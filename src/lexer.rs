@@ -2,23 +2,31 @@ use crate::diag::{Diagnostic, Label};
 use crate::source::{FileId, SourceFile, Span};
 use crate::symbol::{Interner, Symbol};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TokenKind {
     Fn,
     Struct,
     Let,
     Mut,
+    Const,
+    Repr,
+    CAbi,
     Return,
     If,
     Else,
+    While,
     Loop,
+    Break,
+    Continue,
     Unsafe,
+    Null,
     Import,
     Extern,
     True,
     False,
     Ident(Symbol),
     Int(u64),
+    Float(f64),
     String(Symbol),
     LParen,
     RParen,
@@ -26,6 +34,7 @@ pub enum TokenKind {
     RBrace,
     LBracket,
     RBracket,
+    Hash,
     Comma,
     Colon,
     Semi,
@@ -48,7 +57,7 @@ pub enum TokenKind {
     Eof,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
@@ -97,7 +106,7 @@ impl<'a> Lexer<'a> {
                         continue;
                     }
                 },
-                b'0'..=b'9' => match self.lex_int(&mut cursor) {
+                b'0'..=b'9' => match self.lex_number(&mut cursor) {
                     Ok(token) => token,
                     Err(diagnostic) => {
                         diagnostics.push(diagnostic);
@@ -110,6 +119,7 @@ impl<'a> Lexer<'a> {
                 b'}' => single(&mut cursor, TokenKind::RBrace),
                 b'[' => single(&mut cursor, TokenKind::LBracket),
                 b']' => single(&mut cursor, TokenKind::RBracket),
+                b'#' => single(&mut cursor, TokenKind::Hash),
                 b',' => single(&mut cursor, TokenKind::Comma),
                 b';' => single(&mut cursor, TokenKind::Semi),
                 b'.' => single(&mut cursor, TokenKind::Dot),
@@ -217,11 +227,18 @@ impl<'a> Lexer<'a> {
             "struct" => TokenKind::Struct,
             "let" => TokenKind::Let,
             "mut" => TokenKind::Mut,
+            "const" => TokenKind::Const,
+            "repr" => TokenKind::Repr,
+            "C" => TokenKind::CAbi,
             "return" => TokenKind::Return,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
+            "while" => TokenKind::While,
             "loop" => TokenKind::Loop,
+            "break" => TokenKind::Break,
+            "continue" => TokenKind::Continue,
             "unsafe" => TokenKind::Unsafe,
+            "null" => TokenKind::Null,
             "import" => TokenKind::Import,
             "extern" => TokenKind::Extern,
             "true" => TokenKind::True,
@@ -232,7 +249,7 @@ impl<'a> Lexer<'a> {
         token_with_span(cursor.file_id, start, cursor.offset, kind)
     }
 
-    fn lex_int(&mut self, cursor: &mut Cursor<'_>) -> Result<Token, Diagnostic> {
+    fn lex_number(&mut self, cursor: &mut Cursor<'_>) -> Result<Token, Diagnostic> {
         let start = cursor.offset;
         cursor.bump();
         while let Some(byte) = cursor.peek() {
@@ -241,6 +258,32 @@ impl<'a> Lexer<'a> {
             } else {
                 break;
             }
+        }
+
+        if cursor.peek() == Some(b'.')
+            && cursor.peek_next().is_some_and(|byte| byte.is_ascii_digit())
+        {
+            cursor.bump();
+            while let Some(byte) = cursor.peek() {
+                if byte.is_ascii_digit() {
+                    cursor.bump();
+                } else {
+                    break;
+                }
+            }
+
+            let text = &cursor.text[start as usize..cursor.offset as usize];
+            let span = Span::new(cursor.file_id, start, cursor.offset);
+            let value = text.parse::<f64>().map_err(|_| {
+                Diagnostic::error("float literal is invalid")
+                    .with_label(Label::primary(span, "this literal is not a valid f64"))
+            })?;
+            return Ok(token_with_span(
+                cursor.file_id,
+                start,
+                cursor.offset,
+                TokenKind::Float(value),
+            ));
         }
 
         let text = &cursor.text[start as usize..cursor.offset as usize];
