@@ -6,6 +6,10 @@ use crate::symbol::{Interner, Symbol};
 pub enum TokenKind {
     Fn,
     Struct,
+    Enum,
+    Effect,
+    Handle,
+    With,
     Let,
     Mut,
     Const,
@@ -14,6 +18,7 @@ pub enum TokenKind {
     Return,
     If,
     Else,
+    Match,
     While,
     Loop,
     Break,
@@ -34,6 +39,7 @@ pub enum TokenKind {
     RBrace,
     LBracket,
     RBracket,
+    At,
     Hash,
     Comma,
     Colon,
@@ -45,8 +51,10 @@ pub enum TokenKind {
     Slash,
     Amp,
     Bang,
+    Question,
     Assign,
     EqEq,
+    FatArrow,
     NotEq,
     Less,
     LessEq,
@@ -77,6 +85,7 @@ impl<'a> Lexer<'a> {
         let mut cursor = Cursor::new(file.id(), file.text());
         let mut tokens = Vec::new();
         let mut diagnostics = Vec::new();
+        let mut next_ident_is_attribute_name = false;
 
         while let Some(byte) = cursor.peek() {
             if is_whitespace(byte) {
@@ -98,11 +107,14 @@ impl<'a> Lexer<'a> {
 
             let start = cursor.offset;
             let token = match byte {
-                b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident_or_keyword(&mut cursor),
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+                    self.lex_ident_or_keyword(&mut cursor, next_ident_is_attribute_name)
+                }
                 b'"' => match self.lex_string(&mut cursor) {
                     Ok(token) => token,
                     Err(diagnostic) => {
                         diagnostics.push(diagnostic);
+                        next_ident_is_attribute_name = false;
                         continue;
                     }
                 },
@@ -110,6 +122,7 @@ impl<'a> Lexer<'a> {
                     Ok(token) => token,
                     Err(diagnostic) => {
                         diagnostics.push(diagnostic);
+                        next_ident_is_attribute_name = false;
                         continue;
                     }
                 },
@@ -119,6 +132,7 @@ impl<'a> Lexer<'a> {
                 b'}' => single(&mut cursor, TokenKind::RBrace),
                 b'[' => single(&mut cursor, TokenKind::LBracket),
                 b']' => single(&mut cursor, TokenKind::RBracket),
+                b'@' => single(&mut cursor, TokenKind::At),
                 b'#' => single(&mut cursor, TokenKind::Hash),
                 b',' => single(&mut cursor, TokenKind::Comma),
                 b';' => single(&mut cursor, TokenKind::Semi),
@@ -127,6 +141,7 @@ impl<'a> Lexer<'a> {
                 b'*' => single(&mut cursor, TokenKind::Star),
                 b'/' => single(&mut cursor, TokenKind::Slash),
                 b'&' => single(&mut cursor, TokenKind::Amp),
+                b'?' => single(&mut cursor, TokenKind::Question),
                 b':' => {
                     cursor.bump();
                     if cursor.peek() == Some(b':') {
@@ -150,6 +165,9 @@ impl<'a> Lexer<'a> {
                     if cursor.peek() == Some(b'=') {
                         cursor.bump();
                         token_with_span(file.id(), start, cursor.offset, TokenKind::EqEq)
+                    } else if cursor.peek() == Some(b'>') {
+                        cursor.bump();
+                        token_with_span(file.id(), start, cursor.offset, TokenKind::FatArrow)
                     } else {
                         token_with_span(file.id(), start, cursor.offset, TokenKind::Assign)
                     }
@@ -189,10 +207,12 @@ impl<'a> Lexer<'a> {
                             "this character is not part of the MVP lexer",
                         ),
                     ));
+                    next_ident_is_attribute_name = false;
                     continue;
                 }
             };
 
+            next_ident_is_attribute_name = matches!(token.kind, TokenKind::At);
             tokens.push(token);
         }
 
@@ -210,7 +230,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_ident_or_keyword(&mut self, cursor: &mut Cursor<'_>) -> Token {
+    fn lex_ident_or_keyword(&mut self, cursor: &mut Cursor<'_>, force_ident: bool) -> Token {
         let start = cursor.offset;
         cursor.bump();
         while let Some(byte) = cursor.peek() {
@@ -222,9 +242,22 @@ impl<'a> Lexer<'a> {
         }
 
         let text = &cursor.text[start as usize..cursor.offset as usize];
+        if force_ident {
+            return token_with_span(
+                cursor.file_id,
+                start,
+                cursor.offset,
+                TokenKind::Ident(self.interner.intern(text)),
+            );
+        }
+
         let kind = match text {
             "fn" => TokenKind::Fn,
             "struct" => TokenKind::Struct,
+            "enum" => TokenKind::Enum,
+            "effect" => TokenKind::Effect,
+            "handle" => TokenKind::Handle,
+            "with" => TokenKind::With,
             "let" => TokenKind::Let,
             "mut" => TokenKind::Mut,
             "const" => TokenKind::Const,
@@ -233,6 +266,7 @@ impl<'a> Lexer<'a> {
             "return" => TokenKind::Return,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
+            "match" => TokenKind::Match,
             "while" => TokenKind::While,
             "loop" => TokenKind::Loop,
             "break" => TokenKind::Break,
@@ -471,6 +505,81 @@ mod tests {
     }
 
     #[test]
+    fn lexes_item_attribute_marker() {
+        let mut sources = SourceMap::new();
+        let file_id = sources.add_file(
+            PathBuf::from("test.lain"),
+            "@derive(Clone) struct Point {}\n".to_owned(),
+        );
+        let file = sources.file(file_id);
+        let mut interner = Interner::new();
+        let mut lexer = Lexer::new(&mut interner);
+
+        let tokens = lexer.lex_file(file).unwrap();
+
+        assert_eq!(tokens[0].kind, TokenKind::At);
+        assert!(matches!(tokens[1].kind, TokenKind::Ident(_)));
+        assert_eq!(tokens[2].kind, TokenKind::LParen);
+    }
+
+    #[test]
+    fn lexes_keyword_after_at_as_attribute_name() {
+        let mut sources = SourceMap::new();
+        let file_id = sources.add_file(
+            PathBuf::from("test.lain"),
+            "@effect(Net) struct NetOps {}\neffect Raw;\n".to_owned(),
+        );
+        let file = sources.file(file_id);
+        let mut interner = Interner::new();
+        let mut lexer = Lexer::new(&mut interner);
+
+        let tokens = lexer.lex_file(file).unwrap();
+
+        match tokens[1].kind {
+            TokenKind::Ident(symbol) => assert_eq!(interner.resolve(symbol), "effect"),
+            other => panic!("expected attribute identifier, got {other:?}"),
+        }
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::Effect));
+    }
+
+    #[test]
+    fn lexes_question_mark_operator() {
+        let mut sources = SourceMap::new();
+        let file_id = sources.add_file(PathBuf::from("test.lain"), "value?\n".to_owned());
+        let file = sources.file(file_id);
+        let mut interner = Interner::new();
+        let mut lexer = Lexer::new(&mut interner);
+
+        let tokens = lexer.lex_file(file).unwrap();
+
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(_)));
+        assert_eq!(tokens[1].kind, TokenKind::Question);
+        assert_eq!(tokens[2].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lexes_match_keyword_and_fat_arrow() {
+        let mut sources = SourceMap::new();
+        let file_id = sources.add_file(
+            PathBuf::from("test.lain"),
+            "match status { Status::Ok => 1 }\n".to_owned(),
+        );
+        let file = sources.file(file_id);
+        let mut interner = Interner::new();
+        let mut lexer = Lexer::new(&mut interner);
+
+        let tokens = lexer.lex_file(file).unwrap();
+
+        assert_eq!(tokens[0].kind, TokenKind::Match);
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == TokenKind::DoubleColon)
+        );
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::FatArrow));
+    }
+
+    #[test]
     fn skips_line_comments() {
         let mut sources = SourceMap::new();
         let file_id = sources.add_file(
@@ -489,7 +598,7 @@ mod tests {
     #[test]
     fn reports_unexpected_characters() {
         let mut sources = SourceMap::new();
-        let file_id = sources.add_file(PathBuf::from("test.lain"), "@\n".to_owned());
+        let file_id = sources.add_file(PathBuf::from("test.lain"), "$\n".to_owned());
         let file = sources.file(file_id);
         let mut interner = Interner::new();
         let mut lexer = Lexer::new(&mut interner);
