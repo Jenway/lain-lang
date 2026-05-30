@@ -1,0 +1,68 @@
+import std::effects::spawn;
+
+@foreign(c, link_name = "lain_executor_configure")
+fn executor_configure(backend: u32, threads: u32) -> ();
+
+@foreign(c, link_name = "lain_executor_spawn")
+fn executor_spawn_runtime(task: fn() -> () ! {Suspend}, suspend: fn(Waker) -> ()) -> ();
+
+@foreign(c, link_name = "lain_executor_spawn_with")
+fn executor_spawn_with_runtime(
+    task: fn(usize) -> () ! {IO, Suspend},
+    data: usize,
+    suspend: fn(Waker) -> (),
+) -> ();
+
+@foreign(c, link_name = "lain_executor_wake_parts")
+fn executor_wake_runtime(
+    data: *mut u8,
+    wake_fn: fn(*mut u8) -> (),
+    next_data: *mut u8,
+    next_wake_fn: fn(*mut u8) -> (),
+) -> ();
+
+pub struct Executor {
+    suspend: fn(Waker) -> (),
+    spawn: fn(fn() -> () ! {Suspend}) -> () ! {Suspend},
+    spawn_with: fn(fn(usize) -> () ! {IO, Suspend}, usize) -> () ! {IO, Suspend},
+}
+
+fn executor_suspend(waker: Waker) -> () {
+    executor_wake_runtime(
+        waker.data_ptr(),
+        waker.wake_function(),
+        waker.next_data_ptr(),
+        waker.next_wake_function(),
+    );
+}
+
+fn executor_spawn(task: fn() -> () ! {Suspend}) -> () ! {Suspend} {
+    executor_spawn_runtime(task, executor_suspend);
+}
+
+fn executor_spawn_with(task: fn(usize) -> () ! {IO, Suspend}, data: usize) -> () ! {IO, Suspend} {
+    executor_spawn_with_runtime(task, data, executor_suspend);
+}
+
+fn make_executor() -> Handler!{Suspend, Spawn} {
+    Executor {
+        suspend: executor_suspend,
+        spawn: executor_spawn,
+        spawn_with: executor_spawn_with,
+    }
+}
+
+pub fn thread_executor() -> Handler!{Suspend, Spawn} {
+    executor_configure(0, 4);
+    make_executor()
+}
+
+pub fn io_uring_executor(threads: u32) -> Handler!{Suspend, Spawn} {
+    executor_configure(1, threads);
+    make_executor()
+}
+
+pub fn iocp_executor(threads: u32) -> Handler!{Suspend, Spawn} {
+    executor_configure(2, threads);
+    make_executor()
+}

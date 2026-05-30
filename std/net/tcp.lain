@@ -1,20 +1,110 @@
-import std::os::windows::winsock;
+import std::effects::throws;
+import std::effects::suspend;
+import std::mem;
+import std::slice;
 
-fn tcp_listen_any(port: u16) -> usize ! {IO} {
+@foreign(c, link_name = "lain_tcp_startup")
+fn platform_startup() -> i32 ! {IO};
+
+@foreign(c, link_name = "lain_tcp_socket")
+fn platform_socket(af: i32, kind: i32, protocol: i32) -> usize ! {IO};
+
+@foreign(c, link_name = "lain_tcp_bind")
+fn platform_bind(socket: usize, addr: &SockAddrIn, len: i32) -> i32 ! {IO};
+
+@foreign(c, link_name = "lain_tcp_listen")
+fn platform_listen(socket: usize, backlog: i32) -> i32 ! {IO};
+
+@foreign(c, link_name = "lain_tcp_accept")
+fn platform_accept(socket: usize, addr: *mut u8, len: *mut i32) -> usize ! {IO};
+
+@foreign(c, link_name = "lain_tcp_recv")
+fn platform_recv(socket: usize, buffer: *mut u8, len: i32, flags: i32) -> i32 ! {IO};
+
+@foreign(c, link_name = "lain_tcp_send")
+fn platform_send(socket: usize, buffer: *mut u8, len: i32, flags: i32) -> i32 ! {IO};
+
+@foreign(c, link_name = "lain_tcp_close")
+fn platform_close_socket(socket: usize) -> i32 ! {IO};
+
+@foreign(c, link_name = "lain_tcp_htons")
+fn platform_htons(host_short: u16) -> u16 ! {IO};
+
+@foreign(c, link_name = "lain_tcp_shutdown")
+fn platform_shutdown() -> i32 ! {IO};
+
+@foreign(c, link_name = "lain_tcp_wait_readable_wake")
+fn tcp_wait_readable_wake(data: *mut u8) -> ();
+
+@foreign(c, link_name = "lain_tcp_wait_writable_wake")
+fn tcp_wait_writable_wake(data: *mut u8) -> ();
+
+pub enum NetError {
+    StartupFailed,
+    SocketFailed,
+    BindFailed,
+    ListenFailed,
+    AcceptFailed,
+    ReadFailed,
+    WriteFailed,
+}
+
+#[repr(C)]
+pub struct SockAddrIn {
+    family: u16,
+    port: u16,
+    addr: u32,
+    zero: [u8; 8],
+}
+
+pub struct TcpListener {
+    fd: usize,
+}
+
+pub struct TcpStream {
+    fd: usize,
+}
+
+pub struct NetErrorLogAbort {
+    throw: fn(NetError) -> !,
+}
+
+fn abort_net_error(error: NetError) -> ! {
+    loop {}
+}
+
+pub fn Throws::to_log_and_abort() -> NetErrorLogAbort {
+    NetErrorLogAbort { throw: abort_net_error }
+}
+
+pub fn any_addr(port: u16) -> SockAddrIn ! {IO} {
+    SockAddrIn {
+        family: 2,
+        port: platform_htons(port),
+        addr: 0,
+        zero: [0; 8],
+    }
+}
+
+pub fn startup() -> i32 ! {IO} {
+    platform_startup()
+}
+
+pub fn tcp_listen_any(port: u16) -> usize ! {IO} {
     let startup_result = startup();
     if startup_result != 0 {
         0
     } else {
-        let server = socket(2, 1, 6);
+        let server = platform_socket(2, 1, 6);
         let addr = any_addr(port);
-        let bind_result = bind(server, &addr, 16);
+        let bind_result = platform_bind(server, &addr, 16);
         if bind_result != 0 {
-            close_socket(server);
+            platform_close_socket(server);
             0
         } else {
-            let listen_result = listen(server, 16);
+            let listen_result = platform_listen(server, 16);
             if listen_result != 0 {
-                close_socket(server);
+                platform_close_socket(server);
                 0
             } else {
                 server
@@ -23,22 +113,97 @@ fn tcp_listen_any(port: u16) -> usize ! {IO} {
     }
 }
 
-fn tcp_accept(server: usize) -> usize ! {IO} {
-    accept(server, null<*mut u8>, null<*mut i32>)
+pub fn tcp_accept(server: usize) -> usize ! {IO} {
+    platform_accept(server, null<*mut u8>, null<*mut i32>)
 }
 
-fn tcp_recv(socket: usize, buffer: &mut u8, len: i32) -> i32 ! {IO} {
-    recv(socket, buffer, len, 0)
+pub fn tcp_recv(socket: usize, buffer: *mut u8, len: i32) -> i32 ! {IO} {
+    platform_recv(socket, buffer, len, 0)
 }
 
-fn tcp_send(socket: usize, buffer: &u8, len: i32) -> i32 ! {IO} {
-    send(socket, buffer, len, 0)
+pub fn tcp_send(socket: usize, buffer: *mut u8, len: i32) -> i32 ! {IO} {
+    platform_send(socket, buffer, len, 0)
 }
 
-fn tcp_close(socket: usize) -> i32 ! {IO} {
-    close_socket(socket)
+pub fn tcp_close(socket: usize) -> i32 ! {IO} {
+    platform_close_socket(socket)
 }
 
-fn tcp_shutdown() -> i32 ! {IO} {
-    wsa_cleanup()
+pub fn tcp_shutdown() -> i32 ! {IO} {
+    platform_shutdown()
+}
+
+pub fn tcp_readable_waker(socket: usize) -> Waker {
+    Waker::new(usize_to_ptr<u8>(socket), tcp_wait_readable_wake)
+}
+
+pub fn tcp_writable_waker(socket: usize) -> Waker {
+    Waker::new(usize_to_ptr<u8>(socket), tcp_wait_writable_wake)
+}
+
+pub impl TcpListener {
+    pub fn bind(port: u16) -> TcpListener ! {IO, Throws<NetError>} {
+        let fd = tcp_listen_any(port);
+        if fd == 0 {
+            Throws::throw(NetError::BindFailed)
+        } else {
+            TcpListener { fd: fd }
+        }
+    }
+
+    pub fn accept(self: &TcpListener) -> TcpStream ! {IO, Suspend, Throws<NetError>} {
+        perform Suspend::suspend(tcp_readable_waker(self.fd));
+        let fd = tcp_accept(self.fd);
+        if fd == 0 {
+            Throws::throw(NetError::AcceptFailed)
+        } else {
+            TcpStream { fd: fd }
+        }
+    }
+
+    pub fn close(self: TcpListener) -> () ! {IO} {
+        tcp_close(self.fd);
+    }
+}
+
+pub impl TcpStream {
+    pub fn from_raw_fd(fd: usize) -> TcpStream {
+        TcpStream { fd: fd }
+    }
+
+    pub fn raw_fd(self: &TcpStream) -> usize {
+        self.fd
+    }
+
+    pub fn read(self: &TcpStream, buf: &mut [u8]) -> usize ! {IO, Suspend, Throws<NetError>} {
+        perform Suspend::suspend(tcp_readable_waker(self.fd));
+        let received = tcp_recv(
+            self.fd,
+            slice_as_mut_ptr<u8>(buf),
+            usize_to_i32(slice_len_mut<u8>(buf)),
+        );
+        if received < 0 {
+            Throws::throw(NetError::ReadFailed)
+        } else {
+            i32_to_usize(received)
+        }
+    }
+
+    pub fn write(self: &TcpStream, buf: &[u8]) -> () ! {IO, Suspend, Throws<NetError>} {
+        perform Suspend::suspend(tcp_writable_waker(self.fd));
+        let sent = tcp_send(
+            self.fd,
+            slice_as_ptr<u8>(buf),
+            usize_to_i32(slice_len<u8>(buf)),
+        );
+        if sent < 0 {
+            Throws::throw(NetError::WriteFailed)
+        } else {
+            return;
+        }
+    }
+
+    pub fn close(self: TcpStream) -> () ! {IO} {
+        tcp_close(self.fd);
+    }
 }
