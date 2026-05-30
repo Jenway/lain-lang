@@ -1,42 +1,48 @@
-import std::c;
+import std::effects::executor;
 import std::net::tcp;
 
-fn echo_client(client: usize) -> i32 ! {IO} {
-    let mut buffer: [u8; 1024] = [0; 1024];
+fn handle_conn(stream: TcpStream) -> () ! {IO, Suspend, Throws<NetError>} {
+    defer stream.close();
+
+    let mut buffer: [u8; 4096] = [0; 4096];
     let mut running = true;
-    let mut result = 0;
+    let zero: usize = 0;
 
     while running {
-        let received = tcp_recv(client, &mut buffer[0], 1024);
-        if received > 0 {
-            tcp_send(client, &buffer[0], received);
+        let received = stream.read(&mut buffer)?;
+        if received > zero {
+            stream.write(buffer[..received])?;
             0;
         } else {
             running = false;
         };
     };
-
-    result
 }
 
-fn main() -> i32 ! {IO} {
-    let server = tcp_listen_any(7000);
-    if server == 0 {
-        print_line("tcp echo server failed to listen on port 7000");
-        1
-    } else {
-        print_line("tcp echo server listening on port 7000");
-        loop {
-            let client = tcp_accept(server);
-            if client == 0 {
-                0;
-            } else {
-                echo_client(client);
-                tcp_close(client);
-            };
-        };
-        tcp_close(server);
-        tcp_shutdown();
-        0
+fn handle_conn_task(fd: usize) -> () ! {IO, Suspend} {
+    let stream = TcpStream::from_raw_fd(fd);
+    handle {
+        handle_conn(stream);
+    } with Throws::to_log_and_abort()
+}
+
+fn accept_loop(listener: &TcpListener) -> () ! {IO, Suspend, Spawn, Throws<NetError>} {
+    loop {
+        let client = listener.accept()?;
+        perform Spawn::spawn_with(handle_conn_task, client.raw_fd());
     }
+}
+
+fn serve() -> () ! {IO, Suspend, Spawn, Throws<NetError>} {
+    let listener = TcpListener::bind(8080)?;
+    accept_loop(&listener);
+}
+
+fn main() -> () ! {IO} {
+    let executor = thread_executor();
+    handle
+        handle {
+            serve();
+        } with Throws::to_log_and_abort()
+    with executor
 }
