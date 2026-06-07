@@ -1,6 +1,3 @@
-(define (postfix-question operand)
-  #{
-    ,(operand)?
-  })
+(meta-source "operators/question")
 
-(register-postfix-operator! "?" "postfix-question" postfix-question)
+(register-operator! '? 'throws-question-operator)
