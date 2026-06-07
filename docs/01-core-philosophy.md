@@ -158,13 +158,13 @@ comptime 求值（嵌入 Scheme）
 
 | 特性 | 实现位置 |
 |------|----------|
-| i32 / u32 / f32 / f64 等类型 | `std/meta/types.scm` —— bits<N> + 操作集合选择 |
+| i32 / u32 / f32 / f64 等类型 | `std/meta/core/types.scm` —— bits<N> + 操作集合选择 |
 | interface / vtable / 动态分发 | `std/meta/interface.scm` |
 | @derive(Clone, Debug, Json, ...) | `std/meta/derive/*.scm` |
-| @effect / handler / resume | `std/meta/effect.scm` |
+| @effect / handler / resume | `std/meta/effects/base.scm` |
 | Result<T, E> / Throws<E> | `std/meta/effects/throws.scm` |
 | ? 操作符 | `std/meta/operators/question.scm` |
-| async / await / Suspend | `std/meta/async/suspend.scm` |
+| async / await / Suspend | `std/meta/effects/suspend.scm` |
 | defer | `std/meta/control/defer.scm` |
 | panic (unwind 语义) | `std/meta/effects/panic.scm` |
 | borrow checker | 不内置，可以是 meta 层的可选库 |

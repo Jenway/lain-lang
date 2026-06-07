@@ -210,4 +210,4 @@ fn blocking_executor() -> Handler!{Suspend, Spawn}              // 测试用
 
 ## @effect 是库
 
-`@effect` 本身是 Scheme 宏（`std/meta/effect.scm`），不是编译器内置。它生成 handler 基础设施（vtable + dispatch）。编译器只需要提供 `perform` / `handle` / `resume` 三个原语。
+`@effect` 本身是 Scheme 宏（`std/meta/effects/base.scm`），不是编译器内置。它生成 handler 基础设施（vtable + dispatch）。编译器只需要提供 `perform` / `handle` / `resume` 三个原语。
