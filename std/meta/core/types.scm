@@ -50,9 +50,11 @@
 (register-type-constructor! 'u16 0 '(alias bits 16))
 (register-type-constructor! 'u32 0 '(alias bits 32))
 (register-type-constructor! 'u64 0 '(alias bits 64))
+(register-type-constructor! 'usize 0 '(alias bits 64))
 (register-type-constructor! 'bool 0 '(alias bits 1))
 (register-type-constructor! 'f32 0 '(alias float 32))
 (register-type-constructor! 'f64 0 '(alias float 64))
 
 (register-type-constructor! 'Option 1 '(nominal))
 (register-type-constructor! 'Result 2 '(nominal))
+
