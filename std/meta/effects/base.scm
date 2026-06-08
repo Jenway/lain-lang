@@ -33,5 +33,11 @@
 (register-effect-constructor! 'RawPtrRead 0 'raw-ptr-read-effect)
 (register-effect-constructor! 'RawPtrWrite 0 'raw-ptr-write-effect)
 
+(register-effect-lowering-recipe! 'IO 'base-io-effect)
+(register-effect-lowering-recipe! 'Alloc 'base-alloc-effect)
+(register-effect-lowering-recipe! 'RawPtrRead 'base-raw-ptr-read-effect)
+(register-effect-lowering-recipe! 'RawPtrWrite 'base-raw-ptr-write-effect)
+
 (register-raw-pointer-effect! read 'RawPtrRead)
 (register-raw-pointer-effect! write 'RawPtrWrite)
+
