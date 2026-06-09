@@ -209,18 +209,21 @@
                  (record.get payload '|args|))))
     (let* ((callee-payload (middle.payload callee))
            (path (optional.value
-                   (record.get callee-payload '|path|))))
-      (let* ((function (core.function-by-name
-                         (core.path-leaf path))))
-        (core.call!
-          block
-          function
-          (core.lower-args
-            block
-            args
-            (core.function-param-types function)
-            locals
-            (list)))))))
+                   (record.get callee-payload '|path|)))
+           (leaf-name (core.path-leaf path)))
+      (let* ((intrinsic (core.invoke-intrinsic! leaf-name)))
+        (if (optional.some? intrinsic)
+            ((optional.value intrinsic) block args expected-ty locals)
+            (let* ((function (core.function-by-name leaf-name)))
+              (core.call!
+                block
+                function
+                (core.lower-args
+                  block
+                  args
+                  (core.function-param-types function)
+                  locals
+                  (list)))))))))
 
 (define-pass (core-expr-lowerer |middle.expr.method-call| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
