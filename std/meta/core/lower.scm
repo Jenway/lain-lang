@@ -200,23 +200,32 @@
          (begin
            (if (symbol=? (middle.kind expr) '|middle.expr.if|)
                (core.lower-if-tail-expr block expr ret-ty locals)
-               (core.return-value!
-                 block
-                 (core.lower-expr
-                   block
-                   expr
-                   ret-ty
-                   locals)))
+               (if (type.unit? ret-ty)
+                   (begin
+                     (core.lower-expr
+                       block
+                       expr
+                       ret-ty
+                       locals)
+                     (core.return-none! block))
+                   (core.return-value!
+                     block
+                     (core.lower-expr
+                       block
+                       expr
+                       ret-ty
+                       locals))))
            locals)))
       ((symbol=? kind '|middle.stmt.expr|)
-       (begin
-         (core.lower-expr
-           block
-           (optional.value
-             (record.get payload '|expr|))
-           ret-ty
-           locals)
-         locals))
+       (let* ((expr (optional.value
+                      (record.get payload '|expr|))))
+         (begin
+           (core.lower-expr
+             block
+             expr
+             (core.infer-expr-type expr locals)
+             locals)
+           locals)))
       ((symbol=? kind '|middle.stmt.let|)
        (let* ((ty-option (optional.value
                           (record.get payload '|type|))))
