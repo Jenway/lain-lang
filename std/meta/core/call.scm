@@ -61,6 +61,15 @@
             (optional.value
               (record.get payload '|call|))))))))
 
+(define-pass (middle-normalizer |expr.macro-call| raw-expr)
+  (let* ((payload (raw.payload raw-expr))
+         (name (optional.value
+                 (record.get payload '|name|)))
+         (args (optional.value
+                 (record.get payload '|args|)))
+         (expand (pipeline.rule '|expression-macro| name)))
+    (middle.normalize-expr (expand args))))
+
 (define-pass (middle-normalizer |expr.if| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|middle.expr.if|
