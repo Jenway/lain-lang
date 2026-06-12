@@ -2313,7 +2313,7 @@ static void native_inject_all_polyfills(sexp ctx, sexp env) {
                      " (define syntax.parse-optional-effects #f)"
                      " (define syntax.parse-expr-args-tail #f)"
                      " (define syntax.parse-expr-args #f)"
-                     " (define syntax.parse-struct-literal-fields #f)"
+
                      " (define syntax.parse-mul-op #f)"
                      " (define syntax.parse-add-op #f)"
                      " (define syntax.parse-compare-op #f)"
@@ -2336,7 +2336,6 @@ static void native_inject_all_polyfills(sexp ctx, sexp env) {
                      " (define syntax.parse-block-items #f)"
                      " (define syntax.parse-block #f)"
                      " (define syntax.parse-optional-fn-body #f)"
-                     " (define syntax.parse-self-param #f)"
                      " (define core.lower-type #f)"
                      " (define core.lower-types #f)"
                      " (define core.lower-param-types #f)"
@@ -2364,6 +2363,7 @@ static void native_load_meta_sources(sexp ctx, sexp env) {
                               "core/call.scm",
                               "core/lower.scm",
                               "lang/fn.scm",
+                              "syntax/common.scm",
                               "lang/struct.scm",
                               "lang/enum.scm",
                               "lang/effect.scm",
@@ -2371,7 +2371,6 @@ static void native_load_meta_sources(sexp ctx, sexp env) {
                               "lang/impl.scm",
                               "lang/import.scm",
                               "lang/mod.scm",
-                              "syntax/common.scm",
                               "middle/common.scm",
                               "effects/throws.scm",
                               "effects/suspend.scm",

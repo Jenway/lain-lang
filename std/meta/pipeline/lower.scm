@@ -1,4 +1,4 @@
-(meta-source "core/lower")
+(meta-source "pipeline/lower")
 
 ;; ===========================================================================
 ;; 核心降级调度总线 — Data-Directed Dispatch 架构

@@ -1,4 +1,4 @@
-(meta-source "lang/import")
+(meta-source "import/parse")
 
 ;; Join a path (list of symbols) into a single symbol using "::" separator.
 ;; e.g., (std dynarray) -> std::dynarray

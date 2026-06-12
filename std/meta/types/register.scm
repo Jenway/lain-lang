@@ -1,4 +1,4 @@
-(meta-source "core/types")
+(meta-source "types/register")
 
 (register-type-constructor! '|unit| 0 '|core-unit-type|)
 (register-type-constructor! '|never| 0 '|core-never-type|)

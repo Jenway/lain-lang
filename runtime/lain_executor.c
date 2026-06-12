@@ -1273,3 +1273,25 @@ int32_t lain_tcp_shutdown(void) {
     return 0;
 #endif
 }
+
+/* ── native argument forwarding (for main_i32_exit) ── */
+static int g_native_argc = 0;
+static char **g_native_argv = NULL;
+
+void native_set_args(int argc, char **argv) {
+  g_native_argc = argc;
+  g_native_argv = argv;
+}
+
+int32_t native_get_arg_count(void) { return g_native_argc; }
+
+const char *native_get_arg(int32_t idx) {
+  if (idx < 0 || idx >= g_native_argc) return NULL;
+  return g_native_argv[idx];
+}
+
+/* ── println! 运行时支持 ── */
+void __lain_println_raw(void *data, uint32_t len) {
+  write(STDOUT_FILENO, data, len);
+  write(STDOUT_FILENO, "\n", 1);
+}

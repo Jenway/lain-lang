@@ -1,0 +1,58 @@
+(meta-source "control/parse")
+
+;; ═══════════════════════════════════════════════════
+;; 控制流语法解析: if, let, block, return, true, false
+;; ═══════════════════════════════════════════════════
+
+(define (parse-if-expr-after-if cursor)
+  (let* ((condition (parameterize ((*allow-struct-literal* #f)) (parse-expr cursor)))
+         (then-block (parse-block (syntax.cursor-expect-group! cursor '|brace|)))
+         (_else (syntax.cursor-match-ident! cursor '|else|))
+         (else-block (parse-block (syntax.cursor-expect-group! cursor '|brace|))))
+    (lain-quote `(if ,condition ,then-block ,else-block))))
+
+(define (parse-true-literal cursor) (lain-quote '(bool #t)))
+(define (parse-false-literal cursor) (lain-quote '(bool #f)))
+
+(define (parse-let-stmt cursor)
+  (let* ((mutable (syntax.cursor-match-ident! cursor '|mut|))
+         (shared (syntax.cursor-match-ident! cursor '|shared|))
+         (name (syntax.cursor-expect-ident! cursor))
+         (colon (syntax.cursor-match-punct! cursor '|:|))
+         (ty (if (optional.none? colon) (optional.none) (optional.some (parse-type cursor))))
+         (_assign (syntax.cursor-expect-punct! cursor '|=|))
+         (value (parse-expr cursor))
+         (_semi (syntax.cursor-expect-punct! cursor '|;|)))
+    (lain-quote `(let ,(optional.some? mutable) ,(optional.some? shared) ,name ,ty ,value))))
+
+(define (parse-block-items cursor acc)
+  (if (syntax.cursor-eof? cursor) (list.reverse acc)
+      (let* ((ret (syntax.cursor-match-ident! cursor '|return|)))
+        (if (optional.some? ret)
+            (let* ((semi (syntax.cursor-match-punct! cursor '|;|))
+                   (value (if (optional.some? semi) (optional.none) (optional.some (parse-expr cursor))))
+                   (_semi (if (optional.none? semi) (syntax.cursor-expect-punct! cursor '|;|) unit))
+                   (stmt (lain-quote `(return ,(if (optional.none? value) 'void (optional.value value))))))
+              (parse-block-items cursor (list.cons stmt acc)))
+            (let* ((let-token (syntax.cursor-match-ident! cursor '|let|)))
+              (if (optional.some? let-token)
+                  (let* ((stmt (parse-let-stmt cursor))) (parse-block-items cursor (list.cons stmt acc)))
+                  (let* ((expr (parse-expr cursor)) (assign (syntax.cursor-match-punct! cursor '|=|)))
+                    (if (optional.some? assign)
+                        (let* ((value (parse-expr cursor)) (_semi (syntax.cursor-expect-punct! cursor '|;|))
+                               (stmt (lain-quote `(assign ,expr ,value))))
+                          (parse-block-items cursor (list.cons stmt acc)))
+                        (let* ((semi (syntax.cursor-match-punct! cursor '|;|)))
+                          (if (optional.none? semi)
+                              (begin (syntax.cursor-expect-eof! cursor)
+                                     (list.reverse (list.cons (lain-quote `(tail ,expr)) acc)))
+                              (let* ((stmt (lain-quote `(expr-stmt ,expr))))
+                                (parse-block-items cursor (list.cons stmt acc)))))))))))))
+
+(define (parse-block group)
+  (let* ((cursor (syntax.group-cursor group)) (items (parse-block-items cursor (list))))
+    (lain-quote `(block ,@items))))
+
+(register-expr-parser! '|if| parse-if-expr-after-if)
+(register-expr-parser! '|true| parse-true-literal)
+(register-expr-parser! '|false| parse-false-literal)

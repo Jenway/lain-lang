@@ -162,7 +162,7 @@
             (record '|expr.macro-call|
               (record.field '|name| (cadr template))
               (record.field '|type-args| (caddr template))
-              (record.field '|args| (map lain-quote (cadddr template))))))
+              (record.field '|args| (map lain-quote (cdddr template))))))
 
          ;; 结构体字面量: (aggregate name (struct-field fname fval) ...)
          ;; 可选项: (aggregate name :type-args types (struct-field ...) ...)

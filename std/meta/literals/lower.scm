@@ -1,4 +1,4 @@
-(meta-source "core/literals")
+(meta-source "literals/lower")
 
 (define-pass (middle-normalizer |expr.number| raw-expr)
   (let* ((payload (raw.payload raw-expr)))

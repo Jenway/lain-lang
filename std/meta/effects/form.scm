@@ -1,4 +1,4 @@
-(meta-source "lang/effect")
+(meta-source "effects/form")
 
 (define (effect.parse-operation cursor)
   (let* ((name (syntax.cursor-expect-ident! cursor))

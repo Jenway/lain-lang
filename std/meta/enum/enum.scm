@@ -1,4 +1,4 @@
-(meta-source "lang/enum")
+(meta-source "enum/enum")
 
 ;; 解析可选的 variant 载荷类型: VariantName(Type) 或 VariantName
 (define (enum.parse-optional-payload cursor)
