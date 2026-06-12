@@ -35,3 +35,32 @@
          (value (core.lower-expr block value-expr expected-ty locals)))
     (core.store! block ptr value)
     unit))
+
+;; ---------------------------------------------------------------------------
+;; 类型降级: 指针/内存类型
+;; ---------------------------------------------------------------------------
+
+(define-pass (core-type-lowerer |middle.ty.raw-ptr| ty)
+  (let* ((payload (middle.payload ty))
+         (mutable (optional.value (record.get payload '|mutable|)))
+         (pointee (core.lower-type
+                    (optional.value (record.get payload '|pointee|)))))
+    (type.raw-ptr mutable pointee)))
+
+(define-pass (core-type-lowerer |middle.ty.ref| ty)
+  (let* ((payload (middle.payload ty))
+         (mutable (optional.value (record.get payload '|mutable|)))
+         (inner (core.lower-type
+                  (optional.value (record.get payload '|inner|)))))
+    (type.raw-ptr mutable inner)))
+
+(define-pass (core-type-lowerer |middle.ty.slice| ty)
+  (let* ((kind (middle.kind ty)))
+    (type.unsupported kind)))
+
+(define-pass (core-type-lowerer |middle.ty.array| ty)
+  (let* ((payload (middle.payload ty))
+         (element (core.lower-type
+                    (optional.value (record.get payload '|element|))))
+         (len (optional.value (record.get payload '|len|))))
+    (type.array element len)))

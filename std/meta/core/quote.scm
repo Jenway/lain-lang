@@ -99,6 +99,23 @@
               (record.field '|then| (lain-quote (caddr template)))
               (record.field '|else| (lain-quote (cadddr template))))))
 
+         ;; 结构体字面量: (aggregate struct-name (struct-field fname fval) ...)
+         ((symbol=? kind 'aggregate)
+          (let* ((struct-name (cadr template))
+                 (field-forms (cddr template)))
+            (raw.node! '|expr.struct|
+              (record '|expr.struct|
+                (record.field '|name| struct-name)
+                (record.field '|fields|
+                  (map lain-quote field-forms))))))
+
+         ;; 结构体字段值 (用于 aggregate 内): (struct-field fname fval)
+         ((symbol=? kind 'struct-field)
+          (raw.node! '|expr.struct-field|
+            (record '|expr.struct-field|
+              (record.field '|name| (cadr template))
+              (record.field '|value| (lain-quote (caddr template))))))
+
          ;; ── 语句节点 ──
 
          ;; 代码块: (block item ...)

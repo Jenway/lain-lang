@@ -2,11 +2,11 @@
 
 ;; 解析可选的 variant 载荷类型: VariantName(Type) 或 VariantName
 (define (enum.parse-optional-payload cursor)
-  (let* ((open (syntax.cursor-match-punct! cursor '|(|)))
+  (let* ((open (syntax.cursor-match-punct! cursor (string->symbol "(")))
          (has-payload (optional.some? open)))
     (if has-payload
         (let* ((ty (syntax.parse-type cursor)))
-          (syntax.cursor-expect-punct! cursor '|)|)
+          (syntax.cursor-expect-punct! cursor (string->symbol ")"))
           (optional.some ty))
         (optional.none))))
 
@@ -46,6 +46,10 @@
 
 ;; ===========================================================================
 ;; Enum L1 降级 — 将 enum 降级为 Tagged Union 结构体
+;;
+;; 架构: 使用 lain-quote 声明式构建构造函数体 AST，
+;;       然后通过标准 pipeline (normalize → lower) 发射 L1 指令。
+;;       这样 enum.scm 完全自治，不依赖 core-lowerer 的 cond 分支。
 ;; ===========================================================================
 
 ;; 帮助函数: 创建 struct 字段描述 (用于 core.declare-struct!)
@@ -55,8 +59,6 @@
     (record.field '|type| ty)))
 
 ;; 构造 variant 构造函数名 (C 兼容): EnumName_VariantName
-;; 内部 Scheme 符号使用 "::" 分隔符便于查找，
-;; 但 C 函数名必须使用 "_" (:: 不是合法的 C 标识符)
 (define (enum.ctor-name enum-name variant-name)
   (let* ((e-str (symbol->string enum-name))
          (v-str (symbol->string variant-name))
@@ -68,6 +70,35 @@
   (let* ((payload (raw.payload raw-ty))
          (name (optional.value (record.get payload '|name|))))
     (type.registered name (list))))
+
+;; 为带载荷的 variant 构造函数绑定参数到 locals
+;; 这允许 lain-quote 生成的 (path _payload) 在 lowering 时正确解析到函数参数
+(define (enum.bind-ctor-param fn variant)
+  (let* ((variant-payload (raw.payload variant))
+         (payload-raw-ty (optional.value
+                           (record.get variant-payload '|payload|)))
+         (payload-mid-ty (middle.normalize-type payload-raw-ty))
+         (mid-param (middle.node! '|middle.param|
+                      (record '|middle.param|
+                        (record.field '|name| '|_payload|)
+                        (record.field '|type| payload-mid-ty)))))
+    (core.bind-params fn (list mid-param) 0 (list))))
+
+;; ── lain-quote 神器: 声明式构建构造函数体 AST ──
+;; variant 无载荷: return EnumName { tag: N, __data: 0 }
+;; variant 有载荷: return EnumName { tag: N, __data: _payload }
+(define (enum.build-ctor-body-ast enum-name index has-payload)
+  (if (optional.some? has-payload)
+      (lain-quote
+       `(return
+          (aggregate ,enum-name
+            (struct-field tag (number ,index))
+            (struct-field __data (path _payload)))))
+      (lain-quote
+       `(return
+          (aggregate ,enum-name
+            (struct-field tag (number ,index))
+            (struct-field __data (number 0)))))))
 
 ;; Phase 1: core-declarer — 声明 tagged union 结构体 + variant 构造函数签名
 (define (enum.declare-variant-ctors enum-name variants index)
@@ -103,20 +134,17 @@
     ;;    布局: { tag: bits<8>, __data: addr }
     ;;    tag   — 辨別子 (discriminant), 8-bit 足够 256 个变体
     ;;    __data — 载荷数据 blob, 使用 addr 尺寸存放任意指针/值
-    ;;    注: 当没有载荷时, __data 字段忽略 (零值填充)
     (core.declare-struct!
       name
       (list
         (enum.make-field '|tag| (type.bits 8))
         (enum.make-field '|__data| (type.addr))))
-    ;; 2. 为每个 variant 注册构造函数 (无参数函数, 返回 enum 值)
+    ;; 2. 为每个 variant 注册构造函数
     (enum.declare-variant-ctors name variants 0)))
 
-;; Phase 2: core-lowerer — 生成 variant 构造函数的函数体
-;;   每个构造函数:
-;;     1. alloca 分配 enum 结构体空间
-;;     2. 用 core.aggregate! 初始化 { tag: discriminant, __data: payload/null }
-;;     3. 返回 alloca 指针
+;; Phase 2: core-lowerer — 使用 lain-quote + pipeline 生成构造函数体
+;;   不再直接调用 core.const-bits!/core.param/core.aggregate!，
+;;   而是用 lain-quote 构建 raw AST，经 normalize→lower 管道发射 L1 指令。
 (define (enum.lower-variant-ctors enum-name variants index)
   (if (list.empty? variants)
       unit
@@ -127,15 +155,15 @@
              (ctor-name (enum.ctor-name enum-name variant-name))
              (fn (core.function-by-name ctor-name))
              (block (core.append-block! fn))
-             (enum-ty (core.struct-type enum-name))
-             (has-payload (record.get variant-payload '|payload|)))
-        (let* ((tag-val (core.const-bits! block (type.bits 8) index))
-               (data-val (if (optional.some? has-payload)
-                             (core.param fn 0)
-                             (core.const-bits! block (type.addr) 0))))
-          (core.return-value!
-            block
-            (core.aggregate! block enum-ty (list tag-val data-val))))
+             (ret-ty (core.struct-type enum-name))
+             (has-payload (record.get variant-payload '|payload|))
+             (locals (if (optional.some? has-payload)
+                        (enum.bind-ctor-param fn variant)
+                        (list)))
+             (body-raw (enum.build-ctor-body-ast
+                         enum-name index has-payload))
+             (body-mid (middle.normalize-stmt body-raw)))
+        (core.lower-stmt block body-mid ret-ty locals)
         (enum.lower-variant-ctors
           enum-name
           (list.rest variants)
@@ -147,3 +175,9 @@
          (name (optional.value (record.get payload '|name|)))
          (variants (optional.value (record.get enum-payload '|variants|))))
     (enum.lower-variant-ctors name variants 0)))
+
+;; ===========================================================================
+;; 注册到调度总线: enum 类型/表达式的降级规则
+;;   虽然 enum 类型在 middle IR 中表示为 |middle.ty.path| (通过名称查找)，
+;;   但这里保留类型降级钩子，供未来扩展 enum 特定类型语义时使用。
+;; ===========================================================================

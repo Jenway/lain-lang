@@ -142,3 +142,21 @@
             ((symbol=? op '|>=|) '|integer.ge|)
             (else (core.unsupported-operator op))))
       (core.unsupported-operator op)))
+
+;; ---------------------------------------------------------------------------
+;; 表达式类型推导: 运算符
+;; ---------------------------------------------------------------------------
+
+(define-pass (core-expr-inferer |middle.expr.binary| expr locals)
+  (let* ((payload (middle.payload expr))
+         (op (optional.value (record.get payload '|op|))))
+    (if (operators.compare-op? op)
+        (type.registered '|bool| (list))
+        (core.infer-expr-type
+          (optional.value (record.get payload '|left|))
+          locals))))
+
+(define-pass (core-expr-inferer |middle.expr.unary| expr locals)
+  (let* ((payload (middle.payload expr))
+         (operand (optional.value (record.get payload '|operand|))))
+    (core.infer-expr-type operand locals)))
