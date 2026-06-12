@@ -146,6 +146,21 @@
       (list.first path)
       (core.path-leaf (list.rest path))))
 
+;; 将多段路径拼接为 C 兼容的函数名
+;; 单段: Color → Color
+;; 多段: [Color, Red] → Color_Red (用 "_" 替代 "::")
+(define (core.path-fn-name path)
+  (if (list.empty? (list.rest path))
+      (list.first path)
+      (let loop ((p path) (acc ""))
+        (if (list.empty? p)
+            (string->symbol acc)
+            (let* ((seg (symbol->string (list.first p)))
+                   (new-acc (if (string=? acc "")
+                                seg
+                                (string-append acc "_" seg))))
+              (loop (list.rest p) new-acc))))))
+
 (define (core.local-lookup locals name)
   (if (list.empty? locals)
       (core.function-by-name name)
@@ -210,11 +225,11 @@
     (let* ((callee-payload (middle.payload callee))
            (path (optional.value
                    (record.get callee-payload '|path|)))
-           (leaf-name (core.path-leaf path)))
-      (let* ((intrinsic (core.invoke-intrinsic! leaf-name)))
+           (fn-name (core.path-fn-name path)))
+      (let* ((intrinsic (core.invoke-intrinsic! fn-name)))
         (if (optional.some? intrinsic)
             ((optional.value intrinsic) block args expected-ty locals)
-            (let* ((function (core.function-by-name leaf-name)))
+            (let* ((function (core.function-by-name fn-name)))
               (core.call!
                 block
                 function
