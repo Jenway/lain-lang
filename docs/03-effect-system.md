@@ -1,213 +1,134 @@
-# 效果系统、异步与错误处理
+# 效果系统、异步与错误处理设计
 
-## 效果系统概述
+## 效果系统的本质
 
-效果系统是运行时层的核心，统一了原本分散的概念：异步、错误处理、不安全操作、IO、内存分配等全部是"效果"。
+在 Lain 中，**效果系统（Effect System）是整个运行时层的语义核心。**
+它并不是一个单纯的语言特性，而是**一种将“不纯粹的、涉及硬件的控制流改变”以强类型方式进行声明和静态审计的机制**。
 
-### 核心语法
+任何涉及物理硬件或运行状态的操作，在底层都映射为了精细化的效果行：
 
-```lain
-// 函数签名声明效果
-fn fetch(url: &str) -> Bytes ! {IO, Suspend, Throws<NetError>}
-//                           ↑ 这个函数能做的所有副作用
-
-// 触发效果
-perform Throws::throw(error)
-perform Suspend::suspend(waker)
-
-// 消费（handle）效果
-handle expr with {
-    Throws::throw(e) => { log(e); resume(default_value) }
-    Suspend::suspend(w) => { event_loop.register(w) }
-}
-
-// 纯函数 = 效果集为空
-fn add(a: i32, b: i32) -> i32  // ! {}，优化器可最激进处理
 ```
-
-### 效果统一的概念
-
-| 概念 | 效果 | 说明 |
-|------|------|------|
-| 异步 | `Suspend` | async/await 即 Suspend 效果的语法糖 |
-| 错误处理 | `Throws<E>` | 零开销返回值语义 |
-| 不可恢复错误 | `Panic` | unwind 语义，明确付出代价 |
-| 不安全操作 | `RawPtr` / `GlobalMut` / `Asm` | 取代 unsafe 关键字 |
-| IO | `IO` | 系统调用 |
-| 内存分配 | `Alloc` | 堆分配 |
-| 并发内存访问 | `MemRelaxed` / `MemAcquire` / `MemRelease` / `MemSeqCst` | 精细化内存序效果 |
-| 调用栈追踪 | `Trace` | debug build 自动注入，release 优化掉 |
-
-### 没有 unsafe 关键字
-
-```lain
-// 不是这样（Rust 风格）：
-unsafe {
-    *ptr = 42    // 能做任何危险的事，审计困难
-}
-
-// 而是这样：
-fn write_ptr(ptr: *mut i32, val: i32) -> () ! {RawPtr} {
-    *ptr = val   // 签名精确说明了危险类别
-}
-
-// 调用方显式消费效果：
-handle write_ptr(ptr, 42) with permit_raw_ptr()
+                        Lain 运行时效果映射
+┌─────────────────────────────────┬──────────────────────────────────┐
+│             高级效果            │         降级后的物理 L1 映射      │
+├─────────────────────────────────┼──────────────────────────────────┤
+│  IO (系统调用)                  │  #syscall 原语                   │
+├─────────────────────────────────┼──────────────────────────────────┤
+│  RawPtr (裸指针读写)             │  #load / #store 物理指令         │
+├─────────────────────────────────┼──────────────────────────────────┤
+│  Throws<E> (业务预期失败)       │  无 Unwind, 降解为普通 C 返回值  │
+├─────────────────────────────────┼──────────────────────────────────┤
+│  Suspend (异步挂起)             │  #swap_context 上下文置换        │
+└─────────────────────────────────┴──────────────────────────────────┘
 ```
-
-效果签名精确说明危险类别（`! {RawPtr}` 表示只有裸指针，没有 GlobalMut/Asm），代码审计可以按效果集合聚焦。
 
 ---
 
-## 错误处理
+## 一、 错误处理的双轨制分治
 
-### C++ 异常的性能问题
+Lain 拒绝用同一种机制处理所有“Unhappy Path”。我们根据错误的物理性质，将其彻底解耦：
 
-C++ 异常的实现：throw → 运行时展开调用栈 → 查表找 handler → 调用所有析构函数。happy path 零成本，unhappy path 极贵。问题是 unhappy path（文件不存在、解析失败等）往往是常见路径。
+### 1. 预期业务失败：`Throws<E>` 效果 (零展开成本)
 
-### Lain 的方案：两种不同的效果
+像文件不存在、解析失败等，属于“预期的业务流程分支”。
 
-```
-Throws<E>：返回值语义
-  perform Throws::throw(e) → 编译器变换成 return Err(e)
-  handle ... with Throws → 编译器变换成 match
-  等价于 Rust 的 Result<T,E>，零开销
+- **物理实现**：它绝对不使用昂贵、复杂的运行时栈展开（Unwinding）和异常查表。Scheme 宏会在编译期，将 `Throws<E>` **完全重写并降级为最普通的 C 语言 Tagged Union 返回值（即结构体 `{ uint8_t tag, T val, E err }`）**。
+- **性能特征**：在物理汇编上只产生最简单的 `cmp` 和 `jmp` 指令。正常路径（Happy Path）与错误路径（Unhappy Path）的执行速度完全一致。
 
-Panic：unwind 语义
-  真正的栈展开
-  用于不可恢复的程序员错误
-  明确付出代价，签名里可见 ! {Panic}
-```
+### 2. 致命代码 Bug：`#trap()` / Abort (零内存垃圾)
 
-**关键：两者的语义不同，不能混淆。`! {Throws<E>}` 是零开销的，`! {Panic}` 是有 unwind 代价的。选择是显式的。**
+像数组越界、空地址访问、或安全断言（Assert）失败，这属于“程序员的逻辑漏洞”，在物理上是不可恢复的。如果强行捕获并继续运行，会产生灾难性的内存损坏风险。
 
-### 编译期变换
+- **物理实现**：L1 编译器遇到此类崩溃时，**直接在 Codegen 阶段发射单条两字节的 `#trap()` 硬件陷阱指令**（在 x86 上为 `ud2`，在 ARM 上为 `brk`）。
+- **性能特征**：它在物理文件里不产生任何异常保护（EH）恢复表，不占用任何内存体积。一旦触发，CPU 硬件瞬间抛出中断自毁，彻底阻断黑客利用“受损内存状态”进行安全溢出攻击的可能。
 
-```lain
-// 原始函数
-fn foo() -> i32 ! {Throws<ParseError>} {
-    let x = parse(s)   // parse 也有 Throws<ParseError>
-    x + 1
-}
+---
 
-// 变换后（概念上）
-fn foo() -> Result<i32, ParseError> {
-    let x = match parse(s) {
-        Ok(v)  => v,
-        Err(e) => return Err(e),
+## 二、 异步与协程（`Suspend` 效果的物理闭环）
+
+在 Rust 等传统语言中，异步会带来著名的 **“函数颜色问题（What Color is Your Function）”**：红色的 `async` 函数不能在蓝色的同步函数里直接调用，导致颜色污染。
+
+在 Lain 中，**因为 Suspend 效果可以被 handle 掉，函数颜色问题在物理层面彻底消失了。**
+
+### 1. 零污染的同步表面：
+
+高层网络库在写 read 时，表面上是一个完全干净、没有任何 `async` 关键字的同步风格函数：
+
+```rust
+pub impl TcpStream {
+    pub fn read(self: &TcpStream, buf: &mut [u8]) -> usize ! {IO, Suspend, Throws<NetError>} {
+        loop {
+            match raw_socket_read(self.fd, buf) {
+                Ok(n) => return n,
+                Err(EWouldBlock) => {
+                    // 1. 如果没数据，构造 Waker
+                    let w = make_waker(self.fd, get_current_task())
+                    // 2. 注册到底层的 io_uring 中
+                    runtime::register_io_uring(self.fd, w)
+                    // 3. 【触发挂起】：
+                    //    L1 编译器看到该 perform，会强制溢出所有活跃寄存器回栈
+                    //    并调用 #swap_context 切回主调度器！
+                    perform Suspend::suspend(w)
+                }
+                Err(e) => perform Throws::throw(NetError::from(e))?
+            }
+        }
     }
-    Ok(x + 1)
 }
 ```
 
-`?` 是 Scheme 宏，展开成 match + return + Trace 帧记录。
+### 2. 效果处理器与 Executor 100% 解耦
 
-### 效果推导
+因为 `Suspend` 只是一个普通的库效果（`std/effects/suspend.lain`），它不与任何特定的运行时绑定。
+用户可以在最外层，通过一行 `handle` 来任意决定使用什么样的异步调度引擎：
 
-大多数时候不需要手写效果标注，编译器推导：
-
-```lain
-fn process(path: str) -> i32 {
-    let text = fs::read(path)?     // Throws<IoError>
-    let n    = parse_int(text)?    // Throws<ParseError>
-    let conn = db::connect()?      // Throws<DbError>
-    n
-}
-// 编译器推导出：! {Throws<IoError>, Throws<ParseError>, Throws<DbError>}
-```
-
-只在公开 API 需要手写标注，内部函数全部推导。
-
-### 多种错误合并
-
-```lain
-@derive(From)
-enum AppError {
-    Io(IoError),
-    Parse(ParseError),
-    Db(DbError),
-}
-
-pub fn process(path: str) -> i32 ! {Throws<AppError>} {
-    let text = fs::read(path)?    // From<IoError> 自动转换
-    let n    = parse_int(text)?   // From<ParseError> 自动转换
-    n
+```rust
+fn main() {
+    handle {
+        accept_loop()
+    } with {
+        // 当协程内部触发 Suspend 时，在这里被拦截：
+        Suspend::suspend(waker) => {
+            // 保存当前协程上下文，利用 L1 #swap_context 原语切回物理线程调度器
+            l1::swap_context(waker.task.ctx_ptr, &mut sched_ctx as l1::addr)
+        }
+    }
+    // 这里决定了它的执行策略：
+    // 换成 thread_pool_executor(threads: 8) 或者单线程 event_loop 只需要改这一行，
+    // 内部所有的 TcpStream 业务代码一字不改！
+    with io_uring_executor(threads: 4)
 }
 ```
 
 ---
 
-## 异步
+## 三、 无 `unsafe` 的安全借用审计（`RawPtr` 效果）
 
-### 函数颜色问题在效果系统里的解决
+Lain 废除了粗暴的 `unsafe` 关键字。我们通过精准的效果细分来约束硬件操作：
 
-关键洞察：**Suspend 效果可以被 handle 掉，所以不存在"函数颜色"问题。** 同一份业务代码，绑定不同的 handler，得到不同的执行模型。
-
-```lain
-// 业务逻辑：只是一个普通函数，效果签名完全由编译器推导
-fn handle_conn(stream: TcpStream)
-    -> () ! {IO, Suspend, Throws<NetError>}
-{
-    defer stream.close()
-    let mut buf = [u8; 4096]
-    loop {
-        let n = stream.read(&mut buf)?   // Suspend 效果在这里产生
-        stream.write(buf[..n])?
+```rust
+// 1. 这不是 unsafe 函数，它只是一个普通的、标记了物理效果的函数
+fn raw_copy(dst: l1::addr, src: l1::addr, n: usize) -> () ! {RawPtrWrite, RawPtrRead} {
+    let mut i = 0
+    while i < n {
+        // L1 物理内存存储：直接对应 mov 机器指令
+        l1::store(dst + i, l1::load(src + i, l1::bits(8)), relaxed)
+        i += 1
     }
 }
 
-// main 里选择 executor：
-handle accept_loop(listener) with io_uring_executor(threads: 4)
-// 换成 thread_executor() 只改这一行，业务代码不动
-```
-
-与 Rust 的对比：
-- Rust：`handle_conn` 必须是 `async fn`（颜色污染），必须用 `tokio::spawn`（executor 绑定）
-- Lain：业务代码无颜色，executor 是库，handle 点替换
-
-### executor 完全解耦
-
-标准库只提供效果声明，不捆绑 executor：
-
-```lain
-// 标准库：
-effect Suspend {
-    fn suspend(waker: Waker) -> ()
+// 2. 调用者必须显式 handle 这些效果：
+fn safe_api(dst: &mut [u8], src: &[u8]) -> () {
+    handle {
+        raw_copy(dst.ptr, src.ptr, src.len)
+    } with permit_raw_ptr() // 显式消除 RawPtr 效果，代表“我为这次物理操作的安全负责”
 }
-
-// 用户/库提供具体 executor：
-fn io_uring_executor(threads: u32) -> Handler!{Suspend, Spawn}  // Linux
-fn iocp_executor(threads: u32) -> Handler!{Suspend, Spawn}      // Windows
-fn thread_pool_executor(threads: u32) -> Handler!{Suspend, Spawn}
-fn blocking_executor() -> Handler!{Suspend, Spawn}              // 测试用
 ```
 
-换 executor 只改一行调用，编译器不强制绑定任何特定运行时。
+这带来了极致细粒度的安全审计：代码审计者不需要阅读成千上万行带有 `unsafe` 的大代码块。他们只需要查看函数签名，就能立刻区分：
 
----
+- 这个函数是否操作了裸指针（`! {RawPtrWrite}`）？
+- 它是否操作了共享内存（`! {MemAcqRel}`）？
+- 它是否调用了底层汇编（`! {Asm}`）？
 
-## 效果系统的完整图景
-
-所有 "特殊控制流" 都是效果：
-
-```lain
-@effect struct Throws<E>  { fn throw(e: E) -> !        }  // 错误处理
-@effect struct Suspend    { fn suspend(w: Waker) -> ()  }  // 异步
-@effect struct Alloc      { fn alloc(n: usize) -> ptr   }  // 内存分配
-@effect struct IO         { fn syscall(...) -> i64      }  // IO 操作
-@effect struct Spawn      { fn spawn(task: fn()) -> ()  }  // 任务调度
-@effect struct Trace      { fn record_frame(f: Frame)   }  // 调用栈追踪
-@effect struct NonDet     { fn choose() -> bool         }  // 非确定性（测试用）
-```
-
-特点：
-- 编译器推导效果（不强制手写标注）
-- 函数签名完整声明副作用（不可能意外忽略错误路径）
-- 不可能出现"意外的 Throws<E>"（编译器会报错："你调用了 ! {Throws<DbError>} 的函数但没有 handle 它"）
-- debug build：Trace 自动记录调用帧；release build：noop，优化器删除
-
----
-
-## @effect 是库
-
-`@effect` 本身是 Scheme 宏（`std/meta/effects/base.scm`），不是编译器内置。它生成 handler 基础设施（vtable + dispatch）。编译器只需要提供 `perform` / `handle` / `resume` 三个原语。
+所有的危险物理行为，都在编译期被效果系统死死盯防，并以最高效的物理指令低成本运行。
