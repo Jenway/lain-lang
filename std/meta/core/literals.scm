@@ -42,9 +42,22 @@
 
 (define-pass (core-expr-lowerer |middle.expr.bool| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
-        (value (optional.value
-                 (record.get payload '|value|))))
+         (value (optional.value
+                  (record.get payload '|value|))))
     (core.const-bits!
       block
       expected-ty
       (if value 1 0))))
+
+;; ---------------------------------------------------------------------------
+;; 表达式类型推导: 字面量类型
+;; ---------------------------------------------------------------------------
+
+(define-pass (core-expr-inferer |middle.expr.bool| expr locals)
+  (type.registered '|bool| (list)))
+
+(define-pass (core-expr-inferer |middle.expr.string| expr locals)
+  (type.registered '|addr| (list)))
+
+(define-pass (core-expr-inferer |middle.expr.number| expr locals)
+  (type.unsupported '|inferred-expression-type|))
