@@ -1,15 +1,27 @@
 (meta-source "lang/enum")
 
+;; 解析可选的 variant 载荷类型: VariantName(Type) 或 VariantName
+(define (enum.parse-optional-payload cursor)
+  (let* ((open (syntax.cursor-match-punct! cursor '|(|)))
+         (has-payload (optional.some? open)))
+    (if has-payload
+        (let* ((ty (syntax.parse-type cursor)))
+          (syntax.cursor-expect-punct! cursor '|)|)
+          (optional.some ty))
+        (optional.none))))
+
 (define (enum.parse-variants cursor acc)
   (let* ((name (syntax.cursor-match-ident! cursor)))
     (if (optional.none? name)
         (begin
           (syntax.cursor-expect-eof! cursor)
           (list.reverse acc))
-        (let* ((comma (syntax.cursor-match-punct! cursor '|,|))
+        (let* ((payload (enum.parse-optional-payload cursor))
+               (_comma (syntax.cursor-match-punct! cursor '|,|))
                (variant (raw.node! '|enum.variant|
                           (record '|enum.variant|
-                            (record.field '|name| (optional.value name))))))
+                            (record.field '|name| (optional.value name))
+                            (record.field '|payload| payload)))))
           (enum.parse-variants cursor (list.cons variant acc))))))
 
 (define-pass (form-parser |enum| form)
@@ -51,6 +63,12 @@
          (combined (string-append e-str "_" v-str)))
     (string->symbol combined)))
 
+;; 帮助函数: 将 raw type 节点解析为 core type (用于构造函数参数)
+(define (enum.resolve-type raw-ty)
+  (let* ((payload (raw.payload raw-ty))
+         (name (optional.value (record.get payload '|name|))))
+    (type.registered name (list))))
+
 ;; Phase 1: core-declarer — 声明 tagged union 结构体 + variant 构造函数签名
 (define (enum.declare-variant-ctors enum-name variants index)
   (if (list.empty? variants)
@@ -60,11 +78,16 @@
              (variant-name (optional.value
                              (record.get variant-payload '|name|)))
              (ctor-name (enum.ctor-name enum-name variant-name))
-             (enum-ty (core.struct-type enum-name)))
+             (enum-ty (core.struct-type enum-name))
+             (payload (record.get variant-payload '|payload|))
+             (param-types (if (optional.some? payload)
+                              (list (enum.resolve-type
+                                      (optional.value payload)))
+                              (list))))
         (core.begin-function!
           ctor-name
-          (list)     ;; 无参数 (后续 payload enum 会添加参数)
-          enum-ty)   ;; 返回 enum 类型
+          param-types
+          enum-ty)
         (enum.declare-variant-ctors
           enum-name
           (list.rest variants)
@@ -92,7 +115,7 @@
 ;; Phase 2: core-lowerer — 生成 variant 构造函数的函数体
 ;;   每个构造函数:
 ;;     1. alloca 分配 enum 结构体空间
-;;     2. 用 core.aggregate! 初始化 { tag: discriminant, __data: null }
+;;     2. 用 core.aggregate! 初始化 { tag: discriminant, __data: payload/null }
 ;;     3. 返回 alloca 指针
 (define (enum.lower-variant-ctors enum-name variants index)
   (if (list.empty? variants)
@@ -104,11 +127,12 @@
              (ctor-name (enum.ctor-name enum-name variant-name))
              (fn (core.function-by-name ctor-name))
              (block (core.append-block! fn))
-             (enum-ty (core.struct-type enum-name)))
-        ;; 构造聚合值: { tag = discriminant, __data = 0 }
+             (enum-ty (core.struct-type enum-name))
+             (has-payload (record.get variant-payload '|payload|)))
         (let* ((tag-val (core.const-bits! block (type.bits 8) index))
-               (data-val (core.const-bits! block (type.addr) 0)))
-          ;; core.aggregate! 会生成 alloca + 各字段 store + 返回 VAR 表达式
+               (data-val (if (optional.some? has-payload)
+                             (core.param fn 0)
+                             (core.const-bits! block (type.addr) 0))))
           (core.return-value!
             block
             (core.aggregate! block enum-ty (list tag-val data-val))))

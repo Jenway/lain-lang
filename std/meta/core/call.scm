@@ -16,6 +16,13 @@
           (middle.normalize-expr
             (optional.value
               (record.get payload '|callee|))))
+        (record.field '|type-args|
+          (let* ((raw-type-args (record.get payload '|type-args|)))
+            (if (optional.none? raw-type-args)
+                (list)
+                (middle.normalize-types
+                  (optional.value raw-type-args)
+                  (list)))))
         (record.field '|args|
           (middle.normalize-exprs
             (optional.value
@@ -68,6 +75,8 @@
          (args (optional.value
                  (record.get payload '|args|)))
          (expand (pipeline.rule '|expression-macro| name)))
+    ;; 注意: macro 展开目前忽略 type-args (宏不支持泛型参数)
+    ;; 后续可扩展为 (expand args type-args)
     (middle.normalize-expr (expand args))))
 
 (define-pass (middle-normalizer |expr.if| raw-expr)
@@ -337,6 +346,42 @@
                            (list.rest param-types)
                            locals
                            (list))))))))))))))))
+
+(define-pass (middle-normalizer |expr.call-indirect| raw-expr)
+  (let* ((payload (raw.payload raw-expr)))
+    (middle.node! '|middle.expr.call-indirect|
+      (record '|middle.expr.call-indirect|
+        (record.field '|fn-ptr|
+          (middle.normalize-expr
+            (optional.value
+              (record.get payload '|fn-ptr|))))
+        (record.field '|ret-ty|
+          (middle.normalize-type
+            (optional.value
+              (record.get payload '|ret-ty|))))
+        (record.field '|args|
+          (middle.normalize-exprs
+            (optional.value
+              (record.get payload '|args|))
+            (list)))))))
+
+(define (core.lower-args-by-inference block args locals acc)
+  (if (list.empty? args)
+      (list.reverse acc)
+      (let* ((arg (list.first args))
+             (ty (core.infer-expr-type arg locals))
+             (value (core.lower-expr block arg ty locals)))
+        (core.lower-args-by-inference
+          block (list.rest args) locals (list.cons value acc)))))
+
+(define-pass (core-expr-lowerer |middle.expr.call-indirect| block expr expected-ty locals)
+  (let* ((payload (middle.payload expr))
+         (fn-ptr (optional.value (record.get payload '|fn-ptr|)))
+         (ret-ty (core.lower-type (optional.value (record.get payload '|ret-ty|))))
+         (args (optional.value (record.get payload '|args|))))
+    (let* ((lowered-fn-ptr (core.lower-expr block fn-ptr (type.addr) locals))
+           (lowered-args (core.lower-args-by-inference block args locals (list))))
+      (core.call-indirect! block lowered-fn-ptr ret-ty lowered-args))))
 
 (define-pass (core-expr-lowerer |middle.expr.builtin| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
