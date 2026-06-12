@@ -284,23 +284,59 @@
            (core.lower-expr block (list.first args) expected-ty locals))
          expected-ty))
       (else
-       (let* ((function (core.function-by-name method)))
-         (let* ((param-types (core.function-param-types function)))
-           (core.call!
-             block
-             function
-             (list.cons
-               (core.lower-expr
-                 block
-                 receiver
-                 (list.first param-types)
-                 locals)
-               (core.lower-args
-                 block
-                 args
-                 (list.rest param-types)
-                 locals
-                 (list))))))))))
+       ;; 检测是否为 Dyn 胖指针的动态分发调用
+       (let* ((receiver-kind (middle.kind receiver)))
+         (cond
+           ;; 接收者不是变量路径 — 静态分发
+           ((not (symbol=? receiver-kind '|middle.expr.path|))
+            (let* ((function (core.function-by-name method)))
+              (let* ((param-types (core.function-param-types function)))
+                (core.call!
+                  block
+                  function
+                  (list.cons
+                    (core.lower-expr
+                      block
+                      receiver
+                      (list.first param-types)
+                      locals)
+                    (core.lower-args
+                      block
+                      args
+                      (list.rest param-types)
+                      locals
+                      (list)))))))
+           ;; 接收者是变量路径 — 检查是否为 Dyn 类型
+           (else
+            (let* ((receiver-payload (middle.payload receiver))
+                   (receiver-path (optional.value
+                                   (record.get receiver-payload '|path|)))
+                   (receiver-name (list.first receiver-path))
+                   (receiver-ty (core.local-type locals receiver-name)))
+              (cond
+                ((interface.dyn-type? receiver-ty)
+                 ;; 动态分发: vtable 查找 + 间接调用
+                 (impl.lower-dyn-dispatch!
+                   block receiver method args locals))
+                (else
+                 ;; 静态分发回退
+                 (let* ((function (core.function-by-name method)))
+                   (let* ((param-types (core.function-param-types function)))
+                     (core.call!
+                       block
+                       function
+                       (list.cons
+                         (core.lower-expr
+                           block
+                           receiver
+                           (list.first param-types)
+                           locals)
+                         (core.lower-args
+                           block
+                           args
+                           (list.rest param-types)
+                           locals
+                           (list))))))))))))))))
 
 (define-pass (core-expr-lowerer |middle.expr.builtin| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))

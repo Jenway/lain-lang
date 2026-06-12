@@ -56,11 +56,14 @@
         (record.field '|payload| payload)))))
 
 ;; ===========================================================================
-;; Interface L1 降级 — 生成 VTable 结构体类型
+;; Interface L1 降级 — 生成 VTable 结构体类型 + Dyn 胖指针类型
 ;; ===========================================================================
 
 ;; 全局注册表: 存储 interface → methods 映射，供 impl lowerer 查询
 (set! *interface-registry* (list))
+
+;; Dyn 类型注册表: 存储 dyn-type-name → (interface-name . method-index-offsets)
+(set! *dyn-registry* (list))
 
 ;; 帮助函数: 将 interface 注册到全局表
 (define (interface.register! name methods)
@@ -78,6 +81,53 @@
           (if (symbol=? (car entry) name)
               (cdr entry)
               (loop (list.rest reg)))))))
+
+;; Dyn 胖指针类型名: Animal → Animal_Dyn
+(define (interface.dyn-name interface-name)
+  (let* ((s (symbol->string interface-name))
+         (combined (string-append s "_Dyn")))
+    (string->symbol combined)))
+
+;; 注册 Dyn 类型到全局表
+(define (interface.register-dyn! dyn-name interface-name)
+  (set! *dyn-registry*
+    (list.cons
+      (list.cons dyn-name interface-name)
+      *dyn-registry*)))
+
+;; 查询 Dyn 类型对应的 interface name
+(define (interface.lookup-dyn dyn-type-name)
+  (let loop ((reg *dyn-registry*))
+    (if (list.empty? reg)
+        #f
+        (let* ((entry (list.first reg)))
+          (if (symbol=? (car entry) dyn-type-name)
+              (cdr entry)
+              (loop (list.rest reg)))))))
+
+;; 判断一个类型是否为 Dyn 胖指针类型
+(define (interface.dyn-type? ty)
+  (let* ((name (type.product-name ty)))
+    (if name
+        (interface.lookup-dyn name)
+        #f)))
+
+;; 从 Dyn 类型名提取 interface 名: Animal_Dyn → Animal
+(define (interface.name-from-dyn dyn-name)
+  (let* ((str (symbol->string dyn-name))
+         (len (string-length str)))
+    (string->symbol (substring str 0 (- len 4)))))
+
+;; 在 interface methods 列表中查找方法名对应的索引
+(define (interface.find-method-index name methods index)
+  (if (list.empty? methods)
+      #f  ;; 未找到
+      (let* ((method (list.first methods))
+             (payload (raw.payload method))
+             (method-name (optional.value (record.get payload '|name|))))
+        (if (symbol=? method-name name)
+            index
+            (interface.find-method-index name (list.rest methods) (u64.add1 index))))))
 
 ;; 帮助函数: 从 raw method 节点列表中提取 method name (符号)
 (define (interface.method-names methods acc)
@@ -108,17 +158,30 @@
             (record.field '|type| (type.addr)))
           acc))))
 
-;; core-declarer: 为 interface 生成 VTable 结构体类型
+;; core-declarer: 为 interface 生成 VTable 结构体类型 + Dyn 胖指针类型
 (define-pass (core-declarer |middle.interface| item)
   (let* ((payload (middle.payload item))
          (interface-payload (optional.value (record.get payload '|payload|)))
          (name (optional.value (record.get payload '|name|)))
          (methods (optional.value (record.get interface-payload '|methods|)))
          (method-names (interface.method-names methods (list)))
-         (vtable-name (interface.vtable-name name)))
+         (vtable-name (interface.vtable-name name))
+         (dyn-name (interface.dyn-name name)))
     ;; 1. 声明 VTable 结构体: { method1: addr, method2: addr, ... }
     (core.declare-struct!
       vtable-name
       (interface.vtable-fields method-names (list)))
-    ;; 2. 注册到全局表，供 impl lowerer 查询
-    (interface.register! name methods)))
+    ;; 2. 声明 Dyn 胖指针结构体: { data: addr, vtable: addr }
+    (core.declare-struct!
+      dyn-name
+      (list
+        (record '|struct.core-field|
+          (record.field '|name| '|data|)
+          (record.field '|type| (type.addr)))
+        (record '|struct.core-field|
+          (record.field '|name| '|vtable|)
+          (record.field '|type| (type.addr)))))
+    ;; 3. 注册到全局表，供 impl lowerer 查询
+    (interface.register! name methods)
+    ;; 4. 注册 Dyn 类型映射
+    (interface.register-dyn! dyn-name name)))

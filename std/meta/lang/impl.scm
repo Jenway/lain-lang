@@ -145,6 +145,54 @@
       block
       (core.aggregate! block vtable-ty field-values))))
 
+;; ===========================================================================
+;; Impl 动态分发降级 — vtable 查找 + 间接调用
+;; ===========================================================================
+
+;; 胖指针结构: { data: addr (field 0), vtable: addr (field 1) }
+;; 降级路径:
+;;   1. Lower 接收者 → fat-ptr 表达式
+;;   2. core.field!(block, fat-ptr, dyn-ty, 0, addr) → data-ptr
+;;   3. core.field!(block, fat-ptr, dyn-ty, 1, addr) → vtable-ptr
+;;   4. 查找 method 在 interface 中的索引
+;;   5. core.field!(block, vtable-ptr, vtable-ty, method-index, addr) → fn-ptr
+;;   6. core.call-indirect!(block, fn-ptr, ret-ty, (data-ptr . args))
+(define (impl.lower-dyn-dispatch! block receiver method args locals)
+  (let* ((receiver-payload (middle.payload receiver))
+         (receiver-path (optional.value (record.get receiver-payload '|path|)))
+         ;; receiver-name 即变量名
+         (_receiver-name (list.first receiver-path))
+         ;; 从 locals 获取接收者的 Dyn 类型
+         (dyn-ty (core.local-type locals (list.first receiver-path)))
+         ;; Dyn 类型名 → Interface 名
+         (dyn-type-name (type.product-name dyn-ty))
+         (interface-name (interface.name-from-dyn dyn-type-name))
+         ;; VTable 类型
+         (vtable-name (interface.vtable-name interface-name))
+         (vtable-ty (core.struct-type vtable-name))
+         ;; Interface 方法列表
+         (interface-methods (interface.lookup interface-name)))
+    ;; 查找方法在 interface 中的索引
+    (let* ((method-index (interface.find-method-index method interface-methods 0)))
+      (if (eq? method-index #f)
+          (type.unsupported '|dyn-method-not-found-in-interface|)
+          ;; Lower 接收者为 fat-ptr 表达式
+          (let* ((fat-ptr (core.lower-expr block receiver dyn-ty locals)))
+            ;; 提取 data 指针 (field 0, offset 0)
+            (let* ((data-ptr (core.field! block fat-ptr dyn-ty 0 (type.addr))))
+              ;; 提取 vtable 指针 (field 1, offset 8)
+              (let* ((vtable-ptr (core.field! block fat-ptr dyn-ty 1 (type.addr))))
+                ;; 从 vtable 中提取函数指针
+                (let* ((fn-ptr (core.field! block vtable-ptr vtable-ty method-index (type.addr))))
+                  ;; 间接调用: fn_ptr(data_ptr, ...args)
+                  ;; 保守参数类型: 所有参数均为 addr (vtable 中所有槽位都是 addr)
+                  (let* ((lowered-args (core.lower-args block args (list) locals (list))))
+                    (core.call-indirect!
+                      block
+                      fn-ptr
+                      (type.addr)  ;; 返回类型 (保守默认)
+                      (list.cons data-ptr lowered-args)))))))))))
+
 ;; 构建 vtable 字段值列表 (与 interface 定义顺序对齐)
 (define (impl.build-vtable-field-values target-name methods interface-methods acc)
   (if (list.empty? interface-methods)
