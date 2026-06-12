@@ -1,4 +1,4 @@
-(meta-source "lang/impl")
+(meta-source "interface/impl")
 
 ;; impl 专用的方法解析器 — 支持带函数体的方法实现
 ;; 接口声明用 `;` 结束, impl 方法实现用 `{ ... }` 结束

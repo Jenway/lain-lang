@@ -1,0 +1,15 @@
+(meta-source "effects/infer")
+
+;; ═══════════════════════════════════════════════════════════
+;; 效应系统 — 表达式类型推导 (perform / resume / handle)
+;; 当前均为 unsupported stub
+;; ═══════════════════════════════════════════════════════════
+
+(define-pass (core-expr-inferer |middle.expr.perform| expr locals)
+  (type.unsupported '|perform-expression-type|))
+
+(define-pass (core-expr-inferer |middle.expr.resume| expr locals)
+  (type.unsupported '|resume-expression-type|))
+
+(define-pass (core-expr-inferer |middle.expr.handle| expr locals)
+  (type.unsupported '|handle-expression-type|))

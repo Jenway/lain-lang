@@ -1,0 +1,57 @@
+(meta-source "control/lower")
+
+;; ── 语句降级: pipeline stage = core-stmt-lowerer ──
+
+(define-pass (core-stmt-lowerer |middle.stmt.return| block stmt ret-ty locals)
+  (let* ((payload (middle.payload stmt)) (value (optional.value (record.get payload '|value|))))
+    (if (optional.none? value) (core.return-none! block)
+        (core.return-value! block (core.lower-expr block (optional.value value) ret-ty locals)))
+    locals))
+
+(define-pass (core-stmt-lowerer |middle.stmt.tail| block stmt ret-ty locals)
+  (let* ((payload (middle.payload stmt)) (expr (optional.value (record.get payload '|expr|))))
+    (if (symbol=? (middle.kind expr) '|middle.expr.if|)
+        (core.lower-if-tail-expr block expr ret-ty locals)
+        (if (type.unit? ret-ty)
+            (begin (core.lower-expr block expr ret-ty locals) (core.return-none! block))
+            (core.return-value! block (core.lower-expr block expr ret-ty locals))))
+    locals))
+
+(define-pass (core-stmt-lowerer |middle.stmt.expr| block stmt ret-ty locals)
+  (let* ((payload (middle.payload stmt)) (expr (optional.value (record.get payload '|expr|))))
+    (core.lower-expr block expr (core.infer-expr-type expr locals) locals) locals))
+
+(define-pass (core-stmt-lowerer |middle.stmt.let| block stmt ret-ty locals)
+  (let* ((payload (middle.payload stmt))
+         (ty-option (optional.value (record.get payload '|type|)))
+         (name (optional.value (record.get payload '|name|)))
+         (mutable (optional.value (record.get payload '|mutable|)))
+         (value-expr (optional.value (record.get payload '|value|)))
+         (ty (if (optional.none? ty-option) (core.infer-expr-type value-expr locals)
+                 (core.lower-type (optional.value ty-option))))
+         (value (core.lower-expr block value-expr ty locals)))
+    (list.cons (record '|local| (record.field '|name| name) (record.field '|type| ty)
+                 (record.field '|mutable| mutable) (record.field '|value| value)) locals)))
+
+(define-pass (core-stmt-lowerer |middle.stmt.assign| block stmt ret-ty locals)
+  (let* ((payload (middle.payload stmt)) (target (optional.value (record.get payload '|target|)))
+         (value-expr (optional.value (record.get payload '|value|))))
+    (if (symbol=? (middle.kind target) '|middle.expr.path|)
+        (let* ((target-payload (middle.payload target)) (path (optional.value (record.get target-payload '|path|)))
+               (name (list.first path)))
+          (if (core.local-mutable? locals name)
+              (let* ((ty (core.local-type locals name)) (value (core.lower-expr block value-expr ty locals)))
+                (list.cons (record '|local| (record.field '|name| name) (record.field '|type| ty)
+                             (record.field '|mutable| #t) (record.field '|value| value)) locals))
+              (type.unsupported '|immutable-assignment|)))
+        (type.unsupported '|assignment-target|))))
+
+(define (core.lower-stmt block stmt ret-ty locals)
+  (let* ((kind (middle.kind stmt)) (lowerer (pipeline.lookup '|core-stmt-lowerer| kind)))
+    (if lowerer (lowerer block stmt ret-ty locals) locals)))
+
+(define (core.lower-stmts block stmts ret-ty locals)
+  (if (list.empty? stmts) (core.return-none! block)
+      (let* ((next-locals (core.lower-stmt block (list.first stmts) ret-ty locals)))
+        (if (list.empty? (list.rest stmts)) unit
+            (core.lower-stmts block (list.rest stmts) ret-ty next-locals)))))

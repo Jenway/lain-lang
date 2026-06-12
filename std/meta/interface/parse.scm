@@ -1,4 +1,4 @@
-(meta-source "lang/interface")
+(meta-source "interface/parse")
 
 (register-constraint! '|Interface| '|interface-predicate|)
 (register-interface-rule! '|Interface| '|interface-requirements|)

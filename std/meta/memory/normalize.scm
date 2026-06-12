@@ -1,4 +1,10 @@
-(meta-source "core/memory")
+(meta-source "memory/normalize")
+
+;; ═══════════════════════════════════════════════════════════
+;; 内存/指针 — 类型构造注册 + 规范化 + intrinsic
+;; ═══════════════════════════════════════════════════════════
+
+;; ── 类型构造器注册 ──
 
 (register-type-constructor! '|Ptr| 1 '(raw-ptr const))
 (register-type-constructor! '|MutPtr| 1 '(raw-ptr mut))
@@ -9,6 +15,8 @@
 (register-raw-pointer-type! '|const| '|Ptr|)
 (register-raw-pointer-type! '|mut| '|MutPtr|)
 (register-raw-pointer-index-type! '|u64|)
+
+;; ── intrinsic 通道 ──
 
 (define-pass (intrinsic |load| block args expected-ty locals)
   (let* ((ptr-expr (list.first args))
@@ -36,31 +44,16 @@
     (core.store! block ptr value)
     unit))
 
-;; ---------------------------------------------------------------------------
-;; 类型降级: 指针/内存类型
-;; ---------------------------------------------------------------------------
+;; ── borrow 表达式规范化 ──
 
-(define-pass (core-type-lowerer |middle.ty.raw-ptr| ty)
-  (let* ((payload (middle.payload ty))
-         (mutable (optional.value (record.get payload '|mutable|)))
-         (pointee (core.lower-type
-                    (optional.value (record.get payload '|pointee|)))))
-    (type.raw-ptr mutable pointee)))
-
-(define-pass (core-type-lowerer |middle.ty.ref| ty)
-  (let* ((payload (middle.payload ty))
-         (mutable (optional.value (record.get payload '|mutable|)))
-         (inner (core.lower-type
-                  (optional.value (record.get payload '|inner|)))))
-    (type.raw-ptr mutable inner)))
-
-(define-pass (core-type-lowerer |middle.ty.slice| ty)
-  (let* ((kind (middle.kind ty)))
-    (type.unsupported kind)))
-
-(define-pass (core-type-lowerer |middle.ty.array| ty)
-  (let* ((payload (middle.payload ty))
-         (element (core.lower-type
-                    (optional.value (record.get payload '|element|))))
-         (len (optional.value (record.get payload '|len|))))
-    (type.array element len)))
+(define-pass (middle-normalizer |expr.borrow| raw-expr)
+  (let* ((payload (raw.payload raw-expr)))
+    (middle.node! '|middle.expr.borrow|
+      (record '|middle.expr.borrow|
+        (record.field '|mutable|
+          (optional.value
+            (record.get payload '|mutable|)))
+        (record.field '|operand|
+          (middle.normalize-expr
+            (optional.value
+              (record.get payload '|operand|))))))))

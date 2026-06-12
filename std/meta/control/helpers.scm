@@ -1,0 +1,22 @@
+(meta-source "control/helpers")
+
+(define (core.lower-types types acc)
+  (if (list.empty? types) (list.reverse acc)
+      (let* ((ty (core.lower-type (list.first types))))
+        (core.lower-types (list.rest types) (list.cons ty acc)))))
+
+(define (core.lower-param-types params acc)
+  (if (list.empty? params) (list.reverse acc)
+      (let* ((param (list.first params)) (payload (middle.payload param))
+             (ty (core.lower-type (optional.value (record.get payload '|type|)))))
+        (core.lower-param-types (list.rest params) (list.cons ty acc)))))
+
+(define (core.bind-params function params index locals)
+  (if (list.empty? params) (list.reverse locals)
+      (let* ((param (list.first params)) (payload (middle.payload param))
+             (name (optional.value (record.get payload '|name|)))
+             (ty (core.lower-type (optional.value (record.get payload '|type|))))
+             (value (core.param function index))
+             (local (record '|local| (record.field '|name| name) (record.field '|type| ty)
+                      (record.field '|mutable| #f) (record.field '|value| value))))
+        (core.bind-params function (list.rest params) (u64.add1 index) (list.cons local locals)))))
