@@ -60,10 +60,10 @@
 ;; ===========================================================================
 
 ;; 全局注册表: 存储 interface → methods 映射，供 impl lowerer 查询
-(set! *interface-registry* (list))
+(define *interface-registry* (list))
 
 ;; Dyn 类型注册表: 存储 dyn-type-name → (interface-name . method-index-offsets)
-(set! *dyn-registry* (list))
+(define *dyn-registry* (list))
 
 ;; 帮助函数: 将 interface 注册到全局表
 (define (interface.register! name methods)
