@@ -5,14 +5,22 @@
 ;;   - ` 是 Scheme 原生 quasiquote，构建模板结构
 ;;   - , 是 Scheme 原生 unquote，在模板中嵌入 Scheme 值或预构 AST 节点
 ;;
-;; 示例:
-;;   (lain-quote `(call __lain_println_raw (string ,msg-sym) (number ,len-sym)))
-;;   → raw.node! 调用链，构建完整的 expr.call AST 节点
+;; 支持: 字面量、表达式、语句、类型、属性、处理器、参数
 ;; =============================================================================
 
-;; ---------------------------------------------------------------------------
-;; lain-quote 核心函数
-;; ---------------------------------------------------------------------------
+;; 帮助: 在列表中查找关键字符号，返回索引或 #f
+(define (lain-find-keyword kw lst idx)
+  (if (null? lst)
+      #f
+      (if (symbol=? (car lst) kw)
+          idx
+          (lain-find-keyword kw (cdr lst) (+ idx 1)))))
+
+;; 帮助: 取列表前 n 个元素
+(define (lain-take lst n)
+  (if (or (null? lst) (= n 0))
+      (list)
+      (cons (car lst) (lain-take (cdr lst) (- n 1)))))
 
 (define (lain-quote template)
   (cond
@@ -22,46 +30,61 @@
     ((and (list? template) (not (null? template)))
      (let* ((kind (car template)))
        (cond
-         ;; ── 表达式节点 ──
+         ;; ══════════════════════════════════════════════════════════════
+         ;; 字面量节点
+         ;; ══════════════════════════════════════════════════════════════
+
+         ((symbol=? kind 'string)
+          (raw.node! '|expr.string|
+            (record '|expr.string|
+              (record.field '|raw| (cadr template)))))
+
+         ((symbol=? kind 'number)
+          (raw.node! '|expr.number|
+            (record '|expr.number|
+              (record.field '|raw| (cadr template)))))
+
+         ((symbol=? kind 'bool)
+          (raw.node! '|expr.bool|
+            (record '|expr.bool|
+              (record.field '|value| (cadr template)))))
+
+         ;; ══════════════════════════════════════════════════════════════
+         ;; 表达式节点
+         ;; ══════════════════════════════════════════════════════════════
 
          ;; 函数调用: (call callee arg ...)
+         ;; callee 为裸符号时自动转换为 path 节点，否则送入 lain-quote 递归处理
          ((symbol=? kind 'call)
           (let* ((callee-raw (cadr template))
                  (callee (if (symbol? callee-raw)
-                            ;; 裸符号自动转换为 path 节点
                             (lain-quote (list 'path callee-raw))
-                            callee-raw))
+                            (lain-quote callee-raw)))
                  (args (map lain-quote (cddr template))))
             (raw.node! '|expr.call|
               (record '|expr.call|
                 (record.field '|callee| callee)
                 (record.field '|args| args)))))
 
-         ;; 路径引用: (path name)
-         ((symbol=? kind 'path)
-          (raw.node! '|expr.path|
-            (record '|expr.path|
-              (record.field '|path| (list (cadr template))))))
+        ;; 路径引用: (path seg ...) 或 (path seg ... :type-args types)
+        ;; 支持多段路径: (path foo bar) → path=[foo, bar]
+        ((symbol=? kind 'path)
+          (let* ((all-args (cdr template))
+                 (type-args-kw-idx (lain-find-keyword ':type-args all-args 0))
+                 (segments (if type-args-kw-idx
+                              (lain-take all-args type-args-kw-idx)
+                              all-args))
+                 (type-args (if type-args-kw-idx
+                               (list-ref all-args (+ type-args-kw-idx 1))
+                               (list))))
+            (raw.node! '|expr.path|
+              (if (list.empty? type-args)
+                  (record '|expr.path|
+                    (record.field '|path| segments))
+                  (record '|expr.path|
+                    (record.field '|path| segments)
+                    (record.field '|type-args| type-args))))))
 
-         ;; 字符串字面量: (string raw-value)
-         ((symbol=? kind 'string)
-          (raw.node! '|expr.string|
-            (record '|expr.string|
-              (record.field '|raw| (cadr template)))))
-
-         ;; 数字字面量: (number raw-value)
-         ((symbol=? kind 'number)
-          (raw.node! '|expr.number|
-            (record '|expr.number|
-              (record.field '|raw| (cadr template)))))
-
-         ;; 布尔字面量: (bool #t|#f)
-         ((symbol=? kind 'bool)
-          (raw.node! '|expr.bool|
-            (record '|expr.bool|
-              (record.field '|value| (cadr template)))))
-
-         ;; 二元运算: (binary op left right)
          ((symbol=? kind 'binary)
           (raw.node! '|expr.binary|
             (record '|expr.binary|
@@ -69,21 +92,18 @@
               (record.field '|left| (lain-quote (caddr template)))
               (record.field '|right| (lain-quote (cadddr template))))))
 
-         ;; 一元运算: (unary op operand)
          ((symbol=? kind 'unary)
           (raw.node! '|expr.unary|
             (record '|expr.unary|
               (record.field '|op| (cadr template))
               (record.field '|operand| (lain-quote (caddr template))))))
 
-         ;; 字段访问: (field base field-name)
          ((symbol=? kind 'field)
           (raw.node! '|expr.field|
             (record '|expr.field|
               (record.field '|base| (lain-quote (cadr template)))
               (record.field '|field| (caddr template)))))
 
-         ;; 方法调用: (method-call receiver method arg ...)
          ((symbol=? kind 'method-call)
           (raw.node! '|expr.method-call|
             (record '|expr.method-call|
@@ -91,7 +111,6 @@
               (record.field '|method| (caddr template))
               (record.field '|args| (map lain-quote (cdddr template))))))
 
-         ;; if 表达式: (if cond then else)
          ((symbol=? kind 'if)
           (raw.node! '|expr.if|
             (record '|expr.if|
@@ -99,32 +118,93 @@
               (record.field '|then| (lain-quote (caddr template)))
               (record.field '|else| (lain-quote (cadddr template))))))
 
-         ;; 结构体字面量: (aggregate struct-name (struct-field fname fval) ...)
+         ((symbol=? kind 'borrow)
+          (raw.node! '|expr.borrow|
+            (record '|expr.borrow|
+              (record.field '|mutable| (cadr template))
+              (record.field '|operand| (lain-quote (caddr template))))))
+
+         ((symbol=? kind 'perform)
+          (raw.node! '|expr.perform|
+            (record '|expr.perform|
+              (record.field '|call| (lain-quote (cadr template))))))
+
+         ((symbol=? kind 'resume)
+          (let* ((val (cadr template)))
+            (raw.node! '|expr.resume|
+              (record '|expr.resume|
+                (record.field '|value|
+                  (if (symbol=? val 'none)
+                      (optional.none)
+                      (optional.some (lain-quote val))))))))
+
+         ((symbol=? kind 'handle)
+          (raw.node! '|expr.handle|
+            (record '|expr.handle|
+              (record.field '|effect| (cadr template))
+              (record.field '|effect-args| (caddr template))
+              (record.field '|handler| (lain-quote (cadddr template)))
+              (record.field '|body| (lain-quote (car (cddddr template)))))))
+
+         ((symbol=? kind 'tail-call)
+          (raw.node! '|expr.tail-call|
+            (record '|expr.tail-call|
+              (record.field '|call| (lain-quote (cadr template))))))
+
+         ((symbol=? kind 'builtin)
+          (raw.node! '|expr.builtin|
+            (record '|expr.builtin|
+              (record.field '|name| (cadr template))
+              (record.field '|args| (map lain-quote (cddr template))))))
+
+         ((symbol=? kind 'macro-call)
+          (raw.node! '|expr.macro-call|
+            (record '|expr.macro-call|
+              (record.field '|name| (cadr template))
+              (record.field '|type-args| (caddr template))
+              (record.field '|args| (map lain-quote (cadddr template))))))
+
+         ;; 结构体字面量: (aggregate name (struct-field fname fval) ...)
+         ;; 可选项: (aggregate name :type-args types (struct-field ...) ...)
          ((symbol=? kind 'aggregate)
           (let* ((struct-name (cadr template))
-                 (field-forms (cddr template)))
+                 (rest (cddr template))
+                 (has-targs (and (not (null? rest))
+                                 (symbol=? (car rest) ':type-args)))
+                 (type-args (if has-targs (cadr rest) (list)))
+                 (field-forms (if has-targs (cddr rest) rest)))
             (raw.node! '|expr.struct|
-              (record '|expr.struct|
-                (record.field '|name| struct-name)
-                (record.field '|fields|
-                  (map lain-quote field-forms))))))
+              (if (list.empty? type-args)
+                  (record '|expr.struct|
+                    (record.field '|name| struct-name)
+                    (record.field '|fields| (map lain-quote field-forms)))
+                  (record '|expr.struct|
+                    (record.field '|name| struct-name)
+                    (record.field '|type-args| type-args)
+                    (record.field '|fields| (map lain-quote field-forms)))))))
 
-         ;; 结构体字段值 (用于 aggregate 内): (struct-field fname fval)
          ((symbol=? kind 'struct-field)
           (raw.node! '|expr.struct-field|
             (record '|expr.struct-field|
               (record.field '|name| (cadr template))
               (record.field '|value| (lain-quote (caddr template))))))
 
-         ;; ── 语句节点 ──
+         ((symbol=? kind 'call-indirect)
+          (raw.node! '|expr.call-indirect|
+            (record '|expr.call-indirect|
+              (record.field '|fn-ptr| (lain-quote (cadr template)))
+              (record.field '|ret-ty| (lain-quote (caddr template)))
+              (record.field '|args| (map lain-quote (cdddr template))))))
 
-         ;; 代码块: (block item ...)
+         ;; ══════════════════════════════════════════════════════════════
+         ;; 语句节点
+         ;; ══════════════════════════════════════════════════════════════
+
          ((symbol=? kind 'block)
           (raw.node! '|block|
             (record '|block|
               (record.field '|items| (map lain-quote (cdr template))))))
 
-         ;; return 语句: (return expr) 或 (return void)
          ((symbol=? kind 'return)
           (let* ((val (cadr template)))
             (raw.node! '|stmt.return|
@@ -134,44 +214,163 @@
                       (optional.none)
                       (optional.some (lain-quote val))))))))
 
-         ;; 尾表达式: (tail expr)
          ((symbol=? kind 'tail)
           (raw.node! '|stmt.tail|
             (record '|stmt.tail|
               (record.field '|expr| (lain-quote (cadr template))))))
 
-         ;; let 语句: (let name value)
+         ;; let 语句: (let name mutable shared type-option value)
          ((symbol=? kind 'let)
           (raw.node! '|stmt.let|
             (record '|stmt.let|
-              (record.field '|mutable| #f)
-              (record.field '|shared| #f)
-              (record.field '|name| (cadr template))
-              (record.field '|type| (optional.none))
-              (record.field '|value| (lain-quote (caddr template))))))
+              (record.field '|mutable| (cadr template))
+              (record.field '|shared| (caddr template))
+              (record.field '|name| (cadddr template))
+              (record.field '|type|
+                (car (cddddr template)))
+              (record.field '|value|
+                (lain-quote (cadr (cddddr template)))))))
 
-         ;; 赋值语句: (assign target value)
          ((symbol=? kind 'assign)
           (raw.node! '|stmt.assign|
             (record '|stmt.assign|
               (record.field '|target| (lain-quote (cadr template)))
               (record.field '|value| (lain-quote (caddr template))))))
 
-         ;; 间接调用: (call-indirect fn-ptr ret-ty arg ...)
-         ((symbol=? kind 'call-indirect)
-          (raw.node! '|expr.call-indirect|
-            (record '|expr.call-indirect|
-              (record.field '|fn-ptr| (lain-quote (cadr template)))
-              (record.field '|ret-ty| (lain-quote (caddr template)))
-              (record.field '|args| (map lain-quote (cdddr template))))))
+         ((symbol=? kind 'expr-stmt)
+          (raw.node! '|stmt.expr|
+            (record '|stmt.expr|
+              (record.field '|expr| (lain-quote (cadr template))))))
 
-         ;; 类型路径: (type-path name)
+         ;; ══════════════════════════════════════════════════════════════
+         ;; 类型节点
+         ;; ══════════════════════════════════════════════════════════════
+
          ((symbol=? kind 'type-path)
           (raw.node! '|type.path|
             (record '|type.path|
               (record.field '|name| (cadr template)))))
 
+         ((symbol=? kind 'type-unit)
+          (raw.node! '|type.unit|
+            (record '|type.unit|)))
+
+         ((symbol=? kind 'type-ref)
+          (raw.node! '|type.ref|
+            (record '|type.ref|
+              (record.field '|mutable| (cadr template))
+              (record.field '|inner| (lain-quote (caddr template))))))
+
+         ((symbol=? kind 'type-raw-ptr)
+          (raw.node! '|type.raw-ptr|
+            (record '|type.raw-ptr|
+              (record.field '|mutable| (cadr template))
+              (record.field '|pointee| (lain-quote (caddr template))))))
+
+         ((symbol=? kind 'type-slice)
+          (raw.node! '|type.slice|
+            (record '|type.slice|
+              (record.field '|element| (lain-quote (cadr template))))))
+
+         ((symbol=? kind 'type-array)
+          (raw.node! '|type.array|
+            (record '|type.array|
+              (record.field '|element| (lain-quote (cadr template)))
+              (record.field '|len| (caddr template)))))
+
+         ((symbol=? kind 'type-fn)
+          (raw.node! '|type.fn|
+            (record '|type.fn|
+              (record.field '|params| (cadr template))
+              (record.field '|return| (lain-quote (caddr template)))
+              (record.field '|effects| (cadddr template)))))
+
+         ((symbol=? kind 'type-app)
+          (raw.node! '|type.app|
+            (record '|type.app|
+              (record.field '|name| (cadr template))
+              (record.field '|args| (caddr template)))))
+
+         ;; ══════════════════════════════════════════════════════════════
+         ;; 属性节点
+         ;; ══════════════════════════════════════════════════════════════
+
+         ((symbol=? kind 'attr)
+          (raw.node! '|attr|
+            (record '|attr|
+              (record.field '|name| (cadr template))
+              (record.field '|args| (caddr template)))))
+
+         ((symbol=? kind 'attr-arg-string)
+          (raw.node! '|attr.arg.string|
+            (record '|attr.arg.string|
+              (record.field '|raw| (cadr template)))))
+
+         ((symbol=? kind 'attr-arg-number)
+          (raw.node! '|attr.arg.number|
+            (record '|attr.arg.number|
+              (record.field '|raw| (cadr template)))))
+
+         ((symbol=? kind 'attr-arg-path)
+          (raw.node! '|attr.arg.path|
+            (record '|attr.arg.path|
+              (record.field '|path| (cadr template)))))
+
+         ((symbol=? kind 'attr-arg-named)
+          (raw.node! '|attr.arg.named|
+            (record '|attr.arg.named|
+              (record.field '|name| (cadr template))
+              (record.field '|value| (lain-quote (caddr template))))))
+
+         ;; ══════════════════════════════════════════════════════════════
+         ;; 处理器 / 效果 / 参数 / 杂项
+         ;; ══════════════════════════════════════════════════════════════
+
+         ((symbol=? kind 'handler-operation)
+          (raw.node! '|handler.operation|
+            (record '|handler.operation|
+              (record.field '|name| (cadr template))
+              (record.field '|params| (caddr template))
+              (record.field '|return| (cadddr template))
+              (record.field '|body|
+                (lain-quote (car (cddddr template)))))))
+
+         ((symbol=? kind 'handler-value)
+          (raw.node! '|handler.value|
+            (record '|handler.value|
+              (record.field '|value| (lain-quote (cadr template))))))
+
+         ((symbol=? kind 'handler-inline)
+          (raw.node! '|handler.inline|
+            (record '|handler.inline|
+              (record.field '|type| (cadr template))
+              (record.field '|operations| (caddr template)))))
+
+         ((symbol=? kind 'param)
+          (raw.node! '|param|
+            (record '|param|
+              (record.field '|name| (cadr template))
+              (record.field '|type| (lain-quote (caddr template))))))
+
+         ((symbol=? kind 'param-self-ref)
+          (raw.node! '|param.self-ref|
+            (record '|param.self-ref|
+              (record.field '|name| (cadr template))
+              (record.field '|ref| (caddr template)))))
+
+         ((symbol=? kind 'effect-name)
+          (raw.node! '|effect.name|
+            (record '|effect.name|
+              (record.field '|name| (cadr template))
+              (record.field '|args| (caddr template)))))
+
+         ((symbol=? kind 'where-predicate)
+          (raw.node! '|where.predicate|
+            (record '|where.predicate|
+              (record.field '|param| (cadr template))
+              (record.field '|bound| (lain-quote (caddr template))))))
+
          ;; ── 默认: 非 AST 构造指令，原样返回 ──
          (else template))))
-    ;; 标量值 (symbol, number, string 等) 直接透传
+    ;; 标量值直接透传
     (else template)))
