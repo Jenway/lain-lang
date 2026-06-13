@@ -67,7 +67,7 @@ typedef struct {
 uint8_t read_byte_at(const uint8_t *ptr, size_t offset) { return ptr[offset]; }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 3-5. C-Side Lexer, Token Grouper, Form Splitter
+// 3-5. C-Side Lexer (legacy — used during bootstrap, replaced by lexer.lain)
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ============================================================================
@@ -237,6 +237,44 @@ static L1Token *group_tokens_recursive(RawToken *raw, uint32_t total,
   parent->data.group.children = children;
   parent->data.group.count = count;
   return parent;
+}
+
+// ── Token accumulator for Lain-side lexer → C grouping bridge ──────────────
+
+static RawToken *g_raw_tokens = NULL;
+static uint32_t g_raw_token_count = 0;
+static uint32_t g_raw_token_cap = 0;
+
+void native_push_token(const uint8_t *src, int32_t kind,
+                       size_t start, size_t len, int64_t int_val) {
+  if (g_raw_token_count >= g_raw_token_cap) {
+    g_raw_token_cap = g_raw_token_cap ? g_raw_token_cap * 2 : 256;
+    g_raw_tokens = realloc(g_raw_tokens, sizeof(RawToken) * g_raw_token_cap);
+  }
+  RawToken *t = &g_raw_tokens[g_raw_token_count++];
+  t->kind = (RawTokenKind)kind;
+  t->int_val = int_val;
+  if (kind == T_IDENT || kind == T_STRING || kind == T_PUNCT)
+    t->val = strndup((const char *)(src + start), len);
+  else
+    t->val = NULL;
+}
+
+void *native_finish_grouping(void) {
+  if (g_raw_token_count >= g_raw_token_cap) {
+    g_raw_token_cap = g_raw_token_cap ? g_raw_token_cap * 2 : 256;
+    g_raw_tokens = realloc(g_raw_tokens, sizeof(RawToken) * g_raw_token_cap);
+  }
+  g_raw_tokens[g_raw_token_count].kind = T_EOF;
+  g_raw_tokens[g_raw_token_count].val = NULL;
+  g_raw_tokens[g_raw_token_count].int_val = 0;
+  g_raw_token_count++;
+
+  uint32_t idx = 0;
+  void *root = group_tokens_recursive(g_raw_tokens, g_raw_token_count,
+                                      &idx, GRP_ROOT);
+  g_raw_token_count = 0;
+  return root;
 }
 
 // ============================================================================
@@ -1260,6 +1298,10 @@ void native_emit_module_to_file(void *subs_ptr, const char *output_path) {
   fprintf(out, "uint32_t native_file_len(void);\n");
   fprintf(out,
           "void *native_lex_and_group(const uint8_t *src, uint32_t len);\n");
+  fprintf(out,
+          "void native_push_token(const uint8_t *src, int32_t kind,"
+          " size_t start, size_t len, int64_t int_val);\n");
+  fprintf(out, "void *native_finish_grouping(void);\n");
   fprintf(out, "void *native_init_scheme(void);\n");
   fprintf(out, "int32_t native_run_pipeline(void *ctx, void *root_group);\n");
   fprintf(out, "void native_emit_module_to_file(void *subs, const char "
