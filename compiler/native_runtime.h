@@ -26,6 +26,7 @@ int32_t native_run_pipeline(void *ctx, void *root_group);
 
 // codegen (codegen_c.lain wrappers call these)
 void native_emit_module_to_file(void *subs, const char *output_path);
+void native_emit_l1_module(const char *output_path);
 void *native_get_subroutines(void);
 
 // environment

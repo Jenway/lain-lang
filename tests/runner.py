@@ -9,6 +9,7 @@ import shutil
 
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 COMPILER_BIN = os.path.join(WORKSPACE_ROOT, "bootstrap", "bootstrap_l1")
+LAINC_BIN = os.path.join(WORKSPACE_ROOT, "compiler", "lainc")
 
 # 配置 Chibi 虚拟机的环境变量，保证测试时加载正确
 ENV = os.environ.copy()
@@ -61,12 +62,12 @@ def run_ui_tests():
         else:
             log_failure(name, "Expected compilation to fail, but it succeeded.")
 
-# C. codegen: 自动进行 "FileCheck" 验证
+# C. codegen: L1 IR "FileCheck" verification
 def run_codegen_tests():
-    print("\n🚀 Running codegen pattern-matching tests...")
+    print("\n🚀 Running codegen L1 IR tests...")
     for path in glob.glob(os.path.join(FIXTURES_DIR, "codegen", "*.lain")):
         name = os.path.basename(path)
-        out_c = "/tmp/lain_test_out.c"
+        out_l1 = "/tmp/lain_test_out.l1"
 
         # 1. 提取源码里所有的 // CHECK: 模式
         expected_patterns = []
@@ -75,24 +76,24 @@ def run_codegen_tests():
                 if "// CHECK:" in line:
                     expected_patterns.append(line.split("// CHECK:")[1].strip())
 
-        # 2. 编译
-        res = subprocess.run([COMPILER_BIN, path, out_c], env=ENV, capture_output=True, text=True)
+        # 2. 用 lainc --emit-l1 编译
+        res = subprocess.run([LAINC_BIN, "--emit-l1", path, out_l1], env=ENV, capture_output=True, text=True)
         if res.returncode != 0:
             log_failure(name, f"Compilation failed.\n{res.stderr}")
             continue
 
-        # 3. 验证生成的 C 代码是否包含这些模式 (FileCheck)
-        with open(out_c, "r", encoding="utf-8") as f:
-            generated_c = f.read()
+        # 3. 验证生成的 L1 IR 是否包含这些模式 (FileCheck)
+        with open(out_l1, "r", encoding="utf-8") as f:
+            generated_l1 = f.read()
 
         failed_pattern = None
         for pattern in expected_patterns:
-            if pattern not in generated_c:
+            if pattern not in generated_l1:
                 failed_pattern = pattern
                 break
 
         if failed_pattern:
-            log_failure(name, f"Generated C code missing pattern: '{failed_pattern}'")
+            log_failure(name, f"Generated L1 IR missing pattern: '{failed_pattern}'")
         else:
             log_success(name)
 
