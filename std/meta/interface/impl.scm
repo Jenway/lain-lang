@@ -137,25 +137,32 @@
 
 ;; 生成 vtable 工厂函数体:
 ;;   alloca vtable → store fn pointers → return vtable ptr
+;; VTable layout: flat array of addr (8-byte) slots — one per interface method
 (define (impl.lower-vtable-body block vtable-ty target-name methods interface-methods)
-  ;; 构建 field-value 列表: 每个元素是 (fn-ptr-expr)
-  (let* ((field-values (impl.build-vtable-field-values target-name methods interface-methods (list))))
-    ;; 使用 core.aggregate! 一次性分配并初始化 vtable
+  (let* ((field-values (impl.build-vtable-field-values target-name methods interface-methods (list)))
+         (method-count (length field-values))
+         ;; Each slot is 8 bytes (addr). Total size = count * 8
+         (total-size (* method-count 8))
+         (pairs (let loop ((vals field-values) (i 0) (acc '()))
+                  (if (null? vals)
+                      (reverse acc)
+                      (loop (cdr vals) (+ i 1)
+                            (cons (cons (* i 8) (car vals)) acc))))))
     (core.return-value!
       block
-      (core.aggregate! block vtable-ty field-values))))
+      (core.aggregate-layout! block total-size pairs))))
 
 ;; ===========================================================================
 ;; Impl 动态分发降级 — vtable 查找 + 间接调用
 ;; ===========================================================================
 
-;; 胖指针结构: { data: addr (field 0), vtable: addr (field 1) }
+;; 胖指针结构: { data: addr (field 0, offset 0), vtable: addr (field 1, offset 8) }
 ;; 降级路径:
 ;;   1. Lower 接收者 → fat-ptr 表达式
-;;   2. core.field!(block, fat-ptr, dyn-ty, 0, addr) → data-ptr
-;;   3. core.field!(block, fat-ptr, dyn-ty, 1, addr) → vtable-ptr
+;;   2. core.field-offset!(block, fat-ptr, 0, addr) → data-ptr
+;;   3. core.field-offset!(block, fat-ptr, 8, addr) → vtable-ptr
 ;;   4. 查找 method 在 interface 中的索引
-;;   5. core.field!(block, vtable-ptr, vtable-ty, method-index, addr) → fn-ptr
+;;   5. core.field-offset!(block, vtable-ptr, method-index*8, addr) → fn-ptr
 ;;   6. core.call-indirect!(block, fn-ptr, ret-ty, (data-ptr . args))
 (define (impl.lower-dyn-dispatch! block receiver method args locals)
   (let* ((receiver-payload (middle.payload receiver))
@@ -178,12 +185,13 @@
           (type.unsupported '|dyn-method-not-found-in-interface|)
           ;; Lower 接收者为 fat-ptr 表达式
           (let* ((fat-ptr (core.lower-expr block receiver dyn-ty locals)))
+            ;; Fat pointer layout: {data:addr@0, vtable:addr@8}
             ;; 提取 data 指针 (field 0, offset 0)
-            (let* ((data-ptr (core.field! block fat-ptr dyn-ty 0 (type.addr))))
+            (let* ((data-ptr (core.field-offset! block fat-ptr 0 (type.addr))))
               ;; 提取 vtable 指针 (field 1, offset 8)
-              (let* ((vtable-ptr (core.field! block fat-ptr dyn-ty 1 (type.addr))))
-                ;; 从 vtable 中提取函数指针
-                (let* ((fn-ptr (core.field! block vtable-ptr vtable-ty method-index (type.addr))))
+              (let* ((vtable-ptr (core.field-offset! block fat-ptr 8 (type.addr))))
+                ;; 从 vtable 中提取函数指针 (offset = method-index * 8)
+                (let* ((fn-ptr (core.field-offset! block vtable-ptr (* method-index 8) (type.addr))))
                   ;; 间接调用: fn_ptr(data_ptr, ...args)
                   ;; 保守参数类型: 所有参数均为 addr (vtable 中所有槽位都是 addr)
                   (let* ((lowered-args (core.lower-args block args (list) locals (list))))

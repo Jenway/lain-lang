@@ -95,3 +95,24 @@
             (if (eq? (car f) field-name)
                 (cadr f)  ;; type cpointer
                 (loop (cdr fields))))))))
+
+;; ── Anonymous product layout (no registry) ──
+
+;; Returns (total-size . ((offset . type) ...))
+;; field-types: list of type-cpointers (e.g. '(i32-cptr i64-cptr addr-cptr))
+(define (product-layout field-types)
+  (let ((n (length field-types)))
+    (if (zero? n)
+        (cons 0 '())
+        (let loop ((tys field-types) (offset 0) (acc '()))
+          (if (null? tys)
+              (cons offset (reverse acc))
+              (let* ((ty (car tys))
+                     (size (core.type-size-in-bytes! ty))
+                     ;; 64-bit alignment
+                     (aligned (if (and (= size 8) (not (zero? (modulo offset 8))))
+                                  (+ offset (- 8 (modulo offset 8)))
+                                  offset)))
+                (loop (cdr tys)
+                      (+ aligned size)
+                      (cons (cons aligned ty) acc))))))))
