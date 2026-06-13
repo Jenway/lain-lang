@@ -8,8 +8,10 @@ import shutil
 # ── 1. 配置路径与编译器指令 ──────────────────────────────────────────
 
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-COMPILER_BIN = os.path.join(WORKSPACE_ROOT, "bootstrap", "bootstrap_l1")
+COMPILER_BIN = os.path.join(WORKSPACE_ROOT, "compiler", "lainc")
 LAINC_BIN = os.path.join(WORKSPACE_ROOT, "compiler", "lainc")
+# UI tests still use the old bootstrap binary (tests compiler diagnostics)
+UI_COMPILER_BIN = os.path.join(WORKSPACE_ROOT, "bootstrap", "bootstrap_l1")
 
 # 配置 Chibi 虚拟机的环境变量，保证测试时加载正确
 ENV = os.environ.copy()
@@ -56,7 +58,7 @@ def run_ui_tests():
         name = os.path.basename(path)
         out_c = "/tmp/lain_test_out.c"
 
-        res = subprocess.run([COMPILER_BIN, path, out_c], env=ENV, capture_output=True, text=True)
+        res = subprocess.run([UI_COMPILER_BIN, path, out_c], env=ENV, capture_output=True, text=True)
         if res.returncode != 0:
             log_success(name)
         else:

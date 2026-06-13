@@ -2841,50 +2841,8 @@ static void native_inject_all_polyfills(sexp ctx, sexp env) {
       " (define (register-expression-macro! name handler) unit)"
       " (define (register-raw-pointer-effect! kind name) unit))");
 
-  // 15. Syntax cursor high-level wrappers
-  native_eval_string(
-      ctx, env,
-      "(define (syntax.cursor-match-ident! cursor . opt-symbol)"
-      "  (let ((res (if (null? opt-symbol)"
-      "      (syntax.cursor-match-ident-raw! cursor #f)"
-      "      (syntax.cursor-match-ident-raw! cursor (car opt-symbol)))))"
-      "    (if res (optional.some res) (optional.none))))");
-  native_eval_string(ctx, env,
-                     "(define (syntax.cursor-expect-ident! cursor)"
-                     "  (syntax.cursor-expect-ident-raw! cursor))");
-  native_eval_string(
-      ctx, env,
-      "(define (syntax.cursor-match-punct! cursor symbol)"
-      "  (let ((res (syntax.cursor-match-punct-raw! cursor symbol)))"
-      "    (if res (optional.some res) (optional.none))))");
-  native_eval_string(ctx, env,
-                     "(define (syntax.cursor-expect-punct! cursor symbol)"
-                     "  (syntax.cursor-expect-punct-raw! cursor symbol))");
-  native_eval_string(ctx, env,
-                     "(define (syntax.cursor-match-string! cursor)"
-                     "  (let ((res (syntax.cursor-match-string-raw! cursor)))"
-                     "    (if res (optional.some res) (optional.none))))");
-  native_eval_string(ctx, env,
-                     "(define (syntax.cursor-match-number! cursor)"
-                     "  (let ((res (syntax.cursor-match-number-raw! cursor)))"
-                     "    (if res (optional.some res) (optional.none))))");
-  native_eval_string(ctx, env,
-                     "(define (syntax.cursor-expect-number! cursor)"
-                     "  (syntax.cursor-expect-number-raw! cursor))");
-  native_eval_string(
-      ctx, env,
-      "(define (syntax.cursor-match-group! cursor kind)"
-      "  (let ((res (syntax.cursor-match-group-raw! cursor kind)))"
-      "    (if res (optional.some res) (optional.none))))");
-  native_eval_string(ctx, env,
-                     "(define (syntax.cursor-expect-group! cursor kind)"
-                     "  (syntax.cursor-expect-group-raw! cursor kind))");
-  native_eval_string(ctx, env,
-                     "(define (syntax.cursor-expect-eof! cursor)"
-                     "  (syntax.cursor-expect-eof-raw! cursor))");
-  native_eval_string(ctx, env,
-                     "(define (syntax.cursor-eof? cursor)"
-                     "  (eq? (syntax.cursor-eof-raw? cursor) #t))");
+  // 15. Syntax cursor high-level wrappers — NOW DEFINED IN tree.scm
+  // (Removed from C side; pure Scheme tree API replaces cursor FFI)
 
   // 16. Pre-declare variables that meta sources define via set!
   // Chibi-Scheme requires the variable to exist before set! can mutate it.
@@ -3119,9 +3077,9 @@ void *native_init_scheme(void) {
   REG("core.emit-l1!", 2, sexp_core_emit_l1);
   REG("core.lex-to-sexp!", 2, sexp_lex_to_sexp);
 
-  // Register syntax cursor FFI functions
-  REG("syntax.group-cursor", 1, sexp_syntax_group_cursor);
-  REG("syntax.group-kind", 1, sexp_syntax_group_kind);
+  // Register syntax cursor FFI functions (raw versions only)
+  // High-level wrappers (syntax.cursor-*) are defined in tree.scm
+  // syntax.group-cursor and syntax.group-kind are also defined in tree.scm
   REG("syntax.cursor-eof-raw?", 1, sexp_cursor_eof_raw);
   REG("syntax.cursor-expect-eof-raw!", 1, sexp_cursor_expect_eof_raw);
   REG("syntax.cursor-match-punct-raw!", 2, sexp_cursor_match_punct);
@@ -3180,7 +3138,7 @@ int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
   // Clear previous declarations
   sexp_eval_string(ctx, "(set! *lain-declarations* (list))", -1, env);
 
-  // Split root group into individual forms
+  // Split root group into individual forms (C-side, handles ; separators)
   uint32_t form_count = 0;
   L1Token **form_groups = split_root_group((L1Token *)root_group, &form_count);
 
@@ -3188,9 +3146,9 @@ int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
   sexp proc = sexp_env_ref(ctx, env, compile_sym, SEXP_FALSE);
 
   for (uint32_t fi = 0; fi < form_count; fi++) {
-    sexp group_arg =
-        sexp_make_cpointer(ctx, SEXP_CPOINTER, form_groups[fi], SEXP_FALSE, 0);
-    sexp result = sexp_apply(ctx, proc, sexp_cons(ctx, group_arg, SEXP_NULL));
+    // Convert C token tree to Scheme S-expression tree
+    sexp form_tree = token_to_sexp(ctx, form_groups[fi]);
+    sexp result = sexp_apply(ctx, proc, sexp_cons(ctx, form_tree, SEXP_NULL));
 
     if (sexp_exceptionp(result)) {
       fprintf(stderr, "[pipeline ERROR] ");
