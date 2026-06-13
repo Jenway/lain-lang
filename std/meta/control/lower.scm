@@ -19,12 +19,18 @@
     (if (< idx len) (list-ref fields idx) ret-ty)))
 
 ;; ── Helper: wrap a value as throws aggregate {flag:0, value, error:0} ──
+;; Uses fixed i8-flag layout. Dead code until type.product-field-types is fixed.
 (define (core.wrap-throws-return block ret-ty value-expr)
-  (let* ((flag-ty (core.product-field-type-at ret-ty 0))
-         (error-ty (core.product-field-type-at ret-ty 2))
+  (let* ((flag-ty (core.make-bits 8))
+         (error-ty (core.make-bits 32))
          (flag-zero (core.const-bits! block flag-ty 0))
-         (error-zero (core.const-bits! block error-ty 0)))
-    (core.aggregate! block ret-ty (list flag-zero value-expr error-zero))))
+         (error-zero (core.const-bits! block error-ty 0))
+         ;; Default layout: i8@0, i64@8, i32@16 — total 20 bytes
+         (total-size 20)
+         (pairs (list (cons 0 flag-zero)
+                      (cons 8 value-expr)
+                      (cons 16 error-zero))))
+    (core.aggregate-layout! block total-size pairs)))
 
 ;; ── 语句降级: pipeline stage = core-stmt-lowerer ──
 

@@ -25,11 +25,9 @@
     core.param core.block-function
     core.branch! core.cond-branch! core.phi!
     core.type-is-void!
-    core.declare-struct-name! core.declare-struct!
-    core.struct-type core.struct-field-type
-    core.struct-field-type-from-type
-    core.struct-field-index core.struct-field-index-from-type
-    core.aggregate! core.field!
+    core.declare-struct-layout! core.type-size-in-bytes!
+    core.struct-type
+    core.field-offset! core.aggregate-layout!
     core.call-indirect! core.declare-extern-function!
 
     ;; ── 类型构造 (C FFI) ──

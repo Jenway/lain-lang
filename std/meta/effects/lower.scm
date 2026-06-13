@@ -28,19 +28,21 @@
 (define-pass (core-expr-lowerer |middle.expr.perform| block expr expected-ty locals)
   ;; expected-ty is the throws product type (or value type)
   ;; Build error aggregate: {flag: 1, value: 0, error: error_code}
+  ;; Field types are always: i8 flag, i32 value, i32 error — layout computed in Scheme
   (let* ((error-expr (perform.extract-error-expr expr)))
     (if (not error-expr)
         (core.unsupported-expr '|perform-without-args|)
         (let* ((flag-ty (core.make-bits 8))
                (error-code (core.lower-expr block error-expr (core.make-bits 32) locals))
                (flag-one (core.const-bits! block flag-ty 1))
-               (value-zero (core.const-bits! block (core.make-bits 32) 0)))
-          ;; Use expected-ty if it's a product, otherwise use a fresh one
-          (if (core.return-is-product? expected-ty)
-              (core.aggregate! block expected-ty (list flag-one value-zero error-code))
-              ;; Fallback: create a product type on the fly
-              (let* ((product-ty (type.product (list flag-ty (core.make-bits 32) (core.make-bits 32)))))
-                (core.aggregate! block product-ty (list flag-one value-zero error-code))))))))
+               (value-zero (core.const-bits! block (core.make-bits 32) 0))
+               (field-types (list flag-ty (core.make-bits 32) (core.make-bits 32)))
+               (layout (product-layout field-types))
+               (total-size (car layout))
+               (offsets (cdr layout))
+               (field-values (list flag-one value-zero error-code))
+               (pairs (map cons (map car offsets) field-values)))
+          (core.aggregate-layout! block total-size pairs)))))
 
 (define-pass (core-expr-lowerer |middle.expr.resume| block expr expected-ty locals)
   (core.unsupported-expr '|resume-expression|))

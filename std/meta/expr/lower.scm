@@ -307,31 +307,25 @@
 
 ;; ── ? 操作符 lowering: check flag → propagate or unwrap ──
 (define-pass (core-expr-lowerer |middle.expr.question| block expr expected-ty locals)
-  ;; Lower inner call (emits INST_CALL, returns EXPR_CALL that we can reuse)
-  ;; Check flag field[0]: if 0 → extract field[1]; if 1 → return product (propagate)
+  ;; throws product layout: {i8@0, i32@4, i32@8} — hardcoded offsets
   (let* ((payload (middle.payload expr))
          (inner-expr (optional.value (record.get payload '|expr|)))
-         ;; Lower inner call — core.call! emits INST_CALL + returns EXPR_CALL
          (call-expr (core.lower-expr block inner-expr expected-ty locals))
-         ;; Extract flag field (field index 0, i8)
          (flag-ty (core.make-bits 8))
-         (flag-val (core.field! block call-expr expected-ty 0 flag-ty))
-         ;; Create continuation block and error block
+         (flag-val (core.field-offset! block call-expr 0 flag-ty))  ;; offset 0
          (function (core.block-function block))
          (cont-block (core.append-block! function))
          (err-block (core.append-block! function))
-         ;; Branch on flag == 0
          (flag-zero (core.const-bits! block flag-ty 0))
          (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1))))
     (core.cond-branch! block is-ok cont-block err-block)
     ;; Error path: return the product (propagate error)
     (core.set-current-block! err-block)
     (core.return-value! err-block call-expr)
-    ;; Ok path: extract value field (field index 1)
+    ;; Ok path: extract value field (field index 1, offset 4)
     (core.set-current-block! cont-block)
     (let* ((value-ty (core.product-value-type expected-ty))
-           (value-val (core.field! cont-block call-expr expected-ty 1 value-ty)))
-      ;; Keep g_current_block at cont-block for subsequent lowering
+           (value-val (core.field-offset! cont-block call-expr 4 value-ty)))  ;; offset 4
       value-val)))
 
 ;; ── handle lowering: body → check flag → call handler or unwrap ──
@@ -349,31 +343,32 @@
          (handler-name (list.first handler-path))
          (handler-fn (core.function-by-name handler-name))
          ;; Build throws product type: {i8 flag, i32 value, i32 error}
+         ;; Offsets: flag@0, value@4, error@8
          (throws-ty (type.product (list (core.make-bits 8) (core.make-bits 32) (core.make-bits 32))))
          ;; Get the tail expression from body (last statement)
          (last-stmt (list-ref body-items (- (length body-items) 1)))
          (tail-expr (optional.value (record.get (middle.payload last-stmt) '|expr|))))
-    ;; Lower body call → emits INST_CALL, returns EXPR_CALL (product)
-    (let* ((call-expr (core.lower-expr block tail-expr throws-ty locals))
-           ;; Extract flag field (field 0, i8)
-           (flag-ty (core.make-bits 8))
-           (flag-val (core.field! block call-expr throws-ty 0 flag-ty))
-           ;; Create ok/err blocks
-           (function (core.block-function block))
-           (ok-block (core.append-block! function))
-           (err-block (core.append-block! function))
-           ;; Branch on flag == 0
-           (flag-zero (core.const-bits! block flag-ty 0))
-           (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1))))
-      (core.cond-branch! block is-ok ok-block err-block)
-      ;; Error path: extract error (field 2), call handler, return
-      (core.set-current-block! err-block)
-      (let* ((err-ty (core.make-bits 32))
-             (err-val (core.field! err-block call-expr throws-ty 2 err-ty))
-             (handler-ret (core.call! err-block handler-fn (list err-val))))
-        (core.return-value! err-block handler-ret))
-      ;; Ok path: extract value (field 1), return
-      (core.set-current-block! ok-block)
-      (let* ((val-ty (core.make-bits 32))
-             (val-expr (core.field! ok-block call-expr throws-ty 1 val-ty)))
-        (core.return-value! ok-block val-expr)))))
+         ;; Lower body call → emits INST_CALL, returns EXPR_CALL (product)
+         (let* ((call-expr (core.lower-expr block tail-expr throws-ty locals))
+            ;; Extract flag field (field 0, offset 0, i8)
+            (flag-ty (core.make-bits 8))
+            (flag-val (core.field-offset! block call-expr 0 flag-ty))
+            ;; Create ok/err blocks
+            (function (core.block-function block))
+            (ok-block (core.append-block! function))
+            (err-block (core.append-block! function))
+            ;; Branch on flag == 0
+            (flag-zero (core.const-bits! block flag-ty 0))
+            (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1))))
+         (core.cond-branch! block is-ok ok-block err-block)
+         ;; Error path: extract error (field 2, offset 8), call handler, return
+         (core.set-current-block! err-block)
+         (let* ((err-ty (core.make-bits 32))
+              (err-val (core.field-offset! err-block call-expr 8 err-ty))
+              (handler-ret (core.call! err-block handler-fn (list err-val))))
+         (core.return-value! err-block handler-ret))
+         ;; Ok path: extract value (field 1, offset 4), return
+         (core.set-current-block! ok-block)
+         (let* ((val-ty (core.make-bits 32))
+              (val-expr (core.field-offset! ok-block call-expr 4 val-ty)))
+         (core.return-value! ok-block val-expr)))))
