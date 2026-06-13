@@ -7,9 +7,10 @@
 ;; logic, no type inspection.
 ;; ===========================================================================
 
-;; ── Global registry ──
+;; ── Global registries ──
 
 (define *struct-registry* (list))
+(define *type-to-name* (list))  ;; cpointer → name reverse mapping
 
 ;; ── Internal: compute field layout ──
 
@@ -32,16 +33,28 @@
 ;; ── Public API ──
 
 ;; Register a struct: name (symbol), fields ((name . type-cpointer) ...)
-;; Returns the L1Type cpointer from C.
+;; Returns total-size.  C registry kept as thin cache for type lookups.
 (define (struct-register! name lowered-fields)
   (let*-values (((total-size layout) (struct--compute-layout lowered-fields 0 '())))
-    ;; Register with C (thin storage, no computation)
-    (core.declare-struct-layout! name total-size layout)
-    ;; Also cache locally for query functions
+    ;; Scheme registry (primary — owns layout computation)
     (set! *struct-registry*
       (cons (cons name (cons total-size layout)) *struct-registry*))
-    ;; Return the type cpointer for compatibility
-    (core.struct-type name)))
+    ;; C registry (thin cache — needed for type.registered and infer-expr-type)
+    (core.declare-struct-layout! name total-size layout)
+    ;; Reverse mapping for field access (type cpointer → name)
+    (let ((ty (core.struct-type name)))
+      (if ty (set! *type-to-name* (cons (cons ty name) *type-to-name*))))
+    total-size))
+
+;; Look up struct name from type cpointer
+(define (struct-name-from-type ty)
+  (let loop ((mapping *type-to-name*))
+    (if (null? mapping)
+        (error "unknown struct type")
+        (let ((entry (car mapping)))
+          (if (eq? (car entry) ty)
+              (cdr entry)
+              (loop (cdr mapping)))))))
 
 ;; Look up struct info: (total-size . layout)
 (define (struct-lookup name)

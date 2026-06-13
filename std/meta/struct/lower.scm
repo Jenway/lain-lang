@@ -19,28 +19,33 @@
                              (cons (optional.value (record.get f '|name|))
                                    (optional.value (record.get f '|type|))))
                            lowered)))
-    ;; Register via Scheme registry (computes offsets, delegates to C for storage)
+    ;; Register via Scheme registry (computes offsets, stores in C as thin cache)
     (struct-register! name field-pairs)))
 
 (define (struct.lower-literal-fields block struct-name fields locals acc)
   (if (list.empty? fields) (list.reverse acc)
       (let* ((field (list.first fields)) (payload (middle.payload field))
-             (name (optional.value (record.get payload '|name|)))
+             (fname (optional.value (record.get payload '|name|)))
              (value-expr (optional.value (record.get payload '|value|)))
-             (field-ty (struct-field-type struct-name name))
-             (value (core.lower-expr block value-expr field-ty locals)))
-        (struct.lower-literal-fields block struct-name (list.rest fields) locals (list.cons value acc)))))
+             (offset (struct-field-offset struct-name fname))
+             (value (core.lower-expr block value-expr
+                      (struct-field-type struct-name fname) locals)))
+        (struct.lower-literal-fields block struct-name (list.rest fields) locals
+          (list.cons (cons offset value) acc)))))
 
 (define-pass (core-expr-lowerer |middle.expr.struct| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (name (optional.value (record.get payload '|name|)))
-         (fields (optional.value (record.get payload '|fields|))))
-    (core.aggregate! block (core.struct-type name)
-      (struct.lower-literal-fields block name fields locals (list)))))
+         (fields (optional.value (record.get payload '|fields|)))
+         (total-size (struct-total-size name))
+         (layout (struct.lower-literal-fields block name fields locals (list))))
+    ;; Integer-based aggregate: C only sees total-size + (offset . value) pairs
+    (core.aggregate-layout! block total-size layout)))
 
 (define-pass (core-expr-inferer |middle.expr.struct| expr locals)
   (let* ((payload (middle.payload expr))
          (name (optional.value (record.get payload '|name|))))
+    ;; Still use C registry for type lookup (needed by type system)
     (core.struct-type name)))
 
 (define-pass (core-expr-lowerer |middle.expr.field| block expr expected-ty locals)

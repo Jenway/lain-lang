@@ -1655,6 +1655,85 @@ static sexp sexp_core_field(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
 }
 
+// ── New: offset-based field access (no struct type needed) ──
+
+static sexp sexp_core_field_offset(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp arg_block, sexp arg_base,
+                                    sexp arg_offset, sexp arg_field_ty) {
+  L1Block *block = (L1Block *)sexp_cpointer_value(arg_block);
+  L1Expr *base = (L1Expr *)sexp_cpointer_value(arg_base);
+  uint32_t offset = sexp_unbox_fixnum(arg_offset);
+  L1Type *field_ty = (L1Type *)sexp_cpointer_value(arg_field_ty);
+  L1Expr *expr = malloc(sizeof(L1Expr));
+  expr->kind = EXPR_FIELD;
+  expr->data.field.base = base;
+  expr->data.field.struct_ty = NULL;   // use offset directly
+  expr->data.field.field_index = offset;
+  expr->data.field.field_ty = field_ty;
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
+}
+
+// ── New: integer-based aggregate (no struct type needed) ──
+
+static sexp sexp_core_aggregate_layout(sexp ctx, sexp self, sexp_sint_t n,
+                                        sexp arg_block, sexp arg_total_size,
+                                        sexp arg_layout) {
+  L1Block *block = (L1Block *)sexp_cpointer_value(arg_block);
+  uint32_t total_size = sexp_unbox_fixnum(arg_total_size);
+  uint32_t field_count = get_list_length(arg_layout);
+
+  L1Type *result_ty = malloc(sizeof(L1Type));
+  result_ty->kind = TY_ADDR;
+  L1Expr *alloca_expr = malloc(sizeof(L1Expr));
+  alloca_expr->kind = EXPR_ALLOCA;
+  alloca_expr->data.alloca.element_ty = NULL;
+  alloca_expr->data.alloca.byte_size = total_size;
+  alloca_expr->data.alloca.result_ty = result_ty;
+
+  static int agg_counter = 0;
+  char agg_name[64];
+  snprintf(agg_name, sizeof(agg_name), "__agg_%d", agg_counter++);
+  L1Instruction *set_inst = malloc(sizeof(L1Instruction));
+  set_inst->kind = INST_SET;
+  set_inst->data.set.name = strdup(agg_name);
+  set_inst->data.set.val = alloca_expr;
+  set_inst->next = NULL;
+  append_inst_to_block(block, set_inst);
+
+  L1Expr *agg_var = malloc(sizeof(L1Expr));
+  agg_var->kind = EXPR_VAR;
+  agg_var->data.var.name = strdup(agg_name);
+  agg_var->data.var.ty = result_ty;
+
+  sexp curr = arg_layout;
+  for (uint32_t i = 0; i < field_count; i++) {
+    sexp pair = sexp_car(curr);
+    uint32_t off = (uint32_t)sexp_unbox_fixnum(sexp_car(pair));
+    L1Expr *val = (L1Expr *)sexp_cpointer_value(sexp_cdr(pair));
+    L1Type *field_ty = infer_expr_type(val);
+
+    L1Expr *offset_expr = malloc(sizeof(L1Expr));
+    offset_expr->kind = EXPR_CONST;
+    offset_expr->data.const_val = off;
+    L1Expr *dest_expr = malloc(sizeof(L1Expr));
+    dest_expr->kind = EXPR_LEA;
+    dest_expr->data.lea.base = agg_var;
+    dest_expr->data.lea.idx = offset_expr;
+    dest_expr->data.lea.scale = 1;
+
+    L1Instruction *store_inst = malloc(sizeof(L1Instruction));
+    store_inst->kind = INST_STORE;
+    store_inst->data.store.dest = dest_expr;
+    store_inst->data.store.val = val;
+    store_inst->data.store.store_ty = field_ty;
+    store_inst->next = NULL;
+    append_inst_to_block(block, store_inst);
+    curr = sexp_cdr(curr);
+  }
+
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, agg_var, SEXP_FALSE, 0);
+}
+
 static sexp sexp_core_call_indirect(sexp ctx, sexp self, sexp_sint_t n,
                                     sexp arg_block, sexp arg_fn_ptr,
                                     sexp arg_ret_ty, sexp arg_args) {
@@ -1898,8 +1977,10 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
     fprintf(out, "*)((uint8_t*)(");
     emit_c_expr(expr->data.field.base, out);
     fprintf(out, ") + %u)",
-            expr->data.field.struct_ty->fields[expr->data.field.field_index]
-                .offset);
+            expr->data.field.struct_ty
+                ? expr->data.field.struct_ty->fields[expr->data.field.field_index]
+                      .offset
+                : expr->data.field.field_index);
     break;
   case EXPR_CALL_INDIRECT:
     fprintf(out, "((");
@@ -3133,6 +3214,8 @@ void *native_init_scheme(void) {
       sexp_core_struct_field_index_from_type);
   REG("core.aggregate!", 3, sexp_core_aggregate);
   REG("core.field!", 5, sexp_core_field);
+  REG("core.field-offset!", 4, sexp_core_field_offset);
+  REG("core.aggregate-layout!", 3, sexp_core_aggregate_layout);
   REG("core.call-indirect!", 4, sexp_core_call_indirect);
   REG("core.declare-extern-function!", 4, sexp_core_declare_extern_function);
   REG("core.call-expr!", 3, sexp_core_call_expr);
