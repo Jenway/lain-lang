@@ -543,6 +543,106 @@ L1Token **split_root_group(L1Token *root, uint32_t *out_count) {
 }
 
 // ============================================================================
+// 5.5. Token Tree → Scheme S-Expression Converter
+// ============================================================================
+//
+// Converts the C-side L1Token* tree into a Scheme list of records,
+// eliminating the need for cursor FFI. Scheme code can traverse the
+// result with standard car/cdr/match.
+//
+// Format:
+//   (ident "name")   (number 42)   (string "hello")   (punct "->")
+//   (paren ...)      (bracket ...)  (brace ...)         (root ...)
+
+static sexp token_to_sexp(sexp ctx, L1Token *tok) {
+  if (!tok) return SEXP_NULL;
+  
+  if (tok->kind == TOK_RAW) {
+    RawToken *r = &tok->data.raw;
+    switch (r->kind) {
+    case T_IDENT: {
+      sexp tag = sexp_intern(ctx, "ident", -1);
+      sexp val = sexp_c_string(ctx, r->val ? r->val : "", -1);
+      return sexp_list2(ctx, tag, val);
+    }
+    case T_NUMBER: {
+      sexp tag = sexp_intern(ctx, "number", -1);
+      sexp val = sexp_make_integer(ctx, r->int_val);
+      return sexp_list2(ctx, tag, val);
+    }
+    case T_STRING: {
+      sexp tag = sexp_intern(ctx, "string", -1);
+      sexp val = sexp_c_string(ctx, r->val ? r->val : "", -1);
+      return sexp_list2(ctx, tag, val);
+    }
+    case T_PUNCT:
+    case T_LPAREN: case T_RPAREN:
+    case T_LBRACKET: case T_RBRACKET:
+    case T_LBRACE: case T_RBRACE: {
+      sexp tag = sexp_intern(ctx, "punct", -1);
+      const char *s = r->val;
+      if (!s) {
+        switch (r->kind) {
+        case T_LPAREN: s = "("; break;
+        case T_RPAREN: s = ")"; break;
+        case T_LBRACKET: s = "["; break;
+        case T_RBRACKET: s = "]"; break;
+        case T_LBRACE: s = "{"; break;
+        case T_RBRACE: s = "}"; break;
+        default: s = ""; break;
+        }
+      }
+      sexp val = sexp_c_string(ctx, s, -1);
+      return sexp_list2(ctx, tag, val);
+    }
+    default:
+      return sexp_intern(ctx, "eof", -1);
+    }
+  }
+  
+  // TOK_GROUP
+  const char *tag_str = "root";
+  switch (tok->data.group.kind) {
+  case GRP_PAREN:   tag_str = "paren"; break;
+  case GRP_BRACKET: tag_str = "bracket"; break;
+  case GRP_BRACE:   tag_str = "brace"; break;
+  default: break;
+  }
+  sexp tag = sexp_intern(ctx, tag_str, -1);
+  
+  // Build children list
+  sexp children = SEXP_NULL;
+  for (int i = (int)tok->data.group.count - 1; i >= 0; i--) {
+    children = sexp_cons(ctx, token_to_sexp(ctx, tok->data.group.children[i]), children);
+  }
+  return sexp_cons(ctx, tag, children);
+}
+
+void *native_lex_to_sexp(void *ctx_ptr, const uint8_t *src, uint32_t len) {
+  sexp ctx = (sexp)ctx_ptr;
+  
+  // Lex
+  RawToken *raw = malloc(sizeof(RawToken) * 4096);
+  uint32_t total = 0;
+  uint32_t pos = 0;
+  while (1) {
+    RawToken t = lex_one_token_from_mem(src, &pos, len);
+    if (t.kind == T_EOF) break;
+    raw[total++] = t;
+  }
+  
+  // Group
+  uint32_t idx = 0;
+  L1Token *root = group_tokens_recursive(raw, total, &idx, GRP_ROOT);
+  
+  // Convert to sexp
+  sexp result = token_to_sexp(ctx, root);
+  
+  free(raw);
+  return result;
+}
+
+// ============================================================================
 // 6. Helper Utilities
 // ============================================================================
 
@@ -1258,6 +1358,15 @@ sexp sexp_core_end_if(sexp ctx, sexp self, sexp_sint_t n, sexp bv, sexp cv, sexp
   return SEXP_VOID;
 }
 
+
+// ── lex-to-sexp FFI (token tree → Scheme S-expression) ──────────────────
+
+static sexp sexp_lex_to_sexp(sexp ctx, sexp self, sexp_sint_t n,
+                              sexp arg_src, sexp arg_len) {
+  const uint8_t *src = (const uint8_t *)sexp_cpointer_value(arg_src);
+  uint32_t len = sexp_unbox_fixnum(arg_len);
+  return (sexp)native_lex_to_sexp(ctx, src, len);
+}
 
 // ============================================================================
 // 8. Struct/tuple FFI functions
@@ -3008,6 +3117,7 @@ void *native_init_scheme(void) {
   REG("core.end-if!", 4, sexp_core_end_if);
   REG("core.assign-temp!", 2, sexp_core_assign_temp);
   REG("core.emit-l1!", 2, sexp_core_emit_l1);
+  REG("core.lex-to-sexp!", 2, sexp_lex_to_sexp);
 
   // Register syntax cursor FFI functions
   REG("syntax.group-cursor", 1, sexp_syntax_group_cursor);
@@ -3033,6 +3143,20 @@ void *native_init_scheme(void) {
   fprintf(stderr, "[init] 5: meta sources loaded\n");
 
   // bootstrap_driver.scm is already loaded by driver.scm (via native_load_meta_sources).
+  // Smoke test: lex-to-sexp produces correct S-expression
+  {
+    const char *test_src = "fn main() -> i32 { 42 }";
+    sexp tree = (sexp)native_lex_to_sexp(ctx, (const uint8_t *)test_src, strlen(test_src));
+    fprintf(stderr, "[init] 6: lex-to-sexp smoke test: %s\n",
+            sexp_exceptionp(tree) ? "FAILED" : "OK");
+    if (!sexp_exceptionp(tree)) {
+      sexp out = sexp_open_output_string(ctx);
+      sexp_write(ctx, tree, out);
+      sexp str = sexp_get_output_string(ctx, out);
+      fprintf(stderr, "[init] 6:   => %s\n", sexp_string_data(str));
+      sexp_close_port(ctx, out);
+    }
+  }
   // Just verify the key entry point is available.
   {
     sexp sym = sexp_intern(ctx, "compile-group-to-core", -1);
