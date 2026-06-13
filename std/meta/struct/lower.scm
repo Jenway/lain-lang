@@ -14,10 +14,10 @@
          (name (optional.value (record.get payload '|name|)))
          (fields (optional.value (record.get payload '|fields|)))
          (lowered (struct.lower-field-types fields (list)))
-         ;; Build (name . type-cpointer) pairs
+         ;; Build (name . type-cpointer) pairs — lowered produces alist records
          (field-pairs (map (lambda (f)
-                             (cons (optional.value (record.get (middle.payload f) '|name|))
-                                   (optional.value (record.get (middle.payload f) '|type|))))
+                             (cons (optional.value (record.get f '|name|))
+                                   (optional.value (record.get f '|type|))))
                            lowered)))
     ;; Register via Scheme registry (computes offsets, delegates to C for storage)
     (struct-register! name field-pairs)))
