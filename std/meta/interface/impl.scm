@@ -95,11 +95,10 @@
          (instance-name (impl.vtable-instance-name interface-name target-name))
          (interface-methods (interface.lookup interface-name)))
     ;; 注册工厂函数: fn ImplTarget_VTable_for_InterfaceName() -> VTableType
-    ;; 当前无参数; 返回 vtable 结构体指针
-    (core.begin-function!
-      instance-name
-      (list)
-      (core.struct-type vtable-name))))
+    ;; vtable is a struct → pass addr to C, store struct-type in Scheme
+    (let ((vtable-ty (struct-type vtable-name)))
+      (fn-return-type! instance-name vtable-ty)
+      (core.begin-function! instance-name (list) (type.addr)))))
 
 ;; 帮助: 在 interface methods 列表中查找方法名对应的索引
 (define (impl.find-method-index name methods index)
@@ -129,16 +128,15 @@
     (if (list.empty? interface-methods)
         unit  ;; interface 未注册 — 跳过 (实际应由 core-declarer 保证)
         (let* ((fn (core.function-by-name instance-name))
-               (block (core.append-block! fn))
-               (vtable-ty (core.struct-type vtable-name)))
+               (block (core.append-block! fn)))
           ;; 为每个 impl method 计算函数指针并填入 vtable
           (impl.lower-vtable-body
-            block vtable-ty target-name methods interface-methods)))))
+            block target-name methods interface-methods)))))
 
 ;; 生成 vtable 工厂函数体:
 ;;   alloca vtable → store fn pointers → return vtable ptr
 ;; VTable layout: flat array of addr (8-byte) slots — one per interface method
-(define (impl.lower-vtable-body block vtable-ty target-name methods interface-methods)
+(define (impl.lower-vtable-body block target-name methods interface-methods)
   (let* ((field-values (impl.build-vtable-field-values target-name methods interface-methods (list)))
          (method-count (length field-values))
          ;; Each slot is 8 bytes (addr). Total size = count * 8
@@ -176,7 +174,6 @@
          (interface-name (interface.name-from-dyn dyn-type-name))
          ;; VTable 类型
          (vtable-name (interface.vtable-name interface-name))
-         (vtable-ty (core.struct-type vtable-name))
          ;; Interface 方法列表
          (interface-methods (interface.lookup interface-name)))
     ;; 查找方法在 interface 中的索引
