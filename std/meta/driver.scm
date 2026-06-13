@@ -44,6 +44,7 @@
 ;; ═══ 5. 语言功能模块 ═══
 
 (load "std/meta/struct/parse.scm")
+(load "std/meta/struct/registry.scm")
 (load "std/meta/struct/normalize.scm")
 (load "std/meta/struct/lower.scm")
 

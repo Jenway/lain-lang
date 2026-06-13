@@ -1434,6 +1434,71 @@ static sexp sexp_core_declare_struct(sexp ctx, sexp self, sexp_sint_t n,
   return SEXP_VOID;
 }
 
+// ── Thin type-size query (reads width from L1Type cpointer, no computation) ──
+
+static sexp sexp_core_type_size(sexp ctx, sexp self, sexp_sint_t n,
+                                 sexp arg_ty) {
+  L1Type *ty = (L1Type *)sexp_cpointer_value(arg_ty);
+  if (!ty) return sexp_make_fixnum(0);
+  uint32_t size = (ty->kind == TY_BITS) ? (ty->width / 8) : 8;
+  return sexp_make_fixnum((sexp_sint_t)size);
+}
+
+// ── Thin struct layout storage (no computation — offsets pre-computed in Scheme) ──
+
+static sexp sexp_core_declare_struct_layout(sexp ctx, sexp self,
+                                             sexp_sint_t n,
+                                             sexp arg_name,
+                                             sexp arg_total_size,
+                                             sexp arg_layout) {
+  const char *name = sexp_to_c_string(ctx, arg_name);
+  uint32_t total_size = (uint32_t)sexp_unbox_fixnum(arg_total_size);
+
+  // Find or create registry entry
+  L1StructInfo *info = NULL;
+  {
+    L1StructInfo *s = g_struct_registry;
+    while (s) {
+      if (strcmp(s->name, name) == 0) { info = s; break; }
+      s = s->next;
+    }
+  }
+  if (!info) {
+    info = malloc(sizeof(L1StructInfo));
+    info->name = strdup(name);
+    info->next = g_struct_registry;
+    g_struct_registry = info;
+  }
+
+  // Count fields
+  uint32_t field_count = 0;
+  sexp curr = arg_layout;
+  while (sexp_pairp(curr)) { field_count++; curr = sexp_cdr(curr); }
+
+  L1ProductField *fields = malloc(sizeof(L1ProductField) * field_count);
+  curr = arg_layout;
+  for (uint32_t i = 0; i < field_count; i++) {
+    sexp triple = sexp_car(curr);
+    // triple = (name type offset)
+    const char *fname = sexp_to_c_string(ctx, sexp_car(triple));
+    L1Type *fty = (L1Type *)sexp_cpointer_value(sexp_cadr(triple));
+    uint32_t off = (uint32_t)sexp_unbox_fixnum(sexp_caddr(triple));
+    fields[i].name = strdup(fname);
+    fields[i].ty = fty;
+    fields[i].offset = off;
+    curr = sexp_cdr(curr);
+  }
+
+  L1Type *ty = malloc(sizeof(L1Type));
+  ty->kind = TY_PRODUCT;
+  ty->width = total_size;
+  ty->field_count = field_count;
+  ty->fields = fields;
+  ty->struct_name = strdup(name);
+  info->ty = ty;
+  return SEXP_VOID;
+}
+
 static sexp sexp_core_struct_type(sexp ctx, sexp self, sexp_sint_t n,
                                   sexp arg_name) {
   const char *name = sexp_to_c_string(ctx, arg_name);
@@ -3057,6 +3122,8 @@ void *native_init_scheme(void) {
   REG("core.type-is-void!", 1, sexp_core_type_is_void);
   REG("core.declare-struct-name!", 1, sexp_core_declare_struct_name);
   REG("core.declare-struct!", 2, sexp_core_declare_struct);
+  REG("core.declare-struct-layout!", 3, sexp_core_declare_struct_layout);
+  REG("core.type-size-in-bytes!", 1, sexp_core_type_size);
   REG("core.struct-type", 1, sexp_core_struct_type);
   REG("core.struct-field-type", 2, sexp_core_struct_field_type);
   REG("core.struct-field-type-from-type", 2,
