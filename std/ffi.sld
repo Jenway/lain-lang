@@ -23,7 +23,7 @@
     core.call! core.call-expr! core.assign-temp!
     core.primitive! core.local-alloc!
     core.param core.block-function
-    core.branch! core.cond-branch! core.phi!
+    core.branch! core.cond-branch!
     core.type-is-void!
     core.declare-struct-layout! core.type-size-in-bytes!
     core.struct-type

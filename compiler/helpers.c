@@ -40,8 +40,7 @@ typedef enum {
   INST_BREAK,
   INST_IF,
   INST_RETURN,
-  INST_CALL,
-  INST_PHI_ASSIGN
+  INST_CALL
 } L1InstKind;
 
 typedef enum {
@@ -180,12 +179,6 @@ typedef struct L1Block {
   struct L1Block *next;
 } L1Block;
 
-typedef struct L1PhiVar {
-  char *name;
-  L1Type *type;
-  struct L1PhiVar *next;
-} L1PhiVar;
-
 typedef struct L1Subroutine {
   char *name;
   char *link_name;
@@ -194,7 +187,6 @@ typedef struct L1Subroutine {
   L1Type **param_tys;
   L1Block *blocks;
   L1Block *blocks_tail;
-  L1PhiVar *phi_vars;
   int is_extern;
   struct L1Subroutine *next;
 } L1Subroutine;
@@ -786,7 +778,6 @@ static sexp sexp_core_make_proc(sexp ctx, sexp self, sexp_sint_t n,
   sub->param_tys = param_tys;
   sub->blocks = NULL;
   sub->blocks_tail = NULL;
-  sub->phi_vars = NULL;
   sub->next = g_subroutines_head;
   g_subroutines_head = sub;
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, sub, SEXP_FALSE, 0);
@@ -877,7 +868,6 @@ static sexp sexp_core_begin_function(sexp ctx, sexp self, sexp_sint_t n,
   sub->param_tys = param_tys;
   sub->blocks = NULL;
   sub->blocks_tail = NULL;
-  sub->phi_vars = NULL;
   sub->is_extern = 0;
   sub->next = g_subroutines_head;
   g_subroutines_head = sub;
@@ -929,7 +919,6 @@ static sexp sexp_core_declare_extern_function(sexp ctx, sexp self,
   sub->param_tys = param_tys;
   sub->blocks = NULL;
   sub->blocks_tail = NULL;
-  sub->phi_vars = NULL;
   sub->is_extern = 1;
   sub->next = g_subroutines_head;
   g_subroutines_head = sub;
@@ -962,7 +951,6 @@ static sexp sexp_core_function_by_name(sexp ctx, sexp self, sexp_sint_t n,
   ext->param_tys[1]->width = 32;
   ext->blocks = NULL;
   ext->blocks_tail = NULL;
-  ext->phi_vars = NULL;
   ext->is_extern = 1;
   ext->next = g_subroutines_head;
   g_subroutines_head = ext;
@@ -1186,52 +1174,6 @@ static sexp sexp_core_cond_branch(sexp ctx, sexp self, sexp_sint_t n,
     block->terminator->data.cond_branch.false_id = false_bb->id;
   }
   return SEXP_VOID;
-}
-
-static sexp sexp_core_phi(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,
-                          sexp arg_ty, sexp arg_pred1, sexp arg_val1,
-                          sexp arg_pred2, sexp arg_val2) {
-  L1Block *block = (L1Block *)sexp_cpointer_value(arg_block);
-  L1Type *ty = (L1Type *)sexp_cpointer_value(arg_ty);
-  L1Block *pred1 = (L1Block *)sexp_cpointer_value(arg_pred1);
-  L1Expr *val1 = (L1Expr *)sexp_cpointer_value(arg_val1);
-  L1Block *pred2 = (L1Block *)sexp_cpointer_value(arg_pred2);
-  L1Expr *val2 = (L1Expr *)sexp_cpointer_value(arg_val2);
-
-  // Create a phi variable name
-  static int phi_counter = 0;
-  char buf[64];
-  snprintf(buf, sizeof(buf), "__phi_%d", phi_counter++);
-
-  // Register phi variable in the subroutine
-  L1PhiVar *pv = malloc(sizeof(L1PhiVar));
-  pv->name = strdup(buf);
-  pv->type = ty;
-  pv->next = block->parent->phi_vars;
-  block->parent->phi_vars = pv;
-
-  // In pred1: append a PHI_ASSIGN inst
-  L1Instruction *assign1 = malloc(sizeof(L1Instruction));
-  assign1->kind = INST_PHI_ASSIGN;
-  assign1->data.set.name = strdup(buf);
-  assign1->data.set.val = val1;
-  assign1->next = NULL;
-  append_inst_to_block(pred1, assign1);
-
-  // In pred2: append a PHI_ASSIGN inst
-  L1Instruction *assign2 = malloc(sizeof(L1Instruction));
-  assign2->kind = INST_PHI_ASSIGN;
-  assign2->data.set.name = strdup(buf);
-  assign2->data.set.val = val2;
-  assign2->next = NULL;
-  append_inst_to_block(pred2, assign2);
-
-  // In cont block: create a var expression referring to the phi variable
-  L1Expr *expr = malloc(sizeof(L1Expr));
-  expr->kind = EXPR_VAR;
-  expr->data.var.name = strdup(buf);
-  expr->data.var.ty = ty;
-  return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
 }
 
 static sexp sexp_core_type_is_void(sexp ctx, sexp self, sexp_sint_t n,
@@ -1720,11 +1662,6 @@ static void emit_c_instructions(L1Block *block, FILE *out) {
       emit_c_expr(inst->data.set.val, out);
       fprintf(out, ";\n");
       break;
-    case INST_PHI_ASSIGN:
-      fprintf(out, "    %s = ", inst->data.set.name);
-      emit_c_expr(inst->data.set.val, out);
-      fprintf(out, ";\n");
-      break;
     case INST_STORE: {
       L1Type *store_ty = inst->data.store.store_ty;
       if (!store_ty)
@@ -1848,15 +1785,6 @@ static void emit_c_subroutine(L1Subroutine *sub, FILE *out) {
   if (is_main) {
     // Pre-declare native_set_args in the forward declaration section
     // (handled by native_emit_module_to_file)
-  }
-
-  // Declare PHI variables at top
-  L1PhiVar *pv = sub->phi_vars;
-  while (pv) {
-    fprintf(out, "    ");
-    emit_c_type(pv->type, out);
-    fprintf(out, " %s = 0;\n", pv->name);
-    pv = pv->next;
   }
 
   // Emit blocks
@@ -2009,11 +1937,6 @@ static void emit_l1_instruction(L1Block *block, L1Instruction *inst, FILE *out) 
     emit_l1_expr(inst->data.set.val, out);
     fprintf(out, "\n");
     break;
-  case INST_PHI_ASSIGN:
-    fprintf(out, "    %%%s = phi ", inst->data.set.name);
-    emit_l1_expr(inst->data.set.val, out);
-    fprintf(out, "\n");
-    break;
   case INST_STORE:
     fprintf(out, "    store ");
     emit_l1_expr(inst->data.store.val, out);
@@ -2075,11 +1998,6 @@ static void emit_l1_instructions(L1Block *block, FILE *out) {
     switch (inst->kind) {
     case INST_SET:
       fprintf(out, "  %%%s = ", inst->data.set.name);
-      emit_l1_expr(inst->data.set.val, out);
-      fprintf(out, "\n");
-      break;
-    case INST_PHI_ASSIGN:
-      fprintf(out, "  %%%s = phi ", inst->data.set.name);
       emit_l1_expr(inst->data.set.val, out);
       fprintf(out, "\n");
       break;
@@ -2866,7 +2784,6 @@ void *native_init_scheme(void) {
   REG("core.block-function", 1, sexp_core_block_function);
   REG("core.branch!", 2, sexp_core_branch);
   REG("core.cond-branch!", 4, sexp_core_cond_branch);
-  REG("core.phi!", 6, sexp_core_phi);
   REG("core.type-is-void!", 1, sexp_core_type_is_void);
   REG("core.type-size-in-bytes!", 1, sexp_core_type_size);
   REG("core.field-offset!", 4, sexp_core_field_offset);
