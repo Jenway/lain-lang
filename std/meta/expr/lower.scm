@@ -86,6 +86,13 @@
           block (list.rest args) locals (list.cons value acc)))))
 
 (define (core.lower-if-tail-expr block expr expected-ty locals)
+  ;; Structured if lowering: uses INST_IF instead of manual cond_br + block switching.
+  ;; Flow:
+  ;;   1. Evaluate condition in parent block
+  ;;   2. core.begin-if! → creates then/else scratch blocks
+  ;;   3. Lower then-body into then-scratch
+  ;;   4. Lower else-body into else-scratch
+  ;;   5. core.end-if! → builds INST_IF, appends to parent block, frees scratch blocks
   (let* ((payload (middle.payload expr))
          (condition (optional.value
                       (record.get payload '|condition|)))
@@ -93,24 +100,31 @@
                             (record.get payload '|then|)))
          (else-block-expr (optional.value
                             (record.get payload '|else|)))
-         (function (core.block-function block))
-         (then-block (core.append-block! function))
-         (else-block (core.append-block! function))
+         ;; Evaluate condition in parent block
          (condition-value
-           (core.lower-expr block condition (type.bits 1) locals)))
-    (core.cond-branch! block condition-value then-block else-block)
+           (core.lower-expr block condition (type.bits 1) locals))
+         ;; Create scratch blocks
+         (scratch-pair (core.begin-if! block condition-value))
+         (then-scratch (car scratch-pair))
+         (else-scratch (car (cdr scratch-pair))))
+    ;; Lower then-body into then-scratch
+    (core.set-current-block! then-scratch)
     (core.lower-stmts
-      then-block
+      then-scratch
       (optional.value
         (record.get (middle.payload then-block-expr) '|items|))
       expected-ty
       locals)
+    ;; Lower else-body into else-scratch
+    (core.set-current-block! else-scratch)
     (core.lower-stmts
-      else-block
+      else-scratch
       (optional.value
         (record.get (middle.payload else-block-expr) '|items|))
       expected-ty
-      locals)))
+      locals)
+    ;; Build INST_IF in parent block
+    (core.end-if! block condition-value then-scratch else-scratch)))
 
 ;; ── core-expr-lowerer 通道 ──
 
@@ -290,3 +304,76 @@
 
 (define-pass (core-expr-lowerer |middle.expr.handle| block expr expected-ty locals)
   (core.unsupported-expr '|handle-expression|))
+
+;; ── ? 操作符 lowering: check flag → propagate or unwrap ──
+(define-pass (core-expr-lowerer |middle.expr.question| block expr expected-ty locals)
+  ;; Lower inner call (emits INST_CALL, returns EXPR_CALL that we can reuse)
+  ;; Check flag field[0]: if 0 → extract field[1]; if 1 → return product (propagate)
+  (let* ((payload (middle.payload expr))
+         (inner-expr (optional.value (record.get payload '|expr|)))
+         ;; Lower inner call — core.call! emits INST_CALL + returns EXPR_CALL
+         (call-expr (core.lower-expr block inner-expr expected-ty locals))
+         ;; Extract flag field (field index 0, i8)
+         (flag-ty (core.make-bits 8))
+         (flag-val (core.field! block call-expr expected-ty 0 flag-ty))
+         ;; Create continuation block and error block
+         (function (core.block-function block))
+         (cont-block (core.append-block! function))
+         (err-block (core.append-block! function))
+         ;; Branch on flag == 0
+         (flag-zero (core.const-bits! block flag-ty 0))
+         (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1))))
+    (core.cond-branch! block is-ok cont-block err-block)
+    ;; Error path: return the product (propagate error)
+    (core.set-current-block! err-block)
+    (core.return-value! err-block call-expr)
+    ;; Ok path: extract value field (field index 1)
+    (core.set-current-block! cont-block)
+    (let* ((value-ty (core.product-value-type expected-ty))
+           (value-val (core.field! cont-block call-expr expected-ty 1 value-ty)))
+      ;; Keep g_current_block at cont-block for subsequent lowering
+      value-val)))
+
+;; ── handle lowering: body → check flag → call handler or unwrap ──
+(define (core.lower-handle-tail-expr block expr expected-ty locals)
+  ;; For `handle Throws<E> with handler_fn { body }`:
+  ;;   1. Lower body tail expr (call to throws fn → returns product)
+  ;;   2. Check flag: if 0 → unwrap value; if 1 → call handler_fn(error)
+  (let* ((payload (middle.payload expr))
+         (body-block (optional.value (record.get payload '|body|)))
+         (body-items (optional.value (record.get (middle.payload body-block) '|items|)))
+         (handler-expr (optional.value (record.get payload '|handler|)))
+         ;; Get handler function name from path
+         (handler-payload (middle.payload handler-expr))
+         (handler-path (optional.value (record.get handler-payload '|path|)))
+         (handler-name (list.first handler-path))
+         (handler-fn (core.function-by-name handler-name))
+         ;; Build throws product type: {i8 flag, i32 value, i32 error}
+         (throws-ty (type.product (list (core.make-bits 8) (core.make-bits 32) (core.make-bits 32))))
+         ;; Get the tail expression from body (last statement)
+         (last-stmt (list-ref body-items (- (length body-items) 1)))
+         (tail-expr (optional.value (record.get (middle.payload last-stmt) '|expr|))))
+    ;; Lower body call → emits INST_CALL, returns EXPR_CALL (product)
+    (let* ((call-expr (core.lower-expr block tail-expr throws-ty locals))
+           ;; Extract flag field (field 0, i8)
+           (flag-ty (core.make-bits 8))
+           (flag-val (core.field! block call-expr throws-ty 0 flag-ty))
+           ;; Create ok/err blocks
+           (function (core.block-function block))
+           (ok-block (core.append-block! function))
+           (err-block (core.append-block! function))
+           ;; Branch on flag == 0
+           (flag-zero (core.const-bits! block flag-ty 0))
+           (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1))))
+      (core.cond-branch! block is-ok ok-block err-block)
+      ;; Error path: extract error (field 2), call handler, return
+      (core.set-current-block! err-block)
+      (let* ((err-ty (core.make-bits 32))
+             (err-val (core.field! err-block call-expr throws-ty 2 err-ty))
+             (handler-ret (core.call! err-block handler-fn (list err-val))))
+        (core.return-value! err-block handler-ret))
+      ;; Ok path: extract value (field 1), return
+      (core.set-current-block! ok-block)
+      (let* ((val-ty (core.make-bits 32))
+             (val-expr (core.field! ok-block call-expr throws-ty 1 val-ty)))
+        (core.return-value! ok-block val-expr)))))

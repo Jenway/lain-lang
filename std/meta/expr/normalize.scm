@@ -101,3 +101,13 @@
             (optional.value
               (record.get payload '|args|))
             (list)))))))
+
+;; ── ? 操作符规范化 (postfix ?) ──
+(define-pass (middle-normalizer |expr.question| raw-expr)
+  (let* ((payload (raw.payload raw-expr)))
+    (middle.node! '|middle.expr.question|
+      (record '|middle.expr.question|
+        (record.field '|expr|
+          (middle.normalize-expr
+            (optional.value
+              (record.get payload '|expr|))))))))
