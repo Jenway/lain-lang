@@ -55,6 +55,7 @@ typedef enum {
   INST_STORE,
   INST_LOOP,
   INST_BREAK,
+  INST_IF,
   INST_RETURN,
   INST_CALL,
   INST_PHI_ASSIGN
@@ -153,6 +154,11 @@ typedef struct L1Instruction {
       struct L1Instruction *body;
     } loop_stmt;
     struct {
+      L1Expr *condition;
+      struct L1Instruction *then_body;
+      struct L1Instruction *else_body;
+    } if_stmt;
+    struct {
       L1Expr *val;
     } ret;
     struct {
@@ -214,6 +220,9 @@ static L1Subroutine *g_subroutines_head = NULL;
 static L1Subroutine *g_current_sub = NULL;
 static L1Block *g_current_block = NULL;
 static uint32_t g_temp_counter = 0;
+static uint32_t g_block_id_counter = 0;
+static L1Block *g_scratch_blocks[8];
+static int g_scratch_count = 0;
 
 static void append_instruction(L1Subroutine *sub, L1Instruction *inst) {
   if (!g_current_block) {
@@ -632,6 +641,40 @@ static sexp sexp_core_make_addr(sexp ctx, sexp self, sexp_sint_t n) {
 static sexp sexp_core_make_unit(sexp ctx, sexp self, sexp_sint_t n) {
   L1Type *ty = malloc(sizeof(L1Type));
   ty->kind = TY_VOID;
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, ty, SEXP_FALSE, 0);
+}
+
+// -- make-product-type: create anonymous TY_PRODUCT from ((name . type) ...) --
+static sexp sexp_core_make_product_type(sexp ctx, sexp self, sexp_sint_t n,
+                                         sexp arg_fields) {
+  uint32_t field_count = 0;
+  // count fields
+  sexp curr = arg_fields;
+  while (sexp_pairp(curr)) { field_count++; curr = sexp_cdr(curr); }
+
+  L1ProductField *fields = malloc(sizeof(L1ProductField) * field_count);
+  uint32_t offset = 0;
+  curr = arg_fields;
+  for (uint32_t i = 0; i < field_count; i++) {
+    sexp field_pair = sexp_car(curr);
+    const char *fname = sexp_to_c_string(ctx, sexp_car(field_pair));
+    L1Type *fty = (L1Type *)sexp_cpointer_value(sexp_cdr(field_pair));
+    uint32_t field_size = (fty->kind == TY_BITS) ? (fty->width / 8) : 8;
+    // align to field_size
+    if (field_size > 1 && (offset % field_size != 0))
+      offset = (offset + field_size - 1) & ~(field_size - 1);
+    fields[i].name = strdup(fname);
+    fields[i].ty = fty;
+    fields[i].offset = offset;
+    offset += field_size;
+  }
+
+  L1Type *ty = malloc(sizeof(L1Type));
+  ty->kind = TY_PRODUCT;
+  ty->width = offset > 0 ? offset : field_count * 8;
+  ty->field_count = field_count;
+  ty->fields = fields;
+  ty->struct_name = NULL; // anonymous product
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, ty, SEXP_FALSE, 0);
 }
 
@@ -1148,6 +1191,74 @@ static sexp sexp_core_type_is_void(sexp ctx, sexp self, sexp_sint_t n,
   return (ty && ty->kind == TY_VOID) ? SEXP_TRUE : SEXP_FALSE;
 }
 
+
+// ── Scratch blocks + structured if FFI ────────────────────────────────────
+
+sexp sexp_core_set_current_block(sexp ctx, sexp self, sexp_sint_t n, sexp bv) {
+  g_current_block = (L1Block *)sexp_cpointer_value(bv);
+  return SEXP_VOID;
+}
+
+sexp sexp_core_get_current_block(sexp ctx, sexp self, sexp_sint_t n) {
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, g_current_block, SEXP_FALSE, 0);
+}
+
+sexp sexp_core_begin_if(sexp ctx, sexp self, sexp_sint_t n, sexp bv, sexp cv) {
+  L1Block *tb = calloc(1, sizeof(L1Block));
+  L1Block *eb = calloc(1, sizeof(L1Block));
+  tb->id = ++g_block_id_counter;
+  eb->id = ++g_block_id_counter;
+  tb->parent = NULL;
+  eb->parent = NULL;
+  g_scratch_blocks[g_scratch_count++] = tb;
+  g_scratch_blocks[g_scratch_count++] = eb;
+  sexp ts = sexp_make_cpointer(ctx, SEXP_CPOINTER, tb, SEXP_FALSE, 0);
+  sexp es = sexp_make_cpointer(ctx, SEXP_CPOINTER, eb, SEXP_FALSE, 0);
+  return sexp_cons(ctx, ts, sexp_cons(ctx, es, SEXP_NULL));
+}
+
+static void scratch_terminator_to_inst(L1Block *block) {
+  if (!block->terminator || block->terminator->kind != TERM_RETURN)
+    return;
+  L1Instruction *ret = calloc(1, sizeof(L1Instruction));
+  ret->kind = INST_RETURN;
+  ret->data.ret.val = block->terminator->data.ret_val;
+  if (!block->body) {
+    block->body = ret;
+    block->body_tail = ret;
+  } else {
+    block->body_tail->next = ret;
+    block->body_tail = ret;
+  }
+  free(block->terminator);
+  block->terminator = NULL;
+}
+
+sexp sexp_core_end_if(sexp ctx, sexp self, sexp_sint_t n, sexp bv, sexp cv, sexp tv, sexp ev) {
+  L1Block *parent = (L1Block *)sexp_cpointer_value(bv);
+  L1Expr *cond = (L1Expr *)sexp_cpointer_value(cv);
+  L1Block *tb = (L1Block *)sexp_cpointer_value(tv);
+  L1Block *eb = (L1Block *)sexp_cpointer_value(ev);
+  scratch_terminator_to_inst(tb);
+  scratch_terminator_to_inst(eb);
+  L1Instruction *inst = calloc(1, sizeof(L1Instruction));
+  inst->kind = INST_IF;
+  inst->data.if_stmt.condition = cond;
+  inst->data.if_stmt.then_body = tb->body;
+  inst->data.if_stmt.else_body = eb->body;
+  L1Block *saved = g_current_block;
+  g_current_block = parent;
+  append_instruction(NULL, inst);
+  g_current_block = saved;
+  free(tb);
+  free(eb);
+  for (int j = 0; j < g_scratch_count; j++)
+    if (g_scratch_blocks[j] == tb || g_scratch_blocks[j] == eb)
+      g_scratch_blocks[j] = NULL;
+  return SEXP_VOID;
+}
+
+
 // ============================================================================
 // 8. Struct/tuple FFI functions
 // ============================================================================
@@ -1640,6 +1751,41 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
 
 static void emit_c_block_terminator(L1Block *block, FILE *out);
 
+// Helper: emit a single instruction (used for nested if bodies)
+static void emit_c_instruction(L1Block *block, L1Instruction *inst, FILE *out) {
+  switch (inst->kind) {
+  case INST_SET:
+    fprintf(out, "        auto %s = ", inst->data.set.name);
+    emit_c_expr(inst->data.set.val, out);
+    fprintf(out, ";\n");
+    break;
+  case INST_STORE: {
+    L1Type *store_ty = inst->data.store.store_ty;
+    if (!store_ty) store_ty = infer_expr_type(inst->data.store.val);
+    fprintf(out, "        *(");
+    emit_c_type(store_ty, out);
+    fprintf(out, "*)(");
+    emit_c_expr(inst->data.store.dest, out);
+    fprintf(out, ") = ");
+    emit_c_expr(inst->data.store.val, out);
+    fprintf(out, ";\n");
+    break;
+  }
+  case INST_CALL:
+    fprintf(out, "        ");
+    emit_c_expr(inst->data.call_inst.expr, out);
+    fprintf(out, ";\n");
+    break;
+  case INST_RETURN:
+    fprintf(out, "        return ");
+    emit_c_expr(inst->data.ret.val, out);
+    fprintf(out, ";\n");
+    break;
+  default:
+    break;
+  }
+}
+
 static void emit_c_instructions(L1Block *block, FILE *out) {
   L1Instruction *inst = block->body;
   while (inst) {
@@ -1684,6 +1830,27 @@ static void emit_c_instructions(L1Block *block, FILE *out) {
       }
       fprintf(out, "    }\n");
       break;
+    case INST_IF:
+      fprintf(out, "    if (");
+      emit_c_expr(inst->data.if_stmt.condition, out);
+      fprintf(out, ") {\n");
+      {
+        L1Instruction *li = inst->data.if_stmt.then_body;
+        while (li) {
+          emit_c_instruction(block, li, out);
+          li = li->next;
+        }
+      }
+      if (inst->data.if_stmt.else_body) {
+        fprintf(out, "    } else {\n");
+        L1Instruction *li = inst->data.if_stmt.else_body;
+        while (li) {
+          emit_c_instruction(block, li, out);
+          li = li->next;
+        }
+      }
+      fprintf(out, "    }\n");
+      break;
     case INST_CALL:
       if (block->terminator && block->terminator->kind == TERM_RETURN &&
           block->terminator->data.ret_val == inst->data.call_inst.expr) {
@@ -1693,8 +1860,12 @@ static void emit_c_instructions(L1Block *block, FILE *out) {
       emit_c_expr(inst->data.call_inst.expr, out);
       fprintf(out, ";\n");
       break;
-    case INST_BREAK:
     case INST_RETURN:
+      fprintf(out, "    return ");
+      emit_c_expr(inst->data.ret.val, out);
+      fprintf(out, ";\n");
+      break;
+    case INST_BREAK:
     default:
       break;
     }
@@ -1774,6 +1945,324 @@ static void emit_c_subroutine(L1Subroutine *sub, FILE *out) {
     block = block->next;
   }
   fprintf(out, "}\n\n");
+}
+
+// ============================================================================
+// 9.5. L1 IR Text Dumper
+// ============================================================================
+
+static void emit_l1_type(L1Type *ty, FILE *out) {
+  if (!ty) { fprintf(out, "void"); return; }
+  switch (ty->kind) {
+  case TY_BITS:   fprintf(out, "i%d", ty->width); break;
+  case TY_ADDR:   fprintf(out, "addr"); break;
+  case TY_VOID:   fprintf(out, "void"); break;
+  case TY_PRODUCT:
+    fprintf(out, "{%s}", ty->struct_name ? ty->struct_name : "product");
+    break;
+  }
+}
+
+static void emit_l1_expr(L1Expr *expr, FILE *out);
+
+static void emit_l1_expr(L1Expr *expr, FILE *out) {
+  if (!expr) { fprintf(out, "???"); return; }
+  switch (expr->kind) {
+  case EXPR_VAR:
+    fprintf(out, "%%%s", expr->data.var.name);
+    break;
+  case EXPR_CONST:
+    fprintf(out, "%lld", (long long)expr->data.const_val);
+    break;
+  case EXPR_ARG:
+    fprintf(out, "%%arg%d", expr->data.arg_idx);
+    break;
+  case EXPR_ADD:
+    fprintf(out, "add(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_SUB:
+    fprintf(out, "sub(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_LOAD:
+    fprintf(out, "load(");
+    emit_l1_expr(expr->data.load.addr, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_LEA:
+    fprintf(out, "lea(base=");
+    emit_l1_expr(expr->data.lea.base, out);
+    fprintf(out, ", idx=");
+    emit_l1_expr(expr->data.lea.idx, out);
+    fprintf(out, ", scale=%d, offset=%d)", expr->data.lea.scale,
+            expr->data.lea.offset);
+    break;
+  case EXPR_CALL:
+    fprintf(out, "call @%s(", expr->data.call.fn_name);
+    for (uint32_t i = 0; i < expr->data.call.arg_count; i++) {
+      emit_l1_expr(expr->data.call.args[i], out);
+      if (i < expr->data.call.arg_count - 1) fprintf(out, ", ");
+    }
+    fprintf(out, ")");
+    break;
+  case EXPR_STRING:
+    fprintf(out, "\"%s\"", expr->data.str_val.content);
+    break;
+  case EXPR_PRIMITIVE:
+    fprintf(out, "primitive %s(", expr->data.primitive.opcode);
+    for (uint32_t i = 0; i < expr->data.primitive.operand_count; i++) {
+      emit_l1_expr(expr->data.primitive.operands[i], out);
+      if (i < expr->data.primitive.operand_count - 1) fprintf(out, ", ");
+    }
+    fprintf(out, ")");
+    break;
+  case EXPR_ALLOCA:
+    fprintf(out, "alloca(");
+    if (expr->data.alloca.byte_size > 0)
+      fprintf(out, "%d", expr->data.alloca.byte_size);
+    else {
+      emit_l1_type(expr->data.alloca.element_ty, out);
+    }
+    fprintf(out, ")");
+    break;
+  case EXPR_FIELD:
+    fprintf(out, "field[%d](", expr->data.field.field_index);
+    emit_l1_expr(expr->data.field.base, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_CALL_INDIRECT:
+    fprintf(out, "call_indirect(");
+    emit_l1_expr(expr->data.call_indirect.fn_ptr, out);
+    for (uint32_t i = 0; i < expr->data.call_indirect.arg_count; i++) {
+      fprintf(out, ", ");
+      emit_l1_expr(expr->data.call_indirect.args[i], out);
+    }
+    fprintf(out, ")");
+    break;
+  default:
+    fprintf(out, "expr(kind=%d)", expr->kind);
+    break;
+  }
+}
+
+static void emit_l1_terminator(L1Block *block, FILE *out) {
+  if (!block->terminator) return;
+  switch (block->terminator->kind) {
+  case TERM_RETURN:
+    if (block->terminator->data.ret_val) {
+      fprintf(out, "  return ");
+      emit_l1_expr(block->terminator->data.ret_val, out);
+      fprintf(out, "\n");
+    } else {
+      fprintf(out, "  return void\n");
+    }
+    break;
+  case TERM_BRANCH:
+    fprintf(out, "  br block_%d\n", block->terminator->data.target_id);
+    break;
+  case TERM_COND_BRANCH:
+    fprintf(out, "  cond_br ");
+    emit_l1_expr(block->terminator->data.cond_branch.condition, out);
+    fprintf(out, ", block_%d, block_%d\n",
+            block->terminator->data.cond_branch.true_id,
+            block->terminator->data.cond_branch.false_id);
+    break;
+  default:
+    break;
+  }
+}
+
+// Helper: emit a single L1 instruction (used for nested if bodies)
+static void emit_l1_instruction(L1Block *block, L1Instruction *inst, FILE *out) {
+  switch (inst->kind) {
+  case INST_SET:
+    fprintf(out, "    %%%s = ", inst->data.set.name);
+    emit_l1_expr(inst->data.set.val, out);
+    fprintf(out, "\n");
+    break;
+  case INST_PHI_ASSIGN:
+    fprintf(out, "    %%%s = phi ", inst->data.set.name);
+    emit_l1_expr(inst->data.set.val, out);
+    fprintf(out, "\n");
+    break;
+  case INST_STORE:
+    fprintf(out, "    store ");
+    emit_l1_expr(inst->data.store.val, out);
+    fprintf(out, ", ");
+    emit_l1_expr(inst->data.store.dest, out);
+    fprintf(out, "\n");
+    break;
+  case INST_CALL:
+    fprintf(out, "    call ");
+    emit_l1_expr(inst->data.call_inst.expr, out);
+    fprintf(out, "\n");
+    break;
+  case INST_LOOP:
+    fprintf(out, "    loop {\n");
+    {
+      L1Instruction *li = inst->data.loop_stmt.body;
+      while (li) {
+        if (li->kind == INST_BREAK)
+          fprintf(out, "      break\n");
+        else if (li->kind == INST_SET) {
+          fprintf(out, "      %%%s = ", li->data.set.name);
+          emit_l1_expr(li->data.set.val, out);
+          fprintf(out, "\n");
+        }
+        li = li->next;
+      }
+    }
+    fprintf(out, "    }\n");
+    break;
+  case INST_IF:
+    fprintf(out, "    if ");
+    emit_l1_expr(inst->data.if_stmt.condition, out);
+    fprintf(out, " {\n");
+    {
+      L1Instruction *li = inst->data.if_stmt.then_body;
+      while (li) {
+        emit_l1_instruction(block, li, out);
+        li = li->next;
+      }
+    }
+    if (inst->data.if_stmt.else_body) {
+      fprintf(out, "    } else {\n");
+      L1Instruction *li = inst->data.if_stmt.else_body;
+      while (li) {
+        emit_l1_instruction(block, li, out);
+        li = li->next;
+      }
+    }
+    fprintf(out, "    }\n");
+    break;
+  default:
+    break;
+  }
+}
+
+static void emit_l1_instructions(L1Block *block, FILE *out) {
+  L1Instruction *inst = block->body;
+  while (inst) {
+    switch (inst->kind) {
+    case INST_SET:
+      fprintf(out, "  %%%s = ", inst->data.set.name);
+      emit_l1_expr(inst->data.set.val, out);
+      fprintf(out, "\n");
+      break;
+    case INST_PHI_ASSIGN:
+      fprintf(out, "  %%%s = phi ", inst->data.set.name);
+      emit_l1_expr(inst->data.set.val, out);
+      fprintf(out, "\n");
+      break;
+    case INST_STORE:
+      fprintf(out, "  store ");
+      emit_l1_expr(inst->data.store.val, out);
+      fprintf(out, ", ");
+      emit_l1_expr(inst->data.store.dest, out);
+      fprintf(out, "\n");
+      break;
+    case INST_CALL:
+      if (block->terminator && block->terminator->kind == TERM_RETURN &&
+          block->terminator->data.ret_val == inst->data.call_inst.expr) {
+        break;
+      }
+      fprintf(out, "  call ");
+      emit_l1_expr(inst->data.call_inst.expr, out);
+      fprintf(out, "\n");
+      break;
+    case INST_LOOP:
+      fprintf(out, "  loop {\n");
+      {
+        L1Instruction *li = inst->data.loop_stmt.body;
+        while (li) {
+          if (li->kind == INST_BREAK)
+            fprintf(out, "    break\n");
+          else if (li->kind == INST_SET) {
+            fprintf(out, "    %%%s = ", li->data.set.name);
+            emit_l1_expr(li->data.set.val, out);
+            fprintf(out, "\n");
+          }
+          li = li->next;
+        }
+      }
+      fprintf(out, "  }\n");
+      break;
+    case INST_IF:
+      fprintf(out, "  if ");
+      emit_l1_expr(inst->data.if_stmt.condition, out);
+      fprintf(out, " {\n");
+      {
+        L1Instruction *li = inst->data.if_stmt.then_body;
+        while (li) {
+          emit_l1_instruction(block, li, out);
+          li = li->next;
+        }
+      }
+      if (inst->data.if_stmt.else_body) {
+        fprintf(out, "  } else {\n");
+        L1Instruction *li = inst->data.if_stmt.else_body;
+        while (li) {
+          emit_l1_instruction(block, li, out);
+          li = li->next;
+        }
+      }
+      fprintf(out, "  }\n");
+      break;
+    default:
+      break;
+    }
+    inst = inst->next;
+  }
+}
+
+static void emit_l1_subroutine(L1Subroutine *sub, FILE *out) {
+  if (!sub->blocks) return;
+  fprintf(out, "sub @%s(", sub->name);
+  for (uint32_t i = 0; i < sub->param_count; i++) {
+    emit_l1_type(sub->param_tys[i], out);
+    fprintf(out, " %%arg%d", i);
+    if (i < sub->param_count - 1) fprintf(out, ", ");
+  }
+  fprintf(out, ") -> ");
+  emit_l1_type(sub->ret_ty, out);
+  fprintf(out, " {\n");
+
+  L1Block *block = sub->blocks;
+  while (block) {
+    fprintf(out, "block_%d:\n", block->id);
+    emit_l1_instructions(block, out);
+    emit_l1_terminator(block, out);
+    block = block->next;
+  }
+  fprintf(out, "}\n\n");
+}
+
+void native_emit_l1_module(const char *output_path) {
+  FILE *out = fopen(output_path, "w");
+  if (!out) {
+    fprintf(stderr, "Error: cannot open L1 output: %s\n", output_path);
+    return;
+  }
+  L1Subroutine *sub = g_subroutines_head;
+  while (sub) {
+    emit_l1_subroutine(sub, out);
+    sub = sub->next;
+  }
+  fclose(out);
+}
+
+static sexp sexp_core_emit_l1(sexp ctx, sexp self, sexp_sint_t n,
+                               sexp arg_subs, sexp arg_path) {
+  const char *path = sexp_to_c_string(ctx, arg_path);
+  native_emit_l1_module(path);
+  return SEXP_VOID;
 }
 
 // ============================================================================
@@ -2077,7 +2566,8 @@ static void native_inject_all_polyfills(sexp ctx, sexp env) {
 
   // 2. Basic polyfills
   native_eval_string(ctx, env,
-                     "(begin (define unit #f) (define (meta-source x) #f))");
+                     "(begin (define unit #f) (define (meta-source x) #f)"
+                     " (define *error-count* 0))");
 
   // 3. define-pass macro system
   native_eval_string(ctx, env, "(define __lain-passes '())");
@@ -2186,9 +2676,13 @@ static void native_inject_all_polyfills(sexp ctx, sexp env) {
   native_eval_string(ctx, env,
                      "(define type.array (lambda (ty size) (core.make-addr)))");
   native_eval_string(
-      ctx, env, "(define type.product (lambda (types) (core.make-bits 32)))");
+      ctx, env,
+      "(define type.product (lambda (types) (core.make-product-type! types)))");
   native_eval_string(
-      ctx, env, "(define type.product-field-types (lambda (product) (list)))");
+      ctx, env,
+      "(define type.product-field-type (lambda (product field-name)"
+      "  (core.struct-field-type-from-type product field-name)))");
+  native_eval_string(ctx, env, "(define type.product-field-types (lambda (product) '()))");
   native_eval_string(ctx, env, "(define string-byte-len string-length)");
 
   // 13. core.* Scheme polyfills (non-FFI)
@@ -2353,49 +2847,19 @@ static void native_inject_all_polyfills(sexp ctx, sexp env) {
 }
 
 static void native_load_meta_sources(sexp ctx, sexp env) {
-  const char *search_paths[] = {"std/meta/", "../std/meta/", "../../std/meta/",
-                                NULL};
-
-  const char *meta_files[] = {"core/list.scm",
-                              "core/record.scm",
-                              "core/types.scm",
-                              "core/literals.scm",
-                              "core/call.scm",
-                              "core/lower.scm",
-                              "lang/fn.scm",
-                              "syntax/common.scm",
-                              "lang/struct.scm",
-                              "lang/enum.scm",
-                              "lang/effect.scm",
-                              "lang/interface.scm",
-                              "lang/impl.scm",
-                              "lang/import.scm",
-                              "lang/mod.scm",
-                              "middle/common.scm",
-                              "effects/throws.scm",
-                              "effects/suspend.scm",
-                              "effects/spawn.scm",
-                              "effects/base.scm",
-                              "operators/integer.scm",
-                              "operators/question.scm",
-                              NULL};
-
+  // Load the single driver entry point instead of maintaining a duplicate
+  // hardcoded file list. driver.scm has the authoritative load order.
+  const char *search_paths[] = {"std/meta/driver.scm", "../std/meta/driver.scm",
+                                "../../std/meta/driver.scm", NULL};
   for (int si = 0; search_paths[si]; si++) {
-    int found = 0;
-    for (int fi = 0; meta_files[fi]; fi++) {
-      char path[512];
-      snprintf(path, sizeof(path), "%s%s", search_paths[si], meta_files[fi]);
-      FILE *test = fopen(path, "r");
-      if (test) {
-        fclose(test);
-        native_load_file(ctx, env, path);
-        found = 1;
-      }
-    }
-    if (found)
+    FILE *test = fopen(search_paths[si], "r");
+    if (test) {
+      fclose(test);
+      native_load_file(ctx, env, search_paths[si]);
       return;
+    }
   }
-  fprintf(stderr, "Warning: could not find meta sources\n");
+  fprintf(stderr, "Warning: could not find std/meta/driver.scm\n");
 }
 
 // ============================================================================
@@ -2500,6 +2964,7 @@ void *native_init_scheme(void) {
   REG("core.make-bits", 1, sexp_core_make_bits);
   REG("core.make-addr", 0, sexp_core_make_addr);
   REG("core.make-unit", 0, sexp_core_make_unit);
+  REG("core.make-product-type!", 1, sexp_core_make_product_type);
   REG("type.registered-raw", 1, sexp_type_registered);
   REG("core.make-set", 2, sexp_core_make_set);
   REG("core.make-proc", 4, sexp_core_make_proc);
@@ -2537,7 +3002,12 @@ void *native_init_scheme(void) {
   REG("core.call-indirect!", 4, sexp_core_call_indirect);
   REG("core.declare-extern-function!", 4, sexp_core_declare_extern_function);
   REG("core.call-expr!", 3, sexp_core_call_expr);
+  REG("core.set-current-block!", 1, sexp_core_set_current_block);
+  REG("core.get-current-block", 0, sexp_core_get_current_block);
+  REG("core.begin-if!", 2, sexp_core_begin_if);
+  REG("core.end-if!", 4, sexp_core_end_if);
   REG("core.assign-temp!", 2, sexp_core_assign_temp);
+  REG("core.emit-l1!", 2, sexp_core_emit_l1);
 
   // Register syntax cursor FFI functions
   REG("syntax.group-cursor", 1, sexp_syntax_group_cursor);
@@ -2562,175 +3032,15 @@ void *native_init_scheme(void) {
   native_load_meta_sources(ctx, env);
   fprintf(stderr, "[init] 5: meta sources loaded\n");
 
-  // Load the bootstrap driver (pipeline orchestration)
-  const char *driver_path = "bootstrap/bootstrap_driver.scm";
-  FILE *f = fopen(driver_path, "r");
-  if (!f) {
-    driver_path = "../bootstrap/bootstrap_driver.scm";
-    f = fopen(driver_path, "r");
-  }
-  if (f) {
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc(len + 1);
-    fread(buf, 1, len, f);
-    buf[len] = '\0';
-    fclose(f);
-
-    // MINIMAL TEST: eval a simple define and verify it sticks
-    {
-      sexp tr = sexp_eval_string(ctx, "(define (test-hello) 42)", -1, env);
-      check_exception(ctx, tr);
-      sexp ts = sexp_intern(ctx, "test-hello", -1);
-      sexp tv = sexp_env_ref(ctx, env, ts, SEXP_FALSE);
-      fprintf(stderr, "[init] 5b: test-hello after eval_string %s\n",
-              tv == SEXP_FALSE ? "MISSING" : "FOUND");
-    }
-
-    // Load entire driver wrapped in (begin ...)
-    {
-      const char *driver_wrapped = "(begin\n\
-;; ===========================================================================\n\
-;; bootstrap_driver.scm — Lain Bootstrap 编译管线驱动器 (100% Scheme)\n\
-;; ===========================================================================\n\
-\n\
-\n\
-(define (syntax.form-cursor form)\n\
-  (syntax.group-cursor form))\n\
-\n\
-(define (cfg.target-os) '|linux|)\n\
-\n\
-(define (pipeline.rule stage kind)\n\
-  (let loop ((passes __lain-passes))\n\
-    (if (null? passes)\n\
-        (lambda args unit)  ;; 默认无操作 — 未注册的 pass 静默跳过\n\
-        (let* ((entry (car passes))\n\
-               (e-stage (car entry))\n\
-               (e-kind (car (cdr entry)))\n\
-               (e-body (car (cdr (cdr entry)))))\n\
-          (if (and (equal? e-stage stage) (equal? e-kind kind))\n\
-              e-body\n\
-              (loop (cdr passes)))))))\n\
-\n\
-;; ---------------------------------------------------------------------------\n\
-;; 2. 驱动管线\n\
-;; ---------------------------------------------------------------------------\n\
-\n\
-;; Helper: 尝试查找 form-parser，找不到返回 #f\n\
-(define (driver.lookup-form-parser kind)\n\
-  (let loop ((passes __lain-passes))\n\
-    (if (null? passes)\n\
-        #f\n\
-        (let* ((entry (car passes))\n\
-               (e-stage (car entry))\n\
-               (e-kind (car (cdr entry))))\n\
-          (if (and (equal? e-stage 'form-parser) (equal? e-kind kind))\n\
-              (car (cdr (cdr entry)))\n\
-              (loop (cdr passes)))))))\n\
-\n\
-;; Phase 1: Peek root group 的第一个标识符，然后分发 form-parser\n\
-;; 关键：form-parser 接收原始的 root group（不是 cursor！）\n\
-;; form-parser 内部会调用 syntax.form-cursor 创建新的 cursor 从零开始解析\n\
-(define (driver.parse-and-declare root-group)\n\
-  (set! *lain-declarations* (list))\n\
-  (let* ((peek-cursor (syntax.group-cursor root-group))\n\
-         (head (syntax.cursor-match-ident! peek-cursor)))\n\
-    (if (optional.none? head)\n\
-        unit\n\
-        (let* ((kind (optional.value head))\n\
-               (parser (driver.lookup-form-parser kind)))\n\
-          (if parser\n\
-              (begin\n\
-                (parser root-group)\n\
-                (if (null? *lain-declarations*)\n\
-                    (error \"form-parser produced no declarations\")\n\
-                    unit))\n\
-              (driver.parse-as-implicit-main root-group))))))\n\
-\n\
-;; Helper: 当 root group 不是已知 form 时，当做隐式 main 函数体处理\n\
-(define (driver.parse-as-implicit-main root-group)\n\
-  (let* ((block (syntax.parse-block root-group))\n\
-         (sig (raw.node! '|fn.sig|\n\
-                (record '|fn.sig|\n\
-                  (record.field '|attrs| (list))\n\
-                  (record.field '|generics| (list))\n\
-                  (record.field '|params| (list))\n\
-                  (record.field '|return|\n\
-                    (raw.node! '|ty.path|\n\
-                      (record '|ty.path|\n\
-                        (record.field '|name| '|i32|))))\n\
-                  (record.field '|where| #f)\n\
-                  (record.field '|effects| #f)\n\
-                  (record.field '|body| (optional.some block))))))\n\
-    (decl.define! '|fn| '|main| sig)))\n\
-\n\
-;; Phase 2: 遍历 *lain-declarations*，对每条声明调用 raw-normalizer。\n\
-(define (driver.normalize-decls)\n\
-  (let loop ((decls *lain-declarations*) (acc (list)))\n\
-    (if (null? decls)\n\
-        (list.reverse acc)\n\
-        (let* ((decl (car decls))\n\
-               (kind (list-ref decl 1))\n\
-               (normalizer (pipeline.rule 'raw-normalizer kind))\n\
-               (middle-item (normalizer decl)))\n\
-          (loop (cdr decls) (list.cons middle-item acc))))))\n\
-\n\
-;; Phase 3: 对每个 middle item 调用 core-declarer 注册函数签名。\n\
-(define (driver.declare-core middle-items)\n\
-  (for-each\n\
-    (lambda (item)\n\
-      (let* ((kind (middle.kind item))\n\
-             (declarer (pipeline.rule 'core-declarer kind)))\n\
-        (declarer item)))\n\
-    middle-items))\n\
-\n\
-;; Phase 4: 对每个 middle item 调用 core-lowerer 生成 L1 指令。\n\
-(define (driver.lower-core middle-items)\n\
-  (for-each\n\
-    (lambda (item)\n\
-      (let* ((kind (middle.kind item))\n\
-             (lowerer (pipeline.rule 'core-lowerer kind)))\n\
-        (lowerer item)))\n\
-    middle-items))\n\
-\n\
-;; ---------------------------------------------------------------------------\n\
-;; 3. 主入口: compile-group-to-core\n\
-;; ---------------------------------------------------------------------------\n\
-\n\
-(define (compile-group-to-core root-group)\n\
-  (driver.parse-and-declare root-group)\n\
-  (let* ((middle-items (driver.normalize-decls)))\n\
-    (driver.declare-core middle-items)\n\
-    (driver.lower-core middle-items))\n\
-  0)\n\
-\n\
-)";
-      fprintf(stderr,
-              "[init] 6-drv: evaluating driver with begin wrapper...\n");
-      sexp res = sexp_eval_string(ctx, driver_wrapped, -1, env);
-      if (sexp_exceptionp(res)) {
-        fprintf(stderr, "[init] 6-drv ERROR: ");
-        sexp_print_exception(ctx, res, sexp_current_error_port(ctx));
-        fprintf(stderr, "\n");
-      } else {
-        fprintf(stderr, "[init] 6-drv OK\n");
-      }
-    }
-
-    free(buf);
-    // Verify driver functions are defined immediately
-    {
-      sexp sym = sexp_intern(ctx, "compile-group-to-core", -1);
-      sexp val = sexp_env_ref(ctx, env, sym, SEXP_FALSE);
-      fprintf(stderr, "[init] 6a: compile-group-to-core %s\n",
-              val == SEXP_FALSE      ? "MISSING"
-              : sexp_procedurep(val) ? "is proc"
-                                     : "is defined but not proc");
-    }
-  } else {
-    fprintf(stderr, "Error: cannot find bootstrap_driver.scm\n");
-    exit(1);
+  // bootstrap_driver.scm is already loaded by driver.scm (via native_load_meta_sources).
+  // Just verify the key entry point is available.
+  {
+    sexp sym = sexp_intern(ctx, "compile-group-to-core", -1);
+    sexp val = sexp_env_ref(ctx, env, sym, SEXP_FALSE);
+    fprintf(stderr, "[init] 6a: compile-group-to-core %s\n",
+            val == SEXP_FALSE      ? "MISSING"
+            : sexp_procedurep(val) ? "is proc"
+                                   : "is defined but not proc");
   }
 
   return ctx;
