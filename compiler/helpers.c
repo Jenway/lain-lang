@@ -66,411 +66,32 @@ typedef struct {
 
 uint8_t read_byte_at(const uint8_t *ptr, size_t offset) { return ptr[offset]; }
 
-// ══════════════════════════════════════════════════════════════════════════════
-// 3-5. C-Side Lexer (legacy — used during bootstrap, replaced by lexer.lain)
-// ══════════════════════════════════════════════════════════════════════════════
+// C-Side Lexer (REMOVED — replaced by std/meta/lexer.scm)
+// All lexing, grouping, form-splitting, and token-to-sexp conversion
+// now happens in pure Scheme via meta.lex-source! and native_lex_to_sexp.
 
-// ============================================================================
-// 3. Simple Source Lexer (used by native_lex_and_group)
-// ============================================================================
-
-static int lexer_fgetc(const uint8_t **p, uint32_t *pos, uint32_t len) {
-  if (*pos >= len)
-    return EOF;
-  return (*p)[(*pos)++];
-}
-
-static void lexer_ungetc(const uint8_t **p, uint32_t *pos, uint32_t len) {
-  if (*pos > 0)
-    (*pos)--;
-}
-
-static RawToken lex_one_token_from_mem(const uint8_t *src, uint32_t *pos,
-                                       uint32_t len) {
-  RawToken tok = {T_EOF, NULL, 0};
-  const uint8_t *p = src;
-  uint32_t *idx = pos;
-
-  int c = lexer_fgetc(&p, idx, len);
-  // skip whitespace
-  while (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-    c = lexer_fgetc(&p, idx, len);
-  }
-  // skip line comments
-  if (c == '/') {
-    int next = lexer_fgetc(&p, idx, len);
-    if (next == '/') {
-      while (c != '\n' && c != EOF)
-        c = lexer_fgetc(&p, idx, len);
-      return lex_one_token_from_mem(src, idx, len);
-    }
-    lexer_ungetc(&p, idx, len);
-  }
-  if (c == EOF)
-    return tok;
-  if (c == '(') {
-    tok.kind = T_LPAREN;
-    return tok;
-  }
-  if (c == ')') {
-    tok.kind = T_RPAREN;
-    return tok;
-  }
-  if (c == '[') {
-    tok.kind = T_LBRACKET;
-    return tok;
-  }
-  if (c == ']') {
-    tok.kind = T_RBRACKET;
-    return tok;
-  }
-  if (c == '{') {
-    tok.kind = T_LBRACE;
-    return tok;
-  }
-  if (c == '}') {
-    tok.kind = T_RBRACE;
-    return tok;
-  }
-
-  char buf[1024];
-  int i = 0;
-
-  if (c == '"') {
-    c = lexer_fgetc(&p, idx, len);
-    while (c != '"' && c != EOF) {
-      buf[i++] = c;
-      c = lexer_fgetc(&p, idx, len);
-    }
-    buf[i] = '\0';
-    tok.kind = T_STRING;
-    tok.val = strdup(buf);
-    return tok;
-  }
-
-  if (c >= '0' && c <= '9') {
-    while (c >= '0' && c <= '9') {
-      buf[i++] = c;
-      c = lexer_fgetc(&p, idx, len);
-    }
-    lexer_ungetc(&p, idx, len);
-    buf[i] = '\0';
-    tok.kind = T_NUMBER;
-    tok.int_val = atoll(buf);
-    return tok;
-  }
-
-  if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
-    while ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_') {
-      buf[i++] = c;
-      c = lexer_fgetc(&p, idx, len);
-    }
-    lexer_ungetc(&p, idx, len);
-    buf[i] = '\0';
-    tok.kind = T_IDENT;
-    tok.val = strdup(buf);
-    return tok;
-  }
-
-  // punctuation (single or double char)
-  buf[i++] = c;
-  int next = lexer_fgetc(&p, idx, len);
-  if ((c == ':' && next == ':') || (c == '-' && next == '>') ||
-      (c == '=' && next == '>') || (c == '=' && next == '=') ||
-      (c == '!' && next == '=') || (c == '<' && next == '=') ||
-      (c == '>' && next == '=')) {
-    buf[i++] = next;
-  } else {
-    lexer_ungetc(&p, idx, len);
-  }
-  buf[i] = '\0';
-  tok.kind = T_PUNCT;
-  tok.val = strdup(buf);
-  return tok;
-}
-
-// ============================================================================
-// 4. Token Tree Grouper
-// ============================================================================
-
-static L1Token *group_tokens_recursive(RawToken *raw, uint32_t total,
-                                       uint32_t *idx,
-                                       L1GroupKind current_kind) {
-  L1Token *parent = malloc(sizeof(L1Token));
-  parent->kind = TOK_GROUP;
-  parent->data.group.kind = current_kind;
-
-  L1Token **children = malloc(sizeof(L1Token *) * 1024);
-  uint32_t count = 0;
-
-  while (*idx < total) {
-    RawToken t = raw[*idx];
-    if (t.kind == T_RPAREN && current_kind == GRP_PAREN) {
-      (*idx)++;
-      break;
-    }
-    if (t.kind == T_RBRACKET && current_kind == GRP_BRACKET) {
-      (*idx)++;
-      break;
-    }
-    if (t.kind == T_RBRACE && current_kind == GRP_BRACE) {
-      (*idx)++;
-      break;
-    }
-
-    if (t.kind == T_LPAREN || t.kind == T_LBRACKET || t.kind == T_LBRACE) {
-      (*idx)++;
-      L1GroupKind k = (t.kind == T_LPAREN)     ? GRP_PAREN
-                      : (t.kind == T_LBRACKET) ? GRP_BRACKET
-                                               : GRP_BRACE;
-      children[count++] = group_tokens_recursive(raw, total, idx, k);
-    } else {
-      L1Token *leaf = malloc(sizeof(L1Token));
-      leaf->kind = TOK_RAW;
-      leaf->data.raw = t;
-      children[count++] = leaf;
-      (*idx)++;
-    }
-  }
-
-  parent->data.group.children = children;
-  parent->data.group.count = count;
-  return parent;
-}
-
-// ── Token accumulator for Lain-side lexer → C grouping bridge ──────────────
-
-static RawToken *g_raw_tokens = NULL;
-static uint32_t g_raw_token_count = 0;
-static uint32_t g_raw_token_cap = 0;
-
-void native_push_token(const uint8_t *src, int32_t kind,
-                       size_t start, size_t len, int64_t int_val) {
-  if (g_raw_token_count >= g_raw_token_cap) {
-    g_raw_token_cap = g_raw_token_cap ? g_raw_token_cap * 2 : 256;
-    g_raw_tokens = realloc(g_raw_tokens, sizeof(RawToken) * g_raw_token_cap);
-  }
-  RawToken *t = &g_raw_tokens[g_raw_token_count++];
-  t->kind = (RawTokenKind)kind;
-  t->int_val = int_val;
-  if (kind == T_IDENT || kind == T_STRING || kind == T_PUNCT)
-    t->val = strndup((const char *)(src + start), len);
-  else
-    t->val = NULL;
-}
-
-void *native_finish_grouping(void) {
-  if (g_raw_token_count >= g_raw_token_cap) {
-    g_raw_token_cap = g_raw_token_cap ? g_raw_token_cap * 2 : 256;
-    g_raw_tokens = realloc(g_raw_tokens, sizeof(RawToken) * g_raw_token_cap);
-  }
-  g_raw_tokens[g_raw_token_count].kind = T_EOF;
-  g_raw_tokens[g_raw_token_count].val = NULL;
-  g_raw_tokens[g_raw_token_count].int_val = 0;
-  g_raw_token_count++;
-
-  uint32_t idx = 0;
-  void *root = group_tokens_recursive(g_raw_tokens, g_raw_token_count,
-                                      &idx, GRP_ROOT);
-  g_raw_token_count = 0;
-  return root;
-}
-
-// ============================================================================
-// 5. Top-level Form Splitter
-// ============================================================================
-
-L1Token **split_root_group(L1Token *root, uint32_t *out_count) {
-  L1Token **forms = malloc(sizeof(L1Token *) * 64);
-  uint32_t form_count = 0;
-  L1Token **buf = malloc(sizeof(L1Token *) * 512);
-  uint32_t buf_len = 0;
-  int depth = 0;
-
-  for (uint32_t i = 0; i < root->data.group.count; i++) {
-    L1Token *child = root->data.group.children[i];
-    if (child->kind == TOK_RAW && child->data.raw.kind == T_PUNCT &&
-        strcmp(child->data.raw.val, ";") == 0 && depth == 0) {
-      int needs_semi = 0;
-      for (uint32_t j = 0; j < buf_len; j++) {
-        if (buf[j]->kind == TOK_RAW) {
-          if (buf[j]->data.raw.kind == T_IDENT) {
-            if (strcmp(buf[j]->data.raw.val, "import") == 0 ||
-                strcmp(buf[j]->data.raw.val, "us") == 0) {
-              needs_semi = 1;
-            }
-            break;
-          }
-          if (buf[j]->data.raw.kind == T_PUNCT &&
-              strcmp(buf[j]->data.raw.val, "@") == 0) {
-            needs_semi = 1;
-            break;
-          }
-        }
-      }
-      if (needs_semi)
-        buf[buf_len++] = child;
-      L1Token *form = malloc(sizeof(L1Token));
-      form->kind = TOK_GROUP;
-      form->data.group.kind = GRP_ROOT;
-      L1Token **copy = malloc(sizeof(L1Token *) * buf_len);
-      memcpy(copy, buf, sizeof(L1Token *) * buf_len);
-      form->data.group.children = copy;
-      form->data.group.count = buf_len;
-      forms[form_count++] = form;
-      buf = malloc(sizeof(L1Token *) * 512);
-      buf_len = 0;
-      continue;
-    }
-    int is_brace =
-        (child->kind == TOK_GROUP && child->data.group.kind == GRP_BRACE);
-    if (is_brace)
-      depth++;
-    buf[buf_len++] = child;
-    if (is_brace) {
-      depth--;
-      if (depth == 0) {
-        int next_is_semi_or_brace = 0;
-        if (i + 1 < root->data.group.count) {
-          L1Token *next = root->data.group.children[i + 1];
-          if (next->kind == TOK_RAW && next->data.raw.kind == T_PUNCT &&
-              strcmp(next->data.raw.val, ";") == 0)
-            next_is_semi_or_brace = 1;
-          if (next->kind == TOK_GROUP && next->data.group.kind == GRP_BRACE)
-            next_is_semi_or_brace = 1;
-        }
-        if (!next_is_semi_or_brace) {
-          L1Token *form = malloc(sizeof(L1Token));
-          form->kind = TOK_GROUP;
-          form->data.group.kind = GRP_ROOT;
-          L1Token **copy = malloc(sizeof(L1Token *) * buf_len);
-          memcpy(copy, buf, sizeof(L1Token *) * buf_len);
-          form->data.group.children = copy;
-          form->data.group.count = buf_len;
-          forms[form_count++] = form;
-          buf = malloc(sizeof(L1Token *) * 512);
-          buf_len = 0;
-        }
-      }
-    }
-  }
-  if (buf_len > 0) {
-    L1Token *form = malloc(sizeof(L1Token));
-    form->kind = TOK_GROUP;
-    form->data.group.kind = GRP_ROOT;
-    L1Token **copy = malloc(sizeof(L1Token *) * buf_len);
-    memcpy(copy, buf, sizeof(L1Token *) * buf_len);
-    form->data.group.children = copy;
-    form->data.group.count = buf_len;
-    forms[form_count++] = form;
-  }
-  *out_count = form_count;
-  return forms;
-}
-
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 5.5. Token Tree → Scheme S-Expression
-// ══════════════════════════════════════════════════════════════════════════════
-
-// ============================================================================
-// 5.5. Token Tree → Scheme S-Expression Converter
-// ============================================================================
-//
-// Converts the C-side L1Token* tree into a Scheme list of records,
-// eliminating the need for cursor FFI. Scheme code can traverse the
-// result with standard car/cdr/match.
-//
-// Format:
-//   (ident "name")   (number 42)   (string "hello")   (punct "->")
-//   (paren ...)      (bracket ...)  (brace ...)         (root ...)
-
-static sexp token_to_sexp(sexp ctx, L1Token *tok) {
-  if (!tok) return SEXP_NULL;
-  
-  if (tok->kind == TOK_RAW) {
-    RawToken *r = &tok->data.raw;
-    switch (r->kind) {
-    case T_IDENT: {
-      sexp tag = sexp_intern(ctx, "ident", -1);
-      sexp val = sexp_c_string(ctx, r->val ? r->val : "", -1);
-      return sexp_list2(ctx, tag, val);
-    }
-    case T_NUMBER: {
-      sexp tag = sexp_intern(ctx, "number", -1);
-      sexp val = sexp_make_integer(ctx, r->int_val);
-      return sexp_list2(ctx, tag, val);
-    }
-    case T_STRING: {
-      sexp tag = sexp_intern(ctx, "string", -1);
-      sexp val = sexp_c_string(ctx, r->val ? r->val : "", -1);
-      return sexp_list2(ctx, tag, val);
-    }
-    case T_PUNCT:
-    case T_LPAREN: case T_RPAREN:
-    case T_LBRACKET: case T_RBRACKET:
-    case T_LBRACE: case T_RBRACE: {
-      sexp tag = sexp_intern(ctx, "punct", -1);
-      const char *s = r->val;
-      if (!s) {
-        switch (r->kind) {
-        case T_LPAREN: s = "("; break;
-        case T_RPAREN: s = ")"; break;
-        case T_LBRACKET: s = "["; break;
-        case T_RBRACKET: s = "]"; break;
-        case T_LBRACE: s = "{"; break;
-        case T_RBRACE: s = "}"; break;
-        default: s = ""; break;
-        }
-      }
-      sexp val = sexp_c_string(ctx, s, -1);
-      return sexp_list2(ctx, tag, val);
-    }
-    default:
-      return sexp_intern(ctx, "eof", -1);
-    }
-  }
-  
-  // TOK_GROUP
-  const char *tag_str = "root";
-  switch (tok->data.group.kind) {
-  case GRP_PAREN:   tag_str = "paren"; break;
-  case GRP_BRACKET: tag_str = "bracket"; break;
-  case GRP_BRACE:   tag_str = "brace"; break;
-  default: break;
-  }
-  sexp tag = sexp_intern(ctx, tag_str, -1);
-  
-  // Build children list
-  sexp children = SEXP_NULL;
-  for (int i = (int)tok->data.group.count - 1; i >= 0; i--) {
-    children = sexp_cons(ctx, token_to_sexp(ctx, tok->data.group.children[i]), children);
-  }
-  return sexp_cons(ctx, tag, children);
-}
-
+// core.lex-to-sexp! — uses Scheme-side lexer
 void *native_lex_to_sexp(void *ctx_ptr, const uint8_t *src, uint32_t len) {
   sexp ctx = (sexp)ctx_ptr;
-  
-  // Lex
-  RawToken *raw = malloc(sizeof(RawToken) * 4096);
-  uint32_t total = 0;
-  uint32_t pos = 0;
-  while (1) {
-    RawToken t = lex_one_token_from_mem(src, &pos, len);
-    if (t.kind == T_EOF) break;
-    raw[total++] = t;
-  }
-  
-  // Group
-  uint32_t idx = 0;
-  L1Token *root = group_tokens_recursive(raw, total, &idx, GRP_ROOT);
-  
-  // Convert to sexp
-  sexp result = token_to_sexp(ctx, root);
-  
-  free(raw);
+  sexp src_str = sexp_c_string(ctx, (const char *)src, len);
+  sexp len_val = sexp_make_integer(ctx, sexp_string_length(src_str));
+  sexp env = sexp_context_env(ctx);
+  sexp lex_proc = sexp_env_ref(ctx, env,
+                               sexp_intern(ctx, "meta.lex-source!", -1),
+                               SEXP_FALSE);
+  sexp form_list = sexp_apply(ctx, lex_proc, sexp_list2(ctx, src_str, len_val));
+
+  if (sexp_exceptionp(form_list))
+    return SEXP_FALSE;
+
+  // meta.lex-source! returns a list of form trees: ((root ...) (root ...))
+  // For compatibility with old API (single tree), return the first form
+  // if there's only one, otherwise wrap all in a root.
+  if (sexp_pairp(form_list) && sexp_nullp(sexp_cdr(form_list)))
+    return sexp_car(form_list);
+
+  // Multiple forms: wrap in a root
+  sexp result = sexp_cons(ctx, sexp_intern(ctx, "root", -1), form_list);
   return result;
 }
 
@@ -928,6 +549,7 @@ static void native_inject_all_polyfills(sexp ctx, sexp env) {
       "    (core.begin-function! name params ret))"
       "  (define (core.const-zero! block ty)"
       "    (core.const-bits! block ty 0))"
+      "  (define (core.unsupported-expr kind) (core.make-bits 32))"
       "  (define (diag.raise! . args) #f)"
       "  (define (core.declare-enum-name! name variants) unit)))");
 
@@ -1084,24 +706,51 @@ const uint8_t *native_read_file(const char *path) {
 
 uint32_t native_file_len(void) { return g_file_len; }
 
+// ── Import helper: read file → Scheme lex → list of form S-expressions ──
+
+static sexp sexp_read_file_forms(sexp ctx, sexp self, sexp_sint_t n,
+                                  sexp arg_path) {
+  const char *path = sexp_string_data(arg_path);
+  const uint8_t *data = native_read_file(path);
+  if (!data) return SEXP_FALSE;
+  uint32_t len = native_file_len();
+
+  // Use Scheme-side lexer
+  sexp src_str = sexp_c_string(ctx, (const char *)data, len);
+  sexp len_val = sexp_make_integer(ctx, sexp_string_length(src_str));
+  sexp env = sexp_context_env(ctx);
+  sexp lex_proc = sexp_env_ref(ctx, env,
+                               sexp_intern(ctx, "meta.lex-source!", -1),
+                               SEXP_FALSE);
+  sexp result = sexp_apply(ctx, lex_proc, sexp_list2(ctx, src_str, len_val));
+
+  return sexp_exceptionp(result) ? SEXP_FALSE : result;
+}
+
 // Environment variable access
 const char *native_getenv(const char *name) { return getenv(name); }
 
-// Lex + Group: takes source pointer and length, returns L1Token* (root group)
+// ── Deferred lex: store source for later Scheme-side lexing ──────────────
+// native_lex_and_group is called before native_init_scheme, so we can't
+// use the Scheme context yet. Store a COPY of the source (because
+// native_init_scheme calls native_read_file which frees g_file_buffer).
+// Actual lexing happens in native_run_pipeline.
+
+static uint8_t *g_pending_src = NULL;
+static uint32_t g_pending_len = 0;
+
 void *native_lex_and_group(const uint8_t *src, uint32_t len) {
-  RawToken *raw = malloc(sizeof(RawToken) * 4096);
-  uint32_t total = 0;
-  uint32_t pos = 0;
-
-  while (1) {
-    RawToken t = lex_one_token_from_mem(src, &pos, len);
-    if (t.kind == T_EOF)
-      break;
-    raw[total++] = t;
+  // Free previous copy if any
+  if (g_pending_src) {
+    free(g_pending_src);
+    g_pending_src = NULL;
   }
-
-  uint32_t idx = 0;
-  return group_tokens_recursive(raw, total, &idx, GRP_ROOT);
+  // Copy the source — the original buffer may be freed by later
+  // native_read_file calls (e.g. during native_init_scheme).
+  g_pending_src = malloc(len);
+  memcpy(g_pending_src, src, len);
+  g_pending_len = len;
+  return (void *)1; // dummy non-NULL
 }
 
 // Initialize Scheme environment, register all FFI functions, load meta passes
@@ -1191,6 +840,7 @@ void *native_init_scheme(void) {
   REG("core.assign-temp!", 2, sexp_core_assign_temp);
   REG("core.emit-l1!", 2, sexp_core_emit_l1);
   REG("core.lex-to-sexp!", 2, sexp_lex_to_sexp);
+  REG("core.read-file-forms!", 1, sexp_read_file_forms);
 
   // Register syntax cursor FFI functions (raw versions only)
   // High-level wrappers (syntax.cursor-*) are defined in tree.scm
@@ -1253,25 +903,42 @@ int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
   // Clear previous declarations
   sexp_eval_string(ctx, "(set! *lain-declarations* (list))", -1, env);
 
-  // Split root group into individual forms (C-side, handles ; separators)
-  uint32_t form_count = 0;
-  L1Token **form_groups = split_root_group((L1Token *)root_group, &form_count);
+  // Use Scheme-side lexer (meta.lex-source!) to tokenize + group + split
+  // into forms. This replaces the old C-side lex_one_token_from_mem +
+  // group_tokens_recursive + split_root_group + token_to_sexp pipeline.
+  sexp src_str = sexp_c_string(ctx, (const char *)g_pending_src, g_pending_len);
+  sexp len_val = sexp_make_integer(ctx, sexp_string_length(src_str));
+
+  sexp lex_proc = sexp_env_ref(ctx, env,
+                               sexp_intern(ctx, "meta.lex-source!", -1),
+                               SEXP_FALSE);
+  sexp form_list = sexp_apply(ctx, lex_proc, sexp_list2(ctx, src_str, len_val));
+
+  if (sexp_exceptionp(form_list)) {
+    fprintf(stderr, "[pipeline ERROR] Scheme lexer failed:\n");
+    sexp_print_exception(ctx, form_list, sexp_current_error_port(ctx));
+    fprintf(stderr, "\n");
+    return 1;
+  }
 
   sexp compile_sym = sexp_intern(ctx, "compile-group-to-core", -1);
   sexp proc = sexp_env_ref(ctx, env, compile_sym, SEXP_FALSE);
 
-  for (uint32_t fi = 0; fi < form_count; fi++) {
-    // Convert C token tree to Scheme S-expression tree
-    sexp form_tree = token_to_sexp(ctx, form_groups[fi]);
-    sexp result = sexp_apply(ctx, proc, sexp_cons(ctx, form_tree, SEXP_NULL));
+  // Iterate over form list produced by meta.lex-source!
+  sexp_preserve_object(ctx, form_list);
+  for (sexp forms = form_list; sexp_pairp(forms); forms = sexp_cdr(forms)) {
+    sexp form = sexp_car(forms);
+    sexp result = sexp_apply(ctx, proc, sexp_list1(ctx, form));
 
     if (sexp_exceptionp(result)) {
       fprintf(stderr, "[pipeline ERROR] ");
       sexp_print_exception(ctx, result, sexp_current_error_port(ctx));
       fprintf(stderr, "\n");
+      sexp_release_object(ctx, form_list);
       return 1;
     }
   }
+  sexp_release_object(ctx, form_list);
 
   return 0;
 }
@@ -1298,10 +965,6 @@ void native_emit_module_to_file(void *subs_ptr, const char *output_path) {
   fprintf(out, "uint32_t native_file_len(void);\n");
   fprintf(out,
           "void *native_lex_and_group(const uint8_t *src, uint32_t len);\n");
-  fprintf(out,
-          "void native_push_token(const uint8_t *src, int32_t kind,"
-          " size_t start, size_t len, int64_t int_val);\n");
-  fprintf(out, "void *native_finish_grouping(void);\n");
   fprintf(out, "void *native_init_scheme(void);\n");
   fprintf(out, "int32_t native_run_pipeline(void *ctx, void *root_group);\n");
   fprintf(out, "void native_emit_module_to_file(void *subs, const char "

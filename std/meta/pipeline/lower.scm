@@ -43,7 +43,11 @@
          (args (core.lower-types
                  (optional.value (record.get payload '|args|))
                  (list))))
-    (type.registered name args)))
+    ;; If the name is a registered struct (e.g., DynArray<T>),
+    ;; instantiate it concretely in Scheme. Otherwise delegate to C.
+    (if (struct-registered? name)
+        (struct-instantiate name args)
+        (type.registered name args))))
 
 (define (core.lower-type ty)
   (let* ((kind (middle.kind ty))

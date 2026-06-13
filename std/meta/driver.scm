@@ -10,6 +10,9 @@
 (load "std/meta/pipeline/driver.scm")
 (load "std/meta/pipeline/lower.scm")
 
+;; ═══ 1.4 纯 Scheme 词法分析器（替换 C 侧 lexer） ═══
+(load "std/meta/lexer.scm")
+
 ;; ═══ 1.5 共享语法解析工具 ═══
 (load "std/meta/syntax/tree.scm")
 (load "std/meta/syntax/parse.scm")
@@ -78,6 +81,7 @@
 (load "std/meta/interface/parse.scm")
 
 (load "std/meta/import/parse.scm")
+(load "std/meta/import/lower.scm")
 (load "std/meta/literals/lower.scm")
 (load "std/meta/io/println.scm")
 

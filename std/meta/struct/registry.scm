@@ -44,7 +44,9 @@
       (let* ((field (car fields))
              (name (car field))
              (ty (cdr field))
-             (size (core.type-size-in-bytes! ty))
+             ;; If field type is a struct-type record, treat as addr-sized (8 bytes)
+             ;; Otherwise it's an L1Type cpointer — ask C for its size
+             (size (if (struct-type? ty) 8 (core.type-size-in-bytes! ty)))
              ;; 64-bit alignment
              (aligned (if (and (= size 8) (not (zero? (modulo offset 8))))
                           (+ offset (- 8 (modulo offset 8)))
@@ -112,7 +114,60 @@
                 (cadr f)  ;; type cpointer (L1 atom, not struct)
                 (loop (cdr fields))))))))
 
-;; ── Anonymous product layout (no registry) ──
+;; ── Generic struct instantiation ──
+
+;; Create a concrete struct type from a generic struct definition.
+;; e.g., (struct-instantiate 'DynArray (list (struct-type 'RawToken)))
+;; → registers DynArray_RawToken as a concrete struct, returns (struct-type . DynArray_RawToken)
+;;
+;; For now, all instantiations of a generic struct share the same physical layout
+;; (since all type parameters become addr in L1). The concrete name is formed by
+;; appending the lowered type names with underscores.
+(define (struct-instantiate name args)
+  (let* ((concrete-name (struct--concrete-name name args)))
+    (if (struct-registered? concrete-name)
+        (struct-type concrete-name)
+        (struct--instantiate-impl name concrete-name args))))
+
+;; Build a concrete name: DynArray + (RawToken) → DynArray_RawToken
+(define (struct--concrete-name name args)
+  (if (null? args)
+      name
+      (let loop ((remaining args) (acc (symbol->string name)))
+        (if (null? remaining)
+            (string->symbol acc)
+            (let* ((arg (car remaining))
+                   (arg-name (struct--arg-name arg))
+                   (new-acc (string-append acc "_" arg-name)))
+              (loop (cdr remaining) new-acc))))))
+
+;; Get a printable name for an already-lowered type
+(define (struct--arg-name ty)
+  (if (struct-type? ty)
+      (symbol->string (struct-type-name ty))
+      "unknown"))
+
+;; Clone a generic struct's layout, replacing generic params with concrete types.
+;; Since L1 only sees bits/addr/void, all struct-type args become addr.
+(define (struct--instantiate-impl generic-name concrete-name args)
+  (let* ((generic-entry (struct-lookup generic-name))
+         (total-size (cadr generic-entry))
+         (generic-layout (cddr generic-entry))
+         ;; Clone layout: replace any struct-type fields with addr for L1
+         (concrete-fields
+          (map (lambda (field-entry)
+                 (let* ((fname (car field-entry))
+                        (fty (cadr field-entry))
+                        (offs (caddr field-entry))
+                        ;; If field type is a struct-type, replace with addr for L1
+                        (concrete-ty (if (struct-type? fty) (type.addr) fty)))
+                   (list fname concrete-ty offs)))
+               generic-layout)))
+    ;; Register the concrete struct
+    (set! *struct-registry*
+      (cons (cons concrete-name (cons total-size concrete-fields))
+            *struct-registry*))
+    (struct-type concrete-name)))
 
 ;; Returns (total-size . ((offset . type) ...))
 ;; field-types: list of L1 atom cpointers
