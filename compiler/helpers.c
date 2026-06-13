@@ -26,30 +26,12 @@
 // 1. L1 Core IR Type Definitions
 // ============================================================================
 
-typedef enum { TY_BITS, TY_ADDR, TY_VOID, TY_PRODUCT } L1TypeKind;
-
-typedef struct L1ProductField {
-  char *name;
-  struct L1Type *ty;
-  uint32_t offset;
-} L1ProductField;
+typedef enum { TY_BITS, TY_ADDR, TY_VOID } L1TypeKind;
 
 typedef struct L1Type {
   L1TypeKind kind;
-  uint32_t width;
-  uint32_t field_count;
-  L1ProductField *fields;
-  char *struct_name;
+  uint32_t width;  // in bits for TY_BITS, 0 for TY_VOID, 64 for TY_ADDR
 } L1Type;
-
-typedef struct L1StructInfo {
-  char *name;
-  L1Type *ty;
-  sexp cached_cptr; // singleton sexp so eq? works across calls
-  struct L1StructInfo *next;
-} L1StructInfo;
-
-static L1StructInfo *g_struct_registry = NULL;
 
 typedef enum {
   INST_SET,
@@ -665,16 +647,6 @@ static uint32_t get_list_length(sexp list) {
   return len;
 }
 
-static L1Type *find_struct_by_name(const char *name) {
-  L1StructInfo *info = g_struct_registry;
-  while (info) {
-    if (strcmp(info->name, name) == 0)
-      return info->ty;
-    info = info->next;
-  }
-  return NULL;
-}
-
 static void append_inst_to_block(L1Block *block, L1Instruction *inst) {
   if (block->body_tail) {
     block->body_tail->next = inst;
@@ -745,56 +717,22 @@ static sexp sexp_core_make_unit(sexp ctx, sexp self, sexp_sint_t n) {
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, ty, SEXP_FALSE, 0);
 }
 
-// -- make-product-type: create anonymous TY_PRODUCT from ((name . type) ...) --
+// -- make-product-type: returns addr (products are opaque pointers to L1) --
 static sexp sexp_core_make_product_type(sexp ctx, sexp self, sexp_sint_t n,
                                          sexp arg_fields) {
-  uint32_t field_count = 0;
-  // count fields
-  sexp curr = arg_fields;
-  while (sexp_pairp(curr)) { field_count++; curr = sexp_cdr(curr); }
-
-  L1ProductField *fields = malloc(sizeof(L1ProductField) * field_count);
-  uint32_t offset = 0;
-  curr = arg_fields;
-  for (uint32_t i = 0; i < field_count; i++) {
-    sexp field_pair = sexp_car(curr);
-    const char *fname = sexp_to_c_string(ctx, sexp_car(field_pair));
-    L1Type *fty = (L1Type *)sexp_cpointer_value(sexp_cdr(field_pair));
-    uint32_t field_size = (fty->kind == TY_BITS) ? (fty->width / 8) : 8;
-    // align to field_size
-    if (field_size > 1 && (offset % field_size != 0))
-      offset = (offset + field_size - 1) & ~(field_size - 1);
-    fields[i].name = strdup(fname);
-    fields[i].ty = fty;
-    fields[i].offset = offset;
-    offset += field_size;
-  }
-
+  // Anonymous product types are just opaque pointers (addr) at L1 level.
+  // Layout computation happens in Scheme (product-layout).
   L1Type *ty = malloc(sizeof(L1Type));
-  ty->kind = TY_PRODUCT;
-  ty->width = offset > 0 ? offset : field_count * 8;
-  ty->field_count = field_count;
-  ty->fields = fields;
-  ty->struct_name = NULL; // anonymous product
+  ty->kind = TY_ADDR;
+  ty->width = 64;
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, ty, SEXP_FALSE, 0);
 }
 
 static sexp sexp_type_registered(sexp ctx, sexp self, sexp_sint_t n,
                                  sexp name_val) {
   const char *name = sexp_to_c_string(ctx, name_val);
-  // Check struct registry first (use cached cptr for eq? identity)
-  {
-    L1StructInfo *s = g_struct_registry;
-    while (s) {
-      if (strcmp(s->name, name) == 0) {
-        if (!s->cached_cptr)
-          s->cached_cptr = sexp_make_cpointer(ctx, SEXP_CPOINTER, s->ty, SEXP_FALSE, 0);
-        return s->cached_cptr;
-      }
-      s = s->next;
-    }
-  }
-  // Built-in types: fall through to create fresh L1Type
+  // Struct types are now handled in Scheme (struct-registered?) —
+  // this only handles built-in L1 atoms.
   L1Type *ty = malloc(sizeof(L1Type));
   if (strcmp(name, "bool") == 0) {
     ty->kind = TY_BITS;
@@ -1393,81 +1331,6 @@ static sexp sexp_core_type_size(sexp ctx, sexp self, sexp_sint_t n,
   return sexp_make_fixnum((sexp_sint_t)size);
 }
 
-// ── Thin struct layout storage (no computation — offsets pre-computed in Scheme) ──
-
-static sexp sexp_core_declare_struct_layout(sexp ctx, sexp self,
-                                             sexp_sint_t n,
-                                             sexp arg_name,
-                                             sexp arg_total_size,
-                                             sexp arg_layout) {
-  const char *name = sexp_to_c_string(ctx, arg_name);
-  uint32_t total_size = (uint32_t)sexp_unbox_fixnum(arg_total_size);
-
-  // Find or create registry entry
-  L1StructInfo *info = NULL;
-  {
-    L1StructInfo *s = g_struct_registry;
-    while (s) {
-      if (strcmp(s->name, name) == 0) { info = s; break; }
-      s = s->next;
-    }
-  }
-  if (!info) {
-    info = malloc(sizeof(L1StructInfo));
-    info->name = strdup(name);
-    info->cached_cptr = NULL;
-    info->next = g_struct_registry;
-    g_struct_registry = info;
-  }
-
-  // Count fields
-  uint32_t field_count = 0;
-  sexp curr = arg_layout;
-  while (sexp_pairp(curr)) { field_count++; curr = sexp_cdr(curr); }
-
-  L1ProductField *fields = malloc(sizeof(L1ProductField) * field_count);
-  curr = arg_layout;
-  for (uint32_t i = 0; i < field_count; i++) {
-    sexp triple = sexp_car(curr);
-    // triple = (name type offset)
-    const char *fname = sexp_to_c_string(ctx, sexp_car(triple));
-    L1Type *fty = (L1Type *)sexp_cpointer_value(sexp_cadr(triple));
-    uint32_t off = (uint32_t)sexp_unbox_fixnum(sexp_caddr(triple));
-    fields[i].name = strdup(fname);
-    fields[i].ty = fty;
-    fields[i].offset = off;
-    curr = sexp_cdr(curr);
-  }
-
-  L1Type *ty = malloc(sizeof(L1Type));
-  ty->kind = TY_PRODUCT;
-  ty->width = total_size;
-  ty->field_count = field_count;
-  ty->fields = fields;
-  ty->struct_name = strdup(name);
-  info->ty = ty;
-  return SEXP_VOID;
-}
-
-static sexp sexp_core_struct_type(sexp ctx, sexp self, sexp_sint_t n,
-                                  sexp arg_name) {
-  const char *name = sexp_to_c_string(ctx, arg_name);
-  L1StructInfo *info = NULL;
-  {
-    L1StructInfo *s = g_struct_registry;
-    while (s) {
-      if (strcmp(s->name, name) == 0) { info = s; break; }
-      s = s->next;
-    }
-  }
-  if (info) {
-    if (!info->cached_cptr)
-      info->cached_cptr = sexp_make_cpointer(ctx, SEXP_CPOINTER, info->ty, SEXP_FALSE, 0);
-    return info->cached_cptr;
-  }
-  return SEXP_FALSE;
-}
-
 // ── New: offset-based field access (no struct type needed) ──
 
 static sexp sexp_core_field_offset(sexp ctx, sexp self, sexp_sint_t n,
@@ -1583,8 +1446,6 @@ static void emit_c_type(L1Type *ty, FILE *out) {
   if (ty->kind == TY_BITS) {
     fprintf(out, "uint%d_t", ty->width);
   } else if (ty->kind == TY_ADDR) {
-    fprintf(out, "void*");
-  } else if (ty->kind == TY_PRODUCT) {
     fprintf(out, "void*");
   } else {
     fprintf(out, "void");
@@ -1789,11 +1650,7 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
     emit_c_type(expr->data.field.field_ty, out);
     fprintf(out, "*)((uint8_t*)(");
     emit_c_expr(expr->data.field.base, out);
-    fprintf(out, ") + %u)",
-            expr->data.field.struct_ty
-                ? expr->data.field.struct_ty->fields[expr->data.field.field_index]
-                      .offset
-                : expr->data.field.field_index);
+    fprintf(out, ") + %u)", expr->data.field.field_index);
     break;
   case EXPR_CALL_INDIRECT:
     fprintf(out, "((");
@@ -2025,9 +1882,6 @@ static void emit_l1_type(L1Type *ty, FILE *out) {
   case TY_BITS:   fprintf(out, "i%d", ty->width); break;
   case TY_ADDR:   fprintf(out, "addr"); break;
   case TY_VOID:   fprintf(out, "void"); break;
-  case TY_PRODUCT:
-    fprintf(out, "{%s}", ty->struct_name ? ty->struct_name : "product");
-    break;
   }
 }
 
@@ -3014,9 +2868,7 @@ void *native_init_scheme(void) {
   REG("core.cond-branch!", 4, sexp_core_cond_branch);
   REG("core.phi!", 6, sexp_core_phi);
   REG("core.type-is-void!", 1, sexp_core_type_is_void);
-  REG("core.declare-struct-layout!", 3, sexp_core_declare_struct_layout);
   REG("core.type-size-in-bytes!", 1, sexp_core_type_size);
-  REG("core.struct-type", 1, sexp_core_struct_type);
   REG("core.field-offset!", 4, sexp_core_field_offset);
   REG("core.aggregate-layout!", 3, sexp_core_aggregate_layout);
   REG("core.call-indirect!", 4, sexp_core_call_indirect);

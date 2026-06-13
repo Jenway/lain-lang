@@ -84,8 +84,15 @@
                (ret (if (fn.effects-contains-throws? effects)
                         (fn.make-throws-product raw-ret (fn.throws-error-type effects))
                         raw-ret))
-               (param-types (core.lower-param-types params (list))))
-          (core.begin-function! name param-types ret)))))
+               ;; C only knows bits/addr/void — structs become addr
+               (c-ret (if (struct-type? ret) (type.addr) ret))
+               (param-types (core.lower-param-types params (list)))
+               ;; Convert struct params to addr for C
+               (c-params (map (lambda (p) (if (struct-type? p) (type.addr) p))
+                              param-types)))
+          ;; Store real return type in Scheme table (avoids C-side type storage)
+          (fn-return-type! name ret)
+          (core.begin-function! name c-params c-ret)))))
 
 (define-pass (core-declarer |middle.foreign-fn| item)
   (let* ((payload (middle.payload item)) (name (optional.value (record.get payload '|name|)))

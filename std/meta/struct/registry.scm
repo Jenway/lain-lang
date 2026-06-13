@@ -1,20 +1,43 @@
 ;; ===========================================================================
 ;; std/meta/struct/registry.scm — Pure Scheme Struct Registry
 ;;
-;; Moves struct type layout computation (field offsets, alignment, total size)
-;; from C (helpers.c §8) into Scheme.  The C side only stores pre-computed
-;; numbers via core.declare-struct-layout! — no computation, no alignment
-;; logic, no type inspection.
+;; Struct types are pure Scheme records: (struct-type . <name>)
+;; No L1Type*/TY_PRODUCT — C only handles bits/addr/void atoms.
+;; Layout computation, field lookup, type identity: all in Scheme.
 ;; ===========================================================================
 
 ;; ── Global registries ──
 
-(define *struct-registry* (list))
-(define *type-to-name* (list))  ;; cpointer → name reverse mapping
+(define *struct-registry* (list))     ;; ((name . (total-size layout)) ...)
+(define *fn-return-types* (list))     ;; ((name . return-type) ...) — avoids C-side type storage
+
+;; ── Struct type constructor / predicate ──
+
+;; Returns a struct-type record: (struct-type . <name>)
+(define (struct-type name)
+  (cons 'struct-type name))
+
+(define (struct-type? ty)
+  (and (pair? ty) (eq? (car ty) 'struct-type)))
+
+(define (struct-type-name ty)
+  (if (struct-type? ty) (cdr ty)
+      (error "not a struct type")))
+
+;; ── Function return type table (keeps struct identity out of C) ──
+
+(define (fn-return-type! name ret-ty)
+  (set! *fn-return-types* (cons (cons name ret-ty) *fn-return-types*)))
+
+(define (fn-return-type-lookup name)
+  (let loop ((t *fn-return-types*))
+    (if (null? t) #f
+        (if (eq? (caar t) name) (cdar t)
+            (loop (cdr t))))))
 
 ;; ── Internal: compute field layout ──
 
-;; Returns (values total-size layout-list) where layout-list = ((name type offset) ...)
+;; Returns (values total-size layout-list) where layout-list = ((name type-cptr offset) ...)
 (define (struct--compute-layout fields offset acc)
   (if (null? fields)
       (values offset (reverse acc))
@@ -33,30 +56,14 @@
 ;; ── Public API ──
 
 ;; Register a struct: name (symbol), fields ((name . type-cpointer) ...)
-;; Returns total-size.  C registry kept as thin cache for type lookups.
+;; Returns total-size. NO FFI call — everything in Scheme.
 (define (struct-register! name lowered-fields)
   (let*-values (((total-size layout) (struct--compute-layout lowered-fields 0 '())))
-    ;; Scheme registry (primary — owns layout computation)
     (set! *struct-registry*
       (cons (cons name (cons total-size layout)) *struct-registry*))
-    ;; C registry (thin cache — needed for type.registered and infer-expr-type)
-    (core.declare-struct-layout! name total-size layout)
-    ;; Reverse mapping for field access (type cpointer → name)
-    (let ((ty (core.struct-type name)))
-      (if ty (set! *type-to-name* (cons (cons ty name) *type-to-name*))))
     total-size))
 
-;; Look up struct name from type cpointer
-(define (struct-name-from-type ty)
-  (let loop ((mapping *type-to-name*))
-    (if (null? mapping)
-        (error "unknown struct type")
-        (let ((entry (car mapping)))
-          (if (eq? (car entry) ty)
-              (cdr entry)
-              (loop (cdr mapping)))))))
-
-;; Look up struct info: (total-size . layout)
+;; Look up struct info: (name total-size . layout)
 (define (struct-lookup name)
   (let loop ((reg *struct-registry*))
     (if (null? reg)
@@ -65,6 +72,15 @@
           (if (eq? (car entry) name)
               entry
               (loop (cdr reg)))))))
+
+;; Check if a struct name is registered (non-fatal)
+(define (struct-registered? name)
+  (let loop ((reg *struct-registry*))
+    (if (null? reg)
+        #f
+        (if (eq? (caar reg) name)
+            #t
+            (loop (cdr reg))))))
 
 ;; Total size in bytes
 (define (struct-total-size name)
@@ -83,7 +99,7 @@
                 (caddr f)  ;; offset
                 (loop (cdr fields))))))))
 
-;; Field type (cpointer)
+;; Field type — returns L1 atom cpointer (bits/addr/void)
 (define (struct-field-type name field-name)
   (let* ((entry (struct-lookup name))
          (layout (cddr entry)))
@@ -93,13 +109,13 @@
                                 " in struct " (symbol->string name)))
           (let ((f (car fields)))
             (if (eq? (car f) field-name)
-                (cadr f)  ;; type cpointer
+                (cadr f)  ;; type cpointer (L1 atom, not struct)
                 (loop (cdr fields))))))))
 
 ;; ── Anonymous product layout (no registry) ──
 
 ;; Returns (total-size . ((offset . type) ...))
-;; field-types: list of type-cpointers (e.g. '(i32-cptr i64-cptr addr-cptr))
+;; field-types: list of L1 atom cpointers
 (define (product-layout field-types)
   (let ((n (length field-types)))
     (if (zero? n)

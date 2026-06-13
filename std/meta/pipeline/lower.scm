@@ -32,7 +32,10 @@
 (define-pass (core-type-lowerer |middle.ty.path| ty)
   (let* ((payload (middle.payload ty))
          (name (optional.value (record.get payload '|name|))))
-    (type.registered name (list))))
+    ;; Struct types return pure Scheme record — no C cpointer
+    (if (struct-registered? name)
+        (struct-type name)
+        (type.registered name (list)))))
 
 (define-pass (core-type-lowerer |middle.ty.app| ty)
   (let* ((payload (middle.payload ty))
