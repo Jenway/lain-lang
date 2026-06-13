@@ -11,6 +11,7 @@
 (load "std/meta/pipeline/lower.scm")
 
 ;; ═══ 1.5 共享语法解析工具 ═══
+(load "std/meta/syntax/tree.scm")
 (load "std/meta/syntax/parse.scm")
 ;; core/call.scm → 已迁移到 expr/normalize + expr/lower + expr/infer
 ;; core/memory.scm → 已迁移到 memory/normalize + memory/lower + memory/infer
