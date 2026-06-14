@@ -34,15 +34,18 @@
          (_eof (syntax.cursor-expect-eof! cursor))
          (body-cursor (syntax.group-cursor body))
          (variants (enum.parse-variants body-cursor (list)))
-         (node (raw.node! '|enum|
-                 (record '|enum|
-                   (record.field '|attrs| attrs)
-                   (record.field '|generics| generics)
-                   (record.field '|variants| variants)))))
-    (decl.define! '|enum| name node)))
+         (inner-payload (record '|enum|
+                          (record.field '|attrs| attrs)
+                          (record.field '|generics| generics)
+                          (record.field '|variants| variants)))
+         (unified (raw.node! '|let|
+                    (record '|let|
+                      (record.field '|name| name)
+                      (record.field '|type-kind| '|enum|)
+                      (record.field '|payload| inner-payload)))))
+    (decl.define! '|let| name unified)))
 
-(define-pass (raw-normalizer |enum| decl)
-  (middle.normalize-plain-decl decl '|middle.enum|))
+;; enum raw-normalizer 已迁至 let/normalize.scm 的统一分发器
 
 ;; ===========================================================================
 ;; Enum L1 降级 — 将 enum 降级为 Tagged Union 结构体

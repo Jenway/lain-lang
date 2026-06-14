@@ -43,18 +43,21 @@
          (_eof (syntax.cursor-expect-eof! cursor))
          (body-cursor (syntax.group-cursor body))
          (methods (impl.parse-methods body-cursor (list)))
-         (node (raw.node! '|impl|
-                 (record '|impl|
-                   (record.field '|attrs| attrs)
-                   (record.field '|generics| generics)
-                   (record.field '|interface| interface)
-                   (record.field '|target| target)
-                   (record.field '|where| where)
-                   (record.field '|methods| methods)))))
-    (decl.define! '|impl| interface-name node)))
+         (inner-payload (record '|impl|
+                          (record.field '|attrs| attrs)
+                          (record.field '|generics| generics)
+                          (record.field '|interface| interface)
+                          (record.field '|target| target)
+                          (record.field '|where| where)
+                          (record.field '|methods| methods)))
+         (unified (raw.node! '|let|
+                    (record '|let|
+                      (record.field '|name| interface-name)
+                      (record.field '|type-kind| '|impl|)
+                      (record.field '|payload| inner-payload)))))
+    (decl.define! '|let| interface-name unified)))
 
-(define-pass (raw-normalizer |impl| decl)
-  (middle.normalize-plain-decl decl '|middle.impl|))
+;; impl raw-normalizer 已迁至 let/normalize.scm 的统一分发器
 
 ;; ===========================================================================
 ;; Impl L1 降级 — 生成 VTable 实例 (工厂函数)

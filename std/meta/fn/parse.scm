@@ -46,13 +46,18 @@
          (where (parse-where cursor))
          (body (parse-optional-fn-body cursor))
          (_eof (syntax.cursor-expect-eof! cursor))
-         (sig (raw.node! '|fn.sig|
-                (record '|fn.sig|
-                  (record.field '|attrs| attrs) (record.field '|generics| generics)
-                  (record.field '|params| params) (record.field '|return| ret)
-                  (record.field '|where| where) (record.field '|effects| effects)
-                  (record.field '|body| body)))))
-    (if (fn.cfg-enabled? attrs) (decl.define! '|fn| name sig) unit)))
+         ;; Unified let node: wraps old |fn.sig| payload under |let| with type-kind = |fn|
+         (sig-payload (record '|fn.sig|
+                        (record.field '|attrs| attrs) (record.field '|generics| generics)
+                        (record.field '|params| params) (record.field '|return| ret)
+                        (record.field '|where| where) (record.field '|effects| effects)
+                        (record.field '|body| body)))
+         (unified (raw.node! '|let|
+                    (record '|let|
+                      (record.field '|name| name)
+                      (record.field '|type-kind| '|fn|)
+                      (record.field '|payload| sig-payload)))))
+    (if (fn.cfg-enabled? attrs) (decl.define! '|let| name unified) unit)))
 
 (define-pass (form-parser |pub| form)
   (let* ((cursor (syntax.form-cursor form))
@@ -68,12 +73,17 @@
                   (ret (if (optional.some? arrow) (parse-type cursor) (lain-quote '(type-unit)))) (effects (parse-optional-effects cursor))
                   (where (parse-where cursor)) (body (parse-optional-fn-body cursor))
                   (_eof (syntax.cursor-expect-eof! cursor))
-                  (sig (raw.node! '|fn.sig| (record '|fn.sig|
+                  (sig-payload (record '|fn.sig|
                          (record.field '|public| #t) (record.field '|attrs| attrs)
                          (record.field '|generics| generics) (record.field '|params| params)
                          (record.field '|return| ret) (record.field '|where| where)
-                         (record.field '|effects| effects) (record.field '|body| body)))))
-             (if (fn.cfg-enabled? attrs) (decl.define! '|fn| name sig) unit)))
+                         (record.field '|effects| effects) (record.field '|body| body)))
+                  (unified (raw.node! '|let|
+                             (record '|let|
+                               (record.field '|name| name)
+                               (record.field '|type-kind| '|fn|)
+                               (record.field '|payload| sig-payload)))))
+             (if (fn.cfg-enabled? attrs) (decl.define! '|let| name unified) unit)))
           ((symbol=? (optional.value next) '|struct|)
            (let* ((name (syntax.cursor-expect-ident! cursor))
                   (generics (parse-generic-params cursor)) (where (parse-where cursor))
@@ -81,11 +91,16 @@
                   (_eof (syntax.cursor-expect-eof! cursor))
                   (body-cursor (syntax.group-cursor body))
                   (fields (pub.struct-parse-fields body-cursor (list)))
-                  (node (raw.node! '|struct| (record '|struct|
+                  (inner-payload (record '|struct|
                            (record.field '|public| #t) (record.field '|attrs| attrs)
                            (record.field '|generics| generics) (record.field '|where| where)
-                           (record.field '|fields| fields)))))
-             (if (fn.cfg-enabled? attrs) (decl.define! '|struct| name node) unit)))
+                           (record.field '|fields| fields)))
+                  (unified (raw.node! '|let|
+                             (record '|let|
+                               (record.field '|name| name)
+                               (record.field '|type-kind| '|struct|)
+                               (record.field '|payload| inner-payload)))))
+             (if (fn.cfg-enabled? attrs) (decl.define! '|let| name unified) unit)))
           (else unit))))
 
 (define (pub.struct-parse-fields cursor acc)

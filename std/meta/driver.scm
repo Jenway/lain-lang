@@ -73,6 +73,9 @@
 
 (load "std/meta/enum/enum.scm")
 
+;; ═══ 5.5 统一 let normalizer — 所有顶层声明 (fn/struct/enum/interface/impl) 的 raw-normalizer 分发点 ═══
+(load "std/meta/let/normalize.scm")
+
 (load "std/meta/operators/integer.scm")
 (load "std/meta/operators/question.scm")
 

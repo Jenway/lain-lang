@@ -22,8 +22,4 @@
       (record.field '|effects| (optional.value (record.get payload '|effects|)))
       (record.field '|body| (middle.normalize-optional-body (optional.value (record.get payload '|body|)))))))
 
-(define-pass (raw-normalizer |fn| decl)
-  (let* ((name (decl.name decl)) (raw (decl.payload decl)) (payload (raw.payload raw)))
-    (fn.normalize name payload
-      (if (middle.attrs-has? (optional.value (record.get payload '|attrs|)) '|foreign|)
-          '|middle.foreign-fn| '|middle.fn|))))
+;; fn.normalize 保留为纯函数，供 let/normalize.scm 中的统一分发器调用

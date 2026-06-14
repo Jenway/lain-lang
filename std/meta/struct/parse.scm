@@ -35,13 +35,17 @@
          (_eof (syntax.cursor-expect-eof! cursor))
          (body-cursor (syntax.group-cursor body))
          (fields (struct.parse-fields body-cursor (list)))
-         (node (raw.node! '|struct|
-                 (record '|struct|
-                   (record.field '|attrs| attrs)
-                   (record.field '|generics| generics)
-                   (record.field '|where| where)
-                   (record.field '|fields| fields)))))
-    (decl.define! '|struct| name node)))
+         (inner-payload (record '|struct|
+                          (record.field '|attrs| attrs)
+                          (record.field '|generics| generics)
+                          (record.field '|where| where)
+                          (record.field '|fields| fields)))
+         (unified (raw.node! '|let|
+                    (record '|let|
+                      (record.field '|name| name)
+                      (record.field '|type-kind| '|struct|)
+                      (record.field '|payload| inner-payload)))))
+    (decl.define! '|let| name unified)))
 
 ;; ── 字面量字段解析: { field: value, ... } ──
 
