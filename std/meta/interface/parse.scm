@@ -150,9 +150,7 @@
       (interface.vtable-fields
         (list.rest method-names)
         (list.cons
-          (record '|struct.core-field|
-            (record.field '|name| (list.first method-names))
-            (record.field '|type| (type.addr)))
+          (cons (list.first method-names) (type.addr))
           acc))))
 
 ;; core-declarer: 为 interface 生成 VTable 结构体类型 + Dyn 胖指针类型
@@ -165,19 +163,15 @@
          (vtable-name (interface.vtable-name name))
          (dyn-name (interface.dyn-name name)))
     ;; 1. 声明 VTable 结构体: { method1: addr, method2: addr, ... }
-    (core.declare-struct!
+    (struct-register!
       vtable-name
       (interface.vtable-fields method-names (list)))
     ;; 2. 声明 Dyn 胖指针结构体: { data: addr, vtable: addr }
-    (core.declare-struct!
+    (struct-register!
       dyn-name
       (list
-        (record '|struct.core-field|
-          (record.field '|name| '|data|)
-          (record.field '|type| (type.addr)))
-        (record '|struct.core-field|
-          (record.field '|name| '|vtable|)
-          (record.field '|type| (type.addr)))))
+        (cons '|data| (type.addr))
+        (cons '|vtable| (type.addr))))
     ;; 3. 注册到全局表，供 impl lowerer 查询
     (interface.register! name methods)
     ;; 4. 注册 Dyn 类型映射
