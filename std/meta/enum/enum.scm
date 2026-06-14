@@ -2,11 +2,12 @@
 
 ;; 解析可选的 variant 载荷类型: VariantName(Type) 或 VariantName
 (define (enum.parse-optional-payload cursor)
-  (let* ((open (syntax.cursor-match-punct! cursor (string->symbol "(")))
-         (has-payload (optional.some? open)))
+  (let* ((group (syntax.cursor-match-group! cursor '|paren|))
+         (has-payload (optional.some? group)))
     (if has-payload
-        (let* ((ty (syntax.parse-type cursor)))
-          (syntax.cursor-expect-punct! cursor (string->symbol ")"))
+        (let* ((body-cursor (syntax.group-cursor (optional.value group)))
+               (ty (syntax.parse-type body-cursor))
+               (_eof (syntax.cursor-expect-eof! body-cursor)))
           (optional.some ty))
         (optional.none))))
 
@@ -112,7 +113,7 @@
              (variant-name (optional.value
                              (record.get variant-payload '|name|)))
              (ctor-name (enum.ctor-name enum-name variant-name))
-             (enum-ty (core.struct-type enum-name))
+             (enum-ty (struct-type enum-name))
              (payload (record.get variant-payload '|payload|))
              (param-types (if (optional.some? payload)
                               (list (enum.resolve-type
@@ -137,11 +138,10 @@
     ;;    布局: { tag: bits<8>, __data: addr }
     ;;    tag   — 辨別子 (discriminant), 8-bit 足够 256 个变体
     ;;    __data — 载荷数据 blob, 使用 addr 尺寸存放任意指针/值
-    (core.declare-struct!
-      name
+    (struct-register! name
       (list
-        (enum.make-field '|tag| (type.bits 8))
-        (enum.make-field '|__data| (type.addr))))
+        (cons '|tag| (type.bits 8))
+        (cons '|__data| (type.addr))))
     ;; 2. 为每个 variant 注册构造函数
     (enum.declare-variant-ctors name variants 0)))
 
@@ -158,7 +158,7 @@
              (ctor-name (enum.ctor-name enum-name variant-name))
              (fn (core.function-by-name ctor-name))
              (block (core.append-block! fn))
-             (ret-ty (core.struct-type enum-name))
+             (ret-ty (struct-type enum-name))
              (has-payload (record.get variant-payload '|payload|))
              (locals (if (optional.some? has-payload)
                         (enum.bind-ctor-param fn variant)
