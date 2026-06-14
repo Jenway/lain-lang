@@ -16,19 +16,7 @@
       (let* ((field (struct.normalize-field (list.first fields))))
         (struct.normalize-fields (list.rest fields) (list.cons field acc)))))
 
-(define-pass (raw-normalizer |struct| decl)
-  (let* ((name (decl.name decl))
-         (raw (decl.payload decl))
-         (payload (raw.payload raw)))
-    (middle.node! '|middle.struct|
-      (record '|middle.struct|
-        (record.field '|name| name)
-        (record.field '|attrs| (optional.value (record.get payload '|attrs|)))
-        (record.field '|generics| (optional.value (record.get payload '|generics|)))
-        (record.field '|where| (optional.value (record.get payload '|where|)))
-        (record.field '|fields|
-          (struct.normalize-fields
-            (optional.value (record.get payload '|fields|)) (list)))))))
+;; struct.normalize-fields 保留为纯函数，供 let/normalize.scm 中的统一分发器调用
 
 (define (struct.normalize-literal-field field)
   (let* ((payload (raw.payload field)))

@@ -43,7 +43,7 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
   case EXPR_LOAD:
     fprintf(out, "*(");
     emit_c_type(expr->data.load.ty, out);
-    fprintf(out, "*)(");
+    fprintf(out, "*)( ");
     emit_c_expr(expr->data.load.addr, out);
     fprintf(out, ")");
     break;
@@ -81,24 +81,12 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
     fprintf(out, "\"");
     for (char *p = expr->data.str_val.content; *p; p++) {
       switch (*p) {
-      case '\n':
-        fprintf(out, "\\n");
-        break;
-      case '\t':
-        fprintf(out, "\\t");
-        break;
-      case '\r':
-        fprintf(out, "\\r");
-        break;
-      case '\\':
-        fprintf(out, "\\\\");
-        break;
-      case '"':
-        fprintf(out, "\\\"");
-        break;
-      default:
-        fputc(*p, out);
-        break;
+      case '\n': fprintf(out, "\\n"); break;
+      case '\t': fprintf(out, "\\t"); break;
+      case '\r': fprintf(out, "\\r"); break;
+      case '\\': fprintf(out, "\\\\"); break;
+      case '"':  fprintf(out, "\\\""); break;
+      default:   fputc(*p, out); break;
       }
     }
     fprintf(out, "\"");
@@ -126,80 +114,29 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
       L1Expr *left = expr->data.primitive.operands[0];
       L1Expr *right = expr->data.primitive.operands[1];
       if (strcmp(op, "integer.add") == 0 || strcmp(op, "float.add") == 0) {
-        fprintf(out, "(");
-        emit_c_expr(left, out);
-        fprintf(out, " + ");
-        emit_c_expr(right, out);
-        fprintf(out, ")");
-      } else if (strcmp(op, "integer.sub") == 0 ||
-                 strcmp(op, "float.sub") == 0) {
-        fprintf(out, "(");
-        emit_c_expr(left, out);
-        fprintf(out, " - ");
-        emit_c_expr(right, out);
-        fprintf(out, ")");
-      } else if (strcmp(op, "integer.mul") == 0 ||
-                 strcmp(op, "float.mul") == 0) {
-        fprintf(out, "(");
-        emit_c_expr(left, out);
-        fprintf(out, " * ");
-        emit_c_expr(right, out);
-        fprintf(out, ")");
-      } else if (strcmp(op, "integer.div") == 0 ||
-                 strcmp(op, "float.div") == 0) {
-        fprintf(out, "(");
-        emit_c_expr(left, out);
-        fprintf(out, " / ");
-        emit_c_expr(right, out);
-        fprintf(out, ")");
+        fprintf(out, "("); emit_c_expr(left, out); fprintf(out, " + "); emit_c_expr(right, out); fprintf(out, ")");
+      } else if (strcmp(op, "integer.sub") == 0 || strcmp(op, "float.sub") == 0) {
+        fprintf(out, "("); emit_c_expr(left, out); fprintf(out, " - "); emit_c_expr(right, out); fprintf(out, ")");
+      } else if (strcmp(op, "integer.mul") == 0 || strcmp(op, "float.mul") == 0) {
+        fprintf(out, "("); emit_c_expr(left, out); fprintf(out, " * "); emit_c_expr(right, out); fprintf(out, ")");
+      } else if (strcmp(op, "integer.div") == 0 || strcmp(op, "float.div") == 0) {
+        fprintf(out, "("); emit_c_expr(left, out); fprintf(out, " / "); emit_c_expr(right, out); fprintf(out, ")");
       } else if (strcmp(op, "integer.eq") == 0 || strcmp(op, "float.eq") == 0) {
-        fprintf(out, "(");
-        emit_c_expr(left, out);
-        fprintf(out, " == ");
-        emit_c_expr(right, out);
-        fprintf(out, ")");
+        fprintf(out, "("); emit_c_expr(left, out); fprintf(out, " == "); emit_c_expr(right, out); fprintf(out, ")");
       } else if (strcmp(op, "integer.ne") == 0) {
-        fprintf(out, "(");
-        emit_c_expr(left, out);
-        fprintf(out, " != ");
-        emit_c_expr(right, out);
-        fprintf(out, ")");
+        fprintf(out, "("); emit_c_expr(left, out); fprintf(out, " != "); emit_c_expr(right, out); fprintf(out, ")");
       } else if (strcmp(op, "integer.lt") == 0 || strcmp(op, "float.lt") == 0) {
-        fprintf(out, "((int64_t)(");
-        emit_c_expr(left, out);
-        fprintf(out, ") < (int64_t)(");
-        emit_c_expr(right, out);
-        fprintf(out, "))");
+        fprintf(out, "((int64_t)("); emit_c_expr(left, out); fprintf(out, ") < (int64_t)("); emit_c_expr(right, out); fprintf(out, "))");
       } else if (strcmp(op, "integer.le") == 0) {
-        fprintf(out, "((int64_t)(");
-        emit_c_expr(left, out);
-        fprintf(out, ") <= (int64_t)(");
-        emit_c_expr(right, out);
-        fprintf(out, "))");
+        fprintf(out, "((int64_t)("); emit_c_expr(left, out); fprintf(out, ") <= (int64_t)("); emit_c_expr(right, out); fprintf(out, "))");
       } else if (strcmp(op, "integer.gt") == 0) {
-        fprintf(out, "((int64_t)(");
-        emit_c_expr(left, out);
-        fprintf(out, ") > (int64_t)(");
-        emit_c_expr(right, out);
-        fprintf(out, "))");
+        fprintf(out, "((int64_t)("); emit_c_expr(left, out); fprintf(out, ") > (int64_t)("); emit_c_expr(right, out); fprintf(out, "))");
       } else if (strcmp(op, "integer.ge") == 0) {
-        fprintf(out, "((int64_t)(");
-        emit_c_expr(left, out);
-        fprintf(out, ") >= (int64_t)(");
-        emit_c_expr(right, out);
-        fprintf(out, "))");
+        fprintf(out, "((int64_t)("); emit_c_expr(left, out); fprintf(out, ") >= (int64_t)("); emit_c_expr(right, out); fprintf(out, "))");
       } else if (strcmp(op, "cpu.rotate-left") == 0) {
-        fprintf(out, "__builtin_rotateleft64(");
-        emit_c_expr(left, out);
-        fprintf(out, ", ");
-        emit_c_expr(right, out);
-        fprintf(out, ")");
+        fprintf(out, "__builtin_rotateleft64("); emit_c_expr(left, out); fprintf(out, ", "); emit_c_expr(right, out); fprintf(out, ")");
       } else if (strcmp(op, "cpu.extract-bits") == 0) {
-        fprintf(out, "(");
-        emit_c_expr(left, out);
-        fprintf(out, " & ");
-        emit_c_expr(right, out);
-        fprintf(out, ")");
+        fprintf(out, "("); emit_c_expr(left, out); fprintf(out, " & "); emit_c_expr(right, out); fprintf(out, ")");
       } else {
         fprintf(out, "0");
       }
@@ -245,10 +182,15 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
   }
 }
 
-static void emit_c_block_terminator(L1Block *block, FILE *out);
+// Forward declarations with sub parameter for void-main handling
+static void emit_c_block_terminator(L1Block *block, L1Subroutine *sub, FILE *out);
+static void emit_c_instruction(L1Block *block, L1Instruction *inst, L1Subroutine *sub, FILE *out);
+static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out);
 
 // Helper: emit a single instruction (used for nested if bodies)
-static void emit_c_instruction(L1Block *block, L1Instruction *inst, FILE *out) {
+static void emit_c_instruction(L1Block *block, L1Instruction *inst, L1Subroutine *sub, FILE *out) {
+  int is_void_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
+                      (!sub->ret_ty || sub->ret_ty->kind == TY_VOID));
   switch (inst->kind) {
   case INST_SET:
     fprintf(out, "        auto %s = ", inst->data.set.name);
@@ -273,16 +215,22 @@ static void emit_c_instruction(L1Block *block, L1Instruction *inst, FILE *out) {
     fprintf(out, ";\n");
     break;
   case INST_RETURN:
-    fprintf(out, "        return ");
-    emit_c_expr(inst->data.ret.val, out);
-    fprintf(out, ";\n");
+    if (is_void_main) {
+      fprintf(out, "        return 0;\n");
+    } else {
+      fprintf(out, "        return ");
+      emit_c_expr(inst->data.ret.val, out);
+      fprintf(out, ";\n");
+    }
     break;
   default:
     break;
   }
 }
 
-static void emit_c_instructions(L1Block *block, FILE *out) {
+static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out) {
+  int is_void_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
+                      (!sub->ret_ty || sub->ret_ty->kind == TY_VOID));
   L1Instruction *inst = block->body;
   while (inst) {
     switch (inst->kind) {
@@ -293,8 +241,7 @@ static void emit_c_instructions(L1Block *block, FILE *out) {
       break;
     case INST_STORE: {
       L1Type *store_ty = inst->data.store.store_ty;
-      if (!store_ty)
-        store_ty = infer_expr_type(inst->data.store.val);
+      if (!store_ty) store_ty = infer_expr_type(inst->data.store.val);
       fprintf(out, "    *(");
       emit_c_type(store_ty, out);
       fprintf(out, "*)(");
@@ -328,7 +275,7 @@ static void emit_c_instructions(L1Block *block, FILE *out) {
       {
         L1Instruction *li = inst->data.if_stmt.then_body;
         while (li) {
-          emit_c_instruction(block, li, out);
+          emit_c_instruction(block, li, sub, out);
           li = li->next;
         }
       }
@@ -336,7 +283,7 @@ static void emit_c_instructions(L1Block *block, FILE *out) {
         fprintf(out, "    } else {\n");
         L1Instruction *li = inst->data.if_stmt.else_body;
         while (li) {
-          emit_c_instruction(block, li, out);
+          emit_c_instruction(block, li, sub, out);
           li = li->next;
         }
       }
@@ -352,9 +299,13 @@ static void emit_c_instructions(L1Block *block, FILE *out) {
       fprintf(out, ";\n");
       break;
     case INST_RETURN:
-      fprintf(out, "    return ");
-      emit_c_expr(inst->data.ret.val, out);
-      fprintf(out, ";\n");
+      if (is_void_main) {
+        fprintf(out, "    return 0;\n");
+      } else {
+        fprintf(out, "    return ");
+        emit_c_expr(inst->data.ret.val, out);
+        fprintf(out, ";\n");
+      }
       break;
     case INST_BREAK:
     default:
@@ -364,12 +315,17 @@ static void emit_c_instructions(L1Block *block, FILE *out) {
   }
 }
 
-static void emit_c_block_terminator(L1Block *block, FILE *out) {
+static void emit_c_block_terminator(L1Block *block, L1Subroutine *sub, FILE *out) {
   if (!block->terminator)
     return;
+  int is_void_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
+                      (!sub->ret_ty || sub->ret_ty->kind == TY_VOID));
   switch (block->terminator->kind) {
   case TERM_RETURN:
-    if (block->terminator->data.ret_val) {
+    // void main: C requires int main(), so emit return 0 instead of return void
+    if (is_void_main) {
+      fprintf(out, "    return 0;\n");
+    } else if (block->terminator->data.ret_val) {
       fprintf(out, "    return ");
       emit_c_expr(block->terminator->data.ret_val, out);
       fprintf(out, ";\n");
@@ -395,7 +351,6 @@ static void emit_c_block_terminator(L1Block *block, FILE *out) {
 static void emit_c_subroutine(L1Subroutine *sub, FILE *out) {
   if (!sub->blocks)
     return;
-  // Special-case: main with 0 params gets argc/argv injection
   int is_main = (strcmp(sub->name, "main") == 0 && sub->param_count == 0);
   if (is_main) {
     fprintf(out, "int main(int argc, char **argv) {\n");
@@ -410,20 +365,11 @@ static void emit_c_subroutine(L1Subroutine *sub, FILE *out) {
     fprintf(out, ") {\n");
   }
 
-  // Add native_set_args to forward declarations for main
-  if (is_main) {
-    // Pre-declare native_set_args in the forward declaration section
-    // (handled by native_emit_module_to_file)
-  }
-
-  // Emit blocks
   L1Block *block = sub->blocks;
-  int first_block = 1;
   while (block) {
     fprintf(out, "\nblock_%d:\n", block->id);
-    first_block = 0;
-    emit_c_instructions(block, out);
-    emit_c_block_terminator(block, out);
+    emit_c_instructions(block, sub, out);
+    emit_c_block_terminator(block, sub, out);
     block = block->next;
   }
   fprintf(out, "}\n\n");

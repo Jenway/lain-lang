@@ -38,22 +38,19 @@
          (_eof (syntax.cursor-expect-eof! cursor))
          (body-cursor (syntax.group-cursor body))
          (methods (interface.parse-methods body-cursor (list)))
-         (node (raw.node! '|interface|
-                 (record '|interface|
-                   (record.field '|attrs| attrs)
-                   (record.field '|generics| generics)
-                   (record.field '|where| where)
-                   (record.field '|methods| methods)))))
-    (decl.define! '|interface| name node)))
+         (inner-payload (record '|interface|
+                          (record.field '|attrs| attrs)
+                          (record.field '|generics| generics)
+                          (record.field '|where| where)
+                          (record.field '|methods| methods)))
+         (unified (raw.node! '|let|
+                    (record '|let|
+                      (record.field '|name| name)
+                      (record.field '|type-kind| '|interface|)
+                      (record.field '|payload| inner-payload)))))
+    (decl.define! '|let| name unified)))
 
-(define-pass (raw-normalizer |interface| decl)
-  (let* ((name (decl.name decl))
-         (raw (decl.payload decl))
-         (payload (raw.payload raw)))
-    (middle.node! '|middle.interface|
-      (record '|middle.interface|
-        (record.field '|name| name)
-        (record.field '|payload| payload)))))
+;; interface raw-normalizer 已迁至 let/normalize.scm 的统一分发器
 
 ;; ===========================================================================
 ;; Interface L1 降级 — 生成 VTable 结构体类型 + Dyn 胖指针类型
