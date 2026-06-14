@@ -10,11 +10,12 @@
 // ============================================================================
 
 static void emit_l1_type(L1Type *ty, FILE *out) {
-  if (!ty) { fprintf(out, "void"); return; }
+  if (!ty) { fprintf(out, "#unit"); return; }
   switch (ty->kind) {
   case TY_BITS:   fprintf(out, "i%d", ty->width); break;
   case TY_ADDR:   fprintf(out, "addr"); break;
-  case TY_VOID:   fprintf(out, "void"); break;
+  case TY_UNIT:   fprintf(out, "#unit"); break;
+  case TY_NEVER:  fprintf(out, "#never"); break;
   }
 }
 
@@ -116,7 +117,7 @@ static void emit_l1_terminator(L1Block *block, FILE *out) {
       emit_l1_expr(block->terminator->data.ret_val, out);
       fprintf(out, "\n");
     } else {
-      fprintf(out, "  return void\n");
+      fprintf(out, "  return #unit\n");
     }
     break;
   case TERM_BRANCH:

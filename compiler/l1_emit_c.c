@@ -189,8 +189,8 @@ static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out);
 
 // Helper: emit a single instruction (used for nested if bodies)
 static void emit_c_instruction(L1Block *block, L1Instruction *inst, L1Subroutine *sub, FILE *out) {
-  int is_void_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
-                      (!sub->ret_ty || sub->ret_ty->kind == TY_VOID));
+  int is_unit_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
+                      (!sub->ret_ty || sub->ret_ty->kind == TY_UNIT));
   switch (inst->kind) {
   case INST_SET:
     fprintf(out, "        auto %s = ", inst->data.set.name);
@@ -215,7 +215,7 @@ static void emit_c_instruction(L1Block *block, L1Instruction *inst, L1Subroutine
     fprintf(out, ";\n");
     break;
   case INST_RETURN:
-    if (is_void_main) {
+    if (is_unit_main) {
       fprintf(out, "        return 0;\n");
     } else {
       fprintf(out, "        return ");
@@ -229,8 +229,8 @@ static void emit_c_instruction(L1Block *block, L1Instruction *inst, L1Subroutine
 }
 
 static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out) {
-  int is_void_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
-                      (!sub->ret_ty || sub->ret_ty->kind == TY_VOID));
+  int is_unit_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
+                      (!sub->ret_ty || sub->ret_ty->kind == TY_UNIT));
   L1Instruction *inst = block->body;
   while (inst) {
     switch (inst->kind) {
@@ -299,7 +299,7 @@ static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out) {
       fprintf(out, ";\n");
       break;
     case INST_RETURN:
-      if (is_void_main) {
+      if (is_unit_main) {
         fprintf(out, "    return 0;\n");
       } else {
         fprintf(out, "    return ");
@@ -318,12 +318,12 @@ static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out) {
 static void emit_c_block_terminator(L1Block *block, L1Subroutine *sub, FILE *out) {
   if (!block->terminator)
     return;
-  int is_void_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
-                      (!sub->ret_ty || sub->ret_ty->kind == TY_VOID));
+  int is_unit_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
+                      (!sub->ret_ty || sub->ret_ty->kind == TY_UNIT));
   switch (block->terminator->kind) {
   case TERM_RETURN:
     // void main: C requires int main(), so emit return 0 instead of return void
-    if (is_void_main) {
+    if (is_unit_main) {
       fprintf(out, "    return 0;\n");
     } else if (block->terminator->data.ret_val) {
       fprintf(out, "    return ");

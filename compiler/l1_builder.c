@@ -120,7 +120,7 @@ static sexp sexp_core_make_addr(sexp ctx, sexp self, sexp_sint_t n) {
 
 static sexp sexp_core_make_unit(sexp ctx, sexp self, sexp_sint_t n) {
   L1Type *ty = malloc(sizeof(L1Type));
-  ty->kind = TY_VOID;
+  ty->kind = TY_UNIT;
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, ty, SEXP_FALSE, 0);
 }
 
@@ -356,7 +356,7 @@ static sexp sexp_core_function_by_name(sexp ctx, sexp self, sexp_sint_t n,
   ext->name = strdup(name);
   ext->link_name = NULL;
   ext->ret_ty = malloc(sizeof(L1Type));
-  ext->ret_ty->kind = TY_VOID;
+  ext->ret_ty->kind = TY_UNIT;
   ext->param_count = 2;
   ext->param_tys = malloc(sizeof(L1Type *) * 2);
   ext->param_tys[0] = malloc(sizeof(L1Type));
@@ -594,7 +594,7 @@ static sexp sexp_core_cond_branch(sexp ctx, sexp self, sexp_sint_t n,
 static sexp sexp_core_type_is_void(sexp ctx, sexp self, sexp_sint_t n,
                                    sexp arg_ty) {
   L1Type *ty = (L1Type *)sexp_cpointer_value(arg_ty);
-  return (ty && ty->kind == TY_VOID) ? SEXP_TRUE : SEXP_FALSE;
+  return (ty && ty->kind == TY_UNIT) ? SEXP_TRUE : SEXP_FALSE;
 }
 
 
