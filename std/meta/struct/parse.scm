@@ -45,7 +45,7 @@
                       (record.field '|name| name)
                       (record.field '|type-kind| '|struct|)
                       (record.field '|payload| inner-payload)))))
-    (decl.define! '|let| name unified)))
+    (decl.define-dup-checked! '|let| name unified)))
 
 ;; ── 字面量字段解析: { field: value, ... } ──
 

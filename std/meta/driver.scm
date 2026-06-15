@@ -5,6 +5,7 @@
 ;; ═══ 0. 基础设施 ═══
 (load "std/meta/prelude/base.scm")
 (load "std/meta/prelude/quote.scm")
+(load "std/meta/prelude/check.scm")
 
 ;; ═══ 1. pipeline 调度 + core 调度总线 ═══
 (load "std/meta/pipeline/driver.scm")

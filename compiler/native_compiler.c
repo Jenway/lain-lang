@@ -4,30 +4,33 @@
 #include <string.h>
 #include <alloca.h>
 
-static void run_pipeline_for(const void* input_path) {
+static int32_t run_pipeline_for(const void* input_path) {
     native_set_source_path(input_path);
     const uint8_t* src = (const uint8_t*)native_read_file(input_path);
     uint32_t len = native_file_len();
     void* root_group = native_lex_and_group(src, len);
     void* ctx = native_init_scheme();
-    native_run_pipeline(ctx, root_group);
+    return native_run_pipeline(ctx, root_group);
 }
 
 uint32_t compile(const void* arg0, const void* arg1) {
-    run_pipeline_for(arg0);
+    int32_t result = run_pipeline_for(arg0);
+    if (result != 0) return result;
     void* subs = native_get_subroutines();
     native_emit_module_to_file(subs, arg1);
     return 0;
 }
 
 uint32_t compile_l1(const void* arg0, const void* arg1) {
-    run_pipeline_for(arg0);
+    int32_t result = run_pipeline_for(arg0);
+    if (result != 0) return result;
     native_emit_l1_module(arg1);
     return 0;
 }
 
 uint32_t compile_manifest(const void* arg0, const void* arg1) {
-    run_pipeline_for(arg0);
+    int32_t result = run_pipeline_for(arg0);
+    if (result != 0) return result;
     native_emit_manifest(arg1);
     return 0;
 }

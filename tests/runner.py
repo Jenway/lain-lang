@@ -144,15 +144,17 @@ def run_pass_tests():
             log_failure(name, f"GCC compilation failed.\n{gcc_res.stderr}")
             continue
 
-        # 3. 运行并验证
-        run_res = subprocess.run([out_bin], capture_output=True, text=True)
+        # 3. 运行并验证 (capture as bytes to handle potential binary output)
+        run_res = subprocess.run([out_bin], capture_output=True)
+        stdout_text = run_res.stdout.decode('utf-8', errors='replace')
+        stderr_text = run_res.stderr.decode('utf-8', errors='replace')
 
         failures = []
         if run_res.returncode != expected["exit"]:
             failures.append(f"exit code: expected {expected['exit']}, got {run_res.returncode}")
-        if expected["stdout"] is not None and expected["stdout"] not in run_res.stdout:
+        if expected["stdout"] is not None and expected["stdout"] not in stdout_text:
             failures.append(f"stdout missing: '{expected['stdout']}'")
-        if expected["stderr"] is not None and expected["stderr"] not in run_res.stderr:
+        if expected["stderr"] is not None and expected["stderr"] not in stderr_text:
             failures.append(f"stderr missing: '{expected['stderr']}'")
 
         if failures:

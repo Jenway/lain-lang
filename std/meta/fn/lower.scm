@@ -79,7 +79,10 @@
     (if (optional.none? body) unit
         (let* ((name (optional.value (record.get payload '|name|)))
                (params (optional.value (record.get payload '|params|)))
-               (effects (optional.value (record.get payload '|effects|)))
+               (effects-opt (record.get payload '|effects|))
+               ;; Validate effects before lowering
+               (_ (validate-effects! effects-opt))
+               (effects (optional.value effects-opt))
                (raw-ret (core.lower-type (optional.value (record.get payload '|return|))))
                (ret (if (fn.effects-contains-throws? effects)
                         (fn.make-throws-product raw-ret (fn.throws-error-type effects))
