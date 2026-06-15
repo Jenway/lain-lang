@@ -9,6 +9,11 @@
 
 // main.lain compiled functions (bootstrap doesn't forward-declare them)
 uint32_t compile(const void *input_path, const void *output_path);
+uint32_t compile_manifest(const void *input_path, const void *output_path);
+uint32_t compile_l1(const void *input_path, const void *output_path);
+int32_t native_build_with_funcs(const char *root_path, const char *output_path,
+    uint32_t (*compile_fn)(const void*, const void*),
+    uint32_t (*manifest_fn)(const void*, const void*));
 
 // byte reading (used by lexer.lain)
 uint8_t read_byte_at(const uint8_t *ptr, size_t offset);
@@ -33,10 +38,15 @@ int32_t native_run_pipeline(void *ctx, void *root_group);
 // codegen (codegen_c.lain wrappers call these)
 void native_emit_module_to_file(void *subs, const char *output_path);
 void native_emit_l1_module(const char *output_path);
+void native_emit_manifest(const char *output_path);
 void *native_get_subroutines(void);
 
 // environment
 const char *native_getenv(const char *name);
+
+// module prefix (for @foreign(lain) name mangling)
+void native_set_source_path(const char *path);
+const char *native_get_module_prefix(void);
 
 uint32_t compile_impl(void *ctx, void *root_group, void *output_path);
 

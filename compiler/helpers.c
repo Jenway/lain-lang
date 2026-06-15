@@ -246,6 +246,7 @@ static void native_inject_all_polyfills(sexp ctx, sexp env) {
       "(define type.product-field-type (lambda (product field-name)"
       "  (core.struct-field-type-from-type product field-name)))");
   native_eval_string(ctx, env, "(define type.product-field-types (lambda (product) '()))");
+  native_eval_string(ctx, env, "(define type.product-name (lambda (ty) #f))");
   native_eval_string(ctx, env, "(define string-byte-len string-length)");
 
   // 13. core.* Scheme polyfills (non-FFI)
@@ -442,6 +443,252 @@ static sexp sexp_read_file_forms(sexp ctx, sexp self, sexp_sint_t n,
   return sexp_exceptionp(result) ? SEXP_FALSE : result;
 }
 
+// ── Manifest helper: read file as raw string (no lexing) ──
+
+static sexp sexp_read_file_string(sexp ctx, sexp self, sexp_sint_t n,
+                                   sexp arg_path) {
+  const char *path = sexp_string_data(arg_path);
+  const uint8_t *data = native_read_file(path);
+  if (!data) return SEXP_FALSE;
+  uint32_t len = native_file_len();
+  return sexp_c_string(ctx, (const char *)data, len);
+}
+
+// ── Manifest parser: read .manifest file, parse S-expr, return exports list ──
+// Given a source .lain path like "compiler/args.lain", reads
+// "compiler/args.lain.manifest", and returns the parsed (module ...) S-expression.
+
+static sexp sexp_read_manifest(sexp ctx, sexp self, sexp_sint_t n,
+                                sexp arg_source_path) {
+  const char *source_path = sexp_string_data(arg_source_path);
+  char manifest_path[2048];
+  snprintf(manifest_path, sizeof(manifest_path), "%s.manifest", source_path);
+  const uint8_t *data = native_read_file(manifest_path);
+  if (!data) return SEXP_FALSE;
+  uint32_t len = native_file_len();
+  return sexp_read_from_string(ctx, (const char *)data, len);
+}
+
+// ── Build driver: compute compilation order via simple C scanning ──
+// Scans source files for `import <path>;` statements using string matching,
+// then does topological sort in C. Returns a Scheme list of file paths.
+
+static sexp sexp_build_compute_order(sexp ctx, sexp self, sexp_sint_t n,
+                                      sexp arg_root_path) {
+  const char *root_path = sexp_string_data(arg_root_path);
+
+  // Simple graph: array of {path, imports[], import_count, visited}
+  #define MAX_MODULES 64
+  #define MAX_IMPORTS 16
+  typedef struct {
+    char *path;
+    char *imports[MAX_IMPORTS];
+    int import_count;
+    int scanned;  // 0=not scanned, 1=scanned
+    int visited;  // 0=unvisited, 1=visiting, 2=done (for topo sort)
+  } BuildNode;
+  BuildNode nodes[MAX_MODULES];
+  int node_count = 0;
+
+  // Helper: find or create node
+  int find_node(const char *p) {
+    for (int i = 0; i < node_count; i++)
+      if (strcmp(nodes[i].path, p) == 0) return i;
+    if (node_count >= MAX_MODULES) return -1;
+    nodes[node_count].path = strdup(p);
+    nodes[node_count].import_count = 0;
+    nodes[node_count].scanned = 0;
+    nodes[node_count].visited = 0;
+    return node_count++;
+  }
+
+  // Helper: scan file for imports
+  void scan_file(const char *path, int node_idx) {
+    const uint8_t *data = native_read_file(path);
+    if (!data) return;
+    const char *s = (const char*)data;
+    while (*s) {
+      // Skip whitespace and comments
+      while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+      if (*s == '/' && s[1] == '/') {
+        while (*s && *s != '\n') s++;
+        continue;
+      }
+      // Look for "import "
+      if (strncmp(s, "import ", 7) == 0 || strncmp(s, "import\t", 7) == 0) {
+        s += 6; // skip "import"
+        while (*s == ' ' || *s == '\t') s++;
+        // Read module path: ident (:: ident)* ;
+        char mod_path[512];
+        int mp_len = 0;
+        while (*s && *s != ';' && *s != '\n') {
+          if (*s == ':' && s[1] == ':') {
+            mod_path[mp_len++] = '/';
+            s += 2;
+          } else if (*s != ' ' && *s != '\t') {
+            mod_path[mp_len++] = *s;
+            s++;
+          } else {
+            s++;
+          }
+        }
+        mod_path[mp_len] = '\0';
+        if (mp_len > 0) {
+          // Convert to "mod/path.lain"
+          char full[1024];
+          snprintf(full, sizeof(full), "%s.lain", mod_path);
+          // Add to node's imports
+          if (nodes[node_idx].import_count < MAX_IMPORTS)
+            nodes[node_idx].imports[nodes[node_idx].import_count++] = strdup(full);
+          // Recursively scan
+          int dep_idx = find_node(full);
+          if (nodes[dep_idx].scanned == 0) {
+            nodes[dep_idx].scanned = 1;
+            scan_file(full, dep_idx);
+          }
+        }
+        while (*s && *s != ';') s++;
+        if (*s == ';') s++;
+      } else {
+        s++;
+      }
+    }
+  }
+
+  // DFS topological sort
+  int sorted[MAX_MODULES];
+  int sorted_count = 0;
+
+  int dfs(int idx) {
+    if (nodes[idx].visited == 2) return 0; // already done
+    if (nodes[idx].visited == 1) return -1; // cycle!
+    nodes[idx].visited = 1;
+    for (int j = 0; j < nodes[idx].import_count; j++) {
+      // Find the node index for this import
+      for (int k = 0; k < node_count; k++) {
+        if (strcmp(nodes[k].path, nodes[idx].imports[j]) == 0) {
+          if (dfs(k) != 0) return -1;
+          break;
+        }
+      }
+    }
+    nodes[idx].visited = 2;
+    sorted[sorted_count++] = idx;
+    return 0;
+  }
+
+  // Seed: find or create root node
+  int root_idx = find_node(root_path);
+  nodes[root_idx].scanned = 1;
+  scan_file(root_path, root_idx);
+
+  // Topological sort all nodes
+  for (int i = 0; i < node_count; i++) {
+    if (dfs(i) != 0) {
+      return sexp_user_exception(ctx, NULL, "build: circular dependency", SEXP_NULL);
+    }
+  }
+
+  // Build Scheme list from sorted order (reverse to get correct order)
+  sexp result = SEXP_NULL;
+  for (int i = sorted_count - 1; i >= 0; i--) {
+    int idx = sorted[i];
+    result = sexp_cons(ctx, sexp_c_string(ctx, nodes[idx].path, -1), result);
+  }
+
+  // Cleanup
+  for (int i = 0; i < node_count; i++) {
+    free(nodes[i].path);
+    for (int j = 0; j < nodes[i].import_count; j++)
+      free(nodes[i].imports[j]);
+  }
+
+  return result;
+}
+
+// ── Build driver: full multi-file build ──
+// Steps: compute order (Scheme) → compile each module → gcc link
+// compile_fn and manifest_fn are provided by the caller (native_compiler.c)
+
+int32_t native_build_with_funcs(const char *root_path, const char *output_path,
+    uint32_t (*compile_fn)(const void*, const void*),
+    uint32_t (*manifest_fn)(const void*, const void*)) {
+  fprintf(stderr, "[build] computing dependency graph for: %s\n", root_path);
+
+  // Step 1: Initialize Scheme and compute build order
+  void *ctx = native_init_scheme();
+  if (!ctx) return 1;
+  sexp sc = (sexp)ctx;
+  sexp env = sexp_context_env(sc);
+  sexp proc = sexp_env_ref(sc, env,
+                           sexp_intern(sc, "core.build-compute-order!", -1),
+                           SEXP_FALSE);
+  sexp root_str = sexp_c_string(sc, root_path, -1);
+  sexp order_list = sexp_apply(sc, proc, sexp_list1(sc, root_str));
+  if (sexp_exceptionp(order_list)) {
+    fprintf(stderr, "[build] compute-order failed\n");
+    return 1;
+  }
+
+  // Step 2: Collect paths
+  int n = 0;
+  sexp curr = order_list;
+  while (sexp_pairp(curr)) { n++; curr = sexp_cdr(curr); }
+  fprintf(stderr, "[build] %d modules in order\n", n);
+
+  char **src = malloc(sizeof(char*) * n);
+  char **obj = malloc(sizeof(char*) * n);
+  curr = order_list;
+  for (int i = 0; i < n; i++) {
+    src[i] = strdup(sexp_string_data(sexp_car(curr)));
+    // Generate .o in /tmp/lain_build/
+    const char *s = src[i], *slash = strrchr(s, '/');
+    if (slash) s = slash + 1;
+    char *stem = strdup(s);
+    char *dot = strstr(stem, ".lain"); if (dot) *dot = 0;
+    char buf[512];
+    snprintf(buf, sizeof(buf), "/tmp/lain_build/%s.o", stem);
+    obj[i] = strdup(buf);
+    free(stem);
+    curr = sexp_cdr(curr);
+  }
+  system("mkdir -p /tmp/lain_build 2>/dev/null");
+
+  // Step 3: Generate manifest + compile each module
+  for (int i = 0; i < n; i++) {
+    fprintf(stderr, "[build] %d/%d: %s\n", i+1, n, src[i]);
+    // Manifest goes next to source (so import resolution finds it)
+    char mf[1024];
+    snprintf(mf, sizeof(mf), "%s.manifest", src[i]);
+    manifest_fn(src[i], mf);
+    // Compile to .c then gcc -c to .o
+    char cf[1024];
+    snprintf(cf, sizeof(cf), "/tmp/lain_build/tmp_%d.c", i);
+    compile_fn(src[i], cf);
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "gcc -c %s -o %s -I. 2>&1", cf, obj[i]);
+    system(cmd);
+  }
+
+  // Step 4: Link
+  fprintf(stderr, "[build] linking → %s\n", output_path);
+  char link[8192];
+  int pos = snprintf(link, sizeof(link), "gcc -o %s ", output_path);
+  for (int i = 0; i < n; i++)
+    pos += snprintf(link + pos, sizeof(link) - pos, "%s ", obj[i]);
+  pos += snprintf(link + pos, sizeof(link) - pos,
+    "compiler/helpers.c "
+    "-Ibootstrap/chibi-scheme/include "
+    "-Lbootstrap/chibi-scheme -lchibi-scheme -lm -ldl "
+    "-Wl,-rpath,$PWD/bootstrap/chibi-scheme");
+  fprintf(stderr, "[build] %s\n", link);
+  int ret = system(link);
+
+  for (int i = 0; i < n; i++) { free(src[i]); free(obj[i]); }
+  free(src); free(obj);
+  return ret ? 1 : 0;
+}
+
 // Environment variable access
 const char *native_getenv(const char *name) { return getenv(name); }
 
@@ -466,6 +713,24 @@ void *native_lex_and_group(const uint8_t *src, uint32_t len) {
   memcpy(g_pending_src, src, len);
   g_pending_len = len;
   return (void *)1; // dummy non-NULL
+}
+
+// ── Scheme FFI wrappers for module prefix (must be before native_init_scheme) ──
+
+// Forward declarations for native functions defined later
+void native_set_source_path(const char *path);
+const char *native_get_module_prefix(void);
+
+static sexp sexp_set_module_prefix(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp arg_path) {
+  const char *path = sexp_string_data(arg_path);
+  native_set_source_path(path);
+  return SEXP_VOID;
+}
+
+static sexp sexp_get_module_prefix(sexp ctx, sexp self, sexp_sint_t n) {
+  const char *prefix = native_get_module_prefix();
+  return sexp_c_string(ctx, prefix, -1);
 }
 
 // Initialize Scheme environment, register all FFI functions, load meta passes
@@ -556,6 +821,13 @@ void *native_init_scheme(void) {
   REG("core.emit-l1!", 2, sexp_core_emit_l1);
   REG("core.lex-to-sexp!", 2, sexp_lex_to_sexp);
   REG("core.read-file-forms!", 1, sexp_read_file_forms);
+  REG("core.read-file-string!", 1, sexp_read_file_string);
+  REG("core.read-manifest!", 1, sexp_read_manifest);
+  REG("core.build-compute-order!", 1, sexp_build_compute_order);
+  REG("core.set-module-prefix!", 1, sexp_set_module_prefix);
+  REG("core.module-prefix", 0, sexp_get_module_prefix);
+  REG("core.set-function-link-name!", 2, sexp_core_set_function_link_name);
+  REG("core.emit-manifest!", 1, sexp_core_emit_manifest);
 
 #undef REG
   fprintf(stderr, "[init] 4: FFI registered\n");
@@ -751,3 +1023,27 @@ const char *native_get_arg(int32_t idx) {
     return NULL;
   return g_native_argv[idx];
 }
+
+// ── Module name extraction for @foreign(lain) name mangling ───────────────────
+
+static const char *g_source_path = NULL;
+static char g_module_prefix[256] = "";
+
+void native_set_source_path(const char *path) {
+  g_source_path = path;
+  // Extract module name: strip directory + .lain extension
+  const char *basename = strrchr(path, '/');
+  if (!basename) basename = path;
+  else basename++;
+  const char *dot = strrchr(basename, '.');
+  size_t len = dot ? (size_t)(dot - basename) : strlen(basename);
+  if (len > 200) len = 200;
+  memcpy(g_module_prefix, basename, len);
+  g_module_prefix[len] = '\0';
+}
+
+const char *native_get_module_prefix(void) {
+  if (g_module_prefix[0] == '\0') return "";
+  return g_module_prefix;
+}
+

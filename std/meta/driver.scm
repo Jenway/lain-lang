@@ -60,6 +60,7 @@
 (load "std/meta/control/helpers.scm")
 (load "std/meta/control/lower.scm")
 (load "std/meta/control/infer.scm")
+(load "std/meta/control/match.scm")
 
 (load "std/meta/effects/parse.scm")
 (load "std/meta/effects/form.scm")
@@ -85,6 +86,8 @@
 
 (load "std/meta/import/parse.scm")
 (load "std/meta/import/lower.scm")
+(load "std/meta/build/scan.scm")
+(load "std/meta/build/sort.scm")
 (load "std/meta/literals/lower.scm")
 (load "std/meta/io/println.scm")
 

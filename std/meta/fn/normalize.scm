@@ -16,6 +16,7 @@
   (middle.node! middle-kind
     (record middle-kind
       (record.field '|name| name)
+      (record.field '|public| (record.get payload '|public|))
       (record.field '|attrs| (optional.value (record.get payload '|attrs|)))
       (record.field '|params| (middle.normalize-params (optional.value (record.get payload '|params|)) (list)))
       (record.field '|return| (middle.normalize-type (optional.value (record.get payload '|return|))))

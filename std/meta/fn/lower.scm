@@ -92,7 +92,16 @@
                               param-types)))
           ;; Store real return type in Scheme table (avoids C-side type storage)
           (fn-return-type! name ret)
-          (core.begin-function! name c-params c-ret)))))
+          (core.begin-function! name c-params c-ret)
+          ;; Name mangling: pub fn gets C-level link_name (e.g., add → io_add)
+          ;; Internal name stays unmangled for intra-module lookups.
+          (let* ((public (record.get payload '|public|))
+                 (is-public (and (optional.some? public) (optional.value public))))
+            (if is-public
+                (core.set-function-link-name! name
+                  (string-append (core.module-prefix) "_"
+                                 (symbol->string name)))
+                unit))))))
 
 (define-pass (core-declarer |middle.foreign-fn| item)
   (let* ((payload (middle.payload item)) (name (optional.value (record.get payload '|name|)))

@@ -5,6 +5,7 @@
  */
 
 #include "l1_types.h"
+#include "native_runtime.h"
 
 
 // ============================================================================
@@ -308,6 +309,42 @@ static sexp sexp_core_emit_l1(sexp ctx, sexp self, sexp_sint_t n,
                                sexp arg_subs, sexp arg_path) {
   const char *path = sexp_to_c_string(ctx, arg_path);
   native_emit_l1_module(path);
+  return SEXP_VOID;
+}
+
+// ── Manifest emission: walk subroutines, dump pub fn signatures as S-expr ──
+
+void native_emit_manifest(const char *output_path) {
+  FILE *out = fopen(output_path, "w");
+  if (!out) {
+    fprintf(stderr, "Error: cannot open manifest output: %s\n", output_path);
+    return;
+  }
+  const char *prefix = native_get_module_prefix();
+  fprintf(out, "(module %s\n  (exports\n", prefix[0] ? prefix : "unknown");
+  L1Subroutine *sub = g_subroutines_head;
+  while (sub) {
+    // Only pub fn: has link_name (mangled), is not extern (@foreign), has body
+    if (sub->link_name && !sub->is_extern && sub->blocks) {
+      fprintf(out, "    (fn %s (", sub->link_name);
+      for (uint32_t i = 0; i < sub->param_count; i++) {
+        emit_l1_type(sub->param_tys[i], out);
+        if (i < sub->param_count - 1) fprintf(out, " ");
+      }
+      fprintf(out, ") -> ");
+      emit_l1_type(sub->ret_ty, out);
+      fprintf(out, ")\n");
+    }
+    sub = sub->next;
+  }
+  fprintf(out, "  ))\n");
+  fclose(out);
+}
+
+static sexp sexp_core_emit_manifest(sexp ctx, sexp self, sexp_sint_t n,
+                                      sexp arg_path) {
+  const char *path = sexp_to_c_string(ctx, arg_path);
+  native_emit_manifest(path);
   return SEXP_VOID;
 }
 
