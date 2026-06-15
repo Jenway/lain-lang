@@ -37,7 +37,9 @@
                  (record '|effect|
                    (record.field '|attrs| attrs)
                    (record.field '|operations| operations)))))
-    (decl.define! '|effect| name node)))
+    ;; Register in Scheme-side effect registry for validation
+    (register-effect-ctor! name 0)
+    (decl.define-dup-checked! '|effect| name node)))
 
 (define-pass (raw-normalizer |effect| decl)
   (middle.normalize-plain-decl decl '|middle.effect|))

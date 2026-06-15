@@ -57,7 +57,7 @@
                       (record.field '|name| name)
                       (record.field '|type-kind| '|fn|)
                       (record.field '|payload| sig-payload)))))
-    (if (fn.cfg-enabled? attrs) (decl.define! '|let| name unified) unit)))
+    (if (fn.cfg-enabled? attrs) (decl.define-dup-checked! '|let| name unified) unit)))
 
 (define-pass (form-parser |pub| form)
   (let* ((cursor (syntax.form-cursor form))
@@ -83,7 +83,7 @@
                                (record.field '|name| name)
                                (record.field '|type-kind| '|fn|)
                                (record.field '|payload| sig-payload)))))
-             (if (fn.cfg-enabled? attrs) (decl.define! '|let| name unified) unit)))
+             (if (fn.cfg-enabled? attrs) (decl.define-dup-checked! '|let| name unified) unit)))
           ((symbol=? (optional.value next) '|struct|)
            (let* ((name (syntax.cursor-expect-ident! cursor))
                   (generics (parse-generic-params cursor)) (where (parse-where cursor))
@@ -100,7 +100,7 @@
                                (record.field '|name| name)
                                (record.field '|type-kind| '|struct|)
                                (record.field '|payload| inner-payload)))))
-             (if (fn.cfg-enabled? attrs) (decl.define! '|let| name unified) unit)))
+             (if (fn.cfg-enabled? attrs) (decl.define-dup-checked! '|let| name unified) unit)))
           (else unit))))
 
 (define (pub.struct-parse-fields cursor acc)

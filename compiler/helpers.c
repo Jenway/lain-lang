@@ -811,6 +811,7 @@ void *native_init_scheme(void) {
   REG("core.field-offset!", 4, sexp_core_field_offset);
   REG("core.aggregate-layout!", 3, sexp_core_aggregate_layout);
   REG("core.call-indirect!", 4, sexp_core_call_indirect);
+  REG("core.function-ref!", 1, sexp_core_function_ref);
   REG("core.declare-extern-function!", 4, sexp_core_declare_extern_function);
   REG("core.call-expr!", 3, sexp_core_call_expr);
   REG("core.set-current-block!", 1, sexp_core_set_current_block);
@@ -873,6 +874,7 @@ int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
 
   // Clear previous declarations
   sexp_eval_string(ctx, "(set! *lain-declarations* (list))", -1, env);
+  sexp_eval_string(ctx, "(set! *all-declarations* '())", -1, env);
 
   // Use Scheme-side lexer (meta.lex-source!) to tokenize + group + split
   // into forms. This replaces the old C-side lex_one_token_from_mem +

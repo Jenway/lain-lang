@@ -44,7 +44,7 @@
                       (record.field '|name| name)
                       (record.field '|type-kind| '|enum|)
                       (record.field '|payload| inner-payload)))))
-    (decl.define! '|let| name unified)))
+    (decl.define-dup-checked! '|let| name unified)))
 
 ;; enum raw-normalizer 已迁至 let/normalize.scm 的统一分发器
 

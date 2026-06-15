@@ -10,6 +10,7 @@
  */
 
 #include "l1_types.h"
+#include "native_runtime.h"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Global State Definition
@@ -95,7 +96,7 @@ void scratch_terminator_to_inst(L1Block *block) {
 }
 
 // Convert Scheme symbol/string to C string
-static const char *sexp_to_c_string(sexp ctx, sexp val) {
+const char *sexp_to_c_string(sexp ctx, sexp val) {
   if (sexp_symbolp(val))
     return sexp_string_data(sexp_symbol_to_string(ctx, val));
   if (sexp_stringp(val))
@@ -786,6 +787,18 @@ static sexp sexp_core_call_indirect(sexp ctx, sexp self, sexp_sint_t n,
   expr->data.call_indirect.args = args;
   expr->data.call_indirect.arg_count = arg_count;
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
+}
+
+static sexp sexp_core_function_ref(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp arg_name) {
+  const char *name = sexp_to_c_string(ctx, arg_name);
+  L1Expr *var = malloc(sizeof(L1Expr));
+  var->kind = EXPR_VAR;
+  var->data.var.name = strdup(name);
+  var->data.var.ty = malloc(sizeof(L1Type));
+  var->data.var.ty->kind = TY_ADDR;
+  var->data.var.ty->width = 64;
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, var, SEXP_FALSE, 0);
 }
 
 // ============================================================================
