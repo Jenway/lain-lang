@@ -54,6 +54,8 @@
        (core.lower-if-tail-expr block expr ret-ty locals))
       ((symbol=? (middle.kind expr) '|middle.expr.handle|)
        (core.lower-handle-tail-expr block expr ret-ty locals))
+      ((symbol=? (middle.kind expr) '|middle.expr.match|)
+       (match.lower-tail-expr block expr ret-ty locals))
       (else
        (if (type.unit? ret-ty)
            (begin (core.lower-expr block expr ret-ty locals) (core.return-none! block))
@@ -80,6 +82,9 @@
       ((symbol=? (middle.kind expr) '|middle.expr.handle|)
        (core.lower-handle-tail-expr block expr ret-ty locals)
        (core.set-current-block! block))
+      ((symbol=? (middle.kind expr) '|middle.expr.match|)
+       (match.lower-tail-expr block expr ret-ty locals)
+       (core.set-current-block! block))
       (else
        (core.lower-expr block expr (core.infer-expr-type expr locals) locals)))
     locals))
@@ -92,9 +97,34 @@
          (value-expr (optional.value (record.get payload '|value|)))
          (ty (if (optional.none? ty-option) (core.infer-expr-type value-expr locals)
                  (core.lower-type (optional.value ty-option))))
-         (value (core.lower-expr block value-expr ty locals)))
+         ;; For call expressions, use call-expr! (no emit) + assign-temp!
+         ;; to avoid double emission of the call instruction.
+         ;; For non-call expressions (paths, constants), lower-expr is fine
+         ;; because it doesn't emit side-effecting instructions.
+         (expr-kind (middle.kind value-expr))
+         (var (if (symbol=? expr-kind '|middle.expr.call|)
+                  (let* ((call-payload (middle.payload value-expr))
+                         (callee (optional.value (record.get call-payload '|callee|)))
+                         (args (optional.value (record.get call-payload '|args|)))
+                         (callee-payload (middle.payload callee))
+                         (path (optional.value (record.get callee-payload '|path|)))
+                         (fn-name (core.path-fn-name path))
+                         (intrinsic (core.invoke-intrinsic! fn-name)))
+                    (if (optional.some? intrinsic)
+                        ;; Intrinsic: let core.lower-expr handle it (e.g. load/store)
+                        (let* ((value (core.lower-expr block value-expr ty locals)))
+                          (core.assign-temp! block value))
+                        ;; Regular call: use call-expr! to avoid double emission
+                        (let* ((function (core.function-by-name fn-name))
+                               (lowered-args (core.lower-args block args
+                                                (core.function-param-types function)
+                                                locals (list)))
+                               (call-expr (core.call-expr! block function lowered-args)))
+                          (core.assign-temp! block call-expr))))
+                  (let* ((value (core.lower-expr block value-expr ty locals)))
+                    (core.assign-temp! block value)))))
     (list.cons (record '|local| (record.field '|name| name) (record.field '|type| ty)
-                 (record.field '|mutable| mutable) (record.field '|value| value)) locals)))
+                 (record.field '|mutable| mutable) (record.field '|value| var)) locals)))
 
 (define-pass (core-stmt-lowerer |middle.stmt.assign| block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt)) (target (optional.value (record.get payload '|target|)))
@@ -120,3 +150,54 @@
              (current (core.get-current-block)))
         (if (list.empty? (list.rest stmts)) unit
             (core.lower-stmts current (list.rest stmts) ret-ty next-locals)))))
+
+;; ── Match expression lowering ──
+
+;; Helper: lower match arms into cond_br chain
+;; Each non-wildcard arm compares the tag discriminant and branches.
+;; The wildcard arm (_) is the fallthrough default.
+(define (match.lower-arms-helper block tag-val arms ret-ty locals)
+  (if (list.empty? arms)
+      (core.return-none! block)
+      (let* ((arm (list.first arms))
+             (pattern-kind (optional.value (record.get arm '|pattern-kind|)))
+             (pattern-name (optional.value (record.get arm '|pattern-name|)))
+             (body (optional.value (record.get arm '|body|)))
+             (body-items (optional.value (record.get (middle.payload body) '|items|)))
+             (rest-arms (list.rest arms)))
+        (if (symbol=? pattern-kind '|match.pattern.wildcard|)
+            ;; Wildcard/default arm — lower body directly in current block
+            (core.lower-stmts block body-items ret-ty locals)
+            ;; Named variant arm — compare tag to discriminant, branch
+            (let* ((variant-info (enum.lookup-variant pattern-name)))
+              (if (not variant-info)
+                  (type.unsupported '|unknown-variant|)
+                  (let* ((discriminant (cdr variant-info))
+                         (function (core.block-function block))
+                         (arm-block (core.append-block! function))
+                         (next-block (core.append-block! function))
+                         (disc-const (core.const-bits! block (core.make-bits 8) discriminant))
+                         (is-match (core.primitive! block '|integer.eq| (list tag-val disc-const) (core.make-bits 1))))
+                    (core.cond-branch! block is-match arm-block next-block)
+                    ;; Arm body
+                    (core.set-current-block! arm-block)
+                    (core.lower-stmts arm-block body-items ret-ty locals)
+                    ;; Continue with next arms
+                    (core.set-current-block! next-block)
+                    (match.lower-arms-helper next-block tag-val rest-arms ret-ty locals))))))))
+
+;; Lower a match expression as a tail expression.
+;; 1. Lower scrutinee as addr (enum struct)
+;; 2. Extract tag field at offset 0
+;; 3. Delegate to match.lower-arms-helper for cond_br chain
+(define (match.lower-tail-expr block expr ret-ty locals)
+  (let* ((payload (middle.payload expr))
+         (scrutinee (optional.value (record.get payload '|scrutinee|)))
+         (arms (optional.value (record.get payload '|arms|)))
+         ;; Lower scrutinee as addr — enums are tagged union structs
+         (scrutinee-val (core.lower-expr block scrutinee (type.addr) locals))
+         ;; Extract tag field: offset 0, 8-bit discriminant
+         (tag-ty (core.make-bits 8))
+         (tag-val (core.field-offset! block scrutinee-val 0 tag-ty)))
+    (match.lower-arms-helper block tag-val arms ret-ty locals)))
+
