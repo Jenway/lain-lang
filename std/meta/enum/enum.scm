@@ -105,6 +105,26 @@
             (struct-field __data (number 0)))))))
 
 ;; Phase 1: core-declarer — 声明 tagged union 结构体 + variant 构造函数签名
+
+;; ── Variant → index mapping for match lowering ──
+;; Alist: ((variant-name . (enum-name . index)) ...)
+(define *variant-to-index* (list))
+
+(define (enum.register-variant! variant-name enum-name index)
+  (set! *variant-to-index*
+        (cons (cons variant-name (cons enum-name index))
+              *variant-to-index*)))
+
+(define (enum.lookup-variant-helper entries variant-name)
+  (if (null? entries)
+      #f
+      (if (symbol=? (caar entries) variant-name)
+          (cdar entries)
+          (enum.lookup-variant-helper (cdr entries) variant-name))))
+
+(define (enum.lookup-variant variant-name)
+  (enum.lookup-variant-helper *variant-to-index* variant-name))
+
 (define (enum.declare-variant-ctors enum-name variants index)
   (if (list.empty? variants)
       unit
@@ -113,12 +133,14 @@
              (variant-name (optional.value
                              (record.get variant-payload '|name|)))
              (ctor-name (enum.ctor-name enum-name variant-name))
-             (enum-ty (struct-type enum-name))
+             (enum-ty (type.addr))  ;; C-side only sees addr for structs
              (payload (record.get variant-payload '|payload|))
              (param-types (if (optional.some? payload)
                               (list (enum.resolve-type
                                       (optional.value payload)))
                               (list))))
+        ;; Record variant → index mapping for match lowering
+        (enum.register-variant! variant-name enum-name index)
         (core.begin-function!
           ctor-name
           param-types
@@ -158,7 +180,7 @@
              (ctor-name (enum.ctor-name enum-name variant-name))
              (fn (core.function-by-name ctor-name))
              (block (core.append-block! fn))
-             (ret-ty (struct-type enum-name))
+             (ret-ty (type.addr))  ;; C-side only sees addr for structs
              (has-payload (record.get variant-payload '|payload|))
              (locals (if (optional.some? has-payload)
                         (enum.bind-ctor-param fn variant)

@@ -357,7 +357,7 @@ static void emit_c_subroutine(L1Subroutine *sub, FILE *out) {
     fprintf(out, "    native_set_args(argc, argv);\n");
   } else {
     emit_c_type(sub->ret_ty, out);
-    fprintf(out, " %s(", sub->name);
+    fprintf(out, " %s(", sub->link_name ? sub->link_name : sub->name);
     for (uint32_t i = 0; i < sub->param_count; i++) {
       emit_c_type(sub->param_tys[i], out);
       fprintf(out, " arg%d%s", i, (i == sub->param_count - 1) ? "" : ", ");

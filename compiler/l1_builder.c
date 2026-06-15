@@ -301,6 +301,23 @@ static sexp sexp_core_begin_function(sexp ctx, sexp self, sexp_sint_t n,
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, block, SEXP_FALSE, 0);
 }
 
+// Set the C-level link_name for a subroutine (used for pub fn name mangling)
+static sexp sexp_core_set_function_link_name(sexp ctx, sexp self, sexp_sint_t n,
+                                              sexp arg_name, sexp arg_link) {
+  const char *name = sexp_to_c_string(ctx, arg_name);
+  const char *link = sexp_to_c_string(ctx, arg_link);
+  L1Subroutine *s = g_subroutines_head;
+  while (s) {
+    if (strcmp(s->name, name) == 0) {
+      if (s->link_name) free((void*)s->link_name);
+      s->link_name = strdup(link);
+      return SEXP_VOID;
+    }
+    s = s->next;
+  }
+  return SEXP_FALSE;
+}
+
 static sexp sexp_core_declare_extern_function(sexp ctx, sexp self,
                                               sexp_sint_t n, sexp arg_name,
                                               sexp arg_link_name,
@@ -447,7 +464,7 @@ static sexp sexp_core_call(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,
   }
   L1Expr *expr = malloc(sizeof(L1Expr));
   expr->kind = EXPR_CALL;
-  expr->data.call.fn_name = strdup(sub->name);
+  expr->data.call.fn_name = strdup(sub->link_name ? sub->link_name : sub->name);
   expr->data.call.args = args;
   expr->data.call.arg_count = arg_count;
   expr->data.call.ret_ty = sub->ret_ty;
@@ -476,7 +493,7 @@ static sexp sexp_core_call_expr(sexp ctx, sexp self, sexp_sint_t n,
 
   L1Expr *expr = malloc(sizeof(L1Expr));
   expr->kind = EXPR_CALL;
-  expr->data.call.fn_name = strdup(sub->name);
+  expr->data.call.fn_name = strdup(sub->link_name ? sub->link_name : sub->name);
   expr->data.call.args = args;
   expr->data.call.arg_count = arg_count;
   expr->data.call.ret_ty = sub->ret_ty;
