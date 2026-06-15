@@ -123,13 +123,34 @@
          (ty (if (optional.none? ty-option)
                  (core.infer-expr-type value-expr locals)
                  (core.lower-type (optional.value ty-option))))
-         (value (core.lower-expr block value-expr ty locals)))
+         ;; For call expressions, use call-expr! (no emit) + assign-temp!
+         ;; to avoid double emission of the call instruction.
+         (expr-kind (middle.kind value-expr))
+         (var (if (symbol=? expr-kind '|middle.expr.call|)
+                  (let* ((call-payload (middle.payload value-expr))
+                         (callee (optional.value (record.get call-payload '|callee|)))
+                         (args (optional.value (record.get call-payload '|args|)))
+                         (callee-payload (middle.payload callee))
+                         (path (optional.value (record.get callee-payload '|path|)))
+                         (fn-name (core.path-fn-name path))
+                         (intrinsic (core.invoke-intrinsic! fn-name)))
+                    (if (optional.some? intrinsic)
+                        (let* ((value (core.lower-expr block value-expr ty locals)))
+                          (core.assign-temp! block value))
+                        (let* ((function (core.function-by-name fn-name))
+                               (lowered-args (core.lower-args block args
+                                                (core.function-param-types function)
+                                                locals (list)))
+                               (call-expr (core.call-expr! block function lowered-args)))
+                          (core.assign-temp! block call-expr))))
+                  (let* ((value (core.lower-expr block value-expr ty locals)))
+                    (core.assign-temp! block value)))))
     (list.cons
       (record '|local|
         (record.field '|name| name)
         (record.field '|type| ty)
         (record.field '|mutable| mutable)
-        (record.field '|value| value))
+        (record.field '|value| var))
       locals)))
 
 (define-pass (core-stmt-lowerer |middle.stmt.assign| block stmt ret-ty locals)
