@@ -136,6 +136,21 @@ static sexp sexp_core_make_product_type(sexp ctx, sexp self, sexp_sint_t n,
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, ty, SEXP_FALSE, 0);
 }
 
+static sexp sexp_core_make_floats(sexp ctx, sexp self, sexp_sint_t n, sexp arg) {
+  L1Type *ty = malloc(sizeof(L1Type));
+  ty->kind = TY_FLOATS;
+  ty->width = sexp_unbox_fixnum(arg);
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, ty, SEXP_FALSE, 0);
+}
+
+static sexp sexp_core_make_simd(sexp ctx, sexp self, sexp_sint_t n,
+                                sexp arg_width, sexp arg_lanes) {
+  L1Type *ty = malloc(sizeof(L1Type));
+  ty->kind = TY_SIMD;
+  ty->width = sexp_unbox_fixnum(arg_width);  // lanes encoded in width for now
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, ty, SEXP_FALSE, 0);
+}
+
 static sexp sexp_type_registered(sexp ctx, sexp self, sexp_sint_t n,
                                  sexp name_val) {
   const char *name = sexp_to_c_string(ctx, name_val);

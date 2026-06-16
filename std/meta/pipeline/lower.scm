@@ -84,8 +84,8 @@
   (let* ((payload (middle.payload stmt))
          (value (optional.value (record.get payload '|value|))))
     (if (optional.none? value)
-        (core.return-none! block)
-        (core.return-value!
+        (ir.term.return-none block)
+         (ir.term.return
           block
           (core.lower-expr block (optional.value value) ret-ty locals)))
     locals))
@@ -98,8 +98,8 @@
         (if (type.unit? ret-ty)
             (begin
               (core.lower-expr block expr ret-ty locals)
-              (core.return-none! block))
-            (core.return-value!
+              (ir.term.return-none block))
+             (ir.term.return
               block
               (core.lower-expr block expr ret-ty locals))))
     locals))
@@ -136,15 +136,15 @@
                          (intrinsic (core.invoke-intrinsic! fn-name)))
                     (if (optional.some? intrinsic)
                         (let* ((value (core.lower-expr block value-expr ty locals)))
-                          (core.assign-temp! block value))
-                        (let* ((function (core.function-by-name fn-name))
+                          (ir.inst.assign-temp block value))
+                        (let* ((function (ir.sub.by-name fn-name))
                                (lowered-args (core.lower-args block args
-                                                (core.function-param-types function)
+                                                (ir.sub.params function)
                                                 locals (list)))
-                               (call-expr (core.call-expr! block function lowered-args)))
-                          (core.assign-temp! block call-expr))))
+                               (call-expr (ir.inst.call block function lowered-args)))
+                          (ir.inst.assign-temp block call-expr))))
                   (let* ((value (core.lower-expr block value-expr ty locals)))
-                    (core.assign-temp! block value)))))
+                    (ir.inst.assign-temp block value)))))
     (list.cons
       (record '|local|
         (record.field '|name| name)
@@ -206,7 +206,7 @@
              (payload (middle.payload param))
              (name (optional.value (record.get payload '|name|)))
              (ty (core.lower-type (optional.value (record.get payload '|type|))))
-             (value (core.param function index))
+             (value (ir.sub.param function index))
              (local (record '|local|
                       (record.field '|name| name)
                       (record.field '|type| ty)
@@ -220,7 +220,7 @@
 
 (define (core.lower-stmts block stmts ret-ty locals)
   (if (list.empty? stmts)
-      (core.return-none! block)
+      (ir.term.return-none block)
       (let* ((next-locals (core.lower-stmt
                             block
                             (list.first stmts)

@@ -11,7 +11,7 @@
 (define (build.scan-imports source-path)
   ;; Read the file as S-expression forms via the Scheme lexer.
   ;; Returns a list of module paths, or raises error on failure.
-  (let ((forms (core.read-file-forms! source-path)))
+  (let ((forms (host.read-file-forms source-path)))
     (if (or (not forms) (not (pair? forms)))
         (error (string-append "build: cannot read source: " source-path))
         (build.extract-imports forms (list)))))

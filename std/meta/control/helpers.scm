@@ -16,7 +16,7 @@
       (let* ((param (list.first params)) (payload (middle.payload param))
              (name (optional.value (record.get payload '|name|)))
              (ty (core.lower-type (optional.value (record.get payload '|type|))))
-             (value (core.param function index))
+             (value (ir.sub.param function index))
              (local (record '|local| (record.field '|name| name) (record.field '|type| ty)
                       (record.field '|mutable| #f) (record.field '|value| value))))
         (core.bind-params function (list.rest params) (u64.add1 index) (list.cons local locals)))))

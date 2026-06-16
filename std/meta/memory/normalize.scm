@@ -21,27 +21,27 @@
 (define-pass (intrinsic |load| block args expected-ty locals)
   (let* ((ptr-expr (list.first args))
          (ptr (core.lower-expr block ptr-expr expected-ty locals)))
-    (core.load! block ptr expected-ty)))
+    (ir.expr.load block ptr expected-ty)))
 
 (define-pass (intrinsic |store| block args expected-ty locals)
   (let* ((ptr-expr (list.first args))
          (value-expr (list.first (list.rest args)))
          (ptr (core.lower-expr block ptr-expr expected-ty locals))
          (value (core.lower-expr block value-expr expected-ty locals)))
-    (core.store! block ptr value)
+    (ir.inst.store block ptr value)
     unit))
 
 (define-pass (intrinsic |raw-ptr-read| block args expected-ty locals)
   (let* ((ptr-expr (list.first args))
          (ptr (core.lower-expr block ptr-expr expected-ty locals)))
-    (core.load! block ptr expected-ty)))
+    (ir.expr.load block ptr expected-ty)))
 
 (define-pass (intrinsic |raw-ptr-write| block args expected-ty locals)
   (let* ((ptr-expr (list.first args))
          (value-expr (list.first (list.rest args)))
          (ptr (core.lower-expr block ptr-expr expected-ty locals))
          (value (core.lower-expr block value-expr expected-ty locals)))
-    (core.store! block ptr value)
+    (ir.inst.store block ptr value)
     unit))
 
 ;; ── borrow 表达式规范化 ──

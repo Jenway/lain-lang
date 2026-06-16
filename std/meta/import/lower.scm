@@ -4,7 +4,7 @@
 ;; Import core-declarer / core-lowerer (manifest-based)
 ;; 
 ;; Step 7: Reads .manifest files instead of recursive compilation.
-;; Directly calls core.declare-extern-function! for each export.
+;; Directly calls host.new-extern for each export.
 ;; Registers both the mangled C name (for linking) and the
 ;; import-path-derived name (for source-level calls).
 ;; ═══════════════════════════════════════════════════════════
@@ -79,7 +79,7 @@
          (path (optional.value (record.get raw-inner '|path|))))
     ;; Read and parse the manifest file
     (let* ((source-path (import.resolve-path path))
-           (parsed (core.read-manifest! source-path)))
+           (parsed (host.read-manifest source-path)))
       (if (not parsed)
           (error (string-append "import: manifest not found for: " source-path))
           (let ((exports (manifest.extract-exports parsed)))
@@ -154,12 +154,12 @@
           ;; Register with caller-side name, link_name = actual C symbol
           ;; The C emitter now uses link_name for both forward decls and calls,
           ;; so the generated C will reference the correct mangled symbol.
-          (core.declare-extern-function!
+          (host.new-extern
             caller-name            ;; source-level name (e.g., simple_math_add)
             (symbol->string mangled-name)  ;; C-level symbol (e.g., math_add)
             param-tys ret-ty)
           ;; Also register under the mangled name itself, for direct qualified calls
-          (core.declare-extern-function!
+          (host.new-extern
             mangled-name           ;; mangled name (e.g., math_add)
             (symbol->string mangled-name)  ;; same as C symbol
             param-tys ret-ty))

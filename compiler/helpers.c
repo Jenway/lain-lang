@@ -123,250 +123,15 @@ static void native_load_file(sexp ctx, sexp env, const char *path) {
 }
 
 static void native_inject_all_polyfills(sexp ctx, sexp env) {
-  // 1. Import R7RS base
+  // All polyfills are now in host/polyfills.scm — loaded from a single file
+  // instead of 16 separate native_eval_string() blocks.
+  // This makes the polyfill layer portable across R7RS runtimes.
+  //
+  // Import must happen BEFORE load because Chibi's load wraps in (begin ...)
+  // which doesn't properly handle (import ...) at the top level.
   native_eval_string(ctx, env,
                      "(import (scheme base) (scheme cxr) (scheme load))");
-
-  // 2. Basic polyfills
-  native_eval_string(ctx, env,
-                     "(begin (define unit #f) (define (meta-source x) #f)"
-                     " (define *error-count* 0))");
-
-  // 3. define-pass macro system
-  native_eval_string(ctx, env, "(define __lain-passes '())");
-  native_eval_string(
-      ctx, env,
-      "(define (define-pass* stage kind body)"
-      "  (set! __lain-passes"
-      "    (cons (cons stage (cons kind (cons body '()))) __lain-passes)))");
-  native_eval_string(
-      ctx, env,
-      "(define-syntax define-pass"
-      "  (syntax-rules ()"
-      "    ((_ (stage kind arg ...) body ...)"
-      "     (define-pass* 'stage 'kind (lambda (arg ...) body ...)))))");
-
-  // 4. optional.* polyfills
-  native_eval_string(ctx, env,
-                     "(begin (define (optional.none) #f)"
-                     "  (define (optional.some v) v)"
-                     "  (define (optional.value v) v)"
-                     "  (define (optional.some? v) (if v #t #f))"
-                     "  (define (optional.none? v) (not v)))");
-
-  // 5. list.* polyfills
-  native_eval_string(ctx, env,
-                     "(begin (define (list.empty? lst) (null? lst))"
-                     "  (define (list.first lst) (car lst))"
-                     "  (define (list.rest lst) (cdr lst))"
-                     "  (define (list.cons item lst) (cons item lst))"
-                     "  (define (list.reverse lst) (reverse lst)))");
-
-  // 6. symbol=? polyfill
-  native_eval_string(ctx, env, "(define (symbol=? a b) (equal? a b))");
-
-  // 7. record.* polyfills
-  native_eval_string(ctx, env,
-                     "(begin (define (record kind . fields) (cons kind fields))"
-                     "  (define (record.field k v) (cons k v))"
-                     "  (define (record.get payload name)"
-                     "    (let loop ((fields (cdr payload)))"
-                     "      (if (null? fields) #f"
-                     "          (let ((field (car fields)))"
-                     "            (if (equal? (car field) name)"
-                     "                (cdr field)"
-                     "                (loop (cdr fields))))))))");
-
-  // 8. pre_declare_variables (Scheme-side)
-  native_eval_string(ctx, env,
-                     "(begin"
-                     "  (define *syntax-temp-counter* 0)"
-                     "  (define *effect-temp-counter* 0)"
-                     "  (define (syntax.temp) (set! *syntax-temp-counter* (+ "
-                     "*syntax-temp-counter* 1))"
-                     "    (string->symbol (string-append \"__syntax_temp_\""
-                     "      (number->string *syntax-temp-counter*))))"
-                     "  (define (effects.temp) (set! *effect-temp-counter* (+ "
-                     "*effect-temp-counter* 1))"
-                     "    (string->symbol (string-append \"__effect_temp_\""
-                     "      (number->string *effect-temp-counter*)))))");
-
-  // 9. raw.* polyfills
-  native_eval_string(
-      ctx, env,
-      "(begin (define (raw.node! kind payload) (vector 'raw-node kind payload))"
-      "  (define (raw.kind node) (vector-ref node 1))"
-      "  (define (raw.payload node) (vector-ref node 2)))");
-
-  // 10. middle.* polyfills
-  native_eval_string(ctx, env,
-                     "(begin (define (middle.node! kind payload) (vector "
-                     "'middle-node kind payload))"
-                     "  (define (middle.kind node) (vector-ref node 1))"
-                     "  (define (middle.payload node) (vector-ref node 2)))");
-
-  // 11. decl.* polyfills
-  native_eval_string(ctx, env,
-                     "(begin (define *lain-declarations* '())"
-                     "  (define (decl.define! kind name node)"
-                     "    (set! *lain-declarations* (cons (list name kind node)"
-                     "  *lain-declarations*)))"
-                     "  (define (decl.name decl) (car decl))"
-                     "  (define (decl.payload decl) (caddr decl)))");
-
-  // 12. type.* wrappers
-  native_eval_string(ctx, env,
-                     "(define type.unit (lambda () (core.make-unit)))");
-  native_eval_string(
-      ctx, env, "(define type.bits (lambda (width) (core.make-bits width)))");
-  native_eval_string(ctx, env,
-                     "(define type.addr (lambda () (core.make-addr)))");
-  native_eval_string(ctx, env,
-                     "(define type.never (lambda () (core.make-unit)))");
-  native_eval_string(ctx, env,
-                     "(define type.registered (lambda (name . args)"
-                     "  (type.registered-raw name)))");
-  native_eval_string(ctx, env,
-                     "(define type.raw-ptr (lambda args (core.make-addr)))");
-  native_eval_string(ctx, env, "(define type.eq? equal?)");
-  native_eval_string(ctx, env,
-                     "(define (type.unit? ty) (core.type-is-void! ty))");
-  native_eval_string(ctx, env, "(define type.float? (lambda (ty) #f))");
-  native_eval_string(
-      ctx, env, "(define type.unsupported (lambda args (core.make-bits 32)))");
-  native_eval_string(ctx, env,
-                     "(define type.fn (lambda (params ret) (core.make-addr)))");
-  native_eval_string(ctx, env,
-                     "(define type.array (lambda (ty size) (core.make-addr)))");
-  native_eval_string(
-      ctx, env,
-      "(define type.product (lambda (types) (core.make-product-type! types)))");
-  native_eval_string(
-      ctx, env,
-      "(define type.product-field-type (lambda (product field-name)"
-      "  (core.struct-field-type-from-type product field-name)))");
-  native_eval_string(ctx, env, "(define type.product-field-types (lambda (product) '()))");
-  native_eval_string(ctx, env, "(define type.product-name (lambda (ty) #f))");
-  native_eval_string(ctx, env, "(define string-byte-len string-length)");
-
-  // 13. core.* Scheme polyfills (non-FFI)
-  native_eval_string(
-      ctx, env,
-      "(begin (define (core.invoke-intrinsic! name) #f)"
-      "  (define (core.empty-effects) 'empty-effects)"
-      "  (define (registry.operator-registered? op) #t)"
-      "  (define (u64.add1 n) (+ n 1))"
-      "  (define (core.effect! name args) (list 'effect name args))"
-      "  (define (core.effect-row! ids) 'effect-row)"
-      "  (define (core.bind-generic! name) (if #f #f))"
-      "  (define (core.clear-generics!) (if #f #f))"
-      "  (define (core.function-effects fn) (quote empty-effects))"
-      "  (define (core.begin-function-with-effects! name params effects ret)"
-      "    (core.begin-function! name params ret))"
-      "  (define (core.const-zero! block ty)"
-      "    (core.const-bits! block ty 0))"
-      "  (define (core.unsupported-expr kind) (core.make-bits 32))"
-      "  (define (diag.raise! . args) #f)"
-      "  (define (core.declare-enum-name! name variants) unit)))");
-
-  // 14. effects.* polyfills
-  native_eval_string(ctx, env,
-                     "(begin (define (effects.find-throws-arg eff) #f)"
-                     "  (define effects.row-effect-count (lambda (r) 0))"
-                     "  (define effects.row-effect-at (lambda (r i) '()))"
-                     "  (define effects.effect-name (lambda (e) 'unknown))"
-                     "  (define effects.effect-args (lambda (e) '())))");
-
-  // 14.5 Host function polyfills (called at top-level by various meta sources)
-  // All are no-ops in the bootstrap — type registration is handled by the
-  // simplified L1 type system.
-  native_eval_string(
-      ctx, env,
-      "(begin"
-      " (define (register-type-constructor! name arity repr) unit)"
-      " (define (register-string-literal-type! name) unit)"
-      " (define (register-memory-ordering-type! name) unit)"
-      " (define (register-array-type! name) unit)"
-      " (define (register-condition-type! name) unit)"
-      " (define (register-raw-pointer-type! mut name) unit)"
-      " (define (register-raw-pointer-index-type! name) unit)"
-      " (define (register-constraint! name pred) unit)"
-      " (define (register-interface-rule! name rule) unit)"
-      " (define (register-operator! symbol name) unit)"
-      " (define (register-effect-constructor! name arity repr) unit)"
-      " (define (register-expression-macro! name handler) unit)"
-      " (define (register-raw-pointer-effect! kind name) unit))");
-
-  // 15. Syntax cursor high-level wrappers — NOW DEFINED IN tree.scm
-  // (Removed from C side; pure Scheme tree API replaces cursor FFI)
-
-  // 16. Pre-declare variables that meta sources define via set!
-  // Chibi-Scheme requires the variable to exist before set! can mutate it.
-  // This covers all (set! ...) patterns from:
-  //   syntax/common.scm, core/lower.scm, core/call.scm, core/effects.scm
-  native_eval_string(ctx, env,
-                     "(begin"
-                     " (define syntax.parse-path-tail #f)"
-                     " (define syntax.parse-path #f)"
-                     " (define syntax.parse-attr-value #f)"
-                     " (define syntax.parse-attr-arg #f)"
-                     " (define syntax.parse-attr-args-tail #f)"
-                     " (define syntax.parse-attr-args #f)"
-                     " (define syntax.parse-attrs #f)"
-                     " (define syntax.parse-generic-tail #f)"
-                     " (define syntax.parse-generic-params #f)"
-                     " (define syntax.parse-where-tail #f)"
-                     " (define syntax.parse-where #f)"
-                     " (define syntax.parse-type #f)"
-                     " (define syntax.parse-type-args #f)"
-                     " (define syntax.parse-type-list-tail #f)"
-                     " (define syntax.parse-type-list #f)"
-                     " (define syntax.parse-params-tail #f)"
-                     " (define syntax.parse-params #f)"
-                     " (define syntax.parse-empty-params #f)"
-                     " (define syntax.parse-effect-tail #f)"
-                     " (define syntax.parse-effect-name #f)"
-                     " (define syntax.parse-effect-set #f)"
-                     " (define syntax.parse-optional-effects #f)"
-                     " (define syntax.parse-expr-args-tail #f)"
-                     " (define syntax.parse-expr-args #f)"
-
-                     " (define syntax.parse-mul-op #f)"
-                     " (define syntax.parse-add-op #f)"
-                     " (define syntax.parse-compare-op #f)"
-                     " (define syntax.parse-mul-tail #f)"
-                     " (define syntax.parse-add-tail #f)"
-                     " (define syntax.parse-compare-tail #f)"
-                     " (define syntax.parse-unary-expr #f)"
-                     " (define syntax.parse-mul-expr #f)"
-                     " (define syntax.parse-add-expr #f)"
-                     " (define syntax.parse-compare-expr #f)"
-                     " (define syntax.parse-call-or-path #f)"
-                     " (define syntax.parse-postfix-tail #f)"
-                     " (define syntax.parse-inline-handler-operation #f)"
-                     " (define syntax.parse-inline-handler-operations #f)"
-                     " (define syntax.parse-builtin-expr-after-at #f)"
-                     " (define syntax.parse-if-expr-after-if #f)"
-                     " (define syntax.parse-expr-atom #f)"
-                     " (define syntax.parse-expr #f)"
-                     " (define syntax.parse-let-stmt #f)"
-                     " (define syntax.parse-block-items #f)"
-                     " (define syntax.parse-block #f)"
-                     " (define syntax.parse-optional-fn-body #f)"
-                     " (define core.lower-type #f)"
-                     " (define core.lower-types #f)"
-                     " (define core.lower-param-types #f)"
-                     " (define core.bind-params #f)"
-                     " (define core.lower-expr #f)"
-                     " (define core.infer-expr-type #f)"
-                     " (define core.lower-stmt #f)"
-                     " (define core.lower-stmts #f)"
-                     " (define core.lower-if-non-tail-core #f)"
-                     " (define core.lower-if-branch-body #f)"
-                     " (define effects.handler-entry-type #f)"
-                     " (define effects.allocate-entry! #f)"
-                     " (define effects.push-handler! #f)"
-                     " (define effects.pop-handler! #f))");
+  native_load_file(ctx, env, "host/polyfills.scm");
 }
 
 static void native_load_meta_sources(sexp ctx, sexp env) {
@@ -760,30 +525,14 @@ void *native_init_scheme(void) {
   fprintf(stderr, "[init] 2: std env loaded\n");
   sexp env = sexp_context_env(ctx);
 
-  // Inject all polyfills (must happen before meta source loading)
-  native_inject_all_polyfills(ctx, env);
-  fprintf(stderr, "[init] 3: polyfills injected\n");
-  {
-    sexp r = sexp_eval_string(ctx,
-                              "(begin (define-pass (form-parser test-pass "
-                              "form) unit) (null? __lain-passes))",
-                              -1, env);
-    if (r == SEXP_FALSE)
-      fprintf(stderr, "[diag] define-pass works!\n");
-    else if (r == SEXP_TRUE)
-      fprintf(stderr, "[diag] define-pass did NOT populate __lain-passes\n");
-    else {
-      fprintf(stderr, "[diag] define-pass test exception: ");
-      sexp_print_exception(ctx, r, sexp_current_error_port(ctx));
-      fprintf(stderr, "\n");
-    }
-  }
-
-  // Register core FFI functions
+  // Register core FFI functions (Layer B) — must be first because
+  // polyfills (Layer A) contain type.* wrappers that reference these.
 #define REG(name, args, fn) sexp_define_foreign(ctx, env, name, args, fn)
   REG("core.make-bits", 1, sexp_core_make_bits);
   REG("core.make-addr", 0, sexp_core_make_addr);
   REG("core.make-unit", 0, sexp_core_make_unit);
+  REG("core.make-floats", 1, sexp_core_make_floats);
+  REG("core.make-simd", 2, sexp_core_make_simd);
   REG("core.make-product-type!", 1, sexp_core_make_product_type);
   REG("type.registered-raw", 1, sexp_type_registered);
   REG("core.make-set", 2, sexp_core_make_set);
@@ -831,7 +580,29 @@ void *native_init_scheme(void) {
   REG("core.emit-manifest!", 1, sexp_core_emit_manifest);
 
 #undef REG
-  fprintf(stderr, "[init] 4: FFI registered\n");
+  fprintf(stderr, "[init] 3: FFI registered\n");
+
+  // Inject all polyfills (Layer A) — must be after FFI REG because
+  // type.* wrappers reference core.* functions.
+  native_inject_all_polyfills(ctx, env);
+  fprintf(stderr, "[init] 4: polyfills loaded from host/polyfills.scm\n");
+
+  // Smoke-test define-pass (validates polyfill layer works)
+  {
+    sexp r = sexp_eval_string(ctx,
+                              "(begin (define-pass (form-parser test-pass "
+                              "form) unit) (null? __lain-passes))",
+                              -1, env);
+    if (r == SEXP_FALSE)
+      fprintf(stderr, "[diag] define-pass works!\n");
+    else if (r == SEXP_TRUE)
+      fprintf(stderr, "[diag] define-pass did NOT populate __lain-passes\n");
+    else {
+      fprintf(stderr, "[diag] define-pass test exception: ");
+      sexp_print_exception(ctx, r, sexp_current_error_port(ctx));
+      fprintf(stderr, "\n");
+    }
+  }
 
   // Load meta sources (define-pass registrations happen here)
   native_load_meta_sources(ctx, env);
