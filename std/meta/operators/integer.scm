@@ -61,7 +61,7 @@
                      right-expr
                      operand-ty
                      locals)))
-        (core.primitive!
+        (ir.expr.primitive
           block
           (core.binary-primitive op operand-ty)
           (list left right)
@@ -75,17 +75,17 @@
                         (record.get payload '|operand|))))
     (cond
       ((symbol=? op '|-|)
-       (let* ((zero (core.const-bits! block expected-ty 0))
+       (let* ((zero (ir.expr.const block expected-ty 0))
              (operand (core.lower-expr block operand-expr expected-ty locals)))
-         (core.primitive!
+         (ir.expr.primitive
            block
            '|integer.sub|
            (list zero operand)
            expected-ty)))
       ((symbol=? op '|!|)
        (let* ((operand (core.lower-expr block operand-expr expected-ty locals))
-             (zero (core.const-bits! block expected-ty 0)))
-         (core.primitive!
+             (zero (ir.expr.const block expected-ty 0)))
+         (ir.expr.primitive
            block
            '|integer.eq|
            (list operand zero)

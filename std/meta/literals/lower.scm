@@ -26,7 +26,7 @@
 
 (define-pass (core-expr-lowerer |middle.expr.number| block expr expected-ty locals)
   (let* ((payload (middle.payload expr)))
-    (core.const-bits!
+    (ir.expr.const
       block
       expected-ty
       (optional.value
@@ -34,7 +34,7 @@
 
 (define-pass (core-expr-lowerer |middle.expr.string| block expr expected-ty locals)
   (let* ((payload (middle.payload expr)))
-    (core.const-string!
+    (ir.expr.const-string
       block
       expected-ty
       (optional.value
@@ -44,7 +44,7 @@
   (let* ((payload (middle.payload expr))
          (value (optional.value
                   (record.get payload '|value|))))
-    (core.const-bits!
+    (ir.expr.const
       block
       expected-ty
       (if value 1 0))))

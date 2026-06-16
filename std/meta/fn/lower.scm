@@ -64,13 +64,13 @@
             (if (symbol=? (fn.effect-name first) '|Throws|)
                 (let* ((args (fn.effect-args first)))
                   (if (list.empty? args)
-                      (core.make-bits 32)  ;; default error type i32
+                      (ir.type.bits 32)  ;; default error type i32
                       (core.lower-type (list.first args))))
                 (fn.throws-error-type (list.rest effects)))))))
 
 (define (fn.make-throws-product ret-ty error-ty)
   ;; Create TY_PRODUCT: {flag: i8, value: ret_ty, error: error_ty}
-  (type.product (list (core.make-bits 8) ret-ty error-ty)))
+  (type.product (list (ir.type.bits 8) ret-ty error-ty)))
 
 ;; ── Declarer / Lowerer ──
 
@@ -95,14 +95,14 @@
                               param-types)))
           ;; Store real return type in Scheme table (avoids C-side type storage)
           (fn-return-type! name ret)
-          (core.begin-function! name c-params c-ret)
+          (ir.sub.define name c-params c-ret)
           ;; Name mangling: pub fn gets C-level link_name (e.g., add → io_add)
           ;; Internal name stays unmangled for intra-module lookups.
           (let* ((public (record.get payload '|public|))
                  (is-public (and (optional.some? public) (optional.value public))))
             (if is-public
-                (core.set-function-link-name! name
-                  (string-append (core.module-prefix) "_"
+                (ir.sub.set-link-name! name
+                  (string-append (ir.sub.module-prefix) "_"
                                  (symbol->string name)))
                 unit))))))
 
@@ -112,7 +112,7 @@
          (params (optional.value (record.get payload '|params|)))
          (ret (core.lower-type (optional.value (record.get payload '|return|))))
          (param-types (core.lower-param-types params (list))) (link-name (fn.foreign-link-name attrs name)))
-    (if (fn.cfg-enabled? attrs) (core.declare-extern-function! name link-name param-types ret) unit)))
+    (if (fn.cfg-enabled? attrs) (host.new-extern name link-name param-types ret) unit)))
 
 (define-pass (core-lowerer |middle.fn| item)
   (let* ((payload (middle.payload item)) (name (optional.value (record.get payload '|name|)))
@@ -125,7 +125,7 @@
                      raw-ret-ty))
          (body (optional.value (record.get payload '|body|))))
     (if (optional.none? body) unit
-        (let* ((function (core.function-by-name name)) (block (core.append-block! function))
+        (let* ((function (ir.sub.by-name name)) (block (ir.sub.block function))
                (locals (core.bind-params function params 0 (list)))
                (body-payload (middle.payload (optional.value body))))
           (core.lower-stmts block (optional.value (record.get body-payload '|items|)) ret-ty locals)))))

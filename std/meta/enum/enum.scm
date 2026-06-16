@@ -141,7 +141,7 @@
                               (list))))
         ;; Record variant → index mapping for match lowering
         (enum.register-variant! variant-name enum-name index)
-        (core.begin-function!
+        (ir.sub.begin
           ctor-name
           param-types
           enum-ty)
@@ -178,8 +178,8 @@
              (variant-name (optional.value
                              (record.get variant-payload '|name|)))
              (ctor-name (enum.ctor-name enum-name variant-name))
-             (fn (core.function-by-name ctor-name))
-             (block (core.append-block! fn))
+             (fn (ir.sub.by-name ctor-name))
+             (block (ir.sub.block fn))
              (ret-ty (type.addr))  ;; C-side only sees addr for structs
              (has-payload (record.get variant-payload '|payload|))
              (locals (if (optional.some? has-payload)

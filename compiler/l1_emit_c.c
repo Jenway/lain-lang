@@ -251,23 +251,6 @@ static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out) {
       fprintf(out, ";\n");
       break;
     }
-    case INST_LOOP:
-      fprintf(out, "    while (1) {\n");
-      {
-        L1Instruction *li = inst->data.loop_stmt.body;
-        while (li) {
-          if (li->kind == INST_BREAK) {
-            fprintf(out, "    break;\n");
-          } else if (li->kind == INST_SET) {
-            fprintf(out, "        auto %s = ", li->data.set.name);
-            emit_c_expr(li->data.set.val, out);
-            fprintf(out, ";\n");
-          }
-          li = li->next;
-        }
-      }
-      fprintf(out, "    }\n");
-      break;
     case INST_IF:
       fprintf(out, "    if (");
       emit_c_expr(inst->data.if_stmt.condition, out);
@@ -307,7 +290,6 @@ static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out) {
         fprintf(out, ";\n");
       }
       break;
-    case INST_BREAK:
     default:
       break;
     }

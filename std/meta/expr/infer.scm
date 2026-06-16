@@ -20,7 +20,7 @@
 (define-pass (core-expr-inferer |middle.expr.method-call| expr locals)
   (let* ((payload (middle.payload expr))
          (method (optional.value (record.get payload '|method|))))
-    (core.function-return-type (core.function-by-name method))))
+    (ir.sub.ret-type (ir.sub.by-name method))))
 
 (define-pass (core-expr-inferer |middle.expr.builtin| expr locals)
   (let* ((payload (middle.payload expr))
