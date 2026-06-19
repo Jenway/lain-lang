@@ -67,7 +67,10 @@
 (load "std/meta/effects/form.scm")
 (load "std/meta/effects/base.scm")
 (load "std/meta/effects/normalize.scm")
+(load "std/meta/effects/layout.scm")   ;; must load before lower.scm — provides effect.register-layout!
 (load "std/meta/effects/lower.scm")
+(load "std/meta/effects/merge.scm")    ;; multi-effect layout merge
+(load "std/meta/effects/propagate.scm")  ;; effect propagation checking
 (load "std/meta/effects/infer.scm")
 (load "std/meta/effects/throws.scm")
 (load "std/meta/effects/suspend.scm")
@@ -85,6 +88,7 @@
 (load "std/meta/interface/impl.scm")
 (load "std/meta/interface/parse.scm")
 
+(load "std/meta/module/parse.scm")
 (load "std/meta/import/parse.scm")
 (load "std/meta/import/lower.scm")
 (load "std/meta/build/scan.scm")

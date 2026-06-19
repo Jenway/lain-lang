@@ -123,15 +123,16 @@ static void native_load_file(sexp ctx, sexp env, const char *path) {
 }
 
 static void native_inject_all_polyfills(sexp ctx, sexp env) {
-  // All polyfills are now in host/polyfills.scm — loaded from a single file
-  // instead of 16 separate native_eval_string() blocks.
-  // This makes the polyfill layer portable across R7RS runtimes.
-  //
-  // Import must happen BEFORE load because Chibi's load wraps in (begin ...)
-  // which doesn't properly handle (import ...) at the top level.
+#ifdef MINI_EVAL_MODE
+  // In mini_eval mode, load polyfills from file using mini_load_file
+  // (import is not needed — mini_eval uses flat namespace)
+  mini_load_file(ctx, env, "host/polyfills.scm");
+#else
+  // Chibi mode: import R7RS, then load polyfills
   native_eval_string(ctx, env,
                      "(import (scheme base) (scheme cxr) (scheme load))");
   native_load_file(ctx, env, "host/polyfills.scm");
+#endif
 }
 
 static void native_load_meta_sources(sexp ctx, sexp env) {
@@ -219,19 +220,29 @@ static sexp sexp_read_file_string(sexp ctx, sexp self, sexp_sint_t n,
   return sexp_c_string(ctx, (const char *)data, len);
 }
 
-// ── Manifest parser: read .manifest file, parse S-expr, return exports list ──
+// ── Interface parser: read .lci file, fallback to .manifest during migration ──
 // Given a source .lain path like "compiler/args.lain", reads
+// "compiler/args.lain.lci" first, then falls back to
 // "compiler/args.lain.manifest", and returns the parsed (module ...) S-expression.
 
-static sexp sexp_read_manifest(sexp ctx, sexp self, sexp_sint_t n,
+static sexp sexp_read_interface(sexp ctx, sexp self, sexp_sint_t n,
                                 sexp arg_source_path) {
   const char *source_path = sexp_string_data(arg_source_path);
-  char manifest_path[2048];
-  snprintf(manifest_path, sizeof(manifest_path), "%s.manifest", source_path);
-  const uint8_t *data = native_read_file(manifest_path);
+  char interface_path[2048];
+  snprintf(interface_path, sizeof(interface_path), "%s.lci", source_path);
+  const uint8_t *data = native_read_file(interface_path);
+  if (!data) {
+    snprintf(interface_path, sizeof(interface_path), "%s.manifest", source_path);
+    data = native_read_file(interface_path);
+  }
   if (!data) return SEXP_FALSE;
   uint32_t len = native_file_len();
   return sexp_read_from_string(ctx, (const char *)data, len);
+}
+
+static sexp sexp_read_manifest(sexp ctx, sexp self, sexp_sint_t n,
+                                sexp arg_source_path) {
+  return sexp_read_interface(ctx, self, n, arg_source_path);
 }
 
 // ── Build driver: compute compilation order via simple C scanning ──
@@ -373,11 +384,11 @@ static sexp sexp_build_compute_order(sexp ctx, sexp self, sexp_sint_t n,
 
 // ── Build driver: full multi-file build ──
 // Steps: compute order (Scheme) → compile each module → gcc link
-// compile_fn and manifest_fn are provided by the caller (native_compiler.c)
+// compile_fn and interface_fn are provided by the caller (native_compiler.c)
 
 int32_t native_build_with_funcs(const char *root_path, const char *output_path,
     uint32_t (*compile_fn)(const void*, const void*),
-    uint32_t (*manifest_fn)(const void*, const void*)) {
+    uint32_t (*interface_fn)(const void*, const void*)) {
   fprintf(stderr, "[build] computing dependency graph for: %s\n", root_path);
 
   // Step 1: Initialize Scheme and compute build order
@@ -419,13 +430,13 @@ int32_t native_build_with_funcs(const char *root_path, const char *output_path,
   }
   system("mkdir -p /tmp/lain_build 2>/dev/null");
 
-  // Step 3: Generate manifest + compile each module
+  // Step 3: Generate interface + compile each module
   for (int i = 0; i < n; i++) {
     fprintf(stderr, "[build] %d/%d: %s\n", i+1, n, src[i]);
-    // Manifest goes next to source (so import resolution finds it)
-    char mf[1024];
-    snprintf(mf, sizeof(mf), "%s.manifest", src[i]);
-    manifest_fn(src[i], mf);
+    // Interface goes next to source (so import resolution finds it)
+    char ifc[1024];
+    snprintf(ifc, sizeof(ifc), "%s.lci", src[i]);
+    interface_fn(src[i], ifc);
     // Compile to .c then gcc -c to .o
     char cf[1024];
     snprintf(cf, sizeof(cf), "/tmp/lain_build/tmp_%d.c", i);
@@ -548,6 +559,7 @@ void *native_init_scheme(void) {
   REG("core.return-none!", 1, sexp_core_return_none);
   REG("core.function-return-type", 1, sexp_core_function_return_type);
   REG("core.function-param-types", 1, sexp_core_function_param_types);
+  REG("core.function-link-name", 1, sexp_core_function_link_name);
   REG("core.call!", 3, sexp_core_call);
   REG("core.primitive!", 4, sexp_core_primitive);
   REG("core.local-alloc!", 3, sexp_core_local_alloc);
@@ -572,11 +584,16 @@ void *native_init_scheme(void) {
   REG("core.lex-to-sexp!", 2, sexp_lex_to_sexp);
   REG("core.read-file-forms!", 1, sexp_read_file_forms);
   REG("core.read-file-string!", 1, sexp_read_file_string);
+  REG("core.read-interface!", 1, sexp_read_interface);
   REG("core.read-manifest!", 1, sexp_read_manifest);
   REG("core.build-compute-order!", 1, sexp_build_compute_order);
   REG("core.set-module-prefix!", 1, sexp_set_module_prefix);
   REG("core.module-prefix", 0, sexp_get_module_prefix);
   REG("core.set-function-link-name!", 2, sexp_core_set_function_link_name);
+  REG("core.declare-module!", 1, sexp_core_declare_module);
+  REG("core.declare-signature!", 1, sexp_core_declare_signature);
+  REG("core.mark-export!", 1, sexp_core_mark_export);
+  REG("core.emit-interface!", 1, sexp_core_emit_interface);
   REG("core.emit-manifest!", 1, sexp_core_emit_manifest);
 
 #undef REG
@@ -640,6 +657,10 @@ void *native_init_scheme(void) {
 int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
   sexp ctx = (sexp)ctx_ptr;
   g_subroutines_head = NULL;
+  g_export_names_head = NULL;
+  g_declared_module_names_head = NULL;
+  g_declared_signature_names_head = NULL;
+  g_has_explicit_exports = 0;
 
   sexp env = sexp_context_env(ctx);
 
@@ -819,4 +840,3 @@ const char *native_get_module_prefix(void) {
   if (g_module_prefix[0] == '\0') return "";
   return g_module_prefix;
 }
-

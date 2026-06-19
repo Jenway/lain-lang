@@ -1,101 +1,122 @@
 # Lain 语言核心设计与哲学
 
-## 设计哲学
+## 设计原则
 
-**编译器只提供无法在库中实现的原语。** 几乎所有“语言特性”都是库，库是可读、可审计、且可替换的。
+Lain 的核心原则只有一句：
 
-三条基本原则：
+**编译器只提供无法在库中实现的 substrate，不提供语言语义本身。**
 
-- **正交性**：特性之间不重叠，可以独立组合。
-- **显式优于隐式**：副作用（效果）、内存、控制流都必须在类型和语法层面显式可见。
-- **零成本抽象**：不使用的特性在物理层不付出任何运行时或二进制大小的代价。
+这意味着：
 
----
+- `type / module / effect / signature / interface` 不是编译器内建对象
+- 这些概念由 `meta` 库定义、组合、检查、lower
+- 编译器只负责承接它们留下来的语法、工件、IR 和诊断
 
-## 两层语言架构 (Two-Level Architecture)
+另外两条原则保持不变：
 
-Lain 最核心的创新在于：**编译期语言和运行时语言是两门完全解耦的语言。**
+- **显式性**：副作用、阶段、接口边界都必须显式可见
+- **零成本**：高层概念只有在 lowering 后留下必需的物理成本
 
-```
-层 2：编译期语言（标准 Scheme / R7RS 规范）
-  - 职责：作为编译器的中端语义引擎（大脑）。
-  - 能力：完整的 Lisp 元编程能力，在编译期直接在内存中执行 AST 树的原地蜕变（Metamorphosis）。
-  - 物理：执行完毕后，所有高级概念被彻底抹除。
-  - 风格：标准 R7RS Scheme + 编译器内置 API
+## 三相架构
 
-       ↓ 语义降级（类型检查、Effect 变换、单态化、结构体布局计算...）
+Lain 不是“Scheme + runtime”两层，而是三个明确阶段：
 
-层 1：运行时语言 / 物理底座（LAIN-IR）
-  - 职责：作为编译器后端与物理硬件的绝对契约（肉身）。
-  - 能力：仅暴露纯粹的物理尺寸类型、无脑子程序和最底层的 CPU 操作。
-  - 物理：直接对应通用寄存器、浮点寄存器和内存寻址。
-  - 风格：每一行指令强制以 `#` 动词开头。
-```
+### 1. `Scheme meta phase`
 
-### 判断内置的标准：
+这一层负责语言层面的改写与静态建模：
 
-> **如果一个特性需要编译器“理解并分配特定硬件/LLVM资源”才能工作（如调用栈、基本块、物理寄存器、内存序） → 必须内置在 L1 编译器中。**
->
-> **如果一个特性可以通过以上物理原语降级、拆解、组装而成（如结构体、枚举、闭包、效果传播、泛型） → 必须作为 L2 的 Scheme 库实现。**
+- 解析和规范化顶层形式
+- 定义 `module`、`signature`、`interface`、`effect` 等对象模型
+- 做名字解析、静态检查、ascription、lowering 准备
+- 产出 lowered declaration / IR builder 调用 / 接口工件
 
----
+这一层默认应保持纯粹。它的职责是“改语言”，不是“替编译器跑一个操作系统”。
 
-## 编译器 L1 必须内置的最小集合 (L1 Primitives)
+### 2. `compile-time lain phase`
 
-这是 L1 编译器（C 底座）唯一理解的物理概念：
+这一层负责真正有副作用的编译期计算：
 
-### 1. 物理尺寸类型 (Physical Sizes)
+- 读取 schema / IDL / 头文件
+- 生成绑定
+- 生成额外源码或接口工件
+- 调用外部工具链
+- 进行受控的文件、进程、网络等操作
 
-L1 没有任何语义类型（没有 `i32` / `bool` / `String` ），只有寄存器位宽与尺寸：
+这部分必须写成 `lain`，而不是继续往 Scheme VM 里塞越来越多的宿主能力。
 
-- `#bits<N>`：$N$ 位通用存储（$N \in \{1, 8, 16, 32, 64, 128, 256, 512\}$）。无符号语义。
-- `#float<N>`：$N$ 位浮点存储（$N \in \{32, 64\}$）。
-- `#addr`：不透明内存地址（等价于 LLVM 15+ 的 `ptr`，没有类型参数）。**彻底消灭了 `null` 的类型概念**。
-- `#vec<N, T>`：SIMD 向量寄存器，直接映射到 `xmm/ymm/zmm`。
-- `#proc`：物理子程序签名。只有参数类型和返回尺寸，没有参数名（名字是 L2 的概念）。
+### 3. `runtime phase`
 
-### 2. 内存原语 (Memory Primitives)
+这一层是最终程序本身。它消费前两层留下来的 lowered 结果与工件，不再保留高层 module/meta 语义。
 
-- `#alloca(type)`：在当前栈帧分配空间，返回 `#addr`。
-- `#load(addr, type, ordering)`：从地址读取指定位宽的数据。
-- `#store(addr, value, ordering)`：向地址写入指定位宽的数据。
-- `#lea(base, index, scale, offset)`：物理地址平移（直接映射到 `lea` / `getelementptr`）。
-- `#offset(addr, n)`：地址偏移（`addr + bits<64> -> addr`）。
+## 为什么必须是三相
 
-_注：内存序（ordering）支持 `relaxed`、`acquire`、`release`、`acqrel`、`seqcst`。_
+如果把所有编译期能力都放进 Scheme，会出现两个问题：
 
-### 3. 一等硬件指令原语 (Modern CPU Primitives)
+1. Lisp VM 会被迫承载 IO、网络、进程、包管理、桥接生成，最终变成一个巨大而混乱的编译期运行时
+2. 语言用户会把“语言改写”和“副作用构建”混在一起，边界越来越不清楚
 
-为了榨干现代 CPU，L1 抛弃了黑盒的 `#asm` 字符串，将以下硬件流水线操作作为一等数据流节点暴露：
+三相设计的目的就是把这两类职责拆开：
 
-- **指令融合**：`#fma(a, b, c)` （物理单周期、一次舍入误差的乘加）。
-- **位级硬件端口**：`#popcount`、`#clz`、`#ctz`、`#bswap`、`#rotl`、`#rotr`。
-- **硬件预取**：`#prefetch(addr, intent, locality)`。
-- **一等结构化指令**：对于平台特定的硬件指令（如 `cpuid`），通过 `#set [a, b] = #inst("x86.cpuid", ...)`，让编译器的寄存器分配器依然能接管其数据的输入与输出流。
+- Scheme 只负责语义变换
+- `lain` 负责 effectful compile-time work
 
-### 4. 控制流与 CFG
+## 编译器真正提供什么
 
-- `#if cond { ... }` / `#loop { ... }` / `#break` / `#return`：不带作用域和返回值的物理跳转基本块。
-- `#tail_call`：物理尾调用（强制生成 LLVM `musttail` 标记，退化为汇编的 `jmp` 从而保障栈绝不溢出）。
-- `#unreachable()`：生成硬件未定义崩溃（如 `ud2`），用于告知编译器死分支并作极致剪裁。
-- `#expect(cond, likely)`：直接为 CPU 的分支预测器提供物理暗示。
+编译器只需要提供以下底座。
 
-### 5. 并发原语 (Concurrency)
+### 1. syntax substrate
 
-- `#fence(ordering)`：物理内存屏障。
-- `#init_context(stack_addr, proc_addr)`：初始化物理协程栈并在栈底埋入“墓碑”子程序。
-- `#swap_context(curr, next)`：在硬件级别执行栈与寄存器组的置换，且是编译器直接理解的优化/内存重排屏障。
+- 语法节点构造与拆解
+- span / hygiene / source mapping
+- symbol / gensym
 
----
+### 2. phase substrate
 
-## 语言不内置的特性（全部在 L2 / Scheme 宏中实现）
+- 调度 `Scheme meta`
+- 调度 `compile-time lain`
+- 在阶段之间传递依赖、工件、诊断
 
-| 特性                     | L2 层的降级与物理映射方式                                                                                      |
-| :----------------------- | :------------------------------------------------------------------------------------------------------------- |
-| **`i32` / `u32`**        | 编译期映射为 `#bits<32>`，计算时分别调用有符号/无符号物理操作符（如 `#sdiv` / `#udiv`）。                      |
-| **`Ref<T>` / `Box<T>`**  | 编译期映射为 `#addr`，由 Scheme 插入所有权检查和在作用域退出时自动内联 `#call free` 释放内存。                 |
-| **`Option<T>`**          | 编译期降级为包含 `tag` 的物理 Tagged Union，是高层表达“可能没有”的唯一安全方式。                               |
-| **`struct`**             | 纯粹的数据布局，Scheme 在编译期将其抹平，访问字段时直接转为 `#lea` 和 `#load` 的偏移读写。                     |
-| **`impl / module`**      | 编译期命名空间，模块的可见性由其关联的 `signature` 控制，无需多余的 `pub` 关键字。                             |
-| **`interface / vtable`** | 编译期由 Scheme 自动生成 `vtable` 的物理 C 结构体与函数指针常量，动态分发直接降级为 `#call_indirect`。         |
-| **`Throws<E>` / `?`**    | 编译期由 Scheme 自动降级为返回带 tag 的 product 结构，退化为无 Unwind 查表、与 `if/else` 一样快的普通 C 跳转。 |
+### 3. IR substrate
+
+- 构造 L1 / LainIR
+- 定义 extern / global / linkage / `link_name`
+- 输出后端可消费的物理表示
+
+### 4. artifact substrate
+
+- 读写 `.lci`
+- 记录依赖和 hash
+- 注册生成文件
+
+### 5. capability injection substrate
+
+- 给 `compile-time lain` 注入 capability handle
+- 不把“网络 / 包管理 / C++ 绑定”硬编码成编译器语义
+
+## 什么不应内建
+
+以下东西不应作为编译器 semantic API 存在：
+
+- `host.make-module`
+- `host.make-type`
+- `host.make-effect`
+- `host.make-signature`
+- `host.make-interface`
+
+如果这些能力存在，也应只是通用语法或工件底座上的库实现。
+
+## 模块系统在这套架构里的位置
+
+模块系统属于 `Scheme meta phase` 的语言对象模型：
+
+- `module` 是 meta 层对象，不是默认运行时值
+- `signature` 是 module 的接口类型
+- `interface` 继续表示动态分发协议
+- `import(path)` 返回 module 对象
+- `export` 形成接口，不是 runtime effect
+
+因此，模块机制的实现重点不是把 module 做进 L1，而是：
+
+- 在 meta 层定义 module object
+- 在 `.lci` 中序列化 module boundary
+- 在 lowering 时只保留物理链接所需的信息

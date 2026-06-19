@@ -235,6 +235,16 @@ static void emit_l1_instructions(L1Block *block, FILE *out) {
   }
 }
 
+static void emit_named_interface_entries(FILE *out, const char *kind,
+                                         L1ExportName *entries) {
+  while (entries) {
+    if (native_is_export_marked(entries->name)) {
+      fprintf(out, "    (%s (name %s))\n", kind, entries->name);
+    }
+    entries = entries->next;
+  }
+}
+
 static void emit_l1_subroutine(L1Subroutine *sub, FILE *out) {
   if (!sub->blocks) return;
   fprintf(out, "sub @%s(", sub->name);
@@ -278,39 +288,63 @@ static sexp sexp_core_emit_l1(sexp ctx, sexp self, sexp_sint_t n,
   return SEXP_VOID;
 }
 
-// ── Manifest emission: walk subroutines, dump pub fn signatures as S-expr ──
+// ── Interface emission: walk subroutines, dump exported function signatures as S-expr ──
 
-void native_emit_manifest(const char *output_path) {
+void native_emit_interface(const char *output_path) {
   FILE *out = fopen(output_path, "w");
   if (!out) {
-    fprintf(stderr, "Error: cannot open manifest output: %s\n", output_path);
+    fprintf(stderr, "Error: cannot open interface output: %s\n", output_path);
     return;
   }
   const char *prefix = native_get_module_prefix();
-  fprintf(out, "(module %s\n  (exports\n", prefix[0] ? prefix : "unknown");
+  fprintf(out, "(module %s\n", prefix[0] ? prefix : "unknown");
+  fprintf(out, "  (format lci-v1)\n");
+  fprintf(out, "  (exports\n");
   L1Subroutine *sub = g_subroutines_head;
   while (sub) {
-    // Only pub fn: has link_name (mangled), is not extern (@foreign), has body
-    if (sub->link_name && !sub->is_extern && sub->blocks) {
-      fprintf(out, "    (fn %s (", sub->link_name);
+    int exported = 0;
+    if (native_has_explicit_exports()) {
+      exported = sub->link_name && native_is_export_marked(sub->name);
+    } else {
+      exported = sub->link_name && !sub->is_extern && sub->blocks;
+    }
+    if (exported) {
+      fprintf(out, "    (fn\n");
+      fprintf(out, "      (name %s)\n", sub->name);
+      fprintf(out, "      (params (");
       for (uint32_t i = 0; i < sub->param_count; i++) {
         emit_l1_type(sub->param_tys[i], out);
         if (i < sub->param_count - 1) fprintf(out, " ");
       }
-      fprintf(out, ") -> ");
+      fprintf(out, "))\n");
+      fprintf(out, "      (ret ");
       emit_l1_type(sub->ret_ty, out);
       fprintf(out, ")\n");
+      fprintf(out, "      (link_name \"%s\"))\n", sub->link_name);
     }
     sub = sub->next;
   }
+  emit_named_interface_entries(out, "signature", g_declared_signature_names_head);
+  emit_named_interface_entries(out, "module", g_declared_module_names_head);
   fprintf(out, "  ))\n");
   fclose(out);
+}
+
+void native_emit_manifest(const char *output_path) {
+  native_emit_interface(output_path);
+}
+
+static sexp sexp_core_emit_interface(sexp ctx, sexp self, sexp_sint_t n,
+                                     sexp arg_path) {
+  const char *path = sexp_to_c_string(ctx, arg_path);
+  native_emit_interface(path);
+  return SEXP_VOID;
 }
 
 static sexp sexp_core_emit_manifest(sexp ctx, sexp self, sexp_sint_t n,
                                       sexp arg_path) {
   const char *path = sexp_to_c_string(ctx, arg_path);
-  native_emit_manifest(path);
+  native_emit_interface(path);
   return SEXP_VOID;
 }
 

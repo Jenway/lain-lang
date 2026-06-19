@@ -12,10 +12,7 @@
       (list.first path)
       (core.path-leaf (list.rest path))))
 
-;; 将多段路径拼接为 C 兼容的函数名
-;; 单段: Color → Color
-;; 多段: [Color, Red] → Color_Red (用 "_" 替代 "::")
-(define (core.path-fn-name path)
+(define (core.flatten-path-fn-name path)
   (if (list.empty? (list.rest path))
       (list.first path)
       (let loop ((p path) (acc ""))
@@ -26,6 +23,15 @@
                                 seg
                                 (string-append acc "_" seg))))
               (loop (list.rest p) new-acc))))))
+
+;; 将多段路径拼接为 C 兼容的函数名
+;; 单段: Color → Color
+;; 多段: [Color, Red] → Color_Red (用 "_" 替代 "::")
+(define (core.path-fn-name path)
+  (let* ((resolved (import.resolve-qualified-symbol path)))
+    (if resolved
+        resolved
+        (core.flatten-path-fn-name path))))
 
 (define (core.local-lookup locals name)
   (if (list.empty? locals)
@@ -131,8 +137,11 @@
 (define-pass (core-expr-lowerer |middle.expr.path| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (path (optional.value
-                 (record.get payload '|path|))))
-    (core.local-lookup locals (core.path-leaf path))))
+                 (record.get payload '|path|)))
+         (imported (import.resolve-qualified-symbol path)))
+    (if imported
+        (ir.sub.by-name imported)
+        (core.local-lookup locals (core.path-leaf path)))))
 
 (define-pass (core-expr-lowerer |middle.expr.call| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
@@ -144,6 +153,9 @@
            (path (optional.value
                    (record.get callee-payload '|path|)))
            (fn-name (core.path-fn-name path)))
+      ;; Phase 2: propagate callee effects to caller
+      (let* ((callee-effects (propagate.lookup-fn-effects fn-name)))
+        (propagate.record-effects! callee-effects))
       (let* ((intrinsic (core.invoke-intrinsic! fn-name)))
         (if (optional.some? intrinsic)
             ((optional.value intrinsic) block args expected-ty locals)
@@ -306,13 +318,24 @@
   (core.unsupported-expr '|handle-expression|))
 
 ;; ── ? 操作符 lowering: check flag → propagate or unwrap ──
+;; Uses the Throws effect layout from effects/layout.scm.
+;; Layout: {flag: u8, value: T, error: E} — flag at index 0, value at index 1.
 (define-pass (core-expr-lowerer |middle.expr.question| block expr expected-ty locals)
-  ;; throws product layout: {i8@0, i32@4, i32@8} — hardcoded offsets
   (let* ((payload (middle.payload expr))
          (inner-expr (optional.value (record.get payload '|expr|)))
          (call-expr (core.lower-expr block inner-expr expected-ty locals))
-         (flag-ty (ir.type.bits 8))
-         (flag-val (ir.expr.field-offset block call-expr 0 flag-ty))  ;; offset 0
+         ;; Query Throws layout for flag field info
+         (throws-layout (effect.lookup-layout '|Throws| '|throw|))
+         (offsets    (if throws-layout (cadr throws-layout) #f))
+         (flag-index (if throws-layout (caddr throws-layout) 0))
+         ;; flag field at flag-index
+         (flag-offset-ty (if offsets (list-ref offsets flag-index) (cons 0 (ir.type.bits 8))))
+         (flag-offset (car flag-offset-ty))
+         (flag-ty     (cdr flag-offset-ty))
+         ;; value field at index 1
+         (value-offset-ty (if offsets (list-ref offsets 1) (cons 4 (ir.type.bits 32))))
+         (value-offset (car value-offset-ty))
+         (flag-val (ir.expr.field-offset block call-expr flag-offset flag-ty))
          (function (ir.block.parent block))
          (cont-block (ir.sub.block function))
          (err-block (ir.sub.block function))
@@ -322,17 +345,22 @@
     ;; Error path: return the product (propagate error)
     (ir.block.set! err-block)
     (ir.term.return err-block call-expr)
-    ;; Ok path: extract value field (field index 1, offset 4)
+    ;; Ok path: extract value field
     (ir.block.set! cont-block)
     (let* ((value-ty (core.product-value-type expected-ty))
-           (value-val (ir.expr.field-offset cont-block call-expr 4 value-ty)))  ;; offset 4
+           (value-val (ir.expr.field-offset cont-block call-expr value-offset value-ty)))
       value-val)))
 
-;; ── handle lowering: body → check flag → call handler or unwrap ──
+;; ── handle lowering: generic, layout-driven ──
+;; For any effect E with handler fn H, given `handle E with H { body }`:
+;;   1. Look up E's product layout from the registry
+;;   2. Lower body tail expr → product
+;;   3. Extract flag field; branch
+;;   4. flag == 0 → extract value fields, return
+;;   5. flag != 0 → extract arg fields, call handler with all of them
+;; The handler function's parameter types must match the arg field types
+;; in the effect's layout.
 (define (core.lower-handle-tail-expr block expr expected-ty locals)
-  ;; For `handle Throws<E> with handler_fn { body }`:
-  ;;   1. Lower body tail expr (call to throws fn → returns product)
-  ;;   2. Check flag: if 0 → unwrap value; if 1 → call handler_fn(error)
   (let* ((payload (middle.payload expr))
          (body-block (optional.value (record.get payload '|body|)))
          (body-items (optional.value (record.get (middle.payload body-block) '|items|)))
@@ -340,35 +368,72 @@
          ;; Get handler function name from path
          (handler-payload (middle.payload handler-expr))
          (handler-path (optional.value (record.get handler-payload '|path|)))
-         (handler-name (list.first handler-path))
+         (handler-name (if handler-path (list.first handler-path) '|unknown|))
          (handler-fn (ir.sub.by-name handler-name))
-         ;; Build throws product type: {i8 flag, i32 value, i32 error}
-         ;; Offsets: flag@0, value@4, error@8
-         (throws-ty (type.product (list (ir.type.bits 8) (ir.type.bits 32) (ir.type.bits 32))))
-         ;; Get the tail expression from body (last statement)
-         (last-stmt (list-ref body-items (- (length body-items) 1)))
-         (tail-expr (optional.value (record.get (middle.payload last-stmt) '|expr|))))
-         ;; Lower body call → emits INST_CALL, returns EXPR_CALL (product)
-         (let* ((call-expr (core.lower-expr block tail-expr throws-ty locals))
-            ;; Extract flag field (field 0, offset 0, i8)
-            (flag-ty (ir.type.bits 8))
-            (flag-val (ir.expr.field-offset block call-expr 0 flag-ty))
-            ;; Create ok/err blocks
-            (function (ir.block.parent block))
-            (ok-block (ir.sub.block function))
-            (err-block (ir.sub.block function))
-            ;; Branch on flag == 0
-            (flag-zero (ir.expr.const block flag-ty 0))
-            (is-ok (ir.expr.primitive block '|integer.eq| (list flag-val flag-zero) (ir.type.bits 1))))
-         (ir.term.cond-branch block is-ok ok-block err-block)
-         ;; Error path: extract error (field 2, offset 8), call handler, return
-         (ir.block.set! err-block)
-         (let* ((err-ty (ir.type.bits 32))
-              (err-val (ir.expr.field-offset err-block call-expr 8 err-ty))
-              (handler-ret (ir.expr.call err-block handler-fn (list err-val))))
-         (ir.term.return err-block handler-ret))
-         ;; Ok path: extract value (field 1, offset 4), return
-         (ir.block.set! ok-block)
-         (let* ((val-ty (ir.type.bits 32))
-              (val-expr (ir.expr.field-offset ok-block call-expr 4 val-ty)))
-         (ir.term.return ok-block val-expr)))))
+         ;; Extract effect info — lookup in registry
+         (effect-name (optional.value (record.get payload '|effect|)))
+         (layout (effect.lookup-layout effect-name #f)))
+    (if (not layout)
+        ;; No layout registered for this effect — can't lower handle
+        (let* ((msg (string-append "cannot lower handle for effect '"
+                                   (symbol->string effect-name)
+                                   "': no product layout in registry")))
+          (error msg))
+        (let* ((total-size   (car layout))
+               (offsets      (cadr layout))
+               (flag-index   (caddr layout))
+               (arg-indices  (cadddr layout))
+               (num-fields   (length offsets))
+               ;; Compute value indices: all non-flag, non-arg indices
+               (value-indices
+                 (let loop ((i 0) (acc '()))
+                   (if (>= i num-fields)
+                       (reverse acc)
+                       (if (or (= i flag-index)
+                               (effect.index-in-list? i arg-indices))
+                           (loop (+ i 1) acc)
+                           (loop (+ i 1) (cons i acc))))))
+               ;; flag field info
+               (flag-offset-ty (list-ref offsets flag-index))
+               (flag-offset (car flag-offset-ty))
+               (flag-ty     (cdr flag-offset-ty))
+               ;; Build product type from field types
+               (field-types (map cdr offsets))
+               (product-ty  (type.product field-types))
+               ;; Get the tail expression from body (last statement)
+               (last-stmt (list-ref body-items (- (length body-items) 1)))
+               (tail-expr (optional.value (record.get (middle.payload last-stmt) '|expr|))))
+          ;; Lower body call → returns product
+          (let* ((call-expr (core.lower-expr block tail-expr product-ty locals))
+                 ;; Phase 2: the handle absorbs this effect — consume it
+                 (_consume (propagate.consume! effect-name))
+                 ;; Extract flag field
+                 (flag-val (ir.expr.field-offset block call-expr flag-offset flag-ty))
+                 ;; Create ok/err blocks
+                 (function (ir.block.parent block))
+                 (ok-block (ir.sub.block function))
+                 (err-block (ir.sub.block function))
+                 ;; Branch on flag == 0
+                 (flag-zero (ir.expr.const block flag-ty 0))
+                 (is-ok (ir.expr.primitive block '|integer.eq| (list flag-val flag-zero) (ir.type.bits 1))))
+            (ir.term.cond-branch block is-ok ok-block err-block)
+            ;; ── Error path: extract all arg fields, call handler ──
+            (ir.block.set! err-block)
+            (let* ((arg-vals
+                     (map (lambda (idx)
+                            (let* ((off-ty (list-ref offsets idx)))
+                              (ir.expr.field-offset err-block call-expr (car off-ty) (cdr off-ty))))
+                          arg-indices))
+                   (handler-ret (ir.expr.call err-block handler-fn arg-vals)))
+              (ir.term.return err-block handler-ret))
+            ;; ── Ok path: extract value fields, return ──
+            (ir.block.set! ok-block)
+            (if (null? value-indices)
+                ;; No value fields — return void (unit)
+                (ir.term.return-none ok-block)
+                ;; Return the first value field
+                ;; (multi-value effects would build an aggregate here)
+                (let* ((val-idx (car value-indices))
+                       (off-ty (list-ref offsets val-idx))
+                       (val-expr (ir.expr.field-offset ok-block call-expr (car off-ty) (cdr off-ty))))
+                  (ir.term.return ok-block val-expr))))))))

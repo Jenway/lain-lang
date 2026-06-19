@@ -23,6 +23,10 @@ uint32_t      g_temp_counter = 0;
 uint32_t      g_block_id_counter = 0;
 L1Block      *g_scratch_blocks[8];
 int           g_scratch_count = 0;
+L1ExportName *g_export_names_head = NULL;
+L1ExportName *g_declared_module_names_head = NULL;
+L1ExportName *g_declared_signature_names_head = NULL;
+int           g_has_explicit_exports = 0;
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Shared Utility Implementations
@@ -76,6 +80,49 @@ L1Type *infer_expr_type(L1Expr *expr) {
   case EXPR_ALLOCA:  return expr->data.alloca.result_ty;
   default:           { L1Type *t = malloc(sizeof(L1Type)); t->kind = TY_BITS; t->width = 64; return t; }
   }
+}
+
+static void named_entry_append_unique(L1ExportName **head, const char *name) {
+  for (L1ExportName *entry = *head; entry; entry = entry->next) {
+    if (strcmp(entry->name, name) == 0)
+      return;
+  }
+  L1ExportName *entry = malloc(sizeof(L1ExportName));
+  entry->name = strdup(name);
+  entry->next = NULL;
+  if (!*head) {
+    *head = entry;
+    return;
+  }
+  L1ExportName *tail = *head;
+  while (tail->next)
+    tail = tail->next;
+  tail->next = entry;
+}
+
+void native_declare_module(const char *name) {
+  named_entry_append_unique(&g_declared_module_names_head, name);
+}
+
+void native_declare_signature(const char *name) {
+  named_entry_append_unique(&g_declared_signature_names_head, name);
+}
+
+void native_mark_export(const char *name) {
+  g_has_explicit_exports = 1;
+  named_entry_append_unique(&g_export_names_head, name);
+}
+
+int native_has_explicit_exports(void) {
+  return g_has_explicit_exports;
+}
+
+int native_is_export_marked(const char *name) {
+  for (L1ExportName *entry = g_export_names_head; entry; entry = entry->next) {
+    if (strcmp(entry->name, name) == 0)
+      return 1;
+  }
+  return 0;
 }
 
 void scratch_terminator_to_inst(L1Block *block) {
@@ -334,6 +381,27 @@ static sexp sexp_core_set_function_link_name(sexp ctx, sexp self, sexp_sint_t n,
   return SEXP_FALSE;
 }
 
+static sexp sexp_core_mark_export(sexp ctx, sexp self, sexp_sint_t n,
+                                  sexp arg_name) {
+  const char *name = sexp_to_c_string(ctx, arg_name);
+  native_mark_export(name);
+  return SEXP_VOID;
+}
+
+static sexp sexp_core_declare_module(sexp ctx, sexp self, sexp_sint_t n,
+                                     sexp arg_name) {
+  const char *name = sexp_to_c_string(ctx, arg_name);
+  native_declare_module(name);
+  return SEXP_VOID;
+}
+
+static sexp sexp_core_declare_signature(sexp ctx, sexp self, sexp_sint_t n,
+                                        sexp arg_name) {
+  const char *name = sexp_to_c_string(ctx, arg_name);
+  native_declare_signature(name);
+  return SEXP_VOID;
+}
+
 static sexp sexp_core_declare_extern_function(sexp ctx, sexp self,
                                               sexp_sint_t n, sexp arg_name,
                                               sexp arg_link_name,
@@ -466,6 +534,13 @@ static sexp sexp_core_function_param_types(sexp ctx, sexp self, sexp_sint_t n,
                        result);
   }
   return result;
+}
+
+static sexp sexp_core_function_link_name(sexp ctx, sexp self, sexp_sint_t n,
+                                         sexp arg_sub) {
+  L1Subroutine *sub = (L1Subroutine *)sexp_cpointer_value(arg_sub);
+  const char *name = sub->link_name ? sub->link_name : sub->name;
+  return sexp_c_string(ctx, name, -1);
 }
 
 static sexp sexp_core_call(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,

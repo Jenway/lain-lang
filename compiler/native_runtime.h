@@ -10,6 +10,7 @@
 // main.lain compiled functions (bootstrap doesn't forward-declare them)
 uint32_t compile(const void *input_path, const void *output_path);
 uint32_t compile_manifest(const void *input_path, const void *output_path);
+uint32_t compile_interface(const void *input_path, const void *output_path);
 uint32_t compile_l1(const void *input_path, const void *output_path);
 int32_t native_build_with_funcs(const char *root_path, const char *output_path,
     uint32_t (*compile_fn)(const void*, const void*),
@@ -38,8 +39,14 @@ int32_t native_run_pipeline(void *ctx, void *root_group);
 // codegen (codegen_c.lain wrappers call these)
 void native_emit_module_to_file(void *subs, const char *output_path);
 void native_emit_l1_module(const char *output_path);
+void native_emit_interface(const char *output_path);
 void native_emit_manifest(const char *output_path);
 void *native_get_subroutines(void);
+void native_declare_module(const char *name);
+void native_declare_signature(const char *name);
+void native_mark_export(const char *name);
+int native_has_explicit_exports(void);
+int native_is_export_marked(const char *name);
 
 // environment
 const char *native_getenv(const char *name);

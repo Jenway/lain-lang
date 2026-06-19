@@ -1,0 +1,314 @@
+// compiler/lexer.lain — Lain 词法分析器
+//
+// 使用递归（而非 while 循环）实现,因为 bootstrap 编译器不支持 while 循环。
+// 使用 @foreign 函数读取原始指针字节。
+
+import std::dynarray;
+
+// ── 外部 C 辅助函数 ──────────────────────────────────────────────────────────
+
+@foreign(c, link_name = "read_byte_at")
+fn read_byte_at(ptr: *const u8, offset: usize) -> u8;
+
+// ── Token 类型常量 ───────────────────────────────────────────────────────────
+
+pub fn tok_ident() -> i32 { 0 };
+pub fn tok_number() -> i32 { 1 };
+pub fn tok_string() -> i32 { 2 };
+pub fn tok_punct() -> i32 { 3 };
+pub fn tok_lparen() -> i32 { 4 };
+pub fn tok_rparen() -> i32 { 5 };
+pub fn tok_lbracket() -> i32 { 6 };
+pub fn tok_rbracket() -> i32 { 7 };
+pub fn tok_lbrace() -> i32 { 8 };
+pub fn tok_rbrace() -> i32 { 9 };
+pub fn tok_eof() -> i32 { 10 };
+
+// ── 数据结构 ─────────────────────────────────────────────────────────────────
+
+struct RawToken {
+    kind: i32;
+    start: usize;
+    len: usize;
+    int_val: u64;
+};
+
+struct Lexer {
+    src_ptr: *const u8;
+    src_len: usize;
+    pos: usize;
+};
+
+struct LexResult {
+    tok: RawToken;
+    next: Lexer;
+};
+
+// ── 递归辅助函数的返回结构 ───────────────────────────────────────────────────
+
+struct NumResult {
+    val: u64;
+    next: Lexer;
+};
+
+struct PosResult {
+    end_pos: usize;
+    next: Lexer;
+};
+
+// ── 字符分类 ─────────────────────────────────────────────────────────────────
+
+fn is_space(c: u8) -> bool {
+    if c == 32 {
+        true
+    } else {
+        if c == 10 {
+            true
+        } else {
+            if c == 13 {
+                true
+            } else {
+                c == 9
+            }
+        }
+    }
+};
+
+fn is_alpha(c: u8) -> bool {
+    if c >= 65 {
+        if c <= 90 {
+            true
+        } else {
+            c == 95
+        }
+    } else {
+        if c >= 97 {
+            c <= 122
+        } else {
+            false
+        }
+    }
+};
+
+fn is_digit(c: u8) -> bool {
+    if c >= 48 {
+        c <= 57
+    } else {
+        false
+    }
+};
+
+fn is_alpha_or_digit(c: u8) -> bool {
+    if is_alpha(c) {
+        true
+    } else {
+        is_digit(c)
+    }
+};
+
+// ── Lexer 基本操作 ───────────────────────────────────────────────────────────
+
+pub fn lexer_new(p: *const u8, len: usize) -> Lexer {
+    Lexer { src_ptr: p, src_len: len, pos: 0 }
+};
+
+fn lexer_peek(lex: Lexer) -> u8 {
+    if lex.pos >= lex.src_len {
+        0
+    } else {
+        read_byte_at(lex.src_ptr, lex.pos)
+    }
+};
+
+fn lexer_advance(lex: Lexer) -> Lexer {
+    Lexer {
+        src_ptr: lex.src_ptr,
+        src_len: lex.src_len,
+        pos: lex.pos + 1,
+    }
+};
+
+// ── 帮助函数：构造结果 ───────────────────────────────────────────────────────
+
+fn make_token(k: i32, st: usize, ln: usize, val: u64) -> RawToken {
+    RawToken {
+        kind: k,
+        start: st,
+        len: ln,
+        int_val: val,
+    }
+};
+
+fn make_result(k: i32, st: usize, ln: usize, val: u64, nlx: Lexer) -> LexResult {
+    LexResult {
+        tok: make_token(k, st, ln, val),
+        next: nlx,
+    }
+};
+
+// ── 递归：跳过空白 ───────────────────────────────────────────────────────────
+
+fn skip_spaces(lex: Lexer) -> Lexer {
+    let c: u8 = lexer_peek(lex);
+    if is_space(c) {
+        skip_spaces(lexer_advance(lex))
+    } else {
+        lex
+    }
+};
+
+// ── 递归：消费标识符字符直到非 alpha/digit ───────────────────────────────────
+
+fn consume_ident(lex: Lexer) -> Lexer {
+    let c: u8 = lexer_peek(lex);
+    if is_alpha_or_digit(c) {
+        consume_ident(lexer_advance(lex))
+    } else {
+        lex
+    }
+};
+
+// ── 递归：消费数字字符并累加值 ───────────────────────────────────────────────
+
+fn consume_digits(lex: Lexer, val: u64) -> NumResult {
+    let c: u8 = lexer_peek(lex);
+    if is_digit(c) {
+        let zero: u8 = 48;
+        let nd: u8 = c - zero;
+        let mut nd64: u64 = 0;
+        nd64 = nd;
+        let ten: u64 = 10;
+        let temp: u64 = val * ten;
+        let new_val: u64 = temp + nd64;
+        consume_digits(lexer_advance(lex), new_val)
+    } else {
+        NumResult { val: val, next: lex }
+    }
+};
+
+// ── 递归：跳过注释直到换行或 EOF ─────────────────────────────────────────────
+
+fn skip_comment(lex: Lexer) -> Lexer {
+    let c: u8 = lexer_peek(lex);
+    if c == 10 {
+        lex
+    } else {
+        if c == 13 {
+            lex
+        } else {
+            if c == 0 {
+                lex
+            } else {
+                skip_comment(lexer_advance(lex))
+            }
+        }
+    }
+};
+
+// ── 递归：消费字符串直到闭合引号或 EOF ───────────────────────────────────────
+
+fn consume_string(lex: Lexer) -> Lexer {
+    let c: u8 = lexer_peek(lex);
+    if c == 34 {
+        lexer_advance(lex)
+    } else {
+        if c == 0 {
+            lex
+        } else {
+            consume_string(lexer_advance(lex))
+        }
+    }
+};
+
+// ── 主词法分析 ───────────────────────────────────────────────────────────────
+
+pub fn lexer_next_token(lex: Lexer) -> LexResult {
+    let l: Lexer = skip_spaces(lex);
+    let start: usize = l.pos;
+    let c: u8 = lexer_peek(l);
+    let l2: Lexer = lexer_advance(l);
+
+    if c == 0 {
+        make_result(tok_eof(), start, 0, 0, l2)
+    } else {
+    if c == 40 {
+        make_result(tok_lparen(), start, 1, 0, l2)
+    } else {
+    if c == 41 {
+        make_result(tok_rparen(), start, 1, 0, l2)
+    } else {
+    if c == 91 {
+        make_result(tok_lbracket(), start, 1, 0, l2)
+    } else {
+    if c == 93 {
+        make_result(tok_rbracket(), start, 1, 0, l2)
+    } else {
+    if c == 123 {
+        make_result(tok_lbrace(), start, 1, 0, l2)
+    } else {
+    if c == 125 {
+        make_result(tok_rbrace(), start, 1, 0, l2)
+    } else {
+    if is_alpha(c) {
+        let after: Lexer = consume_ident(l2);
+        let tok_len: usize = after.pos - start;
+        make_result(tok_ident(), start, tok_len, 0, after)
+    } else {
+    if is_digit(c) {
+        let zero: u8 = 48;
+        let fd: u8 = c - zero;
+        let mut init_val: u64 = 0;
+        init_val = fd;
+        let nr: NumResult = consume_digits(l2, init_val);
+        let tok_len: usize = nr.next.pos - start;
+        make_result(tok_number(), start, tok_len, nr.val, nr.next)
+    } else {
+    if c == 34 {
+        let str_start: usize = l2.pos;
+        let after_str: Lexer = consume_string(l2);
+        let str_len: usize = after_str.pos - 1 - str_start;
+        make_result(tok_string(), str_start, str_len, 0, after_str)
+    } else {
+    if c == 47 {
+        let next: u8 = lexer_peek(l2);
+        if next == 47 {
+            let after_cmt: Lexer = skip_comment(lexer_advance(l2));
+            lexer_next_token(after_cmt)
+        } else {
+            let tok_len: usize = l2.pos - start;
+            make_result(tok_punct(), start, tok_len, 0, l2)
+        }
+    } else {
+        let tok_len: usize = l2.pos - start;
+        make_result(tok_punct(), start, tok_len, 0, l2)
+    };
+    };
+    };
+    };
+    };
+    };
+    };
+    };
+    };
+    };
+    };
+};
+
+// ── 递归：tokenize 所有 token ────────────────────────────────────────────────
+
+fn tokenize_loop(lex: Lexer, tokens: DynArray<RawToken>) -> DynArray<RawToken> {
+    let result: LexResult = lexer_next_token(lex);
+    let tok: RawToken = result.tok;
+    if tok.kind == tok_eof() {
+        tokens
+    } else {
+        tokens.push(tok);
+        tokenize_loop(result.next, tokens)
+    }
+};
+
+pub fn lexer_tokenize_all(src: *const u8, len: usize) -> DynArray<RawToken> {
+    let lex: Lexer = lexer_new(src, len);
+    let tokens: DynArray<RawToken> = DynArray::new();
+    tokenize_loop(lex, tokens)
+};

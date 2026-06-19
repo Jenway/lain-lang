@@ -1,9 +1,9 @@
 (meta-source "import/lower")
 
 ;; ═══════════════════════════════════════════════════════════
-;; Import core-declarer / core-lowerer (manifest-based)
+;; Import core-declarer / core-lowerer (interface-based, with manifest fallback)
 ;; 
-;; Step 7: Reads .manifest files instead of recursive compilation.
+;; Step 7: Reads compiled interface artifacts instead of recursive compilation.
 ;; Directly calls host.new-extern for each export.
 ;; Registers both the mangled C name (for linking) and the
 ;; import-path-derived name (for source-level calls).
@@ -32,9 +32,9 @@
       (record '|middle.ty.path|
         (record.field '|name| ty-name)))))
 
-;; ── Helper: walk manifest S-expr and extract fn exports ──
+;; ── Helper: walk interface S-expr and extract fn exports ──
 
-;; Returns: ((fn-name (type...) . ret-type) ...)
+;; Returns: ((export-name link-name (type...) ret-type) ...)
 (define (manifest.extract-exports parsed)
   ;; parsed = (module NAME (exports (fn ...) ...))
   (if (not (pair? parsed))
@@ -43,33 +43,223 @@
         (if (not (eq? module-tag 'module))
             (error "manifest: expected (module ...)")
             (let* ((rest (cdr parsed))
-                   (exports-section (if (and (pair? rest) (pair? (cdr rest)))
-                                       (cadr rest) #f)))
+                   (exports-section (manifest.find-exports-section rest)))
               (if (or (not (pair? exports-section))
                       (not (eq? (car exports-section) 'exports)))
                   (error "manifest: missing (exports ...)")
                   ;; exports-section = (exports (fn ...) ...)
                   (manifest.extract-fns (cdr exports-section) (list))))))))
 
+(define (manifest.find-exports-section items)
+  (if (null? items)
+      #f
+      (let* ((item (car items)))
+        (if (and (pair? item) (eq? (car item) 'exports))
+            item
+            (manifest.find-exports-section (cdr items))))))
+
 (define (manifest.extract-fns entries acc)
   (if (null? entries)
       (reverse acc)
       (let* ((entry (car entries)))
         (if (and (pair? entry) (eq? (car entry) 'fn))
-            ;; entry = (fn NAME (TYPES) -> RET)
-            (let* ((fn-name (cadr entry))
-                   (params (caddr entry))
-                   ;; After params: (-> RET)
-                   (tail (cdddr entry))
-                   (ret-type (if (and (pair? tail) (pair? (cdr tail))
-                                     (eq? (car tail) '->))
-                                 (cadr tail)
-                                 (error "manifest: malformed fn entry"))))
+            ;; Accept both legacy shape:
+            ;;   (fn NAME (TYPES) -> RET)
+            ;; and new interface shape:
+            ;;   (fn (name NAME) (params (...)) (ret RET) (link_name "..."))
+            (let* ((fn-name (manifest.fn-entry-name entry))
+                   (link-name (manifest.fn-entry-link-name entry))
+                   (params (manifest.fn-entry-params entry))
+                   (ret-type (manifest.fn-entry-ret entry)))
               (manifest.extract-fns (cdr entries)
-                (cons (list fn-name params ret-type) acc)))
+                (cons (list fn-name link-name params ret-type) acc)))
             (manifest.extract-fns (cdr entries) acc)))))
 
-;; ── core-declarer: read manifest, declare extern functions directly ──
+(define (manifest.extract-entry-names entries tag acc)
+  (if (null? entries)
+      (reverse acc)
+      (let* ((entry (car entries)))
+        (if (and (pair? entry) (eq? (car entry) tag))
+            (let* ((name-field (manifest.assoc-field 'name (cdr entry))))
+              (if (and name-field (pair? (cdr name-field)))
+                  (manifest.extract-entry-names
+                    (cdr entries)
+                    tag
+                    (cons (cadr name-field) acc))
+                  (error "interface: malformed entry missing name")))
+            (manifest.extract-entry-names (cdr entries) tag acc)))))
+
+(define (manifest.assoc-field key fields)
+  (if (null? fields)
+      #f
+      (let* ((field (car fields)))
+        (if (and (pair? field) (eq? (car field) key))
+            field
+            (manifest.assoc-field key (cdr fields))))))
+
+(define (manifest.fn-entry-name entry)
+  (let* ((tail (cdr entry)))
+    (if (and (pair? tail) (symbol? (car tail)))
+        ;; Legacy format: (fn NAME ...)
+        (car tail)
+        ;; New format: look up (name NAME)
+        (let* ((name-field (manifest.assoc-field 'name tail)))
+          (if (and name-field (pair? (cdr name-field)))
+              (cadr name-field)
+              (error "interface: malformed fn entry missing name"))))))
+
+(define (manifest.fn-entry-params entry)
+  (let* ((tail (cdr entry)))
+    (if (and (pair? tail) (symbol? (car tail)))
+        ;; Legacy format: (fn NAME (TYPES) -> RET)
+        (cadr tail)
+        ;; New format: (params (...))
+        (let* ((params-field (manifest.assoc-field 'params tail)))
+          (if (and params-field (pair? (cdr params-field)))
+              (cadr params-field)
+              (error "interface: malformed fn entry missing params"))))))
+
+(define (manifest.fn-entry-ret entry)
+  (let* ((tail (cdr entry)))
+    (if (and (pair? tail) (symbol? (car tail)))
+        ;; Legacy format: (fn NAME (TYPES) -> RET)
+        (let* ((legacy-tail (cdddr entry)))
+          (if (and (pair? legacy-tail) (pair? (cdr legacy-tail))
+                   (eq? (car legacy-tail) '->))
+              (cadr legacy-tail)
+              (error "manifest: malformed fn entry")))
+        ;; New format: (ret RET)
+        (let* ((ret-field (manifest.assoc-field 'ret tail)))
+          (if (and ret-field (pair? (cdr ret-field)))
+              (cadr ret-field)
+              (error "interface: malformed fn entry missing ret"))))))
+
+(define (manifest.fn-entry-link-name entry)
+  (let* ((tail (cdr entry)))
+    (if (and (pair? tail) (symbol? (car tail)))
+        ;; Legacy format has no separate link_name field
+        (car tail)
+        (let* ((link-field (manifest.assoc-field 'link_name tail)))
+          (if (and link-field (pair? (cdr link-field)))
+              (string->symbol (cadr link-field))
+              (manifest.fn-entry-name entry))))))
+
+;; ── Import binding registry ──
+
+(define *import-binding-registry* (list))
+
+(define (import.path-tail-symbol path)
+  (let loop ((segments path) (acc ""))
+    (if (null? segments)
+        (string->symbol acc)
+        (let* ((seg (symbol->string (car segments)))
+               (new-acc (if (string=? acc "")
+                            seg
+                            (string-append acc "_" seg))))
+          (loop (cdr segments) new-acc)))))
+
+(define (import.export-leaf-name mangled-name)
+  (let* ((mangled-str (symbol->string mangled-name))
+         (underscore-idx (import.string-first-index mangled-str #\_)))
+    (if (or (not underscore-idx) (= underscore-idx 0))
+        mangled-name
+        (string->symbol
+          (substring mangled-str
+                     (+ underscore-idx 1)
+                     (string-length mangled-str))))))
+
+(define (import.binding-exports exports acc)
+  (if (null? exports)
+      (reverse acc)
+      (let* ((entry (car exports))
+             (export-name (car entry))
+             (leaf-name (import.export-leaf-name export-name)))
+        (import.binding-exports
+          (cdr exports)
+          (cons (cons leaf-name export-name) acc)))))
+
+(define (import.register-binding! alias import-path exports)
+  (set! *import-binding-registry*
+    (cons (list alias
+                import-path
+                (import.binding-exports exports (list))
+                (list)
+                (list))
+          *import-binding-registry*)))
+
+(define (import.register-binding-metadata! alias import-path
+                                           fn-exports module-exports signature-exports)
+  (set! *import-binding-registry*
+    (cons (list alias import-path fn-exports module-exports signature-exports)
+          *import-binding-registry*)))
+
+(define (import.binding-fn-exports binding)
+  (caddr binding))
+
+(define (import.binding-module-exports binding)
+  (cadddr binding))
+
+(define (import.binding-signature-exports binding)
+  (car (cddddr binding)))
+
+(define (import.lookup-binding alias)
+  (let loop ((entries *import-binding-registry*))
+    (if (null? entries)
+        #f
+        (let* ((entry (car entries))
+               (entry-alias (car entry)))
+          (if (symbol=? entry-alias alias)
+              entry
+              (loop (cdr entries)))))))
+
+(define (import.lookup-export exports leaf-name)
+  (if (null? exports)
+      #f
+      (let* ((entry (car exports)))
+        (if (symbol=? (car entry) leaf-name)
+            (cdr entry)
+            (import.lookup-export (cdr exports) leaf-name)))))
+
+(define (import.resolve-qualified-symbol path)
+  (if (or (null? path) (null? (cdr path)))
+      #f
+      (let* ((binding (import.lookup-binding (car path))))
+        (if (not binding)
+            #f
+            (let* ((exports (import.binding-fn-exports binding))
+                   (leaf-name (import.path-tail-symbol (cdr path))))
+              (import.lookup-export exports leaf-name))))))
+
+(define (import.lookup-name names leaf-name)
+  (if (null? names)
+      #f
+      (if (symbol=? (car names) leaf-name)
+          (car names)
+          (import.lookup-name (cdr names) leaf-name))))
+
+(define (import.resolve-qualified-module-name path)
+  (if (or (null? path) (null? (cdr path)))
+      #f
+      (let* ((binding (import.lookup-binding (car path))))
+        (if (not binding)
+            #f
+            (let* ((leaf-name (import.path-tail-symbol (cdr path))))
+              (import.lookup-name
+                (import.binding-module-exports binding)
+                leaf-name))))))
+
+(define (import.resolve-qualified-signature-name path)
+  (if (or (null? path) (null? (cdr path)))
+      #f
+      (let* ((binding (import.lookup-binding (car path))))
+        (if (not binding)
+            #f
+            (let* ((leaf-name (import.path-tail-symbol (cdr path))))
+              (import.lookup-name
+                (import.binding-signature-exports binding)
+                leaf-name))))))
+
+;; ── core-declarer: read interface, declare extern functions directly ──
 
 (define-pass (core-declarer |middle.import| item)
   (let* ((payload (middle.payload item))
@@ -77,15 +267,23 @@
          ;; The raw import path is nested in the inner |payload| field
          (raw-inner (optional.value (record.get payload '|payload|)))
          (path (optional.value (record.get raw-inner '|path|))))
-    ;; Read and parse the manifest file
+    ;; Read and parse the compiled interface file
     (let* ((source-path (import.resolve-path path))
-           (parsed (host.read-manifest source-path)))
+           (parsed (host.read-interface source-path)))
       (if (not parsed)
-          (error (string-append "import: manifest not found for: " source-path))
-          (let ((exports (manifest.extract-exports parsed)))
+          (error (string-append "import: interface not found for: " source-path))
+          (let* ((rest (cdr parsed))
+                 (exports-section (manifest.find-exports-section rest))
+                 (export-entries (if exports-section (cdr exports-section) (list)))
+                 (exports (manifest.extract-exports parsed))
+                 (module-exports (manifest.extract-entry-names export-entries 'module (list)))
+                 (signature-exports (manifest.extract-entry-names export-entries 'signature (list)))
+                 (fn-exports (import.binding-exports exports (list))))
             ;; Directly declare each export as an extern function.
             ;; Also register with the import-path-derived name so
             ;; source-level calls like simple_math_add() resolve correctly.
+            (import.register-binding-metadata!
+              name path fn-exports module-exports signature-exports)
             (manifest.declare-exports! exports path))))))
 
 ;; Derive the caller-side function name from import path + mangled name.
@@ -143,25 +341,26 @@
   (if (null? exports)
       unit
       (let* ((entry (car exports))
-             (mangled-name (car entry))         ;; e.g., math_add
-             (param-type-names (cadr entry))     ;; e.g., (i32 i32)
-             (ret-type-name (caddr entry)))      ;; e.g., i32
+             (export-name (car entry))           ;; e.g., LocalCount
+             (link-name (cadr entry))            ;; e.g., provider_count
+             (param-type-names (caddr entry))    ;; e.g., (i32 i32)
+             (ret-type-name (cadddr entry)))     ;; e.g., i32
         ;; Lower types to L1Type* cpointers
         (let* ((ret-ty (manifest.type-name->lowered ret-type-name))
                (param-tys (manifest.lower-param-types param-type-names))
                ;; Caller-side name derived from import path
-               (caller-name (import.caller-fn-name import-path mangled-name)))
+               (caller-name (import.caller-fn-name import-path export-name)))
           ;; Register with caller-side name, link_name = actual C symbol
           ;; The C emitter now uses link_name for both forward decls and calls,
           ;; so the generated C will reference the correct mangled symbol.
           (host.new-extern
             caller-name            ;; source-level name (e.g., simple_math_add)
-            (symbol->string mangled-name)  ;; C-level symbol (e.g., math_add)
+            (symbol->string link-name)  ;; C-level symbol (e.g., math_add)
             param-tys ret-ty)
-          ;; Also register under the mangled name itself, for direct qualified calls
+          ;; Also register under the exported interface name itself.
           (host.new-extern
-            mangled-name           ;; mangled name (e.g., math_add)
-            (symbol->string mangled-name)  ;; same as C symbol
+            export-name
+            (symbol->string link-name)
             param-tys ret-ty))
         (manifest.declare-exports! (cdr exports) import-path))))
 
