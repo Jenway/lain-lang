@@ -1,134 +1,150 @@
 # 效果系统、异步与错误处理设计
 
-## 效果系统的本质
+## 效果系统的统一定位
 
-在 Lain 中，**效果系统（Effect System）是整个运行时层的语义核心。**
-它并不是一个单纯的语言特性，而是**一种将“不纯粹的、涉及硬件的控制流改变”以强类型方式进行声明和静态审计的机制**。
+Lain 的 effect system 不只服务运行时，也服务编译期。
 
-任何涉及物理硬件或运行状态的操作，在底层都映射为了精细化的效果行：
+准确地说，effect 是一套统一语义，用来描述：
 
+- 运行时程序的不纯行为
+- compile-time `lain` 的副作用行为
+
+两者共享“显式声明、显式传播、显式处理”的原则，但它们依赖的 capability 来源不同：
+
+- 运行时 effect 依赖运行时库和目标平台
+- 编译期 effect 依赖编译阶段注入的 capability
+
+## 运行时 effect
+
+运行时 effect 仍然覆盖传统的不纯操作：
+
+- `IO`
+- `RawPtrRead` / `RawPtrWrite`
+- `Throws<E>`
+- `Suspend`
+
+这些 effect 最终都会被 lowering 到物理层行为，例如：
+
+| effect | 物理结果 |
+| :-- | :-- |
+| `IO` | 系统调用或运行时封装 |
+| `RawPtr*` | `#load` / `#store` |
+| `Throws<E>` | 显式返回值编码 |
+| `Suspend` | 上下文切换或调度协议 |
+
+## 编译期 effect
+
+编译期 effect 的目标不是把 Scheme 变成大型宿主脚本语言，而是让 compile-time `lain` 用同一套语言机制表达副作用。
+
+典型的编译期 effect 包括：
+
+- `CtFsRead`
+- `CtFsWrite`
+- `CtProcess`
+- `CtNet`
+- `CtEmitSource`
+- `CtEmitInterface`
+
+这些名字只是示意，真正的 effect 集合应由库定义，而不是由编译器硬编码。
+
+## 为什么编译期副作用必须放在 lain
+
+如果把编译期 IO、网络、进程都塞进 Scheme VM，会立即出现三个问题：
+
+1. Lisp VM 会膨胀成大型宿主环境
+2. 语言层变换和副作用构建混在一起
+3. effect system 无法统一地约束这些行为
+
+因此编译期副作用应遵循这条规则：
+
+- Scheme 只生成、检查、变换语言
+- compile-time `lain` 执行 effectful work
+
+## 编译期 capability 模型
+
+编译器不应直接“提供网络栈”或“内建包管理器”。
+
+更合理的做法是：
+
+1. 编译器定义 capability injection substrate
+2. driver 或外部库实现具体 capability
+3. compile-time `lain` 通过显式 effect 使用 capability
+4. meta 层只知道 capability 的存在与边界，不知道业务实现细节
+
+所以编译器只负责：
+
+- 注入 capability handle
+- 检查 phase boundary
+- 记录依赖和产物
+
+而不负责：
+
+- 实现完整网络库
+- 实现包管理逻辑
+- 把 bridge generator 写死在编译器里
+
+## 错误处理
+
+Lain 仍然应区分两类错误：
+
+### 1. 预期失败
+
+例如：
+
+- 文件不存在
+- schema 解析失败
+- 外部工具返回业务错误
+
+这类错误应通过 `Throws<E>` 或同类显式 effect 表达，并保留普通控制流语义。
+
+### 2. 致命错误
+
+例如：
+
+- 内部 lowering 不变式被破坏
+- 不可恢复的运行时内存错误
+
+这类错误不应被包装成普通业务 effect，而应直接终止。
+
+## 异步与 `Suspend`
+
+`Suspend` 依然是运行时效果系统的关键例子，因为它说明：
+
+- effect 不等于某个固定 runtime
+- handler 决定调度策略
+- 语言表面不需要被 `async` 关键字污染
+
+这条原则也能反过来指导 compile-time phase：
+
+- 编译期 capability 不该通过特殊语法魔法提供
+- 它也应通过普通 effect + handler/capability 协议接入
+
+## 一个编译期例子
+
+```lain
+let generated = comptime {
+  let spec = fs::read("api.json")?;
+  let bridge = cppbind::generate(spec)?;
+  emit::source("gen/api.lain", bridge.source)?;
+  emit::interface("gen/api.lci", bridge.interface)?;
+};
 ```
-                        Lain 运行时效果映射
-┌─────────────────────────────────┬──────────────────────────────────┐
-│             高级效果            │         降级后的物理 L1 映射      │
-├─────────────────────────────────┼──────────────────────────────────┤
-│  IO (系统调用)                  │  #syscall 原语                   │
-├─────────────────────────────────┼──────────────────────────────────┤
-│  RawPtr (裸指针读写)             │  #load / #store 物理指令         │
-├─────────────────────────────────┼──────────────────────────────────┤
-│  Throws<E> (业务预期失败)       │  无 Unwind, 降解为普通 C 返回值  │
-├─────────────────────────────────┼──────────────────────────────────┤
-│  Suspend (异步挂起)             │  #swap_context 上下文置换        │
-└─────────────────────────────────┴──────────────────────────────────┘
-```
 
----
+这段代码想表达的是：
 
-## 一、 错误处理的双轨制分治
+- 编译期代码就是 `lain`
+- 它可以有 effect
+- 它需要 capability
+- 它产出 artifact
 
-Lain 拒绝用同一种机制处理所有“Unhappy Path”。我们根据错误的物理性质，将其彻底解耦：
+这里不需要把 `cppbind` 或 `fs` 做成编译器魔法。
 
-### 1. 预期业务失败：`Throws<E>` 效果 (零展开成本)
+## 与 meta 系统的关系
 
-像文件不存在、解析失败等，属于“预期的业务流程分支”。
+effect system 和 meta system 的分工应明确：
 
-- **物理实现**：它绝对不使用昂贵、复杂的运行时栈展开（Unwinding）和异常查表。Scheme 宏会在编译期，将 `Throws<E>` **完全重写并降级为最普通的 C 语言 Tagged Union 返回值（即结构体 `{ uint8_t tag, T val, E err }`）**。
-- **性能特征**：在物理汇编上只产生最简单的 `cmp` 和 `jmp` 指令。正常路径（Happy Path）与错误路径（Unhappy Path）的执行速度完全一致。
+- `Scheme meta` 定义 effect 语法、effect 对象、传播与 lowering 规则
+- compile-time `lain` 消费这些规则去执行副作用逻辑
+- 编译器只提供 phase、artifact、diagnostic、capability substrate
 
-### 2. 致命代码 Bug：`#trap()` / Abort (零内存垃圾)
-
-像数组越界、空地址访问、或安全断言（Assert）失败，这属于“程序员的逻辑漏洞”，在物理上是不可恢复的。如果强行捕获并继续运行，会产生灾难性的内存损坏风险。
-
-- **物理实现**：L1 编译器遇到此类崩溃时，**直接在 Codegen 阶段发射单条两字节的 `#trap()` 硬件陷阱指令**（在 x86 上为 `ud2`，在 ARM 上为 `brk`）。
-- **性能特征**：它在物理文件里不产生任何异常保护（EH）恢复表，不占用任何内存体积。一旦触发，CPU 硬件瞬间抛出中断自毁，彻底阻断黑客利用“受损内存状态”进行安全溢出攻击的可能。
-
----
-
-## 二、 异步与协程（`Suspend` 效果的物理闭环）
-
-在 Rust 等传统语言中，异步会带来著名的 **“函数颜色问题（What Color is Your Function）”**：红色的 `async` 函数不能在蓝色的同步函数里直接调用，导致颜色污染。
-
-在 Lain 中，**因为 Suspend 效果可以被 handle 掉，函数颜色问题在物理层面彻底消失了。**
-
-### 1. 零污染的同步表面：
-
-高层网络库在写 read 时，表面上是一个完全干净、没有任何 `async` 关键字的同步风格函数：
-
-```rust
-pub impl TcpStream {
-    pub fn read(self: &TcpStream, buf: &mut [u8]) -> usize ! {IO, Suspend, Throws<NetError>} {
-        loop {
-            match raw_socket_read(self.fd, buf) {
-                Ok(n) => return n,
-                Err(EWouldBlock) => {
-                    // 1. 如果没数据，构造 Waker
-                    let w = make_waker(self.fd, get_current_task())
-                    // 2. 注册到底层的 io_uring 中
-                    runtime::register_io_uring(self.fd, w)
-                    // 3. 【触发挂起】：
-                    //    L1 编译器看到该 perform，会强制溢出所有活跃寄存器回栈
-                    //    并调用 #swap_context 切回主调度器！
-                    perform Suspend::suspend(w)
-                }
-                Err(e) => perform Throws::throw(NetError::from(e))?
-            }
-        }
-    }
-}
-```
-
-### 2. 效果处理器与 Executor 100% 解耦
-
-因为 `Suspend` 只是一个普通的库效果（`std/effects/suspend.lain`），它不与任何特定的运行时绑定。
-用户可以在最外层，通过一行 `handle` 来任意决定使用什么样的异步调度引擎：
-
-```rust
-fn main() {
-    handle {
-        accept_loop()
-    } with {
-        // 当协程内部触发 Suspend 时，在这里被拦截：
-        Suspend::suspend(waker) => {
-            // 保存当前协程上下文，利用 L1 #swap_context 原语切回物理线程调度器
-            l1::swap_context(waker.task.ctx_ptr, &mut sched_ctx as l1::addr)
-        }
-    }
-    // 这里决定了它的执行策略：
-    // 换成 thread_pool_executor(threads: 8) 或者单线程 event_loop 只需要改这一行，
-    // 内部所有的 TcpStream 业务代码一字不改！
-    with io_uring_executor(threads: 4)
-}
-```
-
----
-
-## 三、 无 `unsafe` 的安全借用审计（`RawPtr` 效果）
-
-Lain 废除了粗暴的 `unsafe` 关键字。我们通过精准的效果细分来约束硬件操作：
-
-```rust
-// 1. 这不是 unsafe 函数，它只是一个普通的、标记了物理效果的函数
-fn raw_copy(dst: l1::addr, src: l1::addr, n: usize) -> () ! {RawPtrWrite, RawPtrRead} {
-    let mut i = 0
-    while i < n {
-        // L1 物理内存存储：直接对应 mov 机器指令
-        l1::store(dst + i, l1::load(src + i, l1::bits(8)), relaxed)
-        i += 1
-    }
-}
-
-// 2. 调用者必须显式 handle 这些效果：
-fn safe_api(dst: &mut [u8], src: &[u8]) -> () {
-    handle {
-        raw_copy(dst.ptr, src.ptr, src.len)
-    } with permit_raw_ptr() // 显式消除 RawPtr 效果，代表“我为这次物理操作的安全负责”
-}
-```
-
-这带来了极致细粒度的安全审计：代码审计者不需要阅读成千上万行带有 `unsafe` 的大代码块。他们只需要查看函数签名，就能立刻区分：
-
-- 这个函数是否操作了裸指针（`! {RawPtrWrite}`）？
-- 它是否操作了共享内存（`! {MemAcqRel}`）？
-- 它是否调用了底层汇编（`! {Asm}`）？
-
-所有的危险物理行为，都在编译期被效果系统死死盯防，并以最高效的物理指令低成本运行。
+这保证了 `effect` 本身仍然是语言库对象，而不是编译器的语义硬编码。
