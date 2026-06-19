@@ -223,7 +223,7 @@ static sexp sexp_read_file_string(sexp ctx, sexp self, sexp_sint_t n,
 // ── Interface parser: read .lci file, fallback to .manifest during migration ──
 // Given a source .lain path like "compiler/args.lain", reads
 // "compiler/args.lain.lci" first, then falls back to
-// "compiler/args.lain.manifest", and returns the parsed (module ...) S-expression.
+// Reads the canonical interface artifact, with legacy manifest fallback.
 
 static sexp sexp_read_interface(sexp ctx, sexp self, sexp_sint_t n,
                                 sexp arg_source_path) {
