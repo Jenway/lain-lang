@@ -119,6 +119,9 @@
                                (lowered-args (core.lower-args block args
                                                 (ir.sub.params function)
                                                 locals (list)))
+                               ;; Phase 2: propagate callee effects to caller
+                               (_callee-effs (let ((effs (propagate.lookup-fn-effects fn-name)))
+                                               (propagate.record-effects! effs)))
                                (call-expr (ir.inst.call block function lowered-args)))
                           (ir.inst.assign-temp block call-expr))))
                   (let* ((value (core.lower-expr block value-expr ty locals)))

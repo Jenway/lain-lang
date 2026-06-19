@@ -180,10 +180,11 @@
               (cons offset (reverse acc))
               (let* ((ty (car tys))
                      (size (ir.type.size ty))
-                     ;; 64-bit alignment
-                     (aligned (if (and (= size 8) (not (zero? (modulo offset 8))))
-                                  (+ offset (- 8 (modulo offset 8)))
-                                  offset)))
+                     ;; Natural alignment: align to field's own size (capped at 8)
+                     (align (if (> size 8) 8 size))
+                     (aligned (if (zero? (modulo offset align))
+                                  offset
+                                  (+ offset (- align (modulo offset align))))))
                 (loop (cdr tys)
                       (+ aligned size)
                       (cons (cons aligned ty) acc))))))))

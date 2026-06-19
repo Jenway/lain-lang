@@ -67,6 +67,18 @@ def run_check_pass():
             log_failure(name, f"Compilation failed.\n{res.stderr}")
 
 
+def extract_check_patterns(path):
+    expected_patterns = []
+    forbidden_patterns = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if "// CHECK:" in line:
+                expected_patterns.append(line.split("// CHECK:")[1].strip())
+            if "// CHECK-NOT:" in line:
+                forbidden_patterns.append(line.split("// CHECK-NOT:")[1].strip())
+    return expected_patterns, forbidden_patterns
+
+
 # B. ui: 必须编译失败（测试编译期诊断）
 def run_ui_tests():
     print("\n🚀 Running UI (expect fail) tests...")
@@ -89,11 +101,7 @@ def run_codegen_tests():
         out_l1 = "/tmp/lain_test_out.l1"
 
         # 1. 提取源码里所有的 // CHECK: 模式
-        expected_patterns = []
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                if "// CHECK:" in line:
-                    expected_patterns.append(line.split("// CHECK:")[1].strip())
+        expected_patterns, forbidden_patterns = extract_check_patterns(path)
 
         # 2. 用 lainc --emit-l1 编译
         res = subprocess.run([COMPILER_BIN, "--emit-l1", path, out_l1], env=ENV, capture_output=True, text=True)
@@ -111,8 +119,104 @@ def run_codegen_tests():
                 failed_pattern = pattern
                 break
 
+        forbidden_hit = None
+        for pattern in forbidden_patterns:
+            if pattern in generated_l1:
+                forbidden_hit = pattern
+                break
+
         if failed_pattern:
             log_failure(name, f"Generated L1 IR missing pattern: '{failed_pattern}'")
+        elif forbidden_hit:
+            log_failure(name, f"Generated L1 IR unexpectedly contained pattern: '{forbidden_hit}'")
+        else:
+            log_success(name)
+
+
+def run_interface_tests():
+    print("\n🚀 Running interface emission tests...")
+    for path in sorted(glob.glob(os.path.join(FIXTURES_DIR, "interface", "*.lain"))):
+        name = os.path.basename(path)
+        out_lci = "/tmp/lain_test_out.lci"
+        expected_patterns, forbidden_patterns = extract_check_patterns(path)
+
+        res = subprocess.run([COMPILER_BIN, "--emit-interface", path, out_lci], env=ENV, capture_output=True, text=True)
+        if res.returncode != 0:
+            log_failure(name, f"Interface emission failed.\n{res.stderr}")
+            continue
+
+        with open(out_lci, "r", encoding="utf-8") as f:
+            generated_lci = f.read()
+
+        failed_pattern = None
+        for pattern in expected_patterns:
+            if pattern not in generated_lci:
+                failed_pattern = pattern
+                break
+
+        forbidden_hit = None
+        for pattern in forbidden_patterns:
+            if pattern in generated_lci:
+                forbidden_hit = pattern
+                break
+
+        if failed_pattern:
+            log_failure(name, f"Generated interface missing pattern: '{failed_pattern}'")
+        elif forbidden_hit:
+            log_failure(name, f"Generated interface unexpectedly contained pattern: '{forbidden_hit}'")
+        else:
+            log_success(name)
+
+
+def run_import_via_interface_tests():
+    print("\n🚀 Running import-via-interface tests...")
+    for path in sorted(glob.glob(os.path.join(FIXTURES_DIR, "import_via_interface", "*", "consumer.lain"))):
+        name = os.path.basename(os.path.dirname(path))
+        case_dir = os.path.dirname(path)
+        out_c = "/tmp/lain_test_import_interface.c"
+        interface_files = []
+
+        try:
+            deps = sorted(
+                p for p in glob.glob(os.path.join(case_dir, "*.lain"))
+                if os.path.basename(p) != "consumer.lain"
+            )
+            for dep in deps:
+                dep_lci = dep + ".lci"
+                interface_files.append(dep_lci)
+                emit_res = subprocess.run([COMPILER_BIN, "--emit-interface", dep, dep_lci], env=ENV, capture_output=True, text=True)
+                if emit_res.returncode != 0:
+                    log_failure(name, f"Interface emission failed for {os.path.basename(dep)}.\n{emit_res.stderr}")
+                    break
+            else:
+                compile_res = subprocess.run([COMPILER_BIN, path, out_c], env=ENV, capture_output=True, text=True)
+                if compile_res.returncode != 0:
+                    log_failure(name, f"Consumer compilation failed.\n{compile_res.stderr}")
+                else:
+                    log_success(name)
+
+        finally:
+            for interface_file in interface_files:
+                if os.path.exists(interface_file):
+                    os.remove(interface_file)
+
+
+def run_build_tests():
+    print("\n🚀 Running build tests...")
+    for path in sorted(glob.glob(os.path.join(FIXTURES_DIR, "build_test", "main.lain"))):
+        name = os.path.splitext(os.path.basename(path))[0]
+        out_bin = "/tmp/lain_build_test_bin"
+        expected = parse_source_annotations(path)
+
+        build_res = subprocess.run([COMPILER_BIN, "--build", path, out_bin], env=ENV, capture_output=True)
+        if build_res.returncode != 0:
+            stderr_text = build_res.stderr.decode('utf-8', errors='replace')
+            log_failure(name, f"Build failed.\n{stderr_text}")
+            continue
+
+        run_res = subprocess.run([out_bin], capture_output=True)
+        if run_res.returncode != expected["exit"]:
+            log_failure(name, f"exit code: expected {expected['exit']}, got {run_res.returncode}")
         else:
             log_success(name)
 
@@ -173,6 +277,9 @@ if __name__ == "__main__":
     run_check_pass()
     run_ui_tests()
     run_codegen_tests()
+    run_interface_tests()
+    run_import_via_interface_tests()
+    run_build_tests()
     run_pass_tests()
 
     print(f"\n📊 Test Suite Summary:")

@@ -39,6 +39,18 @@
                    (record.field '|operations| operations)))))
     ;; Register in Scheme-side effect registry for validation
     (register-effect-ctor! name 0)
+    ;; Phase 4: register a default product layout for this effect.
+    ;; Default layout: {flag: u8, value: i32} — same structure as Throws
+    ;; without an error/arg field. fn.make-effect-product-name will
+    ;; substitute the function's actual return type for the value field.
+    ;; Effects with declared operations will get richer layouts
+    ;; from the operation's parameter types (future work).
+    (if (null? operations)
+        (effect.register-layout! name '|default|
+          (list (ir.type.bits 8) (ir.type.bits 32))
+          0    ;; flag-index: field 0 is the flag
+          '()) ;; no arg indices
+        unit)
     (decl.define-dup-checked! '|effect| name node)))
 
 (define-pass (raw-normalizer |effect| decl)

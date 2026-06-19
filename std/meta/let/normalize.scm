@@ -39,6 +39,30 @@
          (record '|middle.interface|
            (record.field '|name| name)
            (record.field '|payload| inner-payload))))
+      ;; ── import binding ──
+      ((symbol=? type-kind '|import-binding|)
+       (middle.node! '|middle.import|
+         (record '|middle.import|
+           (record.field '|name| name)
+           (record.field '|payload| inner-payload))))
+      ;; ── signature ──
+      ((symbol=? type-kind '|signature|)
+       (middle.node! '|middle.signature|
+         (record '|middle.signature|
+           (record.field '|name| name)
+           (record.field '|payload| inner-payload))))
+      ;; ── module ──
+      ((symbol=? type-kind '|module|)
+       (middle.node! '|middle.module|
+         (record '|middle.module|
+           (record.field '|name| name)
+           (record.field '|payload| inner-payload))))
+      ;; ── imported module/signature alias ──
+      ((symbol=? type-kind '|meta-alias|)
+       (middle.node! '|middle.meta-alias|
+         (record '|middle.meta-alias|
+           (record.field '|name| name)
+           (record.field '|payload| inner-payload))))
       ;; ── impl ──
       ((symbol=? type-kind '|impl|)
        (middle.normalize-plain-item name inner-payload '|middle.impl|))

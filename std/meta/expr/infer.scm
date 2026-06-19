@@ -7,15 +7,19 @@
 
 (define-pass (core-expr-inferer |middle.expr.path| expr locals)
   (let* ((payload (middle.payload expr))
-         (path (optional.value (record.get payload '|path|))))
-    (core.local-type locals (core.path-leaf path))))
+         (path (optional.value (record.get payload '|path|)))
+         (imported (import.resolve-qualified-symbol path)))
+    (if imported
+        (ir.sub.ret-type (ir.sub.by-name imported))
+        (core.local-type locals (core.path-leaf path)))))
 
 (define-pass (core-expr-inferer |middle.expr.call| expr locals)
   (let* ((payload (middle.payload expr))
          (callee (optional.value (record.get payload '|callee|)))
          (callee-payload (middle.payload callee))
-         (path (optional.value (record.get callee-payload '|path|))))
-    (core.local-type locals (core.path-leaf path))))
+         (path (optional.value (record.get callee-payload '|path|)))
+         (fn-name (core.path-fn-name path)))
+    (ir.sub.ret-type (ir.sub.by-name fn-name))))
 
 (define-pass (core-expr-inferer |middle.expr.method-call| expr locals)
   (let* ((payload (middle.payload expr))

@@ -142,7 +142,7 @@
   (core.set-function-link-name! sub name))
 
 (define (ir.sub.name sub)           name)  ;; 简化: 无法从 Sub 查询名
-(define (ir.sub.link-name sub)      "")    ;; 简化: 无法从 Sub 查询 link-name
+(define (ir.sub.link-name sub)      (core.function-link-name sub))
 (define (ir.sub.params sub)         (core.function-param-types sub))
 (define (ir.sub.ret-type sub)       (core.function-return-type sub))
 

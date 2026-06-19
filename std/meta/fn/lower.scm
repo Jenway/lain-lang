@@ -30,7 +30,7 @@
   (let* ((target-os (fn.cfg-target-os attrs)))
     (if (optional.none? target-os) #t (symbol=? (optional.value target-os) (cfg.target-os)))))
 
-;; ── Throws effect helpers ──
+;; ── Effect helpers (generalized from Throws-only) ──
 
 (define (fn.effect-name effect)
   ;; effect is a raw node: (effect-name <name> <args>)
@@ -43,8 +43,19 @@
   (let* ((payload (raw.payload effect)))
     (optional.value (record.get payload '|args|))))
 
+(define (fn.has-declared-effects? effects)
+  ;; effects may be optional.none or an empty list
+  (and effects (optional.some? effects)
+       (not (list.empty? (optional.value effects)))))
+
+(define (fn.first-effect-name effects)
+  ;; Returns the first declared effect name symbol, or #f
+  (if (fn.has-declared-effects? effects)
+      (fn.effect-name (list.first (optional.value effects)))
+      #f))
+
 (define (fn.effects-contains-throws? effects)
-  ;; effects may be optional.none or a list of effect-name raw nodes
+  ;; Kept for backward compat — checks if Throws is in declared effects
   (if (or (optional.none? effects) (not effects))
       #f
       (if (list.empty? effects)
@@ -72,6 +83,43 @@
   ;; Create TY_PRODUCT: {flag: i8, value: ret_ty, error: error_ty}
   (type.product (list (ir.type.bits 8) ret-ty error-ty)))
 
+;; ── Generalized: build product type from any effect declaration ──
+;; Looks up the effect's layout in the registry and builds a product
+;; from the layout's field types. Falls back to raw-ret if no layout.
+;;
+;; Layout defines: {flag: i8, value: T, arg1: A1, arg2: A2, ...}
+;; We substitute the raw return type as the value field type.
+;; For effects with no value field in the layout (only flag + args),
+;; we insert the value field after the flag.
+(define (fn.make-effect-product-name effects raw-ret effect-name)
+  (let* ((layout (effect.lookup-layout effect-name #f)))
+    (if (not layout)
+        raw-ret
+        (let* ((offsets     (cadr layout))
+               (flag-index  (caddr layout))
+               (arg-indices (cadddr layout))
+               (num-fields  (length offsets))
+               ;; Compute value indices: all non-flag, non-arg
+               (value-indices
+                 (let loop ((i 0) (acc '()))
+                   (if (>= i num-fields)
+                       (reverse acc)
+                       (if (or (= i flag-index)
+                               (effect.index-in-list? i arg-indices))
+                           (loop (+ i 1) acc)
+                           (loop (+ i 1) (cons i acc))))))
+               ;; Build field types, substituting the value fields with raw-ret
+               (field-types
+                 (let loop ((i 0) (acc '()))
+                   (if (>= i num-fields)
+                       (reverse acc)
+                       (let* ((original-ty (cdr (list-ref offsets i))))
+                         (if (effect.index-in-list? i value-indices)
+                             (loop (+ i 1) (cons raw-ret acc))
+                             (loop (+ i 1) (cons original-ty acc))))))))
+          ;; Build product from substituted field types
+          (type.product field-types)))))
+
 ;; ── Declarer / Lowerer ──
 
 (define-pass (core-declarer |middle.fn| item)
@@ -84,8 +132,20 @@
                (_ (validate-effects! effects-opt))
                (effects (optional.value effects-opt))
                (raw-ret (core.lower-type (optional.value (record.get payload '|return|))))
-               (ret (if (fn.effects-contains-throws? effects)
-                        (fn.make-throws-product raw-ret (fn.throws-error-type effects))
+               ;; Phase 4: any declared effect wraps return in a product
+               ;; Multi-effect: use merged layout; single effect: use direct lookup
+               (ret (if (fn.has-declared-effects? effects-opt)
+                        (let* ((eff-list (optional.value effects-opt)))
+                          (if (> (length eff-list) 1)
+                              ;; Multi-effect: build merged product
+                              (let* ((eff-names (map fn.effect-name eff-list))
+                                     (merged (effect.merged-info eff-names raw-ret)))
+                                (if merged
+                                    (type.product (car merged))
+                                    (error "merged-info returned #f for multi-effect")))
+                              ;; Single effect: use existing lookup
+                              (let* ((eff-name (fn.first-effect-name effects-opt)))
+                                (fn.make-effect-product-name effects-opt raw-ret eff-name))))
                         raw-ret))
                ;; C only knows bits/addr/void — structs become addr
                (c-ret (if (struct-type? ret) (type.addr) ret))
@@ -119,15 +179,33 @@
          (params (optional.value (record.get payload '|params|)))
          (raw-ret-ty (core.lower-type (optional.value (record.get payload '|return|))))
          (effects (optional.value (record.get payload '|effects|)))
-         (has-throws (fn.effects-contains-throws? effects))
-         (ret-ty (if has-throws
-                     (fn.make-throws-product raw-ret-ty (fn.throws-error-type effects))
+         ;; Phase 4: any declared effect wraps return in a product
+         ;; Multi-effect: use merged layout; single effect: use direct lookup
+         (ret-ty (if (fn.has-declared-effects? (record.get payload '|effects|))
+                     (let* ((eff-list (optional.value (record.get payload '|effects|))))
+                       (if (> (length eff-list) 1)
+                           (let* ((eff-names (map fn.effect-name eff-list))
+                                  (merged (effect.merged-info eff-names raw-ret-ty)))
+                             (if merged
+                                 (type.product (car merged))
+                                 (error "merged-info returned #f in lowerer")))
+                           (let* ((eff-name (fn.first-effect-name (record.get payload '|effects|))))
+                             (fn.make-effect-product-name (record.get payload '|effects|) raw-ret-ty eff-name))))
                      raw-ret-ty))
          (body (optional.value (record.get payload '|body|))))
     (if (optional.none? body) unit
         (let* ((function (ir.sub.by-name name)) (block (ir.sub.block function))
                (locals (core.bind-params function params 0 (list)))
                (body-payload (middle.payload (optional.value body))))
-          (core.lower-stmts block (optional.value (record.get body-payload '|items|)) ret-ty locals)))))
+          ;; Phase 2: clear effect tracker before lowering this fn
+          (propagate.clear!)
+          (core.lower-stmts block (optional.value (record.get body-payload '|items|)) ret-ty locals)
+          ;; Phase 2: register and validate effects
+          (let* ((collected (propagate.collected-effects))
+                 (declared-names (if effects (propagate.extract-names (optional.value effects)) '()))
+                 ;; Register this fn's effects in the global table for callers
+                 (_ (propagate.register-fn-effects! name declared-names)))
+            ;; Validate that all collected effects are declared
+            (propagate.validate-collected! collected declared-names name))))))
 
 (define-pass (core-type-lowerer |middle.ty.fn| ty) (type.unsupported (middle.kind ty)))

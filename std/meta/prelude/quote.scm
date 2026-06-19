@@ -49,6 +49,12 @@
             (record '|expr.bool|
               (record.field '|value| (cadr template)))))
 
+        ((symbol=? kind 'array)
+          (raw.node! '|expr.array|
+            (record '|expr.array|
+              (record.field '|init| (cadr template))
+              (record.field '|len| (caddr template)))))
+
          ;; ══════════════════════════════════════════════════════════════
          ;; 表达式节点
          ;; ══════════════════════════════════════════════════════════════
