@@ -28,15 +28,16 @@ uint32_t compile_l1(const void* arg0, const void* arg1) {
     return 0;
 }
 
-uint32_t compile_manifest(const void* arg0, const void* arg1) {
+uint32_t compile_interface(const void* arg0, const void* arg1) {
     int32_t result = run_pipeline_for(arg0);
     if (result != 0) return result;
     native_emit_interface(arg1);
     return 0;
 }
 
-uint32_t compile_interface(const void* arg0, const void* arg1) {
-    return compile_manifest(arg0, arg1);
+// Legacy compatibility alias for --emit-manifest.
+uint32_t compile_manifest(const void* arg0, const void* arg1) {
+    return compile_interface(arg0, arg1);
 }
 
 uint32_t main(uint32_t argc, char **argv) {
@@ -69,7 +70,7 @@ uint32_t main(uint32_t argc, char **argv) {
         input_path = argv[1];
         output_path = argv[2];
     } else {
-        printf("Usage: %s [--emit-l1|--emit-manifest|--emit-interface] <input.lain> <output>\n", argv[0]);
+        printf("Usage: %s [--emit-l1|--emit-interface|--emit-manifest] <input.lain> <output>\n", argv[0]);
         return 1;
     }
     

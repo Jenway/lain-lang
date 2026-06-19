@@ -25,7 +25,7 @@
 ;; ── Type name → lowered type cpointer ──
 
 ;; Map L1 type names (addr, i32, u8, etc.) to lowered L1Type* cpointers
-(define (manifest.type-name->lowered ty-name)
+(define (interface.type-name->lowered ty-name)
   ;; Create a middle.ty.path node and lower it
   (core.lower-type
     (middle.node! '|middle.ty.path|
@@ -35,30 +35,30 @@
 ;; ── Helper: walk interface S-expr and extract fn exports ──
 
 ;; Returns: ((export-name link-name (type...) ret-type) ...)
-(define (manifest.extract-exports parsed)
+(define (interface.extract-exports parsed)
   ;; parsed = (module NAME (exports (fn ...) ...))
   (if (not (pair? parsed))
-      (error "manifest: invalid format")
+      (error "interface: invalid format")
       (let* ((module-tag (car parsed)))
         (if (not (eq? module-tag 'module))
-            (error "manifest: expected (module ...)")
+            (error "interface: expected (module ...)")
             (let* ((rest (cdr parsed))
-                   (exports-section (manifest.find-exports-section rest)))
+                   (exports-section (interface.find-exports-section rest)))
               (if (or (not (pair? exports-section))
                       (not (eq? (car exports-section) 'exports)))
-                  (error "manifest: missing (exports ...)")
+                  (error "interface: missing (exports ...)")
                   ;; exports-section = (exports (fn ...) ...)
-                  (manifest.extract-fns (cdr exports-section) (list))))))))
+                  (interface.extract-fns (cdr exports-section) (list))))))))
 
-(define (manifest.find-exports-section items)
+(define (interface.find-exports-section items)
   (if (null? items)
       #f
       (let* ((item (car items)))
         (if (and (pair? item) (eq? (car item) 'exports))
             item
-            (manifest.find-exports-section (cdr items))))))
+            (interface.find-exports-section (cdr items))))))
 
-(define (manifest.extract-fns entries acc)
+(define (interface.extract-fns entries acc)
   (if (null? entries)
       (reverse acc)
       (let* ((entry (car entries)))
@@ -67,59 +67,59 @@
             ;;   (fn NAME (TYPES) -> RET)
             ;; and new interface shape:
             ;;   (fn (name NAME) (params (...)) (ret RET) (link_name "..."))
-            (let* ((fn-name (manifest.fn-entry-name entry))
-                   (link-name (manifest.fn-entry-link-name entry))
-                   (params (manifest.fn-entry-params entry))
-                   (ret-type (manifest.fn-entry-ret entry)))
-              (manifest.extract-fns (cdr entries)
+            (let* ((fn-name (interface.fn-entry-name entry))
+                   (link-name (interface.fn-entry-link-name entry))
+                   (params (interface.fn-entry-params entry))
+                   (ret-type (interface.fn-entry-ret entry)))
+              (interface.extract-fns (cdr entries)
                 (cons (list fn-name link-name params ret-type) acc)))
-            (manifest.extract-fns (cdr entries) acc)))))
+            (interface.extract-fns (cdr entries) acc)))))
 
-(define (manifest.extract-entry-names entries tag acc)
+(define (interface.extract-entry-names entries tag acc)
   (if (null? entries)
       (reverse acc)
       (let* ((entry (car entries)))
         (if (and (pair? entry) (eq? (car entry) tag))
-            (let* ((name-field (manifest.assoc-field 'name (cdr entry))))
+            (let* ((name-field (interface.assoc-field 'name (cdr entry))))
               (if (and name-field (pair? (cdr name-field)))
-                  (manifest.extract-entry-names
+                  (interface.extract-entry-names
                     (cdr entries)
                     tag
                     (cons (cadr name-field) acc))
                   (error "interface: malformed entry missing name")))
-            (manifest.extract-entry-names (cdr entries) tag acc)))))
+            (interface.extract-entry-names (cdr entries) tag acc)))))
 
-(define (manifest.assoc-field key fields)
+(define (interface.assoc-field key fields)
   (if (null? fields)
       #f
       (let* ((field (car fields)))
         (if (and (pair? field) (eq? (car field) key))
             field
-            (manifest.assoc-field key (cdr fields))))))
+            (interface.assoc-field key (cdr fields))))))
 
-(define (manifest.fn-entry-name entry)
+(define (interface.fn-entry-name entry)
   (let* ((tail (cdr entry)))
     (if (and (pair? tail) (symbol? (car tail)))
         ;; Legacy format: (fn NAME ...)
         (car tail)
         ;; New format: look up (name NAME)
-        (let* ((name-field (manifest.assoc-field 'name tail)))
+        (let* ((name-field (interface.assoc-field 'name tail)))
           (if (and name-field (pair? (cdr name-field)))
               (cadr name-field)
               (error "interface: malformed fn entry missing name"))))))
 
-(define (manifest.fn-entry-params entry)
+(define (interface.fn-entry-params entry)
   (let* ((tail (cdr entry)))
     (if (and (pair? tail) (symbol? (car tail)))
         ;; Legacy format: (fn NAME (TYPES) -> RET)
         (cadr tail)
         ;; New format: (params (...))
-        (let* ((params-field (manifest.assoc-field 'params tail)))
+        (let* ((params-field (interface.assoc-field 'params tail)))
           (if (and params-field (pair? (cdr params-field)))
               (cadr params-field)
               (error "interface: malformed fn entry missing params"))))))
 
-(define (manifest.fn-entry-ret entry)
+(define (interface.fn-entry-ret entry)
   (let* ((tail (cdr entry)))
     (if (and (pair? tail) (symbol? (car tail)))
         ;; Legacy format: (fn NAME (TYPES) -> RET)
@@ -127,22 +127,22 @@
           (if (and (pair? legacy-tail) (pair? (cdr legacy-tail))
                    (eq? (car legacy-tail) '->))
               (cadr legacy-tail)
-              (error "manifest: malformed fn entry")))
+              (error "interface: malformed fn entry")))
         ;; New format: (ret RET)
-        (let* ((ret-field (manifest.assoc-field 'ret tail)))
+        (let* ((ret-field (interface.assoc-field 'ret tail)))
           (if (and ret-field (pair? (cdr ret-field)))
               (cadr ret-field)
               (error "interface: malformed fn entry missing ret"))))))
 
-(define (manifest.fn-entry-link-name entry)
+(define (interface.fn-entry-link-name entry)
   (let* ((tail (cdr entry)))
     (if (and (pair? tail) (symbol? (car tail)))
         ;; Legacy format has no separate link_name field
         (car tail)
-        (let* ((link-field (manifest.assoc-field 'link_name tail)))
+        (let* ((link-field (interface.assoc-field 'link_name tail)))
           (if (and link-field (pair? (cdr link-field)))
               (string->symbol (cadr link-field))
-              (manifest.fn-entry-name entry))))))
+              (interface.fn-entry-name entry))))))
 
 ;; ── Import binding registry ──
 
@@ -273,21 +273,21 @@
       (if (not parsed)
           (error (string-append "import: interface not found for: " source-path))
           (let* ((rest (cdr parsed))
-                 (exports-section (manifest.find-exports-section rest))
+                 (exports-section (interface.find-exports-section rest))
                  (export-entries (if exports-section (cdr exports-section) (list)))
-                 (exports (manifest.extract-exports parsed))
-                 (module-exports (manifest.extract-entry-names export-entries 'module (list)))
-                 (signature-exports (manifest.extract-entry-names export-entries 'signature (list)))
+                 (exports (interface.extract-exports parsed))
+                 (module-exports (interface.extract-entry-names export-entries 'module (list)))
+                 (signature-exports (interface.extract-entry-names export-entries 'signature (list)))
                  (fn-exports (import.binding-exports exports (list))))
             ;; Directly declare each export as an extern function.
             ;; Also register with the import-path-derived name so
             ;; source-level calls like simple_math_add() resolve correctly.
             (import.register-binding-metadata!
               name path fn-exports module-exports signature-exports)
-            (manifest.declare-exports! exports path))))))
+            (interface.declare-exports! exports path))))))
 
 ;; Derive the caller-side function name from import path + mangled name.
-;; The manifest exports mangled names like "math_add" (prefix from source file).
+;; The interface exports mangled names like "math_add" (prefix from source file).
 ;; The caller expects names like "simple_math_add" (import path joined with _).
 ;; We register BOTH: name=caller_name, link_name=mangled_C_name.
 ;; This makes both simple_math_add(1, 2) and the actual C symbol math_add work.
@@ -337,7 +337,7 @@
             i
             (loop (+ i 1))))))
 
-(define (manifest.declare-exports! exports import-path)
+(define (interface.declare-exports! exports import-path)
   (if (null? exports)
       unit
       (let* ((entry (car exports))
@@ -346,8 +346,8 @@
              (param-type-names (caddr entry))    ;; e.g., (i32 i32)
              (ret-type-name (cadddr entry)))     ;; e.g., i32
         ;; Lower types to L1Type* cpointers
-        (let* ((ret-ty (manifest.type-name->lowered ret-type-name))
-               (param-tys (manifest.lower-param-types param-type-names))
+        (let* ((ret-ty (interface.type-name->lowered ret-type-name))
+               (param-tys (interface.lower-param-types param-type-names))
                ;; Caller-side name derived from import path
                (caller-name (import.caller-fn-name import-path export-name)))
           ;; Register with caller-side name, link_name = actual C symbol
@@ -362,13 +362,13 @@
             export-name
             (symbol->string link-name)
             param-tys ret-ty))
-        (manifest.declare-exports! (cdr exports) import-path))))
+        (interface.declare-exports! (cdr exports) import-path))))
 
-(define (manifest.lower-param-types type-names)
+(define (interface.lower-param-types type-names)
   (if (null? type-names)
       (list)
-      (cons (manifest.type-name->lowered (car type-names))
-            (manifest.lower-param-types (cdr type-names)))))
+      (cons (interface.type-name->lowered (car type-names))
+            (interface.lower-param-types (cdr type-names)))))
 
 ;; ── core-lowerer: no-op (imports produce declarations, not L1 code) ──
 
