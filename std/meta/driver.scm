@@ -10,6 +10,7 @@
 ;; ═══ 1. pipeline 调度 + core 调度总线 ═══
 (load "std/meta/pipeline/driver.scm")
 (load "std/meta/pipeline/lower.scm")
+(load "std/meta/eval.scm")
 
 ;; ═══ 1.4 纯 Scheme 词法分析器（替换 C 侧 lexer） ═══
 (load "std/meta/lexer.scm")

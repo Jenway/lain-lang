@@ -7,6 +7,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
+typedef void (*native_foreign_registrar)(
+  void *user_data,
+  const char *name,
+  int arity,
+  void *fn);
+
 // Native compiler entry points
 uint32_t compile(const void *input_path, const void *output_path);
 uint32_t compile_interface(const void *input_path, const void *output_path);
@@ -24,14 +30,16 @@ uint32_t native_file_len(void);
 
 // token grouping
 void *native_lex_and_group(const uint8_t *src, uint32_t len);
-void native_push_token(const uint8_t *src, int32_t kind,
-                       size_t start, size_t len, int64_t int_val);
-void *native_finish_grouping(void);
 
 // Token tree → Scheme S-expression (eliminates cursor FFI)
 void *native_lex_to_sexp(void *ctx, const uint8_t *src, uint32_t len);
 
 // scheme integration
+void native_register_core_ffi(
+  void *ctx,
+  void *env,
+  native_foreign_registrar registrar,
+  void *user_data);
 void *native_init_scheme(void);
 int32_t native_run_pipeline(void *ctx, void *root_group);
 

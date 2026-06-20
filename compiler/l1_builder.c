@@ -427,17 +427,34 @@ static sexp sexp_core_declare_extern_function(sexp ctx, sexp self,
     }
   }
 
-  L1Subroutine *sub = malloc(sizeof(L1Subroutine));
-  sub->name = strdup(name);
-  sub->link_name = strdup(link_name);
-  sub->ret_ty = ret_ty;
-  sub->param_count = param_count;
-  sub->param_tys = param_tys;
-  sub->blocks = NULL;
-  sub->blocks_tail = NULL;
-  sub->is_extern = 1;
-  sub->next = g_subroutines_head;
-  g_subroutines_head = sub;
+  L1Subroutine *sub = g_subroutines_head;
+  while (sub) {
+    if (strcmp(sub->name, name) == 0)
+      break;
+    sub = sub->next;
+  }
+
+  if (sub) {
+    if (sub->link_name) free(sub->link_name);
+    if (sub->param_tys) free(sub->param_tys);
+    sub->link_name = strdup(link_name);
+    sub->ret_ty = ret_ty;
+    sub->param_count = param_count;
+    sub->param_tys = param_tys;
+    sub->is_extern = 1;
+  } else {
+    sub = malloc(sizeof(L1Subroutine));
+    sub->name = strdup(name);
+    sub->link_name = strdup(link_name);
+    sub->ret_ty = ret_ty;
+    sub->param_count = param_count;
+    sub->param_tys = param_tys;
+    sub->blocks = NULL;
+    sub->blocks_tail = NULL;
+    sub->is_extern = 1;
+    sub->next = g_subroutines_head;
+    g_subroutines_head = sub;
+  }
 
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, sub, SEXP_FALSE, 0);
 }

@@ -166,30 +166,36 @@
         (module.declare-export-names (list.rest names)))))
 
 (define-pass (core-declarer |middle.export| item)
+  (meta.ensure-static-position! '|middle.export|)
   unit)
 
 (define-pass (core-lowerer |middle.export| item)
+  (meta.ensure-static-position! '|middle.export|)
   (let* ((payload (middle.payload item))
          (raw-inner (optional.value (record.get payload '|payload|)))
          (names (optional.value (record.get raw-inner '|names|))))
     (module.declare-export-names names)))
 
 (define-pass (core-declarer |middle.signature| item)
+  (meta.ensure-static-position! '|middle.signature|)
   (let* ((payload (middle.payload item))
          (name (optional.value (record.get payload '|name|))))
     (module.register-signature! name)
     (core.declare-signature! name)))
 
 (define-pass (core-lowerer |middle.signature| item)
+  (meta.ensure-static-position! '|middle.signature|)
   unit)
 
 (define-pass (core-declarer |middle.module| item)
+  (meta.ensure-static-position! '|middle.module|)
   (let* ((payload (middle.payload item))
          (name (optional.value (record.get payload '|name|))))
     (module.register-module! name)
     (core.declare-module! name)))
 
 (define-pass (core-lowerer |middle.module| item)
+  (meta.ensure-static-position! '|middle.module|)
   unit)
 
 (define (module.declare-imported-fn-alias! alias fn-name)
