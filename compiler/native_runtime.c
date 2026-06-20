@@ -56,10 +56,10 @@ void *native_lex_to_sexp(void *ctx_ptr, const uint8_t *src, uint32_t len) {
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 7-8. L1 IR Builder FFI (→ lainir/builder_ffi.c)
+// 7-8. L1 IR Builder FFI (→ compiler/builder_ffi.c)
 // ══════════════════════════════════════════════════════════════════════════════
 #include "lainir/lainir_core.c"
-#include "lainir/builder_ffi.c"
+#include "builder_ffi.c"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 9. C Code Emission (→ lainir/emitter.c)
@@ -70,6 +70,11 @@ void *native_lex_to_sexp(void *ctx_ptr, const uint8_t *src, uint32_t len) {
 // 9.5. L1 IR Text Dump (→ lainir/emit_text.c)
 // ══════════════════════════════════════════════════════════════════════════════
 #include "lainir/emit_text.c"
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 9.75. LainIR Interpreter (→ lainir/interpreter.c)
+// ══════════════════════════════════════════════════════════════════════════════
+#include "lainir/interpreter.c"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 11. Scheme Initialization + FFI Registration

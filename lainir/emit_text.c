@@ -70,6 +70,14 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
     }
     fprintf(out, ")");
     break;
+  case EXPR_EVAL:
+    fprintf(out, "#eval %s(", expr->data.eval.fn_name);
+    for (uint32_t i = 0; i < expr->data.eval.arg_count; i++) {
+      emit_l1_expr(expr->data.eval.args[i], out);
+      if (i < expr->data.eval.arg_count - 1) fprintf(out, ", ");
+    }
+    fprintf(out, ")");
+    break;
   case EXPR_STRING:
     fprintf(out, "\"%s\"", expr->data.str_val.content);
     break;

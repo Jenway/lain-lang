@@ -2,6 +2,7 @@
 #define LAINIR_EXEC_H
 
 #include <chibi/eval.h>
+#include "lainir/interpreter.h"
 
 typedef enum {
   LAINIR_EXEC_OK = 0,

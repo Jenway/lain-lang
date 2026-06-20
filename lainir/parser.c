@@ -40,7 +40,8 @@ typedef enum {
   TK_KW_LOAD,
   TK_KW_ADD,
   TK_KW_SUB_OP,
-  TK_KW_CALL_INDIRECT
+  TK_KW_CALL_INDIRECT,
+  TK_KW_EVAL
 } TokenKind;
 
 typedef struct {
@@ -156,6 +157,7 @@ static TokenKind hash_keyword_kind(const char *text, int len) {
   if (len == 3 && memcmp(text, "add", 3) == 0) return TK_KW_ADD;
   if (len == 3 && memcmp(text, "sub", 3) == 0) return TK_KW_SUB_OP;
   if (len == 13 && memcmp(text, "call_indirect", 13) == 0) return TK_KW_CALL_INDIRECT;
+  if (len == 4 && memcmp(text, "eval", 4) == 0) return TK_KW_EVAL;
   return TK_IDENT;
 }
 
@@ -556,6 +558,21 @@ static L1Expr *parse_expr(Parser *p) {
     return expr;
   case TK_PERCENT:
     return parse_percent_ref(p);
+  case TK_KW_EVAL:
+    next_token(p);
+    token = expect(p, TK_IDENT);
+    text = token_string(token);
+    expect(p, TK_LPAREN);
+    args = parse_expr_list(p, &count);
+    expect(p, TK_RPAREN);
+    expr = lainir_new_expr(EXPR_EVAL);
+    expr->data.eval.fn_name = strdup(text);
+    expr->data.eval.args = args;
+    expr->data.eval.arg_count = count;
+    expr->data.eval.ret_ty = NULL;
+    free(text);
+    return expr;
+
   case TK_KW_CALL:
     next_token(p);
     token = expect(p, TK_IDENT);

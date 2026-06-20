@@ -218,6 +218,9 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
     }
     fprintf(out, ")");
     break;
+  case EXPR_EVAL:
+    fprintf(out, "/* #eval %s(...) */ 0", expr->data.eval.fn_name);
+    break;
   }
 }
 
