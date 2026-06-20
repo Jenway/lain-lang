@@ -15,9 +15,7 @@
   (let* ((raw-message (io.println-string-arg (list.first args)))
          (message (string-append (symbol->string raw-message) "\n"))
          (message-symbol (string->symbol message))
-         (len-symbol (string->symbol
-                       (number->string
-                         (string-byte-len message)))))
+         (len (string-byte-len message)))
     (lain-quote `(call __lain_println_raw
                    (string ,message-symbol)
-                   (number ,len-symbol)))))
+                   (number ,len)))))

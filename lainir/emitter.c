@@ -41,7 +41,28 @@ static void emit_c_type(L1Type *ty, FILE *out) {
   }
 }
 
+static void emit_c_value_type(L1Type *ty, FILE *out) {
+  if (!ty) {
+    fprintf(out, "uint64_t");
+    return;
+  }
+  emit_c_type(ty, out);
+}
+
 static void emit_c_expr(L1Expr *expr, FILE *out);
+
+static int is_zero_arg_main(L1Subroutine *sub) {
+  return sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0;
+}
+
+static int expr_is_unit_value(L1Expr *expr) {
+  L1Type *ty;
+
+  if (!expr)
+    return 1;
+  ty = infer_expr_type(expr);
+  return ty && ty->kind == TY_UNIT;
+}
 
 static void emit_c_expr(L1Expr *expr, FILE *out) {
   if (!expr) {
@@ -60,7 +81,7 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
     break;
   case EXPR_LOAD:
     fprintf(out, "*(");
-    emit_c_type(expr->data.load.ty, out);
+    emit_c_value_type(expr->data.load.ty, out);
     fprintf(out, "*)( ");
     emit_c_expr(expr->data.load.addr, out);
     fprintf(out, ")");
@@ -173,7 +194,7 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
     break;
   case EXPR_FIELD:
     fprintf(out, "*(");
-    emit_c_type(expr->data.field.field_ty, out);
+    emit_c_value_type(expr->data.field.field_ty, out);
     fprintf(out, "*)((uint8_t*)(");
     emit_c_expr(expr->data.field.base, out);
     fprintf(out, ") + %u)", expr->data.field.field_index);
@@ -208,7 +229,7 @@ static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out);
 // Helper: emit a single instruction (used for nested if bodies)
 static void emit_c_instruction(L1Block *block, L1Instruction *inst, L1Subroutine *sub, FILE *out) {
   (void)block;
-  int is_unit_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
+  int is_unit_main = (sub && is_zero_arg_main(sub) &&
                       (!sub->ret_ty || sub->ret_ty->kind == TY_UNIT));
   switch (inst->kind) {
   case INST_SET:
@@ -244,6 +265,11 @@ static void emit_c_instruction(L1Block *block, L1Instruction *inst, L1Subroutine
   case INST_RETURN:
     if (is_unit_main) {
       fprintf(out, "        return 0;\n");
+    } else if (is_zero_arg_main(sub) && expr_is_unit_value(inst->data.ret.val)) {
+      fprintf(out, "        ");
+      emit_c_expr(inst->data.ret.val, out);
+      fprintf(out, ";\n");
+      fprintf(out, "        return 0;\n");
     } else {
       fprintf(out, "        return ");
       emit_c_expr(inst->data.ret.val, out);
@@ -256,7 +282,7 @@ static void emit_c_instruction(L1Block *block, L1Instruction *inst, L1Subroutine
 }
 
 static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out) {
-  int is_unit_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
+  int is_unit_main = (sub && is_zero_arg_main(sub) &&
                       (!sub->ret_ty || sub->ret_ty->kind == TY_UNIT));
   L1Instruction *inst = block->body;
   while (inst) {
@@ -319,6 +345,11 @@ static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out) {
     case INST_RETURN:
       if (is_unit_main) {
         fprintf(out, "    return 0;\n");
+      } else if (is_zero_arg_main(sub) && expr_is_unit_value(inst->data.ret.val)) {
+        fprintf(out, "    ");
+        emit_c_expr(inst->data.ret.val, out);
+        fprintf(out, ";\n");
+        fprintf(out, "    return 0;\n");
       } else {
         fprintf(out, "    return ");
         emit_c_expr(inst->data.ret.val, out);
@@ -335,12 +366,18 @@ static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out) {
 static void emit_c_block_terminator(L1Block *block, L1Subroutine *sub, FILE *out) {
   if (!block->terminator)
     return;
-  int is_unit_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
+  int is_unit_main = (sub && is_zero_arg_main(sub) &&
                       (!sub->ret_ty || sub->ret_ty->kind == TY_UNIT));
   switch (block->terminator->kind) {
   case TERM_RETURN:
     // void main: C requires int main(), so emit return 0 instead of return void
     if (is_unit_main) {
+      fprintf(out, "    return 0;\n");
+    } else if (is_zero_arg_main(sub) &&
+               expr_is_unit_value(block->terminator->data.ret_val)) {
+      fprintf(out, "    ");
+      emit_c_expr(block->terminator->data.ret_val, out);
+      fprintf(out, ";\n");
       fprintf(out, "    return 0;\n");
     } else if (block->terminator->data.ret_val) {
       fprintf(out, "    return ");
@@ -536,6 +573,44 @@ static void emit_forward_decls(
   fprintf(out, "\n");
 }
 
+static void emit_default_extern_stubs(
+    FILE *out, L1Subroutine *head, int with_native_runtime) {
+  if (with_native_runtime)
+    return;
+
+  for (L1Subroutine *sub = head; sub; sub = sub->next) {
+    const char *emit_name;
+
+    if (!sub->is_extern || sub->blocks)
+      continue;
+
+    emit_name = sub_emit_name(sub);
+    if (strcmp(sub->name, "main") == 0 && sub->param_count == 0)
+      continue;
+
+    fprintf(out, "__attribute__((weak)) ");
+    emit_c_type(sub->ret_ty, out);
+    fprintf(out, " %s(", emit_name);
+    for (uint32_t i = 0; i < sub->param_count; i++) {
+      emit_c_type(sub->param_tys[i], out);
+      fprintf(out, " arg%d%s", i, (i == sub->param_count - 1) ? "" : ", ");
+    }
+    if (sub->param_count == 0)
+      fprintf(out, "void");
+    fprintf(out, ") {\n");
+    for (uint32_t i = 0; i < sub->param_count; i++)
+      fprintf(out, "    (void)arg%d;\n", i);
+    if (!sub->ret_ty || sub->ret_ty->kind == TY_UNIT) {
+      fprintf(out, "    return;\n");
+    } else if (sub->ret_ty->kind == TY_ADDR) {
+      fprintf(out, "    return (void*)0;\n");
+    } else {
+      fprintf(out, "    return 0;\n");
+    }
+    fprintf(out, "}\n\n");
+  }
+}
+
 void lainir_emit_c_module(FILE *out, L1Subroutine *head, int with_native_runtime) {
   int has_main = 0;
 
@@ -544,6 +619,7 @@ void lainir_emit_c_module(FILE *out, L1Subroutine *head, int with_native_runtime
   fprintf(out, "#include <alloca.h>\n\n");
 
   emit_forward_decls(out, head, with_native_runtime);
+  emit_default_extern_stubs(out, head, with_native_runtime);
 
   for (L1Subroutine *sub = head; sub; sub = sub->next) {
     if (strcmp(sub->name, "main") == 0 && !sub->is_extern && sub->blocks)
