@@ -1,5 +1,5 @@
 /**
- * lainir/builder_ffi.c — L1 IR Builder FFI Functions
+ * compiler/builder_ffi.c — L1 IR Builder FFI Functions
  *
  * Provides the C-side FFI functions that Scheme meta passes call to construct
  * L1 IR nodes (types, expressions, instructions, blocks, subroutines).
@@ -9,7 +9,7 @@
  * — they cannot move to Scheme because L1 IR is a C data structure.
  */
 
-#include "lainir.h"
+#include "lainir/lainir.h"
 #include <chibi/eval.h>
 #include "compiler/native_runtime.h"
 

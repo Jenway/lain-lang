@@ -55,6 +55,12 @@ static void lainir_free_expr(L1Expr *expr) {
   case EXPR_FIELD:
     lainir_free_expr(expr->data.field.base);
     break;
+  case EXPR_EVAL:
+    free(expr->data.eval.fn_name);
+    for (i = 0; i < expr->data.eval.arg_count; i++)
+      lainir_free_expr(expr->data.eval.args[i]);
+    free(expr->data.eval.args);
+    break;
   case EXPR_CALL_INDIRECT:
     lainir_free_expr(expr->data.call_indirect.fn_ptr);
     for (i = 0; i < expr->data.call_indirect.arg_count; i++)
@@ -220,6 +226,8 @@ L1Type *infer_expr_type(L1Expr *expr) {
     return infer_expr_type(expr->data.bin.left);
   case EXPR_CALL:
     return expr->data.call.ret_ty;
+  case EXPR_EVAL:
+    return expr->data.eval.ret_ty;
   case EXPR_ARG:
     return lainir_new_type(TY_BITS, 64);
   case EXPR_FIELD:
