@@ -1,7 +1,7 @@
 (meta-source "import/lower")
 
 ;; ═══════════════════════════════════════════════════════════
-;; Import core-declarer / core-lowerer (interface-based, with manifest fallback)
+;; Import core-declarer / core-lowerer (interface-based)
 ;; 
 ;; Step 7: Reads compiled interface artifacts instead of recursive compilation.
 ;; Directly calls host.new-extern for each export.

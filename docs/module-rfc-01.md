@@ -23,7 +23,7 @@ Lain modules are compile-time objects in L2. They are not runtime values by defa
 
 ## Relationship To Current System
 
-The current implementation treats imports as a manifest-driven special form that registers extern functions directly. This RFC turns imports into module-producing meta operations and makes typed compiled interfaces the long-term boundary format.
+The current implementation treats imports as an interface-driven special form that registers extern functions directly. This RFC turns imports into module-producing meta operations and keeps typed compiled interfaces as the boundary format.
 
 ## First Iteration Scope
 
