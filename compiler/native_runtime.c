@@ -1,8 +1,8 @@
 /**
- * compiler/helpers.c — Native compiler C runtime
+ * compiler/native_runtime.c — Native compiler runtime
  *
  * Provides:
- *   - L1 IR type definitions (shared with bootstrap_l1.c layout)
+ *   - L1 IR type definitions shared with the bootstrap compiler
  *   - Token grouping (complements compiler/lexer.lain's flat tokenizer)
  *   - L1 IR builder FFI functions (for Chibi-Scheme meta passes)
  *   - C code emission (walks L1 IR, writes C source)
@@ -209,7 +209,7 @@ static sexp sexp_read_file_forms(sexp ctx, sexp self, sexp_sint_t n,
   return sexp_exceptionp(result) ? SEXP_FALSE : result;
 }
 
-// ── Manifest helper: read file as raw string (no lexing) ──
+// ── File helper: read file as raw string (no lexing) ──
 
 static sexp sexp_read_file_string(sexp ctx, sexp self, sexp_sint_t n,
                                    sexp arg_path) {
@@ -443,7 +443,7 @@ int32_t native_build_with_funcs(const char *root_path, const char *output_path,
   for (int i = 0; i < n; i++)
     pos += snprintf(link + pos, sizeof(link) - pos, "%s ", obj[i]);
   pos += snprintf(link + pos, sizeof(link) - pos,
-    "compiler/helpers.c "
+    "compiler/native_runtime.c "
     "-Ibootstrap/chibi-scheme/include "
     "-Lbootstrap/chibi-scheme -lchibi-scheme -lm -ldl "
     "-Wl,-rpath,$PWD/bootstrap/chibi-scheme");
@@ -507,11 +507,9 @@ void *native_init_scheme(void) {
     if (getcwd(cwd, sizeof(cwd))) {
       char project_root[2048];
       strcpy(project_root, cwd);
-      // Strip /compiler or /bootstrap suffix to find project root
+      // Strip /compiler suffix to find project root
       char *p;
       if ((p = strstr(project_root, "/compiler")))
-        *p = '\0';
-      else if ((p = strstr(project_root, "/bootstrap")))
         *p = '\0';
       char module_path[2048];
       snprintf(module_path, sizeof(module_path),

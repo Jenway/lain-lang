@@ -1,7 +1,7 @@
 ;; ============================================================================
 ;; host/polyfills.scm — 编译器 polyfill / 宿主抽象层 (Layer A)
 ;;
-;; 此文件从 compiler/helpers.c 的 native_inject_all_polyfills() 中提取。
+;; 此文件从 compiler/native_runtime.c 的 native_inject_all_polyfills() 中提取。
 ;; 所有定义均为纯 Scheme (R7RS + 少量 syntax-rules)，可被任何 R7RS
 ;; 运行时加载，不依赖 Chibi 特有的 C FFI。
 ;;
