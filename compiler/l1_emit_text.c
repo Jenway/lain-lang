@@ -330,19 +330,8 @@ void native_emit_interface(const char *output_path) {
   fclose(out);
 }
 
-void native_emit_manifest(const char *output_path) {
-  native_emit_interface(output_path);
-}
-
 static sexp sexp_core_emit_interface(sexp ctx, sexp self, sexp_sint_t n,
                                      sexp arg_path) {
-  const char *path = sexp_to_c_string(ctx, arg_path);
-  native_emit_interface(path);
-  return SEXP_VOID;
-}
-
-static sexp sexp_core_emit_manifest(sexp ctx, sexp self, sexp_sint_t n,
-                                      sexp arg_path) {
   const char *path = sexp_to_c_string(ctx, arg_path);
   native_emit_interface(path);
   return SEXP_VOID;

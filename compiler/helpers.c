@@ -220,10 +220,9 @@ static sexp sexp_read_file_string(sexp ctx, sexp self, sexp_sint_t n,
   return sexp_c_string(ctx, (const char *)data, len);
 }
 
-// ── Interface parser: read .lci file, fallback to .manifest during migration ──
-// Given a source .lain path like "compiler/args.lain", reads
-// "compiler/args.lain.lci" first, then falls back to
-// Reads the canonical interface artifact, with legacy manifest fallback.
+// ── Interface parser: read .lci file ──
+// Given a source .lain path like "std/io.lain", reads
+// "std/io.lain.lci".
 
 static sexp sexp_read_interface(sexp ctx, sexp self, sexp_sint_t n,
                                 sexp arg_source_path) {
@@ -231,18 +230,9 @@ static sexp sexp_read_interface(sexp ctx, sexp self, sexp_sint_t n,
   char interface_path[2048];
   snprintf(interface_path, sizeof(interface_path), "%s.lci", source_path);
   const uint8_t *data = native_read_file(interface_path);
-  if (!data) {
-    snprintf(interface_path, sizeof(interface_path), "%s.manifest", source_path);
-    data = native_read_file(interface_path);
-  }
   if (!data) return SEXP_FALSE;
   uint32_t len = native_file_len();
   return sexp_read_from_string(ctx, (const char *)data, len);
-}
-
-static sexp sexp_read_manifest(sexp ctx, sexp self, sexp_sint_t n,
-                                sexp arg_source_path) {
-  return sexp_read_interface(ctx, self, n, arg_source_path);
 }
 
 // ── Build driver: compute compilation order via simple C scanning ──
@@ -585,7 +575,6 @@ void *native_init_scheme(void) {
   REG("core.read-file-forms!", 1, sexp_read_file_forms);
   REG("core.read-file-string!", 1, sexp_read_file_string);
   REG("core.read-interface!", 1, sexp_read_interface);
-  REG("core.read-manifest!", 1, sexp_read_manifest);
   REG("core.build-compute-order!", 1, sexp_build_compute_order);
   REG("core.set-module-prefix!", 1, sexp_set_module_prefix);
   REG("core.module-prefix", 0, sexp_get_module_prefix);
@@ -594,7 +583,6 @@ void *native_init_scheme(void) {
   REG("core.declare-signature!", 1, sexp_core_declare_signature);
   REG("core.mark-export!", 1, sexp_core_mark_export);
   REG("core.emit-interface!", 1, sexp_core_emit_interface);
-  REG("core.emit-manifest!", 1, sexp_core_emit_manifest);
 
 #undef REG
   fprintf(stderr, "[init] 3: FFI registered\n");
