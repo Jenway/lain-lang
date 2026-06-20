@@ -625,7 +625,7 @@ void *native_init_scheme(void) {
   native_load_meta_sources(ctx, env);
   fprintf(stderr, "[init] 5: meta sources loaded\n");
 
-  // bootstrap_driver.scm is already loaded by driver.scm (via native_load_meta_sources).
+  // compile-group-to-core is now loaded directly from std/meta/pipeline/driver.scm.
   // Smoke test: lex-to-sexp produces correct S-expression
   {
     const char *test_src = "fn main() -> i32 { 42 }";
