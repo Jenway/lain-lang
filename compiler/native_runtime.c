@@ -126,12 +126,12 @@ static void native_inject_all_polyfills(sexp ctx, sexp env) {
 #ifdef MINI_EVAL_MODE
   // In mini_eval mode, load polyfills from file using mini_load_file
   // (import is not needed — mini_eval uses flat namespace)
-  mini_load_file(ctx, env, "host/polyfills.scm");
+  mini_load_file(ctx, env, "polyfills.scm");
 #else
   // Chibi mode: import R7RS, then load polyfills
   native_eval_string(ctx, env,
                      "(import (scheme base) (scheme cxr) (scheme load))");
-  native_load_file(ctx, env, "host/polyfills.scm");
+  native_load_file(ctx, env, "polyfills.scm");
 #endif
 }
 
@@ -588,7 +588,7 @@ void *native_init_scheme(void) {
   // Inject all polyfills (Layer A) — must be after FFI REG because
   // type.* wrappers reference core.* functions.
   native_inject_all_polyfills(ctx, env);
-  fprintf(stderr, "[init] 4: polyfills loaded from host/polyfills.scm\n");
+  fprintf(stderr, "[init] 4: polyfills loaded\n");
 
   // Smoke-test define-pass (validates polyfill layer works)
   {
