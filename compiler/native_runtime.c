@@ -16,7 +16,7 @@
 #include "lainir_exec.h"
 #include "vm_chibi.h"
 #include <alloca.h>
-#include "l1_types.h"
+#include "lainir/lainir.h"
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -56,19 +56,20 @@ void *native_lex_to_sexp(void *ctx_ptr, const uint8_t *src, uint32_t len) {
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 7-8. L1 IR Builder FFI (→ l1_builder.c)
+// 7-8. L1 IR Builder FFI (→ lainir/builder_ffi.c)
 // ══════════════════════════════════════════════════════════════════════════════
-#include "l1_builder.c"
+#include "lainir/lainir_core.c"
+#include "lainir/builder_ffi.c"
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 9. C Code Emission (→ l1_emit_c.c)
+// 9. C Code Emission (→ lainir/emitter.c)
 // ══════════════════════════════════════════════════════════════════════════════
-#include "l1_emit_c.c"
+#include "lainir/emitter.c"
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 9.5. L1 IR Text Dump (→ l1_emit_text.c)
+// 9.5. L1 IR Text Dump (→ lainir/emit_text.c)
 // ══════════════════════════════════════════════════════════════════════════════
-#include "l1_emit_text.c"
+#include "lainir/emit_text.c"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 11. Scheme Initialization + FFI Registration
@@ -483,6 +484,11 @@ static sexp sexp_get_module_prefix(sexp ctx, sexp self, sexp_sint_t n) {
   return sexp_c_string(ctx, prefix, -1);
 }
 
+static sexp sexp_core_emit_l1(
+    sexp ctx, sexp self, sexp_sint_t n, sexp arg_subs, sexp arg_path);
+static sexp sexp_core_emit_interface(
+    sexp ctx, sexp self, sexp_sint_t n, sexp arg_path);
+
 void native_register_core_ffi(
     void *ctx_ptr, void *env_ptr, native_foreign_registrar registrar,
     void *user_data) {
@@ -632,11 +638,8 @@ void *native_init_scheme(void) {
 // Run the Scheme pipeline on a token tree
 int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
   sexp ctx = (sexp)ctx_ptr;
-  g_subroutines_head = NULL;
-  g_export_names_head = NULL;
-  g_declared_module_names_head = NULL;
-  g_declared_signature_names_head = NULL;
-  g_has_explicit_exports = 0;
+  lainir_reset_module_state();
+  (void)root_group;
 
   sexp env = sexp_context_env(ctx);
 
@@ -684,152 +687,81 @@ int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
   return 0;
 }
 
-// Emit all subroutines to a file
-static const char *native_sub_emit_name(L1Subroutine *sub) {
-  return sub->link_name ? sub->link_name : sub->name;
-}
-
-static int native_is_default_extern_stub(L1Subroutine *sub) {
-  if (!sub->is_extern || sub->blocks || sub->link_name)
-    return 0;
-  if (!sub->ret_ty || sub->ret_ty->kind != TY_UNIT)
-    return 0;
-  if (sub->param_count != 2)
-    return 0;
-  if (!sub->param_tys || !sub->param_tys[0] || !sub->param_tys[1])
-    return 0;
-  if (sub->param_tys[0]->kind != TY_ADDR)
-    return 0;
-  if (sub->param_tys[1]->kind != TY_BITS || sub->param_tys[1]->width != 32)
-    return 0;
-  return 1;
-}
-
-static int native_sub_decl_score(L1Subroutine *sub) {
-  int score = 0;
-  if (sub->blocks)
-    score += 8;
-  if (sub->link_name)
-    score += 4;
-  if (sub->ret_ty && sub->ret_ty->kind != TY_UNIT)
-    score += 2;
-  if (!native_is_default_extern_stub(sub))
-    score += 1;
-  return score;
-}
-
 void native_emit_module_to_file(void *subs_ptr, const char *output_path) {
+  (void)subs_ptr;
+  lainir_emit_c_module_to_file(g_subroutines_head, output_path, 1);
+}
+
+void native_emit_l1_module(const char *output_path) {
+  lainir_emit_text_module_to_file(g_subroutines_head, output_path);
+}
+
+static sexp sexp_core_emit_l1(sexp ctx, sexp self, sexp_sint_t n,
+                              sexp arg_subs, sexp arg_path) {
+  const char *path = sexp_to_c_string(ctx, arg_path);
+  (void)self;
+  (void)n;
+  (void)arg_subs;
+  native_emit_l1_module(path);
+  return SEXP_VOID;
+}
+
+void native_emit_interface(const char *output_path) {
   FILE *out = fopen(output_path, "w");
   if (!out) {
-    fprintf(stderr, "Error: cannot open output file: %s\n", output_path);
+    fprintf(stderr, "Error: cannot open interface output: %s\n", output_path);
     return;
   }
 
-  fprintf(out, "#include <stdint.h>\n");
-  fprintf(out, "#include <string.h>\n");
-  fprintf(out, "#include <alloca.h>\n\n");
+  const char *prefix = native_get_module_prefix();
+  fprintf(out, "(module %s\n", prefix[0] ? prefix : "unknown");
+  fprintf(out, "  (format lci-v1)\n");
+  fprintf(out, "  (exports\n");
 
-  // Hardcoded native runtime forward declarations
-  // (needed because the bootstrap pipeline skips @foreign forms)
-  fprintf(out, "// Native runtime forward declarations\n");
-  fprintf(out, "void native_set_args(int argc, char **argv);\n");
-  fprintf(out, "int32_t native_get_arg_count(void);\n");
-  fprintf(out, "const char *native_get_arg(int32_t idx);\n");
-  fprintf(out, "const uint8_t *native_read_file(const char *path);\n");
-  fprintf(out, "uint32_t native_file_len(void);\n");
-  fprintf(out,
-          "void *native_lex_and_group(const uint8_t *src, uint32_t len);\n");
-  fprintf(out, "void *native_init_scheme(void);\n");
-  fprintf(out, "int32_t native_run_pipeline(void *ctx, void *root_group);\n");
-  fprintf(out, "void native_emit_module_to_file(void *subs, const char "
-               "*output_path);\n");
-  fprintf(out, "void *native_get_subroutines(void);\n\n");
+  for (L1Subroutine *sub = g_subroutines_head; sub; sub = sub->next) {
+    int exported = 0;
+    if (native_has_explicit_exports())
+      exported = sub->link_name && native_is_export_marked(sub->name);
+    else
+      exported = sub->link_name && !sub->is_extern && sub->blocks;
 
-  // Emit forward declarations for all subroutines
-  // Skip those already declared in the native runtime section
-  static const char *native_funcs[] = {"native_set_args",
-                                       "native_get_arg_count",
-                                       "native_get_arg",
-                                       "native_read_file",
-                                       "native_file_len",
-                                       "native_lex_and_group",
-                                       "native_init_scheme",
-                                       "native_run_pipeline",
-                                       "native_emit_module_to_file",
-                                       "native_get_subroutines",
-                                       NULL};
-  const char *printed_symbols[1024];
-  int printed_symbol_count = 0;
-  L1Subroutine *sub = g_subroutines_head;
-  while (sub) {
-    if (sub->blocks || sub->is_extern) {
-      const char *sub_emit_name = native_sub_emit_name(sub);
-      // Skip if already declared as native runtime function
-      int is_native = 0;
-      for (int i = 0; native_funcs[i]; i++) {
-        if (strcmp(sub->name, native_funcs[i]) == 0 ||
-            (sub->link_name && strcmp(sub->link_name, native_funcs[i]) == 0)) {
-          is_native = 1;
-          break;
-        }
-      }
-      int already_printed = 0;
-      for (int i = 0; i < printed_symbol_count; i++) {
-        if (strcmp(printed_symbols[i], sub_emit_name) == 0) {
-          already_printed = 1;
-          break;
-        }
-      }
-      int shadowed_by_better_decl = 0;
-      if (!already_printed) {
-        int sub_score = native_sub_decl_score(sub);
-        L1Subroutine *other = sub->next;
-        while (other) {
-          if ((other->blocks || other->is_extern) &&
-              strcmp(native_sub_emit_name(other), sub_emit_name) == 0 &&
-              native_sub_decl_score(other) > sub_score) {
-            shadowed_by_better_decl = 1;
-            break;
-          }
-          other = other->next;
-        }
-      }
-      if (!is_native && !already_printed && !shadowed_by_better_decl) {
-        // Special-case: main with 0 params becomes int main(int, char**)
-        if (strcmp(sub->name, "main") == 0 && sub->param_count == 0) {
-          fprintf(out, "int main(int argc, char **argv);\n");
-        } else {
-          emit_c_type(sub->ret_ty, out);
-          fprintf(out, " %s(", sub_emit_name);
-          for (uint32_t i = 0; i < sub->param_count; i++) {
-            if (sub->param_tys[i]) {
-              emit_c_type(sub->param_tys[i], out);
-            } else {
-              fprintf(out, "void*");
-            }
-            fprintf(out, " arg%d%s", i,
-                    (i == sub->param_count - 1) ? "" : ", ");
-          }
-          if (sub->param_count == 0)
-            fprintf(out, "void");
-          fprintf(out, ");\n");
-        }
-        if (printed_symbol_count < 1024)
-          printed_symbols[printed_symbol_count++] = sub_emit_name;
-      }
+    if (!exported)
+      continue;
+
+    fprintf(out, "    (fn\n");
+    fprintf(out, "      (name %s)\n", sub->name);
+    fprintf(out, "      (params (");
+    for (uint32_t i = 0; i < sub->param_count; i++) {
+      emit_l1_type(sub->param_tys[i], out);
+      if (i < sub->param_count - 1)
+        fprintf(out, " ");
     }
-    sub = sub->next;
-  }
-  fprintf(out, "\n");
-
-  // Emit each subroutine
-  sub = g_subroutines_head;
-  while (sub) {
-    emit_c_subroutine(sub, out);
-    sub = sub->next;
+    fprintf(out, "))\n");
+    fprintf(out, "      (ret ");
+    emit_l1_type(sub->ret_ty, out);
+    fprintf(out, ")\n");
+    fprintf(out, "      (link_name \"%s\"))\n", sub->link_name);
   }
 
+  for (L1ExportName *entry = g_declared_signature_names_head; entry; entry = entry->next) {
+    if (native_is_export_marked(entry->name))
+      fprintf(out, "    (signature (name %s))\n", entry->name);
+  }
+  for (L1ExportName *entry = g_declared_module_names_head; entry; entry = entry->next) {
+    if (native_is_export_marked(entry->name))
+      fprintf(out, "    (module (name %s))\n", entry->name);
+  }
+  fprintf(out, "  ))\n");
   fclose(out);
+}
+
+static sexp sexp_core_emit_interface(sexp ctx, sexp self, sexp_sint_t n,
+                                     sexp arg_path) {
+  const char *path = sexp_to_c_string(ctx, arg_path);
+  (void)self;
+  (void)n;
+  native_emit_interface(path);
+  return SEXP_VOID;
 }
 
 // Get subroutine list head (for Lain code to inspect)

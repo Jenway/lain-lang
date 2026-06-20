@@ -1,10 +1,11 @@
 /**
- * compiler/l1_emit_c.c — C Code Emission Backend
+ * lainir/emitter.c — C Code Emission Backend
  *
  * Walks L1 IR and emits C source code.
  */
 
-#include "l1_types.h"
+#include "lainir.h"
+#include <string.h>
 
 
 // ============================================================================
@@ -15,7 +16,24 @@ static void emit_c_type(L1Type *ty, FILE *out) {
     return;
   }
   if (ty->kind == TY_BITS) {
-    fprintf(out, "uint%d_t", ty->width);
+    switch (ty->width) {
+    case 1:
+    case 8:
+      fprintf(out, "uint8_t");
+      break;
+    case 16:
+      fprintf(out, "uint16_t");
+      break;
+    case 32:
+      fprintf(out, "uint32_t");
+      break;
+    case 64:
+      fprintf(out, "uint64_t");
+      break;
+    default:
+      fprintf(out, "uint64_t");
+      break;
+    }
   } else if (ty->kind == TY_ADDR) {
     fprintf(out, "void*");
   } else {
@@ -189,11 +207,20 @@ static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out);
 
 // Helper: emit a single instruction (used for nested if bodies)
 static void emit_c_instruction(L1Block *block, L1Instruction *inst, L1Subroutine *sub, FILE *out) {
+  (void)block;
   int is_unit_main = (sub && strcmp(sub->name, "main") == 0 && sub->param_count == 0 &&
                       (!sub->ret_ty || sub->ret_ty->kind == TY_UNIT));
   switch (inst->kind) {
   case INST_SET:
-    fprintf(out, "        auto %s = ", inst->data.set.name);
+    {
+      L1Type *set_ty = infer_expr_type(inst->data.set.val);
+      fprintf(out, "        ");
+      if (set_ty)
+        emit_c_type(set_ty, out);
+      else
+        fprintf(out, "uint64_t");
+      fprintf(out, " %s = ", inst->data.set.name);
+    }
     emit_c_expr(inst->data.set.val, out);
     fprintf(out, ";\n");
     break;
@@ -235,7 +262,15 @@ static void emit_c_instructions(L1Block *block, L1Subroutine *sub, FILE *out) {
   while (inst) {
     switch (inst->kind) {
     case INST_SET:
-      fprintf(out, "    auto %s = ", inst->data.set.name);
+      {
+        L1Type *set_ty = infer_expr_type(inst->data.set.val);
+        fprintf(out, "    ");
+        if (set_ty)
+          emit_c_type(set_ty, out);
+        else
+          fprintf(out, "uint64_t");
+        fprintf(out, " %s = ", inst->data.set.name);
+      }
       emit_c_expr(inst->data.set.val, out);
       fprintf(out, ";\n");
       break;
@@ -330,13 +365,18 @@ static void emit_c_block_terminator(L1Block *block, L1Subroutine *sub, FILE *out
   }
 }
 
-static void emit_c_subroutine(L1Subroutine *sub, FILE *out) {
+static void emit_c_subroutine(
+    L1Subroutine *sub, FILE *out, int with_native_runtime) {
   if (!sub->blocks)
     return;
   int is_main = (strcmp(sub->name, "main") == 0 && sub->param_count == 0);
   if (is_main) {
-    fprintf(out, "int main(int argc, char **argv) {\n");
-    fprintf(out, "    native_set_args(argc, argv);\n");
+    if (with_native_runtime) {
+      fprintf(out, "int main(int argc, char **argv) {\n");
+      fprintf(out, "    native_set_args(argc, argv);\n");
+    } else {
+      fprintf(out, "int main(void) {\n");
+    }
   } else {
     emit_c_type(sub->ret_ty, out);
     fprintf(out, " %s(", sub->link_name ? sub->link_name : sub->name);
@@ -357,4 +397,174 @@ static void emit_c_subroutine(L1Subroutine *sub, FILE *out) {
   fprintf(out, "}\n\n");
 }
 
-// ============================================================================
+static int should_skip_native_decl(const char *name) {
+  static const char *native_funcs[] = {
+    "native_set_args",
+    "native_get_arg_count",
+    "native_get_arg",
+    "native_read_file",
+    "native_file_len",
+    "native_lex_and_group",
+    "native_init_scheme",
+    "native_run_pipeline",
+    "native_emit_module_to_file",
+    "native_get_subroutines",
+    NULL
+  };
+  for (int i = 0; native_funcs[i]; i++) {
+    if (strcmp(name, native_funcs[i]) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+static const char *sub_emit_name(L1Subroutine *sub) {
+  return sub->link_name ? sub->link_name : sub->name;
+}
+
+static int is_default_extern_stub(L1Subroutine *sub) {
+  if (!sub->is_extern || sub->blocks || sub->link_name)
+    return 0;
+  if (!sub->ret_ty || sub->ret_ty->kind != TY_UNIT)
+    return 0;
+  if (sub->param_count != 2)
+    return 0;
+  if (!sub->param_tys || !sub->param_tys[0] || !sub->param_tys[1])
+    return 0;
+  if (sub->param_tys[0]->kind != TY_ADDR)
+    return 0;
+  if (sub->param_tys[1]->kind != TY_BITS || sub->param_tys[1]->width != 32)
+    return 0;
+  return 1;
+}
+
+static int sub_decl_score(L1Subroutine *sub) {
+  int score = 0;
+  if (sub->blocks)
+    score += 8;
+  if (sub->link_name)
+    score += 4;
+  if (sub->ret_ty && sub->ret_ty->kind != TY_UNIT)
+    score += 2;
+  if (!is_default_extern_stub(sub))
+    score += 1;
+  return score;
+}
+
+static void emit_forward_decls(
+    FILE *out, L1Subroutine *head, int with_native_runtime) {
+  const char *printed_symbols[1024];
+  int printed_symbol_count = 0;
+
+  if (with_native_runtime) {
+    fprintf(out, "// Native runtime forward declarations\n");
+    fprintf(out, "void native_set_args(int argc, char **argv);\n");
+    fprintf(out, "int32_t native_get_arg_count(void);\n");
+    fprintf(out, "const char *native_get_arg(int32_t idx);\n");
+    fprintf(out, "const uint8_t *native_read_file(const char *path);\n");
+    fprintf(out, "uint32_t native_file_len(void);\n");
+    fprintf(out, "void *native_lex_and_group(const uint8_t *src, uint32_t len);\n");
+    fprintf(out, "void *native_init_scheme(void);\n");
+    fprintf(out, "int32_t native_run_pipeline(void *ctx, void *root_group);\n");
+    fprintf(out, "void native_emit_module_to_file(void *subs, const char *output_path);\n");
+    fprintf(out, "void *native_get_subroutines(void);\n\n");
+  }
+
+  for (L1Subroutine *sub = head; sub; sub = sub->next) {
+    const char *emit_name;
+    int is_native = 0;
+    int already_printed = 0;
+    int shadowed_by_better_decl = 0;
+    int sub_score;
+
+    if (!(sub->blocks || sub->is_extern))
+      continue;
+
+    emit_name = sub_emit_name(sub);
+    if (with_native_runtime && should_skip_native_decl(emit_name))
+      continue;
+
+    for (int i = 0; i < printed_symbol_count; i++) {
+      if (strcmp(printed_symbols[i], emit_name) == 0) {
+        already_printed = 1;
+        break;
+      }
+    }
+    if (already_printed)
+      continue;
+
+    if (with_native_runtime) {
+      is_native = should_skip_native_decl(sub->name);
+      if (sub->link_name && should_skip_native_decl(sub->link_name))
+        is_native = 1;
+    }
+    if (is_native)
+      continue;
+
+    sub_score = sub_decl_score(sub);
+    for (L1Subroutine *other = sub->next; other; other = other->next) {
+      if ((other->blocks || other->is_extern) &&
+          strcmp(sub_emit_name(other), emit_name) == 0 &&
+          sub_decl_score(other) > sub_score) {
+        shadowed_by_better_decl = 1;
+        break;
+      }
+    }
+    if (shadowed_by_better_decl)
+      continue;
+
+    if (strcmp(sub->name, "main") == 0 && sub->param_count == 0) {
+      if (with_native_runtime)
+        fprintf(out, "int main(int argc, char **argv);\n");
+      else
+        fprintf(out, "int main(void);\n");
+    } else {
+      emit_c_type(sub->ret_ty, out);
+      fprintf(out, " %s(", emit_name);
+      for (uint32_t i = 0; i < sub->param_count; i++) {
+        emit_c_type(sub->param_tys[i], out);
+        fprintf(out, " arg%d%s", i, (i == sub->param_count - 1) ? "" : ", ");
+      }
+      if (sub->param_count == 0)
+        fprintf(out, "void");
+      fprintf(out, ");\n");
+    }
+
+    if (printed_symbol_count < 1024)
+      printed_symbols[printed_symbol_count++] = emit_name;
+  }
+  fprintf(out, "\n");
+}
+
+void lainir_emit_c_module(FILE *out, L1Subroutine *head, int with_native_runtime) {
+  int has_main = 0;
+
+  fprintf(out, "#include <stdint.h>\n");
+  fprintf(out, "#include <string.h>\n");
+  fprintf(out, "#include <alloca.h>\n\n");
+
+  emit_forward_decls(out, head, with_native_runtime);
+
+  for (L1Subroutine *sub = head; sub; sub = sub->next) {
+    if (strcmp(sub->name, "main") == 0 && !sub->is_extern && sub->blocks)
+      has_main = 1;
+    emit_c_subroutine(sub, out, with_native_runtime);
+  }
+
+  if (!with_native_runtime && !has_main) {
+    fprintf(out, "int main(void) {\n");
+    fprintf(out, "    return 0;\n");
+    fprintf(out, "}\n");
+  }
+}
+
+void lainir_emit_c_module_to_file(
+    L1Subroutine *head, const char *output_path, int with_native_runtime) {
+  FILE *out = fopen(output_path, "w");
+  if (!out) {
+    fprintf(stderr, "Error: cannot open output file: %s\n", output_path);
+    return;
+  }
+  lainir_emit_c_module(out, head, with_native_runtime);
+  fclose(out);
+}

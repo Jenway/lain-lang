@@ -1,5 +1,5 @@
 /**
- * compiler/l1_builder.c — L1 IR Builder FFI Functions
+ * lainir/builder_ffi.c — L1 IR Builder FFI Functions
  *
  * Provides the C-side FFI functions that Scheme meta passes call to construct
  * L1 IR nodes (types, expressions, instructions, blocks, subroutines).
@@ -9,53 +9,9 @@
  * — they cannot move to Scheme because L1 IR is a C data structure.
  */
 
-#include "l1_types.h"
-#include "native_runtime.h"
-
-// ══════════════════════════════════════════════════════════════════════════════
-// Global State Definition
-// ══════════════════════════════════════════════════════════════════════════════
-
-L1Subroutine *g_subroutines_head = NULL;
-L1Subroutine *g_current_sub = NULL;
-L1Block      *g_current_block = NULL;
-uint32_t      g_temp_counter = 0;
-uint32_t      g_block_id_counter = 0;
-L1Block      *g_scratch_blocks[8];
-int           g_scratch_count = 0;
-L1ExportName *g_export_names_head = NULL;
-L1ExportName *g_declared_module_names_head = NULL;
-L1ExportName *g_declared_signature_names_head = NULL;
-int           g_has_explicit_exports = 0;
-
-// ══════════════════════════════════════════════════════════════════════════════
-// Shared Utility Implementations
-// ══════════════════════════════════════════════════════════════════════════════
-
-void append_instruction(L1Subroutine *sub, L1Instruction *inst) {
-  (void)sub;
-  if (!g_current_block) {
-    fprintf(stderr, "ERROR: append_instruction with no current block\n");
-    exit(1);
-  }
-  if (!g_current_block->body) {
-    g_current_block->body = inst;
-    g_current_block->body_tail = inst;
-  } else {
-    g_current_block->body_tail->next = inst;
-    g_current_block->body_tail = inst;
-  }
-}
-
-void append_inst_to_block(L1Block *block, L1Instruction *inst) {
-  if (block->body_tail) {
-    block->body_tail->next = inst;
-    block->body_tail = inst;
-  } else {
-    block->body = inst;
-    block->body_tail = inst;
-  }
-}
+#include "lainir.h"
+#include <chibi/eval.h>
+#include "compiler/native_runtime.h"
 
 uint32_t get_list_length(sexp list) {
   uint32_t len = 0;
@@ -67,83 +23,8 @@ uint32_t get_list_length(sexp list) {
   return len;
 }
 
-L1Type *infer_expr_type(L1Expr *expr) {
-  switch (expr->kind) {
-  case EXPR_VAR:     return expr->data.var.ty;
-  case EXPR_CONST:   { L1Type *t = malloc(sizeof(L1Type)); t->kind = TY_BITS; t->width = 64; return t; }
-  case EXPR_LOAD:    return expr->data.load.ty;
-  case EXPR_ADD:
-  case EXPR_SUB:     return infer_expr_type(expr->data.bin.left);
-  case EXPR_CALL:    return expr->data.call.ret_ty;
-  case EXPR_ARG:     { L1Type *t = malloc(sizeof(L1Type)); t->kind = TY_BITS; t->width = 64; return t; }
-  case EXPR_FIELD:   return expr->data.field.field_ty;
-  case EXPR_ALLOCA:  return expr->data.alloca.result_ty;
-  default:           { L1Type *t = malloc(sizeof(L1Type)); t->kind = TY_BITS; t->width = 64; return t; }
-  }
-}
-
-static void named_entry_append_unique(L1ExportName **head, const char *name) {
-  for (L1ExportName *entry = *head; entry; entry = entry->next) {
-    if (strcmp(entry->name, name) == 0)
-      return;
-  }
-  L1ExportName *entry = malloc(sizeof(L1ExportName));
-  entry->name = strdup(name);
-  entry->next = NULL;
-  if (!*head) {
-    *head = entry;
-    return;
-  }
-  L1ExportName *tail = *head;
-  while (tail->next)
-    tail = tail->next;
-  tail->next = entry;
-}
-
-void native_declare_module(const char *name) {
-  named_entry_append_unique(&g_declared_module_names_head, name);
-}
-
-void native_declare_signature(const char *name) {
-  named_entry_append_unique(&g_declared_signature_names_head, name);
-}
-
-void native_mark_export(const char *name) {
-  g_has_explicit_exports = 1;
-  named_entry_append_unique(&g_export_names_head, name);
-}
-
-int native_has_explicit_exports(void) {
-  return g_has_explicit_exports;
-}
-
-int native_is_export_marked(const char *name) {
-  for (L1ExportName *entry = g_export_names_head; entry; entry = entry->next) {
-    if (strcmp(entry->name, name) == 0)
-      return 1;
-  }
-  return 0;
-}
-
-void scratch_terminator_to_inst(L1Block *block) {
-  if (!block->terminator || block->terminator->kind != TERM_RETURN)
-    return;
-  L1Instruction *ret = calloc(1, sizeof(L1Instruction));
-  ret->kind = INST_RETURN;
-  ret->data.ret.val = block->terminator->data.ret_val;
-  if (!block->body) {
-    block->body = ret;
-    block->body_tail = ret;
-  } else {
-    block->body_tail->next = ret;
-    block->body_tail = ret;
-  }
-  free(block->terminator);
-  block->terminator = NULL;
-}
-
 // Convert Scheme symbol/string to C string
-const char *sexp_to_c_string(sexp ctx, sexp val) {
+static const char *sexp_to_c_string(sexp ctx, sexp val) {
   if (sexp_symbolp(val))
     return sexp_string_data(sexp_symbol_to_string(ctx, val));
   if (sexp_stringp(val))

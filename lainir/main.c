@@ -1,13 +1,6 @@
-#include "l1ir.h"
+#include "lainir.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-
-/* parser */
-L1Module *parse_module(const char *src);
-
-/* emitter */
-void emit_module(FILE *out, L1Module *m);
 
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "r");
@@ -33,10 +26,10 @@ int main(int argc, char **argv) {
     char *src = read_file(path);
     if (!src) return 1;
 
-    L1Module *m = parse_module(src);
+    L1Subroutine *head = lainir_parse_module(src);
     free(src);
 
-    emit_module(stdout, m);
-    module_free(m);
+    lainir_emit_c_module(stdout, head, 0);
+    lainir_free_subroutines(head);
     return 0;
 }
