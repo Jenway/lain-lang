@@ -95,6 +95,3 @@
 (load "std/meta/build/sort.scm")
 (load "std/meta/literals/lower.scm")
 (load "std/meta/io/println.scm")
-
-;; ═══ 6. 编译管线入口 ═══
-(load "bootstrap/bootstrap_driver.scm")

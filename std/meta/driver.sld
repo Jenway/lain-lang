@@ -61,5 +61,5 @@
     ;; 7. IO
     (load "std/meta/io/println.scm")
 
-    ;; 8. 编译管线驱动器
-    (load "bootstrap/bootstrap_driver.scm")))
+    ;; 8. 编译管线驱动器已由 std/meta/pipeline/driver.scm 提供
+    ))
