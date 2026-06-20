@@ -262,6 +262,7 @@
 ;; ── core-declarer: read interface, declare extern functions directly ──
 
 (define-pass (core-declarer |middle.import| item)
+  (meta.ensure-static-position! '|middle.import|)
   (let* ((payload (middle.payload item))
          (name (optional.value (record.get payload '|name|)))
          ;; The raw import path is nested in the inner |payload| field

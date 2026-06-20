@@ -1,5 +1,5 @@
 ;; ============================================================================
-;; host/ir-api.scm — Meta ABI v2 IR 构造器
+;; std/meta/ir-api.scm — Meta ABI v2 IR 构造器
 ;;
 ;; 当前实现：薄包装现有 core.* FFI 函数。
 ;; 未来 LainVM 实现：直接替换为 lainvm 内置函数。

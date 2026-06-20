@@ -13,8 +13,9 @@
  *   - Chibi-Scheme (libchibi)
  */
 
+#include "lainir_exec.h"
+#include "vm_chibi.h"
 #include <alloca.h>
-#include <unistd.h>
 #include "l1_types.h"
 
 
@@ -77,62 +78,9 @@ void *native_lex_to_sexp(void *ctx_ptr, const uint8_t *src, uint32_t len) {
 // 11. Scheme Initialization and Meta Source Loading
 // ============================================================================
 
-static void check_exception(sexp ctx, sexp res) {
-  if (sexp_exceptionp(res)) {
-    sexp_print_exception(ctx, res, sexp_current_error_port(ctx));
-    fprintf(stderr, "\n");
-    exit(1);
-  }
-}
-
-static void native_eval_string(sexp ctx, sexp env, const char *code) {
-  sexp res = sexp_eval_string(ctx, code, -1, env);
-  check_exception(ctx, res);
-}
-
-static void native_load_file(sexp ctx, sexp env, const char *path) {
-  FILE *f = fopen(path, "r");
-  if (!f) {
-    fprintf(stderr, "Warning: cannot open file: %s\n", path);
-    return;
-  }
-  fseek(f, 0, SEEK_END);
-  long len = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  char *buf = malloc(len + 1);
-  if (!buf) {
-    fprintf(stderr, "OOM reading %s\n", path);
-    exit(1);
-  }
-  fread(buf, 1, len, f);
-  buf[len] = '\0';
-  fclose(f);
-  // Wrap in (begin ...) so ALL top-level expressions are evaluated.
-  // sexp_eval_string only evaluates the first expression otherwise.
-  int wrapped_len = len + 9; // "(begin " + content + ")" + NUL
-  char *wrapped = malloc(wrapped_len);
-  if (!wrapped) {
-    fprintf(stderr, "OOM wrapping %s\n", path);
-    exit(1);
-  }
-  sprintf(wrapped, "(begin %s)", buf);
-  free(buf);
-  sexp res = sexp_eval_string(ctx, wrapped, -1, env);
-  check_exception(ctx, res);
-  free(wrapped);
-}
-
 static void native_inject_all_polyfills(sexp ctx, sexp env) {
-#ifdef MINI_EVAL_MODE
-  // In mini_eval mode, load polyfills from file using mini_load_file
-  // (import is not needed — mini_eval uses flat namespace)
-  mini_load_file(ctx, env, "polyfills.scm");
-#else
-  // Chibi mode: import R7RS, then load polyfills
-  native_eval_string(ctx, env,
-                     "(import (scheme base) (scheme cxr) (scheme load))");
-  native_load_file(ctx, env, "polyfills.scm");
-#endif
+  vm_chibi_import_base(ctx, env);
+  vm_chibi_load_file(ctx, env, "polyfills.scm");
 }
 
 static void native_load_meta_sources(sexp ctx, sexp env) {
@@ -140,15 +88,8 @@ static void native_load_meta_sources(sexp ctx, sexp env) {
   // hardcoded file list. driver.scm has the authoritative load order.
   const char *search_paths[] = {"std/meta/driver.scm", "../std/meta/driver.scm",
                                 "../../std/meta/driver.scm", NULL};
-  for (int si = 0; search_paths[si]; si++) {
-    FILE *test = fopen(search_paths[si], "r");
-    if (test) {
-      fclose(test);
-      native_load_file(ctx, env, search_paths[si]);
-      return;
-    }
-  }
-  fprintf(stderr, "Warning: could not find std/meta/driver.scm\n");
+  if (!vm_chibi_load_first_available(ctx, env, search_paths))
+    fprintf(stderr, "Warning: could not find std/meta/driver.scm\n");
 }
 
 // ============================================================================
@@ -372,6 +313,33 @@ static sexp sexp_build_compute_order(sexp ctx, sexp self, sexp_sint_t n,
   return result;
 }
 
+static sexp sexp_core_execute_lainir(sexp ctx, sexp self, sexp_sint_t n,
+                                     sexp arg_entry, sexp arg_args) {
+  const char *entry_name = NULL;
+  if (sexp_symbolp(arg_entry))
+    entry_name = sexp_string_data(sexp_symbol_to_string(ctx, arg_entry));
+  else if (sexp_stringp(arg_entry))
+    entry_name = sexp_string_data(arg_entry);
+
+  if (!entry_name) {
+    return sexp_user_exception(
+      ctx, NULL, "core.execute-lainir!: entry must be a symbol or string",
+      arg_entry);
+  }
+
+  LainirExecRequest request = {
+    .entry_name = entry_name,
+    .args = arg_args
+  };
+  sexp result = SEXP_FALSE;
+  LainirExecStatus status =
+    lainir_exec_request(ctx, sexp_context_env(ctx), &request, &result);
+
+  if (status == LAINIR_EXEC_OK)
+    return result;
+  return result;
+}
+
 // ── Build driver: full multi-file build ──
 // Steps: compute order (Scheme) → compile each module → gcc link
 // compile_fn and interface_fn are provided by the caller (native_compiler.c)
@@ -426,14 +394,29 @@ int32_t native_build_with_funcs(const char *root_path, const char *output_path,
     // Interface goes next to source (so import resolution finds it)
     char ifc[1024];
     snprintf(ifc, sizeof(ifc), "%s.lci", src[i]);
-    interface_fn(src[i], ifc);
+    if (interface_fn(src[i], ifc) != 0) {
+      fprintf(stderr, "[build] interface emission failed: %s\n", src[i]);
+      for (int j = 0; j < n; j++) { free(src[j]); free(obj[j]); }
+      free(src); free(obj);
+      return 1;
+    }
     // Compile to .c then gcc -c to .o
     char cf[1024];
     snprintf(cf, sizeof(cf), "/tmp/lain_build/tmp_%d.c", i);
-    compile_fn(src[i], cf);
+    if (compile_fn(src[i], cf) != 0) {
+      fprintf(stderr, "[build] module compile failed: %s\n", src[i]);
+      for (int j = 0; j < n; j++) { free(src[j]); free(obj[j]); }
+      free(src); free(obj);
+      return 1;
+    }
     char cmd[2048];
     snprintf(cmd, sizeof(cmd), "gcc -c %s -o %s -I. 2>&1", cf, obj[i]);
-    system(cmd);
+    if (system(cmd) != 0) {
+      fprintf(stderr, "[build] object compile failed: %s\n", src[i]);
+      for (int j = 0; j < n; j++) { free(src[j]); free(obj[j]); }
+      free(src); free(obj);
+      return 1;
+    }
   }
 
   // Step 4: Link
@@ -443,7 +426,8 @@ int32_t native_build_with_funcs(const char *root_path, const char *output_path,
   for (int i = 0; i < n; i++)
     pos += snprintf(link + pos, sizeof(link) - pos, "%s ", obj[i]);
   pos += snprintf(link + pos, sizeof(link) - pos,
-    "compiler/native_runtime.c "
+    "compiler/native_runtime.c compiler/vm_chibi.c compiler/lainir_exec.c "
+    "-I. "
     "-Ibootstrap/chibi-scheme/include "
     "-Lbootstrap/chibi-scheme -lchibi-scheme -lm -ldl "
     "-Wl,-rpath,$PWD/bootstrap/chibi-scheme");
@@ -499,34 +483,15 @@ static sexp sexp_get_module_prefix(sexp ctx, sexp self, sexp_sint_t n) {
   return sexp_c_string(ctx, prefix, -1);
 }
 
-// Initialize Scheme environment, register all FFI functions, load meta passes
-void *native_init_scheme(void) {
-  // Set CHIBI_MODULE_PATH so (import (scheme ...)) can find libraries
-  {
-    char cwd[2048];
-    if (getcwd(cwd, sizeof(cwd))) {
-      char project_root[2048];
-      strcpy(project_root, cwd);
-      // Strip /compiler suffix to find project root
-      char *p;
-      if ((p = strstr(project_root, "/compiler")))
-        *p = '\0';
-      char module_path[2048];
-      snprintf(module_path, sizeof(module_path),
-               "%s/bootstrap/chibi-scheme/lib", project_root);
-      setenv("CHIBI_MODULE_PATH", module_path, 1);
-    }
-  }
-
-  sexp ctx = sexp_make_eval_context(NULL, NULL, NULL, 0, 0);
-  fprintf(stderr, "[init] 1: ctx created\n");
-  sexp_load_standard_env(ctx, NULL, SEXP_SEVEN);
-  fprintf(stderr, "[init] 2: std env loaded\n");
-  sexp env = sexp_context_env(ctx);
-
-  // Register core FFI functions (Layer B) — must be first because
-  // polyfills (Layer A) contain type.* wrappers that reference these.
-#define REG(name, args, fn) sexp_define_foreign(ctx, env, name, args, fn)
+void native_register_core_ffi(
+    void *ctx_ptr, void *env_ptr, native_foreign_registrar registrar,
+    void *user_data) {
+  (void)ctx_ptr;
+  (void)env_ptr;
+#ifdef REG
+#undef REG
+#endif
+#define REG(name, args, fn) registrar(user_data, name, args, (void *)(fn))
   REG("core.make-bits", 1, sexp_core_make_bits);
   REG("core.make-addr", 0, sexp_core_make_addr);
   REG("core.make-unit", 0, sexp_core_make_unit);
@@ -581,8 +546,34 @@ void *native_init_scheme(void) {
   REG("core.declare-signature!", 1, sexp_core_declare_signature);
   REG("core.mark-export!", 1, sexp_core_mark_export);
   REG("core.emit-interface!", 1, sexp_core_emit_interface);
-
+  REG("core.execute-lainir!", 2, sexp_core_execute_lainir);
 #undef REG
+}
+
+typedef struct {
+  sexp ctx;
+  sexp env;
+} NativeChibiRegistrarCtx;
+
+static void native_register_foreign_with_chibi(
+    void *user_data, const char *name, int arity, void *fn) {
+  NativeChibiRegistrarCtx *state = (NativeChibiRegistrarCtx *)user_data;
+  sexp_define_foreign(state->ctx, state->env, name, arity, fn);
+}
+
+// Initialize Scheme environment, register all FFI functions, load meta passes
+void *native_init_scheme(void) {
+  vm_chibi_set_module_path_from_cwd();
+
+  sexp ctx = vm_chibi_create_context();
+  fprintf(stderr, "[init] 1: ctx created\n");
+  fprintf(stderr, "[init] 2: std env loaded\n");
+  sexp env = vm_chibi_env(ctx);
+
+  // Register core FFI functions (Layer B) — must be first because
+  // polyfills (Layer A) contain type.* wrappers that reference these.
+  NativeChibiRegistrarCtx reg = {.ctx = ctx, .env = env};
+  native_register_core_ffi(ctx, env, native_register_foreign_with_chibi, &reg);
   fprintf(stderr, "[init] 3: FFI registered\n");
 
   // Inject all polyfills (Layer A) — must be after FFI REG because
@@ -602,8 +593,7 @@ void *native_init_scheme(void) {
       fprintf(stderr, "[diag] define-pass did NOT populate __lain-passes\n");
     else {
       fprintf(stderr, "[diag] define-pass test exception: ");
-      sexp_print_exception(ctx, r, sexp_current_error_port(ctx));
-      fprintf(stderr, "\n");
+      vm_chibi_print_exception(ctx, r);
     }
   }
 
@@ -695,6 +685,39 @@ int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
 }
 
 // Emit all subroutines to a file
+static const char *native_sub_emit_name(L1Subroutine *sub) {
+  return sub->link_name ? sub->link_name : sub->name;
+}
+
+static int native_is_default_extern_stub(L1Subroutine *sub) {
+  if (!sub->is_extern || sub->blocks || sub->link_name)
+    return 0;
+  if (!sub->ret_ty || sub->ret_ty->kind != TY_UNIT)
+    return 0;
+  if (sub->param_count != 2)
+    return 0;
+  if (!sub->param_tys || !sub->param_tys[0] || !sub->param_tys[1])
+    return 0;
+  if (sub->param_tys[0]->kind != TY_ADDR)
+    return 0;
+  if (sub->param_tys[1]->kind != TY_BITS || sub->param_tys[1]->width != 32)
+    return 0;
+  return 1;
+}
+
+static int native_sub_decl_score(L1Subroutine *sub) {
+  int score = 0;
+  if (sub->blocks)
+    score += 8;
+  if (sub->link_name)
+    score += 4;
+  if (sub->ret_ty && sub->ret_ty->kind != TY_UNIT)
+    score += 2;
+  if (!native_is_default_extern_stub(sub))
+    score += 1;
+  return score;
+}
+
 void native_emit_module_to_file(void *subs_ptr, const char *output_path) {
   FILE *out = fopen(output_path, "w");
   if (!out) {
@@ -735,9 +758,12 @@ void native_emit_module_to_file(void *subs_ptr, const char *output_path) {
                                        "native_emit_module_to_file",
                                        "native_get_subroutines",
                                        NULL};
+  const char *printed_symbols[1024];
+  int printed_symbol_count = 0;
   L1Subroutine *sub = g_subroutines_head;
   while (sub) {
     if (sub->blocks || sub->is_extern) {
+      const char *sub_emit_name = native_sub_emit_name(sub);
       // Skip if already declared as native runtime function
       int is_native = 0;
       for (int i = 0; native_funcs[i]; i++) {
@@ -747,13 +773,34 @@ void native_emit_module_to_file(void *subs_ptr, const char *output_path) {
           break;
         }
       }
-      if (!is_native) {
+      int already_printed = 0;
+      for (int i = 0; i < printed_symbol_count; i++) {
+        if (strcmp(printed_symbols[i], sub_emit_name) == 0) {
+          already_printed = 1;
+          break;
+        }
+      }
+      int shadowed_by_better_decl = 0;
+      if (!already_printed) {
+        int sub_score = native_sub_decl_score(sub);
+        L1Subroutine *other = sub->next;
+        while (other) {
+          if ((other->blocks || other->is_extern) &&
+              strcmp(native_sub_emit_name(other), sub_emit_name) == 0 &&
+              native_sub_decl_score(other) > sub_score) {
+            shadowed_by_better_decl = 1;
+            break;
+          }
+          other = other->next;
+        }
+      }
+      if (!is_native && !already_printed && !shadowed_by_better_decl) {
         // Special-case: main with 0 params becomes int main(int, char**)
         if (strcmp(sub->name, "main") == 0 && sub->param_count == 0) {
           fprintf(out, "int main(int argc, char **argv);\n");
         } else {
           emit_c_type(sub->ret_ty, out);
-          fprintf(out, " %s(", sub->link_name ? sub->link_name : sub->name);
+          fprintf(out, " %s(", sub_emit_name);
           for (uint32_t i = 0; i < sub->param_count; i++) {
             if (sub->param_tys[i]) {
               emit_c_type(sub->param_tys[i], out);
@@ -767,6 +814,8 @@ void native_emit_module_to_file(void *subs_ptr, const char *output_path) {
             fprintf(out, "void");
           fprintf(out, ");\n");
         }
+        if (printed_symbol_count < 1024)
+          printed_symbols[printed_symbol_count++] = sub_emit_name;
       }
     }
     sub = sub->next;
