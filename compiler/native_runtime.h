@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// main.lain compiled functions (bootstrap doesn't forward-declare them)
+// Native compiler entry points
 uint32_t compile(const void *input_path, const void *output_path);
 // Legacy compatibility alias for --emit-manifest.
 uint32_t compile_manifest(const void *input_path, const void *output_path);
@@ -37,7 +37,7 @@ void *native_lex_to_sexp(void *ctx, const uint8_t *src, uint32_t len);
 void *native_init_scheme(void);
 int32_t native_run_pipeline(void *ctx, void *root_group);
 
-// codegen (codegen_c.lain wrappers call these)
+// code generation helpers
 void native_emit_module_to_file(void *subs, const char *output_path);
 void native_emit_l1_module(const char *output_path);
 void native_emit_interface(const char *output_path);

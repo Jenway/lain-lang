@@ -9,7 +9,7 @@
  *   - Top-level API functions callable from Lain via @foreign
  *
  * Linked with:
- *   - Bootstrap-compiled Lain → C code (main.lain + imports)
+ *   - Native C compiler front-end/runtime
  *   - Chibi-Scheme (libchibi)
  */
 
