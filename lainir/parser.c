@@ -10,7 +10,6 @@ typedef enum {
   TK_IDENT,
   TK_NUMBER,
   TK_STRING,
-  TK_AT,
   TK_PERCENT,
   TK_LPAREN,
   TK_RPAREN,
@@ -25,7 +24,7 @@ typedef enum {
   TK_SEMICOLON,
   TK_HASH_UNIT,
   TK_HASH_NEVER,
-  TK_KW_SUB,
+  TK_KW_PROC,
   TK_KW_EXTERN,
   TK_KW_RETURN,
   TK_KW_STORE,
@@ -35,7 +34,13 @@ typedef enum {
   TK_KW_COND_BR,
   TK_KW_BR,
   TK_KW_PRIMITIVE,
-  TK_KW_ALLOCA
+  TK_KW_ALLOCA,
+  TK_KW_FIELD,
+  TK_KW_LEA,
+  TK_KW_LOAD,
+  TK_KW_ADD,
+  TK_KW_SUB_OP,
+  TK_KW_CALL_INDIRECT
 } TokenKind;
 
 typedef struct {
@@ -82,13 +87,6 @@ static void parse_fail(Parser *p, const char *message) {
 
 static char *token_string(Token token) {
   return strndup(token.text, token.len);
-}
-
-static int token_is_ident(Token *token, const char *text) {
-  size_t len = strlen(text);
-  return token->kind == TK_IDENT &&
-         token->len == (int)len &&
-         memcmp(token->text, text, len) == 0;
 }
 
 static void parser_reset_subroutine_context(Parser *p) {
@@ -138,8 +136,10 @@ static int parser_label_id(Parser *p, const char *name) {
   return entry->id;
 }
 
-static TokenKind keyword_kind(const char *text, int len) {
-  if (len == 3 && memcmp(text, "sub", 3) == 0) return TK_KW_SUB;
+static TokenKind hash_keyword_kind(const char *text, int len) {
+  if (len == 4 && memcmp(text, "unit", 4) == 0) return TK_HASH_UNIT;
+  if (len == 5 && memcmp(text, "never", 5) == 0) return TK_HASH_NEVER;
+  if (len == 4 && memcmp(text, "proc", 4) == 0) return TK_KW_PROC;
   if (len == 6 && memcmp(text, "extern", 6) == 0) return TK_KW_EXTERN;
   if (len == 6 && memcmp(text, "return", 6) == 0) return TK_KW_RETURN;
   if (len == 5 && memcmp(text, "store", 5) == 0) return TK_KW_STORE;
@@ -150,6 +150,12 @@ static TokenKind keyword_kind(const char *text, int len) {
   if (len == 2 && memcmp(text, "br", 2) == 0) return TK_KW_BR;
   if (len == 9 && memcmp(text, "primitive", 9) == 0) return TK_KW_PRIMITIVE;
   if (len == 6 && memcmp(text, "alloca", 6) == 0) return TK_KW_ALLOCA;
+  if (len == 5 && memcmp(text, "field", 5) == 0) return TK_KW_FIELD;
+  if (len == 3 && memcmp(text, "lea", 3) == 0) return TK_KW_LEA;
+  if (len == 4 && memcmp(text, "load", 4) == 0) return TK_KW_LOAD;
+  if (len == 3 && memcmp(text, "add", 3) == 0) return TK_KW_ADD;
+  if (len == 3 && memcmp(text, "sub", 3) == 0) return TK_KW_SUB_OP;
+  if (len == 13 && memcmp(text, "call_indirect", 13) == 0) return TK_KW_CALL_INDIRECT;
   return TK_IDENT;
 }
 
@@ -211,18 +217,21 @@ static void next_token(Parser *p) {
   }
 
   if (p->src[p->pos] == '#') {
-    if (memcmp(p->src + p->pos, "#unit", 5) == 0) {
-      p->current.kind = TK_HASH_UNIT;
-      p->current.len = 5;
-      p->pos += 5;
-      return;
-    }
-    if (memcmp(p->src + p->pos, "#never", 6) == 0) {
-      p->current.kind = TK_HASH_NEVER;
-      p->current.len = 6;
-      p->pos += 6;
-      return;
-    }
+    int start;
+    TokenKind kind;
+    p->pos++;
+    if (!is_ident_start((unsigned char)p->src[p->pos]))
+      parse_fail(p, "expected identifier after `#`");
+    start = p->pos;
+    while (is_ident_char((unsigned char)p->src[p->pos]))
+      p->pos++;
+    p->current.text = p->src + start;
+    p->current.len = p->pos - start;
+    kind = hash_keyword_kind(p->current.text, p->current.len);
+    if (kind == TK_IDENT)
+      parse_fail(p, "unknown `#` keyword");
+    p->current.kind = kind;
+    return;
   }
 
   if (is_ident_start((unsigned char)p->src[p->pos])) {
@@ -231,12 +240,11 @@ static void next_token(Parser *p) {
       p->pos++;
     p->current.text = p->src + start;
     p->current.len = p->pos - start;
-    p->current.kind = keyword_kind(p->current.text, p->current.len);
+    p->current.kind = TK_IDENT;
     return;
   }
 
   switch (p->src[p->pos++]) {
-  case '@': p->current.kind = TK_AT; break;
   case '%': p->current.kind = TK_PERCENT; break;
   case '(': p->current.kind = TK_LPAREN; break;
   case ')': p->current.kind = TK_RPAREN; break;
@@ -384,7 +392,7 @@ static L1Expr *parse_percent_ref(Parser *p) {
   return expr;
 }
 
-static L1Expr *parse_special_ident_call(Parser *p, const char *name) {
+static L1Expr *parse_special_hash_call(Parser *p, TokenKind kind) {
   uint32_t count;
   L1Expr **args;
   L1Expr *expr;
@@ -393,7 +401,7 @@ static L1Expr *parse_special_ident_call(Parser *p, const char *name) {
   args = parse_expr_list(p, &count);
   expect(p, TK_RPAREN);
 
-  if (strcmp(name, "load") == 0) {
+  if (kind == TK_KW_LOAD) {
     if (count != 1)
       parse_fail(p, "load expects one operand");
     expr = lainir_new_expr(EXPR_LOAD);
@@ -402,16 +410,16 @@ static L1Expr *parse_special_ident_call(Parser *p, const char *name) {
     free(args);
     return expr;
   }
-  if (strcmp(name, "add") == 0 || strcmp(name, "sub") == 0) {
+  if (kind == TK_KW_ADD || kind == TK_KW_SUB_OP) {
     if (count != 2)
       parse_fail(p, "binary op expects two operands");
-    expr = lainir_new_expr(strcmp(name, "add") == 0 ? EXPR_ADD : EXPR_SUB);
+    expr = lainir_new_expr(kind == TK_KW_ADD ? EXPR_ADD : EXPR_SUB);
     expr->data.bin.left = args[0];
     expr->data.bin.right = args[1];
     free(args);
     return expr;
   }
-  if (strcmp(name, "call_indirect") == 0) {
+  if (kind == TK_KW_CALL_INDIRECT) {
     expr = lainir_new_expr(EXPR_CALL_INDIRECT);
     if (count == 0)
       parse_fail(p, "call_indirect expects at least one operand");
@@ -441,12 +449,6 @@ static L1Expr *parse_ident_expr(Parser *p) {
   Token token = expect(p, TK_IDENT);
   char *name = token_string(token);
   L1Expr *expr;
-
-  if (p->current.kind == TK_LPAREN) {
-    expr = parse_special_ident_call(p, name);
-    free(name);
-    return expr;
-  }
 
   expr = new_var_expr(name);
   free(name);
@@ -530,11 +532,11 @@ static L1Expr *parse_expr(Parser *p) {
   L1Expr **args;
   L1Expr *expr;
 
-  if (p->current.kind == TK_IDENT && token_is_ident(&p->current, "field")) {
+  if (p->current.kind == TK_KW_FIELD) {
     next_token(p);
     return parse_field_expr(p);
   }
-  if (p->current.kind == TK_IDENT && token_is_ident(&p->current, "lea")) {
+  if (p->current.kind == TK_KW_LEA) {
     next_token(p);
     return parse_lea_expr(p);
   }
@@ -556,7 +558,6 @@ static L1Expr *parse_expr(Parser *p) {
     return parse_percent_ref(p);
   case TK_KW_CALL:
     next_token(p);
-    expect(p, TK_AT);
     token = expect(p, TK_IDENT);
     text = token_string(token);
     expect(p, TK_LPAREN);
@@ -600,6 +601,15 @@ static L1Expr *parse_expr(Parser *p) {
     expr->data.alloca.result_ty = lainir_new_type(TY_ADDR, 64);
     expect(p, TK_RPAREN);
     return expr;
+  case TK_KW_LOAD:
+  case TK_KW_ADD:
+  case TK_KW_SUB_OP:
+  case TK_KW_CALL_INDIRECT:
+    {
+      TokenKind kind = p->current.kind;
+      next_token(p);
+      return parse_special_hash_call(p, kind);
+    }
   case TK_IDENT:
     return parse_ident_expr(p);
   default:
@@ -779,8 +789,7 @@ static L1Subroutine *parse_subroutine(Parser *p) {
   if (p->current.kind == TK_KW_EXTERN) {
     parser_reset_subroutine_context(p);
     next_token(p);
-    expect(p, TK_KW_SUB);
-    expect(p, TK_AT);
+    expect(p, TK_KW_PROC);
     name_token = expect(p, TK_IDENT);
     name = token_string(name_token);
     sub = lainir_new_subroutine(name);
@@ -796,8 +805,7 @@ static L1Subroutine *parse_subroutine(Parser *p) {
   }
 
   parser_reset_subroutine_context(p);
-  expect(p, TK_KW_SUB);
-  expect(p, TK_AT);
+  expect(p, TK_KW_PROC);
   name_token = expect(p, TK_IDENT);
   name = token_string(name_token);
   sub = lainir_new_subroutine(name);

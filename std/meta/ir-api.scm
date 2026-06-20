@@ -70,10 +70,10 @@
   (core.call-indirect! block fn-ptr ret-ty args))
 
 (define (ir.expr.alloca block element-ty byte-size)
-  (core.local-alloc! block element-ty "_alloca"))
+  (core.local-alloc! block element-ty byte-size))
 
 (define (ir.expr.field block base struct-ty field-index field-ty)
-  (core.field-offset! block struct-ty field-index "_field"))
+  (core.field-offset! block base field-index field-ty))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; 3. 指令（副作用操作）
@@ -83,7 +83,7 @@
   (core.assign-temp! block value))
 
 (define (ir.inst.store block dest value)
-  (core.store! block value dest))
+  (core.store! block dest value))
 
 (define (ir.inst.if block cond then-body else-body)
   ;; 使用现有的 begin-if!/end-if! 机制

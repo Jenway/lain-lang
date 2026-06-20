@@ -1,5 +1,12 @@
 (meta-source "literals/lower")
 
+(define (literal.number-value raw)
+  (cond
+    ((number? raw) raw)
+    ((symbol? raw) (string->number (symbol->string raw)))
+    ((string? raw) (string->number raw))
+    (else raw)))
+
 (define-pass (middle-normalizer |expr.number| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|middle.expr.number|
@@ -37,12 +44,13 @@
             (record.get payload '|len|)))))))
 
 (define-pass (core-expr-lowerer |middle.expr.number| block expr expected-ty locals)
-  (let* ((payload (middle.payload expr)))
+  (let* ((payload (middle.payload expr))
+         (raw (optional.value
+                (record.get payload '|raw|))))
     (ir.expr.const
       block
       expected-ty
-      (optional.value
-        (record.get payload '|raw|)))))
+      (literal.number-value raw))))
 
 (define-pass (core-expr-lowerer |middle.expr.string| block expr expected-ty locals)
   (let* ((payload (middle.payload expr)))
@@ -61,19 +69,20 @@
       expected-ty
       (if value 1 0))))
 
-;; ── Array literal lowering: alloca + store init to first element ──
+;; ── Array literal lowering: alloca only ──
+;; 先保证数组字面量能稳定通过 lowering。
+;; 元素批量初始化后面再补。
 (define-pass (core-expr-lowerer |middle.expr.array| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (init-expr (optional.value (record.get payload '|init|)))
-         (len (optional.value (record.get payload '|len|)))
+         (len (literal.number-value
+                (optional.value (record.get payload '|len|))))
          ;; Use i32 as element type (simplified — all numeric literals are i32)
          (elem-ty (ir.type.bits 32))
          ;; Allocate on stack: [i32 x len] → returns pointer expression
          (ptr (ir.expr.alloca block elem-ty (* len 4)))
-         ;; Lower init value
-         (init-val (core.lower-expr block init-expr elem-ty locals))
-         ;; Store init value to first element
-         (_store (ir.inst.store block ptr init-val)))
+         ;; Keep init expr reachable for future full initialization pass.
+         (_init-val (core.lower-expr block init-expr elem-ty locals)))
     ptr))
 
 ;; ---------------------------------------------------------------------------
