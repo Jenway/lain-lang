@@ -95,3 +95,4 @@
 (load "std/meta/build/sort.scm")
 (load "std/meta/literals/lower.scm")
 (load "std/meta/io/println.scm")
+(load "std/meta/compile.scm")
