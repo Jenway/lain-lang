@@ -48,3 +48,6 @@ The current module design follows these rules:
 
 See [docs/module-rfc-01.md](docs/module-rfc-01.md) for the concrete module
 direction.
+
+The current compiler boundary is described in
+[docs/compiler-design.md](docs/compiler-design.md).
