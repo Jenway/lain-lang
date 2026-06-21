@@ -115,3 +115,42 @@
                          (record.field '|name| (optional.value name))
                          (record.field '|type| ty)))))
           (pub.struct-parse-fields cursor (list.cons field acc))))))
+
+
+;; ── comptime fn ──
+;; comptime fn name<T>(params) -> ret { body }
+;; 语法等同于 fn，但 payload 带 |comptime| 标记，调用时走 #eval
+(define-pass (form-parser |comptime| form)
+  (let* ((cursor (syntax.form-cursor form))
+         ;; 消费 comptime 关键字
+         (_comptime (syntax.cursor-expect-ident! cursor))
+         ;; 下一个必须是 fn
+         (_fn (syntax.cursor-expect-ident! cursor))
+         (_ (if (not (symbol=? _fn '|fn|))
+                (error "comptime must be followed by fn, got: " _fn)
+                unit))
+         (attrs (parse-attrs cursor (list)))
+         (name (syntax.cursor-expect-ident! cursor))
+         (generics (parse-generic-params cursor))
+         (params (parse-params (syntax.cursor-expect-group! cursor '|paren|)))
+         (arrow (syntax.cursor-match-punct! cursor '|->|))
+         (ret (if (optional.some? arrow)
+                  (parse-type cursor)
+                  (lain-quote '(type-unit))))
+         (effects (parse-optional-effects cursor))
+         (where (parse-where cursor))
+         (body (parse-optional-fn-body cursor))
+         (_eof (syntax.cursor-expect-eof! cursor))
+         ;; 和普通 fn 相同，但加入 |comptime| #t 标记
+         (sig-payload (record '|fn.sig|
+                        (record.field '|comptime| #t)
+                        (record.field '|attrs| attrs) (record.field '|generics| generics)
+                        (record.field '|params| params) (record.field '|return| ret)
+                        (record.field '|where| where) (record.field '|effects| effects)
+                        (record.field '|body| body)))
+         (unified (raw.node! '|let|
+                    (record '|let|
+                      (record.field '|name| name)
+                      (record.field '|type-kind| '|fn|)
+                      (record.field '|payload| sig-payload)))))
+    (if (fn.cfg-enabled? attrs) (decl.define-dup-checked! '|let| name unified) unit)))

@@ -186,6 +186,8 @@ static sexp sexp_read_interface(sexp ctx, sexp self, sexp_sint_t n,
 // Scans source files for `import <path>;` statements using string matching,
 // then does topological sort in C. Returns a Scheme list of file paths.
 
+
+
 static sexp sexp_build_compute_order(sexp ctx, sexp self, sexp_sint_t n,
                                       sexp arg_root_path) {
   const char *root_path = sexp_string_data(arg_root_path);
@@ -558,6 +560,7 @@ void native_register_core_ffi(
   REG("core.mark-export!", 1, sexp_core_mark_export);
   REG("core.emit-interface!", 1, sexp_core_emit_interface);
   REG("core.execute-lainir!", 2, sexp_core_execute_lainir);
+  REG("core.eval!", 3, sexp_core_eval);
 #undef REG
 }
 

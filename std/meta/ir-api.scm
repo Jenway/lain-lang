@@ -65,6 +65,10 @@
   ;; fn 是已解析的函数对象（非名字），直接传给 core.call!
   (core.call! block fn args))
 
+(define (ir.expr.eval block fn args . rest)
+  ;; 编译时求值 — fn 是已解析的函数对象，直接传给 core.eval!
+  (core.eval! block fn args))
+
 (define (ir.expr.call-indirect block fn-ptr ret-ty param-tys args)
   ;; 用 core.primitive! 间接调用
   (core.call-indirect! block fn-ptr ret-ty args))

@@ -143,6 +143,15 @@
         (ir.sub.by-name imported)
         (core.local-lookup locals (core.path-leaf path)))))
 
+
+;; Helper: dispatch to ir.expr.eval for comptime fns, ir.expr.call otherwise
+(define (core.call-or-eval block fn-name function args locals)
+  (if (comptime? fn-name)
+      (ir.expr.eval block function
+        (core.lower-args block args (ir.sub.params function) locals (list)))
+      (ir.expr.call block function
+        (core.lower-args block args (ir.sub.params function) locals (list)))))
+
 (define-pass (core-expr-lowerer |middle.expr.call| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (callee (optional.value
@@ -160,15 +169,7 @@
         (if (optional.some? intrinsic)
             ((optional.value intrinsic) block args expected-ty locals)
             (let* ((function (ir.sub.by-name fn-name)))
-              (ir.expr.call
-                block
-                function
-                (core.lower-args
-                  block
-                  args
-                  (ir.sub.params function)
-                  locals
-                  (list)))))))))
+              (core.call-or-eval block fn-name function args locals)))))))
 
 (define-pass (core-expr-lowerer |middle.expr.method-call| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
