@@ -465,6 +465,39 @@ static sexp sexp_core_call(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,
   inst->next = NULL;
   append_instruction(g_current_sub, inst);
 
+  // Also mark as EXPR_EVAL for compile-time interpretation
+  L1Instruction *eval_inst = malloc(sizeof(L1Instruction));
+  eval_inst->kind = INST_CALL;
+  eval_inst->data.call_inst.expr = expr;
+  eval_inst->next = NULL;
+  append_instruction(g_current_sub, eval_inst);
+
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
+}
+
+static sexp sexp_core_eval(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,
+                           sexp arg_fn, sexp arg_args) {
+  L1Subroutine *sub = (L1Subroutine *)sexp_cpointer_value(arg_fn);
+  uint32_t arg_count = get_list_length(arg_args);
+  L1Expr **args = malloc(sizeof(L1Expr *) * arg_count);
+  sexp curr = arg_args;
+  for (uint32_t i = 0; i < arg_count; i++) {
+    args[i] = (L1Expr *)sexp_cpointer_value(sexp_car(curr));
+    curr = sexp_cdr(curr);
+  }
+  L1Expr *expr = malloc(sizeof(L1Expr));
+  expr->kind = EXPR_EVAL;
+  expr->data.eval.fn_name = strdup(sub->link_name ? sub->link_name : sub->name);
+  expr->data.eval.args = args;
+  expr->data.eval.arg_count = arg_count;
+  expr->data.eval.ret_ty = sub->ret_ty;
+
+  L1Instruction *inst = malloc(sizeof(L1Instruction));
+  inst->kind = INST_CALL;
+  inst->data.call_inst.expr = expr;
+  inst->next = NULL;
+  append_instruction(g_current_sub, inst);
+
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
 }
 

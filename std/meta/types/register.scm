@@ -12,6 +12,9 @@
 (register-type-constructor! '|addr| 0 '(alias addr))
 (register-string-literal-type! '|addr|)
 
+(register-type-ctor! '|CStr| 0)
+(register-type-constructor! '|CStr| 0 '(alias addr))
+
 (register-type-ctor! '|Ordering| 0)
 (register-type-constructor! '|Ordering| 0 '(alias bits 8))
 (register-memory-ordering-type! '|Ordering|)

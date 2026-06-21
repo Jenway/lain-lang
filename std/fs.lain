@@ -1,0 +1,51 @@
+// std/fs.lain — Filesystem operations
+// POSIX open/read/write/close via @foreign(c)
+
+import std::alloc;
+import std::mem;
+import std::result;
+import std::slice;
+import std::string;
+
+// ── File descriptor primitives ──
+
+@foreign(c, link_name = "open")
+pub fn fs_open(path: CStr, flags: i32, mode: i32) -> i32 ! {IO};
+
+@foreign(c, link_name = "read")
+pub fn fs_read(fd: i32, buf: addr, count: usize) -> i32 ! {IO};
+
+@foreign(c, link_name = "write")
+pub fn fs_write(fd: i32, buf: addr, count: usize) -> i32 ! {IO};
+
+@foreign(c, link_name = "close")
+pub fn fs_close(fd: i32) -> i32 ! {IO};
+
+// ── Convenience: read entire file ──
+
+pub fn read_to_string(path: CStr) -> Result<String, i32> ! {IO, Alloc, RawPtrWrite} {
+    let fd = fs_open(path, 0, 0);
+    if fd < 0 {
+        return Result::Err(fd);
+    } else {};
+
+    let mut content = String::new();
+    let buf_size: usize = 4096;
+    let buf = malloc(buf_size);
+
+    let mut n = fs_read(fd, buf, buf_size);
+    while n > 0 {
+        let chunk = slice_from_raw_parts<u8>(buf, i32_to_usize(n));
+        content.push(chunk);
+        n = fs_read(fd, buf, buf_size);
+    };
+
+    fs_close(fd);
+    free(buf);
+
+    if n < 0 {
+        Result::Err(n)
+    } else {
+        Result::Ok(content)
+    }
+}

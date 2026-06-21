@@ -64,6 +64,8 @@
         (record.field '|params| (middle.normalize-params raw-params (list)))
         (record.field '|return| (middle.normalize-type (optional.value (record.get payload '|return|))))
         (record.field '|effects| (optional.value (record.get payload '|effects|)))
+        (record.field '|comptime| (let ((f (record.get payload '|comptime|)))
+                               (if (optional.some? f) (optional.value f) #f)))
         (record.field '|body| (middle.normalize-optional-body (optional.value (record.get payload '|body|))))))))
 
 ;; fn.normalize 保留为纯函数，供 let/normalize.scm 中的统一分发器调用

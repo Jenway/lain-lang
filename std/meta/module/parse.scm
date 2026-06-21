@@ -161,8 +161,11 @@
 (define (module.declare-export-names names)
   (if (list.empty? names)
       unit
-      (begin
-        (core.mark-export! (list.first names))
+      (let* ((name (list.first names)))
+        ;; Mark as export for the interface emitter.
+        ;; Link_name is set by @foreign(c) or pub fn; the .lci emitter
+        ;; auto-generates one for non-pub exported fns that lack it.
+        (core.mark-export! name)
         (module.declare-export-names (list.rest names)))))
 
 (define-pass (core-declarer |middle.export| item)

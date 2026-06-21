@@ -159,14 +159,10 @@
           (loop (cdr segments) new-acc)))))
 
 (define (import.export-leaf-name mangled-name)
-  (let* ((mangled-str (symbol->string mangled-name))
-         (underscore-idx (import.string-first-index mangled-str #\_)))
-    (if (or (not underscore-idx) (= underscore-idx 0))
-        mangled-name
-        (string->symbol
-          (substring mangled-str
-                     (+ underscore-idx 1)
-                     (string-length mangled-str))))))
+  ;; Returns the name as-is. The caller-side leaf lookup uses
+  ;; import.path-tail-symbol which joins the path segments with "_",
+  ;; matching the .lci name field convention (moduleprefix_fnname).
+  mangled-name)
 
 (define (import.binding-exports exports acc)
   (if (null? exports)
@@ -288,28 +284,37 @@
             (interface.declare-exports! exports path))))))
 
 ;; Derive the caller-side function name from import path + mangled name.
-;; The interface exports mangled names like "math_add" (prefix from source file).
-;; The caller expects names like "simple_math_add" (import path joined with _).
-;; We register BOTH: name=caller_name, link_name=mangled_C_name.
-;; This makes both simple_math_add(1, 2) and the actual C symbol math_add work.
+;; The interface exports mangled names like "fs_read" (moduleprefix_functionname).
+;; The caller expects names like "std_fs_read" (import path joined with _).
+;; We strip the source module prefix (last path segment + "_") and replace it
+;; with the full import path prefix.
+;; If the export name doesn't start with the module prefix, we prepend the
+;; path prefix to the full export name.
 (define (import.caller-fn-name import-path mangled-name)
-  ;; Extract the basename of the mangled function (after the module prefix).
-  ;; e.g., "math_add" → base = "add"
-  ;; Then prepend the import path prefix: (simple math) → "simple_math_"
   (let* ((mangled-str (symbol->string mangled-name))
          (path-prefix (import.path-prefix-string import-path))
-         ;; Find the FIRST underscore to split module prefix from function name.
-         ;; Mangling format: moduleprefix_functionname (e.g., io_read_and_lex).
-         ;; The function name may itself contain underscores, so we split at
-         ;; the FIRST underscore, not the last.
-         (underscore-idx (import.string-first-index mangled-str #\_)))
-    (if (or (not underscore-idx) (= underscore-idx 0))
-        ;; No underscore — just prepend path prefix
-        (string->symbol (string-append path-prefix mangled-str))
-        ;; Split: everything before first _ is the module prefix, after is the fn name
-        (let* ((base-name (substring mangled-str (+ underscore-idx 1)
+         ;; Source module prefix = last import-path segment + "_"
+         (source-module-str (if (null? import-path)
+                                ""
+                                (symbol->string (import.path-last-segment import-path))))
+         (source-prefix (if (string=? source-module-str "")
+                            ""
+                            (string-append source-module-str "_")))
+         (source-prefix-len (string-length source-prefix)))
+    (if (and (> source-prefix-len 0)
+             (>= (string-length mangled-str) source-prefix-len)
+             (string=? (substring mangled-str 0 source-prefix-len) source-prefix))
+        ;; Export name starts with module prefix — strip it, use path prefix
+        (let* ((base-name (substring mangled-str source-prefix-len
                                      (string-length mangled-str))))
-          (string->symbol (string-append path-prefix base-name))))))
+          (string->symbol (string-append path-prefix base-name)))
+        ;; Export name doesn't match — just prepend path prefix
+        (string->symbol (string-append path-prefix mangled-str)))))
+
+(define (import.path-last-segment path)
+  (if (null? (cdr path))
+      (car path)
+      (import.path-last-segment (cdr path))))
 
 (define (import.path-prefix-string path)
   ;; Convert import path (simple math) to "simple_math_"

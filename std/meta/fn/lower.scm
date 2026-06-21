@@ -1,5 +1,20 @@
 (meta-source "fn/lower")
 
+;; ── Comptime function registry ──
+(define *comptime-fns* (list))
+
+(define (comptime-register! name)
+  (if (not (comptime? name))
+      (set! *comptime-fns* (cons name *comptime-fns*))
+      unit))
+
+(define (comptime? name)
+  (let loop ((fns *comptime-fns*))
+    (if (null? fns) #f
+        (if (symbol=? (car fns) name) #t
+            (loop (cdr fns))))))
+
+
 (define (fn.attr-named-string args name fallback)
   (if (list.empty? args) fallback
       (let* ((arg (list.first args)) (kind (raw.kind arg)) (payload (raw.payload arg)))
@@ -130,6 +145,11 @@
                (effects-opt (record.get payload '|effects|))
                ;; Validate effects before lowering
                (_ (validate-effects! effects-opt))
+               ;; Register comptime function
+               (_ (let ((comptime-flag (record.get payload '|comptime|)))
+                    (if (and (optional.some? comptime-flag) (optional.value comptime-flag))
+                        (comptime-register! name)
+                        unit)))
                (effects (optional.value effects-opt))
                (raw-ret (core.lower-type (optional.value (record.get payload '|return|))))
                ;; Phase 4: any declared effect wraps return in a product

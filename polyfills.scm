@@ -117,6 +117,14 @@
 (define (host.read-interface path)
   (core.read-interface! path))
 
+;; ═══ 12. Interpreter capability bridges ═══
+;; These names must match the link_name used in @foreign(c) declarations
+;; for comptime fns. The L1 interpreter routes extern calls through
+;; scheme_host_call, which looks up the procedure by link_name in the
+;; Scheme global environment.
+
+(define read_file_string core.read-file-string!)
+
 ;; ═══ 12. core.* Scheme polyfills (non-FFI) ═══
 (define (core.invoke-intrinsic! name) #f)
 (define (core.empty-effects) 'empty-effects)
