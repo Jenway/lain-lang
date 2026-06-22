@@ -93,6 +93,24 @@
                       (record.field '|payload| inner-payload)))))
     (decl.define-dup-checked! '|let| name unified)))
 
+;; ── expr binding: let name = <expr>; ──
+;; RHS is not import/signature/module/path — parse as expression.
+;; The expression will be comptime-evaluated during lowering.
+(define (module.parse-expr-binding cursor attrs name saved-index)
+  (syntax.cursor-set-index! cursor saved-index)
+  (let* ((expr (syntax.parse-expr cursor))
+         (_semi (syntax.cursor-match-punct! cursor '|;|))
+         (_eof (syntax.cursor-expect-eof! cursor))
+         (inner-payload (record '|expr.binding|
+                          (record.field '|attrs| attrs)
+                          (record.field '|value| expr)))
+         (unified (raw.node! '|let|
+                    (record '|let|
+                      (record.field '|name| name)
+                      (record.field '|type-kind| '|expr-binding|)
+                      (record.field '|payload| inner-payload)))))
+    (decl.define-dup-checked! '|let| name unified)))
+
 (define-pass (form-parser |let| form)
   (let* ((cursor (syntax.form-cursor form))
          (attrs (syntax.parse-attrs cursor (list)))
@@ -102,7 +120,9 @@
          (rhs-saved (syntax.cursor-get-index cursor))
          (rhs (syntax.cursor-match-ident! cursor)))
     (if (optional.none? rhs)
-        (error "top-level let currently supports import/module/signature bindings only")
+        ;; RHS is not an identifier — parse as a general expression.
+        ;; Handles: let x = 42;  let y = 40 + 2;  let z = f();
+        (module.parse-expr-binding cursor attrs name rhs-saved)
         (let* ((rhs-name (optional.value rhs)))
           (cond
             ((symbol=? rhs-name '|import|)
@@ -111,6 +131,11 @@
              (module.parse-signature-binding cursor attrs name))
             ((symbol=? rhs-name '|module|)
              (module.parse-module-binding cursor attrs name))
+            ;; Bool literals: let x = true; / let x = false;
+            ((symbol=? rhs-name '|true|)
+             (module.parse-expr-binding cursor attrs name rhs-saved))
+            ((symbol=? rhs-name '|false|)
+             (module.parse-expr-binding cursor attrs name rhs-saved))
             (else
              (module.parse-meta-alias-binding cursor attrs name rhs-saved)))))))
 
