@@ -66,6 +66,14 @@
       ;; ── impl ──
       ((symbol=? type-kind '|impl|)
        (middle.normalize-plain-item name inner-payload '|middle.impl|))
+      ;; ── expr binding: let name = <expr>; ──
+      ((symbol=? type-kind '|expr-binding|)
+       (let* ((value-raw (optional.value (record.get inner-payload '|value|)))
+              (value-middle (middle.normalize-expr value-raw)))
+         (middle.node! '|middle.let-binding|
+           (record '|middle.let-binding|
+             (record.field '|name| name)
+             (record.field '|value| value-middle)))))
       ;; ── unknown ──
       (else
        (type.unsupported '|unknown-let-type|)))))

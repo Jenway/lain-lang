@@ -141,7 +141,14 @@
          (imported (import.resolve-qualified-symbol path)))
     (if imported
         (ir.sub.by-name imported)
-        (core.local-lookup locals (core.path-leaf path)))))
+        ;; Check compile-time constant table for top-level let bindings
+        (let* ((leaf (core.path-leaf path))
+               (const (const.lookup leaf)))
+          (if const
+              (let* ((const-ty (cadr const))
+                     (const-val (caddr const)))
+                (ir.expr.const block const-ty const-val))
+              (core.local-lookup locals leaf))))))
 
 
 ;; Helper: dispatch to ir.expr.eval for comptime fns, ir.expr.call otherwise

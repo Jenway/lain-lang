@@ -229,3 +229,65 @@
             (propagate.validate-collected! collected declared-names name))))))
 
 (define-pass (core-type-lowerer |middle.ty.fn| ty) (type.unsupported (middle.kind ty)))
+
+;; ═══════════════════════════════════════════════════════════════════════════
+;; Compile-time constant table — for top-level let x = <expr>;
+;; ═══════════════════════════════════════════════════════════════════════════
+
+(define *const-table* (list))
+
+(define (const.register! name type val)
+  (set! *const-table* (cons (list name type val) *const-table*)))
+
+(define (const.lookup name)
+  (let loop ((table *const-table*))
+    (if (null? table)
+        #f
+        (let* ((entry (car table)))
+          (if (symbol=? (car entry) name)
+              entry
+              (loop (cdr table)))))))
+
+;; Evaluate a middle expression to a constant value at compile time.
+;; Returns (type . value) pair, or #f if not evaluable.
+(define (const.eval-expr expr)
+  (let* ((kind (middle.kind expr))
+         (payload (middle.payload expr)))
+    (cond
+      ((symbol=? kind '|middle.expr.number|)
+       (let* ((raw (optional.value (record.get payload '|raw|)))
+              (val (literal.number-value raw))
+              (ty (ir.type.bits 32)))
+         (cons ty val)))
+      ((symbol=? kind '|middle.expr.bool|)
+       (let* ((val (optional.value (record.get payload '|value|)))
+              (ty (ir.type.bits 1)))
+         (cons ty (if val 1 0))))
+      ((symbol=? kind '|middle.expr.path|)
+       ;; Look up another compile-time constant by name
+       (let* ((path (optional.value (record.get payload '|path|)))
+              (leaf (if (list.empty? (list.rest path))
+                        (list.first path)
+                        #f)))
+         (if leaf
+             (let* ((entry (const.lookup leaf)))
+               (if entry
+                   (cons (cadr entry) (caddr entry))
+                   #f))
+             #f)))
+      (else #f))))
+
+(define-pass (core-declarer |middle.let-binding| item)
+  ;; Register the name as a known binding but don't create IR sub.
+  ;; The actual value is computed during lowering.
+  unit)
+
+(define-pass (core-lowerer |middle.let-binding| item)
+  (let* ((payload (middle.payload item))
+         (name (optional.value (record.get payload '|name|)))
+         (value-expr (optional.value (record.get payload '|value|)))
+         (evaled (const.eval-expr value-expr)))
+    (if evaled
+        (const.register! name (car evaled) (cdr evaled))
+        (error (string-append "unsupported let binding expression for: "
+                              (symbol->string name))))))
