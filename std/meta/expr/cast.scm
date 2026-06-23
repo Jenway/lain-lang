@@ -10,8 +10,8 @@
   (let* ((payload (raw.payload raw-expr))
          (inner (optional.value (record.get payload '|expr|)))
          (target-ty (optional.value (record.get payload '|ty|))))
-    (middle.node! '|middle.expr.cast|
-      (record '|middle.expr.cast|
+    (middle.node! '|cast.as|
+      (record '|cast.as|
         (record.field '|expr| (middle.normalize-expr inner))
         (record.field '|target| (middle.normalize-type target-ty))))))
 
@@ -20,9 +20,9 @@
 ;; 判断 normalized type 是否是 addr 类（&T, opaque, struct, raw-ptr）
 (define (norm-type-is-addr? norm-ty)
   (let ((kind (middle.kind norm-ty)))
-    (or (symbol=? kind '|middle.ty.ref|)
-        (symbol=? kind '|middle.ty.raw-ptr|)
-        (and (symbol=? kind '|middle.ty.path|)
+    (or (symbol=? kind '|types.ref|)
+        (symbol=? kind '|types.raw-ptr|)
+        (and (symbol=? kind '|types.path|)
              (let* ((payload (middle.payload norm-ty))
                     (name (optional.value (record.get payload '|name|))))
                (or (symbol=? name '|addr|)
@@ -34,7 +34,7 @@
 (define (type-to-cpointer lowered-ty)
   (if (struct-type? lowered-ty) (type.addr) lowered-ty))
 
-(define-pass (core-expr-lowerer |middle.expr.cast| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |cast.as| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (inner (optional.value (record.get payload '|expr|)))
          (target-norm-ty (optional.value (record.get payload '|target|)))
@@ -57,7 +57,7 @@
 
 ;; ── 类型推导: 返回目标类型 ──
 
-(define-pass (core-expr-inferer |middle.expr.cast| expr locals)
+(define-pass (core-expr-inferer |cast.as| expr locals)
   (let* ((payload (middle.payload expr))
          (target (optional.value (record.get payload '|target|))))
     (core.lower-type target)))

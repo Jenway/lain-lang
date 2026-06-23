@@ -26,10 +26,10 @@
 
 ;; Map L1 type names (addr, i32, u8, etc.) to lowered L1Type* cpointers
 (define (interface.type-name->lowered ty-name)
-  ;; Create a middle.ty.path node and lower it
+  ;; Create a types.path node and lower it
   (core.lower-type
-    (middle.node! '|middle.ty.path|
-      (record '|middle.ty.path|
+    (middle.node! '|types.path|
+      (record '|types.path|
         (record.field '|name| ty-name)))))
 
 ;; ── Helper: walk interface S-expr and extract fn exports ──

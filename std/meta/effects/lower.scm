@@ -23,10 +23,10 @@
 ;; ── Helper: check if expr is an effect expression ──
 (define (core.is-effect-expr? expr)
   (let* ((kind (middle.kind expr)))
-    (or (symbol=? kind '|middle.expr.perform|)
-        (symbol=? kind '|middle.expr.resume|)
-        (symbol=? kind '|middle.expr.handle|)
-        (symbol=? kind '|middle.expr.question|))))
+    (or (symbol=? kind '|effects.perform|)
+        (symbol=? kind '|effects.resume|)
+        (symbol=? kind '|effects.handle|)
+        (symbol=? kind '|operators.question|))))
 
 ;; ── Helper: check if index is in a list (manual member) ──
 (define (effect.index-in-list? idx lst)
@@ -46,7 +46,7 @@
             (loop (cdr remaining) (+ pos 1))))))
 
 ;; ── perform lowering: unified via effect.lookup-layout ──
-(define-pass (core-expr-lowerer |middle.expr.perform| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |effects.perform| block expr expected-ty locals)
   (let* ((info (perform.extract-effect-info expr)))
     (if (not info)
         (core.unsupported-expr '|perform-bad-format|)
@@ -84,8 +84,8 @@
                                         (core.const-bits! block field-ty 0))))))
                         (build (+ i 1) (cons (cons offset val) field-pairs)))))))))))
 
-(define-pass (core-expr-lowerer |middle.expr.resume| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |effects.resume| block expr expected-ty locals)
   (core.unsupported-expr '|resume-expression|))
 
-(define-pass (core-expr-lowerer |middle.expr.handle| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |effects.handle| block expr expected-ty locals)
   (core.unsupported-expr '|handle-expression|))

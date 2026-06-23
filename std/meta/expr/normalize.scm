@@ -7,16 +7,16 @@
 
 (define-pass (middle-normalizer |expr.path| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.path|
-      (record '|middle.expr.path|
+    (middle.node! '|path.access|
+      (record '|path.access|
         (record.field '|path|
           (optional.value
             (record.get payload '|path|)))))))
 
 (define-pass (middle-normalizer |expr.call| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.call|
-      (record '|middle.expr.call|
+    (middle.node! '|call.fn|
+      (record '|call.fn|
         (record.field '|callee|
           (middle.normalize-expr
             (optional.value
@@ -36,8 +36,8 @@
 
 (define-pass (middle-normalizer |expr.method-call| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.method-call|
-      (record '|middle.expr.method-call|
+    (middle.node! '|call.method|
+      (record '|call.method|
         (record.field '|receiver|
           (middle.normalize-expr
             (optional.value
@@ -53,8 +53,8 @@
 
 (define-pass (middle-normalizer |expr.builtin| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.builtin|
-      (record '|middle.expr.builtin|
+    (middle.node! '|call.builtin|
+      (record '|call.builtin|
         (record.field '|name|
           (optional.value
             (record.get payload '|name|)))
@@ -66,8 +66,8 @@
 
 (define-pass (middle-normalizer |expr.tail-call| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.tail-call|
-      (record '|middle.expr.tail-call|
+    (middle.node! '|call.tail|
+      (record '|call.tail|
         (record.field '|call|
           (middle.normalize-expr
             (optional.value
@@ -86,8 +86,8 @@
 
 (define-pass (middle-normalizer |expr.call-indirect| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.call-indirect|
-      (record '|middle.expr.call-indirect|
+    (middle.node! '|call.indirect|
+      (record '|call.indirect|
         (record.field '|fn-ptr|
           (middle.normalize-expr
             (optional.value
@@ -105,8 +105,8 @@
 ;; ── ? 操作符规范化 (postfix ?) ──
 (define-pass (middle-normalizer |expr.question| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.question|
-      (record '|middle.expr.question|
+    (middle.node! '|operators.question|
+      (record '|operators.question|
         (record.field '|expr|
           (middle.normalize-expr
             (optional.value

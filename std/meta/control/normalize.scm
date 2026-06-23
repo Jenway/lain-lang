@@ -14,17 +14,17 @@
   (let* ((kind (raw.kind raw-stmt)) (payload (raw.payload raw-stmt)))
     (cond
       ((symbol=? kind '|stmt.return|)
-       (middle.node! '|middle.stmt.return| (record '|middle.stmt.return|
+       (middle.node! '|control.return| (record '|control.return|
          (record.field '|value| (let* ((value (optional.value (record.get payload '|value|))))
            (if (optional.none? value) (optional.none) (optional.some (middle.normalize-expr (optional.value value)))))))))
       ((symbol=? kind '|stmt.tail|)
-       (middle.node! '|middle.stmt.tail| (record '|middle.stmt.tail|
+       (middle.node! '|control.tail| (record '|control.tail|
          (record.field '|expr| (middle.normalize-expr (optional.value (record.get payload '|expr|)))))))
       ((symbol=? kind '|stmt.expr|)
-       (middle.node! '|middle.stmt.expr| (record '|middle.stmt.expr|
+       (middle.node! '|control.expr| (record '|control.expr|
          (record.field '|expr| (middle.normalize-expr (optional.value (record.get payload '|expr|)))))))
       ((symbol=? kind '|stmt.let|)
-       (middle.node! '|middle.stmt.let| (record '|middle.stmt.let|
+       (middle.node! '|let.bind| (record '|let.bind|
          (record.field '|mutable| (optional.value (record.get payload '|mutable|)))
          (record.field '|shared| (let* ((shared (record.get payload '|shared|))) (if (optional.none? shared) #f (optional.value shared))))
          (record.field '|name| (optional.value (record.get payload '|name|)))
@@ -32,7 +32,7 @@
            (if (optional.none? ty) (optional.none) (optional.some (middle.normalize-type (optional.value ty))))))
          (record.field '|value| (middle.normalize-expr (optional.value (record.get payload '|value|)))))))
       ((symbol=? kind '|stmt.assign|)
-       (middle.node! '|middle.stmt.assign| (record '|middle.stmt.assign|
+       (middle.node! '|stmt.assign| (record '|stmt.assign|
          (record.field '|target| (middle.normalize-expr (optional.value (record.get payload '|target|))))
          (record.field '|value| (middle.normalize-expr (optional.value (record.get payload '|value|)))))))
       (else (middle.node! '|middle.stmt.unknown| (record '|middle.stmt.unknown| (record.field '|raw-kind| kind)))))))
@@ -41,8 +41,8 @@
 
 (define-pass (middle-normalizer |expr.if| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.if|
-      (record '|middle.expr.if|
+    (middle.node! '|control.if|
+      (record '|control.if|
         (record.field '|condition|
           (middle.normalize-expr
             (optional.value

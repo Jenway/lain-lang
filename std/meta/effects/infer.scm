@@ -5,11 +5,11 @@
 ;; 当前均为 unsupported stub
 ;; ═══════════════════════════════════════════════════════════
 
-(define-pass (core-expr-inferer |middle.expr.perform| expr locals)
+(define-pass (core-expr-inferer |effects.perform| expr locals)
   (type.unsupported '|perform-expression-type|))
 
-(define-pass (core-expr-inferer |middle.expr.resume| expr locals)
+(define-pass (core-expr-inferer |effects.resume| expr locals)
   (type.unsupported '|resume-expression-type|))
 
-(define-pass (core-expr-inferer |middle.expr.handle| expr locals)
+(define-pass (core-expr-inferer |effects.handle| expr locals)
   (type.unsupported '|handle-expression-type|))

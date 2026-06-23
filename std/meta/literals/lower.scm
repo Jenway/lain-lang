@@ -9,24 +9,24 @@
 
 (define-pass (middle-normalizer |expr.number| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.number|
-      (record '|middle.expr.number|
+    (middle.node! '|literals.number|
+      (record '|literals.number|
         (record.field '|raw|
           (optional.value
             (record.get payload '|raw|)))))))
 
 (define-pass (middle-normalizer |expr.string| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.string|
-      (record '|middle.expr.string|
+    (middle.node! '|literals.string|
+      (record '|literals.string|
         (record.field '|raw|
           (optional.value
             (record.get payload '|raw|)))))))
 
 (define-pass (middle-normalizer |expr.bool| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.bool|
-      (record '|middle.expr.bool|
+    (middle.node! '|literals.bool|
+      (record '|literals.bool|
         (record.field '|value|
           (optional.value
             (record.get payload '|value|)))))))
@@ -34,8 +34,8 @@
 ;; ── Array literal: [init; N] ──
 (define-pass (middle-normalizer |expr.array| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.array|
-      (record '|middle.expr.array|
+    (middle.node! '|literals.array|
+      (record '|literals.array|
         (record.field '|init|
           (optional.value
             (record.get payload '|init|)))
@@ -43,7 +43,7 @@
           (optional.value
             (record.get payload '|len|)))))))
 
-(define-pass (core-expr-lowerer |middle.expr.number| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |literals.number| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (raw (optional.value
                 (record.get payload '|raw|))))
@@ -52,7 +52,7 @@
       expected-ty
       (literal.number-value raw))))
 
-(define-pass (core-expr-lowerer |middle.expr.string| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |literals.string| block expr expected-ty locals)
   (let* ((payload (middle.payload expr)))
     (core.const-string!
       block
@@ -60,7 +60,7 @@
       (optional.value
         (record.get payload '|raw|)))))
 
-(define-pass (core-expr-lowerer |middle.expr.bool| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |literals.bool| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (value (optional.value
                   (record.get payload '|value|))))
@@ -72,7 +72,7 @@
 ;; ── Array literal lowering: alloca only ──
 ;; 先保证数组字面量能稳定通过 lowering。
 ;; 元素批量初始化后面再补。
-(define-pass (core-expr-lowerer |middle.expr.array| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |literals.array| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (init-expr (optional.value (record.get payload '|init|)))
          (len (literal.number-value
@@ -89,14 +89,14 @@
 ;; 表达式类型推导: 字面量类型
 ;; ---------------------------------------------------------------------------
 
-(define-pass (core-expr-inferer |middle.expr.bool| expr locals)
+(define-pass (core-expr-inferer |literals.bool| expr locals)
   (type.registered '|bool| (list)))
 
-(define-pass (core-expr-inferer |middle.expr.string| expr locals)
+(define-pass (core-expr-inferer |literals.string| expr locals)
   (type.registered '|addr| (list)))
 
-(define-pass (core-expr-inferer |middle.expr.number| expr locals)
+(define-pass (core-expr-inferer |literals.number| expr locals)
   (type.unsupported '|inferred-expression-type|))
 
-(define-pass (core-expr-inferer |middle.expr.array| expr locals)
+(define-pass (core-expr-inferer |literals.array| expr locals)
   (type.registered '|addr| (list)))

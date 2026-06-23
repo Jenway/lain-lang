@@ -134,10 +134,10 @@
 
 ;; ── core-expr-lowerer 通道 ──
 
-;; pass: core-expr-lowerer |middle.expr.path|
+;; pass: core-expr-lowerer |path.access|
 ;; reads: compiler-state.const-table (via const-table.lookup)
 ;; calls: import.resolve-qualified-symbol, core.local-lookup, core.const-bits!
-(define-pass (core-expr-lowerer |middle.expr.path| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |path.access| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (path (optional.value
                  (record.get payload '|path|)))
@@ -165,7 +165,7 @@
       (core.call! block function
         (core.lower-args block args (core.function-param-types function) locals (list)))))
 
-(define-pass (core-expr-lowerer |middle.expr.call| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |call.fn| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (callee (optional.value
                    (record.get payload '|callee|)))
@@ -184,7 +184,7 @@
             (let* ((function (core.function-by-name fn-name)))
               (core.call-or-eval block fn-name function args locals)))))))
 
-(define-pass (core-expr-lowerer |middle.expr.method-call| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |call.method| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (receiver (optional.value
                      (record.get payload '|receiver|)))
@@ -232,7 +232,7 @@
        (let* ((receiver-kind (middle.kind receiver)))
          (cond
            ;; 接收者不是变量路径 — 静态分发
-           ((not (symbol=? receiver-kind '|middle.expr.path|))
+           ((not (symbol=? receiver-kind '|path.access|))
             (let* ((function (core.function-by-name method)))
               (let* ((param-types (core.function-param-types function)))
                 (core.call!
@@ -282,7 +282,7 @@
                            locals
                            (list))))))))))))))))
 
-(define-pass (core-expr-lowerer |middle.expr.call-indirect| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |call.indirect| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (fn-ptr (optional.value (record.get payload '|fn-ptr|)))
          (ret-ty (core.lower-type (optional.value (record.get payload '|ret-ty|))))
@@ -291,7 +291,7 @@
            (lowered-args (core.lower-args-by-inference block args locals (list))))
       (core.call-indirect! block lowered-fn-ptr ret-ty lowered-args))))
 
-(define-pass (core-expr-lowerer |middle.expr.builtin| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |call.builtin| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (name (optional.value
                  (record.get payload '|name|)))
@@ -307,7 +307,7 @@
       (else
        (core.unsupported-expr name)))))
 
-(define-pass (core-expr-lowerer |middle.expr.tail-call| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |call.tail| block expr expected-ty locals)
   (let* ((payload (middle.payload expr)))
     (core.lower-expr
       block
@@ -316,13 +316,13 @@
       expected-ty
       locals)))
 
-(define-pass (core-expr-lowerer |middle.expr.if| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |control.if| block expr expected-ty locals)
   (core.unsupported-expr '|if-expression|))
 
 ;; ── ? 操作符 lowering: check flag → propagate or unwrap ──
 ;; Uses the Throws effect layout from effects/layout.scm.
 ;; Layout: {flag: u8, value: T, error: E} — flag at index 0, value at index 1.
-(define-pass (core-expr-lowerer |middle.expr.question| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |operators.question| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (inner-expr (optional.value (record.get payload '|expr|)))
          (call-expr (core.lower-expr block inner-expr expected-ty locals))
