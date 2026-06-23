@@ -534,6 +534,7 @@ void native_register_core_ffi(
   REG("core.branch!", 2, sexp_core_branch);
   REG("core.cond-branch!", 4, sexp_core_cond_branch);
   REG("core.type-is-void!", 1, sexp_core_type_is_void);
+  REG("core.type-is-addr!", 1, sexp_core_type_is_addr);
   REG("core.type-size-in-bytes!", 1, sexp_core_type_size);
   REG("core.field-offset!", 4, sexp_core_field_offset);
   REG("core.aggregate-layout!", 3, sexp_core_aggregate_layout);
