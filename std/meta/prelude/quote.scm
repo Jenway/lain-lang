@@ -130,6 +130,12 @@
               (record.field '|mutable| (cadr template))
               (record.field '|operand| (lain-quote (caddr template))))))
 
+         ((symbol=? kind 'cast)
+          (raw.node! '|expr.cast|
+            (record '|expr.cast|
+              (record.field '|expr| (lain-quote (cadr template)))
+              (record.field '|ty| (lain-quote (caddr template))))))
+
          ((symbol=? kind 'perform)
           (raw.node! '|expr.perform|
             (record '|expr.perform|

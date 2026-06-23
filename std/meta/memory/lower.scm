@@ -8,10 +8,14 @@
 
 (define-pass (core-type-lowerer |middle.ty.ref| ty)
   (let* ((payload (middle.payload ty))
-         (mutable (optional.value (record.get payload '|mutable|)))
          (inner (core.lower-type
                   (optional.value (record.get payload '|inner|)))))
-    (type.addr)))
+    ;; If inner is a struct-type, return it directly.
+    ;; The C signature converter (fn/lower.scm line 168-170)
+    ;; turns struct-type params into addr for the C function signature.
+    (if (struct-type? inner)
+        inner
+        (type.addr))))
 
 (define-pass (core-type-lowerer |middle.ty.slice| ty)
   (let* ((kind (middle.kind ty)))
