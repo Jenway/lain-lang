@@ -24,8 +24,8 @@
   (if (struct-type? ty) (cdr ty)
       ;; Unwrap ref types
       (let* ((kind (raw.kind ty)))
-        (if (or (symbol=? kind '|middle.ty.ref|)
-                (symbol=? kind '|middle.ty.raw-ptr|))
+        (if (or (symbol=? kind '|types.ref|)
+                (symbol=? kind '|types.raw-ptr|))
             (let* ((payload (raw.payload ty))
                    (inner (optional.value (record.get payload '|inner|))))
               (struct-type-name inner))

@@ -20,8 +20,8 @@
 
 (define (struct.normalize-literal-field field)
   (let* ((payload (raw.payload field)))
-    (middle.node! '|middle.expr.struct-field|
-      (record '|middle.expr.struct-field|
+    (middle.node! '|struct.field-access|
+      (record '|struct.field-access|
         (record.field '|name| (optional.value (record.get payload '|name|)))
         (record.field '|value|
           (middle.normalize-expr (optional.value (record.get payload '|value|))))))))
@@ -33,8 +33,8 @@
 
 (define-pass (middle-normalizer |expr.struct| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.struct|
-      (record '|middle.expr.struct|
+    (middle.node! '|struct.literal|
+      (record '|struct.literal|
         (record.field '|name| (optional.value (record.get payload '|name|)))
         (record.field '|fields|
           (struct.normalize-literal-fields
@@ -42,7 +42,7 @@
 
 (define-pass (middle-normalizer |expr.field| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.field|
-      (record '|middle.expr.field|
+    (middle.node! '|struct.field|
+      (record '|struct.field|
         (record.field '|base| (middle.normalize-expr (optional.value (record.get payload '|base|))))
         (record.field '|field| (optional.value (record.get payload '|field|)))))))

@@ -26,10 +26,10 @@
 ;; 类型降级: pipeline stage = core-type-lowerer
 ;; ---------------------------------------------------------------------------
 
-(define-pass (core-type-lowerer |middle.ty.unit| ty)
+(define-pass (core-type-lowerer |types.unit| ty)
   (type.unit))
 
-(define-pass (core-type-lowerer |middle.ty.path| ty)
+(define-pass (core-type-lowerer |types.path| ty)
   (let* ((payload (middle.payload ty))
          (name (optional.value (record.get payload '|name|))))
     ;; Struct types return pure Scheme record — no C cpointer
@@ -37,7 +37,7 @@
         (struct-type name)
         (type.registered name (list)))))
 
-(define-pass (core-type-lowerer |middle.ty.app| ty)
+(define-pass (core-type-lowerer |types.app| ty)
   (let* ((payload (middle.payload ty))
          (name (optional.value (record.get payload '|name|)))
          (args (core.lower-types

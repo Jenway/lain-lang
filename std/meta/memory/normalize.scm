@@ -42,8 +42,8 @@
 
 (define-pass (middle-normalizer |expr.borrow| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.borrow|
-      (record '|middle.expr.borrow|
+    (middle.node! '|memory.borrow|
+      (record '|memory.borrow|
         (record.field '|mutable|
           (optional.value
             (record.get payload '|mutable|)))

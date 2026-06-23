@@ -5,7 +5,7 @@
 ;; 从 middle IR 表达式推导其类型
 ;; ═══════════════════════════════════════════════════════════
 
-(define-pass (core-expr-inferer |middle.expr.path| expr locals)
+(define-pass (core-expr-inferer |path.access| expr locals)
   (let* ((payload (middle.payload expr))
          (path (optional.value (record.get payload '|path|)))
          (imported (import.resolve-qualified-symbol path)))
@@ -13,7 +13,7 @@
         (core.function-return-type (core.function-by-name imported))
         (core.local-type locals (core.path-leaf path)))))
 
-(define-pass (core-expr-inferer |middle.expr.call| expr locals)
+(define-pass (core-expr-inferer |call.fn| expr locals)
   (let* ((payload (middle.payload expr))
          (callee (optional.value (record.get payload '|callee|)))
          (callee-payload (middle.payload callee))
@@ -21,22 +21,22 @@
          (fn-name (core.path-fn-name path)))
     (core.function-return-type (core.function-by-name fn-name))))
 
-(define-pass (core-expr-inferer |middle.expr.method-call| expr locals)
+(define-pass (core-expr-inferer |call.method| expr locals)
   (let* ((payload (middle.payload expr))
          (method (optional.value (record.get payload '|method|))))
     (core.function-return-type (core.function-by-name method))))
 
-(define-pass (core-expr-inferer |middle.expr.builtin| expr locals)
+(define-pass (core-expr-inferer |call.builtin| expr locals)
   (let* ((payload (middle.payload expr))
          (args (optional.value (record.get payload '|args|))))
     (core.infer-expr-type (list.first args) locals)))
 
-(define-pass (core-expr-inferer |middle.expr.tail-call| expr locals)
+(define-pass (core-expr-inferer |call.tail| expr locals)
   (let* ((payload (middle.payload expr))
          (call (optional.value (record.get payload '|call|))))
     (core.infer-expr-type call locals)))
 
-(define-pass (core-expr-inferer |middle.expr.call-indirect| expr locals)
+(define-pass (core-expr-inferer |call.indirect| expr locals)
   (let* ((payload (middle.payload expr))
          (ret-ty (optional.value (record.get payload '|ret-ty|))))
     (core.lower-type ret-ty)))

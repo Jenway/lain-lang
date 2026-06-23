@@ -11,7 +11,7 @@
 ;; 1. Compile-time constant table
 ;;    ((name type value) ...)
 ;;    写: core-lowerer |middle.let-binding| (fn/lower.scm)
-;;    读: core-expr-lowerer |middle.expr.path| (expr/lower.scm)
+;;    读: core-expr-lowerer |path.access| (expr/lower.scm)
 ;;    读: const.lookup (本文件)
 ;; ═══════════════════════════════════════════════════════════════════════════
 

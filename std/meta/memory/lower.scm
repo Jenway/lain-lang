@@ -6,7 +6,7 @@
 
 ;; ── 类型降级 ──
 
-(define-pass (core-type-lowerer |middle.ty.ref| ty)
+(define-pass (core-type-lowerer |types.ref| ty)
   (let* ((payload (middle.payload ty))
          (inner (core.lower-type
                   (optional.value (record.get payload '|inner|)))))
@@ -17,11 +17,11 @@
         inner
         (type.addr))))
 
-(define-pass (core-type-lowerer |middle.ty.slice| ty)
+(define-pass (core-type-lowerer |types.slice| ty)
   (let* ((kind (middle.kind ty)))
     (type.unsupported kind)))
 
-(define-pass (core-type-lowerer |middle.ty.array| ty)
+(define-pass (core-type-lowerer |types.array| ty)
   (let* ((payload (middle.payload ty))
          (element (core.lower-type
                     (optional.value (record.get payload '|element|))))
@@ -30,5 +30,5 @@
 
 ;; ── borrow 表达式降级 ──
 
-(define-pass (core-expr-lowerer |middle.expr.borrow| block expr expected-ty locals)
+(define-pass (core-expr-lowerer |memory.borrow| block expr expected-ty locals)
   (core.unsupported-expr '|borrow-expression|))

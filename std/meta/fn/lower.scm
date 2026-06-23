@@ -223,7 +223,7 @@
             ;; Validate that all collected effects are declared
             (propagate.validate-collected! collected declared-names name))))))
 
-(define-pass (core-type-lowerer |middle.ty.fn| ty) (type.unsupported (middle.kind ty)))
+(define-pass (core-type-lowerer |types.fn| ty) (type.unsupported (middle.kind ty)))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; Compile-time constant table is in compiler-state.scm.

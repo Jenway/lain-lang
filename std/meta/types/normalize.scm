@@ -9,17 +9,17 @@
          (payload (raw.payload raw-ty)))
     (cond
       ((symbol=? kind '|type.path|)
-       (middle.node! '|middle.ty.path|
-         (record '|middle.ty.path|
+       (middle.node! '|types.path|
+         (record '|types.path|
            (record.field '|name|
              (optional.value
                (record.get payload '|name|))))))
       ((symbol=? kind '|type.unit|)
-       (middle.node! '|middle.ty.unit|
-         (record '|middle.ty.unit|)))
+       (middle.node! '|types.unit|
+         (record '|types.unit|)))
       ((symbol=? kind '|type.app|)
-       (middle.node! '|middle.ty.app|
-         (record '|middle.ty.app|
+       (middle.node! '|types.app|
+         (record '|types.app|
            (record.field '|name|
              (optional.value
                (record.get payload '|name|)))
@@ -29,8 +29,8 @@
                  (record.get payload '|args|))
                (list))))))
       ((symbol=? kind '|type.raw-ptr|)
-       (middle.node! '|middle.ty.raw-ptr|
-         (record '|middle.ty.raw-ptr|
+       (middle.node! '|types.raw-ptr|
+         (record '|types.raw-ptr|
            (record.field '|mutable|
              (optional.value
                (record.get payload '|mutable|)))
@@ -39,8 +39,8 @@
                (optional.value
                  (record.get payload '|pointee|)))))))
       ((symbol=? kind '|type.ref|)
-       (middle.node! '|middle.ty.ref|
-         (record '|middle.ty.ref|
+       (middle.node! '|types.ref|
+         (record '|types.ref|
            (record.field '|mutable|
              (optional.value
                (record.get payload '|mutable|)))
@@ -49,15 +49,15 @@
                (optional.value
                  (record.get payload '|inner|)))))))
       ((symbol=? kind '|type.slice|)
-       (middle.node! '|middle.ty.slice|
-         (record '|middle.ty.slice|
+       (middle.node! '|types.slice|
+         (record '|types.slice|
            (record.field '|element|
              (middle.normalize-type
                (optional.value
                  (record.get payload '|element|)))))))
       ((symbol=? kind '|type.array|)
-       (middle.node! '|middle.ty.array|
-         (record '|middle.ty.array|
+       (middle.node! '|types.array|
+         (record '|types.array|
            (record.field '|element|
              (middle.normalize-type
                (optional.value
@@ -66,8 +66,8 @@
              (optional.value
                (record.get payload '|len|))))))
       ((symbol=? kind '|type.fn|)
-       (middle.node! '|middle.ty.fn|
-         (record '|middle.ty.fn|
+       (middle.node! '|types.fn|
+         (record '|types.fn|
            (record.field '|params|
              (middle.normalize-types
                (optional.value
@@ -81,8 +81,8 @@
              (optional.value
                (record.get payload '|effects|))))))
       (else
-       (middle.node! '|middle.ty.unknown|
-         (record '|middle.ty.unknown|
+       (middle.node! '|types.unknown|
+         (record '|types.unknown|
            (record.field '|raw-kind| kind)))))))
 
 (define (middle.normalize-types raw-types acc)

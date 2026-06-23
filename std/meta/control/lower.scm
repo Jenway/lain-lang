@@ -34,7 +34,7 @@
 
 ;; ── 语句降级: pipeline stage = core-stmt-lowerer ──
 
-(define-pass (core-stmt-lowerer |middle.stmt.return| block stmt ret-ty locals)
+(define-pass (core-stmt-lowerer |control.return| block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt)) (value (optional.value (record.get payload '|value|))))
     (if (optional.none? value) (core.return-none! block)
         (let* ((inner-ty (if (core.return-is-product? ret-ty)
@@ -47,14 +47,14 @@
           (core.return-value! block wrapped)))
     locals))
 
-(define-pass (core-stmt-lowerer |middle.stmt.tail| block stmt ret-ty locals)
+(define-pass (core-stmt-lowerer |control.tail| block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt)) (expr (optional.value (record.get payload '|expr|))))
     (cond
-      ((symbol=? (middle.kind expr) '|middle.expr.if|)
+      ((symbol=? (middle.kind expr) '|control.if|)
        (core.lower-if-tail-expr block expr ret-ty locals))
-      ((symbol=? (middle.kind expr) '|middle.expr.handle|)
+      ((symbol=? (middle.kind expr) '|effects.handle|)
        (core.lower-handle-tail-expr block expr ret-ty locals))
-      ((symbol=? (middle.kind expr) '|middle.expr.match|)
+      ((symbol=? (middle.kind expr) '|control.match|)
        (match.lower-tail-expr block expr ret-ty locals))
       (else
        (if (type.unit? ret-ty)
@@ -73,23 +73,23 @@
                  (core.return-value! block wrapped))))))
     locals))
 
-(define-pass (core-stmt-lowerer |middle.stmt.expr| block stmt ret-ty locals)
+(define-pass (core-stmt-lowerer |control.expr| block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt)) (expr (optional.value (record.get payload '|expr|))))
     (cond
-      ((symbol=? (middle.kind expr) '|middle.expr.if|)
+      ((symbol=? (middle.kind expr) '|control.if|)
        (core.lower-if-tail-expr block expr ret-ty locals)
        (core.set-current-block! block))
-      ((symbol=? (middle.kind expr) '|middle.expr.handle|)
+      ((symbol=? (middle.kind expr) '|effects.handle|)
        (core.lower-handle-tail-expr block expr ret-ty locals)
        (core.set-current-block! block))
-      ((symbol=? (middle.kind expr) '|middle.expr.match|)
+      ((symbol=? (middle.kind expr) '|control.match|)
        (match.lower-tail-expr block expr ret-ty locals)
        (core.set-current-block! block))
       (else
        (core.lower-expr block expr (core.infer-expr-type expr locals) locals)))
     locals))
 
-(define-pass (core-stmt-lowerer |middle.stmt.let| block stmt ret-ty locals)
+(define-pass (core-stmt-lowerer |let.bind| block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt))
          (ty-option (optional.value (record.get payload '|type|)))
          (name (optional.value (record.get payload '|name|)))
@@ -102,7 +102,7 @@
          ;; For non-call expressions (paths, constants), lower-expr is fine
          ;; because it doesn't emit side-effecting instructions.
          (expr-kind (middle.kind value-expr))
-         (var (if (symbol=? expr-kind '|middle.expr.call|)
+         (var (if (symbol=? expr-kind '|call.fn|)
                   (let* ((call-payload (middle.payload value-expr))
                          (callee (optional.value (record.get call-payload '|callee|)))
                          (args (optional.value (record.get call-payload '|args|)))
@@ -129,10 +129,10 @@
     (list.cons (record '|local| (record.field '|name| name) (record.field '|type| ty)
                  (record.field '|mutable| mutable) (record.field '|value| var)) locals)))
 
-(define-pass (core-stmt-lowerer |middle.stmt.assign| block stmt ret-ty locals)
+(define-pass (core-stmt-lowerer |stmt.assign| block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt)) (target (optional.value (record.get payload '|target|)))
          (value-expr (optional.value (record.get payload '|value|))))
-    (if (symbol=? (middle.kind target) '|middle.expr.path|)
+    (if (symbol=? (middle.kind target) '|path.access|)
         (let* ((target-payload (middle.payload target)) (path (optional.value (record.get target-payload '|path|)))
                (name (list.first path)))
           (if (core.local-mutable? locals name)
@@ -141,7 +141,7 @@
                              (record.field '|mutable| #t) (record.field '|value| value)) locals))
               (type.unsupported '|immutable-assignment|)))
         ;; ── 字段赋值: p.x = v ──
-        (if (symbol=? (middle.kind target) '|middle.expr.field|)
+        (if (symbol=? (middle.kind target) '|struct.field|)
             (let* ((target-payload (middle.payload target))
                    (base-expr (optional.value (record.get target-payload '|base|)))
                    (field-name (optional.value (record.get target-payload '|field|)))

@@ -6,8 +6,8 @@
 
 (define-pass (middle-normalizer |expr.perform| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.perform|
-      (record '|middle.expr.perform|
+    (middle.node! '|effects.perform|
+      (record '|effects.perform|
         (record.field '|call|
           (middle.normalize-expr
             (optional.value
@@ -15,8 +15,8 @@
 
 (define-pass (middle-normalizer |expr.resume| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.resume|
-      (record '|middle.expr.resume|
+    (middle.node! '|effects.resume|
+      (record '|effects.resume|
         (record.field '|value|
           (let* ((value (optional.value
                          (record.get payload '|value|))))
@@ -28,8 +28,8 @@
 
 (define-pass (middle-normalizer |expr.handle| raw-expr)
   (let* ((payload (raw.payload raw-expr)))
-    (middle.node! '|middle.expr.handle|
-      (record '|middle.expr.handle|
+    (middle.node! '|effects.handle|
+      (record '|effects.handle|
         (record.field '|effect|
           (optional.value
             (record.get payload '|effect|)))
