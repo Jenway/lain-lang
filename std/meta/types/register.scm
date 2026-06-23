@@ -12,6 +12,9 @@
 (register-type-constructor! '|addr| 0 '(alias addr))
 (register-string-literal-type! '|addr|)
 
+(register-type-ctor! '|opaque| 0)
+(register-type-constructor! '|opaque| 0 '(alias addr))
+
 (register-type-ctor! '|CStr| 0)
 (register-type-constructor! '|CStr| 0 '(alias addr))
 

@@ -8,7 +8,6 @@
 ;; ═══ 1. Basic polyfills ═══
 (define unit #f)
 (define (meta-source x) #f)
-(define *error-count* 0)
 
 ;; ═══ 2. define-pass macro system ═══
 (define __lain-passes '())
@@ -74,34 +73,32 @@
 (define (middle.payload node) (vector-ref node 2))
 
 ;; ═══ 9. decl.* polyfills ═══
-(define *lain-declarations* '())
 
 (define (decl.define! kind name node)
-  (set! *lain-declarations* (cons (list name kind node) *lain-declarations*)))
+  (declarations.push! (list name kind node)))
 
 (define (decl.name decl) (car decl))
 (define (decl.payload decl) (caddr decl))
 
-;; ═══ 10. IR API + type.* wrappers ═══
-(load "std/meta/ir-api.scm")
+;; ═══ 10. type.* wrappers ═══
 
-(define type.unit    ir.type.unit)
-(define type.bits    ir.type.bits)
-(define type.addr    ir.type.addr)
-(define type.floats  ir.type.floats)
-(define type.simd    ir.type.simd)
-(define type.never   ir.type.never)
-(define type.unit?   ir.type.unit?)
-(define type.eq?     ir.type.equal?)
+(define type.unit    core.make-unit)
+(define type.bits    core.make-bits)
+(define type.addr    core.make-addr)
+(define type.floats  core.make-floats)
+(define type.simd    core.make-simd)
+(define type.never   core.make-unit)
+(define type.unit?   core.type-is-void!)
+(define type.eq?     equal?)
 
-(define (type.raw-ptr . args)        (ir.type.addr))
-(define (type.registered name . args) (ir.type.lookup name))
-(define (type.unsupported . args)     (ir.type.bits 32))
+(define (type.raw-ptr . args)        (core.make-addr))
+(define (type.registered name . args) (type.registered-raw name))
+(define (type.unsupported . args)     (core.make-bits 32))
 
 ;; ── Backward-compat stubs ──
 (define type.float?              (lambda (ty) #f))
-(define type.fn                  (lambda (params ret) (ir.type.addr)))
-(define type.array               (lambda (ty size) (ir.type.addr)))
+(define type.fn                  (lambda (params ret) (core.make-addr)))
+(define type.array               (lambda (ty size) (core.make-addr)))
 (define type.product             (lambda (types) (core.make-product-type! types)))
 (define type.product-field-types (lambda (product) '()))
 (define type.product-field-type  (lambda (product field-name)

@@ -46,7 +46,7 @@
              (ty (cdr field))
              ;; If field type is a struct-type record, treat as addr-sized (8 bytes)
              ;; Otherwise it's an L1Type cpointer — ask C for its size
-             (size (if (struct-type? ty) 8 (ir.type.size ty)))
+             (size (if (struct-type? ty) 8 (core.type-size-in-bytes! ty)))
              ;; 64-bit alignment
              (aligned (if (and (= size 8) (not (zero? (modulo offset 8))))
                           (+ offset (- 8 (modulo offset 8)))
@@ -179,7 +179,7 @@
           (if (null? tys)
               (cons offset (reverse acc))
               (let* ((ty (car tys))
-                     (size (ir.type.size ty))
+                     (size (core.type-size-in-bytes! ty))
                      ;; Natural alignment: align to field's own size (capped at 8)
                      (align (if (> size 8) 8 size))
                      (aligned (if (zero? (modulo offset align))

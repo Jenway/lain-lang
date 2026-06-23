@@ -21,22 +21,22 @@
 ;; ── Helper: wrap a value as throws aggregate {flag:0, value, error:0} ──
 ;; Uses fixed i8-flag layout. Dead code until type.product-field-types is fixed.
 (define (core.wrap-throws-return block ret-ty value-expr)
-  (let* ((flag-ty (ir.type.bits 8))
-         (error-ty (ir.type.bits 32))
-         (flag-zero (ir.expr.const block flag-ty 0))
-         (error-zero (ir.expr.const block error-ty 0))
+  (let* ((flag-ty (core.make-bits 8))
+         (error-ty (core.make-bits 32))
+         (flag-zero (core.const-bits! block flag-ty 0))
+         (error-zero (core.const-bits! block error-ty 0))
          ;; Default layout: i8@0, i64@8, i32@16 — total 20 bytes
          (total-size 20)
          (pairs (list (cons 0 flag-zero)
                       (cons 8 value-expr)
                       (cons 16 error-zero))))
-    (ir.type.aggregate-layout block total-size pairs)))
+    (core.aggregate-layout! block total-size pairs)))
 
 ;; ── 语句降级: pipeline stage = core-stmt-lowerer ──
 
 (define-pass (core-stmt-lowerer |middle.stmt.return| block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt)) (value (optional.value (record.get payload '|value|))))
-    (if (optional.none? value) (ir.term.return-none block)
+    (if (optional.none? value) (core.return-none! block)
         (let* ((inner-ty (if (core.return-is-product? ret-ty)
                              (core.product-value-type ret-ty)
                              ret-ty))
@@ -44,7 +44,7 @@
                (wrapped (if (core.return-is-product? ret-ty)
                             (core.wrap-throws-return block ret-ty lowered)
                             lowered)))
-          (ir.term.return block wrapped)))
+          (core.return-value! block wrapped)))
     locals))
 
 (define-pass (core-stmt-lowerer |middle.stmt.tail| block stmt ret-ty locals)
@@ -58,10 +58,10 @@
        (match.lower-tail-expr block expr ret-ty locals))
       (else
        (if (type.unit? ret-ty)
-           (begin (core.lower-expr block expr ret-ty locals) (ir.term.return-none block))
+           (begin (core.lower-expr block expr ret-ty locals) (core.return-none! block))
            (if (core.is-effect-expr? expr)
                ;; Effect expressions (perform/resume/handle): use full product type, no wrapping
-               (ir.term.return block (core.lower-expr block expr ret-ty locals))
+               (core.return-value! block (core.lower-expr block expr ret-ty locals))
                ;; Normal expressions: lower with inner type, then wrap
                (let* ((inner-ty (if (core.return-is-product? ret-ty)
                                     (core.product-value-type ret-ty)
@@ -70,7 +70,7 @@
                       (wrapped (if (core.return-is-product? ret-ty)
                                    (core.wrap-throws-return block ret-ty lowered)
                                    lowered)))
-                 (ir.term.return block wrapped))))))
+                 (core.return-value! block wrapped))))))
     locals))
 
 (define-pass (core-stmt-lowerer |middle.stmt.expr| block stmt ret-ty locals)
@@ -78,13 +78,13 @@
     (cond
       ((symbol=? (middle.kind expr) '|middle.expr.if|)
        (core.lower-if-tail-expr block expr ret-ty locals)
-       (ir.block.set! block))
+       (core.set-current-block! block))
       ((symbol=? (middle.kind expr) '|middle.expr.handle|)
        (core.lower-handle-tail-expr block expr ret-ty locals)
-       (ir.block.set! block))
+       (core.set-current-block! block))
       ((symbol=? (middle.kind expr) '|middle.expr.match|)
        (match.lower-tail-expr block expr ret-ty locals)
-       (ir.block.set! block))
+       (core.set-current-block! block))
       (else
        (core.lower-expr block expr (core.infer-expr-type expr locals) locals)))
     locals))
@@ -113,19 +113,19 @@
                     (if (optional.some? intrinsic)
                         ;; Intrinsic: let core.lower-expr handle it (e.g. load/store)
                         (let* ((value (core.lower-expr block value-expr ty locals)))
-                          (ir.inst.assign-temp block value))
+                          (core.assign-temp! block value))
                         ;; Regular call: use call-expr! to avoid double emission
-                        (let* ((function (ir.sub.by-name fn-name))
+                        (let* ((function (core.function-by-name fn-name))
                                (lowered-args (core.lower-args block args
-                                                (ir.sub.params function)
+                                                (core.function-param-types function)
                                                 locals (list)))
                                ;; Phase 2: propagate callee effects to caller
                                (_callee-effs (let ((effs (propagate.lookup-fn-effects fn-name)))
                                                (propagate.record-effects! effs)))
-                               (call-expr (ir.inst.call block function lowered-args)))
-                          (ir.inst.assign-temp block call-expr))))
+                               (call-expr (core.call-expr! block function lowered-args)))
+                          (core.assign-temp! block call-expr))))
                   (let* ((value (core.lower-expr block value-expr ty locals)))
-                    (ir.inst.assign-temp block value)))))
+                    (core.assign-temp! block value)))))
     (list.cons (record '|local| (record.field '|name| name) (record.field '|type| ty)
                  (record.field '|mutable| mutable) (record.field '|value| var)) locals)))
 
@@ -147,10 +147,10 @@
     (if lowerer (lowerer block stmt ret-ty locals) locals)))
 
 (define (core.lower-stmts block stmts ret-ty locals)
-  (if (list.empty? stmts) (ir.term.return-none block)
+  (if (list.empty? stmts) (core.return-none! block)
       (let* ((next-locals (core.lower-stmt block (list.first stmts) ret-ty locals))
              ;; Follow g_current_block — stmt lowerers may create branches and switch blocks
-             (current (ir.block.current)))
+             (current (core.get-current-block)))
         (if (list.empty? (list.rest stmts)) unit
             (core.lower-stmts current (list.rest stmts) ret-ty next-locals)))))
 
@@ -161,7 +161,7 @@
 ;; The wildcard arm (_) is the fallthrough default.
 (define (match.lower-arms-helper block tag-val arms ret-ty locals)
   (if (list.empty? arms)
-      (ir.term.return-none block)
+      (core.return-none! block)
       (let* ((arm (list.first arms))
              (pattern-kind (optional.value (record.get arm '|pattern-kind|)))
              (pattern-name (optional.value (record.get arm '|pattern-name|)))
@@ -176,17 +176,17 @@
               (if (not variant-info)
                   (type.unsupported '|unknown-variant|)
                   (let* ((discriminant (cdr variant-info))
-                         (function (ir.block.parent block))
-                         (arm-block (ir.sub.block function))
-                         (next-block (ir.sub.block function))
-                         (disc-const (ir.expr.const block (ir.type.bits 8) discriminant))
-                         (is-match (ir.expr.primitive block '|integer.eq| (list tag-val disc-const) (ir.type.bits 1))))
-                    (ir.term.cond-branch block is-match arm-block next-block)
+                         (function (core.block-function block))
+                         (arm-block (core.append-block! function))
+                         (next-block (core.append-block! function))
+                         (disc-const (core.const-bits! block (core.make-bits 8) discriminant))
+                         (is-match (core.primitive! block '|integer.eq| (list tag-val disc-const) (core.make-bits 1))))
+                    (core.cond-branch! block is-match arm-block next-block)
                     ;; Arm body
-                    (ir.block.set! arm-block)
+                    (core.set-current-block! arm-block)
                     (core.lower-stmts arm-block body-items ret-ty locals)
                     ;; Continue with next arms
-                    (ir.block.set! next-block)
+                    (core.set-current-block! next-block)
                     (match.lower-arms-helper next-block tag-val rest-arms ret-ty locals))))))))
 
 ;; Lower a match expression as a tail expression.
@@ -200,7 +200,7 @@
          ;; Lower scrutinee as addr — enums are tagged union structs
          (scrutinee-val (core.lower-expr block scrutinee (type.addr) locals))
          ;; Extract tag field: offset 0, 8-bit discriminant
-         (tag-ty (ir.type.bits 8))
-         (tag-val (ir.expr.field-offset block scrutinee-val 0 tag-ty)))
+         (tag-ty (core.make-bits 8))
+         (tag-val (core.field-offset! block scrutinee-val 0 tag-ty)))
     (match.lower-arms-helper block tag-val arms ret-ty locals)))
 

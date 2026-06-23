@@ -4,7 +4,7 @@ import std::option;
 import std::slice;
 
 pub struct DynArray<T> {
-    ptr: *mut T,
+    ptr: opaque,
     len: usize,
     cap: usize,
 }
@@ -12,7 +12,7 @@ pub struct DynArray<T> {
 pub impl<T> DynArray<T> {
     pub fn new() -> DynArray<T> ! {Alloc} {
         DynArray {
-            ptr: null<*mut T>,
+            ptr: usize_to_opaque(0),
             len: 0,
             cap: 0,
         }
@@ -25,7 +25,7 @@ pub impl<T> DynArray<T> {
             let bytes = n * size_of<T>();
             let raw = malloc(bytes);
             DynArray {
-                ptr: ptr_cast<u8, T>(raw),
+                ptr: raw,
                 len: 0,
                 cap: n,
             }
@@ -36,7 +36,7 @@ pub impl<T> DynArray<T> {
         if self.len == self.cap {
             self.grow();
         } else {};
-        self.ptr[self.len] = val;
+        store(self.ptr + self.len * size_of<T>(), val);
         self.len = self.len + 1;
     }
 
@@ -45,7 +45,7 @@ pub impl<T> DynArray<T> {
             Option::None
         } else {
             self.len = self.len - 1;
-            Option::Some(self.ptr[self.len])
+            Option::Some(load(self.ptr + self.len * size_of<T>()))
         }
     }
 
@@ -53,7 +53,7 @@ pub impl<T> DynArray<T> {
         if i >= self.len {
             Option::None
         } else {
-            Option::Some(&self.ptr[i])
+            Option::Some(self.ptr + i * size_of<T>() as &T)
         }
     }
 
@@ -61,7 +61,7 @@ pub impl<T> DynArray<T> {
         self.len
     }
 
-    pub fn as_ptr(self: &DynArray<T>) -> *mut T {
+    pub fn as_ptr(self: &DynArray<T>) -> opaque {
         self.ptr
     }
 
@@ -88,9 +88,9 @@ pub impl<T> DynArray<T> {
         let raw = if self.cap == 0 {
             malloc(bytes)
         } else {
-            realloc(ptr_cast<T, u8>(self.ptr), bytes)
+            realloc(self.ptr, bytes)
         };
-        self.ptr = ptr_cast<u8, T>(raw);
+        self.ptr = raw;
         self.cap = new_cap;
     }
 }

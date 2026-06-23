@@ -16,13 +16,13 @@ fn platform_bind(socket: usize, addr: &SockAddrIn, len: i32) -> i32 ! {IO};
 fn platform_listen(socket: usize, backlog: i32) -> i32 ! {IO};
 
 @foreign(c, link_name = "lain_tcp_accept")
-fn platform_accept(socket: usize, addr: *mut u8, len: *mut i32) -> usize ! {IO};
+fn platform_accept(socket: usize, addr: opaque, len: opaque) -> usize ! {IO};
 
 @foreign(c, link_name = "lain_tcp_recv")
-fn platform_recv(socket: usize, buffer: *mut u8, len: i32, flags: i32) -> i32 ! {IO};
+fn platform_recv(socket: usize, buffer: opaque, len: i32, flags: i32) -> i32 ! {IO};
 
 @foreign(c, link_name = "lain_tcp_send")
-fn platform_send(socket: usize, buffer: *mut u8, len: i32, flags: i32) -> i32 ! {IO};
+fn platform_send(socket: usize, buffer: opaque, len: i32, flags: i32) -> i32 ! {IO};
 
 @foreign(c, link_name = "lain_tcp_close")
 fn platform_close_socket(socket: usize) -> i32 ! {IO};
@@ -34,10 +34,10 @@ fn platform_htons(host_short: u16) -> u16 ! {IO};
 fn platform_shutdown() -> i32 ! {IO};
 
 @foreign(c, link_name = "lain_tcp_wait_readable_wake")
-fn tcp_wait_readable_wake(data: *mut u8) -> ();
+fn tcp_wait_readable_wake(data: opaque) -> ();
 
 @foreign(c, link_name = "lain_tcp_wait_writable_wake")
-fn tcp_wait_writable_wake(data: *mut u8) -> ();
+fn tcp_wait_writable_wake(data: opaque) -> ();
 
 pub enum NetError {
     StartupFailed,
@@ -114,14 +114,16 @@ pub fn tcp_listen_any(port: u16) -> usize ! {IO} {
 }
 
 pub fn tcp_accept(server: usize) -> usize ! {IO} {
-    platform_accept(server, null<*mut u8>, null<*mut i32>)
+    let null_addr: opaque = usize_to_opaque(0);
+    let null_len: opaque = usize_to_opaque(0);
+    platform_accept(server, null_addr, null_len)
 }
 
-pub fn tcp_recv(socket: usize, buffer: *mut u8, len: i32) -> i32 ! {IO} {
+pub fn tcp_recv(socket: usize, buffer: opaque, len: i32) -> i32 ! {IO} {
     platform_recv(socket, buffer, len, 0)
 }
 
-pub fn tcp_send(socket: usize, buffer: *mut u8, len: i32) -> i32 ! {IO} {
+pub fn tcp_send(socket: usize, buffer: opaque, len: i32) -> i32 ! {IO} {
     platform_send(socket, buffer, len, 0)
 }
 
@@ -134,11 +136,11 @@ pub fn tcp_shutdown() -> i32 ! {IO} {
 }
 
 pub fn tcp_readable_waker(socket: usize) -> Waker {
-    Waker::new(usize_to_ptr<u8>(socket), tcp_wait_readable_wake)
+    Waker::new(usize_to_opaque(socket), tcp_wait_readable_wake)
 }
 
 pub fn tcp_writable_waker(socket: usize) -> Waker {
-    Waker::new(usize_to_ptr<u8>(socket), tcp_wait_writable_wake)
+    Waker::new(usize_to_opaque(socket), tcp_wait_writable_wake)
 }
 
 pub impl TcpListener {
@@ -179,7 +181,7 @@ pub impl TcpStream {
         perform Suspend::suspend(tcp_readable_waker(self.fd));
         let received = tcp_recv(
             self.fd,
-            slice_as_mut_ptr<u8>(buf),
+            slice_as_mut_opaque<u8>(buf),
             usize_to_i32(slice_len_mut<u8>(buf)),
         );
         if received < 0 {
@@ -193,7 +195,7 @@ pub impl TcpStream {
         perform Suspend::suspend(tcp_writable_waker(self.fd));
         let sent = tcp_send(
             self.fd,
-            slice_as_ptr<u8>(buf),
+            slice_as_opaque<u8>(buf),
             usize_to_i32(slice_len<u8>(buf)),
         );
         if sent < 0 {

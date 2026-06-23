@@ -47,14 +47,14 @@
   (let* ((payload (middle.payload expr))
          (raw (optional.value
                 (record.get payload '|raw|))))
-    (ir.expr.const
+    (core.const-bits!
       block
       expected-ty
       (literal.number-value raw))))
 
 (define-pass (core-expr-lowerer |middle.expr.string| block expr expected-ty locals)
   (let* ((payload (middle.payload expr)))
-    (ir.expr.const-string
+    (core.const-string!
       block
       expected-ty
       (optional.value
@@ -64,7 +64,7 @@
   (let* ((payload (middle.payload expr))
          (value (optional.value
                   (record.get payload '|value|))))
-    (ir.expr.const
+    (core.const-bits!
       block
       expected-ty
       (if value 1 0))))
@@ -78,9 +78,9 @@
          (len (literal.number-value
                 (optional.value (record.get payload '|len|))))
          ;; Use i32 as element type (simplified — all numeric literals are i32)
-         (elem-ty (ir.type.bits 32))
+         (elem-ty (core.make-bits 32))
          ;; Allocate on stack: [i32 x len] → returns pointer expression
-         (ptr (ir.expr.alloca block elem-ty (* len 4)))
+         (ptr (core.local-alloc! block elem-ty (* len 4)))
          ;; Keep init expr reachable for future full initialization pass.
          (_init-val (core.lower-expr block init-expr elem-ty locals)))
     ptr))

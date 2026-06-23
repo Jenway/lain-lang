@@ -501,6 +501,24 @@ static sexp sexp_core_eval(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
 }
 
+static sexp sexp_core_eval_value(sexp ctx, sexp self, sexp_sint_t n,
+                                  sexp arg_val) {
+  L1Expr *expr = (L1Expr *)sexp_cpointer_value(arg_val);
+  (void)self;
+  (void)n;
+  
+  if (!expr) return SEXP_FALSE;
+  
+  switch (expr->kind) {
+  case EXPR_CONST:
+    return sexp_make_fixnum(expr->data.const_val);
+  case EXPR_STRING:
+    return sexp_c_string(ctx, expr->data.str_val.content, -1);
+  default:
+    return SEXP_FALSE;
+  }
+}
+
 static sexp sexp_core_call_expr(sexp ctx, sexp self, sexp_sint_t n,
                                 sexp block_val, sexp fn_val, sexp args_val) {
   L1Subroutine *sub = (L1Subroutine *)sexp_cpointer_value(fn_val);

@@ -12,4 +12,4 @@
 ;; This expr-lowerer returns a dummy value and should never be called —
 ;; the stmt-lowerer intercepts match before core.lower-expr dispatches here.
 (define-pass (core-expr-lowerer |middle.expr.match| block expr expected-ty locals)
-  (ir.expr.const block (ir.type.bits 32) 0))
+  (core.const-bits! block (core.make-bits 32) 0))

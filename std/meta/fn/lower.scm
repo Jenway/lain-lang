@@ -1,18 +1,10 @@
 (meta-source "fn/lower")
 
-;; ── Comptime function registry ──
-(define *comptime-fns* (list))
-
-(define (comptime-register! name)
-  (if (not (comptime? name))
-      (set! *comptime-fns* (cons name *comptime-fns*))
-      unit))
-
-(define (comptime? name)
-  (let loop ((fns *comptime-fns*))
-    (if (null? fns) #f
-        (if (symbol=? (car fns) name) #t
-            (loop (cdr fns))))))
+;; ═══════════════════════════════════════════════════════════════════════════
+;; Comptime function registry and const table are in compiler-state.scm.
+;; Use comptime-fns.register!, comptime-fns.member?, const-table.register!,
+;; and const-table.lookup.
+;; ═══════════════════════════════════════════════════════════════════════════
 
 
 (define (fn.attr-named-string args name fallback)
@@ -90,13 +82,13 @@
             (if (symbol=? (fn.effect-name first) '|Throws|)
                 (let* ((args (fn.effect-args first)))
                   (if (list.empty? args)
-                      (ir.type.bits 32)  ;; default error type i32
+                      (core.make-bits 32)  ;; default error type i32
                       (core.lower-type (list.first args))))
                 (fn.throws-error-type (list.rest effects)))))))
 
 (define (fn.make-throws-product ret-ty error-ty)
   ;; Create TY_PRODUCT: {flag: i8, value: ret_ty, error: error_ty}
-  (type.product (list (ir.type.bits 8) ret-ty error-ty)))
+  (type.product (list (core.make-bits 8) ret-ty error-ty)))
 
 ;; ── Generalized: build product type from any effect declaration ──
 ;; Looks up the effect's layout in the registry and builds a product
@@ -137,6 +129,9 @@
 
 ;; ── Declarer / Lowerer ──
 
+;; pass: core-declarer |middle.fn|
+;; writes: compiler-state.comptime-fns (if comptime flag set)
+;; calls: validate-effects!, core.lower-type
 (define-pass (core-declarer |middle.fn| item)
   (let* ((payload (middle.payload item)) (body (optional.value (record.get (middle.payload item) '|body|))))
     (if (optional.none? body) unit
@@ -148,7 +143,7 @@
                ;; Register comptime function
                (_ (let ((comptime-flag (record.get payload '|comptime|)))
                     (if (and (optional.some? comptime-flag) (optional.value comptime-flag))
-                        (comptime-register! name)
+                        (comptime-fns.register! name)
                         unit)))
                (effects (optional.value effects-opt))
                (raw-ret (core.lower-type (optional.value (record.get payload '|return|))))
@@ -175,14 +170,14 @@
                               param-types)))
           ;; Store real return type in Scheme table (avoids C-side type storage)
           (fn-return-type! name ret)
-          (ir.sub.define name c-params c-ret)
+          (core.begin-function! name c-params c-ret)
           ;; Name mangling: pub fn gets C-level link_name (e.g., add → io_add)
           ;; Internal name stays unmangled for intra-module lookups.
           (let* ((public (record.get payload '|public|))
                  (is-public (and (optional.some? public) (optional.value public))))
             (if is-public
-                (ir.sub.set-link-name! name
-                  (string-append (ir.sub.module-prefix) "_"
+                (core.set-function-link-name! name
+                  (string-append (core.module-prefix) "_"
                                  (symbol->string name)))
                 unit))))))
 
@@ -214,7 +209,7 @@
                      raw-ret-ty))
          (body (optional.value (record.get payload '|body|))))
     (if (optional.none? body) unit
-        (let* ((function (ir.sub.by-name name)) (block (ir.sub.block function))
+        (let* ((function (core.function-by-name name)) (block (core.append-block! function))
                (locals (core.bind-params function params 0 (list)))
                (body-payload (middle.payload (optional.value body))))
           ;; Phase 2: clear effect tracker before lowering this fn
@@ -231,63 +226,45 @@
 (define-pass (core-type-lowerer |middle.ty.fn| ty) (type.unsupported (middle.kind ty)))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
-;; Compile-time constant table — for top-level let x = <expr>;
+;; Compile-time constant table is in compiler-state.scm.
+;; Use const-table.register! and const-table.lookup.
+;;
+;; Expression evaluation for top-level let bindings:
+;;   lowered via core.lower-expr → eval'd via core.eval-value!
+;; This replaces the old const.eval-expr hand-written pattern matcher.
 ;; ═══════════════════════════════════════════════════════════════════════════
 
-(define *const-table* (list))
-
-(define (const.register! name type val)
-  (set! *const-table* (cons (list name type val) *const-table*)))
-
-(define (const.lookup name)
-  (let loop ((table *const-table*))
-    (if (null? table)
-        #f
-        (let* ((entry (car table)))
-          (if (symbol=? (car entry) name)
-              entry
-              (loop (cdr table)))))))
-
-;; Evaluate a middle expression to a constant value at compile time.
-;; Returns (type . value) pair, or #f if not evaluable.
-(define (const.eval-expr expr)
-  (let* ((kind (middle.kind expr))
-         (payload (middle.payload expr)))
-    (cond
-      ((symbol=? kind '|middle.expr.number|)
-       (let* ((raw (optional.value (record.get payload '|raw|)))
-              (val (literal.number-value raw))
-              (ty (ir.type.bits 32)))
-         (cons ty val)))
-      ((symbol=? kind '|middle.expr.bool|)
-       (let* ((val (optional.value (record.get payload '|value|)))
-              (ty (ir.type.bits 1)))
-         (cons ty (if val 1 0))))
-      ((symbol=? kind '|middle.expr.path|)
-       ;; Look up another compile-time constant by name
-       (let* ((path (optional.value (record.get payload '|path|)))
-              (leaf (if (list.empty? (list.rest path))
-                        (list.first path)
-                        #f)))
-         (if leaf
-             (let* ((entry (const.lookup leaf)))
-               (if entry
-                   (cons (cadr entry) (caddr entry))
-                   #f))
-             #f)))
-      (else #f))))
-
 (define-pass (core-declarer |middle.let-binding| item)
+  ;; pass: core-declarer |middle.let-binding|
+  ;; reads: none (no-op — value computed during lowering)
   ;; Register the name as a known binding but don't create IR sub.
   ;; The actual value is computed during lowering.
   unit)
 
+;; pass: core-lowerer |middle.let-binding|
+;; reads: compiler-state.const-table (via register)
+;; calls: core.begin-function!, core.function-by-name, core.append-block!,
+;;        core.lower-expr (pipeline/lower.scm), core.eval-value! (builder_ffi.c)
+;; Lower the expression to L1 IR, then eval it at compile time.
+;; Uses the same lowering path as function bodies — no separate evaluator.
 (define-pass (core-lowerer |middle.let-binding| item)
   (let* ((payload (middle.payload item))
          (name (optional.value (record.get payload '|name|)))
-         (value-expr (optional.value (record.get payload '|value|)))
-         (evaled (const.eval-expr value-expr)))
-    (if evaled
-        (const.register! name (car evaled) (cdr evaled))
-        (error (string-append "unsupported let binding expression for: "
-                              (symbol->string name))))))
+         (value-expr (optional.value (record.get payload '|value|))))
+    ;; Create a temporary sub to hold the lowered expression
+    (let* ((tmp-name (string->symbol
+                       (string-append "$comptime_let_"
+                                      (symbol->string name))))
+           (_ (core.begin-function! tmp-name (list) (core.make-bits 32)))
+           (tmp-sub (core.function-by-name tmp-name))
+           (block (core.append-block! tmp-sub)))
+      ;; Lower the expression into the temp block
+      (let* ((ir-val (core.lower-expr block value-expr (core.make-bits 32) (list)))
+             (result (core.eval-value! ir-val)))
+        (if (and result (not (eq? result #f)))
+            ;; Store in compile-time constant table
+            (const-table.register! name (core.make-bits 32) result)
+            ;; NOTE: unsupported expressions reach here.
+            ;; Will be replaced by full L1 interpreter eval when needed.
+            (error (string-append "unsupported let binding expression for: "
+                                   (symbol->string name))))))))

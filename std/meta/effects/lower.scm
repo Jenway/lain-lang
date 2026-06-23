@@ -66,14 +66,14 @@
                 ;; Build field values in order
                 (let build ((i 0) (field-pairs '()))
                   (if (>= i num-fields)
-                      (ir.type.aggregate-layout block total-size (reverse field-pairs))
+                      (core.aggregate-layout! block total-size (reverse field-pairs))
                       (let* ((offset-type (list-ref offsets i))
                              (offset (car offset-type))
                              (field-ty (cdr offset-type))
                              (val
                               (if (= i flag-index)
                                   ;; Flag field: set to 1
-                                  (ir.expr.const block field-ty 1)
+                                  (core.const-bits! block field-ty 1)
                                   (let* ((arg-pos (effect.index-position i arg-indices)))
                                     (if (>= arg-pos 0)
                                         ;; This field holds an operation argument
@@ -81,7 +81,7 @@
                                           (list-ref args arg-pos)
                                           field-ty locals)
                                         ;; Plain field: zero
-                                        (ir.expr.const block field-ty 0))))))
+                                        (core.const-bits! block field-ty 0))))))
                         (build (+ i 1) (cons (cons offset val) field-pairs)))))))))))
 
 (define-pass (core-expr-lowerer |middle.expr.resume| block expr expected-ty locals)

@@ -47,7 +47,7 @@
     ;; from the operation's parameter types (future work).
     (if (null? operations)
         (effect.register-layout! name '|default|
-          (list (ir.type.bits 8) (ir.type.bits 32))
+          (list (core.make-bits 8) (core.make-bits 32))
           0    ;; flag-index: field 0 is the flag
           '()) ;; no arg indices
         unit)

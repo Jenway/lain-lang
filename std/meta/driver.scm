@@ -7,6 +7,9 @@
 (load "std/meta/prelude/quote.scm")
 (load "std/meta/prelude/check.scm")
 
+;; ═══ 0.5. 编译器全局状态 ═══
+(load "std/meta/compiler-state.scm")
+
 ;; ═══ 1. pipeline 调度 + core 调度总线 ═══
 (load "std/meta/pipeline/driver.scm")
 (load "std/meta/pipeline/lower.scm")

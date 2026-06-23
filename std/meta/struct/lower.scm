@@ -40,7 +40,7 @@
          (total-size (struct-total-size name))
          (layout (struct.lower-literal-fields block name fields locals (list))))
     ;; Integer-based aggregate: C only sees total-size + (offset . value) pairs
-    (ir.type.aggregate-layout block total-size layout)))
+    (core.aggregate-layout! block total-size layout)))
 
 (define-pass (core-expr-inferer |middle.expr.struct| expr locals)
   (let* ((payload (middle.payload expr))
@@ -56,7 +56,7 @@
          (struct-name (struct-type-name base-ty))
          (offset (struct-field-offset struct-name field-name))
          (field-ty (struct-field-type struct-name field-name)))
-    (ir.expr.field-offset block
+    (core.field-offset! block
       (core.lower-expr block base-expr base-ty locals)
       offset field-ty)))
 
