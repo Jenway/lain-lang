@@ -91,10 +91,14 @@ static sexp sexp_type_registered(sexp ctx, sexp self, sexp_sint_t n,
   } else if (strcmp(name, "i8") == 0 || strcmp(name, "u8") == 0) {
     ty->kind = TY_BITS;
     ty->width = 8;
+  } else if (strcmp(name, "i16") == 0 || strcmp(name, "u16") == 0) {
+    ty->kind = TY_BITS;
+    ty->width = 16;
   } else if (strcmp(name, "i32") == 0 || strcmp(name, "u32") == 0) {
     ty->kind = TY_BITS;
     ty->width = 32;
-  } else if (strcmp(name, "i64") == 0 || strcmp(name, "u64") == 0) {
+  } else if (strcmp(name, "i64") == 0 || strcmp(name, "u64") == 0 ||
+             strcmp(name, "usize") == 0) {
     ty->kind = TY_BITS;
     ty->width = 64;
   } else if (strcmp(name, "addr") == 0 || strcmp(name, "opaque") == 0 || strcmp(name, "CStr") == 0) {
@@ -652,6 +656,12 @@ static sexp sexp_core_type_is_void(sexp ctx, sexp self, sexp_sint_t n,
                                    sexp arg_ty) {
   L1Type *ty = (L1Type *)sexp_cpointer_value(arg_ty);
   return (ty && ty->kind == TY_UNIT) ? SEXP_TRUE : SEXP_FALSE;
+}
+
+static sexp sexp_core_type_is_addr(sexp ctx, sexp self, sexp_sint_t n,
+                                   sexp arg_ty) {
+  L1Type *ty = (L1Type *)sexp_cpointer_value(arg_ty);
+  return (ty && ty->kind == TY_ADDR) ? SEXP_TRUE : SEXP_FALSE;
 }
 
 

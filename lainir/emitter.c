@@ -146,6 +146,14 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
         fprintf(out, "__builtin_bswap64(");
         emit_c_expr(expr->data.primitive.operands[0], out);
         fprintf(out, ")");
+      } else if (strcmp(op, "int2ptr") == 0) {
+        fprintf(out, "(void*)(uintptr_t)(");
+        emit_c_expr(expr->data.primitive.operands[0], out);
+        fprintf(out, ")");
+      } else if (strcmp(op, "ptr2int") == 0) {
+        fprintf(out, "(uint64_t)(uintptr_t)(");
+        emit_c_expr(expr->data.primitive.operands[0], out);
+        fprintf(out, ")");
       } else {
         fprintf(out, "0");
       }

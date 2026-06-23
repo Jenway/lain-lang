@@ -88,7 +88,10 @@
 (define type.floats  core.make-floats)
 (define type.simd    core.make-simd)
 (define type.never   core.make-unit)
-(define type.unit?   core.type-is-void!)
+(define (type.unit? ty)
+  (if (struct-type? ty)
+      #f
+      (core.type-is-void! ty)))
 (define type.eq?     equal?)
 
 (define (type.raw-ptr . args)        (core.make-addr))
