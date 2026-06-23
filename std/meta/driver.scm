@@ -28,6 +28,7 @@
 ;; ═══ 2. 表达式层 ═══
 (load "std/meta/expr/hooks.scm")
 (load "std/meta/path/parse.scm")
+(load "std/meta/path/lower.scm")
 (load "std/meta/expr/atom.scm")
 (load "std/meta/types/parse.scm")
 (load "std/meta/types/normalize.scm")

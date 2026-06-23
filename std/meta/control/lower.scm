@@ -218,3 +218,7 @@
          (tag-val (core.field-offset! block scrutinee-val 0 tag-ty)))
     (match.lower-arms-helper block tag-val arms ret-ty locals)))
 
+;; ── if 表达式降级 (stub) ──
+(define-pass (core-expr-lowerer |control.if| block expr expected-ty locals)
+  (core.unsupported-expr '|if-expression|))
+

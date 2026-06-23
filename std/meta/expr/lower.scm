@@ -7,11 +7,6 @@
 
 ;; ── 辅助函数 ──
 
-(define (core.path-leaf path)
-  (if (list.empty? (list.rest path))
-      (list.first path)
-      (core.path-leaf (list.rest path))))
-
 (define (core.flatten-path-fn-name path)
   (if (list.empty? (list.rest path))
       (list.first path)
@@ -137,23 +132,6 @@
 ;; pass: core-expr-lowerer |path.access|
 ;; reads: compiler-state.const-table (via const-table.lookup)
 ;; calls: import.resolve-qualified-symbol, core.local-lookup, core.const-bits!
-(define-pass (core-expr-lowerer |path.access| block expr expected-ty locals)
-  (let* ((payload (middle.payload expr))
-         (path (optional.value
-                 (record.get payload '|path|)))
-         (imported (import.resolve-qualified-symbol path)))
-    (if imported
-        (core.function-by-name imported)
-        ;; Check compile-time constant table for top-level let bindings
-        (let* ((leaf (core.path-leaf path))
-               (const (const-table.lookup leaf)))
-          (if const
-              (let* ((const-ty (cadr const))
-                     (const-val (caddr const)))
-                (core.const-bits! block const-ty const-val))
-              (core.local-lookup locals leaf))))))
-
-
 ;; pass: calls core.call-or-eval (not a define-pass, a helper)
 ;; reads: compiler-state.comptime-fns (via comptime-fns.member?)
 ;; calls: core.eval!, core.call!, core.lower-args, core.function-param-types
@@ -315,43 +293,6 @@
         (record.get payload '|call|))
       expected-ty
       locals)))
-
-(define-pass (core-expr-lowerer |control.if| block expr expected-ty locals)
-  (core.unsupported-expr '|if-expression|))
-
-;; ── ? 操作符 lowering: check flag → propagate or unwrap ──
-;; Uses the Throws effect layout from effects/layout.scm.
-;; Layout: {flag: u8, value: T, error: E} — flag at index 0, value at index 1.
-(define-pass (core-expr-lowerer |operators.question| block expr expected-ty locals)
-  (let* ((payload (middle.payload expr))
-         (inner-expr (optional.value (record.get payload '|expr|)))
-         (call-expr (core.lower-expr block inner-expr expected-ty locals))
-         ;; Query Throws layout for flag field info
-         (throws-layout (effect.lookup-layout '|Throws| '|throw|))
-         (offsets    (if throws-layout (cadr throws-layout) #f))
-         (flag-index (if throws-layout (caddr throws-layout) 0))
-         ;; flag field at flag-index
-         (flag-offset-ty (if offsets (list-ref offsets flag-index) (cons 0 (core.make-bits 8))))
-         (flag-offset (car flag-offset-ty))
-         (flag-ty     (cdr flag-offset-ty))
-         ;; value field at index 1
-         (value-offset-ty (if offsets (list-ref offsets 1) (cons 4 (core.make-bits 32))))
-         (value-offset (car value-offset-ty))
-         (flag-val (core.field-offset! block call-expr flag-offset flag-ty))
-         (function (core.block-function block))
-         (cont-block (core.append-block! function))
-         (err-block (core.append-block! function))
-         (flag-zero (core.const-bits! block flag-ty 0))
-         (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1))))
-    (core.cond-branch! block is-ok cont-block err-block)
-    ;; Error path: return the product (propagate error)
-    (core.set-current-block! err-block)
-    (core.return-value! err-block call-expr)
-    ;; Ok path: extract value field
-    (core.set-current-block! cont-block)
-    (let* ((value-ty (core.product-value-type expected-ty))
-           (value-val (core.field-offset! cont-block call-expr value-offset value-ty)))
-      value-val)))
 
 ;; ── handle lowering: generic, layout-driven ──
 ;; For any effect E with handler fn H, given `handle E with H { body }`:
