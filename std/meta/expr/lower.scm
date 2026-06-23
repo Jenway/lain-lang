@@ -319,18 +319,6 @@
 (define-pass (core-expr-lowerer |middle.expr.if| block expr expected-ty locals)
   (core.unsupported-expr '|if-expression|))
 
-(define-pass (core-expr-lowerer |middle.expr.borrow| block expr expected-ty locals)
-  (core.unsupported-expr '|borrow-expression|))
-
-(define-pass (core-expr-lowerer |middle.expr.perform| block expr expected-ty locals)
-  (core.unsupported-expr '|perform-expression|))
-
-(define-pass (core-expr-lowerer |middle.expr.resume| block expr expected-ty locals)
-  (core.unsupported-expr '|resume-expression|))
-
-(define-pass (core-expr-lowerer |middle.expr.handle| block expr expected-ty locals)
-  (core.unsupported-expr '|handle-expression|))
-
 ;; ── ? 操作符 lowering: check flag → propagate or unwrap ──
 ;; Uses the Throws effect layout from effects/layout.scm.
 ;; Layout: {flag: u8, value: T, error: E} — flag at index 0, value at index 1.

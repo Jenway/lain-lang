@@ -13,6 +13,15 @@
 (define __lain-passes '())
 
 (define (define-pass* stage kind body)
+  ;; 检测重复注册 — 同 (stage, kind) 被多次 define-pass 一定是 bug
+  (let loop ((passes __lain-passes))
+    (if (not (null? passes))
+        (let* ((entry (car passes))
+               (e-stage (car entry))
+               (e-kind (car (cdr entry))))
+          (if (and (equal? e-stage stage) (equal? e-kind kind))
+              (error "DUPLICATE PASS REGISTRATION" stage kind))
+          (loop (cdr passes)))))
   (set! __lain-passes
     (cons (cons stage (cons kind (cons body '()))) __lain-passes)))
 
