@@ -40,18 +40,3 @@
   (let* ((payload (middle.payload expr))
          (ret-ty (optional.value (record.get payload '|ret-ty|))))
     (core.lower-type ret-ty)))
-
-(define-pass (core-expr-inferer |middle.expr.if| expr locals)
-  (type.unsupported '|if-expression-type|))
-
-(define-pass (core-expr-inferer |middle.expr.borrow| expr locals)
-  (type.unsupported '|borrow-expression-type|))
-
-(define-pass (core-expr-inferer |middle.expr.perform| expr locals)
-  (type.unsupported '|perform-expression-type|))
-
-(define-pass (core-expr-inferer |middle.expr.resume| expr locals)
-  (type.unsupported '|resume-expression-type|))
-
-(define-pass (core-expr-inferer |middle.expr.handle| expr locals)
-  (type.unsupported '|handle-expression-type|))
