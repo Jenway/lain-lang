@@ -97,7 +97,7 @@ static sexp sexp_type_registered(sexp ctx, sexp self, sexp_sint_t n,
   } else if (strcmp(name, "i64") == 0 || strcmp(name, "u64") == 0) {
     ty->kind = TY_BITS;
     ty->width = 64;
-  } else if (strcmp(name, "addr") == 0) {
+  } else if (strcmp(name, "addr") == 0 || strcmp(name, "opaque") == 0 || strcmp(name, "CStr") == 0) {
     ty->kind = TY_ADDR;
   } else {
     ty->kind = TY_BITS;

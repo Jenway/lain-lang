@@ -22,7 +22,14 @@
 
 (define (struct-type-name ty)
   (if (struct-type? ty) (cdr ty)
-      (error "not a struct type")))
+      ;; Unwrap ref types
+      (let* ((kind (raw.kind ty)))
+        (if (or (symbol=? kind '|middle.ty.ref|)
+                (symbol=? kind '|middle.ty.raw-ptr|))
+            (let* ((payload (raw.payload ty))
+                   (inner (optional.value (record.get payload '|inner|))))
+              (struct-type-name inner))
+            (error "not a struct type")))))
 
 ;; ── Function return type table (keeps struct identity out of C) ──
 

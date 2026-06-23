@@ -36,6 +36,7 @@
 (load "std/meta/expr/args.scm")
 (load "std/meta/expr/prec.scm")
 (load "std/meta/expr/call.scm")
+(load "std/meta/expr/cast.scm")
 (load "std/meta/expr/normalize.scm")
 (load "std/meta/expr/lower.scm")
 (load "std/meta/expr/infer.scm")
