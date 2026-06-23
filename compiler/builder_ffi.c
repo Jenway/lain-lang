@@ -196,6 +196,21 @@ static sexp sexp_core_store(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,
   return SEXP_VOID;
 }
 
+// LEA: base + offset (index=0, scale=1)
+static sexp sexp_core_lea(sexp ctx, sexp self, sexp_sint_t n,
+                          sexp arg_block, sexp arg_base, sexp arg_offset) {
+  L1Block *block = (L1Block *)sexp_cpointer_value(arg_block);
+  L1Expr *base = (L1Expr *)sexp_cpointer_value(arg_base);
+  uint32_t offset = sexp_unbox_fixnum(arg_offset);
+  L1Expr *expr = malloc(sizeof(L1Expr));
+  expr->kind = EXPR_LEA;
+  expr->data.lea.base = base;
+  expr->data.lea.idx = NULL;
+  expr->data.lea.scale = 0;
+  expr->data.lea.offset = offset;
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
+}
+
 static sexp sexp_core_begin_function(sexp ctx, sexp self, sexp_sint_t n,
                                      sexp arg_name, sexp arg_param_types,
                                      sexp arg_ret_ty) {

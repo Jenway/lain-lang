@@ -518,6 +518,7 @@ void native_register_core_ffi(
   REG("core.const-string!", 3, sexp_core_const_string);
   REG("core.load!", 3, sexp_core_load);
   REG("core.store!", 3, sexp_core_store);
+  REG("core.lea!", 3, sexp_core_lea);
   REG("core.begin-function!", 3, sexp_core_begin_function);
   REG("core.function-by-name", 1, sexp_core_function_by_name);
   REG("core.append-block!", 1, sexp_core_append_block);
