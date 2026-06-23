@@ -87,7 +87,7 @@
 ;; Throws::throw(error: E) -> !
 ;; Product: {flag: u8, value: i32, error: i32}
 (effect.register-layout! '|Throws| '|throw|
-  (list (ir.type.bits 8) (ir.type.bits 32) (ir.type.bits 32))
+  (list (core.make-bits 8) (core.make-bits 32) (core.make-bits 32))
   0    ;; flag-index: field 0 is the flag
   '(2)) ;; arg-indices: field 2 holds the error argument
 
@@ -96,7 +96,7 @@
 ;; Also register Suspend as a valid effect constructor (no-arg ctor)
 (register-effect-ctor! '|Suspend| 0)
 (effect.register-layout! '|Suspend| '|suspend|
-  (list (ir.type.bits 8) (ir.type.addr))
+  (list (core.make-bits 8) (core.make-addr))
   0
   '(1))
 
@@ -104,14 +104,14 @@
 ;; Product: {flag: u8, task_fn: addr}
 (register-effect-ctor! '|Spawn| 0)
 (effect.register-layout! '|Spawn| '|spawn|
-  (list (ir.type.bits 8) (ir.type.addr))
+  (list (core.make-bits 8) (core.make-addr))
   0
   '(1))
 
 ;; ── Helper: build a product from field values ──
 (define (effect.build-product block field-types field-values)
   "Given parallel lists of field types and lowered L1Expr values,
-   compute the product-layout and emit an ir.type.aggregate-layout."
+   compute the product-layout and emit an core.aggregate-layout!."
   (let* ((layout (product-layout field-types))
          (total-size (car layout))
          (offsets (cdr layout))
@@ -120,4 +120,4 @@
          (pairs (map (lambda (off pair val)
                        (cons (car off) val))
                      offsets field-values)))
-    (ir.type.aggregate-layout block total-size pairs)))
+    (core.aggregate-layout! block total-size pairs)))

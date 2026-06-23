@@ -561,6 +561,7 @@ void native_register_core_ffi(
   REG("core.emit-interface!", 1, sexp_core_emit_interface);
   REG("core.execute-lainir!", 2, sexp_core_execute_lainir);
   REG("core.eval!", 3, sexp_core_eval);
+  REG("core.eval-value!", 1, sexp_core_eval_value);
 #undef REG
 }
 

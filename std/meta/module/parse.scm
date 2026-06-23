@@ -227,10 +227,10 @@
   unit)
 
 (define (module.declare-imported-fn-alias! alias fn-name)
-  (let* ((sub (ir.sub.by-name fn-name))
-         (ret-ty (ir.sub.ret-type sub))
-         (param-tys (ir.sub.params sub))
-         (link-name (ir.sub.link-name sub)))
+  (let* ((sub (core.function-by-name fn-name))
+         (ret-ty (core.function-return-type sub))
+         (param-tys (core.function-param-types sub))
+         (link-name (core.function-link-name sub)))
     (host.new-extern alias link-name param-tys ret-ty)))
 
 (define-pass (core-declarer |middle.meta-alias| item)

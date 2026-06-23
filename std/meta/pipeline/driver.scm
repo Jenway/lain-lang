@@ -40,7 +40,7 @@
 ;; Phase 1: Peek root group 的第一个标识符，然后分发 form-parser
 ;; 关键：form-parser 接收原始的 root group（不是 cursor！）
 ;; form-parser 内部会调用 syntax.form-cursor 创建新的 cursor 从零开始解析
-;; 注意：不清空 *lain-declarations*，允许调用者在之前累积声明
+;; 注意：不清空 (declarations.all)，允许调用者在之前累积声明
 (define (driver.parse-and-declare root-group)
   (let* ((peek-cursor (syntax.group-cursor root-group))
          ;; 跳过所有 @attributes 以找到真正的声明关键字
@@ -56,7 +56,7 @@
           (if parser
               (begin
                 (parser root-group)
-                (if (null? *lain-declarations*)
+                (if (null? (declarations.all))
                     (error "form-parser produced no declarations")
                     unit))
               (driver.parse-as-implicit-main root-group))))))
@@ -78,9 +78,9 @@
                   (record.field '|body| (optional.some block))))))
     (decl.define! '|fn| '|main| sig)))
 
-;; Phase 2: 遍历 *lain-declarations*，对每条声明调用 raw-normalizer。
+;; Phase 2: 遍历 (declarations.all)，对每条声明调用 raw-normalizer。
 (define (driver.normalize-decls)
-  (driver.normalize-decls-from *lain-declarations*))
+  (driver.normalize-decls-from (declarations.all)))
 
 ;; 从给定的 decls 列表进行 normalize（供递归导入使用）
 (define (driver.normalize-decls-from decls)
@@ -115,9 +115,9 @@
 ;; 主入口: compile-group-to-core（支持递归导入）
 ;; ---------------------------------------------------------------------------
 
-;; 收集在 known-decls 之后新增到 *lain-declarations* 前面的声明
+;; 收集在 known-decls 之后新增到 (declarations.all) 前面的声明
 (define (driver.collect-new-declarations known-decls)
-  (let loop ((all *lain-declarations*) (acc (list)))
+  (let loop ((all (declarations.all)) (acc (list)))
     (if (null? all)
         (list.reverse acc)
         (if (driver.decl-in-list? (car all) known-decls)
@@ -126,21 +126,21 @@
 
 ;; 收集所有 middle items（包括递归导入的模块）
 (define (driver.collect-all-middle-items root-group)
-  ;; 清空 *lain-declarations*，开始全新的编译
-  (set! *lain-declarations* (list))
+  ;; 清空 (declarations.all)，开始全新的编译
+  (declarations.reset!)
   ;; Phase 1: parse（会递归触发 import 的 core-declarer，但 core-declarer
   ;; 在 Phase 3 才运行，所以这里只收集主文件的声明）
   (driver.parse-and-declare root-group)
   ;; 保存主文件声明列表
-  (let* ((main-decls (list.reverse *lain-declarations*))
+  (let* ((main-decls (list.reverse (declarations.all)))
          ;; Phase 2: normalize 主文件声明
          (main-middle (driver.normalize-decls-from main-decls))
          ;; Phase 3: declare-core（会触发 import 的 core-declarer 递归编译）
          ;; 注意：driver.declare-core 会调用 core-declarer for |middle.import|，
-         ;; 这会在 *lain-declarations* 前面追加被导入模块的声明
+         ;; 这会在 (declarations.all) 前面追加被导入模块的声明
          (_ (driver.declare-core main-middle))
-         ;; 现在 *lain-declarations* = imported decls + main decls
-         (all-decls (list.reverse *lain-declarations*))
+         ;; 现在 (declarations.all) = imported decls + main decls
+         (all-decls (list.reverse (declarations.all)))
          ;; 找出被导入模块新增的声明（不在 main-decls 中的）
          (imported-decls (driver.filter-new-decls all-decls main-decls (list)))
          ;; Phase 2b: normalize 导入模块的声明
@@ -170,8 +170,8 @@
     ;; Phase 4: lower all middle items
     (driver.lower-core all-middle-items)
     ;; Check for errors: if any diagnostic was raised, signal failure
-    (if (> *error-count* 0)
+    (if (> (errors.total) 0)
         (error (string-append "compilation failed with "
-                              (number->string *error-count*)
+                              (number->string (errors.total))
                               " error(s)"))
         0)))

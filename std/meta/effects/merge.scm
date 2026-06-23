@@ -34,8 +34,8 @@
       (let* ((cached (effect.assoc effect-names *merged-info*)))
         (if cached
             (cdr cached)
-            (let* ((field-types (list (ir.type.bits 8)    ;; flag
-                                      (ir.type.bits 8)    ;; discriminator
+            (let* ((field-types (list (core.make-bits 8)    ;; flag
+                                      (core.make-bits 8)    ;; discriminator
                                       raw-ret))           ;; shared value
                    (base-count 3)  ;; flag + disc + value = 3 prefix fields
                    ;; Process effects

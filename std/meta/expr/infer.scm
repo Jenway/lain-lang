@@ -10,7 +10,7 @@
          (path (optional.value (record.get payload '|path|)))
          (imported (import.resolve-qualified-symbol path)))
     (if imported
-        (ir.sub.ret-type (ir.sub.by-name imported))
+        (core.function-return-type (core.function-by-name imported))
         (core.local-type locals (core.path-leaf path)))))
 
 (define-pass (core-expr-inferer |middle.expr.call| expr locals)
@@ -19,12 +19,12 @@
          (callee-payload (middle.payload callee))
          (path (optional.value (record.get callee-payload '|path|)))
          (fn-name (core.path-fn-name path)))
-    (ir.sub.ret-type (ir.sub.by-name fn-name))))
+    (core.function-return-type (core.function-by-name fn-name))))
 
 (define-pass (core-expr-inferer |middle.expr.method-call| expr locals)
   (let* ((payload (middle.payload expr))
          (method (optional.value (record.get payload '|method|))))
-    (ir.sub.ret-type (ir.sub.by-name method))))
+    (core.function-return-type (core.function-by-name method))))
 
 (define-pass (core-expr-inferer |middle.expr.builtin| expr locals)
   (let* ((payload (middle.payload expr))

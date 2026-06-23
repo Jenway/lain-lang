@@ -35,7 +35,7 @@
 
 (define (core.local-lookup locals name)
   (if (list.empty? locals)
-      (ir.sub.by-name name)
+      (core.function-by-name name)
       (let* ((local (list.first locals))
              (local-name (optional.value
                            (record.get local '|name|))))
@@ -46,8 +46,8 @@
 
 (define (core.local-type locals name)
   (if (list.empty? locals)
-      (ir.sub.ret-type
-        (ir.sub.by-name name))
+      (core.function-return-type
+        (core.function-by-name name))
       (let* ((local (list.first locals))
              (local-name (optional.value
                            (record.get local '|name|))))
@@ -95,10 +95,10 @@
   ;; Structured if lowering: uses INST_IF instead of manual cond_br + block switching.
   ;; Flow:
   ;;   1. Evaluate condition in parent block
-  ;;   2. ir.inst.begin-if → creates then/else scratch blocks
+  ;;   2. core.begin-if! → creates then/else scratch blocks
   ;;   3. Lower then-body into then-scratch
   ;;   4. Lower else-body into else-scratch
-  ;;   5. ir.inst.end-if → builds INST_IF, appends to parent block, frees scratch blocks
+  ;;   5. core.end-if! → builds INST_IF, appends to parent block, frees scratch blocks
   (let* ((payload (middle.payload expr))
          (condition (optional.value
                       (record.get payload '|condition|)))
@@ -110,11 +110,11 @@
          (condition-value
            (core.lower-expr block condition (type.bits 1) locals))
          ;; Create scratch blocks
-         (scratch-pair (ir.inst.begin-if block condition-value))
+         (scratch-pair (core.begin-if! block condition-value))
          (then-scratch (car scratch-pair))
          (else-scratch (car (cdr scratch-pair))))
     ;; Lower then-body into then-scratch
-    (ir.block.set! then-scratch)
+    (core.set-current-block! then-scratch)
     (core.lower-stmts
       then-scratch
       (optional.value
@@ -122,7 +122,7 @@
       expected-ty
       locals)
     ;; Lower else-body into else-scratch
-    (ir.block.set! else-scratch)
+    (core.set-current-block! else-scratch)
     (core.lower-stmts
       else-scratch
       (optional.value
@@ -130,34 +130,40 @@
       expected-ty
       locals)
     ;; Build INST_IF in parent block
-    (ir.inst.end-if block condition-value then-scratch else-scratch)))
+    (core.end-if! block condition-value then-scratch else-scratch)))
 
 ;; ── core-expr-lowerer 通道 ──
 
+;; pass: core-expr-lowerer |middle.expr.path|
+;; reads: compiler-state.const-table (via const-table.lookup)
+;; calls: import.resolve-qualified-symbol, core.local-lookup, core.const-bits!
 (define-pass (core-expr-lowerer |middle.expr.path| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (path (optional.value
                  (record.get payload '|path|)))
          (imported (import.resolve-qualified-symbol path)))
     (if imported
-        (ir.sub.by-name imported)
+        (core.function-by-name imported)
         ;; Check compile-time constant table for top-level let bindings
         (let* ((leaf (core.path-leaf path))
-               (const (const.lookup leaf)))
+               (const (const-table.lookup leaf)))
           (if const
               (let* ((const-ty (cadr const))
                      (const-val (caddr const)))
-                (ir.expr.const block const-ty const-val))
+                (core.const-bits! block const-ty const-val))
               (core.local-lookup locals leaf))))))
 
 
-;; Helper: dispatch to ir.expr.eval for comptime fns, ir.expr.call otherwise
+;; pass: calls core.call-or-eval (not a define-pass, a helper)
+;; reads: compiler-state.comptime-fns (via comptime-fns.member?)
+;; calls: core.eval!, core.call!, core.lower-args, core.function-param-types
+;; Helper: dispatch to core.eval! for comptime fns, core.call! otherwise
 (define (core.call-or-eval block fn-name function args locals)
-  (if (comptime? fn-name)
-      (ir.expr.eval block function
-        (core.lower-args block args (ir.sub.params function) locals (list)))
-      (ir.expr.call block function
-        (core.lower-args block args (ir.sub.params function) locals (list)))))
+  (if (comptime-fns.member? fn-name)
+      (core.eval! block function
+        (core.lower-args block args (core.function-param-types function) locals (list)))
+      (core.call! block function
+        (core.lower-args block args (core.function-param-types function) locals (list)))))
 
 (define-pass (core-expr-lowerer |middle.expr.call| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
@@ -175,7 +181,7 @@
       (let* ((intrinsic (core.invoke-intrinsic! fn-name)))
         (if (optional.some? intrinsic)
             ((optional.value intrinsic) block args expected-ty locals)
-            (let* ((function (ir.sub.by-name fn-name)))
+            (let* ((function (core.function-by-name fn-name)))
               (core.call-or-eval block fn-name function args locals)))))))
 
 (define-pass (core-expr-lowerer |middle.expr.method-call| block expr expected-ty locals)
@@ -188,25 +194,25 @@
                  (record.get payload '|args|))))
     (cond
       ((symbol=? method '|popcount|)
-       (ir.expr.primitive
+       (core.primitive!
          block
          '|cpu.popcount|
          (list (core.lower-expr block receiver expected-ty locals))
          expected-ty))
       ((symbol=? method '|leading_zeros|)
-       (ir.expr.primitive
+       (core.primitive!
          block
          '|cpu.leading-zeros|
          (list (core.lower-expr block receiver expected-ty locals))
          expected-ty))
       ((symbol=? method '|bswap|)
-       (ir.expr.primitive
+       (core.primitive!
          block
          '|cpu.bswap|
          (list (core.lower-expr block receiver expected-ty locals))
          expected-ty))
       ((symbol=? method '|rotate_left|)
-       (ir.expr.primitive
+       (core.primitive!
          block
          '|cpu.rotate-left|
          (list
@@ -214,7 +220,7 @@
            (core.lower-expr block (list.first args) expected-ty locals))
          expected-ty))
       ((symbol=? method '|extract_bits|)
-       (ir.expr.primitive
+       (core.primitive!
          block
          '|cpu.extract-bits|
          (list
@@ -227,9 +233,9 @@
          (cond
            ;; 接收者不是变量路径 — 静态分发
            ((not (symbol=? receiver-kind '|middle.expr.path|))
-            (let* ((function (ir.sub.by-name method)))
-              (let* ((param-types (ir.sub.params function)))
-                (ir.expr.call
+            (let* ((function (core.function-by-name method)))
+              (let* ((param-types (core.function-param-types function)))
+                (core.call!
                   block
                   function
                   (list.cons
@@ -258,9 +264,9 @@
                    block receiver method args locals))
                 (else
                  ;; 静态分发回退
-                 (let* ((function (ir.sub.by-name method)))
-                   (let* ((param-types (ir.sub.params function)))
-                     (ir.expr.call
+                 (let* ((function (core.function-by-name method)))
+                   (let* ((param-types (core.function-param-types function)))
+                     (core.call!
                        block
                        function
                        (list.cons
@@ -283,7 +289,7 @@
          (args (optional.value (record.get payload '|args|))))
     (let* ((lowered-fn-ptr (core.lower-expr block fn-ptr (type.addr) locals))
            (lowered-args (core.lower-args-by-inference block args locals (list))))
-      (ir.expr.call-indirect block lowered-fn-ptr ret-ty lowered-args))))
+      (core.call-indirect! block lowered-fn-ptr ret-ty lowered-args))))
 
 (define-pass (core-expr-lowerer |middle.expr.builtin| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
@@ -337,26 +343,26 @@
          (offsets    (if throws-layout (cadr throws-layout) #f))
          (flag-index (if throws-layout (caddr throws-layout) 0))
          ;; flag field at flag-index
-         (flag-offset-ty (if offsets (list-ref offsets flag-index) (cons 0 (ir.type.bits 8))))
+         (flag-offset-ty (if offsets (list-ref offsets flag-index) (cons 0 (core.make-bits 8))))
          (flag-offset (car flag-offset-ty))
          (flag-ty     (cdr flag-offset-ty))
          ;; value field at index 1
-         (value-offset-ty (if offsets (list-ref offsets 1) (cons 4 (ir.type.bits 32))))
+         (value-offset-ty (if offsets (list-ref offsets 1) (cons 4 (core.make-bits 32))))
          (value-offset (car value-offset-ty))
-         (flag-val (ir.expr.field-offset block call-expr flag-offset flag-ty))
-         (function (ir.block.parent block))
-         (cont-block (ir.sub.block function))
-         (err-block (ir.sub.block function))
-         (flag-zero (ir.expr.const block flag-ty 0))
-         (is-ok (ir.expr.primitive block '|integer.eq| (list flag-val flag-zero) (ir.type.bits 1))))
-    (ir.term.cond-branch block is-ok cont-block err-block)
+         (flag-val (core.field-offset! block call-expr flag-offset flag-ty))
+         (function (core.block-function block))
+         (cont-block (core.append-block! function))
+         (err-block (core.append-block! function))
+         (flag-zero (core.const-bits! block flag-ty 0))
+         (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1))))
+    (core.cond-branch! block is-ok cont-block err-block)
     ;; Error path: return the product (propagate error)
-    (ir.block.set! err-block)
-    (ir.term.return err-block call-expr)
+    (core.set-current-block! err-block)
+    (core.return-value! err-block call-expr)
     ;; Ok path: extract value field
-    (ir.block.set! cont-block)
+    (core.set-current-block! cont-block)
     (let* ((value-ty (core.product-value-type expected-ty))
-           (value-val (ir.expr.field-offset cont-block call-expr value-offset value-ty)))
+           (value-val (core.field-offset! cont-block call-expr value-offset value-ty)))
       value-val)))
 
 ;; ── handle lowering: generic, layout-driven ──
@@ -377,7 +383,7 @@
          (handler-payload (middle.payload handler-expr))
          (handler-path (optional.value (record.get handler-payload '|path|)))
          (handler-name (if handler-path (list.first handler-path) '|unknown|))
-         (handler-fn (ir.sub.by-name handler-name))
+         (handler-fn (core.function-by-name handler-name))
          ;; Extract effect info — lookup in registry
          (effect-name (optional.value (record.get payload '|effect|)))
          (layout (effect.lookup-layout effect-name #f)))
@@ -416,32 +422,32 @@
                  ;; Phase 2: the handle absorbs this effect — consume it
                  (_consume (propagate.consume! effect-name))
                  ;; Extract flag field
-                 (flag-val (ir.expr.field-offset block call-expr flag-offset flag-ty))
+                 (flag-val (core.field-offset! block call-expr flag-offset flag-ty))
                  ;; Create ok/err blocks
-                 (function (ir.block.parent block))
-                 (ok-block (ir.sub.block function))
-                 (err-block (ir.sub.block function))
+                 (function (core.block-function block))
+                 (ok-block (core.append-block! function))
+                 (err-block (core.append-block! function))
                  ;; Branch on flag == 0
-                 (flag-zero (ir.expr.const block flag-ty 0))
-                 (is-ok (ir.expr.primitive block '|integer.eq| (list flag-val flag-zero) (ir.type.bits 1))))
-            (ir.term.cond-branch block is-ok ok-block err-block)
+                 (flag-zero (core.const-bits! block flag-ty 0))
+                 (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1))))
+            (core.cond-branch! block is-ok ok-block err-block)
             ;; ── Error path: extract all arg fields, call handler ──
-            (ir.block.set! err-block)
+            (core.set-current-block! err-block)
             (let* ((arg-vals
                      (map (lambda (idx)
                             (let* ((off-ty (list-ref offsets idx)))
-                              (ir.expr.field-offset err-block call-expr (car off-ty) (cdr off-ty))))
+                              (core.field-offset! err-block call-expr (car off-ty) (cdr off-ty))))
                           arg-indices))
-                   (handler-ret (ir.expr.call err-block handler-fn arg-vals)))
-              (ir.term.return err-block handler-ret))
+                   (handler-ret (core.call! err-block handler-fn arg-vals)))
+              (core.return-value! err-block handler-ret))
             ;; ── Ok path: extract value fields, return ──
-            (ir.block.set! ok-block)
+            (core.set-current-block! ok-block)
             (if (null? value-indices)
                 ;; No value fields — return void (unit)
-                (ir.term.return-none ok-block)
+                (core.return-none! ok-block)
                 ;; Return the first value field
                 ;; (multi-value effects would build an aggregate here)
                 (let* ((val-idx (car value-indices))
                        (off-ty (list-ref offsets val-idx))
-                       (val-expr (ir.expr.field-offset ok-block call-expr (car off-ty) (cdr off-ty))))
-                  (ir.term.return ok-block val-expr))))))))
+                       (val-expr (core.field-offset! ok-block call-expr (car off-ty) (cdr off-ty))))
+                  (core.return-value! ok-block val-expr))))))))

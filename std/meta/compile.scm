@@ -14,18 +14,17 @@
         (error "compile: empty or invalid source")
         (begin
           ;; 2. Reset pipeline state
-          (set! *lain-declarations* (list))
-          (set! *error-count* 0)
+          (compiler-state.reset!)
           ;; 3. Parse all forms
           (for-each driver.parse-and-declare forms)
           ;; 4. Run full pipeline (normalize → declare → lower)
-          (let* ((all-decls (reverse *lain-declarations*))
+          (let* ((all-decls (reverse (declarations.all)))
                  (all-middle (driver.normalize-decls-from all-decls))
                  (_ (driver.declare-core all-middle))
                  (_ (driver.lower-core all-middle)))
             ;; 5. Check errors
-            (if (> *error-count* 0)
+            (if (> (errors.total) 0)
                 (error (string-append "compilation failed with "
-                                      (number->string *error-count*)
+                                      (number->string (errors.total))
                                       " error(s)"))
                 0))))))

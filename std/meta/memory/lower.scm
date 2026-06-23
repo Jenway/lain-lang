@@ -4,21 +4,14 @@
 ;; 内存/指针 — 类型降级 + borrow 表达式降级
 ;; ═══════════════════════════════════════════════════════════
 
-;; ── 类型降级: 指针/内存类型 ──
-
-(define-pass (core-type-lowerer |middle.ty.raw-ptr| ty)
-  (let* ((payload (middle.payload ty))
-         (mutable (optional.value (record.get payload '|mutable|)))
-         (pointee (core.lower-type
-                    (optional.value (record.get payload '|pointee|)))))
-    (type.raw-ptr mutable pointee)))
+;; ── 类型降级 ──
 
 (define-pass (core-type-lowerer |middle.ty.ref| ty)
   (let* ((payload (middle.payload ty))
          (mutable (optional.value (record.get payload '|mutable|)))
          (inner (core.lower-type
                   (optional.value (record.get payload '|inner|)))))
-    (type.raw-ptr mutable inner)))
+    (type.addr)))
 
 (define-pass (core-type-lowerer |middle.ty.slice| ty)
   (let* ((kind (middle.kind ty)))
