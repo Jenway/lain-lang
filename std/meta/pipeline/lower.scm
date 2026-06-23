@@ -1,12 +1,11 @@
 (meta-source "pipeline/lower")
 
 ;; ===========================================================================
-;; 核心降级调度总线 — Data-Directed Dispatch 架构
+;; 核心降级调度总线 + 类型降级 + 辅助函数
 ;;
-;; 本文件不再包含任何语言特性的具体降级逻辑。
-;; 所有降级规则通过 define-pass 注册到 pipeline 系统，
-;; core.lower-type / core.lower-stmt / core.lower-expr / core.infer-expr-type
+;; core.lower-type / core.lower-expr / core.infer-expr-type
 ;; 仅作为调度器从注册表中查找并调用对应的处理函数。
+;; 语句降级 (core.lower-stmt/core.lower-stmts) 已迁至 control/lower.scm。
 ;; ===========================================================================
 
 ;; 查找 pipeline 中注册的处理函数，返回 #f 如果未注册

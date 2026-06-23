@@ -1,8 +1,9 @@
 (meta-source "expr/lower")
 
 ;; ═══════════════════════════════════════════════════════════
-;; 表达式降级 — core-expr-lowerer 通道 + 辅助函数
-;; 将 middle IR 的表达式节点降级为 core IR
+;; 函数调用降级 — call.* 系列 + 辅助函数
+;; 将 call.fn / call.method / call.indirect / call.tail / call.builtin
+;; 从 middle IR 降级为 core IR
 ;; ═══════════════════════════════════════════════════════════
 
 ;; ── 辅助函数 ──
@@ -129,9 +130,6 @@
 
 ;; ── core-expr-lowerer 通道 ──
 
-;; pass: core-expr-lowerer |path.access|
-;; reads: compiler-state.const-table (via const-table.lookup)
-;; calls: import.resolve-qualified-symbol, core.local-lookup, core.const-bits!
 ;; pass: calls core.call-or-eval (not a define-pass, a helper)
 ;; reads: compiler-state.comptime-fns (via comptime-fns.member?)
 ;; calls: core.eval!, core.call!, core.lower-args, core.function-param-types
