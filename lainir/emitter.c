@@ -87,11 +87,17 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
     fprintf(out, ")");
     break;
   case EXPR_LEA:
-    fprintf(out, "(void*)((uintptr_t)(");
-    emit_c_expr(expr->data.lea.base, out);
-    fprintf(out, ") + (uintptr_t)(");
-    emit_c_expr(expr->data.lea.idx, out);
-    fprintf(out, ") * %d + %d)", expr->data.lea.scale, expr->data.lea.offset);
+    if (expr->data.lea.idx) {
+      fprintf(out, "(void*)((uintptr_t)(");
+      emit_c_expr(expr->data.lea.base, out);
+      fprintf(out, ") + (uintptr_t)(");
+      emit_c_expr(expr->data.lea.idx, out);
+      fprintf(out, ") * %d + %d)", expr->data.lea.scale, expr->data.lea.offset);
+    } else {
+      fprintf(out, "(void*)((uintptr_t)(");
+      emit_c_expr(expr->data.lea.base, out);
+      fprintf(out, ") + %d)", expr->data.lea.offset);
+    }
     break;
   case EXPR_ADD:
     fprintf(out, "(");
