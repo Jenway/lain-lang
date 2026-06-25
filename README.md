@@ -1,53 +1,39 @@
 # Lain
 
-Lain is a native language experiment with a small compiler core, a library-owned
-meta layer, and a staged compile-time execution model.
+Lain is a native language experiment.
 
-## Current Direction
+## Description
 
-Lain is organized around three distinct phases:
+Lain consists of three layers：
 
-1. `Scheme meta phase`
-   - Rewrites syntax.
-   - Defines language-level objects such as `type`, `module`, `effect`,
-     `signature`, and `interface` in libraries.
-   - Performs static normalization and lowering preparation.
-   - Should stay mostly pure.
+1. `Lain IR`
+    - `Lain IR` is a structred IR, similiar to C, but a bit lower.
+2. `compile time evaluation`
+    - `Lain IR` statements can be run in compile time.
+3. `meta functions`
+    - Scheme functions can be injected via hooks during compile time to manipulate AST
 
-2. `compile-time lain phase`
-   - Runs `lain` code during compilation.
-   - Handles effectful compile-time work such as code generation, bridge
-     generation, schema loading, and other artifact-producing tasks.
-   - Uses explicit effects and injected capabilities rather than compiler magic.
+Lain trying to make the compiler as small as possible, and implement most highlevel feature during meta library.
 
-3. `runtime phase`
-   - The final program.
+## Lain IR
 
-## Compiler Boundary
+```Lain-IR
+#proc add(#bits<32>, #bits<32>) -> #bits<32> {
+  #let %ret = #integer.signed.add(#arg(0), #arg(1))
+  #return %ret
+}
 
-The compiler should not provide semantic objects like `module` or `effect`.
-Those belong to meta libraries. The compiler only provides minimal substrate:
+#proc main() -> #bits<32> {
+  #let %agg = #alloca(8)
+  #store 10, #lea(base=%agg, offset=0)
+  #store 20, #lea(base=%agg, offset=4)
+  #let %a = #field[0](%agg)
+  #let %b = #field[4](%agg)
+  #let %sum = #call(add,%a, %b)
+  #return %sum
+}
+```
 
-- syntax construction and source spans
-- diagnostics and symbol generation
-- phase orchestration
-- IR construction and code emission
-- interface artifact I/O such as `.lci`
-- capability injection for compile-time `lain`
+## Build and Run
 
-## Module System Direction
-
-The current module design follows these rules:
-
-- `module` is a meta-layer object, not a default runtime value
-- `signature` is the interface type for modules
-- `interface` remains the dynamic-dispatch protocol
-- `let` is the unified top-level binding syntax
-- `import(path)` returns a module object
-- `export` forms the module interface and is not a runtime effect
-
-See [docs/module-rfc-01.md](docs/module-rfc-01.md) for the concrete module
-direction.
-
-The current compiler boundary is described in
-[docs/compiler-design.md](docs/compiler-design.md).
+TBD
