@@ -190,18 +190,19 @@
               (if (not variant-info)
                   (type.unsupported '|unknown-variant|)
                   (let* ((discriminant (cdr variant-info))
-                         (function (core.block-function block))
-                         (arm-block (core.append-block! function))
-                         (next-block (core.append-block! function))
                          (disc-const (core.const-bits! block (core.make-bits 8) discriminant))
-                         (is-match (core.primitive! block '|integer.eq| (list tag-val disc-const) (core.make-bits 1))))
-                    (core.cond-branch! block is-match arm-block next-block)
+                         (is-match (core.primitive! block '|integer.eq| (list tag-val disc-const) (core.make-bits 1)))
+                         (pair (core.begin-if! block is-match))
+                         (arm-block (car pair))
+                         (next-block (cadr pair)))
                     ;; Arm body
                     (core.set-current-block! arm-block)
                     (core.lower-stmts arm-block body-items ret-ty locals)
-                    ;; Continue with next arms
+                    ;; Continue with next arms (else branch)
                     (core.set-current-block! next-block)
-                    (match.lower-arms-helper next-block tag-val rest-arms ret-ty locals))))))))
+                    (match.lower-arms-helper next-block tag-val rest-arms ret-ty locals)
+                    ;; Finalize this if
+                    (core.end-if! block is-match arm-block next-block))))))))
 
 ;; Lower a match expression as a tail expression.
 ;; 1. Lower scrutinee as addr (enum struct)

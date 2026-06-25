@@ -1,7 +1,7 @@
 /**
  * lainir/emit_text.c — L1 IR Text Dump
  *
- * Emits a human-readable text representation of L1 IR (for debugging).
+ * Human-readable L1 IR debug output.  Structured IR, no terminators.
  */
 
 #include "lainir.h"
@@ -93,9 +93,8 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
     fprintf(out, "#alloca(");
     if (expr->data.alloca.byte_size > 0)
       fprintf(out, "%d", expr->data.alloca.byte_size);
-    else {
+    else
       emit_l1_type(expr->data.alloca.element_ty, out);
-    }
     fprintf(out, ")");
     break;
   case EXPR_FIELD:
@@ -118,126 +117,82 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
   }
 }
 
-static void emit_l1_terminator(L1Block *block, FILE *out) {
-  if (!block->terminator) return;
-  switch (block->terminator->kind) {
-  case TERM_RETURN:
-    if (block->terminator->data.ret_val) {
-      fprintf(out, "  #return ");
-      emit_l1_expr(block->terminator->data.ret_val, out);
-      fprintf(out, "\n");
-    } else {
-      fprintf(out, "  #return #unit\n");
-    }
-    break;
-  case TERM_BRANCH:
-    fprintf(out, "  #br block_%d\n", block->terminator->data.target_id);
-    break;
-  case TERM_COND_BRANCH:
-    fprintf(out, "  #cond_br ");
-    emit_l1_expr(block->terminator->data.cond_branch.condition, out);
-    fprintf(out, ", block_%d, block_%d\n",
-            block->terminator->data.cond_branch.true_id,
-            block->terminator->data.cond_branch.false_id);
-    break;
-  default:
-    break;
-  }
-}
+static void emit_l1_block(L1Block *block, FILE *out, const char *indent);
 
-// Helper: emit a single L1 instruction (used for nested if bodies)
-static void emit_l1_instruction(L1Block *block, L1Instruction *inst, FILE *out) {
-  switch (inst->kind) {
-  case INST_SET:
-    fprintf(out, "    %%%s = ", inst->data.set.name);
-    emit_l1_expr(inst->data.set.val, out);
-    fprintf(out, "\n");
-    break;
-  case INST_STORE:
-    fprintf(out, "    #store ");
-    emit_l1_expr(inst->data.store.val, out);
-    fprintf(out, ", ");
-    emit_l1_expr(inst->data.store.dest, out);
-    fprintf(out, "\n");
-    break;
-  case INST_CALL:
-    fprintf(out, "    #call ");
-    emit_l1_expr(inst->data.call_inst.expr, out);
-    fprintf(out, "\n");
-    break;
-  case INST_IF:
-    fprintf(out, "    #if ");
-    emit_l1_expr(inst->data.if_stmt.condition, out);
-    fprintf(out, " {\n");
-    {
-      L1Instruction *li = inst->data.if_stmt.then_body;
-      while (li) {
-        emit_l1_instruction(block, li, out);
-        li = li->next;
-      }
-    }
-    if (inst->data.if_stmt.else_body) {
-      fprintf(out, "    } #else {\n");
-      L1Instruction *li = inst->data.if_stmt.else_body;
-      while (li) {
-        emit_l1_instruction(block, li, out);
-        li = li->next;
-      }
-    }
-    fprintf(out, "    }\n");
-    break;
-  default:
-    break;
-  }
-}
-
-static void emit_l1_instructions(L1Block *block, FILE *out) {
+static void emit_l1_block(L1Block *block, FILE *out, const char *indent) {
   L1Instruction *inst = block->body;
   while (inst) {
     switch (inst->kind) {
+    case INST_LET:
+      fprintf(out, "%s%%%s = ", indent, inst->data.let.name);
+      emit_l1_expr(inst->data.let.val, out);
+      fprintf(out, "\n");
+      break;
     case INST_SET:
-      fprintf(out, "  %%%s = ", inst->data.set.name);
+      fprintf(out, "%s%%%s = ", indent, inst->data.set.name);
       emit_l1_expr(inst->data.set.val, out);
       fprintf(out, "\n");
       break;
     case INST_STORE:
-      fprintf(out, "  #store ");
+      fprintf(out, "%s#store ", indent);
       emit_l1_expr(inst->data.store.val, out);
       fprintf(out, ", ");
       emit_l1_expr(inst->data.store.dest, out);
       fprintf(out, "\n");
       break;
-    case INST_CALL:
-      if (block->terminator && block->terminator->kind == TERM_RETURN &&
-          block->terminator->data.ret_val == inst->data.call_inst.expr) {
-        break;
-      }
-      fprintf(out, "  #call ");
-      emit_l1_expr(inst->data.call_inst.expr, out);
-      fprintf(out, "\n");
-      break;
     case INST_IF:
-      fprintf(out, "  #if ");
+      fprintf(out, "%s#if ", indent);
       emit_l1_expr(inst->data.if_stmt.condition, out);
       fprintf(out, " {\n");
-      {
-        L1Instruction *li = inst->data.if_stmt.then_body;
-        while (li) {
-          emit_l1_instruction(block, li, out);
-          li = li->next;
-        }
+      if (inst->data.if_stmt.then_body) {
+        char sub_indent[64];
+        snprintf(sub_indent, sizeof(sub_indent), "%s  ", indent);
+        emit_l1_block(inst->data.if_stmt.then_body, out, sub_indent);
       }
       if (inst->data.if_stmt.else_body) {
-        fprintf(out, "  } #else {\n");
-        L1Instruction *li = inst->data.if_stmt.else_body;
-        while (li) {
-          emit_l1_instruction(block, li, out);
-          li = li->next;
-        }
+        fprintf(out, "%s} else {\n", indent);
+        char sub_indent[64];
+        snprintf(sub_indent, sizeof(sub_indent), "%s  ", indent);
+        emit_l1_block(inst->data.if_stmt.else_body, out, sub_indent);
       }
-      fprintf(out, "  }\n");
+      fprintf(out, "%s}\n", indent);
       break;
-    default:
+    case INST_LOOP:
+      fprintf(out, "%s#loop", indent);
+      if (inst->data.loop.label)
+        fprintf(out, " :%s", inst->data.loop.label);
+      fprintf(out, " {\n");
+      if (inst->data.loop.body) {
+        char sub_indent[64];
+        snprintf(sub_indent, sizeof(sub_indent), "%s  ", indent);
+        emit_l1_block(inst->data.loop.body, out, sub_indent);
+      }
+      fprintf(out, "%s}\n", indent);
+      break;
+    case INST_BREAK:
+      fprintf(out, "%s#break", indent);
+      if (inst->data.jump.label)
+        fprintf(out, " :%s", inst->data.jump.label);
+      fprintf(out, "\n");
+      break;
+    case INST_CONTINUE:
+      fprintf(out, "%s#continue", indent);
+      if (inst->data.jump.label)
+        fprintf(out, " :%s", inst->data.jump.label);
+      fprintf(out, "\n");
+      break;
+    case INST_RETURN:
+      fprintf(out, "%s#return ", indent);
+      if (inst->data.ret.val)
+        emit_l1_expr(inst->data.ret.val, out);
+      else
+        fprintf(out, "#unit");
+      fprintf(out, "\n");
+      break;
+    case INST_CALL:
+      fprintf(out, "%s#call ", indent);
+      emit_l1_expr(inst->data.call_inst.expr, out);
+      fprintf(out, "\n");
       break;
     }
     inst = inst->next;
@@ -258,9 +213,7 @@ static void emit_l1_subroutine(L1Subroutine *sub, FILE *out) {
 
   L1Block *block = sub->blocks;
   while (block) {
-    fprintf(out, "block_%d:\n", block->id);
-    emit_l1_instructions(block, out);
-    emit_l1_terminator(block, out);
+    emit_l1_block(block, out, "  ");
     block = block->next;
   }
   fprintf(out, "}\n\n");

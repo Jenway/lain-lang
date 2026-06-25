@@ -250,13 +250,8 @@ static sexp sexp_core_begin_function(sexp ctx, sexp self, sexp_sint_t n,
   sub->next = g_subroutines_head;
   g_subroutines_head = sub;
 
-  L1Block *block = malloc(sizeof(L1Block));
-  block->id = 0;
-  block->body = NULL;
-  block->body_tail = NULL;
-  block->terminator = NULL;
+  L1Block *block = lainir_new_block();
   block->parent = sub;
-  block->next = NULL;
   sub->blocks = block;
   sub->blocks_tail = block;
   g_current_sub = sub;
@@ -393,13 +388,8 @@ static sexp sexp_core_function_by_name(sexp ctx, sexp self, sexp_sint_t n,
 static sexp sexp_core_append_block(sexp ctx, sexp self, sexp_sint_t n,
                                    sexp arg_sub) {
   L1Subroutine *sub = (L1Subroutine *)sexp_cpointer_value(arg_sub);
-  L1Block *block = malloc(sizeof(L1Block));
-  block->id = sub->blocks_tail ? sub->blocks_tail->id + 1 : 0;
-  block->body = NULL;
-  block->body_tail = NULL;
-  block->terminator = NULL;
+  L1Block *block = lainir_new_block();
   block->parent = sub;
-  block->next = NULL;
   if (sub->blocks_tail) {
     sub->blocks_tail->next = block;
     sub->blocks_tail = block;
@@ -415,22 +405,24 @@ static sexp sexp_core_return_value(sexp ctx, sexp self, sexp_sint_t n,
                                    sexp arg_block, sexp arg_val) {
   L1Block *block = (L1Block *)sexp_cpointer_value(arg_block);
   L1Expr *val = (L1Expr *)sexp_cpointer_value(arg_val);
-  if (!block->terminator) {
-    block->terminator = malloc(sizeof(L1Terminator));
-    block->terminator->kind = TERM_RETURN;
-    block->terminator->data.ret_val = val;
-  }
+  L1Instruction *inst = lainir_new_instruction(INST_RETURN);
+  inst->data.ret.val = val;
+  L1Block *saved = g_current_block;
+  g_current_block = block;
+  append_instruction(NULL, inst);
+  g_current_block = saved;
   return SEXP_VOID;
 }
 
 static sexp sexp_core_return_none(sexp ctx, sexp self, sexp_sint_t n,
                                   sexp arg_block) {
   L1Block *block = (L1Block *)sexp_cpointer_value(arg_block);
-  if (!block->terminator) {
-    block->terminator = malloc(sizeof(L1Terminator));
-    block->terminator->kind = TERM_RETURN;
-    block->terminator->data.ret_val = NULL;
-  }
+  L1Instruction *inst = lainir_new_instruction(INST_RETURN);
+  inst->data.ret.val = NULL;
+  L1Block *saved = g_current_block;
+  g_current_block = block;
+  append_instruction(NULL, inst);
+  g_current_block = saved;
   return SEXP_VOID;
 }
 
@@ -640,30 +632,19 @@ static sexp sexp_core_block_function(sexp ctx, sexp self, sexp_sint_t n,
 
 static sexp sexp_core_branch(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,
                              sexp arg_target) {
-  L1Block *block = (L1Block *)sexp_cpointer_value(arg_block);
-  L1Block *target = (L1Block *)sexp_cpointer_value(arg_target);
-  if (!block->terminator) {
-    block->terminator = malloc(sizeof(L1Terminator));
-    block->terminator->kind = TERM_BRANCH;
-    block->terminator->data.target_id = target->id;
-  }
+  /* Unstructured branch — no-op in structured IR.
+   * Meta passes should use begin-if!/end-if! instead. */
+  (void)ctx; (void)self; (void)n; (void)arg_block; (void)arg_target;
   return SEXP_VOID;
 }
 
 static sexp sexp_core_cond_branch(sexp ctx, sexp self, sexp_sint_t n,
                                   sexp arg_block, sexp arg_cond, sexp arg_true,
                                   sexp arg_false) {
-  L1Block *block = (L1Block *)sexp_cpointer_value(arg_block);
-  L1Expr *cond = (L1Expr *)sexp_cpointer_value(arg_cond);
-  L1Block *true_bb = (L1Block *)sexp_cpointer_value(arg_true);
-  L1Block *false_bb = (L1Block *)sexp_cpointer_value(arg_false);
-  if (!block->terminator) {
-    block->terminator = malloc(sizeof(L1Terminator));
-    block->terminator->kind = TERM_COND_BRANCH;
-    block->terminator->data.cond_branch.condition = cond;
-    block->terminator->data.cond_branch.true_id = true_bb->id;
-    block->terminator->data.cond_branch.false_id = false_bb->id;
-  }
+  /* Unstructured cond-branch — no-op in structured IR.
+   * Meta passes should use begin-if!/end-if! instead. */
+  (void)ctx; (void)self; (void)n; (void)arg_block; (void)arg_cond;
+  (void)arg_true; (void)arg_false;
   return SEXP_VOID;
 }
 
@@ -692,10 +673,8 @@ sexp sexp_core_get_current_block(sexp ctx, sexp self, sexp_sint_t n) {
 }
 
 sexp sexp_core_begin_if(sexp ctx, sexp self, sexp_sint_t n, sexp bv, sexp cv) {
-  L1Block *tb = calloc(1, sizeof(L1Block));
-  L1Block *eb = calloc(1, sizeof(L1Block));
-  tb->id = ++g_block_id_counter;
-  eb->id = ++g_block_id_counter;
+  L1Block *tb = lainir_new_block();
+  L1Block *eb = lainir_new_block();
   tb->parent = NULL;
   eb->parent = NULL;
   g_scratch_blocks[g_scratch_count++] = tb;
@@ -710,19 +689,14 @@ static sexp sexp_core_end_if(sexp ctx, sexp self, sexp_sint_t n, sexp bv, sexp c
   L1Expr *cond = (L1Expr *)sexp_cpointer_value(cv);
   L1Block *tb = (L1Block *)sexp_cpointer_value(tv);
   L1Block *eb = (L1Block *)sexp_cpointer_value(ev);
-  scratch_terminator_to_inst(tb);
-  scratch_terminator_to_inst(eb);
-  L1Instruction *inst = calloc(1, sizeof(L1Instruction));
-  inst->kind = INST_IF;
+  L1Instruction *inst = lainir_new_instruction(INST_IF);
   inst->data.if_stmt.condition = cond;
-  inst->data.if_stmt.then_body = tb->body;
-  inst->data.if_stmt.else_body = eb->body;
+  inst->data.if_stmt.then_body = tb;
+  inst->data.if_stmt.else_body = eb;
   L1Block *saved = g_current_block;
   g_current_block = parent;
   append_instruction(NULL, inst);
   g_current_block = saved;
-  free(tb);
-  free(eb);
   for (int j = 0; j < g_scratch_count; j++)
     if (g_scratch_blocks[j] == tb || g_scratch_blocks[j] == eb)
       g_scratch_blocks[j] = NULL;
