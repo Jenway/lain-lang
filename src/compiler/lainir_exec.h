@@ -1,7 +1,7 @@
 #ifndef LAINIR_EXEC_H
 #define LAINIR_EXEC_H
 
-#include <chibi/eval.h>
+#include "vm_api.h"
 #include "lainir/interpreter.h"
 
 typedef enum {
@@ -12,13 +12,13 @@ typedef enum {
 
 typedef struct {
   const char *entry_name;
-  sexp args;
+  vm_value *args;
 } LainirExecRequest;
 
 LainirExecStatus lainir_exec_request(
-  sexp ctx,
-  sexp env,
+  vm_context *ctx,
+  vm_value *env,
   const LainirExecRequest *request,
-  sexp *result_out);
+  vm_value **result_out);
 
 #endif

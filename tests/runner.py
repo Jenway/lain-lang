@@ -8,12 +8,12 @@ import re
 # ── 1. 配置路径与编译器指令 ──────────────────────────────────────────
 
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-COMPILER_BIN = os.path.join(WORKSPACE_ROOT, "compiler", "lainc")
+COMPILER_BIN = os.path.join(WORKSPACE_ROOT, "src", "compiler", "lainc")
 
 # 配置 Chibi 虚拟机的环境变量，保证测试时加载正确
 ENV = os.environ.copy()
-ENV["LD_LIBRARY_PATH"] = os.path.join(WORKSPACE_ROOT, "bootstrap", "chibi-scheme")
-ENV["CHIBI_MODULE_PATH"] = os.path.join(WORKSPACE_ROOT, "bootstrap", "chibi-scheme", "lib")
+ENV["LD_LIBRARY_PATH"] = os.path.join(WORKSPACE_ROOT, "third_party", "chibi-scheme")
+ENV["CHIBI_MODULE_PATH"] = os.path.join(WORKSPACE_ROOT, "third_party", "chibi-scheme", "lib")
 
 # 测试套件路径
 FIXTURES_DIR = os.path.join(WORKSPACE_ROOT, "tests", "fixtures")

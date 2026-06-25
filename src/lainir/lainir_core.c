@@ -7,7 +7,6 @@ L1Subroutine *g_subroutines_head = NULL;
 L1Subroutine *g_current_sub = NULL;
 L1Block *g_current_block = NULL;
 uint32_t g_temp_counter = 0;
-uint32_t g_block_id_counter = 0;
 L1Block *g_scratch_blocks[8];
 int g_scratch_count = 0;
 L1ExportName *g_export_names_head = NULL;
@@ -75,10 +74,17 @@ static void lainir_free_expr(L1Expr *expr) {
   free(expr);
 }
 
+/* Forward declaration for mutual recursion */
+static void lainir_free_block_list(L1Block *block);
+
 static void lainir_free_instruction_list(L1Instruction *inst) {
   while (inst) {
     L1Instruction *next = inst->next;
     switch (inst->kind) {
+    case INST_LET:
+      free(inst->data.let.name);
+      lainir_free_expr(inst->data.let.val);
+      break;
     case INST_SET:
       free(inst->data.set.name);
       lainir_free_expr(inst->data.set.val);
@@ -89,8 +95,16 @@ static void lainir_free_instruction_list(L1Instruction *inst) {
       break;
     case INST_IF:
       lainir_free_expr(inst->data.if_stmt.condition);
-      lainir_free_instruction_list(inst->data.if_stmt.then_body);
-      lainir_free_instruction_list(inst->data.if_stmt.else_body);
+      lainir_free_block_list(inst->data.if_stmt.then_body);
+      lainir_free_block_list(inst->data.if_stmt.else_body);
+      break;
+    case INST_LOOP:
+      free(inst->data.loop.label);
+      lainir_free_block_list(inst->data.loop.body);
+      break;
+    case INST_BREAK:
+    case INST_CONTINUE:
+      free(inst->data.jump.label);
       break;
     case INST_RETURN:
       lainir_free_expr(inst->data.ret.val);
@@ -108,19 +122,6 @@ static void lainir_free_block_list(L1Block *block) {
   while (block) {
     L1Block *next = block->next;
     lainir_free_instruction_list(block->body);
-    if (block->terminator) {
-      switch (block->terminator->kind) {
-      case TERM_RETURN:
-        lainir_free_expr(block->terminator->data.ret_val);
-        break;
-      case TERM_COND_BRANCH:
-        lainir_free_expr(block->terminator->data.cond_branch.condition);
-        break;
-      default:
-        break;
-      }
-      free(block->terminator);
-    }
     free(block);
     block = next;
   }
@@ -145,15 +146,8 @@ L1Instruction *lainir_new_instruction(L1InstKind kind) {
   return inst;
 }
 
-L1Terminator *lainir_new_terminator(L1TerminatorKind kind) {
-  L1Terminator *term = calloc(1, sizeof(L1Terminator));
-  term->kind = kind;
-  return term;
-}
-
-L1Block *lainir_new_block(int id) {
+L1Block *lainir_new_block(void) {
   L1Block *block = calloc(1, sizeof(L1Block));
-  block->id = id;
   return block;
 }
 
@@ -168,7 +162,6 @@ void lainir_reset_module_state(void) {
   g_current_sub = NULL;
   g_current_block = NULL;
   g_temp_counter = 0;
-  g_block_id_counter = 0;
   g_scratch_count = 0;
   g_export_names_head = NULL;
   g_declared_module_names_head = NULL;
@@ -287,24 +280,4 @@ int native_is_export_marked(const char *name) {
       return 1;
   }
   return 0;
-}
-
-void scratch_terminator_to_inst(L1Block *block) {
-  L1Instruction *ret;
-
-  if (!block->terminator || block->terminator->kind != TERM_RETURN)
-    return;
-
-  ret = calloc(1, sizeof(L1Instruction));
-  ret->kind = INST_RETURN;
-  ret->data.ret.val = block->terminator->data.ret_val;
-  if (!block->body) {
-    block->body = ret;
-    block->body_tail = ret;
-  } else {
-    block->body_tail->next = ret;
-    block->body_tail = ret;
-  }
-  free(block->terminator);
-  block->terminator = NULL;
 }

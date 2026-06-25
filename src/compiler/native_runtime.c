@@ -15,6 +15,7 @@
 
 #include "lainir_exec.h"
 #include "vm_chibi.h"
+#include <chibi/eval.h>   /* sexp type — for FFI stubs; remove after full vm_* migration */
 #include <alloca.h>
 #include "lainir/lainir.h"
 
@@ -85,16 +86,14 @@ void *native_lex_to_sexp(void *ctx_ptr, const uint8_t *src, uint32_t len) {
 // ============================================================================
 
 static void native_inject_all_polyfills(sexp ctx, sexp env) {
-  vm_chibi_import_base(ctx, env);
-  vm_chibi_load_file(ctx, env, "polyfills.scm");
+  vm_import_base((vm_context *)ctx, (vm_value *)env);
+  vm_load_file((vm_context *)ctx, (vm_value *)env, "polyfills.scm");
 }
 
 static void native_load_meta_sources(sexp ctx, sexp env) {
-  // Load the single driver entry point instead of maintaining a duplicate
-  // hardcoded file list. driver.scm has the authoritative load order.
   const char *search_paths[] = {"std/meta/driver.scm", "../std/meta/driver.scm",
                                 "../../std/meta/driver.scm", NULL};
-  if (!vm_chibi_load_first_available(ctx, env, search_paths))
+  if (!vm_load_first((vm_context *)ctx, (vm_value *)env, search_paths))
     fprintf(stderr, "Warning: could not find std/meta/driver.scm\n");
 }
 
@@ -323,29 +322,29 @@ static sexp sexp_build_compute_order(sexp ctx, sexp self, sexp_sint_t n,
 
 static sexp sexp_core_execute_lainir(sexp ctx, sexp self, sexp_sint_t n,
                                      sexp arg_entry, sexp arg_args) {
+  vm_context *c = (vm_context *)ctx;
+  vm_value *entry_val = (vm_value *)arg_entry;
+  vm_value *args_val = (vm_value *)arg_args;
+
   const char *entry_name = NULL;
-  if (sexp_symbolp(arg_entry))
-    entry_name = sexp_string_data(sexp_symbol_to_string(ctx, arg_entry));
-  else if (sexp_stringp(arg_entry))
-    entry_name = sexp_string_data(arg_entry);
+  if (vm_is_symbol(entry_val))
+    entry_name = vm_string_data((vm_value *)vm_symbol_name(c, entry_val));
+  else if (vm_is_string(entry_val))
+    entry_name = vm_string_data(entry_val);
 
   if (!entry_name) {
-    return sexp_user_exception(
-      ctx, NULL, "core.execute-lainir!: entry must be a symbol or string",
-      arg_entry);
+    return (sexp)vm_user_exception(c, "core.execute-lainir!: entry must be a symbol or string");
   }
 
   LainirExecRequest request = {
     .entry_name = entry_name,
-    .args = arg_args
+    .args = args_val
   };
-  sexp result = SEXP_FALSE;
+  vm_value *result = vm_false();
   LainirExecStatus status =
-    lainir_exec_request(ctx, sexp_context_env(ctx), &request, &result);
+    lainir_exec_request(c, vm_context_env(c), &request, &result);
 
-  if (status == LAINIR_EXEC_OK)
-    return result;
-  return result;
+  return (sexp)result;
 }
 
 // ── Build driver: full multi-file build ──
@@ -434,11 +433,11 @@ int32_t native_build_with_funcs(const char *root_path, const char *output_path,
   for (int i = 0; i < n; i++)
     pos += snprintf(link + pos, sizeof(link) - pos, "%s ", obj[i]);
   pos += snprintf(link + pos, sizeof(link) - pos,
-    "compiler/native_runtime.c compiler/vm_chibi.c compiler/lainir_exec.c "
-    "-I. "
-    "-Ibootstrap/chibi-scheme/include "
-    "-Lbootstrap/chibi-scheme -lchibi-scheme -lm -ldl "
-    "-Wl,-rpath,$PWD/bootstrap/chibi-scheme");
+    "src/compiler/native_runtime.c src/compiler/vm_chibi.c src/compiler/lainir_exec.c "
+    "-Isrc "
+    "-Ithird_party/chibi-scheme/include "
+    "-Lthird_party/chibi-scheme -lchibi-scheme -lm -ldl "
+    "-Wl,-rpath,$PWD/third_party/chibi-scheme");
   fprintf(stderr, "[build] %s\n", link);
   int ret = system(link);
 
@@ -580,66 +579,77 @@ static void native_register_foreign_with_chibi(
 
 // Initialize Scheme environment, register all FFI functions, load meta passes
 void *native_init_scheme(void) {
-  vm_chibi_set_module_path_from_cwd();
+  // Set module path for Chibi (computed from cwd)
+  {
+    char cwd[2048];
+    if (getcwd(cwd, sizeof(cwd))) {
+      char *p = strstr(cwd, "/src/compiler");
+      if (p) *p = '\0';
+      char buf[2048];
+      snprintf(buf, sizeof(buf), "%s/third_party/chibi-scheme/lib", cwd);
+      vm_set_module_path(buf);
+    }
+  }
 
-  sexp ctx = vm_chibi_create_context();
+  sexp ctx = (sexp)vm_create();
   fprintf(stderr, "[init] 1: ctx created\n");
   fprintf(stderr, "[init] 2: std env loaded\n");
-  sexp env = vm_chibi_env(ctx);
+  sexp env = (sexp)vm_context_env((vm_context *)ctx);
 
-  // Register core FFI functions (Layer B) — must be first because
-  // polyfills (Layer A) contain type.* wrappers that reference these.
+  // Register core FFI functions (Layer B)
   NativeChibiRegistrarCtx reg = {.ctx = ctx, .env = env};
   native_register_core_ffi(ctx, env, native_register_foreign_with_chibi, &reg);
   fprintf(stderr, "[init] 3: FFI registered\n");
 
-  // Inject all polyfills (Layer A) — must be after FFI REG because
-  // type.* wrappers reference core.* functions.
+  // Inject all polyfills (Layer A)
   native_inject_all_polyfills(ctx, env);
   fprintf(stderr, "[init] 4: polyfills loaded\n");
 
-  // Smoke-test define-pass (validates polyfill layer works)
+  // Smoke-test define-pass
   {
     sexp r = sexp_eval_string(ctx,
                               "(begin (define-pass (form-parser test-pass "
                               "form) unit) (null? __lain-passes))",
                               -1, env);
-    if (r == SEXP_FALSE)
+    vm_value *rv = (vm_value *)r;
+    if (rv == vm_false())
       fprintf(stderr, "[diag] define-pass works!\n");
-    else if (r == SEXP_TRUE)
+    else if (rv == vm_true())
       fprintf(stderr, "[diag] define-pass did NOT populate __lain-passes\n");
     else {
       fprintf(stderr, "[diag] define-pass test exception: ");
-      vm_chibi_print_exception(ctx, r);
+      vm_print_exception((vm_context *)ctx, rv);
     }
   }
 
-  // Load meta sources (define-pass registrations happen here)
+  // Load meta sources
   native_load_meta_sources(ctx, env);
   fprintf(stderr, "[init] 5: meta sources loaded\n");
 
-  // compile-group-to-core is now loaded directly from std/meta/pipeline/driver.scm.
-  // Smoke test: lex-to-sexp produces correct S-expression
+  // Smoke test: lex-to-sexp
   {
     const char *test_src = "fn main() -> i32 { 42 }";
     sexp tree = (sexp)native_lex_to_sexp(ctx, (const uint8_t *)test_src, strlen(test_src));
+    vm_value *tv = (vm_value *)tree;
     fprintf(stderr, "[init] 6: lex-to-sexp smoke test: %s\n",
-            sexp_exceptionp(tree) ? "FAILED" : "OK");
-    if (!sexp_exceptionp(tree)) {
-      sexp out = sexp_open_output_string(ctx);
-      sexp_write(ctx, tree, out);
-      sexp str = sexp_get_output_string(ctx, out);
-      fprintf(stderr, "[init] 6:   => %s\n", sexp_string_data(str));
-      sexp_close_port(ctx, out);
+            vm_is_exception(tv) ? "FAILED" : "OK");
+    if (!vm_is_exception(tv)) {
+      vm_context *c = (vm_context *)ctx;
+      vm_value *out = vm_open_output_string(c);
+      vm_write(c, tv, out);
+      vm_value *str = vm_get_output_string(c, out);
+      fprintf(stderr, "[init] 6:   => %s\n", vm_string_data(str));
+      vm_close_port(c, out);
     }
   }
-  // Just verify the key entry point is available.
+  // Verify compile-group-to-core is available
   {
-    sexp sym = sexp_intern(ctx, "compile-group-to-core", -1);
-    sexp val = sexp_env_ref(ctx, env, sym, SEXP_FALSE);
+    vm_context *c = (vm_context *)ctx;
+    vm_value *sym = vm_intern(c, "compile-group-to-core");
+    vm_value *val = vm_env_ref(c, (vm_value *)env, sym);
     fprintf(stderr, "[init] 6a: compile-group-to-core %s\n",
-            val == SEXP_FALSE      ? "MISSING"
-            : sexp_procedurep(val) ? "is proc"
+            val == vm_false() ? "MISSING"
+            : vm_is_procedure(val) ? "is proc"
                                    : "is defined but not proc");
   }
 
@@ -648,52 +658,46 @@ void *native_init_scheme(void) {
 
 // Run the Scheme pipeline on a token tree
 int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
-  sexp ctx = (sexp)ctx_ptr;
+  vm_context *c = (vm_context *)ctx_ptr;
   lainir_reset_module_state();
   (void)root_group;
 
-  sexp env = sexp_context_env(ctx);
+  vm_value *env = vm_context_env(c);
 
   // Clear previous declarations
-  sexp_eval_string(ctx, "(set! *lain-declarations* (list))", -1, env);
-  sexp_eval_string(ctx, "(set! *all-declarations* '())", -1, env);
+  vm_eval_string(c, env, "(set! *lain-declarations* (list))");
+  vm_eval_string(c, env, "(set! *all-declarations* '())");
 
-  // Use Scheme-side lexer (meta.lex-source!) to tokenize + group + split
-  // into forms. This replaces the old C-side lex_one_token_from_mem +
-  // group_tokens_recursive + split_root_group + token_to_sexp pipeline.
-  sexp src_str = sexp_c_string(ctx, (const char *)g_pending_src, g_pending_len);
-  sexp len_val = sexp_make_integer(ctx, sexp_string_length(src_str));
+  // Use Scheme-side lexer
+  vm_value *src_str = vm_make_string(c, (const char *)g_pending_src, (int)g_pending_len);
+  vm_value *len_val = vm_make_integer(c, vm_string_length(src_str));
 
-  sexp lex_proc = sexp_env_ref(ctx, env,
-                               sexp_intern(ctx, "meta.lex-source!", -1),
-                               SEXP_FALSE);
-  sexp form_list = sexp_apply(ctx, lex_proc, sexp_list2(ctx, src_str, len_val));
+  vm_value *lex_proc = vm_env_ref(c, env, vm_intern(c, "meta.lex-source!"));
+  vm_value *form_list = vm_apply(c, lex_proc, vm_list2(c, src_str, len_val));
 
-  if (sexp_exceptionp(form_list)) {
+  if (vm_is_exception(form_list)) {
     fprintf(stderr, "[pipeline ERROR] Scheme lexer failed:\n");
-    sexp_print_exception(ctx, form_list, sexp_current_error_port(ctx));
-    fprintf(stderr, "\n");
+    vm_print_exception(c, form_list);
     return 1;
   }
 
-  sexp compile_sym = sexp_intern(ctx, "compile-group-to-core", -1);
-  sexp proc = sexp_env_ref(ctx, env, compile_sym, SEXP_FALSE);
+  vm_value *compile_sym = vm_intern(c, "compile-group-to-core");
+  vm_value *proc = vm_env_ref(c, env, compile_sym);
 
   // Iterate over form list produced by meta.lex-source!
-  sexp_preserve_object(ctx, form_list);
-  for (sexp forms = form_list; sexp_pairp(forms); forms = sexp_cdr(forms)) {
-    sexp form = sexp_car(forms);
-    sexp result = sexp_apply(ctx, proc, sexp_list1(ctx, form));
+  vm_preserve(c, form_list);
+  for (vm_value *forms = form_list; vm_is_pair(forms); forms = vm_cdr(forms)) {
+    vm_value *form = vm_car(forms);
+    vm_value *result = vm_apply(c, proc, vm_list1(c, form));
 
-    if (sexp_exceptionp(result)) {
+    if (vm_is_exception(result)) {
       fprintf(stderr, "[pipeline ERROR] ");
-      sexp_print_exception(ctx, result, sexp_current_error_port(ctx));
-      fprintf(stderr, "\n");
-      sexp_release_object(ctx, form_list);
+      vm_print_exception(c, result);
+      vm_release(c, form_list);
       return 1;
     }
   }
-  sexp_release_object(ctx, form_list);
+  vm_release(c, form_list);
 
   return 0;
 }

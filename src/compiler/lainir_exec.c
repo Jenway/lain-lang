@@ -1,67 +1,70 @@
 #include "lainir_exec.h"
 #include "lainir/lainir.h"
 #include "lainir/interpreter.h"
+#include <string.h>
+#include <stdlib.h>
 
 typedef struct {
-  sexp ctx;
-  sexp env;
+  vm_context *ctx;
+  vm_value   *env;
 } SchemeCapabilityEnv;
 
-static uint32_t sexp_list_length(sexp list) {
+static uint32_t sexp_list_length(vm_value *list) {
   uint32_t len = 0;
-  while (sexp_pairp(list)) {
+  while (vm_is_pair(list)) {
     len++;
-    list = sexp_cdr(list);
+    list = vm_cdr(list);
   }
   return len;
 }
 
-static int sexp_to_lainir_value(sexp ctx, sexp value, LainirValue *out) {
-  if (sexp_fixnump(value)) {
-    *out = lainir_value_bits((uint64_t)sexp_unbox_fixnum(value), 32);
+static int sexp_to_lainir_value(vm_context *ctx, vm_value *value,
+                                 LainirValue *out) {
+  if (vm_is_fixnum(value)) {
+    *out = lainir_value_bits((uint64_t)vm_fixnum_value(value), 32);
     return 1;
   }
-  if (sexp_integerp(value)) {
-    *out = lainir_value_bits((uint64_t)sexp_uint_value(value), 64);
+  if (vm_is_integer(value)) {
+    *out = lainir_value_bits((uint64_t)vm_uint_value(value), 64);
     return 1;
   }
-  if (value == SEXP_TRUE) {
+  if (value == vm_true()) {
     *out = lainir_value_bits(1, 1);
     return 1;
   }
-  if (value == SEXP_FALSE) {
+  if (value == vm_false()) {
     *out = lainir_value_bits(0, 1);
     return 1;
   }
-  if (value == SEXP_VOID || value == SEXP_NULL) {
+  if (value == vm_void() || value == vm_null()) {
     *out = lainir_value_unit();
     return 1;
   }
-  if (sexp_stringp(value)) {
-    *out = lainir_value_string(sexp_string_data(value));
+  if (vm_is_string(value)) {
+    *out = lainir_value_string(vm_string_data(value));
     return 1;
   }
-  if (sexp_symbolp(value)) {
-    *out = lainir_value_string(sexp_string_data(sexp_symbol_to_string(ctx, value)));
+  if (vm_is_symbol(value)) {
+    *out = lainir_value_string(vm_symbol_name(ctx, value));
     return 1;
   }
   return 0;
 }
 
-static sexp lainir_value_to_sexp(sexp ctx, LainirValue value) {
+static vm_value *lainir_value_to_sexp(vm_context *ctx, LainirValue value) {
   switch (value.kind) {
   case LAINIR_VALUE_UNIT:
-    return SEXP_VOID;
+    return vm_void();
   case LAINIR_VALUE_BITS:
-    return sexp_make_integer(ctx, value.as.bits);
+    return vm_make_integer(ctx, (int64_t)value.as.bits);
   case LAINIR_VALUE_STRING:
-    return sexp_c_string(ctx, value.as.string ? value.as.string : "", -1);
+    return vm_make_string(ctx, value.as.string ? value.as.string : "", -1);
   case LAINIR_VALUE_ADDR:
-    return sexp_make_cpointer(ctx, SEXP_CPOINTER, value.as.addr, SEXP_FALSE, 0);
+    return vm_make_cpointer(ctx, value.as.addr);
   case LAINIR_VALUE_FUNC:
-    return sexp_c_string(ctx, value.as.func ? value.as.func->name : "", -1);
+    return vm_make_string(ctx, value.as.func ? value.as.func->name : "", -1);
   default:
-    return SEXP_FALSE;
+    return vm_false();
   }
 }
 
@@ -73,22 +76,22 @@ static LainirRunStatus scheme_host_call(
   void *user_data) {
   LainirCapability *cap = (LainirCapability *)user_data;
   SchemeCapabilityEnv *scheme_env = (SchemeCapabilityEnv *)cap->user_data;
-  sexp ctx = scheme_env->ctx;
-  sexp env = scheme_env->env;
-  sexp proc = sexp_env_ref(ctx, env, sexp_intern(ctx, cap->name, -1), SEXP_FALSE);
-  sexp arg_list = SEXP_NULL;
-  sexp result;
+  vm_context *ctx = scheme_env->ctx;
+  vm_value *env = scheme_env->env;
+  vm_value *proc = vm_env_ref(ctx, env, vm_intern(ctx, cap->name));
+  vm_value *arg_list = vm_null();
+  vm_value *result;
 
-  if (proc == SEXP_FALSE || !sexp_procedurep(proc)) {
+  if (proc == vm_false() || !vm_is_procedure(proc)) {
     *error_out = "extern capability not found in Scheme environment";
     return LAINIR_RUN_BAD_CALL;
   }
 
   for (int i = (int)arg_count - 1; i >= 0; i--)
-    arg_list = sexp_cons(ctx, lainir_value_to_sexp(ctx, args[i]), arg_list);
+    arg_list = vm_cons(ctx, lainir_value_to_sexp(ctx, args[i]), arg_list);
 
-  result = sexp_apply(ctx, proc, arg_list);
-  if (sexp_exceptionp(result)) {
+  result = vm_apply(ctx, proc, arg_list);
+  if (vm_is_exception(result)) {
     *error_out = "Scheme extern capability raised exception";
     return LAINIR_RUN_BAD_CALL;
   }
@@ -100,10 +103,10 @@ static LainirRunStatus scheme_host_call(
 }
 
 LainirExecStatus lainir_exec_request(
-  sexp ctx,
-  sexp env,
+  vm_context *ctx,
+  vm_value *env,
   const LainirExecRequest *request,
-  sexp *result_out) {
+  vm_value **result_out) {
   L1Subroutine *entry = NULL;
   LainirValue *args = NULL;
   uint32_t arg_count = sexp_list_length(request->args);
@@ -115,8 +118,7 @@ LainirExecStatus lainir_exec_request(
   LainirExecStatus exec_status = LAINIR_EXEC_FAILED;
 
   if (!caps) {
-    *result_out = sexp_user_exception(
-      ctx, NULL, "lainir execution out of memory", SEXP_FALSE);
+    *result_out = vm_user_exception(ctx, "lainir execution out of memory");
     return LAINIR_EXEC_FAILED;
   }
 
@@ -127,31 +129,27 @@ LainirExecStatus lainir_exec_request(
     }
   }
   if (!entry) {
-    *result_out = sexp_user_exception(
-      ctx, NULL, "lainir execution entry unavailable",
-      sexp_c_string(ctx, request->entry_name, -1));
+    *result_out = vm_user_exception(ctx, "lainir execution entry unavailable");
     lainir_caps_free(caps);
     return LAINIR_EXEC_UNAVAILABLE;
   }
 
   if (arg_count) {
-    sexp curr = request->args;
+    vm_value *curr = request->args;
     args = calloc(arg_count, sizeof(LainirValue));
     if (!args) {
-      *result_out = sexp_user_exception(
-        ctx, NULL, "lainir execution out of memory", SEXP_FALSE);
+      *result_out = vm_user_exception(ctx, "lainir execution out of memory");
       lainir_caps_free(caps);
       return LAINIR_EXEC_FAILED;
     }
     for (uint32_t i = 0; i < arg_count; i++) {
-      if (!sexp_to_lainir_value(ctx, sexp_car(curr), &args[i])) {
-        *result_out = sexp_user_exception(
-          ctx, NULL, "unsupported lainir argument", sexp_car(curr));
+      if (!sexp_to_lainir_value(ctx, vm_car(curr), &args[i])) {
+        *result_out = vm_user_exception(ctx, "unsupported lainir argument");
         free(args);
         lainir_caps_free(caps);
         return LAINIR_EXEC_FAILED;
       }
-      curr = sexp_cdr(curr);
+      curr = vm_cdr(curr);
     }
   }
 
@@ -161,8 +159,7 @@ LainirExecStatus lainir_exec_request(
       if (!cap || !lainir_caps_add(caps, sub->link_name ? sub->link_name : sub->name,
                                    scheme_host_call, cap)) {
         free(cap);
-        *result_out = sexp_user_exception(
-          ctx, NULL, "lainir capability registration failed", SEXP_FALSE);
+        *result_out = vm_user_exception(ctx, "lainir capability registration failed");
         free(args);
         lainir_caps_free(caps);
         return LAINIR_EXEC_FAILED;
@@ -185,15 +182,11 @@ LainirExecStatus lainir_exec_request(
     exec_status = LAINIR_EXEC_OK;
     break;
   case LAINIR_RUN_NO_ENTRY:
-    *result_out = sexp_user_exception(
-      ctx, NULL, "lainir execution entry unavailable",
-      sexp_c_string(ctx, request->entry_name, -1));
+    *result_out = vm_user_exception(ctx, "lainir execution entry unavailable");
     exec_status = LAINIR_EXEC_UNAVAILABLE;
     break;
   default:
-    *result_out = sexp_user_exception(
-      ctx, NULL, error ? error : "lainir execution failed",
-      sexp_c_string(ctx, request->entry_name, -1));
+    *result_out = vm_user_exception(ctx, error ? error : "lainir execution failed");
     exec_status = LAINIR_EXEC_FAILED;
     break;
   }

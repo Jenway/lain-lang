@@ -350,14 +350,13 @@
                  (_consume (propagate.consume! effect-name))
                  ;; Extract flag field
                  (flag-val (core.field-offset! block call-expr flag-offset flag-ty))
-                 ;; Create ok/err blocks
-                 (function (core.block-function block))
-                 (ok-block (core.append-block! function))
-                 (err-block (core.append-block! function))
-                 ;; Branch on flag == 0
+                 ;; Check flag == 0
                  (flag-zero (core.const-bits! block flag-ty 0))
-                 (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1))))
-            (core.cond-branch! block is-ok ok-block err-block)
+                 (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1)))
+                 ;; Structured if — create then/else blocks
+                 (pair (core.begin-if! block is-ok))
+                 (ok-block (car pair))
+                 (err-block (cadr pair)))
             ;; ── Error path: extract all arg fields, call handler ──
             (core.set-current-block! err-block)
             (let* ((arg-vals
@@ -377,4 +376,6 @@
                 (let* ((val-idx (car value-indices))
                        (off-ty (list-ref offsets val-idx))
                        (val-expr (core.field-offset! ok-block call-expr (car off-ty) (cdr off-ty))))
-                  (core.return-value! ok-block val-expr))))))))
+                  (core.return-value! ok-block val-expr)))
+            ;; Finalize if — append INST_IF to parent block
+            (core.end-if! block is-ok ok-block err-block))))))
