@@ -191,7 +191,7 @@
                   (type.unsupported '|unknown-variant|)
                   (let* ((discriminant (cdr variant-info))
                          (disc-const (core.const-bits! block (core.make-bits 8) discriminant))
-                         (is-match (core.primitive! block '|integer.eq| (list tag-val disc-const) (core.make-bits 1)))
+                         (is-match (ir.expr.eq block tag-val disc-const))
                          (pair (core.begin-if! block is-match))
                          (arm-block (car pair))
                          (next-block (cadr pair)))

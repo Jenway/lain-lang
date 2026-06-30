@@ -46,14 +46,14 @@
     (if (eq? source-is-addr target-is-addr)
         ;; 同种类 — 无需转换，只用目标类型来降级
         (core.lower-expr block inner target-ir-ty locals)
-        ;; 跨边界 — 先降级内部表达式，再包装转换 primitive
-        (let* ((inner-ir (core.lower-expr block inner
-                       (type-to-cpointer
-                         (core.infer-expr-type inner locals))
-                       locals))
-               (op (if target-is-addr '|int2ptr| '|ptr2int|)))
-          (core.primitive! block op (list inner-ir)
-            (type-to-cpointer target-ir-ty))))))
+         ;; 跨边界 — 先降级内部表达式，再包装转换 primitive
+         (let* ((inner-ir (core.lower-expr block inner
+                        (type-to-cpointer
+                          (core.infer-expr-type inner locals))
+                        locals)))
+           (if target-is-addr
+               (ir.expr.int2ptr block inner-ir)
+               (ir.expr.ptr2int block inner-ir))))))
 
 ;; ── 类型推导: 返回目标类型 ──
 

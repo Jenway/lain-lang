@@ -64,6 +64,17 @@ typedef enum {
 } L1InstKind;
 
 /* -------------------------------------------------------------------------
+ * Memory Ordering
+ * ------------------------------------------------------------------------- */
+typedef enum {
+  MEM_ORDER_RELAXED,
+  MEM_ORDER_ACQUIRE,
+  MEM_ORDER_RELEASE,
+  MEM_ORDER_ACQREL,
+  MEM_ORDER_SEQCST,
+} L1MemOrder;
+
+/* -------------------------------------------------------------------------
  * Expressions
  * -------------------------------------------------------------------------
  *
@@ -73,6 +84,13 @@ typedef enum {
  *  LOAD          : memory read
  *  LEA           : address calculation  base + idx*scale + offset
  *  ADD / SUB     : arithmetic (other ops go through PRIMITIVE)
+ *  MUL / DIV     : multiplication / division
+ *  EQ / NE       : equality comparison
+ *  LT / LE / GT / GE : ordering comparison
+ *  POPCOUNT / CLZ / ROTL : bit operations
+ *  INT2PTR / PTR2INT : type conversion
+ *  FADD / FSUB / FMUL / FDIV : float arithmetic
+ *  FEQ / FLT     : float comparison
  *  CALL          : direct call, yields a value
  *  CALL_INDIRECT : indirect call through a function pointer
  *  STRING        : string literal (address of read-only data)
@@ -89,6 +107,25 @@ typedef enum {
   EXPR_LEA,
   EXPR_ADD,
   EXPR_SUB,
+  EXPR_MUL,
+  EXPR_DIV,
+  EXPR_EQ,
+  EXPR_NE,
+  EXPR_LT,
+  EXPR_LE,
+  EXPR_GT,
+  EXPR_GE,
+  EXPR_POPCOUNT,
+  EXPR_CLZ,
+  EXPR_ROTL,
+  EXPR_INT2PTR,
+  EXPR_PTR2INT,
+  EXPR_FADD,
+  EXPR_FSUB,
+  EXPR_FMUL,
+  EXPR_FDIV,
+  EXPR_FEQ,
+  EXPR_FLT,
   EXPR_CALL,
   EXPR_CALL_INDIRECT,
   EXPR_STRING,
@@ -126,6 +163,7 @@ struct L1Expr {
     struct {
       L1Expr *addr;
       L1Type *ty;
+      L1MemOrder ordering;
     } load;
 
     /* EXPR_LEA: addr = base + idx*scale + offset */
@@ -136,11 +174,18 @@ struct L1Expr {
       uint32_t offset;
     } lea;
 
-    /* EXPR_ADD, EXPR_SUB */
+    /* EXPR_ADD, EXPR_SUB, EXPR_MUL, EXPR_DIV, EXPR_EQ, EXPR_NE,
+       EXPR_LT, EXPR_LE, EXPR_GT, EXPR_GE, EXPR_FADD, EXPR_FSUB,
+       EXPR_FMUL, EXPR_FDIV, EXPR_FEQ, EXPR_FLT */
     struct {
       L1Expr *left;
       L1Expr *right;
     } bin;
+
+    /* EXPR_POPCOUNT, EXPR_CLZ, EXPR_ROTL, EXPR_INT2PTR, EXPR_PTR2INT */
+    struct {
+      L1Expr *operand;
+    } unary;
 
     /* EXPR_CALL */
     struct {
@@ -227,6 +272,7 @@ struct L1Instruction {
       L1Expr *dest;
       L1Expr *val;
       L1Type *store_ty;
+      L1MemOrder ordering;
     } store;
 
     /* INST_IF */

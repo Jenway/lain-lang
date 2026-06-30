@@ -25,6 +25,9 @@
 ;; core/memory.scm → 已迁移到 memory/normalize + memory/lower + memory/infer
 ;; core/lower.scm → 已迁移到 pipeline/lower.scm (调度总线)
 
+;; ═══ 1.6 IR API 构造器 ═══
+(load "std/meta/ir-api.scm")
+
 ;; ═══ 2. 表达式层 ═══
 (load "std/meta/expr/hooks.scm")
 (load "std/meta/path/parse.scm")

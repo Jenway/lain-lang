@@ -22,7 +22,7 @@
          (value-offset (car value-offset-ty))
          (flag-val (core.field-offset! block call-expr flag-offset flag-ty))
          (flag-zero (core.const-bits! block flag-ty 0))
-         (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1)))
+         (is-ok (ir.expr.eq block flag-val flag-zero))
          ;; Structured if — create then/else blocks
          (pair (core.begin-if! block is-ok))
          (then-b (car pair))

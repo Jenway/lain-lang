@@ -53,10 +53,67 @@
           (ir.expr.const block (ir.type.bits 32) offset))))
 
 (define (ir.expr.add block left right)
-  (core.primitive! block "add" (ir.type.addr) (list left right)))
+  (core.add! left right))
 
 (define (ir.expr.sub block left right)
-  (core.primitive! block "sub" (ir.type.addr) (list left right)))
+  (core.sub! left right))
+
+(define (ir.expr.mul block left right)
+  (core.mul! left right))
+
+(define (ir.expr.div block left right)
+  (core.div! left right))
+
+(define (ir.expr.eq block left right)
+  (core.eq! left right))
+
+(define (ir.expr.ne block left right)
+  (core.ne! left right))
+
+(define (ir.expr.lt block left right)
+  (core.lt! left right))
+
+(define (ir.expr.le block left right)
+  (core.le! left right))
+
+(define (ir.expr.gt block left right)
+  (core.gt! left right))
+
+(define (ir.expr.ge block left right)
+  (core.ge! left right))
+
+(define (ir.expr.fadd block left right)
+  (core.fadd! left right))
+
+(define (ir.expr.fsub block left right)
+  (core.fsub! left right))
+
+(define (ir.expr.fmul block left right)
+  (core.fmul! left right))
+
+(define (ir.expr.fdiv block left right)
+  (core.fdiv! left right))
+
+(define (ir.expr.feq block left right)
+  (core.feq! left right))
+
+(define (ir.expr.flt block left right)
+  (core.flt! left right))
+
+(define (ir.expr.popcount block operand)
+  (core.popcount! operand))
+
+(define (ir.expr.clz block operand)
+  (core.clz! operand))
+
+(define (ir.expr.rotl block operand)
+  (core.rotl! operand))
+
+(define (ir.expr.int2ptr block operand)
+  (core.int2ptr! operand))
+
+(define (ir.expr.ptr2int block operand)
+  (core.ptr2int! operand))
 
 (define (ir.expr.primitive block opcode operands result-ty)
   (core.primitive! block opcode operands result-ty))
