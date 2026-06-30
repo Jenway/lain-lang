@@ -831,14 +831,6 @@ static sexp sexp_core_end_if(sexp ctx, sexp self, sexp_sint_t n, sexp bv, sexp c
 }
 
 
-// ── lex-to-sexp FFI (token tree → Scheme S-expression) ──────────────────
-
-static sexp sexp_lex_to_sexp(sexp ctx, sexp self, sexp_sint_t n,
-                              sexp arg_src, sexp arg_len) {
-  const uint8_t *src = (const uint8_t *)sexp_cpointer_value(arg_src);
-  uint32_t len = sexp_unbox_fixnum(arg_len);
-  return (sexp)native_lex_to_sexp(ctx, src, len);
-}
 // ============================================================================
 
 // ── Thin type-size query (reads width from L1Type cpointer, no computation) ──
@@ -964,6 +956,117 @@ static sexp sexp_core_function_ref(sexp ctx, sexp self, sexp_sint_t n,
   var->data.var.ty->kind = TY_ADDR;
   var->data.var.ty->width = 64;
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, var, SEXP_FALSE, 0);
+}
+
+// ============================================================================
+// LAIN-AST FFI — 让 Scheme 操作 C 侧的拓扑树
+// ============================================================================
+
+#include "lainir/lain_ast.h"
+#include "lainir/lain_ast_parser.c"
+
+// 全局单 arena (简化: 当前只支持一次解析一个文件)
+static AstArena g_ast_arena;
+static int g_ast_arena_inited = 0;
+
+// ast.parse!(src, len) → root node id
+static sexp sexp_ast_parse(sexp ctx, sexp self, sexp_sint_t n,
+                            sexp arg_src, sexp arg_len) {
+    const char *src = sexp_to_c_string(ctx, arg_src);
+    uint32_t len = sexp_unbox_fixnum(arg_len);
+
+    if (g_ast_arena_inited) ast_arena_destroy(&g_ast_arena);
+    ast_arena_init(&g_ast_arena);
+    g_ast_arena_inited = 1;
+
+    AstNodeId root = ast_parse(&g_ast_arena, src, len);
+    return sexp_make_fixnum((sexp_sint_t)root);
+}
+
+// ast.node-count() → count
+static sexp sexp_ast_node_count(sexp ctx, sexp self, sexp_sint_t n) {
+    return sexp_make_fixnum((sexp_sint_t)ast_count(&g_ast_arena));
+}
+
+// ast.node-kind(id) → 0-4
+static sexp sexp_ast_node_kind(sexp ctx, sexp self, sexp_sint_t n,
+                                sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    if (!node) return sexp_make_fixnum(-1);
+    return sexp_make_fixnum((sexp_sint_t)node->kind);
+}
+
+// ast.node-text(id) → string or #f
+static sexp sexp_ast_node_text(sexp ctx, sexp self, sexp_sint_t n,
+                                sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    if (!node || !node->text) return SEXP_FALSE;
+    return sexp_c_string(ctx, node->text, -1);
+}
+
+// ast.node-line(id) → line number
+static sexp sexp_ast_node_line(sexp ctx, sexp self, sexp_sint_t n,
+                                sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    if (!node) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)node->line);
+}
+
+// ast.node-col(id) → column number
+static sexp sexp_ast_node_col(sexp ctx, sexp self, sexp_sint_t n,
+                               sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    if (!node) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)node->col);
+}
+
+// ast.node-left(id) → child id or 0
+static sexp sexp_ast_node_left(sexp ctx, sexp self, sexp_sint_t n,
+                                sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    if (!node) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)node->left);
+}
+
+// ast.node-right(id) → child id or 0
+static sexp sexp_ast_node_right(sexp ctx, sexp self, sexp_sint_t n,
+                                 sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    if (!node) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)node->right);
+}
+
+// ast.node-op(id) → child id or 0
+static sexp sexp_ast_node_op(sexp ctx, sexp self, sexp_sint_t n,
+                              sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    if (!node) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)node->op);
+}
+
+// ast.node-next(id) → sibling id or 0
+static sexp sexp_ast_node_next(sexp ctx, sexp self, sexp_sint_t n,
+                                sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    if (!node) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)node->next);
+}
+
+// ast.destroy!() — free arena
+static sexp sexp_ast_destroy(sexp ctx, sexp self, sexp_sint_t n) {
+    if (g_ast_arena_inited) {
+        ast_arena_destroy(&g_ast_arena);
+        g_ast_arena_inited = 0;
+    }
+    return SEXP_VOID;
 }
 
 // ============================================================================

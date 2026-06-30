@@ -146,8 +146,6 @@
 (define (core.function-effects fn) (quote empty-effects))
 (define (core.begin-function-with-effects! name params effects ret)
   (core.begin-function! name params ret))
-(define (core.const-zero! block ty)
-  (core.const-bits! block ty 0))
 (define (core.unsupported-expr kind) (core.make-bits 32))
 (define (diag.raise! . args) #f)
 (define (core.declare-enum-name! name variants) unit)

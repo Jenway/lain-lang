@@ -31,9 +31,6 @@ uint32_t native_file_len(void);
 // token grouping
 void *native_lex_and_group(const uint8_t *src, uint32_t len);
 
-// Token tree → Scheme S-expression (eliminates cursor FFI)
-void *native_lex_to_sexp(void *ctx, const uint8_t *src, uint32_t len);
-
 // scheme integration
 void native_register_core_ffi(
   void *ctx,

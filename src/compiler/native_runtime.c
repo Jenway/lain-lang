@@ -28,38 +28,14 @@ uint8_t read_byte_at(const uint8_t *ptr, size_t offset) { return ptr[offset]; }
 
 // C-Side Lexer (REMOVED — replaced by std/meta/lexer.scm)
 // All lexing, grouping, form-splitting, and token-to-sexp conversion
-// now happens in pure Scheme via meta.lex-source! and native_lex_to_sexp.
-
-// core.lex-to-sexp! — uses Scheme-side lexer
-void *native_lex_to_sexp(void *ctx_ptr, const uint8_t *src, uint32_t len) {
-  sexp ctx = (sexp)ctx_ptr;
-  sexp src_str = sexp_c_string(ctx, (const char *)src, len);
-  sexp len_val = sexp_make_integer(ctx, sexp_string_length(src_str));
-  sexp env = sexp_context_env(ctx);
-  sexp lex_proc = sexp_env_ref(ctx, env,
-                               sexp_intern(ctx, "meta.lex-source!", -1),
-                               SEXP_FALSE);
-  sexp form_list = sexp_apply(ctx, lex_proc, sexp_list2(ctx, src_str, len_val));
-
-  if (sexp_exceptionp(form_list))
-    return SEXP_FALSE;
-
-  // meta.lex-source! returns a list of form trees: ((root ...) (root ...))
-  // For compatibility with old API (single tree), return the first form
-  // if there's only one, otherwise wrap all in a root.
-  if (sexp_pairp(form_list) && sexp_nullp(sexp_cdr(form_list)))
-    return sexp_car(form_list);
-
-  // Multiple forms: wrap in a root
-  sexp result = sexp_cons(ctx, sexp_intern(ctx, "root", -1), form_list);
-  return result;
-}
+// now happens in pure Scheme via meta.lex-source! (pure Scheme implementation).
 
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 7-8. L1 IR Builder FFI (→ compiler/builder_ffi.c)
 // ══════════════════════════════════════════════════════════════════════════════
 #include "lainir/lainir_core.c"
+#include "lainir/lain_ast.c"
 #include "builder_ffi.c"
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -569,7 +545,6 @@ void native_register_core_ffi(
   REG("core.end-if!", 4, sexp_core_end_if);
   REG("core.assign-temp!", 2, sexp_core_assign_temp);
   REG("core.emit-l1!", 2, sexp_core_emit_l1);
-  REG("core.lex-to-sexp!", 2, sexp_lex_to_sexp);
   REG("core.read-file-forms!", 1, sexp_read_file_forms);
   REG("core.read-file-string!", 1, sexp_read_file_string);
   REG("core.read-interface!", 1, sexp_read_interface);
@@ -584,6 +559,20 @@ void native_register_core_ffi(
   REG("core.execute-lainir!", 2, sexp_core_execute_lainir);
   REG("core.eval!", 3, sexp_core_eval);
   REG("core.eval-value!", 1, sexp_core_eval_value);
+
+  // LAIN-AST FFI
+  REG("ast.parse!", 2, sexp_ast_parse);
+  REG("ast.node-count", 0, sexp_ast_node_count);
+  REG("ast.node-kind", 1, sexp_ast_node_kind);
+  REG("ast.node-text", 1, sexp_ast_node_text);
+  REG("ast.node-line", 1, sexp_ast_node_line);
+  REG("ast.node-col", 1, sexp_ast_node_col);
+  REG("ast.node-left", 1, sexp_ast_node_left);
+  REG("ast.node-right", 1, sexp_ast_node_right);
+  REG("ast.node-op", 1, sexp_ast_node_op);
+  REG("ast.node-next", 1, sexp_ast_node_next);
+  REG("ast.destroy!", 0, sexp_ast_destroy);
+
 #undef REG
 }
 
@@ -647,22 +636,6 @@ void *native_init_scheme(void) {
   native_load_meta_sources(ctx, env);
   fprintf(stderr, "[init] 5: meta sources loaded\n");
 
-  // Smoke test: lex-to-sexp
-  {
-    const char *test_src = "fn main() -> i32 { 42 }";
-    sexp tree = (sexp)native_lex_to_sexp(ctx, (const uint8_t *)test_src, strlen(test_src));
-    vm_value *tv = (vm_value *)tree;
-    fprintf(stderr, "[init] 6: lex-to-sexp smoke test: %s\n",
-            vm_is_exception(tv) ? "FAILED" : "OK");
-    if (!vm_is_exception(tv)) {
-      vm_context *c = (vm_context *)ctx;
-      vm_value *out = vm_open_output_string(c);
-      vm_write(c, tv, out);
-      vm_value *str = vm_get_output_string(c, out);
-      fprintf(stderr, "[init] 6:   => %s\n", vm_string_data(str));
-      vm_close_port(c, out);
-    }
-  }
   // Verify compile-group-to-core is available
   {
     vm_context *c = (vm_context *)ctx;

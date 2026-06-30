@@ -105,3 +105,4 @@
 (load "std/meta/literals/lower.scm")
 (load "std/meta/io/println.scm")
 (load "std/meta/compile.scm")
+(load "std/meta/canonicalize.scm")
