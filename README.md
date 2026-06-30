@@ -4,35 +4,31 @@ Lain is a native language experiment.
 
 ## Description
 
-Lain consists of three layers：
+Lain consists of three layers:
 
-1. `Lain IR`
-    - `Lain IR` is a structred IR, similiar to C, but a bit lower.
-2. `compile time evaluation`
-    - `Lain IR` statements can be run in compile time.
-3. `meta functions`
-    - Scheme functions can be injected via hooks during compile time to manipulate AST
+1. **Lain IR**
 
-Lain trying to make the compiler as small as possible, and implement most highlevel feature during meta library.
+    - A structured IR similar to C, but a bit lowerer;
 
-## Lain IR
+2. **Compile-time execution**
 
-```Lain-IR
-#proc add(#bits<32>, #bits<32>) -> #bits<32> {
-  #let %ret = #integer.signed.add(#arg(0), #arg(1))
-  #return %ret
-}
+    - Expressions can be evaluated during compilation.
+    - Procedures can be executed during compilation.
 
-#proc main() -> #bits<32> {
-  #let %agg = #alloca(8)
-  #store 10, #lea(base=%agg, offset=0)
-  #store 20, #lea(base=%agg, offset=4)
-  #let %a = #field[0](%agg)
-  #let %b = #field[4](%agg)
-  #let %sum = #call(add,%a, %b)
-  #return %sum
-}
-```
+3. **Meta functions**
+
+    - Scheme functions can be injected through compiler hooks to inspect and transform AST nodes.
+
+Lain aims to keep the compiler small and move most high-level language features into reusable meta libraries.
+
+## Design Principles
+
+- Keep the core IR small and stable.
+- Represent control flow explicitly.
+- Represent memory operations explicitly.
+- Separate compile-time evaluation from compile-time execution.
+- Move high-level language features into libraries whenever possible.
+- Treat meta programming as a layer built on top of the IR rather than a special-purpose subsystem.
 
 ## Build and Run
 
