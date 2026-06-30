@@ -93,6 +93,129 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
     emit_c_expr(expr->data.bin.right, out);
     fprintf(out, ")");
     break;
+  case EXPR_MUL:
+    fprintf(out, "(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, " * ");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_DIV:
+    fprintf(out, "(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, " / ");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_EQ:
+    fprintf(out, "(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, " == ");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_NE:
+    fprintf(out, "(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, " != ");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_LT:
+    fprintf(out, "((int64_t)(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, ") < (int64_t)(");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, "))");
+    break;
+  case EXPR_LE:
+    fprintf(out, "((int64_t)(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, ") <= (int64_t)(");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, "))");
+    break;
+  case EXPR_GT:
+    fprintf(out, "((int64_t)(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, ") > (int64_t)(");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, "))");
+    break;
+  case EXPR_GE:
+    fprintf(out, "((int64_t)(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, ") >= (int64_t)(");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, "))");
+    break;
+  case EXPR_FADD:
+    fprintf(out, "(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, " + ");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FSUB:
+    fprintf(out, "(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, " - ");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FMUL:
+    fprintf(out, "(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, " * ");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FDIV:
+    fprintf(out, "(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, " / ");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FEQ:
+    fprintf(out, "(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, " == ");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FLT:
+    fprintf(out, "(");
+    emit_c_expr(expr->data.bin.left, out);
+    fprintf(out, " < ");
+    emit_c_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_POPCOUNT:
+    fprintf(out, "__builtin_popcountll(");
+    emit_c_expr(expr->data.unary.operand, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_CLZ:
+    fprintf(out, "__builtin_clzll(");
+    emit_c_expr(expr->data.unary.operand, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_ROTL:
+    fprintf(out, "__builtin_rotl64(");
+    emit_c_expr(expr->data.unary.operand, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_INT2PTR:
+    fprintf(out, "(void*)(uintptr_t)(");
+    emit_c_expr(expr->data.unary.operand, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_PTR2INT:
+    fprintf(out, "(uint64_t)(uintptr_t)(");
+    emit_c_expr(expr->data.unary.operand, out);
+    fprintf(out, ")");
+    break;
   case EXPR_CALL:
     fprintf(out, "%s(", expr->data.call.fn_name);
     for (uint32_t i = 0; i < expr->data.call.arg_count; i++) {

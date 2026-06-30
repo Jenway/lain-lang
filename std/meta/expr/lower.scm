@@ -170,32 +170,23 @@
                  (record.get payload '|args|))))
     (cond
       ((symbol=? method '|popcount|)
-       (core.primitive!
-         block
-         '|cpu.popcount|
-         (list (core.lower-expr block receiver expected-ty locals))
-         expected-ty))
+       (ir.expr.popcount block
+         (core.lower-expr block receiver expected-ty locals)))
       ((symbol=? method '|leading_zeros|)
-       (core.primitive!
-         block
-         '|cpu.leading-zeros|
-         (list (core.lower-expr block receiver expected-ty locals))
-         expected-ty))
+       (ir.expr.clz block
+         (core.lower-expr block receiver expected-ty locals)))
       ((symbol=? method '|bswap|)
+       ;; bswap 没有对应的 Enum，保留 primitive
        (core.primitive!
          block
          '|cpu.bswap|
          (list (core.lower-expr block receiver expected-ty locals))
          expected-ty))
       ((symbol=? method '|rotate_left|)
-       (core.primitive!
-         block
-         '|cpu.rotate-left|
-         (list
-           (core.lower-expr block receiver expected-ty locals)
-           (core.lower-expr block (list.first args) expected-ty locals))
-         expected-ty))
+       (ir.expr.rotl block
+         (core.lower-expr block receiver expected-ty locals)))
       ((symbol=? method '|extract_bits|)
+       ;; extract_bits 是位与操作，使用 primitive
        (core.primitive!
          block
          '|cpu.extract-bits|
@@ -352,7 +343,7 @@
                  (flag-val (core.field-offset! block call-expr flag-offset flag-ty))
                  ;; Check flag == 0
                  (flag-zero (core.const-bits! block flag-ty 0))
-                 (is-ok (core.primitive! block '|integer.eq| (list flag-val flag-zero) (core.make-bits 1)))
+                 (is-ok (ir.expr.eq block flag-val flag-zero))
                  ;; Structured if — create then/else blocks
                  (pair (core.begin-if! block is-ok))
                  (ok-block (car pair))

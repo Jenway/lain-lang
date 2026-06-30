@@ -49,6 +49,129 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
     emit_l1_expr(expr->data.bin.right, out);
     fprintf(out, ")");
     break;
+  case EXPR_MUL:
+    fprintf(out, "#mul(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_DIV:
+    fprintf(out, "#div(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_EQ:
+    fprintf(out, "#eq(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_NE:
+    fprintf(out, "#ne(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_LT:
+    fprintf(out, "#lt(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_LE:
+    fprintf(out, "#le(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_GT:
+    fprintf(out, "#gt(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_GE:
+    fprintf(out, "#ge(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FADD:
+    fprintf(out, "#fadd(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FSUB:
+    fprintf(out, "#fsub(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FMUL:
+    fprintf(out, "#fmul(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FDIV:
+    fprintf(out, "#fdiv(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FEQ:
+    fprintf(out, "#feq(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_FLT:
+    fprintf(out, "#flt(");
+    emit_l1_expr(expr->data.bin.left, out);
+    fprintf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_POPCOUNT:
+    fprintf(out, "#popcount(");
+    emit_l1_expr(expr->data.unary.operand, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_CLZ:
+    fprintf(out, "#clz(");
+    emit_l1_expr(expr->data.unary.operand, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_ROTL:
+    fprintf(out, "#rotl(");
+    emit_l1_expr(expr->data.unary.operand, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_INT2PTR:
+    fprintf(out, "#int2ptr(");
+    emit_l1_expr(expr->data.unary.operand, out);
+    fprintf(out, ")");
+    break;
+  case EXPR_PTR2INT:
+    fprintf(out, "#ptr2int(");
+    emit_l1_expr(expr->data.unary.operand, out);
+    fprintf(out, ")");
+    break;
   case EXPR_LOAD:
     fprintf(out, "#load(");
     emit_l1_expr(expr->data.load.addr, out);

@@ -596,6 +596,133 @@ static sexp sexp_core_primitive(sexp ctx, sexp self, sexp_sint_t n,
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
 }
 
+// Helper function to create binary expressions
+static sexp sexp_core_bin_expr(sexp ctx, sexp self, sexp_sint_t n,
+                               sexp arg_left, sexp arg_right, L1ExprKind kind) {
+  L1Expr *left = (L1Expr *)sexp_cpointer_value(arg_left);
+  L1Expr *right = (L1Expr *)sexp_cpointer_value(arg_right);
+  L1Expr *expr = malloc(sizeof(L1Expr));
+  expr->kind = kind;
+  expr->data.bin.left = left;
+  expr->data.bin.right = right;
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
+}
+
+// Helper function to create unary expressions
+static sexp sexp_core_unary_expr(sexp ctx, sexp self, sexp_sint_t n,
+                                 sexp arg_operand, L1ExprKind kind) {
+  L1Expr *operand = (L1Expr *)sexp_cpointer_value(arg_operand);
+  L1Expr *expr = malloc(sizeof(L1Expr));
+  expr->kind = kind;
+  expr->data.unary.operand = operand;
+  return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
+}
+
+static sexp sexp_core_mul(sexp ctx, sexp self, sexp_sint_t n,
+                          sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_MUL);
+}
+
+static sexp sexp_core_div(sexp ctx, sexp self, sexp_sint_t n,
+                          sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_DIV);
+}
+
+static sexp sexp_core_eq(sexp ctx, sexp self, sexp_sint_t n,
+                         sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_EQ);
+}
+
+static sexp sexp_core_ne(sexp ctx, sexp self, sexp_sint_t n,
+                         sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_NE);
+}
+
+static sexp sexp_core_lt(sexp ctx, sexp self, sexp_sint_t n,
+                         sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_LT);
+}
+
+static sexp sexp_core_le(sexp ctx, sexp self, sexp_sint_t n,
+                         sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_LE);
+}
+
+static sexp sexp_core_gt(sexp ctx, sexp self, sexp_sint_t n,
+                         sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_GT);
+}
+
+static sexp sexp_core_ge(sexp ctx, sexp self, sexp_sint_t n,
+                         sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_GE);
+}
+
+static sexp sexp_core_add(sexp ctx, sexp self, sexp_sint_t n,
+                          sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_ADD);
+}
+
+static sexp sexp_core_sub(sexp ctx, sexp self, sexp_sint_t n,
+                          sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_SUB);
+}
+
+static sexp sexp_core_fadd(sexp ctx, sexp self, sexp_sint_t n,
+                           sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_FADD);
+}
+
+static sexp sexp_core_fsub(sexp ctx, sexp self, sexp_sint_t n,
+                           sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_FSUB);
+}
+
+static sexp sexp_core_fmul(sexp ctx, sexp self, sexp_sint_t n,
+                           sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_FMUL);
+}
+
+static sexp sexp_core_fdiv(sexp ctx, sexp self, sexp_sint_t n,
+                           sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_FDIV);
+}
+
+static sexp sexp_core_feq(sexp ctx, sexp self, sexp_sint_t n,
+                          sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_FEQ);
+}
+
+static sexp sexp_core_flt(sexp ctx, sexp self, sexp_sint_t n,
+                          sexp arg_left, sexp arg_right) {
+  return sexp_core_bin_expr(ctx, self, n, arg_left, arg_right, EXPR_FLT);
+}
+
+static sexp sexp_core_popcount(sexp ctx, sexp self, sexp_sint_t n,
+                               sexp arg_operand) {
+  return sexp_core_unary_expr(ctx, self, n, arg_operand, EXPR_POPCOUNT);
+}
+
+static sexp sexp_core_clz(sexp ctx, sexp self, sexp_sint_t n,
+                          sexp arg_operand) {
+  return sexp_core_unary_expr(ctx, self, n, arg_operand, EXPR_CLZ);
+}
+
+static sexp sexp_core_rotl(sexp ctx, sexp self, sexp_sint_t n,
+                           sexp arg_operand) {
+  return sexp_core_unary_expr(ctx, self, n, arg_operand, EXPR_ROTL);
+}
+
+static sexp sexp_core_int2ptr(sexp ctx, sexp self, sexp_sint_t n,
+                              sexp arg_operand) {
+  return sexp_core_unary_expr(ctx, self, n, arg_operand, EXPR_INT2PTR);
+}
+
+static sexp sexp_core_ptr2int(sexp ctx, sexp self, sexp_sint_t n,
+                              sexp arg_operand) {
+  return sexp_core_unary_expr(ctx, self, n, arg_operand, EXPR_PTR2INT);
+}
+
 static sexp sexp_core_local_alloc(sexp ctx, sexp self, sexp_sint_t n,
                                   sexp arg_block, sexp arg_element_ty,
                                   sexp arg_byte_size) {

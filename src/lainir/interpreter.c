@@ -297,6 +297,146 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
     if (interp->error) return lainir_value_unit();
     return lainir_value_bits(interp_value_bits(interp,l,"expected bits for sub") - interp_value_bits(interp,r,"expected bits for sub"), l.bit_width ? l.bit_width : 32);
   }
+  case EXPR_MUL: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_bits(interp_value_bits(interp,l,"expected bits for mul") * interp_value_bits(interp,r,"expected bits for mul"), l.bit_width ? l.bit_width : 32);
+  }
+  case EXPR_DIV: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    uint64_t divisor = interp_value_bits(interp,r,"expected bits for div");
+    if (divisor == 0) { interp_trap(interp, "div by zero"); return lainir_value_unit(); }
+    return lainir_value_bits(interp_value_bits(interp,l,"expected bits for div") / divisor, l.bit_width ? l.bit_width : 32);
+  }
+  case EXPR_EQ: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_bits(interp_value_bits(interp,l,"expected bits for eq") == interp_value_bits(interp,r,"expected bits for eq"), 1);
+  }
+  case EXPR_NE: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_bits(interp_value_bits(interp,l,"expected bits for ne") != interp_value_bits(interp,r,"expected bits for ne"), 1);
+  }
+  case EXPR_LT: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_bits((int64_t)interp_value_bits(interp,l,"expected bits for lt") < (int64_t)interp_value_bits(interp,r,"expected bits for lt"), 1);
+  }
+  case EXPR_LE: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_bits((int64_t)interp_value_bits(interp,l,"expected bits for le") <= (int64_t)interp_value_bits(interp,r,"expected bits for le"), 1);
+  }
+  case EXPR_GT: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_bits((int64_t)interp_value_bits(interp,l,"expected bits for gt") > (int64_t)interp_value_bits(interp,r,"expected bits for gt"), 1);
+  }
+  case EXPR_GE: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_bits((int64_t)interp_value_bits(interp,l,"expected bits for ge") >= (int64_t)interp_value_bits(interp,r,"expected bits for ge"), 1);
+  }
+  case EXPR_FADD: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    double lv = *(double*)&l.as.bits;
+    double rv = *(double*)&r.as.bits;
+    double result = lv + rv;
+    uint64_t bits;
+    memcpy(&bits, &result, sizeof(bits));
+    return lainir_value_bits(bits, 64);
+  }
+  case EXPR_FSUB: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    double lv = *(double*)&l.as.bits;
+    double rv = *(double*)&r.as.bits;
+    double result = lv - rv;
+    uint64_t bits;
+    memcpy(&bits, &result, sizeof(bits));
+    return lainir_value_bits(bits, 64);
+  }
+  case EXPR_FMUL: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    double lv = *(double*)&l.as.bits;
+    double rv = *(double*)&r.as.bits;
+    double result = lv * rv;
+    uint64_t bits;
+    memcpy(&bits, &result, sizeof(bits));
+    return lainir_value_bits(bits, 64);
+  }
+  case EXPR_FDIV: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    double lv = *(double*)&l.as.bits;
+    double rv = *(double*)&r.as.bits;
+    if (rv == 0.0) { interp_trap(interp, "fdiv by zero"); return lainir_value_unit(); }
+    double result = lv / rv;
+    uint64_t bits;
+    memcpy(&bits, &result, sizeof(bits));
+    return lainir_value_bits(bits, 64);
+  }
+  case EXPR_FEQ: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    double lv = *(double*)&l.as.bits;
+    double rv = *(double*)&r.as.bits;
+    return lainir_value_bits(lv == rv, 1);
+  }
+  case EXPR_FLT: {
+    LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
+    LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
+    if (interp->error) return lainir_value_unit();
+    double lv = *(double*)&l.as.bits;
+    double rv = *(double*)&r.as.bits;
+    return lainir_value_bits(lv < rv, 1);
+  }
+  case EXPR_POPCOUNT: {
+    LainirValue v = interp_eval_expr(interp, frame, expr->data.unary.operand);
+    if (interp->error) return lainir_value_unit();
+    uint64_t x = interp_value_bits(interp,v,"expected bits for popcount");
+    return lainir_value_bits(__builtin_popcountll(x), 32);
+  }
+  case EXPR_CLZ: {
+    LainirValue v = interp_eval_expr(interp, frame, expr->data.unary.operand);
+    if (interp->error) return lainir_value_unit();
+    uint64_t x = interp_value_bits(interp,v,"expected bits for clz");
+    return lainir_value_bits(__builtin_clzll(x), 32);
+  }
+  case EXPR_ROTL: {
+    LainirValue v = interp_eval_expr(interp, frame, expr->data.unary.operand);
+    if (interp->error) return lainir_value_unit();
+    uint64_t x = interp_value_bits(interp,v,"expected bits for rotl");
+    // Rotate left by 1: (x << 1) | (x >> 63)
+    return lainir_value_bits((x << 1) | (x >> 63), 64);
+  }
+  case EXPR_INT2PTR: {
+    LainirValue v = interp_eval_expr(interp, frame, expr->data.unary.operand);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_addr((void*)(uintptr_t)v.as.bits);
+  }
+  case EXPR_PTR2INT: {
+    LainirValue v = interp_eval_expr(interp, frame, expr->data.unary.operand);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_bits((uint64_t)(uintptr_t)interp_value_addr(interp,v,"expected address for ptr2int"), 64);
+  }
   case EXPR_PRIMITIVE: {
     uint32_t c = expr->data.primitive.operand_count;
     LainirValue *ops = calloc(c ? c : 1, sizeof(LainirValue));

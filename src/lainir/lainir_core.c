@@ -33,8 +33,29 @@ static void lainir_free_expr(L1Expr *expr) {
     break;
   case EXPR_ADD:
   case EXPR_SUB:
+  case EXPR_MUL:
+  case EXPR_DIV:
+  case EXPR_EQ:
+  case EXPR_NE:
+  case EXPR_LT:
+  case EXPR_LE:
+  case EXPR_GT:
+  case EXPR_GE:
+  case EXPR_FADD:
+  case EXPR_FSUB:
+  case EXPR_FMUL:
+  case EXPR_FDIV:
+  case EXPR_FEQ:
+  case EXPR_FLT:
     lainir_free_expr(expr->data.bin.left);
     lainir_free_expr(expr->data.bin.right);
+    break;
+  case EXPR_POPCOUNT:
+  case EXPR_CLZ:
+  case EXPR_ROTL:
+  case EXPR_INT2PTR:
+  case EXPR_PTR2INT:
+    lainir_free_expr(expr->data.unary.operand);
     break;
   case EXPR_CALL:
     free(expr->data.call.fn_name);

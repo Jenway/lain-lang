@@ -31,8 +31,10 @@ typedef enum {
   TK_KW_CALL,
   TK_KW_IF,
   TK_KW_ELSE,
-  TK_KW_COND_BR,
-  TK_KW_BR,
+  TK_KW_LOOP,
+  TK_KW_BREAK,
+  TK_KW_CONTINUE,
+  TK_KW_LET,
   TK_KW_PRIMITIVE,
   TK_KW_ALLOCA,
   TK_KW_FIELD,
@@ -51,12 +53,6 @@ typedef struct {
   int line;
 } Token;
 
-typedef struct LabelEntry {
-  char *name;
-  int id;
-  struct LabelEntry *next;
-} LabelEntry;
-
 typedef struct {
   const char *src;
   int pos;
@@ -65,8 +61,6 @@ typedef struct {
   char **param_names;
   uint32_t param_count;
   uint32_t param_cap;
-  LabelEntry *labels;
-  int next_block_id;
 } Parser;
 
 static int is_ident_start(int c) {
@@ -97,14 +91,6 @@ static void parser_reset_subroutine_context(Parser *p) {
   p->param_names = NULL;
   p->param_count = 0;
   p->param_cap = 0;
-
-  while (p->labels) {
-    LabelEntry *next = p->labels->next;
-    free(p->labels->name);
-    free(p->labels);
-    p->labels = next;
-  }
-  p->next_block_id = 0;
 }
 
 static void parser_add_param_name(Parser *p, const char *name) {
@@ -123,20 +109,6 @@ static int parser_lookup_param_index(Parser *p, const char *name) {
   return -1;
 }
 
-static int parser_label_id(Parser *p, const char *name) {
-  for (LabelEntry *entry = p->labels; entry; entry = entry->next) {
-    if (strcmp(entry->name, name) == 0)
-      return entry->id;
-  }
-
-  LabelEntry *entry = calloc(1, sizeof(LabelEntry));
-  entry->name = strdup(name);
-  entry->id = p->next_block_id++;
-  entry->next = p->labels;
-  p->labels = entry;
-  return entry->id;
-}
-
 static TokenKind hash_keyword_kind(const char *text, int len) {
   if (len == 4 && memcmp(text, "unit", 4) == 0) return TK_HASH_UNIT;
   if (len == 5 && memcmp(text, "never", 5) == 0) return TK_HASH_NEVER;
@@ -147,8 +119,10 @@ static TokenKind hash_keyword_kind(const char *text, int len) {
   if (len == 4 && memcmp(text, "call", 4) == 0) return TK_KW_CALL;
   if (len == 2 && memcmp(text, "if", 2) == 0) return TK_KW_IF;
   if (len == 4 && memcmp(text, "else", 4) == 0) return TK_KW_ELSE;
-  if (len == 7 && memcmp(text, "cond_br", 7) == 0) return TK_KW_COND_BR;
-  if (len == 2 && memcmp(text, "br", 2) == 0) return TK_KW_BR;
+  if (len == 4 && memcmp(text, "loop", 4) == 0) return TK_KW_LOOP;
+  if (len == 5 && memcmp(text, "break", 5) == 0) return TK_KW_BREAK;
+  if (len == 8 && memcmp(text, "continue", 8) == 0) return TK_KW_CONTINUE;
+  if (len == 3 && memcmp(text, "let", 3) == 0) return TK_KW_LET;
   if (len == 9 && memcmp(text, "primitive", 9) == 0) return TK_KW_PRIMITIVE;
   if (len == 6 && memcmp(text, "alloca", 6) == 0) return TK_KW_ALLOCA;
   if (len == 5 && memcmp(text, "field", 5) == 0) return TK_KW_FIELD;
@@ -317,6 +291,7 @@ static L1Type *parse_type(Parser *p) {
 }
 
 static L1Expr *parse_expr(Parser *p);
+static L1Block *parse_block_instructions(Parser *p);
 
 static L1Expr *new_const_expr(int64_t value) {
   L1Expr *expr = lainir_new_expr(EXPR_CONST);
@@ -644,7 +619,15 @@ static L1Instruction *parse_instruction_list(Parser *p) {
   while (p->current.kind != TK_RBRACE && p->current.kind != TK_EOF) {
     L1Instruction *inst = NULL;
 
-    if (p->current.kind == TK_PERCENT) {
+    if (p->current.kind == TK_KW_LET) {
+      next_token(p);
+      Token token = expect(p, TK_IDENT);
+      char *name = token_string(token);
+      expect(p, TK_EQ);
+      inst = lainir_new_instruction(INST_LET);
+      inst->data.let.name = name;
+      inst->data.let.val = parse_expr(p);
+    } else if (p->current.kind == TK_PERCENT) {
       Token token;
       char *name;
 
@@ -666,18 +649,51 @@ static L1Instruction *parse_instruction_list(Parser *p) {
     } else if (p->current.kind == TK_KW_CALL) {
       inst = lainir_new_instruction(INST_CALL);
       inst->data.call_inst.expr = parse_expr(p);
+    } else if (p->current.kind == TK_KW_RETURN) {
+      next_token(p);
+      inst = lainir_new_instruction(INST_RETURN);
+      if (p->current.kind != TK_RBRACE && p->current.kind != TK_SEMICOLON) {
+        inst->data.ret.val = parse_expr(p);
+      }
     } else if (p->current.kind == TK_KW_IF) {
       next_token(p);
       inst = lainir_new_instruction(INST_IF);
       inst->data.if_stmt.condition = parse_expr(p);
       expect(p, TK_LBRACE);
-      inst->data.if_stmt.then_body = parse_instruction_list(p);
+      inst->data.if_stmt.then_body = parse_block_instructions(p);
       expect(p, TK_RBRACE);
       if (p->current.kind == TK_KW_ELSE) {
         next_token(p);
         expect(p, TK_LBRACE);
-        inst->data.if_stmt.else_body = parse_instruction_list(p);
+        inst->data.if_stmt.else_body = parse_block_instructions(p);
         expect(p, TK_RBRACE);
+      }
+    } else if (p->current.kind == TK_KW_LOOP) {
+      next_token(p);
+      inst = lainir_new_instruction(INST_LOOP);
+      inst->data.loop.label = NULL;
+      if (p->current.kind == TK_IDENT) {
+        Token label = expect(p, TK_IDENT);
+        inst->data.loop.label = token_string(label);
+      }
+      expect(p, TK_LBRACE);
+      inst->data.loop.body = parse_block_instructions(p);
+      expect(p, TK_RBRACE);
+    } else if (p->current.kind == TK_KW_BREAK) {
+      next_token(p);
+      inst = lainir_new_instruction(INST_BREAK);
+      inst->data.jump.label = NULL;
+      if (p->current.kind == TK_IDENT) {
+        Token label = expect(p, TK_IDENT);
+        inst->data.jump.label = token_string(label);
+      }
+    } else if (p->current.kind == TK_KW_CONTINUE) {
+      next_token(p);
+      inst = lainir_new_instruction(INST_CONTINUE);
+      inst->data.jump.label = NULL;
+      if (p->current.kind == TK_IDENT) {
+        Token label = expect(p, TK_IDENT);
+        inst->data.jump.label = token_string(label);
       }
     } else {
       break;
@@ -693,13 +709,25 @@ static L1Instruction *parse_instruction_list(Parser *p) {
   return head;
 }
 
+static L1Block *parse_block_instructions(Parser *p) {
+  L1Block *block = lainir_new_block();
+  L1Instruction *insts = parse_instruction_list(p);
+  if (insts) {
+    block->body = insts;
+    block->body_tail = insts;
+    while (block->body_tail && block->body_tail->next)
+      block->body_tail = block->body_tail->next;
+  }
+  return block;
+}
+
 static L1Block *parse_block(Parser *p) {
   Token label = expect(p, TK_IDENT);
   char *label_name = token_string(label);
   L1Block *block;
 
   expect(p, TK_COLON);
-  block = lainir_new_block(parser_label_id(p, label_name));
+  block = lainir_new_block();
   free(label_name);
 
   while (1) {
@@ -707,51 +735,6 @@ static L1Block *parse_block(Parser *p) {
         p->current.kind == TK_RBRACE ||
         p->current.kind == TK_EOF)
       break;
-
-    if (p->current.kind == TK_KW_RETURN) {
-      next_token(p);
-      block->terminator = lainir_new_terminator(TERM_RETURN);
-      if (p->current.kind == TK_HASH_UNIT) {
-        next_token(p);
-        block->terminator->data.ret_val = NULL;
-      } else {
-        block->terminator->data.ret_val = parse_expr(p);
-      }
-      break;
-    }
-
-    if (p->current.kind == TK_KW_BR) {
-      Token target;
-      char *target_name;
-      next_token(p);
-      target = expect(p, TK_IDENT);
-      target_name = token_string(target);
-      block->terminator = lainir_new_terminator(TERM_BRANCH);
-      block->terminator->data.target_id = parser_label_id(p, target_name);
-      free(target_name);
-      break;
-    }
-
-    if (p->current.kind == TK_KW_COND_BR) {
-      Token t_label;
-      Token f_label;
-      char *t_name;
-      char *f_name;
-      next_token(p);
-      block->terminator = lainir_new_terminator(TERM_COND_BRANCH);
-      block->terminator->data.cond_branch.condition = parse_expr(p);
-      expect(p, TK_COMMA);
-      t_label = expect(p, TK_IDENT);
-      expect(p, TK_COMMA);
-      f_label = expect(p, TK_IDENT);
-      t_name = token_string(t_label);
-      f_name = token_string(f_label);
-      block->terminator->data.cond_branch.true_id = parser_label_id(p, t_name);
-      block->terminator->data.cond_branch.false_id = parser_label_id(p, f_name);
-      free(t_name);
-      free(f_name);
-      break;
-    }
 
     {
       L1Instruction *insts = parse_instruction_list(p);

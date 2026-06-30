@@ -61,11 +61,29 @@
                      right-expr
                      operand-ty
                      locals)))
-        (core.primitive!
-          block
-          (core.binary-primitive op operand-ty)
-          (list left right)
-          expected-ty)))))
+        (cond
+          ((type.float? operand-ty)
+           (cond
+             ((symbol=? op '|+|) (ir.expr.fadd block left right))
+             ((symbol=? op '|-|) (ir.expr.fsub block left right))
+             ((symbol=? op '|*|) (ir.expr.fmul block left right))
+             ((symbol=? op '|/|) (ir.expr.fdiv block left right))
+             ((symbol=? op '|==|) (ir.expr.feq block left right))
+             ((symbol=? op '|<|) (ir.expr.flt block left right))
+             (else (core.unsupported-operator op))))
+          (else
+           (cond
+             ((symbol=? op '|+|) (ir.expr.add block left right))
+             ((symbol=? op '|-|) (ir.expr.sub block left right))
+             ((symbol=? op '|*|) (ir.expr.mul block left right))
+             ((symbol=? op '|/|) (ir.expr.div block left right))
+             ((symbol=? op '|==|) (ir.expr.eq block left right))
+             ((symbol=? op '|!=|) (ir.expr.ne block left right))
+             ((symbol=? op '|<|) (ir.expr.lt block left right))
+             ((symbol=? op '|<=|) (ir.expr.le block left right))
+             ((symbol=? op '|>|) (ir.expr.gt block left right))
+             ((symbol=? op '|>=|) (ir.expr.ge block left right))
+             (else (core.unsupported-operator op)))))))))
 
 (define-pass (core-expr-lowerer |operators.unary| block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
@@ -77,20 +95,12 @@
       ((symbol=? op '|-|)
        (let* ((zero (core.const-bits! block expected-ty 0))
              (operand (core.lower-expr block operand-expr expected-ty locals)))
-         (core.primitive!
-           block
-           '|integer.sub|
-           (list zero operand)
-           expected-ty)))
+         (ir.expr.sub block zero operand)))
       ((symbol=? op '|!|)
        (let* ((operand (core.lower-expr block operand-expr expected-ty locals))
              (zero (core.const-bits! block expected-ty 0)))
-         (core.primitive!
-           block
-           '|integer.eq|
-           (list operand zero)
-           expected-ty)))
-        (else (core.unsupported-operator op)))))
+         (ir.expr.eq block operand zero)))
+      (else (core.unsupported-operator op)))))
 
 (define (operators.compare-op? op)
   (cond
