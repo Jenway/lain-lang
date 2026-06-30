@@ -154,16 +154,13 @@
         (cons 'root (ast->sexp-flat id)))))
 
 ;; ── parse-and-canonicalize: 一步到位 ──
-;; 拆分顶层 GROUP 为多个 (root ...) form (每个顶层表达式一个)
 (define (parse-and-canonicalize src len)
   (let* ((root-id (ast.parse! src len))
          (kind (ast.node-kind root-id))
          (left (ast.node-left root-id))
          (forms
           (if (and (= kind ast.group) (not (= left 0)))
-              ;; 每个顶层子节点一个 form
               (ast-group->root-forms left)
-              ;; 单根
               (list (ast->root-form root-id)))))
     (ast.destroy!)
     forms))
@@ -176,3 +173,10 @@
         (let* ((next-id (ast.node-next id))
                (form (cons 'root (ast->sexp-flat id))))
           (loop next-id (cons form acc))))))
+
+;; ── 替换: meta.lex-source! → 新管线 ──
+;; C 代码 (native_runtime.c) 直接调用 meta.lex-source!，
+;; 所以重定义它指向新的 Pratt Parser通路。
+(define meta.lex-source! parse-and-canonicalize)
+
+;; ── parse-and-canonicalize → 独立函数 ──
