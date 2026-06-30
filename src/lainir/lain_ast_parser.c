@@ -332,8 +332,15 @@ static AstNodeId pratt_parse_group(PrattParser *p, TokenType close, const char *
             *next_slot = child;
             next_slot = &p->arena->nodes[child].next;
         }
-        if (p->current.type == TOK_SEMICOLON || p->current.type == TOK_COMMA)
+        if (p->current.type == TOK_SEMICOLON || p->current.type == TOK_COMMA) {
+            // 保留分号/逗号作为 ATOM token (旧 lexer 也是如此)
+            Token tok = p->current;
+            AstNodeId punct = ast_alloc(p->arena, AST_ATOM, tok.line, tok.col);
+            ast_set_text(p->arena, punct, ast_intern(p->arena, tok.start, tok.length));
+            *next_slot = punct;
+            next_slot = &p->arena->nodes[punct].next;
             pratt_advance(p);
+        }
         else if (p->current.type != close)
             break;
     }
@@ -456,8 +463,17 @@ static AstNodeId pratt_parse_expr(PrattParser *p, int min_bp) {
 
         // ── 并列 (Juxtaposition) ──
         // 下一个 token 可以开始表达式（不是显式操作符）→ 隐式 INFIX(" ")
+        // 约束: 不跨越行边界 (同一行或连续的物理相邻)
         if (is_expr_start(p->current.type) && PREC_JUXT > min_bp) {
             Token line_tok = p->current;
+            uint32_t left_line = 1;
+            // 获取 left 节点的行号: 用 ast_get 查询
+            { const AstNode *ln = ast_get(p->arena, left);
+              if (ln) left_line = ln->line; }
+            // 如果下一 token 在另一行，不并列
+            if (line_tok.line > left_line) {
+                break;
+            }
             AstNodeId right = pratt_parse_expr(p, PREC_JUXT);
             AstNodeId inf = ast_alloc(p->arena, AST_INFIX, line_tok.line, line_tok.col);
             AstNodeId space_atom = ast_alloc(p->arena, AST_ATOM, line_tok.line, line_tok.col);

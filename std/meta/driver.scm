@@ -15,8 +15,10 @@
 (load "std/meta/pipeline/lower.scm")
 (load "std/meta/eval.scm")
 
-;; ═══ 1.4 纯 Scheme 词法分析器（替换 C 侧 lexer） ═══
+;; ═══ 1.4 词法分析器 ═══
 (load "std/meta/lexer.scm")
+(load "std/meta/canonicalize.scm")
+;; (load "std/meta/canonicalize.scm")
 
 ;; ═══ 1.5 共享语法解析工具 ═══
 (load "std/meta/syntax/tree.scm")
@@ -104,5 +106,5 @@
 (load "std/meta/build/sort.scm")
 (load "std/meta/literals/lower.scm")
 (load "std/meta/io/println.scm")
+;; (load "std/meta/canonicalize.scm")
 (load "std/meta/compile.scm")
-(load "std/meta/canonicalize.scm")
