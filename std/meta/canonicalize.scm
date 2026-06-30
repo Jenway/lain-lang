@@ -174,9 +174,8 @@
                (form (cons 'root (ast->sexp-flat id))))
           (loop next-id (cons form acc))))))
 
-;; ── 替换: meta.lex-source! → 新管线 ──
-;; C 代码 (native_runtime.c) 直接调用 meta.lex-source!，
-;; 所以重定义它指向新的 Pratt Parser通路。
-(define meta.lex-source! parse-and-canonicalize)
+;; 重定义 meta.lex-source! 为旧实现（暂不切换）
+;; 待 parse-and-canonicalize 验证通过后再启用
+;; (define meta.lex-source! parse-and-canonicalize)
 
 ;; ── parse-and-canonicalize → 独立函数 ──
