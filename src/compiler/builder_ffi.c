@@ -962,8 +962,8 @@ static sexp sexp_core_function_ref(sexp ctx, sexp self, sexp_sint_t n,
 // LAIN-AST FFI — 让 Scheme 操作 C 侧的拓扑树
 // ============================================================================
 
-#include "lainir/lain_ast.h"
-#include "lainir/lain_ast_parser.c"
+#include "lainast/lain_ast.h"
+#include "lainast/lain_ast_parser.c"
 
 // 全局单 arena (简化: 当前只支持一次解析一个文件)
 static AstArena g_ast_arena;
