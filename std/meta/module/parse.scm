@@ -1,7 +1,7 @@
 (meta-source "module/parse")
 
 ;; ===========================================================================
-;; Module / Signature / Export parsing
+;; Module / Signature / Export parsing (tree API)
 ;;
 ;; First implementation goal:
 ;; - support top-level `let name = import("a::b");`
@@ -29,17 +29,16 @@
                       (list.cons (string->symbol segment) acc)))
               (loop (+ i 1) start acc))))))
 
-(define (module.parse-import-binding cursor attrs name)
-  (let* ((group (syntax.cursor-expect-group! cursor '|paren|))
-         (body (syntax.group-cursor group))
-         (path-str (syntax.cursor-match-string! body)))
-    (if (optional.none? path-str)
+;; ── import binding: let name = import("path"); ──
+;; rhs-node: (call (ident import) (paren (string path-str)))
+(define (module.parse-import-binding-tree attrs name rhs-node)
+  (let* ((args-paren (tree.call-args rhs-node))
+         (children (tree.group-children args-paren))
+         (path-str-node (list.first children)))
+    (if (not (tree.string? path-str-node))
         (error "import(...) expects a string literal path")
-        (let* ((_eof-body (syntax.cursor-expect-eof! body))
-               (_semi (syntax.cursor-match-punct! cursor '|;|))
-               (_eof (syntax.cursor-expect-eof! cursor))
-               (path (module.split-import-path
-                       (symbol->string (optional.value path-str))))
+        (let* ((path (module.split-import-path
+                       (symbol->string (tree.string-val path-str-node))))
                (inner-payload (record '|import.binding|
                                 (record.field '|attrs| attrs)
                                 (record.field '|path| path)))
@@ -50,10 +49,12 @@
                             (record.field '|payload| inner-payload)))))
           (decl.define-dup-checked! '|let| name unified)))))
 
-(define (module.parse-signature-binding cursor attrs name)
-  (let* ((body (syntax.cursor-expect-group! cursor '|brace|))
-         (_semi (syntax.cursor-match-punct! cursor '|;|))
-         (_eof (syntax.cursor-expect-eof! cursor))
+;; ── signature binding: let name = signature { ... }; ──
+;; rhs-node: (juxt (ident signature) (brace ...))
+(define (module.parse-signature-binding-tree attrs name rhs-node)
+  (let* ((parts (tree.flatten-juxt rhs-node))
+         ;; parts: ((ident signature) (brace ...))
+         (body (list.first (list.rest parts)))
          (inner-payload (record '|signature|
                           (record.field '|attrs| attrs)
                           (record.field '|body| body)))
@@ -64,10 +65,11 @@
                       (record.field '|payload| inner-payload)))))
     (decl.define-dup-checked! '|let| name unified)))
 
-(define (module.parse-module-binding cursor attrs name)
-  (let* ((body (syntax.cursor-expect-group! cursor '|brace|))
-         (_semi (syntax.cursor-match-punct! cursor '|;|))
-         (_eof (syntax.cursor-expect-eof! cursor))
+;; ── module binding: let name = module { ... }; ──
+;; rhs-node: (juxt (ident module) (brace ...))
+(define (module.parse-module-binding-tree attrs name rhs-node)
+  (let* ((parts (tree.flatten-juxt rhs-node))
+         (body (list.first (list.rest parts)))
          (inner-payload (record '|module|
                           (record.field '|attrs| attrs)
                           (record.field '|body| body)))
@@ -78,11 +80,11 @@
                       (record.field '|payload| inner-payload)))))
     (decl.define-dup-checked! '|let| name unified)))
 
-(define (module.parse-meta-alias-binding cursor attrs name saved-index)
-  (syntax.cursor-set-index! cursor saved-index)
-  (let* ((path (parse-path cursor))
-         (_semi (syntax.cursor-match-punct! cursor '|;|))
-         (_eof (syntax.cursor-expect-eof! cursor))
+;; ── meta-alias binding: let name = some::path; ──
+;; rhs-node: (:: ...) path tree
+(define (module.parse-meta-alias-binding-tree attrs name rhs-node)
+  (let* ((path-nodes (tree.flatten-path rhs-node))
+         (path (map (lambda (n) (tree.ident-sym n)) path-nodes))
          (inner-payload (record '|meta.alias|
                           (record.field '|attrs| attrs)
                           (record.field '|path| path)))
@@ -96,11 +98,8 @@
 ;; ── expr binding: let name = <expr>; ──
 ;; RHS is not import/signature/module/path — parse as expression.
 ;; The expression will be comptime-evaluated during lowering.
-(define (module.parse-expr-binding cursor attrs name saved-index)
-  (syntax.cursor-set-index! cursor saved-index)
-  (let* ((expr (syntax.parse-expr cursor))
-         (_semi (syntax.cursor-match-punct! cursor '|;|))
-         (_eof (syntax.cursor-expect-eof! cursor))
+(define (module.parse-expr-binding-tree attrs name rhs-node)
+  (let* ((expr (expr.lower rhs-node '()))
          (inner-payload (record '|expr.binding|
                           (record.field '|attrs| attrs)
                           (record.field '|value| expr)))
@@ -111,53 +110,78 @@
                       (record.field '|payload| inner-payload)))))
     (decl.define-dup-checked! '|let| name unified)))
 
-(define-pass (form-parser |let| form)
-  (let* ((cursor (syntax.form-cursor form))
-         (attrs (syntax.parse-attrs cursor (list)))
-         (_kw (syntax.cursor-expect-ident! cursor))
-         (name (syntax.cursor-expect-ident! cursor))
-         (_assign (syntax.cursor-expect-punct! cursor '|=|))
-         (rhs-saved (syntax.cursor-get-index cursor))
-         (rhs (syntax.cursor-match-ident! cursor)))
-    (if (optional.none? rhs)
-        ;; RHS is not an identifier — parse as a general expression.
-        ;; Handles: let x = 42;  let y = 40 + 2;  let z = f();
-        (module.parse-expr-binding cursor attrs name rhs-saved)
-        (let* ((rhs-name (optional.value rhs)))
-          (cond
-            ((symbol=? rhs-name '|import|)
-             (module.parse-import-binding cursor attrs name))
-            ((symbol=? rhs-name '|signature|)
-             (module.parse-signature-binding cursor attrs name))
-            ((symbol=? rhs-name '|module|)
-             (module.parse-module-binding cursor attrs name))
-            ;; Bool literals: let x = true; / let x = false;
-            ((symbol=? rhs-name '|true|)
-             (module.parse-expr-binding cursor attrs name rhs-saved))
-            ((symbol=? rhs-name '|false|)
-             (module.parse-expr-binding cursor attrs name rhs-saved))
-            (else
-             (module.parse-meta-alias-binding cursor attrs name rhs-saved)))))))
+;; ── Helper: extract the first ident from a rhs-node for dispatch ──
+(define (module.rhs-first-ident rhs-node)
+  (cond
+   ((tree.ident? rhs-node) (tree.ident-sym rhs-node))
+   ((tree.juxt? rhs-node)  (module.rhs-first-ident (tree.left rhs-node)))
+   ((tree.call? rhs-node)  (module.rhs-first-ident (tree.call-callee rhs-node)))
+   (else #f)))
 
-(define (module.parse-export-names cursor acc)
-  (let* ((next (syntax.cursor-match-ident! cursor)))
-    (if (optional.none? next)
-        (begin
-          (syntax.cursor-expect-eof! cursor)
-          (list.reverse acc))
-        (let* ((name (optional.value next))
-               (_comma (syntax.cursor-match-punct! cursor '|,|)))
-          (module.parse-export-names cursor (list.cons name acc))))))
+;; ── Helper: check if a node is a :: path ──
+(define (module.path-node? node)
+  (and (pair? node) (eq? (car node) '|::|)))
+
+(define-pass (form-parser |let| form)
+  (let* ((tree (form.tree form))
+         (attrs (form.decorators form))
+         ;; tree: (juxt (ident let) (= name-node rhs-node))
+         ;;   or: (juxt (ident let) (= (: name-node type-node) rhs-node))
+         (parts (tree.flatten-juxt tree))
+         ;; parts: ((ident let) assign-node)
+         (assign-node (list.first (list.rest parts)))
+         ;; assign-node: (= lhs rhs)
+         (lhs (tree.left assign-node))
+         (rhs (tree.right assign-node))
+         ;; lhs could be (ident name) or (: (ident name) type)
+         (name (if (tree.ident? lhs)
+                   (tree.ident-sym lhs)
+                   ;; (: (ident name) type) — name with type annotation
+                   (tree.ident-sym (tree.left lhs))))
+         (rhs-kw (module.rhs-first-ident rhs)))
+    (cond
+      ((and rhs-kw (symbol=? rhs-kw '|import|))
+       (module.parse-import-binding-tree attrs name rhs))
+      ((and rhs-kw (symbol=? rhs-kw '|signature|))
+       (module.parse-signature-binding-tree attrs name rhs))
+      ((and rhs-kw (symbol=? rhs-kw '|module|))
+       (module.parse-module-binding-tree attrs name rhs))
+      ;; Bool literals and numeric expressions → expr binding
+      ((and rhs-kw (symbol=? rhs-kw '|true|))
+       (module.parse-expr-binding-tree attrs name rhs))
+      ((and rhs-kw (symbol=? rhs-kw '|false|))
+       (module.parse-expr-binding-tree attrs name rhs))
+      ;; :: path → meta-alias
+      ((module.path-node? rhs)
+       (module.parse-meta-alias-binding-tree attrs name rhs))
+      ;; Bare ident that's not a keyword → also meta-alias (single-segment path)
+      ((and rhs-kw (not (tree.call? rhs)) (not (tree.juxt? rhs))
+            (tree.ident? rhs))
+       (module.parse-meta-alias-binding-tree attrs name rhs))
+      ;; Everything else → general expression
+      (else
+       (module.parse-expr-binding-tree attrs name rhs)))))
+
+;; ── export { names... } ──
+
+(define (module.parse-export-names-tree children acc)
+  ;; children: list of (ident name) and (sep ,)
+  (let loop ((cs children) (acc acc))
+    (if (null? cs)
+        (list.reverse acc)
+        (let ((c (car cs)))
+          (if (tree.sep? c)
+              (loop (cdr cs) acc)
+              (loop (cdr cs) (list.cons (tree.ident-sym c) acc)))))))
 
 (define-pass (form-parser |export| form)
-  (let* ((cursor (syntax.form-cursor form))
-         (attrs (syntax.parse-attrs cursor (list)))
-         (_kw (syntax.cursor-expect-ident! cursor))
-         (body (syntax.cursor-expect-group! cursor '|brace|))
-         (_semi (syntax.cursor-match-punct! cursor '|;|))
-         (_eof (syntax.cursor-expect-eof! cursor))
-         (body-cursor (syntax.group-cursor body))
-         (names (module.parse-export-names body-cursor (list)))
+  (let* ((tree (form.tree form))
+         (attrs (form.decorators form))
+         ;; tree: (juxt (ident export) (brace ...))
+         (parts (tree.flatten-juxt tree))
+         ;; parts: ((ident export) (brace ...))
+         (body (list.first (list.rest parts)))
+         (names (module.parse-export-names-tree (tree.group-children body) (list)))
          (node (raw.node! '|export|
                  (record '|export|
                    (record.field '|attrs| attrs)

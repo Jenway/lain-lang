@@ -2,16 +2,12 @@
 ;; std/meta/compile.scm — Pure compile entry point
 ;;
 ;; Takes source text, runs pipeline. Returns 0 on success.
-;; use-new-parser flag: #f = old Scheme lexer, #t = Pratt Parser
 ;; ===========================================================================
 
 (meta-source "compile")
 
-(define use-new-parser #f)
-
 (define (compile source-text output-path)
-  (let* ((lex-proc (if use-new-parser parse-and-canonicalize meta.lex-source!))
-         (forms (lex-proc source-text (string-length source-text))))
+  (let* ((forms (meta.lex-source! source-text (string-length source-text))))
     (if (null? forms)
         (error "compile: empty or invalid source")
         (begin

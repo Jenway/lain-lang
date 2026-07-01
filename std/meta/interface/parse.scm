@@ -3,41 +3,167 @@
 (register-constraint! '|Interface| '|interface-predicate|)
 (register-interface-rule! '|Interface| '|interface-requirements|)
 
-(define (interface.parse-method cursor)
-  (let* ((name (syntax.cursor-expect-ident! cursor))
-         (params (syntax.parse-params
-                   (syntax.cursor-expect-group! cursor '|paren|)))
-         (_arrow (syntax.cursor-expect-punct! cursor '|->|))
-         (ret (syntax.parse-type cursor))
-         (effects (syntax.parse-optional-effects cursor))
-         (_semi (syntax.cursor-expect-punct! cursor '|;|)))
+;; ── tree-based type parsing ──
+;; Convert a tree node representing a type into lain-quote type AST.
+(define (interface.parse-type-tree node)
+  (cond
+   ;; simple named type: (ident i32)
+   ((tree.ident? node)
+    (lain-quote `(type-path ,(tree.ident-sym node))))
+   ;; unit type: (paren) — empty parens
+   ((tree.paren? node)
+    (if (null? (tree.group-children node))
+        (lain-quote '(type-unit))
+        ;; single-child paren is transparent
+        (interface.parse-type-tree (car (tree.group-children node)))))
+   ;; generic application: (< Name T) or (< Name (juxt T1 T2))
+   ((and (pair? node) (eq? (car node) '|<|))
+    (let* ((base (tree.ident-sym (tree.left node)))
+           (args-node (tree.right node))
+           (args (if (tree.juxt? args-node)
+                     (map interface.parse-type-tree
+                          (filter (lambda (n) (not (and (tree.sep? n) (eq? (tree.sep-sym n) '|,|))))
+                                  (tree.flatten-juxt args-node)))
+                     (list (interface.parse-type-tree args-node)))))
+      (lain-quote `(type-app ,base ,args))))
+   ;; reference: (prefix & inner)
+   ((and (pair? node) (eq? (car node) 'prefix) (eq? (cadr node) '|&|))
+    (let ((inner (interface.parse-type-tree (caddr node))))
+      (lain-quote `(type-ref #f ,inner))))
+   ;; pointer: (prefix * inner)
+   ((and (pair? node) (eq? (car node) 'prefix) (eq? (cadr node) '|*|))
+    (let ((inner (interface.parse-type-tree (caddr node))))
+      (lain-quote `(type-raw-ptr #f ,inner))))
+   (else
+    (error "interface.parse-type-tree: unhandled node"))))
+
+;; ── tree-based param parsing ──
+;; Parse params from a paren group node: (paren (: name type) (sep ,) ...)
+(define (interface.parse-params-tree paren-node)
+  (let* ((children (tree.group-children paren-node))
+         (filtered (filter (lambda (n) (not (and (tree.sep? n) (eq? (tree.sep-sym n) '|,|)))) children)))
+    (map (lambda (child)
+           (if (and (pair? child) (eq? (car child) '|:|))
+               (let* ((name (tree.ident-sym (tree.left child)))
+                      (ty (interface.parse-type-tree (tree.right child))))
+                 (lain-quote `(param ,name ,ty)))
+               (error "interface.parse-params-tree: expected colon annotation")))
+         filtered)))
+
+;; ── tree-based method signature parsing ──
+;; A method in the brace body is a child tree like:
+;;   (juxt (ident fn) (juxt (-> (call name (paren params...)) ret-type) (sep ;)))
+;; or without return type:
+;;   (juxt (ident fn) (juxt (call name (paren params...)) (sep ;)))
+(define (interface.parse-method-tree node)
+  (let* ((parts (tree.flatten-juxt node))
+         ;; skip (ident fn) keyword and trailing (sep ;)
+         (no-kw (cdr parts))  ;; drop fn keyword
+         ;; find the core signature part (everything before trailing ;)
+         (sig-parts (filter (lambda (n) (not (and (tree.sep? n) (eq? (tree.sep-sym n) '|;|)))) no-kw)))
+    ;; sig-parts should be a single node: either (-> (call name params) ret) or (call name params)
+    (let ((sig (if (= (length sig-parts) 1)
+                   (car sig-parts)
+                   ;; multiple parts remaining — reassemble as the first element
+                   (car sig-parts))))
+      (cond
+       ;; with return type: (-> (call name (paren ...)) ret-type)
+       ((and (pair? sig) (eq? (car sig) '|->|))
+        (let* ((lhs (tree.left sig))
+               (ret-node (tree.right sig))
+               (ret (interface.parse-type-tree ret-node)))
+          (interface.parse-method-call-part lhs ret)))
+       ;; function call without return type
+       ((tree.call? sig)
+        (interface.parse-method-call-part sig (lain-quote '(type-unit))))
+       (else
+        (error "interface.parse-method-tree: unexpected method shape"))))))
+
+(define (interface.parse-method-call-part call-node ret)
+  (let* ((callee (tree.call-callee call-node))
+         (name (tree.ident-sym callee))
+         (args-paren (tree.call-args call-node))
+         (params (interface.parse-params-tree args-paren)))
     (raw.node! '|interface.method|
       (record '|interface.method|
         (record.field '|name| name)
         (record.field '|params| params)
         (record.field '|return| ret)
-        (record.field '|effects| effects)))))
+        (record.field '|effects| (optional.none))))))
 
-(define (interface.parse-methods cursor acc)
-  (let* ((next (syntax.cursor-match-ident! cursor)))
-    (if (optional.none? next)
-        (begin
-          (syntax.cursor-expect-eof! cursor)
-          (list.reverse acc))
-        (let* ((method (interface.parse-method cursor)))
-          (interface.parse-methods cursor (list.cons method acc))))))
+;; Parse all method trees from brace body children
+(define (interface.parse-methods-tree children acc)
+  (if (null? children)
+      (list.reverse acc)
+      (let ((child (car children)))
+        (if (and (tree.sep? child) (eq? (tree.sep-sym child) '|;|))
+            ;; skip standalone semicolons
+            (interface.parse-methods-tree (cdr children) acc)
+            (interface.parse-methods-tree
+              (cdr children)
+              (list.cons (interface.parse-method-tree child) acc))))))
+
+;; ── tree-based generic params parsing ──
+;; generics appear as (< Name (juxt T1 (juxt T2 ...))) where the < node
+;; wraps the name+brace. We detect this in the flattened top-level parts.
+(define (interface.parse-generics-from-name-node node)
+  ;; If node is (< name T), extract generic params; else return empty list + name
+  (if (and (pair? node) (eq? (car node) '|<|))
+      (let* ((name-node (tree.left node))
+             (name (tree.ident-sym name-node))
+             (params-node (tree.right node))
+             (param-nodes (if (tree.juxt? params-node)
+                              (filter (lambda (n)
+                                        (not (and (tree.sep? n) (eq? (tree.sep-sym n) '|,|))))
+                                      (tree.flatten-juxt params-node))
+                              (list params-node)))
+             (params (map tree.ident-sym param-nodes)))
+        (cons name params))
+      (cons (tree.ident-sym node) (list))))
+
+;; ── tree-based where clause parsing ──
+;; where T: Bound appears as additional juxt parts: (ident where) (: T Bound)
+(define (interface.parse-where-parts parts)
+  (if (null? parts) (list)
+      (let ((head (car parts)))
+        (if (and (tree.ident? head) (eq? (tree.ident-sym head) '|where|))
+            (interface.parse-where-predicates (cdr parts) (list))
+            (list)))))
+
+(define (interface.parse-where-predicates parts acc)
+  (if (null? parts) (list.reverse acc)
+      (let ((node (car parts)))
+        (if (and (pair? node) (eq? (car node) '|:|))
+            (let* ((param (tree.ident-sym (tree.left node)))
+                   (bound (interface.parse-type-tree (tree.right node)))
+                   (predicate (lain-quote `(where-predicate ,param ,bound))))
+              (interface.parse-where-predicates
+                (filter (lambda (n) (not (and (tree.sep? n) (eq? (tree.sep-sym n) '|,|))))
+                        (cdr parts))
+                (list.cons predicate acc)))
+            (list.reverse acc)))))
 
 (define-pass (form-parser |interface| form)
-  (let* ((cursor (syntax.form-cursor form))
-         (attrs (syntax.parse-attrs cursor (list)))
-         (_kw (syntax.cursor-expect-ident! cursor))
-         (name (syntax.cursor-expect-ident! cursor))
-         (generics (syntax.parse-generic-params cursor))
-         (where (syntax.parse-where cursor))
-         (body (syntax.cursor-expect-group! cursor '|brace|))
-         (_eof (syntax.cursor-expect-eof! cursor))
-         (body-cursor (syntax.group-cursor body))
-         (methods (interface.parse-methods body-cursor (list)))
+  (let* ((tree (form.tree form))
+         (attrs (form.decorators form))
+         (parts (tree.flatten-juxt tree))
+         ;; parts: ((ident interface) name-or-generic-node ... maybe-where ... (brace ...))
+         ;; skip keyword
+         (rest (cdr parts))
+         ;; last element is the brace body
+         (brace (car (reverse rest)))
+         (mid-parts (reverse (cdr (reverse rest))))
+         ;; first mid-part is name (possibly with generics via < node)
+         (name-node (car mid-parts))
+         (name+generics (interface.parse-generics-from-name-node name-node))
+         (name (car name+generics))
+         (generics (cdr name+generics))
+         ;; remaining mid-parts may contain where clause
+         (where-rest (cdr mid-parts))
+         (where (interface.parse-where-parts where-rest))
+         ;; parse methods from brace body
+         (body-children (tree.group-children brace))
+         (methods (interface.parse-methods-tree body-children (list)))
          (inner-payload (record '|interface|
                           (record.field '|attrs| attrs)
                           (record.field '|generics| generics)

@@ -1,40 +1,55 @@
 (meta-source "struct/parse")
 
 ;; ═══════════════════════════════════════════════════
-;; Struct 语法解析
+;; Struct 语法解析 — 树结构版本
 ;; ═══════════════════════════════════════════════════
 
-;; ── 声明字段解析: name: type; ──
+;; ── 从 brace 组解析字段: (: (ident name) type-tree) ──
 
-(define (struct.parse-fields cursor acc)
-  (let* ((name (syntax.cursor-match-ident! cursor)))
-    (if (optional.none? name)
-        (begin
-          (syntax.cursor-expect-eof! cursor)
-          (list.reverse acc))
-        (let* ((_colon (syntax.cursor-expect-punct! cursor '|:|))
-               (ty (parse-type cursor))
-               (semi (syntax.cursor-match-punct! cursor '|;|))
-               (_comma (if (optional.none? semi)
-                           (syntax.cursor-match-punct! cursor '|,|)
-                           unit))
-               (field (raw.node! '|struct.field|
-                        (record '|struct.field|
-                          (record.field '|name| (optional.value name))
-                          (record.field '|type| ty)))))
-          (struct.parse-fields cursor (list.cons field acc))))))
+(define (struct.parse-fields-tree children acc)
+  (if (null? children)
+      (list.reverse acc)
+      (let* ((node (car children))
+             (rest (cdr children)))
+        (cond
+         ;; 跳过分隔符
+         ((tree.sep? node)
+          (struct.parse-fields-tree rest acc))
+         ;; (: name type) — 字段声明
+         ((and (pair? node) (eq? (car node) '|:|))
+          (let* ((name-node (tree.left node))
+                 (type-node (tree.right node))
+                 (name (tree.ident-sym name-node))
+                 (ty (tree-parse-type type-node))
+                 (field (raw.node! '|struct.field|
+                          (record '|struct.field|
+                            (record.field '|name| name)
+                            (record.field '|type| ty)))))
+            (struct.parse-fields-tree rest (list.cons field acc))))
+         (else
+          (struct.parse-fields-tree rest acc))))))
 
 (define-pass (form-parser |struct| form)
-  (let* ((cursor (syntax.form-cursor form))
-         (attrs (parse-attrs cursor (list)))
-         (_kw (syntax.cursor-expect-ident! cursor))
-         (name (syntax.cursor-expect-ident! cursor))
-         (generics (parse-generic-params cursor))
-         (where (parse-where cursor))
-         (body (syntax.cursor-expect-group! cursor '|brace|))
-         (_eof (syntax.cursor-expect-eof! cursor))
-         (body-cursor (syntax.group-cursor body))
-         (fields (struct.parse-fields body-cursor (list)))
+  (let* ((tree (form.tree form))
+         (decos (form.decorators form))
+         (attrs (tree-parse-attrs decos))
+         (parts (tree.flatten-juxt tree))
+         ;; parts: [(ident struct), (ident Name), ..., (brace ...)]
+         ;; 或: [(ident struct), (< (ident Name) (ident T)), ..., (brace ...)]
+         (_kw (car parts))
+         (rest (cdr parts))
+         ;; 提取 name 和 generics
+         (name-and-generics (tree-extract-name-and-generics (car rest)))
+         (name (car name-and-generics))
+         (generics (cdr name-and-generics))
+         (rest2 (cdr rest))
+         ;; 查找 where 子句和 brace body
+         (where-and-body (tree-split-where-and-brace rest2))
+         (where (car where-and-body))
+         (body-node (cdr where-and-body))
+         (fields (if body-node
+                     (struct.parse-fields-tree (tree.group-children body-node) (list))
+                     (list)))
          (inner-payload (record '|struct|
                           (record.field '|attrs| attrs)
                           (record.field '|generics| generics)
@@ -46,39 +61,3 @@
                       (record.field '|type-kind| '|struct|)
                       (record.field '|payload| inner-payload)))))
     (decl.define-dup-checked! '|let| name unified)))
-
-;; ── 字面量字段解析: { field: value, ... } ──
-
-(define (struct.parse-literal-fields cursor acc)
-  (if (syntax.cursor-eof? cursor)
-      (list.reverse acc)
-      (let* ((name (syntax.cursor-expect-ident! cursor))
-             (_colon (syntax.cursor-expect-punct! cursor '|:|))
-             (value (parse-expr cursor))
-             (_comma (syntax.cursor-match-punct! cursor '|,|))
-             (field (lain-quote `(struct-field ,name ,value))))
-        (struct.parse-literal-fields cursor (list.cons field acc)))))
-
-;; ── struct 字面量表达式: Name { fields } ──
-
-(define (struct.parse-literal-expr cursor path-head type-args body)
-  (let* ((fields-cursor (syntax.group-cursor body))
-         (fields (struct.parse-literal-fields fields-cursor (list))))
-    (if (null? type-args)
-        (lain-quote `(aggregate ,path-head ,@fields))
-        (lain-quote `(aggregate ,path-head
-                      :type-args ,type-args
-                      ,@fields)))))
-
-(*struct-literal-parser* struct.parse-literal-expr)
-
-;; ── self 参数: &self: Type ──
-
-(define (struct.parse-self-param group)
-  (let* ((cursor (syntax.group-cursor group))
-         (name (syntax.cursor-expect-ident! cursor))
-         (_colon (syntax.cursor-expect-punct! cursor '|:|))
-         (_amp (syntax.cursor-expect-punct! cursor '|&|))
-         (ty (syntax.cursor-expect-ident! cursor))
-         (_eof (syntax.cursor-expect-eof! cursor)))
-    (lain-quote `(param-self-ref ,name ,ty))))

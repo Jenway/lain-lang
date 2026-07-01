@@ -30,6 +30,7 @@ typedef enum {
     TOK_SEMICOLON,  // ;
     TOK_COMMA,      // ,
     TOK_COLON,      // :
+    TOK_COLON_COLON, // ::
     TOK_DOT,        // .
     TOK_ARROW,      // ->
     TOK_FAT_ARROW,  // =>
@@ -154,7 +155,8 @@ static Token lexer_next(Lexer *l) {
     }
 
     // 标识符 — 无关键字识别，全部归为 TOK_IDENT
-    if (isalpha(c) || c == '_' || c == '@' || c == '$') {
+    // 注意: @ 和 $ 不作为 ident 起始，由下面 switch 处理为独立 punct
+    if (isalpha(c) || c == '_') {
         while (l->pos < l->len && (isalnum(lexer_peek(l)) || lexer_peek(l) == '_'))
             lexer_advance(l);
         t.type = TOK_IDENT;
@@ -172,7 +174,13 @@ static Token lexer_next(Lexer *l) {
         case '}': t.type = TOK_RBRACE; break;
         case ';': t.type = TOK_SEMICOLON; break;
         case ',': t.type = TOK_COMMA; break;
-        case ':': t.type = TOK_COLON; break;
+        case ':':
+            if (l->pos < l->len && lexer_peek(l) == ':') {
+                lexer_advance(l); t.type = TOK_COLON_COLON; t.length = 2;
+            } else {
+                t.type = TOK_COLON;
+            }
+            break;
         case '.': t.type = TOK_DOT; break;
         case '#': t.type = TOK_HASH; break;
         case '@': t.type = TOK_AT; break;
@@ -258,6 +266,7 @@ static int infix_lbp(TokenType t) {
         case TOK_PLUS: case TOK_MINUS:                     return 10;
         case TOK_STAR: case TOK_SLASH: case TOK_PERCENT:   return 11;
         case TOK_COLON:                                    return 12;
+        case TOK_COLON_COLON:                              return 13;
         case TOK_DOT:                                      return 13;
         case TOK_ARROW:                                    return 2;  // -> 右结合
         default: return 0;
@@ -463,15 +472,12 @@ static AstNodeId pratt_parse_expr(PrattParser *p, int min_bp) {
 
         // ── 并列 (Juxtaposition) ──
         // 下一个 token 可以开始表达式（不是显式操作符）→ 隐式 INFIX(" ")
-        // 约束: 不跨越行边界 (同一行或连续的物理相邻)
+        // 约束: 不跨越行边界（基于上一个消耗 token 的行号，而非 left 节点起始行号）
+        // 这样 `if flag { ... } else { ... }` 中的 else 可以接续在 `}` 同行上
         if (is_expr_start(p->current.type) && PREC_JUXT > min_bp) {
             Token line_tok = p->current;
-            uint32_t left_line = 1;
-            // 获取 left 节点的行号: 用 ast_get 查询
-            { const AstNode *ln = ast_get(p->arena, left);
-              if (ln) left_line = ln->line; }
-            // 如果下一 token 在另一行，不并列
-            if (line_tok.line > left_line) {
+            // 如果下一 token 在上一个消耗 token 的行之后，不并列
+            if (line_tok.line > p->previous.line) {
                 break;
             }
             AstNodeId right = pratt_parse_expr(p, PREC_JUXT);
@@ -536,6 +542,7 @@ AstNodeId ast_parse(AstArena *arena, const char *src, uint32_t len) {
     p.lexer.col = 1;
     p.current = lexer_next(&p.lexer);
     p.previous.type = TOK_EOF;
+    p.previous.line = 1;
 
     // 顶层: 分号分隔的表达式序列
     AstNodeId root = ast_alloc(arena, AST_GROUP, 1, 1);

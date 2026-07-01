@@ -22,13 +22,27 @@
                          sep
                          (import.string-join (list.rest strs) sep)))))
 
+;; Extract symbol list from a :: path tree node.
+;; Uses tree.flatten-path to get list of ident nodes, then extracts symbols.
+(define (import.parse-path-tree path-node)
+  (let ((nodes (tree.flatten-path path-node)))
+    (import.extract-ident-syms nodes (list))))
+
+(define (import.extract-ident-syms nodes acc)
+  (if (list.empty? nodes)
+      (list.reverse acc)
+      (import.extract-ident-syms
+        (list.rest nodes)
+        (list.cons (tree.ident-sym (list.first nodes)) acc))))
+
 (define-pass (form-parser |import| form)
-  (let* ((cursor (syntax.form-cursor form))
-         (attrs (syntax.parse-attrs cursor (list)))
-         (_kw (syntax.cursor-expect-ident! cursor))
-         (path (syntax.parse-path cursor))
-         (_semi (syntax.cursor-expect-punct! cursor '|;|))
-         (_eof (syntax.cursor-expect-eof! cursor))
+  (let* ((tree (form.tree form))
+         (parts (tree.flatten-juxt tree))
+         ;; parts: ((ident import) path-node)
+         ;; skip the keyword, take the path
+         (path-node (list.first (list.rest parts)))
+         (path (import.parse-path-tree path-node))
+         (attrs (form.decorators form))
          (node (raw.node! '|import|
                  (record '|import|
                    (record.field '|attrs| attrs)
@@ -37,4 +51,3 @@
 
 (define-pass (raw-normalizer |import| decl)
   (middle.normalize-plain-decl decl '|middle.import|))
-
