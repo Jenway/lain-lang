@@ -1,48 +1,99 @@
 (meta-source "interface/impl")
 
-;; impl 专用的方法解析器 — 支持带函数体的方法实现
-;; 接口声明用 `;` 结束, impl 方法实现用 `{ ... }` 结束
-(define (impl.parse-method cursor)
-  (let* ((name (syntax.cursor-expect-ident! cursor))
-         (params (syntax.parse-params
-                   (syntax.cursor-expect-group! cursor '|paren|)))
-         (_arrow (syntax.cursor-expect-punct! cursor '|->|))
-         (ret (syntax.parse-type cursor))
-         (effects (syntax.parse-optional-effects cursor))
-         (body (syntax.parse-optional-fn-body cursor)))
+;; ── tree-based impl method parsing ──
+;; An impl method has a body (brace block) instead of trailing semicolon.
+;; Tree shape: (juxt (ident fn) (juxt (-> (call name (paren params)) ret) (brace body...)))
+;; or without ->: (juxt (ident fn) (juxt (call name (paren params)) (brace body...)))
+
+(define (impl.parse-method-tree node)
+  (let* ((parts (tree.flatten-juxt node))
+         ;; drop fn keyword
+         (no-kw (cdr parts))
+         ;; separate trailing brace (body) if present
+         (last (car (reverse no-kw)))
+         (has-body (tree.brace? last))
+         (sig-parts (if has-body (reverse (cdr (reverse no-kw))) no-kw))
+         (body (if has-body
+                   (optional.some (tree-parse-block last))
+                   (optional.none)))
+         ;; sig-parts should be one node: (-> (call name params) ret) or (call name params)
+         (sig (car sig-parts)))
+    (cond
+     ;; with return type
+     ((and (pair? sig) (eq? (car sig) '|->|))
+      (let* ((lhs (tree.left sig))
+             (ret (interface.parse-type-tree (tree.right sig))))
+        (impl.parse-method-call-part lhs ret body)))
+     ;; call without return type
+     ((tree.call? sig)
+      (impl.parse-method-call-part sig (lain-quote '(type-unit)) body))
+     (else
+      (error "impl.parse-method-tree: unexpected method shape")))))
+
+(define (impl.parse-method-call-part call-node ret body)
+  (let* ((callee (tree.call-callee call-node))
+         (name (tree.ident-sym callee))
+         (args-paren (tree.call-args call-node))
+         (params (interface.parse-params-tree args-paren)))
     (raw.node! '|impl.method|
       (record '|impl.method|
         (record.field '|name| name)
         (record.field '|params| params)
         (record.field '|return| ret)
-        (record.field '|effects| effects)
+        (record.field '|effects| (optional.none))
         (record.field '|body| body)))))
 
-(define (impl.parse-methods cursor acc)
-  (let* ((next (syntax.cursor-match-ident! cursor)))
-    (if (optional.none? next)
-        (begin
-          (syntax.cursor-expect-eof! cursor)
-          (list.reverse acc))
-        (let* ((method (impl.parse-method cursor)))
-          (impl.parse-methods cursor (list.cons method acc))))))
+;; Parse all method trees from brace body children
+(define (impl.parse-methods-tree children acc)
+  (if (null? children)
+      (list.reverse acc)
+      (let ((child (car children)))
+        (if (and (tree.sep? child))
+            ;; skip separators (semicolons)
+            (impl.parse-methods-tree (cdr children) acc)
+            (impl.parse-methods-tree
+              (cdr children)
+              (list.cons (impl.parse-method-tree child) acc))))))
 
 (define-pass (form-parser |impl| form)
-  (let* ((cursor (syntax.form-cursor form))
-         (attrs (syntax.parse-attrs cursor (list)))
-         (_kw (syntax.cursor-expect-ident! cursor))
-         (generics (syntax.parse-generic-params cursor))
-         (interface-name (syntax.cursor-expect-ident! cursor))
+  (let* ((tree (form.tree form))
+         (attrs (form.decorators form))
+         (parts (tree.flatten-juxt tree))
+         ;; parts: ((ident impl) maybe-generic interface-name (ident for) target ... (brace ...))
+         ;; skip keyword
+         (rest (cdr parts))
+         ;; last element is the brace body
+         (brace (car (reverse rest)))
+         (mid-parts (reverse (cdr (reverse rest))))
+         ;; Find "for" keyword to split interface-name and target
+         ;; Everything before "for" (possibly with generics) is interface side
+         ;; Everything after "for" until brace is target side
+         (split (impl.split-at-for mid-parts))
+         (before-for (car split))
+         (after-for (cdr split))
+         ;; generics: check if first element is a < node
+         (first-part (car before-for))
+         (generics (if (and (pair? first-part) (eq? (car first-part) '|<|))
+                       ;; generic params on the impl itself (rare)
+                       (list)  ;; TODO: handle impl<T> generics
+                       (list)))
+         ;; interface name (possibly with generics via < node)
+         (interface-name-node (car before-for))
+         (interface-name (if (and (pair? interface-name-node) (eq? (car interface-name-node) '|<|))
+                             (tree.ident-sym (tree.left interface-name-node))
+                             (tree.ident-sym interface-name-node)))
          (interface (raw.node! '|type.path|
                       (record '|type.path|
                         (record.field '|name| interface-name))))
-         (_for (syntax.cursor-expect-ident! cursor))
-         (target (syntax.parse-type cursor))
-         (where (syntax.parse-where cursor))
-         (body (syntax.cursor-expect-group! cursor '|brace|))
-         (_eof (syntax.cursor-expect-eof! cursor))
-         (body-cursor (syntax.group-cursor body))
-         (methods (impl.parse-methods body-cursor (list)))
+         ;; target type
+         (target-node (car after-for))
+         (target (interface.parse-type-tree target-node))
+         ;; where clause (remaining after-for parts after target)
+         (where-rest (cdr after-for))
+         (where (interface.parse-where-parts where-rest))
+         ;; parse methods from brace body
+         (body-children (tree.group-children brace))
+         (methods (impl.parse-methods-tree body-children (list)))
          (inner-payload (record '|impl|
                           (record.field '|attrs| attrs)
                           (record.field '|generics| generics)
@@ -56,6 +107,18 @@
                       (record.field '|type-kind| '|impl|)
                       (record.field '|payload| inner-payload)))))
     (decl.define! '|let| interface-name unified)))
+
+;; Helper: split a list at the (ident for) element
+(define (impl.split-at-for parts)
+  (impl.split-at-for-loop parts (list)))
+
+(define (impl.split-at-for-loop parts acc)
+  (if (null? parts)
+      (cons (list.reverse acc) (list))  ;; no "for" found
+      (let ((head (car parts)))
+        (if (and (tree.ident? head) (eq? (tree.ident-sym head) '|for|))
+            (cons (list.reverse acc) (cdr parts))
+            (impl.split-at-for-loop (cdr parts) (cons head acc))))))
 
 ;; impl raw-normalizer 已迁至 let/normalize.scm 的统一分发器
 

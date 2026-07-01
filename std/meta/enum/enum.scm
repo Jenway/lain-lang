@@ -1,40 +1,60 @@
 (meta-source "enum/enum")
 
-;; 解析可选的 variant 载荷类型: VariantName(Type) 或 VariantName
-(define (enum.parse-optional-payload cursor)
-  (let* ((group (syntax.cursor-match-group! cursor '|paren|))
-         (has-payload (optional.some? group)))
-    (if has-payload
-        (let* ((body-cursor (syntax.group-cursor (optional.value group)))
-               (ty (syntax.parse-type body-cursor))
-               (_eof (syntax.cursor-expect-eof! body-cursor)))
-          (optional.some ty))
-        (optional.none))))
+;; ── tree-based variant parsing ──
+;; Variants in brace: (ident Red) (sep ,) (ident Green) (sep ,) (ident Blue)
+;; With payload: (call (ident Foo) (paren (ident i32))) (sep ,) ...
+(define (enum.parse-variant-tree node)
+  (cond
+   ;; simple variant: (ident Name)
+   ((tree.ident? node)
+    (raw.node! '|enum.variant|
+      (record '|enum.variant|
+        (record.field '|name| (tree.ident-sym node))
+        (record.field '|payload| (optional.none)))))
+   ;; variant with payload: (call (ident Name) (paren type-node))
+   ((tree.call? node)
+    (let* ((name (tree.ident-sym (tree.call-callee node)))
+           (paren (tree.call-args node))
+           (children (tree.group-children paren))
+           ;; first non-sep child is the type
+           (ty-node (car (filter (lambda (n) (not (tree.sep? n))) children)))
+           (ty (interface.parse-type-tree ty-node)))
+      (raw.node! '|enum.variant|
+        (record '|enum.variant|
+          (record.field '|name| name)
+          (record.field '|payload| (optional.some ty))))))
+   (else
+    (error "enum.parse-variant-tree: unexpected variant shape"))))
 
-(define (enum.parse-variants cursor acc)
-  (let* ((name (syntax.cursor-match-ident! cursor)))
-    (if (optional.none? name)
-        (begin
-          (syntax.cursor-expect-eof! cursor)
-          (list.reverse acc))
-        (let* ((payload (enum.parse-optional-payload cursor))
-               (_comma (syntax.cursor-match-punct! cursor '|,|))
-               (variant (raw.node! '|enum.variant|
-                          (record '|enum.variant|
-                            (record.field '|name| (optional.value name))
-                            (record.field '|payload| payload)))))
-          (enum.parse-variants cursor (list.cons variant acc))))))
+(define (enum.parse-variants-tree children acc)
+  (if (null? children)
+      (list.reverse acc)
+      (let ((child (car children)))
+        (if (tree.sep? child)
+            ;; skip comma/semicolon separators
+            (enum.parse-variants-tree (cdr children) acc)
+            (enum.parse-variants-tree
+              (cdr children)
+              (list.cons (enum.parse-variant-tree child) acc))))))
 
 (define-pass (form-parser |enum| form)
-  (let* ((cursor (syntax.form-cursor form))
-         (attrs (syntax.parse-attrs cursor (list)))
-         (_kw (syntax.cursor-expect-ident! cursor))
-         (name (syntax.cursor-expect-ident! cursor))
-         (generics (syntax.parse-generic-params cursor))
-         (body (syntax.cursor-expect-group! cursor '|brace|))
-         (_eof (syntax.cursor-expect-eof! cursor))
-         (body-cursor (syntax.group-cursor body))
-         (variants (enum.parse-variants body-cursor (list)))
+  (let* ((tree (form.tree form))
+         (attrs (form.decorators form))
+         (parts (tree.flatten-juxt tree))
+         ;; parts: ((ident enum) name-or-generic-node (brace ...))
+         ;; skip keyword
+         (rest (cdr parts))
+         ;; last element is the brace body
+         (brace (car (reverse rest)))
+         (mid-parts (reverse (cdr (reverse rest))))
+         ;; name (possibly with generics)
+         (name-node (car mid-parts))
+         (name+generics (interface.parse-generics-from-name-node name-node))
+         (name (car name+generics))
+         (generics (cdr name+generics))
+         ;; parse variants from brace body
+         (body-children (tree.group-children brace))
+         (variants (enum.parse-variants-tree body-children (list)))
          (inner-payload (record '|enum|
                           (record.field '|attrs| attrs)
                           (record.field '|generics| generics)

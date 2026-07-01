@@ -4,9 +4,6 @@
 ;; define-pass / __lain-passes 由 C 侧 (helpers.c) 注入。
 ;; ===========================================================================
 
-(define (syntax.form-cursor form)
-  (syntax.group-cursor form))
-
 (define (cfg.target-os) '|linux|)
 
 (define (pipeline.rule stage kind)
@@ -37,33 +34,26 @@
               (car (cdr (cdr entry)))
               (loop (cdr passes)))))))
 
-;; Phase 1: Peek root group 的第一个标识符，然后分发 form-parser
-;; 关键：form-parser 接收原始的 root group（不是 cursor！）
-;; form-parser 内部会调用 syntax.form-cursor 创建新的 cursor 从零开始解析
-;; 注意：不清空 (declarations.all)，允许调用者在之前累积声明
-(define (driver.parse-and-declare root-group)
-  (let* ((peek-cursor (syntax.group-cursor root-group))
-         ;; 跳过所有 @attributes 以找到真正的声明关键字
-         ;; 例如 @foreign(c, link_name="...") pub fn ... → 派发给 pub form-parser
-         (_skip-attrs (syntax.parse-attrs peek-cursor (list)))
-         (head (syntax.cursor-match-ident! peek-cursor))
-         (kind (if (optional.some? head)
-                   (optional.value head)
-                   (optional.none))))
-    (if (optional.none? kind)
+;; Phase 1: 从 form 树提取关键字，分发到对应 form-parser
+(define (driver.parse-and-declare root-form)
+  ;; 从树格式的 form 中提取调度关键字，无需 cursor
+  (let* ((kind (form.keyword root-form)))
+    (if (not kind)
         unit
         (let* ((parser (driver.lookup-form-parser kind)))
           (if parser
               (begin
-                (parser root-group)
+                (parser root-form)
                 (if (null? (declarations.all))
                     (error "form-parser produced no declarations")
                     unit))
-              (driver.parse-as-implicit-main root-group))))))
+              (driver.parse-as-implicit-main root-form))))))
 
-;; Helper: 当 root group 不是已知 form 时，当做隐式 main 函数体处理
-(define (driver.parse-as-implicit-main root-group)
-  (let* ((block (syntax.parse-block root-group))
+;; Helper: 当 form 不是已知声明时，当做隐式 main 函数体处理
+(define (driver.parse-as-implicit-main root-form)
+  (let* ((tree (form.tree root-form))
+         ;; 隐式 main: 把整棵树当作函数体（暂用 lain-quote 包装）
+         (block (lain-quote `(block (tail ,(lain-quote `(number 0))))))
          (sig (raw.node! '|fn.sig|
                 (record '|fn.sig|
                   (record.field '|attrs| (list))
