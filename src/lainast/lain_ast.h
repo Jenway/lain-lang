@@ -81,4 +81,8 @@ const char *ast_intern(AstArena *a, const char *start, uint32_t len);
 // 节点总数
 uint32_t ast_count(const AstArena *a);
 
+// ── Parser (lain_ast_parser.c) ───────────────────────────────────────
+
+AstNodeId ast_parse(AstArena *arena, const char *src, uint32_t len);
+
 #endif // LAIN_AST_H

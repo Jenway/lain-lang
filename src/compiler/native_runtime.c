@@ -32,26 +32,21 @@ uint8_t read_byte_at(const uint8_t *ptr, size_t offset) { return ptr[offset]; }
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 7-8. L1 IR Builder FFI (→ compiler/builder_ffi.c)
+// 7-8. L1 IR Builder FFI (→ compiler/builder_ffi.c + compiler/builder_ffi.h)
 // ══════════════════════════════════════════════════════════════════════════════
-#include "lainir/lainir_core.c"
-#include "lainast/lain_ast.c"
-#include "builder_ffi.c"
+#include "compiler/builder_ffi.h"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 9. C Code Emission (→ lainir/emitter.c)
 // ══════════════════════════════════════════════════════════════════════════════
-#include "lainir/emitter.c"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 9.5. L1 IR Text Dump (→ lainir/emit_text.c)
 // ══════════════════════════════════════════════════════════════════════════════
-#include "lainir/emit_text.c"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 9.75. LainIR Interpreter (→ lainir/interpreter.c)
 // ══════════════════════════════════════════════════════════════════════════════
-#include "lainir/interpreter.c"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 11. Scheme Initialization + FFI Registration
@@ -471,79 +466,9 @@ static sexp sexp_core_emit_l1(
 static sexp sexp_core_emit_interface(
     sexp ctx, sexp self, sexp_sint_t n, sexp arg_path);
 
-void native_register_core_ffi(
-    void *ctx_ptr, void *env_ptr, native_foreign_registrar registrar,
-    void *user_data) {
-  (void)ctx_ptr;
-  (void)env_ptr;
-#ifdef REG
-#undef REG
-#endif
+void native_register_runtime_ffi(
+    native_foreign_registrar registrar, void *user_data) {
 #define REG(name, args, fn) registrar(user_data, name, args, (void *)(fn))
-  REG("core.make-bits", 1, sexp_core_make_bits);
-  REG("core.make-addr", 0, sexp_core_make_addr);
-  REG("core.make-unit", 0, sexp_core_make_unit);
-  REG("core.make-floats", 1, sexp_core_make_floats);
-  REG("core.make-simd", 2, sexp_core_make_simd);
-  REG("core.make-product-type!", 1, sexp_core_make_product_type);
-  REG("type.registered-raw", 1, sexp_type_registered);
-  REG("core.make-set", 2, sexp_core_make_set);
-  REG("core.make-proc", 4, sexp_core_make_proc);
-  REG("core.const-bits!", 3, sexp_core_const_bits);
-  REG("core.const-string!", 3, sexp_core_const_string);
-  REG("core.load!", 3, sexp_core_load);
-  REG("core.store!", 3, sexp_core_store);
-  REG("core.lea!", 3, sexp_core_lea);
-  REG("core.begin-function!", 3, sexp_core_begin_function);
-  REG("core.function-by-name", 1, sexp_core_function_by_name);
-  REG("core.append-block!", 1, sexp_core_append_block);
-  REG("core.return-value!", 2, sexp_core_return_value);
-  REG("core.return-none!", 1, sexp_core_return_none);
-  REG("core.function-return-type", 1, sexp_core_function_return_type);
-  REG("core.function-param-types", 1, sexp_core_function_param_types);
-  REG("core.function-link-name", 1, sexp_core_function_link_name);
-  REG("core.call!", 3, sexp_core_call);
-  REG("core.primitive!", 4, sexp_core_primitive);
-  REG("core.add!", 2, sexp_core_add);
-  REG("core.sub!", 2, sexp_core_sub);
-  REG("core.mul!", 2, sexp_core_mul);
-  REG("core.div!", 2, sexp_core_div);
-  REG("core.eq!", 2, sexp_core_eq);
-  REG("core.ne!", 2, sexp_core_ne);
-  REG("core.lt!", 2, sexp_core_lt);
-  REG("core.le!", 2, sexp_core_le);
-  REG("core.gt!", 2, sexp_core_gt);
-  REG("core.ge!", 2, sexp_core_ge);
-  REG("core.fadd!", 2, sexp_core_fadd);
-  REG("core.fsub!", 2, sexp_core_fsub);
-  REG("core.fmul!", 2, sexp_core_fmul);
-  REG("core.fdiv!", 2, sexp_core_fdiv);
-  REG("core.feq!", 2, sexp_core_feq);
-  REG("core.flt!", 2, sexp_core_flt);
-  REG("core.popcount!", 1, sexp_core_popcount);
-  REG("core.clz!", 1, sexp_core_clz);
-  REG("core.rotl!", 1, sexp_core_rotl);
-  REG("core.int2ptr!", 1, sexp_core_int2ptr);
-  REG("core.ptr2int!", 1, sexp_core_ptr2int);
-  REG("core.local-alloc!", 3, sexp_core_local_alloc);
-  REG("core.param", 2, sexp_core_param);
-  REG("core.block-function", 1, sexp_core_block_function);
-  REG("core.branch!", 2, sexp_core_branch);
-  REG("core.cond-branch!", 4, sexp_core_cond_branch);
-  REG("core.type-is-void!", 1, sexp_core_type_is_void);
-  REG("core.type-is-addr!", 1, sexp_core_type_is_addr);
-  REG("core.type-size-in-bytes!", 1, sexp_core_type_size);
-  REG("core.field-offset!", 4, sexp_core_field_offset);
-  REG("core.aggregate-layout!", 3, sexp_core_aggregate_layout);
-  REG("core.call-indirect!", 4, sexp_core_call_indirect);
-  REG("core.function-ref!", 1, sexp_core_function_ref);
-  REG("core.declare-extern-function!", 4, sexp_core_declare_extern_function);
-  REG("core.call-expr!", 3, sexp_core_call_expr);
-  REG("core.set-current-block!", 1, sexp_core_set_current_block);
-  REG("core.get-current-block", 0, sexp_core_get_current_block);
-  REG("core.begin-if!", 2, sexp_core_begin_if);
-  REG("core.end-if!", 4, sexp_core_end_if);
-  REG("core.assign-temp!", 2, sexp_core_assign_temp);
   REG("core.emit-l1!", 2, sexp_core_emit_l1);
   REG("core.read-file-forms!", 1, sexp_read_file_forms);
   REG("core.read-file-string!", 1, sexp_read_file_string);
@@ -551,28 +476,8 @@ void native_register_core_ffi(
   REG("core.build-compute-order!", 1, sexp_build_compute_order);
   REG("core.set-module-prefix!", 1, sexp_set_module_prefix);
   REG("core.module-prefix", 0, sexp_get_module_prefix);
-  REG("core.set-function-link-name!", 2, sexp_core_set_function_link_name);
-  REG("core.declare-module!", 1, sexp_core_declare_module);
-  REG("core.declare-signature!", 1, sexp_core_declare_signature);
-  REG("core.mark-export!", 1, sexp_core_mark_export);
   REG("core.emit-interface!", 1, sexp_core_emit_interface);
   REG("core.execute-lainir!", 2, sexp_core_execute_lainir);
-  REG("core.eval!", 3, sexp_core_eval);
-  REG("core.eval-value!", 1, sexp_core_eval_value);
-
-  // LAIN-AST FFI
-  REG("ast.parse!", 2, sexp_ast_parse);
-  REG("ast.node-count", 0, sexp_ast_node_count);
-  REG("ast.node-kind", 1, sexp_ast_node_kind);
-  REG("ast.node-text", 1, sexp_ast_node_text);
-  REG("ast.node-line", 1, sexp_ast_node_line);
-  REG("ast.node-col", 1, sexp_ast_node_col);
-  REG("ast.node-left", 1, sexp_ast_node_left);
-  REG("ast.node-right", 1, sexp_ast_node_right);
-  REG("ast.node-op", 1, sexp_ast_node_op);
-  REG("ast.node-next", 1, sexp_ast_node_next);
-  REG("ast.destroy!", 0, sexp_ast_destroy);
-
 #undef REG
 }
 
@@ -609,6 +514,7 @@ void *native_init_scheme(void) {
   // Register core FFI functions (Layer B)
   NativeChibiRegistrarCtx reg = {.ctx = ctx, .env = env};
   native_register_core_ffi(ctx, env, native_register_foreign_with_chibi, &reg);
+  native_register_runtime_ffi(native_register_foreign_with_chibi, &reg);
   fprintf(stderr, "[init] 3: FFI registered\n");
 
   // Inject all polyfills (Layer A)
@@ -707,7 +613,7 @@ void native_emit_l1_module(const char *output_path) {
 
 static sexp sexp_core_emit_l1(sexp ctx, sexp self, sexp_sint_t n,
                               sexp arg_subs, sexp arg_path) {
-  const char *path = sexp_to_c_string(ctx, arg_path);
+  const char *path = sexp_string_data(arg_path);
   (void)self;
   (void)n;
   (void)arg_subs;
@@ -766,7 +672,7 @@ void native_emit_interface(const char *output_path) {
 
 static sexp sexp_core_emit_interface(sexp ctx, sexp self, sexp_sint_t n,
                                      sexp arg_path) {
-  const char *path = sexp_to_c_string(ctx, arg_path);
+  const char *path = sexp_string_data(arg_path);
   (void)self;
   (void)n;
   native_emit_interface(path);

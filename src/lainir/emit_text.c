@@ -9,7 +9,7 @@
 
 // ============================================================================
 
-static void emit_l1_type(L1Type *ty, FILE *out) {
+void emit_l1_type(L1Type *ty, FILE *out) {
   if (!ty) { fprintf(out, "#unit"); return; }
   switch (ty->kind) {
   case TY_BITS:   fprintf(out, "i%d", ty->width); break;
