@@ -35,7 +35,7 @@ uint8_t read_byte_at(const uint8_t *ptr, size_t offset) { return ptr[offset]; }
 // 7-8. L1 IR Builder FFI (→ compiler/builder_ffi.c)
 // ══════════════════════════════════════════════════════════════════════════════
 #include "lainir/lainir_core.c"
-#include "lainir/lain_ast.c"
+#include "lainast/lain_ast.c"
 #include "builder_ffi.c"
 
 // ══════════════════════════════════════════════════════════════════════════════
