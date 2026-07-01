@@ -370,6 +370,7 @@ L1Subroutine *lainir_new_subroutine(const char *name);
 void lainir_reset_module_state(void);
 void lainir_free_subroutines(L1Subroutine *head);
 
+void append_instruction(L1Subroutine *sub, L1Instruction *inst);
 void append_inst_to_block(L1Block *block, L1Instruction *inst);
 L1Type *infer_expr_type(L1Expr *expr);
 
@@ -398,5 +399,6 @@ void lainir_emit_c_module_to_file(L1Subroutine *head, const char *output_path,
 void lainir_emit_text_module(FILE *out, L1Subroutine *head);
 void lainir_emit_text_module_to_file(L1Subroutine *head,
                                      const char *output_path);
+void emit_l1_type(L1Type *ty, FILE *out);
 
 #endif /* LAINIR_H */
