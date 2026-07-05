@@ -38,15 +38,17 @@
 
 ;; ── Helper: get the position of index in list (0-based) ──
 (define (effect.index-position idx lst)
-  (let loop ((remaining lst) (pos 0))
+  (let ((loop #f))
+  (set! loop (lambda (remaining pos)
     (if (null? remaining)
         -1
         (if (= idx (car remaining))
             pos
             (loop (cdr remaining) (+ pos 1))))))
+  (loop lst 0)))
 
 ;; ── perform lowering: unified via effect.lookup-layout ──
-(define-pass (core-expr-lowerer |effects.perform| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|effects.perform| (lambda (block expr expected-ty locals)
   (let* ((info (perform.extract-effect-info expr)))
     (if (not info)
         (core.unsupported-expr '|perform-bad-format|)
@@ -64,7 +66,8 @@
                      (arg-indices (cadddr layout))
                      (num-fields (length offsets)))
                 ;; Build field values in order
-                (let build ((i 0) (field-pairs '()))
+                (let ((build #f))
+  (set! build (lambda (i field-pairs)
                   (if (>= i num-fields)
                       (core.aggregate-layout! block total-size (reverse field-pairs))
                       (let* ((offset-type (list-ref offsets i))
@@ -82,10 +85,11 @@
                                           field-ty locals)
                                         ;; Plain field: zero
                                         (core.const-bits! block field-ty 0))))))
-                        (build (+ i 1) (cons (cons offset val) field-pairs)))))))))))
+                        (build (+ i 1) (cons (cons offset val) field-pairs))))))
+  (build 0 '())))))))))
 
-(define-pass (core-expr-lowerer |effects.resume| block expr expected-ty locals)
-  (core.unsupported-expr '|resume-expression|))
+(define-pass* 'core-expr-lowerer '|effects.resume| (lambda (block expr expected-ty locals)
+  (core.unsupported-expr '|resume-expression|)))
 
-(define-pass (core-expr-lowerer |effects.handle| block expr expected-ty locals)
-  (core.unsupported-expr '|handle-expression|))
+(define-pass* 'core-expr-lowerer '|effects.handle| (lambda (block expr expected-ty locals)
+  (core.unsupported-expr '|handle-expression|)))

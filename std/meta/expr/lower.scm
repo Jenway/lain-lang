@@ -11,14 +11,16 @@
 (define (core.flatten-path-fn-name path)
   (if (list.empty? (list.rest path))
       (list.first path)
-      (let loop ((p path) (acc ""))
+      (let ((loop #f))
+  (set! loop (lambda (p acc)
         (if (list.empty? p)
             (string->symbol acc)
             (let* ((seg (symbol->string (list.first p)))
                    (new-acc (if (string=? acc "")
                                 seg
                                 (string-append acc "_" seg))))
-              (loop (list.rest p) new-acc))))))
+              (loop (list.rest p) new-acc)))))
+  (loop path ""))))
 
 ;; 将多段路径拼接为 C 兼容的函数名
 ;; 单段: Color → Color
@@ -138,10 +140,10 @@
   (if (comptime-fns.member? fn-name)
       (core.eval! block function
         (core.lower-args block args (core.function-param-types function) locals (list)))
-      (core.call! block function
+      (core.call-expr! block function
         (core.lower-args block args (core.function-param-types function) locals (list)))))
 
-(define-pass (core-expr-lowerer |call.fn| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|call.fn| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (callee (optional.value
                    (record.get payload '|callee|)))
@@ -158,9 +160,9 @@
         (if (optional.some? intrinsic)
             ((optional.value intrinsic) block args expected-ty locals)
             (let* ((function (core.function-by-name fn-name)))
-              (core.call-or-eval block fn-name function args locals)))))))
+              (core.call-or-eval block fn-name function args locals))))))))
 
-(define-pass (core-expr-lowerer |call.method| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|call.method| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (receiver (optional.value
                      (record.get payload '|receiver|)))
@@ -247,18 +249,18 @@
                            args
                            (list.rest param-types)
                            locals
-                           (list))))))))))))))))
+                           (list)))))))))))))))))
 
-(define-pass (core-expr-lowerer |call.indirect| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|call.indirect| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (fn-ptr (optional.value (record.get payload '|fn-ptr|)))
          (ret-ty (core.lower-type (optional.value (record.get payload '|ret-ty|))))
          (args (optional.value (record.get payload '|args|))))
     (let* ((lowered-fn-ptr (core.lower-expr block fn-ptr (type.addr) locals))
            (lowered-args (core.lower-args-by-inference block args locals (list))))
-      (core.call-indirect! block lowered-fn-ptr ret-ty lowered-args))))
+      (core.call-indirect! block lowered-fn-ptr ret-ty lowered-args)))))
 
-(define-pass (core-expr-lowerer |call.builtin| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|call.builtin| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (name (optional.value
                  (record.get payload '|name|)))
@@ -272,16 +274,16 @@
       ((symbol=? name '|fma|)
        (core.lower-expr block (list.first args) expected-ty locals))
       (else
-       (core.unsupported-expr name)))))
+       (core.unsupported-expr name))))))
 
-(define-pass (core-expr-lowerer |call.tail| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|call.tail| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr)))
     (core.lower-expr
       block
       (optional.value
         (record.get payload '|call|))
       expected-ty
-      locals)))
+      locals))))
 
 ;; ── handle lowering: generic, layout-driven ──
 ;; For any effect E with handler fn H, given `handle E with H { body }`:
@@ -318,13 +320,15 @@
                (num-fields   (length offsets))
                ;; Compute value indices: all non-flag, non-arg indices
                (value-indices
-                 (let loop ((i 0) (acc '()))
+                 (let ((loop #f))
+  (set! loop (lambda (i acc)
                    (if (>= i num-fields)
                        (reverse acc)
                        (if (or (= i flag-index)
                                (effect.index-in-list? i arg-indices))
                            (loop (+ i 1) acc)
                            (loop (+ i 1) (cons i acc))))))
+  (loop 0 '())))
                ;; flag field info
                (flag-offset-ty (list-ref offsets flag-index))
                (flag-offset (car flag-offset-ty))

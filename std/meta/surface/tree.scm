@@ -5,8 +5,8 @@
 ;;
 ;; 树节点格式（参见 canonicalize.scm）：
 ;;   (ident sym)       (number n)       (string s)    (sep sym)
-;;   (juxt l r)        (OP l r)         (prefix OP x) (postfix x OP)
-;;   (call callee args)(paren ...)      (brace ...)   (bracket ...)
+;;   (juxt l r)        (OP l r)         (prefix OP x) (postfix x OP-or-group)
+;;   (paren ...)       (brace ...)      (bracket ...)
 ;;
 ;; form 格式：(root node) 或 (root deco-node decl-node)
 ;; ============================================================================
@@ -36,7 +36,10 @@
   (and (pair? node) (eq? (car node) 'juxt)))
 
 (define (tree.call? node)
-  (and (pair? node) (eq? (car node) 'call)))
+  (and (pair? node)
+       (or (eq? (car node) 'call) ;; legacy compatibility
+           (and (eq? (car node) 'postfix)
+                (tree.paren? (caddr node))))))
 
 (define (tree.paren? node)
   (and (pair? node) (eq? (car node) 'paren)))
@@ -97,10 +100,12 @@
       (list 'juxt (car parts) (tree-rebuild-juxt (cdr parts)))))
 
 (define (tree-find-brace parts)
-  (let loop ((ps parts))
+  (let ((loop #f))
+  (set! loop (lambda (ps)
     (if (null? ps) #f
         (if (tree.brace? (car ps)) (car ps)
             (loop (cdr ps))))))
+  (loop parts)))
 
 ;; ══════════════════════════════════════════════════════════════════
 ;; 5. form 层工具
@@ -199,7 +204,8 @@
     (lain-quote '(type-unit)))))
 
 (define (tree-parse-bracket-type children)
-  (let loop ((kids children) (before-semi '()) (after-semi #f))
+  (let ((loop #f))
+  (set! loop (lambda (kids before-semi after-semi)
     (if (null? kids)
         (if after-semi
             (lain-quote `(type-array ,(tree-parse-type (car (reverse before-semi)))
@@ -214,6 +220,7 @@
               (if after-semi
                   (loop (cdr kids) before-semi kid)
                   (loop (cdr kids) (cons kid before-semi) after-semi)))))))
+  (loop children '() #f)))
 
 (define (tree-parse-fn-type rest-parts)
   (let* ((paren-node (car rest-parts))
@@ -227,12 +234,14 @@
               (lain-quote `(type-fn ,params ,(tree-parse-type arrow-or-rest) ,(optional.none))))))))
 
 (define (tree-parse-type-list-from-paren paren-node)
-  (let loop ((kids (tree.group-children paren-node)) (acc (list)))
+  (let ((loop #f))
+  (set! loop (lambda (kids acc)
     (if (null? kids) (list.reverse acc)
         (let ((kid (car kids)))
           (if (and (tree.sep? kid) (eq? (tree.sep-sym kid) '|,|))
               (loop (cdr kids) acc)
               (loop (cdr kids) (list.cons (tree-parse-type kid) acc)))))))
+  (loop (tree.group-children paren-node) (list))))
 
 (define (tree-collect-type-args node)
   (cond
@@ -272,12 +281,14 @@
    ((and (pair? node) (eq? (car node) '|>|))
     (tree-collect-generic-idents (tree.left node)))
    ((tree.juxt? node)
-    (let loop ((parts (tree.flatten-juxt node)) (acc (list)))
+    (let ((loop #f))
+  (set! loop (lambda (parts acc)
       (if (null? parts) (list.reverse acc)
           (let ((p (car parts)))
             (if (tree.ident? p)
                 (loop (cdr parts) (list.cons (tree.ident-sym p) acc))
                 (loop (cdr parts) acc))))))
+  (loop (tree.flatten-juxt node) (list))))
    (else (list))))
 
 ;; ══════════════════════════════════════════════════════════════════
@@ -285,7 +296,8 @@
 ;; ══════════════════════════════════════════════════════════════════
 
 (define (tree-parse-params paren-node)
-  (let loop ((children (tree.group-children paren-node)) (acc (list)))
+  (let ((loop #f))
+  (set! loop (lambda (children acc)
     (if (null? children) (list.reverse acc)
         (let* ((child (car children))
                (rest (cdr children)))
@@ -298,6 +310,7 @@
                    (param (lain-quote `(param ,name ,ty))))
               (loop rest (list.cons param acc))))
            (else (loop rest acc)))))))
+  (loop (tree.group-children paren-node) (list))))
 
 ;; ══════════════════════════════════════════════════════════════════
 ;; 9. 装饰器解析: form.decorators → attr list
@@ -317,16 +330,19 @@
       (tree-parse-attr-value node)))
 
 (define (tree-parse-attr-args paren-node)
-  (let loop ((children (tree.group-children paren-node)) (acc (list)))
+  (let ((loop #f))
+  (set! loop (lambda (children acc)
     (if (null? children) (list.reverse acc)
         (let ((child (car children)))
           (if (and (tree.sep? child) (eq? (tree.sep-sym child) '|,|))
               (loop (cdr children) acc)
               (loop (cdr children) (list.cons (tree-parse-attr-arg child) acc)))))))
+  (loop (tree.group-children paren-node) (list))))
 
 (define (tree-parse-single-decorator node)
   (let* ((flat (tree.flatten-juxt node)))
-    (let loop ((parts flat))
+    (let ((loop #f))
+  (set! loop (lambda (parts)
       (if (null? parts) #f
           (let ((first (car parts)))
             (if (and (tree.sep? first) (eq? (tree.sep-sym first) '|@|))
@@ -340,13 +356,16 @@
                                (args (tree-parse-attr-args (tree.call-args attr-node))))
                           (lain-quote `(attr ,name ,args))))
                        (else #f))))
-                (loop (cdr parts))))))))
+                (loop (cdr parts)))))))
+  (loop flat))))
 
 (define (tree-parse-attrs form)
-  (let loop ((ds (form.decorators form)) (acc (list)))
+  (let ((loop #f))
+  (set! loop (lambda (ds acc)
     (if (null? ds) (list.reverse acc)
         (let ((attr (tree-parse-single-decorator (car ds))))
           (loop (cdr ds) (if attr (list.cons attr acc) acc))))))
+  (loop (form.decorators form) (list))))
 
 ;; ══════════════════════════════════════════════════════════════════
 ;; 10. Effects 解析
@@ -363,15 +382,18 @@
    (else (lain-quote `(effect-name _unknown ())))))
 
 (define (tree-parse-effect-set brace-node)
-  (let loop ((kids (tree.group-children brace-node)) (acc (list)))
+  (let ((loop #f))
+  (set! loop (lambda (kids acc)
     (if (null? kids) (list.reverse acc)
         (let ((kid (car kids)))
           (if (and (tree.sep? kid) (eq? (tree.sep-sym kid) '|,|))
               (loop (cdr kids) acc)
               (loop (cdr kids) (list.cons (tree-parse-effect-name kid) acc)))))))
+  (loop (tree.group-children brace-node) (list))))
 
 (define (tree-find-effects parts)
-  (let loop ((ps parts) (before '()))
+  (let ((loop #f))
+  (set! loop (lambda (ps before)
     (if (null? ps)
         (values (optional.none) (list.reverse before))
         (let ((p (car ps)))
@@ -387,22 +409,26 @@
                           (append (list.reverse before) (cdr ps)))
                   (loop (cdr ps) (cons p before)))))
            (else (loop (cdr ps) (cons p before))))))))
+  (loop parts '())))
 
 ;; ══════════════════════════════════════════════════════════════════
 ;; 11. Where 子句解析
 ;; ══════════════════════════════════════════════════════════════════
 
 (define (tree-parse-where parts)
-  (let loop ((ps parts) (before '()))
+  (let ((loop #f))
+  (set! loop (lambda (ps before)
     (if (null? ps)
         (values (list) (list.reverse before))
         (let ((p (car ps)))
           (if (and (tree.ident? p) (eq? (tree.ident-sym p) '|where|))
               (values (tree-parse-where-predicates (cdr ps)) (list.reverse before))
               (loop (cdr ps) (cons p before)))))))
+  (loop parts '())))
 
 (define (tree-parse-where-predicates parts)
-  (let loop ((ps parts) (acc (list)))
+  (let ((loop #f))
+  (set! loop (lambda (ps acc)
     (if (null? ps) (list.reverse acc)
         (let ((p (car ps)))
           (cond
@@ -414,6 +440,7 @@
                    (pred (lain-quote `(where-predicate ,param ,bound))))
               (loop (cdr ps) (list.cons pred acc))))
            (else (loop (cdr ps) acc)))))))
+  (loop parts (list))))
 
 (define (tree-split-where-and-brace parts)
   ;; 返回 (where-list . brace-node-or-#f)
@@ -450,10 +477,47 @@
               (let-values (((expr remaining) (tree-take-expr rest)))
                 (tree-parse-block-items remaining
                   (list.cons (lain-quote `(return ,expr)) acc)))))
+         ;; return already grouped as juxt: (juxt (ident return) expr)
+         ((and (tree.juxt? child)
+               (let* ((flat (tree.flatten-juxt child)))
+                 (and (pair? flat)
+                      (tree.ident? (car flat))
+                      (eq? (tree.ident-sym (car flat)) '|return|))))
+          (let* ((flat (tree.flatten-juxt child))
+                 (value-parts (cdr flat))
+                 (return-expr (if (null? value-parts)
+                                  (lain-quote '(return void))
+                                  (lain-quote
+                                    `(return
+                                       ,(tree-lower-expr
+                                          (if (null? (cdr value-parts))
+                                              (car value-parts)
+                                              (tree-rebuild-juxt value-parts)))))))
+                 (remaining (if (and (pair? rest) (tree.sep? (car rest))
+                                     (eq? (tree.sep-sym (car rest)) '|;|))
+                                (cdr rest)
+                                rest)))
+            (tree-parse-block-items remaining (list.cons return-expr acc))))
          ;; let binding
          ((and (tree.ident? child) (eq? (tree.ident-sym child) '|let|))
           (let-values (((let-stmt remaining) (tree-parse-let-stmt rest)))
             (tree-parse-block-items remaining (list.cons let-stmt acc))))
+         ;; let binding already grouped as juxt: (juxt (ident let) (= ...))
+         ((and (tree.juxt? child)
+               (let* ((flat (tree.flatten-juxt child)))
+                 (and (pair? flat)
+                      (tree.ident? (car flat))
+                      (eq? (tree.ident-sym (car flat)) '|let|))))
+          (let* ((flat (tree.flatten-juxt child)))
+            (let-values (((let-stmt remaining) (tree-parse-let-stmt (cdr flat))))
+              (tree-parse-block-items (append remaining rest) (list.cons let-stmt acc)))))
+         ;; if statement at the front of a juxt may be followed by the next
+         ;; expression without a semicolon. Split only the if prefix here.
+         ((tree-leading-if? child)
+          (let-values (((if-node remaining) (tree-split-leading-if child)))
+            (tree-parse-block-items
+              (append remaining rest)
+              (list.cons (lain-quote `(expr-stmt ,(tree-lower-expr if-node))) acc))))
          ;; 最后一个表达式（无分号结尾）→ tail
          ((null? rest)
           (list.reverse (list.cons (lain-quote `(tail ,(tree-lower-expr child))) acc)))
@@ -467,6 +531,37 @@
                 (tree-parse-block-items rest (list.cons stmt acc)))
               (let ((stmt (lain-quote `(expr-stmt ,(tree-lower-expr child)))))
                 (tree-parse-block-items rest (list.cons stmt acc)))))))))
+
+(define (tree-leading-if? node)
+  (let* ((flat (if (tree.juxt? node) (tree.flatten-juxt node) (list node))))
+    (and (pair? flat)
+         (tree.ident? (car flat))
+         (eq? (tree.ident-sym (car flat)) '|if|)
+         (pair? (cdr flat))
+         (pair? (cddr flat))
+         (tree.brace? (caddr flat)))))
+
+(define (tree-split-leading-if node)
+  (let* ((flat (if (tree.juxt? node) (tree.flatten-juxt node) (list node)))
+         (if-head (car flat))
+         (cond-node (cadr flat))
+         (then-node (caddr flat))
+         (after-then (cdddr flat))
+         (has-else (and (pair? after-then)
+                        (tree.ident? (car after-then))
+                        (eq? (tree.ident-sym (car after-then)) '|else|)
+                        (pair? (cdr after-then))
+                        (tree.brace? (cadr after-then))))
+         (if-parts (if has-else
+                       (list if-head cond-node then-node (car after-then) (cadr after-then))
+                       (list if-head cond-node then-node)))
+         (rest-parts (if has-else (cddr after-then) after-then))
+         (remaining (if (null? rest-parts)
+                        '()
+                        (list (if (null? (cdr rest-parts))
+                                  (car rest-parts)
+                                  (tree-rebuild-juxt rest-parts))))))
+    (values (tree-rebuild-juxt if-parts) remaining)))
 
 (define (tree-take-expr parts)
   ;; 取第一个非分号元素作为表达式，返回 (values expr remaining)
@@ -482,6 +577,45 @@
                                  (cdr rest)
                                  rest)))
               (values (tree-lower-expr first) remaining))))))
+
+(define (tree-if-head? node)
+  (let* ((flat (if (tree.juxt? node) (tree.flatten-juxt node) (list node))))
+    (and (pair? flat)
+         (tree.ident? (car flat))
+         (eq? (tree.ident-sym (car flat)) '|if|))))
+
+(define (tree-collect-if-rhs rhs0 remaining)
+  ;; RawAst keeps `if cond { then } else { else }` as siblings after the
+  ;; leading `if` atom in let RHS. Rebuild one juxt expression and consume it.
+  (if (not (tree-if-head? rhs0))
+      (let* ((rhs-has-brace (and (pair? remaining) (tree.brace? (car remaining))))
+             (rhs (if rhs-has-brace
+                      (tree-rebuild-juxt (list rhs0 (car remaining)))
+                      rhs0))
+             (after-rhs (if rhs-has-brace (cdr remaining) remaining)))
+        (values rhs after-rhs))
+      (let* ((cond-node (if (pair? remaining) (car remaining) #f))
+             (after-cond (if (pair? remaining) (cdr remaining) remaining))
+             (then-node (if (and (pair? after-cond) (tree.brace? (car after-cond)))
+                            (car after-cond)
+                            #f))
+             (after-then (if then-node (cdr after-cond) after-cond))
+             (else-node (if (and (pair? after-then)
+                                 (tree.ident? (car after-then))
+                                 (eq? (tree.ident-sym (car after-then)) '|else|))
+                            (car after-then)
+                            #f))
+             (after-else (if else-node (cdr after-then) after-then))
+             (else-block (if (and (pair? after-else) (tree.brace? (car after-else)))
+                             (car after-else)
+                             #f))
+             (after-rhs (if else-block (cdr after-else) after-else))
+             (base (tree.flatten-juxt rhs0))
+             (with-cond (if cond-node (append base (list cond-node)) base))
+             (with-then (if then-node (append with-cond (list then-node)) with-cond))
+             (with-else (if else-node (append with-then (list else-node)) with-then))
+             (parts (if else-block (append with-else (list else-block)) with-else)))
+        (values (tree-rebuild-juxt parts) after-rhs))))
 
 (define (tree-parse-let-stmt parts)
   ;; parts 是 let 后面的内容
@@ -504,14 +638,15 @@
               (cond
                ((and (pair? node) (eq? (car node) '|=|))
                 (let* ((lhs (tree.left node))
-                       (rhs (tree.right node)))
+                       (rhs0 (tree.right node)))
                   ;; lhs 可能是 (: name type) 或 (ident name)
-                  (let-values (((name ty) (tree-extract-let-name-type lhs)))
+                  (let-values (((rhs after-rhs) (tree-collect-if-rhs rhs0 remaining))
+                               ((name ty) (tree-extract-let-name-type lhs)))
                     ;; 跳过后面的分号
-                    (let ((remaining2 (if (and (pair? remaining) (tree.sep? (car remaining))
-                                               (eq? (tree.sep-sym (car remaining)) '|;|))
-                                          (cdr remaining)
-                                          remaining)))
+                    (let ((remaining2 (if (and (pair? after-rhs) (tree.sep? (car after-rhs))
+                                               (eq? (tree.sep-sym (car after-rhs)) '|;|))
+                                          (cdr after-rhs)
+                                          after-rhs)))
                       (values (lain-quote `(let ,mutable #f ,name ,ty ,(tree-lower-expr rhs)))
                               remaining2)))))
                (else
@@ -571,9 +706,14 @@
           (lain-quote `(field ,recv _unknown)))))
    ;; 路径: (:: a b)
    ((and (pair? node) (eq? (car node) '|::|))
-    (let* ((segments (tree.flatten-path node))
-           (syms (map (lambda (s) (if (tree.ident? s) (tree.ident-sym s) '_)) segments)))
-      (lain-quote `(path ,@syms))))
+    (let* ((right (tree.right node))
+           (syms (tree-path-syms node)))
+      (if (tree.call? right)
+          (let* ((args-paren (tree.call-args right))
+                 (arg-trees (tree-filter-comma (tree.group-children args-paren)))
+                 (arg-exprs (map tree-lower-expr arg-trees)))
+            (lain-quote `(call (path ,@syms) ,@arg-exprs)))
+          (lain-quote `(path ,@syms)))))
    ;; 前缀
    ((and (pair? node) (eq? (car node) 'prefix))
     (let ((op (tree.prefix-op node))
@@ -612,6 +752,16 @@
        ;; match expr { arms }
        ((and (pair? flat) (tree.ident? (car flat)) (eq? (tree.ident-sym (car flat)) '|match|))
         (tree-lower-match-expr (cdr flat)))
+       ;; Struct literal: Name { field: value, ... }
+       ((and (pair? flat)
+             (tree.ident? (car flat))
+             (pair? (cdr flat))
+             (tree.brace? (cadr flat)))
+        (let* ((name (tree.ident-sym (car flat)))
+               (fields (struct.literal-fields-tree
+                         (tree.group-children (cadr flat))
+                         (list))))
+          (lain-quote `(aggregate ,name ,@fields))))
        ;; perform call-expr
        ((and (pair? flat) (tree.ident? (car flat)) (eq? (tree.ident-sym (car flat)) '|perform|))
         (if (null? (cdr flat)) (lain-quote '(number 0))
@@ -643,6 +793,16 @@
 (define (tree-filter-comma children)
   (filter (lambda (c) (not (and (tree.sep? c) (eq? (tree.sep-sym c) '|,|)))) children))
 
+(define (tree-path-node-sym node)
+  (cond
+   ((tree.ident? node) (tree.ident-sym node))
+   ((tree.call? node)
+    (tree-path-node-sym (tree.call-callee node)))
+   (else '_)))
+
+(define (tree-path-syms node)
+  (map tree-path-node-sym (tree.flatten-path node)))
+
 (define (tree-lower-if-expr parts)
   ;; parts: [cond-tree (brace then) (ident else) (brace else)]
   (if (null? parts)
@@ -660,7 +820,7 @@
                               after-then))
              (else-block (if (and (pair? after-else) (tree.brace? (car after-else)))
                              (tree-parse-block (car after-else))
-                             (lain-quote '(block (tail (number 0)))))))
+                             (lain-quote '(block)))))
         (lain-quote `(if ,cond-expr ,then-block ,else-block)))))
 
 (define (tree-lower-builtin-expr parts)

@@ -1,0 +1,110 @@
+struct AstSexpr {
+    tag: i32,
+    symbol: i32,
+    has_child: i32,
+    first_child: addr,
+    has_next: i32,
+    next: addr,
+}
+
+fn tag_atom() -> i32 { 1 }
+fn tag_group() -> i32 { 2 }
+fn tag_juxt() -> i32 { 3 }
+fn tag_infix() -> i32 { 4 }
+fn tag_postfix() -> i32 { 6 }
+
+fn child_or_null(node: AstSexpr) -> addr {
+    if node.has_child == 0 {
+        0
+    } else {
+        node.first_child
+    }
+}
+
+fn second_child_or_null(node: AstSexpr) -> addr {
+    let first: AstSexpr = child_or_null(node);
+    if first.has_next == 0 {
+        0
+    } else {
+        first.next
+    }
+}
+
+fn is_atom_symbol(node: AstSexpr, symbol: i32) -> i32 {
+    if node.tag != tag_atom() {
+        return 0;
+    }
+    if node.symbol != symbol {
+        return 0;
+    }
+    return 1;
+}
+
+fn pub_fn_prefix_matches(prefix: AstSexpr, pub_symbol: i32, fn_symbol: i32) -> i32 {
+    if prefix.tag != tag_juxt() {
+        return 0;
+    }
+    let pub_node: AstSexpr = child_or_null(prefix);
+    if is_atom_symbol(pub_node, pub_symbol) == 0 {
+        return 0;
+    }
+    let fn_node: AstSexpr = second_child_or_null(prefix);
+    return is_atom_symbol(fn_node, fn_symbol);
+}
+
+fn signature_name(signature: AstSexpr) -> i32 {
+    if signature.tag != tag_infix() {
+        return 0;
+    }
+    let call_node: AstSexpr = child_or_null(signature);
+    if call_node.tag != tag_postfix() {
+        return 0;
+    }
+    let name_node: AstSexpr = child_or_null(call_node);
+    return name_node.symbol;
+}
+
+fn pub_fn_signature_or_null(form: AstSexpr, pub_symbol: i32, fn_symbol: i32) -> addr {
+    if form.tag != tag_juxt() {
+        return 0;
+    }
+    let header: AstSexpr = child_or_null(form);
+    if header.tag != tag_juxt() {
+        return 0;
+    }
+    let prefix: AstSexpr = child_or_null(header);
+    if pub_fn_prefix_matches(prefix, pub_symbol, fn_symbol) == 0 {
+        return 0;
+    }
+    return second_child_or_null(header);
+}
+
+fn count_pub_fn_forms(form: AstSexpr, pub_symbol: i32, fn_symbol: i32) -> i32 {
+    let signature: AstSexpr = pub_fn_signature_or_null(form, pub_symbol, fn_symbol);
+    let self_count: i32 = if signature.tag == tag_infix() {
+        1
+    } else {
+        0
+    };
+    let next_count: i32 = if form.has_next == 0 {
+        0
+    } else {
+        count_pub_fn_forms(form.next, pub_symbol, fn_symbol)
+    };
+    return self_count + next_count;
+}
+
+pub fn module_ast_pub_fn_name(form: AstSexpr, pub_symbol: i32, fn_symbol: i32) -> i32 {
+    let signature: AstSexpr = pub_fn_signature_or_null(form, pub_symbol, fn_symbol);
+    return signature_name(signature);
+}
+
+pub fn module_ast_root_pub_fn_count(root: AstSexpr, pub_symbol: i32, fn_symbol: i32) -> i32 {
+    if root.tag != tag_group() {
+        return 0;
+    }
+    if root.has_child == 0 {
+        return 0;
+    }
+    return count_pub_fn_forms(root.first_child, pub_symbol, fn_symbol);
+}

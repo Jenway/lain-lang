@@ -9,7 +9,7 @@
                        (record.field '|type| (core.lower-type (optional.value (record.get payload '|type|)))))
                      acc)))))
 
-(define-pass (core-declarer |middle.struct| item)
+(define-pass* 'core-declarer '|middle.struct| (lambda (item)
   (let* ((payload (middle.payload item))
          (name (optional.value (record.get payload '|name|)))
          (fields (optional.value (record.get payload '|fields|)))
@@ -20,7 +20,7 @@
                                    (optional.value (record.get f '|type|))))
                            lowered)))
     ;; Register via Scheme registry (pure Scheme — no C interaction)
-    (struct-register! name field-pairs)))
+    (struct-register! name field-pairs))))
 
 (define (struct.lower-literal-fields block struct-name fields locals acc)
   (if (list.empty? fields) (list.reverse acc)
@@ -33,22 +33,22 @@
         (struct.lower-literal-fields block struct-name (list.rest fields) locals
           (list.cons (cons offset value) acc)))))
 
-(define-pass (core-expr-lowerer |struct.literal| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|struct.literal| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (name (optional.value (record.get payload '|name|)))
          (fields (optional.value (record.get payload '|fields|)))
          (total-size (struct-total-size name))
          (layout (struct.lower-literal-fields block name fields locals (list))))
     ;; Integer-based aggregate: C only sees total-size + (offset . value) pairs
-    (core.aggregate-layout! block total-size layout)))
+    (core.aggregate-layout! block total-size layout))))
 
-(define-pass (core-expr-inferer |struct.literal| expr locals)
+(define-pass* 'core-expr-inferer '|struct.literal| (lambda (expr locals)
   (let* ((payload (middle.payload expr))
          (name (optional.value (record.get payload '|name|))))
     ;; Pure Scheme struct-type record: (struct-type . name)
-    (struct-type name)))
+    (struct-type name))))
 
-(define-pass (core-expr-lowerer |struct.field| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|struct.field| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (base-expr (optional.value (record.get payload '|base|)))
          (field-name (optional.value (record.get payload '|field|)))
@@ -58,12 +58,12 @@
          (field-ty (struct-field-type struct-name field-name)))
     (core.field-offset! block
       (core.lower-expr block base-expr base-ty locals)
-      offset field-ty)))
+      offset field-ty))))
 
-(define-pass (core-expr-inferer |struct.field| expr locals)
+(define-pass* 'core-expr-inferer '|struct.field| (lambda (expr locals)
   (let* ((payload (middle.payload expr))
          (base (optional.value (record.get payload '|base|)))
          (field-name (optional.value (record.get payload '|field|)))
          (base-ty (core.infer-expr-type base locals))
          (struct-name (struct-type-name base-ty)))
-    (struct-field-type struct-name field-name)))
+    (struct-field-type struct-name field-name))))

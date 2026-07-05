@@ -6,14 +6,14 @@
 
 ;; ── 规范化 ──
 
-(define-pass (middle-normalizer |expr.cast| raw-expr)
+(define-pass* 'middle-normalizer '|expr.cast| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr))
          (inner (optional.value (record.get payload '|expr|)))
          (target-ty (optional.value (record.get payload '|ty|))))
     (middle.node! '|cast.as|
       (record '|cast.as|
         (record.field '|expr| (middle.normalize-expr inner))
-        (record.field '|target| (middle.normalize-type target-ty))))))
+        (record.field '|target| (middle.normalize-type target-ty)))))))
 
 ;; ── 降级: 跨 addr↔bits 边界时插入转换 primitive ──
 
@@ -34,7 +34,7 @@
 (define (type-to-cpointer lowered-ty)
   (if (struct-type? lowered-ty) (type.addr) lowered-ty))
 
-(define-pass (core-expr-lowerer |cast.as| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|cast.as| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (inner (optional.value (record.get payload '|expr|)))
          (target-norm-ty (optional.value (record.get payload '|target|)))
@@ -53,11 +53,11 @@
                         locals)))
            (if target-is-addr
                (ir.expr.int2ptr block inner-ir)
-               (ir.expr.ptr2int block inner-ir))))))
+               (ir.expr.ptr2int block inner-ir)))))))
 
 ;; ── 类型推导: 返回目标类型 ──
 
-(define-pass (core-expr-inferer |cast.as| expr locals)
+(define-pass* 'core-expr-inferer '|cast.as| (lambda (expr locals)
   (let* ((payload (middle.payload expr))
          (target (optional.value (record.get payload '|target|))))
-    (core.lower-type target)))
+    (core.lower-type target))))

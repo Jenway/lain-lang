@@ -37,10 +37,12 @@
   (set! *fn-return-types* (cons (cons name ret-ty) *fn-return-types*)))
 
 (define (fn-return-type-lookup name)
-  (let loop ((t *fn-return-types*))
+  (let ((loop #f))
+  (set! loop (lambda (t)
     (if (null? t) #f
         (if (eq? (caar t) name) (cdar t)
             (loop (cdr t))))))
+  (loop *fn-return-types*)))
 
 ;; ── Internal: compute field layout ──
 
@@ -74,22 +76,26 @@
 
 ;; Look up struct info: (name total-size . layout)
 (define (struct-lookup name)
-  (let loop ((reg *struct-registry*))
+  (let ((loop #f))
+  (set! loop (lambda (reg)
     (if (null? reg)
         (error (string-append "struct not found: " (symbol->string name)))
         (let ((entry (car reg)))
           (if (eq? (car entry) name)
               entry
               (loop (cdr reg)))))))
+  (loop *struct-registry*)))
 
 ;; Check if a struct name is registered (non-fatal)
 (define (struct-registered? name)
-  (let loop ((reg *struct-registry*))
+  (let ((loop #f))
+  (set! loop (lambda (reg)
     (if (null? reg)
         #f
         (if (eq? (caar reg) name)
             #t
             (loop (cdr reg))))))
+  (loop *struct-registry*)))
 
 ;; Total size in bytes
 (define (struct-total-size name)
@@ -99,27 +105,31 @@
 (define (struct-field-offset name field-name)
   (let* ((entry (struct-lookup name))
          (layout (cddr entry)))
-    (let loop ((fields layout))
+    (let ((loop #f))
+  (set! loop (lambda (fields)
       (if (null? fields)
           (error (string-append "field not found: " (symbol->string field-name)
                                 " in struct " (symbol->string name)))
           (let ((f (car fields)))
             (if (eq? (car f) field-name)
                 (caddr f)  ;; offset
-                (loop (cdr fields))))))))
+                (loop (cdr fields)))))))
+  (loop layout))))
 
 ;; Field type — returns L1 atom cpointer (bits/addr/void)
 (define (struct-field-type name field-name)
   (let* ((entry (struct-lookup name))
          (layout (cddr entry)))
-    (let loop ((fields layout))
+    (let ((loop #f))
+  (set! loop (lambda (fields)
       (if (null? fields)
           (error (string-append "field not found: " (symbol->string field-name)
                                 " in struct " (symbol->string name)))
           (let ((f (car fields)))
             (if (eq? (car f) field-name)
                 (cadr f)  ;; type cpointer (L1 atom, not struct)
-                (loop (cdr fields))))))))
+                (loop (cdr fields)))))))
+  (loop layout))))
 
 ;; ── Generic struct instantiation ──
 
@@ -140,13 +150,15 @@
 (define (struct--concrete-name name args)
   (if (null? args)
       name
-      (let loop ((remaining args) (acc (symbol->string name)))
+      (let ((loop #f))
+  (set! loop (lambda (remaining acc)
         (if (null? remaining)
             (string->symbol acc)
             (let* ((arg (car remaining))
                    (arg-name (struct--arg-name arg))
                    (new-acc (string-append acc "_" arg-name)))
-              (loop (cdr remaining) new-acc))))))
+              (loop (cdr remaining) new-acc)))))
+  (loop args (symbol->string name)))))
 
 ;; Get a printable name for an already-lowered type
 (define (struct--arg-name ty)
@@ -182,7 +194,8 @@
   (let ((n (length field-types)))
     (if (zero? n)
         (cons 0 '())
-        (let loop ((tys field-types) (offset 0) (acc '()))
+        (let ((loop #f))
+  (set! loop (lambda (tys offset acc)
           (if (null? tys)
               (cons offset (reverse acc))
               (let* ((ty (car tys))
@@ -194,4 +207,5 @@
                                   (+ offset (- align (modulo offset align))))))
                 (loop (cdr tys)
                       (+ aligned size)
-                      (cons (cons aligned ty) acc))))))))
+                      (cons (cons aligned ty) acc))))))
+  (loop field-types 0 '())))))

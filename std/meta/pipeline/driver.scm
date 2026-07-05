@@ -7,7 +7,8 @@
 (define (cfg.target-os) '|linux|)
 
 (define (pipeline.rule stage kind)
-  (let loop ((passes __lain-passes))
+  (let ((loop #f))
+  (set! loop (lambda (passes)
     (if (null? passes)
         (lambda args unit)  ;; 默认无操作 — 未注册的 pass 静默跳过
         (let* ((entry (car passes))
@@ -17,6 +18,7 @@
           (if (and (equal? e-stage stage) (equal? e-kind kind))
               e-body
               (loop (cdr passes)))))))
+  (loop __lain-passes)))
 
 ;; ---------------------------------------------------------------------------
 ;; 驱动管线
@@ -24,7 +26,8 @@
 
 ;; Helper: 尝试查找 form-parser，找不到返回 #f
 (define (driver.lookup-form-parser kind)
-  (let loop ((passes __lain-passes))
+  (let ((loop #f))
+  (set! loop (lambda (passes)
     (if (null? passes)
         #f
         (let* ((entry (car passes))
@@ -33,6 +36,7 @@
           (if (and (equal? e-stage 'form-parser) (equal? e-kind kind))
               (car (cdr (cdr entry)))
               (loop (cdr passes)))))))
+  (loop __lain-passes)))
 
 ;; Phase 1: 从 form 树提取关键字，分发到对应 form-parser
 (define (driver.parse-and-declare root-form)
@@ -74,7 +78,8 @@
 
 ;; 从给定的 decls 列表进行 normalize（供递归导入使用）
 (define (driver.normalize-decls-from decls)
-  (let loop ((remaining decls) (acc (list)))
+  (let ((loop #f))
+  (set! loop (lambda (remaining acc)
     (if (null? remaining)
         (list.reverse acc)
         (let* ((decl (car remaining))
@@ -82,6 +87,7 @@
                (normalizer (pipeline.rule 'raw-normalizer kind))
                (middle-item (normalizer decl)))
           (loop (cdr remaining) (list.cons middle-item acc))))))
+  (loop decls (list))))
 
 ;; Phase 3: 对每个 middle item 调用 core-declarer 注册函数签名。
 (define (driver.declare-core middle-items)
@@ -107,12 +113,14 @@
 
 ;; 收集在 known-decls 之后新增到 (declarations.all) 前面的声明
 (define (driver.collect-new-declarations known-decls)
-  (let loop ((all (declarations.all)) (acc (list)))
+  (let ((loop #f))
+  (set! loop (lambda (all acc)
     (if (null? all)
         (list.reverse acc)
         (if (driver.decl-in-list? (car all) known-decls)
             (list.reverse acc)  ;; 遇到已知声明，停止收集
             (loop (cdr all) (list.cons (car all) acc))))))
+  (loop (declarations.all) (list))))
 
 ;; 收集所有 middle items（包括递归导入的模块）
 (define (driver.collect-all-middle-items root-group)

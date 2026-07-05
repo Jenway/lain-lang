@@ -29,32 +29,38 @@
   (set! *propagate-current-effects* '()))
 
 (define (propagate.record! effect-name)
-  (let loop ((remaining *propagate-current-effects*))
+  (let ((loop #f))
+  (set! loop (lambda (remaining)
     (if (null? remaining)
         (set! *propagate-current-effects*
               (cons effect-name *propagate-current-effects*))
         (if (eq? (car remaining) effect-name)
             #f  ;; already present
             (loop (cdr remaining))))))
+  (loop *propagate-current-effects*)))
 
 (define (propagate.record-effects! effect-names)
   "Record multiple effects at once."
-  (let loop ((remaining effect-names))
+  (let ((loop #f))
+  (set! loop (lambda (remaining)
     (if (not (null? remaining))
         (begin
           (propagate.record! (car remaining))
           (loop (cdr remaining))))))
+  (loop effect-names)))
 
 (define (propagate.consume! effect-name)
   "Remove an effect from the collected set (used by handle to absorb effects)."
   (set! *propagate-current-effects*
-        (let filter ((remaining *propagate-current-effects*) (acc '()))
+        (let ((filter #f))
+  (set! filter (lambda (remaining acc)
           (if (null? remaining)
               (reverse acc)
               (let ((eff (car remaining)))
                 (if (eq? eff effect-name)
                     (filter (cdr remaining) acc)
-                    (filter (cdr remaining) (cons eff acc))))))))
+                    (filter (cdr remaining) (cons eff acc)))))))
+  (filter *propagate-current-effects* '()))))
 
 (define (propagate.collected-effects)
   *propagate-current-effects*)
@@ -63,7 +69,8 @@
 (define (propagate.validate-collected! collected declared-names fn-name)
   "Check that all collected effects are present in declared-names.
    If not, signal an error."
-  (let check ((remaining collected))
+  (let ((check #f))
+  (set! check (lambda (remaining)
     (if (null? remaining)
         #f  ;; all good
         (let* ((eff (car remaining))
@@ -75,6 +82,7 @@
                                     "' performed in function '"
                                     (symbol->string fn-name)
                                     "' but not declared in signature")))))))
+  (check collected)))
 
 ;; ── Legacy validate (kept for backward compat) ──
 (define (propagate.validate! declared-effects)

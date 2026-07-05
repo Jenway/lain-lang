@@ -35,7 +35,7 @@
         (list.rest nodes)
         (list.cons (tree.ident-sym (list.first nodes)) acc))))
 
-(define-pass (form-parser |import| form)
+(define-pass* 'form-parser '|import| (lambda (form)
   (let* ((tree (form.tree form))
          (parts (tree.flatten-juxt tree))
          ;; parts: ((ident import) path-node)
@@ -47,7 +47,7 @@
                  (record '|import|
                    (record.field '|attrs| attrs)
                    (record.field '|path| path)))))
-    (decl.define! '|import| (import.path-name path) node)))
+    (decl.define! '|import| (import.path-name path) node))))
 
-(define-pass (raw-normalizer |import| decl)
-  (middle.normalize-plain-decl decl '|middle.import|))
+(define-pass* 'raw-normalizer '|import| (lambda (decl)
+  (middle.normalize-plain-decl decl '|middle.import|)))

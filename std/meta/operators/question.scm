@@ -5,7 +5,7 @@
 ;; ── ? 操作符 lowering: check flag → propagate or unwrap ──
 ;; Uses the Throws effect layout from effects/layout.scm.
 ;; Layout: {flag: u8, value: T, error: E} — flag at index 0, value at index 1.
-(define-pass (core-expr-lowerer |operators.question| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|operators.question| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (inner-expr (optional.value (record.get payload '|expr|)))
          (call-expr (core.lower-expr block inner-expr expected-ty locals))
@@ -36,4 +36,4 @@
            (value-val (core.field-offset! then-b call-expr value-offset value-ty)))
       ;; Finalize if — append INST_IF to parent block
       (core.end-if! block is-ok then-b else-b)
-      value-val)))
+      value-val))))

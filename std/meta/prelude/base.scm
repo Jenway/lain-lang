@@ -33,27 +33,33 @@
 (meta-source "core/list")
 
 (define (list.map items f)
-  (let loop ((rest items) (acc (list)))
+  (let ((loop #f))
+  (set! loop (lambda (rest acc)
     (if (list.empty? rest)
         (list.reverse acc)
         (loop (list.rest rest)
               (list.cons (f (list.first rest)) acc)))))
+  (loop items (list))))
 
 (define (list.fold items seed f)
-  (let loop ((rest items) (acc seed))
+  (let ((loop #f))
+  (set! loop (lambda (rest acc)
     (if (list.empty? rest)
         acc
         (loop (list.rest rest)
               (f acc (list.first rest))))))
+  (loop items seed)))
 
 (define (list.find items predicate)
-  (let loop ((rest items))
+  (let ((loop #f))
+  (set! loop (lambda (rest)
     (if (list.empty? rest)
         (optional.none)
         (let* ((item (list.first rest)))
           (if (predicate item)
               (optional.some item)
               (loop (list.rest rest)))))))
+  (loop items)))
 
 
 (meta-source "core/record")

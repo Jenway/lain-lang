@@ -12,7 +12,7 @@
 (register-operator! '|>=| '|ordering-greater-or-equal|)
 (register-operator! '|!| '|logical-not|)
 
-(define-pass (middle-normalizer |expr.binary| raw-expr)
+(define-pass* 'middle-normalizer '|expr.binary| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|operators.binary|
       (record '|operators.binary|
@@ -26,9 +26,9 @@
         (record.field '|right|
           (middle.normalize-expr
             (optional.value
-              (record.get payload '|right|))))))))
+              (record.get payload '|right|)))))))))
 
-(define-pass (middle-normalizer |expr.unary| raw-expr)
+(define-pass* 'middle-normalizer '|expr.unary| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|operators.unary|
       (record '|operators.unary|
@@ -38,9 +38,9 @@
         (record.field '|operand|
           (middle.normalize-expr
             (optional.value
-              (record.get payload '|operand|))))))))
+              (record.get payload '|operand|)))))))))
 
-(define-pass (core-expr-lowerer |operators.binary| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|operators.binary| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
         (op (optional.value
               (record.get payload '|op|)))
@@ -83,9 +83,9 @@
              ((symbol=? op '|<=|) (ir.expr.le block left right))
              ((symbol=? op '|>|) (ir.expr.gt block left right))
              ((symbol=? op '|>=|) (ir.expr.ge block left right))
-             (else (core.unsupported-operator op)))))))))
+             (else (core.unsupported-operator op))))))))))
 
-(define-pass (core-expr-lowerer |operators.unary| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|operators.unary| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
         (op (optional.value
               (record.get payload '|op|)))
@@ -100,7 +100,7 @@
        (let* ((operand (core.lower-expr block operand-expr expected-ty locals))
              (zero (core.const-bits! block expected-ty 0)))
          (ir.expr.eq block operand zero)))
-      (else (core.unsupported-operator op)))))
+      (else (core.unsupported-operator op))))))
 
 (define (operators.compare-op? op)
   (cond
@@ -157,16 +157,16 @@
 ;; 表达式类型推导: 运算符
 ;; ---------------------------------------------------------------------------
 
-(define-pass (core-expr-inferer |operators.binary| expr locals)
+(define-pass* 'core-expr-inferer '|operators.binary| (lambda (expr locals)
   (let* ((payload (middle.payload expr))
          (op (optional.value (record.get payload '|op|))))
     (if (operators.compare-op? op)
         (type.registered '|bool| (list))
         (core.infer-expr-type
           (optional.value (record.get payload '|left|))
-          locals))))
+          locals)))))
 
-(define-pass (core-expr-inferer |operators.unary| expr locals)
+(define-pass* 'core-expr-inferer '|operators.unary| (lambda (expr locals)
   (let* ((payload (middle.payload expr))
          (operand (optional.value (record.get payload '|operand|))))
-    (core.infer-expr-type operand locals)))
+    (core.infer-expr-type operand locals))))

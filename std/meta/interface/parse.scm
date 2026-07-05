@@ -143,7 +143,7 @@
                 (list.cons predicate acc)))
             (list.reverse acc)))))
 
-(define-pass (form-parser |interface| form)
+(define-pass* 'form-parser '|interface| (lambda (form)
   (let* ((tree (form.tree form))
          (attrs (form.decorators form))
          (parts (tree.flatten-juxt tree))
@@ -174,7 +174,7 @@
                       (record.field '|name| name)
                       (record.field '|type-kind| '|interface|)
                       (record.field '|payload| inner-payload)))))
-    (decl.define! '|let| name unified)))
+    (decl.define! '|let| name unified))))
 
 ;; interface raw-normalizer 已迁至 let/normalize.scm 的统一分发器
 
@@ -197,13 +197,15 @@
 
 ;; 帮助函数: 查询 interface 的 methods
 (define (interface.lookup name)
-  (let loop ((reg *interface-registry*))
+  (let ((loop #f))
+  (set! loop (lambda (reg)
     (if (list.empty? reg)
         (list)  ;; 空列表 = 未找到
         (let* ((entry (list.first reg)))
           (if (symbol=? (car entry) name)
               (cdr entry)
               (loop (list.rest reg)))))))
+  (loop *interface-registry*)))
 
 ;; Dyn 胖指针类型名: Animal → Animal_Dyn
 (define (interface.dyn-name interface-name)
@@ -220,13 +222,15 @@
 
 ;; 查询 Dyn 类型对应的 interface name
 (define (interface.lookup-dyn dyn-type-name)
-  (let loop ((reg *dyn-registry*))
+  (let ((loop #f))
+  (set! loop (lambda (reg)
     (if (list.empty? reg)
         #f
         (let* ((entry (list.first reg)))
           (if (symbol=? (car entry) dyn-type-name)
               (cdr entry)
               (loop (list.rest reg)))))))
+  (loop *dyn-registry*)))
 
 ;; 判断一个类型是否为 Dyn 胖指针类型
 (define (interface.dyn-type? ty)
@@ -280,7 +284,7 @@
           acc))))
 
 ;; core-declarer: 为 interface 生成 VTable 结构体类型 + Dyn 胖指针类型
-(define-pass (core-declarer |middle.interface| item)
+(define-pass* 'core-declarer '|middle.interface| (lambda (item)
   (let* ((payload (middle.payload item))
          (interface-payload (optional.value (record.get payload '|payload|)))
          (name (optional.value (record.get payload '|name|)))
@@ -301,4 +305,4 @@
     ;; 3. 注册到全局表，供 impl lowerer 查询
     (interface.register! name methods)
     ;; 4. 注册 Dyn 类型映射
-    (interface.register-dyn! dyn-name name)))
+    (interface.register-dyn! dyn-name name))))

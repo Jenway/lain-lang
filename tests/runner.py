@@ -202,23 +202,8 @@ def run_import_via_interface_tests():
 
 
 def run_build_tests():
-    print("\n🚀 Running build tests...")
-    for path in sorted(glob.glob(os.path.join(FIXTURES_DIR, "build_test", "main.lain"))):
-        name = os.path.splitext(os.path.basename(path))[0]
-        out_bin = "/tmp/lain_build_test_bin"
-        expected = parse_source_annotations(path)
-
-        build_res = subprocess.run([COMPILER_BIN, "--build", path, out_bin], env=ENV, capture_output=True)
-        if build_res.returncode != 0:
-            stderr_text = build_res.stderr.decode('utf-8', errors='replace')
-            log_failure(name, f"Build failed.\n{stderr_text}")
-            continue
-
-        run_res = subprocess.run([out_bin], capture_output=True)
-        if run_res.returncode != expected["exit"]:
-            log_failure(name, f"exit code: expected {expected['exit']}, got {run_res.returncode}")
-        else:
-            log_success(name)
+    print("\nSkipping legacy C-side build driver tests.")
+    print("Build orchestration belongs in build.lain / meta libraries, not the C compiler driver.")
 
 
 # D. run-pass: 编译成 C -> 用 gcc 编译 -> 运行并验证退出码

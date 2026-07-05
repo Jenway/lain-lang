@@ -263,7 +263,8 @@ vm_value *vm_void(void)  { return (vm_value *)SEXP_VOID; }
  * ═══════════════════════════════════════════════════════════════ */
 
 void vm_register_ffi(vm_context *ctx, vm_value *env,
-                     const char *scheme_name, vm_ffi_fn fn) {
+                     const char *scheme_name, int arity, vm_ffi_fn fn) {
+  (void)arity;
   sexp_define_foreign_aux((sexp)ctx, (sexp)env, scheme_name, -1, 0,
                           scheme_name, (sexp_proc1)fn, NULL);
 }

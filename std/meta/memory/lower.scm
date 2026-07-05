@@ -6,7 +6,7 @@
 
 ;; ── 类型降级 ──
 
-(define-pass (core-type-lowerer |types.ref| ty)
+(define-pass* 'core-type-lowerer '|types.ref| (lambda (ty)
   (let* ((payload (middle.payload ty))
          (inner (core.lower-type
                   (optional.value (record.get payload '|inner|)))))
@@ -15,20 +15,20 @@
     ;; turns struct-type params into addr for the C function signature.
     (if (struct-type? inner)
         inner
-        (type.addr))))
+        (type.addr)))))
 
-(define-pass (core-type-lowerer |types.slice| ty)
+(define-pass* 'core-type-lowerer '|types.slice| (lambda (ty)
   (let* ((kind (middle.kind ty)))
-    (type.unsupported kind)))
+    (type.unsupported kind))))
 
-(define-pass (core-type-lowerer |types.array| ty)
+(define-pass* 'core-type-lowerer '|types.array| (lambda (ty)
   (let* ((payload (middle.payload ty))
          (element (core.lower-type
                     (optional.value (record.get payload '|element|))))
          (len (optional.value (record.get payload '|len|))))
-    (type.array element len)))
+    (type.array element len))))
 
 ;; ── borrow 表达式降级 ──
 
-(define-pass (core-expr-lowerer |memory.borrow| block expr expected-ty locals)
-  (core.unsupported-expr '|borrow-expression|))
+(define-pass* 'core-expr-lowerer '|memory.borrow| (lambda (block expr expected-ty locals)
+  (core.unsupported-expr '|borrow-expression|)))

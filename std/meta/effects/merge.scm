@@ -28,63 +28,61 @@
 ;; This returns FIELD TYPES (not byte offsets) — caller uses
 ;; type.product to build the actual product type.
 
+(define (effect.merge-layout-args offsets flag-idx layout-arg-idxs ftypes arg-idxs)
+  (let ((inner #f)
+        (num-fields (length offsets)))
+    (set! inner
+      (lambda (i fts ais)
+        (if (>= i num-fields)
+            (list fts ais)
+            (if (or (= i flag-idx)
+                    (not (effect.index-in-list? i layout-arg-idxs)))
+                (inner (+ i 1) fts ais)
+                (let* ((field-type (cdr (list-ref offsets i)))
+                       (global-idx (length fts)))
+                  (inner (+ i 1)
+                         (cons field-type fts)
+                         (cons global-idx ais)))))))
+    (inner 0 ftypes arg-idxs)))
+
 (define (effect.merged-info effect-names raw-ret)
   (if (or (null? effect-names) (null? (cdr effect-names)))
-      #f  ;; single effect or none — no merge needed
+      #f
       (let* ((cached (effect.assoc effect-names *merged-info*)))
         (if cached
             (cdr cached)
-            (let* ((field-types (list (core.make-bits 8)    ;; flag
-                                      (core.make-bits 8)    ;; discriminator
-                                      raw-ret))           ;; shared value
-                   (base-count 3)  ;; flag + disc + value = 3 prefix fields
-                   ;; Process effects
-                   (result
-                     (let loop ((names effect-names)
-                                (ftypes field-types)
-                                (arg-idxs '())
-                                (discs '())
-                                (disc 0))
-                       (if (null? names)
-                           (list (reverse ftypes)
-                                 (reverse arg-idxs)
-                                 (reverse discs))
-                           (let* ((eff-name (car names))
-                                  (layout (effect.lookup-layout eff-name #f)))
-                             (if (not layout)
-                                 (loop (cdr names) ftypes arg-idxs
-                                       (cons (cons eff-name disc) discs)
-                                       (+ disc 1))
-                                 (let* ((offsets (cadr layout))
-                                        (flag-idx (caddr layout))
-                                        (layout-arg-idxs (cadddr layout))
-                                        (num-fields (length offsets))
-                                        ;; Collect arg types from this effect
-                                        (result2
-                                          (let inner ((i 0)
-                                                      (fts ftypes)
-                                                      (ais arg-idxs))
-                                            (if (>= i num-fields)
-                                                (list fts ais)
-                                                (if (or (= i flag-idx)
-                                                        (not (effect.index-in-list?
-                                                               i layout-arg-idxs)))
-                                                    (inner (+ i 1) fts ais)
-                                                    (let* ((field-type
-                                                             (cdr (list-ref offsets i)))
-                                                           (global-idx (length fts)))
-                                                      (inner (+ i 1)
-                                                             (cons field-type fts)
-                                                             (cons global-idx ais))))))))
-                                   (loop (cdr names)
-                                         (car result2)   ;; updated ftypes
-                                         (cadr result2)  ;; updated arg-idxs
-                                         (cons (cons eff-name disc) discs)
-                                         (+ disc 1)))))))))
-              ;; Cache and return
-              (set! *merged-info*
-                    (cons (cons effect-names result) *merged-info*))
-              result)))))
+            (let ((field-types (list (core.make-bits 8)
+                                     (core.make-bits 8)
+                                     raw-ret))
+                  (loop #f))
+              (set! loop
+                (lambda (names ftypes arg-idxs discs disc)
+                  (if (null? names)
+                      (list (reverse ftypes)
+                            (reverse arg-idxs)
+                            (reverse discs))
+                      (let* ((eff-name (car names))
+                             (layout (effect.lookup-layout eff-name #f)))
+                        (if (not layout)
+                            (loop (cdr names) ftypes arg-idxs
+                                  (cons (cons eff-name disc) discs)
+                                  (+ disc 1))
+                            (let* ((offsets (cadr layout))
+                                   (flag-idx (caddr layout))
+                                   (layout-arg-idxs (cadddr layout))
+                                   (merged-args
+                                    (effect.merge-layout-args
+                                     offsets flag-idx layout-arg-idxs
+                                     ftypes arg-idxs)))
+                              (loop (cdr names)
+                                    (car merged-args)
+                                    (cadr merged-args)
+                                    (cons (cons eff-name disc) discs)
+                                    (+ disc 1))))))))
+              (let ((result (loop effect-names field-types '() '() 0)))
+                (set! *merged-info*
+                      (cons (cons effect-names result) *merged-info*))
+                result))))))
 
 ;; ── effect.merged-discriminator ──
 ;; Get discriminator value for an effect in merged info

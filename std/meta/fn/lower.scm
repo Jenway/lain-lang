@@ -11,7 +11,8 @@
   (if (list.empty? args) fallback
       (let* ((arg (list.first args)) (kind (raw.kind arg)) (payload (raw.payload arg)))
         (if (symbol=? kind '|attr.arg.named|)
-            (let* ((arg-name-path (optional.value (record.get payload '|name|))) (arg-name (list.first arg-name-path)))
+            (let* ((arg-name-raw (optional.value (record.get payload '|name|)))
+                   (arg-name (if (pair? arg-name-raw) (list.first arg-name-raw) arg-name-raw)))
               (if (symbol=? arg-name name)
                   (let* ((value (optional.value (record.get payload '|value|))))
                     (if (symbol=? (raw.kind value) '|attr.arg.string|)
@@ -108,22 +109,26 @@
                (num-fields  (length offsets))
                ;; Compute value indices: all non-flag, non-arg
                (value-indices
-                 (let loop ((i 0) (acc '()))
+                 (let ((loop #f))
+  (set! loop (lambda (i acc)
                    (if (>= i num-fields)
                        (reverse acc)
                        (if (or (= i flag-index)
                                (effect.index-in-list? i arg-indices))
                            (loop (+ i 1) acc)
                            (loop (+ i 1) (cons i acc))))))
+  (loop 0 '())))
                ;; Build field types, substituting the value fields with raw-ret
                (field-types
-                 (let loop ((i 0) (acc '()))
+                 (let ((loop #f))
+  (set! loop (lambda (i acc)
                    (if (>= i num-fields)
                        (reverse acc)
                        (let* ((original-ty (cdr (list-ref offsets i))))
                          (if (effect.index-in-list? i value-indices)
                              (loop (+ i 1) (cons raw-ret acc))
-                             (loop (+ i 1) (cons original-ty acc))))))))
+                             (loop (+ i 1) (cons original-ty acc)))))))
+  (loop 0 '()))))
           ;; Build product from substituted field types
           (type.product field-types)))))
 
@@ -132,7 +137,7 @@
 ;; pass: core-declarer |middle.fn|
 ;; writes: compiler-state.comptime-fns (if comptime flag set)
 ;; calls: validate-effects!, core.lower-type
-(define-pass (core-declarer |middle.fn| item)
+(define-pass* 'core-declarer '|middle.fn| (lambda (item)
   (let* ((payload (middle.payload item)) (body (optional.value (record.get (middle.payload item) '|body|))))
     (if (optional.none? body) unit
         (let* ((name (optional.value (record.get payload '|name|)))
@@ -179,17 +184,17 @@
                 (core.set-function-link-name! name
                   (string-append (core.module-prefix) "_"
                                  (symbol->string name)))
-                unit))))))
+                unit)))))))
 
-(define-pass (core-declarer |middle.foreign-fn| item)
+(define-pass* 'core-declarer '|middle.foreign-fn| (lambda (item)
   (let* ((payload (middle.payload item)) (name (optional.value (record.get payload '|name|)))
          (attrs (optional.value (record.get payload '|attrs|)))
          (params (optional.value (record.get payload '|params|)))
          (ret (core.lower-type (optional.value (record.get payload '|return|))))
          (param-types (core.lower-param-types params (list))) (link-name (fn.foreign-link-name attrs name)))
-    (if (fn.cfg-enabled? attrs) (host.new-extern name link-name param-types ret) unit)))
+    (if (fn.cfg-enabled? attrs) (host.new-extern name link-name param-types ret) unit))))
 
-(define-pass (core-lowerer |middle.fn| item)
+(define-pass* 'core-lowerer '|middle.fn| (lambda (item)
   (let* ((payload (middle.payload item)) (name (optional.value (record.get payload '|name|)))
          (params (optional.value (record.get payload '|params|)))
          (raw-ret-ty (core.lower-type (optional.value (record.get payload '|return|))))
@@ -221,9 +226,9 @@
                  ;; Register this fn's effects in the global table for callers
                  (_ (propagate.register-fn-effects! name declared-names)))
             ;; Validate that all collected effects are declared
-            (propagate.validate-collected! collected declared-names name))))))
+            (propagate.validate-collected! collected declared-names name)))))))
 
-(define-pass (core-type-lowerer |types.fn| ty) (type.unsupported (middle.kind ty)))
+(define-pass* 'core-type-lowerer '|types.fn| (lambda (ty) (type.unsupported (middle.kind ty))))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; Compile-time constant table is in compiler-state.scm.
@@ -234,12 +239,12 @@
 ;; This replaces the old const.eval-expr hand-written pattern matcher.
 ;; ═══════════════════════════════════════════════════════════════════════════
 
-(define-pass (core-declarer |middle.let-binding| item)
+(define-pass* 'core-declarer '|middle.let-binding| (lambda (item)
   ;; pass: core-declarer |middle.let-binding|
   ;; reads: none (no-op — value computed during lowering)
   ;; Register the name as a known binding but don't create IR sub.
   ;; The actual value is computed during lowering.
-  unit)
+  unit))
 
 ;; pass: core-lowerer |middle.let-binding|
 ;; reads: compiler-state.const-table (via register)
@@ -247,7 +252,7 @@
 ;;        core.lower-expr (pipeline/lower.scm), core.eval-value! (builder_ffi.c)
 ;; Lower the expression to L1 IR, then eval it at compile time.
 ;; Uses the same lowering path as function bodies — no separate evaluator.
-(define-pass (core-lowerer |middle.let-binding| item)
+(define-pass* 'core-lowerer '|middle.let-binding| (lambda (item)
   (let* ((payload (middle.payload item))
          (name (optional.value (record.get payload '|name|)))
          (value-expr (optional.value (record.get payload '|value|))))
@@ -267,4 +272,4 @@
             ;; NOTE: unsupported expressions reach here.
             ;; Will be replaced by full L1 interpreter eval when needed.
             (error (string-append "unsupported let binding expression for: "
-                                   (symbol->string name))))))))
+                                   (symbol->string name)))))))))

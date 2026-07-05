@@ -1,8 +1,147 @@
 #include "native_runtime.h"
+#include "lainast/lain_ast.h"
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <alloca.h>
+
+static void ast_indent(FILE *out, int n) {
+    for (int i = 0; i < n; i++) fputc(' ', out);
+}
+
+static const char *ast_node_text(const AstArena *arena, AstNodeId id) {
+    const AstNode *node = ast_get(arena, id);
+    return node && node->text ? node->text : "";
+}
+
+static const char *ast_group_name(const AstArena *arena, const AstNode *node) {
+    const char *op = ast_node_text(arena, node->op);
+    if (strcmp(op, "(") == 0) return "paren";
+    if (strcmp(op, "{") == 0) return "brace";
+    if (strcmp(op, "[") == 0) return "bracket";
+    return "root";
+}
+
+static void ast_print_escaped(FILE *out, const char *text) {
+    fputc('"', out);
+    for (const char *p = text; p && *p; p++) {
+        if (*p == '"' || *p == '\\') {
+            fputc('\\', out);
+            fputc(*p, out);
+        } else if (*p == '\n') {
+            fputs("\\n", out);
+        } else if (*p == '\r') {
+            fputs("\\r", out);
+        } else if (*p == '\t') {
+            fputs("\\t", out);
+        } else {
+            fputc(*p, out);
+        }
+    }
+    fputc('"', out);
+}
+
+static void ast_dump_node(FILE *out, const AstArena *arena, AstNodeId id, int depth);
+
+static void ast_dump_children(FILE *out, const AstArena *arena, AstNodeId first, int depth) {
+    AstNodeId curr = first;
+    while (curr != AST_NULL) {
+        const AstNode *node = ast_get(arena, curr);
+        ast_dump_node(out, arena, curr, depth);
+        curr = node ? node->next : AST_NULL;
+    }
+}
+
+static void ast_dump_node(FILE *out, const AstArena *arena, AstNodeId id, int depth) {
+    const AstNode *node = ast_get(arena, id);
+    if (!node) return;
+
+    switch (node->kind) {
+    case AST_ATOM:
+        ast_indent(out, depth);
+        fputs("(atom ", out);
+        ast_print_escaped(out, node->text ? node->text : "");
+        fputs(")\n", out);
+        break;
+    case AST_GROUP:
+        ast_indent(out, depth);
+        fprintf(out, "(group %s\n", ast_group_name(arena, node));
+        ast_dump_children(out, arena, node->left, depth + 2);
+        ast_indent(out, depth);
+        fputs(")\n", out);
+        break;
+    case AST_PREFIX:
+        ast_indent(out, depth);
+        fputs("(prefix ", out);
+        ast_print_escaped(out, ast_node_text(arena, node->op));
+        fputc('\n', out);
+        ast_dump_node(out, arena, node->left, depth + 2);
+        ast_indent(out, depth);
+        fputs(")\n", out);
+        break;
+    case AST_POSTFIX:
+        ast_indent(out, depth);
+        fputs("(postfix ", out);
+        ast_print_escaped(out, ast_node_text(arena, node->op));
+        fputc('\n', out);
+        ast_dump_node(out, arena, node->left, depth + 2);
+        if (node->right != AST_NULL) ast_dump_node(out, arena, node->right, depth + 2);
+        ast_indent(out, depth);
+        fputs(")\n", out);
+        break;
+    case AST_INFIX: {
+        const char *op = ast_node_text(arena, node->op);
+        ast_indent(out, depth);
+        if (strcmp(op, " ") == 0) {
+            fputs("(juxt\n", out);
+        } else {
+            fputs("(infix ", out);
+            ast_print_escaped(out, op);
+            fputc('\n', out);
+        }
+        ast_dump_node(out, arena, node->left, depth + 2);
+        ast_dump_node(out, arena, node->right, depth + 2);
+        ast_indent(out, depth);
+        fputs(")\n", out);
+        break;
+    }
+    }
+}
+
+static char *read_source_file(const char *path, uint32_t *len_out) {
+    FILE *file = fopen(path, "rb");
+    char *buffer;
+    long len;
+
+    if (!file) return NULL;
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    len = ftell(file);
+    if (len < 0) {
+        fclose(file);
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    buffer = (char *)malloc((size_t)len + 1);
+    if (!buffer) {
+        fclose(file);
+        return NULL;
+    }
+    if (fread(buffer, 1, (size_t)len, file) != (size_t)len) {
+        free(buffer);
+        fclose(file);
+        return NULL;
+    }
+    fclose(file);
+    buffer[len] = '\0';
+    *len_out = (uint32_t)len;
+    return buffer;
+}
 
 static int32_t run_pipeline_for(const void* input_path) {
     native_set_source_path(input_path);
@@ -35,20 +174,46 @@ uint32_t compile_interface(const void* arg0, const void* arg1) {
     return 0;
 }
 
-uint32_t main(uint32_t argc, char **argv) {
+uint32_t compile_ast(const void* arg0, const void* arg1) {
+    const char *input_path = (const char *)arg0;
+    const char *output_path = (const char *)arg1;
+    uint32_t len = 0;
+    char *source = read_source_file(input_path, &len);
+    FILE *out;
+    AstArena arena;
+    AstNodeId root;
+
+    if (!source) {
+        fprintf(stderr, "failed to read %s\n", input_path);
+        return 1;
+    }
+
+    out = fopen(output_path, "wb");
+    if (!out) {
+        fprintf(stderr, "failed to open %s\n", output_path);
+        free(source);
+        return 1;
+    }
+
+    ast_arena_init(&arena);
+    root = ast_parse(&arena, source, len);
+    ast_dump_node(out, &arena, root, 0);
+    ast_arena_destroy(&arena);
+    fclose(out);
+    free(source);
+    return 0;
+}
+
+int main(int argc, char **argv) {
     native_set_args(argc, argv);
     
     int emit_l1 = 0;
     int emit_interface = 0;
-    int build_mode = 0;
+    int emit_ast = 0;
     const char *input_path = NULL;
     const char *output_path = NULL;
     
-    if (argc >= 4 && strcmp(argv[1], "--build") == 0) {
-        build_mode = 1;
-        input_path = argv[2];
-        output_path = argv[3];
-    } else if (argc >= 4 && strcmp(argv[1], "--emit-l1") == 0) {
+    if (argc >= 4 && strcmp(argv[1], "--emit-l1") == 0) {
         emit_l1 = 1;
         input_path = argv[2];
         output_path = argv[3];
@@ -56,15 +221,19 @@ uint32_t main(uint32_t argc, char **argv) {
         emit_interface = 1;
         input_path = argv[2];
         output_path = argv[3];
+    } else if (argc >= 4 && strcmp(argv[1], "--emit-ast") == 0) {
+        emit_ast = 1;
+        input_path = argv[2];
+        output_path = argv[3];
     } else if (argc >= 3) {
         input_path = argv[1];
         output_path = argv[2];
     } else {
-        printf("Usage: %s [--emit-l1|--emit-interface] <input.lain> <output>\n", argv[0]);
+        printf("Usage: %s [--emit-ast|--emit-l1|--emit-interface] <input.lain> <output>\n", argv[0]);
         return 1;
     }
     
-    if (build_mode) return native_build_with_funcs(input_path, output_path, compile, compile_interface);
+    if (emit_ast) return compile_ast(input_path, output_path);
     if (emit_l1) return compile_l1(input_path, output_path);
     if (emit_interface) return compile_interface(input_path, output_path);
     return compile(input_path, output_path);

@@ -7,7 +7,8 @@
 (define *all-declarations* '())
 
 (define (decl.lookup name kind)
-  (let loop ((decls *all-declarations*))
+  (let ((loop #f))
+  (set! loop (lambda (decls)
     (if (null? decls)
         #f
         (let* ((decl (car decls))
@@ -16,6 +17,7 @@
           (if (and (equal? d-name name) (equal? d-kind kind))
               decl
               (loop (cdr decls)))))))
+  (loop *all-declarations*)))
 
 (define (decl.define-dup-checked! kind name node)
   (let ((existing (decl.lookup name kind)))
@@ -40,29 +42,45 @@
 
 ;; Simple list membership test (not in bootstrap stdlib)
 (define (list.member? lst item)
-  (let loop ((remaining lst))
+  (let ((loop #f))
+  (set! loop (lambda (remaining)
     (if (null? remaining)
         #f
         (if (eq? (car remaining) item)
             #t
             (loop (cdr remaining))))))
+  (loop lst)))
 
 (define (register-type-ctor! name arity)
   (set! *known-type-ctors*
         (cons (cons name arity) *known-type-ctors*)))
 
 (define (type-ctor-lookup name)
-  (let loop ((ctors *known-type-ctors*))
+  (let ((loop #f))
+  (set! loop (lambda (ctors)
     (if (null? ctors)
         #f
         (let ((entry (car ctors)))
           (if (eq? (car entry) name)
               entry
               (loop (cdr ctors)))))))
+  (loop *known-type-ctors*)))
 
-;; Returns #t if the name is a known type (builtin, struct, or enum)
+(define (declared-aggregate-type? name)
+  (let ((decl (decl.lookup name '|let|)))
+    (if decl
+        (let* ((node (decl.payload decl))
+               (payload (raw.payload node))
+               (kind (record.get payload '|type-kind|)))
+          (and (optional.some? kind)
+               (or (symbol=? (optional.value kind) '|struct|)
+                   (symbol=? (optional.value kind) '|enum|))))
+        #f)))
+
+;; Returns #t if the name is a known type (builtin, declared aggregate, or registered struct)
 (define (type-known? name)
   (or (type-ctor-lookup name)
+      (declared-aggregate-type? name)
       (struct-registered? name)))
 
 ;; ── Effect constructors: ((name . arity) ...)
@@ -73,13 +91,15 @@
         (cons (cons name arity) *known-effect-ctors*)))
 
 (define (effect-ctor-lookup name)
-  (let loop ((ctors *known-effect-ctors*))
+  (let ((loop #f))
+  (set! loop (lambda (ctors)
     (if (null? ctors)
         #f
         (let ((entry (car ctors)))
           (if (eq? (car entry) name)
               entry
               (loop (cdr ctors)))))))
+  (loop *known-effect-ctors*)))
 
 ;; Validate that a type path refers to a known type
 ;; Called during type lowering.  'name' is a symbol.
@@ -93,7 +113,8 @@
 (define (validate-effects! effects)
   (if (optional.none? effects)
       #t
-      (let loop ((remaining (optional.value effects)))
+      (let ((loop #f))
+  (set! loop (lambda (remaining)
         (if (null? remaining)
             #t
             (let* ((eff (car remaining))
@@ -113,4 +134,5 @@
                                               (number->string expected-arity)
                                               " type argument(s), got "
                                               (number->string actual-arity)))
-                        (loop (cdr remaining))))))))))
+                        (loop (cdr remaining)))))))))
+  (loop (optional.value effects)))))
