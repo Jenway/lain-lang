@@ -4,16 +4,16 @@
 ;; 效应系统 — 表达式规范化 (perform / resume / handle)
 ;; ═══════════════════════════════════════════════════════════
 
-(define-pass (middle-normalizer |expr.perform| raw-expr)
+(define-pass* 'middle-normalizer '|expr.perform| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|effects.perform|
       (record '|effects.perform|
         (record.field '|call|
           (middle.normalize-expr
             (optional.value
-              (record.get payload '|call|))))))))
+              (record.get payload '|call|)))))))))
 
-(define-pass (middle-normalizer |expr.resume| raw-expr)
+(define-pass* 'middle-normalizer '|expr.resume| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|effects.resume|
       (record '|effects.resume|
@@ -24,9 +24,9 @@
                 (optional.none)
                 (optional.some
                   (middle.normalize-expr
-                    (optional.value value))))))))))
+                    (optional.value value)))))))))))
 
-(define-pass (middle-normalizer |expr.handle| raw-expr)
+(define-pass* 'middle-normalizer '|expr.handle| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|effects.handle|
       (record '|effects.handle|
@@ -44,4 +44,4 @@
         (record.field '|body|
           (middle.normalize-block
             (optional.value
-              (record.get payload '|body|))))))))
+              (record.get payload '|body|)))))))))

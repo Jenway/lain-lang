@@ -14,21 +14,18 @@
 
 (define (define-pass* stage kind body)
   ;; 检测重复注册 — 同 (stage, kind) 被多次 define-pass 一定是 bug
-  (let loop ((passes __lain-passes))
+  (let ((loop #f))
+  (set! loop (lambda (passes)
     (if (not (null? passes))
         (let* ((entry (car passes))
                (e-stage (car entry))
                (e-kind (car (cdr entry))))
           (if (and (equal? e-stage stage) (equal? e-kind kind))
               (error "DUPLICATE PASS REGISTRATION" stage kind))
-          (loop (cdr passes)))))
+          (loop (cdr passes))))))
+  (loop __lain-passes))
   (set! __lain-passes
     (cons (cons stage (cons kind (cons body '()))) __lain-passes)))
-
-(define-syntax define-pass
-  (syntax-rules ()
-    ((_ (stage kind arg ...) body ...)
-     (define-pass* 'stage 'kind (lambda (arg ...) body ...)))))
 
 ;; ═══ 3. optional.* polyfills ═══
 (define (optional.none) #f)
@@ -51,12 +48,14 @@
 (define (record kind . fields) (cons kind fields))
 (define (record.field k v) (cons k v))
 (define (record.get payload name)
-  (let loop ((fields (cdr payload)))
+  (let ((loop #f))
+  (set! loop (lambda (fields)
     (if (null? fields) #f
         (let ((field (car fields)))
           (if (equal? (car field) name)
               (cdr field)
               (loop (cdr fields)))))))
+  (loop (cdr payload))))
 
 ;; ═══ 7. Pre-declare temp counters ═══
 (define *syntax-temp-counter* 0)

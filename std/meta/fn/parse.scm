@@ -22,7 +22,8 @@
 
 (define (tree-extract-fn-parts tree)
   (let* ((flat (tree.flatten-juxt tree)))
-    (let skip-kw ((parts flat))
+    (let ((skip-kw #f))
+  (set! skip-kw (lambda (parts)
       (if (null? parts)
           (values '_noname (list) (list) (lain-quote '(type-unit))
                   (optional.none) (optional.none) (list))
@@ -30,7 +31,8 @@
             (if (and (tree.ident? first)
                      (memv (tree.ident-sym first) '(|fn| |pub| |comptime|)))
                 (skip-kw rest)
-                (tree-extract-fn-parts-inner parts)))))))
+                (tree-extract-fn-parts-inner parts))))))
+  (skip-kw flat))))
 
 (define (tree-extract-fn-parts-inner parts)
   (let ((node (car parts)) (rest (cdr parts)))
@@ -74,13 +76,15 @@
 (define (tree-extract-ret-and-body right-of-arrow rest)
   (cond
    ((tree.juxt? right-of-arrow)
-    (let loop ((parts (tree.flatten-juxt right-of-arrow)) (type-parts '()))
+    (let ((loop #f))
+  (set! loop (lambda (parts type-parts)
       (if (null? parts)
           (values (tree-parts-to-type (reverse type-parts)) #f rest)
           (if (tree.brace? (car parts))
               (values (tree-parts-to-type (reverse type-parts)) (car parts)
                       (append (cdr parts) rest))
               (loop (cdr parts) (cons (car parts) type-parts))))))
+  (loop (tree.flatten-juxt right-of-arrow) '())))
    ((tree.brace? right-of-arrow)
     (values (lain-quote '(type-unit)) right-of-arrow rest))
    (else
@@ -101,7 +105,8 @@
          (else (tree-extract-ret-from-parts rest))))))
 
 (define (tree-find-body remaining)
-  (let loop ((ps remaining))
+  (let ((loop #f))
+  (set! loop (lambda (ps)
     (if (null? ps) (optional.none)
         (cond
          ((tree.brace? (car ps))
@@ -109,6 +114,7 @@
          ((and (tree.sep? (car ps)) (eq? (tree.sep-sym (car ps)) '|;|))
           (optional.none))
          (else (loop (cdr ps)))))))
+  (loop remaining)))
 
 (define (tree-resolve-body body-node remaining)
   (if body-node
@@ -119,7 +125,7 @@
 ;; Form Parsers
 ;; ═══════════════════════════════════════════════════
 
-(define-pass (form-parser |fn| form)
+(define-pass* 'form-parser '|fn| (lambda (form)
   (let* ((attrs (tree-parse-attrs form))
          (tree (form.tree form)))
     (let-values (((name generics params ret body effects where)
@@ -137,13 +143,14 @@
                           (record.field '|name| name)
                           (record.field '|type-kind| '|fn|)
                           (record.field '|payload| sig-payload)))))
-        (if (fn.cfg-enabled? attrs) (decl.define-dup-checked! '|let| name unified) unit)))))
+        (if (fn.cfg-enabled? attrs) (decl.define-dup-checked! '|let| name unified) unit))))))
 
-(define-pass (form-parser |pub| form)
+(define-pass* 'form-parser '|pub| (lambda (form)
   (let* ((attrs (tree-parse-attrs form))
          (tree (form.tree form))
          (flat (tree.flatten-juxt tree)))
-    (let skip-pub ((parts flat))
+    (let ((skip-pub #f))
+  (set! skip-pub (lambda (parts)
       (if (null? parts) unit
           (let ((first (car parts)))
             (if (and (tree.ident? first) (eq? (tree.ident-sym first) '|pub|))
@@ -191,9 +198,10 @@
                                                         (record.field '|payload| payload)))))
                                       (if (fn.cfg-enabled? attrs) (decl.define-dup-checked! '|let| name unified) unit)))))))
                          (else unit)))))
-                (skip-pub (cdr parts))))))))
+                (skip-pub (cdr parts)))))))
+  (skip-pub flat)))))
 
-(define-pass (form-parser |comptime| form)
+(define-pass* 'form-parser '|comptime| (lambda (form)
   (let* ((attrs (tree-parse-attrs form))
          (tree (form.tree form)))
     (let-values (((name generics params ret body effects where)
@@ -209,4 +217,4 @@
                           (record.field '|name| name)
                           (record.field '|type-kind| '|fn|)
                           (record.field '|payload| sig)))))
-        (if (fn.cfg-enabled? attrs) (decl.define-dup-checked! '|let| name unified) unit)))))
+        (if (fn.cfg-enabled? attrs) (decl.define-dup-checked! '|let| name unified) unit))))))

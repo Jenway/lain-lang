@@ -13,7 +13,8 @@
 
 ;; Convert module path (compiler lexer) → "compiler/lexer.lain"
 (define (import.resolve-path path)
-  (let loop ((segments path) (acc ""))
+  (let ((loop #f))
+  (set! loop (lambda (segments acc)
     (if (null? segments)
         (string-append acc ".lain")
         (let* ((seg (symbol->string (car segments)))
@@ -21,6 +22,7 @@
                             seg
                             (string-append acc "/" seg))))
           (loop (cdr segments) new-acc)))))
+  (loop path "")))
 
 ;; ── Type name → lowered type cpointer ──
 
@@ -149,7 +151,8 @@
 (define *import-binding-registry* (list))
 
 (define (import.path-tail-symbol path)
-  (let loop ((segments path) (acc ""))
+  (let ((loop #f))
+  (set! loop (lambda (segments acc)
     (if (null? segments)
         (string->symbol acc)
         (let* ((seg (symbol->string (car segments)))
@@ -157,6 +160,7 @@
                             seg
                             (string-append acc "_" seg))))
           (loop (cdr segments) new-acc)))))
+  (loop path "")))
 
 (define (import.export-leaf-name mangled-name)
   ;; Returns the name as-is. The caller-side leaf lookup uses
@@ -199,7 +203,8 @@
   (car (cddddr binding)))
 
 (define (import.lookup-binding alias)
-  (let loop ((entries *import-binding-registry*))
+  (let ((loop #f))
+  (set! loop (lambda (entries)
     (if (null? entries)
         #f
         (let* ((entry (car entries))
@@ -207,6 +212,7 @@
           (if (symbol=? entry-alias alias)
               entry
               (loop (cdr entries)))))))
+  (loop *import-binding-registry*)))
 
 (define (import.lookup-export exports leaf-name)
   (if (null? exports)
@@ -257,7 +263,7 @@
 
 ;; ── core-declarer: read interface, declare extern functions directly ──
 
-(define-pass (core-declarer |middle.import| item)
+(define-pass* 'core-declarer '|middle.import| (lambda (item)
   (meta.ensure-static-position! '|middle.import|)
   (let* ((payload (middle.payload item))
          (name (optional.value (record.get payload '|name|)))
@@ -281,7 +287,7 @@
             ;; source-level calls like simple_math_add() resolve correctly.
             (import.register-binding-metadata!
               name path fn-exports module-exports signature-exports)
-            (interface.declare-exports! exports path))))))
+            (interface.declare-exports! exports path)))))))
 
 ;; Derive the caller-side function name from import path + mangled name.
 ;; The interface exports mangled names like "fs_read" (moduleprefix_functionname).
@@ -318,7 +324,8 @@
 
 (define (import.path-prefix-string path)
   ;; Convert import path (simple math) to "simple_math_"
-  (let loop ((segments path) (acc ""))
+  (let ((loop #f))
+  (set! loop (lambda (segments acc)
     (if (null? segments)
         (if (string=? acc "") acc (string-append acc "_"))
         (let* ((seg (symbol->string (car segments)))
@@ -326,22 +333,27 @@
                             seg
                             (string-append acc "_" seg))))
           (loop (cdr segments) new-acc)))))
+  (loop path "")))
 
 (define (import.string-last-index s ch)
-  (let loop ((i (- (string-length s) 1)))
+  (let ((loop #f))
+  (set! loop (lambda (i)
     (if (< i 0)
         #f
         (if (char=? (string-ref s i) ch)
             i
             (loop (- i 1))))))
+  (loop (- (string-length s) 1))))
 
 (define (import.string-first-index s ch)
-  (let loop ((i 0))
+  (let ((loop #f))
+  (set! loop (lambda (i)
     (if (>= i (string-length s))
         #f
         (if (char=? (string-ref s i) ch)
             i
             (loop (+ i 1))))))
+  (loop 0)))
 
 (define (interface.declare-exports! exports import-path)
   (if (null? exports)
@@ -378,5 +390,5 @@
 
 ;; ── core-lowerer: no-op (imports produce declarations, not L1 code) ──
 
-(define-pass (core-lowerer |middle.import| item)
-  unit)
+(define-pass* 'core-lowerer '|middle.import| (lambda (item)
+  unit))

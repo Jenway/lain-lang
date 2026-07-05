@@ -12,35 +12,35 @@
 
 ;; ── intrinsic 通道 ──
 
-(define-pass (intrinsic |load| block args expected-ty locals)
+(define-pass* 'intrinsic '|load| (lambda (block args expected-ty locals)
   (let* ((ptr-expr (list.first args))
          (ptr (core.lower-expr block ptr-expr expected-ty locals)))
-    (core.load! block ptr expected-ty)))
+    (core.load! block ptr expected-ty))))
 
-(define-pass (intrinsic |store| block args expected-ty locals)
+(define-pass* 'intrinsic '|store| (lambda (block args expected-ty locals)
   (let* ((ptr-expr (list.first args))
          (value-expr (list.first (list.rest args)))
          (ptr (core.lower-expr block ptr-expr expected-ty locals))
          (value (core.lower-expr block value-expr expected-ty locals)))
     (core.store! block ptr value)
-    unit))
+    unit)))
 
-(define-pass (intrinsic |raw-ptr-read| block args expected-ty locals)
+(define-pass* 'intrinsic '|raw-ptr-read| (lambda (block args expected-ty locals)
   (let* ((ptr-expr (list.first args))
          (ptr (core.lower-expr block ptr-expr expected-ty locals)))
-    (core.load! block ptr expected-ty)))
+    (core.load! block ptr expected-ty))))
 
-(define-pass (intrinsic |raw-ptr-write| block args expected-ty locals)
+(define-pass* 'intrinsic '|raw-ptr-write| (lambda (block args expected-ty locals)
   (let* ((ptr-expr (list.first args))
          (value-expr (list.first (list.rest args)))
          (ptr (core.lower-expr block ptr-expr expected-ty locals))
          (value (core.lower-expr block value-expr expected-ty locals)))
     (core.store! block ptr value)
-    unit))
+    unit)))
 
 ;; ── borrow 表达式规范化 ──
 
-(define-pass (middle-normalizer |expr.borrow| raw-expr)
+(define-pass* 'middle-normalizer '|expr.borrow| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|memory.borrow|
       (record '|memory.borrow|
@@ -50,4 +50,4 @@
         (record.field '|operand|
           (middle.normalize-expr
             (optional.value
-              (record.get payload '|operand|))))))))
+              (record.get payload '|operand|)))))))))

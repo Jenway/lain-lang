@@ -37,7 +37,7 @@
               (cdr children)
               (list.cons (enum.parse-variant-tree child) acc))))))
 
-(define-pass (form-parser |enum| form)
+(define-pass* 'form-parser '|enum| (lambda (form)
   (let* ((tree (form.tree form))
          (attrs (form.decorators form))
          (parts (tree.flatten-juxt tree))
@@ -64,7 +64,7 @@
                       (record.field '|name| name)
                       (record.field '|type-kind| '|enum|)
                       (record.field '|payload| inner-payload)))))
-    (decl.define-dup-checked! '|let| name unified)))
+    (decl.define-dup-checked! '|let| name unified))))
 
 ;; enum raw-normalizer 已迁至 let/normalize.scm 的统一分发器
 
@@ -170,7 +170,7 @@
           (list.rest variants)
           (u64.add1 index)))))
 
-(define-pass (core-declarer |middle.enum| item)
+(define-pass* 'core-declarer '|middle.enum| (lambda (item)
   (let* ((payload (middle.payload item))
          (enum-payload (optional.value (record.get payload '|payload|)))
          (name (optional.value (record.get payload '|name|)))
@@ -185,7 +185,7 @@
         (cons '|tag| (type.bits 8))
         (cons '|__data| (type.addr))))
     ;; 2. 为每个 variant 注册构造函数
-    (enum.declare-variant-ctors name variants 0)))
+    (enum.declare-variant-ctors name variants 0))))
 
 ;; Phase 2: core-lowerer — 使用 lain-quote + pipeline 生成构造函数体
 ;;   不再直接调用 core.const-bits!/core.param/core.aggregate!，
@@ -214,12 +214,12 @@
           (list.rest variants)
           (u64.add1 index)))))
 
-(define-pass (core-lowerer |middle.enum| item)
+(define-pass* 'core-lowerer '|middle.enum| (lambda (item)
   (let* ((payload (middle.payload item))
          (enum-payload (optional.value (record.get payload '|payload|)))
          (name (optional.value (record.get payload '|name|)))
          (variants (optional.value (record.get enum-payload '|variants|))))
-    (enum.lower-variant-ctors name variants 0)))
+    (enum.lower-variant-ctors name variants 0))))
 
 ;; ===========================================================================
 ;; 注册到调度总线: enum 类型/表达式的降级规则

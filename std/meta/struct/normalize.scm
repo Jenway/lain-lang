@@ -31,18 +31,18 @@
       (let* ((field (struct.normalize-literal-field (list.first fields))))
         (struct.normalize-literal-fields (list.rest fields) (list.cons field acc)))))
 
-(define-pass (middle-normalizer |expr.struct| raw-expr)
+(define-pass* 'middle-normalizer '|expr.struct| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|struct.literal|
       (record '|struct.literal|
         (record.field '|name| (optional.value (record.get payload '|name|)))
         (record.field '|fields|
           (struct.normalize-literal-fields
-            (optional.value (record.get payload '|fields|)) (list)))))))
+            (optional.value (record.get payload '|fields|)) (list))))))))
 
-(define-pass (middle-normalizer |expr.field| raw-expr)
+(define-pass* 'middle-normalizer '|expr.field| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|struct.field|
       (record '|struct.field|
         (record.field '|base| (middle.normalize-expr (optional.value (record.get payload '|base|))))
-        (record.field '|field| (optional.value (record.get payload '|field|)))))))
+        (record.field '|field| (optional.value (record.get payload '|field|))))))))

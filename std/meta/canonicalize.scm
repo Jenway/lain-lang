@@ -16,8 +16,7 @@
 ;;     (juxt l r)        — INFIX(" ")  并列
 ;;     (OP l r)          — INFIX(op)   显式中缀: -> :: . + - * / < > == != 等
 ;;     (prefix OP x)     — PREFIX      前缀一元运算
-;;     (postfix x OP)    — POSTFIX     后缀运算: ++ --
-;;     (call callee args)— POSTFIX "(" 函数调用，args 是 (paren ...) 节点
+;;     (postfix x OP)    — POSTFIX     后缀拓扑: ++ -- 或 (paren ...)
 ;;
 ;;   分组:
 ;;     (paren child...)  — ( ... )
@@ -41,13 +40,13 @@
 (define (atom->tree-node text)
   (cond
    ;; 分隔符（C parser 在 group 内作为兄弟 ATOM 添加）
-   ((string=? text ",") (list 'sep '|,|))
-   ((string=? text ";") (list 'sep '|;|))
-   ((string=? text "@") (list 'sep '|@|))
-   ((string=? text "#") (list 'sep '|#|))
-   ((string=? text "$") (list 'sep '|$|))
+   ((string=? text ",") (list 'sep (string->symbol ",")))
+   ((string=? text ";") (list 'sep (string->symbol ";")))
+   ((string=? text "@") (list 'sep (string->symbol "@")))
+   ((string=? text "#") (list 'sep (string->symbol "#")))
+   ((string=? text "$") (list 'sep (string->symbol "$")))
    ;; 字符串字面量：C parser 保留引号，如 "hello"
-   ((char=? (string-ref text 0) #\")
+   ((char=? (string-ref text 0) (integer->char 34))
     (list 'string (string->symbol (substring text 1 (- (string-length text) 1)))))
    ;; 数字
    ((char-numeric? (string-ref text 0))
@@ -65,14 +64,14 @@
              (right (ast.node-right id))
              (op    (ast.node-op id))
              (text  (ast.node-text id)))
-        (case kind
+        (cond
 
           ;; ATOM → 带标签的叶节点
-          ((0)
+          ((= kind ast.atom)
            (if text (atom->tree-node text) '()))
 
           ;; INFIX → (juxt l r) 或 (OP l r)
-          ((1)
+          ((= kind ast.infix)
            (let ((op-text (if (= op 0) " " (ast.node-text op))))
              (if (string=? op-text " ")
                  (list 'juxt
@@ -83,27 +82,26 @@
                        (ast->sexp-tree right)))))
 
           ;; PREFIX → (prefix OP operand)
-          ((2)
+          ((= kind ast.prefix)
            (let ((op-text (if (= op 0) "?" (ast.node-text op))))
              (list 'prefix
                    (string->symbol op-text)
                    (ast->sexp-tree left))))
 
-          ;; POSTFIX → (call callee args) 或 (postfix callee OP)
-          ((3)
+          ;; POSTFIX → (postfix operand op-or-group)
+          ((= kind ast.postfix)
            (let ((op-text (if (= op 0) "?" (ast.node-text op))))
              (if (string=? op-text "(")
-                 ;; 函数调用: args 是 right 字段中的 paren GROUP
-                 (list 'call
-                       (ast->sexp-tree left)
-                       (ast->sexp-tree right))
-                 ;; 普通后缀 (++, --)
+                 ;; 括号后缀仍然只是拓扑。是否是调用由 domain parser 判定。
                  (list 'postfix
                        (ast->sexp-tree left)
-                       (string->symbol op-text)))))
+                       (ast->sexp-tree right))
+                  (list 'postfix
+                        (ast->sexp-tree left)
+                        (string->symbol op-text)))))
 
           ;; GROUP → (paren|brace|bracket children...)
-          ((4)
+          ((= kind ast.group)
            (let* ((delim-tag (ast-node-delim id))
                   (children  (ast-group->list-tree left)))
              (cons (or delim-tag 'group) children)))
@@ -125,20 +123,22 @@
 
 ;; ── ast-group->list-tree: 沿 next 链收集兄弟，每个转为树节点 ──
 (define (ast-group->list-tree first-id)
-  (let loop ((id first-id) (acc '()))
+  (let ((loop #f))
+  (set! loop (lambda (id acc)
     (if (= id 0)
         (reverse acc)
         (loop (ast.node-next id)
               (cons (ast->sexp-tree id) acc)))))
+  (loop first-id '())))
 
 ;; ── tree-starts-with-at?: 检测装饰器 (@attr 或 @attr(...)) ──
 ;; 递归检查树节点最左叶是否为 (sep @)
 (define (tree-starts-with-at? node)
   (cond
    ((and (pair? node) (eq? (car node) 'sep)
-         (eq? (cadr node) '|@|)) #t)
+         (eq? (cadr node) (string->symbol "@"))) #t)
    ((and (pair? node) (or (eq? (car node) 'juxt)
-                           (eq? (car node) 'call)))
+                           (eq? (car node) 'postfix)))
     (tree-starts-with-at? (cadr node)))
    (else #f)))
 
@@ -159,7 +159,8 @@
 ;; ── ast-group->root-forms: 每个顶层子节点 → (root ...) ──
 ;; @decorator 与紧随的声明合并为一个 (root deco-node decl-node)
 (define (ast-group->root-forms first-id)
-  (let loop ((id first-id) (acc '()) (pending-decos '()))
+  (let ((loop #f))
+  (set! loop (lambda (id acc pending-decos)
     (if (= id 0)
         ;; 孤立 deco（通常不应出现）→ 也输出
         (reverse
@@ -175,6 +176,7 @@
               (loop next-id
                     (cons (cons 'root (append pending-decos (list node))) acc)
                     '()))))))
+  (loop first-id '() '())))
 
 ;; ── 接入管道 ──
 (define meta.lex-source! parse-and-canonicalize)

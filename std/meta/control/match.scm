@@ -80,14 +80,14 @@
                       (record.field '|body| body-mid))
                     acc)))))
 
-(define-pass (middle-normalizer |expr.match| raw-expr)
+(define-pass* 'middle-normalizer '|expr.match| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr))
          (scrutinee (middle.normalize-expr (optional.value (record.get payload '|scrutinee|))))
          (raw-arms (optional.value (record.get payload '|arms|))))
     (middle.node! '|control.match|
       (record '|control.match|
         (record.field '|scrutinee| scrutinee)
-        (record.field '|arms| (middle.normalize-match-arms-helper raw-arms (list)))))))
+        (record.field '|arms| (middle.normalize-match-arms-helper raw-arms (list))))))))
 
-(define-pass (core-expr-lowerer |control.match| block expr expected-ty locals)
-  (core.const-bits! block (core.make-bits 32) 0))
+(define-pass* 'core-expr-lowerer '|control.match| (lambda (block expr expected-ty locals)
+  (core.const-bits! block (core.make-bits 32) 0)))

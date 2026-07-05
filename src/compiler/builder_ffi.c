@@ -10,8 +10,20 @@
  */
 
 #include "lainir/lainir.h"
-#include <chibi/eval.h>
 #include "compiler/native_runtime.h"
+#include "compiler/vm_compat.h"
+#include <stdlib.h>
+#include <string.h>
+
+static char *lain_strdup(const char *s) {
+  size_t n = strlen(s);
+  char *out = (char *)malloc(n + 1);
+  if (!out) return NULL;
+  memcpy(out, s, n + 1);
+  return out;
+}
+
+#define strdup lain_strdup
 
 uint32_t get_list_length(sexp list) {
   uint32_t len = 0;
@@ -462,8 +474,7 @@ static sexp sexp_core_call(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,
     args[i] = (L1Expr *)sexp_cpointer_value(sexp_car(curr));
     curr = sexp_cdr(curr);
   }
-  L1Expr *expr = malloc(sizeof(L1Expr));
-  expr->kind = EXPR_CALL;
+  L1Expr *expr = lainir_new_expr(EXPR_CALL);
   expr->data.call.fn_name = strdup(sub->link_name ? sub->link_name : sub->name);
   expr->data.call.args = args;
   expr->data.call.arg_count = arg_count;
@@ -496,8 +507,7 @@ static sexp sexp_core_eval(sexp ctx, sexp self, sexp_sint_t n, sexp arg_block,
     args[i] = (L1Expr *)sexp_cpointer_value(sexp_car(curr));
     curr = sexp_cdr(curr);
   }
-  L1Expr *expr = malloc(sizeof(L1Expr));
-  expr->kind = EXPR_EVAL;
+  L1Expr *expr = lainir_new_expr(EXPR_EVAL);
   expr->data.eval.fn_name = strdup(sub->link_name ? sub->link_name : sub->name);
   expr->data.eval.args = args;
   expr->data.eval.arg_count = arg_count;
@@ -542,14 +552,12 @@ static sexp sexp_core_call_expr(sexp ctx, sexp self, sexp_sint_t n,
     curr = sexp_cdr(curr);
   }
 
-  L1Expr *expr = malloc(sizeof(L1Expr));
-  expr->kind = EXPR_CALL;
+  L1Expr *expr = lainir_new_expr(EXPR_CALL);
   expr->data.call.fn_name = strdup(sub->link_name ? sub->link_name : sub->name);
   expr->data.call.args = args;
   expr->data.call.arg_count = arg_count;
   expr->data.call.ret_ty = sub->ret_ty;
   // Does NOT append instruction — caller decides how to emit
-
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
 }
 
@@ -568,9 +576,9 @@ static sexp sexp_core_assign_temp(sexp ctx, sexp self, sexp_sint_t n,
   append_instruction(g_current_sub, inst);
 
   // Return EXPR_VAR referencing the temp variable
-  L1Expr *var = malloc(sizeof(L1Expr));
-  var->kind = EXPR_VAR;
+  L1Expr *var = lainir_new_expr(EXPR_VAR);
   var->data.var.name = strdup(name);
+  var->data.var.ty = infer_expr_type(expr);
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, var, SEXP_FALSE, 0);
 }
 
@@ -804,8 +812,6 @@ sexp sexp_core_begin_if(sexp ctx, sexp self, sexp_sint_t n, sexp bv, sexp cv) {
   L1Block *eb = lainir_new_block();
   tb->parent = NULL;
   eb->parent = NULL;
-  g_scratch_blocks[g_scratch_count++] = tb;
-  g_scratch_blocks[g_scratch_count++] = eb;
   sexp ts = sexp_make_cpointer(ctx, SEXP_CPOINTER, tb, SEXP_FALSE, 0);
   sexp es = sexp_make_cpointer(ctx, SEXP_CPOINTER, eb, SEXP_FALSE, 0);
   return sexp_cons(ctx, ts, sexp_cons(ctx, es, SEXP_NULL));
@@ -824,9 +830,6 @@ static sexp sexp_core_end_if(sexp ctx, sexp self, sexp_sint_t n, sexp bv, sexp c
   g_current_block = parent;
   append_instruction(NULL, inst);
   g_current_block = saved;
-  for (int j = 0; j < g_scratch_count; j++)
-    if (g_scratch_blocks[j] == tb || g_scratch_blocks[j] == eb)
-      g_scratch_blocks[j] = NULL;
   return SEXP_VOID;
 }
 
@@ -908,6 +911,7 @@ static sexp sexp_core_aggregate_layout(sexp ctx, sexp self, sexp_sint_t n,
     dest_expr->data.lea.base = agg_var;
     dest_expr->data.lea.idx = offset_expr;
     dest_expr->data.lea.scale = 1;
+    dest_expr->data.lea.offset = 0;
 
     L1Instruction *store_inst = malloc(sizeof(L1Instruction));
     store_inst->kind = INST_STORE;

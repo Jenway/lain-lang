@@ -16,7 +16,8 @@
 
 (define (module.split-import-path str)
   (let* ((len (string-length str)))
-    (let loop ((i 0) (start 0) (acc (list)))
+    (let ((loop #f))
+  (set! loop (lambda (i start acc)
       (if (>= i len)
           (let* ((segment (substring str start len)))
             (list.reverse
@@ -27,7 +28,8 @@
               (let* ((segment (substring str start i)))
                 (loop (+ i 2) (+ i 2)
                       (list.cons (string->symbol segment) acc)))
-              (loop (+ i 1) start acc))))))
+              (loop (+ i 1) start acc)))))
+  (loop 0 0 (list)))))
 
 ;; ── import binding: let name = import("path"); ──
 ;; rhs-node: (call (ident import) (paren (string path-str)))
@@ -122,7 +124,7 @@
 (define (module.path-node? node)
   (and (pair? node) (eq? (car node) '|::|)))
 
-(define-pass (form-parser |let| form)
+(define-pass* 'form-parser '|let| (lambda (form)
   (let* ((tree (form.tree form))
          (attrs (form.decorators form))
          ;; tree: (juxt (ident let) (= name-node rhs-node))
@@ -160,21 +162,23 @@
        (module.parse-meta-alias-binding-tree attrs name rhs))
       ;; Everything else → general expression
       (else
-       (module.parse-expr-binding-tree attrs name rhs)))))
+       (module.parse-expr-binding-tree attrs name rhs))))))
 
 ;; ── export { names... } ──
 
 (define (module.parse-export-names-tree children acc)
   ;; children: list of (ident name) and (sep ,)
-  (let loop ((cs children) (acc acc))
+  (let ((loop #f))
+  (set! loop (lambda (cs acc)
     (if (null? cs)
         (list.reverse acc)
         (let ((c (car cs)))
           (if (tree.sep? c)
               (loop (cdr cs) acc)
               (loop (cdr cs) (list.cons (tree.ident-sym c) acc)))))))
+  (loop children acc)))
 
-(define-pass (form-parser |export| form)
+(define-pass* 'form-parser '|export| (lambda (form)
   (let* ((tree (form.tree form))
          (attrs (form.decorators form))
          ;; tree: (juxt (ident export) (brace ...))
@@ -186,10 +190,10 @@
                  (record '|export|
                    (record.field '|attrs| attrs)
                    (record.field '|names| names)))))
-    (decl.define! '|export| '|export| node)))
+    (decl.define! '|export| '|export| node))))
 
-(define-pass (raw-normalizer |export| decl)
-  (middle.normalize-plain-decl decl '|middle.export|))
+(define-pass* 'raw-normalizer '|export| (lambda (decl)
+  (middle.normalize-plain-decl decl '|middle.export|)))
 
 (define *module-registry* (list))
 (define *signature-registry* (list))
@@ -217,38 +221,38 @@
         (core.mark-export! name)
         (module.declare-export-names (list.rest names)))))
 
-(define-pass (core-declarer |middle.export| item)
+(define-pass* 'core-declarer '|middle.export| (lambda (item)
   (meta.ensure-static-position! '|middle.export|)
-  unit)
+  unit))
 
-(define-pass (core-lowerer |middle.export| item)
+(define-pass* 'core-lowerer '|middle.export| (lambda (item)
   (meta.ensure-static-position! '|middle.export|)
   (let* ((payload (middle.payload item))
          (raw-inner (optional.value (record.get payload '|payload|)))
          (names (optional.value (record.get raw-inner '|names|))))
-    (module.declare-export-names names)))
+    (module.declare-export-names names))))
 
-(define-pass (core-declarer |middle.signature| item)
+(define-pass* 'core-declarer '|middle.signature| (lambda (item)
   (meta.ensure-static-position! '|middle.signature|)
   (let* ((payload (middle.payload item))
          (name (optional.value (record.get payload '|name|))))
     (module.register-signature! name)
-    (core.declare-signature! name)))
+    (core.declare-signature! name))))
 
-(define-pass (core-lowerer |middle.signature| item)
+(define-pass* 'core-lowerer '|middle.signature| (lambda (item)
   (meta.ensure-static-position! '|middle.signature|)
-  unit)
+  unit))
 
-(define-pass (core-declarer |middle.module| item)
+(define-pass* 'core-declarer '|middle.module| (lambda (item)
   (meta.ensure-static-position! '|middle.module|)
   (let* ((payload (middle.payload item))
          (name (optional.value (record.get payload '|name|))))
     (module.register-module! name)
-    (core.declare-module! name)))
+    (core.declare-module! name))))
 
-(define-pass (core-lowerer |middle.module| item)
+(define-pass* 'core-lowerer '|middle.module| (lambda (item)
   (meta.ensure-static-position! '|middle.module|)
-  unit)
+  unit))
 
 (define (module.declare-imported-fn-alias! alias fn-name)
   (let* ((sub (core.function-by-name fn-name))
@@ -257,7 +261,7 @@
          (link-name (core.function-link-name sub)))
     (host.new-extern alias link-name param-tys ret-ty)))
 
-(define-pass (core-declarer |middle.meta-alias| item)
+(define-pass* 'core-declarer '|middle.meta-alias| (lambda (item)
   (let* ((payload (middle.payload item))
          (name (optional.value (record.get payload '|name|)))
          (raw-inner (optional.value (record.get payload '|payload|)))
@@ -277,7 +281,7 @@
       (else
        (error (string-append
                 "unsupported top-level let binding path: "
-                (symbol->string (list.first path))))))))
+                (symbol->string (list.first path)))))))))
 
-(define-pass (core-lowerer |middle.meta-alias| item)
-  unit)
+(define-pass* 'core-lowerer '|middle.meta-alias| (lambda (item)
+  unit))

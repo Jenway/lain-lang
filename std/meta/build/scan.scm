@@ -68,7 +68,8 @@
 
 (define (build.resolve-source-path import-path)
   ;; Convert (compiler io) → "compiler/io.lain"
-  (let loop ((segments import-path) (acc ""))
+  (let ((loop #f))
+  (set! loop (lambda (segments acc)
     (if (null? segments)
         (string-append acc ".lain")
         (let* ((seg (symbol->string (car segments)))
@@ -76,3 +77,4 @@
                             seg
                             (string-append acc "/" seg))))
           (loop (cdr segments) new-acc)))))
+  (loop import-path "")))

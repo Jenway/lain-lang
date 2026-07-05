@@ -46,13 +46,15 @@
          (raw-params (optional.value (record.get payload '|params|))))
     ;; Validate param types (skip generic params)
     (if (not (list.empty? raw-params))
-        (let loop ((remaining raw-params))
+        (let ((loop #f))
+  (set! loop (lambda (remaining)
           (if (not (null? remaining))
               (let* ((param (car remaining))
                      (param-payload (raw.payload param))
                      (ty (optional.value (record.get param-payload '|type|))))
                 (validate-raw-type! ty generics)
                 (loop (cdr remaining))))))
+  (loop raw-params)))
     ;; Validate return type
     (validate-raw-type! (optional.value (record.get payload '|return|)) generics)
     ;; Build the middle node

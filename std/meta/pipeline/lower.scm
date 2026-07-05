@@ -10,7 +10,8 @@
 
 ;; 查找 pipeline 中注册的处理函数，返回 #f 如果未注册
 (define (pipeline.lookup stage kind)
-  (let loop ((passes __lain-passes))
+  (let ((loop #f))
+  (set! loop (lambda (passes)
     (if (null? passes)
         #f
         (let* ((entry (car passes))
@@ -20,23 +21,24 @@
           (if (and (equal? e-stage stage) (equal? e-kind kind))
               e-body
               (loop (cdr passes)))))))
+  (loop __lain-passes)))
 
 ;; ---------------------------------------------------------------------------
 ;; 类型降级: pipeline stage = core-type-lowerer
 ;; ---------------------------------------------------------------------------
 
-(define-pass (core-type-lowerer |types.unit| ty)
-  (type.unit))
+(define-pass* 'core-type-lowerer '|types.unit| (lambda (ty)
+  (type.unit)))
 
-(define-pass (core-type-lowerer |types.path| ty)
+(define-pass* 'core-type-lowerer '|types.path| (lambda (ty)
   (let* ((payload (middle.payload ty))
          (name (optional.value (record.get payload '|name|))))
     ;; Struct types return pure Scheme record — no C cpointer
     (if (struct-registered? name)
         (struct-type name)
-        (type.registered name (list)))))
+        (type.registered name (list))))))
 
-(define-pass (core-type-lowerer |types.app| ty)
+(define-pass* 'core-type-lowerer '|types.app| (lambda (ty)
   (let* ((payload (middle.payload ty))
          (name (optional.value (record.get payload '|name|)))
          (args (core.lower-types
@@ -46,7 +48,7 @@
     ;; instantiate it concretely in Scheme. Otherwise delegate to C.
     (if (struct-registered? name)
         (struct-instantiate name args)
-        (type.registered name args))))
+        (type.registered name args)))))
 
 (define (core.lower-type ty)
   (let* ((kind (middle.kind ty))

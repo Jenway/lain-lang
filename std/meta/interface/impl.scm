@@ -55,7 +55,7 @@
               (cdr children)
               (list.cons (impl.parse-method-tree child) acc))))))
 
-(define-pass (form-parser |impl| form)
+(define-pass* 'form-parser '|impl| (lambda (form)
   (let* ((tree (form.tree form))
          (attrs (form.decorators form))
          (parts (tree.flatten-juxt tree))
@@ -106,7 +106,7 @@
                       (record.field '|name| interface-name)
                       (record.field '|type-kind| '|impl|)
                       (record.field '|payload| inner-payload)))))
-    (decl.define! '|let| interface-name unified)))
+    (decl.define! '|let| interface-name unified))))
 
 ;; Helper: split a list at the (ident for) element
 (define (impl.split-at-for parts)
@@ -148,7 +148,7 @@
     (string->symbol combined)))
 
 ;; core-declarer: 注册 VTable 实例工厂函数签名
-(define-pass (core-declarer |middle.impl| item)
+(define-pass* 'core-declarer '|middle.impl| (lambda (item)
   (let* ((payload (middle.payload item))
          (impl-payload (optional.value (record.get payload '|payload|)))
          (interface-raw (optional.value (record.get impl-payload '|interface|)))
@@ -164,7 +164,7 @@
     ;; vtable is a struct → pass addr to C, store struct-type in Scheme
     (let ((vtable-ty (struct-type vtable-name)))
       (fn-return-type! instance-name vtable-ty)
-      (core.begin-function! instance-name (list) (type.addr)))))
+      (core.begin-function! instance-name (list) (type.addr))))))
 
 ;; 帮助: 在 interface methods 列表中查找方法名对应的索引
 (define (impl.find-method-index name methods index)
@@ -178,7 +178,7 @@
             (impl.find-method-index name (list.rest methods) (u64.add1 index))))))
 
 ;; core-lowerer: 主入口 — 生成完整的 VTable 实例工厂函数
-(define-pass (core-lowerer |middle.impl| item)
+(define-pass* 'core-lowerer '|middle.impl| (lambda (item)
   (let* ((payload (middle.payload item))
          (impl-payload (optional.value (record.get payload '|payload|)))
          (interface-raw (optional.value (record.get impl-payload '|interface|)))
@@ -197,7 +197,7 @@
                (block (core.append-block! fn)))
           ;; 为每个 impl method 计算函数指针并填入 vtable
           (impl.lower-vtable-body
-            block target-name methods interface-methods)))))
+            block target-name methods interface-methods))))))
 
 ;; 生成 vtable 工厂函数体:
 ;;   alloca vtable → store fn pointers → return vtable ptr
@@ -207,11 +207,13 @@
          (method-count (length field-values))
          ;; Each slot is 8 bytes (addr). Total size = count * 8
          (total-size (* method-count 8))
-         (pairs (let loop ((vals field-values) (i 0) (acc '()))
+         (pairs (let ((loop #f))
+  (set! loop (lambda (vals i acc)
                   (if (null? vals)
                       (reverse acc)
                       (loop (cdr vals) (+ i 1)
-                            (cons (cons (* i 8) (car vals)) acc))))))
+                            (cons (cons (* i 8) (car vals)) acc)))))
+  (loop field-values 0 '()))))
      (core.return-value!
       block
       (core.aggregate-layout! block total-size pairs))))

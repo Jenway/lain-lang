@@ -7,32 +7,32 @@
     ((string? raw) (string->number raw))
     (else raw)))
 
-(define-pass (middle-normalizer |expr.number| raw-expr)
+(define-pass* 'middle-normalizer '|expr.number| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|literals.number|
       (record '|literals.number|
         (record.field '|raw|
           (optional.value
-            (record.get payload '|raw|)))))))
+            (record.get payload '|raw|))))))))
 
-(define-pass (middle-normalizer |expr.string| raw-expr)
+(define-pass* 'middle-normalizer '|expr.string| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|literals.string|
       (record '|literals.string|
         (record.field '|raw|
           (optional.value
-            (record.get payload '|raw|)))))))
+            (record.get payload '|raw|))))))))
 
-(define-pass (middle-normalizer |expr.bool| raw-expr)
+(define-pass* 'middle-normalizer '|expr.bool| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|literals.bool|
       (record '|literals.bool|
         (record.field '|value|
           (optional.value
-            (record.get payload '|value|)))))))
+            (record.get payload '|value|))))))))
 
 ;; ── Array literal: [init; N] ──
-(define-pass (middle-normalizer |expr.array| raw-expr)
+(define-pass* 'middle-normalizer '|expr.array| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|literals.array|
       (record '|literals.array|
@@ -41,38 +41,38 @@
             (record.get payload '|init|)))
         (record.field '|len|
           (optional.value
-            (record.get payload '|len|)))))))
+            (record.get payload '|len|))))))))
 
-(define-pass (core-expr-lowerer |literals.number| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|literals.number| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (raw (optional.value
                 (record.get payload '|raw|))))
     (core.const-bits!
       block
       expected-ty
-      (literal.number-value raw))))
+      (literal.number-value raw)))))
 
-(define-pass (core-expr-lowerer |literals.string| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|literals.string| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr)))
     (core.const-string!
       block
       expected-ty
       (optional.value
-        (record.get payload '|raw|)))))
+        (record.get payload '|raw|))))))
 
-(define-pass (core-expr-lowerer |literals.bool| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|literals.bool| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (value (optional.value
                   (record.get payload '|value|))))
     (core.const-bits!
       block
       expected-ty
-      (if value 1 0))))
+      (if value 1 0)))))
 
 ;; ── Array literal lowering: alloca only ──
 ;; 先保证数组字面量能稳定通过 lowering。
 ;; 元素批量初始化后面再补。
-(define-pass (core-expr-lowerer |literals.array| block expr expected-ty locals)
+(define-pass* 'core-expr-lowerer '|literals.array| (lambda (block expr expected-ty locals)
   (let* ((payload (middle.payload expr))
          (init-expr (optional.value (record.get payload '|init|)))
          (len (literal.number-value
@@ -83,20 +83,20 @@
          (ptr (core.local-alloc! block elem-ty (* len 4)))
          ;; Keep init expr reachable for future full initialization pass.
          (_init-val (core.lower-expr block init-expr elem-ty locals)))
-    ptr))
+    ptr)))
 
 ;; ---------------------------------------------------------------------------
 ;; 表达式类型推导: 字面量类型
 ;; ---------------------------------------------------------------------------
 
-(define-pass (core-expr-inferer |literals.bool| expr locals)
-  (type.registered '|bool| (list)))
+(define-pass* 'core-expr-inferer '|literals.bool| (lambda (expr locals)
+  (type.registered '|bool| (list))))
 
-(define-pass (core-expr-inferer |literals.string| expr locals)
-  (type.registered '|addr| (list)))
+(define-pass* 'core-expr-inferer '|literals.string| (lambda (expr locals)
+  (type.registered '|addr| (list))))
 
-(define-pass (core-expr-inferer |literals.number| expr locals)
-  (type.unsupported '|inferred-expression-type|))
+(define-pass* 'core-expr-inferer '|literals.number| (lambda (expr locals)
+  (type.unsupported '|inferred-expression-type|)))
 
-(define-pass (core-expr-inferer |literals.array| expr locals)
-  (type.registered '|addr| (list)))
+(define-pass* 'core-expr-inferer '|literals.array| (lambda (expr locals)
+  (type.registered '|addr| (list))))

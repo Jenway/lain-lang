@@ -39,7 +39,7 @@
 
 ;; ── if 表达式规范化 (从 core/call.scm 迁移) ──
 
-(define-pass (middle-normalizer |expr.if| raw-expr)
+(define-pass* 'middle-normalizer '|expr.if| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|control.if|
       (record '|control.if|
@@ -54,7 +54,7 @@
         (record.field '|else|
           (middle.normalize-block
             (optional.value
-              (record.get payload '|else|))))))))
+              (record.get payload '|else|)))))))))
 
 (define (middle.normalize-stmts raw-stmts acc)
   (if (list.empty? raw-stmts) (list.reverse acc)

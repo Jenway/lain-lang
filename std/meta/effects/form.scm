@@ -68,7 +68,8 @@
 (define (effect.parse-params-tree children)
   ;; children: list of (: (ident name) (ident type)), (sep ,), ...
   ;; Filter out separators, parse each param
-  (let loop ((cs children) (acc (list)))
+  (let ((loop #f))
+  (set! loop (lambda (cs acc)
     (if (null? cs)
         (list.reverse acc)
         (let ((c (car cs)))
@@ -79,10 +80,12 @@
                      (ty (effect.tree->type (tree.right c)))
                      (param (lain-quote `(param ,name ,ty))))
                 (loop (cdr cs) (list.cons param acc))))))))
+  (loop children (list))))
 
 (define (effect.parse-operations-tree children acc)
   ;; children: list of brace group children (operation nodes and (sep ;))
-  (let loop ((cs children) (acc acc))
+  (let ((loop #f))
+  (set! loop (lambda (cs acc)
     (if (null? cs)
         (list.reverse acc)
         (let ((c (car cs)))
@@ -90,8 +93,9 @@
               (loop (cdr cs) acc)
               (let ((op (effect.parse-operation-tree c)))
                 (loop (cdr cs) (list.cons op acc))))))))
+  (loop children acc)))
 
-(define-pass (form-parser |effect| form)
+(define-pass* 'form-parser '|effect| (lambda (form)
   (let* ((tree (form.tree form))
          (attrs (form.decorators form))
          ;; tree: (juxt (ident effect) (juxt (ident Name) (brace ...)))
@@ -132,7 +136,7 @@
           0    ;; flag-index: field 0 is the flag
           '()) ;; no arg indices
         unit)
-    (decl.define-dup-checked! '|effect| name node)))
+    (decl.define-dup-checked! '|effect| name node))))
 
-(define-pass (raw-normalizer |effect| decl)
-  (middle.normalize-plain-decl decl '|middle.effect|))
+(define-pass* 'raw-normalizer '|effect| (lambda (decl)
+  (middle.normalize-plain-decl decl '|middle.effect|)))

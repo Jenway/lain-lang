@@ -21,13 +21,15 @@
   (set! *const-table* (cons (list name type val) *const-table*)))
 
 (define (const-table.lookup name)
-  (let loop ((table *const-table*))
+  (let ((loop #f))
+  (set! loop (lambda (table)
     (if (null? table)
         #f
         (let* ((entry (car table)))
           (if (symbol=? (car entry) name)
               entry
               (loop (cdr table)))))))
+  (loop *const-table*)))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; 2. Comptime function registry
@@ -44,10 +46,12 @@
       unit))
 
 (define (comptime-fns.member? name)
-  (let loop ((fns *comptime-fns*))
+  (let ((loop #f))
+  (set! loop (lambda (fns)
     (if (null? fns) #f
         (if (symbol=? (car fns) name) #t
             (loop (cdr fns))))))
+  (loop *comptime-fns*)))
 
 ;; ═══════════════════════════════════════════════════════════════════════════
 ;; 3. Error counter

@@ -7,7 +7,7 @@
 ;; 根据 type-kind 分发给对应的 normalize 逻辑。
 ;; ===========================================================================
 
-(define-pass (raw-normalizer |let| decl)
+(define-pass* 'raw-normalizer '|let| (lambda (decl)
   (let* ((raw (decl.payload decl))
          (payload (raw.payload raw))
          (name (optional.value (record.get payload '|name|)))
@@ -76,4 +76,4 @@
              (record.field '|value| value-middle)))))
       ;; ── unknown ──
       (else
-       (type.unsupported '|unknown-let-type|)))))
+       (type.unsupported '|unknown-let-type|))))))

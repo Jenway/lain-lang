@@ -11,11 +11,11 @@
           '|macro.println.expected_string|
           (record '|macro.println.expected_string|)))))
 
-(define-pass (expression-macro |println| args)
+(define-pass* 'expression-macro '|println| (lambda (args)
   (let* ((raw-message (io.println-string-arg (list.first args)))
          (message (string-append (symbol->string raw-message) "\n"))
          (message-symbol (string->symbol message))
          (len (string-byte-len message)))
     (lain-quote `(call __lain_println_raw
                    (string ,message-symbol)
-                   (number ,len)))))
+                   (number ,len))))))

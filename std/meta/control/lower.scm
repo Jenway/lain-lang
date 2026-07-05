@@ -34,7 +34,7 @@
 
 ;; ── 语句降级: pipeline stage = core-stmt-lowerer ──
 
-(define-pass (core-stmt-lowerer |control.return| block stmt ret-ty locals)
+(define-pass* 'core-stmt-lowerer '|control.return| (lambda (block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt)) (value (optional.value (record.get payload '|value|))))
     (if (optional.none? value) (core.return-none! block)
         (let* ((inner-ty (if (core.return-is-product? ret-ty)
@@ -45,9 +45,9 @@
                             (core.wrap-throws-return block ret-ty lowered)
                             lowered)))
           (core.return-value! block wrapped)))
-    locals))
+    locals)))
 
-(define-pass (core-stmt-lowerer |control.tail| block stmt ret-ty locals)
+(define-pass* 'core-stmt-lowerer '|control.tail| (lambda (block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt)) (expr (optional.value (record.get payload '|expr|))))
     (cond
       ((symbol=? (middle.kind expr) '|control.if|)
@@ -71,13 +71,13 @@
                                    (core.wrap-throws-return block ret-ty lowered)
                                    lowered)))
                  (core.return-value! block wrapped))))))
-    locals))
+    locals)))
 
-(define-pass (core-stmt-lowerer |control.expr| block stmt ret-ty locals)
+(define-pass* 'core-stmt-lowerer '|control.expr| (lambda (block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt)) (expr (optional.value (record.get payload '|expr|))))
     (cond
       ((symbol=? (middle.kind expr) '|control.if|)
-       (core.lower-if-tail-expr block expr ret-ty locals)
+       (core.lower-if-stmt block expr ret-ty locals)
        (core.set-current-block! block))
       ((symbol=? (middle.kind expr) '|effects.handle|)
        (core.lower-handle-tail-expr block expr ret-ty locals)
@@ -87,9 +87,58 @@
        (core.set-current-block! block))
       (else
        (core.lower-expr block expr (core.infer-expr-type expr locals) locals)))
+    locals)))
+
+(define (core.lower-stmt-block-no-implicit-return block stmts ret-ty locals)
+  (if (list.empty? stmts)
+      locals
+      (let* ((next-locals
+               (core.lower-stmt-no-implicit-return
+                 block (list.first stmts) ret-ty locals))
+             (current (core.get-current-block)))
+        (core.lower-stmt-block-no-implicit-return
+          current (list.rest stmts) ret-ty next-locals))))
+
+(define (core.lower-stmt-no-implicit-return block stmt ret-ty locals)
+  (let* ((kind (middle.kind stmt))
+         (payload (middle.payload stmt)))
+    (if (symbol=? kind '|control.tail|)
+        (begin
+          (core.lower-expr
+            block
+            (optional.value (record.get payload '|expr|))
+            (core.infer-expr-type
+              (optional.value (record.get payload '|expr|))
+              locals)
+            locals)
+          locals)
+        (core.lower-stmt block stmt ret-ty locals))))
+
+(define (core.lower-if-stmt block expr ret-ty locals)
+  (let* ((payload (middle.payload expr))
+         (condition (optional.value (record.get payload '|condition|)))
+         (then-body (optional.value (record.get payload '|then|)))
+         (else-body (optional.value (record.get payload '|else|)))
+         (condition-value (core.lower-expr block condition (type.bits 1) locals))
+         (scratch-pair (core.begin-if! block condition-value))
+         (then-scratch (car scratch-pair))
+         (else-scratch (car (cdr scratch-pair))))
+    (core.set-current-block! then-scratch)
+    (core.lower-stmt-block-no-implicit-return
+      then-scratch
+      (optional.value (record.get (middle.payload then-body) '|items|))
+      ret-ty
+      locals)
+    (core.set-current-block! else-scratch)
+    (core.lower-stmt-block-no-implicit-return
+      else-scratch
+      (optional.value (record.get (middle.payload else-body) '|items|))
+      ret-ty
+      locals)
+    (core.end-if! block condition-value then-scratch else-scratch)
     locals))
 
-(define-pass (core-stmt-lowerer |let.bind| block stmt ret-ty locals)
+(define-pass* 'core-stmt-lowerer '|let.bind| (lambda (block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt))
          (ty-option (optional.value (record.get payload '|type|)))
          (name (optional.value (record.get payload '|name|)))
@@ -127,9 +176,9 @@
                   (let* ((value (core.lower-expr block value-expr ty locals)))
                     (core.assign-temp! block value)))))
     (list.cons (record '|local| (record.field '|name| name) (record.field '|type| ty)
-                 (record.field '|mutable| mutable) (record.field '|value| var)) locals)))
+                 (record.field '|mutable| mutable) (record.field '|value| var)) locals))))
 
-(define-pass (core-stmt-lowerer |stmt.assign| block stmt ret-ty locals)
+(define-pass* 'core-stmt-lowerer '|stmt.assign| (lambda (block stmt ret-ty locals)
   (let* ((payload (middle.payload stmt)) (target (optional.value (record.get payload '|target|)))
          (value-expr (optional.value (record.get payload '|value|))))
     (if (symbol=? (middle.kind target) '|path.access|)
@@ -154,7 +203,7 @@
                    (value-ir (core.lower-expr block value-expr field-ty locals)))
               (core.store! block dest-addr value-ir)
               locals)
-            (type.unsupported '|assignment-target|)))))
+            (type.unsupported '|assignment-target|))))))
 
 (define (core.lower-stmt block stmt ret-ty locals)
   (let* ((kind (middle.kind stmt)) (lowerer (pipeline.lookup '|core-stmt-lowerer| kind)))
@@ -219,7 +268,55 @@
          (tag-val (core.field-offset! block scrutinee-val 0 tag-ty)))
     (match.lower-arms-helper block tag-val arms ret-ty locals)))
 
-;; ── if 表达式降级 (stub) ──
-(define-pass (core-expr-lowerer |control.if| block expr expected-ty locals)
-  (core.unsupported-expr '|if-expression|))
+;; Lower a block as a value-producing expression.
+(define (core.lower-block-value block stmts expected-ty locals)
+  (if (list.empty? stmts)
+      (core.unsupported-expr '|empty-if-branch|)
+      (if (list.empty? (list.rest stmts))
+          (core.lower-final-stmt-value block (list.first stmts) expected-ty locals)
+          (let* ((next-locals (core.lower-stmt block (list.first stmts) expected-ty locals))
+                 (current (core.get-current-block)))
+            (core.lower-block-value current (list.rest stmts) expected-ty next-locals)))))
+
+(define (core.lower-final-stmt-value block stmt expected-ty locals)
+  (let* ((kind (middle.kind stmt))
+         (payload (middle.payload stmt)))
+    (cond
+      ((symbol=? kind '|control.tail|)
+       (core.lower-expr block (optional.value (record.get payload '|expr|)) expected-ty locals))
+      ((symbol=? kind '|control.expr|)
+       (core.lower-expr block (optional.value (record.get payload '|expr|)) expected-ty locals))
+      ((symbol=? kind '|control.return|)
+       (let* ((value (optional.value (record.get payload '|value|))))
+         (if (optional.none? value)
+             (core.unsupported-expr '|unit-if-branch|)
+             (core.lower-expr block (optional.value value) expected-ty locals))))
+      (else
+       (core.unsupported-expr '|if-branch-value|)))))
+
+(define (core.lower-if-value-branch block body expected-ty locals slot)
+  (let* ((items (optional.value (record.get (middle.payload body) '|items|)))
+         (value (core.lower-block-value block items expected-ty locals)))
+    (core.store! block slot value)))
+
+;; ── if 表达式降级 ──
+(define-pass* 'core-expr-lowerer '|control.if| (lambda (block expr expected-ty locals)
+  (let* ((payload (middle.payload expr))
+         (condition (optional.value (record.get payload '|condition|)))
+         (then-body (optional.value (record.get payload '|then|)))
+         (else-body (optional.value (record.get payload '|else|)))
+         (condition-value (core.lower-expr block condition (type.bits 1) locals))
+         (byte-size (core.type-size-in-bytes! expected-ty))
+         (slot-expr (core.local-alloc! block expected-ty byte-size))
+         (slot (core.assign-temp! block slot-expr))
+         (scratch-pair (core.begin-if! block condition-value))
+         (then-scratch (car scratch-pair))
+         (else-scratch (car (cdr scratch-pair))))
+    (core.set-current-block! then-scratch)
+    (core.lower-if-value-branch then-scratch then-body expected-ty locals slot)
+    (core.set-current-block! else-scratch)
+    (core.lower-if-value-branch else-scratch else-body expected-ty locals slot)
+    (core.end-if! block condition-value then-scratch else-scratch)
+    (core.set-current-block! block)
+    (core.load! block slot expected-ty))))
 

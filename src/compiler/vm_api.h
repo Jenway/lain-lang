@@ -146,6 +146,6 @@ typedef vm_value *(*vm_ffi_fn)(vm_context *ctx, vm_value *self,
                                int nargs, vm_value *args);
 
 void vm_register_ffi(vm_context *ctx, vm_value *env,
-                     const char *scheme_name, vm_ffi_fn fn);
+                     const char *scheme_name, int arity, vm_ffi_fn fn);
 
 #endif /* VM_API_H */

@@ -5,15 +5,15 @@
 ;; 将 raw AST 节点转换为 middle IR 节点
 ;; ═══════════════════════════════════════════════════════════
 
-(define-pass (middle-normalizer |expr.path| raw-expr)
+(define-pass* 'middle-normalizer '|expr.path| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|path.access|
       (record '|path.access|
         (record.field '|path|
           (optional.value
-            (record.get payload '|path|)))))))
+            (record.get payload '|path|))))))))
 
-(define-pass (middle-normalizer |expr.call| raw-expr)
+(define-pass* 'middle-normalizer '|expr.call| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|call.fn|
       (record '|call.fn|
@@ -32,9 +32,9 @@
           (middle.normalize-exprs
             (optional.value
               (record.get payload '|args|))
-            (list)))))))
+            (list))))))))
 
-(define-pass (middle-normalizer |expr.method-call| raw-expr)
+(define-pass* 'middle-normalizer '|expr.method-call| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|call.method|
       (record '|call.method|
@@ -49,9 +49,9 @@
           (middle.normalize-exprs
             (optional.value
               (record.get payload '|args|))
-            (list)))))))
+            (list))))))))
 
-(define-pass (middle-normalizer |expr.builtin| raw-expr)
+(define-pass* 'middle-normalizer '|expr.builtin| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|call.builtin|
       (record '|call.builtin|
@@ -62,18 +62,18 @@
           (middle.normalize-exprs
             (optional.value
               (record.get payload '|args|))
-            (list)))))))
+            (list))))))))
 
-(define-pass (middle-normalizer |expr.tail-call| raw-expr)
+(define-pass* 'middle-normalizer '|expr.tail-call| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|call.tail|
       (record '|call.tail|
         (record.field '|call|
           (middle.normalize-expr
             (optional.value
-              (record.get payload '|call|))))))))
+              (record.get payload '|call|)))))))))
 
-(define-pass (middle-normalizer |expr.macro-call| raw-expr)
+(define-pass* 'middle-normalizer '|expr.macro-call| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr))
          (name (optional.value
                  (record.get payload '|name|)))
@@ -82,9 +82,9 @@
          (expand (pipeline.rule '|expression-macro| name)))
     ;; 注意: macro 展开目前忽略 type-args (宏不支持泛型参数)
     ;; 后续可扩展为 (expand args type-args)
-    (middle.normalize-expr (expand args))))
+    (middle.normalize-expr (expand args)))))
 
-(define-pass (middle-normalizer |expr.call-indirect| raw-expr)
+(define-pass* 'middle-normalizer '|expr.call-indirect| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|call.indirect|
       (record '|call.indirect|
@@ -100,14 +100,14 @@
           (middle.normalize-exprs
             (optional.value
               (record.get payload '|args|))
-            (list)))))))
+            (list))))))))
 
 ;; ── ? 操作符规范化 (postfix ?) ──
-(define-pass (middle-normalizer |expr.question| raw-expr)
+(define-pass* 'middle-normalizer '|expr.question| (lambda (raw-expr)
   (let* ((payload (raw.payload raw-expr)))
     (middle.node! '|operators.question|
       (record '|operators.question|
         (record.field '|expr|
           (middle.normalize-expr
             (optional.value
-              (record.get payload '|expr|))))))))
+              (record.get payload '|expr|)))))))))

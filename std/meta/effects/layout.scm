@@ -53,13 +53,15 @@
     (if existing
         (let* ((ops (cdr existing))
                ;; Manual filter: keep all ops except the one being replaced
-               (updated-ops (let filter ((remaining ops) (acc '()))
+               (updated-ops (let ((filter #f))
+  (set! filter (lambda (remaining acc)
                               (if (null? remaining)
                                   (reverse acc)
                                   (let ((e (car remaining)))
                                     (if (eq? (car e) op-name)
                                         (filter (cdr remaining) acc)
-                                        (filter (cdr remaining) (cons e acc))))))))
+                                        (filter (cdr remaining) (cons e acc)))))))
+  (filter ops '()))))
           (set-cdr! existing (cons entry updated-ops)))
         (set! *effect-layouts*
               (cons (cons effect-name (list entry)) *effect-layouts*)))))

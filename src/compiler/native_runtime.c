@@ -10,14 +10,31 @@
  *
  * Linked with:
  *   - Native C compiler front-end/runtime
- *   - Chibi-Scheme (libchibi)
+ *   - Scheme VM backend selected by vm_api
  */
 
 #include "lainir_exec.h"
-#include "vm_chibi.h"
-#include <chibi/eval.h>   /* sexp type — for FFI stubs; remove after full vm_* migration */
-#include <alloca.h>
+#include "compiler/vm_compat.h"
 #include "lainir/lainir.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#include <direct.h>
+#define getcwd _getcwd
+#else
+#include <unistd.h>
+#endif
+
+static char *lain_strdup(const char *s) {
+  size_t n = strlen(s);
+  char *out = (char *)malloc(n + 1);
+  if (!out) return NULL;
+  memcpy(out, s, n + 1);
+  return out;
+}
+
+#define strdup lain_strdup
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -160,6 +177,12 @@ static sexp sexp_read_interface(sexp ctx, sexp self, sexp_sint_t n,
 
 static sexp sexp_build_compute_order(sexp ctx, sexp self, sexp_sint_t n,
                                       sexp arg_root_path) {
+#ifdef LAIN_DISABLE_NATIVE_BUILD
+  (void)self;
+  (void)n;
+  (void)arg_root_path;
+  return sexp_user_exception(ctx, NULL, "build: disabled in this host build", SEXP_NULL);
+#else
   const char *root_path = sexp_string_data(arg_root_path);
 
   // Simple graph: array of {path, imports[], import_count, visited}
@@ -289,6 +312,7 @@ static sexp sexp_build_compute_order(sexp ctx, sexp self, sexp_sint_t n,
   }
 
   return result;
+#endif
 }
 
 static sexp sexp_core_execute_lainir(sexp ctx, sexp self, sexp_sint_t n,
@@ -325,6 +349,14 @@ static sexp sexp_core_execute_lainir(sexp ctx, sexp self, sexp_sint_t n,
 int32_t native_build_with_funcs(const char *root_path, const char *output_path,
     uint32_t (*compile_fn)(const void*, const void*),
     uint32_t (*interface_fn)(const void*, const void*)) {
+#ifdef LAIN_DISABLE_NATIVE_BUILD
+  (void)root_path;
+  (void)output_path;
+  (void)compile_fn;
+  (void)interface_fn;
+  fprintf(stderr, "native --build is disabled in this host build\n");
+  return 1;
+#else
   fprintf(stderr, "[build] computing dependency graph for: %s\n", root_path);
 
   // Step 1: Initialize Scheme and compute build order
@@ -403,18 +435,26 @@ int32_t native_build_with_funcs(const char *root_path, const char *output_path,
   int pos = snprintf(link, sizeof(link), "gcc -o %s ", output_path);
   for (int i = 0; i < n; i++)
     pos += snprintf(link + pos, sizeof(link) - pos, "%s ", obj[i]);
+#if defined(LAIN_SCHEME_BACKEND_GAUCHE)
+  fprintf(stderr,
+          "[build] legacy C-side build is not supported by the Gauche backend\n");
+  for (int i = 0; i < n; i++) { free(src[i]); free(obj[i]); }
+  free(src); free(obj);
+  return 1;
+#else
   pos += snprintf(link + pos, sizeof(link) - pos,
     "src/compiler/native_runtime.c src/compiler/vm_chibi.c src/compiler/lainir_exec.c "
-    "-Isrc "
-    "-Ithird_party/chibi-scheme/include "
+    "-Isrc -Ithird_party/chibi-scheme/include -DLAIN_SCHEME_BACKEND_CHIBI "
     "-Lthird_party/chibi-scheme -lchibi-scheme -lm -ldl "
     "-Wl,-rpath,$PWD/third_party/chibi-scheme");
+#endif
   fprintf(stderr, "[build] %s\n", link);
   int ret = system(link);
 
   for (int i = 0; i < n; i++) { free(src[i]); free(obj[i]); }
   free(src); free(obj);
   return ret ? 1 : 0;
+#endif
 }
 
 // Environment variable access
@@ -484,12 +524,13 @@ void native_register_runtime_ffi(
 typedef struct {
   sexp ctx;
   sexp env;
-} NativeChibiRegistrarCtx;
+} NativeVmRegistrarCtx;
 
-static void native_register_foreign_with_chibi(
+static void native_register_foreign_with_vm(
     void *user_data, const char *name, int arity, void *fn) {
-  NativeChibiRegistrarCtx *state = (NativeChibiRegistrarCtx *)user_data;
-  sexp_define_foreign(state->ctx, state->env, name, arity, fn);
+  NativeVmRegistrarCtx *state = (NativeVmRegistrarCtx *)user_data;
+  vm_register_ffi((vm_context *)state->ctx, (vm_value *)state->env,
+                  name, arity, (vm_ffi_fn)fn);
 }
 
 // Initialize Scheme environment, register all FFI functions, load meta passes
@@ -507,51 +548,18 @@ void *native_init_scheme(void) {
   }
 
   sexp ctx = (sexp)vm_create();
-  fprintf(stderr, "[init] 1: ctx created\n");
-  fprintf(stderr, "[init] 2: std env loaded\n");
   sexp env = (sexp)vm_context_env((vm_context *)ctx);
 
   // Register core FFI functions (Layer B)
-  NativeChibiRegistrarCtx reg = {.ctx = ctx, .env = env};
-  native_register_core_ffi(ctx, env, native_register_foreign_with_chibi, &reg);
-  native_register_runtime_ffi(native_register_foreign_with_chibi, &reg);
-  fprintf(stderr, "[init] 3: FFI registered\n");
+  NativeVmRegistrarCtx reg = {.ctx = ctx, .env = env};
+  native_register_core_ffi(ctx, env, native_register_foreign_with_vm, &reg);
+  native_register_runtime_ffi(native_register_foreign_with_vm, &reg);
 
   // Inject all polyfills (Layer A)
   native_inject_all_polyfills(ctx, env);
-  fprintf(stderr, "[init] 4: polyfills loaded\n");
-
-  // Smoke-test define-pass
-  {
-    sexp r = sexp_eval_string(ctx,
-                              "(begin (define-pass (form-parser test-pass "
-                              "form) unit) (null? __lain-passes))",
-                              -1, env);
-    vm_value *rv = (vm_value *)r;
-    if (rv == vm_false())
-      fprintf(stderr, "[diag] define-pass works!\n");
-    else if (rv == vm_true())
-      fprintf(stderr, "[diag] define-pass did NOT populate __lain-passes\n");
-    else {
-      fprintf(stderr, "[diag] define-pass test exception: ");
-      vm_print_exception((vm_context *)ctx, rv);
-    }
-  }
 
   // Load meta sources
   native_load_meta_sources(ctx, env);
-  fprintf(stderr, "[init] 5: meta sources loaded\n");
-
-  // Verify compile-group-to-core is available
-  {
-    vm_context *c = (vm_context *)ctx;
-    vm_value *sym = vm_intern(c, "compile-group-to-core");
-    vm_value *val = vm_env_ref(c, (vm_value *)env, sym);
-    fprintf(stderr, "[init] 6a: compile-group-to-core %s\n",
-            val == vm_false() ? "MISSING"
-            : vm_is_procedure(val) ? "is proc"
-                                   : "is defined but not proc");
-  }
 
   return ctx;
 }
@@ -564,40 +572,25 @@ int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
 
   vm_value *env = vm_context_env(c);
 
-  // Clear previous declarations
-  vm_eval_string(c, env, "(set! *lain-declarations* (list))");
+  // Clear previous compilation state through the meta-owned API.
+  vm_eval_string(c, env, "(compiler-state.reset!)");
   vm_eval_string(c, env, "(set! *all-declarations* '())");
 
-  // Use Scheme-side lexer
   vm_value *src_str = vm_make_string(c, (const char *)g_pending_src, (int)g_pending_len);
-  vm_value *len_val = vm_make_integer(c, vm_string_length(src_str));
-
-  vm_value *lex_proc = vm_env_ref(c, env, vm_intern(c, "meta.lex-source!"));
-  vm_value *form_list = vm_apply(c, lex_proc, vm_list2(c, src_str, len_val));
-
-  if (vm_is_exception(form_list)) {
-    fprintf(stderr, "[pipeline ERROR] Scheme lexer failed:\n");
-    vm_print_exception(c, form_list);
+  vm_value *out_path = vm_make_string(c, "", 0);
+  vm_value *compile_sym = vm_intern(c, "compile");
+  vm_value *proc = vm_env_ref(c, env, compile_sym);
+  if (!vm_is_procedure(proc)) {
+    fprintf(stderr, "[pipeline ERROR] compile entry point is not registered\n");
     return 1;
   }
 
-  vm_value *compile_sym = vm_intern(c, "compile-group-to-core");
-  vm_value *proc = vm_env_ref(c, env, compile_sym);
-
-  // Iterate over form list produced by meta.lex-source!
-  vm_preserve(c, form_list);
-  for (vm_value *forms = form_list; vm_is_pair(forms); forms = vm_cdr(forms)) {
-    vm_value *form = vm_car(forms);
-    vm_value *result = vm_apply(c, proc, vm_list1(c, form));
-
-    if (vm_is_exception(result)) {
-      fprintf(stderr, "[pipeline ERROR] ");
-      vm_print_exception(c, result);
-      vm_release(c, form_list);
-      return 1;
-    }
+  vm_value *result = vm_apply(c, proc, vm_list2(c, src_str, out_path));
+  if (vm_is_exception(result)) {
+    fprintf(stderr, "[pipeline ERROR] ");
+    vm_print_exception(c, result);
+    return 1;
   }
-  vm_release(c, form_list);
 
   return 0;
 }
@@ -708,7 +701,9 @@ static char g_module_prefix[256] = "";
 void native_set_source_path(const char *path) {
   g_source_path = path;
   // Extract module name: strip directory + .lain extension
-  const char *basename = strrchr(path, '/');
+  const char *slash = strrchr(path, '/');
+  const char *backslash = strrchr(path, '\\');
+  const char *basename = slash > backslash ? slash : backslash;
   if (!basename) basename = path;
   else basename++;
   const char *dot = strrchr(basename, '.');

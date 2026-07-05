@@ -29,10 +29,27 @@
          (else
           (struct.parse-fields-tree rest acc))))))
 
-(define-pass (form-parser |struct| form)
+(define (struct.literal-fields-tree children acc)
+  (if (null? children)
+      (list.reverse acc)
+      (let ((child (car children))
+            (rest (cdr children)))
+        (cond
+         ((and (tree.sep? child) (eq? (tree.sep-sym child) '|,|))
+          (struct.literal-fields-tree rest acc))
+         ((and (pair? child) (eq? (car child) '|:|))
+          (let* ((name-node (tree.left child))
+                 (value-node (tree.right child))
+                 (name (if (tree.ident? name-node) (tree.ident-sym name-node) '_unknown))
+                 (field (list 'struct-field name (tree-lower-expr value-node))))
+            (struct.literal-fields-tree rest (list.cons field acc))))
+         (else
+          (struct.literal-fields-tree rest acc))))))
+
+(define-pass* 'form-parser '|struct| (lambda (form)
   (let* ((tree (form.tree form))
          (decos (form.decorators form))
-         (attrs (tree-parse-attrs decos))
+         (attrs (tree-parse-attrs form))
          (parts (tree.flatten-juxt tree))
          ;; parts: [(ident struct), (ident Name), ..., (brace ...)]
          ;; 或: [(ident struct), (< (ident Name) (ident T)), ..., (brace ...)]
@@ -60,4 +77,4 @@
                       (record.field '|name| name)
                       (record.field '|type-kind| '|struct|)
                       (record.field '|payload| inner-payload)))))
-    (decl.define-dup-checked! '|let| name unified)))
+    (decl.define-dup-checked! '|let| name unified))))
