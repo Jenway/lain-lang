@@ -59,12 +59,19 @@ PREPARE_INTERFACES: dict[tuple[str, str], tuple[str, ...]] = {
         "packages/lain/compiler/module_ast_summary.lain",
         "packages/lain/compiler/module_ast_score.lain",
     ),
+    ("meta", "import_lain_compiler_module_resolution"): (
+        "packages/lain/compiler/module_resolution.lain",
+    ),
     ("meta", "import_lain_compiler_lainc"): (
         "packages/lain/compiler/module_ast_summary.lain",
         "packages/lain/compiler/module_ast_score.lain",
         "packages/lain/compiler/ir_builder.lain",
         "packages/lain/compiler/diagnostic.lain",
         "packages/lain/compiler/lainc.lain",
+    ),
+    ("meta", "lower_i32_literal_to_ir"): (
+        "packages/lain/compiler/ir_builder.lain",
+        "packages/lain/compiler/literal_lowering.lain",
     ),
     ("ir_builder", "import_lain_compiler_ir_builder"): (
         "packages/lain/compiler/ir_builder.lain",

@@ -193,16 +193,16 @@ RULES: tuple[Rule, ...] = (
         description="pipeline must not silently ignore missing required passes",
         paths=("std/meta/pipeline/driver.scm",),
         pattern=r"lambda args unit|静默跳过",
-        allowed_count=1,
-        rationale="Known debt: missing pass currently returns a no-op.",
+        allowed_count=0,
+        rationale="A required pass lookup must fail with its stage and kind.",
     ),
     Rule(
         ident="P2_PIPELINE_FAKE_IMPLICIT_MAIN",
         description="unknown forms must not silently become fake main",
         paths=("std/meta/pipeline/driver.scm",),
         pattern=r"parse-as-implicit-main|decl\.define! '\|fn\| '\|main\||\(number 0\)",
-        allowed_count=4,
-        rationale="Known debt: unknown top-level form is converted to main returning 0.",
+        allowed_count=0,
+        rationale="Unknown top-level forms must fail during dispatch.",
     ),
 )
 
