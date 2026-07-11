@@ -73,10 +73,13 @@ def normalize(text: str) -> str:
 
 
 def compiler_path() -> pathlib.Path:
-    exe = ROOT / "src" / "compiler" / "lainc.exe"
-    if exe.exists():
-        return exe
-    return ROOT / "src" / "compiler" / "lainc"
+    names = ("lainc.exe", "lainc")
+    for directory in (ROOT / "zig-out" / "bin", ROOT / "src" / "compiler"):
+        for name in names:
+            candidate = directory / name
+            if candidate.exists():
+                return candidate
+    return ROOT / "zig-out" / "bin" / names[0]
 
 
 def run_case(exe: pathlib.Path, source: pathlib.Path) -> bool:
@@ -146,6 +149,44 @@ def run_lainc_emit_ast_case(compiler: pathlib.Path, source: pathlib.Path) -> boo
     return True
 
 
+def run_capacity_regression(exe: pathlib.Path, compiler: pathlib.Path) -> bool:
+    """Exercise sibling links across arena reallocations, including .lci export scan."""
+    source = BUILD / "ast_capacity_regression.lain"
+    out_lci = BUILD / "ast_capacity_regression.lain.lci"
+    function_count = 180
+    tail_name = "tail_capacity_marker"
+    declarations = [
+        f"pub fn capacity_fn_{i}(x: i32) -> i32 {{ x + {i} }};"
+        for i in range(function_count - 1)
+    ]
+    declarations.append(f"pub fn {tail_name}(x: i32) -> i32 {{ x + 1 }};")
+    source.write_text("\n".join(declarations) + "\n", encoding="utf-8")
+
+    result = subprocess.run([str(exe), str(source)], capture_output=True, text=True)
+    if result.returncode != 0 or tail_name not in result.stdout:
+        print("FAIL capacity regression: tail declaration missing from raw AST")
+        print(result.stderr)
+        return False
+
+    result = subprocess.run(
+        [str(compiler), "--emit-interface", str(source), str(out_lci)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not out_lci.exists():
+        print("FAIL capacity regression: lainc --emit-interface failed")
+        print(result.stderr or result.stdout)
+        return False
+    interface = out_lci.read_text(encoding="utf-8")
+    if f"(name {tail_name})" not in interface:
+        print("FAIL capacity regression: tail public function missing from .lci")
+        return False
+
+    print("PASS capacity regression across AST arena growth")
+    return True
+
+
 def main() -> int:
     try:
         exe = build_dump_tool()
@@ -170,7 +211,10 @@ def main() -> int:
         if not run_lainc_emit_ast_case(compiler, source):
             failed += 1
 
-    total = len(sources) * 2
+    if not run_capacity_regression(exe, compiler):
+        failed += 1
+
+    total = len(sources) * 2 + 1
     print(f"\nAST golden: {total - failed}/{total} passed")
     return 1 if failed else 0
 

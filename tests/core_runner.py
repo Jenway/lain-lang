@@ -26,6 +26,10 @@ def main() -> int:
     suites = [
         ("core/ast", [python, "tests/core/ast/run_ast_golden.py"]),
         ("core/boundaries", [python, "tests/core/boundaries/boundary_lint.py"]),
+        (
+            "core/bootstrap-execution",
+            [python, "tests/core/bootstrap_execution/run_bootstrap_execution.py"],
+        ),
         ("core/scheme-host", [python, "tests/core/scheme_host/run_scheme_host_smoke.py"]),
         ("bootstrap-core", [python, "tests/bootstrap-core/run_bootstrap_core.py"]),
     ]
