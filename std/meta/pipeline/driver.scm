@@ -6,11 +6,11 @@
 
 (define (cfg.target-os) '|linux|)
 
-(define (pipeline.rule stage kind)
+(define (pipeline.lookup stage kind)
   (let ((loop #f))
   (set! loop (lambda (passes)
     (if (null? passes)
-        (lambda args unit)  ;; 默认无操作 — 未注册的 pass 静默跳过
+        #f
         (let* ((entry (car passes))
                (e-stage (car entry))
                (e-kind (car (cdr entry)))
@@ -19,6 +19,18 @@
               e-body
               (loop (cdr passes)))))))
   (loop __lain-passes)))
+
+;; Required stages use this accessor so a missing registration cannot silently
+;; turn into a successful no-op. Optional stages must call pipeline.lookup and
+;; handle #f at the call site.
+(define (pipeline.rule stage kind)
+  (let* ((body (pipeline.lookup stage kind)))
+    (if body
+        body
+        (error (string-append "missing required pipeline pass: "
+                              (symbol->string stage)
+                              "/"
+                              (symbol->string kind))))))
 
 ;; ---------------------------------------------------------------------------
 ;; 驱动管线
@@ -43,7 +55,7 @@
   ;; 从树格式的 form 中提取调度关键字，无需 cursor
   (let* ((kind (form.keyword root-form)))
     (if (not kind)
-        unit
+        (error "unknown top-level form: unable to determine form keyword")
         (let* ((parser (driver.lookup-form-parser kind)))
           (if parser
               (begin
@@ -51,26 +63,9 @@
                 (if (null? (declarations.all))
                     (error "form-parser produced no declarations")
                     unit))
-              (driver.parse-as-implicit-main root-form))))))
-
-;; Helper: 当 form 不是已知声明时，当做隐式 main 函数体处理
-(define (driver.parse-as-implicit-main root-form)
-  (let* ((tree (form.tree root-form))
-         ;; 隐式 main: 把整棵树当作函数体（暂用 lain-quote 包装）
-         (block (lain-quote `(block (tail ,(lain-quote `(number 0))))))
-         (sig (raw.node! '|fn.sig|
-                (record '|fn.sig|
-                  (record.field '|attrs| (list))
-                  (record.field '|generics| (list))
-                  (record.field '|params| (list))
-                  (record.field '|return|
-                    (raw.node! '|ty.path|
-                      (record '|ty.path|
-                        (record.field '|name| '|i32|))))
-                  (record.field '|where| #f)
-                  (record.field '|effects| #f)
-                  (record.field '|body| (optional.some block))))))
-    (decl.define! '|fn| '|main| sig)))
+              (error (string-append "unknown top-level form: no form-parser for `"
+                                    (symbol->string kind)
+                                    "`")))))))
 
 ;; Phase 2: 遍历 (declarations.all)，对每条声明调用 raw-normalizer。
 (define (driver.normalize-decls)
@@ -103,8 +98,10 @@
   (for-each
     (lambda (item)
       (let* ((kind (middle.kind item))
-             (lowerer (pipeline.rule 'core-lowerer kind)))
-        (lowerer item)))
+             ;; Some declaration-only items (for example structs) deliberately
+             ;; have no runtime lowering pass.
+             (lowerer (pipeline.lookup 'core-lowerer kind)))
+        (if lowerer (lowerer item) unit)))
     middle-items))
 
 ;; ---------------------------------------------------------------------------

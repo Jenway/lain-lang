@@ -1,0 +1,53 @@
+struct ExportEntry {
+    name: i32,
+    link_symbol: i32,
+    has_next: i32,
+    next: addr,
+}
+
+fn module_error_missing_export() -> i32 { 4101 }
+fn module_error_missing_dependency() -> i32 { 4102 }
+fn module_error_duplicate_export() -> i32 { 4103 }
+
+fn export_match_count(entry: ExportEntry, name_symbol: i32) -> i32 {
+    let self_count: i32 = if entry.name == name_symbol { 1 } else { 0 };
+    let next_count: i32 = if entry.has_next == 0 { 0 } else { export_match_count(entry.next, name_symbol) };
+    return self_count + next_count;
+}
+
+fn export_link(entry: ExportEntry, name_symbol: i32) -> i32 {
+    if entry.name == name_symbol { return entry.link_symbol; }
+    if entry.has_next == 0 { return 0; }
+    return export_link(entry.next, name_symbol);
+}
+
+fn resolve_export_score(dependency_matches: i32, entry: ExportEntry, package_symbol: i32, path_symbol: i32, name_symbol: i32) -> i32 {
+    if dependency_matches == 0 {
+        return module_error_missing_dependency() + package_symbol + path_symbol;
+    }
+    let matches: i32 = export_match_count(entry, name_symbol);
+    if matches == 0 {
+        return module_error_missing_export() + package_symbol + path_symbol + name_symbol;
+    }
+    if matches != 1 {
+        return module_error_duplicate_export() + package_symbol + path_symbol + name_symbol;
+    }
+    return 1 + export_link(entry, name_symbol);
+}
+
+pub fn module_resolution_two_exports_score(package_symbol: i32, path_symbol: i32, first_name: i32, first_link: i32, second_name: i32, second_link: i32, wanted_name: i32) -> i32 {
+    let second: ExportEntry = ExportEntry { name: second_name, link_symbol: second_link, has_next: 0, next: 0 };
+    let first: ExportEntry = ExportEntry { name: first_name, link_symbol: first_link, has_next: 1, next: second };
+    return resolve_export_score(1, first, package_symbol, path_symbol, wanted_name);
+}
+
+pub fn module_resolution_missing_dependency_score(package_symbol: i32, path_symbol: i32, name_symbol: i32) -> i32 {
+    let only: ExportEntry = ExportEntry { name: name_symbol, link_symbol: 11, has_next: 0, next: 0 };
+    return resolve_export_score(0, only, package_symbol, path_symbol, name_symbol);
+}
+
+pub fn module_resolution_duplicate_export_code(package_symbol: i32, path_symbol: i32, name_symbol: i32) -> i32 {
+    let second: ExportEntry = ExportEntry { name: name_symbol, link_symbol: 22, has_next: 0, next: 0 };
+    let first: ExportEntry = ExportEntry { name: name_symbol, link_symbol: 11, has_next: 1, next: second };
+    return resolve_export_score(1, first, 0, 0, name_symbol) - name_symbol;
+}
