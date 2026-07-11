@@ -8,6 +8,7 @@ static char *read_file(const char *path) {
   FILE *f = fopen(path, "r");
   char *buf;
   long sz;
+  size_t read_sz;
   if (!f) {
     perror(path);
     return NULL;
@@ -20,8 +21,8 @@ static char *read_file(const char *path) {
     fclose(f);
     return NULL;
   }
-  fread(buf, 1, sz, f);
-  buf[sz] = 0;
+  read_sz = fread(buf, 1, sz, f);
+  buf[read_sz] = 0;
   fclose(f);
   return buf;
 }

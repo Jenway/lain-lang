@@ -466,12 +466,15 @@ static AstNodeId pratt_parse_group(PrattParser *p, TokenType close,
     ast_set_op(p->arena, group, delim_atom);
   }
 
-  AstNodeId *next_slot = &p->arena->nodes[group].left;
+  AstNodeId last_child = AST_NULL;
   while (p->current.type != close && p->current.type != TOK_EOF) {
     AstNodeId child = pratt_parse_expr(p, 0);
     if (child != AST_NULL) {
-      *next_slot = child;
-      next_slot = &p->arena->nodes[child].next;
+      if (last_child == AST_NULL)
+        ast_set_left(p->arena, group, child);
+      else
+        ast_set_next(p->arena, last_child, child);
+      last_child = child;
     }
     if (p->current.type == TOK_SEMICOLON || p->current.type == TOK_COMMA) {
       // 保留分号/逗号作为 ATOM token (旧 lexer 也是如此)
@@ -479,8 +482,11 @@ static AstNodeId pratt_parse_group(PrattParser *p, TokenType close,
       AstNodeId punct = ast_alloc(p->arena, AST_ATOM, tok.line, tok.col);
       ast_set_text(p->arena, punct,
                    ast_intern(p->arena, tok.start, tok.length));
-      *next_slot = punct;
-      next_slot = &p->arena->nodes[punct].next;
+      if (last_child == AST_NULL)
+        ast_set_left(p->arena, group, punct);
+      else
+        ast_set_next(p->arena, last_child, punct);
+      last_child = punct;
       pratt_advance(p);
     }
   }
@@ -689,13 +695,16 @@ AstNodeId ast_parse(AstArena *arena, const char *src, uint32_t len) {
 
   // 顶层: 分号分隔的表达式序列
   AstNodeId root = ast_alloc(arena, AST_GROUP, 1, 1);
-  AstNodeId *next_slot = &arena->nodes[root].left;
+  AstNodeId last_child = AST_NULL;
 
   while (p.current.type != TOK_EOF) {
     AstNodeId expr = pratt_parse_expr(&p, 0);
     if (expr != AST_NULL) {
-      *next_slot = expr;
-      next_slot = &arena->nodes[expr].next;
+      if (last_child == AST_NULL)
+        ast_set_left(arena, root, expr);
+      else
+        ast_set_next(arena, last_child, expr);
+      last_child = expr;
     } else {
       pratt_advance(&p);
     }

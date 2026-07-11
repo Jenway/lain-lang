@@ -67,6 +67,15 @@ PREPARE_INTERFACES: dict[tuple[str, str], tuple[str, ...]] = {
         "packages/lain/compiler/module_ast_score.lain",
         "packages/lain/compiler/ir_builder.lain",
         "packages/lain/compiler/diagnostic.lain",
+        "packages/lain/compiler/compile_result.lain",
+        "packages/lain/compiler/lainc.lain",
+    ),
+    ("meta", "import_lain_compiler_compile_result"): (
+        "packages/lain/compiler/module_ast_summary.lain",
+        "packages/lain/compiler/module_ast_score.lain",
+        "packages/lain/compiler/ir_builder.lain",
+        "packages/lain/compiler/diagnostic.lain",
+        "packages/lain/compiler/compile_result.lain",
         "packages/lain/compiler/lainc.lain",
     ),
     ("meta", "lower_i32_literal_to_ir"): (
@@ -80,10 +89,13 @@ PREPARE_INTERFACES: dict[tuple[str, str], tuple[str, ...]] = {
 
 
 def compiler_path() -> pathlib.Path:
-    exe = ROOT / "src" / "compiler" / "lainc.exe"
-    if exe.exists():
-        return exe
-    return ROOT / "src" / "compiler" / "lainc"
+    names = ("lainc.exe", "lainc")
+    for directory in (ROOT / "zig-out" / "bin", ROOT / "src" / "compiler"):
+        for name in names:
+            candidate = directory / name
+            if candidate.exists():
+                return candidate
+    return ROOT / "zig-out" / "bin" / names[0]
 
 
 def parse_cases() -> list[Case]:

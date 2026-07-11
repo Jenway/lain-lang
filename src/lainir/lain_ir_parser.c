@@ -81,7 +81,15 @@ static void parse_fail(Parser *p, const char *message) {
 }
 
 static char *token_string(Token token) {
-  return strndup(token.text, token.len);
+  size_t len = (size_t)token.len;
+  char *copy = malloc(len + 1);
+  if (!copy) {
+    fprintf(stderr, "lainir parser: out of memory\n");
+    exit(1);
+  }
+  memcpy(copy, token.text, len);
+  copy[len] = '\0';
+  return copy;
 }
 
 static void parser_reset_subroutine_context(Parser *p) {
@@ -817,6 +825,17 @@ static L1Subroutine *parse_subroutine(Parser *p) {
   expect(p, TK_ARROW);
   sub->ret_ty = parse_type(p);
   expect(p, TK_LBRACE);
+
+  /* Older text emitters wrote instructions directly inside the procedure
+     braces. Treat that spelling as an implicit entry block while retaining
+     labeled blocks as the canonical format emitted by current builds. */
+  if (p->current.kind != TK_IDENT && p->current.kind != TK_RBRACE) {
+    L1Block *block = parse_block_instructions(p);
+    block->parent = sub;
+    sub->blocks = block;
+    sub->blocks_tail = block;
+    tail = block;
+  }
 
   while (p->current.kind == TK_IDENT) {
     L1Block *block = parse_block(p);

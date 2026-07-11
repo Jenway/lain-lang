@@ -335,7 +335,9 @@ static void emit_l1_subroutine(L1Subroutine *sub, FILE *out) {
   fprintf(out, " {\n");
 
   L1Block *block = sub->blocks;
+  uint32_t block_index = 0;
   while (block) {
+    fprintf(out, "block_%u:\n", block_index++);
     emit_l1_block(block, out, "  ");
     block = block->next;
   }

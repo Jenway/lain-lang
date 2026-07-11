@@ -8,7 +8,20 @@ import re
 # ── 1. 配置路径与编译器指令 ──────────────────────────────────────────
 
 WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-COMPILER_BIN = os.path.join(WORKSPACE_ROOT, "src", "compiler", "lainc")
+def compiler_path():
+    names = ("lainc.exe", "lainc")
+    for directory in (
+        os.path.join(WORKSPACE_ROOT, "zig-out", "bin"),
+        os.path.join(WORKSPACE_ROOT, "src", "compiler"),
+    ):
+        for name in names:
+            candidate = os.path.join(directory, name)
+            if os.path.exists(candidate):
+                return candidate
+    return os.path.join(WORKSPACE_ROOT, "zig-out", "bin", names[0])
+
+
+COMPILER_BIN = compiler_path()
 
 # 配置 Chibi 虚拟机的环境变量，保证测试时加载正确
 ENV = os.environ.copy()
