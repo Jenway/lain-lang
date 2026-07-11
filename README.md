@@ -32,4 +32,15 @@ Lain aims to keep the compiler small and move most high-level language features 
 
 ## Build and Run
 
-TBD
+Zig 0.16 or newer is the primary stage-0 build tool:
+
+```text
+zig build                         # build and install lainc, l1c, and l1i
+zig build test                    # build everything and run core tests
+zig build lainc -Dscheme=gauche  # select the Scheme host explicitly
+zig build lainc -Dscheme=chibi
+```
+
+Build products are installed under `zig-out/bin`. On Windows the default
+Scheme backend is Gauche; other platforms default to the bundled Chibi setup.
+The legacy Makefile remains available during the transition.
