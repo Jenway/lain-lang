@@ -10,8 +10,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-OUT = ROOT / "build/core-self-hosting/m3_meta_compiler.l1"
-PARTS = ROOT / "build/core-self-hosting/m3-parts"
+OUT = ROOT / "build/core-self-hosting/meta_compiler.l1"
+PARTS = ROOT / "build/core-self-hosting/artifact-parts"
 MODULES = (
     "packages/lain/compiler/mini_syntax.lain",
     "packages/lain/compiler/mini_middle.lain",
@@ -117,7 +117,7 @@ def build() -> Path:
             missing = sorted(EXPECTED_HOST_CAPABILITIES - externs)
             unexpected = sorted(externs - EXPECTED_HOST_CAPABILITIES)
             raise RuntimeError(
-                "M3 artifact capability contract changed: "
+                "Meta artifact capability contract changed: "
                 f"missing={missing}, unexpected={unexpected}"
             )
         OUT.write_text(

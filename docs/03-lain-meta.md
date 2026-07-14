@@ -192,7 +192,7 @@ M3 不再为每次目标编译递归 source-link 整个 Lain Meta 实现。Stage
 提供的 extern，并保留真正的 host extern，形成可重复装载的：
 
 ```text
-build/core-self-hosting/m3_meta_compiler.l1
+build/core-self-hosting/meta_compiler.l1
 ```
 
 运行 compiler artifact 与运行普通生成程序具有不同 capability policy：

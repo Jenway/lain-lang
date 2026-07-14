@@ -1,6 +1,6 @@
 # Bootstrap Core Meta
 
-Pending tests for Lain-written compiler slices:
+Lain-written compiler capability slices:
 
 ```text
 split_comma_group.lain
@@ -10,4 +10,3 @@ diagnostic_builder.lain
 ```
 
 These cases protect the first migration path from Scheme meta code to Lain meta code.
-

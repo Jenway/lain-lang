@@ -32,7 +32,7 @@ Current scope:
   used by Lain-owned frontends
 
 M3 builds these modules once, in dependency order, into
-`build/core-self-hosting/m3_meta_compiler.l1`.  The reusable artifact declares
+`build/core-self-hosting/meta_compiler.l1`.  The reusable artifact declares
 only its required host capabilities and can compile target source without
 source-linking the compiler graph through Scheme on every invocation.
 The artifact loader enforces a host-side allowlist in addition to checking the

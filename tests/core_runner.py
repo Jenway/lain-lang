@@ -25,6 +25,7 @@ def main() -> int:
     python = sys.executable
     suites = [
         ("core/ast", [python, "tests/core/ast/run_ast_golden.py"]),
+        ("core/examples", [python, "tests/core/examples/run_examples.py"]),
         ("core/boundaries", [python, "tests/core/boundaries/boundary_lint.py"]),
         (
             "core/bootstrap-execution",

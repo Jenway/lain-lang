@@ -31,60 +31,6 @@ class Case:
 
 PREPARE_INTERFACES: dict[tuple[str, str], tuple[str, ...]] = {
     ("comptime", "comptime_read_fixture"): ("std/build.lain",),
-    ("ir_builder", "import_std_bootstrap_ir_builder"): (
-        "std/bootstrap/ir_builder.lain",
-    ),
-    ("meta", "import_std_bootstrap_ast_type"): (
-        "std/bootstrap/ast_tree.lain",
-        "std/bootstrap/type_shape.lain",
-    ),
-    ("meta", "import_lain_compiler_core"): (
-        "packages/lain/compiler/ast.lain",
-        "packages/lain/compiler/type_shape.lain",
-        "packages/lain/compiler/diagnostic.lain",
-    ),
-    ("meta", "import_lain_compiler_ast_sexpr"): (
-        "packages/lain/compiler/ast_sexpr.lain",
-    ),
-    ("meta", "import_lain_compiler_module"): (
-        "packages/lain/compiler/module.lain",
-        "packages/lain/compiler/module_query.lain",
-        "packages/lain/compiler/module_dependency.lain",
-        "packages/lain/compiler/module_diagnostic.lain",
-    ),
-    ("meta", "import_lain_compiler_module_ast"): (
-        "packages/lain/compiler/module_ast.lain",
-    ),
-    ("meta", "import_lain_compiler_module_ast_summary"): (
-        "packages/lain/compiler/module_ast_summary.lain",
-        "packages/lain/compiler/module_ast_score.lain",
-    ),
-    ("meta", "import_lain_compiler_module_resolution"): (
-        "packages/lain/compiler/module_resolution.lain",
-    ),
-    ("meta", "import_lain_compiler_lainc"): (
-        "packages/lain/compiler/module_ast_summary.lain",
-        "packages/lain/compiler/module_ast_score.lain",
-        "packages/lain/compiler/ir_builder.lain",
-        "packages/lain/compiler/diagnostic.lain",
-        "packages/lain/compiler/compile_result.lain",
-        "packages/lain/compiler/lainc.lain",
-    ),
-    ("meta", "import_lain_compiler_compile_result"): (
-        "packages/lain/compiler/module_ast_summary.lain",
-        "packages/lain/compiler/module_ast_score.lain",
-        "packages/lain/compiler/ir_builder.lain",
-        "packages/lain/compiler/diagnostic.lain",
-        "packages/lain/compiler/compile_result.lain",
-        "packages/lain/compiler/lainc.lain",
-    ),
-    ("meta", "lower_i32_literal_to_ir"): (
-        "packages/lain/compiler/ir_builder.lain",
-        "packages/lain/compiler/literal_lowering.lain",
-    ),
-    ("ir_builder", "import_lain_compiler_ir_builder"): (
-        "packages/lain/compiler/ir_builder.lain",
-    ),
     ("ir_builder", "import_lain_compiler_l1_unit"): (
         "packages/lain/compiler/l1_type.lain",
         "packages/lain/compiler/l1_value.lain",

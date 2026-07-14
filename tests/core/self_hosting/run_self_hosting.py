@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the coarse-grained generated-L1 execution capability."""
+"""Exercise the reusable Lain-written Meta compiler artifact."""
 
 from __future__ import annotations
 
@@ -10,22 +10,24 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-SOURCE = ROOT / "tests/core/self_hosting/execute_generated_text.lain"
 AST_CONTRACT_SOURCE = ROOT / "tests/core/self_hosting/ast_capability_contract.lain"
 IMPORT_SOURCE = ROOT / "tests/core/self_hosting/import_l1_unit_emitter.lain"
-M3_ARTIFACT_SOURCE = ROOT / "tests/core/self_hosting/m3_artifact_end_to_end.lain"
-M4_FRONTEND_SOURCE = ROOT / "tests/core/self_hosting/m4_self_compile_frontend.lain"
-M4_DIAGNOSTICS_SOURCE = (
-    ROOT / "tests/core/self_hosting/m4_compile_result_diagnostics.lain"
+ARTIFACT_MODULES_SOURCE = (
+    ROOT / "tests/core/self_hosting/artifact_compiles_real_modules.lain"
 )
-M3_ARTIFACT_BUILDER = ROOT / "tests/core/self_hosting/build_m3_artifact.py"
-M3_ARTIFACT = ROOT / "build/core-self-hosting/m3_meta_compiler.l1"
+SELF_COMPILE_SOURCE = (
+    ROOT / "tests/core/self_hosting/artifact_self_compiles_frontend.lain"
+)
+DIAGNOSTICS_SOURCE = (
+    ROOT / "tests/core/self_hosting/compile_result_diagnostics.lain"
+)
+ARTIFACT_BUILDER = ROOT / "tests/core/self_hosting/build_meta_artifact.py"
+META_ARTIFACT = ROOT / "build/core-self-hosting/meta_compiler.l1"
 INVALID_SOURCE = ROOT / "tests/core/self_hosting/reject_invalid_generated_text.lain"
 UNAUTHORIZED_CAPABILITY_SOURCE = (
     ROOT / "tests/core/self_hosting/reject_unauthorized_compiler_capability.lain"
 )
 OUT_DIR = ROOT / "build/core-self-hosting"
-OUT_L1 = OUT_DIR / "execute_generated_text.l1"
 
 
 def tool(name: str) -> Path:
@@ -53,15 +55,6 @@ def main() -> int:
         print(f"FAIL ast.* capability contract returned {contract.stdout.strip()!r}")
         return 1
 
-    # --interpret compiles the Lain component and executes it through the
-    # in-process interpreter, preserving its explicit host capability table.
-    executed = run([str(lainc), "--interpret", str(SOURCE), "main"])
-    if executed.returncode != 0:
-        print(f"FAIL executing stage-1 component: {(executed.stderr or executed.stdout).strip()}")
-        return 1
-    if executed.stdout.strip() != "42":
-        print(f"FAIL expected generated target result 42, got {executed.stdout.strip()!r}")
-        return 1
     imported = run([str(lainc), "--interpret", str(IMPORT_SOURCE), "main"])
     if imported.returncode != 0:
         print("FAIL executing imported L1Unit emitter: "
@@ -71,41 +64,42 @@ def main() -> int:
         print("FAIL expected imported L1Unit emitter result 42, got "
               f"{imported.stdout.strip()!r}")
         return 1
-    built = run([sys.executable, str(M3_ARTIFACT_BUILDER)])
-    if built.returncode != 0 or not M3_ARTIFACT.exists():
-        print("FAIL building reusable M3 compiler artifact: "
+    built = run([sys.executable, str(ARTIFACT_BUILDER)])
+    if built.returncode != 0 or not META_ARTIFACT.exists():
+        print("FAIL building reusable Meta compiler artifact: "
               f"{(built.stderr or built.stdout).strip()}")
         return 1
-    checked = run([str(tool("l1check")), str(M3_ARTIFACT), "mini_meta_compile"])
+    checked = run([str(tool("l1check")), str(META_ARTIFACT), "mini_meta_compile"])
     if checked.returncode != 0:
-        print(f"FAIL verifying M3 compiler artifact: {checked.stderr.strip()}")
+        print(f"FAIL verifying Meta compiler artifact: {checked.stderr.strip()}")
         return 1
-    m3 = run([str(lainc), "--interpret", str(M3_ARTIFACT_SOURCE), "main"])
-    if m3.returncode != 0:
-        print("FAIL executing reusable M3 compiler artifact: "
-              f"{(m3.stderr or m3.stdout).strip()}")
+    modules = run([str(lainc), "--interpret", str(ARTIFACT_MODULES_SOURCE), "main"])
+    if modules.returncode != 0:
+        print("FAIL executing reusable Meta compiler artifact: "
+              f"{(modules.stderr or modules.stdout).strip()}")
         return 1
-    if m3.stdout.strip() != "42":
-        print(f"FAIL expected reusable M3 compiler artifact result 42, got {m3.stdout.strip()!r}")
+    if modules.stdout.strip() != "42":
+        print("FAIL expected reusable Meta compiler artifact result 42, got "
+              f"{modules.stdout.strip()!r}")
         return 1
-    frontend = run([str(lainc), "--interpret", str(M4_FRONTEND_SOURCE), "main"])
+    frontend = run([str(lainc), "--interpret", str(SELF_COMPILE_SOURCE), "main"])
     if frontend.returncode != 0:
-        print("FAIL M4 self-compiling frontend foundation: "
+        print("FAIL self-compiling frontend foundation: "
               f"{(frontend.stderr or frontend.stdout).strip()}")
         return 1
     if frontend.stdout.strip() != "42":
-        print("FAIL expected M4 frontend self-compile result 42, got "
+        print("FAIL expected frontend self-compile result 42, got "
               f"{frontend.stdout.strip()!r}")
         return 1
     diagnostics = run([
-        str(lainc), "--interpret", str(M4_DIAGNOSTICS_SOURCE), "main"
+        str(lainc), "--interpret", str(DIAGNOSTICS_SOURCE), "main"
     ])
     if diagnostics.returncode != 0:
-        print("FAIL M4 structured CompileResult diagnostics: "
+        print("FAIL structured CompileResult diagnostics: "
               f"{(diagnostics.stderr or diagnostics.stdout).strip()}")
         return 1
     if diagnostics.stdout.strip() != "42":
-        print("FAIL expected M4 CompileResult diagnostic result 42, got "
+        print("FAIL expected CompileResult diagnostic result 42, got "
               f"{diagnostics.stdout.strip()!r}")
         return 1
     rejected = run([str(lainc), "--interpret", str(INVALID_SOURCE), "main"])
@@ -123,7 +117,7 @@ def main() -> int:
         print("FAIL unauthorized compiler capability did not produce policy diagnostic: "
               f"{(unauthorized.stderr or unauthorized.stdout).strip()}")
         return 1
-    print("PASS M4 artifact self-compiled the complete mini frontend core and diagnostics: 42")
+    print("PASS Meta artifact compiled real modules, self-compiled the frontend, and reported diagnostics: 42")
     return 0
 
 

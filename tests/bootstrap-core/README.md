@@ -1,8 +1,9 @@
 # Bootstrap Core Tests
 
-这些测试定义 Lain `0.1.0` 的旧世界完成线。
+这些测试定义自举编译器仍然依赖的最小 Lain 语言能力。
 
-这里不追求覆盖所有语言特性。每个测试都必须证明旧世界能支撑一块 Lain-meta compiler code。
+这里不追求覆盖所有语言特性，也不再保护已经被 M4 Meta artifact 取代的
+旧 compiler-core 实现。每个测试都必须证明当前自举路径仍然需要的一项能力。
 
 ## Layout
 
