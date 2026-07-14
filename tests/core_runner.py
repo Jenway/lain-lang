@@ -30,6 +30,8 @@ def main() -> int:
             "core/bootstrap-execution",
             [python, "tests/core/bootstrap_execution/run_bootstrap_execution.py"],
         ),
+        ("core/lainir-contract", [python, "tests/core/lainir_contract/run_contract.py"]),
+        ("core/self-hosting", [python, "tests/core/self_hosting/run_self_hosting.py"]),
         ("core/scheme-host", [python, "tests/core/scheme_host/run_scheme_host_smoke.py"]),
         ("bootstrap-core", [python, "tests/bootstrap-core/run_bootstrap_core.py"]),
     ]

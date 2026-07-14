@@ -92,5 +92,7 @@ const char *ast_intern(AstArena *a, const char *start, uint32_t len) {
 }
 
 uint32_t ast_count(const AstArena *a) {
-    return a->count;
+    // Slot 0 is the permanent AST_NULL sentinel, not a syntax node.  Keep
+    // the public count aligned with the observable ast.node-* domain.
+    return a->count > 0 ? a->count - 1 : 0;
 }

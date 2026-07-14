@@ -15,6 +15,25 @@ typedef struct {
   vm_value *args;
 } LainirExecRequest;
 
+typedef struct {
+  const char *text;
+  const char *entry_name;
+  const LainirValue *args;
+  uint32_t arg_count;
+  vm_context *host_ctx;
+  vm_value *host_env;
+  const char *const *allowed_capabilities;
+  uint32_t allowed_capability_count;
+} LainirExecTextRequest;
+
+/* Coarse-grained bootstrap capability.  The caller owns the source text;
+ * parsing creates a private module which is always released before return.
+ * A successful STRING result is heap-owned by the caller. */
+LainirExecStatus lainir_exec_text_request(
+  const LainirExecTextRequest *request,
+  LainirValue *result_out,
+  L1Diagnostic *diagnostic);
+
 LainirExecStatus lainir_exec_request(
   vm_context *ctx,
   vm_value *env,

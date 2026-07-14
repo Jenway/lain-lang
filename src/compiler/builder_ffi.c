@@ -129,6 +129,7 @@ static sexp sexp_core_make_set(sexp ctx, sexp self, sexp_sint_t n,
   L1Instruction *inst = malloc(sizeof(L1Instruction));
   inst->kind = INST_SET;
   inst->data.set.name = strdup(name);
+  inst->data.set.ty = NULL;
   inst->data.set.val = val;
   inst->next = NULL;
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, inst, SEXP_FALSE, 0);
@@ -571,6 +572,7 @@ static sexp sexp_core_assign_temp(sexp ctx, sexp self, sexp_sint_t n,
   L1Instruction *inst = malloc(sizeof(L1Instruction));
   inst->kind = INST_SET;
   inst->data.set.name = strdup(name);
+  inst->data.set.ty = NULL;
   inst->data.set.val = expr;
   inst->next = NULL;
   append_instruction(g_current_sub, inst);
@@ -753,7 +755,8 @@ static sexp sexp_core_param(sexp ctx, sexp self, sexp_sint_t n,
   uint32_t idx = sexp_unbox_fixnum(arg_index);
   L1Expr *expr = malloc(sizeof(L1Expr));
   expr->kind = EXPR_ARG;
-  expr->data.arg_idx = idx;
+  expr->data.arg.index = idx;
+  expr->data.arg.ty = NULL;
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, expr, SEXP_FALSE, 0);
 }
 
@@ -887,6 +890,7 @@ static sexp sexp_core_aggregate_layout(sexp ctx, sexp self, sexp_sint_t n,
   L1Instruction *set_inst = malloc(sizeof(L1Instruction));
   set_inst->kind = INST_SET;
   set_inst->data.set.name = strdup(agg_name);
+  set_inst->data.set.ty = NULL;
   set_inst->data.set.val = alloca_expr;
   set_inst->next = NULL;
   append_inst_to_block(block, set_inst);
@@ -1007,6 +1011,49 @@ static sexp sexp_ast_node_text(sexp ctx, sexp self, sexp_sint_t n,
     const AstNode *node = ast_get(&g_ast_arena, id);
     if (!node || !node->text) return SEXP_FALSE;
     return sexp_c_string(ctx, node->text, -1);
+}
+
+// Batched topology predicates used by the self-hosted Meta reader.  They do
+// not assign language meaning; they only avoid repeated VM crossings for the
+// common kind/op/text query sequences.
+static sexp sexp_ast_node_is_atom_text(sexp ctx, sexp self, sexp_sint_t n,
+                                       sexp arg_id, sexp arg_text) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    const char *text = sexp_to_c_string(ctx, arg_text);
+    return sexp_make_fixnum(node && node->kind == AST_ATOM && node->text &&
+                            text && strcmp(node->text, text) == 0 ? 1 : 0);
+}
+
+static sexp sexp_ast_node_is_infix_text(sexp ctx, sexp self, sexp_sint_t n,
+                                        sexp arg_id, sexp arg_text) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    const AstNode *op = node ? ast_get(&g_ast_arena, node->op) : NULL;
+    const char *text = sexp_to_c_string(ctx, arg_text);
+    return sexp_make_fixnum(node && node->kind == AST_INFIX && op && op->text &&
+                            text && strcmp(op->text, text) == 0 ? 1 : 0);
+}
+
+// 0=non-atom, 1=canonical unsigned decimal atom, 2=quoted atom, 3=other atom.
+static sexp sexp_ast_node_atom_class(sexp ctx, sexp self, sexp_sint_t n,
+                                     sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_get(&g_ast_arena, id);
+    const char *text;
+    size_t len;
+    size_t i;
+    if (!node || node->kind != AST_ATOM || !node->text)
+        return sexp_make_fixnum(0);
+    text = node->text;
+    len = strlen(text);
+    if (len >= 2 && text[0] == '"' && text[len - 1] == '"')
+        return sexp_make_fixnum(2);
+    if (len > 0 && !(len > 1 && text[0] == '0')) {
+        for (i = 0; i < len && text[i] >= '0' && text[i] <= '9'; i++) {}
+        if (i == len) return sexp_make_fixnum(1);
+    }
+    return sexp_make_fixnum(3);
 }
 
 // ast.node-line(id) → line number
@@ -1163,6 +1210,9 @@ void native_register_core_ffi(
   REG("ast.node-count", 0, sexp_ast_node_count);
   REG("ast.node-kind", 1, sexp_ast_node_kind);
   REG("ast.node-text", 1, sexp_ast_node_text);
+  REG("ast.node-is-atom-text", 2, sexp_ast_node_is_atom_text);
+  REG("ast.node-is-infix-text", 2, sexp_ast_node_is_infix_text);
+  REG("ast.node-atom-class", 1, sexp_ast_node_atom_class);
   REG("ast.node-line", 1, sexp_ast_node_line);
   REG("ast.node-col", 1, sexp_ast_node_col);
   REG("ast.node-left", 1, sexp_ast_node_left);

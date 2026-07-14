@@ -33,7 +33,7 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
     fprintf(out, "%lld", (long long)expr->data.const_val);
     break;
   case EXPR_ARG:
-    fprintf(out, "%%arg%d", expr->data.arg_idx);
+    fprintf(out, "%%arg%d", expr->data.arg.index);
     break;
   case EXPR_ADD:
     fprintf(out, "#add(");
@@ -247,12 +247,18 @@ static void emit_l1_block(L1Block *block, FILE *out, const char *indent) {
   while (inst) {
     switch (inst->kind) {
     case INST_LET:
-      fprintf(out, "%s%%%s = ", indent, inst->data.let.name);
+      fprintf(out, "%s#let %%%s: ", indent, inst->data.let.name);
+      emit_l1_type(inst->data.let.ty ? inst->data.let.ty :
+                       infer_expr_type(inst->data.let.val), out);
+      fprintf(out, " = ");
       emit_l1_expr(inst->data.let.val, out);
       fprintf(out, "\n");
       break;
     case INST_SET:
-      fprintf(out, "%s%%%s = ", indent, inst->data.set.name);
+      fprintf(out, "%s%%%s: ", indent, inst->data.set.name);
+      emit_l1_type(inst->data.set.ty ? inst->data.set.ty :
+                       infer_expr_type(inst->data.set.val), out);
+      fprintf(out, " = ");
       emit_l1_expr(inst->data.set.val, out);
       fprintf(out, "\n");
       break;
@@ -323,6 +329,19 @@ static void emit_l1_block(L1Block *block, FILE *out, const char *indent) {
 }
 
 static void emit_l1_subroutine(L1Subroutine *sub, FILE *out) {
+  if (sub->is_extern && !sub->blocks) {
+    fprintf(out, "#extern #proc %s(",
+            sub->link_name ? sub->link_name : sub->name);
+    for (uint32_t i = 0; i < sub->param_count; i++) {
+      emit_l1_type(sub->param_tys[i], out);
+      fprintf(out, " %%arg%d", i);
+      if (i < sub->param_count - 1) fprintf(out, ", ");
+    }
+    fprintf(out, ") -> ");
+    emit_l1_type(sub->ret_ty, out);
+    fprintf(out, ";\n\n");
+    return;
+  }
   if (!sub->blocks) return;
   fprintf(out, "#proc %s(", sub->name);
   for (uint32_t i = 0; i < sub->param_count; i++) {
@@ -335,9 +354,7 @@ static void emit_l1_subroutine(L1Subroutine *sub, FILE *out) {
   fprintf(out, " {\n");
 
   L1Block *block = sub->blocks;
-  uint32_t block_index = 0;
   while (block) {
-    fprintf(out, "block_%u:\n", block_index++);
     emit_l1_block(block, out, "  ");
     block = block->next;
   }

@@ -78,7 +78,7 @@ const AstNode *ast_get(const AstArena *a, AstNodeId id);
 // 字符串 intern: 相同内容返回相同指针
 const char *ast_intern(AstArena *a, const char *start, uint32_t len);
 
-// 节点总数
+// 节点总数 (不包含 AST_NULL sentinel)
 uint32_t ast_count(const AstArena *a);
 
 // ── Parser (lain_ast_parser.c) ───────────────────────────────────────

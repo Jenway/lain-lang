@@ -342,6 +342,337 @@ static sexp sexp_core_execute_lainir(sexp ctx, sexp self, sexp_sint_t n,
   return (sexp)result;
 }
 
+static vm_value *ffi_core_execute_lainir_text(
+    vm_context *c, vm_value *self, intptr_t n,
+    vm_value *text_val, vm_value *entry_val) {
+  const char *entry_name = NULL;
+  LainirValue result = lainir_value_unit();
+  L1Diagnostic diagnostic;
+
+  if (!vm_is_string(text_val))
+    return vm_user_exception(c,
+      "core.execute-lainir-text!: text must be a string");
+  if (vm_is_symbol(entry_val))
+    entry_name = vm_symbol_name(c, entry_val);
+  else if (vm_is_string(entry_val))
+    entry_name = vm_string_data(entry_val);
+  if (!entry_name)
+    return vm_user_exception(c,
+      "core.execute-lainir-text!: entry must be a symbol or string");
+
+  LainirExecTextRequest request = {
+    .text = vm_string_data(text_val),
+    .entry_name = entry_name,
+    .args = NULL,
+    .arg_count = 0,
+    .host_ctx = NULL,
+    .host_env = NULL,
+  };
+  if (lainir_exec_text_request(&request, &result, &diagnostic) != LAINIR_EXEC_OK) {
+    if (diagnostic.message[0])
+      fprintf(stderr, "[generated L1 ERROR %d] %s\n",
+              diagnostic.code, diagnostic.message);
+    return vm_user_exception(c,
+      diagnostic.message[0] ? diagnostic.message :
+                              "generated LAIN-IR execution failed");
+  }
+  if (result.kind == LAINIR_VALUE_BITS)
+    return vm_make_integer(c, (int64_t)result.as.bits);
+  if (result.kind == LAINIR_VALUE_STRING) {
+    vm_value *value = vm_make_string(
+      c, result.as.string ? result.as.string : "", -1);
+    free((void *)result.as.string);
+    return value;
+  }
+  if (result.kind == LAINIR_VALUE_UNIT)
+    return vm_void();
+  return vm_user_exception(c,
+    "core.execute-lainir-text!: unsupported result kind");
+}
+
+static vm_value *ffi_core_execute_lainir_text_i32(
+    vm_context *c, vm_value *self, intptr_t n,
+    vm_value *text_val, vm_value *entry_val, vm_value *arg_val) {
+  const char *entry_name = NULL;
+  LainirValue result = lainir_value_unit();
+  LainirValue arg;
+  L1Diagnostic diagnostic;
+  (void)self;
+  (void)n;
+
+  if (!vm_is_string(text_val))
+    return vm_user_exception(c,
+      "core.execute-lainir-text-i32!: text must be a string");
+  if (vm_is_symbol(entry_val))
+    entry_name = vm_symbol_name(c, entry_val);
+  else if (vm_is_string(entry_val))
+    entry_name = vm_string_data(entry_val);
+  if (!entry_name)
+    return vm_user_exception(c,
+      "core.execute-lainir-text-i32!: entry must be a symbol or string");
+  if (!vm_is_integer(arg_val))
+    return vm_user_exception(c,
+      "core.execute-lainir-text-i32!: argument must be an integer");
+
+  arg = lainir_value_bits((uint32_t)vm_uint_value(arg_val), 32);
+  LainirExecTextRequest request = {
+    .text = vm_string_data(text_val),
+    .entry_name = entry_name,
+    .args = &arg,
+    .arg_count = 1,
+    .host_ctx = NULL,
+    .host_env = NULL,
+  };
+  if (lainir_exec_text_request(&request, &result, &diagnostic) != LAINIR_EXEC_OK) {
+    if (diagnostic.message[0])
+      fprintf(stderr, "[generated L1 ERROR %d] %s\n",
+              diagnostic.code, diagnostic.message);
+    return vm_user_exception(c,
+      diagnostic.message[0] ? diagnostic.message :
+                              "generated LAIN-IR execution failed");
+  }
+  if (result.kind == LAINIR_VALUE_BITS)
+    return vm_make_integer(c, (int64_t)result.as.bits);
+  if (result.kind == LAINIR_VALUE_STRING) {
+    vm_value *value = vm_make_string(
+      c, result.as.string ? result.as.string : "", -1);
+    free((void *)result.as.string);
+    return value;
+  }
+  if (result.kind == LAINIR_VALUE_UNIT)
+    return vm_void();
+  return vm_user_exception(c,
+    "core.execute-lainir-text-i32!: unsupported result kind");
+}
+
+static const char *const compiler_artifact_capabilities[] = {
+  "core.string-first-byte!",
+  "core.i32-to-string!",
+  "core.string-is-i32!",
+  "core.string-to-i32!",
+  "core.string-equal!",
+  "core.string-append-linear!",
+  "ast.node-atom-class",
+  "ast.node-is-infix-text",
+  "ast.node-is-atom-text",
+  "ast.node-text",
+  "ast.node-next",
+  "ast.node-op",
+  "ast.node-right",
+  "ast.node-left",
+  "ast.node-kind",
+  "ast.parse!",
+};
+
+static vm_value *ffi_core_execute_compiler_artifact(
+    vm_context *c, vm_value *self, intptr_t n,
+    vm_value *artifact_val, vm_value *entry_val,
+    vm_value *source_val, vm_value *length_val) {
+  const char *entry_name = NULL;
+  LainirValue result = lainir_value_unit();
+  LainirValue args[2];
+  L1Diagnostic diagnostic;
+  (void)self;
+  (void)n;
+  if (!vm_is_string(artifact_val) || !vm_is_string(source_val) ||
+      !vm_is_integer(length_val))
+    return vm_user_exception(c,
+      "core.execute-compiler-artifact!: expected artifact, entry, source, length");
+  if (vm_is_symbol(entry_val))
+    entry_name = vm_symbol_name(c, entry_val);
+  else if (vm_is_string(entry_val))
+    entry_name = vm_string_data(entry_val);
+  if (!entry_name)
+    return vm_user_exception(c,
+      "core.execute-compiler-artifact!: entry must be a symbol or string");
+
+  args[0] = lainir_value_string(vm_string_data(source_val));
+  args[1] = lainir_value_bits((uint32_t)vm_uint_value(length_val), 32);
+  LainirExecTextRequest request = {
+    .text = vm_string_data(artifact_val),
+    .entry_name = entry_name,
+    .args = args,
+    .arg_count = 2,
+    .host_ctx = c,
+    .host_env = vm_context_env(c),
+    .allowed_capabilities = compiler_artifact_capabilities,
+    .allowed_capability_count =
+      (uint32_t)(sizeof(compiler_artifact_capabilities) /
+                 sizeof(compiler_artifact_capabilities[0])),
+  };
+  if (lainir_exec_text_request(&request, &result, &diagnostic) != LAINIR_EXEC_OK) {
+    if (diagnostic.message[0])
+      fprintf(stderr, "[compiler artifact ERROR %d] %s\n",
+              diagnostic.code, diagnostic.message);
+    return vm_user_exception(c,
+      diagnostic.message[0] ? diagnostic.message :
+                              "compiler artifact execution failed");
+  }
+  if (result.kind == LAINIR_VALUE_STRING) {
+    vm_value *value = vm_make_string(
+      c, result.as.string ? result.as.string : "", -1);
+    free((void *)result.as.string);
+    return value;
+  }
+  if (result.kind == LAINIR_VALUE_BITS)
+    return vm_make_integer(c, (int64_t)result.as.bits);
+  return vm_user_exception(c,
+    "core.execute-compiler-artifact!: unsupported result kind");
+}
+
+static vm_value *ffi_core_execute_compiler_artifact_named(
+    vm_context *c, vm_value *self, intptr_t n,
+    vm_value *artifact_val, vm_value *source_val,
+    vm_value *length_val, vm_value *name_val) {
+  const char *entry_name = "mini_meta_compile_named";
+  LainirValue result = lainir_value_unit();
+  LainirValue args[3];
+  L1Diagnostic diagnostic;
+  (void)self;
+  (void)n;
+  if (!vm_is_string(artifact_val) || !vm_is_string(source_val) ||
+      !vm_is_integer(length_val) || !vm_is_string(name_val))
+    return vm_user_exception(c,
+      "core.execute-compiler-artifact-named!: expected artifact, source, length, name");
+
+  args[0] = lainir_value_string(vm_string_data(source_val));
+  args[1] = lainir_value_bits((uint32_t)vm_uint_value(length_val), 32);
+  args[2] = lainir_value_string(vm_string_data(name_val));
+  LainirExecTextRequest request = {
+    .text = vm_string_data(artifact_val),
+    .entry_name = entry_name,
+    .args = args,
+    .arg_count = 3,
+    .host_ctx = c,
+    .host_env = vm_context_env(c),
+    .allowed_capabilities = compiler_artifact_capabilities,
+    .allowed_capability_count =
+      (uint32_t)(sizeof(compiler_artifact_capabilities) /
+                 sizeof(compiler_artifact_capabilities[0])),
+  };
+  if (lainir_exec_text_request(&request, &result, &diagnostic) != LAINIR_EXEC_OK) {
+    if (diagnostic.message[0])
+      fprintf(stderr, "[compiler artifact ERROR %d] %s\n",
+              diagnostic.code, diagnostic.message);
+    return vm_user_exception(c,
+      diagnostic.message[0] ? diagnostic.message :
+                              "named compiler artifact execution failed");
+  }
+  if (result.kind == LAINIR_VALUE_STRING) {
+    vm_value *value = vm_make_string(
+      c, result.as.string ? result.as.string : "", -1);
+    free((void *)result.as.string);
+    return value;
+  }
+  if (result.kind == LAINIR_VALUE_BITS)
+    return vm_make_integer(c, (int64_t)result.as.bits);
+  return vm_user_exception(c,
+    "core.execute-compiler-artifact-named!: unsupported result kind");
+}
+
+/* These are generic bootstrap text capabilities.  They do not understand L1
+ * syntax: Lain owns the emitter grammar and only asks the host to concatenate
+ * strings or render a primitive integer. */
+static vm_value *ffi_core_string_append(
+    vm_context *c, vm_value *self, intptr_t n,
+    vm_value *left, vm_value *right) {
+  const char *left_text;
+  const char *right_text;
+  size_t left_len;
+  size_t right_len;
+  char *joined;
+  vm_value *result;
+
+  (void)self;
+  (void)n;
+  if (!vm_is_string(left) || !vm_is_string(right))
+    return vm_user_exception(c, "core.string-append!: expected two strings");
+  left_text = vm_string_data(left);
+  right_text = vm_string_data(right);
+  left_len = strlen(left_text);
+  right_len = strlen(right_text);
+  joined = malloc(left_len + right_len + 1);
+  if (!joined)
+    return vm_user_exception(c, "core.string-append!: out of memory");
+  memcpy(joined, left_text, left_len);
+  memcpy(joined + left_len, right_text, right_len + 1);
+  result = vm_make_string(c, joined, (int)(left_len + right_len));
+  free(joined);
+  return result;
+}
+
+/* Generic bootstrap text predicate.  This compares opaque source text only;
+ * it deliberately has no knowledge of syntax nodes or L1 grammar. */
+static vm_value *ffi_core_string_equal(
+    vm_context *c, vm_value *self, intptr_t n,
+    vm_value *left, vm_value *right) {
+  (void)self;
+  (void)n;
+  if (!vm_is_string(left) || !vm_is_string(right))
+    return vm_user_exception(c, "core.string-equal!: expected two strings");
+  return vm_make_integer(c,
+    strcmp(vm_string_data(left), vm_string_data(right)) == 0 ? 1 : 0);
+}
+
+static vm_value *ffi_core_string_length(
+    vm_context *c, vm_value *self, intptr_t n, vm_value *value) {
+  (void)self;
+  (void)n;
+  if (!vm_is_string(value))
+    return vm_user_exception(c, "core.string-length!: expected a string");
+  return vm_make_integer(c, (int64_t)strlen(vm_string_data(value)));
+}
+
+static vm_value *ffi_core_string_first_byte(
+    vm_context *c, vm_value *self, intptr_t n, vm_value *value) {
+  const unsigned char *text;
+  (void)self;
+  (void)n;
+  if (!vm_is_string(value))
+    return vm_user_exception(c, "core.string-first-byte!: expected a string");
+  text = (const unsigned char *)vm_string_data(value);
+  return vm_make_integer(c, text[0] ? (int64_t)text[0] : -1);
+}
+
+static vm_value *ffi_core_i32_to_string(
+    vm_context *c, vm_value *self, intptr_t n, vm_value *value) {
+  char text[32];
+  (void)self;
+  (void)n;
+  if (!vm_is_integer(value))
+    return vm_user_exception(c, "core.i32-to-string!: expected an integer");
+  snprintf(text, sizeof(text), "%d", (int32_t)vm_uint_value(value));
+  return vm_make_string(c, text, -1);
+}
+
+static vm_value *ffi_core_string_to_i32(
+    vm_context *c, vm_value *self, intptr_t n, vm_value *text_value) {
+  char *end = NULL;
+  long value;
+  (void)self;
+  (void)n;
+  if (!vm_is_string(text_value))
+    return vm_user_exception(c, "core.string-to-i32!: expected a string");
+  value = strtol(vm_string_data(text_value), &end, 10);
+  if (!end || *end != '\0' || value < INT32_MIN || value > INT32_MAX)
+    return vm_user_exception(c, "core.string-to-i32!: invalid i32 literal");
+  return vm_make_integer(c, (int64_t)value);
+}
+
+static vm_value *ffi_core_string_is_i32(
+    vm_context *c, vm_value *self, intptr_t n, vm_value *text_value) {
+  char *end = NULL;
+  long value;
+  (void)self;
+  (void)n;
+  if (!vm_is_string(text_value))
+    return vm_make_integer(c, 0);
+  value = strtol(vm_string_data(text_value), &end, 10);
+  return vm_make_integer(c,
+    end && end != vm_string_data(text_value) && *end == '\0' &&
+    value >= INT32_MIN && value <= INT32_MAX ? 1 : 0);
+}
+
 // ── Build driver: full multi-file build ──
 // Steps: compute order (Scheme) → compile each module → gcc link
 // compile_fn and interface_fn are provided by the caller (native_compiler.c)
@@ -468,6 +799,11 @@ const char *native_getenv(const char *name) { return getenv(name); }
 
 static uint8_t *g_pending_src = NULL;
 static uint32_t g_pending_len = 0;
+static int g_interpret_source_linking = 0;
+
+void native_set_interpret_source_linking(int enabled) {
+  g_interpret_source_linking = enabled ? 1 : 0;
+}
 
 void *native_lex_and_group(const uint8_t *src, uint32_t len) {
   // Free previous copy if any
@@ -518,6 +854,19 @@ void native_register_runtime_ffi(
   REG("core.module-prefix", 0, sexp_get_module_prefix);
   REG("core.emit-interface!", 1, sexp_core_emit_interface);
   REG("core.execute-lainir!", 2, sexp_core_execute_lainir);
+  REG("core.execute-lainir-text!", 2, ffi_core_execute_lainir_text);
+  REG("core.execute-lainir-text-i32!", 3, ffi_core_execute_lainir_text_i32);
+  REG("core.execute-compiler-artifact!", 4, ffi_core_execute_compiler_artifact);
+  REG("core.execute-compiler-artifact-named!", 4,
+      ffi_core_execute_compiler_artifact_named);
+  REG("core.string-append!", 2, ffi_core_string_append);
+  REG("core.string-append-linear!", 2, ffi_core_string_append);
+  REG("core.string-equal!", 2, ffi_core_string_equal);
+  REG("core.string-length!", 1, ffi_core_string_length);
+  REG("core.string-first-byte!", 1, ffi_core_string_first_byte);
+  REG("core.i32-to-string!", 1, ffi_core_i32_to_string);
+  REG("core.string-to-i32!", 1, ffi_core_string_to_i32);
+  REG("core.string-is-i32!", 1, ffi_core_string_is_i32);
 #undef REG
 }
 
@@ -575,6 +924,10 @@ int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
   // Clear previous compilation state through the meta-owned API.
   vm_eval_string(c, env, "(compiler-state.reset!)");
   vm_eval_string(c, env, "(set! *all-declarations* '())");
+  vm_eval_string(c, env,
+                 g_interpret_source_linking
+                     ? "(import.configure-source-linking! #t)"
+                     : "(import.configure-source-linking! #f)");
 
   vm_value *src_str = vm_make_string(c, (const char *)g_pending_src, (int)g_pending_len);
   vm_value *out_path = vm_make_string(c, "", 0);

@@ -237,17 +237,34 @@ L1Type *infer_expr_type(L1Expr *expr) {
     return expr->data.load.ty;
   case EXPR_ADD:
   case EXPR_SUB:
+  case EXPR_MUL:
+  case EXPR_DIV:
     return infer_expr_type(expr->data.bin.left);
+  case EXPR_EQ:
+  case EXPR_NE:
+  case EXPR_LT:
+  case EXPR_LE:
+  case EXPR_GT:
+  case EXPR_GE:
+  case EXPR_FEQ:
+  case EXPR_FLT:
+    return lainir_new_type(TY_BITS, 1);
+  case EXPR_STRING:
+    /* A string literal denotes the address of immutable backing storage. */
+    return expr->data.str_val.ty ? expr->data.str_val.ty
+                                 : lainir_new_type(TY_ADDR, 64);
   case EXPR_CALL:
     return expr->data.call.ret_ty;
   case EXPR_EVAL:
     return expr->data.eval.ret_ty;
   case EXPR_ARG:
-    return lainir_new_type(TY_BITS, 64);
+    return expr->data.arg.ty;
   case EXPR_FIELD:
     return expr->data.field.field_ty;
   case EXPR_ALLOCA:
     return expr->data.alloca.result_ty;
+  case EXPR_PRIMITIVE:
+    return expr->data.primitive.result_ty;
   default:
     return lainir_new_type(TY_BITS, 64);
   }

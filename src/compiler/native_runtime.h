@@ -39,6 +39,10 @@ void native_register_core_ffi(
   void *user_data);
 void *native_init_scheme(void);
 int32_t native_run_pipeline(void *ctx, void *root_group);
+// Interpreter-only transition mode: imports are elaborated from Lain source
+// into the same in-memory L1 module.  Normal compilation continues to use
+// interface artifacts and does not acquire source-module policy in C.
+void native_set_interpret_source_linking(int enabled);
 
 // code generation helpers
 void native_emit_module_to_file(void *subs, const char *output_path);

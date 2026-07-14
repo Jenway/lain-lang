@@ -75,6 +75,10 @@ def main() -> int:
     if emitted.returncode != 0:
         print(f"FAIL compiling Lain component: {(emitted.stderr or emitted.stdout).strip()}")
         return 1
+    emitted_text = OUT_L1.read_text(encoding="utf-8")
+    if "block_0:" in emitted_text:
+        print("FAIL canonical structured LAIN-IR must not emit CFG block labels")
+        return 1
 
     executed = run([str(L1I), str(OUT_L1), "main", "42"])
     if executed.returncode != 0:
@@ -85,7 +89,13 @@ def main() -> int:
         print(f"FAIL expected 42, got {actual!r}")
         return 1
 
-    print("PASS Lain constant-lowering component -> emitted LAIN-IR -> interpreter result 42")
+    legacy = run([str(L1I), "tests/l1/001_add.l1", "add", "40", "2"])
+    if legacy.returncode != 0 or legacy.stdout.strip() != "42":
+        detail = (legacy.stderr or legacy.stdout).strip()
+        print(f"FAIL parsing legacy labeled LAIN-IR: {detail}")
+        return 1
+
+    print("PASS structured LAIN-IR execution and legacy labeled input compatibility")
     return 0
 
 

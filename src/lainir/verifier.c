@@ -1,0 +1,283 @@
+#include "lainir.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct Name {
+  const char *value;
+  L1Type *ty;
+  const struct Name *next;
+} Name;
+
+typedef struct LoopScope {
+  const char *label;
+  const struct LoopScope *parent;
+} LoopScope;
+
+typedef struct {
+  L1Subroutine *module;
+  L1Subroutine *sub;
+  L1Diagnostic *diagnostic;
+} VerifyContext;
+
+static int fail(VerifyContext *ctx, int code, const char *format, ...) {
+  va_list args;
+  if (ctx->diagnostic) {
+    ctx->diagnostic->code = code;
+    ctx->diagnostic->line = 0;
+    ctx->diagnostic->column = 0;
+    va_start(args, format);
+    vsnprintf(ctx->diagnostic->message, sizeof(ctx->diagnostic->message),
+              format, args);
+    va_end(args);
+  }
+  return 0;
+}
+
+static int same_type(const L1Type *left, const L1Type *right) {
+  return left && right && left->kind == right->kind && left->width == right->width;
+}
+
+static L1Subroutine *find_subroutine(L1Subroutine *head, const char *name) {
+  for (; head; head = head->next)
+    if (head->name && name && strcmp(head->name, name) == 0)
+      return head;
+  return NULL;
+}
+
+static const Name *find_name(const Name *names, const char *value) {
+  for (; names; names = names->next)
+    if (strcmp(names->value, value) == 0)
+      return names;
+  return NULL;
+}
+
+static int name_exists(const Name *names, const char *value) {
+  return find_name(names, value) != NULL;
+}
+
+static int loop_exists(const LoopScope *loop, const char *label) {
+  for (; loop; loop = loop->parent)
+    if (!label || (loop->label && strcmp(loop->label, label) == 0))
+      return 1;
+  return 0;
+}
+
+static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
+  uint32_t i;
+  L1Subroutine *callee;
+  if (!expr)
+    return fail(ctx, 2001, "missing expression in procedure `%s`", ctx->sub->name);
+
+  switch (expr->kind) {
+  case EXPR_VAR: {
+    const Name *binding = expr->data.var.name ?
+                              find_name(names, expr->data.var.name) : NULL;
+    if (!binding)
+      return fail(ctx, 2002, "undefined value `%%%s` in procedure `%s`",
+                  expr->data.var.name ? expr->data.var.name : "?", ctx->sub->name);
+    /* Resolving a variable is also the point where a parsed use receives its
+       declared type.  No later verifier rule is allowed to treat it as
+       type-unknown. */
+    expr->data.var.ty = binding->ty;
+    return 1;
+  }
+  case EXPR_ARG:
+    if (expr->data.arg.index >= ctx->sub->param_count)
+      return fail(ctx, 2003, "argument %u is out of range in procedure `%s`",
+                  expr->data.arg.index, ctx->sub->name);
+    /* Parser-created #arg nodes receive their type from the signature. */
+    expr->data.arg.ty = ctx->sub->param_tys[expr->data.arg.index];
+    return 1;
+  case EXPR_ADD: case EXPR_SUB: case EXPR_MUL: case EXPR_DIV:
+  case EXPR_EQ: case EXPR_NE: case EXPR_LT: case EXPR_LE: case EXPR_GT: case EXPR_GE:
+  case EXPR_FADD: case EXPR_FSUB: case EXPR_FMUL: case EXPR_FDIV: case EXPR_FEQ: case EXPR_FLT:
+    return verify_expr(ctx, expr->data.bin.left, names) &&
+           verify_expr(ctx, expr->data.bin.right, names);
+  case EXPR_POPCOUNT: case EXPR_CLZ: case EXPR_ROTL:
+  case EXPR_INT2PTR: case EXPR_PTR2INT:
+    return verify_expr(ctx, expr->data.unary.operand, names);
+  case EXPR_LOAD:
+    return verify_expr(ctx, expr->data.load.addr, names);
+  case EXPR_LEA:
+    return verify_expr(ctx, expr->data.lea.base, names) &&
+           (!expr->data.lea.idx || verify_expr(ctx, expr->data.lea.idx, names));
+  case EXPR_FIELD:
+    return verify_expr(ctx, expr->data.field.base, names);
+  case EXPR_CALL:
+    callee = find_subroutine(ctx->module, expr->data.call.fn_name);
+    if (!callee)
+      return fail(ctx, 2004, "unknown call target `%s` in procedure `%s`",
+                  expr->data.call.fn_name, ctx->sub->name);
+    if (callee->param_count != expr->data.call.arg_count)
+      return fail(ctx, 2005, "call to `%s` expects %u arguments, got %u",
+                  callee->name, callee->param_count, expr->data.call.arg_count);
+    expr->data.call.ret_ty = callee->ret_ty;
+    for (i = 0; i < expr->data.call.arg_count; i++) {
+      L1Expr *arg = expr->data.call.args[i];
+      if (arg->kind == EXPR_LOAD && !arg->data.load.ty)
+        arg->data.load.ty = callee->param_tys[i];
+      if (!verify_expr(ctx, arg, names)) return 0;
+      if (!same_type(callee->param_tys[i], infer_expr_type(arg)) &&
+          !(arg->kind == EXPR_CONST && callee->param_tys[i]->kind == TY_BITS))
+        return fail(ctx, 2006, "argument %u to `%s` has incompatible type",
+                    i, callee->name);
+    }
+    return 1;
+  case EXPR_EVAL:
+    callee = find_subroutine(ctx->module, expr->data.eval.fn_name);
+    if (!callee)
+      return fail(ctx, 2004, "unknown eval target `%s`", expr->data.eval.fn_name);
+    for (i = 0; i < expr->data.eval.arg_count; i++)
+      if (!verify_expr(ctx, expr->data.eval.args[i], names)) return 0;
+    return 1;
+  case EXPR_CALL_INDIRECT:
+    if (!verify_expr(ctx, expr->data.call_indirect.fn_ptr, names)) return 0;
+    for (i = 0; i < expr->data.call_indirect.arg_count; i++)
+      if (!verify_expr(ctx, expr->data.call_indirect.args[i], names)) return 0;
+    return 1;
+  case EXPR_PRIMITIVE:
+    for (i = 0; i < expr->data.primitive.operand_count; i++)
+      if (!verify_expr(ctx, expr->data.primitive.operands[i], names)) return 0;
+    /* Legacy textual primitives do not carry a result annotation.  This is
+       still a concrete inference rule, not an unknown-type escape hatch:
+       a homogeneous primitive inherits its resolved operand type. */
+    if (!expr->data.primitive.result_ty && expr->data.primitive.operand_count) {
+      L1Type *candidate = infer_expr_type(expr->data.primitive.operands[0]);
+      int homogeneous = candidate != NULL;
+      for (i = 1; homogeneous && i < expr->data.primitive.operand_count; i++)
+        homogeneous = same_type(candidate,
+                                infer_expr_type(expr->data.primitive.operands[i]));
+      if (homogeneous)
+        expr->data.primitive.result_ty = candidate;
+    }
+    return 1;
+  case EXPR_CONST: case EXPR_STRING: case EXPR_ALLOCA:
+    return 1;
+  }
+  return fail(ctx, 2099, "unsupported expression kind %d", (int)expr->kind);
+}
+
+static int expression_is_condition(L1Expr *expr) {
+  if (!expr) return 0;
+  if (expr->kind == EXPR_CONST)
+    return expr->data.const_val == 0 || expr->data.const_val == 1;
+  if (expr->kind == EXPR_EQ || expr->kind == EXPR_NE || expr->kind == EXPR_LT ||
+      expr->kind == EXPR_LE || expr->kind == EXPR_GT || expr->kind == EXPR_GE ||
+      expr->kind == EXPR_FEQ || expr->kind == EXPR_FLT)
+    return 1;
+  return expr->kind == EXPR_VAR && expr->data.var.ty &&
+         expr->data.var.ty->kind == TY_BITS && expr->data.var.ty->width == 1;
+}
+
+static int value_type_compatible(L1Type *type, L1Expr *value) {
+  L1Type *actual;
+  if (!type) return 0;
+  if (type->kind == TY_UNIT) return value == NULL;
+  if (!value) return 0;
+  /* Textual #load deliberately carries no redundant result annotation.  Its
+     result is contextually typed by the binding/return/store contract that
+     consumes it. */
+  if (value->kind == EXPR_LOAD && !value->data.load.ty)
+    value->data.load.ty = type;
+  if (value->kind == EXPR_CONST && type->kind == TY_BITS) return 1;
+  actual = infer_expr_type(value);
+  /* Integer literals and arithmetic are width-polymorphic in the text parser;
+     a resolved value (variable or parameter) is not. */
+  if (type->kind == TY_BITS && actual && actual->kind == TY_BITS &&
+      value->kind != EXPR_VAR && value->kind != EXPR_ARG) return 1;
+  return same_type(type, actual);
+}
+
+static int verify_block(VerifyContext *ctx, L1Block *block, const Name *incoming,
+                        const LoopScope *loops) {
+  const Name *names = incoming;
+  int terminated = 0;
+  for (L1Instruction *inst = block ? block->body : NULL; inst; inst = inst->next) {
+    Name binding;
+    if (terminated)
+      return fail(ctx, 2010, "instruction follows structured terminator in `%s`",
+                  ctx->sub->name);
+    switch (inst->kind) {
+    case INST_LET: case INST_SET: {
+      const char *name = inst->kind == INST_LET ? inst->data.let.name : inst->data.set.name;
+      L1Type **binding_ty = inst->kind == INST_LET ? &inst->data.let.ty : &inst->data.set.ty;
+      L1Expr *value = inst->kind == INST_LET ? inst->data.let.val : inst->data.set.val;
+      if (!verify_expr(ctx, value, names)) return 0;
+      if (inst->kind == INST_LET && name_exists(names, name))
+        return fail(ctx, 2011, "duplicate binding `%%%s` in `%s`", name, ctx->sub->name);
+      /* Older text omitted the annotation.  Accept it at the parser boundary
+         only when the expression gives us a concrete type, then canonical
+         printing writes that type back out. */
+      if (!*binding_ty)
+        *binding_ty = infer_expr_type(value);
+      if (!*binding_ty)
+        return fail(ctx, 2015, "binding `%%%s` needs an explicit type", name);
+      if (!value_type_compatible(*binding_ty, value))
+        return fail(ctx, 2016, "binding `%%%s` does not match its declared type", name);
+      binding.value = name; binding.ty = *binding_ty; binding.next = names; names = &binding;
+      /* The binding node only needs to live through the recursive verification below;
+         instruction lists are verified linearly, so recurse via the remaining list. */
+      if (inst->next) {
+        L1Block rest = {.body = inst->next};
+        return verify_block(ctx, &rest, names, loops);
+      }
+      return 1;
+    }
+    case INST_STORE:
+      if (!verify_expr(ctx, inst->data.store.val, names) ||
+          !verify_expr(ctx, inst->data.store.dest, names)) return 0;
+      break;
+    case INST_CALL:
+      if (!verify_expr(ctx, inst->data.call_inst.expr, names)) return 0;
+      break;
+    case INST_IF:
+      if (!verify_expr(ctx, inst->data.if_stmt.condition, names)) return 0;
+      if (!expression_is_condition(inst->data.if_stmt.condition))
+        return fail(ctx, 2012, "#if condition in `%s` is not #bits<1>", ctx->sub->name);
+      if (!verify_block(ctx, inst->data.if_stmt.then_body, names, loops) ||
+          (inst->data.if_stmt.else_body &&
+           !verify_block(ctx, inst->data.if_stmt.else_body, names, loops))) return 0;
+      break;
+    case INST_LOOP: {
+      LoopScope scope = {.label = inst->data.loop.label, .parent = loops};
+      if (!verify_block(ctx, inst->data.loop.body, names, &scope)) return 0;
+      break;
+    }
+    case INST_BREAK: case INST_CONTINUE:
+      if (!loop_exists(loops, inst->data.jump.label))
+        return fail(ctx, 2013, "%s outside its target loop in `%s`",
+                    inst->kind == INST_BREAK ? "#break" : "#continue", ctx->sub->name);
+      terminated = 1;
+      break;
+    case INST_RETURN:
+      if (!verify_expr(ctx, inst->data.ret.val, names) && inst->data.ret.val) return 0;
+      if (!value_type_compatible(ctx->sub->ret_ty, inst->data.ret.val))
+        return fail(ctx, 2014, "return type mismatch in `%s`", ctx->sub->name);
+      terminated = 1;
+      break;
+    }
+  }
+  return 1;
+}
+
+int lainir_verify_module(L1Subroutine *head, const char *entry_name,
+                         L1Diagnostic *diagnostic) {
+  VerifyContext ctx = {.module = head, .diagnostic = diagnostic};
+  if (diagnostic) memset(diagnostic, 0, sizeof(*diagnostic));
+  if (entry_name && !find_subroutine(head, entry_name))
+    return fail(&ctx, 2020, "entry procedure `%s` does not exist", entry_name);
+  for (L1Subroutine *sub = head; sub; sub = sub->next) {
+    for (L1Subroutine *other = head; other != sub; other = other->next)
+      if (strcmp(other->name, sub->name) == 0)
+        return fail(&ctx, 2021, "duplicate procedure `%s`", sub->name);
+    if (sub->is_extern) continue;
+    ctx.sub = sub;
+    if (!sub->blocks)
+      return fail(&ctx, 2022, "procedure `%s` has no body", sub->name);
+    for (L1Block *block = sub->blocks; block; block = block->next)
+      if (!verify_block(&ctx, block, NULL, NULL)) return 0;
+  }
+  return 1;
+}

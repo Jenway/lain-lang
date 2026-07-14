@@ -59,7 +59,7 @@ static void emit_c_expr(L1Expr *expr, FILE *out) {
     fprintf(out, "%lld", (long long)expr->data.const_val);
     break;
   case EXPR_ARG:
-    fprintf(out, "arg%d", expr->data.arg_idx);
+    fprintf(out, "arg%d", expr->data.arg.index);
     break;
   case EXPR_LOAD:
     fprintf(out, "*("); emit_c_value_type(expr->data.load.ty, out);

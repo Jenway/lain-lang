@@ -125,6 +125,12 @@
 (define (host.read-interface path)
   (core.read-interface! path))
 
+;; Source form loading is used only by Meta's interpreter-link transition
+;; mode.  C exposes a file read primitive; parsing and module traversal stay
+;; in the Meta layer.
+(define (host.read-file-forms path)
+  (core.read-file-forms! path))
+
 ;; ═══ 12. Interpreter capability bridges ═══
 ;; These names must match the link_name used in @foreign(c) declarations
 ;; for comptime fns. The L1 interpreter routes extern calls through

@@ -1,0 +1,154 @@
+// Meta-owned classification of top-level RawAst forms.
+//
+// This is deliberately a semantic view owned by Lain.  The C RawAst reader
+// still knows only topology; imports, attributes, declarations and procedure
+// definitions acquire meaning here.
+
+import packages::lain::compiler::mini_syntax;
+
+pub fn mini_middle_schema_version() -> i32 { return 4; }
+
+// Top-level item tags.
+// 1=attribute, 2=import, 3=procedure declaration, 4=procedure definition,
+// 0=unsupported.
+pub fn mini_middle_item_tag(item: i32) -> i32 {
+    if mini_syntax_is_juxt(item) != 1 { return 0; }
+    if mini_syntax_is_atom_text(mini_syntax_left(item), "@") == 1 { return 1; }
+    if mini_syntax_is_atom_text(mini_syntax_left(item), "import") == 1 { return 2; }
+    if mini_syntax_function_style(item) == 4 { return 3; }
+    if mini_syntax_function_style(item) != 0 { return 4; }
+    return 0;
+}
+
+pub fn mini_middle_first_item(root: i32) -> i32 {
+    return mini_syntax_left(root);
+}
+
+pub fn mini_middle_next_item(item: i32) -> i32 {
+    return mini_syntax_next(item);
+}
+
+pub fn mini_middle_first_callable_from(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    let tag: i32 = mini_middle_item_tag(item);
+    if tag == 3 { return item; }
+    if tag == 4 { return item; }
+    return mini_middle_first_callable_from(mini_middle_next_item(item));
+}
+
+pub fn mini_middle_first_callable(root: i32) -> i32 {
+    return mini_middle_first_callable_from(mini_middle_first_item(root));
+}
+
+pub fn mini_middle_next_callable(item: i32) -> i32 {
+    return mini_middle_first_callable_from(mini_middle_next_item(item));
+}
+
+pub fn mini_middle_first_definition_from(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    if mini_middle_item_tag(item) == 4 { return item; }
+    return mini_middle_first_definition_from(mini_middle_next_item(item));
+}
+
+pub fn mini_middle_first_definition(root: i32) -> i32 {
+    return mini_middle_first_definition_from(mini_middle_first_item(root));
+}
+
+pub fn mini_middle_next_definition(item: i32) -> i32 {
+    return mini_middle_first_definition_from(mini_middle_next_item(item));
+}
+
+pub fn mini_middle_definition_count(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    return 1 + mini_middle_definition_count(mini_middle_next_definition(item));
+}
+
+pub fn mini_middle_callable_name_count(item: i32, name: addr) -> i32 {
+    if item == 0 { return 0; }
+    if mini_syntax_text_equal(mini_syntax_function_name(item), name) == 1 {
+        return 1 + mini_middle_callable_name_count(
+            mini_middle_next_callable(item), name);
+    }
+    return mini_middle_callable_name_count(mini_middle_next_callable(item), name);
+}
+
+pub fn mini_middle_find_callable(item: i32, name: addr) -> i32 {
+    if item == 0 { return 0; }
+    if mini_syntax_text_equal(mini_syntax_function_name(item), name) == 1 {
+        return item;
+    }
+    return mini_middle_find_callable(mini_middle_next_callable(item), name);
+}
+
+fn mini_middle_validate_definitions(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    let code: i32 = mini_syntax_validate_function(item);
+    if code != 0 { return code; }
+    return mini_middle_validate_definitions(mini_middle_next_definition(item));
+}
+
+pub fn mini_middle_validate_program(root: i32) -> i32 {
+    if mini_syntax_kind(root) != 4 { return 1001; }
+    let first: i32 = mini_middle_first_definition(root);
+    if first == 0 { return 1005; }
+    return mini_middle_validate_definitions(first);
+}
+
+// Lexical scope queries over a block's sibling list.  The target is a body
+// form, not an arbitrary expression node.  Nested blocks inherit only the
+// bindings encountered before their owning `if`; bindings after that `if`
+// are never visible inside it.
+fn mini_middle_tree_contains(node: i32, target: i32) -> i32 {
+    if node == 0 { return 0; }
+    if node == target { return 1; }
+    if mini_syntax_kind(node) == 4 {
+        return mini_middle_siblings_contain(mini_syntax_left(node), target);
+    }
+    if mini_middle_tree_contains(mini_syntax_left(node), target) == 1 {
+        return 1;
+    }
+    if mini_middle_tree_contains(mini_syntax_right(node), target) == 1 {
+        return 1;
+    }
+    if mini_middle_tree_contains(mini_syntax_op(node), target) == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+fn mini_middle_siblings_contain(node: i32, target: i32) -> i32 {
+    if node == 0 { return 0; }
+    if mini_middle_tree_contains(node, target) == 1 { return 1; }
+    return mini_middle_siblings_contain(mini_syntax_next(node), target);
+}
+
+fn mini_middle_scope_scan(
+    cursor: i32, target: i32, name: addr, candidate: i32) -> i32 {
+    if cursor == 0 { return 0; }
+    if cursor == target { return candidate; }
+    if mini_syntax_form_tag(cursor) == 5 {
+        let branch: i32 = mini_syntax_left(
+            mini_syntax_if_statement_body(cursor));
+        if mini_middle_siblings_contain(branch, target) == 1 {
+            let nested: i32 = mini_middle_scope_scan(branch, target, name, 0);
+            if nested != 0 { return nested; }
+            return candidate;
+        }
+    }
+    if mini_syntax_form_tag(cursor) == 2 {
+        if mini_syntax_text_equal(
+            mini_syntax_text(mini_syntax_local_name_node(cursor)), name) == 1 {
+            return mini_middle_scope_scan(
+                mini_syntax_next(cursor), target, name, cursor);
+        }
+    }
+    return mini_middle_scope_scan(
+        mini_syntax_next(cursor), target, name, candidate);
+}
+
+pub fn mini_middle_find_visible_local(
+    function: i32, target: i32, name: addr) -> i32 {
+    let body: i32 = mini_syntax_function_body(function);
+    return mini_middle_scope_scan(
+        mini_syntax_left(body), target, name, 0);
+}

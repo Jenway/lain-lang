@@ -14,6 +14,8 @@ const lainc_sources = &.{
     "src/compiler/native_compiler.c",
     "src/compiler/builder_ffi.c",
     "src/lainir/lainir_core.c",
+    "src/lainir/lain_ir_parser.c",
+    "src/lainir/verifier.c",
     "src/lainast/lain_ast.c",
     "src/lainast/lain_ast_parser.c",
     "src/lainir/emitter.c",
@@ -78,15 +80,39 @@ pub fn build(b: *std.Build) void {
             "src/lainir/lain_ir_parser.c",
             "src/lainir/lainir_core.c",
             "src/lainir/interpreter.c",
+            "src/lainir/verifier.c",
         },
         .flags = common_c_flags,
     });
     installNamed(b, l1i, "l1i", "Build and install the LAIN-IR interpreter");
 
+    const l1check = addCExecutable(b, "l1check", target, optimize);
+    l1check.root_module.addCSourceFiles(.{
+        .files = &.{
+            "src/lainir/lain_ir_check_main.c",
+            "src/lainir/lain_ir_parser.c",
+            "src/lainir/lainir_core.c",
+            "src/lainir/emit_text.c",
+            "src/lainir/verifier.c",
+        },
+        .flags = common_c_flags,
+    });
+    installNamed(b, l1check, "l1check", "Parse, verify, and canonicalize LAIN-IR");
+
     const test_step = b.step("test", "Build all tools and run the core test suite");
     const run_tests = b.addSystemCommand(&.{ "python", "tests/core_runner.py" });
     run_tests.step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_tests.step);
+
+    const self_host_step = b.step(
+        "test-self-host",
+        "Run the generated structured L1 execution closure",
+    );
+    const run_self_host = b.addSystemCommand(&.{
+        "python", "tests/core/self_hosting/run_self_hosting.py",
+    });
+    run_self_host.step.dependOn(b.getInstallStep());
+    self_host_step.dependOn(&run_self_host.step);
 }
 
 fn addCExecutable(

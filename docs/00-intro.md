@@ -212,7 +212,7 @@ LAIN-IR 是 Lain 的物理执行层中间表示。
 #loop
 #break
 #continue
-#condbr
+#if
 #switch
 #proc
 #call

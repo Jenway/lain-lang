@@ -1,4 +1,5 @@
 #include "native_runtime.h"
+#include "lainir_exec.h"
 #include "lainast/lain_ast.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -144,6 +145,7 @@ static char *read_source_file(const char *path, uint32_t *len_out) {
 }
 
 static int32_t run_pipeline_for(const void* input_path) {
+    native_set_interpret_source_linking(0);
     native_set_source_path(input_path);
     const uint8_t* src = (const uint8_t*)native_read_file(input_path);
     uint32_t len = native_file_len();
@@ -172,6 +174,38 @@ uint32_t compile_interface(const void* arg0, const void* arg1) {
     if (result != 0) return result;
     native_emit_interface(arg1);
     return 0;
+}
+
+static uint32_t interpret_lain(const char *input_path, const char *entry_name) {
+    native_set_interpret_source_linking(1);
+    native_set_source_path(input_path);
+    const uint8_t *src = (const uint8_t *)native_read_file(input_path);
+    uint32_t len = native_file_len();
+    void *root_group = native_lex_and_group(src, len);
+    vm_context *ctx = (vm_context *)native_init_scheme();
+    vm_value *result = vm_false();
+    LainirExecRequest request;
+    if (native_run_pipeline(ctx, root_group) != 0) return 1;
+    request.entry_name = entry_name;
+    request.args = vm_null();
+    if (lainir_exec_request(ctx, vm_context_env(ctx), &request, &result) !=
+        LAINIR_EXEC_OK) {
+        fprintf(stderr, "[interpret ERROR] ");
+        vm_print_exception(ctx, result);
+        return 1;
+    }
+    if (vm_is_integer(result) || vm_is_fixnum(result)) {
+        int64_t value = vm_is_fixnum(result) ? vm_fixnum_value(result)
+                                             : (int64_t)vm_uint_value(result);
+        printf("%lld\n", (long long)value);
+        return 0;
+    }
+    if (result == vm_void() || result == vm_null()) {
+        puts("unit");
+        return 0;
+    }
+    fprintf(stderr, "interpreted entry returned an unsupported value\n");
+    return 1;
 }
 
 uint32_t compile_ast(const void* arg0, const void* arg1) {
@@ -210,10 +244,15 @@ int main(int argc, char **argv) {
     int emit_l1 = 0;
     int emit_interface = 0;
     int emit_ast = 0;
+    int interpret = 0;
     const char *input_path = NULL;
     const char *output_path = NULL;
     
-    if (argc >= 4 && strcmp(argv[1], "--emit-l1") == 0) {
+    if (argc >= 4 && strcmp(argv[1], "--interpret") == 0) {
+        interpret = 1;
+        input_path = argv[2];
+        output_path = argv[3];
+    } else if (argc >= 4 && strcmp(argv[1], "--emit-l1") == 0) {
         emit_l1 = 1;
         input_path = argv[2];
         output_path = argv[3];
@@ -229,10 +268,11 @@ int main(int argc, char **argv) {
         input_path = argv[1];
         output_path = argv[2];
     } else {
-        printf("Usage: %s [--emit-ast|--emit-l1|--emit-interface] <input.lain> <output>\n", argv[0]);
+        printf("Usage: %s [--interpret|--emit-ast|--emit-l1|--emit-interface] <input.lain> <output-or-entry>\n", argv[0]);
         return 1;
     }
     
+    if (interpret) return interpret_lain(input_path, output_path);
     if (emit_ast) return compile_ast(input_path, output_path);
     if (emit_l1) return compile_l1(input_path, output_path);
     if (emit_interface) return compile_interface(input_path, output_path);

@@ -153,8 +153,11 @@ RULES: tuple[Rule, ...] = (
         description="compiler core still uses sexp-shaped compatibility names",
         paths=("src/compiler/native_runtime.c", "src/compiler/builder_ffi.c"),
         pattern=r"\bsexp\b|sexp_|SEXP_",
-        allowed_count=559,
-        rationale="Known debt: vm_compat.h keeps old FFI code compiling while backend APIs are split.",
+        allowed_count=579,
+        rationale=(
+            "Known debt: vm_compat.h keeps old FFI code compiling while backend APIs are split; "
+            "M3 adds three batched RawAst queries at this pre-existing compatibility boundary."
+        ),
     ),
     Rule(
         ident="M1_META_NO_DEFINE_SYNTAX",

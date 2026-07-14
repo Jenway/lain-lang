@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,6 +43,12 @@ typedef enum {
   TK_KW_LOAD,
   TK_KW_ADD,
   TK_KW_SUB_OP,
+  TK_KW_EQ_OP,
+  TK_KW_NE_OP,
+  TK_KW_LT_OP,
+  TK_KW_LE_OP,
+  TK_KW_GT_OP,
+  TK_KW_GE_OP,
   TK_KW_CALL_INDIRECT,
   TK_KW_EVAL
 } TokenKind;
@@ -61,6 +68,9 @@ typedef struct {
   char **param_names;
   uint32_t param_count;
   uint32_t param_cap;
+  jmp_buf failure;
+  L1Diagnostic *diagnostic;
+  L1Subroutine *module_head;
 } Parser;
 
 static int is_ident_start(int c) {
@@ -68,16 +78,20 @@ static int is_ident_start(int c) {
 }
 
 static int is_ident_char(int c) {
-  return isalnum(c) || c == '_' || c == '.';
+  return isalnum(c) || c == '_' || c == '.' || c == '-' || c == '!';
 }
 
 static void parse_fail(Parser *p, const char *message) {
-  fprintf(stderr, "line %d: %s near `%.*s`\n",
-          p->current.line,
-          message,
-          p->current.len > 0 ? p->current.len : 0,
-          p->current.text ? p->current.text : "");
-  exit(1);
+  if (p->diagnostic) {
+    p->diagnostic->code = 1001;
+    p->diagnostic->line = p->current.line;
+    p->diagnostic->column = 0;
+    snprintf(p->diagnostic->message, sizeof(p->diagnostic->message),
+             "%s near `%.*s`", message,
+             p->current.len > 0 ? p->current.len : 0,
+             p->current.text ? p->current.text : "");
+  }
+  longjmp(p->failure, 1);
 }
 
 static char *token_string(Token token) {
@@ -138,6 +152,12 @@ static TokenKind hash_keyword_kind(const char *text, int len) {
   if (len == 4 && memcmp(text, "load", 4) == 0) return TK_KW_LOAD;
   if (len == 3 && memcmp(text, "add", 3) == 0) return TK_KW_ADD;
   if (len == 3 && memcmp(text, "sub", 3) == 0) return TK_KW_SUB_OP;
+  if (len == 2 && memcmp(text, "eq", 2) == 0) return TK_KW_EQ_OP;
+  if (len == 2 && memcmp(text, "ne", 2) == 0) return TK_KW_NE_OP;
+  if (len == 2 && memcmp(text, "lt", 2) == 0) return TK_KW_LT_OP;
+  if (len == 2 && memcmp(text, "le", 2) == 0) return TK_KW_LE_OP;
+  if (len == 2 && memcmp(text, "gt", 2) == 0) return TK_KW_GT_OP;
+  if (len == 2 && memcmp(text, "ge", 2) == 0) return TK_KW_GE_OP;
   if (len == 13 && memcmp(text, "call_indirect", 13) == 0) return TK_KW_CALL_INDIRECT;
   if (len == 4 && memcmp(text, "eval", 4) == 0) return TK_KW_EVAL;
   return TK_IDENT;
@@ -224,7 +244,10 @@ static void next_token(Parser *p) {
       p->pos++;
     p->current.text = p->src + start;
     p->current.len = p->pos - start;
-    p->current.kind = TK_IDENT;
+    if (p->current.len == 4 && memcmp(p->current.text, "else", 4) == 0)
+      p->current.kind = TK_KW_ELSE;
+    else
+      p->current.kind = TK_IDENT;
     return;
   }
 
@@ -316,7 +339,8 @@ static L1Expr *new_var_expr(const char *name) {
 
 static L1Expr *new_arg_expr(uint32_t index) {
   L1Expr *expr = lainir_new_expr(EXPR_ARG);
-  expr->data.arg_idx = index;
+  expr->data.arg.index = index;
+  expr->data.arg.ty = NULL;
   return expr;
 }
 
@@ -395,10 +419,21 @@ static L1Expr *parse_special_hash_call(Parser *p, TokenKind kind) {
     free(args);
     return expr;
   }
-  if (kind == TK_KW_ADD || kind == TK_KW_SUB_OP) {
+  if (kind == TK_KW_ADD || kind == TK_KW_SUB_OP ||
+      kind == TK_KW_EQ_OP || kind == TK_KW_NE_OP ||
+      kind == TK_KW_LT_OP || kind == TK_KW_LE_OP ||
+      kind == TK_KW_GT_OP || kind == TK_KW_GE_OP) {
     if (count != 2)
       parse_fail(p, "binary op expects two operands");
-    expr = lainir_new_expr(kind == TK_KW_ADD ? EXPR_ADD : EXPR_SUB);
+    L1ExprKind expr_kind = EXPR_ADD;
+    if (kind == TK_KW_SUB_OP) expr_kind = EXPR_SUB;
+    else if (kind == TK_KW_EQ_OP) expr_kind = EXPR_EQ;
+    else if (kind == TK_KW_NE_OP) expr_kind = EXPR_NE;
+    else if (kind == TK_KW_LT_OP) expr_kind = EXPR_LT;
+    else if (kind == TK_KW_LE_OP) expr_kind = EXPR_LE;
+    else if (kind == TK_KW_GT_OP) expr_kind = EXPR_GT;
+    else if (kind == TK_KW_GE_OP) expr_kind = EXPR_GE;
+    expr = lainir_new_expr(expr_kind);
     expr->data.bin.left = args[0];
     expr->data.bin.right = args[1];
     free(args);
@@ -604,6 +639,12 @@ static L1Expr *parse_expr(Parser *p) {
   case TK_KW_LOAD:
   case TK_KW_ADD:
   case TK_KW_SUB_OP:
+  case TK_KW_EQ_OP:
+  case TK_KW_NE_OP:
+  case TK_KW_LT_OP:
+  case TK_KW_LE_OP:
+  case TK_KW_GT_OP:
+  case TK_KW_GE_OP:
   case TK_KW_CALL_INDIRECT:
     {
       TokenKind kind = p->current.kind;
@@ -629,11 +670,22 @@ static L1Instruction *parse_instruction_list(Parser *p) {
 
     if (p->current.kind == TK_KW_LET) {
       next_token(p);
+      /* Canonical spelling is `#let %name: type = value`.  The percent and
+         type annotation were absent from the first text grammar, so retain
+         both legacy spellings as input during the migration. */
+      if (p->current.kind == TK_PERCENT)
+        next_token(p);
       Token token = expect(p, TK_IDENT);
       char *name = token_string(token);
+      L1Type *ty = NULL;
+      if (p->current.kind == TK_COLON) {
+        next_token(p);
+        ty = parse_type(p);
+      }
       expect(p, TK_EQ);
       inst = lainir_new_instruction(INST_LET);
       inst->data.let.name = name;
+      inst->data.let.ty = ty;
       inst->data.let.val = parse_expr(p);
     } else if (p->current.kind == TK_PERCENT) {
       Token token;
@@ -642,10 +694,16 @@ static L1Instruction *parse_instruction_list(Parser *p) {
       next_token(p);
       token = expect(p, TK_IDENT);
       name = token_string(token);
+      L1Type *ty = NULL;
+      if (p->current.kind == TK_COLON) {
+        next_token(p);
+        ty = parse_type(p);
+      }
       expect(p, TK_EQ);
 
       inst = lainir_new_instruction(INST_SET);
       inst->data.set.name = name;
+      inst->data.set.ty = ty;
       inst->data.set.val = parse_expr(p);
     } else if (p->current.kind == TK_KW_STORE) {
       next_token(p);
@@ -826,9 +884,9 @@ static L1Subroutine *parse_subroutine(Parser *p) {
   sub->ret_ty = parse_type(p);
   expect(p, TK_LBRACE);
 
-  /* Older text emitters wrote instructions directly inside the procedure
-     braces. Treat that spelling as an implicit entry block while retaining
-     labeled blocks as the canonical format emitted by current builds. */
+  /* Canonical structured LAIN-IR writes instructions directly inside the
+     procedure region. Legacy block_N: spellings remain accepted on input,
+     but labels are not branch targets and are not emitted again. */
   if (p->current.kind != TK_IDENT && p->current.kind != TK_RBRACE) {
     L1Block *block = parse_block_instructions(p);
     block->parent = sub;
@@ -852,10 +910,21 @@ static L1Subroutine *parse_subroutine(Parser *p) {
   return sub;
 }
 
-L1Subroutine *lainir_parse_module(const char *src) {
-  Parser p = {.src = src, .pos = 0, .line = 1};
+int lainir_parse_module_checked(const char *src, L1Subroutine **out_module,
+                                L1Diagnostic *diagnostic) {
+  Parser p = {.src = src, .pos = 0, .line = 1, .diagnostic = diagnostic};
   L1Subroutine *head = NULL;
   L1Subroutine *tail = NULL;
+
+  if (out_module)
+    *out_module = NULL;
+  if (diagnostic)
+    memset(diagnostic, 0, sizeof(*diagnostic));
+  if (setjmp(p.failure)) {
+    parser_reset_subroutine_context(&p);
+    lainir_free_subroutines(p.module_head);
+    return 0;
+  }
 
   next_token(&p);
   while (p.current.kind != TK_EOF) {
@@ -865,7 +934,20 @@ L1Subroutine *lainir_parse_module(const char *src) {
     else
       tail->next = sub;
     tail = sub;
+    p.module_head = head;
   }
   parser_reset_subroutine_context(&p);
-  return head;
+  if (out_module)
+    *out_module = head;
+  return 1;
+}
+
+L1Subroutine *lainir_parse_module(const char *src) {
+  L1Subroutine *module = NULL;
+  L1Diagnostic diagnostic;
+  if (!lainir_parse_module_checked(src, &module, &diagnostic)) {
+    fprintf(stderr, "line %d: %s\n", diagnostic.line, diagnostic.message);
+    return NULL;
+  }
+  return module;
 }

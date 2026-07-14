@@ -482,35 +482,37 @@ LAIN-IR 不表达 overload resolution。
 
 ## 8. Local Binding
 
-局部绑定使用：
+局部绑定在规范文本中带有结果类型：
 
 ```lain-ir
-#set %name = instruction
+#let %name: i32 = instruction
 ```
 
 示例：
 
 ```lain-ir
-#set %x = #add #bits<32> %a %b
-#set %y = #umul #bits<32> %x 10
+#let %x: i32 = #add(%a, %b)
+#let %y: i32 = #mul(%x, 10)
 ```
 
-`#set` 不是变量赋值。
+过程签名的 `-> T` 是 `#return` 的类型契约；绑定或参数被返回、传给调用时，verifier 必须能解析出它的类型。旧的无注解绑定（例如 `#let x = 42` 或 `%x = 42`）只作为输入兼容：验证器从可推导表达式补类型，printer 一律输出带注解的规范形式。
+
+`#let` 不是变量赋值。
 
 它只是给 SSA value 命名。
 
 下面的形式非法：
 
 ```lain-ir
-#set %x = #add #bits<32> %a %b
-#set %x = #sub #bits<32> %x 1
+#let %x: i32 = #add(%a, %b)
+#let %x: i32 = #sub(%x, 1)
 ```
 
 应该写成：
 
 ```lain-ir
-#set %x0 = #add #bits<32> %a %b
-#set %x1 = #sub #bits<32> %x0 1
+#let %x0: i32 = #add(%a, %b)
+#let %x1: i32 = #sub(%x0, 1)
 ```
 
 ## 9. Arithmetic and Bit Operations
@@ -869,11 +871,16 @@ LAIN-IR 使用结构化控制流。
 #loop
 #break
 #continue
-#condbr
+#if
 #switch
 #ret
 #unreachable
 ```
+
+LAIN-IR 的公开控制流是结构化 region，不是 CFG。普通 region 没有
+basic-block label，也不能作为任意跳转目标。LLVM backend 或 custom
+backend 可以在 lowering 时为这些 region 构造私有 CFG、basic block 和
+phi/block parameter。
 
 ## 15. Block
 
@@ -893,13 +900,11 @@ LAIN-IR 使用结构化控制流。
 ```lain-ir
 #set %x = #block choose () -> #bits<32> {
   #set %c = #ucmp lt #bits<32> %a %b
-  #condbr %c then_path else_path
-
-then_path:
-  #break choose %a
-
-else_path:
-  #break choose %b
+  #if %c {
+    #break choose %a
+  } else {
+    #break choose %b
+  }
 }
 ```
 
@@ -930,27 +935,29 @@ else_path:
     %sum: #bits<32> = 0
   ) -> #bits<32> {
     #set %done = #ucmp gt #bits<32> %i %n
-    #condbr %done exit body
-
-  exit:
-    #break sum_loop %sum
-
-  body:
-    #set %next_sum = #add #bits<32> %sum %i
-    #set %next_i = #add #bits<32> %i 1
-    #continue sum_loop %next_i %next_sum
+    #if %done {
+      #break sum_loop %sum
+    } else {
+      #set %next_sum = #add #bits<32> %sum %i
+      #set %next_i = #add #bits<32> %i 1
+      #continue sum_loop %next_i %next_sum
+    }
   }
 
   #ret %result
 }
 ```
 
-## 17. Conditional Branch
+## 17. Conditional Region
 
-条件分支：
+条件控制流使用结构化 `#if`：
 
-```text
-#condbr %cond then_label else_label
+```lain-ir
+#set %result = #if %cond {
+  #yield %then_value
+} else {
+  #yield %else_value
+}
 ```
 
 `%cond` 类型必须是：
@@ -959,20 +966,20 @@ else_path:
 #bits<1>
 ```
 
-示例：
+不产生值时，可以省略结果绑定和 `#yield`：
 
 ```lain-ir
 #set %c = #ucmp lt #bits<32> %x %y
-#condbr %c less greater_or_equal
-
-less:
+#if %c {
   #ret %x
-
-greater_or_equal:
+} else {
   #ret %y
+}
 ```
 
-`then_label` 和 `else_label` 是当前结构化 region 内的局部 label。
+`#if` 的分支是嵌套 region，不拥有 CFG label。产生值的各分支必须以
+`#yield` 返回与声明结果类型一致的值。backend 在需要时把它 lower 为
+then/else/merge basic blocks。
 
 ## 18. Switch
 
@@ -980,9 +987,9 @@ greater_or_equal:
 
 ```lain-ir
 #switch %target {
-  case 0: label0
-  case 1: label1
-  default: label_default
+  case 0 { ... }
+  case 1 { ... }
+  default { ... }
 }
 ```
 
@@ -990,19 +997,10 @@ greater_or_equal:
 
 ```lain-ir
 #switch %tag {
-  case 0: zero_case
-  case 1: one_case
-  default: other_case
+  case 0 { #ret 0 }
+  case 1 { #ret 1 }
+  default { #ret 255 }
 }
-
-zero_case:
-  #ret 0
-
-one_case:
-  #ret 1
-
-other_case:
-  #ret 255
 ```
 
 ## 19. Return and Unreachable
@@ -1204,7 +1202,8 @@ LAIN-IR 在进入 Backend 前必须通过 verifier。
 #continue 的目标必须是可见的 #loop。
 #break 参数必须匹配目标 region 返回类型。
 #continue 参数必须匹配目标 loop 参数类型。
-#condbr 的条件必须是 #bits<1>。
+#if 的条件必须是 #bits<1>。
+#if / #switch 的分支必须是嵌套 region，不能引用任意 CFG label。
 #switch 的 case value 必须匹配 target 类型。
 #load / #store 必须显式携带访问类型。
 #load 不能使用 release ordering。
@@ -1227,17 +1226,12 @@ LAIN-IR 在进入 Backend 前必须通过 verifier。
 
 ```lain-ir
 #proc min_u32(%a: #bits<32>, %b: #bits<32>) -> #bits<32> {
-  #set %result = #block choose () -> #bits<32> {
-    #set %c = #ucmp lt #bits<32> %a %b
-    #condbr %c then_path else_path
-
-  then_path:
-    #break choose %a
-
-  else_path:
-    #break choose %b
+  #set %c = #ucmp lt #bits<32> %a %b
+  #set %result = #if %c {
+    #yield %a
+  } else {
+    #yield %b
   }
-
   #ret %result
 }
 ```
@@ -1251,15 +1245,13 @@ LAIN-IR 在进入 Backend 前必须通过 verifier。
     %sum: #bits<32> = 0
   ) -> #bits<32> {
     #set %done = #ucmp gt #bits<32> %i %n
-    #condbr %done exit body
-
-  exit:
-    #break sum_loop %sum
-
-  body:
-    #set %next_sum = #add #bits<32> %sum %i
-    #set %next_i = #add #bits<32> %i 1
-    #continue sum_loop %next_i %next_sum
+    #if %done {
+      #break sum_loop %sum
+    } else {
+      #set %next_sum = #add #bits<32> %sum %i
+      #set %next_i = #add #bits<32> %i 1
+      #continue sum_loop %next_i %next_sum
+    }
   }
 
   #ret %result
@@ -1380,7 +1372,8 @@ Backend 只处理 LAIN-IR：
 #load
 #store
 #add
-#branch
+#if
+#switch
 #loop
 #proc
 #call

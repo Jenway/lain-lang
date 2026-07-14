@@ -180,7 +180,12 @@
           ;; Internal name stays unmangled for intra-module lookups.
           (let* ((public (record.get payload '|public|))
                  (is-public (and (optional.some? public) (optional.value public))))
-            (if is-public
+            ;; During interpreter source-linking every Lain implementation is
+            ;; present in one in-memory L1 module.  Keep calls by their
+            ;; canonical Lain name; C-level export mangling would otherwise
+            ;; make the interpreter mistake an internal call for a host
+            ;; capability.
+            (if (and is-public (not (import.source-linking?)))
                 (core.set-function-link-name! name
                   (string-append (core.module-prefix) "_"
                                  (symbol->string name)))

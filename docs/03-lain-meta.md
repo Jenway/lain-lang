@@ -150,6 +150,102 @@ Meta 层运行在宿主编译器提供的环境中。
 
 后续自举阶段，Meta 层可以逐步迁移到 Lain 自身。
 
+当前自举实现已经包含第一个由 Lain 所有的端到端切片：
+
+```text
+target source
+  -> RawAst opaque handles
+  -> mini_syntax.lain (zero-copy Middle-AST views)
+  -> mini_elaborate.lain (scope and i32 semantics)
+  -> mini_lower.lain (recursive lowering)
+  -> mini_meta.lain (driver)
+  -> packages/lain/compiler/l1_text_builder.lain
+  -> canonical structured LAIN-IR
+  -> host verifier / interpreter
+```
+
+M2 切片支持多个具名 `i32` 过程、`i32` 参数、顺序局部 `let`、参数与局部
+作用域、规范十进制字面量、递归 `+`、直接函数调用、`==` 和最终位置的结构化
+`if/else`。模块函数表负责重复声明、callee 和 arity 检查。目标程序的这些
+语义不经过 Scheme domain lowerer；Scheme 只承担编译并启动这段 Lain Meta
+实现的 stage-0 职责。
+
+当前作用域环境使用函数体 syntax interval `[body-start, current-form)` 表示。
+查找名字时，Lain Meta 遍历此前的 local forms。这使源码顺序、重复绑定和
+先声明后使用的规则保持显式，并避免把作用域策略下放给 C host。
+
+当前 Middle AST 采用 zero-copy semantic view：仍以 opaque RawAst node id 作为
+存储身份，但只通过 `mini_syntax` 暴露的 `expr-tag`、`form-tag` 和 program view
+访问。`mini_elaborate` 与 `mini_lower` 不直接调用 C AST capability。这样阶段
+边界已经存在，同时不要求 C host 为高层语义节点提供分配器。
+
+M2 使用明确的 `i32` / `bool` 类型对象和单次 parse 的 CompileResult 查询协议，
+可取得成功状态、诊断、procedure count、procedure lookup 和完整 L1 unit 文本。
+它仍不是完整 Meta 系统：尚未覆盖用户定义类型、泛型、effect、完整控制流和
+跨源模块摘要。后续 domain 必须沿相同所有权边界扩展，而不是在 C parser 或
+LAIN-IR 中加入这些高层语义。
+
+### M3 reusable compiler artifact
+
+M3 不再为每次目标编译递归 source-link 整个 Lain Meta 实现。Stage-0 按依赖
+顺序分别生成 interface 与 L1，再把实际 procedure 合并、去除已由 artifact
+提供的 extern，并保留真正的 host extern，形成可重复装载的：
+
+```text
+build/core-self-hosting/m3_meta_compiler.l1
+```
+
+运行 compiler artifact 与运行普通生成程序具有不同 capability policy：
+
+```text
+generated target L1
+  capability-free by default
+
+M3 compiler artifact
+  binds an #extern only when it is also in the host's fixed compiler allowlist
+```
+
+M3 的固定 allowlist 仅包含 RawAst reader（`ast.parse!`、node topology/text
+queries）以及纯字符串/整数文本 helpers。文件、进程、环境、网络和普通生成目标
+执行能力不在名单中；artifact 声明未授权 extern 会在执行前得到 diagnostic
+3006。构建脚本同时断言最终 artifact 的 extern 集恰好等于该名单，防止依赖静默
+漂移。当前 RawAst bridge 是 single-active-session：下一次 `ast.parse!` 替换上一
+次 arena，最后一个 session 随 VM 生命周期释放。
+
+artifact 的首个真实输入是 `packages/lain/compiler/mini_type.lain`，随后覆盖
+返回 `addr` 和字符串诊断的 `mini_diagnostic.lain`。这要求 Lain Meta 支持真实
+`pub fn`、显式 `return`、语句式 `if`、`addr`/字符串类型，以及带参数调用。
+
+### M4 Meta-owned frontend core
+
+M4 把 zero-copy syntax view 之上的顶层解释正式放入
+`packages/lain/compiler/mini_middle.lain`。它区分 attribute、import、procedure
+declaration 和 procedure definition；callable table 同时包含声明和定义，而
+lowering 只生成被选择的定义。
+
+局部作用域不再用单一的 `[body-start, current-form)` 平面区间近似。Lain Meta
+从函数 block 根开始查找目标 form，进入嵌套 `if` 时继承此前支配该分支的绑定，
+同时拒绝分支之后才出现的声明。由此支持 parent lexical scope、branch-local
+shadowing 和顺序可见性。
+
+M4 artifact 验收把以下源文件合成一个语义闭包：
+
+```text
+mini_syntax + mini_middle + mini_type + mini_module
+  + mini_elaborate + l1_text_builder + mini_lower
+  + mini_diagnostic + mini_compile_result + mini_meta
+```
+
+整个闭包由 Lain-owned elaborator 验证。`mini_meta_compile_named` 随后选择一个
+procedure 生成定义，并把其余已验证 callable 写成 extern contract；测试执行
+自编译生成的 `mini_meta_schema_version() -> 4`。这是增量自举接口，不是长期
+module linker；跨源 ModuleSummary/linking 仍属于 M5。
+
+CompileResult 查询协议包含成功状态、diagnostic code/message、失败 procedure、
+procedure summary 和 L1 unit。失败编译不会生成部分 L1。大型 bootstrap 文本
+lowering 使用显式线性 capability `core.string-append-linear!`，其输入临时片段在
+调用后失效，避免递归拼接保留平方级内存；结构化 L1Unit 将在后续阶段取代它。
+
 无论宿主语言是什么，Meta 层都不直接操作 C 内存指针。
 
 Meta 通过 Host API 操作 AST、IR、diagnostic 和编译期执行环境。
@@ -1102,7 +1198,7 @@ Lowering 输出：
 #call
 #block
 #loop
-#condbr
+#if
 #ret
 ```
 

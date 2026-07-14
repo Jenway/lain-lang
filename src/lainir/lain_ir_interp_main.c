@@ -45,6 +45,7 @@ int main(int argc, char **argv) {
   LainirRunRequest request;
   const char *error = NULL;
   LainirRunStatus status;
+  L1Diagnostic diagnostic;
 
   if (argc < 3) {
     fprintf(stderr, "usage: l1i <input.l1> <entry> [arg ...]\n");
@@ -54,8 +55,20 @@ int main(int argc, char **argv) {
   src = read_file(argv[1]);
   if (!src)
     return 1;
-  module = lainir_parse_module(src);
+  if (!lainir_parse_module_checked(src, &module, &diagnostic)) {
+    fprintf(stderr, "lainir parse error [%d] line %d: %s\n", diagnostic.code,
+            diagnostic.line, diagnostic.message);
+    free(src);
+    return 1;
+  }
   free(src);
+
+  if (!lainir_verify_module(module, argv[2], &diagnostic)) {
+    fprintf(stderr, "lainir verify error [%d]: %s\n", diagnostic.code,
+            diagnostic.message);
+    lainir_free_subroutines(module);
+    return 1;
+  }
 
   if (argc > 3) {
     args = calloc((size_t)(argc - 3), sizeof(LainirValue));

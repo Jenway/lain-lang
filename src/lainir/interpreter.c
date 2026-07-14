@@ -276,10 +276,10 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
   case EXPR_STRING:
     return lainir_value_string(expr->data.str_val.content);
   case EXPR_ARG:
-    if (expr->data.arg_idx >= frame->arg_count) {
+    if (expr->data.arg.index >= frame->arg_count) {
       interp_trap(interp, "argument index out of bounds"); return lainir_value_unit();
     }
-    return frame->args[expr->data.arg_idx];
+    return frame->args[expr->data.arg.index];
   case EXPR_VAR: {
     LainirBinding *b = interp_lookup_local(frame, expr->data.var.name);
     if (!b) { interp_trap(interp, "unknown local variable"); return lainir_value_unit(); }

@@ -1,0 +1,346 @@
+// Module/function lookup, lexical scope resolution and type elaboration for M4.
+
+import packages::lain::compiler::mini_syntax;
+import packages::lain::compiler::mini_type;
+import packages::lain::compiler::mini_module;
+import packages::lain::compiler::mini_middle;
+
+fn mini_name_visible(function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
+    if mini_syntax_param_named(mini_syntax_function_first_param(function), name) == 1 { return 1; }
+    if mini_middle_find_visible_local(function, stop, name) != 0 { return 1; }
+    return 0;
+}
+
+fn mini_type_from_syntax(node: i32) -> i32 {
+    if mini_syntax_is_atom_text(node, "i32") == 1 { return mini_type_i32(); }
+    if mini_syntax_is_atom_text(node, "addr") == 1 { return mini_type_addr(); }
+    return mini_type_error();
+}
+
+fn mini_function_return_type(function: i32) -> i32 {
+    return mini_type_from_syntax(mini_syntax_right(mini_syntax_function_signature(function)));
+}
+
+fn mini_name_type(root: i32, function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
+    let local: i32 = mini_middle_find_visible_local(function, stop, name);
+    if local != 0 {
+        let binding: i32 = mini_syntax_local_binding(local);
+        return mini_expr_type(
+            root, function, mini_syntax_local_value_node(local), body_start, local);
+    }
+    let param: i32 = mini_syntax_find_param(mini_syntax_function_first_param(function), name);
+    if param == 0 { return mini_type_error(); }
+    return mini_type_from_syntax(mini_syntax_param_type_node(param));
+}
+
+pub fn mini_elaborate_name_visible(function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
+    return mini_name_visible(function, body_start, stop, name);
+}
+
+pub fn mini_elaborate_name_is_local(function: i32, stop: i32, name: addr) -> i32 {
+    if mini_middle_find_visible_local(function, stop, name) != 0 { return 1; }
+    return 0;
+}
+
+fn mini_expr_type(root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    let tag: i32 = mini_syntax_expr_tag(node);
+    if tag == 1 { return mini_type_i32(); }
+    if tag == 2 {
+        return mini_name_type(root, function, body_start, stop, mini_syntax_text(node));
+    }
+    if tag == 3 { return mini_type_i32(); }
+    if tag == 4 {
+        let callee: i32 = mini_module_find_procedure(root, mini_syntax_call_name(node));
+        if callee == 0 { return mini_type_error(); }
+        return mini_function_return_type(callee);
+    }
+    if tag == 5 { return mini_type_bool(); }
+    if tag == 8 { return mini_type_bool(); }
+    if tag == 6 {
+        return mini_expr_type(root, function, mini_syntax_if_then_expr(node), body_start, stop);
+    }
+    if tag == 7 { return mini_type_addr(); }
+    return mini_type_error();
+}
+
+pub fn mini_elaborate_expr_type(root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    return mini_expr_type(root, function, node, body_start, stop);
+}
+
+fn mini_validate_args(root: i32, function: i32, arg: i32, param: i32, body_start: i32, stop: i32) -> i32 {
+    if arg == 0 { return 0; }
+    let code: i32 = mini_validate_expr(root, function, arg, body_start, stop);
+    if code != 0 { return code; }
+    let expected: i32 = mini_type_from_syntax(mini_syntax_param_type_node(param));
+    if mini_expr_type(root, function, arg, body_start, stop) != expected { return 2304; }
+    return mini_validate_args(
+        root, function, mini_syntax_arg_next(arg), mini_syntax_param_next(param), body_start, stop);
+}
+
+fn mini_validate_call(root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    let name: addr = mini_syntax_call_name(node);
+    let first_function: i32 = mini_module_first_procedure(root);
+    let matches: i32 = mini_module_procedure_name_count(root, name);
+    if matches == 0 { return 2301; }
+    if matches != 1 { return 2302; }
+    let callee: i32 = mini_module_find_procedure(root, name);
+    let args: i32 = mini_syntax_call_first_arg(node);
+    if mini_syntax_arg_count(args) != mini_syntax_param_count(mini_syntax_function_first_param(callee)) {
+        return 2303;
+    }
+    return mini_validate_args(
+        root, function, args, mini_syntax_function_first_param(callee), body_start, stop);
+}
+
+fn mini_validate_if(root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    let condition: i32 = mini_syntax_if_condition(node);
+    let condition_code: i32 = mini_validate_expr(root, function, condition, body_start, stop);
+    if condition_code != 0 { return condition_code; }
+    if mini_expr_type(root, function, condition, body_start, stop) != mini_type_bool() { return 2401; }
+    let then_expr: i32 = mini_syntax_if_then_expr(node);
+    let else_expr: i32 = mini_syntax_if_else_expr(node);
+    if then_expr == 0 { return 2403; }
+    if else_expr == 0 { return 2403; }
+    if mini_syntax_next(then_expr) != 0 { return 2403; }
+    if mini_syntax_next(else_expr) != 0 { return 2403; }
+    if mini_syntax_expr_tag(then_expr) == 6 { return 2405; }
+    if mini_syntax_expr_tag(else_expr) == 6 { return 2405; }
+    let then_code: i32 = mini_validate_expr(root, function, then_expr, body_start, stop);
+    if then_code != 0 { return then_code; }
+    let else_code: i32 = mini_validate_expr(root, function, else_expr, body_start, stop);
+    if else_code != 0 { return else_code; }
+    let then_type: i32 = mini_expr_type(root, function, then_expr, body_start, stop);
+    let else_type: i32 = mini_expr_type(root, function, else_expr, body_start, stop);
+    if then_type == mini_type_error() { return 2402; }
+    if mini_type_same(then_type, else_type) != 1 { return 2402; }
+    return 0;
+}
+
+fn mini_validate_expr(root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    let tag: i32 = mini_syntax_expr_tag(node);
+    if tag == 1 { return 0; }
+    if tag == 7 { return 0; }
+    if tag == 2 {
+        if mini_name_visible(function, body_start, stop, mini_syntax_text(node)) == 1 { return 0; }
+        return 2003;
+    }
+    if tag == 3 {
+        let left_code: i32 = mini_validate_expr(root, function, mini_syntax_left(node), body_start, stop);
+        if left_code != 0 { return left_code; }
+        let right_code: i32 = mini_validate_expr(root, function, mini_syntax_right(node), body_start, stop);
+        if right_code != 0 { return right_code; }
+        if mini_expr_type(root, function, mini_syntax_left(node), body_start, stop) != mini_type_i32() { return 2201; }
+        if mini_expr_type(root, function, mini_syntax_right(node), body_start, stop) != mini_type_i32() { return 2201; }
+        return 0;
+    }
+    if tag == 4 { return mini_validate_call(root, function, node, body_start, stop); }
+    if tag == 5 {
+        let left_code: i32 = mini_validate_expr(root, function, mini_syntax_left(node), body_start, stop);
+        if left_code != 0 { return left_code; }
+        let right_code: i32 = mini_validate_expr(root, function, mini_syntax_right(node), body_start, stop);
+        if right_code != 0 { return right_code; }
+        let left_type: i32 = mini_expr_type(root, function, mini_syntax_left(node), body_start, stop);
+        let right_type: i32 = mini_expr_type(root, function, mini_syntax_right(node), body_start, stop);
+        if left_type == mini_type_error() { return 2202; }
+        if mini_type_same(left_type, right_type) != 1 { return 2202; }
+        return 0;
+    }
+    if tag == 8 {
+        let left_code: i32 = mini_validate_expr(root, function, mini_syntax_left(node), body_start, stop);
+        if left_code != 0 { return left_code; }
+        let right_code: i32 = mini_validate_expr(root, function, mini_syntax_right(node), body_start, stop);
+        if right_code != 0 { return right_code; }
+        let left_type: i32 = mini_expr_type(root, function, mini_syntax_left(node), body_start, stop);
+        let right_type: i32 = mini_expr_type(root, function, mini_syntax_right(node), body_start, stop);
+        if left_type == mini_type_error() { return 2202; }
+        if mini_type_same(left_type, right_type) != 1 { return 2202; }
+        return 0;
+    }
+    if tag == 6 { return mini_validate_if(root, function, node, body_start, stop); }
+    if mini_syntax_kind(node) == 1 { return 2002; }
+    return 2001;
+}
+
+fn mini_validate_body(root: i32, function: i32, node: i32, body_start: i32) -> i32 {
+    if node == 0 { return 2103; }
+    let form_tag: i32 = mini_syntax_form_tag(node);
+    if form_tag == 1 { return mini_validate_body(root, function, mini_syntax_next(node), body_start); }
+    if form_tag == 2 {
+        let binding: i32 = mini_syntax_local_binding(node);
+        if mini_syntax_is_infix(binding, "=") != 1 { return 2101; }
+        let name_node: i32 = mini_syntax_local_name_node(node);
+        if mini_syntax_is_identifier(name_node) != 1 { return 2101; }
+        let name: addr = mini_syntax_text(name_node);
+        if mini_name_visible(function, body_start, node, name) == 1 { return 2102; }
+        let value: i32 = mini_syntax_local_value_node(node);
+        if mini_syntax_expr_tag(value) == 6 { return 2404; }
+        let value_code: i32 = mini_validate_expr(root, function, value, body_start, node);
+        if value_code != 0 { return value_code; }
+        let value_type: i32 = mini_expr_type(root, function, value, body_start, node);
+        if value_type == mini_type_error() { return 2203; }
+        let declared_type_node: i32 = mini_syntax_local_type_node(node);
+        if declared_type_node != 0 {
+            if value_type != mini_type_from_syntax(declared_type_node) { return 2203; }
+        }
+        return mini_validate_body(root, function, mini_syntax_next(node), body_start);
+    }
+    if mini_syntax_next(node) != 0 { return 2104; }
+    let result_code: i32 = mini_validate_expr(root, function, node, body_start, node);
+    if result_code != 0 { return result_code; }
+    if mini_expr_type(root, function, node, body_start, node) != mini_function_return_type(function) { return 2204; }
+    return 0;
+}
+
+fn mini_only_separators(node: i32) -> i32 {
+    if node == 0 { return 1; }
+    if mini_syntax_form_tag(node) != 1 { return 0; }
+    return mini_only_separators(mini_syntax_next(node));
+}
+
+fn mini_validate_statement_block(root: i32, function: i32, node: i32, body_start: i32) -> i32 {
+    if node == 0 { return 0; }
+    let form_tag: i32 = mini_syntax_form_tag(node);
+    if form_tag == 1 {
+        return mini_validate_statement_block(
+            root, function, mini_syntax_next(node), body_start);
+    }
+    if form_tag == 2 {
+        let binding: i32 = mini_syntax_local_binding(node);
+        if mini_syntax_is_infix(binding, "=") != 1 { return 2101; }
+        let name_node: i32 = mini_syntax_local_name_node(node);
+        if mini_syntax_is_identifier(name_node) != 1 { return 2101; }
+        if mini_name_visible(
+            function, body_start, node, mini_syntax_text(name_node)) == 1 {
+            return 2102;
+        }
+        let value: i32 = mini_syntax_local_value_node(node);
+        let value_code: i32 = mini_validate_expr(
+            root, function, value, body_start, node);
+        if value_code != 0 { return value_code; }
+        let value_type: i32 = mini_expr_type(
+            root, function, value, body_start, node);
+        if value_type == mini_type_error() { return 2203; }
+        let declared_type_node: i32 = mini_syntax_local_type_node(node);
+        if declared_type_node != 0 {
+            if value_type != mini_type_from_syntax(declared_type_node) { return 2203; }
+        }
+        return mini_validate_statement_block(
+            root, function, mini_syntax_next(node), body_start);
+    }
+    if form_tag == 4 {
+        let value: i32 = mini_syntax_return_expr(node);
+        let value_code: i32 = mini_validate_expr(
+            root, function, value, body_start, node);
+        if value_code != 0 { return value_code; }
+        if mini_expr_type(root, function, value, body_start, node) !=
+            mini_function_return_type(function) { return 2204; }
+        if mini_only_separators(mini_syntax_next(node)) != 1 { return 2501; }
+        return 0;
+    }
+    if form_tag == 5 {
+        let condition: i32 = mini_syntax_if_statement_condition(node);
+        let condition_code: i32 = mini_validate_expr(
+            root, function, condition, body_start, node);
+        if condition_code != 0 { return condition_code; }
+        if mini_expr_type(root, function, condition, body_start, node) !=
+            mini_type_bool() { return 2401; }
+        let branch: i32 = mini_syntax_left(mini_syntax_if_statement_body(node));
+        let branch_code: i32 = mini_validate_statement_block(
+            root, function, branch, branch);
+        if branch_code != 0 { return branch_code; }
+        return mini_validate_statement_block(
+            root, function, mini_syntax_next(node), body_start);
+    }
+    return 2502;
+}
+
+fn mini_validate_declared_body(root: i32, function: i32, node: i32, body_start: i32) -> i32 {
+    if node == 0 { return 2103; }
+    let form_tag: i32 = mini_syntax_form_tag(node);
+    if form_tag == 1 {
+        return mini_validate_declared_body(root, function, mini_syntax_next(node), body_start);
+    }
+    if form_tag == 2 {
+        let binding: i32 = mini_syntax_local_binding(node);
+        if mini_syntax_is_infix(binding, "=") != 1 { return 2101; }
+        let name_node: i32 = mini_syntax_local_name_node(node);
+        if mini_syntax_is_identifier(name_node) != 1 { return 2101; }
+        let name: addr = mini_syntax_text(name_node);
+        if mini_name_visible(function, body_start, node, name) == 1 { return 2102; }
+        let value: i32 = mini_syntax_local_value_node(node);
+        let value_code: i32 = mini_validate_expr(root, function, value, body_start, node);
+        if value_code != 0 { return value_code; }
+        let value_type: i32 = mini_expr_type(root, function, value, body_start, node);
+        if value_type == mini_type_error() { return 2203; }
+        let declared_type_node: i32 = mini_syntax_local_type_node(node);
+        if declared_type_node != 0 {
+            if value_type != mini_type_from_syntax(declared_type_node) { return 2203; }
+        }
+        return mini_validate_declared_body(root, function, mini_syntax_next(node), body_start);
+    }
+    if form_tag == 4 {
+        let value: i32 = mini_syntax_return_expr(node);
+        let value_code: i32 = mini_validate_expr(root, function, value, body_start, node);
+        if value_code != 0 { return value_code; }
+        if mini_expr_type(root, function, value, body_start, node) != mini_function_return_type(function) { return 2204; }
+        if mini_only_separators(mini_syntax_next(node)) != 1 { return 2501; }
+        return 0;
+    }
+    if form_tag == 5 {
+        let condition: i32 = mini_syntax_if_statement_condition(node);
+        let condition_code: i32 = mini_validate_expr(root, function, condition, body_start, node);
+        if condition_code != 0 { return condition_code; }
+        if mini_expr_type(root, function, condition, body_start, node) != mini_type_bool() { return 2401; }
+        let branch: i32 = mini_syntax_left(mini_syntax_if_statement_body(node));
+        let branch_code: i32 = mini_validate_statement_block(root, function, branch, branch);
+        if branch_code != 0 { return branch_code; }
+        return mini_validate_declared_body(root, function, mini_syntax_next(node), body_start);
+    }
+    return 2502;
+}
+
+fn mini_validate_param_names(param: i32) -> i32 {
+    if param == 0 { return 0; }
+    let name: addr = mini_syntax_text(mini_syntax_param_name_node(param));
+    if mini_syntax_param_named(mini_syntax_param_next(param), name) == 1 { return 2110; }
+    return mini_validate_param_names(mini_syntax_param_next(param));
+}
+
+fn mini_validate_function_semantics(root: i32, function: i32) -> i32 {
+    let name: addr = mini_syntax_function_name(function);
+    if mini_module_procedure_name_count(root, name) != 1 { return 2111; }
+    let param_code: i32 = mini_validate_param_names(mini_syntax_function_first_param(function));
+    if param_code != 0 { return param_code; }
+    let body: i32 = mini_syntax_function_body(function);
+    let first: i32 = mini_syntax_left(body);
+    if mini_syntax_function_style(function) == 1 {
+        return mini_validate_body(root, function, first, first);
+    }
+    return mini_validate_declared_body(root, function, first, first);
+}
+
+fn mini_validate_functions(root: i32, function: i32) -> i32 {
+    if function == 0 { return 0; }
+    let code: i32 = mini_validate_function_semantics(root, function);
+    if code != 0 { return code; }
+    return mini_validate_functions(root, mini_middle_next_definition(function));
+}
+
+fn mini_diagnostic_function(root: i32, function: i32) -> addr {
+    if function == 0 { return ""; }
+    if mini_validate_function_semantics(root, function) != 0 {
+        return mini_syntax_function_name(function);
+    }
+    return mini_diagnostic_function(root, mini_middle_next_definition(function));
+}
+
+pub fn mini_elaborate_diagnostic_function(root: i32) -> addr {
+    if mini_middle_validate_program(root) != 0 { return ""; }
+    return mini_diagnostic_function(root, mini_module_first_procedure(root));
+}
+
+pub fn mini_elaborate_validate(root: i32) -> i32 {
+    let syntax_code: i32 = mini_middle_validate_program(root);
+    if syntax_code != 0 { return syntax_code; }
+    return mini_validate_functions(root, mini_module_first_procedure(root));
+}

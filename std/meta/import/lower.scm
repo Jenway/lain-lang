@@ -1,5 +1,69 @@
 (meta-source "import/lower")
 
+;; This is a deliberately narrow stage-0 bridge for `lainc --interpret`.
+;; Module graph policy remains in Meta: C merely selects this mode and later
+;; executes the single L1 module that Meta produced.  Normal compilation keeps
+;; using the legacy interface-file bridge.
+(define *import-source-linking?* #f)
+(define *import-source-modules* (list))
+
+(define (import.configure-source-linking! enabled)
+  (set! *import-source-linking?* enabled)
+  (set! *import-source-modules* (list)))
+
+(define (import.source-linking?) *import-source-linking?*)
+
+(define (import.source-module-seen? path)
+  (if (null? *import-source-modules*)
+      #f
+      (if (string=? path (car *import-source-modules*))
+          #t
+          (let ((saved *import-source-modules*))
+            ;; Keep the implementation compatible with the small Scheme
+            ;; prelude: use a local tail-recursive walk rather than `member`.
+            (let ((loop #f))
+              (set! loop (lambda (rest)
+                (if (null? rest) #f
+                    (if (string=? path (car rest)) #t
+                        (loop (cdr rest))))))
+              (loop (cdr saved)))))))
+
+;; `declarations.push!` conses onto a persistent list.  For recursive source
+;; imports we must split that list at the exact old tail, not by `equal?`:
+;; two independent modules may legitimately contain an identical import form.
+;; Structural matching would then silently drop declarations after that form.
+(define (import.declarations-since old-tail)
+  (let ((loop #f))
+    (set! loop (lambda (rest acc)
+      (if (eq? rest old-tail)
+          (list.reverse acc)
+          (if (null? rest)
+              (error "import: declaration stack lost its prior tail")
+              (loop (cdr rest) (list.cons (car rest) acc))))))
+    (loop (declarations.all) (list))))
+
+(define (import.declare-and-lower-source! source-path)
+  (if (import.source-module-seen? source-path)
+      unit
+      (begin
+        ;; Mark before parsing so recursive imports fail as a normal missing
+        ;; symbol later rather than recurse forever.  Cycle diagnostics are a
+        ;; subsequent module-graph slice.
+        (set! *import-source-modules*
+              (cons source-path *import-source-modules*))
+        (let* ((forms (host.read-file-forms source-path)))
+          (if (not forms)
+              (error (string-append "import: source not found for: " source-path))
+              (let* ((known (declarations.all))
+                     (_ (for-each driver.parse-and-declare forms))
+                     (new-decls (import.declarations-since known))
+                     (new-middle (driver.normalize-decls-from new-decls)))
+                ;; Recursion happens while declaring nested imports.  Lower
+                ;; dependencies first, then the current module, so all Lain
+                ;; implementation bodies land in this L1 module.
+                (driver.declare-core new-middle)
+                (driver.lower-core new-middle)))))))
+
 ;; ═══════════════════════════════════════════════════════════
 ;; Import core-declarer / core-lowerer (interface-based)
 ;; 
@@ -270,12 +334,17 @@
          ;; The raw import path is nested in the inner |payload| field
          (raw-inner (optional.value (record.get payload '|payload|)))
          (path (optional.value (record.get raw-inner '|path|))))
-    ;; Read and parse the compiled interface file
+    ;; Interpreter mode links Lain implementation bodies through Meta.  The
+    ;; ordinary compiler path remains interface-based.
     (let* ((source-path (import.resolve-path path))
-           (parsed (host.read-interface source-path)))
-      (if (not parsed)
-          (error (string-append "import: interface not found for: " source-path))
-          (let* ((rest (cdr parsed))
+           (parsed (if *import-source-linking?*
+                       #f
+                       (host.read-interface source-path))))
+      (if *import-source-linking?*
+          (import.declare-and-lower-source! source-path)
+          (if (not parsed)
+              (error (string-append "import: interface not found for: " source-path))
+              (let* ((rest (cdr parsed))
                  (exports-section (interface.find-exports-section rest))
                  (export-entries (if exports-section (cdr exports-section) (list)))
                  (exports (interface.extract-exports parsed))
@@ -287,7 +356,7 @@
             ;; source-level calls like simple_math_add() resolve correctly.
             (import.register-binding-metadata!
               name path fn-exports module-exports signature-exports)
-            (interface.declare-exports! exports path)))))))
+                (interface.declare-exports! exports path))))))))
 
 ;; Derive the caller-side function name from import path + mangled name.
 ;; The interface exports mangled names like "fs_read" (moduleprefix_functionname).

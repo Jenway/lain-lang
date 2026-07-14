@@ -1,0 +1,363 @@
+// Zero-copy semantic views over topology-only RawAst handles.
+// All knowledge of RawAst topology for the first Lain-owned domain lives here.
+
+@foreign(c, link_name = "ast.parse!")
+fn ast_parse(source: addr, length: i32) -> i32;
+@foreign(c, link_name = "ast.node-kind")
+fn ast_node_kind(node: i32) -> i32;
+@foreign(c, link_name = "ast.node-left")
+fn ast_node_left(node: i32) -> i32;
+@foreign(c, link_name = "ast.node-right")
+fn ast_node_right(node: i32) -> i32;
+@foreign(c, link_name = "ast.node-op")
+fn ast_node_op(node: i32) -> i32;
+@foreign(c, link_name = "ast.node-next")
+fn ast_node_next(node: i32) -> i32;
+@foreign(c, link_name = "ast.node-text")
+fn ast_node_text(node: i32) -> addr;
+@foreign(c, link_name = "ast.node-is-atom-text")
+fn ast_node_is_atom_text(node: i32, text: addr) -> i32;
+@foreign(c, link_name = "ast.node-is-infix-text")
+fn ast_node_is_infix_text(node: i32, text: addr) -> i32;
+@foreign(c, link_name = "ast.node-atom-class")
+fn ast_node_atom_class(node: i32) -> i32;
+@foreign(c, link_name = "core.string-equal!")
+fn string_equal(left: addr, right: addr) -> i32;
+@foreign(c, link_name = "core.string-to-i32!")
+fn string_to_i32(text: addr) -> i32;
+@foreign(c, link_name = "core.string-is-i32!")
+fn string_is_i32(text: addr) -> i32;
+@foreign(c, link_name = "core.i32-to-string!")
+fn i32_to_string(value: i32) -> addr;
+@foreign(c, link_name = "core.string-first-byte!")
+fn string_first_byte(value: addr) -> i32;
+
+pub fn mini_syntax_parse(source: addr, length: i32) -> i32 { return ast_parse(source, length); }
+pub fn mini_syntax_kind(node: i32) -> i32 { return ast_node_kind(node); }
+pub fn mini_syntax_left(node: i32) -> i32 { return ast_node_left(node); }
+pub fn mini_syntax_right(node: i32) -> i32 { return ast_node_right(node); }
+pub fn mini_syntax_op(node: i32) -> i32 { return ast_node_op(node); }
+pub fn mini_syntax_next(node: i32) -> i32 { return ast_node_next(node); }
+pub fn mini_syntax_text(node: i32) -> addr { return ast_node_text(node); }
+pub fn mini_syntax_text_equal(left: addr, right: addr) -> i32 { return string_equal(left, right); }
+pub fn mini_syntax_i32_text(value: i32) -> addr { return i32_to_string(value); }
+
+pub fn mini_syntax_is_atom_text(node: i32, text: addr) -> i32 {
+    return ast_node_is_atom_text(node, text);
+}
+
+pub fn mini_syntax_is_infix(node: i32, op: addr) -> i32 {
+    return ast_node_is_infix_text(node, op);
+}
+
+pub fn mini_syntax_is_juxt(node: i32) -> i32 { return mini_syntax_is_infix(node, " "); }
+
+pub fn mini_syntax_is_i32_atom(node: i32) -> i32 {
+    if ast_node_atom_class(node) == 1 { return 1; }
+    return 0;
+}
+
+pub fn mini_syntax_is_identifier(node: i32) -> i32 {
+    if ast_node_atom_class(node) != 3 { return 0; }
+    if mini_syntax_is_atom_text(node, ";") == 1 { return 0; }
+    if mini_syntax_is_atom_text(node, ",") == 1 { return 0; }
+    return 1;
+}
+
+pub fn mini_syntax_is_string_atom(node: i32) -> i32 {
+    if ast_node_atom_class(node) == 2 { return 1; }
+    return 0;
+}
+
+pub fn mini_syntax_first_function(root: i32) -> i32 { return ast_node_left(root); }
+pub fn mini_syntax_function_next(function: i32) -> i32 { return ast_node_next(function); }
+pub fn mini_syntax_function_head(function: i32) -> i32 { return ast_node_left(function); }
+pub fn mini_syntax_function_body(function: i32) -> i32 { return ast_node_right(function); }
+pub fn mini_syntax_function_signature(function: i32) -> i32 {
+    if mini_syntax_function_style(function) == 4 { return ast_node_right(function); }
+    return ast_node_right(mini_syntax_function_head(function));
+}
+// 1 = `let name = fn`, 2 = `pub fn name`, 3 = `fn name`,
+// 4 = declaration-only `fn name(...)->...`.
+pub fn mini_syntax_function_style(function: i32) -> i32 {
+    if mini_syntax_is_juxt(function) == 1 {
+        if mini_syntax_is_atom_text(ast_node_left(function), "fn") == 1 {
+            if mini_syntax_is_infix(ast_node_right(function), "->") == 1 { return 4; }
+        }
+    }
+    if mini_syntax_is_atom_text(
+        ast_node_left(mini_syntax_function_head(function)), "let") == 1 {
+        return 1;
+    }
+    if mini_syntax_is_juxt(
+        ast_node_left(mini_syntax_function_head(function))) == 1 {
+        if mini_syntax_is_atom_text(
+            ast_node_left(ast_node_left(mini_syntax_function_head(function))),
+            "pub") == 1 {
+            if mini_syntax_is_atom_text(
+                ast_node_right(ast_node_left(mini_syntax_function_head(function))),
+                "fn") == 1 { return 2; }
+        }
+    }
+    if mini_syntax_is_atom_text(
+        ast_node_left(mini_syntax_function_head(function)), "fn") == 1 {
+        return 3;
+    }
+    return 0;
+}
+pub fn mini_syntax_function_binding(function: i32) -> i32 {
+    return ast_node_left(mini_syntax_function_signature(function));
+}
+pub fn mini_syntax_function_name_node(function: i32) -> i32 {
+    return ast_node_left(mini_syntax_function_binding(function));
+}
+pub fn mini_syntax_function_name(function: i32) -> addr {
+    return ast_node_text(mini_syntax_function_name_node(function));
+}
+pub fn mini_syntax_function_fn_form(function: i32) -> i32 {
+    if mini_syntax_function_style(function) == 1 {
+        return ast_node_right(mini_syntax_function_binding(function));
+    }
+    return mini_syntax_function_binding(function);
+}
+pub fn mini_syntax_function_params(function: i32) -> i32 {
+    return ast_node_right(mini_syntax_function_fn_form(function));
+}
+pub fn mini_syntax_function_first_param(function: i32) -> i32 {
+    return ast_node_left(mini_syntax_function_params(function));
+}
+
+pub fn mini_syntax_param_name_node(param: i32) -> i32 { return ast_node_left(param); }
+pub fn mini_syntax_param_type_node(param: i32) -> i32 { return ast_node_right(param); }
+pub fn mini_syntax_param_next(param: i32) -> i32 {
+    let separator: i32 = ast_node_next(param);
+    if separator == 0 { return 0; }
+    return ast_node_next(separator);
+}
+
+pub fn mini_syntax_param_count(param: i32) -> i32 {
+    if param == 0 { return 0; }
+    return 1 + mini_syntax_param_count(mini_syntax_param_next(param));
+}
+
+pub fn mini_syntax_param_named(param: i32, name: addr) -> i32 {
+    if param == 0 { return 0; }
+    if string_equal(ast_node_text(ast_node_left(param)), name) == 1 { return 1; }
+    return mini_syntax_param_named(mini_syntax_param_next(param), name);
+}
+
+pub fn mini_syntax_find_param(param: i32, name: addr) -> i32 {
+    if param == 0 { return 0; }
+    if string_equal(ast_node_text(ast_node_left(param)), name) == 1 { return param; }
+    return mini_syntax_find_param(mini_syntax_param_next(param), name);
+}
+
+pub fn mini_syntax_param_index(param: i32, name: addr, index: i32) -> i32 {
+    if param == 0 { return 1000000; }
+    if string_equal(ast_node_text(ast_node_left(param)), name) == 1 { return index; }
+    return mini_syntax_param_index(mini_syntax_param_next(param), name, index + 1);
+}
+
+pub fn mini_syntax_find_function(function: i32, name: addr) -> i32 {
+    if function == 0 { return 0; }
+    if string_equal(mini_syntax_function_name(function), name) == 1 { return function; }
+    return mini_syntax_find_function(ast_node_next(function), name);
+}
+
+pub fn mini_syntax_function_count(function: i32) -> i32 {
+    if function == 0 { return 0; }
+    return 1 + mini_syntax_function_count(ast_node_next(function));
+}
+
+pub fn mini_syntax_function_name_count(function: i32, name: addr) -> i32 {
+    if function == 0 { return 0; }
+    if string_equal(mini_syntax_function_name(function), name) == 1 {
+        return 1 + mini_syntax_function_name_count(ast_node_next(function), name);
+    }
+    return mini_syntax_function_name_count(ast_node_next(function), name);
+}
+
+pub fn mini_syntax_is_call(node: i32) -> i32 {
+    if ast_node_kind(node) != 3 { return 0; }
+    if mini_syntax_is_atom_text(ast_node_op(node), "(") != 1 { return 0; }
+    return mini_syntax_is_identifier(ast_node_left(node));
+}
+pub fn mini_syntax_call_name(node: i32) -> addr { return ast_node_text(ast_node_left(node)); }
+pub fn mini_syntax_call_args(node: i32) -> i32 { return ast_node_right(node); }
+pub fn mini_syntax_call_first_arg(node: i32) -> i32 { return ast_node_left(ast_node_right(node)); }
+pub fn mini_syntax_arg_next(arg: i32) -> i32 {
+    let separator: i32 = ast_node_next(arg);
+    if separator == 0 { return 0; }
+    return ast_node_next(separator);
+}
+pub fn mini_syntax_arg_count(arg: i32) -> i32 {
+    if arg == 0 { return 0; }
+    return 1 + mini_syntax_arg_count(mini_syntax_arg_next(arg));
+}
+
+// if view for: if <cond> { <then> } else { <else> }
+pub fn mini_syntax_is_if(node: i32) -> i32 {
+    if mini_syntax_is_juxt(node) != 1 { return 0; }
+    let with_else: i32 = ast_node_left(node);
+    let else_body: i32 = ast_node_right(node);
+    if ast_node_kind(else_body) != 4 { return 0; }
+    if mini_syntax_is_juxt(with_else) != 1 { return 0; }
+    if mini_syntax_is_atom_text(ast_node_right(with_else), "else") != 1 { return 0; }
+    let with_then: i32 = ast_node_left(with_else);
+    if mini_syntax_is_juxt(with_then) != 1 { return 0; }
+    if ast_node_kind(ast_node_right(with_then)) != 4 { return 0; }
+    let with_cond: i32 = ast_node_left(with_then);
+    if mini_syntax_is_juxt(with_cond) != 1 { return 0; }
+    return mini_syntax_is_atom_text(ast_node_left(with_cond), "if");
+}
+
+pub fn mini_syntax_is_if_statement(node: i32) -> i32 {
+    if mini_syntax_is_juxt(node) != 1 { return 0; }
+    if ast_node_kind(ast_node_right(node)) != 4 { return 0; }
+    let with_condition: i32 = ast_node_left(node);
+    if mini_syntax_is_juxt(with_condition) != 1 { return 0; }
+    return mini_syntax_is_atom_text(ast_node_left(with_condition), "if");
+}
+pub fn mini_syntax_if_statement_condition(node: i32) -> i32 {
+    return ast_node_right(ast_node_left(node));
+}
+pub fn mini_syntax_if_statement_body(node: i32) -> i32 { return ast_node_right(node); }
+
+pub fn mini_syntax_is_return(node: i32) -> i32 {
+    if mini_syntax_is_juxt(node) != 1 { return 0; }
+    return mini_syntax_is_atom_text(ast_node_left(node), "return");
+}
+pub fn mini_syntax_return_expr(node: i32) -> i32 { return ast_node_right(node); }
+pub fn mini_syntax_if_condition(node: i32) -> i32 {
+    return ast_node_right(ast_node_left(ast_node_left(ast_node_left(node))));
+}
+pub fn mini_syntax_if_then_group(node: i32) -> i32 {
+    return ast_node_right(ast_node_left(ast_node_left(node)));
+}
+pub fn mini_syntax_if_else_group(node: i32) -> i32 { return ast_node_right(node); }
+pub fn mini_syntax_if_then_expr(node: i32) -> i32 {
+    return ast_node_left(mini_syntax_if_then_group(node));
+}
+pub fn mini_syntax_if_else_expr(node: i32) -> i32 {
+    return ast_node_left(mini_syntax_if_else_group(node));
+}
+
+// Semantic expression tags: 1=i32, 2=name, 3=add, 4=call, 5=eq, 6=if,
+// 7=string, 8=ne.
+pub fn mini_syntax_expr_tag(node: i32) -> i32 {
+    if mini_syntax_is_i32_atom(node) == 1 { return 1; }
+    if mini_syntax_is_string_atom(node) == 1 { return 7; }
+    if mini_syntax_is_identifier(node) == 1 { return 2; }
+    if mini_syntax_is_infix(node, "+") == 1 { return 3; }
+    if mini_syntax_is_call(node) == 1 { return 4; }
+    if mini_syntax_is_infix(node, "==") == 1 { return 5; }
+    if mini_syntax_is_infix(node, "!=") == 1 { return 8; }
+    if mini_syntax_is_if(node) == 1 { return 6; }
+    return 0;
+}
+
+// Body form tags: 1=separator, 2=local let, 3=expression, 4=return, 5=if stmt.
+pub fn mini_syntax_form_tag(node: i32) -> i32 {
+    if mini_syntax_is_atom_text(node, ";") == 1 { return 1; }
+    if mini_syntax_is_return(node) == 1 { return 4; }
+    if mini_syntax_is_if_statement(node) == 1 { return 5; }
+    if mini_syntax_is_juxt(node) == 1 {
+        if mini_syntax_is_atom_text(ast_node_left(node), "let") == 1 { return 2; }
+    }
+    return 3;
+}
+
+pub fn mini_syntax_local_binding(form: i32) -> i32 {
+    return mini_syntax_right(form);
+}
+
+pub fn mini_syntax_local_name_node(form: i32) -> i32 {
+    if mini_syntax_is_infix(
+        mini_syntax_left(mini_syntax_local_binding(form)), ":") == 1 {
+        return mini_syntax_left(
+            mini_syntax_left(mini_syntax_local_binding(form)));
+    }
+    return mini_syntax_left(mini_syntax_local_binding(form));
+}
+
+pub fn mini_syntax_local_type_node(form: i32) -> i32 {
+    if mini_syntax_is_infix(
+        mini_syntax_left(mini_syntax_local_binding(form)), ":") == 1 {
+        return mini_syntax_right(
+            mini_syntax_left(mini_syntax_local_binding(form)));
+    }
+    return 0;
+}
+
+pub fn mini_syntax_local_value_node(form: i32) -> i32 {
+    return mini_syntax_right(mini_syntax_local_binding(form));
+}
+
+fn mini_syntax_validate_params(param: i32) -> i32 {
+    if param == 0 { return 0; }
+    if mini_syntax_is_infix(param, ":") != 1 { return 1110; }
+    if mini_syntax_is_identifier(ast_node_left(param)) != 1 { return 1111; }
+    if mini_syntax_is_atom_text(ast_node_right(param), "i32") != 1 {
+        if mini_syntax_is_atom_text(ast_node_right(param), "addr") != 1 { return 1112; }
+    }
+    let separator: i32 = ast_node_next(param);
+    if separator == 0 { return 0; }
+    if mini_syntax_is_atom_text(separator, ",") != 1 { return 1113; }
+    let next_param: i32 = ast_node_next(separator);
+    if next_param == 0 { return 1114; }
+    return mini_syntax_validate_params(next_param);
+}
+
+pub fn mini_syntax_validate_function(function: i32) -> i32 {
+    if mini_syntax_is_juxt(function) != 1 { return 1002; }
+    let head: i32 = mini_syntax_function_head(function);
+    if mini_syntax_is_juxt(head) != 1 { return 1003; }
+    let style: i32 = mini_syntax_function_style(function);
+    if style == 0 { return 1004; }
+    let signature: i32 = mini_syntax_function_signature(function);
+    if mini_syntax_is_infix(signature, "->") != 1 { return 1101; }
+    if mini_syntax_is_atom_text(ast_node_right(signature), "i32") != 1 {
+        if mini_syntax_is_atom_text(ast_node_right(signature), "addr") != 1 { return 1102; }
+    }
+    let binding: i32 = mini_syntax_function_binding(function);
+    if style == 1 {
+        if mini_syntax_is_infix(binding, "=") != 1 { return 1103; }
+    }
+    if style != 1 {
+        if ast_node_kind(binding) != 3 { return 1103; }
+    }
+    if mini_syntax_is_identifier(mini_syntax_function_name_node(function)) != 1 { return 1104; }
+    let fn_form: i32 = mini_syntax_function_fn_form(function);
+    if ast_node_kind(fn_form) != 3 { return 1105; }
+    if mini_syntax_is_atom_text(ast_node_op(fn_form), "(") != 1 { return 1105; }
+    if style == 1 {
+        if mini_syntax_is_atom_text(ast_node_left(fn_form), "fn") != 1 { return 1106; }
+    }
+    let params: i32 = mini_syntax_function_params(function);
+    if ast_node_kind(params) != 4 { return 1107; }
+    let param_code: i32 = mini_syntax_validate_params(ast_node_left(params));
+    if param_code != 0 { return param_code; }
+    if ast_node_kind(mini_syntax_function_body(function)) != 4 { return 1201; }
+    return 0;
+}
+
+fn mini_syntax_validate_functions(function: i32) -> i32 {
+    if function == 0 { return 0; }
+    let code: i32 = mini_syntax_validate_function(function);
+    if code != 0 { return code; }
+    return mini_syntax_validate_functions(ast_node_next(function));
+}
+
+pub fn mini_syntax_validate_program(root: i32) -> i32 {
+    if ast_node_kind(root) != 4 { return 1001; }
+    let first: i32 = ast_node_left(root);
+    if first == 0 { return 1005; }
+    return mini_syntax_validate_functions(first);
+}
+
+// Compatibility views for the first procedure.
+pub fn mini_syntax_program_top(root: i32) -> i32 { return mini_syntax_first_function(root); }
+pub fn mini_syntax_program_head(root: i32) -> i32 { return mini_syntax_function_head(mini_syntax_first_function(root)); }
+pub fn mini_syntax_program_signature(root: i32) -> i32 { return mini_syntax_function_signature(mini_syntax_first_function(root)); }
+pub fn mini_syntax_program_binding(root: i32) -> i32 { return mini_syntax_function_binding(mini_syntax_first_function(root)); }
+pub fn mini_syntax_program_body(root: i32) -> i32 { return mini_syntax_function_body(mini_syntax_first_function(root)); }

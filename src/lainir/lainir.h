@@ -140,6 +140,13 @@ typedef struct L1Instruction L1Instruction;
 typedef struct L1Block L1Block;
 typedef struct L1Subroutine L1Subroutine;
 
+typedef struct {
+  int code;
+  int line;
+  int column;
+  char message[192];
+} L1Diagnostic;
+
 /* -------------------------------------------------------------------------
  * Expression node
  * ------------------------------------------------------------------------- */
@@ -157,7 +164,10 @@ struct L1Expr {
     int64_t const_val;
 
     /* EXPR_ARG */
-    uint32_t arg_idx;
+    struct {
+      uint32_t index;
+      L1Type *ty; /* resolved from the owning procedure signature */
+    } arg;
 
     /* EXPR_LOAD */
     struct {
@@ -258,12 +268,16 @@ struct L1Instruction {
     /* INST_LET: immutable binding */
     struct {
       char *name;
+      /* Declared result type.  Textual L1 bindings are typed; NULL is only
+         retained while accepting legacy input, before verification infers it. */
+      L1Type *ty;
       L1Expr *val;
     } let;
 
     /* INST_SET: mutable assignment */
     struct {
       char *name;
+      L1Type *ty;
       L1Expr *val;
     } set;
 
@@ -387,6 +401,10 @@ int native_is_export_marked(const char *name);
  * Frontend
  * ------------------------------------------------------------------------- */
 L1Subroutine *lainir_parse_module(const char *src);
+int lainir_parse_module_checked(const char *src, L1Subroutine **out_module,
+                                L1Diagnostic *diagnostic);
+int lainir_verify_module(L1Subroutine *head, const char *entry_name,
+                         L1Diagnostic *diagnostic);
 
 /* -------------------------------------------------------------------------
  * Backends
