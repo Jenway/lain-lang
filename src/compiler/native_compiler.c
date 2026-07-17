@@ -1,5 +1,6 @@
 #include "native_runtime.h"
 #include "structured_unit.h"
+#include "version.h"
 #include "lainir_exec.h"
 #include "lainast/lain_ast.h"
 #include <stdint.h>
@@ -480,6 +481,19 @@ uint32_t compile_ast(const void* arg0, const void* arg1) {
 int main(int argc, char **argv) {
     native_set_args(argc, argv);
 
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        printf(
+            "lainc %s\n"
+            "LAIN-IR schema %d\n"
+            "Compiler API schema %d\n"
+            "ModuleArtifact schema %d\n",
+            LAIN_VERSION,
+            LAIN_IR_SCHEMA_VERSION,
+            LAIN_COMPILER_API_SCHEMA_VERSION,
+            LAIN_MODULE_ARTIFACT_SCHEMA_VERSION);
+        return 0;
+    }
+
     int emit_l1 = 0;
     int bootstrap_emit_l1 = 0;
     int emit_workspace_l1 = 0;
@@ -532,12 +546,13 @@ int main(int argc, char **argv) {
     } else {
         printf(
             "Usage:\n"
+            "  %s --version\n"
             "  %s --emit-l1 <input.lain> <output.l1>\n"
             "  %s --emit-workspace-l1 <output.l1> <module.lain>...\n"
             "  %s --artifact <compiler.l1> --emit-l1 <input.lain> <output.l1>\n"
             "  %s --bootstrap-emit-l1 <input.lain> <output.l1>\n"
             "  %s [--interpret|--emit-ast|--emit-interface] <input> <output-or-entry>\n",
-            argv[0], argv[0], argv[0], argv[0], argv[0]);
+            argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
         return 1;
     }
 
