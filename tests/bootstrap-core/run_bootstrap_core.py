@@ -89,7 +89,7 @@ def run_emit_l1(case: Case, compiler: pathlib.Path) -> tuple[bool, str]:
 
     try:
         result = subprocess.run(
-            [str(compiler), "--emit-l1", str(case.path), str(out_l1)],
+            [str(compiler), "--bootstrap-emit-l1", str(case.path), str(out_l1)],
             cwd=ROOT,
             capture_output=True,
             text=True,

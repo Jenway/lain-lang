@@ -236,15 +236,136 @@ mini_syntax + mini_middle + mini_type + mini_module
   + mini_diagnostic + mini_compile_result + mini_meta
 ```
 
-整个闭包由 Lain-owned elaborator 验证。`mini_meta_compile_named` 随后选择一个
-procedure 生成定义，并把其余已验证 callable 写成 extern contract；测试执行
+完整编译由 Lain-owned elaborator 验证整个闭包。增量入口
+`mini_meta_compile_named` 只验证所选 procedure 的函数体及其引用的 callable
+签名，随后生成该定义并把其余 callable 写成 extern contract；测试执行
 自编译生成的 `mini_meta_schema_version() -> 4`。这是增量自举接口，不是长期
-module linker；跨源 ModuleSummary/linking 仍属于 M5。
+module linker。
 
 CompileResult 查询协议包含成功状态、diagnostic code/message、失败 procedure、
-procedure summary 和 L1 unit。失败编译不会生成部分 L1。大型 bootstrap 文本
-lowering 使用显式线性 capability `core.string-append-linear!`，其输入临时片段在
-调用后失效，避免递归拼接保留平方级内存；结构化 L1Unit 将在后续阶段取代它。
+procedure summary 和 L1 unit。失败编译不会生成部分 L1。M4/M5 使用的整单元文本
+lowering 现在只保留为 bootstrap 参考实现。
+
+### M5 Unified bindings and Meta modules
+
+M5 将顶层声明收束为同一个 Meta binding：
+
+```lain
+let NAME: EXPECTED_SHAPE = INITIALIZER;
+```
+
+`fn`、`module` 与 `require` 是构造 MetaValue 的普通 Meta constructor，不是
+RawAst 节点种类。`mini_middle.lain` 提取 binding name、expected shape、
+initializer 和可选 body；`mini_module.lain` 在这些 view 上形成 zero-copy
+ModuleSummary，并维护 exports 与 dependency graph；`mini_workspace.lain` 统一完成
+结构校验、跨模块 elaboration、诊断与 linking。
+
+验收 workspace 中，`app` 通过
+`let math: Module = require(math)` 获得 ModuleRef，`math.add(40, 2)` 经过 export
+检查后 lower 为 `#call math__add(...)`。Module/require/export 在 L1 中全部消失，
+最终只有 `math__add`、`app__main` 等物理 procedure。自编译 schema 同步升级为
+`mini_meta_schema_version() -> 5`。
+
+### M6 Structured L1Unit
+
+M6 将默认 Meta artifact 的 lowering 路径从：
+
+```text
+Lain Meta -> L1 text -> C text parser -> physical L1 nodes
+```
+
+替换为：
+
+```text
+Lain Meta -> opaque physical builder capabilities -> L1Unit handle
+```
+
+`l1_unit_builder.lain` 定义 Lain 侧的结构化 builder API，
+`mini_lower_unit.lain` 负责名称、类型、调用、局部变量、控制流与 procedure 顺序。
+C host 只分配和保存 `L1Subroutine`、`L1Instruction`、`L1Expr` 等物理节点，并提供
+verify、execute、debug-text 与 destroy；它不解释 `let`、`fn`、`module` 或 source
+alias。
+
+成功编译返回非零 opaque unit handle。任一验证或构造步骤失败时，Meta 销毁正在
+构造的 unit 并返回 0，因此调用者永远拿不到部分 L1Unit。文本 emitter 只用于
+观察已经构造完成的 unit，不再是编译通道。
+
+默认 artifact 不再链接 `l1_text_builder.lain`、`mini_lower.lain` 或
+`core.string-append-linear!`。M6 验收覆盖普通编译、named self-compile、跨模块
+`math.add(40, 2)` linking、失败原子性、debug text，以及直接执行
+`app__main == 42`。schema 同步升级为 6。
+
+### M7 Lain-owned L1 Interpreter
+
+M7 在 structured L1Unit 上增加只读的物理查询 ABI。C 可以回答 procedure、
+instruction、expression 的 kind、child、name、argument 等结构问题，并提供 opaque
+frame/result 存储；C 不决定表达式如何求值。
+
+执行语义位于 `packages/lain/compiler/l1_interpreter.lain`：
+
+```text
+procedure lookup -> argument frame -> instruction walk -> expression eval
+                 -> call/if/return -> structured result
+```
+
+当前自举子集包括 i32 常量、argument、local variable、add、eq、ne、direct call、
+let、structured if 和 return。找不到 procedure、arity 不符、未知节点及 extern call
+均产生稳定的 interpreter status。尤其是 extern 不会自动映射到 host capability。
+
+M7 使用同一个跨模块 unit 验收：C reference interpreter 与 Lain interpreter 都执行
+`app__main == 42`。C reference 仍用于差分测试，但不是新 interpreter 的语义实现。
+
+### M8 Structured Comptime Evaluation
+
+M8 不创建第二套 evaluator。Meta 先把待求值程序 lower 为 temporary structured
+L1Unit，再调用 M7 的 Lain interpreter：
+
+```text
+source -> RawAst -> Lain Meta -> temporary L1Unit
+                               -> Lain interpreter -> status/value
+                               -> continued structured lowering
+```
+
+`mini_meta_comptime`/`mini_meta_comptime_main` 返回 opaque result，其中 status 0
+表示成功；source elaboration 失败保留原 diagnostic code，物理 lowering 失败返回
+8002，extern capability call 返回 7002。temporary unit 在求值后销毁。
+
+`mini_meta_comptime_materialize_main` 将求出的 i32 重新写入一个新的 structured
+L1Unit，证明结果回到了 Meta/lowering 流程，而不是停在测试宿主。验收程序以递归
+`sum_range(1, 11, 0)` 计算 55，运行两次结果相同；C runtime reference、Lain
+comptime 与 materialized unit 三条路径均得到 55。schema 同步升级为 8。
+
+当前 M8 是编译器 Meta API/执行协议；把 `comptime` surface form 接入完整用户语法
+仍属于后续 surface elaboration 工作。其执行语义已经固定为 LAIN-IR interpreter，
+不属于 Scheme Meta evaluator。
+
+### M9 Lain-owned Compiler State
+
+M9 把编译过程的状态与结果从宿主约定迁入 Lain：
+
+```text
+M9SyntaxRef(node, start, end)
+M9CompilerState(syntax, phase, module_count, optional_unit, diagnostics)
+  -> M9CompileResult(outcome_tag, syntax, module_count,
+                     optional_unit, diagnostics)
+```
+
+`mini_meta_compile_structured_root` 是真实内部入口。验证失败时，它把稳定 diagnostic
+code/message/span 写入 Lain-owned `M9DiagnosticBag`；lowering 成功时才写入 opaque
+L1Unit。`m9_compiler_state_finish` 强制执行失败原子性：只要存在诊断或 unit 缺失，
+结果就是 failure 且不暴露 unit。`mini_meta_compile -> i32` 仅是旧 CLI/FFI 的兼容投影，
+不再定义内部错误模型。
+
+当前 bootstrap 没有自有 growable allocator，因此 DiagnosticBag 使用拥有四个 inline
+slot 的有界 slice，避免返回借用 callee stack 的链表。结果 outcome 使用 tagged-struct
+字段；完整 enum/match 仍由独立 bootstrap-core 测试保护，在 match-as-value lowering
+完备后可以替换物理表示，而不改变 CompileResult policy。
+
+结构体按地址通过当前 L1 ABI。interpreter 的 aggregate arena 因而具有整次 run 的
+生命周期，`#field[offset](base):type` 在文本 round-trip 中保留字段物理类型，64 位
+addr store 必须写入完整 pointer width。M9 验收执行 begin/with-unit/finish/result 四个
+探针，并覆盖成功结果、失败诊断、source extent、无 partial L1Unit，以及包含
+`compiler_state.lain` 的增量自编译闭包。schema 升级为 9。
 
 无论宿主语言是什么，Meta 层都不直接操作 C 内存指针。
 
@@ -1602,3 +1723,40 @@ Meta owns language semantics.
 LAIN-IR owns physical execution.
 Backend owns target emission.
 ```
+
+## 34. M10-M13 自举状态
+
+当前实现已经越过“只能编译一个选定函数”的增量切片。稳定编译器源码闭包由
+`tests/core/self_hosting/compiler_source.py` 中的有序模块列表定义，数据流为：
+
+```text
+compiler_source.lain
+  -> RawAst
+  -> Lain-owned Parsed/Middle/Elaborated programs
+  -> Lain-owned structured lowering policy
+  -> opaque physical L1Unit
+  -> reloadable L1 text
+```
+
+M10 使 Meta nominal identity 与物理 ABI shape 分离；M11 使动态集合、符号表、
+scope 和 diagnostics 由 Lain `CompilerContext` 所有；M12 固定显式阶段与失败原子性；
+M13 则用这条管线编译完整的 Lain compiler source closure。
+
+`@foreign(c, link_name = "...")` 在 RawAst 中仍只是 attribute topology。Lain
+Middle/Lower 层解释它、把源码调用名重定位到物理 capability name，并按 link name
+去重跨模块重复声明。C 不认识 `foreign` 的语言语义。
+
+当前固定点不是只比较行为分数：
+
+```text
+stage1 compile(source) -> stage2.l1
+stage2 compile(source) -> stage3.l1
+stage2.l1 == stage3.l1  // byte-for-byte
+```
+
+stage2/stage3 都重新经过 L1 parser 与 verifier，schema 都为 12。跨代行为门槛还
+覆盖普通函数执行 42、未知 procedure 诊断 2301、两模块 workspace 执行 42，以及
+Lain interpreter/comptime 执行 55。
+
+这意味着日常 Meta compiler 的策略主体已经可以由 Lain 表达并达到固定点；
+Scheme 仍用于制造 stage1 和承载尚未迁移的旧语言域，因此尚未从仓库删除。

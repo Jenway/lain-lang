@@ -1,0 +1,559 @@
+// M11 Lain-owned compiler context and growable collection policy.
+//
+// The host exposes only opaque raw slot storage.  Lain owns length, capacity,
+// geometric growth, parallel-table consistency, scope truncation, diagnostic
+// lifetime, and success/failure policy.
+
+@foreign(c, link_name = "compiler.storage-new!")
+fn host_storage_new(kind: i32) -> i32;
+@foreign(c, link_name = "compiler.storage-reserve!")
+fn host_storage_reserve(storage: i32, capacity: i32) -> i32;
+@foreign(c, link_name = "compiler.storage-set-i32!")
+fn host_storage_set_i32(storage: i32, index: i32, value: i32) -> i32;
+@foreign(c, link_name = "compiler.storage-get-i32!")
+fn host_storage_get_i32(storage: i32, index: i32) -> i32;
+@foreign(c, link_name = "compiler.storage-set-string!")
+fn host_storage_set_string(storage: i32, index: i32, value: addr) -> i32;
+@foreign(c, link_name = "compiler.storage-get-string!")
+fn host_storage_get_string(storage: i32, index: i32) -> addr;
+@foreign(c, link_name = "compiler.storage-destroy!")
+fn host_storage_destroy(storage: i32) -> i32;
+@foreign(c, link_name = "core.string-equal!")
+fn host_string_equal(left: addr, right: addr) -> i32;
+
+pub struct M11I32Vec {
+    storage: i32,
+    len: i32,
+    capacity: i32,
+    ok: i32,
+}
+
+pub struct M11StringVec {
+    storage: i32,
+    len: i32,
+    capacity: i32,
+    ok: i32,
+}
+
+fn m11_next_capacity(capacity: i32) -> i32 {
+    if capacity == 0 { return 4; }
+    return capacity + capacity;
+}
+
+pub fn m11_i32_vec_new() -> M11I32Vec {
+    let storage: i32 = host_storage_new(1);
+    if storage == 0 {
+        return M11I32Vec { storage: 0, len: 0, capacity: 0, ok: 0 };
+    }
+    return M11I32Vec { storage: storage, len: 0, capacity: 0, ok: 1 };
+}
+
+pub fn m11_string_vec_new() -> M11StringVec {
+    let storage: i32 = host_storage_new(2);
+    if storage == 0 {
+        return M11StringVec { storage: 0, len: 0, capacity: 0, ok: 0 };
+    }
+    return M11StringVec { storage: storage, len: 0, capacity: 0, ok: 1 };
+}
+
+pub fn m11_i32_vec_push(vec: M11I32Vec, value: i32) -> M11I32Vec {
+    if vec.ok == 0 { return vec; }
+    let capacity: i32 = vec.capacity;
+    if vec.len == capacity {
+        let grown: i32 = m11_next_capacity(capacity);
+        if host_storage_reserve(vec.storage, grown) == 0 {
+            return M11I32Vec {
+                storage: vec.storage, len: vec.len,
+                capacity: vec.capacity, ok: 0,
+            };
+        }
+        if host_storage_set_i32(vec.storage, vec.len, value) == 0 {
+            return M11I32Vec {
+                storage: vec.storage, len: vec.len,
+                capacity: grown, ok: 0,
+            };
+        }
+        let new_len: i32 = vec.len + 1;
+        return M11I32Vec {
+            storage: vec.storage, len: new_len,
+            capacity: grown, ok: 1,
+        };
+    }
+    if host_storage_set_i32(vec.storage, vec.len, value) == 0 {
+        return M11I32Vec {
+            storage: vec.storage, len: vec.len,
+            capacity: vec.capacity, ok: 0,
+        };
+    }
+    let new_len: i32 = vec.len + 1;
+    return M11I32Vec {
+        storage: vec.storage, len: new_len,
+        capacity: vec.capacity, ok: 1,
+    };
+}
+
+pub fn m11_string_vec_push(
+    vec: M11StringVec, value: addr) -> M11StringVec {
+    if vec.ok == 0 { return vec; }
+    let capacity: i32 = vec.capacity;
+    if vec.len == capacity {
+        let grown: i32 = m11_next_capacity(capacity);
+        if host_storage_reserve(vec.storage, grown) == 0 {
+            return M11StringVec {
+                storage: vec.storage, len: vec.len,
+                capacity: vec.capacity, ok: 0,
+            };
+        }
+        if host_storage_set_string(vec.storage, vec.len, value) == 0 {
+            return M11StringVec {
+                storage: vec.storage, len: vec.len,
+                capacity: grown, ok: 0,
+            };
+        }
+        let new_len: i32 = vec.len + 1;
+        return M11StringVec {
+            storage: vec.storage, len: new_len,
+            capacity: grown, ok: 1,
+        };
+    }
+    if host_storage_set_string(vec.storage, vec.len, value) == 0 {
+        return M11StringVec {
+            storage: vec.storage, len: vec.len,
+            capacity: vec.capacity, ok: 0,
+        };
+    }
+    let new_len: i32 = vec.len + 1;
+    return M11StringVec {
+        storage: vec.storage, len: new_len,
+        capacity: vec.capacity, ok: 1,
+    };
+}
+
+pub fn m11_i32_vec_get(vec: M11I32Vec, index: i32) -> i32 {
+    if index < 0 { return 0; }
+    if index >= vec.len { return 0; }
+    return host_storage_get_i32(vec.storage, index);
+}
+
+pub fn m11_string_vec_get(vec: M11StringVec, index: i32) -> addr {
+    if index < 0 { return ""; }
+    if index >= vec.len { return ""; }
+    return host_storage_get_string(vec.storage, index);
+}
+
+pub fn m11_i32_vec_truncate(vec: M11I32Vec, len: i32) -> M11I32Vec {
+    if len < 0 { return vec; }
+    if len > vec.len { return vec; }
+    return M11I32Vec {
+        storage: vec.storage, len: len,
+        capacity: vec.capacity, ok: vec.ok,
+    };
+}
+
+pub fn m11_string_vec_truncate(
+    vec: M11StringVec, len: i32) -> M11StringVec {
+    if len < 0 { return vec; }
+    if len > vec.len { return vec; }
+    return M11StringVec {
+        storage: vec.storage, len: len,
+        capacity: vec.capacity, ok: vec.ok,
+    };
+}
+
+pub fn m11_i32_vec_destroy(vec: M11I32Vec) -> i32 {
+    return host_storage_destroy(vec.storage);
+}
+
+pub fn m11_string_vec_destroy(vec: M11StringVec) -> i32 {
+    return host_storage_destroy(vec.storage);
+}
+
+pub struct M11SymbolTable {
+    names: M11StringVec,
+    values: M11I32Vec,
+}
+
+pub fn m11_symbol_table_new() -> M11SymbolTable {
+    return M11SymbolTable {
+        names: m11_string_vec_new(), values: m11_i32_vec_new(),
+    };
+}
+
+pub fn m11_symbol_table_insert(
+    table: M11SymbolTable, name: addr, value: i32) -> M11SymbolTable {
+    return M11SymbolTable {
+        names: m11_string_vec_push(table.names, name),
+        values: m11_i32_vec_push(table.values, value),
+    };
+}
+
+fn m11_symbol_table_find_from(
+    table: M11SymbolTable, name: addr, index: i32) -> i32 {
+    if index < 0 { return 0; }
+    if host_string_equal(m11_string_vec_get(table.names, index), name) == 1 {
+        return m11_i32_vec_get(table.values, index);
+    }
+    return m11_symbol_table_find_from(table, name, index + -1);
+}
+
+pub fn m11_symbol_table_find(table: M11SymbolTable, name: addr) -> i32 {
+    let names: M11StringVec = table.names;
+    return m11_symbol_table_find_from(table, name, names.len + -1);
+}
+
+pub fn m11_symbol_table_count(table: M11SymbolTable) -> i32 {
+    let names: M11StringVec = table.names;
+    return names.len;
+}
+
+pub fn m11_symbol_table_destroy(table: M11SymbolTable) -> i32 {
+    let names: i32 = m11_string_vec_destroy(table.names);
+    let values: i32 = m11_i32_vec_destroy(table.values);
+    if names == 1 { return values; }
+    return 0;
+}
+
+pub struct M11ScopeStack {
+    names: M11StringVec,
+    type_ids: M11I32Vec,
+    marks: M11I32Vec,
+    depth: i32,
+}
+
+pub fn m11_scope_stack_new() -> M11ScopeStack {
+    return M11ScopeStack {
+        names: m11_string_vec_new(),
+        type_ids: m11_i32_vec_new(),
+        marks: m11_i32_vec_new(),
+        depth: 0,
+    };
+}
+
+pub fn m11_scope_enter(scopes: M11ScopeStack) -> M11ScopeStack {
+    let names: M11StringVec = scopes.names;
+    let depth: i32 = scopes.depth + 1;
+    return M11ScopeStack {
+        names: scopes.names,
+        type_ids: scopes.type_ids,
+        marks: m11_i32_vec_push(scopes.marks, names.len),
+        depth: depth,
+    };
+}
+
+pub fn m11_scope_bind(
+    scopes: M11ScopeStack, name: addr, type_id: i32) -> M11ScopeStack {
+    return M11ScopeStack {
+        names: m11_string_vec_push(scopes.names, name),
+        type_ids: m11_i32_vec_push(scopes.type_ids, type_id),
+        marks: scopes.marks,
+        depth: scopes.depth,
+    };
+}
+
+pub fn m11_scope_exit(scopes: M11ScopeStack) -> M11ScopeStack {
+    if scopes.depth == 0 { return scopes; }
+    let marks: M11I32Vec = scopes.marks;
+    let mark: i32 = m11_i32_vec_get(marks, marks.len + -1);
+    let depth: i32 = scopes.depth + -1;
+    return M11ScopeStack {
+        names: m11_string_vec_truncate(scopes.names, mark),
+        type_ids: m11_i32_vec_truncate(scopes.type_ids, mark),
+        marks: m11_i32_vec_truncate(marks, marks.len + -1),
+        depth: depth,
+    };
+}
+
+fn m11_scope_lookup_from(
+    scopes: M11ScopeStack, name: addr, index: i32) -> i32 {
+    if index < 0 { return 0; }
+    if host_string_equal(m11_string_vec_get(scopes.names, index), name) == 1 {
+        return m11_i32_vec_get(scopes.type_ids, index);
+    }
+    return m11_scope_lookup_from(scopes, name, index + -1);
+}
+
+pub fn m11_scope_lookup(scopes: M11ScopeStack, name: addr) -> i32 {
+    let names: M11StringVec = scopes.names;
+    return m11_scope_lookup_from(scopes, name, names.len + -1);
+}
+
+pub fn m11_scope_destroy(scopes: M11ScopeStack) -> i32 {
+    let names: i32 = m11_string_vec_destroy(scopes.names);
+    let types: i32 = m11_i32_vec_destroy(scopes.type_ids);
+    let marks: i32 = m11_i32_vec_destroy(scopes.marks);
+    if names == 1 {
+        if types == 1 { return marks; }
+    }
+    return 0;
+}
+
+pub struct M11DiagnosticStore {
+    codes: M11I32Vec,
+    messages: M11StringVec,
+    nodes: M11I32Vec,
+    starts: M11I32Vec,
+    ends: M11I32Vec,
+}
+
+pub fn m11_diagnostics_new() -> M11DiagnosticStore {
+    return M11DiagnosticStore {
+        codes: m11_i32_vec_new(), messages: m11_string_vec_new(),
+        nodes: m11_i32_vec_new(), starts: m11_i32_vec_new(),
+        ends: m11_i32_vec_new(),
+    };
+}
+
+pub fn m11_diagnostics_push(
+    diagnostics: M11DiagnosticStore, code: i32, message: addr,
+    node: i32, start: i32, end: i32) -> M11DiagnosticStore {
+    return M11DiagnosticStore {
+        codes: m11_i32_vec_push(diagnostics.codes, code),
+        messages: m11_string_vec_push(diagnostics.messages, message),
+        nodes: m11_i32_vec_push(diagnostics.nodes, node),
+        starts: m11_i32_vec_push(diagnostics.starts, start),
+        ends: m11_i32_vec_push(diagnostics.ends, end),
+    };
+}
+
+pub fn m11_diagnostics_count(diagnostics: M11DiagnosticStore) -> i32 {
+    let codes: M11I32Vec = diagnostics.codes;
+    return codes.len;
+}
+
+pub fn m11_diagnostics_code(
+    diagnostics: M11DiagnosticStore, index: i32) -> i32 {
+    return m11_i32_vec_get(diagnostics.codes, index);
+}
+
+pub fn m11_diagnostics_message(
+    diagnostics: M11DiagnosticStore, index: i32) -> addr {
+    return m11_string_vec_get(diagnostics.messages, index);
+}
+
+pub fn m11_diagnostics_start(
+    diagnostics: M11DiagnosticStore, index: i32) -> i32 {
+    return m11_i32_vec_get(diagnostics.starts, index);
+}
+
+pub fn m11_diagnostics_end(
+    diagnostics: M11DiagnosticStore, index: i32) -> i32 {
+    return m11_i32_vec_get(diagnostics.ends, index);
+}
+
+pub fn m11_diagnostics_destroy(diagnostics: M11DiagnosticStore) -> i32 {
+    let codes: i32 = m11_i32_vec_destroy(diagnostics.codes);
+    let messages: i32 = m11_string_vec_destroy(diagnostics.messages);
+    let nodes: i32 = m11_i32_vec_destroy(diagnostics.nodes);
+    let starts: i32 = m11_i32_vec_destroy(diagnostics.starts);
+    let ends: i32 = m11_i32_vec_destroy(diagnostics.ends);
+    if codes == 1 {
+        if messages == 1 {
+            if nodes == 1 {
+                if starts == 1 { return ends; }
+            }
+        }
+    }
+    return 0;
+}
+
+pub struct CompilerContext {
+    syntax_root: i32,
+    source_length: i32,
+    phase: i32,
+    unit: i32,
+    modules: M11SymbolTable,
+    types: M11SymbolTable,
+    scopes: M11ScopeStack,
+    diagnostics: M11DiagnosticStore,
+}
+
+pub struct CompileResult {
+    outcome_tag: i32,
+    unit: i32,
+    module_count: i32,
+    diagnostics: M11DiagnosticStore,
+}
+
+pub fn compiler_context_new(
+    syntax_root: i32, source_length: i32) -> CompilerContext {
+    return CompilerContext {
+        syntax_root: syntax_root, source_length: source_length,
+        phase: 1, unit: 0,
+        modules: m11_symbol_table_new(),
+        types: m11_symbol_table_new(),
+        scopes: m11_scope_stack_new(),
+        diagnostics: m11_diagnostics_new(),
+    };
+}
+
+pub fn compiler_context_add_module(
+    context: CompilerContext, name: addr, module_id: i32)
+    -> CompilerContext {
+    return CompilerContext {
+        syntax_root: context.syntax_root,
+        source_length: context.source_length,
+        phase: context.phase, unit: context.unit,
+        modules: m11_symbol_table_insert(context.modules, name, module_id),
+        types: context.types, scopes: context.scopes,
+        diagnostics: context.diagnostics,
+    };
+}
+
+pub fn compiler_context_add_type(
+    context: CompilerContext, name: addr, type_id: i32)
+    -> CompilerContext {
+    return CompilerContext {
+        syntax_root: context.syntax_root,
+        source_length: context.source_length,
+        phase: context.phase, unit: context.unit,
+        modules: context.modules,
+        types: m11_symbol_table_insert(context.types, name, type_id),
+        scopes: context.scopes, diagnostics: context.diagnostics,
+    };
+}
+
+pub fn compiler_context_add_diagnostic(
+    context: CompilerContext, code: i32, message: addr,
+    node: i32, start: i32, end: i32) -> CompilerContext {
+    return CompilerContext {
+        syntax_root: context.syntax_root,
+        source_length: context.source_length,
+        phase: 4, unit: 0,
+        modules: context.modules, types: context.types,
+        scopes: context.scopes,
+        diagnostics: m11_diagnostics_push(
+            context.diagnostics, code, message, node, start, end),
+    };
+}
+
+pub fn compiler_context_with_unit(
+    context: CompilerContext, unit: i32) -> CompilerContext {
+    return CompilerContext {
+        syntax_root: context.syntax_root,
+        source_length: context.source_length,
+        phase: 3, unit: unit,
+        modules: context.modules, types: context.types,
+        scopes: context.scopes, diagnostics: context.diagnostics,
+    };
+}
+
+pub fn compiler_context_finish(context: CompilerContext) -> CompileResult {
+    let module_count: i32 = m11_symbol_table_count(context.modules);
+    let destroyed_modules: i32 = m11_symbol_table_destroy(context.modules);
+    let destroyed_types: i32 = m11_symbol_table_destroy(context.types);
+    let destroyed_scopes: i32 = m11_scope_destroy(context.scopes);
+    if m11_diagnostics_count(context.diagnostics) != 0 {
+        return CompileResult {
+            outcome_tag: 0, unit: 0, module_count: module_count,
+            diagnostics: context.diagnostics,
+        };
+    }
+    if context.unit == 0 {
+        return CompileResult {
+            outcome_tag: 0, unit: 0, module_count: module_count,
+            diagnostics: context.diagnostics,
+        };
+    }
+    return CompileResult {
+        outcome_tag: 1, unit: context.unit, module_count: module_count,
+        diagnostics: context.diagnostics,
+    };
+}
+
+pub fn compile_result_destroy(result: CompileResult) -> i32 {
+    return m11_diagnostics_destroy(result.diagnostics);
+}
+
+pub fn compile_result_ok(result: CompileResult) -> i32 {
+    return result.outcome_tag;
+}
+
+pub fn compile_result_unit_or_zero(result: CompileResult) -> i32 {
+    if result.outcome_tag == 0 { return 0; }
+    return result.unit;
+}
+
+pub fn compile_result_module_count(result: CompileResult) -> i32 {
+    return result.module_count;
+}
+
+pub fn compile_result_diagnostic_count(
+    result: CompileResult) -> i32 {
+    let diagnostics: M11DiagnosticStore = result.diagnostics;
+    return m11_diagnostics_count(diagnostics);
+}
+
+pub fn compile_result_diagnostic_code(
+    result: CompileResult, index: i32) -> i32 {
+    let diagnostics: M11DiagnosticStore = result.diagnostics;
+    return m11_diagnostics_code(diagnostics, index);
+}
+
+pub fn compile_result_diagnostic_message(
+    result: CompileResult, index: i32) -> addr {
+    let diagnostics: M11DiagnosticStore = result.diagnostics;
+    return m11_diagnostics_message(diagnostics, index);
+}
+
+pub fn compile_result_diagnostic_start(
+    result: CompileResult, index: i32) -> i32 {
+    let diagnostics: M11DiagnosticStore = result.diagnostics;
+    return m11_diagnostics_start(diagnostics, index);
+}
+
+pub fn compile_result_diagnostic_end(
+    result: CompileResult, index: i32) -> i32 {
+    let diagnostics: M11DiagnosticStore = result.diagnostics;
+    return m11_diagnostics_end(diagnostics, index);
+}
+
+pub fn compiler_context_schema_version() -> i32 { return 1; }
+
+// Exercises growth past the old four-diagnostic ceiling, shadowing, scope
+// truncation, module/type tables, and owned message lifetime.
+pub fn compiler_context_runtime_probe() -> i32 {
+    let context0: CompilerContext = compiler_context_new(7, 99);
+    let context1: CompilerContext = compiler_context_add_module(
+        context0, "math", 40);
+    let context2: CompilerContext = compiler_context_add_type(
+        context1, "i32", 2);
+    let module_value: i32 = m11_symbol_table_find(context2.modules, "math");
+    let type_value: i32 = m11_symbol_table_find(context2.types, "i32");
+    let scopes0: M11ScopeStack = m11_scope_enter(context2.scopes);
+    let scopes1: M11ScopeStack = m11_scope_bind(scopes0, "x", 2);
+    let inner0: M11ScopeStack = m11_scope_enter(scopes1);
+    let inner1: M11ScopeStack = m11_scope_bind(inner0, "x", 3);
+    let inner_value: i32 = m11_scope_lookup(inner1, "x");
+    let outer: M11ScopeStack = m11_scope_exit(inner1);
+    let outer_value: i32 = m11_scope_lookup(outer, "x");
+    let context3: CompilerContext = CompilerContext {
+        syntax_root: context2.syntax_root,
+        source_length: context2.source_length,
+        phase: context2.phase, unit: context2.unit,
+        modules: context2.modules, types: context2.types,
+        scopes: outer, diagnostics: context2.diagnostics,
+    };
+    let context4: CompilerContext = compiler_context_add_diagnostic(
+        context3, 1001, "d1", 1, 0, 1);
+    let context5: CompilerContext = compiler_context_add_diagnostic(
+        context4, 1002, "d2", 2, 1, 2);
+    let context6: CompilerContext = compiler_context_add_diagnostic(
+        context5, 1003, "d3", 3, 2, 3);
+    let context7: CompilerContext = compiler_context_add_diagnostic(
+        context6, 1004, "d4", 4, 3, 4);
+    let context8: CompilerContext = compiler_context_add_diagnostic(
+        context7, 1005, "d5", 5, 4, 5);
+    let context9: CompilerContext = compiler_context_add_diagnostic(
+        context8, 1006, "d6", 6, 5, 6);
+    let result: CompileResult = compiler_context_finish(context9);
+    let count: i32 = m11_diagnostics_count(result.diagnostics);
+    let last: i32 = m11_diagnostics_code(result.diagnostics, 5);
+    let destroyed: i32 = compile_result_destroy(result);
+    if inner_value != 3 { return 301; }
+    if outer_value != 2 { return 302; }
+    if count != 6 { return 303; }
+    if last != 1006 { return 304; }
+    if destroyed != 1 { return 305; }
+    if module_value != 40 { return 306; }
+    return type_value + 40;
+}

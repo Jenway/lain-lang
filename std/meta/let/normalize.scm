@@ -24,6 +24,7 @@
        (middle.node! '|middle.struct|
          (record '|middle.struct|
            (record.field '|name| name)
+           (record.field '|public| (record.get inner-payload '|public|))
            (record.field '|attrs| (optional.value (record.get inner-payload '|attrs|)))
            (record.field '|generics| (optional.value (record.get inner-payload '|generics|)))
            (record.field '|where| (optional.value (record.get inner-payload '|where|)))

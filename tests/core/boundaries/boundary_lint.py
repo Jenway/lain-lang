@@ -78,6 +78,17 @@ RULES: tuple[Rule, ...] = (
         rationale="Known debt: build graph scanner currently searches source text for import.",
     ),
     Rule(
+        ident="C1_NATIVE_COMPILER_LEGACY_ARTIFACT_API",
+        description="normal CLI must use one structured compiler request/result ABI",
+        paths=("src/compiler/native_compiler.c",),
+        pattern=r"compiler_compile_text|compiler_compile_workspace_text|compiler_(?:workspace_)?diagnostic_",
+        allowed_count=0,
+        rationale=(
+            "The host calls compiler_compile once and projects output or diagnostics "
+            "from that owned result; it must not re-run compilation."
+        ),
+    ),
+    Rule(
         ident="C1_BUILDER_STD_TYPE_NAMES",
         description="builder FFI must not own std/source-level type aliases",
         paths=("src/compiler/builder_ffi.c",),
@@ -92,6 +103,25 @@ RULES: tuple[Rule, ...] = (
         pattern=r"Auto-create stub|Default signature",
         allowed_count=2,
         rationale="Known debt: missing function lookup creates a default extern stub.",
+    ),
+    Rule(
+        ident="C6_STRUCTURED_UNIT_NO_SOURCE_POLICY",
+        description="structured L1 storage must not recognize source-language forms",
+        paths=("src/compiler/structured_unit.c",),
+        pattern=r'"(let|fn|module|require|struct|interface|effect|comptime)"',
+        allowed_count=0,
+        rationale="The structured host ABI stores physical nodes and frames only.",
+    ),
+    Rule(
+        ident="M8_LAIN_INTERPRETER_NO_HOST_EXECUTOR",
+        description="Lain interpreter/comptime must not delegate evaluation to the C executor",
+        paths=(
+            "packages/lain/compiler/l1_interpreter.lain",
+            "packages/lain/compiler/mini_meta.lain",
+        ),
+        pattern=r"core\.execute-lainir|core\.eval!|host_unit_execute",
+        allowed_count=0,
+        rationale="M7/M8 evaluation policy must remain in the Lain interpreter.",
     ),
     Rule(
         ident="M4_LAINIR_SOURCE_MODULE_DEBT",
@@ -126,7 +156,7 @@ RULES: tuple[Rule, ...] = (
             r"native_emit_interface|compile_interface|lci-v1|"
             r"interface emission"
         ),
-        allowed_count=23,
+        allowed_count=24,
         rationale=(
             "Known debt: .lci is the old bootstrap bridge. New module policy "
             "should move to meta-owned ModuleSummary-like artifacts."
@@ -153,10 +183,12 @@ RULES: tuple[Rule, ...] = (
         description="compiler core still uses sexp-shaped compatibility names",
         paths=("src/compiler/native_runtime.c", "src/compiler/builder_ffi.c"),
         pattern=r"\bsexp\b|sexp_|SEXP_",
-        allowed_count=579,
+        allowed_count=740,
         rationale=(
             "Known debt: vm_compat.h keeps old FFI code compiling while backend APIs are split; "
-            "M3 adds three batched RawAst queries at this pre-existing compatibility boundary."
+            "M3-M15 add physical RawAst, stable syntax-unit storage, compiler-storage, "
+            "artifact orchestration, and structured-L1 queries at this pre-existing "
+            "compatibility boundary."
         ),
     ),
     Rule(

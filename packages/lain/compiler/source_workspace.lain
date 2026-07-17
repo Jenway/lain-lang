@@ -1,0 +1,230 @@
+// Structured source input owned by the Lain compiler.
+//
+// The host supplies only two physical string stores (paths and source text).
+// Lain owns SourceUnit construction, per-unit parsing, module-boundary checks,
+// diagnostics, and the eventual workspace compilation policy.
+
+import packages::lain::compiler::mini_syntax;
+import packages::lain::compiler::mini_module;
+import packages::lain::compiler::compiler_context;
+import packages::lain::compiler::mini_workspace;
+
+@foreign(c, link_name = "compiler.storage-get-string!")
+fn source_storage_get(storage: i32, index: i32) -> addr;
+@foreign(c, link_name = "core.string-length!")
+fn source_string_length(value: addr) -> i32;
+pub struct SourceUnit {
+    path: addr,
+    source: addr,
+    length: i32,
+    unit: i32,
+    root: i32,
+    module: i32,
+}
+
+pub struct WorkspaceInput {
+    path_storage: i32,
+    source_storage: i32,
+    syntax_store: i32,
+    syntax_units: M11I32Vec,
+    workspace: ModuleWorkspace,
+    count: i32,
+    diagnostic: i32,
+    diagnostic_index: i32,
+}
+
+fn workspace_input_build(
+    input: WorkspaceInput, index: i32) -> WorkspaceInput {
+    if input.diagnostic != 0 { return input; }
+    if index == input.count { return input; }
+    let source: addr = source_storage_get(input.source_storage, index);
+    let length: i32 = source_string_length(source);
+    if length == 0 {
+        return WorkspaceInput {
+            path_storage: input.path_storage,
+            source_storage: input.source_storage,
+            syntax_store: input.syntax_store,
+            syntax_units: input.syntax_units,
+            workspace: input.workspace,
+            count: input.count,
+            diagnostic: 4301, diagnostic_index: index,
+        };
+    }
+    let unit: i32 = mini_syntax_unit_parse(
+        input.syntax_store, source, length);
+    if unit == 0 {
+        return WorkspaceInput {
+            path_storage: input.path_storage,
+            source_storage: input.source_storage,
+            syntax_store: input.syntax_store,
+            syntax_units: input.syntax_units,
+            workspace: input.workspace,
+            count: input.count,
+            diagnostic: 4302, diagnostic_index: index,
+        };
+    }
+    let root: i32 = mini_syntax_unit_root(input.syntax_store, unit);
+    if mini_syntax_kind(root) != 4 {
+        return WorkspaceInput {
+            path_storage: input.path_storage,
+            source_storage: input.source_storage,
+            syntax_store: input.syntax_store,
+            syntax_units: m11_i32_vec_push(input.syntax_units, unit),
+            workspace: input.workspace,
+            count: input.count,
+            diagnostic: 4302, diagnostic_index: index,
+        };
+    }
+    if mini_module_workspace_module_count(root) != 1 {
+        return WorkspaceInput {
+            path_storage: input.path_storage,
+            source_storage: input.source_storage,
+            syntax_store: input.syntax_store,
+            syntax_units: m11_i32_vec_push(input.syntax_units, unit),
+            workspace: input.workspace,
+            count: input.count,
+            diagnostic: 4303, diagnostic_index: index,
+        };
+    }
+    let units: M11I32Vec = m11_i32_vec_push(input.syntax_units, unit);
+    let workspace: ModuleWorkspace = module_workspace_push(
+        input.workspace, mini_module_first_module(root), index);
+    if units.ok == 0 {
+        return WorkspaceInput {
+            path_storage: input.path_storage,
+            source_storage: input.source_storage,
+            syntax_store: input.syntax_store,
+            syntax_units: units,
+            workspace: workspace,
+            count: input.count,
+            diagnostic: 4304, diagnostic_index: index,
+        };
+    }
+    if workspace.diagnostic != 0 {
+        return WorkspaceInput {
+            path_storage: input.path_storage,
+            source_storage: input.source_storage,
+            syntax_store: input.syntax_store,
+            syntax_units: units,
+            workspace: workspace,
+            count: input.count,
+            diagnostic: workspace.diagnostic,
+            diagnostic_index: workspace.diagnostic_index,
+        };
+    }
+    return workspace_input_build(
+        WorkspaceInput {
+            path_storage: input.path_storage,
+            source_storage: input.source_storage,
+            syntax_store: input.syntax_store,
+            syntax_units: units,
+            workspace: workspace,
+            count: input.count,
+            diagnostic: 0, diagnostic_index: 0,
+        },
+        index + 1);
+}
+
+pub fn workspace_input_new(
+    path_storage: i32, source_storage: i32,
+    count: i32) -> WorkspaceInput {
+    let empty: WorkspaceInput = WorkspaceInput {
+        path_storage: path_storage,
+        source_storage: source_storage,
+        syntax_store: mini_syntax_store_new(),
+        syntax_units: m11_i32_vec_new(),
+        workspace: module_workspace_new(),
+        count: count,
+        diagnostic: 0, diagnostic_index: 0,
+    };
+    if count == 0 {
+        return WorkspaceInput {
+            path_storage: path_storage,
+            source_storage: source_storage,
+            syntax_store: empty.syntax_store,
+            syntax_units: empty.syntax_units,
+            workspace: empty.workspace,
+            count: count,
+            diagnostic: 4300, diagnostic_index: 0,
+        };
+    }
+    if empty.syntax_store == 0 {
+        return WorkspaceInput {
+            path_storage: path_storage,
+            source_storage: source_storage,
+            syntax_store: empty.syntax_store,
+            syntax_units: empty.syntax_units,
+            workspace: empty.workspace,
+            count: count,
+            diagnostic: 4304, diagnostic_index: 0,
+        };
+    }
+    let built: WorkspaceInput = workspace_input_build(empty, 0);
+    if built.diagnostic != 0 { return built; }
+    let ordered: ModuleWorkspace = module_workspace_build_order(
+        built.workspace);
+    return WorkspaceInput {
+        path_storage: built.path_storage,
+        source_storage: built.source_storage,
+        syntax_store: built.syntax_store,
+        syntax_units: built.syntax_units,
+        workspace: ordered,
+        count: built.count,
+        diagnostic: ordered.diagnostic,
+        diagnostic_index: ordered.diagnostic_index,
+    };
+}
+
+pub fn workspace_input_source(
+    input: WorkspaceInput, index: i32) -> SourceUnit {
+    let source: addr = source_storage_get(input.source_storage, index);
+    return SourceUnit {
+        path: source_storage_get(input.path_storage, index),
+        source: source,
+        length: source_string_length(source),
+        unit: m11_i32_vec_get(input.syntax_units, index),
+        root: mini_syntax_unit_root(
+            input.syntax_store, m11_i32_vec_get(input.syntax_units, index)),
+        module: module_workspace_module_at(input.workspace, index),
+    };
+}
+
+pub fn workspace_input_module_count(input: WorkspaceInput) -> i32 {
+    return module_workspace_count(input.workspace);
+}
+
+pub fn workspace_input_module_workspace(
+    input: WorkspaceInput) -> ModuleWorkspace {
+    return input.workspace;
+}
+
+pub fn workspace_input_diagnostic_path(input: WorkspaceInput) -> addr {
+    if input.diagnostic != 0 {
+        return source_storage_get(input.path_storage, input.diagnostic_index);
+    }
+    let index: i32 = mini_workspace_diagnostic_source_index_indexed(
+        input.workspace);
+    return source_storage_get(input.path_storage, index);
+}
+
+fn workspace_input_destroy_units(input: WorkspaceInput, index: i32) -> i32 {
+    let syntax_units: M11I32Vec = input.syntax_units;
+    if index == syntax_units.len { return 1; }
+    if mini_syntax_unit_destroy(
+        input.syntax_store,
+        m11_i32_vec_get(input.syntax_units, index)) != 1 { return 0; }
+    return workspace_input_destroy_units(input, index + 1);
+}
+
+pub fn workspace_input_destroy(input: WorkspaceInput) -> i32 {
+    let units_ok: i32 = workspace_input_destroy_units(input, 0);
+    let units: i32 = m11_i32_vec_destroy(input.syntax_units);
+    let workspace: i32 = module_workspace_destroy(input.workspace);
+    let store: i32 = mini_syntax_store_destroy(input.syntax_store);
+    if units_ok != 1 { return 0; }
+    if units != 1 { return 0; }
+    if workspace != 1 { return 0; }
+    return store;
+}
+
+pub fn source_workspace_schema_version() -> i32 { return 1; }

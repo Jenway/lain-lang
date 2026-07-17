@@ -9,7 +9,13 @@
 ;; ── Global registries ──
 
 (define *struct-registry* (list))     ;; ((name . (total-size layout)) ...)
+(define *struct-identities* (list))   ;; ((name . canonical-identity) ...)
 (define *fn-return-types* (list))     ;; ((name . return-type) ...) — avoids C-side type storage
+
+(define (struct-registry.reset!)
+  (set! *struct-registry* (list))
+  (set! *struct-identities* (list))
+  (set! *fn-return-types* (list)))
 
 ;; ── Struct type constructor / predicate ──
 
@@ -72,7 +78,80 @@
   (let*-values (((total-size layout) (struct--compute-layout lowered-fields 0 '())))
     (set! *struct-registry*
       (cons (cons name (cons total-size layout)) *struct-registry*))
+    (set! *struct-identities*
+      (cons (cons name
+                  (string-append (core.module-prefix) "::"
+                                 (symbol->string name)))
+            *struct-identities*))
     total-size))
+
+;; Register a layout recovered from a Meta-owned module interface.  Offsets
+;; and nominal identity are producer decisions and therefore must not be
+;; recomputed by the importing host bridge.
+(define (struct-register-imported! name identity total-size layout)
+  (set! *struct-registry*
+    (cons (cons name (cons total-size layout)) *struct-registry*))
+  (set! *struct-identities*
+    (cons (cons name identity) *struct-identities*))
+  total-size)
+
+(define (struct-identity name)
+  (let ((loop #f))
+    (set! loop (lambda (entries)
+      (if (null? entries)
+          (string-append (core.module-prefix) "::" (symbol->string name))
+          (if (eq? (caar entries) name)
+              (cdar entries)
+              (loop (cdr entries))))))
+    (loop *struct-identities*)))
+
+(define (struct-alignment name)
+  (let* ((entry (struct-lookup name))
+         (layout (cddr entry)))
+    (let ((loop #f))
+      (set! loop (lambda (fields best)
+        (if (null? fields)
+            best
+            (let* ((ty (cadar fields))
+                   (size (if (struct-type? ty)
+                             8
+                             (core.type-size-in-bytes! ty)))
+                   (align (if (> size 8) 8 size)))
+              (loop (cdr fields) (if (> align best) align best))))))
+      (loop layout 1))))
+
+;; Stable interface spelling for normalized types.  The stage-0 bridge only
+;; needs a symbol; applications use the same concrete-name convention as the
+;; struct registry, while pointer-like forms have the physical `addr` ABI.
+(define (interface.middle-type-name ty)
+  (let* ((kind (middle.kind ty))
+         (payload (middle.payload ty)))
+    (cond
+      ((symbol=? kind '|types.path|)
+       (optional.value (record.get payload '|name|)))
+      ((symbol=? kind '|types.unit|) '|unit|)
+      ((symbol=? kind '|types.app|)
+       (let* ((name (optional.value (record.get payload '|name|)))
+              (args (optional.value (record.get payload '|args|))))
+         (interface.concrete-type-name name args)))
+      ((or (symbol=? kind '|types.raw-ptr|)
+           (symbol=? kind '|types.ref|)
+           (symbol=? kind '|types.slice|)
+           (symbol=? kind '|types.fn|)) '|addr|)
+      (else '|addr|))))
+
+(define (interface.concrete-type-name name args)
+  (if (null? args)
+      name
+      (interface.concrete-type-name-loop args (symbol->string name))))
+
+(define (interface.concrete-type-name-loop args acc)
+  (if (null? args)
+      (string->symbol acc)
+      (interface.concrete-type-name-loop
+        (cdr args)
+        (string-append acc "_"
+          (symbol->string (interface.middle-type-name (car args)))))))
 
 ;; Look up struct info: (name total-size . layout)
 (define (struct-lookup name)

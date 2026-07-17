@@ -173,7 +173,13 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
     fprintf(out, ")");
     break;
   case EXPR_LOAD:
-    fprintf(out, "#load(");
+    fprintf(out, "#load");
+    if (expr->data.load.ty) {
+      fprintf(out, "[");
+      emit_l1_type(expr->data.load.ty, out);
+      fprintf(out, "]");
+    }
+    fprintf(out, "(");
     emit_l1_expr(expr->data.load.addr, out);
     fprintf(out, ")");
     break;
@@ -181,7 +187,10 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
     fprintf(out, "#lea(base=");
     emit_l1_expr(expr->data.lea.base, out);
     fprintf(out, ", idx=");
-    emit_l1_expr(expr->data.lea.idx, out);
+    if (expr->data.lea.idx)
+      emit_l1_expr(expr->data.lea.idx, out);
+    else
+      fprintf(out, "0");
     fprintf(out, ", scale=%d, offset=%d)", expr->data.lea.scale,
             expr->data.lea.offset);
     break;
@@ -224,6 +233,10 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
     fprintf(out, "#field[%d](", expr->data.field.field_index);
     emit_l1_expr(expr->data.field.base, out);
     fprintf(out, ")");
+    if (expr->data.field.field_ty) {
+      fprintf(out, ":");
+      emit_l1_type(expr->data.field.field_ty, out);
+    }
     break;
   case EXPR_CALL_INDIRECT:
     fprintf(out, "#call_indirect(");
@@ -311,15 +324,15 @@ static void emit_l1_block(L1Block *block, FILE *out, const char *indent) {
       fprintf(out, "\n");
       break;
     case INST_RETURN:
-      fprintf(out, "%s#return ", indent);
-      if (inst->data.ret.val)
+      fprintf(out, "%s#return", indent);
+      if (inst->data.ret.val) {
+        fprintf(out, " ");
         emit_l1_expr(inst->data.ret.val, out);
-      else
-        fprintf(out, "#unit");
+      }
       fprintf(out, "\n");
       break;
     case INST_CALL:
-      fprintf(out, "%s#call ", indent);
+      fprintf(out, "%s", indent);
       emit_l1_expr(inst->data.call_inst.expr, out);
       fprintf(out, "\n");
       break;

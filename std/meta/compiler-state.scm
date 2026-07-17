@@ -97,4 +97,7 @@
   (set! *const-table* (list))
   (set! *comptime-fns* (list))
   (set! *error-count* 0)
-  (set! *declarations* (list)))
+  (set! *declarations* (list))
+  ;; Defined by struct/registry.scm before compile is invoked.  Imported
+  ;; nominal identities are compilation-local, just like declarations.
+  (struct-registry.reset!))

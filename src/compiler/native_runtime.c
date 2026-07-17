@@ -52,6 +52,7 @@ uint8_t read_byte_at(const uint8_t *ptr, size_t offset) { return ptr[offset]; }
 // 7-8. L1 IR Builder FFI (→ compiler/builder_ffi.c + compiler/builder_ffi.h)
 // ══════════════════════════════════════════════════════════════════════════════
 #include "compiler/builder_ffi.h"
+#include "compiler/structured_unit.h"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 9. C Code Emission (→ lainir/emitter.c)
@@ -152,6 +153,31 @@ static sexp sexp_read_file_string(sexp ctx, sexp self, sexp_sint_t n,
   if (!data) return SEXP_FALSE;
   uint32_t len = native_file_len();
   return sexp_c_string(ctx, (const char *)data, len);
+}
+
+// Bootstrap orchestration capability.  The compiler artifact produces text;
+// this host helper only persists bytes to the path chosen by the harness.
+static sexp sexp_write_file_string(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp arg_path, sexp arg_text) {
+  const char *path;
+  const char *text;
+  FILE *file;
+  size_t length;
+  size_t written;
+  (void)ctx;
+  (void)self;
+  (void)n;
+  if (!sexp_stringp(arg_path) || !sexp_stringp(arg_text))
+    return sexp_make_fixnum(0);
+  path = sexp_string_data(arg_path);
+  text = sexp_string_data(arg_text);
+  length = strlen(text);
+  file = fopen(path, "wb");
+  if (!file) return sexp_make_fixnum(0);
+  written = fwrite(text, 1, length, file);
+  if (fclose(file) != 0 || written != length)
+    return sexp_make_fixnum(0);
+  return sexp_make_fixnum(1);
 }
 
 // ── Interface parser: read .lci file ──
@@ -446,23 +472,135 @@ static vm_value *ffi_core_execute_lainir_text_i32(
 }
 
 static const char *const compiler_artifact_capabilities[] = {
+  "compiler.storage-new!",
+  "compiler.storage-reserve!",
+  "compiler.storage-set-i32!",
+  "compiler.storage-get-i32!",
+  "compiler.storage-set-string!",
+  "compiler.storage-get-string!",
+  "compiler.storage-destroy!",
+  "core.destroy-lainir-unit!",
+  "core.string-append!",
+  "core.string-from-addr!",
   "core.string-first-byte!",
+  "core.string-length!",
   "core.i32-to-string!",
   "core.string-is-i32!",
   "core.string-to-i32!",
   "core.string-equal!",
-  "core.string-append-linear!",
   "ast.node-atom-class",
+  "ast.node-line",
   "ast.node-is-infix-text",
   "ast.node-is-atom-text",
   "ast.node-text",
+  "ast.node-string-value",
   "ast.node-next",
   "ast.node-op",
   "ast.node-right",
   "ast.node-left",
   "ast.node-kind",
   "ast.parse!",
+  "ast.store-new!",
+  "ast.store-destroy!",
+  "ast.unit-parse!",
+  "ast.unit-destroy!",
+  "ast.unit-root",
+  "ast.unit-node-count",
+  "ast.unit-node-kind",
+  "ast.unit-node-text",
+  "ast.unit-node-string-value",
+  "ast.unit-node-is-atom-text",
+  "ast.unit-node-is-infix-text",
+  "ast.unit-node-atom-class",
+  "ast.unit-node-line",
+  "ast.unit-node-col",
+  "ast.unit-node-left",
+  "ast.unit-node-right",
+  "ast.unit-node-op",
+  "ast.unit-node-next",
+  "l1.call-arg!",
+  "l1.expr-arg!",
+  "l1.expr-binary!",
+  "l1.expr-call!",
+  "l1.expr-alloca!",
+  "l1.expr-lea!",
+  "l1.expr-load!",
+  "l1.expr-i32!",
+  "l1.expr-string!",
+  "l1.expr-var!",
+  "l1.proc-if-return!",
+  "l1.proc-if-return-then!",
+  "l1.block-if!",
+  "l1.block-let!",
+  "l1.block-return!",
+  "l1.block-call!",
+  "l1.block-store!",
+  "l1.proc-let!",
+  "l1.proc-new!",
+  "l1.proc-extern!",
+  "l1.proc-param!",
+  "l1.proc-body!",
+  "l1.proc-return!",
+  "l1.proc-store!",
+  "l1.unit-new!",
+  "l1.unit-verify!",
+  "l1.unit-verify-code!",
+  "l1.unit-verify-message!",
+  "core.lainir-unit-debug-text!",
+  "l1.read-find-proc!",
+  "l1.read-proc-is-extern!",
+  "l1.read-proc-param-count!",
+  "l1.read-proc-first-inst!",
+  "l1.read-inst-next!",
+  "l1.read-inst-kind!",
+  "l1.read-inst-expr!",
+  "l1.read-inst-name!",
+  "l1.read-inst-branch!",
+  "l1.read-expr-kind!",
+  "l1.read-expr-i32!",
+  "l1.read-expr-index!",
+  "l1.read-expr-name!",
+  "l1.read-expr-child!",
+  "l1.read-call-arg-count!",
+  "l1.read-call-arg!",
+  "l1.eval-new!",
+  "l1.eval-frame-new!",
+  "l1.eval-frame-arg-set!",
+  "l1.eval-frame-arg!",
+  "l1.eval-frame-var-set!",
+  "l1.eval-frame-var!",
+  "l1.eval-fail!",
+  "l1.eval-status!",
+  "l1.eval-destroy!",
+  "l1.result-new!",
+  "l1.result-status!",
+  "l1.result-value!",
+  "l1.result-destroy!",
 };
+
+LainirExecStatus native_execute_compiler_artifact(
+    void *ctx_ptr,
+    const char *artifact_text,
+    const char *entry_name,
+    const LainirValue *args,
+    uint32_t arg_count,
+    LainirValue *result_out,
+    L1Diagnostic *diagnostic) {
+  vm_context *ctx = (vm_context *)ctx_ptr;
+  LainirExecTextRequest request = {
+    .text = artifact_text,
+    .entry_name = entry_name,
+    .args = args,
+    .arg_count = arg_count,
+    .host_ctx = ctx,
+    .host_env = ctx ? vm_context_env(ctx) : NULL,
+    .allowed_capabilities = compiler_artifact_capabilities,
+    .allowed_capability_count =
+      (uint32_t)(sizeof(compiler_artifact_capabilities) /
+                 sizeof(compiler_artifact_capabilities[0])),
+  };
+  return lainir_exec_text_request(&request, result_out, diagnostic);
+}
 
 static vm_value *ffi_core_execute_compiler_artifact(
     vm_context *c, vm_value *self, intptr_t n,
@@ -488,19 +626,9 @@ static vm_value *ffi_core_execute_compiler_artifact(
 
   args[0] = lainir_value_string(vm_string_data(source_val));
   args[1] = lainir_value_bits((uint32_t)vm_uint_value(length_val), 32);
-  LainirExecTextRequest request = {
-    .text = vm_string_data(artifact_val),
-    .entry_name = entry_name,
-    .args = args,
-    .arg_count = 2,
-    .host_ctx = c,
-    .host_env = vm_context_env(c),
-    .allowed_capabilities = compiler_artifact_capabilities,
-    .allowed_capability_count =
-      (uint32_t)(sizeof(compiler_artifact_capabilities) /
-                 sizeof(compiler_artifact_capabilities[0])),
-  };
-  if (lainir_exec_text_request(&request, &result, &diagnostic) != LAINIR_EXEC_OK) {
+  if (native_execute_compiler_artifact(
+        c, vm_string_data(artifact_val), entry_name, args, 2,
+        &result, &diagnostic) != LAINIR_EXEC_OK) {
     if (diagnostic.message[0])
       fprintf(stderr, "[compiler artifact ERROR %d] %s\n",
               diagnostic.code, diagnostic.message);
@@ -538,19 +666,9 @@ static vm_value *ffi_core_execute_compiler_artifact_named(
   args[0] = lainir_value_string(vm_string_data(source_val));
   args[1] = lainir_value_bits((uint32_t)vm_uint_value(length_val), 32);
   args[2] = lainir_value_string(vm_string_data(name_val));
-  LainirExecTextRequest request = {
-    .text = vm_string_data(artifact_val),
-    .entry_name = entry_name,
-    .args = args,
-    .arg_count = 3,
-    .host_ctx = c,
-    .host_env = vm_context_env(c),
-    .allowed_capabilities = compiler_artifact_capabilities,
-    .allowed_capability_count =
-      (uint32_t)(sizeof(compiler_artifact_capabilities) /
-                 sizeof(compiler_artifact_capabilities[0])),
-  };
-  if (lainir_exec_text_request(&request, &result, &diagnostic) != LAINIR_EXEC_OK) {
+  if (native_execute_compiler_artifact(
+        c, vm_string_data(artifact_val), entry_name, args, 3,
+        &result, &diagnostic) != LAINIR_EXEC_OK) {
     if (diagnostic.message[0])
       fprintf(stderr, "[compiler artifact ERROR %d] %s\n",
               diagnostic.code, diagnostic.message);
@@ -599,6 +717,18 @@ static vm_value *ffi_core_string_append(
   result = vm_make_string(c, joined, (int)(left_len + right_len));
   free(joined);
   return result;
+}
+
+/* Restore an owned VM string from a NUL-terminated address kept in a Lain
+ * aggregate.  The aggregate stores the physical pointer, not the interpreter
+ * STRING tag, so this conversion must be explicit at the host boundary. */
+static vm_value *ffi_core_string_from_addr(
+    vm_context *c, vm_value *self, intptr_t n, vm_value *value) {
+  const char *text;
+  (void)self;
+  (void)n;
+  text = (const char *)vm_cpointer_value(value);
+  return vm_make_string(c, text ? text : "", -1);
 }
 
 /* Generic bootstrap text predicate.  This compares opaque source text only;
@@ -848,6 +978,7 @@ void native_register_runtime_ffi(
   REG("core.emit-l1!", 2, sexp_core_emit_l1);
   REG("core.read-file-forms!", 1, sexp_read_file_forms);
   REG("core.read-file-string!", 1, sexp_read_file_string);
+  REG("core.write-file-string!", 2, sexp_write_file_string);
   REG("core.read-interface!", 1, sexp_read_interface);
   REG("core.build-compute-order!", 1, sexp_build_compute_order);
   REG("core.set-module-prefix!", 1, sexp_set_module_prefix);
@@ -861,6 +992,7 @@ void native_register_runtime_ffi(
       ffi_core_execute_compiler_artifact_named);
   REG("core.string-append!", 2, ffi_core_string_append);
   REG("core.string-append-linear!", 2, ffi_core_string_append);
+  REG("core.string-from-addr!", 1, ffi_core_string_from_addr);
   REG("core.string-equal!", 2, ffi_core_string_equal);
   REG("core.string-length!", 1, ffi_core_string_length);
   REG("core.string-first-byte!", 1, ffi_core_string_first_byte);
@@ -882,8 +1014,7 @@ static void native_register_foreign_with_vm(
                   name, arity, (vm_ffi_fn)fn);
 }
 
-// Initialize Scheme environment, register all FFI functions, load meta passes
-void *native_init_scheme(void) {
+static void *native_init_vm_host(int load_stage0_meta) {
   // Set module path for Chibi (computed from cwd)
   {
     char cwd[2048];
@@ -902,21 +1033,34 @@ void *native_init_scheme(void) {
   // Register core FFI functions (Layer B)
   NativeVmRegistrarCtx reg = {.ctx = ctx, .env = env};
   native_register_core_ffi(ctx, env, native_register_foreign_with_vm, &reg);
+  native_register_structured_unit_ffi(
+      ctx, env, native_register_foreign_with_vm, &reg);
   native_register_runtime_ffi(native_register_foreign_with_vm, &reg);
 
-  // Inject all polyfills (Layer A)
-  native_inject_all_polyfills(ctx, env);
-
-  // Load meta sources
-  native_load_meta_sources(ctx, env);
+  if (load_stage0_meta) {
+    // Stage-0 only: the self-hosted compiler artifact does not execute these
+    // Scheme sources and must remain usable outside the repository root.
+    native_inject_all_polyfills(ctx, env);
+    native_load_meta_sources(ctx, env);
+  }
 
   return ctx;
+}
+
+// Initialize Scheme environment, register all FFI functions, load meta passes
+void *native_init_scheme(void) {
+  return native_init_vm_host(1);
+}
+
+void *native_init_compiler_artifact_host(void) {
+  return native_init_vm_host(0);
 }
 
 // Run the Scheme pipeline on a token tree
 int32_t native_run_pipeline(void *ctx_ptr, void *root_group) {
   vm_context *c = (vm_context *)ctx_ptr;
   lainir_reset_module_state();
+  native_reset_interface_metadata();
   (void)root_group;
 
   vm_value *env = vm_context_env(c);
@@ -967,6 +1111,132 @@ static sexp sexp_core_emit_l1(sexp ctx, sexp self, sexp_sint_t n,
   return SEXP_VOID;
 }
 
+typedef struct NativeInterfaceField {
+  char *name;
+  char *type_name;
+  uint32_t offset;
+} NativeInterfaceField;
+
+typedef struct NativeInterfaceType {
+  char *name;
+  char *identity;
+  uint32_t size;
+  uint32_t align;
+  uint32_t field_count;
+  NativeInterfaceField *fields;
+  struct NativeInterfaceType *next;
+} NativeInterfaceType;
+
+typedef struct NativeInterfaceFunction {
+  char *name;
+  uint32_t param_count;
+  char **param_types;
+  char *ret_type;
+  struct NativeInterfaceFunction *next;
+} NativeInterfaceFunction;
+
+static NativeInterfaceType *g_interface_types_head = NULL;
+static NativeInterfaceType *g_interface_types_tail = NULL;
+static NativeInterfaceFunction *g_interface_functions_head = NULL;
+static NativeInterfaceFunction *g_interface_functions_tail = NULL;
+
+static char *native_interface_strdup(const char *s) {
+  size_t n = strlen(s ? s : "");
+  char *copy = (char *)malloc(n + 1);
+  if (!copy) abort();
+  memcpy(copy, s ? s : "", n + 1);
+  return copy;
+}
+
+void native_reset_interface_metadata(void) {
+  NativeInterfaceType *type = g_interface_types_head;
+  NativeInterfaceFunction *fn = g_interface_functions_head;
+  while (type) {
+    NativeInterfaceType *next = type->next;
+    uint32_t i;
+    free(type->name);
+    free(type->identity);
+    for (i = 0; i < type->field_count; ++i) {
+      free(type->fields[i].name);
+      free(type->fields[i].type_name);
+    }
+    free(type->fields);
+    free(type);
+    type = next;
+  }
+  while (fn) {
+    NativeInterfaceFunction *next = fn->next;
+    uint32_t i;
+    free(fn->name);
+    for (i = 0; i < fn->param_count; ++i)
+      free(fn->param_types[i]);
+    free(fn->param_types);
+    free(fn->ret_type);
+    free(fn);
+    fn = next;
+  }
+  g_interface_types_head = g_interface_types_tail = NULL;
+  g_interface_functions_head = g_interface_functions_tail = NULL;
+}
+
+void native_declare_interface_type(
+    const char *name, const char *identity, uint32_t size, uint32_t align,
+    uint32_t field_count, const char *const *field_names,
+    const char *const *field_types, const uint32_t *field_offsets) {
+  NativeInterfaceType *entry =
+      (NativeInterfaceType *)calloc(1, sizeof(NativeInterfaceType));
+  uint32_t i;
+  if (!entry) abort();
+  entry->name = native_interface_strdup(name);
+  entry->identity = native_interface_strdup(identity);
+  entry->size = size;
+  entry->align = align;
+  entry->field_count = field_count;
+  entry->fields = (NativeInterfaceField *)calloc(
+      field_count ? field_count : 1, sizeof(NativeInterfaceField));
+  if (!entry->fields) abort();
+  for (i = 0; i < field_count; ++i) {
+    entry->fields[i].name = native_interface_strdup(field_names[i]);
+    entry->fields[i].type_name = native_interface_strdup(field_types[i]);
+    entry->fields[i].offset = field_offsets[i];
+  }
+  if (g_interface_types_tail)
+    g_interface_types_tail->next = entry;
+  else
+    g_interface_types_head = entry;
+  g_interface_types_tail = entry;
+}
+
+void native_declare_interface_function(
+    const char *name, uint32_t param_count,
+    const char *const *param_types, const char *ret_type) {
+  NativeInterfaceFunction *entry =
+      (NativeInterfaceFunction *)calloc(1, sizeof(NativeInterfaceFunction));
+  uint32_t i;
+  if (!entry) abort();
+  entry->name = native_interface_strdup(name);
+  entry->param_count = param_count;
+  entry->param_types =
+      (char **)calloc(param_count ? param_count : 1, sizeof(char *));
+  if (!entry->param_types) abort();
+  for (i = 0; i < param_count; ++i)
+    entry->param_types[i] = native_interface_strdup(param_types[i]);
+  entry->ret_type = native_interface_strdup(ret_type);
+  if (g_interface_functions_tail)
+    g_interface_functions_tail->next = entry;
+  else
+    g_interface_functions_head = entry;
+  g_interface_functions_tail = entry;
+}
+
+static NativeInterfaceFunction *native_interface_function(const char *name) {
+  NativeInterfaceFunction *entry;
+  for (entry = g_interface_functions_head; entry; entry = entry->next)
+    if (strcmp(entry->name, name) == 0)
+      return entry;
+  return NULL;
+}
+
 void native_emit_interface(const char *output_path) {
   FILE *out = fopen(output_path, "w");
   if (!out) {
@@ -976,11 +1246,29 @@ void native_emit_interface(const char *output_path) {
 
   const char *prefix = native_get_module_prefix();
   fprintf(out, "(module %s\n", prefix[0] ? prefix : "unknown");
-  fprintf(out, "  (format lci-v1)\n");
+  fprintf(out, "  (format lci-v2)\n");
   fprintf(out, "  (exports\n");
+
+  for (NativeInterfaceType *type = g_interface_types_head; type;
+       type = type->next) {
+    uint32_t i;
+    fprintf(out, "    (type\n");
+    fprintf(out, "      (name %s)\n", type->name);
+    fprintf(out, "      (identity \"%s\")\n", type->identity);
+    fprintf(out, "      (size %u)\n", type->size);
+    fprintf(out, "      (align %u)\n", type->align);
+    fprintf(out, "      (fields\n");
+    for (i = 0; i < type->field_count; ++i)
+      fprintf(out,
+              "        (field (name %s) (type %s) (offset %u))\n",
+              type->fields[i].name, type->fields[i].type_name,
+              type->fields[i].offset);
+    fprintf(out, "      ))\n");
+  }
 
   for (L1Subroutine *sub = g_subroutines_head; sub; sub = sub->next) {
     int exported = 0;
+    NativeInterfaceFunction *semantic;
     if (native_has_explicit_exports())
       exported = sub->link_name && native_is_export_marked(sub->name);
     else
@@ -989,16 +1277,34 @@ void native_emit_interface(const char *output_path) {
     if (!exported)
       continue;
 
+    semantic = native_interface_function(sub->name);
+
     fprintf(out, "    (fn\n");
     fprintf(out, "      (name %s)\n", sub->name);
     fprintf(out, "      (params (");
+    for (uint32_t i = 0; i < sub->param_count; i++) {
+      if (semantic && i < semantic->param_count)
+        fprintf(out, "%s", semantic->param_types[i]);
+      else
+        emit_l1_type(sub->param_tys[i], out);
+      if (i < sub->param_count - 1)
+        fprintf(out, " ");
+    }
+    fprintf(out, "))\n");
+    fprintf(out, "      (ret ");
+    if (semantic)
+      fprintf(out, "%s", semantic->ret_type);
+    else
+      emit_l1_type(sub->ret_ty, out);
+    fprintf(out, ")\n");
+    fprintf(out, "      (abi_params (");
     for (uint32_t i = 0; i < sub->param_count; i++) {
       emit_l1_type(sub->param_tys[i], out);
       if (i < sub->param_count - 1)
         fprintf(out, " ");
     }
     fprintf(out, "))\n");
-    fprintf(out, "      (ret ");
+    fprintf(out, "      (abi_ret ");
     emit_l1_type(sub->ret_ty, out);
     fprintf(out, ")\n");
     fprintf(out, "      (link_name \"%s\"))\n", sub->link_name);

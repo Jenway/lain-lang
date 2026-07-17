@@ -483,16 +483,20 @@ static L1Expr *parse_field_expr(Parser *p) {
   expect(p, TK_LBRACK);
   token = expect(p, TK_NUMBER);
   text = token_string(token);
+  expr->data.field.field_index = (uint32_t)strtoul(text, NULL, 10);
+  free(text);
+  expr->data.field.field_ty = NULL;
   expect(p, TK_RBRACK);
   expect(p, TK_LPAREN);
 
-  expr->data.field.field_index = (uint32_t)strtoul(text, NULL, 10);
-  free(text);
   expr->data.field.base = parse_expr(p);
   expr->data.field.struct_ty = NULL;
-  expr->data.field.field_ty = NULL;
 
   expect(p, TK_RPAREN);
+  if (p->current.kind == TK_COLON) {
+    next_token(p);
+    expr->data.field.field_ty = parse_type(p);
+  }
   return expr;
 }
 
@@ -559,6 +563,23 @@ static L1Expr *parse_expr(Parser *p) {
   if (p->current.kind == TK_KW_LEA) {
     next_token(p);
     return parse_lea_expr(p);
+  }
+  if (p->current.kind == TK_KW_LOAD) {
+    L1Type *load_ty = NULL;
+    L1Expr *addr;
+    next_token(p);
+    if (p->current.kind == TK_LBRACK) {
+      next_token(p);
+      load_ty = parse_type(p);
+      expect(p, TK_RBRACK);
+    }
+    expect(p, TK_LPAREN);
+    addr = parse_expr(p);
+    expect(p, TK_RPAREN);
+    expr = lainir_new_expr(EXPR_LOAD);
+    expr->data.load.addr = addr;
+    expr->data.load.ty = load_ty;
+    return expr;
   }
 
   switch (p->current.kind) {

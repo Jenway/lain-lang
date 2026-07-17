@@ -8,39 +8,125 @@ import re
 import subprocess
 from pathlib import Path
 
+from artifact_cache import (
+    cache_matches,
+    input_fingerprint as cache_fingerprint,
+    write_stamp,
+)
+from compiler_source import MODULES, build_compiler_source
+
 
 ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "build/core-self-hosting/meta_compiler.l1"
 PARTS = ROOT / "build/core-self-hosting/artifact-parts"
-MODULES = (
-    "packages/lain/compiler/mini_syntax.lain",
-    "packages/lain/compiler/mini_middle.lain",
-    "packages/lain/compiler/mini_type.lain",
-    "packages/lain/compiler/mini_module.lain",
-    "packages/lain/compiler/mini_elaborate.lain",
-    "packages/lain/compiler/l1_text_builder.lain",
-    "packages/lain/compiler/mini_lower.lain",
-    "packages/lain/compiler/mini_diagnostic.lain",
-    "packages/lain/compiler/mini_compile_result.lain",
-    "packages/lain/compiler/mini_meta.lain",
-)
+STAMP = ROOT / "build/core-self-hosting/meta_compiler.stamp.json"
+CACHE_SCHEMA = "lain-meta-artifact-cache-v2"
+COMPILER_API_SCHEMA = "1"
 EXPECTED_HOST_CAPABILITIES = {
+    "compiler.storage-new!",
+    "compiler.storage-reserve!",
+    "compiler.storage-set-i32!",
+    "compiler.storage-get-i32!",
+    "compiler.storage-set-string!",
+    "compiler.storage-get-string!",
+    "compiler.storage-destroy!",
+    "core.destroy-lainir-unit!",
+    "core.string-append!",
+    "core.string-from-addr!",
     "core.string-first-byte!",
+    "core.string-length!",
     "core.i32-to-string!",
     "core.string-is-i32!",
     "core.string-to-i32!",
     "core.string-equal!",
-    "core.string-append-linear!",
     "ast.node-atom-class",
+    "ast.node-line",
     "ast.node-is-infix-text",
     "ast.node-is-atom-text",
     "ast.node-text",
+    "ast.node-string-value",
     "ast.node-next",
     "ast.node-op",
     "ast.node-right",
     "ast.node-left",
     "ast.node-kind",
     "ast.parse!",
+    "ast.store-new!",
+    "ast.store-destroy!",
+    "ast.unit-parse!",
+    "ast.unit-destroy!",
+    "ast.unit-root",
+    "ast.unit-node-count",
+    "ast.unit-node-kind",
+    "ast.unit-node-text",
+    "ast.unit-node-string-value",
+    "ast.unit-node-is-atom-text",
+    "ast.unit-node-is-infix-text",
+    "ast.unit-node-atom-class",
+    "ast.unit-node-line",
+    "ast.unit-node-col",
+    "ast.unit-node-left",
+    "ast.unit-node-right",
+    "ast.unit-node-op",
+    "ast.unit-node-next",
+    "l1.call-arg!",
+    "l1.expr-arg!",
+    "l1.expr-binary!",
+    "l1.expr-call!",
+    "l1.expr-alloca!",
+    "l1.expr-lea!",
+    "l1.expr-load!",
+    "l1.expr-i32!",
+    "l1.expr-string!",
+    "l1.expr-var!",
+    "l1.proc-if-return!",
+    "l1.proc-if-return-then!",
+    "l1.block-if!",
+    "l1.block-let!",
+    "l1.block-return!",
+    "l1.block-call!",
+    "l1.block-store!",
+    "l1.proc-let!",
+    "l1.proc-new!",
+    "l1.proc-extern!",
+    "l1.proc-param!",
+    "l1.proc-body!",
+    "l1.proc-return!",
+    "l1.proc-store!",
+    "l1.unit-new!",
+    "l1.unit-verify!",
+    "l1.unit-verify-code!",
+    "l1.unit-verify-message!",
+    "core.lainir-unit-debug-text!",
+    "l1.read-find-proc!",
+    "l1.read-proc-is-extern!",
+    "l1.read-proc-param-count!",
+    "l1.read-proc-first-inst!",
+    "l1.read-inst-next!",
+    "l1.read-inst-kind!",
+    "l1.read-inst-expr!",
+    "l1.read-inst-name!",
+    "l1.read-inst-branch!",
+    "l1.read-expr-kind!",
+    "l1.read-expr-i32!",
+    "l1.read-expr-index!",
+    "l1.read-expr-name!",
+    "l1.read-expr-child!",
+    "l1.read-call-arg-count!",
+    "l1.read-call-arg!",
+    "l1.eval-new!",
+    "l1.eval-frame-new!",
+    "l1.eval-frame-arg-set!",
+    "l1.eval-frame-arg!",
+    "l1.eval-frame-var-set!",
+    "l1.eval-frame-var!",
+    "l1.eval-fail!",
+    "l1.eval-status!",
+    "l1.eval-destroy!",
+    "l1.result-new!",
+    "l1.result-status!",
+    "l1.result-value!",
+    "l1.result-destroy!",
 }
 
 
@@ -49,15 +135,65 @@ def compiler() -> Path:
     return ROOT / "zig-out/bin" / f"lainc{suffix}"
 
 
+def tool(name: str) -> Path:
+    suffix = ".exe" if os.name == "nt" else ""
+    return ROOT / "zig-out/bin" / f"{name}{suffix}"
+
+
 def run(args: list[str]) -> None:
     result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
 
+def input_fingerprint(source: Path) -> str:
+    inputs: list[tuple[str, bytes]] = [
+        ("builder", Path(__file__).read_bytes()),
+        (
+            "cache-contract",
+            (Path(__file__).parent / "artifact_cache.py").read_bytes(),
+        ),
+        ("canonical-compiler-source", source.read_bytes()),
+        ("stage0-lainc", compiler().read_bytes()),
+        ("validator-l1check", tool("l1check").read_bytes()),
+        ("schema-reader-l1i", tool("l1i").read_bytes()),
+        ("polyfills.scm", (ROOT / "polyfills.scm").read_bytes()),
+    ]
+    inputs.extend(
+        (path.relative_to(ROOT).as_posix(), path.read_bytes())
+        for path in sorted((ROOT / "std/meta").rglob("*.scm"))
+    )
+    return cache_fingerprint(CACHE_SCHEMA, inputs)
+
+
+def compiler_artifact_valid(path: Path) -> bool:
+    checked = subprocess.run(
+        [str(tool("l1check")), str(path), "compiler_compile"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if checked.returncode != 0:
+        return False
+    schema = subprocess.run(
+        [str(tool("l1i")), str(path), "compiler_api_schema_version"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    return schema.returncode == 0 and schema.stdout.strip() == COMPILER_API_SCHEMA
+
+
 def build() -> Path:
     lainc = compiler()
+    source = build_compiler_source()
+    fingerprint = input_fingerprint(source)
+    if (cache_matches(OUT, STAMP, CACHE_SCHEMA, fingerprint)
+            and compiler_artifact_valid(OUT)):
+        return OUT
     PARTS.mkdir(parents=True, exist_ok=True)
+    for stale in PARTS.glob("*.l1"):
+        stale.unlink()
     interfaces: list[Path] = []
     outputs: list[Path] = []
     try:
@@ -67,7 +203,10 @@ def build() -> Path:
             output = PARTS / f"{index:02d}-{source.stem}.l1"
             run([str(lainc), "--emit-interface", str(source), str(interface)])
             interfaces.append(interface)
-            run([str(lainc), "--emit-l1", str(source), str(output)])
+            # Stage-1 must always be produced by the stage-0 reference path.
+            # Normal --emit-l1 is reserved for the installed self-hosted
+            # compiler artifact starting with M14.
+            run([str(lainc), "--bootstrap-emit-l1", str(source), str(output)])
             outputs.append(output)
         parts = [path.read_text(encoding="utf-8") for path in outputs]
         defined = {
@@ -125,6 +264,11 @@ def build() -> Path:
             encoding="utf-8",
             newline="\n",
         )
+        if not compiler_artifact_valid(OUT):
+            raise RuntimeError(
+                "stage-1 artifact lacks compiler_compile or compiler API schema 1"
+            )
+        write_stamp(OUT, STAMP, CACHE_SCHEMA, fingerprint)
         return OUT
     finally:
         for interface in interfaces:

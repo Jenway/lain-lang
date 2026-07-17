@@ -6,7 +6,7 @@ import packages::lain::compiler::l1_text_builder;
 import packages::lain::compiler::mini_module;
 import packages::lain::compiler::mini_middle;
 
-pub fn mini_lower_schema_version() -> i32 { return 4; }
+pub fn mini_lower_schema_version() -> i32 { return 5; }
 
 fn mini_lower_params(param: i32, index: i32) -> addr {
     if param == 0 { return ""; }
@@ -190,8 +190,170 @@ fn mini_lower_callable_externs(item: i32, selected: addr) -> addr {
 pub fn mini_lower_named_validated(root: i32, name: addr) -> addr {
     let selected: i32 = mini_module_find_procedure(root, name);
     if selected == 0 { return ""; }
-    if mini_middle_item_tag(selected) != 4 { return ""; }
+    if mini_middle_is_procedure_definition(selected) != 1 { return ""; }
     return l1_text_concat(
         mini_lower_callable_externs(mini_middle_first_callable(root), name),
         mini_lower_function(root, selected));
+}
+
+// M5 workspace lowering.  Module values disappear here: only qualified
+// physical procedure symbols remain in L1.
+fn mini_lower_link_name(module: i32, name: addr) -> addr {
+    return l1_text_concat(
+        l1_text_concat(mini_module_summary_name(module), "__"), name);
+}
+
+fn mini_lower_workspace_args(
+    workspace: i32, module: i32, root: i32, function: i32,
+    arg: i32, body_start: i32, stop: i32, index: i32) -> addr {
+    if arg == 0 { return ""; }
+    let value: addr = mini_lower_workspace_expr(
+        workspace, module, root, function, arg, body_start, stop);
+    let own: addr = l1_text_call_arg(value, if index == 0 { 1 } else { 0 });
+    return l1_text_concat(
+        own,
+        mini_lower_workspace_args(
+            workspace, module, root, function,
+            mini_syntax_arg_next(arg), body_start, stop, index + 1));
+}
+
+fn mini_lower_workspace_expr(
+    workspace: i32, module: i32, root: i32, function: i32,
+    node: i32, body_start: i32, stop: i32) -> addr {
+    let tag: i32 = mini_syntax_expr_tag(node);
+    if tag == 1 { return mini_syntax_text(node); }
+    if tag == 7 { return mini_syntax_text(node); }
+    if tag == 2 {
+        return mini_lower_name(function, body_start, stop, mini_syntax_text(node));
+    }
+    if tag == 3 {
+        return l1_text_i32_add(
+            mini_lower_workspace_expr(
+                workspace, module, root, function,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_workspace_expr(
+                workspace, module, root, function,
+                mini_syntax_right(node), body_start, stop));
+    }
+    if tag == 4 {
+        return l1_text_call(
+            mini_lower_link_name(module, mini_syntax_call_name(node)),
+            mini_lower_workspace_args(
+                workspace, module, root, function,
+                mini_syntax_call_first_arg(node), body_start, stop, 0));
+    }
+    if tag == 9 {
+        let target: i32 = mini_module_resolve_alias(
+            workspace, module, mini_syntax_member_base_name(node));
+        return l1_text_call(
+            mini_lower_link_name(target, mini_syntax_member_name(node)),
+            mini_lower_workspace_args(
+                workspace, module, root, function,
+                mini_syntax_member_first_arg(node), body_start, stop, 0));
+    }
+    if tag == 8 {
+        return l1_text_i32_ne(
+            mini_lower_workspace_expr(
+                workspace, module, root, function,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_workspace_expr(
+                workspace, module, root, function,
+                mini_syntax_right(node), body_start, stop));
+    }
+    return l1_text_i32_eq(
+        mini_lower_workspace_expr(
+            workspace, module, root, function,
+            mini_syntax_left(node), body_start, stop),
+        mini_lower_workspace_expr(
+            workspace, module, root, function,
+            mini_syntax_right(node), body_start, stop));
+}
+
+fn mini_lower_workspace_body(
+    workspace: i32, module: i32, root: i32, function: i32,
+    node: i32, body_start: i32) -> addr {
+    let form_tag: i32 = mini_syntax_form_tag(node);
+    if form_tag == 1 {
+        return mini_lower_workspace_body(
+            workspace, module, root, function,
+            mini_syntax_next(node), body_start);
+    }
+    if form_tag == 2 {
+        let name: addr = mini_syntax_text(mini_syntax_local_name_node(node));
+        let value_node: i32 = mini_syntax_local_value_node(node);
+        let value: addr = mini_lower_workspace_expr(
+            workspace, module, root, function, value_node, body_start, node);
+        return l1_text_concat(
+            l1_text_binding(
+                name,
+                mini_lower_type_text(
+                    mini_elaborate_module_expr_type(
+                        workspace, module, root, function,
+                        value_node, body_start, node)),
+                value),
+            mini_lower_workspace_body(
+                workspace, module, root, function,
+                mini_syntax_next(node), body_start));
+    }
+    if mini_syntax_expr_tag(node) == 6 {
+        return l1_text_if_return(
+            mini_lower_workspace_expr(
+                workspace, module, root, function,
+                mini_syntax_if_condition(node), body_start, node),
+            mini_lower_workspace_expr(
+                workspace, module, root, function,
+                mini_syntax_if_then_expr(node), body_start, node),
+            mini_lower_workspace_expr(
+                workspace, module, root, function,
+                mini_syntax_if_else_expr(node), body_start, node));
+    }
+    return l1_text_return(
+        mini_lower_workspace_expr(
+            workspace, module, root, function, node, body_start, node));
+}
+
+fn mini_lower_workspace_function(
+    workspace: i32, module: i32, root: i32, function: i32) -> addr {
+    let params: addr = mini_lower_params(
+        mini_syntax_function_first_param(function), 0);
+    let body: i32 = mini_syntax_function_body(function);
+    let first: i32 = mini_syntax_left(body);
+    return l1_text_concat(
+        l1_text_concat(
+            l1_text_proc_begin_typed(
+                mini_lower_link_name(
+                    module, mini_syntax_function_name(function)),
+                params,
+                mini_syntax_text(
+                    mini_syntax_right(
+                        mini_syntax_function_signature(function)))),
+            mini_lower_workspace_body(
+                workspace, module, root, function, first, first)),
+        l1_text_proc_end());
+}
+
+fn mini_lower_workspace_functions(
+    workspace: i32, module: i32, root: i32, function: i32) -> addr {
+    if function == 0 { return ""; }
+    return l1_text_concat(
+        mini_lower_workspace_function(
+            workspace, module, root, function),
+        mini_lower_workspace_functions(
+            workspace, module, root,
+            mini_middle_next_definition(function)));
+}
+
+fn mini_lower_workspace_modules(workspace: i32, module: i32) -> addr {
+    if module == 0 { return ""; }
+    let root: i32 = mini_module_body(module);
+    return l1_text_concat(
+        mini_lower_workspace_functions(
+            workspace, module, root, mini_module_first_procedure(root)),
+        mini_lower_workspace_modules(
+            workspace, mini_module_next_module(module)));
+}
+
+pub fn mini_lower_workspace_validated(workspace: i32) -> addr {
+    return mini_lower_workspace_modules(
+        workspace, mini_module_first_module(workspace));
 }

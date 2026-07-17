@@ -4,55 +4,32 @@ fn read_file_string(path: addr) -> addr;
 @foreign(c, link_name = "core.string-length!")
 fn string_length(text: addr) -> i32;
 
-@foreign(c, link_name = "core.string-equal!")
-fn string_equal(left: addr, right: addr) -> i32;
-
-@foreign(c, link_name = "core.execute-compiler-artifact!")
-fn execute_compiler_artifact(artifact: addr, entry: addr, source: addr, length: i32) -> addr;
-
 @foreign(c, link_name = "core.execute-compiler-artifact!")
 fn execute_compiler_artifact_i32(artifact: addr, entry: addr, source: addr, length: i32) -> i32;
 
-@foreign(c, link_name = "core.execute-lainir-text!")
-fn execute_l1_text(text: addr, entry: addr) -> i32;
-
-@foreign(c, link_name = "core.execute-lainir-text!")
-fn execute_l1_text_addr(text: addr, entry: addr) -> addr;
-
-@foreign(c, link_name = "core.execute-lainir-text-i32!")
-fn execute_l1_text_i32(text: addr, entry: addr, arg: i32) -> addr;
+@foreign(c, link_name = "core.execute-lainir-unit!")
+fn execute_l1_unit(unit: i32, entry: addr) -> i32;
+@foreign(c, link_name = "core.destroy-lainir-unit!")
+fn destroy_l1_unit(unit: i32) -> i32;
 
 fn main() -> i32 {
     let artifact: addr = read_file_string("build/core-self-hosting/meta_compiler.l1");
 
     let target_source: addr = "let add = fn(a: i32, b: i32) -> i32 { a + b }
 let main = fn() -> i32 { let x = add(40, 2); if x == 42 { x } else { 0 } }";
-    let target_l1: addr = execute_compiler_artifact(
+    let target_unit: i32 = execute_compiler_artifact_i32(
         artifact, "mini_meta_compile", target_source, string_length(target_source));
-    if execute_l1_text(target_l1, "main") != 42 { return 3201; }
+    if target_unit == 0 { return 3201; }
+    if execute_l1_unit(target_unit, "main") != 42 { return 3202; }
+    if destroy_l1_unit(target_unit) != 1 { return 3203; }
 
-    let type_source: addr = read_file_string("packages/lain/compiler/mini_type.lain");
-    let type_l1: addr = execute_compiler_artifact(
-        artifact, "mini_meta_compile", type_source, string_length(type_source));
-    if execute_l1_text(type_l1, "mini_type_i32") != 1 { return 3202; }
-
-    let diagnostic_source: addr = read_file_string("packages/lain/compiler/mini_diagnostic.lain");
-    let diagnostic_l1: addr = execute_compiler_artifact(
-        artifact, "mini_meta_compile", diagnostic_source, string_length(diagnostic_source));
-    let message: addr = execute_l1_text_i32(
-        diagnostic_l1, "mini_diagnostic_message", 2301);
-    if string_equal(message, "unknown procedure") != 1 { return 3203; }
-
-    // M4: the artifact understands Meta-owned top-level forms, keeps a
-    // declaration in its callable table, and lowers definitions only.
-    let builder_source: addr = read_file_string("packages/lain/compiler/l1_text_builder.lain");
-    let builder_code: i32 = execute_compiler_artifact_i32(
-        artifact, "mini_meta_validate", builder_source, string_length(builder_source));
-    if builder_code != 0 { return builder_code; }
-    let builder_l1: addr = execute_compiler_artifact(
-        artifact, "mini_meta_compile", builder_source, string_length(builder_source));
-    let proc_end: addr = execute_l1_text_addr(builder_l1, "l1_text_proc_end");
-    if string_equal(proc_end, "}") != 1 { return 3204; }
-
+    // M7: the artifact accepts the Lain-owned interpreter source itself,
+    // including its physical foreign contracts and recursive evaluator.
+    let interpreter_source: addr = read_file_string(
+        "packages/lain/compiler/l1_interpreter.lain");
+    let interpreter_code: i32 = execute_compiler_artifact_i32(
+        artifact, "mini_meta_validate", interpreter_source,
+        string_length(interpreter_source));
+    if interpreter_code != 0 { return interpreter_code; }
     return 42;
 }

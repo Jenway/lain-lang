@@ -13,6 +13,7 @@ const lainc_sources = &.{
     "src/compiler/lainir_exec.c",
     "src/compiler/native_compiler.c",
     "src/compiler/builder_ffi.c",
+    "src/compiler/structured_unit.c",
     "src/lainir/lainir_core.c",
     "src/lainir/lain_ir_parser.c",
     "src/lainir/verifier.c",
@@ -58,7 +59,8 @@ pub fn build(b: *std.Build) void {
     } else {
         std.debug.panic("unknown -Dscheme={s}; expected gauche or chibi", .{scheme});
     }
-    installNamed(b, lainc, "lainc", "Build and install the Lain compiler");
+    const install_lainc = installNamed(
+        b, lainc, "lainc", "Build and install the stage-0 Lain host");
 
     const l1c = addCExecutable(b, "l1c", target, optimize);
     l1c.root_module.addCSourceFiles(.{
@@ -71,7 +73,7 @@ pub fn build(b: *std.Build) void {
         },
         .flags = common_c_flags,
     });
-    installNamed(b, l1c, "l1c", "Build and install the LAIN-IR C emitter");
+    _ = installNamed(b, l1c, "l1c", "Build and install the LAIN-IR C emitter");
 
     const l1i = addCExecutable(b, "l1i", target, optimize);
     l1i.root_module.addCSourceFiles(.{
@@ -84,7 +86,7 @@ pub fn build(b: *std.Build) void {
         },
         .flags = common_c_flags,
     });
-    installNamed(b, l1i, "l1i", "Build and install the LAIN-IR interpreter");
+    _ = installNamed(b, l1i, "l1i", "Build and install the LAIN-IR interpreter");
 
     const l1check = addCExecutable(b, "l1check", target, optimize);
     l1check.root_module.addCSourceFiles(.{
@@ -97,7 +99,26 @@ pub fn build(b: *std.Build) void {
         },
         .flags = common_c_flags,
     });
-    installNamed(b, l1check, "l1check", "Parse, verify, and canonicalize LAIN-IR");
+    const install_l1check = installNamed(
+        b, l1check, "l1check", "Parse, verify, and canonicalize LAIN-IR");
+
+    const generate_self_hosted = b.addSystemCommand(&.{
+        "python", "tests/core/self_hosting/build_self_hosted_compiler.py",
+    });
+    generate_self_hosted.step.dependOn(&install_lainc.step);
+    generate_self_hosted.step.dependOn(&install_l1check.step);
+    const install_self_hosted = b.addInstallFileWithDir(
+        .{ .cwd_relative = "build/core-self-hosting/stage2_compiler.l1" },
+        .bin,
+        "stage2_compiler.l1",
+    );
+    install_self_hosted.step.dependOn(&generate_self_hosted.step);
+    b.getInstallStep().dependOn(&install_self_hosted.step);
+    const self_hosted_step = b.step(
+        "self-host-compiler",
+        "Build and install the stage-2 self-hosted Lain compiler artifact",
+    );
+    self_hosted_step.dependOn(&install_self_hosted.step);
 
     const test_step = b.step("test", "Build all tools and run the core test suite");
     const run_tests = b.addSystemCommand(&.{ "python", "tests/core_runner.py" });
@@ -135,11 +156,12 @@ fn installNamed(
     artifact: *std.Build.Step.Compile,
     name: []const u8,
     description: []const u8,
-) void {
+) *std.Build.Step.InstallArtifact {
     const install = b.addInstallArtifact(artifact, .{});
     b.getInstallStep().dependOn(&install.step);
     const step = b.step(name, description);
     step.dependOn(&install.step);
+    return install;
 }
 
 fn addGaucheConfiguration(b: *std.Build, module: *std.Build.Module, windows: bool) void {

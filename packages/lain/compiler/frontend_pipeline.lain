@@ -1,0 +1,209 @@
+// M12 explicit Lain-owned frontend pipeline.
+//
+// RawAst remains an opaque, topology-only substrate.  These records are the
+// phase boundaries owned by Lain: domain parse, zero-copy Middle AST,
+// elaboration, and structured L1 lowering.  No Scheme pass participates in
+// this normal compiler entry.
+
+import packages::lain::compiler::mini_syntax;
+import packages::lain::compiler::mini_middle;
+import packages::lain::compiler::mini_module;
+import packages::lain::compiler::mini_elaborate;
+import packages::lain::compiler::mini_lower_unit;
+import packages::lain::compiler::l1_unit_builder;
+import packages::lain::compiler::mini_diagnostic;
+import packages::lain::compiler::compiler_context;
+
+pub struct ParsedProgram {
+    root: i32,
+    item_count: i32,
+    diagnostic: i32,
+}
+
+pub struct MiddleProgram {
+    root: i32,
+    first_definition: i32,
+    definition_count: i32,
+    diagnostic: i32,
+}
+
+pub struct ElaboratedProgram {
+    root: i32,
+    procedure_count: i32,
+    diagnostic: i32,
+}
+
+pub struct LoweredProgram {
+    unit: i32,
+    diagnostic: i32,
+}
+
+fn m12_count_items(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    return 1 + m12_count_items(mini_middle_next_item(item));
+}
+
+fn m12_head_has_atom(node: i32, text: addr) -> i32 {
+    if node == 0 { return 0; }
+    if mini_syntax_is_atom_text(node, text) == 1 { return 1; }
+    if mini_syntax_is_juxt(node) == 1 {
+        if m12_head_has_atom(mini_syntax_left(node), text) == 1 { return 1; }
+        return m12_head_has_atom(mini_syntax_right(node), text);
+    }
+    return 0;
+}
+
+fn m12_is_meta_declaration(item: i32) -> i32 {
+    if mini_syntax_is_atom_text(item, ";") == 1 { return 1; }
+    if mini_syntax_is_juxt(item) != 1 { return 0; }
+    let head: i32 = mini_syntax_left(item);
+    if m12_head_has_atom(head, "struct") == 1 { return 1; }
+    if m12_head_has_atom(head, "enum") == 1 { return 1; }
+    if m12_head_has_atom(head, "interface") == 1 { return 1; }
+    if m12_head_has_atom(head, "effect") == 1 { return 1; }
+    return 0;
+}
+
+fn m12_validate_domain_items(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    let tag: i32 = mini_middle_item_tag(item);
+    // Attributes/import sugar/declarations/direct functions/unified let are
+    // all domain forms.  A zero tag is topology that no Lain domain claimed.
+    if tag == 0 {
+        if m12_is_meta_declaration(item) != 1 { return 12001; }
+    }
+    return m12_validate_domain_items(mini_middle_next_item(item));
+}
+
+pub fn frontend_parse(root: i32) -> ParsedProgram {
+    if mini_syntax_kind(root) != 4 {
+        return ParsedProgram {
+            root: root, item_count: 0, diagnostic: 1001,
+        };
+    }
+    let first: i32 = mini_middle_first_item(root);
+    if first == 0 {
+        return ParsedProgram {
+            root: root, item_count: 0, diagnostic: 1005,
+        };
+    }
+    let diagnostic: i32 = m12_validate_domain_items(first);
+    return ParsedProgram {
+        root: root, item_count: m12_count_items(first),
+        diagnostic: diagnostic,
+    };
+}
+
+pub fn frontend_build_middle(parsed: ParsedProgram) -> MiddleProgram {
+    if parsed.diagnostic != 0 {
+        return MiddleProgram {
+            root: parsed.root, first_definition: 0,
+            definition_count: 0, diagnostic: parsed.diagnostic,
+        };
+    }
+    let first: i32 = mini_middle_first_definition(parsed.root);
+    let diagnostic: i32 = mini_middle_validate_program(parsed.root);
+    return MiddleProgram {
+        root: parsed.root, first_definition: first,
+        definition_count: mini_middle_definition_count(first),
+        diagnostic: diagnostic,
+    };
+}
+
+pub fn frontend_elaborate(middle: MiddleProgram) -> ElaboratedProgram {
+    if middle.diagnostic != 0 {
+        return ElaboratedProgram {
+            root: middle.root, procedure_count: middle.definition_count,
+            diagnostic: middle.diagnostic,
+        };
+    }
+    return ElaboratedProgram {
+        root: middle.root,
+        procedure_count: mini_module_procedure_count(middle.root),
+        diagnostic: mini_elaborate_validate(middle.root),
+    };
+}
+
+pub fn frontend_lower(elaborated: ElaboratedProgram) -> LoweredProgram {
+    if elaborated.diagnostic != 0 {
+        return LoweredProgram {
+            unit: 0, diagnostic: elaborated.diagnostic,
+        };
+    }
+    let unit: i32 = mini_lower_unit_plain_validated(elaborated.root);
+    if unit == 0 {
+        return LoweredProgram { unit: 0, diagnostic: 8002 };
+    }
+    return LoweredProgram { unit: unit, diagnostic: 0 };
+}
+
+pub fn frontend_compile(
+    root: i32, source_length: i32) -> CompileResult {
+    let context0: CompilerContext = compiler_context_new(root, source_length);
+    let context1: CompilerContext = compiler_context_add_module(
+        context0, "main", 1);
+    let context2: CompilerContext = compiler_context_add_type(
+        context1, "i32", 1);
+    let context3: CompilerContext = compiler_context_add_type(
+        context2, "bool", 2);
+    let context4: CompilerContext = compiler_context_add_type(
+        context3, "addr", 3);
+
+    let parsed: ParsedProgram = frontend_parse(root);
+    if parsed.diagnostic != 0 {
+        let failed: CompilerContext = compiler_context_add_diagnostic(
+            context4, parsed.diagnostic,
+            mini_diagnostic_message(parsed.diagnostic),
+            root, 0, source_length);
+        return compiler_context_finish(failed);
+    }
+
+    let middle: MiddleProgram = frontend_build_middle(parsed);
+    if middle.diagnostic != 0 {
+        let failed: CompilerContext = compiler_context_add_diagnostic(
+            context4, middle.diagnostic,
+            mini_diagnostic_message(middle.diagnostic),
+            root, 0, source_length);
+        return compiler_context_finish(failed);
+    }
+
+    let elaborated: ElaboratedProgram = frontend_elaborate(middle);
+    if elaborated.diagnostic != 0 {
+        let failed: CompilerContext = compiler_context_add_diagnostic(
+            context4, elaborated.diagnostic,
+            mini_diagnostic_message(elaborated.diagnostic),
+            root, 0, source_length);
+        return compiler_context_finish(failed);
+    }
+
+    let lowered: LoweredProgram = frontend_lower(elaborated);
+    if lowered.diagnostic != 0 {
+        let failed: CompilerContext = compiler_context_add_diagnostic(
+            context4, lowered.diagnostic,
+            mini_diagnostic_message(lowered.diagnostic),
+            root, 0, source_length);
+        return compiler_context_finish(failed);
+    }
+    return compiler_context_finish(
+        compiler_context_with_unit(context4, lowered.unit));
+}
+
+pub fn m12_frontend_phase_probe(source: addr, length: i32) -> i32 {
+    let root: i32 = mini_syntax_parse(source, length);
+    let parsed: ParsedProgram = frontend_parse(root);
+    if parsed.diagnostic != 0 { return 1201; }
+    let middle: MiddleProgram = frontend_build_middle(parsed);
+    if middle.diagnostic != 0 { return 1202; }
+    let elaborated: ElaboratedProgram = frontend_elaborate(middle);
+    if elaborated.diagnostic != 0 { return 1203; }
+    let lowered: LoweredProgram = frontend_lower(elaborated);
+    if lowered.diagnostic != 0 { return 1204; }
+    let destroyed: i32 = l1_unit_builder_destroy(lowered.unit);
+    if destroyed != 1 { return 1205; }
+    if parsed.item_count == 0 { return 1206; }
+    if middle.definition_count == 0 { return 1207; }
+    if elaborated.procedure_count == 0 { return 1208; }
+    return 42;
+}
+
+pub fn m12_frontend_schema_version() -> i32 { return 12; }

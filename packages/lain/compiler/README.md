@@ -18,18 +18,26 @@ Current scope:
 - LAIN-AST to ModuleSummary-like export count and score helpers
 - minimal IR builder model helpers
 - a first `lainc.lain` entry that composes module summary, IR builder, and diagnostics
-- `mini_meta.lain`: the M4 Lain-owned AST-to-L1 driver and result façade
+- `mini_meta.lain`: the M5 Lain-owned AST-to-L1 driver and result façade
 - `mini_syntax.lain`: zero-copy semantic/Middle-AST views over RawAst handles
 - `mini_type.lain`: explicit error / `i32` / `bool` / `addr` type objects
-- `mini_module.lain`: Meta-owned procedure/dependency summary and lookup policy
+- `mini_module.lain`: Meta-owned ModuleValue/ModuleSummary views, export and
+  dependency policy
 - `mini_elaborate.lain`: module function table, parameter/local scope,
   call/arity resolution, and expression type validation
-- `mini_lower.lain`: multi-procedure lowering with parameters, calls,
-  comparison, and structured `if/else`
+- `mini_lower.lain`: legacy text-lowering bootstrap reference
 - `mini_compile_result.lain`: single-parse CompileResult/L1Unit query protocol
+- `mini_workspace.lain`: multi-module validation, diagnostics, summary queries,
+  and physical link orchestration
 - `mini_diagnostic.lain`: stable diagnostic codes and user-facing messages
-- `l1_text_builder.lain`: the canonical structured-L1 text construction API
-  used by Lain-owned frontends
+- `l1_text_builder.lain`: legacy text construction bootstrap reference
+- `l1_unit_builder.lain`: opaque structured L1Unit construction API
+- `l1_interpreter.lain`: M7 Lain-owned interpreter for the structured L1
+  bootstrap subset
+- `mini_lower_unit.lain`: M6 direct lowering from Lain-owned Meta views into
+  physical L1 nodes
+- `compiler_state.lain`: M9 Lain-owned syntax reference, diagnostics,
+  compiler state, optional unit, and structured CompileResult
 
 M3 builds these modules once, in dependency order, into
 `build/core-self-hosting/meta_compiler.l1`.  The reusable artifact declares
@@ -42,15 +50,183 @@ binding as an extern does not grant access to it.
 M4 adds a Lain-owned top-level Middle Form layer (`mini_middle.lain`) and a
 lexical scope query that follows nested block ownership rather than treating a
 function body as one flat sibling interval.  The reusable artifact can now
-validate the complete mini frontend source closure—syntax, Middle Forms,
+compile the complete mini frontend source closure—syntax, Middle Forms,
 types, module table, elaborator, L1 text builder, lowerer, diagnostics,
-CompileResult, and Meta facade—and selectively lower a named procedure while
-representing the other validated callables as extern contracts.  The M4 test
+CompileResult, and Meta facade—and selectively validate/lower a named
+procedure while representing the other callable signatures as extern
+contracts. The full compile entry still validates every body. The M4 test
 executes the resulting self-compiled `mini_meta_schema_version` procedure.
 
-Whole-unit text emission is still a bootstrap path, not the long-term L1 ABI.
-Its dedicated `core.string-append-linear!` capability consumes temporary text
-fragments so compiler-sized emission remains bounded.  M6 replaces this text
-path with the structured Lain-owned `L1Unit` builder.
+M5 makes the declaration model explicit and uniform:
+
+```lain
+let name: ExpectedShape = initializer;
+```
+
+Functions, modules, and dependencies are not parser declaration kinds.
+`fn`, `module`, and `require` are Meta constructors; a binding's expected
+shape and initializer determine its MetaValue. A workspace can therefore bind
+two modules, resolve an exported member call, and lower it to physical L1 names
+such as `math__add` and `app__main`. The M5 tests execute the latter to 42 and
+verify that dependency, visibility, duplicate-name, and cycle failures emit no
+partial L1.
+
+M6 removes whole-unit text generation from the default self-hosted artifact
+path. `mini_meta_compile`, `mini_meta_compile_named`, and workspace compilation
+return opaque structured `L1Unit` handles. Lain owns naming, type, call, and
+procedure-order policy; C owns only physical L1 node storage and handle
+lifecycle. Text emission is a debug view of an already-built unit, and the
+default artifact no longer requires `core.string-append-linear!`.
+
+M7 adds a read-only physical L1 ABI and implements evaluation policy in
+`l1_interpreter.lain`. The interpreter owns procedure lookup, argument
+binding, local bindings, arithmetic/comparison, calls, structured branches,
+returns, and extern rejection. C supplies opaque node and frame/result storage
+only. The C interpreter remains the reference oracle; both interpreters execute
+the same linked workspace unit to 42.
+
+M8 uses that same Lain interpreter for structured comptime evaluation.
+`mini_meta_comptime` compiles a temporary unit, evaluates it without host
+capability dispatch, and returns a structured status/value result.
+`mini_meta_comptime_materialize_main` demonstrates the next Meta step by
+feeding the evaluated value back into a new structured unit. The recursive
+acceptance case deterministically computes 55, preserves source diagnostic
+codes, and rejects an extern call with status 7002. The artifact schema is 8.
+
+M9 replaces the compiler's internal `0 == failure` convention with real Lain
+data. `M9CompilerState` owns an opaque syntax reference, phase, module count,
+optional unit and an inline bootstrap diagnostic slice. Finishing the state
+produces `M9CompileResult`; a failed result never exposes a partial unit and
+retains diagnostic code, message and source extent. The public integer-return
+entry remains only as a CLI/bootstrap compatibility projection.
+
+Aggregate results are passed by address in the current physical ABI. Their
+allocations therefore live for the complete interpreter run, and typed field
+metadata survives L1 text round-trips. M9 uses a tagged-result field while
+match-as-value lowering is incomplete; this is the bootstrap tagged-struct
+representation permitted by the core contract, not a return to integer error
+codes. The reusable artifact executes the state transition probes, compiles
+valid source, rejects invalid source atomically, and includes
+`compiler_state.lain` in its incremental self-compile closure. The artifact
+schema is 9.
 
 The package path is imported as `packages::lain::compiler::*`.
+
+## M10-M13 fixed-point self hosting
+
+M10 replaces consumer-side aggregate mirrors with Meta-owned nominal type
+identities carried by `lci-v2` semantic interfaces.  ABI shapes remain a
+physical contract, but consumers import `M9CompilerState`,
+`M9CompileResult`, and related types by identity rather than redeclaring their
+fields.
+
+M11 moves the growable compiler context into `compiler_context.lain`.  Lain
+owns vector growth, symbol tables, lexical scope stacks, diagnostics, and the
+`CompileResult` policy.  The host exposes only opaque raw storage slots.
+The normal compiler API now uses stable `CompilerContext` and `CompileResult`
+names; the old M9 state/result implementation is retained only in its own
+compatibility module for bootstrap ABI probes.
+
+M12 makes the frontend phases explicit in `frontend_pipeline.lain`:
+
+```text
+RawAst root -> ParsedProgram -> MiddleProgram
+            -> ElaboratedProgram -> LoweredProgram
+```
+
+Each failed phase produces a diagnostic and never exposes a partial
+`L1Unit`.  The normal `mini_meta_compile` entry runs this Lain-owned pipeline.
+
+M13 compiles the authoritative 16-module compiler source closure with that
+pipeline.  Foreign declarations are interpreted from ordinary RawAst
+attribute topology, relocated to their `link_name`, and deduplicated in the
+Lain lowerer.  The resulting structured unit is serialized through the
+physical L1 printer; typed loads and canonical LEA/call statement spelling
+make the text a lossless reloadable artifact.
+
+The fixed-point gate is:
+
+```text
+stage0 C/Scheme bootstrap -> stage1 meta_compiler.l1
+stage1 + compiler_source.lain -> stage2_compiler.l1
+stage2 + compiler_source.lain -> stage3_compiler.l1
+
+stage2 bytes == stage3 bytes
+```
+
+Both generated artifacts pass `l1check`, report schema 12, and agree with
+stage1 on ordinary compilation, diagnostics, Meta-owned module workspaces,
+and L1 interpreter/comptime behavior.  Run the complete gate with:
+
+```text
+zig build test-self-host
+```
+
+## M14-M18 command-line compiler and multi-file ownership
+
+The milestones now have concrete boundaries:
+
+- **M14** installs the stage-2 artifact and makes it the normal `lainc` path.
+- **M15** gives every parsed source a stable opaque syntax handle owned by a
+  `SyntaxStore`/`SyntaxUnit`; destroying another unit cannot invalidate it.
+- **M16** builds a real multi-root `ModuleWorkspace`.  Source files are never
+  concatenated, and dependency order is independent of command-line order.
+- **M17** materializes a Lain-owned `ModuleArtifact` summary whose copied
+  names, dependencies and export signatures remain valid after syntax units
+  are destroyed.  Stage artifacts use schema-versioned, content-hashed cache
+  stamps and are revalidated on every cache hit.
+- **M18** defines one `CompileRequest -> compiler_compile -> CompileResult`
+  ABI for both single-file and workspace compilation.  The launcher compiles
+  once and projects output or diagnostics from that same owned result.
+
+M17 does **not** yet claim persistent per-module incremental code reuse.  The
+detached summary and trustworthy cache are the foundation for a future
+serialized module artifact; currently the cached compiled unit is still the
+whole compiler artifact.
+
+`zig build` now generates `build/core-self-hosting/stage2_compiler.l1`, checks
+it with `l1check`, and installs it beside `lainc` as
+`zig-out/bin/stage2_compiler.l1`.  Generation is keyed by a SHA-256 input and
+output stamp; an unchanged build verifies the artifact without recompiling the
+16-module closure.
+
+The normal CLI loads that artifact and sends both single-file and workspace
+builds through one owned request/result ABI:
+
+```text
+lainc --emit-l1 input.lain output.l1
+  -> CompileRequest(mode=single, paths, sources, count=1)
+  -> compiler_compile(request) -> result handle
+
+lainc --emit-workspace-l1 output.l1 math.lain app.lain
+  -> CompileRequest(mode=workspace, paths, sources, count=2)
+  -> compiler_compile(request) -> result handle
+
+result handle
+  -> outcome + L1 text
+  -> or diagnostic code/message/path/span
+  -> module count
+  -> compiler_result_destroy(result)
+```
+
+`SourceUnit` and `WorkspaceInput` are Lain-owned compiler structures.  The C
+launcher transports bytes and paths only; it does not concatenate source
+files or decide module boundaries.  A syntax store keeps every source unit's
+tree alive simultaneously.  Lain constructs `ModuleWorkspace`, validates and
+orders its dependency graph, and lowers the indexed module roots directly.
+
+`compiler_compile` performs compilation once.  The launcher then projects L1
+or diagnostics from the same owned result handle, instead of re-running the
+compiler once per diagnostic field.  The result owns copied strings until its
+explicit destroy call; the physical storage implementation does not know the
+request or result schema.
+
+The artifact host registers only the physical capability allowlist.  It does
+not load `polyfills.scm` or `std/meta/driver.scm`.  A failed compilation
+projects the Lain diagnostic from the existing result, exits non-zero, and
+does not create the requested output file.
+
+The current stage-2 language boundary is deliberate: it covers the compiler's
+self-hosting subset, not every form handled by the stage-0 Scheme reference.
+Legacy compatibility tests therefore invoke `--bootstrap-emit-l1` explicitly;
+the normal command never silently falls back from Lain to Scheme.

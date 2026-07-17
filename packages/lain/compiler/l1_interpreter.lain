@@ -1,0 +1,242 @@
+// M7 Lain-owned interpreter for the structured L1 subset emitted by M6.
+// The host exposes node shape and opaque frame storage only.  Evaluation,
+// calls, control flow, return propagation, and extern rejection live here.
+
+@foreign(c, link_name = "l1.read-find-proc!")
+fn host_find_proc(unit: i32, name: addr) -> i32;
+@foreign(c, link_name = "l1.read-proc-is-extern!")
+fn host_proc_is_extern(unit: i32, procedure: i32) -> i32;
+@foreign(c, link_name = "l1.read-proc-param-count!")
+fn host_proc_param_count(unit: i32, procedure: i32) -> i32;
+@foreign(c, link_name = "l1.read-proc-first-inst!")
+fn host_proc_first_inst(unit: i32, procedure: i32) -> i32;
+@foreign(c, link_name = "l1.read-inst-next!")
+fn host_inst_next(unit: i32, instruction: i32) -> i32;
+@foreign(c, link_name = "l1.read-inst-kind!")
+fn host_inst_kind(unit: i32, instruction: i32) -> i32;
+@foreign(c, link_name = "l1.read-inst-expr!")
+fn host_inst_expr(unit: i32, instruction: i32) -> i32;
+@foreign(c, link_name = "l1.read-inst-name!")
+fn host_inst_name(unit: i32, instruction: i32) -> addr;
+@foreign(c, link_name = "l1.read-inst-branch!")
+fn host_inst_branch(unit: i32, instruction: i32, then_branch: i32) -> i32;
+@foreign(c, link_name = "l1.read-expr-kind!")
+fn host_expr_kind(unit: i32, expression: i32) -> i32;
+@foreign(c, link_name = "l1.read-expr-i32!")
+fn host_read_expr_i32(unit: i32, expression: i32) -> i32;
+@foreign(c, link_name = "l1.read-expr-index!")
+fn host_expr_index(unit: i32, expression: i32) -> i32;
+@foreign(c, link_name = "l1.read-expr-name!")
+fn host_expr_name(unit: i32, expression: i32) -> addr;
+@foreign(c, link_name = "l1.read-expr-child!")
+fn host_expr_child(unit: i32, expression: i32, right: i32) -> i32;
+@foreign(c, link_name = "l1.read-call-arg-count!")
+fn host_call_arg_count(unit: i32, expression: i32) -> i32;
+@foreign(c, link_name = "l1.read-call-arg!")
+fn host_read_call_arg(unit: i32, expression: i32, index: i32) -> i32;
+
+@foreign(c, link_name = "l1.eval-new!")
+fn host_eval_new() -> i32;
+@foreign(c, link_name = "l1.eval-frame-new!")
+fn host_frame_new(evaluation: i32) -> i32;
+@foreign(c, link_name = "l1.eval-frame-arg-set!")
+fn host_frame_arg_set(frame: i32, index: i32, value: i32) -> i32;
+@foreign(c, link_name = "l1.eval-frame-arg!")
+fn host_frame_arg(frame: i32, index: i32) -> i32;
+@foreign(c, link_name = "l1.eval-frame-var-set!")
+fn host_frame_var_set(frame: i32, name: addr, value: i32) -> i32;
+@foreign(c, link_name = "l1.eval-frame-var!")
+fn host_frame_var(frame: i32, name: addr) -> i32;
+@foreign(c, link_name = "l1.eval-fail!")
+fn host_eval_fail(evaluation: i32, status: i32) -> i32;
+@foreign(c, link_name = "l1.eval-status!")
+fn host_eval_status(evaluation: i32) -> i32;
+@foreign(c, link_name = "l1.eval-destroy!")
+fn host_eval_destroy(evaluation: i32) -> i32;
+@foreign(c, link_name = "l1.result-new!")
+fn host_result_new(status: i32, value: i32) -> i32;
+@foreign(c, link_name = "l1.result-status!")
+fn host_result_status(result: i32) -> i32;
+@foreign(c, link_name = "l1.result-value!")
+fn host_result_value(result: i32) -> i32;
+@foreign(c, link_name = "l1.result-destroy!")
+fn host_result_destroy(result: i32) -> i32;
+
+pub fn l1_interpreter_schema_version() -> i32 { return 7; }
+
+pub fn l1_interpreter_result_error(status: i32) -> i32 {
+    return host_result_new(status, 0);
+}
+pub fn l1_interpreter_result_status(result: i32) -> i32 {
+    return host_result_status(result);
+}
+pub fn l1_interpreter_result_value(result: i32) -> i32 {
+    return host_result_value(result);
+}
+pub fn l1_interpreter_result_destroy(result: i32) -> i32 {
+    return host_result_destroy(result);
+}
+
+fn l1_interpreter_eval_expr(
+    evaluation: i32, unit: i32, frame: i32, expression: i32) -> i32 {
+    if host_eval_status(evaluation) != 0 { return 0; }
+    let kind: i32 = host_expr_kind(unit, expression);
+    if kind == 1 {
+        return host_frame_var(frame, host_expr_name(unit, expression));
+    }
+    if kind == 2 { return host_read_expr_i32(unit, expression); }
+    if kind == 3 {
+        return host_frame_arg(frame, host_expr_index(unit, expression));
+    }
+    if kind == 4 {
+        return l1_interpreter_eval_expr(
+            evaluation, unit, frame,
+            host_expr_child(unit, expression, 0))
+            + l1_interpreter_eval_expr(
+                evaluation, unit, frame,
+                host_expr_child(unit, expression, 1));
+    }
+    if kind == 5 {
+        if l1_interpreter_eval_expr(
+            evaluation, unit, frame,
+            host_expr_child(unit, expression, 0))
+            == l1_interpreter_eval_expr(
+                evaluation, unit, frame,
+                host_expr_child(unit, expression, 1)) { return 1; }
+        return 0;
+    }
+    if kind == 6 {
+        if l1_interpreter_eval_expr(
+            evaluation, unit, frame,
+            host_expr_child(unit, expression, 0))
+            != l1_interpreter_eval_expr(
+                evaluation, unit, frame,
+                host_expr_child(unit, expression, 1)) { return 1; }
+        return 0;
+    }
+    if kind == 7 {
+        return l1_interpreter_eval_call(
+            evaluation, unit, frame, expression);
+    }
+    let ignored: i32 = host_eval_fail(evaluation, 7004);
+    return 0;
+}
+
+fn l1_interpreter_bind_call_args(
+    evaluation: i32, unit: i32, caller_frame: i32,
+    callee_frame: i32, call: i32, index: i32, count: i32) -> i32 {
+    if index == count { return 1; }
+    let value: i32 = l1_interpreter_eval_expr(
+        evaluation, unit, caller_frame,
+        host_read_call_arg(unit, call, index));
+    if host_eval_status(evaluation) != 0 { return 0; }
+    if host_frame_arg_set(callee_frame, index, value) != 1 { return 0; }
+    return l1_interpreter_bind_call_args(
+        evaluation, unit, caller_frame, callee_frame,
+        call, index + 1, count);
+}
+
+fn l1_interpreter_eval_call(
+    evaluation: i32, unit: i32, caller_frame: i32, call: i32) -> i32 {
+    let procedure: i32 = host_find_proc(unit, host_expr_name(unit, call));
+    if procedure == 0 {
+        let ignored: i32 = host_eval_fail(evaluation, 7001);
+        return 0;
+    }
+    if host_proc_is_extern(unit, procedure) == 1 {
+        let ignored: i32 = host_eval_fail(evaluation, 7002);
+        return 0;
+    }
+    let count: i32 = host_call_arg_count(unit, call);
+    if host_proc_param_count(unit, procedure) != count {
+        let ignored: i32 = host_eval_fail(evaluation, 7005);
+        return 0;
+    }
+    let callee_frame: i32 = host_frame_new(evaluation);
+    if callee_frame == 0 { return 0; }
+    if l1_interpreter_bind_call_args(
+        evaluation, unit, caller_frame,
+        callee_frame, call, 0, count) != 1 { return 0; }
+    return l1_interpreter_eval_instructions(
+        evaluation, unit, callee_frame,
+        host_proc_first_inst(unit, procedure));
+}
+
+fn l1_interpreter_eval_instructions(
+    evaluation: i32, unit: i32, frame: i32, instruction: i32) -> i32 {
+    if instruction == 0 {
+        let ignored: i32 = host_eval_fail(evaluation, 7008);
+        return 0;
+    }
+    let kind: i32 = host_inst_kind(unit, instruction);
+    if kind == 1 {
+        let value: i32 = l1_interpreter_eval_expr(
+            evaluation, unit, frame,
+            host_inst_expr(unit, instruction));
+        if host_eval_status(evaluation) != 0 { return 0; }
+        if host_frame_var_set(
+            frame, host_inst_name(unit, instruction), value) != 1 {
+            return 0;
+        }
+        return l1_interpreter_eval_instructions(
+            evaluation, unit, frame,
+            host_inst_next(unit, instruction));
+    }
+    if kind == 2 {
+        let condition: i32 = l1_interpreter_eval_expr(
+            evaluation, unit, frame,
+            host_inst_expr(unit, instruction));
+        if host_eval_status(evaluation) != 0 { return 0; }
+        if condition != 0 {
+            return l1_interpreter_eval_instructions(
+                evaluation, unit, frame,
+                host_inst_branch(unit, instruction, 1));
+        }
+        return l1_interpreter_eval_instructions(
+            evaluation, unit, frame,
+            host_inst_branch(unit, instruction, 0));
+    }
+    if kind == 3 {
+        return l1_interpreter_eval_expr(
+            evaluation, unit, frame,
+            host_inst_expr(unit, instruction));
+    }
+    let ignored: i32 = host_eval_fail(evaluation, 7003);
+    return 0;
+}
+
+pub fn l1_interpreter_run(unit: i32, entry: addr) -> i32 {
+    let evaluation: i32 = host_eval_new();
+    if evaluation == 0 { return host_result_new(7101, 0); }
+    let procedure: i32 = host_find_proc(unit, entry);
+    if procedure == 0 {
+        let ignored: i32 = host_eval_fail(evaluation, 7001);
+    }
+    if procedure != 0 {
+        if host_proc_is_extern(unit, procedure) == 1 {
+            let ignored: i32 = host_eval_fail(evaluation, 7002);
+        }
+    }
+    if procedure != 0 {
+        if host_proc_param_count(unit, procedure) != 0 {
+            let ignored: i32 = host_eval_fail(evaluation, 7005);
+        }
+    }
+    if host_eval_status(evaluation) != 0 {
+        let failed_status: i32 = host_eval_status(evaluation);
+        let destroyed: i32 = host_eval_destroy(evaluation);
+        return host_result_new(failed_status, 0);
+    }
+    let frame: i32 = host_frame_new(evaluation);
+    if frame == 0 {
+        let failed_status: i32 = host_eval_status(evaluation);
+        let destroyed: i32 = host_eval_destroy(evaluation);
+        return host_result_new(failed_status, 0);
+    }
+    let value: i32 = l1_interpreter_eval_instructions(
+        evaluation, unit, frame,
+        host_proc_first_inst(unit, procedure));
+    let status: i32 = host_eval_status(evaluation);
+    let destroyed: i32 = host_eval_destroy(evaluation);
+    return host_result_new(status, value);
+}

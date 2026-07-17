@@ -342,3 +342,74 @@ Legacy fixtures: X/Y passing
 ```
 
 Do not report only a single total pass count.
+
+## 7. M7/M8 Differential Execution Gate
+
+`tests/core/self_hosting/lain_interpreter_comptime.lain` protects the
+interpreter/comptime ownership boundary. It must prove:
+
+```text
+same M6 cross-module L1Unit: C interpreter == Lain interpreter == 42
+recursive temporary L1Unit: runtime == comptime == materialized result == 55
+two comptime runs: identical result
+invalid source: nonzero source diagnostic status
+named-unit extern call: rejected with status 7002
+```
+
+The test must execute structured units directly. Emitting and reparsing L1 text
+does not satisfy this gate.
+
+## 8. M9 Structured Compiler State Gate
+
+`tests/core/self_hosting/run_self_hosting.py` and
+`compile_result_diagnostics.lain` must prove:
+
+```text
+begin state: nested SyntaxRef remains readable across a call
+with-unit state: OptionalUnit and module_count remain readable
+finish state: success returns the complete unit and outcome
+valid source: CompileResult.ok == 1
+invalid source: CompileResult.ok == 0 and unit == None
+invalid source: exactly one stable code/message/span diagnostic
+failure: no partial L1Unit is returned
+self-compile closure: compiler_state.lain is present and schema == 9
+```
+
+The test must invoke the procedures in the reusable artifact. Constructing a
+parallel host-side result or checking only a source-level score does not satisfy
+the gate.
+
+## 9. M10-M14 Fixed-point And CLI Gate
+
+`tests/core/self_hosting/run_self_hosting.py` is the authoritative M10-M14
+gate. It must prove all of the following in one run:
+
+```text
+M10: lci-v2 preserves semantic TypeIdentity and ABI shape without mirrors
+M11: Lain-owned CompilerContext collections/scopes/diagnostics execute
+M12: parse -> Middle -> elaborate -> structured L1 phases succeed atomically
+M13: stage1 emits verifier-clean stage2
+M13: stage2 emits verifier-clean stage3
+M13: stage2 and stage3 are byte-identical
+M13: stage2 and stage3 report schema 12
+M14: normal lainc --emit-l1 loads the stage2 artifact and executes main == 42
+M14: --emit-workspace-l1 links two Module files and executes app__main == 42
+M14: invalid input reports diagnostic 2301 and leaves no partial output
+```
+
+`artifact_generation_behavior.lain` additionally runs stage1, stage2, and
+stage3 against the same ordinary program, invalid program, module workspace,
+and comptime program. Text equality without these behavior checks is not a
+sufficient fixed-point proof.
+
+Stage1 and stage2 artifacts are cached by a SHA-256 fingerprint of their full
+source/tool inputs and rechecked with `l1check` on a cache hit.  An existing
+stage3 is reused only when its bytes already equal the current verified
+stage2.  Full compiler-closure compilation belongs to the two generation
+gates; smaller runtime fixtures must not compile that closure again.
+
+Run it through the Zig build graph:
+
+```text
+zig build test-self-host
+```

@@ -25,6 +25,10 @@ def main() -> int:
     python = sys.executable
     suites = [
         ("core/ast", [python, "tests/core/ast/run_ast_golden.py"]),
+        (
+            "core/artifact-cache",
+            [python, "tests/core/artifact_cache/run_artifact_cache.py"],
+        ),
         ("core/examples", [python, "tests/core/examples/run_examples.py"]),
         ("core/boundaries", [python, "tests/core/boundaries/boundary_lint.py"]),
         (

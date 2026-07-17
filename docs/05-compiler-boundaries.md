@@ -192,6 +192,39 @@ C may expose file IO and path utilities. It must not decide module graph policy,
 
 See `docs/10-module-meta-boundary.md`.
 
+### C5. Structured L1 Builder Is A Physical ABI
+
+C may allocate physical L1 nodes, keep them behind opaque handles, verify and
+execute a completed unit, emit a debug text view, and destroy the unit.
+
+C must not interpret source bindings, modules, type aliases, visibility, or
+choose linked procedure names. Those policies belong to Lain Meta. The `l1.*`
+builder capability set is therefore a physical storage ABI, not a second
+source-language frontend.
+
+### C6. Interpreter Storage Is Not Interpreter Policy
+
+During bootstrap, C may expose read-only physical L1 node queries and opaque
+frame/result storage because the current Lain subset cannot yet allocate its
+own dynamic maps. C must not evaluate expressions, walk control flow, resolve
+calls, or dispatch target externs on behalf of the Lain interpreter.
+
+Those decisions live in `packages/lain/compiler/l1_interpreter.lain`. The C
+interpreter may remain as a reference implementation and runtime fallback, but
+M8 comptime evaluation must use the Lain-owned interpreter path.
+
+### C7. Compiler State And Result Policy Belong To Lain
+
+Syntax/L1 handles may remain opaque physical values during bootstrap, but
+phase transitions, diagnostic collection, success/failure, optional-unit
+policy and failure atomicity belong to `compiler_state.lain`.
+
+C or Scheme must not manufacture a successful result, translate a diagnostic
+code into success, or expose a partially built L1Unit. They may retain
+aggregate storage for one interpreter run and copy a diagnostic string at the
+FFI boundary. Those are lifetime/representation operations, not compiler
+policy.
+
 ## 6. Pipeline Rules
 
 ### P1. Missing Passes Should Not Be Silent

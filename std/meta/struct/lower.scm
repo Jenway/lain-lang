@@ -6,8 +6,22 @@
         (struct.lower-field-types (list.rest fields)
           (list.cons (record '|struct.core-field|
                        (record.field '|name| (optional.value (record.get payload '|name|)))
-                       (record.field '|type| (core.lower-type (optional.value (record.get payload '|type|)))))
+                       (record.field '|type| (core.lower-type (optional.value (record.get payload '|type|))))
+                       (record.field '|semantic-type|
+                         (interface.middle-type-name
+                           (optional.value (record.get payload '|type|)))))
                      acc)))))
+
+(define (struct.interface-fields name lowered acc)
+  (if (null? lowered)
+      (reverse acc)
+      (let* ((field (car lowered))
+             (field-name (optional.value (record.get field '|name|)))
+             (field-type (optional.value (record.get field '|semantic-type|))))
+        (struct.interface-fields name (cdr lowered)
+          (cons (list field-name field-type
+                      (struct-field-offset name field-name))
+                acc)))))
 
 (define-pass* 'core-declarer '|middle.struct| (lambda (item)
   (let* ((payload (middle.payload item))
@@ -19,8 +33,19 @@
                              (cons (optional.value (record.get f '|name|))
                                    (optional.value (record.get f '|type|))))
                            lowered)))
-    ;; Register via Scheme registry (pure Scheme — no C interaction)
-    (struct-register! name field-pairs))))
+    ;; Register via Scheme registry.  Public nominal identity and layout are
+    ;; then handed to C only as an already-decided legacy interface record.
+    (struct-register! name field-pairs)
+    (let* ((public-opt (record.get payload '|public|))
+           (public (and (optional.some? public-opt)
+                        (optional.value public-opt))))
+      (if public
+          (core.declare-interface-type!
+            name
+            (struct-identity name)
+            (list (struct-total-size name) (struct-alignment name))
+            (struct.interface-fields name lowered (list)))
+          unit)))))
 
 (define (struct.lower-literal-fields block struct-name fields locals acc)
   (if (list.empty? fields) (list.reverse acc)
@@ -55,10 +80,16 @@
          (base-ty (core.infer-expr-type base-expr locals))
          (struct-name (struct-type-name base-ty))
          (offset (struct-field-offset struct-name field-name))
-         (field-ty (struct-field-type struct-name field-name)))
+         (field-ty (struct-field-type struct-name field-name))
+         ;; Struct values are physical addresses in L1.  Passing the pure
+         ;; Scheme `(struct-type . name)` record through the C cpointer ABI
+         ;; corrupts EXPR_FIELD.field_ty and makes text round-trips lose type
+         ;; information.
+         (physical-field-ty
+           (if (struct-type? field-ty) (type.addr) field-ty)))
     (core.field-offset! block
       (core.lower-expr block base-expr base-ty locals)
-      offset field-ty))))
+      offset physical-field-ty))))
 
 (define-pass* 'core-expr-inferer '|struct.field| (lambda (expr locals)
   (let* ((payload (middle.payload expr))

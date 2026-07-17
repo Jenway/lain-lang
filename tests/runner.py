@@ -117,7 +117,7 @@ def run_codegen_tests():
         expected_patterns, forbidden_patterns = extract_check_patterns(path)
 
         # 2. 用 lainc --emit-l1 编译
-        res = subprocess.run([COMPILER_BIN, "--emit-l1", path, out_l1], env=ENV, capture_output=True, text=True)
+        res = subprocess.run([COMPILER_BIN, "--bootstrap-emit-l1", path, out_l1], env=ENV, capture_output=True, text=True)
         if res.returncode != 0:
             log_failure(name, f"Compilation failed.\n{res.stderr}")
             continue

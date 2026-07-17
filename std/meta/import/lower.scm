@@ -141,6 +141,69 @@
                 (cons (list fn-name link-name params ret-type) acc)))
             (interface.extract-fns (cdr entries) acc)))))
 
+(define (interface.extract-types parsed)
+  (let* ((exports-section
+           (interface.find-exports-section (cdr parsed))))
+    (if exports-section
+        (interface.extract-tagged (cdr exports-section) 'type (list))
+        (list))))
+
+(define (interface.extract-tagged entries tag acc)
+  (if (null? entries)
+      (reverse acc)
+      (let ((entry (car entries)))
+        (interface.extract-tagged
+          (cdr entries) tag
+          (if (and (pair? entry) (eq? (car entry) tag))
+              (cons entry acc)
+              acc)))))
+
+(define (interface.required-field entry key)
+  (let ((field (interface.assoc-field key (cdr entry))))
+    (if (and field (pair? (cdr field)))
+        (cadr field)
+        (error (string-append "interface: malformed type entry missing "
+                              (symbol->string key))))))
+
+(define (interface.type-field-layout fields acc)
+  (if (null? fields)
+      (reverse acc)
+      (let* ((entry (car fields)))
+        (if (and (pair? entry) (eq? (car entry) 'field))
+            (let* ((name (interface.required-field entry 'name))
+                   (type-name (interface.required-field entry 'type))
+                   (offset (interface.required-field entry 'offset))
+                   (type (interface.type-name->lowered type-name)))
+              (interface.type-field-layout
+                (cdr fields) (cons (list name type offset) acc)))
+            (interface.type-field-layout (cdr fields) acc)))))
+
+(define (interface.declare-types! entries)
+  (if (null? entries)
+      unit
+      (let* ((entry (car entries))
+             (name (interface.required-field entry 'name))
+             (identity (interface.required-field entry 'identity))
+             (size (interface.required-field entry 'size))
+             (fields-section (interface.assoc-field 'fields (cdr entry)))
+             (fields (if fields-section
+                         (interface.type-field-layout
+                           (cdr fields-section) (list))
+                         (list))))
+        (struct-register-imported! name identity size fields)
+        (interface.declare-types! (cdr entries)))))
+
+;; Import types must be visible before normalization validates function and
+;; local annotations.  This is Meta phase ordering, not parser knowledge: the
+;; import form parser merely asks the interface elaborator to predeclare the
+;; nominal summaries carried by the module artifact.
+(define (interface.predeclare-path-types! path)
+  (let* ((source-path (import.resolve-path path))
+         (parsed (host.read-interface source-path)))
+    (if parsed
+        (interface.declare-types! (interface.extract-types parsed))
+        unit)))
+
 (define (interface.extract-entry-names entries tag acc)
   (if (null? entries)
       (reverse acc)
@@ -348,12 +411,14 @@
                  (exports-section (interface.find-exports-section rest))
                  (export-entries (if exports-section (cdr exports-section) (list)))
                  (exports (interface.extract-exports parsed))
+                 (types (interface.extract-types parsed))
                  (module-exports (interface.extract-entry-names export-entries 'module (list)))
                  (signature-exports (interface.extract-entry-names export-entries 'signature (list)))
                  (fn-exports (import.binding-exports exports (list))))
             ;; Directly declare each export as an extern function.
             ;; Also register with the import-path-derived name so
             ;; source-level calls like simple_math_add() resolve correctly.
+            (interface.declare-types! types)
             (import.register-binding-metadata!
               name path fn-exports module-exports signature-exports)
                 (interface.declare-exports! exports path))))))))
@@ -433,10 +498,20 @@
              (param-type-names (caddr entry))    ;; e.g., (i32 i32)
              (ret-type-name (cadddr entry)))     ;; e.g., i32
         ;; Lower types to L1Type* cpointers
-        (let* ((ret-ty (interface.type-name->lowered ret-type-name))
-               (param-tys (interface.lower-param-types param-type-names))
+        (let* ((semantic-ret (interface.type-name->lowered ret-type-name))
+               (semantic-params (interface.lower-param-types param-type-names))
+               (ret-ty (if (struct-type? semantic-ret)
+                           (type.addr) semantic-ret))
+               (param-tys
+                 (map (lambda (ty)
+                        (if (struct-type? ty) (type.addr) ty))
+                      semantic-params))
                ;; Caller-side name derived from import path
                (caller-name (import.caller-fn-name import-path export-name)))
+          ;; Semantic return identity remains Meta-owned even though the host
+          ;; extern declaration receives only the physical addr ABI.
+          (fn-return-type! caller-name semantic-ret)
+          (fn-return-type! export-name semantic-ret)
           ;; Register with caller-side name, link_name = actual C symbol
           ;; The C emitter now uses link_name for both forward decls and calls,
           ;; so the generated C will reference the correct mangled symbol.

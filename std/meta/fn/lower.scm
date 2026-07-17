@@ -134,6 +134,16 @@
 
 ;; ── Declarer / Lowerer ──
 
+(define (fn.interface-param-type-names params acc)
+  (if (null? params)
+      (reverse acc)
+      (let* ((param (car params))
+             (payload (middle.payload param))
+             (ty (optional.value (record.get payload '|type|))))
+        (fn.interface-param-type-names
+          (cdr params)
+          (cons (interface.middle-type-name ty) acc)))))
+
 ;; pass: core-declarer |middle.fn|
 ;; writes: compiler-state.comptime-fns (if comptime flag set)
 ;; calls: validate-effects!, core.lower-type
@@ -186,9 +196,15 @@
             ;; make the interpreter mistake an internal call for a host
             ;; capability.
             (if (and is-public (not (import.source-linking?)))
-                (core.set-function-link-name! name
-                  (string-append (core.module-prefix) "_"
-                                 (symbol->string name)))
+                (begin
+                  (core.set-function-link-name! name
+                    (string-append (core.module-prefix) "_"
+                                   (symbol->string name)))
+                  (core.declare-interface-function!
+                    name
+                    (fn.interface-param-type-names params (list))
+                    (interface.middle-type-name
+                      (optional.value (record.get payload '|return|)))))
                 unit)))))))
 
 (define-pass* 'core-declarer '|middle.foreign-fn| (lambda (item)

@@ -1,23 +1,258 @@
-// Meta-owned classification of top-level RawAst forms.
+// Meta-owned binding views over topology-only RawAst forms.
 //
 // This is deliberately a semantic view owned by Lain.  The C RawAst reader
-// still knows only topology; imports, attributes, declarations and procedure
-// definitions acquire meaning here.
+// still knows only topology.  The canonical declaration model is
+// `let name : expected-shape = initializer`; functions, modules and imports
+// are interpretations of the initializer, not distinct parser declarations.
 
 import packages::lain::compiler::mini_syntax;
 
-pub fn mini_middle_schema_version() -> i32 { return 4; }
+pub fn mini_middle_schema_version() -> i32 { return 5; }
+
+// A binding with a block-producing initializer (`fn` or `module`) has the
+// block juxtaposed after its head.  A simple binding (`require`, local value)
+// is already its own head.
+pub fn mini_middle_binding_head(item: i32) -> i32 {
+    if mini_syntax_is_juxt(item) == 1 {
+        if mini_syntax_kind(mini_syntax_right(item)) == 4 {
+            return mini_syntax_left(item);
+        }
+    }
+    return item;
+}
+
+pub fn mini_middle_binding_assignment(item: i32) -> i32 {
+    let head: i32 = mini_middle_binding_head(item);
+    if mini_syntax_is_juxt(head) != 1 { return 0; }
+    if mini_syntax_is_atom_text(mini_syntax_left(head), "let") != 1 {
+        return 0;
+    }
+    let tail: i32 = mini_syntax_right(head);
+    if mini_syntax_is_infix(tail, "->") == 1 {
+        if mini_syntax_is_infix(mini_syntax_left(tail), "=") == 1 {
+            return mini_syntax_left(tail);
+        }
+        return 0;
+    }
+    if mini_syntax_is_infix(tail, "=") == 1 { return tail; }
+    return 0;
+}
+
+pub fn mini_middle_is_binding(item: i32) -> i32 {
+    if mini_middle_binding_assignment(item) != 0 { return 1; }
+    return 0;
+}
+
+pub fn mini_middle_binding_name_node(item: i32) -> i32 {
+    let assignment: i32 = mini_middle_binding_assignment(item);
+    if assignment == 0 { return 0; }
+    let declared: i32 = mini_syntax_left(assignment);
+    if mini_syntax_is_infix(declared, ":") == 1 {
+        return mini_syntax_left(declared);
+    }
+    return declared;
+}
+
+pub fn mini_middle_binding_name(item: i32) -> addr {
+    return mini_syntax_text(mini_middle_binding_name_node(item));
+}
+
+pub fn mini_middle_binding_expected(item: i32) -> i32 {
+    let assignment: i32 = mini_middle_binding_assignment(item);
+    if assignment == 0 { return 0; }
+    let declared: i32 = mini_syntax_left(assignment);
+    if mini_syntax_is_infix(declared, ":") == 1 {
+        return mini_syntax_right(declared);
+    }
+    return 0;
+}
+
+pub fn mini_middle_binding_initializer(item: i32) -> i32 {
+    let assignment: i32 = mini_middle_binding_assignment(item);
+    if assignment == 0 { return 0; }
+    return mini_syntax_right(assignment);
+}
+
+pub fn mini_middle_binding_body(item: i32) -> i32 {
+    if mini_syntax_is_juxt(item) != 1 { return 0; }
+    if mini_syntax_kind(mini_syntax_right(item)) != 4 { return 0; }
+    return mini_syntax_right(item);
+}
+
+pub fn mini_middle_binding_expected_is(item: i32, expected: addr) -> i32 {
+    let shape: i32 = mini_middle_binding_expected(item);
+    if shape == 0 { return 0; }
+    return mini_syntax_is_atom_text(shape, expected);
+}
+
+pub fn mini_middle_binding_initializer_is(item: i32, constructor: addr) -> i32 {
+    let initializer: i32 = mini_middle_binding_initializer(item);
+    if initializer == 0 { return 0; }
+    return mini_syntax_is_atom_text(initializer, constructor);
+}
+
+pub fn mini_middle_is_module_binding(item: i32) -> i32 {
+    if mini_middle_is_binding(item) != 1 { return 0; }
+    if mini_middle_binding_expected_is(item, "Module") != 1 { return 0; }
+    if mini_middle_binding_initializer_is(item, "module") != 1 { return 0; }
+    if mini_middle_binding_body(item) == 0 { return 0; }
+    return 1;
+}
+
+pub fn mini_middle_is_require_binding(item: i32) -> i32 {
+    if mini_middle_is_binding(item) != 1 { return 0; }
+    if mini_middle_binding_expected_is(item, "Module") != 1 { return 0; }
+    let initializer: i32 = mini_middle_binding_initializer(item);
+    if mini_syntax_is_call(initializer) != 1 { return 0; }
+    if mini_syntax_text_equal(mini_syntax_call_name(initializer), "require") != 1 {
+        return 0;
+    }
+    return 1;
+}
+
+pub fn mini_middle_is_export_attribute(item: i32) -> i32 {
+    if mini_syntax_is_juxt(item) != 1 { return 0; }
+    if mini_syntax_is_atom_text(mini_syntax_left(item), "@") != 1 { return 0; }
+    return mini_syntax_is_atom_text(mini_syntax_right(item), "export");
+}
+
+pub fn mini_middle_is_foreign_attribute(item: i32) -> i32 {
+    if mini_syntax_is_juxt(item) != 1 { return 0; }
+    if mini_syntax_is_atom_text(mini_syntax_left(item), "@") != 1 {
+        return 0;
+    }
+    let attribute: i32 = mini_syntax_right(item);
+    if mini_syntax_is_call(attribute) != 1 { return 0; }
+    return mini_syntax_text_equal(
+        mini_syntax_call_name(attribute), "foreign");
+}
+
+pub fn mini_middle_is_named_call_attribute(item: i32, name: addr) -> i32 {
+    if mini_syntax_is_juxt(item) != 1 { return 0; }
+    if mini_syntax_is_atom_text(mini_syntax_left(item), "@") != 1 {
+        return 0;
+    }
+    let attribute: i32 = mini_syntax_right(item);
+    if mini_syntax_is_call(attribute) != 1 { return 0; }
+    return mini_syntax_text_equal(mini_syntax_call_name(attribute), name);
+}
+
+fn mini_middle_attribute_first_arg_text(item: i32) -> addr {
+    return mini_syntax_text(
+        mini_syntax_call_first_arg(mini_syntax_right(item)));
+}
+
+fn mini_middle_find_attribute_arg(item: i32, name: addr) -> addr {
+    if item == 0 { return ""; }
+    if mini_middle_is_named_call_attribute(item, name) == 1 {
+        return mini_middle_attribute_first_arg_text(item);
+    }
+    return mini_middle_find_attribute_arg(mini_middle_next_item(item), name);
+}
+
+pub fn mini_middle_interface_type_name(root: i32) -> addr {
+    return mini_middle_find_attribute_arg(
+        mini_middle_first_item(root), "interface");
+}
+
+pub fn mini_middle_interface_impl_prefix(root: i32) -> addr {
+    return mini_middle_find_attribute_arg(
+        mini_middle_first_item(root), "interface_impl");
+}
+
+fn mini_middle_foreign_attribute_link(item: i32) -> addr {
+    let attribute: i32 = mini_syntax_right(item);
+    let language: i32 = mini_syntax_call_first_arg(attribute);
+    let option: i32 = mini_syntax_arg_next(language);
+    if mini_syntax_is_infix(option, "=") != 1 { return ""; }
+    if mini_syntax_is_atom_text(
+        mini_syntax_left(option), "link_name") != 1 { return ""; }
+    let value: i32 = mini_syntax_right(option);
+    if mini_syntax_is_string_atom(value) != 1 { return ""; }
+    return mini_syntax_string_value(value);
+}
+
+fn mini_middle_foreign_link_scan(
+    item: i32, declaration: i32, pending: addr) -> addr {
+    if item == 0 { return ""; }
+    if item == declaration { return pending; }
+    if mini_middle_is_foreign_attribute(item) == 1 {
+        return mini_middle_foreign_link_scan(
+            mini_middle_next_item(item), declaration,
+            mini_middle_foreign_attribute_link(item));
+    }
+    return mini_middle_foreign_link_scan(
+        mini_middle_next_item(item), declaration, "");
+}
+
+pub fn mini_middle_foreign_link_name(
+    root: i32, declaration: i32) -> addr {
+    return mini_middle_foreign_link_scan(
+        mini_middle_first_item(root), declaration, "");
+}
+
+fn mini_middle_foreign_link_precedes_scan(
+    item: i32, declaration: i32, link: addr) -> i32 {
+    if item == 0 { return 0; }
+    if item == declaration { return 0; }
+    if mini_middle_is_foreign_attribute(item) == 1 {
+        // The attribute immediately preceding `declaration` belongs to that
+        // declaration and must not be mistaken for an earlier duplicate.
+        if mini_middle_next_item(item) == declaration { return 0; }
+        if mini_syntax_text_equal(
+            mini_middle_foreign_attribute_link(item), link) == 1 {
+            return 1;
+        }
+    }
+    return mini_middle_foreign_link_precedes_scan(
+        mini_middle_next_item(item), declaration, link);
+}
+
+pub fn mini_middle_foreign_link_precedes(
+    root: i32, declaration: i32, link: addr) -> i32 {
+    return mini_middle_foreign_link_precedes_scan(
+        mini_middle_first_item(root), declaration, link);
+}
+
+pub fn mini_middle_is_procedure_definition(item: i32) -> i32 {
+    if mini_syntax_function_style(item) == 1 { return 1; }
+    if mini_syntax_function_style(item) == 2 { return 1; }
+    if mini_syntax_function_style(item) == 3 { return 1; }
+    return 0;
+}
 
 // Top-level item tags.
-// 1=attribute, 2=import, 3=procedure declaration, 4=procedure definition,
+// 1=attribute, 2=legacy import sugar, 3=procedure declaration,
+// 4=legacy direct procedure definition, 5=canonical let binding,
 // 0=unsupported.
 pub fn mini_middle_item_tag(item: i32) -> i32 {
     if mini_syntax_is_juxt(item) != 1 { return 0; }
     if mini_syntax_is_atom_text(mini_syntax_left(item), "@") == 1 { return 1; }
     if mini_syntax_is_atom_text(mini_syntax_left(item), "import") == 1 { return 2; }
     if mini_syntax_function_style(item) == 4 { return 3; }
+    if mini_middle_is_binding(item) == 1 { return 5; }
     if mini_syntax_function_style(item) != 0 { return 4; }
     return 0;
+}
+
+fn mini_middle_is_std_io_import(item: i32) -> i32 {
+    if mini_middle_item_tag(item) != 2 { return 0; }
+    let path: i32 = mini_syntax_right(item);
+    if mini_syntax_is_infix(path, "::") != 1 { return 0; }
+    if mini_syntax_is_atom_text(mini_syntax_left(path), "std") != 1 {
+        return 0;
+    }
+    return mini_syntax_is_atom_text(mini_syntax_right(path), "io");
+}
+
+fn mini_middle_has_std_io_import_from(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    if mini_middle_is_std_io_import(item) == 1 { return 1; }
+    return mini_middle_has_std_io_import_from(mini_middle_next_item(item));
+}
+
+pub fn mini_middle_has_std_io_import(root: i32) -> i32 {
+    return mini_middle_has_std_io_import_from(mini_middle_first_item(root));
 }
 
 pub fn mini_middle_first_item(root: i32) -> i32 {
@@ -33,6 +268,9 @@ pub fn mini_middle_first_callable_from(item: i32) -> i32 {
     let tag: i32 = mini_middle_item_tag(item);
     if tag == 3 { return item; }
     if tag == 4 { return item; }
+    if tag == 5 {
+        if mini_middle_is_procedure_definition(item) == 1 { return item; }
+    }
     return mini_middle_first_callable_from(mini_middle_next_item(item));
 }
 
@@ -46,7 +284,7 @@ pub fn mini_middle_next_callable(item: i32) -> i32 {
 
 pub fn mini_middle_first_definition_from(item: i32) -> i32 {
     if item == 0 { return 0; }
-    if mini_middle_item_tag(item) == 4 { return item; }
+    if mini_middle_is_procedure_definition(item) == 1 { return item; }
     return mini_middle_first_definition_from(mini_middle_next_item(item));
 }
 

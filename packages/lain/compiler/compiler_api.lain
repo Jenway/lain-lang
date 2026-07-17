@@ -1,0 +1,212 @@
+// Stable artifact ABI for compiler requests and results.
+// C owns only opaque physical slots; Lain owns their schema and policy.
+
+import packages::lain::compiler::mini_syntax;
+import packages::lain::compiler::mini_diagnostic;
+import packages::lain::compiler::compiler_context;
+import packages::lain::compiler::frontend_pipeline;
+import packages::lain::compiler::l1_unit_builder;
+import packages::lain::compiler::mini_workspace;
+import packages::lain::compiler::mini_module;
+import packages::lain::compiler::source_workspace;
+
+@foreign(c, link_name = "compiler.storage-new!")
+fn compiler_api_storage_new(kind: i32) -> i32;
+@foreign(c, link_name = "compiler.storage-reserve!")
+fn compiler_api_storage_reserve(storage: i32, capacity: i32) -> i32;
+@foreign(c, link_name = "compiler.storage-set-i32!")
+fn compiler_api_storage_set_i32(storage: i32, index: i32, value: i32) -> i32;
+@foreign(c, link_name = "compiler.storage-get-i32!")
+fn compiler_api_storage_get_i32(storage: i32, index: i32) -> i32;
+@foreign(c, link_name = "compiler.storage-set-string!")
+fn compiler_api_storage_set_string(storage: i32, index: i32, value: addr) -> i32;
+@foreign(c, link_name = "compiler.storage-get-string!")
+fn compiler_api_storage_get_string(storage: i32, index: i32) -> addr;
+@foreign(c, link_name = "compiler.storage-destroy!")
+fn compiler_api_storage_destroy(storage: i32) -> i32;
+@foreign(c, link_name = "core.string-length!")
+fn compiler_api_string_length(value: addr) -> i32;
+
+// CompileRequest slots: mode, path storage, source storage, source count.
+fn compiler_request_mode(request: i32) -> i32 {
+    return compiler_api_storage_get_i32(request, 0);
+}
+fn compiler_request_paths(request: i32) -> i32 {
+    return compiler_api_storage_get_i32(request, 1);
+}
+fn compiler_request_sources(request: i32) -> i32 {
+    return compiler_api_storage_get_i32(request, 2);
+}
+fn compiler_request_count(request: i32) -> i32 {
+    return compiler_api_storage_get_i32(request, 3);
+}
+
+// CompileResult integer slots: outcome, code, start, end, module count,
+// owned string storage, diagnostic count.  String slots: L1, message, path.
+fn compiler_result_make(
+    outcome: i32, l1_text: addr, diagnostic_code: i32,
+    diagnostic_message: addr, diagnostic_path: addr,
+    diagnostic_start: i32, diagnostic_end: i32,
+    module_count: i32) -> i32 {
+    let result: i32 = compiler_api_storage_new(1);
+    let strings: i32 = compiler_api_storage_new(2);
+    if result == 0 {
+        if strings != 0 {
+            let destroyed_strings: i32 = compiler_api_storage_destroy(strings);
+        }
+        return 0;
+    }
+    if strings == 0 {
+        let destroyed_result: i32 = compiler_api_storage_destroy(result);
+        return 0;
+    }
+    if compiler_api_storage_reserve(result, 7) == 0 {
+        let destroyed_strings: i32 = compiler_api_storage_destroy(strings);
+        let destroyed_result: i32 = compiler_api_storage_destroy(result);
+        return 0;
+    }
+    if compiler_api_storage_reserve(strings, 3) == 0 {
+        let destroyed_strings: i32 = compiler_api_storage_destroy(strings);
+        let destroyed_result: i32 = compiler_api_storage_destroy(result);
+        return 0;
+    }
+    let set_outcome: i32 = compiler_api_storage_set_i32(result, 0, outcome);
+    let set_code: i32 = compiler_api_storage_set_i32(result, 1, diagnostic_code);
+    let set_start: i32 = compiler_api_storage_set_i32(result, 2, diagnostic_start);
+    let set_end: i32 = compiler_api_storage_set_i32(result, 3, diagnostic_end);
+    let set_modules: i32 = compiler_api_storage_set_i32(result, 4, module_count);
+    let set_strings: i32 = compiler_api_storage_set_i32(result, 5, strings);
+    let set_diagnostic_count: i32 = compiler_api_storage_set_i32(
+        result, 6, compiler_api_diagnostic_count(diagnostic_code));
+    let set_l1: i32 = compiler_api_storage_set_string(strings, 0, l1_text);
+    let set_message: i32 = compiler_api_storage_set_string(
+        strings, 1, diagnostic_message);
+    let set_path: i32 = compiler_api_storage_set_string(
+        strings, 2, diagnostic_path);
+    return result;
+}
+
+fn compiler_api_diagnostic_count(code: i32) -> i32 {
+    if code == 0 { return 0; }
+    return 1;
+}
+
+fn compiler_compile_single(request: i32) -> i32 {
+    let paths: i32 = compiler_request_paths(request);
+    let sources: i32 = compiler_request_sources(request);
+    let source: addr = compiler_api_storage_get_string(sources, 0);
+    let path: addr = compiler_api_storage_get_string(paths, 0);
+    let length: i32 = compiler_api_string_length(source);
+    let root: i32 = mini_syntax_parse(source, length);
+    let compiled: CompileResult = frontend_compile(root, length);
+    let module_count: i32 = compile_result_module_count(compiled);
+    if compile_result_ok(compiled) == 1 {
+        let unit: i32 = compile_result_unit_or_zero(compiled);
+        let text: addr = l1_unit_builder_debug_text(unit);
+        let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+        let result: i32 = compiler_result_make(
+            1, text, 0, "", path, 0, 0, module_count);
+        let destroyed_compile: i32 = compile_result_destroy(compiled);
+        return result;
+    }
+    let code: i32 = compile_result_diagnostic_code(compiled, 0);
+    let message: addr = compile_result_diagnostic_message(compiled, 0);
+    let start: i32 = compile_result_diagnostic_start(compiled, 0);
+    let end: i32 = compile_result_diagnostic_end(compiled, 0);
+    let result: i32 = compiler_result_make(
+        0, "", code, message, path, start, end, module_count);
+    let destroyed_compile: i32 = compile_result_destroy(compiled);
+    return result;
+}
+
+fn compiler_compile_workspace(request: i32) -> i32 {
+    let paths: i32 = compiler_request_paths(request);
+    let sources: i32 = compiler_request_sources(request);
+    let count: i32 = compiler_request_count(request);
+    let input: WorkspaceInput = workspace_input_new(paths, sources, count);
+    let workspace: ModuleWorkspace = workspace_input_module_workspace(input);
+    if input.diagnostic != 0 {
+        let code: i32 = input.diagnostic;
+        let path: addr = workspace_input_diagnostic_path(input);
+        let result: i32 = compiler_result_make(
+            0, "", code, mini_diagnostic_message(code), path,
+            0, 0, workspace_input_module_count(input));
+        let destroyed_input: i32 = workspace_input_destroy(input);
+        return result;
+    }
+    let code: i32 = mini_workspace_validate_indexed(workspace);
+    if code != 0 {
+        let path: addr = workspace_input_diagnostic_path(input);
+        let result: i32 = compiler_result_make(
+            0, "", code, mini_diagnostic_message(code), path,
+            0, 0, workspace_input_module_count(input));
+        let destroyed_input: i32 = workspace_input_destroy(input);
+        return result;
+    }
+    let unit: i32 = mini_workspace_compile_indexed(workspace);
+    if unit == 0 {
+        let result: i32 = compiler_result_make(
+            0, "", 8002, mini_diagnostic_message(8002), "",
+            0, 0, workspace_input_module_count(input));
+        let destroyed_input: i32 = workspace_input_destroy(input);
+        return result;
+    }
+    let text: addr = l1_unit_builder_debug_text(unit);
+    let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+    let result: i32 = compiler_result_make(
+        1, text, 0, "", "", 0, 0,
+        workspace_input_module_count(input));
+    let destroyed_input: i32 = workspace_input_destroy(input);
+    return result;
+}
+
+pub fn compiler_compile(request: i32) -> i32 {
+    let mode: i32 = compiler_request_mode(request);
+    let count: i32 = compiler_request_count(request);
+    if count == 0 {
+        return compiler_result_make(
+            0, "", 4300, mini_diagnostic_message(4300), "", 0, 0, 0);
+    }
+    if mode == 1 { return compiler_compile_single(request); }
+    if mode == 2 { return compiler_compile_workspace(request); }
+    return compiler_result_make(
+        0, "", 4400, mini_diagnostic_message(4400), "", 0, 0, 0);
+}
+
+pub fn compiler_result_outcome(result: i32) -> i32 {
+    return compiler_api_storage_get_i32(result, 0);
+}
+pub fn compiler_result_diagnostic_code(result: i32) -> i32 {
+    return compiler_api_storage_get_i32(result, 1);
+}
+pub fn compiler_result_diagnostic_start(result: i32) -> i32 {
+    return compiler_api_storage_get_i32(result, 2);
+}
+pub fn compiler_result_diagnostic_end(result: i32) -> i32 {
+    return compiler_api_storage_get_i32(result, 3);
+}
+pub fn compiler_result_module_count(result: i32) -> i32 {
+    return compiler_api_storage_get_i32(result, 4);
+}
+pub fn compiler_result_diagnostic_count(result: i32) -> i32 {
+    return compiler_api_storage_get_i32(result, 6);
+}
+fn compiler_result_strings(result: i32) -> i32 {
+    return compiler_api_storage_get_i32(result, 5);
+}
+pub fn compiler_result_l1_text(result: i32) -> addr {
+    return compiler_api_storage_get_string(compiler_result_strings(result), 0);
+}
+pub fn compiler_result_diagnostic_message(result: i32) -> addr {
+    return compiler_api_storage_get_string(compiler_result_strings(result), 1);
+}
+pub fn compiler_result_diagnostic_path(result: i32) -> addr {
+    return compiler_api_storage_get_string(compiler_result_strings(result), 2);
+}
+pub fn compiler_result_destroy(result: i32) -> i32 {
+    let strings: i32 = compiler_result_strings(result);
+    let destroyed_strings: i32 = compiler_api_storage_destroy(strings);
+    return compiler_api_storage_destroy(result);
+}
+
+pub fn compiler_api_schema_version() -> i32 { return 1; }

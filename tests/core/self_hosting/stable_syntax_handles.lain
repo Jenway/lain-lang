@@ -1,0 +1,77 @@
+// M15 contract: syntax nodes are local to independently-owned parse units.
+// Destroying or reparsing one unit must not invalidate any other unit.
+@foreign(c, link_name = "ast.store-new!")
+fn store_new() -> i32;
+@foreign(c, link_name = "ast.store-destroy!")
+fn store_destroy(store: i32) -> i32;
+@foreign(c, link_name = "ast.unit-parse!")
+fn unit_parse(store: i32, source: addr, length: i32) -> i32;
+@foreign(c, link_name = "ast.unit-destroy!")
+fn unit_destroy(store: i32, unit: i32) -> i32;
+@foreign(c, link_name = "ast.unit-root")
+fn unit_root(store: i32, unit: i32) -> i32;
+@foreign(c, link_name = "ast.node-kind")
+fn node_kind(node: i32) -> i32;
+@foreign(c, link_name = "ast.node-text")
+fn node_text(node: i32) -> addr;
+@foreign(c, link_name = "ast.node-left")
+fn node_left(node: i32) -> i32;
+@foreign(c, link_name = "ast.node-right")
+fn node_right(node: i32) -> i32;
+@foreign(c, link_name = "ast.node-op")
+fn node_op(node: i32) -> i32;
+@foreign(c, link_name = "ast.parse!")
+fn legacy_parse(source: addr, length: i32) -> i32;
+@foreign(c, link_name = "core.string-equal!")
+fn string_equal(left: addr, right: addr) -> i32;
+
+fn expression(store: i32, unit: i32) -> i32 {
+    return node_left(unit_root(store, unit));
+}
+
+fn main() -> i32 {
+    let first_store: i32 = store_new();
+    let second_store: i32 = store_new();
+    if first_store == 0 { return 1; }
+    if second_store == 0 { return 2; }
+
+    let first: i32 = unit_parse(first_store, "40 + 2", 6);
+    let second: i32 = unit_parse(first_store, "7 + 6", 5);
+    let isolated: i32 = unit_parse(second_store, "20 + 22", 7);
+    if first == 0 { return 3; }
+    if second == 0 { return 4; }
+    if isolated == 0 { return 5; }
+
+    let first_expr: i32 = expression(first_store, first);
+    let second_expr: i32 = expression(first_store, second);
+    let isolated_expr: i32 = expression(second_store, isolated);
+    if string_equal(node_text(node_left(first_expr)), "40") != 1 {
+        return 6;
+    }
+    if string_equal(node_text(node_op(second_expr)), "+") != 1 {
+        return 7;
+    }
+    if string_equal(node_text(node_right(isolated_expr)), "22") != 1 {
+        return 8;
+    }
+
+    // A legacy parse replaces only the legacy arena.
+    if legacy_parse("1", 1) == 0 { return 9; }
+    if node_kind(second_expr) != 1 { return 10; }
+
+    if unit_destroy(first_store, first) != 1 { return 11; }
+    if unit_root(first_store, first) != 0 { return 12; }
+    if node_kind(first_expr) != -1 { return 13; }
+    if node_kind(second_expr) != 1 { return 14; }
+    if node_kind(isolated_expr) != 1 { return 15; }
+
+    // Unit ids cannot be used through a store that does not own them.
+    if unit_root(first_store, isolated) != 0 { return 16; }
+    if unit_root(second_store, second) != 0 { return 17; }
+
+    if store_destroy(first_store) != 1 { return 18; }
+    if node_kind(second_expr) != -1 { return 19; }
+    if node_kind(isolated_expr) != 1 { return 20; }
+    if store_destroy(second_store) != 1 { return 21; }
+    return 42;
+}

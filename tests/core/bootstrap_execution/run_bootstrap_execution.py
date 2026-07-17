@@ -71,7 +71,9 @@ def main() -> int:
         print(f"FAIL building LAIN-IR interpreter: {detail}")
         return 1
 
-    emitted = run([str(compiler), "--emit-l1", str(COMPONENT), str(OUT_L1)])
+    emitted = run([
+        str(compiler), "--bootstrap-emit-l1", str(COMPONENT), str(OUT_L1)
+    ])
     if emitted.returncode != 0:
         print(f"FAIL compiling Lain component: {(emitted.stderr or emitted.stdout).strip()}")
         return 1

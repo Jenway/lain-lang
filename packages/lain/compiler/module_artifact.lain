@@ -1,0 +1,321 @@
+// Detached, in-memory module summaries.
+//
+// Every string is copied into compiler-owned physical storage by M11StringVec.
+// No RawAst node or SyntaxUnit handle escapes this file's build phase, so the
+// artifact remains queryable after its source workspace has been destroyed.
+
+import packages::lain::compiler::compiler_context;
+import packages::lain::compiler::mini_module;
+import packages::lain::compiler::mini_syntax;
+
+pub struct ModuleArtifact {
+    module_names: M11StringVec,
+    source_indices: M11I32Vec,
+    dependency_starts: M11I32Vec,
+    dependency_counts: M11I32Vec,
+    dependency_names: M11StringVec,
+    export_starts: M11I32Vec,
+    export_counts: M11I32Vec,
+    export_names: M11StringVec,
+    export_kinds: M11I32Vec,
+    export_param_counts: M11I32Vec,
+    export_return_types: M11StringVec,
+    ok: i32,
+}
+
+fn module_artifact_string_vec_len(vec: M11StringVec) -> i32 {
+    return vec.len;
+}
+
+fn module_artifact_string_vec_ok(vec: M11StringVec) -> i32 {
+    return vec.ok;
+}
+
+fn module_artifact_i32_vec_ok(vec: M11I32Vec) -> i32 {
+    return vec.ok;
+}
+
+fn module_artifact_export_vectors_ok(
+    names: M11StringVec, kinds: M11I32Vec,
+    params: M11I32Vec, returns: M11StringVec) -> i32 {
+    if names.ok == 0 { return 0; }
+    if kinds.ok == 0 { return 0; }
+    if params.ok == 0 { return 0; }
+    return returns.ok;
+}
+
+fn module_artifact_new() -> ModuleArtifact {
+    return ModuleArtifact {
+        module_names: m11_string_vec_new(),
+        source_indices: m11_i32_vec_new(),
+        dependency_starts: m11_i32_vec_new(),
+        dependency_counts: m11_i32_vec_new(),
+        dependency_names: m11_string_vec_new(),
+        export_starts: m11_i32_vec_new(),
+        export_counts: m11_i32_vec_new(),
+        export_names: m11_string_vec_new(),
+        export_kinds: m11_i32_vec_new(),
+        export_param_counts: m11_i32_vec_new(),
+        export_return_types: m11_string_vec_new(),
+        ok: 1,
+    };
+}
+
+fn module_artifact_storage_ok(artifact: ModuleArtifact) -> i32 {
+    if module_artifact_string_vec_ok(artifact.module_names) == 0 { return 0; }
+    if module_artifact_i32_vec_ok(artifact.source_indices) == 0 { return 0; }
+    if module_artifact_i32_vec_ok(artifact.dependency_starts) == 0 { return 0; }
+    if module_artifact_i32_vec_ok(artifact.dependency_counts) == 0 { return 0; }
+    if module_artifact_string_vec_ok(artifact.dependency_names) == 0 { return 0; }
+    if module_artifact_i32_vec_ok(artifact.export_starts) == 0 { return 0; }
+    if module_artifact_i32_vec_ok(artifact.export_counts) == 0 { return 0; }
+    if module_artifact_string_vec_ok(artifact.export_names) == 0 { return 0; }
+    if module_artifact_i32_vec_ok(artifact.export_kinds) == 0 { return 0; }
+    if module_artifact_i32_vec_ok(artifact.export_param_counts) == 0 { return 0; }
+    if module_artifact_string_vec_ok(artifact.export_return_types) == 0 { return 0; }
+    return artifact.ok;
+}
+
+fn module_artifact_append_dependencies(
+    artifact: ModuleArtifact, module: i32,
+    index: i32, count: i32) -> ModuleArtifact {
+    if index == count { return artifact; }
+    let names: M11StringVec = m11_string_vec_push(
+        artifact.dependency_names,
+        mini_module_summary_dependency_name_at(module, index));
+    return module_artifact_append_dependencies(
+        ModuleArtifact {
+            module_names: artifact.module_names,
+            source_indices: artifact.source_indices,
+            dependency_starts: artifact.dependency_starts,
+            dependency_counts: artifact.dependency_counts,
+            dependency_names: names,
+            export_starts: artifact.export_starts,
+            export_counts: artifact.export_counts,
+            export_names: artifact.export_names,
+            export_kinds: artifact.export_kinds,
+            export_param_counts: artifact.export_param_counts,
+            export_return_types: artifact.export_return_types,
+            ok: names.ok,
+        },
+        module, index + 1, count);
+}
+
+fn module_artifact_append_exports(
+    artifact: ModuleArtifact, module: i32,
+    index: i32, count: i32) -> ModuleArtifact {
+    if index == count { return artifact; }
+    let names: M11StringVec = m11_string_vec_push(
+        artifact.export_names,
+        mini_module_summary_export_name_at(module, index));
+    let kinds: M11I32Vec = m11_i32_vec_push(
+        artifact.export_kinds,
+        mini_module_summary_export_kind_at(module, index));
+    let params: M11I32Vec = m11_i32_vec_push(
+        artifact.export_param_counts,
+        mini_module_summary_export_param_count_at(module, index));
+    let returns: M11StringVec = m11_string_vec_push(
+        artifact.export_return_types,
+        mini_module_summary_export_return_type_at(module, index));
+    let ok: i32 = module_artifact_export_vectors_ok(
+        names, kinds, params, returns);
+    return module_artifact_append_exports(
+        ModuleArtifact {
+            module_names: artifact.module_names,
+            source_indices: artifact.source_indices,
+            dependency_starts: artifact.dependency_starts,
+            dependency_counts: artifact.dependency_counts,
+            dependency_names: artifact.dependency_names,
+            export_starts: artifact.export_starts,
+            export_counts: artifact.export_counts,
+            export_names: names,
+            export_kinds: kinds,
+            export_param_counts: params,
+            export_return_types: returns,
+            ok: ok,
+        },
+        module, index + 1, count);
+}
+
+fn module_artifact_build_from(
+    artifact: ModuleArtifact, workspace: ModuleWorkspace,
+    index: i32) -> ModuleArtifact {
+    if artifact.ok == 0 { return artifact; }
+    if index == module_workspace_count(workspace) { return artifact; }
+    let module: i32 = module_workspace_module_at(workspace, index);
+    let dependency_start: i32 = module_artifact_string_vec_len(
+        artifact.dependency_names);
+    let dependency_count: i32 = mini_module_summary_dependency_count(module);
+    let with_dependencies: ModuleArtifact = module_artifact_append_dependencies(
+        artifact, module, 0, dependency_count);
+    let export_start: i32 = module_artifact_string_vec_len(
+        with_dependencies.export_names);
+    let export_count: i32 = mini_module_summary_export_count(module);
+    let with_exports: ModuleArtifact = module_artifact_append_exports(
+        with_dependencies, module, 0, export_count);
+    let names: M11StringVec = m11_string_vec_push(
+        with_exports.module_names, mini_module_summary_name(module));
+    let sources: M11I32Vec = m11_i32_vec_push(
+        with_exports.source_indices,
+        module_workspace_source_index_at(workspace, index));
+    let dependency_starts: M11I32Vec = m11_i32_vec_push(
+        with_exports.dependency_starts, dependency_start);
+    let dependency_counts: M11I32Vec = m11_i32_vec_push(
+        with_exports.dependency_counts, dependency_count);
+    let export_starts: M11I32Vec = m11_i32_vec_push(
+        with_exports.export_starts, export_start);
+    let export_counts: M11I32Vec = m11_i32_vec_push(
+        with_exports.export_counts, export_count);
+    let next: ModuleArtifact = ModuleArtifact {
+        module_names: names,
+        source_indices: sources,
+        dependency_starts: dependency_starts,
+        dependency_counts: dependency_counts,
+        dependency_names: with_exports.dependency_names,
+        export_starts: export_starts,
+        export_counts: export_counts,
+        export_names: with_exports.export_names,
+        export_kinds: with_exports.export_kinds,
+        export_param_counts: with_exports.export_param_counts,
+        export_return_types: with_exports.export_return_types,
+        ok: with_exports.ok,
+    };
+    return module_artifact_build_from(next, workspace, index + 1);
+}
+
+pub fn module_artifact_build(workspace: ModuleWorkspace) -> ModuleArtifact {
+    let artifact: ModuleArtifact = module_artifact_build_from(
+        module_artifact_new(), workspace, 0);
+    return ModuleArtifact {
+        module_names: artifact.module_names,
+        source_indices: artifact.source_indices,
+        dependency_starts: artifact.dependency_starts,
+        dependency_counts: artifact.dependency_counts,
+        dependency_names: artifact.dependency_names,
+        export_starts: artifact.export_starts,
+        export_counts: artifact.export_counts,
+        export_names: artifact.export_names,
+        export_kinds: artifact.export_kinds,
+        export_param_counts: artifact.export_param_counts,
+        export_return_types: artifact.export_return_types,
+        ok: module_artifact_storage_ok(artifact),
+    };
+}
+
+pub fn module_artifact_ok(artifact: ModuleArtifact) -> i32 { return artifact.ok; }
+pub fn module_artifact_module_count(artifact: ModuleArtifact) -> i32 {
+    return module_artifact_string_vec_len(artifact.module_names);
+}
+pub fn module_artifact_module_name(
+    artifact: ModuleArtifact, module_index: i32) -> addr {
+    return m11_string_vec_get(artifact.module_names, module_index);
+}
+pub fn module_artifact_source_index(
+    artifact: ModuleArtifact, module_index: i32) -> i32 {
+    return m11_i32_vec_get(artifact.source_indices, module_index);
+}
+pub fn module_artifact_dependency_count(
+    artifact: ModuleArtifact, module_index: i32) -> i32 {
+    return m11_i32_vec_get(artifact.dependency_counts, module_index);
+}
+pub fn module_artifact_dependency_name(
+    artifact: ModuleArtifact, module_index: i32, dependency_index: i32) -> addr {
+    let start: i32 = m11_i32_vec_get(
+        artifact.dependency_starts, module_index);
+    return m11_string_vec_get(
+        artifact.dependency_names, start + dependency_index);
+}
+pub fn module_artifact_export_count(
+    artifact: ModuleArtifact, module_index: i32) -> i32 {
+    return m11_i32_vec_get(artifact.export_counts, module_index);
+}
+fn module_artifact_export_index(
+    artifact: ModuleArtifact, module_index: i32, export_index: i32) -> i32 {
+    return m11_i32_vec_get(artifact.export_starts, module_index) + export_index;
+}
+pub fn module_artifact_export_name(
+    artifact: ModuleArtifact, module_index: i32, export_index: i32) -> addr {
+    return m11_string_vec_get(
+        artifact.export_names,
+        module_artifact_export_index(artifact, module_index, export_index));
+}
+pub fn module_artifact_export_kind(
+    artifact: ModuleArtifact, module_index: i32, export_index: i32) -> i32 {
+    return m11_i32_vec_get(
+        artifact.export_kinds,
+        module_artifact_export_index(artifact, module_index, export_index));
+}
+pub fn module_artifact_export_param_count(
+    artifact: ModuleArtifact, module_index: i32, export_index: i32) -> i32 {
+    return m11_i32_vec_get(
+        artifact.export_param_counts,
+        module_artifact_export_index(artifact, module_index, export_index));
+}
+pub fn module_artifact_export_return_type(
+    artifact: ModuleArtifact, module_index: i32, export_index: i32) -> addr {
+    return m11_string_vec_get(
+        artifact.export_return_types,
+        module_artifact_export_index(artifact, module_index, export_index));
+}
+
+pub fn module_artifact_destroy(artifact: ModuleArtifact) -> i32 {
+    let a: i32 = m11_string_vec_destroy(artifact.module_names);
+    let b: i32 = m11_i32_vec_destroy(artifact.source_indices);
+    let c: i32 = m11_i32_vec_destroy(artifact.dependency_starts);
+    let d: i32 = m11_i32_vec_destroy(artifact.dependency_counts);
+    let e: i32 = m11_string_vec_destroy(artifact.dependency_names);
+    let f: i32 = m11_i32_vec_destroy(artifact.export_starts);
+    let g: i32 = m11_i32_vec_destroy(artifact.export_counts);
+    let h: i32 = m11_string_vec_destroy(artifact.export_names);
+    let i: i32 = m11_i32_vec_destroy(artifact.export_kinds);
+    let j: i32 = m11_i32_vec_destroy(artifact.export_param_counts);
+    let k: i32 = m11_string_vec_destroy(artifact.export_return_types);
+    if a == 0 { return 0; }
+    if b == 0 { return 0; }
+    if c == 0 { return 0; }
+    if d == 0 { return 0; }
+    if e == 0 { return 0; }
+    if f == 0 { return 0; }
+    if g == 0 { return 0; }
+    if h == 0 { return 0; }
+    if i == 0 { return 0; }
+    if j == 0 { return 0; }
+    return k;
+}
+
+pub fn module_artifact_schema_version() -> i32 { return 1; }
+
+// Focused executable contract used by the self-hosting test.  Queries happen
+// only after both source-owned containers have been destroyed.
+pub fn module_artifact_detached_probe(source: addr, length: i32) -> i32 {
+    let store: i32 = mini_syntax_store_new();
+    let unit: i32 = mini_syntax_unit_parse(store, source, length);
+    let root: i32 = mini_syntax_unit_root(store, unit);
+    let workspace: ModuleWorkspace = module_workspace_from_root(root);
+    if workspace.diagnostic != 0 { return workspace.diagnostic; }
+    let artifact: ModuleArtifact = module_artifact_build(workspace);
+    if module_artifact_ok(artifact) != 1 { return 1; }
+    if module_workspace_destroy(workspace) != 1 { return 2; }
+    if mini_syntax_unit_destroy(store, unit) != 1 { return 20; }
+    if mini_syntax_store_destroy(store) != 1 { return 21; }
+    if module_artifact_module_count(artifact) != 2 { return 3; }
+    if mini_syntax_text_equal(
+        module_artifact_module_name(artifact, 0), "math") != 1 { return 4; }
+    if mini_syntax_text_equal(
+        module_artifact_module_name(artifact, 1), "app") != 1 { return 5; }
+    if module_artifact_dependency_count(artifact, 1) != 1 { return 6; }
+    if mini_syntax_text_equal(
+        module_artifact_dependency_name(artifact, 1, 0), "math") != 1 {
+        return 7;
+    }
+    if mini_syntax_text_equal(
+        module_artifact_export_name(artifact, 0, 0), "add") != 1 { return 8; }
+    if module_artifact_export_kind(artifact, 0, 0) != 1 { return 9; }
+    if module_artifact_export_param_count(artifact, 0, 0) != 2 { return 10; }
+    if mini_syntax_text_equal(
+        module_artifact_export_return_type(artifact, 0, 0), "i32") != 1 {
+        return 11;
+    }
+    if module_artifact_destroy(artifact) != 1 { return 12; }
+    return 42;
+}

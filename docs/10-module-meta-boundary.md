@@ -50,7 +50,7 @@ Source Text
   -> backend/linker
 ```
 
-Module resolver 的输入是 LAIN-AST 或 meta-normalized declarations。
+Module resolver 的输入是 LAIN-AST 或 meta-normalized bindings。
 
 Module resolver 的输出不是 LAIN-IR module node，而是 meta artifact：
 
@@ -167,28 +167,32 @@ package
 
 这些 token 可以是普通 atom，但不能在 AST 层获得语义。
 
-### Step 2: Meta Parse Declarations
+### Step 2: Meta Interprets Unified Bindings
 
-Meta domain parser 识别：
+M5 不为 module/import/export 增加独立 declaration grammar。Meta 统一解释：
 
-```text
-import path;
-pub fn ...
-export { ... }
-let api = import("path");
-let M = module { ... };
+```lain
+let math: Module = module {
+    @export
+    let add = fn(a: i32, b: i32) -> i32 { a + b };
+};
+
+let app: Module = module {
+    let math: Module = require(math);
+    @export
+    let main = fn() -> i32 { math.add(40, 2) };
+};
 ```
 
-输出 meta declarations：
+统一形式是：
 
 ```text
-ImportDecl
-ExportDecl
-ModuleDecl
-FnDecl
-StructDecl
-...
+let NAME : EXPECTED_SHAPE = INITIALIZER
 ```
+
+`module`、`require`、`fn` 都是 Meta constructor。`Module` 是期望的
+MetaValue shape，`@export` 是后继 binding 的 Meta metadata。RawAst 只保留
+这些 token 的拓扑，不理解 module 语义。
 
 ### Step 3: Resolve Module Graph
 
@@ -368,10 +372,12 @@ IR receives direct linkage flags or link names
 
 ### Phase 3: Implement Resolver In Lain
 
-New-world target package:
+M5 已实现的 bootstrap slice：
 
 ```text
-packages/lain/compiler/module.lain
+packages/lain/compiler/mini_middle.lain
+packages/lain/compiler/mini_module.lain
+packages/lain/compiler/mini_workspace.lain
 ```
 
 Responsibilities:
@@ -385,6 +391,12 @@ path resolution helpers
 visibility checking
 cycle diagnostics
 ```
+
+当前实现以一个 workspace RawAst root 表示多个显式 Module binding，支持 export
+summary、require dependency、重名/缺失/环诊断、跨模块可见性检查，并在 lowering
+时把 `math.add` 解析成物理符号 `math__add`。这仍是 zero-copy bootstrap
+ModuleSummary view；持久化 artifact、package path/source discovery 和增量 cache
+留给后续阶段。
 
 ### Phase 4: Retire .lci As Public Concept
 
@@ -422,13 +434,15 @@ import/export resolution helpers compile in packages/lain/compiler
 legacy .lci bridge still works until removed
 ```
 
-The next useful self-hosting slice is:
+当前自举验收是：
 
 ```text
-packages/lain/compiler/module.lain
-  builds a ModuleSummary-like value
-  records exported fn signatures
-  reports missing import as Diagnostic
+math + app workspace
+  validates 2 modules / 1 dependency
+  exposes only @export bindings
+  rejects missing dependency, private access, duplicate module and cycle
+  lowers app.main -> app__main and math.add -> math__add
+  executes app__main == 42
 ```
 
 ## 10. Stop Rule

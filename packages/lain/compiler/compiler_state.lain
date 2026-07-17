@@ -1,0 +1,299 @@
+// M9 Lain-owned compiler state and result model.
+//
+// This is real compiler data, not a host-side result façade.  Syntax and L1
+// remain opaque handles, while diagnostics, collection ownership, phase, and
+// success/failure policy are represented in Lain.
+
+pub struct M9SyntaxRef {
+    node: i32,
+    start: i32,
+    end: i32,
+}
+
+pub struct M9Diagnostic {
+    code: i32,
+    message: addr,
+    span: M9SyntaxRef,
+}
+
+// Bootstrap-owned diagnostic slice.  It is deliberately inline and bounded
+// so CompileResult owns its diagnostics without borrowing a callee stack or
+// requiring a host allocator.  A growable DynArray can replace this physical
+// representation later without changing result policy.
+pub struct M9DiagnosticBag {
+    count: i32,
+    item0: M9Diagnostic,
+    item1: M9Diagnostic,
+    item2: M9Diagnostic,
+    item3: M9Diagnostic,
+}
+
+pub struct M9OptionalUnit {
+    has_value: i32,
+    value: i32,
+}
+
+pub struct M9CompilerState {
+    syntax: M9SyntaxRef,
+    phase: i32,
+    module_count: i32,
+    unit: M9OptionalUnit,
+    diagnostics: M9DiagnosticBag,
+}
+
+pub struct M9CompileResult {
+    // Bootstrap tagged-result representation.  The complete enum/match
+    // implementation remains a language feature, but compiler result policy
+    // must not depend on the still-incomplete match-as-value lowering path.
+    outcome_tag: i32,
+    syntax: M9SyntaxRef,
+    module_count: i32,
+    unit: M9OptionalUnit,
+    diagnostics: M9DiagnosticBag,
+}
+
+fn m9_diagnostic_bag_empty() -> M9DiagnosticBag {
+    let empty_span: M9SyntaxRef = M9SyntaxRef {
+        node: 0,
+        start: 0,
+        end: 0,
+    };
+    let empty: M9Diagnostic = M9Diagnostic {
+        code: 0,
+        message: "",
+        span: empty_span,
+    };
+    return M9DiagnosticBag {
+        count: 0,
+        item0: empty,
+        item1: empty,
+        item2: empty,
+        item3: empty,
+    };
+}
+
+fn m9_optional_unit_none() -> M9OptionalUnit {
+    return M9OptionalUnit { has_value: 0, value: 0 };
+}
+
+fn m9_optional_unit_some(value: i32) -> M9OptionalUnit {
+    return M9OptionalUnit { has_value: 1, value: value };
+}
+
+fn m9_diagnostic_bag_push(
+    bag: M9DiagnosticBag, diagnostic: M9Diagnostic) -> M9DiagnosticBag {
+    if bag.count == 0 {
+        return M9DiagnosticBag {
+            count: 1,
+            item0: diagnostic,
+            item1: bag.item1,
+            item2: bag.item2,
+            item3: bag.item3,
+        };
+    }
+    if bag.count == 1 {
+        return M9DiagnosticBag {
+            count: 2,
+            item0: bag.item0,
+            item1: diagnostic,
+            item2: bag.item2,
+            item3: bag.item3,
+        };
+    }
+    if bag.count == 2 {
+        return M9DiagnosticBag {
+            count: 3,
+            item0: bag.item0,
+            item1: bag.item1,
+            item2: diagnostic,
+            item3: bag.item3,
+        };
+    }
+    if bag.count == 3 {
+        return M9DiagnosticBag {
+            count: 4,
+            item0: bag.item0,
+            item1: bag.item1,
+            item2: bag.item2,
+            item3: diagnostic,
+        };
+    }
+    return bag;
+}
+
+pub fn m9_compiler_state_begin(
+    syntax_node: i32, start: i32, end: i32) -> M9CompilerState {
+    let syntax: M9SyntaxRef = M9SyntaxRef {
+        node: syntax_node,
+        start: start,
+        end: end,
+    };
+    return M9CompilerState {
+        syntax: syntax,
+        phase: 1,
+        module_count: 0,
+        unit: m9_optional_unit_none(),
+        diagnostics: m9_diagnostic_bag_empty(),
+    };
+}
+
+pub fn m9_compiler_state_add_diagnostic(
+    state: M9CompilerState, code: i32, message: addr,
+    syntax_node: i32, start: i32, end: i32) -> M9CompilerState {
+    let span: M9SyntaxRef = M9SyntaxRef {
+        node: syntax_node,
+        start: start,
+        end: end,
+    };
+    let diagnostic: M9Diagnostic = M9Diagnostic {
+        code: code,
+        message: message,
+        span: span,
+    };
+    return M9CompilerState {
+        syntax: state.syntax,
+        phase: 4,
+        module_count: state.module_count,
+        unit: m9_optional_unit_none(),
+        diagnostics: m9_diagnostic_bag_push(state.diagnostics, diagnostic),
+    };
+}
+
+pub fn m9_compiler_state_with_unit(
+    state: M9CompilerState, unit: i32, module_count: i32) -> M9CompilerState {
+    return M9CompilerState {
+        syntax: state.syntax,
+        phase: 3,
+        module_count: module_count,
+        unit: m9_optional_unit_some(unit),
+        diagnostics: state.diagnostics,
+    };
+}
+
+pub fn m9_compiler_state_finish(state: M9CompilerState) -> M9CompileResult {
+    let diagnostics: M9DiagnosticBag = state.diagnostics;
+    let unit: M9OptionalUnit = state.unit;
+    if diagnostics.count != 0 {
+        return M9CompileResult {
+            outcome_tag: 0,
+            syntax: state.syntax,
+            module_count: state.module_count,
+            unit: m9_optional_unit_none(),
+            diagnostics: state.diagnostics,
+        };
+    }
+    if unit.has_value == 0 {
+        return M9CompileResult {
+            outcome_tag: 0,
+            syntax: state.syntax,
+            module_count: state.module_count,
+            unit: m9_optional_unit_none(),
+            diagnostics: state.diagnostics,
+        };
+    }
+    return M9CompileResult {
+        outcome_tag: 1,
+        syntax: state.syntax,
+        module_count: state.module_count,
+        unit: state.unit,
+        diagnostics: state.diagnostics,
+    };
+}
+
+pub fn m9_compile_result_ok(result: M9CompileResult) -> i32 {
+    if result.outcome_tag == 1 { return 1; }
+    return 0;
+}
+
+pub fn m9_compile_result_unit_or_zero(result: M9CompileResult) -> i32 {
+    if m9_compile_result_ok(result) == 0 { return 0; }
+    let unit: M9OptionalUnit = result.unit;
+    if unit.has_value == 0 { return 0; }
+    return unit.value;
+}
+
+pub fn m9_compile_result_module_count(result: M9CompileResult) -> i32 {
+    return result.module_count;
+}
+
+pub fn m9_compile_result_diagnostic_count(result: M9CompileResult) -> i32 {
+    let diagnostics: M9DiagnosticBag = result.diagnostics;
+    return diagnostics.count;
+}
+
+pub fn m9_compile_result_first_diagnostic_code(
+    result: M9CompileResult) -> i32 {
+    let diagnostics: M9DiagnosticBag = result.diagnostics;
+    if diagnostics.count == 0 { return 0; }
+    let diagnostic: M9Diagnostic = diagnostics.item0;
+    return diagnostic.code;
+}
+
+pub fn m9_compile_result_first_diagnostic_message(
+    result: M9CompileResult) -> addr {
+    let diagnostics: M9DiagnosticBag = result.diagnostics;
+    if diagnostics.count == 0 { return ""; }
+    let diagnostic: M9Diagnostic = diagnostics.item0;
+    return diagnostic.message;
+}
+
+pub fn m9_compile_result_first_diagnostic_start(
+    result: M9CompileResult) -> i32 {
+    let diagnostics: M9DiagnosticBag = result.diagnostics;
+    if diagnostics.count == 0 { return 0; }
+    let diagnostic: M9Diagnostic = diagnostics.item0;
+    let span: M9SyntaxRef = diagnostic.span;
+    return span.start;
+}
+
+pub fn m9_compile_result_first_diagnostic_end(
+    result: M9CompileResult) -> i32 {
+    let diagnostics: M9DiagnosticBag = result.diagnostics;
+    if diagnostics.count == 0 { return 0; }
+    let diagnostic: M9Diagnostic = diagnostics.item0;
+    let span: M9SyntaxRef = diagnostic.span;
+    return span.end;
+}
+
+pub fn m9_compile_result_syntax_node(result: M9CompileResult) -> i32 {
+    let syntax: M9SyntaxRef = result.syntax;
+    return syntax.node;
+}
+
+pub fn m9_compiler_state_schema_version() -> i32 { return 9; }
+
+// Narrow runtime probes intentionally exercise one ownership boundary at a
+// time.  They are part of the M9 acceptance surface rather than test-only
+// score functions: a self-hosted compiler needs returned aggregate values to
+// remain readable across procedure calls.
+pub fn m9_compiler_state_begin_probe() -> i32 {
+    let state: M9CompilerState = m9_compiler_state_begin(7, 10, 14);
+    let syntax: M9SyntaxRef = state.syntax;
+    return state.phase + syntax.node;
+}
+
+pub fn m9_compiler_state_unit_probe() -> i32 {
+    let state: M9CompilerState = m9_compiler_state_begin(7, 10, 14);
+    let lowered: M9CompilerState = m9_compiler_state_with_unit(
+        state, 41, 1);
+    let unit: M9OptionalUnit = lowered.unit;
+    return unit.value + lowered.module_count;
+}
+
+pub fn m9_compiler_state_finish_probe() -> i32 {
+    let state: M9CompilerState = m9_compiler_state_begin(7, 10, 14);
+    let lowered: M9CompilerState = m9_compiler_state_with_unit(
+        state, 41, 1);
+    let result: M9CompileResult = m9_compiler_state_finish(lowered);
+    return m9_compile_result_module_count(result)
+        + m9_compile_result_unit_or_zero(result);
+}
+
+pub fn m9_compiler_state_runtime_probe() -> i32 {
+    let state: M9CompilerState = m9_compiler_state_begin(7, 10, 14);
+    let lowered: M9CompilerState = m9_compiler_state_with_unit(
+        state, 41, 1);
+    let result: M9CompileResult = m9_compiler_state_finish(lowered);
+    return m9_compile_result_ok(result)
+        + m9_compile_result_unit_or_zero(result);
+}

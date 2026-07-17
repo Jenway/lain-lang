@@ -1,0 +1,148 @@
+@foreign(c, link_name = "core.read-file-string!")
+fn read_file_string(path: addr) -> addr;
+@foreign(c, link_name = "core.string-length!")
+fn string_length(text: addr) -> i32;
+@foreign(c, link_name = "core.string-append!")
+fn string_append(left: addr, right: addr) -> addr;
+@foreign(c, link_name = "core.execute-compiler-artifact!")
+fn artifact_i32(
+    artifact: addr, entry: addr, argument: addr, integer: i32) -> i32;
+@foreign(c, link_name = "core.execute-compiler-artifact!")
+fn artifact_addr(
+    artifact: addr, entry: addr, argument: addr, integer: i32) -> addr;
+@foreign(c, link_name = "core.execute-compiler-artifact-named!")
+fn artifact_named(
+    artifact: addr, source: addr, length: i32, name: addr) -> i32;
+@foreign(c, link_name = "core.execute-lainir-unit!")
+fn execute_l1_unit(unit: i32, entry: addr) -> i32;
+@foreign(c, link_name = "core.destroy-lainir-unit!")
+fn destroy_l1_unit(unit: i32) -> i32;
+@foreign(c, link_name = "l1.result-status!")
+fn result_status(result: i32) -> i32;
+@foreign(c, link_name = "l1.result-value!")
+fn result_value(result: i32) -> i32;
+@foreign(c, link_name = "l1.result-destroy!")
+fn result_destroy(result: i32) -> i32;
+@foreign(c, link_name = "l1.read-find-proc!")
+fn read_find_proc(unit: i32, name: addr) -> i32;
+@foreign(c, link_name = "l1.read-proc-is-extern!")
+fn read_proc_is_extern(unit: i32, procedure: i32) -> i32;
+
+fn expect_result(result: i32, expected: i32, error: i32) -> i32 {
+    if result == 0 { return error; }
+    if result_status(result) != 0 {
+        result_destroy(result);
+        return error + 1;
+    }
+    if result_value(result) != expected {
+        result_destroy(result);
+        return error + 2;
+    }
+    if result_destroy(result) != 1 { return error + 3; }
+    return 0;
+}
+
+fn main() -> i32 {
+    let artifact: addr = read_file_string(
+        "build/core-self-hosting/meta_compiler.l1");
+
+    // M7: interpret the exact cross-module structured unit that the C
+    // reference interpreter executes.  Module policy has already vanished.
+    let math: addr = read_file_string(
+        "tests/core/self_hosting/fixtures/math_module.lain");
+    let app: addr = read_file_string(
+        "tests/core/self_hosting/fixtures/app_module.lain");
+    let workspace: addr = string_append(math, app);
+    let workspace_unit: i32 = artifact_i32(
+        artifact, "mini_meta_workspace_compile",
+        workspace, string_length(workspace));
+    if workspace_unit == 0 { return 3701; }
+    if execute_l1_unit(workspace_unit, "app__main") != 42 { return 3702; }
+    let interpreted: i32 = artifact_i32(
+        artifact, "mini_meta_interpret_entry", "app__main", workspace_unit);
+    let interpreted_code: i32 = expect_result(interpreted, 42, 3710);
+    if interpreted_code != 0 { return interpreted_code; }
+    let missing_entry: i32 = artifact_i32(
+        artifact, "mini_meta_interpret_entry", "does_not_exist", workspace_unit);
+    if missing_entry == 0 { return 3714; }
+    if result_status(missing_entry) != 7001 { return 3715; }
+    if result_destroy(missing_entry) != 1 { return 3716; }
+    if destroy_l1_unit(workspace_unit) != 1 { return 3703; }
+
+    // Cover local-frame storage and `ne` in addition to the workspace's
+    // argument, call, add, and return path.
+    let local_source: addr = "let add = fn(a: i32, b: i32) -> i32 { a + b }
+let main = fn() -> i32 { let value: i32 = add(40, 2); if value != 42 { 0 } else { value } }";
+    let local_unit: i32 = artifact_i32(
+        artifact, "mini_meta_compile", local_source,
+        string_length(local_source));
+    if local_unit == 0 { return 3717; }
+    let local_result: i32 = artifact_i32(
+        artifact, "mini_meta_interpret_entry", "main", local_unit);
+    let local_code: i32 = expect_result(local_result, 42, 3718);
+    if local_code != 0 { return local_code; }
+    if destroy_l1_unit(local_unit) != 1 { return 3723; }
+
+    // M8: recursive deterministic evaluation through the same Lain
+    // interpreter.  sum_range(1, 11, 0) = 55.
+    let comptime_source: addr = "let sum_range = fn(current: i32, limit: i32, acc: i32) -> i32 { if current == limit { acc } else { sum_range(current + 1, limit, acc + current) } }
+let main = fn() -> i32 { sum_range(1, 11, 0) }";
+    let runtime_unit: i32 = artifact_i32(
+        artifact, "mini_meta_compile", comptime_source,
+        string_length(comptime_source));
+    if runtime_unit == 0 { return 3720; }
+    if execute_l1_unit(runtime_unit, "main") != 55 { return 3721; }
+    if destroy_l1_unit(runtime_unit) != 1 { return 3722; }
+
+    let first: i32 = artifact_i32(
+        artifact, "mini_meta_comptime_main", comptime_source,
+        string_length(comptime_source));
+    let first_code: i32 = expect_result(first, 55, 3730);
+    if first_code != 0 { return first_code; }
+    let second: i32 = artifact_i32(
+        artifact, "mini_meta_comptime_main", comptime_source,
+        string_length(comptime_source));
+    let second_code: i32 = expect_result(second, 55, 3740);
+    if second_code != 0 { return second_code; }
+
+    // The evaluated value is fed back into structured lowering, not text.
+    let materialized: i32 = artifact_i32(
+        artifact, "mini_meta_comptime_materialize_main", comptime_source,
+        string_length(comptime_source));
+    if materialized == 0 { return 3750; }
+    if execute_l1_unit(materialized, "comptime_value") != 55 { return 3751; }
+    if destroy_l1_unit(materialized) != 1 { return 3752; }
+
+    // A source diagnostic remains observable as a result status.
+    let invalid_source: addr = "let main = fn() -> i32 { missing_name }";
+    let invalid: i32 = artifact_i32(
+        artifact, "mini_meta_comptime_main", invalid_source,
+        string_length(invalid_source));
+    if invalid == 0 { return 3760; }
+    if result_status(invalid) == 0 { return 3761; }
+    if string_length(artifact_addr(
+        artifact, "mini_meta_comptime_diagnostic_message",
+        invalid_source, string_length(invalid_source))) == 0 { return 3763; }
+    if result_destroy(invalid) != 1 { return 3762; }
+
+    // Named lowering represents non-selected callees as extern contracts.
+    // The Lain comptime interpreter must reject them instead of dispatching a
+    // host capability.
+    let extern_source: addr = "let helper = fn() -> i32 { 42 }
+let main = fn() -> i32 { helper() }";
+    let named_unit: i32 = artifact_named(
+        artifact, extern_source, string_length(extern_source), "main");
+    if named_unit == 0 { return 3765; }
+    let helper_proc: i32 = read_find_proc(named_unit, "helper");
+    if helper_proc == 0 { return 3766; }
+    if read_proc_is_extern(named_unit, helper_proc) != 1 { return 3767; }
+    if destroy_l1_unit(named_unit) != 1 { return 3768; }
+    let denied: i32 = artifact_i32(
+        artifact, "mini_meta_comptime_named_main", extern_source,
+        string_length(extern_source));
+    if denied == 0 { return 3770; }
+    if result_status(denied) != 7002 { return 3771; }
+    if result_destroy(denied) != 1 { return 3772; }
+
+    return 42;
+}

@@ -47,7 +47,8 @@
                  (record '|import|
                    (record.field '|attrs| attrs)
                    (record.field '|path| path)))))
-    (decl.define! '|import| (import.path-name path) node))))
+    (decl.define! '|import| (import.path-name path) node)
+    (interface.predeclare-path-types! path))))
 
 (define-pass* 'raw-normalizer '|import| (lambda (decl)
   (middle.normalize-plain-decl decl '|middle.import|)))

@@ -1,0 +1,919 @@
+// M6 lowering from validated Meta module views directly into a structured
+// L1Unit.  No L1 text is produced or parsed on this path.
+
+import packages::lain::compiler::mini_syntax;
+import packages::lain::compiler::mini_middle;
+import packages::lain::compiler::mini_module;
+import packages::lain::compiler::mini_elaborate;
+import packages::lain::compiler::l1_unit_builder;
+
+@foreign(c, link_name = "core.string-append!")
+fn string_append(left: addr, right: addr) -> addr;
+
+pub fn mini_lower_unit_schema_version() -> i32 { return 6; }
+
+fn mini_lower_unit_link_name(module: i32, name: addr) -> addr {
+    return string_append(
+        string_append(mini_module_summary_name(module), "__"), name);
+}
+
+fn mini_lower_unit_type_from_syntax(node: i32) -> i32 {
+    if mini_syntax_is_atom_text(node, "i32") == 1 { return 1; }
+    if mini_syntax_is_atom_text(node, "addr") == 1 { return 3; }
+    if mini_syntax_is_unit_type(node) == 1 { return 4; }
+    if mini_syntax_is_interface_dyn_type(node) == 1 { return 3; }
+    // Stage-0 lowers aggregate values by reference.  During incremental
+    // self-compilation, unselected compiler procedures are emitted as extern
+    // contracts; their named struct/result types therefore have the same
+    // physical ABI as `addr`, even though their semantic identity remains in
+    // the Lain Meta layer.
+    if mini_syntax_is_identifier(node) == 1 { return 3; }
+    return 0;
+}
+
+fn mini_lower_plain_link_name(
+    index: M13ElaborationIndex, root: i32, name: addr) -> addr {
+    let callable: i32 = mini_elaborate_find_callable(index, name);
+    if callable == 0 { return name; }
+    if mini_syntax_function_style(callable) != 4 { return name; }
+    let link: addr = mini_middle_foreign_link_name(root, callable);
+    if mini_syntax_text_equal(link, "") == 1 { return name; }
+    return link;
+}
+
+fn mini_lower_callable_link_name(root: i32, callable: i32) -> addr {
+    if mini_syntax_function_style(callable) == 4 {
+        return mini_middle_foreign_link_name(root, callable);
+    }
+    return mini_syntax_function_name(callable);
+}
+
+fn mini_lower_unit_params(unit: i32, procedure: i32, param: i32) -> i32 {
+    if param == 0 { return 1; }
+    let type_tag: i32 = mini_lower_unit_type_from_syntax(
+        mini_syntax_param_type_node(param));
+    if type_tag == 0 { return 0; }
+    if l1_unit_builder_param(unit, procedure, type_tag) != 1 { return 0; }
+    return mini_lower_unit_params(
+        unit, procedure, mini_syntax_param_next(param));
+}
+
+fn mini_lower_unit_name(
+    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+    unit: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    let type_tag: i32 = mini_elaborate_module_expr_type_indexed(
+        workspace, module, root, function, node, body_start, stop);
+    let name: addr = mini_syntax_text(node);
+    if mini_elaborate_name_is_local(function, stop, name) == 1 {
+        return l1_unit_builder_var(unit, name, type_tag);
+    }
+    let index: i32 = mini_syntax_param_index(
+        mini_syntax_function_first_param(function), name, 0);
+    return l1_unit_builder_arg(unit, index, type_tag);
+}
+
+fn mini_lower_unit_call_args(
+    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+    unit: i32, call: i32, arg: i32,
+    body_start: i32, stop: i32) -> i32 {
+    if arg == 0 { return 1; }
+    let value: i32 = mini_lower_unit_expr(
+        workspace, module, root, function,
+        unit, arg, body_start, stop);
+    if value == 0 { return 0; }
+    if l1_unit_builder_call_arg(unit, call, value) != 1 { return 0; }
+    return mini_lower_unit_call_args(
+        workspace, module, root, function, unit, call,
+        mini_syntax_arg_next(arg), body_start, stop);
+}
+
+fn mini_lower_unit_expr(
+    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+    unit: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    let tag: i32 = mini_syntax_expr_tag(node);
+    if tag == 1 {
+        return l1_unit_builder_i32(unit, mini_syntax_i32_value(node));
+    }
+    if tag == 7 {
+        return l1_unit_builder_string(unit, mini_syntax_string_value(node));
+    }
+    if tag == 2 {
+        return mini_lower_unit_name(
+            workspace, module, root, function,
+            unit, node, body_start, stop);
+    }
+    if tag == 3 {
+        let left: i32 = mini_lower_unit_expr(
+            workspace, module, root, function,
+            unit, mini_syntax_left(node), body_start, stop);
+        let right: i32 = mini_lower_unit_expr(
+            workspace, module, root, function,
+            unit, mini_syntax_right(node), body_start, stop);
+        return l1_unit_builder_add(unit, left, right);
+    }
+    if tag == 5 {
+        let left: i32 = mini_lower_unit_expr(
+            workspace, module, root, function,
+            unit, mini_syntax_left(node), body_start, stop);
+        let right: i32 = mini_lower_unit_expr(
+            workspace, module, root, function,
+            unit, mini_syntax_right(node), body_start, stop);
+        return l1_unit_builder_eq(unit, left, right);
+    }
+    if tag == 8 {
+        let left: i32 = mini_lower_unit_expr(
+            workspace, module, root, function,
+            unit, mini_syntax_left(node), body_start, stop);
+        let right: i32 = mini_lower_unit_expr(
+            workspace, module, root, function,
+            unit, mini_syntax_right(node), body_start, stop);
+        return l1_unit_builder_ne(unit, left, right);
+    }
+    if tag == 4 {
+        let call: i32 = l1_unit_builder_call(
+            unit,
+            mini_lower_unit_link_name(module, mini_syntax_call_name(node)),
+            mini_elaborate_module_expr_type_indexed(
+                workspace, module, root, function,
+                node, body_start, stop));
+        if mini_lower_unit_call_args(
+            workspace, module, root, function, unit, call,
+            mini_syntax_call_first_arg(node), body_start, stop) != 1 {
+            return 0;
+        }
+        return call;
+    }
+    if tag == 9 {
+        let target: i32 = module_workspace_resolve_alias(
+            workspace, module, mini_syntax_member_base_name(node));
+        let call: i32 = l1_unit_builder_call(
+            unit,
+            mini_lower_unit_link_name(target, mini_syntax_member_name(node)),
+            mini_elaborate_module_expr_type_indexed(
+                workspace, module, root, function,
+                node, body_start, stop));
+        if mini_lower_unit_call_args(
+            workspace, module, root, function, unit, call,
+            mini_syntax_member_first_arg(node), body_start, stop) != 1 {
+            return 0;
+        }
+        return call;
+    }
+    return 0;
+}
+
+fn mini_lower_unit_body(
+    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+    unit: i32, procedure: i32, node: i32, body_start: i32) -> i32 {
+    let form_tag: i32 = mini_syntax_form_tag(node);
+    if form_tag == 1 {
+        return mini_lower_unit_body(
+            workspace, module, root, function, unit, procedure,
+            mini_syntax_next(node), body_start);
+    }
+    if form_tag == 2 {
+        let value_node: i32 = mini_syntax_local_value_node(node);
+        let value: i32 = mini_lower_unit_expr(
+            workspace, module, root, function,
+            unit, value_node, body_start, node);
+        let type_tag: i32 = mini_elaborate_module_expr_type_indexed(
+            workspace, module, root, function,
+            value_node, body_start, node);
+        if l1_unit_builder_let(
+            unit, procedure,
+            mini_syntax_text(mini_syntax_local_name_node(node)),
+            type_tag, value) != 1 { return 0; }
+        return mini_lower_unit_body(
+            workspace, module, root, function, unit, procedure,
+            mini_syntax_next(node), body_start);
+    }
+    if mini_syntax_expr_tag(node) == 6 {
+        let condition: i32 = mini_lower_unit_expr(
+            workspace, module, root, function, unit,
+            mini_syntax_if_condition(node), body_start, node);
+        let then_value: i32 = mini_lower_unit_expr(
+            workspace, module, root, function, unit,
+            mini_syntax_if_then_expr(node), body_start, node);
+        let else_value: i32 = mini_lower_unit_expr(
+            workspace, module, root, function, unit,
+            mini_syntax_if_else_expr(node), body_start, node);
+        return l1_unit_builder_if_return(
+            unit, procedure, condition, then_value, else_value);
+    }
+    let result: i32 = mini_lower_unit_expr(
+        workspace, module, root, function,
+        unit, node, body_start, node);
+    return l1_unit_builder_return(unit, procedure, result);
+}
+
+fn mini_lower_unit_function(
+    workspace: ModuleWorkspace, module: i32, root: i32,
+    unit: i32, function: i32) -> i32 {
+    let return_type: i32 = mini_lower_unit_type_from_syntax(
+        mini_syntax_right(mini_syntax_function_signature(function)));
+    let procedure: i32 = l1_unit_builder_proc(
+        unit,
+        mini_lower_unit_link_name(
+            module, mini_syntax_function_name(function)),
+        return_type);
+    if procedure == 0 { return 0; }
+    if mini_lower_unit_params(
+        unit, procedure,
+        mini_syntax_function_first_param(function)) != 1 { return 0; }
+    let body: i32 = mini_syntax_function_body(function);
+    let first: i32 = mini_syntax_left(body);
+    return mini_lower_unit_body(
+        workspace, module, root, function,
+        unit, procedure, first, first);
+}
+
+fn mini_lower_unit_functions(
+    workspace: ModuleWorkspace, module: i32, root: i32,
+    unit: i32, function: i32) -> i32 {
+    if function == 0 { return 1; }
+    if mini_lower_unit_function(
+        workspace, module, root, unit, function) != 1 { return 0; }
+    return mini_lower_unit_functions(
+        workspace, module, root, unit,
+        mini_middle_next_definition(function));
+}
+
+fn mini_lower_unit_modules(
+    workspace: ModuleWorkspace, unit: i32, position: i32) -> i32 {
+    if position == module_workspace_order_count(workspace) { return 1; }
+    let module: i32 = module_workspace_ordered_module(workspace, position);
+    let root: i32 = mini_module_body(module);
+    if mini_lower_unit_functions(
+        workspace, module, root, unit,
+        mini_module_first_procedure(root)) != 1 { return 0; }
+    return mini_lower_unit_modules(
+        workspace, unit, position + 1);
+}
+
+fn mini_lower_unit_entry(workspace: ModuleWorkspace) -> addr {
+    let module: i32 = module_workspace_ordered_module(workspace, 0);
+    let root: i32 = mini_module_body(module);
+    let function: i32 = mini_module_first_procedure(root);
+    return mini_lower_unit_link_name(
+        module, mini_syntax_function_name(function));
+}
+
+// M17-facing fragment hook: append one indexed module to an existing physical
+// unit without verifying the partially linked graph.
+pub fn mini_lower_unit_append_module(
+    workspace: ModuleWorkspace, unit: i32,
+    module_index: i32) -> i32 {
+    let module: i32 = module_workspace_module_at(workspace, module_index);
+    if module == 0 { return 0; }
+    let root: i32 = mini_module_body(module);
+    return mini_lower_unit_functions(
+        workspace, module, root, unit,
+        mini_module_first_procedure(root));
+}
+
+pub fn mini_lower_unit_verify_linked(
+    workspace: ModuleWorkspace, unit: i32) -> i32 {
+    if module_workspace_count(workspace) == 0 { return 0; }
+    return l1_unit_builder_verify(unit, mini_lower_unit_entry(workspace));
+}
+
+pub fn mini_lower_unit_workspace_validated(
+    workspace: ModuleWorkspace) -> i32 {
+    let unit: i32 = l1_unit_builder_new();
+    if unit == 0 { return 0; }
+    if mini_lower_unit_modules(
+        workspace, unit, 0) != 1 {
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    if mini_lower_unit_verify_linked(workspace, unit) != 1 {
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    return unit;
+}
+
+// Plain-source compatibility entry used while the bootstrap compiler source
+// is still organized as imported files rather than explicit Module values.
+// It constructs the same structured unit and carries no source-module policy.
+fn mini_lower_plain_name(
+    index: M13ElaborationIndex, root: i32, function: i32, unit: i32,
+    node: i32, body_start: i32, stop: i32) -> i32 {
+    let type_tag: i32 = mini_elaborate_expr_type_indexed(
+        index, root, function, node, body_start, stop);
+    let name: addr = mini_syntax_text(node);
+    if mini_elaborate_name_is_local(function, stop, name) == 1 {
+        return l1_unit_builder_var(unit, name, type_tag);
+    }
+    return l1_unit_builder_arg(
+        unit,
+        mini_syntax_param_index(
+            mini_syntax_function_first_param(function), name, 0),
+        type_tag);
+}
+
+fn mini_lower_plain_args(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, block: i32, call: i32,
+    arg: i32, body_start: i32, stop: i32) -> i32 {
+    if arg == 0 { return 1; }
+    let value: i32 = mini_lower_plain_expr(
+        index, root, function, unit, block, arg, body_start, stop);
+    if value == 0 { return 0; }
+    if l1_unit_builder_call_arg(unit, call, value) != 1 { return 0; }
+    return mini_lower_plain_args(
+        index, root, function, unit, block, call,
+        mini_syntax_arg_next(arg), body_start, stop);
+}
+
+fn mini_lower_plain_aggregate_fields(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, block: i32, aggregate: i32,
+    aggregate_name: addr, field: i32,
+    body_start: i32, stop: i32) -> i32 {
+    if field == 0 { return 1; }
+    if mini_syntax_is_atom_text(field, ",") == 1 {
+        return mini_lower_plain_aggregate_fields(
+            index, root, function, unit, block, aggregate,
+            aggregate_name, mini_syntax_next(field), body_start, stop);
+    }
+    let value_node: i32 = mini_syntax_aggregate_field_value(field);
+    let value: i32 = mini_lower_plain_expr(
+        index, root, function, unit, block,
+        value_node, body_start, stop);
+    if value == 0 { return 0; }
+    let offset: i32 = mini_elaborate_aggregate_field_offset(
+        index, aggregate,
+        mini_syntax_text(mini_syntax_aggregate_field_name_node(field)));
+    if offset < 0 { return 0; }
+    let base: i32 = l1_unit_builder_var(unit, aggregate_name, 3);
+    let destination: i32 = l1_unit_builder_lea(unit, base, offset);
+    let type_tag: i32 = mini_elaborate_expr_type_indexed(
+        index, root, function, value_node, body_start, stop);
+    if l1_unit_builder_block_store(
+        unit, block, destination, value, type_tag) != 1 { return 0; }
+    return mini_lower_plain_aggregate_fields(
+        index, root, function, unit, block, aggregate,
+        aggregate_name, mini_syntax_next(field), body_start, stop);
+}
+
+fn mini_lower_plain_aggregate(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, block: i32, node: i32,
+    body_start: i32, stop: i32) -> i32 {
+    let size: i32 = mini_elaborate_aggregate_size(index, node);
+    if size == 0 { return 0; }
+    let allocation: i32 = l1_unit_builder_alloca(unit, size);
+    let name: addr = string_append(
+        "__m13_agg_", mini_syntax_i32_text(node));
+    if l1_unit_builder_block_let(
+        unit, block, name, 3, allocation) != 1 { return 0; }
+    if mini_lower_plain_aggregate_fields(
+        index, root, function, unit, block, node, name,
+        mini_syntax_aggregate_first_field(node),
+        body_start, stop) != 1 { return 0; }
+    return l1_unit_builder_var(unit, name, 3);
+}
+
+fn mini_lower_plain_expr(
+    index: M13ElaborationIndex, root: i32, function: i32, unit: i32,
+    block: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    let tag: i32 = mini_syntax_expr_tag(node);
+    if tag == 1 {
+        return l1_unit_builder_i32(unit, mini_syntax_i32_value(node));
+    }
+    if tag == 7 {
+        return l1_unit_builder_string(unit, mini_syntax_string_value(node));
+    }
+    if tag == 2 {
+        return mini_lower_plain_name(
+            index, root, function, unit, node, body_start, stop);
+    }
+    if tag == 3 {
+        return l1_unit_builder_add(
+            unit,
+            mini_lower_plain_expr(
+                index, root, function, unit, block,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_plain_expr(
+                index, root, function, unit, block,
+                mini_syntax_right(node), body_start, stop));
+    }
+    if tag == 5 {
+        return l1_unit_builder_eq(
+            unit,
+            mini_lower_plain_expr(
+                index, root, function, unit, block,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_plain_expr(
+                index, root, function, unit, block,
+                mini_syntax_right(node), body_start, stop));
+    }
+    if tag == 8 {
+        return l1_unit_builder_ne(
+            unit,
+            mini_lower_plain_expr(
+                index, root, function, unit, block,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_plain_expr(
+                index, root, function, unit, block,
+                mini_syntax_right(node), body_start, stop));
+    }
+    if tag == 4 {
+        let call: i32 = l1_unit_builder_call(
+            unit, mini_lower_plain_link_name(
+                index, root, mini_syntax_call_name(node)),
+            mini_elaborate_expr_type_indexed(
+                index, root, function, node, body_start, stop));
+        if mini_lower_plain_args(
+            index, root, function, unit, block, call,
+            mini_syntax_call_first_arg(node), body_start, stop) != 1 {
+            return 0;
+        }
+        return call;
+    }
+    if tag == 10 {
+        return mini_lower_plain_aggregate(
+            index, root, function, unit, block,
+            node, body_start, stop);
+    }
+    if tag == 11 {
+        let base: i32 = mini_lower_plain_expr(
+            index, root, function, unit, block,
+            mini_syntax_left(node), body_start, stop);
+        let offset: i32 = mini_elaborate_field_offset_indexed(
+            index, root, function, node, body_start, stop);
+        if offset < 0 { return 0; }
+        let address: i32 = l1_unit_builder_lea(unit, base, offset);
+        return l1_unit_builder_load(
+            unit, address,
+            mini_elaborate_expr_type_indexed(
+                index, root, function, node, body_start, stop));
+    }
+    if tag == 12 {
+        return l1_unit_builder_lt(
+            unit,
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_right(node), body_start, stop));
+    }
+    if tag == 13 {
+        return l1_unit_builder_le(
+            unit,
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_right(node), body_start, stop));
+    }
+    if tag == 14 {
+        return l1_unit_builder_gt(
+            unit,
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_right(node), body_start, stop));
+    }
+    if tag == 15 {
+        return l1_unit_builder_ge(
+            unit,
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_right(node), body_start, stop));
+    }
+    if tag == 16 {
+        return l1_unit_builder_sub(
+            unit,
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_right(node), body_start, stop));
+    }
+    if tag == 17 {
+        return l1_unit_builder_mul(
+            unit,
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_left(node), body_start, stop),
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_right(node), body_start, stop));
+    }
+    if tag == 18 {
+        return l1_unit_builder_sub(
+            unit, l1_unit_builder_i32(unit, 0),
+            mini_lower_plain_expr(index, root, function, unit, block,
+                mini_syntax_prefix_operand(node), body_start, stop));
+    }
+    if tag == 19 {
+        let argument: i32 = mini_syntax_macro_first_arg(node);
+        let call: i32 = l1_unit_builder_call(
+            unit, "__lain_println_raw", 4);
+        if l1_unit_builder_call_arg(
+            unit, call,
+            l1_unit_builder_string(
+                unit, mini_syntax_string_value(argument))) != 1 { return 0; }
+        if l1_unit_builder_call_arg(
+            unit, call,
+            l1_unit_builder_i32(
+                unit, mini_syntax_string_length(argument))) != 1 { return 0; }
+        return call;
+    }
+    if tag == 20 {
+        let member: addr = mini_syntax_interface_member_name(node);
+        let argument: i32 = mini_syntax_interface_first_arg(node);
+        if mini_syntax_text_equal(member, "make_dyn") == 1 {
+            // Closed-world single-impl elaboration: Dyn has the physical ABI
+            // of its data address and the compile-time vtable witness erases.
+            return mini_lower_plain_expr(
+                index, root, function, unit, block,
+                argument, body_start, stop);
+        }
+        if mini_syntax_text_equal(member, "make_vtable") == 1 {
+            return l1_unit_builder_string(unit, "");
+        }
+        let target: addr = string_append(
+            string_append(mini_middle_interface_impl_prefix(root), "_"),
+            member);
+        let call: i32 = l1_unit_builder_call(
+            unit, target,
+            mini_elaborate_expr_type_indexed(
+                index, root, function, node, body_start, stop));
+        if mini_lower_plain_args(
+            index, root, function, unit, block, call,
+            argument, body_start, stop) != 1 { return 0; }
+        return call;
+    }
+    return 0;
+}
+
+fn mini_lower_plain_import_externs(unit: i32, root: i32) -> i32 {
+    if mini_middle_has_std_io_import(root) != 1 { return 1; }
+    let procedure: i32 = l1_unit_builder_extern(
+        unit, "__lain_println_raw", 4);
+    if procedure == 0 { return 0; }
+    if l1_unit_builder_param(unit, procedure, 3) != 1 { return 0; }
+    return l1_unit_builder_param(unit, procedure, 1);
+}
+
+fn mini_lower_plain_body(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, procedure: i32, block: i32,
+    node: i32, body_start: i32) -> i32 {
+    let form_tag: i32 = mini_syntax_form_tag(node);
+    if form_tag == 1 {
+        return mini_lower_plain_body(
+            index, root, function, unit, procedure, block,
+            mini_syntax_next(node), body_start);
+    }
+    if form_tag == 2 {
+        let value_node: i32 = mini_syntax_local_value_node(node);
+        let value: i32 = mini_lower_plain_expr(
+            index, root, function, unit, block,
+            value_node, body_start, node);
+        if l1_unit_builder_let(
+            unit, procedure,
+            mini_syntax_text(mini_syntax_local_name_node(node)),
+            mini_elaborate_expr_type_indexed(
+                index, root, function, value_node, body_start, node),
+            value) != 1 { return 0; }
+        return mini_lower_plain_body(
+            index, root, function, unit, procedure, block,
+            mini_syntax_next(node), body_start);
+    }
+    if mini_syntax_expr_tag(node) == 6 {
+        return l1_unit_builder_if_return(
+            unit, procedure,
+            mini_lower_plain_expr(
+                index, root, function, unit, block,
+                mini_syntax_if_condition(node), body_start, node),
+            mini_lower_plain_expr(
+                index, root, function, unit, block,
+                mini_syntax_if_then_expr(node), body_start, node),
+            mini_lower_plain_expr(
+                index, root, function, unit, block,
+                mini_syntax_if_else_expr(node), body_start, node));
+    }
+    return l1_unit_builder_return(
+        unit, procedure,
+        mini_lower_plain_expr(
+            index, root, function, unit, block,
+            node, body_start, node));
+}
+
+fn mini_lower_plain_statement_block(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, block: i32,
+    node: i32, body_start: i32) -> i32 {
+    if node == 0 { return 1; }
+    let form_tag: i32 = mini_syntax_form_tag(node);
+    if form_tag == 1 {
+        return mini_lower_plain_statement_block(
+            index, root, function, unit, block,
+            mini_syntax_next(node), body_start);
+    }
+    if form_tag == 2 {
+        let value_node: i32 = mini_syntax_local_value_node(node);
+        let value: i32 = mini_lower_plain_expr(
+            index, root, function, unit, block,
+            value_node, body_start, node);
+        if l1_unit_builder_block_let(
+            unit, block,
+            mini_syntax_text(mini_syntax_local_name_node(node)),
+            mini_elaborate_expr_type_indexed(
+                index, root, function, value_node, body_start, node),
+            value) != 1 { return 0; }
+        return mini_lower_plain_statement_block(
+            index, root, function, unit, block,
+            mini_syntax_next(node), body_start);
+    }
+    if form_tag == 3 {
+        let value: i32 = mini_lower_plain_expr(
+            index, root, function, unit, block,
+            node, body_start, node);
+        if mini_lower_plain_only_separators(mini_syntax_next(node)) == 1 {
+            if mini_elaborate_expr_type_indexed(
+                index, root, function, node, body_start, node) == 4 {
+                if l1_unit_builder_block_call(
+                    unit, block, value) != 1 { return 0; }
+                return l1_unit_builder_block_return(unit, block, 0);
+            }
+            return l1_unit_builder_block_return(unit, block, value);
+        }
+        if l1_unit_builder_block_call(
+            unit, block, value) != 1 { return 0; }
+        return mini_lower_plain_statement_block(
+            index, root, function, unit, block,
+            mini_syntax_next(node), body_start);
+    }
+    if form_tag == 4 {
+        let return_node: i32 = mini_syntax_return_expr(node);
+        let return_value: i32 = mini_lower_plain_expr(
+            index, root, function, unit, block,
+            return_node, body_start, node);
+        if mini_elaborate_expr_type_indexed(
+            index, root, function, return_node, body_start, node) == 4 {
+            if l1_unit_builder_block_call(
+                unit, block, return_value) != 1 { return 0; }
+            return l1_unit_builder_block_return(unit, block, 0);
+        }
+        return l1_unit_builder_block_return(unit, block, return_value);
+    }
+    if form_tag == 5 {
+        let condition: i32 = mini_lower_plain_expr(
+            index, root, function, unit, block,
+            mini_syntax_if_statement_condition(node), body_start, node);
+        let branch: i32 = mini_syntax_left(
+            mini_syntax_if_statement_body(node));
+        let then_block: i32 = l1_unit_builder_block_if(
+            unit, block, condition);
+        if then_block == 0 { return 0; }
+        if mini_lower_plain_statement_block(
+            index, root, function, unit, then_block,
+            branch, branch) != 1 { return 0; }
+        return mini_lower_plain_statement_block(
+            index, root, function, unit, block,
+            mini_syntax_next(node), body_start);
+    }
+    return 0;
+}
+
+fn mini_lower_plain_only_separators(node: i32) -> i32 {
+    if node == 0 { return 1; }
+    if mini_syntax_form_tag(node) != 1 { return 0; }
+    return mini_lower_plain_only_separators(mini_syntax_next(node));
+}
+
+fn mini_lower_plain_declared_body(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, procedure: i32,
+    node: i32, body_start: i32) -> i32 {
+    let block: i32 = l1_unit_builder_proc_body(unit, procedure);
+    if block == 0 { return 0; }
+    return mini_lower_plain_statement_block(
+        index, root, function, unit, block, node, body_start);
+}
+
+fn mini_lower_plain_function(
+    index: M13ElaborationIndex, root: i32,
+    unit: i32, function: i32) -> i32 {
+    let procedure: i32 = l1_unit_builder_proc(
+        unit, mini_syntax_function_name(function),
+        mini_lower_unit_type_from_syntax(
+            mini_syntax_right(mini_syntax_function_signature(function))));
+    if procedure == 0 { return 0; }
+    if mini_lower_unit_params(
+        unit, procedure,
+        mini_syntax_function_first_param(function)) != 1 { return 0; }
+    let body: i32 = mini_syntax_function_body(function);
+    let first: i32 = mini_syntax_left(body);
+    let block: i32 = l1_unit_builder_proc_body(unit, procedure);
+    if block == 0 { return 0; }
+    if mini_syntax_function_style(function) == 1 {
+        return mini_lower_plain_body(
+            index, root, function, unit, procedure, block, first, first);
+    }
+    return mini_lower_plain_declared_body(
+        index, root, function, unit, procedure, first, first);
+}
+
+fn mini_lower_plain_definitions(
+    index: M13ElaborationIndex, root: i32,
+    unit: i32, function: i32) -> i32 {
+    if function == 0 { return 1; }
+    if mini_lower_plain_function(index, root, unit, function) != 1 { return 0; }
+    return mini_lower_plain_definitions(
+        index, root, unit, mini_middle_next_definition(function));
+}
+
+fn m13_lower_failure_function(
+    index: M13ElaborationIndex, root: i32, function: i32) -> i32 {
+    if function == 0 { return 0; }
+    let unit: i32 = l1_unit_builder_new();
+    if unit == 0 { return function; }
+    let ok: i32 = mini_lower_plain_function(
+        index, root, unit, function);
+    let destroyed: i32 = l1_unit_builder_destroy(unit);
+    if ok != 1 { return function; }
+    return m13_lower_failure_function(
+        index, root, mini_middle_next_definition(function));
+}
+
+pub fn mini_lower_unit_failure_line(root: i32) -> i32 {
+    let index: M13ElaborationIndex = mini_elaborate_index_new(root);
+    let function: i32 = m13_lower_failure_function(
+        index, root, mini_module_first_procedure(root));
+    let line: i32 = mini_syntax_line(function);
+    let destroyed: i32 = mini_elaborate_index_destroy(index);
+    return line;
+}
+
+fn mini_lower_plain_externs(
+    unit: i32, root: i32, callable: i32, selected: addr) -> i32 {
+    if callable == 0 { return 1; }
+    if mini_syntax_text_equal(
+        mini_syntax_function_name(callable), selected) != 1 {
+        let link: addr = mini_lower_callable_link_name(root, callable);
+        if mini_syntax_function_style(callable) == 4 {
+            if mini_middle_foreign_link_precedes(
+                root, callable, link) == 1 {
+                return mini_lower_plain_externs(
+                    unit, root, mini_middle_next_callable(callable), selected);
+            }
+        }
+        let procedure: i32 = l1_unit_builder_extern(
+            unit, link,
+            mini_lower_unit_type_from_syntax(
+                mini_syntax_right(
+                    mini_syntax_function_signature(callable))));
+        if procedure == 0 { return 0; }
+        if mini_lower_unit_params(
+            unit, procedure,
+            mini_syntax_function_first_param(callable)) != 1 { return 0; }
+    }
+    return mini_lower_plain_externs(
+        unit, root, mini_middle_next_callable(callable), selected);
+}
+
+
+fn mini_lower_plain_foreign_declarations(
+    unit: i32, root: i32, callable: i32) -> i32 {
+    if callable == 0 { return 1; }
+    if mini_syntax_function_style(callable) == 4 {
+        let link: addr = mini_middle_foreign_link_name(root, callable);
+        if mini_syntax_text_equal(link, "") == 1 { return 0; }
+        if mini_middle_foreign_link_precedes(
+            root, callable, link) != 1 {
+            let procedure: i32 = l1_unit_builder_extern(
+                unit, link, mini_lower_unit_type_from_syntax(
+                    mini_syntax_right(
+                        mini_syntax_function_signature(callable))));
+            if procedure == 0 { return 0; }
+            if mini_lower_unit_params(
+                unit, procedure,
+                mini_syntax_function_first_param(callable)) != 1 { return 0; }
+        }
+    }
+    return mini_lower_plain_foreign_declarations(
+        unit, root, mini_middle_next_callable(callable));
+}
+
+pub fn mini_lower_unit_plain_validated(root: i32) -> i32 {
+    let unit: i32 = l1_unit_builder_new();
+    if unit == 0 { return 0; }
+    let index: M13ElaborationIndex = mini_elaborate_index_new(root);
+    if mini_lower_plain_import_externs(unit, root) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    if mini_lower_plain_foreign_declarations(
+        unit, root, mini_middle_first_callable(root)) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    if mini_lower_plain_definitions(
+        index, root, unit, mini_module_first_procedure(root)) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    let entry: addr = mini_syntax_function_name(
+        mini_module_first_procedure(root));
+    if l1_unit_builder_verify(unit, entry) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+    return unit;
+}
+
+// M13 observability gate.  8101 means construction failed before verifier;
+// otherwise return the stable L1 verifier diagnostic code (zero on success).
+pub fn mini_lower_unit_plain_failure_code(root: i32) -> i32 {
+    let unit: i32 = l1_unit_builder_new();
+    if unit == 0 { return 8100; }
+    let index: M13ElaborationIndex = mini_elaborate_index_new(root);
+    if mini_lower_plain_import_externs(unit, root) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+        return 8101;
+    }
+    if mini_lower_plain_foreign_declarations(
+        unit, root, mini_middle_first_callable(root)) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+        return 8101;
+    }
+    if mini_lower_plain_definitions(
+        index, root, unit, mini_module_first_procedure(root)) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+        return 8101;
+    }
+    let entry: addr = mini_syntax_function_name(
+        mini_module_first_procedure(root));
+    let code: i32 = l1_unit_builder_verify_code(unit, entry);
+    let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+    let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+    return code;
+}
+
+pub fn mini_lower_unit_plain_failure_message(root: i32) -> addr {
+    let unit: i32 = l1_unit_builder_new();
+    if unit == 0 { return "unable to allocate L1 unit"; }
+    let index: M13ElaborationIndex = mini_elaborate_index_new(root);
+    if mini_lower_plain_import_externs(unit, root) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+        return "unable to construct import extern declarations";
+    }
+    if mini_lower_plain_foreign_declarations(
+        unit, root, mini_middle_first_callable(root)) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+        return "unable to construct foreign declarations";
+    }
+    if mini_lower_plain_definitions(
+        index, root, unit, mini_module_first_procedure(root)) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+        return "unable to construct complete L1 unit";
+    }
+    let entry: addr = mini_syntax_function_name(
+        mini_module_first_procedure(root));
+    // The host returns an immutable VM string, so it remains valid after the
+    // temporary physical unit is destroyed.
+    let message: addr = l1_unit_builder_verify_message(unit, entry);
+    let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+    let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+    return message;
+}
+
+pub fn mini_lower_unit_named_validated(root: i32, name: addr) -> i32 {
+    let selected: i32 = mini_module_find_procedure(root, name);
+    if selected == 0 { return 0; }
+    if mini_middle_is_procedure_definition(selected) != 1 { return 0; }
+    let unit: i32 = l1_unit_builder_new();
+    if unit == 0 { return 0; }
+    let index: M13ElaborationIndex = mini_elaborate_index_new(root);
+    if mini_lower_plain_externs(
+        unit, root, mini_middle_first_callable(root), name) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    if mini_lower_plain_function(index, root, unit, selected) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    if l1_unit_builder_verify(unit, name) != 1 {
+        let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    let destroyed_index: i32 = mini_elaborate_index_destroy(index);
+    return unit;
+}

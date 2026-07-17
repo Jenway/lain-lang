@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "lainir_exec.h"
 
 typedef void (*native_foreign_registrar)(
   void *user_data,
@@ -38,7 +39,18 @@ void native_register_core_ffi(
   native_foreign_registrar registrar,
   void *user_data);
 void *native_init_scheme(void);
+// Registers only physical host capabilities required by a precompiled Lain
+// compiler artifact.  It deliberately does not load Scheme Meta sources.
+void *native_init_compiler_artifact_host(void);
 int32_t native_run_pipeline(void *ctx, void *root_group);
+LainirExecStatus native_execute_compiler_artifact(
+  void *ctx,
+  const char *artifact_text,
+  const char *entry_name,
+  const LainirValue *args,
+  uint32_t arg_count,
+  LainirValue *result_out,
+  L1Diagnostic *diagnostic);
 // Interpreter-only transition mode: imports are elaborated from Lain source
 // into the same in-memory L1 module.  Normal compilation continues to use
 // interface artifacts and does not acquire source-module policy in C.
@@ -54,6 +66,18 @@ void native_declare_signature(const char *name);
 void native_mark_export(const char *name);
 int native_has_explicit_exports(void);
 int native_is_export_marked(const char *name);
+
+// Legacy interface transport. Meta owns visibility, nominal identity,
+// semantic field types, and semantic function signatures; the C host only
+// retains those already-decided records until interface serialization.
+void native_reset_interface_metadata(void);
+void native_declare_interface_type(
+    const char *name, const char *identity, uint32_t size, uint32_t align,
+    uint32_t field_count, const char *const *field_names,
+    const char *const *field_types, const uint32_t *field_offsets);
+void native_declare_interface_function(
+    const char *name, uint32_t param_count,
+    const char *const *param_types, const char *ret_type);
 
 // environment
 const char *native_getenv(const char *name);

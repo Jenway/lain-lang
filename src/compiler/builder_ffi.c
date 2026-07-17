@@ -310,6 +310,67 @@ static sexp sexp_core_declare_signature(sexp ctx, sexp self, sexp_sint_t n,
   return SEXP_VOID;
 }
 
+// Meta has already decided the public nominal type and its semantic layout.
+// This bridge copies that record for .lci serialization; it does not infer
+// visibility, identity, layout, or L1 representation.
+static sexp sexp_core_declare_interface_type(
+    sexp ctx, sexp self, sexp_sint_t n, sexp arg_name, sexp arg_identity,
+    sexp arg_layout, sexp arg_fields) {
+  uint32_t count = get_list_length(arg_fields);
+  const char **names = (const char **)calloc(count ? count : 1,
+                                              sizeof(const char *));
+  const char **types = (const char **)calloc(count ? count : 1,
+                                              sizeof(const char *));
+  uint32_t *offsets =
+      (uint32_t *)calloc(count ? count : 1, sizeof(uint32_t));
+  sexp rest = arg_fields;
+  uint32_t i = 0;
+  (void)self;
+  (void)n;
+  if (!names || !types || !offsets) abort();
+  while (sexp_pairp(rest) && i < count) {
+    sexp field = sexp_car(rest);
+    sexp tail = sexp_cdr(field);
+    names[i] = sexp_to_c_string(ctx, sexp_car(field));
+    types[i] = sexp_to_c_string(ctx, sexp_car(tail));
+    tail = sexp_cdr(tail);
+    offsets[i] = (uint32_t)sexp_unbox_fixnum(sexp_car(tail));
+    ++i;
+    rest = sexp_cdr(rest);
+  }
+  native_declare_interface_type(
+      sexp_to_c_string(ctx, arg_name), sexp_to_c_string(ctx, arg_identity),
+      (uint32_t)sexp_unbox_fixnum(sexp_car(arg_layout)),
+      (uint32_t)sexp_unbox_fixnum(sexp_car(sexp_cdr(arg_layout))),
+      i, names, types, offsets);
+  free(names);
+  free(types);
+  free(offsets);
+  return SEXP_VOID;
+}
+
+static sexp sexp_core_declare_interface_function(
+    sexp ctx, sexp self, sexp_sint_t n, sexp arg_name, sexp arg_params,
+    sexp arg_ret) {
+  uint32_t count = get_list_length(arg_params);
+  const char **params = (const char **)calloc(count ? count : 1,
+                                               sizeof(const char *));
+  sexp rest = arg_params;
+  uint32_t i = 0;
+  (void)self;
+  (void)n;
+  if (!params) abort();
+  while (sexp_pairp(rest) && i < count) {
+    params[i++] = sexp_to_c_string(ctx, sexp_car(rest));
+    rest = sexp_cdr(rest);
+  }
+  native_declare_interface_function(
+      sexp_to_c_string(ctx, arg_name), i, params,
+      sexp_to_c_string(ctx, arg_ret));
+  free(params);
+  return SEXP_VOID;
+}
+
 static sexp sexp_core_declare_extern_function(sexp ctx, sexp self,
                                               sexp_sint_t n, sexp arg_name,
                                               sexp arg_link_name,
@@ -976,6 +1037,368 @@ static sexp sexp_core_function_ref(sexp ctx, sexp self, sexp_sint_t n,
 static AstArena g_ast_arena;
 static int g_ast_arena_inited = 0;
 
+// Stable multi-source syntax storage.  AstNodeId remains local to AstArena;
+// callers see an opaque tagged i32 whose registry entry identifies the
+// owning store, unit, and local node.  This lets the existing ast.node-*
+// topology API traverse multiple live arenas without widening every Lain
+// frontend function signature.
+typedef struct {
+    uint32_t id;
+    int alive;
+    AstArena arena;
+    AstNodeId root;
+    uint32_t stable_base;
+} AstSyntaxUnit;
+
+typedef struct {
+    uint32_t id;
+    int alive;
+    AstSyntaxUnit *units;
+    uint32_t unit_count;
+    uint32_t unit_capacity;
+} AstSyntaxStore;
+
+static AstSyntaxStore *g_ast_stores = NULL;
+static uint32_t g_ast_store_count = 0;
+static uint32_t g_ast_store_capacity = 0;
+static uint32_t g_ast_next_store_id = 1;
+static uint32_t g_ast_next_unit_id = 1;
+
+#define AST_STABLE_HANDLE_TAG UINT32_C(0x40000000)
+#define AST_STABLE_HANDLE_MASK UINT32_C(0x3fffffff)
+
+typedef struct {
+    uint32_t store_id;
+    uint32_t unit_id;
+    AstNodeId local_id;
+} AstStableNodeRef;
+
+static AstStableNodeRef *g_ast_stable_nodes = NULL;
+static uint32_t g_ast_stable_node_count = 0;
+static uint32_t g_ast_stable_node_capacity = 0;
+
+static AstSyntaxStore *ast_syntax_store_get(uint32_t store_id) {
+    uint32_t i;
+    for (i = 0; i < g_ast_store_count; i++) {
+        AstSyntaxStore *store = &g_ast_stores[i];
+        if (store->alive && store->id == store_id) return store;
+    }
+    return NULL;
+}
+
+static AstSyntaxUnit *ast_syntax_unit_get(AstSyntaxStore *store,
+                                           uint32_t unit_id) {
+    uint32_t i;
+    if (!store) return NULL;
+    for (i = 0; i < store->unit_count; i++) {
+        AstSyntaxUnit *unit = &store->units[i];
+        if (unit->alive && unit->id == unit_id) return unit;
+    }
+    return NULL;
+}
+
+static uint32_t ast_syntax_register_nodes(AstSyntaxStore *store,
+                                          AstSyntaxUnit *unit) {
+    uint32_t count = ast_count(&unit->arena);
+    uint32_t needed = g_ast_stable_node_count + count;
+    uint32_t i;
+    if (needed >= AST_STABLE_HANDLE_TAG) return 0;
+    if (needed > g_ast_stable_node_capacity) {
+        uint32_t next = g_ast_stable_node_capacity ?
+            g_ast_stable_node_capacity * 2 : 1024;
+        while (next < needed) next *= 2;
+        AstStableNodeRef *grown = realloc(
+            g_ast_stable_nodes, sizeof(*grown) * next);
+        if (!grown) return 0;
+        g_ast_stable_nodes = grown;
+        g_ast_stable_node_capacity = next;
+    }
+    unit->stable_base = g_ast_stable_node_count + 1;
+    for (i = 1; i <= count; i++) {
+        AstStableNodeRef *ref = &g_ast_stable_nodes[g_ast_stable_node_count++];
+        ref->store_id = store->id;
+        ref->unit_id = unit->id;
+        ref->local_id = (AstNodeId)i;
+    }
+    return 1;
+}
+
+static uint32_t ast_syntax_stable_handle(const AstSyntaxUnit *unit,
+                                         AstNodeId local_id) {
+    if (!unit || local_id == AST_NULL) return 0;
+    return AST_STABLE_HANDLE_TAG |
+           (unit->stable_base + (uint32_t)local_id - 1);
+}
+
+static const AstNode *ast_ffi_node_get(uint32_t handle,
+                                       AstSyntaxUnit **out_unit,
+                                       AstNodeId *out_local) {
+    AstSyntaxUnit *unit = NULL;
+    AstNodeId local = (AstNodeId)handle;
+    const AstNode *node = NULL;
+    if ((handle & AST_STABLE_HANDLE_TAG) != 0) {
+        uint32_t index = handle & AST_STABLE_HANDLE_MASK;
+        AstStableNodeRef *ref;
+        AstSyntaxStore *store;
+        if (index == 0 || index > g_ast_stable_node_count) goto done;
+        ref = &g_ast_stable_nodes[index - 1];
+        store = ast_syntax_store_get(ref->store_id);
+        unit = ast_syntax_unit_get(store, ref->unit_id);
+        local = ref->local_id;
+        if (unit) node = ast_get(&unit->arena, local);
+    } else if (g_ast_arena_inited) {
+        node = ast_get(&g_ast_arena, local);
+    }
+done:
+    if (out_unit) *out_unit = unit;
+    if (out_local) *out_local = local;
+    return node;
+}
+
+static uint32_t ast_ffi_child_handle(AstSyntaxUnit *unit,
+                                     AstNodeId local_child) {
+    return unit ? ast_syntax_stable_handle(unit, local_child)
+                : (uint32_t)local_child;
+}
+
+static const AstNode *ast_syntax_node_get(uint32_t store_id,
+                                           uint32_t unit_id,
+                                           uint32_t node_handle) {
+    AstSyntaxStore *store = ast_syntax_store_get(store_id);
+    AstSyntaxUnit *unit = ast_syntax_unit_get(store, unit_id);
+    AstSyntaxUnit *owner = NULL;
+    const AstNode *node;
+    if (!unit) return NULL;
+    node = ast_ffi_node_get(node_handle, &owner, NULL);
+    if (owner) return owner == unit ? node : NULL;
+    // Explicit unit APIs retain local-node compatibility during migration.
+    return ast_get(&unit->arena, (AstNodeId)node_handle);
+}
+
+static sexp sexp_ast_store_new(sexp ctx, sexp self, sexp_sint_t n) {
+    AstSyntaxStore *store;
+    if (g_ast_store_count == g_ast_store_capacity) {
+        uint32_t next = g_ast_store_capacity ? g_ast_store_capacity * 2 : 4;
+        AstSyntaxStore *grown = realloc(g_ast_stores, sizeof(*grown) * next);
+        if (!grown) return sexp_make_fixnum(0);
+        g_ast_stores = grown;
+        g_ast_store_capacity = next;
+    }
+    store = &g_ast_stores[g_ast_store_count++];
+    memset(store, 0, sizeof(*store));
+    store->id = g_ast_next_store_id++;
+    store->alive = 1;
+    return sexp_make_fixnum((sexp_sint_t)store->id);
+}
+
+static sexp sexp_ast_store_destroy(sexp ctx, sexp self, sexp_sint_t n,
+                                   sexp arg_store) {
+    uint32_t i;
+    AstSyntaxStore *store = ast_syntax_store_get(
+        (uint32_t)sexp_unbox_fixnum(arg_store));
+    if (!store) return sexp_make_fixnum(0);
+    for (i = 0; i < store->unit_count; i++) {
+        if (store->units[i].alive) {
+            ast_arena_destroy(&store->units[i].arena);
+            store->units[i].alive = 0;
+        }
+    }
+    free(store->units);
+    store->units = NULL;
+    store->unit_count = 0;
+    store->unit_capacity = 0;
+    store->alive = 0;
+    return sexp_make_fixnum(1);
+}
+
+static sexp sexp_ast_unit_parse(sexp ctx, sexp self, sexp_sint_t n,
+                                sexp arg_store, sexp arg_src,
+                                sexp arg_len) {
+    AstSyntaxUnit *unit;
+    AstSyntaxStore *store = ast_syntax_store_get(
+        (uint32_t)sexp_unbox_fixnum(arg_store));
+    const char *src = sexp_to_c_string(ctx, arg_src);
+    uint32_t len = (uint32_t)sexp_unbox_fixnum(arg_len);
+    if (!store || !src) return sexp_make_fixnum(0);
+    if (store->unit_count == store->unit_capacity) {
+        uint32_t next = store->unit_capacity ? store->unit_capacity * 2 : 4;
+        AstSyntaxUnit *grown = realloc(store->units, sizeof(*grown) * next);
+        if (!grown) return sexp_make_fixnum(0);
+        store->units = grown;
+        store->unit_capacity = next;
+    }
+    unit = &store->units[store->unit_count++];
+    memset(unit, 0, sizeof(*unit));
+    unit->id = g_ast_next_unit_id++;
+    unit->alive = 1;
+    ast_arena_init(&unit->arena);
+    unit->root = ast_parse(&unit->arena, src, len);
+    if (!ast_syntax_register_nodes(store, unit)) {
+        ast_arena_destroy(&unit->arena);
+        unit->alive = 0;
+        unit->root = AST_NULL;
+        return sexp_make_fixnum(0);
+    }
+    return sexp_make_fixnum((sexp_sint_t)unit->id);
+}
+
+static sexp sexp_ast_unit_destroy(sexp ctx, sexp self, sexp_sint_t n,
+                                  sexp arg_store, sexp arg_unit) {
+    AstSyntaxStore *store = ast_syntax_store_get(
+        (uint32_t)sexp_unbox_fixnum(arg_store));
+    AstSyntaxUnit *unit = ast_syntax_unit_get(
+        store, (uint32_t)sexp_unbox_fixnum(arg_unit));
+    if (!unit) return sexp_make_fixnum(0);
+    ast_arena_destroy(&unit->arena);
+    unit->alive = 0;
+    unit->root = AST_NULL;
+    return sexp_make_fixnum(1);
+}
+
+static AstSyntaxUnit *ast_syntax_unit_from_args(sexp arg_store,
+                                                sexp arg_unit) {
+    AstSyntaxStore *store = ast_syntax_store_get(
+        (uint32_t)sexp_unbox_fixnum(arg_store));
+    return ast_syntax_unit_get(store, (uint32_t)sexp_unbox_fixnum(arg_unit));
+}
+
+static sexp sexp_ast_unit_root(sexp ctx, sexp self, sexp_sint_t n,
+                               sexp arg_store, sexp arg_unit) {
+    AstSyntaxUnit *unit = ast_syntax_unit_from_args(arg_store, arg_unit);
+    return sexp_make_fixnum(unit ?
+        (sexp_sint_t)ast_syntax_stable_handle(unit, unit->root) : 0);
+}
+
+static sexp sexp_ast_unit_node_count(sexp ctx, sexp self, sexp_sint_t n,
+                                     sexp arg_store, sexp arg_unit) {
+    AstSyntaxUnit *unit = ast_syntax_unit_from_args(arg_store, arg_unit);
+    return sexp_make_fixnum(unit ? (sexp_sint_t)ast_count(&unit->arena) : 0);
+}
+
+static sexp sexp_ast_unit_node_kind(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp s, sexp u, sexp id) {
+    const AstNode *node = ast_syntax_node_get(
+        (uint32_t)sexp_unbox_fixnum(s), (uint32_t)sexp_unbox_fixnum(u),
+        (uint32_t)sexp_unbox_fixnum(id));
+    return sexp_make_fixnum(node ? (sexp_sint_t)node->kind : -1);
+}
+
+static sexp sexp_ast_unit_node_text(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp s, sexp u, sexp id) {
+    const AstNode *node = ast_syntax_node_get(
+        (uint32_t)sexp_unbox_fixnum(s), (uint32_t)sexp_unbox_fixnum(u),
+        (uint32_t)sexp_unbox_fixnum(id));
+    return node && node->text ? sexp_c_string(ctx, node->text, -1) : SEXP_FALSE;
+}
+
+static sexp sexp_ast_unit_node_string_value(sexp ctx, sexp self,
+                                            sexp_sint_t n, sexp s, sexp u,
+                                            sexp id) {
+    const AstNode *node = ast_syntax_node_get(
+        (uint32_t)sexp_unbox_fixnum(s), (uint32_t)sexp_unbox_fixnum(u),
+        (uint32_t)sexp_unbox_fixnum(id));
+    size_t len;
+    if (!node || !node->text) return SEXP_FALSE;
+    len = strlen(node->text);
+    if (len < 2 || node->text[0] != '"' || node->text[len - 1] != '"')
+        return SEXP_FALSE;
+    return sexp_c_string(ctx, node->text + 1, (sexp_sint_t)(len - 2));
+}
+
+static sexp sexp_ast_unit_node_is_atom_text(sexp ctx, sexp self,
+                                            sexp_sint_t n, sexp s, sexp u,
+                                            sexp id, sexp arg_text) {
+    const AstNode *node = ast_syntax_node_get(
+        (uint32_t)sexp_unbox_fixnum(s), (uint32_t)sexp_unbox_fixnum(u),
+        (uint32_t)sexp_unbox_fixnum(id));
+    const char *value = sexp_to_c_string(ctx, arg_text);
+    return sexp_make_fixnum(node && node->kind == AST_ATOM && node->text &&
+                            value && strcmp(node->text, value) == 0 ? 1 : 0);
+}
+
+static sexp sexp_ast_unit_node_is_infix_text(sexp ctx, sexp self,
+                                             sexp_sint_t n, sexp s, sexp u,
+                                             sexp id, sexp arg_text) {
+    uint32_t store_id = (uint32_t)sexp_unbox_fixnum(s);
+    uint32_t unit_id = (uint32_t)sexp_unbox_fixnum(u);
+    const AstNode *node = ast_syntax_node_get(
+        store_id, unit_id, (uint32_t)sexp_unbox_fixnum(id));
+    const AstNode *op = node ? ast_syntax_node_get(store_id, unit_id, node->op)
+                             : NULL;
+    const char *value = sexp_to_c_string(ctx, arg_text);
+    return sexp_make_fixnum(node && node->kind == AST_INFIX && op && op->text &&
+                            value && strcmp(op->text, value) == 0 ? 1 : 0);
+}
+
+static sexp sexp_ast_unit_node_atom_class(sexp ctx, sexp self, sexp_sint_t n,
+                                          sexp s, sexp u, sexp id) {
+    const AstNode *node = ast_syntax_node_get(
+        (uint32_t)sexp_unbox_fixnum(s), (uint32_t)sexp_unbox_fixnum(u),
+        (uint32_t)sexp_unbox_fixnum(id));
+    const char *value;
+    size_t len;
+    size_t i;
+    if (!node || node->kind != AST_ATOM || !node->text)
+        return sexp_make_fixnum(0);
+    value = node->text;
+    len = strlen(value);
+    if (len >= 2 && value[0] == '"' && value[len - 1] == '"')
+        return sexp_make_fixnum(2);
+    if (len > 0 && !(len > 1 && value[0] == '0')) {
+        for (i = 0; i < len && value[i] >= '0' && value[i] <= '9'; i++) {}
+        if (i == len) return sexp_make_fixnum(1);
+    }
+    return sexp_make_fixnum(3);
+}
+
+static sexp sexp_ast_unit_node_line(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp s, sexp u, sexp id) {
+    const AstNode *node = ast_syntax_node_get(
+        (uint32_t)sexp_unbox_fixnum(s), (uint32_t)sexp_unbox_fixnum(u),
+        (uint32_t)sexp_unbox_fixnum(id));
+    return sexp_make_fixnum(node ? (sexp_sint_t)node->line : 0);
+}
+
+static sexp sexp_ast_unit_node_col(sexp ctx, sexp self, sexp_sint_t n,
+                                   sexp s, sexp u, sexp id) {
+    const AstNode *node = ast_syntax_node_get(
+        (uint32_t)sexp_unbox_fixnum(s), (uint32_t)sexp_unbox_fixnum(u),
+        (uint32_t)sexp_unbox_fixnum(id));
+    return sexp_make_fixnum(node ? (sexp_sint_t)node->col : 0);
+}
+
+static sexp ast_unit_node_edge(sexp ctx, sexp s, sexp u, sexp id, int edge) {
+    AstSyntaxUnit *unit = ast_syntax_unit_from_args(s, u);
+    const AstNode *node = ast_syntax_node_get(
+        (uint32_t)sexp_unbox_fixnum(s), (uint32_t)sexp_unbox_fixnum(u),
+        (uint32_t)sexp_unbox_fixnum(id));
+    AstNodeId value = AST_NULL;
+    if (node) {
+        if (edge == 0) value = node->left;
+        else if (edge == 1) value = node->right;
+        else if (edge == 2) value = node->op;
+        else value = node->next;
+    }
+    return sexp_make_fixnum((sexp_sint_t)ast_ffi_child_handle(unit, value));
+}
+
+static sexp sexp_ast_unit_node_left(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp s, sexp u, sexp id) {
+    return ast_unit_node_edge(ctx, s, u, id, 0);
+}
+static sexp sexp_ast_unit_node_right(sexp ctx, sexp self, sexp_sint_t n,
+                                     sexp s, sexp u, sexp id) {
+    return ast_unit_node_edge(ctx, s, u, id, 1);
+}
+static sexp sexp_ast_unit_node_op(sexp ctx, sexp self, sexp_sint_t n,
+                                  sexp s, sexp u, sexp id) {
+    return ast_unit_node_edge(ctx, s, u, id, 2);
+}
+static sexp sexp_ast_unit_node_next(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp s, sexp u, sexp id) {
+    return ast_unit_node_edge(ctx, s, u, id, 3);
+}
+
 // ast.parse!(src, len) → root node id
 static sexp sexp_ast_parse(sexp ctx, sexp self, sexp_sint_t n,
                             sexp arg_src, sexp arg_len) {
@@ -999,7 +1422,7 @@ static sexp sexp_ast_node_count(sexp ctx, sexp self, sexp_sint_t n) {
 static sexp sexp_ast_node_kind(sexp ctx, sexp self, sexp_sint_t n,
                                 sexp arg_id) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
+    const AstNode *node = ast_ffi_node_get(id, NULL, NULL);
     if (!node) return sexp_make_fixnum(-1);
     return sexp_make_fixnum((sexp_sint_t)node->kind);
 }
@@ -1008,9 +1431,24 @@ static sexp sexp_ast_node_kind(sexp ctx, sexp self, sexp_sint_t n,
 static sexp sexp_ast_node_text(sexp ctx, sexp self, sexp_sint_t n,
                                 sexp arg_id) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
+    const AstNode *node = ast_ffi_node_get(id, NULL, NULL);
     if (!node || !node->text) return SEXP_FALSE;
     return sexp_c_string(ctx, node->text, -1);
+}
+
+// Lexical string payload.  This removes only the delimiter quotes, matching
+// the bootstrap reader's current string-literal contract; it assigns no
+// source-language meaning to the token.
+static sexp sexp_ast_node_string_value(sexp ctx, sexp self, sexp_sint_t n,
+                                       sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    const AstNode *node = ast_ffi_node_get(id, NULL, NULL);
+    size_t len;
+    if (!node || !node->text) return SEXP_FALSE;
+    len = strlen(node->text);
+    if (len < 2 || node->text[0] != '"' || node->text[len - 1] != '"')
+        return SEXP_FALSE;
+    return sexp_c_string(ctx, node->text + 1, (sexp_sint_t)(len - 2));
 }
 
 // Batched topology predicates used by the self-hosted Meta reader.  They do
@@ -1019,7 +1457,7 @@ static sexp sexp_ast_node_text(sexp ctx, sexp self, sexp_sint_t n,
 static sexp sexp_ast_node_is_atom_text(sexp ctx, sexp self, sexp_sint_t n,
                                        sexp arg_id, sexp arg_text) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
+    const AstNode *node = ast_ffi_node_get(id, NULL, NULL);
     const char *text = sexp_to_c_string(ctx, arg_text);
     return sexp_make_fixnum(node && node->kind == AST_ATOM && node->text &&
                             text && strcmp(node->text, text) == 0 ? 1 : 0);
@@ -1028,8 +1466,10 @@ static sexp sexp_ast_node_is_atom_text(sexp ctx, sexp self, sexp_sint_t n,
 static sexp sexp_ast_node_is_infix_text(sexp ctx, sexp self, sexp_sint_t n,
                                         sexp arg_id, sexp arg_text) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
-    const AstNode *op = node ? ast_get(&g_ast_arena, node->op) : NULL;
+    AstSyntaxUnit *unit = NULL;
+    const AstNode *node = ast_ffi_node_get(id, &unit, NULL);
+    const AstNode *op = node ? (unit ? ast_get(&unit->arena, node->op)
+                                     : ast_get(&g_ast_arena, node->op)) : NULL;
     const char *text = sexp_to_c_string(ctx, arg_text);
     return sexp_make_fixnum(node && node->kind == AST_INFIX && op && op->text &&
                             text && strcmp(op->text, text) == 0 ? 1 : 0);
@@ -1039,7 +1479,7 @@ static sexp sexp_ast_node_is_infix_text(sexp ctx, sexp self, sexp_sint_t n,
 static sexp sexp_ast_node_atom_class(sexp ctx, sexp self, sexp_sint_t n,
                                      sexp arg_id) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
+    const AstNode *node = ast_ffi_node_get(id, NULL, NULL);
     const char *text;
     size_t len;
     size_t i;
@@ -1060,7 +1500,7 @@ static sexp sexp_ast_node_atom_class(sexp ctx, sexp self, sexp_sint_t n,
 static sexp sexp_ast_node_line(sexp ctx, sexp self, sexp_sint_t n,
                                 sexp arg_id) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
+    const AstNode *node = ast_ffi_node_get(id, NULL, NULL);
     if (!node) return sexp_make_fixnum(0);
     return sexp_make_fixnum((sexp_sint_t)node->line);
 }
@@ -1069,7 +1509,7 @@ static sexp sexp_ast_node_line(sexp ctx, sexp self, sexp_sint_t n,
 static sexp sexp_ast_node_col(sexp ctx, sexp self, sexp_sint_t n,
                                sexp arg_id) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
+    const AstNode *node = ast_ffi_node_get(id, NULL, NULL);
     if (!node) return sexp_make_fixnum(0);
     return sexp_make_fixnum((sexp_sint_t)node->col);
 }
@@ -1078,36 +1518,40 @@ static sexp sexp_ast_node_col(sexp ctx, sexp self, sexp_sint_t n,
 static sexp sexp_ast_node_left(sexp ctx, sexp self, sexp_sint_t n,
                                 sexp arg_id) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
+    AstSyntaxUnit *unit = NULL;
+    const AstNode *node = ast_ffi_node_get(id, &unit, NULL);
     if (!node) return sexp_make_fixnum(0);
-    return sexp_make_fixnum((sexp_sint_t)node->left);
+    return sexp_make_fixnum((sexp_sint_t)ast_ffi_child_handle(unit, node->left));
 }
 
 // ast.node-right(id) → child id or 0
 static sexp sexp_ast_node_right(sexp ctx, sexp self, sexp_sint_t n,
                                  sexp arg_id) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
+    AstSyntaxUnit *unit = NULL;
+    const AstNode *node = ast_ffi_node_get(id, &unit, NULL);
     if (!node) return sexp_make_fixnum(0);
-    return sexp_make_fixnum((sexp_sint_t)node->right);
+    return sexp_make_fixnum((sexp_sint_t)ast_ffi_child_handle(unit, node->right));
 }
 
 // ast.node-op(id) → child id or 0
 static sexp sexp_ast_node_op(sexp ctx, sexp self, sexp_sint_t n,
                               sexp arg_id) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
+    AstSyntaxUnit *unit = NULL;
+    const AstNode *node = ast_ffi_node_get(id, &unit, NULL);
     if (!node) return sexp_make_fixnum(0);
-    return sexp_make_fixnum((sexp_sint_t)node->op);
+    return sexp_make_fixnum((sexp_sint_t)ast_ffi_child_handle(unit, node->op));
 }
 
 // ast.node-next(id) → sibling id or 0
 static sexp sexp_ast_node_next(sexp ctx, sexp self, sexp_sint_t n,
                                 sexp arg_id) {
     uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
-    const AstNode *node = ast_get(&g_ast_arena, id);
+    AstSyntaxUnit *unit = NULL;
+    const AstNode *node = ast_ffi_node_get(id, &unit, NULL);
     if (!node) return sexp_make_fixnum(0);
-    return sexp_make_fixnum((sexp_sint_t)node->next);
+    return sexp_make_fixnum((sexp_sint_t)ast_ffi_child_handle(unit, node->next));
 }
 
 // ast.destroy!() — free arena
@@ -1202,6 +1646,10 @@ void native_register_core_ffi(
   REG("core.declare-module!", 1, sexp_core_declare_module);
   REG("core.declare-signature!", 1, sexp_core_declare_signature);
   REG("core.mark-export!", 1, sexp_core_mark_export);
+  REG("core.declare-interface-type!", 4,
+      sexp_core_declare_interface_type);
+  REG("core.declare-interface-function!", 3,
+      sexp_core_declare_interface_function);
   REG("core.eval!", 3, sexp_core_eval);
   REG("core.eval-value!", 1, sexp_core_eval_value);
 
@@ -1210,6 +1658,7 @@ void native_register_core_ffi(
   REG("ast.node-count", 0, sexp_ast_node_count);
   REG("ast.node-kind", 1, sexp_ast_node_kind);
   REG("ast.node-text", 1, sexp_ast_node_text);
+  REG("ast.node-string-value", 1, sexp_ast_node_string_value);
   REG("ast.node-is-atom-text", 2, sexp_ast_node_is_atom_text);
   REG("ast.node-is-infix-text", 2, sexp_ast_node_is_infix_text);
   REG("ast.node-atom-class", 1, sexp_ast_node_atom_class);
@@ -1220,6 +1669,24 @@ void native_register_core_ffi(
   REG("ast.node-op", 1, sexp_ast_node_op);
   REG("ast.node-next", 1, sexp_ast_node_next);
   REG("ast.destroy!", 0, sexp_ast_destroy);
+  REG("ast.store-new!", 0, sexp_ast_store_new);
+  REG("ast.store-destroy!", 1, sexp_ast_store_destroy);
+  REG("ast.unit-parse!", 3, sexp_ast_unit_parse);
+  REG("ast.unit-destroy!", 2, sexp_ast_unit_destroy);
+  REG("ast.unit-root", 2, sexp_ast_unit_root);
+  REG("ast.unit-node-count", 2, sexp_ast_unit_node_count);
+  REG("ast.unit-node-kind", 3, sexp_ast_unit_node_kind);
+  REG("ast.unit-node-text", 3, sexp_ast_unit_node_text);
+  REG("ast.unit-node-string-value", 3, sexp_ast_unit_node_string_value);
+  REG("ast.unit-node-is-atom-text", 4, sexp_ast_unit_node_is_atom_text);
+  REG("ast.unit-node-is-infix-text", 4, sexp_ast_unit_node_is_infix_text);
+  REG("ast.unit-node-atom-class", 3, sexp_ast_unit_node_atom_class);
+  REG("ast.unit-node-line", 3, sexp_ast_unit_node_line);
+  REG("ast.unit-node-col", 3, sexp_ast_unit_node_col);
+  REG("ast.unit-node-left", 3, sexp_ast_unit_node_left);
+  REG("ast.unit-node-right", 3, sexp_ast_unit_node_right);
+  REG("ast.unit-node-op", 3, sexp_ast_unit_node_op);
+  REG("ast.unit-node-next", 3, sexp_ast_unit_node_next);
 #undef REG
 }
 

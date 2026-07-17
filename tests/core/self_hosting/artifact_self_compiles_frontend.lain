@@ -2,51 +2,46 @@
 fn read_file_string(path: addr) -> addr;
 @foreign(c, link_name = "core.string-length!")
 fn string_length(text: addr) -> i32;
-@foreign(c, link_name = "core.string-append!")
-fn string_append(left: addr, right: addr) -> addr;
-@foreign(c, link_name = "core.execute-compiler-artifact!")
-fn execute_compiler_artifact(
-    artifact: addr, entry: addr, source: addr, length: i32) -> addr;
+@foreign(c, link_name = "core.string-equal!")
+fn string_equal(left: addr, right: addr) -> i32;
 @foreign(c, link_name = "core.execute-compiler-artifact-named!")
 fn execute_compiler_artifact_named(
-    artifact: addr, source: addr, length: i32, name: addr) -> addr;
-@foreign(c, link_name = "core.execute-lainir-text!")
-fn execute_l1_text(text: addr, entry: addr) -> i32;
+    artifact: addr, source: addr, length: i32, name: addr) -> i32;
+@foreign(c, link_name = "core.execute-compiler-artifact!")
+fn execute_compiler_artifact(
+    artifact: addr, entry: addr, source: addr, length: i32) -> i32;
+@foreign(c, link_name = "core.execute-lainir-unit!")
+fn execute_l1_unit(unit: i32, entry: addr) -> i32;
+@foreign(c, link_name = "core.destroy-lainir-unit!")
+fn destroy_l1_unit(unit: i32) -> i32;
 
 fn main() -> i32 {
     let artifact: addr = read_file_string(
         "build/core-self-hosting/meta_compiler.l1");
-    let syntax: addr = read_file_string(
-        "packages/lain/compiler/mini_syntax.lain");
-    let middle: addr = read_file_string(
-        "packages/lain/compiler/mini_middle.lain");
-    let types: addr = read_file_string(
-        "packages/lain/compiler/mini_type.lain");
-    let module_source: addr = read_file_string(
-        "packages/lain/compiler/mini_module.lain");
-    let elaborate: addr = read_file_string(
-        "packages/lain/compiler/mini_elaborate.lain");
-    let text_builder: addr = read_file_string(
-        "packages/lain/compiler/l1_text_builder.lain");
-    let lower: addr = read_file_string(
-        "packages/lain/compiler/mini_lower.lain");
-    let diagnostic: addr = read_file_string(
-        "packages/lain/compiler/mini_diagnostic.lain");
-    let compile_result: addr = read_file_string(
-        "packages/lain/compiler/mini_compile_result.lain");
-    let meta: addr = read_file_string(
-        "packages/lain/compiler/mini_meta.lain");
-    let source0: addr = string_append(syntax, middle);
-    let source1: addr = string_append(source0, types);
-    let source2: addr = string_append(source1, module_source);
-    let source3: addr = string_append(source2, elaborate);
-    let source4: addr = string_append(source3, text_builder);
-    let source5: addr = string_append(source4, lower);
-    let source6: addr = string_append(source5, diagnostic);
-    let source7: addr = string_append(source6, compile_result);
-    let source: addr = string_append(source7, meta);
-    let l1: addr = execute_compiler_artifact_named(
-        artifact, source, string_length(source), "mini_meta_schema_version");
-    if execute_l1_text(l1, "mini_meta_schema_version") != 4 { return 3411; }
+    if execute_compiler_artifact(
+        artifact, "mini_meta_m11_context_probe", "", 0) != 42 {
+        return 3409;
+    }
+    let phase_source: addr = "pub fn helper(a: i32) -> i32 { return a + 1; }
+pub fn main() -> i32 { return helper(41); }";
+    if execute_compiler_artifact(
+        artifact, "mini_meta_m12_phase_probe", phase_source,
+        string_length(phase_source)) != 42 {
+        return 3408;
+    }
+    // Full-closure compilation is the stage1 -> stage2 builder gate, and is
+    // repeated by stage2 -> stage3 below.  This fixture keeps the orthogonal
+    // named-compilation contract: an unrelated invalid body must not
+    // force validation of the selected leaf, while the selected body itself
+    // is still checked.
+    let partial: addr = "pub fn good() -> i32 { return 42; }
+pub fn bad() -> i32 { return missing(1); }";
+    let good_unit: i32 = execute_compiler_artifact_named(
+        artifact, partial, string_length(partial), "good");
+    if execute_l1_unit(good_unit, "good") != 42 { return 3412; }
+    if destroy_l1_unit(good_unit) != 1 { return 3415; }
+    let bad_unit: i32 = execute_compiler_artifact_named(
+        artifact, partial, string_length(partial), "bad");
+    if bad_unit != 0 { return 3413; }
     return 42;
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile every supported user-facing example to LAIN-IR."""
+"""Compile the public examples through the installed self-hosted compiler."""
 
 from __future__ import annotations
 
@@ -19,10 +19,19 @@ def compiler() -> pathlib.Path:
     return ROOT / "zig-out" / "bin" / f"lainc{suffix}"
 
 
+def checker() -> pathlib.Path:
+    suffix = ".exe" if os.name == "nt" else ""
+    return ROOT / "zig-out" / "bin" / f"l1check{suffix}"
+
+
 def main() -> int:
     lainc = compiler()
+    l1check = checker()
     if not lainc.exists():
         print(f"FAIL compiler missing: {lainc}", file=sys.stderr)
+        return 1
+    if not l1check.exists():
+        print(f"FAIL checker missing: {l1check}", file=sys.stderr)
         return 1
 
     sources = sorted(EXAMPLES.glob("*.lain"))
@@ -44,12 +53,21 @@ def main() -> int:
                 detail = (result.stderr or result.stdout).strip()
                 print(f"FAIL {source.name}: {detail}", file=sys.stderr)
                 return 1
+            checked = subprocess.run(
+                [str(l1check), str(output)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+            if checked.returncode != 0:
+                detail = (checked.stderr or checked.stdout).strip()
+                print(f"FAIL {source.name} L1 verification: {detail}", file=sys.stderr)
+                return 1
             print(f"PASS {source.name}")
 
-    print(f"Examples: {len(sources)} supported sources compiled")
+    print(f"Self-hosted examples: {len(sources)} sources compiled and verified")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

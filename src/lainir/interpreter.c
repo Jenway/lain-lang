@@ -20,15 +20,24 @@ typedef struct LainirFrame {
   LainirBinding *locals;
   uint32_t local_count;
   uint32_t local_cap;
-  LainirBuffer *allocas;
-  uint32_t alloca_count;
-  uint32_t alloca_cap;
   struct LainirFrame *caller;
 } LainirFrame;
 
 typedef struct {
+  const char *name;
+  L1Subroutine *sub;
+} LainirSubIndexEntry;
+
+typedef struct {
   L1Subroutine *module;
+  LainirSubIndexEntry *sub_index;
+  uint32_t sub_index_cap;
   LainirCapabilityTable *caps;
+  /* Aggregate allocations have run lifetime, not frame lifetime.  A struct
+   * may be returned from a callee and consumed by its caller. */
+  LainirBuffer *allocas;
+  uint32_t alloca_count;
+  uint32_t alloca_cap;
   const char *error;
   int should_return;
   int should_break;
@@ -123,10 +132,66 @@ static uint32_t interp_type_size(L1Type *ty) {
   }
 }
 
-static L1Subroutine *interp_find_sub(L1Subroutine *head, const char *name) {
+static L1Subroutine *interp_find_sub_linear(L1Subroutine *head,
+                                            const char *name) {
   for (L1Subroutine *sub = head; sub; sub = sub->next) {
     if (strcmp(sub->name, name) == 0) return sub;
     if (sub->link_name && strcmp(sub->link_name, name) == 0) return sub;
+  }
+  return NULL;
+}
+
+static uint32_t interp_hash_name(const char *name) {
+  uint32_t hash = 2166136261u;
+  const unsigned char *p = (const unsigned char *)name;
+  while (*p) {
+    hash ^= *p++;
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+static void interp_sub_index_insert(LainirInterpreter *interp,
+                                    const char *name,
+                                    L1Subroutine *sub) {
+  if (!interp->sub_index || !name) return;
+  uint32_t slot = interp_hash_name(name) & (interp->sub_index_cap - 1);
+  while (interp->sub_index[slot].name) {
+    /* Preserve the linked-list lookup contract: the first matching symbol
+     * wins when malformed/unverified input contains duplicate names. */
+    if (strcmp(interp->sub_index[slot].name, name) == 0) return;
+    slot = (slot + 1) & (interp->sub_index_cap - 1);
+  }
+  interp->sub_index[slot].name = name;
+  interp->sub_index[slot].sub = sub;
+}
+
+static void interp_build_sub_index(LainirInterpreter *interp) {
+  uint32_t key_count = 0;
+  uint32_t cap = 16;
+  for (L1Subroutine *sub = interp->module; sub; sub = sub->next) {
+    key_count++;
+    if (sub->link_name) key_count++;
+  }
+  while (cap < key_count * 2) cap *= 2;
+  interp->sub_index = calloc(cap, sizeof(LainirSubIndexEntry));
+  if (!interp->sub_index) return;
+  interp->sub_index_cap = cap;
+  for (L1Subroutine *sub = interp->module; sub; sub = sub->next) {
+    interp_sub_index_insert(interp, sub->name, sub);
+    if (sub->link_name) interp_sub_index_insert(interp, sub->link_name, sub);
+  }
+}
+
+static L1Subroutine *interp_find_sub(LainirInterpreter *interp,
+                                     const char *name) {
+  if (!interp->sub_index || !name)
+    return interp_find_sub_linear(interp->module, name);
+  uint32_t slot = interp_hash_name(name) & (interp->sub_index_cap - 1);
+  while (interp->sub_index[slot].name) {
+    if (strcmp(interp->sub_index[slot].name, name) == 0)
+      return interp->sub_index[slot].sub;
+    slot = (slot + 1) & (interp->sub_index_cap - 1);
   }
   return NULL;
 }
@@ -156,8 +221,16 @@ static int interp_set_local(LainirFrame *frame, const char *name, LainirValue va
 static void interp_free_frame(LainirFrame *frame) {
   if (!frame) return;
   for (uint32_t i = 0; i < frame->local_count; i++) free(frame->locals[i].name);
-  for (uint32_t i = 0; i < frame->alloca_count; i++) free(frame->allocas[i].data);
-  free(frame->locals); free(frame->allocas); free(frame->args);
+  free(frame->locals); free(frame->args);
+}
+
+static void interp_free_allocas(LainirInterpreter *interp) {
+  for (uint32_t i = 0; i < interp->alloca_count; i++)
+    free(interp->allocas[i].data);
+  free(interp->allocas);
+  interp->allocas = NULL;
+  interp->alloca_count = 0;
+  interp->alloca_cap = 0;
 }
 
 static LainirCapabilityEntry *interp_lookup_cap(LainirCapabilityTable *caps, const char *name) {
@@ -188,7 +261,16 @@ static uint32_t interp_store_width(L1Type *ty, LainirValue value) {
     if (value.bit_width && value.bit_width <= 8) return 1;
     if (value.bit_width && value.bit_width <= 16) return 2;
     if (value.bit_width && value.bit_width <= 32) return 4;
+    return 8;
   }
+  /* Text L1 currently omits the store type, so the interpreter must preserve
+   * the complete physical representation of pointer-like runtime values.
+   * Writing the historical four-byte fallback truncates addresses on 64-bit
+   * hosts and corrupts every nested aggregate returned across a call. */
+  if (value.kind == LAINIR_VALUE_ADDR ||
+      value.kind == LAINIR_VALUE_STRING ||
+      value.kind == LAINIR_VALUE_FUNC)
+    return (uint32_t)sizeof(void *);
   return 4;
 }
 
@@ -198,6 +280,21 @@ static LainirValue interp_load_bits(LainirInterpreter *interp, void *addr,
   if (!addr) { interp_trap(interp, "load from null"); return lainir_value_unit(); }
   memcpy(&bits, addr, size);
   return lainir_value_bits(bits, bit_width ? bit_width : size * 8);
+}
+
+static LainirValue interp_load_typed(
+    LainirInterpreter *interp, void *addr, L1Type *ty) {
+  if (!addr) {
+    interp_trap(interp, "load from null");
+    return lainir_value_unit();
+  }
+  if (ty && ty->kind == TY_ADDR) {
+    void *value = NULL;
+    memcpy(&value, addr, sizeof(value));
+    return lainir_value_addr(value);
+  }
+  return interp_load_bits(
+      interp, addr, interp_type_size(ty), interp_type_bits(ty));
 }
 
 static LainirValue interp_eval_primitive(LainirInterpreter *interp, L1Expr *expr,
@@ -246,7 +343,7 @@ static LainirValue interp_call_host(LainirInterpreter *interp, const char *name,
 
 static LainirValue interp_eval_call(LainirInterpreter *interp, LainirFrame *frame,
                                      L1Expr *expr) {
-  L1Subroutine *sub = interp_find_sub(interp->module, expr->data.call.fn_name);
+  L1Subroutine *sub = interp_find_sub(interp, expr->data.call.fn_name);
   LainirValue *args = NULL;
   LainirValue result = lainir_value_unit();
   if (expr->data.call.arg_count) {
@@ -453,15 +550,15 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
     if (!sz) sz = interp_type_size(expr->data.alloca.element_ty);
     uint8_t *data = calloc(sz ? sz : 1, 1);
     if (!data) { interp_trap(interp, "out of memory"); return lainir_value_unit(); }
-    if (frame->alloca_count == frame->alloca_cap) {
-      uint32_t nc = frame->alloca_cap ? frame->alloca_cap * 2 : 4;
-      LainirBuffer *na = realloc(frame->allocas, sizeof(LainirBuffer) * nc);
+    if (interp->alloca_count == interp->alloca_cap) {
+      uint32_t nc = interp->alloca_cap ? interp->alloca_cap * 2 : 4;
+      LainirBuffer *na = realloc(interp->allocas, sizeof(LainirBuffer) * nc);
       if (!na) { free(data); interp_trap(interp, "out of memory"); return lainir_value_unit(); }
-      frame->allocas = na; frame->alloca_cap = nc;
+      interp->allocas = na; interp->alloca_cap = nc;
     }
-    frame->allocas[frame->alloca_count].data = data;
-    frame->allocas[frame->alloca_count].size = sz;
-    frame->alloca_count++;
+    interp->allocas[interp->alloca_count].data = data;
+    interp->allocas[interp->alloca_count].size = sz;
+    interp->alloca_count++;
     return lainir_value_addr(data);
   }
   case EXPR_LEA: {
@@ -477,8 +574,9 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
   case EXPR_LOAD: {
     LainirValue av = interp_eval_expr(interp, frame, expr->data.load.addr);
     if (interp->error) return lainir_value_unit();
-    return interp_load_bits(interp, interp_value_addr(interp, av, "expected address for load"),
-                            interp_type_size(expr->data.load.ty), interp_type_bits(expr->data.load.ty));
+    return interp_load_typed(
+        interp, interp_value_addr(interp, av, "expected address for load"),
+        expr->data.load.ty);
   }
   case EXPR_FIELD: {
     LainirValue bv = interp_eval_expr(interp, frame, expr->data.field.base);
@@ -488,6 +586,11 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
     if (!expr->data.field.field_ty) { sz = 4; bt = 32; }
     uint8_t *addr = (uint8_t *)interp_value_addr(interp, bv, "expected address for field");
     if (interp->error) return lainir_value_unit();
+    if (expr->data.field.field_ty &&
+        expr->data.field.field_ty->kind == TY_ADDR)
+      return interp_load_typed(
+          interp, addr + expr->data.field.field_index,
+          expr->data.field.field_ty);
     return interp_load_bits(interp, addr + expr->data.field.field_index, sz, bt);
   }
   case EXPR_EVAL:
@@ -635,10 +738,25 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
   }
   interp.module = request->module;
   interp.caps = request->caps;
-  L1Subroutine *entry = interp_find_sub(request->module, request->entry_name);
-  if (!entry) { if (error_out) *error_out = "entry not found"; return LAINIR_RUN_NO_ENTRY; }
+  interp_build_sub_index(&interp);
+  L1Subroutine *entry = interp_find_sub(&interp, request->entry_name);
+  if (!entry) {
+    free(interp.sub_index);
+    if (error_out) *error_out = "entry not found";
+    return LAINIR_RUN_NO_ENTRY;
+  }
   *result_out = interp_call_sub(&interp, entry, request->args, request->arg_count);
-  if (interp.error) { if (error_out) *error_out = interp.error; return LAINIR_RUN_TRAP; }
+  free(interp.sub_index);
+  if (interp.error) {
+    interp_free_allocas(&interp);
+    if (error_out) *error_out = interp.error;
+    return LAINIR_RUN_TRAP;
+  }
+  /* Address results currently have no owner token in the public run API.
+   * Preserve the historical usable-pointer behavior until that API gains one;
+   * all scalar/string/unit runs release their aggregate arena here. */
+  if (result_out->kind != LAINIR_VALUE_ADDR)
+    interp_free_allocas(&interp);
   if (error_out) *error_out = NULL;
   return LAINIR_RUN_OK;
 }
