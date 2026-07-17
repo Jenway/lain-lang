@@ -1,5 +1,7 @@
 # Lain
 
+Current compiler version: `0.1.0-alpha.1`.
+
 Lain is a native language experiment.
 
 ## Description
