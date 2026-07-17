@@ -67,5 +67,6 @@ persistent per-module incremental reuse remains a later milestone.
 `--emit-l1` currently accepts the self-hosting core subset: `i32`/`addr`
 procedures, calls, arithmetic, explicit returns, foreign declarations, and
 explicit `let name: Module = module { ... }` workspaces. The older, broader
-Scheme frontend remains available explicitly as
-`--bootstrap-emit-l1 input.lain output.l1`; it is not an automatic fallback.
+The Scheme stage-0 frontend is maintained only on `bootstrap/stage0`.
+The main worktree may invoke it through the sibling bootstrap worktree when
+rebuilding the first compiler seed; normal compilation never falls back to it.
