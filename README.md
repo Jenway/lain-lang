@@ -17,7 +17,9 @@ Lain consists of three layers:
 
 3. **Meta functions**
 
-    - Scheme functions can be injected through compiler hooks to inspect and transform AST nodes.
+    - The self-hosted frontend is written in Lain and transforms RawAst into
+      structured LAIN-IR.
+    - Scheme remains the stage-0/reference implementation during migration.
 
 Lain aims to keep the compiler small and move most high-level language features into reusable meta libraries.
 
@@ -35,8 +37,9 @@ Lain aims to keep the compiler small and move most high-level language features 
 Zig 0.16 or newer is the primary stage-0 build tool:
 
 ```text
-zig build                         # build and install lainc, l1c, and l1i
+zig build                         # install tools and the stage-2 compiler artifact
 zig build test                    # build everything and run core tests
+zig build self-host-compiler      # explicitly rebuild/install stage2_compiler.l1
 zig build lainc -Dscheme=gauche  # select the Scheme host explicitly
 zig build lainc -Dscheme=chibi
 ```
@@ -44,3 +47,23 @@ zig build lainc -Dscheme=chibi
 Build products are installed under `zig-out/bin`. On Windows the default
 Scheme backend is Gauche; other platforms default to the bundled Chibi setup.
 The legacy Makefile remains available during the transition.
+
+Normal LAIN-IR emission uses the installed self-hosted artifact:
+
+```text
+lainc --emit-l1 input.lain output.l1
+lainc --emit-workspace-l1 output.l1 math.lain app.lain
+```
+
+Multi-file compilation keeps one stable syntax unit per input, constructs the
+module dependency graph in Lain, and lowers modules in topological order.  The
+normal C launcher transports paths/bytes and calls the Lain-owned compiler ABI
+once; it does not join source files or re-run compilation to obtain
+diagnostics.  Module summaries can already outlive their syntax units, while
+persistent per-module incremental reuse remains a later milestone.
+
+`--emit-l1` currently accepts the self-hosting core subset: `i32`/`addr`
+procedures, calls, arithmetic, explicit returns, foreign declarations, and
+explicit `let name: Module = module { ... }` workspaces. The older, broader
+Scheme frontend remains available explicitly as
+`--bootstrap-emit-l1 input.lain output.l1`; it is not an automatic fallback.
