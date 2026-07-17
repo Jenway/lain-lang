@@ -17,6 +17,9 @@ from compiler_source import MODULES, build_compiler_source
 
 
 ROOT = Path(__file__).resolve().parents[3]
+BOOTSTRAP_ROOT = Path(
+    os.environ.get("LAIN_BOOTSTRAP_ROOT", ROOT.parent / "lain-bootstrap")
+)
 OUT = ROOT / "build/core-self-hosting/meta_compiler.l1"
 PARTS = ROOT / "build/core-self-hosting/artifact-parts"
 STAMP = ROOT / "build/core-self-hosting/meta_compiler.stamp.json"
@@ -157,11 +160,17 @@ def input_fingerprint(source: Path) -> str:
         ("stage0-lainc", compiler().read_bytes()),
         ("validator-l1check", tool("l1check").read_bytes()),
         ("schema-reader-l1i", tool("l1i").read_bytes()),
-        ("polyfills.scm", (ROOT / "polyfills.scm").read_bytes()),
+        (
+            "bootstrap/polyfills.scm",
+            (BOOTSTRAP_ROOT / "polyfills.scm").read_bytes(),
+        ),
     ]
     inputs.extend(
-        (path.relative_to(ROOT).as_posix(), path.read_bytes())
-        for path in sorted((ROOT / "std/meta").rglob("*.scm"))
+        (
+            "bootstrap/" + path.relative_to(BOOTSTRAP_ROOT).as_posix(),
+            path.read_bytes(),
+        )
+        for path in sorted((BOOTSTRAP_ROOT / "std/meta").rglob("*.scm"))
     )
     return cache_fingerprint(CACHE_SCHEMA, inputs)
 

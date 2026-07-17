@@ -2,10 +2,10 @@
 
 This package is the first Lain-written compiler core.
 
-It is intentionally separate from `std/meta`, which remains the old Scheme
-hosted compiler pipeline. The old compiler may build this package and import
-its interfaces, but compiler concepts added here should not become C or Scheme
-special cases.
+It is intentionally separate from the old Scheme-hosted pipeline.  That
+pipeline now lives on `bootstrap/stage0`; `main` contains no `std/meta`
+implementation.  Bootstrap may build this package, but compiler concepts added
+here must not become C or Scheme special cases.
 
 Current scope:
 

@@ -1,5 +1,17 @@
 # Bootstrap Boundary
 
+当前分支布局从 `v0.1.0-alpha.1` 起已经落实为：
+
+```text
+main                 Lain-owned compiler development
+bootstrap/stage0     C/Scheme cold-start implementation
+```
+
+Scheme frontend 只存在于 `bootstrap/stage0`。主线通过相邻的
+`lain-bootstrap` worktree 运行显式 bootstrap/兼容性检查；普通编译使用
+自举 artifact。下面的 Old World/New World 列表描述所有权边界，不再表示
+这些文件同时存在于 `main`。
+
 本文档定义 Lain 的旧世界和自举新世界之间的版本分界。
 
 这个分界不是发布包装。它是工程停工线：旧世界只负责制造第一版可用的 Lain 自举工具链，不能继续无限扩张。
@@ -33,12 +45,10 @@ std/meta-lain/*.lain
 ## 2. Version Line
 
 ```text
-0.0.x 旧世界整理期
-0.1.0 Bootstrap Core freeze
-0.2.0 第一批 Lain-meta pass 可运行
-0.3.0 部分 Lain-meta pass 默认启用
-0.4.0 Scheme meta 开始退场
-1.0.0 self-hosted compiler can compile its core
+0.1.0-alpha.1  第一个 stage2 == stage3 的自举固定点；Scheme 分支隔离
+0.1.0          bootstrap branch 与主线 seed 协议冻结
+0.2.0          持久化模块产物和增量依赖图
+1.0.0          语言、LAIN-IR 和模块 artifact 兼容性承诺
 ```
 
 `0.1.0` 的定义：
@@ -200,4 +210,3 @@ tests/bootstrap-core/
 ```
 
 如果某个功能不服务自举，就不阻塞 `0.1.0`。
-

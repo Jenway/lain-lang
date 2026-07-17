@@ -22,6 +22,7 @@
 #ifdef _WIN32
 #include <direct.h>
 #define getcwd _getcwd
+#define chdir _chdir
 #else
 #include <unistd.h>
 #endif
@@ -74,16 +75,32 @@ uint8_t read_byte_at(const uint8_t *ptr, size_t offset) { return ptr[offset]; }
 // 11. Scheme Initialization and Meta Source Loading
 // ============================================================================
 
+static const char *native_bootstrap_root(void) {
+  const char *configured = getenv("LAIN_BOOTSTRAP_ROOT");
+  return configured && *configured ? configured : "../lain-bootstrap";
+}
+
+static int native_load_bootstrap_file(
+    sexp ctx, sexp env, const char *relative_path) {
+  char original_cwd[1024];
+  const char *root = native_bootstrap_root();
+  if (!getcwd(original_cwd, sizeof(original_cwd))) return 0;
+  if (chdir(root) != 0) return 0;
+  vm_load_file((vm_context *)ctx, (vm_value *)env, relative_path);
+  if (chdir(original_cwd) != 0)
+    fprintf(stderr, "Warning: could not restore compiler working directory\n");
+  return 1;
+}
+
 static void native_inject_all_polyfills(sexp ctx, sexp env) {
   vm_import_base((vm_context *)ctx, (vm_value *)env);
-  vm_load_file((vm_context *)ctx, (vm_value *)env, "polyfills.scm");
+  if (!native_load_bootstrap_file(ctx, env, "polyfills.scm"))
+    fprintf(stderr, "Warning: could not find bootstrap polyfills.scm\n");
 }
 
 static void native_load_meta_sources(sexp ctx, sexp env) {
-  const char *search_paths[] = {"std/meta/driver.scm", "../std/meta/driver.scm",
-                                "../../std/meta/driver.scm", NULL};
-  if (!vm_load_first((vm_context *)ctx, (vm_value *)env, search_paths))
-    fprintf(stderr, "Warning: could not find std/meta/driver.scm\n");
+  if (!native_load_bootstrap_file(ctx, env, "std/meta/driver.scm"))
+    fprintf(stderr, "Warning: could not find bootstrap std/meta/driver.scm\n");
 }
 
 // ============================================================================

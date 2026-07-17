@@ -16,5 +16,6 @@ Current active suites:
 - `bootstrap-execution`: execute a Lain-written compiler component
 - `lainir-contract`: parse, verify, and canonicalize LAIN-IR
 - `self-hosting`: build and execute the Lain-written Meta artifact
-- `scheme-host`: host/runtime compatibility contract
+- Scheme-host compatibility tests live on `bootstrap/stage0`; `main` tests the
+  Lain-owned compiler and consumes bootstrap tools from the sibling worktree.
 - `bootstrap-core`: minimal Lain capabilities needed by compiler code
