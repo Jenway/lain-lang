@@ -65,8 +65,18 @@ diagnostics.  Module summaries can already outlive their syntax units, while
 persistent per-module incremental reuse remains a later milestone.
 
 `--emit-l1` currently accepts the self-hosting core subset: `i32`/`addr`
-procedures, calls, arithmetic, explicit returns, foreign declarations, and
-explicit `let name: Module = module { ... }` workspaces. The older, broader
+callables, calls, arithmetic, explicit returns, foreign bindings, and canonical
+declarations of the form:
+
+```lain
+let NAME [: EXPECTED] = INITIALIZER
+```
+
+The declaration constructors are `std::func`, `std::struct`, `std::module`,
+and `import("path")`. `@` is reserved for attributes such as `@export` and
+`@foreign`; it does not introduce a second declaration grammar. Historical
+standalone `fn`, `struct`, `module`, and `import` declarations are rejected.
+
 The Scheme stage-0 frontend is maintained only on `bootstrap/stage0`.
 The main worktree may invoke it through the sibling bootstrap worktree when
 rebuilding the first compiler seed; normal compilation never falls back to it.

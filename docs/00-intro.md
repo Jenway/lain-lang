@@ -24,7 +24,9 @@ LAIN-IR 表达 lower 后的物理执行。
 Backend 只负责目标代码生成。
 ```
 
-这种设计避免 Parser 过早绑定语言语义，使 `fn`、`struct`、`effect`、`module`、`generic` 等高层概念都可以作为 Meta 层 form 被定义和演化。
+这种设计避免 Parser 过早绑定语言语义。Parser 只识别拓扑；Meta 层再解释
+统一绑定以及 `std::func`、`std::struct`、`std::module`、`import("path")`
+等 initializer。
 
 ## 2. Compilation Pipeline
 
@@ -249,14 +251,14 @@ base address + byte offset + load/store type
 
 ## 7. Function Model
 
-Lain 中的 `fn` 是 Meta 层定义的高层 form。
+Lain 中的 callable 是由 Meta 层 `std::func` 构造器产生的高层对象。
 
 LAIN-IR 中的 `#proc` 是物理 subroutine。
 
 二者不等价：
 
 ```text
-fn != #proc
+std::func callable != #proc
 ```
 
 一个高层函数经过 Meta 展开后，可能 lower 为：
@@ -280,7 +282,7 @@ Lain 的泛型不是 Parser 级特性。
 推荐形式：
 
 ```lain
-fn identity(comptime T: type, x: T) -> T {
+let identity = std::func(comptime T: type, x: T) -> T {
     x
 }
 
@@ -311,7 +313,7 @@ LAIN-IR 不直接保留高层 effect set。
 例如：
 
 ```lain
-fn read() -> String ! {IO, Throws(Error)} {
+let read = std::func() -> String ! {IO, Throws(Error)} {
     ...
 }
 ```
