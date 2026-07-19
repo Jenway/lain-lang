@@ -34,6 +34,13 @@ pub fn build(b: *std.Build) void {
     ) orelse if (target.result.os.tag == .windows) "gauche" else "chibi";
 
     const lainc = addCExecutable(b, "lainc", target, optimize);
+    // The bootstrap Meta artifact still walks some source lists recursively.
+    // Give the cold-start host enough stack to compile the canonical compiler
+    // closure while those walkers are being migrated into Lain-owned stores.
+    // This changes only the stage-0 process envelope, not Lain or L1 semantics.
+    if (target.result.os.tag == .windows) {
+        lainc.stack_size = 64 * 1024 * 1024;
+    }
     lainc.root_module.addCSourceFiles(.{ .files = lainc_sources, .flags = common_c_flags });
     // Build orchestration belongs to Meta/Lain. Disabling the legacy C source
     // scanner also keeps the stage-0 compiler portable across GCC and Clang.

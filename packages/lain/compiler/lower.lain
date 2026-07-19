@@ -6,6 +6,7 @@ let surface_forms = import("packages::lain::compiler::surface_forms");
 let modules = import("packages::lain::compiler::modules");
 let elaborator = import("packages::lain::compiler::elaborator");
 let l1_unit_builder = import("packages::lain::compiler::l1_unit_builder");
+let l1_interpreter = import("packages::lain::compiler::l1_interpreter");
 
 @foreign(c, link_name = "core.string-append!")
 let string_append = std::func(left: addr, right: addr) -> addr;
@@ -20,9 +21,13 @@ let lower_link_name = std::func(module: i32, name: addr) -> addr {
 
 let lower_type_from_syntax = std::func(node: i32) -> i32 {
     if syntax_is_atom_text(node, "i32") == 1 { return 1; }
+    if syntax_is_atom_text(node, "bool") == 1 { return 2; }
     if syntax_is_atom_text(node, "addr") == 1 { return 3; }
     if syntax_is_unit_type(node) == 1 { return 4; }
     if syntax_is_interface_dyn_type(node) == 1 { return 3; }
+    if syntax_is_comptime_type(node) == 1 {
+        return lower_type_from_syntax(syntax_comptime_argument(node));
+    }
     // Stage-0 lowers aggregate values by reference.  During incremental
     // self-compilation, unselected compiler procedures are emitted as extern
     // contracts; their named struct/result types therefore have the same
@@ -513,9 +518,80 @@ let lower_plain_aggregate = std::func(
     return l1_unit_builder_var(unit, name, 3);
 }
 
+let lower_plain_consteval = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    target_unit: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    let operand: i32 = syntax_consteval_operand(node);
+    let temporary: i32 = l1_unit_builder_new();
+    if temporary == 0 { return 0; }
+
+    // A direct pure call receives its concrete callee body in the temporary
+    // unit.  Recursive calls reuse that registered procedure.  Additional
+    // dependency-closure expansion is handled by specialization below.
+    if syntax_expr_tag(operand) == 4 {
+        let callee: i32 = elaborator_find_callable(
+            index, syntax_call_name(operand));
+        if callee == 0 {
+            let destroyed_missing: i32 =
+                l1_unit_builder_destroy(temporary);
+            return 0;
+        }
+        if lower_plain_function(
+            index, root, temporary, callee) != 1 {
+            let destroyed_callee: i32 =
+                l1_unit_builder_destroy(temporary);
+            return 0;
+        }
+    }
+
+    let result_type: i32 = elaborator_expr_type_indexed(
+        index, root, function, operand, body_start, stop);
+    let entry: i32 = l1_unit_builder_proc(
+        temporary, "__lain_consteval", result_type);
+    if entry == 0 {
+        let destroyed_entry: i32 = l1_unit_builder_destroy(temporary);
+        return 0;
+    }
+    let block: i32 = l1_unit_builder_proc_body(temporary, entry);
+    let expression: i32 = lower_plain_expr(
+        index, root, function, temporary, block,
+        operand, body_start, stop);
+    if expression == 0 {
+        let destroyed_expression: i32 =
+            l1_unit_builder_destroy(temporary);
+        return 0;
+    }
+    if l1_unit_builder_return(
+        temporary, entry, expression) != 1 {
+        let destroyed_return: i32 = l1_unit_builder_destroy(temporary);
+        return 0;
+    }
+
+    let evaluation: i32 = l1_interpreter_run(
+        temporary, "__lain_consteval");
+    let status: i32 = l1_interpreter_result_status(evaluation);
+    if status != 0 {
+        let destroyed_result: i32 =
+            l1_interpreter_result_destroy(evaluation);
+        let destroyed_temporary: i32 =
+            l1_unit_builder_destroy(temporary);
+        return 0;
+    }
+    let value: i32 = l1_interpreter_result_value(evaluation);
+    let destroyed_result: i32 =
+        l1_interpreter_result_destroy(evaluation);
+    let destroyed_temporary: i32 =
+        l1_unit_builder_destroy(temporary);
+    return l1_unit_builder_i32(target_unit, value);
+}
+
 let lower_plain_expr = std::func(
     index: M13ElaborationIndex, root: i32, function: i32, unit: i32,
     block: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    if syntax_is_consteval_call(node) == 1 {
+        return lower_plain_consteval(
+            index, root, function, unit, node, body_start, stop);
+    }
     let tag: i32 = syntax_expr_tag(node);
     if tag == 1 {
         return l1_unit_builder_i32(unit, syntax_i32_value(node));
@@ -913,6 +989,22 @@ let lower_plain_foreign_declarations = std::func(
         unit, root, surface_next_callable(callable));
 }
 
+let lower_plain_top_consteval = std::func(
+    index: M13ElaborationIndex, root: i32, unit: i32, item: i32) -> i32 {
+    if item == 0 { return 1; }
+    if surface_item_tag(item) == 5 {
+        let initializer: i32 = surface_binding_initializer(item);
+        if syntax_is_consteval_call(initializer) == 1 {
+            if lower_plain_consteval(
+                index, root, 0, unit, initializer, 0, 0) == 0 {
+                return 0;
+            }
+        }
+    }
+    return lower_plain_top_consteval(
+        index, root, unit, surface_next_item(item));
+}
+
 @export
 let lower_plain_validated = std::func(root: i32) -> i32 {
     let unit: i32 = l1_unit_builder_new();
@@ -920,6 +1012,12 @@ let lower_plain_validated = std::func(root: i32) -> i32 {
     let index: M13ElaborationIndex = elaborator_index_new(root);
     if lower_plain_foreign_declarations(
         unit, root, surface_first_callable(root)) != 1 {
+        let destroyed_index: i32 = elaborator_index_destroy(index);
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    if lower_plain_top_consteval(
+        index, root, unit, surface_first_item(root)) != 1 {
         let destroyed_index: i32 = elaborator_index_destroy(index);
         l1_unit_builder_destroy(unit);
         return 0;

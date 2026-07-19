@@ -4,6 +4,8 @@
 // geometric growth, parallel-table consistency, scope truncation, diagnostic
 // lifetime, and success/failure policy.
 
+let types = import("packages::lain::compiler::types");
+
 @foreign(c, link_name = "compiler.storage-new!")
 let host_storage_new = std::func(kind: i32) -> i32;
 @foreign(c, link_name = "compiler.storage-reserve!")
@@ -456,6 +458,9 @@ let CompilerContext: type = std::struct {
     unit: i32,
     modules: M11SymbolTable,
     types: M11SymbolTable,
+    type_kinds: M11I32Vec,
+    type_arguments: M11I32Vec,
+    type_owners: M11I32Vec,
     scopes: M11ScopeStack,
     diagnostics: M11DiagnosticStore,
 }
@@ -470,13 +475,55 @@ let CompileResult: type = std::struct {
 }
 
 @export
+let TypeInternResult: type = std::struct {
+    context: CompilerContext,
+    type_id: i32,
+}
+
+let compiler_builtin_type_kinds = std::func() -> M11I32Vec {
+    let values0: M11I32Vec = m11_i32_vec_new();
+    let values1: M11I32Vec = m11_i32_vec_push(values0, 1);
+    let values2: M11I32Vec = m11_i32_vec_push(values1, 1);
+    let values3: M11I32Vec = m11_i32_vec_push(values2, 1);
+    let values4: M11I32Vec = m11_i32_vec_push(values3, 1);
+    let values5: M11I32Vec = m11_i32_vec_push(values4, 1);
+    let values6: M11I32Vec = m11_i32_vec_push(values5, 1);
+    return m11_i32_vec_push(values6, 1);
+}
+
+let compiler_builtin_type_zeros = std::func() -> M11I32Vec {
+    let values0: M11I32Vec = m11_i32_vec_new();
+    let values1: M11I32Vec = m11_i32_vec_push(values0, 0);
+    let values2: M11I32Vec = m11_i32_vec_push(values1, 0);
+    let values3: M11I32Vec = m11_i32_vec_push(values2, 0);
+    let values4: M11I32Vec = m11_i32_vec_push(values3, 0);
+    let values5: M11I32Vec = m11_i32_vec_push(values4, 0);
+    let values6: M11I32Vec = m11_i32_vec_push(values5, 0);
+    return m11_i32_vec_push(values6, 0);
+}
+
+let compiler_builtin_types = std::func() -> M11SymbolTable {
+    let types0: M11SymbolTable = m11_symbol_table_new();
+    let types1: M11SymbolTable = m11_symbol_table_insert(types0, "i32", 1);
+    let types2: M11SymbolTable = m11_symbol_table_insert(types1, "bool", 2);
+    let types3: M11SymbolTable = m11_symbol_table_insert(types2, "addr", 3);
+    let types4: M11SymbolTable = m11_symbol_table_insert(types3, "unit", 4);
+    let types5: M11SymbolTable = m11_symbol_table_insert(types4, "type", 5);
+    let types6: M11SymbolTable = m11_symbol_table_insert(types5, "Module", 6);
+    return m11_symbol_table_insert(types6, "Callable", 7);
+}
+
+@export
 let compiler_context_new = std::func(
     syntax_root: i32, source_length: i32) -> CompilerContext {
     return CompilerContext {
         syntax_root: syntax_root, source_length: source_length,
         phase: 1, unit: 0,
         modules: m11_symbol_table_new(),
-        types: m11_symbol_table_new(),
+        types: compiler_builtin_types(),
+        type_kinds: compiler_builtin_type_kinds(),
+        type_arguments: compiler_builtin_type_zeros(),
+        type_owners: compiler_builtin_type_zeros(),
         scopes: m11_scope_stack_new(),
         diagnostics: m11_diagnostics_new(),
     };
@@ -491,7 +538,11 @@ let compiler_context_add_module = std::func(
         source_length: context.source_length,
         phase: context.phase, unit: context.unit,
         modules: m11_symbol_table_insert(context.modules, name, module_id),
-        types: context.types, scopes: context.scopes,
+        types: context.types,
+        type_kinds: context.type_kinds,
+        type_arguments: context.type_arguments,
+        type_owners: context.type_owners,
+        scopes: context.scopes,
         diagnostics: context.diagnostics,
     };
 }
@@ -506,8 +557,69 @@ let compiler_context_add_type = std::func(
         phase: context.phase, unit: context.unit,
         modules: context.modules,
         types: m11_symbol_table_insert(context.types, name, type_id),
+        type_kinds: context.type_kinds,
+        type_arguments: context.type_arguments,
+        type_owners: context.type_owners,
         scopes: context.scopes, diagnostics: context.diagnostics,
     };
+}
+
+@export
+let compiler_context_type_value = std::func(
+    context: CompilerContext, type_id: i32) -> TypeValue {
+    let type_kinds: M11I32Vec = context.type_kinds;
+    if type_id <= 0 { return type_value(0); }
+    if type_id > type_kinds.len { return type_value(0); }
+    return TypeValue {
+        id: type_id,
+        kind: m11_i32_vec_get(context.type_kinds, type_id + -1),
+        argument: m11_i32_vec_get(
+            context.type_arguments, type_id + -1),
+        owner: m11_i32_vec_get(context.type_owners, type_id + -1),
+    };
+}
+
+let compiler_context_find_type_value = std::func(
+    context: CompilerContext, kind: i32, argument: i32,
+    owner: i32, index: i32) -> i32 {
+    let type_kinds: M11I32Vec = context.type_kinds;
+    if index >= type_kinds.len { return 0; }
+    if m11_i32_vec_get(context.type_kinds, index) == kind {
+        if m11_i32_vec_get(context.type_arguments, index) == argument {
+            if m11_i32_vec_get(context.type_owners, index) == owner {
+                return index + 1;
+            }
+        }
+    }
+    return compiler_context_find_type_value(
+        context, kind, argument, owner, index + 1);
+}
+
+@export
+let compiler_context_intern_type = std::func(
+    context: CompilerContext, name: addr, kind: i32,
+    argument: i32, owner: i32) -> TypeInternResult {
+    let existing: i32 = compiler_context_find_type_value(
+        context, kind, argument, owner, 0);
+    if existing != 0 {
+        return TypeInternResult { context: context, type_id: existing };
+    }
+    let type_kinds: M11I32Vec = context.type_kinds;
+    let type_id: i32 = type_kinds.len + 1;
+    let updated: CompilerContext = CompilerContext {
+        syntax_root: context.syntax_root,
+        source_length: context.source_length,
+        phase: context.phase, unit: context.unit,
+        modules: context.modules,
+        types: m11_symbol_table_insert(context.types, name, type_id),
+        type_kinds: m11_i32_vec_push(context.type_kinds, kind),
+        type_arguments: m11_i32_vec_push(
+            context.type_arguments, argument),
+        type_owners: m11_i32_vec_push(context.type_owners, owner),
+        scopes: context.scopes,
+        diagnostics: context.diagnostics,
+    };
+    return TypeInternResult { context: updated, type_id: type_id };
 }
 
 @export
@@ -519,6 +631,9 @@ let compiler_context_add_diagnostic = std::func(
         source_length: context.source_length,
         phase: 4, unit: 0,
         modules: context.modules, types: context.types,
+        type_kinds: context.type_kinds,
+        type_arguments: context.type_arguments,
+        type_owners: context.type_owners,
         scopes: context.scopes,
         diagnostics: m11_diagnostics_push(
             context.diagnostics, code, message, node, start, end),
@@ -533,6 +648,9 @@ let compiler_context_with_unit = std::func(
         source_length: context.source_length,
         phase: 3, unit: unit,
         modules: context.modules, types: context.types,
+        type_kinds: context.type_kinds,
+        type_arguments: context.type_arguments,
+        type_owners: context.type_owners,
         scopes: context.scopes, diagnostics: context.diagnostics,
     };
 }
@@ -542,6 +660,12 @@ let compiler_context_finish = std::func(context: CompilerContext) -> CompileResu
     let module_count: i32 = m11_symbol_table_count(context.modules);
     let destroyed_modules: i32 = m11_symbol_table_destroy(context.modules);
     let destroyed_types: i32 = m11_symbol_table_destroy(context.types);
+    let destroyed_type_kinds: i32 =
+        m11_i32_vec_destroy(context.type_kinds);
+    let destroyed_type_arguments: i32 =
+        m11_i32_vec_destroy(context.type_arguments);
+    let destroyed_type_owners: i32 =
+        m11_i32_vec_destroy(context.type_owners);
     let destroyed_scopes: i32 = m11_scope_destroy(context.scopes);
     if m11_diagnostics_count(context.diagnostics) != 0 {
         return CompileResult {
@@ -643,6 +767,9 @@ let compiler_context_runtime_probe = std::func() -> i32 {
         source_length: context2.source_length,
         phase: context2.phase, unit: context2.unit,
         modules: context2.modules, types: context2.types,
+        type_kinds: context2.type_kinds,
+        type_arguments: context2.type_arguments,
+        type_owners: context2.type_owners,
         scopes: outer, diagnostics: context2.diagnostics,
     };
     let context4: CompilerContext = compiler_context_add_diagnostic(

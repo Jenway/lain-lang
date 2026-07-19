@@ -297,6 +297,27 @@ let syntax_call_callee_is = std::func(node: i32, name: addr) -> i32 {
 }
 
 @export
+let syntax_is_std_call = std::func(node: i32, name: addr) -> i32 {
+    if syntax_is_qualified_call(node) != 1 { return 0; }
+    let namespace: i32 = syntax_call_namespace(node);
+    if syntax_is_atom_text(namespace, "std") != 1 { return 0; }
+    return syntax_call_callee_is(node, name);
+}
+
+@export
+let syntax_is_consteval_call = std::func(node: i32) -> i32 {
+    if syntax_is_std_call(node, "consteval") != 1 { return 0; }
+    if syntax_arg_count(syntax_call_first_arg(node)) != 1 { return 0; }
+    return 1;
+}
+
+@export
+let syntax_consteval_operand = std::func(node: i32) -> i32 {
+    if syntax_is_consteval_call(node) != 1 { return 0; }
+    return syntax_call_first_arg(node);
+}
+
+@export
 
 let syntax_first_function = std::func(root: i32) -> i32 { return ast_node_left(root); }
 @export
@@ -505,6 +526,31 @@ let syntax_arg_next = std::func(arg: i32) -> i32 {
 let syntax_arg_count = std::func(arg: i32) -> i32 {
     if arg == 0 { return 0; }
     return 1 + syntax_arg_count(syntax_arg_next(arg));
+}
+
+// `Comptime` is not reader syntax.  These helpers only recognize the ordinary
+// call topology so the elaborator can assign the Meta type-constructor
+// meaning.  Keeping this test here avoids duplicating RawAst shape knowledge.
+@export
+let syntax_is_comptime_type = std::func(node: i32) -> i32 {
+    if syntax_is_call(node) != 1 { return 0; }
+    if syntax_call_namespace(node) != 0 { return 0; }
+    if syntax_call_callee_is(node, "Comptime") != 1 { return 0; }
+    if syntax_arg_count(syntax_call_first_arg(node)) != 1 { return 0; }
+    return 1;
+}
+
+@export
+let syntax_comptime_argument = std::func(node: i32) -> i32 {
+    if syntax_is_comptime_type(node) != 1 { return 0; }
+    return syntax_call_first_arg(node);
+}
+
+@export
+let syntax_is_comptime_spelling = std::func(node: i32) -> i32 {
+    if syntax_path_tail_is(node, "Comptime") == 1 { return 1; }
+    if syntax_is_call(node) != 1 { return 0; }
+    return syntax_call_callee_is(node, "Comptime");
 }
 
 // Qualified calls remain ordinary RawAst topology: `module.member(args)` is
@@ -831,7 +877,9 @@ let syntax_validate_params = std::func(param: i32) -> i32 {
                     ast_node_right(param)) == 1 {
                     return syntax_validate_params_after_type(param);
                 }
-                return 1112;
+                if syntax_is_call(ast_node_right(param)) != 1 {
+                    return 1112;
+                }
             }
         }
     }

@@ -117,6 +117,7 @@ let elaborator_name_visible_impl = std::func(function: i32, body_start: i32, sto
 
 let type_from_syntax = std::func(node: i32) -> i32 {
     if syntax_is_atom_text(node, "i32") == 1 { return type_i32(); }
+    if syntax_is_atom_text(node, "bool") == 1 { return type_bool(); }
     if syntax_is_atom_text(node, "addr") == 1 { return type_addr(); }
     if syntax_is_unit_type(node) == 1 { return type_unit(); }
     if syntax_path_tail_is(node, "type") == 1 {
@@ -134,8 +135,23 @@ let type_from_syntax = std::func(node: i32) -> i32 {
     if syntax_is_interface_dyn_type(node) == 1 {
         return type_addr();
     }
+    if syntax_is_comptime_type(node) == 1 {
+        return type_comptime(
+            type_from_syntax(syntax_comptime_argument(node)));
+    }
     if syntax_is_identifier(node) == 1 { return type_addr(); }
     return type_error();
+}
+
+let elaborator_type_syntax_diagnostic = std::func(node: i32) -> i32 {
+    if syntax_is_comptime_spelling(node) == 1 {
+        if syntax_is_comptime_type(node) != 1 { return 2801; }
+        let argument: i32 = type_from_syntax(
+            syntax_comptime_argument(node));
+        if type_comptime(argument) == 0 { return 2801; }
+    }
+    if type_from_syntax(node) == type_error() { return 12007; }
+    return 0;
 }
 
 // Constructor calls are Meta callables.  The value produced by `func` is a
@@ -190,6 +206,8 @@ let elaborator_binding_inferred_type = std::func(item: i32) -> i32 {
     }
     let initializer: i32 = surface_binding_initializer(item);
     if syntax_is_i32_atom(initializer) == 1 { return type_i32(); }
+    if syntax_is_atom_text(initializer, "true") == 1 { return type_bool(); }
+    if syntax_is_atom_text(initializer, "false") == 1 { return type_bool(); }
     if syntax_is_string_atom(initializer) == 1 { return type_addr(); }
     return type_error();
 }
@@ -202,7 +220,17 @@ let elaborator_binding_type = std::func(item: i32) -> i32 {
     if expected_node == 0 { return inferred; }
     let expected: i32 = type_from_syntax(expected_node);
     if expected == type_error() { return type_error(); }
+    if syntax_is_consteval_call(
+        surface_binding_initializer(item)) == 1 {
+        return expected;
+    }
     if inferred == type_error() { return type_error(); }
+    if type_is_comptime(expected) == 1 {
+        if type_same(type_comptime_argument(expected), inferred) != 1 {
+            return type_error();
+        }
+        return expected;
+    }
     if type_same(expected, inferred) != 1 { return type_error(); }
     return expected;
 }
@@ -211,18 +239,63 @@ let elaborator_validate_top_level_bindings = std::func(item: i32) -> i32 {
     if item == 0 { return 0; }
     if surface_item_tag(item) == 5 {
         let inferred: i32 = elaborator_binding_inferred_type(item);
-        if inferred == type_error() { return 12007; }
         let expected_node: i32 = surface_binding_expected(item);
         if expected_node != 0 {
+            let syntax_code: i32 =
+                elaborator_type_syntax_diagnostic(expected_node);
+            if syntax_code != 0 { return syntax_code; }
             let expected: i32 = type_from_syntax(expected_node);
-            if expected == type_error() { return 12007; }
-            if type_same(expected, inferred) != 1 { return 12006; }
+            if syntax_is_consteval_call(
+                surface_binding_initializer(item)) == 1 {
+                return elaborator_validate_top_level_bindings(
+                    surface_next_item(item));
+            }
+            if type_is_comptime(expected) == 1 {
+                // The full expression evaluator is connected in the next
+                // milestone.  Scalar literals are already persistent values.
+                let initializer: i32 = surface_binding_initializer(item);
+                if syntax_is_i32_atom(initializer) != 1 {
+                    if syntax_is_atom_text(initializer, "true") != 1 {
+                        if syntax_is_atom_text(initializer, "false") != 1 {
+                            return 2802;
+                        }
+                    }
+                }
+                if type_same(
+                    type_comptime_argument(expected), inferred) != 1 {
+                    return 12006;
+                }
+            }
+            if type_is_comptime(expected) != 1 {
+                if type_same(expected, inferred) != 1 { return 12006; }
+            }
         }
+        if inferred == type_error() { return 12007; }
         if surface_binding_is_func(item) == 1 {
             if elaborator_callable_phase(item) == 0 { return 12008; }
         }
     }
     return elaborator_validate_top_level_bindings(surface_next_item(item));
+}
+
+let elaborator_validate_top_consteval = std::func(
+    index: M13ElaborationIndex, root: i32, item: i32) -> i32 {
+    if item == 0 { return 0; }
+    if surface_item_tag(item) == 5 {
+        let initializer: i32 = surface_binding_initializer(item);
+        if syntax_is_std_call(initializer, "consteval") == 1 {
+            if syntax_is_consteval_call(initializer) != 1 { return 2802; }
+            let operand: i32 = syntax_consteval_operand(initializer);
+            let dependency: i32 = elaborator_consteval_dependency_code(
+                index, root, 0, operand, 0, 0);
+            if dependency != 0 { return dependency; }
+            let code: i32 = elaborator_validate_expr(
+                index, root, 0, operand, 0, 0);
+            if code != 0 { return code; }
+        }
+    }
+    return elaborator_validate_top_consteval(
+        index, root, surface_next_item(item));
 }
 
 let elaborator_interface_callee = std::func(
@@ -443,6 +516,11 @@ let elaborator_name_is_local = std::func(function: i32, stop: i32, name: addr) -
 }
 
 let elaborator_expr_type_indexed_impl = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    if syntax_is_consteval_call(node) == 1 {
+        return elaborator_expr_type_indexed_impl(
+            index, root, function, syntax_consteval_operand(node),
+            body_start, stop);
+    }
     let tag: i32 = syntax_expr_tag(node);
     if tag == 1 { return type_i32(); }
     if tag == 2 {
@@ -593,6 +671,61 @@ let elaborator_validate_call = std::func(index: M13ElaborationIndex, root: i32, 
         index, root, function, args, syntax_function_first_param(callee), body_start, stop);
 }
 
+let elaborator_consteval_dependency_code = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    node: i32, body_start: i32, stop: i32) -> i32 {
+    let tag: i32 = syntax_expr_tag(node);
+    if tag == 1 { return 0; }
+    if tag == 7 { return 0; }
+    if tag == 2 { return 2803; }
+    if tag == 4 {
+        if syntax_call_namespace(node) != 0 { return 2805; }
+        let arg: i32 = syntax_call_first_arg(node);
+        return elaborator_consteval_args_dependency_code(
+            index, root, function, arg, body_start, stop);
+    }
+    if tag == 3 {
+        let left: i32 = elaborator_consteval_dependency_code(
+            index, root, function, syntax_left(node), body_start, stop);
+        if left != 0 { return left; }
+        return elaborator_consteval_dependency_code(
+            index, root, function, syntax_right(node), body_start, stop);
+    }
+    if tag == 5 {
+        let left: i32 = elaborator_consteval_dependency_code(
+            index, root, function, syntax_left(node), body_start, stop);
+        if left != 0 { return left; }
+        return elaborator_consteval_dependency_code(
+            index, root, function, syntax_right(node), body_start, stop);
+    }
+    if tag == 8 {
+        let left: i32 = elaborator_consteval_dependency_code(
+            index, root, function, syntax_left(node), body_start, stop);
+        if left != 0 { return left; }
+        return elaborator_consteval_dependency_code(
+            index, root, function, syntax_right(node), body_start, stop);
+    }
+    if m13_is_numeric_binary_tag(tag) == 1 {
+        let left: i32 = elaborator_consteval_dependency_code(
+            index, root, function, syntax_left(node), body_start, stop);
+        if left != 0 { return left; }
+        return elaborator_consteval_dependency_code(
+            index, root, function, syntax_right(node), body_start, stop);
+    }
+    return 2803;
+}
+
+let elaborator_consteval_args_dependency_code = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    arg: i32, body_start: i32, stop: i32) -> i32 {
+    if arg == 0 { return 0; }
+    let code: i32 = elaborator_consteval_dependency_code(
+        index, root, function, arg, body_start, stop);
+    if code != 0 { return code; }
+    return elaborator_consteval_args_dependency_code(
+        index, root, function, syntax_arg_next(arg), body_start, stop);
+}
+
 let elaborator_validate_if = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
     let condition: i32 = syntax_if_condition(node);
     let condition_code: i32 = elaborator_validate_expr(index, root, function, condition, body_start, stop);
@@ -618,6 +751,15 @@ let elaborator_validate_if = std::func(index: M13ElaborationIndex, root: i32, fu
 }
 
 let elaborator_validate_expr = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    if syntax_is_std_call(node, "consteval") == 1 {
+        if syntax_is_consteval_call(node) != 1 { return 2802; }
+        let operand: i32 = syntax_consteval_operand(node);
+        let dependency: i32 = elaborator_consteval_dependency_code(
+            index, root, function, operand, body_start, stop);
+        if dependency != 0 { return dependency; }
+        return elaborator_validate_expr(
+            index, root, function, operand, body_start, stop);
+    }
     let tag: i32 = syntax_expr_tag(node);
     if tag == 1 { return 0; }
     if tag == 7 { return 0; }
@@ -1060,6 +1202,12 @@ let elaborator_validate = std::func(root: i32) -> i32 {
         surface_first_item(root));
     if binding_code != 0 { return binding_code; }
     let index: M13ElaborationIndex = m13_index_new(root);
+    let consteval_code: i32 = elaborator_validate_top_consteval(
+        index, root, surface_first_item(root));
+    if consteval_code != 0 {
+        let destroyed_consteval: i32 = m13_index_destroy(index);
+        return consteval_code;
+    }
     let result: i32 = elaborator_validate_functions(
         index, root, module_first_procedure(root));
     let destroyed: i32 = m13_index_destroy(index);
@@ -1080,6 +1228,12 @@ let elaborator_validate_named = std::func(root: i32, name: addr) -> i32 {
     if index.duplicate != 0 {
         let destroyed_duplicate: i32 = m13_index_destroy(index);
         return 2302;
+    }
+    let consteval_code: i32 = elaborator_validate_top_consteval(
+        index, root, surface_first_item(root));
+    if consteval_code != 0 {
+        let destroyed_consteval: i32 = m13_index_destroy(index);
+        return consteval_code;
     }
     let selected: i32 = m13_find(index, name);
     if selected == 0 {
