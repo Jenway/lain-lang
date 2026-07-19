@@ -10,6 +10,8 @@ let l1_interpreter = import("packages::lain::compiler::l1_interpreter");
 
 @foreign(c, link_name = "core.string-append!")
 let string_append = std::func(left: addr, right: addr) -> addr;
+@foreign(c, link_name = "l1.read-find-proc!")
+let lower_find_procedure = std::func(unit: i32, name: addr) -> i32;
 
 @export
 let lower_schema_version = std::func() -> i32 { return 6; }
@@ -518,6 +520,196 @@ let lower_plain_aggregate = std::func(
     return l1_unit_builder_var(unit, name, 3);
 }
 
+let LowerSpecialization: type = std::struct {
+    type_name_node: i32,
+    type_id: i32,
+    has_type: i32,
+    value_name_node: i32,
+    value: i32,
+    has_value: i32,
+}
+
+let lower_specialization_collect = std::func(
+    param: i32, arg: i32, binding: LowerSpecialization)
+    -> LowerSpecialization {
+    if param == 0 { return binding; }
+    let param_type: i32 = syntax_param_type_node(param);
+    if syntax_path_tail_is(param_type, "type") == 1 {
+        return lower_specialization_collect(
+            syntax_param_next(param), syntax_arg_next(arg),
+            LowerSpecialization {
+                type_name_node: syntax_param_name_node(param),
+                type_id: lower_type_from_syntax(arg),
+                has_type: 1,
+                value_name_node: binding.value_name_node,
+                value: binding.value,
+                has_value: binding.has_value,
+            });
+    }
+    if syntax_is_comptime_type(param_type) == 1 {
+        return lower_specialization_collect(
+            syntax_param_next(param), syntax_arg_next(arg),
+            LowerSpecialization {
+                type_name_node: binding.type_name_node,
+                type_id: binding.type_id,
+                has_type: binding.has_type,
+                value_name_node: syntax_param_name_node(param),
+                value: syntax_i32_value(arg),
+                has_value: 1,
+            });
+    }
+    return lower_specialization_collect(
+        syntax_param_next(param), syntax_arg_next(arg), binding);
+}
+
+let lower_specialized_type = std::func(
+    node: i32, binding: LowerSpecialization) -> i32 {
+    if syntax_is_atom_text(
+        node, syntax_text(binding.type_name_node)) == 1 {
+        return binding.type_id;
+    }
+    if syntax_is_comptime_type(node) == 1 {
+        return lower_type_from_syntax(syntax_comptime_argument(node));
+    }
+    return lower_type_from_syntax(node);
+}
+
+let lower_specialization_name = std::func(
+    function: i32, binding: LowerSpecialization) -> addr {
+    let name: addr = syntax_function_name(function);
+    if binding.has_type == 1 {
+        let typed: addr = string_append(
+            string_append(
+                string_append(name, "__"),
+                syntax_text(binding.type_name_node)),
+            string_append("_", lower_type_name(binding.type_id)));
+        if binding.has_value == 0 { return typed; }
+        return string_append(
+            string_append(
+                string_append(typed, "__"),
+                syntax_text(binding.value_name_node)),
+            string_append("_", lower_i32_name(binding.value)));
+    }
+    return string_append(
+        string_append(
+            string_append(name, "__"),
+            syntax_text(binding.value_name_node)),
+        string_append("_", lower_i32_name(binding.value)));
+}
+
+let lower_type_name = std::func(type_id: i32) -> addr {
+    if type_id == 1 { return "i32"; }
+    if type_id == 2 { return "bool"; }
+    if type_id == 3 { return "addr"; }
+    if type_id == 4 { return "unit"; }
+    return "type";
+}
+
+let lower_i32_name = std::func(value: i32) -> addr {
+    return syntax_i32_text(value);
+}
+
+let lower_specialized_params = std::func(
+    unit: i32, procedure: i32, param: i32,
+    binding: LowerSpecialization) -> i32 {
+    if param == 0 { return 1; }
+    if syntax_param_is_compiletime(param) != 1 {
+        if l1_unit_builder_param(
+            unit, procedure,
+            lower_specialized_type(
+                syntax_param_type_node(param), binding)) != 1 {
+            return 0;
+        }
+    }
+    return lower_specialized_params(
+        unit, procedure, syntax_param_next(param), binding);
+}
+
+let lower_specialized_expr = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, node: i32, binding: LowerSpecialization) -> i32 {
+    let tag: i32 = syntax_expr_tag(node);
+    if tag == 1 {
+        return l1_unit_builder_i32(unit, syntax_i32_value(node));
+    }
+    if tag == 2 {
+        let name: addr = syntax_text(node);
+        if binding.has_value == 1 {
+            if syntax_text_equal(
+                name, syntax_text(binding.value_name_node)) == 1 {
+                return l1_unit_builder_i32(unit, binding.value);
+            }
+        }
+        let param: i32 = syntax_find_param(
+            syntax_function_first_param(function), name);
+        if param == 0 { return 0; }
+        return l1_unit_builder_arg(
+            unit,
+            syntax_runtime_param_index(
+                syntax_function_first_param(function), name, 0),
+            lower_specialized_type(
+                syntax_param_type_node(param), binding));
+    }
+    if tag == 3 {
+        return l1_unit_builder_add(
+            unit,
+            lower_specialized_expr(
+                index, root, function, unit, syntax_left(node), binding),
+            lower_specialized_expr(
+                index, root, function, unit, syntax_right(node), binding));
+    }
+    return 0;
+}
+
+let lower_ensure_specialization = std::func(
+    index: M13ElaborationIndex, root: i32, unit: i32,
+    function: i32, args: i32) -> addr {
+    let binding: LowerSpecialization = lower_specialization_collect(
+        syntax_function_first_param(function), args,
+        LowerSpecialization {
+            type_name_node: 0, type_id: 0, has_type: 0,
+            value_name_node: 0, value: 0, has_value: 0,
+        });
+    let name: addr = lower_specialization_name(function, binding);
+    if lower_find_procedure(unit, name) != 0 { return name; }
+    let procedure: i32 = l1_unit_builder_proc(
+        unit, name,
+        lower_specialized_type(
+            syntax_right(syntax_function_signature(function)), binding));
+    if procedure == 0 { return ""; }
+    // Registering the procedure before its body is the provisional cache
+    // entry that permits ordinary recursion of this concrete key.
+    if lower_specialized_params(
+        unit, procedure, syntax_function_first_param(function),
+        binding) != 1 { return ""; }
+    let body: i32 = syntax_function_body(function);
+    let form: i32 = syntax_left(body);
+    let value_node: i32 = syntax_return_expr(form);
+    if value_node == 0 { return ""; }
+    let value: i32 = lower_specialized_expr(
+        index, root, function, unit, value_node, binding);
+    if value == 0 { return ""; }
+    if l1_unit_builder_return(unit, procedure, value) != 1 { return ""; }
+    return name;
+}
+
+let lower_generic_call_args = std::func(
+    index: M13ElaborationIndex, root: i32, caller: i32,
+    unit: i32, block: i32, call: i32, param: i32, arg: i32,
+    body_start: i32, stop: i32) -> i32 {
+    if param == 0 { return 1; }
+    if syntax_param_is_compiletime(param) != 1 {
+        let value: i32 = lower_plain_expr(
+            index, root, caller, unit, block, arg, body_start, stop);
+        if value == 0 { return 0; }
+        if l1_unit_builder_call_arg(unit, call, value) != 1 { return 0; }
+    }
+    return lower_generic_call_args(
+        index, root, caller, unit, block, call,
+        syntax_param_next(param), syntax_arg_next(arg),
+        body_start, stop);
+}
+
 let lower_plain_consteval = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     target_unit: i32, node: i32, body_start: i32, stop: i32) -> i32 {
@@ -634,6 +826,27 @@ let lower_plain_expr = std::func(
                 syntax_right(node), body_start, stop));
     }
     if tag == 4 {
+        let generic: i32 = elaborator_find_callable(
+            index, syntax_call_name(node));
+        if generic != 0 {
+            if syntax_function_is_generic(generic) == 1 {
+                let link: addr = lower_ensure_specialization(
+                    index, root, unit, generic,
+                    syntax_call_first_arg(node));
+                if syntax_text_equal(link, "") == 1 { return 0; }
+                let call: i32 = l1_unit_builder_call(
+                    unit, link,
+                    elaborator_expr_type_indexed(
+                        index, root, function, node, body_start, stop));
+                if lower_generic_call_args(
+                    index, root, function, unit, block, call,
+                    syntax_function_first_param(generic),
+                    syntax_call_first_arg(node), body_start, stop) != 1 {
+                    return 0;
+                }
+                return call;
+            }
+        }
         let call: i32 = l1_unit_builder_call(
             unit, lower_plain_link_name(
                 index, root, lower_call_name(node)),
@@ -910,9 +1123,22 @@ let lower_plain_definitions = std::func(
     index: M13ElaborationIndex, root: i32,
     unit: i32, function: i32) -> i32 {
     if function == 0 { return 1; }
+    if syntax_function_is_generic(function) == 1 {
+        return lower_plain_definitions(
+            index, root, unit, surface_next_definition(function));
+    }
     if lower_plain_function(index, root, unit, function) != 1 { return 0; }
     return lower_plain_definitions(
         index, root, unit, surface_next_definition(function));
+}
+
+let lower_plain_entry_function = std::func(function: i32) -> i32 {
+    if function == 0 { return 0; }
+    if syntax_function_is_generic(function) == 1 {
+        return lower_plain_entry_function(
+            surface_next_definition(function));
+    }
+    return function;
 }
 
 let m13_lower_failure_function = std::func(
@@ -1028,8 +1254,14 @@ let lower_plain_validated = std::func(root: i32) -> i32 {
         l1_unit_builder_destroy(unit);
         return 0;
     }
-    let entry: addr = syntax_function_name(
+    let entry_function: i32 = lower_plain_entry_function(
         module_first_procedure(root));
+    if entry_function == 0 {
+        let destroyed_index: i32 = elaborator_index_destroy(index);
+        l1_unit_builder_destroy(unit);
+        return 0;
+    }
+    let entry: addr = syntax_function_name(entry_function);
     if l1_unit_builder_verify(unit, entry) != 1 {
         let destroyed_index: i32 = elaborator_index_destroy(index);
         l1_unit_builder_destroy(unit);
@@ -1059,7 +1291,7 @@ let lower_plain_failure_code = std::func(root: i32) -> i32 {
         return 8101;
     }
     let entry: addr = syntax_function_name(
-        module_first_procedure(root));
+        lower_plain_entry_function(module_first_procedure(root)));
     let code: i32 = l1_unit_builder_verify_code(unit, entry);
     let destroyed_index: i32 = elaborator_index_destroy(index);
     let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
@@ -1084,7 +1316,7 @@ let lower_plain_failure_message = std::func(root: i32) -> addr {
         return "unable to construct complete L1 unit";
     }
     let entry: addr = syntax_function_name(
-        module_first_procedure(root));
+        lower_plain_entry_function(module_first_procedure(root)));
     // The host returns an immutable VM string, so it remains valid after the
     // temporary physical unit is destroyed.
     let message: addr = l1_unit_builder_verify_message(unit, entry);

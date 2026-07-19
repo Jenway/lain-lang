@@ -44,12 +44,30 @@ def run_case(
             diagnostic or f"missing {expected_error}",
         )
 
+def specialization_deduplicates() -> tuple[bool, str]:
+    source = FIXTURES / "generic_dedup.lain"
+    with tempfile.TemporaryDirectory(prefix="lain-specialization-") as tmp:
+        output = pathlib.Path(tmp) / "out.l1"
+        result = subprocess.run(
+            [str(compiler()), "--emit-l1", str(source), str(output)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not output.exists():
+            return False, (result.stderr or result.stdout).strip()
+        text = output.read_text(encoding="utf-8")
+        count = text.count("#proc identity__T_i32(")
+        return count == 1, f"{count} concrete definition(s)"
+
 
 def main() -> int:
     cases = (
         ("literal Comptime(i32)", "literal_i32.lain", None),
         ("consteval user call", "consteval_call.lain", None),
         ("top-level consteval binding", "top_level_consteval.lain", None),
+        ("type specialization", "generic_identity.lain", None),
+        ("value specialization", "generic_repeat.lain", None),
         ("reject Comptime(addr)", "malformed_addr.lain", "error 2801"),
         ("require compile-time value", "value_required.lain", "error 2802"),
         (
@@ -68,6 +86,9 @@ def main() -> int:
         ok, detail = run_case(source, error)
         print(f"{'PASS' if ok else 'FAIL'} {label}: {detail}")
         failed += 0 if ok else 1
+    ok, detail = specialization_deduplicates()
+    print(f"{'PASS' if ok else 'FAIL'} specialization dedup: {detail}")
+    failed += 0 if ok else 1
     return 1 if failed else 0
 
 

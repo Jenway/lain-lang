@@ -499,7 +499,51 @@ let elaborator_name_type = std::func(index: M13ElaborationIndex, root: i32, func
     }
     let param: i32 = syntax_find_param(syntax_function_first_param(function), name);
     if param == 0 { return type_error(); }
-    return type_from_syntax(syntax_param_type_node(param));
+    let param_type: i32 = type_from_syntax(syntax_param_type_node(param));
+    if type_is_comptime(param_type) == 1 {
+        return type_comptime_argument(param_type);
+    }
+    return param_type;
+}
+
+let elaborator_type_value_id_from_name = std::func(name: addr) -> i32 {
+    if syntax_text_equal(name, "i32") == 1 { return type_i32(); }
+    if syntax_text_equal(name, "bool") == 1 { return type_bool(); }
+    if syntax_text_equal(name, "addr") == 1 { return type_addr(); }
+    if syntax_text_equal(name, "unit") == 1 { return type_unit(); }
+    if syntax_text_equal(name, "type") == 1 { return type_type(); }
+    return 0;
+}
+
+let elaborator_type_value_id = std::func(node: i32) -> i32 {
+    if syntax_is_identifier(node) != 1 { return 0; }
+    return elaborator_type_value_id_from_name(syntax_text(node));
+}
+
+let elaborator_generic_bound_type = std::func(
+    param: i32, arg: i32, target: addr) -> i32 {
+    if param == 0 { return 0; }
+    if syntax_path_tail_is(syntax_param_type_node(param), "type") == 1 {
+        if syntax_text_equal(
+            syntax_text(syntax_param_name_node(param)), target) == 1 {
+            return elaborator_type_value_id(arg);
+        }
+    }
+    return elaborator_generic_bound_type(
+        syntax_param_next(param), syntax_arg_next(arg), target);
+}
+
+let elaborator_generic_return_type = std::func(
+    callee: i32, args: i32) -> i32 {
+    let return_node: i32 = syntax_right(
+        syntax_function_signature(callee));
+    if syntax_is_identifier(return_node) == 1 {
+        let bound: i32 = elaborator_generic_bound_type(
+            syntax_function_first_param(callee), args,
+            syntax_text(return_node));
+        if bound != 0 { return bound; }
+    }
+    return type_from_syntax(return_node);
 }
 
 @export
@@ -530,6 +574,10 @@ let elaborator_expr_type_indexed_impl = std::func(index: M13ElaborationIndex, ro
     if tag == 4 {
         let callee: i32 = m13_find(index, syntax_call_name(node));
         if callee == 0 { return type_error(); }
+        if syntax_function_is_generic(callee) == 1 {
+            return elaborator_generic_return_type(
+                callee, syntax_call_first_arg(node));
+        }
         return elaborator_function_return_type(callee);
     }
     if tag == 5 { return type_bool(); }
@@ -658,6 +706,50 @@ let elaborator_validate_args = std::func(index: M13ElaborationIndex, root: i32, 
         index, root, function, syntax_arg_next(arg), syntax_param_next(param), body_start, stop);
 }
 
+let elaborator_validate_generic_args = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    arg: i32, param: i32, body_start: i32, stop: i32,
+    type_name: addr, type_id: i32) -> i32 {
+    if arg == 0 { return 0; }
+    let param_type_node: i32 = syntax_param_type_node(param);
+    if syntax_path_tail_is(param_type_node, "type") == 1 {
+        let argument_type: i32 = elaborator_type_value_id(arg);
+        if argument_type == 0 { return 2810; }
+        return elaborator_validate_generic_args(
+            index, root, function, syntax_arg_next(arg),
+            syntax_param_next(param), body_start, stop,
+            syntax_text(syntax_param_name_node(param)), argument_type);
+    }
+    let code: i32 = elaborator_validate_expr(
+        index, root, function, arg, body_start, stop);
+    if code != 0 { return code; }
+    let expected: i32 = type_from_syntax(param_type_node);
+    if syntax_is_atom_text(param_type_node, type_name) == 1 {
+        if elaborator_expr_type_indexed_impl(
+            index, root, function, arg, body_start, stop) != type_id {
+            return 2812;
+        }
+    }
+    if syntax_is_atom_text(param_type_node, type_name) != 1 {
+        if type_is_comptime(expected) == 1 {
+            if syntax_is_i32_atom(arg) != 1 { return 2802; }
+            if type_comptime_argument(expected) != type_i32() {
+                return 2813;
+            }
+        }
+        if type_is_comptime(expected) != 1 {
+            if elaborator_expr_type_indexed_impl(
+                index, root, function, arg, body_start, stop) != expected {
+                return 2812;
+            }
+        }
+    }
+    return elaborator_validate_generic_args(
+        index, root, function, syntax_arg_next(arg),
+        syntax_param_next(param), body_start, stop,
+        type_name, type_id);
+}
+
 let elaborator_validate_call = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
     let name: addr = syntax_call_name(node);
     if index.duplicate != 0 { return 2302; }
@@ -666,6 +758,11 @@ let elaborator_validate_call = std::func(index: M13ElaborationIndex, root: i32, 
     let args: i32 = syntax_call_first_arg(node);
     if syntax_arg_count(args) != syntax_param_count(syntax_function_first_param(callee)) {
         return 2303;
+    }
+    if syntax_function_is_generic(callee) == 1 {
+        return elaborator_validate_generic_args(
+            index, root, function, args,
+            syntax_function_first_param(callee), body_start, stop, "", 0);
     }
     return elaborator_validate_args(
         index, root, function, args, syntax_function_first_param(callee), body_start, stop);
