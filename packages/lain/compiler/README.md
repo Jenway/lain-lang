@@ -11,20 +11,20 @@ Current scope:
 
 - the 17-module self-hosted compiler closure defined by `compiler_source.py`
 - the structured L1 model used by active Bootstrap Core import tests
-- `mini_meta.lain`: the M5 Lain-owned AST-to-L1 driver and result façade
-- `mini_syntax.lain`: zero-copy semantic/Middle-AST views over RawAst handles
-- `mini_type.lain`: explicit error / `i32` / `bool` / `addr` type objects
-- `mini_module.lain`: Meta-owned ModuleValue/ModuleSummary views, export and
+- `compiler.lain`: the M5 Lain-owned AST-to-L1 driver and result façade
+- `syntax.lain`: zero-copy semantic/Middle-AST views over RawAst handles
+- `types.lain`: explicit error / `i32` / `bool` / `addr` type objects
+- `modules.lain`: Meta-owned ModuleValue/ModuleSummary views, export and
   dependency policy
-- `mini_elaborate.lain`: module function table, parameter/local scope,
+- `elaborator.lain`: module function table, parameter/local scope,
   call/arity resolution, and expression type validation
-- `mini_workspace.lain`: multi-module validation, diagnostics, summary queries,
+- `workspace.lain`: multi-module validation, diagnostics, summary queries,
   and physical link orchestration
-- `mini_diagnostic.lain`: stable diagnostic codes and user-facing messages
+- `diagnostics.lain`: stable diagnostic codes and user-facing messages
 - `l1_unit_builder.lain`: opaque structured L1Unit construction API
 - `l1_interpreter.lain`: M7 Lain-owned interpreter for the structured L1
   bootstrap subset
-- `mini_lower_unit.lain`: M6 direct lowering from Lain-owned Meta views into
+- `lower.lain`: direct lowering from Lain-owned Meta views into
   physical L1 nodes
 - `compiler_state.lain`: M9 Lain-owned syntax reference, diagnostics,
   compiler state, optional unit, and structured CompileResult
@@ -37,7 +37,7 @@ The artifact loader enforces a host-side allowlist in addition to checking the
 artifact's exact extern set at build time; declaring an arbitrary Scheme
 binding as an extern does not grant access to it.
 
-M4 adds a Lain-owned top-level Middle Form layer (`mini_middle.lain`) and a
+M4 adds a Lain-owned top-level Middle Form layer (`surface_forms.lain`) and a
 lexical scope query that follows nested block ownership rather than treating a
 function body as one flat sibling interval.  The reusable artifact can now
 compile the complete mini frontend source closure—syntax, Middle Forms,
@@ -45,7 +45,7 @@ types, module table, elaborator, L1 text builder, lowerer, diagnostics,
 CompileResult, and Meta facade—and selectively validate/lower a named
 procedure while representing the other callable signatures as extern
 contracts. The full compile entry still validates every body. The M4 test
-executes the resulting self-compiled `mini_meta_schema_version` procedure.
+executes the resulting self-compiled `compiler_frontend_schema_version` procedure.
 
 M5 makes the declaration model explicit and uniform:
 
@@ -62,7 +62,7 @@ verify that dependency, visibility, duplicate-name, and cycle failures emit no
 partial L1.
 
 M6 removes whole-unit text generation from the default self-hosted artifact
-path. `mini_meta_compile`, `mini_meta_compile_named`, and workspace compilation
+path. `compiler_frontend_compile`, `compiler_frontend_compile_named`, and workspace compilation
 return opaque structured `L1Unit` handles. Lain owns naming, type, call, and
 procedure-order policy; C owns only physical L1 node storage and handle
 lifecycle. Text emission is a debug view of an already-built unit, and the
@@ -76,9 +76,9 @@ only. The C interpreter remains the reference oracle; both interpreters execute
 the same linked workspace unit to 42.
 
 M8 uses that same Lain interpreter for structured comptime evaluation.
-`mini_meta_comptime` compiles a temporary unit, evaluates it without host
+`compiler_frontend_comptime` compiles a temporary unit, evaluates it without host
 capability dispatch, and returns a structured status/value result.
-`mini_meta_comptime_materialize_main` demonstrates the next Meta step by
+`compiler_frontend_comptime_materialize_main` demonstrates the next Meta step by
 feeding the evaluated value back into a new structured unit. The recursive
 acceptance case deterministically computes 55, preserves source diagnostic
 codes, and rejects an extern call with status 7002. The artifact schema is 8.
@@ -125,7 +125,7 @@ RawAst root -> ParsedProgram -> MiddleProgram
 ```
 
 Each failed phase produces a diagnostic and never exposes a partial
-`L1Unit`.  The normal `mini_meta_compile` entry runs this Lain-owned pipeline.
+`L1Unit`.  The normal `compiler_frontend_compile` entry runs this Lain-owned pipeline.
 
 M13 compiles the authoritative 16-module compiler source closure with that
 pipeline.  Foreign declarations are interpreted from ordinary RawAst

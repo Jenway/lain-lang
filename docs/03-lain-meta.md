@@ -155,10 +155,10 @@ Meta 层运行在宿主编译器提供的环境中。
 ```text
 target source
   -> RawAst opaque handles
-  -> mini_syntax.lain (zero-copy Middle-AST views)
-  -> mini_elaborate.lain (scope and i32 semantics)
-  -> mini_lower.lain (recursive lowering)
-  -> mini_meta.lain (driver)
+  -> syntax.lain (zero-copy Middle-AST views)
+  -> elaborator.lain (scope and i32 semantics)
+  -> lower.lain (recursive lowering)
+  -> compiler.lain (driver)
   -> packages/lain/compiler/l1_text_builder.lain
   -> canonical structured LAIN-IR
   -> host verifier / interpreter
@@ -175,8 +175,8 @@ M2 切片支持多个具名 `i32` 过程、`i32` 参数、顺序局部 `let`、�
 先声明后使用的规则保持显式，并避免把作用域策略下放给 C host。
 
 当前 Middle AST 采用 zero-copy semantic view：仍以 opaque RawAst node id 作为
-存储身份，但只通过 `mini_syntax` 暴露的 `expr-tag`、`form-tag` 和 program view
-访问。`mini_elaborate` 与 `mini_lower` 不直接调用 C AST capability。这样阶段
+存储身份，但只通过 `syntax` 暴露的 `expr-tag`、`form-tag` 和 program view
+访问。`elaborator` 与 `lower` 不直接调用 C AST capability。这样阶段
 边界已经存在，同时不要求 C host 为高层语义节点提供分配器。
 
 M2 使用明确的 `i32` / `bool` 类型对象和单次 parse 的 CompileResult 查询协议，
@@ -212,15 +212,15 @@ queries）以及纯字符串/整数文本 helpers。文件、进程、环境、�
 漂移。当前 RawAst bridge 是 single-active-session：下一次 `ast.parse!` 替换上一
 次 arena，最后一个 session 随 VM 生命周期释放。
 
-artifact 的首个真实输入是 `packages/lain/compiler/mini_type.lain`，随后覆盖
-返回 `addr` 和字符串诊断的 `mini_diagnostic.lain`。这要求 Lain Meta 支持带
+artifact 的首个真实输入是 `packages/lain/compiler/types.lain`，随后覆盖
+返回 `addr` 和字符串诊断的 `diagnostics.lain`。这要求 Lain Meta 支持带
 `@export` 的 canonical callable binding、显式 `return`、语句式 `if`、
 `addr`/字符串类型，以及带参数调用。
 
 ### M4 Meta-owned frontend core
 
 M4 把 zero-copy syntax view 之上的顶层解释正式放入
-`packages/lain/compiler/mini_middle.lain`。它区分 attribute、import、procedure
+`packages/lain/compiler/surface_forms.lain`。它区分 attribute、import、procedure
 declaration 和 procedure definition；callable table 同时包含声明和定义，而
 lowering 只生成被选择的定义。
 
@@ -232,15 +232,15 @@ shadowing 和顺序可见性。
 M4 artifact 验收把以下源文件合成一个语义闭包：
 
 ```text
-mini_syntax + mini_middle + mini_type + mini_module
-  + mini_elaborate + l1_text_builder + mini_lower
-  + mini_diagnostic + mini_compile_result + mini_meta
+syntax + surface + types + modules
+  + elaborator + l1_text_builder + lower
+  + diagnostics + compile_result + compiler_frontend
 ```
 
 完整编译由 Lain-owned elaborator 验证整个闭包。增量入口
-`mini_meta_compile_named` 只验证所选 procedure 的函数体及其引用的 callable
+`compiler_frontend_compile_named` 只验证所选 procedure 的函数体及其引用的 callable
 签名，随后生成该定义并把其余 callable 写成 extern contract；测试执行
-自编译生成的 `mini_meta_schema_version() -> 4`。这是增量自举接口，不是长期
+自编译生成的 `compiler_frontend_schema_version() -> 4`。这是增量自举接口，不是长期
 module linker。
 
 CompileResult 查询协议包含成功状态、diagnostic code/message、失败 procedure、
@@ -256,16 +256,16 @@ let NAME: EXPECTED_SHAPE = INITIALIZER;
 ```
 
 `std::func`、`std::module` 与 `import("path")` 是构造 MetaValue 的普通 Meta
-constructor，不是 RawAst 节点种类。`mini_middle.lain` 提取 binding name、expected shape、
-initializer 和可选 body；`mini_module.lain` 在这些 view 上形成 zero-copy
-ModuleSummary，并维护 exports 与 dependency graph；`mini_workspace.lain` 统一完成
+constructor，不是 RawAst 节点种类。`surface_forms.lain` 提取 binding name、expected shape、
+initializer 和可选 body；`modules.lain` 在这些 view 上形成 zero-copy
+ModuleSummary，并维护 exports 与 dependency graph；`workspace.lain` 统一完成
 结构校验、跨模块 elaboration、诊断与 linking。
 
 验收 workspace 中，`app` 通过
 `let math = import("math")` 获得 ModuleRef，`math.add(40, 2)` 经过 export
 检查后 lower 为 `#call math__add(...)`。Module/import/export 在 L1 中全部消失，
 最终只有 `math__add`、`app__main` 等物理 procedure。自编译 schema 同步升级为
-`mini_meta_schema_version() -> 5`。
+`compiler_frontend_schema_version() -> 5`。
 
 ### M6 Structured L1Unit
 
@@ -282,7 +282,7 @@ Lain Meta -> opaque physical builder capabilities -> L1Unit handle
 ```
 
 `l1_unit_builder.lain` 定义 Lain 侧的结构化 builder API，
-`mini_lower_unit.lain` 负责名称、类型、调用、局部变量、控制流与 procedure 顺序。
+`lower.lain` 负责名称、类型、调用、局部变量、控制流与 procedure 顺序。
 C host 只分配和保存 `L1Subroutine`、`L1Instruction`、`L1Expr` 等物理节点，并提供
 verify、execute、debug-text 与 destroy；它不解释 `let`、`fn`、`module` 或 source
 alias。
@@ -291,7 +291,7 @@ alias。
 构造的 unit 并返回 0，因此调用者永远拿不到部分 L1Unit。文本 emitter 只用于
 观察已经构造完成的 unit，不再是编译通道。
 
-默认 artifact 不再链接 `l1_text_builder.lain`、`mini_lower.lain` 或
+默认 artifact 不再链接 `l1_text_builder.lain`、`lower.lain` 或
 `core.string-append-linear!`。M6 验收覆盖普通编译、named self-compile、跨模块
 `math.add(40, 2)` linking、失败原子性、debug text，以及直接执行
 `app__main == 42`。schema 同步升级为 6。
@@ -327,11 +327,11 @@ source -> RawAst -> Lain Meta -> temporary L1Unit
                                -> continued structured lowering
 ```
 
-`mini_meta_comptime`/`mini_meta_comptime_main` 返回 opaque result，其中 status 0
+`compiler_frontend_comptime`/`compiler_frontend_comptime_main` 返回 opaque result，其中 status 0
 表示成功；source elaboration 失败保留原 diagnostic code，物理 lowering 失败返回
 8002，extern capability call 返回 7002。temporary unit 在求值后销毁。
 
-`mini_meta_comptime_materialize_main` 将求出的 i32 重新写入一个新的 structured
+`compiler_frontend_comptime_materialize_main` 将求出的 i32 重新写入一个新的 structured
 L1Unit，证明结果回到了 Meta/lowering 流程，而不是停在测试宿主。验收程序以递归
 `sum_range(1, 11, 0)` 计算 55，运行两次结果相同；C runtime reference、Lain
 comptime 与 materialized unit 三条路径均得到 55。schema 同步升级为 8。
@@ -351,10 +351,10 @@ M9CompilerState(syntax, phase, module_count, optional_unit, diagnostics)
                      optional_unit, diagnostics)
 ```
 
-`mini_meta_compile_structured_root` 是真实内部入口。验证失败时，它把稳定 diagnostic
+`compiler_frontend_compile_structured_root` 是真实内部入口。验证失败时，它把稳定 diagnostic
 code/message/span 写入 Lain-owned `M9DiagnosticBag`；lowering 成功时才写入 opaque
 L1Unit。`m9_compiler_state_finish` 强制执行失败原子性：只要存在诊断或 unit 缺失，
-结果就是 failure 且不暴露 unit。`mini_meta_compile -> i32` 仅是旧 CLI/FFI 的兼容投影，
+结果就是 failure 且不暴露 unit。`compiler_frontend_compile -> i32` 仅是旧 CLI/FFI 的兼容投影，
 不再定义内部错误模型。
 
 当前 bootstrap 没有自有 growable allocator，因此 DiagnosticBag 使用拥有四个 inline

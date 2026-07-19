@@ -225,7 +225,7 @@ def build() -> Path:
         }
         # Stage-0 interfaces expose imported procedures under a caller-side
         # module-qualified symbol (for example
-        # `mini_syntax_mini_syntax_is_infix`).  A standalone artifact links
+        # `syntax_syntax_is_infix`).  A standalone artifact links
         # all of those modules into one L1 unit, so resolve that import name to
         # the concrete procedure before pruning extern declarations.
         module_names = tuple(Path(relative).stem for relative in MODULES)

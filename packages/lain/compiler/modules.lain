@@ -1,0 +1,1011 @@
+// Meta-owned callable summaries plus ModuleValue/ModuleSummary views.
+// A module is a canonical let binding whose initializer is `module`; require
+// is another let initializer.  No module/import policy exists in RawAst or L1.
+
+let syntax = import("packages::lain::compiler::syntax");
+let surface_forms = import("packages::lain::compiler::surface_forms");
+let compiler_context = import("packages::lain::compiler::compiler_context");
+// A multi-source workspace cannot use RawAst sibling links to cross source
+// unit boundaries.  This index is Meta-owned; its node values are stable
+// opaque syntax handles supplied by the reader store.
+@export
+let ModuleWorkspace: type = std::struct {
+    modules: M11I32Vec,
+    source_indices: M11I32Vec,
+    order: M11I32Vec,
+    diagnostic: i32,
+    diagnostic_index: i32,
+}
+
+@export
+
+let module_workspace_new = std::func() -> ModuleWorkspace {
+    return ModuleWorkspace {
+        modules: m11_i32_vec_new(),
+        source_indices: m11_i32_vec_new(),
+        order: m11_i32_vec_new(),
+        diagnostic: 0,
+        diagnostic_index: 0,
+    };
+}
+
+@export
+
+let module_workspace_count = std::func(workspace: ModuleWorkspace) -> i32 {
+    let modules: M11I32Vec = workspace.modules;
+    return modules.len;
+}
+
+@export
+
+let module_workspace_order_count = std::func(workspace: ModuleWorkspace) -> i32 {
+    let order: M11I32Vec = workspace.order;
+    return order.len;
+}
+
+@export
+
+let module_workspace_module_at = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    return m11_i32_vec_get(workspace.modules, index);
+}
+
+@export
+
+let module_workspace_source_index_at = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    return m11_i32_vec_get(workspace.source_indices, index);
+}
+
+@export
+
+let module_workspace_name_at = std::func(
+    workspace: ModuleWorkspace, index: i32) -> addr {
+    return module_summary_name(
+        module_workspace_module_at(workspace, index));
+}
+
+@export
+
+let module_workspace_dependency_count_at = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    return module_summary_dependency_count(
+        module_workspace_module_at(workspace, index));
+}
+
+@export
+
+let module_workspace_export_count_at = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    return module_summary_export_count(
+        module_workspace_module_at(workspace, index));
+}
+
+@export
+
+let module_workspace_push = std::func(
+    workspace: ModuleWorkspace, module: i32,
+    source_index: i32) -> ModuleWorkspace {
+    let modules: M11I32Vec = m11_i32_vec_push(workspace.modules, module);
+    let sources: M11I32Vec = m11_i32_vec_push(
+        workspace.source_indices, source_index);
+    if modules.ok == 0 {
+        return ModuleWorkspace {
+            modules: modules, source_indices: sources,
+            order: workspace.order, diagnostic: 4304,
+            diagnostic_index: source_index,
+        };
+    }
+    if sources.ok == 0 {
+        return ModuleWorkspace {
+            modules: modules, source_indices: sources,
+            order: workspace.order, diagnostic: 4304,
+            diagnostic_index: source_index,
+        };
+    }
+    return ModuleWorkspace {
+        modules: modules, source_indices: sources,
+        order: workspace.order, diagnostic: workspace.diagnostic,
+        diagnostic_index: workspace.diagnostic_index,
+    };
+}
+
+let module_workspace_add_root_modules = std::func(
+    workspace: ModuleWorkspace, module: i32,
+    source_index: i32) -> ModuleWorkspace {
+    if module == 0 { return workspace; }
+    let next: ModuleWorkspace = module_workspace_push(
+        workspace, module, source_index);
+    return module_workspace_add_root_modules(
+        next, module_next_module(module), source_index);
+}
+
+// Compatibility adapter for the historical single-root workspace API.
+@export
+let module_workspace_from_root = std::func(root: i32) -> ModuleWorkspace {
+    let workspace: ModuleWorkspace = module_workspace_add_root_modules(
+        module_workspace_new(), module_first_module(root), 0);
+    return module_workspace_build_order(workspace);
+}
+
+let module_workspace_name_count_from = std::func(
+    workspace: ModuleWorkspace, name: addr, index: i32) -> i32 {
+    if index == module_workspace_count(workspace) { return 0; }
+    if syntax_text_equal(
+        module_workspace_name_at(workspace, index), name) == 1 {
+        return 1 + module_workspace_name_count_from(
+            workspace, name, index + 1);
+    }
+    return module_workspace_name_count_from(workspace, name, index + 1);
+}
+
+@export
+
+let module_workspace_name_count = std::func(
+    workspace: ModuleWorkspace, name: addr) -> i32 {
+    return module_workspace_name_count_from(workspace, name, 0);
+}
+
+let module_workspace_find_index_from = std::func(
+    workspace: ModuleWorkspace, name: addr, index: i32) -> i32 {
+    if index == module_workspace_count(workspace) { return -1; }
+    if syntax_text_equal(
+        module_workspace_name_at(workspace, index), name) == 1 {
+        return index;
+    }
+    return module_workspace_find_index_from(workspace, name, index + 1);
+}
+
+@export
+
+let module_workspace_find_index = std::func(
+    workspace: ModuleWorkspace, name: addr) -> i32 {
+    return module_workspace_find_index_from(workspace, name, 0);
+}
+
+@export
+
+let module_workspace_find = std::func(
+    workspace: ModuleWorkspace, name: addr) -> i32 {
+    let index: i32 = module_workspace_find_index(workspace, name);
+    if index < 0 { return 0; }
+    return module_workspace_module_at(workspace, index);
+}
+
+@export
+
+let module_workspace_resolve_alias = std::func(
+    workspace: ModuleWorkspace, module: i32, alias: addr) -> i32 {
+    let request: i32 = module_find_dependency_alias(module, alias);
+    if request == 0 { return 0; }
+    return module_workspace_find(
+        workspace, module_dependency_target_name(request));
+}
+
+@export
+
+let module_first_procedure = std::func(root: i32) -> i32 {
+    return surface_first_definition(root);
+}
+
+@export
+
+let module_procedure_count = std::func(root: i32) -> i32 {
+    return surface_definition_count(surface_first_definition(root));
+}
+
+@export
+
+let module_procedure_name_count = std::func(root: i32, name: addr) -> i32 {
+    return surface_callable_name_count(surface_first_callable(root), name);
+}
+
+@export
+
+let module_find_procedure = std::func(root: i32, name: addr) -> i32 {
+    return surface_find_callable(surface_first_callable(root), name);
+}
+
+@export
+
+let module_has_procedure = std::func(root: i32, name: addr) -> i32 {
+    if module_find_procedure(root, name) != 0 { return 1; }
+    return 0;
+}
+
+// Cross-source dependency resolution remains an M5 concern.  M4 nevertheless
+// exposes the field so callers do not infer module policy from RawAst.
+@export
+let module_dependency_count = std::func(root: i32) -> i32 {
+    if root == 0 { return 0; }
+    return 0;
+}
+
+@export
+
+let module_first_module_from = std::func(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    if surface_is_module_binding(item) == 1 { return item; }
+    return module_first_module_from(surface_next_item(item));
+}
+
+@export
+
+let module_first_module = std::func(workspace: i32) -> i32 {
+    return module_first_module_from(surface_first_item(workspace));
+}
+
+@export
+
+let module_next_module = std::func(module: i32) -> i32 {
+    return module_first_module_from(surface_next_item(module));
+}
+
+@export
+
+let module_workspace_module_count_from = std::func(module: i32) -> i32 {
+    if module == 0 { return 0; }
+    return 1 + module_workspace_module_count_from(
+        module_next_module(module));
+}
+
+@export
+
+let module_workspace_module_count = std::func(workspace: i32) -> i32 {
+    return module_workspace_module_count_from(
+        module_first_module(workspace));
+}
+
+@export
+
+let module_summary_name = std::func(module: i32) -> addr {
+    return surface_binding_name(module);
+}
+
+@export
+
+let module_body = std::func(module: i32) -> i32 {
+    return surface_binding_body(module);
+}
+
+@export
+
+let module_first_body_item = std::func(module: i32) -> i32 {
+    return syntax_left(module_body(module));
+}
+
+@export
+
+let module_view_workspace_name_count_from = std::func(module: i32, name: addr) -> i32 {
+    if module == 0 { return 0; }
+    if syntax_text_equal(module_summary_name(module), name) == 1 {
+        return 1 + module_view_workspace_name_count_from(
+            module_next_module(module), name);
+    }
+    return module_view_workspace_name_count_from(
+        module_next_module(module), name);
+}
+
+@export
+
+let module_view_workspace_name_count = std::func(workspace: i32, name: addr) -> i32 {
+    return module_view_workspace_name_count_from(
+        module_first_module(workspace), name);
+}
+
+@export
+
+let module_view_workspace_find_from = std::func(module: i32, name: addr) -> i32 {
+    if module == 0 { return 0; }
+    if syntax_text_equal(module_summary_name(module), name) == 1 {
+        return module;
+    }
+    return module_view_workspace_find_from(module_next_module(module), name);
+}
+
+@export
+
+let module_view_workspace_find = std::func(workspace: i32, name: addr) -> i32 {
+    return module_view_workspace_find_from(module_first_module(workspace), name);
+}
+
+@export
+
+let module_first_dependency_from = std::func(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    if surface_is_require_binding(item) == 1 { return item; }
+    return module_first_dependency_from(surface_next_item(item));
+}
+
+@export
+
+let module_first_dependency = std::func(module: i32) -> i32 {
+    return module_first_dependency_from(module_first_body_item(module));
+}
+
+@export
+
+let module_next_dependency = std::func(binding: i32) -> i32 {
+    return module_first_dependency_from(surface_next_item(binding));
+}
+
+@export
+
+let module_dependency_target_node = std::func(binding: i32) -> i32 {
+    let initializer: i32 = surface_binding_initializer(binding);
+    return syntax_call_first_arg(initializer);
+}
+
+@export
+
+let module_dependency_target_name = std::func(binding: i32) -> addr {
+    let target: i32 = module_dependency_target_node(binding);
+    if syntax_is_string_atom(target) == 1 {
+        return syntax_string_value(target);
+    }
+    return syntax_text(target);
+}
+
+@export
+
+let module_summary_dependency_count_from = std::func(binding: i32) -> i32 {
+    if binding == 0 { return 0; }
+    return 1 + module_summary_dependency_count_from(
+        module_next_dependency(binding));
+}
+
+@export
+
+let module_summary_dependency_count = std::func(module: i32) -> i32 {
+    return module_summary_dependency_count_from(
+        module_first_dependency(module));
+}
+
+let module_dependency_binding_at_from = std::func(
+    binding: i32, wanted: i32, index: i32) -> i32 {
+    if binding == 0 { return 0; }
+    if index == wanted { return binding; }
+    return module_dependency_binding_at_from(
+        module_next_dependency(binding), wanted, index + 1);
+}
+
+@export
+
+let module_summary_dependency_name_at = std::func(
+    module: i32, index: i32) -> addr {
+    let binding: i32 = module_dependency_binding_at_from(
+        module_first_dependency(module), index, 0);
+    if binding == 0 { return ""; }
+    return module_dependency_target_name(binding);
+}
+
+@export
+
+let module_view_workspace_dependency_count_from = std::func(module: i32) -> i32 {
+    if module == 0 { return 0; }
+    return module_summary_dependency_count(module) +
+        module_view_workspace_dependency_count_from(module_next_module(module));
+}
+
+@export
+
+let module_view_workspace_dependency_count = std::func(workspace: i32) -> i32 {
+    return module_view_workspace_dependency_count_from(
+        module_first_module(workspace));
+}
+
+@export
+
+let module_find_dependency_alias_from = std::func(binding: i32, alias: addr) -> i32 {
+    if binding == 0 { return 0; }
+    if syntax_text_equal(surface_binding_name(binding), alias) == 1 {
+        return binding;
+    }
+    return module_find_dependency_alias_from(
+        module_next_dependency(binding), alias);
+}
+
+@export
+
+let module_find_dependency_alias = std::func(module: i32, alias: addr) -> i32 {
+    return module_find_dependency_alias_from(
+        module_first_dependency(module), alias);
+}
+
+@export
+
+let module_resolve_alias = std::func(workspace: i32, module: i32, alias: addr) -> i32 {
+    let request: i32 = module_find_dependency_alias(module, alias);
+    if request == 0 { return 0; }
+    return module_view_workspace_find(
+        workspace, module_dependency_target_name(request));
+}
+
+let module_binding_name_count = std::func(item: i32, name: addr) -> i32 {
+    if item == 0 { return 0; }
+    if surface_is_binding(item) == 1 {
+        if syntax_text_equal(surface_binding_name(item), name) == 1 {
+            return 1 + module_binding_name_count(
+                surface_next_item(item), name);
+        }
+    }
+    return module_binding_name_count(surface_next_item(item), name);
+}
+
+@export
+
+let module_find_binding = std::func(item: i32, name: addr) -> i32 {
+    if item == 0 { return 0; }
+    if surface_is_binding(item) == 1 {
+        if syntax_text_equal(surface_binding_name(item), name) == 1 {
+            return item;
+        }
+    }
+    return module_find_binding(surface_next_item(item), name);
+}
+
+let module_export_count_items = std::func(item: i32, pending: i32) -> i32 {
+    if item == 0 { return 0; }
+    if surface_is_export_attribute(item) == 1 {
+        return module_export_count_items(surface_next_item(item), 1);
+    }
+    if surface_is_binding(item) == 1 {
+        return pending + module_export_count_items(
+            surface_next_item(item), 0);
+    }
+    return module_export_count_items(surface_next_item(item), pending);
+}
+
+@export
+
+let module_summary_export_count = std::func(module: i32) -> i32 {
+    return module_export_count_items(module_first_body_item(module), 0);
+}
+
+let module_export_binding_at_items = std::func(
+    item: i32, wanted: i32, index: i32, pending: i32) -> i32 {
+    if item == 0 { return 0; }
+    if surface_is_export_attribute(item) == 1 {
+        return module_export_binding_at_items(
+            surface_next_item(item), wanted, index, 1);
+    }
+    if surface_is_binding(item) == 1 {
+        if pending == 1 {
+            if index == wanted { return item; }
+            return module_export_binding_at_items(
+                surface_next_item(item), wanted, index + 1, 0);
+        }
+        return module_export_binding_at_items(
+            surface_next_item(item), wanted, index, 0);
+    }
+    return module_export_binding_at_items(
+        surface_next_item(item), wanted, index, pending);
+}
+
+@export
+
+let module_summary_export_binding_at = std::func(
+    module: i32, index: i32) -> i32 {
+    return module_export_binding_at_items(
+        module_first_body_item(module), index, 0, 0);
+}
+
+@export
+
+let module_summary_export_name_at = std::func(
+    module: i32, index: i32) -> addr {
+    let binding: i32 = module_summary_export_binding_at(module, index);
+    if binding == 0 { return ""; }
+    return surface_binding_name(binding);
+}
+
+// Detached artifact ABI: 1=procedure, 2=non-procedure value binding.
+@export
+let module_summary_export_kind_at = std::func(
+    module: i32, index: i32) -> i32 {
+    let binding: i32 = module_summary_export_binding_at(module, index);
+    if binding == 0 { return 0; }
+    if surface_is_procedure_definition(binding) == 1 { return 1; }
+    return 2;
+}
+
+@export
+
+let module_summary_export_param_count_at = std::func(
+    module: i32, index: i32) -> i32 {
+    let binding: i32 = module_summary_export_binding_at(module, index);
+    if binding == 0 { return 0; }
+    if surface_is_procedure_definition(binding) != 1 { return 0; }
+    return syntax_param_count(syntax_function_first_param(binding));
+}
+
+@export
+
+let module_summary_export_return_type_at = std::func(
+    module: i32, index: i32) -> addr {
+    let binding: i32 = module_summary_export_binding_at(module, index);
+    if binding == 0 { return ""; }
+    if surface_is_procedure_definition(binding) != 1 { return ""; }
+    return syntax_text(
+        syntax_right(syntax_function_signature(binding)));
+}
+
+let module_find_exported_binding_items = std::func(
+    item: i32, name: addr, pending: i32) -> i32 {
+    if item == 0 { return 0; }
+    if surface_is_export_attribute(item) == 1 {
+        return module_find_exported_binding_items(
+            surface_next_item(item), name, 1);
+    }
+    if surface_is_binding(item) == 1 {
+        if pending == 1 {
+            if syntax_text_equal(surface_binding_name(item), name) == 1 {
+                return item;
+            }
+        }
+        return module_find_exported_binding_items(
+            surface_next_item(item), name, 0);
+    }
+    return module_find_exported_binding_items(
+        surface_next_item(item), name, pending);
+}
+
+@export
+
+let module_find_exported_binding = std::func(module: i32, name: addr) -> i32 {
+    return module_find_exported_binding_items(
+        module_first_body_item(module), name, 0);
+}
+
+@export
+
+let module_summary_has_export = std::func(module: i32, name: addr) -> i32 {
+    if module_find_exported_binding(module, name) != 0 { return 1; }
+    return 0;
+}
+
+@export
+
+let module_find_exported_procedure = std::func(module: i32, name: addr) -> i32 {
+    let binding: i32 = module_find_exported_binding(module, name);
+    if binding == 0 { return 0; }
+    if surface_is_procedure_definition(binding) != 1 { return 0; }
+    return binding;
+}
+
+@export
+
+let module_summary_export_param_count = std::func(module: i32, name: addr) -> i32 {
+    let binding: i32 = module_find_exported_procedure(module, name);
+    if binding == 0 { return 0; }
+    return syntax_param_count(syntax_function_first_param(binding));
+}
+
+@export
+
+let module_summary_export_return_type = std::func(module: i32, name: addr) -> addr {
+    let binding: i32 = module_find_exported_procedure(module, name);
+    if binding == 0 { return ""; }
+    return syntax_text(
+        syntax_right(syntax_function_signature(binding)));
+}
+
+let module_validate_import = std::func(binding: i32) -> i32 {
+    let initializer: i32 = surface_binding_initializer(binding);
+    let arg: i32 = syntax_call_first_arg(initializer);
+    if arg == 0 { return 4006; }
+    if syntax_arg_next(arg) != 0 { return 4006; }
+    if syntax_is_path(arg) != 1 {
+        if syntax_is_string_atom(arg) != 1 { return 4006; }
+    }
+    return 0;
+}
+
+let module_validate_body_items = std::func(item: i32, pending_export: i32) -> i32 {
+    if item == 0 {
+        if pending_export == 1 { return 4005; }
+        return 0;
+    }
+    if syntax_is_atom_text(item, ";") == 1 {
+        return module_validate_body_items(
+            surface_next_item(item), pending_export);
+    }
+    if surface_is_export_attribute(item) == 1 {
+        if pending_export == 1 { return 4005; }
+        return module_validate_body_items(surface_next_item(item), 1);
+    }
+    if surface_is_foreign_attribute(item) == 1 {
+        if pending_export == 1 { return 4005; }
+        return module_validate_body_items(
+            surface_next_item(item), 1);
+    }
+    if surface_is_require_binding(item) == 1 {
+        if pending_export == 1 { return 4007; }
+        let import_code: i32 = module_validate_import(item);
+        if import_code != 0 { return import_code; }
+        if module_binding_name_count(
+            surface_next_item(item), surface_binding_name(item)) != 0 {
+            return 4004;
+        }
+        return module_validate_body_items(surface_next_item(item), 0);
+    }
+    if surface_is_procedure_definition(item) == 1 {
+        if surface_is_binding(item) != 1 { return 4003; }
+        let function_code: i32 = syntax_validate_function(item);
+        if function_code != 0 { return function_code; }
+        if module_binding_name_count(
+            surface_next_item(item), surface_binding_name(item)) != 0 {
+            return 4004;
+        }
+        return module_validate_body_items(surface_next_item(item), 0);
+    }
+    if surface_binding_is_func(item) == 1 {
+        if pending_export != 1 { return 4003; }
+        return module_validate_body_items(surface_next_item(item), 0);
+    }
+    if surface_binding_is_struct(item) == 1 {
+        if module_binding_name_count(
+            surface_next_item(item), surface_binding_name(item)) != 0 {
+            return 4004;
+        }
+        return module_validate_body_items(
+            surface_next_item(item), 0);
+    }
+    if surface_is_module_binding(item) == 1 {
+        if module_binding_name_count(
+            surface_next_item(item), surface_binding_name(item)) != 0 {
+            return 4004;
+        }
+        return module_validate_body_items(
+            surface_next_item(item), 0);
+    }
+    return 4003;
+}
+
+let module_validate_shape = std::func(module: i32) -> i32 {
+    if surface_is_module_binding(module) != 1 { return 4001; }
+    if syntax_is_identifier(surface_binding_name_node(module)) != 1 {
+        return 4001;
+    }
+    let expected: i32 = surface_binding_expected(module);
+    if expected != 0 {
+        if syntax_path_tail_is(expected, "Module") != 1 {
+            if syntax_path_tail_is(expected, "module") != 1 {
+                return 12006;
+            }
+        }
+    }
+    return module_validate_body_items(module_first_body_item(module), 0);
+}
+
+let module_validate_workspace_items = std::func(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    if syntax_is_atom_text(item, ";") == 1 {
+        return module_validate_workspace_items(surface_next_item(item));
+    }
+    if surface_is_module_binding(item) != 1 { return 4001; }
+    let code: i32 = module_validate_shape(item);
+    if code != 0 { return code; }
+    return module_validate_workspace_items(surface_next_item(item));
+}
+
+let module_validate_unique_modules = std::func(workspace: i32, module: i32) -> i32 {
+    if module == 0 { return 0; }
+    if module_view_workspace_name_count(
+        workspace, module_summary_name(module)) != 1 { return 4002; }
+    return module_validate_unique_modules(workspace, module_next_module(module));
+}
+
+let module_validate_dependencies_from = std::func(
+    workspace: i32, binding: i32) -> i32 {
+    if binding == 0 { return 0; }
+    if module_view_workspace_find(
+        workspace, module_dependency_target_name(binding)) == 0 {
+        return 4101;
+    }
+    return module_validate_dependencies_from(
+        workspace, module_next_dependency(binding));
+}
+
+let module_validate_dependencies = std::func(workspace: i32, module: i32) -> i32 {
+    if module == 0 { return 0; }
+    let code: i32 = module_validate_dependencies_from(
+        workspace, module_first_dependency(module));
+    if code != 0 { return code; }
+    return module_validate_dependencies(workspace, module_next_module(module));
+}
+
+let module_validate_dependency_paths = std::func(
+    workspace: i32, binding: i32, depth: i32, module_count: i32) -> i32 {
+    if binding == 0 { return 0; }
+    if depth == module_count { return 4103; }
+    let target: i32 = module_view_workspace_find(
+        workspace, module_dependency_target_name(binding));
+    let child_code: i32 = module_validate_dependency_paths(
+        workspace, module_first_dependency(target), depth + 1, module_count);
+    if child_code != 0 { return child_code; }
+    return module_validate_dependency_paths(
+        workspace, module_next_dependency(binding), depth, module_count);
+}
+
+let module_validate_cycles_from = std::func(
+    workspace: i32, module: i32, module_count: i32) -> i32 {
+    if module == 0 { return 0; }
+    let code: i32 = module_validate_dependency_paths(
+        workspace, module_first_dependency(module), 0, module_count);
+    if code != 0 { return code; }
+    return module_validate_cycles_from(
+        workspace, module_next_module(module), module_count);
+}
+
+@export
+
+let module_validate_workspace = std::func(workspace: i32) -> i32 {
+    if syntax_kind(workspace) != 4 { return 1001; }
+    let module_count: i32 = module_workspace_module_count(workspace);
+    if module_count == 0 { return 4000; }
+    let shape_code: i32 = module_validate_workspace_items(
+        surface_first_item(workspace));
+    if shape_code != 0 { return shape_code; }
+    let unique_code: i32 = module_validate_unique_modules(
+        workspace, module_first_module(workspace));
+    if unique_code != 0 { return unique_code; }
+    let dependency_code: i32 = module_validate_dependencies(
+        workspace, module_first_module(workspace));
+    if dependency_code != 0 { return dependency_code; }
+    return module_validate_cycles_from(
+        workspace, module_first_module(workspace), module_count);
+}
+
+let module_validation_code_for = std::func(workspace: i32, module: i32) -> i32 {
+    let shape_code: i32 = module_validate_shape(module);
+    if shape_code != 0 { return shape_code; }
+    if module_view_workspace_name_count(
+        workspace, module_summary_name(module)) != 1 { return 4002; }
+    let dependency_code: i32 = module_validate_dependencies_from(
+        workspace, module_first_dependency(module));
+    if dependency_code != 0 { return dependency_code; }
+    return module_validate_dependency_paths(
+        workspace,
+        module_first_dependency(module),
+        0,
+        module_workspace_module_count(workspace));
+}
+
+let module_diagnostic_module_from = std::func(workspace: i32, module: i32) -> addr {
+    if module == 0 { return ""; }
+    if module_validation_code_for(workspace, module) != 0 {
+        return module_summary_name(module);
+    }
+    return module_diagnostic_module_from(workspace, module_next_module(module));
+}
+
+@export
+
+let module_diagnostic_module = std::func(workspace: i32) -> addr {
+    return module_diagnostic_module_from(
+        workspace, module_first_module(workspace));
+}
+
+let module_workspace_dependency_count_from = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    if index == module_workspace_count(workspace) { return 0; }
+    return module_workspace_dependency_count_at(workspace, index) +
+        module_workspace_dependency_count_from(workspace, index + 1);
+}
+
+@export
+
+let module_workspace_dependency_count = std::func(workspace: ModuleWorkspace) -> i32 {
+    return module_workspace_dependency_count_from(workspace, 0);
+}
+
+let module_workspace_validate_shapes = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    if index == module_workspace_count(workspace) { return 0; }
+    let code: i32 = module_validate_shape(
+        module_workspace_module_at(workspace, index));
+    if code != 0 { return code; }
+    return module_workspace_validate_shapes(workspace, index + 1);
+}
+
+let module_workspace_validate_unique = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    if index == module_workspace_count(workspace) { return 0; }
+    if module_workspace_name_count(
+        workspace, module_workspace_name_at(workspace, index)) != 1 {
+        return 4002;
+    }
+    return module_workspace_validate_unique(workspace, index + 1);
+}
+
+let module_workspace_validate_dependency_bindings = std::func(
+    workspace: ModuleWorkspace, binding: i32) -> i32 {
+    if binding == 0 { return 0; }
+    if module_workspace_find(
+        workspace, module_dependency_target_name(binding)) == 0 {
+        return 4101;
+    }
+    return module_workspace_validate_dependency_bindings(
+        workspace, module_next_dependency(binding));
+}
+
+let module_workspace_validate_dependencies = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    if index == module_workspace_count(workspace) { return 0; }
+    let code: i32 = module_workspace_validate_dependency_bindings(
+        workspace, module_first_dependency(
+            module_workspace_module_at(workspace, index)));
+    if code != 0 { return code; }
+    return module_workspace_validate_dependencies(workspace, index + 1);
+}
+
+let module_workspace_validate_dependency_path = std::func(
+    workspace: ModuleWorkspace, binding: i32,
+    depth: i32) -> i32 {
+    if binding == 0 { return 0; }
+    if depth == module_workspace_count(workspace) { return 4103; }
+    let target: i32 = module_workspace_find(
+        workspace, module_dependency_target_name(binding));
+    let child: i32 = module_workspace_validate_dependency_path(
+        workspace, module_first_dependency(target), depth + 1);
+    if child != 0 { return child; }
+    return module_workspace_validate_dependency_path(
+        workspace, module_next_dependency(binding), depth);
+}
+
+let module_workspace_validate_cycles = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    if index == module_workspace_count(workspace) { return 0; }
+    let code: i32 = module_workspace_validate_dependency_path(
+        workspace, module_first_dependency(
+            module_workspace_module_at(workspace, index)), 0);
+    if code != 0 { return code; }
+    return module_workspace_validate_cycles(workspace, index + 1);
+}
+
+@export
+
+let module_workspace_validate = std::func(workspace: ModuleWorkspace) -> i32 {
+    if module_workspace_count(workspace) == 0 { return 4000; }
+    let shape: i32 = module_workspace_validate_shapes(workspace, 0);
+    if shape != 0 { return shape; }
+    let unique: i32 = module_workspace_validate_unique(workspace, 0);
+    if unique != 0 { return unique; }
+    let dependencies: i32 = module_workspace_validate_dependencies(workspace, 0);
+    if dependencies != 0 { return dependencies; }
+    return module_workspace_validate_cycles(workspace, 0);
+}
+
+let module_workspace_validation_index_from = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    if index == module_workspace_count(workspace) { return 0; }
+    let module: i32 = module_workspace_module_at(workspace, index);
+    if module_validate_shape(module) != 0 {
+        return module_workspace_source_index_at(workspace, index);
+    }
+    if module_workspace_name_count(
+        workspace, module_workspace_name_at(workspace, index)) != 1 {
+        return module_workspace_source_index_at(workspace, index);
+    }
+    if module_workspace_validate_dependency_bindings(
+        workspace, module_first_dependency(module)) != 0 {
+        return module_workspace_source_index_at(workspace, index);
+    }
+    if module_workspace_validate_dependency_path(
+        workspace, module_first_dependency(module), 0) != 0 {
+        return module_workspace_source_index_at(workspace, index);
+    }
+    return module_workspace_validation_index_from(workspace, index + 1);
+}
+
+@export
+
+let module_workspace_validation_source_index = std::func(
+    workspace: ModuleWorkspace) -> i32 {
+    return module_workspace_validation_index_from(workspace, 0);
+}
+
+let module_workspace_order_contains = std::func(
+    workspace: ModuleWorkspace, module_index: i32,
+    position: i32) -> i32 {
+    if position == module_workspace_order_count(workspace) { return 0; }
+    if m11_i32_vec_get(workspace.order, position) == module_index { return 1; }
+    return module_workspace_order_contains(
+        workspace, module_index, position + 1);
+}
+
+let module_workspace_dependencies_ready = std::func(
+    workspace: ModuleWorkspace, binding: i32) -> i32 {
+    if binding == 0 { return 1; }
+    let target_index: i32 = module_workspace_find_index(
+        workspace, module_dependency_target_name(binding));
+    if module_workspace_order_contains(
+        workspace, target_index, 0) != 1 { return 0; }
+    return module_workspace_dependencies_ready(
+        workspace, module_next_dependency(binding));
+}
+
+let module_workspace_find_ready = std::func(
+    workspace: ModuleWorkspace, index: i32) -> i32 {
+    if index == module_workspace_count(workspace) { return -1; }
+    if module_workspace_order_contains(workspace, index, 0) != 1 {
+        if module_workspace_dependencies_ready(
+            workspace, module_first_dependency(
+                module_workspace_module_at(workspace, index))) == 1 {
+            return index;
+        }
+    }
+    return module_workspace_find_ready(workspace, index + 1);
+}
+
+let module_workspace_build_order_from = std::func(
+    workspace: ModuleWorkspace) -> ModuleWorkspace {
+    if module_workspace_order_count(workspace) == module_workspace_count(workspace) {
+        return workspace;
+    }
+    let ready: i32 = module_workspace_find_ready(workspace, 0);
+    if ready < 0 {
+        return ModuleWorkspace {
+            modules: workspace.modules,
+            source_indices: workspace.source_indices,
+            order: workspace.order, diagnostic: 4103,
+            diagnostic_index: 0,
+        };
+    }
+    let order: M11I32Vec = m11_i32_vec_push(workspace.order, ready);
+    let next: ModuleWorkspace = ModuleWorkspace {
+        modules: workspace.modules,
+        source_indices: workspace.source_indices,
+        order: order,
+        diagnostic: workspace.diagnostic,
+        diagnostic_index: workspace.diagnostic_index,
+    };
+    if order.ok == 0 {
+        return ModuleWorkspace {
+            modules: workspace.modules,
+            source_indices: workspace.source_indices,
+            order: order, diagnostic: 4304,
+            diagnostic_index: module_workspace_source_index_at(
+                workspace, ready),
+        };
+    }
+    return module_workspace_build_order_from(next);
+}
+
+@export
+
+let module_workspace_build_order = std::func(
+    workspace: ModuleWorkspace) -> ModuleWorkspace {
+    if workspace.diagnostic != 0 { return workspace; }
+    let code: i32 = module_workspace_validate(workspace);
+    if code != 0 {
+        return ModuleWorkspace {
+            modules: workspace.modules,
+            source_indices: workspace.source_indices,
+            order: workspace.order, diagnostic: code,
+            diagnostic_index: module_workspace_validation_source_index(
+                workspace),
+        };
+    }
+    return module_workspace_build_order_from(workspace);
+}
+
+@export
+
+let module_workspace_ordered_module = std::func(
+    workspace: ModuleWorkspace, position: i32) -> i32 {
+    return module_workspace_module_at(
+        workspace, m11_i32_vec_get(workspace.order, position));
+}
+
+@export
+
+let module_workspace_destroy = std::func(workspace: ModuleWorkspace) -> i32 {
+    let modules: i32 = m11_i32_vec_destroy(workspace.modules);
+    let sources: i32 = m11_i32_vec_destroy(workspace.source_indices);
+    let order: i32 = m11_i32_vec_destroy(workspace.order);
+    if modules != 1 { return 0; }
+    if sources != 1 { return 0; }
+    return order;
+}

@@ -117,7 +117,7 @@ RULES: tuple[Rule, ...] = (
         description="Lain interpreter/comptime must not delegate evaluation to the C executor",
         paths=(
             "packages/lain/compiler/l1_interpreter.lain",
-            "packages/lain/compiler/mini_meta.lain",
+            "packages/lain/compiler/compiler.lain",
         ),
         pattern=r"core\.execute-lainir|core\.eval!|host_unit_execute",
         allowed_count=0,

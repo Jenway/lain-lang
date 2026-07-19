@@ -14,22 +14,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "build/core-self-hosting/compiler_source.lain"
 MODULES = (
-    "packages/lain/compiler/mini_syntax.lain",
-    "packages/lain/compiler/mini_middle.lain",
-    "packages/lain/compiler/mini_type.lain",
+    "packages/lain/compiler/syntax.lain",
+    "packages/lain/compiler/surface_forms.lain",
+    "packages/lain/compiler/types.lain",
     "packages/lain/compiler/compiler_context.lain",
-    "packages/lain/compiler/mini_module.lain",
-    "packages/lain/compiler/mini_elaborate.lain",
+    "packages/lain/compiler/modules.lain",
+    "packages/lain/compiler/elaborator.lain",
     "packages/lain/compiler/l1_unit_builder.lain",
     "packages/lain/compiler/l1_interpreter.lain",
-    "packages/lain/compiler/mini_lower_unit.lain",
-    "packages/lain/compiler/mini_diagnostic.lain",
-    "packages/lain/compiler/mini_workspace.lain",
+    "packages/lain/compiler/lower.lain",
+    "packages/lain/compiler/diagnostics.lain",
+    "packages/lain/compiler/workspace.lain",
     "packages/lain/compiler/source_workspace.lain",
     "packages/lain/compiler/module_artifact.lain",
     "packages/lain/compiler/frontend_pipeline.lain",
     "packages/lain/compiler/compiler_state.lain",
-    "packages/lain/compiler/mini_meta.lain",
+    "packages/lain/compiler/compiler.lain",
     "packages/lain/compiler/compiler_api.lain",
 )
 

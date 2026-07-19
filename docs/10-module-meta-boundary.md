@@ -375,9 +375,9 @@ IR receives direct linkage flags or link names
 M5 已实现的 bootstrap slice：
 
 ```text
-packages/lain/compiler/mini_middle.lain
-packages/lain/compiler/mini_module.lain
-packages/lain/compiler/mini_workspace.lain
+packages/lain/compiler/surface_forms.lain
+packages/lain/compiler/modules.lain
+packages/lain/compiler/workspace.lain
 ```
 
 Responsibilities:
