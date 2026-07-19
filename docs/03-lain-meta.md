@@ -1763,9 +1763,9 @@ stage2 compile(source) -> stage3.l1
 stage2.l1 == stage3.l1  // byte-for-byte
 ```
 
-stage2/stage3 都重新经过 L1 parser 与 verifier，schema 都为 12。跨代行为门槛还
-覆盖普通函数执行 42、未知 procedure 诊断 2301、两模块 workspace 执行 42，以及
-Lain interpreter/comptime 执行 55。
+stage2/stage3 都重新经过 L1 parser 与 verifier，compiler API schema 都为 1。
+跨代门槛还要求普通函数和两模块 workspace 生成完全相同的 LAIN-IR，未知
+procedure 生成完全相同的 2301 诊断；生成结果分别执行为 42。
 
 这意味着日常 Meta compiler 的策略主体已经可以由 Lain 表达并达到固定点；
 Scheme 仍用于制造 stage1 和承载尚未迁移的旧语言域，因此尚未从仓库删除。

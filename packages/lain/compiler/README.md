@@ -144,9 +144,9 @@ stage2 + compiler_source.lain -> stage3_compiler.l1
 stage2 bytes == stage3 bytes
 ```
 
-Both generated artifacts pass `l1check`, report schema 12, and agree with
-stage1 on ordinary compilation, diagnostics, Meta-owned module workspaces,
-and L1 interpreter/comptime behavior.  Run the complete gate with:
+Both generated artifacts pass `l1check`, report compiler API schema 1, and
+produce identical LAIN-IR and diagnostics for ordinary compilation and
+Meta-owned module workspaces. Run the complete gate with:
 
 ```text
 zig build test-self-host

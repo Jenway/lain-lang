@@ -395,22 +395,22 @@ M12: parse -> Middle -> elaborate -> structured L1 phases succeed atomically
 M13: stage1 emits verifier-clean stage2
 M13: stage2 emits verifier-clean stage3
 M13: stage2 and stage3 are byte-identical
-M13: stage2 and stage3 report schema 12
+M13: stage2 and stage3 report compiler API schema 1
 M14: normal lainc --emit-l1 loads the stage2 artifact and executes main == 42
 M14: --emit-workspace-l1 links two Module files and executes app__main == 42
 M14: invalid input reports diagnostic 2301 and leaves no partial output
 ```
 
-`artifact_generation_behavior.lain` additionally runs stage1, stage2, and
-stage3 against the same ordinary program, invalid program, module workspace,
-and comptime program. Text equality without these behavior checks is not a
-sufficient fixed-point proof.
+The same gate runs stage2 and stage3 against an ordinary program, an invalid
+program, and ordered/reversed module workspaces. It requires identical
+generated LAIN-IR and diagnostics in addition to byte-identical compiler
+artifacts.
 
-Stage1 and stage2 artifacts are cached by a SHA-256 fingerprint of their full
-source/tool inputs and rechecked with `l1check` on a cache hit.  An existing
-stage3 is reused only when its bytes already equal the current verified
-stage2.  Full compiler-closure compilation belongs to the two generation
-gates; smaller runtime fixtures must not compile that closure again.
+Stage1, stage2, and stage3 artifacts are cached by a SHA-256 fingerprint of
+their full source/tool inputs and rechecked with `l1check` on a cache hit.
+The authoritative gate always compares the current verified stage2 and stage3
+bytes. Full compiler-closure compilation belongs to the generation gates;
+smaller runtime fixtures must not compile that closure again.
 
 Run it through the Zig build graph:
 
