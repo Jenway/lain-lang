@@ -9,15 +9,8 @@ here must not become C or Scheme special cases.
 
 Current scope:
 
-- AST topology helpers
-- AST S-expression tree consumers
-- type shape helpers
-- diagnostic data helpers
-- meta-owned module summary, query, dependency, and diagnostic helpers
-- LAIN-AST topology readers for module export extraction
-- LAIN-AST to ModuleSummary-like export count and score helpers
-- minimal IR builder model helpers
-- a first `lainc.lain` entry that composes module summary, IR builder, and diagnostics
+- the 17-module self-hosted compiler closure defined by `compiler_source.py`
+- the structured L1 model used by active Bootstrap Core import tests
 - `mini_meta.lain`: the M5 Lain-owned AST-to-L1 driver and result façade
 - `mini_syntax.lain`: zero-copy semantic/Middle-AST views over RawAst handles
 - `mini_type.lain`: explicit error / `i32` / `bool` / `addr` type objects
@@ -25,12 +18,9 @@ Current scope:
   dependency policy
 - `mini_elaborate.lain`: module function table, parameter/local scope,
   call/arity resolution, and expression type validation
-- `mini_lower.lain`: legacy text-lowering bootstrap reference
-- `mini_compile_result.lain`: single-parse CompileResult/L1Unit query protocol
 - `mini_workspace.lain`: multi-module validation, diagnostics, summary queries,
   and physical link orchestration
 - `mini_diagnostic.lain`: stable diagnostic codes and user-facing messages
-- `l1_text_builder.lain`: legacy text construction bootstrap reference
 - `l1_unit_builder.lain`: opaque structured L1Unit construction API
 - `l1_interpreter.lain`: M7 Lain-owned interpreter for the structured L1
   bootstrap subset

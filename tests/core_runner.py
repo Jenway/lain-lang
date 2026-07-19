@@ -26,6 +26,10 @@ def main() -> int:
     suites = [
         ("core/ast", [python, "tests/core/ast/run_ast_golden.py"]),
         (
+            "core/declarations",
+            [python, "tests/core/declarations/run_declaration_contract.py"],
+        ),
+        (
             "core/artifact-cache",
             [python, "tests/core/artifact_cache/run_artifact_cache.py"],
         ),

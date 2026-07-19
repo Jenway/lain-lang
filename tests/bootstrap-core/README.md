@@ -31,7 +31,6 @@ Initial cases:
 ```text
 option_result.lain
 list_slice.lain
-enum_match.lain
 ast_tree_structs.lain
 ```
 
@@ -46,8 +45,6 @@ parser/lowerer control flow can be written in Lain
 Initial cases:
 
 ```text
-match_nested.lain
-early_return_result.lain
 list_traversal.lain
 ```
 
@@ -64,24 +61,8 @@ Initial cases:
 ```text
 split_comma_group.lain
 parse_type_application.lain
-parse_fn_shape.lain
+parse_binding_shape.lain
 diagnostic_builder.lain
-```
-
-### comptime
-
-Purpose:
-
-```text
-Lain-meta helpers can execute at compile time through LAIN-IR
-```
-
-Initial cases:
-
-```text
-comptime_build_ast.lain
-comptime_parse_type.lain
-comptime_read_fixture.lain
 ```
 
 ### ir_builder

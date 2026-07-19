@@ -29,17 +29,7 @@ class Case:
     contract: str
 
 
-PREPARE_INTERFACES: dict[tuple[str, str], tuple[str, ...]] = {
-    ("comptime", "comptime_read_fixture"): ("std/build.lain",),
-    ("ir_builder", "import_lain_compiler_l1_unit"): (
-        "packages/lain/compiler/l1_type.lain",
-        "packages/lain/compiler/l1_value.lain",
-        "packages/lain/compiler/l1_instruction.lain",
-        "packages/lain/compiler/l1_region.lain",
-        "packages/lain/compiler/l1_procedure.lain",
-        "packages/lain/compiler/l1_unit.lain",
-    ),
-}
+PREPARE_INTERFACES: dict[tuple[str, str], tuple[str, ...]] = {}
 
 
 def compiler_path() -> pathlib.Path:

@@ -5,7 +5,15 @@ Every source file in this directory is a supported, compile-checked example.
 must not be placed here.
 
 - `tour.lain`: minimal executable returning `42`
-- `hello.lain`: standard I/O import and effect declaration
-- `structs.lain`: struct construction, field access, arithmetic, and calls
-- `interface.lain`: interface implementation and dynamic dispatch surface
+- `structs.lain`: `std::struct` binding, construction, field access, and calls
 
+All declarations use one surface form:
+
+```lain
+let name: optional_type = meta_constructor(...)
+```
+
+Functions use `std::func`, types use `std::struct`, and dependencies use a
+binding initialized by `import(...)`. Historical `fn name`, `struct Name`, and
+standalone `import path` declarations are intentionally not demonstrated or
+accepted as alternate spellings.

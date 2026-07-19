@@ -86,7 +86,7 @@ Module 是 source-level namespace。
 例子：
 
 ```lain
-import packages::lain::compiler::ast_sexpr;
+let ast_sexpr = import("packages::lain::compiler::ast_sexpr");
 ```
 
 这条路径应该由 meta resolver 解释为：
@@ -143,9 +143,9 @@ link_name string
 它不表达：
 
 ```text
-import packages::foo::bar
+source dependency binding
 export { name }
-module Foo { ... }
+source module namespace
 package dependency
 ```
 
@@ -172,15 +172,15 @@ package
 M5 不为 module/import/export 增加独立 declaration grammar。Meta 统一解释：
 
 ```lain
-let math: Module = module {
+let math: Module = std::module {
     @export
-    let add = fn(a: i32, b: i32) -> i32 { a + b };
+    let add = std::func(a: i32, b: i32) -> i32 { a + b };
 };
 
-let app: Module = module {
-    let math: Module = require(math);
+let app: Module = std::module {
+    let math = import("math");
     @export
-    let main = fn() -> i32 { math.add(40, 2) };
+    let main = std::func() -> i32 { math.add(40, 2) };
 };
 ```
 
@@ -190,7 +190,7 @@ let app: Module = module {
 let NAME : EXPECTED_SHAPE = INITIALIZER
 ```
 
-`module`、`require`、`fn` 都是 Meta constructor。`Module` 是期望的
+`std::module`、`import("path")`、`std::func` 都是 Meta constructor。`Module` 是期望的
 MetaValue shape，`@export` 是后继 binding 的 Meta metadata。RawAst 只保留
 这些 token 的拓扑，不理解 module 语义。
 
@@ -228,7 +228,7 @@ Source-level names 在这里被解析。
 Meta lowerer 把 resolved declarations 降成 LAIN-IR：
 
 ```text
-fn foo(...) -> ...
+let foo = std::func(...) -> ...
   -> #proc canonical_or_internal_name(...)
 
 extern "c" link_name = "puts"
@@ -393,7 +393,7 @@ cycle diagnostics
 ```
 
 当前实现以一个 workspace RawAst root 表示多个显式 Module binding，支持 export
-summary、require dependency、重名/缺失/环诊断、跨模块可见性检查，并在 lowering
+summary、import dependency、重名/缺失/环诊断、跨模块可见性检查，并在 lowering
 时把 `math.add` 解析成物理符号 `math__add`。这仍是 zero-copy bootstrap
 ModuleSummary view；持久化 artifact、package path/source discovery 和增量 cache
 留给后续阶段。

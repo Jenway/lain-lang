@@ -213,8 +213,9 @@ queries）以及纯字符串/整数文本 helpers。文件、进程、环境、�
 次 arena，最后一个 session 随 VM 生命周期释放。
 
 artifact 的首个真实输入是 `packages/lain/compiler/mini_type.lain`，随后覆盖
-返回 `addr` 和字符串诊断的 `mini_diagnostic.lain`。这要求 Lain Meta 支持真实
-`pub fn`、显式 `return`、语句式 `if`、`addr`/字符串类型，以及带参数调用。
+返回 `addr` 和字符串诊断的 `mini_diagnostic.lain`。这要求 Lain Meta 支持带
+`@export` 的 canonical callable binding、显式 `return`、语句式 `if`、
+`addr`/字符串类型，以及带参数调用。
 
 ### M4 Meta-owned frontend core
 
@@ -254,15 +255,15 @@ M5 将顶层声明收束为同一个 Meta binding：
 let NAME: EXPECTED_SHAPE = INITIALIZER;
 ```
 
-`fn`、`module` 与 `require` 是构造 MetaValue 的普通 Meta constructor，不是
-RawAst 节点种类。`mini_middle.lain` 提取 binding name、expected shape、
+`std::func`、`std::module` 与 `import("path")` 是构造 MetaValue 的普通 Meta
+constructor，不是 RawAst 节点种类。`mini_middle.lain` 提取 binding name、expected shape、
 initializer 和可选 body；`mini_module.lain` 在这些 view 上形成 zero-copy
 ModuleSummary，并维护 exports 与 dependency graph；`mini_workspace.lain` 统一完成
 结构校验、跨模块 elaboration、诊断与 linking。
 
 验收 workspace 中，`app` 通过
-`let math: Module = require(math)` 获得 ModuleRef，`math.add(40, 2)` 经过 export
-检查后 lower 为 `#call math__add(...)`。Module/require/export 在 L1 中全部消失，
+`let math = import("math")` 获得 ModuleRef，`math.add(40, 2)` 经过 export
+检查后 lower 为 `#call math__add(...)`。Module/import/export 在 L1 中全部消失，
 最终只有 `math__add`、`app__main` 等物理 procedure。自编译 schema 同步升级为
 `mini_meta_schema_version() -> 5`。
 
@@ -700,18 +701,19 @@ LAIN-IR 不能包含高层语义结构。
 Core AST != LAIN-IR
 ```
 
-## 11. Function Form
+## 11. Function Constructor
 
-高层 `fn` 是 Meta 层定义的 form。
+高层 callable 由 Meta 层的 `std::func` 构造器产生，并通过统一的
+`let NAME [: EXPECTED] = INITIALIZER` 语法绑定。
 
-Parser 不知道 `fn` 是函数。
+Parser 不知道 `std::func` 会构造函数。
 
-LAIN-IR 也不知道 source-level `fn`。
+LAIN-IR 也不知道 source-level callable。
 
 源码：
 
 ```lain
-fn add(x: i32, y: i32) -> i32 {
+let add = std::func(x: i32, y: i32) -> i32 {
     x + y
 }
 ```
@@ -719,14 +721,17 @@ fn add(x: i32, y: i32) -> i32 {
 AstTree 只表达：
 
 ```text
-Atom("fn")
 Atom("add")
+Atom("=")
+Atom("std")
+Atom("::")
+Atom("func")
 Group(paren, ...)
 Infix("->", ...)
 Group(brace, ...)
 ```
 
-`fn/parse.scm` 才能把它解释为：
+绑定解析器先取得 initializer，`std::func` 构造器再把它解释为：
 
 ```text
 middle.fn
@@ -750,17 +755,17 @@ middle.fn
 因此：
 
 ```text
-fn != #proc
+std::func callable != #proc
 ```
 
-## 12. Struct Form
+## 12. Struct Constructor
 
-高层 `struct` 是 Meta 层定义的 form。
+高层结构类型由 Meta 层的 `std::struct` 构造器产生，并绑定到名称。
 
 源码：
 
 ```lain
-struct Pair {
+let Pair: type = std::struct {
     a: i32,
     b: i32,
 }
@@ -768,7 +773,7 @@ struct Pair {
 
 AstTree 不知道这是结构体。
 
-`struct/parse.scm` 将其解释为：
+统一绑定解析器与 `std::struct` 构造器将其解释为：
 
 ```text
 middle.struct
@@ -861,7 +866,7 @@ Lain 的泛型是 comptime value parameter 的一种用法。
 推荐形式：
 
 ```lain
-fn identity(comptime T: type, x: T) -> T {
+let identity = std::func(comptime T: type, x: T) -> T {
     x
 }
 
@@ -914,7 +919,7 @@ LAIN-IR 不直接保留高层 effect set。
 例如：
 
 ```lain
-fn read() -> String ! {IO, Throws(Error)} {
+let read = std::func() -> String ! {IO, Throws(Error)} {
     ...
 }
 ```
@@ -959,8 +964,8 @@ Attribute 是 Meta 层 form。
 例如：
 
 ```lain
-@[foreign(link_name = "puts")]
-fn puts(s: CStr) -> i32;
+@foreign(link_name = "puts")
+let puts = std::func(s: CStr) -> i32;
 ```
 
 AstTree 只描述：
@@ -1254,7 +1259,7 @@ closure layout
 例如：
 
 ```lain
-struct Pair {
+let Pair: type = std::struct {
     a: i32,
     b: i32,
 }
@@ -1289,7 +1294,7 @@ Typed / Elaborated Middle AST -> LAIN-IR
 Lowering 必须消除：
 
 ```text
-source fn
+std::func callable binding
 source struct
 source module
 source effect
@@ -1356,12 +1361,14 @@ diagnostic
 例如，读取文件生成 binding：
 
 ```lain
-comptime fn generate_bindings() -> AstTree ! {HostRead, HostWrite} {
+let generate_bindings = std::func() -> AstTree ! {HostRead, HostWrite} {
     ...
 }
 ```
 
-应先被 Meta 解析和检查，再 lower 成 comptime LAIN-IR，由 Host evaluator 执行。
+其 callable phase 由 Meta 语义决定；当它被判定为 comptime callable
+时，应先被 Meta 检查，再 lower 成 comptime LAIN-IR，由 Host evaluator
+执行。这里不规定尚未冻结的 phase 表层语法。
 
 Meta 不能直接绕过 effect system 调用宿主文件 API。
 
@@ -1452,7 +1459,7 @@ Meta pipeline 的推荐顺序：
 
 ```text
 1. RawAst -> AstTree canonicalization
-2. module / import surface parsing
+2. canonical binding parsing and std::module/import initializer dispatch
 3. attribute collection
 4. top-level domain parsing
 5. macro registration
@@ -1487,18 +1494,20 @@ Parser 不知道 module。
 源码：
 
 ```lain
-module math;
+let io = import("std::io");
 
-import std.io;
-
-fn add(x: i32, y: i32) -> i32 {
-    x + y
-}
+let math: Module = std::module {
+    @export
+    let add = std::func(x: i32, y: i32) -> i32 {
+        x + y
+    };
+};
 ```
 
 AstTree 只看到 atom、juxt、sep、group 等拓扑。
 
-`module/parse.scm` 和 `import/parse.scm` 负责解析 module form 和 import form。
+统一绑定解析器取得 initializer；`std::module` 与 `import("path")`
+构造器分别负责模块构造和依赖加载。
 
 Module elaboration 负责：
 
@@ -1628,10 +1637,10 @@ control/parse.scm
   应负责 block、if、loop、match、return 等控制 form。
 
 fn/parse.scm
-  应负责 source-level fn form。
+  应负责 std::func initializer。
 
 struct/parse.scm
-  应负责 source-level struct form。
+  应负责 std::struct initializer。
 ```
 
 特别注意：
@@ -1671,8 +1680,8 @@ canonicalize.scm 不应该生成 (call callee args)。
 12. 建立 layout pass。
 13. 建立 LAIN-IR lowering pass。
 14. 建立 IR verifier。
-15. 删除 legacy (call callee args) 兼容路径。
-16. 决定 `<...>` 是兼容语法、实验语法，还是移除。
+15. 保证旧式独立 fn、struct、module、import 声明在 domain phase 被拒绝。
+16. `<...>` 不进入核心语法；类型和值应用统一使用圆括号。
 ```
 
 迁移时不需要一次性重写整个编译器。

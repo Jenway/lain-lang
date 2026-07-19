@@ -2,7 +2,8 @@
 
 These tests protect compiler layer boundaries.
 
-They are intentionally separate from `tests/runner.py` for now. The current tree has known boundary debt, so this suite starts as a debt-aware lint: known violations are counted, and new violations fail.
+The former broad legacy runner has been removed. This suite starts as a
+debt-aware lint: known violations are counted, and new violations fail.
 
 Run:
 

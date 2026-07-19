@@ -168,7 +168,7 @@ generic tree traversal
 diagnostic builder
 type parser slice
 expr atom/call parser slice
-simple fn parser
+simple std::func initializer elaborator
 ```
 
 暂时不要迁：
@@ -176,7 +176,7 @@ simple fn parser
 ```text
 effect lowering
 multi-module build
-full fn lowering
+full callable lowering
 interface dispatch
 ```
 

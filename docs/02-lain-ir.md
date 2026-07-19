@@ -258,7 +258,7 @@ effect object
 例如高层结构体：
 
 ```lain
-struct Vec(comptime T: type) {
+let Vec: type = std::struct(comptime T: type) {
     ptr: Ptr(T),
     len: usize,
     cap: usize,
@@ -372,7 +372,7 @@ LAIN-IR 的过程使用 `#proc` 定义。
 
 它不是高层 Lain 的 `fn`。
 
-一个高层 `fn` 可能 lower 为：
+一个由 `std::func` 构造的高层 callable 可能 lower 为：
 
 ```text
 zero proc
@@ -386,7 +386,7 @@ trampoline proc
 例如：
 
 ```lain
-fn identity(comptime T: type, x: T) -> T {
+let identity = std::func(comptime T: type, x: T) -> T {
     x
 }
 ```
@@ -413,9 +413,10 @@ fn identity(comptime T: type, x: T) -> T {
 #extern_proc puts(%s: #addr) -> #bits<32> link_name="puts"
 ```
 
-`#extern_proc` 是 ABI 层声明，不是高层 `foreign fn`。
+`#extern_proc` 是 ABI 层声明，不是带 `@foreign` 的高层 callable binding。
 
-高层 `foreign fn` 应该先在 Middle AST 中解析、检查，再 lower 成 `#extern_proc` 或 wrapper `#proc`。
+带 `@foreign` 的高层 callable binding 应该先在 Middle AST 中解析、检查，
+再 lower 成 `#extern_proc` 或 wrapper `#proc`。
 
 ### 6.3 Calling Convention
 
@@ -1263,12 +1264,12 @@ LAIN-IR 在进入 Backend 前必须通过 verifier。
 高层代码：
 
 ```lain
-struct Pair {
+let Pair: type = std::struct {
     a: i32,
     b: i32,
 }
 
-fn second(p: Ptr(Pair)) -> i32 {
+let second = std::func(p: Ptr(Pair)) -> i32 {
     p.b
 }
 ```
@@ -1419,7 +1420,7 @@ LAIN-IR 不包含 source-level fn。
 核心对应关系：
 
 ```text
-source fn      -> Meta form -> maybe one or more #proc
+std::func binding -> Meta callable -> maybe one or more #proc
 source struct  -> layout metadata -> #addr + #offset + #load/#store
 source generic -> comptime specialization -> concrete #proc / code
 source effect  -> checked semantic annotation -> lowered control/runtime form

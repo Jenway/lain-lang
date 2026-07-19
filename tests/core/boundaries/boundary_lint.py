@@ -58,8 +58,8 @@ RULES: tuple[Rule, ...] = (
         description="surface/tree must not host domain parsers or lowerers",
         paths=("std/meta/surface/tree.scm",),
         pattern=r"raw\.node!|middle\.node!|^\(define \(tree-(parse|lower)-",
-        allowed_count=23,
-        rationale="Known debt: type/effect/block/expr parsing currently lives in surface/tree.",
+        allowed_count=0,
+        rationale="Bootstrap surface/tree must remain topology-only.",
     ),
     Rule(
         ident="C1_LAINAST_SOURCE_KEYWORDS",
@@ -156,7 +156,7 @@ RULES: tuple[Rule, ...] = (
             r"native_emit_interface|compile_interface|lci-v1|"
             r"interface emission"
         ),
-        allowed_count=24,
+        allowed_count=20,
         rationale=(
             "Known debt: .lci is the old bootstrap bridge. New module policy "
             "should move to meta-owned ModuleSummary-like artifacts."
@@ -218,7 +218,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="B1_NO_LAINC_BUILD_CLI",
         description="lainc CLI must not expose the legacy C-side build driver",
-        paths=("src/compiler/native_compiler.c", "tests/runner.py"),
+        paths=("src/compiler/native_compiler.c",),
         pattern=r'"--build"|build_mode|native_build_with_funcs',
         allowed_count=0,
         rationale="Build orchestration belongs in build.lain / meta libraries.",

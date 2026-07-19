@@ -131,7 +131,7 @@ generic
 例如源码：
 
 ```lain
-fn main() -> i32 {
+let main = std::func() -> i32 {
     return 0;
 }
 ```
@@ -141,14 +141,18 @@ fn main() -> i32 {
 它只能被表示为由以下拓扑元素组成的树：
 
 ```text
-Atom("fn")
 Atom("main")
+Atom("=")
+Atom("std")
+Atom("::")
+Atom("func")
 Group(paren, ...)
 Infix("->", ...)
 Group(brace, ...)
 ```
 
-只有 Meta 层的 `fn/parse.scm` 可以把这棵拓扑树解释为 `middle.fn`。
+只有 Meta 层先识别统一的 `let NAME [: EXPECTED] = INITIALIZER`
+绑定，再由 `std::func` 构造器把 initializer 解释为 `middle.fn`。
 
 ## 4. Meta Frontend
 
@@ -242,12 +246,12 @@ effect.app
 例如：
 
 ```lain
-fn add(x: i32, y: i32) -> i32 {
+let add = std::func(x: i32, y: i32) -> i32 {
     x + y
 }
 ```
 
-经过 `fn/parse.scm` 后，可以变成：
+经过绑定解析与 `std::func` 构造器 elaboration 后，可以变成：
 
 ```text
 middle.fn
@@ -376,17 +380,17 @@ LAIN-IR 不负责表达：
 
 ## 8. High-Level Function vs Physical Procedure
 
-Lain 源码中的 `fn` 是 Meta 层定义的高层 form。
+Lain 源码中的 callable 是由 Meta 层 `std::func` 构造器产生的高层对象。
 
 LAIN-IR 中的 `#proc` 是物理 subroutine。
 
 二者不是同一个概念。
 
 ```text
-fn != #proc
+std::func callable != #proc
 ```
 
-一个高层 `fn` 经过 Meta 展开后，可能 lower 为：
+一个由 `std::func` 构造并绑定的高层函数经过 Meta 展开后，可能 lower 为：
 
 - 一个 `#proc`
 - 多个 specialized `#proc`
@@ -399,7 +403,7 @@ fn != #proc
 例如：
 
 ```lain
-fn identity(comptime T: type, x: T) -> T {
+let identity = std::func(comptime T: type, x: T) -> T {
     x
 }
 ```
@@ -416,22 +420,19 @@ fn identity(comptime T: type, x: T) -> T {
 
 也可能被完全 inline，不产生任何 `#proc`。
 
-因此，`fn` 是语言语义；`#proc` 是物理实现。
+因此，`std::func` 构造的 callable 是语言语义；`#proc` 是物理实现。
 
 ## 9. Type, Struct, Module, Effect
 
 Lain 的高层概念由 Meta 层定义，不属于 Parser，也不属于 LAIN-AST。
 
-这些都是 Meta domain form：
+统一绑定右侧可以调用这些 Meta 构造器：
 
 ```text
-fn
-struct
-module
-effect
-interface
-import
-comptime
+std::func
+std::struct
+std::module
+import("path")
 ```
 
 Parser 只看到 token 和拓扑。
@@ -439,7 +440,7 @@ Parser 只看到 token 和拓扑。
 例如：
 
 ```lain
-struct Vec(comptime T: type) {
+let Vec: type = std::struct(comptime T: type) {
     ptr: Ptr(T),
     len: usize,
     cap: usize,
@@ -451,12 +452,18 @@ Parser 不知道这是结构体。
 AstTree 只描述：
 
 ```text
-Atom("struct")
 Postfix(Atom("Vec"), Group(paren, ...))
+Atom(":")
+Atom("type")
+Atom("=")
+Atom("std")
+Atom("::")
+Atom("struct")
 Group(brace, ...)
 ```
 
-只有 `struct/parse.scm` 可以把它解释成 `middle.struct`。
+只有统一绑定解析器和 `std::struct` 构造器可以把它解释成
+`middle.struct`。
 
 之后，layout pass 决定字段偏移、对齐、大小，并最终 lower 到 LAIN-IR 的地址、offset、load、store。
 
@@ -471,7 +478,7 @@ Lain 的泛型不应该是 Parser 级特性。
 推荐语法：
 
 ```lain
-fn identity(comptime T: type, x: T) -> T {
+let identity = std::func(comptime T: type, x: T) -> T {
     x
 }
 

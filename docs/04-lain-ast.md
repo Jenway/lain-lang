@@ -95,8 +95,8 @@ LAIN-AST 只能回答一个问题：
 也就是说：
 
 ```text
-Atom("fn") 不表示函数声明。
-Atom("struct") 不表示结构体声明。
+Atom("std") 不表示标准构造器命名空间。
+Infix("::", Atom("std"), Atom("func")) 不表示 callable construction。
 Postfix(foo, Group(paren, ...)) 不表示函数调用。
 Infix(":", x, i32) 不表示 typed binding。
 Group(brace, ...) 不表示 block。
@@ -203,7 +203,7 @@ syntax_context
 例子：
 
 ```text
-fn
+std
 let
 main
 i32
@@ -213,7 +213,7 @@ i32
 ::
 ```
 
-`Atom("fn")` 不表示函数声明。
+`Atom("std")` 不表示标准库或 Meta 构造器命名空间。
 
 `Atom("i32")` 不表示类型。
 
@@ -224,19 +224,19 @@ i32
 示例：
 
 ```text
-fn
+std
 ```
 
 RawAst：
 
 ```text
-Atom("fn")
+Atom("std")
 ```
 
 AstTree：
 
 ```scheme
-(atom "fn" span ctx)
+(atom "std" span ctx)
 ```
 
 ## 6. Group
@@ -488,30 +488,28 @@ syntax_context
 例子：
 
 ```lain
-fn main
+let main
 return x
 comptime T
 handle Throws
-module math
-import std.io
+@export
 ```
 
 对应拓扑：
 
 ```text
-Juxt(Atom("fn"), Atom("main"))
+Juxt(Atom("let"), Atom("main"))
 Juxt(Atom("return"), Atom("x"))
 Juxt(Atom("comptime"), Atom("T"))
 Juxt(Atom("handle"), Atom("Throws"))
-Juxt(Atom("module"), Atom("math"))
-Juxt(Atom("import"), Infix(".", Atom("std"), Atom("io")))
+Juxt(Atom("@"), Atom("export"))
 ```
 
 `Juxt(Atom("return"), x)` 不表示 return statement。
 
-`Juxt(Atom("fn"), x)` 不表示 function declaration。
+`Juxt(Atom("let"), x)` 不表示 binding。
 
-`Juxt(Atom("module"), x)` 不表示 module declaration。
+`Juxt(Atom("return"), x)` 不表示 return statement。
 
 它们只是 token 并列。
 
@@ -747,10 +745,10 @@ string
 仍然不表示类型。
 
 ```scheme
-(ident "fn")
+(ident "std")
 ```
 
-仍然不表示函数声明。
+仍然不表示标准构造器命名空间。
 
 中缀 operator 可以作为动态 tag 出现：
 
@@ -868,14 +866,15 @@ tree-parse-pattern
 
 这些函数依赖 Lain 语言语义，必须放在对应 domain parser 中。
 
-## 19. Function Is Not Primitive Syntax
+## 19. Function Construction Is Not Primitive Syntax
 
-高层 `fn` 是 Meta 层定义的 form，不是 Parser 或 LAIN-AST 的内建语义。
+高层 callable 由 Meta 层的 `std::func` 构造器产生，不是 Parser 或
+LAIN-AST 的内建语义。源码声明始终使用统一绑定。
 
 源码：
 
 ```lain
-fn add(x: i32, y: i32) -> i32 {
+let add = std::func(x: i32, y: i32) -> i32 {
     x + y
 }
 ```
@@ -883,14 +882,18 @@ fn add(x: i32, y: i32) -> i32 {
 在 LAIN-AST 中只是：
 
 ```text
-Atom("fn")
+Atom("let")
 Atom("add")
+Atom("=")
+Atom("std")
+Atom("::")
+Atom("func")
 Group(paren, ...)
 Infix("->", ...)
 Group(brace, ...)
 ```
 
-只有 `fn/parse.scm` 可以把它解释成：
+只有绑定 parser 与 `std::func` 构造器可以把它解释成：
 
 ```text
 middle.fn
@@ -916,10 +919,10 @@ closure conversion
 因此：
 
 ```text
-fn != #proc
+std::func callable != #proc
 ```
 
-一个高层 `fn` 可能 lower 为：
+一个由 `std::func` 构造的高层 callable 可能 lower 为：
 
 ```text
 一个 #proc
@@ -932,14 +935,14 @@ fn != #proc
 
 LAIN-AST 不知道这些。
 
-## 20. Struct Is Not Primitive Syntax
+## 20. Struct Construction Is Not Primitive Syntax
 
-高层 `struct` 是 Meta 层定义的 form。
+高层结构类型由 Meta 层的 `std::struct` 构造器产生，并通过统一绑定命名。
 
 源码：
 
 ```lain
-struct Pair {
+let Pair: type = std::struct {
     a: i32,
     b: i32,
 }
@@ -948,12 +951,18 @@ struct Pair {
 LAIN-AST 只能表达：
 
 ```text
-Atom("struct")
+Atom("let")
 Atom("Pair")
+Atom(":")
+Atom("type")
+Atom("=")
+Atom("std")
+Atom("::")
+Atom("struct")
 Group(brace, ...)
 ```
 
-只有 `struct/parse.scm` 可以把它解释为：
+只有绑定 parser 与 `std::struct` 构造器可以把它解释为：
 
 ```text
 middle.struct
@@ -1085,21 +1094,20 @@ Attribute 是 Meta 层 form。
 源码：
 
 ```lain
-#[foreign(link_name = "puts")]
-fn puts(s: CStr) -> i32;
+@foreign(link_name = "puts")
+let puts = std::func(s: CStr) -> i32;
 ```
 
 LAIN-AST 只能表达：
 
 ```scheme
-(prefix "#"
-  (group bracket
-    ((postfix
-       (atom "foreign")
-       (group paren
-         ((infix "="
-            (atom "link_name")
-            (string "\"puts\""))))))))
+(prefix "@"
+  (postfix
+    (atom "foreign")
+    (group paren
+      ((infix "="
+         (atom "link_name")
+         (string "\"puts\""))))))
 ```
 
 `attrs/parse.scm` 或对应 domain parser 才能把它解释成 attribute。
@@ -1109,7 +1117,7 @@ Parser 不知道：
 ```text
 foreign 是 attribute。
 link_name 是 attribute field。
-这个 attribute 作用于后面的 fn。
+这个 attribute 作用于后面的 canonical binding。
 ```
 
 这些是 Meta 语义。
@@ -1121,28 +1129,42 @@ Module 和 import 属于 Meta 层。
 源码：
 
 ```lain
-module math;
+let io = import("std::io");
 
-import std.io;
+let math: Module = std::module {
+    @export
+    let answer = 42;
+};
 ```
 
 LAIN-AST 只能表达 token 并列和分隔：
 
 ```scheme
-(juxt (atom "module") (atom "math"))
+(juxt
+  (juxt (juxt (atom "let") (atom "io")) (atom "="))
+  (postfix (atom "import") (group paren ((string "\"std::io\"")))))
 (sep ";")
-(juxt (atom "import") (. (atom "std") (atom "io")))
-(sep ";")
+(juxt
+  (juxt
+    (juxt
+      (juxt
+        (juxt (atom "let") (atom "math"))
+        (atom ":"))
+      (atom "Module"))
+    (atom "="))
+  (juxt
+    (infix "::" (atom "std") (atom "module"))
+    (group brace (...))))
 ```
 
-只有：
+统一绑定 parser 先取得 initializer；只有：
 
 ```text
 module/parse.scm
 import/parse.scm
 ```
 
-可以把它们解释为：
+可以把构造器调用解释为：
 
 ```text
 middle.module
@@ -1177,7 +1199,7 @@ Parser 如果要把 `Vec<T>` 解析成专门的 generic node，就必须知道�
 Lain 更适合 Zig 风格泛型：
 
 ```lain
-fn identity(comptime T: type, x: T) -> T {
+let identity = std::func(comptime T: type, x: T) -> T {
     x
 }
 
@@ -1256,9 +1278,8 @@ Parser 无法只凭局部形状知道第二个是不是泛型。
 
 因此 `<...>` 不应作为核心泛型语法。
 
-如果短期保留 `<...>`，只能作为兼容语法或实验语法，在 domain parser 层处理。
-
-它不能进入 RawAst 核心合同。
+`<...>` 不属于核心语法，也不提供兼容入口。类型和值应用统一使用
+`Name(...)`；旧写法在 domain phase 被拒绝。
 
 也就是说，不能新增：
 
@@ -1295,12 +1316,12 @@ Domain parser 可以共享通用 helper。
 
 但不能把自己的语义 helper 放回 AstTree 层。
 
-## 28. Example: Function Declaration
+## 28. Example: Callable Binding
 
 Source:
 
 ```lain
-fn main() -> i32 {
+let main = std::func() -> i32 {
     return 0;
 }
 ```
@@ -1310,9 +1331,11 @@ AstTree：
 ```scheme
 (juxt
   (juxt
-    (atom "fn")
+    (juxt
+      (juxt (atom "let") (atom "main"))
+      (atom "="))
     (postfix
-      (atom "main")
+      (infix "::" (atom "std") (atom "func"))
       (group paren ())))
   (infix "->"
     (atom "i32")
@@ -1321,11 +1344,12 @@ AstTree：
        (sep ";")))))
 ```
 
-这不是函数声明。
+这不是 Parser 内建的函数声明。
 
 它只是拓扑树。
 
-`fn/parse.scm` 才能把它解释成：
+绑定 parser 先解析 `let` shell，`std::func` 构造器再把 initializer
+解释成：
 
 ```text
 middle.fn
@@ -1419,7 +1443,7 @@ expr.call
 Source:
 
 ```lain
-fn identity(comptime T: type, x: T) -> T {
+let identity = std::func(comptime T: type, x: T) -> T {
     x
 }
 ```
@@ -1459,7 +1483,7 @@ type 是类型的类型。
 Source:
 
 ```lain
-fn f() -> i32 ! {Throws(i32), Suspend} {
+let f = std::func() -> i32 ! {Throws(i32), Suspend} {
     0
 }
 ```
@@ -1499,21 +1523,20 @@ LAIN-AST 不知道 effect。
 Source:
 
 ```lain
-#[foreign(link_name = "puts")]
-fn puts(s: CStr);
+@foreign(link_name = "puts")
+let puts = std::func(s: CStr);
 ```
 
 AstTree：
 
 ```scheme
-(prefix "#"
-  (group bracket
-    ((postfix
-       (atom "foreign")
-       (group paren
-         ((infix "="
-            (atom "link_name")
-            (string "\"puts\""))))))))
+(prefix "@"
+  (postfix
+    (atom "foreign")
+    (group paren
+      ((infix "="
+         (atom "link_name")
+         (string "\"puts\""))))))
 ```
 
 这不表示 attribute。
@@ -1525,14 +1548,15 @@ attr.foreign
   link_name: "puts"
 ```
 
-`fn/parse.scm` 或 top-level parser 决定这个 attribute 作用于后面的 `fn` form。
+top-level binding parser 决定这个 attribute 作用于后面的 `let` binding；
+`@` 只承担 attribute 前缀，不引入另一类声明。
 
-## 34. Example: Struct Declaration
+## 34. Example: Struct Binding
 
 Source:
 
 ```lain
-struct Pair {
+let Pair: type = std::struct {
     a: i32,
     b: i32,
 }
@@ -1543,8 +1567,14 @@ AstTree：
 ```scheme
 (juxt
   (juxt
-    (atom "struct")
-    (atom "Pair"))
+    (juxt
+      (juxt
+        (juxt
+          (juxt (atom "let") (atom "Pair"))
+          (atom ":"))
+        (atom "type"))
+      (atom "="))
+    (infix "::" (atom "std") (atom "struct")))
   (group brace
     ((infix ":" (atom "a") (atom "i32"))
      (sep ",")
@@ -1554,7 +1584,7 @@ AstTree：
 
 这不表示结构体。
 
-`struct/parse.scm` 才能解释：
+绑定 parser 与 `std::struct` 构造器才能解释：
 
 ```text
 middle.struct
@@ -1715,10 +1745,10 @@ control/parse.scm
   应负责 block、if、loop、match、return。
 
 fn/parse.scm
-  应负责 source-level fn form。
+  应负责 std::func initializer。
 
 struct/parse.scm
-  应负责 source-level struct form。
+  应负责 std::struct initializer。
 ```
 
 `canonicalize.scm` 不应该生成：
@@ -1748,7 +1778,7 @@ attrs/parse.scm     attribute argument
 Name(TypeArg, ...)
 ```
 
-`<...>` 应作为兼容语法、实验语法，或最终移除。
+`<...>` 不属于核心语法；类型和值应用统一写成 `Name(...)`。
 
 ## 39. Migration Plan
 
@@ -1765,11 +1795,12 @@ Name(TypeArg, ...)
 8. 把 tree-lower-expr 迁到 expr/parse.scm。
 9. 把 block parsing 迁到 control/parse.scm 或专门的 block parser。
 10. 把 effect set parsing 迁到 effects/form.scm。
-11. 把 fn parsing 迁到 fn/parse.scm。
-12. 把 struct parsing 迁到 struct/parse.scm。
-13. 逐步删除 domain parser 对 legacy (call callee args) 形状的兼容。
-14. 决定 <...> 是兼容语法、实验语法，还是完全移除。
-15. 让 Juxt 和 Sep 在规范与实现中逐渐成为独立节点。
+11. 让顶层 parser 只接受 let NAME [: EXPECTED] = INITIALIZER。
+12. 把 std::func initializer elaboration 放在 fn/parse.scm。
+13. 把 std::struct initializer elaboration 放在 struct/parse.scm。
+14. 在 domain phase 拒绝旧式独立 fn、struct、module、import 声明。
+15. 类型和值应用统一使用圆括号，不接受 <...>。
+16. 让 Juxt 和 Sep 在规范与实现中逐渐成为独立节点。
 ```
 
 迁移过程中，Middle AST 和 LAIN-IR 不需要一起重写。

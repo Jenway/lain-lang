@@ -126,12 +126,12 @@ Only domain parsers may turn AstTree into semantic nodes.
 Examples:
 
 ```text
-fn/parse.scm          owns function declarations
+fn/parse.scm          owns std::func initializers
 types/parse.scm       owns type expressions
 expr/parse.scm        owns value expressions
 effects/form.scm      owns effect declarations and effect sets
 attrs/parse.scm       owns attributes
-import/parse.scm      owns import declarations
+import/parse.scm      owns import("path") initializers
 ```
 
 Shared helpers are allowed, but shared helpers must not become a hidden second parser.

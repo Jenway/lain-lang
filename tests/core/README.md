@@ -11,6 +11,8 @@ python tests/core_runner.py
 Current active suites:
 
 - `ast`: RawAst topology golden tests
+- `declarations`: canonical `let NAME[: TYPE] = RHS` contracts and removal
+  of historical declaration spellings
 - `examples`: every supported user-facing example compiles to LAIN-IR
 - `boundaries`: static layer-boundary lint
 - `bootstrap-execution`: execute a Lain-written compiler component

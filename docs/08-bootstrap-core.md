@@ -34,11 +34,12 @@ package ecosystem
 旧世界至少要支持：
 
 ```text
-module/import declarations
-fn declarations
-foreign fn declarations
-struct declarations
-enum or tagged-union declarations
+let NAME [: EXPECTED] = INITIALIZER declarations
+std::func callable constructors
+std::struct type/layout constructors
+std::module module constructors
+import("path") dependency constructors
+@ attributes on bindings
 let local bindings
 assignment where needed for builders
 if expressions/statements
@@ -118,8 +119,8 @@ simple loops or list traversal helper
 如果 loop 语法还不稳定，可以先用标准库 traversal helper 支撑 parser code：
 
 ```lain
-list_each(nodes, fn(node) { ... })
-list_fold(nodes, init, fn(acc, node) { ... })
+list_each(nodes, std::func(node) { ... })
+list_fold(nodes, init, std::func(acc, node) { ... })
 ```
 
 但这种 helper 必须能由旧世界编译。
@@ -143,10 +144,10 @@ enum AstTree {
 }
 ```
 
-如果 enum 暂时无法完整实现，允许 bootstrap tagged struct：
+Bootstrap Core 当前用 `std::struct` 表达带显式 tag 的结构：
 
 ```lain
-struct AstTree {
+let AstTree: type = std::struct {
     tag: AstTag,
     payload: addr,
 }
@@ -175,15 +176,15 @@ Lain-meta 不应直接操作 C FFI 细节。
 Bootstrap Core 需要一层 Lain wrapper：
 
 ```lain
-struct IrBuilder {
+let IrBuilder: type = std::struct {
     module: IrModule,
 }
 
-fn fn_begin(b: IrBuilder, name: Symbol, sig: FnSig) -> Result(IrFn, Diagnostic)
-fn block_new(b: IrBuilder, fn: IrFn) -> IrBlock
-fn const_i32(b: IrBuilder, value: i32) -> IrValue
-fn call(b: IrBuilder, callee: IrFn, args: Slice(IrValue)) -> Result(IrValue, Diagnostic)
-fn ret(b: IrBuilder, block: IrBlock, value: IrValue) -> Result(unit, Diagnostic)
+let fn_begin = std::func(b: IrBuilder, name: Symbol, sig: FnSig) -> Result(IrFn, Diagnostic)
+let block_new = std::func(b: IrBuilder, function: IrFn) -> IrBlock
+let const_i32 = std::func(b: IrBuilder, value: i32) -> IrValue
+let call = std::func(b: IrBuilder, callee: IrFn, args: Slice(IrValue)) -> Result(IrValue, Diagnostic)
+let ret = std::func(b: IrBuilder, block: IrBlock, value: IrValue) -> Result(unit, Diagnostic)
 ```
 
 旧世界可以在下面继续调用 Scheme/C FFI，但 Lain-meta 代码只能依赖这层 wrapper。
@@ -193,7 +194,7 @@ fn ret(b: IrBuilder, block: IrBlock, value: IrValue) -> Result(unit, Diagnostic)
 最低诊断模型：
 
 ```lain
-struct Diagnostic {
+let Diagnostic: type = std::struct {
     span: Option(Span),
     code: Symbol,
     message: String,
@@ -241,7 +242,7 @@ Option/Result/List/Slice compile and run simple tests
 enum/tagged union plus match compiles
 parser helper can split comma-separated groups
 type parser slice parses Name(T)
-fn parser slice parses fn name(params) -> ret
+std::func constructor slice elaborates callable bindings
 lowering slice emits a simple LAIN-IR function
 comptime helper builds a small AstTree or IR fragment
 ```
@@ -257,4 +258,3 @@ comptime helper builds a small AstTree or IR fragment
 ```
 
 如果答案是否定，就推迟到新世界。
-

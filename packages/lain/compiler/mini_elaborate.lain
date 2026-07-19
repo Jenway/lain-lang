@@ -1,26 +1,26 @@
 // Module/function lookup, lexical scope resolution and type elaboration for M4.
 
-import packages::lain::compiler::mini_syntax;
-import packages::lain::compiler::mini_type;
-import packages::lain::compiler::mini_module;
-import packages::lain::compiler::mini_middle;
-import packages::lain::compiler::compiler_context;
-
+let mini_syntax = import("packages::lain::compiler::mini_syntax");
+let mini_type = import("packages::lain::compiler::mini_type");
+let mini_module = import("packages::lain::compiler::mini_module");
+let mini_middle = import("packages::lain::compiler::mini_middle");
+let compiler_context = import("packages::lain::compiler::compiler_context");
 @foreign(c, link_name = "core.string-append!")
-fn mini_elaborate_string_append(left: addr, right: addr) -> addr;
+let mini_elaborate_string_append = std::func(left: addr, right: addr) -> addr;
 
 // M13 builds the callable environment once before elaborating bodies.  The
 // earlier bootstrap path repeatedly rediscovered every callable by walking
 // RawAst for every call expression, which made full self-compilation
 // quadratic in expensive topology queries.  The table and duplicate policy
 // are Lain-owned; the host supplies only the raw growable slots from M11.
-pub struct M13ElaborationIndex {
+@export
+let M13ElaborationIndex: type = std::struct {
     functions: M11SymbolTable,
     types: M11SymbolTable,
     duplicate: i32,
 }
 
-fn m13_index_callable(
+let m13_index_callable = std::func(
     function: i32, index: M13ElaborationIndex) -> M13ElaborationIndex {
     if function == 0 { return index; }
     let name: addr = mini_syntax_function_name(function);
@@ -44,7 +44,7 @@ fn m13_index_callable(
         });
 }
 
-fn m13_index_types(
+let m13_index_types = std::func(
     item: i32, index: M13ElaborationIndex) -> M13ElaborationIndex {
     if item == 0 { return index; }
     if mini_syntax_is_struct_declaration(item) == 1 {
@@ -69,7 +69,7 @@ fn m13_index_types(
     return m13_index_types(mini_middle_next_item(item), index);
 }
 
-fn m13_index_new(root: i32) -> M13ElaborationIndex {
+let m13_index_new = std::func(root: i32) -> M13ElaborationIndex {
     let callables: M13ElaborationIndex = m13_index_callable(
         mini_middle_first_callable(root),
         M13ElaborationIndex {
@@ -79,40 +79,58 @@ fn m13_index_new(root: i32) -> M13ElaborationIndex {
     return m13_index_types(mini_middle_first_item(root), callables);
 }
 
-pub fn mini_elaborate_index_new(root: i32) -> M13ElaborationIndex {
+@export
+
+let mini_elaborate_index_new = std::func(root: i32) -> M13ElaborationIndex {
     return m13_index_new(root);
 }
 
-fn m13_index_destroy(index: M13ElaborationIndex) -> i32 {
+let m13_index_destroy = std::func(index: M13ElaborationIndex) -> i32 {
     let functions: i32 = m11_symbol_table_destroy(index.functions);
     let types: i32 = m11_symbol_table_destroy(index.types);
     if functions == 1 { return types; }
     return 0;
 }
 
-pub fn mini_elaborate_index_destroy(index: M13ElaborationIndex) -> i32 {
+@export
+
+let mini_elaborate_index_destroy = std::func(index: M13ElaborationIndex) -> i32 {
     return m13_index_destroy(index);
 }
 
-fn m13_find(index: M13ElaborationIndex, name: addr) -> i32 {
+let m13_find = std::func(index: M13ElaborationIndex, name: addr) -> i32 {
     return m11_symbol_table_find(index.functions, name);
 }
 
-pub fn mini_elaborate_find_callable(
+@export
+
+let mini_elaborate_find_callable = std::func(
     index: M13ElaborationIndex, name: addr) -> i32 {
     return m13_find(index, name);
 }
 
-fn mini_name_visible(function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
+let mini_name_visible = std::func(function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
     if mini_syntax_param_named(mini_syntax_function_first_param(function), name) == 1 { return 1; }
     if mini_middle_find_visible_local(function, stop, name) != 0 { return 1; }
     return 0;
 }
 
-fn mini_type_from_syntax(node: i32) -> i32 {
+let mini_type_from_syntax = std::func(node: i32) -> i32 {
     if mini_syntax_is_atom_text(node, "i32") == 1 { return mini_type_i32(); }
     if mini_syntax_is_atom_text(node, "addr") == 1 { return mini_type_addr(); }
     if mini_syntax_is_unit_type(node) == 1 { return mini_type_unit(); }
+    if mini_syntax_path_tail_is(node, "type") == 1 {
+        return mini_type_type();
+    }
+    if mini_syntax_path_tail_is(node, "Module") == 1 {
+        return mini_type_module();
+    }
+    if mini_syntax_path_tail_is(node, "module") == 1 {
+        return mini_type_module();
+    }
+    if mini_syntax_path_tail_is(node, "Callable") == 1 {
+        return mini_type_callable();
+    }
     if mini_syntax_is_interface_dyn_type(node) == 1 {
         return mini_type_addr();
     }
@@ -120,7 +138,94 @@ fn mini_type_from_syntax(node: i32) -> i32 {
     return mini_type_error();
 }
 
-fn mini_interface_callee(
+// Constructor calls are Meta callables.  The value produced by `func` is a
+// runtime callable unless a later elaboration rule supplies an explicit,
+// valid phase.  Keeping phase as resolved data avoids encoding evaluation
+// policy in the parser or in the constructor's spelling.
+@export
+let mini_elaborate_constructor_phase = std::func(item: i32) -> i32 {
+    if mini_middle_binding_constructor_is(item, "func") == 1 {
+        return mini_callable_phase_meta();
+    }
+    if mini_middle_binding_constructor_is(item, "struct") == 1 {
+        return mini_callable_phase_meta();
+    }
+    if mini_middle_binding_constructor_is(item, "module") == 1 {
+        return mini_callable_phase_meta();
+    }
+    if mini_middle_binding_constructor_is(item, "import") == 1 {
+        return mini_callable_phase_meta();
+    }
+    return 0;
+}
+
+@export
+
+let mini_elaborate_resolve_callable_phase = std::func(
+    function: i32, requested_phase: i32) -> i32 {
+    if mini_middle_binding_is_func(function) != 1 { return 0; }
+    if requested_phase == 0 { return mini_callable_phase_runtime(); }
+    if mini_callable_phase_valid(requested_phase) != 1 { return 0; }
+    return requested_phase;
+}
+
+@export
+
+let mini_elaborate_callable_phase = std::func(function: i32) -> i32 {
+    return mini_elaborate_resolve_callable_phase(function, 0);
+}
+
+let mini_elaborate_binding_inferred_type = std::func(item: i32) -> i32 {
+    if mini_middle_binding_is_func(item) == 1 {
+        return mini_type_callable();
+    }
+    if mini_middle_binding_is_struct(item) == 1 {
+        return mini_type_type();
+    }
+    if mini_middle_is_module_binding(item) == 1 {
+        return mini_type_module();
+    }
+    if mini_middle_is_require_binding(item) == 1 {
+        return mini_type_module();
+    }
+    let initializer: i32 = mini_middle_binding_initializer(item);
+    if mini_syntax_is_i32_atom(initializer) == 1 { return mini_type_i32(); }
+    if mini_syntax_is_string_atom(initializer) == 1 { return mini_type_addr(); }
+    return mini_type_error();
+}
+
+@export
+
+let mini_elaborate_binding_type = std::func(item: i32) -> i32 {
+    let inferred: i32 = mini_elaborate_binding_inferred_type(item);
+    let expected_node: i32 = mini_middle_binding_expected(item);
+    if expected_node == 0 { return inferred; }
+    let expected: i32 = mini_type_from_syntax(expected_node);
+    if expected == mini_type_error() { return mini_type_error(); }
+    if inferred == mini_type_error() { return mini_type_error(); }
+    if mini_type_same(expected, inferred) != 1 { return mini_type_error(); }
+    return expected;
+}
+
+let mini_validate_top_level_bindings = std::func(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    if mini_middle_item_tag(item) == 5 {
+        let inferred: i32 = mini_elaborate_binding_inferred_type(item);
+        if inferred == mini_type_error() { return 12007; }
+        let expected_node: i32 = mini_middle_binding_expected(item);
+        if expected_node != 0 {
+            let expected: i32 = mini_type_from_syntax(expected_node);
+            if expected == mini_type_error() { return 12007; }
+            if mini_type_same(expected, inferred) != 1 { return 12006; }
+        }
+        if mini_middle_binding_is_func(item) == 1 {
+            if mini_elaborate_callable_phase(item) == 0 { return 12008; }
+        }
+    }
+    return mini_validate_top_level_bindings(mini_middle_next_item(item));
+}
+
+let mini_interface_callee = std::func(
     index: M13ElaborationIndex, root: i32, node: i32) -> i32 {
     if mini_syntax_text_equal(
         mini_middle_interface_type_name(root),
@@ -134,11 +239,11 @@ fn mini_interface_callee(
             mini_syntax_interface_member_name(node)));
 }
 
-fn mini_function_return_type(function: i32) -> i32 {
+let mini_function_return_type = std::func(function: i32) -> i32 {
     return mini_type_from_syntax(mini_syntax_right(mini_syntax_function_signature(function)));
 }
 
-fn m13_find_field_type(field: i32, name: addr) -> i32 {
+let m13_find_field_type = std::func(field: i32, name: addr) -> i32 {
     if field == 0 { return 0; }
     if mini_syntax_is_atom_text(field, ",") == 1 {
         return m13_find_field_type(mini_syntax_next(field), name);
@@ -152,7 +257,7 @@ fn m13_find_field_type(field: i32, name: addr) -> i32 {
     return m13_find_field_type(mini_syntax_next(field), name);
 }
 
-fn m13_struct_field_type(
+let m13_struct_field_type = std::func(
     index: M13ElaborationIndex, type_node: i32, name: addr) -> i32 {
     if type_node == 0 { return 0; }
     let declaration: i32 = m11_symbol_table_find(
@@ -162,13 +267,13 @@ fn m13_struct_field_type(
         mini_syntax_struct_first_field(declaration), name);
 }
 
-fn m13_type_size(type_node: i32) -> i32 {
+let m13_type_size = std::func(type_node: i32) -> i32 {
     if mini_syntax_is_atom_text(type_node, "i32") == 1 { return 4; }
     if mini_syntax_is_atom_text(type_node, "bool") == 1 { return 4; }
     return 8;
 }
 
-fn m13_field_offset_from(
+let m13_field_offset_from = std::func(
     field: i32, name: addr, offset: i32, four_byte_tail: i32) -> i32 {
     if field == 0 { return -1; }
     if mini_syntax_is_atom_text(field, ",") == 1 {
@@ -205,7 +310,7 @@ fn m13_field_offset_from(
         mini_syntax_next(field), name, offset + 4, 1);
 }
 
-fn m13_struct_size_from(
+let m13_struct_size_from = std::func(
     field: i32, offset: i32,
     four_byte_tail: i32, has_addr: i32) -> i32 {
     if field == 0 {
@@ -235,7 +340,9 @@ fn m13_struct_size_from(
         mini_syntax_next(field), offset + 4, 1, has_addr);
 }
 
-pub fn mini_elaborate_aggregate_size(
+@export
+
+let mini_elaborate_aggregate_size = std::func(
     index: M13ElaborationIndex, aggregate: i32) -> i32 {
     let declaration: i32 = m11_symbol_table_find(
         index.types,
@@ -245,7 +352,9 @@ pub fn mini_elaborate_aggregate_size(
         mini_syntax_struct_first_field(declaration), 0, 0, 0);
 }
 
-pub fn mini_elaborate_aggregate_field_offset(
+@export
+
+let mini_elaborate_aggregate_field_offset = std::func(
     index: M13ElaborationIndex, aggregate: i32, name: addr) -> i32 {
     let declaration: i32 = m11_symbol_table_find(
         index.types,
@@ -255,7 +364,9 @@ pub fn mini_elaborate_aggregate_field_offset(
         mini_syntax_struct_first_field(declaration), name, 0, 0);
 }
 
-pub fn mini_elaborate_field_offset_indexed(
+@export
+
+let mini_elaborate_field_offset_indexed = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     let base_type: i32 = m13_expr_type_node(
@@ -268,7 +379,7 @@ pub fn mini_elaborate_field_offset_indexed(
         mini_syntax_text(mini_syntax_right(node)), 0, 0);
 }
 
-fn m13_expr_type_node(
+let m13_expr_type_node = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     let tag: i32 = mini_syntax_expr_tag(node);
@@ -306,7 +417,7 @@ fn m13_expr_type_node(
     return 0;
 }
 
-fn mini_name_type(index: M13ElaborationIndex, root: i32, function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
+let mini_name_type = std::func(index: M13ElaborationIndex, root: i32, function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
     let local: i32 = mini_middle_find_visible_local(function, stop, name);
     if local != 0 {
         let binding: i32 = mini_syntax_local_binding(local);
@@ -318,16 +429,20 @@ fn mini_name_type(index: M13ElaborationIndex, root: i32, function: i32, body_sta
     return mini_type_from_syntax(mini_syntax_param_type_node(param));
 }
 
-pub fn mini_elaborate_name_visible(function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
+@export
+
+let mini_elaborate_name_visible = std::func(function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
     return mini_name_visible(function, body_start, stop, name);
 }
 
-pub fn mini_elaborate_name_is_local(function: i32, stop: i32, name: addr) -> i32 {
+@export
+
+let mini_elaborate_name_is_local = std::func(function: i32, stop: i32, name: addr) -> i32 {
     if mini_middle_find_visible_local(function, stop, name) != 0 { return 1; }
     return 0;
 }
 
-fn mini_expr_type(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+let mini_expr_type = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
     let tag: i32 = mini_syntax_expr_tag(node);
     if tag == 1 { return mini_type_i32(); }
     if tag == 2 {
@@ -373,7 +488,7 @@ fn mini_expr_type(index: M13ElaborationIndex, root: i32, function: i32, node: i3
     return mini_type_error();
 }
 
-fn mini_validate_interface_call(
+let mini_validate_interface_call = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     if mini_syntax_text_equal(
@@ -406,7 +521,7 @@ fn mini_validate_interface_call(
         mini_syntax_function_first_param(callee), body_start, stop);
 }
 
-fn mini_validate_aggregate_fields(
+let mini_validate_aggregate_fields = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     field: i32, body_start: i32, stop: i32) -> i32 {
     if field == 0 { return 0; }
@@ -426,7 +541,7 @@ fn mini_validate_aggregate_fields(
         index, root, function, mini_syntax_next(field), body_start, stop);
 }
 
-fn m13_is_numeric_binary_tag(tag: i32) -> i32 {
+let m13_is_numeric_binary_tag = std::func(tag: i32) -> i32 {
     if tag == 12 { return 1; }
     if tag == 13 { return 1; }
     if tag == 14 { return 1; }
@@ -436,7 +551,9 @@ fn m13_is_numeric_binary_tag(tag: i32) -> i32 {
     return 0;
 }
 
-pub fn mini_elaborate_expr_type(root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+@export
+
+let mini_elaborate_expr_type = std::func(root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
     let index: M13ElaborationIndex = m13_index_new(root);
     let result: i32 = mini_expr_type(
         index, root, function, node, body_start, stop);
@@ -444,14 +561,16 @@ pub fn mini_elaborate_expr_type(root: i32, function: i32, node: i32, body_start:
     return result;
 }
 
-pub fn mini_elaborate_expr_type_indexed(
+@export
+
+let mini_elaborate_expr_type_indexed = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     return mini_expr_type(
         index, root, function, node, body_start, stop);
 }
 
-fn mini_validate_args(index: M13ElaborationIndex, root: i32, function: i32, arg: i32, param: i32, body_start: i32, stop: i32) -> i32 {
+let mini_validate_args = std::func(index: M13ElaborationIndex, root: i32, function: i32, arg: i32, param: i32, body_start: i32, stop: i32) -> i32 {
     if arg == 0 { return 0; }
     let code: i32 = mini_validate_expr(index, root, function, arg, body_start, stop);
     if code != 0 { return code; }
@@ -461,7 +580,7 @@ fn mini_validate_args(index: M13ElaborationIndex, root: i32, function: i32, arg:
         index, root, function, mini_syntax_arg_next(arg), mini_syntax_param_next(param), body_start, stop);
 }
 
-fn mini_validate_call(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+let mini_validate_call = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
     let name: addr = mini_syntax_call_name(node);
     if index.duplicate != 0 { return 2302; }
     let callee: i32 = m13_find(index, name);
@@ -474,7 +593,7 @@ fn mini_validate_call(index: M13ElaborationIndex, root: i32, function: i32, node
         index, root, function, args, mini_syntax_function_first_param(callee), body_start, stop);
 }
 
-fn mini_validate_if(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+let mini_validate_if = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
     let condition: i32 = mini_syntax_if_condition(node);
     let condition_code: i32 = mini_validate_expr(index, root, function, condition, body_start, stop);
     if condition_code != 0 { return condition_code; }
@@ -498,7 +617,7 @@ fn mini_validate_if(index: M13ElaborationIndex, root: i32, function: i32, node: 
     return 0;
 }
 
-fn mini_validate_expr(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+let mini_validate_expr = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
     let tag: i32 = mini_syntax_expr_tag(node);
     if tag == 1 { return 0; }
     if tag == 7 { return 0; }
@@ -592,7 +711,7 @@ fn mini_validate_expr(index: M13ElaborationIndex, root: i32, function: i32, node
     return 2001;
 }
 
-fn mini_validate_body(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32) -> i32 {
+let mini_validate_body = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32) -> i32 {
     if node == 0 { return 2103; }
     let form_tag: i32 = mini_syntax_form_tag(node);
     if form_tag == 1 { return mini_validate_body(index, root, function, mini_syntax_next(node), body_start); }
@@ -622,13 +741,13 @@ fn mini_validate_body(index: M13ElaborationIndex, root: i32, function: i32, node
     return 0;
 }
 
-fn mini_only_separators(node: i32) -> i32 {
+let mini_only_separators = std::func(node: i32) -> i32 {
     if node == 0 { return 1; }
     if mini_syntax_form_tag(node) != 1 { return 0; }
     return mini_only_separators(mini_syntax_next(node));
 }
 
-fn mini_validate_statement_block(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32) -> i32 {
+let mini_validate_statement_block = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32) -> i32 {
     if node == 0 { return 0; }
     let form_tag: i32 = mini_syntax_form_tag(node);
     if form_tag == 1 {
@@ -692,7 +811,7 @@ fn mini_validate_statement_block(index: M13ElaborationIndex, root: i32, function
     return 2502;
 }
 
-fn mini_validate_declared_body(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32) -> i32 {
+let mini_validate_declared_body = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32) -> i32 {
     if node == 0 { return 2103; }
     let form_tag: i32 = mini_syntax_form_tag(node);
     if form_tag == 1 {
@@ -720,8 +839,7 @@ fn mini_validate_declared_body(index: M13ElaborationIndex, root: i32, function: 
         let code: i32 = mini_validate_expr(
             index, root, function, node, body_start, node);
         if code != 0 { return code; }
-        // A direct-style `fn name(...) { expr }` uses its final expression as
-        // the procedure result, just like the unified-let function form.
+        // A canonical func body may use its final expression as the result.
         if mini_only_separators(mini_syntax_next(node)) == 1 {
             if mini_expr_type(
                 index, root, function, node, body_start, node) !=
@@ -752,34 +870,31 @@ fn mini_validate_declared_body(index: M13ElaborationIndex, root: i32, function: 
     return 2502;
 }
 
-fn mini_validate_param_names(param: i32) -> i32 {
+let mini_validate_param_names = std::func(param: i32) -> i32 {
     if param == 0 { return 0; }
     let name: addr = mini_syntax_text(mini_syntax_param_name_node(param));
     if mini_syntax_param_named(mini_syntax_param_next(param), name) == 1 { return 2110; }
     return mini_validate_param_names(mini_syntax_param_next(param));
 }
 
-fn mini_validate_function_semantics(index: M13ElaborationIndex, root: i32, function: i32) -> i32 {
+let mini_validate_function_semantics = std::func(index: M13ElaborationIndex, root: i32, function: i32) -> i32 {
     let name: addr = mini_syntax_function_name(function);
     if index.duplicate != 0 { return 2111; }
     let param_code: i32 = mini_validate_param_names(mini_syntax_function_first_param(function));
     if param_code != 0 { return param_code; }
     let body: i32 = mini_syntax_function_body(function);
     let first: i32 = mini_syntax_left(body);
-    if mini_syntax_function_style(function) == 1 {
-        return mini_validate_body(index, root, function, first, first);
-    }
     return mini_validate_declared_body(index, root, function, first, first);
 }
 
-fn mini_validate_functions(index: M13ElaborationIndex, root: i32, function: i32) -> i32 {
+let mini_validate_functions = std::func(index: M13ElaborationIndex, root: i32, function: i32) -> i32 {
     if function == 0 { return 0; }
     let code: i32 = mini_validate_function_semantics(index, root, function);
     if code != 0 { return code; }
     return mini_validate_functions(index, root, mini_middle_next_definition(function));
 }
 
-fn mini_diagnostic_function(index: M13ElaborationIndex, root: i32, function: i32) -> addr {
+let mini_diagnostic_function = std::func(index: M13ElaborationIndex, root: i32, function: i32) -> addr {
     if function == 0 { return ""; }
     if mini_validate_function_semantics(index, root, function) != 0 {
         return mini_syntax_function_name(function);
@@ -787,7 +902,7 @@ fn mini_diagnostic_function(index: M13ElaborationIndex, root: i32, function: i32
     return mini_diagnostic_function(index, root, mini_middle_next_definition(function));
 }
 
-fn mini_diagnostic_function_node(
+let mini_diagnostic_function_node = std::func(
     index: M13ElaborationIndex, root: i32, function: i32) -> i32 {
     if function == 0 { return 0; }
     if mini_validate_function_semantics(index, root, function) != 0 {
@@ -797,7 +912,7 @@ fn mini_diagnostic_function_node(
         index, root, mini_middle_next_definition(function));
 }
 
-fn m13_declared_failure_node(
+let m13_declared_failure_node = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     node: i32, body_start: i32) -> i32 {
     if node == 0 { return 0; }
@@ -857,7 +972,7 @@ fn m13_declared_failure_node(
     return node;
 }
 
-fn m13_failure_statement_from(
+let m13_failure_statement_from = std::func(
     index: M13ElaborationIndex, root: i32, function: i32) -> i32 {
     if function == 0 { return 0; }
     if mini_validate_function_semantics(index, root, function) != 0 {
@@ -870,7 +985,9 @@ fn m13_failure_statement_from(
         index, root, mini_middle_next_definition(function));
 }
 
-pub fn mini_elaborate_diagnostic_statement_line(root: i32) -> i32 {
+@export
+
+let mini_elaborate_diagnostic_statement_line = std::func(root: i32) -> i32 {
     if mini_middle_validate_program(root) != 0 { return 0; }
     let index: M13ElaborationIndex = m13_index_new(root);
     let node: i32 = m13_failure_statement_from(
@@ -880,7 +997,9 @@ pub fn mini_elaborate_diagnostic_statement_line(root: i32) -> i32 {
     return line;
 }
 
-pub fn mini_elaborate_diagnostic_statement_code(root: i32) -> i32 {
+@export
+
+let mini_elaborate_diagnostic_statement_code = std::func(root: i32) -> i32 {
     if mini_middle_validate_program(root) != 0 {
         return mini_middle_validate_program(root);
     }
@@ -909,7 +1028,9 @@ pub fn mini_elaborate_diagnostic_statement_code(root: i32) -> i32 {
     return result;
 }
 
-pub fn mini_elaborate_diagnostic_function_line(root: i32) -> i32 {
+@export
+
+let mini_elaborate_diagnostic_function_line = std::func(root: i32) -> i32 {
     if mini_middle_validate_program(root) != 0 { return 0; }
     let index: M13ElaborationIndex = m13_index_new(root);
     let node: i32 = mini_diagnostic_function_node(
@@ -919,7 +1040,9 @@ pub fn mini_elaborate_diagnostic_function_line(root: i32) -> i32 {
     return line;
 }
 
-pub fn mini_elaborate_diagnostic_function(root: i32) -> addr {
+@export
+
+let mini_elaborate_diagnostic_function = std::func(root: i32) -> addr {
     if mini_middle_validate_program(root) != 0 { return ""; }
     let index: M13ElaborationIndex = m13_index_new(root);
     let result: addr = mini_diagnostic_function(
@@ -928,9 +1051,14 @@ pub fn mini_elaborate_diagnostic_function(root: i32) -> addr {
     return result;
 }
 
-pub fn mini_elaborate_validate(root: i32) -> i32 {
+@export
+
+let mini_elaborate_validate = std::func(root: i32) -> i32 {
     let syntax_code: i32 = mini_middle_validate_program(root);
     if syntax_code != 0 { return syntax_code; }
+    let binding_code: i32 = mini_validate_top_level_bindings(
+        mini_middle_first_item(root));
+    if binding_code != 0 { return binding_code; }
     let index: M13ElaborationIndex = m13_index_new(root);
     let result: i32 = mini_validate_functions(
         index, root, mini_module_first_procedure(root));
@@ -942,8 +1070,12 @@ pub fn mini_elaborate_validate(root: i32) -> i32 {
 // definition is checked completely, including the signatures of every call
 // it makes, without revalidating unrelated function bodies in the same
 // source closure.
-pub fn mini_elaborate_validate_named(root: i32, name: addr) -> i32 {
+@export
+let mini_elaborate_validate_named = std::func(root: i32, name: addr) -> i32 {
     if mini_syntax_kind(root) != 4 { return 1001; }
+    let binding_code: i32 = mini_validate_top_level_bindings(
+        mini_middle_first_item(root));
+    if binding_code != 0 { return binding_code; }
     let index: M13ElaborationIndex = m13_index_new(root);
     if index.duplicate != 0 {
         let destroyed_duplicate: i32 = m13_index_destroy(index);
@@ -963,20 +1095,19 @@ pub fn mini_elaborate_validate_named(root: i32, name: addr) -> i32 {
 }
 
 // M5 module-context elaboration.  Canonical module bodies contain only
-// unified let bindings, so this path can stay independent of the legacy
-// direct `pub fn` statement-body compatibility path above.
-fn mini_workspace_type_from_syntax(node: i32) -> i32 {
+// unified let bindings.
+let mini_workspace_type_from_syntax = std::func(node: i32) -> i32 {
     if mini_syntax_is_atom_text(node, "i32") == 1 { return mini_type_i32(); }
     if mini_syntax_is_atom_text(node, "addr") == 1 { return mini_type_addr(); }
     return mini_type_error();
 }
 
-fn mini_workspace_function_return_type(function: i32) -> i32 {
+let mini_workspace_function_return_type = std::func(function: i32) -> i32 {
     return mini_workspace_type_from_syntax(
         mini_syntax_right(mini_syntax_function_signature(function)));
 }
 
-fn mini_workspace_name_type(
+let mini_workspace_name_type = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     body_start: i32, stop: i32, name: addr) -> i32 {
     let local: i32 = mini_middle_find_visible_local(function, stop, name);
@@ -991,7 +1122,7 @@ fn mini_workspace_name_type(
     return mini_workspace_type_from_syntax(mini_syntax_param_type_node(param));
 }
 
-fn mini_workspace_member_callee(
+let mini_workspace_member_callee = std::func(
     workspace: ModuleWorkspace, module: i32, node: i32) -> i32 {
     let target: i32 = module_workspace_resolve_alias(
         workspace, module, mini_syntax_member_base_name(node));
@@ -1000,7 +1131,7 @@ fn mini_workspace_member_callee(
         target, mini_syntax_member_name(node));
 }
 
-fn mini_workspace_expr_type(
+let mini_workspace_expr_type = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     let tag: i32 = mini_syntax_expr_tag(node);
@@ -1033,14 +1164,16 @@ fn mini_workspace_expr_type(
     return mini_type_error();
 }
 
-pub fn mini_elaborate_module_expr_type_indexed(
+@export
+
+let mini_elaborate_module_expr_type_indexed = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     return mini_workspace_expr_type(
         workspace, module, root, function, node, body_start, stop);
 }
 
-fn mini_workspace_validate_args(
+let mini_workspace_validate_args = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     arg: i32, param: i32, body_start: i32, stop: i32) -> i32 {
     if arg == 0 { return 0; }
@@ -1059,7 +1192,7 @@ fn mini_workspace_validate_args(
         body_start, stop);
 }
 
-fn mini_workspace_validate_local_call(
+let mini_workspace_validate_local_call = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     let name: addr = mini_syntax_call_name(node);
@@ -1075,7 +1208,7 @@ fn mini_workspace_validate_local_call(
         mini_syntax_function_first_param(callee), body_start, stop);
 }
 
-fn mini_workspace_validate_member_call(
+let mini_workspace_validate_member_call = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     let target: i32 = module_workspace_resolve_alias(
@@ -1096,7 +1229,7 @@ fn mini_workspace_validate_member_call(
         mini_syntax_function_first_param(callee), body_start, stop);
 }
 
-fn mini_workspace_validate_if(
+let mini_workspace_validate_if = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     let condition: i32 = mini_syntax_if_condition(node);
@@ -1127,7 +1260,7 @@ fn mini_workspace_validate_if(
     return 0;
 }
 
-fn mini_workspace_validate_expr(
+let mini_workspace_validate_expr = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     let tag: i32 = mini_syntax_expr_tag(node);
@@ -1213,7 +1346,80 @@ fn mini_workspace_validate_expr(
     return 2001;
 }
 
-fn mini_workspace_validate_body(
+let mini_workspace_validate_statement_block = std::func(
+    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+    node: i32, body_start: i32) -> i32 {
+    if node == 0 { return 0; }
+    let form_tag: i32 = mini_syntax_form_tag(node);
+    if form_tag == 1 {
+        return mini_workspace_validate_statement_block(
+            workspace, module, root, function,
+            mini_syntax_next(node), body_start);
+    }
+    if form_tag == 2 {
+        let name_node: i32 = mini_syntax_local_name_node(node);
+        if mini_syntax_is_identifier(name_node) != 1 { return 2101; }
+        if mini_name_visible(
+            function, body_start, node, mini_syntax_text(name_node)) == 1 {
+            return 2102;
+        }
+        let value: i32 = mini_syntax_local_value_node(node);
+        let value_code: i32 = mini_workspace_validate_expr(
+            workspace, module, root, function, value, body_start, node);
+        if value_code != 0 { return value_code; }
+        let value_type: i32 = mini_workspace_expr_type(
+            workspace, module, root, function, value, body_start, node);
+        if value_type == mini_type_error() { return 2203; }
+        let declared: i32 = mini_syntax_local_type_node(node);
+        if declared != 0 {
+            if value_type != mini_workspace_type_from_syntax(declared) {
+                return 2203;
+            }
+        }
+        return mini_workspace_validate_statement_block(
+            workspace, module, root, function,
+            mini_syntax_next(node), body_start);
+    }
+    if form_tag == 3 {
+        let code: i32 = mini_workspace_validate_expr(
+            workspace, module, root, function, node, body_start, node);
+        if code != 0 { return code; }
+        return mini_workspace_validate_statement_block(
+            workspace, module, root, function,
+            mini_syntax_next(node), body_start);
+    }
+    if form_tag == 4 {
+        let value: i32 = mini_syntax_return_expr(node);
+        let value_code: i32 = mini_workspace_validate_expr(
+            workspace, module, root, function, value, body_start, node);
+        if value_code != 0 { return value_code; }
+        if mini_workspace_expr_type(
+            workspace, module, root, function, value, body_start, node) !=
+            mini_workspace_function_return_type(function) { return 2204; }
+        if mini_only_separators(mini_syntax_next(node)) != 1 { return 2501; }
+        return 0;
+    }
+    if form_tag == 5 {
+        let condition: i32 = mini_syntax_if_statement_condition(node);
+        let condition_code: i32 = mini_workspace_validate_expr(
+            workspace, module, root, function, condition, body_start, node);
+        if condition_code != 0 { return condition_code; }
+        if mini_workspace_expr_type(
+            workspace, module, root, function, condition, body_start, node) !=
+            mini_type_bool() { return 2401; }
+        let branch: i32 = mini_syntax_left(
+            mini_syntax_if_statement_body(node));
+        let branch_code: i32 = mini_workspace_validate_statement_block(
+            workspace, module, root, function, branch, branch);
+        if branch_code != 0 { return branch_code; }
+        return mini_workspace_validate_statement_block(
+            workspace, module, root, function,
+            mini_syntax_next(node), body_start);
+    }
+    return 2502;
+}
+
+let mini_workspace_validate_body = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     node: i32, body_start: i32) -> i32 {
     if node == 0 { return 2103; }
@@ -1247,17 +1453,52 @@ fn mini_workspace_validate_body(
             workspace, module, root, function,
             mini_syntax_next(node), body_start);
     }
-    if mini_syntax_next(node) != 0 { return 2104; }
-    let result_code: i32 = mini_workspace_validate_expr(
-        workspace, module, root, function, node, body_start, node);
-    if result_code != 0 { return result_code; }
-    if mini_workspace_expr_type(
-        workspace, module, root, function, node, body_start, node) !=
-        mini_workspace_function_return_type(function) { return 2204; }
-    return 0;
+    if form_tag == 3 {
+        let result_code: i32 = mini_workspace_validate_expr(
+            workspace, module, root, function, node, body_start, node);
+        if result_code != 0 { return result_code; }
+        if mini_only_separators(mini_syntax_next(node)) == 1 {
+            if mini_workspace_expr_type(
+                workspace, module, root, function, node, body_start, node) !=
+                mini_workspace_function_return_type(function) { return 2204; }
+            return 0;
+        }
+        return mini_workspace_validate_body(
+            workspace, module, root, function,
+            mini_syntax_next(node), body_start);
+    }
+    if form_tag == 4 {
+        let value: i32 = mini_syntax_return_expr(node);
+        let value_code: i32 = mini_workspace_validate_expr(
+            workspace, module, root, function, value, body_start, node);
+        if value_code != 0 { return value_code; }
+        if mini_workspace_expr_type(
+            workspace, module, root, function, value, body_start, node) !=
+            mini_workspace_function_return_type(function) { return 2204; }
+        if mini_only_separators(mini_syntax_next(node)) != 1 { return 2501; }
+        return 0;
+    }
+    if form_tag == 5 {
+        let condition: i32 = mini_syntax_if_statement_condition(node);
+        let condition_code: i32 = mini_workspace_validate_expr(
+            workspace, module, root, function, condition, body_start, node);
+        if condition_code != 0 { return condition_code; }
+        if mini_workspace_expr_type(
+            workspace, module, root, function, condition, body_start, node) !=
+            mini_type_bool() { return 2401; }
+        let branch: i32 = mini_syntax_left(
+            mini_syntax_if_statement_body(node));
+        let branch_code: i32 = mini_workspace_validate_statement_block(
+            workspace, module, root, function, branch, branch);
+        if branch_code != 0 { return branch_code; }
+        return mini_workspace_validate_body(
+            workspace, module, root, function,
+            mini_syntax_next(node), body_start);
+    }
+    return 2502;
 }
 
-fn mini_workspace_validate_function(
+let mini_workspace_validate_function = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32) -> i32 {
     let param_code: i32 = mini_validate_param_names(
         mini_syntax_function_first_param(function));
@@ -1268,7 +1509,7 @@ fn mini_workspace_validate_function(
         workspace, module, root, function, first, first);
 }
 
-fn mini_workspace_validate_functions(
+let mini_workspace_validate_functions = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32) -> i32 {
     if function == 0 { return 0; }
     let code: i32 = mini_workspace_validate_function(
@@ -1278,14 +1519,16 @@ fn mini_workspace_validate_functions(
         workspace, module, root, mini_middle_next_definition(function));
 }
 
-pub fn mini_elaborate_validate_module_indexed(
+@export
+
+let mini_elaborate_validate_module_indexed = std::func(
     workspace: ModuleWorkspace, module: i32) -> i32 {
     let root: i32 = mini_module_body(module);
     return mini_workspace_validate_functions(
         workspace, module, root, mini_module_first_procedure(root));
 }
 
-fn mini_workspace_diagnostic_function_from(
+let mini_workspace_diagnostic_function_from = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32) -> addr {
     if function == 0 { return ""; }
     if mini_workspace_validate_function(
@@ -1296,7 +1539,9 @@ fn mini_workspace_diagnostic_function_from(
         workspace, module, root, mini_middle_next_definition(function));
 }
 
-pub fn mini_elaborate_module_diagnostic_function_indexed(
+@export
+
+let mini_elaborate_module_diagnostic_function_indexed = std::func(
     workspace: ModuleWorkspace, module: i32) -> addr {
     let root: i32 = mini_module_body(module);
     return mini_workspace_diagnostic_function_from(
@@ -1305,7 +1550,8 @@ pub fn mini_elaborate_module_diagnostic_function_indexed(
 
 // Historical single-root workspace adapters.  Stable compiler workspace
 // paths build one ModuleWorkspace and use the indexed entries directly.
-pub fn mini_elaborate_module_expr_type(
+@export
+let mini_elaborate_module_expr_type = std::func(
     root_workspace: i32, module: i32, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     let workspace: ModuleWorkspace = module_workspace_from_root(root_workspace);
@@ -1315,7 +1561,9 @@ pub fn mini_elaborate_module_expr_type(
     return result;
 }
 
-pub fn mini_elaborate_validate_module(
+@export
+
+let mini_elaborate_validate_module = std::func(
     root_workspace: i32, module: i32) -> i32 {
     let workspace: ModuleWorkspace = module_workspace_from_root(root_workspace);
     let result: i32 = mini_elaborate_validate_module_indexed(workspace, module);
@@ -1323,7 +1571,9 @@ pub fn mini_elaborate_validate_module(
     return result;
 }
 
-pub fn mini_elaborate_module_diagnostic_function(
+@export
+
+let mini_elaborate_module_diagnostic_function = std::func(
     root_workspace: i32, module: i32) -> addr {
     let workspace: ModuleWorkspace = module_workspace_from_root(root_workspace);
     let result: addr = mini_elaborate_module_diagnostic_function_indexed(

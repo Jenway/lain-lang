@@ -5,77 +5,141 @@
 // elaboration, and structured L1 lowering.  No Scheme pass participates in
 // this normal compiler entry.
 
-import packages::lain::compiler::mini_syntax;
-import packages::lain::compiler::mini_middle;
-import packages::lain::compiler::mini_module;
-import packages::lain::compiler::mini_elaborate;
-import packages::lain::compiler::mini_lower_unit;
-import packages::lain::compiler::l1_unit_builder;
-import packages::lain::compiler::mini_diagnostic;
-import packages::lain::compiler::compiler_context;
+let mini_syntax = import("packages::lain::compiler::mini_syntax");
+let mini_middle = import("packages::lain::compiler::mini_middle");
+let mini_module = import("packages::lain::compiler::mini_module");
+let mini_elaborate = import("packages::lain::compiler::mini_elaborate");
+let mini_lower_unit = import("packages::lain::compiler::mini_lower_unit");
+let l1_unit_builder = import("packages::lain::compiler::l1_unit_builder");
+let mini_diagnostic = import("packages::lain::compiler::mini_diagnostic");
+let compiler_context = import("packages::lain::compiler::compiler_context");
 
-pub struct ParsedProgram {
+@export
+let ParsedProgram = std::struct {
     root: i32,
     item_count: i32,
     diagnostic: i32,
 }
 
-pub struct MiddleProgram {
+@export
+let MiddleProgram = std::struct {
     root: i32,
     first_definition: i32,
     definition_count: i32,
     diagnostic: i32,
 }
 
-pub struct ElaboratedProgram {
+@export
+let ElaboratedProgram = std::struct {
     root: i32,
     procedure_count: i32,
     diagnostic: i32,
 }
 
-pub struct LoweredProgram {
+@export
+let LoweredProgram = std::struct {
     unit: i32,
     diagnostic: i32,
 }
 
-fn m12_count_items(item: i32) -> i32 {
+let m12_count_items = std::func(item: i32) -> i32 {
     if item == 0 { return 0; }
-    return 1 + m12_count_items(mini_middle_next_item(item));
+    let item1: i32 = mini_middle_next_item(item);
+    if item1 == 0 { return 1; }
+    let item2: i32 = mini_middle_next_item(item1);
+    if item2 == 0 { return 2; }
+    let item3: i32 = mini_middle_next_item(item2);
+    if item3 == 0 { return 3; }
+    let item4: i32 = mini_middle_next_item(item3);
+    if item4 == 0 { return 4; }
+    let item5: i32 = mini_middle_next_item(item4);
+    if item5 == 0 { return 5; }
+    let item6: i32 = mini_middle_next_item(item5);
+    if item6 == 0 { return 6; }
+    let item7: i32 = mini_middle_next_item(item6);
+    if item7 == 0 { return 7; }
+    return 8 + m12_count_items(mini_middle_next_item(item7));
 }
 
-fn m12_head_has_atom(node: i32, text: addr) -> i32 {
-    if node == 0 { return 0; }
-    if mini_syntax_is_atom_text(node, text) == 1 { return 1; }
-    if mini_syntax_is_juxt(node) == 1 {
-        if m12_head_has_atom(mini_syntax_left(node), text) == 1 { return 1; }
-        return m12_head_has_atom(mini_syntax_right(node), text);
+let m12_validate_binding = std::func(item: i32) -> i32 {
+    if mini_syntax_is_identifier(
+        mini_middle_binding_name_node(item)) != 1 { return 12002; }
+    let body: i32 = mini_middle_binding_body(item);
+    let body_constructor: i32 =
+        mini_middle_binding_is_func(item)
+        + mini_middle_binding_is_struct(item)
+        + mini_middle_is_module_binding(item);
+    if body != 0 {
+        if body_constructor == 0 { return 12003; }
+        return 0;
     }
+    if mini_middle_binding_constructor_is(item, "struct") == 1 { return 12004; }
+    if mini_middle_binding_constructor_is(item, "module") == 1 { return 12004; }
     return 0;
 }
 
-fn m12_is_meta_declaration(item: i32) -> i32 {
-    if mini_syntax_is_atom_text(item, ";") == 1 { return 1; }
-    if mini_syntax_is_juxt(item) != 1 { return 0; }
-    let head: i32 = mini_syntax_left(item);
-    if m12_head_has_atom(head, "struct") == 1 { return 1; }
-    if m12_head_has_atom(head, "enum") == 1 { return 1; }
-    if m12_head_has_atom(head, "interface") == 1 { return 1; }
-    if m12_head_has_atom(head, "effect") == 1 { return 1; }
+let m12_validate_attribute_target = std::func(item: i32) -> i32 {
+    let target: i32 = mini_middle_next_item(item);
+    if target == 0 { return 12005; }
+    let tag: i32 = mini_middle_item_tag(target);
+    if tag == 1 { return m12_validate_attribute_target(target); }
+    if tag != 5 { return 12005; }
     return 0;
 }
 
-fn m12_validate_domain_items(item: i32) -> i32 {
-    if item == 0 { return 0; }
+let m12_validate_domain_item = std::func(item: i32) -> i32 {
     let tag: i32 = mini_middle_item_tag(item);
-    // Attributes/import sugar/declarations/direct functions/unified let are
-    // all domain forms.  A zero tag is topology that no Lain domain claimed.
-    if tag == 0 {
-        if m12_is_meta_declaration(item) != 1 { return 12001; }
+    // RawAst accepts every topology.  The Meta/domain boundary accepts one
+    // declaration model only: attributes plus unified let bindings.
+    if tag == 0 { return 12001; }
+    if tag == 1 {
+        let attribute_code: i32 = m12_validate_attribute_target(item);
+        if attribute_code != 0 { return attribute_code; }
     }
-    return m12_validate_domain_items(mini_middle_next_item(item));
+    if tag == 5 {
+        let binding_code: i32 = m12_validate_binding(item);
+        if binding_code != 0 { return binding_code; }
+    }
+    return 0;
 }
 
-pub fn frontend_parse(root: i32) -> ParsedProgram {
+let m12_validate_domain_items = std::func(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    let code0: i32 = m12_validate_domain_item(item);
+    if code0 != 0 { return code0; }
+    let item1: i32 = mini_middle_next_item(item);
+    if item1 == 0 { return 0; }
+    let code1: i32 = m12_validate_domain_item(item1);
+    if code1 != 0 { return code1; }
+    let item2: i32 = mini_middle_next_item(item1);
+    if item2 == 0 { return 0; }
+    let code2: i32 = m12_validate_domain_item(item2);
+    if code2 != 0 { return code2; }
+    let item3: i32 = mini_middle_next_item(item2);
+    if item3 == 0 { return 0; }
+    let code3: i32 = m12_validate_domain_item(item3);
+    if code3 != 0 { return code3; }
+    let item4: i32 = mini_middle_next_item(item3);
+    if item4 == 0 { return 0; }
+    let code4: i32 = m12_validate_domain_item(item4);
+    if code4 != 0 { return code4; }
+    let item5: i32 = mini_middle_next_item(item4);
+    if item5 == 0 { return 0; }
+    let code5: i32 = m12_validate_domain_item(item5);
+    if code5 != 0 { return code5; }
+    let item6: i32 = mini_middle_next_item(item5);
+    if item6 == 0 { return 0; }
+    let code6: i32 = m12_validate_domain_item(item6);
+    if code6 != 0 { return code6; }
+    let item7: i32 = mini_middle_next_item(item6);
+    if item7 == 0 { return 0; }
+    let code7: i32 = m12_validate_domain_item(item7);
+    if code7 != 0 { return code7; }
+    return m12_validate_domain_items(mini_middle_next_item(item7));
+}
+
+@export
+let frontend_parse = std::func(root: i32) -> ParsedProgram {
     if mini_syntax_kind(root) != 4 {
         return ParsedProgram {
             root: root, item_count: 0, diagnostic: 1001,
@@ -94,7 +158,8 @@ pub fn frontend_parse(root: i32) -> ParsedProgram {
     };
 }
 
-pub fn frontend_build_middle(parsed: ParsedProgram) -> MiddleProgram {
+@export
+let frontend_build_middle = std::func(parsed: ParsedProgram) -> MiddleProgram {
     if parsed.diagnostic != 0 {
         return MiddleProgram {
             root: parsed.root, first_definition: 0,
@@ -110,7 +175,8 @@ pub fn frontend_build_middle(parsed: ParsedProgram) -> MiddleProgram {
     };
 }
 
-pub fn frontend_elaborate(middle: MiddleProgram) -> ElaboratedProgram {
+@export
+let frontend_elaborate = std::func(middle: MiddleProgram) -> ElaboratedProgram {
     if middle.diagnostic != 0 {
         return ElaboratedProgram {
             root: middle.root, procedure_count: middle.definition_count,
@@ -124,7 +190,8 @@ pub fn frontend_elaborate(middle: MiddleProgram) -> ElaboratedProgram {
     };
 }
 
-pub fn frontend_lower(elaborated: ElaboratedProgram) -> LoweredProgram {
+@export
+let frontend_lower = std::func(elaborated: ElaboratedProgram) -> LoweredProgram {
     if elaborated.diagnostic != 0 {
         return LoweredProgram {
             unit: 0, diagnostic: elaborated.diagnostic,
@@ -137,7 +204,8 @@ pub fn frontend_lower(elaborated: ElaboratedProgram) -> LoweredProgram {
     return LoweredProgram { unit: unit, diagnostic: 0 };
 }
 
-pub fn frontend_compile(
+@export
+let frontend_compile = std::func(
     root: i32, source_length: i32) -> CompileResult {
     let context0: CompilerContext = compiler_context_new(root, source_length);
     let context1: CompilerContext = compiler_context_add_module(
@@ -188,7 +256,8 @@ pub fn frontend_compile(
         compiler_context_with_unit(context4, lowered.unit));
 }
 
-pub fn m12_frontend_phase_probe(source: addr, length: i32) -> i32 {
+@export
+let m12_frontend_phase_probe = std::func(source: addr, length: i32) -> i32 {
     let root: i32 = mini_syntax_parse(source, length);
     let parsed: ParsedProgram = frontend_parse(root);
     if parsed.diagnostic != 0 { return 1201; }
@@ -206,4 +275,5 @@ pub fn m12_frontend_phase_probe(source: addr, length: i32) -> i32 {
     return 42;
 }
 
-pub fn m12_frontend_schema_version() -> i32 { return 12; }
+@export
+let m12_frontend_schema_version = std::func() -> i32 { return 12; }
