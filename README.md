@@ -42,6 +42,7 @@ Zig 0.16 or newer is the primary stage-0 build tool:
 zig build                         # install tools and the stage-2 compiler artifact
 zig build test                    # build everything and run core tests
 zig build self-host-compiler      # explicitly rebuild/install stage2_compiler.l1
+zig build test-self-host          # prove the stage2 == stage3 byte fixed point
 zig build lainc -Dscheme=gauche  # select the Scheme host explicitly
 zig build lainc -Dscheme=chibi
 ```
@@ -80,3 +81,8 @@ standalone `fn`, `struct`, `module`, and `import` declarations are rejected.
 The Scheme stage-0 frontend is maintained only on `bootstrap/stage0`.
 The main worktree may invoke it through the sibling bootstrap worktree when
 rebuilding the first compiler seed; normal compilation never falls back to it.
+
+The self-hosting gate rebuilds `stage3_compiler.l1` with the current stage-2
+artifact and requires both compiler artifacts to be byte-identical. It also
+requires identical generated LAIN-IR and diagnostics for representative
+single-file and module-workspace inputs.
