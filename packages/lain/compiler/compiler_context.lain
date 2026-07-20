@@ -5,6 +5,7 @@
 // lifetime, and success/failure policy.
 
 let types = import("packages::lain::compiler::types");
+let syntax = import("packages::lain::compiler::syntax");
 
 @foreign(c, link_name = "compiler.storage-new!")
 let host_storage_new = std::func(kind: i32) -> i32;
@@ -192,6 +193,7 @@ let m11_string_vec_destroy = std::func(vec: M11StringVec) -> i32 {
 
 let M11SymbolTable: type = std::struct {
     names: M11StringVec,
+    hygiene_contexts: M11I32Vec,
     values: M11I32Vec,
     next: M11I32Vec,
     heads: M11I32Vec,
@@ -228,14 +230,16 @@ let m11_symbol_table_bucket = std::func(name: addr) -> i32 {
 @export
 let m11_symbol_table_new = std::func() -> M11SymbolTable {
     return M11SymbolTable {
-        names: m11_string_vec_new(), values: m11_i32_vec_new(),
+        names: m11_string_vec_new(),
+        hygiene_contexts: m11_i32_vec_new(),
+        values: m11_i32_vec_new(),
         next: m11_i32_vec_new(), heads: m11_i32_vec_zeroed(512),
     };
 }
 
-@export
-let m11_symbol_table_insert = std::func(
-    table: M11SymbolTable, name: addr, value: i32) -> M11SymbolTable {
+let m11_symbol_table_insert_context = std::func(
+    table: M11SymbolTable, name: addr,
+    hygiene_context: i32, value: i32) -> M11SymbolTable {
     let names_before: M11StringVec = table.names;
     let heads: M11I32Vec = table.heads;
     let bucket: i32 = m11_symbol_table_bucket(name);
@@ -244,27 +248,57 @@ let m11_symbol_table_insert = std::func(
         heads.storage, bucket, names_before.len + 1);
     return M11SymbolTable {
         names: m11_string_vec_push(table.names, name),
+        hygiene_contexts: m11_i32_vec_push(
+            table.hygiene_contexts, hygiene_context),
         values: m11_i32_vec_push(table.values, value),
         next: m11_i32_vec_push(table.next, old_head),
         heads: heads,
     };
 }
 
+@export
+let m11_symbol_table_insert = std::func(
+    table: M11SymbolTable, name: addr, value: i32) -> M11SymbolTable {
+    return m11_symbol_table_insert_context(table, name, 0, value);
+}
+
+@export
+let m11_symbol_table_insert_node = std::func(
+    table: M11SymbolTable, identifier: i32,
+    value: i32) -> M11SymbolTable {
+    return m11_symbol_table_insert_context(
+        table, syntax_text(identifier), syntax_hygiene(identifier), value);
+}
+
 let m11_symbol_table_find_from = std::func(
-    table: M11SymbolTable, name: addr, entry: i32) -> i32 {
+    table: M11SymbolTable, name: addr,
+    hygiene_context: i32, entry: i32) -> i32 {
     if entry == 0 { return 0; }
     if host_string_equal(
         m11_string_vec_get(table.names, entry + -1), name) == 1 {
-        return m11_i32_vec_get(table.values, entry + -1);
+        if m11_i32_vec_get(
+            table.hygiene_contexts, entry + -1) == hygiene_context {
+            return m11_i32_vec_get(table.values, entry + -1);
+        }
     }
     return m11_symbol_table_find_from(
-        table, name, m11_i32_vec_get(table.next, entry + -1));
+        table, name, hygiene_context,
+        m11_i32_vec_get(table.next, entry + -1));
 }
 
 @export
 let m11_symbol_table_find = std::func(table: M11SymbolTable, name: addr) -> i32 {
     return m11_symbol_table_find_from(
-        table, name,
+        table, name, 0,
+        m11_i32_vec_get(table.heads, m11_symbol_table_bucket(name)));
+}
+
+@export
+let m11_symbol_table_find_node = std::func(
+    table: M11SymbolTable, identifier: i32) -> i32 {
+    let name: addr = syntax_text(identifier);
+    return m11_symbol_table_find_from(
+        table, name, syntax_hygiene(identifier),
         m11_i32_vec_get(table.heads, m11_symbol_table_bucket(name)));
 }
 
@@ -277,12 +311,15 @@ let m11_symbol_table_count = std::func(table: M11SymbolTable) -> i32 {
 @export
 let m11_symbol_table_destroy = std::func(table: M11SymbolTable) -> i32 {
     let names: i32 = m11_string_vec_destroy(table.names);
+    let hygiene: i32 = m11_i32_vec_destroy(table.hygiene_contexts);
     let values: i32 = m11_i32_vec_destroy(table.values);
     let next: i32 = m11_i32_vec_destroy(table.next);
     let heads: i32 = m11_i32_vec_destroy(table.heads);
     if names == 1 {
-        if values == 1 {
+        if hygiene == 1 {
+          if values == 1 {
             if next == 1 { return heads; }
+          }
         }
     }
     return 0;

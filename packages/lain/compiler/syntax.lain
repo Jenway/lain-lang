@@ -82,6 +82,8 @@ let i32_to_string = std::func(value: i32) -> addr;
 let string_first_byte = std::func(value: addr) -> i32;
 @foreign(c, link_name = "core.string-length!")
 let string_length = std::func(value: addr) -> i32;
+@foreign(c, link_name = "core.string-append!")
+let syntax_string_append = std::func(left: addr, right: addr) -> addr;
 
 @export
 
@@ -234,6 +236,28 @@ let syntax_is_identifier = std::func(node: i32) -> i32 {
     if syntax_is_atom_text(node, ";") == 1 { return 0; }
     if syntax_is_atom_text(node, ",") == 1 { return 0; }
     return 1;
+}
+
+// Identifier identity is spelling plus the expansion context that introduced
+// it.  Parsed source and explicit call-site clones use context 0; freshly
+// generated identifiers use their Meta expansion context.
+@export
+let syntax_identifier_equal = std::func(left: i32, right: i32) -> i32 {
+    if syntax_is_identifier(left) != 1 { return 0; }
+    if syntax_is_identifier(right) != 1 { return 0; }
+    if string_equal(syntax_text(left), syntax_text(right)) != 1 { return 0; }
+    if syntax_hygiene(left) != syntax_hygiene(right) { return 0; }
+    return 1;
+}
+
+@export
+let syntax_identifier_link_name = std::func(identifier: i32) -> addr {
+    let spelling: addr = syntax_text(identifier);
+    let context: i32 = syntax_hygiene(identifier);
+    if context == 0 { return spelling; }
+    return syntax_string_append(
+        syntax_string_append(spelling, "__h"),
+        syntax_i32_text(context));
 }
 
 @export
@@ -437,11 +461,29 @@ let syntax_find_param = std::func(param: i32, name: addr) -> i32 {
 }
 
 @export
+let syntax_find_param_node = std::func(param: i32, reference: i32) -> i32 {
+    if param == 0 { return 0; }
+    if syntax_identifier_equal(
+        syntax_param_name_node(param), reference) == 1 { return param; }
+    return syntax_find_param_node(syntax_param_next(param), reference);
+}
+
+@export
 
 let syntax_param_index = std::func(param: i32, name: addr, index: i32) -> i32 {
     if param == 0 { return 1000000; }
     if string_equal(ast_node_text(ast_node_left(param)), name) == 1 { return index; }
     return syntax_param_index(syntax_param_next(param), name, index + 1);
+}
+
+@export
+let syntax_param_index_node = std::func(
+    param: i32, reference: i32, index: i32) -> i32 {
+    if param == 0 { return 1000000; }
+    if syntax_identifier_equal(
+        syntax_param_name_node(param), reference) == 1 { return index; }
+    return syntax_param_index_node(
+        syntax_param_next(param), reference, index + 1);
 }
 
 @export
@@ -599,6 +641,23 @@ let syntax_runtime_param_index = std::func(
     }
     return syntax_runtime_param_index(
         syntax_param_next(param), name, index + 1);
+}
+
+@export
+let syntax_runtime_param_index_node = std::func(
+    param: i32, reference: i32, index: i32) -> i32 {
+    if param == 0 { return 1000000; }
+    if syntax_identifier_equal(
+        syntax_param_name_node(param), reference) == 1 {
+        if syntax_param_is_compiletime(param) == 1 { return 1000000; }
+        return index;
+    }
+    if syntax_param_is_compiletime(param) == 1 {
+        return syntax_runtime_param_index_node(
+            syntax_param_next(param), reference, index);
+    }
+    return syntax_runtime_param_index_node(
+        syntax_param_next(param), reference, index + 1);
 }
 
 // Qualified calls remain ordinary RawAst topology: `module.member(args)` is

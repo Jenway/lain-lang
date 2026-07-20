@@ -59,6 +59,18 @@ def main() -> int:
             None,
             "#return 1",
         ),
+        (
+            "hygiene prevents call-site capture",
+            "meta_hygiene_no_capture.lain",
+            "error 2003",
+            None,
+        ),
+        (
+            "fresh identifiers share expansion context",
+            "meta_hygiene_fresh_binding.lain",
+            None,
+            "#return %arg0",
+        ),
         ("zero replacement forms", "meta_empty.lain", None, "#proc main("),
         ("two replacement forms", "meta_two.lain", "error 2111", None),
         (

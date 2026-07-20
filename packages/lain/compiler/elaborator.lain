@@ -23,8 +23,9 @@ let M13ElaborationIndex: type = std::struct {
 let m13_index_callable = std::func(
     function: i32, index: M13ElaborationIndex) -> M13ElaborationIndex {
     if function == 0 { return index; }
-    let name: addr = syntax_function_name(function);
-    let old: i32 = m11_symbol_table_find(index.functions, name);
+    let name_node: i32 = syntax_function_name_node(function);
+    let old: i32 = m11_symbol_table_find_node(
+        index.functions, name_node);
     let duplicate: i32 = index.duplicate;
     if old != 0 {
         return m13_index_callable(
@@ -37,8 +38,8 @@ let m13_index_callable = std::func(
     return m13_index_callable(
         surface_next_callable(function),
         M13ElaborationIndex {
-            functions: m11_symbol_table_insert(
-                index.functions, name, function),
+            functions: m11_symbol_table_insert_node(
+                index.functions, name_node, function),
             types: index.types,
             duplicate: duplicate,
         });
@@ -48,9 +49,8 @@ let m13_index_types = std::func(
     item: i32, index: M13ElaborationIndex) -> M13ElaborationIndex {
     if item == 0 { return index; }
     if syntax_is_struct_declaration(item) == 1 {
-        let name: addr = syntax_text(
-            syntax_struct_name_node(item));
-        if m11_symbol_table_find(index.types, name) != 0 {
+        let name_node: i32 = syntax_struct_name_node(item);
+        if m11_symbol_table_find_node(index.types, name_node) != 0 {
             return m13_index_types(
                 surface_next_item(item),
                 M13ElaborationIndex {
@@ -62,7 +62,8 @@ let m13_index_types = std::func(
             surface_next_item(item),
             M13ElaborationIndex {
                 functions: index.functions,
-                types: m11_symbol_table_insert(index.types, name, item),
+                types: m11_symbol_table_insert_node(
+                    index.types, name_node, item),
                 duplicate: index.duplicate,
             });
     }
@@ -102,6 +103,11 @@ let m13_find = std::func(index: M13ElaborationIndex, name: addr) -> i32 {
     return m11_symbol_table_find(index.functions, name);
 }
 
+let m13_find_node = std::func(
+    index: M13ElaborationIndex, identifier: i32) -> i32 {
+    return m11_symbol_table_find_node(index.functions, identifier);
+}
+
 @export
 
 let elaborator_find_callable = std::func(
@@ -109,9 +115,24 @@ let elaborator_find_callable = std::func(
     return m13_find(index, name);
 }
 
+@export
+let elaborator_find_callable_node = std::func(
+    index: M13ElaborationIndex, identifier: i32) -> i32 {
+    return m13_find_node(index, identifier);
+}
+
 let elaborator_name_visible_impl = std::func(function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
     if syntax_param_named(syntax_function_first_param(function), name) == 1 { return 1; }
     if surface_find_visible_local(function, stop, name) != 0 { return 1; }
+    return 0;
+}
+
+let elaborator_name_visible_node_impl = std::func(
+    function: i32, body_start: i32, stop: i32, reference: i32) -> i32 {
+    if syntax_find_param_node(
+        syntax_function_first_param(function), reference) != 0 { return 1; }
+    if surface_find_visible_local_node(
+        function, stop, reference) != 0 { return 1; }
     return 0;
 }
 
@@ -460,9 +481,8 @@ let m13_expr_type_node = std::func(
     if tag == 7 { return 0; }
     if tag == 10 { return syntax_aggregate_type_node(node); }
     if tag == 2 {
-        let name: addr = syntax_text(node);
-        let local: i32 = surface_find_visible_local(
-            function, stop, name);
+        let local: i32 = surface_find_visible_local_node(
+            function, stop, node);
         if local != 0 {
             let declared: i32 = syntax_local_type_node(local);
             if declared != 0 { return declared; }
@@ -470,13 +490,14 @@ let m13_expr_type_node = std::func(
                 index, root, function,
                 syntax_local_value_node(local), body_start, local);
         }
-        let param: i32 = syntax_find_param(
-            syntax_function_first_param(function), name);
+        let param: i32 = syntax_find_param_node(
+            syntax_function_first_param(function), node);
         if param == 0 { return 0; }
         return syntax_param_type_node(param);
     }
     if tag == 4 {
-        let callee: i32 = m13_find(index, syntax_call_name(node));
+        let callee: i32 = m13_find_node(
+            index, syntax_call_callee(node));
         if callee == 0 { return 0; }
         return syntax_right(syntax_function_signature(callee));
     }
@@ -490,14 +511,18 @@ let m13_expr_type_node = std::func(
     return 0;
 }
 
-let elaborator_name_type = std::func(index: M13ElaborationIndex, root: i32, function: i32, body_start: i32, stop: i32, name: addr) -> i32 {
-    let local: i32 = surface_find_visible_local(function, stop, name);
+let elaborator_name_type = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    body_start: i32, stop: i32, reference: i32) -> i32 {
+    let local: i32 = surface_find_visible_local_node(
+        function, stop, reference);
     if local != 0 {
         let binding: i32 = syntax_local_binding(local);
         return elaborator_expr_type_indexed_impl(
             index, root, function, syntax_local_value_node(local), body_start, local);
     }
-    let param: i32 = syntax_find_param(syntax_function_first_param(function), name);
+    let param: i32 = syntax_find_param_node(
+        syntax_function_first_param(function), reference);
     if param == 0 { return type_error(); }
     let param_type: i32 = type_from_syntax(syntax_param_type_node(param));
     if type_is_comptime(param_type) == 1 {
@@ -559,6 +584,14 @@ let elaborator_name_is_local = std::func(function: i32, stop: i32, name: addr) -
     return 0;
 }
 
+@export
+let elaborator_name_node_is_local = std::func(
+    function: i32, stop: i32, reference: i32) -> i32 {
+    if surface_find_visible_local_node(
+        function, stop, reference) != 0 { return 1; }
+    return 0;
+}
+
 let elaborator_expr_type_indexed_impl = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
     if syntax_is_consteval_call(node) == 1 {
         return elaborator_expr_type_indexed_impl(
@@ -568,11 +601,13 @@ let elaborator_expr_type_indexed_impl = std::func(index: M13ElaborationIndex, ro
     let tag: i32 = syntax_expr_tag(node);
     if tag == 1 { return type_i32(); }
     if tag == 2 {
-        return elaborator_name_type(index, root, function, body_start, stop, syntax_text(node));
+        return elaborator_name_type(
+            index, root, function, body_start, stop, node);
     }
     if tag == 3 { return type_i32(); }
     if tag == 4 {
-        let callee: i32 = m13_find(index, syntax_call_name(node));
+        let callee: i32 = m13_find_node(
+            index, syntax_call_callee(node));
         if callee == 0 { return type_error(); }
         if syntax_function_is_generic(callee) == 1 {
             return elaborator_generic_return_type(
@@ -716,8 +751,8 @@ let elaborator_validate_generic_args = std::func(
         let argument_type: i32 = elaborator_type_value_id(arg);
         if argument_type == 0 {
             if syntax_is_identifier(arg) != 1 { return 2810; }
-            let caller_param: i32 = syntax_find_param(
-                syntax_function_first_param(function), syntax_text(arg));
+            let caller_param: i32 = syntax_find_param_node(
+                syntax_function_first_param(function), arg);
             if caller_param == 0 { return 2810; }
             if syntax_path_tail_is(
                 syntax_param_type_node(caller_param), "type") != 1 {
@@ -747,9 +782,8 @@ let elaborator_validate_generic_args = std::func(
         if type_is_comptime(expected) == 1 {
             if syntax_is_i32_atom(arg) != 1 {
                 if syntax_is_identifier(arg) != 1 { return 2802; }
-                let caller_param: i32 = syntax_find_param(
-                    syntax_function_first_param(function),
-                    syntax_text(arg));
+                let caller_param: i32 = syntax_find_param_node(
+                    syntax_function_first_param(function), arg);
                 if caller_param == 0 { return 2802; }
                 let caller_type: i32 = type_from_syntax(
                     syntax_param_type_node(caller_param));
@@ -773,9 +807,9 @@ let elaborator_validate_generic_args = std::func(
 }
 
 let elaborator_validate_call = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
-    let name: addr = syntax_call_name(node);
     if index.duplicate != 0 { return 2302; }
-    let callee: i32 = m13_find(index, name);
+    let callee: i32 = m13_find_node(
+        index, syntax_call_callee(node));
     if callee == 0 { return 2301; }
     let args: i32 = syntax_call_first_arg(node);
     if syntax_arg_count(args) != syntax_param_count(syntax_function_first_param(callee)) {
@@ -905,7 +939,8 @@ let elaborator_validate_expr = std::func(index: M13ElaborationIndex, root: i32, 
             index, root, function, syntax_left(node), body_start, stop);
     }
     if tag == 2 {
-        if elaborator_name_visible_impl(function, body_start, stop, syntax_text(node)) == 1 { return 0; }
+        if elaborator_name_visible_node_impl(
+            function, body_start, stop, node) == 1 { return 0; }
         return 2003;
     }
     if tag == 3 {
@@ -981,8 +1016,8 @@ let elaborator_validate_body = std::func(index: M13ElaborationIndex, root: i32, 
         if syntax_is_infix(binding, "=") != 1 { return 2101; }
         let name_node: i32 = syntax_local_name_node(node);
         if syntax_is_identifier(name_node) != 1 { return 2101; }
-        let name: addr = syntax_text(name_node);
-        if elaborator_name_visible_impl(function, body_start, node, name) == 1 { return 2102; }
+        if elaborator_name_visible_node_impl(
+            function, body_start, node, name_node) == 1 { return 2102; }
         let value: i32 = syntax_local_value_node(node);
         if syntax_expr_tag(value) == 6 { return 2404; }
         let value_code: i32 = elaborator_validate_expr(index, root, function, value, body_start, node);
@@ -1020,8 +1055,8 @@ let elaborator_validate_statement_block = std::func(index: M13ElaborationIndex, 
         if syntax_is_infix(binding, "=") != 1 { return 2101; }
         let name_node: i32 = syntax_local_name_node(node);
         if syntax_is_identifier(name_node) != 1 { return 2101; }
-        if elaborator_name_visible_impl(
-            function, body_start, node, syntax_text(name_node)) == 1 {
+        if elaborator_name_visible_node_impl(
+            function, body_start, node, name_node) == 1 {
             return 2102;
         }
         let value: i32 = syntax_local_value_node(node);
@@ -1083,8 +1118,8 @@ let elaborator_validate_declared_body = std::func(index: M13ElaborationIndex, ro
         if syntax_is_infix(binding, "=") != 1 { return 2101; }
         let name_node: i32 = syntax_local_name_node(node);
         if syntax_is_identifier(name_node) != 1 { return 2101; }
-        let name: addr = syntax_text(name_node);
-        if elaborator_name_visible_impl(function, body_start, node, name) == 1 { return 2102; }
+        if elaborator_name_visible_node_impl(
+            function, body_start, node, name_node) == 1 { return 2102; }
         let value: i32 = syntax_local_value_node(node);
         let value_code: i32 = elaborator_validate_expr(index, root, function, value, body_start, node);
         if value_code != 0 { return value_code; }
@@ -1146,7 +1181,8 @@ let elaborator_specialization_depth = std::func(
     let form: i32 = syntax_left(body);
     let value: i32 = syntax_return_expr(form);
     if syntax_expr_tag(value) != 4 { return 0; }
-    let callee: i32 = m13_find(index, syntax_call_name(value));
+    let callee: i32 = m13_find_node(
+        index, syntax_call_callee(value));
     if callee == 0 { return 0; }
     if syntax_function_is_generic(callee) != 1 { return 0; }
     if syntax_text_equal(syntax_function_name(callee), origin) == 1 {
@@ -1404,15 +1440,16 @@ let workspace_function_return_type = std::func(function: i32) -> i32 {
 
 let workspace_name_type = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
-    body_start: i32, stop: i32, name: addr) -> i32 {
-    let local: i32 = surface_find_visible_local(function, stop, name);
+    body_start: i32, stop: i32, reference: i32) -> i32 {
+    let local: i32 = surface_find_visible_local_node(
+        function, stop, reference);
     if local != 0 {
         return workspace_expr_type(
             workspace, module, root, function,
             syntax_local_value_node(local), body_start, local);
     }
-    let param: i32 = syntax_find_param(
-        syntax_function_first_param(function), name);
+    let param: i32 = syntax_find_param_node(
+        syntax_function_first_param(function), reference);
     if param == 0 { return type_error(); }
     return workspace_type_from_syntax(syntax_param_type_node(param));
 }
@@ -1435,7 +1472,7 @@ let workspace_expr_type = std::func(
     if tag == 2 {
         return workspace_name_type(
             workspace, module, root, function,
-            body_start, stop, syntax_text(node));
+            body_start, stop, node);
     }
     if tag == 3 { return type_i32(); }
     if tag == 4 {
@@ -1562,8 +1599,8 @@ let workspace_validate_expr = std::func(
     if tag == 1 { return 0; }
     if tag == 7 { return 0; }
     if tag == 2 {
-        if elaborator_name_visible_impl(
-            function, body_start, stop, syntax_text(node)) == 1 { return 0; }
+        if elaborator_name_visible_node_impl(
+            function, body_start, stop, node) == 1 { return 0; }
         return 2003;
     }
     if tag == 3 {
@@ -1654,8 +1691,8 @@ let workspace_validate_statement_block = std::func(
     if form_tag == 2 {
         let name_node: i32 = syntax_local_name_node(node);
         if syntax_is_identifier(name_node) != 1 { return 2101; }
-        if elaborator_name_visible_impl(
-            function, body_start, node, syntax_text(name_node)) == 1 {
+        if elaborator_name_visible_node_impl(
+            function, body_start, node, name_node) == 1 {
             return 2102;
         }
         let value: i32 = syntax_local_value_node(node);
@@ -1727,8 +1764,8 @@ let workspace_validate_body = std::func(
     if form_tag == 2 {
         let name_node: i32 = syntax_local_name_node(node);
         if syntax_is_identifier(name_node) != 1 { return 2101; }
-        if elaborator_name_visible_impl(
-            function, body_start, node, syntax_text(name_node)) == 1 {
+        if elaborator_name_visible_node_impl(
+            function, body_start, node, name_node) == 1 {
             return 2102;
         }
         let value: i32 = syntax_local_value_node(node);

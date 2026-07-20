@@ -97,12 +97,12 @@ let lower_name = std::func(
     unit: i32, node: i32, body_start: i32, stop: i32) -> i32 {
     let type_tag: i32 = elaborator_module_expr_type_indexed(
         workspace, module, root, function, node, body_start, stop);
-    let name: addr = syntax_text(node);
-    if elaborator_name_is_local(function, stop, name) == 1 {
+    let name: addr = syntax_identifier_link_name(node);
+    if elaborator_name_node_is_local(function, stop, node) == 1 {
         return l1_unit_builder_var(unit, name, type_tag);
     }
-    let index: i32 = syntax_param_index(
-        syntax_function_first_param(function), name, 0);
+    let index: i32 = syntax_param_index_node(
+        syntax_function_first_param(function), node, 0);
     return l1_unit_builder_arg(unit, index, type_tag);
 }
 
@@ -212,7 +212,7 @@ let lower_statement_block = std::func(
             unit, value_node, body_start, node);
         if l1_unit_builder_block_let(
             unit, block,
-            syntax_text(syntax_local_name_node(node)),
+            syntax_identifier_link_name(syntax_local_name_node(node)),
             elaborator_module_expr_type_indexed(
                 workspace, module, root, function,
                 value_node, body_start, node),
@@ -274,7 +274,7 @@ let lower_body = std::func(
             value_node, body_start, node);
         if l1_unit_builder_let(
             unit, procedure,
-            syntax_text(syntax_local_name_node(node)),
+            syntax_identifier_link_name(syntax_local_name_node(node)),
             type_tag, value) != 1 { return 0; }
         return lower_body(
             workspace, module, root, function, unit, procedure,
@@ -446,14 +446,14 @@ let lower_plain_name = std::func(
     node: i32, body_start: i32, stop: i32) -> i32 {
     let type_tag: i32 = elaborator_expr_type_indexed(
         index, root, function, node, body_start, stop);
-    let name: addr = syntax_text(node);
-    if elaborator_name_is_local(function, stop, name) == 1 {
+    let name: addr = syntax_identifier_link_name(node);
+    if elaborator_name_node_is_local(function, stop, node) == 1 {
         return l1_unit_builder_var(unit, name, type_tag);
     }
     return l1_unit_builder_arg(
         unit,
-        syntax_param_index(
-            syntax_function_first_param(function), name, 0),
+        syntax_param_index_node(
+            syntax_function_first_param(function), node, 0),
         type_tag);
 }
 
@@ -601,8 +601,7 @@ let lower_specialization_collect = std::func(
 
 let lower_specialized_type = std::func(
     node: i32, binding: LowerSpecialization) -> i32 {
-    if syntax_is_atom_text(
-        node, syntax_text(binding.type_name_node)) == 1 {
+    if syntax_identifier_equal(node, binding.type_name_node) == 1 {
         return binding.type_id;
     }
     if syntax_is_comptime_type(node) == 1 {
@@ -671,20 +670,19 @@ let lower_specialized_expr = std::func(
         return l1_unit_builder_i32(unit, syntax_i32_value(node));
     }
     if tag == 2 {
-        let name: addr = syntax_text(node);
         if binding.has_value == 1 {
-            if syntax_text_equal(
-                name, syntax_text(binding.value_name_node)) == 1 {
+            if syntax_identifier_equal(
+                node, binding.value_name_node) == 1 {
                 return l1_unit_builder_i32(unit, binding.value);
             }
         }
-        let param: i32 = syntax_find_param(
-            syntax_function_first_param(function), name);
+        let param: i32 = syntax_find_param_node(
+            syntax_function_first_param(function), node);
         if param == 0 { return 0; }
         return l1_unit_builder_arg(
             unit,
-            syntax_runtime_param_index(
-                syntax_function_first_param(function), name, 0),
+            syntax_runtime_param_index_node(
+                syntax_function_first_param(function), node, 0),
             lower_specialized_type(
                 syntax_param_type_node(param), binding));
     }
@@ -699,8 +697,8 @@ let lower_specialized_expr = std::func(
                 depth));
     }
     if tag == 4 {
-        let callee: i32 = elaborator_find_callable(
-            index, syntax_call_name(node));
+        let callee: i32 = elaborator_find_callable_node(
+            index, syntax_call_callee(node));
         if callee == 0 { return 0; }
         if syntax_function_is_generic(callee) != 1 { return 0; }
         let args: i32 = syntax_call_first_arg(node);
@@ -807,8 +805,8 @@ let lower_plain_consteval = std::func(
     // unit.  Recursive calls reuse that registered procedure.  Additional
     // dependency-closure expansion is handled by specialization below.
     if syntax_expr_tag(operand) == 4 {
-        let callee: i32 = elaborator_find_callable(
-            index, syntax_call_name(operand));
+        let callee: i32 = elaborator_find_callable_node(
+            index, syntax_call_callee(operand));
         if callee == 0 {
             let destroyed_missing: i32 =
                 l1_unit_builder_destroy(temporary);
@@ -912,8 +910,8 @@ let lower_plain_expr = std::func(
                 syntax_right(node), body_start, stop));
     }
     if tag == 4 {
-        let generic: i32 = elaborator_find_callable(
-            index, syntax_call_name(node));
+        let generic: i32 = elaborator_find_callable_node(
+            index, syntax_call_callee(node));
         if generic != 0 {
             if syntax_function_is_generic(generic) == 1 {
                 let link: addr = lower_ensure_specialization(
@@ -1076,7 +1074,7 @@ let lower_plain_statement_block = std::func(
             value_node, body_start, node);
         if l1_unit_builder_block_let(
             unit, block,
-            syntax_text(syntax_local_name_node(node)),
+            syntax_identifier_link_name(syntax_local_name_node(node)),
             elaborator_expr_type_indexed(
                 index, root, function, value_node, body_start, node),
             value) != 1 { return 0; }
@@ -1135,7 +1133,7 @@ let lower_plain_body = std::func(
             value_node, body_start, node);
         if l1_unit_builder_let(
             unit, procedure,
-            syntax_text(syntax_local_name_node(node)),
+            syntax_identifier_link_name(syntax_local_name_node(node)),
             elaborator_expr_type_indexed(
                 index, root, function, value_node, body_start, node),
             value) != 1 { return 0; }

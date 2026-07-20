@@ -1599,6 +1599,40 @@ static sexp sexp_meta_syntax_clone(sexp ctx, sexp self, sexp_sint_t n,
     return sexp_make_fixnum((sexp_sint_t)id);
 }
 
+static sexp meta_syntax_source_edge(sexp arg_source, int edge) {
+    uint32_t raw = (uint32_t)sexp_unbox_fixnum(arg_source);
+    AstSyntaxUnit *owner = NULL;
+    const AstNode *source = ast_ffi_node_get(raw, &owner, NULL);
+    AstNodeId child = AST_NULL;
+    if (!source) return sexp_make_fixnum(0);
+    if (edge == 0) child = source->left;
+    else if (edge == 1) child = source->right;
+    else if (edge == 2) child = source->op;
+    else child = source->next;
+    return sexp_make_fixnum(
+        (sexp_sint_t)ast_ffi_child_handle(owner, child));
+}
+
+static sexp sexp_meta_syntax_left(sexp ctx, sexp self, sexp_sint_t n,
+                                  sexp arg_source) {
+    return meta_syntax_source_edge(arg_source, 0);
+}
+
+static sexp sexp_meta_syntax_right(sexp ctx, sexp self, sexp_sint_t n,
+                                   sexp arg_source) {
+    return meta_syntax_source_edge(arg_source, 1);
+}
+
+static sexp sexp_meta_syntax_op(sexp ctx, sexp self, sexp_sint_t n,
+                                sexp arg_source) {
+    return meta_syntax_source_edge(arg_source, 2);
+}
+
+static sexp sexp_meta_syntax_next(sexp ctx, sexp self, sexp_sint_t n,
+                                  sexp arg_source) {
+    return meta_syntax_source_edge(arg_source, 3);
+}
+
 static sexp sexp_meta_syntax_atom(sexp ctx, sexp self, sexp_sint_t n,
                                   sexp arg_source) {
     return sexp_make_fixnum((sexp_sint_t)meta_syntax_atom_source(
@@ -2165,6 +2199,10 @@ void native_register_core_ffi(
   REG("meta.syntax-enter!", 4, sexp_meta_syntax_enter);
   REG("meta.syntax-leave!", 0, sexp_meta_syntax_leave);
   REG("meta.syntax-clone!", 1, sexp_meta_syntax_clone);
+  REG("meta.syntax-left!", 1, sexp_meta_syntax_left);
+  REG("meta.syntax-right!", 1, sexp_meta_syntax_right);
+  REG("meta.syntax-op!", 1, sexp_meta_syntax_op);
+  REG("meta.syntax-next!", 1, sexp_meta_syntax_next);
   REG("meta.syntax-atom!", 1, sexp_meta_syntax_atom);
   REG("meta.syntax-group!", 2, sexp_meta_syntax_group);
   REG("meta.syntax-prefix!", 2, sexp_meta_syntax_prefix);
