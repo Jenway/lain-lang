@@ -529,37 +529,74 @@ let LowerSpecialization: type = std::struct {
     has_value: i32,
 }
 
-let lower_specialization_collect = std::func(
-    param: i32, arg: i32, binding: LowerSpecialization)
+let lower_bound_type_argument = std::func(
+    arg: i32, parent: LowerSpecialization) -> i32 {
+    if parent.has_type == 1 {
+        if syntax_is_atom_text(
+            arg, syntax_text(parent.type_name_node)) == 1 {
+            return parent.type_id;
+        }
+    }
+    return lower_type_from_syntax(arg);
+}
+
+let lower_bound_value_argument = std::func(
+    arg: i32, parent: LowerSpecialization) -> i32 {
+    if parent.has_value == 1 {
+        if syntax_is_atom_text(
+            arg, syntax_text(parent.value_name_node)) == 1 {
+            return parent.value;
+        }
+    }
+    return syntax_i32_value(arg);
+}
+
+let lower_specialization_collect_bound = std::func(
+    param: i32, arg: i32, binding: LowerSpecialization,
+    parent: LowerSpecialization)
     -> LowerSpecialization {
     if param == 0 { return binding; }
     let param_type: i32 = syntax_param_type_node(param);
     if syntax_path_tail_is(param_type, "type") == 1 {
-        return lower_specialization_collect(
+        return lower_specialization_collect_bound(
             syntax_param_next(param), syntax_arg_next(arg),
             LowerSpecialization {
                 type_name_node: syntax_param_name_node(param),
-                type_id: lower_type_from_syntax(arg),
+                type_id: lower_bound_type_argument(arg, parent),
                 has_type: 1,
                 value_name_node: binding.value_name_node,
                 value: binding.value,
                 has_value: binding.has_value,
-            });
+            }, parent);
     }
     if syntax_is_comptime_type(param_type) == 1 {
-        return lower_specialization_collect(
+        return lower_specialization_collect_bound(
             syntax_param_next(param), syntax_arg_next(arg),
             LowerSpecialization {
                 type_name_node: binding.type_name_node,
                 type_id: binding.type_id,
                 has_type: binding.has_type,
                 value_name_node: syntax_param_name_node(param),
-                value: syntax_i32_value(arg),
+                value: lower_bound_value_argument(arg, parent),
                 has_value: 1,
-            });
+            }, parent);
     }
-    return lower_specialization_collect(
-        syntax_param_next(param), syntax_arg_next(arg), binding);
+    return lower_specialization_collect_bound(
+        syntax_param_next(param), syntax_arg_next(arg), binding, parent);
+}
+
+let lower_empty_specialization = std::func() -> LowerSpecialization {
+    return LowerSpecialization {
+        type_name_node: 0, type_id: 0, has_type: 0,
+        value_name_node: 0, value: 0, has_value: 0,
+    };
+}
+
+let lower_specialization_collect = std::func(
+    param: i32, arg: i32) -> LowerSpecialization {
+    return lower_specialization_collect_bound(
+        param, arg, lower_empty_specialization(),
+        lower_empty_specialization());
 }
 
 let lower_specialized_type = std::func(
@@ -627,7 +664,8 @@ let lower_specialized_params = std::func(
 
 let lower_specialized_expr = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
-    unit: i32, node: i32, binding: LowerSpecialization) -> i32 {
+    unit: i32, node: i32, binding: LowerSpecialization,
+    depth: i32) -> i32 {
     let tag: i32 = syntax_expr_tag(node);
     if tag == 1 {
         return l1_unit_builder_i32(unit, syntax_i32_value(node));
@@ -654,24 +692,64 @@ let lower_specialized_expr = std::func(
         return l1_unit_builder_add(
             unit,
             lower_specialized_expr(
-                index, root, function, unit, syntax_left(node), binding),
+                index, root, function, unit, syntax_left(node), binding,
+                depth),
             lower_specialized_expr(
-                index, root, function, unit, syntax_right(node), binding));
+                index, root, function, unit, syntax_right(node), binding,
+                depth));
+    }
+    if tag == 4 {
+        let callee: i32 = elaborator_find_callable(
+            index, syntax_call_name(node));
+        if callee == 0 { return 0; }
+        if syntax_function_is_generic(callee) != 1 { return 0; }
+        let args: i32 = syntax_call_first_arg(node);
+        let child: LowerSpecialization =
+            lower_specialization_collect_bound(
+                syntax_function_first_param(callee), args,
+                lower_empty_specialization(), binding);
+        let link: addr = lower_ensure_specialization_bound(
+            index, root, unit, callee, args, binding, depth + 1);
+        if syntax_text_equal(link, "") == 1 { return 0; }
+        let call: i32 = l1_unit_builder_call(
+            unit, link,
+            lower_specialized_type(
+                syntax_right(syntax_function_signature(callee)), child));
+        if lower_specialized_call_args(
+            index, root, function, unit, call,
+            syntax_function_first_param(callee), args,
+            binding, depth) != 1 { return 0; }
+        return call;
     }
     return 0;
 }
 
-let lower_ensure_specialization = std::func(
+let lower_specialized_call_args = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, call: i32, param: i32, arg: i32,
+    binding: LowerSpecialization, depth: i32) -> i32 {
+    if param == 0 { return 1; }
+    if syntax_param_is_compiletime(param) != 1 {
+        let value: i32 = lower_specialized_expr(
+            index, root, function, unit, arg, binding, depth);
+        if value == 0 { return 0; }
+        if l1_unit_builder_call_arg(unit, call, value) != 1 { return 0; }
+    }
+    return lower_specialized_call_args(
+        index, root, function, unit, call,
+        syntax_param_next(param), syntax_arg_next(arg), binding, depth);
+}
+
+let lower_ensure_specialization_bound = std::func(
     index: M13ElaborationIndex, root: i32, unit: i32,
-    function: i32, args: i32) -> addr {
-    let binding: LowerSpecialization = lower_specialization_collect(
+    function: i32, args: i32, parent: LowerSpecialization,
+    depth: i32) -> addr {
+    let binding: LowerSpecialization = lower_specialization_collect_bound(
         syntax_function_first_param(function), args,
-        LowerSpecialization {
-            type_name_node: 0, type_id: 0, has_type: 0,
-            value_name_node: 0, value: 0, has_value: 0,
-        });
+        lower_empty_specialization(), parent);
     let name: addr = lower_specialization_name(function, binding);
     if lower_find_procedure(unit, name) != 0 { return name; }
+    if depth > 128 { return ""; }
     let procedure: i32 = l1_unit_builder_proc(
         unit, name,
         lower_specialized_type(
@@ -687,10 +765,18 @@ let lower_ensure_specialization = std::func(
     let value_node: i32 = syntax_return_expr(form);
     if value_node == 0 { return ""; }
     let value: i32 = lower_specialized_expr(
-        index, root, function, unit, value_node, binding);
+        index, root, function, unit, value_node, binding, depth);
     if value == 0 { return ""; }
     if l1_unit_builder_return(unit, procedure, value) != 1 { return ""; }
     return name;
+}
+
+let lower_ensure_specialization = std::func(
+    index: M13ElaborationIndex, root: i32, unit: i32,
+    function: i32, args: i32) -> addr {
+    return lower_ensure_specialization_bound(
+        index, root, unit, function, args,
+        lower_empty_specialization(), 1);
 }
 
 let lower_generic_call_args = std::func(
