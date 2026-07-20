@@ -9,7 +9,7 @@ here must not become C or Scheme special cases.
 
 Current scope:
 
-- the 17-module self-hosted compiler closure defined by `compiler_source.py`
+- the 19-module self-hosted compiler closure defined by `compiler_source.py`
 - the structured L1 model used by active Bootstrap Core import tests
 - `compiler.lain`: the M5 Lain-owned AST-to-L1 driver and result façade
 - `syntax.lain`: zero-copy semantic/Middle-AST views over RawAst handles
@@ -26,8 +26,8 @@ Current scope:
   bootstrap subset
 - `lower.lain`: direct lowering from Lain-owned Meta views into
   physical L1 nodes
-- `compiler_state.lain`: M9 Lain-owned syntax reference, diagnostics,
-  compiler state, optional unit, and structured CompileResult
+- `compiler_state.lain`: retained M9 compatibility probes; it is no longer in
+  the active self-hosted compiler closure
 
 M3 builds these modules once, in dependency order, into
 `build/core-self-hosting/meta_compiler.l1`.  The reusable artifact declares
@@ -127,7 +127,7 @@ RawAst root -> ParsedProgram -> MiddleProgram
 Each failed phase produces a diagnostic and never exposes a partial
 `L1Unit`.  The normal `compiler_frontend_compile` entry runs this Lain-owned pipeline.
 
-M13 compiles the authoritative 16-module compiler source closure with that
+M13 compiles the authoritative compiler source closure with that
 pipeline.  Foreign declarations are interpreted from ordinary RawAst
 attribute topology, relocated to their `link_name`, and deduplicated in the
 Lain lowerer.  The resulting structured unit is serialized through the
@@ -178,7 +178,7 @@ whole compiler artifact.
 it with `l1check`, and installs it beside `lainc` as
 `zig-out/bin/stage2_compiler.l1`.  Generation is keyed by a SHA-256 input and
 output stamp; an unchanged build verifies the artifact without recompiling the
-17-module closure.
+current compiler closure.
 
 The normal CLI loads that artifact and sends both single-file and workspace
 builds through one owned request/result ABI:

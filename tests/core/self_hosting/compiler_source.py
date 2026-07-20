@@ -31,7 +31,6 @@ MODULES = (
     "packages/lain/compiler/source_workspace.lain",
     "packages/lain/compiler/module_artifact.lain",
     "packages/lain/compiler/frontend_pipeline.lain",
-    "packages/lain/compiler/compiler_state.lain",
     "packages/lain/compiler/compiler.lain",
     "packages/lain/compiler/compiler_api.lain",
 )
