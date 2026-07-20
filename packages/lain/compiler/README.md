@@ -239,3 +239,32 @@ Meta failures distinguish malformed results (`2903`), expansion exhaustion
 (`2904`), invalid syntax handles (`2905`), and unavailable capabilities
 (`2906`). Diagnostics produced after re-entry include the expansion depth and
 resolve their node origin back to the initial call site.
+
+## Enum TypeValues and physical layout
+
+`std::enum` is a Lain-owned Meta constructor, not RawAst or LAIN-IR syntax:
+
+```lain
+let Option = std::enum(T: type) {
+    None,
+    Some(T),
+};
+```
+
+`enums.lain` validates zero/one-payload variants, interns the declaration as a
+nominal `TypeValue`, and interns concrete applications such as `Option(i32)`
+as specialized `TypeValue`s. Type discovery walks only actual type positions
+(binding expectations, function signatures, local declarations and enum
+payloads); it deliberately does not deep-scan every RawAst expression.
+
+The deterministic physical layout is a minimal tag followed by aligned maximum
+payload storage. For `Option(i32)` the contract is one tag bit, payload offset
+4, total size 8 and alignment 4. Constructor and `match` lowering will consume
+this contract; LAIN-IR itself gains no enum, variant, pattern or CFG-label
+concept.
+
+Diagnostics `3001`-`3003` cover malformed declarations, duplicate variants and
+invalid payload shapes. The core enum suite executes the layout contract inside
+the real compiler artifact with the normal capability allowlist. The launcher
+offers `--artifact <path> --artifact-run <zero-argument-entry>` for these
+artifact-level executable contracts.

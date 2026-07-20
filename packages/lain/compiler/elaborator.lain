@@ -45,11 +45,21 @@ let m13_index_callable = std::func(
         });
 }
 
+let m13_type_declaration_name_node = std::func(item: i32) -> i32 {
+    if syntax_is_struct_declaration(item) == 1 {
+        return syntax_struct_name_node(item);
+    }
+    if syntax_is_enum_declaration(item) == 1 {
+        return syntax_enum_name_node(item);
+    }
+    return 0;
+}
+
 let m13_index_types = std::func(
     item: i32, index: M13ElaborationIndex) -> M13ElaborationIndex {
     if item == 0 { return index; }
-    if syntax_is_struct_declaration(item) == 1 {
-        let name_node: i32 = syntax_struct_name_node(item);
+    let name_node: i32 = m13_type_declaration_name_node(item);
+    if name_node != 0 {
         if m11_symbol_table_find_node(index.types, name_node) != 0 {
             return m13_index_types(
                 surface_next_item(item),
@@ -160,6 +170,19 @@ let type_from_syntax = std::func(node: i32) -> i32 {
         return type_comptime(
             type_from_syntax(syntax_comptime_argument(node)));
     }
+    // Nominal type application is a Meta-level specialization.  The
+    // CompilerContext has already interned its TypeValue; the current
+    // structured L1 subset represents enum values through an address until
+    // constructor/match lowering supplies the concrete aggregate operations.
+    if syntax_is_call(node) == 1 {
+        if syntax_call_namespace(node) == 0 {
+            if syntax_is_identifier(syntax_call_callee(node)) == 1 {
+                if syntax_arg_count(syntax_call_first_arg(node)) == 1 {
+                    return type_addr();
+                }
+            }
+        }
+    }
     if syntax_is_identifier(node) == 1 { return type_addr(); }
     return type_error();
 }
@@ -185,6 +208,9 @@ let elaborator_constructor_phase = std::func(item: i32) -> i32 {
         return callable_phase_meta();
     }
     if surface_binding_constructor_is(item, "struct") == 1 {
+        return callable_phase_meta();
+    }
+    if surface_binding_constructor_is(item, "enum") == 1 {
         return callable_phase_meta();
     }
     if surface_binding_constructor_is(item, "module") == 1 {
@@ -217,6 +243,9 @@ let elaborator_binding_inferred_type = std::func(item: i32) -> i32 {
         return type_callable();
     }
     if surface_binding_is_struct(item) == 1 {
+        return type_type();
+    }
+    if surface_binding_is_enum(item) == 1 {
         return type_type();
     }
     if surface_is_module_binding(item) == 1 {

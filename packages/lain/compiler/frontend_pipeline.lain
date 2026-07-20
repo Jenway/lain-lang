@@ -14,6 +14,7 @@ let l1_unit_builder = import("packages::lain::compiler::l1_unit_builder");
 let diagnostics = import("packages::lain::compiler::diagnostics");
 let compiler_context = import("packages::lain::compiler::compiler_context");
 let meta = import("packages::lain::compiler::meta");
+let enums = import("packages::lain::compiler::enums");
 
 @export
 let ParsedProgram = std::struct {
@@ -69,12 +70,14 @@ let m12_validate_binding = std::func(item: i32) -> i32 {
     let body_constructor: i32 =
         surface_binding_is_func(item)
         + surface_binding_is_struct(item)
+        + surface_binding_is_enum(item)
         + surface_is_module_binding(item);
     if body != 0 {
         if body_constructor == 0 { return 12003; }
         return 0;
     }
     if surface_binding_constructor_is(item, "struct") == 1 { return 12004; }
+    if surface_binding_constructor_is(item, "enum") == 1 { return 12004; }
     if surface_binding_constructor_is(item, "module") == 1 { return 12004; }
     return 0;
 }
@@ -266,10 +269,21 @@ let frontend_compile = std::func(
         return frontend_finish_expansion(failed, expansion);
     }
 
+    let enum_registration: EnumRegistration = enum_register_program(
+        context4, expansion.root);
+    if enum_registration.diagnostic != 0 {
+        let failed: CompilerContext = compiler_context_add_diagnostic(
+            enum_registration.context,
+            enum_registration.diagnostic,
+            diagnostic_message(enum_registration.diagnostic),
+            enum_registration.node, 0, source_length);
+        return frontend_finish_expansion(failed, expansion);
+    }
+
     let elaborated: ElaboratedProgram = frontend_elaborate(middle);
     if elaborated.diagnostic != 0 {
         let failed: CompilerContext = compiler_context_add_diagnostic(
-            context4, elaborated.diagnostic,
+            enum_registration.context, elaborated.diagnostic,
             diagnostic_message(elaborated.diagnostic),
             root, 0, source_length);
         return frontend_finish_expansion(failed, expansion);
@@ -278,13 +292,13 @@ let frontend_compile = std::func(
     let lowered: LoweredProgram = frontend_lower(elaborated);
     if lowered.diagnostic != 0 {
         let failed: CompilerContext = compiler_context_add_diagnostic(
-            context4, lowered.diagnostic,
+            enum_registration.context, lowered.diagnostic,
             diagnostic_message(lowered.diagnostic),
             root, 0, source_length);
         return frontend_finish_expansion(failed, expansion);
     }
     return frontend_finish_expansion(
-        compiler_context_with_unit(context4, lowered.unit),
+        compiler_context_with_unit(enum_registration.context, lowered.unit),
         expansion);
 }
 

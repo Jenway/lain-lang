@@ -19,6 +19,7 @@ MODULES = (
     "packages/lain/compiler/surface_forms.lain",
     "packages/lain/compiler/types.lain",
     "packages/lain/compiler/compiler_context.lain",
+    "packages/lain/compiler/enums.lain",
     "packages/lain/compiler/modules.lain",
     "packages/lain/compiler/elaborator.lain",
     "packages/lain/compiler/l1_unit_builder.lain",

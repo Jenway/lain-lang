@@ -229,6 +229,44 @@ static int artifact_call_handle(
     return artifact_call_values(ctx, artifact, entry, &arg, 1, result);
 }
 
+static uint32_t run_artifact_entry(
+    const char *artifact_path, const char *entry) {
+    uint32_t artifact_length = 0;
+    char *artifact = read_source_file(artifact_path, &artifact_length);
+    void *ctx = NULL;
+    LainirValue result = lainir_value_unit();
+    uint32_t status = 1;
+    (void)artifact_length;
+    if (!artifact) {
+        fprintf(stderr, "failed to read compiler artifact %s\n", artifact_path);
+        return 1;
+    }
+    ctx = native_init_compiler_artifact_host();
+    if (!ctx) {
+        fprintf(stderr, "failed to initialize compiler artifact host\n");
+        free(artifact);
+        return 1;
+    }
+    if (!artifact_call_values(ctx, artifact, entry, NULL, 0, &result))
+        goto cleanup;
+    if (result.kind == LAINIR_VALUE_BITS) {
+        printf("%lld\n", (long long)result.as.bits);
+        status = 0;
+        goto cleanup;
+    }
+    if (result.kind == LAINIR_VALUE_STRING) {
+        printf("%s\n", result.as.string ? result.as.string : "");
+        status = 0;
+        goto cleanup;
+    }
+    fprintf(stderr, "compiler artifact entry %s returned no printable value\n",
+        entry);
+cleanup:
+    if (result.kind == LAINIR_VALUE_STRING) free((void *)result.as.string);
+    free(artifact);
+    return status;
+}
+
 static int artifact_result_i32(
     void *ctx, const char *artifact, const char *entry,
     uint32_t result_handle, int32_t *value_out) {
@@ -506,6 +544,7 @@ int main(int argc, char **argv) {
     int emit_interface = 0;
     int emit_ast = 0;
     int interpret = 0;
+    int artifact_run = 0;
     int arg_index = 1;
     const char *artifact_path = NULL;
     char *default_artifact = NULL;
@@ -517,7 +556,11 @@ int main(int argc, char **argv) {
         arg_index += 2;
     }
 
-    if (argc - arg_index >= 3 && strcmp(argv[arg_index], "--interpret") == 0) {
+    if (argc - arg_index >= 2 &&
+               strcmp(argv[arg_index], "--artifact-run") == 0) {
+        artifact_run = 1;
+        input_path = argv[arg_index + 1];
+    } else if (argc - arg_index >= 3 && strcmp(argv[arg_index], "--interpret") == 0) {
         interpret = 1;
         input_path = argv[arg_index + 1];
         output_path = argv[arg_index + 2];
@@ -556,12 +599,20 @@ int main(int argc, char **argv) {
             "  %s --emit-l1 <input.lain> <output.l1>\n"
             "  %s --emit-workspace-l1 <output.l1> <module.lain>...\n"
             "  %s --artifact <compiler.l1> --emit-l1 <input.lain> <output.l1>\n"
+            "  %s --artifact <compiler.l1> --artifact-run <entry>\n"
             "  %s --bootstrap-emit-l1 <input.lain> <output.l1>\n"
             "  %s [--interpret|--emit-ast|--emit-interface] <input> <output-or-entry>\n",
-            argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
+            argv[0], argv[0], argv[0], argv[0], argv[0], argv[0], argv[0]);
         return 1;
     }
 
+    if (artifact_run) {
+        if (!artifact_path) {
+            fprintf(stderr, "--artifact-run requires --artifact <compiler.l1>\n");
+            return 1;
+        }
+        return run_artifact_entry(artifact_path, input_path);
+    }
     if (interpret) return interpret_lain(input_path, output_path);
     if (emit_ast) return compile_ast(input_path, output_path);
     if (bootstrap_emit_l1) return compile_l1(input_path, output_path);
