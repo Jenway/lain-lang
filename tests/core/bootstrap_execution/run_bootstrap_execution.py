@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 COMPONENT = ROOT / "tests/core/bootstrap_execution/const_lowering_component.lain"
+UNDECLARED_CALL = ROOT / "tests/core/bootstrap_execution/undeclared_call.lain"
 OUT_DIR = ROOT / "build/core-bootstrap-execution"
 OUT_L1 = OUT_DIR / "build_const_return_fn.l1"
 L1I = OUT_DIR / ("l1i.exe" if os.name == "nt" else "l1i")
@@ -91,13 +92,30 @@ def main() -> int:
         print(f"FAIL expected 42, got {actual!r}")
         return 1
 
+    undeclared_out = OUT_DIR / "undeclared_call.l1"
+    undeclared_out.unlink(missing_ok=True)
+    undeclared = run([
+        str(compiler), "--bootstrap-emit-l1",
+        str(UNDECLARED_CALL), str(undeclared_out),
+    ])
+    undeclared_diagnostic = (undeclared.stderr or undeclared.stdout).strip()
+    if undeclared.returncode == 0 or undeclared_out.exists():
+        print("FAIL bootstrap compiler synthesized an undeclared extern")
+        return 1
+    if "core.function-by-name: undeclared function" not in undeclared_diagnostic:
+        print(f"FAIL unexpected undeclared-call diagnostic: {undeclared_diagnostic}")
+        return 1
+
     legacy = run([str(L1I), "tests/l1/001_add.l1", "add", "40", "2"])
     if legacy.returncode != 0 or legacy.stdout.strip() != "42":
         detail = (legacy.stderr or legacy.stdout).strip()
         print(f"FAIL parsing legacy labeled LAIN-IR: {detail}")
         return 1
 
-    print("PASS structured LAIN-IR execution and legacy labeled input compatibility")
+    print(
+        "PASS structured LAIN-IR execution, explicit extern contracts, "
+        "and legacy labeled input compatibility"
+    )
     return 0
 
 

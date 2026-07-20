@@ -240,6 +240,9 @@ void vm_print_exception(vm_context *ctx, vm_value *exn) {
 vm_value *vm_user_exception(vm_context *ctx, const char *msg) {
   return (vm_value *)sexp_user_exception((sexp)ctx, NULL, msg, SEXP_NULL);
 }
+vm_value *vm_raise_user_exception(vm_context *ctx, const char *msg) {
+  return (vm_value *)sexp_user_exception((sexp)ctx, NULL, msg, SEXP_NULL);
+}
 
 /* ═══════════════════════════════════════════════════════════════
  * Error port

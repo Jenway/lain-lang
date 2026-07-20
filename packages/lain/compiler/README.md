@@ -216,6 +216,14 @@ not load `polyfills.scm` or `std/meta/driver.scm`.  A failed compilation
 projects the Lain diagnostic from the existing result, exits non-zero, and
 does not create the requested output file.
 
+Physical function lookup is strict. `core.function-by-name` returns only a
+procedure that Meta has already declared in the current `L1Unit`; it never
+synthesizes an extern or guesses a fallback signature. An undeclared call
+therefore crosses the VM FFI boundary as an exception and cannot leave a
+partial output unit. Foreign procedures must enter through an explicit
+`@foreign` declaration whose Lain-owned lowering supplies the complete
+physical signature and link name.
+
 The current stage-2 language boundary is deliberate: it covers the compiler's
 self-hosting subset, not every form handled by the stage-0 Scheme reference.
 Legacy compatibility tests therefore invoke `--bootstrap-emit-l1` explicitly;

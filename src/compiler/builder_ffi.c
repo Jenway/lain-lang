@@ -437,26 +437,8 @@ static sexp sexp_core_function_by_name(sexp ctx, sexp self, sexp_sint_t n,
       return sexp_make_cpointer(ctx, SEXP_CPOINTER, s, SEXP_FALSE, 0);
     s = s->next;
   }
-  // Auto-create stub for external runtime functions
-  // Default signature: fn(addr, i32) -> void (L1 physical ABI knowledge)
-  L1Subroutine *ext = malloc(sizeof(L1Subroutine));
-  ext->name = strdup(name);
-  ext->link_name = NULL;
-  ext->ret_ty = malloc(sizeof(L1Type));
-  ext->ret_ty->kind = TY_UNIT;
-  ext->param_count = 2;
-  ext->param_tys = malloc(sizeof(L1Type *) * 2);
-  ext->param_tys[0] = malloc(sizeof(L1Type));
-  ext->param_tys[0]->kind = TY_ADDR;
-  ext->param_tys[1] = malloc(sizeof(L1Type));
-  ext->param_tys[1]->kind = TY_BITS;
-  ext->param_tys[1]->width = 32;
-  ext->blocks = NULL;
-  ext->blocks_tail = NULL;
-  ext->is_extern = 1;
-  ext->next = g_subroutines_head;
-  g_subroutines_head = ext;
-  return sexp_make_cpointer(ctx, SEXP_CPOINTER, ext, SEXP_FALSE, 0);
+  return (sexp)vm_raise_user_exception(
+      (vm_context *)ctx, "core.function-by-name: undeclared function");
 }
 
 static sexp sexp_core_append_block(sexp ctx, sexp self, sexp_sint_t n,

@@ -385,6 +385,11 @@ vm_value *vm_user_exception(vm_context *ctx, const char *msg) {
   (void)ctx;
   return (vm_value *)remember_exception(Scm_MakeString(msg, -1, -1, SCM_STRING_COPYING));
 }
+vm_value *vm_raise_user_exception(vm_context *ctx, const char *msg) {
+  (void)ctx;
+  Scm_Error("%s", msg);
+  return (vm_value *)SCM_UNDEFINED;
+}
 vm_value *vm_error_port(vm_context *ctx) {
   (void)ctx;
   return (vm_value *)SCM_OBJ(Scm_CurrentErrorPort());

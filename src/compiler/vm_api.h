@@ -121,6 +121,7 @@ vm_value *vm_read_from_string(vm_context *ctx, const char *s, int len);
 
 void      vm_print_exception(vm_context *ctx, vm_value *exn);
 vm_value *vm_user_exception(vm_context *ctx, const char *msg);
+vm_value *vm_raise_user_exception(vm_context *ctx, const char *msg);
 
 /* ═══════════════════════════════════════════════════════════════
  * Error port

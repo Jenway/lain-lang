@@ -67,7 +67,7 @@ typedef int sexp_sint_t;
 #define sexp_read_from_string(ctx, s, len) \
   ((sexp)vm_read_from_string((vm_context *)(ctx), (const char *)(s), (int)(len)))
 #define sexp_user_exception(ctx, self, msg, irritants) \
-  ((sexp)vm_user_exception((vm_context *)(ctx), (const char *)(msg)))
+  ((sexp)vm_raise_user_exception((vm_context *)(ctx), (const char *)(msg)))
 
 #define sexp_print_exception(ctx, exn, port) \
   vm_print_exception((vm_context *)(ctx), (vm_value *)(exn))

@@ -101,8 +101,8 @@ RULES: tuple[Rule, ...] = (
         description="builder FFI must not synthesize undeclared extern functions",
         paths=("src/compiler/builder_ffi.c",),
         pattern=r"Auto-create stub|Default signature",
-        allowed_count=2,
-        rationale="Known debt: missing function lookup creates a default extern stub.",
+        allowed_count=0,
+        rationale="Missing calls must fail unless Meta declared an explicit extern contract.",
     ),
     Rule(
         ident="C6_STRUCTURED_UNIT_NO_SOURCE_POLICY",
