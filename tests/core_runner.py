@@ -33,6 +33,8 @@ def main() -> int:
             "core/artifact-cache",
             [python, "tests/core/artifact_cache/run_artifact_cache.py"],
         ),
+        ("core/comptime", [python, "tests/core/comptime/run_comptime_contract.py"]),
+        ("core/meta", [python, "tests/core/meta/run_meta_contract.py"]),
         ("core/examples", [python, "tests/core/examples/run_examples.py"]),
         ("core/boundaries", [python, "tests/core/boundaries/boundary_lint.py"]),
         (

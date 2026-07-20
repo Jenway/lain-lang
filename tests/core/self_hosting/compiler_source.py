@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "build/core-self-hosting/compiler_source.lain"
 MODULES = (
     "packages/lain/compiler/syntax.lain",
+    "packages/lain/compiler/generated_syntax.lain",
     "packages/lain/compiler/surface_forms.lain",
     "packages/lain/compiler/types.lain",
     "packages/lain/compiler/compiler_context.lain",
@@ -22,6 +23,7 @@ MODULES = (
     "packages/lain/compiler/elaborator.lain",
     "packages/lain/compiler/l1_unit_builder.lain",
     "packages/lain/compiler/l1_interpreter.lain",
+    "packages/lain/compiler/meta.lain",
     "packages/lain/compiler/lower.lain",
     "packages/lain/compiler/diagnostics.lain",
     "packages/lain/compiler/workspace.lain",

@@ -246,3 +246,55 @@ let l1_interpreter_run = std::func(unit: i32, entry: addr) -> i32 {
     let destroyed: i32 = host_eval_destroy(evaluation);
     return host_result_new(status, value);
 }
+
+// Meta callables use two opaque i32 arguments (MetaContext and
+// MetaInvocation handles).  They execute through the same evaluator as
+// consteval and ordinary interpreted L1; this is an entry adapter, not a
+// second evaluator.
+@export
+let l1_interpreter_run2 = std::func(
+    unit: i32, entry: addr, argument0: i32, argument1: i32) -> i32 {
+    let evaluation: i32 = host_eval_new();
+    if evaluation == 0 { return host_result_new(7101, 0); }
+    let procedure: i32 = host_find_proc(unit, entry);
+    if procedure == 0 {
+        let ignored: i32 = host_eval_fail(evaluation, 7001);
+    }
+    if procedure != 0 {
+        if host_proc_is_extern(unit, procedure) == 1 {
+            let ignored: i32 = host_eval_fail(evaluation, 7002);
+        }
+    }
+    if procedure != 0 {
+        if host_proc_param_count(unit, procedure) != 2 {
+            let ignored: i32 = host_eval_fail(evaluation, 7005);
+        }
+    }
+    if host_eval_status(evaluation) != 0 {
+        let failed_status: i32 = host_eval_status(evaluation);
+        let destroyed: i32 = host_eval_destroy(evaluation);
+        return host_result_new(failed_status, 0);
+    }
+    let frame: i32 = host_frame_new(evaluation);
+    if frame == 0 {
+        let failed_status: i32 = host_eval_status(evaluation);
+        let destroyed: i32 = host_eval_destroy(evaluation);
+        return host_result_new(failed_status, 0);
+    }
+    if host_frame_arg_set(frame, 0, argument0) != 1 {
+        let failed_status: i32 = host_eval_status(evaluation);
+        let destroyed: i32 = host_eval_destroy(evaluation);
+        return host_result_new(failed_status, 0);
+    }
+    if host_frame_arg_set(frame, 1, argument1) != 1 {
+        let failed_status: i32 = host_eval_status(evaluation);
+        let destroyed: i32 = host_eval_destroy(evaluation);
+        return host_result_new(failed_status, 0);
+    }
+    let value: i32 = l1_interpreter_eval_instructions(
+        evaluation, unit, frame,
+        host_proc_first_inst(unit, procedure));
+    let status: i32 = host_eval_status(evaluation);
+    let destroyed: i32 = host_eval_destroy(evaluation);
+    return host_result_new(status, value);
+}

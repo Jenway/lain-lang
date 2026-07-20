@@ -1,0 +1,383 @@
+// User attribute Meta: resolution, signature checking, L1 execution, and
+// generated-syntax re-entry.  The first public slice deliberately exposes a
+// small SyntaxList intrinsic set; the physical RawAst reader remains unaware
+// of Meta, attributes, and expansion.
+
+let syntax = import("packages::lain::compiler::syntax");
+let surface_forms = import("packages::lain::compiler::surface_forms");
+let generated_syntax = import("packages::lain::compiler::generated_syntax");
+let l1_unit_builder = import("packages::lain::compiler::l1_unit_builder");
+let l1_interpreter = import("packages::lain::compiler::l1_interpreter");
+
+let meta_attribute_name = std::func(item: i32) -> addr {
+    if syntax_is_juxt(item) != 1 { return ""; }
+    if syntax_is_atom_text(syntax_left(item), "@") != 1 { return ""; }
+    let attribute: i32 = syntax_right(item);
+    if syntax_is_identifier(attribute) == 1 { return syntax_text(attribute); }
+    if syntax_is_call(attribute) == 1 { return syntax_call_name(attribute); }
+    return "";
+}
+
+let meta_binding_is_meta = std::func(item: i32) -> i32 {
+    if surface_is_binding(item) != 1 { return 0; }
+    let initializer: i32 = surface_binding_initializer(item);
+    if syntax_is_std_call(initializer, "meta") != 1 { return 0; }
+    if syntax_arg_count(syntax_call_first_arg(initializer)) != 1 { return 0; }
+    return 1;
+}
+
+let meta_binding_callable = std::func(item: i32) -> i32 {
+    if meta_binding_is_meta(item) != 1 { return 0; }
+    return syntax_call_first_arg(surface_binding_initializer(item));
+}
+
+@export
+let MetaExpansion: type = std::struct {
+    root: i32,
+    diagnostic: i32,
+    expansion_count: i32,
+}
+
+let meta_callable_head = std::func(callable: i32) -> i32 {
+    if syntax_is_juxt(callable) != 1 { return 0; }
+    if syntax_kind(syntax_right(callable)) != 4 { return 0; }
+    return syntax_left(callable);
+}
+
+let meta_callable_fn = std::func(callable: i32) -> i32 {
+    let head: i32 = meta_callable_head(callable);
+    if syntax_is_infix(head, "->") != 1 { return 0; }
+    let fn_form: i32 = syntax_left(head);
+    if syntax_is_std_call(fn_form, "func") != 1 { return 0; }
+    return fn_form;
+}
+
+let meta_callable_body = std::func(callable: i32) -> i32 {
+    if meta_callable_head(callable) == 0 { return 0; }
+    return syntax_right(callable);
+}
+
+let meta_param_is = std::func(
+    param: i32, name: addr, type_name: addr) -> i32 {
+    if param == 0 { return 0; }
+    if syntax_is_atom_text(syntax_param_name_node(param), name) != 1 {
+        return 0;
+    }
+    return syntax_path_tail_is(syntax_param_type_node(param), type_name);
+}
+
+let meta_callable_signature_valid = std::func(callable: i32) -> i32 {
+    let fn_form: i32 = meta_callable_fn(callable);
+    if fn_form == 0 { return 0; }
+    let head: i32 = meta_callable_head(callable);
+    if syntax_path_tail_is(syntax_right(head), "SyntaxList") != 1 {
+        return 0;
+    }
+    let first: i32 = syntax_call_first_arg(fn_form);
+    if syntax_arg_count(first) != 2 { return 0; }
+    if meta_param_is(first, "context", "MetaContext") != 1 { return 0; }
+    let second: i32 = syntax_arg_next(first);
+    if meta_param_is(
+        second, "invocation", "MetaInvocation") != 1 { return 0; }
+    if meta_callable_body(callable) == 0 { return 0; }
+    return 1;
+}
+
+let meta_find_definition_from = std::func(
+    item: i32, name: addr) -> i32 {
+    if item == 0 { return 0; }
+    if meta_binding_is_meta(item) == 1 {
+        if syntax_text_equal(surface_binding_name(item), name) == 1 {
+            return item;
+        }
+    }
+    return meta_find_definition_from(surface_next_item(item), name);
+}
+
+let meta_find_definition = std::func(root: i32, name: addr) -> i32 {
+    return meta_find_definition_from(surface_first_item(root), name);
+}
+
+let meta_validate_definitions = std::func(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    if meta_binding_is_meta(item) == 1 {
+        if meta_callable_signature_valid(meta_binding_callable(item)) != 1 {
+            return 2901;
+        }
+    }
+    return meta_validate_definitions(surface_next_item(item));
+}
+
+let meta_has_definition = std::func(item: i32) -> i32 {
+    if item == 0 { return 0; }
+    if meta_binding_is_meta(item) == 1 { return 1; }
+    return meta_has_definition(surface_next_item(item));
+}
+
+let meta_is_invocation_target = std::func(node: i32) -> i32 {
+    if syntax_is_infix(node, ".") != 1 { return 0; }
+    if syntax_is_atom_text(syntax_left(node), "invocation") != 1 {
+        return 0;
+    }
+    return syntax_is_atom_text(syntax_right(node), "target_syntax");
+}
+
+// 0 = zero replacement forms, target argument = one form, -1 = two forms.
+// These are SyntaxList intrinsics, not runtime functions.
+let meta_return_mode = std::func(callable: i32) -> i32 {
+    let body: i32 = meta_callable_body(callable);
+    let statement: i32 = syntax_left(body);
+    if syntax_is_return(statement) != 1 { return -2; }
+    let value: i32 = syntax_return_expr(statement);
+    if meta_is_invocation_target(value) == 1 { return 1; }
+    if syntax_is_call(value) != 1 { return -2; }
+    if syntax_call_namespace(value) != 0 { return -2; }
+    if syntax_call_callee_is(value, "syntax_list_empty") == 1 {
+        if syntax_arg_count(syntax_call_first_arg(value)) == 0 { return 0; }
+        return -2;
+    }
+    if syntax_call_callee_is(value, "syntax_list_one") == 1 {
+        if syntax_arg_count(syntax_call_first_arg(value)) != 1 { return -2; }
+        if meta_is_invocation_target(syntax_call_first_arg(value)) != 1 {
+            return -2;
+        }
+        return 1;
+    }
+    if syntax_call_callee_is(value, "syntax_list_two") == 1 {
+        let first: i32 = syntax_call_first_arg(value);
+        if syntax_arg_count(first) != 2 { return -2; }
+        if meta_is_invocation_target(first) != 1 { return -2; }
+        if meta_is_invocation_target(syntax_arg_next(first)) != 1 {
+            return -2;
+        }
+        return -1;
+    }
+    return -2;
+}
+
+let meta_execute = std::func(
+    definition: i32, context_handle: i32,
+    target_handle: i32) -> i32 {
+    let mode: i32 = meta_return_mode(meta_binding_callable(definition));
+    if mode == -2 { return -2; }
+    let unit: i32 = l1_unit_builder_new();
+    if unit == 0 { return -2; }
+    let name: addr = surface_binding_name(definition);
+    let procedure: i32 = l1_unit_builder_proc(unit, name, 1);
+    if procedure == 0 {
+        let destroyed: i32 = l1_unit_builder_destroy(unit);
+        return -2;
+    }
+    if l1_unit_builder_param(unit, procedure, 1) != 1 {
+        let destroyed: i32 = l1_unit_builder_destroy(unit);
+        return -2;
+    }
+    if l1_unit_builder_param(unit, procedure, 1) != 1 {
+        let destroyed: i32 = l1_unit_builder_destroy(unit);
+        return -2;
+    }
+    let result_value: i32 = meta_result_expression(unit, mode);
+    if l1_unit_builder_return(unit, procedure, result_value) != 1 {
+        let destroyed: i32 = l1_unit_builder_destroy(unit);
+        return -2;
+    }
+    let result: i32 = l1_interpreter_run2(
+        unit, name, context_handle, target_handle);
+    let status: i32 = l1_interpreter_result_status(result);
+    let value: i32 = l1_interpreter_result_value(result);
+    let destroyed_result: i32 = l1_interpreter_result_destroy(result);
+    let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
+    if status != 0 { return -2; }
+    return value;
+}
+
+let meta_result_expression = std::func(unit: i32, mode: i32) -> i32 {
+    if mode == 1 { return l1_unit_builder_arg(unit, 1, 1); }
+    return l1_unit_builder_i32(unit, mode);
+}
+
+let meta_append_clone = std::func(
+    builder: GeneratedSyntaxStore, previous: i32,
+    source: i32) -> i32 {
+    let cloned: i32 = generated_syntax_clone(builder, source);
+    if cloned == 0 { return -1; }
+    if previous != 0 {
+        if generated_syntax_append(builder, previous, cloned) != 1 {
+            return -1;
+        }
+    }
+    return cloned;
+}
+
+let MetaExpandState: type = std::struct {
+    source_root: i32,
+    builder: GeneratedSyntaxStore,
+    root: i32,
+    previous: i32,
+    count: i32,
+    expansion_id: i32,
+    error: i32,
+}
+
+let meta_state_error = std::func(
+    state: MetaExpandState, code: i32) -> MetaExpandState {
+    return MetaExpandState {
+        source_root: state.source_root, builder: state.builder,
+        root: state.root, previous: state.previous,
+        count: state.count, expansion_id: state.expansion_id,
+        error: code,
+    };
+}
+
+let meta_increment = std::func(value: i32) -> i32 {
+    return value + 1;
+}
+
+let meta_decrement = std::func(value: i32) -> i32 {
+    return value + -1;
+}
+
+let meta_builtin_attribute = std::func(name: addr) -> i32 {
+    if syntax_text_equal(name, "export") == 1 { return 1; }
+    if syntax_text_equal(name, "foreign") == 1 { return 1; }
+    if syntax_text_equal(name, "interface") == 1 { return 1; }
+    if syntax_text_equal(name, "interface_impl") == 1 { return 1; }
+    return 0;
+}
+
+let meta_state_append = std::func(
+    state: MetaExpandState, source: i32) -> MetaExpandState {
+    let cloned: i32 = meta_append_clone(
+        state.builder, state.previous, source);
+    if cloned == -1 { return meta_state_error(state, 2905); }
+    if state.previous == 0 {
+        if generated_syntax_set_first(
+            state.builder, state.root, cloned) != 1 {
+            return meta_state_error(state, 2905);
+        }
+    }
+    return MetaExpandState {
+        source_root: state.source_root, builder: state.builder,
+        root: state.root, previous: cloned,
+        count: meta_increment(state.count),
+        expansion_id: state.expansion_id, error: 0,
+    };
+}
+
+let meta_expand_items = std::func(
+    item: i32, state: MetaExpandState) -> MetaExpandState {
+    if item == 0 { return state; }
+    if state.error != 0 { return state; }
+    if meta_binding_is_meta(item) == 1 {
+        return meta_expand_items(
+            surface_next_item(item), state);
+    }
+    if surface_item_tag(item) == 1 {
+        if state.expansion_id > 64 {
+            return meta_state_error(state, 2904);
+        }
+        let name: addr = meta_attribute_name(item);
+        let definition: i32 = meta_find_definition(
+            state.source_root, name);
+        if definition != 0 {
+            let target: i32 = surface_next_item(item);
+            if target == 0 { return meta_state_error(state, 2903); }
+            let result: i32 = meta_execute(
+                definition, state.expansion_id, target);
+            if result == -2 { return meta_state_error(state, 2903); }
+            if result == 0 {
+                return meta_expand_items(
+                    surface_next_item(target),
+                    MetaExpandState {
+                        source_root: state.source_root,
+                        builder: state.builder, root: state.root,
+                        previous: state.previous, count: state.count,
+                        expansion_id: meta_increment(
+                            state.expansion_id), error: 0,
+                    });
+            }
+            let first: MetaExpandState = meta_state_append(state, target);
+            if first.error != 0 { return first; }
+            if result == -1 {
+                let second: MetaExpandState = meta_state_append(first, target);
+                if second.error != 0 { return second; }
+                return meta_expand_items(
+                    surface_next_item(target),
+                    MetaExpandState {
+                        source_root: second.source_root,
+                        builder: second.builder, root: second.root,
+                        previous: second.previous, count: second.count,
+                        expansion_id: meta_increment(
+                            second.expansion_id), error: 0,
+                    });
+            }
+            return meta_expand_items(
+                surface_next_item(target),
+                MetaExpandState {
+                    source_root: first.source_root,
+                    builder: first.builder, root: first.root,
+                    previous: first.previous, count: first.count,
+                    expansion_id: meta_increment(
+                        first.expansion_id), error: 0,
+                });
+        }
+        if syntax_text_equal(name, "") != 1 {
+            if meta_builtin_attribute(name) != 1 {
+                return meta_state_error(state, 2902);
+            }
+        }
+    }
+    return meta_expand_items(
+        surface_next_item(item), meta_state_append(state, item));
+}
+
+@export
+let meta_expand = std::func(root: i32) -> MetaExpansion {
+    if meta_has_definition(surface_first_item(root)) != 1 {
+        return MetaExpansion {
+            root: root, diagnostic: 0, expansion_count: 0,
+        };
+    }
+    let validation: i32 = meta_validate_definitions(
+        surface_first_item(root));
+    if validation != 0 {
+        return MetaExpansion {
+            root: root, diagnostic: validation, expansion_count: 0,
+        };
+    }
+    let builder: GeneratedSyntaxStore = generated_syntax_new(1, root, 1);
+    if builder.ok != 1 {
+        return MetaExpansion {
+            root: root, diagnostic: 2905, expansion_count: 0,
+        };
+    }
+    let generated_root: i32 = generated_syntax_node(
+        builder, 4, 0, 0, 0);
+    if generated_root == 0 {
+        return MetaExpansion {
+            root: root, diagnostic: 2905, expansion_count: 0,
+        };
+    }
+    let state: MetaExpandState = meta_expand_items(
+        surface_first_item(root),
+        MetaExpandState {
+            source_root: root, builder: builder, root: generated_root,
+            previous: 0, count: 0, expansion_id: 1, error: 0,
+        });
+    if state.error != 0 {
+        return MetaExpansion {
+            root: root, diagnostic: state.error, expansion_count: 0,
+        };
+    }
+    let list: SyntaxList = generated_syntax_seal(
+        builder, generated_root, state.count);
+    if list.ok != 1 {
+        return MetaExpansion {
+            root: root, diagnostic: 2905, expansion_count: 0,
+        };
+    }
+    return MetaExpansion {
+        root: list.root, diagnostic: 0,
+        expansion_count: meta_decrement(state.expansion_id),
+    };
+}

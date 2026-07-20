@@ -81,7 +81,11 @@ def main() -> int:
                     f"{label} schema: expected 1, got {schema.stdout!r}"
                 )
 
-        for source in ("ast_capability_contract.lain", "stable_syntax_handles.lain"):
+        for source in (
+            "ast_capability_contract.lain",
+            "stable_syntax_handles.lain",
+            "generated_syntax_handles.lain",
+        ):
             result = run([str(lainc), "--interpret", str(HERE / source), "main"])
             require(result, source)
             if result.stdout.strip() != "42":
