@@ -34,6 +34,30 @@ let host_expr_child = std::func(unit: i32, expression: i32, right: i32) -> i32;
 let host_call_arg_count = std::func(unit: i32, expression: i32) -> i32;
 @foreign(c, link_name = "l1.read-call-arg!")
 let host_read_call_arg = std::func(unit: i32, expression: i32, index: i32) -> i32;
+@foreign(c, link_name = "core.string-equal!")
+let l1_host_string_equal = std::func(left: addr, right: addr) -> i32;
+
+@foreign(c, link_name = "meta.syntax-clone!")
+let host_meta_syntax_clone = std::func(source: i32) -> i32;
+@foreign(c, link_name = "meta.syntax-atom!")
+let host_meta_syntax_atom = std::func(source: i32) -> i32;
+@foreign(c, link_name = "meta.syntax-group!")
+let host_meta_syntax_group = std::func(delimiter: i32, first: i32) -> i32;
+@foreign(c, link_name = "meta.syntax-prefix!")
+let host_meta_syntax_prefix = std::func(operator: i32, operand: i32) -> i32;
+@foreign(c, link_name = "meta.syntax-postfix!")
+let host_meta_syntax_postfix = std::func(operand: i32, operator: i32) -> i32;
+@foreign(c, link_name = "meta.syntax-infix!")
+let host_meta_syntax_infix = std::func(
+    operator: i32, left: i32, right: i32) -> i32;
+@foreign(c, link_name = "meta.syntax-append!")
+let host_meta_syntax_append = std::func(node: i32, next: i32) -> i32;
+@foreign(c, link_name = "meta.syntax-list-empty!")
+let host_meta_syntax_list_empty = std::func() -> i32;
+@foreign(c, link_name = "meta.syntax-list-one!")
+let host_meta_syntax_list_one = std::func(first: i32) -> i32;
+@foreign(c, link_name = "meta.syntax-list-two!")
+let host_meta_syntax_list_two = std::func(first: i32, second: i32) -> i32;
 
 @foreign(c, link_name = "l1.eval-new!")
 let host_eval_new = std::func() -> i32;
@@ -141,21 +165,94 @@ let l1_interpreter_bind_call_args = std::func(
         call, index + 1, count);
 }
 
+let l1_interpreter_meta_arg = std::func(
+    evaluation: i32, unit: i32, caller_frame: i32,
+    call: i32, index: i32) -> i32 {
+    return l1_interpreter_eval_expr(
+        evaluation, unit, caller_frame,
+        host_read_call_arg(unit, call, index));
+}
+
+let l1_interpreter_meta_result = std::func(
+    evaluation: i32, value: i32) -> i32 {
+    if value != 0 { return value; }
+    let ignored: i32 = host_eval_fail(evaluation, 7009);
+    return 0;
+}
+
+let l1_interpreter_eval_meta_call = std::func(
+    evaluation: i32, unit: i32, caller_frame: i32,
+    call: i32, name: addr) -> i32 {
+    if l1_host_string_equal(name, "meta.syntax-list-empty!") == 1 {
+        return l1_interpreter_meta_result(
+            evaluation, host_meta_syntax_list_empty());
+    }
+    let argument0: i32 = l1_interpreter_meta_arg(
+        evaluation, unit, caller_frame, call, 0);
+    if host_eval_status(evaluation) != 0 { return 0; }
+    if l1_host_string_equal(name, "meta.syntax-clone!") == 1 {
+        return l1_interpreter_meta_result(
+            evaluation, host_meta_syntax_clone(argument0));
+    }
+    if l1_host_string_equal(name, "meta.syntax-atom!") == 1 {
+        return l1_interpreter_meta_result(
+            evaluation, host_meta_syntax_atom(argument0));
+    }
+    if l1_host_string_equal(name, "meta.syntax-list-one!") == 1 {
+        return l1_interpreter_meta_result(
+            evaluation, host_meta_syntax_list_one(argument0));
+    }
+    let argument1: i32 = l1_interpreter_meta_arg(
+        evaluation, unit, caller_frame, call, 1);
+    if host_eval_status(evaluation) != 0 { return 0; }
+    if l1_host_string_equal(name, "meta.syntax-group!") == 1 {
+        return l1_interpreter_meta_result(
+            evaluation, host_meta_syntax_group(argument0, argument1));
+    }
+    if l1_host_string_equal(name, "meta.syntax-prefix!") == 1 {
+        return l1_interpreter_meta_result(
+            evaluation, host_meta_syntax_prefix(argument0, argument1));
+    }
+    if l1_host_string_equal(name, "meta.syntax-postfix!") == 1 {
+        return l1_interpreter_meta_result(
+            evaluation, host_meta_syntax_postfix(argument0, argument1));
+    }
+    if l1_host_string_equal(name, "meta.syntax-append!") == 1 {
+        return l1_interpreter_meta_result(
+            evaluation, host_meta_syntax_append(argument0, argument1));
+    }
+    if l1_host_string_equal(name, "meta.syntax-list-two!") == 1 {
+        return l1_interpreter_meta_result(
+            evaluation, host_meta_syntax_list_two(argument0, argument1));
+    }
+    let argument2: i32 = l1_interpreter_meta_arg(
+        evaluation, unit, caller_frame, call, 2);
+    if host_eval_status(evaluation) != 0 { return 0; }
+    if l1_host_string_equal(name, "meta.syntax-infix!") == 1 {
+        return l1_interpreter_meta_result(
+            evaluation,
+            host_meta_syntax_infix(argument0, argument1, argument2));
+    }
+    let ignored: i32 = host_eval_fail(evaluation, 7002);
+    return 0;
+}
+
 let l1_interpreter_eval_call = std::func(
     evaluation: i32, unit: i32, caller_frame: i32, call: i32) -> i32 {
-    let procedure: i32 = host_find_proc(unit, host_expr_name(unit, call));
+    let name: addr = host_expr_name(unit, call);
+    let procedure: i32 = host_find_proc(unit, name);
     if procedure == 0 {
         let ignored: i32 = host_eval_fail(evaluation, 7001);
-        return 0;
-    }
-    if host_proc_is_extern(unit, procedure) == 1 {
-        let ignored: i32 = host_eval_fail(evaluation, 7002);
         return 0;
     }
     let count: i32 = host_call_arg_count(unit, call);
     if host_proc_param_count(unit, procedure) != count {
         let ignored: i32 = host_eval_fail(evaluation, 7005);
         return 0;
+    }
+    if host_proc_is_extern(unit, procedure) == 1 {
+        return l1_interpreter_eval_meta_call(
+            evaluation, unit, caller_frame, call, name);
     }
     let callee_frame: i32 = host_frame_new(evaluation);
     if callee_frame == 0 { return 0; }

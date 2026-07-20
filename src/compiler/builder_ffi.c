@@ -1514,6 +1514,190 @@ static sexp sexp_ast_unit_seal(sexp ctx, sexp self, sexp_sint_t n,
         (sexp_sint_t)ast_syntax_stable_handle(unit, root));
 }
 
+typedef struct {
+    AstSyntaxUnit *unit;
+    uint32_t origin;
+    uint32_t hygiene;
+} ActiveMetaSyntaxRuntime;
+
+static ActiveMetaSyntaxRuntime g_meta_syntax_runtime;
+
+static AstNodeId meta_syntax_atom_text(const char *text, size_t length) {
+    AstSyntaxUnit *unit = g_meta_syntax_runtime.unit;
+    AstNodeId id;
+    if (!unit || unit->sealed || !text) return AST_NULL;
+    id = ast_alloc(&unit->arena, AST_ATOM, 0, 0);
+    if (!ast_syntax_ensure_metadata(unit, id)) return AST_NULL;
+    ast_set_text(&unit->arena, id, ast_intern(
+        &unit->arena, text, (uint32_t)length));
+    unit->node_origins[id] = g_meta_syntax_runtime.origin;
+    unit->node_hygiene[id] = g_meta_syntax_runtime.hygiene;
+    return id;
+}
+
+static AstNodeId meta_syntax_atom_source(uint32_t source_handle) {
+    const AstNode *source = ast_ffi_node_get(source_handle, NULL, NULL);
+    const char *text;
+    size_t length;
+    if (!source || source->kind != AST_ATOM || !source->text)
+        return AST_NULL;
+    text = source->text;
+    length = strlen(text);
+    if (length >= 2 && text[0] == '"' && text[length - 1] == '"') {
+        text++;
+        length -= 2;
+    }
+    return meta_syntax_atom_text(text, length);
+}
+
+static AstNodeId meta_syntax_node(AstNodeKind kind, AstNodeId left,
+                                  AstNodeId right, AstNodeId op) {
+    AstSyntaxUnit *unit = g_meta_syntax_runtime.unit;
+    AstNodeId id;
+    if (!unit || unit->sealed) return AST_NULL;
+    id = ast_alloc(&unit->arena, kind, 0, 0);
+    if (!ast_syntax_ensure_metadata(unit, id)) return AST_NULL;
+    ast_set_left(&unit->arena, id, left);
+    ast_set_right(&unit->arena, id, right);
+    ast_set_op(&unit->arena, id, op);
+    unit->node_origins[id] = g_meta_syntax_runtime.origin;
+    unit->node_hygiene[id] = g_meta_syntax_runtime.hygiene;
+    return id;
+}
+
+static AstNodeId meta_syntax_local(sexp value) {
+    AstSyntaxUnit *unit = g_meta_syntax_runtime.unit;
+    return unit ? ast_generated_local_id(unit, value) : AST_NULL;
+}
+
+static sexp sexp_meta_syntax_enter(sexp ctx, sexp self, sexp_sint_t n,
+                                   sexp arg_store, sexp arg_unit,
+                                   sexp arg_origin, sexp arg_hygiene) {
+    AstSyntaxUnit *unit = ast_syntax_unit_from_args(arg_store, arg_unit);
+    if (!unit || unit->sealed || g_meta_syntax_runtime.unit)
+        return sexp_make_fixnum(0);
+    g_meta_syntax_runtime.unit = unit;
+    g_meta_syntax_runtime.origin =
+        (uint32_t)sexp_unbox_fixnum(arg_origin);
+    g_meta_syntax_runtime.hygiene =
+        (uint32_t)sexp_unbox_fixnum(arg_hygiene);
+    return sexp_make_fixnum(1);
+}
+
+static sexp sexp_meta_syntax_leave(sexp ctx, sexp self, sexp_sint_t n) {
+    memset(&g_meta_syntax_runtime, 0, sizeof(g_meta_syntax_runtime));
+    return sexp_make_fixnum(1);
+}
+
+static sexp sexp_meta_syntax_clone(sexp ctx, sexp self, sexp_sint_t n,
+                                   sexp arg_source) {
+    AstNodeId id;
+    if (!g_meta_syntax_runtime.unit) return sexp_make_fixnum(0);
+    id = ast_generated_clone_node(
+        g_meta_syntax_runtime.unit,
+        (uint32_t)sexp_unbox_fixnum(arg_source), 0);
+    return sexp_make_fixnum((sexp_sint_t)id);
+}
+
+static sexp sexp_meta_syntax_atom(sexp ctx, sexp self, sexp_sint_t n,
+                                  sexp arg_source) {
+    return sexp_make_fixnum((sexp_sint_t)meta_syntax_atom_source(
+        (uint32_t)sexp_unbox_fixnum(arg_source)));
+}
+
+static sexp sexp_meta_syntax_group(sexp ctx, sexp self, sexp_sint_t n,
+                                   sexp arg_delimiter, sexp arg_first) {
+    uint32_t delimiter_raw = (uint32_t)sexp_unbox_fixnum(arg_delimiter);
+    AstNodeId op = meta_syntax_atom_source(
+        delimiter_raw);
+    AstNodeId first = meta_syntax_local(arg_first);
+    if (!op || (sexp_unbox_fixnum(arg_first) != 0 && !first))
+        return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)meta_syntax_node(
+        AST_GROUP, first, AST_NULL, op));
+}
+
+static sexp meta_syntax_unary(sexp arg_operator, sexp arg_operand,
+                              AstNodeKind kind) {
+    AstNodeId op = meta_syntax_atom_source(
+        (uint32_t)sexp_unbox_fixnum(arg_operator));
+    AstNodeId operand = meta_syntax_local(arg_operand);
+    if (!op || !operand) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)meta_syntax_node(
+        kind, operand, AST_NULL, op));
+}
+
+static sexp sexp_meta_syntax_prefix(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp arg_operator, sexp arg_operand) {
+    return meta_syntax_unary(arg_operator, arg_operand, AST_PREFIX);
+}
+
+static sexp sexp_meta_syntax_postfix(sexp ctx, sexp self, sexp_sint_t n,
+                                     sexp arg_operand, sexp arg_operator) {
+    AstNodeId operand = meta_syntax_local(arg_operand);
+    AstNodeId group = meta_syntax_local(arg_operator);
+    const AstNode *group_node = group && g_meta_syntax_runtime.unit
+        ? ast_get(&g_meta_syntax_runtime.unit->arena, group) : NULL;
+    if (operand && group_node && group_node->kind == AST_GROUP &&
+        group_node->op) {
+        return sexp_make_fixnum((sexp_sint_t)meta_syntax_node(
+            AST_POSTFIX, operand, group, group_node->op));
+    }
+    if (operand && group_node && group_node->kind == AST_ATOM) {
+        return sexp_make_fixnum((sexp_sint_t)meta_syntax_node(
+            AST_POSTFIX, operand, AST_NULL, group));
+    }
+    return meta_syntax_unary(arg_operator, arg_operand, AST_POSTFIX);
+}
+
+static sexp sexp_meta_syntax_infix(sexp ctx, sexp self, sexp_sint_t n,
+                                   sexp arg_operator, sexp arg_left,
+                                   sexp arg_right) {
+    AstNodeId op = meta_syntax_atom_source(
+        (uint32_t)sexp_unbox_fixnum(arg_operator));
+    AstNodeId left = meta_syntax_local(arg_left);
+    AstNodeId right = meta_syntax_local(arg_right);
+    if (!op || !left || !right) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)meta_syntax_node(
+        AST_INFIX, left, right, op));
+}
+
+static sexp sexp_meta_syntax_append(sexp ctx, sexp self, sexp_sint_t n,
+                                    sexp arg_node, sexp arg_next) {
+    AstNodeId node = meta_syntax_local(arg_node);
+    AstNodeId next = meta_syntax_local(arg_next);
+    if (!node || !next) return sexp_make_fixnum(0);
+    ast_set_next(&g_meta_syntax_runtime.unit->arena, node, next);
+    return sexp_make_fixnum(1);
+}
+
+static AstNodeId meta_syntax_list(AstNodeId first, AstNodeId second) {
+    if (first && second)
+        ast_set_next(&g_meta_syntax_runtime.unit->arena, first, second);
+    return meta_syntax_node(AST_GROUP, first, AST_NULL, AST_NULL);
+}
+
+static sexp sexp_meta_syntax_list_empty(sexp ctx, sexp self, sexp_sint_t n) {
+    return sexp_make_fixnum((sexp_sint_t)meta_syntax_list(
+        AST_NULL, AST_NULL));
+}
+
+static sexp sexp_meta_syntax_list_one(sexp ctx, sexp self, sexp_sint_t n,
+                                      sexp arg_first) {
+    AstNodeId first = meta_syntax_local(arg_first);
+    if (!first) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)meta_syntax_list(
+        first, AST_NULL));
+}
+
+static sexp sexp_meta_syntax_list_two(sexp ctx, sexp self, sexp_sint_t n,
+                                      sexp arg_first, sexp arg_second) {
+    AstNodeId first = meta_syntax_local(arg_first);
+    AstNodeId second = meta_syntax_local(arg_second);
+    if (!first || !second) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)meta_syntax_list(first, second));
+}
+
 static sexp sexp_ast_unit_destroy(sexp ctx, sexp self, sexp_sint_t n,
                                   sexp arg_store, sexp arg_unit) {
     AstSyntaxStore *store = ast_syntax_store_get(
@@ -1656,6 +1840,8 @@ static sexp ast_unit_node_edge(sexp ctx, sexp s, sexp u, sexp id, int edge) {
         else if (edge == 2) value = node->op;
         else value = node->next;
     }
+    if (unit && !unit->sealed)
+        return sexp_make_fixnum((sexp_sint_t)value);
     return sexp_make_fixnum((sexp_sint_t)ast_ffi_child_handle(unit, value));
 }
 
@@ -1976,6 +2162,18 @@ void native_register_core_ffi(
   REG("ast.unit-append!", 4, sexp_ast_unit_append);
   REG("ast.unit-clone!", 3, sexp_ast_unit_clone);
   REG("ast.unit-seal!", 3, sexp_ast_unit_seal);
+  REG("meta.syntax-enter!", 4, sexp_meta_syntax_enter);
+  REG("meta.syntax-leave!", 0, sexp_meta_syntax_leave);
+  REG("meta.syntax-clone!", 1, sexp_meta_syntax_clone);
+  REG("meta.syntax-atom!", 1, sexp_meta_syntax_atom);
+  REG("meta.syntax-group!", 2, sexp_meta_syntax_group);
+  REG("meta.syntax-prefix!", 2, sexp_meta_syntax_prefix);
+  REG("meta.syntax-postfix!", 2, sexp_meta_syntax_postfix);
+  REG("meta.syntax-infix!", 3, sexp_meta_syntax_infix);
+  REG("meta.syntax-append!", 2, sexp_meta_syntax_append);
+  REG("meta.syntax-list-empty!", 0, sexp_meta_syntax_list_empty);
+  REG("meta.syntax-list-one!", 1, sexp_meta_syntax_list_one);
+  REG("meta.syntax-list-two!", 2, sexp_meta_syntax_list_two);
   REG("ast.unit-destroy!", 2, sexp_ast_unit_destroy);
   REG("ast.unit-root", 2, sexp_ast_unit_root);
   REG("ast.unit-node-count", 2, sexp_ast_unit_node_count);

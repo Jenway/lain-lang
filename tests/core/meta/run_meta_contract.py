@@ -53,6 +53,12 @@ def main() -> int:
     failed = 0
     cases = (
         ("one replacement form", "meta_identity.lain", None, "#proc main("),
+        (
+            "constructed replacement form",
+            "meta_construct.lain",
+            None,
+            "#return 1",
+        ),
         ("zero replacement forms", "meta_empty.lain", None, "#proc main("),
         ("two replacement forms", "meta_two.lain", "error 2111", None),
         (

@@ -9,6 +9,12 @@ let generated_syntax = import("packages::lain::compiler::generated_syntax");
 let l1_unit_builder = import("packages::lain::compiler::l1_unit_builder");
 let l1_interpreter = import("packages::lain::compiler::l1_interpreter");
 
+@foreign(c, link_name = "meta.syntax-enter!")
+let meta_host_syntax_enter = std::func(
+    store: i32, unit: i32, origin: i32, hygiene: i32) -> i32;
+@foreign(c, link_name = "meta.syntax-leave!")
+let meta_host_syntax_leave = std::func() -> i32;
+
 let meta_attribute_name = std::func(item: i32) -> addr {
     if syntax_is_juxt(item) != 1 { return ""; }
     if syntax_is_atom_text(syntax_left(item), "@") != 1 { return ""; }
@@ -122,46 +128,155 @@ let meta_is_invocation_target = std::func(node: i32) -> i32 {
     return syntax_is_atom_text(syntax_right(node), "target_syntax");
 }
 
-// 0 = zero replacement forms, target argument = one form, -1 = two forms.
-// These are SyntaxList intrinsics, not runtime functions.
-let meta_return_mode = std::func(callable: i32) -> i32 {
-    let body: i32 = meta_callable_body(callable);
-    let statement: i32 = syntax_left(body);
-    if syntax_is_return(statement) != 1 { return -2; }
-    let value: i32 = syntax_return_expr(statement);
-    if meta_is_invocation_target(value) == 1 { return 1; }
-    if syntax_is_call(value) != 1 { return -2; }
-    if syntax_call_namespace(value) != 0 { return -2; }
-    if syntax_call_callee_is(value, "syntax_list_empty") == 1 {
-        if syntax_arg_count(syntax_call_first_arg(value)) == 0 { return 0; }
-        return -2;
+let meta_declare_extern_params = std::func(
+    unit: i32, procedure: i32, count: i32) -> i32 {
+    if count == 0 { return 1; }
+    if l1_unit_builder_param(unit, procedure, 1) != 1 { return 0; }
+    return meta_declare_extern_params(unit, procedure, count + -1);
+}
+
+let meta_declare_extern = std::func(
+    unit: i32, name: addr, count: i32) -> i32 {
+    let procedure: i32 = l1_unit_builder_extern(unit, name, 1);
+    if procedure == 0 { return 0; }
+    return meta_declare_extern_params(unit, procedure, count);
+}
+
+let meta_declare_capabilities = std::func(unit: i32) -> i32 {
+    if meta_declare_extern(unit, "meta.syntax-clone!", 1) != 1 { return 0; }
+    if meta_declare_extern(unit, "meta.syntax-atom!", 1) != 1 { return 0; }
+    if meta_declare_extern(unit, "meta.syntax-group!", 2) != 1 { return 0; }
+    if meta_declare_extern(unit, "meta.syntax-prefix!", 2) != 1 { return 0; }
+    if meta_declare_extern(unit, "meta.syntax-postfix!", 2) != 1 { return 0; }
+    if meta_declare_extern(unit, "meta.syntax-infix!", 3) != 1 { return 0; }
+    if meta_declare_extern(unit, "meta.syntax-append!", 2) != 1 { return 0; }
+    if meta_declare_extern(unit, "meta.syntax-list-empty!", 0) != 1 {
+        return 0;
     }
-    if syntax_call_callee_is(value, "syntax_list_one") == 1 {
-        if syntax_arg_count(syntax_call_first_arg(value)) != 1 { return -2; }
-        if meta_is_invocation_target(syntax_call_first_arg(value)) != 1 {
-            return -2;
-        }
-        return 1;
+    if meta_declare_extern(unit, "meta.syntax-list-one!", 1) != 1 { return 0; }
+    return meta_declare_extern(unit, "meta.syntax-list-two!", 2);
+}
+
+let meta_l1_call0 = std::func(unit: i32, name: addr) -> i32 {
+    return l1_unit_builder_call(unit, name, 1);
+}
+
+let meta_l1_call1 = std::func(
+    unit: i32, name: addr, argument0: i32) -> i32 {
+    let call: i32 = l1_unit_builder_call(unit, name, 1);
+    if call == 0 { return 0; }
+    if l1_unit_builder_call_arg(unit, call, argument0) != 1 { return 0; }
+    return call;
+}
+
+let meta_l1_call2 = std::func(
+    unit: i32, name: addr, argument0: i32, argument1: i32) -> i32 {
+    let call: i32 = meta_l1_call1(unit, name, argument0);
+    if call == 0 { return 0; }
+    if l1_unit_builder_call_arg(unit, call, argument1) != 1 { return 0; }
+    return call;
+}
+
+let meta_l1_call3 = std::func(
+    unit: i32, name: addr, argument0: i32,
+    argument1: i32, argument2: i32) -> i32 {
+    let call: i32 = meta_l1_call2(unit, name, argument0, argument1);
+    if call == 0 { return 0; }
+    if l1_unit_builder_call_arg(unit, call, argument2) != 1 { return 0; }
+    return call;
+}
+
+let meta_lower_expression = std::func(unit: i32, node: i32) -> i32 {
+    if meta_is_invocation_target(node) == 1 {
+        return l1_unit_builder_arg(unit, 1, 1);
     }
-    if syntax_call_callee_is(value, "syntax_list_two") == 1 {
-        let first: i32 = syntax_call_first_arg(value);
-        if syntax_arg_count(first) != 2 { return -2; }
-        if meta_is_invocation_target(first) != 1 { return -2; }
-        if meta_is_invocation_target(syntax_arg_next(first)) != 1 {
-            return -2;
-        }
-        return -1;
+    if syntax_is_i32_atom(node) == 1 {
+        return l1_unit_builder_i32(unit, syntax_i32_value(node));
     }
-    return -2;
+    if syntax_is_call(node) != 1 { return 0; }
+    if syntax_call_namespace(node) != 0 { return 0; }
+    let first: i32 = syntax_call_first_arg(node);
+    if syntax_call_callee_is(node, "syntax_list_empty") == 1 {
+        if syntax_arg_count(first) != 0 { return 0; }
+        return meta_l1_call0(unit, "meta.syntax-list-empty!");
+    }
+    if syntax_call_callee_is(node, "syntax_clone") == 1 {
+        if syntax_arg_count(first) != 1 { return 0; }
+        return meta_l1_call1(
+            unit, "meta.syntax-clone!",
+            meta_lower_expression(unit, first));
+    }
+    if syntax_call_callee_is(node, "syntax_atom") == 1 {
+        if syntax_arg_count(first) != 1 { return 0; }
+        return meta_l1_call1(
+            unit, "meta.syntax-atom!",
+            l1_unit_builder_i32(unit, first));
+    }
+    if syntax_call_callee_is(node, "syntax_list_one") == 1 {
+        if syntax_arg_count(first) != 1 { return 0; }
+        return meta_l1_call1(
+            unit, "meta.syntax-list-one!",
+            meta_lower_expression(unit, first));
+    }
+    if syntax_call_callee_is(node, "syntax_group") == 1 {
+        if syntax_arg_count(first) != 2 { return 0; }
+        return meta_l1_call2(
+            unit, "meta.syntax-group!",
+            l1_unit_builder_i32(unit, first),
+            meta_lower_expression(unit, syntax_arg_next(first)));
+    }
+    if syntax_call_callee_is(node, "syntax_prefix") == 1 {
+        if syntax_arg_count(first) != 2 { return 0; }
+        return meta_l1_call2(
+            unit, "meta.syntax-prefix!",
+            l1_unit_builder_i32(unit, first),
+            meta_lower_expression(unit, syntax_arg_next(first)));
+    }
+    if syntax_call_callee_is(node, "syntax_postfix") == 1 {
+        if syntax_arg_count(first) != 2 { return 0; }
+        return meta_l1_call2(
+            unit, "meta.syntax-postfix!",
+            meta_lower_expression(unit, first),
+            meta_lower_expression(unit, syntax_arg_next(first)));
+    }
+    if syntax_call_callee_is(node, "syntax_append") == 1 {
+        if syntax_arg_count(first) != 2 { return 0; }
+        return meta_l1_call2(
+            unit, "meta.syntax-append!",
+            meta_lower_expression(unit, first),
+            meta_lower_expression(unit, syntax_arg_next(first)));
+    }
+    if syntax_call_callee_is(node, "syntax_list_two") == 1 {
+        if syntax_arg_count(first) != 2 { return 0; }
+        return meta_l1_call2(
+            unit, "meta.syntax-list-two!",
+            meta_lower_expression(unit, first),
+            meta_lower_expression(unit, syntax_arg_next(first)));
+    }
+    if syntax_call_callee_is(node, "syntax_infix") == 1 {
+        if syntax_arg_count(first) != 3 { return 0; }
+        let second: i32 = syntax_arg_next(first);
+        return meta_l1_call3(
+            unit, "meta.syntax-infix!",
+            l1_unit_builder_i32(unit, first),
+            meta_lower_expression(unit, second),
+            meta_lower_expression(unit, syntax_arg_next(second)));
+    }
+    return 0;
 }
 
 let meta_execute = std::func(
-    definition: i32, context_handle: i32,
-    target_handle: i32) -> i32 {
-    let mode: i32 = meta_return_mode(meta_binding_callable(definition));
-    if mode == -2 { return -2; }
+    definition: i32, builder: GeneratedSyntaxStore,
+    context_handle: i32, target_handle: i32) -> i32 {
+    let body: i32 = meta_callable_body(meta_binding_callable(definition));
+    let statement: i32 = syntax_left(body);
+    if syntax_is_return(statement) != 1 { return -2; }
     let unit: i32 = l1_unit_builder_new();
     if unit == 0 { return -2; }
+    if meta_declare_capabilities(unit) != 1 {
+        let destroyed: i32 = l1_unit_builder_destroy(unit);
+        return -2;
+    }
     let name: addr = surface_binding_name(definition);
     let procedure: i32 = l1_unit_builder_proc(unit, name, 1);
     if procedure == 0 {
@@ -176,24 +291,31 @@ let meta_execute = std::func(
         let destroyed: i32 = l1_unit_builder_destroy(unit);
         return -2;
     }
-    let result_value: i32 = meta_result_expression(unit, mode);
+    let result_value: i32 = meta_lower_expression(
+        unit, syntax_return_expr(statement));
+    if result_value == 0 {
+        let destroyed: i32 = l1_unit_builder_destroy(unit);
+        return -2;
+    }
     if l1_unit_builder_return(unit, procedure, result_value) != 1 {
+        let destroyed: i32 = l1_unit_builder_destroy(unit);
+        return -2;
+    }
+    if meta_host_syntax_enter(
+        builder.store, builder.unit, target_handle, context_handle) != 1 {
         let destroyed: i32 = l1_unit_builder_destroy(unit);
         return -2;
     }
     let result: i32 = l1_interpreter_run2(
         unit, name, context_handle, target_handle);
+    let left: i32 = meta_host_syntax_leave();
     let status: i32 = l1_interpreter_result_status(result);
     let value: i32 = l1_interpreter_result_value(result);
     let destroyed_result: i32 = l1_interpreter_result_destroy(result);
     let destroyed_unit: i32 = l1_unit_builder_destroy(unit);
     if status != 0 { return -2; }
+    if generated_syntax_local_kind(builder, value) != 4 { return -2; }
     return value;
-}
-
-let meta_result_expression = std::func(unit: i32, mode: i32) -> i32 {
-    if mode == 1 { return l1_unit_builder_arg(unit, 1, 1); }
-    return l1_unit_builder_i32(unit, mode);
 }
 
 let meta_append_clone = std::func(
@@ -264,6 +386,35 @@ let meta_state_append = std::func(
     };
 }
 
+let meta_state_adopt_nodes = std::func(
+    state: MetaExpandState, node: i32) -> MetaExpandState {
+    if node == 0 { return state; }
+    if generated_syntax_local_kind(state.builder, node) == -1 {
+        return meta_state_error(state, 2905);
+    }
+    let next: i32 = generated_syntax_local_next(state.builder, node);
+    if state.previous == 0 {
+        if generated_syntax_set_first(
+            state.builder, state.root, node) != 1 {
+            return meta_state_error(state, 2905);
+        }
+    }
+    if state.previous != 0 {
+        if generated_syntax_append(
+            state.builder, state.previous, node) != 1 {
+            return meta_state_error(state, 2905);
+        }
+    }
+    return meta_state_adopt_nodes(
+        MetaExpandState {
+            source_root: state.source_root, builder: state.builder,
+            root: state.root, previous: node,
+            count: meta_increment(state.count),
+            expansion_id: state.expansion_id, error: 0,
+        },
+        next);
+}
+
 let meta_expand_items = std::func(
     item: i32, state: MetaExpandState) -> MetaExpandState {
     if item == 0 { return state; }
@@ -283,42 +434,20 @@ let meta_expand_items = std::func(
             let target: i32 = surface_next_item(item);
             if target == 0 { return meta_state_error(state, 2903); }
             let result: i32 = meta_execute(
-                definition, state.expansion_id, target);
+                definition, state.builder, state.expansion_id, target);
             if result == -2 { return meta_state_error(state, 2903); }
-            if result == 0 {
-                return meta_expand_items(
-                    surface_next_item(target),
-                    MetaExpandState {
-                        source_root: state.source_root,
-                        builder: state.builder, root: state.root,
-                        previous: state.previous, count: state.count,
-                        expansion_id: meta_increment(
-                            state.expansion_id), error: 0,
-                    });
-            }
-            let first: MetaExpandState = meta_state_append(state, target);
-            if first.error != 0 { return first; }
-            if result == -1 {
-                let second: MetaExpandState = meta_state_append(first, target);
-                if second.error != 0 { return second; }
-                return meta_expand_items(
-                    surface_next_item(target),
-                    MetaExpandState {
-                        source_root: second.source_root,
-                        builder: second.builder, root: second.root,
-                        previous: second.previous, count: second.count,
-                        expansion_id: meta_increment(
-                            second.expansion_id), error: 0,
-                    });
-            }
+            let adopted: MetaExpandState = meta_state_adopt_nodes(
+                state,
+                generated_syntax_local_left(state.builder, result));
+            if adopted.error != 0 { return adopted; }
             return meta_expand_items(
                 surface_next_item(target),
                 MetaExpandState {
-                    source_root: first.source_root,
-                    builder: first.builder, root: first.root,
-                    previous: first.previous, count: first.count,
+                    source_root: adopted.source_root,
+                    builder: adopted.builder, root: adopted.root,
+                    previous: adopted.previous, count: adopted.count,
                     expansion_id: meta_increment(
-                        first.expansion_id), error: 0,
+                        adopted.expansion_id), error: 0,
                 });
         }
         if syntax_text_equal(name, "") != 1 {
