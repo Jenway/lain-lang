@@ -10,7 +10,7 @@
  */
 
 #include "lainir/lainir.h"
-#include "compiler/native_runtime.h"
+#include "compiler/builder_ffi.h"
 #include "compiler/vm_compat.h"
 #include <stdlib.h>
 #include <string.h>
@@ -1266,6 +1266,19 @@ static sexp sexp_ast_store_destroy(sexp ctx, sexp self, sexp_sint_t n,
     return sexp_make_fixnum(1);
 }
 
+static sexp sexp_ast_store_live_count(sexp ctx, sexp self, sexp_sint_t n) {
+    return sexp_make_fixnum((sexp_sint_t)native_ast_store_live_count());
+}
+
+uint32_t native_ast_store_live_count(void) {
+    uint32_t count = 0;
+    uint32_t i;
+    for (i = 0; i < g_ast_store_count; i++) {
+        if (g_ast_stores[i].alive) count++;
+    }
+    return count;
+}
+
 static AstSyntaxUnit *ast_syntax_unit_from_args(sexp arg_store,
                                                 sexp arg_unit);
 
@@ -1473,6 +1486,8 @@ static AstNodeId ast_generated_clone_node(AstSyntaxUnit *target,
     id = ast_alloc(&target->arena, source->kind, source->line, source->col);
     if (!ast_syntax_ensure_metadata(target, id)) return AST_NULL;
     target->node_origins[id] = ast_syntax_handle_origin(source_handle);
+    if (target->node_origins[id] == 0)
+        target->node_origins[id] = source_handle;
     target->node_hygiene[id] = ast_syntax_handle_hygiene(source_handle);
     ast_set_left(&target->arena, id, left);
     ast_set_right(&target->arena, id, right);
@@ -2184,6 +2199,7 @@ void native_register_core_ffi(
   REG("ast.destroy!", 0, sexp_ast_destroy);
   REG("ast.store-new!", 0, sexp_ast_store_new);
   REG("ast.store-destroy!", 1, sexp_ast_store_destroy);
+  REG("ast.store-live-count", 0, sexp_ast_store_live_count);
   REG("ast.unit-parse!", 3, sexp_ast_unit_parse);
   REG("ast.unit-new-generated!", 1, sexp_ast_unit_new_generated);
   REG("ast.unit-atom!", 3, sexp_ast_unit_atom);

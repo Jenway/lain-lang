@@ -42,6 +42,13 @@ let MetaExpansion: type = std::struct {
     root: i32,
     diagnostic: i32,
     expansion_count: i32,
+    syntax_store: i32,
+    diagnostic_node: i32,
+}
+
+@export
+let meta_expansion_destroy = std::func(expansion: MetaExpansion) -> i32 {
+    return generated_syntax_store_destroy(expansion.syntax_store);
 }
 
 let meta_callable_head = std::func(callable: i32) -> i32 {
@@ -367,16 +374,22 @@ let MetaExpandState: type = std::struct {
     count: i32,
     expansion_id: i32,
     error: i32,
+    error_node: i32,
 }
 
-let meta_state_error = std::func(
-    state: MetaExpandState, code: i32) -> MetaExpandState {
+let meta_state_error_at = std::func(
+    state: MetaExpandState, code: i32, node: i32) -> MetaExpandState {
     return MetaExpandState {
         source_root: state.source_root, builder: state.builder,
         root: state.root, previous: state.previous,
         count: state.count, expansion_id: state.expansion_id,
-        error: code,
+        error: code, error_node: node,
     };
+}
+
+let meta_state_error = std::func(
+    state: MetaExpandState, code: i32) -> MetaExpandState {
+    return meta_state_error_at(state, code, state.source_root);
 }
 
 let meta_increment = std::func(value: i32) -> i32 {
@@ -410,7 +423,7 @@ let meta_state_append = std::func(
         source_root: state.source_root, builder: state.builder,
         root: state.root, previous: cloned,
         count: meta_increment(state.count),
-        expansion_id: state.expansion_id, error: 0,
+        expansion_id: state.expansion_id, error: 0, error_node: 0,
     };
 }
 
@@ -438,7 +451,7 @@ let meta_state_adopt_nodes = std::func(
             source_root: state.source_root, builder: state.builder,
             root: state.root, previous: node,
             count: meta_increment(state.count),
-            expansion_id: state.expansion_id, error: 0,
+            expansion_id: state.expansion_id, error: 0, error_node: 0,
         },
         next);
 }
@@ -453,17 +466,19 @@ let meta_expand_items = std::func(
     }
     if surface_item_tag(item) == 1 {
         if state.expansion_id > 64 {
-            return meta_state_error(state, 2904);
+            return meta_state_error_at(state, 2904, item);
         }
         let name: addr = meta_attribute_name(item);
         let definition: i32 = meta_find_definition(
             state.source_root, name);
         if definition != 0 {
             let target: i32 = surface_next_item(item);
-            if target == 0 { return meta_state_error(state, 2903); }
+            if target == 0 { return meta_state_error_at(state, 2903, item); }
             let result: i32 = meta_execute(
                 definition, state.builder, state.expansion_id, target);
-            if result == -2 { return meta_state_error(state, 2903); }
+            if result == -2 {
+                return meta_state_error_at(state, 2903, target);
+            }
             let adopted: MetaExpandState = meta_state_adopt_nodes(
                 state,
                 generated_syntax_local_left(state.builder, result));
@@ -474,13 +489,14 @@ let meta_expand_items = std::func(
                     source_root: adopted.source_root,
                     builder: adopted.builder, root: adopted.root,
                     previous: adopted.previous, count: adopted.count,
-                    expansion_id: meta_increment(
-                        adopted.expansion_id), error: 0,
+                        expansion_id: meta_increment(
+                            adopted.expansion_id),
+                        error: 0, error_node: 0,
                 });
         }
         if syntax_text_equal(name, "") != 1 {
             if meta_builtin_attribute(name) != 1 {
-                return meta_state_error(state, 2902);
+                return meta_state_error_at(state, 2902, item);
             }
         }
     }
@@ -493,6 +509,7 @@ let meta_expand = std::func(root: i32) -> MetaExpansion {
     if meta_has_definition(surface_first_item(root)) != 1 {
         return MetaExpansion {
             root: root, diagnostic: 0, expansion_count: 0,
+            syntax_store: 0, diagnostic_node: 0,
         };
     }
     let validation: i32 = meta_validate_definitions(
@@ -500,19 +517,23 @@ let meta_expand = std::func(root: i32) -> MetaExpansion {
     if validation != 0 {
         return MetaExpansion {
             root: root, diagnostic: validation, expansion_count: 0,
+            syntax_store: 0, diagnostic_node: root,
         };
     }
     let builder: GeneratedSyntaxStore = generated_syntax_new(1, root, 1);
     if builder.ok != 1 {
         return MetaExpansion {
             root: root, diagnostic: 2905, expansion_count: 0,
+            syntax_store: 0, diagnostic_node: root,
         };
     }
     let generated_root: i32 = generated_syntax_node(
         builder, 4, 0, 0, 0);
     if generated_root == 0 {
+        let destroyed: i32 = generated_syntax_builder_destroy(builder);
         return MetaExpansion {
             root: root, diagnostic: 2905, expansion_count: 0,
+            syntax_store: 0, diagnostic_node: root,
         };
     }
     let state: MetaExpandState = meta_expand_items(
@@ -520,21 +541,28 @@ let meta_expand = std::func(root: i32) -> MetaExpansion {
         MetaExpandState {
             source_root: root, builder: builder, root: generated_root,
             previous: 0, count: 0, expansion_id: 1, error: 0,
+            error_node: 0,
         });
     if state.error != 0 {
+        let destroyed: i32 = generated_syntax_builder_destroy(builder);
         return MetaExpansion {
             root: root, diagnostic: state.error, expansion_count: 0,
+            syntax_store: 0, diagnostic_node: state.error_node,
         };
     }
     let list: SyntaxList = generated_syntax_seal(
         builder, generated_root, state.count);
     if list.ok != 1 {
+        let destroyed: i32 = generated_syntax_builder_destroy(builder);
         return MetaExpansion {
             root: root, diagnostic: 2905, expansion_count: 0,
+            syntax_store: 0, diagnostic_node: root,
         };
     }
     return MetaExpansion {
         root: list.root, diagnostic: 0,
         expansion_count: meta_decrement(state.expansion_id),
+        syntax_store: list.store,
+        diagnostic_node: 0,
     };
 }

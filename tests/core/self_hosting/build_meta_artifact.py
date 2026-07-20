@@ -58,6 +58,7 @@ EXPECTED_HOST_CAPABILITIES = {
     "ast.parse!",
     "ast.store-new!",
     "ast.store-destroy!",
+    "ast.store-live-count",
     "ast.unit-parse!",
     "ast.unit-new-generated!",
     "ast.unit-atom!",

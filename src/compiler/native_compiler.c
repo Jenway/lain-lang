@@ -1,4 +1,5 @@
 #include "native_runtime.h"
+#include "builder_ffi.h"
 #include "structured_unit.h"
 #include "version.h"
 #include "lainir_exec.h"
@@ -257,6 +258,7 @@ static uint32_t compile_inputs_with_artifact(
     LainirValue compiled = lainir_value_unit();
     LainirValue result = lainir_value_unit();
     int32_t outcome = 0;
+    uint32_t ast_stores_before = native_ast_store_live_count();
     (void)artifact_length;
     if (!artifact) {
         fprintf(stderr, "failed to read compiler artifact %s\n", artifact_path);
@@ -305,6 +307,10 @@ static uint32_t compile_inputs_with_artifact(
     }
     if (!artifact_call_handle(ctx, artifact, "compiler_compile", request, &compiled))
         goto cleanup;
+    if (native_ast_store_live_count() != ast_stores_before) {
+        fprintf(stderr, "compiler_compile leaked syntax store ownership\n");
+        goto cleanup;
+    }
     if (compiled.kind != LAINIR_VALUE_BITS || compiled.as.bits == 0) {
         fprintf(stderr, "compiler_compile did not return a result handle\n");
         goto cleanup;

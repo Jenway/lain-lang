@@ -521,6 +521,7 @@ static const char *const compiler_artifact_capabilities[] = {
   "ast.parse!",
   "ast.store-new!",
   "ast.store-destroy!",
+  "ast.store-live-count",
   "ast.unit-parse!",
   "ast.unit-new-generated!",
   "ast.unit-atom!",

@@ -205,6 +205,13 @@ let frontend_lower = std::func(elaborated: ElaboratedProgram) -> LoweredProgram 
     return LoweredProgram { unit: unit, diagnostic: 0 };
 }
 
+let frontend_finish_expansion = std::func(
+    context: CompilerContext,
+    expansion: MetaExpansion) -> CompileResult {
+    let destroyed: i32 = meta_expansion_destroy(expansion);
+    return compiler_context_finish(context);
+}
+
 @export
 let frontend_compile = std::func(
     root: i32, source_length: i32) -> CompileResult {
@@ -220,11 +227,13 @@ let frontend_compile = std::func(
 
     let expansion: MetaExpansion = meta_expand(root);
     if expansion.diagnostic != 0 {
+        let diagnostic_node: i32 = syntax_call_site(
+            expansion.diagnostic_node);
         let failed: CompilerContext = compiler_context_add_diagnostic(
             context4, expansion.diagnostic,
             diagnostic_message(expansion.diagnostic),
-            root, 0, source_length);
-        return compiler_context_finish(failed);
+            diagnostic_node, 0, source_length);
+        return frontend_finish_expansion(failed, expansion);
     }
 
     let parsed: ParsedProgram = frontend_parse(expansion.root);
@@ -233,7 +242,7 @@ let frontend_compile = std::func(
             context4, parsed.diagnostic,
             diagnostic_message(parsed.diagnostic),
             root, 0, source_length);
-        return compiler_context_finish(failed);
+        return frontend_finish_expansion(failed, expansion);
     }
 
     let middle: MiddleProgram = frontend_build_middle(parsed);
@@ -242,7 +251,7 @@ let frontend_compile = std::func(
             context4, middle.diagnostic,
             diagnostic_message(middle.diagnostic),
             root, 0, source_length);
-        return compiler_context_finish(failed);
+        return frontend_finish_expansion(failed, expansion);
     }
 
     let elaborated: ElaboratedProgram = frontend_elaborate(middle);
@@ -251,7 +260,7 @@ let frontend_compile = std::func(
             context4, elaborated.diagnostic,
             diagnostic_message(elaborated.diagnostic),
             root, 0, source_length);
-        return compiler_context_finish(failed);
+        return frontend_finish_expansion(failed, expansion);
     }
 
     let lowered: LoweredProgram = frontend_lower(elaborated);
@@ -260,10 +269,11 @@ let frontend_compile = std::func(
             context4, lowered.diagnostic,
             diagnostic_message(lowered.diagnostic),
             root, 0, source_length);
-        return compiler_context_finish(failed);
+        return frontend_finish_expansion(failed, expansion);
     }
-    return compiler_context_finish(
-        compiler_context_with_unit(context4, lowered.unit));
+    return frontend_finish_expansion(
+        compiler_context_with_unit(context4, lowered.unit),
+        expansion);
 }
 
 @export
