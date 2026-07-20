@@ -220,3 +220,22 @@ The current stage-2 language boundary is deliberate: it covers the compiler's
 self-hosting subset, not every form handled by the stage-0 Scheme reference.
 Legacy compatibility tests therefore invoke `--bootstrap-emit-l1` explicitly;
 the normal command never silently falls back from Lain to Scheme.
+
+## User Meta fixed point
+
+Top-level `std::meta(fn)` bindings are compiled to temporary structured
+LAIN-IR and executed by the same Lain-owned interpreter used for consteval.
+The only callable externs are the explicit `meta.syntax-*` topology
+capabilities. Generated syntax is sealed into immutable units and re-enters
+Meta expansion until no user attribute remains.
+
+One initial form may execute at most 64 user Meta transformations. Generated
+identifiers use the expansion hygiene context; `syntax_clone` is the explicit
+call-site capture operation. All generated units for one compilation share a
+single owned syntax store, so origins stay valid across rounds and the
+frontend releases the complete expansion lifetime through one exit.
+
+Meta failures distinguish malformed results (`2903`), expansion exhaustion
+(`2904`), invalid syntax handles (`2905`), and unavailable capabilities
+(`2906`). Diagnostics produced after re-entry include the expansion depth and
+resolve their node origin back to the initial call site.

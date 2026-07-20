@@ -183,6 +183,16 @@ static void interp_build_sub_index(LainirInterpreter *interp) {
   }
 }
 
+static LainirValue interp_normalize_typed_value(
+    LainirValue value, L1Type *ty) {
+  if (!ty || ty->kind != TY_BITS || value.kind != LAINIR_VALUE_BITS)
+    return value;
+  value.bit_width = ty->width ? ty->width : 64;
+  if (value.bit_width < 64)
+    value.as.bits &= (UINT64_C(1) << value.bit_width) - UINT64_C(1);
+  return value;
+}
+
 static L1Subroutine *interp_find_sub(LainirInterpreter *interp,
                                      const char *name) {
   if (!interp->sub_index || !name)
@@ -548,7 +558,7 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
   case EXPR_ALLOCA: {
     uint32_t sz = expr->data.alloca.byte_size;
     if (!sz) sz = interp_type_size(expr->data.alloca.element_ty);
-    uint8_t *data = calloc(sz ? sz : 1, 1);
+    uint8_t *data = calloc((sz ? sz : 1) + 16, 1);
     if (!data) { interp_trap(interp, "out of memory"); return lainir_value_unit(); }
     if (interp->alloca_count == interp->alloca_cap) {
       uint32_t nc = interp->alloca_cap ? interp->alloca_cap * 2 : 4;
@@ -637,6 +647,16 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
       uint8_t *addr = (uint8_t *)interp_value_addr(interp, dest, "expected address for store");
       if (interp->error) return;
       uint32_t width = interp_store_width(inst->data.store.store_ty, value);
+      for (uint32_t i = 0; i < interp->alloca_count; i++) {
+        uint8_t *begin = interp->allocas[i].data;
+        uint8_t *guard_end = begin + interp->allocas[i].size + 16;
+        if (addr >= begin && addr < guard_end &&
+            (addr < begin || (uint64_t)(addr - begin) + width >
+                              interp->allocas[i].size)) {
+          interp_trap(interp, "store exceeds alloca");
+          return;
+        }
+      }
       memcpy(addr, &value.as.bits, width);
       break;
     }
@@ -703,7 +723,11 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
   if (arg_count) {
     frame.args = calloc(arg_count, sizeof(LainirValue));
     if (!frame.args) { interp_trap(interp, "out of memory"); return lainir_value_unit(); }
-    memcpy(frame.args, args, sizeof(LainirValue) * arg_count);
+    for (uint32_t i = 0; i < arg_count; i++) {
+      L1Type *param_ty =
+          i < sub->param_count && sub->param_tys ? sub->param_tys[i] : NULL;
+      frame.args[i] = interp_normalize_typed_value(args[i], param_ty);
+    }
   }
 
   int saved_ret = interp->should_return;

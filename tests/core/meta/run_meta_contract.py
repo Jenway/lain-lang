@@ -91,6 +91,36 @@ def main() -> int:
             "error 2902",
             None,
         ),
+        (
+            "generated attribute re-enters Meta expansion",
+            "meta_recursive.lain",
+            None,
+            "#return 42",
+        ),
+        (
+            "recursive Meta expansion is bounded",
+            "meta_expansion_limit.lain",
+            "error 2904",
+            None,
+        ),
+        (
+            "Meta capability is denied by default",
+            "meta_capability_denied.lain",
+            "error 2906",
+            None,
+        ),
+        (
+            "invalid generated Syntax handle",
+            "meta_invalid_handle.lain",
+            "error 2905",
+            None,
+        ),
+        (
+            "generated Meta diagnostic preserves expansion trace",
+            "meta_generated_unknown.lain",
+            "Meta expansion trace: depth 1",
+            None,
+        ),
     )
     for label, source, error, expected_text in cases:
         ok, detail = compile_case(source, error)
