@@ -1049,6 +1049,9 @@ typedef struct {
     AstArena arena;
     AstNodeId root;
     uint32_t stable_base;
+    uint32_t *node_origins;
+    uint32_t *node_hygiene;
+    uint32_t metadata_capacity;
 } AstSyntaxUnit;
 
 typedef struct {
@@ -1072,6 +1075,8 @@ typedef struct {
     uint32_t store_id;
     uint32_t unit_id;
     AstNodeId local_id;
+    uint32_t origin;
+    uint32_t hygiene;
 } AstStableNodeRef;
 
 static AstStableNodeRef *g_ast_stable_nodes = NULL;
@@ -1120,8 +1125,52 @@ static uint32_t ast_syntax_register_nodes(AstSyntaxStore *store,
         ref->store_id = store->id;
         ref->unit_id = unit->id;
         ref->local_id = (AstNodeId)i;
+        ref->origin = unit->node_origins && i < unit->metadata_capacity ?
+            unit->node_origins[i] : 0;
+        ref->hygiene = unit->node_hygiene && i < unit->metadata_capacity ?
+            unit->node_hygiene[i] : 0;
+        if (ref->origin == 0)
+            ref->origin = AST_STABLE_HANDLE_TAG | g_ast_stable_node_count;
     }
     return 1;
+}
+
+static int ast_syntax_ensure_metadata(AstSyntaxUnit *unit,
+                                      uint32_t needed) {
+    uint32_t next;
+    uint32_t *origins;
+    uint32_t *hygiene;
+    if (needed < unit->metadata_capacity) return 1;
+    next = unit->metadata_capacity ? unit->metadata_capacity * 2 : 16;
+    while (next <= needed) next *= 2;
+    origins = realloc(unit->node_origins, sizeof(*origins) * next);
+    if (!origins) return 0;
+    unit->node_origins = origins;
+    hygiene = realloc(unit->node_hygiene, sizeof(*hygiene) * next);
+    if (!hygiene) return 0;
+    unit->node_hygiene = hygiene;
+    memset(unit->node_origins + unit->metadata_capacity, 0,
+           sizeof(*unit->node_origins) * (next - unit->metadata_capacity));
+    memset(unit->node_hygiene + unit->metadata_capacity, 0,
+           sizeof(*unit->node_hygiene) * (next - unit->metadata_capacity));
+    unit->metadata_capacity = next;
+    return 1;
+}
+
+static uint32_t ast_syntax_handle_origin(uint32_t handle) {
+    uint32_t index;
+    if ((handle & AST_STABLE_HANDLE_TAG) == 0) return handle;
+    index = handle & AST_STABLE_HANDLE_MASK;
+    if (index == 0 || index > g_ast_stable_node_count) return 0;
+    return g_ast_stable_nodes[index - 1].origin;
+}
+
+static uint32_t ast_syntax_handle_hygiene(uint32_t handle) {
+    uint32_t index;
+    if ((handle & AST_STABLE_HANDLE_TAG) == 0) return 0;
+    index = handle & AST_STABLE_HANDLE_MASK;
+    if (index == 0 || index > g_ast_stable_node_count) return 0;
+    return g_ast_stable_nodes[index - 1].hygiene;
 }
 
 static uint32_t ast_syntax_stable_handle(const AstSyntaxUnit *unit,
@@ -1201,6 +1250,11 @@ static sexp sexp_ast_store_destroy(sexp ctx, sexp self, sexp_sint_t n,
     for (i = 0; i < store->unit_count; i++) {
         if (store->units[i].alive) {
             ast_arena_destroy(&store->units[i].arena);
+            free(store->units[i].node_origins);
+            free(store->units[i].node_hygiene);
+            store->units[i].node_origins = NULL;
+            store->units[i].node_hygiene = NULL;
+            store->units[i].metadata_capacity = 0;
             store->units[i].alive = 0;
         }
     }
@@ -1290,6 +1344,7 @@ static sexp sexp_ast_unit_atom(sexp ctx, sexp self, sexp_sint_t n,
     AstNodeId id;
     if (!unit || unit->sealed || !text) return sexp_make_fixnum(0);
     id = ast_alloc(&unit->arena, AST_ATOM, 0, 0);
+    if (!ast_syntax_ensure_metadata(unit, id)) return sexp_make_fixnum(0);
     ast_set_text(&unit->arena, id,
                  ast_intern(&unit->arena, text, (uint32_t)strlen(text)));
     return sexp_make_fixnum((sexp_sint_t)id);
@@ -1304,6 +1359,7 @@ static sexp sexp_ast_unit_node(sexp ctx, sexp self, sexp_sint_t n,
     if (!unit || unit->sealed || kind < AST_INFIX || kind > AST_GROUP)
         return sexp_make_fixnum(0);
     id = ast_alloc(&unit->arena, (AstNodeKind)kind, 0, 0);
+    if (!ast_syntax_ensure_metadata(unit, id)) return sexp_make_fixnum(0);
     return sexp_make_fixnum((sexp_sint_t)id);
 }
 
@@ -1354,6 +1410,24 @@ static sexp sexp_ast_unit_set_origin(sexp ctx, sexp self, sexp_sint_t n,
     if (!node || !source) return sexp_make_fixnum(0);
     node->line = source->line;
     node->col = source->col;
+    if (!ast_syntax_ensure_metadata(unit, local))
+        return sexp_make_fixnum(0);
+    unit->node_origins[local] =
+        (uint32_t)sexp_unbox_fixnum(arg_source);
+    return sexp_make_fixnum(1);
+}
+
+static sexp sexp_ast_unit_set_hygiene(sexp ctx, sexp self, sexp_sint_t n,
+                                      sexp arg_store, sexp arg_unit,
+                                      sexp arg_node, sexp arg_hygiene) {
+    AstSyntaxUnit *unit = ast_syntax_unit_from_args(arg_store, arg_unit);
+    AstNodeId local;
+    if (!unit || unit->sealed) return sexp_make_fixnum(0);
+    local = ast_generated_local_id(unit, arg_node);
+    if (local == AST_NULL || !ast_syntax_ensure_metadata(unit, local))
+        return sexp_make_fixnum(0);
+    unit->node_hygiene[local] =
+        (uint32_t)sexp_unbox_fixnum(arg_hygiene);
     return sexp_make_fixnum(1);
 }
 
@@ -1397,6 +1471,9 @@ static AstNodeId ast_generated_clone_node(AstSyntaxUnit *target,
         next = ast_generated_clone_node(
             target, ast_ffi_child_handle(owner, source->next), 1);
     id = ast_alloc(&target->arena, source->kind, source->line, source->col);
+    if (!ast_syntax_ensure_metadata(target, id)) return AST_NULL;
+    target->node_origins[id] = ast_syntax_handle_origin(source_handle);
+    target->node_hygiene[id] = ast_syntax_handle_hygiene(source_handle);
     ast_set_left(&target->arena, id, left);
     ast_set_right(&target->arena, id, right);
     ast_set_op(&target->arena, id, op);
@@ -1445,6 +1522,11 @@ static sexp sexp_ast_unit_destroy(sexp ctx, sexp self, sexp_sint_t n,
         store, (uint32_t)sexp_unbox_fixnum(arg_unit));
     if (!unit) return sexp_make_fixnum(0);
     ast_arena_destroy(&unit->arena);
+    free(unit->node_origins);
+    free(unit->node_hygiene);
+    unit->node_origins = NULL;
+    unit->node_hygiene = NULL;
+    unit->metadata_capacity = 0;
     unit->alive = 0;
     unit->root = AST_NULL;
     return sexp_make_fixnum(1);
@@ -1709,6 +1791,20 @@ static sexp sexp_ast_node_col(sexp ctx, sexp self, sexp_sint_t n,
     return sexp_make_fixnum((sexp_sint_t)node->col);
 }
 
+static sexp sexp_ast_node_origin(sexp ctx, sexp self, sexp_sint_t n,
+                                 sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    if (!ast_ffi_node_get(id, NULL, NULL)) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)ast_syntax_handle_origin(id));
+}
+
+static sexp sexp_ast_node_hygiene(sexp ctx, sexp self, sexp_sint_t n,
+                                  sexp arg_id) {
+    uint32_t id = (uint32_t)sexp_unbox_fixnum(arg_id);
+    if (!ast_ffi_node_get(id, NULL, NULL)) return sexp_make_fixnum(0);
+    return sexp_make_fixnum((sexp_sint_t)ast_syntax_handle_hygiene(id));
+}
+
 // ast.node-left(id) → child id or 0
 static sexp sexp_ast_node_left(sexp ctx, sexp self, sexp_sint_t n,
                                 sexp arg_id) {
@@ -1859,6 +1955,8 @@ void native_register_core_ffi(
   REG("ast.node-atom-class", 1, sexp_ast_node_atom_class);
   REG("ast.node-line", 1, sexp_ast_node_line);
   REG("ast.node-col", 1, sexp_ast_node_col);
+  REG("ast.node-origin", 1, sexp_ast_node_origin);
+  REG("ast.node-hygiene", 1, sexp_ast_node_hygiene);
   REG("ast.node-left", 1, sexp_ast_node_left);
   REG("ast.node-right", 1, sexp_ast_node_right);
   REG("ast.node-op", 1, sexp_ast_node_op);
@@ -1874,6 +1972,7 @@ void native_register_core_ffi(
   REG("ast.unit-set-right!", 4, sexp_ast_unit_set_right);
   REG("ast.unit-set-op!", 4, sexp_ast_unit_set_op);
   REG("ast.unit-set-origin!", 4, sexp_ast_unit_set_origin);
+  REG("ast.unit-set-hygiene!", 4, sexp_ast_unit_set_hygiene);
   REG("ast.unit-append!", 4, sexp_ast_unit_append);
   REG("ast.unit-clone!", 3, sexp_ast_unit_clone);
   REG("ast.unit-seal!", 3, sexp_ast_unit_seal);

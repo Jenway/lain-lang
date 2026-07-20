@@ -67,6 +67,12 @@ def main() -> int:
             "error 2903",
             None,
         ),
+        (
+            "unknown attribute",
+            "meta_unknown_attribute.lain",
+            "error 2902",
+            None,
+        ),
     )
     for label, source, error, expected_text in cases:
         ok, detail = compile_case(source, error)
