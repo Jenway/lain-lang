@@ -93,8 +93,8 @@ RULES: tuple[Rule, ...] = (
         description="builder FFI must not own std/source-level type aliases",
         paths=("src/compiler/builder_ffi.c",),
         pattern=r'"CStr"|\"opaque\"',
-        allowed_count=1,
-        rationale="Known debt: CStr/opaque aliases are hardcoded in C type lookup.",
+        allowed_count=0,
+        rationale="Standard-library aliases must be resolved by Meta before physical type construction.",
     ),
     Rule(
         ident="C2_BUILDER_AUTO_EXTERN_STUB",

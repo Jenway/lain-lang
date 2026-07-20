@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 COMPONENT = ROOT / "tests/core/bootstrap_execution/const_lowering_component.lain"
 UNDECLARED_CALL = ROOT / "tests/core/bootstrap_execution/undeclared_call.lain"
+UNKNOWN_TYPE = ROOT / "tests/core/bootstrap_execution/unknown_type.lain"
 OUT_DIR = ROOT / "build/core-bootstrap-execution"
 OUT_L1 = OUT_DIR / "build_const_return_fn.l1"
 L1I = OUT_DIR / ("l1i.exe" if os.name == "nt" else "l1i")
@@ -106,6 +107,20 @@ def main() -> int:
         print(f"FAIL unexpected undeclared-call diagnostic: {undeclared_diagnostic}")
         return 1
 
+    unknown_type_out = OUT_DIR / "unknown_type.l1"
+    unknown_type_out.unlink(missing_ok=True)
+    unknown_type = run([
+        str(compiler), "--bootstrap-emit-l1",
+        str(UNKNOWN_TYPE), str(unknown_type_out),
+    ])
+    unknown_type_diagnostic = (unknown_type.stderr or unknown_type.stdout).strip()
+    if unknown_type.returncode == 0 or unknown_type_out.exists():
+        print("FAIL bootstrap compiler defaulted an unknown type to i32")
+        return 1
+    if "unknown type" not in unknown_type_diagnostic:
+        print(f"FAIL unexpected unknown-type diagnostic: {unknown_type_diagnostic}")
+        return 1
+
     legacy = run([str(L1I), "tests/l1/001_add.l1", "add", "40", "2"])
     if legacy.returncode != 0 or legacy.stdout.strip() != "42":
         detail = (legacy.stderr or legacy.stdout).strip()
@@ -113,7 +128,7 @@ def main() -> int:
         return 1
 
     print(
-        "PASS structured LAIN-IR execution, explicit extern contracts, "
+        "PASS structured LAIN-IR execution, strict bootstrap type/extern contracts, "
         "and legacy labeled input compatibility"
     )
     return 0

@@ -224,6 +224,15 @@ partial output unit. Foreign procedures must enter through an explicit
 `@foreign` declaration whose Lain-owned lowering supplies the complete
 physical signature and link name.
 
+The remaining stage-0 type bridge is strict as well. It accepts only the
+bootstrap compiler's known scalar atoms; standard-library aliases such as
+`CStr` and `opaque` are not physical L1 type names, and an unknown name cannot
+default to `i32`. Until serialized module artifacts carry transitive nominal
+signature dependencies, compiler modules state those dependencies explicitly
+and in topological import order (`types` before `compiler_context` before
+`modules`). M21 is expected to derive and persist this edge set instead of
+requiring the temporary source-level ordering discipline.
+
 The current stage-2 language boundary is deliberate: it covers the compiler's
 self-hosting subset, not every form handled by the stage-0 Scheme reference.
 Legacy compatibility tests therefore invoke `--bootstrap-emit-l1` explicitly;

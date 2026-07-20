@@ -12,6 +12,7 @@
 #include "lainir/lainir.h"
 #include "compiler/builder_ffi.h"
 #include "compiler/vm_compat.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -113,11 +114,15 @@ static sexp sexp_type_registered(sexp ctx, sexp self, sexp_sint_t n,
              strcmp(name, "usize") == 0) {
     ty->kind = TY_BITS;
     ty->width = 64;
-  } else if (strcmp(name, "addr") == 0 || strcmp(name, "opaque") == 0 || strcmp(name, "CStr") == 0) {
+  } else if (strcmp(name, "addr") == 0) {
     ty->kind = TY_ADDR;
   } else {
-    ty->kind = TY_BITS;
-    ty->width = 32;
+    char message[256];
+    free(ty);
+    snprintf(message, sizeof(message),
+             "type.registered-raw: unknown bootstrap type `%s`", name);
+    vm_raise_user_exception((vm_context *)ctx, message);
+    return self;
   }
   return sexp_make_cpointer(ctx, SEXP_CPOINTER, ty, SEXP_FALSE, 0);
 }

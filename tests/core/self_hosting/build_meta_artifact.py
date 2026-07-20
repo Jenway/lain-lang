@@ -177,7 +177,9 @@ def tool(name: str) -> Path:
 def run(args: list[str]) -> None:
     result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True)
     if result.returncode:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+        command = " ".join(str(arg) for arg in args)
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"command failed: {command}\n{detail}")
 
 
 def input_fingerprint(source: Path) -> str:
