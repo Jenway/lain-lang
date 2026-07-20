@@ -784,7 +784,106 @@ let syntax_if_statement_body = std::func(node: i32) -> i32 { return ast_node_rig
 
 @export
 
+let syntax_is_match = std::func(node: i32) -> i32 {
+    if syntax_is_juxt(node) != 1 { return 0; }
+    if syntax_kind(syntax_right(node)) != 4 { return 0; }
+    let with_target: i32 = syntax_left(node);
+    if syntax_is_juxt(with_target) != 1 { return 0; }
+    let prefix: i32 = syntax_left(with_target);
+    if syntax_is_atom_text(prefix, "match") == 1 { return 1; }
+    if syntax_is_juxt(prefix) != 1 { return 0; }
+    if syntax_is_atom_text(syntax_left(prefix), "return") != 1 {
+        return 0;
+    }
+    return syntax_is_atom_text(syntax_right(prefix), "match");
+}
+
+@export
+let syntax_match_has_return_prefix = std::func(node: i32) -> i32 {
+    if syntax_is_match(node) != 1 { return 0; }
+    return syntax_is_juxt(syntax_left(syntax_left(node)));
+}
+
+@export
+let syntax_match_target = std::func(node: i32) -> i32 {
+    return syntax_right(syntax_left(node));
+}
+
+@export
+let syntax_match_first_arm = std::func(node: i32) -> i32 {
+    return syntax_left(syntax_right(node));
+}
+
+@export
+let syntax_match_arm_is_valid_shape = std::func(arm: i32) -> i32 {
+    return syntax_is_infix(arm, "=>");
+}
+
+@export
+let syntax_match_arm_pattern = std::func(arm: i32) -> i32 {
+    return syntax_left(arm);
+}
+
+@export
+let syntax_match_arm_value = std::func(arm: i32) -> i32 {
+    return syntax_right(arm);
+}
+
+@export
+let syntax_match_pattern_is_wildcard = std::func(pattern: i32) -> i32 {
+    return syntax_is_atom_text(pattern, "_");
+}
+
+@export
+let syntax_enum_reference_is_payload = std::func(node: i32) -> i32 {
+    if syntax_is_infix(node, ".") != 1 { return 0; }
+    let member: i32 = syntax_right(node);
+    if syntax_kind(member) != 3 { return 0; }
+    if syntax_is_atom_text(syntax_op(member), "(") != 1 { return 0; }
+    return syntax_is_identifier(syntax_left(member));
+}
+
+@export
+let syntax_is_enum_reference = std::func(node: i32) -> i32 {
+    if syntax_is_infix(node, ".") != 1 { return 0; }
+    let enum_type: i32 = syntax_left(node);
+    if syntax_is_call(enum_type) != 1 { return 0; }
+    if syntax_call_namespace(enum_type) != 0 { return 0; }
+    if syntax_is_identifier(syntax_call_callee(enum_type)) != 1 {
+        return 0;
+    }
+    if syntax_arg_count(syntax_call_first_arg(enum_type)) != 1 {
+        return 0;
+    }
+    let member: i32 = syntax_right(node);
+    if syntax_is_identifier(member) == 1 { return 1; }
+    return syntax_enum_reference_is_payload(node);
+}
+
+@export
+let syntax_enum_reference_type = std::func(node: i32) -> i32 {
+    return syntax_left(node);
+}
+
+@export
+let syntax_enum_reference_name_node = std::func(node: i32) -> i32 {
+    let member: i32 = syntax_right(node);
+    if syntax_is_identifier(member) == 1 { return member; }
+    return syntax_left(member);
+}
+
+@export
+let syntax_enum_reference_payload = std::func(node: i32) -> i32 {
+    if syntax_enum_reference_is_payload(node) != 1 { return 0; }
+    return syntax_left(syntax_right(syntax_right(node)));
+}
+
+@export
+
 let syntax_is_return = std::func(node: i32) -> i32 {
+    if syntax_is_match(node) == 1 {
+        return syntax_match_has_return_prefix(node);
+    }
     if syntax_is_juxt(node) != 1 { return 0; }
     let head: i32 = ast_node_left(node);
     if syntax_is_atom_text(head, "return") == 1 { return 1; }
@@ -798,6 +897,7 @@ let syntax_is_return = std::func(node: i32) -> i32 {
 }
 @export
 let syntax_return_expr = std::func(node: i32) -> i32 {
+    if syntax_is_match(node) == 1 { return node; }
     let head: i32 = ast_node_left(node);
     if syntax_is_atom_text(head, "return") == 1 {
         return ast_node_right(node);
@@ -968,9 +1068,11 @@ let syntax_if_else_expr = std::func(node: i32) -> i32 {
 
 // Semantic expression tags: 1=i32, 2=name, 3=add, 4=call, 5=eq, 6=if,
 // 7=string, 8=ne, 9=qualified module call, 19=macro invocation,
-// 20=interface/type-owned call.
+// 20=interface/type-owned call, 21=enum variant reference, 22=match.
 @export
 let syntax_expr_tag = std::func(node: i32) -> i32 {
+    if syntax_is_match(node) == 1 { return 22; }
+    if syntax_is_enum_reference(node) == 1 { return 21; }
     if syntax_is_i32_atom(node) == 1 { return 1; }
     if syntax_is_string_atom(node) == 1 { return 7; }
     if syntax_is_identifier(node) == 1 { return 2; }

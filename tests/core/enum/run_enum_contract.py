@@ -79,9 +79,16 @@ def main() -> int:
     cases = (
         ("generic enum definition", "definition.lain", None),
         ("specialized enum TypeValue", "specialized_type.lain", None),
+        ("constructor and exhaustive match", "constructor_match.lain", None),
         ("malformed type parameter", "malformed_parameter.lain", "error 3001"),
         ("duplicate variant", "duplicate_variant.lain", "error 3002"),
         ("invalid payload", "invalid_payload.lain", "error 3003"),
+        ("match target must be enum", "match_non_enum.lain", "error 3010"),
+        ("unknown match variant", "match_unknown_variant.lain", "error 3011"),
+        ("duplicate match variant", "match_duplicate_variant.lain", "error 3011"),
+        ("non-exhaustive match", "match_non_exhaustive.lain", "error 3012"),
+        ("unreachable match arm", "match_unreachable_arm.lain", "error 3013"),
+        ("match arm type mismatch", "match_type_mismatch.lain", "error 3014"),
     )
     failed = 0
     for label, source, error in cases:

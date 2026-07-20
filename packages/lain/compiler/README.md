@@ -178,7 +178,7 @@ whole compiler artifact.
 it with `l1check`, and installs it beside `lainc` as
 `zig-out/bin/stage2_compiler.l1`.  Generation is keyed by a SHA-256 input and
 output stamp; an unchanged build verifies the artifact without recompiling the
-16-module closure.
+17-module closure.
 
 The normal CLI loads that artifact and sends both single-file and workspace
 builds through one owned request/result ABI:
@@ -259,12 +259,23 @@ payloads); it deliberately does not deep-scan every RawAst expression.
 
 The deterministic physical layout is a minimal tag followed by aligned maximum
 payload storage. For `Option(i32)` the contract is one tag bit, payload offset
-4, total size 8 and alignment 4. Constructor and `match` lowering will consume
-this contract; LAIN-IR itself gains no enum, variant, pattern or CFG-label
-concept.
+4, total size 8 and alignment 4. Variant constructors allocate that layout,
+store the tag and optional payload, and materialize the nominal value as its
+physical address. Exhaustive `match` reads the tag, emits structured
+conditionals, and loads a bound single payload from the same layout. LAIN-IR
+itself gains no enum, variant, pattern or CFG-label concept.
+
+The first match slice supports zero- or one-payload variants, a direct payload
+identifier, `_` as the final arm, exhaustive coverage, and a common arm
+`TypeId`. Pattern guards, nested destructuring and general arm-local binding
+expressions remain later elaborator work.
 
 Diagnostics `3001`-`3003` cover malformed declarations, duplicate variants and
-invalid payload shapes. The core enum suite executes the layout contract inside
-the real compiler artifact with the normal capability allowlist. The launcher
-offers `--artifact <path> --artifact-run <zero-argument-entry>` for these
+invalid payload shapes. Diagnostics `3010`-`3014` cover a non-enum target,
+unknown or duplicate variants, non-exhaustive matches, unreachable arms and arm
+type disagreement. The core enum suite compiles and executes
+`Option(i32).Some(42)` through an exhaustive match, and executes the layout
+contract inside the real compiler artifact with the normal capability
+allowlist. The launcher offers
+`--artifact <path> --artifact-run <zero-argument-entry>` for these
 artifact-level executable contracts.

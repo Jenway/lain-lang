@@ -314,6 +314,7 @@ static uint32_t structured_object_id(
 static L1Type *structured_type(StructuredUnit *unit, uint32_t tag) {
   L1TypeKind kind = TY_BITS;
   uint32_t width = 32;
+  if (tag >= 101 && tag <= 132) width = tag - 100;
   if (tag == 2) width = 1;
   if (tag == 3) { kind = TY_ADDR; width = 64; }
   if (tag == 4) { kind = TY_UNIT; width = 0; }

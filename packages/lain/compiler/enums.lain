@@ -299,6 +299,64 @@ let enum_variant_count = std::func(variant: i32) -> i32 {
     return 1 + enum_variant_count(syntax_next(variant));
 }
 
+@export
+let enum_declaration_variant_count = std::func(
+    declaration: i32) -> i32 {
+    return enum_variant_count(syntax_enum_first_variant(declaration));
+}
+
+@export
+let enum_find_variant = std::func(
+    variant: i32, name_node: i32) -> i32 {
+    if variant == 0 { return 0; }
+    if enum_is_separator(variant) == 1 {
+        return enum_find_variant(syntax_next(variant), name_node);
+    }
+    let candidate: i32 = syntax_enum_variant_name_node(variant);
+    if candidate != 0 {
+        if syntax_text_equal(
+            syntax_text(candidate), syntax_text(name_node)) == 1 {
+            return variant;
+        }
+    }
+    return enum_find_variant(syntax_next(variant), name_node);
+}
+
+let enum_variant_index_from = std::func(
+    variant: i32, target: i32, index: i32) -> i32 {
+    if variant == 0 { return -1; }
+    if enum_is_separator(variant) == 1 {
+        return enum_variant_index_from(
+            syntax_next(variant), target, index);
+    }
+    if variant == target { return index; }
+    return enum_variant_index_from(
+        syntax_next(variant), target, index + 1);
+}
+
+@export
+let enum_variant_index = std::func(
+    declaration: i32, variant: i32) -> i32 {
+    return enum_variant_index_from(
+        syntax_enum_first_variant(declaration), variant, 0);
+}
+
+@export
+let enum_concrete_payload_type = std::func(
+    declaration: i32, variant: i32, enum_type: i32) -> i32 {
+    let payload: i32 = syntax_enum_variant_payload(variant);
+    if payload == 0 { return 0; }
+    let param: i32 = syntax_enum_first_param(declaration);
+    if param == 0 { return payload; }
+    if syntax_is_identifier(payload) != 1 { return payload; }
+    if syntax_text_equal(
+        syntax_text(payload),
+        syntax_text(syntax_param_name_node(param))) != 1 {
+        return payload;
+    }
+    return syntax_call_first_arg(enum_type);
+}
+
 let enum_tag_bits_for_count = std::func(count: i32) -> i32 {
     if count <= 2 { return 1; }
     if count <= 4 { return 2; }
@@ -306,6 +364,100 @@ let enum_tag_bits_for_count = std::func(count: i32) -> i32 {
     if count <= 256 { return 8; }
     if count <= 65536 { return 16; }
     return 32;
+}
+
+@export
+let enum_tag_type_tag = std::func(tag_bits: i32) -> i32 {
+    return 100 + tag_bits;
+}
+
+let enum_syntax_type_size = std::func(type_node: i32) -> i32 {
+    if syntax_is_atom_text(type_node, "i32") == 1 { return 4; }
+    if syntax_is_atom_text(type_node, "bool") == 1 { return 4; }
+    if syntax_is_atom_text(type_node, "addr") == 1 { return 8; }
+    return 8;
+}
+
+let enum_syntax_type_align = std::func(type_node: i32) -> i32 {
+    if syntax_is_atom_text(type_node, "addr") == 1 { return 8; }
+    if syntax_is_call(type_node) == 1 { return 8; }
+    if syntax_is_identifier(type_node) == 1 {
+        if syntax_is_atom_text(type_node, "i32") != 1 {
+            if syntax_is_atom_text(type_node, "bool") != 1 {
+                return 8;
+            }
+        }
+    }
+    return 4;
+}
+
+let enum_syntax_max_payload_size = std::func(
+    declaration: i32, enum_type: i32,
+    variant: i32, maximum: i32) -> i32 {
+    if variant == 0 { return maximum; }
+    if enum_is_separator(variant) == 1 {
+        return enum_syntax_max_payload_size(
+            declaration, enum_type, syntax_next(variant), maximum);
+    }
+    if syntax_enum_variant_is_payload(variant) != 1 {
+        return enum_syntax_max_payload_size(
+            declaration, enum_type, syntax_next(variant), maximum);
+    }
+    let size: i32 = enum_syntax_type_size(
+        enum_concrete_payload_type(declaration, variant, enum_type));
+    if size > maximum {
+        return enum_syntax_max_payload_size(
+            declaration, enum_type, syntax_next(variant), size);
+    }
+    return enum_syntax_max_payload_size(
+        declaration, enum_type, syntax_next(variant), maximum);
+}
+
+let enum_syntax_max_payload_align = std::func(
+    declaration: i32, enum_type: i32,
+    variant: i32, maximum: i32) -> i32 {
+    if variant == 0 { return maximum; }
+    if enum_is_separator(variant) == 1 {
+        return enum_syntax_max_payload_align(
+            declaration, enum_type, syntax_next(variant), maximum);
+    }
+    if syntax_enum_variant_is_payload(variant) != 1 {
+        return enum_syntax_max_payload_align(
+            declaration, enum_type, syntax_next(variant), maximum);
+    }
+    let align: i32 = enum_syntax_type_align(
+        enum_concrete_payload_type(declaration, variant, enum_type));
+    if align > maximum {
+        return enum_syntax_max_payload_align(
+            declaration, enum_type, syntax_next(variant), align);
+    }
+    return enum_syntax_max_payload_align(
+        declaration, enum_type, syntax_next(variant), maximum);
+}
+
+@export
+let enum_layout_for_type_syntax = std::func(
+    declaration: i32, enum_type: i32) -> EnumLayout {
+    let first: i32 = syntax_enum_first_variant(declaration);
+    let count: i32 = enum_variant_count(first);
+    let payload_size: i32 = enum_syntax_max_payload_size(
+        declaration, enum_type, first, 0);
+    let payload_align: i32 = enum_syntax_max_payload_align(
+        declaration, enum_type, first, 1);
+    if payload_size == 0 {
+        return EnumLayout {
+            tag_bits: enum_tag_bits_for_count(count),
+            payload_size: 0, payload_align: 1,
+            payload_offset: 0, size: 1, align: 1, ok: 1,
+        };
+    }
+    let total_size: i32 = payload_align + payload_size;
+    return EnumLayout {
+        tag_bits: enum_tag_bits_for_count(count),
+        payload_size: payload_size, payload_align: payload_align,
+        payload_offset: payload_align, size: total_size,
+        align: payload_align, ok: 1,
+    };
 }
 
 let enum_physical_size = std::func(type_id: i32) -> i32 {
