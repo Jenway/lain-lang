@@ -19,6 +19,8 @@ let M13ElaborationIndex: type = std::struct {
     functions: M11SymbolTable,
     types: M11SymbolTable,
     duplicate: i32,
+    arm_binding: i32,
+    arm_binding_type: i32,
 }
 
 let m13_index_callable = std::func(
@@ -34,6 +36,8 @@ let m13_index_callable = std::func(
             M13ElaborationIndex {
                 functions: index.functions, duplicate: 1,
                 types: index.types,
+                arm_binding: index.arm_binding,
+                arm_binding_type: index.arm_binding_type,
             });
     }
     return m13_index_callable(
@@ -43,6 +47,8 @@ let m13_index_callable = std::func(
                 index.functions, name_node, function),
             types: index.types,
             duplicate: duplicate,
+            arm_binding: index.arm_binding,
+            arm_binding_type: index.arm_binding_type,
         });
 }
 
@@ -67,6 +73,8 @@ let m13_index_types = std::func(
                 M13ElaborationIndex {
                     functions: index.functions, types: index.types,
                     duplicate: 1,
+                    arm_binding: index.arm_binding,
+                    arm_binding_type: index.arm_binding_type,
                 });
         }
         return m13_index_types(
@@ -76,6 +84,8 @@ let m13_index_types = std::func(
                 types: m11_symbol_table_insert_node(
                     index.types, name_node, item),
                 duplicate: index.duplicate,
+                arm_binding: index.arm_binding,
+                arm_binding_type: index.arm_binding_type,
             });
     }
     return m13_index_types(surface_next_item(item), index);
@@ -87,6 +97,7 @@ let m13_index_new = std::func(root: i32) -> M13ElaborationIndex {
         M13ElaborationIndex {
             functions: m11_symbol_table_new(),
             types: m11_symbol_table_new(), duplicate: 0,
+            arm_binding: 0, arm_binding_type: 0,
         });
     return m13_index_types(surface_first_item(root), callables);
 }
@@ -615,24 +626,36 @@ let m13_match_arm_binding = std::func(
     return syntax_enum_reference_payload(pattern);
 }
 
+let m13_match_arm_index = std::func(
+    index: M13ElaborationIndex, arm: i32) -> M13ElaborationIndex {
+    let binding: i32 = m13_match_arm_binding(index, arm);
+    if binding == 0 { return index; }
+    let pattern: i32 = syntax_match_arm_pattern(arm);
+    let declaration: i32 = m13_enum_declaration(
+        index, syntax_enum_reference_type(pattern));
+    let variant: i32 = m13_enum_reference_variant(index, pattern);
+    return M13ElaborationIndex {
+        functions: index.functions, types: index.types,
+        duplicate: index.duplicate,
+        arm_binding: binding,
+        arm_binding_type: enum_concrete_payload_type(
+            declaration, variant, syntax_enum_reference_type(pattern)),
+    };
+}
+
+@export
+let elaborator_match_arm_index = std::func(
+    index: M13ElaborationIndex, arm: i32) -> M13ElaborationIndex {
+    return m13_match_arm_index(index, arm);
+}
+
 let m13_match_arm_type_node = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     arm: i32, body_start: i32, stop: i32) -> i32 {
     let value: i32 = syntax_match_arm_value(arm);
-    let binding: i32 = m13_match_arm_binding(index, arm);
-    if binding != 0 {
-        if syntax_identifier_equal(binding, value) == 1 {
-            let pattern: i32 = syntax_match_arm_pattern(arm);
-            let declaration: i32 = m13_enum_declaration(
-                index, syntax_enum_reference_type(pattern));
-            let variant: i32 = m13_enum_reference_variant(index, pattern);
-            return enum_concrete_payload_type(
-                declaration, variant,
-                syntax_enum_reference_type(pattern));
-        }
-    }
+    let arm_index: M13ElaborationIndex = m13_match_arm_index(index, arm);
     return m13_expr_type_node(
-        index, root, function, value, body_start, stop);
+        arm_index, root, function, value, body_start, stop);
 }
 
 let m13_match_result_type_node = std::func(
@@ -641,6 +664,24 @@ let m13_match_result_type_node = std::func(
     let arm: i32 = syntax_match_first_arm(match_node);
     if arm == 0 { return 0; }
     return m13_match_arm_type_node(
+        index, root, function, arm, body_start, stop);
+}
+
+let m13_match_arm_type = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    arm: i32, body_start: i32, stop: i32) -> i32 {
+    let arm_index: M13ElaborationIndex = m13_match_arm_index(index, arm);
+    return elaborator_expr_type_indexed_impl(
+        arm_index, root, function, syntax_match_arm_value(arm),
+        body_start, stop);
+}
+
+let m13_match_result_type = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    match_node: i32, body_start: i32, stop: i32) -> i32 {
+    let arm: i32 = syntax_match_first_arm(match_node);
+    if arm == 0 { return type_error(); }
+    return m13_match_arm_type(
         index, root, function, arm, body_start, stop);
 }
 
@@ -657,6 +698,11 @@ let m13_expr_type_node = std::func(
             index, root, function, node, body_start, stop);
     }
     if tag == 2 {
+        if index.arm_binding != 0 {
+            if syntax_identifier_equal(index.arm_binding, node) == 1 {
+                return index.arm_binding_type;
+            }
+        }
         let local: i32 = surface_find_visible_local_node(
             function, stop, node);
         if local != 0 {
@@ -698,6 +744,11 @@ let elaborator_expr_type_node_indexed = std::func(
 let elaborator_name_type = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     body_start: i32, stop: i32, reference: i32) -> i32 {
+    if index.arm_binding != 0 {
+        if syntax_identifier_equal(index.arm_binding, reference) == 1 {
+            return type_from_syntax(index.arm_binding_type);
+        }
+    }
     let local: i32 = surface_find_visible_local_node(
         function, stop, reference);
     if local != 0 {
@@ -815,8 +866,8 @@ let elaborator_expr_type_indexed_impl = std::func(index: M13ElaborationIndex, ro
     if tag == 10 { return type_addr(); }
     if tag == 21 { return type_addr(); }
     if tag == 22 {
-        return type_from_syntax(m13_match_result_type_node(
-            index, root, function, node, body_start, stop));
+        return m13_match_result_type(
+            index, root, function, node, body_start, stop);
     }
     if tag == 11 {
         return type_from_syntax(m13_expr_type_node(
@@ -1127,22 +1178,12 @@ let elaborator_validate_match_arms = std::func(
     result_type: i32) -> i32 {
     if arm == 0 { return 0; }
     let value: i32 = syntax_match_arm_value(arm);
-    let binding: i32 = m13_match_arm_binding(index, arm);
-    if binding == 0 {
-        let code: i32 = elaborator_validate_expr(
-            index, root, function, value, body_start, stop);
-        if code != 0 { return code; }
-    }
-    if binding != 0 {
-        if syntax_identifier_equal(binding, value) != 1 {
-            let code: i32 = elaborator_validate_expr(
-                index, root, function, value, body_start, stop);
-            if code != 0 { return code; }
-        }
-    }
-    let arm_type_node: i32 = m13_match_arm_type_node(
+    let arm_index: M13ElaborationIndex = m13_match_arm_index(index, arm);
+    let code: i32 = elaborator_validate_expr(
+        arm_index, root, function, value, body_start, stop);
+    if code != 0 { return code; }
+    let arm_type: i32 = m13_match_arm_type(
         index, root, function, arm, body_start, stop);
-    let arm_type: i32 = type_from_syntax(arm_type_node);
     if arm_type == type_error() { return 3014; }
     if result_type != 0 {
         if type_same(result_type, arm_type) != 1 { return 3014; }
@@ -1221,6 +1262,11 @@ let elaborator_validate_expr = std::func(index: M13ElaborationIndex, root: i32, 
             index, root, function, syntax_left(node), body_start, stop);
     }
     if tag == 2 {
+        if index.arm_binding != 0 {
+            if syntax_identifier_equal(index.arm_binding, node) == 1 {
+                return 0;
+            }
+        }
         if elaborator_name_visible_node_impl(
             function, body_start, stop, node) == 1 { return 0; }
         return 2003;

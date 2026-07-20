@@ -457,6 +457,11 @@ let lower_plain_name = std::func(
     let type_tag: i32 = elaborator_expr_type_indexed(
         index, root, function, node, body_start, stop);
     let name: addr = syntax_identifier_link_name(node);
+    if index.arm_binding != 0 {
+        if syntax_identifier_equal(index.arm_binding, node) == 1 {
+            return l1_unit_builder_var(unit, name, type_tag);
+        }
+    }
     if elaborator_name_node_is_local(function, stop, node) == 1 {
         return l1_unit_builder_var(unit, name, type_tag);
     }
@@ -1005,6 +1010,11 @@ let lower_plain_expr = std::func(
             index, root, function, unit, block,
             node, body_start, stop);
     }
+    if tag == 22 {
+        return lower_plain_match_value(
+            index, root, function, unit, block,
+            node, body_start, stop);
+    }
     if tag == 11 {
         let base: i32 = lower_plain_expr(
             index, root, function, unit, block,
@@ -1182,34 +1192,39 @@ let lower_plain_match_next_arm = std::func(arm: i32) -> i32 {
     return next;
 }
 
-let lower_plain_match_arm_value = std::func(
+let lower_plain_match_bind_payload = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     unit: i32, block: i32, arm: i32, target_name: addr,
     declaration: i32, enum_type: i32,
     body_start: i32, stop: i32) -> i32 {
     let pattern: i32 = syntax_match_arm_pattern(arm);
-    let value: i32 = syntax_match_arm_value(arm);
-    if syntax_match_pattern_is_wildcard(pattern) != 1 {
-        let variant: i32 = elaborator_enum_reference_variant(
-            index, pattern);
-        let binding: i32 = syntax_enum_reference_payload(pattern);
-        if binding != 0 {
-            if syntax_identifier_equal(binding, value) == 1 {
-                let layout: EnumLayout = enum_layout_for_type_syntax(
-                    declaration, enum_type);
-                let address: i32 = l1_unit_builder_lea(
-                    unit, l1_unit_builder_var(unit, target_name, 3),
-                    layout.payload_offset);
-                return l1_unit_builder_load(
-                    unit, address,
-                    lower_type_from_syntax(enum_concrete_payload_type(
-                        declaration, variant, enum_type)));
-            }
-        }
-    }
+    if syntax_match_pattern_is_wildcard(pattern) == 1 { return 1; }
+    let binding: i32 = syntax_enum_reference_payload(pattern);
+    if binding == 0 { return 1; }
+    let variant: i32 = elaborator_enum_reference_variant(index, pattern);
+    let layout: EnumLayout = enum_layout_for_type_syntax(
+        declaration, enum_type);
+    let payload_type: i32 = lower_type_from_syntax(
+        enum_concrete_payload_type(declaration, variant, enum_type));
+    let address: i32 = l1_unit_builder_lea(
+        unit, l1_unit_builder_var(unit, target_name, 3),
+        layout.payload_offset);
+    let payload: i32 = l1_unit_builder_load(
+        unit, address, payload_type);
+    return l1_unit_builder_block_let(
+        unit, block, syntax_identifier_link_name(binding),
+        payload_type, payload);
+}
+
+let lower_plain_match_arm_value = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, block: i32, arm: i32,
+    body_start: i32, stop: i32) -> i32 {
+    let arm_index: M13ElaborationIndex = elaborator_match_arm_index(
+        index, arm);
     return lower_plain_expr(
-        index, root, function, unit, block,
-        value, body_start, stop);
+        arm_index, root, function, unit, block,
+        syntax_match_arm_value(arm), body_start, stop);
 }
 
 let lower_plain_match_arms = std::func(
@@ -1219,25 +1234,35 @@ let lower_plain_match_arms = std::func(
     declaration: i32, enum_type: i32,
     body_start: i32, stop: i32) -> i32 {
     if arm == 0 { return 0; }
-    let value: i32 = lower_plain_match_arm_value(
-        index, root, function, unit, block, arm, target_name,
-        declaration, enum_type, body_start, stop);
-    if value == 0 { return 0; }
     let next: i32 = lower_plain_match_next_arm(arm);
     if next == 0 {
+        if lower_plain_match_bind_payload(
+            index, root, function, unit, block, arm, target_name,
+            declaration, enum_type, body_start, stop) != 1 { return 0; }
+        let value: i32 = lower_plain_match_arm_value(
+            index, root, function, unit, block, arm,
+            body_start, stop);
+        if value == 0 { return 0; }
         return l1_unit_builder_return(unit, procedure, value);
     }
     let pattern: i32 = syntax_match_arm_pattern(arm);
-    if syntax_match_pattern_is_wildcard(pattern) == 1 {
-        return l1_unit_builder_return(unit, procedure, value);
-    }
     let variant: i32 = elaborator_enum_reference_variant(index, pattern);
     let condition: i32 = l1_unit_builder_eq(
         unit, l1_unit_builder_var(unit, tag_name, tag_type),
         l1_unit_builder_i32(
             unit, enum_variant_index(declaration, variant)));
-    if l1_unit_builder_if_return_then(
-        unit, procedure, condition, value) != 1 { return 0; }
+    let then_block: i32 = l1_unit_builder_block_if(
+        unit, block, condition);
+    if then_block == 0 { return 0; }
+    if lower_plain_match_bind_payload(
+        index, root, function, unit, then_block, arm, target_name,
+        declaration, enum_type, body_start, stop) != 1 { return 0; }
+    let value: i32 = lower_plain_match_arm_value(
+        index, root, function, unit, then_block, arm,
+        body_start, stop);
+    if value == 0 { return 0; }
+    if l1_unit_builder_block_return(
+        unit, then_block, value) != 1 { return 0; }
     return lower_plain_match_arms(
         index, root, function, unit, procedure, block,
         next, target_name, tag_name, tag_type, declaration, enum_type,
@@ -1277,6 +1302,116 @@ let lower_plain_match_return = std::func(
         syntax_match_first_arm(node), target_name, tag_name,
         enum_tag_type_tag(layout.tag_bits),
         declaration, enum_type, body_start, stop);
+}
+
+let lower_plain_type_size = std::func(type_tag: i32) -> i32 {
+    if type_tag == 1 { return 4; }
+    if type_tag == 2 { return 4; }
+    if type_tag == 3 { return 8; }
+    return 0;
+}
+
+let lower_plain_match_store_arm = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, block: i32, arm: i32,
+    target_name: addr, result_name: addr, result_type: i32,
+    declaration: i32, enum_type: i32,
+    body_start: i32, stop: i32) -> i32 {
+    if lower_plain_match_bind_payload(
+        index, root, function, unit, block, arm, target_name,
+        declaration, enum_type, body_start, stop) != 1 { return 0; }
+    let value: i32 = lower_plain_match_arm_value(
+        index, root, function, unit, block, arm,
+        body_start, stop);
+    if value == 0 { return 0; }
+    return l1_unit_builder_block_store(
+        unit, block,
+        l1_unit_builder_var(unit, result_name, 3),
+        value, result_type);
+}
+
+let lower_plain_match_value_arms = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, block: i32, arm: i32,
+    target_name: addr, tag_name: addr, tag_type: i32,
+    result_name: addr, result_type: i32,
+    declaration: i32, enum_type: i32,
+    body_start: i32, stop: i32) -> i32 {
+    if arm == 0 { return 0; }
+    let next: i32 = lower_plain_match_next_arm(arm);
+    if next == 0 {
+        return lower_plain_match_store_arm(
+            index, root, function, unit, block, arm,
+            target_name, result_name, result_type,
+            declaration, enum_type, body_start, stop);
+    }
+    let pattern: i32 = syntax_match_arm_pattern(arm);
+    let variant: i32 = elaborator_enum_reference_variant(index, pattern);
+    let condition: i32 = l1_unit_builder_eq(
+        unit, l1_unit_builder_var(unit, tag_name, tag_type),
+        l1_unit_builder_i32(
+            unit, enum_variant_index(declaration, variant)));
+    let then_block: i32 = l1_unit_builder_block_if(
+        unit, block, condition);
+    if then_block == 0 { return 0; }
+    let else_block: i32 = l1_unit_builder_block_else(
+        unit, then_block);
+    if else_block == 0 { return 0; }
+    if lower_plain_match_store_arm(
+        index, root, function, unit, then_block, arm,
+        target_name, result_name, result_type,
+        declaration, enum_type, body_start, stop) != 1 { return 0; }
+    return lower_plain_match_value_arms(
+        index, root, function, unit, else_block, next,
+        target_name, tag_name, tag_type,
+        result_name, result_type, declaration, enum_type,
+        body_start, stop);
+}
+
+let lower_plain_match_value = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, block: i32, node: i32,
+    body_start: i32, stop: i32) -> i32 {
+    let target_node: i32 = syntax_match_target(node);
+    let enum_type: i32 = elaborator_expr_type_node_indexed(
+        index, root, function, target_node, body_start, stop);
+    let declaration: i32 = elaborator_enum_declaration(index, enum_type);
+    if declaration == 0 { return 0; }
+    let target: i32 = lower_plain_expr(
+        index, root, function, unit, block,
+        target_node, body_start, stop);
+    if target == 0 { return 0; }
+    let target_name: addr = string_append(
+        "__match_target_", syntax_i32_text(node));
+    if l1_unit_builder_block_let(
+        unit, block, target_name, 3, target) != 1 { return 0; }
+    let layout: EnumLayout = enum_layout_for_type_syntax(
+        declaration, enum_type);
+    let tag_type: i32 = enum_tag_type_tag(layout.tag_bits);
+    let tag: i32 = l1_unit_builder_load(
+        unit, l1_unit_builder_var(unit, target_name, 3), tag_type);
+    if tag == 0 { return 0; }
+    let tag_name: addr = string_append(
+        "__match_tag_", syntax_i32_text(node));
+    if l1_unit_builder_block_let(
+        unit, block, tag_name, tag_type, tag) != 1 { return 0; }
+    let result_type: i32 = elaborator_expr_type_indexed(
+        index, root, function, node, body_start, stop);
+    let result_size: i32 = lower_plain_type_size(result_type);
+    if result_size == 0 { return 0; }
+    let result_name: addr = string_append(
+        "__match_result_", syntax_i32_text(node));
+    if l1_unit_builder_block_let(
+        unit, block, result_name, 3,
+        l1_unit_builder_alloca(unit, result_size)) != 1 { return 0; }
+    if lower_plain_match_value_arms(
+        index, root, function, unit, block,
+        syntax_match_first_arm(node),
+        target_name, tag_name, tag_type,
+        result_name, result_type, declaration, enum_type,
+        body_start, stop) != 1 { return 0; }
+    return l1_unit_builder_load(
+        unit, l1_unit_builder_var(unit, result_name, 3), result_type);
 }
 
 let lower_plain_body = std::func(

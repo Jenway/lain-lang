@@ -265,10 +265,18 @@ physical address. Exhaustive `match` reads the tag, emits structured
 conditionals, and loads a bound single payload from the same layout. LAIN-IR
 itself gains no enum, variant, pattern or CFG-label concept.
 
-The first match slice supports zero- or one-payload variants, a direct payload
-identifier, `_` as the final arm, exhaustive coverage, and a common arm
-`TypeId`. Pattern guards, nested destructuring and general arm-local binding
-expressions remain later elaborator work.
+The match elaborator supports zero- or one-payload variants, an arm-local
+payload identifier, `_` as the final arm, exhaustive coverage, and a common
+arm `TypeId`. Payload bindings participate in normal expression validation and
+lowering, so an arm may use forms such as `value + fallback` without exposing
+`value` to another arm. Pattern guards and nested destructuring remain later
+elaborator work.
+
+`match` may be returned directly or used as a local initializer. Value matches
+allocate a result slot and lower to nested structured `if`/`else` regions whose
+selected arm stores the result before the common load. The physical builder
+only exposes block construction; enum and pattern policy remains entirely in
+the Lain-owned elaborator and lowerer.
 
 Diagnostics `3001`-`3003` cover malformed declarations, duplicate variants and
 invalid payload shapes. Diagnostics `3010`-`3014` cover a non-enum target,

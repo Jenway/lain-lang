@@ -115,6 +115,7 @@ EXPECTED_HOST_CAPABILITIES = {
     "l1.proc-if-return!",
     "l1.proc-if-return-then!",
     "l1.block-if!",
+    "l1.block-else!",
     "l1.block-let!",
     "l1.block-return!",
     "l1.block-call!",

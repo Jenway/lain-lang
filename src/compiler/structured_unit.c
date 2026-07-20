@@ -718,6 +718,34 @@ static sexp structured_block_if(
   return sexp_make_fixnum(block_id);
 }
 
+static sexp structured_block_else(
+    sexp ctx, sexp self, sexp_sint_t n, sexp then_block_value) {
+  StructuredUnit *unit = NULL;
+  L1Block *then_block = structured_find_object_global(
+      sexp_unbox_fixnum(then_block_value), STRUCTURED_OBJECT_BLOCK, &unit);
+  if (!then_block || !unit) return sexp_make_fixnum(0);
+  for (uint32_t i = 0; i < unit->object_count; i++) {
+    StructuredObject *object = &unit->objects[i];
+    if (object->kind != STRUCTURED_OBJECT_INST) continue;
+    L1Instruction *inst = object->pointer;
+    if (!inst || inst->kind != INST_IF) continue;
+    if (inst->data.if_stmt.then_body != then_block) continue;
+    if (inst->data.if_stmt.else_body) {
+      return sexp_make_fixnum(structured_object_id(
+          unit, STRUCTURED_OBJECT_BLOCK, inst->data.if_stmt.else_body));
+    }
+    L1Block *else_block = lainir_new_block();
+    if (!else_block) return sexp_make_fixnum(0);
+    else_block->parent = then_block->parent;
+    uint32_t block_id = structured_add_object(
+        unit, STRUCTURED_OBJECT_BLOCK, else_block);
+    if (!block_id) { free(else_block); return sexp_make_fixnum(0); }
+    inst->data.if_stmt.else_body = else_block;
+    return sexp_make_fixnum(block_id);
+  }
+  return sexp_make_fixnum(0);
+}
+
 static sexp structured_block_let(
     sexp ctx, sexp self, sexp_sint_t n, sexp block_value,
     sexp name_value, sexp type_tag_value, sexp expr_value) {
@@ -1356,6 +1384,7 @@ void native_register_structured_unit_ffi(
   REG("l1.proc-if-return!", 4, structured_proc_if_return);
   REG("l1.proc-if-return-then!", 3, structured_proc_if_return_then);
   REG("l1.block-if!", 2, structured_block_if);
+  REG("l1.block-else!", 1, structured_block_else);
   REG("l1.block-let!", 4, structured_block_let);
   REG("l1.block-return!", 2, structured_block_return);
   REG("l1.block-call!", 2, structured_block_call);
