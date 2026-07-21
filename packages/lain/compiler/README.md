@@ -304,3 +304,22 @@ contract inside the real compiler artifact with the normal capability
 allowlist. The launcher offers
 `--artifact <path> --artifact-run <zero-argument-entry>` for these
 artifact-level executable contracts.
+
+## Structured conditional values
+
+An `if` is an ordinary typed expression and can initialize a local or appear
+inside another conditional:
+
+```lain
+let selected: i32 = if ready {
+    if cached { 40 } else { compute() }
+} else {
+    0
+};
+```
+
+The elaborator requires a `bool` condition, exactly one expression per branch,
+and the same `TypeId` from both branches. Lowering allocates one result slot,
+emits structured then/else regions that store only the selected value, and
+loads the result after the region. Single-file and workspace compilation use
+the same policy. LAIN-IR gains no conditional-value node or CFG label.

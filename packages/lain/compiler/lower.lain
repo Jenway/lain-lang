@@ -120,22 +120,68 @@ let lower_name = std::func(
 
 let lower_call_args = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
-    unit: i32, call: i32, arg: i32,
+    unit: i32, block: i32, call: i32, arg: i32,
     body_start: i32, stop: i32) -> i32 {
     if arg == 0 { return 1; }
     let value: i32 = lower_expr(
         workspace, module, root, function,
-        unit, arg, body_start, stop);
+        unit, block, arg, body_start, stop);
     if value == 0 { return 0; }
     if l1_unit_builder_call_arg(unit, call, value) != 1 { return 0; }
     return lower_call_args(
-        workspace, module, root, function, unit, call,
+        workspace, module, root, function, unit, block, call,
         syntax_arg_next(arg), body_start, stop);
+}
+
+let lower_value_type_size = std::func(type_tag: i32) -> i32 {
+    if type_tag == 1 { return 4; }
+    if type_tag == 2 { return 4; }
+    if type_tag == 3 { return 8; }
+    return 0;
+}
+
+let lower_if_value = std::func(
+    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+    unit: i32, block: i32, node: i32,
+    body_start: i32, stop: i32) -> i32 {
+    let result_type: i32 = elaborator_module_expr_type_indexed(
+        workspace, module, root, function, node, body_start, stop);
+    let result_size: i32 = lower_value_type_size(result_type);
+    if result_size == 0 { return 0; }
+    let result_name: addr = string_append(
+        "__if_result_", syntax_i32_text(node));
+    if l1_unit_builder_block_let(
+        unit, block, result_name, 3,
+        l1_unit_builder_alloca(unit, result_size)) != 1 { return 0; }
+    let condition: i32 = lower_expr(
+        workspace, module, root, function, unit, block,
+        syntax_if_condition(node), body_start, stop);
+    let then_block: i32 = l1_unit_builder_block_if(
+        unit, block, condition);
+    if then_block == 0 { return 0; }
+    let else_block: i32 = l1_unit_builder_block_else(unit, then_block);
+    if else_block == 0 { return 0; }
+    let then_value: i32 = lower_expr(
+        workspace, module, root, function, unit, then_block,
+        syntax_if_then_expr(node), body_start, stop);
+    if then_value == 0 { return 0; }
+    if l1_unit_builder_block_store(
+        unit, then_block, l1_unit_builder_var(unit, result_name, 3),
+        then_value, result_type) != 1 { return 0; }
+    let else_value: i32 = lower_expr(
+        workspace, module, root, function, unit, else_block,
+        syntax_if_else_expr(node), body_start, stop);
+    if else_value == 0 { return 0; }
+    if l1_unit_builder_block_store(
+        unit, else_block, l1_unit_builder_var(unit, result_name, 3),
+        else_value, result_type) != 1 { return 0; }
+    return l1_unit_builder_load(
+        unit, l1_unit_builder_var(unit, result_name, 3), result_type);
 }
 
 let lower_expr = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
-    unit: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    unit: i32, block: i32, node: i32, body_start: i32, stop: i32) -> i32 {
     let tag: i32 = syntax_expr_tag(node);
     if tag == 1 {
         return l1_unit_builder_i32(unit, syntax_i32_value(node));
@@ -151,28 +197,28 @@ let lower_expr = std::func(
     if tag == 3 {
         let left: i32 = lower_expr(
             workspace, module, root, function,
-            unit, syntax_left(node), body_start, stop);
+            unit, block, syntax_left(node), body_start, stop);
         let right: i32 = lower_expr(
             workspace, module, root, function,
-            unit, syntax_right(node), body_start, stop);
+            unit, block, syntax_right(node), body_start, stop);
         return l1_unit_builder_add(unit, left, right);
     }
     if tag == 5 {
         let left: i32 = lower_expr(
             workspace, module, root, function,
-            unit, syntax_left(node), body_start, stop);
+            unit, block, syntax_left(node), body_start, stop);
         let right: i32 = lower_expr(
             workspace, module, root, function,
-            unit, syntax_right(node), body_start, stop);
+            unit, block, syntax_right(node), body_start, stop);
         return l1_unit_builder_eq(unit, left, right);
     }
     if tag == 8 {
         let left: i32 = lower_expr(
             workspace, module, root, function,
-            unit, syntax_left(node), body_start, stop);
+            unit, block, syntax_left(node), body_start, stop);
         let right: i32 = lower_expr(
             workspace, module, root, function,
-            unit, syntax_right(node), body_start, stop);
+            unit, block, syntax_right(node), body_start, stop);
         return l1_unit_builder_ne(unit, left, right);
     }
     if tag == 4 {
@@ -182,7 +228,7 @@ let lower_expr = std::func(
                 workspace, module, root, function,
                 node, body_start, stop));
         if lower_call_args(
-            workspace, module, root, function, unit, call,
+            workspace, module, root, function, unit, block, call,
             syntax_call_first_arg(node), body_start, stop) != 1 {
             return 0;
         }
@@ -198,11 +244,16 @@ let lower_expr = std::func(
                 workspace, module, root, function,
                 node, body_start, stop));
         if lower_call_args(
-            workspace, module, root, function, unit, call,
+            workspace, module, root, function, unit, block, call,
             syntax_member_first_arg(node), body_start, stop) != 1 {
             return 0;
         }
         return call;
+    }
+    if tag == 6 {
+        return lower_if_value(
+            workspace, module, root, function, unit, block,
+            node, body_start, stop);
     }
     return 0;
 }
@@ -221,7 +272,7 @@ let lower_statement_block = std::func(
         let value_node: i32 = syntax_local_value_node(node);
         let value: i32 = lower_expr(
             workspace, module, root, function,
-            unit, value_node, body_start, node);
+            unit, block, value_node, body_start, node);
         if l1_unit_builder_block_let(
             unit, block,
             syntax_identifier_link_name(syntax_local_name_node(node)),
@@ -236,7 +287,7 @@ let lower_statement_block = std::func(
     if form_tag == 3 {
         let value: i32 = lower_expr(
             workspace, module, root, function,
-            unit, node, body_start, node);
+            unit, block, node, body_start, node);
         if l1_unit_builder_block_call(unit, block, value) != 1 { return 0; }
         return lower_statement_block(
             workspace, module, root, function, unit, block,
@@ -247,12 +298,12 @@ let lower_statement_block = std::func(
             unit, block,
             lower_expr(
                 workspace, module, root, function, unit,
-                syntax_return_expr(node), body_start, node));
+                block, syntax_return_expr(node), body_start, node));
     }
     if form_tag == 5 {
         let condition: i32 = lower_expr(
             workspace, module, root, function, unit,
-            syntax_if_statement_condition(node), body_start, node);
+            block, syntax_if_statement_condition(node), body_start, node);
         let then_block: i32 = l1_unit_builder_block_if(
             unit, block, condition);
         if then_block == 0 { return 0; }
@@ -277,10 +328,11 @@ let lower_body = std::func(
             syntax_next(node), body_start);
     }
     if form_tag == 2 {
+        let block: i32 = l1_unit_builder_proc_body(unit, procedure);
         let value_node: i32 = syntax_local_value_node(node);
         let value: i32 = lower_expr(
             workspace, module, root, function,
-            unit, value_node, body_start, node);
+            unit, block, value_node, body_start, node);
         let type_tag: i32 = elaborator_module_expr_type_indexed(
             workspace, module, root, function,
             value_node, body_start, node);
@@ -293,15 +345,17 @@ let lower_body = std::func(
             syntax_next(node), body_start);
     }
     if form_tag == 4 {
+        let block: i32 = l1_unit_builder_proc_body(unit, procedure);
         return l1_unit_builder_return(
             unit, procedure,
             lower_expr(
                 workspace, module, root, function, unit,
-                syntax_return_expr(node), body_start, node));
+                block, syntax_return_expr(node), body_start, node));
     }
     if form_tag == 5 {
         let condition: i32 = lower_expr(
             workspace, module, root, function, unit,
+            l1_unit_builder_proc_body(unit, procedure),
             syntax_if_statement_condition(node), body_start, node);
         let block: i32 = l1_unit_builder_proc_body(unit, procedure);
         let then_block: i32 = l1_unit_builder_block_if(
@@ -316,21 +370,17 @@ let lower_body = std::func(
             syntax_next(node), body_start);
     }
     if syntax_expr_tag(node) == 6 {
-        let condition: i32 = lower_expr(
-            workspace, module, root, function, unit,
-            syntax_if_condition(node), body_start, node);
-        let then_value: i32 = lower_expr(
-            workspace, module, root, function, unit,
-            syntax_if_then_expr(node), body_start, node);
-        let else_value: i32 = lower_expr(
-            workspace, module, root, function, unit,
-            syntax_if_else_expr(node), body_start, node);
-        return l1_unit_builder_if_return(
-            unit, procedure, condition, then_value, else_value);
+        let block: i32 = l1_unit_builder_proc_body(unit, procedure);
+        return l1_unit_builder_return(
+            unit, procedure,
+            lower_if_value(
+                workspace, module, root, function, unit, block,
+                node, body_start, node));
     }
+    let block: i32 = l1_unit_builder_proc_body(unit, procedure);
     let result: i32 = lower_expr(
         workspace, module, root, function,
-        unit, node, body_start, node);
+        unit, block, node, body_start, node);
     return l1_unit_builder_return(unit, procedure, result);
 }
 
@@ -920,6 +970,45 @@ let lower_plain_consteval = std::func(
     return l1_unit_builder_i32(target_unit, value);
 }
 
+let lower_plain_if_value = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    unit: i32, block: i32, node: i32,
+    body_start: i32, stop: i32) -> i32 {
+    let result_type: i32 = elaborator_expr_type_indexed(
+        index, root, function, node, body_start, stop);
+    let result_size: i32 = lower_value_type_size(result_type);
+    if result_size == 0 { return 0; }
+    let result_name: addr = string_append(
+        "__if_result_", syntax_i32_text(node));
+    if l1_unit_builder_block_let(
+        unit, block, result_name, 3,
+        l1_unit_builder_alloca(unit, result_size)) != 1 { return 0; }
+    let condition: i32 = lower_plain_expr(
+        index, root, function, unit, block,
+        syntax_if_condition(node), body_start, stop);
+    let then_block: i32 = l1_unit_builder_block_if(
+        unit, block, condition);
+    if then_block == 0 { return 0; }
+    let else_block: i32 = l1_unit_builder_block_else(unit, then_block);
+    if else_block == 0 { return 0; }
+    let then_value: i32 = lower_plain_expr(
+        index, root, function, unit, then_block,
+        syntax_if_then_expr(node), body_start, stop);
+    if then_value == 0 { return 0; }
+    if l1_unit_builder_block_store(
+        unit, then_block, l1_unit_builder_var(unit, result_name, 3),
+        then_value, result_type) != 1 { return 0; }
+    let else_value: i32 = lower_plain_expr(
+        index, root, function, unit, else_block,
+        syntax_if_else_expr(node), body_start, stop);
+    if else_value == 0 { return 0; }
+    if l1_unit_builder_block_store(
+        unit, else_block, l1_unit_builder_var(unit, result_name, 3),
+        else_value, result_type) != 1 { return 0; }
+    return l1_unit_builder_load(
+        unit, l1_unit_builder_var(unit, result_name, 3), result_type);
+}
+
 let lower_plain_expr = std::func(
     index: M13ElaborationIndex, root: i32, function: i32, unit: i32,
     block: i32, node: i32, body_start: i32, stop: i32) -> i32 {
@@ -1001,6 +1090,11 @@ let lower_plain_expr = std::func(
             return 0;
         }
         return call;
+    }
+    if tag == 6 {
+        return lower_plain_if_value(
+            index, root, function, unit, block,
+            node, body_start, stop);
     }
     if tag == 10 {
         return lower_plain_aggregate(
@@ -1306,13 +1400,6 @@ let lower_plain_match_return = std::func(
         declaration, enum_type, body_start, stop);
 }
 
-let lower_plain_type_size = std::func(type_tag: i32) -> i32 {
-    if type_tag == 1 { return 4; }
-    if type_tag == 2 { return 4; }
-    if type_tag == 3 { return 8; }
-    return 0;
-}
-
 let lower_plain_match_store_arm = std::func(
     index: M13ElaborationIndex, root: i32, function: i32,
     unit: i32, block: i32, arm: i32,
@@ -1399,7 +1486,7 @@ let lower_plain_match_value = std::func(
         unit, block, tag_name, tag_type, tag) != 1 { return 0; }
     let result_type: i32 = elaborator_expr_type_indexed(
         index, root, function, node, body_start, stop);
-    let result_size: i32 = lower_plain_type_size(result_type);
+    let result_size: i32 = lower_value_type_size(result_type);
     if result_size == 0 { return 0; }
     let result_name: addr = string_append(
         "__match_result_", syntax_i32_text(node));
@@ -1470,17 +1557,11 @@ let lower_plain_body = std::func(
             syntax_next(node), body_start);
     }
     if syntax_expr_tag(node) == 6 {
-        return l1_unit_builder_if_return(
+        return l1_unit_builder_return(
             unit, procedure,
-            lower_plain_expr(
+            lower_plain_if_value(
                 index, root, function, unit, block,
-                syntax_if_condition(node), body_start, node),
-            lower_plain_expr(
-                index, root, function, unit, block,
-                syntax_if_then_expr(node), body_start, node),
-            lower_plain_expr(
-                index, root, function, unit, block,
-                syntax_if_else_expr(node), body_start, node));
+                node, body_start, node));
     }
     if syntax_is_match(node) == 1 {
         return lower_plain_match_return(

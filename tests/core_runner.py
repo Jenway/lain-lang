@@ -34,6 +34,7 @@ def main() -> int:
             [python, "tests/core/artifact_cache/run_artifact_cache.py"],
         ),
         ("core/comptime", [python, "tests/core/comptime/run_comptime_contract.py"]),
+        ("core/control", [python, "tests/core/control/run_control_contract.py"]),
         ("core/meta", [python, "tests/core/meta/run_meta_contract.py"]),
         ("core/enum", [python, "tests/core/enum/run_enum_contract.py"]),
         ("core/examples", [python, "tests/core/examples/run_examples.py"]),
