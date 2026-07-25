@@ -1,0 +1,955 @@
+@foreign("bootstrap.source-count")
+let bootstrap_source_count = std::func() -> usize;
+
+@foreign("bootstrap.source-data")
+let bootstrap_source_data = std::func(index: usize) -> addr;
+
+@foreign("bootstrap.source-length")
+let bootstrap_source_length = std::func(index: usize) -> usize;
+
+@foreign("bootstrap.artifact-begin")
+let bootstrap_artifact_begin = std::func() -> unit;
+
+@foreign("bootstrap.artifact-write-byte")
+let bootstrap_artifact_write_byte = std::func(byte: i32) -> unit;
+
+@foreign("bootstrap.artifact-write-literal")
+let bootstrap_artifact_write_literal = std::func(text: addr) -> unit;
+
+@foreign("bootstrap.artifact-finish")
+let bootstrap_artifact_finish = std::func() -> unit;
+
+let byte_at = std::func(source: addr, index: usize) -> i32 {
+    return std::load_i8(std::offset(source, index));
+};
+
+let is_space = std::func(byte: i32) -> bool {
+    if byte == 32 { return 1; }
+    if byte == 9 { return 1; }
+    if byte == 10 { return 1; }
+    if byte == 13 { return 1; }
+    return 0;
+};
+
+let is_ident_byte = std::func(byte: i32) -> bool {
+    if byte >= 48 {
+        if byte <= 57 { return 1; }
+    }
+    if byte >= 65 {
+        if byte <= 90 { return 1; }
+    }
+    if byte >= 97 {
+        if byte <= 122 { return 1; }
+    }
+    if byte == 95 { return 1; }
+    return 0;
+};
+
+let skip_space = std::func(
+    source: addr,
+    length: usize,
+    initial: usize,
+) -> usize {
+    let cursor: usize = initial;
+    let running: bool = 1;
+    while running {
+        if cursor >= length {
+            running = 0;
+        } else {
+            let byte: i32 = byte_at(source, cursor);
+            if is_space(byte) {
+                cursor = cursor + 1;
+            } else {
+                if byte == 47 {
+                    if cursor + 1 < length {
+                        if byte_at(source, cursor + 1) == 47 {
+                            cursor = cursor + 2;
+                            let commenting: bool = 1;
+                            while commenting {
+                                if cursor >= length {
+                                    commenting = 0;
+                                } else {
+                                    if byte_at(source, cursor) == 10 {
+                                        cursor = cursor + 1;
+                                        commenting = 0;
+                                    } else {
+                                        cursor = cursor + 1;
+                                    }
+                                }
+                            }
+                        } else {
+                            running = 0;
+                        }
+                    } else {
+                        running = 0;
+                    }
+                } else {
+                    running = 0;
+                }
+            }
+        }
+    }
+    return cursor;
+};
+
+let scan_ident_end = std::func(
+    source: addr,
+    length: usize,
+    start: usize,
+) -> usize {
+    let cursor: usize = start;
+    while cursor < length {
+        if is_ident_byte(byte_at(source, cursor)) {
+            cursor = cursor + 1;
+        } else {
+            return cursor;
+        }
+    }
+    return cursor;
+};
+
+let emit_span = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> unit {
+    let cursor: usize = start;
+    while cursor < end {
+        bootstrap_artifact_write_byte(byte_at(source, cursor));
+        cursor = cursor + 1;
+    }
+    return;
+};
+
+let emit_name = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> unit {
+    let cursor: usize = start;
+    let bootstrap_name: bool = 0;
+    if end - start >= 10 {
+        if byte_at(source, start) == 98 {
+            if byte_at(source, start + 1) == 111 {
+                if byte_at(source, start + 2) == 111 {
+                    if byte_at(source, start + 3) == 116 {
+                        if byte_at(source, start + 4) == 115 {
+                            if byte_at(source, start + 5) == 116 {
+                                if byte_at(source, start + 6) == 114 {
+                                    if byte_at(source, start + 7) == 97 {
+                                        if byte_at(source, start + 8) == 112 {
+                                            if byte_at(source, start + 9) == 95 {
+                                                bootstrap_name = 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    while cursor < end {
+        let byte: i32 = byte_at(source, cursor);
+        if bootstrap_name {
+            if cursor == start + 9 {
+                bootstrap_artifact_write_byte(46);
+            } else {
+                if byte == 95 {
+                    bootstrap_artifact_write_byte(45);
+                } else {
+                    bootstrap_artifact_write_byte(byte);
+                }
+            }
+        } else {
+            bootstrap_artifact_write_byte(byte);
+        }
+        cursor = cursor + 1;
+    }
+    return;
+};
+
+let span_is = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    code: i32,
+) -> bool {
+    let length: usize = end - start;
+    if code == 1 {
+        if length != 3 { return 0; }
+        if byte_at(source, start) != 108 { return 0; }
+        if byte_at(source, start + 1) != 101 { return 0; }
+        return byte_at(source, start + 2) == 116;
+    }
+    if code == 2 {
+        if length != 6 { return 0; }
+        if byte_at(source, start) != 114 { return 0; }
+        if byte_at(source, start + 1) != 101 { return 0; }
+        if byte_at(source, start + 2) != 116 { return 0; }
+        if byte_at(source, start + 3) != 117 { return 0; }
+        if byte_at(source, start + 4) != 114 { return 0; }
+        return byte_at(source, start + 5) == 110;
+    }
+    if code == 3 {
+        if length != 2 { return 0; }
+        if byte_at(source, start) != 105 { return 0; }
+        return byte_at(source, start + 1) == 102;
+    }
+    if code == 4 {
+        if length != 5 { return 0; }
+        if byte_at(source, start) != 119 { return 0; }
+        if byte_at(source, start + 1) != 104 { return 0; }
+        if byte_at(source, start + 2) != 105 { return 0; }
+        if byte_at(source, start + 3) != 108 { return 0; }
+        return byte_at(source, start + 4) == 101;
+    }
+    if code == 5 {
+        if length != 4 { return 0; }
+        if byte_at(source, start) != 101 { return 0; }
+        if byte_at(source, start + 1) != 108 { return 0; }
+        if byte_at(source, start + 2) != 115 { return 0; }
+        return byte_at(source, start + 3) == 101;
+    }
+    return 0;
+};
+
+let trim_left = std::func(
+    source: addr,
+    end: usize,
+    start: usize,
+) -> usize {
+    let cursor: usize = start;
+    while cursor < end {
+        if is_space(byte_at(source, cursor)) {
+            cursor = cursor + 1;
+        } else {
+            return cursor;
+        }
+    }
+    return cursor;
+};
+
+let trim_right = std::func(
+    source: addr,
+    start: usize,
+    initial_end: usize,
+) -> usize {
+    let end: usize = initial_end;
+    while end > start {
+        if is_space(byte_at(source, end - 1)) {
+            end = end - 1;
+        } else {
+            return end;
+        }
+    }
+    return end;
+};
+
+let matching_close = std::func(
+    source: addr,
+    length: usize,
+    open: usize,
+    open_byte: i32,
+    close_byte: i32,
+) -> usize {
+    let cursor: usize = open + 1;
+    let depth: i32 = 1;
+    let quoted: bool = 0;
+    while cursor < length {
+        let byte: i32 = byte_at(source, cursor);
+        if quoted {
+            if byte == 92 {
+                cursor = cursor + 1;
+            } else {
+                if byte == 34 { quoted = 0; }
+            }
+        } else {
+            if byte == 34 {
+                quoted = 1;
+            } else {
+                if byte == open_byte { depth = depth + 1; }
+                if byte == close_byte {
+                    depth = depth - 1;
+                    if depth == 0 { return cursor; }
+                }
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return length;
+};
+
+let find_top_level = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    wanted: i32,
+) -> usize {
+    let cursor: usize = start;
+    let paren_depth: i32 = 0;
+    let quoted: bool = 0;
+    while cursor < end {
+        let byte: i32 = byte_at(source, cursor);
+        if quoted {
+            if byte == 92 {
+                cursor = cursor + 1;
+            } else {
+                if byte == 34 { quoted = 0; }
+            }
+        } else {
+            if byte == 34 {
+                quoted = 1;
+            } else {
+                if paren_depth == 0 {
+                    if byte == wanted { return cursor; }
+                }
+                if byte == 40 { paren_depth = paren_depth + 1; }
+                if byte == 41 { paren_depth = paren_depth - 1; }
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return end;
+};
+
+let find_last_operator = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    level: i32,
+) -> usize {
+    let cursor: usize = start;
+    let found: usize = end;
+    let depth: i32 = 0;
+    let quoted: bool = 0;
+    while cursor < end {
+        let byte: i32 = byte_at(source, cursor);
+        if quoted {
+            if byte == 92 {
+                cursor = cursor + 1;
+            } else {
+                if byte == 34 { quoted = 0; }
+            }
+        } else {
+            if byte == 34 {
+                quoted = 1;
+            } else {
+                if byte == 40 { depth = depth + 1; }
+                if byte == 41 { depth = depth - 1; }
+                if depth == 0 {
+                    if level == 1 {
+                        let second_half: bool = 0;
+                        if cursor > start {
+                            let previous: i32 = byte_at(
+                                source,
+                                cursor - 1,
+                            );
+                            if previous == 61 { second_half = 1; }
+                            if previous == 33 { second_half = 1; }
+                            if previous == 60 { second_half = 1; }
+                            if previous == 62 { second_half = 1; }
+                        }
+                        if second_half == 0 {
+                            if byte == 61 { found = cursor; }
+                            if byte == 33 { found = cursor; }
+                            if byte == 60 { found = cursor; }
+                            if byte == 62 { found = cursor; }
+                        }
+                    }
+                    if level == 2 {
+                        if byte == 43 { found = cursor; }
+                        if byte == 45 { found = cursor; }
+                    }
+                    if level == 3 {
+                        if byte == 42 { found = cursor; }
+                        if byte == 47 { found = cursor; }
+                    }
+                }
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return found;
+};
+
+let emit_type = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> unit {
+    let left: usize = trim_left(source, end, start);
+    let right: usize = trim_right(source, left, end);
+    let length: usize = right - left;
+    if length == 5 {
+        if byte_at(source, left) == 117 {
+            bootstrap_artifact_write_literal("i64");
+            return;
+        }
+    }
+    if length == 4 {
+        if byte_at(source, left) == 98 {
+            bootstrap_artifact_write_literal("i1");
+            return;
+        }
+        if byte_at(source, left) == 117 {
+            bootstrap_artifact_write_literal("#unit");
+            return;
+        }
+    }
+    emit_span(source, left, right);
+    return;
+};
+
+let emit_operator = std::func(
+    source: addr,
+    position: usize,
+) -> usize {
+    let byte: i32 = byte_at(source, position);
+    if byte == 43 { bootstrap_artifact_write_literal("#add("); return 1; }
+    if byte == 45 { bootstrap_artifact_write_literal("#sub("); return 1; }
+    if byte == 42 { bootstrap_artifact_write_literal("#mul("); return 1; }
+    if byte == 47 { bootstrap_artifact_write_literal("#div("); return 1; }
+    if byte == 61 { bootstrap_artifact_write_literal("#eq("); return 2; }
+    if byte == 33 { bootstrap_artifact_write_literal("#ne("); return 2; }
+    if byte == 60 {
+        if byte_at(source, position + 1) == 61 {
+            bootstrap_artifact_write_literal("#le(");
+            return 2;
+        }
+        bootstrap_artifact_write_literal("#lt(");
+        return 1;
+    }
+    if byte == 62 {
+        if byte_at(source, position + 1) == 61 {
+            bootstrap_artifact_write_literal("#ge(");
+            return 2;
+        }
+        bootstrap_artifact_write_literal("#gt(");
+        return 1;
+    }
+    return 1;
+};
+
+let emit_expression = std::func(
+    source: addr,
+    initial_start: usize,
+    initial_end: usize,
+) -> unit {
+    let start: usize = trim_left(source, initial_end, initial_start);
+    let end: usize = trim_right(source, start, initial_end);
+
+    if end > start {
+        if byte_at(source, start) == 40 {
+            let close: usize = matching_close(source, end, start, 40, 41);
+            if close + 1 == end {
+                emit_expression(source, start + 1, close);
+                return;
+            }
+        }
+    }
+
+    let level: i32 = 1;
+    while level <= 3 {
+        let operator: usize = find_last_operator(source, start, end, level);
+        if operator < end {
+            let width: usize = emit_operator(source, operator);
+            emit_expression(source, start, operator);
+            bootstrap_artifact_write_literal(", ");
+            emit_expression(source, operator + width, end);
+            bootstrap_artifact_write_literal(")");
+            return;
+        }
+        level = level + 1;
+    }
+
+    let open: usize = find_top_level(source, start, end, 40);
+    if open < end {
+        let name_end: usize = trim_right(source, start, open);
+        let special_load: bool = 0;
+        let special_offset: bool = 0;
+        if name_end - start == 12 {
+            if byte_at(source, start) == 115 {
+                if byte_at(source, start + 5) == 108 {
+                    special_load = 1;
+                }
+            }
+        }
+        if name_end - start == 11 {
+            if byte_at(source, start) == 115 {
+                if byte_at(source, start + 5) == 111 {
+                    special_offset = 1;
+                }
+            }
+        }
+        let close: usize = matching_close(source, end, open, 40, 41);
+        if special_load {
+            bootstrap_artifact_write_literal("#load[i8](");
+            emit_expression(source, open + 1, close);
+            bootstrap_artifact_write_literal(")");
+            return;
+        }
+        if special_offset {
+            let comma: usize = find_top_level(source, open + 1, close, 44);
+            bootstrap_artifact_write_literal("#lea(base=");
+            emit_expression(source, open + 1, comma);
+            bootstrap_artifact_write_literal(", idx=");
+            emit_expression(source, comma + 1, close);
+            bootstrap_artifact_write_literal(", scale=1, offset=0)");
+            return;
+        }
+        bootstrap_artifact_write_literal("#call ");
+        emit_name(source, start, name_end);
+        bootstrap_artifact_write_literal("(");
+        let argument_start: usize = open + 1;
+        let argument_cursor: usize = argument_start;
+        let first: bool = 1;
+        while argument_cursor < close {
+            let comma: usize = find_top_level(
+                source,
+                argument_cursor,
+                close,
+                44,
+            );
+            let argument_left: usize = trim_left(
+                source,
+                comma,
+                argument_cursor,
+            );
+            let argument_right: usize = trim_right(
+                source,
+                argument_left,
+                comma,
+            );
+            if argument_left == argument_right {
+                argument_cursor = close;
+            } else {
+                if first == 0 {
+                    bootstrap_artifact_write_literal(", ");
+                }
+                emit_expression(
+                    source,
+                    argument_left,
+                    argument_right,
+                );
+                first = 0;
+                if comma == close {
+                    argument_cursor = close;
+                } else {
+                    argument_cursor = comma + 1;
+                }
+            }
+        }
+        bootstrap_artifact_write_literal(")");
+        return;
+    }
+
+    if byte_at(source, start) == 34 {
+        emit_span(source, start, end);
+        return;
+    }
+    if byte_at(source, start) >= 48 {
+        if byte_at(source, start) <= 57 {
+            emit_span(source, start, end);
+            return;
+        }
+    }
+    bootstrap_artifact_write_byte(37);
+    emit_name(source, start, end);
+    return;
+};
+
+let scan_statement_end = std::func(
+    source: addr,
+    end: usize,
+    start: usize,
+) -> usize {
+    let cursor: usize = start;
+    let depth: i32 = 0;
+    let quoted: bool = 0;
+    while cursor < end {
+        let byte: i32 = byte_at(source, cursor);
+        if quoted {
+            if byte == 92 {
+                cursor = cursor + 1;
+            } else {
+                if byte == 34 { quoted = 0; }
+            }
+        } else {
+            if byte == 34 {
+                quoted = 1;
+            } else {
+                if byte == 40 { depth = depth + 1; }
+                if byte == 41 { depth = depth - 1; }
+                if depth == 0 {
+                    if byte == 59 { return cursor; }
+                }
+            }
+        }
+        cursor = cursor + 1;
+    }
+    return end;
+};
+
+let compile_block = std::func(
+    source: addr,
+    length: usize,
+    block_start: usize,
+    block_end: usize,
+) -> unit {
+    let cursor: usize = skip_space(source, block_end, block_start);
+    while cursor < block_end {
+        let word_end: usize = scan_ident_end(source, block_end, cursor);
+        if span_is(source, cursor, word_end, 2) {
+            let semi: usize = scan_statement_end(source, block_end, word_end);
+            bootstrap_artifact_write_literal("  #return");
+            let value_start: usize = trim_left(source, semi, word_end);
+            if value_start < semi {
+                bootstrap_artifact_write_literal(" ");
+                emit_expression(source, value_start, semi);
+            }
+            bootstrap_artifact_write_literal("\n");
+            cursor = skip_space(source, block_end, semi + 1);
+        } else {
+            if span_is(source, cursor, word_end, 1) {
+                let semi: usize = scan_statement_end(
+                    source,
+                    block_end,
+                    word_end,
+                );
+                let name_start: usize = skip_space(
+                    source,
+                    semi,
+                    word_end,
+                );
+                let name_end: usize = scan_ident_end(
+                    source,
+                    semi,
+                    name_start,
+                );
+                let colon: usize = find_top_level(
+                    source,
+                    name_end,
+                    semi,
+                    58,
+                );
+                let equal: usize = find_top_level(
+                    source,
+                    name_end,
+                    semi,
+                    61,
+                );
+                bootstrap_artifact_write_literal("  #let %");
+                emit_name(source, name_start, name_end);
+                bootstrap_artifact_write_literal(": ");
+                emit_type(source, colon + 1, equal);
+                bootstrap_artifact_write_literal(" = ");
+                emit_expression(source, equal + 1, semi);
+                bootstrap_artifact_write_literal("\n");
+                cursor = skip_space(source, block_end, semi + 1);
+            } else {
+                if span_is(source, cursor, word_end, 3) {
+                    let open: usize = find_top_level(
+                        source,
+                        word_end,
+                        block_end,
+                        123,
+                    );
+                    let close: usize = matching_close(
+                        source,
+                        block_end,
+                        open,
+                        123,
+                        125,
+                    );
+                    bootstrap_artifact_write_literal("  #if ");
+                    emit_expression(source, word_end, open);
+                    bootstrap_artifact_write_literal(" {\n");
+                    compile_block(source, length, open + 1, close);
+                    bootstrap_artifact_write_literal("  }");
+                    let next: usize = skip_space(
+                        source,
+                        block_end,
+                        close + 1,
+                    );
+                    let next_end: usize = scan_ident_end(
+                        source,
+                        block_end,
+                        next,
+                    );
+                    if span_is(source, next, next_end, 5) {
+                        let else_open: usize = skip_space(
+                            source,
+                            block_end,
+                            next_end,
+                        );
+                        let else_close: usize = matching_close(
+                            source,
+                            block_end,
+                            else_open,
+                            123,
+                            125,
+                        );
+                        bootstrap_artifact_write_literal(" #else {\n");
+                        compile_block(
+                            source,
+                            length,
+                            else_open + 1,
+                            else_close,
+                        );
+                        bootstrap_artifact_write_literal("  }\n");
+                        cursor = skip_space(
+                            source,
+                            block_end,
+                            else_close + 1,
+                        );
+                    } else {
+                        bootstrap_artifact_write_literal("\n");
+                        cursor = next;
+                    }
+                } else {
+                    if span_is(source, cursor, word_end, 4) {
+                        let open: usize = find_top_level(
+                            source,
+                            word_end,
+                            block_end,
+                            123,
+                        );
+                        let close: usize = matching_close(
+                            source,
+                            block_end,
+                            open,
+                            123,
+                            125,
+                        );
+                        bootstrap_artifact_write_literal("  #loop {\n");
+                        bootstrap_artifact_write_literal("  #if #eq(");
+                        emit_expression(source, word_end, open);
+                        bootstrap_artifact_write_literal(
+                            ", 0) {\n  #break\n  }\n"
+                        );
+                        compile_block(source, length, open + 1, close);
+                        bootstrap_artifact_write_literal(
+                            "  #continue\n  }\n"
+                        );
+                        cursor = skip_space(
+                            source,
+                            block_end,
+                            close + 1,
+                        );
+                    } else {
+                        let semi: usize = scan_statement_end(
+                            source,
+                            block_end,
+                            cursor,
+                        );
+                        let equal: usize = find_top_level(
+                            source,
+                            cursor,
+                            semi,
+                            61,
+                        );
+                        if equal < semi {
+                            bootstrap_artifact_write_literal("  %");
+                            emit_name(
+                                source,
+                                cursor,
+                                trim_right(source, cursor, equal),
+                            );
+                            bootstrap_artifact_write_literal(" = ");
+                            emit_expression(source, equal + 1, semi);
+                            bootstrap_artifact_write_literal("\n");
+                        } else {
+                            bootstrap_artifact_write_literal("  ");
+                            emit_expression(source, cursor, semi);
+                            bootstrap_artifact_write_literal("\n");
+                        }
+                        cursor = skip_space(
+                            source,
+                            block_end,
+                            semi + 1,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    return;
+};
+
+let emit_parameters = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> unit {
+    let cursor: usize = skip_space(source, end, start);
+    let first: bool = 1;
+    while cursor < end {
+        let comma: usize = find_top_level(source, cursor, end, 44);
+        let name_start: usize = trim_left(source, comma, cursor);
+        let name_end: usize = scan_ident_end(source, comma, name_start);
+        let colon: usize = find_top_level(
+            source,
+            name_end,
+            comma,
+            58,
+        );
+        if first == 0 {
+            bootstrap_artifact_write_literal(", ");
+        }
+        emit_type(source, colon + 1, comma);
+        bootstrap_artifact_write_literal(" %");
+        emit_name(source, name_start, name_end);
+        first = 0;
+        if comma == end {
+            cursor = end;
+        } else {
+            cursor = skip_space(source, end, comma + 1);
+        }
+    }
+    return;
+};
+
+let compile_source = std::func(
+    source: addr,
+    length: usize,
+) -> i32 {
+    let cursor: usize = skip_space(source, length, 0);
+    while cursor < length {
+        if cursor >= length { return 0; }
+        let foreign: bool = 0;
+        if byte_at(source, cursor) == 64 {
+            foreign = 1;
+            let annotation_open: usize = find_top_level(
+                source,
+                cursor,
+                length,
+                40,
+            );
+            let annotation_close: usize = matching_close(
+                source,
+                length,
+                annotation_open,
+                40,
+                41,
+            );
+            cursor = skip_space(
+                source,
+                length,
+                annotation_close + 1,
+            );
+        }
+
+        let let_end: usize = scan_ident_end(source, length, cursor);
+        if span_is(source, cursor, let_end, 1) == 0 {
+            return 10;
+        }
+        let name_start: usize = skip_space(source, length, let_end);
+        let name_end: usize = scan_ident_end(
+            source,
+            length,
+            name_start,
+        );
+        let equal: usize = find_top_level(
+            source,
+            name_end,
+            length,
+            61,
+        );
+        let params_open: usize = find_top_level(
+            source,
+            equal + 1,
+            length,
+            40,
+        );
+        let params_close: usize = matching_close(
+            source,
+            length,
+            params_open,
+            40,
+            41,
+        );
+        let arrow: usize = skip_space(
+            source,
+            length,
+            params_close + 1,
+        );
+        let type_start: usize = skip_space(
+            source,
+            length,
+            arrow + 2,
+        );
+        let type_end: usize = scan_ident_end(
+            source,
+            length,
+            type_start,
+        );
+        let after_type: usize = skip_space(
+            source,
+            length,
+            type_end,
+        );
+
+        if foreign {
+            bootstrap_artifact_write_literal("#extern #proc ");
+        } else {
+            bootstrap_artifact_write_literal("#proc ");
+        }
+        emit_name(source, name_start, name_end);
+        bootstrap_artifact_write_literal("(");
+        emit_parameters(source, params_open + 1, params_close);
+        bootstrap_artifact_write_literal(") -> ");
+        emit_type(source, type_start, type_end);
+
+        if foreign {
+            bootstrap_artifact_write_literal(";\n\n");
+            let semi: usize = scan_statement_end(
+                source,
+                length,
+                after_type,
+            );
+            cursor = skip_space(source, length, semi + 1);
+        } else {
+            let body_open: usize = after_type;
+            let body_close: usize = matching_close(
+                source,
+                length,
+                body_open,
+                123,
+                125,
+            );
+            bootstrap_artifact_write_literal(" {\n");
+            compile_block(
+                source,
+                length,
+                body_open + 1,
+                body_close,
+            );
+            bootstrap_artifact_write_literal("}\n\n");
+            let semi: usize = skip_space(
+                source,
+                length,
+                body_close + 1,
+            );
+            cursor = skip_space(source, length, semi + 1);
+        }
+    }
+    return 0;
+};
+
+let compiler_compile = std::func() -> i32 {
+    if bootstrap_source_count() != 1 {
+        return 1;
+    }
+    let source: addr = bootstrap_source_data(0);
+    let length: usize = bootstrap_source_length(0);
+    bootstrap_artifact_begin();
+    let status: i32 = compile_source(source, length);
+    if status != 0 {
+        return status;
+    }
+    bootstrap_artifact_finish();
+    return 0;
+};
