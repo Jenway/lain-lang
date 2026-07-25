@@ -323,3 +323,27 @@ and the same `TypeId` from both branches. Lowering allocates one result slot,
 emits structured then/else regions that store only the selected value, and
 loads the result after the region. Single-file and workspace compilation use
 the same policy. LAIN-IR gains no conditional-value node or CFG label.
+
+## Local mutation and structured loops
+
+The self-hosted compiler recognizes assignment and loop control as Meta-level
+body forms without adding parser keywords:
+
+```lain
+let value: i32 = 0;
+loop {
+    value = value + 1;
+    if value == 2 { continue; }
+    if value == 4 { break; }
+}
+```
+
+An assignment target must resolve to a preceding local `let`; parameters and
+unresolved names are not mutable targets. The assigned value must have the
+same `TypeId` as that local. `break` and `continue` are accepted only under a
+lexically enclosing loop, including inside nested structured `if` blocks.
+
+Lowering maps these forms to the existing physical `SET`, `LOOP`, `BREAK`,
+and `CONTINUE` instructions. Falling off a `#loop` body begins the next
+iteration, consistently in the interpreter and C backend. No CFG labels or
+source-level loop nodes are added to LAIN-IR.

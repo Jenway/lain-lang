@@ -830,6 +830,82 @@ static sexp structured_block_store(
   return sexp_make_fixnum(1);
 }
 
+static sexp structured_block_set(
+    sexp ctx, sexp self, sexp_sint_t n, sexp block_value,
+    sexp name_value, sexp type_tag_value, sexp expr_value) {
+  StructuredUnit *unit = NULL;
+  L1Block *block = structured_find_object_global(
+      sexp_unbox_fixnum(block_value), STRUCTURED_OBJECT_BLOCK, &unit);
+  L1Expr *expr = structured_find_object(
+      unit, sexp_unbox_fixnum(expr_value), STRUCTURED_OBJECT_EXPR);
+  if (!block || !expr) return sexp_make_fixnum(0);
+  L1Instruction *inst = lainir_new_instruction(INST_SET);
+  if (!inst) return sexp_make_fixnum(0);
+  inst->data.set.name = structured_strdup(structured_text(name_value));
+  inst->data.set.ty = structured_type(
+      unit, sexp_unbox_fixnum(type_tag_value));
+  inst->data.set.val = expr;
+  if (!inst->data.set.name || !inst->data.set.ty ||
+      !structured_add_object(unit, STRUCTURED_OBJECT_INST, inst)) {
+    free(inst->data.set.name);
+    free(inst);
+    return sexp_make_fixnum(0);
+  }
+  append_inst_to_block(block, inst);
+  return sexp_make_fixnum(1);
+}
+
+static sexp structured_block_loop(
+    sexp ctx, sexp self, sexp_sint_t n, sexp block_value) {
+  StructuredUnit *unit = NULL;
+  L1Block *block = structured_find_object_global(
+      sexp_unbox_fixnum(block_value), STRUCTURED_OBJECT_BLOCK, &unit);
+  if (!block || !unit) return sexp_make_fixnum(0);
+  L1Instruction *inst = lainir_new_instruction(INST_LOOP);
+  L1Block *body = lainir_new_block();
+  if (!inst || !body) { free(inst); free(body); return sexp_make_fixnum(0); }
+  body->parent = block->parent;
+  inst->data.loop.body = body;
+  inst->data.loop.label = NULL;
+  if (!structured_add_object(unit, STRUCTURED_OBJECT_INST, inst)) {
+    free(body);
+    free(inst);
+    return sexp_make_fixnum(0);
+  }
+  uint32_t body_id = structured_add_object(
+      unit, STRUCTURED_OBJECT_BLOCK, body);
+  if (!body_id) { free(body); free(inst); return sexp_make_fixnum(0); }
+  append_inst_to_block(block, inst);
+  return sexp_make_fixnum(body_id);
+}
+
+static sexp structured_block_jump(
+    sexp block_value, L1InstKind kind) {
+  StructuredUnit *unit = NULL;
+  L1Block *block = structured_find_object_global(
+      sexp_unbox_fixnum(block_value), STRUCTURED_OBJECT_BLOCK, &unit);
+  if (!block || !unit) return sexp_make_fixnum(0);
+  L1Instruction *inst = lainir_new_instruction(kind);
+  if (!inst) return sexp_make_fixnum(0);
+  inst->data.jump.label = NULL;
+  if (!structured_add_object(unit, STRUCTURED_OBJECT_INST, inst)) {
+    free(inst);
+    return sexp_make_fixnum(0);
+  }
+  append_inst_to_block(block, inst);
+  return sexp_make_fixnum(1);
+}
+
+static sexp structured_block_break(
+    sexp ctx, sexp self, sexp_sint_t n, sexp block_value) {
+  return structured_block_jump(block_value, INST_BREAK);
+}
+
+static sexp structured_block_continue(
+    sexp ctx, sexp self, sexp_sint_t n, sexp block_value) {
+  return structured_block_jump(block_value, INST_CONTINUE);
+}
+
 /* Read-only physical L1Unit ABI.  The stable numeric tags below describe
  * node shape only; evaluation policy belongs to l1_interpreter.lain. */
 
@@ -1389,6 +1465,10 @@ void native_register_structured_unit_ffi(
   REG("l1.block-return!", 2, structured_block_return);
   REG("l1.block-call!", 2, structured_block_call);
   REG("l1.block-store!", 4, structured_block_store);
+  REG("l1.block-set!", 4, structured_block_set);
+  REG("l1.block-loop!", 1, structured_block_loop);
+  REG("l1.block-break!", 1, structured_block_break);
+  REG("l1.block-continue!", 1, structured_block_continue);
   REG("l1.unit-verify!", 2, structured_unit_verify);
   REG("l1.unit-verify-code!", 2, structured_unit_verify_code);
   REG("l1.unit-verify-message!", 2, structured_unit_verify_message);

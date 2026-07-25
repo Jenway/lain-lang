@@ -684,7 +684,10 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
         if (interp->should_return) break;
         if (interp->should_break) { interp->should_break = 0; break; }
         if (interp->should_continue) { interp->should_continue = 0; continue; }
-        break;
+        /* Falling off the structured body starts the next iteration.  This
+           matches the documented infinite-loop semantics and the C emitter's
+           `while (1)` lowering. */
+        continue;
       }
       interp->should_break = saved_break;
       interp->should_continue = saved_cont;

@@ -87,6 +87,14 @@ def main() -> int:
         ("nested if value", "if_value_nested.lain", None),
         ("if branch type mismatch", "if_value_type_mismatch.lain", "error 2402"),
         ("if condition must be bool", "if_value_bad_condition.lain", "error 2401"),
+        ("local assignment", "assignment.lain", None),
+        ("structured loop break continue", "loop_control.lain", None),
+        ("loop body fallthrough repeats", "loop_fallthrough.lain", None),
+        ("nested structured loop", "nested_loop.lain", None),
+        ("assignment rejects parameter", "assignment_parameter.lain", "error 2410"),
+        ("assignment type mismatch", "assignment_type_mismatch.lain", "error 2411"),
+        ("break outside loop", "break_outside_loop.lain", "error 2412"),
+        ("continue outside loop", "continue_outside_loop.lain", "error 2413"),
     )
     failed = 0
     for label, source, error in cases:

@@ -1368,12 +1368,35 @@ let elaborator_only_separators = std::func(node: i32) -> i32 {
     return elaborator_only_separators(syntax_next(node));
 }
 
-let elaborator_validate_statement_block = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32) -> i32 {
+let elaborator_validate_assignment = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    node: i32, body_start: i32) -> i32 {
+    let target: i32 = syntax_assignment_target(node);
+    if elaborator_name_node_is_local(function, node, target) != 1 {
+        return 2410;
+    }
+    let value: i32 = syntax_assignment_value(node);
+    let code: i32 = elaborator_validate_expr(
+        index, root, function, value, body_start, node);
+    if code != 0 { return code; }
+    let target_type: i32 = elaborator_expr_type_indexed_impl(
+        index, root, function, target, body_start, node);
+    let value_type: i32 = elaborator_expr_type_indexed_impl(
+        index, root, function, value, body_start, node);
+    if target_type == type_error() { return 2410; }
+    if type_same(target_type, value_type) != 1 { return 2411; }
+    return 0;
+}
+
+let elaborator_validate_statement_block_depth = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    node: i32, body_start: i32, loop_depth: i32) -> i32 {
     if node == 0 { return 0; }
     let form_tag: i32 = syntax_form_tag(node);
     if form_tag == 1 {
-        return elaborator_validate_statement_block(
-            index, root, function, syntax_next(node), body_start);
+        return elaborator_validate_statement_block_depth(
+            index, root, function, syntax_next(node), body_start,
+            loop_depth);
     }
     if form_tag == 2 {
         let binding: i32 = syntax_local_binding(node);
@@ -1395,15 +1418,17 @@ let elaborator_validate_statement_block = std::func(index: M13ElaborationIndex, 
         if declared_type_node != 0 {
             if value_type != type_from_syntax(declared_type_node) { return 2203; }
         }
-        return elaborator_validate_statement_block(
-            index, root, function, syntax_next(node), body_start);
+        return elaborator_validate_statement_block_depth(
+            index, root, function, syntax_next(node), body_start,
+            loop_depth);
     }
     if form_tag == 3 {
         let code: i32 = elaborator_validate_expr(
             index, root, function, node, body_start, node);
         if code != 0 { return code; }
-        return elaborator_validate_statement_block(
-            index, root, function, syntax_next(node), body_start);
+        return elaborator_validate_statement_block_depth(
+            index, root, function, syntax_next(node), body_start,
+            loop_depth);
     }
     if form_tag == 4 {
         let value: i32 = syntax_return_expr(node);
@@ -1423,13 +1448,52 @@ let elaborator_validate_statement_block = std::func(index: M13ElaborationIndex, 
         if elaborator_expr_type_indexed_impl(index, root, function, condition, body_start, node) !=
             type_bool() { return 2401; }
         let branch: i32 = syntax_left(syntax_if_statement_body(node));
-        let branch_code: i32 = elaborator_validate_statement_block(
-            index, root, function, branch, branch);
+        let branch_code: i32 = elaborator_validate_statement_block_depth(
+            index, root, function, branch, body_start, loop_depth);
         if branch_code != 0 { return branch_code; }
-        return elaborator_validate_statement_block(
-            index, root, function, syntax_next(node), body_start);
+        return elaborator_validate_statement_block_depth(
+            index, root, function, syntax_next(node), body_start,
+            loop_depth);
+    }
+    if form_tag == 6 {
+        let branch: i32 = syntax_left(syntax_loop_body(node));
+        let branch_code: i32 = elaborator_validate_statement_block_depth(
+            index, root, function, branch, body_start, loop_depth + 1);
+        if branch_code != 0 { return branch_code; }
+        return elaborator_validate_statement_block_depth(
+            index, root, function, syntax_next(node), body_start,
+            loop_depth);
+    }
+    if form_tag == 7 {
+        let code: i32 = elaborator_validate_assignment(
+            index, root, function, node, body_start);
+        if code != 0 { return code; }
+        return elaborator_validate_statement_block_depth(
+            index, root, function, syntax_next(node), body_start,
+            loop_depth);
+    }
+    if form_tag == 8 {
+        if loop_depth == 0 { return 2412; }
+        if elaborator_only_separators(syntax_next(node)) != 1 {
+            return 2501;
+        }
+        return 0;
+    }
+    if form_tag == 9 {
+        if loop_depth == 0 { return 2413; }
+        if elaborator_only_separators(syntax_next(node)) != 1 {
+            return 2501;
+        }
+        return 0;
     }
     return 2502;
+}
+
+let elaborator_validate_statement_block = std::func(
+    index: M13ElaborationIndex, root: i32, function: i32,
+    node: i32, body_start: i32) -> i32 {
+    return elaborator_validate_statement_block_depth(
+        index, root, function, node, body_start, 0);
 }
 
 let elaborator_validate_declared_body = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32) -> i32 {
@@ -1456,6 +1520,23 @@ let elaborator_validate_declared_body = std::func(index: M13ElaborationIndex, ro
         }
         return elaborator_validate_declared_body(index, root, function, syntax_next(node), body_start);
     }
+    if form_tag == 6 {
+        let branch: i32 = syntax_left(syntax_loop_body(node));
+        let branch_code: i32 = elaborator_validate_statement_block_depth(
+            index, root, function, branch, body_start, 1);
+        if branch_code != 0 { return branch_code; }
+        return elaborator_validate_declared_body(
+            index, root, function, syntax_next(node), body_start);
+    }
+    if form_tag == 7 {
+        let code: i32 = elaborator_validate_assignment(
+            index, root, function, node, body_start);
+        if code != 0 { return code; }
+        return elaborator_validate_declared_body(
+            index, root, function, syntax_next(node), body_start);
+    }
+    if form_tag == 8 { return 2412; }
+    if form_tag == 9 { return 2413; }
     if form_tag == 3 {
         let code: i32 = elaborator_validate_expr(
             index, root, function, node, body_start, node);
@@ -2003,15 +2084,35 @@ let workspace_validate_expr = std::func(
     return 2001;
 }
 
-let workspace_validate_statement_block = std::func(
+let workspace_validate_assignment = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     node: i32, body_start: i32) -> i32 {
+    let target: i32 = syntax_assignment_target(node);
+    if elaborator_name_node_is_local(function, node, target) != 1 {
+        return 2410;
+    }
+    let value: i32 = syntax_assignment_value(node);
+    let code: i32 = workspace_validate_expr(
+        workspace, module, root, function, value, body_start, node);
+    if code != 0 { return code; }
+    let target_type: i32 = workspace_expr_type(
+        workspace, module, root, function, target, body_start, node);
+    let value_type: i32 = workspace_expr_type(
+        workspace, module, root, function, value, body_start, node);
+    if target_type == type_error() { return 2410; }
+    if type_same(target_type, value_type) != 1 { return 2411; }
+    return 0;
+}
+
+let workspace_validate_statement_block_depth = std::func(
+    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+    node: i32, body_start: i32, loop_depth: i32) -> i32 {
     if node == 0 { return 0; }
     let form_tag: i32 = syntax_form_tag(node);
     if form_tag == 1 {
-        return workspace_validate_statement_block(
+        return workspace_validate_statement_block_depth(
             workspace, module, root, function,
-            syntax_next(node), body_start);
+            syntax_next(node), body_start, loop_depth);
     }
     if form_tag == 2 {
         let name_node: i32 = syntax_local_name_node(node);
@@ -2033,17 +2134,17 @@ let workspace_validate_statement_block = std::func(
                 return 2203;
             }
         }
-        return workspace_validate_statement_block(
+        return workspace_validate_statement_block_depth(
             workspace, module, root, function,
-            syntax_next(node), body_start);
+            syntax_next(node), body_start, loop_depth);
     }
     if form_tag == 3 {
         let code: i32 = workspace_validate_expr(
             workspace, module, root, function, node, body_start, node);
         if code != 0 { return code; }
-        return workspace_validate_statement_block(
+        return workspace_validate_statement_block_depth(
             workspace, module, root, function,
-            syntax_next(node), body_start);
+            syntax_next(node), body_start, loop_depth);
     }
     if form_tag == 4 {
         let value: i32 = syntax_return_expr(node);
@@ -2066,14 +2167,54 @@ let workspace_validate_statement_block = std::func(
             type_bool() { return 2401; }
         let branch: i32 = syntax_left(
             syntax_if_statement_body(node));
-        let branch_code: i32 = workspace_validate_statement_block(
-            workspace, module, root, function, branch, branch);
+        let branch_code: i32 = workspace_validate_statement_block_depth(
+            workspace, module, root, function, branch, body_start,
+            loop_depth);
         if branch_code != 0 { return branch_code; }
-        return workspace_validate_statement_block(
+        return workspace_validate_statement_block_depth(
             workspace, module, root, function,
-            syntax_next(node), body_start);
+            syntax_next(node), body_start, loop_depth);
+    }
+    if form_tag == 6 {
+        let branch: i32 = syntax_left(syntax_loop_body(node));
+        let branch_code: i32 = workspace_validate_statement_block_depth(
+            workspace, module, root, function, branch, body_start,
+            loop_depth + 1);
+        if branch_code != 0 { return branch_code; }
+        return workspace_validate_statement_block_depth(
+            workspace, module, root, function,
+            syntax_next(node), body_start, loop_depth);
+    }
+    if form_tag == 7 {
+        let code: i32 = workspace_validate_assignment(
+            workspace, module, root, function, node, body_start);
+        if code != 0 { return code; }
+        return workspace_validate_statement_block_depth(
+            workspace, module, root, function,
+            syntax_next(node), body_start, loop_depth);
+    }
+    if form_tag == 8 {
+        if loop_depth == 0 { return 2412; }
+        if elaborator_only_separators(syntax_next(node)) != 1 {
+            return 2501;
+        }
+        return 0;
+    }
+    if form_tag == 9 {
+        if loop_depth == 0 { return 2413; }
+        if elaborator_only_separators(syntax_next(node)) != 1 {
+            return 2501;
+        }
+        return 0;
     }
     return 2502;
+}
+
+let workspace_validate_statement_block = std::func(
+    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+    node: i32, body_start: i32) -> i32 {
+    return workspace_validate_statement_block_depth(
+        workspace, module, root, function, node, body_start, 0);
 }
 
 let workspace_validate_body = std::func(
@@ -2110,6 +2251,25 @@ let workspace_validate_body = std::func(
             workspace, module, root, function,
             syntax_next(node), body_start);
     }
+    if form_tag == 6 {
+        let branch: i32 = syntax_left(syntax_loop_body(node));
+        let branch_code: i32 = workspace_validate_statement_block_depth(
+            workspace, module, root, function, branch, body_start, 1);
+        if branch_code != 0 { return branch_code; }
+        return workspace_validate_body(
+            workspace, module, root, function,
+            syntax_next(node), body_start);
+    }
+    if form_tag == 7 {
+        let code: i32 = workspace_validate_assignment(
+            workspace, module, root, function, node, body_start);
+        if code != 0 { return code; }
+        return workspace_validate_body(
+            workspace, module, root, function,
+            syntax_next(node), body_start);
+    }
+    if form_tag == 8 { return 2412; }
+    if form_tag == 9 { return 2413; }
     if form_tag == 3 {
         let result_code: i32 = workspace_validate_expr(
             workspace, module, root, function, node, body_start, node);
