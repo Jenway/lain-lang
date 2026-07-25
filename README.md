@@ -21,7 +21,8 @@ Lain consists of three layers:
 
     - The self-hosted frontend is written in Lain and transforms RawAst into
       structured LAIN-IR.
-    - Scheme remains the stage-0/reference implementation during migration.
+    - Language features are implemented by Lain code rather than a C or
+      Scheme frontend.
 
 Lain aims to keep the compiler small and move most high-level language features into reusable meta libraries.
 
@@ -34,36 +35,24 @@ Lain aims to keep the compiler small and move most high-level language features 
 - Move high-level language features into libraries whenever possible.
 - Treat meta programming as a layer built on top of the IR rather than a special-purpose subsystem.
 
-## Build and Run
+## Bootstrap status
 
-Zig 0.16 or newer is the primary stage-0 build tool:
+`main` no longer contains the C compiler host, C RawAst implementation,
+C LAIN-IR storage/interpreter, Scheme bridge, or their Zig/Make build entry.
+This is an intentional cut: the remaining compiler implementation must be
+completed in Lain instead of silently delegating its data structures back to C.
 
-```text
-zig build                         # install tools and the stage-2 compiler artifact
-zig build test                    # build everything and run core tests
-zig build self-host-compiler      # explicitly rebuild/install stage2_compiler.l1
-zig build test-self-host          # prove the stage2 == stage3 byte fixed point
-zig build lainc -Dscheme=gauche  # select the Scheme host explicitly
-zig build lainc -Dscheme=chibi
-```
-
-Build products are installed under `zig-out/bin`. On Windows the default
-Scheme backend is Gauche; other platforms default to the bundled Chibi setup.
-The legacy Makefile remains available during the transition.
-
-Normal LAIN-IR emission uses the installed self-hosted artifact:
+The last buildable C/Scheme bootstrap is preserved in Git history and on the
+`bootstrap/stage0` branch.  The next bootstrap target is:
 
 ```text
-lainc --emit-l1 input.lain output.l1
-lainc --emit-workspace-l1 output.l1 math.lain app.lain
+bootstrap branch: LAIN-IR interpreter + frozen compiler.l1
+main branch:      Lain compiler and libraries written in .lain
 ```
 
-Multi-file compilation keeps one stable syntax unit per input, constructs the
-module dependency graph in Lain, and lowers modules in topological order.  The
-normal C launcher transports paths/bytes and calls the Lain-owned compiler ABI
-once; it does not join source files or re-run compilation to obtain
-diagnostics.  Module summaries can already outlive their syntax units, while
-persistent per-module incremental reuse remains a later milestone.
+The current `main` cutover commit is not buildable yet.  Its immediate work is
+to replace the remaining `ast.*`, `compiler.storage.*`, `l1.*`, and
+`meta.syntax.*` external contracts with Lain-owned implementations.
 
 `--emit-l1` currently accepts the self-hosting core subset: `i32`/`addr`
 callables, calls, arithmetic, explicit returns, foreign bindings, and canonical
@@ -78,11 +67,6 @@ and `import("path")`. `@` is reserved for attributes such as `@export` and
 `@foreign`; it does not introduce a second declaration grammar. Historical
 standalone `fn`, `struct`, `module`, and `import` declarations are rejected.
 
-The Scheme stage-0 frontend is maintained only on `bootstrap/stage0`.
-The main worktree may invoke it through the sibling bootstrap worktree when
-rebuilding the first compiler seed; normal compilation never falls back to it.
-
-The self-hosting gate rebuilds `stage3_compiler.l1` with the current stage-2
-artifact and requires both compiler artifacts to be byte-identical. It also
-requires identical generated LAIN-IR and diagnostics for representative
-single-file and module-workspace inputs.
+The final gate remains `stage2.l1 == stage3.l1`, but it must be restored using
+the bootstrap branch interpreter without reintroducing C facilities into
+`main`.

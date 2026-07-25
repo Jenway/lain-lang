@@ -1,6 +1,12 @@
-# M20.5 Self-hosting Ownership Audit
+# Historical M20.5 Self-hosting Ownership Audit
 
 Snapshot: 2026-07-25.
+
+> Historical note: the C host described below was removed from `main` after
+> this audit.  The current branch is intentionally at a pure-Lain cutover
+> point and is not buildable until the listed storage/parser/IR responsibilities
+> are reimplemented in Lain.  The old implementation remains in Git history
+> and `bootstrap/stage0`; it must not be copied back into `main`.
 
 ## Direct answer
 
