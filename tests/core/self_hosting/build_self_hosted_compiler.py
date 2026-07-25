@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "build/core-self-hosting/stage2_compiler.l1"
 STAMP = ROOT / "build/core-self-hosting/stage2_compiler.stamp.json"
 CACHE_SCHEMA = "lain-stage2-compiler-cache-v2"
+FORCE_REBUILD = os.environ.get("LAIN_SELF_HOST_FORCE_REBUILD") == "1"
 
 
 def tool(name: str) -> Path:
@@ -55,7 +56,8 @@ def build() -> Path:
     stage1 = build_stage1()
     source = build_compiler_source()
     fingerprint = input_fingerprint(source, stage1)
-    if (cache_matches(OUT, STAMP, CACHE_SCHEMA, fingerprint)
+    if (not FORCE_REBUILD
+            and cache_matches(OUT, STAMP, CACHE_SCHEMA, fingerprint)
             and compiler_artifact_valid(OUT)):
         return OUT
     OUT.parent.mkdir(parents=True, exist_ok=True)

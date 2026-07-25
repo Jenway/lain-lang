@@ -124,6 +124,20 @@ RULES: tuple[Rule, ...] = (
         rationale="M7/M8 evaluation policy must remain in the Lain interpreter.",
     ),
     Rule(
+        ident="M20_SINGLE_LOWERING_ENGINE",
+        description="single-source and workspace compilation must share LowerContext lowering",
+        paths=("packages/lain/compiler/lower.lain",),
+        pattern=(
+            r"^let lower_(?:name|call_args|if_value|expr|statement_block|"
+            r"body|function|functions)\b"
+        ),
+        allowed_count=0,
+        rationale=(
+            "Mode-specific resolution belongs in LowerContext; expression, "
+            "statement, and function lowering must not fork."
+        ),
+    ),
+    Rule(
         ident="M4_LAINIR_SOURCE_MODULE_DEBT",
         description="LAIN-IR must not own source-level module/export state",
         paths=("src/lainir/*.c", "src/lainir/*.h"),

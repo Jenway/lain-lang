@@ -141,6 +141,16 @@ pub fn build(b: *std.Build) void {
     });
     run_self_host.step.dependOn(b.getInstallStep());
     self_host_step.dependOn(&run_self_host.step);
+
+    const cold_bootstrap_step = b.step(
+        "test-cold-bootstrap",
+        "Rebuild the compiler from the pinned bootstrap/stage0 commit",
+    );
+    const run_cold_bootstrap = b.addSystemCommand(&.{
+        "python", "tests/core/self_hosting/run_cold_bootstrap.py",
+    });
+    run_cold_bootstrap.step.dependOn(b.getInstallStep());
+    cold_bootstrap_step.dependOn(&run_cold_bootstrap.step);
 }
 
 fn addCExecutable(

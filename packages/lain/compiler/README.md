@@ -24,8 +24,9 @@ Current scope:
 - `l1_unit_builder.lain`: opaque structured L1Unit construction API
 - `l1_interpreter.lain`: M7 Lain-owned interpreter for the structured L1
   bootstrap subset
-- `lower.lain`: direct lowering from Lain-owned Meta views into
-  physical L1 nodes
+- `lower.lain`: one `LowerContext`-driven lowering engine for both plain
+  source roots and indexed workspace modules; only name/type resolution is
+  mode-specific before physical L1 construction
 - `compiler_state.lain`: retained M9 compatibility probes; it is no longer in
   the active self-hosted compiler closure
 

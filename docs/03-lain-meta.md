@@ -1769,3 +1769,28 @@ procedure 生成完全相同的 2301 诊断；生成结果分别执行为 42。
 
 这意味着日常 Meta compiler 的策略主体已经可以由 Lain 表达并达到固定点；
 Scheme 仍用于制造 stage1 和承载尚未迁移的旧语言域，因此尚未从仓库删除。
+
+## 35. M20.3 统一 Lowering
+
+单文件和 workspace 保留两个编译入口，但不再各自维护表达式、语句和函数
+lowerer。两者都构造 `LowerContext` 并进入同一条递归 lowering：
+
+```text
+plain root --------> LowerContext(mode = plain) -----\
+                                                     -> expr/body/function -> L1Unit
+workspace module --> LowerContext(mode = workspace) -/
+```
+
+模式差异只允许存在于两个查询中：
+
+```text
+source callable / foreign capability / module symbol -> physical link name
+local or cross-module expression                     -> physical type tag
+```
+
+`consteval`、specialization、aggregate、enum/match、structured if/loop、
+assignment 和普通调用均由共享 engine 处理。旧的 workspace-only
+`lower_expr`、`lower_body`、`lower_function` 已删除；boundary lint
+`M20_SINGLE_LOWERING_ENGINE` 防止平行实现重新出现。两个入口仍分别负责
+workspace 的链接验证和 plain source 的入口选择，这属于编排差异，不属于
+语言 lowering 策略。

@@ -25,6 +25,7 @@ PARTS = ROOT / "build/core-self-hosting/artifact-parts"
 STAMP = ROOT / "build/core-self-hosting/meta_compiler.stamp.json"
 CACHE_SCHEMA = "lain-meta-artifact-cache-v2"
 COMPILER_API_SCHEMA = "1"
+FORCE_REBUILD = os.environ.get("LAIN_SELF_HOST_FORCE_REBUILD") == "1"
 EXPECTED_HOST_CAPABILITIES = {
     "compiler.storage-new!",
     "compiler.storage-reserve!",
@@ -234,7 +235,8 @@ def build() -> Path:
     lainc = compiler()
     source = build_compiler_source()
     fingerprint = input_fingerprint(source)
-    if (cache_matches(OUT, STAMP, CACHE_SCHEMA, fingerprint)
+    if (not FORCE_REBUILD
+            and cache_matches(OUT, STAMP, CACHE_SCHEMA, fingerprint)
             and compiler_artifact_valid(OUT)):
         return OUT
     PARTS.mkdir(parents=True, exist_ok=True)
