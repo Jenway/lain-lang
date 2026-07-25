@@ -121,6 +121,50 @@ let elaborator_index_destroy = std::func(index: M13ElaborationIndex) -> i32 {
     return m13_index_destroy(index);
 }
 
+// One elaboration environment serves both a plain source root and a module
+// inside an indexed workspace.  Language rules are shared; only
+// cross-module resolution depends on workspace_mode.
+@export
+let ElaborationContext: type = std::struct {
+    index: M13ElaborationIndex,
+    workspace: ModuleWorkspace,
+    module: i32,
+    root: i32,
+    workspace_mode: i32,
+}
+
+let elaboration_plain_context = std::func(
+    index: M13ElaborationIndex, root: i32) -> ElaborationContext {
+    return ElaborationContext {
+        index: index,
+        workspace: module_workspace_new(),
+        module: 0,
+        root: root,
+        workspace_mode: 0,
+    };
+}
+
+let elaboration_workspace_context = std::func(
+    workspace: ModuleWorkspace, module: i32, root: i32)
+    -> ElaborationContext {
+    return ElaborationContext {
+        index: m13_index_new(root),
+        workspace: workspace,
+        module: module,
+        root: root,
+        workspace_mode: 1,
+    };
+}
+
+let elaboration_context_destroy = std::func(
+    context: ElaborationContext) -> i32 {
+    let destroyed_index: i32 = m13_index_destroy(context.index);
+    if context.workspace_mode == 0 {
+        return module_workspace_destroy(context.workspace);
+    }
+    return destroyed_index;
+}
+
 let m13_find = std::func(index: M13ElaborationIndex, name: addr) -> i32 {
     return m11_symbol_table_find(index.functions, name);
 }
@@ -825,6 +869,125 @@ let elaborator_name_node_is_local = std::func(
     if surface_find_visible_local_node(
         function, stop, reference) != 0 { return 1; }
     return 0;
+}
+
+let elaboration_context_name_type = std::func(
+    context: ElaborationContext, function: i32,
+    body_start: i32, stop: i32, reference: i32) -> i32 {
+    let index: M13ElaborationIndex = context.index;
+    if index.arm_binding != 0 {
+        if syntax_identifier_equal(index.arm_binding, reference) == 1 {
+            return type_from_syntax(index.arm_binding_type);
+        }
+    }
+    let local: i32 = surface_find_visible_local_node(
+        function, stop, reference);
+    if local != 0 {
+        return elaboration_context_expr_type(
+            context, function, syntax_local_value_node(local),
+            body_start, local);
+    }
+    let param: i32 = syntax_find_param_node(
+        syntax_function_first_param(function), reference);
+    if param == 0 { return type_error(); }
+    let param_type: i32 = type_from_syntax(
+        syntax_param_type_node(param));
+    if type_is_comptime(param_type) == 1 {
+        return type_comptime_argument(param_type);
+    }
+    return param_type;
+}
+
+let elaboration_context_expr_type = std::func(
+    context: ElaborationContext, function: i32,
+    node: i32, body_start: i32, stop: i32) -> i32 {
+    if syntax_is_consteval_call(node) == 1 {
+        return elaboration_context_expr_type(
+            context, function, syntax_consteval_operand(node),
+            body_start, stop);
+    }
+    let tag: i32 = syntax_expr_tag(node);
+    if tag == 1 { return type_i32(); }
+    if tag == 2 {
+        return elaboration_context_name_type(
+            context, function, body_start, stop, node);
+    }
+    if tag == 3 { return type_i32(); }
+    if tag == 4 {
+        let callee: i32 = m13_find_node(
+            context.index, syntax_call_callee(node));
+        if callee == 0 { return type_error(); }
+        if syntax_function_is_generic(callee) == 1 {
+            return elaborator_generic_return_type(
+                callee, syntax_call_first_arg(node));
+        }
+        return elaborator_function_return_type(callee);
+    }
+    if tag == 5 { return type_bool(); }
+    if tag == 8 { return type_bool(); }
+    if tag == 12 { return type_bool(); }
+    if tag == 13 { return type_bool(); }
+    if tag == 14 { return type_bool(); }
+    if tag == 15 { return type_bool(); }
+    if tag == 16 { return type_i32(); }
+    if tag == 17 { return type_i32(); }
+    if tag == 18 { return type_i32(); }
+    if tag == 6 {
+        return elaboration_context_expr_type(
+            context, function, syntax_if_then_expr(node),
+            body_start, stop);
+    }
+    if tag == 7 { return type_addr(); }
+    if tag == 9 {
+        if context.workspace_mode != 1 { return type_error(); }
+        let callee: i32 = workspace_member_callee(
+            context.workspace, context.module, node);
+        if callee == 0 { return type_error(); }
+        return elaborator_function_return_type(callee);
+    }
+    if tag == 10 { return type_addr(); }
+    if tag == 21 { return type_addr(); }
+    if tag == 22 {
+        return m13_match_result_type(
+            context.index, context.root, function,
+            node, body_start, stop);
+    }
+    if tag == 11 {
+        return type_from_syntax(m13_expr_type_node(
+            context.index, context.root, function,
+            node, body_start, stop));
+    }
+    if tag == 19 { return type_unit(); }
+    if tag == 20 {
+        let member: addr = syntax_interface_member_name(node);
+        if syntax_text_equal(member, "make_dyn") == 1 {
+            return type_addr();
+        }
+        if syntax_text_equal(member, "make_vtable") == 1 {
+            return type_addr();
+        }
+        let callee: i32 = elaborator_interface_callee(
+            context.index, context.root, node);
+        if callee == 0 { return type_error(); }
+        return elaborator_function_return_type(callee);
+    }
+    return type_error();
+}
+
+@export
+let elaborator_context_expr_type_indexed = std::func(
+    index: M13ElaborationIndex, workspace: ModuleWorkspace,
+    module: i32, root: i32, workspace_mode: i32,
+    function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
+    return elaboration_context_expr_type(
+        ElaborationContext {
+            index: index,
+            workspace: workspace,
+            module: module,
+            root: root,
+            workspace_mode: workspace_mode,
+        },
+        function, node, body_start, stop);
 }
 
 let elaborator_expr_type_indexed_impl = std::func(index: M13ElaborationIndex, root: i32, function: i32, node: i32, body_start: i32, stop: i32) -> i32 {
@@ -1600,16 +1763,13 @@ let elaborator_specialization_depth = std::func(
 }
 
 let elaborator_validate_function_semantics = std::func(index: M13ElaborationIndex, root: i32, function: i32) -> i32 {
-    let name: addr = syntax_function_name(function);
-    if index.duplicate != 0 { return 2111; }
-    let param_code: i32 = elaborator_validate_param_names(syntax_function_first_param(function));
-    if param_code != 0 { return param_code; }
-    let depth_code: i32 = elaborator_specialization_depth(
-        index, function, name, 1);
-    if depth_code != 0 { return depth_code; }
-    let body: i32 = syntax_function_body(function);
-    let first: i32 = syntax_left(body);
-    return elaborator_validate_declared_body(index, root, function, first, first);
+    let context: ElaborationContext = elaboration_plain_context(
+        index, root);
+    let result: i32 = elaboration_context_validate_function(
+        context, function);
+    let destroyed_workspace: i32 = module_workspace_destroy(
+        context.workspace);
+    return result;
 }
 
 let elaborator_validate_functions = std::func(index: M13ElaborationIndex, root: i32, function: i32) -> i32 {
@@ -1833,33 +1993,6 @@ let elaborator_validate_named = std::func(root: i32, name: addr) -> i32 {
 
 // M5 module-context elaboration.  Canonical module bodies contain only
 // unified let bindings.
-let workspace_type_from_syntax = std::func(node: i32) -> i32 {
-    if syntax_is_atom_text(node, "i32") == 1 { return type_i32(); }
-    if syntax_is_atom_text(node, "addr") == 1 { return type_addr(); }
-    return type_error();
-}
-
-let workspace_function_return_type = std::func(function: i32) -> i32 {
-    return workspace_type_from_syntax(
-        syntax_right(syntax_function_signature(function)));
-}
-
-let workspace_name_type = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
-    body_start: i32, stop: i32, reference: i32) -> i32 {
-    let local: i32 = surface_find_visible_local_node(
-        function, stop, reference);
-    if local != 0 {
-        return workspace_expr_type(
-            workspace, module, root, function,
-            syntax_local_value_node(local), body_start, local);
-    }
-    let param: i32 = syntax_find_param_node(
-        syntax_function_first_param(function), reference);
-    if param == 0 { return type_error(); }
-    return workspace_type_from_syntax(syntax_param_type_node(param));
-}
-
 let workspace_member_callee = std::func(
     workspace: ModuleWorkspace, module: i32, node: i32) -> i32 {
     let target: i32 = module_workspace_resolve_alias(
@@ -1869,88 +2002,65 @@ let workspace_member_callee = std::func(
         target, syntax_member_name(node));
 }
 
-let workspace_expr_type = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
-    node: i32, body_start: i32, stop: i32) -> i32 {
-    let tag: i32 = syntax_expr_tag(node);
-    if tag == 1 { return type_i32(); }
-    if tag == 7 { return type_addr(); }
-    if tag == 2 {
-        return workspace_name_type(
-            workspace, module, root, function,
-            body_start, stop, node);
-    }
-    if tag == 3 { return type_i32(); }
-    if tag == 4 {
-        let callee: i32 = module_find_procedure(
-            root, syntax_call_name(node));
-        if callee == 0 { return type_error(); }
-        return workspace_function_return_type(callee);
-    }
-    if tag == 5 { return type_bool(); }
-    if tag == 8 { return type_bool(); }
-    if tag == 6 {
-        return workspace_expr_type(
-            workspace, module, root, function,
-            syntax_if_then_expr(node), body_start, stop);
-    }
-    if tag == 9 {
-        let callee: i32 = workspace_member_callee(workspace, module, node);
-        if callee == 0 { return type_error(); }
-        return workspace_function_return_type(callee);
-    }
-    return type_error();
-}
-
 @export
 
 let elaborator_module_expr_type_indexed = std::func(
     workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
-    return workspace_expr_type(
-        workspace, module, root, function, node, body_start, stop);
+    let context: ElaborationContext = elaboration_workspace_context(
+        workspace, module, root);
+    let result: i32 = elaboration_context_expr_type(
+        context, function, node, body_start, stop);
+    let destroyed: i32 = elaboration_context_destroy(context);
+    return result;
 }
 
-let workspace_validate_args = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+let elaboration_context_validate_args = std::func(
+    context: ElaborationContext, function: i32,
     arg: i32, param: i32, body_start: i32, stop: i32) -> i32 {
     if arg == 0 { return 0; }
-    let code: i32 = workspace_validate_expr(
-        workspace, module, root, function, arg, body_start, stop);
+    let code: i32 = elaboration_context_validate_expr(
+        context, function, arg, body_start, stop);
     if code != 0 { return code; }
-    let expected: i32 = workspace_type_from_syntax(
+    let expected: i32 = type_from_syntax(
         syntax_param_type_node(param));
-    if workspace_expr_type(
-        workspace, module, root, function, arg, body_start, stop) != expected {
+    if elaboration_context_expr_type(
+        context, function, arg, body_start, stop) != expected {
         return 2304;
     }
-    return workspace_validate_args(
-        workspace, module, root, function,
+    return elaboration_context_validate_args(
+        context, function,
         syntax_arg_next(arg), syntax_param_next(param),
         body_start, stop);
 }
 
-let workspace_validate_local_call = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+let elaboration_context_validate_local_call = std::func(
+    context: ElaborationContext, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
-    let name: addr = syntax_call_name(node);
-    let matches: i32 = module_procedure_name_count(root, name);
-    if matches == 0 { return 2301; }
-    if matches != 1 { return 2302; }
-    let callee: i32 = module_find_procedure(root, name);
+    let index: M13ElaborationIndex = context.index;
+    if index.duplicate != 0 { return 2302; }
+    let callee: i32 = m13_find_node(
+        index, syntax_call_callee(node));
+    if callee == 0 { return 2301; }
     let args: i32 = syntax_call_first_arg(node);
     if syntax_arg_count(args) != syntax_param_count(
         syntax_function_first_param(callee)) { return 2303; }
-    return workspace_validate_args(
-        workspace, module, root, function, args,
+    if syntax_function_is_generic(callee) == 1 {
+        return elaborator_validate_generic_args(
+            index, context.root, function, args,
+            syntax_function_first_param(callee), body_start, stop, "", 0);
+    }
+    return elaboration_context_validate_args(
+        context, function, args,
         syntax_function_first_param(callee), body_start, stop);
 }
 
-let workspace_validate_member_call = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+let elaboration_context_validate_member_call = std::func(
+    context: ElaborationContext, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
+    if context.workspace_mode != 1 { return 2301; }
     let target: i32 = module_workspace_resolve_alias(
-        workspace, module, syntax_member_base_name(node));
+        context.workspace, context.module, syntax_member_base_name(node));
     if target == 0 { return 4104; }
     let member: addr = syntax_member_name(node);
     let any_binding: i32 = module_find_binding(
@@ -1962,20 +2072,20 @@ let workspace_validate_member_call = std::func(
     let args: i32 = syntax_member_first_arg(node);
     if syntax_arg_count(args) != syntax_param_count(
         syntax_function_first_param(callee)) { return 2303; }
-    return workspace_validate_args(
-        workspace, module, root, function, args,
+    return elaboration_context_validate_args(
+        context, function, args,
         syntax_function_first_param(callee), body_start, stop);
 }
 
-let workspace_validate_if = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+let elaboration_context_validate_if = std::func(
+    context: ElaborationContext, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
     let condition: i32 = syntax_if_condition(node);
-    let condition_code: i32 = workspace_validate_expr(
-        workspace, module, root, function, condition, body_start, stop);
+    let condition_code: i32 = elaboration_context_validate_expr(
+        context, function, condition, body_start, stop);
     if condition_code != 0 { return condition_code; }
-    if workspace_expr_type(
-        workspace, module, root, function, condition, body_start, stop) !=
+    if elaboration_context_expr_type(
+        context, function, condition, body_start, stop) !=
         type_bool() { return 2401; }
     let then_expr: i32 = syntax_if_then_expr(node);
     let else_expr: i32 = syntax_if_else_expr(node);
@@ -1983,135 +2093,209 @@ let workspace_validate_if = std::func(
     if else_expr == 0 { return 2403; }
     if syntax_next(then_expr) != 0 { return 2403; }
     if syntax_next(else_expr) != 0 { return 2403; }
-    let then_code: i32 = workspace_validate_expr(
-        workspace, module, root, function, then_expr, body_start, stop);
+    let then_code: i32 = elaboration_context_validate_expr(
+        context, function, then_expr, body_start, stop);
     if then_code != 0 { return then_code; }
-    let else_code: i32 = workspace_validate_expr(
-        workspace, module, root, function, else_expr, body_start, stop);
+    let else_code: i32 = elaboration_context_validate_expr(
+        context, function, else_expr, body_start, stop);
     if else_code != 0 { return else_code; }
-    let then_type: i32 = workspace_expr_type(
-        workspace, module, root, function, then_expr, body_start, stop);
-    let else_type: i32 = workspace_expr_type(
-        workspace, module, root, function, else_expr, body_start, stop);
+    let then_type: i32 = elaboration_context_expr_type(
+        context, function, then_expr, body_start, stop);
+    let else_type: i32 = elaboration_context_expr_type(
+        context, function, else_expr, body_start, stop);
     if then_type == type_error() { return 2402; }
     if type_same(then_type, else_type) != 1 { return 2402; }
     return 0;
 }
 
-let workspace_validate_expr = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+let elaboration_context_validate_expr = std::func(
+    context: ElaborationContext, function: i32,
     node: i32, body_start: i32, stop: i32) -> i32 {
+    if syntax_is_std_call(node, "consteval") == 1 {
+        if syntax_is_consteval_call(node) != 1 { return 2802; }
+        let operand: i32 = syntax_consteval_operand(node);
+        let dependency: i32 = elaborator_consteval_dependency_code(
+            context.index, context.root, function,
+            operand, body_start, stop);
+        if dependency != 0 { return dependency; }
+        return elaboration_context_validate_expr(
+            context, function, operand, body_start, stop);
+    }
     let tag: i32 = syntax_expr_tag(node);
+    if tag == 21 {
+        return elaborator_validate_enum_reference(
+            context.index, context.root, function,
+            node, body_start, stop);
+    }
+    if tag == 22 {
+        return elaborator_validate_match(
+            context.index, context.root, function,
+            node, body_start, stop);
+    }
     if tag == 1 { return 0; }
     if tag == 7 { return 0; }
+    if tag == 19 {
+        if syntax_text_equal(
+            syntax_macro_name(node), "println") != 1 { return 2701; }
+        if surface_has_std_io_import(context.root) != 1 { return 2702; }
+        let argument: i32 = syntax_macro_first_arg(node);
+        if syntax_arg_count(argument) != 1 { return 2703; }
+        if syntax_is_string_atom(argument) != 1 { return 2704; }
+        return 0;
+    }
+    if tag == 20 {
+        return elaborator_validate_interface_call(
+            context.index, context.root, function,
+            node, body_start, stop);
+    }
+    if tag == 10 {
+        return elaborator_validate_aggregate_fields(
+            context.index, context.root, function,
+            syntax_aggregate_first_field(node), body_start, stop);
+    }
+    if tag == 11 {
+        return elaboration_context_validate_expr(
+            context, function, syntax_left(node), body_start, stop);
+    }
     if tag == 2 {
+        let index: M13ElaborationIndex = context.index;
+        if index.arm_binding != 0 {
+            if syntax_identifier_equal(index.arm_binding, node) == 1 {
+                return 0;
+            }
+        }
         if elaborator_name_visible_node_impl(
             function, body_start, stop, node) == 1 { return 0; }
         return 2003;
     }
     if tag == 3 {
-        let left_code: i32 = workspace_validate_expr(
-            workspace, module, root, function,
+        let left_code: i32 = elaboration_context_validate_expr(
+            context, function,
             syntax_left(node), body_start, stop);
         if left_code != 0 { return left_code; }
-        let right_code: i32 = workspace_validate_expr(
-            workspace, module, root, function,
+        let right_code: i32 = elaboration_context_validate_expr(
+            context, function,
             syntax_right(node), body_start, stop);
         if right_code != 0 { return right_code; }
-        if workspace_expr_type(
-            workspace, module, root, function,
+        if elaboration_context_expr_type(
+            context, function,
             syntax_left(node), body_start, stop) != type_i32() {
             return 2201;
         }
-        if workspace_expr_type(
-            workspace, module, root, function,
+        if elaboration_context_expr_type(
+            context, function,
             syntax_right(node), body_start, stop) != type_i32() {
             return 2201;
         }
         return 0;
     }
     if tag == 4 {
-        return workspace_validate_local_call(
-            workspace, module, root, function, node, body_start, stop);
+        return elaboration_context_validate_local_call(
+            context, function, node, body_start, stop);
     }
     if tag == 9 {
-        return workspace_validate_member_call(
-            workspace, module, root, function, node, body_start, stop);
+        return elaboration_context_validate_member_call(
+            context, function, node, body_start, stop);
     }
     if tag == 5 {
-        let left_code: i32 = workspace_validate_expr(
-            workspace, module, root, function,
+        let left_code: i32 = elaboration_context_validate_expr(
+            context, function,
             syntax_left(node), body_start, stop);
         if left_code != 0 { return left_code; }
-        let right_code: i32 = workspace_validate_expr(
-            workspace, module, root, function,
+        let right_code: i32 = elaboration_context_validate_expr(
+            context, function,
             syntax_right(node), body_start, stop);
         if right_code != 0 { return right_code; }
-        let left_type: i32 = workspace_expr_type(
-            workspace, module, root, function,
+        let left_type: i32 = elaboration_context_expr_type(
+            context, function,
             syntax_left(node), body_start, stop);
-        let right_type: i32 = workspace_expr_type(
-            workspace, module, root, function,
+        let right_type: i32 = elaboration_context_expr_type(
+            context, function,
             syntax_right(node), body_start, stop);
         if left_type == type_error() { return 2202; }
         if type_same(left_type, right_type) != 1 { return 2202; }
         return 0;
     }
     if tag == 8 {
-        let left_code: i32 = workspace_validate_expr(
-            workspace, module, root, function,
+        let left_code: i32 = elaboration_context_validate_expr(
+            context, function,
             syntax_left(node), body_start, stop);
         if left_code != 0 { return left_code; }
-        let right_code: i32 = workspace_validate_expr(
-            workspace, module, root, function,
+        let right_code: i32 = elaboration_context_validate_expr(
+            context, function,
             syntax_right(node), body_start, stop);
         if right_code != 0 { return right_code; }
-        let left_type: i32 = workspace_expr_type(
-            workspace, module, root, function,
+        let left_type: i32 = elaboration_context_expr_type(
+            context, function,
             syntax_left(node), body_start, stop);
-        let right_type: i32 = workspace_expr_type(
-            workspace, module, root, function,
+        let right_type: i32 = elaboration_context_expr_type(
+            context, function,
             syntax_right(node), body_start, stop);
         if left_type == type_error() { return 2202; }
         if type_same(left_type, right_type) != 1 { return 2202; }
         return 0;
     }
+    if m13_is_numeric_binary_tag(tag) == 1 {
+        let left_code: i32 = elaboration_context_validate_expr(
+            context, function, syntax_left(node), body_start, stop);
+        if left_code != 0 { return left_code; }
+        let right_code: i32 = elaboration_context_validate_expr(
+            context, function, syntax_right(node), body_start, stop);
+        if right_code != 0 { return right_code; }
+        if elaboration_context_expr_type(
+            context, function, syntax_left(node),
+            body_start, stop) != type_i32() { return 2201; }
+        if elaboration_context_expr_type(
+            context, function, syntax_right(node),
+            body_start, stop) != type_i32() { return 2201; }
+        return 0;
+    }
+    if tag == 18 {
+        let code: i32 = elaboration_context_validate_expr(
+            context, function, syntax_prefix_operand(node),
+            body_start, stop);
+        if code != 0 { return code; }
+        if elaboration_context_expr_type(
+            context, function, syntax_prefix_operand(node),
+            body_start, stop) != type_i32() { return 2201; }
+        return 0;
+    }
     if tag == 6 {
-        return workspace_validate_if(
-            workspace, module, root, function, node, body_start, stop);
+        return elaboration_context_validate_if(
+            context, function, node, body_start, stop);
     }
     if syntax_kind(node) == 1 { return 2002; }
     return 2001;
 }
 
-let workspace_validate_assignment = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+let elaboration_context_validate_assignment = std::func(
+    context: ElaborationContext, function: i32,
     node: i32, body_start: i32) -> i32 {
     let target: i32 = syntax_assignment_target(node);
     if elaborator_name_node_is_local(function, node, target) != 1 {
         return 2410;
     }
     let value: i32 = syntax_assignment_value(node);
-    let code: i32 = workspace_validate_expr(
-        workspace, module, root, function, value, body_start, node);
+    let code: i32 = elaboration_context_validate_expr(
+        context, function, value, body_start, node);
     if code != 0 { return code; }
-    let target_type: i32 = workspace_expr_type(
-        workspace, module, root, function, target, body_start, node);
-    let value_type: i32 = workspace_expr_type(
-        workspace, module, root, function, value, body_start, node);
+    let target_type: i32 = elaboration_context_expr_type(
+        context, function, target, body_start, node);
+    let value_type: i32 = elaboration_context_expr_type(
+        context, function, value, body_start, node);
     if target_type == type_error() { return 2410; }
     if type_same(target_type, value_type) != 1 { return 2411; }
     return 0;
 }
 
-let workspace_validate_statement_block_depth = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+let elaboration_context_validate_statement_block_depth = std::func(
+    context: ElaborationContext, function: i32,
     node: i32, body_start: i32, loop_depth: i32) -> i32 {
     if node == 0 { return 0; }
     let form_tag: i32 = syntax_form_tag(node);
     if form_tag == 1 {
-        return workspace_validate_statement_block_depth(
-            workspace, module, root, function,
+        return elaboration_context_validate_statement_block_depth(
+            context, function,
             syntax_next(node), body_start, loop_depth);
     }
     if form_tag == 2 {
@@ -2122,75 +2306,75 @@ let workspace_validate_statement_block_depth = std::func(
             return 2102;
         }
         let value: i32 = syntax_local_value_node(node);
-        let value_code: i32 = workspace_validate_expr(
-            workspace, module, root, function, value, body_start, node);
+        let value_code: i32 = elaboration_context_validate_expr(
+            context, function, value, body_start, node);
         if value_code != 0 { return value_code; }
-        let value_type: i32 = workspace_expr_type(
-            workspace, module, root, function, value, body_start, node);
+        let value_type: i32 = elaboration_context_expr_type(
+            context, function, value, body_start, node);
         if value_type == type_error() { return 2203; }
         let declared: i32 = syntax_local_type_node(node);
         if declared != 0 {
-            if value_type != workspace_type_from_syntax(declared) {
+            if value_type != type_from_syntax(declared) {
                 return 2203;
             }
         }
-        return workspace_validate_statement_block_depth(
-            workspace, module, root, function,
+        return elaboration_context_validate_statement_block_depth(
+            context, function,
             syntax_next(node), body_start, loop_depth);
     }
     if form_tag == 3 {
-        let code: i32 = workspace_validate_expr(
-            workspace, module, root, function, node, body_start, node);
+        let code: i32 = elaboration_context_validate_expr(
+            context, function, node, body_start, node);
         if code != 0 { return code; }
-        return workspace_validate_statement_block_depth(
-            workspace, module, root, function,
+        return elaboration_context_validate_statement_block_depth(
+            context, function,
             syntax_next(node), body_start, loop_depth);
     }
     if form_tag == 4 {
         let value: i32 = syntax_return_expr(node);
-        let value_code: i32 = workspace_validate_expr(
-            workspace, module, root, function, value, body_start, node);
+        let value_code: i32 = elaboration_context_validate_expr(
+            context, function, value, body_start, node);
         if value_code != 0 { return value_code; }
-        if workspace_expr_type(
-            workspace, module, root, function, value, body_start, node) !=
-            workspace_function_return_type(function) { return 2204; }
+        if elaboration_context_expr_type(
+            context, function, value, body_start, node) !=
+            elaborator_function_return_type(function) { return 2204; }
         if elaborator_only_separators(syntax_next(node)) != 1 { return 2501; }
         return 0;
     }
     if form_tag == 5 {
         let condition: i32 = syntax_if_statement_condition(node);
-        let condition_code: i32 = workspace_validate_expr(
-            workspace, module, root, function, condition, body_start, node);
+        let condition_code: i32 = elaboration_context_validate_expr(
+            context, function, condition, body_start, node);
         if condition_code != 0 { return condition_code; }
-        if workspace_expr_type(
-            workspace, module, root, function, condition, body_start, node) !=
+        if elaboration_context_expr_type(
+            context, function, condition, body_start, node) !=
             type_bool() { return 2401; }
         let branch: i32 = syntax_left(
             syntax_if_statement_body(node));
-        let branch_code: i32 = workspace_validate_statement_block_depth(
-            workspace, module, root, function, branch, body_start,
+        let branch_code: i32 = elaboration_context_validate_statement_block_depth(
+            context, function, branch, body_start,
             loop_depth);
         if branch_code != 0 { return branch_code; }
-        return workspace_validate_statement_block_depth(
-            workspace, module, root, function,
+        return elaboration_context_validate_statement_block_depth(
+            context, function,
             syntax_next(node), body_start, loop_depth);
     }
     if form_tag == 6 {
         let branch: i32 = syntax_left(syntax_loop_body(node));
-        let branch_code: i32 = workspace_validate_statement_block_depth(
-            workspace, module, root, function, branch, body_start,
+        let branch_code: i32 = elaboration_context_validate_statement_block_depth(
+            context, function, branch, body_start,
             loop_depth + 1);
         if branch_code != 0 { return branch_code; }
-        return workspace_validate_statement_block_depth(
-            workspace, module, root, function,
+        return elaboration_context_validate_statement_block_depth(
+            context, function,
             syntax_next(node), body_start, loop_depth);
     }
     if form_tag == 7 {
-        let code: i32 = workspace_validate_assignment(
-            workspace, module, root, function, node, body_start);
+        let code: i32 = elaboration_context_validate_assignment(
+            context, function, node, body_start);
         if code != 0 { return code; }
-        return workspace_validate_statement_block_depth(
-            workspace, module, root, function,
+        return elaboration_context_validate_statement_block_depth(
+            context, function,
             syntax_next(node), body_start, loop_depth);
     }
     if form_tag == 8 {
@@ -2210,21 +2394,21 @@ let workspace_validate_statement_block_depth = std::func(
     return 2502;
 }
 
-let workspace_validate_statement_block = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+let elaboration_context_validate_statement_block = std::func(
+    context: ElaborationContext, function: i32,
     node: i32, body_start: i32) -> i32 {
-    return workspace_validate_statement_block_depth(
-        workspace, module, root, function, node, body_start, 0);
+    return elaboration_context_validate_statement_block_depth(
+        context, function, node, body_start, 0);
 }
 
-let workspace_validate_body = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32,
+let elaboration_context_validate_body = std::func(
+    context: ElaborationContext, function: i32,
     node: i32, body_start: i32) -> i32 {
     if node == 0 { return 2103; }
     let form_tag: i32 = syntax_form_tag(node);
     if form_tag == 1 {
-        return workspace_validate_body(
-            workspace, module, root, function,
+        return elaboration_context_validate_body(
+            context, function,
             syntax_next(node), body_start);
     }
     if form_tag == 2 {
@@ -2235,105 +2419,110 @@ let workspace_validate_body = std::func(
             return 2102;
         }
         let value: i32 = syntax_local_value_node(node);
-        let value_code: i32 = workspace_validate_expr(
-            workspace, module, root, function, value, body_start, node);
+        let value_code: i32 = elaboration_context_validate_expr(
+            context, function, value, body_start, node);
         if value_code != 0 { return value_code; }
-        let value_type: i32 = workspace_expr_type(
-            workspace, module, root, function, value, body_start, node);
+        let value_type: i32 = elaboration_context_expr_type(
+            context, function, value, body_start, node);
         if value_type == type_error() { return 2203; }
         let declared: i32 = syntax_local_type_node(node);
         if declared != 0 {
-            if value_type != workspace_type_from_syntax(declared) {
+            if value_type != type_from_syntax(declared) {
                 return 2203;
             }
         }
-        return workspace_validate_body(
-            workspace, module, root, function,
+        return elaboration_context_validate_body(
+            context, function,
             syntax_next(node), body_start);
     }
     if form_tag == 6 {
         let branch: i32 = syntax_left(syntax_loop_body(node));
-        let branch_code: i32 = workspace_validate_statement_block_depth(
-            workspace, module, root, function, branch, body_start, 1);
+        let branch_code: i32 = elaboration_context_validate_statement_block_depth(
+            context, function, branch, body_start, 1);
         if branch_code != 0 { return branch_code; }
-        return workspace_validate_body(
-            workspace, module, root, function,
+        return elaboration_context_validate_body(
+            context, function,
             syntax_next(node), body_start);
     }
     if form_tag == 7 {
-        let code: i32 = workspace_validate_assignment(
-            workspace, module, root, function, node, body_start);
+        let code: i32 = elaboration_context_validate_assignment(
+            context, function, node, body_start);
         if code != 0 { return code; }
-        return workspace_validate_body(
-            workspace, module, root, function,
+        return elaboration_context_validate_body(
+            context, function,
             syntax_next(node), body_start);
     }
     if form_tag == 8 { return 2412; }
     if form_tag == 9 { return 2413; }
     if form_tag == 3 {
-        let result_code: i32 = workspace_validate_expr(
-            workspace, module, root, function, node, body_start, node);
+        let result_code: i32 = elaboration_context_validate_expr(
+            context, function, node, body_start, node);
         if result_code != 0 { return result_code; }
         if elaborator_only_separators(syntax_next(node)) == 1 {
-            if workspace_expr_type(
-                workspace, module, root, function, node, body_start, node) !=
-                workspace_function_return_type(function) { return 2204; }
+            if elaboration_context_expr_type(
+                context, function, node, body_start, node) !=
+                elaborator_function_return_type(function) { return 2204; }
             return 0;
         }
-        return workspace_validate_body(
-            workspace, module, root, function,
+        return elaboration_context_validate_body(
+            context, function,
             syntax_next(node), body_start);
     }
     if form_tag == 4 {
         let value: i32 = syntax_return_expr(node);
-        let value_code: i32 = workspace_validate_expr(
-            workspace, module, root, function, value, body_start, node);
+        let value_code: i32 = elaboration_context_validate_expr(
+            context, function, value, body_start, node);
         if value_code != 0 { return value_code; }
-        if workspace_expr_type(
-            workspace, module, root, function, value, body_start, node) !=
-            workspace_function_return_type(function) { return 2204; }
+        if elaboration_context_expr_type(
+            context, function, value, body_start, node) !=
+            elaborator_function_return_type(function) { return 2204; }
         if elaborator_only_separators(syntax_next(node)) != 1 { return 2501; }
         return 0;
     }
     if form_tag == 5 {
         let condition: i32 = syntax_if_statement_condition(node);
-        let condition_code: i32 = workspace_validate_expr(
-            workspace, module, root, function, condition, body_start, node);
+        let condition_code: i32 = elaboration_context_validate_expr(
+            context, function, condition, body_start, node);
         if condition_code != 0 { return condition_code; }
-        if workspace_expr_type(
-            workspace, module, root, function, condition, body_start, node) !=
+        if elaboration_context_expr_type(
+            context, function, condition, body_start, node) !=
             type_bool() { return 2401; }
         let branch: i32 = syntax_left(
             syntax_if_statement_body(node));
-        let branch_code: i32 = workspace_validate_statement_block(
-            workspace, module, root, function, branch, branch);
+        let branch_code: i32 = elaboration_context_validate_statement_block(
+            context, function, branch, branch);
         if branch_code != 0 { return branch_code; }
-        return workspace_validate_body(
-            workspace, module, root, function,
+        return elaboration_context_validate_body(
+            context, function,
             syntax_next(node), body_start);
     }
     return 2502;
 }
 
-let workspace_validate_function = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32) -> i32 {
+let elaboration_context_validate_function = std::func(
+    context: ElaborationContext, function: i32) -> i32 {
+    let index: M13ElaborationIndex = context.index;
+    if index.duplicate != 0 { return 2111; }
     let param_code: i32 = elaborator_validate_param_names(
         syntax_function_first_param(function));
     if param_code != 0 { return param_code; }
     let body: i32 = syntax_function_body(function);
     let first: i32 = syntax_left(body);
-    return workspace_validate_body(
-        workspace, module, root, function, first, first);
+    let depth_code: i32 = elaborator_specialization_depth(
+        index, function, syntax_function_name(function), 1);
+    if depth_code != 0 { return depth_code; }
+    return elaboration_context_validate_body(
+        context, function, first, first);
 }
 
-let workspace_validate_functions = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32) -> i32 {
+let elaboration_context_validate_functions = std::func(
+    context: ElaborationContext, function: i32) -> i32 {
     if function == 0 { return 0; }
-    let code: i32 = workspace_validate_function(
-        workspace, module, root, function);
+    let code: i32 = elaboration_context_validate_function(
+        context, function);
     if code != 0 { return code; }
-    return workspace_validate_functions(
-        workspace, module, root, surface_next_definition(function));
+    return elaboration_context_validate_functions(
+        context, surface_next_definition(function));
 }
 
 @export
@@ -2341,19 +2530,23 @@ let workspace_validate_functions = std::func(
 let elaborator_validate_module_indexed = std::func(
     workspace: ModuleWorkspace, module: i32) -> i32 {
     let root: i32 = module_body(module);
-    return workspace_validate_functions(
-        workspace, module, root, module_first_procedure(root));
+    let context: ElaborationContext = elaboration_workspace_context(
+        workspace, module, root);
+    let result: i32 = elaboration_context_validate_functions(
+        context, module_first_procedure(root));
+    let destroyed: i32 = elaboration_context_destroy(context);
+    return result;
 }
 
-let workspace_diagnostic_function_from = std::func(
-    workspace: ModuleWorkspace, module: i32, root: i32, function: i32) -> addr {
+let elaboration_context_diagnostic_function_from = std::func(
+    context: ElaborationContext, function: i32) -> addr {
     if function == 0 { return ""; }
-    if workspace_validate_function(
-        workspace, module, root, function) != 0 {
+    if elaboration_context_validate_function(
+        context, function) != 0 {
         return syntax_function_name(function);
     }
-    return workspace_diagnostic_function_from(
-        workspace, module, root, surface_next_definition(function));
+    return elaboration_context_diagnostic_function_from(
+        context, surface_next_definition(function));
 }
 
 @export
@@ -2361,8 +2554,12 @@ let workspace_diagnostic_function_from = std::func(
 let elaborator_module_diagnostic_function_indexed = std::func(
     workspace: ModuleWorkspace, module: i32) -> addr {
     let root: i32 = module_body(module);
-    return workspace_diagnostic_function_from(
-        workspace, module, root, module_first_procedure(root));
+    let context: ElaborationContext = elaboration_workspace_context(
+        workspace, module, root);
+    let result: addr = elaboration_context_diagnostic_function_from(
+        context, module_first_procedure(root));
+    let destroyed: i32 = elaboration_context_destroy(context);
+    return result;
 }
 
 // Historical single-root workspace adapters.  Stable compiler workspace

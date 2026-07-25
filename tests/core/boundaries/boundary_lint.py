@@ -138,6 +138,24 @@ RULES: tuple[Rule, ...] = (
         ),
     ),
     Rule(
+        ident="M21_SINGLE_ELABORATION_ENGINE",
+        description=(
+            "single-source and workspace compilation must share "
+            "ElaborationContext validation"
+        ),
+        paths=("packages/lain/compiler/elaborator.lain",),
+        pattern=(
+            r"^let workspace_(?:expr_type|validate_args|validate_expr|"
+            r"validate_if|validate_assignment|validate_statement_block|"
+            r"validate_body|validate_function|validate_functions)\b"
+        ),
+        allowed_count=0,
+        rationale=(
+            "Workspace lookup belongs in ElaborationContext; expression, "
+            "statement, body, and function validation must not fork."
+        ),
+    ),
+    Rule(
         ident="M4_LAINIR_SOURCE_MODULE_DEBT",
         description="LAIN-IR must not own source-level module/export state",
         paths=("src/lainir/*.c", "src/lainir/*.h"),

@@ -1794,3 +1794,51 @@ assignment 和普通调用均由共享 engine 处理。旧的 workspace-only
 `M20_SINGLE_LOWERING_ENGINE` 防止平行实现重新出现。两个入口仍分别负责
 workspace 的链接验证和 plain source 的入口选择，这属于编排差异，不属于
 语言 lowering 策略。
+
+## 36. M21 统一 Elaboration
+
+单文件与 workspace 不再各自维护类型推断、表达式验证、语句体验证和函数验证。
+两个入口都构造 `ElaborationContext`，再进入同一套语义引擎：
+
+```text
+plain root --------> ElaborationContext(mode = plain) -----\
+                                                           -> type/expr/body/function
+workspace module --> ElaborationContext(mode = workspace) -/
+```
+
+上下文只封装查找环境：
+
+```text
+ElaborationContext
+  index          当前源码的 declaration/function index
+  workspace      跨模块 summary 与导出查询
+  module/root    当前语义作用域
+  workspace_mode 是否允许跨模块 member resolution
+```
+
+因此 `if` 条件、调用参数、局部 binding、赋值、返回值、`consteval`、
+aggregate、enum/match 与 specialization 的语义检查只有一个实现。workspace
+模式增加的是成员解析能力，不是另一套语言规则。
+
+兼容入口 `elaborator_module_expr_type_indexed` 仍保留给现有调用方，但它只创建
+context 并转发到共享查询。旧的 `workspace_expr_type` 和
+`workspace_validate_*` 递归实现已删除；boundary lint
+`M21_SINGLE_ELABORATION_ENGINE` 防止它们重新出现。
+
+parity 测试同时覆盖：
+
+```text
+跨模块成员解析成功并执行为 42
+workspace 内局部调用和 consteval 执行结果为 42
+单文件与 workspace 对错误 if 条件都报告 2401
+```
+
+这一步与 M20.3 合并后的前端主路径是：
+
+```text
+RawAst
+  -> surface forms
+  -> ElaborationContext (one semantic engine)
+  -> LowerContext (one physical lowering engine)
+  -> L1Unit
+```

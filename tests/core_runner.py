@@ -35,6 +35,10 @@ def main() -> int:
         ),
         ("core/comptime", [python, "tests/core/comptime/run_comptime_contract.py"]),
         ("core/control", [python, "tests/core/control/run_control_contract.py"]),
+        (
+            "core/elaboration",
+            [python, "tests/core/elaboration/run_elaboration_parity.py"],
+        ),
         ("core/meta", [python, "tests/core/meta/run_meta_contract.py"]),
         ("core/enum", [python, "tests/core/enum/run_enum_contract.py"]),
         ("core/examples", [python, "tests/core/examples/run_examples.py"]),
