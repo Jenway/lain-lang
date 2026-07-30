@@ -1,10 +1,4 @@
-/**
- * lainir/lainir.h — Shared Lain IR data structures
- *
- * Design notes:
- *   - L1 is a structured IR.
- *
- */
+// lainir/lainir.h
 
 #ifndef LAINIR_H
 #define LAINIR_H
@@ -269,7 +263,8 @@ struct L1Instruction {
     struct {
       char *name;
       /* Declared result type.  Textual L1 bindings are typed; NULL is only
-         retained while accepting legacy input, before verification infers it. */
+         retained while accepting legacy input, before verification infers it.
+       */
       L1Type *ty;
       L1Expr *val;
     } let;

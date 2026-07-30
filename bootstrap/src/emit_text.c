@@ -4,27 +4,44 @@
  * Human-readable L1 IR debug output.  Structured IR, no terminators.
  */
 
-#include "lainir.h"
-
+#include "lainir/lainir.h"
 
 // ============================================================================
 
 void emit_l1_type(L1Type *ty, FILE *out) {
-  if (!ty) { fprintf(out, "#unit"); return; }
+  if (!ty) {
+    fprintf(out, "#unit");
+    return;
+  }
   switch (ty->kind) {
-  case TY_BITS:   fprintf(out, "i%d", ty->width); break;
-  case TY_ADDR:   fprintf(out, "addr"); break;
-  case TY_UNIT:   fprintf(out, "#unit"); break;
-  case TY_NEVER:  fprintf(out, "#never"); break;
-  case TY_FLOATS: fprintf(out, "f%d", ty->width); break;
-  case TY_SIMD:   fprintf(out, "simd%d", ty->width); break;
+  case TY_BITS:
+    fprintf(out, "i%d", ty->width);
+    break;
+  case TY_ADDR:
+    fprintf(out, "addr");
+    break;
+  case TY_UNIT:
+    fprintf(out, "#unit");
+    break;
+  case TY_NEVER:
+    fprintf(out, "#never");
+    break;
+  case TY_FLOATS:
+    fprintf(out, "f%d", ty->width);
+    break;
+  case TY_SIMD:
+    fprintf(out, "simd%d", ty->width);
+    break;
   }
 }
 
 static void emit_l1_expr(L1Expr *expr, FILE *out);
 
 static void emit_l1_expr(L1Expr *expr, FILE *out) {
-  if (!expr) { fprintf(out, "???"); return; }
+  if (!expr) {
+    fprintf(out, "???");
+    return;
+  }
   switch (expr->kind) {
   case EXPR_VAR:
     fprintf(out, "%%%s", expr->data.var.name);
@@ -198,7 +215,8 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
     fprintf(out, "#call %s(", expr->data.call.fn_name);
     for (uint32_t i = 0; i < expr->data.call.arg_count; i++) {
       emit_l1_expr(expr->data.call.args[i], out);
-      if (i < expr->data.call.arg_count - 1) fprintf(out, ", ");
+      if (i < expr->data.call.arg_count - 1)
+        fprintf(out, ", ");
     }
     fprintf(out, ")");
     break;
@@ -206,7 +224,8 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
     fprintf(out, "#eval %s(", expr->data.eval.fn_name);
     for (uint32_t i = 0; i < expr->data.eval.arg_count; i++) {
       emit_l1_expr(expr->data.eval.args[i], out);
-      if (i < expr->data.eval.arg_count - 1) fprintf(out, ", ");
+      if (i < expr->data.eval.arg_count - 1)
+        fprintf(out, ", ");
     }
     fprintf(out, ")");
     break;
@@ -217,7 +236,8 @@ static void emit_l1_expr(L1Expr *expr, FILE *out) {
     fprintf(out, "#primitive %s(", expr->data.primitive.opcode);
     for (uint32_t i = 0; i < expr->data.primitive.operand_count; i++) {
       emit_l1_expr(expr->data.primitive.operands[i], out);
-      if (i < expr->data.primitive.operand_count - 1) fprintf(out, ", ");
+      if (i < expr->data.primitive.operand_count - 1)
+        fprintf(out, ", ");
     }
     fprintf(out, ")");
     break;
@@ -261,16 +281,18 @@ static void emit_l1_block(L1Block *block, FILE *out, const char *indent) {
     switch (inst->kind) {
     case INST_LET:
       fprintf(out, "%s#let %%%s: ", indent, inst->data.let.name);
-      emit_l1_type(inst->data.let.ty ? inst->data.let.ty :
-                       infer_expr_type(inst->data.let.val), out);
+      emit_l1_type(inst->data.let.ty ? inst->data.let.ty
+                                     : infer_expr_type(inst->data.let.val),
+                   out);
       fprintf(out, " = ");
       emit_l1_expr(inst->data.let.val, out);
       fprintf(out, "\n");
       break;
     case INST_SET:
       fprintf(out, "%s%%%s: ", indent, inst->data.set.name);
-      emit_l1_type(inst->data.set.ty ? inst->data.set.ty :
-                       infer_expr_type(inst->data.set.val), out);
+      emit_l1_type(inst->data.set.ty ? inst->data.set.ty
+                                     : infer_expr_type(inst->data.set.val),
+                   out);
       fprintf(out, " = ");
       emit_l1_expr(inst->data.set.val, out);
       fprintf(out, "\n");
@@ -348,19 +370,22 @@ static void emit_l1_subroutine(L1Subroutine *sub, FILE *out) {
     for (uint32_t i = 0; i < sub->param_count; i++) {
       emit_l1_type(sub->param_tys[i], out);
       fprintf(out, " %%arg%d", i);
-      if (i < sub->param_count - 1) fprintf(out, ", ");
+      if (i < sub->param_count - 1)
+        fprintf(out, ", ");
     }
     fprintf(out, ") -> ");
     emit_l1_type(sub->ret_ty, out);
     fprintf(out, ";\n\n");
     return;
   }
-  if (!sub->blocks) return;
+  if (!sub->blocks)
+    return;
   fprintf(out, "#proc %s(", sub->name);
   for (uint32_t i = 0; i < sub->param_count; i++) {
     emit_l1_type(sub->param_tys[i], out);
     fprintf(out, " %%arg%d", i);
-    if (i < sub->param_count - 1) fprintf(out, ", ");
+    if (i < sub->param_count - 1)
+      fprintf(out, ", ");
   }
   fprintf(out, ") -> ");
   emit_l1_type(sub->ret_ty, out);
@@ -382,7 +407,8 @@ void lainir_emit_text_module(FILE *out, L1Subroutine *head) {
   }
 }
 
-void lainir_emit_text_module_to_file(L1Subroutine *head, const char *output_path) {
+void lainir_emit_text_module_to_file(L1Subroutine *head,
+                                     const char *output_path) {
   FILE *out = fopen(output_path, "w");
   if (!out) {
     fprintf(stderr, "Error: cannot open L1 output: %s\n", output_path);
