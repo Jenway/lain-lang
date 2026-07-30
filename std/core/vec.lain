@@ -1,0 +1,271 @@
+// std/core/vec.lain
+//
+// A Vec specialization is determined by three compile-time values:
+//
+//   T           element type
+//   Allocation  allocation-policy Module
+//   Bounds      bounds-policy Module
+//
+// Vec does not carry an Allocator callback table and its operations do not
+// return a fixed allocation or bounds error.  They perform the effects
+// exported by the selected policy modules.  The caller chooses handlers for
+// those effects.
+
+let allocation: Module = import("std::allocation");
+let bounds: Module = import("std::bounds");
+
+
+// Shape required from the Allocation argument.
+//
+// Allocation.Block
+// Allocation.Effect
+// Allocation.empty()
+// Allocation.is_empty(block)
+// Allocation.address(block)
+// Allocation.allocate(size, alignment)       ! {Allocation.Effect}
+// Allocation.resize(block, size, alignment)  ! {Allocation.Effect}
+// Allocation.release(block)                  ! {Allocation.Effect}
+// Allocation.capacity_overflow()             ! {Allocation.Effect}
+let AllocationPolicy: ModuleShape = allocation.Policy;
+
+
+// Shape required from the Bounds argument.
+//
+// A checked policy may handle Bounds.Effect by producing Throws(BoundsError).
+// An unchecked policy may handle it with a no-op.  Vec itself does not select
+// either behavior.
+let BoundsPolicy: ModuleShape = bounds.Policy;
+
+
+// The file exports one Module value.  Importing "std::core::vec" returns this
+// namespace; it does not inject its members into the importing scope.
+@export
+let vec: Module = std::module {
+
+    // Vec is a type constructor.  Module arguments are compile-time values
+    // and therefore participate in the specialization key.
+    @export
+    let Vec = std::func(
+        T: type,
+        Allocation: AllocationPolicy,
+        Bounds: BoundsPolicy,
+    ) -> type {
+
+        let Concrete: type = std::struct {
+            storage: Allocation.Block,
+            length: usize,
+            capacity: usize,
+        };
+
+
+        let next_capacity = std::func(
+            current: usize,
+            required: usize,
+        ) -> usize ! {Allocation.Effect} {
+            if required <= current {
+                return current;
+            }
+
+            let candidate: usize = 4;
+
+            if current != 0 {
+                if current > std::usize_max() / 2 {
+                    candidate = required;
+                } else {
+                    candidate = current * 2;
+                }
+            }
+
+            if candidate < required {
+                candidate = required;
+            }
+
+            if candidate < current {
+                return Allocation.capacity_overflow();
+            }
+
+            return candidate;
+        };
+
+
+        // Functions in Namespace are associated with Concrete below.  A
+        // specialization such as IntVec therefore exposes IntVec.new,
+        // IntVec.push, IntVec.get, and so on.
+        let Namespace: Module = std::module {
+
+            @export
+            let new = std::func() -> Concrete {
+                return Concrete {
+                    storage: Allocation.empty(),
+                    length: 0,
+                    capacity: 0,
+                };
+            };
+
+
+            @export
+            let length = std::func(
+                values: &Concrete,
+            ) -> usize {
+                return values.length;
+            };
+
+
+            @export
+            let capacity = std::func(
+                values: &Concrete,
+            ) -> usize {
+                return values.capacity;
+            };
+
+
+            @export
+            let is_empty = std::func(
+                values: &Concrete,
+            ) -> bool {
+                return values.length == 0;
+            };
+
+
+            @export
+            let reserve = std::func(
+                values: &mut Concrete,
+                required: usize,
+            ) -> unit ! {Allocation.Effect} {
+                if required <= values.capacity {
+                    return;
+                }
+
+                // Zero-sized values have logical capacity but need no memory.
+                if std::size_of(T) == 0 {
+                    values.capacity = std::usize_max();
+                    return;
+                }
+
+                let grown: usize = next_capacity(
+                    values.capacity,
+                    required,
+                );
+
+                if grown > std::usize_max() / std::size_of(T) {
+                    return Allocation.capacity_overflow();
+                }
+
+                let byte_count: usize =
+                    grown * std::size_of(T);
+
+                if Allocation.is_empty(values.storage) {
+                    values.storage = Allocation.allocate(
+                        byte_count,
+                        std::align_of(T),
+                    );
+                } else {
+                    values.storage = Allocation.resize(
+                        values.storage,
+                        byte_count,
+                        std::align_of(T),
+                    );
+                }
+
+                values.capacity = grown;
+            };
+
+
+            @export
+            let push = std::func(
+                values: &mut Concrete,
+                value: T,
+            ) -> unit ! {Allocation.Effect} {
+                if values.length == std::usize_max() {
+                    return Allocation.capacity_overflow();
+                }
+
+                Namespace.reserve(
+                    values,
+                    values.length + 1,
+                );
+
+                if std::size_of(T) != 0 {
+                    std::store(
+                        T,
+                        Allocation.address(values.storage)
+                            + values.length * std::size_of(T),
+                        value,
+                    );
+                }
+
+                values.length = values.length + 1;
+            };
+
+
+            @export
+            let get = std::func(
+                values: &Concrete,
+                index: usize,
+            ) -> &T ! {Bounds.Effect} {
+                Bounds.check(index, values.length);
+
+                if std::size_of(T) == 0 {
+                    return std::dangling_ref(T);
+                }
+
+                return std::ref_at(
+                    T,
+                    Allocation.address(values.storage)
+                        + index * std::size_of(T),
+                );
+            };
+
+
+            @export
+            let get_mut = std::func(
+                values: &mut Concrete,
+                index: usize,
+            ) -> &mut T ! {Bounds.Effect} {
+                Bounds.check(index, values.length);
+
+                if std::size_of(T) == 0 {
+                    return std::dangling_mut_ref(T);
+                }
+
+                return std::mut_ref_at(
+                    T,
+                    Allocation.address(values.storage)
+                        + index * std::size_of(T),
+                );
+            };
+
+
+            @export
+            let truncate = std::func(
+                values: &mut Concrete,
+                new_length: usize,
+            ) -> unit ! {Bounds.Effect} {
+                Bounds.check(new_length, values.length + 1);
+                values.length = new_length;
+            };
+
+
+            @export
+            let release = std::func(
+                values: &mut Concrete,
+            ) -> unit ! {Allocation.Effect} {
+                if Allocation.is_empty(values.storage) == false {
+                    Allocation.release(values.storage);
+                }
+
+                values.storage = Allocation.empty();
+                values.length = 0;
+                values.capacity = 0;
+            };
+        };
+
+
+        // A type is a first-class value with an associated namespace.  The
+        // result remains a type, while member lookup is delegated to Namespace.
+        return std::type_with_namespace(
+            Concrete,
+            Namespace,
+        );
+    };
+};

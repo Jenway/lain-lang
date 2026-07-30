@@ -1,0 +1,200 @@
+// Lossless, platform-free tokenizer.
+//
+// Tokens reference byte spans in the caller-owned source String.  The
+// tokenizer does not know keywords: `let`, `struct`, `Module` and `match`
+// are all identifiers.
+
+let memory_model: Module = import("std::memory_model");
+let vector: Module = import("std::core::vec");
+let memory: Module = import("std::core::memory");
+
+@export
+let tokenizer: Module = std::module {
+
+    @export
+    let Tokenizer = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let TokenKind: type = i32;
+
+        let Span: type = std::struct {
+            start: usize,
+            end: usize,
+        };
+
+        let Token: type = std::struct {
+            kind: TokenKind,
+            span: Span,
+        };
+
+        let TokenVector: type = vector.Vec(
+            Token,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let TokenStream: type = std::struct {
+            source: memory.ByteSpan,
+            tokens: TokenVector,
+        };
+
+        let is_space = std::func(byte: i32) -> bool {
+            return byte == 32
+                || byte == 9
+                || byte == 10
+                || byte == 13;
+        };
+
+        let is_digit = std::func(byte: i32) -> bool {
+            return byte >= 48 && byte <= 57;
+        };
+
+        let is_ident_start = std::func(byte: i32) -> bool {
+            if byte >= 65 && byte <= 90 { return true; }
+            if byte >= 97 && byte <= 122 { return true; }
+            return byte == 95 || byte >= 128;
+        };
+
+        let is_ident_continue = std::func(byte: i32) -> bool {
+            return is_ident_start(byte) || is_digit(byte);
+        };
+
+        let is_delimiter = std::func(byte: i32) -> bool {
+            return byte == 40 || byte == 41
+                || byte == 91 || byte == 93
+                || byte == 123 || byte == 125;
+        };
+
+        let is_punctuation = std::func(byte: i32) -> bool {
+            return byte == 44 || byte == 59;
+        };
+
+        let push = std::func(
+            output: &mut TokenVector,
+            kind: TokenKind,
+            start: usize,
+            end: usize,
+        ) -> unit ! {Memory.Allocation.Effect} {
+            output.push(Token {
+                kind: kind,
+                span: Span { start: start, end: end },
+            });
+        };
+
+        let tokenize = std::func(
+            source: memory.ByteSpan,
+        ) -> TokenStream ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let output: TokenVector = TokenVector.new();
+            let cursor: usize = 0;
+            let length: usize = source.length;
+
+            while cursor < length {
+                let start: usize = cursor;
+                let byte: i32 = memory.byte_at(source, cursor);
+
+                if is_space(byte) {
+                    cursor = cursor + 1;
+                    while cursor < length
+                        && is_space(
+                            memory.byte_at(source, cursor),
+                        ) {
+                        cursor = cursor + 1;
+                    }
+                    push(&mut output, 1, start, cursor);
+                } else if byte == 47
+                    && cursor + 1 < length
+                    && memory.byte_at(source, cursor + 1) == 47 {
+                    cursor = cursor + 2;
+                    while cursor < length
+                        && memory.byte_at(source, cursor) != 10 {
+                        cursor = cursor + 1;
+                    }
+                    push(&mut output, 2, start, cursor);
+                } else if byte == 34 {
+                    cursor = cursor + 1;
+                    let escaped: bool = false;
+                    while cursor < length {
+                        let current: i32 =
+                            memory.byte_at(source, cursor);
+                        cursor = cursor + 1;
+                        if escaped {
+                            escaped = false;
+                        } else if current == 92 {
+                            escaped = true;
+                        } else if current == 34 {
+                            break;
+                        }
+                    }
+                    push(&mut output, 5, start, cursor);
+                } else if is_digit(byte) {
+                    cursor = cursor + 1;
+                    while cursor < length
+                        && is_digit(
+                            memory.byte_at(source, cursor),
+                        ) {
+                        cursor = cursor + 1;
+                    }
+                    push(&mut output, 4, start, cursor);
+                } else if is_ident_start(byte) {
+                    cursor = cursor + 1;
+                    while cursor < length
+                        && is_ident_continue(
+                            memory.byte_at(source, cursor),
+                        ) {
+                        cursor = cursor + 1;
+                    }
+                    push(&mut output, 3, start, cursor);
+                } else if is_delimiter(byte) {
+                    cursor = cursor + 1;
+                    push(&mut output, 7, start, cursor);
+                } else if is_punctuation(byte) {
+                    cursor = cursor + 1;
+                    push(&mut output, 8, start, cursor);
+                } else {
+                    // Operators remain arbitrary non-space byte sequences.
+                    // Meaning and precedence are selected by Meta.
+                    cursor = cursor + 1;
+                    while cursor < length {
+                        let current: i32 =
+                            memory.byte_at(source, cursor);
+                        if is_space(current)
+                            || is_ident_continue(current)
+                            || is_delimiter(current)
+                            || is_punctuation(current)
+                            || current == 34 {
+                            break;
+                        }
+                        cursor = cursor + 1;
+                    }
+                    push(&mut output, 6, start, cursor);
+                }
+            }
+
+            push(&mut output, 9, length, length);
+            return TokenStream {
+                source: source,
+                tokens: output,
+            };
+        };
+
+        return std::module {
+            @export let Span: type = Span;
+            @export let Token: type = Token;
+            @export let TokenVector: type = TokenVector;
+            @export let TokenStream: type = TokenStream;
+            @export let tokenize = tokenize;
+            @export let trivia = std::func() -> TokenKind { return 1; };
+            @export let comment = std::func() -> TokenKind { return 2; };
+            @export let identifier = std::func() -> TokenKind { return 3; };
+            @export let number = std::func() -> TokenKind { return 4; };
+            @export let string = std::func() -> TokenKind { return 5; };
+            @export let operator = std::func() -> TokenKind { return 6; };
+            @export let delimiter = std::func() -> TokenKind { return 7; };
+            @export let punctuation = std::func() -> TokenKind { return 8; };
+            @export let eof = std::func() -> TokenKind { return 9; };
+        };
+    };
+};

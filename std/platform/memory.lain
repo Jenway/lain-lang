@@ -1,0 +1,196 @@
+// Deterministic, in-memory handlers for std::platform effects.
+// All backing storage is supplied by the caller.
+
+let effects: Module = import("std::effect");
+let bounds: Module = import("std::bounds");
+let arena: Module = import("std::core::arena");
+let vector: Module = import("std::core::vec");
+let memory: Module = import("std::core::memory");
+let memory_model: Module = import("std::memory_model");
+let source: Module = import("std::core::source");
+let platform: Module = import("std::platform::api");
+
+@export
+let memory_platform: Module = std::module {
+    @export
+    let Platform = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let API: Module = platform.API(Memory);
+        let SourceBuffer: type = source.SourceBuffer(Memory);
+        let SourceVector: type = vector.Vec(
+            SourceBuffer,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+        let ArtifactVector: type = vector.Vec(
+            Memory.Bytes,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let State: type = std::struct {
+            arena: arena.State,
+            sources: SourceVector,
+            artifacts: ArtifactVector,
+            console_output: Memory.String,
+        };
+
+        let Namespace: Module = std::module {
+            @export
+            let State: type = State;
+
+            @export
+            let new = std::func(
+                backing: memory.Region,
+            ) -> State {
+                return State {
+                    arena: arena.from_region(backing),
+                    sources: SourceVector.new(),
+                    artifacts: ArtifactVector.new(),
+                    console_output: Memory.String.new(),
+                };
+            };
+
+            @export
+            let add_source = std::func(
+                state: &mut State,
+                value: SourceBuffer,
+            ) -> unit ! {
+                Memory.Allocation.Effect,
+            } {
+                SourceVector.push(&mut state.sources, value);
+            };
+
+            @export
+            let virtual_memory_handler = std::func(
+                state: &mut State,
+            ) -> effects.Handler(
+                API.VirtualMemory,
+                {effects.Throws(platform.Error)},
+            ) {
+                return std::handler(API.VirtualMemory) ! {
+                    effects.Throws(platform.Error),
+                } {
+                    reserve_pages(minimum_bytes) {
+                        // The fake cannot obtain new pages.  It cuts a region
+                        // from the backing arena supplied by the test.
+                        let block: arena.Block =
+                            perform arena.Policy.allocate(
+                                minimum_bytes,
+                                4096,
+                            );
+                        resume memory.Region {
+                            data: block.data,
+                            length: block.size,
+                        };
+                    }
+
+                    release_pages(region) {
+                        resume ();
+                    }
+                };
+            };
+
+            @export
+            let source_read_handler = std::func(
+                state: &mut State,
+            ) -> effects.Handler(
+                API.SourceRead,
+                {
+                    effects.Throws(platform.Error),
+                    Memory.Allocation.Effect,
+                    Memory.Bounds.Effect,
+                },
+            ) {
+                return std::handler(API.SourceRead) ! {
+                    effects.Throws(platform.Error),
+                    Memory.Allocation.Effect,
+                    Memory.Bounds.Effect,
+                } {
+                    read_source(path) {
+                        let index: usize = 0;
+                        while index < SourceVector.length(
+                            &state.sources) {
+                            let candidate: &SourceBuffer =
+                                SourceVector.get(
+                                    &state.sources,
+                                    index,
+                                );
+                            if Memory.String.equal(
+                                &candidate.path,
+                                path,
+                            ) {
+                                resume SourceBuffer {
+                                    path: Memory.String.clone(
+                                        &candidate.path,
+                                    ),
+                                    contents: candidate.contents,
+                                };
+                            }
+                            index = index + 1;
+                        }
+                        effects.throw(platform.Error { code: 1 });
+                    }
+                };
+            };
+
+            @export
+            let artifact_write_handler = std::func(
+                state: &mut State,
+            ) -> effects.Handler(
+                API.ArtifactWrite,
+                {
+                    Memory.Allocation.Effect,
+                    Memory.Bounds.Effect,
+                },
+            ) {
+                return std::handler(API.ArtifactWrite) ! {
+                    Memory.Allocation.Effect,
+                    Memory.Bounds.Effect,
+                } {
+                    write_artifact(path, artifact) {
+                        let copy: Memory.Bytes =
+                            Memory.Bytes.new();
+                        let index: usize = 0;
+                        while index < artifact.length() {
+                            copy.push(*artifact.get(index));
+                            index = index + 1;
+                        }
+                        ArtifactVector.push(
+                            &mut state.artifacts,
+                            copy,
+                        );
+                        resume ();
+                    }
+                };
+            };
+
+            @export
+            let console_write_handler = std::func(
+                state: &mut State,
+            ) -> effects.Handler(
+                API.ConsoleWrite,
+                {
+                    Memory.Allocation.Effect,
+                    Memory.Bounds.Effect,
+                },
+            ) {
+                return std::handler(API.ConsoleWrite) ! {
+                    Memory.Allocation.Effect,
+                    Memory.Bounds.Effect,
+                } {
+                    write_console(text) {
+                        Memory.String.append(
+                            &mut state.console_output,
+                            text,
+                        );
+                        resume ();
+                    }
+                };
+            };
+        };
+
+        return Namespace;
+    };
+};

@@ -1,0 +1,772 @@
+// Unified surface elaborator.
+//
+// Single-file and multi-file compilation both enter through ProgramInput.
+// Syntax remains topology-only; this module introduces bindings, functions,
+// types, ModuleValue, effects and specialization.
+
+let memory_model: Module = import("std::memory_model");
+let vector: Module = import("std::core::vec");
+let syntax: Module = import("packages::lain::compiler::syntax");
+let types: Module = import("packages::lain::compiler::types");
+let modules: Module = import("packages::lain::compiler::modules");
+let compiler_effects: Module =
+    import("packages::lain::compiler::effects");
+let source_workspace: Module =
+    import("packages::lain::compiler::source_workspace");
+
+@export
+let elaborator: Module = std::module {
+
+    @export
+    let Elaborator = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let Syntax: Module = syntax.Syntax(Memory);
+        let Types: Module = types.Registry(Memory);
+        let Modules: Module = modules.Modules(Memory);
+        let Effects: Module = compiler_effects.Effects(Memory);
+        let Sources: Module =
+            source_workspace.SourceWorkspace(Memory);
+
+        let ExprId: type = usize;
+        let FunctionId: type = usize;
+
+        let ExprIdVector: type = vector.Vec(
+            ExprId,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let Expr: type = std::struct {
+            kind: i32,
+            type_id: types.TypeId,
+            syntax_unit: Syntax.UnitId,
+            syntax_node: Syntax.NodeId,
+            i32_value: i32,
+            left: ExprId,
+            right: ExprId,
+            callee: FunctionId,
+            arguments: ExprIdVector,
+        };
+
+        let ExprVector: type = vector.Vec(
+            Expr,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let TypeIdVector: type = vector.Vec(
+            types.TypeId,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let Function: type = std::struct {
+            id: FunctionId,
+            owner: types.ModuleId,
+            name: Memory.String,
+            parameter_types: TypeIdVector,
+            return_type: types.TypeId,
+            effects: Effects.EffectSet,
+            body: ExprId,
+        };
+
+        let FunctionVector: type = vector.Vec(
+            Function,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let SpecializationArgument: type = std::struct {
+            kind: i32,
+            type_value: types.TypeId,
+            comptime_value: types.ComptimeValue,
+            module_value: types.ModuleId,
+        };
+
+        let SpecializationArgumentVector: type = vector.Vec(
+            SpecializationArgument,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let SpecializationKey: type = std::struct {
+            owner: types.ModuleId,
+            callable: FunctionId,
+            arguments: SpecializationArgumentVector,
+        };
+
+        let Specialization: type = std::struct {
+            key: SpecializationKey,
+            function: FunctionId,
+            provisional: bool,
+        };
+
+        let SpecializationVector: type = vector.Vec(
+            Specialization,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let ModuleBinding: type = std::struct {
+            owner: types.ModuleId,
+            name: Memory.String,
+            value: types.ModuleValue,
+        };
+
+        let ModuleBindingVector: type = vector.Vec(
+            ModuleBinding,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let Program: type = std::struct {
+            modules: Modules.Workspace,
+            types: Types.State,
+            expressions: ExprVector,
+            functions: FunctionVector,
+            specializations: SpecializationVector,
+            module_bindings: ModuleBindingVector,
+            function_types: Effects.FunctionTypeVector,
+            calls: Effects.CallEdgeVector,
+            effects: Effects.Store,
+            entry: FunctionId,
+        };
+
+        let Result: type = std::struct {
+            program: Program,
+            diagnostic: i32,
+            diagnostic_unit: Syntax.UnitId,
+            diagnostic_node: Syntax.NodeId,
+        };
+
+        let new_program = std::func() -> Program
+            ! {Memory.Allocation.Effect} {
+            return Program {
+                modules: Modules.new(),
+                types: Types.new(),
+                expressions: ExprVector.new(),
+                functions: FunctionVector.new(),
+                specializations: SpecializationVector.new(),
+                module_bindings: ModuleBindingVector.new(),
+                function_types: Effects.FunctionTypeVector.new(),
+                calls: Effects.CallEdgeVector.new(),
+                effects: Effects.new_store(),
+                entry: std::usize_max(),
+            };
+        };
+
+        let add_expression = std::func(
+            program: &mut Program,
+            value: Expr,
+        ) -> ExprId ! {Memory.Allocation.Effect} {
+            let id: ExprId = program.expressions.length();
+            program.expressions.push(value);
+            return id;
+        };
+
+        let invalid_expression = std::func(
+            unit: Syntax.UnitId,
+            node: Syntax.NodeId,
+        ) -> Expr {
+            return Expr {
+                kind: 0,
+                type_id: 0,
+                syntax_unit: unit,
+                syntax_node: node,
+                i32_value: 0,
+                left: 0,
+                right: 0,
+                callee: 0,
+                arguments: ExprIdVector.new(),
+            };
+        };
+
+        let find_function = std::func(
+            program: &Program,
+            name: &Memory.String,
+        ) -> FunctionId ! {Memory.Bounds.Effect} {
+            let index: usize = 0;
+            while index < program.functions.length() {
+                if Memory.String.equal(
+                    &program.functions.get(index).name,
+                    name,
+                ) {
+                    return index;
+                }
+                index = index + 1;
+            }
+            return std::usize_max();
+        };
+
+        // First executable surface slice: literals, calls and `+`.
+        let elaborate_expression = std::func(
+            program: &mut Program,
+            store: &Syntax.Store,
+            unit: Syntax.UnitId,
+            first: Syntax.NodeId,
+            caller: FunctionId,
+        ) -> ExprId ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let current: Syntax.NodeId =
+                Syntax.next_significant(store, unit, first);
+            let left: ExprId = std::usize_max();
+            let current_node: &Syntax.Node =
+                Syntax.node(store, unit, current);
+
+            if current_node.token_kind == 4 {
+                let value: Expr = invalid_expression(unit, current);
+                value.kind = 1;
+                value.type_id = program.types.builtins.i32;
+                value.i32_value =
+                    Syntax.token_i32(store, unit, current);
+                left = add_expression(program, value);
+            } else if current_node.token_kind == 3 {
+                let name: Memory.String = Syntax.copy_token_text(
+                    store,
+                    unit,
+                    current,
+                    false,
+                );
+                let callee: FunctionId =
+                    find_function(program, &name);
+                if callee == std::usize_max() {
+                    return callee;
+                }
+                let call: Expr = invalid_expression(unit, current);
+                call.kind = 3;
+                call.type_id =
+                    program.functions.get(callee).return_type;
+                call.callee = callee;
+
+                let argument_group: Syntax.NodeId =
+                    Syntax.next_significant(
+                        store,
+                        unit,
+                        current_node.next_sibling,
+                    );
+                if argument_group != Syntax.invalid_node()
+                    && Syntax.node(
+                        store,
+                        unit,
+                        argument_group,
+                    ).kind == 2 {
+                    let argument: Syntax.NodeId =
+                        Syntax.next_significant(
+                            store,
+                            unit,
+                            Syntax.node(
+                                store,
+                                unit,
+                                argument_group,
+                            ).first_child,
+                        );
+                    while argument != Syntax.invalid_node() {
+                        if !Syntax.token_equal(
+                            store,
+                            unit,
+                            argument,
+                            ",",
+                            1,
+                        ) {
+                            call.arguments.push(
+                                elaborate_expression(
+                                    program,
+                                    store,
+                                    unit,
+                                    argument,
+                                    caller,
+                                ),
+                            );
+                        }
+                        argument = Syntax.next_significant(
+                            store,
+                            unit,
+                            Syntax.node(
+                                store,
+                                unit,
+                                argument,
+                            ).next_sibling,
+                        );
+                    }
+                }
+                left = add_expression(program, call);
+                program.calls.push(Effects.CallEdge {
+                    caller: caller,
+                    callee: callee,
+                });
+            }
+
+            if left == std::usize_max() { return left; }
+
+            let operator_node: Syntax.NodeId =
+                Syntax.next_significant(
+                    store,
+                    unit,
+                    Syntax.node(store, unit, current).next_sibling,
+                );
+            if operator_node == Syntax.invalid_node() {
+                return left;
+            }
+            if !Syntax.token_equal(
+                store,
+                unit,
+                operator_node,
+                "+",
+                1,
+            ) {
+                return left;
+            }
+
+            let right_node: Syntax.NodeId =
+                Syntax.next_significant(
+                    store,
+                    unit,
+                    Syntax.node(
+                        store,
+                        unit,
+                        operator_node,
+                    ).next_sibling,
+                );
+            let right_value: Expr =
+                invalid_expression(unit, right_node);
+            right_value.kind = 1;
+            right_value.type_id = program.types.builtins.i32;
+            right_value.i32_value = Syntax.token_i32(
+                store,
+                unit,
+                right_node,
+            );
+            let right: ExprId =
+                add_expression(program, right_value);
+
+            let addition: Expr =
+                invalid_expression(unit, operator_node);
+            addition.kind = 2;
+            addition.type_id = program.types.builtins.i32;
+            addition.left = left;
+            addition.right = right;
+            return add_expression(program, addition);
+        };
+
+        let elaborate_function_body = std::func(
+            program: &mut Program,
+            store: &Syntax.Store,
+            unit: Syntax.UnitId,
+            body: Syntax.NodeId,
+            caller: FunctionId,
+        ) -> ExprId ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let first: Syntax.NodeId =
+                Syntax.next_significant(
+                    store,
+                    unit,
+                    Syntax.node(store, unit, body).first_child,
+                );
+            if Syntax.token_equal(
+                store,
+                unit,
+                first,
+                "return",
+                6,
+            ) {
+                return elaborate_expression(
+                    program,
+                    store,
+                    unit,
+                    Syntax.node(store, unit, first).next_sibling,
+                    caller,
+                );
+            }
+            return elaborate_expression(
+                program,
+                store,
+                unit,
+                first,
+                caller,
+            );
+        };
+
+        let declare_function = std::func(
+            program: &mut Program,
+            owner: types.ModuleId,
+            name: &Memory.String,
+            return_type: types.TypeId,
+            body: ExprId,
+        ) -> FunctionId ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let id: FunctionId = program.functions.length();
+            program.functions.push(Function {
+                id: id,
+                owner: owner,
+                name: Memory.String.clone(name),
+                parameter_types: TypeIdVector.new(),
+                return_type: return_type,
+                effects: Effects.empty(),
+                body: body,
+            });
+            program.function_types.push(Effects.FunctionType {
+                return_type: return_type,
+                effects: Effects.empty(),
+            });
+            let code: i32 = Modules.export(
+                &mut program.modules,
+                owner,
+                Modules.Export {
+                    name: Memory.String.clone(name),
+                    kind: 2,
+                    type_id: return_type,
+                    value_id: id,
+                },
+            );
+            return id;
+        };
+
+        let same_specialization_key = std::func(
+            left: &SpecializationKey,
+            right: &SpecializationKey,
+        ) -> bool ! {Memory.Bounds.Effect} {
+            if left.owner != right.owner
+                || left.callable != right.callable
+                || left.arguments.length()
+                    != right.arguments.length() {
+                return false;
+            }
+            let index: usize = 0;
+            while index < left.arguments.length() {
+                let a: &SpecializationArgument =
+                    left.arguments.get(index);
+                let b: &SpecializationArgument =
+                    right.arguments.get(index);
+                if a.kind != b.kind
+                    || a.type_value != b.type_value
+                    || a.module_value != b.module_value {
+                    return false;
+                }
+                if a.kind == 2 {
+                    if !types.same_comptime_value(
+                        &a.comptime_value,
+                        &b.comptime_value,
+                    ) {
+                        return false;
+                    }
+                }
+                index = index + 1;
+            }
+            return true;
+        };
+
+        let begin_specialization = std::func(
+            program: &mut Program,
+            key: SpecializationKey,
+            depth: usize,
+        ) -> FunctionId ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            if depth >= 128 {
+                return std::usize_max();
+            }
+            let index: usize = 0;
+            while index < program.specializations.length() {
+                let current: &Specialization =
+                    program.specializations.get(index);
+                if same_specialization_key(&current.key, &key) {
+                    return current.function;
+                }
+                index = index + 1;
+            }
+
+            // Register before lowering the body so ordinary recursive calls
+            // see this exact specialization.
+            let provisional: FunctionId =
+                program.functions.length();
+            program.specializations.push(Specialization {
+                key: key,
+                function: provisional,
+                provisional: true,
+            });
+            return provisional;
+        };
+
+        let elaborate_source = std::func(
+            program: &mut Program,
+            workspace: &Sources.Workspace,
+            source_index: usize,
+        ) -> i32 ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let source_unit: &Sources.SourceUnit =
+                workspace.sources.get(source_index);
+            let module_id: types.ModuleId = Modules.resolve_import(
+                &program.modules,
+                &source_unit.source.path,
+            ).id;
+            let root: Syntax.NodeId = workspace.syntax
+                .units.get(source_unit.syntax_unit).root;
+            let current: Syntax.NodeId = Syntax.next_significant(
+                &workspace.syntax,
+                source_unit.syntax_unit,
+                Syntax.node(
+                    &workspace.syntax,
+                    source_unit.syntax_unit,
+                    root,
+                ).first_child,
+            );
+
+            while current != Syntax.invalid_node() {
+                if Syntax.token_equal(
+                    &workspace.syntax,
+                    source_unit.syntax_unit,
+                    current,
+                    "let",
+                    3,
+                ) {
+                    let name_node: Syntax.NodeId =
+                        Syntax.next_significant(
+                            &workspace.syntax,
+                            source_unit.syntax_unit,
+                            Syntax.node(
+                                &workspace.syntax,
+                                source_unit.syntax_unit,
+                                current,
+                            ).next_sibling,
+                        );
+                    let name: Memory.String =
+                        Syntax.copy_token_text(
+                            &workspace.syntax,
+                            source_unit.syntax_unit,
+                            name_node,
+                            false,
+                        );
+
+                    let scan: Syntax.NodeId = name_node;
+                    let body: Syntax.NodeId =
+                        Syntax.invalid_node();
+                    let import_call: Syntax.NodeId =
+                        Syntax.invalid_node();
+                    while scan != Syntax.invalid_node() {
+                        if Syntax.token_equal(
+                            &workspace.syntax,
+                            source_unit.syntax_unit,
+                            scan,
+                            "import",
+                            6,
+                        ) {
+                            import_call = scan;
+                            break;
+                        }
+                        if Syntax.node(
+                            &workspace.syntax,
+                            source_unit.syntax_unit,
+                            scan,
+                        ).kind == 2 {
+                            if Syntax.node(
+                                &workspace.syntax,
+                                source_unit.syntax_unit,
+                                scan,
+                            ).delimiter == 3 {
+                                body = scan;
+                                break;
+                            }
+                        }
+                        scan = Syntax.node(
+                            &workspace.syntax,
+                            source_unit.syntax_unit,
+                            scan,
+                        ).next_sibling;
+                    }
+
+                    if import_call != Syntax.invalid_node() {
+                        let arguments: Syntax.NodeId =
+                            Syntax.next_significant(
+                                &workspace.syntax,
+                                source_unit.syntax_unit,
+                                Syntax.node(
+                                    &workspace.syntax,
+                                    source_unit.syntax_unit,
+                                    import_call,
+                                ).next_sibling,
+                            );
+                        let path_node: Syntax.NodeId =
+                            Syntax.next_significant(
+                                &workspace.syntax,
+                                source_unit.syntax_unit,
+                                Syntax.node(
+                                    &workspace.syntax,
+                                    source_unit.syntax_unit,
+                                    arguments,
+                                ).first_child,
+                            );
+                        let path: Memory.String =
+                            Syntax.copy_token_text(
+                                &workspace.syntax,
+                                source_unit.syntax_unit,
+                                path_node,
+                                true,
+                            );
+                        let imported: types.ModuleValue =
+                            Modules.resolve_import(
+                                &program.modules,
+                                &path,
+                            );
+                        if imported.id == 0 { return 2504; }
+                        program.module_bindings.push(ModuleBinding {
+                            owner: module_id,
+                            name: name,
+                            value: imported,
+                        });
+                        Modules.add_dependency(
+                            &mut program.modules,
+                            module_id,
+                            imported.id,
+                        );
+                        current = Syntax.node(
+                            &workspace.syntax,
+                            source_unit.syntax_unit,
+                            arguments,
+                        ).next_sibling;
+                        continue;
+                    } else if body != Syntax.invalid_node() {
+                        let function: FunctionId =
+                            find_function(program, &name);
+                        if function == std::usize_max() {
+                            function = declare_function(
+                                program,
+                                module_id,
+                                &name,
+                                program.types.builtins.i32,
+                                std::usize_max(),
+                            );
+                        }
+                        let body_expression: ExprId =
+                            elaborate_function_body(
+                                program,
+                                &workspace.syntax,
+                                source_unit.syntax_unit,
+                                body,
+                                function,
+                            );
+                        program.functions.get_mut(function).body =
+                            body_expression;
+                        if Memory.String.equal_literal(
+                            &name,
+                            "main",
+                            4,
+                        ) {
+                            program.entry = function;
+                        }
+                        current = Syntax.node(
+                            &workspace.syntax,
+                            source_unit.syntax_unit,
+                            body,
+                        ).next_sibling;
+                        continue;
+                    }
+                }
+
+                current = Syntax.node(
+                    &workspace.syntax,
+                    source_unit.syntax_unit,
+                    current,
+                ).next_sibling;
+            }
+            return 0;
+        };
+
+        let elaborate = std::func(
+            workspace: &Sources.Workspace,
+        ) -> Result ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let program: Program = new_program();
+            let index: usize = 0;
+            // Declare all modules before reading any body.  Imports therefore
+            // behave identically in forward, reverse and single-file order.
+            while index < workspace.sources.length() {
+                let source_unit: &Sources.SourceUnit =
+                    workspace.sources.get(index);
+                let ignored: types.ModuleId = Modules.declare(
+                    &mut program.modules,
+                    Memory.String.clone(&source_unit.source.path),
+                    index,
+                    0,
+                );
+                index = index + 1;
+            }
+
+            index = 0;
+            while index < workspace.sources.length() {
+                let code: i32 = elaborate_source(
+                    &mut program,
+                    workspace,
+                    index,
+                );
+                if code != 0 {
+                    return Result {
+                        program: program,
+                        diagnostic: code,
+                        diagnostic_unit:
+                            workspace.sources.get(index).syntax_unit,
+                        diagnostic_node: 0,
+                    };
+                }
+                index = index + 1;
+            }
+
+            if program.entry == std::usize_max() {
+                return Result {
+                    program: program,
+                    diagnostic: 4301,
+                    diagnostic_unit: 0,
+                    diagnostic_node: 0,
+                };
+            }
+            let effect_code: i32 = Effects.validate_program(
+                &program.effects,
+                &program.function_types,
+                &program.calls,
+            );
+            if effect_code != 0 {
+                return Result {
+                    program: program,
+                    diagnostic: effect_code,
+                    diagnostic_unit: 0,
+                    diagnostic_node: 0,
+                };
+            }
+            return Result {
+                program: program,
+                diagnostic: 0,
+                diagnostic_unit: 0,
+                diagnostic_node: 0,
+            };
+        };
+
+        return std::module {
+            @export let ExprId: type = ExprId;
+            @export let FunctionId: type = FunctionId;
+            @export let Expr: type = Expr;
+            @export let Function: type = Function;
+            @export let SpecializationArgument: type =
+                SpecializationArgument;
+            @export let SpecializationKey: type = SpecializationKey;
+            @export let ModuleBinding: type = ModuleBinding;
+            @export let Program: type = Program;
+            @export let Result: type = Result;
+            @export let same_specialization_key =
+                same_specialization_key;
+            @export let begin_specialization =
+                begin_specialization;
+            @export let elaborate = elaborate;
+        };
+    };
+};

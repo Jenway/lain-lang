@@ -1,0 +1,181 @@
+// std/core/memory.lain
+//
+// Borrowed memory over caller-supplied addresses.  Public indexing is
+// controlled by a Bounds policy.  Region is the raw storage description used
+// by allocation handlers and is not itself a container namespace.
+
+let bounds: Module = import("std::bounds");
+
+@export
+let memory: Module = std::module {
+    @export
+    let ByteSpan: type = std::struct {
+        data: addr,
+        length: usize,
+    };
+
+    @export
+    let byte_span = std::func(
+        data: addr,
+        length: usize,
+    ) -> ByteSpan {
+        return ByteSpan { data: data, length: length };
+    };
+
+    @export
+    let empty_byte_span = std::func() -> ByteSpan {
+        return ByteSpan { data: 0 as addr, length: 0 };
+    };
+
+    @export
+    let byte_at = std::func(
+        span: ByteSpan,
+        index: usize,
+    ) -> i32 {
+        return std::load_bits(8, span.data + index);
+    };
+
+    @export
+    let Region: type = std::struct {
+        data: addr,
+        length: usize,
+    };
+
+    @export
+    let region = std::func(
+        data: addr,
+        length: usize,
+    ) -> Region {
+        return Region { data: data, length: length };
+    };
+
+    @export
+    let empty_region = std::func() -> Region {
+        return Region { data: 0 as addr, length: 0 };
+    };
+
+    @export
+    let Span = std::func(
+        T: type,
+        Bounds: bounds.Policy,
+    ) -> type {
+        let Concrete: type = std::struct {
+            data: addr,
+            length: usize,
+        };
+
+        let Namespace: Module = std::module {
+            @export
+            let empty = std::func() -> Concrete {
+                return Concrete {
+                    data: 0 as addr,
+                    length: 0,
+                };
+            };
+
+            @export
+            let from_region = std::func(
+                region: memory.Region,
+            ) -> Concrete {
+                return Concrete {
+                    data: region.data,
+                    length: region.length / std::size_of(T),
+                };
+            };
+
+            @export
+            let get = std::func(
+                values: &Concrete,
+                index: usize,
+            ) -> &T ! {Bounds.Effect} {
+                Bounds.check(index, values.length);
+                if std::size_of(T) == 0 {
+                    return std::dangling_ref(T);
+                }
+                return std::ref_at(
+                    T,
+                    values.data + index * std::size_of(T),
+                );
+            };
+
+            @export
+            let get_mut = std::func(
+                values: &mut Concrete,
+                index: usize,
+            ) -> &mut T ! {Bounds.Effect} {
+                Bounds.check(index, values.length);
+                if std::size_of(T) == 0 {
+                    return std::dangling_mut_ref(T);
+                }
+                return std::mut_ref_at(
+                    T,
+                    values.data + index * std::size_of(T),
+                );
+            };
+
+            @export
+            let slice = std::func(
+                values: &Concrete,
+                start: usize,
+                length: usize,
+            ) -> Concrete ! {Bounds.Effect} {
+                Bounds.check(start, values.length + 1);
+                if length > values.length - start {
+                    Bounds.check(values.length + 1, values.length);
+                }
+                return Concrete {
+                    data: values.data + start * std::size_of(T),
+                    length: length,
+                };
+            };
+        };
+
+        return std::type_with_namespace(Concrete, Namespace);
+    };
+
+    @export
+    let copy_raw = std::func(
+        destination: memory.Region,
+        source: memory.Region,
+        length: usize,
+    ) -> unit {
+        let index: usize = 0;
+        while index < length {
+            std::store_bits(
+                8,
+                destination.data + index,
+                std::load_bits(8, source.data + index),
+            );
+            index = index + 1;
+        }
+    };
+
+    @export
+    let fill_raw = std::func(
+        destination: memory.Region,
+        value: i32,
+    ) -> unit {
+        let index: usize = 0;
+        while index < destination.length {
+            std::store_bits(8, destination.data + index, value);
+            index = index + 1;
+        }
+    };
+
+    @export
+    let equal_raw = std::func(
+        left: memory.Region,
+        right: memory.Region,
+    ) -> bool {
+        if left.length != right.length { return false; }
+        let index: usize = 0;
+        while index < left.length {
+            if std::load_bits(8, left.data + index)
+                != std::load_bits(8, right.data + index) {
+                return false;
+            }
+            index = index + 1;
+        }
+        return true;
+    };
+};
