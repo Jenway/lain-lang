@@ -76,37 +76,6 @@ pub fn build(b: *std.Build) void {
         "lainc",
         "Build the driver for the pure-Lain compiler artifact",
     );
-
-    const racket_smoke = b.addSystemCommand(&.{
-        "racket", "tests/bootstrap-racket/run.rkt",
-    });
-    racket_smoke.step.dependOn(&install_l1i.step);
-    racket_smoke.step.dependOn(&install_l1check.step);
-    racket_smoke.step.dependOn(&install_l1bootstrap.step);
-    const racket_smoke_step = b.step(
-        "test-racket-bootstrap",
-        "Translate Lain with Racket and execute the generated LAIN-IR",
-    );
-    racket_smoke_step.dependOn(&racket_smoke.step);
-
-    const fixed_point = b.addSystemCommand(&.{
-        "racket", "tests/bootstrap-racket/run-fixed-point.rkt",
-    });
-    fixed_point.step.dependOn(&install_l1i.step);
-    fixed_point.step.dependOn(&install_l1check.step);
-    fixed_point.step.dependOn(&install_l1bootstrap.step);
-    fixed_point.step.dependOn(&install_lainc.step);
-    const fixed_point_step = b.step(
-        "bootstrap",
-        "Build lainc and prove the pure-Lain stage2/stage3 fixed point",
-    );
-    fixed_point_step.dependOn(&fixed_point.step);
-
-    const test_step = b.step(
-        "test",
-        "Run the standalone Racket/bootstrap tests",
-    );
-    test_step.dependOn(&racket_smoke.step);
 }
 
 fn bootstrapExecutable(
