@@ -1,4 +1,5 @@
-#include "lainir/lainir.h"
+#include "lainir/core.h"
+#include "lainir/verify.h"
 
 #include <stdarg.h>
 #include <stdio.h>

@@ -1,32 +1,14 @@
-# Lain-Lang Introduction
+# Lain-Lang
 
-Lain-Lang 是一门以 Meta 编译、显式底层语义和可自举编译器为核心目标的系统编程语言实验项目。
-
-它的设计重点不是在 Parser 中固化一套封闭语法，而是将源码拓扑、语言语义、物理执行表示严格分层，使语言本身可以由 Meta 层持续定义、扩展和自举。
+Language Experiment Lain Lang
 
 ## 1. Core Design
 
-Lain 的核心原则是：
+我们能否让编译器本体尽量的精简，而让所有的高级语言特性都以库的方式实现？
 
-```text
-LAIN-AST owns topology.
-Meta owns language semantics.
-LAIN-IR owns physical execution.
-Backend owns target emission.
-```
+我们希望它的 meta 功能尽可能强大，这里的 meta 指的是在编译期间对于 AST 的操作变换。
 
-也就是说：
-
-```text
-源码解析层只描述 token 如何组合。
-Meta 层解释这些组合的语言意义。
-LAIN-IR 表达 lower 后的物理执行。
-Backend 只负责目标代码生成。
-```
-
-这种设计避免 Parser 过早绑定语言语义。Parser 只识别拓扑；Meta 层再解释
-统一绑定以及 `std::func`、`std::struct`、`std::module`、`import("path")`
-等 initializer。
+我们希望它的底层中间表示（也就是 Lain-IR）尽可能简洁而忠实反映现代的 CPU。
 
 ## 2. Compilation Pipeline
 
@@ -432,25 +414,3 @@ type / expr / effect / fn / struct / module parser 分离到各自 domain。
 Middle AST 和 elaboration pass 承担语言语义。
 LAIN-IR 保持物理、显式、可验证。
 ```
-
-## 14. Summary
-
-Lain-Lang 是一个以 Meta 编译为核心的系统语言项目。
-
-它的关键特点是：
-
-```text
-无语义 LAIN-AST
-Meta-defined language forms
-Middle AST semantic layer
-comptime-based generics
-effect-aware elaboration
-physical LAIN-IR
-explicit memory model
-compile-time execution boundary
-hygienic macro system
-C / LLVM-oriented backend
-self-hosting-oriented architecture
-```
-
-其设计目标是让语言高层特性保持可扩展、可自举，同时让底层 IR 保持简单、显式、可执行、可验证。

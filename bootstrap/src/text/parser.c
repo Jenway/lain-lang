@@ -1,4 +1,5 @@
-#include "lainir/lainir.h"
+#include "lainir/core.h"
+#include "lainir/parse.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -99,10 +100,8 @@ static void parse_fail(Parser *p, const char *message) {
 static char *token_string(Token token) {
   size_t len = (size_t)token.len;
   char *copy = malloc(len + 1);
-  if (!copy) {
-    fprintf(stderr, "lainir parser: out of memory\n");
-    exit(1);
-  }
+  if (!copy)
+    abort();
   memcpy(copy, token.text, len);
   copy[len] = '\0';
   return copy;
@@ -112,10 +111,8 @@ static char *token_string_literal(Token token) {
   size_t input = 0;
   size_t output = 0;
   char *copy = malloc((size_t)token.len + 1);
-  if (!copy) {
-    fprintf(stderr, "lainir parser: out of memory\n");
-    exit(1);
-  }
+  if (!copy)
+    abort();
   while (input < (size_t)token.len) {
     char current = token.text[input++];
     if (current == '\\' && input < (size_t)token.len) {
@@ -1005,9 +1002,7 @@ int lainir_parse_module_checked(const char *src, L1Subroutine **out_module,
 L1Subroutine *lainir_parse_module(const char *src) {
   L1Subroutine *module = NULL;
   L1Diagnostic diagnostic;
-  if (!lainir_parse_module_checked(src, &module, &diagnostic)) {
-    fprintf(stderr, "line %d: %s\n", diagnostic.line, diagnostic.message);
+  if (!lainir_parse_module_checked(src, &module, &diagnostic))
     return NULL;
-  }
   return module;
 }

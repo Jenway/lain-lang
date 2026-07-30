@@ -1,7 +1,7 @@
 #ifndef LAINIR_INTERPRETER_H
 #define LAINIR_INTERPRETER_H
 
-#include "lainir/lainir.h"
+#include "lainir/core.h"
 
 typedef enum {
   LAINIR_RUN_OK = 0,

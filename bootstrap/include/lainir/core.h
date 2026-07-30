@@ -1,11 +1,10 @@
-// lainir/lainir.h
+// lainir/core.h
 
-#ifndef LAINIR_H
-#define LAINIR_H
+#ifndef LAINIR_CORE_H
+#define LAINIR_CORE_H
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 
 /*
  * # Types
@@ -392,26 +391,4 @@ void native_mark_export(const char *name);
 int native_has_explicit_exports(void);
 int native_is_export_marked(const char *name);
 
-/* -------------------------------------------------------------------------
- * Frontend
- * ------------------------------------------------------------------------- */
-L1Subroutine *lainir_parse_module(const char *src);
-int lainir_parse_module_checked(const char *src, L1Subroutine **out_module,
-                                L1Diagnostic *diagnostic);
-int lainir_verify_module(L1Subroutine *head, const char *entry_name,
-                         L1Diagnostic *diagnostic);
-
-/* -------------------------------------------------------------------------
- * Backends
- *
- * ------------------------------------------------------------------------- */
-void lainir_emit_c_module(FILE *out, L1Subroutine *head,
-                          int with_native_runtime);
-void lainir_emit_c_module_to_file(L1Subroutine *head, const char *output_path,
-                                  int with_native_runtime);
-void lainir_emit_text_module(FILE *out, L1Subroutine *head);
-void lainir_emit_text_module_to_file(L1Subroutine *head,
-                                     const char *output_path);
-void emit_l1_type(L1Type *ty, FILE *out);
-
-#endif /* LAINIR_H */
+#endif /* LAINIR_CORE_H */
