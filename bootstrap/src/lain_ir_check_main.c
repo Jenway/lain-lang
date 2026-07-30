@@ -1,4 +1,4 @@
-#include "lainir.h"
+#include "lainir/lainir.h"
 
 #include <stdio.h>
 #include <stdlib.h>

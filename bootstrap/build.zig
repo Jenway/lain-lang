@@ -9,10 +9,10 @@ const c_flags = &.{
 };
 
 const runtime_sources = &.{
-    "src/lainir/lain_ir_parser.c",
-    "src/lainir/lainir_core.c",
-    "src/lainir/interpreter.c",
-    "src/lainir/verifier.c",
+    "src/lain_ir_parser.c",
+    "src/lainir_core.c",
+    "src/interpreter.c",
+    "src/verifier.c",
 };
 
 pub fn build(b: *std.Build) void {
@@ -22,15 +22,15 @@ pub fn build(b: *std.Build) void {
     const l1i = addCExecutable(b, "l1i", target, optimize);
     l1i.root_module.addCSourceFiles(.{
         .files = &.{
-            "src/lainir/lain_ir_interp_main.c",
-            "src/lainir/lain_ir_parser.c",
-            "src/lainir/lainir_core.c",
-            "src/lainir/interpreter.c",
-            "src/lainir/verifier.c",
+            "src/lain_ir_interp_main.c",
+            "src/lain_ir_parser.c",
+            "src/lainir_core.c",
+            "src/interpreter.c",
+            "src/verifier.c",
         },
         .flags = c_flags,
     });
-    const install_l1i = installNamed(
+    _ = installNamed(
         b,
         l1i,
         "l1i",
@@ -40,15 +40,15 @@ pub fn build(b: *std.Build) void {
     const l1check = addCExecutable(b, "l1check", target, optimize);
     l1check.root_module.addCSourceFiles(.{
         .files = &.{
-            "src/lainir/lain_ir_check_main.c",
-            "src/lainir/lain_ir_parser.c",
-            "src/lainir/lainir_core.c",
-            "src/lainir/emit_text.c",
-            "src/lainir/verifier.c",
+            "src/lain_ir_check_main.c",
+            "src/lain_ir_parser.c",
+            "src/lainir_core.c",
+            "src/emit_text.c",
+            "src/verifier.c",
         },
         .flags = c_flags,
     });
-    const install_l1check = installNamed(
+    _ = installNamed(
         b,
         l1check,
         "l1check",
@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
         optimize,
         false,
     );
-    const install_l1bootstrap = installNamed(
+    _ = installNamed(
         b,
         l1bootstrap,
         "l1bootstrap",
@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
     );
 
     const lainc = bootstrapExecutable(b, "lainc", target, optimize, true);
-    const install_lainc = installNamed(
+    _ = installNamed(
         b,
         lainc,
         "lainc",
@@ -87,7 +87,7 @@ fn bootstrapExecutable(
 ) *std.Build.Step.Compile {
     const executable = addCExecutable(b, name, target, optimize);
     executable.root_module.addCSourceFiles(.{
-        .files = &.{"src/lainir/lain_ir_bootstrap_main.c"},
+        .files = &.{"src/lain_ir_bootstrap_main.c"},
         .flags = c_flags,
     });
     executable.root_module.addCSourceFiles(.{
@@ -110,7 +110,7 @@ fn addCExecutable(
         .optimize = optimize,
         .link_libc = true,
     });
-    module.addIncludePath(b.path("src"));
+    module.addIncludePath(b.path("include"));
     return b.addExecutable(.{ .name = name, .root_module = module });
 }
 
