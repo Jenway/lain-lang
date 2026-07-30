@@ -1,31 +1,11 @@
-#include "interpreter.h"
+#include "lainir/interpreter.h"
+#include "lainir/parse.h"
+#include "lainir/verify.h"
+#include "host_io.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static char *read_file(const char *path) {
-  FILE *f = fopen(path, "r");
-  char *buf;
-  long sz;
-  size_t read_sz;
-  if (!f) {
-    perror(path);
-    return NULL;
-  }
-  fseek(f, 0, SEEK_END);
-  sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  buf = malloc(sz + 1);
-  if (!buf) {
-    fclose(f);
-    return NULL;
-  }
-  read_sz = fread(buf, 1, sz, f);
-  buf[read_sz] = 0;
-  fclose(f);
-  return buf;
-}
 
 static int parse_arg_value(const char *text, LainirValue *out) {
   char *end = NULL;
@@ -38,7 +18,8 @@ static int parse_arg_value(const char *text, LainirValue *out) {
 
 int main(int argc, char **argv) {
   const char *entry;
-  char *src;
+  unsigned char *src;
+  size_t src_length;
   L1Subroutine *module;
   LainirValue *args = NULL;
   LainirValue result = lainir_value_unit();
@@ -52,10 +33,11 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  src = read_file(argv[1]);
+  src = lainir_host_read_file(argv[1], &src_length);
   if (!src)
     return 1;
-  if (!lainir_parse_module_checked(src, &module, &diagnostic)) {
+  if (!lainir_parse_module_checked(
+          (const char *)src, &module, &diagnostic)) {
     fprintf(stderr, "lainir parse error [%d] line %d: %s\n", diagnostic.code,
             diagnostic.line, diagnostic.message);
     free(src);

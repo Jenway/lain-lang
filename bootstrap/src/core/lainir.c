@@ -1,4 +1,4 @@
-#include "lainir/lainir.h"
+#include "lainir/core.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -205,8 +205,7 @@ void lainir_free_subroutines(L1Subroutine *head) {
 void append_instruction(L1Subroutine *sub, L1Instruction *inst) {
   (void)sub;
   if (!g_current_block) {
-    fprintf(stderr, "ERROR: append_instruction with no current block\n");
-    exit(1);
+    abort();
   }
   if (!g_current_block->body) {
     g_current_block->body = inst;

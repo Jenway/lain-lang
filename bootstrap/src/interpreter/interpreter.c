@@ -1,4 +1,4 @@
-#include "interpreter.h"
+#include "lainir/interpreter.h"
 
 #include <stdlib.h>
 #include <string.h>

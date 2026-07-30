@@ -44,14 +44,17 @@ def build_interpreter() -> tuple[bool, str]:
         return False, "C compiler unavailable (tried clang, gcc, cc)"
     command = [
         cc,
-        "-Isrc",
+        "-Ibootstrap/include",
+        "-Ibootstrap/src/host",
         "-std=c11",
         "-include",
         str(COMPAT),
-        "src/lainir/lain_ir_interp_main.c",
-        "src/lainir/lain_ir_parser.c",
-        "src/lainir/lainir_core.c",
-        "src/lainir/interpreter.c",
+        "bootstrap/src/cli/l1i.c",
+        "bootstrap/src/core/lainir.c",
+        "bootstrap/src/core/verifier.c",
+        "bootstrap/src/text/parser.c",
+        "bootstrap/src/interpreter/interpreter.c",
+        "bootstrap/src/host/host_io.c",
         "-o",
         str(L1I),
     ]

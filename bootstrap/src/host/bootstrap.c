@@ -1,4 +1,8 @@
-#include "interpreter.h"
+#include "lainir/interpreter.h"
+#include "lainir/parse.h"
+#include "lainir/verify.h"
+#include "bootstrap_host.h"
+#include "host_io.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,35 +23,7 @@ typedef struct {
 } BootstrapContext;
 
 static unsigned char *read_file_bytes(const char *path, size_t *length_out) {
-  FILE *file = fopen(path, "rb");
-  unsigned char *bytes;
-  long length;
-  size_t actual;
-  if (!file)
-    return NULL;
-  if (fseek(file, 0, SEEK_END) != 0) {
-    fclose(file);
-    return NULL;
-  }
-  length = ftell(file);
-  if (length < 0 || fseek(file, 0, SEEK_SET) != 0) {
-    fclose(file);
-    return NULL;
-  }
-  bytes = malloc((size_t)length + 1);
-  if (!bytes) {
-    fclose(file);
-    return NULL;
-  }
-  actual = fread(bytes, 1, (size_t)length, file);
-  fclose(file);
-  if (actual != (size_t)length) {
-    free(bytes);
-    return NULL;
-  }
-  bytes[actual] = 0;
-  *length_out = actual;
-  return bytes;
+  return lainir_host_read_file(path, length_out);
 }
 
 static int value_index(
@@ -281,23 +257,7 @@ static int add_capability(
   return lainir_caps_add(table, name, function, context);
 }
 
-static char *sibling_path(const char *program, const char *name) {
-  const char *slash = strrchr(program, '/');
-  const char *backslash = strrchr(program, '\\');
-  const char *separator =
-      !slash ? backslash : (!backslash || slash > backslash ? slash : backslash);
-  size_t directory_length = separator ? (size_t)(separator - program + 1) : 0;
-  size_t name_length = strlen(name);
-  char *path = malloc(directory_length + name_length + 1);
-  if (!path)
-    return NULL;
-  if (directory_length)
-    memcpy(path, program, directory_length);
-  memcpy(path + directory_length, name, name_length + 1);
-  return path;
-}
-
-int main(int argc, char **argv) {
+int bootstrap_run_cli(int argc, char **argv) {
   BootstrapContext context = {0};
   LainirCapabilityTable *caps = NULL;
   LainirRunRequest request = {0};
@@ -312,23 +272,8 @@ int main(int argc, char **argv) {
   const char *artifact_path;
   int source_start;
   int source_arg_count;
-  char *owned_compiler_path = NULL;
   int exit_code = 1;
 
-#ifdef LAIN_BOOTSTRAP_DRIVER
-  if (argc != 4 || strcmp(argv[1], "--emit-l1") != 0) {
-    fprintf(stderr, "usage: lainc --emit-l1 <source.lain> <output.l1>\n");
-    return 1;
-  }
-  owned_compiler_path = sibling_path(argv[0], "lainc.l1");
-  if (!owned_compiler_path)
-    return 1;
-  compiler_path = owned_compiler_path;
-  entry_name = "compiler_compile";
-  artifact_path = argv[3];
-  source_start = 2;
-  source_arg_count = 1;
-#else
   if (argc < 5) {
     fprintf(stderr,
             "usage: l1bootstrap <compiler.l1> <entry> <output.l1> "
@@ -340,7 +285,6 @@ int main(int argc, char **argv) {
   artifact_path = argv[3];
   source_start = 4;
   source_arg_count = argc - 4;
-#endif
 
   compiler_text = read_file_bytes(compiler_path, &compiler_length);
   if (!compiler_text) {
@@ -432,6 +376,5 @@ cleanup:
   lainir_caps_free(caps);
   lainir_free_subroutines(module);
   free(compiler_text);
-  free(owned_compiler_path);
   return exit_code;
 }

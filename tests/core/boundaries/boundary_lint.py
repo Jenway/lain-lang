@@ -158,7 +158,11 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="M4_LAINIR_SOURCE_MODULE_DEBT",
         description="LAIN-IR must not own source-level module/export state",
-        paths=("src/lainir/*.c", "src/lainir/*.h"),
+        paths=(
+            "bootstrap/src/core/*.c",
+            "bootstrap/src/text/*.c",
+            "bootstrap/include/lainir/*.h",
+        ),
         pattern=(
             r"native_declare_module|native_mark_export|"
             r"native_has_explicit_exports|native_is_export_marked|"
