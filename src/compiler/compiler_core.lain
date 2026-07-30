@@ -1,0 +1,198 @@
+// Platform-free, unified compiler entry.
+
+let memory_model: Module = import("std::memory_model");
+let slice: Module = import("std::core::slice");
+let source: Module = import("std::core::source");
+let source_workspace: Module =
+    import("packages::lain::compiler::source_workspace");
+let elaborator: Module =
+    import("packages::lain::compiler::elaborator");
+let meta: Module = import("packages::lain::compiler::meta");
+let lower: Module = import("packages::lain::compiler::lower");
+let l1_verifier: Module =
+    import("packages::lain::compiler::l1_verifier");
+let l1_printer: Module =
+    import("packages::lain::compiler::l1_printer");
+let compiler_context: Module =
+    import("packages::lain::compiler::compiler_context");
+
+@export
+let compiler_core: Module = std::module {
+    @export
+    let Compiler = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let Sources: Module =
+            source_workspace.SourceWorkspace(Memory);
+        let Elaborator: Module = elaborator.Elaborator(Memory);
+        let Meta: Module = meta.Meta(Memory);
+        let Lower: Module = lower.Lower(Memory);
+        let Verifier: Module = l1_verifier.Verifier(Memory);
+        let Printer: Module = l1_printer.Printer(Memory);
+        let Context: Module = compiler_context.Context(Memory);
+
+        let SourceBuffer: type = source.SourceBuffer(Memory);
+        let SourceSlice: type = slice.Slice(
+            SourceBuffer,
+            Memory.Bounds,
+        );
+
+        let CompileOptions: type = std::struct {
+            emit_text_l1: bool,
+            verify_l1: bool,
+        };
+
+        let CompileRequest: type = std::struct {
+            sources: SourceSlice,
+            root_module: Memory.String,
+            options: CompileOptions,
+        };
+
+        let empty_artifact = std::func() -> Memory.Bytes {
+            return Memory.Bytes.new();
+        };
+
+        let artifact_from_text = std::func(
+            text: &Memory.String,
+        ) -> Memory.Bytes ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let output: Memory.Bytes = Memory.Bytes.new();
+            let index: usize = 0;
+            while index < Memory.String.length(text) {
+                output.push(Memory.String.byte_at(text, index));
+                index = index + 1;
+            }
+            return output;
+        };
+
+        let diagnostic = std::func(
+            code: i32,
+            source_id: usize,
+        ) -> Context.Diagnostic {
+            return Context.Diagnostic {
+                code: code,
+                message: Memory.String.new(),
+                source_id: source_id,
+                start: 0,
+                end: 0,
+            };
+        };
+
+        let compile = std::func(
+            request: CompileRequest,
+        ) -> Context.CompileResult ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let context: Context.State = Context.new();
+            let workspace: Sources.Workspace = Sources.new();
+
+            let source_index: usize = 0;
+            while source_index < request.sources.length {
+                Sources.add(
+                    &mut workspace,
+                    request.sources.get(source_index),
+                );
+                source_index = source_index + 1;
+            }
+
+            if workspace.sources.length() == 0 {
+                Context.add_diagnostic(
+                    &mut context,
+                    diagnostic(4300, 0),
+                );
+                return Context.finish(context, empty_artifact());
+            }
+
+            let meta_registry: Meta.Registry =
+                Meta.new_registry();
+            let meta_index: usize = 0;
+            while meta_index < workspace.sources.length() {
+                let syntax_unit =
+                    workspace.sources.get(meta_index).syntax_unit;
+                let root = workspace.syntax.units
+                    .get(syntax_unit).root;
+                let expanded: Meta.Expansion = Meta.expand(
+                    &mut workspace.syntax,
+                    syntax_unit,
+                    root,
+                    &meta_registry,
+                );
+                if expanded.diagnostic != 0 {
+                    Context.add_diagnostic(
+                        &mut context,
+                        diagnostic(expanded.diagnostic, meta_index),
+                    );
+                    return Context.finish(
+                        context,
+                        empty_artifact(),
+                    );
+                }
+                workspace.sources.get_mut(meta_index).syntax_unit =
+                    expanded.syntax.unit;
+                meta_index = meta_index + 1;
+            }
+
+            let elaborated: Elaborator.Result =
+                Elaborator.elaborate(&workspace);
+            if elaborated.diagnostic != 0 {
+                Context.add_diagnostic(
+                    &mut context,
+                    diagnostic(
+                        elaborated.diagnostic,
+                        elaborated.diagnostic_unit,
+                    ),
+                );
+                return Context.finish(context, empty_artifact());
+            }
+
+            let lowered: Lower.Result =
+                Lower.program(&elaborated.program);
+            if lowered.diagnostic != 0 {
+                Context.add_diagnostic(
+                    &mut context,
+                    diagnostic(lowered.diagnostic, 0),
+                );
+                return Context.finish(context, empty_artifact());
+            }
+
+            if request.options.verify_l1 {
+                let verify_code: i32 = Verifier.unit(
+                    &lowered.unit,
+                    lowered.entry,
+                );
+                if verify_code != 0 {
+                    Context.add_diagnostic(
+                        &mut context,
+                        diagnostic(verify_code, 0),
+                    );
+                    return Context.finish(
+                        context,
+                        empty_artifact(),
+                    );
+                }
+            }
+
+            let artifact: Memory.Bytes = empty_artifact();
+            if request.options.emit_text_l1 {
+                let text: Memory.String =
+                    Printer.unit(&lowered.unit);
+                artifact = artifact_from_text(&text);
+            }
+
+            context.module_count =
+                elaborated.program.modules.summaries.length();
+            context.has_artifact = true;
+            return Context.finish(context, artifact);
+        };
+
+        return std::module {
+            @export let CompileOptions: type = CompileOptions;
+            @export let CompileRequest: type = CompileRequest;
+            @export let CompileResult: type = Context.CompileResult;
+            @export let compile = compile;
+        };
+    };
+};

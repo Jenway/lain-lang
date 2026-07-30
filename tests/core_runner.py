@@ -41,6 +41,10 @@ def main() -> int:
         ),
         ("core/meta", [python, "tests/core/meta/run_meta_contract.py"]),
         ("core/enum", [python, "tests/core/enum/run_enum_contract.py"]),
+        (
+            "core/pure-lain",
+            [python, "tests/core/pure_lain/run_pure_lain_contract.py"],
+        ),
         ("core/examples", [python, "tests/core/examples/run_examples.py"]),
         ("core/boundaries", [python, "tests/core/boundaries/boundary_lint.py"]),
         (
@@ -49,6 +53,14 @@ def main() -> int:
         ),
         ("core/lainir-contract", [python, "tests/core/lainir_contract/run_contract.py"]),
         ("core/self-hosting", [python, "tests/core/self_hosting/run_self_hosting.py"]),
+        (
+            "core/stage1-language",
+            [python, "tests/core/self_hosting/run_stage1_language.py"],
+        ),
+        (
+            "core/full-fixed-point",
+            [python, "tests/core/self_hosting/run_stage1_compatibility.py"],
+        ),
         ("bootstrap-core", [python, "tests/bootstrap-core/run_bootstrap_core.py"]),
     ]
 

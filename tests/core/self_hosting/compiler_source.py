@@ -14,25 +14,35 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "build/core-self-hosting/compiler_source.lain"
 MODULES = (
+    "packages/lain/compiler/tokenizer.lain",
     "packages/lain/compiler/syntax.lain",
     "packages/lain/compiler/generated_syntax.lain",
-    "packages/lain/compiler/surface_forms.lain",
     "packages/lain/compiler/types.lain",
+    "packages/lain/compiler/effects.lain",
     "packages/lain/compiler/compiler_context.lain",
-    "packages/lain/compiler/enums.lain",
     "packages/lain/compiler/modules.lain",
+    "packages/lain/compiler/source_workspace.lain",
+    "packages/lain/compiler/module_artifact.lain",
     "packages/lain/compiler/elaborator.lain",
+    "packages/lain/compiler/l1_ir.lain",
     "packages/lain/compiler/l1_unit_builder.lain",
+    "packages/lain/compiler/l1_verifier.lain",
+    "packages/lain/compiler/l1_printer.lain",
     "packages/lain/compiler/l1_interpreter.lain",
     "packages/lain/compiler/meta.lain",
     "packages/lain/compiler/lower.lain",
-    "packages/lain/compiler/diagnostics.lain",
     "packages/lain/compiler/workspace.lain",
-    "packages/lain/compiler/source_workspace.lain",
-    "packages/lain/compiler/module_artifact.lain",
     "packages/lain/compiler/frontend_pipeline.lain",
     "packages/lain/compiler/compiler.lain",
+    "packages/lain/compiler/compiler_core.lain",
+    "packages/lain/compiler/compiler_driver.lain",
     "packages/lain/compiler/compiler_api.lain",
+    "packages/lain/compiler/lainc.lain",
+    # Concrete transitional compiler entry. The modules above remain
+    # compile-time library values until a concrete MemoryModel instantiates
+    # them; this source is the physical compiler used for the bootstrap fixed
+    # point during that transition.
+    "packages/lain/bootstrap/stage1_compiler.lain",
 )
 
 

@@ -1,0 +1,142 @@
+// std/core/string.lain
+//
+// UTF-8 byte ownership follows the selected Allocation policy.  Public byte
+// indexing follows the selected Bounds policy.  Unicode scalar/grapheme
+// operations are intentionally outside this first namespace.
+
+let allocation: Module = import("std::allocation");
+let bounds: Module = import("std::bounds");
+let vector: Module = import("std::core::vec");
+
+@export
+let string: Module = std::module {
+    @export
+    let String = std::func(
+        Allocation: allocation.Policy,
+        Bounds: bounds.Policy,
+    ) -> type {
+        let ByteVector: type = vector.Vec(
+            i32,
+            Allocation,
+            Bounds,
+        );
+
+        let Concrete: type = std::struct {
+            bytes: ByteVector,
+        };
+
+        let Namespace: Module = std::module {
+            @export
+            let new = std::func() -> Concrete {
+                return Concrete {
+                    bytes: ByteVector.new(),
+                };
+            };
+
+            @export
+            let length = std::func(
+                value: &Concrete,
+            ) -> usize {
+                return ByteVector.length(&value.bytes);
+            };
+
+            @export
+            let append_byte = std::func(
+                value: &mut Concrete,
+                byte: i32,
+            ) -> unit ! {Allocation.Effect} {
+                ByteVector.push(&mut value.bytes, byte & 255);
+            };
+
+            @export
+            let append = std::func(
+                value: &mut Concrete,
+                suffix: &Concrete,
+            ) -> unit ! {
+                Allocation.Effect,
+                Bounds.Effect,
+            } {
+                let index: usize = 0;
+                while index < ByteVector.length(&suffix.bytes) {
+                    let byte: i32 =
+                        ByteVector.get(&suffix.bytes, index).*;
+                    ByteVector.push(&mut value.bytes, byte);
+                    index = index + 1;
+                }
+            };
+
+            @export
+            let clone = std::func(
+                value: &Concrete,
+            ) -> Concrete ! {
+                Allocation.Effect,
+                Bounds.Effect,
+            } {
+                let output: Concrete = Namespace.new();
+                Namespace.append(&mut output, value);
+                return output;
+            };
+
+            @export
+            let byte_at = std::func(
+                value: &Concrete,
+                index: usize,
+            ) -> i32 ! {Bounds.Effect} {
+                return ByteVector.get(&value.bytes, index).*;
+            };
+
+            @export
+            let equal = std::func(
+                left: &Concrete,
+                right: &Concrete,
+            ) -> bool ! {Bounds.Effect} {
+                let left_length: usize =
+                    ByteVector.length(&left.bytes);
+                if left_length != ByteVector.length(&right.bytes) {
+                    return false;
+                }
+                let index: usize = 0;
+                while index < left_length {
+                    if ByteVector.get(&left.bytes, index).*
+                        != ByteVector.get(&right.bytes, index).* {
+                        return false;
+                    }
+                    index = index + 1;
+                }
+                return true;
+            };
+
+            @export
+            let equal_literal = std::func(
+                value: &Concrete,
+                literal: addr,
+                literal_length: usize,
+            ) -> bool ! {Bounds.Effect} {
+                if ByteVector.length(&value.bytes) != literal_length {
+                    return false;
+                }
+                let index: usize = 0;
+                while index < literal_length {
+                    if ByteVector.get(&value.bytes, index).*
+                        != std::load_bits(8, literal + index) {
+                        return false;
+                    }
+                    index = index + 1;
+                }
+                return true;
+            };
+
+            @export
+            let release = std::func(
+                value: &mut Concrete,
+            ) -> unit ! {Allocation.Effect} {
+                ByteVector.release(&mut value.bytes);
+            };
+        };
+
+        return std::type_with_namespace(
+            Concrete,
+            Namespace,
+        );
+    };
+};
