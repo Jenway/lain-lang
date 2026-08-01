@@ -126,6 +126,20 @@ typedef enum {
   EXPR_ALLOCA,
   EXPR_FIELD,
   EXPR_EVAL,
+  EXPR_SDIV,
+  EXPR_UDIV,
+  EXPR_SLT,
+  EXPR_SLE,
+  EXPR_SGT,
+  EXPR_SGE,
+  EXPR_ULT,
+  EXPR_ULE,
+  EXPR_UGT,
+  EXPR_UGE,
+  EXPR_ZEXT,
+  EXPR_SEXT,
+  EXPR_TRUNC,
+  EXPR_PROC_ADDR,
 } L1ExprKind;
 
 typedef struct L1Expr L1Expr;
@@ -189,6 +203,17 @@ struct L1Expr {
     struct {
       L1Expr *operand;
     } unary;
+
+    /* EXPR_ZEXT, EXPR_SEXT, EXPR_TRUNC */
+    struct {
+      L1Expr *operand;
+      L1Type *target_ty;
+    } conversion;
+
+    /* EXPR_PROC_ADDR */
+    struct {
+      char *fn_name;
+    } proc_addr;
 
     /* EXPR_CALL */
     struct {

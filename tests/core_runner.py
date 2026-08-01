@@ -52,6 +52,24 @@ def main() -> int:
             [python, "tests/core/bootstrap_execution/run_bootstrap_execution.py"],
         ),
         ("core/lainir-contract", [python, "tests/core/lainir_contract/run_contract.py"]),
+        (
+            "lainir/compiler-boundary",
+            [python, "tests/lainir_codegen/check_boundary.py"],
+        ),
+        (
+            "lainir/parser-differential",
+            [python, "tests/lainir_codegen/run_parser_differential.py"],
+        ),
+        (
+            "lainir/execution-differential",
+            [python, "tests/lainir_codegen/run_execution_differential.py"],
+        ),
+        (
+            "lainir/diagnostic-differential",
+            [python, "tests/lainir_codegen/run_diagnostic_differential.py"],
+        ),
+        ("lainir/codegen-stage0", [python, "tests/lainir_codegen/run_stage0.py"]),
+        ("lainir/self-host", [python, "tests/lainir_codegen/run_self_host.py"]),
         ("core/self-hosting", [python, "tests/core/self_hosting/run_self_hosting.py"]),
         (
             "core/stage1-language",

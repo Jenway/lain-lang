@@ -312,8 +312,6 @@ The expected interpreter result is:
 The following work remains before LAIN-IR can host the complete Lain
 compiler:
 
-- executable indirect calls and procedure-address values;
-- explicit signed and unsigned integer operations;
 - stable immutable data segments for frozen compiler data;
 - float and bitcast conversion operations;
 - precise allocation lifetime and address validity rules;

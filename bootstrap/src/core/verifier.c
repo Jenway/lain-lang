@@ -96,16 +96,73 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
   case EXPR_FADD: case EXPR_FSUB: case EXPR_FMUL: case EXPR_FDIV: case EXPR_FEQ: case EXPR_FLT:
     return verify_expr(ctx, expr->data.bin.left, names) &&
            verify_expr(ctx, expr->data.bin.right, names);
+  case EXPR_SDIV: case EXPR_UDIV:
+  case EXPR_SLT: case EXPR_SLE: case EXPR_SGT: case EXPR_SGE:
+  case EXPR_ULT: case EXPR_ULE: case EXPR_UGT: case EXPR_UGE: {
+    L1Type *left;
+    L1Type *right;
+    if (!verify_expr(ctx, expr->data.bin.left, names) ||
+        !verify_expr(ctx, expr->data.bin.right, names))
+      return 0;
+    left = infer_expr_type(expr->data.bin.left);
+    right = infer_expr_type(expr->data.bin.right);
+    if (!left || !right || left->kind != TY_BITS || right->kind != TY_BITS)
+      return fail(ctx, 2030, "explicit integer operation requires #bits operands");
+    if (expr->data.bin.left->kind != EXPR_CONST &&
+        expr->data.bin.right->kind != EXPR_CONST &&
+        !same_type(left, right))
+      return fail(ctx, 2031, "explicit integer operand widths do not match");
+    return 1;
+  }
   case EXPR_POPCOUNT: case EXPR_CLZ: case EXPR_ROTL:
   case EXPR_INT2PTR: case EXPR_PTR2INT:
     return verify_expr(ctx, expr->data.unary.operand, names);
+  case EXPR_ZEXT: case EXPR_SEXT: case EXPR_TRUNC: {
+    L1Type *source;
+    if (!verify_expr(ctx, expr->data.conversion.operand, names)) return 0;
+    source = infer_expr_type(expr->data.conversion.operand);
+    if (!source || source->kind != TY_BITS ||
+        !expr->data.conversion.target_ty ||
+        expr->data.conversion.target_ty->kind != TY_BITS)
+      return fail(ctx, 2023, "integer conversion requires #bits operands");
+    if ((expr->kind == EXPR_TRUNC &&
+         expr->data.conversion.target_ty->width >= source->width) ||
+        (expr->kind != EXPR_TRUNC &&
+         expr->data.conversion.target_ty->width <= source->width))
+      return fail(ctx, 2024, "integer conversion has invalid width direction");
+    return 1;
+  }
   case EXPR_LOAD:
-    return verify_expr(ctx, expr->data.load.addr, names);
+    if (!verify_expr(ctx, expr->data.load.addr, names)) return 0;
+    {
+      L1Type *address = infer_expr_type(expr->data.load.addr);
+      if (!address || address->kind != TY_ADDR)
+        return fail(ctx, 2032, "#load operand is not #addr");
+    }
+    return 1;
   case EXPR_LEA:
-    return verify_expr(ctx, expr->data.lea.base, names) &&
-           (!expr->data.lea.idx || verify_expr(ctx, expr->data.lea.idx, names));
+    if (!verify_expr(ctx, expr->data.lea.base, names) ||
+        (expr->data.lea.idx &&
+         !verify_expr(ctx, expr->data.lea.idx, names)))
+      return 0;
+    {
+      L1Type *base = infer_expr_type(expr->data.lea.base);
+      L1Type *index = expr->data.lea.idx
+                          ? infer_expr_type(expr->data.lea.idx) : NULL;
+      if (!base || base->kind != TY_ADDR)
+        return fail(ctx, 2033, "#lea base is not #addr");
+      if (index && index->kind != TY_BITS)
+        return fail(ctx, 2034, "#lea index is not #bits");
+    }
+    return 1;
   case EXPR_FIELD:
-    return verify_expr(ctx, expr->data.field.base, names);
+    if (!verify_expr(ctx, expr->data.field.base, names)) return 0;
+    {
+      L1Type *base = infer_expr_type(expr->data.field.base);
+      if (!base || base->kind != TY_ADDR)
+        return fail(ctx, 2035, "#field base is not #addr");
+    }
+    return 1;
   case EXPR_CALL:
     callee = find_subroutine(ctx->module, expr->data.call.fn_name);
     if (!callee)
@@ -133,10 +190,44 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
     for (i = 0; i < expr->data.eval.arg_count; i++)
       if (!verify_expr(ctx, expr->data.eval.args[i], names)) return 0;
     return 1;
+  case EXPR_PROC_ADDR:
+    if (!find_subroutine(ctx->module, expr->data.proc_addr.fn_name))
+      return fail(ctx, 2025, "unknown procedure address `%s`",
+                  expr->data.proc_addr.fn_name);
+    return 1;
   case EXPR_CALL_INDIRECT:
     if (!verify_expr(ctx, expr->data.call_indirect.fn_ptr, names)) return 0;
-    for (i = 0; i < expr->data.call_indirect.arg_count; i++)
-      if (!verify_expr(ctx, expr->data.call_indirect.args[i], names)) return 0;
+    {
+      L1Type *target_ty = infer_expr_type(expr->data.call_indirect.fn_ptr);
+      if (!target_ty || target_ty->kind != TY_ADDR)
+        return fail(ctx, 2026, "call_indirect target is not #addr");
+    }
+    if (expr->data.call_indirect.param_count !=
+        expr->data.call_indirect.arg_count)
+      return fail(ctx, 2027, "call_indirect signature arity mismatch");
+    for (i = 0; i < expr->data.call_indirect.arg_count; i++) {
+      L1Expr *arg = expr->data.call_indirect.args[i];
+      if (!verify_expr(ctx, arg, names)) return 0;
+      if (!same_type(expr->data.call_indirect.param_tys[i],
+                     infer_expr_type(arg)) &&
+          !(arg->kind == EXPR_CONST &&
+            expr->data.call_indirect.param_tys[i]->kind == TY_BITS))
+        return fail(ctx, 2028, "call_indirect argument %u type mismatch", i);
+    }
+    if (expr->data.call_indirect.fn_ptr->kind == EXPR_PROC_ADDR) {
+      L1Subroutine *target = find_subroutine(
+          ctx->module,
+          expr->data.call_indirect.fn_ptr->data.proc_addr.fn_name);
+      if (!target ||
+          !same_type(target->ret_ty, expr->data.call_indirect.ret_ty) ||
+          target->param_count != expr->data.call_indirect.param_count)
+        return fail(ctx, 2029, "call_indirect direct target signature mismatch");
+      for (i = 0; i < target->param_count; i++)
+        if (!same_type(target->param_tys[i],
+                       expr->data.call_indirect.param_tys[i]))
+          return fail(ctx, 2029,
+                      "call_indirect direct target signature mismatch");
+    }
     return 1;
   case EXPR_PRIMITIVE:
     for (i = 0; i < expr->data.primitive.operand_count; i++)
@@ -154,7 +245,14 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
         expr->data.primitive.result_ty = candidate;
     }
     return 1;
-  case EXPR_CONST: case EXPR_STRING: case EXPR_ALLOCA:
+  case EXPR_ALLOCA:
+    if (!expr->data.alloca.byte_size &&
+        (!expr->data.alloca.element_ty ||
+         expr->data.alloca.element_ty->kind == TY_UNIT ||
+         expr->data.alloca.element_ty->kind == TY_NEVER))
+      return fail(ctx, 2036, "#alloca element has no physical size");
+    return 1;
+  case EXPR_CONST: case EXPR_STRING:
     return 1;
   }
   return fail(ctx, 2099, "unsupported expression kind %d", (int)expr->kind);
@@ -167,6 +265,10 @@ static int expression_is_condition(L1Expr *expr) {
     return expr->data.const_val == 0 || expr->data.const_val == 1;
   if (expr->kind == EXPR_EQ || expr->kind == EXPR_NE || expr->kind == EXPR_LT ||
       expr->kind == EXPR_LE || expr->kind == EXPR_GT || expr->kind == EXPR_GE ||
+      expr->kind == EXPR_SLT || expr->kind == EXPR_SLE ||
+      expr->kind == EXPR_SGT || expr->kind == EXPR_SGE ||
+      expr->kind == EXPR_ULT || expr->kind == EXPR_ULE ||
+      expr->kind == EXPR_UGT || expr->kind == EXPR_UGE ||
       expr->kind == EXPR_FEQ || expr->kind == EXPR_FLT)
     return 1;
   type = infer_expr_type(expr);
@@ -230,6 +332,18 @@ static int verify_block(VerifyContext *ctx, L1Block *block, const Name *incoming
     case INST_STORE:
       if (!verify_expr(ctx, inst->data.store.val, names) ||
           !verify_expr(ctx, inst->data.store.dest, names)) return 0;
+      if (!inst->data.store.store_ty)
+        inst->data.store.store_ty = infer_expr_type(inst->data.store.val);
+      if (!inst->data.store.store_ty)
+        return fail(ctx, 2017, "#store requires an explicit physical type");
+      if (!value_type_compatible(
+              inst->data.store.store_ty, inst->data.store.val))
+        return fail(ctx, 2018, "#store value does not match its physical type");
+      {
+        L1Type *dest_ty = infer_expr_type(inst->data.store.dest);
+        if (!dest_ty || dest_ty->kind != TY_ADDR)
+          return fail(ctx, 2019, "#store destination is not #addr");
+      }
       break;
     case INST_CALL:
       if (!verify_expr(ctx, inst->data.call_inst.expr, names)) return 0;

@@ -53,7 +53,26 @@ typedef enum {
   TK_KW_GT_OP,
   TK_KW_GE_OP,
   TK_KW_CALL_INDIRECT,
-  TK_KW_EVAL
+  TK_KW_EVAL,
+  TK_HASH_BITS,
+  TK_HASH_FLOAT,
+  TK_HASH_ADDR,
+  TK_LANGLE,
+  TK_RANGLE,
+  TK_KW_SDIV,
+  TK_KW_UDIV,
+  TK_KW_SLT,
+  TK_KW_SLE,
+  TK_KW_SGT,
+  TK_KW_SGE,
+  TK_KW_ULT,
+  TK_KW_ULE,
+  TK_KW_UGT,
+  TK_KW_UGE
+  ,TK_KW_ZEXT
+  ,TK_KW_SEXT
+  ,TK_KW_TRUNC
+  ,TK_KW_PROC_ADDR
 } TokenKind;
 
 typedef struct {
@@ -163,6 +182,9 @@ static int parser_lookup_param_index(Parser *p, const char *name) {
 static TokenKind hash_keyword_kind(const char *text, int len) {
   if (len == 4 && memcmp(text, "unit", 4) == 0) return TK_HASH_UNIT;
   if (len == 5 && memcmp(text, "never", 5) == 0) return TK_HASH_NEVER;
+  if (len == 4 && memcmp(text, "bits", 4) == 0) return TK_HASH_BITS;
+  if (len == 5 && memcmp(text, "float", 5) == 0) return TK_HASH_FLOAT;
+  if (len == 4 && memcmp(text, "addr", 4) == 0) return TK_HASH_ADDR;
   if (len == 4 && memcmp(text, "proc", 4) == 0) return TK_KW_PROC;
   if (len == 6 && memcmp(text, "extern", 6) == 0) return TK_KW_EXTERN;
   if (len == 6 && memcmp(text, "return", 6) == 0) return TK_KW_RETURN;
@@ -183,12 +205,26 @@ static TokenKind hash_keyword_kind(const char *text, int len) {
   if (len == 3 && memcmp(text, "sub", 3) == 0) return TK_KW_SUB_OP;
   if (len == 3 && memcmp(text, "mul", 3) == 0) return TK_KW_MUL_OP;
   if (len == 3 && memcmp(text, "div", 3) == 0) return TK_KW_DIV_OP;
+  if (len == 4 && memcmp(text, "sdiv", 4) == 0) return TK_KW_SDIV;
+  if (len == 4 && memcmp(text, "udiv", 4) == 0) return TK_KW_UDIV;
   if (len == 2 && memcmp(text, "eq", 2) == 0) return TK_KW_EQ_OP;
   if (len == 2 && memcmp(text, "ne", 2) == 0) return TK_KW_NE_OP;
   if (len == 2 && memcmp(text, "lt", 2) == 0) return TK_KW_LT_OP;
   if (len == 2 && memcmp(text, "le", 2) == 0) return TK_KW_LE_OP;
   if (len == 2 && memcmp(text, "gt", 2) == 0) return TK_KW_GT_OP;
   if (len == 2 && memcmp(text, "ge", 2) == 0) return TK_KW_GE_OP;
+  if (len == 3 && memcmp(text, "slt", 3) == 0) return TK_KW_SLT;
+  if (len == 3 && memcmp(text, "sle", 3) == 0) return TK_KW_SLE;
+  if (len == 3 && memcmp(text, "sgt", 3) == 0) return TK_KW_SGT;
+  if (len == 3 && memcmp(text, "sge", 3) == 0) return TK_KW_SGE;
+  if (len == 3 && memcmp(text, "ult", 3) == 0) return TK_KW_ULT;
+  if (len == 3 && memcmp(text, "ule", 3) == 0) return TK_KW_ULE;
+  if (len == 3 && memcmp(text, "ugt", 3) == 0) return TK_KW_UGT;
+  if (len == 3 && memcmp(text, "uge", 3) == 0) return TK_KW_UGE;
+  if (len == 4 && memcmp(text, "zext", 4) == 0) return TK_KW_ZEXT;
+  if (len == 4 && memcmp(text, "sext", 4) == 0) return TK_KW_SEXT;
+  if (len == 5 && memcmp(text, "trunc", 5) == 0) return TK_KW_TRUNC;
+  if (len == 9 && memcmp(text, "proc_addr", 9) == 0) return TK_KW_PROC_ADDR;
   if (len == 13 && memcmp(text, "call_indirect", 13) == 0) return TK_KW_CALL_INDIRECT;
   if (len == 4 && memcmp(text, "eval", 4) == 0) return TK_KW_EVAL;
   return TK_IDENT;
@@ -294,6 +330,8 @@ static void next_token(Parser *p) {
   case ':': p->current.kind = TK_COLON; break;
   case '=': p->current.kind = TK_EQ; break;
   case ';': p->current.kind = TK_SEMICOLON; break;
+  case '<': p->current.kind = TK_LANGLE; break;
+  case '>': p->current.kind = TK_RANGLE; break;
   case '-':
     if (p->src[p->pos] == '>') {
       p->pos++;
@@ -330,6 +368,25 @@ static L1Type *parse_type(Parser *p) {
   if (token.kind == TK_HASH_NEVER) {
     next_token(p);
     return lainir_new_type(TY_NEVER, 0);
+  }
+  if (token.kind == TK_HASH_ADDR) {
+    next_token(p);
+    return lainir_new_type(TY_ADDR, 64);
+  }
+  if (token.kind == TK_HASH_BITS || token.kind == TK_HASH_FLOAT) {
+    L1TypeKind kind =
+        token.kind == TK_HASH_BITS ? TY_BITS : TY_FLOATS;
+    uint32_t width;
+    next_token(p);
+    expect(p, TK_LANGLE);
+    token = expect(p, TK_NUMBER);
+    text = token_string(token);
+    width = (uint32_t)strtoul(text, NULL, 10);
+    free(text);
+    if (!width)
+      parse_fail(p, "physical type width must be non-zero");
+    expect(p, TK_RANGLE);
+    return lainir_new_type(kind, width);
   }
   if (token.kind != TK_IDENT)
     parse_fail(p, "expected type");
@@ -454,7 +511,12 @@ static L1Expr *parse_special_hash_call(Parser *p, TokenKind kind) {
       kind == TK_KW_MUL_OP || kind == TK_KW_DIV_OP ||
       kind == TK_KW_EQ_OP || kind == TK_KW_NE_OP ||
       kind == TK_KW_LT_OP || kind == TK_KW_LE_OP ||
-      kind == TK_KW_GT_OP || kind == TK_KW_GE_OP) {
+      kind == TK_KW_GT_OP || kind == TK_KW_GE_OP ||
+      kind == TK_KW_SDIV || kind == TK_KW_UDIV ||
+      kind == TK_KW_SLT || kind == TK_KW_SLE ||
+      kind == TK_KW_SGT || kind == TK_KW_SGE ||
+      kind == TK_KW_ULT || kind == TK_KW_ULE ||
+      kind == TK_KW_UGT || kind == TK_KW_UGE) {
     if (count != 2)
       parse_fail(p, "binary op expects two operands");
     L1ExprKind expr_kind = EXPR_ADD;
@@ -467,6 +529,16 @@ static L1Expr *parse_special_hash_call(Parser *p, TokenKind kind) {
     else if (kind == TK_KW_LE_OP) expr_kind = EXPR_LE;
     else if (kind == TK_KW_GT_OP) expr_kind = EXPR_GT;
     else if (kind == TK_KW_GE_OP) expr_kind = EXPR_GE;
+    else if (kind == TK_KW_SDIV) expr_kind = EXPR_SDIV;
+    else if (kind == TK_KW_UDIV) expr_kind = EXPR_UDIV;
+    else if (kind == TK_KW_SLT) expr_kind = EXPR_SLT;
+    else if (kind == TK_KW_SLE) expr_kind = EXPR_SLE;
+    else if (kind == TK_KW_SGT) expr_kind = EXPR_SGT;
+    else if (kind == TK_KW_SGE) expr_kind = EXPR_SGE;
+    else if (kind == TK_KW_ULT) expr_kind = EXPR_ULT;
+    else if (kind == TK_KW_ULE) expr_kind = EXPR_ULE;
+    else if (kind == TK_KW_UGT) expr_kind = EXPR_UGT;
+    else if (kind == TK_KW_UGE) expr_kind = EXPR_UGE;
     expr = lainir_new_expr(expr_kind);
     expr->data.bin.left = args[0];
     expr->data.bin.right = args[1];
@@ -590,6 +662,80 @@ static L1Expr *parse_expr(Parser *p) {
   L1Expr **args;
   L1Expr *expr;
 
+  if (p->current.kind == TK_KW_PROC_ADDR) {
+    next_token(p);
+    expect(p, TK_LPAREN);
+    token = expect(p, TK_IDENT);
+    text = token_string(token);
+    expect(p, TK_RPAREN);
+    expr = lainir_new_expr(EXPR_PROC_ADDR);
+    expr->data.proc_addr.fn_name = text;
+    return expr;
+  }
+  if (p->current.kind == TK_KW_CALL_INDIRECT) {
+    next_token(p);
+    if (p->current.kind != TK_LBRACK)
+      return parse_special_hash_call(p, TK_KW_CALL_INDIRECT);
+    next_token(p);
+    expect(p, TK_LPAREN);
+    {
+      uint32_t param_cap = 4;
+      uint32_t param_count = 0;
+      L1Type **param_tys = NULL;
+      L1Type *return_ty;
+      if (p->current.kind != TK_RPAREN) {
+        param_tys = calloc(param_cap, sizeof(L1Type *));
+        while (1) {
+          if (param_count == param_cap) {
+            param_cap *= 2;
+            param_tys = realloc(
+                param_tys, param_cap * sizeof(L1Type *));
+          }
+          param_tys[param_count++] = parse_type(p);
+          if (p->current.kind != TK_COMMA) break;
+          next_token(p);
+        }
+      }
+      expect(p, TK_RPAREN);
+      expect(p, TK_ARROW);
+      return_ty = parse_type(p);
+      expect(p, TK_RBRACK);
+      expect(p, TK_LPAREN);
+      args = parse_expr_list(p, &count);
+      expect(p, TK_RPAREN);
+      if (!count) parse_fail(p, "call_indirect requires a target");
+      expr = lainir_new_expr(EXPR_CALL_INDIRECT);
+      expr->data.call_indirect.fn_ptr = args[0];
+      expr->data.call_indirect.ret_ty = return_ty;
+      expr->data.call_indirect.param_tys = param_tys;
+      expr->data.call_indirect.param_count = param_count;
+      expr->data.call_indirect.arg_count = count - 1;
+      expr->data.call_indirect.args =
+          count > 1 ? calloc(count - 1, sizeof(L1Expr *)) : NULL;
+      for (uint32_t i = 1; i < count; i++)
+        expr->data.call_indirect.args[i - 1] = args[i];
+      free(args);
+      return expr;
+    }
+  }
+  if (p->current.kind == TK_KW_ZEXT ||
+      p->current.kind == TK_KW_SEXT ||
+      p->current.kind == TK_KW_TRUNC) {
+    TokenKind conversion_kind = p->current.kind;
+    next_token(p);
+    expect(p, TK_LBRACK);
+    L1Type *target_ty = parse_type(p);
+    expect(p, TK_RBRACK);
+    expect(p, TK_LPAREN);
+    L1Expr *operand = parse_expr(p);
+    expect(p, TK_RPAREN);
+    expr = lainir_new_expr(
+        conversion_kind == TK_KW_ZEXT ? EXPR_ZEXT :
+        conversion_kind == TK_KW_SEXT ? EXPR_SEXT : EXPR_TRUNC);
+    expr->data.conversion.operand = operand;
+    expr->data.conversion.target_ty = target_ty;
+    return expr;
+  }
   if (p->current.kind == TK_KW_FIELD) {
     next_token(p);
     return parse_field_expr(p);
@@ -702,6 +848,16 @@ static L1Expr *parse_expr(Parser *p) {
   case TK_KW_LE_OP:
   case TK_KW_GT_OP:
   case TK_KW_GE_OP:
+  case TK_KW_SDIV:
+  case TK_KW_UDIV:
+  case TK_KW_SLT:
+  case TK_KW_SLE:
+  case TK_KW_SGT:
+  case TK_KW_SGE:
+  case TK_KW_ULT:
+  case TK_KW_ULE:
+  case TK_KW_UGT:
+  case TK_KW_UGE:
   case TK_KW_CALL_INDIRECT:
     {
       TokenKind kind = p->current.kind;
@@ -765,10 +921,15 @@ static L1Instruction *parse_instruction_list(Parser *p) {
     } else if (p->current.kind == TK_KW_STORE) {
       next_token(p);
       inst = lainir_new_instruction(INST_STORE);
+      inst->data.store.store_ty = NULL;
+      if (p->current.kind == TK_LBRACK) {
+        next_token(p);
+        inst->data.store.store_ty = parse_type(p);
+        expect(p, TK_RBRACK);
+      }
       inst->data.store.val = parse_expr(p);
       expect(p, TK_COMMA);
       inst->data.store.dest = parse_expr(p);
-      inst->data.store.store_ty = NULL;
     } else if (p->current.kind == TK_KW_CALL) {
       inst = lainir_new_instruction(INST_CALL);
       inst->data.call_inst.expr = parse_expr(p);

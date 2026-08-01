@@ -41,6 +41,16 @@ static void lainir_free_expr(L1Expr *expr) {
   case EXPR_LE:
   case EXPR_GT:
   case EXPR_GE:
+  case EXPR_SDIV:
+  case EXPR_UDIV:
+  case EXPR_SLT:
+  case EXPR_SLE:
+  case EXPR_SGT:
+  case EXPR_SGE:
+  case EXPR_ULT:
+  case EXPR_ULE:
+  case EXPR_UGT:
+  case EXPR_UGE:
   case EXPR_FADD:
   case EXPR_FSUB:
   case EXPR_FMUL:
@@ -56,6 +66,11 @@ static void lainir_free_expr(L1Expr *expr) {
   case EXPR_INT2PTR:
   case EXPR_PTR2INT:
     lainir_free_expr(expr->data.unary.operand);
+    break;
+  case EXPR_ZEXT:
+  case EXPR_SEXT:
+  case EXPR_TRUNC:
+    lainir_free_expr(expr->data.conversion.operand);
     break;
   case EXPR_CALL:
     free(expr->data.call.fn_name);
@@ -87,6 +102,9 @@ static void lainir_free_expr(L1Expr *expr) {
       lainir_free_expr(expr->data.call_indirect.args[i]);
     free(expr->data.call_indirect.args);
     free(expr->data.call_indirect.param_tys);
+    break;
+  case EXPR_PROC_ADDR:
+    free(expr->data.proc_addr.fn_name);
     break;
   default:
     break;
@@ -238,6 +256,8 @@ L1Type *infer_expr_type(L1Expr *expr) {
   case EXPR_SUB:
   case EXPR_MUL:
   case EXPR_DIV:
+  case EXPR_SDIV:
+  case EXPR_UDIV:
     return infer_expr_type(expr->data.bin.left);
   case EXPR_EQ:
   case EXPR_NE:
@@ -245,6 +265,14 @@ L1Type *infer_expr_type(L1Expr *expr) {
   case EXPR_LE:
   case EXPR_GT:
   case EXPR_GE:
+  case EXPR_SLT:
+  case EXPR_SLE:
+  case EXPR_SGT:
+  case EXPR_SGE:
+  case EXPR_ULT:
+  case EXPR_ULE:
+  case EXPR_UGT:
+  case EXPR_UGE:
   case EXPR_FEQ:
   case EXPR_FLT:
     return lainir_new_type(TY_BITS, 1);
@@ -262,6 +290,23 @@ L1Type *infer_expr_type(L1Expr *expr) {
     return expr->data.field.field_ty;
   case EXPR_ALLOCA:
     return expr->data.alloca.result_ty;
+  case EXPR_LEA:
+  case EXPR_INT2PTR:
+  case EXPR_PROC_ADDR:
+    return lainir_new_type(TY_ADDR, 64);
+  case EXPR_PTR2INT:
+    return lainir_new_type(TY_BITS, 64);
+  case EXPR_CALL_INDIRECT:
+    return expr->data.call_indirect.ret_ty;
+  case EXPR_ZEXT:
+  case EXPR_SEXT:
+  case EXPR_TRUNC:
+    return expr->data.conversion.target_ty;
+  case EXPR_FADD:
+  case EXPR_FSUB:
+  case EXPR_FMUL:
+  case EXPR_FDIV:
+    return infer_expr_type(expr->data.bin.left);
   case EXPR_PRIMITIVE:
     return expr->data.primitive.result_ty;
   default:
