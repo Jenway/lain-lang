@@ -64,6 +64,8 @@ LainirValue lainir_value_bits(uint64_t bits, uint32_t bit_width) {
   LainirValue value; memset(&value, 0, sizeof(value));
   value.kind = LAINIR_VALUE_BITS;
   value.bit_width = bit_width ? bit_width : 64;
+  if (value.bit_width < 64)
+    bits &= (UINT64_C(1) << value.bit_width) - 1;
   value.as.bits = bits; return value;
 }
 
@@ -249,6 +251,73 @@ static uint64_t interp_value_bits(LainirInterpreter *interp, LainirValue value, 
   return value.as.bits;
 }
 
+static int64_t interp_signed_bits(uint64_t bits, uint32_t width) {
+  if (!width || width >= 64) return (int64_t)bits;
+  {
+    uint64_t sign = UINT64_C(1) << (width - 1);
+    uint64_t mask = (UINT64_C(1) << width) - 1;
+    bits &= mask;
+    return (int64_t)((bits ^ sign) - sign);
+  }
+}
+
+static LainirValue interp_coerce_physical(
+    LainirInterpreter *interp, LainirValue value, L1Type *type) {
+  if (!type) return value;
+  if (type->kind == TY_BITS) {
+    if (value.kind != LAINIR_VALUE_BITS) {
+      interp_trap(interp, "expected bits for physical coercion");
+      return lainir_value_unit();
+    }
+    return lainir_value_bits(value.as.bits, type->width);
+  }
+  if (type->kind == TY_UNIT) return lainir_value_unit();
+  return value;
+}
+
+static LainirValue interp_eval_explicit_integer_binary(
+    LainirInterpreter *interp, LainirFrame *frame, L1Expr *expr) {
+  LainirValue left = interp_eval_expr(interp, frame, expr->data.bin.left);
+  LainirValue right = interp_eval_expr(interp, frame, expr->data.bin.right);
+  uint32_t width = left.bit_width ? left.bit_width : 32;
+  uint64_t lhs;
+  uint64_t rhs;
+  int64_t signed_lhs;
+  int64_t signed_rhs;
+  if (interp->error) return lainir_value_unit();
+  lhs = interp_value_bits(interp, left, "expected bits for integer operation");
+  rhs = interp_value_bits(interp, right, "expected bits for integer operation");
+  signed_lhs = interp_signed_bits(lhs, width);
+  signed_rhs = interp_signed_bits(rhs, width);
+  switch (expr->kind) {
+  case EXPR_SDIV:
+    if (!signed_rhs) {
+      interp_trap(interp, "sdiv by zero");
+      return lainir_value_unit();
+    }
+    if (width == 64 && signed_lhs == INT64_MIN && signed_rhs == -1)
+      return lainir_value_bits((uint64_t)INT64_MIN, width);
+    return lainir_value_bits((uint64_t)(signed_lhs / signed_rhs), width);
+  case EXPR_UDIV:
+    if (!rhs) {
+      interp_trap(interp, "udiv by zero");
+      return lainir_value_unit();
+    }
+    return lainir_value_bits(lhs / rhs, width);
+  case EXPR_SLT: return lainir_value_bits(signed_lhs < signed_rhs, 1);
+  case EXPR_SLE: return lainir_value_bits(signed_lhs <= signed_rhs, 1);
+  case EXPR_SGT: return lainir_value_bits(signed_lhs > signed_rhs, 1);
+  case EXPR_SGE: return lainir_value_bits(signed_lhs >= signed_rhs, 1);
+  case EXPR_ULT: return lainir_value_bits(lhs < rhs, 1);
+  case EXPR_ULE: return lainir_value_bits(lhs <= rhs, 1);
+  case EXPR_UGT: return lainir_value_bits(lhs > rhs, 1);
+  case EXPR_UGE: return lainir_value_bits(lhs >= rhs, 1);
+  default:
+    interp_trap(interp, "invalid explicit integer operation");
+    return lainir_value_unit();
+  }
+}
+
 static void *interp_value_addr(LainirInterpreter *interp, LainirValue value, const char *ctx) {
   if (value.kind == LAINIR_VALUE_ADDR) return value.as.addr;
   if (value.kind == LAINIR_VALUE_STRING) return (void *)value.as.string;
@@ -368,6 +437,31 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
                                      L1Expr *expr) {
   if (!expr) return lainir_value_unit();
   switch (expr->kind) {
+  case EXPR_SDIV:
+  case EXPR_UDIV:
+  case EXPR_SLT:
+  case EXPR_SLE:
+  case EXPR_SGT:
+  case EXPR_SGE:
+  case EXPR_ULT:
+  case EXPR_ULE:
+  case EXPR_UGT:
+  case EXPR_UGE:
+    return interp_eval_explicit_integer_binary(interp, frame, expr);
+  case EXPR_ZEXT:
+  case EXPR_SEXT:
+  case EXPR_TRUNC: {
+    LainirValue operand = interp_eval_expr(
+        interp, frame, expr->data.conversion.operand);
+    uint32_t target_width = expr->data.conversion.target_ty->width;
+    uint64_t bits;
+    if (interp->error) return lainir_value_unit();
+    bits = interp_value_bits(
+        interp, operand, "expected bits for integer conversion");
+    if (expr->kind == EXPR_SEXT)
+      bits = (uint64_t)interp_signed_bits(bits, operand.bit_width);
+    return lainir_value_bits(bits, target_width);
+  }
   case EXPR_CONST:
     return lainir_value_bits((uint64_t)expr->data.const_val, 32);
   case EXPR_STRING:
@@ -593,12 +687,55 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
           expr->data.field.field_ty);
     return interp_load_bits(interp, addr + expr->data.field.field_index, sz, bt);
   }
+  case EXPR_PROC_ADDR: {
+    L1Subroutine *target = interp_find_sub(
+        interp, expr->data.proc_addr.fn_name);
+    if (!target) {
+      interp_trap(interp, "procedure address target not found");
+      return lainir_value_unit();
+    }
+    return lainir_value_func(target);
+  }
   case EXPR_EVAL:
   case EXPR_CALL:
     return interp_eval_call(interp, frame, expr);
-  case EXPR_CALL_INDIRECT:
-    interp_trap(interp, "call_indirect not implemented");
-    return lainir_value_unit();
+  case EXPR_CALL_INDIRECT: {
+    LainirValue target = interp_eval_expr(
+        interp, frame, expr->data.call_indirect.fn_ptr);
+    LainirValue *args = NULL;
+    LainirValue result = lainir_value_unit();
+    if (interp->error) return result;
+    if (target.kind != LAINIR_VALUE_FUNC || !target.as.func) {
+      interp_trap(interp, "call_indirect target is not a procedure");
+      return result;
+    }
+    if (expr->data.call_indirect.arg_count) {
+      args = calloc(
+          expr->data.call_indirect.arg_count, sizeof(LainirValue));
+      if (!args) {
+        interp_trap(interp, "out of memory");
+        return result;
+      }
+    }
+    for (uint32_t i = 0; i < expr->data.call_indirect.arg_count; i++) {
+      args[i] = interp_eval_expr(
+          interp, frame, expr->data.call_indirect.args[i]);
+      if (interp->error) {
+        free(args);
+        return result;
+      }
+    }
+    if (target.as.func->is_extern && !target.as.func->blocks)
+      result = interp_call_host(
+          interp, target.as.func->name, args,
+          expr->data.call_indirect.arg_count);
+    else
+      result = interp_call_sub(
+          interp, target.as.func, args,
+          expr->data.call_indirect.arg_count);
+    free(args);
+    return result;
+  }
   default:
     interp_trap(interp, "unsupported expression");
     return lainir_value_unit();
@@ -620,11 +757,15 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     case INST_LET: {
       LainirValue value = interp_eval_expr(interp, frame, inst->data.let.val);
       if (interp->error) return;
+      value = interp_coerce_physical(interp, value, inst->data.let.ty);
+      if (interp->error) return;
       interp_set_local(frame, inst->data.let.name, value);
       break;
     }
     case INST_SET: {
       LainirValue value = interp_eval_expr(interp, frame, inst->data.set.val);
+      if (interp->error) return;
+      value = interp_coerce_physical(interp, value, inst->data.set.ty);
       if (interp->error) return;
       if (!interp_set_local(frame, inst->data.set.name, value))
         { interp_trap(interp, "set: unknown variable"); return; }
@@ -633,6 +774,9 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     case INST_STORE: {
       LainirValue dest  = interp_eval_expr(interp, frame, inst->data.store.dest);
       LainirValue value = interp_eval_expr(interp, frame, inst->data.store.val);
+      if (interp->error) return;
+      value = interp_coerce_physical(
+          interp, value, inst->data.store.store_ty);
       if (interp->error) return;
       uint8_t *addr = (uint8_t *)interp_value_addr(interp, dest, "expected address for store");
       if (interp->error) return;
@@ -679,6 +823,8 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     case INST_RETURN: {
       LainirValue value = interp_eval_expr(interp, frame, inst->data.ret.val);
       if (interp->error) return;
+      value = interp_coerce_physical(interp, value, frame->sub->ret_ty);
+      if (interp->error) return;
       interp->should_return = 1;
       interp->return_value = value;
       return;
@@ -703,7 +849,14 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
   if (arg_count) {
     frame.args = calloc(arg_count, sizeof(LainirValue));
     if (!frame.args) { interp_trap(interp, "out of memory"); return lainir_value_unit(); }
-    memcpy(frame.args, args, sizeof(LainirValue) * arg_count);
+    for (uint32_t i = 0; i < arg_count; i++) {
+      frame.args[i] = interp_coerce_physical(
+          interp, args[i], i < sub->param_count ? sub->param_tys[i] : NULL);
+      if (interp->error) {
+        interp_free_frame(&frame);
+        return lainir_value_unit();
+      }
+    }
   }
 
   int saved_ret = interp->should_return;

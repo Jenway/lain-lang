@@ -162,13 +162,19 @@ static LainirRunStatus write_bytes(
 static LainirRunStatus write_diagnostic(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
+  const void *bytes;
   (void)user_data;
-  if (count != 2 || args[0].kind != LAINIR_VALUE_ADDR ||
+  if (count != 2 ||
+      (args[0].kind != LAINIR_VALUE_ADDR &&
+       args[0].kind != LAINIR_VALUE_STRING) ||
       args[1].kind != LAINIR_VALUE_BITS) {
     *error = "bootstrap.write-diagnostic expects address and length";
     return LAINIR_RUN_BAD_CALL;
   }
-  fwrite(args[0].as.addr, 1, (size_t)args[1].as.bits, stderr);
+  bytes = args[0].kind == LAINIR_VALUE_STRING
+              ? (const void *)args[0].as.string
+              : args[0].as.addr;
+  fwrite(bytes, 1, (size_t)args[1].as.bits, stderr);
   fputc('\n', stderr);
   *result = lainir_value_unit();
   return LAINIR_RUN_OK;

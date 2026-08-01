@@ -64,10 +64,10 @@ static void emit_l1_type(L1Type *ty, EmitState *out) {
   }
   switch (ty->kind) {
   case TY_BITS:
-    emitf(out, "i%d", ty->width);
+    emitf(out, "#bits<%d>", ty->width);
     break;
   case TY_ADDR:
-    emitf(out, "addr");
+    emitf(out, "#addr");
     break;
   case TY_UNIT:
     emitf(out, "#unit");
@@ -76,7 +76,7 @@ static void emit_l1_type(L1Type *ty, EmitState *out) {
     emitf(out, "#never");
     break;
   case TY_FLOATS:
-    emitf(out, "f%d", ty->width);
+    emitf(out, "#float<%d>", ty->width);
     break;
   case TY_SIMD:
     emitf(out, "simd%d", ty->width);
@@ -87,8 +87,30 @@ static void emit_l1_type(L1Type *ty, EmitState *out) {
 static void emit_l1_expr(L1Expr *expr, EmitState *out);
 
 static void emit_l1_expr(L1Expr *expr, EmitState *out) {
+  const char *explicit_integer_op = NULL;
   if (!expr) {
     emitf(out, "???");
+    return;
+  }
+  switch (expr->kind) {
+  case EXPR_SDIV: explicit_integer_op = "sdiv"; break;
+  case EXPR_UDIV: explicit_integer_op = "udiv"; break;
+  case EXPR_SLT: explicit_integer_op = "slt"; break;
+  case EXPR_SLE: explicit_integer_op = "sle"; break;
+  case EXPR_SGT: explicit_integer_op = "sgt"; break;
+  case EXPR_SGE: explicit_integer_op = "sge"; break;
+  case EXPR_ULT: explicit_integer_op = "ult"; break;
+  case EXPR_ULE: explicit_integer_op = "ule"; break;
+  case EXPR_UGT: explicit_integer_op = "ugt"; break;
+  case EXPR_UGE: explicit_integer_op = "uge"; break;
+  default: break;
+  }
+  if (explicit_integer_op) {
+    emitf(out, "#%s(", explicit_integer_op);
+    emit_l1_expr(expr->data.bin.left, out);
+    emitf(out, ", ");
+    emit_l1_expr(expr->data.bin.right, out);
+    emitf(out, ")");
     return;
   }
   switch (expr->kind) {
@@ -238,6 +260,19 @@ static void emit_l1_expr(L1Expr *expr, EmitState *out) {
     emit_l1_expr(expr->data.unary.operand, out);
     emitf(out, ")");
     break;
+  case EXPR_ZEXT:
+  case EXPR_SEXT:
+  case EXPR_TRUNC:
+    emitf(out, expr->kind == EXPR_ZEXT ? "#zext[" :
+               expr->kind == EXPR_SEXT ? "#sext[" : "#trunc[");
+    emit_l1_type(expr->data.conversion.target_ty, out);
+    emitf(out, "](");
+    emit_l1_expr(expr->data.conversion.operand, out);
+    emitf(out, ")");
+    break;
+  case EXPR_PROC_ADDR:
+    emitf(out, "#proc_addr(%s)", expr->data.proc_addr.fn_name);
+    break;
   case EXPR_LOAD:
     emitf(out, "#load");
     if (expr->data.load.ty) {
@@ -308,7 +343,15 @@ static void emit_l1_expr(L1Expr *expr, EmitState *out) {
     }
     break;
   case EXPR_CALL_INDIRECT:
-    emitf(out, "#call_indirect(");
+    emitf(out, "#call_indirect[(");
+    for (uint32_t i = 0; i < expr->data.call_indirect.param_count; i++) {
+      emit_l1_type(expr->data.call_indirect.param_tys[i], out);
+      if (i + 1 < expr->data.call_indirect.param_count)
+        emitf(out, ", ");
+    }
+    emitf(out, ") -> ");
+    emit_l1_type(expr->data.call_indirect.ret_ty, out);
+    emitf(out, "](");
     emit_l1_expr(expr->data.call_indirect.fn_ptr, out);
     for (uint32_t i = 0; i < expr->data.call_indirect.arg_count; i++) {
       emitf(out, ", ");
@@ -353,7 +396,12 @@ static void emit_l1_block(
       emitf(out, "\n");
       break;
     case INST_STORE:
-      emitf(out, "%s#store ", indent);
+      emitf(out, "%s#store[", indent);
+      emit_l1_type(inst->data.store.store_ty
+                       ? inst->data.store.store_ty
+                       : infer_expr_type(inst->data.store.val),
+                   out);
+      emitf(out, "] ");
       emit_l1_expr(inst->data.store.val, out);
       emitf(out, ", ");
       emit_l1_expr(inst->data.store.dest, out);
