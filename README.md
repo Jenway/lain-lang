@@ -54,7 +54,7 @@ The current `main` cutover commit is not buildable yet.  Its immediate work is
 to replace the remaining `ast.*`, `compiler.storage.*`, `l1.*`, and
 `meta.syntax.*` external contracts with Lain-owned implementations.
 
-`--emit-l1` currently accepts the self-hosting core subset: `i32`/`addr`
+`--emit-l1` currently accepts the self-hosting core subset: `#bits<32>`/`#addr`
 callables, calls, arithmetic, explicit returns, foreign bindings, and canonical
 declarations of the form:
 
