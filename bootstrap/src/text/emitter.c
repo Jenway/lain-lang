@@ -85,6 +85,28 @@ static void emit_l1_type(L1Type *ty, EmitState *out) {
 }
 
 static void emit_l1_expr(L1Expr *expr, EmitState *out);
+static void emit_l1_block(L1Block *block, EmitState *out, const char *indent);
+
+static void emit_c_string_literal(const char *text, EmitState *out) {
+  emitf(out, "\"");
+  for (const unsigned char *p = (const unsigned char *)(text ? text : "");
+       *p; p++) {
+    switch (*p) {
+    case '\\': emitf(out, "\\\\"); break;
+    case '"': emitf(out, "\\\""); break;
+    case '\n': emitf(out, "\\n"); break;
+    case '\r': emitf(out, "\\r"); break;
+    case '\t': emitf(out, "\\t"); break;
+    default:
+      if (*p < 32 || *p >= 127)
+        emitf(out, "\\x%02x", (unsigned)*p);
+      else
+        emitf(out, "%c", *p);
+      break;
+    }
+  }
+  emitf(out, "\"");
+}
 
 static void emit_l1_expr(L1Expr *expr, EmitState *out) {
   const char *explicit_integer_op = NULL;
@@ -270,6 +292,13 @@ static void emit_l1_expr(L1Expr *expr, EmitState *out) {
     emit_l1_expr(expr->data.conversion.operand, out);
     emitf(out, ")");
     break;
+  case EXPR_BITCAST:
+    emitf(out, "#bitcast[");
+    emit_l1_type(expr->data.conversion.target_ty, out);
+    emitf(out, "](");
+    emit_l1_expr(expr->data.conversion.operand, out);
+    emitf(out, ")");
+    break;
   case EXPR_PROC_ADDR:
     emitf(out, "#proc_addr(%s)", expr->data.proc_addr.fn_name);
     break;
@@ -305,16 +334,12 @@ static void emit_l1_expr(L1Expr *expr, EmitState *out) {
     emitf(out, ")");
     break;
   case EXPR_EVAL:
-    emitf(out, "#eval %s(", expr->data.eval.fn_name);
-    for (uint32_t i = 0; i < expr->data.eval.arg_count; i++) {
-      emit_l1_expr(expr->data.eval.args[i], out);
-      if (i < expr->data.eval.arg_count - 1)
-        emitf(out, ", ");
-    }
-    emitf(out, ")");
+    emitf(out, "#eval {\n");
+    emit_l1_block(expr->data.eval.block, out, "  ");
+    emitf(out, "}");
     break;
   case EXPR_STRING:
-    emitf(out, "\"%s\"", expr->data.str_val.content);
+    emit_c_string_literal(expr->data.str_val.content, out);
     break;
   case EXPR_PRIMITIVE:
     emitf(out, "#primitive %s(", expr->data.primitive.opcode);
@@ -364,11 +389,6 @@ static void emit_l1_expr(L1Expr *expr, EmitState *out) {
     break;
   }
 }
-
-static void emit_l1_block(
-    L1Block *block,
-    EmitState *out,
-    const char *indent);
 
 static void emit_l1_block(
     L1Block *block,

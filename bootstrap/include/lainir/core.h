@@ -140,6 +140,7 @@ typedef enum {
   EXPR_SEXT,
   EXPR_TRUNC,
   EXPR_PROC_ADDR,
+  EXPR_BITCAST,
 } L1ExprKind;
 
 typedef struct L1Expr L1Expr;
@@ -204,7 +205,7 @@ struct L1Expr {
       L1Expr *operand;
     } unary;
 
-    /* EXPR_ZEXT, EXPR_SEXT, EXPR_TRUNC */
+    /* EXPR_ZEXT, EXPR_SEXT, EXPR_TRUNC, EXPR_BITCAST */
     struct {
       L1Expr *operand;
       L1Type *target_ty;
@@ -262,14 +263,9 @@ struct L1Expr {
       L1Type *field_ty;
     } field;
 
-    /*
-     * EXPR_EVAL: compile-time call.
-     *
-     */
+    /* EXPR_EVAL: a block evaluated by the compiler at compile time. */
     struct {
-      char *fn_name;
-      L1Expr **args;
-      uint32_t arg_count;
+      L1Block *block;
       L1Type *ret_ty;
     } eval;
 
@@ -281,6 +277,10 @@ struct L1Expr {
  * ------------------------------------------------------------------------- */
 struct L1Instruction {
   L1InstKind kind;
+  /* Source location of the instruction's leading token.  Nodes built by
+     programmatic clients may leave this at zero. */
+  int line;
+  int column;
   union {
 
     /* INST_LET: immutable binding */
@@ -402,6 +402,7 @@ L1Subroutine *lainir_new_subroutine(const char *name);
  * ------------------------------------------------------------------------- */
 void lainir_reset_module_state(void);
 void lainir_free_subroutines(L1Subroutine *head);
+void lainir_free_expr_tree(L1Expr *expr);
 
 void append_instruction(L1Subroutine *sub, L1Instruction *inst);
 void append_inst_to_block(L1Block *block, L1Instruction *inst);

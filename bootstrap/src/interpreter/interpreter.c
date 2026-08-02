@@ -43,6 +43,9 @@ typedef struct {
   int should_break;
   int should_continue;
   LainirValue return_value;
+  uint64_t steps;
+  uint32_t call_depth;
+  uint64_t allocated_bytes;
 } LainirInterpreter;
 
 /* ── forward declarations for mutual recursion ── */
@@ -50,6 +53,7 @@ static LainirValue interp_eval_expr(LainirInterpreter *, LainirFrame *, L1Expr *
 static void interp_exec_block(LainirInterpreter *, LainirFrame *, L1Block *);
 static LainirValue interp_call_sub(LainirInterpreter *, L1Subroutine *,
                                     const LainirValue *, uint32_t);
+static void interp_trap(LainirInterpreter *, const char *);
 
 /* ═══════════════════════════════════════════════════════════════
  * Value constructors
@@ -112,6 +116,22 @@ int lainir_caps_add(LainirCapabilityTable *caps, const char *name,
   caps->entries[caps->count].user_data = user_data;
   caps->count++;
   return 1;
+}
+
+void lainir_caps_set_limits(LainirCapabilityTable *caps,
+                            uint64_t max_steps,
+                            uint32_t max_call_depth,
+                            uint64_t max_alloc_bytes) {
+  if (!caps) return;
+  caps->max_steps = max_steps;
+  caps->max_call_depth = max_call_depth;
+  caps->max_alloc_bytes = max_alloc_bytes;
+}
+
+void lainir_caps_set_eval_limit(LainirCapabilityTable *caps,
+                                uint64_t max_eval_blocks) {
+  if (!caps) return;
+  caps->max_eval_blocks = max_eval_blocks;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -198,6 +218,16 @@ static L1Subroutine *interp_find_sub(LainirInterpreter *interp,
   return NULL;
 }
 
+static int interp_tick(LainirInterpreter *interp) {
+  uint64_t limit = interp->caps ? interp->caps->max_steps : 0;
+  if (limit && interp->steps >= limit) {
+    interp_trap(interp, "interpreter step limit exceeded");
+    return 0;
+  }
+  interp->steps++;
+  return 1;
+}
+
 static LainirBinding *interp_lookup_local(LainirFrame *frame, const char *name) {
   for (uint32_t i = 0; i < frame->local_count; i++)
     if (strcmp(frame->locals[i].name, name) == 0) return &frame->locals[i];
@@ -249,6 +279,41 @@ static void interp_trap(LainirInterpreter *interp, const char *error) {
 static uint64_t interp_value_bits(LainirInterpreter *interp, LainirValue value, const char *ctx) {
   if (value.kind != LAINIR_VALUE_BITS) { interp_trap(interp, ctx); return 0; }
   return value.as.bits;
+}
+
+static double interp_value_float(LainirInterpreter *interp, LainirValue value,
+                                 const char *ctx) {
+  if (value.kind != LAINIR_VALUE_BITS ||
+      (value.bit_width != 32 && value.bit_width != 64)) {
+    interp_trap(interp, ctx);
+    return 0.0;
+  }
+  if (value.bit_width == 32) {
+    uint32_t bits = (uint32_t)value.as.bits;
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return (double)result;
+  }
+  {
+    double result;
+    uint64_t bits = value.as.bits;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+  }
+}
+
+static LainirValue interp_make_float(double value, uint32_t width) {
+  if (width == 32) {
+    float narrowed = (float)value;
+    uint32_t bits;
+    memcpy(&bits, &narrowed, sizeof(bits));
+    return lainir_value_bits(bits, 32);
+  }
+  {
+    uint64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return lainir_value_bits(bits, 64);
+  }
 }
 
 static int64_t interp_signed_bits(uint64_t bits, uint32_t width) {
@@ -433,9 +498,33 @@ static LainirValue interp_eval_call(LainirInterpreter *interp, LainirFrame *fram
   return result;
 }
 
+/* Evaluate a compile-time block in the current frame.  The compiler owns the
+ * decision to invoke the interpreter for compile-time work; once here, an
+ * eval block is just another structured call frame. */
+static LainirValue interp_eval_block(LainirInterpreter *interp,
+                                      LainirFrame *frame, L1Block *block) {
+  int saved_return = interp->should_return;
+  int saved_break = interp->should_break;
+  int saved_continue = interp->should_continue;
+  LainirValue saved_value = interp->return_value;
+  LainirValue result = lainir_value_unit();
+  interp->should_return = 0;
+  interp->should_break = 0;
+  interp->should_continue = 0;
+  interp_exec_block(interp, frame, block);
+  if (!interp->error && interp->should_return)
+    result = interp->return_value;
+  interp->should_return = saved_return;
+  interp->should_break = saved_break;
+  interp->should_continue = saved_continue;
+  interp->return_value = saved_value;
+  return result;
+}
+
 static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *frame,
                                      L1Expr *expr) {
   if (!expr) return lainir_value_unit();
+  if (!interp_tick(interp)) return lainir_value_unit();
   switch (expr->kind) {
   case EXPR_SDIV:
   case EXPR_UDIV:
@@ -461,6 +550,19 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
     if (expr->kind == EXPR_SEXT)
       bits = (uint64_t)interp_signed_bits(bits, operand.bit_width);
     return lainir_value_bits(bits, target_width);
+  }
+  case EXPR_BITCAST: {
+    LainirValue operand = interp_eval_expr(
+        interp, frame, expr->data.conversion.operand);
+    if (interp->error) return lainir_value_unit();
+    if (operand.kind != LAINIR_VALUE_BITS) {
+      interp_trap(interp, "#bitcast requires a physical bit value");
+      return lainir_value_unit();
+    }
+    return lainir_value_bits(
+        operand.as.bits,
+        expr->data.conversion.target_ty
+            ? expr->data.conversion.target_ty->width : operand.bit_width);
   }
   case EXPR_CONST:
     return lainir_value_bits((uint64_t)expr->data.const_val, 32);
@@ -542,61 +644,49 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
     LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
     LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
     if (interp->error) return lainir_value_unit();
-    double lv = *(double*)&l.as.bits;
-    double rv = *(double*)&r.as.bits;
-    double result = lv + rv;
-    uint64_t bits;
-    memcpy(&bits, &result, sizeof(bits));
-    return lainir_value_bits(bits, 64);
+    double lv = interp_value_float(interp, l, "expected #float for fadd");
+    double rv = interp_value_float(interp, r, "expected #float for fadd");
+    return interp_make_float(lv + rv, l.bit_width);
   }
   case EXPR_FSUB: {
     LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
     LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
     if (interp->error) return lainir_value_unit();
-    double lv = *(double*)&l.as.bits;
-    double rv = *(double*)&r.as.bits;
-    double result = lv - rv;
-    uint64_t bits;
-    memcpy(&bits, &result, sizeof(bits));
-    return lainir_value_bits(bits, 64);
+    double lv = interp_value_float(interp, l, "expected #float for fsub");
+    double rv = interp_value_float(interp, r, "expected #float for fsub");
+    return interp_make_float(lv - rv, l.bit_width);
   }
   case EXPR_FMUL: {
     LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
     LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
     if (interp->error) return lainir_value_unit();
-    double lv = *(double*)&l.as.bits;
-    double rv = *(double*)&r.as.bits;
-    double result = lv * rv;
-    uint64_t bits;
-    memcpy(&bits, &result, sizeof(bits));
-    return lainir_value_bits(bits, 64);
+    double lv = interp_value_float(interp, l, "expected #float for fmul");
+    double rv = interp_value_float(interp, r, "expected #float for fmul");
+    return interp_make_float(lv * rv, l.bit_width);
   }
   case EXPR_FDIV: {
     LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
     LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
     if (interp->error) return lainir_value_unit();
-    double lv = *(double*)&l.as.bits;
-    double rv = *(double*)&r.as.bits;
+    double lv = interp_value_float(interp, l, "expected #float for fdiv");
+    double rv = interp_value_float(interp, r, "expected #float for fdiv");
     if (rv == 0.0) { interp_trap(interp, "fdiv by zero"); return lainir_value_unit(); }
-    double result = lv / rv;
-    uint64_t bits;
-    memcpy(&bits, &result, sizeof(bits));
-    return lainir_value_bits(bits, 64);
+    return interp_make_float(lv / rv, l.bit_width);
   }
   case EXPR_FEQ: {
     LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
     LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
     if (interp->error) return lainir_value_unit();
-    double lv = *(double*)&l.as.bits;
-    double rv = *(double*)&r.as.bits;
+    double lv = interp_value_float(interp, l, "expected #float for feq");
+    double rv = interp_value_float(interp, r, "expected #float for feq");
     return lainir_value_bits(lv == rv, 1);
   }
   case EXPR_FLT: {
     LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
     LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
     if (interp->error) return lainir_value_unit();
-    double lv = *(double*)&l.as.bits;
-    double rv = *(double*)&r.as.bits;
+    double lv = interp_value_float(interp, l, "expected #float for flt");
+    double rv = interp_value_float(interp, r, "expected #float for flt");
     return lainir_value_bits(lv < rv, 1);
   }
   case EXPR_POPCOUNT: {
@@ -642,6 +732,13 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
   case EXPR_ALLOCA: {
     uint32_t sz = expr->data.alloca.byte_size;
     if (!sz) sz = interp_type_size(expr->data.alloca.element_ty);
+    if (interp->caps && interp->caps->max_alloc_bytes &&
+        (interp->allocated_bytes > interp->caps->max_alloc_bytes ||
+         (uint64_t)sz > interp->caps->max_alloc_bytes -
+                         interp->allocated_bytes)) {
+      interp_trap(interp, "interpreter allocation limit exceeded");
+      return lainir_value_unit();
+    }
     uint8_t *data = calloc(sz ? sz : 1, 1);
     if (!data) { interp_trap(interp, "out of memory"); return lainir_value_unit(); }
     if (interp->alloca_count == interp->alloca_cap) {
@@ -653,6 +750,7 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
     interp->allocas[interp->alloca_count].data = data;
     interp->allocas[interp->alloca_count].size = sz;
     interp->alloca_count++;
+    interp->allocated_bytes += sz;
     return lainir_value_addr(data);
   }
   case EXPR_LEA: {
@@ -696,9 +794,10 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
     }
     return lainir_value_func(target);
   }
-  case EXPR_EVAL:
   case EXPR_CALL:
     return interp_eval_call(interp, frame, expr);
+  case EXPR_EVAL:
+    return interp_eval_block(interp, frame, expr->data.eval.block);
   case EXPR_CALL_INDIRECT: {
     LainirValue target = interp_eval_expr(
         interp, frame, expr->data.call_indirect.fn_ptr);
@@ -750,6 +849,7 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
                                L1Block *block) {
   L1Instruction *inst = block->body;
   while (inst) {
+    if (!interp_tick(interp)) return;
     if (interp->should_return || interp->should_break || interp->should_continue)
       return;
 
@@ -845,15 +945,22 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
 static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
                                     const LainirValue *args, uint32_t arg_count) {
   LainirFrame frame; memset(&frame, 0, sizeof(frame));
+  uint32_t max_depth = interp->caps ? interp->caps->max_call_depth : 0;
+  if (max_depth && interp->call_depth >= max_depth) {
+    interp_trap(interp, "interpreter call-depth limit exceeded");
+    return lainir_value_unit();
+  }
+  interp->call_depth++;
   frame.sub = sub; frame.arg_count = arg_count;
   if (arg_count) {
     frame.args = calloc(arg_count, sizeof(LainirValue));
-    if (!frame.args) { interp_trap(interp, "out of memory"); return lainir_value_unit(); }
+    if (!frame.args) { interp_trap(interp, "out of memory"); interp->call_depth--; return lainir_value_unit(); }
     for (uint32_t i = 0; i < arg_count; i++) {
       frame.args[i] = interp_coerce_physical(
           interp, args[i], i < sub->param_count ? sub->param_tys[i] : NULL);
       if (interp->error) {
         interp_free_frame(&frame);
+        interp->call_depth--;
         return lainir_value_unit();
       }
     }
@@ -866,7 +973,7 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
   L1Block *block = sub->blocks;
   while (block) {
     interp_exec_block(interp, &frame, block);
-    if (interp->error) { interp_free_frame(&frame); interp->should_return = saved_ret; return lainir_value_unit(); }
+    if (interp->error) { interp_free_frame(&frame); interp->should_return = saved_ret; interp->call_depth--; return lainir_value_unit(); }
     if (interp->should_return) break;
     block = block->next;
   }
@@ -875,6 +982,7 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
   interp->should_return = saved_ret;
   interp->return_value = saved_val;
   interp_free_frame(&frame);
+  interp->call_depth--;
   return result;
 }
 
@@ -910,6 +1018,233 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
    * all scalar/string/unit runs release their aggregate arena here. */
   if (result_out->kind != LAINIR_VALUE_ADDR)
     interp_free_allocas(&interp);
+  if (error_out) *error_out = NULL;
+  return LAINIR_RUN_OK;
+}
+
+LainirRunStatus lainir_eval_block(
+    L1Subroutine *module,
+    L1Block *block,
+    L1Type *return_type,
+    LainirCapabilityTable *caps,
+    LainirValue *result_out,
+    const char **error_out) {
+  LainirInterpreter interp;
+  L1Subroutine eval_sub;
+
+  if (!module || !block || !result_out) {
+    if (error_out) *error_out = "invalid eval block request";
+    return LAINIR_RUN_TRAP;
+  }
+
+  memset(&interp, 0, sizeof(interp));
+  memset(&eval_sub, 0, sizeof(eval_sub));
+  eval_sub.name = "<eval>";
+  eval_sub.ret_ty = return_type;
+  eval_sub.blocks = block;
+  interp.module = module;
+  interp.caps = caps;
+  interp_build_sub_index(&interp);
+
+  *result_out = interp_call_sub(&interp, &eval_sub, NULL, 0);
+  free(interp.sub_index);
+  if (interp.error) {
+    interp_free_allocas(&interp);
+    if (error_out) *error_out = interp.error;
+    return LAINIR_RUN_TRAP;
+  }
+  if (result_out->kind != LAINIR_VALUE_ADDR)
+    interp_free_allocas(&interp);
+  if (error_out) *error_out = NULL;
+  return LAINIR_RUN_OK;
+}
+
+/* Compiler-side #eval materialization.  This deliberately lives beside the
+ * interpreter: the compiler supplies an IR module, asks the interpreter to
+ * execute each eval block, then replaces the block with a constant. */
+static LainirRunStatus fold_expr(L1Subroutine *module, L1Expr **slot,
+                                 LainirCapabilityTable *caps,
+                                 const char **error_out);
+
+static LainirRunStatus fold_block(L1Subroutine *module, L1Block *block,
+                                  LainirCapabilityTable *caps,
+                                  const char **error_out) {
+  for (; block; block = block->next) {
+    for (L1Instruction *inst = block->body; inst; inst = inst->next) {
+      L1Expr **expr = NULL;
+      switch (inst->kind) {
+      case INST_LET: expr = &inst->data.let.val; break;
+      case INST_SET: expr = &inst->data.set.val; break;
+      case INST_STORE:
+        if (fold_expr(module, &inst->data.store.dest, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+        expr = &inst->data.store.val; break;
+      case INST_RETURN: expr = &inst->data.ret.val; break;
+      case INST_CALL: expr = &inst->data.call_inst.expr; break;
+      case INST_IF:
+        expr = &inst->data.if_stmt.condition;
+        if (fold_expr(module, expr, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+        if (fold_block(module, inst->data.if_stmt.then_body, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+        if (fold_block(module, inst->data.if_stmt.else_body, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+        continue;
+      case INST_LOOP:
+        if (fold_block(module, inst->data.loop.body, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+        continue;
+      default: continue;
+      }
+      if (expr && fold_expr(module, expr, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+    }
+  }
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus fold_expr(L1Subroutine *module, L1Expr **slot,
+                                 LainirCapabilityTable *caps,
+                                 const char **error_out) {
+  L1Expr *expr = slot ? *slot : NULL;
+  if (!expr) return LAINIR_RUN_OK;
+  switch (expr->kind) {
+  case EXPR_EVAL: {
+    LainirValue value;
+    if (fold_block(module, expr->data.eval.block, caps, error_out) != LAINIR_RUN_OK)
+      return LAINIR_RUN_TRAP;
+    LainirRunStatus status = lainir_eval_block(module, expr->data.eval.block,
+                                               expr->data.eval.ret_ty, caps,
+                                               &value, error_out);
+    if (status != LAINIR_RUN_OK) return status;
+    if (value.kind != LAINIR_VALUE_BITS) {
+      if (error_out) *error_out = "#eval result must be a bits value";
+      return LAINIR_RUN_BAD_CALL;
+    }
+    L1Expr *constant = lainir_new_expr(EXPR_CONST);
+    if (!constant) {
+      if (error_out) *error_out = "out of memory";
+      return LAINIR_RUN_TRAP;
+    }
+    constant->data.const_val = (int64_t)value.as.bits;
+    *slot = constant;
+    lainir_free_expr_tree(expr);
+    return LAINIR_RUN_OK;
+  }
+  case EXPR_LOAD: return fold_expr(module, &expr->data.load.addr, caps, error_out);
+  case EXPR_LEA:
+    if (fold_expr(module, &expr->data.lea.base, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+    return fold_expr(module, &expr->data.lea.idx, caps, error_out);
+  case EXPR_FIELD: return fold_expr(module, &expr->data.field.base, caps, error_out);
+  case EXPR_CALL: for (uint32_t i = 0; i < expr->data.call.arg_count; i++) if (fold_expr(module, &expr->data.call.args[i], caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP; return LAINIR_RUN_OK;
+  case EXPR_CALL_INDIRECT:
+    if (fold_expr(module, &expr->data.call_indirect.fn_ptr, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+    for (uint32_t i = 0; i < expr->data.call_indirect.arg_count; i++) if (fold_expr(module, &expr->data.call_indirect.args[i], caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+    return LAINIR_RUN_OK;
+  case EXPR_PRIMITIVE: for (uint32_t i = 0; i < expr->data.primitive.operand_count; i++) if (fold_expr(module, &expr->data.primitive.operands[i], caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP; return LAINIR_RUN_OK;
+  case EXPR_ADD: case EXPR_SUB: case EXPR_MUL: case EXPR_DIV: case EXPR_EQ: case EXPR_NE: case EXPR_LT: case EXPR_LE: case EXPR_GT: case EXPR_GE:
+  case EXPR_SDIV: case EXPR_UDIV: case EXPR_SLT: case EXPR_SLE: case EXPR_SGT: case EXPR_SGE: case EXPR_ULT: case EXPR_ULE: case EXPR_UGT: case EXPR_UGE:
+  case EXPR_FADD: case EXPR_FSUB: case EXPR_FMUL: case EXPR_FDIV: case EXPR_FEQ: case EXPR_FLT:
+    if (fold_expr(module, &expr->data.bin.left, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+    return fold_expr(module, &expr->data.bin.right, caps, error_out);
+  case EXPR_POPCOUNT: case EXPR_CLZ: case EXPR_ROTL: case EXPR_INT2PTR: case EXPR_PTR2INT:
+    return fold_expr(module, &expr->data.unary.operand, caps, error_out);
+  case EXPR_ZEXT: case EXPR_SEXT: case EXPR_TRUNC: case EXPR_BITCAST:
+    return fold_expr(module, &expr->data.conversion.operand, caps, error_out);
+  default: return LAINIR_RUN_OK;
+  }
+}
+
+static uint64_t count_expr_evals(const L1Expr *expr);
+
+static uint64_t count_block_evals(const L1Block *block) {
+  uint64_t count = 0;
+  for (; block; block = block->next) {
+    for (const L1Instruction *inst = block->body; inst; inst = inst->next) {
+      switch (inst->kind) {
+      case INST_LET: count += count_expr_evals(inst->data.let.val); break;
+      case INST_SET: count += count_expr_evals(inst->data.set.val); break;
+      case INST_STORE:
+        count += count_expr_evals(inst->data.store.dest);
+        count += count_expr_evals(inst->data.store.val);
+        break;
+      case INST_IF:
+        count += count_expr_evals(inst->data.if_stmt.condition);
+        count += count_block_evals(inst->data.if_stmt.then_body);
+        count += count_block_evals(inst->data.if_stmt.else_body);
+        break;
+      case INST_LOOP: count += count_block_evals(inst->data.loop.body); break;
+      case INST_RETURN: count += count_expr_evals(inst->data.ret.val); break;
+      case INST_CALL: count += count_expr_evals(inst->data.call_inst.expr); break;
+      default: break;
+      }
+    }
+  }
+  return count;
+}
+
+static uint64_t count_expr_evals(const L1Expr *expr) {
+  uint64_t count = 0;
+  if (!expr) return 0;
+  switch (expr->kind) {
+  case EXPR_EVAL:
+    return 1 + count_block_evals(expr->data.eval.block);
+  case EXPR_LOAD: return count_expr_evals(expr->data.load.addr);
+  case EXPR_LEA:
+    return count_expr_evals(expr->data.lea.base) +
+           count_expr_evals(expr->data.lea.idx);
+  case EXPR_FIELD: return count_expr_evals(expr->data.field.base);
+  case EXPR_ZEXT: case EXPR_SEXT: case EXPR_TRUNC: case EXPR_BITCAST:
+    return count_expr_evals(expr->data.conversion.operand);
+  case EXPR_POPCOUNT: case EXPR_CLZ: case EXPR_ROTL:
+  case EXPR_INT2PTR: case EXPR_PTR2INT:
+    return count_expr_evals(expr->data.unary.operand);
+  case EXPR_CALL:
+    for (uint32_t i = 0; i < expr->data.call.arg_count; i++)
+      count += count_expr_evals(expr->data.call.args[i]);
+    return count;
+  case EXPR_CALL_INDIRECT:
+    count += count_expr_evals(expr->data.call_indirect.fn_ptr);
+    for (uint32_t i = 0; i < expr->data.call_indirect.arg_count; i++)
+      count += count_expr_evals(expr->data.call_indirect.args[i]);
+    return count;
+  case EXPR_PRIMITIVE:
+    for (uint32_t i = 0; i < expr->data.primitive.operand_count; i++)
+      count += count_expr_evals(expr->data.primitive.operands[i]);
+    return count;
+  case EXPR_ADD: case EXPR_SUB: case EXPR_MUL: case EXPR_DIV:
+  case EXPR_EQ: case EXPR_NE: case EXPR_LT: case EXPR_LE:
+  case EXPR_GT: case EXPR_GE: case EXPR_SDIV: case EXPR_UDIV:
+  case EXPR_SLT: case EXPR_SLE: case EXPR_SGT: case EXPR_SGE:
+  case EXPR_ULT: case EXPR_ULE: case EXPR_UGT: case EXPR_UGE:
+  case EXPR_FADD: case EXPR_FSUB: case EXPR_FMUL: case EXPR_FDIV:
+  case EXPR_FEQ: case EXPR_FLT:
+    return count_expr_evals(expr->data.bin.left) +
+           count_expr_evals(expr->data.bin.right);
+  default: return 0;
+  }
+}
+
+LainirRunStatus lainir_fold_module(L1Subroutine *module,
+                                   LainirCapabilityTable *caps,
+                                   const char **error_out) {
+  LainirCapabilityTable default_caps;
+  uint64_t eval_count;
+  if (!module) {
+    if (error_out) *error_out = "invalid module";
+    return LAINIR_RUN_TRAP;
+  }
+  if (!caps) {
+    memset(&default_caps, 0, sizeof(default_caps));
+    lainir_caps_set_limits(&default_caps, UINT64_C(1000000), 256,
+                           UINT64_C(64) * 1024 * 1024);
+    lainir_caps_set_eval_limit(&default_caps, UINT64_C(100000));
+    caps = &default_caps;
+  }
+  eval_count = 0;
+  for (L1Subroutine *sub = module; sub; sub = sub->next)
+    eval_count += count_block_evals(sub->blocks);
+  if (caps->max_eval_blocks && eval_count > caps->max_eval_blocks) {
+    if (error_out) *error_out = "compile-time eval block limit exceeded";
+    return LAINIR_RUN_TRAP;
+  }
+  for (L1Subroutine *sub = module; sub; sub = sub->next)
+    if (fold_block(module, sub->blocks, caps, error_out) != LAINIR_RUN_OK)
+      return LAINIR_RUN_TRAP;
   if (error_out) *error_out = NULL;
   return LAINIR_RUN_OK;
 }

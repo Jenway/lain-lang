@@ -569,6 +569,27 @@
   #if #call token_equals(%cursor, "trunc", 5) {
     #return #call lexer_set_kind(%cursor, 65)
   }
+  #if #call token_equals(%cursor, "fadd", 4) {
+    #return #call lexer_set_kind(%cursor, 66)
+  }
+  #if #call token_equals(%cursor, "fsub", 4) {
+    #return #call lexer_set_kind(%cursor, 67)
+  }
+  #if #call token_equals(%cursor, "fmul", 4) {
+    #return #call lexer_set_kind(%cursor, 68)
+  }
+  #if #call token_equals(%cursor, "fdiv", 4) {
+    #return #call lexer_set_kind(%cursor, 69)
+  }
+  #if #call token_equals(%cursor, "feq", 3) {
+    #return #call lexer_set_kind(%cursor, 70)
+  }
+  #if #call token_equals(%cursor, "flt", 3) {
+    #return #call lexer_set_kind(%cursor, 71)
+  }
+  #if #call token_equals(%cursor, "bitcast", 7) {
+    #return #call lexer_set_kind(%cursor, 72)
+  }
   #return 16
 }
 
@@ -608,6 +629,7 @@
 //           +8 source start i64, +16 source length i64,
 //           +24 left/first-argument addr, +32 right addr,
 //           +40 next argument addr, +48 argument count i64
+//           kind 46 is #eval; its left field is the returned block expression.
 
 #proc ir_expr_new(
   i32 %kind,
@@ -666,6 +688,18 @@
   #store %start, #lea(base=%expression, idx=0, scale=0, offset=8)
   #store %length, #lea(base=%expression, idx=0, scale=0, offset=16)
   #store %expression, #lea(base=%expression, idx=0, scale=0, offset=24)
+  #store %expression, #lea(base=%expression, idx=0, scale=0, offset=32)
+  #store %expression, #lea(base=%expression, idx=0, scale=0, offset=40)
+  #store 0, #lea(base=%expression, idx=0, scale=0, offset=48)
+  #return %expression
+}
+
+#proc ir_expr_eval_new(addr %body) -> addr {
+  #let %expression: addr = #call bootstrap.allocate-pages(56)
+  #store 46, #lea(base=%expression, idx=0, scale=0, offset=0)
+  #store %expression, #lea(base=%expression, idx=0, scale=0, offset=8)
+  #store 0, #lea(base=%expression, idx=0, scale=0, offset=16)
+  #store %body, #lea(base=%expression, idx=0, scale=0, offset=24)
   #store %expression, #lea(base=%expression, idx=0, scale=0, offset=32)
   #store %expression, #lea(base=%expression, idx=0, scale=0, offset=40)
   #store 0, #lea(base=%expression, idx=0, scale=0, offset=48)
@@ -1347,6 +1381,9 @@
   #if #ge(%kind, 31) {
     #if #le(%kind, 40) { #return 1 }
   }
+  #if #ge(%kind, 66) {
+    #if #le(%kind, 71) { #return 1 }
+  }
   #return 0
 }
 
@@ -1357,6 +1394,9 @@
   }
   #if #ge(%kind, 33) {
     #if #le(%kind, 40) { #return 1 }
+  }
+  #if #ge(%kind, 70) {
+    #if #le(%kind, 71) { #return 1 }
   }
   #return 0
 }
@@ -1423,10 +1463,16 @@
   #if #eq(#call ir_expr_kind(%expression), 30) {
     #call ir_expr_free(#call ir_expr_left(%expression))
   }
+  #if #eq(#call ir_expr_kind(%expression), 46) {
+    #call ir_expr_free(#call ir_expr_left(%expression))
+  }
   #if #ge(#call ir_expr_kind(%expression), 41) {
     #if #le(#call ir_expr_kind(%expression), 43) {
       #call ir_expr_free(#call ir_expr_left(%expression))
     }
+  }
+  #if #eq(#call ir_expr_kind(%expression), 72) {
+    #call ir_expr_free(#call ir_expr_left(%expression))
   }
   #if #eq(#call ir_expr_kind(%expression), 24) {
     #call ir_expr_free(#call ir_expr_left(%expression))
@@ -1658,6 +1704,12 @@
   #if #eq(%token_kind, 60) { #return 38 }
   #if #eq(%token_kind, 61) { #return 39 }
   #if #eq(%token_kind, 62) { #return 40 }
+  #if #eq(%token_kind, 66) { #return 66 }
+  #if #eq(%token_kind, 67) { #return 67 }
+  #if #eq(%token_kind, 68) { #return 68 }
+  #if #eq(%token_kind, 69) { #return 69 }
+  #if #eq(%token_kind, 70) { #return 70 }
+  #if #eq(%token_kind, 71) { #return 71 }
   #return 0
 }
 
@@ -1741,6 +1793,15 @@
       )
     }
   }
+  #if #eq(%kind, 72) {
+    #call parser_expect(%cursor, 9)
+    #let %target_width: i32 = #call parse_type_width(%cursor)
+    #call parser_expect(%cursor, 10)
+    #call parser_expect(%cursor, 5)
+    #let %operand: addr = #call parse_expression(%cursor)
+    #call parser_expect(%cursor, 6)
+    #return #call ir_expr_conversion_new(72, %target_width, %operand)
+  }
 
   #let %binary_kind: i32 = #call binary_ir_kind(%kind)
   #if #ne(%binary_kind, 0) {
@@ -1756,7 +1817,20 @@
     #return #call parse_direct_call(%cursor)
   }
   #if #eq(%kind, 46) {
-    #return #call parse_direct_call(%cursor)
+    #call parser_expect(%cursor, 7)
+    #let %body: addr = #call parse_function_body(%cursor)
+    #call parser_expect(%cursor, 8)
+    #return #call ir_expr_eval_new(%body)
+  }
+  #if #ge(%kind, 66) {
+    #if #le(%kind, 71) {
+      #call parser_expect(%cursor, 5)
+      #let %left: addr = #call parse_expression(%cursor)
+      #call parser_expect(%cursor, 11)
+      #let %right: addr = #call parse_expression(%cursor)
+      #call parser_expect(%cursor, 6)
+      #return #call ir_expr_binary_new(%kind, %left, %right)
+    }
   }
   #if #eq(%kind, 30) {
     #call parser_expect(%cursor, 1)
@@ -1974,6 +2048,10 @@
 #proc parsed_expression_width(addr %expression) -> i32 {
   #let %kind: i32 = #call ir_expr_kind(%expression)
   #if #eq(%kind, 1) { #return 0 }
+  #if #eq(%kind, 73) { #return 0 }
+  #if #eq(%kind, 46) {
+    #return #call parsed_expression_width(#call ir_expr_left(%expression))
+  }
   #if #eq(%kind, 13) { #return #call ir_body_let_width(%expression) }
   #if #eq(%kind, 21) { #return 128 }
   #if #eq(%kind, 22) { #return #call ir_body_let_width(%expression) }
@@ -1983,6 +2061,7 @@
   #if #ge(%kind, 41) {
     #if #le(%kind, 43) { #return #call ir_body_let_width(%expression) }
   }
+  #if #eq(%kind, 72) { #return #call ir_body_let_width(%expression) }
   #if #call ir_expr_is_binary(%expression) {
     #let %left: i32 = #call parsed_expression_width(
       #call ir_expr_left(%expression)
@@ -2400,6 +2479,704 @@
   #return 1
 }
 
+// Compile-time evaluator used by #eval.  It intentionally accepts only
+// side-effect-free integer expressions and local procedures whose arguments
+// are themselves constant; anything else is a compile-time error rather than
+// a runtime fallback.
+#proc bool_to_i64(i1 %value) -> i64 {
+  #if %value { #return 1 }
+  #return 0
+}
+
+// Compile-time calls must not rewrite the function definition in place:
+// multiple #eval calls may invoke the same helper with different arguments.
+// These two small cloners copy the compiler-owned 56-byte nodes and recurse
+// through only the pointer fields whose layout is meaningful for each kind.
+#proc clone_const_expr(addr %expression) -> addr {
+  #let %copy: addr = #call bootstrap.allocate-pages(56)
+  #store #load[i64](#lea(base=%expression, idx=0, scale=0, offset=0)),
+    #lea(base=%copy, idx=0, scale=0, offset=0)
+  #store #load[i64](#lea(base=%expression, idx=0, scale=0, offset=8)),
+    #lea(base=%copy, idx=0, scale=0, offset=8)
+  #store #load[i64](#lea(base=%expression, idx=0, scale=0, offset=16)),
+    #lea(base=%copy, idx=0, scale=0, offset=16)
+  #store 0, #lea(base=%copy, idx=0, scale=0, offset=40)
+  #store #load[i64](#lea(base=%expression, idx=0, scale=0, offset=48)),
+    #lea(base=%copy, idx=0, scale=0, offset=48)
+  #let %kind: i32 = #call ir_expr_kind(%expression)
+  #if #call ir_expr_is_binary(%expression) {
+    #store #call clone_const_expr(#call ir_expr_left(%expression)),
+      #lea(base=%copy, idx=0, scale=0, offset=24)
+    #store #call clone_const_expr(#call ir_expr_right(%expression)),
+      #lea(base=%copy, idx=0, scale=0, offset=32)
+    #return %copy
+  }
+  #if #eq(%kind, 72) {
+    #store #call clone_const_expr(#call ir_expr_left(%expression)),
+      #lea(base=%copy, idx=0, scale=0, offset=24)
+    #return %copy
+  }
+  #if #eq(%kind, 46) {
+    #store #call clone_const_body(#call ir_expr_left(%expression)),
+      #lea(base=%copy, idx=0, scale=0, offset=24)
+    #return %copy
+  }
+  #if #eq(%kind, 3) {
+    #let %argument: addr = #call ir_expr_left(%expression)
+    #let %remaining: i64 = #call ir_expr_argument_count(%expression)
+    #let %first: addr = %argument
+    #let %last: addr = %argument
+    #let %index: i64 = 0
+    #loop arguments {
+      #if #eq(%remaining, 0) { #break arguments }
+      #let %next: addr = #call ir_expr_next(%argument)
+      #let %item: addr = #call clone_const_expr(%argument)
+      #if #eq(%index, 0) {
+        %first: addr = %item
+      } else {
+        #call ir_expr_set_next(%last, %item)
+      }
+      %last: addr = %item
+      %argument: addr = %next
+      %remaining: i64 = #sub(%remaining, 1)
+      %index: i64 = #add(%index, 1)
+      #continue arguments
+    }
+    #store %first, #lea(base=%copy, idx=0, scale=0, offset=24)
+  }
+  #return %copy
+}
+
+#proc clone_const_body(addr %body) -> addr {
+  #let %kind: i32 = #call ir_expr_kind(%body)
+  #if #eq(%kind, 14) {
+    #let %copy: addr = #call ir_body_let_new(
+      #call ir_expr_start(%body), #call ir_expr_length(%body),
+      #call ir_body_let_width(%body),
+      #call clone_const_expr(#call ir_expr_left(%body)),
+      #call clone_const_body(#call ir_expr_right(%body))
+    )
+    #return %copy
+  }
+  #if #eq(%kind, 15) {
+    #return #call ir_body_if_new(
+      #call clone_const_expr(#call ir_expr_left(%body)),
+      #call clone_const_body(#call ir_expr_right(%body)),
+      #call clone_const_body(#call ir_body_if_else(%body)),
+      #call clone_const_body(#call ir_body_if_continuation(%body))
+    )
+  }
+  #if #eq(%kind, 17) {
+    #return #call ir_body_loop_new(
+      #call ir_expr_start(%body), #call ir_expr_length(%body),
+      #call clone_const_body(#call ir_expr_left(%body)),
+      #call clone_const_body(#call ir_expr_right(%body))
+    )
+  }
+  #if #eq(%kind, 20) {
+    #return #call ir_body_set_new(
+      #call ir_expr_start(%body), #call ir_expr_length(%body),
+      #call ir_body_let_width(%body),
+      #call clone_const_expr(#call ir_expr_left(%body)),
+      #call clone_const_body(#call ir_expr_right(%body))
+    )
+  }
+  #if #eq(%kind, 24) {
+    #return #call ir_body_store_new(
+      #load[i32](#lea(base=%body, idx=0, scale=0, offset=48)),
+      #call clone_const_expr(#call ir_expr_left(%body)),
+      #call clone_const_expr(#call ir_expr_right(%body)),
+      #call clone_const_body(#call ir_body_store_rest(%body))
+    )
+  }
+  #if #eq(%kind, 27) {
+    #return #call ir_body_effect_call_new(
+      #call clone_const_expr(#call ir_expr_left(%body)),
+      #call clone_const_body(#call ir_expr_right(%body))
+    )
+  }
+  #if #eq(%kind, 16) { #return #call ir_body_end_new() }
+  #if #eq(%kind, 28) { #return #call ir_body_unit_return_new() }
+  #if #eq(%kind, 18) {
+    #return #call ir_body_jump_new(
+      18, #call ir_expr_start(%body), #call ir_expr_length(%body)
+    )
+  }
+  #if #eq(%kind, 19) {
+    #return #call ir_body_jump_new(
+      19, #call ir_expr_start(%body), #call ir_expr_length(%body)
+    )
+  }
+  #return #call clone_const_expr(%body)
+}
+
+#proc eval_const_call(
+  addr %data,
+  i64 %source_length,
+  addr %module,
+  addr %call,
+  addr %function,
+  addr %ok
+) -> i64 {
+  #let %remaining: i64 = #call ir_expr_argument_count(%call)
+  #if #ne(%remaining, #call ir_function_parameter_count(%function)) {
+    #store 0, %ok
+    #return 0
+  }
+  #let %argument: addr = #call ir_expr_left(%call)
+  #let %parameter: addr = #call ir_function_first_parameter(%function)
+  #let %body: addr = #call ir_function_body(%function)
+  #if #ne(%remaining, 0) {
+    %body: addr = #call clone_const_body(%body)
+  }
+  #loop arguments {
+    #if #eq(%remaining, 0) { #break arguments }
+    #let %value: i64 = #call eval_const_expr(
+      %data, %source_length, %module, %argument, %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return 0 }
+    %body: addr = #call substitute_const_body(
+      %data, %source_length, %body,
+      #call ir_parameter_name_start(%parameter),
+      #call ir_parameter_name_length(%parameter),
+      %value
+    )
+    %argument: addr = #call ir_expr_next(%argument)
+    %parameter: addr = #call ir_parameter_next(%parameter)
+    %remaining: i64 = #sub(%remaining, 1)
+    #continue arguments
+  }
+  #return #call eval_const_body(
+    %data, %source_length, %module, %body, %ok
+  )
+}
+
+#proc eval_const_expr(
+  addr %data,
+  i64 %source_length,
+  addr %module,
+  addr %expression,
+  addr %ok
+) -> i64 {
+  #let %kind: i32 = #call ir_expr_kind(%expression)
+  #if #eq(%kind, 1) {
+    #let %start: i64 = #call ir_expr_start(%expression)
+    #let %length: i64 = #call ir_expr_length(%expression)
+    #let %offset: i64 = 0
+    #let %value: i64 = 0
+    #if #eq(%length, 0) { #store 0, %ok #return 0 }
+    #loop digits {
+      #if #ge(%offset, %length) { #break digits }
+      #let %byte: i8 = #call byte_at(%data, #add(%start, %offset))
+      #if #lt(%byte, 48) {
+        #store 0, %ok
+        #return 0
+      }
+      #if #gt(%byte, 57) {
+        #store 0, %ok
+        #return 0
+      }
+      %value: i64 = #add(
+        #mul(%value, 10),
+        #sub(%byte, 48)
+      )
+      %offset: i64 = #add(%offset, 1)
+      #continue digits
+    }
+    #return %value
+  }
+  #if #eq(%kind, 73) {
+    #return #load[i64](#lea(
+      base=%expression, idx=0, scale=0, offset=24
+    ))
+  }
+  #if #eq(%kind, 46) {
+    #return #call eval_const_body(
+      %data, %source_length, %module,
+      #call ir_expr_left(%expression), %ok
+    )
+  }
+  #if #eq(%kind, 3) {
+    #let %function: addr = #call ir_module_first(%module)
+    #let %remaining: i64 = #call ir_module_count(%module)
+    #loop functions {
+      #if #eq(%remaining, 0) { #break functions }
+      #if #call source_ranges_equal(
+        %data, %source_length,
+        #call ir_expr_start(%expression),
+        #call ir_expr_length(%expression),
+        #call ir_function_name_start(%function),
+        #call ir_function_name_length(%function)
+      ) {
+        #if #call ir_function_is_external(%function) {
+          #store 0, %ok
+          #return 0
+        }
+        #return #call eval_const_call(
+          %data, %source_length, %module,
+          %expression, %function, %ok
+        )
+      }
+      %function: addr = #call ir_function_next(%function)
+      %remaining: i64 = #sub(%remaining, 1)
+      #continue functions
+    }
+    #store 0, %ok
+    #return 0
+  }
+  #if #call ir_expr_is_binary(%expression) {
+    #let %left: i64 = #call eval_const_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%expression), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return 0 }
+    #let %right: i64 = #call eval_const_expr(
+      %data, %source_length, %module,
+      #call ir_expr_right(%expression), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return 0 }
+    #if #eq(%kind, 2) { #return #add(%left, %right) }
+    #if #eq(%kind, 4) { #return #sub(%left, %right) }
+    #if #eq(%kind, 5) { #return #mul(%left, %right) }
+    #if #eq(%kind, 6) {
+      #if #eq(%right, 0) { #store 0, %ok #return 0 }
+      #return #div(%left, %right)
+    }
+    #if #eq(%kind, 7) { #return #call bool_to_i64(#eq(%left, %right)) }
+    #if #eq(%kind, 8) { #return #call bool_to_i64(#ne(%left, %right)) }
+    #if #eq(%kind, 9) { #return #call bool_to_i64(#lt(%left, %right)) }
+    #if #eq(%kind, 10) { #return #call bool_to_i64(#le(%left, %right)) }
+    #if #eq(%kind, 11) { #return #call bool_to_i64(#gt(%left, %right)) }
+    #if #eq(%kind, 12) { #return #call bool_to_i64(#ge(%left, %right)) }
+    #if #eq(%kind, 31) {
+      #if #eq(%right, 0) { #store 0, %ok #return 0 }
+      #return #sdiv(%left, %right)
+    }
+    #if #eq(%kind, 32) {
+      #if #eq(%right, 0) { #store 0, %ok #return 0 }
+      #return #udiv(%left, %right)
+    }
+    #if #eq(%kind, 33) { #return #call bool_to_i64(#slt(%left, %right)) }
+    #if #eq(%kind, 34) { #return #call bool_to_i64(#sle(%left, %right)) }
+    #if #eq(%kind, 35) { #return #call bool_to_i64(#sgt(%left, %right)) }
+    #if #eq(%kind, 36) { #return #call bool_to_i64(#sge(%left, %right)) }
+    #if #eq(%kind, 37) { #return #call bool_to_i64(#ult(%left, %right)) }
+    #if #eq(%kind, 38) { #return #call bool_to_i64(#ule(%left, %right)) }
+    #if #eq(%kind, 39) { #return #call bool_to_i64(#ugt(%left, %right)) }
+    #if #eq(%kind, 40) { #return #call bool_to_i64(#uge(%left, %right)) }
+    #if #eq(%kind, 66) { #return #add(%left, %right) }
+    #if #eq(%kind, 67) { #return #sub(%left, %right) }
+    #if #eq(%kind, 68) { #return #mul(%left, %right) }
+    #if #eq(%kind, 69) {
+      #if #eq(%right, 0) { #store 0, %ok #return 0 }
+      #return #div(%left, %right)
+    }
+    #if #eq(%kind, 70) { #return #call bool_to_i64(#eq(%left, %right)) }
+    #if #eq(%kind, 71) { #return #call bool_to_i64(#lt(%left, %right)) }
+  }
+  #if #eq(%kind, 72) {
+    #return #call eval_const_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%expression), %ok
+    )
+  }
+  #store 0, %ok
+  #return 0
+}
+
+#proc eval_const_body(
+  addr %data,
+  i64 %source_length,
+  addr %module,
+  addr %body,
+  addr %ok
+) -> i64 {
+  #let %kind: i32 = #call ir_expr_kind(%body)
+  #if #eq(%kind, 16) { #store 0, %ok #return 0 }
+  #if #eq(%kind, 14) {
+    #let %value: i64 = #call eval_const_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return 0 }
+    #let %rest: addr = #call substitute_const_body(
+      %data, %source_length,
+      #call ir_expr_right(%body),
+      #call ir_expr_start(%body),
+      #call ir_expr_length(%body),
+      %value
+    )
+    #return #call eval_const_body(
+      %data, %source_length, %module,
+      %rest, %ok
+    )
+  }
+  #if #eq(%kind, 16) { #return 0 }
+  #if #eq(%kind, 18) { #return 0 }
+  #if #eq(%kind, 19) { #return 0 }
+  #if #eq(%kind, 15) {
+    #let %condition: i64 = #call eval_const_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return 0 }
+    #if #ne(%condition, 0) {
+      #return #call eval_const_body(
+        %data, %source_length, %module,
+        #call ir_expr_right(%body), %ok
+      )
+    }
+    #return #call eval_const_body(
+      %data, %source_length, %module,
+      #call ir_body_if_else(%body), %ok
+    )
+  }
+  #if #eq(%kind, 20) {
+    #let %ignored: i64 = #call eval_const_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return 0 }
+    #return #call eval_const_body(
+      %data, %source_length, %module,
+      #call ir_expr_right(%body), %ok
+    )
+  }
+  #return #call eval_const_expr(
+    %data, %source_length, %module, %body, %ok
+  )
+}
+
+#proc ir_expr_const_value_new(i64 %value) -> addr {
+  #let %expression: addr = #call bootstrap.allocate-pages(56)
+  #store 73, #lea(base=%expression, idx=0, scale=0, offset=0)
+  #store %value, #lea(base=%expression, idx=0, scale=0, offset=24)
+  #store %expression, #lea(base=%expression, idx=0, scale=0, offset=32)
+  #store %expression, #lea(base=%expression, idx=0, scale=0, offset=40)
+  #return %expression
+}
+
+#proc substitute_const_expr(
+  addr %data,
+  i64 %source_length,
+  addr %expression,
+  i64 %name_start,
+  i64 %name_length,
+  i64 %value
+) -> addr {
+  #let %kind: i32 = #call ir_expr_kind(%expression)
+  #if #eq(%kind, 13) {
+    #if #call source_ranges_equal(
+      %data, %source_length,
+      #call ir_expr_start(%expression),
+      #call ir_expr_length(%expression),
+      %name_start, %name_length
+    ) {
+      #return #call ir_expr_const_value_new(%value)
+    }
+    #return %expression
+  }
+  #if #call ir_expr_is_binary(%expression) {
+    #store #call substitute_const_expr(
+      %data, %source_length,
+      #call ir_expr_left(%expression),
+      %name_start, %name_length, %value
+    ), #lea(base=%expression, idx=0, scale=0, offset=24)
+    #store #call substitute_const_expr(
+      %data, %source_length,
+      #call ir_expr_right(%expression),
+      %name_start, %name_length, %value
+    ), #lea(base=%expression, idx=0, scale=0, offset=32)
+    #return %expression
+  }
+  #if #eq(%kind, 72) {
+    #store #call substitute_const_expr(
+      %data, %source_length,
+      #call ir_expr_left(%expression),
+      %name_start, %name_length, %value
+    ), #lea(base=%expression, idx=0, scale=0, offset=24)
+    #return %expression
+  }
+  #return %expression
+}
+
+#proc substitute_const_body(
+  addr %data,
+  i64 %source_length,
+  addr %body,
+  i64 %name_start,
+  i64 %name_length,
+  i64 %value
+) -> addr {
+  #let %kind: i32 = #call ir_expr_kind(%body)
+  #if #eq(%kind, 14) {
+    #store #call substitute_const_expr(
+      %data, %source_length,
+      #call ir_expr_left(%body),
+      %name_start, %name_length, %value
+    ), #lea(base=%body, idx=0, scale=0, offset=24)
+    #store #call substitute_const_body(
+      %data, %source_length,
+      #call ir_expr_right(%body),
+      %name_start, %name_length, %value
+    ), #lea(base=%body, idx=0, scale=0, offset=32)
+    #return %body
+  }
+  #if #eq(%kind, 15) {
+    #store #call substitute_const_expr(
+      %data, %source_length,
+      #call ir_expr_left(%body),
+      %name_start, %name_length, %value
+    ), #lea(base=%body, idx=0, scale=0, offset=24)
+    #store #call substitute_const_body(
+      %data, %source_length,
+      #call ir_expr_right(%body),
+      %name_start, %name_length, %value
+    ), #lea(base=%body, idx=0, scale=0, offset=32)
+    #store #call substitute_const_body(
+      %data, %source_length,
+      #call ir_body_if_else(%body),
+      %name_start, %name_length, %value
+    ), #lea(base=%body, idx=0, scale=0, offset=40)
+    #store #call substitute_const_body(
+      %data, %source_length,
+      #call ir_body_if_continuation(%body),
+      %name_start, %name_length, %value
+    ), #lea(base=%body, idx=0, scale=0, offset=48)
+    #return %body
+  }
+  #if #eq(%kind, 20) {
+    #store #call substitute_const_expr(
+      %data, %source_length,
+      #call ir_expr_left(%body),
+      %name_start, %name_length, %value
+    ), #lea(base=%body, idx=0, scale=0, offset=24)
+    #store #call substitute_const_body(
+      %data, %source_length,
+      #call ir_expr_right(%body),
+      %name_start, %name_length, %value
+    ), #lea(base=%body, idx=0, scale=0, offset=32)
+    #return %body
+  }
+  #return #call substitute_const_expr(
+    %data, %source_length, %body,
+    %name_start, %name_length, %value
+  )
+}
+
+#proc fold_compiletime_expr(
+  addr %data,
+  i64 %source_length,
+  addr %module,
+  addr %expression,
+  addr %ok
+) -> addr {
+  #let %kind: i32 = #call ir_expr_kind(%expression)
+  #if #eq(%kind, 46) {
+    #let %value: i64 = #call eval_const_body(
+      %data, %source_length, %module,
+      #call ir_expr_left(%expression), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %expression }
+    #return #call ir_expr_const_value_new(%value)
+  }
+  #if #eq(%kind, 3) {
+    #let %argument: addr = #call ir_expr_left(%expression)
+    #let %remaining: i64 = #call ir_expr_argument_count(%expression)
+    #let %previous: addr = #call ir_expr_left(%expression)
+    #let %first: i1 = 1
+    #loop arguments {
+      #if #eq(%remaining, 0) { #break arguments }
+      #let %next: addr = #call ir_expr_next(%argument)
+      #let %folded: addr = #call fold_compiletime_expr(
+        %data, %source_length, %module, %argument, %ok
+      )
+      #if #eq(#load[i1](%ok), 0) { #return %expression }
+      #if %first {
+        #store %folded, #lea(base=%expression, idx=0, scale=0, offset=24)
+        %first: i1 = 0
+      } else {
+        #call ir_expr_set_next(%previous, %folded)
+      }
+      %previous: addr = %folded
+      %argument: addr = %next
+      %remaining: i64 = #sub(%remaining, 1)
+      #continue arguments
+    }
+    #return %expression
+  }
+  #if #call ir_expr_is_binary(%expression) {
+    #let %left: addr = #call fold_compiletime_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%expression), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %expression }
+    #let %right: addr = #call fold_compiletime_expr(
+      %data, %source_length, %module,
+      #call ir_expr_right(%expression), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %expression }
+    #store %left, #lea(base=%expression, idx=0, scale=0, offset=24)
+    #store %right, #lea(base=%expression, idx=0, scale=0, offset=32)
+  }
+  #if #eq(%kind, 72) {
+    #let %operand: addr = #call fold_compiletime_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%expression), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %expression }
+    #store %operand, #lea(base=%expression, idx=0, scale=0, offset=24)
+  }
+  #return %expression
+}
+
+#proc fold_compiletime_body(
+  addr %data,
+  i64 %source_length,
+  addr %module,
+  addr %body,
+  addr %ok
+) -> addr {
+  #let %kind: i32 = #call ir_expr_kind(%body)
+  #if #eq(%kind, 14) {
+    #let %value: addr = #call fold_compiletime_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %body }
+    #store %value, #lea(base=%body, idx=0, scale=0, offset=24)
+    #store #call fold_compiletime_body(
+      %data, %source_length, %module,
+      #call ir_expr_right(%body), %ok
+    ), #lea(base=%body, idx=0, scale=0, offset=32)
+    #return %body
+  }
+  #if #eq(%kind, 15) {
+    #let %condition: addr = #call fold_compiletime_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %body }
+    #store %condition, #lea(base=%body, idx=0, scale=0, offset=24)
+    #let %then_body: addr = #call fold_compiletime_body(
+      %data, %source_length, %module,
+      #call ir_expr_right(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %body }
+    #store %then_body, #lea(base=%body, idx=0, scale=0, offset=32)
+    #let %else_body: addr = #call fold_compiletime_body(
+      %data, %source_length, %module,
+      #call ir_body_if_else(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %body }
+    #store %else_body, #lea(base=%body, idx=0, scale=0, offset=40)
+    #let %continuation: addr = #call fold_compiletime_body(
+      %data, %source_length, %module,
+      #call ir_body_if_continuation(%body), %ok
+    )
+    #store %continuation, #lea(base=%body, idx=0, scale=0, offset=48)
+    #return %body
+  }
+  #if #eq(%kind, 17) {
+    #let %loop_body: addr = #call fold_compiletime_body(
+      %data, %source_length, %module,
+      #call ir_expr_left(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %body }
+    #store %loop_body, #lea(base=%body, idx=0, scale=0, offset=24)
+    #let %continuation: addr = #call fold_compiletime_body(
+      %data, %source_length, %module,
+      #call ir_expr_right(%body), %ok
+    )
+    #store %continuation, #lea(base=%body, idx=0, scale=0, offset=32)
+    #return %body
+  }
+  #if #eq(%kind, 20) {
+    #let %value: addr = #call fold_compiletime_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %body }
+    #store %value, #lea(base=%body, idx=0, scale=0, offset=24)
+    #let %rest: addr = #call fold_compiletime_body(
+      %data, %source_length, %module,
+      #call ir_expr_right(%body), %ok
+    )
+    #store %rest, #lea(base=%body, idx=0, scale=0, offset=32)
+    #return %body
+  }
+  #if #eq(%kind, 24) {
+    #let %value: addr = #call fold_compiletime_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %body }
+    #let %destination: addr = #call fold_compiletime_expr(
+      %data, %source_length, %module,
+      #call ir_expr_right(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %body }
+    #store %value, #lea(base=%body, idx=0, scale=0, offset=24)
+    #store %destination, #lea(base=%body, idx=0, scale=0, offset=32)
+    #let %rest: addr = #call fold_compiletime_body(
+      %data, %source_length, %module,
+      #call ir_body_store_rest(%body), %ok
+    )
+    #store %rest, #lea(base=%body, idx=0, scale=0, offset=40)
+    #return %body
+  }
+  #if #eq(%kind, 27) {
+    #let %call: addr = #call fold_compiletime_expr(
+      %data, %source_length, %module,
+      #call ir_expr_left(%body), %ok
+    )
+    #if #eq(#load[i1](%ok), 0) { #return %body }
+    #store %call, #lea(base=%body, idx=0, scale=0, offset=24)
+    #let %rest: addr = #call fold_compiletime_body(
+      %data, %source_length, %module,
+      #call ir_expr_right(%body), %ok
+    )
+    #store %rest, #lea(base=%body, idx=0, scale=0, offset=32)
+    #return %body
+  }
+  #if #eq(%kind, 16) { #return %body }
+  #if #eq(%kind, 18) { #return %body }
+  #if #eq(%kind, 19) { #return %body }
+  #if #eq(%kind, 28) { #return %body }
+  #let %value: addr = #call fold_compiletime_expr(
+    %data, %source_length, %module, %body, %ok
+  )
+  #return %value
+}
+
+#proc fold_compiletime_module(
+  addr %data,
+  i64 %source_length,
+  addr %module
+) -> i1 {
+  #let %function: addr = #call ir_module_first(%module)
+  #let %remaining: i64 = #call ir_module_count(%module)
+  #loop functions {
+    #if #eq(%remaining, 0) { #break functions }
+    #let %ok: addr = #call bootstrap.allocate-pages(1)
+    #store 1, %ok
+    #let %body: addr = #call fold_compiletime_body(
+      %data, %source_length, %module,
+      #call ir_function_body(%function), %ok
+    )
+    #store %body, #lea(base=%function, idx=0, scale=0, offset=24)
+    #if #eq(#load[i1](%ok), 0) {
+      #call bootstrap.release-pages(%ok)
+      #return 0
+    }
+    #call bootstrap.release-pages(%ok)
+    %function: addr = #call ir_function_next(%function)
+    %remaining: i64 = #sub(%remaining, 1)
+    #continue functions
+  }
+  #return 1
+}
+
 #proc ir_module_name_count(
   addr %data,
   i64 %source_length,
@@ -2554,6 +3331,13 @@
 ) -> i32 {
   #let %kind: i32 = #call ir_expr_kind(%expression)
   #if #eq(%kind, 1) { #return 0 }
+  #if #eq(%kind, 73) { #return 0 }
+  #if #eq(%kind, 46) {
+    #return #call expression_width(
+      %data, %source_length, %module, %function,
+      #call ir_expr_left(%expression)
+    )
+  }
   #if #eq(%kind, 3) {
     #return #call ir_call_return_width(
       %data,
@@ -2622,6 +3406,42 @@
     #if #eq(%index_width, 255) { #return 255 }
     #return 128
   }
+  #if #eq(%kind, 16) { #return 0 }
+  #if #eq(%kind, 18) { #return 0 }
+  #if #eq(%kind, 19) { #return 0 }
+  #if #eq(%kind, 15) {
+    #if #ne(
+      #call expression_width(
+        %data, %source_length, %module, %function,
+        #call ir_expr_left(%expression)
+      ),
+      1
+    ) { #return 255 }
+    #let %then_width: i32 = #call expression_width(
+      %data, %source_length, %module, %function,
+      #call ir_expr_right(%expression)
+    )
+    #let %else_width: i32 = #call expression_width(
+      %data, %source_length, %module, %function,
+      #call ir_body_if_else(%expression)
+    )
+    #let %continuation_width: i32 = #call expression_width(
+      %data, %source_length, %module, %function,
+      #call ir_body_if_continuation(%expression)
+    )
+    #if #eq(%then_width, 255) { #return 255 }
+    #if #eq(%else_width, 255) { #return 255 }
+    #if #ne(%then_width, 0) {
+      #if #ne(%else_width, 0) {
+        #if #ne(%then_width, %else_width) { #return 255 }
+      }
+    }
+    #if #ne(%continuation_width, 0) {
+      #return %continuation_width
+    }
+    #if #ne(%then_width, 0) { #return %then_width }
+    #return %else_width
+  }
   #if #eq(%kind, 14) {
     #let %value_width: i32 = #call expression_width(
       %data,
@@ -2676,6 +3496,49 @@
       #return %target_width
     }
   }
+  #if #eq(%kind, 72) {
+    #let %source_width: i32 = #call expression_width(
+      %data, %source_length, %module, %function,
+      #call ir_expr_left(%expression)
+    )
+    #let %target_width: i32 = #call ir_body_let_width(%expression)
+    #if #eq(%source_width, 288) {
+      #if #eq(%target_width, 32) {
+        #store %source_width, #lea(base=%expression, idx=0, scale=0, offset=40)
+        #return %target_width
+      }
+      #return 255
+    }
+    #if #eq(%source_width, 320) {
+      #if #eq(%target_width, 64) {
+        #store %source_width, #lea(base=%expression, idx=0, scale=0, offset=40)
+        #return %target_width
+      }
+      #return 255
+    }
+    #if #eq(%target_width, 288) {
+      #if #eq(%source_width, 32) {
+        #store %source_width, #lea(base=%expression, idx=0, scale=0, offset=40)
+        #return %target_width
+      }
+      #return 255
+    }
+    #if #eq(%target_width, 320) {
+      #if #eq(%source_width, 64) {
+        #store %source_width, #lea(base=%expression, idx=0, scale=0, offset=40)
+        #return %target_width
+      }
+      #return 255
+    }
+    #if #eq(%source_width, %target_width) {
+      #if #eq(%source_width, 1) { #return %target_width }
+      #if #eq(%source_width, 8) { #return %target_width }
+      #if #eq(%source_width, 16) { #return %target_width }
+      #if #eq(%source_width, 32) { #return %target_width }
+      #if #eq(%source_width, 64) { #return %target_width }
+    }
+    #return 255
+  }
   #if #call ir_expr_is_binary(%expression) {
     #let %left_width: i32 = #call expression_width(
       %data,
@@ -2693,6 +3556,20 @@
     )
     #if #eq(%left_width, 255) { #return 255 }
     #if #eq(%right_width, 255) { #return 255 }
+    #if #ge(%kind, 66) {
+      #if #le(%kind, 71) {
+        #if #ne(%left_width, %right_width) { #return 255 }
+        #if #eq(%left_width, 288) {
+          #if #ge(%kind, 70) { #return 1 }
+          #return 288
+        }
+        #if #eq(%left_width, 320) {
+          #if #ge(%kind, 70) { #return 1 }
+          #return 320
+        }
+        #return 255
+      }
+    }
     #if #ge(%left_width, 256) { #return 255 }
     #if #ge(%right_width, 256) { #return 255 }
     #if #call ir_expr_is_comparison(%expression) {
@@ -2852,6 +3729,12 @@
   #let %kind: i32 = #call ir_expr_kind(%expression)
   #if #eq(%kind, 1) {
     #return 1
+  }
+  #if #eq(%kind, 46) {
+    #return #call verify_expression_names(
+      %data, %source_length, %module, %function,
+      #call ir_expr_left(%expression)
+    )
   }
   #if #eq(%kind, 29) { #return 1 }
   #if #eq(%kind, 30) {
@@ -3141,6 +4024,12 @@
         #call ir_expr_left(%expression)
       )
     }
+  }
+  #if #eq(%kind, 72) {
+    #return #call verify_expression_names(
+      %data, %source_length, %module, %function,
+      #call ir_expr_left(%expression)
+    )
   }
   #return 0
 }
@@ -3448,6 +4337,12 @@
 
 #proc expression_uses_memory(addr %expression) -> i1 {
   #let %kind: i32 = #call ir_expr_kind(%expression)
+  #if #eq(%kind, 46) {
+    #return #call expression_uses_memory(#call ir_expr_left(%expression))
+  }
+  #if #eq(%kind, 72) {
+    #return #call expression_uses_memory(#call ir_expr_left(%expression))
+  }
   #if #eq(%kind, 21) { #return 1 }
   #if #eq(%kind, 22) { #return 1 }
   #if #eq(%kind, 23) { #return 1 }
@@ -3538,6 +4433,12 @@
 
 #proc expression_uses_division(addr %expression) -> i1 {
   #let %kind: i32 = #call ir_expr_kind(%expression)
+  #if #eq(%kind, 46) {
+    #return #call expression_uses_division(#call ir_expr_left(%expression))
+  }
+  #if #eq(%kind, 72) {
+    #return #call expression_uses_division(#call ir_expr_left(%expression))
+  }
   #if #eq(%kind, 6) { #return 1 }
   #if #eq(%kind, 31) { #return 1 }
   #if #eq(%kind, 32) { #return 1 }
@@ -3761,6 +4662,48 @@
 
 #proc emit_c_expression(addr %data, addr %expression) -> #unit {
   #let %kind: i32 = #call ir_expr_kind(%expression)
+  // #eval is consumed during compilation.  The compile-time pass replaces
+  // supported blocks with kind=73 scalar constants before C emission; this
+  // branch remains a defensive fallback for an unmaterialized block.
+  #if #eq(%kind, 46) {
+    #call emit_c_expression(%data, #call ir_expr_left(%expression))
+    #return
+  }
+  #if #eq(%kind, 73) {
+    #let %value: i64 = #load[i64](#lea(
+      base=%expression, idx=0, scale=0, offset=24
+    ))
+    #if #lt(%value, 0) {
+      #call bootstrap.artifact-write-byte(45)
+      %value: i64 = #sub(0, %value)
+    }
+    #if #eq(%value, 0) {
+      #call bootstrap.artifact-write-byte(48)
+      #return
+    }
+    #let %buffer: addr = #call bootstrap.allocate-pages(32)
+    #let %count: i64 = 0
+    #loop digits {
+      #if #eq(%value, 0) { #break digits }
+      #let %quotient: i64 = #div(%value, 10)
+      #store #add(48, #sub(%value, #mul(%quotient, 10))), #lea(
+        base=%buffer, idx=%count, scale=1, offset=0
+      )
+      %count: i64 = #add(%count, 1)
+      %value: i64 = %quotient
+      #continue digits
+    }
+    #loop output {
+      #if #eq(%count, 0) { #break output }
+      %count: i64 = #sub(%count, 1)
+      #call bootstrap.artifact-write-byte(#load[i8](#lea(
+        base=%buffer, idx=%count, scale=1, offset=0
+      )))
+      #continue output
+    }
+    #call bootstrap.release-pages(%buffer)
+    #return
+  }
   #if #eq(%kind, 1) {
     #let %start: i64 = #call ir_expr_start(%expression)
     #call emit_source_range(
@@ -3799,6 +4742,50 @@
       #return
     }
   }
+  #if #eq(%kind, 72) {
+    #let %source_width: i32 = #load[i32](#lea(
+      base=%expression, idx=0, scale=0, offset=40
+    ))
+    #let %target_width: i32 = #call ir_body_let_width(%expression)
+    #if #eq(%source_width, %target_width) {
+      #call emit_c_expression(%data, #call ir_expr_left(%expression))
+      #return
+    }
+    #if #eq(%source_width, 288) {
+      #call bootstrap.artifact-write-literal(
+        "((union { uint32_t i; float f; }){ .f = (float)("
+      )
+      #call emit_c_expression(%data, #call ir_expr_left(%expression))
+      #call bootstrap.artifact-write-literal(" ) }).i")
+      #return
+    }
+    #if #eq(%source_width, 320) {
+      #call bootstrap.artifact-write-literal(
+        "((union { uint64_t i; double f; }){ .f = (double)("
+      )
+      #call emit_c_expression(%data, #call ir_expr_left(%expression))
+      #call bootstrap.artifact-write-literal(" ) }).i")
+      #return
+    }
+    #if #eq(%target_width, 288) {
+      #call bootstrap.artifact-write-literal(
+        "((union { uint32_t i; float f; }){ .i = (uint32_t)("
+      )
+      #call emit_c_expression(%data, #call ir_expr_left(%expression))
+      #call bootstrap.artifact-write-literal(" ) }).f")
+      #return
+    }
+    #if #eq(%target_width, 320) {
+      #call bootstrap.artifact-write-literal(
+        "((union { uint64_t i; double f; }){ .i = (uint64_t)("
+      )
+      #call emit_c_expression(%data, #call ir_expr_left(%expression))
+      #call bootstrap.artifact-write-literal(" ) }).f")
+      #return
+    }
+    #call bootstrap.artifact-write-literal("0")
+    #return
+  }
   #if #call ir_expr_is_binary(%expression) {
     #if #le(%kind, 6) {
       #call emit_c_wrapping_binary(%data, %expression, %kind)
@@ -3811,6 +4798,16 @@
     #if #eq(%kind, 32) {
       #call emit_c_wrapping_binary(%data, %expression, %kind)
       #return
+    }
+    #if #ge(%kind, 66) {
+      #if #le(%kind, 71) {
+        #call bootstrap.artifact-write-literal("(")
+        #call emit_c_expression(%data, #call ir_expr_left(%expression))
+        #call emit_c_binary_operator(%kind)
+        #call emit_c_expression(%data, #call ir_expr_right(%expression))
+        #call bootstrap.artifact-write-literal(")")
+        #return
+      }
     }
     #if #ge(%kind, 37) {
       #call bootstrap.artifact-write-literal("((")
@@ -3994,6 +4991,12 @@
   #if #eq(%kind, 38) { #call bootstrap.artifact-write-literal(" <= ") #return }
   #if #eq(%kind, 39) { #call bootstrap.artifact-write-literal(" > ") #return }
   #if #eq(%kind, 40) { #call bootstrap.artifact-write-literal(" >= ") #return }
+  #if #eq(%kind, 66) { #call bootstrap.artifact-write-literal(" + ") #return }
+  #if #eq(%kind, 67) { #call bootstrap.artifact-write-literal(" - ") #return }
+  #if #eq(%kind, 68) { #call bootstrap.artifact-write-literal(" * ") #return }
+  #if #eq(%kind, 69) { #call bootstrap.artifact-write-literal(" / ") #return }
+  #if #eq(%kind, 70) { #call bootstrap.artifact-write-literal(" == ") #return }
+  #if #eq(%kind, 71) { #call bootstrap.artifact-write-literal(" < ") #return }
   #call bootstrap.artifact-write-literal(" /* invalid-op */ ")
   #return
 }
@@ -4473,6 +5476,14 @@
     #call ir_module_free(%module)
     #return #call reject_cursor(%cursor)
   }
+  #if #eq(#call fold_compiletime_module(%data, %length, %module), 0) {
+    #call ir_module_free(%module)
+    #return #call emit_error(
+      "cannot evaluate #eval at compile time",
+      39,
+      2
+    )
+  }
 
   #call emit_c_module(%data, %module)
   #call ir_module_free(%module)
@@ -4501,6 +5512,14 @@
   #if #eq(#call verify_module_names(%data, %length, %module), 0) {
     #call ir_module_free(%module)
     #return #call reject_cursor(%cursor)
+  }
+  #if #eq(#call fold_compiletime_module(%data, %length, %module), 0) {
+    #call ir_module_free(%module)
+    #return #call emit_error(
+      "cannot evaluate #eval at compile time",
+      39,
+      2
+    )
   }
   #call emit_c_module(%data, %module)
   #call ir_module_free(%module)

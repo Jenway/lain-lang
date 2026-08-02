@@ -46,6 +46,11 @@ typedef struct {
   LainirCapabilityEntry *entries;
   uint32_t count;
   uint32_t cap;
+  /* Optional execution limits. Zero means unlimited. */
+  uint64_t max_steps;
+  uint32_t max_call_depth;
+  uint64_t max_alloc_bytes;
+  uint64_t max_eval_blocks;
 } LainirCapabilityTable;
 
 typedef struct {
@@ -70,9 +75,38 @@ int lainir_caps_add(
   LainirHostFn fn,
   void *user_data);
 
+void lainir_caps_set_limits(
+  LainirCapabilityTable *caps,
+  uint64_t max_steps,
+  uint32_t max_call_depth,
+  uint64_t max_alloc_bytes);
+
+void lainir_caps_set_eval_limit(
+  LainirCapabilityTable *caps,
+  uint64_t max_eval_blocks);
+
 LainirRunStatus lainir_run(
   const LainirRunRequest *request,
   LainirValue *result_out,
+  const char **error_out);
+
+/* Execute one already-parsed block in an explicit compile-time context.
+ * The block is borrowed; the interpreter does not free it.  This is the
+ * entry point a compiler uses for #eval. */
+LainirRunStatus lainir_eval_block(
+  L1Subroutine *module,
+  L1Block *block,
+  L1Type *return_type,
+  LainirCapabilityTable *caps,
+  LainirValue *result_out,
+  const char **error_out);
+
+/* Fold all #eval expressions in a module.  Only scalar bit results are
+ * materialized; address, function and unit results remain invalid in value
+ * positions and return LAINIR_RUN_BAD_CALL. */
+LainirRunStatus lainir_fold_module(
+  L1Subroutine *module,
+  LainirCapabilityTable *caps,
   const char **error_out);
 
 LainirValue lainir_value_unit(void);
