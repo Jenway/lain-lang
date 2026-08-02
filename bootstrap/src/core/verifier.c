@@ -20,14 +20,19 @@ typedef struct {
   L1Subroutine *module;
   L1Subroutine *sub;
   L1Diagnostic *diagnostic;
+  int current_line;
+  int current_column;
 } VerifyContext;
+
+static int verify_block(VerifyContext *ctx, L1Block *block,
+                        const Name *incoming, const LoopScope *loops);
 
 static int fail(VerifyContext *ctx, int code, const char *format, ...) {
   va_list args;
   if (ctx->diagnostic) {
     ctx->diagnostic->code = code;
-    ctx->diagnostic->line = 0;
-    ctx->diagnostic->column = 0;
+    ctx->diagnostic->line = ctx->current_line;
+    ctx->diagnostic->column = ctx->current_column;
     va_start(args, format);
     vsnprintf(ctx->diagnostic->message, sizeof(ctx->diagnostic->message),
               format, args);
@@ -93,9 +98,20 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
     return 1;
   case EXPR_ADD: case EXPR_SUB: case EXPR_MUL: case EXPR_DIV:
   case EXPR_EQ: case EXPR_NE: case EXPR_LT: case EXPR_LE: case EXPR_GT: case EXPR_GE:
-  case EXPR_FADD: case EXPR_FSUB: case EXPR_FMUL: case EXPR_FDIV: case EXPR_FEQ: case EXPR_FLT:
     return verify_expr(ctx, expr->data.bin.left, names) &&
            verify_expr(ctx, expr->data.bin.right, names);
+  case EXPR_FADD: case EXPR_FSUB: case EXPR_FMUL: case EXPR_FDIV: case EXPR_FEQ: case EXPR_FLT: {
+    L1Type *left;
+    L1Type *right;
+    if (!verify_expr(ctx, expr->data.bin.left, names) ||
+        !verify_expr(ctx, expr->data.bin.right, names)) return 0;
+    left = infer_expr_type(expr->data.bin.left);
+    right = infer_expr_type(expr->data.bin.right);
+    if (!left || !right || left->kind != TY_FLOATS ||
+        right->kind != TY_FLOATS || left->width != right->width)
+      return fail(ctx, 2039, "float operation requires equal-width #float operands");
+    return 1;
+  }
   case EXPR_SDIV: case EXPR_UDIV:
   case EXPR_SLT: case EXPR_SLE: case EXPR_SGT: case EXPR_SGE:
   case EXPR_ULT: case EXPR_ULE: case EXPR_UGT: case EXPR_UGE: {
@@ -130,6 +146,19 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
         (expr->kind != EXPR_TRUNC &&
          expr->data.conversion.target_ty->width <= source->width))
       return fail(ctx, 2024, "integer conversion has invalid width direction");
+    return 1;
+  }
+  case EXPR_BITCAST: {
+    L1Type *source;
+    L1Type *target = expr->data.conversion.target_ty;
+    if (!verify_expr(ctx, expr->data.conversion.operand, names)) return 0;
+    source = infer_expr_type(expr->data.conversion.operand);
+    if (!source || !target ||
+        !((source->kind == TY_BITS || source->kind == TY_FLOATS) &&
+          (target->kind == TY_BITS || target->kind == TY_FLOATS)) ||
+        source->width != target->width)
+      return fail(ctx, 2038,
+                  "#bitcast requires equal-width #bits/#float physical types");
     return 1;
   }
   case EXPR_LOAD:
@@ -184,12 +213,10 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
     }
     return 1;
   case EXPR_EVAL:
-    callee = find_subroutine(ctx->module, expr->data.eval.fn_name);
-    if (!callee)
-      return fail(ctx, 2004, "unknown eval target `%s`", expr->data.eval.fn_name);
-    for (i = 0; i < expr->data.eval.arg_count; i++)
-      if (!verify_expr(ctx, expr->data.eval.args[i], names)) return 0;
-    return 1;
+    if (!expr->data.eval.block)
+      return fail(ctx, 2037, "#eval requires a block");
+    expr->data.eval.ret_ty = ctx->sub->ret_ty;
+    return verify_block(ctx, expr->data.eval.block, names, NULL);
   case EXPR_PROC_ADDR:
     if (!find_subroutine(ctx->module, expr->data.proc_addr.fn_name))
       return fail(ctx, 2025, "unknown procedure address `%s`",
@@ -300,6 +327,8 @@ static int verify_block(VerifyContext *ctx, L1Block *block, const Name *incoming
   int terminated = 0;
   for (L1Instruction *inst = block ? block->body : NULL; inst; inst = inst->next) {
     Name binding;
+    ctx->current_line = inst->line;
+    ctx->current_column = inst->column;
     if (terminated)
       return fail(ctx, 2010, "instruction follows structured terminator in `%s`",
                   ctx->sub->name);

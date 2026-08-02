@@ -312,10 +312,22 @@ The expected interpreter result is:
 The following work remains before LAIN-IR can host the complete Lain
 compiler:
 
-- stable immutable data segments for frozen compiler data;
-- float and bitcast conversion operations;
+- a module-level data-segment declaration and relocation model for frozen
+  compiler data (string literals work today, but are not yet named segments);
+- float literals and complete float ABI support (the reference interpreter now
+  executes `#fadd/#fsub/#fmul/#fdiv/#feq/#flt` for 32/64-bit physical values);
 - precise allocation lifetime and address validity rules;
-- deterministic traps with source locations.
+- deterministic traps with source locations.  Parsed instructions retain their
+  leading-token line/column, and verifier diagnostics report that location;
+  nodes supplied directly through the C API may leave it at zero.
+
+The interpreter exposes optional execution limits through
+`lainir_caps_set_limits`: step count, call depth, and aggregate `#alloca`
+bytes. `lainir_caps_set_eval_limit` additionally bounds the number of eval
+blocks in a module. A zero limit means unlimited. These limits are especially intended for
+compiler-side `#eval`, so a malformed or non-terminating compile-time program
+cannot run without a bound; `lainir_fold_module` installs a bounded default
+when its capability table argument is null.
 
 These are physical execution capabilities.  They must not be replaced with
 AST, Module, type-system or Meta-specific host callbacks.

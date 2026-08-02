@@ -74,6 +74,7 @@ pub fn build(b: *std.Build) void {
     );
     l1check.root_module.linkLibrary(core);
     l1check.root_module.linkLibrary(text);
+    l1check.root_module.linkLibrary(interpreter);
     l1check.root_module.linkLibrary(host_io);
     _ = installNamed(
         b,

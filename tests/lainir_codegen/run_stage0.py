@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pathlib
+import os
 import shutil
 import subprocess
 import sys
@@ -23,11 +24,21 @@ FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "return_42.l1"
 INDIRECT_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "indirect_42.l1"
 
 
-def find_c_compiler() -> str | None:
+def find_c_compiler() -> list[str] | None:
+    zig = shutil.which("zig")
+    if zig:
+        return [zig, "cc"]
     for candidate in ("clang", "cc", "gcc"):
         found = shutil.which(candidate)
         if found:
-            return found
+            try:
+                probe = subprocess.run(
+                    [found, "--version"], capture_output=True, timeout=5
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if probe.returncode == 0:
+                return [found]
     return None
 
 
@@ -199,7 +210,7 @@ main ( ) -> i32 {
                 "int32_t main(void);\n"
                 "int32_t answer(void);\n\n"
                 "int32_t main(void) {\n"
-                "  return (answer() + 2);\n"
+                "  return ((int32_t)(uint32_t)((((uint32_t)(answer())) + ((uint32_t)(2)))));\n"
                 "}\n\n"
                 "int32_t answer(void) {\n"
                 "  return 40;\n"
@@ -561,7 +572,9 @@ main ( ) -> i32 {
 #proc main() -> i32 {
   #let %memory: addr = #alloca(8)
   #let %slot: addr = #lea(base=%memory, idx=0, scale=0, offset=4)
-  #let %answer: i32 = #eval sum(40, 2)
+  #let %answer: i32 = #eval {
+    #return #call sum(40, 2)
+  }
   #store %answer, %slot
   #return #field[4](%memory):i32
 }
@@ -570,6 +583,64 @@ main ( ) -> i32 {
             newline="\n",
         )
         inputs.append((remaining_forms, 42, ""))
+        nested_eval = pathlib.Path(__file__).parent / "fixtures" / "eval_nested_42.l1"
+        inputs.append(
+            (
+                nested_eval,
+                42,
+                "#include <stdint.h>\n\n"
+                "int32_t inner(void);\n"
+                "int32_t main(void);\n\n"
+                "int32_t inner(void) {\n"
+                "  return 40;\n"
+                "}\n\n"
+                "int32_t main(void) {\n"
+                "  return 42;\n"
+                "}\n\n",
+            )
+        )
+        eval_call_args = pathlib.Path(__file__).parent / "fixtures" / "eval_call_args.l1"
+        inputs.append((eval_call_args, 45, ""))
+        direct_eval_call = pathlib.Path(__file__).parent / "fixtures" / "eval_call_42.l1"
+        inputs.append(
+            (
+                direct_eval_call,
+                40,
+                "#include <stdint.h>\n\n"
+                "int32_t inner(void);\n"
+                "int32_t main(void);\n\n"
+                "int32_t inner(void) {\n"
+                "  return 40;\n"
+                "}\n\n"
+                "int32_t main(void) {\n"
+                "  return 40;\n"
+                "}\n\n",
+            )
+        )
+        eval_const_let = pathlib.Path(__file__).parent / "fixtures" / "eval_const_let_42.l1"
+        inputs.append(
+            (
+                eval_const_let,
+                42,
+                "#include <stdint.h>\n\n"
+                "int32_t main(void);\n\n"
+                "int32_t main(void) {\n"
+                "  return 42;\n"
+                "}\n\n",
+            )
+        )
+        eval_const_if = pathlib.Path(__file__).parent / "fixtures" / "eval_const_if_42.l1"
+        inputs.append(
+            (
+                eval_const_if,
+                42,
+                "#include <stdint.h>\n\n"
+                "int32_t main(void);\n\n"
+                "int32_t main(void) {\n"
+                "  return 42;\n"
+                "}\n\n",
+            )
+        )
 
         labeled_loop_program = work / "labeled_loop.l1"
         labeled_loop_program.write_text(
@@ -638,6 +709,16 @@ main ( ) -> i32 {
                 return generated.returncode
 
             actual = generated_c.read_text(encoding="utf-8")
+            # Golden C snippets are opt-in: the backend intentionally emits
+            # explicit fixed-width wrappers, so semantic execution and
+            # deterministic repeat output are the stable default contract.
+            if os.environ.get("LAINIR_CHECK_GOLDEN") == "1" and _expected and actual != _expected:
+                print(f"generated C mismatch for {source}", file=sys.stderr)
+                print("--- expected ---", file=sys.stderr)
+                print(_expected, file=sys.stderr)
+                print("--- actual ---", file=sys.stderr)
+                print(actual, file=sys.stderr)
+                return 1
             repeated_c = work / f"repeat-{source.stem}.c"
             repeated = run(
                 [
@@ -658,7 +739,7 @@ main ( ) -> i32 {
                 return 1
 
             compiled = run(
-                [c_compiler, str(generated_c), "-o", str(executable)],
+                [*c_compiler, str(generated_c), "-o", str(executable)],
                 ROOT,
             )
             if compiled.returncode:
@@ -668,12 +749,12 @@ main ( ) -> i32 {
             native = run([str(executable)], ROOT)
             if native.returncode != status:
                 print(
-                    f"native result mismatch: expected {status}, got {native.returncode}",
+                    f"native result mismatch for {source.name}: expected {status}, got {native.returncode}",
                     file=sys.stderr,
                 )
                 return 1
 
-        if pathlib.Path(c_compiler).name.lower().startswith(("clang", "gcc")):
+        if pathlib.Path(c_compiler[0]).name.lower().startswith(("clang", "gcc")):
             ub_program = work / "fixed_width_edges.l1"
             ub_program.write_text(
                 """#proc main() -> i32 {
@@ -711,7 +792,7 @@ main ( ) -> i32 {
                 return require_ub.returncode
             sanitized = run(
                 [
-                    c_compiler,
+                    *c_compiler,
                     "-fsanitize=undefined",
                     "-fno-sanitize-recover=undefined",
                     str(ub_c),
@@ -723,7 +804,7 @@ main ( ) -> i32 {
             sanitizer_available = sanitized.returncode == 0
             if sanitized.returncode:
                 sanitized = run(
-                    [c_compiler, str(ub_c), "-o", str(ub_executable)],
+                    [*c_compiler, str(ub_c), "-o", str(ub_executable)],
                     ROOT,
                 )
                 if sanitized.returncode:
@@ -767,7 +848,7 @@ main ( ) -> i32 {
                 else []
             )
             compiled_zero = run(
-                [c_compiler, *zero_flags, str(divide_zero_c), "-o", str(divide_zero_executable)],
+                [*c_compiler, *zero_flags, str(divide_zero_c), "-o", str(divide_zero_executable)],
                 ROOT,
             )
             if compiled_zero.returncode:
@@ -976,7 +1057,11 @@ main ( ) -> i32 {
                 "#proc main() -> i32 { #return #field[0](42):i32 }\n"
             ),
             "unknown-eval": (
-                "#proc main() -> i32 { #return #eval missing() }\n"
+                "#proc main() -> i32 { #return #eval { #return #call missing() } }\n"
+            ),
+            "runtime-dependent-eval": (
+                "#proc main() -> i32 { #let %x: i32 = 40 "
+                "#return #eval { #return #add(%x, 2) } }\n"
             ),
             "trailing-garbage": "#proc main() -> i32 { #return 1 } garbage\n",
         }
@@ -1000,7 +1085,10 @@ main ( ) -> i32 {
             )
             if (
                 rejected.returncode == 0
-                or "invalid module" not in rejected.stderr
+                or (
+                    "invalid module" not in rejected.stderr
+                    and "cannot evaluate #eval at compile time" not in rejected.stderr
+                )
                 or artifact.exists()
             ):
                 print(

@@ -29,11 +29,21 @@ def run(command: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def find_c_compiler() -> str | None:
+def find_c_compiler() -> list[str] | None:
+    zig = shutil.which("zig")
+    if zig:
+        return [zig, "cc"]
     for candidate in ("clang", "cc", "gcc"):
         found = shutil.which(candidate)
         if found:
-            return found
+            try:
+                probe = subprocess.run(
+                    [found, "--version"], capture_output=True, timeout=5
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if probe.returncode == 0:
+                return [found]
     return None
 
 
@@ -84,7 +94,7 @@ def main() -> int:
                 print(generated.stderr, file=sys.stderr)
                 return 1
             compiled = run(
-                [c_compiler, str(generated_c), "-o", str(executable)]
+                [*c_compiler, str(generated_c), "-o", str(executable)]
             )
             if compiled.returncode:
                 print(f"C compilation failed for {source.name}", file=sys.stderr)

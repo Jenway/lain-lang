@@ -14,6 +14,8 @@ L1ExportName *g_declared_module_names_head = NULL;
 L1ExportName *g_declared_signature_names_head = NULL;
 int g_has_explicit_exports = 0;
 
+static void lainir_free_block_list(L1Block *block);
+
 static void lainir_free_expr(L1Expr *expr) {
   uint32_t i;
 
@@ -70,6 +72,7 @@ static void lainir_free_expr(L1Expr *expr) {
   case EXPR_ZEXT:
   case EXPR_SEXT:
   case EXPR_TRUNC:
+  case EXPR_BITCAST:
     lainir_free_expr(expr->data.conversion.operand);
     break;
   case EXPR_CALL:
@@ -91,10 +94,7 @@ static void lainir_free_expr(L1Expr *expr) {
     lainir_free_expr(expr->data.field.base);
     break;
   case EXPR_EVAL:
-    free(expr->data.eval.fn_name);
-    for (i = 0; i < expr->data.eval.arg_count; i++)
-      lainir_free_expr(expr->data.eval.args[i]);
-    free(expr->data.eval.args);
+    lainir_free_block_list(expr->data.eval.block);
     break;
   case EXPR_CALL_INDIRECT:
     lainir_free_expr(expr->data.call_indirect.fn_ptr);
@@ -113,8 +113,9 @@ static void lainir_free_expr(L1Expr *expr) {
   free(expr);
 }
 
-/* Forward declaration for mutual recursion */
-static void lainir_free_block_list(L1Block *block);
+void lainir_free_expr_tree(L1Expr *expr) {
+  lainir_free_expr(expr);
+}
 
 static void lainir_free_instruction_list(L1Instruction *inst) {
   while (inst) {
@@ -301,6 +302,7 @@ L1Type *infer_expr_type(L1Expr *expr) {
   case EXPR_ZEXT:
   case EXPR_SEXT:
   case EXPR_TRUNC:
+  case EXPR_BITCAST:
     return expr->data.conversion.target_ty;
   case EXPR_FADD:
   case EXPR_FSUB:

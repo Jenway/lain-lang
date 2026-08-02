@@ -27,7 +27,9 @@ CASES = {
     ),
     "unknown-call": (
         "verify",
-        "#proc main() -> #bits<32> { #return #call missing() }\n",
+        "#proc main() -> #bits<32> {\n"
+        "  #return #call missing()\n"
+        "}\n",
     ),
     "duplicate-procedure": (
         "verify",
@@ -97,6 +99,13 @@ def main() -> int:
                 if compiled.returncode != 0
                 else "accepted"
             )
+            if name == "unknown-call" and "line 2:1" not in reference.stderr:
+                print(
+                    f"{name}: verifier lost the parsed instruction source line",
+                    file=sys.stderr,
+                )
+                print(reference.stderr, file=sys.stderr)
+                return 1
             if (
                 reference.returncode == 0
                 or debug.returncode != 0

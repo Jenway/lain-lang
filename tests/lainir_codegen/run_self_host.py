@@ -21,6 +21,8 @@ BOOTSTRAP = (
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
 HOST = ROOT / "bootstrap" / "src" / "host" / "native_compiler.c"
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "return_42.l1"
+NESTED_EVAL_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "eval_nested_42.l1"
+ARGS_EVAL_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "eval_call_args.l1"
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -36,10 +38,19 @@ def require(result: subprocess.CompletedProcess[str], stage: str) -> None:
 
 
 def main() -> int:
-    c_compiler = next(
-        (found for name in ("clang", "cc", "gcc") if (found := shutil.which(name))),
-        None,
-    )
+    zig = shutil.which("zig")
+    c_compiler = [zig, "cc"] if zig else None
+    for name in () if c_compiler is not None else ("clang", "cc", "gcc"):
+        found = shutil.which(name)
+        if not found:
+            continue
+        try:
+            probe = subprocess.run([found, "--version"], capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0:
+            c_compiler = [found]
+            break
     if not BOOTSTRAP.exists() or c_compiler is None:
         print("self-host prerequisites are unavailable", file=sys.stderr)
         return 1
@@ -68,7 +79,7 @@ def main() -> int:
         require(
             run(
                 [
-                    c_compiler,
+                    *c_compiler,
                     "-std=c11",
                     str(stage1_c),
                     str(HOST),
@@ -100,6 +111,50 @@ def main() -> int:
         if stage0_fixture.read_bytes() != stage1_fixture.read_bytes():
             raise RuntimeError("stage 0 and stage 1 disagree on the fixture")
 
+        stage0_nested = work / "nested.stage0.c"
+        stage1_nested = work / "nested.stage1.c"
+        require(
+            run(
+                [
+                    str(BOOTSTRAP),
+                    str(COMPILER),
+                    "lainir_compile",
+                    str(stage0_nested),
+                    str(NESTED_EVAL_FIXTURE),
+                ]
+            ),
+            "stage 0 nested eval compile",
+        )
+        require(
+            run([str(stage1), str(stage1_nested), str(NESTED_EVAL_FIXTURE)]),
+            "stage 1 nested eval compile",
+        )
+        if stage0_nested.read_bytes() != stage1_nested.read_bytes():
+            raise RuntimeError("stage 0 and stage 1 disagree on nested eval")
+        if b"return 42;" not in stage0_nested.read_bytes():
+            raise RuntimeError("nested eval was not materialized at compile time")
+
+        stage0_args = work / "args.stage0.c"
+        stage1_args = work / "args.stage1.c"
+        require(
+            run(
+                [
+                    str(BOOTSTRAP),
+                    str(COMPILER),
+                    "lainir_compile",
+                    str(stage0_args),
+                    str(ARGS_EVAL_FIXTURE),
+                ]
+            ),
+            "stage 0 constant-argument eval compile",
+        )
+        require(
+            run([str(stage1), str(stage1_args), str(ARGS_EVAL_FIXTURE)]),
+            "stage 1 constant-argument eval compile",
+        )
+        if stage0_args.read_bytes() != stage1_args.read_bytes():
+            raise RuntimeError("stage 0 and stage 1 disagree on constant-argument eval")
+
         require(
             run([str(stage1), "--module", str(stage2_c), str(COMPILER)]),
             "stage 1 -> stage 2 C",
@@ -107,7 +162,7 @@ def main() -> int:
         require(
             run(
                 [
-                    c_compiler,
+                    *c_compiler,
                     "-std=c11",
                     str(stage2_c),
                     str(HOST),

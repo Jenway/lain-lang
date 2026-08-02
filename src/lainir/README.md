@@ -62,6 +62,11 @@ introduce undefined behavior:
 #let %loaded: #bits<32> = #load[#bits<32>](%slot)
 ```
 
+There is deliberately no hidden `#global` or `#data` instruction in this
+layer. Frozen compiler data is represented as ordinary immutable bytes and
+addresses supplied by the surrounding module/host boundary; named data
+segments would move source-language module semantics into the IR.
+
 At this stage a bare integer literal has no width of its own, so it cannot be
 stored directly; bind it to a typed local first.
 
@@ -110,6 +115,18 @@ small native host in `bootstrap/src/host/native_compiler.c` supplies only
 source bytes, diagnostics, allocation, artifact I/O, and the process entry
 point. It contains no lexer, parser, verifier, IR, or emitter logic.
 
+The reference interpreter exposes `lainir_eval_block(...)` and
+`lainir_fold_module(...)` for compiler integrations. `lainir_fold_module`
+recursively executes `#eval` blocks and materializes scalar bit results as
+constants; nested evals are folded inside-out. The self-hosted compiler has a
+matching LAIN-IR evaluator for its constant integer subset, and rejects
+runtime-dependent evals instead of emitting them as runtime code. Constant
+locals and constant-argument local calls inside an eval block are substituted
+before evaluation, so nested blocks and constant `#if` branches can build
+values through ordinary `#let` bindings. Ordinary
+`lainir_run(...)` remains the runtime entry point. Interpreter limits can be
+configured with `lainir_caps_set_limits`.
+
 ## Stage-0 invocation
 
 From the repository root, after building `bootstrap`:
@@ -128,5 +145,12 @@ Canonical public syntax is defined by `docs/02-lain-ir.md`. Both the C
 reference front end and the LAIN-IR-written compiler accept canonical
 `#bits<N>`, `#float<N>`, `#addr`, typed `#store`, explicit signed/unsigned
 integer operations, width conversions, and signature-bearing indirect calls.
+The reference parser keeps old `i32`/`addr` spellings only for migration;
+`l1check --strict` rejects those aliases.
 Legacy scalar aliases and ambiguous integer spellings remain accepted only as
-a migration surface for the existing bootstrap compiler source.
+a migration surface for the existing bootstrap compiler source. The
+LAIN-IR-written compiler now also performs a small compile-time evaluator for
+constant integer eval blocks and zero-argument local calls; unsupported
+runtime-dependent evals are rejected instead of being emitted as runtime code.
+Verifier diagnostics preserve the source line of parsed instructions (direct
+C-API nodes may have line `0`).
