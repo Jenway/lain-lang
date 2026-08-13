@@ -1,0 +1,173 @@
+// Module and namespace Meta bindings.
+//
+// Module shells are created before their bodies are collected so imports and
+// recursive references can resolve a stable Meta value.
+
+#extern #proc raw_is_nil(addr %node) -> i1;
+#extern #proc raw_node_next(addr %node) -> addr;
+#extern #proc meta_atom_equal(
+  addr %source, addr %node, addr %text, #bits<64> %length
+) -> i1;
+#extern #proc meta_value_function(
+  addr %source, addr %name, addr %function, addr %environment
+) -> addr;
+#extern #proc meta_value_scalar(
+  addr %source, addr %name, #bits<64> %value
+) -> addr;
+#extern #proc meta_value_type(
+  addr %source, addr %name, addr %node
+) -> addr;
+#extern #proc meta_value_module(
+  addr %source, addr %name, addr %group, addr %environment
+) -> addr;
+#extern #proc meta_env_bind(
+  addr %environment, addr %source, addr %name, addr %value
+) -> #unit;
+#extern #proc meta_env_new(addr %parent) -> addr;
+#extern #proc meta_env_lookup_local(
+  addr %environment, addr %source, addr %node
+) -> addr;
+#extern #proc meta_value_kind(addr %value) -> #bits<32>;
+#extern #proc meta_value_environment(addr %value) -> addr;
+#extern #proc program_nil() -> addr;
+#extern #proc program_module_group(addr %source, addr %let_node) -> addr;
+#extern #proc program_constant_value(addr %constant) -> #bits<64>;
+
+#proc program_meta_bind_function(
+  addr %environment, addr %source, addr %let_node, addr %function
+) -> #unit {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %value: addr = #call meta_value_function(
+    %source, %name, %function, %environment
+  )
+  #call meta_env_bind(%environment, %source, %name, %value)
+  #return
+}
+
+#proc program_meta_bind_constant(
+  addr %environment, addr %source, addr %let_node, addr %constant
+) -> #unit {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %value: addr = #call meta_value_scalar(
+    %source, %name, #call program_constant_value(%constant)
+  )
+  #call meta_env_bind(%environment, %source, %name, %value)
+  #return
+}
+
+#proc program_meta_bind_type(
+  addr %environment, addr %source, addr %let_node, addr %type
+) -> #unit {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %value: addr = #call meta_value_type(
+    %source, %name, %let_node
+  )
+  #call meta_env_bind(%environment, %source, %name, %value)
+  #return
+}
+
+#proc program_meta_bind_module(
+  addr %environment, addr %source, addr %let_node
+) -> addr {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %existing: addr = #call meta_env_lookup_local(
+    %environment, %source, %name
+  )
+  #if #eq(#call raw_is_nil(%existing), 0) {
+    #if #eq(#call meta_value_kind(%existing), 2) {
+      #return #call meta_value_environment(%existing)
+    }
+  }
+  #let %group: addr = #call program_module_group(%source, %let_node)
+  #let %module_environment: addr = #call meta_env_new(%environment)
+  #let %value: addr = #call meta_value_module(
+    %source, %name, %group, %module_environment
+  )
+  #call meta_env_bind(%environment, %source, %name, %value)
+  #return %module_environment
+}
+
+#proc program_is_module_declaration(
+  addr %source, addr %let_node
+) -> i1 {
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call meta_atom_equal(%source, %node, "module", 6) {
+      #return 1
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return 0 }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_is_record_declaration(
+  addr %source, addr %let_node
+) -> i1 {
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call meta_atom_equal(%source, %node, "struct", 6) {
+      #return 1
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return 0 }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_module_group(
+  addr %source, addr %let_node
+) -> addr {
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return %node }
+    #if #call meta_atom_equal(%source, %node, "module", 6) {
+      #let %group: addr = #call raw_node_next(%node)
+      #if #eq(#call raw_node_kind(%group), 2) {
+        #if #eq(#call raw_node_delimiter(%group), 123) {
+          #return %group
+        }
+      }
+      #return %group
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return %node }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_is_std_module_value(
+  addr %source, addr %node
+) -> i1 {
+  #if #eq(#call meta_atom_equal(%source, %node, "std", 3), 0) {
+    #return 0
+  }
+  #let %colon1: addr = #call raw_node_next(%node)
+  #let %colon2: addr = #call raw_node_next(%colon1)
+  #let %member: addr = #call raw_node_next(%colon2)
+  #let %group: addr = #call raw_node_next(%member)
+  #if #eq(#call meta_atom_equal(%source, %colon1, ":", 1), 0) {
+    #return 0
+  }
+  #if #eq(#call meta_atom_equal(%source, %colon2, ":", 1), 0) {
+    #return 0
+  }
+  #if #eq(#call meta_atom_equal(%source, %member, "module", 6), 0) {
+    #return 0
+  }
+  #if #call raw_is_nil(%group) { #return 0 }
+  #if #ne(#call raw_node_kind(%group), 2) { #return 0 }
+  #return #eq(#call raw_node_delimiter(%group), 123)
+}
+
+#proc program_std_module_value_group(
+  addr %source, addr %node
+) -> addr {
+  #return #call raw_node_next(
+    #call raw_node_next(
+      #call raw_node_next(#call raw_node_next(%node))
+    )
+  )
+}

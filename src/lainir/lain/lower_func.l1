@@ -1,0 +1,305 @@
+// First source-to-LAIN-IR lowering slice.
+//
+// This is intentionally small but real: Meta recognizes the generic RawAst
+// shape of `let main = std::func() -> i32 { return N; };`, validates it, and
+// emits executable LAIN-IR.  The RawAst parser remains completely unaware of
+// the declaration's meaning.
+
+#extern #proc bootstrap.source-count() -> i64;
+#extern #proc bootstrap.source-data(i64 %index) -> addr;
+#extern #proc bootstrap.source-length(i64 %index) -> i64;
+#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+#extern #proc bootstrap.release-pages(addr %memory) -> #unit;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(i8 %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+
+#extern #proc tool_source_new(addr %data, i64 %length) -> addr;
+#extern #proc tool_source_data(addr %source) -> addr;
+#extern #proc tool_lex_all(addr %source) -> addr;
+#extern #proc raw_parse(addr %source, addr %tokens) -> addr;
+#extern #proc raw_is_nil(addr %node) -> i1;
+#extern #proc raw_node_kind(addr %node) -> i32;
+#extern #proc raw_node_delimiter(addr %node) -> i32;
+#extern #proc raw_node_start(addr %node) -> i64;
+#extern #proc raw_node_length(addr %node) -> i64;
+#extern #proc raw_node_first(addr %node) -> addr;
+#extern #proc raw_node_next(addr %node) -> addr;
+#extern #proc tool_byte_at(addr %data, i64 %index) -> i8;
+#extern #proc meta_atom_equal(
+  addr %source, addr %node, addr %text, i64 %length
+) -> i1;
+#extern #proc meta_write_decimal(i64 %value) -> #unit;
+#extern #proc meta_write_span(
+  addr %source, i64 %start, i64 %length
+) -> #unit;
+
+// FunctionResult: status @0, value @8.
+#proc function_result_new(i32 %status, i64 %value) -> addr {
+  #let %result: addr = #call bootstrap.allocate-pages(16)
+  #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
+  #store %value, #lea(base=%result, idx=0, scale=0, offset=8)
+  #return %result
+}
+
+#proc function_status(addr %result) -> i32 {
+  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=0))
+}
+
+#proc function_value(addr %result) -> i64 {
+  #return #load[i64](#lea(base=%result, idx=0, scale=0, offset=8))
+}
+
+#proc function_parse_decimal(addr %source, addr %node) -> addr {
+  #if #ne(#call raw_node_kind(%node), 1) {
+    #return #call function_result_new(5005, 0)
+  }
+  #let %data: addr = #call tool_source_data(%source)
+  #let %value: i64 = 0
+  #let %index: i64 = 0
+  #loop digits {
+    #if #ge(%index, #call raw_node_length(%node)) { #break digits }
+    #let %byte: i8 = #call tool_byte_at(
+      %data, #add(#call raw_node_start(%node), %index)
+    )
+    #if #lt(%byte, 48) { #return #call function_result_new(5005, 0) }
+    #if #gt(%byte, 57) { #return #call function_result_new(5005, 0) }
+    %value: i64 = #add(#mul(%value, 10), #sub(%byte, 48))
+    %index: i64 = #add(%index, 1)
+    #continue digits
+  }
+  #return #call function_result_new(0, %value)
+}
+
+#proc function_is_semicolon(addr %source, addr %node) -> i1 {
+  #return #call meta_atom_equal(%source, %node, ";", 1)
+}
+
+#proc function_expression_result(addr %source, addr %body) -> addr {
+  #let %return_keyword: addr = #call raw_node_first(%body)
+  #if #eq(#call meta_atom_equal(%source, %return_keyword, "return", 6), 0) {
+    #return #call function_result_new(5004, 0)
+  }
+  #let %left_node: addr = #call raw_node_next(%return_keyword)
+  #if #call raw_is_nil(%left_node) {
+    #return #call function_result_new(5004, 0)
+  }
+  #let %left: addr = #call function_parse_decimal(%source, %left_node)
+  #if #ne(#call function_status(%left), 0) { #return %left }
+  #let %operator: addr = #call raw_node_next(%left_node)
+  #if #call raw_is_nil(%operator) {
+    #return %left
+  }
+  #if #call function_is_semicolon(%source, %operator) {
+    #return %left
+  }
+  #if #eq(#call meta_atom_equal(%source, %operator, "+", 1), 0) {
+    #if #eq(#call meta_atom_equal(%source, %operator, "-", 1), 0) {
+      #if #eq(#call meta_atom_equal(%source, %operator, "*", 1), 0) {
+        #if #eq(#call meta_atom_equal(%source, %operator, "/", 1), 0) {
+          #return #call function_result_new(5002, 0)
+        }
+      }
+    }
+  }
+  #let %right_node: addr = #call raw_node_next(%operator)
+  #if #call raw_is_nil(%right_node) {
+    #return #call function_result_new(5002, 0)
+  }
+  #let %right: addr = #call function_parse_decimal(%source, %right_node)
+  #if #ne(#call function_status(%right), 0) { #return %right }
+  #let %tail: addr = #call raw_node_next(%right_node)
+  #if #call raw_is_nil(%tail) {
+    #return #call function_result_new(0, #call function_value(%left))
+  }
+  #if #call function_is_semicolon(%source, %tail) {
+    #if #call meta_atom_equal(%source, %operator, "/", 1) {
+      #if #eq(#call function_value(%right), 0) {
+        #return #call function_result_new(5007, 0)
+      }
+    }
+    #return #call function_result_new(0, #call function_value(%left))
+  }
+  #return #call function_result_new(5002, 0)
+}
+
+#proc function_main_binding(addr %source, addr %root) -> addr {
+  #let %node: addr = #call raw_node_first(%root)
+  #loop bindings {
+    #if #call raw_is_nil(%node) { #return %node }
+    #if #call meta_atom_equal(%source, %node, "let", 3) {
+      #let %name: addr = #call raw_node_next(%node)
+      #if #call meta_atom_equal(%source, %name, "main", 4) {
+        #return %name
+      }
+    }
+    %node: addr = #call raw_node_next(%node)
+    #continue bindings
+  }
+  #return %node
+}
+
+#proc function_body(addr %source, addr %name) -> addr {
+  #let %equals: addr = #call raw_node_next(%name)
+  #if #call raw_is_nil(%equals) { #return %equals }
+  #let %constructor: addr = #call raw_node_next(%equals)
+  #if #call raw_is_nil(%constructor) { #return %constructor }
+  #if #call meta_atom_equal(%source, %constructor, "std", 3) {
+    #let %colon1: addr = #call raw_node_next(%constructor)
+    #let %colon2: addr = #call raw_node_next(%colon1)
+    #let %func: addr = #call raw_node_next(%colon2)
+    #if #call meta_atom_equal(%source, %func, "func", 4) {
+      #let %params: addr = #call raw_node_next(%func)
+      #let %arrow1: addr = #call raw_node_next(%params)
+      #let %arrow2: addr = #call raw_node_next(%arrow1)
+      #let %return_type: addr = #call raw_node_next(%arrow2)
+      #let %body: addr = #call raw_node_next(%return_type)
+      #if #eq(#call raw_node_delimiter(%params), 40) {
+        #if #eq(#call raw_node_delimiter(%body), 123) {
+          #return %body
+        }
+      }
+    }
+  }
+  #return %equals
+}
+
+#proc function_compile_value(addr %source, addr %name) -> addr {
+  #let %equals: addr = #call raw_node_next(%name)
+  #if #call raw_is_nil(%equals) { #return #call function_result_new(5002, 0) }
+  #if #eq(#call meta_atom_equal(%source, %equals, "=", 1), 0) {
+    #return #call function_result_new(5002, 0)
+  }
+  #let %constructor: addr = #call raw_node_next(%equals)
+  #let %colon1: addr = #call raw_node_next(%constructor)
+  #let %colon2: addr = #call raw_node_next(%colon1)
+  #let %func: addr = #call raw_node_next(%colon2)
+  #if #call raw_is_nil(%func) {
+    #return #call function_result_new(5002, 0)
+  }
+  #if #eq(#call meta_atom_equal(%source, %constructor, "std", 3), 0) {
+    #return #call function_result_new(5002, 0)
+  }
+  #if #eq(#call meta_atom_equal(%source, %colon1, ":", 1), 0) {
+    #return #call function_result_new(5002, 0)
+  }
+  #if #eq(#call meta_atom_equal(%source, %colon2, ":", 1), 0) {
+    #return #call function_result_new(5002, 0)
+  }
+  #if #eq(#call meta_atom_equal(%source, %func, "func", 4), 0) {
+    #return #call function_result_new(5002, 0)
+  }
+  #let %params: addr = #call raw_node_next(%func)
+  #if #call raw_is_nil(%params) { #return #call function_result_new(5003, 0) }
+  #if #eq(#call raw_node_delimiter(%params), 40) {
+    #if #call raw_is_nil(#call raw_node_first(%params)) {
+      // The zero-parameter form is the first lowering contract.
+    } else {
+      #return #call function_result_new(5003, 0)
+    }
+  } else {
+    #return #call function_result_new(5003, 0)
+  }
+  #let %arrow1: addr = #call raw_node_next(%params)
+  #let %arrow2: addr = #call raw_node_next(%arrow1)
+  #let %return_type: addr = #call raw_node_next(%arrow2)
+  #let %body: addr = #call raw_node_next(%return_type)
+  #if #call raw_is_nil(%body) { #return #call function_result_new(5004, 0) }
+  #if #eq(#call meta_atom_equal(%source, %arrow1, "-", 1), 0) {
+    #return #call function_result_new(5002, 0)
+  }
+  #if #eq(#call meta_atom_equal(%source, %arrow2, ">", 1), 0) {
+    #return #call function_result_new(5002, 0)
+  }
+  #if #eq(#call meta_atom_equal(%source, %return_type, "i32", 3), 0) {
+    #return #call function_result_new(5006, 0)
+  }
+  #if #ne(#call raw_node_delimiter(%body), 123) {
+    #return #call function_result_new(5004, 0)
+  }
+  #return #call function_expression_result(%source, %body)
+}
+
+#proc function_write_error(i32 %status) -> #unit {
+  #call bootstrap.artifact-write-literal("(error ")
+  #call meta_write_decimal(#zext[#bits<64>](%status))
+  #call bootstrap.artifact-write-literal(")\n")
+  #return
+}
+
+#proc function_write_expression(addr %source, addr %body) -> #unit {
+  #let %return_keyword: addr = #call raw_node_first(%body)
+  #let %left_node: addr = #call raw_node_next(%return_keyword)
+  #let %left: addr = #call function_parse_decimal(%source, %left_node)
+  #let %operator: addr = #call raw_node_next(%left_node)
+  #if #call raw_is_nil(%operator) {
+    #call bootstrap.artifact-write-literal("  #return ")
+    #call meta_write_decimal(#call function_value(%left))
+    #call bootstrap.artifact-write-literal("\n")
+    #return
+  }
+  #if #call function_is_semicolon(%source, %operator) {
+    #call bootstrap.artifact-write-literal("  #return ")
+    #call meta_write_decimal(#call function_value(%left))
+    #call bootstrap.artifact-write-literal("\n")
+    #return
+  }
+  #let %right_node: addr = #call raw_node_next(%operator)
+  #let %right: addr = #call function_parse_decimal(%source, %right_node)
+  #call bootstrap.artifact-write-literal("  #let %lhs: #bits<32> = ")
+  #call meta_write_decimal(#call function_value(%left))
+  #call bootstrap.artifact-write-literal("\n  #let %rhs: #bits<32> = ")
+  #call meta_write_decimal(#call function_value(%right))
+  #call bootstrap.artifact-write-literal("\n  #let %result: #bits<32> = #")
+  #if #call meta_atom_equal(%source, %operator, "+", 1) {
+    #call bootstrap.artifact-write-literal("add")
+  } else {
+    #if #call meta_atom_equal(%source, %operator, "-", 1) {
+      #call bootstrap.artifact-write-literal("sub")
+    } else {
+      #if #call meta_atom_equal(%source, %operator, "*", 1) {
+        #call bootstrap.artifact-write-literal("mul")
+      } else {
+        #call bootstrap.artifact-write-literal("div")
+      }
+    }
+  }
+  #call bootstrap.artifact-write-literal("(%lhs, %rhs)\n  #return %result\n")
+  #return
+}
+
+#proc lain_lower_function() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 5000 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %name: addr = #call function_main_binding(%source, %root)
+  #let %result: addr = #call function_result_new(5001, 0)
+  #if #call raw_is_nil(%name) {
+    #call bootstrap.artifact-begin()
+    #call function_write_error(5001)
+    #call bootstrap.artifact-finish()
+    #call bootstrap.release-pages(%source)
+    #return 5001
+  }
+  %result: addr = #call function_compile_value(%source, %name)
+  #let %status: i32 = #call function_status(%result)
+  #call bootstrap.artifact-begin()
+  #if #ne(%status, 0) {
+    #call function_write_error(%status)
+  } else {
+    #call bootstrap.artifact-write-literal("#proc ")
+    #call meta_write_span(
+      %source, #call raw_node_start(%name), #call raw_node_length(%name)
+    )
+    #call bootstrap.artifact-write-literal("() -> #bits<32> {\n")
+    #call function_write_expression(%source, #call function_body(%source, %name))
+    #call bootstrap.artifact-write-literal("\n}\n")
+  }
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}

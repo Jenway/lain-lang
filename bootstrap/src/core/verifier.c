@@ -313,6 +313,11 @@ static int value_type_compatible(L1Type *type, L1Expr *value) {
   if (value->kind == EXPR_LOAD && !value->data.load.ty)
     value->data.load.ty = type;
   if (value->kind == EXPR_CONST && type->kind == TY_BITS) return 1;
+  /* The source-level Meta layer uses `0 as addr` for a null handle.  Keep
+     the physical IR address type pointer-shaped while allowing that one
+     untyped literal in a typed address position. */
+  if (value->kind == EXPR_CONST && type->kind == TY_ADDR)
+    return value->data.const_val == 0;
   actual = infer_expr_type(value);
   /* Integer literals and arithmetic are width-polymorphic in the text parser;
      a resolved value (variable or parameter) is not. */

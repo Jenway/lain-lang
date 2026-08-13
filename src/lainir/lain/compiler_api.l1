@@ -1,0 +1,85 @@
+// LAIN-IR-owned request/result boundary for the compiler.
+//
+// The bootstrap host still supplies sources through capabilities and receives
+// the final status as the entry return value.  The request/result objects keep
+// the compiler policy in LAIN-IR so the host does not grow a second semantic
+// API while the later phases are added.
+
+#extern #proc bootstrap.source-count() -> i64;
+#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+#extern #proc lain_lower_program(addr %request, addr %syntax_index) -> i32;
+#extern #proc syntax_units_build() -> addr;
+#extern #proc syntax_index_count(addr %index) -> i64;
+
+// CompilerRequest:
+//   source count @0, emit-l1 @8, verify-l1 @16,
+//   source begin/end @24/@32, root source @40, require-main @48.
+#proc compiler_request_new() -> addr {
+  #let %request: addr = #call bootstrap.allocate-pages(56)
+  #let %source_count: i64 = #call bootstrap.source-count()
+  #store #call bootstrap.source-count(),
+    #lea(base=%request, idx=0, scale=0, offset=0)
+  #store 1, #lea(base=%request, idx=0, scale=0, offset=8)
+  #store 1, #lea(base=%request, idx=0, scale=0, offset=16)
+  #store 0, #lea(base=%request, idx=0, scale=0, offset=24)
+  #store %source_count, #lea(base=%request, idx=0, scale=0, offset=32)
+  #store 0, #lea(base=%request, idx=0, scale=0, offset=40)
+  #store 1, #lea(base=%request, idx=0, scale=0, offset=48)
+  #return %request
+}
+
+#proc compiler_request_set_root(addr %request, i64 %root) -> #unit {
+  #store %root, #lea(base=%request, idx=0, scale=0, offset=40)
+  #return
+}
+
+#proc compiler_request_set_require_main(addr %request, i1 %required) -> #unit {
+  #store %required, #lea(base=%request, idx=0, scale=0, offset=48)
+  #return
+}
+
+// CompilerResult:
+//   status @0, diagnostic @8, syntax-unit count @16, artifact-present @24.
+#proc compiler_result_new(
+  i32 %status, i32 %diagnostic, i64 %module_count, i8 %artifact
+) -> addr {
+  #let %result: addr = #call bootstrap.allocate-pages(32)
+  #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
+  #store %diagnostic, #lea(base=%result, idx=0, scale=0, offset=8)
+  #store %module_count, #lea(base=%result, idx=0, scale=0, offset=16)
+  #store %artifact, #lea(base=%result, idx=0, scale=0, offset=24)
+  #return %result
+}
+
+#proc compiler_result_status(addr %result) -> i32 {
+  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=0))
+}
+
+#proc compiler_result_diagnostic(addr %result) -> i32 {
+  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=8))
+}
+
+#proc compiler_result_module_count(addr %result) -> i64 {
+  #return #load[i64](#lea(base=%result, idx=0, scale=0, offset=16))
+}
+
+#proc compiler_result_has_artifact(addr %result) -> i1 {
+  #return #ne(#load[i8](#lea(base=%result, idx=0, scale=0, offset=24)), 0)
+}
+
+#proc compiler_compile_request(addr %request) -> addr {
+  #let %syntax_index: addr = #call syntax_units_build()
+  #let %source_begin: i64 = #load[i64](
+    #lea(base=%request, idx=0, scale=0, offset=24)
+  )
+  #let %source_end: i64 = #load[i64](
+    #lea(base=%request, idx=0, scale=0, offset=32)
+  )
+  #let %module_count: i64 = #sub(%source_end, %source_begin)
+  #let %status: i32 = #call lain_lower_program(%request, %syntax_index)
+  #let %artifact: i8 = 0
+  #if #eq(%status, 0) { %artifact: i8 = 1 }
+  #return #call compiler_result_new(
+    %status, %status, %module_count, %artifact
+  )
+}

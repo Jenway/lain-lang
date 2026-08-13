@@ -1,0 +1,310 @@
+// Meta-owned module descriptor.
+//
+// `std::module { ... }` is deliberately recognized here, not by RawAst.  The
+// descriptor stores only source spans and a linked member list; visibility,
+// imports, and code generation remain later phases.
+
+#extern #proc bootstrap.source-count() -> i64;
+#extern #proc bootstrap.source-data(i64 %index) -> addr;
+#extern #proc bootstrap.source-length(i64 %index) -> i64;
+#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+#extern #proc bootstrap.release-pages(addr %memory) -> #unit;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(i8 %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+
+#extern #proc tool_source_new(addr %data, i64 %length) -> addr;
+#extern #proc tool_source_data(addr %source) -> addr;
+#extern #proc tool_lex_all(addr %source) -> addr;
+#extern #proc tool_byte_at(addr %data, i64 %index) -> i8;
+#extern #proc raw_parse(addr %source, addr %tokens) -> addr;
+#extern #proc raw_is_nil(addr %node) -> i1;
+#extern #proc raw_node_kind(addr %node) -> i32;
+#extern #proc raw_node_delimiter(addr %node) -> i32;
+#extern #proc raw_node_start(addr %node) -> i64;
+#extern #proc raw_node_length(addr %node) -> i64;
+#extern #proc raw_node_first(addr %node) -> addr;
+#extern #proc raw_node_next(addr %node) -> addr;
+#extern #proc meta_atom_equal(
+  addr %source, addr %node, addr %text, i64 %length
+) -> i1;
+#extern #proc meta_binding_name(addr %source, addr %root) -> addr;
+#extern #proc meta_write_span(addr %source, i64 %start, i64 %length) -> #unit;
+#extern #proc meta_write_decimal(i64 %value) -> #unit;
+
+// Module descriptor: kind @0, name start/length @8/@16, member count @24,
+// first/last member @32/@40, diagnostic @48.
+// Member descriptor: name start/length @0/@8, next @16.
+#proc module_member_new(addr %name) -> addr {
+  #let %member: addr = #call bootstrap.allocate-pages(24)
+  #let %nil: addr = #call bootstrap.allocate-pages(8)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
+  #store #call raw_node_start(%name), #lea(base=%member, idx=0, scale=0, offset=0)
+  #store #call raw_node_length(%name), #lea(base=%member, idx=0, scale=0, offset=8)
+  #store %nil, #lea(base=%member, idx=0, scale=0, offset=16)
+  #return %member
+}
+
+#proc module_descriptor_new(addr %name) -> addr {
+  #let %descriptor: addr = #call bootstrap.allocate-pages(56)
+  #let %nil: addr = #call bootstrap.allocate-pages(8)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
+  #store 2, #lea(base=%descriptor, idx=0, scale=0, offset=0)
+  #store #call raw_node_start(%name), #lea(base=%descriptor, idx=0, scale=0, offset=8)
+  #store #call raw_node_length(%name), #lea(base=%descriptor, idx=0, scale=0, offset=16)
+  #store 0, #lea(base=%descriptor, idx=0, scale=0, offset=24)
+  #store %nil, #lea(base=%descriptor, idx=0, scale=0, offset=32)
+  #store %nil, #lea(base=%descriptor, idx=0, scale=0, offset=40)
+  #store 0, #lea(base=%descriptor, idx=0, scale=0, offset=48)
+  #return %descriptor
+}
+
+#proc module_group(addr %source, addr %root) -> addr {
+  #let %current: addr = #call raw_node_first(%root)
+  #loop find_module {
+    #if #call raw_is_nil(%current) { #return %current }
+    #if #call meta_atom_equal(%source, %current, "module", 6) {
+      #let %candidate: addr = #call raw_node_next(%current)
+      #if #ne(#call raw_node_kind(%candidate), 2) {
+        %current: addr = #call raw_node_next(%current)
+        #continue find_module
+      }
+      #if #eq(#call raw_node_delimiter(%candidate), 123) {
+        #return %candidate
+      }
+    }
+    %current: addr = #call raw_node_next(%current)
+    #continue find_module
+  }
+}
+
+#proc module_member_duplicate(addr %source, addr %descriptor, addr %name) -> i1 {
+  #let %data: addr = #call tool_source_data(%source)
+  #let %member: addr = #load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))
+  #let %name_start: i64 = #call raw_node_start(%name)
+  #let %name_length: i64 = #call raw_node_length(%name)
+  #loop members {
+    #if #call raw_is_nil(%member) { #break members }
+    #if #eq(#load[i64](#lea(base=%member, idx=0, scale=0, offset=8)), %name_length) {
+      #let %index: i64 = 0
+      #let %same: i1 = 1
+      #loop compare {
+        #if #ge(%index, %name_length) { #break compare }
+        #if #ne(
+          #call tool_byte_at(%data, #add(#load[i64](#lea(base=%member, idx=0, scale=0, offset=0)), %index)),
+          #call tool_byte_at(%data, #add(%name_start, %index))
+        ) {
+          %same: i1 = 0
+          #break compare
+        }
+        %index: i64 = #add(%index, 1)
+        #continue compare
+      }
+      #if %same { #return 1 }
+    }
+    %member: addr = #load[addr](#lea(base=%member, idx=0, scale=0, offset=16))
+    #continue members
+  }
+  #return 0
+}
+
+#proc module_group_from_binding(
+  addr %source, addr %let_node
+) -> addr {
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return %node }
+    #if #call meta_atom_equal(%source, %node, "module", 6) {
+      #let %group: addr = #call raw_node_next(%node)
+      #if #eq(#call raw_node_kind(%group), 2) {
+        #if #eq(#call raw_node_delimiter(%group), 123) {
+          #return %group
+        }
+      }
+      #return %group
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return %node }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc meta_module_annotation_is_valid(
+  addr %source, addr %annotation
+) -> i1 {
+  #if #call meta_atom_equal(%source, %annotation, "Module", 6) {
+    #return 1
+  }
+  #if #call meta_atom_equal(%source, %annotation, "ModuleShape", 11) {
+    #return 1
+  }
+  #if #ne(#call raw_node_kind(%annotation), 1) { #return 0 }
+  #let %data: addr = #call tool_source_data(%source)
+  #let %index: i64 = 0
+  #loop qualified {
+    #if #ge(%index, #call raw_node_length(%annotation)) {
+      #break qualified
+    }
+    #if #eq(
+      #call tool_byte_at(
+        %data, #add(#call raw_node_start(%annotation), %index)
+      ),
+      46
+    ) { #return 1 }
+    %index: i64 = #add(%index, 1)
+    #continue qualified
+  }
+  #return 0
+}
+
+#proc meta_module_validate_binding(
+  addr %source, addr %let_node
+) -> i32 {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #if #call raw_is_nil(%name) { #return 3010 }
+  #let %colon: addr = #call raw_node_next(%name)
+  #let %annotation: addr = #call raw_node_next(%colon)
+  #let %equals: addr = #call raw_node_next(%annotation)
+  #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
+    #return 3011
+  }
+  #if #eq(
+    #call meta_module_annotation_is_valid(%source, %annotation),
+    0
+  ) {
+    #return 3011
+  }
+  #if #eq(#call meta_atom_equal(%source, %equals, "=", 1), 0) {
+    #return 3011
+  }
+  #let %group: addr = #call module_group_from_binding(
+    %source, %let_node
+  )
+  #if #call raw_is_nil(%group) { #return 3011 }
+  #let %descriptor: addr = #call module_descriptor_new(%name)
+  #let %member: addr = #call raw_node_first(%group)
+  #let %count: i64 = 0
+  #loop members {
+    #if #call raw_is_nil(%member) { #break members }
+    #if #call meta_atom_equal(%source, %member, "let", 3) {
+      #let %member_name: addr = #call raw_node_next(%member)
+      #if #call raw_is_nil(%member_name) { #return 3012 }
+      #if #call module_member_duplicate(
+        %source, %descriptor, %member_name
+      ) { #return 3013 }
+      #let %new_member: addr = #call module_member_new(%member_name)
+      #if #call raw_is_nil(
+        #load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))
+      ) {
+        #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=32)
+      } else {
+        #store %new_member, #lea(
+          base=#load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=40)),
+          idx=0, scale=1, offset=16
+        )
+      }
+      #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=40)
+      %count: i64 = #add(%count, 1)
+    }
+    %member: addr = #call raw_node_next(%member)
+    #continue members
+  }
+  #store %count, #lea(base=%descriptor, idx=0, scale=0, offset=24)
+  #return #load[i32](#lea(base=%descriptor, idx=0, scale=0, offset=48))
+}
+
+#proc meta_module_build(addr %source, addr %root) -> addr {
+  #let %name: addr = #call meta_binding_name(%source, %root)
+  #let %descriptor: addr = #call module_descriptor_new(%name)
+  #if #call raw_is_nil(%name) {
+    #store 3010, #lea(base=%descriptor, idx=0, scale=0, offset=48)
+    #return %descriptor
+  }
+  #let %group: addr = #call module_group(%source, %root)
+  #if #call raw_is_nil(%group) {
+    #store 3011, #lea(base=%descriptor, idx=0, scale=0, offset=48)
+    #return %descriptor
+  }
+  #let %member: addr = #call raw_node_first(%group)
+  #let %count: i64 = 0
+  #loop bindings {
+    #if #call raw_is_nil(%member) { #break bindings }
+    #if #call meta_atom_equal(%source, %member, "let", 3) {
+      #let %member_name: addr = #call raw_node_next(%member)
+      #if #call raw_is_nil(%member_name) {
+        #store 3012, #lea(base=%descriptor, idx=0, scale=0, offset=48)
+        #return %descriptor
+      }
+      #if #call module_member_duplicate(%source, %descriptor, %member_name) {
+        #store 3013, #lea(base=%descriptor, idx=0, scale=0, offset=48)
+        #return %descriptor
+      }
+      #let %new_member: addr = #call module_member_new(%member_name)
+      #if #call raw_is_nil(#load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))) {
+        #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=32)
+      } else {
+        #store %new_member, #lea(
+          base=#load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=40)),
+          idx=0, scale=1, offset=16
+        )
+      }
+      #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=40)
+      %count: i64 = #add(%count, 1)
+    }
+    %member: addr = #call raw_node_next(%member)
+    #continue bindings
+  }
+  #store %count, #lea(base=%descriptor, idx=0, scale=0, offset=24)
+  #return %descriptor
+}
+
+#proc meta_module_dump(addr %source, addr %root) -> #unit {
+  #let %descriptor: addr = #call meta_module_build(%source, %root)
+  #let %diagnostic: i32 = #load[i32](#lea(base=%descriptor, idx=0, scale=0, offset=48))
+  #if #ne(%diagnostic, 0) {
+    #call bootstrap.artifact-write-literal("(error ")
+    #call meta_write_decimal(#zext[#bits<64>](%diagnostic))
+    #call bootstrap.artifact-write-byte(41)
+    #call bootstrap.artifact-write-byte(10)
+    #return
+  }
+  #call bootstrap.artifact-write-literal("(meta-module ")
+  #call meta_write_span(
+    %source,
+    #load[i64](#lea(base=%descriptor, idx=0, scale=0, offset=8)),
+    #load[i64](#lea(base=%descriptor, idx=0, scale=0, offset=16))
+  )
+  #call bootstrap.artifact-write-literal(" members=")
+  #call meta_write_decimal(#load[i64](#lea(base=%descriptor, idx=0, scale=0, offset=24)))
+  #let %member: addr = #load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))
+  #loop write_members {
+    #if #call raw_is_nil(%member) { #break write_members }
+    #call bootstrap.artifact-write-literal(" (member ")
+    #call meta_write_span(
+      %source,
+      #load[i64](#lea(base=%member, idx=0, scale=0, offset=0)),
+      #load[i64](#lea(base=%member, idx=0, scale=0, offset=8))
+    )
+    #call bootstrap.artifact-write-byte(41)
+    %member: addr = #load[addr](#lea(base=%member, idx=0, scale=0, offset=16))
+    #continue write_members
+  }
+  #call bootstrap.artifact-write-byte(41)
+  #call bootstrap.artifact-write-byte(10)
+  #return
+}
+
+#proc lain_meta_module_dump() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #call bootstrap.artifact-begin()
+  #call meta_module_dump(%source, %root)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return 0
+}

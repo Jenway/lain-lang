@@ -1,0 +1,681 @@
+// Minimal Lain meta substrate built on the generic RawAst.
+//
+// This file is intentionally a semantic library, not a parser extension:
+// `std::struct` is found by inspecting ordinary atoms and groups.  The raw
+// parser remains unaware of let, record, and type.
+
+#extern #proc bootstrap.source-count() -> i64;
+#extern #proc bootstrap.source-data(i64 %index) -> addr;
+#extern #proc bootstrap.source-length(i64 %index) -> i64;
+#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+#extern #proc bootstrap.release-pages(addr %memory) -> #unit;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(i8 %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+
+#extern #proc tool_source_new(addr %data, i64 %length) -> addr;
+#extern #proc tool_source_data(addr %source) -> addr;
+#extern #proc tool_lex_all(addr %source) -> addr;
+#extern #proc raw_parse(addr %source, addr %tokens) -> addr;
+#extern #proc raw_is_nil(addr %node) -> i1;
+#extern #proc raw_node_kind(addr %node) -> i32;
+#extern #proc raw_node_delimiter(addr %node) -> i32;
+#extern #proc raw_node_start(addr %node) -> i64;
+#extern #proc raw_node_length(addr %node) -> i64;
+#extern #proc raw_node_first(addr %node) -> addr;
+#extern #proc raw_node_next(addr %node) -> addr;
+#extern #proc tool_byte_at(addr %data, i64 %index) -> i8;
+
+#proc meta_atom_equal(
+  addr %source, addr %node, addr %text, i64 %text_length
+) -> i1 {
+  #if #ne(#call raw_node_kind(%node), 1) { #return 0 }
+  #if #ne(#call raw_node_length(%node), %text_length) { #return 0 }
+  #let %data: addr = #call tool_source_data(%source)
+  #let %index: i64 = 0
+  #loop compare {
+    #if #ge(%index, %text_length) { #break compare }
+    #if #ne(
+      #call tool_byte_at(%data, #add(#call raw_node_start(%node), %index)),
+      #call tool_byte_at(%text, %index)
+    ) { #return 0 }
+    %index: i64 = #add(%index, 1)
+    #continue compare
+  }
+  #return 1
+}
+
+#proc meta_is_group(addr %node, i32 %delimiter) -> i1 {
+  #if #ne(#call raw_node_kind(%node), 2) { #return 0 }
+  #return #eq(#call raw_node_delimiter(%node), %delimiter)
+}
+
+#proc meta_binding_name(addr %source, addr %root) -> addr {
+  #let %current: addr = #call raw_node_first(%root)
+  #loop find_let {
+    #if #call raw_is_nil(%current) { #return %current }
+    #if #call meta_atom_equal(%source, %current, "let", 3) {
+      #return #call raw_node_next(%current)
+    }
+    %current: addr = #call raw_node_next(%current)
+    #continue find_let
+  }
+  #return %current
+}
+
+#proc meta_record_group(addr %source, addr %root) -> addr {
+  #let %current: addr = #call raw_node_first(%root)
+  #loop find_struct {
+    #if #call raw_is_nil(%current) { #return %current }
+    #if #call meta_atom_equal(%source, %current, "struct", 6) {
+      #let %candidate: addr = #call raw_node_next(%current)
+      #if #call meta_is_group(%candidate, 123) { #return %candidate }
+    }
+    %current: addr = #call raw_node_next(%current)
+    #continue find_struct
+  }
+  #return %current
+}
+
+// Meta type descriptor layout:
+//   kind @0, name start/length @8/@16, field count @24,
+//   size @32, alignment @40, first/last field @48/@56, diagnostic @64.
+// Field descriptor layout:
+//   name start/length @0/@8, type start/length @16/@24,
+//   offset @32, size @40, next @48.
+#proc meta_field_new(
+  addr %name, addr %field_type, i64 %offset, i64 %size
+) -> addr {
+  #let %field: addr = #call bootstrap.allocate-pages(56)
+  #let %nil: addr = #call bootstrap.allocate-pages(8)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
+  #let %name_start: i64 = #call raw_node_start(%name)
+  #let %type_start: i64 = #call raw_node_start(%field_type)
+  #store %name_start, #lea(base=%field, idx=0, scale=0, offset=0)
+  #store #call raw_node_length(%name), #lea(base=%field, idx=0, scale=0, offset=8)
+  #store %type_start, #lea(base=%field, idx=0, scale=0, offset=16)
+  #store #call raw_node_length(%field_type), #lea(base=%field, idx=0, scale=0, offset=24)
+  #store %offset, #lea(base=%field, idx=0, scale=0, offset=32)
+  #store %size, #lea(base=%field, idx=0, scale=0, offset=40)
+  #store %nil, #lea(base=%field, idx=0, scale=0, offset=48)
+  #return %field
+}
+
+#proc meta_type_new(addr %name) -> addr {
+  #let %type: addr = #call bootstrap.allocate-pages(72)
+  #let %nil: addr = #call bootstrap.allocate-pages(8)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
+  #store 1, #lea(base=%type, idx=0, scale=0, offset=0)
+  #store #call raw_node_start(%name), #lea(base=%type, idx=0, scale=0, offset=8)
+  #store #call raw_node_length(%name), #lea(base=%type, idx=0, scale=0, offset=16)
+  #store 0, #lea(base=%type, idx=0, scale=0, offset=24)
+  #store 0, #lea(base=%type, idx=0, scale=0, offset=32)
+  #store 1, #lea(base=%type, idx=0, scale=0, offset=40)
+  #store %nil, #lea(base=%type, idx=0, scale=0, offset=48)
+  #store %nil, #lea(base=%type, idx=0, scale=0, offset=56)
+  #store 0, #lea(base=%type, idx=0, scale=0, offset=64)
+  #return %type
+}
+
+// Built-in physical type registry.  These are layout facts, not parser
+// keywords: the RawAst still sees ordinary atoms and the meta layer decides
+// which names denote usable field types.
+#proc meta_builtin_size(addr %source, addr %node) -> i64 {
+  #if #call meta_atom_equal(%source, %node, "bool", 4) { #return 1 }
+  #if #call meta_atom_equal(%source, %node, "i8", 2) { #return 1 }
+  #if #call meta_atom_equal(%source, %node, "i16", 3) { #return 2 }
+  #if #call meta_atom_equal(%source, %node, "i32", 3) { #return 4 }
+  #if #call meta_atom_equal(%source, %node, "i64", 3) { #return 8 }
+  #if #call meta_atom_equal(%source, %node, "u8", 2) { #return 1 }
+  #if #call meta_atom_equal(%source, %node, "u16", 3) { #return 2 }
+  #if #call meta_atom_equal(%source, %node, "u32", 3) { #return 4 }
+  #if #call meta_atom_equal(%source, %node, "u64", 3) { #return 8 }
+  #if #call meta_atom_equal(%source, %node, "usize", 5) { #return 8 }
+  #if #call meta_atom_equal(%source, %node, "isize", 5) { #return 8 }
+  #return 0
+}
+
+#proc meta_builtin_alignment(addr %source, addr %node) -> i64 {
+  #return #call meta_builtin_size(%source, %node)
+}
+
+#proc meta_builtin_width(addr %source, addr %node) -> i64 {
+  #if #call meta_atom_equal(%source, %node, "bool", 4) { #return 1 }
+  #let %size: i64 = #call meta_builtin_size(%source, %node)
+  #if #eq(%size, 0) { #return 0 }
+  #return #mul(%size, 8)
+}
+
+#proc meta_builtin_width_span(
+  addr %source, i64 %start, i64 %length
+) -> i64 {
+  #let %data: addr = #call tool_source_data(%source)
+  #if #eq(%length, 3) {
+    #if #eq(#call tool_byte_at(%data, %start), 105) {
+      #if #eq(#call tool_byte_at(%data, #add(%start, 1)), 51) {
+        #if #eq(#call tool_byte_at(%data, #add(%start, 2)), 50) {
+          #return 32
+        }
+      }
+    }
+    #if #eq(#call tool_byte_at(%data, %start), 117) {
+      #if #eq(#call tool_byte_at(%data, #add(%start, 1)), 51) {
+        #if #eq(#call tool_byte_at(%data, #add(%start, 2)), 50) {
+          #return 32
+        }
+      }
+    }
+  }
+  #if #eq(%length, 2) {
+    #if #eq(#call tool_byte_at(%data, %start), 105) {
+      #if #eq(#call tool_byte_at(%data, #add(%start, 1)), 56) {
+        #return 8
+      }
+    }
+  }
+  #if #eq(%length, 5) {
+    #if #eq(#call tool_byte_at(%data, %start), 117) {
+      #if #eq(#call tool_byte_at(%data, #add(%start, 1)), 115) {
+        #if #eq(#call tool_byte_at(%data, #add(%start, 2)), 105) {
+          #if #eq(#call tool_byte_at(%data, #add(%start, 3)), 122) {
+            #if #eq(#call tool_byte_at(%data, #add(%start, 4)), 101) {
+              #return 64
+            }
+          }
+        }
+      }
+    }
+  }
+  #return 0
+}
+
+// Address/reference types are represented by an ordinary `& T` pair (with
+// `addr` retained as the bootstrap spelling).  The compiler asks Meta about
+// this shape so the physical type rule does not leak into lowering logic.
+#proc meta_type_is_address(addr %source, addr %node) -> i1 {
+  #if #call meta_atom_equal(%source, %node, "&", 1) { #return 1 }
+  #if #call meta_atom_equal(%source, %node, "addr", 4) { #return 1 }
+  #if #call meta_atom_equal(%source, %node, "opaque", 6) { #return 1 }
+  #return 0
+}
+
+#proc meta_type_is_unit(addr %source, addr %node) -> i1 {
+  #return #call meta_atom_equal(%source, %node, "unit", 4)
+}
+
+// A nominal or qualified type is a compile-time identity whose physical
+// representation is supplied by its defining module.  Until that module is
+// elaborated, the safe boundary representation is one address-sized slot.
+#proc meta_type_is_nominal(addr %source, addr %node) -> i1 {
+  #if #call raw_is_nil(%node) { #return 0 }
+  #if #ne(#call raw_node_kind(%node), 1) { #return 0 }
+  #if #call meta_atom_equal(%source, %node, "Module", 6) { #return 1 }
+  #if #call meta_atom_equal(%source, %node, "type", 4) { #return 1 }
+  #if #call meta_atom_equal(%source, %node, "unit", 4) { #return 1 }
+  #let %data: addr = #call tool_source_data(%source)
+  #let %start: i64 = #call raw_node_start(%node)
+  #let %length: i64 = #call raw_node_length(%node)
+  #if #eq(%length, 0) { #return 0 }
+  #let %first: i8 = #call tool_byte_at(%data, %start)
+  #if #ge(%first, 65) {
+    #if #le(%first, 90) { #return 1 }
+  }
+  #let %index: i64 = 0
+  #loop qualified {
+    #if #ge(%index, %length) { #break qualified }
+    #if #eq(#call tool_byte_at(%data, #add(%start, %index)), 46) {
+      #return 1
+    }
+    %index: i64 = #add(%index, 1)
+    #continue qualified
+  }
+  #return 0
+}
+
+#proc meta_type_size(addr %source, addr %node) -> i64 {
+  #let %size: i64 = #call meta_builtin_size(%source, %node)
+  #if #ne(%size, 0) { #return %size }
+  #if #call meta_type_is_address(%source, %node) { #return 8 }
+  #if #call meta_type_is_nominal(%source, %node) { #return 8 }
+  #let %arguments: addr = #call raw_node_next(%node)
+  #if #eq(#call raw_node_kind(%arguments), 2) {
+    #if #eq(#call raw_node_delimiter(%arguments), 40) { #return 8 }
+  }
+  #return 0
+}
+
+#proc meta_type_alignment(addr %source, addr %node) -> i64 {
+  #return #call meta_type_size(%source, %node)
+}
+
+// Return the final RawAst node occupied by a source type expression.  `&`
+// optionally carries the ordinary `mut` marker before its pointee; named
+// generic types carry a following parenthesized argument group.  The caller
+// then advances once to the declaration separator/body.
+#proc meta_type_end(addr %source, addr %node) -> addr {
+  // Only the reference spelling has a following pointee/mutability sequence.
+  // `addr` and `opaque` are already terminal physical types; treating the
+  // next declaration token as their pointee would swallow a following `;`.
+  #if #call meta_atom_equal(%source, %node, "&", 1) {
+    #let %pointee: addr = #call raw_node_next(%node)
+    #if #call raw_is_nil(%pointee) { #return %node }
+    #if #call meta_atom_equal(%source, %pointee, "mut", 3) {
+      %pointee: addr = #call raw_node_next(%pointee)
+    }
+    #if #call raw_is_nil(%pointee) { #return %node }
+    #let %current: addr = %pointee
+    #loop qualified_pointee {
+      #let %dot: addr = #call raw_node_next(%current)
+      #if #call raw_is_nil(%dot) { #break qualified_pointee }
+      #if #eq(#call meta_atom_equal(%source, %dot, ".", 1), 1) {
+        #let %member: addr = #call raw_node_next(%dot)
+        #if #call raw_is_nil(%member) { #break qualified_pointee }
+        %current: addr = %member
+        #continue qualified_pointee
+      }
+      #break qualified_pointee
+    }
+    #let %arguments: addr = #call raw_node_next(%current)
+    #if #call raw_is_nil(%arguments) { #return %pointee }
+    #if #eq(#call raw_node_kind(%arguments), 2) {
+      #if #eq(#call raw_node_delimiter(%arguments), 40) {
+        #return %arguments
+      }
+    }
+    #return %current
+  }
+  #let %current: addr = %node
+  #loop qualified {
+    #let %dot: addr = #call raw_node_next(%current)
+    #if #call raw_is_nil(%dot) { #break qualified }
+    #if #eq(#call meta_atom_equal(%source, %dot, ".", 1), 1) {
+      #let %member: addr = #call raw_node_next(%dot)
+      #if #call raw_is_nil(%member) { #break qualified }
+      %current: addr = %member
+      #continue qualified
+    }
+    #break qualified
+  }
+  #let %arguments: addr = #call raw_node_next(%current)
+  #if #call raw_is_nil(%arguments) { #return %node }
+  #if #eq(#call raw_node_kind(%arguments), 2) {
+    #if #eq(#call raw_node_delimiter(%arguments), 40) {
+      #return %arguments
+    }
+  }
+  #return %current
+}
+
+#proc meta_align_up(i64 %value, i64 %alignment) -> i64 {
+  #if #le(%alignment, 1) { #return %value }
+  #let %remainder: i64 = #sub(
+    %value, #mul(#div(%value, %alignment), %alignment)
+  )
+  #if #eq(%remainder, 0) { #return %value }
+  #return #add(%value, #sub(%alignment, %remainder))
+}
+
+#proc meta_field_name_duplicate(addr %source, addr %type, addr %name) -> i1 {
+  #let %data: addr = #call tool_source_data(%source)
+  #let %existing: addr = #load[addr](
+    #lea(base=%type, idx=0, scale=0, offset=48)
+  )
+  #let %name_length: i64 = #call raw_node_length(%name)
+  #let %name_start: i64 = #call raw_node_start(%name)
+  #loop fields {
+    #if #call raw_is_nil(%existing) { #break fields }
+    #if #eq(
+      #load[i64](#lea(base=%existing, idx=0, scale=0, offset=8)),
+      %name_length
+    ) {
+      #let %index: i64 = 0
+      #let %same: i1 = 1
+      #loop compare {
+        #if #ge(%index, %name_length) { #break compare }
+        #if #ne(
+          #call tool_byte_at(
+            %data,
+            #add(#load[i64](#lea(base=%existing, idx=0, scale=0, offset=0)), %index)
+          ),
+          #call tool_byte_at(%data, #add(%name_start, %index))
+        ) {
+          %same: i1 = 0
+          #break compare
+        }
+        %index: i64 = #add(%index, 1)
+        #continue compare
+      }
+      #if %same { #return 1 }
+    }
+    %existing: addr = #load[addr](
+      #lea(base=%existing, idx=0, scale=0, offset=48)
+    )
+    #continue fields
+  }
+  #return 0
+}
+
+// Interpret `let NAME: type = std::struct { ... }` into a real meta-owned
+// record descriptor.  Unknown field types are reported as meta diagnostics
+// rather than silently becoming raw syntax.
+#proc meta_record_build(addr %source, addr %root) -> addr {
+  #let %name: addr = #call meta_binding_name(%source, %root)
+  #let %group: addr = #call meta_record_group(%source, %root)
+  #let %type: addr = #call meta_type_new(%name)
+  #if #call raw_is_nil(%name) {
+    #store 3001, #lea(base=%type, idx=0, scale=0, offset=64)
+    #return %type
+  }
+  #let %annotation_colon: addr = #call raw_node_next(%name)
+  #if #call raw_is_nil(%annotation_colon) {
+    #store 3004, #lea(base=%type, idx=0, scale=0, offset=64)
+    #return %type
+  }
+  #let %annotation: addr = #call raw_node_next(%annotation_colon)
+  #if #eq(#call meta_atom_equal(%source, %annotation_colon, ":", 1), 0) {
+    #store 3004, #lea(base=%type, idx=0, scale=0, offset=64)
+    #return %type
+  }
+  #if #call raw_is_nil(%annotation) {
+    #store 3005, #lea(base=%type, idx=0, scale=0, offset=64)
+    #return %type
+  }
+  #if #eq(#call meta_atom_equal(%source, %annotation, "type", 4), 0) {
+    #store 3005, #lea(base=%type, idx=0, scale=0, offset=64)
+    #return %type
+  }
+  #let %equals: addr = #call raw_node_next(%annotation)
+  #if #call raw_is_nil(%equals) {
+    #store 3006, #lea(base=%type, idx=0, scale=0, offset=64)
+    #return %type
+  }
+  #if #eq(#call meta_atom_equal(%source, %equals, "=", 1), 0) {
+    #store 3006, #lea(base=%type, idx=0, scale=0, offset=64)
+    #return %type
+  }
+  #if #call raw_is_nil(%group) {
+    #store 3002, #lea(base=%type, idx=0, scale=0, offset=64)
+    #return %type
+  }
+  #let %field: addr = #call raw_node_first(%group)
+  #let %offset: i64 = 0
+  #let %count: i64 = 0
+  #let %record_alignment: i64 = 1
+  #loop fields {
+    #if #call raw_is_nil(%field) { #break fields }
+    #let %colon: addr = #call raw_node_next(%field)
+    #if #call raw_is_nil(%colon) { #break fields }
+    #let %field_type: addr = #call raw_node_next(%colon)
+    #if #call raw_is_nil(%field_type) { #break fields }
+    #if #call meta_atom_equal(%source, %colon, ":", 1) {
+      #let %field_size: i64 = #call meta_type_size(%source, %field_type)
+      #let %field_alignment: i64 = #call meta_type_alignment(
+        %source, %field_type
+      )
+      #if #ne(%field_size, 0) {
+        #if #call meta_field_name_duplicate(%source, %type, %field) {
+          #store 3008, #lea(base=%type, idx=0, scale=0, offset=64)
+          #return %type
+        }
+        %offset: i64 = #call meta_align_up(%offset, %field_alignment)
+        #let %descriptor: addr = #call meta_field_new(
+          %field, %field_type, %offset, %field_size
+        )
+        #if #call raw_is_nil(#load[addr](#lea(base=%type, idx=0, scale=0, offset=48))) {
+          #store %descriptor, #lea(base=%type, idx=0, scale=0, offset=48)
+        } else {
+          #store %descriptor, #lea(
+            base=#load[addr](#lea(base=%type, idx=0, scale=0, offset=56)),
+            idx=0, scale=1, offset=48
+          )
+        }
+        #store %descriptor, #lea(base=%type, idx=0, scale=0, offset=56)
+        %offset: i64 = #add(%offset, %field_size)
+        %count: i64 = #add(%count, 1)
+        #if #gt(%field_alignment, %record_alignment) {
+          %record_alignment: i64 = %field_alignment
+        }
+      } else {
+        #store 3003, #lea(base=%type, idx=0, scale=0, offset=64)
+        #return %type
+      }
+      %field: addr = #call raw_node_next(%field_type)
+    } else {
+      %field: addr = %colon
+    }
+    #continue fields
+  }
+  #store %count, #lea(base=%type, idx=0, scale=0, offset=24)
+  #store #call meta_align_up(%offset, %record_alignment),
+    #lea(base=%type, idx=0, scale=0, offset=32)
+  #store %record_alignment, #lea(base=%type, idx=0, scale=0, offset=40)
+  #return %type
+}
+
+#proc meta_record_group_from_binding(
+  addr %source, addr %let_node
+) -> addr {
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return %node }
+    #if #call meta_atom_equal(%source, %node, "struct", 6) {
+      #let %group: addr = #call raw_node_next(%node)
+      #if #call meta_is_group(%group, 123) { #return %group }
+      #return %group
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return %node }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+// Validate a record binding that is not the first top-level declaration.
+// This is deliberately a Meta operation over a concrete binding node; RawAst
+// still has no knowledge of `struct`, fields, or type annotations.
+#proc meta_record_validate_binding(
+  addr %source, addr %let_node
+) -> i32 {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #if #call raw_is_nil(%name) { #return 3001 }
+  #let %colon: addr = #call raw_node_next(%name)
+  #let %annotation: addr = #call raw_node_next(%colon)
+  #let %equals: addr = #call raw_node_next(%annotation)
+  #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
+    #return 3004
+  }
+  #if #eq(#call meta_atom_equal(%source, %annotation, "type", 4), 0) {
+    #return 3005
+  }
+  #if #eq(#call meta_atom_equal(%source, %equals, "=", 1), 0) {
+    #return 3006
+  }
+  #let %group: addr = #call meta_record_group_from_binding(
+    %source, %let_node
+  )
+  #if #call raw_is_nil(%group) { #return 3002 }
+  #let %type: addr = #call meta_type_new(%name)
+  #let %field: addr = #call raw_node_first(%group)
+  #let %offset: i64 = 0
+  #let %count: i64 = 0
+  #let %alignment: i64 = 1
+  #loop fields {
+    #if #call raw_is_nil(%field) { #break fields }
+    #let %field_colon: addr = #call raw_node_next(%field)
+    #let %field_type: addr = #call raw_node_next(%field_colon)
+    #if #call raw_is_nil(%field_colon) {
+      #break fields
+    }
+    #if #eq(#call meta_atom_equal(%source, %field_colon, ":", 1), 0) {
+      %field: addr = %field_colon
+    } else {
+      #if #call raw_is_nil(%field_type) { #return 3007 }
+      #let %field_size: i64 = #call meta_type_size(
+        %source, %field_type
+      )
+      #let %field_alignment: i64 = #call meta_type_alignment(
+        %source, %field_type
+      )
+      #if #eq(%field_size, 0) { #return 3003 }
+      #if #call meta_field_name_duplicate(%source, %type, %field) {
+        #return 3008
+      }
+      %offset: i64 = #call meta_align_up(%offset, %field_alignment)
+      #let %descriptor: addr = #call meta_field_new(
+        %field, %field_type, %offset, %field_size
+      )
+      #if #call raw_is_nil(
+        #load[addr](#lea(base=%type, idx=0, scale=0, offset=48))
+      ) {
+        #store %descriptor, #lea(base=%type, idx=0, scale=0, offset=48)
+      } else {
+        #store %descriptor, #lea(
+          base=#load[addr](#lea(base=%type, idx=0, scale=0, offset=56)),
+          idx=0, scale=1, offset=48
+        )
+      }
+      #store %descriptor, #lea(base=%type, idx=0, scale=0, offset=56)
+      %offset: i64 = #add(%offset, %field_size)
+      %count: i64 = #add(%count, 1)
+      #if #gt(%field_alignment, %alignment) {
+        %alignment: i64 = %field_alignment
+      }
+      %field: addr = #call raw_node_next(%field_type)
+    }
+    #continue fields
+  }
+  #store %count, #lea(base=%type, idx=0, scale=0, offset=24)
+  #store #call meta_align_up(%offset, %alignment),
+    #lea(base=%type, idx=0, scale=0, offset=32)
+  #store %alignment, #lea(base=%type, idx=0, scale=0, offset=40)
+  #return #load[i32](#lea(base=%type, idx=0, scale=0, offset=64))
+}
+
+#proc meta_write_atom(addr %source, addr %node) -> #unit {
+  #let %data: addr = #call tool_source_data(%source)
+  #let %index: i64 = 0
+  #loop write_atom {
+    #if #ge(%index, #call raw_node_length(%node)) { #break write_atom }
+    #call bootstrap.artifact-write-byte(
+      #call tool_byte_at(%data, #add(#call raw_node_start(%node), %index))
+    )
+    %index: i64 = #add(%index, 1)
+    #continue write_atom
+  }
+  #return
+}
+
+#proc meta_write_span(addr %source, i64 %start, i64 %length) -> #unit {
+  #let %data: addr = #call tool_source_data(%source)
+  #let %index: i64 = 0
+  #loop write_span {
+    #if #ge(%index, %length) { #break write_span }
+    #call bootstrap.artifact-write-byte(
+      #call tool_byte_at(%data, #add(%start, %index))
+    )
+    %index: i64 = #add(%index, 1)
+    #continue write_span
+  }
+  #return
+}
+
+#proc meta_write_small_decimal(i64 %value) -> #unit {
+  #if #lt(%value, 10) {
+    #call bootstrap.artifact-write-byte(#trunc[#bits<8>](#add(48, %value)))
+    #return
+  }
+  #let %tens: i64 = #div(%value, 10)
+  #call bootstrap.artifact-write-byte(#trunc[#bits<8>](#add(48, %tens)))
+  #call bootstrap.artifact-write-byte(
+    #trunc[#bits<8>](#add(48, #sub(%value, #mul(%tens, 10))))
+  )
+  #return
+}
+
+#proc meta_write_decimal(i64 %value) -> #unit {
+  #if #eq(%value, 0) {
+    #call bootstrap.artifact-write-byte(48)
+    #return
+  }
+  // Keep the digits in reverse order in a fixed stack buffer.  The previous
+  // implementation only handled three decimal digits: for 12001 it emitted
+  // the byte value for 120 (`<`) instead of the characters `120`.
+  #let %buffer: addr = #alloca(32)
+  #let %index: i64 = 32
+  #let %remaining: i64 = %value
+  #loop digits {
+    #if #eq(%remaining, 0) { #break digits }
+    %index: i64 = #sub(%index, 1)
+    #let %quotient: i64 = #div(%remaining, 10)
+    #let %digit: i64 = #sub(
+      %remaining, #mul(%quotient, 10)
+    )
+    #store #trunc[#bits<8>](#add(48, %digit)),
+      #lea(base=%buffer, idx=%index, scale=1, offset=0)
+    %remaining: i64 = %quotient
+    #continue digits
+  }
+  #loop write_digits {
+    #if #ge(%index, 32) { #break write_digits }
+    #call bootstrap.artifact-write-byte(
+      #load[i8](#lea(base=%buffer, idx=%index, scale=1, offset=0))
+    )
+    %index: i64 = #add(%index, 1)
+    #continue write_digits
+  }
+  #return
+}
+
+#proc meta_record_dump(addr %source, addr %root) -> #unit {
+  #let %name: addr = #call meta_binding_name(%source, %root)
+  #let %type: addr = #call meta_record_build(%source, %root)
+  #let %data: addr = #call tool_source_data(%source)
+  #let %diagnostic: i32 = #load[i32](#lea(base=%type, idx=0, scale=0, offset=64))
+  #if #ne(%diagnostic, 0) {
+    #call bootstrap.artifact-write-literal("(error ")
+    #call meta_write_decimal(#zext[#bits<64>](%diagnostic))
+    #call bootstrap.artifact-write-byte(41)
+    #call bootstrap.artifact-write-byte(10)
+    #return
+  }
+  #call bootstrap.artifact-write-literal("(record ")
+  #call meta_write_atom(%source, %name)
+  #call bootstrap.artifact-write-literal(" size=")
+  #let %size: i64 = #load[i64](#lea(base=%type, idx=0, scale=0, offset=32))
+  #call meta_write_small_decimal(%size)
+  #let %field: addr = #load[addr](#lea(base=%type, idx=0, scale=0, offset=48))
+  #loop fields {
+    #if #call raw_is_nil(%field) { #break fields }
+    #call bootstrap.artifact-write-literal(" (field ")
+    #call meta_write_span(%source,
+      #load[i64](#lea(base=%field, idx=0, scale=0, offset=0)),
+      #load[i64](#lea(base=%field, idx=0, scale=0, offset=8)))
+    #call bootstrap.artifact-write-byte(32)
+    #call meta_write_span(%source,
+      #load[i64](#lea(base=%field, idx=0, scale=0, offset=16)),
+      #load[i64](#lea(base=%field, idx=0, scale=0, offset=24)))
+    #call bootstrap.artifact-write-literal(" offset=")
+    #let %offset: i64 = #load[i64](#lea(base=%field, idx=0, scale=0, offset=32))
+    #call meta_write_small_decimal(%offset)
+    #call bootstrap.artifact-write-byte(41)
+    %field: addr = #load[addr](#lea(base=%field, idx=0, scale=0, offset=48))
+    #continue fields
+  }
+  #call bootstrap.artifact-write-byte(41)
+  #call bootstrap.artifact-write-byte(10)
+  #return
+}
+
+#proc lain_meta_record_dump() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #call bootstrap.artifact-begin()
+  #call meta_record_dump(%source, %root)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return 0
+}

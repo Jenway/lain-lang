@@ -1,0 +1,146 @@
+// Meta binding collection for top-level functions and constants.
+
+#extern #proc raw_is_nil(addr %node) -> i1;
+#extern #proc raw_node_next(addr %node) -> addr;
+#extern #proc meta_env_lookup_local(
+  addr %environment, addr %source, addr %node
+) -> addr;
+#extern #proc meta_value_function(
+  addr %source, addr %name, addr %function, addr %environment
+) -> addr;
+#extern #proc meta_value_scalar(
+  addr %source, addr %name, #bits<64> %value
+) -> addr;
+#extern #proc meta_env_bind(
+  addr %environment, addr %source, addr %name, addr %value
+) -> #unit;
+#extern #proc program_parse_function(
+  addr %unit, addr %source, #bits<64> %source_index, addr %let_node
+) -> addr;
+#extern #proc program_find_function_in_source(
+  addr %unit, i64 %source_index, addr %source, addr %node
+) -> addr;
+#extern #proc program_function_set_environment(
+  addr %function, addr %environment
+) -> #unit;
+#extern #proc program_function_status(addr %function) -> #bits<32>;
+#extern #proc program_function_is_nil(addr %function) -> i1;
+#extern #proc program_unit_set_debug_module_kind(
+  addr %unit, #bits<32> %kind
+) -> #unit;
+#extern #proc program_unit_set_validation_function(
+  addr %unit, addr %function
+) -> #unit;
+#extern #proc program_set_unit_status(addr %unit, #bits<32> %status) -> #unit;
+#extern #proc program_append_function_if_missing(
+  addr %unit, addr %function
+) -> #unit;
+#extern #proc program_meta_bind_function(
+  addr %environment, addr %source, addr %let_node, addr %function
+) -> #unit;
+#extern #proc program_parse_constant(
+  addr %unit, addr %source, addr %let_node
+) -> addr;
+#extern #proc program_constant_status(addr %constant) -> #bits<32>;
+#extern #proc program_find_constant(
+  addr %unit, addr %source, addr %node
+) -> addr;
+#extern #proc program_append_constant(addr %unit, addr %constant) -> #unit;
+#extern #proc program_meta_bind_constant(
+  addr %environment, addr %source, addr %let_node, addr %constant
+) -> #unit;
+#extern #proc program_unit_set_validation_node(
+  addr %unit, addr %source, addr %node
+) -> #unit;
+#extern #proc program_parse_literal_constant(
+  addr %source, addr %let_node
+) -> addr;
+#extern #proc program_constant_value(addr %constant) -> #bits<64>;
+
+#proc program_collect_function_candidate(
+  addr %unit, addr %source, #bits<64> %source_index, addr %let_node,
+  addr %environment
+) -> #bits<32> {
+  #let %function: addr = #call program_parse_function(
+    %unit, %source, %source_index, %let_node
+  )
+  #call program_function_set_environment(%function, %environment)
+  #let %status: #bits<32> = #call program_function_status(%function)
+  #if #ne(%status, 0) {
+    #call program_unit_set_debug_module_kind(%unit, 4701)
+    #call program_unit_set_validation_function(%unit, %function)
+    #call program_set_unit_status(%unit, %status)
+    #return %status
+  }
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %existing_value: addr = #call meta_env_lookup_local(
+    %environment, %source, %name
+  )
+  #if #call raw_is_nil(%existing_value) {
+    #call program_append_function_if_missing(%unit, %function)
+    #call program_meta_bind_function(
+      %environment, %source, %let_node, %function
+    )
+    #return 0
+  }
+  #call program_unit_set_validation_function(%unit, %function)
+  #call program_unit_set_validation_node(%unit, %source, %name)
+  #call program_set_unit_status(%unit, 5110)
+  #return 5110
+}
+
+#proc program_collect_constant_candidate(
+  addr %unit, addr %source, addr %let_node, addr %environment
+) -> #bits<32> {
+  #let %constant: addr = #call program_parse_constant(
+    %unit, %source, %let_node
+  )
+  #let %status: #bits<32> = #call program_constant_status(%constant)
+  #if #ne(%status, 0) {
+    #call program_set_unit_status(%unit, %status)
+    #return %status
+  }
+  #let %existing: addr = #call program_find_constant(
+    %unit, %source, #call raw_node_next(%let_node)
+  )
+  #if #call raw_is_nil(%existing) {
+    #call program_append_constant(%unit, %constant)
+    #call program_meta_bind_constant(
+      %environment, %source, %let_node, %constant
+    )
+    #return 0
+  }
+  #call program_unit_set_validation_node(
+    %unit, %source, #call raw_node_next(%let_node)
+  )
+  #call program_set_unit_status(%unit, 5113)
+  #return 5113
+}
+
+#proc program_collect_literal_candidate(
+  addr %unit, addr %source, addr %let_node, addr %environment
+) -> #bits<32> {
+  #let %constant: addr = #call program_parse_literal_constant(
+    %source, %let_node
+  )
+  #let %status: #bits<32> = #call program_constant_status(%constant)
+  #if #ne(%status, 0) {
+    #call program_set_unit_status(%unit, %status)
+    #return %status
+  }
+  #let %existing: addr = #call program_find_constant(
+    %unit, %source, #call raw_node_next(%let_node)
+  )
+  #if #call raw_is_nil(%existing) {
+    #call program_append_constant(%unit, %constant)
+    #call program_meta_bind_constant(
+      %environment, %source, %let_node, %constant
+    )
+    #return 0
+  }
+  #call program_unit_set_validation_node(
+    %unit, %source, #call raw_node_next(%let_node)
+  )
+  #call program_set_unit_status(%unit, 5113)
+  #return 5113
+}

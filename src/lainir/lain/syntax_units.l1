@@ -1,0 +1,167 @@
+// Syntax-unit index over the cached RawAst workspace.
+//
+// RawAst remains deliberately unaware of Lain declarations.  This index is
+// the first semantic boundary that gives later passes a stable unit handle:
+// one source, one root, its top-level span, and the cached import/node counts.
+// The source and root pointers are borrowed from workspace_cache and remain
+// valid for the lifetime of the compilation request.
+
+#extern #proc bootstrap.source-count() -> i64;
+#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(i8 %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
+
+#extern #proc workspace_cache_build() -> addr;
+#extern #proc workspace_cache_source(addr %cache, i64 %index) -> addr;
+#extern #proc workspace_cache_root(addr %cache, i64 %index) -> addr;
+#extern #proc workspace_cache_nodes(addr %cache, i64 %index) -> i64;
+#extern #proc workspace_cache_imports(addr %cache, i64 %index) -> i64;
+#extern #proc workspace_cache_resolved_import_count(
+  addr %cache, i64 %index
+) -> i64;
+#extern #proc workspace_cache_has_cycle(addr %cache, i64 %index) -> i1;
+#extern #proc raw_node_first(addr %node) -> addr;
+#extern #proc raw_node_start(addr %node) -> i64;
+#extern #proc raw_node_length(addr %node) -> i64;
+#extern #proc meta_write_decimal(i64 %value) -> #unit;
+
+// Index header: unit count @0, borrowed workspace cache @8.
+// Entry stride 64, beginning at @16:
+// source index @0, source @8, root @16, first top-level node @24,
+// node count @32, import count @40, root span start/length @48/@56.
+#proc syntax_index_entry(addr %index, i64 %ordinal) -> addr {
+  #return #lea(base=%index, idx=%ordinal, scale=64, offset=16)
+}
+
+#proc syntax_index_count(addr %index) -> i64 {
+  #return #load[i64](#lea(base=%index, idx=0, scale=0, offset=0))
+}
+
+#proc syntax_index_cache(addr %index) -> addr {
+  #return #load[addr](#lea(base=%index, idx=0, scale=0, offset=8))
+}
+
+#proc syntax_index_status_range(
+  addr %index, i64 %begin, i64 %end
+) -> i32 {
+  #let %cache: addr = #call syntax_index_cache(%index)
+  #let %count: i64 = #call syntax_index_count(%index)
+  #if #gt(%begin, %end) { #return 5100 }
+  #if #gt(%end, %count) { #return 5100 }
+  #let %ordinal: i64 = %begin
+  #loop units {
+    #if #ge(%ordinal, %end) { #break units }
+    #let %imports: i64 = #call workspace_cache_imports(%cache, %ordinal)
+    #let %resolved: i64 = #call workspace_cache_resolved_import_count(
+      %cache, %ordinal
+    )
+    #if #lt(%resolved, %imports) { #return 4101 }
+    #if #call workspace_cache_has_cycle(%cache, %ordinal) {
+      #return 4103
+    }
+    %ordinal: i64 = #add(%ordinal, 1)
+    #continue units
+  }
+  #return 0
+}
+
+#proc syntax_index_status(addr %index) -> i32 {
+  #return #call syntax_index_status_range(
+    %index, 0, #call syntax_index_count(%index)
+  )
+}
+
+#proc syntax_unit_source_index(addr %unit) -> i64 {
+  #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=0))
+}
+
+#proc syntax_unit_source(addr %unit) -> addr {
+  #return #load[addr](#lea(base=%unit, idx=0, scale=0, offset=8))
+}
+
+#proc syntax_unit_root(addr %unit) -> addr {
+  #return #load[addr](#lea(base=%unit, idx=0, scale=0, offset=16))
+}
+
+#proc syntax_unit_first(addr %unit) -> addr {
+  #return #load[addr](#lea(base=%unit, idx=0, scale=0, offset=24))
+}
+
+#proc syntax_unit_nodes(addr %unit) -> i64 {
+  #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=32))
+}
+
+#proc syntax_unit_imports(addr %unit) -> i64 {
+  #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=40))
+}
+
+#proc syntax_unit_span_start(addr %unit) -> i64 {
+  #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=48))
+}
+
+#proc syntax_unit_span_length(addr %unit) -> i64 {
+  #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=56))
+}
+
+#proc syntax_units_build() -> addr {
+  #let %count: i64 = #call bootstrap.source-count()
+  #let %cache: addr = #call workspace_cache_build()
+  #let %index: addr = #call bootstrap.allocate-pages(
+    #add(16, #mul(%count, 64))
+  )
+  #store %count, #lea(base=%index, idx=0, scale=0, offset=0)
+  #store %cache, #lea(base=%index, idx=0, scale=0, offset=8)
+  #let %ordinal: i64 = 0
+  #loop units {
+    #if #ge(%ordinal, %count) { #break units }
+    #let %unit: addr = #call syntax_index_entry(%index, %ordinal)
+    #let %source: addr = #call workspace_cache_source(%cache, %ordinal)
+    #let %root: addr = #call workspace_cache_root(%cache, %ordinal)
+    #let %first: addr = #call raw_node_first(%root)
+    #store %ordinal, #lea(base=%unit, idx=0, scale=0, offset=0)
+    #store %source, #lea(base=%unit, idx=0, scale=0, offset=8)
+    #store %root, #lea(base=%unit, idx=0, scale=0, offset=16)
+    #store %first, #lea(base=%unit, idx=0, scale=0, offset=24)
+    #store #call workspace_cache_nodes(%cache, %ordinal),
+      #lea(base=%unit, idx=0, scale=0, offset=32)
+    #store #call workspace_cache_imports(%cache, %ordinal),
+      #lea(base=%unit, idx=0, scale=0, offset=40)
+    #store #call raw_node_start(%root),
+      #lea(base=%unit, idx=0, scale=0, offset=48)
+    #store #call raw_node_length(%root),
+      #lea(base=%unit, idx=0, scale=0, offset=56)
+    %ordinal: i64 = #add(%ordinal, 1)
+    #continue units
+  }
+  #return %index
+}
+
+#proc syntax_units_dump() -> i32 {
+  #let %index: addr = #call syntax_units_build()
+  #call bootstrap.artifact-begin()
+  #call bootstrap.artifact-write-literal("(syntax-units count=")
+  #call meta_write_decimal(#call syntax_index_count(%index))
+  #call bootstrap.artifact-write-literal(")\n")
+  #let %ordinal: i64 = 0
+  #let %count: i64 = #call syntax_index_count(%index)
+  #loop dump {
+    #if #ge(%ordinal, %count) { #break dump }
+    #let %unit: addr = #call syntax_index_entry(%index, %ordinal)
+    #call bootstrap.artifact-write-literal("(unit source=")
+    #call meta_write_decimal(#call syntax_unit_source_index(%unit))
+    #call bootstrap.artifact-write-literal(" span=")
+    #call meta_write_decimal(#call syntax_unit_span_start(%unit))
+    #call bootstrap.artifact-write-byte(58)
+    #call meta_write_decimal(#call syntax_unit_span_length(%unit))
+    #call bootstrap.artifact-write-literal(" nodes=")
+    #call meta_write_decimal(#call syntax_unit_nodes(%unit))
+    #call bootstrap.artifact-write-literal(" imports=")
+    #call meta_write_decimal(#call syntax_unit_imports(%unit))
+    #call bootstrap.artifact-write-literal(")\n")
+    %ordinal: i64 = #add(%ordinal, 1)
+    #continue dump
+  }
+  #call bootstrap.artifact-finish()
+  #return 0
+}
