@@ -1,0 +1,655 @@
+// Meta collection stage.
+//
+// This module builds lexical environments, imports, module values, and
+// compile-time declarations.  It does not validate runtime expressions or
+// emit physical LAIN-IR.
+
+#extern #proc raw_node_first(addr %node) -> addr;
+#extern #proc raw_node_next(addr %node) -> addr;
+#extern #proc meta_atom_equal(
+  addr %source, addr %node, addr %text, #bits<64> %length
+) -> i1;
+#extern #proc program_is_function_declaration(
+  addr %source, addr %let_node
+) -> i1;
+#extern #proc program_find_function_in_source(
+  addr %unit, i64 %source_index, addr %source, addr %node
+) -> addr;
+#extern #proc program_function_is_nil(addr %function) -> i1;
+#extern #proc program_meta_bind_function(
+  addr %environment, addr %source, addr %let_node, addr %function
+) -> #unit;
+#proc program_bind_import_aliases(
+  addr %unit, addr %source, #bits<64> %source_index, addr %root,
+  addr %environment
+) -> #unit {
+  #let %node: addr = #call raw_node_first(%root)
+  #let %source_count: #bits<64> = #call program_unit_source_count(%unit)
+  #let %ordinal: #bits<64> = 0
+  #loop declarations {
+    #if #call raw_is_nil(%node) { #return }
+    #if #call meta_atom_equal(%source, %node, "let", 3) {
+      #let %argument: addr = #call program_import_argument(
+        %source, %node
+      )
+      #if #eq(#call raw_is_nil(%argument), 0) {
+        #let %target: #bits<64> = #call workspace_import_target(
+          %source_index, %source, %root, %source_count, %ordinal
+        )
+        %ordinal: #bits<64> = #add(%ordinal, 1)
+        #if #lt(%target, %source_count) {
+          #let %name: addr = #call raw_node_next(%node)
+          #if #call meta_atom_equal(%source, %name, "vector", 6) {
+            #call program_unit_set_import_context(%unit, %target, 0)
+          }
+          #let %existing: addr = #call meta_env_lookup_local(
+            %environment, %source, %name
+          )
+          #if #call meta_atom_equal(%source, %name, "l1_ir", 5) {
+            #if #call raw_is_nil(%existing) {
+              #call program_unit_set_import_context(%unit, %target, 0)
+            } else {
+              #call program_unit_set_import_context(
+                %unit, %target, #call meta_value_kind(%existing)
+              )
+            }
+          }
+          #if #call raw_is_nil(%existing) {
+            #let %value: addr = #call program_materialize_import_target(
+              %unit, %target, %environment
+            )
+            #if #call meta_atom_equal(%source, %name, "l1_ir", 5) {
+              #if #call raw_is_nil(%value) {
+                #call program_unit_set_import_context(%unit, %target, 0)
+              } else {
+                #call program_unit_set_import_context(
+                  %unit, %target, #call meta_value_kind(%value)
+                )
+              }
+            }
+            #if #eq(#call raw_is_nil(%value), 0) {
+              #call meta_env_bind(%environment, %source, %name, %value)
+            }
+          } else {
+            #if #eq(#call meta_value_kind(%existing), 2) {
+              #let %existing_environment: addr =
+                #call meta_value_environment(%existing)
+              #if #eq(#call meta_env_count(%existing_environment), 0) {
+                #call program_materialize_import_target(
+                  %unit, %target, %environment
+                )
+              }
+            }
+          }
+        }
+      }
+    }
+    %node: addr = #call raw_node_next(%node)
+    #continue declarations
+  }
+}
+
+#proc program_is_meta_call_binding(
+  addr %source, addr %let_node
+) -> i1 {
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call meta_atom_equal(%source, %node, "=", 1) {
+      #let %value: addr = #call raw_node_next(%node)
+      #if #call raw_is_nil(%value) { #return 0 }
+      #if #call program_is_std_path(%source, %value) {
+        #let %member: addr = #call program_operand_name(%source, %value)
+        #if #call meta_atom_equal(%source, %member, "effect", 6) {
+          #return 1
+        }
+        #if #call meta_atom_equal(
+          %source, %member, "effect_operation", 16
+        ) { #return 1 }
+        #if #call meta_atom_equal(%source, %member, "handler", 7) {
+          #return 1
+        }
+        #return 0
+      }
+      #let %callee: addr = #call program_operand_name(%source, %value)
+      #if #call meta_atom_equal(%source, %callee, "import", 6) {
+        #return 0
+      }
+      #return #eq(
+        #call raw_is_nil(#call program_operand_group(%source, %value)),
+        0
+      )
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) {
+      #return 0
+    }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_is_meta_value_binding(
+  addr %source, addr %let_node, addr %environment
+) -> i1 {
+  #if #call program_is_type_binding(%source, %let_node) { #return 0 }
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call meta_atom_equal(%source, %node, "=", 1) {
+      #let %value: addr = #call raw_node_next(%node)
+      #if #call raw_is_nil(%value) { #return 0 }
+      #if #eq(
+        #call raw_is_nil(#call program_operand_group(%source, %value)),
+        0
+      ) { #return 0 }
+      #return #eq(
+        #call raw_is_nil(
+          #call meta_env_lookup_path(%environment, %source, %value)
+        ),
+        0
+      )
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return 0 }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_collect_meta_value_candidate(
+  addr %source, addr %let_node, addr %environment
+) -> #bits<32> {
+  #let %value_node: addr = #call program_meta_call_value_node(
+    %source, %let_node
+  )
+  #let %value: addr = #call meta_env_lookup_path(
+    %environment, %source, %value_node
+  )
+  #if #call raw_is_nil(%value) { #return 5108 }
+  #call meta_env_bind(
+    %environment, %source, #call raw_node_next(%let_node), %value
+  )
+  #return 0
+}
+
+#proc program_collect_record_candidate(
+  addr %unit, addr %source, addr %let_node
+) -> #bits<32> {
+  #let %status: #bits<32> = #call meta_record_validate_binding(
+    %source, %let_node
+  )
+  #if #ne(%status, 0) {
+    #call program_set_unit_status(%unit, %status)
+    #return %status
+  }
+  #return 0
+}
+
+#proc program_collect_module_candidate(
+  addr %unit, addr %source, addr %let_node
+) -> #bits<32> {
+  #let %status: #bits<32> = #call meta_module_validate_binding(
+    %source, %let_node
+  )
+  #if #ne(%status, 0) {
+    #call program_set_unit_status(%unit, %status)
+    #return %status
+  }
+  #return 0
+}
+
+#proc program_bind_module_type(
+  addr %source, addr %let_node, addr %environment
+) -> #bits<32> {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #if #call raw_is_nil(%name) { #return 0 }
+  #let %type_expression: addr = #call program_type_binding_value(
+    %source, %let_node
+  )
+  #if #call raw_is_nil(%type_expression) { #return 0 }
+  #let %resolved: addr = #call meta_env_lookup_path(
+    %environment, %source, %type_expression
+  )
+  #if #eq(#call raw_is_nil(%resolved), 0) {
+    #if #eq(#call meta_value_kind(%resolved), 4) {
+      #call meta_env_bind(%environment, %source, %name, %resolved)
+      #return 0
+    }
+  }
+  #let %value: addr = #call meta_value_type_with_namespace(
+    %source, %name, %let_node, %environment
+  )
+  #call meta_env_bind(%environment, %source, %name, %value)
+  #return 0
+}
+
+#proc program_attribute_status(
+  addr %source, addr %attribute
+) -> #bits<32> {
+  #let %name: addr = #call raw_node_next(%attribute)
+  #if #call raw_is_nil(%name) { #return 12005 }
+  #if #call meta_atom_equal(%source, %name, "compiler_intrinsic", 18) {
+    #let %arguments: addr = #call raw_node_next(%name)
+    #if #call raw_is_nil(%arguments) { #return 12005 }
+    #if #ne(#call raw_node_kind(%arguments), 2) { #return 12005 }
+    #if #ne(#call raw_node_delimiter(%arguments), 40) { #return 12005 }
+    #return 0
+  }
+  #if #eq(#call meta_atom_equal(%source, %name, "export", 6), 0) {
+    #return 2902
+  }
+  #let %binding: addr = #call raw_node_next(%name)
+  #if #call raw_is_nil(%binding) { #return 12005 }
+  #if #eq(#call meta_atom_equal(%source, %binding, "let", 3), 0) {
+    #return 12005
+  }
+  #return 0
+}
+
+#proc program_collect_module(
+  addr %unit, addr %source, #bits<64> %source_index, addr %group,
+  addr %environment
+) -> #bits<32> {
+  #let %node: addr = #call raw_node_first(%group)
+  #loop members {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call meta_atom_equal(%source, %node, "@", 1) {
+      #let %attribute_status: #bits<32> = #call program_attribute_status(
+        %source, %node
+      )
+      #if #ne(%attribute_status, 0) {
+        #call program_set_unit_status(%unit, %attribute_status)
+        #return %attribute_status
+      }
+    }
+    #if #call meta_atom_equal(%source, %node, "let", 3) {
+      #if #call program_is_type_binding(%source, %node) {
+        #if #eq(#call program_is_meta_call_binding(%source, %node), 0) {
+          #if #call program_is_record_declaration(%source, %node) {
+            #let %record_status: #bits<32> =
+              #call program_collect_record_candidate(
+                %unit, %source, %node
+              )
+            #if #ne(%record_status, 0) { #return %record_status }
+          }
+          #let %type_status: #bits<32> = #call program_bind_module_type(
+            %source, %node, %environment
+          )
+          #if #ne(%type_status, 0) { #return %type_status }
+          %node: addr = #call program_skip_statement(%source, %node)
+          #continue members
+        }
+      }
+      #if #call program_is_function_declaration(%source, %node) {
+        #let %status: #bits<32> = #call program_collect_function_candidate(
+          %unit, %source, %source_index, %node, %environment
+        )
+        #if #ne(%status, 0) { #return %status }
+      } else {
+        #if #call program_is_consteval_declaration(%source, %node) {
+          #let %status: #bits<32> =
+            #call program_collect_constant_candidate(
+              %unit, %source, %node, %environment
+            )
+          #if #ne(%status, 0) { #return %status }
+        } else {
+          #if #call program_is_literal_declaration(%source, %node) {
+            #let %status: #bits<32> = #call program_collect_literal_candidate(
+              %unit, %source, %node, %environment
+            )
+            #if #ne(%status, 0) { #return %status }
+          } else {
+            #if #call program_is_meta_call_binding(%source, %node) {
+              #let %status: #bits<32> =
+                #call program_collect_meta_call_candidate(
+                  %unit, %source, %node, %environment
+                )
+              #if #ne(%status, 0) { #return %status }
+            } else {
+              #if #call program_is_meta_value_binding(
+                %source, %node, %environment
+              ) {
+                #let %status: #bits<32> =
+                  #call program_collect_meta_value_candidate(
+                    %source, %node, %environment
+                  )
+                #if #ne(%status, 0) { #return %status }
+              } else {
+                #if #call program_is_record_declaration(%source, %node) {
+                  #let %status: #bits<32> =
+                    #call program_collect_record_candidate(
+                      %unit, %source, %node
+                    )
+                  #if #ne(%status, 0) { #return %status }
+                } else {
+                  #if #call program_is_module_declaration(%source, %node) {
+                    #let %module_status: #bits<32> =
+                      #call program_collect_module_candidate(
+                        %unit, %source, %node
+                      )
+                    #if #ne(%module_status, 0) {
+                      #return %module_status
+                    }
+                    #let %nested: addr = #call program_module_group(
+                      %source, %node
+                    )
+                    #let %nested_environment: addr =
+                      #call program_meta_bind_module(
+                        %environment, %source, %node
+                      )
+                    #let %status: #bits<32> = #call program_collect_module(
+                      %unit, %source, %source_index, %nested,
+                      %nested_environment
+                    )
+                    #if #ne(%status, 0) { #return %status }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    #if #call meta_atom_equal(%source, %node, "let", 3) {
+      %node: addr = #call program_skip_statement(%source, %node)
+      #continue members
+    }
+    %node: addr = #call raw_node_next(%node)
+    #continue members
+  }
+}
+
+#proc program_collect_source(
+  addr %unit, addr %source, #bits<64> %source_index, addr %root
+) -> #bits<32> {
+  #let %source_environment: addr = #call meta_env_new(
+    #call program_unit_meta_environment(%unit)
+  )
+  #call program_bind_import_aliases(
+    %unit, %source, %source_index, %root, %source_environment
+  )
+  #let %node: addr = #call raw_node_first(%root)
+  #loop top_level {
+    #if #call raw_is_nil(%node) { #break top_level }
+    #if #call meta_atom_equal(%source, %node, "@", 1) {
+      #let %attribute_status: #bits<32> = #call program_attribute_status(
+        %source, %node
+      )
+      #if #ne(%attribute_status, 0) {
+        #call program_set_unit_status(%unit, %attribute_status)
+        #return %attribute_status
+      }
+    }
+    #if #call meta_atom_equal(%source, %node, "let", 3) {
+      #if #call meta_atom_equal(
+        %source, #call raw_node_next(%node), "bounds", 6
+      ) { #call program_unit_set_debug_bounds_kind(%unit, 190) }
+      #if #call meta_atom_equal(
+        %source, #call raw_node_next(%node), "l1_ir", 5
+      ) {
+        #if #eq(#call program_unit_debug_module_kind(%unit), 0) {
+          #call program_unit_set_debug_module_kind(%unit, 90)
+        }
+      }
+      #if #call program_is_function_declaration(%source, %node) {
+        #if #call meta_atom_equal(
+          %source, #call raw_node_next(%node), "l1_ir", 5
+        ) { #call program_unit_set_debug_module_kind(%unit, 91) }
+        #let %status: #bits<32> = #call program_collect_function_candidate(
+          %unit, %source, %source_index, %node, %source_environment
+        )
+        #if #ne(%status, 0) { #return %status }
+      } else {
+        #if #call program_is_consteval_declaration(%source, %node) {
+          #if #call meta_atom_equal(
+            %source, #call raw_node_next(%node), "l1_ir", 5
+          ) { #call program_unit_set_debug_module_kind(%unit, 92) }
+          #let %status: #bits<32> =
+            #call program_collect_constant_candidate(
+              %unit, %source, %node, %source_environment
+            )
+          #if #ne(%status, 0) { #return %status }
+        } else {
+          #if #call program_is_literal_declaration(%source, %node) {
+            #if #call meta_atom_equal(
+              %source, #call raw_node_next(%node), "l1_ir", 5
+            ) { #call program_unit_set_debug_module_kind(%unit, 93) }
+            #let %status: #bits<32> = #call program_collect_literal_candidate(
+              %unit, %source, %node, %source_environment
+            )
+            #if #ne(%status, 0) { #return %status }
+          } else {
+            #if #call program_is_meta_call_binding(%source, %node) {
+              #if #call meta_atom_equal(
+                %source, #call raw_node_next(%node), "l1_ir", 5
+              ) { #call program_unit_set_debug_module_kind(%unit, 94) }
+              #let %status: #bits<32> =
+                #call program_collect_meta_call_candidate(
+                  %unit, %source, %node, %source_environment
+                )
+              #if #ne(%status, 0) { #return %status }
+            } else {
+              #if #call program_is_meta_value_binding(
+                %source, %node, %source_environment
+              ) {
+                #if #call meta_atom_equal(
+                  %source, #call raw_node_next(%node), "l1_ir", 5
+                ) { #call program_unit_set_debug_module_kind(%unit, 95) }
+                #let %status: #bits<32> =
+                  #call program_collect_meta_value_candidate(
+                    %source, %node, %source_environment
+                  )
+                #if #ne(%status, 0) { #return %status }
+              } else {
+                #if #call program_is_record_declaration(%source, %node) {
+                  #if #call meta_atom_equal(
+                    %source, #call raw_node_next(%node), "l1_ir", 5
+                  ) { #call program_unit_set_debug_module_kind(%unit, 96) }
+                  #let %status: #bits<32> =
+                    #call program_collect_record_candidate(
+                      %unit, %source, %node
+                    )
+                  #if #ne(%status, 0) { #return %status }
+                } else {
+                  #if #call program_is_module_declaration(%source, %node) {
+                    #if #call meta_atom_equal(
+                      %source, #call raw_node_next(%node), "bounds", 6
+                    ) { #call program_unit_set_debug_bounds_kind(%unit, 197) }
+                    #if #call meta_atom_equal(
+                      %source, #call raw_node_next(%node), "l1_ir", 5
+                    ) { #call program_unit_set_debug_module_kind(%unit, 97) }
+                    #let %module_status: #bits<32> =
+                      #call program_collect_module_candidate(
+                        %unit, %source, %node
+                      )
+                    #if #ne(%module_status, 0) {
+                      #return %module_status
+                    }
+                    #let %group: addr = #call program_module_group(
+                      %source, %node
+                    )
+                    #let %module_name: addr = #call raw_node_next(%node)
+                    #let %existing_module: addr = #call meta_env_lookup_local(
+                      %source_environment, %source, %module_name
+                    )
+                    #let %module_environment: addr =
+                      #call program_meta_bind_module(
+                        %source_environment, %source, %node
+                      )
+                    #if #eq(#call raw_is_nil(%existing_module), 0) {
+                      #if #eq(#call meta_value_kind(%existing_module), 2) {
+                        #if #gt(#call meta_env_count(%module_environment), 0) {
+                          #let %cached_modules: addr =
+                            #call program_unit_materialized_modules(%unit)
+                          #if #call program_unit_has_materialized_modules(%unit) {
+                            #store %existing_module,
+                              #lea(base=%cached_modules, idx=%source_index, scale=8, offset=0)
+                          }
+                          %node: addr = #call raw_node_next(%node)
+                          #continue top_level
+                        }
+                      }
+                    }
+                    #if #call meta_atom_equal(
+                      %source, #call raw_node_next(%node), "l1_ir", 5
+                    ) {
+                      #call program_unit_set_debug_module_kind(%unit, 99)
+                      #let %debug_module: addr = #call meta_env_lookup_local(
+                        %source_environment,
+                        %source, #call raw_node_next(%node)
+                      )
+                      #if #call raw_is_nil(%debug_module) {
+                        #call program_unit_set_debug_module_kind(%unit, 0)
+                        #call program_unit_set_import_context(%unit, 18, 0)
+                      } else {
+                        #call program_unit_set_debug_module_kind(
+                          %unit, #call meta_value_kind(%debug_module)
+                        )
+                        #call program_unit_set_import_context(
+                          %unit, 18, #call meta_value_kind(%debug_module)
+                        )
+                      }
+                    }
+                    #let %status: #bits<32> = #call program_collect_module(
+                      %unit, %source, %source_index, %group,
+                      %module_environment
+                    )
+                    #if #ne(%status, 0) { #return %status }
+                    #let %cached_modules: addr =
+                      #call program_unit_materialized_modules(%unit)
+                    #if #call program_unit_has_materialized_modules(%unit) {
+                      #let %module_value: addr = #call meta_env_lookup_local(
+                        %source_environment, %source, %module_name
+                      )
+                      #if #call raw_is_nil(%module_value) {
+                      } else {
+                        #store %module_value,
+                          #lea(base=%cached_modules, idx=%source_index, scale=8, offset=0)
+                      }
+                    }
+                  } else {
+                    #if #eq(
+                      #call program_is_ignored_declaration(%source, %node), 0
+                    ) {
+                      #call program_set_unit_status(%unit, 5102)
+                      #return 5102
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    #if #call meta_atom_equal(%source, %node, "let", 3) {
+      %node: addr = #call program_skip_statement(%source, %node)
+      #continue top_level
+    }
+    %node: addr = #call raw_node_next(%node)
+    #continue top_level
+  }
+  #return 0
+}
+
+#proc program_prebind_top_level_modules(
+  addr %unit, addr %environment, addr %source, addr %root
+) -> #unit {
+  #let %node: addr = #call raw_node_first(%root)
+  #loop declarations {
+    #if #call raw_is_nil(%node) { #return }
+    #if #call meta_atom_equal(%source, %node, "let", 3) {
+      #if #call program_is_module_declaration(%source, %node) {
+        #if #call meta_atom_equal(
+          %source, #call raw_node_next(%node), "bounds", 6
+        ) {
+          #let %before: addr = #call meta_env_lookup_local(
+            %environment, %source, #call raw_node_next(%node)
+          )
+          #if #call raw_is_nil(%before) {
+            #call program_unit_set_debug_module_kind(%unit, 250)
+          } else {
+            #call program_unit_set_debug_module_kind(%unit, 251)
+          }
+        }
+        #call program_meta_bind_module(%environment, %source, %node)
+        #if #call meta_atom_equal(
+          %source, #call raw_node_next(%node), "bounds", 6
+        ) {
+          #let %after: addr = #call meta_env_lookup_local(
+            %environment, %source, #call raw_node_next(%node)
+          )
+          #if #call raw_is_nil(%after) {
+            #call program_unit_set_debug_module_kind(%unit, 260)
+          } else {
+            #call program_unit_set_debug_module_kind(%unit, 261)
+          }
+        }
+      }
+    }
+    %node: addr = #call raw_node_next(%node)
+    #continue declarations
+  }
+}
+
+#proc program_collect_types_group(
+  addr %unit, addr %source, #bits<64> %source_index, addr %group
+) -> #bits<32> {
+  #let %node: addr = #call raw_node_first(%group)
+  #loop members {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call meta_atom_equal(%source, %node, "let", 3) {
+      #if #call meta_atom_equal(
+        %source, #call raw_node_next(%node), "Token", 5
+      ) { #call program_unit_set_debug_bounds_kind(%unit, 900) }
+      #if #call program_is_type_binding(%source, %node) {
+        #let %status: #bits<32> = #call program_collect_type_candidate(
+          %unit, %source, %source_index, %node
+        )
+        #if #ne(%status, 0) { #return %status }
+      }
+      #if #call program_is_module_declaration(%source, %node) {
+        #let %nested: addr = #call program_module_group(
+          %source, %node
+        )
+        #let %status: #bits<32> = #call program_collect_types_group(
+          %unit, %source, %source_index, %nested
+        )
+        #if #ne(%status, 0) { #return %status }
+      }
+    }
+    #if #call meta_atom_equal(%source, %node, "let", 3) {
+      %node: addr = #call program_skip_statement(%source, %node)
+      #continue members
+    }
+    %node: addr = #call raw_node_next(%node)
+    #continue members
+  }
+}
+
+#proc program_collect_types(
+  addr %unit, addr %source, #bits<64> %source_index, addr %root
+) -> #bits<32> {
+  #return #call program_collect_types_group(
+    %unit, %source, %source_index, %root
+  )
+}
+
+#proc program_collect(addr %source, addr %root) -> addr {
+  #let %unit: addr = #call program_unit_new(%source, %root)
+  #let %type_status: #bits<32> = #call program_collect_types(
+    %unit, %source, 0, %root
+  )
+  #if #ne(%type_status, 0) {
+    #call program_set_unit_status(%unit, %type_status)
+    #return %unit
+  }
+  #let %status: #bits<32> = #call program_collect_source(
+    %unit, %source, 0, %root
+  )
+  #if #eq(#call program_unit_count(%unit), 0) {
+    #if #eq(#call program_unit_status(%unit), 0) {
+      #call program_set_unit_status(%unit, 5100)
+    }
+  }
+  #return %unit
+}

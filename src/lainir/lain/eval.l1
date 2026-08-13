@@ -1,0 +1,185 @@
+// Compile-time evaluator slice for the Lain meta frontend.
+//
+// The evaluator runs as LAIN-IR during compilation.  It consumes generic
+// syntax, not a compiler-private expression AST.  This first slice evaluates
+// integer literals and left-associative arithmetic expressions inside
+// `std::consteval(...)`; the phase/result boundary is the part that matters.
+
+#extern #proc bootstrap.source-count() -> i64;
+#extern #proc bootstrap.source-data(i64 %index) -> addr;
+#extern #proc bootstrap.source-length(i64 %index) -> i64;
+#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+#extern #proc bootstrap.release-pages(addr %memory) -> #unit;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(i8 %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+
+#extern #proc tool_source_new(addr %data, i64 %length) -> addr;
+#extern #proc tool_source_data(addr %source) -> addr;
+#extern #proc tool_lex_all(addr %source) -> addr;
+#extern #proc raw_parse(addr %source, addr %tokens) -> addr;
+#extern #proc raw_is_nil(addr %node) -> i1;
+#extern #proc raw_node_kind(addr %node) -> i32;
+#extern #proc raw_node_delimiter(addr %node) -> i32;
+#extern #proc raw_node_start(addr %node) -> i64;
+#extern #proc raw_node_length(addr %node) -> i64;
+#extern #proc raw_node_first(addr %node) -> addr;
+#extern #proc raw_node_next(addr %node) -> addr;
+#extern #proc tool_byte_at(addr %data, i64 %index) -> i8;
+#extern #proc meta_atom_equal(addr %source, addr %node, addr %text, i64 %length) -> i1;
+#extern #proc meta_write_decimal(i64 %value) -> #unit;
+#extern #proc meta_value_nil() -> addr;
+
+// EvalResult: status @0, value @8.  Status 0 means success.
+#proc eval_result_new(i32 %status, i64 %value) -> addr {
+  #let %result: addr = #call bootstrap.allocate-pages(24)
+  #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
+  #store 0, #lea(base=%result, idx=0, scale=0, offset=4)
+  #store %value, #lea(base=%result, idx=0, scale=0, offset=8)
+  #store 0, #lea(base=%result, idx=0, scale=0, offset=16)
+  #return %result
+}
+
+#proc eval_result_object(i32 %status, addr %object) -> addr {
+  #let %result: addr = #call bootstrap.allocate-pages(24)
+  #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
+  #store 1, #lea(base=%result, idx=0, scale=0, offset=4)
+  #store 0, #lea(base=%result, idx=0, scale=0, offset=8)
+  #store %object, #lea(base=%result, idx=0, scale=0, offset=16)
+  #return %result
+}
+
+#proc eval_status(addr %result) -> i32 {
+  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=0))
+}
+
+#proc eval_value(addr %result) -> i64 {
+  #return #load[i64](#lea(base=%result, idx=0, scale=0, offset=8))
+}
+
+#proc eval_result_is_object(addr %result) -> i1 {
+  #return #eq(#load[i32](#lea(base=%result, idx=0, scale=0, offset=4)), 1)
+}
+
+#proc eval_object(addr %result) -> addr {
+  #return #load[addr](#lea(base=%result, idx=0, scale=0, offset=16))
+}
+
+#proc eval_parse_decimal(addr %source, addr %node) -> addr {
+  #if #ne(#call raw_node_kind(%node), 1) {
+    #return #call eval_result_new(3101, 0)
+  }
+  #let %data: addr = #call tool_source_data(%source)
+  #let %value: i64 = 0
+  #let %index: i64 = 0
+  #loop digits {
+    #if #ge(%index, #call raw_node_length(%node)) { #break digits }
+    #let %byte: i8 = #call tool_byte_at(
+      %data, #add(#call raw_node_start(%node), %index)
+    )
+    #if #lt(%byte, 48) { #return #call eval_result_new(3101, 0) }
+    #if #gt(%byte, 57) { #return #call eval_result_new(3101, 0) }
+    %value: i64 = #add(#mul(%value, 10), #sub(%byte, 48))
+    %index: i64 = #add(%index, 1)
+    #continue digits
+  }
+  #return #call eval_result_new(0, %value)
+}
+
+#proc eval_node(addr %source, addr %node) -> addr {
+  #if #call raw_is_nil(%node) { #return #call eval_result_new(3101, 0) }
+  #if #eq(#call raw_node_kind(%node), 1) {
+    #return #call eval_parse_decimal(%source, %node)
+  }
+  #if #eq(#call raw_node_delimiter(%node), 40) {
+    #let %child: addr = #call raw_node_first(%node)
+    #return #call eval_node(%source, %child)
+  }
+  #return #call eval_result_new(3101, 0)
+}
+
+#proc eval_group(addr %source, addr %group) -> addr {
+  #let %left_node: addr = #call raw_node_first(%group)
+  #let %left: addr = #call eval_node(%source, %left_node)
+  #if #ne(#call eval_status(%left), 0) { #return %left }
+  #let %current: addr = #call raw_node_next(%left_node)
+  #let %value: i64 = #call eval_value(%left)
+  #loop terms {
+    #if #call raw_is_nil(%current) { #break terms }
+    #let %right_node: addr = #call raw_node_next(%current)
+    #if #call raw_is_nil(%right_node) {
+      #return #call eval_result_new(3102, 0)
+    }
+    #let %right: addr = #call eval_node(%source, %right_node)
+    #if #ne(#call eval_status(%right), 0) { #return %right }
+    #let %right_value: i64 = #call eval_value(%right)
+    #if #call meta_atom_equal(%source, %current, "+", 1) {
+      %value: i64 = #add(%value, %right_value)
+    } else {
+      #if #call meta_atom_equal(%source, %current, "-", 1) {
+        %value: i64 = #sub(%value, %right_value)
+      } else {
+        #if #call meta_atom_equal(%source, %current, "*", 1) {
+          %value: i64 = #mul(%value, %right_value)
+        } else {
+          #if #call meta_atom_equal(%source, %current, "/", 1) {
+            #if #eq(%right_value, 0) {
+              #return #call eval_result_new(3103, 0)
+            }
+            %value: i64 = #div(%value, %right_value)
+          } else {
+            #return #call eval_result_new(3102, 0)
+          }
+        }
+      }
+    }
+    %current: addr = #call raw_node_next(%right_node)
+    #continue terms
+  }
+  #return #call eval_result_new(0, %value)
+}
+
+#proc eval_consteval_group(addr %source, addr %root) -> addr {
+  #let %current: addr = #call raw_node_first(%root)
+  #loop find_consteval {
+    #if #call raw_is_nil(%current) {
+      #return #call eval_result_new(3100, 0)
+    }
+    #if #call meta_atom_equal(%source, %current, "consteval", 9) {
+      #let %candidate: addr = #call raw_node_next(%current)
+      #if #ne(#call raw_node_kind(%candidate), 2) {
+        #return #call eval_result_new(3100, 0)
+      }
+      #if #eq(#call raw_node_delimiter(%candidate), 40) {
+        #return #call eval_group(%source, %candidate)
+      }
+    }
+    %current: addr = #call raw_node_next(%current)
+    #continue find_consteval
+  }
+}
+
+#proc lain_meta_eval_dump() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %result: addr = #call eval_consteval_group(%source, %root)
+  #call bootstrap.artifact-begin()
+  #if #eq(#call eval_status(%result), 0) {
+    #call bootstrap.artifact-write-literal("(eval ")
+    #call meta_write_decimal(#call eval_value(%result))
+    #call bootstrap.artifact-write-byte(41)
+  } else {
+    #call bootstrap.artifact-write-literal("(error ")
+    #call meta_write_decimal(#zext[#bits<64>](#call eval_status(%result)))
+    #call bootstrap.artifact-write-byte(41)
+  }
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return 0
+}

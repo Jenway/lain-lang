@@ -55,6 +55,14 @@ def require_same_file(left: Path, right: Path, label: str) -> None:
 
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
+    # The current tree has no native `lainc.exe`; its stage boundary is the
+    # LAIN-IR compiler bundle driven by l1bootstrap.  Keep this historical
+    # test name usable by forwarding to that current check.
+    current = ROOT / "scripts" / "run_lainir_self_host.py"
+    if not tool("lainc").exists():
+        return subprocess.run(
+            [sys.executable, str(current)], cwd=ROOT
+        ).returncode
     lainc = tool("lainc")
     l1check = tool("l1check")
     l1i = tool("l1i")

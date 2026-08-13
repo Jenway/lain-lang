@@ -1,0 +1,113 @@
+// Meta-call binding helpers.
+//
+// A top-level Meta call is evaluated while collecting the module environment.
+// This module extracts the declaration-value lookup and the call-to-binding
+// bridge from the physical lowering pass.
+
+#proc program_meta_call_value_node(
+  addr %source, addr %let_node
+) -> addr {
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return %node }
+    #if #call meta_atom_equal(%source, %node, "=", 1) {
+      #return #call raw_node_next(%node)
+    }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_collect_meta_call_candidate(
+  addr %unit, addr %source, addr %let_node, addr %environment
+) -> #bits<32> {
+  #let %value_node: addr = #call program_meta_call_value_node(
+    %source, %let_node
+  )
+  // Intrinsic Meta objects do not have a physical L1 function target.
+  #if #call program_is_std_meta_object(%source, %value_node) {
+    #let %intrinsic_result: addr = #call program_eval_operand_environment(
+      %unit, %source, #call program_nil(), #call program_nil(),
+      %environment, %value_node
+    )
+    #let %intrinsic_status: #bits<32> = #call eval_status(%intrinsic_result)
+    #if #ne(%intrinsic_status, 0) { #return %intrinsic_status }
+    #let %intrinsic_name: addr = #call raw_node_next(%let_node)
+    #if #call eval_result_is_object(%intrinsic_result) {
+      #call meta_env_bind(
+        %environment, %source, %intrinsic_name,
+        #call eval_object(%intrinsic_result)
+      )
+    } else {
+      #call meta_env_bind(
+        %environment, %source, %intrinsic_name,
+        #call meta_value_scalar(
+          %source, %intrinsic_name,
+          #call eval_value(%intrinsic_result)
+        )
+      )
+    }
+    #return 0
+  }
+  #let %callee: addr = #call program_operand_name(
+    %source, %value_node
+  )
+  #let %group: addr = #call program_operand_group(
+    %source, %value_node
+  )
+  // Keep the existing diagnostic probe for the known module-lookup span.
+  #if #eq(#call raw_node_start(%value_node), 880) {
+    #let %probe: addr = #call meta_env_lookup_span(
+      %environment, %source, 880, 6
+    )
+    #if #call raw_is_nil(%probe) {
+      #call program_unit_set_debug_module_kind(%unit, 270)
+    } else {
+      #call program_unit_set_debug_module_kind(%unit, 271)
+    }
+    #let %probe_environment: addr = %environment
+    #let %probe_depth: #bits<32> = 0
+    #loop probe_environments {
+      #if #call raw_is_nil(%probe_environment) {
+        #break probe_environments
+      }
+      #let %probe_local: addr = #call meta_env_lookup_local(
+        %probe_environment, %source, %value_node
+      )
+      #if #call raw_is_nil(%probe_local) {
+      } else {
+        #if #eq(%probe_depth, 0) {
+          #call program_unit_set_debug_module_kind(%unit, 280)
+        } else {
+          #if #eq(%probe_depth, 1) {
+            #call program_unit_set_debug_module_kind(%unit, 281)
+          } else {
+            #call program_unit_set_debug_module_kind(%unit, 282)
+          }
+        }
+        #break probe_environments
+      }
+      %probe_environment: addr = #call meta_env_parent(%probe_environment)
+      %probe_depth: #bits<32> = #add(%probe_depth, 1)
+      #continue probe_environments
+    }
+  }
+  #let %result: addr = #call program_eval_call_environment(
+    %unit, %source, #call program_nil(), #call program_nil(),
+    %value_node, %group, %environment
+  )
+  #let %status: #bits<32> = #call eval_status(%result)
+  #if #ne(%status, 0) { #return %status }
+  #let %name: addr = #call raw_node_next(%let_node)
+  #if #call eval_result_is_object(%result) {
+    #call meta_env_bind(
+      %environment, %source, %name, #call eval_object(%result)
+    )
+    #return 0
+  }
+  #let %scalar: addr = #call meta_value_scalar(
+    %source, %name, #call eval_value(%result)
+  )
+  #call meta_env_bind(%environment, %source, %name, %scalar)
+  #return 0
+}

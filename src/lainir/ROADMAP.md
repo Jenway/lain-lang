@@ -105,8 +105,168 @@ Status: complete.
 
 ## M6 — convergence
 
-Status: complete.
+Status: complete for the current LAIN-IR compiler closure.  The bootstrap
+interpreter executes the compiler source to produce stage 1 C; stage 1 and
+stage 2 then produce stage 2 and stage 3 C respectively.
 
 - [x] Stage 1 produces stage 2.
-- [x] Stage 2 produces stage 3.
+- [x] Stage 2 produces a verifier-valid stage 3.
 - [x] Stage 2 and stage 3 C output is byte-for-byte identical.
+
+## M7 — first Lain frontend slices
+
+The Lain frontend is separate from the LAIN-IR parser. Its RawAst is a
+generic topology tree; semantic forms are interpreted by LAIN-IR meta code.
+
+- [x] Parse Lain atoms and delimiter groups into a LAIN-IR-owned RawAst.
+- [x] Interpret `let NAME: type = std::struct { ... }` in meta code.
+- [x] Build a meta-owned record descriptor with field spans, offsets, size,
+  alignment, and diagnostic codes.
+- [x] Reject duplicate field names in the meta-owned record descriptor.
+- [x] Interpret `std::module { ... }` into a meta-owned module descriptor with
+  member spans and duplicate-member diagnostics.
+- [x] Execute a first compile-time expression slice over generic syntax.
+- [x] Evaluate left-associative `+`, `-`, `*`, and `/` expressions with a
+  division-by-zero diagnostic.
+- [x] Lower a numeric record to executable LAIN-IR and run it.
+- [x] Build a deterministic multi-source workspace boundary with import
+  resolution and cycle/unresolved-module diagnostics.
+- [x] Cache parsed units and graph edges so repeated meta phases do not
+  re-lex/re-parse each source; unresolved imports are stored as a source-count
+  sentinel and cycle checks walk the cached edge vectors.
+- [x] Add a unified LAIN-IR driver that schedules workspace, meta, and
+  compile-time evaluation phases into one deterministic artifact.
+- [x] Propagate the first workspace/meta/eval diagnostic to the driver exit
+  status instead of silently accepting an error artifact.
+- [x] Make the self-hosting source closure resolve the physical compiler from
+  `src/compiler` while preserving package-qualified logical imports.
+- [x] Provide a reproducible bundle/run entry for the LAIN-IR frontend.
+- [x] Replace the inspection artifact with the `compiler_compile`
+  request/result boundary and its first executable source-to-LAIN-IR slice;
+  the broader language closure remains tracked under M8/M9.
+- [x] Generalize the meta type registry and record layout to `bool`, signed
+  `i8`/`i16`/`i32`/`i64`, and unsigned `u8`/`u16`/`u32`/`u64`, including
+  alignment padding.
+- [x] Generalize physical field lowering from two fields to an `i32` field
+  sequence (including generated accumulator chains).
+- [x] Lower heterogeneous physical fields (`bool`/`i8`/`i16`/`i32`/`i64`)
+  through sign-extension into a `bits<64>` accumulator and typed stores.
+- [x] Preserve source-level signedness for the built-in `i*`/`u*` field slice;
+  narrow unsigned loads are zero-extended and signed loads sign-extended.
+- [ ] Define and enforce source-level overflow policy instead of relying on
+  the current positive test values.
+
+## M8 — replace the phase artifact with the compiler boundary
+
+This is the next implementation block.  The existing `src/compiler/*.lain`
+remains the source of truth; the small frontend above is not a substitute for
+it.
+
+- [x] Add a stable `compiler_compile` entry and lower the first source form,
+  `let main = std::func() -> i32 { return N; };`, to executable LAIN-IR.
+- [x] Split executable-entry policy from library compilation: `compiler_compile`
+  requires `main`, while `compiler_compile_library` keeps the same request /
+  result ABI for source closures without a native entry.
+- [x] Define a LAIN-IR-owned `CompilerRequest`/`CompilerResult` record with
+  capability-backed source count, lowering options, diagnostic status, module
+  count, and artifact presence.  The request now carries an explicit source
+  slice and root-source selection.
+- [x] Make the bootstrap host provide only source/path/artifact capabilities;
+  the compiler bundle calls one `compiler_compile` entry and projects the
+  returned status.  The host remains unchanged and has no Lain semantic code.
+- [x] Add a syntax-unit index over cached RawAst nodes, preserving source
+  spans and module boundaries without teaching RawAst Lain keywords.
+- [x] Feed the cached syntax-unit index into compiler lowering instead of
+  re-lexing and re-parsing each source during the function pass.
+- [x] Lower multiple `std::func` declarations, `i32` parameters, literal
+  arithmetic, and direct calls with arity/name diagnostics (`5108`/`5109`).
+- [x] Preserve physical widths for `i8`/`i16`/`i32`/`i64` and unsigned
+  variants in function signatures; require the native `main` shape.
+- [x] Route function type-width lookup through the Meta built-in type registry;
+  the program lowerer no longer owns the integer-name table.
+- [x] Lower a two-branch `if` with boolean literals or `==`/`!=` comparison
+  against a parameter/literal, preserving return coverage.
+- [x] Lower ordered local `let` bindings in function bodies and resolve local
+  names in return expressions.
+- [x] Lower a mutable `while` loop with comparison exit, assignment,
+  `break`, and `continue` in the first function-body control-flow slice.
+- [x] Run record/module Meta validation before function collection and allow
+  validated type/module declarations to coexist with executable functions.
+- [ ] Implement Meta expansion for declarations, attributes, imports, and
+  compile-time calls in LAIN-IR, with explicit limits and diagnostics.
+- [x] Collect executable functions nested in `std::module` bindings while
+  keeping `@export` as ordinary RawAst metadata rather than parser magic.
+- [x] Validate the first Meta attribute contract (`@export` must precede a
+  canonical `let` binding) and reject unknown/dangling attributes.
+- [x] Run Meta-owned record validation for record bindings nested in modules;
+  duplicate fields and unknown physical field types stop compilation.
+- [x] Validate runtime record literals against their Meta descriptor: unknown,
+  duplicate, and missing fields are rejected before LAIN-IR emission.
+- [x] Validate nested module binding shape and duplicate member names before
+  collecting executable members.
+- [x] Validate top-level `std::consteval(...)` bindings through the existing
+  LAIN-IR evaluator, including division-by-zero diagnostics.
+- [x] Materialize successful top-level integer `std::consteval(...)` bindings
+  as constants in function operands; unresolved and duplicate names remain
+  diagnostics.
+- [x] Execute the first compile-time direct function-call subset in LAIN-IR,
+  including parameter substitution, arithmetic returns, arity, and name
+  diagnostics.
+- [x] Lower `std::consteval(...)` operands inside runtime function expressions
+  by executing the same LAIN-IR compile-time call path and emitting the value.
+- [x] Keep a Meta-owned physical type environment for aliases, records, and
+  generic constructor values; named record types lower to `addr` and primitive
+  aliases retain their registered bit width.
+- [x] Resolve qualified function and constant operands through their final
+  Meta member while retaining the original qualified atom span for diagnostics.
+- [x] Consume source effect clauses (`! { ... }`) at the compiler boundary;
+  effects do not become LAIN-IR syntax or host-side semantics.
+- [x] Lower boolean literals, ordered comparisons, and arithmetic expressions
+  nested in direct-call arguments, inserting explicit physical truncation at
+  the callee parameter width.
+- [x] Register simple inferred integer `let NAME = literal` bindings in the
+  same Meta-owned constant environment, including module members.
+- [x] Scope duplicate final-member function names by source ordinal and emit
+  deterministic collision labels for later source units; nested module path
+  identity remains part of M9.
+- [x] Use cached import edges as a compiler boundary: unresolved imports and
+  dependency cycles stop lowering with the workspace diagnostics (`4101`/
+  `4103`).
+- [x] Treat `std::...` imports as external capability modules and resolve
+  package-qualified imports against physical source basenames; unresolved
+  internal imports and cycles still produce diagnostics.
+- [ ] Elaborate bindings and types, then lower the first executable Lain subset
+  (function declarations, integer expressions, calls, and returns) to the
+  existing LAIN-IR builder.
+- [ ] Verify and print the generated LAIN-IR through the existing verifier and
+  printer; no C-side semantic fallback is allowed.
+- [x] Add one end-to-end fixture that compiles with `compiler_compile`, runs
+  the generated LAIN-IR, and proves stage-0/stage-1 byte convergence.
+
+## M9 — self-host the full compiler source
+
+The remaining work is deliberately ordered by semantic dependency.  We must
+not hide unresolved module members behind generated externs: `Compiler.compile`
+is a compile-time module value that has to become a real executable Lain
+function before the canonical closure can be checked.
+
+- [ ] **Meta values and environments.** Represent module values, function
+  values, and captured bindings in the LAIN-IR meta heap; make a compile-time
+  function call return a module/member descriptor instead of only an integer.
+- [ ] **`#eval` bridge.** Compile a compile-time block to LAIN-IR, invoke the
+  existing interpreter during compilation, and materialize its result or AST
+  data. Add recursion, step, allocation, and diagnostic limits; runtime
+  interpretation treats the same form as an ordinary call boundary.
+- [ ] **Qualified member lowering.** Resolve `Module.member` through the
+  meta-owned descriptor/environment chain, including functions created inside
+  a module factory and their captured bindings. Keep unresolved members as
+  diagnostics, never as implicit host calls.
+- [ ] **Canonical compiler closure.** Lower `src/compiler` module by module,
+  starting with `compiler_core`, then `compiler_driver`, `compiler_api`, and
+  `lainc`; after each module, run `l1check` and execute a small request.
+- [ ] **Thin CLI and fixed point.** Restore `lainc` as a capability-only host,
+  rebuild stage 2 and stage 3 from the same canonical source, and require
+  byte-identical artifacts.
+- [ ] **Regression gate.** Re-enable the core suites that currently require
+  `zig-out/bin/lainc`, then run the Lain frontend/tooling suites and the full
+  self-hosting gate together.

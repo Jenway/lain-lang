@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pathlib
+import os
 import shutil
 import subprocess
 import sys
@@ -26,7 +27,12 @@ ARGS_EVAL_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "eval_call_args
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    env = os.environ.copy()
+    env.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "local"))
+    env.setdefault("ZIG_GLOBAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "global"))
+    return subprocess.run(
+        command, cwd=ROOT, env=env, text=True, capture_output=True
+    )
 
 
 def require(result: subprocess.CompletedProcess[str], stage: str) -> None:

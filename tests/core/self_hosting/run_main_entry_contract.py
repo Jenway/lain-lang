@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-ENTRY = ROOT / "packages" / "lain" / "compiler" / "lainc.lain"
+ENTRY = ROOT / "src" / "compiler" / "lainc.lain"
 
 
 def require(condition: bool, message: str) -> None:
@@ -18,10 +18,11 @@ def require(condition: bool, message: str) -> None:
 
 def main() -> int:
     text = ENTRY.read_text(encoding="utf-8")
-    require("compiler_core.Compiler(Memory)" in text, "compiler core is not instantiated")
-    require("memory_model.Model(" in text, "memory model is not instantiated")
-    require("let compiler_compile = std::func(" in text, "compiler entry is missing")
-    require("Compiler.compile(request)" in text, "entry does not call compiler core")
+    require("compiler_api.compiler_api.API" in text, "thin compiler API is not exported")
+    require("let lainc: Module = std::module" in text, "lainc module is missing")
+    require("compiler_core.Compiler(Memory)" not in text, "lainc eagerly specializes compiler core")
+    require("memory_model.Model(" not in text, "lainc chooses a memory policy")
+    require("compiler_compile" not in text, "thin entry owns no concrete compile function")
     require("stage1_compiler" not in text, "main entry depends on transitional compiler")
     require("@foreign" not in text, "platform ABI leaked into compiler core entry")
     print("main compiler entry contract: PASS")

@@ -18,6 +18,10 @@ def import_path(name: str) -> Path:
     parts = name.split("::")
     if parts[0] == "std":
         return ROOT.joinpath("std", *parts[1:]).with_suffix(".lain")
+    if parts[:3] == ["packages", "lain", "compiler"]:
+        # Keep logical package imports stable while resolving the physical
+        # repository layout from src/compiler.
+        return ROOT.joinpath("src", "compiler", *parts[3:]).with_suffix(".lain")
     if parts[0] == "packages":
         return ROOT.joinpath(*parts).with_suffix(".lain")
     raise ValueError(f"unsupported import root in {name!r}")

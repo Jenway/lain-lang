@@ -9,14 +9,22 @@ import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+VIRTUAL_COMPILER_PREFIX = "packages/lain/compiler/"
+CANONICAL_COMPILER = ROOT / "src" / "compiler"
 
 
 def fail(message: str) -> None:
     raise RuntimeError(message)
 
 
+def resolve(path: str) -> pathlib.Path:
+    if path.startswith(VIRTUAL_COMPILER_PREFIX):
+        return CANONICAL_COMPILER / path[len(VIRTUAL_COMPILER_PREFIX):]
+    return ROOT / path
+
+
 def text(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
+    return resolve(path).read_text(encoding="utf-8")
 
 
 def main() -> int:
@@ -50,7 +58,7 @@ def main() -> int:
         "packages/lain/compiler/compiler_driver.lain",
     )
     for relative in required:
-        if not (ROOT / relative).is_file():
+        if not resolve(relative).is_file():
             fail(f"missing pure-Lain facility: {relative}")
 
     core_files = list((ROOT / "std/core").glob("*.lain"))
@@ -61,7 +69,7 @@ def main() -> int:
         if re.search(r"\b(malloc|realloc|free|mmap|VirtualAlloc|syscall)\b", source):
             fail(f"core names an OS/C allocator: {path.relative_to(ROOT)}")
 
-    compiler_files = list((ROOT / "packages/lain/compiler").glob("*.lain"))
+    compiler_files = list(CANONICAL_COMPILER.glob("*.lain"))
     platform_importers = []
     for path in compiler_files:
         source = path.read_text(encoding="utf-8")
@@ -187,7 +195,7 @@ def main() -> int:
         "l1_procedure.lain",
         "l1_unit.lain",
     ):
-        if (ROOT / "packages/lain/compiler" / obsolete).exists():
+        if (CANONICAL_COMPILER / obsolete).exists():
             fail(f"obsolete fixed-size L1 mock remains: {obsolete}")
 
     tokenizer = text("packages/lain/compiler/tokenizer.lain")
@@ -249,7 +257,7 @@ def main() -> int:
         "surface_forms.lain",
         "enums.lain",
     ):
-        if (ROOT / "packages/lain/compiler" / obsolete).exists():
+        if (CANONICAL_COMPILER / obsolete).exists():
             fail(f"obsolete parallel compiler domain remains: {obsolete}")
 
     for fixture in (

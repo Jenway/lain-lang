@@ -69,6 +69,11 @@ def main() -> int:
             [python, "tests/lainir_codegen/run_diagnostic_differential.py"],
         ),
         ("lainir/codegen-stage0", [python, "tests/lainir_codegen/run_stage0.py"]),
+        ("lainir/lain-frontend", [python, "tests/lainir_lain/run_all.py"]),
+        (
+            "lainir/lain-compiler",
+            [python, "tests/lainir_lain/run_compiler_compile.py"],
+        ),
         ("lainir/self-host", [python, "tests/lainir_codegen/run_self_host.py"]),
         ("core/self-hosting", [python, "tests/core/self_hosting/run_self_hosting.py"]),
         (

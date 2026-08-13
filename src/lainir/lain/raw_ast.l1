@@ -1,0 +1,273 @@
+// Lain surface parser, first LAIN-IR vertical slice.
+//
+// This parser deliberately knows nothing about `let`, `record`, `type`,
+// `module`, or any other Lain meaning.  It consumes the shared lossless lexer
+// and builds only atoms and delimiter groups.  The semantic interpretation is
+// a later meta/domain-parser phase.
+
+#extern #proc bootstrap.source-count() -> i64;
+#extern #proc bootstrap.source-data(i64 %index) -> addr;
+#extern #proc bootstrap.source-length(i64 %index) -> i64;
+#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+#extern #proc bootstrap.release-pages(addr %memory) -> #unit;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(i8 %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+
+#extern #proc tool_source_new(addr %data, i64 %length) -> addr;
+#extern #proc tool_source_nil(addr %source) -> addr;
+#extern #proc tool_is_nil(addr %source, addr %value) -> i1;
+#extern #proc tool_source_data(addr %source) -> addr;
+#extern #proc tool_lex_all(addr %source) -> addr;
+#extern #proc tool_byte_at(addr %data, i64 %index) -> i8;
+#extern #proc tool_token_kind(addr %token) -> i32;
+#extern #proc tool_token_start(addr %token) -> i64;
+#extern #proc tool_token_length(addr %token) -> i64;
+#extern #proc tool_token_next(addr %token) -> addr;
+
+// RawAst node layout:
+//   kind @0 (1 atom, 2 group), delimiter @4,
+//   source start @8, source length @16, first child @24,
+//   last child @32, next sibling @40, token kind @48,
+//   child count @56.
+#proc raw_node_nil() -> addr {
+  #let %nil: addr = #call bootstrap.allocate-pages(64)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
+  // The sentinel is a real RawAst node.  Keep every pointer slot self-linked
+  // so callers may safely ask for first/last/next before checking raw_is_nil.
+  // The old zero-filled assumption was false for the page allocator and made
+  // a harmless traversal of the sentinel dereference address 0.
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=4)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=8)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=16)
+  #store %nil, #lea(base=%nil, idx=0, scale=0, offset=24)
+  #store %nil, #lea(base=%nil, idx=0, scale=0, offset=32)
+  #store %nil, #lea(base=%nil, idx=0, scale=0, offset=40)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=48)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=56)
+  #return %nil
+}
+
+#proc raw_is_nil(addr %node) -> i1 {
+  #return #eq(#load[i8](%node), 0)
+}
+
+#proc raw_node_new(
+  i32 %kind, i32 %delimiter, i64 %start, i64 %length, i32 %token_kind
+) -> addr {
+  #let %node: addr = #call bootstrap.allocate-pages(64)
+  #let %nil: addr = #call raw_node_nil()
+  #store %kind, #lea(base=%node, idx=0, scale=0, offset=0)
+  #store %delimiter, #lea(base=%node, idx=0, scale=0, offset=4)
+  #store %start, #lea(base=%node, idx=0, scale=0, offset=8)
+  #store %length, #lea(base=%node, idx=0, scale=0, offset=16)
+  #store %nil, #lea(base=%node, idx=0, scale=0, offset=24)
+  #store %nil, #lea(base=%node, idx=0, scale=0, offset=32)
+  #store %nil, #lea(base=%node, idx=0, scale=0, offset=40)
+  #store %token_kind, #lea(base=%node, idx=0, scale=0, offset=48)
+  #store 0, #lea(base=%node, idx=0, scale=0, offset=56)
+  #return %node
+}
+
+#proc raw_node_kind(addr %node) -> i32 {
+  #return #load[i32](#lea(base=%node, idx=0, scale=0, offset=0))
+}
+
+#proc raw_node_delimiter(addr %node) -> i32 {
+  #return #load[i32](#lea(base=%node, idx=0, scale=0, offset=4))
+}
+
+#proc raw_node_start(addr %node) -> i64 {
+  #return #load[i64](#lea(base=%node, idx=0, scale=0, offset=8))
+}
+
+#proc raw_node_length(addr %node) -> i64 {
+  #return #load[i64](#lea(base=%node, idx=0, scale=0, offset=16))
+}
+
+#proc raw_node_first(addr %node) -> addr {
+  #return #load[addr](#lea(base=%node, idx=0, scale=0, offset=24))
+}
+
+#proc raw_node_last(addr %node) -> addr {
+  #return #load[addr](#lea(base=%node, idx=0, scale=0, offset=32))
+}
+
+#proc raw_node_next(addr %node) -> addr {
+  #return #load[addr](#lea(base=%node, idx=0, scale=0, offset=40))
+}
+
+#proc raw_node_token_kind(addr %node) -> i32 {
+  #return #load[i32](#lea(base=%node, idx=0, scale=0, offset=48))
+}
+
+#proc raw_node_set_next(addr %node, addr %next) -> #unit {
+  #store %next, #lea(base=%node, idx=0, scale=0, offset=40)
+  #return
+}
+
+#proc raw_append(addr %parent, addr %child) -> #unit {
+  #let %first: addr = #call raw_node_first(%parent)
+  #let %last: addr = #call raw_node_last(%parent)
+  #if #call raw_is_nil(%first) {
+    #store %child, #lea(base=%parent, idx=0, scale=0, offset=24)
+  } else {
+    #call raw_node_set_next(%last, %child)
+  }
+  #store %child, #lea(base=%parent, idx=0, scale=0, offset=32)
+  #store #add(
+    #load[i64](#lea(base=%parent, idx=0, scale=0, offset=56)),
+    1
+  ), #lea(base=%parent, idx=0, scale=0, offset=56)
+  #return
+}
+
+// Cursor layout: current token @0, end position of last consumed token @8.
+#proc raw_cursor_new(addr %token) -> addr {
+  #let %cursor: addr = #call bootstrap.allocate-pages(16)
+  #store %token, #lea(base=%cursor, idx=0, scale=0, offset=0)
+  #store 0, #lea(base=%cursor, idx=0, scale=0, offset=8)
+  #return %cursor
+}
+
+#proc raw_cursor_token(addr %cursor) -> addr {
+  #return #load[addr](#lea(base=%cursor, idx=0, scale=0, offset=0))
+}
+
+#proc raw_cursor_set_token(addr %cursor, addr %token) -> #unit {
+  #store %token, #lea(base=%cursor, idx=0, scale=0, offset=0)
+  #return
+}
+
+#proc raw_cursor_end(addr %cursor) -> i64 {
+  #return #load[i64](#lea(base=%cursor, idx=0, scale=0, offset=8))
+}
+
+#proc raw_cursor_set_end(addr %cursor, i64 %end) -> #unit {
+  #store %end, #lea(base=%cursor, idx=0, scale=0, offset=8)
+  #return
+}
+
+#proc raw_matching_close(i8 %open) -> i8 {
+  #if #eq(%open, 40) { #return 41 }
+  #if #eq(%open, 91) { #return 93 }
+  #if #eq(%open, 123) { #return 125 }
+  #return 0
+}
+
+#proc raw_is_open(i8 %byte) -> i1 {
+  #if #eq(%byte, 40) { #return 1 }
+  #if #eq(%byte, 91) { #return 1 }
+  #if #eq(%byte, 123) { #return 1 }
+  #return 0
+}
+
+// Parse children until EOF or the requested closing delimiter.  The cursor is
+// advanced past a matching close, so callers can continue appending siblings.
+#proc raw_parse_children(
+  addr %source, addr %cursor, addr %parent, i8 %close
+) -> #unit {
+  #let %data: addr = #call tool_source_data(%source)
+  #loop children {
+    #let %token: addr = #call raw_cursor_token(%cursor)
+    #if #call tool_is_nil(%source, %token) { #break children }
+    #let %kind: i32 = #call tool_token_kind(%token)
+    #if #eq(%kind, 0) { #break children }
+    #let %start: i64 = #call tool_token_start(%token)
+    #let %length: i64 = #call tool_token_length(%token)
+    #let %byte: i8 = #call tool_byte_at(%data, %start)
+    #if #ne(%close, 0) {
+      #if #eq(%byte, %close) {
+        #call raw_cursor_set_token(%cursor, #call tool_token_next(%token))
+        #call raw_cursor_set_end(%cursor, #add(%start, %length))
+        #return
+      }
+    }
+    #call raw_cursor_set_token(%cursor, #call tool_token_next(%token))
+    #if #call raw_is_open(%byte) {
+      #let %group: addr = #call raw_node_new(2, #zext[#bits<32>](%byte), %start, 0, 0)
+      #call raw_parse_children(
+        %source, %cursor, %group, #call raw_matching_close(%byte)
+      )
+      #let %end: i64 = #call raw_cursor_end(%cursor)
+      #if #eq(%end, 0) { %end: i64 = #add(%start, %length) }
+      #store #sub(%end, %start), #lea(base=%group, idx=0, scale=0, offset=16)
+      #call raw_append(%parent, %group)
+    } else {
+      #let %atom: addr = #call raw_node_new(
+        1, 0, %start, %length, %kind
+      )
+      #call raw_append(%parent, %atom)
+      #call raw_cursor_set_end(%cursor, #add(%start, %length))
+    }
+    #continue children
+  }
+  #return
+}
+
+#proc raw_parse(addr %source, addr %tokens) -> addr {
+  #let %length: i64 = #load[i64](#lea(base=%source, idx=0, scale=0, offset=8))
+  #let %root: addr = #call raw_node_new(2, 0, 0, %length, 0)
+  #let %cursor: addr = #call raw_cursor_new(%tokens)
+  #call raw_parse_children(%source, %cursor, %root, 0)
+  #return %root
+}
+
+#proc raw_dump_bytes(addr %data, i64 %start, i64 %length) -> #unit {
+  #let %index: i64 = 0
+  #loop bytes {
+    #if #ge(%index, %length) { #break bytes }
+    #call bootstrap.artifact-write-byte(
+      #call tool_byte_at(%data, #add(%start, %index))
+    )
+    %index: i64 = #add(%index, 1)
+    #continue bytes
+  }
+  #return
+}
+
+#proc raw_dump(addr %source, addr %node) -> #unit {
+  #let %data: addr = #call tool_source_data(%source)
+  #if #eq(#call raw_node_kind(%node), 1) {
+    #call bootstrap.artifact-write-literal("(atom ")
+    #call raw_dump_bytes(
+      %data, #call raw_node_start(%node), #call raw_node_length(%node)
+    )
+    #call bootstrap.artifact-write-literal(")")
+    #return
+  }
+  #if #eq(#call raw_node_delimiter(%node), 0) {
+    #call bootstrap.artifact-write-literal("(root")
+  } else {
+    #call bootstrap.artifact-write-literal("(group ")
+    #call bootstrap.artifact-write-byte(
+      #call tool_byte_at(%data, #call raw_node_start(%node))
+    )
+  }
+  #let %child: addr = #call raw_node_first(%node)
+  #loop dump_children {
+    #if #call raw_is_nil(%child) { #break dump_children }
+    #call bootstrap.artifact-write-literal(" ")
+    #call raw_dump(%source, %child)
+    %child: addr = #call raw_node_next(%child)
+    #continue dump_children
+  }
+  #call bootstrap.artifact-write-literal(")")
+  #return
+}
+
+#proc lain_raw_ast_dump() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #call bootstrap.artifact-begin()
+  #call raw_dump(%source, %root)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return 0
+}

@@ -1,0 +1,149 @@
+// Meta evaluation cache helpers.
+//
+// These routines cache compile-time factory calls by function and argument
+// values.  The cache belongs to the compiler's Meta layer: it prevents a
+// repeated compile-time call from rebuilding the same value/module tree.
+
+#proc program_eval_argument_same(addr %left, addr %right) -> i1 {
+  #if #ne(
+    #call eval_result_is_object(%left),
+    #call eval_result_is_object(%right)
+  ) { #return 0 }
+  #if #eq(#call eval_result_is_object(%left), 0) {
+    #return #eq(#call eval_value(%left), #call eval_value(%right))
+  }
+  #let %left_value: addr = #call eval_object(%left)
+  #let %right_value: addr = #call eval_object(%right)
+  #if #ne(
+    #call meta_value_kind(%left_value),
+    #call meta_value_kind(%right_value)
+  ) { #return 0 }
+  #if #ne(
+    #call meta_value_start(%left_value),
+    #call meta_value_start(%right_value)
+  ) { #return 0 }
+  #if #ne(
+    #call meta_value_length(%left_value),
+    #call meta_value_length(%right_value)
+  ) { #return 0 }
+  // Equal offsets from different source units do not imply equal type text.
+  #if #eq(#call meta_value_kind(%left_value), 4) {
+    #let %left_source: addr = #call meta_value_source(%left_value)
+    #let %right_source: addr = #call meta_value_source(%right_value)
+    #let %left_data: addr = #call tool_source_data(%left_source)
+    #let %right_data: addr = #call tool_source_data(%right_source)
+    #let %text_index: #bits<64> = 0
+    #loop compare_type_text {
+      #if #ge(%text_index, #call meta_value_length(%left_value)) {
+        #break compare_type_text
+      }
+      #if #ne(
+        #call tool_byte_at(
+          %left_data,
+          #add(
+            #call meta_value_start(%left_value), %text_index
+          )
+        ),
+        #call tool_byte_at(
+          %right_data,
+          #add(
+            #call meta_value_start(%right_value), %text_index
+          )
+        )
+      ) { #return 0 }
+      %text_index: #bits<64> = #add(%text_index, 1)
+      #continue compare_type_text
+    }
+  }
+  #if #ne(
+    #call program_function_environment_key(
+      #call meta_value_environment(%left_value)
+    ),
+    #call program_function_environment_key(
+      #call meta_value_environment(%right_value)
+    )
+  ) { #return 0 }
+  #if #eq(#call meta_value_kind(%left_value), 3) {
+    #return #call program_function_same(
+      #call meta_value_payload(%left_value),
+      #call meta_value_payload(%right_value)
+    )
+  }
+  #return 1
+}
+
+#proc program_eval_cache_lookup(
+  addr %unit, addr %function, addr %arguments, #bits<64> %count
+) -> addr {
+  #let %entry: addr = #load[addr](
+    #lea(base=%unit, idx=0, scale=0, offset=264)
+  )
+  #loop entries {
+    #if #call raw_is_nil(%entry) { #return #call program_nil() }
+    #if #call program_function_same(
+      #load[addr](#lea(base=%entry, idx=0, scale=0, offset=0)),
+      %function
+    ) {
+      #if #eq(
+        #load[#bits<64>](#lea(base=%entry, idx=0, scale=0, offset=8)),
+        %count
+      ) {
+        #let %index: #bits<64> = 0
+        #let %cached_arguments: addr = #load[addr](
+          #lea(base=%entry, idx=0, scale=0, offset=16)
+        )
+        #let %same: i1 = 1
+        #loop arguments {
+          #if #ge(%index, %count) { #break arguments }
+          #if #eq(
+            #call program_eval_argument_same(
+              #load[addr](#lea(base=%cached_arguments, idx=%index, scale=8, offset=0)),
+              #load[addr](#lea(base=%arguments, idx=%index, scale=8, offset=0))
+            ), 0
+          ) {
+            %same: i1 = 0
+            #break arguments
+          }
+          %index: #bits<64> = #add(%index, 1)
+          #continue arguments
+        }
+        #if %same {
+          #return #load[addr](
+            #lea(base=%entry, idx=0, scale=0, offset=24)
+          )
+        }
+      }
+    }
+    %entry: addr = #load[addr](
+      #lea(base=%entry, idx=0, scale=0, offset=32)
+    )
+    #continue entries
+  }
+}
+
+#proc program_eval_cache_store(
+  addr %unit, addr %function, addr %arguments, #bits<64> %count,
+  addr %result
+) -> #unit {
+  #let %entry: addr = #call bootstrap.allocate-pages(40)
+  #store %function, #lea(base=%entry, idx=0, scale=0, offset=0)
+  #store %count, #lea(base=%entry, idx=0, scale=0, offset=8)
+  #store %arguments, #lea(base=%entry, idx=0, scale=0, offset=16)
+  #store %result, #lea(base=%entry, idx=0, scale=0, offset=24)
+  #let %nil: addr = #call program_nil()
+  #store %nil, #lea(base=%entry, idx=0, scale=0, offset=32)
+  #let %head: addr = #load[addr](
+    #lea(base=%unit, idx=0, scale=0, offset=264)
+  )
+  #if #call raw_is_nil(%head) {
+    #store %entry, #lea(base=%unit, idx=0, scale=0, offset=264)
+    #store %entry, #lea(base=%unit, idx=0, scale=0, offset=272)
+  } else {
+    #let %tail: addr = #load[addr](
+      #lea(base=%unit, idx=0, scale=0, offset=272)
+    )
+    #store %entry, #lea(base=%tail, idx=0, scale=0, offset=32)
+    #store %entry, #lea(base=%unit, idx=0, scale=0, offset=272)
+  }
+  #return
+}

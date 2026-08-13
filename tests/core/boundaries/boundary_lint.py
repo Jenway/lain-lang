@@ -116,8 +116,8 @@ RULES: tuple[Rule, ...] = (
         ident="M8_LAIN_INTERPRETER_NO_HOST_EXECUTOR",
         description="Lain interpreter/comptime must not delegate evaluation to the C executor",
         paths=(
-            "packages/lain/compiler/l1_interpreter.lain",
-            "packages/lain/compiler/compiler.lain",
+            "src/compiler/l1_interpreter.lain",
+            "src/compiler/compiler.lain",
         ),
         pattern=r"core\.execute-lainir|core\.eval!|host_unit_execute",
         allowed_count=0,
@@ -126,7 +126,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="M20_SINGLE_LOWERING_ENGINE",
         description="single-source and workspace compilation must share LowerContext lowering",
-        paths=("packages/lain/compiler/lower.lain",),
+        paths=("src/compiler/lower.lain",),
         pattern=(
             r"^let lower_(?:name|call_args|if_value|expr|statement_block|"
             r"body|function|functions)\b"
@@ -143,7 +143,7 @@ RULES: tuple[Rule, ...] = (
             "single-source and workspace compilation must share "
             "ElaborationContext validation"
         ),
-        paths=("packages/lain/compiler/elaborator.lain",),
+        paths=("src/compiler/elaborator.lain",),
         pattern=(
             r"^let workspace_(?:expr_type|validate_args|validate_expr|"
             r"validate_if|validate_assignment|validate_statement_block|"

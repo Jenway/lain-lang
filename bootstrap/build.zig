@@ -123,6 +123,28 @@ pub fn build(b: *std.Build) void {
         "Build the generic frozen-compiler runner",
     );
 
+    const l1ls = addCExecutable(
+        b,
+        "l1ls",
+        "src/cli/l1ls.c",
+        target,
+        optimize,
+    );
+    l1ls.root_module.addCSourceFiles(.{
+        .files = &.{"src/host/lsp_host.c"},
+        .flags = c_flags,
+    });
+    l1ls.root_module.linkLibrary(core);
+    l1ls.root_module.linkLibrary(text);
+    l1ls.root_module.linkLibrary(interpreter);
+    l1ls.root_module.linkLibrary(host_io);
+    _ = installNamed(
+        b,
+        l1ls,
+        "l1ls",
+        "Run the LAIN-IR language server over stdio",
+    );
+
 }
 
 fn newCModule(

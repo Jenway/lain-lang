@@ -1,0 +1,800 @@
+// A deliberately small Lain front end written in LAIN-IR.
+//
+// The parser is syntax-only: it builds token and delimiter-group nodes.  The
+// Meta layer owns `let`, `bits`, and `record`, and turns those nodes into a
+// type environment plus Core nodes.  The generated Core AST is then emitted
+// as C.
+
+#extern #proc bootstrap.source-data(i64 %index) -> #addr;
+#extern #proc bootstrap.source-length(i64 %index) -> #bits<64>;
+#extern #proc bootstrap.allocate-pages(i64 %size) -> #addr;
+#extern #proc bootstrap.write-diagnostic(#addr %text, #bits<64> %length) -> #unit;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(#bits<8> %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(#addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+
+// Cursor: data, length, position, error flag.
+#proc cursor_new(#addr %data, #bits<64> %length) -> #addr {
+  #let %cursor: #addr = #alloca(32)
+  #store[#addr] %data, #lea(base=%cursor, idx=0, scale=0, offset=0)
+  #store[#bits<64>] %length, #lea(base=%cursor, idx=0, scale=0, offset=8)
+  #store[#bits<64>] 0, #lea(base=%cursor, idx=0, scale=0, offset=16)
+  #store[#bits<1>] 0, #lea(base=%cursor, idx=0, scale=0, offset=24)
+  #return %cursor
+}
+
+#proc cursor_data(#addr %cursor) -> #addr {
+  #return #load[#addr](#lea(base=%cursor, idx=0, scale=0, offset=0))
+}
+
+#proc cursor_length(#addr %cursor) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%cursor, idx=0, scale=0, offset=8))
+}
+
+#proc cursor_position(#addr %cursor) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%cursor, idx=0, scale=0, offset=16))
+}
+
+#proc cursor_set_position(#addr %cursor, #bits<64> %position) -> #unit {
+  #store[#bits<64>] %position, #lea(base=%cursor, idx=0, scale=0, offset=16)
+  #return
+}
+
+#proc cursor_failed(#addr %cursor) -> #bits<1> {
+  #return #load[#bits<1>](#lea(base=%cursor, idx=0, scale=0, offset=24))
+}
+
+#proc cursor_fail(#addr %cursor) -> #unit {
+  #store[#bits<1>] 1, #lea(base=%cursor, idx=0, scale=0, offset=24)
+  #return
+}
+
+#proc cursor_peek(#addr %cursor) -> #bits<8> {
+  #let %position: #bits<64> = #call cursor_position(%cursor)
+  #if #ge(%position, #call cursor_length(%cursor)) {
+    #return 0
+  }
+  #return #load[#bits<8>](#lea(
+    base=#call cursor_data(%cursor), idx=%position, scale=1, offset=0
+  ))
+}
+
+#proc cursor_advance(#addr %cursor) -> #unit {
+  #call cursor_set_position(
+    %cursor, #add(#call cursor_position(%cursor), 1)
+  )
+  #return
+}
+
+#proc is_space(#bits<8> %byte) -> #bits<1> {
+  #if #eq(%byte, 32) { #return 1 }
+  #if #eq(%byte, 9) { #return 1 }
+  #if #eq(%byte, 10) { #return 1 }
+  #if #eq(%byte, 13) { #return 1 }
+  #return 0
+}
+
+#proc is_digit(#bits<8> %byte) -> #bits<1> {
+  #if #lt(%byte, 48) { #return 0 }
+  #if #gt(%byte, 57) { #return 0 }
+  #return 1
+}
+
+#proc is_word_byte(#bits<8> %byte) -> #bits<1> {
+  #if #ge(%byte, 48) {
+    #if #le(%byte, 57) { #return 1 }
+  }
+  #if #ge(%byte, 65) {
+    #if #le(%byte, 90) { #return 1 }
+  }
+  #if #ge(%byte, 97) {
+    #if #le(%byte, 122) { #return 1 }
+  }
+  #if #eq(%byte, 95) { #return 1 }
+  #return 0
+}
+
+#proc skip_space(#addr %cursor) -> #unit {
+  #loop whitespace {
+    #let %byte: #bits<8> = #call cursor_peek(%cursor)
+    #if #eq(#call is_space(%byte), 0) { #break whitespace }
+    #call cursor_advance(%cursor)
+    #continue whitespace
+  }
+  #return
+}
+
+// Node layout (all nodes are 64 bytes):
+// kind@0, next@8, name_start@16, name_length@24, value@32,
+// children@40, child_count@48, generated@56.
+#proc node_new(#bits<32> %kind) -> #addr {
+  #let %node: #addr = #call bootstrap.allocate-pages(64)
+  #store[#bits<32>] %kind, #lea(base=%node, idx=0, scale=0, offset=0)
+  #store[#bits<64>] 0, #lea(base=%node, idx=0, scale=0, offset=8)
+  #store[#bits<64>] 0, #lea(base=%node, idx=0, scale=0, offset=16)
+  #store[#bits<64>] 0, #lea(base=%node, idx=0, scale=0, offset=24)
+  #store[#bits<64>] 0, #lea(base=%node, idx=0, scale=0, offset=32)
+  #store[#bits<64>] 0, #lea(base=%node, idx=0, scale=0, offset=40)
+  #store[#bits<64>] 0, #lea(base=%node, idx=0, scale=0, offset=48)
+  #store[#bits<1>] 0, #lea(base=%node, idx=0, scale=0, offset=56)
+  #return %node
+}
+
+#proc addr_zero() -> #addr {
+  #let %slot: #addr = #alloca(8)
+  #store[#bits<64>] 0, #lea(base=%slot, idx=0, scale=0, offset=0)
+  #return #load[#addr](#lea(base=%slot, idx=0, scale=0, offset=0))
+}
+
+#proc node_kind(#addr %node) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%node, idx=0, scale=0, offset=0))
+}
+
+#proc node_next(#addr %node) -> #addr {
+  #return #load[#addr](#lea(base=%node, idx=0, scale=0, offset=8))
+}
+
+#proc node_set_next(#addr %node, #addr %next) -> #unit {
+  #store[#addr] %next, #lea(base=%node, idx=0, scale=0, offset=8)
+  #return
+}
+
+#proc node_name_start(#addr %node) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%node, idx=0, scale=0, offset=16))
+}
+
+#proc node_name_length(#addr %node) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%node, idx=0, scale=0, offset=24))
+}
+
+#proc node_value(#addr %node) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%node, idx=0, scale=0, offset=32))
+}
+
+#proc node_set_value(#addr %node, #bits<64> %value) -> #unit {
+  #store[#bits<64>] %value, #lea(base=%node, idx=0, scale=0, offset=32)
+  #return
+}
+
+#proc node_children(#addr %node) -> #addr {
+  #return #load[#addr](#lea(base=%node, idx=0, scale=0, offset=40))
+}
+
+#proc node_set_children(#addr %node, #addr %children) -> #unit {
+  #store[#addr] %children, #lea(base=%node, idx=0, scale=0, offset=40)
+  #return
+}
+
+#proc node_child_count(#addr %node) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%node, idx=0, scale=0, offset=48))
+}
+
+#proc node_set_child_count(#addr %node, #bits<64> %count) -> #unit {
+  #store[#bits<64>] %count, #lea(base=%node, idx=0, scale=0, offset=48)
+  #return
+}
+
+#proc node_set_generated(#addr %node) -> #unit {
+  #store[#bits<1>] 1, #lea(base=%node, idx=0, scale=0, offset=56)
+  #return
+}
+
+#proc parse_word(#addr %cursor) -> #addr {
+  #call skip_space(%cursor)
+  #let %start: #bits<64> = #call cursor_position(%cursor)
+  #let %length: #bits<64> = 0
+  #loop word {
+    #let %byte: #bits<8> = #call cursor_peek(%cursor)
+    #if #eq(#call is_word_byte(%byte), 0) { #break word }
+    #call cursor_advance(%cursor)
+    %length: #bits<64> = #add(%length, 1)
+    #continue word
+  }
+  #if #eq(%length, 0) {
+    #call cursor_fail(%cursor)
+    #return #call node_new(90)
+  }
+  #let %token: #addr = #call node_new(90)
+  #store[#bits<64>] %start, #lea(base=%token, idx=0, scale=0, offset=16)
+  #store[#bits<64>] %length, #lea(base=%token, idx=0, scale=0, offset=24)
+  #return %token
+}
+
+#proc word_is(
+  #addr %data, #addr %token, #addr %literal, #bits<64> %length
+) -> #bits<1> {
+  #if #ne(#call node_name_length(%token), %length) { #return 0 }
+  #let %offset: #bits<64> = 0
+  #loop compare {
+    #if #ge(%offset, %length) { #break compare }
+    #let %left: #bits<8> = #load[#bits<8>](#lea(
+      base=%data, idx=#add(#call node_name_start(%token), %offset), scale=1, offset=0
+    ))
+    #let %right: #bits<8> = #load[#bits<8>](#lea(
+      base=%literal, idx=%offset, scale=1, offset=0
+    ))
+    #if #ne(%left, %right) { #return 0 }
+    %offset: #bits<64> = #add(%offset, 1)
+    #continue compare
+  }
+  #return 1
+}
+
+#proc expect_byte(#addr %cursor, #bits<8> %expected) -> #bits<1> {
+  #call skip_space(%cursor)
+  #if #ne(#call cursor_peek(%cursor), %expected) {
+    #call cursor_fail(%cursor)
+    #return 0
+  }
+  #call cursor_advance(%cursor)
+  #return 1
+}
+
+#proc parse_number(#addr %cursor) -> #bits<64> {
+  #call skip_space(%cursor)
+  #let %value: #bits<64> = 0
+  #let %count: #bits<64> = 0
+  #loop digits {
+    #let %byte: #bits<8> = #call cursor_peek(%cursor)
+    #if #eq(#call is_digit(%byte), 0) { #break digits }
+    %value: #bits<64> = #add(#mul(%value, 10), #sub(%byte, 48))
+    %count: #bits<64> = #add(%count, 1)
+    #call cursor_advance(%cursor)
+    #continue digits
+  }
+  #if #eq(%count, 0) { #call cursor_fail(%cursor) }
+  #return %value
+}
+
+#proc node_append_child(#addr %parent, #addr %child) -> #unit {
+  #let %count: #bits<64> = #call node_child_count(%parent)
+  #if #eq(%count, 0) {
+    #call node_set_children(%parent, %child)
+  } else {
+    #let %last: #addr = #call node_children(%parent)
+    #let %offset: #bits<64> = 1
+    #loop children {
+      #if #ge(%offset, %count) { #break children }
+      %last: #addr = #call node_next(%last)
+      %offset: #bits<64> = #add(%offset, 1)
+      #continue children
+    }
+    #call node_set_next(%last, %child)
+  }
+  #call node_set_child_count(%parent, #add(%count, 1))
+  #return
+}
+
+#proc parse_literal(#addr %cursor) -> #addr {
+  #call skip_space(%cursor)
+  #let %start: #bits<64> = #call cursor_position(%cursor)
+  #let %value: #bits<64> = #call parse_number(%cursor)
+  #let %literal: #addr = #call node_new(95)
+  #store[#bits<64>] %start, #lea(base=%literal, idx=0, scale=0, offset=16)
+  #store[#bits<64>] #sub(#call cursor_position(%cursor), %start),
+    #lea(base=%literal, idx=0, scale=0, offset=24)
+  #call node_set_value(%literal, %value)
+  #return %literal
+}
+
+#proc parse_group(#addr %cursor, #bits<8> %open) -> #addr {
+  #let %close: #bits<8> = 125
+  #if #eq(%open, 40) { %close: #bits<8> = 41 }
+  #if #eq(%open, 91) { %close: #bits<8> = 93 }
+  #if #eq(%open, 60) { %close: #bits<8> = 62 }
+  #call cursor_advance(%cursor)
+  #let %group: #addr = #call node_new(91)
+  #loop group {
+    #call skip_space(%cursor)
+    #if #eq(#call cursor_peek(%cursor), %close) { #break group }
+    #if #eq(#call cursor_position(%cursor), #call cursor_length(%cursor)) {
+      #call cursor_fail(%cursor)
+      #break group
+    }
+    #call node_append_child(%group, #call parse_atom(%cursor))
+    #if #call cursor_failed(%cursor) { #break group }
+    #continue group
+  }
+  #call expect_byte(%cursor, %close)
+  #return %group
+}
+
+#proc parse_atom(#addr %cursor) -> #addr {
+  #call skip_space(%cursor)
+  #let %byte: #bits<8> = #call cursor_peek(%cursor)
+  #if #call is_digit(%byte) { #return #call parse_literal(%cursor) }
+  #if #call is_word_byte(%byte) { #return #call parse_word(%cursor) }
+  #if #eq(%byte, 123) { #return #call parse_group(%cursor, 123) }
+  #if #eq(%byte, 40) { #return #call parse_group(%cursor, 40) }
+  #if #eq(%byte, 91) { #return #call parse_group(%cursor, 91) }
+  #if #eq(%byte, 60) { #return #call parse_group(%cursor, 60) }
+  #if #eq(%byte, 0) {
+    #call cursor_fail(%cursor)
+    #return #call node_new(90)
+  }
+  #let %token: #addr = #call node_new(90)
+  #store[#bits<64>] #call cursor_position(%cursor),
+    #lea(base=%token, idx=0, scale=0, offset=16)
+  #store[#bits<64>] 1, #lea(base=%token, idx=0, scale=0, offset=24)
+  #call cursor_advance(%cursor)
+  #return %token
+}
+
+#proc parse_statement(#addr %cursor) -> #addr {
+  #let %form: #addr = #call node_new(92)
+  #loop form {
+    #call skip_space(%cursor)
+    #if #eq(#call cursor_position(%cursor), #call cursor_length(%cursor)) {
+      #break form
+    }
+    #if #eq(#call cursor_peek(%cursor), 59) {
+      #call cursor_advance(%cursor)
+      #break form
+    }
+    #call node_append_child(%form, #call parse_atom(%cursor))
+    #if #call cursor_failed(%cursor) { #break form }
+    #continue form
+  }
+  #return %form
+}
+
+#proc parse_program(#addr %cursor) -> #addr {
+  #let %sentinel: #addr = #call node_new(0)
+  #let %first: #addr = %sentinel
+  #let %last: #addr = %sentinel
+  #let %count: #bits<64> = 0
+  #loop statements {
+    #call skip_space(%cursor)
+    #if #eq(#call cursor_position(%cursor), #call cursor_length(%cursor)) {
+      #break statements
+    }
+    #let %statement: #addr = #call parse_statement(%cursor)
+    #if #call cursor_failed(%cursor) { #break statements }
+    #if #eq(#call node_child_count(%statement), 0) { #break statements }
+    #if #eq(%count, 0) {
+      %first: #addr = %statement
+    } else {
+      #call node_set_next(%last, %statement)
+    }
+    %last: #addr = %statement
+    %count: #bits<64> = #add(%count, 1)
+    #continue statements
+  }
+  #if #eq(%count, 0) { #return %sentinel }
+  #call node_set_next(%last, %sentinel)
+  #return %first
+}
+
+// Meta values and descriptors.  A type is a compile-time value; it is never
+// represented as a runtime C local.
+// TypeDesc: kind@0, width@8, fields@16, field_count@24.
+#proc type_bits_new(#bits<64> %width) -> #addr {
+  #let %type: #addr = #call bootstrap.allocate-pages(32)
+  #store[#bits<32>] 1, #lea(base=%type, idx=0, scale=0, offset=0)
+  #store[#bits<64>] %width, #lea(base=%type, idx=0, scale=0, offset=8)
+  #store[#bits<64>] 0, #lea(base=%type, idx=0, scale=0, offset=16)
+  #store[#bits<64>] 0, #lea(base=%type, idx=0, scale=0, offset=24)
+  #return %type
+}
+
+#proc type_record_new(
+  #addr %fields, #bits<64> %count
+) -> #addr {
+  #let %type: #addr = #call bootstrap.allocate-pages(32)
+  #store[#bits<32>] 2, #lea(base=%type, idx=0, scale=0, offset=0)
+  #store[#bits<64>] 0, #lea(base=%type, idx=0, scale=0, offset=8)
+  #store[#addr] %fields, #lea(base=%type, idx=0, scale=0, offset=16)
+  #store[#bits<64>] %count, #lea(base=%type, idx=0, scale=0, offset=24)
+  #return %type
+}
+
+#proc type_kind(#addr %type) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%type, idx=0, scale=0, offset=0))
+}
+
+#proc type_width(#addr %type) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%type, idx=0, scale=0, offset=8))
+}
+
+#proc type_fields(#addr %type) -> #addr {
+  #return #load[#addr](#lea(base=%type, idx=0, scale=0, offset=16))
+}
+
+#proc type_field_count(#addr %type) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%type, idx=0, scale=0, offset=24))
+}
+
+#proc node_value_addr(#addr %node) -> #addr {
+  #return #load[#addr](#lea(base=%node, idx=0, scale=0, offset=32))
+}
+
+#proc node_set_value_addr(#addr %node, #addr %value) -> #unit {
+  #store[#addr] %value, #lea(base=%node, idx=0, scale=0, offset=32)
+  #return
+}
+
+#proc node_child_at(#addr %node, #bits<64> %index) -> #addr {
+  #let %current: #addr = #call node_children(%node)
+  #let %offset: #bits<64> = 0
+  #loop children {
+    #if #ge(%offset, #call node_child_count(%node)) { #break children }
+    #if #eq(%offset, %index) { #return %current }
+    %current: #addr = #call node_next(%current)
+    %offset: #bits<64> = #add(%offset, 1)
+    #continue children
+  }
+  #return #call addr_zero()
+}
+
+// Meta environment entry: name_start@0, name_length@8, value@16, next@24.
+#proc env_new() -> #addr {
+  #let %env: #addr = #call bootstrap.allocate-pages(16)
+  #store[#bits<64>] 0, #lea(base=%env, idx=0, scale=0, offset=0)
+  #store[#bits<64>] 0, #lea(base=%env, idx=0, scale=0, offset=8)
+  #return %env
+}
+
+#proc env_bind(
+  #addr %data, #addr %env, #addr %name, #addr %value
+) -> #unit {
+  #let %entry: #addr = #call bootstrap.allocate-pages(32)
+  #store[#bits<64>] #call node_name_start(%name),
+    #lea(base=%entry, idx=0, scale=0, offset=0)
+  #store[#bits<64>] #call node_name_length(%name),
+    #lea(base=%entry, idx=0, scale=0, offset=8)
+  #store[#addr] %value, #lea(base=%entry, idx=0, scale=0, offset=16)
+  #store[#addr] #load[#addr](#lea(base=%env, idx=0, scale=0, offset=0)),
+    #lea(base=%entry, idx=0, scale=0, offset=24)
+  #store[#addr] %entry, #lea(base=%env, idx=0, scale=0, offset=0)
+  #store[#bits<64>] #add(
+    #load[#bits<64>](#lea(base=%env, idx=0, scale=0, offset=8)), 1
+  ), #lea(base=%env, idx=0, scale=0, offset=8)
+  #return
+}
+
+#proc env_lookup(
+  #addr %data, #addr %env, #addr %name
+) -> #addr {
+  #let %entry: #addr = #load[#addr](#lea(base=%env, idx=0, scale=0, offset=0))
+  #let %remaining: #bits<64> = #load[#bits<64>](
+    #lea(base=%env, idx=0, scale=0, offset=8)
+  )
+  #loop bindings {
+    #if #eq(%remaining, 0) { #break bindings }
+    #let %length: #bits<64> = #load[#bits<64>](
+      #lea(base=%entry, idx=0, scale=0, offset=8)
+    )
+    #if #eq(%length, #call node_name_length(%name)) {
+      #let %offset: #bits<64> = 0
+      #let %equal: #bits<1> = 1
+      #loop names {
+        #if #ge(%offset, %length) { #break names }
+        #let %left: #bits<8> = #load[#bits<8>](#lea(
+          base=%data, idx=#add(
+            #load[#bits<64>](#lea(base=%entry, idx=0, scale=0, offset=0)),
+            %offset
+          ), scale=1, offset=0
+        ))
+        #let %right: #bits<8> = #load[#bits<8>](#lea(
+          base=%data, idx=#add(#call node_name_start(%name), %offset),
+          scale=1, offset=0
+        ))
+        #if #ne(%left, %right) { %equal: #bits<1> = 0 }
+        %offset: #bits<64> = #add(%offset, 1)
+        #continue names
+      }
+      #if #eq(%equal, 1) { #return #load[#addr](#lea(
+        base=%entry, idx=0, scale=0, offset=16
+      )) }
+    }
+    %entry: #addr = #load[#addr](#lea(base=%entry, idx=0, scale=0, offset=24))
+    %remaining: #bits<64> = #sub(%remaining, 1)
+    #continue bindings
+  }
+  #return #call addr_zero()
+}
+
+#proc meta_bits(
+  #addr %data, #addr %bits_name, #addr %angle_group
+) -> #addr {
+  #if #eq(#call word_is(%data, %bits_name, "bits", 4), 0) {
+    #return #call addr_zero()
+  }
+  #let %width_ast: #addr = #call node_child_at(%angle_group, 0)
+  #if #ne(#call node_kind(%width_ast), 95) { #return #call addr_zero() }
+  #return #call type_bits_new(#call node_value(%width_ast))
+}
+
+// The record Meta function reads the generic `{ ... }` group and creates a
+// TypeDesc whose fields are also usable by the C emitter.
+#proc meta_record(
+  #addr %data, #addr %record_name, #addr %body
+) -> #addr {
+  #let %first: #addr = #call addr_zero()
+  #let %last: #addr = #call addr_zero()
+  #let %count: #bits<64> = 0
+  #let %index: #bits<64> = 0
+  #loop fields {
+    #let %field_name: #addr = #call node_child_at(%body, %index)
+    #if #ge(%index, #call node_child_count(%body)) { #break fields }
+    %index: #bits<64> = #add(%index, 1)
+    #let %colon: #addr = #call node_child_at(%body, %index)
+    %index: #bits<64> = #add(%index, 1)
+    #let %type_name: #addr = #call node_child_at(%body, %index)
+    %index: #bits<64> = #add(%index, 1)
+    #let %angle: #addr = #call node_child_at(%body, %index)
+    #let %field_type: #addr = #call meta_bits(%data, %type_name, %angle)
+    %index: #bits<64> = #add(%index, 1)
+    #let %field: #addr = #call node_new(4)
+    #store[#bits<64>] #call node_name_start(%field_name),
+      #lea(base=%field, idx=0, scale=0, offset=16)
+    #store[#bits<64>] #call node_name_length(%field_name),
+      #lea(base=%field, idx=0, scale=0, offset=24)
+    #call node_set_value(%field, #call type_width(%field_type))
+    #if #eq(%count, 0) {
+      %first: #addr = %field
+    } else {
+      #call node_set_next(%last, %field)
+    }
+    %last: #addr = %field
+    %count: #bits<64> = #add(%count, 1)
+    #if #ge(%index, #call node_child_count(%body)) { #break fields }
+    %index: #bits<64> = #add(%index, 1)
+    #continue fields
+  }
+  #return #call type_record_new(%first, %count)
+}
+
+#proc meta_let(
+  #addr %data, #addr %env, #addr %form
+) -> #bits<1> {
+  #let %name: #addr = #call node_child_at(%form, 1)
+  #let %equals: #addr = #call node_child_at(%form, 2)
+  #if #ge(#call node_child_count(%form), 5) {
+    #let %annotation: #addr = #call node_child_at(%form, 3)
+    #if #eq(#call word_is(%data, %annotation, "type", 4), 0) {
+      #return 0
+    }
+    %equals: #addr = #call node_child_at(%form, 4)
+  }
+  #let %rhs: #addr = #call node_next(%equals)
+  #if #eq(#call node_kind(%rhs), 90) {
+    #if #eq(#call word_is(%data, %rhs, "record", 6), 1) {
+      #let %body: #addr = #call node_next(%rhs)
+      #let %type: #addr = #call meta_record(%data, %name, %body)
+      #call env_bind(%data, %env, %name, %type)
+      #store[#bits<32>] 10, #lea(base=%form, idx=0, scale=0, offset=0)
+      #store[#bits<64>] #call node_name_start(%name),
+        #lea(base=%form, idx=0, scale=0, offset=16)
+      #store[#bits<64>] #call node_name_length(%name),
+        #lea(base=%form, idx=0, scale=0, offset=24)
+      #call node_set_children(%form, #call type_fields(%type))
+      #call node_set_child_count(%form, #call type_field_count(%type))
+      #call node_set_generated(%form)
+      #return 1
+    }
+  }
+  #if #eq(#call node_kind(%rhs), 95) {
+    #call env_bind(%data, %env, %name, %rhs)
+    #store[#bits<32>] 2, #lea(base=%form, idx=0, scale=0, offset=0)
+    #store[#bits<64>] #call node_name_start(%name),
+      #lea(base=%form, idx=0, scale=0, offset=16)
+    #store[#bits<64>] #call node_name_length(%name),
+      #lea(base=%form, idx=0, scale=0, offset=24)
+    #call node_set_value(%form, #call node_value(%rhs))
+    #call node_set_generated(%form)
+    #return 1
+  }
+  #return 0
+}
+
+#proc meta_return(#addr %data, #addr %form) -> #bits<1> {
+  #let %value: #addr = #call node_child_at(%form, 1)
+  #store[#bits<32>] 3, #lea(base=%form, idx=0, scale=0, offset=0)
+  #if #eq(#call node_kind(%value), 95) {
+    #call node_set_value(%form, #call node_value(%value))
+  } else {
+    #store[#bits<64>] #call node_name_start(%value),
+      #lea(base=%form, idx=0, scale=0, offset=16)
+    #store[#bits<64>] #call node_name_length(%value),
+      #lea(base=%form, idx=0, scale=0, offset=24)
+  }
+  #call node_set_generated(%form)
+  #return 1
+}
+
+#proc expand_meta(#addr %data, #addr %head, #addr %env) -> #bits<1> {
+  #let %current: #addr = %head
+  #loop expand {
+    #if #eq(#call node_kind(%current), 0) { #break expand }
+    #let %head_word: #addr = #call node_child_at(%current, 0)
+    #if #call word_is(%data, %head_word, "let", 3) {
+      #if #eq(#call meta_let(%data, %env, %current), 1) { } else { #return 0 }
+    } else {
+      #if #call word_is(%data, %head_word, "return", 6) {
+        #if #eq(#call meta_return(%data, %current), 1) { } else { #return 0 }
+      } else {
+        #return 0
+      }
+    }
+    %current: #addr = #call node_next(%current)
+    #continue expand
+  }
+  #return 1
+}
+
+#proc emit_bytes(#addr %data, #bits<64> %start, #bits<64> %length) -> #unit {
+  #let %offset: #bits<64> = 0
+  #loop bytes {
+    #if #ge(%offset, %length) { #break bytes }
+    #call bootstrap.artifact-write-byte(#load[#bits<8>](#lea(
+      base=%data, idx=#add(%start, %offset), scale=1, offset=0
+    )))
+    %offset: #bits<64> = #add(%offset, 1)
+    #continue bytes
+  }
+  #return
+}
+
+#proc emit_field_type(#bits<64> %width) -> #unit {
+  #if #eq(%width, 32) {
+    #call bootstrap.artifact-write-literal("int32_t")
+  } else {
+    #call bootstrap.artifact-write-literal("int64_t")
+  }
+  #return
+}
+
+#proc emit_record(#addr %data, #addr %record) -> #unit {
+  #call bootstrap.artifact-write-literal("typedef struct ")
+  #call emit_bytes(
+    %data, #call node_name_start(%record), #call node_name_length(%record)
+  )
+  #call bootstrap.artifact-write-literal(" {\n")
+  #let %field: #addr = #call node_children(%record)
+  #let %remaining: #bits<64> = #call node_child_count(%record)
+  #loop fields {
+    #if #eq(%remaining, 0) { #break fields }
+    #call bootstrap.artifact-write-literal("  ")
+    #call emit_field_type(#call node_value(%field))
+    #call bootstrap.artifact-write-literal(" ")
+    #call emit_bytes(
+      %data, #call node_name_start(%field), #call node_name_length(%field)
+    )
+    #call bootstrap.artifact-write-literal(";\n")
+    %field: #addr = #call node_next(%field)
+    %remaining: #bits<64> = #sub(%remaining, 1)
+    #continue fields
+  }
+  #call bootstrap.artifact-write-literal("} ")
+  #call emit_bytes(
+    %data, #call node_name_start(%record), #call node_name_length(%record)
+  )
+  #call bootstrap.artifact-write-literal(";\n\n")
+  #return
+}
+
+#proc names_equal(
+  #addr %data, #addr %left, #addr %right
+) -> #bits<1> {
+  #if #ne(#call node_name_length(%left), #call node_name_length(%right)) {
+    #return 0
+  }
+  #let %offset: #bits<64> = 0
+  #loop names {
+    #if #ge(%offset, #call node_name_length(%left)) { #break names }
+    #let %a: #bits<8> = #load[#bits<8>](#lea(
+      base=%data, idx=#add(#call node_name_start(%left), %offset), scale=1, offset=0
+    ))
+    #let %b: #bits<8> = #load[#bits<8>](#lea(
+      base=%data, idx=#add(#call node_name_start(%right), %offset), scale=1, offset=0
+    ))
+    #if #ne(%a, %b) { #return 0 }
+    %offset: #bits<64> = #add(%offset, 1)
+    #continue names
+  }
+  #return 1
+}
+
+#proc find_let(#addr %data, #addr %head, #addr %target) -> #bits<64> {
+  #let %current: #addr = %head
+  #loop bindings {
+    #if #eq(#call node_kind(%current), 0) { #break bindings }
+    #if #eq(#call node_kind(%current), 2) {
+      #if #call names_equal(%data, %current, %target) {
+        #return #call node_value(%current)
+      }
+    }
+    %current: #addr = #call node_next(%current)
+    #continue bindings
+  }
+  #return 0
+}
+
+#proc emit_i64(#bits<64> %value) -> #unit {
+  #let %buffer: #addr = #alloca(32)
+  #let %position: #bits<64> = 31
+  #let %remaining: #bits<64> = %value
+  #if #eq(%remaining, 0) {
+    #store[#bits<8>] 48, #lea(base=%buffer, idx=0, scale=1, offset=0)
+    #call bootstrap.artifact-write-byte(48)
+    #return
+  }
+  #loop digits {
+    #if #eq(%remaining, 0) { #break digits }
+    #let %digit: #bits<64> = #udiv(%remaining, 10)
+    #let %remainder: #bits<64> = #sub(%remaining, #mul(%digit, 10))
+    #store[#bits<8>] #add(%remainder, 48), #lea(
+      base=%buffer, idx=%position, scale=1, offset=0
+    )
+    %remaining: #bits<64> = %digit
+    %position: #bits<64> = #sub(%position, 1)
+    #continue digits
+  }
+  %position: #bits<64> = #add(%position, 1)
+  #call emit_bytes(%buffer, %position, #sub(32, %position))
+  #return
+}
+
+#proc emit_program(#addr %data, #addr %head) -> #unit {
+  #call bootstrap.artifact-write-literal("#include <stdint.h>\n\n")
+  #let %current: #addr = %head
+  #loop records {
+    #if #eq(#call node_kind(%current), 0) { #break records }
+    #if #eq(#call node_kind(%current), 10) {
+      #call emit_record(%data, %current)
+    }
+    %current: #addr = #call node_next(%current)
+    #continue records
+  }
+  #call bootstrap.artifact-write-literal("int32_t main(void) {\n")
+  %current: #addr = %head
+  #loop lets {
+    #if #eq(#call node_kind(%current), 0) { #break lets }
+    #if #eq(#call node_kind(%current), 2) {
+      #call bootstrap.artifact-write-literal("  int32_t ")
+      #call emit_bytes(%data, #call node_name_start(%current), #call node_name_length(%current))
+      #call bootstrap.artifact-write-literal(" = ")
+      #call emit_i64(#call node_value(%current))
+      #call bootstrap.artifact-write-literal(";\n")
+    }
+    %current: #addr = #call node_next(%current)
+    #continue lets
+  }
+  #let %return_node: #addr = %head
+  #loop find_return {
+    #if #eq(#call node_kind(%return_node), 0) { #break find_return }
+    #if #eq(#call node_kind(%return_node), 3) { #break find_return }
+    %return_node: #addr = #call node_next(%return_node)
+    #continue find_return
+  }
+  #call bootstrap.artifact-write-literal("  return ")
+  #if #eq(#call node_name_length(%return_node), 0) {
+    #call emit_i64(#call node_value(%return_node))
+  } else {
+    #call emit_i64(#call find_let(%data, %head, %return_node))
+  }
+  #call bootstrap.artifact-write-literal(";\n}\n")
+  #return
+}
+
+#proc demo_compile() -> #bits<32> {
+  #let %data: #addr = #call bootstrap.source-data(0)
+  #let %length: #bits<64> = #call bootstrap.source-length(0)
+  #let %cursor: #addr = #call cursor_new(%data, %length)
+  #let %head: #addr = #call parse_program(%cursor)
+  #if #call cursor_failed(%cursor) {
+    #call bootstrap.write-diagnostic("demo Lain parser: invalid input", 32)
+    #return 2
+  }
+  #let %env: #addr = #call env_new()
+  #if #eq(#call expand_meta(%data, %head, %env), 0) {
+    #call bootstrap.write-diagnostic("demo Meta: unsupported form", 31)
+    #return 3
+  }
+  #call bootstrap.artifact-begin()
+  #call emit_program(%data, %head)
+  #call bootstrap.artifact-finish()
+  #return 0
+}

@@ -23,3 +23,6 @@ Current active suites:
 - Scheme-host compatibility tests live on `bootstrap/stage0`; `main` tests the
   Lain-owned compiler and consumes bootstrap tools from the sibling worktree.
 - `bootstrap-core`: minimal Lain capabilities needed by compiler code
+- `lainir/lain-frontend`: stage-0 RawAst, meta record/layout, compile-time
+  eval, module graph diagnostics, unified driver, and executable lowering
+  slices written in LAIN-IR.
