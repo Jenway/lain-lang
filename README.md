@@ -42,12 +42,12 @@ C LAIN-IR storage/interpreter, Scheme bridge, or their Zig/Make build entry.
 This is an intentional cut: the remaining compiler implementation must be
 completed in Lain instead of silently delegating its data structures back to C.
 
-The last buildable C/Scheme bootstrap is preserved in Git history and on the
-`bootstrap/stage0` branch.  The next bootstrap target is:
+The last buildable C/Scheme bootstrap is preserved in Git history.  The next
+bootstrap target is:
 
 ```text
-bootstrap branch: LAIN-IR interpreter + frozen compiler.l1
-main branch:      Lain compiler and libraries written in .lain
+seed/:      C LAIN-IR interpreter (lainir-seed) + frozen compiler.l1
+main:       Lain compiler and libraries written in .lain
 ```
 
 The current `main` cutover commit is not buildable yet.  Its immediate work is
@@ -68,5 +68,4 @@ and `import("path")`. `@` is reserved for attributes such as `@export` and
 standalone `fn`, `struct`, `module`, and `import` declarations are rejected.
 
 The final gate remains `stage2.l1 == stage3.l1`, but it must be restored using
-the bootstrap branch interpreter without reintroducing C facilities into
-`main`.
+the seed interpreter without reintroducing C facilities into `main`.

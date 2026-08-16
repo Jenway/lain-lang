@@ -15,7 +15,7 @@
 - `src/lainir/tools/lsp.l1`：Content-Length/CRLF framing、文档存储和协议派发。
 - `src/lainir/tools/lsp_tools.l1`：在 LAIN-IR 中接入 source/highlight，并序列化
   `semanticTokens/full`；formatting 使用同一套字节排版规则生成全文 TextEdit。
-- `bootstrap/zig-out/bin/lainir-lsp`：只提供 LSP 的 stream/allocator 能力；同时把
+- `seed/zig-out/bin/lainir-lsp`：只提供 LSP 的 stream/allocator 能力；同时把
   `bootstrap.allocate-pages` 映射到同一个 allocator，方便加载 source/highlight。
 
 ## 构建与检查

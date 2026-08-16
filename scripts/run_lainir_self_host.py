@@ -19,11 +19,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin" / (
+BOOTSTRAP = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
-HOST = ROOT / "bootstrap" / "src" / "host" / "native_compiler.c"
+HOST = ROOT / "seed" / "src" / "host" / "native_compiler.c"
 
 
 def run(arguments: list[Path | str], *, env: dict[str, str] | None = None) -> None:
