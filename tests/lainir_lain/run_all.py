@@ -24,6 +24,7 @@ def main() -> int:
         "run_workspace.py",
         "run_driver.py",
         "run_lainc_m1.py",
+        "run_lainc_m2.py",
     )
     for script in scripts:
         result = subprocess.run(
