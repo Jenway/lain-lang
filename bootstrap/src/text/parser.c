@@ -80,6 +80,8 @@ typedef enum {
   ,TK_KW_FDIV
   ,TK_KW_FEQ
   ,TK_KW_FLT
+  ,TK_KW_INT2PTR
+  ,TK_KW_PTR2INT
 } TokenKind;
 
 typedef struct {
@@ -240,6 +242,8 @@ static TokenKind hash_keyword_kind(const char *text, int len) {
   if (len == 4 && memcmp(text, "fdiv", 4) == 0) return TK_KW_FDIV;
   if (len == 3 && memcmp(text, "feq", 3) == 0) return TK_KW_FEQ;
   if (len == 3 && memcmp(text, "flt", 3) == 0) return TK_KW_FLT;
+  if (len == 7 && memcmp(text, "int2ptr", 7) == 0) return TK_KW_INT2PTR;
+  if (len == 7 && memcmp(text, "ptr2int", 7) == 0) return TK_KW_PTR2INT;
   if (len == 13 && memcmp(text, "call_indirect", 13) == 0) return TK_KW_CALL_INDIRECT;
   if (len == 4 && memcmp(text, "eval", 4) == 0) return TK_KW_EVAL;
   return TK_IDENT;
@@ -694,6 +698,19 @@ static L1Expr *parse_expr(Parser *p) {
     expect(p, TK_RPAREN);
     expr = lainir_new_expr(EXPR_PROC_ADDR);
     expr->data.proc_addr.fn_name = text;
+    return expr;
+  }
+  if (p->current.kind == TK_KW_INT2PTR ||
+      p->current.kind == TK_KW_PTR2INT) {
+    TokenKind conversion_kind = p->current.kind;
+    L1Expr *operand;
+    next_token(p);
+    expect(p, TK_LPAREN);
+    operand = parse_expr(p);
+    expect(p, TK_RPAREN);
+    expr = lainir_new_expr(
+        conversion_kind == TK_KW_INT2PTR ? EXPR_INT2PTR : EXPR_PTR2INT);
+    expr->data.unary.operand = operand;
     return expr;
   }
   if (p->current.kind == TK_KW_CALL_INDIRECT) {

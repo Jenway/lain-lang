@@ -74,7 +74,21 @@
     )
   }
   #if #call program_is_external_vec_call(%source, %node) {
-    #return #call program_eval_external_vec(%source, %node)
+    #let %environment: addr = #call program_unit_meta_environment(%unit)
+    #if #eq(#call program_function_is_nil(%function), 0) {
+      #let %function_environment: addr = #call program_function_environment(
+        %function
+      )
+      #if #eq(#call raw_is_nil(%function_environment), 0) {
+        %environment: addr = %function_environment
+      }
+    }
+    #let %existing: addr = #call meta_env_lookup_path(
+      %environment, %source, %node
+    )
+    #if #eq(#call meta_value_kind(%existing), 0) {
+      #return #call program_eval_external_vec(%source, %node)
+    }
   }
   #if #call program_is_std_path(%source, %node) {
     #let %member: addr = #call program_operand_name(%source, %node)
@@ -340,6 +354,11 @@
 #proc program_eval_function(
   addr %unit, addr %function, addr %arguments
 ) -> addr {
+  #call program_unit_set_meta_stage(%unit, 11)
+  #if #call program_unit_meta_step_inc(%unit) {
+    #call program_unit_set_validation_function(%unit, %function)
+    #return #call eval_result_new(5124, 0)
+  }
   #let %source: addr = #call program_function_source(%function)
   #let %old_environment: addr = #call program_function_environment(
     %function
@@ -436,7 +455,12 @@
     )
   }
   #if #call program_is_external_vec_call(%source, %node) {
-    #return #call program_eval_external_vec(%source, %node)
+    #let %existing: addr = #call meta_env_lookup_path(
+      %environment, %source, %node
+    )
+    #if #eq(#call meta_value_kind(%existing), 0) {
+      #return #call program_eval_external_vec(%source, %node)
+    }
   }
   #if #call program_is_std_path(%source, %node) {
     #let %member: addr = #call program_operand_name(%source, %node)
@@ -589,8 +613,22 @@
   addr %unit, addr %source, addr %caller, addr %caller_arguments,
   addr %callee, addr %group, addr %environment
 ) -> addr {
+  #call program_unit_set_meta_callee(%unit, #call raw_node_start(%callee))
+  #if #call program_unit_meta_step_inc(%unit) {
+    #call program_unit_set_validation_node(%unit, %source, %callee)
+    #return #call eval_result_new(5124, 0)
+  }
+  // The compiler's physical lowering does not need to execute every method
+  // body while building a module factory.  Keep the first large API closure
+  // bounded: factories still return their concrete type/module descriptor,
+  // while runtime method calls are resolved later by lowering.
   #if #call program_is_external_vec_call(%source, %callee) {
-    #return #call program_eval_external_vec(%source, %callee)
+    #let %existing: addr = #call meta_env_lookup_path(
+      %environment, %source, %callee
+    )
+    #if #eq(#call meta_value_kind(%existing), 0) {
+      #return #call program_eval_external_vec(%source, %callee)
+    }
   }
   #let %path_start: #bits<64> = #call raw_node_start(%callee)
   #let %path_length: #bits<64> = #call raw_node_length(%callee)
@@ -607,7 +645,7 @@
   #let %first_value: addr = #call meta_env_lookup_span(
     %environment, %source, %path_start, %path_index
   )
-  #if #call raw_is_nil(%first_value) {
+  #if #eq(#call meta_value_kind(%first_value), 0) {
     #call program_unit_set_first_path_kind(%unit, 0)
   } else {
     #call program_unit_set_first_path_kind(
@@ -618,7 +656,7 @@
   #let %meta_value: addr = #call meta_env_lookup_path(
     %environment, %source, %callee
   )
-  #if #call raw_is_nil(%meta_value) {
+  #if #eq(#call meta_value_kind(%meta_value), 0) {
     #call program_unit_set_path_kind(%unit, 0)
   } else {
     #call program_unit_set_path_kind(
@@ -638,7 +676,7 @@
     } else {
       #call program_unit_set_validation_function(%unit, %caller)
     }
-    #if #call raw_is_nil(%first_value) {
+    #if #eq(#call meta_value_kind(%first_value), 0) {
       #if #call program_function_is_nil(%caller) {
       } else {
         #call program_unit_set_validation_function(%unit, %caller)
@@ -692,7 +730,7 @@
   #let %cached: addr = #call program_eval_cache_lookup(
     %unit, %target, %arguments, %count
   )
-  #if #eq(#call raw_is_nil(%cached), 0) {
+  #if #call program_unit_cache_hit(%unit) {
     #return %cached
   }
   #let %evaluated: addr = #call program_eval_function(

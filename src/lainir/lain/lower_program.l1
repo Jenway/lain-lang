@@ -105,6 +105,12 @@
 #extern #proc meta_value_payload(addr %value) -> addr;
 #extern #proc meta_value_environment(addr %value) -> addr;
 #extern #proc meta_value_scalar_number(addr %value) -> i64;
+#extern #proc program_unit_meta_step_inc(addr %unit) -> i1;
+#extern #proc program_unit_set_meta_member(addr %unit, i64 %start) -> #unit;
+#extern #proc program_unit_set_meta_callee(addr %unit, i64 %start) -> #unit;
+#extern #proc program_unit_set_validation_node(
+  addr %unit, addr %source, addr %node
+) -> #unit;
 #extern #proc eval_group(addr %source, addr %group) -> addr;
 #extern #proc eval_result_new(i32 %status, i64 %value) -> addr;
 #extern #proc eval_result_object(i32 %status, addr %object) -> addr;
@@ -149,9 +155,13 @@
   // validation source/node @112/@120, call expected/actual/source-index
   // @128/@136/@144, Meta path kind @152, first-segment kind @160,
   // last import target/kind @168/@176, source roots @208,
-  // materialized module cache @216, Meta-evaluation cache head/tail
-  // @264/@272, physical-function hash buckets @280.
-  #let %unit: addr = #call bootstrap.allocate-pages(288)
+  // materialized module cache @216, Meta-evaluation step counter @224,
+  // cache-hit flag @232, cache-entry count @240,
+  // materialized-module construction states @288, Meta-evaluation cache
+  // head/tail @264/@272, physical-function hash buckets @280,
+  // import-collection flag @320, physical root index @328,
+  // lazy-nonroot flag @336.
+  #let %unit: addr = #call bootstrap.allocate-pages(344)
   #let %nil: addr = #call program_nil()
   #let %function_buckets: addr = #call bootstrap.allocate-pages(32768)
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=0)
@@ -183,6 +193,17 @@
   #store 0, #lea(base=%unit, idx=0, scale=0, offset=200)
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=208)
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=216)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=224)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=232)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=240)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=248)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=256)
+  #store %nil, #lea(base=%unit, idx=0, scale=0, offset=288)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=296)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=300)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=320)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=328)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=336)
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=264)
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=272)
   #store %function_buckets,
@@ -229,6 +250,10 @@
 
 #proc program_function_unit(addr %function) -> addr {
   #return #load[addr](#lea(base=%function, idx=0, scale=0, offset=72))
+}
+
+#proc program_function_is_linked(addr %function) -> i1 {
+  #return #load[i1](#lea(base=%function, idx=0, scale=0, offset=104))
 }
 
 #proc program_function_environment(addr %function) -> addr {
@@ -457,6 +482,30 @@
   #let %return_name: addr = #call program_operand_name(
     %source, %return_type
   )
+  // A module-valued forwarding call is a compile-time factory wrapper.  A
+  // module-valued identity function still has a physical ABI and is kept for
+  // nominal-parameter lowering, so inspect the returned expression before
+  // classifying it as Meta.
+  #if #call meta_atom_equal(%source, %return_name, "Module", 6) {
+    #let %statement: addr = #call raw_node_first(
+      #call program_function_body(%function)
+    )
+    #loop module_return_scan {
+      #if #call raw_is_nil(%statement) { #break module_return_scan }
+      #if #call meta_atom_equal(%source, %statement, "return", 6) {
+        #let %value: addr = #call raw_node_next(%statement)
+        #if #eq(#call raw_is_nil(
+          #call program_operand_group(%source, %value)
+        ), 0) { #return 1 }
+        #break module_return_scan
+      }
+      %statement: addr = #call raw_node_next(%statement)
+      #continue module_return_scan
+    }
+  }
+  #if #call meta_atom_equal(%source, %return_name, "ModuleShape", 11) {
+    #return 1
+  }
   #if #call meta_atom_equal(%source, %return_name, "Effect", 6) {
     #return 1
   }
@@ -490,6 +539,102 @@
   #return #load[i32](#lea(base=%unit, idx=0, scale=0, offset=24))
 }
 
+#proc program_unit_meta_step_inc(addr %unit) -> i1 {
+  #let %step: #bits<64> = #add(
+    #load[#bits<64>](#lea(base=%unit, idx=0, scale=0, offset=224)), 1
+  )
+  #store %step, #lea(base=%unit, idx=0, scale=0, offset=224)
+  // This protects compile-time Meta evaluation from an accidental recursive
+  // factory.  The limit is deliberately generous for the current bootstrap,
+  // while making a runaway evaluation report a normal compiler diagnostic.
+  #return #ge(%step, 50000)
+}
+
+#proc program_unit_meta_step(addr %unit) -> i64 {
+  #return #load[#bits<64>](#lea(base=%unit, idx=0, scale=0, offset=224))
+}
+
+#proc program_unit_set_meta_stage(addr %unit, i32 %stage) -> #unit {
+  #store %stage, #lea(base=%unit, idx=0, scale=0, offset=248)
+  #return
+}
+
+#proc program_unit_meta_stage(addr %unit) -> i32 {
+  #return #load[i32](#lea(base=%unit, idx=0, scale=0, offset=248))
+}
+
+#proc program_unit_set_meta_import_action(addr %unit, i32 %action) -> #unit {
+  #store %action, #lea(base=%unit, idx=0, scale=0, offset=256)
+  #return
+}
+
+#proc program_unit_meta_import_action(addr %unit) -> i32 {
+  #return #load[i32](#lea(base=%unit, idx=0, scale=0, offset=256))
+}
+
+#proc program_unit_set_meta_callee(addr %unit, i64 %start) -> #unit {
+  #store %start, #lea(base=%unit, idx=0, scale=0, offset=300)
+  #return
+}
+
+#proc program_unit_meta_callee(addr %unit) -> i64 {
+  #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=300))
+}
+
+#proc program_unit_set_collecting_import(addr %unit, i1 %value) -> #unit {
+  #store %value, #lea(base=%unit, idx=0, scale=0, offset=320)
+  #return
+}
+
+#proc program_unit_collecting_import(addr %unit) -> i1 {
+  #return #load[i1](#lea(base=%unit, idx=0, scale=0, offset=320))
+}
+
+#proc program_unit_set_physical_root_index(addr %unit, i64 %index) -> #unit {
+  #store %index, #lea(base=%unit, idx=0, scale=0, offset=328)
+  #return
+}
+
+#proc program_unit_physical_root_index(addr %unit) -> i64 {
+  #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=328))
+}
+
+#proc program_unit_set_lazy_nonroot(addr %unit, i1 %value) -> #unit {
+  #store %value, #lea(base=%unit, idx=0, scale=0, offset=336)
+  #return
+}
+
+#proc program_unit_lazy_nonroot(addr %unit) -> i1 {
+  #return #load[i1](#lea(base=%unit, idx=0, scale=0, offset=336))
+}
+
+#proc program_unit_set_meta_member(addr %unit, i64 %start) -> #unit {
+  #store %start, #lea(base=%unit, idx=0, scale=0, offset=296)
+  #return
+}
+
+#proc program_unit_meta_member(addr %unit) -> i64 {
+  #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=296))
+}
+
+#proc program_unit_set_cache_hit(addr %unit, i1 %hit) -> #unit {
+  #store %hit, #lea(base=%unit, idx=0, scale=0, offset=232)
+  #return
+}
+
+#proc program_unit_cache_hit(addr %unit) -> i1 {
+  #return #load[i1](#lea(base=%unit, idx=0, scale=0, offset=232))
+}
+
+#proc program_unit_cache_count(addr %unit) -> i64 {
+  #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=240))
+}
+
+#proc program_unit_set_cache_count(addr %unit, i64 %count) -> #unit {
+  #store %count, #lea(base=%unit, idx=0, scale=0, offset=240)
+  #return
+}
+
 #proc program_unit_set_sources(
   addr %unit, addr %sources, i64 %count
 ) -> #unit {
@@ -519,6 +664,15 @@
   #return #load[addr](#lea(base=%unit, idx=0, scale=0, offset=216))
 }
 
+#proc program_unit_set_materialized_states(addr %unit, addr %states) -> #unit {
+  #store %states, #lea(base=%unit, idx=0, scale=0, offset=288)
+  #return
+}
+
+#proc program_unit_materialized_states(addr %unit) -> addr {
+  #return #load[addr](#lea(base=%unit, idx=0, scale=0, offset=288))
+}
+
 
 
 
@@ -526,6 +680,19 @@
   #return #ne(
     #load[i8](#lea(base=%unit, idx=0, scale=0, offset=200)), 0
   )
+}
+
+#proc program_unit_materialized_state(addr %unit, i64 %target) -> i64 {
+  #let %states: addr = #call program_unit_materialized_states(%unit)
+  #return #load[i64](#lea(base=%states, idx=%target, scale=8, offset=0))
+}
+
+#proc program_unit_set_materialized_state(
+  addr %unit, i64 %target, i64 %state
+) -> #unit {
+  #let %states: addr = #call program_unit_materialized_states(%unit)
+  #store %state, #lea(base=%states, idx=%target, scale=8, offset=0)
+  #return
 }
 
 #proc program_unit_set_writing(addr %unit, i1 %writing) -> #unit {
@@ -1101,15 +1268,18 @@
     3
   )
   #let %function: addr = #call program_unit_head(%unit)
+  #let %scan_steps: i64 = 0
   #loop functions {
     #if #call program_function_is_nil(%function) {
       #return %function
     }
+    #if #ge(%scan_steps, 100000) { #return #call program_nil() }
+    %scan_steps: i64 = #add(%scan_steps, 1)
     #if #call program_name_matches_node(%source, %function, %final_name) {
       #let %candidate_environment: addr =
         #call program_function_environment(%function)
       #if #eq(
-        #call program_function_environment_key(%candidate_environment),
+        #call program_function_specialization_key(%function),
         %wanted_key
       ) {
         #return %function
@@ -1176,6 +1346,70 @@
       #return #call program_nil()
     }
   }
+  // Resolve the receiver's concrete type value before the legacy AST-only
+  // field walk.  A factory-produced type carries the exact Namespace for its
+  // specialization (`Vec(SourceUnit)`); looking up `get` there prevents a
+  // width-only fallback from selecting an unrelated `get` such as
+  // `Span(Unit).get`.
+  #let %receiver_node: addr = #call program_ufcs_receiver_node(
+    %source, %path_node
+  )
+  #if #eq(#call raw_is_nil(%receiver_node), 0) {
+    #let %receiver_type_value: addr =
+      #call program_record_meta_type_for_nested_ufcs(
+        %unit, %source, %caller, %receiver_node
+      )
+    #if #eq(#call meta_value_kind(%receiver_type_value), 4) {
+      #let %receiver_namespace: addr = #call meta_value_environment(
+        %receiver_type_value
+      )
+      #let %receiver_namespace_value: addr = #call meta_env_lookup_text(
+        %receiver_namespace, %source, "Namespace", 9
+      )
+      #if #eq(#call meta_value_kind(%receiver_namespace_value), 2) {
+        %receiver_namespace: addr = #call meta_value_environment(
+          %receiver_namespace_value
+        )
+      }
+      #let %receiver_member_start: i64 = #call program_name_start(
+        %source, %path_node
+      )
+      #let %receiver_member_length: i64 = #call program_name_length(
+        %source, %path_node
+      )
+      #let %receiver_member_value: addr = #call meta_env_lookup_span(
+        %receiver_namespace, %source,
+        %receiver_member_start, %receiver_member_length
+      )
+      #if #eq(#call meta_value_kind(%receiver_member_value), 3) {
+        // The Meta member payload is the descriptor created while this
+        // namespace was collected.  It already belongs to this concrete
+        // factory instance, so prefer it over a name/key scan through the
+        // physical list.
+        #let %receiver_member_target: addr = #call meta_value_payload(
+          %receiver_member_value
+        )
+        #if #eq(#call program_function_is_nil(%receiver_member_target), 0) {
+          #call program_append_function_if_missing(
+            %unit, %receiver_member_target
+          )
+          #return %receiver_member_target
+        }
+        #let %receiver_member_environment: addr = #call meta_value_environment(
+          %receiver_member_value
+        )
+        #let %receiver_scoped_target: addr = #call program_nil()
+        #if #eq(#call meta_env_is_nil(%receiver_member_environment), 0) {
+          %receiver_scoped_target: addr = #call program_find_function_in_environment(
+            %unit, %source, %path_node, %receiver_member_environment
+          )
+        }
+        #if #eq(#call program_function_is_nil(%receiver_scoped_target), 0) {
+          #return %receiver_scoped_target
+        }
+      }
+    }
+  }
   #let %field_type: addr = #call program_record_type_for_ufcs_field(
     %source, %caller, %path_node
   )
@@ -1216,7 +1450,7 @@
   #let %namespace_module: addr = #call meta_env_lookup_text(
     %namespace, %source, "Namespace", 9
   )
-  #if #eq(#call raw_is_nil(%namespace_module), 0) {
+  #if #ne(#call meta_value_kind(%namespace_module), 0) {
     #if #eq(#call meta_value_kind(%namespace_module), 2) {
       %namespace: addr = #call meta_value_environment(%namespace_module)
     }
@@ -1226,7 +1460,7 @@
   #let %member: addr = #call meta_env_lookup_span(
     %namespace, %source, %member_start, %member_length
   )
-  #if #call raw_is_nil(%member) {
+  #if #eq(#call meta_value_kind(%member), 0) {
     #let %member_text: addr = #lea(
       base=#call tool_source_data(%source),
       idx=%member_start, scale=1, offset=0
@@ -1235,7 +1469,7 @@
       %namespace, %source, %member_text, %member_length
     )
   }
-  #if #call raw_is_nil(%member) {
+  #if #eq(#call meta_value_kind(%member), 0) {
     #if #call program_unit_writing(%unit) {
       #return #call program_find_function(
         %unit, %source, #call program_operand_name(%source, %node)
@@ -1340,6 +1574,111 @@
   #return #sub(0, 1)
 }
 
+// Decide whether a value is physically an address.  This deliberately uses
+// a dotted field's own type instead of the receiver's record type: `values`
+// and `values.length` have the same receiver, but only the former is an
+// address while the latter is a bits<64> field.
+#proc program_value_is_address(
+  addr %unit, addr %source, addr %function, addr %node
+) -> i1 {
+  #if #call meta_atom_equal(%source, %node, "&", 1) { #return 1 }
+  // A direct call can return an address even when it has no record field
+  // spelling, for example `Allocation.address(values.storage)`.
+  #let %group: addr = #call program_operand_group(%source, %node)
+  #if #eq(#call raw_is_nil(%group), 0) {
+    #let %target: addr = #call program_find_function_for_caller(
+      %unit, %source, %function, %node
+    )
+    #if #eq(#call program_function_is_nil(%target), 0) {
+      #let %target_source: addr = #call program_function_source(%target)
+      #let %return_type: addr = #load[addr](
+        #lea(base=%target, idx=0, scale=0, offset=24)
+      )
+      #if #call meta_type_is_address(%target_source, %return_type) {
+        #return 1
+      }
+      #if #ne(
+        #call program_type_width_in_unit(
+          %unit, %target_source, %return_type
+        ),
+        0
+      ) { #return 0 }
+      #if #call program_type_is_address_in_unit(
+        %unit, %target_source, %return_type
+      ) { #return 1 }
+      #return 0
+    }
+  }
+  // The RawAst node at an expression start is only the first atom.  Extend
+  // it through the complete operand before looking up `value.field`: using
+  // just `value` would classify every field of an address-backed record as
+  // an address, including scalar fields such as `value.span.start`.
+  #let %operand_end: addr = #call program_operand_end_source(%source, %node)
+  #let %operand: addr = %node
+  #if #eq(#call raw_is_nil(%operand_end), 0) {
+    %operand: addr = #call raw_node_new(
+      1, 0, #call raw_node_start(%node),
+      #sub(
+        #add(#call raw_node_start(%operand_end),
+          #call raw_node_length(%operand_end)),
+        #call raw_node_start(%node)
+      ), 3
+    )
+  }
+  #let %prefix: i64 = #call program_name_prefix_length(%source, %operand)
+  #if #gt(%prefix, 0) {
+    // The one-field resolver below is exact for `values.data`.  Nested paths
+    // need the full Meta environment of every intermediate record; until the
+    // shared projection type-result helper owns that traversal, treat them
+    // as scalar here rather than producing an invalid #lea for
+    // `value.span.start`.
+    #let %dot_count: i64 = 0
+    #let %dot_index: i64 = 0
+    #let %operand_data: addr = #call tool_source_data(%source)
+    #loop dots {
+      #if #ge(%dot_index, #call raw_node_length(%operand)) { #break dots }
+      #if #eq(
+        #call tool_byte_at(
+          %operand_data,
+          #add(#call raw_node_start(%operand), %dot_index)
+        ),
+        46
+      ) { %dot_count: i64 = #add(%dot_count, 1) }
+      %dot_index: i64 = #add(%dot_index, 1)
+      #continue dots
+    }
+    #if #ge(%dot_count, 2) { #return 0 }
+    #let %field_type: addr = #call program_record_type_for_ufcs_field(
+      %source, %function, %operand
+    )
+    #if #eq(#call raw_is_nil(%field_type), 0) {
+      #if #call meta_type_is_address(%source, %field_type) { #return 1 }
+      #if #ne(
+        #call program_type_width_in_unit(%unit, %source, %field_type), 0
+      ) { #return 0 }
+      #if #call program_type_is_address_in_unit(
+        %unit, %source, %field_type
+      ) { #return 1 }
+      #return 0
+    }
+  }
+  #if #eq(%prefix, 0) {
+    #let %type: addr = #call program_record_type_for_field(
+      %source, %function, %operand
+    )
+    #if #eq(#call raw_is_nil(%type), 0) {
+      #if #call meta_type_is_address(%source, %type) { #return 1 }
+      #if #ne(
+        #call program_type_width_in_unit(%unit, %source, %type), 0
+      ) { #return 0 }
+      #if #call program_type_is_address_in_unit(
+        %unit, %source, %type
+      ) { #return 1 }
+    }
+  }
+  #return 0
+}
+
 // Infer a call argument's physical width from the caller's parameter/local
 // type.  The matcher intentionally returns -1 when the expression is too
 // complex to infer; that keeps existing Meta lookup behavior for those calls.
@@ -1355,6 +1694,18 @@
   }
   #if #call program_is_decimal(%source, %argument) { #return 64 }
   #if #call program_is_boolean(%source, %argument) { #return 1 }
+  // `std::load_bits(width, address)` carries its physical width in the
+  // first argument even though it has no source-level declaration to query.
+  #if #call program_is_std_intrinsic_call(
+    %source, %argument, "load_bits", 9
+  ) {
+    #let %group: addr = #call program_operand_group(%source, %argument)
+    #let %width_node: addr = #call raw_node_first(%group)
+    #let %width_result: addr = #call program_parse_decimal(
+      %source, %width_node
+    )
+    #return #call program_result_value(%width_result)
+  }
   // The argument node can span an infix expression (`byte & 255`).  Resolve
   // the type from its first operand, which is the value passed through the
   // expression and preserves the concrete generic width.
@@ -1424,6 +1775,16 @@
     #call program_name_prefix_length(%source, %argument), 0
   )
   #if %dotted {
+    // Preserve the type value while walking the receiver path.  This keeps
+    // the `T = SourceUnit` binding from the Vec specialization attached to
+    // `workspace.sources` before the call resolver examines `get`.
+    #let %receiver_nested_value: addr =
+      #call program_record_meta_type_for_nested_ufcs(
+        %unit, %source, %caller, %argument
+      )
+    #if #eq(#call meta_value_kind(%receiver_nested_value), 4) {
+      #return %receiver_nested_value
+    }
     #let %direct_type: addr = #call program_record_type_for_ufcs_field(
       %source, %caller, %argument
     )
@@ -1583,6 +1944,17 @@
       %environment: addr = %caller_environment
     }
   }
+  // A physical specialization keeps the lexical Meta environment it had
+  // when the factory was evaluated.  The descriptor may be temporarily
+  // rebound while compile-time evaluation walks its body; use the saved
+  // environment as the source of captured names such as `ByteVector`.
+  #let %saved_environment: addr = #call program_nil()
+  #if #eq(#call program_function_is_nil(%caller), 0) {
+    %saved_environment: addr = #call program_function_environment(%caller)
+    #if #eq(#call raw_is_nil(%saved_environment), 0) {
+      %environment: addr = %saved_environment
+    }
+  }
   #let %ufcs: addr = #call program_nil()
   #let %prefix_length: i64 = #call program_name_prefix_length(
     %source, %path_node
@@ -1598,13 +1970,46 @@
     #let %receiver: addr = #call program_ufcs_receiver_node(
       %source, %path_node
     )
-    #if #eq(#call raw_is_nil(%receiver), 0) {
-      #let %receiver_value: addr = #call meta_env_lookup_path(
-        %environment, %source, %receiver
-      )
+  #if #eq(#call raw_is_nil(%receiver), 0) {
+    #let %receiver_value: addr = #call meta_env_lookup_path(
+      %environment, %source, %receiver
+    )
       #if #eq(#call raw_is_nil(%receiver_value), 0) {
+        // A type value with an attached namespace uses the same qualified
+        // Meta lookup as a module value.  It has no runtime receiver, so
+        // sending it through UFCS makes `ByteVector.new()` look like a field
+        // access on the enclosing physical function and loses the specialized
+        // target.  Keep both module and type namespaces on the Meta path.
         #if #eq(#call meta_value_kind(%receiver_value), 2) {
           %skip_ufcs: i1 = 1
+        } else {
+        #if #eq(#call meta_value_kind(%receiver_value), 4) {
+          %skip_ufcs: i1 = 1
+        }
+        }
+      }
+    }
+  }
+  // Calls inside a specialized factory function carry the factory's lexical
+  // environment on the physical function descriptor.  The ordinary caller
+  // environment can be replaced by the temporary evaluator environment, so
+  // retry the receiver lookup against the descriptor's saved environment.
+  #if #eq(%skip_ufcs, 0) {
+    #if #eq(#call program_function_is_nil(%caller), 0) {
+      #let %saved_environment_2: addr = #call program_function_environment(
+        %caller
+      )
+      #if #eq(#call raw_is_nil(%saved_environment_2), 0) {
+        #let %saved_receiver: addr = #call program_ufcs_receiver_node(
+          %source, %path_node
+        )
+        #if #eq(#call raw_is_nil(%saved_receiver), 0) {
+          #let %saved_value: addr = #call meta_env_lookup_path(
+            %saved_environment_2, %source, %saved_receiver
+          )
+          #if #eq(#call meta_value_kind(%saved_value), 4) {
+            %skip_ufcs: i1 = 1
+          }
         }
       }
     }
@@ -1632,39 +2037,103 @@
     // replace the receiver's specialization with the first sibling.
     #return %ufcs
   }
+  // A type-qualified member (`ByteVector.new`) has no runtime receiver, so it
+  // deliberately skipped UFCS above.  Resolve the final member directly in
+  // the namespace carried by the type value.  The complete dotted path lookup
+  // cannot do this reliably when the type name is a captured factory binding:
+  // the first segment belongs to the caller environment, while the member
+  // belongs to the type's namespace environment.
+  #if #eq(%skip_ufcs, 1) {
+    #let %receiver: addr = #call program_ufcs_receiver_node(
+      %source, %path_node
+    )
+    #if #eq(#call raw_is_nil(%receiver), 0) {
+      #let %receiver_value: addr = #call meta_env_lookup_path(
+        %environment, %source, %receiver
+      )
+      #if #eq(#call meta_value_kind(%receiver_value), 4) {
+        #let %type_environment: addr = #call meta_value_environment(
+          %receiver_value
+        )
+        // Some factory paths retain the factory lexical environment on the
+        // type value and expose the actual member table as `Namespace`.
+        // Normalize both representations before looking up the member.
+        #let %namespace_value: addr = #call meta_env_lookup_text(
+          %type_environment, %source, "Namespace", 9
+        )
+        #if #eq(#call meta_value_kind(%namespace_value), 2) {
+          %type_environment: addr = #call meta_value_environment(
+            %namespace_value
+          )
+        }
+        #let %member_start: i64 = #call program_name_start(
+          %source, %path_node
+        )
+        #let %member_length: i64 = #call program_name_length(
+          %source, %path_node
+        )
+        #let %member_value: addr = #call meta_env_lookup_span(
+          %type_environment, %source, %member_start, %member_length
+        )
+        #if #eq(#call meta_value_kind(%member_value), 3) {
+          #let %target: addr = #call meta_value_payload(%member_value)
+          #if #eq(#call program_function_is_nil(%target), 0) {
+            #call program_append_function_if_missing(%unit, %target)
+            #return %target
+          }
+          #let %member_environment: addr = #call meta_value_environment(
+            %member_value
+          )
+          #let %member_node: addr = #call raw_node_new(
+            1, 0, %member_start, %member_length, 3
+          )
+          #let %scoped_target: addr =
+            #call program_find_function_in_environment(
+              %unit, %source, %member_node, %member_environment
+            )
+          #if #eq(#call program_function_is_nil(%scoped_target), 0) {
+            #call program_append_function_if_missing(%unit, %scoped_target)
+            #return %scoped_target
+          }
+        }
+      }
+    }
+  }
   #let %meta_value: addr = #call meta_env_lookup_path(
     %environment, %source, %path_node
   )
-  #if #call raw_is_nil(%meta_value) {
+  #if #eq(#call meta_value_kind(%meta_value), 0) {
     #call program_unit_set_path_kind(%unit, 0)
   } else {
     #call program_unit_set_path_kind(
       %unit, #call meta_value_kind(%meta_value)
     )
   }
-  #if #eq(#call raw_is_nil(%meta_value), 0) {
+  #if #ne(#call meta_value_kind(%meta_value), 0) {
     #if #eq(#call meta_value_kind(%meta_value), 3) {
       #let %target: addr = #call meta_value_payload(%meta_value)
-      // Qualified type/member calls carry the namespace environment on the
-      // Meta function value.  Use that key to recover the matching physical
-      // specialization when several Vec<T>.push descriptors share one source
-      // span and name.
+      // The Meta payload is the exact descriptor exported by the resolved
+      // module. Keep it intact here. Re-scanning physical functions by name
+      // can select the forwarding wrapper itself when two modules export a
+      // member named `compile`.
+      // Runtime record-field receivers have no module member payload at Meta
+      // lookup time.  Their physical descriptor still needs the ABI-width
+      // scan used for sibling specializations such as `sources.get`.
+      #let %match_generic_receiver: i1 = 0
       #if #ne(#call program_name_prefix_length(%source, %path_node), 0) {
-        #let %scoped_target: addr =
-          #call program_find_function_in_environment(
-            %unit, %source, %path_node,
-            #call meta_value_environment(%meta_value)
+        #let %match_receiver: addr = #call program_ufcs_receiver_node(
+          %source, %path_node
+        )
+        #if #eq(#call raw_is_nil(%match_receiver), 0) {
+          #let %match_value: addr = #call meta_env_lookup_path(
+            %environment, %source, %match_receiver
           )
-        #if #eq(#call program_function_is_nil(%scoped_target), 0) {
-          %target: addr = %scoped_target
+          #if #eq(#call meta_value_kind(%match_value), 0) {
+            %match_generic_receiver: i1 = 1
+          }
         }
       }
-      // A stale factory namespace can still point at a sibling generic
-      // specialization.  When the call has ordinary source arguments, use
-      // their physical widths to select the matching descriptor among the
-      // same-spelled specializations.  This is what separates
-      // `Vec(i32).push` from `Vec(Record).push` in a large source closure.
-      #if #ne(#call program_name_prefix_length(%source, %path_node), 0) {
+      #if %match_generic_receiver {
         #let %matching_target: addr = #call program_find_type_matching_call(
           %unit, %source, %caller, %target, %path_node, 0
         )
@@ -2307,12 +2776,7 @@
   addr %unit, addr %function
 ) -> #unit {
   #if #call program_function_is_nil(%function) { #return }
-  // Meta factories can materialize a fresh descriptor for the same closure
-  // key more than once.  Keep one physical copy in the unit; otherwise every
-  // Vec specialization is validated and emitted repeatedly.
-  #if #call program_unit_has_function(%unit, %function) {
-    #return
-  }
+  #if #call program_function_is_linked(%function) { #return }
   #call program_append_function(%unit, %function)
   #return
 }
@@ -2320,12 +2784,40 @@
 #proc program_materialize_import_target(
   addr %unit, i64 %target, addr %environment
 ) -> addr {
+  #call program_unit_set_meta_import_action(
+    %unit, #trunc[i32](#add(3000, %target))
+  )
+  #call program_unit_set_meta_stage(
+    %unit, #trunc[i32](#add(100, %target))
+  )
+  #call program_unit_set_meta_import_action(
+    %unit, #trunc[i32](#add(10000, %target))
+  )
+  #if #call program_unit_meta_step_inc(%unit) {
+    #return #call meta_value_nil()
+  }
   #let %materialized: addr = #call program_unit_materialized_modules(%unit)
   #if #call program_unit_has_materialized_modules(%unit) {
+    #let %state: i64 = #call program_unit_materialized_state(%unit, %target)
+    #call program_unit_set_meta_import_action(
+      %unit, #trunc[i32](#add(20000, %state))
+    )
+    #if #ne(%state, 0) {
+      #return #load[addr](
+        #lea(base=%materialized, idx=%target, scale=8, offset=0)
+      )
+    }
+    #call program_unit_set_materialized_state(%unit, %target, 1)
     #let %cached: addr = #load[addr](
       #lea(base=%materialized, idx=%target, scale=8, offset=0)
     )
-    #if #eq(#call raw_is_nil(%cached), 0) {
+    // Materialized entries are Meta values.  `raw_is_nil` inspects the first
+    // byte of a RawAst node and is not a valid test for a page-aligned Meta
+    // object; kind zero is the explicit Meta nil marker.
+    #if #ne(#call meta_value_kind(%cached), 0) {
+      #call program_unit_set_meta_import_action(
+        %unit, #trunc[i32](#add(2000, %target))
+      )
       #return %cached
     }
   }
@@ -2339,6 +2831,7 @@
   )
   #let %node: addr = #call raw_node_first(%root)
   #loop modules {
+    #call program_unit_set_meta_member(%unit, #call raw_node_start(%node))
     #if #call raw_is_nil(%node) {
       #break modules
     }
@@ -2358,20 +2851,35 @@
         #let %module_value: addr = #call meta_value_module(
           %source, %name, %group, %module_environment
         )
+        #if #call program_unit_has_materialized_modules(%unit) {
+          #store %module_value,
+            #lea(base=%materialized, idx=%target, scale=8, offset=0)
+        }
+        // Keep the shell in the local module environment while collecting.
+        // Publish it to the unit cache only after the member collection has
+        // completed; a partially collected shell is not a usable import.
         #call meta_env_bind(
           %environment, %source, %name, %module_value
         )
-        // Imported modules are collected directly from their parsed root;
-        // they do not pass through program_collect_source.  Install that
-        // source's own import aliases before parsing its members, otherwise
-        // parameter types such as memory_model.Shape remain unresolved and
-        // the exported member never enters the module environment.
+        // Preserve the source module name inside its own body environment so
+        // nested declarations can use qualified self references.
+        #call meta_env_bind(
+          %module_environment, %source, %name, %module_value
+        )
         #call program_bind_import_aliases(
           %unit, %source, %target, %root, %module_environment
         )
+        #call program_unit_set_collecting_import(%unit, 1)
         #let %status: i32 = #call program_collect_module(
           %unit, %source, %target, %group, %module_environment
         )
+        #call program_unit_set_collecting_import(%unit, 0)
+        #if #ne(%status, 0) {
+          #call program_unit_set_debug_source_index(
+            %unit, #call raw_node_start(%node)
+          )
+          #call program_unit_set_debug_module_kind(%unit, 4354)
+        }
         // The source may already have been checked in the main collection
         // pass.  Keep the materialized Module available even if this alias
         // pass observes a diagnostic; the normal unit status will report it
@@ -2379,6 +2887,10 @@
         #if #call program_unit_has_materialized_modules(%unit) {
           #store %module_value,
             #lea(base=%materialized, idx=%target, scale=8, offset=0)
+          #call program_unit_set_materialized_state(%unit, %target, 2)
+        }
+        #if #ne(%target, 0) {
+          #call program_unit_set_debug_module_kind(%unit, 4356)
         }
         #return %module_value
       }
@@ -2400,15 +2912,31 @@
   #let %module_value: addr = #call meta_value_module(
     %source, %module_name, %root, %module_environment
   )
-  #call program_bind_import_aliases(
-    %unit, %source, %target, %root, %module_environment
-  )
-  #let %status: i32 = #call program_collect_module(
-    %unit, %source, %target, %root, %module_environment
-  )
   #if #call program_unit_has_materialized_modules(%unit) {
     #store %module_value,
       #lea(base=%materialized, idx=%target, scale=8, offset=0)
+  }
+  #call program_bind_import_aliases(
+    %unit, %source, %target, %root, %module_environment
+  )
+  #call program_unit_set_collecting_import(%unit, 1)
+  #let %status: i32 = #call program_collect_module(
+    %unit, %source, %target, %root, %module_environment
+  )
+  #call program_unit_set_collecting_import(%unit, 0)
+  #if #ne(%status, 0) {
+    #call program_unit_set_debug_source_index(
+      %unit, #call raw_node_start(%module_name)
+    )
+    #call program_unit_set_debug_module_kind(%unit, 4355)
+  }
+  #if #call program_unit_has_materialized_modules(%unit) {
+    #store %module_value,
+      #lea(base=%materialized, idx=%target, scale=8, offset=0)
+    #call program_unit_set_materialized_state(%unit, %target, 2)
+  }
+  #if #ne(%target, 0) {
+    #call program_unit_set_debug_module_kind(%unit, 4357)
   }
   #return %module_value
 }
@@ -3453,6 +3981,43 @@
   #let %field_type: addr = #call program_record_type_for_field(
     %source, %function, %node
   )
+  // If the local's nominal type was not retained in its Meta environment,
+  // recover the record descriptor from the unit's collected type table.  The
+  // old fallback treated the whole nominal (`Meta.Expansion`) as the field
+  // type, which emitted `#load[addr]` at offset zero for `expanded.diagnostic`.
+  #if #eq(#call raw_is_nil(%field_type), 0) {
+    #let %descriptor: addr = #call program_find_type_final_member(
+      %unit, %source, %field_type
+    )
+    #if #eq(#call raw_is_nil(%descriptor), 0) {
+      #let %record_binding: addr = #call program_type_binding(%descriptor)
+      #let %record_source: addr = #call program_type_source(%descriptor)
+      #let %field: addr = #call program_record_field_for_node(
+        %source, %record_source, %record_binding, %node
+      )
+      #if #eq(#call raw_is_nil(%field), 0) {
+        #let %member_type: addr = #call program_record_field_type(
+          %record_source, %field
+        )
+        #let %offset: i64 = #call program_record_field_offset(
+          %source, %record_source, %record_binding, %node
+        )
+        #call bootstrap.artifact-write-literal("#load[")
+        #if #call program_write_meta_alias_type(
+          %unit, %record_source, %function, %member_type
+        ) {
+        } else {
+          #call program_write_type(%unit, %record_source, %member_type)
+        }
+        #call bootstrap.artifact-write-literal("](#lea(base=")
+        #call program_write_field_base(%source, %node)
+        #call bootstrap.artifact-write-literal(", idx=0, scale=0, offset=")
+        #call meta_write_decimal(%offset)
+        #call bootstrap.artifact-write-literal("))")
+        #return
+      }
+    }
+  }
   #call bootstrap.artifact-write-literal("#load[")
   #if #call program_field_is_length(%source, %node) {
     #call bootstrap.artifact-write-literal("#bits<64>")
@@ -3548,7 +4113,6 @@
   #let %needs_receiver: i1 = 0
   #if #gt(%field_prefix, 0) { %needs_receiver: i1 = 1 }
   #if #call raw_is_nil(%binding) { %needs_receiver: i1 = 1 }
-  #if #call raw_is_nil(%record_source) { %needs_receiver: i1 = 1 }
   #if %needs_receiver {
     #if #gt(%field_prefix, 0) {
       #let %receiver: addr = #call raw_node_new(
@@ -3595,10 +4159,6 @@
     }
   }
   #if #call raw_is_nil(%binding) {
-    #call program_write_unknown_field_load(%unit, %source, %function, %node)
-    #return
-  }
-  #if #call raw_is_nil(%record_source) {
     #call program_write_unknown_field_load(%unit, %source, %function, %node)
     #return
   }
@@ -3738,6 +4298,117 @@
   #return
 }
 
+// Record values occupy storage in the physical backend.  A record literal in
+// an expression therefore needs statements before that expression: allocate
+// the record, initialize every field, and then use its address.  Keeping this
+// materialization separate from the expression writer prevents a `#let` from
+// being emitted halfway through `#call f(...)`.
+#proc program_write_record_literal_children(
+  addr %unit, addr %source, addr %function, addr %literal
+) -> #unit {
+  #let %group: addr = #call program_record_literal_group(%source, %literal)
+  #let %field: addr = #call raw_node_first(%group)
+  #loop fields {
+    #if #call raw_is_nil(%field) { #break fields }
+    #let %colon: addr = #call raw_node_next(%field)
+    #let %value: addr = #call raw_node_next(%colon)
+    #call program_write_record_literals_in_expression(
+      %unit, %source, %function, %value
+    )
+    #let %value_end: addr = #call program_value_expression_end(
+      %source, %value
+    )
+    %field: addr = #call raw_node_next(%value_end)
+    #if #call meta_atom_equal(%source, %field, ",", 1) {
+      %field: addr = #call raw_node_next(%field)
+    }
+    #continue fields
+  }
+  #return
+}
+
+#proc program_write_record_literal_temporary(
+  addr %unit, addr %source, addr %function, addr %literal
+) -> #unit {
+  #let %binding: addr = #call program_record_binding_for_literal_in_function(
+    %unit, %source, %function, %literal
+  )
+  // Resolving a literal through a factory namespace can materialize its
+  // descriptor on the first lookup.  Query once more before deciding that no
+  // temporary is needed, so the later expression writer cannot discover the
+  // record only after this prelude has already been skipped.
+  #if #call raw_is_nil(%binding) {
+    %binding: addr = #call program_record_binding_for_literal_in_function(
+      %unit, %source, %function, %literal
+    )
+  }
+  #if #call raw_is_nil(%binding) { #return }
+  #call program_write_record_literal_children(
+    %unit, %source, %function, %literal
+  )
+  #let %record_source: addr = #call program_record_source_for_literal_in_function(
+    %unit, %source, %function, %literal
+  )
+  #let %size: i64 = #call program_record_size(%record_source, %binding)
+  #if #eq(%size, 0) { %size: i64 = 16 }
+  #call bootstrap.artifact-write-literal("  #let ")
+  #call program_write_record_base(%source, %literal, 1)
+  #call bootstrap.artifact-write-literal(": addr = #alloca(")
+  #call meta_write_decimal(%size)
+  #call bootstrap.artifact-write-literal(")\n")
+  #call program_write_record_literal_stores(
+    %unit, %source, %function, %literal, %literal, 1
+  )
+  #return
+}
+
+#proc program_write_record_literals_in_expression(
+  addr %unit, addr %source, addr %function, addr %node
+) -> #unit {
+  #if #call raw_is_nil(%node) { #return }
+  #if #call program_is_record_literal(%source, %node) {
+    #call program_write_record_literal_temporary(
+      %unit, %source, %function, %node
+    )
+    #return
+  }
+  #if #call program_is_parenthesized_operand(%node) {
+    #call program_write_record_literals_in_expression(
+      %unit, %source, %function, #call program_parenthesized_inner(%node)
+    )
+    #return
+  }
+  #let %group: addr = #call program_operand_group(%source, %node)
+  #if #eq(#call raw_is_nil(%group), 0) {
+    #let %argument: addr = #call raw_node_first(%group)
+    #loop arguments {
+      #if #call raw_is_nil(%argument) { #break arguments }
+      #call program_write_record_literals_in_expression(
+        %unit, %source, %function, %argument
+      )
+      #let %argument_end: addr = #call program_value_expression_end(
+        %source, %argument
+      )
+      #let %separator: addr = #call raw_node_next(%argument_end)
+      #if #call raw_is_nil(%separator) { #break arguments }
+      %argument: addr = #call raw_node_next(%separator)
+      #continue arguments
+    }
+    #return
+  }
+  #let %left_end: addr = #call program_operand_end_source(%source, %node)
+  #let %operator: addr = #call raw_node_next(%left_end)
+  #if #call program_is_operator(%source, %operator) {
+    #let %right: addr = #call raw_node_next(
+      #call program_value_operator_end(%source, %operator)
+    )
+    #call program_write_record_literals_in_expression(
+      %unit, %source, %function, %right
+    )
+  }
+  #return
+}
+
 #proc program_write_record_base(
   addr %source, addr %base, i1 %temporary
 ) -> #unit {
@@ -3806,6 +4477,9 @@
     %unit, %source, %function, %literal
   )
   #let %size: i64 = #call program_record_size(%record_source, %binding)
+  #call program_write_record_literal_children(
+    %unit, %source, %function, %literal
+  )
   #call bootstrap.artifact-write-literal("  #let ")
   #call program_write_record_base(%source, %literal, 1)
   #call bootstrap.artifact-write-literal(": addr = #alloca(")
@@ -4349,6 +5023,11 @@
     )
     #return 5108
   }
+  // Validation can discover a physical target through a Meta module even
+  // when that target was never evaluated as a compile-time call.  Attach the
+  // descriptor before emission so the generated direct call always has a
+  // verifier-visible procedure definition.
+  #call program_append_function_if_missing(%unit, %target)
   #let %ufcs: addr = #call program_find_ufcs_function(
     %unit, %source, %function, %callee
   )
@@ -4463,6 +5142,69 @@
   #return 0
 }
 
+// A record is physically represented by an address.  `Vec(T)` therefore
+// stores one record address per slot when T is a record.  `std::ref_at(T,
+// slot)` must load that address before returning it to code that reads the
+// record fields.  Explicit `&U` type arguments keep their ordinary reference
+// slot semantics and are deliberately excluded here.
+#proc program_intrinsic_type_uses_record_slot(
+  addr %unit, addr %source, addr %function, addr %type
+) -> i1 {
+  #let %environment: addr = #call program_function_environment(%function)
+  // A Meta environment is not a RawAst node.  Check it through its own tag
+  // predicate instead of relying on RawAst layout details.
+  #if #call meta_env_is_nil(%environment) { #return 0 }
+  #let %value: addr = #call meta_function_type_value(
+    %environment, %source, %type
+  )
+  // Vec's type parameter is declared in its factory environment.  The
+  // shared method descriptor can still resolve the spelling `T` to that
+  // placeholder, so retrieve the concrete capture from the parent chain.
+  #if #call meta_atom_equal(%source, %type, "T", 1) {
+    #let %captured: addr = #call meta_lookup_type_parameter_value(
+      %environment
+    )
+    #if #eq(#call meta_value_kind(%captured), 4) {
+      %value: addr = %captured
+    }
+  }
+  #if #ne(#call meta_value_kind(%value), 4) { #return 0 }
+  #let %concrete_source: addr = #call meta_value_source(%value)
+  #let %concrete: addr = #call meta_value_payload(%value)
+  #if #call meta_atom_equal(%concrete_source, %concrete, "let", 3) {
+    %concrete: addr = #call program_type_binding_value(
+      %concrete_source, %concrete
+    )
+  }
+  // A factory-created record keeps the constructor expression as the type
+  // value payload (`std::struct { ... }`), rather than the `let Token`
+  // declaration.  That expression has neither a builtin width nor a nominal
+  // name, so recognize the constructor before the generic physical checks.
+  #if #call program_is_std_path(%concrete_source, %concrete) {
+    #if #call meta_atom_equal(
+      %concrete_source,
+      #call program_operand_name(%concrete_source, %concrete), "struct", 6
+    ) { #return 1 }
+  }
+  #if #call meta_type_is_address(%concrete_source, %concrete) { #return 0 }
+  #if #ne(
+    #call program_type_width_in_unit(%unit, %concrete_source, %concrete), 0
+  ) { #return 0 }
+  #if #call program_type_is_address_in_unit(
+    %unit, %concrete_source, %concrete
+  ) { #return 1 }
+  // A factory argument can name a record declared in another source before
+  // that source's nominal entry has reached this unit's type table.  Its
+  // Meta value still carries the defining source, which distinguishes it
+  // from the unresolved `T` placeholder in std/core/vec.
+  #if #ne(%concrete_source, %source) {
+    #if #call meta_type_is_nominal(%concrete_source, %concrete) {
+      #return 1
+    }
+  }
+  #return 0
+}
+
 #proc program_write_intrinsic_load_bits(
   addr %source, addr %function, addr %node
 ) -> #unit {
@@ -4489,10 +5231,7 @@
   #let %group: addr = #call program_operand_group(%source, %node)
   #let %argument: addr = #call raw_node_first(%group)
   #let %environment: addr = #call program_function_environment(%function)
-  #if #call raw_is_nil(%environment) {
-    %environment: addr = #call program_function_environment(%function)
-  }
-  #if #call raw_is_nil(%environment) {
+  #if #call meta_env_is_nil(%environment) {
     #return 8
   }
   #let %value: addr = #call meta_env_lookup_path(
@@ -4883,7 +5622,9 @@
     %unit, %source, "main", 4
   )
   #if %require_main {
-    #if #call program_function_is_nil(%main) { #return 5101 }
+    #if #call program_function_is_nil(%main) {
+      #return 5101
+    }
     #if #ne(#call program_function_count(%main), 0) { #return 5111 }
     #if #eq(
       #call meta_atom_equal(
@@ -4966,26 +5707,50 @@
 #proc program_post_call_member_node(
   addr %source, addr %node
 ) -> addr {
-  // RawAst keeps a call's argument group directly after the callee path.
-  // The projection, when present, is the next sibling of that group.  Read
-  // only that local shape; scanning later siblings can mistake another
-  // statement's `.field` for this call's projection.
-  #let %group: addr = #call program_operand_group(%source, %node)
-  #if #call raw_is_nil(%group) { #return #call program_nil() }
-  #let %after: addr = #call raw_node_next(%group)
-  #if #call program_is_dot_member(%source, %after) {
-    #return #call raw_node_new(
-      1, 0,
-      #add(#call raw_node_start(%after), 1),
-      #sub(#call raw_node_length(%after), 1),
-      3
-    )
+  // The initial node may be the first segment of a dotted path, while the
+  // call group belongs to a later segment (`workspace.sources.get(i)`).
+  // Walk the path until its first argument group, then inspect only the
+  // sibling immediately after that group for the projection.
+  #let %current: addr = %node
+  #let %steps: i64 = 0
+  #loop path {
+    #if #ge(%steps, 64) { #return #call program_nil() }
+    #let %next: addr = #call raw_node_next(%current)
+    #if #call raw_is_nil(%next) { #return #call program_nil() }
+    // Do not let a later argument's call group turn an earlier argument into
+    // a post-call projection.  RawAst stores the whole argument list in one
+    // sibling chain, so the comma is the boundary for this path walk.
+    #if #call meta_atom_equal(%source, %next, ",", 1) {
+      #return #call program_nil()
+    }
+    #if #call meta_atom_equal(%source, %next, ";", 1) {
+      #return #call program_nil()
+    }
+    // Inspect the raw sibling chain directly.  `program_operand_name` walks
+    // all the way to the final member, so using `program_operand_group` here
+    // would skip the group attached to an earlier member such as `get`.
+    #if #eq(#call raw_node_kind(%next), 2) {
+      #if #eq(#call raw_node_delimiter(%next), 40) {
+        #let %after: addr = #call raw_node_next(%next)
+        #if #call program_is_dot_member(%source, %after) {
+          #return #call raw_node_new(
+            1, 0,
+            #add(#call raw_node_start(%after), 1),
+            #sub(#call raw_node_length(%after), 1),
+            3
+          )
+        }
+        #if #call program_is_dot(%source, %after) {
+          #let %member: addr = #call raw_node_next(%after)
+          #if #eq(#call raw_node_kind(%member), 1) { #return %member }
+        }
+        #return #call program_nil()
+      }
+    }
+    %current: addr = %next
+    %steps: i64 = #add(%steps, 1)
+    #continue path
   }
-  #if #call program_is_dot(%source, %after) {
-    #let %member: addr = #call raw_node_next(%after)
-    #if #eq(#call raw_node_kind(%member), 1) { #return %member }
-  }
-  #return #call program_nil()
 }
 
 #proc program_post_call_base_node(
@@ -5026,6 +5791,85 @@
   #return #call program_nil()
 }
 
+// The first executable backend maps the Allocation policy to one persistent
+// interpreter arena per value.  Allocation is still represented by ordinary
+// Lain source calls; this adapter is the runtime implementation of that
+// effect until the host callback ABI is wired through the Lain backend.
+//
+// `resize` deliberately keeps the original block.  Each initial allocation
+// reserves enough space for the current bootstrap compiler, so preserving the
+// block also preserves existing Vec contents across logical capacity growth.
+#proc program_is_allocation_policy_path(
+  addr %source, addr %node
+) -> i1 {
+  // A normal RawAst path starts at the `Allocation` atom.  Some call-site
+  // helpers instead hand the writer one synthetic atom spanning the complete
+  // `Allocation.member` text, so accept both representations.
+  #if #call meta_atom_equal(%source, %node, "Allocation", 10) {
+    #return 1
+  }
+  #let %length: i64 = #call raw_node_length(%node)
+  #if #lt(%length, 11) { #return 0 }
+  #let %data: addr = #call tool_source_data(%source)
+  #let %start: i64 = #call raw_node_start(%node)
+  #if #ne(#call tool_byte_at(%data, %start), 65) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 1)), 108) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 2)), 108) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 3)), 111) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 4)), 99) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 5)), 97) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 6)), 116) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 7)), 105) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 8)), 111) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 9)), 110) { #return 0 }
+  #return #eq(#call tool_byte_at(%data, #add(%start, 10)), 46)
+}
+
+#proc program_write_allocation_policy_call(
+  addr %source, addr %function, addr %node
+) -> i1 {
+  #if #eq(#call program_is_allocation_policy_path(%source, %node), 0) {
+    #return 0
+  }
+  #let %group: addr = #call program_operand_group(%source, %node)
+  #if #call raw_is_nil(%group) { #return 0 }
+  // Qualified source paths are one RawAst atom (`Allocation.resize`), not
+  // atom/dot/atom nodes.  Extract the final member before comparing it with
+  // the runtime policy operation names.
+  #let %target_name: addr = #call raw_node_new(
+    1, 0, #call program_name_start(%source, %node),
+    #call program_name_length(%source, %node), 3
+  )
+  #let %first: addr = #call raw_node_first(%group)
+  #if #call meta_atom_equal(%source, %target_name, "address", 7) {
+    #call program_write_operand(%source, %function, %first)
+    #return 1
+  }
+  #if #call meta_atom_equal(%source, %target_name, "empty", 5) {
+    #call bootstrap.artifact-write-literal("#alloca(1048576)")
+    #return 1
+  }
+  #if #call meta_atom_equal(%source, %target_name, "is_empty", 8) {
+    #call bootstrap.artifact-write-literal("#eq(")
+    #call program_write_operand(%source, %function, %first)
+    #call bootstrap.artifact-write-literal(", #int2ptr(0))")
+    #return 1
+  }
+  #if #call meta_atom_equal(%source, %target_name, "allocate", 8) {
+    #call bootstrap.artifact-write-literal("#alloca(1048576)")
+    #return 1
+  }
+  #if #call meta_atom_equal(%source, %target_name, "resize", 6) {
+    #call program_write_operand(%source, %function, %first)
+    #return 1
+  }
+  #if #call meta_atom_equal(%source, %target_name, "release", 7) {
+    #call bootstrap.artifact-write-literal("0")
+    #return 1
+  }
+  #return 0
+}
+
 #proc program_write_operand_base(
   addr %source, addr %function, addr %node
 ) -> #unit {
@@ -5064,10 +5908,41 @@
         %target_environment, %target_source, %element_text,
         #call raw_node_length(%element_type)
       )
+      // The physical `get` descriptor is shared by Vec specializations, so
+      // its own environment can leave `T` unresolved.  The receiver carries
+      // the concrete factory environment (`Vec(ExprId)`, `Vec(SourceUnit)`,
+      // ...); recover T there before choosing the dereference load width.
+      #let %receiver: addr = #call program_ufcs_receiver_node(
+        %source, %value
+      )
+      #let %receiver_value: addr = #call program_call_argument_type_value(
+        #call program_function_unit(%function), %source, %function,
+        %receiver
+      )
+      #if #eq(#call meta_value_kind(%receiver_value), 4) {
+        #let %receiver_environment: addr = #call meta_value_environment(
+          %receiver_value
+        )
+        #let %receiver_element: addr = #call meta_lookup_concrete_type_value(
+          %receiver_environment, %source
+        )
+        #if #ne(#call meta_value_kind(%receiver_element), 4) {
+          %receiver_element: addr = #call meta_lookup_type_parameter_value(
+            %receiver_environment
+          )
+        }
+        #if #eq(#call meta_value_kind(%receiver_element), 4) {
+          %element_value: addr = %receiver_element
+        }
+      }
       // `get` returns a reference.  Dereferencing it loads one element using
       // the element's physical representation.  Record values are represented
       // by `addr`; scalar builtins keep their concrete bit width.
       #call bootstrap.artifact-write-literal("#load[")
+      #if #call program_write_meta_value_type(
+        #call program_function_unit(%target), %element_value
+      ) {
+      } else {
       #if #call program_write_resolved_function_type(
         #call program_function_unit(%target), %target_source, %target,
         %element_type
@@ -5076,6 +5951,7 @@
         #call program_write_type(
           #call program_function_unit(%target), %target_source, %element_type
         )
+      }
       }
       #call bootstrap.artifact-write-literal("](")
       #call program_write_operand(%source, %function, %value)
@@ -5099,6 +5975,25 @@
       )
       #call bootstrap.artifact-write-byte(41)
       #return
+    }
+    // Integer literals default to the machine width in LAIN-IR.  Give the
+    // zero operand the same width as a typed local/parameter so `-i32`
+    // remains a `bits<32>` expression at a call boundary.
+    #let %signed_type: addr = #call program_record_type_for_field(
+      %source, %function, %signed
+    )
+    #let %signed_width: i64 = #call program_type_width_in_unit(
+      #call program_function_unit(%function), %source, %signed_type
+    )
+    #if #ne(%signed_width, 0) {
+      #if #lt(%signed_width, 64) {
+        #call bootstrap.artifact-write-literal("#sub(#trunc[#bits<")
+        #call meta_write_decimal(%signed_width)
+        #call bootstrap.artifact-write-literal(">](0), ")
+        #call program_write_value_expression(%source, %function, %signed)
+        #call bootstrap.artifact-write-byte(41)
+        #return
+      }
     }
     #call bootstrap.artifact-write-literal("#sub(0, ")
     #call program_write_value_expression(%source, %function, %signed)
@@ -5171,15 +6066,52 @@
     #return
   }
   #if #call meta_atom_equal(
+    %source, #call program_operand_name(%source, %node),
+    "dangling_mut_ref", 16
+  ) {
+    #call bootstrap.artifact-write-literal("#alloca(1)")
+    #return
+  }
+  #if #call meta_atom_equal(
     %source, #call program_operand_name(%source, %node), "ref_at", 6
   ) {
     #let %group: addr = #call program_operand_group(%source, %node)
     #let %type: addr = #call raw_node_first(%group)
     #let %comma: addr = #call raw_node_next(%type)
     #let %address: addr = #call raw_node_next(%comma)
+    #if #call program_intrinsic_type_uses_record_slot(
+      #call program_function_unit(%function), %source, %function, %type
+    ) {
+      #call bootstrap.artifact-write-literal("#load[addr](")
+      #call program_write_value_expression(%source, %function, %address)
+      #call bootstrap.artifact-write-byte(41)
+      #return
+    }
     #call program_write_value_expression(%source, %function, %address)
     #return
   }
+  #if #call meta_atom_equal(
+    %source, #call program_operand_name(%source, %node),
+    "mut_ref_at", 10
+  ) {
+    #let %group: addr = #call program_operand_group(%source, %node)
+    #let %type: addr = #call raw_node_first(%group)
+    #let %comma: addr = #call raw_node_next(%type)
+    #let %address: addr = #call raw_node_next(%comma)
+    #if #call program_intrinsic_type_uses_record_slot(
+      #call program_function_unit(%function), %source, %function, %type
+    ) {
+      #call bootstrap.artifact-write-literal("#load[addr](")
+      #call program_write_value_expression(%source, %function, %address)
+      #call bootstrap.artifact-write-byte(41)
+      #return
+    }
+    #call program_write_value_expression(%source, %function, %address)
+    #return
+  }
+  #if #call program_write_allocation_policy_call(
+    %source, %function, %node
+  ) { #return }
   #if #call program_is_policy_path(%source, %node) {
     #let %member: addr = #call program_operand_name(%source, %node)
     #if #call meta_atom_equal(%source, %member, "address", 7) {
@@ -5243,9 +6175,9 @@
       #call program_function_unit(%function), %source, %function, %node
     )
     #if #eq(#call raw_is_nil(%record_binding), 0) {
-      #call program_write_record_allocation(
-        #call program_function_unit(%function), %source, %function, %node
-      )
+      // The statement writer has already materialized this literal.  Here it
+      // is only a value expression, so pass the initialized temporary.
+      #call program_write_record_base(%source, %node, 1)
       #return
     }
   }
@@ -5311,6 +6243,16 @@
   #let %target: addr = #call program_find_function_for_caller(
     #call program_function_unit(%function), %source, %function, %lookup_node
   )
+  #if #call program_function_is_nil(%target) {
+  } else {
+    // The target may come from a Meta module that was never evaluated as a
+    // compile-time call.  Attach it before writing the call label; otherwise
+    // the emitted LAIN-IR refers to a descriptor that never reaches the
+    // module's physical procedure list.
+    #call program_append_function_if_missing(
+      #call program_function_unit(%function), %target
+    )
+  }
   // A module-qualified call has no runtime receiver.  Its normal argument
   // list starts at the original group, and the call is emitted directly.
   #let %module_call: i1 = #call program_is_upper_module_path(
@@ -5352,6 +6294,32 @@
     #call program_function_unit(%function), %source, %function, %lookup_node
   )
   #let %ufcs_call: i1 = #eq(#call program_function_is_nil(%ufcs), 0)
+  // A module call and a UFCS call can share the same spelling when the
+  // parser's path span starts at an argument expression.  The physical
+  // target's arity disambiguates them: a real UFCS call has one implicit
+  // receiver more than the explicit argument group.
+  #if %ufcs_call {
+    #let %explicit_count: i64 = 0
+    #let %explicit: addr = #call raw_node_first(%group)
+    #loop explicit_arguments {
+      #if #call raw_is_nil(%explicit) { #break explicit_arguments }
+      %explicit_count: i64 = #add(%explicit_count, 1)
+      #let %explicit_end: addr = #call program_value_expression_end(
+        %source, %explicit
+      )
+      #let %separator: addr = #call raw_node_next(%explicit_end)
+      #if #call raw_is_nil(%separator) { #break explicit_arguments }
+      %explicit: addr = #call raw_node_next(%separator)
+      #continue explicit_arguments
+    }
+    #if #eq(#call program_function_is_nil(%target), 0) {
+      #if #eq(
+        #call program_function_count(%target), %explicit_count
+      ) {
+        %ufcs_call: i1 = 0
+      }
+    }
+  }
   #if %module_call {
     %ufcs_call: i1 = 0
   }
@@ -5547,10 +6515,45 @@
                 %source, %record_source, %binding, %projection_node
               )
               #call bootstrap.artifact-write-literal("#load[")
-              #let %alias_type: i1 = #call program_write_meta_alias_type(
-                #call program_function_unit(%function), %record_source,
-                %function, %field_type
-              )
+              // Resolve the field type in the record type's own lexical
+              // environment.  A field such as `Syntax.UnitId` belongs to the
+              // factory that created `SourceUnit`; the caller's environment
+              // cannot reliably resolve that alias.
+              #let %projection_field_value: addr =
+                #call meta_function_type_value(
+                  #call meta_value_environment(%type_value),
+                  %record_source, %field_type
+                )
+              #if #ne(
+                #call meta_value_kind(%projection_field_value), 4
+              ) {
+                // Qualified field aliases can come from a copied RawAst
+                // span.  Retry by text in the record type's own namespace;
+                // this is the same environment that created ModuleValue.
+                #let %field_environment: addr = #call meta_value_environment(
+                  %type_value
+                )
+                #let %field_text: addr = #lea(
+                  base=#call tool_source_data(%record_source),
+                  idx=#call raw_node_start(%field_type), scale=1, offset=0
+                )
+                %projection_field_value: addr = #call meta_env_lookup_text(
+                  %field_environment, %record_source, %field_text,
+                  #call raw_node_length(%field_type)
+                )
+              }
+              #let %projection_field_written: i1 =
+                #call program_write_meta_value_type(
+                  #call program_function_unit(%function),
+                  %projection_field_value
+                )
+              #let %alias_type: i1 = %projection_field_written
+              #if #eq(%alias_type, 0) {
+                %alias_type: i1 = #call program_write_meta_alias_type(
+                  #call program_function_unit(%function), %record_source,
+                  %function, %field_type
+                )
+              }
               #if #eq(%alias_type, 0) {
                 #call program_write_function_type(
                   #call program_function_unit(%function), %record_source,
@@ -5665,14 +6668,42 @@
     %source, %operator
   )
   #let %right: addr = #call raw_node_next(%operator_end)
-  // Policy.address returns a pointer.  Lower pointer-plus-byte-offset to the
-  // native #lea form instead of feeding an addr into integer #add.
+  // Pointer-plus-byte-offset belongs to the native #lea form.  The left side
+  // can be `Allocation.address(...)`, a record field such as `values.data`,
+  // or a direct address local, so decide from its physical type rather than
+  // from one spelling of the source expression.
   #if #call meta_atom_equal(%source, %operator, "+", 1) {
-    #if #call program_is_policy_path(%source, %left) {
-      #let %group: addr = #call program_operand_group(%source, %left)
-      #let %base: addr = #call raw_node_first(%group)
+    #let %left_is_address: i1 = #call program_value_is_address(
+      #call program_function_unit(%function), %source, %function, %left
+    )
+    #if %left_is_address {
+      #let %base: addr = %left
+      // `Allocation.address(block)` is a surface-level identity operation
+      // over the policy block.  Resolve the selected function and examine
+      // its defining name; this remains reliable when the caller's qualified
+      // path cannot be traversed as one RawAst operand.
+      #let %base_group: addr = #call program_operand_group(%source, %left)
+      #if #eq(#call raw_is_nil(%base_group), 0) {
+        #let %base_target: addr = #call program_find_function_for_caller(
+          #call program_function_unit(%function), %source, %function, %left
+        )
+        #if #eq(#call program_function_is_nil(%base_target), 0) {
+          #let %base_target_source: addr =
+            #call program_function_source(%base_target)
+          #let %base_target_name: addr = #call raw_node_new(
+            1, 0, #call program_function_name_start(%base_target),
+            #call program_function_name_length(%base_target), 3
+          )
+          #if #call meta_atom_equal(
+            %base_target_source, %base_target_name, "address", 7
+          ) {
+            %base: addr = #call raw_node_first(%base_group)
+          }
+        }
+      }
       #let %index: addr = %right
       #let %scale: i64 = 1
+      #let %folded_scale: i1 = 0
       #let %index_end: addr = #call program_operand_end_source(
         %source, %right
       )
@@ -5686,12 +6717,17 @@
             #call program_function_unit(%function),
             %source, %function, %scale_node
           )
+          %folded_scale: i1 = 1
         }
       }
       #call bootstrap.artifact-write-literal("#lea(base=")
       #call program_write_operand(%source, %function, %base)
       #call bootstrap.artifact-write-literal(", idx=")
-      #call program_write_operand(%source, %function, %index)
+      #if %folded_scale {
+        #call program_write_operand(%source, %function, %index)
+      } else {
+        #call program_write_value_expression(%source, %function, %right)
+      }
       #call bootstrap.artifact-write-literal(", scale=")
       #call meta_write_decimal(%scale)
       #call bootstrap.artifact-write-literal(", offset=0)")
@@ -5833,6 +6869,37 @@
     #call program_function_unit(%function),
     #call program_function_source(%target), %type
   )
+  #let %actual_width: i64 = #call program_call_argument_width(
+    #call program_function_unit(%function), %source, %function, %argument
+  )
+  // LAIN-IR calls require exact physical widths.  Lain expressions can
+  // produce a narrower value (for example `load_bits(8, p)` passed to an
+  // `i32` parameter), so insert the explicit integer conversion at the call
+  // boundary.
+  #if #call program_is_std_intrinsic_call(
+    %source, %argument, "load_bits", 9
+  ) {
+  #if #ne(%width, 0) {
+  #if #ne(%actual_width, #sub(0, 1)) {
+  #if #ne(%width, %actual_width) {
+    #if #gt(%width, %actual_width) {
+      #call bootstrap.artifact-write-literal("#zext[#bits<")
+      #call meta_write_decimal(%width)
+      #call bootstrap.artifact-write-literal(">](")
+      #call program_write_value_expression(%source, %function, %argument)
+      #call bootstrap.artifact-write-byte(41)
+      #return
+    }
+    #call bootstrap.artifact-write-literal("#trunc[#bits<")
+    #call meta_write_decimal(%width)
+    #call bootstrap.artifact-write-literal(">](")
+    #call program_write_value_expression(%source, %function, %argument)
+    #call bootstrap.artifact-write-byte(41)
+    #return
+  }
+  }
+  }
+  }
   #let %left_end: addr = #call program_operand_end_source(
     %source, %argument
   )
@@ -5849,14 +6916,30 @@
         #return
       }
     }
+    // An infix expression gets its physical width from its left operand.
+    // Convert only when that resolved width actually differs from the callee
+    // parameter.  The older `width < 64` shortcut truncated expressions that
+    // were already `bits<32>` (for example `%value / 10`).
     #if #ne(%width, 0) {
-      #if #lt(%width, 64) {
-        #call bootstrap.artifact-write-literal("#trunc[#bits<")
-        #call meta_write_decimal(%width)
-        #call bootstrap.artifact-write-literal(">](")
-        #call program_write_value_expression(%source, %function, %argument)
-        #call bootstrap.artifact-write-byte(41)
-        #return
+      #if #ne(%actual_width, #sub(0, 1)) {
+        #if #ne(%actual_width, 0) {
+          #if #ne(%width, %actual_width) {
+            #if #gt(%width, %actual_width) {
+              #call bootstrap.artifact-write-literal("#zext[#bits<")
+              #call meta_write_decimal(%width)
+              #call bootstrap.artifact-write-literal(">](")
+              #call program_write_value_expression(%source, %function, %argument)
+              #call bootstrap.artifact-write-byte(41)
+              #return
+            }
+            #call bootstrap.artifact-write-literal("#trunc[#bits<")
+            #call meta_write_decimal(%width)
+            #call bootstrap.artifact-write-literal(">](")
+            #call program_write_value_expression(%source, %function, %argument)
+            #call bootstrap.artifact-write-byte(41)
+            #return
+          }
+        }
       }
     }
   }
@@ -5887,6 +6970,9 @@
       #return
     }
   }
+  #call program_write_record_literals_in_expression(
+    #call program_function_unit(%function), %source, %function, %left
+  )
   // A unit-returning call is a statement in LAIN-IR.  `#return <expr>` needs
   // a value, so emit the call first and then return from the current unit
   // function.  This matters for code such as `return Namespace.push(...)`.
@@ -5907,21 +6993,6 @@
       #return
     }
   }
-  #let %return_type: addr = #load[addr](
-    #lea(base=%function, idx=0, scale=0, offset=24)
-  )
-  #if #call program_type_is_address_in_unit(
-    #call program_function_unit(%function), %source, %return_type
-  ) {
-    #if #call program_is_std_path(%source, %left) {
-      #call bootstrap.artifact-write-literal("  #return #alloca(1)\n")
-      #return
-    }
-    #if #call meta_atom_equal(%source, %left, "std", 3) {
-      #call bootstrap.artifact-write-literal("  #return #alloca(1)\n")
-      #return
-    }
-  }
   #call bootstrap.artifact-write-literal("  #return ")
   #call program_write_value_expression(%source, %function, %left)
   #call bootstrap.artifact-write-byte(10)
@@ -5929,15 +7000,10 @@
 }
 
 #proc program_is_policy_path(addr %source, addr %node) -> i1 {
-  #let %member: addr = #call program_operand_name(%source, %node)
-  #if #call meta_atom_equal(%source, %member, "address", 7) { #return 1 }
-  #if #call meta_atom_equal(%source, %member, "empty", 5) { #return 1 }
-  #if #call meta_atom_equal(%source, %member, "allocate", 8) { #return 1 }
-  #if #call meta_atom_equal(%source, %member, "resize", 6) { #return 1 }
-  #if #call meta_atom_equal(%source, %member, "release", 7) { #return 1 }
-  #if #call meta_atom_equal(%source, %member, "capacity_overflow", 17) {
-    #return 1
-  }
+  // Policy operations are qualified calls.  Looking only at the final name
+  // classified ordinary locals such as `let empty = ...; values.push(empty)`
+  // as allocation operations and replaced their value with `#alloca(1)`.
+  // Keep the check tied to a policy path below.
   #let %data: addr = #call tool_source_data(%source)
   #let %start: i64 = #call raw_node_start(%node)
   #let %length: i64 = #call raw_node_length(%node)
@@ -6095,6 +7161,9 @@
     // Lain permits a final expression to return from a non-unit function.
     // Keep intermediate expression statements as statements, while lowering
     // the last one to the LAIN-IR return form required by l1check.
+    #call program_write_record_literals_in_expression(
+      #call program_function_unit(%function), %source, %function, %statement
+    )
     #let %expression_end: addr = #call program_value_expression_end(
       %source, %statement
     )
@@ -6215,6 +7284,62 @@
 // the alias binding (`let ModuleId: type = usize`).  Resolve that binding
 // before the nominal/address fallback runs; otherwise every qualified alias
 // is emitted as `addr`, even when its target is a scalar builtin.
+#proc program_write_meta_value_type(
+  addr %unit, addr %value
+) -> i1 {
+  #if #ne(#call meta_value_kind(%value), 4) { #return 0 }
+  #let %current_value: addr = %value
+  #let %concrete_source: addr = #call meta_value_source(%current_value)
+  #let %concrete: addr = #call meta_value_payload(%current_value)
+  #let %depth: #bits<32> = 0
+  #loop aliases {
+    #if #ge(%depth, 8) { #break aliases }
+    %depth: #bits<32> = #add(%depth, 1)
+    #if #call meta_atom_equal(
+      %concrete_source, %concrete, "let", 3
+    ) {
+      %concrete: addr = #call program_type_binding_value(
+        %concrete_source, %concrete
+      )
+    }
+    #let %span_width: i64 = #call meta_builtin_width_span(
+      %concrete_source,
+      #call raw_node_start(%concrete),
+      #call raw_node_length(%concrete)
+    )
+    #if #call program_write_physical_width(%span_width) { #return 1 }
+    #let %width: i64 = #call program_type_width(
+      %concrete_source, %concrete
+    )
+    #if #eq(%width, 0) {
+      %width: i64 = #call program_type_width_in_unit(
+        %unit, %concrete_source, %concrete
+      )
+    }
+    #if #call program_write_physical_width(%width) { #return 1 }
+    #if #call program_type_is_address_in_unit(
+      %unit, %concrete_source, %concrete
+    ) {
+      #call bootstrap.artifact-write-literal("addr")
+      #return 1
+    }
+    #if #call meta_type_is_nominal(%concrete_source, %concrete) {
+      #let %next: addr = #call meta_env_lookup_path(
+        #call meta_value_environment(%current_value),
+        %concrete_source, %concrete
+      )
+      #if #eq(#call meta_value_kind(%next), 4) {
+        %current_value: addr = %next
+        %concrete_source: addr = #call meta_value_source(%next)
+        %concrete: addr = #call meta_value_payload(%next)
+        #continue aliases
+      }
+    }
+    #break aliases
+  }
+  #return 0
+}
+
 #proc program_write_meta_alias_type(
   addr %unit, addr %source, addr %function, addr %type
 ) -> i1 {
@@ -6338,6 +7463,23 @@
   #if #call raw_is_nil(%type) {
     #call bootstrap.artifact-write-literal("#unit")
     #return
+  }
+  // Qualified aliases such as `types.NamespaceId` are already present in
+  // the function's captured module environment.  Resolve that exact path
+  // before the record-field fallback, which can lose the imported module
+  // namespace when the type node came from another source file.
+  #let %function_environment: addr = #call program_function_environment(
+    %function
+  )
+  #if #eq(#call meta_env_is_nil(%function_environment), 0) {
+    #let %direct_value: addr = #call meta_env_lookup_path(
+      %function_environment, %source, %type
+    )
+    #if #eq(#call meta_value_kind(%direct_value), 4) {
+      #if #call program_write_meta_value_type(
+        %unit, %direct_value
+      ) { #return }
+    }
   }
   #if #call program_write_meta_alias_type(
     %unit, %source, %function, %type
@@ -6508,6 +7650,9 @@
       #let %size: i64 = #call program_record_size(
         %record_source, %record_binding
       )
+      #call program_write_record_literal_children(
+        #call program_function_unit(%function), %source, %function, %value
+      )
       #call bootstrap.artifact-write-literal("  #let %")
       #call meta_write_span(
         %source, #call raw_node_start(%name), #call raw_node_length(%name)
@@ -6527,6 +7672,9 @@
       #return
     }
   }
+  #call program_write_record_literals_in_expression(
+    #call program_function_unit(%function), %source, %function, %value
+  )
   #call bootstrap.artifact-write-literal("  #let %")
   #call meta_write_span(
     %source, #call raw_node_start(%name), #call raw_node_length(%name)
@@ -6597,6 +7745,9 @@
     )
     #let %equals: addr = #call raw_node_next(%address_end)
     #let %value: addr = #call raw_node_next(%equals)
+    #call program_write_record_literals_in_expression(
+      #call program_function_unit(%function), %source, %function, %value
+    )
     #call bootstrap.artifact-write-literal("  #store ")
     #call program_write_value_expression(%source, %function, %value)
     #call bootstrap.artifact-write-literal(", ")
@@ -6645,6 +7796,9 @@
               )
               #let %equals: addr = #call raw_node_next(%assignment_end)
               #let %value: addr = #call raw_node_next(%equals)
+              #call program_write_record_literals_in_expression(
+                %unit, %source, %function, %value
+              )
               #call bootstrap.artifact-write-literal("  #store ")
               #call program_write_value_expression(%source, %function, %value)
               #call bootstrap.artifact-write-literal(", #lea(base=")
@@ -6674,21 +7828,14 @@
     #if #call raw_is_nil(%binding) {
       #let %equals: addr = #call raw_node_next(%assignment)
       #let %value: addr = #call raw_node_next(%equals)
+      #call program_write_record_literals_in_expression(
+        %unit, %source, %function, %value
+      )
       #call bootstrap.artifact-write-literal("  #store ")
       #call program_write_value_expression(%source, %function, %value)
       #call bootstrap.artifact-write-literal(
         ", #lea(base="
       )
-      #call program_write_field_base(%source, %assignment)
-      #call bootstrap.artifact-write-literal(", idx=0, scale=0, offset=0)\n")
-      #return
-    }
-    #if #call raw_is_nil(%record_source) {
-      #let %equals: addr = #call raw_node_next(%assignment)
-      #let %value: addr = #call raw_node_next(%equals)
-      #call bootstrap.artifact-write-literal("  #store ")
-      #call program_write_value_expression(%source, %function, %value)
-      #call bootstrap.artifact-write-literal(", #lea(base=")
       #call program_write_field_base(%source, %assignment)
       #call bootstrap.artifact-write-literal(", idx=0, scale=0, offset=0)\n")
       #return
@@ -6699,6 +7846,9 @@
     #if #call raw_is_nil(%field) {
       #let %equals: addr = #call raw_node_next(%assignment)
       #let %value: addr = #call raw_node_next(%equals)
+      #call program_write_record_literals_in_expression(
+        %unit, %source, %function, %value
+      )
       #call bootstrap.artifact-write-literal("  #store ")
       #call program_write_value_expression(%source, %function, %value)
       #call bootstrap.artifact-write-literal(", #lea(base=")
@@ -6714,6 +7864,9 @@
     )
     #let %equals: addr = #call raw_node_next(%assignment)
     #let %value: addr = #call raw_node_next(%equals)
+    #call program_write_record_literals_in_expression(
+      %unit, %source, %function, %value
+    )
     #call bootstrap.artifact-write-literal("  #store ")
     #call program_write_value_expression(%source, %function, %value)
     #call bootstrap.artifact-write-literal(", #lea(base=")
@@ -6725,6 +7878,9 @@
   }
   #let %equals: addr = #call raw_node_next(%assignment)
   #let %value: addr = #call raw_node_next(%equals)
+  #call program_write_record_literals_in_expression(
+    #call program_function_unit(%function), %source, %function, %value
+  )
   #let %type: addr = #call program_local_type(%source, %function, %assignment)
   #call bootstrap.artifact-write-literal("  %")
   #call meta_write_span(
@@ -6836,6 +7992,10 @@
               #if #call program_is_assignment_statement(%source, %statement) {
                 #call program_write_assignment(%source, %function, %statement)
               } else {
+                #call program_write_record_literals_in_expression(
+                  #call program_function_unit(%function), %source,
+                  %function, %statement
+                )
                 #call bootstrap.artifact-write-literal("    ")
                 #if #call program_is_std_intrinsic_call(
                   %source, %statement, "store_bits", 10
@@ -7314,6 +8474,10 @@
               #call program_write_block(%source, %function, %body)
               #return
             }
+            #call program_write_record_literals_in_expression(
+              #call program_function_unit(%function), %source, %function,
+              %first
+            )
             #if #call program_function_returns_unit(%source, %function) {
               #call bootstrap.artifact-write-literal("  ")
             } else {
@@ -7469,6 +8633,23 @@
   #call bootstrap.artifact-write-literal(" debug-source-index ")
   #call meta_write_decimal(#call program_unit_debug_source_index(%unit))
   #call bootstrap.artifact-write-literal(")\n")
+  #call bootstrap.artifact-write-literal("(context meta-import-action ")
+  #call meta_write_decimal(
+    #zext[#bits<64>](#call program_unit_meta_import_action(%unit))
+  )
+  #call bootstrap.artifact-write-literal(")\n")
+  #call bootstrap.artifact-write-literal("(context meta-steps ")
+  #call meta_write_decimal(#call program_unit_meta_step(%unit))
+  #call bootstrap.artifact-write-literal(" stage ")
+  #call meta_write_decimal(
+    #zext[#bits<64>](#call program_unit_meta_stage(%unit))
+  )
+  #call bootstrap.artifact-write-literal(")\n")
+  #call bootstrap.artifact-write-literal("(context meta-callee-start ")
+  #call meta_write_decimal(
+    #call program_unit_meta_callee(%unit)
+  )
+  #call bootstrap.artifact-write-literal(")\n")
   #return
 }
 
@@ -7542,6 +8723,13 @@
   #let %source: addr = #call syntax_unit_source(%first_unit)
   #let %root: addr = #call syntax_unit_root(%first_unit)
   #let %unit: addr = #call program_unit_new(%source, %root)
+  #call program_unit_set_physical_root_index(
+    %unit, #sub(%root_index, %source_begin)
+  )
+  #call program_unit_set_lazy_nonroot(
+    %unit,
+    #ne(#load[i1](#lea(base=%request, idx=0, scale=0, offset=48)), 0)
+  )
   #let %sources: addr = #call bootstrap.allocate-pages(
     #mul(%source_count, 8)
   )
@@ -7551,11 +8739,15 @@
   #let %materialized_modules: addr = #call bootstrap.allocate-pages(
     #mul(%source_count, 8)
   )
+  #let %materialized_states: addr = #call bootstrap.allocate-pages(
+    #mul(%source_count, 8)
+  )
   #call program_unit_set_sources(%unit, %sources, %source_count)
   #call program_unit_set_roots(%unit, %roots)
   #call program_unit_set_materialized_modules(
     %unit, %materialized_modules
   )
+  #call program_unit_set_materialized_states(%unit, %materialized_states)
   #let %materialized_index: i64 = 0
   #loop clear_materialized_modules {
     #if #ge(%materialized_index, %source_count) {
@@ -7563,6 +8755,8 @@
     }
     #store #call program_nil(),
       #lea(base=%materialized_modules, idx=%materialized_index, scale=8, offset=0)
+    #store 0,
+      #lea(base=%materialized_states, idx=%materialized_index, scale=8, offset=0)
     %materialized_index: i64 = #add(%materialized_index, 1)
     #continue clear_materialized_modules
   }
@@ -7758,5 +8952,6 @@
   #call bootstrap.release-pages(%sources)
   #call bootstrap.release-pages(%roots)
   #call bootstrap.release-pages(%materialized_modules)
+  #call bootstrap.release-pages(%materialized_states)
   #return %status
 }

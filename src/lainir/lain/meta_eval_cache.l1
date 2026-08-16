@@ -75,11 +75,14 @@
 #proc program_eval_cache_lookup(
   addr %unit, addr %function, addr %arguments, #bits<64> %count
 ) -> addr {
+  #call program_unit_set_cache_hit(%unit, 0)
   #let %entry: addr = #load[addr](
     #lea(base=%unit, idx=0, scale=0, offset=264)
   )
+  #let %entry_index: #bits<64> = 0
+  #let %entry_count: #bits<64> = #call program_unit_cache_count(%unit)
   #loop entries {
-    #if #call raw_is_nil(%entry) { #return #call program_nil() }
+    #if #ge(%entry_index, %entry_count) { #return #call program_nil() }
     #if #call program_function_same(
       #load[addr](#lea(base=%entry, idx=0, scale=0, offset=0)),
       %function
@@ -108,6 +111,7 @@
           #continue arguments
         }
         #if %same {
+          #call program_unit_set_cache_hit(%unit, 1)
           #return #load[addr](
             #lea(base=%entry, idx=0, scale=0, offset=24)
           )
@@ -117,6 +121,7 @@
     %entry: addr = #load[addr](
       #lea(base=%entry, idx=0, scale=0, offset=32)
     )
+    %entry_index: #bits<64> = #add(%entry_index, 1)
     #continue entries
   }
 }
@@ -135,7 +140,8 @@
   #let %head: addr = #load[addr](
     #lea(base=%unit, idx=0, scale=0, offset=264)
   )
-  #if #call raw_is_nil(%head) {
+  #let %entry_count: #bits<64> = #call program_unit_cache_count(%unit)
+  #if #eq(%entry_count, 0) {
     #store %entry, #lea(base=%unit, idx=0, scale=0, offset=264)
     #store %entry, #lea(base=%unit, idx=0, scale=0, offset=272)
   } else {
@@ -145,5 +151,6 @@
     #store %entry, #lea(base=%tail, idx=0, scale=0, offset=32)
     #store %entry, #lea(base=%unit, idx=0, scale=0, offset=272)
   }
+  #call program_unit_set_cache_count(%unit, #add(%entry_count, 1))
   #return
 }

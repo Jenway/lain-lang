@@ -281,6 +281,28 @@ static uint64_t interp_value_bits(LainirInterpreter *interp, LainirValue value, 
   return value.as.bits;
 }
 
+static int interp_values_equal(LainirInterpreter *interp,
+                               LainirValue left, LainirValue right) {
+  if (left.kind != right.kind) {
+    interp_trap(interp, "equality operands have different physical kinds");
+    return 0;
+  }
+  switch (left.kind) {
+  case LAINIR_VALUE_UNIT:
+    return 1;
+  case LAINIR_VALUE_BITS:
+    return left.as.bits == right.as.bits;
+  case LAINIR_VALUE_ADDR:
+    return left.as.addr == right.as.addr;
+  case LAINIR_VALUE_STRING:
+    return left.as.string == right.as.string;
+  case LAINIR_VALUE_FUNC:
+    return left.as.func == right.as.func;
+  }
+  interp_trap(interp, "invalid equality operand");
+  return 0;
+}
+
 static double interp_value_float(LainirInterpreter *interp, LainirValue value,
                                  const char *ctx) {
   if (value.kind != LAINIR_VALUE_BITS ||
@@ -384,7 +406,11 @@ static LainirValue interp_eval_explicit_integer_binary(
 }
 
 static void *interp_value_addr(LainirInterpreter *interp, LainirValue value, const char *ctx) {
-  if (value.kind == LAINIR_VALUE_ADDR) return value.as.addr;
+  if (value.kind == LAINIR_VALUE_ADDR) {
+    if (value.as.addr) return value.as.addr;
+    interp_trap(interp, "null address");
+    return NULL;
+  }
   if (value.kind == LAINIR_VALUE_STRING) return (void *)value.as.string;
   interp_trap(interp, ctx); return NULL;
 }
@@ -608,13 +634,17 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
     LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
     LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
     if (interp->error) return lainir_value_unit();
-    return lainir_value_bits(interp_value_bits(interp,l,"expected bits for eq") == interp_value_bits(interp,r,"expected bits for eq"), 1);
+    int equal = interp_values_equal(interp, l, r);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_bits(equal, 1);
   }
   case EXPR_NE: {
     LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
     LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
     if (interp->error) return lainir_value_unit();
-    return lainir_value_bits(interp_value_bits(interp,l,"expected bits for ne") != interp_value_bits(interp,r,"expected bits for ne"), 1);
+    int equal = interp_values_equal(interp, l, r);
+    if (interp->error) return lainir_value_unit();
+    return lainir_value_bits(!equal, 1);
   }
   case EXPR_LT: {
     LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);

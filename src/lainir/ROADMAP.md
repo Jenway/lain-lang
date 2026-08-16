@@ -250,6 +250,25 @@ not hide unresolved module members behind generated externs: `Compiler.compile`
 is a compile-time module value that has to become a real executable Lain
 function before the canonical closure can be checked.
 
+The first bootstrap increment now exists: `bootstrap/frozen/lainc.l1` is a
+reproducible executable compiler artifact for the current Lain frontend
+subset.  It can compile the small function/module fixtures and lower the
+canonical `src/compiler` source closure to verifier-valid LAIN-IR.  That
+artifact is still below the full compiler boundary described by this section.
+
+Status (2026-08-16): full compiler-API Meta instantiation is now accepted
+end-to-end.  Running the re-frozen `bootstrap/frozen/lainc.l1` over
+`compiler_api_schema.lain` plus all `src/compiler` and std sources succeeds at
+`compiler_compile`, passes `l1check` (including the previously blocked
+`Meta.expand`/`Modules.declare` nominal parameter physical-type check), and
+`l1i` returns `1` (`tests/lainir_lain/run_compiler_api_bootstrap.py`).
+Remaining blocker: the empty-input fixture
+`compiler_api_compile_empty.lain` produces a verifier-valid artifact whose
+execution dereferences a null address in `l1i` (access violation
+`0xC0000005`).  After that comes real Lain source input, wiring
+`run_compiler_source_closure.py`/`run_compiler_api_bootstrap.py` into
+`run_all.py`, and the stage2/stage3 byte comparison listed below.
+
 - [ ] **Meta values and environments.** Represent module values, function
   values, and captured bindings in the LAIN-IR meta heap; make a compile-time
   function call return a module/member descriptor instead of only an integer.
@@ -261,6 +280,10 @@ function before the canonical closure can be checked.
   meta-owned descriptor/environment chain, including functions created inside
   a module factory and their captured bindings. Keep unresolved members as
   diagnostics, never as implicit host calls.
+- [x] Materialize Meta-resolved call targets in the physical function list so
+  generated direct calls cannot reference an omitted procedure.
+- [x] Keep module-valued forwarding factories in the compile-time phase while
+  preserving physical module-typed identity functions.
 - [ ] **Canonical compiler closure.** Lower `src/compiler` module by module,
   starting with `compiler_core`, then `compiler_driver`, `compiler_api`, and
   `lainc`; after each module, run `l1check` and execute a small request.

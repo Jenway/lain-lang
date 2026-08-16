@@ -19,6 +19,8 @@ def main() -> int:
         "run_meta_eval.py",
         "run_lower_record.py",
         "run_compiler_compile.py",
+        "run_bootstrap_lainc.py",
+        "run_compiler_source_closure.py",
         "run_workspace.py",
         "run_driver.py",
     )

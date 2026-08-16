@@ -75,10 +75,11 @@
 //   0 data, 8 length, 16 offset, 24 line, 32 column,
 //   40 pending-trivia-first, 48 pending-trivia-last,
 //   56 diagnostics-first, 64 diagnostics-last, 72 diagnostic-count,
-//   80 nil/sentinel address, 88 scan-limit.  LAIN-IR integer literals cannot be addresses,
-//   so all nullable links use this per-source sentinel instead of address 0.
+//   80 nil/sentinel address, 88 scan-limit, 96 content fingerprint.  LAIN-IR
+//   integer literals cannot be addresses, so all nullable links use this
+//   per-source sentinel instead of address 0.
 #proc tool_source_new(addr %data, i64 %length) -> addr {
-  #let %source: addr = #call bootstrap.allocate-pages(96)
+  #let %source: addr = #call bootstrap.allocate-pages(112)
   // Keep the sentinel large enough for record-kind probes used by parser
   // links.  Only the first byte is the nil tag; the remaining bytes stay zero.
   #let %nil: addr = #call bootstrap.allocate-pages(48)
@@ -94,6 +95,21 @@
   #store 0, #lea(base=%source, idx=0, scale=0, offset=72)
   #store %nil, #lea(base=%source, idx=0, scale=0, offset=80)
   #store %length, #lea(base=%source, idx=0, scale=0, offset=88)
+  // Cache a content fingerprint once, when the source object is created.
+  // Meta lookup can then compare source identity in O(1) without rescanning
+  // the complete file for every captured generic function.
+  #let %fingerprint: i64 = 1469598103934665603
+  #let %index: i64 = 0
+  #loop fingerprint_bytes {
+    #if #ge(%index, %length) { #break fingerprint_bytes }
+    %fingerprint: i64 = #add(
+      #mul(%fingerprint, 131),
+      #zext[#bits<64>](#load[i8](#lea(base=%data, idx=%index, scale=1, offset=0)))
+    )
+    %index: i64 = #add(%index, 1)
+    #continue fingerprint_bytes
+  }
+  #store %fingerprint, #lea(base=%source, idx=0, scale=0, offset=96)
   #return %source
 }
 
@@ -138,6 +154,10 @@
 
 #proc tool_source_scan_limit(addr %source) -> i64 {
   #return #load[i64](#lea(base=%source, idx=0, scale=0, offset=88))
+}
+
+#proc tool_source_fingerprint(addr %source) -> i64 {
+  #return #load[i64](#lea(base=%source, idx=0, scale=0, offset=96))
 }
 
 #proc tool_source_set_scan_limit(addr %source, i64 %limit) -> #unit {

@@ -26,6 +26,19 @@ The build produces:
 - `l1i`: execute a LAIN-IR entry procedure.
 - `l1bootstrap`: run an explicitly selected frozen compiler artifact.
 
+The repository also carries the first frozen minimal Lain compiler at
+`bootstrap/frozen/lainc.l1`.  It is generated reproducibly from the current
+LAIN-IR-written frontend bundle:
+
+```text
+python scripts/freeze_lainc_bootstrap.py
+```
+
+The frozen compiler currently covers the executable Lain subset exercised by
+`tests/lainir_lain`, including functions, calls, modules, and the first
+compile-time closure/module cases.  It is the bootstrap seed for the later
+full `src/compiler` self-hosting closure; it is not yet the final `lainc`.
+
 Build from this directory with:
 
 ```text

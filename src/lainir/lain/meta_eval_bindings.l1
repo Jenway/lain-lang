@@ -4,6 +4,14 @@
 // module owns that environment update; runtime lowering only consumes the
 // resulting function/module descriptors.
 
+#extern #proc program_append_function_if_missing(
+  addr %unit, addr %function
+) -> #unit;
+#extern #proc program_unit_collecting_import(addr %unit) -> i1;
+#extern #proc program_unit_lazy_nonroot(addr %unit) -> i1;
+#extern #proc program_unit_physical_root_index(addr %unit) -> i64;
+#extern #proc program_function_source_index(addr %function) -> i64;
+
 #proc program_eval_bind_local_function(
   addr %unit, addr %source, addr %function_owner,
   addr %let_node, addr %environment
@@ -18,8 +26,21 @@
     #return %status
   }
   #call program_function_set_environment(%function, %environment)
-  // Keep a physical descriptor so runtime functions can emit this callee.
-  #call program_append_function_if_missing(%unit, %function)
+  // Root functions are attached immediately. Functions declared inside a
+  // non-root factory are attached when validation finds a runtime call; this
+  // keeps every Vec specialization from eagerly adding its whole namespace.
+  #if #eq(#call program_unit_collecting_import(%unit), 0) {
+    #if #eq(#call program_unit_lazy_nonroot(%unit), 0) {
+      #call program_append_function_if_missing(%unit, %function)
+    } else {
+      #if #eq(
+        #call program_function_source_index(%function),
+        #call program_unit_physical_root_index(%unit)
+      ) {
+        #call program_append_function_if_missing(%unit, %function)
+      }
+    }
+  }
   #call meta_env_bind(
     %environment, %source, #call raw_node_next(%let_node),
     #call meta_value_function(
@@ -53,8 +74,8 @@
     )
     #if #ne(%type_status, 0) { #return %type_status }
     #if #call program_eval_special_type(%source, %value_node) {
-      #let %type_result: addr = #call program_eval_type_object(
-        %source, %name, %value_node
+      #let %type_result: addr = #call program_eval_type_object_environment(
+        %source, %name, %value_node, %environment
       )
       #call meta_env_bind(
         %environment, %source, %name, #call eval_object(%type_result)
@@ -103,8 +124,8 @@
   }
 
   #if #call program_eval_special_type(%source, %value_node) {
-    #let %type_result: addr = #call program_eval_type_object(
-      %source, %name, %value_node
+    #let %type_result: addr = #call program_eval_type_object_environment(
+      %source, %name, %value_node, %environment
     )
     #call meta_env_bind(
       %environment, %source, %name, #call eval_object(%type_result)

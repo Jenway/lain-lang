@@ -43,6 +43,7 @@ RECORD_AND_FUNCTION = pathlib.Path(__file__).parent / "fixtures" / "record_and_f
 RECORD_LITERAL_MISSING = pathlib.Path(__file__).parent / "fixtures" / "function_record_literal_missing.lain"
 RECORD_LITERAL_UNKNOWN = pathlib.Path(__file__).parent / "fixtures" / "function_record_literal_unknown.lain"
 RECORD_LITERAL_DUPLICATE = pathlib.Path(__file__).parent / "fixtures" / "function_record_literal_duplicate.lain"
+RECORD_LITERAL_CALL_NESTED = pathlib.Path(__file__).parent / "fixtures" / "function_record_literal_call_nested.lain"
 DIVZERO = pathlib.Path(__file__).parent / "fixtures" / "function_divzero.lain"
 BAD = pathlib.Path(__file__).parent / "fixtures" / "function_bad.lain"
 UNKNOWN_CALL = pathlib.Path(__file__).parent / "fixtures" / "function_unknown_call.lain"
@@ -375,7 +376,7 @@ def main() -> int:
             print(qualified.stderr or qualified.stdout, file=sys.stderr)
             return 1
         qualified_text = qualified_output.read_text(encoding="utf-8")
-        if "#call f0_41_687643027767960_add(40, 2)" not in qualified_text:
+        if not re.search(r"#call f0_41_[0-9]+_add\(40, 2\)", qualified_text):
             print("compiler_compile did not resolve a qualified Meta call", file=sys.stderr)
             return 1
         checked_qualified = run([str(L1CHECK), str(qualified_output), "main"])
@@ -854,6 +855,33 @@ def main() -> int:
         if checked_record.returncode or executed_record.stdout.strip() != "42":
             print(
                 checked_record.stderr or executed_record.stderr or executed_record.stdout,
+                file=sys.stderr,
+            )
+            return 1
+        nested_record_output = directory / "record-literal-call-nested.l1"
+        nested_record = run(
+            [
+                sys.executable,
+                str(RUNNER),
+                "-o",
+                str(nested_record_output),
+                str(RECORD_LITERAL_CALL_NESTED),
+            ]
+        )
+        if nested_record.returncode:
+            print(nested_record.stderr or nested_record.stdout, file=sys.stderr)
+            return 1
+        checked_nested_record = run([str(L1CHECK), str(nested_record_output), "main"])
+        executed_nested_record = run([str(L1I), str(nested_record_output), "main"])
+        if (
+            checked_nested_record.returncode
+            or executed_nested_record.returncode
+            or executed_nested_record.stdout.strip() != "41"
+        ):
+            print(
+                checked_nested_record.stderr
+                or executed_nested_record.stderr
+                or executed_nested_record.stdout,
                 file=sys.stderr,
             )
             return 1
