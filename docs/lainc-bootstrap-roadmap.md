@@ -14,7 +14,7 @@
 
 ```text
 C lainir-seed
-    -> seed/frozen/lainc.l1
+    -> src/lainir/lainc.l1
     -> stage1 lainc
     -> stage1 编译 src/compiler
     -> stage2 lainc
@@ -34,7 +34,7 @@ C lainir-seed
 - record、module、部分类型环境和有限的 `std::consteval`。
 - 函数、调用、整数/布尔表达式、局部变量、`if` 和 `while` 的部分 lowering。
 - LAIN-IR formatter、语法高亮、dumb parser 和 LSP 基础协议处理。
-- `seed/frozen/lainc.l1`（已从当前源码重新 freeze），可编译最小
+- `src/lainir/lainc.l1`（已从当前源码重新 freeze），可编译最小
   Lain 子集，并把完整 `src/compiler` 闭包降低成 verifier-valid LAIN-IR。
 - 完整 compiler-API Meta 实例化：`compiler_api_schema.lain` + 全部
   `src/compiler` + std 源 → `compiler_compile` 成功 → `lainir-print` 通过 →
@@ -58,7 +58,7 @@ C lainir-seed
 
 已完成的第一步增量：
 
-- 已生成并冻结 `seed/frozen/lainc.l1`。
+- 已生成并冻结 `src/lainir/lainc.l1`。
 - C `lainir-seed` 可以用它编译 `return_42`、模块工厂和闭包捕获 fixture。
 - 它可以把当前完整 `src/compiler` 多文件闭包降低成 verifier-valid 的
   LAIN-IR artifact。
@@ -109,13 +109,13 @@ C lainir-seed
 - `tests/lainir_lain/run_compiler_api_bootstrap.py` 与
   `run_type_namespace_nested.py` 已通过但尚未接入 `run_all.py`，等空输入
   验收后一并接线。
-- `seed/frozen/lainc.l1` 已从最新源码重新冻结；冻结快照与
+- `src/lainir/lainc.l1` 已从最新源码重新冻结；冻结快照与
   `scripts/freeze_lainc_bootstrap.py` 保持可复现。
 
 ## 阶段一：冻结最小 bootstrap `lainc`
 
 目标：生成并提交一份可被 C bootstrap 解释器执行的
-`seed/frozen/lainc.l1`。
+`src/lainir/lainc.l1`。
 
 状态：第一版已完成。后续扩展仍然沿用同一个冻结入口。
 
@@ -142,8 +142,8 @@ let main = std::func() -> i32 {
 验收条件：
 
 ```text
-lainir-print seed/frozen/lainc.l1
-lainir-seed seed/frozen/lainc.l1 ...
+lainir-print src/lainir/lainc.l1
+lainir-seed src/lainir/lainc.l1 ...
 lainir-seed run generated.l1 main
 ```
 
@@ -317,7 +317,7 @@ compiler_core
 
 ```text
 C lainir-seed
-    -> seed/frozen/lainc.l1
+    -> src/lainir/lainc.l1
     -> stage1 lainc
     -> stage1 编译 src/compiler
     -> stage2 lainc

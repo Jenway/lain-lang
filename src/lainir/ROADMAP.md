@@ -251,14 +251,14 @@ not hide unresolved module members behind generated externs: `Compiler.compile`
 is a compile-time module value that has to become a real executable Lain
 function before the canonical closure can be checked.
 
-The first bootstrap increment now exists: `seed/frozen/lainc.l1` is a
+The first bootstrap increment now exists: `src/lainir/lainc.l1` is a
 reproducible executable compiler artifact for the current Lain frontend
 subset.  It can compile the small function/module fixtures and lower the
 canonical `src/compiler` source closure to verifier-valid LAIN-IR.  That
 artifact is still below the full compiler boundary described by this section.
 
 Status (2026-08-16): full compiler-API Meta instantiation is now accepted
-end-to-end.  Running the re-frozen `seed/frozen/lainc.l1` over
+end-to-end.  Running the re-frozen `src/lainir/lainc.l1` over
 `compiler_api_schema.lain` plus all `src/compiler` and std sources succeeds at
 `compiler_compile`, passes `lainir-print` (including the previously blocked
 `Meta.expand`/`Modules.declare` nominal parameter physical-type check), and

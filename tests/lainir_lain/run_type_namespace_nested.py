@@ -14,7 +14,7 @@ SUFFIX = ".exe" if os.name == "nt" else ""
 BOOTSTRAP = BIN / f"lainir-seed{SUFFIX}"
 CHECK = BIN / f"lainir-print{SUFFIX}"
 FIXTURE = ROOT / "tests" / "lainir_lain" / "fixtures" / "type_namespace_nested.lain"
-COMPILER = ROOT / "seed" / "frozen" / "lainc.l1"
+COMPILER = ROOT / "src" / "lainir" / "lainc.l1"
 SOURCES = tuple(sorted((ROOT / "src" / "compiler").glob("*.lain"))) + (
     ROOT / "std" / "memory_model.lain",
     ROOT / "std" / "allocation.lain",

@@ -13,7 +13,7 @@ BIN = ROOT / "seed" / "zig-out" / "bin"
 SUFFIX = ".exe" if os.name == "nt" else ""
 BOOTSTRAP = BIN / f"lainir-seed{SUFFIX}"
 CHECK = BIN / f"lainir-print{SUFFIX}"
-COMPILER = ROOT / "seed" / "frozen" / "lainc.l1"
+COMPILER = ROOT / "src" / "lainir" / "lainc.l1"
 MODULES = (
     "src/compiler/tokenizer.lain",
     "src/compiler/syntax.lain",

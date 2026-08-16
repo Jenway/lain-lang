@@ -5,6 +5,17 @@ compiler.  The C bootstrap interpreter is the seed: it executes this code, but
 it does not provide parsing, verification, or C emission on the compiler's
 behalf.
 
+## Frozen Lain compiler
+
+`src/lainir/lainc.l1` is the frozen minimal Lain compiler: it is the packaged
+LAIN-IR-written Lain frontend (`src/lainir/lain/*.l1` plus
+`src/lainir/tools/source.l1`), generated reproducibly by
+`scripts/freeze_lainc_bootstrap.py` and executed by the seed interpreter.  It
+currently covers the executable Lain subset exercised by `tests/lainir_lain`,
+including functions, calls, modules, and the first compile-time
+closure/module cases.  It is the bootstrap seed for the later full
+`src/compiler` self-hosting closure; it is not yet the final `lainc`.
+
 ## Boundary
 
 - Compiler logic is written in `.l1`.

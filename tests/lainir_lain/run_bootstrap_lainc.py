@@ -15,7 +15,7 @@ SUFFIX = ".exe" if os.name == "nt" else ""
 BOOTSTRAP = BIN / f"lainir-seed{SUFFIX}"
 CHECK = BIN / f"lainir-print{SUFFIX}"
 INTERPRETER = BIN / f"lainir-seed{SUFFIX}"
-COMPILER = ROOT / "seed" / "frozen" / "lainc.l1"
+COMPILER = ROOT / "src" / "lainir" / "lainc.l1"
 
 
 def run(*arguments: Path | str) -> subprocess.CompletedProcess[str]:
