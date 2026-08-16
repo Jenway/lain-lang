@@ -775,7 +775,6 @@ let meta_eval_expr = std::func(
 // args_end); binds parameters then evaluates the return expression.
 let meta_call_consteval = std::func(
     source: addr,
-    output: addr,
     meta: addr,
     mlen: usize,
     row: usize,
@@ -785,14 +784,36 @@ let meta_call_consteval = std::func(
     let params: addr = sb_new();
     let ps: usize = meta_value_payload_start(meta, mlen, row);
     let body: usize = meta_value_payload_length(meta, mlen, row);
-    let pname: usize = parse_ident(source, ps + 1);
-    let plen0: usize = pname - ps;
-    let plen1: usize = plen0 - 1;
-    if plen1 > 0 {
-        let av: usize = meta_eval_const(source, args_start, args_end);
-        let sentinel: usize = 0 - 1;
-        if av != sentinel {
-            meta_append(params, 1, ps + 1, plen1, av, 0);
+    let params_end: usize = ps + 1;
+    let pdone2: i32 = 0;
+    while pdone2 == 0 {
+        if sb_byte_at(source, params_end) == 41 {
+            pdone2 = 1;
+            let marker: i32 = 0;
+        } else {
+            params_end = params_end + 1;
+            let marker: i32 = 0;
+        }
+    }
+    let sentinel: usize = 0 - 1;
+    let pcur: usize = ps + 1;
+    let acur: usize = args_start;
+    let pdone: i32 = 0;
+    while pdone == 0 {
+        if pcur >= params_end {
+            pdone = 1;
+            let marker: i32 = 0;
+        } else {
+            let pn: usize = parse_ident(source, pcur);
+            let psep: usize = scan_top_op(source, pn, params_end, 44);
+            let asep: usize = scan_top_op(source, acur, args_end, 44);
+            let av: usize = meta_eval_const(source, acur, asep);
+            if av != sentinel {
+                meta_append(params, 1, pcur, pn - pcur, av, 0);
+                let marker: i32 = 0;
+            }
+            pcur = skip_space(source, psep + 1);
+            acur = skip_space(source, asep + 1);
             let marker: i32 = 0;
         }
     }
@@ -2602,7 +2623,7 @@ let compile = std::func(
                                                 }
                                             }
                                             let cv2: usize = meta_call_consteval(
-                                                source, output, meta, mlen2, crow2, cafter + 1, aend
+                                                source, meta, mlen2, crow2, cafter + 1, aend
                                             );
                                             if cv2 != sentinel {
                                                 meta_append(consts, 1, cns, cne - cns, cv2, 0);
