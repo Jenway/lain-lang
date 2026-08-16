@@ -12111,7 +12111,48 @@
 }
 
 #proc program_write_function(addr %source, addr %function) -> #unit {
-  #if #call program_function_is_external(%source, %function) { #return }
+  #if #call program_function_is_external(%source, %function) {
+    // A body-less std::func is an external procedure declaration.  Emit it
+    // as #extern #proc so calls to it verify and resolve through the host
+    // capability table, instead of silently dropping the declaration.
+    #call bootstrap.artifact-write-literal("#extern #proc ")
+    #call program_write_function_label(
+      #call program_function_unit(%function), %function
+    )
+    #call bootstrap.artifact-write-byte(40)
+    #let %param: addr = #call raw_node_first(
+      #call program_function_params(%function)
+    )
+    #let %first: i1 = 1
+    #loop params {
+      #if #call raw_is_nil(%param) { #break params }
+      #if #eq(%first, 0) {
+        #call bootstrap.artifact-write-literal(", ")
+      }
+      #let %colon: addr = #call raw_node_next(%param)
+      #let %type: addr = #call raw_node_next(%colon)
+      #let %type_end: addr = #call program_type_end(%source, %type)
+      #call program_write_function_type(
+        #call program_function_unit(%function), %source, %function, %type
+      )
+      #call bootstrap.artifact-write-literal(" %")
+      #call meta_write_span(
+        %source, #call raw_node_start(%param), #call raw_node_length(%param)
+      )
+      %first: i1 = 0
+      %param: addr = #call raw_node_next(%type_end)
+      #if #call raw_is_nil(%param) { #break params }
+      %param: addr = #call raw_node_next(%param)
+      #continue params
+    }
+    #call bootstrap.artifact-write-literal(") -> ")
+    #call program_write_function_type(
+      #call program_function_unit(%function), %source, %function,
+      #load[addr](#lea(base=%function, idx=0, scale=0, offset=24))
+    )
+    #call bootstrap.artifact-write-literal(";\n\n")
+    #return
+  }
   #if #call program_function_is_meta(%source, %function) { #return }
   #call bootstrap.artifact-write-literal("#proc ")
   #call program_write_function_label(
