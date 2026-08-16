@@ -414,6 +414,19 @@ let meta_scan_type_end = std::func(
     return type_end;
 };
 
+// Emit the #bits width text for a field byte width (1/4/8).
+let meta_emit_bits = std::func(output: addr, w: usize) -> unit {
+    if w == 1 {
+        sb_append_literal(output, "1", 1);
+    } else {
+        if w == 4 {
+            sb_append_literal(output, "32", 2);
+        } else {
+            sb_append_literal(output, "64", 2);
+        }
+    }
+};
+
 // ---- byte helpers ----
 let is_space = std::func(byte: i32) -> bool {
     if byte == 32 { return true; }
@@ -691,6 +704,7 @@ let emit_arg_one = std::func(
     args_end: usize,
     output: addr,
     layout: addr,
+    types: addr,
 ) -> usize {
     let arg_end: usize = arg_start;
     let depth: usize = 0;
@@ -727,7 +741,7 @@ let emit_arg_one = std::func(
             let marker: i32 = 0;
         }
     }
-    emit_expr(source, arg_start, arg_end, output, layout);
+    emit_expr(source, arg_start, arg_end, output, layout, types);
     return arg_end;
 };
 
@@ -738,6 +752,7 @@ let emit_call_args = std::func(
     args_end: usize,
     output: addr,
     layout: addr,
+    types: addr,
 ) -> unit {
     let current: usize = args_start;
     let first: i32 = 1;
@@ -749,7 +764,7 @@ let emit_call_args = std::func(
         } else {
             sb_append_literal(output, ", ", 2);
         }
-        current = emit_arg_one(source, arg_start, args_end, output, layout);
+        current = emit_arg_one(source, arg_start, args_end, output, layout, types);
         current = skip_space(source, current);
         if current < args_end {
             if sb_byte_at(source, current) == 44 {
@@ -834,12 +849,13 @@ let emit_call_named = std::func(
     args_end: usize,
     output: addr,
     layout: addr,
+    types: addr,
 ) -> unit {
     let marker: i32 = 0;
     sb_append_literal(output, "#call f0_", 9);
     sb_append_span(output, source, name_start, name_end - name_start);
     sb_append_literal(output, "(", 1);
-    emit_call_args(source, args_start, args_end, output, layout);
+    emit_call_args(source, args_start, args_end, output, layout, types);
     sb_append_literal(output, ")", 1);
 };
 
@@ -851,6 +867,7 @@ let emit_std_intrinsic = std::func(
     expr_end: usize,
     output: addr,
     layout: addr,
+    types: addr,
 ) -> bool {
     let after: usize = skip_space(source, name_end);
     if sb_byte_at(source, after) != 58 { return 0; }
@@ -975,7 +992,7 @@ let emit_std_intrinsic = std::func(
         let value_start: usize = skip_space(source, addr_mid + 1);
         let value_end: usize = trim_end(source, value_start, args_end);
         sb_append_literal(output, "#store ", 7);
-        emit_expr(source, value_start, value_end, output, layout);
+        emit_expr(source, value_start, value_end, output, layout, types);
         sb_append_literal(output, ", ", 2);
         emit_addr_expr(source, addr_start, addr_mid, output);
         return 1;
@@ -991,6 +1008,7 @@ let emit_operand2 = std::func(
     end: usize,
     output: addr,
     layout: addr,
+    types: addr,
 ) -> unit {
     let s: usize = trim_start(source, start, end);
     let e: usize = trim_end(source, s, end);
@@ -1010,8 +1028,33 @@ let emit_operand2 = std::func(
         return;
     }
     let name_end: usize = parse_ident(source, s);
+    let field_after: usize = skip_space(source, name_end);
+    if sb_byte_at(source, field_after) == 46 {
+        let fstart: usize = skip_space(source, field_after + 1);
+        let fend: usize = parse_ident(source, fstart);
+        let tlen: usize = sb_len(types);
+        let trec: usize = meta_table_find(types, tlen, source, s, name_end);
+        if trec < tlen {
+            let tseg: usize = meta_seg_end(types, tlen, trec);
+            let llen: usize = sb_len(layout);
+            let lrec: usize = meta_table_find(layout, llen, types, trec, tseg);
+            if lrec < llen {
+                let lseg: usize = meta_seg_end(layout, llen, lrec);
+                let off: usize = meta_field_offset(layout, lrec, lseg, source, fstart, fend);
+                let w: usize = meta_field_width(layout, lrec, lseg, source, fstart, fend);
+                sb_append_literal(output, "#load[#bits<", 12);
+                meta_emit_bits(output, w);
+                sb_append_literal(output, ">](#lea(base=%", 14);
+                sb_append_span(output, source, s, name_end - s);
+                sb_append_literal(output, ", idx=0, scale=0, offset=", 25);
+                meta_append_decimal(output, off);
+                sb_append_literal(output, "))", 2);
+                return;
+            }
+        }
+    }
     if sb_span_equals(source, s, name_end - s, "std", 3) {
-        if emit_std_intrinsic(source, s, name_end, e, output, layout) == 1 {
+        if emit_std_intrinsic(source, s, name_end, e, output, layout, types) == 1 {
             return;
         }
     }
@@ -1053,7 +1096,7 @@ let emit_operand2 = std::func(
                 }
             }
         }
-        emit_call_named(source, member_start, member_end, args_start, args_end, output, layout);
+        emit_call_named(source, member_start, member_end, args_start, args_end, output, layout, types);
         return;
     }
     sb_append_literal(output, "%", 1);
@@ -1067,40 +1110,41 @@ let emit_add_expr = std::func(
     end: usize,
     output: addr,
     layout: addr,
+    types: addr,
 ) -> unit {
     let s: usize = trim_start(source, start, end);
     let e: usize = trim_end(source, s, end);
     let plus: usize = scan_top_op(source, s, e, 43);
     if plus < e {
         sb_append_literal(output, "#add(", 5);
-        emit_add_expr(source, s, plus, output, layout);
+        emit_add_expr(source, s, plus, output, layout, types);
         sb_append_literal(output, ", ", 2);
         let right_start: usize = skip_space(source, plus + 1);
-        emit_add_expr(source, right_start, e, output, layout);
+        emit_add_expr(source, right_start, e, output, layout, types);
         sb_append_literal(output, ")", 1);
         return;
     }
     let minus: usize = scan_top_op(source, s, e, 45);
     if minus < e {
         sb_append_literal(output, "#sub(", 5);
-        emit_add_expr(source, s, minus, output, layout);
+        emit_add_expr(source, s, minus, output, layout, types);
         sb_append_literal(output, ", ", 2);
         let right_start: usize = skip_space(source, minus + 1);
-        emit_add_expr(source, right_start, e, output, layout);
+        emit_add_expr(source, right_start, e, output, layout, types);
         sb_append_literal(output, ")", 1);
         return;
     }
     let mul: usize = scan_top_op(source, s, e, 42);
     if mul < e {
         sb_append_literal(output, "#mul(", 5);
-        emit_add_expr(source, s, mul, output, layout);
+        emit_add_expr(source, s, mul, output, layout, types);
         sb_append_literal(output, ", ", 2);
         let right_start: usize = skip_space(source, mul + 1);
-        emit_add_expr(source, right_start, e, output, layout);
+        emit_add_expr(source, right_start, e, output, layout, types);
         sb_append_literal(output, ")", 1);
         return;
     }
-    emit_operand2(source, s, e, output, layout);
+    emit_operand2(source, s, e, output, layout, types);
 };
 
 // Lower a comparison expression as #eq/#ne/#lt/#gt/#le/#ge.
@@ -1110,6 +1154,7 @@ let emit_cmp_expr = std::func(
     end: usize,
     output: addr,
     layout: addr,
+    types: addr,
 ) -> unit {
     let s: usize = trim_start(source, start, end);
     let e: usize = trim_end(source, s, end);
@@ -1138,18 +1183,18 @@ let emit_cmp_expr = std::func(
                 }
             }
         }
-        emit_add_expr(source, s, cmp, output, layout);
+        emit_add_expr(source, s, cmp, output, layout, types);
         sb_append_literal(output, ", ", 2);
         let right_start: usize = skip_space(source, cmp + 1);
         if op2 == 61 {
             right_start = skip_space(source, cmp + 2);
             let marker: i32 = 0;
         }
-        emit_add_expr(source, right_start, e, output, layout);
+        emit_add_expr(source, right_start, e, output, layout, types);
         sb_append_literal(output, ")", 1);
         return;
     }
-    emit_add_expr(source, s, e, output, layout);
+    emit_add_expr(source, s, e, output, layout, types);
 };
 
 // Lower a boolean-and expression as #eq(#add(#zext64(L), #zext64(R)), 2).
@@ -1159,19 +1204,20 @@ let emit_and_expr = std::func(
     end: usize,
     output: addr,
     layout: addr,
+    types: addr,
 ) -> unit {
     let s: usize = trim_start(source, start, end);
     let e: usize = trim_end(source, s, end);
     let and: usize = scan_and(source, s, e);
     if and < e {
         sb_append_literal(output, "#eq(#add(#zext[#bits<64>](", 26);
-        emit_cmp_expr(source, s, and, output, layout);
+        emit_cmp_expr(source, s, and, output, layout, types);
         sb_append_literal(output, "), #zext[#bits<64>](", 20);
-        emit_cmp_expr(source, and + 2, e, output, layout);
+        emit_cmp_expr(source, and + 2, e, output, layout, types);
         sb_append_literal(output, ")), 2)", 6);
         return;
     }
-    emit_cmp_expr(source, s, e, output, layout);
+    emit_cmp_expr(source, s, e, output, layout, types);
 };
 
 // Lower a full expression [start, end).
@@ -1181,11 +1227,12 @@ let emit_expr = std::func(
     end: usize,
     output: addr,
     layout: addr,
+    types: addr,
 ) -> unit {
     let s: usize = trim_start(source, start, end);
     let e: usize = trim_end(source, s, end);
     if s >= e { return; }
-    emit_and_expr(source, s, e, output, layout);
+    emit_and_expr(source, s, e, output, layout, types);
 };
 
 // ---- type lowering ----
@@ -1371,6 +1418,7 @@ let emit_stmt_let = std::func(
     index: usize,
     body_end: usize,
     layout: addr,
+    types: addr,
 ) -> usize {
     let name_start: usize = skip_space(source, index + 3);
     let name_end: usize = parse_ident(source, name_start);
@@ -1381,6 +1429,14 @@ let emit_stmt_let = std::func(
         let marker: i32 = 0;
     }
     let semi: usize = scan_semi(source, eq + 1, body_end);
+    if sb_byte_at(source, mark) == 58 {
+        let tstart: usize = trim_start(source, mark + 1, eq);
+        let tend: usize = trim_end(source, tstart, eq);
+        sb_append_span(types, source, name_start, name_end - name_start);
+        sb_append_literal(types, ":", 1);
+        sb_append_span(types, source, tstart, tend - tstart);
+        sb_append_literal(types, "|", 1);
+    }
     let rs: usize = trim_start(source, eq + 1, semi);
     let rn: usize = parse_ident(source, rs);
     let ra: usize = skip_space(source, rn);
@@ -1388,7 +1444,7 @@ let emit_stmt_let = std::func(
         let rlen: usize = sb_len(layout);
         let rrec: usize = meta_table_find(layout, rlen, source, rs, rn);
         if rrec < rlen {
-            emit_record_value(source, output, name_start, name_end, eq + 1, semi, layout);
+            emit_record_value(source, output, name_start, name_end, eq + 1, semi, layout, types);
             return semi + 1;
         }
     }
@@ -1401,7 +1457,7 @@ let emit_stmt_let = std::func(
     } else {
         sb_append_literal(output, " = ", 3);
     }
-    emit_expr(source, eq + 1, semi, output, layout);
+    emit_expr(source, eq + 1, semi, output, layout, types);
     sb_append_literal(output, "\n", 1);
     return semi + 1;
 };
@@ -1413,15 +1469,16 @@ let emit_stmt_while = std::func(
     index: usize,
     body_end: usize,
     layout: addr,
+    types: addr,
 ) -> usize {
     let cond_start: usize = skip_space(source, index + 5);
     let brace: usize = scan_brace(source, cond_start, body_end);
     let brace_end: usize = match_brace(source, brace, body_end);
     sb_append_literal(output, "#loop {\n", 8);
     sb_append_literal(output, "  #if #eq(", 10);
-    emit_expr(source, cond_start, brace, output, layout);
+    emit_expr(source, cond_start, brace, output, layout, types);
     sb_append_literal(output, ", 0) { #break }\n", 16);
-    emit_block(source, output, brace + 1, brace_end, layout);
+    emit_block(source, output, brace + 1, brace_end, layout, types);
     sb_append_literal(output, "  #continue\n}\n", 14);
     return brace_end + 1;
 };
@@ -1433,21 +1490,22 @@ let emit_stmt_if = std::func(
     index: usize,
     body_end: usize,
     layout: addr,
+    types: addr,
 ) -> usize {
     let cond_start: usize = skip_space(source, index + 2);
     let brace: usize = scan_brace(source, cond_start, body_end);
     let brace_end: usize = match_brace(source, brace, body_end);
     sb_append_literal(output, "#if ", 4);
-    emit_expr(source, cond_start, brace, output, layout);
+    emit_expr(source, cond_start, brace, output, layout, types);
     sb_append_literal(output, " {\n", 3);
-    emit_block(source, output, brace + 1, brace_end, layout);
+    emit_block(source, output, brace + 1, brace_end, layout, types);
     sb_append_literal(output, "}\n", 2);
     let after: usize = skip_space(source, brace_end + 1);
     if sb_span_equals(source, after, 4, "else", 4) {
         let brace2: usize = scan_brace(source, after + 4, body_end);
         let brace2_end: usize = match_brace(source, brace2, body_end);
         sb_append_literal(output, "else {\n", 7);
-        emit_block(source, output, brace2 + 1, brace2_end, layout);
+        emit_block(source, output, brace2 + 1, brace2_end, layout, types);
         sb_append_literal(output, "}\n", 2);
         return brace2_end + 1;
     }
@@ -1462,11 +1520,12 @@ let emit_stmt_ret = std::func(
     index: usize,
     body_end: usize,
     layout: addr,
+    types: addr,
 ) -> usize {
     let expr_start: usize = skip_space(source, index + 6);
     let semi: usize = scan_semi(source, expr_start, body_end);
     sb_append_literal(output, "  #return ", 10);
-    emit_expr(source, expr_start, semi, output, layout);
+    emit_expr(source, expr_start, semi, output, layout, types);
     sb_append_literal(output, "\n", 1);
     return semi + 1;
 };
@@ -1478,6 +1537,7 @@ let emit_stmt_other = std::func(
     index: usize,
     body_end: usize,
     layout: addr,
+    types: addr,
 ) -> usize {
     let s: usize = skip_space(source, index);
     let semi: usize = scan_semi(source, s, body_end);
@@ -1487,11 +1547,11 @@ let emit_stmt_other = std::func(
         sb_append_literal(output, "%", 1);
         sb_append_span(output, source, s, name_end - s);
         sb_append_literal(output, " = ", 3);
-        emit_expr(source, after + 1, semi, output, layout);
+        emit_expr(source, after + 1, semi, output, layout, types);
         sb_append_literal(output, "\n", 1);
         return semi + 1;
     }
-    emit_expr(source, s, semi, output, layout);
+    emit_expr(source, s, semi, output, layout, types);
     sb_append_literal(output, "\n", 1);
     return semi + 1;
 };
@@ -1503,29 +1563,30 @@ let emit_stmt = std::func(
     index: usize,
     body_end: usize,
     layout: addr,
+    types: addr,
 ) -> usize {
     let s: usize = skip_space(source, index);
     if s >= body_end { return s; }
     let first: i32 = sb_byte_at(source, s);
     if first == 125 { return s; }
     if sb_span_equals(source, s, 3, "let", 3) {
-        return emit_stmt_let(source, output, s, body_end, layout);
+        return emit_stmt_let(source, output, s, body_end, layout, types);
     }
     if sb_span_equals(source, s, 5, "while", 5) {
-        return emit_stmt_while(source, output, s, body_end, layout);
+        return emit_stmt_while(source, output, s, body_end, layout, types);
     }
     if sb_span_equals(source, s, 2, "if", 2) {
-        return emit_stmt_if(source, output, s, body_end, layout);
+        return emit_stmt_if(source, output, s, body_end, layout, types);
     }
     if sb_span_equals(source, s, 6, "return", 6) {
-        return emit_stmt_ret(source, output, s, body_end, layout);
+        return emit_stmt_ret(source, output, s, body_end, layout, types);
     }
     if sb_span_equals(source, s, 5, "break", 5) {
         let semi: usize = scan_semi(source, s, body_end);
         sb_append_literal(output, "#break\n", 7);
         return semi + 1;
     }
-    return emit_stmt_other(source, output, s, body_end, layout);
+    return emit_stmt_other(source, output, s, body_end, layout, types);
 };
 
 // Emit the statements in [start, end).
@@ -1535,13 +1596,14 @@ let emit_block = std::func(
     start: usize,
     end: usize,
     layout: addr,
+    types: addr,
 ) -> unit {
     let current: usize = start;
     while current < end {
         let s: usize = skip_space(source, current);
         if s >= end { break; }
         if sb_byte_at(source, s) == 125 { break; }
-        current = emit_stmt(source, output, s, end, layout);
+        current = emit_stmt(source, output, s, end, layout, types);
         let marker: i32 = 0;
     }
 };
@@ -1730,7 +1792,9 @@ let emit_module = std::func(
     index: usize,
     end: usize,
     layout: addr,
+    types: addr,
 ) -> usize {
+    let types: addr = sb_new();
     let name_start: usize = skip_space(source, index + 3);
     let brace: usize = scan_brace(source, name_start, end);
     let brace_end: usize = match_brace(source, brace, end);
@@ -1740,7 +1804,7 @@ let emit_module = std::func(
         let s: usize = skip_space(source, current);
         if s >= brace_end { break; }
         if sb_span_equals(source, s, 3, "let", 3) {
-            current = emit_function2(source, output, s, 0, layout);
+            current = emit_function2(source, output, s, 0, layout, types);
         } else {
             current = s + 1;
             let marker: i32 = 0;
@@ -1759,7 +1823,9 @@ let emit_function2 = std::func(
     index: usize,
     link: usize,
     layout: addr,
+    types: addr,
 ) -> usize {
+    let types: addr = sb_new();
     let name_start: usize = skip_space(source, index + 3);
     let name_end: usize = parse_ident(source, name_start);
     let params_start: usize = name_end;
@@ -1809,7 +1875,7 @@ let emit_function2 = std::func(
     sb_append_literal(output, ") -> ", 5);
     emit_type(source, ret_start, ret_end, output);
     sb_append_literal(output, " {\n", 3);
-    emit_block(source, output, body_open + 1, match_brace(source, body_open, sb_len(source)), layout);
+    emit_block(source, output, body_open + 1, match_brace(source, body_open, sb_len(source)), layout, types);
     sb_append_literal(output, "}\n", 2);
     return match_brace(source, body_open, sb_len(source)) + 1;
 };
@@ -1892,6 +1958,7 @@ let emit_record_value = std::func(
     expr_start: usize,
     expr_end: usize,
     layout: addr,
+    types: addr,
 ) -> unit {
     let name_start: usize = trim_start(source, expr_start, expr_end);
     let name_end: usize = parse_ident(source, name_start);
@@ -1922,17 +1989,9 @@ let emit_record_value = std::func(
         sb_append_literal(output, "#let %v", 7);
         meta_append_decimal(output, index);
         sb_append_literal(output, ": #bits<", 8);
-        if w == 1 {
-            sb_append_literal(output, "1", 1);
-        } else {
-            if w == 4 {
-                sb_append_literal(output, "32", 2);
-            } else {
-                sb_append_literal(output, "64", 2);
-            }
-        }
+        meta_emit_bits(output, w);
         sb_append_literal(output, "> = ", 4);
-        emit_expr(source, vstart, vend, output, layout);
+        emit_expr(source, vstart, vend, output, layout, types);
         sb_append_literal(output, "\n", 1);
         sb_append_literal(output, "#store %v", 9);
         meta_append_decimal(output, index);
@@ -1963,6 +2022,7 @@ let compile = std::func(
     let length: usize = sb_len(source);
     let link: usize = 0;
     let layout: addr = sb_new();
+    let types: addr = sb_new();
     while index < length {
         index = skip_space(source, index);
         if index >= length { break; }
@@ -1991,10 +2051,10 @@ let compile = std::func(
                         index = emit_record(source, output, index, length, layout);
                     } else {
                         if sb_span_equals(source, func_start, 11, "std::module", 11) {
-                            index = emit_module(source, output, index, length, layout);
+                            index = emit_module(source, output, index, length, layout, types);
                         } else {
                             if sb_span_equals(source, func_start, 9, "std::func", 9) {
-                                index = emit_function2(source, output, index, link, layout);
+                                index = emit_function2(source, output, index, link, layout, types);
                                 link = 0;
                         } else {
                             let semi: usize = scan_semi(source, index, length);
