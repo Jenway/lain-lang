@@ -427,6 +427,161 @@ let meta_emit_bits = std::func(output: addr, w: usize) -> unit {
     }
 };
 
+// ---- meta objects ----
+// Compile-time meta objects are rows in one text table.  References are row
+// numbers (usize); this sidesteps pointer indirection, which the frozen
+// front-end cannot lower (it refuses #store targets that are not #addr,
+// usize->addr assignment, and load_bits results as addr returns).
+//
+// Row format (5 fields, 5 '|' separators):
+//   kind|name_start|name_length|payload_start|payload_length|
+// kind: 0 = nil, 1 = scalar, 2 = module, 3 = function, 4 = type.
+
+let meta_pipe_count = std::func(buf: addr, len: usize) -> usize {
+    let index: usize = 0;
+    let count: usize = 0;
+    while index < len {
+        if sb_byte_at(buf, index) == 124 {
+            count = count + 1;
+            let marker: i32 = 0;
+        }
+        index = index + 1;
+        let marker: i32 = 0;
+    }
+    return count;
+};
+
+let meta_rows = std::func(buf: addr, len: usize) -> usize {
+    let pipes: usize = meta_pipe_count(buf, len);
+    let rows: usize = 0;
+    let rem: usize = pipes;
+    while rem >= 5 {
+        rem = rem - 5;
+        rows = rows + 1;
+        let marker: i32 = 0;
+    }
+    return rows;
+};
+
+// Parse the segment after the (seg+1)-th '|' in [start, len).
+let meta_field = std::func(buf: addr, len: usize, seg: usize) -> usize {
+    let index: usize = 0;
+    let count: usize = 0;
+    let seg_start: usize = 0;
+    let found: i32 = 0;
+    while found == 0 {
+        if index >= len {
+            found = 1;
+            let marker: i32 = 0;
+        } else {
+            if sb_byte_at(buf, index) == 124 {
+                count = count + 1;
+                if count == seg {
+                    seg_start = index + 1;
+                    let marker: i32 = 0;
+                }
+                if count > seg {
+                    found = 1;
+                    let marker: i32 = 0;
+                } else {
+                    index = index + 1;
+                    let marker: i32 = 0;
+                }
+            } else {
+                index = index + 1;
+                let marker: i32 = 0;
+            }
+        }
+    }
+    return meta_parse_decimal(buf, seg_start, index);
+};
+
+// Field of the row-th row (1-based; row 0 returns 0).
+let meta_row_field = std::func(buf: addr, len: usize, row: usize, field: usize) -> usize {
+    let five: usize = 5;
+    let seg: usize = row * five + field;
+    if row == 0 { return 0; }
+    return meta_field(buf, len, seg);
+};
+
+// Append a row; returns its 1-based row number.
+let meta_append = std::func(
+    table: addr,
+    kind: usize,
+    ns: usize,
+    nl: usize,
+    ps: usize,
+    pl: usize,
+) -> usize {
+    let rows: usize = meta_rows(table, sb_len(table));
+    meta_append_decimal(table, kind);
+    sb_append_literal(table, "|", 1);
+    meta_append_decimal(table, ns);
+    sb_append_literal(table, "|", 1);
+    meta_append_decimal(table, nl);
+    sb_append_literal(table, "|", 1);
+    meta_append_decimal(table, ps);
+    sb_append_literal(table, "|", 1);
+    meta_append_decimal(table, pl);
+    sb_append_literal(table, "|", 1);
+    return rows + 1;
+};
+
+// Look up a name span [ns, ns+nl) among kind!=0 rows; returns row or 0.
+let meta_lookup = std::func(
+    table: addr,
+    len: usize,
+    ns: usize,
+    nl: usize,
+) -> usize {
+    let rows: usize = meta_rows(table, len);
+    let row: usize = 1;
+    let found: i32 = 0;
+    while found == 0 {
+        if row > rows { break; }
+        let rn: usize = meta_row_field(table, len, row, 1);
+        let rl: usize = meta_row_field(table, len, row, 2);
+        if rl == nl {
+            let same: i32 = 1;
+            let i: usize = 0;
+            while i < nl {
+                let rb: usize = rn + i;
+                let nb: usize = ns + i;
+                if sb_byte_at(table, rb) != sb_byte_at(table, nb) {
+                    same = 0;
+                    let marker: i32 = 0;
+                    break;
+                }
+                i = i + 1;
+                let marker: i32 = 0;
+            }
+            if same == 1 {
+                let k: usize = meta_row_field(table, len, row, 0);
+                if k != 0 { return row; }
+            }
+        }
+        row = row + 1;
+        let marker: i32 = 0;
+    }
+    return 0;
+};
+
+let meta_value_kind = std::func(table: addr, len: usize, row: usize) -> usize {
+    return meta_row_field(table, len, row, 0);
+};
+let meta_value_name_start = std::func(table: addr, len: usize, row: usize) -> usize {
+    return meta_row_field(table, len, row, 1);
+};
+let meta_value_name_length = std::func(table: addr, len: usize, row: usize) -> usize {
+    return meta_row_field(table, len, row, 2);
+};
+let meta_value_payload_start = std::func(table: addr, len: usize, row: usize) -> usize {
+    return meta_row_field(table, len, row, 3);
+};
+let meta_value_payload_length = std::func(table: addr, len: usize, row: usize) -> usize {
+    return meta_row_field(table, len, row, 4);
+};
+
 // ---- byte helpers ----
 let is_space = std::func(byte: i32) -> bool {
     if byte == 32 { return true; }
@@ -2121,3 +2276,4 @@ let compiler_compile = std::func() -> i32 {
     artifact_finish();
     return status;
 };
+
