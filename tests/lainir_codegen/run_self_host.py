@@ -14,13 +14,13 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BOOTSTRAP = (
     ROOT
-    / "bootstrap"
+    / "seed"
     / "zig-out"
     / "bin"
     / ("lainir-seed.exe" if sys.platform == "win32" else "lainir-seed")
 )
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
-HOST = ROOT / "bootstrap" / "src" / "host" / "native_compiler.c"
+HOST = ROOT / "seed" / "src" / "host" / "native_compiler.c"
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "return_42.l1"
 NESTED_EVAL_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "eval_nested_42.l1"
 ARGS_EVAL_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "eval_call_args.l1"

@@ -9,12 +9,12 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BIN = ROOT / "bootstrap" / "zig-out" / "bin"
+BIN = ROOT / "seed" / "zig-out" / "bin"
 SUFFIX = ".exe" if os.name == "nt" else ""
 BOOTSTRAP = BIN / f"lainir-seed{SUFFIX}"
 CHECK = BIN / f"lainir-print{SUFFIX}"
 INTERPRETER = BIN / f"lainir-seed{SUFFIX}"
-COMPILER = ROOT / "bootstrap" / "frozen" / "lainc.l1"
+COMPILER = ROOT / "seed" / "frozen" / "lainc.l1"
 FIXTURE = ROOT / "tests" / "lainir_lain" / "fixtures" / "compiler_api_schema.lain"
 COMPILER_SOURCES = tuple(sorted((ROOT / "src" / "compiler").glob("*.lain")))
 STD_SOURCES = (

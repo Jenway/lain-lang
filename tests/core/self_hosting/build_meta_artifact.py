@@ -199,13 +199,13 @@ def input_fingerprint(source: Path) -> str:
         ("validator-l1check", tool("l1check").read_bytes()),
         ("schema-reader-l1i", tool("l1i").read_bytes()),
         (
-            "bootstrap/polyfills.scm",
+            "seed/polyfills.scm",
             (BOOTSTRAP_ROOT / "polyfills.scm").read_bytes(),
         ),
     ]
     inputs.extend(
         (
-            "bootstrap/" + path.relative_to(BOOTSTRAP_ROOT).as_posix(),
+            "seed/" + path.relative_to(BOOTSTRAP_ROOT).as_posix(),
             path.read_bytes(),
         )
         for path in sorted((BOOTSTRAP_ROOT / "std/meta").rglob("*.scm"))

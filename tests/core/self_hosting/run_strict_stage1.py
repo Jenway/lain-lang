@@ -17,8 +17,8 @@ BOOTSTRAP = Path(
     )
 ).resolve()
 BIN = BOOTSTRAP / "zig-out" / "bin"
-FROZEN = BOOTSTRAP / "bootstrap" / "frozen" / "lainc.l1"
-STAGE1_SOURCE = ROOT / "packages" / "lain" / "bootstrap" / "stage1_compiler.lain"
+FROZEN = BOOTSTRAP / "seed" / "frozen" / "lainc.l1"
+STAGE1_SOURCE = ROOT / "packages" / "lain" / "seed" / "stage1_compiler.lain"
 FIXTURES = ROOT / "tests" / "core" / "self_hosting" / "fixtures"
 BUILD = ROOT / "build" / "core-self-hosting"
 

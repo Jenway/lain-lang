@@ -14,7 +14,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BOOTSTRAP = (
     ROOT
-    / "bootstrap"
+    / "seed"
     / "zig-out"
     / "bin"
     / ("lainir-seed.exe" if sys.platform == "win32" else "lainir-seed")

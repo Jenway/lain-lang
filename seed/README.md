@@ -29,7 +29,7 @@ The build produces:
   entry procedure without capabilities.
 
 The repository also carries the first frozen minimal Lain compiler at
-`bootstrap/frozen/lainc.l1`.  It is generated reproducibly from the current
+`seed/frozen/lainc.l1`.  It is generated reproducibly from the current
 LAIN-IR-written frontend bundle:
 
 ```text

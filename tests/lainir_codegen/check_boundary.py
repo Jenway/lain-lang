@@ -27,7 +27,7 @@ def main() -> int:
             print(f"  {path}", file=sys.stderr)
         return 1
 
-    build_files = [ROOT / "bootstrap" / "build.zig"]
+    build_files = [ROOT / "seed" / "build.zig"]
     for build_file in build_files:
         text = build_file.read_text(encoding="utf-8")
         if "src/lainir" in text.replace("\\", "/"):

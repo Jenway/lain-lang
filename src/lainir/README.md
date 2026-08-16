@@ -111,7 +111,7 @@ C bootstrap interpreter
 ```
 
 Stage 2 and stage 3 output are required to be byte-for-byte identical. The
-small native host in `bootstrap/src/host/native_compiler.c` supplies only
+small native host in `seed/src/host/native_compiler.c` supplies only
 source bytes, diagnostics, allocation, artifact I/O, and the process entry
 point. It contains no lexer, parser, verifier, IR, or emitter logic.
 
@@ -132,7 +132,7 @@ configured with `lainir_caps_set_limits`.
 From the repository root, after building `bootstrap`:
 
 ```text
-bootstrap/zig-out/bin/lainir-seed \
+seed/zig-out/bin/lainir-seed \
   src/lainir/compiler.l1 lainir_compile output.c input.l1
 ```
 

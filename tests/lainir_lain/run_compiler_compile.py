@@ -11,7 +11,7 @@ import tempfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin"
+BOOTSTRAP = ROOT / "seed" / "zig-out" / "bin"
 L1CHECK = BOOTSTRAP / "lainir-print.exe"
 L1I = BOOTSTRAP / "lainir-seed.exe"
 RUNNER = ROOT / "scripts" / "run_lain_compiler.py"

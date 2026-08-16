@@ -296,7 +296,7 @@ printer is already the single formatting authority.
 
 ## 12. Current executable example
 
-`bootstrap/lainir/module_let.l1` is the first non-trivial executable example.
+`seed/lainir/module_let.l1` is the first non-trivial executable example.
 It represents Syntax nodes and Module bindings in ordinary memory and executes
 a `meta_let` LAIN-IR procedure.  No Module or Meta instruction is added to
 LAIN-IR.

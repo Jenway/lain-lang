@@ -18,7 +18,7 @@ import tempfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-BOOTSTRAP_DIR = ROOT / "bootstrap" / "zig-out" / "bin"
+BOOTSTRAP_DIR = ROOT / "seed" / "zig-out" / "bin"
 L1CHECK = BOOTSTRAP_DIR / ("lainir-print.exe" if sys.platform == "win32" else "lainir-print")
 L1BOOTSTRAP = BOOTSTRAP_DIR / (
     "lainir-seed.exe" if sys.platform == "win32" else "lainir-seed"

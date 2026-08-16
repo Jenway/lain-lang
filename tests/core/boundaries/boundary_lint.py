@@ -159,9 +159,9 @@ RULES: tuple[Rule, ...] = (
         ident="M4_LAINIR_SOURCE_MODULE_DEBT",
         description="LAIN-IR must not own source-level module/export state",
         paths=(
-            "bootstrap/src/core/*.c",
-            "bootstrap/src/text/*.c",
-            "bootstrap/include/lainir/*.h",
+            "seed/src/core/*.c",
+            "seed/src/text/*.c",
+            "seed/include/lainir/*.h",
         ),
         pattern=(
             r"native_declare_module|native_mark_export|"
@@ -320,7 +320,7 @@ def check_canonicalize_fixed_tags(strict: bool) -> bool:
     path = ROOT / "std/meta/canonicalize.scm"
     if not path.exists():
         print("OK A1_CANONICALIZE_FIXED_TAG_WHITELIST: bootstrap-only")
-        print("    Scheme canonicalizer is maintained on bootstrap/stage0")
+        print("    Scheme canonicalizer is maintained on seed/stage0")
         return True
     tag_regex = re.compile(r"\((?:list|cons)\s+'([A-Za-z][A-Za-z0-9_.-]*)\b")
     matches: list[tuple[int, str, str]] = []

@@ -11,7 +11,7 @@ import tempfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-BIN = ROOT / "bootstrap" / "zig-out" / "bin"
+BIN = ROOT / "seed" / "zig-out" / "bin"
 SUFFIX = ".exe" if sys.platform == "win32" else ""
 INTERPRETER = BIN / f"lainir-seed{SUFFIX}"
 BOOTSTRAP = BIN / f"lainir-seed{SUFFIX}"

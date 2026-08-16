@@ -17,7 +17,7 @@ import tempfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-BOOTSTRAP_BIN = ROOT / "bootstrap" / "zig-out" / "bin"
+BOOTSTRAP_BIN = ROOT / "seed" / "zig-out" / "bin"
 L1CHECK = BOOTSTRAP_BIN / ("lainir-print.exe" if sys.platform == "win32" else "lainir-print")
 L1LS = BOOTSTRAP_BIN / ("lainir-lsp.exe" if sys.platform == "win32" else "lainir-lsp")
 TOOLS = ROOT / "src" / "lainir" / "tools"

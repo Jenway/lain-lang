@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
-L1CHECK = ROOT / "bootstrap" / "zig-out" / "bin" / (
+L1CHECK = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-print.exe" if os.name == "nt" else "lainir-print"
 )
 OUTPUT = ROOT / "build" / "lainir" / "lain_compiler.l1"

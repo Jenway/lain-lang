@@ -20,7 +20,7 @@ Current active suites:
 - `self-hosting`: prove the stage1 -> stage2 -> stage3 chain, require the
   stage2/stage3 compiler artifacts to be byte-identical, and compare their
   generated LAIN-IR and diagnostics
-- Scheme-host compatibility tests live on `bootstrap/stage0`; `main` tests the
+- Scheme-host compatibility tests live on `seed/stage0`; `main` tests the
   Lain-owned compiler and consumes bootstrap tools from the sibling worktree.
 - `bootstrap-core`: minimal Lain capabilities needed by compiler code
 - `lainir/lain-frontend`: stage-0 RawAst, meta record/layout, compile-time
