@@ -259,12 +259,12 @@ artifact is still below the full compiler boundary described by this section.
 Status (2026-08-16): full compiler-API Meta instantiation is now accepted
 end-to-end.  Running the re-frozen `bootstrap/frozen/lainc.l1` over
 `compiler_api_schema.lain` plus all `src/compiler` and std sources succeeds at
-`compiler_compile`, passes `l1check` (including the previously blocked
+`compiler_compile`, passes `lainir-print` (including the previously blocked
 `Meta.expand`/`Modules.declare` nominal parameter physical-type check), and
-`l1i` returns `1` (`tests/lainir_lain/run_compiler_api_bootstrap.py`).
+`lainir-run` returns `1` (`tests/lainir_lain/run_compiler_api_bootstrap.py`).
 Remaining blocker: the empty-input fixture
 `compiler_api_compile_empty.lain` produces a verifier-valid artifact whose
-execution dereferences a null address in `l1i` (access violation
+execution dereferences a null address in `lainir-run` (access violation
 `0xC0000005`).  After that comes real Lain source input, wiring
 `run_compiler_source_closure.py`/`run_compiler_api_bootstrap.py` into
 `run_all.py`, and the stage2/stage3 byte comparison listed below.
@@ -286,7 +286,7 @@ execution dereferences a null address in `l1i` (access violation
   preserving physical module-typed identity functions.
 - [ ] **Canonical compiler closure.** Lower `src/compiler` module by module,
   starting with `compiler_core`, then `compiler_driver`, `compiler_api`, and
-  `lainc`; after each module, run `l1check` and execute a small request.
+  `lainc`; after each module, run `lainir-print` and execute a small request.
 - [ ] **Thin CLI and fixed point.** Restore `lainc` as a capability-only host,
   rebuild stage 2 and stage 3 from the same canonical source, and require
   byte-identical artifacts.

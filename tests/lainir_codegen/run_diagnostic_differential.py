@@ -12,8 +12,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SUFFIX = ".exe" if sys.platform == "win32" else ""
 BIN = ROOT / "bootstrap" / "zig-out" / "bin"
-CHECKER = BIN / f"l1check{SUFFIX}"
-BOOTSTRAP = BIN / f"l1bootstrap{SUFFIX}"
+CHECKER = BIN / f"lainir-print{SUFFIX}"
+BOOTSTRAP = BIN / f"lainir-interpreter{SUFFIX}"
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
 
 CASES = {

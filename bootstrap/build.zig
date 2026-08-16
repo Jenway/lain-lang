@@ -65,51 +65,51 @@ pub fn build(b: *std.Build) void {
     bootstrap_host.root_module.linkLibrary(interpreter);
     bootstrap_host.root_module.linkLibrary(host_io);
 
-    const l1check = addCExecutable(
+    const lainir_print = addCExecutable(
         b,
-        "l1check",
-        "src/cli/l1check.c",
+        "lainir-print",
+        "src/cli/print_main.c",
         target,
         optimize,
     );
-    l1check.root_module.linkLibrary(core);
-    l1check.root_module.linkLibrary(text);
-    l1check.root_module.linkLibrary(interpreter);
-    l1check.root_module.linkLibrary(host_io);
+    lainir_print.root_module.linkLibrary(core);
+    lainir_print.root_module.linkLibrary(text);
+    lainir_print.root_module.linkLibrary(interpreter);
+    lainir_print.root_module.linkLibrary(host_io);
     _ = installNamed(
         b,
-        l1check,
-        "l1check",
+        lainir_print,
+        "lainir-print",
         "Build the minimal LAIN-IR parser and verifier",
     );
 
-    const l1i = addCExecutable(
+    const lainir_run = addCExecutable(
         b,
-        "l1i",
-        "src/cli/l1i.c",
+        "lainir-run",
+        "src/cli/run_main.c",
         target,
         optimize,
     );
-    l1i.root_module.linkLibrary(core);
-    l1i.root_module.linkLibrary(text);
-    l1i.root_module.linkLibrary(interpreter);
-    l1i.root_module.linkLibrary(host_io);
+    lainir_run.root_module.linkLibrary(core);
+    lainir_run.root_module.linkLibrary(text);
+    lainir_run.root_module.linkLibrary(interpreter);
+    lainir_run.root_module.linkLibrary(host_io);
     _ = installNamed(
         b,
-        l1i,
-        "l1i",
+        lainir_run,
+        "lainir-run",
         "Build the minimal LAIN-IR interpreter",
     );
 
-    const l1bootstrap = addCExecutable(
+    const lainir_interpreter = addCExecutable(
         b,
-        "l1bootstrap",
-        "src/cli/l1bootstrap.c",
+        "lainir-interpreter",
+        "src/cli/interpreter_main.c",
         target,
         optimize,
     );
     linkBootstrap(
-        l1bootstrap,
+        lainir_interpreter,
         core,
         text,
         interpreter,
@@ -118,30 +118,30 @@ pub fn build(b: *std.Build) void {
     );
     _ = installNamed(
         b,
-        l1bootstrap,
-        "l1bootstrap",
+        lainir_interpreter,
+        "lainir-interpreter",
         "Build the generic frozen-compiler runner",
     );
 
-    const l1ls = addCExecutable(
+    const lainir_lsp = addCExecutable(
         b,
-        "l1ls",
-        "src/cli/l1ls.c",
+        "lainir-lsp",
+        "src/cli/lsp_main.c",
         target,
         optimize,
     );
-    l1ls.root_module.addCSourceFiles(.{
+    lainir_lsp.root_module.addCSourceFiles(.{
         .files = &.{"src/host/lsp_host.c"},
         .flags = c_flags,
     });
-    l1ls.root_module.linkLibrary(core);
-    l1ls.root_module.linkLibrary(text);
-    l1ls.root_module.linkLibrary(interpreter);
-    l1ls.root_module.linkLibrary(host_io);
+    lainir_lsp.root_module.linkLibrary(core);
+    lainir_lsp.root_module.linkLibrary(text);
+    lainir_lsp.root_module.linkLibrary(interpreter);
+    lainir_lsp.root_module.linkLibrary(host_io);
     _ = installNamed(
         b,
-        l1ls,
-        "l1ls",
+        lainir_lsp,
+        "lainir-lsp",
         "Run the LAIN-IR language server over stdio",
     );
 

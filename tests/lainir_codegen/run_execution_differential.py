@@ -13,8 +13,8 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BIN = ROOT / "bootstrap" / "zig-out" / "bin"
 SUFFIX = ".exe" if sys.platform == "win32" else ""
-INTERPRETER = BIN / f"l1i{SUFFIX}"
-BOOTSTRAP = BIN / f"l1bootstrap{SUFFIX}"
+INTERPRETER = BIN / f"lainir-run{SUFFIX}"
+BOOTSTRAP = BIN / f"lainir-interpreter{SUFFIX}"
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 

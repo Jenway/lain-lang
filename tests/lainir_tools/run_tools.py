@@ -2,7 +2,7 @@
 """Regression tests for the LAIN-IR-written editor tools.
 
 The formatter is exercised twice through the stage0 runner.  This catches
-both a broken LAIN-IR module (the l1check gate) and a formatter that is not
+both a broken LAIN-IR module (the lainir-print gate) and a formatter that is not
 idempotent.  The parser, highlighter, and LSP are also executed through their
 stage0 paths; protocol checks use the real stdio host.
 """
@@ -19,11 +19,11 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BOOTSTRAP_DIR = ROOT / "bootstrap" / "zig-out" / "bin"
-L1CHECK = BOOTSTRAP_DIR / ("l1check.exe" if sys.platform == "win32" else "l1check")
+L1CHECK = BOOTSTRAP_DIR / ("lainir-print.exe" if sys.platform == "win32" else "lainir-print")
 L1BOOTSTRAP = BOOTSTRAP_DIR / (
-    "l1bootstrap.exe" if sys.platform == "win32" else "l1bootstrap"
+    "lainir-interpreter.exe" if sys.platform == "win32" else "lainir-interpreter"
 )
-L1LS = BOOTSTRAP_DIR / ("l1ls.exe" if sys.platform == "win32" else "l1ls")
+L1LS = BOOTSTRAP_DIR / ("lainir-lsp.exe" if sys.platform == "win32" else "lainir-lsp")
 TOOLS = ROOT / "src" / "lainir" / "tools"
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
@@ -44,9 +44,9 @@ def report_failure(label: str, result: subprocess.CompletedProcess[str]) -> None
 def check_module(source: pathlib.Path, entry: str) -> bool:
     result = run([str(L1CHECK), str(source), entry])
     if result.returncode:
-        report_failure(f"l1check {source.name}:{entry}", result)
+        report_failure(f"lainir-print {source.name}:{entry}", result)
         return False
-    print(f"PASS l1check {source.name}:{entry}")
+    print(f"PASS lainir-print {source.name}:{entry}")
     return True
 
 
@@ -133,7 +133,7 @@ def run_formatter() -> bool:
 def run_highlight() -> bool:
     """Bundle and execute the LAIN-IR highlighter, then validate its ABI.
 
-    The test intentionally checks the produced JSON rather than only l1check:
+    The test intentionally checks the produced JSON rather than only lainir-print:
     this catches broken capability wiring, linked-list termination, span
     ordering, and accidental changes to the public highlight record shape.
     """
@@ -315,7 +315,7 @@ def check_lsp_conditionally() -> bool:
         print(f"SKIP lsp framing fixture ({detail})")
         return True
 
-    print("PASS l1check lsp.l1:lsp_run")
+    print("PASS lainir-print lsp.l1:lsp_run")
     fixture = (FIXTURES / "lsp_initialize_frame.txt").read_bytes().rstrip(b"\n")
     # Keep fixtures repository-friendly (LF), then put them on the wire with
     # the protocol's required CRLF separators and validate the declared body.

@@ -140,7 +140,7 @@ int lsp_run_cli(int argc, char **argv) {
   LainirRunStatus status;
 
   if (argc < 2) {
-    fprintf(stderr, "usage: l1ls <lsp.l1> [entry]\n");
+    fprintf(stderr, "usage: lainir-lsp <lsp.l1> [entry]\n");
     return 1;
   }
 #ifdef _WIN32

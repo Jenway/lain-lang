@@ -22,9 +22,9 @@ host <- cli
 
 The build produces:
 
-- `l1check`: parse, verify, and print canonical LAIN-IR.
-- `l1i`: execute a LAIN-IR entry procedure.
-- `l1bootstrap`: run an explicitly selected frozen compiler artifact.
+- `lainir-print`: parse, verify, and print canonical LAIN-IR.
+- `lainir-run`: execute a LAIN-IR entry procedure.
+- `lainir-interpreter`: run an explicitly selected frozen compiler artifact.
 
 The repository also carries the first frozen minimal Lain compiler at
 `bootstrap/frozen/lainc.l1`.  It is generated reproducibly from the current

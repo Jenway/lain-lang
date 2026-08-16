@@ -17,7 +17,7 @@ BOOTSTRAP = (
     / "bootstrap"
     / "zig-out"
     / "bin"
-    / ("l1bootstrap.exe" if sys.platform == "win32" else "l1bootstrap")
+    / ("lainir-interpreter.exe" if sys.platform == "win32" else "lainir-interpreter")
 )
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
 HOST = ROOT / "bootstrap" / "src" / "host" / "native_compiler.c"

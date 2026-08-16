@@ -132,7 +132,7 @@ configured with `lainir_caps_set_limits`.
 From the repository root, after building `bootstrap`:
 
 ```text
-bootstrap/zig-out/bin/l1bootstrap \
+bootstrap/zig-out/bin/lainir-interpreter \
   src/lainir/compiler.l1 lainir_compile output.c input.l1
 ```
 
@@ -146,7 +146,7 @@ reference front end and the LAIN-IR-written compiler accept canonical
 `#bits<N>`, `#float<N>`, `#addr`, typed `#store`, explicit signed/unsigned
 integer operations, width conversions, and signature-bearing indirect calls.
 The reference parser keeps old `i32`/`addr` spellings only for migration;
-`l1check --strict` rejects those aliases.
+`lainir-print --strict` rejects those aliases.
 Legacy scalar aliases and ambiguous integer spellings remain accepted only as
 a migration surface for the existing bootstrap compiler source. The
 LAIN-IR-written compiler now also performs a small compile-time evaluator for

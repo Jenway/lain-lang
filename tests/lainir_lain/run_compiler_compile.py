@@ -12,8 +12,8 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin"
-L1CHECK = BOOTSTRAP / "l1check.exe"
-L1I = BOOTSTRAP / "l1i.exe"
+L1CHECK = BOOTSTRAP / "lainir-print.exe"
+L1I = BOOTSTRAP / "lainir-run.exe"
 RUNNER = ROOT / "scripts" / "run_lain_compiler.py"
 GOOD = pathlib.Path(__file__).parent / "fixtures" / "function_return.lain"
 ARITHMETIC = pathlib.Path(__file__).parent / "fixtures" / "function_arithmetic.lain"
@@ -158,7 +158,7 @@ def main() -> int:
         units_output = directory / "syntax-units.txt"
         units = run(
             [
-                str(BOOTSTRAP / "l1bootstrap.exe"),
+                str(BOOTSTRAP / "lainir-interpreter.exe"),
                 str(ROOT / "build" / "lainir" / "lain_compiler.l1"),
                 "syntax_units_dump",
                 str(units_output),

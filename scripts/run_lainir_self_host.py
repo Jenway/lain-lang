@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin" / (
-    "l1bootstrap.exe" if os.name == "nt" else "l1bootstrap"
+    "lainir-interpreter.exe" if os.name == "nt" else "lainir-interpreter"
 )
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
 HOST = ROOT / "bootstrap" / "src" / "host" / "native_compiler.c"

@@ -3,7 +3,7 @@
 Status: executable bootstrap subset.
 
 This document specifies the LAIN-IR text accepted by the bootstrap parser,
-verified by `l1check`, and executed by `l1i`.  Forms that are only ideas for a
+verified by `lainir-print`, and executed by `lainir-run`.  Forms that are only ideas for a
 future IR do not belong in this document.
 
 ## 1. Boundary
@@ -273,7 +273,7 @@ The returned value must match the procedure result type.
 
 ## 11. Canonical formatting
 
-`l1check` performs:
+`lainir-print` performs:
 
 ```text
 parse

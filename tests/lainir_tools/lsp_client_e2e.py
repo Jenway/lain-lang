@@ -18,8 +18,8 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BOOTSTRAP_BIN = ROOT / "bootstrap" / "zig-out" / "bin"
-L1CHECK = BOOTSTRAP_BIN / ("l1check.exe" if sys.platform == "win32" else "l1check")
-L1LS = BOOTSTRAP_BIN / ("l1ls.exe" if sys.platform == "win32" else "l1ls")
+L1CHECK = BOOTSTRAP_BIN / ("lainir-print.exe" if sys.platform == "win32" else "lainir-print")
+L1LS = BOOTSTRAP_BIN / ("lainir-lsp.exe" if sys.platform == "win32" else "lainir-lsp")
 TOOLS = ROOT / "src" / "lainir" / "tools"
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 

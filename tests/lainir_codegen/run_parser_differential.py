@@ -11,10 +11,10 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "bootstrap" / "zig-out" / "bin" / (
-    "l1check.exe" if sys.platform == "win32" else "l1check"
+    "lainir-print.exe" if sys.platform == "win32" else "lainir-print"
 )
 BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin" / (
-    "l1bootstrap.exe" if sys.platform == "win32" else "l1bootstrap"
+    "lainir-interpreter.exe" if sys.platform == "win32" else "lainir-interpreter"
 )
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
 

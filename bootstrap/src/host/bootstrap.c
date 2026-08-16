@@ -282,7 +282,7 @@ int bootstrap_run_cli(int argc, char **argv) {
 
   if (argc < 5) {
     fprintf(stderr,
-            "usage: l1bootstrap <compiler.l1> <entry> <output.l1> "
+            "usage: lainir-interpreter <compiler.l1> <entry> <output.l1> "
             "<source> [source ...]\n");
     return 1;
   }
