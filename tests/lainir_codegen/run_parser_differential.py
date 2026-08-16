@@ -14,7 +14,7 @@ CHECKER = ROOT / "bootstrap" / "zig-out" / "bin" / (
     "lainir-print.exe" if sys.platform == "win32" else "lainir-print"
 )
 BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin" / (
-    "lainir-interpreter.exe" if sys.platform == "win32" else "lainir-interpreter"
+    "lainir-seed.exe" if sys.platform == "win32" else "lainir-seed"
 )
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
 

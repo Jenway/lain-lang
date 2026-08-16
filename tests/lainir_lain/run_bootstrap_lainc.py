@@ -12,9 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 BIN = ROOT / "bootstrap" / "zig-out" / "bin"
 SUFFIX = ".exe" if os.name == "nt" else ""
-BOOTSTRAP = BIN / f"lainir-interpreter{SUFFIX}"
+BOOTSTRAP = BIN / f"lainir-seed{SUFFIX}"
 CHECK = BIN / f"lainir-print{SUFFIX}"
-INTERPRETER = BIN / f"lainir-run{SUFFIX}"
+INTERPRETER = BIN / f"lainir-seed{SUFFIX}"
 COMPILER = ROOT / "bootstrap" / "frozen" / "lainc.l1"
 
 
@@ -40,7 +40,7 @@ def compile_and_run(source: Path, expected: str, output: Path) -> None:
     require(generated, f"bootstrap compile {source.name}")
     checked = run(CHECK, output, "main")
     require(checked, f"check {source.name}")
-    executed = run(INTERPRETER, output, "main")
+    executed = run(INTERPRETER, "run", output, "main")
     require(executed, f"execute {source.name}")
     if executed.stdout.strip() != expected:
         raise RuntimeError(

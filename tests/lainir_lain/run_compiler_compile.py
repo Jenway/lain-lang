@@ -13,7 +13,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin"
 L1CHECK = BOOTSTRAP / "lainir-print.exe"
-L1I = BOOTSTRAP / "lainir-run.exe"
+L1I = BOOTSTRAP / "lainir-seed.exe"
 RUNNER = ROOT / "scripts" / "run_lain_compiler.py"
 GOOD = pathlib.Path(__file__).parent / "fixtures" / "function_return.lain"
 ARITHMETIC = pathlib.Path(__file__).parent / "fixtures" / "function_arithmetic.lain"
@@ -85,7 +85,7 @@ def main() -> int:
         if checked.returncode:
             print(checked.stderr or checked.stdout, file=sys.stderr)
             return 1
-        executed = run([str(L1I), str(generated), "main"])
+        executed = run([str(L1I), "run", str(generated), "main"])
         if executed.returncode or executed.stdout.strip() != "42":
             print(executed.stderr or executed.stdout, file=sys.stderr)
             return 1
@@ -101,7 +101,7 @@ def main() -> int:
             print("compiler_compile folded away the runtime arithmetic lowering", file=sys.stderr)
             return 1
         checked_arithmetic = run([str(L1CHECK), str(arithmetic_output), "main"])
-        executed_arithmetic = run([str(L1I), str(arithmetic_output), "main"])
+        executed_arithmetic = run([str(L1I), "run", str(arithmetic_output), "main"])
         if checked_arithmetic.returncode or executed_arithmetic.stdout.strip() != "42":
             print(
                 checked_arithmetic.stderr
@@ -122,7 +122,7 @@ def main() -> int:
             print("compiler_compile did not lower the direct function call", file=sys.stderr)
             return 1
         checked_calls = run([str(L1CHECK), str(calls_output), "main"])
-        executed_calls = run([str(L1I), str(calls_output), "main"])
+        executed_calls = run([str(L1I), "run", str(calls_output), "main"])
         if checked_calls.returncode or executed_calls.stdout.strip() != "42":
             print(
                 checked_calls.stderr or executed_calls.stderr or executed_calls.stdout,
@@ -148,7 +148,7 @@ def main() -> int:
             print("compiler_compile did not lower functions from multiple sources", file=sys.stderr)
             return 1
         checked_multi = run([str(L1CHECK), str(multi_output), "main"])
-        executed_multi = run([str(L1I), str(multi_output), "main"])
+        executed_multi = run([str(L1I), "run", str(multi_output), "main"])
         if checked_multi.returncode or executed_multi.stdout.strip() != "42":
             print(
                 checked_multi.stderr or executed_multi.stderr or executed_multi.stdout,
@@ -158,7 +158,7 @@ def main() -> int:
         units_output = directory / "syntax-units.txt"
         units = run(
             [
-                str(BOOTSTRAP / "lainir-interpreter.exe"),
+                str(BOOTSTRAP / "lainir-seed.exe"),
                 str(ROOT / "build" / "lainir" / "lain_compiler.l1"),
                 "syntax_units_dump",
                 str(units_output),
@@ -177,7 +177,7 @@ def main() -> int:
             print(consteval.stderr or consteval.stdout, file=sys.stderr)
             return 1
         checked_consteval = run([str(L1CHECK), str(consteval_output), "main"])
-        executed_consteval = run([str(L1I), str(consteval_output), "main"])
+        executed_consteval = run([str(L1I), "run", str(consteval_output), "main"])
         if checked_consteval.returncode or executed_consteval.stdout.strip() != "42":
             print(
                 checked_consteval.stderr
@@ -235,7 +235,7 @@ def main() -> int:
             print(nested.stderr or nested.stdout, file=sys.stderr)
             return 1
         checked_nested = run([str(L1CHECK), str(nested_output), "main"])
-        executed_nested = run([str(L1I), str(nested_output), "main"])
+        executed_nested = run([str(L1I), "run", str(nested_output), "main"])
         if checked_nested.returncode or executed_nested.stdout.strip() != "42":
             print(
                 checked_nested.stderr
@@ -284,7 +284,7 @@ def main() -> int:
             print("compiler_compile did not execute a consteval function call", file=sys.stderr)
             return 1
         checked_consteval_call = run([str(L1CHECK), str(consteval_call_output), "main"])
-        executed_consteval_call = run([str(L1I), str(consteval_call_output), "main"])
+        executed_consteval_call = run([str(L1I), "run", str(consteval_call_output), "main"])
         if checked_consteval_call.returncode or executed_consteval_call.stdout.strip() != "42":
             print(
                 checked_consteval_call.stderr
@@ -313,7 +313,7 @@ def main() -> int:
             [str(L1CHECK), str(consteval_in_function_output), "main"]
         )
         executed_consteval_in_function = run(
-            [str(L1I), str(consteval_in_function_output), "main"]
+            [str(L1I), "run", str(consteval_in_function_output), "main"]
         )
         if (
             checked_consteval_in_function.returncode
@@ -353,7 +353,7 @@ def main() -> int:
             print("compiler_compile did not lower the Meta address type", file=sys.stderr)
             return 1
         checked_address = run([str(L1CHECK), str(address_output), "main"])
-        executed_address = run([str(L1I), str(address_output), "main"])
+        executed_address = run([str(L1I), "run", str(address_output), "main"])
         if checked_address.returncode or executed_address.stdout.strip() != "42":
             print(
                 checked_address.stderr
@@ -380,7 +380,7 @@ def main() -> int:
             print("compiler_compile did not resolve a qualified Meta call", file=sys.stderr)
             return 1
         checked_qualified = run([str(L1CHECK), str(qualified_output), "main"])
-        executed_qualified = run([str(L1I), str(qualified_output), "main"])
+        executed_qualified = run([str(L1I), "run", str(qualified_output), "main"])
         if checked_qualified.returncode or executed_qualified.stdout.strip() != "42":
             print(
                 checked_qualified.stderr
@@ -401,7 +401,7 @@ def main() -> int:
             print("compiler_compile did not erase the source effect clause at the boundary", file=sys.stderr)
             return 1
         checked_effects = run([str(L1CHECK), str(effects_output), "main"])
-        executed_effects = run([str(L1I), str(effects_output), "main"])
+        executed_effects = run([str(L1I), "run", str(effects_output), "main"])
         if checked_effects.returncode or executed_effects.stdout.strip() != "42":
             print(
                 checked_effects.stderr
@@ -425,7 +425,7 @@ def main() -> int:
             print("compiler_compile did not lower a record type alias as an address", file=sys.stderr)
             return 1
         checked_alias = run([str(L1CHECK), str(alias_output), "main"])
-        executed_alias = run([str(L1I), str(alias_output), "main"])
+        executed_alias = run([str(L1I), "run", str(alias_output), "main"])
         if checked_alias.returncode or executed_alias.stdout.strip() != "42":
             print(
                 checked_alias.stderr or executed_alias.stderr or executed_alias.stdout,
@@ -444,7 +444,7 @@ def main() -> int:
             print("compiler_compile did not lower a Meta bool literal", file=sys.stderr)
             return 1
         checked_bool = run([str(L1CHECK), str(bool_output), "main"])
-        executed_bool = run([str(L1I), str(bool_output), "main"])
+        executed_bool = run([str(L1I), "run", str(bool_output), "main"])
         if checked_bool.returncode or executed_bool.stdout.strip() != "42":
             print(
                 checked_bool.stderr or executed_bool.stderr or executed_bool.stdout,
@@ -470,7 +470,7 @@ def main() -> int:
             print("compiler_compile did not resolve a type from a later source unit", file=sys.stderr)
             return 1
         checked_external_type = run([str(L1CHECK), str(external_type_output), "main"])
-        executed_external_type = run([str(L1I), str(external_type_output), "main"])
+        executed_external_type = run([str(L1I), "run", str(external_type_output), "main"])
         if checked_external_type.returncode or executed_external_type.stdout.strip() != "42":
             print(
                 checked_external_type.stderr
@@ -500,7 +500,7 @@ def main() -> int:
             print("compiler_compile did not preserve a Meta generic constructor as an address", file=sys.stderr)
             return 1
         checked_generic = run([str(L1CHECK), str(generic_output), "main"])
-        executed_generic = run([str(L1I), str(generic_output), "main"])
+        executed_generic = run([str(L1I), "run", str(generic_output), "main"])
         if checked_generic.returncode or executed_generic.stdout.strip() != "42":
             print(
                 checked_generic.stderr or executed_generic.stderr or executed_generic.stdout,
@@ -529,7 +529,7 @@ def main() -> int:
             print("compiler_compile did not lower expressions inside call arguments", file=sys.stderr)
             return 1
         checked_call_expression = run([str(L1CHECK), str(call_expression_output), "main"])
-        executed_call_expression = run([str(L1I), str(call_expression_output), "main"])
+        executed_call_expression = run([str(L1I), "run", str(call_expression_output), "main"])
         if checked_call_expression.returncode or executed_call_expression.stdout.strip() != "42":
             print(
                 checked_call_expression.stderr
@@ -550,7 +550,7 @@ def main() -> int:
             print("compiler_compile did not lower comparison expressions", file=sys.stderr)
             return 1
         checked_comparison = run([str(L1CHECK), str(comparison_output), "main"])
-        executed_comparison = run([str(L1I), str(comparison_output), "main"])
+        executed_comparison = run([str(L1I), "run", str(comparison_output), "main"])
         if checked_comparison.returncode or executed_comparison.stdout.strip() != "42":
             print(
                 checked_comparison.stderr or executed_comparison.stderr or executed_comparison.stdout,
@@ -569,7 +569,7 @@ def main() -> int:
             print("compiler_compile did not lower an ordered if comparison", file=sys.stderr)
             return 1
         checked_if_order = run([str(L1CHECK), str(if_order_output), "main"])
-        executed_if_order = run([str(L1I), str(if_order_output), "main"])
+        executed_if_order = run([str(L1I), "run", str(if_order_output), "main"])
         if checked_if_order.returncode or executed_if_order.stdout.strip() != "42":
             print(
                 checked_if_order.stderr or executed_if_order.stderr or executed_if_order.stdout,
@@ -594,7 +594,7 @@ def main() -> int:
             print("compiler_compile did not resolve a qualified Meta constant", file=sys.stderr)
             return 1
         checked_qualified_constant = run([str(L1CHECK), str(qualified_constant_output), "main"])
-        executed_qualified_constant = run([str(L1I), str(qualified_constant_output), "main"])
+        executed_qualified_constant = run([str(L1I), "run", str(qualified_constant_output), "main"])
         if checked_qualified_constant.returncode or executed_qualified_constant.stdout.strip() != "42":
             print(
                 checked_qualified_constant.stderr
@@ -611,7 +611,7 @@ def main() -> int:
             print(std_import.stderr or std_import.stdout, file=sys.stderr)
             return 1
         checked_std_import = run([str(L1CHECK), str(std_import_output), "main"])
-        executed_std_import = run([str(L1I), str(std_import_output), "main"])
+        executed_std_import = run([str(L1I), "run", str(std_import_output), "main"])
         if checked_std_import.returncode or executed_std_import.stdout.strip() != "42":
             print(
                 checked_std_import.stderr or executed_std_import.stderr or executed_std_import.stdout,
@@ -633,7 +633,7 @@ def main() -> int:
             print(package.stderr or package.stdout, file=sys.stderr)
             return 1
         checked_package = run([str(L1CHECK), str(package_output), "main"])
-        executed_package = run([str(L1I), str(package_output), "main"])
+        executed_package = run([str(L1I), "run", str(package_output), "main"])
         if checked_package.returncode or executed_package.stdout.strip() != "42":
             print(
                 checked_package.stderr or executed_package.stderr or executed_package.stdout,
@@ -652,7 +652,7 @@ def main() -> int:
             print("compiler_compile did not lower nominal qualified types", file=sys.stderr)
             return 1
         checked_nominal = run([str(L1CHECK), str(nominal_output), "main"])
-        executed_nominal = run([str(L1I), str(nominal_output), "main"])
+        executed_nominal = run([str(L1I), "run", str(nominal_output), "main"])
         if checked_nominal.returncode or executed_nominal.stdout.strip() != "42":
             print(
                 checked_nominal.stderr or executed_nominal.stderr or executed_nominal.stdout,
@@ -683,7 +683,7 @@ def main() -> int:
             [str(L1CHECK), str(nested_projection_output), "main"]
         )
         executed_nested_projection = run(
-            [str(L1I), str(nested_projection_output), "main"]
+            [str(L1I), "run", str(nested_projection_output), "main"]
         )
         if (
             checked_nested_projection.returncode
@@ -712,7 +712,7 @@ def main() -> int:
             print("compiler_compile did not lower the UFCS receiver", file=sys.stderr)
             return 1
         checked_ufcs = run([str(L1CHECK), str(ufcs_output), "main"])
-        executed_ufcs = run([str(L1I), str(ufcs_output), "main"])
+        executed_ufcs = run([str(L1I), "run", str(ufcs_output), "main"])
         if checked_ufcs.returncode or executed_ufcs.stdout.strip() != "42":
             print(
                 checked_ufcs.stderr or executed_ufcs.stderr or executed_ufcs.stdout,
@@ -731,7 +731,7 @@ def main() -> int:
             print("compiler_compile did not lower both branches", file=sys.stderr)
             return 1
         checked_if = run([str(L1CHECK), str(if_output), "main"])
-        executed_if = run([str(L1I), str(if_output), "main"])
+        executed_if = run([str(L1I), "run", str(if_output), "main"])
         if checked_if.returncode or executed_if.stdout.strip() != "42":
             print(checked_if.stderr or executed_if.stderr or executed_if.stdout, file=sys.stderr)
             return 1
@@ -747,7 +747,7 @@ def main() -> int:
             print("compiler_compile did not lower a parameter condition", file=sys.stderr)
             return 1
         checked_if_param = run([str(L1CHECK), str(if_param_output), "main"])
-        executed_if_param = run([str(L1I), str(if_param_output), "main"])
+        executed_if_param = run([str(L1I), "run", str(if_param_output), "main"])
         if checked_if_param.returncode or executed_if_param.stdout.strip() != "42":
             print(
                 checked_if_param.stderr
@@ -768,7 +768,7 @@ def main() -> int:
             print("compiler_compile did not lower a local binding", file=sys.stderr)
             return 1
         checked_local = run([str(L1CHECK), str(local_output), "main"])
-        executed_local = run([str(L1I), str(local_output), "main"])
+        executed_local = run([str(L1I), "run", str(local_output), "main"])
         if checked_local.returncode or executed_local.stdout.strip() != "42":
             print(checked_local.stderr or executed_local.stderr or executed_local.stdout, file=sys.stderr)
             return 1
@@ -784,7 +784,7 @@ def main() -> int:
             print("compiler_compile did not lower a while loop", file=sys.stderr)
             return 1
         checked_while = run([str(L1CHECK), str(while_output), "main"])
-        executed_while = run([str(L1I), str(while_output), "main"])
+        executed_while = run([str(L1I), "run", str(while_output), "main"])
         if checked_while.returncode or executed_while.stdout.strip() != "3":
             print(checked_while.stderr or executed_while.stderr or executed_while.stdout, file=sys.stderr)
             return 1
@@ -809,7 +809,7 @@ def main() -> int:
             [str(L1CHECK), str(duplicate_module_output), "main"]
         )
         executed_duplicate_module = run(
-            [str(L1I), str(duplicate_module_output), "main"]
+            [str(L1I), "run", str(duplicate_module_output), "main"]
         )
         if (
             checked_duplicate_module.returncode
@@ -830,7 +830,7 @@ def main() -> int:
             print(factory.stderr or factory.stdout, file=sys.stderr)
             return 1
         checked_factory = run([str(L1CHECK), str(factory_output), "main"])
-        executed_factory = run([str(L1I), str(factory_output), "main"])
+        executed_factory = run([str(L1I), "run", str(factory_output), "main"])
         if checked_factory.returncode or executed_factory.stdout.strip() != "42":
             print(
                 checked_factory.stderr or executed_factory.stderr or executed_factory.stdout,
@@ -851,7 +851,7 @@ def main() -> int:
             print(record_run.stderr or record_run.stdout, file=sys.stderr)
             return 1
         checked_record = run([str(L1CHECK), str(record_output), "main"])
-        executed_record = run([str(L1I), str(record_output), "main"])
+        executed_record = run([str(L1I), "run", str(record_output), "main"])
         if checked_record.returncode or executed_record.stdout.strip() != "42":
             print(
                 checked_record.stderr or executed_record.stderr or executed_record.stdout,
@@ -872,7 +872,7 @@ def main() -> int:
             print(nested_record.stderr or nested_record.stdout, file=sys.stderr)
             return 1
         checked_nested_record = run([str(L1CHECK), str(nested_record_output), "main"])
-        executed_nested_record = run([str(L1I), str(nested_record_output), "main"])
+        executed_nested_record = run([str(L1I), "run", str(nested_record_output), "main"])
         if (
             checked_nested_record.returncode
             or executed_nested_record.returncode

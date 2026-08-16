@@ -10,7 +10,7 @@ import tempfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-L1BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin" / "lainir-interpreter.exe"
+L1BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin" / "lainir-seed.exe"
 L1CHECK = ROOT / "bootstrap" / "zig-out" / "bin" / "lainir-print.exe"
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 TOOLS = ROOT / "src" / "lainir" / "tools"

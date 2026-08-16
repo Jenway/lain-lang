@@ -9,7 +9,7 @@ surface forms into Core nodes before the C emitter runs.
 Build the bootstrap tools first, then from the repository root run:
 
 ```text
-bootstrap/zig-out/bin/lainir-interpreter \
+bootstrap/zig-out/bin/lainir-seed \
   demo/lain_meta_subset.l1 demo_compile demo/hello_record.c \
   demo/hello_record.lain
 ```

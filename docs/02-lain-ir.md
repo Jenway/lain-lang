@@ -3,7 +3,7 @@
 Status: executable bootstrap subset.
 
 This document specifies the LAIN-IR text accepted by the bootstrap parser,
-verified by `lainir-print`, and executed by `lainir-run`.  Forms that are only ideas for a
+verified by `lainir-print`, and executed by `lainir-seed run`.  Forms that are only ideas for a
 future IR do not belong in this document.
 
 ## 1. Boundary

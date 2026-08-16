@@ -11,9 +11,9 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin"
-L1BOOTSTRAP = BOOTSTRAP / "lainir-interpreter.exe"
+L1BOOTSTRAP = BOOTSTRAP / "lainir-seed.exe"
 L1CHECK = BOOTSTRAP / "lainir-print.exe"
-L1I = BOOTSTRAP / "lainir-run.exe"
+L1I = BOOTSTRAP / "lainir-seed.exe"
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 TOOLS = ROOT / "src" / "lainir" / "tools"
 RAW_AST = ROOT / "src" / "lainir" / "lain" / "raw_ast.l1"
@@ -69,7 +69,7 @@ def main() -> int:
         if output_check.returncode:
             print(output_check.stderr or output_check.stdout, file=sys.stderr)
             return 1
-        executed = run([str(L1I), str(output), "main"])
+        executed = run([str(L1I), "run", str(output), "main"])
         if executed.returncode or executed.stdout.strip() != "42":
             print(executed.stderr or executed.stdout, file=sys.stderr)
             return 1
@@ -90,7 +90,7 @@ def main() -> int:
         if three_checked.returncode:
             print(three_checked.stderr or three_checked.stdout, file=sys.stderr)
             return 1
-        three_executed = run([str(L1I), str(three_output), "main"])
+        three_executed = run([str(L1I), "run", str(three_output), "main"])
         if three_executed.returncode or three_executed.stdout.strip() != "42":
             print(three_executed.stderr or three_executed.stdout, file=sys.stderr)
             return 1
@@ -111,7 +111,7 @@ def main() -> int:
         if mixed_checked.returncode:
             print(mixed_checked.stderr or mixed_checked.stdout, file=sys.stderr)
             return 1
-        mixed_executed = run([str(L1I), str(mixed_output), "main"])
+        mixed_executed = run([str(L1I), "run", str(mixed_output), "main"])
         if mixed_executed.returncode or mixed_executed.stdout.strip() != "42":
             print(mixed_executed.stderr or mixed_executed.stdout, file=sys.stderr)
             return 1
@@ -139,7 +139,7 @@ def main() -> int:
         if unsigned_checked.returncode:
             print(unsigned_checked.stderr or unsigned_checked.stdout, file=sys.stderr)
             return 1
-        unsigned_executed = run([str(L1I), str(unsigned_output), "main"])
+        unsigned_executed = run([str(L1I), "run", str(unsigned_output), "main"])
         if unsigned_executed.returncode or unsigned_executed.stdout.strip() != "42":
             print(unsigned_executed.stderr or unsigned_executed.stdout, file=sys.stderr)
             return 1

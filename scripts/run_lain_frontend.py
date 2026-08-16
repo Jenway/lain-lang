@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "scripts" / "build_lain_frontend.py"
 L1BOOTSTRAP = ROOT / "bootstrap" / "zig-out" / "bin" / (
-    "lainir-interpreter.exe" if os.name == "nt" else "lainir-interpreter"
+    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
 BUNDLE = ROOT / "build" / "lainir" / "lain_frontend.l1"
 

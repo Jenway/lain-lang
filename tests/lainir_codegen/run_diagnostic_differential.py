@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SUFFIX = ".exe" if sys.platform == "win32" else ""
 BIN = ROOT / "bootstrap" / "zig-out" / "bin"
 CHECKER = BIN / f"lainir-print{SUFFIX}"
-BOOTSTRAP = BIN / f"lainir-interpreter{SUFFIX}"
+BOOTSTRAP = BIN / f"lainir-seed{SUFFIX}"
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
 
 CASES = {

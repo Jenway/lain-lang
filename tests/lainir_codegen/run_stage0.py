@@ -17,7 +17,7 @@ BOOTSTRAP = (
     / "bootstrap"
     / "zig-out"
     / "bin"
-    / ("lainir-interpreter.exe" if sys.platform == "win32" else "lainir-interpreter")
+    / ("lainir-seed.exe" if sys.platform == "win32" else "lainir-seed")
 )
 COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "return_42.l1"

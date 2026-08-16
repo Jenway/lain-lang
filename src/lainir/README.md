@@ -132,7 +132,7 @@ configured with `lainir_caps_set_limits`.
 From the repository root, after building `bootstrap`:
 
 ```text
-bootstrap/zig-out/bin/lainir-interpreter \
+bootstrap/zig-out/bin/lainir-seed \
   src/lainir/compiler.l1 lainir_compile output.c input.l1
 ```
 

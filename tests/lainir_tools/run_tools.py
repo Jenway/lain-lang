@@ -21,7 +21,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 BOOTSTRAP_DIR = ROOT / "bootstrap" / "zig-out" / "bin"
 L1CHECK = BOOTSTRAP_DIR / ("lainir-print.exe" if sys.platform == "win32" else "lainir-print")
 L1BOOTSTRAP = BOOTSTRAP_DIR / (
-    "lainir-interpreter.exe" if sys.platform == "win32" else "lainir-interpreter"
+    "lainir-seed.exe" if sys.platform == "win32" else "lainir-seed"
 )
 L1LS = BOOTSTRAP_DIR / ("lainir-lsp.exe" if sys.platform == "win32" else "lainir-lsp")
 TOOLS = ROOT / "src" / "lainir" / "tools"

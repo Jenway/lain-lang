@@ -83,33 +83,15 @@ pub fn build(b: *std.Build) void {
         "Build the minimal LAIN-IR parser and verifier",
     );
 
-    const lainir_run = addCExecutable(
+    const lainir_seed = addCExecutable(
         b,
-        "lainir-run",
-        "src/cli/run_main.c",
-        target,
-        optimize,
-    );
-    lainir_run.root_module.linkLibrary(core);
-    lainir_run.root_module.linkLibrary(text);
-    lainir_run.root_module.linkLibrary(interpreter);
-    lainir_run.root_module.linkLibrary(host_io);
-    _ = installNamed(
-        b,
-        lainir_run,
-        "lainir-run",
-        "Build the minimal LAIN-IR interpreter",
-    );
-
-    const lainir_interpreter = addCExecutable(
-        b,
-        "lainir-interpreter",
-        "src/cli/interpreter_main.c",
+        "lainir-seed",
+        "src/cli/seed_main.c",
         target,
         optimize,
     );
     linkBootstrap(
-        lainir_interpreter,
+        lainir_seed,
         core,
         text,
         interpreter,
@@ -118,9 +100,9 @@ pub fn build(b: *std.Build) void {
     );
     _ = installNamed(
         b,
-        lainir_interpreter,
-        "lainir-interpreter",
-        "Build the generic frozen-compiler runner",
+        lainir_seed,
+        "lainir-seed",
+        "Run the LAIN-IR interpreter (interpreter|run subcommands)",
     );
 
     const lainir_lsp = addCExecutable(

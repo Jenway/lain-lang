@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 BIN = ROOT / "bootstrap" / "zig-out" / "bin"
 SUFFIX = ".exe" if os.name == "nt" else ""
-BOOTSTRAP = BIN / f"lainir-interpreter{SUFFIX}"
+BOOTSTRAP = BIN / f"lainir-seed{SUFFIX}"
 CHECK = BIN / f"lainir-print{SUFFIX}"
 FIXTURE = ROOT / "tests" / "lainir_lain" / "fixtures" / "type_namespace_nested.lain"
 COMPILER = ROOT / "bootstrap" / "frozen" / "lainc.l1"

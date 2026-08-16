@@ -85,6 +85,6 @@ guessing which braces are structural.
 ```text
 python scripts/bundle_lainir.py -o parser_bundle.l1 \
   src/lainir/tools/source.l1 src/lainir/tools/parser.l1
-bootstrap/zig-out/bin/lainir-interpreter.exe parser_bundle.l1 \
+bootstrap/zig-out/bin/lainir-seed.exe parser_bundle.l1 \
   tool_parse_demo ast.json input.l1
 ```
