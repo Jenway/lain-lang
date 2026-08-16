@@ -223,7 +223,7 @@
   addr %source, addr %name, addr %params, addr %return_type, addr %body,
   i64 %source_index
 ) -> addr {
-  #let %function: addr = #call bootstrap.allocate-pages(112)
+  #let %function: addr = #call bootstrap.allocate-pages(120)
   #let %nil: addr = #call program_nil()
   #store #call raw_node_start(%name),
     #lea(base=%function, idx=0, scale=0, offset=0)
@@ -241,6 +241,8 @@
   #store %nil, #lea(base=%function, idx=0, scale=0, offset=88)
   #store 0, #lea(base=%function, idx=0, scale=0, offset=96)
   #store 0, #lea(base=%function, idx=0, scale=0, offset=104)
+  // @foreign link_name content start (0 when absent).
+  #store 0, #lea(base=%function, idx=0, scale=0, offset=112)
   #return %function
 }
 
@@ -2291,6 +2293,30 @@
     #call bootstrap.artifact-write-literal("main")
     #return
   }
+  // External declarations carrying @foreign link_name use that name as the
+  // extern label, so calls resolve through the host capability table.
+  // The link slot is only consulted for externals; other functions never
+  // touch it.
+  #if #call program_function_is_external(%source, %function) {
+    #let %link_start: i64 = #load[i64](
+      #lea(base=%function, idx=0, scale=0, offset=112)
+    )
+    #if #ne(%link_start, 0) {
+      #let %data: addr = #call tool_source_data(%source)
+      #let %scan: i64 = %link_start
+      #loop link_name_bytes {
+        #if #eq(#call tool_byte_at(%data, %scan), 34) {
+          #break link_name_bytes
+        }
+        #call bootstrap.artifact-write-byte(
+          #call tool_byte_at(%data, %scan)
+        )
+        %scan: i64 = #add(%scan, 1)
+        #continue link_name_bytes
+      }
+      #return
+    }
+  }
   #call bootstrap.artifact-write-literal("f")
   #call meta_write_decimal(%source_index)
   #call bootstrap.artifact-write-byte(95)
@@ -2496,13 +2522,16 @@
   #if #eq(#call meta_atom_equal(%source, %arrow2, ">", 1), 0) { #call program_set_function_status(%function, 5102) #return %function }
   #if #call raw_is_nil(%return_type) { #call program_set_function_status(%function, 5104) #return %function }
   #if #call raw_is_nil(%body) { #call program_set_function_status(%function, 5102) #return %function }
+  // Parse parameters before the external check: a body-less std::func is
+  // still a declaration with a real parameter list that call-site arity
+  // checks must see.
+  #let %parameter_status: i32 = #call program_parse_params(%unit, %source, %function, %params)
+  #if #ne(%parameter_status, 0) { #call program_set_function_status(%function, %parameter_status) }
   #if #call meta_atom_equal(%source, %body, ";", 1) {
     #return %function
   }
   #if #eq(#call program_type_valid_in_unit(%unit, %source, %return_type), 0) { #call program_set_function_status(%function, 5104) #return %function }
   #if #ne(#call raw_node_delimiter(%body), 123) { #call program_set_function_status(%function, 5102) #return %function }
-  #let %parameter_status: i32 = #call program_parse_params(%unit, %source, %function, %params)
-  #if #ne(%parameter_status, 0) { #call program_set_function_status(%function, %parameter_status) }
   #return %function
 }
 
@@ -6600,15 +6629,61 @@
           #call program_function_source(%target), %element_type, "mut", 3
         ) { %element_type: addr = #call raw_node_next(%element_type) }
       }
-      #call bootstrap.artifact-write-literal("#load[")
-      #if #call program_write_resolved_function_type(
-        #call program_function_unit(%target),
-        #call program_function_source(%target), %target, %element_type
-      ) { } else {
-        #call program_write_type(
-          #call program_function_unit(%target),
-          #call program_function_source(%target), %element_type
+      // Recover the concrete element type through the receiver's factory
+      // environment.  The physical `get` descriptor can carry a stale or
+      // overwritten `T` binding; the receiver (`ByteVector`) holds the
+      // concrete factory environment (`Vec(i32)`), so resolve T there first.
+      #let %element_value: addr = #call program_nil()
+      #let %receiver: addr = #call program_ufcs_receiver_node(
+        %source, %left
+      )
+      #if #eq(#call raw_is_nil(%receiver), 0) {
+        #let %receiver_value: addr = #call program_call_argument_type_value(
+          #call program_function_unit(%function), %source, %function,
+          %receiver
         )
+        #if #eq(#call meta_value_kind(%receiver_value), 4) {
+          #let %receiver_environment: addr = #call meta_value_environment(
+            %receiver_value
+          )
+          #let %receiver_element: addr = #call meta_lookup_concrete_type_value(
+            %receiver_environment, %source
+          )
+          #if #ne(#call meta_value_kind(%receiver_element), 4) {
+            %receiver_element: addr = #call meta_lookup_type_parameter_value(
+              %receiver_environment
+            )
+          }
+          #if #eq(#call meta_value_kind(%receiver_element), 4) {
+            %element_value: addr = %receiver_element
+          }
+        }
+      }
+      #call bootstrap.artifact-write-literal("#load[")
+      #if #eq(#call meta_value_kind(%element_value), 4) {
+        #if #call program_write_meta_value_type(
+          #call program_function_unit(%target), %element_value
+        ) { } else {
+          #if #call program_write_resolved_function_type(
+            #call program_function_unit(%target),
+            #call program_function_source(%target), %target, %element_type
+          ) { } else {
+            #call program_write_type(
+              #call program_function_unit(%target),
+              #call program_function_source(%target), %element_type
+            )
+          }
+        }
+      } else {
+        #if #call program_write_resolved_function_type(
+          #call program_function_unit(%target),
+          #call program_function_source(%target), %target, %element_type
+        ) { } else {
+          #call program_write_type(
+            #call program_function_unit(%target),
+            #call program_function_source(%target), %element_type
+          )
+        }
       }
       #call bootstrap.artifact-write-literal("](")
       #call program_write_operand_base(%source, %function, %left)

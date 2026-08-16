@@ -3825,7 +3825,7 @@
   addr %source, addr %name, addr %params, addr %return_type, addr %body,
   i64 %source_index
 ) -> addr {
-  #let %function: addr = #call bootstrap.allocate-pages(112)
+  #let %function: addr = #call bootstrap.allocate-pages(120)
   #let %nil: addr = #call program_nil()
   #store #call raw_node_start(%name),
     #lea(base=%function, idx=0, scale=0, offset=0)
@@ -3843,6 +3843,8 @@
   #store %nil, #lea(base=%function, idx=0, scale=0, offset=88)
   #store 0, #lea(base=%function, idx=0, scale=0, offset=96)
   #store 0, #lea(base=%function, idx=0, scale=0, offset=104)
+  // @foreign link_name content start (0 when absent).
+  #store 0, #lea(base=%function, idx=0, scale=0, offset=112)
   #return %function
 }
 
@@ -5893,6 +5895,30 @@
     #call bootstrap.artifact-write-literal("main")
     #return
   }
+  // External declarations carrying @foreign link_name use that name as the
+  // extern label, so calls resolve through the host capability table.
+  // The link slot is only consulted for externals; other functions never
+  // touch it.
+  #if #call program_function_is_external(%source, %function) {
+    #let %link_start: i64 = #load[i64](
+      #lea(base=%function, idx=0, scale=0, offset=112)
+    )
+    #if #ne(%link_start, 0) {
+      #let %data: addr = #call tool_source_data(%source)
+      #let %scan: i64 = %link_start
+      #loop link_name_bytes {
+        #if #eq(#call tool_byte_at(%data, %scan), 34) {
+          #break link_name_bytes
+        }
+        #call bootstrap.artifact-write-byte(
+          #call tool_byte_at(%data, %scan)
+        )
+        %scan: i64 = #add(%scan, 1)
+        #continue link_name_bytes
+      }
+      #return
+    }
+  }
   #call bootstrap.artifact-write-literal("f")
   #call meta_write_decimal(%source_index)
   #call bootstrap.artifact-write-byte(95)
@@ -6098,13 +6124,16 @@
   #if #eq(#call meta_atom_equal(%source, %arrow2, ">", 1), 0) { #call program_set_function_status(%function, 5102) #return %function }
   #if #call raw_is_nil(%return_type) { #call program_set_function_status(%function, 5104) #return %function }
   #if #call raw_is_nil(%body) { #call program_set_function_status(%function, 5102) #return %function }
+  // Parse parameters before the external check: a body-less std::func is
+  // still a declaration with a real parameter list that call-site arity
+  // checks must see.
+  #let %parameter_status: i32 = #call program_parse_params(%unit, %source, %function, %params)
+  #if #ne(%parameter_status, 0) { #call program_set_function_status(%function, %parameter_status) }
   #if #call meta_atom_equal(%source, %body, ";", 1) {
     #return %function
   }
   #if #eq(#call program_type_valid_in_unit(%unit, %source, %return_type), 0) { #call program_set_function_status(%function, 5104) #return %function }
   #if #ne(#call raw_node_delimiter(%body), 123) { #call program_set_function_status(%function, 5102) #return %function }
-  #let %parameter_status: i32 = #call program_parse_params(%unit, %source, %function, %params)
-  #if #ne(%parameter_status, 0) { #call program_set_function_status(%function, %parameter_status) }
   #return %function
 }
 
@@ -10202,15 +10231,61 @@
           #call program_function_source(%target), %element_type, "mut", 3
         ) { %element_type: addr = #call raw_node_next(%element_type) }
       }
-      #call bootstrap.artifact-write-literal("#load[")
-      #if #call program_write_resolved_function_type(
-        #call program_function_unit(%target),
-        #call program_function_source(%target), %target, %element_type
-      ) { } else {
-        #call program_write_type(
-          #call program_function_unit(%target),
-          #call program_function_source(%target), %element_type
+      // Recover the concrete element type through the receiver's factory
+      // environment.  The physical `get` descriptor can carry a stale or
+      // overwritten `T` binding; the receiver (`ByteVector`) holds the
+      // concrete factory environment (`Vec(i32)`), so resolve T there first.
+      #let %element_value: addr = #call program_nil()
+      #let %receiver: addr = #call program_ufcs_receiver_node(
+        %source, %left
+      )
+      #if #eq(#call raw_is_nil(%receiver), 0) {
+        #let %receiver_value: addr = #call program_call_argument_type_value(
+          #call program_function_unit(%function), %source, %function,
+          %receiver
         )
+        #if #eq(#call meta_value_kind(%receiver_value), 4) {
+          #let %receiver_environment: addr = #call meta_value_environment(
+            %receiver_value
+          )
+          #let %receiver_element: addr = #call meta_lookup_concrete_type_value(
+            %receiver_environment, %source
+          )
+          #if #ne(#call meta_value_kind(%receiver_element), 4) {
+            %receiver_element: addr = #call meta_lookup_type_parameter_value(
+              %receiver_environment
+            )
+          }
+          #if #eq(#call meta_value_kind(%receiver_element), 4) {
+            %element_value: addr = %receiver_element
+          }
+        }
+      }
+      #call bootstrap.artifact-write-literal("#load[")
+      #if #eq(#call meta_value_kind(%element_value), 4) {
+        #if #call program_write_meta_value_type(
+          #call program_function_unit(%target), %element_value
+        ) { } else {
+          #if #call program_write_resolved_function_type(
+            #call program_function_unit(%target),
+            #call program_function_source(%target), %target, %element_type
+          ) { } else {
+            #call program_write_type(
+              #call program_function_unit(%target),
+              #call program_function_source(%target), %element_type
+            )
+          }
+        }
+      } else {
+        #if #call program_write_resolved_function_type(
+          #call program_function_unit(%target),
+          #call program_function_source(%target), %target, %element_type
+        ) { } else {
+          #call program_write_type(
+            #call program_function_unit(%target),
+            #call program_function_source(%target), %element_type
+          )
+        }
       }
       #call bootstrap.artifact-write-literal("](")
       #call program_write_operand_base(%source, %function, %left)
@@ -13062,14 +13137,32 @@
         #if #eq(#call meta_value_kind(%resolved), 4) {
           #let %resolved_source: addr = #call meta_value_source(%resolved)
           #let %resolved_payload: addr = #call meta_value_payload(%resolved)
-          #if #call meta_atom_equal(
+          #let %payload_is_T: i1 = #call meta_atom_equal(
             %resolved_source, %resolved_payload, "T", 1
-          ) {
+          )
+          #if %payload_is_T {
             #let %concrete: addr = #call meta_lookup_concrete_type_value(
               %environment, %source
             )
             #if #eq(#call raw_is_nil(%concrete), 0) {
               #return %concrete
+            }
+          }
+          // A generic parameter binding whose payload does not point at the
+          // parameter name can carry a stale/overwritten payload (the span
+          // and payload disagree).  Recover the concrete type parameter from
+          // the environment instead of trusting the inconsistent payload.
+          #if #eq(%payload_is_T, 0) {
+            #if #ne(
+              #call raw_node_start(%resolved_payload),
+              #call meta_value_start(%resolved)
+            ) {
+              #let %concrete: addr = #call meta_lookup_concrete_type_value(
+                %environment, %source
+              )
+              #if #eq(#call raw_is_nil(%concrete), 0) {
+                #return %concrete
+              }
             }
           }
         }
@@ -14452,6 +14545,15 @@
     %unit, %source, %source_index, %let_node
   )
   #call program_function_set_environment(%function, %environment)
+  // A pending @foreign link name (unit slot 184) attaches to this
+  // function's extern label; store it in the descriptor (slot 112).
+  #let %foreign_link: i64 = #load[i64](
+    #lea(base=%unit, idx=0, scale=0, offset=184)
+  )
+  #if #ne(%foreign_link, 0) {
+    #store %foreign_link, #lea(base=%function, idx=0, scale=0, offset=112)
+    #store 0, #lea(base=%unit, idx=0, scale=0, offset=184)
+  }
   #let %status: #bits<32> = #call program_function_status(%function)
   #if #ne(%status, 0) {
     #call program_unit_set_debug_module_kind(%unit, 4701)
@@ -16081,6 +16183,16 @@
     #if #ne(#call raw_node_delimiter(%arguments), 40) { #return 12005 }
     #return 0
   }
+  #if #call meta_atom_equal(%source, %name, "foreign", 7) {
+    // @foreign(c, link_name = "...") precedes a body-less std::func
+    // external declaration.  The link name maps the extern label to a
+    // host capability name at emission time.
+    #let %arguments: addr = #call raw_node_next(%name)
+    #if #call raw_is_nil(%arguments) { #return 12005 }
+    #if #ne(#call raw_node_kind(%arguments), 2) { #return 12005 }
+    #if #ne(#call raw_node_delimiter(%arguments), 40) { #return 12005 }
+    #return 0
+  }
   #if #eq(#call meta_atom_equal(%source, %name, "export", 6), 0) {
     #return 2902
   }
@@ -16090,6 +16202,38 @@
     #return 12005
   }
   #return 0
+}
+
+// Extract the content start of the @foreign link_name string, or 0 if the
+// attribute is not @foreign or has no link_name argument.
+#proc program_attribute_link_name(
+  addr %source, addr %attribute
+) -> i64 {
+  #let %name: addr = #call raw_node_next(%attribute)
+  #if #eq(#call meta_atom_equal(%source, %name, "foreign", 7), 0) {
+    #return 0
+  }
+  #let %arguments: addr = #call raw_node_next(%name)
+  #if #call raw_is_nil(%arguments) { #return 0 }
+  #if #ne(#call raw_node_kind(%arguments), 2) { #return 0 }
+  #if #ne(#call raw_node_delimiter(%arguments), 40) { #return 0 }
+  #let %item: addr = #call raw_node_first(%arguments)
+  #loop items {
+    #if #call raw_is_nil(%item) { #return 0 }
+    #if #call meta_atom_equal(%source, %item, "link_name", 9) {
+      #let %equals: addr = #call raw_node_next(%item)
+      #if #call raw_is_nil(%equals) { #return 0 }
+      #let %value: addr = #call raw_node_next(%equals)
+      #if #call raw_is_nil(%value) { #return 0 }
+      #if #ne(#call raw_node_kind(%value), 1) { #return 0 }
+      // Skip the opening quote; emission scans until the closing quote.
+      #return #add(#call raw_node_start(%value), 1)
+    }
+    #let %separator: addr = #call raw_node_next(%item)
+    #if #call raw_is_nil(%separator) { #return 0 }
+    %item: addr = #call raw_node_next(%separator)
+    #continue items
+  }
 }
 
 #proc program_collect_module(
@@ -16114,6 +16258,13 @@
       #if #ne(%attribute_status, 0) {
         #call program_set_unit_status(%unit, %attribute_status)
         #return %attribute_status
+      }
+      #let %foreign_link: i64 = #call program_attribute_link_name(
+        %source, %node
+      )
+      #if #ne(%foreign_link, 0) {
+        // Pending @foreign link name for the following let binding.
+        #store %foreign_link, #lea(base=%unit, idx=0, scale=0, offset=184)
       }
     }
     #if #call meta_atom_equal(%source, %node, "let", 3) {
@@ -16236,6 +16387,13 @@
       #if #ne(%attribute_status, 0) {
         #call program_set_unit_status(%unit, %attribute_status)
         #return %attribute_status
+      }
+      #let %foreign_link: i64 = #call program_attribute_link_name(
+        %source, %node
+      )
+      #if #ne(%foreign_link, 0) {
+        // Pending @foreign link name for the following top-level let.
+        #store %foreign_link, #lea(base=%unit, idx=0, scale=0, offset=184)
       }
     }
     #if #call meta_atom_equal(%source, %node, "let", 3) {

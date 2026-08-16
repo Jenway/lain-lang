@@ -23,6 +23,7 @@ def main() -> int:
         "run_compiler_source_closure.py",
         "run_workspace.py",
         "run_driver.py",
+        "run_lainc_m1.py",
     )
     for script in scripts:
         result = subprocess.run(

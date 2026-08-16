@@ -228,6 +228,16 @@
     #if #ne(#call raw_node_delimiter(%arguments), 40) { #return 12005 }
     #return 0
   }
+  #if #call meta_atom_equal(%source, %name, "foreign", 7) {
+    // @foreign(c, link_name = "...") precedes a body-less std::func
+    // external declaration.  The link name maps the extern label to a
+    // host capability name at emission time.
+    #let %arguments: addr = #call raw_node_next(%name)
+    #if #call raw_is_nil(%arguments) { #return 12005 }
+    #if #ne(#call raw_node_kind(%arguments), 2) { #return 12005 }
+    #if #ne(#call raw_node_delimiter(%arguments), 40) { #return 12005 }
+    #return 0
+  }
   #if #eq(#call meta_atom_equal(%source, %name, "export", 6), 0) {
     #return 2902
   }
@@ -237,6 +247,38 @@
     #return 12005
   }
   #return 0
+}
+
+// Extract the content start of the @foreign link_name string, or 0 if the
+// attribute is not @foreign or has no link_name argument.
+#proc program_attribute_link_name(
+  addr %source, addr %attribute
+) -> i64 {
+  #let %name: addr = #call raw_node_next(%attribute)
+  #if #eq(#call meta_atom_equal(%source, %name, "foreign", 7), 0) {
+    #return 0
+  }
+  #let %arguments: addr = #call raw_node_next(%name)
+  #if #call raw_is_nil(%arguments) { #return 0 }
+  #if #ne(#call raw_node_kind(%arguments), 2) { #return 0 }
+  #if #ne(#call raw_node_delimiter(%arguments), 40) { #return 0 }
+  #let %item: addr = #call raw_node_first(%arguments)
+  #loop items {
+    #if #call raw_is_nil(%item) { #return 0 }
+    #if #call meta_atom_equal(%source, %item, "link_name", 9) {
+      #let %equals: addr = #call raw_node_next(%item)
+      #if #call raw_is_nil(%equals) { #return 0 }
+      #let %value: addr = #call raw_node_next(%equals)
+      #if #call raw_is_nil(%value) { #return 0 }
+      #if #ne(#call raw_node_kind(%value), 1) { #return 0 }
+      // Skip the opening quote; emission scans until the closing quote.
+      #return #add(#call raw_node_start(%value), 1)
+    }
+    #let %separator: addr = #call raw_node_next(%item)
+    #if #call raw_is_nil(%separator) { #return 0 }
+    %item: addr = #call raw_node_next(%separator)
+    #continue items
+  }
 }
 
 #proc program_collect_module(
@@ -261,6 +303,13 @@
       #if #ne(%attribute_status, 0) {
         #call program_set_unit_status(%unit, %attribute_status)
         #return %attribute_status
+      }
+      #let %foreign_link: i64 = #call program_attribute_link_name(
+        %source, %node
+      )
+      #if #ne(%foreign_link, 0) {
+        // Pending @foreign link name for the following let binding.
+        #store %foreign_link, #lea(base=%unit, idx=0, scale=0, offset=184)
       }
     }
     #if #call meta_atom_equal(%source, %node, "let", 3) {
@@ -383,6 +432,13 @@
       #if #ne(%attribute_status, 0) {
         #call program_set_unit_status(%unit, %attribute_status)
         #return %attribute_status
+      }
+      #let %foreign_link: i64 = #call program_attribute_link_name(
+        %source, %node
+      )
+      #if #ne(%foreign_link, 0) {
+        // Pending @foreign link name for the following top-level let.
+        #store %foreign_link, #lea(base=%unit, idx=0, scale=0, offset=184)
       }
     }
     #if #call meta_atom_equal(%source, %node, "let", 3) {
