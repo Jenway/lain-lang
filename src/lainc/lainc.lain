@@ -29,6 +29,28 @@ let String: type = string_mod.string.String(
     bounds.bounds.Unchecked,
 );
 
+// Host capabilities for writing the compiled product to the artifact file.
+@foreign(c, link_name = "bootstrap.artifact-begin")
+let artifact_begin = std::func() -> unit;
+@foreign(c, link_name = "bootstrap.artifact-write-byte")
+let artifact_write_byte = std::func(byte: i32) -> unit;
+@foreign(c, link_name = "bootstrap.artifact-finish")
+let artifact_finish = std::func() -> unit;
+
+// Write a String's bytes to the artifact stream.
+let write_string_to_artifact = std::func(
+    value: &String,
+) -> unit {
+    let index: usize = 0;
+    let length: usize = String.length(value);
+    while index < length {
+        let byte: i32 = String.byte_at(value, index);
+        artifact_write_byte(byte);
+        index = index + 1;
+        let marker: i32 = 0;
+    }
+};
+
 // ---- byte helpers ----
 let is_space = std::func(byte: i32) -> bool {
     if byte == 32 { return true; }
@@ -37,7 +59,9 @@ let is_space = std::func(byte: i32) -> bool {
 };
 
 let is_digit = std::func(byte: i32) -> bool {
-    return byte >= 48 && byte <= 57;
+    if byte < 48 { return false; }
+    if byte > 57 { return false; }
+    return true;
 };
 
 let is_ident_start = std::func(byte: i32) -> bool {
@@ -151,7 +175,7 @@ let emit_operand = std::func(
             args_end = args_end + 1;
             let marker: i32 = 0;
         }
-        append_literal(output, "#call f0_", 8);
+        append_literal(output, "#call f0_", 9);
         append_span(source, start, name_end - start, output);
         append_literal(output, "(", 1);
         append_span(source, args_start, args_end - args_start, output);
@@ -269,7 +293,7 @@ let emit_function = std::func(
     }
     append_literal(output, "(", 1);
     emit_params(source, output, params_start + 1, params_end);
-    append_literal(output, ") -> #bits<32> {\n", 18);
+    append_literal(output, ") -> #bits<32> {\n", 17);
     emit_body(source, output, body_open + 1);
     append_literal(output, "}\n", 2);
     current = body_open + 1;
@@ -317,15 +341,13 @@ let emit = std::func() -> String {
     return output;
 };
 
-// Compile and verify the emitted text exactly inside the Lain layer.
+// Compile and write the emitted LAIN-IR to the artifact stream.
+// The artifact (product.l1) is then verified and executed by the harness.
 let main = std::func() -> i32 {
     let emitted: String = emit();
-    if String.equal_literal(
-        &emitted,
-        "#proc f0_add(#bits<32> %x, #bits<32> %y) -> #bits<32> {\n  #return #add(%x, %y)\n}\n#proc main() -> #bits<32> {\n  #return #call f0_add(40, 2)\n}\n",
-        141,
-    ) {
-        return 1;
-    }
+    let marker: i32 = 0;
+    artifact_begin();
+    write_string_to_artifact(&emitted);
+    artifact_finish();
     return 0;
 };
