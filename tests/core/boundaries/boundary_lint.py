@@ -72,7 +72,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="C1_NATIVE_RUNTIME_IMPORT_SCAN",
         description="C runtime must not scan Lain source text for import declarations",
-        paths=("src/compiler/native_runtime.c",),
+        paths=("src/compiler-archive/native_runtime.c",),
         pattern=r'"import[ \t]',
         allowed_count=2,
         rationale="Known debt: build graph scanner currently searches source text for import.",
@@ -80,7 +80,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="C1_NATIVE_COMPILER_LEGACY_ARTIFACT_API",
         description="normal CLI must use one structured compiler request/result ABI",
-        paths=("src/compiler/native_compiler.c",),
+        paths=("src/compiler-archive/native_compiler.c",),
         pattern=r"compiler_compile_text|compiler_compile_workspace_text|compiler_(?:workspace_)?diagnostic_",
         allowed_count=0,
         rationale=(
@@ -91,7 +91,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="C1_BUILDER_STD_TYPE_NAMES",
         description="builder FFI must not own std/source-level type aliases",
-        paths=("src/compiler/builder_ffi.c",),
+        paths=("src/compiler-archive/builder_ffi.c",),
         pattern=r'"CStr"|\"opaque\"',
         allowed_count=0,
         rationale="Standard-library aliases must be resolved by Meta before physical type construction.",
@@ -99,7 +99,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="C2_BUILDER_AUTO_EXTERN_STUB",
         description="builder FFI must not synthesize undeclared extern functions",
-        paths=("src/compiler/builder_ffi.c",),
+        paths=("src/compiler-archive/builder_ffi.c",),
         pattern=r"Auto-create stub|Default signature",
         allowed_count=0,
         rationale="Missing calls must fail unless Meta declared an explicit extern contract.",
@@ -107,7 +107,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="C6_STRUCTURED_UNIT_NO_SOURCE_POLICY",
         description="structured L1 storage must not recognize source-language forms",
-        paths=("src/compiler/structured_unit.c",),
+        paths=("src/compiler-archive/structured_unit.c",),
         pattern=r'"(let|fn|module|require|struct|interface|effect|comptime)"',
         allowed_count=0,
         rationale="The structured host ABI stores physical nodes and frames only.",
@@ -116,8 +116,8 @@ RULES: tuple[Rule, ...] = (
         ident="M8_LAIN_INTERPRETER_NO_HOST_EXECUTOR",
         description="Lain interpreter/comptime must not delegate evaluation to the C executor",
         paths=(
-            "src/compiler/l1_interpreter.lain",
-            "src/compiler/compiler.lain",
+            "src/compiler-archive/l1_interpreter.lain",
+            "src/compiler-archive/compiler.lain",
         ),
         pattern=r"core\.execute-lainir|core\.eval!|host_unit_execute",
         allowed_count=0,
@@ -126,7 +126,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="M20_SINGLE_LOWERING_ENGINE",
         description="single-source and workspace compilation must share LowerContext lowering",
-        paths=("src/compiler/lower.lain",),
+        paths=("src/compiler-archive/lower.lain",),
         pattern=(
             r"^let lower_(?:name|call_args|if_value|expr|statement_block|"
             r"body|function|functions)\b"
@@ -143,7 +143,7 @@ RULES: tuple[Rule, ...] = (
             "single-source and workspace compilation must share "
             "ElaborationContext validation"
         ),
-        paths=("src/compiler/elaborator.lain",),
+        paths=("src/compiler-archive/elaborator.lain",),
         pattern=(
             r"^let workspace_(?:expr_type|validate_args|validate_expr|"
             r"validate_if|validate_assignment|validate_statement_block|"
@@ -180,8 +180,8 @@ RULES: tuple[Rule, ...] = (
         ident="M5_LCI_LEGACY_ARTIFACT_DEBT",
         description=".lci must remain a legacy meta bridge artifact, not the module design",
         paths=(
-            "src/compiler/*.c",
-            "src/compiler/*.h",
+            "src/compiler-archive/*.c",
+            "src/compiler-archive/*.h",
             "std/meta/*.scm",
             "std/meta/**/*.scm",
             "tests/bootstrap-core/*.py",
@@ -201,23 +201,23 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="V1_CHIBI_HEADER_BACKEND_ONLY",
         description="Chibi headers must be included only by the Chibi backend",
-        paths=("src/compiler/*.c", "src/compiler/*.h"),
+        paths=("src/compiler-archive/*.c", "src/compiler-archive/*.h"),
         pattern=r"^\s*#include\s+<chibi/eval\.h>",
         allowed_count=1,
-        rationale="Only src/compiler/vm_chibi.c may include chibi/eval.h.",
+        rationale="Only src/compiler-archive/vm_chibi.c may include chibi/eval.h.",
     ),
     Rule(
         ident="V2_GAUCHE_HEADER_BACKEND_ONLY",
         description="Gauche headers must be included only by the Gauche backend",
-        paths=("src/compiler/*.c", "src/compiler/*.h"),
+        paths=("src/compiler-archive/*.c", "src/compiler-archive/*.h"),
         pattern=r"^\s*#include\s+<gauche(?:\.h|/)",
         allowed_count=9,
-        rationale="Only src/compiler/vm_gauche.c may include Gauche headers.",
+        rationale="Only src/compiler-archive/vm_gauche.c may include Gauche headers.",
     ),
     Rule(
         ident="V3_SCHEME_COMPAT_SEXP_DEBT",
         description="compiler core still uses sexp-shaped compatibility names",
-        paths=("src/compiler/native_runtime.c", "src/compiler/builder_ffi.c"),
+        paths=("src/compiler-archive/native_runtime.c", "src/compiler-archive/builder_ffi.c"),
         pattern=r"\bsexp\b|sexp_|SEXP_",
         allowed_count=926,
         rationale=(
@@ -255,7 +255,7 @@ RULES: tuple[Rule, ...] = (
     Rule(
         ident="B1_NO_LAINC_BUILD_CLI",
         description="lainc CLI must not expose the legacy C-side build driver",
-        paths=("src/compiler/native_compiler.c",),
+        paths=("src/compiler-archive/native_compiler.c",),
         pattern=r'"--build"|build_mode|native_build_with_funcs',
         allowed_count=0,
         rationale="Build orchestration belongs in build.lain / meta libraries.",

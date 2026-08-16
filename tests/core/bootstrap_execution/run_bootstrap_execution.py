@@ -26,7 +26,7 @@ def run(command: list[str]) -> subprocess.CompletedProcess[str]:
 
 def compiler_path() -> Path:
     names = ("lainc.exe", "lainc")
-    for directory in (ROOT / "zig-out" / "bin", ROOT / "src" / "compiler"):
+    for directory in (ROOT / "zig-out" / "bin", ROOT / "src" / "compiler-archive"):
         for name in names:
             candidate = directory / name
             if candidate.exists():

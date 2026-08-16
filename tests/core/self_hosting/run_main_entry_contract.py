@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-ENTRY = ROOT / "src" / "compiler" / "lainc.lain"
+ENTRY = ROOT / "src" / "compiler-archive" / "lainc.lain"
 
 
 def require(condition: bool, message: str) -> None:

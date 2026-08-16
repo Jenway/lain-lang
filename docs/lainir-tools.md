@@ -103,7 +103,7 @@ python scripts/run_lain_compiler.py -o build/lainir/main.l1 \
 声明、物理整数签名、直接调用、局部变量和首批控制流 lower 成可执行 LAIN-IR；
 syntax-unit index 复用缓存的 RawAst，顶层 `std::consteval` 会在编译期求值，
 未解析 import/循环依赖会在 lowering 前报错。更大范围的类型系统和现有
-`src/compiler` 闭包仍在后续 M8/M9。
+`src/compiler-archive` 闭包仍在后续 M8/M9。
 
 1. **增量扫描边界强化**：为跨 token、字符串、注释和文件尾的编辑补充更多稳定点
    回归；AST 继续按快照重建，避免把语法树复用和 token 拼接混为一谈。

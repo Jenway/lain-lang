@@ -13,8 +13,9 @@ LAIN-IR-written Lain frontend (`src/lainir/lain/*.l1` plus
 `scripts/freeze_lainc_bootstrap.py` and executed by the seed interpreter.  It
 currently covers the executable Lain subset exercised by `tests/lainir_lain`,
 including functions, calls, modules, and the first compile-time
-closure/module cases.  It is the bootstrap seed for the later full
-`src/compiler` self-hosting closure; it is not yet the final `lainc`.
+closure/module cases.  It is the bootstrap seed for a Lain-written
+compiler; the earlier full `src/compiler` tree is archived at
+`src/compiler-archive`.
 
 ## Boundary
 

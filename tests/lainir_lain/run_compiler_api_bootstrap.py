@@ -16,7 +16,7 @@ CHECK = BIN / f"lainir-print{SUFFIX}"
 INTERPRETER = BIN / f"lainir-seed{SUFFIX}"
 COMPILER = ROOT / "src" / "lainir" / "lainc.l1"
 FIXTURE = ROOT / "tests" / "lainir_lain" / "fixtures" / "compiler_api_schema.lain"
-COMPILER_SOURCES = tuple(sorted((ROOT / "src" / "compiler").glob("*.lain")))
+COMPILER_SOURCES = tuple(sorted((ROOT / "src" / "compiler-archive").glob("*.lain")))
 STD_SOURCES = (
     ROOT / "std" / "memory_model.lain",
     ROOT / "std" / "allocation.lain",

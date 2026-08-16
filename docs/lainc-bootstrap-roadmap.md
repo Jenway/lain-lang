@@ -10,13 +10,13 @@
 ## 目标
 
 最终用 C 写的 `lainir-seed` 执行 LAIN-IR 编译器，得到可编译完整
-`src/compiler` 的 Lain compiler，并完成自举：
+`src/compiler-archive` 的 Lain compiler，并完成自举：
 
 ```text
 C lainir-seed
     -> src/lainir/lainc.l1
     -> stage1 lainc
-    -> stage1 编译 src/compiler
+    -> stage1 编译 src/compiler-archive
     -> stage2 lainc
     -> stage2 再编译自身
 ```
@@ -35,9 +35,9 @@ C lainir-seed
 - 函数、调用、整数/布尔表达式、局部变量、`if` 和 `while` 的部分 lowering。
 - LAIN-IR formatter、语法高亮、dumb parser 和 LSP 基础协议处理。
 - `src/lainir/lainc.l1`（已从当前源码重新 freeze），可编译最小
-  Lain 子集，并把完整 `src/compiler` 闭包降低成 verifier-valid LAIN-IR。
+  Lain 子集，并把完整 `src/compiler-archive` 闭包降低成 verifier-valid LAIN-IR。
 - 完整 compiler-API Meta 实例化：`compiler_api_schema.lain` + 全部
-  `src/compiler` + std 源 → `compiler_compile` 成功 → `lainir-print` 通过 →
+  `src/compiler-archive` + std 源 → `compiler_compile` 成功 → `lainir-print` 通过 →
   `lainir-seed run` 返回 `1`（`tests/lainir_lain/run_compiler_api_bootstrap.py`）。
 - `Meta.expand` 调用链的 verifier 错误已修复：完整 API artifact 的
   `lainir-print` 已通过（含此前卡住的 `Modules.declare` nominal 参数物理
@@ -60,7 +60,7 @@ C lainir-seed
 
 - 已生成并冻结 `src/lainir/lainc.l1`。
 - C `lainir-seed` 可以用它编译 `return_42`、模块工厂和闭包捕获 fixture。
-- 它可以把当前完整 `src/compiler` 多文件闭包降低成 verifier-valid 的
+- 它可以把当前完整 `src/compiler-archive` 多文件闭包降低成 verifier-valid 的
   LAIN-IR artifact。
 - 这个 artifact 仍然只包含当前前端实际能物化的编译器函数，尚未成为完整
   的 `lainc`。
@@ -81,7 +81,7 @@ C lainir-seed
   完整 API 探针现在已经能走过 `workspace.sources.get(...).syntax_unit` 和
   `workspace.syntax.units.get(...).root` 两条真实路径，但在后续
   `Meta.expand` 的其他调用上仍会被 verifier 拦住，暂时不能称为完整
-  `src/compiler` 的 verifier-valid 结果。
+  `src/compiler-archive` 的 verifier-valid 结果。
 - 局部工厂函数的物理描述符现在按需挂载；同一个描述符重复进入物理链时
   会被链接标记拦住。小型多文件用户闭包保留顶层未限定 helper 的兼容路径，
   大型 compiler 闭包继续按模块限定名延迟物化。
@@ -101,7 +101,7 @@ C lainir-seed
 当前增量（2026-08-16）：
 
 - 完整 API 探针已通过 `compiler_compile`、`lainir-print` 与 `lainir-seed run` 验收：
-  `compiler_api_schema.lain` 在全部 `src/compiler` + std 源闭包下实例化
+  `compiler_api_schema.lain` 在全部 `src/compiler-archive` + std 源闭包下实例化
   `lainc.API(Memory)` 并执行返回 `1`。此前的 `5124` 步数保护停止点与
   `Meta.expand` 调用链的 verifier 错误均已消除。
 - `compiler_api_compile_empty.lain`（空输入编译请求）已能生成 artifact 且
@@ -263,7 +263,7 @@ let x: i32 = A.get(&a, 0).*;
 - 同一个 `Vec(i32)` 调用只生成一个可复用的专用化。
 - `get` 的返回值能继续访问具体 record 字段。
 - 生成的 LAIN-IR 通过 `lainir-print`，解释执行结果正确。
-- `src/compiler` 中的 `SourceUnitVector` 能通过
+- `src/compiler-archive` 中的 `SourceUnitVector` 能通过
   `sources.get(index).syntax_unit` 这条真实路径。
 
 ### 本轮修正记录（2026-08-14）
@@ -297,7 +297,7 @@ compiler API 还剩 verifier 阶段的独立调用 lowering 问题。暂时不�
 先支持标量和普通函数调用，再支持模块、类型和 AST 数据。加入递归深度、
 解释步数、分配量和诊断限制。
 
-## 阶段四：编译 `src/compiler`
+## 阶段四：编译 `src/compiler-archive`
 
 按依赖顺序逐个通过 bootstrap `lainc` 编译：
 
@@ -309,7 +309,7 @@ compiler_core
 ```
 
 每完成一个模块，都运行 `lainir-print` 和 `lainir-seed run`。不要一次把整个
-`src/compiler` closure 当作一个未分阶段的大目标。
+`src/compiler-archive` closure 当作一个未分阶段的大目标。
 
 ## 阶段五：形成自举闭环
 
@@ -319,14 +319,14 @@ compiler_core
 C lainir-seed
     -> src/lainir/lainc.l1
     -> stage1 lainc
-    -> stage1 编译 src/compiler
+    -> stage1 编译 src/compiler-archive
     -> stage2 lainc
     -> stage2 再编译自身
 ```
 
 验收条件：
 
-- `src/compiler` 全部可编译。
+- `src/compiler-archive` 全部可编译。
 - stage2 和 stage3 输出字节一致。
 - `lainc` 能编译普通 Lain 程序。
 - host 只负责文件、内存、诊断和 artifact I/O。

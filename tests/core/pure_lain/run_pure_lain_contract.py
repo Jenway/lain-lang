@@ -10,7 +10,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 VIRTUAL_COMPILER_PREFIX = "packages/lain/compiler/"
-CANONICAL_COMPILER = ROOT / "src" / "compiler"
+CANONICAL_COMPILER = ROOT / "src" / "compiler-archive"
 
 
 def fail(message: str) -> None:
