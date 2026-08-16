@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the Lain RawAst parser through the stage-0 LAIN-IR runner."""
+"""Exercise the Lain RawAst parser through the seed LAIN-IR runner."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def main() -> int:
         if "(group {" not in text or "(group (" not in text:
             print(f"RawAst lost delimiter groups: {text!r}", file=sys.stderr)
             return 1
-    print("PASS Lain RawAst parser stage0")
+    print("PASS Lain RawAst parser (seed)")
     return 0
 
 

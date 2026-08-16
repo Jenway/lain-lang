@@ -1,7 +1,7 @@
 # `lainir-c`
 
 This directory contains the LAIN-IR implementation of the LAIN-IR to C
-compiler.  The C bootstrap interpreter is stage 0: it executes this code, but
+compiler.  The C bootstrap interpreter is the seed: it executes this code, but
 it does not provide parsing, verification, or C emission on the compiler's
 behalf.
 
@@ -102,15 +102,15 @@ name libc or platform ABI functions and can return either a physical value or
 The compiler now reaches a native fixed point:
 
 ```text
-C bootstrap interpreter
-  -> lainir-c.stage1.c
-  -> native lainir-c.stage1
-  -> lainir-c.stage2.c
-  -> native lainir-c.stage2
-  -> lainir-c.stage3.c
+seed (lainir-seed)
+  -> lainir-c-gen1.c
+  -> native lainir-c-gen1
+  -> lainir-c-gen2.c
+  -> native lainir-c-gen2
+  -> lainir-c-gen3.c
 ```
 
-Stage 2 and stage 3 output are required to be byte-for-byte identical. The
+gen2 and gen3 output are required to be byte-for-byte identical. The
 small native host in `seed/src/host/native_compiler.c` supplies only
 source bytes, diagnostics, allocation, artifact I/O, and the process entry
 point. It contains no lexer, parser, verifier, IR, or emitter logic.
@@ -127,9 +127,9 @@ values through ordinary `#let` bindings. Ordinary
 `lainir_run(...)` remains the runtime entry point. Interpreter limits can be
 configured with `lainir_caps_set_limits`.
 
-## Stage-0 invocation
+## Seed invocation
 
-From the repository root, after building `bootstrap`:
+From the repository root, after building `seed`:
 
 ```text
 seed/zig-out/bin/lainir-seed \

@@ -1,7 +1,7 @@
 # LAIN-IR compiler roadmap
 
 The implementation grows as executable vertical slices.  A phase is complete
-only when stage 0 can execute it and a native C compiler can compile its
+only when seed can execute it and a native C compiler can compile its
 output.
 
 ## M1 — executable code-generation path
@@ -16,8 +16,9 @@ Status: complete.
 - [x] Recognize and validate the complete one-procedure grammar.
 - [x] Separate source access, lexical trivia, matching, and C writer logic.
 
-The stage-0 parser still consumes one compiler artifact, so these layers are
-procedures in `compiler.l1`.  Physical source-file splitting belongs to M2,
+The initial compiler parser still consumes one compiler artifact, so these
+layers are procedures in `compiler.l1`.  Physical source-file splitting
+belongs to M2,
 after compiler-source bundling exists.
 
 ## M2 — parser complete
@@ -97,21 +98,21 @@ Status: complete.
 
 Status: complete.
 
-- [x] Stage 0 interprets the compiler and emits `lainir-c.stage1.c`.
-- [x] The system C compiler creates a standalone `lainir-c.stage1`.
-- [x] Stage 1 compiles all of the current `src/lainir` compiler source.
+- [x] seed interprets the compiler and emits `lainir-c-gen1.c`.
+- [x] The system C compiler creates a standalone `lainir-c-gen1`.
+- [x] gen1 compiles all of the current `src/lainir` compiler source.
 - [x] The native executable links no private LAIN-IR implementation library;
   its C host provides process I/O and allocation capabilities only.
 
 ## M6 — convergence
 
 Status: complete for the current LAIN-IR compiler closure.  The bootstrap
-interpreter executes the compiler source to produce stage 1 C; stage 1 and
-stage 2 then produce stage 2 and stage 3 C respectively.
+interpreter executes the compiler source to produce gen1 C; gen1 and
+gen2 then produce gen2 and gen3 C respectively.
 
-- [x] Stage 1 produces stage 2.
-- [x] Stage 2 produces a verifier-valid stage 3.
-- [x] Stage 2 and stage 3 C output is byte-for-byte identical.
+- [x] gen1 produces gen2.
+- [x] gen2 produces a verifier-valid gen3.
+- [x] gen2 and gen3 C output is byte-for-byte identical.
 
 ## M7 — first Lain frontend slices
 
@@ -241,7 +242,7 @@ it.
 - [ ] Verify and print the generated LAIN-IR through the existing verifier and
   printer; no C-side semantic fallback is allowed.
 - [x] Add one end-to-end fixture that compiles with `compiler_compile`, runs
-  the generated LAIN-IR, and proves stage-0/stage-1 byte convergence.
+  the generated LAIN-IR, and proves seed/gen1 byte convergence.
 
 ## M9 — self-host the full compiler source
 
@@ -267,7 +268,7 @@ Remaining blocker: the empty-input fixture
 execution dereferences a null address in `lainir-seed run` (access violation
 `0xC0000005`).  After that comes real Lain source input, wiring
 `run_compiler_source_closure.py`/`run_compiler_api_bootstrap.py` into
-`run_all.py`, and the stage2/stage3 byte comparison listed below.
+`run_all.py`, and the gen2/gen3 byte comparison listed below.
 
 - [ ] **Meta values and environments.** Represent module values, function
   values, and captured bindings in the LAIN-IR meta heap; make a compile-time
@@ -288,7 +289,7 @@ execution dereferences a null address in `lainir-seed run` (access violation
   starting with `compiler_core`, then `compiler_driver`, `compiler_api`, and
   `lainc`; after each module, run `lainir-print` and execute a small request.
 - [ ] **Thin CLI and fixed point.** Restore `lainc` as a capability-only host,
-  rebuild stage 2 and stage 3 from the same canonical source, and require
+  rebuild gen2 and gen3 from the same canonical source, and require
   byte-identical artifacts.
 - [ ] **Regression gate.** Re-enable the core suites that currently require
   `zig-out/bin/lainc`, then run the Lain frontend/tooling suites and the full

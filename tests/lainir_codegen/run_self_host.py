@@ -35,10 +35,10 @@ def run(command: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def require(result: subprocess.CompletedProcess[str], stage: str) -> None:
+def require(result: subprocess.CompletedProcess[str], label: str) -> None:
     if result.returncode:
         raise RuntimeError(
-            f"{stage} failed with {result.returncode}\n"
+            f"{label} failed with {result.returncode}\n"
             f"{result.stdout}{result.stderr}"
         )
 
@@ -64,11 +64,11 @@ def main() -> int:
     suffix = ".exe" if sys.platform == "win32" else ""
     with tempfile.TemporaryDirectory(prefix="lainir-self-host-") as temporary:
         work = pathlib.Path(temporary)
-        stage1_c = work / "lainir-c.stage1.c"
-        stage2_c = work / "lainir-c.stage2.c"
-        stage3_c = work / "lainir-c.stage3.c"
-        stage1 = work / f"lainir-c.stage1{suffix}"
-        stage2 = work / f"lainir-c.stage2{suffix}"
+        gen1_c = work / "lainir-c-gen1.c"
+        gen2_c = work / "lainir-c-gen2.c"
+        gen3_c = work / "lainir-c-gen3.c"
+        gen1 = work / f"lainir-c-gen1{suffix}"
+        gen2 = work / f"lainir-c-gen2{suffix}"
 
         require(
             run(
@@ -76,118 +76,118 @@ def main() -> int:
                     str(BOOTSTRAP),
                     str(COMPILER),
                     "lainir_compile_module",
-                    str(stage1_c),
+                    str(gen1_c),
                     str(COMPILER),
                 ]
             ),
-            "stage 0 -> stage 1 C",
+            "seed -> gen1 C",
         )
         require(
             run(
                 [
                     *c_compiler,
                     "-std=c11",
-                    str(stage1_c),
+                    str(gen1_c),
                     str(HOST),
                     "-o",
-                    str(stage1),
+                    str(gen1),
                 ]
             ),
-            "stage 1 native link",
+            "gen1 native link",
         )
 
-        stage0_fixture = work / "fixture.stage0.c"
-        stage1_fixture = work / "fixture.stage1.c"
+        seed_fixture = work / "fixture.seed.c"
+        gen1_fixture = work / "fixture.gen1.c"
         require(
             run(
                 [
                     str(BOOTSTRAP),
                     str(COMPILER),
                     "lainir_compile",
-                    str(stage0_fixture),
+                    str(seed_fixture),
                     str(FIXTURE),
                 ]
             ),
-            "stage 0 fixture compile",
+            "seed fixture compile",
         )
         require(
-            run([str(stage1), str(stage1_fixture), str(FIXTURE)]),
-            "stage 1 fixture compile",
+            run([str(gen1), str(gen1_fixture), str(FIXTURE)]),
+            "gen1 fixture compile",
         )
-        if stage0_fixture.read_bytes() != stage1_fixture.read_bytes():
-            raise RuntimeError("stage 0 and stage 1 disagree on the fixture")
+        if seed_fixture.read_bytes() != gen1_fixture.read_bytes():
+            raise RuntimeError("seed and gen1 disagree on the fixture")
 
-        stage0_nested = work / "nested.stage0.c"
-        stage1_nested = work / "nested.stage1.c"
+        seed_nested = work / "nested.seed.c"
+        gen1_nested = work / "nested.gen1.c"
         require(
             run(
                 [
                     str(BOOTSTRAP),
                     str(COMPILER),
                     "lainir_compile",
-                    str(stage0_nested),
+                    str(seed_nested),
                     str(NESTED_EVAL_FIXTURE),
                 ]
             ),
-            "stage 0 nested eval compile",
+            "seed nested eval compile",
         )
         require(
-            run([str(stage1), str(stage1_nested), str(NESTED_EVAL_FIXTURE)]),
-            "stage 1 nested eval compile",
+            run([str(gen1), str(gen1_nested), str(NESTED_EVAL_FIXTURE)]),
+            "gen1 nested eval compile",
         )
-        if stage0_nested.read_bytes() != stage1_nested.read_bytes():
-            raise RuntimeError("stage 0 and stage 1 disagree on nested eval")
-        if b"return 42;" not in stage0_nested.read_bytes():
+        if seed_nested.read_bytes() != gen1_nested.read_bytes():
+            raise RuntimeError("seed and gen1 disagree on nested eval")
+        if b"return 42;" not in seed_nested.read_bytes():
             raise RuntimeError("nested eval was not materialized at compile time")
 
-        stage0_args = work / "args.stage0.c"
-        stage1_args = work / "args.stage1.c"
+        seed_args = work / "args.seed.c"
+        gen1_args = work / "args.gen1.c"
         require(
             run(
                 [
                     str(BOOTSTRAP),
                     str(COMPILER),
                     "lainir_compile",
-                    str(stage0_args),
+                    str(seed_args),
                     str(ARGS_EVAL_FIXTURE),
                 ]
             ),
-            "stage 0 constant-argument eval compile",
+            "seed constant-argument eval compile",
         )
         require(
-            run([str(stage1), str(stage1_args), str(ARGS_EVAL_FIXTURE)]),
-            "stage 1 constant-argument eval compile",
+            run([str(gen1), str(gen1_args), str(ARGS_EVAL_FIXTURE)]),
+            "gen1 constant-argument eval compile",
         )
-        if stage0_args.read_bytes() != stage1_args.read_bytes():
-            raise RuntimeError("stage 0 and stage 1 disagree on constant-argument eval")
+        if seed_args.read_bytes() != gen1_args.read_bytes():
+            raise RuntimeError("seed and gen1 disagree on constant-argument eval")
 
         require(
-            run([str(stage1), "--module", str(stage2_c), str(COMPILER)]),
-            "stage 1 -> stage 2 C",
+            run([str(gen1), "--module", str(gen2_c), str(COMPILER)]),
+            "gen1 -> gen2 C",
         )
         require(
             run(
                 [
                     *c_compiler,
                     "-std=c11",
-                    str(stage2_c),
+                    str(gen2_c),
                     str(HOST),
                     "-o",
-                    str(stage2),
+                    str(gen2),
                 ]
             ),
-            "stage 2 native link",
+            "gen2 native link",
         )
         require(
-            run([str(stage2), "--module", str(stage3_c), str(COMPILER)]),
-            "stage 2 -> stage 3 C",
+            run([str(gen2), "--module", str(gen3_c), str(COMPILER)]),
+            "gen2 -> gen3 C",
         )
-        if stage2_c.read_bytes() != stage3_c.read_bytes():
+        if gen2_c.read_bytes() != gen3_c.read_bytes():
             raise RuntimeError("self-hosting did not converge byte-for-byte")
 
     print(
-        "LAIN-IR self-host: stage 1 executed, stage 0/1 agreed, "
-        "and stage 2/3 C converged byte-for-byte"
+        "LAIN-IR self-host: gen1 executed, seed/gen1 agreed, "
+        "and gen2/gen3 C converged byte-for-byte"
     )
     return 0
 
