@@ -17,6 +17,9 @@
 #extern #proc meta_value_type(
   addr %source, addr %name, addr %node
 ) -> addr;
+#extern #proc meta_value_type_with_namespace(
+  addr %source, addr %name, addr %node, addr %environment
+) -> addr;
 #extern #proc meta_value_module(
   addr %source, addr %name, addr %group, addr %environment
 ) -> addr;
@@ -59,8 +62,8 @@
   addr %environment, addr %source, addr %let_node, addr %type
 ) -> #unit {
   #let %name: addr = #call raw_node_next(%let_node)
-  #let %value: addr = #call meta_value_type(
-    %source, %name, %let_node
+  #let %value: addr = #call meta_value_type_with_namespace(
+    %source, %name, %let_node, %environment
   )
   #call meta_env_bind(%environment, %source, %name, %value)
   #return
@@ -73,7 +76,7 @@
   #let %existing: addr = #call meta_env_lookup_local(
     %environment, %source, %name
   )
-  #if #eq(#call raw_is_nil(%existing), 0) {
+  #if #ne(#call meta_value_kind(%existing), 0) {
     #if #eq(#call meta_value_kind(%existing), 2) {
       #return #call meta_value_environment(%existing)
     }
@@ -84,6 +87,12 @@
     %source, %name, %group, %module_environment
   )
   #call meta_env_bind(%environment, %source, %name, %value)
+  // Module bodies may refer to their own exported namespace, for example
+  // `bounds.Check(Checked)` inside the `bounds` module.  Keep the same module
+  // value visible from its body environment as well as from the parent.
+  #call meta_env_bind(
+    %module_environment, %source, %name, %value
+  )
   #return %module_environment
 }
 

@@ -2,9 +2,6 @@
 
 #extern #proc raw_is_nil(addr %node) -> i1;
 #extern #proc raw_node_next(addr %node) -> addr;
-#extern #proc meta_env_lookup_local(
-  addr %environment, addr %source, addr %node
-) -> addr;
 #extern #proc meta_value_function(
   addr %source, addr %name, addr %function, addr %environment
 ) -> addr;
@@ -14,6 +11,9 @@
 #extern #proc meta_env_bind(
   addr %environment, addr %source, addr %name, addr %value
 ) -> #unit;
+#extern #proc meta_env_lookup_local(
+  addr %environment, addr %source, addr %node
+) -> addr;
 #extern #proc program_parse_function(
   addr %unit, addr %source, #bits<64> %source_index, addr %let_node
 ) -> addr;
@@ -35,6 +35,10 @@
 #extern #proc program_append_function_if_missing(
   addr %unit, addr %function
 ) -> #unit;
+#extern #proc program_unit_collecting_import(addr %unit) -> i1;
+#extern #proc program_unit_lazy_nonroot(addr %unit) -> i1;
+#extern #proc program_unit_physical_root_index(addr %unit) -> i64;
+#extern #proc program_unit_source_count(addr %unit) -> i64;
 #extern #proc program_meta_bind_function(
   addr %environment, addr %source, addr %let_node, addr %function
 ) -> #unit;
@@ -77,7 +81,25 @@
     %environment, %source, %name
   )
   #if #call raw_is_nil(%existing_value) {
-    #call program_append_function_if_missing(%unit, %function)
+    #if #eq(#call program_unit_collecting_import(%unit), 0) {
+      #if #eq(#call program_unit_lazy_nonroot(%unit), 0) {
+        #call program_append_function_if_missing(%unit, %function)
+      } else {
+        #if #eq(
+          %source_index, #call program_unit_physical_root_index(%unit)
+        ) {
+          #call program_append_function_if_missing(%unit, %function)
+        } else {
+          // Small user source closures historically allow an unqualified
+          // helper from a second file. Keep those top-level descriptors
+          // available; large compiler closures use explicit module paths and
+          // retain lazy physical materialization.
+          #if #le(#call program_unit_source_count(%unit), 4) {
+            #call program_append_function_if_missing(%unit, %function)
+          }
+        }
+      }
+    }
     #call program_meta_bind_function(
       %environment, %source, %let_node, %function
     )

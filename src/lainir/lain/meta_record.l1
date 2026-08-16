@@ -11,6 +11,8 @@
 #extern #proc raw_node_first(addr %node) -> addr;
 #extern #proc tool_source_data(addr %source) -> addr;
 #extern #proc tool_source_length(addr %source) -> #bits<64>;
+#extern #proc tool_source_fingerprint(addr %source) -> #bits<64>;
+#extern #proc tool_is_space(i8 %byte) -> i1;
 #extern #proc tool_byte_at(addr %data, #bits<64> %index) -> i8;
 #extern #proc meta_atom_equal(
   addr %source, addr %node, addr %text, #bits<64> %length
@@ -20,6 +22,13 @@
 ) -> addr;
 #extern #proc meta_env_lookup_text(
   addr %environment, addr %source, addr %text, #bits<64> %length
+) -> addr;
+#extern #proc meta_value_kind(addr %value) -> #bits<32>;
+#extern #proc meta_value_source(addr %value) -> addr;
+#extern #proc meta_value_payload(addr %value) -> addr;
+#extern #proc meta_value_environment(addr %value) -> addr;
+#extern #proc meta_function_type_value(
+  addr %environment, addr %source, addr %type
 ) -> addr;
 #extern #proc program_nil() -> addr;
 #extern #proc program_record_group_for_binding(
@@ -228,12 +237,17 @@
     )
     #let %candidate_source: addr =
       #call program_function_source(%candidate)
-    // Source index is assigned when each source is collected.  It is a
-    // stable, O(1) identity for the lexical environment we need here and
-    // avoids comparing every source byte for every candidate function.
+    // The type node belongs to `%source`, which may be the source of an
+    // imported factory rather than the caller's source.  Match the candidate
+    // function's defining source directly; comparing it with the caller's
+    // source index drops environments for nested types such as
+    // `Syntax.Store.UnitVector`.
+    // Source objects cache a content fingerprint.  Comparing it keeps this
+    // filter O(1); scanning whole files for every captured function makes
+    // generic lookup quadratic.
     #if #ne(
-      #call program_function_source_index(%candidate),
-      #call program_function_source_index(%function)
+      #call tool_source_fingerprint(%candidate_source),
+      #call tool_source_fingerprint(%source)
     ) {
       %candidate_environment: addr = #call program_nil()
     }
@@ -435,9 +449,36 @@
       %find: #bits<64> = #add(%find, 1)
       #continue find_next_dot
     }
+    // A multiline call can leave indentation inside the raw span between
+    // two path segments (`workspace.syntax.units\n    .get`).  Trim that
+    // layout whitespace before matching the record field name.
+    #let %member_start: #bits<64> = #add(%path_start, %cursor)
+    #let %member_length: #bits<64> = #sub(%next_dot, %cursor)
+    #loop trim_member_left {
+      #if #le(%member_length, 0) { #break trim_member_left }
+      #if #call tool_is_space(
+        #call tool_byte_at(%data, %member_start)
+      ) {
+        %member_start: #bits<64> = #add(%member_start, 1)
+        %member_length: #bits<64> = #sub(%member_length, 1)
+        #continue trim_member_left
+      }
+      #break trim_member_left
+    }
+    #loop trim_member_right {
+      #if #le(%member_length, 0) { #break trim_member_right }
+      #if #call tool_is_space(
+        #call tool_byte_at(
+          %data, #sub(#add(%member_start, %member_length), 1)
+        )
+      ) {
+        %member_length: #bits<64> = #sub(%member_length, 1)
+        #continue trim_member_right
+      }
+      #break trim_member_right
+    }
     #let %member_node: addr = #call raw_node_new(
-      1, 0, #add(%path_start, %cursor),
-      #sub(%next_dot, %cursor), 3
+      1, 0, %member_start, %member_length, 3
     )
     #let %field: addr = #call program_record_field_for_node(
       %source, %record_source, %binding, %member_node
@@ -486,6 +527,146 @@
     #continue members
   }
   #return %current_type
+}
+
+// Resolve the Meta type value of a dotted record path.  The AST-only helper
+// above is enough for finding a field declaration, but it drops the lexical
+// environment carried by a type factory.  That environment is where a call
+// such as `Vec(SourceUnit)` stores `T = SourceUnit`.  Keep the value while
+// walking the path so a later UFCS call can recover the concrete receiver
+// type without searching unrelated environments.
+#proc program_record_meta_type_for_nested_ufcs(
+  addr %unit, addr %source, addr %function, addr %node
+) -> addr {
+  #let %path_start: #bits<64> = #call raw_node_start(%node)
+  #let %path_length: #bits<64> = #call raw_node_length(%node)
+  #let %first_dot: #bits<64> = #call program_name_prefix_length(
+    %source, %node
+  )
+  #if #le(%first_dot, 0) { #return #call meta_value_nil() }
+  #let %dot_count: #bits<64> = 0
+  #let %scan: #bits<64> = %first_dot
+  #let %data: addr = #call tool_source_data(%source)
+  #loop count_dots {
+    #if #ge(%scan, %path_length) { #break count_dots }
+    #if #eq(
+      #call tool_byte_at(%data, #add(%path_start, %scan)), 46
+    ) {
+      %dot_count: #bits<64> = #add(%dot_count, 1)
+    }
+    %scan: #bits<64> = #add(%scan, 1)
+    #continue count_dots
+  }
+  #if #eq(%dot_count, 0) { #return #call meta_value_nil() }
+  #let %receiver_node: addr = #call raw_node_new(
+    1, 0, %path_start, %first_dot, 3
+  )
+  #let %current_type: addr = #call program_param_type_for_field(
+    #call program_function_source(%function), %function, %receiver_node
+  )
+  #if #call raw_is_nil(%current_type) {
+    %current_type: addr = #call program_local_type_for_field(
+      #call program_function_source(%function), %function, %receiver_node
+    )
+  }
+  #if #call raw_is_nil(%current_type) { #return #call meta_value_nil() }
+  #if #call meta_type_is_address(
+    #call program_function_source(%function), %current_type
+  ) {
+    %current_type: addr = #call raw_node_next(%current_type)
+    #if #call meta_atom_equal(
+      #call program_function_source(%function), %current_type, "mut", 3
+    ) {
+      %current_type: addr = #call raw_node_next(%current_type)
+    }
+  }
+  #let %current_value: addr = #call program_record_meta_type_for_field(
+    %unit, #call program_function_source(%function), %function,
+    %current_type
+  )
+  #if #ne(#call meta_value_kind(%current_value), 4) {
+    #return #call meta_value_nil()
+  }
+  #let %record_source: addr = #call meta_value_source(%current_value)
+  #let %binding: addr = #call meta_value_payload(%current_value)
+  #let %cursor: #bits<64> = #add(%first_dot, 1)
+  #let %member_index: #bits<64> = 0
+  #loop members {
+    #if #ge(%member_index, %dot_count) { #break members }
+    #let %next_dot: #bits<64> = %path_length
+    #let %find: #bits<64> = %cursor
+    #loop find_next_dot {
+      #if #ge(%find, %path_length) { #break find_next_dot }
+      #if #eq(
+        #call tool_byte_at(%data, #add(%path_start, %find)), 46
+      ) {
+        %next_dot: #bits<64> = %find
+        #break find_next_dot
+      }
+      %find: #bits<64> = #add(%find, 1)
+      #continue find_next_dot
+    }
+    #let %member_start: #bits<64> = #add(%path_start, %cursor)
+    #let %member_length: #bits<64> = #sub(%next_dot, %cursor)
+    #loop trim_meta_member_left {
+      #if #le(%member_length, 0) { #break trim_meta_member_left }
+      #if #call tool_is_space(#call tool_byte_at(%data, %member_start)) {
+        %member_start: #bits<64> = #add(%member_start, 1)
+        %member_length: #bits<64> = #sub(%member_length, 1)
+        #continue trim_meta_member_left
+      }
+      #break trim_meta_member_left
+    }
+    #loop trim_meta_member_right {
+      #if #le(%member_length, 0) { #break trim_meta_member_right }
+      #if #call tool_is_space(
+        #call tool_byte_at(
+          %data, #sub(#add(%member_start, %member_length), 1)
+        )
+      ) {
+        %member_length: #bits<64> = #sub(%member_length, 1)
+        #continue trim_meta_member_right
+      }
+      #break trim_meta_member_right
+    }
+    #let %member_node: addr = #call raw_node_new(
+      1, 0, %member_start, %member_length, 3
+    )
+    #let %field: addr = #call program_record_field_for_node(
+      %source, %record_source, %binding, %member_node
+    )
+    #if #call raw_is_nil(%field) { #return #call meta_value_nil() }
+    #let %field_type: addr = #call program_record_field_type(
+      %record_source, %field
+    )
+    #if #call meta_type_is_address(%record_source, %field_type) {
+      %field_type: addr = #call raw_node_next(%field_type)
+      #if #call meta_atom_equal(
+        %record_source, %field_type, "mut", 3
+      ) {
+        %field_type: addr = #call raw_node_next(%field_type)
+      }
+    }
+    #let %field_value: addr = #call meta_function_type_value(
+      #call meta_value_environment(%current_value),
+      %record_source, %field_type
+    )
+    #if #ne(#call meta_value_kind(%field_value), 4) {
+      %field_value: addr = #call program_record_meta_type_for_field(
+        %unit, %record_source, %function, %field_type
+      )
+    }
+    #if #ne(#call meta_value_kind(%field_value), 4) {
+      #return #call meta_value_nil()
+    }
+    %current_value: addr = %field_value
+    %record_source: addr = #call meta_value_source(%current_value)
+    %binding: addr = #call meta_value_payload(%current_value)
+    %cursor: #bits<64> = #add(%next_dot, 1)
+    %member_index: #bits<64> = #add(%member_index, 1)
+    #continue members
+  }
+  #return %current_value
 }
 
 #proc program_record_type_for_ufcs_field(
