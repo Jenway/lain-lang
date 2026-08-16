@@ -698,9 +698,8 @@ let meta_eval_const = std::func(source: addr, start: usize, end: usize) -> usize
     return 0 - 1;
 };
 
-// Evaluate an expression at compile time: decimal literal, parameter
-// reference (looked up in params), or literal op literal recursion.
-let meta_eval_expr = std::func(
+// Evaluate one compile-time operand: decimal literal or parameter ref.
+let meta_eval_operand = std::func(
     source: addr,
     start: usize,
     end: usize,
@@ -719,39 +718,64 @@ let meta_eval_expr = std::func(
         if prow != 0 {
             return meta_row_field(params, plen, prow, 3);
         }
-        return 0 - 1;
     }
+    return 0 - 1;
+};
+
+// Evaluate a compile-time expression of the form `operand op operand`
+// (single level, no recursion); returns max-1 when not evaluable.
+let meta_eval_expr = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    params: addr,
+) -> usize {
+    let sentinel: usize = 0 - 1;
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
     let plus: usize = scan_top_op(source, s, e, 43);
     if plus < e {
-        let lv: usize = meta_eval_expr(source, s, plus, params);
-        let rv: usize = meta_eval_expr(source, plus + 1, e, params);
-        let sum: usize = lv + rv;
-        return sum;
+        let lv: usize = meta_eval_operand(source, s, plus, params);
+        let rv: usize = meta_eval_operand(source, plus + 1, e, params);
+        if lv != sentinel {
+            if rv != sentinel {
+                let sum: usize = lv + rv;
+                return sum;
+            }
+        }
     }
     let minus: usize = scan_top_op(source, s, e, 45);
     if minus < e {
-        let lv: usize = meta_eval_expr(source, s, minus, params);
-        let rv: usize = meta_eval_expr(source, minus + 1, e, params);
-        if lv >= rv {
-            let diff: usize = lv - rv;
-            return diff;
+        let lv: usize = meta_eval_operand(source, s, minus, params);
+        let rv: usize = meta_eval_operand(source, minus + 1, e, params);
+        if lv != sentinel {
+            if rv != sentinel {
+                if lv >= rv {
+                    let diff: usize = lv - rv;
+                    return diff;
+                }
+            }
         }
-        return 0 - 1;
     }
     let mul: usize = scan_top_op(source, s, e, 42);
     if mul < e {
-        let lv: usize = meta_eval_expr(source, s, mul, params);
-        let rv: usize = meta_eval_expr(source, mul + 1, e, params);
-        let prod: usize = lv * rv;
-        return prod;
+        let lv: usize = meta_eval_operand(source, s, mul, params);
+        let rv: usize = meta_eval_operand(source, mul + 1, e, params);
+        if lv != sentinel {
+            if rv != sentinel {
+                let prod: usize = lv * rv;
+                return prod;
+            }
+        }
     }
-    return 0 - 1;
+    return meta_eval_operand(source, s, e, params);
 };
 
 // Call a consteval (kind 6) function row with arguments [args_start,
 // args_end); binds parameters then evaluates the return expression.
 let meta_call_consteval = std::func(
     source: addr,
+    output: addr,
     meta: addr,
     mlen: usize,
     row: usize,
@@ -762,11 +786,15 @@ let meta_call_consteval = std::func(
     let ps: usize = meta_value_payload_start(meta, mlen, row);
     let body: usize = meta_value_payload_length(meta, mlen, row);
     let pname: usize = parse_ident(source, ps + 1);
-    let plen0: usize = pname - ps - 1;
-    if plen0 > 0 {
+    let plen0: usize = pname - ps;
+    let plen1: usize = plen0 - 1;
+    if plen1 > 0 {
         let av: usize = meta_eval_const(source, args_start, args_end);
-        meta_append(params, 1, ps + 1, plen0, av, 0);
-        let marker: i32 = 0;
+        let sentinel: usize = 0 - 1;
+        if av != sentinel {
+            meta_append(params, 1, ps + 1, plen1, av, 0);
+            let marker: i32 = 0;
+        }
     }
     let src_len: usize = sb_len(source);
     let brace_end: usize = match_brace(source, body, src_len);
@@ -2539,6 +2567,50 @@ let compile = std::func(
                             let cval: usize = meta_eval_const(source, crs, cre);
                             if cval != sentinel {
                                 meta_append(consts, 1, cns, cne - cns, cval, 0);
+                                let marker: i32 = 0;
+                            } else {
+                                let cne2: usize = parse_ident(source, crs);
+                                let cafter: usize = skip_space(source, cne2);
+                                if sb_byte_at(source, cafter) == 40 {
+                                    let mlen2: usize = sb_len(meta);
+                                    let crow2: usize = meta_lookup(meta, mlen2, source, crs, cne2 - crs);
+                                    if crow2 != 0 {
+                                        let ck: usize = meta_value_kind(meta, mlen2, crow2);
+                                        if ck == 6 {
+                                            let aend: usize = cafter + 1;
+                                            let adepth: usize = 1;
+                                            let adone: usize = 0;
+                                            while adone == 0 {
+                                                if sb_byte_at(source, aend) == 41 {
+                                                    adepth = adepth - 1;
+                                                    if adepth == 0 {
+                                                        adone = 1;
+                                                        let marker: i32 = 0;
+                                                    } else {
+                                                        aend = aend + 1;
+                                                        let marker: i32 = 0;
+                                                    }
+                                                } else {
+                                                    if sb_byte_at(source, aend) == 40 {
+                                                        adepth = adepth + 1;
+                                                        aend = aend + 1;
+                                                        let marker: i32 = 0;
+                                                    } else {
+                                                        aend = aend + 1;
+                                                        let marker: i32 = 0;
+                                                    }
+                                                }
+                                            }
+                                            let cv2: usize = meta_call_consteval(
+                                                source, output, meta, mlen2, crow2, cafter + 1, aend
+                                            );
+                                            if cv2 != sentinel {
+                                                meta_append(consts, 1, cns, cne - cns, cv2, 0);
+                                                let marker: i32 = 0;
+                                            }
+                                        }
+                                    }
+                                }
                                 let marker: i32 = 0;
                             }
                             index = semi + 1;
