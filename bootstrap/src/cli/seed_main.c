@@ -2,11 +2,13 @@
 #include "lainir/parse.h"
 #include "lainir/verify.h"
 #include "host_io.h"
+#include "bootstrap_host.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/* seed_run: bare interpreter without capabilities (historical l1i). */
 static int parse_arg_value(const char *text, LainirValue *out) {
   char *end = NULL;
   unsigned long long v = strtoull(text, &end, 10);
@@ -24,7 +26,7 @@ static int parse_limit(const char *text, uint64_t *out) {
   return 1;
 }
 
-int main(int argc, char **argv) {
+static int seed_run(int argc, char **argv) {
   const char *entry;
   int input_index = 1;
   uint64_t max_steps = 0;
@@ -55,7 +57,7 @@ int main(int argc, char **argv) {
     }
   }
   if (argc < input_index + 2) {
-    fprintf(stderr, "usage: lainir-run [--max-steps N] [--max-call-depth N] [--max-alloc-bytes N] <input.l1> <entry> [arg ...]\n");
+    fprintf(stderr, "usage: lainir-seed run [--max-steps N] [--max-call-depth N] [--max-alloc-bytes N] <input.l1> <entry> [arg ...]\n");
     return 1;
   }
 
@@ -141,4 +143,23 @@ int main(int argc, char **argv) {
   default:
     return 1;
   }
+}
+
+int main(int argc, char **argv) {
+  if (argc < 2) {
+    fprintf(stderr, "usage: lainir-seed <interpreter|run> [args...]\n");
+    fprintf(stderr, "  interpreter <compiler.l1> <entry> <output.l1> <source...>\n");
+    fprintf(stderr, "  run         <input.l1> <entry> [arg ...]\n");
+    return 1;
+  }
+  if (strcmp(argv[1], "run") == 0) {
+    return seed_run(argc - 1, argv + 1);
+  }
+  if (strcmp(argv[1], "interpreter") == 0) {
+    return bootstrap_run_cli(argc - 1, argv + 1);
+  }
+  /* Historical default: interpret argv[1] as the compiler artifact path
+   * (previous l1bootstrap shape), for callers that do not pass a
+   * subcommand yet. */
+  return bootstrap_run_cli(argc, argv);
 }

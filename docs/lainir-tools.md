@@ -33,7 +33,7 @@ python scripts/bundle_lainir.py -o formatter_bundle.l1 \
   src/lainir/tools/source.l1 \
   src/lainir/tools/parser.l1 \
   src/lainir/tools/formatter.l1
-lainir-interpreter formatter_bundle.l1 lainir_format out.l1 input.l1
+lainir-seed formatter_bundle.l1 lainir_format out.l1 input.l1
 ```
 
 高亮模块需要把三个 LAIN-IR 文件合并（合并脚本只处理声明去重，不承载逻辑）：
@@ -43,7 +43,7 @@ python scripts/bundle_lainir.py -o highlight_bundle.l1 \
   src/lainir/tools/source.l1 \
   src/lainir/tools/highlight.l1 \
   src/lainir/tools/highlight_cli.l1
-lainir-interpreter highlight_bundle.l1 lainir_highlight highlights.json input.l1
+lainir-seed highlight_bundle.l1 lainir_highlight highlights.json input.l1
 ```
 
 LSP 通过标准输入输出运行：

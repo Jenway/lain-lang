@@ -261,10 +261,10 @@ end-to-end.  Running the re-frozen `bootstrap/frozen/lainc.l1` over
 `compiler_api_schema.lain` plus all `src/compiler` and std sources succeeds at
 `compiler_compile`, passes `lainir-print` (including the previously blocked
 `Meta.expand`/`Modules.declare` nominal parameter physical-type check), and
-`lainir-run` returns `1` (`tests/lainir_lain/run_compiler_api_bootstrap.py`).
+`lainir-seed run` returns `1` (`tests/lainir_lain/run_compiler_api_bootstrap.py`).
 Remaining blocker: the empty-input fixture
 `compiler_api_compile_empty.lain` produces a verifier-valid artifact whose
-execution dereferences a null address in `lainir-run` (access violation
+execution dereferences a null address in `lainir-seed run` (access violation
 `0xC0000005`).  After that comes real Lain source input, wiring
 `run_compiler_source_closure.py`/`run_compiler_api_bootstrap.py` into
 `run_all.py`, and the stage2/stage3 byte comparison listed below.

@@ -23,8 +23,10 @@ host <- cli
 The build produces:
 
 - `lainir-print`: parse, verify, and print canonical LAIN-IR.
-- `lainir-run`: execute a LAIN-IR entry procedure.
-- `lainir-interpreter`: run an explicitly selected frozen compiler artifact.
+- `lainir-seed`: the C-written LAIN-IR interpreter.  Its `interpreter`
+  subcommand runs an explicitly selected frozen compiler artifact with the
+  bootstrap capabilities; its `run` subcommand executes a plain LAIN-IR
+  entry procedure without capabilities.
 
 The repository also carries the first frozen minimal Lain compiler at
 `bootstrap/frozen/lainc.l1`.  It is generated reproducibly from the current

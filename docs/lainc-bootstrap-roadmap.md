@@ -9,11 +9,11 @@
 
 ## 目标
 
-最终用 C 写的 `lainir-interpreter` 执行 LAIN-IR 编译器，得到可编译完整
+最终用 C 写的 `lainir-seed` 执行 LAIN-IR 编译器，得到可编译完整
 `src/compiler` 的 Lain compiler，并完成自举：
 
 ```text
-C lainir-interpreter
+C lainir-seed
     -> bootstrap/frozen/lainc.l1
     -> stage1 lainc
     -> stage1 编译 src/compiler
@@ -21,7 +21,7 @@ C lainir-interpreter
     -> stage2 再编译自身
 ```
 
-`lainir-interpreter` 只提供文件、内存、诊断和 artifact I/O。Lain 的语义、Meta、
+`lainir-seed` 只提供文件、内存、诊断和 artifact I/O。Lain 的语义、Meta、
 类型和编译期执行都由 LAIN-IR/Lain compiler 实现。
 
 ## 当前基线
@@ -38,7 +38,7 @@ C lainir-interpreter
   Lain 子集，并把完整 `src/compiler` 闭包降低成 verifier-valid LAIN-IR。
 - 完整 compiler-API Meta 实例化：`compiler_api_schema.lain` + 全部
   `src/compiler` + std 源 → `compiler_compile` 成功 → `lainir-print` 通过 →
-  `lainir-run` 返回 `1`（`tests/lainir_lain/run_compiler_api_bootstrap.py`）。
+  `lainir-seed run` 返回 `1`（`tests/lainir_lain/run_compiler_api_bootstrap.py`）。
 - `Meta.expand` 调用链的 verifier 错误已修复：完整 API artifact 的
   `lainir-print` 已通过（含此前卡住的 `Modules.declare` nominal 参数物理
   类型检查）。
@@ -47,7 +47,7 @@ C lainir-interpreter
 
 还没有：
 
-- 空输入 fixture 的 `lainir-run` 验收（当前卡点）：`api.compile` 对空输入
+- 空输入 fixture 的 `lainir-seed run` 验收（当前卡点）：`api.compile` 对空输入
   生成的 LAIN-IR 在解释器中解引用空地址崩溃（最新代码下为
   access violation `0xC0000005`）；fixture `compiler_api_compile_empty.lain`
   已就位但验收脚本未写。
@@ -59,7 +59,7 @@ C lainir-interpreter
 已完成的第一步增量：
 
 - 已生成并冻结 `bootstrap/frozen/lainc.l1`。
-- C `lainir-interpreter` 可以用它编译 `return_42`、模块工厂和闭包捕获 fixture。
+- C `lainir-seed` 可以用它编译 `return_42`、模块工厂和闭包捕获 fixture。
 - 它可以把当前完整 `src/compiler` 多文件闭包降低成 verifier-valid 的
   LAIN-IR artifact。
 - 这个 artifact 仍然只包含当前前端实际能物化的编译器函数，尚未成为完整
@@ -89,7 +89,7 @@ C lainir-interpreter
   空值判断混用的问题。这样可以避免已完成的导入模块被源码收集阶段重复
   展开。
 - `compiler_api_schema.lain` 现在已经通过 bootstrap 编译、`lainir-print` 和
-  `lainir-run` 验收。此前的 `5124` 停止点来自普通 RawAst 遍历结束时先触发
+  `lainir-seed run` 验收。此前的 `5124` 停止点来自普通 RawAst 遍历结束时先触发
   步数保护；空节点检查顺序已经修正。
 - 完整 API 的主要耗时来自工厂函数体里的局部 `std::func`。当前非根工厂的
   局部函数采用延迟物化：验证阶段发现真实运行时调用时再加入物理函数链。
@@ -100,12 +100,12 @@ C lainir-interpreter
 
 当前增量（2026-08-16）：
 
-- 完整 API 探针已通过 `compiler_compile`、`lainir-print` 与 `lainir-run` 验收：
+- 完整 API 探针已通过 `compiler_compile`、`lainir-print` 与 `lainir-seed run` 验收：
   `compiler_api_schema.lain` 在全部 `src/compiler` + std 源闭包下实例化
   `lainc.API(Memory)` 并执行返回 `1`。此前的 `5124` 步数保护停止点与
   `Meta.expand` 调用链的 verifier 错误均已消除。
 - `compiler_api_compile_empty.lain`（空输入编译请求）已能生成 artifact 且
-  `lainir-print` 通过；`lainir-run` 执行仍在空地址处崩溃，这是当前唯一的已知卡点。
+  `lainir-print` 通过；`lainir-seed run` 执行仍在空地址处崩溃，这是当前唯一的已知卡点。
 - `tests/lainir_lain/run_compiler_api_bootstrap.py` 与
   `run_type_namespace_nested.py` 已通过但尚未接入 `run_all.py`，等空输入
   验收后一并接线。
@@ -143,8 +143,8 @@ let main = std::func() -> i32 {
 
 ```text
 lainir-print bootstrap/frozen/lainc.l1
-lainir-interpreter bootstrap/frozen/lainc.l1 ...
-lainir-run generated.l1 main
+lainir-seed bootstrap/frozen/lainc.l1 ...
+lainir-seed run generated.l1 main
 ```
 
 冻结 bootstrap 前，必须把 Lain 源码类型名和生成的 LAIN-IR 物理类型分开，
@@ -308,7 +308,7 @@ compiler_core
     -> lainc
 ```
 
-每完成一个模块，都运行 `lainir-print` 和 `lainir-run`。不要一次把整个
+每完成一个模块，都运行 `lainir-print` 和 `lainir-seed run`。不要一次把整个
 `src/compiler` closure 当作一个未分阶段的大目标。
 
 ## 阶段五：形成自举闭环
@@ -316,7 +316,7 @@ compiler_core
 最终链条：
 
 ```text
-C lainir-interpreter
+C lainir-seed
     -> bootstrap/frozen/lainc.l1
     -> stage1 lainc
     -> stage1 编译 src/compiler
@@ -333,18 +333,18 @@ C lainir-interpreter
 
 ## 下一项实现任务
 
-完整 compiler-API 实例化已验收（schema fixture 经 `lainir-print`/`lainir-run` 返回
+完整 compiler-API 实例化已验收（schema fixture 经 `lainir-print`/`lainir-seed run` 返回
 `1`），`Meta.expand` 调用链的 verifier 错误已修复。当前唯一的已知卡点是
-空输入 fixture 在 `lainir-run` 下的空地址崩溃，修复顺序如下。
+空输入 fixture 在 `lainir-seed run` 下的空地址崩溃，修复顺序如下。
 
 阶段验收顺序：
 
-1. 定位并修复空输入 fixture 的 `lainir-run` 崩溃：`compiler_api_compile_empty.lain`
+1. 定位并修复空输入 fixture 的 `lainir-seed run` 崩溃：`compiler_api_compile_empty.lain`
    （空 `SourceSlice` 的 `api.compile(request)`）生成的 artifact 已通过
    `lainir-print`，但解释执行解引用空地址（access violation）。用解释器调试
    输出定位到具体 `#proc`/指令。
 2. 补写验收脚本 `tests/lainir_lain/run_compiler_api_compile_empty.py`
-   （`compiler_compile` → `lainir-print` → `lainir-run`，status 为 0）。
+   （`compiler_compile` → `lainir-print` → `lainir-seed run`，status 为 0）。
 3. 把输入换成真实的 Lain 源码字节串，检查返回的 artifact、诊断和状态。
 4. 把这条实例化路径接入 `run_compiler_source_closure.py`，并连同
    `run_compiler_api_bootstrap.py`、`run_type_namespace_nested.py` 一起
