@@ -640,6 +640,64 @@ let meta_fold_binary = std::func(
     return false;
 };
 
+// Evaluate a constant expression [start, end): a decimal literal or
+// literal op literal (+/-/*).  Returns max-1 when not evaluable.
+let meta_eval_const = std::func(source: addr, start: usize, end: usize) -> usize {
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
+    if meta_is_number(source, s, e) {
+        return meta_parse_decimal(source, s, e);
+    }
+    let plus: usize = scan_top_op(source, s, e, 43);
+    if plus < e {
+        let ls: usize = trim_start(source, s, plus);
+        let le: usize = trim_end(source, ls, plus);
+        let rs: usize = skip_space(source, plus + 1);
+        let re: usize = trim_end(source, rs, e);
+        if meta_is_number(source, ls, le) {
+            if meta_is_number(source, rs, re) {
+                let lv: usize = meta_parse_decimal(source, ls, le);
+                let rv: usize = meta_parse_decimal(source, rs, re);
+                let sum: usize = lv + rv;
+                return sum;
+            }
+        }
+    }
+    let minus: usize = scan_top_op(source, s, e, 45);
+    if minus < e {
+        let ls: usize = trim_start(source, s, minus);
+        let le: usize = trim_end(source, ls, minus);
+        let rs: usize = skip_space(source, minus + 1);
+        let re: usize = trim_end(source, rs, e);
+        if meta_is_number(source, ls, le) {
+            if meta_is_number(source, rs, re) {
+                let lv: usize = meta_parse_decimal(source, ls, le);
+                let rv: usize = meta_parse_decimal(source, rs, re);
+                if lv >= rv {
+                    let diff: usize = lv - rv;
+                    return diff;
+                }
+            }
+        }
+    }
+    let mul: usize = scan_top_op(source, s, e, 42);
+    if mul < e {
+        let ls: usize = trim_start(source, s, mul);
+        let le: usize = trim_end(source, ls, mul);
+        let rs: usize = skip_space(source, mul + 1);
+        let re: usize = trim_end(source, rs, e);
+        if meta_is_number(source, ls, le) {
+            if meta_is_number(source, rs, re) {
+                let lv: usize = meta_parse_decimal(source, ls, le);
+                let rv: usize = meta_parse_decimal(source, rs, re);
+                let prod: usize = lv * rv;
+                return prod;
+            }
+        }
+    }
+    return 0 - 1;
+};
+
 // ---- byte helpers ----
 let is_space = std::func(byte: i32) -> bool {
     if byte == 32 { return true; }
@@ -1292,9 +1350,8 @@ let emit_operand2 = std::func(
     let clen: usize = sb_len(consts);
     let crow: usize = meta_lookup(consts, clen, source, s, name_end - s);
     if crow != 0 {
-        let ps: usize = meta_value_payload_start(consts, clen, crow);
-        let pl: usize = meta_value_payload_length(consts, clen, crow);
-        sb_append_span(output, source, ps, pl);
+        let val: usize = meta_row_field(consts, clen, crow, 3);
+        meta_append_decimal(output, val);
         return;
     }
     let member_start: usize = emit_path_tail(source, s, e);
@@ -2349,8 +2406,9 @@ let compile = std::func(
                             let cne: usize = parse_ident(source, cns);
                             let crs: usize = trim_start(source, eq + 1, semi);
                             let cre: usize = trim_end(source, crs, semi);
-                            if meta_is_number(source, crs, cre) {
-                                meta_append(consts, 1, cns, cne - cns, crs, cre - crs);
+                            let cval: usize = meta_eval_const(source, crs, cre);
+                            if cval != 0 - 1 {
+                                meta_append(consts, 1, cns, cne - cns, cval, 0);
                                 let marker: i32 = 0;
                             }
                             index = semi + 1;
