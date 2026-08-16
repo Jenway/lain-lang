@@ -474,6 +474,70 @@ let emit_call_args = std::func(
     }
 };
 
+// Return the start of the last segment of a qualified path `a.b.c` /
+// `a::b`, or the original start when there is no path.  Module members are
+// emitted as f0_<member>, so call sites use the last segment as the callee.
+let emit_path_tail = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> usize {
+    let tail: usize = start;
+    let scan: usize = parse_ident(source, start);
+    let done: i32 = 0;
+    while done == 0 {
+        let sep: usize = skip_space(source, scan);
+        if sep >= end {
+            done = 1;
+            let marker: i32 = 0;
+        } else {
+            let b: i32 = sb_byte_at(source, sep);
+            if b == 46 {
+                let next: usize = skip_space(source, sep + 1);
+                if next < end {
+                    if is_ident_start(sb_byte_at(source, next)) {
+                        tail = next;
+                        scan = parse_ident(source, next);
+                        let marker: i32 = 0;
+                    } else {
+                        done = 1;
+                        let marker: i32 = 0;
+                    }
+                } else {
+                    done = 1;
+                    let marker: i32 = 0;
+                }
+            } else {
+                if b == 58 {
+                    if sb_byte_at(source, sep + 1) == 58 {
+                        let next: usize = skip_space(source, sep + 2);
+                        if next < end {
+                            if is_ident_start(sb_byte_at(source, next)) {
+                                tail = next;
+                                scan = parse_ident(source, next);
+                                let marker: i32 = 0;
+                            } else {
+                                done = 1;
+                                let marker: i32 = 0;
+                            }
+                        } else {
+                            done = 1;
+                            let marker: i32 = 0;
+                        }
+                    } else {
+                        done = 1;
+                        let marker: i32 = 0;
+                    }
+                } else {
+                    done = 1;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    return tail;
+};
+
 // Emit a call NAME(args) where name spans [name_start, name_end).
 let emit_call_named = std::func(
     source: addr,
@@ -669,7 +733,9 @@ let emit_operand2 = std::func(
         sb_append_literal(output, "0", 1);
         return;
     }
-    let after: usize = skip_space(source, name_end);
+    let member_start: usize = emit_path_tail(source, s, e);
+    let member_end: usize = parse_ident(source, member_start);
+    let after: usize = skip_space(source, member_end);
     if sb_byte_at(source, after) == 40 {
         let args_start: usize = after + 1;
         let args_end: usize = args_start;
@@ -697,11 +763,11 @@ let emit_operand2 = std::func(
                 }
             }
         }
-        emit_call_named(source, s, name_end, args_start, args_end, output);
+        emit_call_named(source, member_start, member_end, args_start, args_end, output);
         return;
     }
     sb_append_literal(output, "%", 1);
-    sb_append_span(output, source, s, name_end - s);
+    sb_append_span(output, source, member_start, member_end - member_start);
 };
 
 // Lower an addition/subtraction chain as #add(L, R) / #sub(L, R).
@@ -729,6 +795,16 @@ let emit_add_expr = std::func(
         emit_add_expr(source, s, minus, output);
         sb_append_literal(output, ", ", 2);
         let right_start: usize = skip_space(source, minus + 1);
+        emit_add_expr(source, right_start, e, output);
+        sb_append_literal(output, ")", 1);
+        return;
+    }
+    let mul: usize = scan_top_op(source, s, e, 42);
+    if mul < e {
+        sb_append_literal(output, "#mul(", 5);
+        emit_add_expr(source, s, mul, output);
+        sb_append_literal(output, ", ", 2);
+        let right_start: usize = skip_space(source, mul + 1);
         emit_add_expr(source, right_start, e, output);
         sb_append_literal(output, ")", 1);
         return;
@@ -1329,6 +1405,35 @@ let emit_foreign_wrapper = std::func(
     }
 };
 
+// Emit a `let NAME = std::module { ... }` binding: compile every member
+// `std::func` in the block as a LAIN-IR function (f0_<member>).  The module
+// value itself is compile-time only, so no runtime object is emitted.
+// Returns the index after the block.
+let emit_module = std::func(
+    source: addr,
+    output: addr,
+    index: usize,
+    end: usize,
+) -> usize {
+    let name_start: usize = skip_space(source, index + 3);
+    let brace: usize = scan_brace(source, name_start, end);
+    let brace_end: usize = match_brace(source, brace, end);
+    let body: usize = brace + 1;
+    let current: usize = body;
+    while current < brace_end {
+        let s: usize = skip_space(source, current);
+        if s >= brace_end { break; }
+        if sb_span_equals(source, s, 3, "let", 3) {
+            current = emit_function2(source, output, s, 0);
+        } else {
+            current = s + 1;
+            let marker: i32 = 0;
+        }
+        let marker: i32 = 0;
+    }
+    return brace_end + 1;
+};
+
 // Emit one top-level function declaration at index ('let').  Returns the
 // index after it.  link is the pending @foreign link_name content start
 // (0 when none).
@@ -1424,13 +1529,17 @@ let compile = std::func(
                 if sb_span_equals(source, index, 3, "let", 3) {
                     let eq: usize = scan_top_op(source, index, length, 61);
                     let func_start: usize = skip_space(source, eq + 1);
-                    if sb_span_equals(source, func_start, 9, "std::func", 9) {
-                        index = emit_function2(source, output, index, link);
-                        link = 0;
+                    if sb_span_equals(source, func_start, 11, "std::module", 11) {
+                        index = emit_module(source, output, index, length);
                     } else {
-                        let semi: usize = scan_semi(source, index, length);
-                        index = semi + 1;
-                        let marker: i32 = 0;
+                        if sb_span_equals(source, func_start, 9, "std::func", 9) {
+                            index = emit_function2(source, output, index, link);
+                            link = 0;
+                        } else {
+                            let semi: usize = scan_semi(source, index, length);
+                            index = semi + 1;
+                            let marker: i32 = 0;
+                        }
                     }
                 } else {
                     index = index + 1;
