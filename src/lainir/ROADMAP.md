@@ -140,7 +140,7 @@ generic topology tree; semantic forms are interpreted by LAIN-IR meta code.
 - [x] Propagate the first workspace/meta/eval diagnostic to the driver exit
   status instead of silently accepting an error artifact.
 - [x] Make the self-hosting source closure resolve the physical compiler from
-  `src/compiler` while preserving package-qualified logical imports.
+  `src/compiler-archive` while preserving package-qualified logical imports.
 - [x] Provide a reproducible bundle/run entry for the LAIN-IR frontend.
 - [x] Replace the inspection artifact with the `compiler_compile`
   request/result boundary and its first executable source-to-LAIN-IR slice;
@@ -159,7 +159,7 @@ generic topology tree; semantic forms are interpreted by LAIN-IR meta code.
 
 ## M8 — replace the phase artifact with the compiler boundary
 
-This is the next implementation block.  The existing `src/compiler/*.lain`
+This is the next implementation block.  The existing `src/compiler-archive/*.lain`
 remains the source of truth; the small frontend above is not a substitute for
 it.
 
@@ -254,12 +254,12 @@ function before the canonical closure can be checked.
 The first bootstrap increment now exists: `src/lainir/lainc.l1` is a
 reproducible executable compiler artifact for the current Lain frontend
 subset.  It can compile the small function/module fixtures and lower the
-canonical `src/compiler` source closure to verifier-valid LAIN-IR.  That
+canonical `src/compiler-archive` source closure to verifier-valid LAIN-IR.  That
 artifact is still below the full compiler boundary described by this section.
 
 Status (2026-08-16): full compiler-API Meta instantiation is now accepted
 end-to-end.  Running the re-frozen `src/lainir/lainc.l1` over
-`compiler_api_schema.lain` plus all `src/compiler` and std sources succeeds at
+`compiler_api_schema.lain` plus all `src/compiler-archive` and std sources succeeds at
 `compiler_compile`, passes `lainir-print` (including the previously blocked
 `Meta.expand`/`Modules.declare` nominal parameter physical-type check), and
 `lainir-seed run` returns `1` (`tests/lainir_lain/run_compiler_api_bootstrap.py`).
@@ -285,7 +285,7 @@ execution dereferences a null address in `lainir-seed run` (access violation
   generated direct calls cannot reference an omitted procedure.
 - [x] Keep module-valued forwarding factories in the compile-time phase while
   preserving physical module-typed identity functions.
-- [ ] **Canonical compiler closure.** Lower `src/compiler` module by module,
+- [ ] **Canonical compiler closure.** Lower `src/compiler-archive` module by module,
   starting with `compiler_core`, then `compiler_driver`, `compiler_api`, and
   `lainc`; after each module, run `lainir-print` and execute a small request.
 - [ ] **Thin CLI and fixed point.** Restore `lainc` as a capability-only host,
