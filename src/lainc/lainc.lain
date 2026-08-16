@@ -698,6 +698,91 @@ let meta_eval_const = std::func(source: addr, start: usize, end: usize) -> usize
     return 0 - 1;
 };
 
+// Evaluate an expression at compile time: decimal literal, parameter
+// reference (looked up in params), or literal op literal recursion.
+let meta_eval_expr = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    params: addr,
+) -> usize {
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
+    if meta_is_number(source, s, e) {
+        return meta_parse_decimal(source, s, e);
+    }
+    let ne: usize = parse_ident(source, s);
+    let after: usize = skip_space(source, ne);
+    if after >= e {
+        let plen: usize = sb_len(params);
+        let prow: usize = meta_lookup(params, plen, source, s, ne - s);
+        if prow != 0 {
+            return meta_row_field(params, plen, prow, 3);
+        }
+        return 0 - 1;
+    }
+    let plus: usize = scan_top_op(source, s, e, 43);
+    if plus < e {
+        let lv: usize = meta_eval_expr(source, s, plus, params);
+        let rv: usize = meta_eval_expr(source, plus + 1, e, params);
+        let sum: usize = lv + rv;
+        return sum;
+    }
+    let minus: usize = scan_top_op(source, s, e, 45);
+    if minus < e {
+        let lv: usize = meta_eval_expr(source, s, minus, params);
+        let rv: usize = meta_eval_expr(source, minus + 1, e, params);
+        if lv >= rv {
+            let diff: usize = lv - rv;
+            return diff;
+        }
+        return 0 - 1;
+    }
+    let mul: usize = scan_top_op(source, s, e, 42);
+    if mul < e {
+        let lv: usize = meta_eval_expr(source, s, mul, params);
+        let rv: usize = meta_eval_expr(source, mul + 1, e, params);
+        let prod: usize = lv * rv;
+        return prod;
+    }
+    return 0 - 1;
+};
+
+// Call a consteval (kind 6) function row with arguments [args_start,
+// args_end); binds parameters then evaluates the return expression.
+let meta_call_consteval = std::func(
+    source: addr,
+    meta: addr,
+    mlen: usize,
+    row: usize,
+    args_start: usize,
+    args_end: usize,
+) -> usize {
+    let params: addr = sb_new();
+    let ps: usize = meta_value_payload_start(meta, mlen, row);
+    let body: usize = meta_value_payload_length(meta, mlen, row);
+    let pname: usize = parse_ident(source, ps + 1);
+    let av: usize = meta_eval_const(source, args_start, args_end);
+    meta_append(params, 1, ps + 1, pname - ps - 1, av, 0);
+    let src_len: usize = sb_len(source);
+    let brace_end: usize = match_brace(source, body, src_len);
+    let ret: usize = body + 1;
+    let scanning: i32 = 1;
+    while scanning == 1 {
+        if sb_byte_at(source, ret) == 114 {
+            scanning = 0;
+            let marker: i32 = 0;
+        } else {
+            ret = ret + 1;
+            let marker: i32 = 0;
+        }
+    }
+    let rexpr: usize = skip_space(source, ret + 6);
+    let rsemi: usize = scan_semi(source, rexpr, brace_end);
+    let value: usize = meta_eval_expr(source, rexpr, rsemi, params);
+    return value;
+};
+
 // ---- byte helpers ----
 let is_space = std::func(byte: i32) -> bool {
     if byte == 32 { return true; }
@@ -2355,6 +2440,43 @@ let emit_record_value = std::func(
     }
 };
 
+// Bind a compile-time function declaration
+// `let NAME = std::consteval(params) -> T { body }` into the meta table
+// (kind 6) without emitting any product.  Payload: params_start, body_open.
+let emit_consteval = std::func(
+    source: addr,
+    index: usize,
+    end: usize,
+    meta: addr,
+) -> usize {
+    let name_start: usize = skip_space(source, index + 3);
+    let name_end: usize = parse_ident(source, name_start);
+    let params_start: usize = name_end;
+    while sb_byte_at(source, params_start) != 40 {
+        params_start = params_start + 1;
+        let marker: i32 = 0;
+    }
+    let params_end: usize = params_start + 1;
+    while sb_byte_at(source, params_end) != 41 {
+        params_end = params_end + 1;
+        let marker: i32 = 0;
+    }
+    let scan: usize = params_end + 1;
+    let body_open: usize = scan;
+    while body_open < end {
+        let b: i32 = sb_byte_at(source, body_open);
+        if b == 123 { break; }
+        if b == 59 { break; }
+        body_open = body_open + 1;
+        let marker: i32 = 0;
+    }
+    meta_append(meta, 6, name_start, name_end - name_start, params_start, body_open);
+    if sb_byte_at(source, body_open) == 123 {
+        return match_brace(source, body_open, end) + 1;
+    }
+    return scan_semi(source, body_open, end) + 1;
+};
+
 // Compile the source program into LAIN-IR text.  Returns 0 on success.
 let compile = std::func(
     source: addr,
@@ -2394,7 +2516,10 @@ let compile = std::func(
                     if sb_span_equals(source, func_start, 11, "std::struct", 11) {
                         index = emit_record(source, output, index, length, layout, meta);
                     } else {
-                        if sb_span_equals(source, func_start, 11, "std::module", 11) {
+                        if sb_span_equals(source, func_start, 14, "std::consteval", 14) {
+                            index = emit_consteval(source, index, length, meta);
+                        } else {
+                            if sb_span_equals(source, func_start, 11, "std::module", 11) {
                             index = emit_module(source, output, index, length, layout, types, meta, consts);
                         } else {
                             if sb_span_equals(source, func_start, 9, "std::func", 9) {
@@ -2406,8 +2531,9 @@ let compile = std::func(
                             let cne: usize = parse_ident(source, cns);
                             let crs: usize = trim_start(source, eq + 1, semi);
                             let cre: usize = trim_end(source, crs, semi);
+                            let sentinel: usize = 0 - 1;
                             let cval: usize = meta_eval_const(source, crs, cre);
-                            if cval != 0 - 1 {
+                            if cval != sentinel {
                                 meta_append(consts, 1, cns, cne - cns, cval, 0);
                                 let marker: i32 = 0;
                             }
@@ -2415,6 +2541,7 @@ let compile = std::func(
                             let marker: i32 = 0;
                         }
                     }
+                }
                 }
             } else {
                 index = index + 1;
