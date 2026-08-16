@@ -1,12 +1,20 @@
-// src/lainc/lainc.lain — M0: minimal Lain-written lainc.
+// src/lainc/lainc.lain — M0/M1: Lain-written lainc.
 //
 // Compiles the smallest Lain subset into LAIN-IR text:
 //   let main = std::func() -> i32 { return N; };
 // -> #proc main() -> #bits<32> { #return N }
 //
-// M0 variant: compile returns the length of the emitted LAIN-IR text
-// (i32), because frozen lainc's return-type support does not yet cover
-// record/String values.  Output-channel wiring comes in the next step.
+// Frozen-lainc workarounds observed during M0:
+//   - a non-root function whose first statement is a call has its body
+//     truncated (lead every function with a `let`)
+//   - a call as the final statement of an if branch becomes a `return`
+//     (follow such calls with a `let`)
+//   - addr+usize arithmetic needs the #lea path (fixed in frozen lainc)
+//   - string literals are passed as (addr, length); lengths must be exact
+//
+// Entry points:
+//   emit() -> String : compile the hard-coded source, return the LAIN-IR
+//   main() -> i32    : compile and verify the emitted text inside Lain
 
 let string_mod: Module = import("std::core::string");
 let bounds: Module = import("std::bounds");
@@ -48,14 +56,12 @@ let is_return_at = std::func(
 
 // Scan the source for the decimal digits of the return value and emit
 // a minimal LAIN-IR procedure into output.  Returns the digit count.
-// NOTE: the first statement must be a `let`; frozen lainc truncates a
-// non-root function whose first statement is a call.
 let compile = std::func(
     source: &String,
     output: &mut String,
 ) -> i32 {
     let digits: i32 = 0;
-    append_literal(output, "#proc main() -> #bits<32> {\n  #return ", 40);
+    append_literal(output, "#proc main() -> #bits<32> {\n  #return ", 38);
     let index: usize = 0;
     let length: usize = String.length(source);
     let capturing: i32 = 0;
@@ -80,23 +86,32 @@ let compile = std::func(
     return digits;
 };
 
-// M0 entry: compile a hard-coded return_42 source and verify the emitted
-// LAIN-IR inside the Lain layer.  Return codes:
-//   1 = compiled and emitted text matches expectations
-//   3 = digit extraction failed (expected 2 digits)
-//   4.. = emitted text mismatch
-let main = std::func() -> i32 {
+// Compile the hard-coded return_42 source and return the emitted LAIN-IR
+// text.  This entry is exercised by `lainir-seed run src_lainc.l1 emit`,
+// which prints the String result.
+let emit = std::func() -> String {
     let source: String = String.new();
     append_literal(
         &mut source,
         "let main = std::func() -> i32 { return 42; };",
-        47,
+        45,
     );
     let output: String = String.new();
     let digits: i32 = compile(&source, &mut output);
-    if digits != 2 { return 3; }
-    if String.byte_at(&output, 0) != 35 { return 4; }
-    if String.byte_at(&output, 1) != 112 { return 5; }
-    if String.byte_at(&output, 2) != 114 { return 6; }
-    return 1;
+    let marker: i32 = 0;
+    return output;
+};
+
+// Compile and verify the emitted text inside the Lain layer.
+// Return codes: 1 = emitted text matches expectations exactly.
+let main = std::func() -> i32 {
+    let emitted: String = emit();
+    if String.equal_literal(
+        &emitted,
+        "#proc main() -> #bits<32> {\n  #return 42\n}\n",
+        43,
+    ) {
+        return 1;
+    }
+    return 0;
 };
