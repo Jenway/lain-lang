@@ -605,6 +605,41 @@ let meta_is_number = std::func(source: addr, start: usize, end: usize) -> bool {
     return false;
 };
 
+// Fold a binary operation on two decimal literals (+/-/*); returns true
+// when the result was written instead of the #op form.
+let meta_fold_binary = std::func(
+    source: addr,
+    output: addr,
+    ls: usize,
+    le: usize,
+    rs: usize,
+    re: usize,
+    op: i32,
+) -> bool {
+    if meta_is_number(source, ls, le) {
+        if meta_is_number(source, rs, re) {
+            let lv: usize = meta_parse_decimal(source, ls, le);
+            let rv: usize = meta_parse_decimal(source, rs, re);
+            if op == 43 {
+                let sum: usize = lv + rv;
+                meta_append_decimal(output, sum);
+                return true;
+            }
+            if op == 42 {
+                let prod: usize = lv * rv;
+                meta_append_decimal(output, prod);
+                return true;
+            }
+            if lv >= rv {
+                let diff: usize = lv - rv;
+                meta_append_decimal(output, diff);
+                return true;
+            }
+        }
+    }
+    return false;
+};
+
 // ---- byte helpers ----
 let is_space = std::func(byte: i32) -> bool {
     if byte == 32 { return true; }
@@ -1314,6 +1349,13 @@ let emit_add_expr = std::func(
     let e: usize = trim_end(source, s, end);
     let plus: usize = scan_top_op(source, s, e, 43);
     if plus < e {
+        let ls: usize = trim_start(source, s, plus);
+        let le: usize = trim_end(source, ls, plus);
+        let rs: usize = skip_space(source, plus + 1);
+        let re: usize = trim_end(source, rs, e);
+        if meta_fold_binary(source, output, ls, le, rs, re, 43) {
+            return;
+        }
         sb_append_literal(output, "#add(", 5);
         emit_add_expr(source, s, plus, output, layout, types, meta, consts);
         sb_append_literal(output, ", ", 2);
@@ -1324,6 +1366,13 @@ let emit_add_expr = std::func(
     }
     let minus: usize = scan_top_op(source, s, e, 45);
     if minus < e {
+        let ms: usize = trim_start(source, s, minus);
+        let me: usize = trim_end(source, ms, minus);
+        let rs2: usize = skip_space(source, minus + 1);
+        let re2: usize = trim_end(source, rs2, e);
+        if meta_fold_binary(source, output, ms, me, rs2, re2, 45) {
+            return;
+        }
         sb_append_literal(output, "#sub(", 5);
         emit_add_expr(source, s, minus, output, layout, types, meta, consts);
         sb_append_literal(output, ", ", 2);
@@ -1334,6 +1383,13 @@ let emit_add_expr = std::func(
     }
     let mul: usize = scan_top_op(source, s, e, 42);
     if mul < e {
+        let xs: usize = trim_start(source, s, mul);
+        let xe: usize = trim_end(source, xs, mul);
+        let rs3: usize = skip_space(source, mul + 1);
+        let re3: usize = trim_end(source, rs3, e);
+        if meta_fold_binary(source, output, xs, xe, rs3, re3, 42) {
+            return;
+        }
         sb_append_literal(output, "#mul(", 5);
         emit_add_expr(source, s, mul, output, layout, types, meta, consts);
         sb_append_literal(output, ", ", 2);
