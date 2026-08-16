@@ -2,9 +2,9 @@
 """Run the real LAIN-IR compiler fixed point.
 
 The compiler implementation is ``src/lainir/compiler.l1``.  The C bootstrap
-interpreter executes that LAIN-IR source once to produce a native stage1
-compiler.  Each later stage is produced by the preceding stage, so the
-stage2/stage3 equality check covers the compiler's parser, verifier, evaluator
+interpreter executes that LAIN-IR source once to produce a native gen1
+compiler.  Each later generation is produced by the preceding one, so the
+gen2/gen3 equality check covers the compiler's parser, verifier, evaluator
 and C emitter instead of merely copying an input bundle.
 """
 
@@ -47,7 +47,7 @@ def find_c_compiler() -> list[str]:
         candidate = shutil.which(name)
         if candidate:
             return [candidate]
-    raise RuntimeError("no C compiler is available for the native stage")
+    raise RuntimeError("no C compiler is available for the native build")
 
 
 def compile_native(c_compiler: list[str], source: Path, output: Path, env: dict[str, str]) -> None:
@@ -81,25 +81,25 @@ def main() -> int:
         env.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "local"))
         env.setdefault("ZIG_GLOBAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "global"))
 
-        stage1_c = work / "lainir-c.stage1.c"
-        stage2_c = work / "lainir-c.stage2.c"
-        stage3_c = work / "lainir-c.stage3.c"
+        gen1_c = work / "lainir-c-gen1.c"
+        gen2_c = work / "lainir-c-gen2.c"
+        gen3_c = work / "lainir-c-gen3.c"
         suffix = ".exe" if os.name == "nt" else ""
-        stage1 = work / f"lainir-c.stage1{suffix}"
-        stage2 = work / f"lainir-c.stage2{suffix}"
+        gen1 = work / f"lainir-c-gen1{suffix}"
+        gen2 = work / f"lainir-c-gen2{suffix}"
 
-        run([BOOTSTRAP, COMPILER, "lainir_compile_module", stage1_c, COMPILER])
-        compile_native(c_compiler, stage1_c, stage1, env)
+        run([BOOTSTRAP, COMPILER, "lainir_compile_module", gen1_c, COMPILER])
+        compile_native(c_compiler, gen1_c, gen1, env)
 
-        run([stage1, "--module", stage2_c, COMPILER], env=env)
-        compile_native(c_compiler, stage2_c, stage2, env)
+        run([gen1, "--module", gen2_c, COMPILER], env=env)
+        compile_native(c_compiler, gen2_c, gen2, env)
 
-        run([stage2, "--module", stage3_c, COMPILER], env=env)
+        run([gen2, "--module", gen3_c, COMPILER], env=env)
 
-        if stage2_c.read_bytes() != stage3_c.read_bytes():
-            raise RuntimeError("stage2 and stage3 C output differ")
+        if gen2_c.read_bytes() != gen3_c.read_bytes():
+            raise RuntimeError("gen2 and gen3 C output differ")
 
-    print("PASS LAIN-IR stage1 -> stage2 -> stage3 C fixed point")
+    print("PASS LAIN-IR gen1 -> gen2 -> gen3 C fixed point")
     return 0
 
 
