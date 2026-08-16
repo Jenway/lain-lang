@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
     }
   }
   if (argc < input_index + 2) {
-    fprintf(stderr, "usage: l1i [--max-steps N] [--max-call-depth N] [--max-alloc-bytes N] <input.l1> <entry> [arg ...]\n");
+    fprintf(stderr, "usage: lainir-run [--max-steps N] [--max-call-depth N] [--max-alloc-bytes N] <input.l1> <entry> [arg ...]\n");
     return 1;
   }
 

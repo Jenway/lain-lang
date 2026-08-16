@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
     input_index++;
   }
   if (argc < input_index + 1 || argc > input_index + 2) {
-    fprintf(stderr, "usage: l1check [--strict] [--fold-eval] <input.l1> [entry]\n");
+    fprintf(stderr, "usage: lainir-print [--strict] [--fold-eval] <input.l1> [entry]\n");
     return 2;
   }
   if (argc == input_index + 2) entry = argv[input_index + 1];

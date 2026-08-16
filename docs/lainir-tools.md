@@ -15,7 +15,7 @@
 - `src/lainir/tools/lsp.l1`：Content-Length/CRLF framing、文档存储和协议派发。
 - `src/lainir/tools/lsp_tools.l1`：在 LAIN-IR 中接入 source/highlight，并序列化
   `semanticTokens/full`；formatting 使用同一套字节排版规则生成全文 TextEdit。
-- `bootstrap/zig-out/bin/l1ls`：只提供 LSP 的 stream/allocator 能力；同时把
+- `bootstrap/zig-out/bin/lainir-lsp`：只提供 LSP 的 stream/allocator 能力；同时把
   `bootstrap.allocate-pages` 映射到同一个 allocator，方便加载 source/highlight。
 
 ## 构建与检查
@@ -33,7 +33,7 @@ python scripts/bundle_lainir.py -o formatter_bundle.l1 \
   src/lainir/tools/source.l1 \
   src/lainir/tools/parser.l1 \
   src/lainir/tools/formatter.l1
-l1bootstrap formatter_bundle.l1 lainir_format out.l1 input.l1
+lainir-interpreter formatter_bundle.l1 lainir_format out.l1 input.l1
 ```
 
 高亮模块需要把三个 LAIN-IR 文件合并（合并脚本只处理声明去重，不承载逻辑）：
@@ -43,7 +43,7 @@ python scripts/bundle_lainir.py -o highlight_bundle.l1 \
   src/lainir/tools/source.l1 \
   src/lainir/tools/highlight.l1 \
   src/lainir/tools/highlight_cli.l1
-l1bootstrap highlight_bundle.l1 lainir_highlight highlights.json input.l1
+lainir-interpreter highlight_bundle.l1 lainir_highlight highlights.json input.l1
 ```
 
 LSP 通过标准输入输出运行：
@@ -55,7 +55,7 @@ python scripts/bundle_lainir.py -o lsp_bundle.l1 \
   src/lainir/tools/parser.l1 \
   src/lainir/tools/lsp.l1 \
   src/lainir/tools/lsp_tools.l1
-l1ls lsp_bundle.l1
+lainir-lsp lsp_bundle.l1
 ```
 
 输入和输出都是标准 JSON-RPC framing：`Content-Length: N\r\n\r\n` 后跟 N 个字节。

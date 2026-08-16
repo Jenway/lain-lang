@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 L1CHECK = ROOT / "bootstrap" / "zig-out" / "bin" / (
-    "l1check.exe" if os.name == "nt" else "l1check"
+    "lainir-print.exe" if os.name == "nt" else "lainir-print"
 )
 OUTPUT = ROOT / "build" / "lainir" / "lain_compiler.l1"
 MODULES = (
