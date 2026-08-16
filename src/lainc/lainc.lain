@@ -1,20 +1,25 @@
-// src/lainc/lainc.lain — M0/M1: Lain-written lainc.
+// src/lainc/lainc.lain — M1: Lain-written lainc with calls and arithmetic.
 //
-// Compiles the smallest Lain subset into LAIN-IR text:
-//   let main = std::func() -> i32 { return N; };
-// -> #proc main() -> #bits<32> { #return N }
+// Compiles this Lain subset into LAIN-IR text:
+//   let add = std::func(x: i32, y: i32) -> i32 { return x + y; };
+//   let main = std::func() -> i32 { return add(40, 2); };
+// ->
+//   #proc f0_add(#bits<32> %x, #bits<32> %y) -> #bits<32> {
+//     #return #add(%x, %y)
+//   }
+//   #proc main() -> #bits<32> {
+//     #return #call f0_add(40, 2)
+//   }
 //
-// Frozen-lainc workarounds observed during M0:
-//   - a non-root function whose first statement is a call has its body
-//     truncated (lead every function with a `let`)
-//   - a call as the final statement of an if branch becomes a `return`
-//     (follow such calls with a `let`)
-//   - addr+usize arithmetic needs the #lea path (fixed in frozen lainc)
-//   - string literals are passed as (addr, length); lengths must be exact
+// Frozen-lainc workarounds:
+//   - lead every function with a `let` (call-first truncates the body)
+//   - follow calls inside if-branches with a `let`
+//   - string-literal lengths must be exact
+//   - no top-level std::struct bindings (record + later functions => 3005)
 //
-// Entry points:
-//   emit() -> String : compile the hard-coded source, return the LAIN-IR
-//   main() -> i32    : compile and verify the emitted text inside Lain
+// Entries:
+//   emit() -> String : compile the hard-coded add+main source
+//   main() -> i32    : compile and verify the emitted text exactly
 
 let string_mod: Module = import("std::core::string");
 let bounds: Module = import("std::bounds");
@@ -23,6 +28,70 @@ let String: type = string_mod.string.String(
     arena.arena_min.Policy,
     bounds.bounds.Unchecked,
 );
+
+// ---- byte helpers ----
+let is_space = std::func(byte: i32) -> bool {
+    if byte == 32 { return true; }
+    if byte == 10 { return true; }
+    return false;
+};
+
+let is_digit = std::func(byte: i32) -> bool {
+    return byte >= 48 && byte <= 57;
+};
+
+let is_ident_start = std::func(byte: i32) -> bool {
+    if byte >= 97 && byte <= 122 { return true; }
+    if byte >= 65 && byte <= 90 { return true; }
+    return false;
+};
+
+let is_ident_char = std::func(byte: i32) -> bool {
+    if is_ident_start(byte) { return true; }
+    return is_digit(byte);
+};
+
+// ---- scanning helpers ----
+let skip_space = std::func(source: &String, index: usize) -> usize {
+    let current: usize = index;
+    while current < String.length(source) {
+        let byte: i32 = String.byte_at(source, current);
+        if is_space(byte) == false { return current; }
+        current = current + 1;
+        let marker: i32 = 0;
+    }
+    return current;
+};
+
+// Parse an identifier starting at index; returns the index just after it.
+let parse_ident = std::func(source: &String, index: usize) -> usize {
+    let current: usize = index;
+    while current < String.length(source) {
+        let byte: i32 = String.byte_at(source, current);
+        if is_ident_char(byte) == false { break; }
+        current = current + 1;
+        let marker: i32 = 0;
+    }
+    return current;
+};
+
+// Append source bytes [start, start+length) to output.
+let append_span = std::func(
+    source: &String,
+    start: usize,
+    length: usize,
+    output: &mut String,
+) -> unit {
+    let index: usize = 0;
+    while index < length {
+        String.append_byte(
+            output,
+            String.byte_at(source, start + index),
+        );
+        index = index + 1;
+        let marker: i32 = 0;
+    }
+};
 
 // Append a literal byte string to a String.
 let append_literal = std::func(
@@ -37,79 +106,224 @@ let append_literal = std::func(
             std::load_bits(8, literal + index),
         );
         index = index + 1;
+        let marker: i32 = 0;
     }
 };
 
-// Does the source contain the word "return" starting at index?
-let is_return_at = std::func(
+// Does the source span [start, start+length) equal the literal text?
+let span_equals = std::func(
     source: &String,
-    index: usize,
+    start: usize,
+    length: usize,
+    literal: addr,
+    literal_length: usize,
 ) -> bool {
-    if String.byte_at(source, index) != 114 { return false; }
-    if String.byte_at(source, index + 1) != 101 { return false; }
-    if String.byte_at(source, index + 2) != 116 { return false; }
-    if String.byte_at(source, index + 3) != 117 { return false; }
-    if String.byte_at(source, index + 4) != 114 { return false; }
-    if String.byte_at(source, index + 5) != 110 { return false; }
+    if length != literal_length { return false; }
+    let index: usize = 0;
+    while index < length {
+        let byte: i32 = String.byte_at(source, start + index);
+        if byte != std::load_bits(8, literal + index) { return false; }
+        index = index + 1;
+        let marker: i32 = 0;
+    }
     return true;
 };
 
-// Scan the source for the decimal digits of the return value and emit
-// a minimal LAIN-IR procedure into output.  Returns the digit count.
+// Emit one operand covering [start, end): number (verbatim), param
+// (%name), or call (#call f0_NAME(args)).
+let emit_operand = std::func(
+    source: &String,
+    start: usize,
+    end: usize,
+    output: &mut String,
+) -> unit {
+    let first: i32 = String.byte_at(source, start);
+    if is_digit(first) {
+        append_span(source, start, end - start, output);
+        return;
+    }
+    let name_end: usize = parse_ident(source, start);
+    let after: usize = skip_space(source, name_end);
+    if String.byte_at(source, after) == 40 {
+        let args_start: usize = after + 1;
+        let args_end: usize = args_start;
+        while String.byte_at(source, args_end) != 41 {
+            args_end = args_end + 1;
+            let marker: i32 = 0;
+        }
+        append_literal(output, "#call f0_", 8);
+        append_span(source, start, name_end - start, output);
+        append_literal(output, "(", 1);
+        append_span(source, args_start, args_end - args_start, output);
+        append_literal(output, ")", 1);
+        return;
+    }
+    append_literal(output, "%", 1);
+    append_span(source, start, name_end - start, output);
+};
+
+// Emit one function body starting after the opening brace: `  #return EXPR\n`.
+let emit_body = std::func(
+    source: &String,
+    output: &mut String,
+    body_start: usize,
+) -> unit {
+    let return_at: usize = skip_space(source, body_start);
+    let expr_start: usize = skip_space(source, return_at + 6);
+    let semi: usize = expr_start;
+    while String.byte_at(source, semi) != 59 {
+        semi = semi + 1;
+        let marker: i32 = 0;
+    }
+    let plus: usize = expr_start;
+    let plus_found: i32 = 0;
+    while plus < semi {
+        if String.byte_at(source, plus) == 43 {
+            plus_found = 1;
+            let marker: i32 = 0;
+            break;
+        }
+        plus = plus + 1;
+        let marker: i32 = 0;
+    }
+    append_literal(output, "  #return ", 10);
+    if plus_found == 1 {
+        append_literal(output, "#add(", 5);
+        emit_operand(source, expr_start, plus, output);
+        append_literal(output, ", ", 2);
+        let right_start: usize = skip_space(source, plus + 1);
+        emit_operand(source, right_start, semi, output);
+        append_literal(output, ")", 1);
+    } else {
+        emit_operand(source, expr_start, semi, output);
+    }
+    append_literal(output, "\n", 1);
+};
+
+// Emit a parameter list [start, end): `x: i32, y: i32` ->
+// `#bits<32> %x, #bits<32> %y`.
+let emit_params = std::func(
+    source: &String,
+    output: &mut String,
+    params_start: usize,
+    params_end: usize,
+) -> unit {
+    let current: usize = params_start;
+    let first: i32 = 1;
+    while current < params_end {
+        current = skip_space(source, current);
+        let name_end: usize = parse_ident(source, current);
+        if first == 1 {
+            first = 0;
+        } else {
+            append_literal(output, ", ", 2);
+        }
+        append_literal(output, "#bits<32> %", 11);
+        append_span(source, current, name_end - current, output);
+        let scanning: i32 = 1;
+        while scanning == 1 && current < params_end {
+            let byte: i32 = String.byte_at(source, current);
+            if byte == 44 {
+                current = current + 1;
+                scanning = 0;
+                let marker: i32 = 0;
+            } else {
+                current = current + 1;
+                let marker: i32 = 0;
+            }
+        }
+        let marker2: i32 = 0;
+    }
+};
+
+// Emit one top-level function declaration.  Returns the index after it.
+let emit_function = std::func(
+    source: &String,
+    output: &mut String,
+    index: usize,
+) -> usize {
+    let current: usize = index + 3;
+    current = skip_space(source, current);
+    let name_end: usize = parse_ident(source, current);
+    let params_start: usize = current;
+    while String.byte_at(source, params_start) != 40 {
+        params_start = params_start + 1;
+        let marker: i32 = 0;
+    }
+    let params_end: usize = params_start + 1;
+    while String.byte_at(source, params_end) != 41 {
+        params_end = params_end + 1;
+        let marker: i32 = 0;
+    }
+    let body_open: usize = params_end + 1;
+    while String.byte_at(source, body_open) != 123 {
+        body_open = body_open + 1;
+        let marker: i32 = 0;
+    }
+    append_literal(output, "#proc ", 6);
+    if span_equals(source, current, name_end - current, "main", 4) {
+        append_span(source, current, name_end - current, output);
+    } else {
+        append_literal(output, "f0_", 3);
+        append_span(source, current, name_end - current, output);
+    }
+    append_literal(output, "(", 1);
+    emit_params(source, output, params_start + 1, params_end);
+    append_literal(output, ") -> #bits<32> {\n", 18);
+    emit_body(source, output, body_open + 1);
+    append_literal(output, "}\n", 2);
+    current = body_open + 1;
+    while String.byte_at(source, current) != 125 {
+        current = current + 1;
+        let marker: i32 = 0;
+    }
+    // Skip the closing '}' and the terminating ';' so the driver loop
+    // resumes at the next declaration, not in the middle of this one.
+    current = current + 1;
+    while String.byte_at(source, current) != 59 {
+        current = current + 1;
+        let marker: i32 = 0;
+    }
+    return current + 1;
+};
+
+// Compile the source program into LAIN-IR text.  Returns 0 on success.
 let compile = std::func(
     source: &String,
     output: &mut String,
 ) -> i32 {
-    let digits: i32 = 0;
-    append_literal(output, "#proc main() -> #bits<32> {\n  #return ", 38);
     let index: usize = 0;
     let length: usize = String.length(source);
-    let capturing: i32 = 0;
     while index < length {
-        let byte: i32 = String.byte_at(source, index);
-        if capturing == 0 {
-            if is_return_at(source, index) {
-                capturing = 1;
-                let marker: i32 = 0;
-            }
-        } else {
-            if byte >= 48 && byte <= 57 {
-                String.append_byte(output, byte);
-                digits = digits + 1;
-                let marker: i32 = 0;
-            }
-        }
-        index = index + 1;
-        let marker2: i32 = 0;
+        index = skip_space(source, index);
+        if index >= length { break; }
+        index = emit_function(source, output, index);
+        let marker: i32 = 0;
     }
-    append_literal(output, "\n}\n", 3);
-    return digits;
+    return 0;
 };
 
-// Compile the hard-coded return_42 source and return the emitted LAIN-IR
-// text.  This entry is exercised by `lainir-seed run src_lainc.l1 emit`,
-// which prints the String result.
+// Compile the hard-coded add+main source and return the emitted LAIN-IR.
 let emit = std::func() -> String {
     let source: String = String.new();
     append_literal(
         &mut source,
-        "let main = std::func() -> i32 { return 42; };",
-        45,
+        "let add = std::func(x: i32, y: i32) -> i32 {\n    return x + y;\n};\nlet main = std::func() -> i32 {\n    return add(40, 2);\n};",
+        123,
     );
     let output: String = String.new();
-    let digits: i32 = compile(&source, &mut output);
+    let status: i32 = compile(&source, &mut output);
     let marker: i32 = 0;
     return output;
 };
 
-// Compile and verify the emitted text inside the Lain layer.
-// Return codes: 1 = emitted text matches expectations exactly.
+// Compile and verify the emitted text exactly inside the Lain layer.
 let main = std::func() -> i32 {
     let emitted: String = emit();
     if String.equal_literal(
         &emitted,
-        "#proc main() -> #bits<32> {\n  #return 42\n}\n",
-        43,
+        "#proc f0_add(#bits<32> %x, #bits<32> %y) -> #bits<32> {\n  #return #add(%x, %y)\n}\n#proc main() -> #bits<32> {\n  #return #call f0_add(40, 2)\n}\n",
+        141,
     ) {
         return 1;
     }
