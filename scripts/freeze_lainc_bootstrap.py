@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build" / "lainir" / "lain_compiler.l1"
-FROZEN = ROOT / "seed" / "frozen" / "lainc.l1"
+FROZEN = ROOT / "src" / "lainir" / "lainc.l1"
 BUILD_SCRIPT = ROOT / "scripts" / "build_lain_compiler.py"
 
 
