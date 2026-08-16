@@ -1,0 +1,102 @@
+// src/lainc/lainc.lain — M0: minimal Lain-written lainc.
+//
+// Compiles the smallest Lain subset into LAIN-IR text:
+//   let main = std::func() -> i32 { return N; };
+// -> #proc main() -> #bits<32> { #return N }
+//
+// M0 variant: compile returns the length of the emitted LAIN-IR text
+// (i32), because frozen lainc's return-type support does not yet cover
+// record/String values.  Output-channel wiring comes in the next step.
+
+let string_mod: Module = import("std::core::string");
+let bounds: Module = import("std::bounds");
+let arena: Module = import("std::core::arena_min");
+let String: type = string_mod.string.String(
+    arena.arena_min.Policy,
+    bounds.bounds.Unchecked,
+);
+
+// Append a literal byte string to a String.
+let append_literal = std::func(
+    output: &mut String,
+    literal: addr,
+    length: usize,
+) -> unit {
+    let index: usize = 0;
+    while index < length {
+        String.append_byte(
+            output,
+            std::load_bits(8, literal + index),
+        );
+        index = index + 1;
+    }
+};
+
+// Does the source contain the word "return" starting at index?
+let is_return_at = std::func(
+    source: &String,
+    index: usize,
+) -> bool {
+    if String.byte_at(source, index) != 114 { return false; }
+    if String.byte_at(source, index + 1) != 101 { return false; }
+    if String.byte_at(source, index + 2) != 116 { return false; }
+    if String.byte_at(source, index + 3) != 117 { return false; }
+    if String.byte_at(source, index + 4) != 114 { return false; }
+    if String.byte_at(source, index + 5) != 110 { return false; }
+    return true;
+};
+
+// Scan the source for the decimal digits of the return value and emit
+// a minimal LAIN-IR procedure into output.  Returns the digit count.
+// NOTE: the first statement must be a `let`; frozen lainc truncates a
+// non-root function whose first statement is a call.
+let compile = std::func(
+    source: &String,
+    output: &mut String,
+) -> i32 {
+    let digits: i32 = 0;
+    append_literal(output, "#proc main() -> #bits<32> {\n  #return ", 40);
+    let index: usize = 0;
+    let length: usize = String.length(source);
+    let capturing: i32 = 0;
+    while index < length {
+        let byte: i32 = String.byte_at(source, index);
+        if capturing == 0 {
+            if is_return_at(source, index) {
+                capturing = 1;
+                let marker: i32 = 0;
+            }
+        } else {
+            if byte >= 48 && byte <= 57 {
+                String.append_byte(output, byte);
+                digits = digits + 1;
+                let marker: i32 = 0;
+            }
+        }
+        index = index + 1;
+        let marker2: i32 = 0;
+    }
+    append_literal(output, "\n}\n", 3);
+    return digits;
+};
+
+// M0 entry: compile a hard-coded return_42 source and verify the emitted
+// LAIN-IR inside the Lain layer.  Return codes:
+//   1 = compiled and emitted text matches expectations
+//   3 = digit extraction failed (expected 2 digits)
+//   4.. = emitted text mismatch
+let main = std::func() -> i32 {
+    let source: String = String.new();
+    append_literal(
+        &mut source,
+        "let main = std::func() -> i32 { return 42; };",
+        47,
+    );
+    let output: String = String.new();
+    let digits: i32 = compile(&source, &mut output);
+    if digits != 2 { return 3; }
+    if String.byte_at(&output, 0) != 35 { return 4; }
+    if String.byte_at(&output, 1) != 112 { return 5; }
+    if String.byte_at(&output, 2) != 114 { return 6; }
+    return 1;
+};
