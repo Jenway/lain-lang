@@ -135,19 +135,38 @@ let sb_from_source = std::func() -> addr {
 //   and a `|` separator.  Types table format: `name:TypeName|...`.
 
 // Parse a decimal number in [start, end) of buf.
-let meta_parse_decimal = std::func(buf: addr, start: usize, end: usize) -> i32 {
-    let value: i32 = 0;
+let meta_parse_decimal = std::func(buf: addr, start: usize, end: usize) -> usize {
+    let value: usize = 0;
     let index: usize = start;
     while index < end {
         let byte: i32 = sb_byte_at(buf, index);
         if is_digit(byte) {
-            value = value * 10 + byte - 48;
+            let digit: usize = byte - 48;
+            value = value * 10;
+            value = value + digit;
             let marker: i32 = 0;
         }
         index = index + 1;
         let marker: i32 = 0;
     }
     return value;
+};
+
+// One decimal digit of v into tmp (via the digits lookup table); returns
+// v / 10.  Factored out because the frozen front-end drops statements that
+// directly follow an inner while loop inside an outer loop body.
+let meta_append_digit = std::func(tmp: addr, digits: addr, v: usize) -> usize {
+    let n: usize = 0;
+    let r: usize = v;
+    let ten: usize = 10;
+    let one: usize = 1;
+    while r >= ten {
+        r = r - ten;
+        n = n + one;
+        let marker: i32 = 0;
+    }
+    sb_append_span(tmp, digits, r, 1);
+    return n;
 };
 
 // Append a decimal number to buf.
@@ -160,18 +179,8 @@ let meta_append_decimal = std::func(buf: addr, value: usize) -> unit {
         let digits: addr = sb_new();
         sb_append_literal(digits, "0123456789", 10);
         let v: usize = value;
-        let ten: usize = 10;
-        let one: usize = 1;
         while v > 0 {
-            let n: usize = 0;
-            let r: usize = v;
-            while r >= ten {
-                r = r - ten;
-                n = n + one;
-                let marker: i32 = 0;
-            }
-            sb_append_span(tmp, digits, r, 1);
-            v = n;
+            v = meta_append_digit(tmp, digits, v);
             let marker: i32 = 0;
         }
         let index: usize = sb_len(tmp);
@@ -213,19 +222,23 @@ let meta_seg_colon = std::func(buf: addr, seg_end: usize, index: usize) -> usize
 let meta_table_find = std::func(
     buf: addr,
     buf_len: usize,
+    source: addr,
     name_start: usize,
     name_end: usize,
 ) -> usize {
     let index: usize = 0;
     let found: i32 = 0;
-    while found == 0 && index < buf_len {
+    while found == 0 {
+        if index >= buf_len { break; }
         let seg_end: usize = meta_seg_end(buf, buf_len, index);
         let colon: usize = meta_seg_colon(buf, seg_end, index);
-        if colon - index == name_end - name_start {
+        let seg_len: usize = name_end - name_start;
+        let clen: usize = colon - index;
+        if clen == seg_len {
             let same: i32 = 1;
             let i: usize = 0;
-            while i < name_end - name_start {
-                if sb_byte_at(buf, index + i) != sb_byte_at(buf, name_start + i) {
+            while i < seg_len {
+                if sb_byte_at(buf, index + i) != sb_byte_at(source, name_start + i) {
                     same = 0;
                     let marker: i32 = 0;
                     break;
@@ -263,23 +276,37 @@ let meta_field_num_end = std::func(buf: addr, seg_end: usize, name_end: usize) -
     return num_end;
 };
 
+let meta_field_w_end = std::func(buf: addr, seg_end: usize, num_end: usize) -> usize {
+    let w_end: usize = num_end + 1;
+    while w_end < seg_end {
+        if sb_byte_at(buf, w_end) == 35 { break; }
+        w_end = w_end + 1;
+        let marker: i32 = 0;
+    }
+    return w_end;
+};
+
 let meta_field_offset = std::func(
     buf: addr,
     rec: usize,
     seg_end: usize,
+    source: addr,
     fname_start: usize,
     fname_end: usize,
-) -> i32 {
+) -> usize {
     let index: usize = rec;
     let found: i32 = 0;
-    while found == 0 && index < seg_end {
+    while found == 0 {
+        if index >= seg_end { break; }
         let name_end: usize = meta_field_name_end(buf, seg_end, index);
         let num_end: usize = meta_field_num_end(buf, seg_end, name_end);
-        if name_end - index == fname_end - fname_start {
+        let flen: usize = fname_end - fname_start;
+        let nlen: usize = name_end - index;
+        if nlen == flen {
             let same: i32 = 1;
             let i: usize = 0;
-            while i < fname_end - fname_start {
-                if sb_byte_at(buf, index + i) != sb_byte_at(buf, fname_start + i) {
+            while i < flen {
+                if sb_byte_at(buf, index + i) != sb_byte_at(source, fname_start + i) {
                     same = 0;
                     let marker: i32 = 0;
                     break;
@@ -291,18 +318,59 @@ let meta_field_offset = std::func(
                 return meta_parse_decimal(buf, name_end + 1, num_end);
             }
         }
-        index = num_end + 1;
+        index = meta_field_w_end(buf, seg_end, num_end) + 1;
         let marker: i32 = 0;
     }
     return 0 - 1;
 };
 
-// Find the total size in the layout segment (after `=`), or -1.
+// Find the byte width of field `fname` in the layout segment, or max-1.
+let meta_field_width = std::func(
+    buf: addr,
+    rec: usize,
+    seg_end: usize,
+    source: addr,
+    fname_start: usize,
+    fname_end: usize,
+) -> usize {
+    let index: usize = rec;
+    let found: i32 = 0;
+    while found == 0 {
+        if index >= seg_end { break; }
+        let name_end: usize = meta_field_name_end(buf, seg_end, index);
+        let num_end: usize = meta_field_num_end(buf, seg_end, name_end);
+        let flen: usize = fname_end - fname_start;
+        let nlen: usize = name_end - index;
+        if nlen == flen {
+            let same: i32 = 1;
+            let i: usize = 0;
+            while i < flen {
+                if sb_byte_at(buf, index + i) != sb_byte_at(source, fname_start + i) {
+                    same = 0;
+                    let marker: i32 = 0;
+                    break;
+                }
+                i = i + 1;
+                let marker: i32 = 0;
+            }
+            if same == 1 {
+                return meta_parse_decimal(
+                    buf, num_end + 1, meta_field_w_end(buf, seg_end, num_end)
+                );
+            }
+        }
+        index = meta_field_w_end(buf, seg_end, num_end) + 1;
+        let marker: i32 = 0;
+    }
+    return 0 - 1;
+};
+
+// Find the total size in the layout segment (after `=`), or max-1.
 let meta_record_size = std::func(
     buf: addr,
     rec: usize,
     seg_end: usize,
-) -> i32 {
+) -> usize {
     let eq: usize = rec;
     while eq < seg_end {
         if sb_byte_at(buf, eq) == 61 { break; }
@@ -1307,18 +1375,32 @@ let emit_stmt_let = std::func(
     let name_start: usize = skip_space(source, index + 3);
     let name_end: usize = parse_ident(source, name_start);
     let mark: usize = scan_let_mark(source, name_end, body_end);
-    sb_append_literal(output, "#let %", 6);
-    sb_append_span(output, source, name_start, name_end - name_start);
     let eq: usize = mark;
     if sb_byte_at(source, mark) == 58 {
         eq = scan_top_op(source, mark + 1, body_end, 61);
+        let marker: i32 = 0;
+    }
+    let semi: usize = scan_semi(source, eq + 1, body_end);
+    let rs: usize = trim_start(source, eq + 1, semi);
+    let rn: usize = parse_ident(source, rs);
+    let ra: usize = skip_space(source, rn);
+    if sb_byte_at(source, ra) == 123 {
+        let rlen: usize = sb_len(layout);
+        let rrec: usize = meta_table_find(layout, rlen, source, rs, rn);
+        if rrec < rlen {
+            emit_record_value(source, output, name_start, name_end, eq + 1, semi, layout);
+            return semi + 1;
+        }
+    }
+    sb_append_literal(output, "#let %", 6);
+    sb_append_span(output, source, name_start, name_end - name_start);
+    if sb_byte_at(source, mark) == 58 {
         sb_append_literal(output, ": ", 2);
         emit_type(source, mark + 1, eq, output);
         sb_append_literal(output, " = ", 3);
     } else {
         sb_append_literal(output, " = ", 3);
     }
-    let semi: usize = scan_semi(source, eq + 1, body_end);
     emit_expr(source, eq + 1, semi, output, layout);
     sb_append_literal(output, "\n", 1);
     return semi + 1;
@@ -1777,6 +1859,8 @@ let emit_record = std::func(
         sb_append_literal(layout, "#", 1);
         meta_append_decimal(layout, offset);
         sb_append_literal(layout, "#", 1);
+        meta_append_decimal(layout, width);
+        sb_append_literal(layout, "#", 1);
         offset = offset + width;
         current = type_end;
         current = skip_space(source, current);
@@ -1792,6 +1876,82 @@ let emit_record = std::func(
     meta_append_decimal(layout, offset);
     sb_append_literal(layout, "|", 1);
     return brace_end + 1;
+};
+
+// Emit a record constructor `Name { f: v, ... }` at [expr_start, expr_end)
+// into output as
+//   #let %var: addr = #alloca(<size>)
+//   #let %v<i>: #bits<W> = <value>
+//   #store %v<i>, #lea(base=%var, idx=0, scale=0, offset=<off>)
+// for every field; `var` is the binding being assigned.
+let emit_record_value = std::func(
+    source: addr,
+    output: addr,
+    var_name_start: usize,
+    var_name_end: usize,
+    expr_start: usize,
+    expr_end: usize,
+    layout: addr,
+) -> unit {
+    let name_start: usize = trim_start(source, expr_start, expr_end);
+    let name_end: usize = parse_ident(source, name_start);
+    let brace: usize = scan_brace(source, name_end, expr_end);
+    let brace_end: usize = match_brace(source, brace, expr_end);
+    let len: usize = sb_len(layout);
+    let rec: usize = meta_table_find(layout, len, source, name_start, name_end);
+    if rec >= len { return; }
+    let seg_end: usize = meta_seg_end(layout, len, rec);
+    let size: usize = meta_record_size(layout, rec, seg_end);
+    sb_append_literal(output, "#let %", 6);
+    sb_append_span(output, source, var_name_start, var_name_end - var_name_start);
+    sb_append_literal(output, ": addr = #alloca(", 17);
+    meta_append_decimal(output, size);
+    sb_append_literal(output, ")\n", 2);
+    let body: usize = brace + 1;
+    let current: usize = body;
+    let index: usize = 0;
+    while current < brace_end {
+        let fs: usize = skip_space(source, current);
+        if fs >= brace_end { break; }
+        let fname_end: usize = parse_ident(source, fs);
+        let fcolon: usize = scan_top_op(source, fs, brace_end, 58);
+        let vstart: usize = skip_space(source, fcolon + 1);
+        let vend: usize = meta_scan_type_end(source, brace_end, vstart);
+        let off: usize = meta_field_offset(layout, rec, seg_end, source, fs, fname_end);
+        let w: usize = meta_field_width(layout, rec, seg_end, source, fs, fname_end);
+        sb_append_literal(output, "#let %v", 7);
+        meta_append_decimal(output, index);
+        sb_append_literal(output, ": #bits<", 8);
+        if w == 1 {
+            sb_append_literal(output, "1", 1);
+        } else {
+            if w == 4 {
+                sb_append_literal(output, "32", 2);
+            } else {
+                sb_append_literal(output, "64", 2);
+            }
+        }
+        sb_append_literal(output, "> = ", 4);
+        emit_expr(source, vstart, vend, output, layout);
+        sb_append_literal(output, "\n", 1);
+        sb_append_literal(output, "#store %v", 9);
+        meta_append_decimal(output, index);
+        sb_append_literal(output, ", #lea(base=%", 13);
+        sb_append_span(output, source, var_name_start, var_name_end - var_name_start);
+        sb_append_literal(output, ", idx=0, scale=0, offset=", 25);
+        meta_append_decimal(output, off);
+        sb_append_literal(output, ")\n", 2);
+        current = vend;
+        current = skip_space(source, current);
+        if current < brace_end {
+            if sb_byte_at(source, current) == 44 {
+                current = current + 1;
+                let marker: i32 = 0;
+            }
+        }
+        index = index + 1;
+        let marker: i32 = 0;
+    }
 };
 
 // Compile the source program into LAIN-IR text.  Returns 0 on success.
