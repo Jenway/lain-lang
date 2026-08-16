@@ -1,33 +1,25 @@
-// src/lainc/lainc.lain — M1: Lain-written lainc with calls and arithmetic.
+// src/lainc/lainc.lain — M2: self-hosting lainc.
 //
-// Compiles this Lain subset into LAIN-IR text:
-//   let add = std::func(x: i32, y: i32) -> i32 { return x + y; };
-//   let main = std::func() -> i32 { return add(40, 2); };
-// ->
-//   #proc f0_add(#bits<32> %x, #bits<32> %y) -> #bits<32> {
-//     #return #add(%x, %y)
-//   }
-//   #proc main() -> #bits<32> {
-//     #return #call f0_add(40, 2)
-//   }
+// Self-contained: no std imports.  String buffers are managed through
+// bootstrap.allocate-pages plus byte load/store primitives, so the emitted
+// LAIN-IR for this file is self-contained and can compile itself
+// (gen2 == gen3 fixed point).
 //
-// Frozen-lainc workarounds:
-//   - lead every function with a `let` (call-first truncates the body)
-//   - follow calls inside if-branches with a `let`
-//   - string-literal lengths must be exact
-//   - no top-level std::struct bindings (record + later functions => 3005)
+// The compiler in this file lowers a Lain subset into LAIN-IR text:
+//   top-level `let NAME = std::func(...) -> T { stmts }` declarations
+//   (plus body-less external declarations after @foreign), with statements
+//   let / while / if / else / return / break / assignment / calls and
+//   expressions numbers, identifiers, calls, +, comparisons, &&, string
+//   literals, &x.  The emitted text uses deterministic labels (f0_NAME)
+//   and direct #call / #load / #store forms.
 //
 // Entries:
-//   emit() -> String : compile the hard-coded add+main source
-//   main() -> i32    : compile and verify the emitted text exactly
+//   emit() -> addr          : compile the hard-coded add+main source
+//   main() -> i32           : write emit()'s product to the artifact
+//   compiler_compile() -> i32 : compile host source 0, write the artifact
 
-let string_mod: Module = import("std::core::string");
-let bounds: Module = import("std::bounds");
-let arena: Module = import("std::core::arena_min");
-let String: type = string_mod.string.String(
-    arena.arena_min.Policy,
-    bounds.bounds.Unchecked,
-);
+@foreign(c, link_name = "bootstrap.allocate-pages")
+let allocate_pages = std::func(size: usize) -> addr;
 
 // Host capabilities for writing the compiled product to the artifact file.
 @foreign(c, link_name = "bootstrap.artifact-begin")
@@ -37,18 +29,104 @@ let artifact_write_byte = std::func(byte: i32) -> unit;
 @foreign(c, link_name = "bootstrap.artifact-finish")
 let artifact_finish = std::func() -> unit;
 
-// Write a String's bytes to the artifact stream.
-let write_string_to_artifact = std::func(
-    value: &String,
+// Host capabilities for reading the source program to compile.
+@foreign(c, link_name = "bootstrap.source-count")
+let source_count = std::func() -> usize;
+@foreign(c, link_name = "bootstrap.source-length")
+let source_length = std::func(index: usize) -> usize;
+@foreign(c, link_name = "bootstrap.source-data")
+let source_data = std::func(index: usize) -> addr;
+
+// ---- self-contained string buffers ----
+// Layout: [8-byte length][data bytes...].
+
+let sb_new = std::func() -> addr {
+    let buf: addr = allocate_pages(1048576);
+    std::store_bits(64, buf, 0);
+    let marker: i32 = 0;
+    return buf;
+};
+
+let sb_len = std::func(buf: addr) -> usize {
+    return std::load_bits(64, buf);
+};
+
+let sb_byte_at = std::func(buf: addr, index: usize) -> i32 {
+    return std::load_bits(8, buf + 8 + index);
+};
+
+// Byte load through an address parameter; the frozen frontend lowers
+// `addr + usize` to #lea only for parameters, so address arithmetic must
+// live inside a function whose base is a parameter.
+let sb_byte_at_addr = std::func(source: addr, index: usize) -> i32 {
+    return std::load_bits(8, source + index);
+};
+
+let sb_append = std::func(buf: addr, byte: i32) -> unit {
+    let len: usize = std::load_bits(64, buf);
+    std::store_bits(8, buf + 8 + len, byte);
+    std::store_bits(64, buf, len + 1);
+    let marker: i32 = 0;
+};
+
+let sb_append_literal = std::func(
+    buf: addr,
+    literal: addr,
+    length: usize,
 ) -> unit {
     let index: usize = 0;
-    let length: usize = String.length(value);
     while index < length {
-        let byte: i32 = String.byte_at(value, index);
-        artifact_write_byte(byte);
+        sb_append(buf, std::load_bits(8, literal + index));
         index = index + 1;
         let marker: i32 = 0;
     }
+};
+
+let sb_append_span = std::func(
+    buf: addr,
+    source: addr,
+    start: usize,
+    length: usize,
+) -> unit {
+    let index: usize = 0;
+    while index < length {
+        sb_append(buf, sb_byte_at(source, start + index));
+        index = index + 1;
+        let marker: i32 = 0;
+    }
+};
+
+let sb_span_equals = std::func(
+    source: addr,
+    start: usize,
+    length: usize,
+    literal: addr,
+    literal_length: usize,
+) -> bool {
+    if length != literal_length { return false; }
+    let index: usize = 0;
+    while index < length {
+        if sb_byte_at(source, start + index) != std::load_bits(8, literal + index) {
+            return false;
+        }
+        index = index + 1;
+        let marker: i32 = 0;
+    }
+    return true;
+};
+
+let sb_from_source = std::func() -> addr {
+    let length: usize = source_length(0);
+    let data: addr = source_data(0);
+    let buf: addr = sb_new();
+    let index: usize = 0;
+    while index < length {
+        sb_append(buf, sb_byte_at_addr(data, index));
+        index = index + 1;
+        let marker: i32 = 0;
+    }
+    let marker: i32 = 0;
+    return buf;
 };
 
 // ---- byte helpers ----
@@ -72,14 +150,16 @@ let is_ident_start = std::func(byte: i32) -> bool {
 
 let is_ident_char = std::func(byte: i32) -> bool {
     if is_ident_start(byte) { return true; }
-    return is_digit(byte);
+    if is_digit(byte) { return true; }
+    if byte == 95 { return true; }
+    return false;
 };
 
 // ---- scanning helpers ----
-let skip_space = std::func(source: &String, index: usize) -> usize {
+let skip_space = std::func(source: addr, index: usize) -> usize {
     let current: usize = index;
-    while current < String.length(source) {
-        let byte: i32 = String.byte_at(source, current);
+    while current < sb_len(source) {
+        let byte: i32 = sb_byte_at(source, current);
         if is_space(byte) == false { return current; }
         current = current + 1;
         let marker: i32 = 0;
@@ -87,11 +167,10 @@ let skip_space = std::func(source: &String, index: usize) -> usize {
     return current;
 };
 
-// Parse an identifier starting at index; returns the index just after it.
-let parse_ident = std::func(source: &String, index: usize) -> usize {
+let parse_ident = std::func(source: addr, index: usize) -> usize {
     let current: usize = index;
-    while current < String.length(source) {
-        let byte: i32 = String.byte_at(source, current);
+    while current < sb_len(source) {
+        let byte: i32 = sb_byte_at(source, current);
         if is_ident_char(byte) == false { break; }
         current = current + 1;
         let marker: i32 = 0;
@@ -99,136 +178,1087 @@ let parse_ident = std::func(source: &String, index: usize) -> usize {
     return current;
 };
 
-// Append source bytes [start, start+length) to output.
-let append_span = std::func(
-    source: &String,
-    start: usize,
-    length: usize,
-    output: &mut String,
-) -> unit {
-    let index: usize = 0;
-    while index < length {
-        String.append_byte(
-            output,
-            String.byte_at(source, start + index),
-        );
-        index = index + 1;
+// Skip a string literal starting at a quote; returns the index after it.
+let skip_string = std::func(source: addr, index: usize) -> usize {
+    let current: usize = index + 1;
+    while sb_byte_at(source, current) != 34 {
+        current = current + 1;
         let marker: i32 = 0;
     }
+    return current + 1;
 };
 
-// Append a literal byte string to a String.
-let append_literal = std::func(
-    output: &mut String,
-    literal: addr,
-    length: usize,
-) -> unit {
-    let index: usize = 0;
-    while index < length {
-        String.append_byte(
-            output,
-            std::load_bits(8, literal + index),
-        );
-        index = index + 1;
-        let marker: i32 = 0;
-    }
-};
-
-// Does the source span [start, start+length) equal the literal text?
-let span_equals = std::func(
-    source: &String,
-    start: usize,
-    length: usize,
-    literal: addr,
-    literal_length: usize,
-) -> bool {
-    if length != literal_length { return false; }
-    let index: usize = 0;
-    while index < length {
-        let byte: i32 = String.byte_at(source, start + index);
-        if byte != std::load_bits(8, literal + index) { return false; }
-        index = index + 1;
-        let marker: i32 = 0;
-    }
-    return true;
-};
-
-// Emit one operand covering [start, end): number (verbatim), param
-// (%name), or call (#call f0_NAME(args)).
-let emit_operand = std::func(
-    source: &String,
+// Find the first top-level occurrence of a single-char operator op in
+// [start, end), skipping string literals and parenthesised groups.
+// Returns end when absent.
+let scan_top_op = std::func(
+    source: addr,
     start: usize,
     end: usize,
-    output: &mut String,
+    op: i32,
+) -> usize {
+    let current: usize = start;
+    let depth: usize = 0;
+    while current < end {
+        let byte: i32 = sb_byte_at(source, current);
+        if byte == 34 {
+            current = skip_string(source, current);
+            let marker: i32 = 0;
+        } else {
+            if byte == 40 {
+                depth = depth + 1;
+                current = current + 1;
+                let marker: i32 = 0;
+            } else {
+                if byte == 41 {
+                    depth = depth - 1;
+                    current = current + 1;
+                    let marker: i32 = 0;
+                } else {
+                    if depth == 0 && byte == op {
+                        return current;
+                    }
+                    current = current + 1;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    return end;
+};
+
+// Find the first top-level comparison operator in [start, end); returns
+// end when absent.  == != < > <= >=
+let scan_cmp = std::func(source: addr, start: usize, end: usize) -> usize {
+    let current: usize = start;
+    let depth: usize = 0;
+    while current < end {
+        let byte: i32 = sb_byte_at(source, current);
+        if byte == 34 {
+            current = skip_string(source, current);
+            let marker: i32 = 0;
+        } else {
+            if byte == 40 {
+                depth = depth + 1;
+                current = current + 1;
+                let marker: i32 = 0;
+            } else {
+                if byte == 41 {
+                    depth = depth - 1;
+                    current = current + 1;
+                    let marker: i32 = 0;
+                } else {
+                    if depth == 0 {
+                        if byte == 61 { return current; }
+                        if byte == 33 { return current; }
+                        if byte == 60 { return current; }
+                        if byte == 62 { return current; }
+                    }
+                    current = current + 1;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    return end;
+};
+
+// Find the first top-level `&&` (two ampersands) in [start, end); returns
+// the position of the first ampersand, or end when absent.
+let scan_and = std::func(source: addr, start: usize, end: usize) -> usize {
+    let current: usize = start;
+    let depth: usize = 0;
+    while current < end {
+        let byte: i32 = sb_byte_at(source, current);
+        if byte == 34 {
+            current = skip_string(source, current);
+            let marker: i32 = 0;
+        } else {
+            if byte == 40 {
+                depth = depth + 1;
+                current = current + 1;
+                let marker: i32 = 0;
+            } else {
+                if byte == 41 {
+                    depth = depth - 1;
+                    current = current + 1;
+                    let marker: i32 = 0;
+                } else {
+                    if depth == 0 && byte == 38 {
+                        if sb_byte_at(source, current + 1) == 38 {
+                            return current;
+                        }
+                    }
+                    current = current + 1;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    return end;
+};
+
+// Trim [start, end) to the non-space core; returns the new start.
+let trim_start = std::func(source: addr, start: usize, end: usize) -> usize {
+    let current: usize = start;
+    while current < end {
+        if is_space(sb_byte_at(source, current)) == false { return current; }
+        current = current + 1;
+        let marker: i32 = 0;
+    }
+    return current;
+};
+
+// Trim trailing spaces; returns the new end.
+let trim_end = std::func(source: addr, start: usize, end: usize) -> usize {
+    let current: usize = end;
+    while current > start {
+        let byte: i32 = sb_byte_at(source, current - 1);
+        if is_space(byte) == false { return current; }
+        current = current - 1;
+        let marker: i32 = 0;
+    }
+    return current;
+};
+
+// ---- expression lowering ----
+
+// Lower an address expression [start, end) as #lea(base=.., idx=..).
+// Forms: BASE + IDX or BASE + NUM + IDX (over the address chain).
+let emit_addr_expr = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
 ) -> unit {
-    let first: i32 = String.byte_at(source, start);
-    if is_digit(first) {
-        append_span(source, start, end - start, output);
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
+    let base_end: usize = parse_ident(source, s);
+    let current: usize = skip_space(source, base_end);
+    if sb_byte_at(source, current) == 43 {
+        current = skip_space(source, current + 1);
+        let marker: i32 = 0;
+    }
+    let item_first: i32 = sb_byte_at(source, current);
+    let item1_end: usize = current;
+    let scanning: i32 = 1;
+    while scanning == 1 {
+        if item1_end < e {
+            if sb_byte_at(source, item1_end) == 43 {
+                scanning = 0;
+                let marker: i32 = 0;
+            } else {
+                item1_end = item1_end + 1;
+                let marker: i32 = 0;
+            }
+        } else {
+            scanning = 0;
+            let marker: i32 = 0;
+        }
+    }
+    let second_start: usize = skip_space(source, item1_end);
+    if sb_byte_at(source, second_start) == 43 {
+        second_start = skip_space(source, second_start + 1);
+        let marker: i32 = 0;
+    }
+    let second_end: usize = second_start;
+    let scanning2: i32 = 1;
+    while scanning2 == 1 {
+        if second_end < e {
+            if sb_byte_at(source, second_end) == 43 {
+                scanning2 = 0;
+                let marker: i32 = 0;
+            } else {
+                second_end = second_end + 1;
+                let marker: i32 = 0;
+            }
+        } else {
+            scanning2 = 0;
+            let marker: i32 = 0;
+        }
+    }
+    sb_append_literal(output, "#lea(base=%", 11);
+    sb_append_span(output, source, s, base_end - s);
+    sb_append_literal(output, ", idx=", 6);
+    if item1_end == current {
+        sb_append_literal(output, "0, scale=0, offset=0)", 21);
+    } else {
+        if is_digit(item_first) {
+            let off_end: usize = trim_end(source, current, item1_end);
+            sb_append_literal(output, "%", 1);
+            sb_append_span(output, source, second_start, second_end - second_start);
+            sb_append_literal(output, ", scale=1, offset=", 18);
+            sb_append_span(output, source, current, off_end - current);
+            sb_append_literal(output, ")", 1);
+        } else {
+            let off_end: usize = trim_end(source, current, item1_end);
+            sb_append_literal(output, "%", 1);
+            sb_append_span(output, source, current, off_end - current);
+            sb_append_literal(output, ", scale=1, offset=0)", 20);
+        }
+    }
+};
+
+// Emit one argument spanning from arg_start; returns the index after it.
+let emit_arg_one = std::func(
+    source: addr,
+    arg_start: usize,
+    args_end: usize,
+    output: addr,
+) -> usize {
+    let arg_end: usize = arg_start;
+    let depth: usize = 0;
+    let arg_done: i32 = 0;
+    while arg_done == 0 {
+        if arg_end < args_end {
+            let byte: i32 = sb_byte_at(source, arg_end);
+            if byte == 34 {
+                arg_end = skip_string(source, arg_end);
+                let marker: i32 = 0;
+            } else {
+                if byte == 40 {
+                    depth = depth + 1;
+                    arg_end = arg_end + 1;
+                    let marker: i32 = 0;
+                } else {
+                    if byte == 41 {
+                        depth = depth - 1;
+                        arg_end = arg_end + 1;
+                        let marker: i32 = 0;
+                    } else {
+                        if depth == 0 && byte == 44 {
+                            arg_done = 1;
+                            let marker: i32 = 0;
+                        } else {
+                            arg_end = arg_end + 1;
+                            let marker: i32 = 0;
+                        }
+                    }
+                }
+            }
+        } else {
+            arg_done = 1;
+            let marker: i32 = 0;
+        }
+    }
+    emit_expr(source, arg_start, arg_end, output);
+    return arg_end;
+};
+
+// Emit the argument list (args_start, args_end) with each argument lowered.
+let emit_call_args = std::func(
+    source: addr,
+    args_start: usize,
+    args_end: usize,
+    output: addr,
+) -> unit {
+    let current: usize = args_start;
+    let first: i32 = 1;
+    while current < args_end {
+        let arg_start: usize = skip_space(source, current);
+        if arg_start >= args_end { break; }
+        if first == 1 {
+            first = 0;
+        } else {
+            sb_append_literal(output, ", ", 2);
+        }
+        current = emit_arg_one(source, arg_start, args_end, output);
+        current = skip_space(source, current);
+        if current < args_end {
+            if sb_byte_at(source, current) == 44 {
+                current = current + 1;
+                let marker: i32 = 0;
+            }
+        }
+        let marker: i32 = 0;
+    }
+};
+
+// Emit a call NAME(args) where name spans [name_start, name_end).
+let emit_call_named = std::func(
+    source: addr,
+    name_start: usize,
+    name_end: usize,
+    args_start: usize,
+    args_end: usize,
+    output: addr,
+) -> unit {
+    let marker: i32 = 0;
+    sb_append_literal(output, "#call f0_", 9);
+    sb_append_span(output, source, name_start, name_end - name_start);
+    sb_append_literal(output, "(", 1);
+    emit_call_args(source, args_start, args_end, output);
+    sb_append_literal(output, ")", 1);
+};
+
+// Emit std::load_bits / std::store_bits; returns true when handled.
+let emit_std_intrinsic = std::func(
+    source: addr,
+    name_start: usize,
+    name_end: usize,
+    expr_end: usize,
+    output: addr,
+) -> bool {
+    let after: usize = skip_space(source, name_end);
+    if sb_byte_at(source, after) != 58 { return 0; }
+    let member: usize = skip_space(source, after + 2);
+    let member_end: usize = parse_ident(source, member);
+    if sb_byte_at(source, member_end) != 40 { return 0; }
+    let args_start: usize = member_end + 1;
+    let args_end: usize = args_start;
+    let depth: usize = 0;
+    while args_end < expr_end {
+        let byte: i32 = sb_byte_at(source, args_end);
+        if byte == 34 {
+            args_end = skip_string(source, args_end);
+            let marker: i32 = 0;
+        } else {
+            if byte == 40 {
+                depth = depth + 1;
+                args_end = args_end + 1;
+                let marker: i32 = 0;
+            } else {
+                if byte == 41 {
+                    if depth == 0 { break; }
+                    depth = depth - 1;
+                    args_end = args_end + 1;
+                    let marker: i32 = 0;
+                } else {
+                    args_end = args_end + 1;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    if sb_span_equals(source, member, member_end - member, "load_bits", 9) {
+        let width_start: usize = skip_space(source, args_start);
+        let width_end: usize = width_start;
+        let width_done: i32 = 0;
+        while width_done == 0 {
+            if width_end < args_end {
+                if sb_byte_at(source, width_end) == 44 {
+                    width_done = 1;
+                    let marker: i32 = 0;
+                } else {
+                    width_end = width_end + 1;
+                    let marker: i32 = 0;
+                }
+            } else {
+                width_done = 1;
+                let marker: i32 = 0;
+            }
+        }
+        let addr_start: usize = skip_space(source, width_end + 1);
+        let addr_end: usize = trim_end(source, addr_start, args_end);
+        if sb_span_equals(source, width_start, width_end - width_start, "8", 1) {
+            sb_append_literal(output, "#zext[#bits<32>](", 17);
+        }
+        sb_append_literal(output, "#load[#bits<", 12);
+        sb_append_span(output, source, width_start, width_end - width_start);
+        sb_append_literal(output, ">", 1);
+        sb_append_literal(output, "]", 1);
+        sb_append_literal(output, "(", 1);
+        emit_addr_expr(source, addr_start, addr_end, output);
+        sb_append_literal(output, ")", 1);
+        if sb_span_equals(source, width_start, width_end - width_start, "8", 1) {
+            sb_append_literal(output, ")", 1);
+        }
+        return 1;
+    }
+    if sb_span_equals(source, member, member_end - member, "store_bits", 10) {
+        let width_start: usize = skip_space(source, args_start);
+        let width_end: usize = width_start;
+        let width_done: i32 = 0;
+        while width_done == 0 {
+            if width_end < args_end {
+                if sb_byte_at(source, width_end) == 44 {
+                    width_done = 1;
+                    let marker: i32 = 0;
+                } else {
+                    width_end = width_end + 1;
+                    let marker: i32 = 0;
+                }
+            } else {
+                width_done = 1;
+                let marker: i32 = 0;
+            }
+        }
+        let addr_start: usize = skip_space(source, width_end + 1);
+        let addr_mid: usize = addr_start;
+        let depth2: usize = 0;
+        let addr_done: i32 = 0;
+        while addr_done == 0 {
+            if addr_mid < args_end {
+                let b: i32 = sb_byte_at(source, addr_mid);
+                if b == 34 {
+                    addr_mid = skip_string(source, addr_mid);
+                    let marker: i32 = 0;
+                } else {
+                    if b == 40 {
+                        depth2 = depth2 + 1;
+                        addr_mid = addr_mid + 1;
+                        let marker: i32 = 0;
+                    } else {
+                        if b == 41 {
+                            depth2 = depth2 - 1;
+                            addr_mid = addr_mid + 1;
+                            let marker: i32 = 0;
+                        } else {
+                            if depth2 == 0 && b == 44 {
+                                addr_done = 1;
+                                let marker: i32 = 0;
+                            } else {
+                                addr_mid = addr_mid + 1;
+                                let marker: i32 = 0;
+                            }
+                        }
+                    }
+                }
+            } else {
+                addr_done = 1;
+                let marker: i32 = 0;
+            }
+        }
+        let value_start: usize = skip_space(source, addr_mid + 1);
+        let value_end: usize = trim_end(source, value_start, args_end);
+        sb_append_literal(output, "#store ", 7);
+        emit_expr(source, value_start, value_end, output);
+        sb_append_literal(output, ", ", 2);
+        emit_addr_expr(source, addr_start, addr_mid, output);
+        return 1;
+    }
+    return 0;
+};
+
+// Emit a single operand [start, end): number, string literal, identifier,
+// &x, or call.
+let emit_operand2 = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
+    let first: i32 = sb_byte_at(source, s);
+    if first == 34 {
+        sb_append_span(output, source, s, e - s);
         return;
     }
-    let name_end: usize = parse_ident(source, start);
+    if first == 38 {
+        let inner: usize = skip_space(source, s + 1);
+        sb_append_literal(output, "%", 1);
+        sb_append_span(output, source, inner, parse_ident(source, inner) - inner);
+        return;
+    }
+    if is_digit(first) {
+        sb_append_span(output, source, s, e - s);
+        return;
+    }
+    let name_end: usize = parse_ident(source, s);
+    if sb_span_equals(source, s, name_end - s, "std", 3) {
+        if emit_std_intrinsic(source, s, name_end, e, output) == 1 {
+            return;
+        }
+    }
+    if sb_span_equals(source, s, name_end - s, "true", 4) {
+        sb_append_literal(output, "1", 1);
+        return;
+    }
+    if sb_span_equals(source, s, name_end - s, "false", 5) {
+        sb_append_literal(output, "0", 1);
+        return;
+    }
     let after: usize = skip_space(source, name_end);
-    if String.byte_at(source, after) == 40 {
+    if sb_byte_at(source, after) == 40 {
         let args_start: usize = after + 1;
         let args_end: usize = args_start;
-        while String.byte_at(source, args_end) != 41 {
-            args_end = args_end + 1;
-            let marker: i32 = 0;
+        let depth: usize = 0;
+        while args_end < e {
+            let byte: i32 = sb_byte_at(source, args_end);
+            if byte == 34 {
+                args_end = skip_string(source, args_end);
+                let marker: i32 = 0;
+            } else {
+                if byte == 40 {
+                    depth = depth + 1;
+                    args_end = args_end + 1;
+                    let marker: i32 = 0;
+                } else {
+                    if byte == 41 {
+                        if depth == 0 { break; }
+                        depth = depth - 1;
+                        args_end = args_end + 1;
+                        let marker: i32 = 0;
+                    } else {
+                        args_end = args_end + 1;
+                        let marker: i32 = 0;
+                    }
+                }
+            }
         }
-        append_literal(output, "#call f0_", 9);
-        append_span(source, start, name_end - start, output);
-        append_literal(output, "(", 1);
-        append_span(source, args_start, args_end - args_start, output);
-        append_literal(output, ")", 1);
+        emit_call_named(source, s, name_end, args_start, args_end, output);
         return;
     }
-    append_literal(output, "%", 1);
-    append_span(source, start, name_end - start, output);
+    sb_append_literal(output, "%", 1);
+    sb_append_span(output, source, s, name_end - s);
 };
 
-// Emit one function body starting after the opening brace: `  #return EXPR\n`.
-let emit_body = std::func(
-    source: &String,
-    output: &mut String,
-    body_start: usize,
+// Lower an addition/subtraction chain as #add(L, R) / #sub(L, R).
+let emit_add_expr = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
 ) -> unit {
-    let return_at: usize = skip_space(source, body_start);
-    let expr_start: usize = skip_space(source, return_at + 6);
-    let semi: usize = expr_start;
-    while String.byte_at(source, semi) != 59 {
-        semi = semi + 1;
-        let marker: i32 = 0;
-    }
-    let plus: usize = expr_start;
-    let plus_found: i32 = 0;
-    while plus < semi {
-        if String.byte_at(source, plus) == 43 {
-            plus_found = 1;
-            let marker: i32 = 0;
-            break;
-        }
-        plus = plus + 1;
-        let marker: i32 = 0;
-    }
-    append_literal(output, "  #return ", 10);
-    if plus_found == 1 {
-        append_literal(output, "#add(", 5);
-        emit_operand(source, expr_start, plus, output);
-        append_literal(output, ", ", 2);
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
+    let plus: usize = scan_top_op(source, s, e, 43);
+    if plus < e {
+        sb_append_literal(output, "#add(", 5);
+        emit_add_expr(source, s, plus, output);
+        sb_append_literal(output, ", ", 2);
         let right_start: usize = skip_space(source, plus + 1);
-        emit_operand(source, right_start, semi, output);
-        append_literal(output, ")", 1);
-    } else {
-        emit_operand(source, expr_start, semi, output);
+        emit_add_expr(source, right_start, e, output);
+        sb_append_literal(output, ")", 1);
+        return;
     }
-    append_literal(output, "\n", 1);
+    let minus: usize = scan_top_op(source, s, e, 45);
+    if minus < e {
+        sb_append_literal(output, "#sub(", 5);
+        emit_add_expr(source, s, minus, output);
+        sb_append_literal(output, ", ", 2);
+        let right_start: usize = skip_space(source, minus + 1);
+        emit_add_expr(source, right_start, e, output);
+        sb_append_literal(output, ")", 1);
+        return;
+    }
+    emit_operand2(source, s, e, output);
 };
 
-// Emit a parameter list [start, end): `x: i32, y: i32` ->
-// `#bits<32> %x, #bits<32> %y`.
-let emit_params = std::func(
-    source: &String,
-    output: &mut String,
+// Lower a comparison expression as #eq/#ne/#lt/#gt/#le/#ge.
+let emit_cmp_expr = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
+    let cmp: usize = scan_cmp(source, s, e);
+    if cmp < e {
+        let op1: i32 = sb_byte_at(source, cmp);
+        let op2: i32 = sb_byte_at(source, cmp + 1);
+        if op1 == 61 {
+            sb_append_literal(output, "#eq(", 4);
+        } else {
+            if op1 == 33 {
+                sb_append_literal(output, "#ne(", 4);
+            } else {
+                if op1 == 60 {
+                    if op2 == 61 {
+                        sb_append_literal(output, "#le(", 4);
+                    } else {
+                        sb_append_literal(output, "#lt(", 4);
+                    }
+                } else {
+                    if op2 == 61 {
+                        sb_append_literal(output, "#ge(", 4);
+                    } else {
+                        sb_append_literal(output, "#gt(", 4);
+                    }
+                }
+            }
+        }
+        emit_add_expr(source, s, cmp, output);
+        sb_append_literal(output, ", ", 2);
+        let right_start: usize = skip_space(source, cmp + 1);
+        if op2 == 61 {
+            right_start = skip_space(source, cmp + 2);
+            let marker: i32 = 0;
+        }
+        emit_add_expr(source, right_start, e, output);
+        sb_append_literal(output, ")", 1);
+        return;
+    }
+    emit_add_expr(source, s, e, output);
+};
+
+// Lower a boolean-and expression as #eq(#add(#zext64(L), #zext64(R)), 2).
+let emit_and_expr = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
+    let and: usize = scan_and(source, s, e);
+    if and < e {
+        sb_append_literal(output, "#eq(#add(#zext[#bits<64>](", 26);
+        emit_cmp_expr(source, s, and, output);
+        sb_append_literal(output, "), #zext[#bits<64>](", 20);
+        emit_cmp_expr(source, and + 2, e, output);
+        sb_append_literal(output, ")), 2)", 6);
+        return;
+    }
+    emit_cmp_expr(source, s, e, output);
+};
+
+// Lower a full expression [start, end).
+let emit_expr = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
+    if s >= e { return; }
+    emit_and_expr(source, s, e, output);
+};
+
+// ---- type lowering ----
+
+let emit_type = std::func(
+    source: addr,
+    ts: usize,
+    te: usize,
+    output: addr,
+) -> unit {
+    let t: usize = trim_start(source, ts, te);
+    let t2: usize = trim_end(source, t, te);
+    let first: i32 = sb_byte_at(source, t);
+    if first == 38 {
+        sb_append_literal(output, "addr", 4);
+        return;
+    }
+    if sb_span_equals(source, t, t2 - t, "unit", 4) {
+        sb_append_literal(output, "#unit", 5);
+        return;
+    }
+    if sb_span_equals(source, t, t2 - t, "bool", 4) {
+        sb_append_literal(output, "#bits<1>", 8);
+        return;
+    }
+    if sb_span_equals(source, t, t2 - t, "usize", 5) {
+        sb_append_literal(output, "#bits<64>", 9);
+        return;
+    }
+    if sb_span_equals(source, t, t2 - t, "i32", 3) {
+        sb_append_literal(output, "#bits<32>", 9);
+        return;
+    }
+    if sb_span_equals(source, t, t2 - t, "addr", 4) {
+        sb_append_literal(output, "addr", 4);
+        return;
+    }
+    sb_append_literal(output, "addr", 4);
+};
+
+// Find the first top-level `:` or `=` in [start, end); returns end when
+// absent.  Used to split a `let NAME[: TYPE] = EXPR;` binding.
+let scan_let_mark = std::func(source: addr, start: usize, end: usize) -> usize {
+    let current: usize = start;
+    let depth: usize = 0;
+    while current < end {
+        let byte: i32 = sb_byte_at(source, current);
+        if byte == 34 {
+            current = skip_string(source, current);
+            let marker: i32 = 0;
+        } else {
+            if byte == 40 {
+                depth = depth + 1;
+                current = current + 1;
+                let marker: i32 = 0;
+            } else {
+                if byte == 41 {
+                    depth = depth - 1;
+                    current = current + 1;
+                    let marker: i32 = 0;
+                } else {
+                    if depth == 0 {
+                        if byte == 58 { return current; }
+                        if byte == 61 { return current; }
+                    }
+                    current = current + 1;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    return end;
+};
+
+// ---- statement lowering ----
+
+// Find the top-level `;` in [start, end); returns end when absent.
+let scan_semi = std::func(source: addr, start: usize, end: usize) -> usize {
+    let current: usize = start;
+    let depth: usize = 0;
+    while current < end {
+        let byte: i32 = sb_byte_at(source, current);
+        if byte == 34 {
+            current = skip_string(source, current);
+            let marker: i32 = 0;
+        } else {
+            if byte == 40 {
+                depth = depth + 1;
+                current = current + 1;
+                let marker: i32 = 0;
+            } else {
+                if byte == 41 {
+                    depth = depth - 1;
+                    current = current + 1;
+                    let marker: i32 = 0;
+                } else {
+                    if depth == 0 && byte == 59 { return current; }
+                    current = current + 1;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    return end;
+};
+
+// Find the top-level `{` in [start, end); returns end when absent.
+let scan_brace = std::func(source: addr, start: usize, end: usize) -> usize {
+    let current: usize = start;
+    let depth: usize = 0;
+    while current < end {
+        let byte: i32 = sb_byte_at(source, current);
+        if byte == 34 {
+            current = skip_string(source, current);
+            let marker: i32 = 0;
+        } else {
+            if byte == 40 {
+                depth = depth + 1;
+                current = current + 1;
+                let marker: i32 = 0;
+            } else {
+                if byte == 41 {
+                    depth = depth - 1;
+                    current = current + 1;
+                    let marker: i32 = 0;
+                } else {
+                    if depth == 0 && byte == 123 { return current; }
+                    current = current + 1;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    return end;
+};
+
+// Match the `}` closing the `{` at brace (top-level); returns its index.
+let match_brace = std::func(source: addr, brace: usize, end: usize) -> usize {
+    let current: usize = brace + 1;
+    let depth: usize = 1;
+    while current < end {
+        let byte: i32 = sb_byte_at(source, current);
+        if byte == 34 {
+            current = skip_string(source, current);
+            let marker: i32 = 0;
+        } else {
+            if byte == 40 {
+                depth = depth + 1;
+                current = current + 1;
+                let marker: i32 = 0;
+            } else {
+                if byte == 41 {
+                    depth = depth - 1;
+                    current = current + 1;
+                    let marker: i32 = 0;
+                } else {
+                    if byte == 123 {
+                        depth = depth + 1;
+                        current = current + 1;
+                        let marker: i32 = 0;
+                    } else {
+                        if byte == 125 {
+                            if depth == 1 { return current; }
+                            depth = depth - 1;
+                            current = current + 1;
+                            let marker: i32 = 0;
+                        } else {
+                            current = current + 1;
+                            let marker: i32 = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return end;
+};
+
+// Emit a `let NAME: TYPE = EXPR;` binding.  Returns the index after it.
+let emit_stmt_let = std::func(
+    source: addr,
+    output: addr,
+    index: usize,
+    body_end: usize,
+) -> usize {
+    let name_start: usize = skip_space(source, index + 3);
+    let name_end: usize = parse_ident(source, name_start);
+    let mark: usize = scan_let_mark(source, name_end, body_end);
+    sb_append_literal(output, "#let %", 6);
+    sb_append_span(output, source, name_start, name_end - name_start);
+    let eq: usize = mark;
+    if sb_byte_at(source, mark) == 58 {
+        eq = scan_top_op(source, mark + 1, body_end, 61);
+        sb_append_literal(output, ": ", 2);
+        emit_type(source, mark + 1, eq, output);
+        sb_append_literal(output, " = ", 3);
+    } else {
+        sb_append_literal(output, " = ", 3);
+    }
+    let semi: usize = scan_semi(source, eq + 1, body_end);
+    emit_expr(source, eq + 1, semi, output);
+    sb_append_literal(output, "\n", 1);
+    return semi + 1;
+};
+
+// Emit `while COND { ... }`.  Returns the index after it.
+let emit_stmt_while = std::func(
+    source: addr,
+    output: addr,
+    index: usize,
+    body_end: usize,
+) -> usize {
+    let cond_start: usize = skip_space(source, index + 5);
+    let brace: usize = scan_brace(source, cond_start, body_end);
+    let brace_end: usize = match_brace(source, brace, body_end);
+    sb_append_literal(output, "#loop {\n", 8);
+    sb_append_literal(output, "  #if #eq(", 10);
+    emit_expr(source, cond_start, brace, output);
+    sb_append_literal(output, ", 0) { #break }\n", 16);
+    emit_block(source, output, brace + 1, brace_end);
+    sb_append_literal(output, "  #continue\n}\n", 14);
+    return brace_end + 1;
+};
+
+// Emit `if COND { ... } else { ... }`.  Returns the index after it.
+let emit_stmt_if = std::func(
+    source: addr,
+    output: addr,
+    index: usize,
+    body_end: usize,
+) -> usize {
+    let cond_start: usize = skip_space(source, index + 2);
+    let brace: usize = scan_brace(source, cond_start, body_end);
+    let brace_end: usize = match_brace(source, brace, body_end);
+    sb_append_literal(output, "#if ", 4);
+    emit_expr(source, cond_start, brace, output);
+    sb_append_literal(output, " {\n", 3);
+    emit_block(source, output, brace + 1, brace_end);
+    sb_append_literal(output, "}\n", 2);
+    let after: usize = skip_space(source, brace_end + 1);
+    if sb_span_equals(source, after, 4, "else", 4) {
+        let brace2: usize = scan_brace(source, after + 4, body_end);
+        let brace2_end: usize = match_brace(source, brace2, body_end);
+        sb_append_literal(output, "else {\n", 7);
+        emit_block(source, output, brace2 + 1, brace2_end);
+        sb_append_literal(output, "}\n", 2);
+        return brace2_end + 1;
+    }
+    let marker: i32 = 0;
+    return brace_end + 1;
+};
+
+// Emit `return EXPR;`.  Returns the index after it.
+let emit_stmt_ret = std::func(
+    source: addr,
+    output: addr,
+    index: usize,
+    body_end: usize,
+) -> usize {
+    let expr_start: usize = skip_space(source, index + 6);
+    let semi: usize = scan_semi(source, expr_start, body_end);
+    sb_append_literal(output, "  #return ", 10);
+    emit_expr(source, expr_start, semi, output);
+    sb_append_literal(output, "\n", 1);
+    return semi + 1;
+};
+
+// Emit an assignment or call statement.  Returns the index after it.
+let emit_stmt_other = std::func(
+    source: addr,
+    output: addr,
+    index: usize,
+    body_end: usize,
+) -> usize {
+    let s: usize = skip_space(source, index);
+    let semi: usize = scan_semi(source, s, body_end);
+    let name_end: usize = parse_ident(source, s);
+    let after: usize = skip_space(source, name_end);
+    if sb_byte_at(source, after) == 61 {
+        sb_append_literal(output, "%", 1);
+        sb_append_span(output, source, s, name_end - s);
+        sb_append_literal(output, " = ", 3);
+        emit_expr(source, after + 1, semi, output);
+        sb_append_literal(output, "\n", 1);
+        return semi + 1;
+    }
+    emit_expr(source, s, semi, output);
+    sb_append_literal(output, "\n", 1);
+    return semi + 1;
+};
+
+// Emit one statement at index.  Returns the index after it.
+let emit_stmt = std::func(
+    source: addr,
+    output: addr,
+    index: usize,
+    body_end: usize,
+) -> usize {
+    let s: usize = skip_space(source, index);
+    if s >= body_end { return s; }
+    let first: i32 = sb_byte_at(source, s);
+    if first == 125 { return s; }
+    if sb_span_equals(source, s, 3, "let", 3) {
+        return emit_stmt_let(source, output, s, body_end);
+    }
+    if sb_span_equals(source, s, 5, "while", 5) {
+        return emit_stmt_while(source, output, s, body_end);
+    }
+    if sb_span_equals(source, s, 2, "if", 2) {
+        return emit_stmt_if(source, output, s, body_end);
+    }
+    if sb_span_equals(source, s, 6, "return", 6) {
+        return emit_stmt_ret(source, output, s, body_end);
+    }
+    if sb_span_equals(source, s, 5, "break", 5) {
+        let semi: usize = scan_semi(source, s, body_end);
+        sb_append_literal(output, "#break\n", 7);
+        return semi + 1;
+    }
+    return emit_stmt_other(source, output, s, body_end);
+};
+
+// Emit the statements in [start, end).
+let emit_block = std::func(
+    source: addr,
+    output: addr,
+    start: usize,
+    end: usize,
+) -> unit {
+    let current: usize = start;
+    while current < end {
+        let s: usize = skip_space(source, current);
+        if s >= end { break; }
+        if sb_byte_at(source, s) == 125 { break; }
+        current = emit_stmt(source, output, s, end);
+        let marker: i32 = 0;
+    }
+};
+
+// ---- function lowering ----
+
+// Emit one parameter `name: TYPE` starting at index; returns the index
+// just after the type.
+let emit_param_one = std::func(
+    source: addr,
+    output: addr,
+    index: usize,
+    params_end: usize,
+) -> usize {
+    let current: usize = skip_space(source, index);
+    if current >= params_end { return params_end; }
+    let name_end: usize = parse_ident(source, current);
+    let colon: usize = scan_top_op(source, current, params_end, 58);
+    let type_start: usize = colon + 1;
+    let type_end: usize = scan_top_op(source, type_start, params_end, 44);
+    emit_type(source, type_start, type_end, output);
+    sb_append_literal(output, " %", 2);
+    sb_append_span(output, source, current, name_end - current);
+    return type_end;
+};
+
+let emit_params2 = std::func(
+    source: addr,
+    output: addr,
+    params_start: usize,
+    params_end: usize,
+) -> unit {
+    let current: usize = params_start;
+    let first: i32 = 1;
+    while current < params_end {
+        if first == 1 {
+            first = 0;
+        } else {
+            sb_append_literal(output, ", ", 2);
+        }
+        current = emit_param_one(source, output, current, params_end);
+        current = skip_space(source, current);
+        if current < params_end {
+            if sb_byte_at(source, current) == 44 {
+                current = current + 1;
+                current = skip_space(source, current);
+                let marker: i32 = 0;
+            }
+        }
+        let marker: i32 = 0;
+    }
+};
+
+// Extract the @foreign link_name content start after index ('@'), or 0.
+let extract_link = std::func(source: addr, index: usize) -> usize {
+    let current: usize = index;
+    while current < sb_len(source) {
+        let byte: i32 = sb_byte_at(source, current);
+        if byte == 10 { return 0; }
+        if byte == 59 { return 0; }
+        if sb_span_equals(source, current, 9, "link_name", 9) {
+            let eq: usize = skip_space(source, current + 9);
+            if sb_byte_at(source, eq) == 61 {
+                let quote: usize = skip_space(source, eq + 1);
+                if sb_byte_at(source, quote) == 34 {
+                    return quote + 1;
+                }
+            }
+        }
+        current = current + 1;
+        let marker: i32 = 0;
+    }
+    return 0;
+};
+
+// Emit the extern label (link_name content, main, compiler_compile, f0_).
+let emit_label = std::func(
+    source: addr,
+    output: addr,
+    name_start: usize,
+    name_end: usize,
+    link: usize,
+) -> unit {
+    if link != 0 {
+        let scan: usize = link;
+        while sb_byte_at(source, scan) != 34 {
+            sb_append(output, sb_byte_at(source, scan));
+            scan = scan + 1;
+            let marker: i32 = 0;
+        }
+        return;
+    }
+    if sb_span_equals(source, name_start, name_end - name_start, "main", 4) {
+        sb_append_span(output, source, name_start, name_end - name_start);
+        return;
+    }
+    if sb_span_equals(source, name_start, name_end - name_start, "compiler_compile", 16) {
+        sb_append_span(output, source, name_start, name_end - name_start);
+        return;
+    }
+    sb_append_literal(output, "f0_", 3);
+    sb_append_span(output, source, name_start, name_end - name_start);
+};
+
+// Emit a parameter-name list `%a, %b` from [params_start, params_end).
+let emit_param_names = std::func(
+    source: addr,
+    output: addr,
     params_start: usize,
     params_end: usize,
 ) -> unit {
@@ -240,114 +1270,223 @@ let emit_params = std::func(
         if first == 1 {
             first = 0;
         } else {
-            append_literal(output, ", ", 2);
+            sb_append_literal(output, ", ", 2);
         }
-        append_literal(output, "#bits<32> %", 11);
-        append_span(source, current, name_end - current, output);
-        let scanning: i32 = 1;
-        while scanning == 1 && current < params_end {
-            let byte: i32 = String.byte_at(source, current);
-            if byte == 44 {
-                current = current + 1;
-                scanning = 0;
-                let marker: i32 = 0;
-            } else {
+        sb_append_literal(output, "%", 1);
+        sb_append_span(output, source, current, name_end - current);
+        let colon: usize = scan_top_op(source, current, params_end, 58);
+        let type_end: usize = scan_top_op(source, colon + 1, params_end, 44);
+        current = type_end;
+        if current < params_end {
+            if sb_byte_at(source, current) == 44 {
                 current = current + 1;
                 let marker: i32 = 0;
             }
         }
-        let marker2: i32 = 0;
+        let marker: i32 = 0;
     }
 };
 
-// Emit one top-level function declaration.  Returns the index after it.
-let emit_function = std::func(
-    source: &String,
-    output: &mut String,
+// Emit an @foreign declaration: the #extern (host link) plus a f0_ wrapper
+// that forwards the call so emitted call sites keep the f0_NAME label.
+let emit_foreign_wrapper = std::func(
+    source: addr,
+    output: addr,
+    name_start: usize,
+    name_end: usize,
+    params_start: usize,
+    params_end: usize,
+    ret_start: usize,
+    ret_end: usize,
+    link: usize,
+) -> unit {
+    let marker: i32 = 0;
+    sb_append_literal(output, "#extern #proc ", 14);
+    emit_label(source, output, name_start, name_end, link);
+    sb_append_literal(output, "(", 1);
+    emit_params2(source, output, params_start, params_end);
+    sb_append_literal(output, ") -> ", 5);
+    emit_type(source, ret_start, ret_end, output);
+    sb_append_literal(output, ";\n\n", 3);
+    sb_append_literal(output, "#proc f0_", 9);
+    sb_append_span(output, source, name_start, name_end - name_start);
+    sb_append_literal(output, "(", 1);
+    emit_params2(source, output, params_start, params_end);
+    sb_append_literal(output, ") -> ", 5);
+    emit_type(source, ret_start, ret_end, output);
+    if sb_span_equals(source, ret_start, ret_end - ret_start, "unit", 4) {
+        sb_append_literal(output, " {\n  #call ", 11);
+        emit_label(source, output, name_start, name_end, link);
+        sb_append_literal(output, "(", 1);
+        emit_param_names(source, output, params_start, params_end);
+        sb_append_literal(output, ")\n  #return\n}\n\n", 15);
+    } else {
+        sb_append_literal(output, " {\n  #return #call ", 19);
+        emit_label(source, output, name_start, name_end, link);
+        sb_append_literal(output, "(", 1);
+        emit_param_names(source, output, params_start, params_end);
+        sb_append_literal(output, ")\n}\n\n", 5);
+    }
+};
+
+// Emit one top-level function declaration at index ('let').  Returns the
+// index after it.  link is the pending @foreign link_name content start
+// (0 when none).
+let emit_function2 = std::func(
+    source: addr,
+    output: addr,
     index: usize,
+    link: usize,
 ) -> usize {
-    let current: usize = index + 3;
-    current = skip_space(source, current);
-    let name_end: usize = parse_ident(source, current);
-    let params_start: usize = current;
-    while String.byte_at(source, params_start) != 40 {
+    let name_start: usize = skip_space(source, index + 3);
+    let name_end: usize = parse_ident(source, name_start);
+    let params_start: usize = name_end;
+    while sb_byte_at(source, params_start) != 40 {
         params_start = params_start + 1;
         let marker: i32 = 0;
     }
     let params_end: usize = params_start + 1;
-    while String.byte_at(source, params_end) != 41 {
+    while sb_byte_at(source, params_end) != 41 {
         params_end = params_end + 1;
         let marker: i32 = 0;
     }
-    let body_open: usize = params_end + 1;
-    while String.byte_at(source, body_open) != 123 {
+    let scan: usize = params_end + 1;
+    let body_open: usize = scan;
+    while body_open < sb_len(source) {
+        let b: i32 = sb_byte_at(source, body_open);
+        if b == 123 { break; }
+        if b == 59 { break; }
         body_open = body_open + 1;
         let marker: i32 = 0;
     }
-    append_literal(output, "#proc ", 6);
-    if span_equals(source, current, name_end - current, "main", 4) {
-        append_span(source, current, name_end - current, output);
-    } else {
-        append_literal(output, "f0_", 3);
-        append_span(source, current, name_end - current, output);
-    }
-    append_literal(output, "(", 1);
-    emit_params(source, output, params_start + 1, params_end);
-    append_literal(output, ") -> #bits<32> {\n", 17);
-    emit_body(source, output, body_open + 1);
-    append_literal(output, "}\n", 2);
-    current = body_open + 1;
-    while String.byte_at(source, current) != 125 {
-        current = current + 1;
+    let arrow: usize = params_end;
+    while sb_byte_at(source, arrow) != 62 {
+        arrow = arrow + 1;
         let marker: i32 = 0;
     }
-    // Skip the closing '}' and the terminating ';' so the driver loop
-    // resumes at the next declaration, not in the middle of this one.
-    current = current + 1;
-    while String.byte_at(source, current) != 59 {
-        current = current + 1;
+    let ret_start: usize = skip_space(source, arrow + 1);
+    let ret_end: usize = ret_start;
+    while ret_end < body_open {
+        let b: i32 = sb_byte_at(source, ret_end);
+        if b == 123 { break; }
+        if b == 59 { break; }
+        ret_end = ret_end + 1;
         let marker: i32 = 0;
     }
-    return current + 1;
+    if sb_byte_at(source, body_open) == 59 {
+        emit_foreign_wrapper(
+            source, output, name_start, name_end,
+            params_start + 1, params_end, ret_start, ret_end, link
+        );
+        return scan_semi(source, body_open, sb_len(source)) + 1;
+    }
+    sb_append_literal(output, "#proc ", 6);
+    emit_label(source, output, name_start, name_end, link);
+    sb_append_literal(output, "(", 1);
+    emit_params2(source, output, params_start + 1, params_end);
+    sb_append_literal(output, ") -> ", 5);
+    emit_type(source, ret_start, ret_end, output);
+    sb_append_literal(output, " {\n", 3);
+    emit_block(source, output, body_open + 1, match_brace(source, body_open, sb_len(source)));
+    sb_append_literal(output, "}\n", 2);
+    return match_brace(source, body_open, sb_len(source)) + 1;
 };
 
 // Compile the source program into LAIN-IR text.  Returns 0 on success.
 let compile = std::func(
-    source: &String,
-    output: &mut String,
+    source: addr,
+    output: addr,
 ) -> i32 {
     let index: usize = 0;
-    let length: usize = String.length(source);
+    let length: usize = sb_len(source);
+    let link: usize = 0;
     while index < length {
         index = skip_space(source, index);
         if index >= length { break; }
-        index = emit_function(source, output, index);
-        let marker: i32 = 0;
+        let first: i32 = sb_byte_at(source, index);
+        if first == 47 {
+            while index < length {
+                if sb_byte_at(source, index) == 10 { break; }
+                index = index + 1;
+                let marker: i32 = 0;
+            }
+            let marker: i32 = 0;
+        } else {
+            if first == 64 {
+                link = extract_link(source, index);
+                while index < length {
+                    if sb_byte_at(source, index) == 10 { break; }
+                    index = index + 1;
+                    let marker: i32 = 0;
+                }
+                let marker: i32 = 0;
+            } else {
+                if sb_span_equals(source, index, 3, "let", 3) {
+                    let eq: usize = scan_top_op(source, index, length, 61);
+                    let func_start: usize = skip_space(source, eq + 1);
+                    if sb_span_equals(source, func_start, 9, "std::func", 9) {
+                        index = emit_function2(source, output, index, link);
+                        link = 0;
+                    } else {
+                        let semi: usize = scan_semi(source, index, length);
+                        index = semi + 1;
+                        let marker: i32 = 0;
+                    }
+                } else {
+                    index = index + 1;
+                    let marker: i32 = 0;
+                }
+            }
+        }
     }
     return 0;
 };
 
 // Compile the hard-coded add+main source and return the emitted LAIN-IR.
-let emit = std::func() -> String {
-    let source: String = String.new();
-    append_literal(
-        &mut source,
+let emit = std::func() -> addr {
+    let source: addr = sb_new();
+    sb_append_literal(
+        source,
         "let add = std::func(x: i32, y: i32) -> i32 {\n    return x + y;\n};\nlet main = std::func() -> i32 {\n    return add(40, 2);\n};",
         123,
     );
-    let output: String = String.new();
-    let status: i32 = compile(&source, &mut output);
+    let output: addr = sb_new();
+    let status: i32 = compile(source, output);
     let marker: i32 = 0;
     return output;
+};
+
+// Write a buffer's bytes to the artifact stream.
+let write_buffer_to_artifact = std::func(buf: addr) -> unit {
+    let index: usize = 0;
+    let length: usize = sb_len(buf);
+    while index < length {
+        artifact_write_byte(sb_byte_at(buf, index));
+        index = index + 1;
+        let marker: i32 = 0;
+    }
 };
 
 // Compile and write the emitted LAIN-IR to the artifact stream.
 // The artifact (product.l1) is then verified and executed by the harness.
 let main = std::func() -> i32 {
-    let emitted: String = emit();
+    let emitted: addr = emit();
     let marker: i32 = 0;
     artifact_begin();
-    write_string_to_artifact(&emitted);
+    write_buffer_to_artifact(emitted);
     artifact_finish();
     return 0;
+};
+
+// compiler_compile entry: compile the first host source and write the
+// artifact.  Returns the compile status.
+let compiler_compile = std::func() -> i32 {
+    let source: addr = sb_from_source();
+    let output: addr = sb_new();
+    let status: i32 = compile(source, output);
+    let marker: i32 = 0;
+    artifact_begin();
+    write_buffer_to_artifact(output);
+    artifact_finish();
+    return status;
 };
