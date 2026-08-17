@@ -433,9 +433,10 @@ let meta_emit_bits = std::func(output: addr, w: usize) -> unit {
 // front-end cannot lower (it refuses #store targets that are not #addr,
 // usize->addr assignment, and load_bits results as addr returns).
 //
-// Row format (5 fields, 5 '|' separators):
-//   kind|name_start|name_length|payload_start|payload_length|
+// Row format (6 fields, 6 '|' separators):
+//   kind|name_start|name_length|payload_start|payload_length|mod_row|
 // kind: 0 = nil, 1 = scalar, 2 = module, 3 = function, 4 = type.
+// mod_row: 1-based row of the owning module (0 = top-level).
 
 let meta_pipe_count = std::func(buf: addr, len: usize) -> usize {
     let index: usize = 0;
@@ -455,8 +456,8 @@ let meta_rows = std::func(buf: addr, len: usize) -> usize {
     let pipes: usize = meta_pipe_count(buf, len);
     let rows: usize = 0;
     let rem: usize = pipes;
-    while rem >= 5 {
-        rem = rem - 5;
+    while rem >= 6 {
+        rem = rem - 6;
         rows = rows + 1;
         let marker: i32 = 0;
     }
@@ -498,9 +499,9 @@ let meta_field = std::func(buf: addr, len: usize, seg: usize) -> usize {
 
 // Field of the row-th row (1-based; row 0 returns 0).
 let meta_row_field = std::func(buf: addr, len: usize, row: usize, field: usize) -> usize {
-    let five: usize = 5;
+    let six: usize = 6;
     let prior: usize = row - 1;
-    let seg: usize = prior * five;
+    let seg: usize = prior * six;
     if row == 0 { return 0; }
     let seg2: usize = seg + field;
     return meta_field(buf, len, seg2);
@@ -514,6 +515,7 @@ let meta_append = std::func(
     nl: usize,
     ps: usize,
     pl: usize,
+    mrow: usize,
 ) -> usize {
     let rows: usize = meta_rows(table, sb_len(table));
     meta_append_decimal(table, kind);
@@ -525,6 +527,8 @@ let meta_append = std::func(
     meta_append_decimal(table, ps);
     sb_append_literal(table, "|", 1);
     meta_append_decimal(table, pl);
+    sb_append_literal(table, "|", 1);
+    meta_append_decimal(table, mrow);
     sb_append_literal(table, "|", 1);
     return rows + 1;
 };
@@ -561,6 +565,52 @@ let meta_lookup = std::func(
             if same == 1 {
                 let k: usize = meta_row_field(table, len, row, 0);
                 if k != 0 { return row; }
+            }
+        }
+        row = row + 1;
+        let marker: i32 = 0;
+    }
+    return 0;
+};
+
+// Look up a name span among rows owned by module row `mrow` (field 5).
+// Returns the row or 0.  Used for module member resolution so two modules
+// can share member names.
+let meta_lookup_qualified = std::func(
+    table: addr,
+    len: usize,
+    source: addr,
+    ns: usize,
+    nl: usize,
+    mrow: usize,
+) -> usize {
+    let rows: usize = meta_rows(table, len);
+    let row: usize = 1;
+    let found: i32 = 0;
+    while found == 0 {
+        if row > rows { break; }
+        let modr: usize = meta_row_field(table, len, row, 5);
+        if modr == mrow {
+            let rn: usize = meta_row_field(table, len, row, 1);
+            let rl: usize = meta_row_field(table, len, row, 2);
+            if rl == nl {
+                let same: i32 = 1;
+                let i: usize = 0;
+                while i < nl {
+                    let rb: usize = rn + i;
+                    let nb: usize = ns + i;
+                    if sb_byte_at(source, rb) != sb_byte_at(source, nb) {
+                        same = 0;
+                        let marker: i32 = 0;
+                        break;
+                    }
+                    i = i + 1;
+                    let marker: i32 = 0;
+                }
+                if same == 1 {
+                    let k: usize = meta_row_field(table, len, row, 0);
+                    if k != 0 { return row; }
+                }
             }
         }
         row = row + 1;
@@ -809,7 +859,7 @@ let meta_call_consteval = std::func(
             let asep: usize = scan_top_op(source, acur, args_end, 44);
             let av: usize = meta_eval_const(source, acur, asep);
             if av != sentinel {
-                meta_append(params, 1, pcur, pn - pcur, av, 0);
+                meta_append(params, 1, pcur, pn - pcur, av, 0, 0);
                 let marker: i32 = 0;
             }
             pcur = skip_space(source, psep + 1);
@@ -1254,10 +1304,14 @@ let emit_path_tail = std::func(
 };
 
 // Emit a call NAME(args) where name spans [name_start, name_end).
+// mod_start/mod_end name the module the member belongs to (0/0 for
+// top-level functions), producing #call f0_<mod>_<member>.
 let emit_call_named = std::func(
     source: addr,
     name_start: usize,
     name_end: usize,
+    mod_start: usize,
+    mod_end: usize,
     args_start: usize,
     args_end: usize,
     output: addr,
@@ -1268,6 +1322,10 @@ let emit_call_named = std::func(
 ) -> unit {
     let marker: i32 = 0;
     sb_append_literal(output, "#call f0_", 9);
+    if mod_end != 0 {
+        sb_append_span(output, source, mod_start, mod_end - mod_start);
+        sb_append_literal(output, "_", 1);
+    }
     sb_append_span(output, source, name_start, name_end - name_start);
     sb_append_literal(output, "(", 1);
     emit_call_args(source, args_start, args_end, output, layout, types, meta, consts);
@@ -1522,8 +1580,41 @@ let emit_operand2 = std::func(
                 }
             }
         }
-        emit_call_named(source, member_start, member_end, args_start, args_end, output, layout, types, meta, consts);
+        let mstart: usize = 0;
+        let mend: usize = 0;
+        if member_start != s {
+            let mlen2: usize = sb_len(meta);
+            let mrow2: usize = meta_lookup(meta, mlen2, source, s, name_end - s);
+            if mrow2 != 0 {
+                let mk2: usize = meta_value_kind(meta, mlen2, mrow2);
+                if mk2 == 2 {
+                    mstart = s;
+                    mend = name_end;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+        emit_call_named(source, member_start, member_end, mstart, mend, args_start, args_end, output, layout, types, meta, consts);
         return;
+    }
+    let mlen3: usize = sb_len(meta);
+    let mrow3: usize = 0;
+    if member_start != s {
+        mrow3 = meta_lookup(meta, mlen3, source, s, name_end - s);
+        let marker: i32 = 0;
+    }
+    if mrow3 != 0 {
+        let mk3: usize = meta_value_kind(meta, mlen3, mrow3);
+        if mk3 == 2 {
+            let clen3: usize = sb_len(consts);
+            let crow3: usize = meta_lookup_qualified(consts, clen3, source, member_start, member_end - member_start, mrow3);
+            if crow3 != 0 {
+                let val3: usize = meta_row_field(consts, clen3, crow3, 3);
+                meta_append_decimal(output, val3);
+                return;
+            }
+            let marker: i32 = 0;
+        }
     }
     sb_append_literal(output, "%", 1);
     sb_append_span(output, source, member_start, member_end - member_start);
@@ -2149,12 +2240,17 @@ let extract_link = std::func(source: addr, index: usize) -> usize {
 };
 
 // Emit the extern label (link_name content, main, compiler_compile, f0_).
+// Emit a function label.  Module members are prefixed `f0_<mod>_<member>`
+// so two modules can use the same member name without colliding; mod_end
+// is 0 for top-level functions.
 let emit_label = std::func(
     source: addr,
     output: addr,
     name_start: usize,
     name_end: usize,
     link: usize,
+    mod_start: usize,
+    mod_end: usize,
 ) -> unit {
     if link != 0 {
         let scan: usize = link;
@@ -2165,15 +2261,21 @@ let emit_label = std::func(
         }
         return;
     }
-    if sb_span_equals(source, name_start, name_end - name_start, "main", 4) {
-        sb_append_span(output, source, name_start, name_end - name_start);
-        return;
-    }
-    if sb_span_equals(source, name_start, name_end - name_start, "compiler_compile", 16) {
-        sb_append_span(output, source, name_start, name_end - name_start);
-        return;
+    if mod_end == 0 {
+        if sb_span_equals(source, name_start, name_end - name_start, "main", 4) {
+            sb_append_span(output, source, name_start, name_end - name_start);
+            return;
+        }
+        if sb_span_equals(source, name_start, name_end - name_start, "compiler_compile", 16) {
+            sb_append_span(output, source, name_start, name_end - name_start);
+            return;
+        }
     }
     sb_append_literal(output, "f0_", 3);
+    if mod_end != 0 {
+        sb_append_span(output, source, mod_start, mod_end - mod_start);
+        sb_append_literal(output, "_", 1);
+    }
     sb_append_span(output, source, name_start, name_end - name_start);
 };
 
@@ -2221,16 +2323,22 @@ let emit_foreign_wrapper = std::func(
     ret_start: usize,
     ret_end: usize,
     link: usize,
+    mod_start: usize,
+    mod_end: usize,
 ) -> unit {
     let marker: i32 = 0;
     sb_append_literal(output, "#extern #proc ", 14);
-    emit_label(source, output, name_start, name_end, link);
+    emit_label(source, output, name_start, name_end, link, mod_start, mod_end);
     sb_append_literal(output, "(", 1);
     emit_params2(source, output, params_start, params_end);
     sb_append_literal(output, ") -> ", 5);
     emit_type(source, ret_start, ret_end, output);
     sb_append_literal(output, ";\n\n", 3);
     sb_append_literal(output, "#proc f0_", 9);
+    if mod_end != 0 {
+        sb_append_span(output, source, mod_start, mod_end - mod_start);
+        sb_append_literal(output, "_", 1);
+    }
     sb_append_span(output, source, name_start, name_end - name_start);
     sb_append_literal(output, "(", 1);
     emit_params2(source, output, params_start, params_end);
@@ -2238,23 +2346,25 @@ let emit_foreign_wrapper = std::func(
     emit_type(source, ret_start, ret_end, output);
     if sb_span_equals(source, ret_start, ret_end - ret_start, "unit", 4) {
         sb_append_literal(output, " {\n  #call ", 11);
-        emit_label(source, output, name_start, name_end, link);
+        emit_label(source, output, name_start, name_end, link, mod_start, mod_end);
         sb_append_literal(output, "(", 1);
         emit_param_names(source, output, params_start, params_end);
         sb_append_literal(output, ")\n  #return\n}\n\n", 15);
     } else {
         sb_append_literal(output, " {\n  #return #call ", 19);
-        emit_label(source, output, name_start, name_end, link);
+        emit_label(source, output, name_start, name_end, link, mod_start, mod_end);
         sb_append_literal(output, "(", 1);
         emit_param_names(source, output, params_start, params_end);
         sb_append_literal(output, ")\n}\n\n", 5);
     }
 };
 
-// Emit a `let NAME = std::module { ... }` binding: compile every member
-// `std::func` in the block as a LAIN-IR function (f0_<member>).  The module
-// value itself is compile-time only, so no runtime object is emitted.
-// Returns the index after the block.
+// Emit a `let NAME = std::module { ... }` binding: bind the module value
+// (kind 2) into the meta table and compile every member.  Members are
+// namespace-isolated: functions become f0_<mod>_<member>, constants are
+// bound into consts with the module's row recorded, consteval members are
+// bound kind 6.  The module value itself is compile-time only, so no
+// runtime object is emitted.  Returns the index after the block.
 let emit_module = std::func(
     source: addr,
     output: addr,
@@ -2270,14 +2380,36 @@ let emit_module = std::func(
     let name_end: usize = parse_ident(source, name_start);
     let brace: usize = scan_brace(source, name_start, end);
     let brace_end: usize = match_brace(source, brace, end);
-    meta_append(meta, 2, name_start, name_end - name_start, brace, 1);
+    let mrow: usize = meta_append(meta, 2, name_start, name_end - name_start, brace, 1, 0);
     let body: usize = brace + 1;
     let current: usize = body;
     while current < brace_end {
         let s: usize = skip_space(source, current);
         if s >= brace_end { break; }
         if sb_span_equals(source, s, 3, "let", 3) {
-            current = emit_function2(source, output, s, 0, layout, types, meta, consts);
+            let eq: usize = scan_top_op(source, s, brace_end, 61);
+            let fs: usize = skip_space(source, eq + 1);
+            if sb_span_equals(source, fs, 9, "std::func", 9) {
+                current = emit_function2(source, output, s, 0, name_start, name_end, mrow, layout, types, meta, consts);
+            } else {
+                if sb_span_equals(source, fs, 14, "std::consteval", 14) {
+                    current = emit_consteval(source, s, brace_end, meta, mrow);
+                } else {
+                    let mns: usize = skip_space(source, s + 3);
+                    let mne: usize = parse_ident(source, mns);
+                    let semi: usize = scan_semi(source, s, brace_end);
+                    let crs: usize = trim_start(source, eq + 1, semi);
+                    let cre: usize = trim_end(source, crs, semi);
+                    let sentinel: usize = 0 - 1;
+                    let cv: usize = meta_eval_const(source, crs, cre);
+                    if cv != sentinel {
+                        meta_append(consts, 1, mns, mne - mns, cv, 0, mrow);
+                        let marker: i32 = 0;
+                    }
+                    current = semi + 1;
+                    let marker: i32 = 0;
+                }
+            }
         } else {
             current = s + 1;
             let marker: i32 = 0;
@@ -2289,12 +2421,17 @@ let emit_module = std::func(
 
 // Emit one top-level function declaration at index ('let').  Returns the
 // index after it.  link is the pending @foreign link_name content start
-// (0 when none).
+// (0 when none).  mod_start/mod_end name the enclosing module (0/0 for
+// top-level functions); module members are emitted as f0_<mod>_<member>.
+// mrow is the meta row of the owning module (0 for top-level).
 let emit_function2 = std::func(
     source: addr,
     output: addr,
     index: usize,
     link: usize,
+    mod_start: usize,
+    mod_end: usize,
+    mrow: usize,
     layout: addr,
     types: addr,
     meta: addr,
@@ -2336,16 +2473,17 @@ let emit_function2 = std::func(
         ret_end = ret_end + 1;
         let marker: i32 = 0;
     }
-    meta_append(meta, 3, name_start, name_end - name_start, body_open, 1);
+    meta_append(meta, 3, name_start, name_end - name_start, body_open, 1, mrow);
     if sb_byte_at(source, body_open) == 59 {
         emit_foreign_wrapper(
             source, output, name_start, name_end,
-            params_start + 1, params_end, ret_start, ret_end, link
+            params_start + 1, params_end, ret_start, ret_end, link,
+            mod_start, mod_end
         );
         return scan_semi(source, body_open, sb_len(source)) + 1;
     }
     sb_append_literal(output, "#proc ", 6);
-    emit_label(source, output, name_start, name_end, link);
+    emit_label(source, output, name_start, name_end, link, mod_start, mod_end);
     sb_append_literal(output, "(", 1);
     emit_params2(source, output, params_start + 1, params_end);
     sb_append_literal(output, ") -> ", 5);
@@ -2371,7 +2509,7 @@ let emit_record = std::func(
     let name_end: usize = parse_ident(source, name_start);
     let brace: usize = scan_brace(source, name_start, end);
     let brace_end: usize = match_brace(source, brace, end);
-    meta_append(meta, 4, name_start, name_end - name_start, brace, 1);
+    meta_append(meta, 4, name_start, name_end - name_start, brace, 1, 0);
     sb_append_span(layout, source, name_start, name_end - name_start);
     sb_append_literal(layout, ":", 1);
     let body: usize = brace + 1;
@@ -2496,11 +2634,13 @@ let emit_record_value = std::func(
 // Bind a compile-time function declaration
 // `let NAME = std::consteval(params) -> T { body }` into the meta table
 // (kind 6) without emitting any product.  Payload: params_start, body_open.
+// mrow is the owning module's meta row (0 for top-level).
 let emit_consteval = std::func(
     source: addr,
     index: usize,
     end: usize,
     meta: addr,
+    mrow: usize,
 ) -> usize {
     let name_start: usize = skip_space(source, index + 3);
     let name_end: usize = parse_ident(source, name_start);
@@ -2523,7 +2663,7 @@ let emit_consteval = std::func(
         body_open = body_open + 1;
         let marker: i32 = 0;
     }
-    meta_append(meta, 6, name_start, name_end - name_start, params_start, body_open);
+    meta_append(meta, 6, name_start, name_end - name_start, params_start, body_open, mrow);
     if sb_byte_at(source, body_open) == 123 {
         return match_brace(source, body_open, end) + 1;
     }
@@ -2570,13 +2710,13 @@ let compile = std::func(
                         index = emit_record(source, output, index, length, layout, meta);
                     } else {
                         if sb_span_equals(source, func_start, 14, "std::consteval", 14) {
-                            index = emit_consteval(source, index, length, meta);
+                            index = emit_consteval(source, index, length, meta, 0);
                         } else {
                             if sb_span_equals(source, func_start, 11, "std::module", 11) {
                             index = emit_module(source, output, index, length, layout, types, meta, consts);
                         } else {
                             if sb_span_equals(source, func_start, 9, "std::func", 9) {
-                                index = emit_function2(source, output, index, link, layout, types, meta, consts);
+                                index = emit_function2(source, output, index, link, 0, 0, 0, layout, types, meta, consts);
                                 link = 0;
                         } else {
                             let semi: usize = scan_semi(source, index, length);
@@ -2587,18 +2727,42 @@ let compile = std::func(
                             let sentinel: usize = 0 - 1;
                             let cval: usize = meta_eval_const(source, crs, cre);
                             if cval != sentinel {
-                                meta_append(consts, 1, cns, cne - cns, cval, 0);
+                                meta_append(consts, 1, cns, cne - cns, cval, 0, 0);
                                 let marker: i32 = 0;
                             } else {
                                 let cne2: usize = parse_ident(source, crs);
-                                let cafter: usize = skip_space(source, cne2);
-                                if sb_byte_at(source, cafter) == 40 {
+                                let csep: usize = skip_space(source, cne2);
+                                let cmod_row: usize = 0;
+                                let cmem_start: usize = crs;
+                                let cmem_end: usize = cne2;
+                                if sb_byte_at(source, csep) == 46 {
+                                    let cnext: usize = skip_space(source, csep + 1);
+                                    if is_ident_start(sb_byte_at(source, cnext)) {
+                                        let mlen3: usize = sb_len(meta);
+                                        let mrow4: usize = meta_lookup(meta, mlen3, source, crs, cne2 - crs);
+                                        if mrow4 != 0 {
+                                            let mk4: usize = meta_value_kind(meta, mlen3, mrow4);
+                                            if mk4 == 2 {
+                                                cmod_row = mrow4;
+                                                cmem_start = cnext;
+                                                cmem_end = parse_ident(source, cnext);
+                                                let marker: i32 = 0;
+                                            }
+                                        }
+                                    }
+                                }
+                                if sb_byte_at(source, cmem_end) == 40 {
                                     let mlen2: usize = sb_len(meta);
-                                    let crow2: usize = meta_lookup(meta, mlen2, source, crs, cne2 - crs);
+                                    let crow2: usize = 0;
+                                    if cmod_row != 0 {
+                                        crow2 = meta_lookup_qualified(meta, mlen2, source, cmem_start, cmem_end - cmem_start, cmod_row);
+                                    } else {
+                                        crow2 = meta_lookup(meta, mlen2, source, cmem_start, cmem_end - cmem_start);
+                                    }
                                     if crow2 != 0 {
                                         let ck: usize = meta_value_kind(meta, mlen2, crow2);
                                         if ck == 6 {
-                                            let aend: usize = cafter + 1;
+                                            let aend: usize = cmem_end + 1;
                                             let adepth: usize = 1;
                                             let adone: usize = 0;
                                             while adone == 0 {
@@ -2623,10 +2787,10 @@ let compile = std::func(
                                                 }
                                             }
                                             let cv2: usize = meta_call_consteval(
-                                                source, meta, mlen2, crow2, cafter + 1, aend
+                                                source, meta, mlen2, crow2, cmem_end + 1, aend
                                             );
                                             if cv2 != sentinel {
-                                                meta_append(consts, 1, cns, cne - cns, cv2, 0);
+                                                meta_append(consts, 1, cns, cne - cns, cv2, 0, 0);
                                                 let marker: i32 = 0;
                                             }
                                         }

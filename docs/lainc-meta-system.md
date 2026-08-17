@@ -10,7 +10,9 @@ LAIN-IR text the meta layer decides on.
 
 All meta objects live in text tables (rows), referenced by 1-based row
 numbers (`usize`).  Row format: `kind|name_start|name_length|payload_start|
-payload_length|` (5 fields, 5 `|`).
+payload_length|mod_row|` (6 fields, 6 `|`); `mod_row` is the 1-based row of
+the owning module (0 = top-level) and makes member resolution
+namespace-aware.
 
 | kind | meaning                                   |
 |------|-------------------------------------------|
@@ -27,6 +29,8 @@ Tables and operations:
 - `meta_append` — append a row, returns its number.
 - `meta_lookup` — find a row by name span (names live in the source buffer;
   the table stores source offsets).
+- `meta_lookup_qualified` — find a row by name span among rows owned by a
+  given module row (field 5); used for module member resolution.
 - `meta_parse_decimal` / `meta_append_decimal` (digits lookup table +
   subtractive division) / `meta_is_number` / `meta_eval_const` /
   `meta_fold_binary` — numeric parsing and constant folding.
@@ -45,19 +49,49 @@ Tables and operations:
   `operand op operand` expressions, no recursion), the `return` expression
   is evaluated, and the result is bound into consts.
   - `square(5) -> 25`, `add2(40, 2) -> 42`, `five() -> 42`.
+  - Qualified calls `math.square(6)` resolve through the module's row to the
+    kind-6 member (see Modules).
 - **Records**: `std::struct` declarations write a layout table
   (`Name:field#offset#width#...=size|`); constructors expand to
   `#alloca(size)` + per-field `#store`; field access `p.x` resolves the
   variable's type through a per-function type table and the layout table
   into `#load[#bits<W>](#lea(base=%p, ..., offset=off))`.
 
+## Modules
+
+A module is a meta **value**: `let NAME = std::module { ... };` binds a
+kind-2 row (payload = body position) and emits no runtime object.
+
+Members are namespace-isolated:
+
+- **Functions** are emitted as `f0_<mod>_<member>` (`emit_label` adds the
+  module prefix; `main`/`compiler_compile` special-casing is suppressed for
+  members).  A call `mod.member(args)` resolves through the meta table:
+  the first path segment is looked up (must be kind 2), then the call is
+  emitted as `#call f0_<mod>_<member>` (`emit_operand2` / `emit_call_named`).
+  Two modules may use the same member name without colliding.
+- **Constants** (`let N = <const-expr>;` inside a module) are bound into the
+  consts table with the module's row recorded; a qualified reference
+  `mod.N` resolves via `meta_lookup_qualified` and splices the stored value.
+  A bare `N` reference inside the module also resolves (unqualified lookup
+  scans all rows).
+- **consteval members** (`let F = std::consteval ...;` inside a module) are
+  bound kind 6 with the module's row; a top-level `let X = mod.F(args);`
+  folds the call to a constant.
+
+Calls to module members from **inside** the module must be fully qualified
+(`mod.other(...)`), since the emitter does not thread the enclosing module
+into expression lowering.  Nested modules are not yet supported (a nested
+`std::module` inside a module is skipped).  Cross-module name collisions
+for bare (unqualified) constant references pick the first binding.
+
 ## Known limitations
 
 - consteval interpretation is single-level (no nested `a + b * c`), no
   recursion, no calls inside consteval bodies.
 - Multi-argument consteval works; argument/parameter counts must agree.
-- Module values are bound (kind 2) but member resolution is still textual
-  (`mod.member` -> `f0_member`), not yet meta-driven.
+- consteval members are only callable from top-level constant initializers
+  (function-body calls to a consteval member are not folded).
 - The frozen front-end (used to bootstrap gen1) has quirks that the meta
   code works around: compound expressions keep only the first operation
   (`a - b - c` must be split), `0 - 1` in comparisons must go through a
