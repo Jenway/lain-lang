@@ -227,22 +227,26 @@ python tests/lainir_lain/run_compiler_source_closure.py  # frozen 参照（不�
 
 ## 7. 下一项
 
-阶段 D（工厂体语言面）已完成并提交。**阶段 E（archive 主干闭包）已
-开始探索**：tokenizer+syntax+合成入口的编译链已跑通（0 产物预期——工厂
-定义不 eval），定位到两个前置缺口：
+阶段 D（工厂体语言面）已完成并提交。**阶段 E（archive 主干闭包）实施中**
+（提交 c224060）——五项 M2 安全改动已落地：
 
-- **工厂体内嵌套工厂调用**（syntax 的 `let Lex: Module =
-  tokenizer.Tokenizer(Memory);`）：需要 eval_module_factory 常量分支的
-  `try_bind_module_value`（非自举核心区，理论安全，待单独验证 M2）。
-- **`&mut` 值参数与 record 构造 stub**：必须放在 emit_operand2 **之外**
-  （emit_arg_one / emit_stmt_let），因为 emit_operand2 的任何改动都破坏
-  M2 收敛（见「5. 风险与对策」）。
+- eval_module_factory 常量分支 try_bind：工厂体内嵌套工厂调用
+  （`let Lex: Module = tokenizer.Tokenizer(Memory);`）绑定 ✓
+- emit_stmt_let record 构造失败 → `#let %x = 0` ✓
+- emit_arg_one `&mut ident` 值参数 → `%ident` ✓
+- emit_stmt_other 裸 stub 语句 → `#let %_ = 0` ✓
+- emit_else_tail（新）：else-if 链嵌套在单个 `else { }` 内
+  （`#if C1 { } else { #if C2 { } else { ... } }`——LAIN-IR 要求每个
+  else 配对 #if）；递归版在 frozen 值返回递归 lower 下坏，已弃
 
-阶段 E 实施顺序：
+**当前状态**：tokenizer+syntax 工厂链编译出 25 个运行时 proc
+（f0_Tokenizer_* / f0_Syntax_*）；l1check 推进到 tokenize 的深层
+else-if 链（7 分支）处失败——frozen 前端对链状态（depth/current）的
+lower 仍产生垃圾（`#eq(#sub(%, %space), ...)` 类）。
 
-1. eval_module_factory 常量分支加回 try_bind（嵌套工厂调用），验证 M2。
-2. emit_stmt_let 的 record 构造失败分支 stub（let rhs 的
-   `Node {...}`），验证 M2；再处理参数位置的 `Lex.Span {...}`。
-3. emit_arg_one 处理 `&mut ident` 值参数，验证 M2。
-4. 逐模块编译 archive（tokenizer → syntax → … → lainc），每模块 l1check。
-5. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物 verifier-valid。
+**阶段 E 剩余**：
+
+1. 修深层 else-if 链的 frozen lower 问题（emit_else_tail 的状态推进被
+   丢——尝试把链状态推进抽成独立函数、或改用「每分支独立函数」展开）。
+2. 逐模块编译 archive（tokenizer → syntax → … → lainc），每模块 l1check。
+3. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物 verifier-valid。
