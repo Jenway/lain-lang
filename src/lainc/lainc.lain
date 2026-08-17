@@ -17,6 +17,8 @@
 //   emit() -> addr          : compile the hard-coded add+main source
 //   main() -> i32           : write emit()'s product to the artifact
 //   compiler_compile() -> i32 : compile host source 0, write the artifact
+//   compiler_compile_library() -> i32 : compile all host sources as one
+//     library session (imports bind across files; last source is entry)
 
 @foreign(c, link_name = "bootstrap.allocate-pages")
 let allocate_pages = std::func(size: usize) -> addr;
@@ -36,6 +38,10 @@ let source_count = std::func() -> usize;
 let source_length = std::func(index: usize) -> usize;
 @foreign(c, link_name = "bootstrap.source-data")
 let source_data = std::func(index: usize) -> addr;
+@foreign(c, link_name = "bootstrap.source-path-data")
+let source_path_data = std::func(index: usize) -> addr;
+@foreign(c, link_name = "bootstrap.source-path-length")
+let source_path_length = std::func(index: usize) -> usize;
 
 // ---- self-contained string buffers ----
 // Layout: [8-byte length][data bytes...].
@@ -115,18 +121,162 @@ let sb_span_equals = std::func(
     return true;
 };
 
-let sb_from_source = std::func() -> addr {
-    let length: usize = source_length(0);
-    let data: addr = source_data(0);
+let sb_from_source_index = std::func(index: usize) -> addr {
+    let length: usize = source_length(index);
+    let data: addr = source_data(index);
     let buf: addr = sb_new();
-    let index: usize = 0;
-    while index < length {
-        sb_append(buf, sb_byte_at_addr(data, index));
-        index = index + 1;
+    let i2: usize = 0;
+    while i2 < length {
+        sb_append(buf, sb_byte_at_addr(data, i2));
+        i2 = i2 + 1;
         let marker: i32 = 0;
     }
     let marker: i32 = 0;
     return buf;
+};
+
+let sb_from_source = std::func() -> addr {
+    return sb_from_source_index(0);
+};
+
+// Compare [start_a, start_a+length) of buf_a against [start_b, start_b+
+// length) of buf_b byte-wise.
+let sb_span_eq_buf = std::func(
+    buf_a: addr,
+    start_a: usize,
+    buf_b: addr,
+    start_b: usize,
+    length: usize,
+) -> bool {
+    let index: usize = 0;
+    let same: i32 = 1;
+    while index < length {
+        if sb_byte_at(buf_a, start_a + index) != sb_byte_at(buf_b, start_b + index) {
+            same = 0;
+            let marker: i32 = 0;
+            break;
+        }
+        index = index + 1;
+        let marker: i32 = 0;
+    }
+    if same == 1 { return true; }
+    return false;
+};
+
+// Copy the basename (last path component, without extension) of host
+// source `index` into a fresh buffer.
+let source_basename = std::func(index: usize) -> addr {
+    let plen: usize = source_path_length(index);
+    let pdata: addr = source_path_data(index);
+    let buf: addr = sb_new();
+    let start: usize = 0;
+    let scan: usize = 0;
+    while scan < plen {
+        let b: i32 = sb_byte_at_addr(pdata, scan);
+        if b == 47 {
+            start = scan + 1;
+            let marker: i32 = 0;
+        }
+        if b == 92 {
+            start = scan + 1;
+            let marker: i32 = 0;
+        }
+        scan = scan + 1;
+        let marker: i32 = 0;
+    }
+    let end: usize = start;
+    while end < plen {
+        let b2: i32 = sb_byte_at_addr(pdata, end);
+        if b2 == 46 { break; }
+        end = end + 1;
+        let marker: i32 = 0;
+    }
+    let i3: usize = start;
+    while i3 < end {
+        sb_append(buf, sb_byte_at_addr(pdata, i3));
+        i3 = i3 + 1;
+        let marker: i32 = 0;
+    }
+    let marker: i32 = 0;
+    return buf;
+};
+
+// Copy the final `::` component of an `import("...")` literal spanning
+// [start, end) of source into a fresh buffer.
+let import_last_component = std::func(source: addr, start: usize, end: usize) -> addr {
+    let q1: usize = start;
+    while q1 < end {
+        if sb_byte_at(source, q1) == 34 { break; }
+        q1 = q1 + 1;
+        let marker: i32 = 0;
+    }
+    let q2: usize = q1 + 1;
+    while q2 < end {
+        if sb_byte_at(source, q2) == 34 { break; }
+        q2 = q2 + 1;
+        let marker: i32 = 0;
+    }
+    let last: usize = q1 + 1;
+    let scan: usize = q1 + 1;
+    while scan < q2 {
+        if sb_byte_at(source, scan) == 58 {
+            if scan + 1 < q2 {
+                if sb_byte_at(source, scan + 1) == 58 {
+                    last = scan + 2;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+        scan = scan + 1;
+        let marker: i32 = 0;
+    }
+    let buf: addr = sb_new();
+    let i4: usize = last;
+    while i4 < q2 {
+        sb_append(buf, sb_byte_at(source, i4));
+        i4 = i4 + 1;
+        let marker: i32 = 0;
+    }
+    let marker: i32 = 0;
+    return buf;
+};
+
+// Find the host source whose basename equals `name`; returns its index,
+// or source_count() when absent.
+let import_find_source = std::func(name: addr) -> usize {
+    let count: usize = source_count();
+    let index: usize = 0;
+    let found: i32 = 0;
+    while found == 0 {
+        if index >= count { break; }
+        let base: addr = source_basename(index);
+        if sb_len(base) == sb_len(name) {
+            if sb_span_eq_buf(base, 0, name, 0, sb_len(name)) {
+                found = 1;
+                let marker: i32 = 0;
+                break;
+            }
+        }
+        index = index + 1;
+        let marker: i32 = 0;
+    }
+    return index;
+};
+
+// Bind `let NAME: Module = import("...");` at index: the import alias gets
+// a kind-2 module row whose payload is the target host source index.
+// Returns the index after the declaration.
+let bind_import = std::func(source: addr, index: usize, end: usize, meta: addr) -> usize {
+    let eq: usize = scan_top_op(source, index, end, 61);
+    let fs: usize = skip_space(source, eq + 1);
+    let semi: usize = scan_semi(source, index, end);
+    let ns: usize = skip_space(source, index + 3);
+    let ne: usize = parse_ident(source, ns);
+    let comp: addr = import_last_component(source, fs, semi);
+    let target: usize = import_find_source(comp);
+    meta_append(meta, 2, ns, ne - ns, target, 1, 0);
+    let marker: i32 = 0;
+    return semi + 1;
 };
 
 // ---- meta tables ----
@@ -2251,6 +2401,7 @@ let emit_label = std::func(
     link: usize,
     mod_start: usize,
     mod_end: usize,
+    prefix: addr,
 ) -> unit {
     if link != 0 {
         let scan: usize = link;
@@ -2261,12 +2412,23 @@ let emit_label = std::func(
         }
         return;
     }
+    if sb_len(prefix) != 0 {
+        sb_append_literal(output, "f0_", 3);
+        sb_append_span(output, prefix, 0, sb_len(prefix));
+        sb_append_literal(output, "_", 1);
+        sb_append_span(output, source, name_start, name_end - name_start);
+        return;
+    }
     if mod_end == 0 {
         if sb_span_equals(source, name_start, name_end - name_start, "main", 4) {
             sb_append_span(output, source, name_start, name_end - name_start);
             return;
         }
         if sb_span_equals(source, name_start, name_end - name_start, "compiler_compile", 16) {
+            sb_append_span(output, source, name_start, name_end - name_start);
+            return;
+        }
+        if sb_span_equals(source, name_start, name_end - name_start, "compiler_compile_library", 24) {
             sb_append_span(output, source, name_start, name_end - name_start);
             return;
         }
@@ -2325,16 +2487,21 @@ let emit_foreign_wrapper = std::func(
     link: usize,
     mod_start: usize,
     mod_end: usize,
+    prefix: addr,
 ) -> unit {
     let marker: i32 = 0;
     sb_append_literal(output, "#extern #proc ", 14);
-    emit_label(source, output, name_start, name_end, link, mod_start, mod_end);
+    emit_label(source, output, name_start, name_end, link, mod_start, mod_end, prefix);
     sb_append_literal(output, "(", 1);
     emit_params2(source, output, params_start, params_end);
     sb_append_literal(output, ") -> ", 5);
     emit_type(source, ret_start, ret_end, output);
     sb_append_literal(output, ";\n\n", 3);
     sb_append_literal(output, "#proc f0_", 9);
+    if sb_len(prefix) != 0 {
+        sb_append_span(output, prefix, 0, sb_len(prefix));
+        sb_append_literal(output, "_", 1);
+    }
     if mod_end != 0 {
         sb_append_span(output, source, mod_start, mod_end - mod_start);
         sb_append_literal(output, "_", 1);
@@ -2346,13 +2513,13 @@ let emit_foreign_wrapper = std::func(
     emit_type(source, ret_start, ret_end, output);
     if sb_span_equals(source, ret_start, ret_end - ret_start, "unit", 4) {
         sb_append_literal(output, " {\n  #call ", 11);
-        emit_label(source, output, name_start, name_end, link, mod_start, mod_end);
+        emit_label(source, output, name_start, name_end, link, mod_start, mod_end, prefix);
         sb_append_literal(output, "(", 1);
         emit_param_names(source, output, params_start, params_end);
         sb_append_literal(output, ")\n  #return\n}\n\n", 15);
     } else {
         sb_append_literal(output, " {\n  #return #call ", 19);
-        emit_label(source, output, name_start, name_end, link, mod_start, mod_end);
+        emit_label(source, output, name_start, name_end, link, mod_start, mod_end, prefix);
         sb_append_literal(output, "(", 1);
         emit_param_names(source, output, params_start, params_end);
         sb_append_literal(output, ")\n}\n\n", 5);
@@ -2381,6 +2548,7 @@ let emit_module = std::func(
     let brace: usize = scan_brace(source, name_start, end);
     let brace_end: usize = match_brace(source, brace, end);
     let mrow: usize = meta_append(meta, 2, name_start, name_end - name_start, brace, 1, 0);
+    let empty_prefix: addr = sb_new();
     let body: usize = brace + 1;
     let current: usize = body;
     while current < brace_end {
@@ -2390,7 +2558,7 @@ let emit_module = std::func(
             let eq: usize = scan_top_op(source, s, brace_end, 61);
             let fs: usize = skip_space(source, eq + 1);
             if sb_span_equals(source, fs, 9, "std::func", 9) {
-                current = emit_function2(source, output, s, 0, name_start, name_end, mrow, layout, types, meta, consts);
+                current = emit_function2(source, output, s, 0, name_start, name_end, mrow, empty_prefix, layout, types, meta, consts);
             } else {
                 if sb_span_equals(source, fs, 14, "std::consteval", 14) {
                     current = emit_consteval(source, s, brace_end, meta, mrow);
@@ -2423,7 +2591,9 @@ let emit_module = std::func(
 // index after it.  link is the pending @foreign link_name content start
 // (0 when none).  mod_start/mod_end name the enclosing module (0/0 for
 // top-level functions); module members are emitted as f0_<mod>_<member>.
-// mrow is the meta row of the owning module (0 for top-level).
+// mrow is the meta row of the owning module (0 for top-level).  prefix is
+// a non-empty buffer when this source is an import library: top-level
+// names become f0_<basename>_<name>.
 let emit_function2 = std::func(
     source: addr,
     output: addr,
@@ -2432,6 +2602,7 @@ let emit_function2 = std::func(
     mod_start: usize,
     mod_end: usize,
     mrow: usize,
+    prefix: addr,
     layout: addr,
     types: addr,
     meta: addr,
@@ -2478,12 +2649,12 @@ let emit_function2 = std::func(
         emit_foreign_wrapper(
             source, output, name_start, name_end,
             params_start + 1, params_end, ret_start, ret_end, link,
-            mod_start, mod_end
+            mod_start, mod_end, prefix
         );
         return scan_semi(source, body_open, sb_len(source)) + 1;
     }
     sb_append_literal(output, "#proc ", 6);
-    emit_label(source, output, name_start, name_end, link, mod_start, mod_end);
+    emit_label(source, output, name_start, name_end, link, mod_start, mod_end, prefix);
     sb_append_literal(output, "(", 1);
     emit_params2(source, output, params_start + 1, params_end);
     sb_append_literal(output, ") -> ", 5);
@@ -2670,18 +2841,22 @@ let emit_consteval = std::func(
     return scan_semi(source, body_open, end) + 1;
 };
 
-// Compile the source program into LAIN-IR text.  Returns 0 on success.
-let compile = std::func(
+// Compile one source program into LAIN-IR text appended to output, sharing
+// the session tables (layout/types/meta/consts).  prefix is a non-empty
+// buffer when this source is an import library: top-level names are
+// emitted as f0_<basename>_<name>.  Returns 0 on success.
+let compile_source = std::func(
     source: addr,
     output: addr,
+    layout: addr,
+    types: addr,
+    meta: addr,
+    consts: addr,
+    prefix: addr,
 ) -> i32 {
     let index: usize = 0;
     let length: usize = sb_len(source);
     let link: usize = 0;
-    let layout: addr = sb_new();
-    let types: addr = sb_new();
-    let meta: addr = sb_new();
-    let consts: addr = sb_new();
     while index < length {
         index = skip_space(source, index);
         if index >= length { break; }
@@ -2706,6 +2881,9 @@ let compile = std::func(
                 if sb_span_equals(source, index, 3, "let", 3) {
                     let eq: usize = scan_top_op(source, index, length, 61);
                     let func_start: usize = skip_space(source, eq + 1);
+                    if sb_span_equals(source, func_start, 6, "import", 6) {
+                        index = bind_import(source, index, length, meta);
+                    } else {
                     if sb_span_equals(source, func_start, 11, "std::struct", 11) {
                         index = emit_record(source, output, index, length, layout, meta);
                     } else {
@@ -2716,7 +2894,7 @@ let compile = std::func(
                             index = emit_module(source, output, index, length, layout, types, meta, consts);
                         } else {
                             if sb_span_equals(source, func_start, 9, "std::func", 9) {
-                                index = emit_function2(source, output, index, link, 0, 0, 0, layout, types, meta, consts);
+                                index = emit_function2(source, output, index, link, 0, 0, 0, prefix, layout, types, meta, consts);
                                 link = 0;
                         } else {
                             let semi: usize = scan_semi(source, index, length);
@@ -2804,6 +2982,7 @@ let compile = std::func(
                     }
                 }
                 }
+                    }
             } else {
                 index = index + 1;
                 let marker: i32 = 0;
@@ -2812,6 +2991,21 @@ let compile = std::func(
     }
     }
     return 0;
+};
+
+// Compile the source program into LAIN-IR text.  Returns 0 on success.
+let compile = std::func(
+    source: addr,
+    output: addr,
+) -> i32 {
+    let layout: addr = sb_new();
+    let types: addr = sb_new();
+    let meta: addr = sb_new();
+    let consts: addr = sb_new();
+    let empty_prefix: addr = sb_new();
+    let status: i32 = compile_source(source, output, layout, types, meta, consts, empty_prefix);
+    let marker: i32 = 0;
+    return status;
 };
 
 // Compile the hard-coded add+main source and return the emitted LAIN-IR.
@@ -2857,6 +3051,41 @@ let compiler_compile = std::func() -> i32 {
     let output: addr = sb_new();
     let status: i32 = compile(source, output);
     let marker: i32 = 0;
+    artifact_begin();
+    write_buffer_to_artifact(output);
+    artifact_finish();
+    return status;
+};
+
+// compiler_compile_library entry: compile every host source as one library
+// session.  Sources before the last are import libraries (their top-level
+// names get the source-basename prefix f0_<basename>_<name>); the last
+// source is the entry (no prefix).  All sources share one meta/consts/
+// layout session, so imports bind across files.  Sources must be ordered
+// dependency-first.  The product is a single LAIN-IR artifact.
+let compiler_compile_library = std::func() -> i32 {
+    let count: usize = source_count();
+    let layout: addr = sb_new();
+    let types: addr = sb_new();
+    let meta: addr = sb_new();
+    let consts: addr = sb_new();
+    let output: addr = sb_new();
+    let empty_prefix: addr = sb_new();
+    let idx: usize = 0;
+    let status: i32 = 0;
+    while idx < count {
+        let src: addr = sb_from_source_index(idx);
+        if idx + 1 < count {
+            let prefix2: addr = source_basename(idx);
+            status = compile_source(src, output, layout, types, meta, consts, prefix2);
+            let marker: i32 = 0;
+        } else {
+            status = compile_source(src, output, layout, types, meta, consts, empty_prefix);
+            let marker: i32 = 0;
+        }
+        idx = idx + 1;
+        let marker: i32 = 0;
+    }
     artifact_begin();
     write_buffer_to_artifact(output);
     artifact_finish();
