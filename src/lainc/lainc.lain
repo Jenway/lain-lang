@@ -264,7 +264,8 @@ let import_find_source = std::func(name: addr) -> usize {
 };
 
 // Bind `let NAME: Module = import("...");` at index: the import alias gets
-// a kind-2 module row whose payload is the target host source index.
+// a kind-2 module row whose payload is the target host source index, or 0
+// for std:: imports (external capability stubs, no host source).
 // Returns the index after the declaration.
 let bind_import = std::func(source: addr, index: usize, end: usize, meta: addr) -> usize {
     let eq: usize = scan_top_op(source, index, end, 61);
@@ -274,7 +275,22 @@ let bind_import = std::func(source: addr, index: usize, end: usize, meta: addr) 
     let ne: usize = parse_ident(source, ns);
     let comp: addr = import_last_component(source, fs, semi);
     let target: usize = import_find_source(comp);
-    meta_append(meta, 2, ns, ne - ns, target, 1, 0);
+    let q1: usize = fs;
+    while q1 < semi {
+        if sb_byte_at(source, q1) == 34 { break; }
+        q1 = q1 + 1;
+        let marker: i32 = 0;
+    }
+    let stdstub: usize = 0;
+    if sb_span_equals(source, q1 + 1, 5, "std::", 5) {
+        stdstub = 1;
+        let marker: i32 = 0;
+    }
+    if stdstub == 1 {
+        meta_append(meta, 2, ns, ne - ns, 0, 0, 0);
+    } else {
+        meta_append(meta, 2, ns, ne - ns, target, 1, 0);
+    }
     let marker: i32 = 0;
     return semi + 1;
 };
@@ -1205,6 +1221,40 @@ let scan_and = std::func(source: addr, start: usize, end: usize) -> usize {
     return end;
 };
 
+// Find the first top-level `||` in [start, end); returns end when absent.
+let scan_or = std::func(source: addr, start: usize, end: usize) -> usize {
+    let current: usize = start;
+    let depth: usize = 0;
+    while current < end {
+        let byte: i32 = sb_byte_at(source, current);
+        if byte == 34 {
+            current = skip_string(source, current);
+            let marker: i32 = 0;
+        } else {
+            if byte == 40 {
+                depth = depth + 1;
+                current = current + 1;
+                let marker: i32 = 0;
+            } else {
+                if byte == 41 {
+                    depth = depth - 1;
+                    current = current + 1;
+                    let marker: i32 = 0;
+                } else {
+                    if depth == 0 && byte == 124 {
+                        if sb_byte_at(source, current + 1) == 124 {
+                            return current;
+                        }
+                    }
+                    current = current + 1;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    return end;
+};
+
 // Trim [start, end) to the non-space core; returns the new start.
 let trim_start = std::func(source: addr, start: usize, end: usize) -> usize {
     let current: usize = start;
@@ -1744,6 +1794,25 @@ let emit_operand2 = std::func(
                 }
             }
         }
+        let stub: usize = 0;
+        if mstart != 0 {
+            let mlen5: usize = sb_len(meta);
+            let mrow5: usize = meta_lookup(meta, mlen5, source, mstart, mend - mstart);
+            let mpl: usize = meta_value_payload_length(meta, mlen5, mrow5);
+            if mpl == 0 {
+                stub = 1;
+                let marker: i32 = 0;
+            }
+        } else {
+            if member_start != s {
+                stub = 1;
+                let marker: i32 = 0;
+            }
+        }
+        if stub == 1 {
+            sb_append_literal(output, "0", 1);
+            return;
+        }
         emit_call_named(source, member_start, member_end, mstart, mend, args_start, args_end, output, layout, types, meta, consts);
         return;
     }
@@ -1890,6 +1959,7 @@ let emit_cmp_expr = std::func(
 };
 
 // Lower a boolean-and expression as #eq(#add(#zext64(L), #zext64(R)), 2).
+// The right side recurses so `a && b && c` lowers fully.
 let emit_and_expr = std::func(
     source: addr,
     start: usize,
@@ -1907,11 +1977,38 @@ let emit_and_expr = std::func(
         sb_append_literal(output, "#eq(#add(#zext[#bits<64>](", 26);
         emit_cmp_expr(source, s, and, output, layout, types, meta, consts);
         sb_append_literal(output, "), #zext[#bits<64>](", 20);
-        emit_cmp_expr(source, and + 2, e, output, layout, types, meta, consts);
+        emit_and_expr(source, and + 2, e, output, layout, types, meta, consts);
         sb_append_literal(output, ")), 2)", 6);
         return;
     }
     emit_cmp_expr(source, s, e, output, layout, types, meta, consts);
+};
+
+// Lower a boolean-or expression as
+// #ne(#add(#zext64(#ne(L, 0)), #zext64(#ne(R, 0))), 0).
+// The right side recurses so `a || b || c` lowers fully.
+let emit_or_expr = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+    layout: addr,
+    types: addr,
+    meta: addr,
+    consts: addr,
+) -> unit {
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
+    let or: usize = scan_or(source, s, e);
+    if or < e {
+        sb_append_literal(output, "#ne(#add(#zext[#bits<64>](#ne(", 30);
+        emit_and_expr(source, s, or, output, layout, types, meta, consts);
+        sb_append_literal(output, ", 0)), #zext[#bits<64>](#ne(", 28);
+        emit_or_expr(source, or + 2, e, output, layout, types, meta, consts);
+        sb_append_literal(output, ", 0))), 0)", 10);
+        return;
+    }
+    emit_and_expr(source, s, e, output, layout, types, meta, consts);
 };
 
 // Lower a full expression [start, end).
@@ -1928,7 +2025,7 @@ let emit_expr = std::func(
     let s: usize = trim_start(source, start, end);
     let e: usize = trim_end(source, s, end);
     if s >= e { return; }
-    emit_and_expr(source, s, e, output, layout, types, meta, consts);
+    emit_or_expr(source, s, e, output, layout, types, meta, consts);
 };
 
 // ---- type lowering ----
@@ -2625,10 +2722,21 @@ let emit_function2 = std::func(
     let body_open: usize = scan;
     while body_open < sb_len(source) {
         let b: i32 = sb_byte_at(source, body_open);
-        if b == 123 { break; }
-        if b == 59 { break; }
-        body_open = body_open + 1;
-        let marker: i32 = 0;
+        if b == 33 {
+            let eb: usize = body_open + 1;
+            while eb < sb_len(source) {
+                if sb_byte_at(source, eb) == 123 { break; }
+                eb = eb + 1;
+                let marker: i32 = 0;
+            }
+            body_open = match_brace(source, eb, sb_len(source)) + 1;
+            let marker: i32 = 0;
+        } else {
+            if b == 123 { break; }
+            if b == 59 { break; }
+            body_open = body_open + 1;
+            let marker: i32 = 0;
+        }
     }
     let arrow: usize = params_end;
     while sb_byte_at(source, arrow) != 62 {
@@ -2652,6 +2760,11 @@ let emit_function2 = std::func(
             mod_start, mod_end, prefix
         );
         return scan_semi(source, body_open, sb_len(source)) + 1;
+    }
+    let rtrim: usize = trim_start(source, ret_start, ret_end);
+    let rtrim2: usize = trim_end(source, rtrim, ret_end);
+    if sb_span_equals(source, rtrim, rtrim2 - rtrim, "Module", 6) {
+        return match_brace(source, body_open, sb_len(source)) + 1;
     }
     sb_append_literal(output, "#proc ", 6);
     emit_label(source, output, name_start, name_end, link, mod_start, mod_end, prefix);

@@ -107,14 +107,31 @@ src/lainc 是 Lain 写、受自举约束，需重新实现，不能复用 LAIN-I
   - gen1（frozen lainc 直接产物）的入口名是 `f0_compiler_compile_library`
     （frozen emit_label 无此特例）；gen2 起（自举后）入口名正确。
 
-### 阶段 B：std 外部能力 stub（差距 3、6）
+### 阶段 B：std 外部能力 stub（差距 3、6）——✅ 已完成
 
-- 7 个 std 模块在 import 时创建 stub 模块行；成员（`Shape`、`Allocation`、
-  `Bounds`、`Effect`、`Vec`、`ByteSpan`、`byte_at`、`new` 等）按需生成类型
-  值 stub（对齐 frozen lainc.l1 14666 行语义）。
-- `vector.Vec(T, A, B)` 类型级调用：生成实例化类型记录（layout 表）。
-- 验收：`tokenizer.lain` 单独编译不崩，`memory_model.Shape` 等引用解析为
-  stub；产物 l1check。
+- `import("std::...")` 识别：import 字符串以 `std::` 开头时绑定 kind=2
+  stub 行（payload_length=0 标记外部能力，无 host source）。
+- stub 成员值调用在 `emit_operand2` 中降级为字面量 0（能力占位）；
+  非模块 receiver 的方法调用（`output.push(...)`、`TokenVector.new()`）
+  同样降级为 0。
+- `-> Module` 工厂函数：`emit_function2` 检测返回类型 Module 后只绑定
+  meta（kind=3），**不 emit 运行时 proc**（工厂体是编译期构造，其内
+  类型别名/嵌套函数不再泄漏进产物）。
+- 效果子句 `! {...}`：`emit_function2` 的 body_open 扫描跳过（不解析
+  `Memory.Allocation.Effect` 等路径）。
+- `||` 逻辑或：新增 `scan_or` + `emit_or_expr`
+  （`#ne(#add(#zext64(#ne(L,0)), #zext64(#ne(R,0))), 0)`）；`&&` 右操作
+  递归（`a && b && c` 全 lower）。
+- 验收：`run_lainc_archive_b.py`（std import stub 运行 42；tokenizer.lain
+  编译产物 l1check 干净、无工厂 proc），M1/M2/阶段 A 保持。
+- 已知限制（本阶段记录）：
+  - std stub 成员调用产物是字面量 0，**语义不完整**（仅 l1check；运行
+    语义需要真正的 std 实现，属后续阶段）。
+  - 类型别名 `let X: type = ...`、泛型 `vector.Vec(T, ...)` 尚未绑定
+    （emit_type 回落 addr）。
+  - 函数体外的 record 定义（`std::struct` 在普通函数体内）未支持。
+  - 测试脚本写入的 entry 文件必须 LF（Python `Path.write_text` 在
+    Windows 会写 CRLF，破坏 compile 文本扫描）。
 
 ### 阶段 C：模块工厂求值（差距 4、5、7）——最大工程
 
@@ -175,13 +192,14 @@ python tests/lainir_lain/run_compiler_source_closure.py  # frozen 参照（不�
 
 ## 7. 下一项
 
-阶段 A 已完成并提交。下一项是**阶段 B：std 外部能力 stub**——
+阶段 B 已完成并提交。下一项是**阶段 C：模块工厂求值**（最大工程）——
 
-- `import("std::memory_model")` 等 7 个 std 模块：import 时识别 std 前缀
-  （`std::` 开头，区别于 `packages::`），绑定 stub 模块行（kind=2），
-  成员（`Shape`/`Allocation`/`Bounds`/`Effect`/`Vec`/`ByteSpan`/`byte_at`/
-  `new` 等）按需生成类型值 stub（对齐 frozen lainc.l1 14666 行语义：
-  std 源不在 workspace 时给 `vector.Vec(T)` 一个类型值）。
-- 目标：`tokenizer.lain` 单独编译不崩，`memory_model.Shape` 等引用解析为
-  stub；产物 l1check。
-- 保持 M1/M2/阶段 A 绿。
+- `tokenizer.Tokenizer(Memory)` 编译期调用：绑定参数 → 逐语句执行工厂体
+  （类型别名绑定、record 定义、泛型实例化、嵌套 `std::module` 构造、
+  `return <module>`）→ 产生模块 meta 值。
+- 本质是「迷你模块解释器」；在 frozen 前端约束下实现（拆小函数、避免
+  有返回值递归；在现有非递归 consteval 求值基础上扩展为语句序列）。
+- 模块体内的 `let Lex: Module = tokenizer.Tokenizer(Memory);`（syntax.lain
+  19 行）调用链必须工作。
+- 验收：tokenizer 工厂可被 syntax 调用返回模块值；合成 fixture 全链；
+  保持 M1/M2/阶段 A/B 绿。
