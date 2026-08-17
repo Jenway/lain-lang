@@ -85,15 +85,27 @@ src/lainc 是 Lain 写、受自举约束，需重新实现，不能复用 LAIN-I
 > 每个阶段结束：M1（→42）与 M2（gen2==gen3 固定点）回归必须保持绿；
 > 新增 fixture 进 `tests/lainir_lain/` 并注册 `run_all.py`。
 
-### 阶段 A：多源会话与 import 解析（差距 1、2、12）
+### 阶段 A：多源会话与 import 解析（差距 1、2、12）——✅ 已完成
 
-- `compiler_compile_library(source_count, sources...) -> i32` 入口：读多个源，
-  共享一个 meta/consts/layout 会话。
-- `let X: Module = import("...");` 解析：包名→文件路径映射
-  （`packages::lain::compiler::<name>` → `src/compiler-archive/<name>.lain`；
-  std 名 → 外部能力），按依赖拓扑排序编译，import 别名绑定为 kind=2 模块行。
-- 顶层 `@export` 识别（区分 @foreign link 与可见性标记）。
-- 验收：两个最小假模块互相 import 编译正确；M2 保持。
+- `compiler_compile_library()` 入口：读全部 host source，共享
+  meta/consts/layout 会话；最后一个源是入口（无前缀），其余是 import
+  库（顶层名 emit 为 `f0_<basename>_<name>`，basename 取自 host 路径）。
+- `let X: Module = import("...")` 解析：取 import 字符串最后 `::` 段，
+  与每个 host source 的路径 basename 字节匹配，绑定 kind=2 别名行
+  （payload = 目标源索引）。
+- `emit_label`/`emit_function2`/`emit_foreign_wrapper` 增加 `prefix` 缓冲
+  参数（空 = 无前缀）；`compiler_compile_library` 进入入口特例。
+- `@foreign` 增加 `bootstrap.source-path-data/length`。
+- 验收：`run_lainc_archive_a.py`（裸函数库 `b.five` → `f0_b_five` → 5；
+  模块库 `b2.math.seven` → `f0_math_seven` → 7），M1/M2 保持。
+- 已知限制（本阶段记录）：
+  - import 别名必须等于目标源 basename（archive 结构性约定，如
+    `compiler_api.compiler_api.API`）；别名 ≠ basename 时成员解析错。
+  - 源必须按依赖序传入（无拓扑排序）。
+  - 裸名成员绑定跨库可能冲突（调用方走别名 kind=2 前缀构造，不查成员
+    绑定，故无碍）。
+  - gen1（frozen lainc 直接产物）的入口名是 `f0_compiler_compile_library`
+    （frozen emit_label 无此特例）；gen2 起（自举后）入口名正确。
 
 ### 阶段 B：std 外部能力 stub（差距 3、6）
 
@@ -157,11 +169,19 @@ src/lainc 是 Lain 写、受自举约束，需重新实现，不能复用 LAIN-I
 python tests/lainir_lain/run_lainc_m1.py        # →42
 python tests/lainir_lain/run_lainc_m2.py        # gen2==gen3 固定点
 python tests/lainir_lain/run_lainc_module.py    # module 机制
+python tests/lainir_lain/run_lainc_archive_a.py # 阶段 A：多源+import
 python tests/lainir_lain/run_compiler_source_closure.py  # frozen 参照（不改）
-# 新增：run_lainc_archive_*.py 每阶段对应
 ```
 
 ## 7. 下一项
 
-从阶段 A 开始：`compiler_compile_library` 多源入口 + import 别名绑定 +
-`@export` 识别；合成双模块 fixture 验收；保持 M1/M2 绿。
+阶段 A 已完成并提交。下一项是**阶段 B：std 外部能力 stub**——
+
+- `import("std::memory_model")` 等 7 个 std 模块：import 时识别 std 前缀
+  （`std::` 开头，区别于 `packages::`），绑定 stub 模块行（kind=2），
+  成员（`Shape`/`Allocation`/`Bounds`/`Effect`/`Vec`/`ByteSpan`/`byte_at`/
+  `new` 等）按需生成类型值 stub（对齐 frozen lainc.l1 14666 行语义：
+  std 源不在 workspace 时给 `vector.Vec(T)` 一个类型值）。
+- 目标：`tokenizer.lain` 单独编译不崩，`memory_model.Shape` 等引用解析为
+  stub；产物 l1check。
+- 保持 M1/M2/阶段 A 绿。

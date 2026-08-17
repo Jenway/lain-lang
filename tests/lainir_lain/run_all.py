@@ -25,6 +25,7 @@ def main() -> int:
         "run_driver.py",
         "run_lainc_m1.py",
         "run_lainc_module.py",
+        "run_lainc_archive_a.py",
         "run_lainc_m2.py",
     )
     for script in scripts:
