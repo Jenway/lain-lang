@@ -133,16 +133,32 @@ src/lainc 是 Lain 写、受自举约束，需重新实现，不能复用 LAIN-I
   - 测试脚本写入的 entry 文件必须 LF（Python `Path.write_text` 在
     Windows 会写 CRLF，破坏 compile 文本扫描）。
 
-### 阶段 C：模块工厂求值（差距 4、5、7）——最大工程
+### 阶段 C：模块工厂求值（差距 4、5、7）——✅ 已完成（核心路径）
 
-- `F = std::func(...) -> Module` 的编译期调用：绑定参数 → 逐语句执行函数体
-  （类型别名绑定、record 定义、泛型实例化、嵌套 `std::module` 构造、
-  `return <module>`）→ 产生模块 meta 值。
-- 本质是「迷你模块解释器」；在 frozen 前端约束下实现（拆小函数、避免
-  有返回值递归；参照现有 consteval 求值的非递归单层策略扩展为语句序列）。
-- 模块体内的 `let Lex: Module = tokenizer.Tokenizer(Memory);`（syntax.lain
-  19 行）调用链必须工作。
-- 验收：tokenizer 工厂可被 syntax 调用返回模块值；合成 fixture 全链。
+- **多源拼接**：`compiler_compile_library` 把所有源拼接进一个共享大缓冲
+  （`append_source_to_big`），`compile_source` 增加 `seg_begin`/`seg_end2`
+  范围参数——meta 表名字偏移全局一致，**跨源 meta 查找不再错位**。
+- **`let NAME: Module = MOD.FACTORY(ARGS);`**：`try_bind_module_value`
+  识别（`scan_let_mark` 找 `: Module` 注解 + 调用形态 + 第一段 kind=2
+  模块）→ `eval_module_factory`：
+  - 工厂函数（kind=3）的 body_open 从 meta 取（同一大缓冲，偏移一致）
+  - 建工厂模块值行（kind=2，payload=工厂名 span，payload_length>1 标记）
+  - 扫描工厂体：`std::func` 成员经 `emit_function2` emit 为
+    `f0_<factory>_<member>`（mrow=工厂模块行）；consteval/record/常量
+    成员绑定；`return std::module {...}` 跳过
+- **调用解析**：`emit_operand2` 中模块行 payload_length>1 时前缀用
+  payload 的工厂名 span（`lex.five()` → `#call f0_make_five`）。
+- 顶层 consteval 检测抽成 `try_consteval_call`（guard 风格），解决
+  compile 顶层嵌套超限（frozen 5106）。
+- 验收：`run_lainc_archive_c.py`（`t.make(1)` → `lex.five()` →
+  `f0_make_five` → 运行 5），M1/M2/阶段 A/B 保持。
+- 已知限制（本阶段记录）：
+  - 工厂体 `return std::module { name: value }` 的导出列表不处理
+    （体内所有绑定都算成员）。
+  - 工厂参数不绑定（工厂体内的参数引用如 `Memory.Allocation` 未解析，
+    效果子句跳过）。
+  - `let X: type = ...` 类型别名、`vector.Vec(...)` 泛型实例化仍未绑定
+    （emit_type 回落 addr）。
 
 ### 阶段 D：语言特性补齐（差距 8、9、10、11）
 
@@ -187,19 +203,22 @@ python tests/lainir_lain/run_lainc_m1.py        # →42
 python tests/lainir_lain/run_lainc_m2.py        # gen2==gen3 固定点
 python tests/lainir_lain/run_lainc_module.py    # module 机制
 python tests/lainir_lain/run_lainc_archive_a.py # 阶段 A：多源+import
+python tests/lainir_lain/run_lainc_archive_b.py # 阶段 B：std stub
+python tests/lainir_lain/run_lainc_archive_c.py # 阶段 C：模块工厂
 python tests/lainir_lain/run_compiler_source_closure.py  # frozen 参照（不改）
 ```
 
 ## 7. 下一项
 
-阶段 B 已完成并提交。下一项是**阶段 C：模块工厂求值**（最大工程）——
+阶段 C（模块工厂核心路径）已完成并提交。下一项是**阶段 D：语言特性
+补齐**（差距 8、9、10、11）——
 
-- `tokenizer.Tokenizer(Memory)` 编译期调用：绑定参数 → 逐语句执行工厂体
-  （类型别名绑定、record 定义、泛型实例化、嵌套 `std::module` 构造、
-  `return <module>`）→ 产生模块 meta 值。
-- 本质是「迷你模块解释器」；在 frozen 前端约束下实现（拆小函数、避免
-  有返回值递归；在现有非递归 consteval 求值基础上扩展为语句序列）。
-- 模块体内的 `let Lex: Module = tokenizer.Tokenizer(Memory);`（syntax.lain
-  19 行）调用链必须工作。
-- 验收：tokenizer 工厂可被 syntax 调用返回模块值；合成 fixture 全链；
-  保持 M1/M2/阶段 A/B 绿。
+- 效果子句 `! {...}`：已在 emit_function2 body_open 扫描跳过（阶段 B）。
+- `&mut T` 参数：emit_type 已回落 addr（`&` → addr）。
+- 方法调用 stub：已降级为 0（阶段 B）。
+- 剩余：函数体内 `let X: type = std::struct {...}`（record 定义在普通
+  函数体内，emit_stmt 识别为值 let 会出垃圾）、`vector.Vec(T, A, B)`
+  类型别名绑定、`else if` 链验证。
+- 目标：`tokenizer.lain` 的工厂体真正可编译执行（类型/record 绑定），
+  为阶段 E（archive 主干闭包）铺路。
+- 保持 M1/M2/阶段 A/B/C 绿。

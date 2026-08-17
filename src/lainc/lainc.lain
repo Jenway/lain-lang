@@ -295,6 +295,123 @@ let bind_import = std::func(source: addr, index: usize, end: usize, meta: addr) 
     return semi + 1;
 };
 
+// Execute a module factory call `MOD.FACTORY(ARGS)` spanning [fs, fe):
+// the factory body is scanned as a compile-time module construction.
+// std::func members are emitted as f0_<factory>_<member> and bound under
+// a new module row whose payload is the factory-name span (payload_length
+// = its length, > 1, marking a factory-produced module value); consteval
+// and record members bind normally.  Returns the new module row (0 on
+// failure).
+let eval_module_factory = std::func(
+    source: addr,
+    output: addr,
+    fs: usize,
+    fe: usize,
+    alias_ns: usize,
+    alias_nl: usize,
+    layout: addr,
+    types: addr,
+    meta: addr,
+    consts: addr,
+) -> usize {
+    let member_start: usize = emit_path_tail(source, fs, fe);
+    let member_end: usize = parse_ident(source, member_start);
+    let flen: usize = sb_len(meta);
+    let flen2: usize = member_end - member_start;
+    let frow: usize = meta_lookup(meta, flen, source, member_start, flen2);
+    let zero: usize = 0;
+    if frow == 0 { return zero; }
+    let fkind: usize = meta_value_kind(meta, flen, frow);
+    if fkind != 3 { return zero; }
+    let body_open: usize = meta_value_payload_start(meta, flen, frow);
+    let fbuf: addr = sb_new();
+    let i5: usize = member_start;
+    while i5 < member_end {
+        sb_append(fbuf, sb_byte_at(source, i5));
+        i5 = i5 + 1;
+        let marker: i32 = 0;
+    }
+    let mrow7: usize = meta_append(meta, 2, alias_ns, alias_nl, member_start, flen2, 0);
+    let body_end: usize = match_brace(source, body_open, sb_len(source));
+    let current: usize = body_open + 1;
+    while current < body_end {
+        let s: usize = skip_space(source, current);
+        if s >= body_end { break; }
+        if sb_span_equals(source, s, 3, "let", 3) {
+            let eq2: usize = scan_top_op(source, s, body_end, 61);
+            let fs2: usize = skip_space(source, eq2 + 1);
+            if sb_span_equals(source, fs2, 9, "std::func", 9) {
+                current = emit_function2(source, output, s, 0, 0, 0, mrow7, fbuf, layout, types, meta, consts);
+            } else {
+                if sb_span_equals(source, fs2, 14, "std::consteval", 14) {
+                    current = emit_consteval(source, s, body_end, meta, mrow7);
+                } else {
+                    if sb_span_equals(source, fs2, 11, "std::struct", 11) {
+                        current = emit_record(source, output, s, body_end, layout, meta);
+                    } else {
+                        let semi2: usize = scan_semi(source, s, body_end);
+                        let crs2: usize = trim_start(source, eq2 + 1, semi2);
+                        let cre2: usize = trim_end(source, crs2, semi2);
+                        let sentinel2: usize = 0 - 1;
+                        let cv2: usize = meta_eval_const(source, crs2, cre2);
+                        if cv2 != sentinel2 {
+                            let mns2: usize = skip_space(source, s + 3);
+                            let mne2: usize = parse_ident(source, mns2);
+                            meta_append(consts, 1, mns2, mne2 - mns2, cv2, 0, mrow7);
+                            let marker: i32 = 0;
+                        }
+                        current = semi2 + 1;
+                        let marker: i32 = 0;
+                    }
+                }
+            }
+        } else {
+            let semi3: usize = scan_semi(source, s, body_end);
+            current = semi3 + 1;
+            let marker: i32 = 0;
+        }
+        let marker: i32 = 0;
+    }
+    return mrow7;
+};
+
+// Detect `let NAME: Module = MOD.FACTORY(ARGS);` at index: evaluate the
+// factory and bind NAME to the produced module value.  Returns 1 when
+// handled.
+let try_bind_module_value = std::func(
+    source: addr,
+    index: usize,
+    end: usize,
+    output: addr,
+    layout: addr,
+    types: addr,
+    meta: addr,
+    consts: addr,
+) -> i32 {
+    let eq: usize = scan_top_op(source, index, end, 61);
+    let semi: usize = scan_semi(source, index, end);
+    let mns: usize = skip_space(source, index + 3);
+    let mne: usize = parse_ident(source, mns);
+    let mark: usize = scan_let_mark(source, mns, semi);
+    if sb_byte_at(source, mark) != 58 { return 0; }
+    let typ_s: usize = skip_space(source, mark + 1);
+    if sb_span_equals(source, typ_s, 6, "Module", 6) == false { return 0; }
+    let call_s: usize = skip_space(source, eq + 1);
+    let call_e: usize = trim_end(source, call_s, semi);
+    let fe2: usize = parse_ident(source, call_s);
+    let after: usize = skip_space(source, fe2);
+    if sb_byte_at(source, after) != 46 { return 0; }
+    let clen: usize = sb_len(meta);
+    let clen2: usize = fe2 - call_s;
+    let cmod: usize = meta_lookup(meta, clen, source, call_s, clen2);
+    if cmod == 0 { return 0; }
+    let ck: usize = meta_value_kind(meta, clen, cmod);
+    if ck != 2 { return 0; }
+    let mrow8: usize = eval_module_factory(source, output, call_s, call_e, mns, mne - mns, layout, types, meta, consts);
+    if mrow8 == 0 { return 0; }
+    return 1;
+};
+
 // ---- meta tables ----
 // Layout table format: `Name:field#offset#...=size|...`
 //   each record is `TypeName:` then `field#byteoffset#` pairs then `=size`
@@ -1802,6 +1919,14 @@ let emit_operand2 = std::func(
             if mpl == 0 {
                 stub = 1;
                 let marker: i32 = 0;
+            } else {
+                if mpl > 1 {
+                    let mps2: usize = meta_value_payload_start(meta, mlen5, mrow5);
+                    let mpse: usize = mps2 + mpl;
+                    mstart = mps2;
+                    mend = mpse;
+                    let marker: i32 = 0;
+                }
             }
         } else {
             if member_start != s {
@@ -2670,6 +2795,9 @@ let emit_module = std::func(
                     if cv != sentinel {
                         meta_append(consts, 1, mns, mne - mns, cv, 0, mrow);
                         let marker: i32 = 0;
+                    } else {
+                        let tb: i32 = try_bind_module_value(source, s, brace_end, output, layout, types, meta, consts);
+                        let marker: i32 = 0;
                     }
                     current = semi + 1;
                     let marker: i32 = 0;
@@ -2954,6 +3082,83 @@ let emit_consteval = std::func(
     return scan_semi(source, body_open, end) + 1;
 };
 
+// Detect a top-level consteval call `let NAME = CV(args);` with the
+// expression [crs, cre) and alias [cns, cne): evaluate and bind into
+// consts.  Returns 1 when bound.
+let try_consteval_call = std::func(
+    source: addr,
+    crs: usize,
+    cre: usize,
+    cns: usize,
+    cne: usize,
+    meta: addr,
+    consts: addr,
+    sentinel: usize,
+) -> i32 {
+    let cne2: usize = parse_ident(source, crs);
+    let csep: usize = skip_space(source, cne2);
+    let cmod_row: usize = 0;
+    let cmem_start: usize = crs;
+    let cmem_end: usize = cne2;
+    if sb_byte_at(source, csep) == 46 {
+        let cnext: usize = skip_space(source, csep + 1);
+        if is_ident_start(sb_byte_at(source, cnext)) {
+            let mlen3: usize = sb_len(meta);
+            let mrow4: usize = meta_lookup(meta, mlen3, source, crs, cne2 - crs);
+            if mrow4 != 0 {
+                let mk4: usize = meta_value_kind(meta, mlen3, mrow4);
+                if mk4 == 2 {
+                    cmod_row = mrow4;
+                    cmem_start = cnext;
+                    cmem_end = parse_ident(source, cnext);
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    if sb_byte_at(source, cmem_end) != 40 { return 0; }
+    let mlen2: usize = sb_len(meta);
+    let crow2: usize = 0;
+    if cmod_row != 0 {
+        crow2 = meta_lookup_qualified(meta, mlen2, source, cmem_start, cmem_end - cmem_start, cmod_row);
+    } else {
+        crow2 = meta_lookup(meta, mlen2, source, cmem_start, cmem_end - cmem_start);
+    }
+    if crow2 == 0 { return 0; }
+    let ck: usize = meta_value_kind(meta, mlen2, crow2);
+    if ck != 6 { return 0; }
+    let aend: usize = cmem_end + 1;
+    let adepth: usize = 1;
+    let adone: usize = 0;
+    while adone == 0 {
+        if sb_byte_at(source, aend) == 41 {
+            adepth = adepth - 1;
+            if adepth == 0 {
+                adone = 1;
+                let marker: i32 = 0;
+            } else {
+                aend = aend + 1;
+                let marker: i32 = 0;
+            }
+        } else {
+            if sb_byte_at(source, aend) == 40 {
+                adepth = adepth + 1;
+                aend = aend + 1;
+                let marker: i32 = 0;
+            } else {
+                aend = aend + 1;
+                let marker: i32 = 0;
+            }
+        }
+    }
+    let cv2: usize = meta_call_consteval(source, meta, mlen2, crow2, cmem_end + 1, aend);
+    if cv2 != sentinel {
+        meta_append(consts, 1, cns, cne - cns, cv2, 0, 0);
+        return 1;
+    }
+    return 0;
+};
+
 // Compile one source program into LAIN-IR text appended to output, sharing
 // the session tables (layout/types/meta/consts).  prefix is a non-empty
 // buffer when this source is an import library: top-level names are
@@ -2966,9 +3171,11 @@ let compile_source = std::func(
     meta: addr,
     consts: addr,
     prefix: addr,
+    seg_begin: usize,
+    seg_end2: usize,
 ) -> i32 {
-    let index: usize = 0;
-    let length: usize = sb_len(source);
+    let index: usize = seg_begin;
+    let length: usize = seg_end2;
     let link: usize = 0;
     while index < length {
         index = skip_space(source, index);
@@ -3021,71 +3228,10 @@ let compile_source = std::func(
                                 meta_append(consts, 1, cns, cne - cns, cval, 0, 0);
                                 let marker: i32 = 0;
                             } else {
-                                let cne2: usize = parse_ident(source, crs);
-                                let csep: usize = skip_space(source, cne2);
-                                let cmod_row: usize = 0;
-                                let cmem_start: usize = crs;
-                                let cmem_end: usize = cne2;
-                                if sb_byte_at(source, csep) == 46 {
-                                    let cnext: usize = skip_space(source, csep + 1);
-                                    if is_ident_start(sb_byte_at(source, cnext)) {
-                                        let mlen3: usize = sb_len(meta);
-                                        let mrow4: usize = meta_lookup(meta, mlen3, source, crs, cne2 - crs);
-                                        if mrow4 != 0 {
-                                            let mk4: usize = meta_value_kind(meta, mlen3, mrow4);
-                                            if mk4 == 2 {
-                                                cmod_row = mrow4;
-                                                cmem_start = cnext;
-                                                cmem_end = parse_ident(source, cnext);
-                                                let marker: i32 = 0;
-                                            }
-                                        }
-                                    }
-                                }
-                                if sb_byte_at(source, cmem_end) == 40 {
-                                    let mlen2: usize = sb_len(meta);
-                                    let crow2: usize = 0;
-                                    if cmod_row != 0 {
-                                        crow2 = meta_lookup_qualified(meta, mlen2, source, cmem_start, cmem_end - cmem_start, cmod_row);
-                                    } else {
-                                        crow2 = meta_lookup(meta, mlen2, source, cmem_start, cmem_end - cmem_start);
-                                    }
-                                    if crow2 != 0 {
-                                        let ck: usize = meta_value_kind(meta, mlen2, crow2);
-                                        if ck == 6 {
-                                            let aend: usize = cmem_end + 1;
-                                            let adepth: usize = 1;
-                                            let adone: usize = 0;
-                                            while adone == 0 {
-                                                if sb_byte_at(source, aend) == 41 {
-                                                    adepth = adepth - 1;
-                                                    if adepth == 0 {
-                                                        adone = 1;
-                                                        let marker: i32 = 0;
-                                                    } else {
-                                                        aend = aend + 1;
-                                                        let marker: i32 = 0;
-                                                    }
-                                                } else {
-                                                    if sb_byte_at(source, aend) == 40 {
-                                                        adepth = adepth + 1;
-                                                        aend = aend + 1;
-                                                        let marker: i32 = 0;
-                                                    } else {
-                                                        aend = aend + 1;
-                                                        let marker: i32 = 0;
-                                                    }
-                                                }
-                                            }
-                                            let cv2: usize = meta_call_consteval(
-                                                source, meta, mlen2, crow2, cmem_end + 1, aend
-                                            );
-                                            if cv2 != sentinel {
-                                                meta_append(consts, 1, cns, cne - cns, cv2, 0, 0);
-                                                let marker: i32 = 0;
-                                            }
-                                        }
-                                    }
+                                let tb: i32 = try_bind_module_value(source, index, length, output, layout, types, meta, consts);
+                                if tb == 0 {
+                                    let tc: i32 = try_consteval_call(source, crs, cre, cns, cne, meta, consts, sentinel);
+                                    let marker: i32 = 0;
                                 }
                                 let marker: i32 = 0;
                             }
@@ -3116,7 +3262,8 @@ let compile = std::func(
     let meta: addr = sb_new();
     let consts: addr = sb_new();
     let empty_prefix: addr = sb_new();
-    let status: i32 = compile_source(source, output, layout, types, meta, consts, empty_prefix);
+    let src_len: usize = sb_len(source);
+    let status: i32 = compile_source(source, output, layout, types, meta, consts, empty_prefix, 0, src_len);
     let marker: i32 = 0;
     return status;
 };
@@ -3170,12 +3317,27 @@ let compiler_compile = std::func() -> i32 {
     return status;
 };
 
+// Append host source `idx` to the shared big buffer; returns the new
+// buffer length.
+let append_source_to_big = std::func(big: addr, idx: usize) -> usize {
+    let src: addr = sb_from_source_index(idx);
+    let i6: usize = 0;
+    while i6 < sb_len(src) {
+        sb_append(big, sb_byte_at(src, i6));
+        i6 = i6 + 1;
+        let marker: i32 = 0;
+    }
+    let marker: i32 = 0;
+    return sb_len(big);
+};
+
 // compiler_compile_library entry: compile every host source as one library
-// session.  Sources before the last are import libraries (their top-level
-// names get the source-basename prefix f0_<basename>_<name>); the last
-// source is the entry (no prefix).  All sources share one meta/consts/
-// layout session, so imports bind across files.  Sources must be ordered
-// dependency-first.  The product is a single LAIN-IR artifact.
+// session.  All sources are concatenated into one shared source buffer so
+// meta-table name offsets are globally consistent across files; sources
+// before the last are import libraries (top-level names get the
+// source-basename prefix f0_<basename>_<name>), the last is the entry (no
+// prefix).  Sources must be ordered dependency-first.  The product is a
+// single LAIN-IR artifact.
 let compiler_compile_library = std::func() -> i32 {
     let count: usize = source_count();
     let layout: addr = sb_new();
@@ -3183,17 +3345,21 @@ let compiler_compile_library = std::func() -> i32 {
     let meta: addr = sb_new();
     let consts: addr = sb_new();
     let output: addr = sb_new();
+    let big: addr = sb_new();
     let empty_prefix: addr = sb_new();
+    let cursor: usize = 0;
     let idx: usize = 0;
     let status: i32 = 0;
     while idx < count {
-        let src: addr = sb_from_source_index(idx);
+        let seg_begin: usize = cursor;
+        let seg_end2: usize = append_source_to_big(big, idx);
+        cursor = seg_end2;
         if idx + 1 < count {
             let prefix2: addr = source_basename(idx);
-            status = compile_source(src, output, layout, types, meta, consts, prefix2);
+            status = compile_source(big, output, layout, types, meta, consts, prefix2, seg_begin, seg_end2);
             let marker: i32 = 0;
         } else {
-            status = compile_source(src, output, layout, types, meta, consts, empty_prefix);
+            status = compile_source(big, output, layout, types, meta, consts, empty_prefix, seg_begin, seg_end2);
             let marker: i32 = 0;
         }
         idx = idx + 1;
