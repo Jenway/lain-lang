@@ -360,7 +360,25 @@ let eval_module_factory = std::func(
                             meta_append(consts, 1, mns2, mne2 - mns2, cv2, 0, mrow7);
                             let marker: i32 = 0;
                         } else {
-                            let tb2: i32 = try_bind_module_value(source, s, body_end, output, layout, types, meta, consts);
+                            let mns2: usize = skip_space(source, s + 3);
+                            let mne2: usize = parse_ident(source, mns2);
+                            let mark3: usize = scan_let_mark(source, mns2, semi2);
+                            let is_type_alias: usize = 0;
+                            if sb_byte_at(source, mark3) == 58 {
+                                let typ_s2: usize = skip_space(source, mark3 + 1);
+                                if sb_span_equals(source, typ_s2, 4, "type", 4) {
+                                    is_type_alias = 1;
+                                    let eq3: usize = scan_top_op(source, mark3 + 1, semi2, 61);
+                                    let te_s: usize = trim_start(source, eq3 + 1, semi2);
+                                    let te_e: usize = trim_end(source, te_s, semi2);
+                                    meta_append(meta, 4, mns2, mne2 - mns2, te_s, te_e - te_s, mrow7);
+                                    let marker: i32 = 0;
+                                }
+                            }
+                            if is_type_alias == 0 {
+                                let tb2: i32 = try_bind_module_value(source, s, body_end, output, layout, types, meta, consts);
+                                let marker: i32 = 0;
+                            }
                             let marker: i32 = 0;
                         }
                         current = semi2 + 1;
@@ -369,13 +387,68 @@ let eval_module_factory = std::func(
                 }
             }
         } else {
-            let semi3: usize = scan_semi(source, s, body_end);
-            current = semi3 + 1;
+            current = scan_return_module(source, output, s, body_end, layout, types, meta, consts, mrow7, fbuf);
             let marker: i32 = 0;
         }
         let marker: i32 = 0;
     }
     return mrow7;
+};
+
+// Scan `return std::module { ... };` at index: emit any inline std::func
+// members (eof/trivia/comment/...) as f0_<factory>_<name> and skip the
+// rest.  Returns the index after the return statement.
+let scan_return_module = std::func(
+    source: addr,
+    output: addr,
+    index: usize,
+    body_end: usize,
+    layout: addr,
+    types: addr,
+    meta: addr,
+    consts: addr,
+    mrow7: usize,
+    fbuf: addr,
+) -> usize {
+    let rs3: usize = skip_space(source, index + 6);
+    let re3: usize = parse_ident(source, rs3);
+    let ra3: usize = skip_space(source, re3);
+    if sb_span_equals(source, rs3, re3 - rs3, "std", 3) == false {
+        let semi3: usize = scan_semi(source, index, body_end);
+        return semi3 + 1;
+    }
+    if sb_byte_at(source, ra3) != 58 {
+        let semi3: usize = scan_semi(source, index, body_end);
+        return semi3 + 1;
+    }
+    let rmod: usize = skip_space(source, ra3 + 2);
+    if sb_span_equals(source, rmod, 6, "module", 6) == false {
+        let semi3: usize = scan_semi(source, index, body_end);
+        return semi3 + 1;
+    }
+    let rbrace: usize = scan_brace(source, rmod, body_end);
+    let rbrace_end: usize = match_brace(source, rbrace, body_end);
+    let rcur: usize = rbrace + 1;
+    while rcur < rbrace_end {
+        let rm: usize = skip_space(source, rcur);
+        if rm >= rbrace_end { break; }
+        if sb_span_equals(source, rm, 3, "let", 3) {
+            let req: usize = scan_top_op(source, rm, rbrace_end, 61);
+            let rfs: usize = skip_space(source, req + 1);
+            if sb_span_equals(source, rfs, 9, "std::func", 9) {
+                rcur = emit_function2(source, output, rm, 0, 0, 0, mrow7, fbuf, layout, types, meta, consts);
+            } else {
+                let rsemi: usize = scan_semi(source, rm, rbrace_end);
+                rcur = rsemi + 1;
+                let marker: i32 = 0;
+            }
+        } else {
+            rcur = rm + 1;
+            let marker: i32 = 0;
+        }
+        let marker: i32 = 0;
+    }
+    return rbrace_end + 1;
 };
 
 // Detect `let NAME: Module = MOD.FACTORY(ARGS);` at index: evaluate the
@@ -1909,8 +1982,15 @@ let emit_operand2 = std::func(
         let mlen7: usize = sb_len(meta);
         let mrow7b: usize = meta_lookup(meta, mlen7, source, s, name_end - s);
         if mrow7b == 0 {
-            sb_append_literal(output, "0", 1);
-            return;
+            let mfin: usize = emit_path_tail(source, s, e);
+            let mfend: usize = parse_ident(source, mfin);
+            let mfafter: usize = skip_space(source, mfend);
+            if sb_byte_at(source, mfafter) == 40 {
+                let marker: i32 = 0;
+            } else {
+                sb_append_literal(output, "0", 1);
+                return;
+            }
         }
     }
     if sb_span_equals(source, s, name_end - s, "std", 3) {
@@ -2238,6 +2318,7 @@ let emit_type = std::func(
     ts: usize,
     te: usize,
     output: addr,
+    meta: addr,
 ) -> unit {
     let t: usize = trim_start(source, ts, te);
     let t2: usize = trim_end(source, t, te);
@@ -2265,6 +2346,21 @@ let emit_type = std::func(
     if sb_span_equals(source, t, t2 - t, "addr", 4) {
         sb_append_literal(output, "addr", 4);
         return;
+    }
+    let ml: usize = sb_len(meta);
+    let tr: usize = meta_lookup(meta, ml, source, t, t2 - t);
+    if tr != 0 {
+        let tk: usize = meta_value_kind(meta, ml, tr);
+        if tk == 4 {
+            let ps: usize = meta_value_payload_start(meta, ml, tr);
+            let pl: usize = meta_value_payload_length(meta, ml, tr);
+            if sb_byte_at(source, ps) != 123 {
+                let pe: usize = ps + pl;
+                emit_type(source, ps, pe, output, meta);
+                return;
+            }
+            let marker: i32 = 0;
+        }
     }
     sb_append_literal(output, "addr", 4);
 };
@@ -2454,7 +2550,7 @@ let emit_stmt_let = std::func(
     sb_append_span(output, source, name_start, name_end - name_start);
     if sb_byte_at(source, mark) == 58 {
         sb_append_literal(output, ": ", 2);
-        emit_type(source, mark + 1, eq, output);
+        emit_type(source, mark + 1, eq, output, meta);
         sb_append_literal(output, " = ", 3);
     } else {
         sb_append_literal(output, " = ", 3);
@@ -2581,6 +2677,13 @@ let emit_stmt_ret = std::func(
 ) -> usize {
     let expr_start: usize = skip_space(source, index + 6);
     let semi: usize = scan_semi(source, expr_start, body_end);
+    let rs2: usize = trim_start(source, expr_start, semi);
+    let rn2: usize = parse_ident(source, rs2);
+    let ra2: usize = skip_space(source, rn2);
+    if sb_byte_at(source, ra2) == 123 {
+        sb_append_literal(output, "  #return 0\n", 12);
+        return semi + 1;
+    }
     sb_append_literal(output, "  #return ", 10);
     emit_expr(source, expr_start, semi, output, layout, types, meta, consts);
     sb_append_literal(output, "\n", 1);
@@ -2620,7 +2723,9 @@ let emit_stmt_other = std::func(
     }
     if is_eq_cmp == 0 {
         if eq2 < semi {
-            sb_append_literal(output, "#let %_ = ", 10);
+            sb_append_literal(output, "#let %_", 7);
+            meta_append_decimal(output, semi);
+            sb_append_literal(output, " = ", 3);
             emit_expr(source, eq2 + 1, semi, output, layout, types, meta, consts);
             sb_append_literal(output, "\n", 1);
             return semi + 1;
@@ -2633,7 +2738,9 @@ let emit_stmt_other = std::func(
         let last1: i32 = sb_byte_at(output, o3);
         if last1 == 48 {
             std::store_bits(64, output, o3);
-            sb_append_literal(output, "#let %_ = 0\n", 12);
+            sb_append_literal(output, "#let %_", 7);
+            meta_append_decimal(output, semi);
+            sb_append_literal(output, " = 0\n", 5);
             return semi + 1;
         }
     }
@@ -2706,6 +2813,7 @@ let emit_param_one = std::func(
     output: addr,
     index: usize,
     params_end: usize,
+    meta: addr,
 ) -> usize {
     let current: usize = skip_space(source, index);
     if current >= params_end { return params_end; }
@@ -2713,7 +2821,7 @@ let emit_param_one = std::func(
     let colon: usize = scan_top_op(source, current, params_end, 58);
     let type_start: usize = colon + 1;
     let type_end: usize = scan_top_op(source, type_start, params_end, 44);
-    emit_type(source, type_start, type_end, output);
+    emit_type(source, type_start, type_end, output, meta);
     sb_append_literal(output, " %", 2);
     sb_append_span(output, source, current, name_end - current);
     return type_end;
@@ -2724,6 +2832,7 @@ let emit_params2 = std::func(
     output: addr,
     params_start: usize,
     params_end: usize,
+    meta: addr,
 ) -> unit {
     let current: usize = params_start;
     let first: i32 = 1;
@@ -2733,7 +2842,7 @@ let emit_params2 = std::func(
         } else {
             sb_append_literal(output, ", ", 2);
         }
-        current = emit_param_one(source, output, current, params_end);
+        current = emit_param_one(source, output, current, params_end, meta);
         current = skip_space(source, current);
         if current < params_end {
             if sb_byte_at(source, current) == 44 {
@@ -2867,14 +2976,15 @@ let emit_foreign_wrapper = std::func(
     mod_start: usize,
     mod_end: usize,
     prefix: addr,
+    meta: addr,
 ) -> unit {
     let marker: i32 = 0;
     sb_append_literal(output, "#extern #proc ", 14);
     emit_label(source, output, name_start, name_end, link, mod_start, mod_end, prefix);
     sb_append_literal(output, "(", 1);
-    emit_params2(source, output, params_start, params_end);
+    emit_params2(source, output, params_start, params_end, meta);
     sb_append_literal(output, ") -> ", 5);
-    emit_type(source, ret_start, ret_end, output);
+    emit_type(source, ret_start, ret_end, output, meta);
     sb_append_literal(output, ";\n\n", 3);
     sb_append_literal(output, "#proc f0_", 9);
     if sb_len(prefix) != 0 {
@@ -2887,9 +2997,9 @@ let emit_foreign_wrapper = std::func(
     }
     sb_append_span(output, source, name_start, name_end - name_start);
     sb_append_literal(output, "(", 1);
-    emit_params2(source, output, params_start, params_end);
+    emit_params2(source, output, params_start, params_end, meta);
     sb_append_literal(output, ") -> ", 5);
-    emit_type(source, ret_start, ret_end, output);
+    emit_type(source, ret_start, ret_end, output, meta);
     if sb_span_equals(source, ret_start, ret_end - ret_start, "unit", 4) {
         sb_append_literal(output, " {\n  #call ", 11);
         emit_label(source, output, name_start, name_end, link, mod_start, mod_end, prefix);
@@ -3034,6 +3144,7 @@ let emit_function2 = std::func(
         let b: i32 = sb_byte_at(source, ret_end);
         if b == 123 { break; }
         if b == 59 { break; }
+        if b == 33 { break; }
         ret_end = ret_end + 1;
         let marker: i32 = 0;
     }
@@ -3042,7 +3153,7 @@ let emit_function2 = std::func(
         emit_foreign_wrapper(
             source, output, name_start, name_end,
             params_start + 1, params_end, ret_start, ret_end, link,
-            mod_start, mod_end, prefix
+            mod_start, mod_end, prefix, meta
         );
         return scan_semi(source, body_open, sb_len(source)) + 1;
     }
@@ -3054,9 +3165,9 @@ let emit_function2 = std::func(
     sb_append_literal(output, "#proc ", 6);
     emit_label(source, output, name_start, name_end, link, mod_start, mod_end, prefix);
     sb_append_literal(output, "(", 1);
-    emit_params2(source, output, params_start + 1, params_end);
+    emit_params2(source, output, params_start + 1, params_end, meta);
     sb_append_literal(output, ") -> ", 5);
-    emit_type(source, ret_start, ret_end, output);
+    emit_type(source, ret_start, ret_end, output, meta);
     sb_append_literal(output, " {\n", 3);
     emit_block(source, output, body_open + 1, match_brace(source, body_open, sb_len(source)), layout, types, meta, consts);
     sb_append_literal(output, "}\n", 2);
