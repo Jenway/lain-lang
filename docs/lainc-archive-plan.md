@@ -160,14 +160,23 @@ src/lainc 是 Lain 写、受自举约束，需重新实现，不能复用 LAIN-I
   - `let X: type = ...` 类型别名、`vector.Vec(...)` 泛型实例化仍未绑定
     （emit_type 回落 addr）。
 
-### 阶段 D：语言特性补齐（差距 8、9、10、11）
+### 阶段 D：语言特性补齐（差距 8、9、10、11）——✅ 已完成（核心路径）
 
-- 效果子句 `! {...}`：解析并忽略（记录到 meta，emit 时丢弃）。
-- `&mut T` 参数：降级为 addr/按引用 emit。
-- 方法调用 `x.f(args)`：按「receiver 限定调用」解析（现有 emit_path_tail
-  已支持 `a.b(...)` 形态，扩展 meta 驱动解析）。
-- `||`、`else if`、链式比较：拆句/循环展开（frozen 约束）。
-- 验收：tokenizer.lain 全函数编译 + 运行；`is_space`/`tokenize` 逻辑正确。
+- 效果子句 `! {...}`：emit_function2 body_open 扫描跳过（阶段 B）。
+- `&mut T` 参数：emit_type `&` → addr（阶段 B）。
+- 方法调用 stub：非模块 receiver 调用降级 0（阶段 B）。
+- **工厂体互调**：裸名调用若 callee 是工厂模块成员（kind=3、owner 行
+  payload_length>1），前缀用工厂名 span（`bare_call_prefix` /
+  `bare_call_prefix_len`）——`classify(byte)` → `#call f0_make_classify`
+  等，工厂体内函数可互相调用。
+- **字段访问失败降级**：`x.field` 在 per-function types 表查不到且 x
+  不是模块时降级 0（原 fall-through 会输出未定义的 `%field`）。
+- 验收：`run_lainc_archive_d.py`——工厂体内 record 定义、`||` 链、
+  else、字段 stub、互调全链，`process()` → 42。M1/M2/阶段 A/B/C 保持。
+- 已知限制（本阶段记录）：
+  - `let X: type = <type-expr>` 类型别名与 `vector.Vec(...)` 泛型实例化
+    仍未绑定（emit_type 回落 addr；record 字段宽度对别名取默认）。
+  - 工厂参数不绑定（`Memory.Allocation` 等仅在效果子句中出现，已跳过）。
 
 ### 阶段 E：archive 主干闭包（roadmap 阶段四）
 
@@ -205,20 +214,20 @@ python tests/lainir_lain/run_lainc_module.py    # module 机制
 python tests/lainir_lain/run_lainc_archive_a.py # 阶段 A：多源+import
 python tests/lainir_lain/run_lainc_archive_b.py # 阶段 B：std stub
 python tests/lainir_lain/run_lainc_archive_c.py # 阶段 C：模块工厂
+python tests/lainir_lain/run_lainc_archive_d.py # 阶段 D：工厂体语言面
 python tests/lainir_lain/run_compiler_source_closure.py  # frozen 参照（不改）
 ```
 
 ## 7. 下一项
 
-阶段 C（模块工厂核心路径）已完成并提交。下一项是**阶段 D：语言特性
-补齐**（差距 8、9、10、11）——
+阶段 D（工厂体语言面）已完成并提交。下一项是**阶段 E：archive 主干
+闭包**（roadmap 阶段四）——
 
-- 效果子句 `! {...}`：已在 emit_function2 body_open 扫描跳过（阶段 B）。
-- `&mut T` 参数：emit_type 已回落 addr（`&` → addr）。
-- 方法调用 stub：已降级为 0（阶段 B）。
-- 剩余：函数体内 `let X: type = std::struct {...}`（record 定义在普通
-  函数体内，emit_stmt 识别为值 let 会出垃圾）、`vector.Vec(T, A, B)`
-  类型别名绑定、`else if` 链验证。
-- 目标：`tokenizer.lain` 的工厂体真正可编译执行（类型/record 绑定），
-  为阶段 E（archive 主干闭包）铺路。
-- 保持 M1/M2/阶段 A/B/C 绿。
+- 按依赖顺序逐模块编译 archive：tokenizer → syntax → generated_syntax →
+  types → effects → ... → compiler_core → compiler_driver → compiler_api
+  → lainc。
+- 关键前置：`-> Module` 工厂**调用链**（tokenizer.Tokenizer(Memory) 被
+  syntax 调用）、跨模块 import 层级、std 成员 stub 解析。
+- 每模块产物 l1check；最后实例化 `lainc.API` 运行。
+- 验收：24 文件全部编译，产物 verifier-valid，无 `(error ...)` 产物。
+- 保持 M1/M2/阶段 A/B/C/D 绿。

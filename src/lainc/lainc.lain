@@ -1792,6 +1792,48 @@ let emit_std_intrinsic = std::func(
     return 0;
 };
 
+// Resolve the factory prefix for a bare member call: when the callee is a
+// std::func member of a factory-produced module (kind 3 with a non-zero
+// owning module row whose payload names the factory), returns the factory
+// name start offset; 0 otherwise.
+let bare_call_prefix = std::func(
+    source: addr,
+    member_start: usize,
+    member_end: usize,
+    meta: addr,
+) -> usize {
+    let mlen: usize = sb_len(meta);
+    let mrow: usize = meta_lookup(meta, mlen, source, member_start, member_end - member_start);
+    if mrow == 0 { return 0; }
+    let mk: usize = meta_value_kind(meta, mlen, mrow);
+    if mk != 3 { return 0; }
+    let owner: usize = meta_row_field(meta, mlen, mrow, 5);
+    if owner == 0 { return 0; }
+    let pl: usize = meta_value_payload_length(meta, mlen, owner);
+    if pl <= 1 { return 0; }
+    return meta_value_payload_start(meta, mlen, owner);
+};
+
+// The length of the factory-name prefix for a bare member call; 0 when
+// the callee has no factory owner.
+let bare_call_prefix_len = std::func(
+    source: addr,
+    member_start: usize,
+    member_end: usize,
+    meta: addr,
+) -> usize {
+    let mlen: usize = sb_len(meta);
+    let mrow: usize = meta_lookup(meta, mlen, source, member_start, member_end - member_start);
+    if mrow == 0 { return 0; }
+    let mk: usize = meta_value_kind(meta, mlen, mrow);
+    if mk != 3 { return 0; }
+    let owner: usize = meta_row_field(meta, mlen, mrow, 5);
+    if owner == 0 { return 0; }
+    let pl: usize = meta_value_payload_length(meta, mlen, owner);
+    if pl <= 1 { return 0; }
+    return pl;
+};
+
 // Emit a single operand [start, end): number, string literal, identifier,
 // &x, or call.
 let emit_operand2 = std::func(
@@ -1845,6 +1887,12 @@ let emit_operand2 = std::func(
                 sb_append_literal(output, "))", 2);
                 return;
             }
+        }
+        let mlen7: usize = sb_len(meta);
+        let mrow7b: usize = meta_lookup(meta, mlen7, source, s, name_end - s);
+        if mrow7b == 0 {
+            sb_append_literal(output, "0", 1);
+            return;
         }
     }
     if sb_span_equals(source, s, name_end - s, "std", 3) {
@@ -1937,6 +1985,18 @@ let emit_operand2 = std::func(
         if stub == 1 {
             sb_append_literal(output, "0", 1);
             return;
+        }
+        if mstart == 0 {
+            let bp: usize = bare_call_prefix(source, member_start, member_end, meta);
+            if bp != 0 {
+                let bplen: usize = bare_call_prefix_len(source, member_start, member_end, meta);
+                if bplen != 0 {
+                    let bpe: usize = bp + bplen;
+                    mstart = bp;
+                    mend = bpe;
+                    let marker: i32 = 0;
+                }
+            }
         }
         emit_call_named(source, member_start, member_end, mstart, mend, args_start, args_end, output, layout, types, meta, consts);
         return;
