@@ -359,6 +359,9 @@ let eval_module_factory = std::func(
                             let mne2: usize = parse_ident(source, mns2);
                             meta_append(consts, 1, mns2, mne2 - mns2, cv2, 0, mrow7);
                             let marker: i32 = 0;
+                        } else {
+                            let tb2: i32 = try_bind_module_value(source, s, body_end, output, layout, types, meta, consts);
+                            let marker: i32 = 0;
                         }
                         current = semi2 + 1;
                         let marker: i32 = 0;
@@ -1519,6 +1522,21 @@ let emit_arg_one = std::func(
             let marker: i32 = 0;
         }
     }
+    let ts: usize = trim_start(source, arg_start, arg_end);
+    let amut: usize = 0;
+    if sb_byte_at(source, ts) == 38 {
+        let after_amp: usize = skip_space(source, ts + 1);
+        if sb_span_equals(source, after_amp, 3, "mut", 3) {
+            amut = 1;
+            let marker: i32 = 0;
+        }
+    }
+    if amut == 1 {
+        let ident_s: usize = skip_space(source, ts + 4);
+        sb_append_literal(output, "%", 1);
+        sb_append_span(output, source, ident_s, parse_ident(source, ident_s) - ident_s);
+        return arg_end;
+    }
     emit_expr(source, arg_start, arg_end, output, layout, types, meta, consts);
     return arg_end;
 };
@@ -2427,6 +2445,10 @@ let emit_stmt_let = std::func(
             emit_record_value(source, output, name_start, name_end, eq + 1, semi, layout, types, meta, consts);
             return semi + 1;
         }
+        sb_append_literal(output, "#let %", 6);
+        sb_append_span(output, source, name_start, name_end - name_start);
+        sb_append_literal(output, " = 0\n", 5);
+        return semi + 1;
     }
     sb_append_literal(output, "#let %", 6);
     sb_append_span(output, source, name_start, name_end - name_start);
@@ -2465,6 +2487,60 @@ let emit_stmt_while = std::func(
     return brace_end + 1;
 };
 
+// Emit the `else` / `else if` chain starting at `start` (which points at
+// the `else` keyword).  else-if clauses become nested `else { #if ... }`
+// blocks; returns the index after the chain.
+let emit_else_tail = std::func(
+    source: addr,
+    output: addr,
+    start: usize,
+    body_end: usize,
+    layout: addr,
+    types: addr,
+    meta: addr,
+    consts: addr,
+) -> usize {
+    let done: usize = 0;
+    let current: usize = start;
+    let depth: usize = 1;
+    sb_append_literal(output, "else {\n", 7);
+    while done == 0 {
+        if sb_span_equals(source, current, 4, "else", 4) {
+            let after_else: usize = skip_space(source, current + 4);
+            if sb_span_equals(source, after_else, 2, "if", 2) {
+                let cond_start: usize = skip_space(source, after_else + 2);
+                let brace: usize = scan_brace(source, cond_start, body_end);
+                let brace_end: usize = match_brace(source, brace, body_end);
+                sb_append_literal(output, "  #if ", 6);
+                emit_expr(source, cond_start, brace, output, layout, types, meta, consts);
+                sb_append_literal(output, " {\n", 3);
+                emit_block(source, output, brace + 1, brace_end, layout, types, meta, consts);
+                sb_append_literal(output, "} else {\n", 9);
+                depth = depth + 1;
+                current = skip_space(source, brace_end + 1);
+                let marker: i32 = 0;
+            } else {
+                let brace2: usize = scan_brace(source, after_else, body_end);
+                let brace2_end: usize = match_brace(source, brace2, body_end);
+                emit_block(source, output, brace2 + 1, brace2_end, layout, types, meta, consts);
+                current = brace2_end + 1;
+                done = 1;
+                let marker: i32 = 0;
+            }
+        } else {
+            done = 1;
+            let marker: i32 = 0;
+        }
+        let marker: i32 = 0;
+    }
+    while depth > 0 {
+        sb_append_literal(output, "}\n", 2);
+        depth = depth - 1;
+        let marker: i32 = 0;
+    }
+    return current;
+};
+
 // Emit `if COND { ... } else { ... }`.  Returns the index after it.
 let emit_stmt_if = std::func(
     source: addr,
@@ -2486,12 +2562,7 @@ let emit_stmt_if = std::func(
     sb_append_literal(output, "}\n", 2);
     let after: usize = skip_space(source, brace_end + 1);
     if sb_span_equals(source, after, 4, "else", 4) {
-        let brace2: usize = scan_brace(source, after + 4, body_end);
-        let brace2_end: usize = match_brace(source, brace2, body_end);
-        sb_append_literal(output, "else {\n", 7);
-        emit_block(source, output, brace2 + 1, brace2_end, layout, types, meta, consts);
-        sb_append_literal(output, "}\n", 2);
-        return brace2_end + 1;
+        return emit_else_tail(source, output, after, body_end, layout, types, meta, consts);
     }
     let marker: i32 = 0;
     return brace_end + 1;
@@ -2540,6 +2611,16 @@ let emit_stmt_other = std::func(
         return semi + 1;
     }
     emit_expr(source, s, semi, output, layout, types, meta, consts);
+    let olen: usize = sb_len(output);
+    if olen >= 2 {
+        let o3: usize = olen - 1;
+        let last1: i32 = sb_byte_at(output, o3);
+        if last1 == 48 {
+            std::store_bits(64, output, o3);
+            sb_append_literal(output, "#let %_ = 0\n", 12);
+            return semi + 1;
+        }
+    }
     sb_append_literal(output, "\n", 1);
     return semi + 1;
 };
