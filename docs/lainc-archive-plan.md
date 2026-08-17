@@ -202,6 +202,13 @@ src/lainc 是 Lain 写、受自举约束，需重新实现，不能复用 LAIN-I
 - **std 无源码**：不写 std 库，按 frozen lainc.l1 的外部能力语义给 stub。
 - **M2 固定点脆弱**：任何 emit 改动都可能破坏自举。对策：每阶段改动后
   立即跑 M1/M2；lint（check_lens.py）+ LF 检查。
+- **emit_operand2 不可动（阶段 E 实测）**：在 emit_operand2 内加任何
+  逻辑（`&mut` 参数跳过、record 构造 stub，两种写法均试）都破坏 M2
+  收敛（gen2≠gen3）。根因：emit_operand2 是「编译自身时被自身处理」的
+  自举核心——frozen（gen1 生成者）与 gen1（gen2 生成者）对改动的翻译
+  产生分歧。阶段 E 所需的 `&mut` 值参数、`Lex.Span {...}` record 构造
+  stub 必须**绕开 emit_operand2**（放 emit_arg_one / emit_stmt_let /
+  emit_call_args 等外围，逐个小步验证 M2）。
 - **规模**：参照 frozen lainc.l1 相关机制约 2000+ 行 LAIN-IR；src/lainc
   复刻预计数百至上千行 Lain，分阶段合入，不一次大爆炸。
 
@@ -220,14 +227,22 @@ python tests/lainir_lain/run_compiler_source_closure.py  # frozen 参照（不�
 
 ## 7. 下一项
 
-阶段 D（工厂体语言面）已完成并提交。下一项是**阶段 E：archive 主干
-闭包**（roadmap 阶段四）——
+阶段 D（工厂体语言面）已完成并提交。**阶段 E（archive 主干闭包）已
+开始探索**：tokenizer+syntax+合成入口的编译链已跑通（0 产物预期——工厂
+定义不 eval），定位到两个前置缺口：
 
-- 按依赖顺序逐模块编译 archive：tokenizer → syntax → generated_syntax →
-  types → effects → ... → compiler_core → compiler_driver → compiler_api
-  → lainc。
-- 关键前置：`-> Module` 工厂**调用链**（tokenizer.Tokenizer(Memory) 被
-  syntax 调用）、跨模块 import 层级、std 成员 stub 解析。
-- 每模块产物 l1check；最后实例化 `lainc.API` 运行。
-- 验收：24 文件全部编译，产物 verifier-valid，无 `(error ...)` 产物。
-- 保持 M1/M2/阶段 A/B/C/D 绿。
+- **工厂体内嵌套工厂调用**（syntax 的 `let Lex: Module =
+  tokenizer.Tokenizer(Memory);`）：需要 eval_module_factory 常量分支的
+  `try_bind_module_value`（非自举核心区，理论安全，待单独验证 M2）。
+- **`&mut` 值参数与 record 构造 stub**：必须放在 emit_operand2 **之外**
+  （emit_arg_one / emit_stmt_let），因为 emit_operand2 的任何改动都破坏
+  M2 收敛（见「5. 风险与对策」）。
+
+阶段 E 实施顺序：
+
+1. eval_module_factory 常量分支加回 try_bind（嵌套工厂调用），验证 M2。
+2. emit_stmt_let 的 record 构造失败分支 stub（let rhs 的
+   `Node {...}`），验证 M2；再处理参数位置的 `Lex.Span {...}`。
+3. emit_arg_one 处理 `&mut ident` 值参数，验证 M2。
+4. 逐模块编译 archive（tokenizer → syntax → … → lainc），每模块 l1check。
+5. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物 verifier-valid。
