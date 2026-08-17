@@ -228,26 +228,32 @@ python tests/lainir_lain/run_compiler_source_closure.py  # frozen 参照（不�
 ## 7. 下一项
 
 阶段 D（工厂体语言面）已完成并提交。**阶段 E（archive 主干闭包）实施中**
-——已提交改动：嵌套工厂调用 try_bind（c224060 前项）、record 构造 stub、
-`&mut` 值参数、裸 stub 语句包装、emit_else_tail 嵌套 else-if 展开、
-**复合/字段赋值 lower**（`target.first_child = child` 等 → `#let %_ = 值`，
-46f28d4）。
+（提交 b6ea385 等）——本轮完成：
 
-**当前状态**：tokenizer（简化变体，去嵌套 else-if）+syntax 工厂链编译
-产物**无垃圾语句**（parse 错误清零）；剩余 l1check 错误是
-`verify[2006]` 类型不匹配——**类型别名未绑定**：`let TokenKind: type =
-i32;` 未解析，push 声明 `addr %kind`（emit_type 未知类型回落 addr），
-调用传数字 `1`（#bits<32>）→ 不匹配。
+- **类型别名绑定**：`let X: type = T;` 绑定 kind=4，emit_type 查表递归
+  解析（TokenKind → #bits<32>）；emit_params2/emit_foreign_wrapper 贯穿
+  meta 参数（曾漏 wrapper 导致 frozen 5108——已修）。
+- **return module 成员**：scan_return_module 处理 `return std::module
+  {...}` 内联函数（eof/trivia/...）→ f0_<factory>_<name>。
+- **效果子句返回类型**：ret_end 扫描在 `!` 停（`-> NodeId ! {...}` 正确
+  解析别名）。
+- **record 构造 return** → `#return 0`；丢弃绑定唯一名（`%_<pos>`）；
+  字段 stub 只对非调用形态（方法调用 fall-through）。
+
+**当前状态**：tokenizer（简化变体）+syntax 工厂链编译无垃圾语句；l1check
+剩余唯一错误是 `verify[2006]`——**未解析字段访问的 stub 0 传给 addr
+参数**（如 `read_group(..., token.span)` → 0 vs `addr %opening_span`）。
+已用最小 LAIN-IR 测试确认「0 字面量不能作 addr 参数」（`#call f(0)` →
+2006），而 `#let %x: addr = 0` 可（注解强制）。这是**类型系统不完整**
+（per-function types 表缺参数类型，无法知道字段的精确类型）。
 
 **阶段 E 剩余**：
 
-1. **类型别名绑定**：`let X: type = <type-expr>;` 绑定（kind=4 或 consts），
-   emit_type 查表解析（TokenKind → #bits<32>）——emit_type 需加 meta
-   参数，改动面大、M2 敏感，需小步验证。
-2. **原版 tokenizer 的嵌套 else-if**（byte==34 分支的 escaped 处理）——
-   简化变体已验证该结构是 105 行垃圾（`#eq(#sub(%, %space)...)`）的
-   触发点，但 emit_else_tail 本身在 t3-t8 合成测试中正常；需在嵌套
-   上下文下再定位（可能是 emit_else_tail 循环体内调 emit_block 的
-   嵌套 while 触发 frozen 丢语句）。
+1. **addr 参数位置的字段 stub**：让 stub 值与 addr 参数兼容——候选：
+   emit_arg_one 检测字段形态实参输出基变量（`token.span` → `%token`），
+   或按函数声明类型包装；需要小步验证 M2 与标量位置的兼容性。
+2. **原版 tokenizer 的嵌套 else-if**（byte==34 分支）——简化变体已过
+   类型检查，原版需在嵌套上下文再定位。
 3. 逐模块编译 archive（tokenizer → syntax → … → lainc），每模块 l1check。
-4. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物 verifier-valid。
+4. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物 verifier-valid
+   （或记录剩余 verify 类型限制）。
