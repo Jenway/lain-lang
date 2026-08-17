@@ -228,25 +228,26 @@ python tests/lainir_lain/run_compiler_source_closure.py  # frozen 参照（不�
 ## 7. 下一项
 
 阶段 D（工厂体语言面）已完成并提交。**阶段 E（archive 主干闭包）实施中**
-（提交 c224060）——五项 M2 安全改动已落地：
+——已提交改动：嵌套工厂调用 try_bind（c224060 前项）、record 构造 stub、
+`&mut` 值参数、裸 stub 语句包装、emit_else_tail 嵌套 else-if 展开、
+**复合/字段赋值 lower**（`target.first_child = child` 等 → `#let %_ = 值`，
+46f28d4）。
 
-- eval_module_factory 常量分支 try_bind：工厂体内嵌套工厂调用
-  （`let Lex: Module = tokenizer.Tokenizer(Memory);`）绑定 ✓
-- emit_stmt_let record 构造失败 → `#let %x = 0` ✓
-- emit_arg_one `&mut ident` 值参数 → `%ident` ✓
-- emit_stmt_other 裸 stub 语句 → `#let %_ = 0` ✓
-- emit_else_tail（新）：else-if 链嵌套在单个 `else { }` 内
-  （`#if C1 { } else { #if C2 { } else { ... } }`——LAIN-IR 要求每个
-  else 配对 #if）；递归版在 frozen 值返回递归 lower 下坏，已弃
-
-**当前状态**：tokenizer+syntax 工厂链编译出 25 个运行时 proc
-（f0_Tokenizer_* / f0_Syntax_*）；l1check 推进到 tokenize 的深层
-else-if 链（7 分支）处失败——frozen 前端对链状态（depth/current）的
-lower 仍产生垃圾（`#eq(#sub(%, %space), ...)` 类）。
+**当前状态**：tokenizer（简化变体，去嵌套 else-if）+syntax 工厂链编译
+产物**无垃圾语句**（parse 错误清零）；剩余 l1check 错误是
+`verify[2006]` 类型不匹配——**类型别名未绑定**：`let TokenKind: type =
+i32;` 未解析，push 声明 `addr %kind`（emit_type 未知类型回落 addr），
+调用传数字 `1`（#bits<32>）→ 不匹配。
 
 **阶段 E 剩余**：
 
-1. 修深层 else-if 链的 frozen lower 问题（emit_else_tail 的状态推进被
-   丢——尝试把链状态推进抽成独立函数、或改用「每分支独立函数」展开）。
-2. 逐模块编译 archive（tokenizer → syntax → … → lainc），每模块 l1check。
-3. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物 verifier-valid。
+1. **类型别名绑定**：`let X: type = <type-expr>;` 绑定（kind=4 或 consts），
+   emit_type 查表解析（TokenKind → #bits<32>）——emit_type 需加 meta
+   参数，改动面大、M2 敏感，需小步验证。
+2. **原版 tokenizer 的嵌套 else-if**（byte==34 分支的 escaped 处理）——
+   简化变体已验证该结构是 105 行垃圾（`#eq(#sub(%, %space)...)`）的
+   触发点，但 emit_else_tail 本身在 t3-t8 合成测试中正常；需在嵌套
+   上下文下再定位（可能是 emit_else_tail 循环体内调 emit_block 的
+   嵌套 while 触发 frozen 丢语句）。
+3. 逐模块编译 archive（tokenizer → syntax → … → lainc），每模块 l1check。
+4. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物 verifier-valid。
