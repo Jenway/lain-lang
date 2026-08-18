@@ -9,6 +9,9 @@ compile-time evaluator handles:
   - local let bindings in consteval bodies
   - references to previously bound top-level constants
   - if/else branches with comparisons
+  - calls to other consteval functions (bare, module-qualified,
+    referencing caller parameters)
+  - boolean conditions with && and || and else-if chains
 Each product must l1check clean and run to the expected value.
 """
 
@@ -77,6 +80,8 @@ def main() -> int:
             "consteval_locals": "42",      # base = x*10; bonus = 2; base+bonus
             "consteval_const_ref": "84",   # A = add1(41); double(A) = A*2
             "consteval_if": "1",           # classify(40) == 40 -> 1
+            "consteval_calls": "13",       # square(2) + square(3)
+            "consteval_bool": "1234",      # else-if chain, && / ||, top-level expr
         }
         for name, expected in cases.items():
             out = compile_fixture(name)
