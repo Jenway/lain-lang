@@ -1370,10 +1370,196 @@ let meta_eval_nested = std::func(
     return result;
 };
 
-// Evaluate a compile-time condition [start, end): `operand cmp operand`
-// with cmp in == != < <= > >=.  Returns 1 (true), 0 (false), or max-1 when
-// not evaluable.  Single comparison only (no && || yet; they return max-1).
-let meta_eval_cond = std::func(
+// Find the closing paren for the call group whose opening `(` is at [open,
+// end); returns the position of the matching `)`, or end when unbalanced.
+let meta_scan_call_end = std::func(source: addr, open: usize, end: usize) -> usize {
+    let aend: usize = open + 1;
+    let adepth: usize = 1;
+    let adone: usize = 0;
+    while adone == 0 {
+        if aend >= end { return end; }
+        if sb_byte_at(source, aend) == 41 {
+            adepth = adepth - 1;
+            if adepth == 0 {
+                adone = 1;
+                let marker: i32 = 0;
+            } else {
+                aend = aend + 1;
+                let marker: i32 = 0;
+            }
+        } else {
+            if sb_byte_at(source, aend) == 40 {
+                adepth = adepth + 1;
+                aend = aend + 1;
+                let marker: i32 = 0;
+            } else {
+                aend = aend + 1;
+                let marker: i32 = 0;
+            }
+        }
+    }
+    return aend;
+};
+
+// Evaluate one compile-time operand, additionally recognizing a call
+// `name(args)` or `mod.name(args)` to a consteval (kind 6) function row.
+// end is the expression end (not the operand end): a call's `)` lies after
+// the callee identifier.  The callee is evaluated with calls=0 (pure body),
+// so calls may not nest inside a callee; this avoids recursive Lain
+// functions (the frozen bootstrap lowers value-returning recursion
+// incorrectly).  Returns the call result or max-1 when not evaluable.
+let meta_eval_operand_call = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    params: addr,
+    meta: addr,
+    mlen: usize,
+    consts: addr,
+) -> usize {
+    let sentinel: usize = 0 - 1;
+    let s: usize = trim_start(source, start, end);
+    let e: usize = trim_end(source, s, end);
+    let oe: usize = meta_operand_end(source, s, e);
+    let after: usize = skip_space(source, oe);
+    if after >= e {
+        return meta_eval_operand(source, s, oe, params);
+    }
+    if sb_byte_at(source, after) != 40 {
+        if sb_byte_at(source, after) != 46 {
+            return meta_eval_operand(source, s, oe, params);
+        }
+    }
+    let cmod_row: usize = 0;
+    let cmem_start: usize = s;
+    let cmem_end: usize = oe;
+    let csep2: usize = after;
+    if sb_byte_at(source, csep2) == 46 {
+        let cnext: usize = skip_space(source, csep2 + 1);
+        if is_ident_start(sb_byte_at(source, cnext)) {
+            let mlen3: usize = sb_len(meta);
+            let mrow4: usize = meta_lookup(meta, mlen3, source, s, oe - s);
+            if mrow4 != 0 {
+                let mk4: usize = meta_value_kind(meta, mlen3, mrow4);
+                if mk4 == 2 {
+                    cmod_row = mrow4;
+                    cmem_start = cnext;
+                    cmem_end = parse_ident(source, cnext);
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    if sb_byte_at(source, cmem_end) != 40 { return sentinel; }
+    let crow2: usize = 0;
+    if cmod_row != 0 {
+        crow2 = meta_lookup_qualified(meta, mlen, source, cmem_start, cmem_end - cmem_start, cmod_row);
+    } else {
+        crow2 = meta_lookup(meta, mlen, source, cmem_start, cmem_end - cmem_start);
+    }
+    if crow2 == 0 { return sentinel; }
+    let ck: usize = meta_value_kind(meta, mlen, crow2);
+    if ck != 6 { return sentinel; }
+    let aend: usize = meta_scan_call_end(source, cmem_end, e);
+    if aend >= e { return sentinel; }
+    return meta_call_consteval(source, meta, mlen, crow2, cmem_end + 1, aend, consts, 0, params);
+};
+
+// End of a full operand at [start, limit): the identifier itself, or the
+// complete `mod.name(...)` call group (path segments joined by `.` plus the
+// balanced parentheses).  Returns the index after the operand.
+let meta_operand_call_end = std::func(source: addr, start: usize, limit: usize) -> usize {
+    let cur: usize = meta_operand_end(source, start, limit);
+    let scanning: i32 = 1;
+    while scanning == 1 {
+        if cur >= limit {
+            scanning = 0;
+            let marker: i32 = 0;
+        } else {
+            let b: i32 = sb_byte_at(source, cur);
+            if b == 46 {
+                let nxt: usize = skip_space(source, cur + 1);
+                cur = parse_ident(source, nxt);
+                let marker: i32 = 0;
+            } else {
+                if b == 40 {
+                    let close: usize = meta_scan_call_end(source, cur, limit);
+                    cur = close + 1;
+                    let marker: i32 = 0;
+                } else {
+                    scanning = 0;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+    }
+    return cur;
+};
+
+// Nested expression evaluator with call recognition: same as
+// meta_eval_nested, but operands may be consteval calls.  The callee body
+// is evaluated purely (calls=0), so calls inside a callee are not folded.
+let meta_eval_nested_call = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    params: addr,
+    meta: addr,
+    mlen: usize,
+    consts: addr,
+) -> usize {
+    let sentinel: usize = 0 - 1;
+    let vals: addr = sb_new();
+    let ops: addr = sb_new();
+    let cur: usize = trim_start(source, start, end);
+    let limit: usize = trim_end(source, cur, end);
+    let scanning: i32 = 1;
+    while scanning == 1 {
+        if cur >= limit {
+            scanning = 0;
+            let marker: i32 = 0;
+        } else {
+            let b: i32 = sb_byte_at(source, cur);
+            if b == 43 {
+                let ok: i32 = meta_fold_ops(vals, ops, 43, sentinel);
+                if ok == 0 { return sentinel; }
+                sb_append(ops, 43);
+                cur = skip_space(source, cur + 1);
+                let marker: i32 = 0;
+            } else {
+                if b == 45 {
+                    let ok: i32 = meta_fold_ops(vals, ops, 45, sentinel);
+                    if ok == 0 { return sentinel; }
+                    sb_append(ops, 45);
+                    cur = skip_space(source, cur + 1);
+                    let marker: i32 = 0;
+                } else {
+                    if b == 42 {
+                        let ok: i32 = meta_fold_ops(vals, ops, 42, sentinel);
+                        if ok == 0 { return sentinel; }
+                        sb_append(ops, 42);
+                        cur = skip_space(source, cur + 1);
+                        let marker: i32 = 0;
+                    } else {
+                        let v: usize = meta_eval_operand_call(source, cur, limit, params, meta, mlen, consts);
+                        if v == sentinel { return sentinel; }
+                        meta_stack_push(vals, v);
+                        cur = skip_space(source, meta_operand_call_end(source, cur, limit));
+                    }
+                }
+            }
+        }
+    }
+    let ok2: i32 = meta_fold_all(vals, ops, sentinel);
+    if ok2 == 0 { return sentinel; }
+    let result: usize = meta_stack_pop(vals);
+    return result;
+};
+
+// Evaluate a single compile-time comparison [start, end):
+// `operand cmp operand` with cmp in == != < <= > >=.
+// Returns 1 (true), 0 (false), or max-1 when not evaluable.
+let meta_eval_cond_single = std::func(
     source: addr,
     start: usize,
     end: usize,
@@ -1429,6 +1615,106 @@ let meta_eval_cond = std::func(
     return result;
 };
 
+// Precedence of a compile-time boolean operator: && = 2, || = 1.
+let meta_bool_prec = std::func(op: i32) -> usize {
+    if op == 38 { return 2; }
+    return 1;
+};
+
+// Fold boolean operator-stack entries whose precedence is >= the incoming
+// one.  Returns 1 on success, 0 when a fold failed.
+let meta_fold_bool_ops = std::func(
+    vals: addr,
+    ops: addr,
+    incoming: i32,
+    sentinel: usize,
+) -> i32 {
+    let done: i32 = 0;
+    while done == 0 {
+        let olen: usize = sb_len(ops);
+        if olen == 0 {
+            done = 1;
+            let marker: i32 = 0;
+        } else {
+            let top: i32 = sb_byte_at(ops, olen - 1);
+            if meta_bool_prec(top) < meta_bool_prec(incoming) {
+                done = 1;
+                let marker: i32 = 0;
+            } else {
+                let rv: usize = meta_stack_pop(vals);
+                let lv: usize = meta_stack_pop(vals);
+                if rv == sentinel { return 0; }
+                if lv == sentinel { return 0; }
+                let lz: usize = 0;
+                let rz: usize = 0;
+                if lv != 0 { lz = 1; }
+                if rv != 0 { rz = 1; }
+                let res: usize = 0;
+                if top == 38 {
+                    if lz == 1 {
+                        if rz == 1 { res = 1; }
+                    }
+                } else {
+                    if lz == 1 { res = 1; }
+                    if rz == 1 { res = 1; }
+                }
+                meta_stack_push(vals, res);
+                std::store_bits(64, ops, olen - 1);
+                let marker: i32 = 0;
+            }
+        }
+    }
+    return 1;
+};
+
+// Evaluate a compile-time condition [start, end) with && and ||:
+// comparisons joined by && (precedence 2) and || (precedence 1),
+// left-associative, iteratively (two explicit stacks; no recursion).
+// Returns 1 (true), 0 (false), or max-1 when not evaluable.
+let meta_eval_bool = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    params: addr,
+) -> usize {
+    let sentinel: usize = 0 - 1;
+    let vals: addr = sb_new();
+    let ops: addr = sb_new();
+    let cur: usize = trim_start(source, start, end);
+    let limit: usize = trim_end(source, cur, end);
+    let scanning: i32 = 1;
+    while scanning == 1 {
+        if cur >= limit {
+            scanning = 0;
+            let marker: i32 = 0;
+        } else {
+            let and: usize = scan_and(source, cur, limit);
+            let or: usize = scan_or(source, cur, limit);
+            let stop: usize = limit;
+            if and < stop { stop = and; }
+            if or < stop { stop = or; }
+            let cv: usize = meta_eval_cond_single(source, cur, stop, params);
+            if cv == sentinel { return sentinel; }
+            meta_stack_push(vals, cv);
+            if stop >= limit {
+                scanning = 0;
+                let marker: i32 = 0;
+            } else {
+                let b: i32 = sb_byte_at(source, stop);
+                let ok: i32 = meta_fold_bool_ops(vals, ops, b, sentinel);
+                if ok == 0 { return sentinel; }
+                sb_append(ops, b);
+                cur = skip_space(source, stop + 2);
+                let marker: i32 = 0;
+            }
+        }
+    }
+    let ok2: i32 = meta_fold_bool_ops(vals, ops, 124, sentinel);
+    if ok2 == 0 { return sentinel; }
+    let result: usize = meta_stack_pop(vals);
+    return result;
+};
+
 // Copy every kind-1 row (top-level constant) of the consts table into the
 // params table, so compile-time argument expressions can reference already
 // bound top-level constants.  Single loop, no nesting.
@@ -1458,6 +1744,12 @@ let meta_consteval_copy_consts = std::func(consts: addr, params: addr) -> unit {
 
 // Call a consteval (kind 6) function row with arguments [args_start,
 // args_end); binds parameters then evaluates the return expression.
+// calls = 1 allows the body expression to call other consteval functions
+// (operands go through meta_eval_operand_call); calls = 0 evaluates the
+// body purely.  Nested calls never recurse into another calls=1 frame, so
+// no recursive Lain function is generated.  outer is the caller's parameter
+// environment (its kind-1 rows are copied in so argument expressions can
+// reference caller parameters); pass nil (0) at top level.
 let meta_call_consteval = std::func(
     source: addr,
     meta: addr,
@@ -1466,9 +1758,12 @@ let meta_call_consteval = std::func(
     args_start: usize,
     args_end: usize,
     consts: addr,
+    calls: i32,
+    outer: addr,
 ) -> usize {
     let params: addr = sb_new();
     meta_consteval_copy_consts(consts, params);
+    meta_consteval_copy_consts(outer, params);
     let ps: usize = meta_value_payload_start(meta, mlen, row);
     let body: usize = meta_value_payload_length(meta, mlen, row);
     let params_end: usize = ps + 1;
@@ -1494,7 +1789,14 @@ let meta_call_consteval = std::func(
             let pn: usize = parse_ident(source, pcur);
             let psep: usize = scan_top_op(source, pn, params_end, 44);
             let asep: usize = scan_top_op(source, acur, args_end, 44);
-            let av: usize = meta_eval_nested(source, acur, asep, params);
+            let av: usize = 0 - 1;
+            if calls == 1 {
+                av = meta_eval_nested_call(source, acur, asep, params, meta, mlen, consts);
+                let marker: i32 = 0;
+            } else {
+                av = meta_eval_nested(source, acur, asep, params);
+                let marker: i32 = 0;
+            }
             if av != sentinel {
                 meta_append(params, 1, pcur, pn - pcur, av, 0, 0);
                 let marker: i32 = 0;
@@ -1509,25 +1811,8 @@ let meta_call_consteval = std::func(
     let after_locals: usize = meta_consteval_bind_locals(source, body + 1, brace_end, params);
     let stmt: usize = skip_space(source, after_locals);
     if sb_span_equals(source, stmt, 2, "if", 2) {
-        let cond_start: usize = skip_space(source, stmt + 2);
-        let brace: usize = scan_brace(source, cond_start, brace_end);
-        let cond: usize = meta_eval_cond(source, cond_start, brace, params);
-        if cond != sentinel {
-            let then_close: usize = match_brace(source, brace, brace_end);
-            let after_then: usize = skip_space(source, then_close + 1);
-            if sb_span_equals(source, after_then, 4, "else", 4) {
-                let else_brace: usize = scan_brace(source, after_then + 4, brace_end);
-                let else_close: usize = match_brace(source, else_brace, brace_end);
-                if cond == 1 {
-                    return meta_consteval_eval_branch(source, brace + 1, then_close, params);
-                }
-                return meta_consteval_eval_branch(source, else_brace + 1, else_close, params);
-            }
-            if cond == 1 {
-                return meta_consteval_eval_branch(source, brace + 1, then_close, params);
-            }
-            return sentinel;
-        }
+        let iv: usize = meta_consteval_run_if(source, stmt, brace_end, params, meta, mlen, consts, calls);
+        if iv != sentinel { return iv; }
     }
     let ret: usize = after_locals;
     let scanning: i32 = 1;
@@ -1542,17 +1827,84 @@ let meta_call_consteval = std::func(
     }
     let rexpr: usize = skip_space(source, ret + 6);
     let rsemi: usize = scan_semi(source, rexpr, brace_end);
-    let value: usize = meta_eval_expr(source, rexpr, rsemi, params);
+    let value: usize = 0 - 1;
+    if calls == 1 {
+        value = meta_eval_nested_call(source, rexpr, rsemi, params, meta, mlen, consts);
+        let marker: i32 = 0;
+    } else {
+        value = meta_eval_expr(source, rexpr, rsemi, params);
+        let marker: i32 = 0;
+    }
     return value;
+};
+
+// Evaluate a consteval if/else-if/else chain starting at `stmt` (which
+// points at "if").  Returns the branch value or max-1 when the chain did
+// not produce a value (no branch taken, or a condition was not evaluable).
+// Iterative: each else-if is one loop turn (no recursive Lain function).
+let meta_consteval_run_if = std::func(
+    source: addr,
+    stmt: usize,
+    brace_end: usize,
+    params: addr,
+    meta: addr,
+    mlen: usize,
+    consts: addr,
+    calls: i32,
+) -> usize {
+    let sentinel: usize = 0 - 1;
+    let current: usize = stmt;
+    let running: i32 = 1;
+    let result: usize = sentinel;
+    while running == 1 {
+        if sb_span_equals(source, current, 2, "if", 2) {
+            let cond_start: usize = skip_space(source, current + 2);
+            let brace: usize = scan_brace(source, cond_start, brace_end);
+            let cond: usize = meta_eval_bool(source, cond_start, brace, params);
+            let then_close: usize = match_brace(source, brace, brace_end);
+            if cond == 1 {
+                result = meta_consteval_eval_branch(source, brace + 1, then_close, params, meta, mlen, consts, calls);
+                running = 0;
+                let marker: i32 = 0;
+            } else {
+                let after_then: usize = skip_space(source, then_close + 1);
+                if sb_span_equals(source, after_then, 4, "else", 4) {
+                    let after_else: usize = skip_space(source, after_then + 4);
+                    if sb_span_equals(source, after_else, 2, "if", 2) {
+                        current = after_else;
+                        let marker: i32 = 0;
+                    } else {
+                        let else_brace: usize = scan_brace(source, after_else, brace_end);
+                        let else_close: usize = match_brace(source, else_brace, brace_end);
+                        result = meta_consteval_eval_branch(source, else_brace + 1, else_close, params, meta, mlen, consts, calls);
+                        running = 0;
+                        let marker: i32 = 0;
+                    }
+                } else {
+                    running = 0;
+                    let marker: i32 = 0;
+                }
+            }
+        } else {
+            running = 0;
+            let marker: i32 = 0;
+        }
+    }
+    return result;
 };
 
 // Evaluate a consteval branch [start, end): bind local lets, then find the
 // return expression and evaluate it.  Returns the value or max-1.
+// calls selects call-recognizing evaluation (same as meta_call_consteval).
 let meta_consteval_eval_branch = std::func(
     source: addr,
     start: usize,
     end: usize,
     params: addr,
+    meta: addr,
+    mlen: usize,
+    consts: addr,
+    calls: i32,
 ) -> usize {
     let sentinel: usize = 0 - 1;
     let after_locals: usize = meta_consteval_bind_locals(source, start, end, params);
@@ -1569,7 +1921,14 @@ let meta_consteval_eval_branch = std::func(
     }
     let rexpr: usize = skip_space(source, ret + 6);
     let rsemi: usize = scan_semi(source, rexpr, end);
-    let value: usize = meta_eval_expr(source, rexpr, rsemi, params);
+    let value: usize = 0 - 1;
+    if calls == 1 {
+        value = meta_eval_nested_call(source, rexpr, rsemi, params, meta, mlen, consts);
+        let marker: i32 = 0;
+    } else {
+        value = meta_eval_expr(source, rexpr, rsemi, params);
+        let marker: i32 = 0;
+    }
     return value;
 };
 
@@ -3874,7 +4233,8 @@ let try_consteval_call = std::func(
             }
         }
     }
-    let cv2: usize = meta_call_consteval(source, meta, mlen2, crow2, cmem_end + 1, aend, consts);
+    let outer0: addr = sb_new();
+    let cv2: usize = meta_call_consteval(source, meta, mlen2, crow2, cmem_end + 1, aend, consts, 1, outer0);
     if cv2 != sentinel {
         meta_append(consts, 1, cns, cne - cns, cv2, 0, 0);
         return 1;
@@ -3951,12 +4311,20 @@ let compile_source = std::func(
                                 meta_append(consts, 1, cns, cne - cns, cval, 0, 0);
                                 let marker: i32 = 0;
                             } else {
-                                let tb: i32 = try_bind_module_value(source, index, length, output, layout, types, meta, consts);
-                                if tb == 0 {
-                                    let tc: i32 = try_consteval_call(source, crs, cre, cns, cne, meta, consts, sentinel);
+                                let env2: addr = sb_new();
+                                meta_consteval_copy_consts(consts, env2);
+                                let cval2: usize = meta_eval_nested(source, crs, cre, env2);
+                                if cval2 != sentinel {
+                                    meta_append(consts, 1, cns, cne - cns, cval2, 0, 0);
+                                    let marker: i32 = 0;
+                                } else {
+                                    let tb: i32 = try_bind_module_value(source, index, length, output, layout, types, meta, consts);
+                                    if tb == 0 {
+                                        let tc: i32 = try_consteval_call(source, crs, cre, cns, cne, meta, consts, sentinel);
+                                        let marker: i32 = 0;
+                                    }
                                     let marker: i32 = 0;
                                 }
-                                let marker: i32 = 0;
                             }
                             index = semi + 1;
                             let marker: i32 = 0;

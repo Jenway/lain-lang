@@ -50,14 +50,24 @@ Tables and operations:
   - `square(5) -> 25`, `add2(40, 2) -> 42`, `five() -> 42`.
   - Qualified calls `math.square(6)` resolve through the module's row to the
     kind-6 member (see Modules).
-  - The evaluator (`meta_eval_expr` + `meta_eval_nested`) now handles nested
-    arithmetic (`x * y + 1`, `a + b * c`) with an iterative shunting-yard
-    (two explicit stacks, no recursion), nested argument expressions
-    (`calc(2 + 3, 4 * 2)`), local `let` bindings inside the body
-    (`let base = x * 10; return base + 1;`), references to already bound
-    top-level constants (the consts table is copied into the parameter
-    environment), and `if cond { ... } else { ... }` branches with
-    `== != < <= > >=` comparisons.
+  - The evaluator (`meta_eval_expr` + `meta_eval_nested` +
+    `meta_eval_nested_call` + `meta_eval_bool`) handles:
+    - nested arithmetic (`x * y + 1`, `a + b * c`) with an iterative
+      shunting-yard (two explicit stacks, no recursion);
+    - nested argument expressions (`calc(2 + 3, 4 * 2)`);
+    - local `let` bindings inside the body (`let base = x * 10; return
+      base + 1;`);
+    - references to already bound top-level constants (the consts table is
+      copied into the parameter environment);
+    - `if / else if / else` chains with `== != < <= > >=` comparisons and
+      boolean `&&` / `||` conditions (iterative, precedence-aware);
+    - calls to other consteval functions — bare (`square(a)`) and
+      module-qualified (`math.square(a)`) — where the callee's body is
+      evaluated purely (calls=0) and the caller's parameter environment is
+      threaded into the callee, so argument expressions can reference caller
+      parameters; calls therefore cannot nest inside a callee;
+    - top-level initializers that are nested constant expressions over
+      bound constants (`let answer = a * 1000 + b * 100;`).
 - **Records**: `std::struct` declarations write a layout table
   (`Name:field#offset#width#...=size|`); constructors expand to
   `#alloca(size)` + per-field `#store`; field access `p.x` resolves the
@@ -94,10 +104,11 @@ for bare (unqualified) constant references pick the first binding.
 
 ## Known limitations
 
-- consteval interpretation has no recursion and no calls to other consteval
-  functions inside a body (a compile-time function cannot invoke another);
-  conditions support a single comparison (no `&&` / `||` yet — they fall
-  back to not-evaluable).
+- consteval interpretation has no recursion and calls cannot nest inside a
+  callee: a compile-time function may call another consteval function, but
+  the callee's own body is evaluated purely (its return expression and
+  arguments cannot contain further calls).  `&&` / `||` conditions and
+  `else if` chains are supported.
 - Multi-argument consteval works; argument/parameter counts must agree.
 - consteval members are only callable from top-level constant initializers
   (function-body calls to a consteval member are not folded).
