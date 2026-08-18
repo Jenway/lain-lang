@@ -1784,9 +1784,9 @@ let meta_eval_bool = std::func(
     return result;
 };
 
-// Copy every kind-1 row (top-level constant) of the consts table into the
-// params table, so compile-time argument expressions can reference already
-// bound top-level constants.  Single loop, no nesting.
+// Copy every kind-1 row of the consts table into the params table, so
+// compile-time argument expressions can reference already bound top-level
+// constants.  Single loop, no nesting.
 let meta_consteval_copy_consts = std::func(consts: addr, params: addr) -> unit {
     let clen: usize = sb_len(consts);
     let crows: usize = meta_rows(consts, clen);
@@ -1806,6 +1806,127 @@ let meta_consteval_copy_consts = std::func(consts: addr, params: addr) -> unit {
                 let marker: i32 = 0;
             }
             crow = crow + 1;
+            let marker: i32 = 0;
+        }
+    }
+};
+
+// Is the name span [ns, ns+nl) one of this function's parameter names?
+// Parameters live in [ps+1, params_end) as `name: type` comma-separated.
+let meta_span_is_param = std::func(
+    source: addr,
+    ns: usize,
+    nl: usize,
+    ps: usize,
+    params_end: usize,
+) -> i32 {
+    let cur: usize = ps + 1;
+    let found: i32 = 0;
+    let done: i32 = 0;
+    while done == 0 {
+        if cur >= params_end {
+            done = 1;
+            let marker: i32 = 0;
+        } else {
+            let pn: usize = parse_ident(source, cur);
+            let pl: usize = pn - cur;
+            if pl == nl {
+                let same: i32 = 1;
+                let i: usize = 0;
+                while i < nl {
+                    if sb_byte_at(source, cur + i) != sb_byte_at(source, ns + i) {
+                        same = 0;
+                        let marker: i32 = 0;
+                        break;
+                    }
+                    i = i + 1;
+                    let marker: i32 = 0;
+                }
+                if same == 1 {
+                    found = 1;
+                    done = 1;
+                    let marker: i32 = 0;
+                }
+            }
+            let after: usize = skip_space(source, pn);
+            let colon: usize = after;
+            if colon < params_end {
+                if sb_byte_at(source, colon) == 58 {
+                    let ts: usize = skip_space(source, colon + 1);
+                    let te: usize = ts;
+                    let tdone: i32 = 0;
+                    while tdone == 0 {
+                        if te >= params_end {
+                            tdone = 1;
+                            let marker: i32 = 0;
+                        } else {
+                            if sb_byte_at(source, te) == 44 {
+                                tdone = 1;
+                                let marker: i32 = 0;
+                            } else {
+                                te = te + 1;
+                                let marker: i32 = 0;
+                            }
+                        }
+                    }
+                    let nxt: usize = te;
+                    if nxt < params_end {
+                        cur = skip_space(source, nxt + 1);
+                        let marker: i32 = 0;
+                    } else {
+                        cur = params_end;
+                        let marker: i32 = 0;
+                    }
+                } else {
+                    if sb_byte_at(source, colon) == 44 {
+                        cur = skip_space(source, colon + 1);
+                        let marker: i32 = 0;
+                    } else {
+                        cur = params_end;
+                        let marker: i32 = 0;
+                    }
+                }
+            } else {
+                cur = params_end;
+                let marker: i32 = 0;
+            }
+        }
+    }
+    return found;
+};
+
+// Copy every kind-1 row of the caller's environment (outer) into params,
+// skipping rows whose name is one of this function's parameters (the
+// callee's own binding must shadow the caller's same-named variable).
+// Single loop, no nesting.
+let meta_consteval_copy_outer_skip = std::func(
+    source: addr,
+    outer: addr,
+    params: addr,
+    ps: usize,
+    params_end: usize,
+) -> unit {
+    let olen: usize = sb_len(outer);
+    let orows: usize = meta_rows(outer, olen);
+    let orow: usize = 1;
+    let done: i32 = 0;
+    while done == 0 {
+        if orow > orows {
+            done = 1;
+            let marker: i32 = 0;
+        } else {
+            let ok: usize = meta_row_field(outer, olen, orow, 0);
+            if ok == 1 {
+                let ons: usize = meta_row_field(outer, olen, orow, 1);
+                let onl: usize = meta_row_field(outer, olen, orow, 2);
+                let opsv: usize = meta_row_field(outer, olen, orow, 3);
+                let skip: i32 = meta_span_is_param(source, ons, onl, ps, params_end);
+                if skip == 0 {
+                    meta_append(params, 1, ons, onl, opsv, 0, 0);
+                    let marker: i32 = 0;
+                }
+            }
+            orow = orow + 1;
             let marker: i32 = 0;
         }
     }
@@ -1832,7 +1953,6 @@ let meta_call_consteval = std::func(
 ) -> usize {
     let params: addr = sb_new();
     meta_consteval_copy_consts(consts, params);
-    meta_consteval_copy_consts(outer, params);
     let ps: usize = meta_value_payload_start(meta, mlen, row);
     let body: usize = meta_value_payload_length(meta, mlen, row);
     let params_end: usize = ps + 1;
@@ -1846,6 +1966,7 @@ let meta_call_consteval = std::func(
             let marker: i32 = 0;
         }
     }
+    meta_consteval_copy_outer_skip(source, outer, params, ps, params_end);
     let sentinel: usize = 0 - 1;
     let pcur: usize = ps + 1;
     let acur: usize = args_start;

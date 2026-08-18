@@ -110,8 +110,11 @@ for bare (unqualified) constant references pick the first binding.
 - consteval interpretation has no recursion and calls cannot nest inside a
   callee: a compile-time function may call another consteval function, but
   the callee's own body is evaluated purely (its return expression and
-  arguments cannot contain further calls).  `&&` / `||` conditions and
-  `else if` chains are supported.
+  arguments cannot contain further calls).  `&&` / `||` conditions,
+  `else if` chains, and calls inside conditions are supported.
+- A callee's parameters shadow same-named bindings in the caller's
+  environment (`meta_consteval_copy_outer_skip`), so `outer(n)` calling
+  `inner(n)` binds each function's own `n` correctly.
 - Multi-argument consteval works; argument/parameter counts must agree.
 - consteval members are only callable from top-level constant initializers
   (function-body calls to a consteval member are not folded).
