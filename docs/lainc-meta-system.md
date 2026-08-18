@@ -66,6 +66,9 @@ Tables and operations:
       evaluated purely (calls=0) and the caller's parameter environment is
       threaded into the callee, so argument expressions can reference caller
       parameters; calls therefore cannot nest inside a callee;
+    - calls inside `if`/`else` conditions: comparison operands may be
+      consteval calls (`if identity(n) == 0 || n == 10 { ... }`) via
+      `meta_eval_cond_single_call`, whose callees are also evaluated purely;
     - top-level initializers that are nested constant expressions over
       bound constants (`let answer = a * 1000 + b * 100;`).
 - **Records**: `std::struct` declarations write a layout table
