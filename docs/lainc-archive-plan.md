@@ -228,32 +228,25 @@ python tests/lainir_lain/run_compiler_source_closure.py  # frozen 参照（不�
 ## 7. 下一项
 
 阶段 D（工厂体语言面）已完成并提交。**阶段 E（archive 主干闭包）实施中**
-（提交 b6ea385 等）——本轮完成：
+——**核心验收达成**：原版 `tokenizer.lain` + `syntax.lain` 跨文件工厂链
+编译产物 **l1check 干净（verifier-valid）**（正式测试 run_lainc_archive_e.py，
+提交 c045eb3 等）。
 
-- **类型别名绑定**：`let X: type = T;` 绑定 kind=4，emit_type 查表递归
-  解析（TokenKind → #bits<32>）；emit_params2/emit_foreign_wrapper 贯穿
-  meta 参数（曾漏 wrapper 导致 frozen 5108——已修）。
-- **return module 成员**：scan_return_module 处理 `return std::module
-  {...}` 内联函数（eof/trivia/...）→ f0_<factory>_<name>。
-- **效果子句返回类型**：ret_end 扫描在 `!` 停（`-> NodeId ! {...}` 正确
-  解析别名）。
-- **record 构造 return** → `#return 0`；丢弃绑定唯一名（`%_<pos>`）；
-  字段 stub 只对非调用形态（方法调用 fall-through）。
+本轮完成（每项过 M2 固定点）：
 
-**当前状态**：tokenizer（简化变体）+syntax 工厂链编译无垃圾语句；l1check
-剩余唯一错误是 `verify[2006]`——**未解析字段访问的 stub 0 传给 addr
-参数**（如 `read_group(..., token.span)` → 0 vs `addr %opening_span`）。
-已用最小 LAIN-IR 测试确认「0 字面量不能作 addr 参数」（`#call f(0)` →
-2006），而 `#let %x: addr = 0` 可（注解强制）。这是**类型系统不完整**
-（per-function types 表缺参数类型，无法知道字段的精确类型）。
+- **参数位置字段 stub**：emit_arg_one 对不可解析字段实参输出基变量
+  （addr）；模块成员 record 构造（`Lex.Span {...}`）stub `#alloca(1)`；
+  参数扫描跟踪 `{}` 深度（record 构造逗号不再拆参数）。
+- **record 构造唯一字段名**：`#let %v<pos>_<index>`（同函数多个构造
+  不再 %v0 冲突）。
+- **链式字段 stub**：`unit.nodes.get(...)` 等字段后跟链/调用 → 0。
+- 原版 tokenizer 的嵌套 else-if（byte==34 分支）也随之通过（之前的
+  else-if 嵌套展开 + 字段/赋值修复顺带解决）。
 
 **阶段 E 剩余**：
 
-1. **addr 参数位置的字段 stub**：让 stub 值与 addr 参数兼容——候选：
-   emit_arg_one 检测字段形态实参输出基变量（`token.span` → `%token`），
-   或按函数声明类型包装；需要小步验证 M2 与标量位置的兼容性。
-2. **原版 tokenizer 的嵌套 else-if**（byte==34 分支）——简化变体已过
-   类型检查，原版需在嵌套上下文再定位。
-3. 逐模块编译 archive（tokenizer → syntax → … → lainc），每模块 l1check。
-4. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物 verifier-valid
-   （或记录剩余 verify 类型限制）。
+1. **逐模块扩展**：tokenizer → syntax → generated_syntax → types →
+   effects → … → compiler_core → compiler_driver → compiler_api →
+   lainc，每模块 l1check；新增模块可能暴露新语法缺口。
+2. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物
+   verifier-valid。
