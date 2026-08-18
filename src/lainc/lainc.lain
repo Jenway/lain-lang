@@ -1580,12 +1580,24 @@ let emit_arg_one = std::func(
                         arg_end = arg_end + 1;
                         let marker: i32 = 0;
                     } else {
-                        if depth == 0 && byte == 44 {
-                            arg_done = 1;
-                            let marker: i32 = 0;
-                        } else {
+                        if byte == 123 {
+                            depth = depth + 1;
                             arg_end = arg_end + 1;
                             let marker: i32 = 0;
+                        } else {
+                            if byte == 125 {
+                                depth = depth - 1;
+                                arg_end = arg_end + 1;
+                                let marker: i32 = 0;
+                            } else {
+                                if depth == 0 && byte == 44 {
+                                    arg_done = 1;
+                                    let marker: i32 = 0;
+                                } else {
+                                    arg_end = arg_end + 1;
+                                    let marker: i32 = 0;
+                                }
+                            }
                         }
                     }
                 }
@@ -1609,6 +1621,41 @@ let emit_arg_one = std::func(
         sb_append_literal(output, "%", 1);
         sb_append_span(output, source, ident_s, parse_ident(source, ident_s) - ident_s);
         return arg_end;
+    }
+    let ane: usize = parse_ident(source, ts);
+    let aaf: usize = skip_space(source, ane);
+    if sb_byte_at(source, aaf) == 46 {
+        let tlen: usize = sb_len(types);
+        let trec: usize = meta_table_find(types, tlen, source, ts, ane);
+        let resolvable: usize = 0;
+        if trec < tlen {
+            let tseg: usize = meta_seg_end(types, tlen, trec);
+            let llen: usize = sb_len(layout);
+            let lrec: usize = meta_table_find(layout, llen, types, trec, tseg);
+            if lrec < llen {
+                resolvable = 1;
+                let marker: i32 = 0;
+            }
+        }
+        if resolvable == 0 {
+            let afin: usize = emit_path_tail(source, ts, arg_end);
+            let afend: usize = parse_ident(source, afin);
+            let afaf: usize = skip_space(source, afend);
+            if sb_byte_at(source, afaf) != 40 {
+                let mlen8: usize = sb_len(meta);
+                let mrow8: usize = meta_lookup(meta, mlen8, source, ts, ane - ts);
+                if mrow8 != 0 {
+                    let mk8: usize = meta_value_kind(meta, mlen8, mrow8);
+                    if mk8 == 2 {
+                        sb_append_literal(output, "#alloca(1)", 10);
+                        return arg_end;
+                    }
+                }
+                sb_append_literal(output, "%", 1);
+                sb_append_span(output, source, ts, ane - ts);
+                return arg_end;
+            }
+        }
     }
     emit_expr(source, arg_start, arg_end, output, layout, types, meta, consts);
     return arg_end;
@@ -1966,6 +2013,15 @@ let emit_operand2 = std::func(
             let llen: usize = sb_len(layout);
             let lrec: usize = meta_table_find(layout, llen, types, trec, tseg);
             if lrec < llen {
+                let fchk: usize = skip_space(source, fend);
+                if sb_byte_at(source, fchk) == 46 {
+                    sb_append_literal(output, "0", 1);
+                    return;
+                }
+                if sb_byte_at(source, fchk) == 40 {
+                    sb_append_literal(output, "0", 1);
+                    return;
+                }
                 let lseg: usize = meta_seg_end(layout, llen, lrec);
                 let off: usize = meta_field_offset(layout, lrec, lseg, source, fstart, fend);
                 let w: usize = meta_field_width(layout, lrec, lseg, source, fstart, fend);
@@ -3285,6 +3341,8 @@ let emit_record_value = std::func(
         let off: usize = meta_field_offset(layout, rec, seg_end, source, fs, fname_end);
         let w: usize = meta_field_width(layout, rec, seg_end, source, fs, fname_end);
         sb_append_literal(output, "#let %v", 7);
+        meta_append_decimal(output, expr_start);
+        sb_append_literal(output, "_", 1);
         meta_append_decimal(output, index);
         sb_append_literal(output, ": #bits<", 8);
         meta_emit_bits(output, w);
@@ -3292,6 +3350,8 @@ let emit_record_value = std::func(
         emit_expr(source, vstart, vend, output, layout, types, meta, consts);
         sb_append_literal(output, "\n", 1);
         sb_append_literal(output, "#store %v", 9);
+        meta_append_decimal(output, expr_start);
+        sb_append_literal(output, "_", 1);
         meta_append_decimal(output, index);
         sb_append_literal(output, ", #lea(base=%", 13);
         sb_append_span(output, source, var_name_start, var_name_end - var_name_start);
