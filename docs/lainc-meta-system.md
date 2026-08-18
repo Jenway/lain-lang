@@ -45,12 +45,19 @@ Tables and operations:
 - **consteval calls**: `let square = std::consteval(n: i32) -> i32 { return
   n * n; };` binds a kind-6 row (payload = params pos, body pos) and emits
   **no product**.  A top-level initializer that is a call to a kind-6 row is
-  interpreted: parameters are bound from the argument list (single-level
-  `operand op operand` expressions, no recursion), the `return` expression
-  is evaluated, and the result is bound into consts.
+  interpreted: parameters are bound from the argument list, the `return`
+  expression is evaluated, and the result is bound into consts.
   - `square(5) -> 25`, `add2(40, 2) -> 42`, `five() -> 42`.
   - Qualified calls `math.square(6)` resolve through the module's row to the
     kind-6 member (see Modules).
+  - The evaluator (`meta_eval_expr` + `meta_eval_nested`) now handles nested
+    arithmetic (`x * y + 1`, `a + b * c`) with an iterative shunting-yard
+    (two explicit stacks, no recursion), nested argument expressions
+    (`calc(2 + 3, 4 * 2)`), local `let` bindings inside the body
+    (`let base = x * 10; return base + 1;`), references to already bound
+    top-level constants (the consts table is copied into the parameter
+    environment), and `if cond { ... } else { ... }` branches with
+    `== != < <= > >=` comparisons.
 - **Records**: `std::struct` declarations write a layout table
   (`Name:field#offset#width#...=size|`); constructors expand to
   `#alloca(size)` + per-field `#store`; field access `p.x` resolves the
@@ -87,8 +94,10 @@ for bare (unqualified) constant references pick the first binding.
 
 ## Known limitations
 
-- consteval interpretation is single-level (no nested `a + b * c`), no
-  recursion, no calls inside consteval bodies.
+- consteval interpretation has no recursion and no calls to other consteval
+  functions inside a body (a compile-time function cannot invoke another);
+  conditions support a single comparison (no `&&` / `||` yet — they fall
+  back to not-evaluable).
 - Multi-argument consteval works; argument/parameter counts must agree.
 - consteval members are only callable from top-level constant initializers
   (function-body calls to a consteval member are not folded).
