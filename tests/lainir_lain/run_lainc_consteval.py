@@ -10,7 +10,7 @@ compile-time evaluator handles:
   - references to previously bound top-level constants
   - if/else branches with comparisons
   - calls to other consteval functions (bare, module-qualified,
-    referencing caller parameters)
+    referencing caller parameters, and inside if/else conditions)
   - boolean conditions with && and || and else-if chains
 Each product must l1check clean and run to the expected value.
 """
@@ -82,6 +82,7 @@ def main() -> int:
             "consteval_if": "1",           # classify(40) == 40 -> 1
             "consteval_calls": "13",       # square(2) + square(3)
             "consteval_bool": "1234",      # else-if chain, && / ||, top-level expr
+            "consteval_cond_call": "21",   # identity(n)==0 in if condition
         }
         for name, expected in cases.items():
             out = compile_fixture(name)
