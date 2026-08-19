@@ -378,8 +378,8 @@
 }
 
 // Replace the first child of parent whose address equals old_child with
-// new_child, keeping the sibling chain.  Returns 1 when a replacement
-// happened.
+// new_child, keeping the sibling chain: the replacement takes over the
+// old child's next link.  Returns 1 when a replacement happened.
 #proc ast_replace_child(
   addr %parent, addr %old_child, addr %new_child
 ) -> i1 {
@@ -389,6 +389,8 @@
   #loop scan {
     #if #call raw_is_nil(%child) { #break scan }
     #if #eq(%child, %old_child) {
+      // The replacement continues the old child's sibling chain.
+      #call raw_node_set_next(%new_child, #call raw_node_next(%child))
       #if #eq(#call raw_is_nil(%prev), 0) {
         #call raw_node_set_next(%prev, %new_child)
       } else {
@@ -423,6 +425,41 @@
     #continue children
   }
   #return %copy
+}
+
+// Write the source text of an AST subtree to the artifact stream: atoms
+// emit their original bytes, groups emit the opening delimiter, each child
+// in order, and the matching closing delimiter.  A root node (delimiter 0)
+// emits its children with no wrapper.  This is the AST -> text direction:
+// together with raw_parse (text -> AST) it closes the round trip that
+// macro expansion needs.
+#proc ast_write(addr %source, addr %node) -> #unit {
+  #let %data: addr = #call tool_source_data(%source)
+  #if #eq(#call raw_node_kind(%node), 1) {
+    #call raw_dump_bytes(
+      %data, #call raw_node_start(%node), #call raw_node_length(%node)
+    )
+    #return
+  }
+  #let %delim: i32 = #call raw_node_delimiter(%node)
+  #if #ne(%delim, 0) {
+    #call bootstrap.artifact-write-byte(
+      #call tool_byte_at(%data, #call raw_node_start(%node))
+    )
+  }
+  #let %child: addr = #call raw_node_first(%node)
+  #loop write_children {
+    #if #call raw_is_nil(%child) { #break write_children }
+    #call ast_write(%source, %child)
+    %child: addr = #call raw_node_next(%child)
+    #continue write_children
+  }
+  #if #ne(%delim, 0) {
+    #call bootstrap.artifact-write-byte(
+      #call raw_matching_close(#trunc[#bits<8>](#trunc[#bits<32>](#zext[#bits<64>](%delim))))
+    )
+  }
+  #return
 }
 
 // Write a non-negative integer in decimal to the artifact stream.
@@ -503,15 +540,20 @@
   // nodes: whole-tree count
   #call bootstrap.artifact-write-literal(" nodes:")
   #call ast_write_decimal(#call ast_node_count(%root))
-  // replace: swap found's first arg atom for a fresh atom (9)
+  // replace: swap found's first arg atom (1) for a copy of the second (2)
   #let %args: addr = #call ast_postfix_args(%found)
   #let %first_arg: addr = #call raw_node_first(%args)
-  #let %repl: addr = #call raw_node_new(1, 0, 0, 1, 0)
+  #let %second_arg: addr = #call raw_node_next(#call raw_node_next(%first_arg))
+  #let %repl: addr = #call ast_copy(%second_arg)
   #let %replaced: i1 = #call ast_replace_child(%args, %first_arg, %repl)
   #call bootstrap.artifact-write-literal(" replaced:")
   #call ast_write_decimal(#zext[#bits<64>](%replaced))
   #call bootstrap.artifact-write-literal(" after:")
   #call ast_write_decimal(#call ast_node_count(%args))
+  // text: the transformed call written back as source text (name + args)
+  #call bootstrap.artifact-write-literal(" text:")
+  #call ast_write(%source, %found)
+  #call ast_write(%source, %args)
   // copy: deep copy of the paren args group preserves node count
   #let %copy: addr = #call ast_copy(#call ast_postfix_args(%found))
   #call bootstrap.artifact-write-literal(" copy:")
