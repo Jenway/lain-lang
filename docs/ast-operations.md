@@ -120,6 +120,16 @@ Probes (each is a seed entry point):
   every matching atom in a subtree with a deep copy of the fresh atom;
   `ast_source_from_pool` builds a source over the pool so `ast_write`
   serialises generated and original atoms alike.
+- `lain_macro_eval_ast_probe` — the `#eval` bridge to AST values.  An
+  `#eval` block runs in the seed interpreter at compile time; its result
+  type is the enclosing subroutine's return type, so a proc returning
+  `addr` hands an AST value back to the meta layer.  The worker builds a
+  fresh AST for the call span `foo(1,2)` via `ast_from_text` inside the
+  block and returns the root address; the probe consumes that value with
+  the ordinary AST views (`eval_ast:6 eval_text:foo(1,2)`).  This is the
+  "return AST data" leg of the roadmap's #eval flow (scalar / module /
+  type / AST data); the fold path (`lainir_fold_module`) still folds only
+  bits results, since a folded AST cannot be materialised as text.
 
 ## Verification
 

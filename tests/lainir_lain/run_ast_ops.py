@@ -602,7 +602,35 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST ops, macro expansion, compile integration, guards, template locals, capture detection, hygiene rename (seed bundle)")
+        # #eval bridge to AST values: an #eval block runs at compile time
+        # inside a proc that returns `addr`, builds a fresh AST for the
+        # call span via ast_from_text, and hands the root address back to
+        # the meta layer, which consumes it with the AST views.
+        eaf_fixture = directory / "eaf_fixture.lain"
+        eaf_fixture.write_text("let x = foo(1, 2);\n", encoding="utf-8")
+        eaf_output = directory / "eaf.txt"
+        eaf_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_eval_ast_probe",
+                str(eaf_output),
+                str(eaf_fixture),
+            ]
+        )
+        if eaf_run.returncode:
+            print(eaf_run.stderr or eaf_run.stdout, file=sys.stderr)
+            return 1
+        eaf_text = eaf_output.read_text(encoding="utf-8").strip()
+        expected_eaf = "eval_ast:6 eval_text:foo(1,2)"
+        if eaf_text != expected_eaf:
+            print(
+                f"eval-ast bridge mismatch: {eaf_text!r}, "
+                f"expected {expected_eaf!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST ops, macro expansion, compile integration, guards, template locals, capture detection, hygiene rename, eval-ast bridge (seed bundle)")
     return 0
 
 
