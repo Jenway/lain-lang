@@ -301,7 +301,35 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST views, transforms, macro expansion incl. nested + round-trip (seed bundle)")
+        # Integrated probe: view + transform + macro expansion in one run.
+        all_fixture = directory / "all_fixture.lain"
+        all_fixture.write_text(
+            "let twice = macro(x) { (x + x) };\n"
+            "let y = twice(21);\n",
+            encoding="utf-8",
+        )
+        all_output = directory / "all.txt"
+        all_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_ast_all_probe",
+                str(all_output),
+                str(all_fixture),
+            ]
+        )
+        if all_run.returncode:
+            print(all_run.stderr or all_run.stdout, file=sys.stderr)
+            return 1
+        all_text = all_output.read_text(encoding="utf-8").strip()
+        expected_all = "view:1 replaced:1 prog:lety=(21+21);"
+        if all_text != expected_all:
+            print(
+                f"integrated mismatch: {all_text!r}, expected {expected_all!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST views, transforms, macro expansion, round-trip, integrated (seed bundle)")
     return 0
 
 
