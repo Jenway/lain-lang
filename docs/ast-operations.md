@@ -65,6 +65,8 @@ single postfix node).
 | `ast_find_macro_call_deep(source, node, text, len)` | depth-first call-site search |
 | `ast_find_parent(root, node)` | parent group containing `node` |
 | `ast_expand_macro_call(source, root, name, group, template, param)` | expand one call site in place |
+| `ast_substitute_params(source, body, param_group, arg_group)` | pair each parameter with its argument (multi-param macros) |
+| `ast_arg_expr_end(source, node)` | end offset of an argument expression up to the next comma |
 
 Probes (each is a seed entry point):
 
@@ -80,6 +82,10 @@ Probes (each is a seed entry point):
   macro calls, until none remain
   (`prog:lety=((21+1)+(21+1)); expanded:3 residual:0`)
 - `lain_ast_ops_probe` — the view/transform unit checks
+- `lain_macro_multi_param_probe` — multi-parameter macros
+  (`let add = macro(x, y) { (x + y) }; let z = add(3, 4);` →
+  `prog:letz=(3+4);`; arguments may be whole expressions, e.g.
+  `add(2 * 3, 4)` → `(2*3+4)`)
 
 ## Verification
 

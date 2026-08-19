@@ -329,7 +329,35 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST views, transforms, macro expansion, round-trip, integrated (seed bundle)")
+        # Multi-parameter macro: `macro(x, y)` pairs params with args.
+        mp_fixture = directory / "mp_fixture.lain"
+        mp_fixture.write_text(
+            "let add = macro(x, y) { (x + y) };\n"
+            "let z = add(3, 4);\n",
+            encoding="utf-8",
+        )
+        mp_output = directory / "mp.txt"
+        mp_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_multi_param_probe",
+                str(mp_output),
+                str(mp_fixture),
+            ]
+        )
+        if mp_run.returncode:
+            print(mp_run.stderr or mp_run.stdout, file=sys.stderr)
+            return 1
+        mp_text = mp_output.read_text(encoding="utf-8").strip()
+        expected_mp = "prog:letz=(3+4);"
+        if mp_text != expected_mp:
+            print(
+                f"multi-param mismatch: {mp_text!r}, expected {expected_mp!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST ops, macro expansion incl. nested and multi-param (seed bundle)")
     return 0
 
 

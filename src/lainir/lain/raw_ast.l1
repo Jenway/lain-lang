@@ -1137,9 +1137,179 @@
 //   let a = twice(21);
 //   let b = twice(5);
 //   let c = twice(1);
-// The probe recognises the declaration, expands every call site, removes
-// the declaration and writes the whole program back.
+// End offset of the argument expression starting at atom `node` inside a
+// group: scan siblings until a top-level comma or the group end.  Returns
+// the end offset of the last expression atom.
+#proc ast_arg_expr_end(addr %source, addr %node) -> i64 {
+  #let %cur: addr = %node
+  #let %end: i64 = #add(
+    #call raw_node_start(%cur), #call raw_node_length(%cur)
+  )
+  #let %scanning: i1 = 1
+  #loop scan {
+    #if #eq(%scanning, 0) { #break scan }
+    #let %nxt: addr = #call raw_node_next(%cur)
+    #if #eq(#call raw_is_nil(%nxt), 0) {
+      #if #eq(#call ast_is_atom(%source, %nxt, ",", 1), 1) {
+        %scanning: i1 = 0
+      } else {
+        %cur: addr = %nxt
+        %end: i64 = #add(
+          #call raw_node_start(%cur), #call raw_node_length(%cur)
+        )
+      }
+    } else {
+      %scanning: i1 = 0
+    }
+    #continue scan
+  }
+  #return %end
+}
+
+// Replace every parameter placeholder in `body` with the corresponding
+// argument subtree.  Both groups are `atom , atom , ...` sibling chains
+// (the comma is an atom whose text is ",").  Positions pair up:
+// param[0] -> arg[0], param[1] -> arg[1], etc.  An argument may be a
+// whole expression (`2 * 3`), so its span runs to the next comma.  Uses
+// ast_substitute for each pair so nested placeholders are replaced too.
+#proc ast_substitute_params(
+  addr %source,
+  addr %body,
+  addr %param_group,
+  addr %arg_group
+) -> #unit {
+  #let %p: addr = #call raw_node_first(%param_group)
+  #let %a: addr = #call raw_node_first(%arg_group)
+  #let %done: i1 = 0
+  #loop pairs {
+    #if #eq(%done, 1) { #break pairs }
+    #if #eq(#call raw_is_nil(%p), 0) {
+      #if #eq(#call raw_is_nil(%a), 0) {
+        // p is a param atom, a is the first atom of the matching argument.
+        #let %pdata: addr = #call tool_source_data(%source)
+        #let %plen: i64 = #call raw_node_length(%p)
+        #let %pstart: i64 = #call raw_node_start(%p)
+        #let %ph: addr = #lea(base=%pdata, idx=%pstart, scale=1, offset=0)
+        #let %aend: i64 = #call ast_arg_expr_end(%source, %a)
+        #let %arg_tree: addr = #call ast_from_text(
+          %source,
+          #call raw_node_start(%a),
+          #sub(%aend, #call raw_node_start(%a))
+        )
+        #call ast_substitute(%source, %body, %ph, %plen, %arg_tree)
+        // Advance p past any comma, then a past its whole expression and
+        // the following comma.
+        #let %pn: addr = #call raw_node_next(%p)
+        #if #eq(#call raw_is_nil(%pn), 0) {
+          #if #eq(#call ast_is_atom(%source, %pn, ",", 1), 1) {
+            %p: addr = #call raw_node_next(%pn)
+          } else {
+            %p: addr = %pn
+          }
+        } else {
+          %p: addr = %pn
+        }
+        // Move a to the next argument: walk to the node whose end equals
+        // aend, then take its next (the comma) and skip it.
+        #let %an: addr = %a
+        #let %a_done: i1 = 0
+        #loop advance_a {
+          #if #eq(%a_done, 1) { #break advance_a }
+          #if #eq(#call raw_is_nil(%an), 0) {
+            #if #eq(
+              #add(#call raw_node_start(%an), #call raw_node_length(%an)),
+              %aend
+            ) {
+              %an: addr = #call raw_node_next(%an)
+              %a_done: i1 = 1
+            } else {
+              %an: addr = #call raw_node_next(%an)
+            }
+          } else {
+            %a_done: i1 = 1
+          }
+          #continue advance_a
+        }
+        #if #eq(#call raw_is_nil(%an), 0) {
+          #if #eq(#call ast_is_atom(%source, %an, ",", 1), 1) {
+            %a: addr = #call raw_node_next(%an)
+          } else {
+            %a: addr = %an
+          }
+        } else {
+          %a: addr = %an
+        }
+      } else {
+        %done: i1 = 1
+      }
+    } else {
+      %done: i1 = 1
+    }
+    #continue pairs
+  }
+  #return
+}
+
+// Multi-parameter macro expansion probe.  Fixture:
+//   let add = macro(x, y) { (x + y) };
+//   let z = add(3, 4);
+// The probe recognises the declaration, removes it, expands the call by
+// substituting each parameter with its matching argument, and writes the
+// program back.
 // Output: prog:<rewritten program>
+#proc lain_macro_multi_param_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // Locate the `macro` declaration.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %macro_atom: addr = #call raw_node_nil()
+  #loop scan_decls {
+    #if #call raw_is_nil(%child) { #break scan_decls }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "macro", 5), 1) {
+        %macro_atom: addr = %child
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_decls
+  }
+  #let %param_group: addr = #call raw_node_next(%macro_atom)
+  #let %template_brace: addr = #call raw_node_next(%param_group)
+  #let %body: addr = #call raw_node_first(%template_brace)
+  // Locate the call site `add(3, 4)`.
+  #let %call_name: addr = #call ast_find_macro_call(%source, %root, "add", 3)
+  #let %call_group: addr = #call raw_node_next(%call_name)
+  // Remove the declaration (7 top-level nodes).
+  #let %count: i64 = 0
+  #loop remove_decl {
+    #if #ge(%count, 7) { #break remove_decl }
+    #let %first: addr = #call raw_node_first(%root)
+    #if #eq(#call raw_is_nil(%first), 0) {
+      #call ast_remove_child(%root, %first)
+    }
+    %count: i64 = #add(%count, 1)
+    #continue remove_decl
+  }
+  // Expand: substitute params with args, then replace the call site.
+  #let %expanded_body: addr = #call ast_copy(%body)
+  #call ast_substitute_params(%source, %expanded_body, %param_group, %call_group)
+  #call ast_replace_child(%root, %call_name, %expanded_body)
+  #call ast_remove_child(%root, %call_group)
+  // Write the whole program back.
+  #call bootstrap.artifact-write-literal("prog:")
+  #call ast_write(%source, %root)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
+// Multi-call-site macro expansion probe (one macro name, many calls).
 #proc lain_macro_multi_probe() -> i32 {
   #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
   #let %data: addr = #call bootstrap.source-data(0)
