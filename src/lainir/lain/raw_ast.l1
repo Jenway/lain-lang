@@ -1364,3 +1364,75 @@
   #call bootstrap.release-pages(%source)
   #return %status
 }
+
+// Integrated AST-ops probe: one run demonstrates the whole mechanism.
+// Fixture:
+//   let twice = macro(x) { (x + x) };
+//   let y = twice(21);
+// Steps: parse, view the call (ast_is_call/postfix), transform a copy
+// (replace first arg), expand the macro call, remove the declaration,
+// write the program back and count the result.
+// Output: view:<0|1> replaced:<0|1> prog:<text>
+#proc lain_ast_all_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // 1. View: find the `twice(21)` call.
+  #let %name_node: addr = #call ast_find_macro_call(%source, %root, "twice", 5)
+  #let %view: i1 = 0
+  #if #eq(#call raw_is_nil(%name_node), 0) { %view: i1 = 1 }
+  // 2. Transform: copy the call's argument group and replace its first
+  //    argument with a copy of itself — proves copy+replace on a subtree
+  //    without touching the original tree.
+  #let %replaced: i1 = 0
+  #if #eq(%view, 1) {
+    #let %group_node: addr = #call raw_node_next(%name_node)
+    #let %arg_copy: addr = #call ast_copy(%group_node)
+    #let %first_arg: addr = #call raw_node_first(%arg_copy)
+    #if #eq(#call raw_is_nil(%first_arg), 0) {
+      #call ast_replace_child(
+        %arg_copy, %first_arg, #call ast_copy(%first_arg)
+      )
+      %replaced: i1 = 1
+    }
+  }
+  // 3. Macro expansion: find and remove the declaration, expand the call.
+  #let %macro_atom: addr = #call ast_find_macro_call(%source, %root, "macro", 5)
+  #let %param_group: addr = #call raw_node_next(%macro_atom)
+  #let %template_brace: addr = #call raw_node_next(%param_group)
+  #let %body: addr = #call raw_node_first(%template_brace)
+  #let %param: addr = #call raw_node_first(%param_group)
+  #let %call_name: addr = #call ast_find_macro_call(%source, %root, "twice", 5)
+  #if #eq(#call raw_is_nil(%call_name), 0) {
+    #let %call_group: addr = #call raw_node_next(%call_name)
+    #call ast_expand_macro_call(
+      %source, %root, %call_name, %call_group, %body, %param
+    )
+  }
+  // 4. Remove the declaration (7 top-level nodes) and write back.
+  #let %count: i64 = 0
+  #loop remove_decl {
+    #if #ge(%count, 7) { #break remove_decl }
+    #let %first: addr = #call raw_node_first(%root)
+    #if #eq(#call raw_is_nil(%first), 0) {
+      #call ast_remove_child(%root, %first)
+    }
+    %count: i64 = #add(%count, 1)
+    #continue remove_decl
+  }
+  #call bootstrap.artifact-write-literal("view:")
+  #call ast_write_decimal(#zext[#bits<64>](%view))
+  #call bootstrap.artifact-write-literal(" replaced:")
+  #call ast_write_decimal(#zext[#bits<64>](%replaced))
+  #call bootstrap.artifact-write-literal(" prog:")
+  #call ast_write(%source, %root)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
