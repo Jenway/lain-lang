@@ -94,6 +94,11 @@ Probes (each is a seed entry point):
 - `lain_macro_recursion_probe` — self-referential macros are caught by
   a step bound: `let loop = macro(x) { (loop(x)) };` reports
   `expanded:8 recursive:1 residual:1` instead of looping forever
+- `lain_macro_let_probe` — templates may declare local bindings:
+  `let inc2 = macro(x) { let t = (x + 1); (t + t) };` expands
+  `inc2(10)` to `{let t = (10+1); (t+t)}` — the placeholder is replaced
+  inside the binding and the template's own `t` is kept (deep copy makes
+  each instance independent)
 
 ## Verification
 

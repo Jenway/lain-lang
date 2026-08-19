@@ -459,7 +459,37 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST ops, macro expansion, compile integration, recursion guard (seed bundle)")
+        # Template-local binding: a macro whose template declares a local
+        # `let t = (x + 1)` and uses `t` twice expands with the
+        # placeholder replaced inside the binding and the local kept.
+        let_fixture = directory / "let_fixture.lain"
+        let_fixture.write_text(
+            "let inc2 = macro(x) { let t = (x + 1); (t + t) };\n"
+            "let y = inc2(10);\n",
+            encoding="utf-8",
+        )
+        let_output = directory / "let.txt"
+        let_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_let_probe",
+                str(let_output),
+                str(let_fixture),
+            ]
+        )
+        if let_run.returncode:
+            print(let_run.stderr or let_run.stdout, file=sys.stderr)
+            return 1
+        let_text = let_output.read_text(encoding="utf-8").strip()
+        expected_let = "prog:lety={lett=(10+1);(t+t)};"
+        if let_text != expected_let:
+            print(
+                f"template-let mismatch: {let_text!r}, expected {expected_let!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST ops, macro expansion, compile integration, guards, template locals (seed bundle)")
     return 0
 
 
