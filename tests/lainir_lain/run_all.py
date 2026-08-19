@@ -14,6 +14,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 def main() -> int:
     scripts = (
         "run_raw_ast.py",
+        "run_ast_ops.py",
         "run_meta_record.py",
         "run_meta_module.py",
         "run_meta_eval.py",
