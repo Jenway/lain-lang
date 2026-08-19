@@ -1022,12 +1022,52 @@
   #return #call raw_node_nil()
 }
 
+// Depth-first search for a macro call site anywhere in the tree: a
+// postfix group whose name atom's text equals `text`.  Recurses into
+// group children so calls nested inside expanded templates are found.
+#proc ast_find_macro_call_deep(
+  addr %source, addr %node, addr %text, i64 %len
+) -> addr {
+  #if #call raw_is_nil(%node) { #return #call raw_node_nil() }
+  #if #eq(#call ast_is_postfix_group(%node), 1) {
+    #if #eq(#call ast_span_equal(%source, %node, %text, %len), 1) {
+      #return %node
+    }
+  }
+  #let %child: addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #let %hit: addr = #call ast_find_macro_call_deep(%source, %child, %text, %len)
+    #if #eq(#call raw_is_nil(%hit), 0) { #return %hit }
+    %child: addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return #call raw_node_nil()
+}
+
+// Find the parent group whose sibling chain contains `node`, searching
+// depth-first from root.  Returns the parent or nil.
+#proc ast_find_parent(addr %root, addr %node) -> addr {
+  #let %child: addr = #call raw_node_first(%root)
+  #loop scan {
+    #if #call raw_is_nil(%child) { #break scan }
+    #if #eq(%child, %node) { #return %root }
+    #if #eq(#call raw_node_kind(%child), 2) {
+      #let %p: addr = #call ast_find_parent(%child, %node)
+      #if #eq(#call raw_is_nil(%p), 0) { #return %p }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan
+  }
+  #return #call raw_node_nil()
+}
+
 // Expand one macro call site in place.  call_name is the name atom of the
 // call (`twice`), call_group its argument group `(args)`.  The template
 // body (a group like `(x + x)`) has every atom matching the macro
 // parameter's text replaced by a copy of the argument subtree, then the
 // call's arg group is removed and the call name atom is replaced by the
-// expanded body.  This mutates the sibling chain under root.
+// expanded body.  This mutates the sibling chain under the call's parent.
 #proc ast_expand_macro_call(
   addr %source,
   addr %root,
@@ -1049,40 +1089,46 @@
   #let %pstart: i64 = #call raw_node_start(%param)
   // Work on a copy of the template so each expansion starts fresh.
   #let %body: addr = #call ast_copy(%body_template)
-  // Replace every placeholder (two passes for `x + x`).
-  #let %hit1: addr = #call raw_node_nil()
-  #let %c2: addr = #call raw_node_first(%body)
-  #loop find1 {
-    #if #call raw_is_nil(%c2) { #break find1 }
-    #if #eq(#call ast_span_equal(%source, %c2, #lea(base=%pdata, idx=%pstart, scale=1, offset=0), %plen), 1) {
-      %hit1: addr = %c2
-      #break find1
+  // Replace every placeholder (deep search handles placeholders nested
+  // inside groups like `(inc(x))`).
+  #let %ph: addr = #lea(base=%pdata, idx=%pstart, scale=1, offset=0)
+  #call ast_substitute(%source, %body, %ph, %plen, %arg_tree)
+  // Splice the expansion into the call site: find the call's parent
+  // (it may be nested inside a group), replace the name atom there (the
+  // expansion takes over the name's next link, which is the arg group),
+  // then remove the now-dangling arg group.
+  #let %parent: addr = #call ast_find_parent(%root, %call_name)
+  #if #eq(#call raw_is_nil(%parent), 0) {
+    #call ast_replace_child(%parent, %call_name, %body)
+    #call ast_remove_child(%parent, %call_group)
+  }
+  #return
+}
+
+// Replace every atom in the subtree rooted at node whose text equals
+// placeholder [ph, ph+plen) with a copy of arg_tree.  Recursive descent:
+// for each child, if it is a matching atom, replace it in this node's
+// sibling chain; otherwise recurse into the child's subtree.
+#proc ast_substitute(
+  addr %source,
+  addr %node,
+  addr %ph,
+  i64 %plen,
+  addr %arg_tree
+) -> #unit {
+  #let %child: addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #if #eq(#call ast_is_atom(%source, %child, %ph, %plen), 1) {
+      #call ast_replace_child(%node, %child, #call ast_copy(%arg_tree))
+    } else {
+      #if #eq(#call raw_node_kind(%child), 2) {
+        #call ast_substitute(%source, %child, %ph, %plen, %arg_tree)
+      }
     }
-    %c2: addr = #call raw_node_next(%c2)
-    #continue find1
+    %child: addr = #call raw_node_next(%child)
+    #continue children
   }
-  #if #eq(#call raw_is_nil(%hit1), 0) {
-    #call ast_replace_child(%body, %hit1, #call ast_copy(%arg_tree))
-  }
-  #let %hit2: addr = #call raw_node_nil()
-  #let %c3: addr = #call raw_node_first(%body)
-  #loop find2 {
-    #if #call raw_is_nil(%c3) { #break find2 }
-    #if #eq(#call ast_span_equal(%source, %c3, #lea(base=%pdata, idx=%pstart, scale=1, offset=0), %plen), 1) {
-      %hit2: addr = %c3
-      #break find2
-    }
-    %c3: addr = #call raw_node_next(%c3)
-    #continue find2
-  }
-  #if #eq(#call raw_is_nil(%hit2), 0) {
-    #call ast_replace_child(%body, %hit2, #call ast_copy(%arg_tree))
-  }
-  // Splice the expansion into the call site: replace the name atom first
-  // (the expansion takes over the name's next link, which is the arg
-  // group), then remove the now-dangling arg group.
-  #call ast_replace_child(%root, %call_name, %body)
-  #call ast_remove_child(%root, %call_group)
   #return
 }
 
@@ -1149,6 +1195,155 @@
     }
     %count: i64 = #add(%count, 1)
     #continue remove_decl
+  }
+  // Write the whole program back.
+  #call bootstrap.artifact-write-literal("prog:")
+  #call ast_write(%source, %root)
+  #call bootstrap.artifact-write-literal(" expanded:")
+  #call ast_write_decimal(%expanded)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
+
+// Find the template info for macro `name` (length `len`) in the root's
+// sibling chain: returns the parameter atom of the matching declaration,
+// or nil.  The template brace is its next sibling, the body is inside it.
+// Assumes the declaration shape `let NAME = macro(P) { BODY };`.
+#proc ast_macro_param(addr %source, addr %root, addr %text, i64 %len) -> addr {
+  #let %c: addr = #call raw_node_first(%root)
+  #loop scan {
+    #if #call raw_is_nil(%c) { #break scan }
+    #if #eq(#call ast_is_postfix_group(%c), 1) {
+      #if #eq(#call ast_span_equal(%source, %c, %text, %len), 1) {
+        // c is the NAME atom of `let NAME = macro(P) {...}`; the macro
+        // atom and its param group follow the `=`.
+        #return %c
+      }
+    }
+    %c: addr = #call raw_node_next(%c)
+    #continue scan
+  }
+  #return #call raw_node_nil()
+}
+
+// Nested macro expansion probe.  Fixture:
+//   let inc = macro(x) { (x + 1) };
+//   let twice = macro(x) { (inc(x) + inc(x)) };
+//   let y = twice(21);
+// Expanding `twice(21)` first yields `(inc(21) + inc(21))`; the loop then
+// expands the inner `inc` calls to `(21 + 1)` each.  Expansion repeats
+// until no macro call remains, then declarations are removed and the
+// whole program is written back.
+// Output: prog:<rewritten program> expanded:<count>
+#proc lain_macro_nested_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // Locate both declarations by finding each `macro` postfix group.
+  // `let NAME = macro (P) {B} ;`: macro's previous sibling is `=`, whose
+  // previous sibling is NAME; macro's next is (P), then {B}.
+  #let %inc_param: addr = #call raw_node_nil()
+  #let %inc_body: addr = #call raw_node_nil()
+  #let %twice_param: addr = #call raw_node_nil()
+  #let %twice_body: addr = #call raw_node_nil()
+  #let %child: addr = #call raw_node_first(%root)
+  #loop scan_decls {
+    #if #call raw_is_nil(%child) { #break scan_decls }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "macro", 5), 1) {
+        // NAME is two siblings before macro; (P) and {B} follow it.
+        #let %eq_node: addr = #call raw_node_nil()
+        #let %name_node: addr = #call raw_node_nil()
+        #let %scan2: addr = #call raw_node_first(%root)
+        #loop find_eq {
+          #if #call raw_is_nil(%scan2) { #break find_eq }
+          #if #eq(#call raw_node_next(%scan2), %child) {
+            %eq_node: addr = %scan2
+            #break find_eq
+          }
+          %scan2: addr = #call raw_node_next(%scan2)
+          #continue find_eq
+        }
+        #let %scan3: addr = #call raw_node_first(%root)
+        #loop find_name {
+          #if #call raw_is_nil(%scan3) { #break find_name }
+          #if #eq(#call raw_node_next(%scan3), %eq_node) {
+            %name_node: addr = %scan3
+            #break find_name
+          }
+          %scan3: addr = #call raw_node_next(%scan3)
+          #continue find_name
+        }
+        #let %param_group: addr = #call raw_node_next(%child)
+        #let %brace: addr = #call raw_node_next(%param_group)
+        #if #eq(#call ast_span_equal(%source, %name_node, "inc", 3), 1) {
+          %inc_param: addr = #call raw_node_first(%param_group)
+          %inc_body: addr = #call raw_node_first(%brace)
+        }
+        #if #eq(#call ast_span_equal(%source, %name_node, "twice", 5), 1) {
+          %twice_param: addr = #call raw_node_first(%param_group)
+          %twice_body: addr = #call raw_node_first(%brace)
+        }
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_decls
+  }
+  // Remove both macro declarations before expanding, so deep searches do
+  // not mistake template internals for call sites.  Each declaration is
+  // 7 top-level nodes (let NAME = macro (P) {B} ;).
+  #let %rcount: i64 = 0
+  #loop remove_decls {
+    #if #ge(%rcount, 14) { #break remove_decls }
+    #let %rfirst: addr = #call raw_node_first(%root)
+    #if #eq(#call raw_is_nil(%rfirst), 0) {
+      #call ast_remove_child(%root, %rfirst)
+    }
+    %rcount: i64 = #add(%rcount, 1)
+    #continue remove_decls
+  }
+  // Expand every macro call until none remains.  Prefer expanding `inc`
+  // (the inner macro) first so `twice` templates containing `inc` are
+  // re-scanned after their own expansion.
+  #let %expanded: i64 = 0
+  #let %scanning: i1 = 1
+  #loop expand_all {
+    #if #eq(%scanning, 0) { #break expand_all }
+    #if #ge(%expanded, 12) { #break expand_all }
+    #let %name_node: addr = #call ast_find_macro_call_deep(
+      %source, %root, "inc", 3
+    )
+    #let %group_node: addr = #call raw_node_nil()
+    #let %param_sel: addr = %inc_param
+    #let %body_sel: addr = %inc_body
+    #if #eq(#call raw_is_nil(%name_node), 0) {
+      %group_node: addr = #call raw_node_next(%name_node)
+    } else {
+      %name_node: addr = #call ast_find_macro_call_deep(
+        %source, %root, "twice", 5
+      )
+      %param_sel: addr = %twice_param
+      %body_sel: addr = %twice_body
+      #if #eq(#call raw_is_nil(%name_node), 0) {
+        %group_node: addr = #call raw_node_next(%name_node)
+      }
+    }
+    #if #eq(#call raw_is_nil(%name_node), 0) {
+      #call ast_expand_macro_call(
+        %source, %root, %name_node, %group_node, %body_sel, %param_sel
+      )
+      %expanded: i64 = #add(%expanded, 1)
+    } else {
+      %scanning: i1 = 0
+    }
+    #continue expand_all
   }
   // Write the whole program back.
   #call bootstrap.artifact-write-literal("prog:")
