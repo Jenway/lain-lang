@@ -459,6 +459,44 @@
   #return %root
 }
 
+// Find the first atom child of parent whose text equals `text`; returns
+// nil when absent.  Walks the sibling chain only (no descent).
+#proc ast_find_atom(
+  addr %source, addr %parent, addr %text, i64 %length
+) -> addr {
+  #let %child: addr = #call raw_node_first(%parent)
+  #loop scan {
+    #if #call raw_is_nil(%child) { #break scan }
+    #if #eq(#call ast_is_atom(%source, %child, %text, %length), 1) {
+      #return %child
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan
+  }
+  #return #call raw_node_nil()
+}
+
+// Find the first atom in a whole subtree (depth-first) whose text equals
+// `text`.  Returns nil when absent.  This is the template placeholder
+// search used by macro instantiation.
+#proc ast_find_atom_deep(
+  addr %source, addr %node, addr %text, i64 %length
+) -> addr {
+  #if #call raw_is_nil(%node) { #return #call raw_node_nil() }
+  #if #eq(#call ast_is_atom(%source, %node, %text, %length), 1) {
+    #return %node
+  }
+  #let %child: addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #let %hit: addr = #call ast_find_atom_deep(%source, %child, %text, %length)
+    #if #eq(#call raw_is_nil(%hit), 0) { #return %hit }
+    %child: addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return #call raw_node_nil()
+}
+
 // Write the source text of an AST subtree to the artifact stream: atoms
 // emit their original bytes, groups emit the opening delimiter, each child
 // in order, and the matching closing delimiter.  A root node (delimiter 0)
@@ -599,6 +637,84 @@
   #call bootstrap.artifact-write-literal(" gentext:")
   #call ast_write(%source, #call raw_node_first(%gen))
   #call ast_write(%source, #call raw_node_next(#call raw_node_first(%gen)))
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
+
+// Macro-instantiation probe.  Fixture:
+//   let y = twice(21);
+//   let t = (x + x);
+// "twice" is treated as a macro whose expansion template is the
+// parenthesised body of `let t = <template>;`.  The probe:
+//   1. finds the `twice(21)` call and parses its argument (21) into an AST;
+//   2. finds the template group after `let t = ` and parses it into an AST;
+//   3. replaces every `x` placeholder in the template with a copy of the
+//      argument subtree (macro instantiation);
+//   4. writes the instantiated template back as text.
+// Output line: tmpl:<text> args:<count> first_x:<0|1> inst:<text>
+#proc lain_macro_expand_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // 1. Find the `twice(21)` call and the template group.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %call: addr = #call raw_node_nil()
+  #let %template: addr = #call raw_node_nil()
+  #loop scan_top {
+    #if #call raw_is_nil(%child) { #break scan_top }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "twice", 5), 1) {
+        %call: addr = %child
+      }
+    }
+    // Template: `let t = (x + x);` — after `t` and `=` is the group.
+    #if #eq(#call ast_is_atom(%source, %child, "t", 1), 1) {
+      #let %eq: addr = #call raw_node_next(%child)
+      #if #eq(#call raw_is_nil(%eq), 0) {
+        #if #eq(#call ast_is_atom(%source, %eq, "=", 1), 1) {
+          %template: addr = #call raw_node_next(%eq)
+        }
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_top
+  }
+  // 2. Argument subtree: parse `twice(`'s first argument span.
+  #let %args: addr = #call ast_postfix_args(%call)
+  #let %first_arg: addr = #call raw_node_first(%args)
+  #let %arg_tree: addr = #call ast_from_text(
+    %source,
+    #call raw_node_start(%first_arg),
+    #call raw_node_length(%first_arg)
+  )
+  #call bootstrap.artifact-write-literal(" tmpl:")
+  #call ast_write(%source, %template)
+  #call bootstrap.artifact-write-literal(" args:")
+  #call ast_write_decimal(#call ast_node_count(%arg_tree))
+  // 3. Instantiate: replace each `x` placeholder in the template group
+  //    with a copy of the argument subtree.
+  #let %x1: addr = #call ast_find_atom(%source, %template, "x", 1)
+  #let %found_x: i1 = 0
+  #if #eq(#call raw_is_nil(%x1), 0) {
+    #call ast_replace_child(%template, %x1, #call ast_copy(%arg_tree))
+    %found_x: i1 = 1
+  }
+  #let %x2: addr = #call ast_find_atom(%source, %template, "x", 1)
+  #if #eq(#call raw_is_nil(%x2), 0) {
+    #call ast_replace_child(%template, %x2, #call ast_copy(%arg_tree))
+  }
+  #call bootstrap.artifact-write-literal(" first_x:")
+  #call ast_write_decimal(#zext[#bits<64>](%found_x))
+  // 4. Write the instantiated template.
+  #call bootstrap.artifact-write-literal(" inst:")
+  #call ast_write(%source, %template)
   #call bootstrap.artifact-write-byte(10)
   #call bootstrap.artifact-finish()
   #call bootstrap.release-pages(%source)
