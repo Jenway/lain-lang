@@ -536,7 +536,73 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST ops, macro expansion, compile integration, guards, template locals, capture detection (seed bundle)")
+        # Hygiene: fresh-name generation.  The same fixture is expanded and
+        # the template's `t` atoms (bound + uses) are renamed to a freshly
+        # generated `t_1` held in an in-memory text pool, so the caller's
+        # `t` is the only `t` left and the capture hazard is resolved.
+        hyg_fixture = directory / "hyg_fixture.lain"
+        hyg_fixture.write_text(
+            "let t = 99; "
+            "let inc2 = macro(x) { let t = (x + 1); (t + t) }; "
+            "let y = inc2(10);\n",
+            encoding="utf-8",
+        )
+        hyg_output = directory / "hyg.txt"
+        hyg_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_hygiene_probe",
+                str(hyg_output),
+                str(hyg_fixture),
+            ]
+        )
+        if hyg_run.returncode:
+            print(hyg_run.stderr or hyg_run.stdout, file=sys.stderr)
+            return 1
+        hyg_text = hyg_output.read_text(encoding="utf-8").strip()
+        expected_hyg = (
+            "t_occurrences:1 t1_occurrences:3 renamed:3 capture:0 "
+            "prog:lett=99;lety={lett_1=(10+1);(t_1+t_1)};"
+        )
+        if hyg_text != expected_hyg:
+            print(
+                f"hygiene-rename mismatch: {hyg_text!r}, "
+                f"expected {expected_hyg!r}",
+                file=sys.stderr,
+            )
+            return 1
+        # Round-trip the renamed program: it must re-parse as plain Lain.
+        hyg_rt = directory / "hyg_rt.lain"
+        hyg_rt.write_text(
+            "lett=99;lety={lett_1=(10+1);(t_1+t_1)};\n",
+            encoding="utf-8",
+        )
+        hyg_rt_output = directory / "hyg_rt.txt"
+        hyg_rt_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_raw_ast_dump",
+                str(hyg_rt_output),
+                str(hyg_rt),
+            ]
+        )
+        if hyg_rt_run.returncode:
+            print(
+                f"hygiene round-trip parse failed: "
+                f"{hyg_rt_run.stderr or hyg_rt_run.stdout}",
+                file=sys.stderr,
+            )
+            return 1
+        hyg_rt_text = hyg_rt_output.read_text(encoding="utf-8").strip()
+        if not hyg_rt_text.startswith("(root (atom lett)"):
+            print(
+                f"hygiene round-trip dump unexpected: {hyg_rt_text!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST ops, macro expansion, compile integration, guards, template locals, capture detection, hygiene rename (seed bundle)")
     return 0
 
 

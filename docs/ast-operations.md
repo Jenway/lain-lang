@@ -107,8 +107,19 @@ Probes (each is a seed entry point):
   reports `t_occurrences:4 capture:1` (the caller's `t`, the template's
   bound `t`, and its two uses).  `ast_count_atom` counts atoms by text
   span; `capture` is 1 when the name occurs more than once after
-  expansion.  The follow-up is fresh-name generation (`ast_atom_from_text`
-  buffers), which needs in-memory text buffers not yet built.
+  expansion.
+- `lain_macro_hygiene_probe` — hygiene step 2: fresh-name generation.
+  The same fixture is expanded and the template's `t` atoms (bound and
+  used) are renamed to a freshly generated `t_1`, held in an in-memory
+  text pool:
+  `t_occurrences:1 t1_occurrences:3 renamed:3 capture:0
+   prog:lett=99;lety={lett_1=(10+1);(t_1+t_1)};`
+  The caller's `t` is now the only `t` left (`capture:0`).  `ast_pool_new`
+  / `ast_pool_append` materialise the source data into an allocated
+  buffer so generated names have real bytes; `ast_rename_in` replaces
+  every matching atom in a subtree with a deep copy of the fresh atom;
+  `ast_source_from_pool` builds a source over the pool so `ast_write`
+  serialises generated and original atoms alike.
 
 ## Verification
 

@@ -1981,3 +1981,220 @@
   #call bootstrap.release-pages(%source)
   #return %status
 }
+
+// ---------------------------------------------------------------------------
+// Fresh-name generation (hygiene step 2).
+//
+// RawAst atoms are spans into the source data, so a *generated* name has
+// nowhere to live.  A text pool fixes that: copy the whole source data
+// into an allocated buffer, append generated names after it, and build a
+// new source object over the pool.  Existing spans still address their
+// bytes (the copy is at the same offsets); generated atoms address the
+// appended region.  ast_write then serialises generated and original
+// atoms alike.
+//
+// Pool layout (bytes): 0 data addr, 8 used i64, 16 capacity i64.
+// ---------------------------------------------------------------------------
+
+#proc ast_pool_new(i64 %capacity) -> addr {
+  #let %pool: addr = #call bootstrap.allocate-pages(24)
+  #let %data: addr = #call bootstrap.allocate-pages(%capacity)
+  #store %data, #lea(base=%pool, idx=0, scale=0, offset=0)
+  #store 0, #lea(base=%pool, idx=0, scale=0, offset=8)
+  #store %capacity, #lea(base=%pool, idx=0, scale=0, offset=16)
+  #return %pool
+}
+
+#proc ast_pool_data(addr %pool) -> addr {
+  #return #load[addr](#lea(base=%pool, idx=0, scale=0, offset=0))
+}
+
+#proc ast_pool_used(addr %pool) -> i64 {
+  #return #load[i64](#lea(base=%pool, idx=0, scale=0, offset=8))
+}
+
+// Append `len` bytes from `text` to the pool; returns the start offset.
+#proc ast_pool_append(addr %pool, addr %text, i64 %len) -> i64 {
+  #let %data: addr = #call ast_pool_data(%pool)
+  #let %used: i64 = #call ast_pool_used(%pool)
+  #let %index: i64 = 0
+  #loop copy_bytes {
+    #if #ge(%index, %len) { #break copy_bytes }
+    #store[#bits<8>] #load[#bits<8>](
+      #lea(base=%text, idx=%index, scale=1, offset=0)
+    ), #lea(base=%data, idx=#add(%used, %index), scale=1, offset=0)
+    %index: i64 = #add(%index, 1)
+    #continue copy_bytes
+  }
+  #store #add(%used, %len), #lea(base=%pool, idx=0, scale=0, offset=8)
+  #return %used
+}
+
+// Copy the complete source data into the pool (same offsets).
+#proc ast_pool_copy_source(addr %pool, addr %source) -> #unit {
+  #call ast_pool_append(%pool, #call tool_source_data(%source),
+    #call tool_source_length(%source))
+  #return
+}
+
+// A source object over the pool buffer: spans up to `used` resolve to
+// the copied source plus any appended generated text.
+#proc ast_source_from_pool(addr %pool) -> addr {
+  #return #call tool_source_new(
+    #call ast_pool_data(%pool), #call ast_pool_used(%pool)
+  )
+}
+
+// Replace every atom whose text equals `text` (length `len`) inside the
+// subtree rooted at `node` with a deep copy of `fresh`.  Returns the
+// number of replacements.  `fresh` is an atom whose span addresses the
+// pool (generated text); each replacement gets its own copy so instances
+// stay independent.
+#proc ast_rename_in(
+  addr %source, addr %node, addr %text, i64 %len, addr %fresh
+) -> i64 {
+  #if #call raw_is_nil(%node) { #return 0 }
+  #let %renamed: i64 = 0
+  #let %child: addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #let %next: addr = #call raw_node_next(%child)
+    #if #eq(#call ast_is_atom(%source, %child, %text, %len), 1) {
+      #call ast_replace_child(%node, %child, #call ast_copy(%fresh))
+      %renamed: i64 = #add(%renamed, 1)
+    } else {
+      %renamed: i64 = #add(
+        %renamed,
+        #call ast_rename_in(%source, %child, %text, %len, %fresh)
+      )
+    }
+    %child: addr = %next
+    #continue children
+  }
+  #return %renamed
+}
+
+// Hygiene probe: expand a template whose local `t` collides with a
+// caller `t`, then rename the template's `t` atoms (bound and used) to
+// a freshly generated `t_1` in a text pool.  After renaming, the caller's
+// `t` is the only `t` left, the template's local is `t_1`, and the
+// expanded program serialises with the generated name:
+//   let t = 99; let y = {let t_1 = (10+1); (t_1+t_1)};
+// Output:
+//   t_occurrences:<n> t1_occurrences:<m> renamed:<r> capture:<0|1>
+//   prog:<renamed program>
+#proc lain_macro_hygiene_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // Locate the `macro` declaration.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %macro_atom: addr = #call raw_node_nil()
+  #loop scan_decls {
+    #if #call raw_is_nil(%child) { #break scan_decls }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "macro", 5), 1) {
+        %macro_atom: addr = %child
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_decls
+  }
+  #let %param_group: addr = #call raw_node_next(%macro_atom)
+  #let %template_brace: addr = #call raw_node_next(%param_group)
+  #let %body: addr = %template_brace
+  #let %param: addr = #call raw_node_first(%param_group)
+  // Locate the call `inc2(10)`.
+  #let %call_name: addr = #call ast_find_macro_call(%source, %root, "inc2", 4)
+  #let %call_group: addr = #call raw_node_next(%call_name)
+  // Expand (template has a local let binding).
+  #let %expanded_body: addr = #call ast_copy(%body)
+  #let %pdata: addr = #call tool_source_data(%source)
+  #let %plen: i64 = #call raw_node_length(%param)
+  #let %pstart: i64 = #call raw_node_start(%param)
+  #let %ph: addr = #lea(base=%pdata, idx=%pstart, scale=1, offset=0)
+  #let %first_arg: addr = #call raw_node_first(%call_group)
+  #let %arg_tree: addr = #call ast_from_text(
+    %source,
+    #call raw_node_start(%first_arg),
+    #call raw_node_length(%first_arg)
+  )
+  #call ast_substitute(%source, %expanded_body, %ph, %plen, %arg_tree)
+  #call ast_replace_child(%root, %call_name, %expanded_body)
+  #call ast_remove_child(%root, %call_group)
+  // Remove the declaration (7 top-level nodes after the `;` before
+  // `inc2`), as in the capture probe.
+  #let %before: addr = #call raw_node_nil()
+  #let %prev2: addr = #call raw_node_nil()
+  #let %prev1: addr = #call raw_node_nil()
+  #let %child2: addr = #call raw_node_first(%root)
+  #loop find_decl {
+    #if #call raw_is_nil(%child2) { #break find_decl }
+    #if #eq(#call ast_is_atom(%source, %child2, "inc2", 4), 1) {
+      %before: addr = %prev2
+      #break find_decl
+    }
+    %prev2: addr = %prev1
+    %prev1: addr = %child2
+    %child2: addr = #call raw_node_next(%child2)
+    #continue find_decl
+  }
+  #let %count: i64 = 0
+  #loop remove_decl {
+    #if #ge(%count, 7) { #break remove_decl }
+    #let %next: addr = #call raw_node_next(%before)
+    #if #eq(#call raw_is_nil(%next), 1) { #break remove_decl }
+    #call ast_remove_child(%root, %next)
+    %count: i64 = #add(%count, 1)
+    #continue remove_decl
+  }
+  // Materialise the program into a pool: copy the source data, append the
+  // fresh name `t_1`, and build a pool-backed source.
+  #let %pool: addr = #call ast_pool_new(#add(%length, 32))
+  #call ast_pool_copy_source(%pool, %source)
+  #let %fresh_off: i64 = #call ast_pool_append(%pool, "t_1", 3)
+  #let %fresh: addr = #call raw_node_new(1, 0, %fresh_off, 3, 1)
+  // Rename the template's `t` atoms (inside the expanded body) to `t_1`.
+  #let %renamed: i64 = #call ast_rename_in(
+    %source, %expanded_body, "t", 1, %fresh
+  )
+  // Count with the pool-backed source: `t` should now be only the
+  // caller's binding (1), `t_1` the template's decl plus its two uses (3).
+  #let %pool_source: addr = #call ast_source_from_pool(%pool)
+  #let %pool_data: addr = #call ast_pool_data(%pool)
+  #let %tdecl_atom: addr = #call raw_node_next(#call raw_node_first(%root))
+  #let %tptr: addr = #lea(
+    base=%pool_data,
+    idx=#call raw_node_start(%tdecl_atom),
+    scale=1,
+    offset=0
+  )
+  #let %t_occ: i64 = #call ast_count_atom(
+    %pool_source, %root, %tptr, #call raw_node_length(%tdecl_atom)
+  )
+  #let %t1ptr: addr = #lea(base=%pool_data, idx=%fresh_off, scale=1, offset=0)
+  #let %t1_occ: i64 = #call ast_count_atom(%pool_source, %root, %t1ptr, 3)
+  #call bootstrap.artifact-write-literal("t_occurrences:")
+  #call ast_write_decimal(%t_occ)
+  #call bootstrap.artifact-write-literal(" t1_occurrences:")
+  #call ast_write_decimal(%t1_occ)
+  #call bootstrap.artifact-write-literal(" renamed:")
+  #call ast_write_decimal(%renamed)
+  #call bootstrap.artifact-write-literal(" capture:")
+  #if #gt(%t_occ, 1) {
+    #call bootstrap.artifact-write-literal("1")
+  } else {
+    #call bootstrap.artifact-write-literal("0")
+  }
+  #call bootstrap.artifact-write-literal(" prog:")
+  #call ast_write(%pool_source, %root)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
