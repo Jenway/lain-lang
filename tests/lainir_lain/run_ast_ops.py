@@ -9,11 +9,16 @@ semantic views and structural transforms on top of its topology-only tree:
   - ast_is_atom / ast_span_equal: text predicates over node spans;
   - ast_node_count: iterative subtree counting (explicit stack, no
     recursion);
-  - ast_replace_child: replace a child in a sibling chain;
-  - ast_copy: deep copy of a subtree.
+  - ast_replace_child: replace a child in a sibling chain (the
+    replacement takes over the old child's next link);
+  - ast_copy: deep copy of a subtree;
+  - ast_write: AST -> source text (atoms emit their bytes, groups emit
+    delimiters and children).
 
-The probe entry parses `let x = foo(1, 2);` and reports each operation's
-result as `key:value` pairs.  This runner asserts the exact expected line.
+The probe entry parses `let x = foo(1, 2);`, replaces the first argument
+with a copy of the second, writes the transformed call back as text and
+reports each operation's result as `key:value` pairs.  This runner
+asserts the exact expected line.
 """
 
 from __future__ import annotations
@@ -73,7 +78,7 @@ def main() -> int:
             print(executed.stderr or executed.stdout, file=sys.stderr)
             return 1
         text = output.read_text(encoding="utf-8").strip()
-        # call:1 name:foo args:4 nodes:9 replaced:1 after:2 copy:2
+        # call:1 name:foo args:4 nodes:9 replaced:1 after:4 text:foo(2,2) copy:4
         parts = dict(item.split(":", 1) for item in text.split())
         expected = {
             "call": "1",       # foo(1,2) is a call-shaped postfix group
@@ -81,8 +86,9 @@ def main() -> int:
             "args": "4",       # paren group has 4 nodes (foo,1,',',2)
             "nodes": "9",      # whole tree: let x = foo(1, 2) ;
             "replaced": "1",   # first arg replaced
-            "after": "2",      # args group now foo + replacement = 2 nodes
-            "copy": "2",       # deep copy preserves the 2-node group
+            "after": "4",      # args group still foo,2,',',2 = 4 nodes
+            "text": "foo(2,2)",  # transformed call written back as text
+            "copy": "4",       # deep copy preserves the 4-node group
         }
         for key, value in expected.items():
             if parts.get(key) != value:
