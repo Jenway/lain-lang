@@ -178,7 +178,38 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
-    print("PASS Lain AST views, transforms, macro instantiation and declaration (seed bundle)")
+        # Program-level expansion: the macro declaration is removed from
+        # the tree and the call site is replaced with the expansion, then
+        # the whole program is written back.
+        prog_fixture = directory / "prog_fixture.lain"
+        prog_fixture.write_text(
+            "let twice = macro(x) { (x + x) };\n"
+            "let y = twice(21);\n",
+            encoding="utf-8",
+        )
+        prog_output = directory / "prog.txt"
+        prog_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_program_probe",
+                str(prog_output),
+                str(prog_fixture),
+            ]
+        )
+        if prog_run.returncode:
+            print(prog_run.stderr or prog_run.stdout, file=sys.stderr)
+            return 1
+        prog_text = prog_output.read_text(encoding="utf-8").strip()
+        expected_prog = "prog:lety=(21+21);"
+        if prog_text != expected_prog:
+            print(
+                f"program-expansion mismatch: {prog_text!r}, "
+                f"expected {expected_prog!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST views, transforms, macro expansion and program rewrite (seed bundle)")
     return 0
 
 
