@@ -389,6 +389,21 @@ def main() -> int:
             )
             return 1
         expanded_lain = cp_text.split("prog:", 1)[1].strip()
+
+        def respace(compact: str) -> str:
+            # ast_write emits no whitespace between atoms (e.g. `lety=42;`),
+            # which the reference lexer would read as one identifier.  Restore
+            # minimal spacing (`let y =42;`) so the expansion is the program
+            # the macro author wrote.
+            if compact.startswith("let"):
+                rest = compact[3:]
+                name_end = 0
+                while name_end < len(rest) and rest[name_end].isalpha():
+                    name_end += 1
+                return "let " + rest[:name_end] + " " + rest[name_end:]
+            return compact
+
+        expanded_lain = respace(expanded_lain)
         compiled_src = directory / "compiled.lain"
         compiled_src.write_text(
             expanded_lain
@@ -489,7 +504,39 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST ops, macro expansion, compile integration, guards, template locals (seed bundle)")
+        # Capture collision (hygiene detection): the template declares a
+        # local `t` while the caller also has a top-level `t`.  After
+        # expansion both sets of `t` atoms remain in the program, so the
+        # occurrence count exceeds one and the probe reports capture:1.
+        cap_fixture = directory / "cap_fixture.lain"
+        cap_fixture.write_text(
+            "let t = 99; "
+            "let inc2 = macro(x) { let t = (x + 1); (t + t) }; "
+            "let y = inc2(10);\n",
+            encoding="utf-8",
+        )
+        cap_output = directory / "cap.txt"
+        cap_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_capture_probe",
+                str(cap_output),
+                str(cap_fixture),
+            ]
+        )
+        if cap_run.returncode:
+            print(cap_run.stderr or cap_run.stdout, file=sys.stderr)
+            return 1
+        cap_text = cap_output.read_text(encoding="utf-8").strip()
+        cap_parts = dict(item.split(":", 1) for item in cap_text.split())
+        if cap_parts.get("t_occurrences") != "4" or cap_parts.get("capture") != "1":
+            print(
+                f"capture-detection mismatch: {cap_text!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST ops, macro expansion, compile integration, guards, template locals, capture detection (seed bundle)")
     return 0
 
 
