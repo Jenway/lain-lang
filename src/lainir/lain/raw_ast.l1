@@ -720,3 +720,151 @@
   #call bootstrap.release-pages(%source)
   #return %status
 }
+
+// Macro-declaration probe.  Fixture:
+//   let twice = macro(x) { (x + x) };
+//   let y = twice(21);
+// The probe recognises `let NAME = macro(PARAM) { TEMPLATE };`, extracts
+// the macro name, parameter and template group, finds the call site,
+// substitutes the argument for the parameter in the template and writes
+// the expansion back.
+// Output: name:<m> param:<p> tmpl:<t> arg:<a> inst:<expanded>
+#proc lain_macro_decl_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // Walk top-level: the declaration is `let twice = macro (x) { ... };`
+  // parsed as: let, twice, =, macro, (x), { ... }, ;
+  // `macro` is an atom followed by its parameter group `(x)`; the template
+  // brace group follows that.  Find the `macro` atom.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %macro_atom: addr = #call raw_node_nil()
+  #let %call: addr = #call raw_node_nil()
+  #loop scan_top {
+    #if #call raw_is_nil(%child) { #break scan_top }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "macro", 5), 1) {
+        %macro_atom: addr = %child
+      } else {
+        #if #eq(#call ast_span_equal(%source, %child, "twice", 5), 1) {
+          %call: addr = %child
+        }
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_top
+  }
+  // Parameter group is the sibling after `macro`.
+  #let %param_group: addr = #call raw_node_next(%macro_atom)
+  // Template brace group follows the parameter group.
+  #let %template_brace: addr = #call raw_node_next(%param_group)
+  // Macro name: `let` NAME `=` `macro` -> two siblings before macro_atom.
+  #let %name: addr = #call raw_node_nil()
+  #let %scan: addr = #call raw_node_first(%root)
+  #loop find_name {
+    #if #call raw_is_nil(%scan) { #break find_name }
+    #if #eq(#call raw_node_next(%scan), %macro_atom) {
+      // scan is `=`; two before it is the name.
+      %name: addr = #call raw_node_nil()
+      #let %scan2: addr = #call raw_node_first(%root)
+      #loop find_name2 {
+        #if #call raw_is_nil(%scan2) { #break find_name2 }
+        #if #eq(#call raw_node_next(%scan2), %scan) {
+          %name: addr = %scan2
+          #break find_name2
+        }
+        %scan2: addr = #call raw_node_next(%scan2)
+        #continue find_name2
+      }
+      #break find_name
+    }
+    %scan: addr = #call raw_node_next(%scan)
+    #continue find_name
+  }
+  // Macro parameter: first child of the parameter group (the atom `x`).
+  #let %param: addr = #call raw_node_first(%param_group)
+  // Template body: the brace group `{ (x + x) }`'s first child is the
+  // inner paren group `(x + x)` — substitute inside it.
+  #let %body: addr = #call raw_node_first(%template_brace)
+  // Call argument: first child of twice(...)'s arg group (the atom `21`).
+  #let %call_arg: addr = #call raw_node_first(
+    #call ast_postfix_args(%call)
+  )
+  #let %arg_tree: addr = #call ast_from_text(
+    %source,
+    #call raw_node_start(%call_arg),
+    #call raw_node_length(%call_arg)
+  )
+  // Output fields.
+  #call bootstrap.artifact-write-literal(" name:")
+  #call raw_dump_bytes(
+    %data, #call raw_node_start(%name), #call raw_node_length(%name)
+  )
+  #call bootstrap.artifact-write-literal(" param:")
+  #call raw_dump_bytes(
+    %data, #call raw_node_start(%param), #call raw_node_length(%param)
+  )
+  #call bootstrap.artifact-write-literal(" tmpl:")
+  #call ast_write(%source, %body)
+  #call bootstrap.artifact-write-literal(" arg:")
+  #call ast_write(%source, %arg_tree)
+  // Instantiate: replace every atom whose text equals the param inside the
+  // template body with a copy of the argument subtree.  Two explicit
+  // passes cover `x + x` without a substitution loop.
+  #let %plen: i64 = #call raw_node_length(%param)
+  #let %pdata: addr = #call tool_source_data(%source)
+  #let %pstart: i64 = #call raw_node_start(%param)
+  #let %hit1: addr = #call raw_node_nil()
+  #let %c2: addr = #call raw_node_first(%body)
+  #loop find_in_body1 {
+    #if #call raw_is_nil(%c2) { #break find_in_body1 }
+    #if #eq(
+      #call ast_span_equal(
+        %source, %c2,
+        #lea(base=%pdata, idx=%pstart, scale=1, offset=0),
+        %plen
+      ),
+      1
+    ) {
+      %hit1: addr = %c2
+      #break find_in_body1
+    }
+    %c2: addr = #call raw_node_next(%c2)
+    #continue find_in_body1
+  }
+  #if #eq(#call raw_is_nil(%hit1), 0) {
+    #call ast_replace_child(%body, %hit1, #call ast_copy(%arg_tree))
+  }
+  #let %hit2: addr = #call raw_node_nil()
+  #let %c3: addr = #call raw_node_first(%body)
+  #loop find_in_body2 {
+    #if #call raw_is_nil(%c3) { #break find_in_body2 }
+    #if #eq(
+      #call ast_span_equal(
+        %source, %c3,
+        #lea(base=%pdata, idx=%pstart, scale=1, offset=0),
+        %plen
+      ),
+      1
+    ) {
+      %hit2: addr = %c3
+      #break find_in_body2
+    }
+    %c3: addr = #call raw_node_next(%c3)
+    #continue find_in_body2
+  }
+  #if #eq(#call raw_is_nil(%hit2), 0) {
+    #call ast_replace_child(%body, %hit2, #call ast_copy(%arg_tree))
+  }
+  #call bootstrap.artifact-write-literal(" inst:")
+  #call ast_write(%source, %body)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
