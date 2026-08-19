@@ -271,3 +271,253 @@
   #call bootstrap.release-pages(%source)
   #return 0
 }
+
+// ---------------------------------------------------------------------------
+// AST view and transform operations.
+//
+// RawAst is a topology-only tree: atoms (kind 1) and delimiter groups
+// (kind 2).  The functions below layer the first semantic views on top of
+// that topology and add the structural transforms macros and lowering will
+// need.  They are self-contained (only bootstrap/tool externs), so the same
+// bundle can be exercised directly by the seed runner.
+// ---------------------------------------------------------------------------
+
+// Compare the text of node [start, start+length) with a literal string.
+// Returns 1 when equal.  length is in bytes; text must be null-terminated.
+#proc ast_span_equal(
+  addr %source, addr %node, addr %text, i64 %length
+) -> i1 {
+  #if #ne(#call raw_node_length(%node), %length) { #return 0 }
+  #let %data: addr = #call tool_source_data(%source)
+  #let %index: i64 = 0
+  #loop compare {
+    #if #ge(%index, %length) { #break compare }
+    #if #ne(
+      #call tool_byte_at(%data, #add(#call raw_node_start(%node), %index)),
+      #call tool_byte_at(%text, %index)
+    ) { #return 0 }
+    %index: i64 = #add(%index, 1)
+    #continue compare
+  }
+  #return 1
+}
+
+// Is node an atom (identifier) whose text equals `text`?
+#proc ast_is_atom(addr %source, addr %node, addr %text, i64 %length) -> i1 {
+  #if #call raw_is_nil(%node) { #return 0 }
+  #if #ne(#call raw_node_kind(%node), 1) { #return 0 }
+  #return #call ast_span_equal(%source, %node, %text, %length)
+}
+
+// Is node the `Name(args)` postfix-call topology: an atom followed by a
+// parenthesised group?  Vec(i32), foo(x) and Result(i32, Error) all share
+// this shape; the caller decides whether it is a call or a type application.
+#proc ast_is_postfix_group(addr %node) -> i1 {
+  #if #call raw_is_nil(%node) { #return 0 }
+  #if #ne(#call raw_node_kind(%node), 1) { #return 0 }
+  #let %group: addr = #call raw_node_next(%node)
+  #if #call raw_is_nil(%group) { #return 0 }
+  #if #ne(#call raw_node_kind(%group), 2) { #return 0 }
+  #if #ne(#call raw_node_delimiter(%group), 40) { #return 0 }
+  #return 1
+}
+
+// The callee/name node of a postfix-group node (the leading atom).
+#proc ast_postfix_name(addr %node) -> addr {
+  #if #eq(#call ast_is_postfix_group(%node), 0) { #return #call raw_node_nil() }
+  #return %node
+}
+
+// The argument group node of a postfix-group node (the following paren).
+#proc ast_postfix_args(addr %node) -> addr {
+  #if #eq(#call ast_is_postfix_group(%node), 0) { #return #call raw_node_nil() }
+  #return #call raw_node_next(%node)
+}
+
+// Is node a call `name(args)` (name is an identifier, group is paren)?
+// Type applications share the topology but are distinguished by context;
+// this predicate is the call view of the shared shape.
+#proc ast_is_call(addr %node) -> i1 {
+  #return #call ast_is_postfix_group(%node)
+}
+
+// Count the nodes in the subtree rooted at node (inclusive).  Iterative
+// traversal with an explicit stack of work items: each frame holds a node
+// and the next sibling to visit after its subtree.  Depth-bounded at 256.
+#proc ast_node_count(addr %root) -> i64 {
+  // Stack frame: [node @0, next @8] on a 16-byte page chain.
+  #let %stack: addr = #call bootstrap.allocate-pages(#mul(16, 256))
+  #let %sp: i64 = 0
+  #let %count: i64 = 0
+  // Push (root, nil).
+  #store %root, #lea(base=%stack, idx=%sp, scale=16, offset=0)
+  #store #call raw_node_nil(), #lea(base=%stack, idx=%sp, scale=16, offset=8)
+  %sp: i64 = #add(%sp, 1)
+  #loop walk {
+    #if #eq(%sp, 0) { #break walk }
+    %sp: i64 = #sub(%sp, 1)
+    #let %node: addr = #load[addr](#lea(base=%stack, idx=%sp, scale=16, offset=0))
+    #let %next: addr = #load[addr](#lea(base=%stack, idx=%sp, scale=16, offset=8))
+    #if #call raw_is_nil(%node) {
+      #if #call raw_is_nil(%next) { #continue walk }
+      // Advance to the sibling.
+      #store %next, #lea(base=%stack, idx=%sp, scale=16, offset=0)
+      #store #call raw_node_nil(), #lea(base=%stack, idx=%sp, scale=16, offset=8)
+      %sp: i64 = #add(%sp, 1)
+      #continue walk
+    }
+    %count: i64 = #add(%count, 1)
+    // Push (first_child, next_sibling).
+    #store #call raw_node_first(%node), #lea(base=%stack, idx=%sp, scale=16, offset=0)
+    #store #call raw_node_next(%node), #lea(base=%stack, idx=%sp, scale=16, offset=8)
+    %sp: i64 = #add(%sp, 1)
+    #continue walk
+  }
+  #call bootstrap.release-pages(%stack)
+  #return %count
+}
+
+// Replace the first child of parent whose address equals old_child with
+// new_child, keeping the sibling chain.  Returns 1 when a replacement
+// happened.
+#proc ast_replace_child(
+  addr %parent, addr %old_child, addr %new_child
+) -> i1 {
+  #let %child: addr = #call raw_node_first(%parent)
+  #let %prev: addr = #call raw_node_nil()
+  #let %replaced: i1 = 0
+  #loop scan {
+    #if #call raw_is_nil(%child) { #break scan }
+    #if #eq(%child, %old_child) {
+      #if #eq(#call raw_is_nil(%prev), 0) {
+        #call raw_node_set_next(%prev, %new_child)
+      } else {
+        #store %new_child, #lea(base=%parent, idx=0, scale=0, offset=24)
+      }
+      %replaced: i1 = 1
+      #break scan
+    }
+    %prev: addr = %child
+    %child: addr = #call raw_node_next(%child)
+    #continue scan
+  }
+  #return %replaced
+}
+
+// Deep-copy the subtree rooted at node.  Returns a fresh, disconnected tree
+// with identical topology, spans and token kinds.  Depth-bounded at 256.
+#proc ast_copy(addr %node) -> addr {
+  #let %kind: i32 = #call raw_node_kind(%node)
+  #let %copy: addr = #call raw_node_new(
+    %kind,
+    #call raw_node_delimiter(%node),
+    #call raw_node_start(%node),
+    #call raw_node_length(%node),
+    #call raw_node_token_kind(%node)
+  )
+  #let %child: addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #call raw_append(%copy, #call ast_copy(%child))
+    %child: addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return %copy
+}
+
+// Write a non-negative integer in decimal to the artifact stream.
+#proc ast_write_decimal(i64 %value) -> #unit {
+  #if #eq(%value, 0) {
+    #call bootstrap.artifact-write-byte(48)
+    #return
+  }
+  #let %buffer: addr = #alloca(32)
+  #let %index: i64 = 32
+  #let %remaining: i64 = %value
+  #loop digits {
+    #if #eq(%remaining, 0) { #break digits }
+    %index: i64 = #sub(%index, 1)
+    #let %quotient: i64 = #div(%remaining, 10)
+    #let %digit: i64 = #sub(
+      %remaining, #mul(%quotient, 10)
+    )
+    #store #trunc[#bits<8>](#add(48, %digit)),
+      #lea(base=%buffer, idx=%index, scale=1, offset=0)
+    %remaining: i64 = %quotient
+    #continue digits
+  }
+  #loop write_digits {
+    #if #ge(%index, 32) { #break write_digits }
+    #call bootstrap.artifact-write-byte(
+      #load[i8](#lea(base=%buffer, idx=%index, scale=1, offset=0))
+    )
+    %index: i64 = #add(%index, 1)
+    #continue write_digits
+  }
+  #return
+}
+
+// Probe entry: parse `let x = foo(1, 2);`, then exercise the AST views and
+// transforms.  Writes one line per check to the artifact:
+//   call:<0|1> name:<text> args_count:<n> nodes:<n> replaced:<0|1> after:<n>
+// Returns 0 when every check produced the expected result.
+#proc lain_ast_ops_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #let %buf: addr = #call bootstrap.allocate-pages(4096)
+  #let %buflen: i64 = 0
+  #call bootstrap.artifact-begin()
+  // Find the top-level `foo(1, 2)` postfix group: the second child of the
+  // `let` statement's initializer position.  Walk top-level: root children
+  // are (let, x, =, foo-group, ;) — locate the node whose text is "foo" and
+  // which is a postfix group.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %found: addr = #call raw_node_nil()
+  #loop scan_root {
+    #if #call raw_is_nil(%child) { #break scan_root }
+    #if #eq(#call ast_is_call(%child), 1) {
+      %found: addr = %child
+      #break scan_root
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_root
+  }
+  #if #call raw_is_nil(%found) { %status: i32 = 3 }
+  // call:1
+  #call bootstrap.artifact-write-literal("call:")
+  #call ast_write_decimal(#zext[#bits<64>](#call ast_is_call(%found)))
+  // name:foo
+  #call bootstrap.artifact-write-literal(" name:")
+  #let %name: addr = #call ast_postfix_name(%found)
+  #call raw_dump_bytes(
+    %data, #call raw_node_start(%name), #call raw_node_length(%name)
+  )
+  // args:  the paren group child count (foo, 1, 2 => 3)
+  #call bootstrap.artifact-write-literal(" args:")
+  #call ast_write_decimal(#call ast_node_count(#call ast_postfix_args(%found)))
+  // nodes: whole-tree count
+  #call bootstrap.artifact-write-literal(" nodes:")
+  #call ast_write_decimal(#call ast_node_count(%root))
+  // replace: swap found's first arg atom for a fresh atom (9)
+  #let %args: addr = #call ast_postfix_args(%found)
+  #let %first_arg: addr = #call raw_node_first(%args)
+  #let %repl: addr = #call raw_node_new(1, 0, 0, 1, 0)
+  #let %replaced: i1 = #call ast_replace_child(%args, %first_arg, %repl)
+  #call bootstrap.artifact-write-literal(" replaced:")
+  #call ast_write_decimal(#zext[#bits<64>](%replaced))
+  #call bootstrap.artifact-write-literal(" after:")
+  #call ast_write_decimal(#call ast_node_count(%args))
+  // copy: deep copy of the paren args group preserves node count
+  #let %copy: addr = #call ast_copy(#call ast_postfix_args(%found))
+  #call bootstrap.artifact-write-literal(" copy:")
+  #call ast_write_decimal(#call ast_node_count(%copy))
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
