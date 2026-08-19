@@ -1848,3 +1848,136 @@
   #call bootstrap.release-pages(%source)
   #return %status
 }
+
+// Count atoms whose text equals `text` (length `len`) in the subtree
+// rooted at node (recursive).  Used to detect name collisions after
+// macro expansion.
+#proc ast_count_atom(addr %source, addr %node, addr %text, i64 %len) -> i64 {
+  #if #call raw_is_nil(%node) { #return 0 }
+  #let %count: i64 = 0
+  #if #eq(#call ast_is_atom(%source, %node, %text, %len), 1) {
+    %count: i64 = #add(%count, 1)
+  }
+  #let %child: addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    %count: i64 = #add(
+      %count, #call ast_count_atom(%source, %child, %text, %len)
+    )
+    %child: addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return %count
+}
+
+// Capture-collision probe.  Fixture:
+//   let t = 99;
+//   let inc2 = macro(x) { let t = (x + 1); (t + t) };
+//   let y = inc2(10);
+// The template declares a local `t`; the caller also has a top-level
+// `t`.  After expansion the expanded program contains both the template
+// `t` (bound and used) and the caller's `t`, so `t` appears more than
+// once — the probe counts occurrences and reports capture:1 (a hygiene
+// hazard).  This is the detection step; fresh-name generation is the
+// follow-up.
+// Output: t_occurrences:<n> capture:<0|1>
+#proc lain_macro_capture_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // Locate the `macro` declaration.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %macro_atom: addr = #call raw_node_nil()
+  #loop scan_decls {
+    #if #call raw_is_nil(%child) { #break scan_decls }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "macro", 5), 1) {
+        %macro_atom: addr = %child
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_decls
+  }
+  #let %param_group: addr = #call raw_node_next(%macro_atom)
+  #let %template_brace: addr = #call raw_node_next(%param_group)
+  #let %body: addr = %template_brace
+  #let %param: addr = #call raw_node_first(%param_group)
+  // Locate the call `inc2(10)`.
+  #let %call_name: addr = #call ast_find_macro_call(%source, %root, "inc2", 4)
+  #let %call_group: addr = #call raw_node_next(%call_name)
+  // Expand (template has a local let binding).
+  #let %expanded_body: addr = #call ast_copy(%body)
+  #let %pdata: addr = #call tool_source_data(%source)
+  #let %plen: i64 = #call raw_node_length(%param)
+  #let %pstart: i64 = #call raw_node_start(%param)
+  #let %ph: addr = #lea(base=%pdata, idx=%pstart, scale=1, offset=0)
+  #let %first_arg: addr = #call raw_node_first(%call_group)
+  #let %arg_tree: addr = #call ast_from_text(
+    %source,
+    #call raw_node_start(%first_arg),
+    #call raw_node_length(%first_arg)
+  )
+  #call ast_substitute(%source, %expanded_body, %ph, %plen, %arg_tree)
+  #call ast_replace_child(%root, %call_name, %expanded_body)
+  #call ast_remove_child(%root, %call_group)
+  // Remove the declaration `let inc2 = macro(x) { ... };` (7 top-level
+  // nodes).  It is preceded by `let t = 99;`, so locate its `let` by
+  // tracking the previous two children while scanning for the `inc2`
+  // atom, then splice out the 7 nodes that follow the node before it.
+  #let %before: addr = #call raw_node_nil()
+  #let %prev2: addr = #call raw_node_nil()
+  #let %prev1: addr = #call raw_node_nil()
+  #let %child2: addr = #call raw_node_first(%root)
+  #loop find_decl {
+    #if #call raw_is_nil(%child2) { #break find_decl }
+    #if #eq(#call ast_is_atom(%source, %child2, "inc2", 4), 1) {
+      %before: addr = %prev2
+      #break find_decl
+    }
+    %prev2: addr = %prev1
+    %prev1: addr = %child2
+    %child2: addr = #call raw_node_next(%child2)
+    #continue find_decl
+  }
+  #let %count: i64 = 0
+  #loop remove_decl {
+    #if #ge(%count, 7) { #break remove_decl }
+    #let %next: addr = #call raw_node_next(%before)
+    #if #eq(#call raw_is_nil(%next), 1) { #break remove_decl }
+    #call ast_remove_child(%root, %next)
+    %count: i64 = #add(%count, 1)
+    #continue remove_decl
+  }
+  // Count `t` occurrences in the whole tree after expansion, anchored on
+  // the caller's `t` atom (second node of the remaining program):
+  //   let t = 99; let y = {let t = (10 + 1); (t + t)};
+  // gives 1 (caller decl) + 1 (template decl) + 2 (template uses) = 4.
+  #let %td: addr = #call tool_source_data(%source)
+  #let %tdecl_atom: addr = #call raw_node_next(#call raw_node_first(%root))
+  #let %tptr: addr = #lea(
+    base=%td,
+    idx=#call raw_node_start(%tdecl_atom),
+    scale=1,
+    offset=0
+  )
+  #let %t_occ: i64 = #call ast_count_atom(
+    %source, %root, %tptr, #call raw_node_length(%tdecl_atom)
+  )
+  #call bootstrap.artifact-write-literal("t_occurrences:")
+  #call ast_write_decimal(%t_occ)
+  #call bootstrap.artifact-write-literal(" capture:")
+  #if #gt(%t_occ, 1) {
+    #call bootstrap.artifact-write-literal("1")
+  } else {
+    #call bootstrap.artifact-write-literal("0")
+  }
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}

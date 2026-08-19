@@ -88,9 +88,10 @@ Probes (each is a seed entry point):
   `add(2 * 3, 4)` → `(2*3+4)`)
 - `lain_macro_compile_probe` — expansion to compilable Lain: a macro
   with a bare-expression template (`macro(x) { x }`) expands
-  `val(42)` to `let y = 42;`; the test harness appends a `main`,
-  compiles the result with the reference lainc and runs it to 42 —
-  macro output is real, compilable code, not just parseable text
+  `val(42)` to `lety=42;` (ast_write emits no whitespace); the test
+  harness re-spaces it to `let y =42;`, appends a `main`, compiles the
+  result with the reference lainc and runs it to 42 — macro output is
+  real, compilable code, not just parseable text
 - `lain_macro_recursion_probe` — self-referential macros are caught by
   a step bound: `let loop = macro(x) { (loop(x)) };` reports
   `expanded:8 recursive:1 residual:1` instead of looping forever
@@ -99,6 +100,15 @@ Probes (each is a seed entry point):
   `inc2(10)` to `{let t = (10+1); (t+t)}` — the placeholder is replaced
   inside the binding and the template's own `t` is kept (deep copy makes
   each instance independent)
+- `lain_macro_capture_probe` — hygiene step 1: capture-collision detection.
+  When the caller also binds the template's local name, expansion leaves
+  both sets of atoms in the program:
+  `let t = 99; let inc2 = macro(x) { let t = (x + 1); (t + t) }; let y = inc2(10);`
+  reports `t_occurrences:4 capture:1` (the caller's `t`, the template's
+  bound `t`, and its two uses).  `ast_count_atom` counts atoms by text
+  span; `capture` is 1 when the name occurs more than once after
+  expansion.  The follow-up is fresh-name generation (`ast_atom_from_text`
+  buffers), which needs in-memory text buffers not yet built.
 
 ## Verification
 
