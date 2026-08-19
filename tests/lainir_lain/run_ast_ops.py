@@ -357,7 +357,73 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST ops, macro expansion incl. nested and multi-param (seed bundle)")
+        # Compile integration: a macro whose template is a bare expression
+        # expands to plain Lain the reference compiler can compile.  The
+        # harness appends a `main` and compiles with the reference lainc.
+        cp_fixture = directory / "cp_fixture.lain"
+        cp_fixture.write_text(
+            "let val = macro(x) { x };\n"
+            "let y = val(42);\n",
+            encoding="utf-8",
+        )
+        cp_output = directory / "cp.txt"
+        cp_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_compile_probe",
+                str(cp_output),
+                str(cp_fixture),
+            ]
+        )
+        if cp_run.returncode:
+            print(cp_run.stderr or cp_run.stdout, file=sys.stderr)
+            return 1
+        cp_text = cp_output.read_text(encoding="utf-8").strip()
+        expected_cp = "prog:lety=42;"
+        if cp_text != expected_cp:
+            print(
+                f"compile-integration mismatch: {cp_text!r}, "
+                f"expected {expected_cp!r}",
+                file=sys.stderr,
+            )
+            return 1
+        expanded_lain = cp_text.split("prog:", 1)[1].strip()
+        compiled_src = directory / "compiled.lain"
+        compiled_src.write_text(
+            expanded_lain
+            + "\n"
+            + "let main = std::func() -> i32 {\n"
+            + "    return y;\n"
+            + "};\n",
+            encoding="utf-8",
+        )
+        compiled_out = directory / "compiled.l1"
+        ref_lainc = ROOT / "src" / "lainir" / "lainc.l1"
+        compiled = run(
+            [
+                str(SEED),
+                str(ref_lainc),
+                "compiler_compile",
+                str(compiled_out),
+                str(compiled_src),
+            ]
+        )
+        if compiled.returncode:
+            print(
+                f"reference compile of macro output failed: "
+                f"{compiled.stderr or compiled.stdout}",
+                file=sys.stderr,
+            )
+            return 1
+        executed = run([str(SEED), "run", str(compiled_out), "main"])
+        if executed.returncode or executed.stdout.strip() != "42":
+            print(
+                f"macro output did not run to 42: {executed.stdout!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST ops, macro expansion, multi-param, compile integration (seed bundle)")
     return 0
 
 

@@ -86,6 +86,11 @@ Probes (each is a seed entry point):
   (`let add = macro(x, y) { (x + y) }; let z = add(3, 4);` →
   `prog:letz=(3+4);`; arguments may be whole expressions, e.g.
   `add(2 * 3, 4)` → `(2*3+4)`)
+- `lain_macro_compile_probe` — expansion to compilable Lain: a macro
+  with a bare-expression template (`macro(x) { x }`) expands
+  `val(42)` to `let y = 42;`; the test harness appends a `main`,
+  compiles the result with the reference lainc and runs it to 42 —
+  macro output is real, compilable code, not just parseable text
 
 ## Verification
 
