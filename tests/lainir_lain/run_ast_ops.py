@@ -240,7 +240,38 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST views, transforms, macro expansion, multi call sites (seed bundle)")
+        # Nested macro expansion: `twice`'s template contains `inc` calls,
+        # which are expanded after `twice` itself.
+        nested_fixture = directory / "nested_fixture.lain"
+        nested_fixture.write_text(
+            "let inc = macro(x) { (x + 1) };\n"
+            "let twice = macro(x) { (inc(x) + inc(x)) };\n"
+            "let y = twice(21);\n",
+            encoding="utf-8",
+        )
+        nested_output = directory / "nested.txt"
+        nested_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_nested_probe",
+                str(nested_output),
+                str(nested_fixture),
+            ]
+        )
+        if nested_run.returncode:
+            print(nested_run.stderr or nested_run.stdout, file=sys.stderr)
+            return 1
+        nested_text = nested_output.read_text(encoding="utf-8").strip()
+        expected_nested = "prog:lety=((21+1)+(21+1)); expanded:3"
+        if nested_text != expected_nested:
+            print(
+                f"nested-expansion mismatch: {nested_text!r}, "
+                f"expected {expected_nested!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST views, transforms, macro expansion incl. nested (seed bundle)")
     return 0
 
 
