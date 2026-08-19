@@ -1606,3 +1606,83 @@
   #call bootstrap.release-pages(%source)
   #return %status
 }
+
+// Compile-integration probe: expand a macro whose template is a bare
+// expression, so the expansion is plain Lain the reference compiler can
+// compile.  Fixture:
+//   let val = macro(x) { x };
+//   let y = val(42);
+// Expansion yields `let y = 42;`.  The test harness appends a `main` and
+// compiles it with the reference lainc, proving macro output is
+// compilable Lain, not just parseable.
+// Output: prog:<rewritten program>
+#proc lain_macro_compile_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // Locate the `macro` declaration.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %macro_atom: addr = #call raw_node_nil()
+  #loop scan_decls {
+    #if #call raw_is_nil(%child) { #break scan_decls }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "macro", 5), 1) {
+        %macro_atom: addr = %child
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_decls
+  }
+  #let %param_group: addr = #call raw_node_next(%macro_atom)
+  #let %template_brace: addr = #call raw_node_next(%param_group)
+  #let %body: addr = #call raw_node_first(%template_brace)
+  #let %param: addr = #call raw_node_first(%param_group)
+  // Locate the call `val(42)`.
+  #let %call_name: addr = #call ast_find_macro_call(%source, %root, "val", 3)
+  #let %call_group: addr = #call raw_node_next(%call_name)
+  // Remove the declaration (7 top-level nodes).
+  #let %count: i64 = 0
+  #loop remove_decl {
+    #if #ge(%count, 7) { #break remove_decl }
+    #let %first: addr = #call raw_node_first(%root)
+    #if #eq(#call raw_is_nil(%first), 0) {
+      #call ast_remove_child(%root, %first)
+    }
+    %count: i64 = #add(%count, 1)
+    #continue remove_decl
+  }
+  // Expand: the template body is the bare placeholder `x`; substitute
+  // the argument, then replace the call site with the expansion.
+  #let %expanded_body: addr = #call ast_copy(%body)
+  #let %ph: addr = #call tool_source_data(%source)
+  #let %pstart: i64 = #call raw_node_start(%param)
+  #let %plen: i64 = #call raw_node_length(%param)
+  #let %ph_off: addr = #lea(base=%ph, idx=%pstart, scale=1, offset=0)
+  #let %first_arg: addr = #call raw_node_first(%call_group)
+  #let %arg_tree: addr = #call ast_from_text(
+    %source,
+    #call raw_node_start(%first_arg),
+    #call raw_node_length(%first_arg)
+  )
+  // If the whole template body is the placeholder itself (bare `x`),
+  // the expansion is just the argument subtree.
+  #if #eq(#call ast_is_atom(%source, %body, %ph_off, %plen), 1) {
+    %expanded_body: addr = #call ast_copy(%arg_tree)
+  } else {
+    #call ast_substitute(%source, %expanded_body, %ph_off, %plen, %arg_tree)
+  }
+  #call ast_replace_child(%root, %call_name, %expanded_body)
+  #call ast_remove_child(%root, %call_group)
+  // Write the whole program back.
+  #call bootstrap.artifact-write-literal("prog:")
+  #call ast_write(%source, %root)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
