@@ -209,7 +209,38 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST views, transforms, macro expansion and program rewrite (seed bundle)")
+        # Multi call-site expansion: every `twice(...)` call is expanded.
+        multi_fixture = directory / "multi_fixture.lain"
+        multi_fixture.write_text(
+            "let twice = macro(x) { (x + x) };\n"
+            "let a = twice(21);\n"
+            "let b = twice(5);\n"
+            "let c = twice(1);\n",
+            encoding="utf-8",
+        )
+        multi_output = directory / "multi.txt"
+        multi_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_multi_probe",
+                str(multi_output),
+                str(multi_fixture),
+            ]
+        )
+        if multi_run.returncode:
+            print(multi_run.stderr or multi_run.stdout, file=sys.stderr)
+            return 1
+        multi_text = multi_output.read_text(encoding="utf-8").strip()
+        expected_multi = "prog:leta=(21+21);letb=(5+5);letc=(1+1); expanded:3"
+        if multi_text != expected_multi:
+            print(
+                f"multi-expansion mismatch: {multi_text!r}, "
+                f"expected {expected_multi!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST views, transforms, macro expansion, multi call sites (seed bundle)")
     return 0
 
 

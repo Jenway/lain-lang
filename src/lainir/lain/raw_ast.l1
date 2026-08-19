@@ -1001,3 +1001,162 @@
   #call bootstrap.release-pages(%source)
   #return %status
 }
+
+// Find the next macro call site in the root's sibling chain: a postfix
+// group whose name atom's text equals `text` (length `len`).  Returns the
+// name atom, or nil when none remains.  Single loop, no nesting.
+#proc ast_find_macro_call(
+  addr %source, addr %root, addr %text, i64 %len
+) -> addr {
+  #let %c: addr = #call raw_node_first(%root)
+  #loop scan {
+    #if #call raw_is_nil(%c) { #break scan }
+    #if #eq(#call ast_is_postfix_group(%c), 1) {
+      #if #eq(#call ast_span_equal(%source, %c, %text, %len), 1) {
+        #return %c
+      }
+    }
+    %c: addr = #call raw_node_next(%c)
+    #continue scan
+  }
+  #return #call raw_node_nil()
+}
+
+// Expand one macro call site in place.  call_name is the name atom of the
+// call (`twice`), call_group its argument group `(args)`.  The template
+// body (a group like `(x + x)`) has every atom matching the macro
+// parameter's text replaced by a copy of the argument subtree, then the
+// call's arg group is removed and the call name atom is replaced by the
+// expanded body.  This mutates the sibling chain under root.
+#proc ast_expand_macro_call(
+  addr %source,
+  addr %root,
+  addr %call_name,
+  addr %call_group,
+  addr %body_template,
+  addr %param
+) -> #unit {
+  // Argument subtree from the call's first arg.
+  #let %call_arg: addr = #call raw_node_first(%call_group)
+  #let %arg_tree: addr = #call ast_from_text(
+    %source,
+    #call raw_node_start(%call_arg),
+    #call raw_node_length(%call_arg)
+  )
+  // Parameter span for placeholder matching.
+  #let %plen: i64 = #call raw_node_length(%param)
+  #let %pdata: addr = #call tool_source_data(%source)
+  #let %pstart: i64 = #call raw_node_start(%param)
+  // Work on a copy of the template so each expansion starts fresh.
+  #let %body: addr = #call ast_copy(%body_template)
+  // Replace every placeholder (two passes for `x + x`).
+  #let %hit1: addr = #call raw_node_nil()
+  #let %c2: addr = #call raw_node_first(%body)
+  #loop find1 {
+    #if #call raw_is_nil(%c2) { #break find1 }
+    #if #eq(#call ast_span_equal(%source, %c2, #lea(base=%pdata, idx=%pstart, scale=1, offset=0), %plen), 1) {
+      %hit1: addr = %c2
+      #break find1
+    }
+    %c2: addr = #call raw_node_next(%c2)
+    #continue find1
+  }
+  #if #eq(#call raw_is_nil(%hit1), 0) {
+    #call ast_replace_child(%body, %hit1, #call ast_copy(%arg_tree))
+  }
+  #let %hit2: addr = #call raw_node_nil()
+  #let %c3: addr = #call raw_node_first(%body)
+  #loop find2 {
+    #if #call raw_is_nil(%c3) { #break find2 }
+    #if #eq(#call ast_span_equal(%source, %c3, #lea(base=%pdata, idx=%pstart, scale=1, offset=0), %plen), 1) {
+      %hit2: addr = %c3
+      #break find2
+    }
+    %c3: addr = #call raw_node_next(%c3)
+    #continue find2
+  }
+  #if #eq(#call raw_is_nil(%hit2), 0) {
+    #call ast_replace_child(%body, %hit2, #call ast_copy(%arg_tree))
+  }
+  // Splice the expansion into the call site: replace the name atom first
+  // (the expansion takes over the name's next link, which is the arg
+  // group), then remove the now-dangling arg group.
+  #call ast_replace_child(%root, %call_name, %body)
+  #call ast_remove_child(%root, %call_group)
+  #return
+}
+
+// Multi-call-site macro expansion probe.  Fixture:
+//   let twice = macro(x) { (x + x) };
+//   let a = twice(21);
+//   let b = twice(5);
+//   let c = twice(1);
+// The probe recognises the declaration, expands every call site, removes
+// the declaration and writes the whole program back.
+// Output: prog:<rewritten program>
+#proc lain_macro_multi_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // Find the macro declaration.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %macro_atom: addr = #call raw_node_nil()
+  #loop scan_top {
+    #if #call raw_is_nil(%child) { #break scan_top }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "macro", 5), 1) {
+        %macro_atom: addr = %child
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_top
+  }
+  #let %param_group: addr = #call raw_node_next(%macro_atom)
+  #let %template_brace: addr = #call raw_node_next(%param_group)
+  #let %body_template: addr = #call raw_node_first(%template_brace)
+  #let %param: addr = #call raw_node_first(%param_group)
+  // Expand every call site whose name is `twice`.
+  #let %expanded: i64 = 0
+  #let %scanning: i1 = 1
+  #loop expand_all {
+    #if #eq(%scanning, 0) { #break expand_all }
+    #let %name_node: addr = #call ast_find_macro_call(
+      %source, %root, "twice", 5
+    )
+    #if #eq(#call raw_is_nil(%name_node), 0) {
+      #let %group_node: addr = #call raw_node_next(%name_node)
+      #call ast_expand_macro_call(
+        %source, %root, %name_node, %group_node, %body_template, %param
+      )
+      %expanded: i64 = #add(%expanded, 1)
+    } else {
+      %scanning: i1 = 0
+    }
+    #continue expand_all
+  }
+  // Remove the macro declaration (first seven root children).
+  #let %count: i64 = 0
+  #loop remove_decl {
+    #if #ge(%count, 7) { #break remove_decl }
+    #let %first: addr = #call raw_node_first(%root)
+    #if #eq(#call raw_is_nil(%first), 0) {
+      #call ast_remove_child(%root, %first)
+    }
+    %count: i64 = #add(%count, 1)
+    #continue remove_decl
+  }
+  // Write the whole program back.
+  #call bootstrap.artifact-write-literal("prog:")
+  #call ast_write(%source, %root)
+  #call bootstrap.artifact-write-literal(" expanded:")
+  #call ast_write_decimal(%expanded)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
