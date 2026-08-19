@@ -1772,3 +1772,79 @@
   #call bootstrap.release-pages(%source)
   #return %status
 }
+
+// Template-local-binding macro probe.  Fixture:
+//   let inc2 = macro(x) { let t = (x + 1); (t + t) };
+//   let y = inc2(10);
+// The template declares a local `t` bound from the placeholder `x` and
+// uses it twice.  Expansion must copy the template (so the local is
+// independent per instance), substitute `x` inside the let initialiser
+// (deep replacement), and keep `t` as the template's own binding.
+// Output: prog:<rewritten program>
+#proc lain_macro_let_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // Locate the `macro` declaration.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %macro_atom: addr = #call raw_node_nil()
+  #loop scan_decls {
+    #if #call raw_is_nil(%child) { #break scan_decls }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "macro", 5), 1) {
+        %macro_atom: addr = %child
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_decls
+  }
+  #let %param_group: addr = #call raw_node_next(%macro_atom)
+  #let %template_brace: addr = #call raw_node_next(%param_group)
+  // The template body is the whole brace group (it may contain a
+  // statement sequence: `let t = ...; (t + t)`), not just its first
+  // child.
+  #let %body: addr = %template_brace
+  #let %param: addr = #call raw_node_first(%param_group)
+  // Locate the call `inc2(10)`.
+  #let %call_name: addr = #call ast_find_macro_call(%source, %root, "inc2", 4)
+  #let %call_group: addr = #call raw_node_next(%call_name)
+  // Remove the declaration (7 top-level nodes).
+  #let %count: i64 = 0
+  #loop remove_decl {
+    #if #ge(%count, 7) { #break remove_decl }
+    #let %first: addr = #call raw_node_first(%root)
+    #if #eq(#call raw_is_nil(%first), 0) {
+      #call ast_remove_child(%root, %first)
+    }
+    %count: i64 = #add(%count, 1)
+    #continue remove_decl
+  }
+  // Expand: copy the template, substitute x -> 10 (deep), replace the
+  // call site with the expansion.
+  #let %expanded_body: addr = #call ast_copy(%body)
+  #let %pdata: addr = #call tool_source_data(%source)
+  #let %plen: i64 = #call raw_node_length(%param)
+  #let %pstart: i64 = #call raw_node_start(%param)
+  #let %ph: addr = #lea(base=%pdata, idx=%pstart, scale=1, offset=0)
+  #let %first_arg: addr = #call raw_node_first(%call_group)
+  #let %arg_tree: addr = #call ast_from_text(
+    %source,
+    #call raw_node_start(%first_arg),
+    #call raw_node_length(%first_arg)
+  )
+  #call ast_substitute(%source, %expanded_body, %ph, %plen, %arg_tree)
+  #call ast_replace_child(%root, %call_name, %expanded_body)
+  #call ast_remove_child(%root, %call_group)
+  // Write the whole program back.
+  #call bootstrap.artifact-write-literal("prog:")
+  #call ast_write(%source, %root)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
