@@ -1686,3 +1686,89 @@
   #call bootstrap.release-pages(%source)
   #return %status
 }
+
+// Self-referential macro probe.  Fixture:
+//   let loop = macro(x) { (loop(x)) };
+//   let y = loop(1);
+// Expanding `loop(1)` yields `(loop(1))`, which contains the macro call
+// again — expansion would never terminate.  The probe expands with a
+// step bound, detects that a macro call remains after the bound, and
+// reports recursive:1 instead of looping forever.
+// Output: expanded:<n> recursive:<0|1> residual:<0|1>
+#proc lain_macro_recursion_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // Locate the `macro` declaration.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %macro_atom: addr = #call raw_node_nil()
+  #loop scan_decls {
+    #if #call raw_is_nil(%child) { #break scan_decls }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "macro", 5), 1) {
+        %macro_atom: addr = %child
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_decls
+  }
+  #let %param_group: addr = #call raw_node_next(%macro_atom)
+  #let %template_brace: addr = #call raw_node_next(%param_group)
+  #let %body: addr = #call raw_node_first(%template_brace)
+  #let %param: addr = #call raw_node_first(%param_group)
+  // Remove the declaration (7 top-level nodes).
+  #let %count: i64 = 0
+  #loop remove_decl {
+    #if #ge(%count, 7) { #break remove_decl }
+    #let %first: addr = #call raw_node_first(%root)
+    #if #eq(#call raw_is_nil(%first), 0) {
+      #call ast_remove_child(%root, %first)
+    }
+    %count: i64 = #add(%count, 1)
+    #continue remove_decl
+  }
+  // Expand with a hard step bound; detect non-termination.
+  #let %expanded: i64 = 0
+  #let %recursive: i1 = 0
+  #let %scanning: i1 = 1
+  #loop expand_all {
+    #if #eq(%scanning, 0) { #break expand_all }
+    #if #ge(%expanded, 8) {
+      %recursive: i1 = 1
+      %scanning: i1 = 0
+    } else {
+      #let %call_name: addr = #call ast_find_macro_call_deep(
+        %source, %root, "loop", 4
+      )
+      #if #eq(#call raw_is_nil(%call_name), 0) {
+        #let %call_group: addr = #call raw_node_next(%call_name)
+        #call ast_expand_macro_call(
+          %source, %root, %call_name, %call_group, %body, %param
+        )
+        %expanded: i64 = #add(%expanded, 1)
+      } else {
+        %scanning: i1 = 0
+      }
+    }
+    #continue expand_all
+  }
+  // Residual: does a `loop` call remain after the bound?
+  #let %residual: i1 = 0
+  #let %rnode: addr = #call ast_find_macro_call_deep(%source, %root, "loop", 4)
+  #if #eq(#call raw_is_nil(%rnode), 0) { %residual: i1 = 1 }
+  #call bootstrap.artifact-write-literal("expanded:")
+  #call ast_write_decimal(%expanded)
+  #call bootstrap.artifact-write-literal(" recursive:")
+  #call ast_write_decimal(#zext[#bits<64>](%recursive))
+  #call bootstrap.artifact-write-literal(" residual:")
+  #call ast_write_decimal(#zext[#bits<64>](%residual))
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}

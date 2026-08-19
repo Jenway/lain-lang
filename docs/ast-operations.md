@@ -91,6 +91,9 @@ Probes (each is a seed entry point):
   `val(42)` to `let y = 42;`; the test harness appends a `main`,
   compiles the result with the reference lainc and runs it to 42 —
   macro output is real, compilable code, not just parseable text
+- `lain_macro_recursion_probe` — self-referential macros are caught by
+  a step bound: `let loop = macro(x) { (loop(x)) };` reports
+  `expanded:8 recursive:1 residual:1` instead of looping forever
 
 ## Verification
 

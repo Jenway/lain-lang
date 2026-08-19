@@ -423,7 +423,43 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST ops, macro expansion, multi-param, compile integration (seed bundle)")
+        # Self-referential macro: expansion never terminates, so the probe
+        # must hit its step bound and report recursive:1 instead of
+        # looping forever.
+        rec_fixture = directory / "rec_fixture.lain"
+        rec_fixture.write_text(
+            "let loop = macro(x) { (loop(x)) };\n"
+            "let y = loop(1);\n",
+            encoding="utf-8",
+        )
+        rec_output = directory / "rec.txt"
+        rec_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_recursion_probe",
+                str(rec_output),
+                str(rec_fixture),
+            ]
+        )
+        if rec_run.returncode:
+            print(rec_run.stderr or rec_run.stdout, file=sys.stderr)
+            return 1
+        rec_text = rec_output.read_text(encoding="utf-8").strip()
+        rec_parts = dict(item.split(":", 1) for item in rec_text.split())
+        if rec_parts.get("recursive") != "1" or rec_parts.get("residual") != "1":
+            print(
+                f"recursion-detection mismatch: {rec_text!r}",
+                file=sys.stderr,
+            )
+            return 1
+        if rec_parts.get("expanded") != "8":
+            print(
+                f"recursion step bound mismatch: {rec_text!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST ops, macro expansion, compile integration, recursion guard (seed bundle)")
     return 0
 
 
