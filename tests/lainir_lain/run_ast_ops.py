@@ -139,7 +139,46 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
-    print("PASS Lain AST views, transforms and macro instantiation (seed bundle)")
+        # Macro declaration: `let twice = macro(x) { (x + x) };` is
+        # recognised, its template extracted, and the call site `twice(21)`
+        # expanded by substituting the argument for the parameter.
+        decl_fixture = directory / "decl_fixture.lain"
+        decl_fixture.write_text(
+            "let twice = macro(x) { (x + x) };\n"
+            "let y = twice(21);\n",
+            encoding="utf-8",
+        )
+        decl_output = directory / "decl.txt"
+        decl_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_decl_probe",
+                str(decl_output),
+                str(decl_fixture),
+            ]
+        )
+        if decl_run.returncode:
+            print(decl_run.stderr or decl_run.stdout, file=sys.stderr)
+            return 1
+        decl_text = decl_output.read_text(encoding="utf-8").strip()
+        decl_parts = dict(item.split(":", 1) for item in decl_text.split())
+        decl_expected = {
+            "name": "twice",     # macro name from declaration
+            "param": "x",        # macro parameter
+            "tmpl": "(x+x)",     # extracted template group
+            "arg": "21",         # call-site argument
+            "inst": "(21+21)",   # expanded template
+        }
+        for key, value in decl_expected.items():
+            if decl_parts.get(key) != value:
+                print(
+                    f"macro-decl mismatch: {key!r} = {decl_parts.get(key)!r}, "
+                    f"expected {value!r}; full line {decl_text!r}",
+                    file=sys.stderr,
+                )
+                return 1
+    print("PASS Lain AST views, transforms, macro instantiation and declaration (seed bundle)")
     return 0
 
 
