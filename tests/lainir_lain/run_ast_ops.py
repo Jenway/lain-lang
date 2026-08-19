@@ -104,7 +104,42 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
-    print("PASS Lain AST views and transforms (seed bundle)")
+        # Macro instantiation: `twice(21)` expands the template `(x + x)`
+        # by substituting each `x` placeholder with a copy of the argument.
+        macro_fixture = directory / "macro_fixture.lain"
+        macro_fixture.write_text(
+            "let y = twice(21);\nlet t = (x + x);\n", encoding="utf-8"
+        )
+        macro_output = directory / "macro.txt"
+        macro_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_macro_expand_probe",
+                str(macro_output),
+                str(macro_fixture),
+            ]
+        )
+        if macro_run.returncode:
+            print(macro_run.stderr or macro_run.stdout, file=sys.stderr)
+            return 1
+        macro_text = macro_output.read_text(encoding="utf-8").strip()
+        macro_parts = dict(item.split(":", 1) for item in macro_text.split())
+        macro_expected = {
+            "tmpl": "(x+x)",      # template group text
+            "args": "2",          # argument `21` tree has 2 nodes (root+atom)
+            "first_x": "1",       # first placeholder found
+            "inst": "(21+21)",    # instantiated template text
+        }
+        for key, value in macro_expected.items():
+            if macro_parts.get(key) != value:
+                print(
+                    f"macro mismatch: {key!r} = {macro_parts.get(key)!r}, "
+                    f"expected {value!r}; full line {macro_text!r}",
+                    file=sys.stderr,
+                )
+                return 1
+    print("PASS Lain AST views, transforms and macro instantiation (seed bundle)")
     return 0
 
 
