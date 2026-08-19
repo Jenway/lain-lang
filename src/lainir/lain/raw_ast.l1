@@ -2198,3 +2198,73 @@
   #call bootstrap.release-pages(%source)
   #return %status
 }
+
+// ---------------------------------------------------------------------------
+// #eval bridge to AST values.
+//
+// `#eval` is the LAIN-IR compile-time execution boundary: the block runs
+// in the seed interpreter during compilation.  Its result type is the
+// enclosing subroutine's return type, so a proc returning `addr` can hand
+// an AST value (a RawAst root built at compile time) back to the meta
+// layer, which then consumes it with the ordinary AST views.  This is the
+// "return AST data" leg of the roadmap's #eval flow
+// (scalar / module / type / AST data).
+// ---------------------------------------------------------------------------
+
+// Worker: parse the source span [start, start+len) into a fresh,
+// independent AST *inside* an #eval block and return its root address.
+#proc lain_macro_eval_ast_worker(addr %source, i64 %start, i64 %len) -> addr {
+  #let %root: addr = #eval {
+    #return #call ast_from_text(%source, %start, %len)
+  }
+  #return %root
+}
+
+// Probe.  Fixture: `let x = foo(1, 2);`.  Locates the `foo(1,2)` call,
+// bridges its span through #eval into an AST value, and consumes that
+// value with the AST views (node count + text round trip).
+// Output: eval_ast:<nodes> eval_text:<written span>
+#proc lain_macro_eval_ast_probe() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
+  #let %status: i32 = 0
+  #call bootstrap.artifact-begin()
+  // Locate the `foo(1,2)` call site.
+  #let %child: addr = #call raw_node_first(%root)
+  #let %call_name: addr = #call raw_node_nil()
+  #loop scan_root {
+    #if #call raw_is_nil(%child) { #break scan_root }
+    #if #eq(#call ast_is_postfix_group(%child), 1) {
+      #if #eq(#call ast_span_equal(%source, %child, "foo", 3), 1) {
+        %call_name: addr = %child
+      }
+    }
+    %child: addr = #call raw_node_next(%child)
+    #continue scan_root
+  }
+  // Bridge: build the call's AST at compile time via #eval and consume
+  // the returned address with the AST views.  The span covers the whole
+  // call: from the `foo` name through the closing paren of the group.
+  #let %call_group: addr = #call raw_node_next(%call_name)
+  #let %call_end: i64 = #add(
+    #call raw_node_start(%call_group), #call raw_node_length(%call_group)
+  )
+  #let %call_span: i64 = #sub(%call_end, #call raw_node_start(%call_name))
+  #let %ast: addr = #call lain_macro_eval_ast_worker(
+    %source,
+    #call raw_node_start(%call_name),
+    %call_span
+  )
+  #call bootstrap.artifact-write-literal("eval_ast:")
+  #call ast_write_decimal(#call ast_node_count(%ast))
+  #call bootstrap.artifact-write-literal(" eval_text:")
+  #call ast_write(%source, %ast)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
