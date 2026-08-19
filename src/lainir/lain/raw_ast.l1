@@ -427,6 +427,38 @@
   #return %copy
 }
 
+// Add delta to every node start in the subtree rooted at node.  Used to
+// rebase a subtree parsed from a sub-buffer back to the parent source's
+// coordinates.  Recursive (depth bounded by tree depth).
+#proc ast_relocate(addr %node, i64 %delta) -> #unit {
+  #let %start: i64 = #call raw_node_start(%node)
+  #store #add(%start, %delta), #lea(base=%node, idx=0, scale=0, offset=8)
+  #let %child: addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #call ast_relocate(%child, %delta)
+    %child: addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return
+}
+
+// Parse the source text [start, start+length) of source into a fresh,
+// independent AST tree.  A temporary source object is built over the same
+// data bytes, lexed and parsed; the resulting nodes are then rebased by
+// `start` so their spans refer back to the parent source.  This is the
+// text -> AST generation direction used by macro expansion.
+#proc ast_from_text(addr %source, i64 %start, i64 %length) -> addr {
+  #let %data: addr = #call tool_source_data(%source)
+  #let %sub_data: addr = #lea(base=%data, idx=%start, scale=1, offset=0)
+  #let %sub: addr = #call tool_source_new(%sub_data, %length)
+  #let %tokens: addr = #call tool_lex_all(%sub)
+  #let %root: addr = #call raw_parse(%sub, %tokens)
+  #call ast_relocate(%root, %start)
+  #call bootstrap.release-pages(%sub)
+  #return %root
+}
+
 // Write the source text of an AST subtree to the artifact stream: atoms
 // emit their original bytes, groups emit the opening delimiter, each child
 // in order, and the matching closing delimiter.  A root node (delimiter 0)
@@ -558,6 +590,15 @@
   #let %copy: addr = #call ast_copy(#call ast_postfix_args(%found))
   #call bootstrap.artifact-write-literal(" copy:")
   #call ast_write_decimal(#call ast_node_count(%copy))
+  // gen: re-parse the original call text into a fresh AST and write it back
+  #let %gen: addr = #call ast_from_text(
+    %source, #call raw_node_start(%found), 9
+  )
+  #call bootstrap.artifact-write-literal(" gen:")
+  #call ast_write_decimal(#call ast_node_count(%gen))
+  #call bootstrap.artifact-write-literal(" gentext:")
+  #call ast_write(%source, #call raw_node_first(%gen))
+  #call ast_write(%source, #call raw_node_next(#call raw_node_first(%gen)))
   #call bootstrap.artifact-write-byte(10)
   #call bootstrap.artifact-finish()
   #call bootstrap.release-pages(%source)

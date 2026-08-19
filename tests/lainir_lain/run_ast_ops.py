@@ -13,12 +13,16 @@ semantic views and structural transforms on top of its topology-only tree:
     replacement takes over the old child's next link);
   - ast_copy: deep copy of a subtree;
   - ast_write: AST -> source text (atoms emit their bytes, groups emit
-    delimiters and children).
+    delimiters and children);
+  - ast_from_text: parse a source span into a fresh, independent AST
+    (re-based to parent-source coordinates) — the text -> AST generation
+    direction.
 
 The probe entry parses `let x = foo(1, 2);`, replaces the first argument
-with a copy of the second, writes the transformed call back as text and
-reports each operation's result as `key:value` pairs.  This runner
-asserts the exact expected line.
+with a copy of the second, writes the transformed call back as text,
+re-parses the original call text into a fresh AST, and reports each
+operation's result as `key:value` pairs.  This runner asserts the exact
+expected line.
 """
 
 from __future__ import annotations
@@ -89,6 +93,8 @@ def main() -> int:
             "after": "4",      # args group still foo,2,',',2 = 4 nodes
             "text": "foo(2,2)",  # transformed call written back as text
             "copy": "4",       # deep copy preserves the 4-node group
+            "gen": "6",        # fresh parse of foo(1,2): root+foo+group(3)
+            "gentext": "foo(1,2)",  # generated AST writes back unchanged
         }
         for key, value in expected.items():
             if parts.get(key) != value:
