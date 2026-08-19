@@ -263,7 +263,7 @@ def main() -> int:
             print(nested_run.stderr or nested_run.stdout, file=sys.stderr)
             return 1
         nested_text = nested_output.read_text(encoding="utf-8").strip()
-        expected_nested = "prog:lety=((21+1)+(21+1)); expanded:3"
+        expected_nested = "prog:lety=((21+1)+(21+1)); expanded:3 residual:0"
         if nested_text != expected_nested:
             print(
                 f"nested-expansion mismatch: {nested_text!r}, "
@@ -271,7 +271,37 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-    print("PASS Lain AST views, transforms, macro expansion incl. nested (seed bundle)")
+        # Round-trip: the expanded program (no macro calls left) must be
+        # parseable as ordinary Lain source.  Feed the `prog:` text back
+        # through the raw parser and require a successful dump.
+        expanded_prog = nested_text.split("prog:", 1)[1].split(" ", 1)[0]
+        roundtrip_fixture = directory / "roundtrip.lain"
+        roundtrip_fixture.write_text(expanded_prog + "\n", encoding="utf-8")
+        roundtrip_output = directory / "roundtrip.txt"
+        roundtrip_run = run(
+            [
+                str(SEED),
+                str(bundle),
+                "lain_raw_ast_dump",
+                str(roundtrip_output),
+                str(roundtrip_fixture),
+            ]
+        )
+        if roundtrip_run.returncode:
+            print(
+                f"round-trip parse failed for {expanded_prog!r}: "
+                f"{roundtrip_run.stderr or roundtrip_run.stdout}",
+                file=sys.stderr,
+            )
+            return 1
+        roundtrip_text = roundtrip_output.read_text(encoding="utf-8").strip()
+        if not roundtrip_text.startswith("(root (atom lety)"):
+            print(
+                f"round-trip dump unexpected: {roundtrip_text!r}",
+                file=sys.stderr,
+            )
+            return 1
+    print("PASS Lain AST views, transforms, macro expansion incl. nested + round-trip (seed bundle)")
     return 0
 
 
