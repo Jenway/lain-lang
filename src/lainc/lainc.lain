@@ -3345,6 +3345,52 @@ let emit_type = std::func(
             let marker: i32 = 0;
         }
     }
+    // Qualified type alias `Mod.Member`: resolve the module row from the
+    // first path segment, then look the member up under that row.  The
+    // member's own payload is emitted recursively, so `Syntax.NodeId`
+    // (an alias for `usize`) lowers to #bits<64> instead of addr.
+    // Scan once for the last `.` separator; the segment after it is the
+    // member name, the segment before it is the module.
+    let tscan: usize = t;
+    let scan: usize = t;
+    while scan < t2 {
+        if sb_byte_at(source, scan) == 46 {
+            let after: usize = skip_space(source, scan + 1);
+            if after < t2 {
+                if is_ident_start(sb_byte_at(source, after)) {
+                    tscan = after;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+        scan = scan + 1;
+        let marker: i32 = 0;
+    }
+    if tscan > t {
+        let mod_span: usize = t;
+        let mod_end: usize = parse_ident(source, mod_span);
+        let mrow: usize = meta_lookup(meta, ml, source, mod_span, mod_end - mod_span);
+        if mrow != 0 {
+            let mkind: usize = meta_value_kind(meta, ml, mrow);
+            if mkind == 2 {
+                let mem_end: usize = parse_ident(source, tscan);
+                let mtr: usize = meta_lookup_qualified(meta, ml, source, tscan, mem_end - tscan, mrow);
+                if mtr != 0 {
+                    let mtk: usize = meta_value_kind(meta, ml, mtr);
+                    if mtk == 4 {
+                        let mps: usize = meta_value_payload_start(meta, ml, mtr);
+                        let mpl: usize = meta_value_payload_length(meta, ml, mtr);
+                        if sb_byte_at(source, mps) != 123 {
+                            let mpe: usize = mps + mpl;
+                            emit_type(source, mps, mpe, output, meta);
+                            return;
+                        }
+                        let marker: i32 = 0;
+                    }
+                }
+            }
+        }
+    }
     sb_append_literal(output, "addr", 4);
 };
 
@@ -3516,7 +3562,9 @@ let emit_stmt_let = std::func(
     }
     let rs: usize = trim_start(source, eq + 1, semi);
     let rn: usize = parse_ident(source, rs);
-    let ra: usize = skip_space(source, rn);
+    let rt0: usize = emit_path_tail(source, rs, semi);
+    let rn0: usize = parse_ident(source, rt0);
+    let ra: usize = skip_space(source, rn0);
     if sb_byte_at(source, ra) == 123 {
         let rlen: usize = sb_len(layout);
         let rrec: usize = meta_table_find(layout, rlen, source, rs, rn);
@@ -3524,9 +3572,7 @@ let emit_stmt_let = std::func(
             emit_record_value(source, output, name_start, name_end, eq + 1, semi, layout, types, meta, consts);
             return semi + 1;
         }
-        let rt: usize = emit_path_tail(source, rs, semi);
-        let rn2: usize = parse_ident(source, rt);
-        let rrec2: usize = meta_table_find(layout, rlen, source, rt, rn2);
+        let rrec2: usize = meta_table_find(layout, rlen, source, rt0, rn0);
         if rrec2 < rlen {
             emit_record_value(source, output, name_start, name_end, eq + 1, semi, layout, types, meta, consts);
             return semi + 1;
@@ -4239,6 +4285,84 @@ let emit_record = std::func(
     return brace_end + 1;
 };
 
+// Is the type span [ts, te) lowered to an address?  Mirrors emit_type's
+// decision: `&` references, `addr`, and any type the emitter cannot
+// resolve to a scalar bits type (record payloads, cross-module aliases,
+// unknown names) are all `addr`; the scalar keywords are bits.
+let meta_type_is_addr = std::func(
+    source: addr,
+    ts: usize,
+    te: usize,
+    meta: addr,
+) -> i32 {
+    let t: usize = trim_start(source, ts, te);
+    let t2: usize = trim_end(source, t, te);
+    let first: i32 = sb_byte_at(source, t);
+    if first == 38 { return 1; }
+    if sb_span_equals(source, t, t2 - t, "addr", 4) { return 1; }
+    if sb_span_equals(source, t, t2 - t, "unit", 4) { return 0; }
+    if sb_span_equals(source, t, t2 - t, "bool", 4) { return 0; }
+    if sb_span_equals(source, t, t2 - t, "usize", 5) { return 0; }
+    if sb_span_equals(source, t, t2 - t, "i32", 3) { return 0; }
+    let ml: usize = sb_len(meta);
+    let tr: usize = meta_lookup(meta, ml, source, t, t2 - t);
+    if tr != 0 {
+        let tk: usize = meta_value_kind(meta, ml, tr);
+        if tk == 4 {
+            let ps: usize = meta_value_payload_start(meta, ml, tr);
+            let pl: usize = meta_value_payload_length(meta, ml, tr);
+            if sb_byte_at(source, ps) != 123 {
+                let pe: usize = ps + pl;
+                return meta_type_is_addr(source, ps, pe, meta);
+            }
+            let marker: i32 = 0;
+        }
+    }
+    // Qualified type alias: resolve the module row, then the member, and
+    // recurse into the member's payload (mirrors emit_type).  Scan once
+    // for the last `.` separator.
+    let tscan: usize = t;
+    let scan: usize = t;
+    while scan < t2 {
+        if sb_byte_at(source, scan) == 46 {
+            let after: usize = skip_space(source, scan + 1);
+            if after < t2 {
+                if is_ident_start(sb_byte_at(source, after)) {
+                    tscan = after;
+                    let marker: i32 = 0;
+                }
+            }
+        }
+        scan = scan + 1;
+        let marker: i32 = 0;
+    }
+    if tscan > t {
+        let mod_span: usize = t;
+        let mod_end: usize = parse_ident(source, mod_span);
+        let mrow: usize = meta_lookup(meta, ml, source, mod_span, mod_end - mod_span);
+        if mrow != 0 {
+            let mkind: usize = meta_value_kind(meta, ml, mrow);
+            if mkind == 2 {
+                let mem_end: usize = parse_ident(source, tscan);
+                let mtr: usize = meta_lookup_qualified(meta, ml, source, tscan, mem_end - tscan, mrow);
+                if mtr != 0 {
+                    let mtk: usize = meta_value_kind(meta, ml, mtr);
+                    if mtk == 4 {
+                        let mps: usize = meta_value_payload_start(meta, ml, mtr);
+                        let mpl: usize = meta_value_payload_length(meta, ml, mtr);
+                        if sb_byte_at(source, mps) != 123 {
+                            let mpe: usize = mps + mpl;
+                            return meta_type_is_addr(source, mps, mpe, meta);
+                        }
+                        let marker: i32 = 0;
+                    }
+                }
+            }
+        }
+    }
+    return 1;
+};
+
 // Emit a record constructor `Name { f: v, ... }` at [expr_start, expr_end)
 // into output as
 //   #let %var: addr = #alloca(<size>)
@@ -4288,9 +4412,32 @@ let emit_record_value = std::func(
         meta_append_decimal(output, expr_start);
         sb_append_literal(output, "_", 1);
         meta_append_decimal(output, index);
-        sb_append_literal(output, ": #bits<", 8);
-        meta_emit_bits(output, w);
-        sb_append_literal(output, "> = ", 4);
+        // A field whose value is a single bound variable takes the
+        // variable's declared physical type (addr for pointer-shaped
+        // fields such as Memory.String; bits otherwise).  Other value
+        // forms keep the layout width.
+        let vident_end: usize = parse_ident(source, vstart);
+        let vaddr: i32 = 0;
+        if vident_end > vstart {
+            let vspace: usize = skip_space(source, vident_end);
+            if vspace >= vend {
+                let tlen: usize = sb_len(types);
+                let trec: usize = meta_table_find(types, tlen, source, vstart, vident_end);
+                if trec < tlen {
+                    let tseg: usize = meta_seg_end(types, tlen, trec);
+                    let isa: i32 = meta_type_is_addr(source, trec, tseg, meta);
+                    if isa == 1 { vaddr = 1; }
+                    let marker: i32 = 0;
+                }
+            }
+        }
+        if vaddr == 1 {
+            sb_append_literal(output, ": addr = ", 9);
+        } else {
+            sb_append_literal(output, ": #bits<", 8);
+            meta_emit_bits(output, w);
+            sb_append_literal(output, "> = ", 4);
+        }
         emit_expr(source, vstart, vend, output, layout, types, meta, consts);
         sb_append_literal(output, "\n", 1);
         sb_append_literal(output, "#store %v", 9);
@@ -4495,6 +4642,20 @@ let compile_source = std::func(
                             let cne: usize = parse_ident(source, cns);
                             let crs: usize = trim_start(source, eq + 1, semi);
                             let cre: usize = trim_end(source, crs, semi);
+                            // Top-level type alias `let NAME: type = TYPE;`:
+                            // bind a kind-4 meta row (payload = the type
+                            // span) so emit_type can resolve it.
+                            let tmark: usize = scan_let_mark(source, cns, semi);
+                            if sb_byte_at(source, tmark) == 58 {
+                                let ttyp: usize = skip_space(source, tmark + 1);
+                                if sb_span_equals(source, ttyp, 4, "type", 4) {
+                                    let teq: usize = scan_top_op(source, tmark + 1, semi, 61);
+                                    let tas: usize = trim_start(source, teq + 1, semi);
+                                    let tae: usize = trim_end(source, tas, semi);
+                                    meta_append(meta, 4, cns, cne - cns, tas, tae - tas, 0);
+                                    let marker: i32 = 0;
+                                }
+                            }
                             let sentinel: usize = 0 - 1;
                             let cval: usize = meta_eval_const(source, crs, cre);
                             if cval != sentinel {
