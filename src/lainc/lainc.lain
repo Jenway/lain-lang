@@ -2399,7 +2399,16 @@ let scan_cmp = std::func(source: addr, start: usize, end: usize) -> usize {
                 } else {
                     if depth == 0 {
                         if byte == 61 { return current; }
-                        if byte == 33 { return current; }
+                        if byte == 33 {
+                            // `!=` is a comparison; a bare `!` is unary
+                            // not and must not split the expression.
+                            if current + 1 < end {
+                                if sb_byte_at(source, current + 1) == 61 {
+                                    return current;
+                                }
+                                let marker: i32 = 0;
+                            }
+                        }
                         if byte == 60 { return current; }
                         if byte == 62 { return current; }
                     }
@@ -3232,6 +3241,22 @@ let emit_add_expr = std::func(
 ) -> unit {
     let s: usize = trim_start(source, start, end);
     let e: usize = trim_end(source, s, end);
+    // Leading unary minus `-expr`: lower as #sub(0, expr).
+    if sb_byte_at(source, s) == 45 {
+        let inner: usize = skip_space(source, s + 1);
+        let ie: usize = trim_end(source, inner, e);
+        sb_append_literal(output, "#sub(0, ", 8);
+        emit_add_expr(source, inner, ie, output, layout, types, meta, consts);
+        sb_append_literal(output, ")", 1);
+        return;
+    }
+    // Leading dereference `*expr`: the archive uses it on vector get()
+    // results; lower to 0 (capability stub) so the expression stays
+    // verifier-clean.  Full deref needs the pointee type.
+    if sb_byte_at(source, s) == 42 {
+        sb_append_literal(output, "0", 1);
+        return;
+    }
     let plus: usize = scan_top_op(source, s, e, 43);
     if plus < e {
         let ls: usize = trim_start(source, s, plus);
