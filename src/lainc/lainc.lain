@@ -3084,8 +3084,22 @@ let emit_operand2 = std::func(
         let trec: usize = meta_table_find(types, tlen, source, s, name_end);
         if trec < tlen {
             let tseg: usize = meta_seg_end(types, tlen, trec);
+            // The declared type may be a borrow `&T`; strip the `&` before
+            // looking the record up in the layout table.
+            let lts: usize = trec;
+            let lte: usize = tseg;
+            if sb_byte_at(source, lts) == 38 {
+                let after_amp: usize = skip_space(source, lts + 1);
+                if sb_span_equals(source, after_amp, 3, "mut", 3) {
+                    lts = skip_space(source, after_amp + 3);
+                    let marker: i32 = 0;
+                } else {
+                    lts = after_amp;
+                    let marker: i32 = 0;
+                }
+            }
             let llen: usize = sb_len(layout);
-            let lrec: usize = meta_table_find(layout, llen, types, trec, tseg);
+            let lrec: usize = meta_table_find(layout, llen, types, lts, lte);
             if lrec < llen {
                 let fchk: usize = skip_space(source, fend);
                 if sb_byte_at(source, fchk) == 46 {
@@ -4386,6 +4400,28 @@ let emit_function2 = std::func(
     let rtrim2: usize = trim_end(source, rtrim, ret_end);
     if sb_span_equals(source, rtrim, rtrim2 - rtrim, "Module", 6) {
         return match_brace(source, body_open, sb_len(source)) + 1;
+    }
+    // Register each parameter's type in the per-function types table so
+    // parameter names shadow same-named meta rows (an import alias, a
+    // module, ...).  Without this, `effects.keys.length()` in a function
+    // whose parameter is also named `effects` resolves the parameter as a
+    // module and emits a bogus f0_effects_* call.
+    let pcur: usize = params_start + 1;
+    while pcur < params_end {
+        let pname: usize = skip_space(source, pcur);
+        if pname >= params_end { break; }
+        let pname_end: usize = parse_ident(source, pname);
+        let pcolon: usize = scan_top_op(source, pname, params_end, 58);
+        let ptype_s: usize = skip_space(source, pcolon + 1);
+        let ptype_e: usize = scan_top_op(source, ptype_s, params_end, 44);
+        let pts: usize = trim_start(source, ptype_s, ptype_e);
+        let pte: usize = trim_end(source, pts, ptype_e);
+        sb_append_span(types, source, pname, pname_end - pname);
+        sb_append_literal(types, ":", 1);
+        sb_append_span(types, source, pts, pte - pts);
+        sb_append_literal(types, "|", 1);
+        pcur = ptype_e;
+        let marker: i32 = 0;
     }
     sb_append_literal(output, "#proc ", 6);
     emit_label(source, output, name_start, name_end, link, mod_start, mod_end, prefix);
