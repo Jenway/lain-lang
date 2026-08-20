@@ -3020,6 +3020,14 @@ let emit_operand2 = std::func(
     let s: usize = trim_start(source, start, end);
     let e: usize = trim_end(source, s, end);
     let first: i32 = sb_byte_at(source, s);
+    // Unary not `!expr`: lower as #eq(expr, 0).
+    if first == 33 {
+        let inner: usize = skip_space(source, s + 1);
+        sb_append_literal(output, "#eq(", 4);
+        emit_operand2(source, inner, e, output, layout, types, meta, consts);
+        sb_append_literal(output, ", 0)", 4);
+        return;
+    }
     if first == 34 {
         sb_append_span(output, source, s, e - s);
         return;
@@ -4208,14 +4216,31 @@ let emit_module = std::func(
                     let semi: usize = scan_semi(source, s, brace_end);
                     let crs: usize = trim_start(source, eq + 1, semi);
                     let cre: usize = trim_end(source, crs, semi);
-                    let sentinel: usize = 0 - 1;
-                    let cv: usize = meta_eval_const(source, crs, cre);
-                    if cv != sentinel {
-                        meta_append(consts, 1, mns, mne - mns, cv, 0, mrow);
-                        let marker: i32 = 0;
-                    } else {
-                        let tb: i32 = try_bind_module_value(source, s, brace_end, output, layout, types, meta, consts);
-                        let marker: i32 = 0;
+                    // Module member type alias `let NAME: type = TYPE;`
+                    // binds a kind-4 row owned by the module.
+                    let talias: i32 = 0;
+                    let tmark: usize = scan_let_mark(source, mns, semi);
+                    if sb_byte_at(source, tmark) == 58 {
+                        let ttyp: usize = skip_space(source, tmark + 1);
+                        if sb_span_equals(source, ttyp, 4, "type", 4) {
+                            let teq: usize = scan_top_op(source, tmark + 1, semi, 61);
+                            let tas: usize = trim_start(source, teq + 1, semi);
+                            let tae: usize = trim_end(source, tas, semi);
+                            meta_append(meta, 4, mns, mne - mns, tas, tae - tas, mrow);
+                            talias = 1;
+                            let marker: i32 = 0;
+                        }
+                    }
+                    if talias == 0 {
+                        let sentinel: usize = 0 - 1;
+                        let cv: usize = meta_eval_const(source, crs, cre);
+                        if cv != sentinel {
+                            meta_append(consts, 1, mns, mne - mns, cv, 0, mrow);
+                            let marker: i32 = 0;
+                        } else {
+                            let tb: i32 = try_bind_module_value(source, s, brace_end, output, layout, types, meta, consts);
+                            let marker: i32 = 0;
+                        }
                     }
                     current = semi + 1;
                     let marker: i32 = 0;
