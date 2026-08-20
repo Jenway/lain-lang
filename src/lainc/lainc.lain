@@ -1,4 +1,4 @@
-// src/lainc/lainc.lain — M2: self-hosting lainc.
+// src/lainc/lainc.lain ? M2: self-hosting lainc.
 //
 // Self-contained: no std imports.  String buffers are managed through
 // bootstrap.allocate-pages plus byte load/store primitives, so the emitted
@@ -636,6 +636,8 @@ let meta_field_num_end = std::func(buf: addr, seg_end: usize, name_end: usize) -
 };
 
 let meta_field_w_end = std::func(buf: addr, seg_end: usize, num_end: usize) -> usize {
+    // num_end points at the first `#` after the offset number; this scans
+    // to the `#` that closes the width number.  The addr flag follows.
     let w_end: usize = num_end + 1;
     while w_end < seg_end {
         if sb_byte_at(buf, w_end) == 35 { break; }
@@ -643,6 +645,66 @@ let meta_field_w_end = std::func(buf: addr, seg_end: usize, num_end: usize) -> u
         let marker: i32 = 0;
     }
     return w_end;
+};
+
+// Index of the next field's name: skip the width number and the addr flag
+// that follow `#offset#`.  w_end is the `#` closing the width.
+let meta_field_next = std::func(buf: addr, seg_end: usize, w_end: usize) -> usize {
+    let a_end: usize = w_end + 1;
+    while a_end < seg_end {
+        if sb_byte_at(buf, a_end) == 35 { break; }
+        a_end = a_end + 1;
+        let marker: i32 = 0;
+    }
+    return a_end + 1;
+};
+
+// Read the addr flag (0 = bits field, 1 = address field) of field `fname`
+// in the layout segment, or max-1 when absent.
+let meta_field_addr = std::func(
+    buf: addr,
+    rec: usize,
+    seg_end: usize,
+    source: addr,
+    fname_start: usize,
+    fname_end: usize,
+) -> usize {
+    let index: usize = rec;
+    let found: i32 = 0;
+    while found == 0 {
+        if index >= seg_end { break; }
+        let name_end: usize = meta_field_name_end(buf, seg_end, index);
+        let num_end: usize = meta_field_num_end(buf, seg_end, name_end);
+        let flen: usize = fname_end - fname_start;
+        let nlen: usize = name_end - index;
+        if nlen == flen {
+            let same: i32 = 1;
+            let i: usize = 0;
+            while i < flen {
+                if sb_byte_at(buf, index + i) != sb_byte_at(source, fname_start + i) {
+                    same = 0;
+                    let marker: i32 = 0;
+                    break;
+                }
+                i = i + 1;
+                let marker: i32 = 0;
+            }
+            if same == 1 {
+                // addr flag starts after `#width#`; read up to the next `#`.
+                let w_end: usize = meta_field_w_end(buf, seg_end, num_end);
+                let flag_end: usize = w_end + 1;
+                while flag_end < seg_end {
+                    if sb_byte_at(buf, flag_end) == 35 { break; }
+                    flag_end = flag_end + 1;
+                    let marker: i32 = 0;
+                }
+                return meta_parse_decimal(buf, w_end + 1, flag_end);
+            }
+        }
+        index = meta_field_next(buf, seg_end, meta_field_w_end(buf, seg_end, num_end));
+        let marker: i32 = 0;
+    }
+    return 0 - 1;
 };
 
 let meta_field_offset = std::func(
@@ -677,7 +739,7 @@ let meta_field_offset = std::func(
                 return meta_parse_decimal(buf, name_end + 1, num_end);
             }
         }
-        index = meta_field_w_end(buf, seg_end, num_end) + 1;
+        index = meta_field_next(buf, seg_end, meta_field_w_end(buf, seg_end, num_end));
         let marker: i32 = 0;
     }
     return 0 - 1;
@@ -718,7 +780,7 @@ let meta_field_width = std::func(
                 );
             }
         }
-        index = meta_field_w_end(buf, seg_end, num_end) + 1;
+        index = meta_field_next(buf, seg_end, meta_field_w_end(buf, seg_end, num_end));
         let marker: i32 = 0;
     }
     return 0 - 1;
@@ -924,6 +986,50 @@ let meta_lookup = std::func(
             if same == 1 {
                 let k: usize = meta_row_field(table, len, row, 0);
                 if k != 0 { return row; }
+            }
+        }
+        row = row + 1;
+        let marker: i32 = 0;
+    }
+    return 0;
+};
+
+// Look up a name span among rows of a specific kind.  Unlike meta_lookup
+// (which returns the first non-zero row), this finds a row whose kind
+// matches, so a module-value binding (kind 2) can shadow an earlier
+// factory-member row (kind 3) with the same name.
+let meta_lookup_kind = std::func(
+    table: addr,
+    len: usize,
+    source: addr,
+    ns: usize,
+    nl: usize,
+    want: usize,
+) -> usize {
+    let rows: usize = meta_rows(table, len);
+    let row: usize = 1;
+    let found: i32 = 0;
+    while found == 0 {
+        if row > rows { break; }
+        let rn: usize = meta_row_field(table, len, row, 1);
+        let rl: usize = meta_row_field(table, len, row, 2);
+        if rl == nl {
+            let same: i32 = 1;
+            let i: usize = 0;
+            while i < nl {
+                let rb: usize = rn + i;
+                let nb: usize = ns + i;
+                if sb_byte_at(source, rb) != sb_byte_at(source, nb) {
+                    same = 0;
+                    let marker: i32 = 0;
+                    break;
+                }
+                i = i + 1;
+                let marker: i32 = 0;
+            }
+            if same == 1 {
+                let k: usize = meta_row_field(table, len, row, 0);
+                if k == want { return row; }
             }
         }
         row = row + 1;
@@ -3369,7 +3475,7 @@ let emit_type = std::func(
     if tscan > t {
         let mod_span: usize = t;
         let mod_end: usize = parse_ident(source, mod_span);
-        let mrow: usize = meta_lookup(meta, ml, source, mod_span, mod_end - mod_span);
+        let mrow: usize = meta_lookup_kind(meta, ml, source, mod_span, mod_end - mod_span, 2);
         if mrow != 0 {
             let mkind: usize = meta_value_kind(meta, ml, mrow);
             if mkind == 2 {
@@ -4262,11 +4368,18 @@ let emit_record = std::func(
             width = 8;
             let marker: i32 = 0;
         }
+        // Record whether the field type lowers to an address, so record
+        // constructors can store addr-typed values (Memory.String etc.)
+        // with the right physical type.  The type span here is a source
+        // offset, so meta_type_is_addr is valid on it.
+        let faddr: usize = meta_type_is_addr(source, t, t2, meta);
         sb_append_span(layout, source, s, field_end - s);
         sb_append_literal(layout, "#", 1);
         meta_append_decimal(layout, offset);
         sb_append_literal(layout, "#", 1);
         meta_append_decimal(layout, width);
+        sb_append_literal(layout, "#", 1);
+        meta_append_decimal(layout, faddr);
         sb_append_literal(layout, "#", 1);
         offset = offset + width;
         current = type_end;
@@ -4294,7 +4407,7 @@ let meta_type_is_addr = std::func(
     ts: usize,
     te: usize,
     meta: addr,
-) -> i32 {
+) -> usize {
     let t: usize = trim_start(source, ts, te);
     let t2: usize = trim_end(source, t, te);
     let first: i32 = sb_byte_at(source, t);
@@ -4339,7 +4452,7 @@ let meta_type_is_addr = std::func(
     if tscan > t {
         let mod_span: usize = t;
         let mod_end: usize = parse_ident(source, mod_span);
-        let mrow: usize = meta_lookup(meta, ml, source, mod_span, mod_end - mod_span);
+        let mrow: usize = meta_lookup_kind(meta, ml, source, mod_span, mod_end - mod_span, 2);
         if mrow != 0 {
             let mkind: usize = meta_value_kind(meta, ml, mrow);
             if mkind == 2 {
@@ -4408,30 +4521,16 @@ let emit_record_value = std::func(
         let vend: usize = meta_scan_type_end(source, brace_end, vstart);
         let off: usize = meta_field_offset(layout, rec, seg_end, source, fs, fname_end);
         let w: usize = meta_field_width(layout, rec, seg_end, source, fs, fname_end);
+        let faddr: usize = meta_field_addr(layout, rec, seg_end, source, fs, fname_end);
         sb_append_literal(output, "#let %v", 7);
         meta_append_decimal(output, expr_start);
         sb_append_literal(output, "_", 1);
         meta_append_decimal(output, index);
-        // A field whose value is a single bound variable takes the
-        // variable's declared physical type (addr for pointer-shaped
-        // fields such as Memory.String; bits otherwise).  Other value
-        // forms keep the layout width.
-        let vident_end: usize = parse_ident(source, vstart);
-        let vaddr: i32 = 0;
-        if vident_end > vstart {
-            let vspace: usize = skip_space(source, vident_end);
-            if vspace >= vend {
-                let tlen: usize = sb_len(types);
-                let trec: usize = meta_table_find(types, tlen, source, vstart, vident_end);
-                if trec < tlen {
-                    let tseg: usize = meta_seg_end(types, tlen, trec);
-                    let isa: i32 = meta_type_is_addr(source, trec, tseg, meta);
-                    if isa == 1 { vaddr = 1; }
-                    let marker: i32 = 0;
-                }
-            }
-        }
-        if vaddr == 1 {
+        // A field whose declared type is pointer-shaped (Memory.String,
+        // &mut T, record aliases) stores an address; scalar fields store
+        // their byte width.  The addr flag is recorded in the layout table
+        // by emit_record, so no type-table lookup is needed here.
+        if faddr == 1 {
             sb_append_literal(output, ": addr = ", 9);
         } else {
             sb_append_literal(output, ": #bits<", 8);
