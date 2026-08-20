@@ -263,6 +263,27 @@ l1check 干净；阶段 A–D fixture 全绿（5/42）；M2 固定点 gen2==gen3
    syntax.Syntax(Memory);` 在工厂体内）+ 成员引用。`clone_from` 的参数
    `Syntax.NodeId` 仍回落 addr——工厂体内嵌套模块绑定的登记/查找路径
    未走通（顶层 library 模式已通，工厂体内不通）。
+
+   已定位的精确行为（跨文件 + 入口模式，qual_type 系列最小复现）：
+   - 顶层 `let SX: Module = q.syntax_mod(0);`（限定调用）+ 顶层函数用
+     `SX.NodeId` 参数 → 解析为 `#bits<64>` ✅（qual_type8）
+   - 工厂体内 `let SX: Module = q.syntax_mod(0);` + 工厂体内成员函数
+     `clone_from(id: SX.NodeId)` → 成员 proc 不 emit、`OM.clone_from(7)`
+     调用不编译（qual_type9/12/13）
+   - 工厂体内成员函数用**普通 i32 参数**也不 emit（qual_type10/11）——
+     所以问题不止限定类型，工厂体内模块绑定后的**成员函数 emit** 本身
+     就断：eval_module_factory 扫描工厂体时 `let SX: Module = ...` 走
+     else → try_bind_module_value，成功后 `current = semi2 + 1` 应继续
+     处理 clone_from，但实际未 emit
+   - 顶层**裸工厂调用** `let OM: Module = outer_mod(0);` 不被识别
+     （try_bind_module_value 要求限定 `mod.fn(...)` 形态）——archive
+     自身都走限定调用，此项仅影响测试 fixture
+   - `compiler_compile`（单源）模式工厂链完全不工作（qual_type1-7）；
+     library 模式是正确基线
+   - 下一步：在 eval_module_factory 的 else 分支核对 try_bind_module_value
+     调用后 current 的推进（怀疑 scan_semi 的 `end` 参数或
+     emit_function2 的返回被 else 分支覆盖）
+
 2. **逐模块扩展**：generated_syntax → types → effects → … →
    compiler_core → compiler_driver → compiler_api → lainc，每模块
    l1check；新增模块可能暴露新语法缺口。
