@@ -232,21 +232,39 @@ python tests/lainir_lain/run_compiler_source_closure.py  # frozen 参照（不�
 编译产物 **l1check 干净（verifier-valid）**（正式测试 run_lainc_archive_e.py，
 提交 c045eb3 等）。
 
-本轮完成（每项过 M2 固定点）：
+2026-08-20 续：修复了阻碍 archive 链的 record 构造缺口（提交 7987edc、
+0fa7d9c）：
 
-- **参数位置字段 stub**：emit_arg_one 对不可解析字段实参输出基变量
-  （addr）；模块成员 record 构造（`Lex.Span {...}`）stub `#alloca(1)`；
-  参数扫描跟踪 `{}` 深度（record 构造逗号不再拆参数）。
-- **record 构造唯一字段名**：`#let %v<pos>_<index>`（同函数多个构造
-  不再 %v0 冲突）。
-- **链式字段 stub**：`unit.nodes.get(...)` 等字段后跟链/调用 → 0。
-- 原版 tokenizer 的嵌套 else-if（byte==34 分支）也随之通过（之前的
-  else-if 嵌套展开 + 字段/赋值修复顺带解决）。
+- **record 构造 let 绑定丢失**：emit_record_value 用 expr_start（`=` 后，
+  可能指向空白）解析 record 名，parse_ident 得到空 span → meta_table_find
+  必失败 → 整个 let 静默无输出（`f0_Syntax_parse` 里 `%unit` 未定义）。
+  修复：先 trim_start 再 emit_path_tail。
+- **限定 record 构造**（`Syntax.Unit {...}`）：emit_stmt_let 只在 RHS 首段
+  后是 `{` 时进 record 分支，限定名落到 emit_expr 输出裸 `%Unit`。修复：
+  用 emit_path_tail 定位尾段再判 `{`。
+- **addr 字段**：record 字段值若为指针形变量（`Memory.String` 等）固定
+  `#bits<W>` 声明与 addr 变量不匹配。新增 `meta_type_is_addr`（镜像
+  emit_type 决策），emit_record_value 对单标识符字段值查 types 表判定。
+- **顶层类型别名**：`let NAME: type = TYPE;` 此前被静默忽略（不登记
+  meta kind=4），emit_type 对任何别名回落 addr。compile_source 现在绑定
+  kind-4 行，`NodeId` → `#bits<64>` 可解析。
+- 附带：emit_type / meta_type_is_addr 支持限定类型别名 `Mod.Member`
+  （解析模块行 + meta_lookup_qualified 递归 payload）——library 模式下
+  已验证 `SX.NodeId` 参数 → `#bits<64>`。
+- 循环内避免 `continue`（frozen 前端会把 `continue` 当变量 emit 成
+  `%continue` 未定义；lint：循环体用 if/else 设标志）。
+
+已验证：record 构造 emit alloca+逐字段 store；tokenizer+syntax 链
+l1check 干净；阶段 A–D fixture 全绿（5/42）；M2 固定点 gen2==gen3 保持。
 
 **阶段 E 剩余**：
 
-1. **逐模块扩展**：tokenizer → syntax → generated_syntax → types →
-   effects → … → compiler_core → compiler_driver → compiler_api →
-   lainc，每模块 l1check；新增模块可能暴露新语法缺口。
-2. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物
+1. **generated_syntax 卡点**：工厂内模块绑定（`let Syntax: Module =
+   syntax.Syntax(Memory);` 在工厂体内）+ 成员引用。`clone_from` 的参数
+   `Syntax.NodeId` 仍回落 addr——工厂体内嵌套模块绑定的登记/查找路径
+   未走通（顶层 library 模式已通，工厂体内不通）。
+2. **逐模块扩展**：generated_syntax → types → effects → … →
+   compiler_core → compiler_driver → compiler_api → lainc，每模块
+   l1check；新增模块可能暴露新语法缺口。
+3. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物
    verifier-valid。
