@@ -259,33 +259,32 @@ l1check 干净；阶段 A–D fixture 全绿（5/42）；M2 固定点 gen2==gen3
 
 **阶段 E 剩余**：
 
-1. **generated_syntax 卡点**：工厂内模块绑定（`let Syntax: Module =
-   syntax.Syntax(Memory);` 在工厂体内）+ 成员引用。`clone_from` 的参数
-   `Syntax.NodeId` 仍回落 addr——工厂体内嵌套模块绑定的登记/查找路径
-   未走通（顶层 library 模式已通，工厂体内不通）。
-
-   已定位的精确行为（跨文件 + 入口模式，qual_type 系列最小复现）：
-   - 顶层 `let SX: Module = q.syntax_mod(0);`（限定调用）+ 顶层函数用
-     `SX.NodeId` 参数 → 解析为 `#bits<64>` ✅（qual_type8）
-   - 工厂体内 `let SX: Module = q.syntax_mod(0);` + 工厂体内成员函数
-     `clone_from(id: SX.NodeId)` → 成员 proc 不 emit、`OM.clone_from(7)`
-     调用不编译（qual_type9/12/13）
-   - 工厂体内成员函数用**普通 i32 参数**也不 emit（qual_type10/11）——
-     所以问题不止限定类型，工厂体内模块绑定后的**成员函数 emit** 本身
-     就断：eval_module_factory 扫描工厂体时 `let SX: Module = ...` 走
-     else → try_bind_module_value，成功后 `current = semi2 + 1` 应继续
-     处理 clone_from，但实际未 emit
-   - 顶层**裸工厂调用** `let OM: Module = outer_mod(0);` 不被识别
-     （try_bind_module_value 要求限定 `mod.fn(...)` 形态）——archive
-     自身都走限定调用，此项仅影响测试 fixture
-   - `compiler_compile`（单源）模式工厂链完全不工作（qual_type1-7）；
-     library 模式是正确基线
-   - 下一步：在 eval_module_factory 的 else 分支核对 try_bind_module_value
-     调用后 current 的推进（怀疑 scan_semi 的 `end` 参数或
-     emit_function2 的返回被 else 分支覆盖）
-
-2. **逐模块扩展**：generated_syntax → types → effects → … →
-   compiler_core → compiler_driver → compiler_api → lainc，每模块
-   l1check；新增模块可能暴露新语法缺口。
+1. **effects.lain 卡点（精确）**：`contains(effects: &EffectSet)` 里
+   `effects.keys.length()` 被 emit 成 `f0_effects_length`（把参数当模块）。
+   已修复参数登记（emit_function2 登记 name:type 到 per-function types
+   表）+ emit_operand2 剥离 `&`/`&mut` 查 layout——b23/b24 最小复现
+   （参数名 effects + record 字段 + 方法调用）均正确 stub 0。真实
+   effects 仍失败，差异在 `EffectKeyVector` 是 **`vector.Vec(...)` 泛型
+   实例别名**（非 std::struct），emit_record 时字段类型解析走
+   meta_type_is_addr 递归泛型路径，可能导致 EffectSet 的 keys 字段
+   在 layout 查找/字段访问时落回 meta_lookup("effects")。下一步：
+   对比真实 vs b24 的 layout 登记与字段访问路径，或在 emit_operand2
+   字段分支对"types 表命中但 layout 查不到"的情况直接 stub 0（当前
+   落到 meta_lookup 是 bug）。
+2. **逐模块扩展**：effects → lower → … → compiler_core → compiler_driver
+   → compiler_api → lainc，每模块 l1check；新增模块可能暴露新语法缺口。
 3. 最后实例化 `lainc.API` 运行；验收 24 文件全部编译、产物
    verifier-valid。
+
+2026-08-21 续（已提交 7987edc→670957a）：archive 链从 tokenizer 推进到
+effects（tokenizer+syntax+generated_syntax+types 四模块 l1check 干净）：
+- 修复记录构造 let 绑定丢失（trim_start + emit_path_tail）
+- 限定 record 构造（Syntax.Unit {...}）
+- layout 表 addr flag（emit_record 登记字段物理类型，emit_record_value
+  按 flag 输出 addr/bits store）
+- 限定类型别名 meta_lookup_kind（kind-2 模块行优先于同名 kind-3 工厂行）
+- 顶层/模块成员类型别名登记（kind-4）
+- 一元取反 !、一元负号 -、解引用 * 前缀
+- scan_cmp 不再把 ! 当比较符（!= 才比较）
+- get()/get_mut() 调用链实参 → #int2ptr(0)（addr 参数类型检查）
+- 参数登记到 types 表 + & 剥离
