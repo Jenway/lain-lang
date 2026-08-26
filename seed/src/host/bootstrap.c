@@ -7,6 +7,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+/* Keep the host header independent from windows.h: the latter defines a
+ * typedef named EXPR_EVAL, which collides with the interpreter's expression
+ * enum. */
+#define MEM_COMMIT 0x1000UL
+#define MEM_RESERVE 0x2000UL
+#define MEM_RELEASE 0x8000UL
+#define PAGE_READWRITE 0x04UL
+__declspec(dllimport) void *__stdcall VirtualAlloc(
+    void *, size_t, unsigned long, unsigned long);
+__declspec(dllimport) int __stdcall VirtualFree(
+    void *, size_t, unsigned long);
+#endif
 
 typedef struct {
   const char *path;
@@ -99,6 +112,21 @@ static LainirRunStatus source_length(
   return LAINIR_RUN_OK;
 }
 
+static LainirRunStatus copy_bytes(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  (void)user_data;
+  if (count != 3 || args[0].kind != LAINIR_VALUE_ADDR ||
+      args[1].kind != LAINIR_VALUE_ADDR || args[2].kind != LAINIR_VALUE_BITS) {
+    *error = "bootstrap.copy-bytes expects destination, source and length";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (args[2].as.bits)
+    memcpy(args[0].as.addr, args[1].as.addr, (size_t)args[2].as.bits);
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
 static LainirRunStatus allocate_pages(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
@@ -110,7 +138,16 @@ static LainirRunStatus allocate_pages(
     return LAINIR_RUN_BAD_CALL;
   }
   size = (size_t)args[0].as.bits;
+  /* VirtualAlloc returns demand-zero committed pages on Windows.  Unlike
+   * calloc, it does not touch every byte up front, so the many 64 KiB/1 MiB
+   * compiler buffers only consume physical memory for pages the compiler
+   * actually uses. */
+#ifdef _WIN32
+  memory = VirtualAlloc(NULL, size ? size : 1,
+                        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
   memory = calloc(size ? size : 1, 1);
+#endif
   if (!memory) {
     *error = "bootstrap.allocate-pages failed";
     return LAINIR_RUN_TRAP;
@@ -127,7 +164,14 @@ static LainirRunStatus release_pages(
     *error = "bootstrap.release-pages expects one address";
     return LAINIR_RUN_BAD_CALL;
   }
+#ifdef _WIN32
+  if (!VirtualFree(args[0].as.addr, 0, MEM_RELEASE)) {
+    *error = "bootstrap.release-pages failed";
+    return LAINIR_RUN_BAD_CALL;
+  }
+#else
   free(args[0].as.addr);
+#endif
   *result = lainir_value_unit();
   return LAINIR_RUN_OK;
 }
@@ -209,6 +253,25 @@ static LainirRunStatus artifact_write_byte(
   }
   if (fputc((int)(args[0].as.bits & 255), context->artifact) == EOF) {
     *error = "bootstrap.artifact-write-byte failed";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus artifact_write_span(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  size_t length;
+  if (count != 2 || args[0].kind != LAINIR_VALUE_ADDR ||
+      args[1].kind != LAINIR_VALUE_BITS || !context->artifact) {
+    *error = "bootstrap.artifact-write-span has invalid arguments or state";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  length = (size_t)args[1].as.bits;
+  if (length && fwrite(args[0].as.addr, 1, length, context->artifact) != length) {
+    *error = "bootstrap.artifact-write-span failed";
     return LAINIR_RUN_BAD_CALL;
   }
   *result = lainir_value_unit();
@@ -334,6 +397,7 @@ int bootstrap_run_cli(int argc, char **argv) {
                       &context) ||
       !add_capability(caps, "bootstrap.source-data", source_data, &context) ||
       !add_capability(caps, "bootstrap.source-length", source_length, &context) ||
+      !add_capability(caps, "bootstrap.copy-bytes", copy_bytes, &context) ||
       !add_capability(caps, "bootstrap.allocate-pages", allocate_pages,
                       &context) ||
       !add_capability(caps, "bootstrap.release-pages", release_pages,
@@ -345,12 +409,25 @@ int bootstrap_run_cli(int argc, char **argv) {
                       &context) ||
       !add_capability(caps, "bootstrap.artifact-write-byte",
                       artifact_write_byte, &context) ||
+      !add_capability(caps, "bootstrap.artifact-write-span",
+                      artifact_write_span, &context) ||
       !add_capability(caps, "bootstrap.artifact-write-literal",
                       artifact_write_literal, &context) ||
       !add_capability(caps, "bootstrap.artifact-finish", artifact_finish,
                       &context)) {
     fprintf(stderr, "could not initialize bootstrap capabilities\n");
     goto cleanup;
+  }
+
+  /* Keep long archive-library runs diagnosable without changing the normal
+   * bootstrap contract.  A temporary step cap can be supplied by the host
+   * while bisecting a multi-source lowering loop. */
+  const char *step_limit_text = getenv("LAINIR_BOOTSTRAP_MAX_STEPS");
+  if (step_limit_text && *step_limit_text) {
+    char *step_limit_end = NULL;
+    unsigned long long step_limit = strtoull(step_limit_text, &step_limit_end, 10);
+    if (step_limit_end != step_limit_text && *step_limit_end == '\0' && step_limit > 0)
+      lainir_caps_set_limits(caps, (uint64_t)step_limit, 256, 0);
   }
 
   request.module = module;

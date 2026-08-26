@@ -1,5 +1,6 @@
 #include "lainir/interpreter.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -7,6 +8,11 @@ typedef struct {
   char *name;
   LainirValue value;
 } LainirBinding;
+
+typedef struct {
+  const char *name;
+  uint32_t binding_index;
+} LainirLocalIndexEntry;
 
 typedef struct {
   uint8_t *data;
@@ -17,9 +23,15 @@ typedef struct LainirFrame {
   L1Subroutine *sub;
   LainirValue *args;
   uint32_t arg_count;
+  LainirValue args_inline[8];
+  int args_heap;
   LainirBinding *locals;
   uint32_t local_count;
   uint32_t local_cap;
+  LainirBinding locals_inline[16];
+  int locals_heap;
+  LainirLocalIndexEntry *local_index;
+  uint32_t local_index_cap;
   struct LainirFrame *caller;
 } LainirFrame;
 
@@ -27,6 +39,12 @@ typedef struct {
   const char *name;
   L1Subroutine *sub;
 } LainirSubIndexEntry;
+
+typedef struct {
+  L1Subroutine *sub;
+  uint64_t calls;
+  uint64_t steps;
+} LainirTraceProcedure;
 
 typedef struct {
   L1Subroutine *module;
@@ -45,7 +63,25 @@ typedef struct {
   LainirValue return_value;
   uint64_t steps;
   uint32_t call_depth;
+  LainirFrame *active_frame;
   uint64_t allocated_bytes;
+  int trace_enabled;
+  int trace_live_enabled;
+  int fast_builtins_enabled;
+  int fast_leaves_enabled;
+  int fast_scanners_enabled;
+  int fast_meta_scan_enabled;
+  int trace_meta_enabled;
+  int trace_fast_names_enabled;
+  const char *trace_call_name;
+  const char *trace_return_name;
+  const char *trace_path;
+  LainirTraceProcedure *trace_procedures;
+  uint32_t trace_procedure_count;
+  LainirTraceProcedure *trace_active;
+  const char *fast_active_name;
+  uint64_t trace_expr_kinds[64];
+  uint64_t trace_inst_kinds[16];
 } LainirInterpreter;
 
 /* ── forward declarations for mutual recursion ── */
@@ -54,6 +90,10 @@ static void interp_exec_block(LainirInterpreter *, LainirFrame *, L1Block *);
 static LainirValue interp_call_sub(LainirInterpreter *, L1Subroutine *,
                                     const LainirValue *, uint32_t);
 static void interp_trap(LainirInterpreter *, const char *);
+static void interp_trace_finish(LainirInterpreter *);
+static int interp_try_fast_builtin(LainirInterpreter *, L1Subroutine *,
+                                    const LainirValue *, uint32_t,
+                                    LainirValue *);
 
 /* ═══════════════════════════════════════════════════════════════
  * Value constructors
@@ -225,10 +265,138 @@ static int interp_tick(LainirInterpreter *interp) {
     return 0;
   }
   interp->steps++;
+  if (interp->trace_active) interp->trace_active->steps++;
+  if (interp->trace_live_enabled && (interp->steps % 100) == 0) {
+    const char *name = "<unknown>";
+    if (interp->active_frame && interp->active_frame->sub &&
+        interp->active_frame->sub->name)
+      name = interp->active_frame->sub->name;
+    fprintf(stderr, "lainir live: step=%llu procedure=%s\\n",
+            (unsigned long long)interp->steps, name);
+    fflush(stderr);
+  }
+  return 1;
+}
+
+static void interp_trace_init(LainirInterpreter *interp) {
+  const char *path = getenv("LAINIR_TRACE_PROFILE");
+  uint32_t count = 0;
+  if (!path || !path[0]) return;
+  for (L1Subroutine *sub = interp->module; sub; sub = sub->next) count++;
+  interp->trace_procedures = calloc(count, sizeof(LainirTraceProcedure));
+  if (!interp->trace_procedures) return;
+  interp->trace_enabled = 1;
+  interp->trace_path = path;
+  interp->trace_procedure_count = count;
+  uint32_t index = 0;
+  for (L1Subroutine *sub = interp->module; sub; sub = sub->next) {
+    interp->trace_procedures[index++].sub = sub;
+  }
+}
+
+static LainirTraceProcedure *interp_trace_procedure(
+    LainirInterpreter *interp, L1Subroutine *sub) {
+  if (!interp->trace_enabled) return NULL;
+  for (uint32_t i = 0; i < interp->trace_procedure_count; i++)
+    if (interp->trace_procedures[i].sub == sub)
+      return &interp->trace_procedures[i];
+  return NULL;
+}
+
+static int interp_trace_compare_steps(const void *left, const void *right) {
+  const LainirTraceProcedure *const *a = left;
+  const LainirTraceProcedure *const *b = right;
+  if ((*a)->steps < (*b)->steps) return 1;
+  if ((*a)->steps > (*b)->steps) return -1;
+  return 0;
+}
+
+static void interp_trace_finish(LainirInterpreter *interp) {
+  static const char *inst_names[] = {
+      "let", "set", "store", "if", "loop", "break", "continue",
+      "return", "call"};
+  static const char *expr_names[] = {
+      "var", "const", "arg", "load", "lea", "add", "sub", "mul",
+      "div", "eq", "ne", "lt", "le", "gt", "ge", "popcount", "clz",
+      "rotl", "int2ptr", "ptr2int", "fadd", "fsub", "fmul", "fdiv",
+      "feq", "flt", "call", "call_indirect", "string", "primitive",
+      "alloca", "field", "eval", "sdiv", "udiv", "slt", "sle", "sgt",
+      "sge", "ult", "ule", "ugt", "uge", "zext", "sext", "trunc",
+      "proc_addr", "bitcast"};
+  FILE *out;
+  LainirTraceProcedure **ranked;
+  if (!interp->trace_enabled) return;
+  out = strcmp(interp->trace_path, "-") == 0
+            ? stderr : fopen(interp->trace_path, "w");
+  if (!out) out = stderr;
+  fprintf(out, "section\tname\tcalls\tsteps\n");
+  ranked = calloc(interp->trace_procedure_count, sizeof(*ranked));
+  if (ranked) {
+    for (uint32_t i = 0; i < interp->trace_procedure_count; i++)
+      ranked[i] = &interp->trace_procedures[i];
+    qsort(ranked, interp->trace_procedure_count, sizeof(*ranked),
+          interp_trace_compare_steps);
+    for (uint32_t i = 0; i < interp->trace_procedure_count; i++) {
+      LainirTraceProcedure *entry = ranked[i];
+      if (!entry->calls && !entry->steps) continue;
+      fprintf(out, "procedure\t%s\t%llu\t%llu\n", entry->sub->name,
+              (unsigned long long)entry->calls,
+              (unsigned long long)entry->steps);
+    }
+    free(ranked);
+  }
+  for (uint32_t i = 0; i < sizeof(inst_names) / sizeof(inst_names[0]); i++)
+    if (interp->trace_inst_kinds[i])
+      fprintf(out, "instruction\t%s\t%llu\t0\n", inst_names[i],
+              (unsigned long long)interp->trace_inst_kinds[i]);
+  for (uint32_t i = 0; i < sizeof(expr_names) / sizeof(expr_names[0]); i++)
+    if (interp->trace_expr_kinds[i])
+      fprintf(out, "expression\t%s\t%llu\t0\n", expr_names[i],
+              (unsigned long long)interp->trace_expr_kinds[i]);
+  fprintf(out, "summary\ttotal\t0\t%llu\n",
+          (unsigned long long)interp->steps);
+  if (out != stderr) fclose(out);
+  free(interp->trace_procedures);
+  interp->trace_procedures = NULL;
+  interp->trace_enabled = 0;
+}
+
+static void interp_local_index_insert(LainirFrame *frame,
+                                      const char *name,
+                                      uint32_t binding_index) {
+  if (!frame->local_index || !name) return;
+  uint32_t slot = interp_hash_name(name) & (frame->local_index_cap - 1);
+  while (frame->local_index[slot].name) {
+    /* Keep the first binding, matching the old linear lookup behavior if a
+     * malformed module emits duplicate `let` names. */
+    if (strcmp(frame->local_index[slot].name, name) == 0) return;
+    slot = (slot + 1) & (frame->local_index_cap - 1);
+  }
+  frame->local_index[slot].name = name;
+  frame->local_index[slot].binding_index = binding_index;
+}
+
+static int interp_local_index_rebuild(LainirFrame *frame, uint32_t cap) {
+  LainirLocalIndexEntry *index = calloc(cap, sizeof(*index));
+  if (!index) return 0;
+  free(frame->local_index);
+  frame->local_index = index;
+  frame->local_index_cap = cap;
+  for (uint32_t i = 0; i < frame->local_count; i++)
+    interp_local_index_insert(frame, frame->locals[i].name, i);
   return 1;
 }
 
 static LainirBinding *interp_lookup_local(LainirFrame *frame, const char *name) {
+  if (frame->local_index && frame->local_index_cap && name) {
+    uint32_t slot = interp_hash_name(name) & (frame->local_index_cap - 1);
+    while (frame->local_index[slot].name) {
+      if (strcmp(frame->local_index[slot].name, name) == 0)
+        return &frame->locals[frame->local_index[slot].binding_index];
+      slot = (slot + 1) & (frame->local_index_cap - 1);
+    }
+    return NULL;
+  }
   for (uint32_t i = 0; i < frame->local_count; i++)
     if (strcmp(frame->locals[i].name, name) == 0) return &frame->locals[i];
   return NULL;
@@ -239,21 +407,54 @@ static int interp_set_local(LainirFrame *frame, const char *name, LainirValue va
   if (b) { b->value = value; return 1; }
   if (frame->local_count == frame->local_cap) {
     uint32_t nc = frame->local_cap ? frame->local_cap * 2 : 8;
-    LainirBinding *nl = realloc(frame->locals, sizeof(LainirBinding) * nc);
+    LainirBinding *nl;
+    int was_heap = frame->locals_heap;
+    if (frame->locals_heap) {
+      nl = realloc(frame->locals, sizeof(LainirBinding) * nc);
+    } else {
+      nl = malloc(sizeof(LainirBinding) * nc);
+      if (nl && frame->local_count)
+        memcpy(nl, frame->locals,
+               sizeof(LainirBinding) * frame->local_count);
+    }
     if (!nl) return 0;
+    /* realloc already owns and, when necessary, releases the old heap
+     * block.  Freeing frame->locals again here corrupts the heap after the
+     * second local-capacity growth; only the inline-to-heap transition needs
+     * a flag change. */
+    if (!was_heap) frame->locals_heap = 1;
     frame->locals = nl; frame->local_cap = nc;
   }
   frame->locals[frame->local_count].name = strdup(name);
   if (!frame->locals[frame->local_count].name) return 0;
   frame->locals[frame->local_count].value = value;
   frame->local_count++;
+  if (!frame->local_index ||
+      (frame->local_count + 1) * 10 >= frame->local_index_cap * 7) {
+    uint32_t cap = frame->local_index_cap ? frame->local_index_cap * 2 : 16;
+    while (cap < frame->local_count * 2) cap *= 2;
+    if (!interp_local_index_rebuild(frame, cap)) {
+      /* The linear path remains correct if the optional accelerator cannot
+       * allocate memory.  Drop a stale partial index so future lookups do
+       * not miss the binding just appended above. */
+      free(frame->local_index);
+      frame->local_index = NULL;
+      frame->local_index_cap = 0;
+    }
+  } else {
+    interp_local_index_insert(
+        frame, frame->locals[frame->local_count - 1].name,
+        frame->local_count - 1);
+  }
   return 1;
 }
 
 static void interp_free_frame(LainirFrame *frame) {
   if (!frame) return;
   for (uint32_t i = 0; i < frame->local_count; i++) free(frame->locals[i].name);
-  free(frame->locals); free(frame->args);
+  if (frame->locals_heap) free(frame->locals);
+  free(frame->local_index);
+  if (frame->args_heap) free(frame->args);
 }
 
 static void interp_free_allocas(LainirInterpreter *interp) {
@@ -274,16 +475,50 @@ static LainirCapabilityEntry *interp_lookup_cap(LainirCapabilityTable *caps, con
 
 static void interp_trap(LainirInterpreter *interp, const char *error) {
   if (!interp->error) interp->error = error;
+  if (getenv("LAINIR_TRACE_FAST") && interp->fast_active_name)
+    fprintf(stderr, "lainir fast trap: %s (%s)\n",
+            interp->fast_active_name, error);
 }
 
 static uint64_t interp_value_bits(LainirInterpreter *interp, LainirValue value, const char *ctx) {
-  if (value.kind != LAINIR_VALUE_BITS) { interp_trap(interp, ctx); return 0; }
+  if (value.kind != LAINIR_VALUE_BITS) {
+    if (getenv("LAINIR_TRACE_TRAP")) {
+      const char *name = "<unknown>";
+      if (interp->active_frame && interp->active_frame->sub &&
+          interp->active_frame->sub->name)
+        name = interp->active_frame->sub->name;
+      fprintf(stderr, "lainir trap: %s kind=%d in %s", ctx,
+              (int)value.kind, name);
+      for (LainirFrame *caller = interp->active_frame ?
+               interp->active_frame->caller : NULL;
+           caller; caller = caller->caller) {
+        if (caller->sub && caller->sub->name)
+          fprintf(stderr, " caller=%s", caller->sub->name);
+      }
+      fputc('\n', stderr);
+    }
+    interp_trap(interp, ctx); return 0;
+  }
   return value.as.bits;
 }
 
 static int interp_values_equal(LainirInterpreter *interp,
                                LainirValue left, LainirValue right) {
   if (left.kind != right.kind) {
+    if (getenv("LAINIR_TRACE_TRAP")) {
+      const char *name = "<unknown>";
+      if (interp->active_frame && interp->active_frame->sub &&
+          interp->active_frame->sub->name)
+        name = interp->active_frame->sub->name;
+      fprintf(stderr, "lainir trap: equality kind mismatch in %s left=%d right=%d",
+              name, (int)left.kind, (int)right.kind);
+      for (LainirFrame *caller = interp->active_frame ? interp->active_frame->caller : NULL;
+           caller; caller = caller->caller) {
+        if (caller->sub && caller->sub->name)
+          fprintf(stderr, " caller=%s", caller->sub->name);
+      }
+      fputc('\n', stderr);
+    }
     interp_trap(interp, "equality operands have different physical kinds");
     return 0;
   }
@@ -358,6 +593,15 @@ static LainirValue interp_coerce_physical(
     }
     return lainir_value_bits(value.as.bits, type->width);
   }
+  if (type->kind == TY_ADDR) {
+    /* Source-level string literals are interned as a distinct physical
+     * value kind, but an `addr` parameter consumes their byte storage.  Keep
+     * the conversion at the call/let boundary so pointer arithmetic and
+     * loads see the same address representation as an explicit address. */
+    if (value.kind == LAINIR_VALUE_STRING)
+      return lainir_value_addr((void *)value.as.string);
+    return value;
+  }
   if (type->kind == TY_UNIT) return lainir_value_unit();
   return value;
 }
@@ -408,10 +652,47 @@ static LainirValue interp_eval_explicit_integer_binary(
 static void *interp_value_addr(LainirInterpreter *interp, LainirValue value, const char *ctx) {
   if (value.kind == LAINIR_VALUE_ADDR) {
     if (value.as.addr) return value.as.addr;
+    /* Keep the normal trap text stable, but expose the active procedure when
+     * explicitly requested.  This is useful for diagnosing generated L1
+     * layouts without making ordinary compiler runs noisy. */
+    if (getenv("LAINIR_TRACE_TRAP")) {
+      const char *name = "<unknown>";
+      if (interp->active_frame && interp->active_frame->sub &&
+          interp->active_frame->sub->name)
+        name = interp->active_frame->sub->name;
+      fprintf(stderr, "lainir trap: null address in %s", name);
+      if (interp->active_frame && interp->active_frame->arg_count) {
+        fprintf(stderr, " args=");
+        for (uint32_t i = 0; i < interp->active_frame->arg_count; i++) {
+          LainirValue arg = interp->active_frame->args[i];
+          if (i) fputc(',', stderr);
+          if (arg.kind == LAINIR_VALUE_ADDR)
+            fprintf(stderr, "addr:%p", arg.as.addr);
+          else if (arg.kind == LAINIR_VALUE_BITS)
+            fprintf(stderr, "bits:%llu", (unsigned long long)arg.as.bits);
+          else
+            fprintf(stderr, "kind:%d", (int)arg.kind);
+        }
+      }
+      for (LainirFrame *caller = interp->active_frame ? interp->active_frame->caller : NULL;
+           caller; caller = caller->caller) {
+        if (caller->sub && caller->sub->name)
+          fprintf(stderr, " caller=%s", caller->sub->name);
+      }
+      fputc('\\n', stderr);
+    }
     interp_trap(interp, "null address");
     return NULL;
   }
   if (value.kind == LAINIR_VALUE_STRING) return (void *)value.as.string;
+  if (getenv("LAINIR_TRACE_TRAP")) {
+    const char *name = "<unknown>";
+    if (interp->active_frame && interp->active_frame->sub &&
+        interp->active_frame->sub->name)
+      name = interp->active_frame->sub->name;
+    fprintf(stderr, "lainir trap: %s kind=%d in %s\n", ctx,
+            (int)value.kind, name);
+  }
   interp_trap(interp, ctx); return NULL;
 }
 
@@ -551,6 +832,8 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
                                      L1Expr *expr) {
   if (!expr) return lainir_value_unit();
   if (!interp_tick(interp)) return lainir_value_unit();
+  if (interp->trace_enabled && (uint32_t)expr->kind < 64)
+    interp->trace_expr_kinds[expr->kind]++;
   switch (expr->kind) {
   case EXPR_SDIV:
   case EXPR_UDIV:
@@ -880,6 +1163,8 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
   L1Instruction *inst = block->body;
   while (inst) {
     if (!interp_tick(interp)) return;
+    if (interp->trace_enabled && (uint32_t)inst->kind < 16)
+      interp->trace_inst_kinds[inst->kind]++;
     if (interp->should_return || interp->should_break || interp->should_continue)
       return;
 
@@ -968,31 +1253,1362 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
   }
 }
 
+/* A small opt-in native path for the bootstrap compiler's leaf procedures.
+ * These procedures are pure layout accessors or bounded byte comparisons.
+ * Keeping the path behind LAINIR_FAST_BUILTINS preserves the ordinary
+ * interpreter for conformance/debugging runs while making long self-hosting
+ * bootstraps practical. */
+static int interp_fast_enabled(const LainirInterpreter *interp) {
+  return interp && interp->fast_builtins_enabled;
+}
+
+static int interp_fast_leaves_enabled(const LainirInterpreter *interp) {
+  return interp && interp->fast_leaves_enabled;
+}
+
+static const char *interp_fast_name(const char *name) {
+  if (name && name[0] == 'f' && name[1] == '0' && name[2] == '_')
+    return name + 3;
+  return name;
+}
+
+static void *interp_fast_addr(const LainirValue *value) {
+  if (!value) return NULL;
+  if (value->kind == LAINIR_VALUE_ADDR) return value->as.addr;
+  if (value->kind == LAINIR_VALUE_STRING) return (void *)value->as.string;
+  return NULL;
+}
+
+static uint64_t interp_fast_bits(const LainirValue *value) {
+  return value && value->kind == LAINIR_VALUE_BITS ? value->as.bits : 0;
+}
+
+static uint64_t interp_fast_load_u64(const uint8_t *base, size_t offset) {
+  uint64_t value = 0;
+  memcpy(&value, base + offset, sizeof(value));
+  return value;
+}
+
+static void interp_fast_store_u64(uint8_t *base, size_t offset,
+                                  uint64_t value) {
+  memcpy(base + offset, &value, sizeof(value));
+}
+
+static uint32_t interp_fast_load_u32(const uint8_t *base, size_t offset) {
+  uint32_t value = 0;
+  memcpy(&value, base + offset, sizeof(value));
+  return value;
+}
+
+static int interp_fast_suffix(const char *name, const char *suffix) {
+  if (!name || !suffix) return 0;
+  size_t name_length = strlen(name);
+  size_t suffix_length = strlen(suffix);
+  return name_length >= suffix_length &&
+         strcmp(name + name_length - suffix_length, suffix) == 0;
+}
+
+/* The source compiler's StringBuffer accessors are tiny wrappers around the
+ * same raw loads used by the native `tool_*` accessors.  Generated source-
+ * faithful compilers give them an f0_<hash>_ prefix, so dispatch by suffix
+ * while keeping this path opt-in with LAINIR_FAST_BUILTINS. */
+static int interp_fast_sb_byte(const uint8_t *buffer, uint64_t index,
+                               uint8_t *result) {
+  static unsigned trace_count = 0;
+  if (!buffer || !result) return 0;
+  uint64_t header = interp_fast_load_u64(buffer, 0);
+  /* Frozen L1 constants can materialize `usize` sentinels as either a full
+   * 64-bit all-ones value or a zero-extended 32-bit all-ones value. */
+  if (header == UINT64_MAX || header == UINT32_MAX) {
+    uint8_t *data = (uint8_t *)interp_fast_load_u64(buffer, 16);
+    if (!data) return 0;
+    *result = data[index];
+  } else {
+    *result = buffer[8 + index];
+  }
+  if (getenv("LAINIR_TRACE_FAST_SB") && trace_count++ < 32) {
+    fprintf(stderr, "fast_sb buffer=%p header=%llu index=%llu byte=%u data=%p\n",
+            (const void *)buffer, (unsigned long long)header,
+            (unsigned long long)index, (unsigned)*result,
+            header == UINT64_MAX ? (void *)interp_fast_load_u64(buffer, 16)
+                                 : (const void *)(buffer + 8));
+    fflush(stderr);
+  }
+  return 1;
+}
+
+static int interp_fast_span_equal(const uint8_t *buffer_a, uint64_t start_a,
+                                  const uint8_t *buffer_b, uint64_t start_b,
+                                  uint64_t length) {
+  for (uint64_t index = 0; index < length; index++) {
+    uint8_t left = 0;
+    uint8_t right = 0;
+    if (!interp_fast_sb_byte(buffer_a, start_a + index, &left) ||
+        !interp_fast_sb_byte(buffer_b, start_b + index, &right) ||
+        left != right)
+      return 0;
+  }
+  return 1;
+}
+
+/* Exact native counterpart of lainc's scan_top_op/scan_semi/scan_brace.  The
+ * source routines intentionally use unsigned depth arithmetic: an unmatched
+ * closing parenthesis underflows and therefore cannot become top-level again.
+ * Keep that behavior instead of clamping depth, which was the source of an
+ * earlier parser fast-path mismatch. */
+static int interp_fast_scan_delimited(const uint8_t *source, uint64_t start,
+                                      uint64_t end, int mode, int op,
+                                      uint64_t *result) {
+  if (!source || !result) return 0;
+  uint64_t current = start;
+  uint64_t depth = 0;
+  while (current < end) {
+    uint8_t byte = 0;
+    if (!interp_fast_sb_byte(source, current, &byte)) return 0;
+    if (byte == 34) {
+      /* This mirrors skip_string: it starts after the opening quote, stops at
+       * the next quote, and returns the position after that quote. */
+      current++;
+      while (current < end) {
+        if (!interp_fast_sb_byte(source, current, &byte)) return 0;
+        if (byte == 34) {
+          current++;
+          break;
+        }
+        current++;
+      }
+    } else if (byte == 40) {
+      depth++;
+      current++;
+    } else if (byte == 41) {
+      depth--;
+      current++;
+    } else {
+      int target = mode == 0 ? op : (mode == 1 ? 59 : 123);
+      if (depth == 0 && byte == (uint8_t)target) {
+        *result = current;
+        return 1;
+      }
+      current++;
+    }
+  }
+  *result = end;
+  return 1;
+}
+
+static int interp_fast_skip_line_comment(const uint8_t *source,
+                                         uint64_t index, uint64_t length,
+                                         uint64_t *result) {
+  if (!source || !result) return 0;
+  uint64_t current = index + 2;
+  while (current < length) {
+    uint8_t byte = 0;
+    if (!interp_fast_sb_byte(source, current, &byte)) return 0;
+    if (byte == 10) {
+      *result = current + 1;
+      return 1;
+    }
+    current++;
+  }
+  *result = current;
+  return 1;
+}
+
+static int interp_fast_skip_space(const uint8_t *source, uint64_t index,
+                                  uint64_t length, uint64_t *result) {
+  if (!source || !result) return 0;
+  uint64_t current = index;
+  while (current < length) {
+    uint8_t byte = 0;
+    if (!interp_fast_sb_byte(source, current, &byte)) return 0;
+    if (byte == 32 || byte == 10) {
+      current++;
+      continue;
+    }
+    if (byte == 47 && current + 1 < length) {
+      uint8_t next = 0;
+      if (!interp_fast_sb_byte(source, current + 1, &next)) return 0;
+      if (next == 47) {
+        if (!interp_fast_skip_line_comment(source, current, length, &current))
+          return 0;
+        continue;
+      }
+    }
+    break;
+  }
+  *result = current;
+  return 1;
+}
+
+/* The source-faithful lainc keeps six decoded fields for each metadata row at
+ * a fixed offset in its StringBuffer and an open-addressed name index in a
+ * separately allocated table.  These helpers mirror the L1 implementation
+ * exactly.  They are deliberately kept separate from the std::meta helpers
+ * above: both APIs use the name `meta_*`, but they operate on different object
+ * layouts. */
+static uint64_t interp_fast_meta_row_field(const uint8_t *table,
+                                           uint64_t row, uint64_t field) {
+  if (!table || row == 0 || field >= 6) return 0;
+  return interp_fast_load_u64(table, 655360ULL + (row - 1) * 48ULL + field * 8ULL);
+}
+
+static uint64_t interp_fast_meta_name_hash(const uint8_t *source,
+                                           uint64_t start,
+                                           uint64_t length) {
+  if (length == 0) return 1;
+  uint8_t first = 0;
+  uint8_t last = 0;
+  if (!interp_fast_sb_byte(source, start, &first) ||
+      !interp_fast_sb_byte(source, start + length - 1, &last))
+    return UINT64_MAX;
+  return length * 131ULL + (uint64_t)first * 17ULL + (uint64_t)last + 2ULL;
+}
+
+static uint64_t interp_fast_meta_index_lookup(const uint8_t *table,
+                                              const uint8_t *source,
+                                              uint64_t start,
+                                              uint64_t length) {
+  if (!table || !source) return UINT64_MAX;
+  const uint8_t *index_base =
+      (const uint8_t *)(uintptr_t)interp_fast_load_u64(table, 524184);
+  if (!index_base) return UINT64_MAX;
+  uint64_t generation = interp_fast_load_u64(table, 524192);
+  uint64_t generation_base = generation * 4294967296ULL;
+  uint64_t hash = interp_fast_meta_name_hash(source, start, length);
+  if (hash == UINT64_MAX) return UINT64_MAX;
+  uint64_t expected = generation_base + hash + 1ULL;
+  uint64_t slot = hash % 16384ULL;
+  for (uint64_t probes = 0; probes < 16384ULL; probes++) {
+    uint64_t offset = (slot + probes) * 16ULL;
+    uint64_t stored = interp_fast_load_u64(index_base, offset);
+    if (stored == 0 || stored < generation_base) return 0;
+    if (stored == expected) {
+      uint64_t row = interp_fast_load_u64(index_base, offset + 8);
+      uint64_t row_length = interp_fast_meta_row_field(table, row, 2);
+      uint64_t row_start = interp_fast_meta_row_field(table, row, 1);
+      if (row_length == length &&
+          interp_fast_span_equal(source, row_start, source, start, length))
+        return row;
+    }
+  }
+  return 0;
+}
+
+static uint64_t interp_fast_meta_cache_get(const uint8_t *table,
+                                           const uint8_t *source,
+                                           uint64_t start,
+                                           uint64_t length,
+                                           uint64_t mode) {
+  if (!table || !source) return 0;
+  for (uint64_t slot = 0; slot < 4; slot++) {
+    uint64_t base = 524000ULL + slot * 40ULL;
+    if (interp_fast_load_u64(table, base) == (uint64_t)(uintptr_t)source &&
+        interp_fast_load_u64(table, base + 8) == start &&
+        interp_fast_load_u64(table, base + 16) == length &&
+        interp_fast_load_u64(table, base + 24) == mode) {
+      uint64_t row = interp_fast_load_u64(table, base + 32);
+      if (row != 0) return row;
+    }
+  }
+  return 0;
+}
+
+static void interp_fast_meta_cache_put(uint8_t *table, const uint8_t *source,
+                                       uint64_t start, uint64_t length,
+                                       uint64_t mode, uint64_t row) {
+  if (!table || !source || row == 0) return;
+  uint64_t slot = interp_fast_load_u64(table, 524240);
+  if (slot >= 4) slot = 0;
+  uint64_t base = 524000ULL + slot * 40ULL;
+  interp_fast_store_u64(table, base, (uint64_t)(uintptr_t)source);
+  interp_fast_store_u64(table, base + 8, start);
+  interp_fast_store_u64(table, base + 16, length);
+  interp_fast_store_u64(table, base + 24, mode);
+  interp_fast_store_u64(table, base + 32, row);
+  interp_fast_store_u64(table, 524240, slot + 1);
+}
+
+static int interp_fast_meta_index_prepare(uint8_t *table,
+                                          const uint8_t *source) {
+  if (!table || !source) return 0;
+  uint8_t *index_base =
+      (uint8_t *)(uintptr_t)interp_fast_load_u64(table, 524184);
+  if (!index_base) return 0;
+  uint64_t old_source = interp_fast_load_u64(table, 524168);
+  uint64_t indexed = interp_fast_load_u64(table, 524176);
+  uint64_t generation = interp_fast_load_u64(table, 524192);
+  if (getenv("LAINIR_TRACE_META")) {
+    static unsigned trace_prepare = 0;
+    if (trace_prepare++ < 16)
+      fprintf(stderr, "fast_meta_prepare table=%p index=%p old=%p indexed=%llu gen=%llu rows=%llu\n",
+              (void *)table, (void *)index_base,
+              (void *)(uintptr_t)old_source,
+              (unsigned long long)indexed,
+              (unsigned long long)generation,
+              (unsigned long long)interp_fast_load_u64(table, 524280));
+  }
+  if (old_source != (uint64_t)(uintptr_t)source) {
+    interp_fast_store_u64(table, 524168, (uint64_t)(uintptr_t)source);
+    indexed = 0;
+    generation++;
+    interp_fast_store_u64(table, 524176, 0);
+    interp_fast_store_u64(table, 524192, generation);
+  }
+  uint64_t generation_base = generation * 4294967296ULL;
+  uint64_t rows = interp_fast_load_u64(table, 524280);
+  while (indexed < rows) {
+    uint64_t row = indexed + 1;
+    uint64_t row_offset = 655360ULL + (row - 1) * 48ULL;
+    uint64_t start = interp_fast_load_u64(table, row_offset + 8);
+    uint64_t length = interp_fast_load_u64(table, row_offset + 16);
+    uint64_t hash = interp_fast_meta_name_hash(source, start, length);
+    if (hash == UINT64_MAX) return 0;
+    uint64_t expected = generation_base + hash + 1ULL;
+    uint64_t slot = hash % 16384ULL;
+    int placed = 0;
+    for (uint64_t probes = 0; probes < 16384ULL; probes++) {
+      uint64_t offset = (slot + probes) * 16ULL;
+      uint64_t stored = interp_fast_load_u64(index_base, offset);
+      if (stored == 0 || stored < generation_base) {
+        interp_fast_store_u64(index_base, offset, expected);
+        interp_fast_store_u64(index_base, offset + 8, row);
+        placed = 1;
+        break;
+      }
+      if (stored == expected) {
+        uint64_t prior = interp_fast_load_u64(index_base, offset + 8);
+        uint64_t prior_start = interp_fast_meta_row_field(table, prior, 1);
+        uint64_t prior_length = interp_fast_meta_row_field(table, prior, 2);
+        if (prior_length == length &&
+            interp_fast_span_equal(source, prior_start, source, start, length)) {
+          placed = 1;
+          break;
+        }
+      }
+    }
+    /* Preserve the L1 loop's monotonic progress even if a pathological table
+     * fills all slots; lookup will fall back to the row scan in that case. */
+    if (!placed) {
+      interp_fast_store_u64(table, 524176, row);
+      return 1;
+    }
+    indexed = row;
+    interp_fast_store_u64(table, 524176, indexed);
+  }
+  return 1;
+}
+
+static int interp_fast_meta_row_matches(const uint8_t *table,
+                                        const uint8_t *source,
+                                        uint64_t row, uint64_t start,
+                                        uint64_t length, uint64_t want,
+                                        int check_kind) {
+  if (!table || !source || row == 0) return 0;
+  if (check_kind && interp_fast_meta_row_field(table, row, 0) != want)
+    return 0;
+  uint64_t row_length = interp_fast_meta_row_field(table, row, 2);
+  if (row_length != length) return 0;
+  uint64_t row_start = interp_fast_meta_row_field(table, row, 1);
+  return interp_fast_span_equal(source, row_start, source, start, length);
+}
+
+static int interp_fast_meta_table_lookup(LainirInterpreter *interp,
+                                         const LainirValue *args,
+                                         uint64_t want, int check_kind,
+                                         int latest, LainirValue *result) {
+  uint8_t *table = (uint8_t *)interp_fast_addr(&args[0]);
+  uint8_t *source = (uint8_t *)interp_fast_addr(&args[2]);
+  uint64_t start = interp_fast_bits(&args[3]);
+  uint64_t length = interp_fast_bits(&args[4]);
+  if (!table || !source) {
+    interp_trap(interp, "load from null");
+    return 1;
+  }
+  /* A direct row scan is the source-faithful implementation of all three
+   * helpers.  Keep it separate from the experimental hash-index path: the
+   * index stores only the first row for a name, while kind/latest lookups can
+   * intentionally select another row.  This path therefore changes only the
+   * execution layer (C loop instead of interpreted Lain instructions), not
+   * lookup semantics. */
+  int direct_scan = interp->fast_meta_scan_enabled;
+  /* A missing external index means this is an older artifact.  Let the L1
+   * implementation handle it rather than silently changing its semantics. */
+  if (!interp_fast_load_u64(table, 524184)) return 0;
+
+  /* The L1 lookup helpers prepare the append-stable name index before they
+   * scan rows.  A native early return must preserve that side effect because
+   * meta_lookup_qualified and later lookups can consult the index directly. */
+  if (!latest && direct_scan &&
+      !interp_fast_meta_index_prepare(table, source))
+    return 0;
+
+  if (!latest && !direct_scan && getenv("LAINIR_FAST_META_INDEX") &&
+      !interp_fast_meta_index_prepare(table, source)) return 0;
+
+  if (!latest && !direct_scan && !getenv("LAINIR_FAST_META_INDEX")) {
+    if (getenv("LAINIR_TRACE_META"))
+      fprintf(stderr, "fast_meta_fallback source=%p table=%p\n",
+              (void *)source, (void *)table);
+    return 0;
+  }
+
+  if (!latest && getenv("LAINIR_FAST_META_INDEX")) {
+    uint64_t mode = check_kind ? want + 1ULL : 0;
+    uint64_t cached = interp_fast_meta_cache_get(table, source, start,
+                                                 length, mode);
+    if (cached != 0) {
+      *result = lainir_value_bits(cached, 64);
+      return 1;
+    }
+  }
+
+  uint64_t rows = interp_fast_load_u64(table, 524280);
+  if (interp->trace_meta_enabled) {
+    static unsigned trace_lookups = 0;
+    if (trace_lookups++ < 128)
+      fprintf(stderr, "fast_meta_lookup[%u] latest=%d kind=%d want=%llu start=%llu len=%llu rows=%llu\n",
+              trace_lookups, latest, check_kind,
+              (unsigned long long)want, (unsigned long long)start,
+              (unsigned long long)length, (unsigned long long)rows);
+  }
+  if (!latest && !direct_scan && getenv("LAINIR_FAST_META_INDEX_HIT")) {
+    /* index_prepare is dispatched independently and has already brought the
+     * table through the current row count in normal generated code.  Calling
+     * the index lookup here is safe for both the first and later lookups. */
+    uint64_t indexed = interp_fast_meta_index_lookup(table, source, start,
+                                                      length);
+      if (indexed == UINT64_MAX) return 0;
+    if (indexed != 0 && (!getenv("LAINIR_FAST_META_SKIP_KIND6") ||
+                         interp_fast_meta_row_field(table, indexed, 0) != 6) &&
+        (!check_kind || interp_fast_meta_row_field(table, indexed, 0) == want)) {
+      if (getenv("LAINIR_TRACE_META"))
+        fprintf(stderr, "fast_meta_hit row=%llu kind=%llu row_start=%llu row_len=%llu query_start=%llu query_len=%llu\n",
+                (unsigned long long)indexed,
+                (unsigned long long)interp_fast_meta_row_field(table, indexed, 0),
+                (unsigned long long)interp_fast_meta_row_field(table, indexed, 1),
+                (unsigned long long)interp_fast_meta_row_field(table, indexed, 2),
+                (unsigned long long)start, (unsigned long long)length);
+      if (!getenv("LAINIR_FAST_META_NO_CACHE"))
+        interp_fast_meta_cache_put(table, source, start, length,
+                                   check_kind ? want + 1ULL : 0, indexed);
+      *result = lainir_value_bits(indexed, 64);
+      return 1;
+    }
+    /* A miss or kind collision must retain the source implementation's
+     * fallback semantics.  Returning 0 from the fast-dispatch hook here makes
+     * interp_call_sub execute the original L1 scan, while successful indexed
+     * hits stay on the native path. */
+    return 0;
+  }
+
+  if (!latest && !direct_scan) return 0;
+
+  if (latest) {
+    for (uint64_t row = rows; row > 0; row--) {
+      if (interp_fast_meta_row_matches(table, source, row, start, length,
+                                       want, 1)) {
+        *result = lainir_value_bits(row, 64);
+        return 1;
+      }
+    }
+  } else {
+    for (uint64_t row = 1; row <= rows; row++) {
+      if (interp_fast_meta_row_matches(table, source, row, start, length,
+                                       want, check_kind)) {
+        uint64_t kind = interp_fast_meta_row_field(table, row, 0);
+        /* meta_lookup accepts every non-nil row; meta_lookup_kind accepts only
+         * the requested kind.  The indexed hit above intentionally preserves
+         * the source implementation's direct return behavior. */
+        if (kind != 0 && (!check_kind || kind == want)) {
+          interp_fast_meta_cache_put(table, source, start, length,
+                                     check_kind ? want + 1ULL : 0, row);
+          *result = lainir_value_bits(row, 64);
+          return 1;
+        }
+      }
+    }
+  }
+  *result = lainir_value_bits(0, 64);
+  return 1;
+}
+
+static LainirValue interp_fast_meta_nil(void) {
+  uint8_t *nil = (uint8_t *)calloc(8, 1);
+  return lainir_value_addr(nil);
+}
+
+static LainirValue interp_fast_meta_lookup_span(
+    LainirInterpreter *interp, const LainirValue *args, int local_only) {
+  uint8_t *environment = (uint8_t *)interp_fast_addr(&args[0]);
+  uint8_t *source = (uint8_t *)interp_fast_addr(&args[1]);
+  uint64_t start = interp_fast_bits(&args[2]);
+  uint64_t length = interp_fast_bits(&args[3]);
+  if (!environment || !source) {
+    interp_trap(interp, "load from null");
+    return lainir_value_unit();
+  }
+  uint8_t *data = (uint8_t *)interp_fast_load_u64(source, 0);
+  uint64_t hash = length;
+  if (hash >= 256) hash -= 256;
+  for (uint64_t index = 0; index < length; index++) {
+    hash += data[start + index];
+    if (hash >= 256) hash -= 256;
+  }
+  uint32_t depth = 0;
+  while (environment && depth++ < (local_only ? 1u : 256u)) {
+    if (interp_fast_load_u32(environment, 0) == 0)
+      return interp_fast_meta_nil();
+    uint8_t *buckets = (uint8_t *)interp_fast_load_u64(environment, 40);
+    if (!buckets) {
+      interp_trap(interp, "load from null");
+      return lainir_value_unit();
+    }
+    uint8_t *binding = (uint8_t *)interp_fast_load_u64(buckets, hash * 16);
+    uint32_t binding_steps = 0;
+    while (binding && binding_steps++ < 4096) {
+      if (interp_fast_load_u32(binding, 0) == 0) break;
+      if (interp_fast_load_u64(binding, 56) == hash &&
+          interp_fast_load_u64(binding, 24) == length) {
+        uint8_t *binding_source =
+            (uint8_t *)interp_fast_load_u64(binding, 8);
+        uint8_t *binding_data = binding_source
+            ? (uint8_t *)interp_fast_load_u64(binding_source, 0) : NULL;
+        if (!binding_data) {
+          interp_trap(interp, "load from null");
+          return lainir_value_unit();
+        }
+        if (memcmp(data + start,
+                   binding_data + interp_fast_load_u64(binding, 16),
+                   (size_t)length) == 0)
+          return lainir_value_addr(
+              (void *)interp_fast_load_u64(binding, 32));
+      }
+      binding = (uint8_t *)interp_fast_load_u64(binding, 48);
+    }
+    if (local_only) break;
+    environment = (uint8_t *)interp_fast_load_u64(environment, 8);
+  }
+  return interp_fast_meta_nil();
+}
+
+static LainirValue interp_fast_meta_lookup_path(
+    LainirInterpreter *interp, const LainirValue *args) {
+  uint8_t *environment = (uint8_t *)interp_fast_addr(&args[0]);
+  uint8_t *source = (uint8_t *)interp_fast_addr(&args[1]);
+  uint8_t *node = (uint8_t *)interp_fast_addr(&args[2]);
+  if (!environment || !source || !node) {
+    interp_trap(interp, "load from null");
+    return lainir_value_unit();
+  }
+  uint8_t *data = (uint8_t *)interp_fast_load_u64(source, 0);
+
+  /* Tokenized paths (`a . b`) retain the dot and member as sibling nodes. */
+  uint8_t *next = (uint8_t *)interp_fast_load_u64(node, 40);
+  if (next && interp_fast_load_u32(next, 0) == 1 &&
+      interp_fast_load_u64(next, 16) == 1 &&
+      data[interp_fast_load_u64(next, 8)] == '.') {
+    uint8_t *current = node;
+    while (current) {
+      LainirValue span_args[4] = {
+        args[0], args[1],
+        lainir_value_bits(interp_fast_load_u64(current, 8), 64),
+        lainir_value_bits(interp_fast_load_u64(current, 16), 64)
+      };
+      LainirValue value = interp_fast_meta_lookup_span(interp, span_args, 0);
+      if (interp->error) return value;
+      uint8_t *value_ptr = (uint8_t *)interp_fast_addr(&value);
+      if (!value_ptr || interp_fast_load_u32(value_ptr, 0) == 0)
+        return value;
+      next = (uint8_t *)interp_fast_load_u64(current, 40);
+      if (!next || interp_fast_load_u32(next, 0) != 1 ||
+          interp_fast_load_u64(next, 16) != 1 ||
+          data[interp_fast_load_u64(next, 8)] != '.')
+        return value;
+      uint8_t *member = (uint8_t *)interp_fast_load_u64(next, 40);
+      if (!member) return interp_fast_meta_nil();
+      uint32_t kind = interp_fast_load_u32(value_ptr, 0);
+      if (kind != 2 && kind != 4) return interp_fast_meta_nil();
+      environment = (uint8_t *)interp_fast_load_u64(value_ptr, 40);
+      current = member;
+    }
+    return interp_fast_meta_nil();
+  }
+
+  /* A lexed qualified atom (`a.b`) is split in place and resolved through
+   * the environment captured by each module/type value. */
+  uint64_t start = interp_fast_load_u64(node, 8);
+  uint64_t length = interp_fast_load_u64(node, 16);
+  uint64_t index = 0;
+  while (index <= length) {
+    uint64_t scan = index;
+    while (scan < length && data[start + scan] != '.') scan++;
+    uint64_t segment_length = scan - index;
+    if (!segment_length) return interp_fast_meta_nil();
+    LainirValue span_args[4] = {
+      lainir_value_addr(environment), args[1],
+      lainir_value_bits(start + index, 64),
+      lainir_value_bits(segment_length, 64)
+    };
+    LainirValue value = interp_fast_meta_lookup_span(interp, span_args, 0);
+    if (interp->error) return value;
+    uint8_t *value_ptr = (uint8_t *)interp_fast_addr(&value);
+    if (!value_ptr || interp_fast_load_u32(value_ptr, 0) == 0)
+      return value;
+    if (scan >= length) return value;
+    uint32_t kind = interp_fast_load_u32(value_ptr, 0);
+    if (kind != 2 && kind != 4) return interp_fast_meta_nil();
+    environment = (uint8_t *)interp_fast_load_u64(value_ptr, 40);
+    index = scan + 1;
+  }
+  return interp_fast_meta_nil();
+}
+
+static int interp_fast_local_matches_group(const uint8_t *data,
+                                           const uint8_t *group,
+                                           const uint8_t *node,
+                                           uint32_t depth) {
+  if (!group || !node || depth > 4096) return 0;
+  const uint8_t *statement =
+      (const uint8_t *)interp_fast_load_u64(group, 24);
+  while (statement) {
+    if (interp_fast_load_u32(statement, 0) == 0) return 0;
+    if (interp_fast_load_u32(statement, 0) == 1 &&
+        interp_fast_load_u64(statement, 16) == 3 &&
+        memcmp(data + interp_fast_load_u64(statement, 8), "let", 3) == 0) {
+      const uint8_t *name =
+          (const uint8_t *)interp_fast_load_u64(statement, 40);
+      if (name && interp_fast_load_u64(name, 16) ==
+                       interp_fast_load_u64(node, 16) &&
+          memcmp(data + interp_fast_load_u64(name, 8),
+                 data + interp_fast_load_u64(node, 8),
+                 (size_t)interp_fast_load_u64(node, 16)) == 0)
+        return 1;
+    }
+    if (interp_fast_load_u32(statement, 0) == 2 &&
+        interp_fast_local_matches_group(data, statement, node, depth + 1))
+      return 1;
+    statement = (const uint8_t *)interp_fast_load_u64(statement, 40);
+  }
+  return 0;
+}
+
+static int interp_try_fast_builtin(LainirInterpreter *interp,
+                                    L1Subroutine *sub,
+                                    const LainirValue *args,
+                                    uint32_t arg_count,
+                                    LainirValue *result) {
+  if (!interp_fast_enabled(interp) || !sub || !sub->name || !result)
+    return 0;
+  const char *name = interp_fast_name(sub->name);
+  interp->fast_active_name = name;
+  if (interp->trace_meta_enabled && strstr(name, "meta")) {
+    static unsigned trace_meta_names = 0;
+    if (trace_meta_names++ < 128)
+      fprintf(stderr, "fast_meta_name[%u] %s argc=%u\n",
+              trace_meta_names, name, arg_count);
+  }
+  if (interp->trace_fast_names_enabled) {
+    static unsigned trace_names = 0;
+    if (trace_names++ < 256)
+      fprintf(stderr, "fast_name[%u] %s argc=%u\n", trace_names, name, arg_count);
+  }
+
+  if (interp_fast_suffix(name, "_sb_byte_at") && arg_count == 2) {
+    uint8_t *buffer = (uint8_t *)interp_fast_addr(&args[0]);
+    uint8_t byte = 0;
+    if (!interp_fast_sb_byte(buffer, interp_fast_bits(&args[1]), &byte)) {
+      interp_trap(interp, "load from null");
+      return 1;
+    }
+    *result = lainir_value_bits(byte, 32);
+    return 1;
+  }
+  if (interp_fast_suffix(name, "_sb_load64_at") && arg_count == 2) {
+    uint8_t *buffer = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!buffer) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(
+        interp_fast_load_u64(buffer, interp_fast_bits(&args[1])), 64);
+    return 1;
+  }
+  if (interp_fast_suffix(name, "_sb_load_addr_at") && arg_count == 2) {
+    uint8_t *buffer = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!buffer) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_addr((void *)interp_fast_load_u64(
+        buffer, interp_fast_bits(&args[1])));
+    return 1;
+  }
+  if (interp_fast_suffix(name, "_sb_load8_at") && arg_count == 2) {
+    uint8_t *buffer = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!buffer) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(buffer[interp_fast_bits(&args[1])], 8);
+    return 1;
+  }
+  if (interp_fast_suffix(name, "_sb_span_eq_buf") && arg_count == 5) {
+    uint8_t *left = (uint8_t *)interp_fast_addr(&args[0]);
+    uint8_t *right = (uint8_t *)interp_fast_addr(&args[2]);
+    uint64_t left_start = interp_fast_bits(&args[1]);
+    uint64_t right_start = interp_fast_bits(&args[3]);
+    uint64_t length = interp_fast_bits(&args[4]);
+    if (!left || !right) { interp_trap(interp, "load from null"); return 1; }
+    int same = 1;
+    for (uint64_t index = 0; index < length; index++) {
+      uint8_t left_byte = 0;
+      uint8_t right_byte = 0;
+      if (!interp_fast_sb_byte(left, left_start + index, &left_byte) ||
+          !interp_fast_sb_byte(right, right_start + index, &right_byte)) {
+        interp_trap(interp, "load from null");
+        return 1;
+      }
+      if (left_byte != right_byte) { same = 0; break; }
+    }
+    *result = lainir_value_bits(same, 1);
+    return 1;
+  }
+
+  if (strcmp(name, "tool_byte_at") == 0 && arg_count == 2) {
+    uint8_t *data = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!data) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(data[interp_fast_bits(&args[1])], 8);
+    return 1;
+  }
+  if (strcmp(name, "tool_source_data") == 0 && arg_count == 1) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!source) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_addr((void *)interp_fast_load_u64(source, 0));
+    return 1;
+  }
+  if (strcmp(name, "tool_source_length") == 0 && arg_count == 1) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!source) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(interp_fast_load_u64(source, 8), 64);
+    return 1;
+  }
+  if (strcmp(name, "raw_is_nil") == 0 && arg_count == 1) {
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!node) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(node[0] == 0, 1);
+    return 1;
+  }
+  if (strcmp(name, "raw_node_kind") == 0 && arg_count == 1) {
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!node) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(interp_fast_load_u32(node, 0), 32);
+    return 1;
+  }
+  if (strcmp(name, "raw_node_delimiter") == 0 && arg_count == 1) {
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!node) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(interp_fast_load_u32(node, 4), 32);
+    return 1;
+  }
+  if (strcmp(name, "raw_node_start") == 0 && arg_count == 1) {
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!node) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(interp_fast_load_u64(node, 8), 64);
+    return 1;
+  }
+  if (strcmp(name, "raw_node_length") == 0 && arg_count == 1) {
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!node) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(interp_fast_load_u64(node, 16), 64);
+    return 1;
+  }
+  if ((strcmp(name, "raw_node_first") == 0 ||
+       strcmp(name, "raw_node_last") == 0 ||
+       strcmp(name, "raw_node_next") == 0) && arg_count == 1) {
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!node) { interp_trap(interp, "load from null"); return 1; }
+    size_t offset = strcmp(name, "raw_node_first") == 0 ? 24 :
+                    strcmp(name, "raw_node_last") == 0 ? 32 : 40;
+    *result = lainir_value_addr((void *)interp_fast_load_u64(node, offset));
+    return 1;
+  }
+  if ((strcmp(name, "meta_env_is_nil") == 0 ||
+       strcmp(name, "meta_env_binding_is_nil") == 0) && arg_count == 1) {
+    uint8_t *object = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!object) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(interp_fast_load_u32(object, 0) == 0, 1);
+    return 1;
+  }
+  if (interp->fast_scanners_enabled &&
+      interp_fast_suffix(name, "_scan_top_op") && arg_count == 4) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint64_t start = interp_fast_bits(&args[1]);
+    uint64_t end = interp_fast_bits(&args[2]);
+    uint64_t op = interp_fast_bits(&args[3]);
+    uint64_t found = end;
+    if (!source) { interp_trap(interp, "load from null"); return 1; }
+    if (!interp_fast_scan_delimited(source, start, end, 0, (int)op, &found))
+      return 0;
+    *result = lainir_value_bits(found, 64);
+    return 1;
+  }
+  if (interp->fast_scanners_enabled &&
+      interp_fast_suffix(name, "_is_space") && arg_count == 1) {
+    uint64_t byte = interp_fast_bits(&args[0]);
+    *result = lainir_value_bits(byte == 32 || byte == 10, 1);
+    return 1;
+  }
+  if (interp->fast_scanners_enabled &&
+      interp_fast_suffix(name, "_skip_line_comment") && arg_count == 2) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint64_t index = interp_fast_bits(&args[1]);
+    uint64_t length = 0;
+    uint64_t found = index;
+    if (!source) { interp_trap(interp, "load from null"); return 1; }
+    uint64_t header = interp_fast_load_u64(source, 0);
+    length = (header == UINT64_MAX || header == UINT32_MAX)
+        ? interp_fast_load_u64(source, 8) : header;
+    if (!interp_fast_skip_line_comment(source, index, length, &found)) return 0;
+    *result = lainir_value_bits(found, 64);
+    return 1;
+  }
+  if (interp->fast_scanners_enabled &&
+      interp_fast_suffix(name, "_skip_space") && arg_count == 2) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint64_t index = interp_fast_bits(&args[1]);
+    uint64_t length = 0;
+    uint64_t found = index;
+    if (!source) { interp_trap(interp, "load from null"); return 1; }
+    uint64_t header = interp_fast_load_u64(source, 0);
+    length = (header == UINT64_MAX || header == UINT32_MAX)
+        ? interp_fast_load_u64(source, 8) : header;
+    if (!interp_fast_skip_space(source, index, length, &found)) return 0;
+    *result = lainir_value_bits(found, 64);
+    return 1;
+  }
+  if (interp->fast_scanners_enabled &&
+      interp_fast_suffix(name, "_scan_semi") && arg_count == 3) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint64_t start = interp_fast_bits(&args[1]);
+    uint64_t end = interp_fast_bits(&args[2]);
+    uint64_t found = end;
+    if (!source) { interp_trap(interp, "load from null"); return 1; }
+    if (!interp_fast_scan_delimited(source, start, end, 1, 0, &found))
+      return 0;
+    *result = lainir_value_bits(found, 64);
+    return 1;
+  }
+  if (interp->fast_scanners_enabled &&
+      interp_fast_suffix(name, "_scan_brace") && arg_count == 3) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint64_t start = interp_fast_bits(&args[1]);
+    uint64_t end = interp_fast_bits(&args[2]);
+    uint64_t found = end;
+    if (!source) { interp_trap(interp, "load from null"); return 1; }
+    if (!interp_fast_scan_delimited(source, start, end, 2, 0, &found))
+      return 0;
+    *result = lainir_value_bits(found, 64);
+    return 1;
+  }
+  if (interp_fast_suffix(name, "_sb_span_equals") && arg_count == 5) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint64_t start = interp_fast_bits(&args[1]);
+    uint64_t length = interp_fast_bits(&args[2]);
+    const uint8_t *literal =
+        (const uint8_t *)interp_fast_addr(&args[3]);
+    uint64_t literal_length = interp_fast_bits(&args[4]);
+    if (!source || !literal) {
+      interp_trap(interp, "load from null");
+      return 1;
+    }
+    if (length != literal_length) {
+      *result = lainir_value_bits(0, 1);
+      return 1;
+    }
+    for (uint64_t index = 0; index < length; index++) {
+      uint8_t byte = 0;
+      if (!interp_fast_sb_byte(source, start + index, &byte)) {
+        interp_trap(interp, "load from null");
+        return 1;
+      }
+      if (byte != literal[index]) {
+        *result = lainir_value_bits(0, 1);
+        return 1;
+      }
+    }
+    *result = lainir_value_bits(1, 1);
+    return 1;
+  }
+  if (strcmp(name, "meta_value_kind") == 0 && arg_count == 1) {
+    uint8_t *value = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!value) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(interp_fast_load_u32(value, 0), 32);
+    return 1;
+  }
+  if ((interp->fast_meta_scan_enabled ||
+       getenv("LAINIR_FAST_META_LATEST")) &&
+      interp_fast_suffix(name, "_meta_lookup_kind_latest") && arg_count == 6) {
+    return interp_fast_meta_table_lookup(interp, args, interp_fast_bits(&args[5]),
+                                          1, 1, result);
+  }
+  if ((interp->fast_meta_scan_enabled ||
+       getenv("LAINIR_FAST_META_KIND")) &&
+      interp_fast_suffix(name, "_meta_lookup_kind") && arg_count == 6) {
+    return interp_fast_meta_table_lookup(interp, args, interp_fast_bits(&args[5]),
+                                          1, 0, result);
+  }
+  if ((interp->fast_meta_scan_enabled ||
+       getenv("LAINIR_FAST_META_LOOKUP")) &&
+      interp_fast_suffix(name, "_meta_lookup") && arg_count == 5) {
+    return interp_fast_meta_table_lookup(interp, args, 0, 0, 0, result);
+  }
+  if (interp_fast_suffix(name, "_meta_index_prepare") && arg_count == 3) {
+    uint8_t *table = (uint8_t *)interp_fast_addr(&args[0]);
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[2]);
+    uint8_t *index_base;
+    uint64_t old_source;
+    uint64_t indexed;
+    uint64_t generation;
+    uint64_t generation_base;
+    uint64_t rows;
+    if (!table || !source) {
+      interp_trap(interp, "load from null");
+      return 1;
+    }
+    index_base = (uint8_t *)interp_fast_load_u64(table, 524184);
+    /* Older generated compilers do not have the external index pointer. */
+    if (!index_base) return 0;
+    old_source = interp_fast_load_u64(table, 524168);
+    indexed = interp_fast_load_u64(table, 524176);
+    generation = interp_fast_load_u64(table, 524192);
+    if (old_source != (uint64_t)(uintptr_t)source) {
+      interp_fast_store_u64(table, 524168, (uint64_t)(uintptr_t)source);
+      indexed = 0;
+      generation++;
+      interp_fast_store_u64(table, 524176, 0);
+      interp_fast_store_u64(table, 524192, generation);
+    }
+    generation_base = generation * 4294967296ULL;
+    rows = interp_fast_load_u64(table, 524280);
+    while (indexed < rows) {
+      uint64_t row = indexed + 1;
+      uint64_t row_offset = 655360ULL + (row - 1) * 48ULL;
+      uint64_t ns = interp_fast_load_u64(table, row_offset + 8);
+      uint64_t nl = interp_fast_load_u64(table, row_offset + 16);
+      uint64_t hash = nl * 131ULL + 2ULL;
+      uint8_t first = 0;
+      uint8_t last = 0;
+      if (nl != 0) {
+        if (!interp_fast_sb_byte(source, ns, &first) ||
+            !interp_fast_sb_byte(source, ns + nl - 1, &last)) {
+          interp_trap(interp, "load from null");
+          return 1;
+        }
+        hash += (uint64_t)first * 17ULL + last;
+      }
+      uint64_t expected = generation_base + hash + 1ULL;
+      uint64_t slot = hash % 16384ULL;
+      for (uint64_t probes = 0; probes < 16384ULL; probes++) {
+        uint64_t offset = (slot + probes) * 16ULL;
+        uint64_t stored = interp_fast_load_u64(index_base, offset);
+        if (stored == 0 || stored < generation_base) {
+          interp_fast_store_u64(index_base, offset, expected);
+          interp_fast_store_u64(index_base, offset + 8, row);
+          break;
+        }
+        if (stored == expected) {
+          uint64_t prior = interp_fast_load_u64(index_base, offset + 8);
+          uint64_t prior_offset = 655360ULL + (prior - 1) * 48ULL;
+          uint64_t prior_ns = interp_fast_load_u64(table, prior_offset + 8);
+          uint64_t prior_nl = interp_fast_load_u64(table, prior_offset + 16);
+          if (prior_nl == nl &&
+              interp_fast_span_equal(source, prior_ns, source, ns, nl))
+            break;
+        }
+      }
+      indexed = row;
+      interp_fast_store_u64(table, 524176, indexed);
+    }
+    *result = lainir_value_unit();
+    return 1;
+  }
+  if (interp_fast_suffix(name, "_meta_row_field") && arg_count == 4) {
+    uint8_t *table = (uint8_t *)interp_fast_addr(&args[0]);
+    uint64_t row = interp_fast_bits(&args[2]);
+    uint64_t field = interp_fast_bits(&args[3]);
+    if (!table) { interp_trap(interp, "load from null"); return 1; }
+    if (row == 0) {
+      *result = lainir_value_bits(0, 64);
+    } else {
+      uint64_t offset = 655360ULL + (row - 1) * 48ULL + field * 8ULL;
+      *result = lainir_value_bits(interp_fast_load_u64(table, offset), 64);
+    }
+    return 1;
+  }
+  if (getenv("LAINIR_FAST_META_INDEX_LOOKUP") &&
+      interp_fast_suffix(name, "_meta_index_lookup") && arg_count == 5) {
+    uint8_t *table = (uint8_t *)interp_fast_addr(&args[0]);
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[2]);
+    uint64_t start = interp_fast_bits(&args[3]);
+    uint64_t length = interp_fast_bits(&args[4]);
+    if (!table || !source) {
+      interp_trap(interp, "load from null");
+      return 1;
+    }
+    uint64_t row = interp_fast_meta_index_lookup(table, source, start, length);
+    /* UINT64_MAX is the helper's "old artifact / invalid buffer" sentinel;
+     * let the original L1 procedure handle that layout. */
+    if (row == UINT64_MAX) return 0;
+    *result = lainir_value_bits(row, 64);
+    return 1;
+  }
+  if (interp_fast_suffix(name, "_sb_len") && arg_count == 1) {
+    uint8_t *buffer = (uint8_t *)interp_fast_addr(&args[0]);
+    uint64_t header;
+    if (!buffer) { interp_trap(interp, "load from null"); return 1; }
+    header = interp_fast_load_u64(buffer, 0);
+    if (header == UINT64_MAX || header == UINT32_MAX)
+      header = interp_fast_load_u64(buffer, 8);
+    *result = lainir_value_bits(header, 64);
+    return 1;
+  }
+  if (strcmp(name, "meta_env_hash_span") == 0 && arg_count == 3) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!source) { interp_trap(interp, "load from null"); return 1; }
+    uint8_t *data = (uint8_t *)interp_fast_load_u64(source, 0);
+    uint64_t start = interp_fast_bits(&args[1]);
+    uint64_t length = interp_fast_bits(&args[2]);
+    uint64_t hash = length;
+    if (hash >= 256) hash -= 256;
+    for (uint64_t index = 0; index < length; index++) {
+      hash += data[start + index];
+      if (hash >= 256) hash -= 256;
+    }
+    *result = lainir_value_bits(hash, 64);
+    return 1;
+  }
+  if (strcmp(name, "meta_env_lookup_span") == 0 && arg_count == 4) {
+    *result = interp_fast_meta_lookup_span(interp, args, 0);
+    return 1;
+  }
+  if (strcmp(name, "meta_env_lookup_path") == 0 && arg_count == 3) {
+    *result = interp_fast_meta_lookup_path(interp, args);
+    return 1;
+  }
+  if (strcmp(name, "program_local_matches_group") == 0 && arg_count == 3) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint8_t *group = (uint8_t *)interp_fast_addr(&args[1]);
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[2]);
+    if (!source || !group || !node) {
+      interp_trap(interp, "load from null");
+      return 1;
+    }
+    uint8_t *data = (uint8_t *)interp_fast_load_u64(source, 0);
+    *result = lainir_value_bits(
+        interp_fast_local_matches_group(data, group, node, 0), 1);
+    return 1;
+  }
+  if (interp_fast_leaves_enabled(interp) && strcmp(name, "program_nil") == 0 && arg_count == 0) {
+    *result = interp_fast_meta_nil();
+    return 1;
+  }
+  if (interp_fast_leaves_enabled(interp) && strcmp(name, "program_function_is_nil") == 0 && arg_count == 1) {
+    uint8_t *function = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!function) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_bits(interp_fast_load_u64(function, 8) == 0, 1);
+    return 1;
+  }
+  if (interp_fast_leaves_enabled(interp) && strcmp(name, "program_function_environment") == 0 && arg_count == 1) {
+    uint8_t *function = (uint8_t *)interp_fast_addr(&args[0]);
+    if (!function) { interp_trap(interp, "load from null"); return 1; }
+    *result = lainir_value_addr((void *)interp_fast_load_u64(function, 88));
+    return 1;
+  }
+  if (interp_fast_leaves_enabled(interp) && strcmp(name, "program_name_prefix_length") == 0 && arg_count == 2) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[1]);
+    if (!source || !node) { interp_trap(interp, "load from null"); return 1; }
+    uint8_t *data = (uint8_t *)interp_fast_load_u64(source, 0);
+    uint64_t start = interp_fast_load_u64(node, 8);
+    uint64_t length = interp_fast_load_u64(node, 16);
+    /* Large spans can be whole source groups rather than names.  Leave those
+     * to the step-counted L1 implementation so the native loop cannot hide a
+     * pathological scan behind the bootstrap limit. */
+    if (length > 4096) return 0;
+    uint64_t prefix = 0;
+    for (uint64_t index = 0; index < length; index++) {
+      if (data[start + index] == '.' && prefix == 0) prefix = index;
+    }
+    *result = lainir_value_bits(prefix, 64);
+    return 1;
+  }
+  if (interp_fast_leaves_enabled(interp) && (strcmp(name, "program_is_dot") == 0 ||
+       strcmp(name, "program_is_dot_member") == 0) && arg_count == 2) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[1]);
+    if (!source || !node) { interp_trap(interp, "load from null"); return 1; }
+    uint8_t *data = (uint8_t *)interp_fast_load_u64(source, 0);
+    uint64_t start = interp_fast_load_u64(node, 8);
+    uint64_t length = interp_fast_load_u64(node, 16);
+    int match = interp_fast_load_u32(node, 0) == 1;
+    if (strcmp(name, "program_is_dot") == 0)
+      match = match && length == 1 && data[start] == '.';
+    else
+      match = match && length >= 2 && data[start] == '.';
+    *result = lainir_value_bits(match, 1);
+    return 1;
+  }
+  if (interp_fast_leaves_enabled(interp) && strcmp(name, "program_operand_name") == 0 && arg_count == 2) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint8_t *current = (uint8_t *)interp_fast_addr(&args[1]);
+    if (!source || !current) { interp_trap(interp, "load from null"); return 1; }
+    uint8_t *data = (uint8_t *)interp_fast_load_u64(source, 0);
+    for (uint32_t depth = 0; current && depth < 256; depth++) {
+      uint8_t *colon1 = (uint8_t *)interp_fast_load_u64(current, 40);
+      if (colon1 && interp_fast_load_u32(colon1, 0) == 1 &&
+          interp_fast_load_u64(colon1, 16) == 1 &&
+          data[interp_fast_load_u64(colon1, 8)] == ':') {
+        uint8_t *colon2 = (uint8_t *)interp_fast_load_u64(colon1, 40);
+        if (colon2 && interp_fast_load_u32(colon2, 0) == 1 &&
+            interp_fast_load_u64(colon2, 16) == 1 &&
+            data[interp_fast_load_u64(colon2, 8)] == ':') {
+          uint8_t *member = (uint8_t *)interp_fast_load_u64(colon2, 40);
+          if (!member || interp_fast_load_u32(member, 0) != 1) break;
+          current = member;
+          continue;
+        }
+      }
+      uint8_t *dot = (uint8_t *)interp_fast_load_u64(current, 40);
+      if (!dot) break;
+      uint64_t dot_length = interp_fast_load_u64(dot, 16);
+      uint64_t dot_start = interp_fast_load_u64(dot, 8);
+      if (interp_fast_load_u32(dot, 0) == 1 && dot_length >= 2 &&
+          data[dot_start] == '.') {
+        current = dot;
+        continue;
+      }
+      if (interp_fast_load_u32(dot, 0) != 1 || dot_length != 1 ||
+          data[dot_start] != '.') break;
+      uint8_t *member = (uint8_t *)interp_fast_load_u64(dot, 40);
+      if (!member || interp_fast_load_u32(member, 0) != 1) break;
+      current = member;
+    }
+    *result = lainir_value_addr(current);
+    return 1;
+  }
+  if (strcmp(name, "meta_env_lookup_local") == 0 && arg_count == 3) {
+    LainirValue local_args[4] = {args[0], args[1], args[2], args[2]};
+    local_args[3].as.bits = interp_fast_bits(&args[2]);
+    /* The local API receives a RawAst name, so resolve its start/length
+     * before using the common span lookup implementation. */
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[2]);
+    if (!node) { interp_trap(interp, "load from null"); return 1; }
+    local_args[2] = lainir_value_bits(interp_fast_load_u64(node, 8), 64);
+    local_args[3] = lainir_value_bits(interp_fast_load_u64(node, 16), 64);
+    /* Repackage as environment, source, start, length. */
+    LainirValue span_args[4] = {
+      args[0], args[1], local_args[2], local_args[3]
+    };
+    *result = interp_fast_meta_lookup_span(interp, span_args, 1);
+    return 1;
+  }
+  if (strcmp(name, "meta_atom_equal") == 0 && arg_count == 4) {
+    uint8_t *source = (uint8_t *)interp_fast_addr(&args[0]);
+    uint8_t *node = (uint8_t *)interp_fast_addr(&args[1]);
+    uint8_t *text = (uint8_t *)interp_fast_addr(&args[2]);
+    uint64_t length = interp_fast_bits(&args[3]);
+    if (!source || !node || !text) {
+      interp_trap(interp, "load from null"); return 1;
+    }
+    int same = interp_fast_load_u32(node, 0) == 1 &&
+               interp_fast_load_u64(node, 16) == length;
+    if (same) {
+      uint8_t *data = (uint8_t *)interp_fast_load_u64(source, 0);
+      uint64_t start = interp_fast_load_u64(node, 8);
+      same = memcmp(data + start, text, (size_t)length) == 0;
+    }
+    *result = lainir_value_bits(same, 1);
+    return 1;
+  }
+  /* Syntax token comparisons are a hot path during archive elaboration.  The
+   * L1 implementation walks each byte through memory.byte_at; use the same
+   * record layout directly when the scanner fast paths are enabled. */
+  if (interp->fast_scanners_enabled &&
+      interp_fast_suffix(name, "_token_equal") && arg_count == 5) {
+    uint8_t *store = (uint8_t *)interp_fast_addr(&args[0]);
+    uint64_t unit_id = interp_fast_bits(&args[1]);
+    uint64_t node_id = interp_fast_bits(&args[2]);
+    const uint8_t *literal =
+        (const uint8_t *)interp_fast_addr(&args[3]);
+    uint64_t literal_length = interp_fast_bits(&args[4]);
+    int same = 0;
+    if (store && literal) {
+      uint8_t *units_vec = (uint8_t *)interp_fast_load_u64(store, 0);
+      uint8_t *units_storage = units_vec
+          ? (uint8_t *)interp_fast_load_u64(units_vec, 0) : NULL;
+      uint8_t *unit = units_storage
+          ? (uint8_t *)interp_fast_load_u64(units_storage + 24 + unit_id * 8, 0)
+          : NULL;
+      uint8_t *nodes_vec = unit
+          ? (uint8_t *)interp_fast_load_u64(unit, 8) : NULL;
+      uint8_t *nodes_storage = nodes_vec
+          ? (uint8_t *)interp_fast_load_u64(nodes_vec, 0) : NULL;
+      uint8_t *node = nodes_storage
+          ? (uint8_t *)interp_fast_load_u64(nodes_storage + 24 + node_id * 8, 0)
+          : NULL;
+      if (getenv("LAINIR_TRACE_FAST_TOKEN_EQUAL")) {
+        fprintf(stderr, " ptrs store=%p units_vec=%p unit=%p nodes_vec=%p node=%p source=%p span=%p kind=%u\n",
+                (void *)store, (void *)units_vec, (void *)unit,
+                (void *)nodes_vec, (void *)node,
+                unit ? (void *)interp_fast_load_u64(unit, 0) : NULL,
+                node ? (void *)interp_fast_load_u64(node, 12) : NULL,
+                node ? interp_fast_load_u32(node, 0) : 0);
+      }
+      if (unit && node && interp_fast_load_u32(node, 0) == 1 &&
+          node[60] == 0) {
+        uint8_t *span = (uint8_t *)interp_fast_load_u64(node, 12);
+        uint8_t *source_span = (uint8_t *)interp_fast_load_u64(unit, 0);
+        uint8_t *source = source_span
+            ? (uint8_t *)interp_fast_load_u64(source_span, 0) : NULL;
+        if (span && source) {
+          uint64_t start = interp_fast_load_u64(span, 0);
+          uint64_t end = interp_fast_load_u64(span, 8);
+          if (end >= start && end - start == literal_length)
+            same = memcmp(source + start, literal,
+                          (size_t)literal_length) == 0;
+        }
+      }
+    }
+    if (getenv("LAINIR_TRACE_FAST_TOKEN_EQUAL")) {
+      fprintf(stderr, "fast_token_equal unit=%llu node=%llu len=%llu result=%d\n",
+              (unsigned long long)unit_id, (unsigned long long)node_id,
+              (unsigned long long)literal_length, same);
+      fflush(stderr);
+    }
+    *result = lainir_value_bits(same, 1);
+    return 1;
+  }
+  return 0;
+}
+
 /* ═══════════════════════════════════════════════════════════════
  * Subroutine call
  * ═══════════════════════════════════════════════════════════════ */
 
 static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
                                     const LainirValue *args, uint32_t arg_count) {
+  LainirValue fast_result;
+  if (interp_try_fast_builtin(interp, sub, args, arg_count, &fast_result))
+    return fast_result;
   LainirFrame frame; memset(&frame, 0, sizeof(frame));
+  frame.args = frame.args_inline;
+  frame.locals = frame.locals_inline;
+  frame.local_cap = sizeof(frame.locals_inline) / sizeof(frame.locals_inline[0]);
+  LainirFrame *saved_frame = interp->active_frame;
+  LainirTraceProcedure *saved_trace = interp->trace_active;
+  LainirTraceProcedure *trace = interp_trace_procedure(interp, sub);
+  if (trace) trace->calls++;
+  interp->trace_active = trace;
   uint32_t max_depth = interp->caps ? interp->caps->max_call_depth : 0;
   if (max_depth && interp->call_depth >= max_depth) {
     interp_trap(interp, "interpreter call-depth limit exceeded");
+    interp->trace_active = saved_trace;
     return lainir_value_unit();
   }
   interp->call_depth++;
-  frame.sub = sub; frame.arg_count = arg_count;
+  frame.sub = sub; frame.arg_count = arg_count; frame.caller = saved_frame;
+  interp->active_frame = &frame;
   if (arg_count) {
-    frame.args = calloc(arg_count, sizeof(LainirValue));
-    if (!frame.args) { interp_trap(interp, "out of memory"); interp->call_depth--; return lainir_value_unit(); }
+    if (arg_count > sizeof(frame.args_inline) / sizeof(frame.args_inline[0])) {
+      frame.args = calloc(arg_count, sizeof(LainirValue));
+      frame.args_heap = 1;
+    }
+    if (!frame.args) { interp_trap(interp, "out of memory"); interp->call_depth--; interp->trace_active = saved_trace; interp->active_frame = saved_frame; return lainir_value_unit(); }
     for (uint32_t i = 0; i < arg_count; i++) {
       frame.args[i] = interp_coerce_physical(
           interp, args[i], i < sub->param_count ? sub->param_tys[i] : NULL);
       if (interp->error) {
         interp_free_frame(&frame);
         interp->call_depth--;
+        interp->trace_active = saved_trace;
+        interp->active_frame = saved_frame;
         return lainir_value_unit();
       }
+    }
+    const char *trace_call = interp->trace_call_name;
+    if (trace_call && sub->name && strcmp(trace_call, sub->name) == 0) {
+      fprintf(stderr, "lainir call %s argc=%u", sub->name, sub->param_count);
+      for (uint32_t trace_index = 0; trace_index < sub->param_count; trace_index++) {
+        LainirValue trace_arg = frame.args[trace_index];
+        if (trace_arg.kind == LAINIR_VALUE_BITS)
+          fprintf(stderr, " arg%u=bits:%llu", trace_index,
+                  (unsigned long long)trace_arg.as.bits);
+        else if (trace_arg.kind == LAINIR_VALUE_ADDR)
+          fprintf(stderr, " arg%u=addr:%p", trace_index, (void *)trace_arg.as.addr);
+        else
+          fprintf(stderr, " arg%u=kind:%d", trace_index, (int)trace_arg.kind);
+      }
+      fputc('\n', stderr);
+      if (getenv("LAINIR_TRACE_CALL_FIELDS")) {
+        for (uint32_t trace_index = 0; trace_index < sub->param_count; trace_index++) {
+          LainirValue trace_arg = frame.args[trace_index];
+          if (trace_arg.kind == LAINIR_VALUE_ADDR && trace_arg.as.addr) {
+            unsigned char *raw = (unsigned char *)trace_arg.as.addr;
+            fprintf(stderr, " fields%u=", trace_index);
+            for (unsigned int off = 0; off < 80; off += 8) {
+              uint64_t word = 0;
+              memcpy(&word, raw + off, sizeof(word));
+              fprintf(stderr, "%s%llu", off ? "," : "", (unsigned long long)word);
+            }
+            fputc('\n', stderr);
+          }
+        }
+      }
+      if (strcmp(sub->name, "f0_Syntax_token_equal") == 0 &&
+          sub->param_count == 5 && getenv("LAINIR_TRACE_TOKEN_EQUAL")) {
+        uint8_t *store_raw = (uint8_t *)frame.args[0].as.addr;
+        uint64_t unit_id = frame.args[1].as.bits;
+        uint64_t node_id = frame.args[2].as.bits;
+        uint8_t *unit = NULL;
+        uint8_t *node = NULL;
+        if (store_raw) {
+          uint8_t *units_vec = (uint8_t *)interp_fast_load_u64(store_raw, 0);
+          uint8_t *units_storage = units_vec ? (uint8_t *)interp_fast_load_u64(units_vec, 0) : NULL;
+          unit = units_storage ? (uint8_t *)interp_fast_load_u64(units_storage + 24 + unit_id * 8, 0) : NULL;
+          if (unit) {
+            uint8_t *nodes_vec = (uint8_t *)interp_fast_load_u64(unit, 8);
+            uint8_t *nodes_storage = nodes_vec ? (uint8_t *)interp_fast_load_u64(nodes_vec, 0) : NULL;
+            node = nodes_storage ? (uint8_t *)interp_fast_load_u64(nodes_storage + 24 + node_id * 8, 0) : NULL;
+          }
+        }
+        fprintf(stderr, " token_equal_debug unit=%p node=%p", (void *)unit, (void *)node);
+        if (unit) {
+          uint8_t *source = (uint8_t *)interp_fast_load_u64(unit, 0);
+          fprintf(stderr, " source=%p", (void *)source);
+        }
+        if (node) {
+          uint8_t *span = (uint8_t *)interp_fast_load_u64(node, 12);
+          fprintf(stderr, " node_type=%u", interp_fast_load_u32(node, 0));
+          if (span) fprintf(stderr, " span=%llu..%llu", (unsigned long long)interp_fast_load_u64(span, 0), (unsigned long long)interp_fast_load_u64(span, 8));
+        }
+        fprintf(stderr, " literal=%p len=%llu\n", frame.args[3].kind == LAINIR_VALUE_ADDR ? frame.args[3].as.addr : NULL, (unsigned long long)frame.args[4].as.bits);
+        if (unit && node && frame.args[3].kind == LAINIR_VALUE_ADDR) {
+          uint8_t *source = (uint8_t *)interp_fast_load_u64(unit, 0);
+          uint8_t *span = (uint8_t *)interp_fast_load_u64(node, 12);
+          uint64_t start = span ? interp_fast_load_u64(span, 0) : 0;
+          uint64_t len = frame.args[4].as.bits;
+          fprintf(stderr, " token_bytes=");
+          for (uint64_t i = 0; i < len && i < 16; i++) fprintf(stderr, "%02x", source ? source[start + i] : 0);
+          fprintf(stderr, " literal_bytes=");
+          for (uint64_t i = 0; i < len && i < 16; i++) fprintf(stderr, "%02x", ((uint8_t *)frame.args[3].as.addr)[i]);
+          fputc('\n', stderr);
+        }
+      }
+      if (strcmp(sub->name, "f0_Lower_program") == 0 &&
+          sub->param_count == 1 && frame.args[0].kind == LAINIR_VALUE_ADDR &&
+          frame.args[0].as.addr) {
+        uint8_t *source = (uint8_t *)frame.args[0].as.addr;
+        fprintf(stderr, " lower_vectors=");
+        for (unsigned int off = 16; off <= 40; off += 8) {
+          uint8_t *vec = (uint8_t *)interp_fast_load_u64(source, off);
+          uint64_t len = vec ? interp_fast_load_u64(vec, 8) : 0;
+          fprintf(stderr, "%s%u:%p/%llu", off == 16 ? "" : ",", off,
+                  (void *)vec, (unsigned long long)len);
+        }
+        fputc('\n', stderr);
+      }
+      fflush(stderr);
     }
   }
 
@@ -1003,22 +2619,52 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
   L1Block *block = sub->blocks;
   while (block) {
     interp_exec_block(interp, &frame, block);
-    if (interp->error) { interp_free_frame(&frame); interp->should_return = saved_ret; interp->call_depth--; return lainir_value_unit(); }
+    if (interp->error) { interp_free_frame(&frame); interp->should_return = saved_ret; interp->call_depth--; interp->trace_active = saved_trace; interp->active_frame = saved_frame; return lainir_value_unit(); }
     if (interp->should_return) break;
     block = block->next;
   }
 
   LainirValue result = interp->return_value;
+  const char *trace_return = interp->trace_return_name;
+  if (trace_return && sub->name && strcmp(trace_return, sub->name) == 0) {
+    fprintf(stderr, "lainir return %s kind=%d", sub->name, (int)result.kind);
+    if (result.kind == LAINIR_VALUE_BITS)
+      fprintf(stderr, " bits:%llu", (unsigned long long)result.as.bits);
+    else if (result.kind == LAINIR_VALUE_ADDR)
+      fprintf(stderr, " addr:%p", (void *)result.as.addr);
+    fputc('\n', stderr);
+    fflush(stderr);
+  }
   interp->should_return = saved_ret;
   interp->return_value = saved_val;
   interp_free_frame(&frame);
   interp->call_depth--;
+  interp->trace_active = saved_trace;
+  interp->active_frame = saved_frame;
   return result;
 }
 
 /* ═══════════════════════════════════════════════════════════════
  * Public entry point
  * ═══════════════════════════════════════════════════════════════ */
+
+static int interp_env_enabled(const char *name) {
+  const char *value = getenv(name);
+  return value && value[0] == '1';
+}
+
+static void interp_init_env_flags(LainirInterpreter *interp) {
+  interp->trace_live_enabled = interp_env_enabled("LAINIR_TRACE_LIVE");
+  interp->fast_builtins_enabled = interp_env_enabled("LAINIR_FAST_BUILTINS");
+  interp->fast_leaves_enabled = interp_env_enabled("LAINIR_FAST_LEAVES");
+  interp->fast_scanners_enabled = interp_env_enabled("LAINIR_FAST_SCANNERS");
+  interp->fast_meta_scan_enabled = interp_env_enabled("LAINIR_FAST_META_SCAN");
+  interp->trace_meta_enabled = interp_env_enabled("LAINIR_TRACE_META");
+  interp->trace_fast_names_enabled =
+      interp_env_enabled("LAINIR_TRACE_FAST_NAMES");
+  interp->trace_call_name = getenv("LAINIR_TRACE_CALL");
+  interp->trace_return_name = getenv("LAINIR_TRACE_RETURN");
+}
 
 LainirRunStatus lainir_run(const LainirRunRequest *request,
                           LainirValue *result_out, const char **error_out) {
@@ -1029,14 +2675,20 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
   }
   interp.module = request->module;
   interp.caps = request->caps;
+  /* Diagnostic and fast-path environment switches are read once per run;
+   * getenv must not sit on the interpreter's step/call hot paths. */
+  interp_init_env_flags(&interp);
   interp_build_sub_index(&interp);
+  interp_trace_init(&interp);
   L1Subroutine *entry = interp_find_sub(&interp, request->entry_name);
   if (!entry) {
+    interp_trace_finish(&interp);
     free(interp.sub_index);
     if (error_out) *error_out = "entry not found";
     return LAINIR_RUN_NO_ENTRY;
   }
   *result_out = interp_call_sub(&interp, entry, request->args, request->arg_count);
+  interp_trace_finish(&interp);
   free(interp.sub_index);
   if (interp.error) {
     interp_free_allocas(&interp);
@@ -1074,6 +2726,7 @@ LainirRunStatus lainir_eval_block(
   eval_sub.blocks = block;
   interp.module = module;
   interp.caps = caps;
+  interp_init_env_flags(&interp);
   interp_build_sub_index(&interp);
 
   *result_out = interp_call_sub(&interp, &eval_sub, NULL, 0);
