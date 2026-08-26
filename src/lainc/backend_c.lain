@@ -1,0 +1,804 @@
+// Lain-written canonical L1 -> C backend.
+//
+// This is deliberately a small, executable backend kernel.  The lowering
+// policy lives in Lain; the host only supplies source bytes and an artifact
+// stream.  It accepts the scalar/procedure subset used by the bootstrap
+// fixtures: #proc, #return, #let, #call, #if, #loop and arithmetic/comparison
+// expressions.  Unsupported instructions are emitted as C comments, so the
+// boundary is visible in the generated artifact instead of being silent.
+
+@foreign(c, link_name = "bootstrap.allocate-pages")
+let allocate_pages = std::func(size: usize) -> addr;
+@foreign(c, link_name = "bootstrap.artifact-begin")
+let artifact_begin = std::func() -> unit;
+@foreign(c, link_name = "bootstrap.artifact-write-byte")
+let artifact_write_byte = std::func(byte: i32) -> unit;
+@foreign(c, link_name = "bootstrap.artifact-finish")
+let artifact_finish = std::func() -> unit;
+@foreign(c, link_name = "bootstrap.source-length")
+let source_length = std::func(index: usize) -> usize;
+@foreign(c, link_name = "bootstrap.source-data")
+let source_data = std::func(index: usize) -> addr;
+@foreign(c, link_name = "bootstrap.copy-bytes")
+let copy_bytes = std::func(destination: addr, source: addr, length: usize) -> unit;
+
+let load8 = std::func(data: addr, index: usize) -> i32 {
+    return std::load_bits(8, data + index);
+};
+
+let append = std::func(output: addr, byte: i32) -> unit {
+    let length: usize = std::load_bits(64, output);
+    std::store_bits(8, output + 8 + length, byte);
+    std::store_bits(64, output, length + 1);
+};
+
+let append_literal = std::func(
+    output: addr,
+    literal: addr,
+    length: usize,
+) -> unit {
+    let current: usize = std::load_bits(64, output);
+    copy_bytes(output + 8 + current, literal, length);
+    std::store_bits(64, output, current + length);
+};
+
+let append_span = std::func(
+    output: addr,
+    source: addr,
+    start: usize,
+    end: usize,
+) -> unit {
+    let length: usize = end - start;
+    let current: usize = std::load_bits(64, output);
+    copy_bytes(output + 8 + current, source + start, length);
+    std::store_bits(64, output, current + length);
+};
+
+let match_at = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    literal: addr,
+    length: usize,
+) -> bool {
+    if start + length > end {
+        return false;
+    }
+    let index: usize = 0;
+    while index < length {
+        if load8(source, start + index) != std::load_bits(8, literal + index) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+};
+
+let is_space = std::func(byte: i32) -> bool {
+    return byte == 32 || byte == 9 || byte == 13;
+};
+
+let find_string_end = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> usize {
+    let index: usize = start + 1;
+    let result: usize = end;
+    while index < end {
+        let byte: i32 = load8(source, index);
+        if byte == 34 {
+            result = index + 1;
+            index = end;
+        } else {
+            index = index + 1;
+        }
+    }
+    return result;
+};
+
+// Copy an expression while removing L1's SSA marker and mapping the pure
+// scalar operators to C helper macros.  Keeping the calls as macros lets the
+// backend remain textual without giving up expression nesting.
+let emit_expr = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let index: usize = start;
+    while index < end {
+        let byte: i32 = load8(source, index);
+        if byte == 34 {
+            let string_end: usize = find_string_end(source, index, end);
+            append_literal(output, "(uintptr_t)", 11);
+            append_span(output, source, index, string_end);
+            index = string_end;
+        } else {
+        if byte == 37 {
+            index = index + 1;
+        } else {
+            if byte == 35 {
+                if match_at(source, index, end, "#add", 4) {
+                    append_literal(output, "L1_add", 6);
+                    index = index + 4;
+                } else {
+                    if match_at(source, index, end, "#sub", 4) {
+                        append_literal(output, "L1_sub", 6);
+                        index = index + 4;
+                    } else {
+                        if match_at(source, index, end, "#mul", 4) {
+                            append_literal(output, "L1_mul", 6);
+                            index = index + 4;
+                        } else {
+                            if match_at(source, index, end, "#eq", 3) {
+                                append_literal(output, "L1_eq", 5);
+                                index = index + 3;
+                            } else {
+                                if match_at(source, index, end, "#ne", 3) {
+                                    append_literal(output, "L1_ne", 5);
+                                    index = index + 3;
+                                } else {
+                                    if match_at(source, index, end, "#lt", 3) {
+                                        append_literal(output, "L1_lt", 5);
+                                        index = index + 3;
+                                    } else {
+                                        if match_at(source, index, end, "#le(", 4) {
+                                            append_literal(output, "L1_le", 5);
+                                            index = index + 3;
+                                        } else {
+                                            if match_at(source, index, end, "#gt", 3) {
+                                                append_literal(output, "L1_gt", 5);
+                                                index = index + 3;
+                                            } else {
+                                            if match_at(source, index, end, "#ge", 3) {
+                                                append_literal(output, "L1_ge", 5);
+                                                index = index + 3;
+                                                } else {
+                                                    if match_at(source, index, end, "#and", 4) {
+                                                        append_literal(output, "L1_and", 6);
+                                                        index = index + 4;
+                                                    } else {
+                                                        if match_at(source, index, end, "#or", 3) {
+                                                            append_literal(output, "L1_or", 5);
+                                                            index = index + 3;
+                                                        } else {
+                                                    if match_at(source, index, end, "#call", 5) {
+                                                        index = index + 5;
+                                    } else {
+                                        if match_at(source, index, end, "#load", 5) {
+                                            let type_start: usize = index + 6;
+                                            if match_at(source, type_start, end, "#bits<8>", 8) {
+                                                append_literal(output, "L1_load8", 8);
+                                            } else {
+                                                append_literal(output, "L1_load64", 9);
+                                            }
+                                            index = index + 5;
+                                            while index < end {
+                                                if load8(source, index) == 93 {
+                                                    index = index + 1;
+                                                    break;
+                                                }
+                                                index = index + 1;
+                                            }
+                                        } else {
+                                            if match_at(source, index, end, "#lea", 4) {
+                                                append_literal(output, "L1_lea(", 7);
+                                                let field_start: usize = index + 5;
+                                                let cursor: usize = field_start;
+                                                let depth: i32 = 0;
+                                                while cursor < end {
+                                                    let field_byte: i32 = load8(source, cursor);
+                                                    if field_byte == 40 {
+                                                        depth = depth + 1;
+                                                    } else {
+                                                        if field_byte == 41 {
+                                                            if depth == 0 {
+                                                                let equals: usize = field_start;
+                                                                while equals < cursor {
+                                                                    if load8(source, equals) == 61 {
+                                                                        break;
+                                                                    }
+                                                                    equals = equals + 1;
+                                                                }
+                                                                emit_expr(source, equals + 1, cursor, output);
+                                                                append(output, 41);
+                                                                cursor = cursor + 1;
+                                                                break;
+                                                            }
+                                                            depth = depth - 1;
+                                                        } else {
+                                                            if field_byte == 44 {
+                                                                if depth == 0 {
+                                                                    let equals: usize = field_start;
+                                                                    while equals < cursor {
+                                                                        if load8(source, equals) == 61 {
+                                                                            break;
+                                                                        }
+                                                                        equals = equals + 1;
+                                                                    }
+                                                                    emit_expr(source, equals + 1, cursor, output);
+                                                                    append_literal(output, ", ", 2);
+                                                                    field_start = cursor + 1;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    cursor = cursor + 1;
+                                                }
+                                                index = cursor;
+                                            } else {
+                                            if match_at(source, index, end, "#zext", 5) {
+                                                index = index + 5;
+                                                while index < end {
+                                                    if load8(source, index) == 93 {
+                                                        index = index + 1;
+                                                        break;
+                                                    }
+                                                    index = index + 1;
+                                                }
+                                            } else {
+                                                if match_at(source, index, end, "#udiv", 5) {
+                                                    append_literal(output, "L1_udiv", 7);
+                                                    index = index + 5;
+                                                } else {
+                                                if match_at(source, index, end, "#urem", 5) {
+                                                    append_literal(output, "L1_urem", 7);
+                                                    index = index + 5;
+                                                } else {
+                                                if match_at(source, index, end, "#int2ptr", 8) {
+                                                    index = index + 8;
+                                                } else {
+                                                    if match_at(source, index, end, "#ptr2int", 8) {
+                                                        index = index + 8;
+                                                    } else {
+                                                        append(output, byte);
+                                                        index = index + 1;
+                                                    }
+                                                }
+                                                }
+                                                }
+                                            }
+                                            }
+                                        }
+                                    }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                if byte == 46 || byte == 45 {
+                    append(output, 95);
+                } else {
+                    append(output, byte);
+                }
+                index = index + 1;
+            }
+        }
+        }
+    }
+};
+
+let emit_c_type = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let index: usize = start;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    if match_at(source, index, end, "#unit", 5) {
+        append_literal(output, "void", 4);
+        return;
+    }
+    if match_at(source, index, end, "#addr", 5) {
+        append_literal(output, "uintptr_t", 9);
+        return;
+    }
+    if match_at(source, index, end, "addr", 4) {
+        append_literal(output, "uintptr_t", 9);
+        return;
+    }
+    if match_at(source, index, end, "#bits<32>", 9) {
+        append_literal(output, "uint32_t", 8);
+        return;
+    }
+    if match_at(source, index, end, "#bits<1>", 8) {
+        append_literal(output, "uint8_t", 7);
+        return;
+    }
+    append_literal(output, "uint64_t", 8);
+};
+
+let emit_proc = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let index: usize = start + 5;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    let name_start: usize = index;
+    while index < end {
+        if load8(source, index) == 40 {
+            break;
+        }
+        index = index + 1;
+    }
+    let open: usize = index;
+    let close: usize = open;
+    while close < end {
+        if load8(source, close) == 41 {
+            break;
+        }
+        close = close + 1;
+    }
+    let arrow: usize = close;
+    while arrow < end {
+        if match_at(source, arrow, end, "->", 2) {
+            break;
+        }
+        arrow = arrow + 1;
+    }
+    if match_at(source, name_start, open, "main", 4) {
+        append_literal(output, "int", 3);
+    } else {
+        emit_c_type(source, arrow + 2, end, output);
+    }
+    append_literal(output, " ", 1);
+    if match_at(source, name_start, open, "main", 4) {
+        append_literal(output, "lainc_entry", 11);
+    } else {
+        append_span(output, source, name_start, open);
+    }
+    append_literal(output, "(", 1);
+    let cursor: usize = open + 1;
+    let emitted: i32 = 0;
+    while cursor < close {
+        if load8(source, cursor) == 37 {
+            let name_cursor: usize = cursor + 1;
+            let name_end: usize = name_cursor;
+            while name_end < close {
+                let name_byte: i32 = load8(source, name_end);
+                if name_byte == 44 {
+                    break;
+                }
+                if name_byte == 41 {
+                    break;
+                }
+                if is_space(name_byte) {
+                    break;
+                }
+                name_end = name_end + 1;
+            }
+            if emitted == 1 {
+                append_literal(output, ", ", 2);
+            }
+            append_literal(output, "uintptr_t", 9);
+            append_literal(output, " ", 1);
+            let shadow_types: i32 = 0;
+            if match_at(source, name_start, open, "f0_emit_module", 14) {
+                shadow_types = 1;
+            }
+            if match_at(source, name_start, open, "f0_emit_function2", 17) {
+                shadow_types = 1;
+            }
+            if shadow_types == 1 {
+                if match_at(source, name_cursor, name_end, "types", 5) {
+                    append_literal(output, "param_types", 11);
+                } else {
+                    append_span(output, source, name_cursor, name_end);
+                }
+            } else {
+                append_span(output, source, name_cursor, name_end);
+            }
+            emitted = 1;
+            cursor = name_end;
+        } else {
+            cursor = cursor + 1;
+        }
+    }
+    if emitted == 0 {
+        append_literal(output, "void", 4);
+    }
+    append_literal(output, ") {\n", 4);
+};
+
+// Emit old-style C declarations in a first pass.  Empty parameter lists keep
+// the declaration compatible with the typed definition emitted in pass two,
+// while allowing calls to procedures that appear later in the L1 module.
+let emit_proc_decl = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let index: usize = start + 5;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    let name_start: usize = index;
+    while index < end {
+        if load8(source, index) == 40 {
+            break;
+        }
+        index = index + 1;
+    }
+    let open: usize = index;
+    let arrow: usize = open;
+    while arrow < end {
+        if match_at(source, arrow, end, "->", 2) {
+            break;
+        }
+        arrow = arrow + 1;
+    }
+    if match_at(source, name_start, open, "main", 4) {
+        append_literal(output, "int", 3);
+    } else {
+        emit_c_type(source, arrow + 2, end, output);
+    }
+    append_literal(output, " ", 1);
+    if match_at(source, name_start, open, "main", 4) {
+        append_literal(output, "lainc_entry", 11);
+    } else {
+        append_span(output, source, name_start, open);
+    }
+    append_literal(output, "();\n", 4);
+};
+
+let emit_store_line = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let width: i32 = 64;
+    let index: usize = start + 6;
+    if index < end {
+        if load8(source, index) == 91 {
+            let type_start: usize = index + 1;
+            if match_at(source, type_start, end, "#bits<8>", 8) {
+                width = 8;
+            } else {
+                if match_at(source, type_start, end, "#bits<32>", 9) {
+                    width = 32;
+                }
+            }
+            while index < end {
+                if load8(source, index) == 93 {
+                    index = index + 1;
+                    break;
+                }
+                index = index + 1;
+            }
+        }
+    }
+    let value_start: usize = index;
+    while value_start < end {
+        if is_space(load8(source, value_start)) {
+            value_start = value_start + 1;
+        } else {
+            break;
+        }
+    }
+    let comma: usize = value_start;
+    let depth: i32 = 0;
+    while comma < end {
+        let byte: i32 = load8(source, comma);
+        if byte == 40 {
+            depth = depth + 1;
+        } else {
+            if byte == 41 {
+                depth = depth - 1;
+            } else {
+                if byte == 44 && depth == 0 {
+                    break;
+                }
+            }
+        }
+        comma = comma + 1;
+    }
+    if width == 64 {
+        if match_at(source, value_start, comma, "%byte", 5) {
+            width = 8;
+        }
+    }
+    if width == 8 {
+        append_literal(output, "L1_store8(", 10);
+    } else {
+        if width == 32 {
+            append_literal(output, "L1_store32(", 11);
+        } else {
+            append_literal(output, "L1_store64(", 11);
+        }
+    }
+    if comma < end {
+        emit_expr(source, comma + 1, end, output);
+        append_literal(output, ", ", 2);
+    }
+    emit_expr(source, value_start, comma, output);
+    append_literal(output, ");\n", 3);
+};
+
+let emit_line = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let index: usize = start;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    if index == end {
+        return;
+    }
+    if match_at(source, index, end, "#proc", 5) {
+        emit_proc(source, index, end, output);
+        return;
+    }
+    if match_at(source, index, end, "#extern", 7) {
+        append_literal(output, "/* ", 3);
+        append_span(output, source, index, end);
+        append_literal(output, " */\n", 4);
+        return;
+    }
+    if match_at(source, index, end, "} else {", 8) {
+        append_literal(output, "} else {\n", 9);
+        return;
+    }
+    if match_at(source, index, end, "else {", 6) {
+        append_literal(output, "else {\n", 7);
+        return;
+    }
+    if load8(source, index) == 125 {
+        append_literal(output, "}\n", 2);
+        return;
+    }
+    if match_at(source, index, end, "#store", 6) {
+        emit_store_line(source, index, end, output);
+        return;
+    }
+    if match_at(source, index, end, "#return", 7) {
+        append_literal(output, "  return ", 9);
+        emit_expr(source, index + 7, end, output);
+        append_literal(output, ";\n", 2);
+        return;
+    }
+    if match_at(source, index, end, "#let", 4) {
+        let name: usize = index + 4;
+        while name < end {
+            if is_space(load8(source, name)) {
+                name = name + 1;
+            } else {
+                break;
+            }
+        }
+        if name < end {
+            if load8(source, name) == 37 {
+                name = name + 1;
+            }
+        }
+        let name_end: usize = name;
+        while name_end < end {
+            let name_byte: i32 = load8(source, name_end);
+            if name_byte == 58 || is_space(name_byte) {
+                break;
+            }
+            name_end = name_end + 1;
+        }
+        let equals: usize = name;
+        while equals < end {
+            if load8(source, equals) == 61 {
+                break;
+            }
+            equals = equals + 1;
+        }
+        append_literal(output, "  int64_t ", 10);
+        append_span(output, source, name, name_end);
+        append_literal(output, "= ", 2);
+        if equals < end {
+            emit_expr(source, equals + 1, end, output);
+        }
+        append_literal(output, ";\n", 2);
+        return;
+    }
+    if load8(source, index) == 37 {
+        let name: usize = index + 1;
+        let colon: usize = name;
+        while colon < end {
+            let name_byte: i32 = load8(source, colon);
+            if name_byte == 58 {
+                break;
+            }
+            if name_byte == 61 {
+                break;
+            }
+            if is_space(name_byte) {
+                break;
+            }
+            colon = colon + 1;
+        }
+        let equals: usize = colon;
+        if equals < end {
+            if load8(source, equals) != 61 {
+                while equals < end {
+                    if load8(source, equals) == 61 {
+                        break;
+                    }
+                    equals = equals + 1;
+                }
+            }
+        }
+        append_literal(output, "  ", 2);
+        append_span(output, source, name, colon);
+        append_literal(output, " = ", 3);
+        if equals < end {
+            emit_expr(source, equals + 1, end, output);
+        }
+        append_literal(output, ";\n", 2);
+        return;
+    }
+    if match_at(source, index, end, "#call", 5) {
+        append_literal(output, "  ", 2);
+        emit_expr(source, index + 5, end, output);
+        append_literal(output, ";\n", 2);
+        return;
+    }
+    if match_at(source, index, end, "#if", 3) {
+        let condition_end: usize = index + 3;
+        let quoted: i32 = 0;
+        while condition_end < end {
+            let condition_byte: i32 = load8(source, condition_end);
+            if condition_byte == 34 {
+                if quoted == 0 {
+                    quoted = 1;
+                } else {
+                    quoted = 0;
+                }
+            } else {
+                if condition_byte == 123 {
+                    if quoted == 0 {
+                        break;
+                    }
+                }
+            }
+            condition_end = condition_end + 1;
+        }
+        append_literal(output, "  if (", 6);
+        emit_expr(source, index + 3, condition_end, output);
+        append_literal(output, ") {\n", 4);
+        let body: usize = condition_end + 1;
+        while body < end {
+            if is_space(load8(source, body)) {
+                body = body + 1;
+            } else {
+                break;
+            }
+        }
+        if match_at(source, body, end, "#break", 6) {
+            append_literal(output, "  break;\n", 9);
+            append_literal(output, "}\n", 2);
+        }
+        return;
+    }
+    if match_at(source, index, end, "#loop", 5) {
+        append_literal(output, "  for (;;) {\n", 13);
+        return;
+    }
+    if match_at(source, index, end, "#break", 6) {
+        append_literal(output, "  break;\n", 9);
+        return;
+    }
+    if match_at(source, index, end, "#continue", 9) {
+        append_literal(output, "  continue;\n", 12);
+        return;
+    }
+    append_literal(output, "/* unsupported L1: ", 20);
+    append_span(output, source, index, end);
+    append_literal(output, " */\n", 4);
+};
+
+let backend_compile = std::func() -> i32 {
+    let input: addr = allocate_pages(1048576);
+    let input_length: usize = source_length(0);
+    let input_data: addr = source_data(0);
+    let output: addr = allocate_pages(1048576);
+    std::store_bits(64, output, 0);
+    append_literal(output, "#include <stdint.h>\n#include <stddef.h>\n", 40);
+    append_literal(output, "#include <stdlib.h>\n", 20);
+    append_literal(output, "static uintptr_t base, idx, scale, offset;\n", 43);
+    append_literal(output, "#define L1_load8(p) (*(uint8_t*)(uintptr_t)(p))\n", 48);
+    append_literal(output, "#define L1_load32(p) (*(uint32_t*)(uintptr_t)(p))\n", 50);
+    append_literal(output, "#define L1_load64(p) (*(uint64_t*)(uintptr_t)(p))\n", 50);
+    append_literal(output, "#define L1_store8(p,v) (*(uint8_t*)(uintptr_t)(p)=(uint8_t)(v))\n", 64);
+    append_literal(output, "#define L1_store32(p,v) (*(uint32_t*)(uintptr_t)(p)=(uint32_t)(v))\n", 67);
+    append_literal(output, "#define L1_store64(p,v) (*(uint64_t*)(uintptr_t)(p)=(uint64_t)(v))\n", 67);
+    append_literal(output, "#define L1_lea(base,idx,scale,offset) ((uintptr_t)(base)+(uintptr_t)(idx)*(uintptr_t)(scale)+(intptr_t)(offset))\n", 113);
+    append_literal(output, "extern uintptr_t bootstrap_allocate_pages(uint64_t);\n", 53);
+    append_literal(output, "extern void bootstrap_artifact_begin(void);\n", 44);
+    append_literal(output, "extern void bootstrap_artifact_write_byte(uint32_t);\n", 53);
+    append_literal(output, "extern void bootstrap_artifact_write_span(uintptr_t, uint64_t);\n", 64);
+    append_literal(output, "extern void bootstrap_artifact_finish(void);\n", 45);
+    append_literal(output, "extern uint64_t bootstrap_source_count(void);\n", 46);
+    append_literal(output, "extern uint64_t bootstrap_source_length(uint64_t);\n", 51);
+    append_literal(output, "extern uintptr_t bootstrap_source_data(uint64_t);\n", 50);
+    append_literal(output, "extern uintptr_t bootstrap_source_path_data(uint64_t);\n", 55);
+    append_literal(output, "extern uint64_t bootstrap_source_path_length(uint64_t);\n", 56);
+    append_literal(output, "extern void bootstrap_copy_bytes(uintptr_t, uintptr_t, uint64_t);\n", 66);
+    append_literal(output, "#define L1_add(a,b) ((a)+(b))\n#define L1_sub(a,b) ((a)-(b))\n#define L1_mul(a,b) ((a)*(b))\n#define L1_eq(a,b) ((a)==(b))\n#define L1_lt(a,b) ((a)<(b))\n#define L1_le(a,b) ((a)<=(b))\n#define L1_and(a,b) ((a)&&(b))\n#define L1_or(a,b) ((a)||(b))\n", 240);
+    append_literal(output, "#define L1_ne(a,b) ((a)!=(b))\n#define L1_gt(a,b) ((a)>(b))\n#define L1_ge(a,b) ((a)>=(b))\n", 89);
+    append_literal(output, "#define L1_udiv(a,b) ((a)/(b))\n#define L1_urem(a,b) ((a)%(b))\n", 62);
+    // Pass one collects procedure declarations so calls may target later
+    // definitions in the same canonical module.
+    let declaration_start: usize = 0;
+    let declaration_index: usize = 0;
+    while declaration_index < input_length {
+        if load8(input_data, declaration_index) == 10 {
+            if match_at(input_data, declaration_start, declaration_index, "#proc", 5) {
+                emit_proc_decl(input_data, declaration_start, declaration_index, output);
+            }
+            declaration_start = declaration_index + 1;
+        }
+        declaration_index = declaration_index + 1;
+    }
+    if declaration_start < input_length {
+        if match_at(input_data, declaration_start, input_length, "#proc", 5) {
+            emit_proc_decl(input_data, declaration_start, input_length, output);
+        }
+    }
+    let line_start: usize = 0;
+    let index: usize = 0;
+    while index < input_length {
+        if load8(input_data, index) == 10 {
+            emit_line(input_data, line_start, index, output);
+            line_start = index + 1;
+        }
+        index = index + 1;
+    }
+    if line_start < input_length {
+        emit_line(input_data, line_start, input_length, output);
+    }
+    artifact_begin();
+    let out_length: usize = std::load_bits(64, output);
+    let out_index: usize = 0;
+    while out_index < out_length {
+        artifact_write_byte(load8(output, 8 + out_index));
+        out_index = out_index + 1;
+    }
+    artifact_finish();
+    return 0;
+};
+
+// The wrapper keeps the module directly executable while backend_compile
+// remains a reusable entry for a future compiler driver.
+let main = std::func() -> i32 {
+    return backend_compile();
+};

@@ -92,18 +92,30 @@
 }
 
 // Environment layout: tag @0, parent @8, first/last binding @16/@24,
-// count @32.  Binding layout: tag @0, source @8, name start/length @16/@24,
-// value @32, next @40.  The explicit tags matter: a parent/source pointer
+// count @32, 256-bucket name index @40. Each bucket stores head/tail pointers.
+// Binding layout: tag @0, source @8, name start/length @16/@24,
+// value @32, next @40, bucket-next @48, name hash @56.
+// The explicit tags matter: a parent/source pointer
 // is not a reliable nil marker because page-aligned addresses often begin
 // with a zero byte.
 #proc meta_env_new(addr %parent) -> addr {
-  #let %environment: addr = #call bootstrap.allocate-pages(40)
+  #let %environment: addr = #call bootstrap.allocate-pages(48)
+  #let %buckets: addr = #call bootstrap.allocate-pages(4096)
   #let %nil: addr = #call meta_value_nil()
   #store 1, #lea(base=%environment, idx=0, scale=0, offset=0)
   #store %parent, #lea(base=%environment, idx=0, scale=0, offset=8)
   #store %nil, #lea(base=%environment, idx=0, scale=0, offset=16)
   #store %nil, #lea(base=%environment, idx=0, scale=0, offset=24)
   #store 0, #lea(base=%environment, idx=0, scale=0, offset=32)
+  #store %buckets, #lea(base=%environment, idx=0, scale=0, offset=40)
+  #let %bucket_index: i64 = 0
+  #loop initialize_buckets {
+    #if #ge(%bucket_index, 256) { #break initialize_buckets }
+    #store %nil, #lea(base=%buckets, idx=%bucket_index, scale=16, offset=0)
+    #store %nil, #lea(base=%buckets, idx=%bucket_index, scale=16, offset=8)
+    %bucket_index: i64 = #add(%bucket_index, 1)
+    #continue initialize_buckets
+  }
   #return %environment
 }
 
@@ -122,9 +134,9 @@
 }
 
 #proc meta_env_binding_new(
-  addr %source, addr %name, addr %value
+  addr %source, addr %name, addr %value, i64 %name_hash
 ) -> addr {
-  #let %binding: addr = #call bootstrap.allocate-pages(48)
+  #let %binding: addr = #call bootstrap.allocate-pages(64)
   #let %nil: addr = #call meta_value_nil()
   #store 1, #lea(base=%binding, idx=0, scale=0, offset=0)
   #store %source, #lea(base=%binding, idx=0, scale=0, offset=8)
@@ -134,6 +146,8 @@
     #lea(base=%binding, idx=0, scale=0, offset=24)
   #store %value, #lea(base=%binding, idx=0, scale=0, offset=32)
   #store %nil, #lea(base=%binding, idx=0, scale=0, offset=40)
+  #store %nil, #lea(base=%binding, idx=0, scale=0, offset=48)
+  #store %name_hash, #lea(base=%binding, idx=0, scale=0, offset=56)
   #return %binding
 }
 
@@ -143,11 +157,49 @@
   )
 }
 
+// A deliberately small rolling hash. Keeping the accumulator in [0, 255]
+// makes the value directly usable as the fixed bucket index in LAIN-IR.
+#proc meta_env_hash_span(
+  addr %source, i64 %start, i64 %length
+) -> i64 {
+  #let %data: addr = #call tool_source_data(%source)
+  #let %hash: i64 = %length
+  #if #ge(%hash, 256) { %hash: i64 = #sub(%hash, 256) }
+  #let %index: i64 = 0
+  #loop bytes {
+    #if #ge(%index, %length) { #break bytes }
+    %hash: i64 = #add(
+      %hash, #call tool_byte_at(%data, #add(%start, %index))
+    )
+    #if #ge(%hash, 256) { %hash: i64 = #sub(%hash, 256) }
+    %index: i64 = #add(%index, 1)
+    #continue bytes
+  }
+  #return %hash
+}
+
+#proc meta_env_hash_text(addr %text, i64 %length) -> i64 {
+  #let %hash: i64 = %length
+  #if #ge(%hash, 256) { %hash: i64 = #sub(%hash, 256) }
+  #let %index: i64 = 0
+  #loop bytes {
+    #if #ge(%index, %length) { #break bytes }
+    %hash: i64 = #add(%hash, #call tool_byte_at(%text, %index))
+    #if #ge(%hash, 256) { %hash: i64 = #sub(%hash, 256) }
+    %index: i64 = #add(%index, 1)
+    #continue bytes
+  }
+  #return %hash
+}
+
 #proc meta_env_bind(
   addr %environment, addr %source, addr %name, addr %value
 ) -> #unit {
+  #let %name_hash: i64 = #call meta_env_hash_span(
+    %source, #call raw_node_start(%name), #call raw_node_length(%name)
+  )
   #let %binding: addr = #call meta_env_binding_new(
-    %source, %name, %value
+    %source, %name, %value, %name_hash
   )
   #let %first: addr = #load[addr](
     #lea(base=%environment, idx=0, scale=0, offset=16)
@@ -161,6 +213,21 @@
     #store %binding, #lea(base=%last, idx=0, scale=0, offset=40)
   }
   #store %binding, #lea(base=%environment, idx=0, scale=0, offset=24)
+  #let %buckets: addr = #load[addr](
+    #lea(base=%environment, idx=0, scale=0, offset=40)
+  )
+  #let %bucket_first: addr = #load[addr](
+    #lea(base=%buckets, idx=%name_hash, scale=16, offset=0)
+  )
+  #if #call meta_env_binding_is_nil(%bucket_first) {
+    #store %binding, #lea(base=%buckets, idx=%name_hash, scale=16, offset=0)
+  } else {
+    #let %bucket_last: addr = #load[addr](
+      #lea(base=%buckets, idx=%name_hash, scale=16, offset=8)
+    )
+    #store %binding, #lea(base=%bucket_last, idx=0, scale=0, offset=48)
+  }
+  #store %binding, #lea(base=%buckets, idx=%name_hash, scale=16, offset=8)
   #store #add(
     #load[i64](#lea(base=%environment, idx=0, scale=0, offset=32)), 1
   ), #lea(base=%environment, idx=0, scale=0, offset=32)
@@ -210,42 +277,23 @@
 #proc meta_env_lookup(
   addr %environment, addr %source, addr %name
 ) -> addr {
-  #let %current: addr = %environment
-  #let %depth: i64 = 0
-  #loop environments {
-    #if #ge(%depth, 256) { #return #call meta_value_nil() }
-    %depth: i64 = #add(%depth, 1)
-    #if #call meta_env_is_nil(%current) {
-      #return #call meta_value_nil()
-    }
-    #let %binding: addr = #load[addr](
-      #lea(base=%current, idx=0, scale=0, offset=16)
-    )
-    #let %binding_steps: i64 = 0
-    #loop bindings {
-      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
-      #if #ge(%binding_steps, 4096) {
-        #return #call meta_value_nil()
-      }
-      %binding_steps: i64 = #add(%binding_steps, 1)
-      #if #call meta_env_name_matches(%source, %name, %binding) {
-        #return #call meta_env_binding_value(%binding)
-      }
-      %binding: addr = #load[addr](
-        #lea(base=%binding, idx=0, scale=0, offset=40)
-      )
-      #continue bindings
-    }
-    %current: addr = #call meta_env_parent(%current)
-    #continue environments
-  }
+  #return #call meta_env_lookup_span(
+    %environment, %source, #call raw_node_start(%name),
+    #call raw_node_length(%name)
+  )
 }
 
 #proc meta_env_lookup_local(
   addr %environment, addr %source, addr %name
 ) -> addr {
+  #let %start: i64 = #call raw_node_start(%name)
+  #let %length: i64 = #call raw_node_length(%name)
+  #let %hash: i64 = #call meta_env_hash_span(%source, %start, %length)
+  #let %buckets: addr = #load[addr](
+    #lea(base=%environment, idx=0, scale=0, offset=40)
+  )
   #let %binding: addr = #load[addr](
-    #lea(base=%environment, idx=0, scale=0, offset=16)
+    #lea(base=%buckets, idx=%hash, scale=16, offset=0)
   )
   #let %binding_steps: i64 = 0
   #loop bindings {
@@ -256,11 +304,13 @@
       #return #call meta_value_nil()
     }
     %binding_steps: i64 = #add(%binding_steps, 1)
-    #if #call meta_env_name_matches(%source, %name, %binding) {
-      #return #call meta_env_binding_value(%binding)
+    #if #eq(#load[i64](#lea(base=%binding, idx=0, scale=0, offset=56)), %hash) {
+      #if #call meta_env_name_matches(%source, %name, %binding) {
+        #return #call meta_env_binding_value(%binding)
+      }
     }
     %binding: addr = #load[addr](
-      #lea(base=%binding, idx=0, scale=0, offset=40)
+      #lea(base=%binding, idx=0, scale=0, offset=48)
     )
     #continue bindings
   }
@@ -274,7 +324,7 @@
   addr %environment, addr %source, addr %text, i64 %length
 ) -> addr {
   #let %current: addr = %environment
-  #let %data: addr = #call tool_source_data(%source)
+  #let %hash: i64 = #call meta_env_hash_text(%text, %length)
   #let %depth: i64 = 0
   #loop environments {
     #if #ge(%depth, 256) { #return #call meta_value_nil() }
@@ -282,8 +332,11 @@
     #if #call meta_env_is_nil(%current) {
       #return #call meta_value_nil()
     }
+    #let %buckets: addr = #load[addr](
+      #lea(base=%current, idx=0, scale=0, offset=40)
+    )
     #let %binding: addr = #load[addr](
-      #lea(base=%current, idx=0, scale=0, offset=16)
+      #lea(base=%buckets, idx=%hash, scale=16, offset=0)
     )
     #let %binding_steps: i64 = 0
     #loop bindings {
@@ -292,40 +345,42 @@
         #return #call meta_value_nil()
       }
       %binding_steps: i64 = #add(%binding_steps, 1)
-      #if #eq(
+      #if #eq(#load[i64](#lea(base=%binding, idx=0, scale=0, offset=56)), %hash) {
+        #if #eq(
         #load[i64](#lea(base=%binding, idx=0, scale=0, offset=24)),
         %length
-      ) {
-        #let %binding_source: addr = #load[addr](
-          #lea(base=%binding, idx=0, scale=0, offset=8)
-        )
-        #let %binding_data: addr = #call tool_source_data(
-          %binding_source
-        )
-        #let %index: i64 = 0
-        #let %same: i1 = 1
-        #loop compare {
-          #if #ge(%index, %length) { #break compare }
-          #if #ne(
-            #call tool_byte_at(
-              %binding_data,
-              #add(
-                #load[i64](#lea(base=%binding, idx=0, scale=0, offset=16)),
-                %index
-              )
-            ),
-            #call tool_byte_at(%text, %index)
-          ) {
-            %same: i1 = 0
-            #break compare
+        ) {
+          #let %binding_source: addr = #load[addr](
+            #lea(base=%binding, idx=0, scale=0, offset=8)
+          )
+          #let %binding_data: addr = #call tool_source_data(
+            %binding_source
+          )
+          #let %index: i64 = 0
+          #let %same: i1 = 1
+          #loop compare {
+            #if #ge(%index, %length) { #break compare }
+            #if #ne(
+              #call tool_byte_at(
+                %binding_data,
+                #add(
+                  #load[i64](#lea(base=%binding, idx=0, scale=0, offset=16)),
+                  %index
+                )
+              ),
+              #call tool_byte_at(%text, %index)
+            ) {
+              %same: i1 = 0
+              #break compare
+            }
+            %index: i64 = #add(%index, 1)
+            #continue compare
           }
-          %index: i64 = #add(%index, 1)
-          #continue compare
+          #if %same { #return #call meta_env_binding_value(%binding) }
         }
-        #if %same { #return #call meta_env_binding_value(%binding) }
       }
       %binding: addr = #load[addr](
-        #lea(base=%binding, idx=0, scale=0, offset=40)
+        #lea(base=%binding, idx=0, scale=0, offset=48)
       )
       #continue bindings
     }
@@ -339,6 +394,7 @@
 ) -> addr {
   #let %current: addr = %environment
   #let %data: addr = #call tool_source_data(%source)
+  #let %hash: i64 = #call meta_env_hash_span(%source, %start, %length)
   #let %depth: i64 = 0
   #loop environments {
     #if #ge(%depth, 256) { #return #call meta_value_nil() }
@@ -346,8 +402,11 @@
     #if #call meta_env_is_nil(%current) {
       #return #call meta_value_nil()
     }
+    #let %buckets: addr = #load[addr](
+      #lea(base=%current, idx=0, scale=0, offset=40)
+    )
     #let %binding: addr = #load[addr](
-      #lea(base=%current, idx=0, scale=0, offset=16)
+      #lea(base=%buckets, idx=%hash, scale=16, offset=0)
     )
     #let %binding_steps: i64 = 0
     #loop bindings {
@@ -356,40 +415,42 @@
         #return #call meta_value_nil()
       }
       %binding_steps: i64 = #add(%binding_steps, 1)
-      #if #eq(
+      #if #eq(#load[i64](#lea(base=%binding, idx=0, scale=0, offset=56)), %hash) {
+        #if #eq(
           #load[i64](#lea(base=%binding, idx=0, scale=0, offset=24)),
-        %length
-      ) {
-        #let %binding_source: addr = #load[addr](
-          #lea(base=%binding, idx=0, scale=0, offset=8)
-        )
-        #let %binding_data: addr = #call tool_source_data(
-          %binding_source
-        )
-        #let %index: i64 = 0
-        #let %same: i1 = 1
-        #loop compare {
-          #if #ge(%index, %length) { #break compare }
-          #if #ne(
-            #call tool_byte_at(%data, #add(%start, %index)),
-            #call tool_byte_at(
-              %binding_data,
-              #add(
-                #load[i64](#lea(base=%binding, idx=0, scale=0, offset=16)),
-                %index
+          %length
+        ) {
+          #let %binding_source: addr = #load[addr](
+            #lea(base=%binding, idx=0, scale=0, offset=8)
+          )
+          #let %binding_data: addr = #call tool_source_data(
+            %binding_source
+          )
+          #let %index: i64 = 0
+          #let %same: i1 = 1
+          #loop compare {
+            #if #ge(%index, %length) { #break compare }
+            #if #ne(
+              #call tool_byte_at(%data, #add(%start, %index)),
+              #call tool_byte_at(
+                %binding_data,
+                #add(
+                  #load[i64](#lea(base=%binding, idx=0, scale=0, offset=16)),
+                  %index
+                )
               )
-            )
-          ) {
-            %same: i1 = 0
-            #break compare
+            ) {
+              %same: i1 = 0
+              #break compare
+            }
+            %index: i64 = #add(%index, 1)
+            #continue compare
           }
-          %index: i64 = #add(%index, 1)
-          #continue compare
+          #if %same { #return #call meta_env_binding_value(%binding) }
         }
-        #if %same { #return #call meta_env_binding_value(%binding) }
       }
       %binding: addr = #load[addr](
-        #lea(base=%binding, idx=0, scale=0, offset=40)
+        #lea(base=%binding, idx=0, scale=0, offset=48)
       )
       #continue bindings
     }
