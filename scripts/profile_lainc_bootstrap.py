@@ -10,8 +10,10 @@ short Markdown summary under build/profiles/.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -19,6 +21,11 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional profiling enhancement
+    psutil = None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +47,83 @@ class Step:
     stdout_log: str
     stderr_log: str
     output_bytes: int | None = None
+    peak_rss_bytes: int | None = None
+    peak_vms_bytes: int | None = None
+    diagnostic_count: int | None = None
+
+
+def read_internal_trace(path: Path) -> dict[str, object] | None:
+    """Summarize the optional seed procedure trace without changing artifacts."""
+    if not path.exists():
+        return None
+    rows: list[dict[str, object]] = []
+    total_calls = 0
+    total_steps = 0
+    meta_calls = 0
+    specialization_calls = 0
+    cache_hits = 0
+    cache_misses = 0
+    cache_seen = False
+    for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+        fields = line.split("\t")
+        if len(fields) != 4:
+            continue
+        kind, name, calls_text, steps_text = fields
+        if kind == "cache":
+            cache_seen = True
+            try:
+                value = int(calls_text)
+            except ValueError:
+                continue
+            if name == "meta_lookup_hits":
+                cache_hits = value
+            elif name == "meta_lookup_misses":
+                cache_misses = value
+            continue
+        if kind != "procedure":
+            continue
+        try:
+            calls = int(calls_text)
+            steps = int(steps_text)
+        except ValueError:
+            continue
+        total_calls += calls
+        total_steps += steps
+        if name.startswith("meta_") or name.startswith("Meta_"):
+            meta_calls += calls
+        if "special" in name or "factory" in name:
+            specialization_calls += calls
+        rows.append({"name": name, "calls": calls, "steps": steps})
+    rows.sort(key=lambda row: int(row["steps"]), reverse=True)
+    return {
+        "file": path.name,
+        "procedure_count": len(rows),
+        "total_calls": total_calls,
+        "total_steps": total_steps,
+        "meta_call_count": meta_calls,
+        "specialization_call_count": specialization_calls,
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+        "cache_instrumented": cache_seen,
+        "top_procedures": rows[:25],
+    }
+
+
+def source_manifest(paths: list[Path]) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for path in paths:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        result.append(
+            {
+                "path": str(path),
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
+    return result
 
 
 def run_step(
@@ -54,6 +138,8 @@ def run_step(
     stderr_path = report_dir / f"{name}.stderr.log"
     print(f"[{name}] START", flush=True)
     started = time.perf_counter()
+    peak_rss = 0
+    peak_vms = 0
     with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open(
         "w", encoding="utf-8"
     ) as stderr_file:
@@ -68,15 +154,57 @@ def run_step(
             text=True,
             env=process_env,
         )
-        while True:
+        process_info = psutil.Process(process.pid) if psutil else None
+        try:
+            while True:
+                try:
+                    if process_info:
+                        try:
+                            memory = process_info.memory_info()
+                            peak_rss = max(peak_rss, memory.rss)
+                            peak_vms = max(peak_vms, memory.vms)
+                        except psutil.Error:
+                            pass
+                    returncode = process.wait(timeout=5)
+                    break
+                except subprocess.TimeoutExpired:
+                    if process_info:
+                        try:
+                            memory = process_info.memory_info()
+                            peak_rss = max(peak_rss, memory.rss)
+                            peak_vms = max(peak_vms, memory.vms)
+                        except psutil.Error:
+                            pass
+                    elapsed = time.perf_counter() - started
+                    print(f"[{name}] running {elapsed:8.1f}s", flush=True)
+        except KeyboardInterrupt:
+            # Ctrl-C should not leave a multi-minute seed compiler orphaned.
+            # This is especially important on Windows, where the child does
+            # not necessarily receive the console interrupt with its parent.
+            process.terminate()
             try:
-                returncode = process.wait(timeout=5)
-                break
+                process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                elapsed = time.perf_counter() - started
-                print(f"[{name}] running {elapsed:8.1f}s", flush=True)
+                process.kill()
+                process.wait()
+            raise
+        if process_info:
+            try:
+                memory = process_info.memory_info()
+                peak_rss = max(peak_rss, memory.rss)
+                peak_vms = max(peak_vms, memory.vms)
+            except psutil.Error:
+                pass
     seconds = time.perf_counter() - started
     output_bytes = output.stat().st_size if output and output.exists() else None
+    diagnostic_count = None
+    try:
+        stderr_text = stderr_path.read_text(encoding="utf-8")
+        match = re.search(r"bootstrap summary .* diagnostics=(\d+)", stderr_text)
+        if match:
+            diagnostic_count = int(match.group(1))
+    except OSError:
+        pass
     print(
         f"[{name}] END rc={returncode} time={seconds:.3f}s"
         + (f" output={output_bytes}B" if output_bytes is not None else ""),
@@ -90,16 +218,43 @@ def run_step(
         stdout_log=stdout_path.name,
         stderr_log=stderr_path.name,
         output_bytes=output_bytes,
+        peak_rss_bytes=peak_rss or None,
+        peak_vms_bytes=peak_vms or None,
+        diagnostic_count=diagnostic_count,
     )
 
 
-def write_reports(report_dir: Path, steps: list[Step], fixed_point: bool | None) -> None:
+def write_reports(
+    report_dir: Path,
+    steps: list[Step],
+    fixed_point: bool | None,
+    sources: list[dict[str, object]],
+    trace: dict[str, object] | None,
+) -> None:
     total = sum(step.seconds for step in steps)
+    budget_threshold = 0.50
+    budget_alerts = [
+        step.name for step in steps
+        if total > 0 and step.seconds / total > budget_threshold
+    ]
+    dominant_step = max(steps, key=lambda step: step.seconds).name if steps else None
     payload = {
         "created_at": datetime.now().astimezone().isoformat(),
         "root": str(ROOT),
         "total_seconds": total,
         "fixed_point": fixed_point,
+        "sources": sources,
+        "trace": trace,
+        "cache": {
+            "hits": trace.get("cache_hits") if trace else None,
+            "misses": trace.get("cache_misses") if trace else None,
+            "instrumented": bool(trace and trace.get("cache_instrumented")),
+        },
+        "budget": {
+            "threshold_share": budget_threshold,
+            "dominant_step": dominant_step,
+            "alerts": budget_alerts,
+        },
         "steps": [asdict(step) for step in steps],
     }
     (report_dir / "profile.json").write_text(
@@ -121,15 +276,18 @@ def write_reports(report_dir: Path, steps: list[Step], fixed_point: bool | None)
         "",
         "## Time distribution",
         "",
-        "| Rank | Step | Seconds | Share | Result | Output |",
-        "| ---: | --- | ---: | ---: | ---: | ---: |",
+        "| Rank | Step | Seconds | Share | Result | Output | Peak RSS | Peak VMS | Diagnostics |",
+        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for rank, step in enumerate(ranked, 1):
         share = (step.seconds / total * 100.0) if total else 0.0
         size = f"{step.output_bytes} B" if step.output_bytes is not None else "-"
+        rss = f"{step.peak_rss_bytes / 1024 / 1024:.1f} MiB" if step.peak_rss_bytes else "-"
+        vms = f"{step.peak_vms_bytes / 1024 / 1024:.1f} MiB" if step.peak_vms_bytes else "-"
+        diagnostics = str(step.diagnostic_count) if step.diagnostic_count is not None else "-"
         lines.append(
             f"| {rank} | `{step.name}` | {step.seconds:.3f} | "
-            f"{share:.1f}% | {step.returncode} | {size} |"
+            f"{share:.1f}% | {step.returncode} | {size} | {rss} | {vms} | {diagnostics} |"
         )
     lines.extend(
         [
@@ -140,6 +298,12 @@ def write_reports(report_dir: Path, steps: list[Step], fixed_point: bool | None)
             f"({compile_seconds / total * 100.0:.1f}% of measured time).",
             f"- Verifier processes consumed {verify_seconds:.3f} s "
             f"({verify_seconds / total * 100.0:.3f}% of measured time).",
+            (
+                f"- Budget alert: `{dominant_step}` exceeds 50% of measured time; "
+                "the next performance task should target this phase."
+                if budget_alerts
+                else "- No single phase exceeds the 50% performance budget."
+            ),
             "- Similar gen2 and gen3 times indicate a stable hot path rather than "
             "one anomalous bootstrap generation.",
             "- The next useful trace is procedure and opcode counts in the seed "
@@ -150,6 +314,25 @@ def write_reports(report_dir: Path, steps: list[Step], fixed_point: bool | None)
             "",
         ]
     )
+    if trace:
+        lines.extend(
+            [
+                "## Internal procedure trace",
+                "",
+                f"- Procedures: {trace['procedure_count']}",
+                f"- Calls: {trace['total_calls']}",
+                f"- Steps: {trace['total_steps']}",
+                f"- Meta calls: {trace['meta_call_count']}",
+                f"- Specialization/factory calls: {trace['specialization_call_count']}",
+                f"- Meta lookup cache hits/misses: {trace['cache_hits']}/{trace['cache_misses']}",
+                "",
+                "| Procedure | Calls | Steps |",
+                "| --- | ---: | ---: |",
+            ]
+        )
+        for row in trace["top_procedures"][:10]:
+            lines.append(f"| `{row['name']}` | {row['calls']} | {row['steps']} |")
+        lines.append("")
     (report_dir / "analysis.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -195,6 +378,8 @@ def main() -> int:
     report_dir.mkdir(parents=True)
     steps: list[Step] = []
     fixed_point: bool | None = None
+    trace_summary: dict[str, object] | None = None
+    sources = source_manifest([args.compiler_artifact, LAINC])
 
     with tempfile.TemporaryDirectory(prefix="lainc-profile-") as directory:
         tmp = Path(directory)
@@ -238,7 +423,9 @@ def main() -> int:
             step = run_step(name, command, report_dir, output, extra_env)
             steps.append(step)
             if step.returncode:
-                write_reports(report_dir, steps, fixed_point)
+                trace_file = report_dir / f"{trace_stage}-internal.tsv" if trace_stage else None
+                trace_summary = read_internal_trace(trace_file) if trace_file else None
+                write_reports(report_dir, steps, fixed_point, sources, trace_summary)
                 print(f"profile: {report_dir}", flush=True)
                 return step.returncode
 
@@ -279,7 +466,9 @@ def main() -> int:
                 if step.returncode:
                     break
 
-    write_reports(report_dir, steps, fixed_point)
+    trace_file = report_dir / f"{trace_stage}-internal.tsv" if trace_stage else None
+    trace_summary = read_internal_trace(trace_file) if trace_file else None
+    write_reports(report_dir, steps, fixed_point, sources, trace_summary)
     print(f"profile: {report_dir}", flush=True)
     if fixed_point is False:
         return 1

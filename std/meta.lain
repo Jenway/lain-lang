@@ -1,0 +1,486 @@
+// Standard Meta data model.
+//
+// This module contains phase-owned values used by compile-time language
+// extensions.  It deliberately does not execute procedures or touch host
+// capabilities; the compiler supplies those through an explicit interpreter
+// boundary.
+
+let memory_model: Module = import("std::memory_model");
+let vector: Module = import("std::core::vec");
+
+@export
+let meta: Module = std::module {
+
+    // Phase values are independent of any compiler AST representation.  They
+    // are the common currency between type factories, elaboration and
+    // compile-time evaluation.
+    @export
+    let ComptimeValue: type = std::struct {
+        type_id: usize,
+        kind: i32,
+        i32_payload: i32,
+        bool_payload: bool,
+        type_payload: usize,
+        module_payload: usize,
+        valid: bool,
+    };
+
+    @export
+    let comptime_i32 = std::func(
+        type_id: usize,
+        value: i32,
+    ) -> ComptimeValue {
+        return ComptimeValue {
+            type_id: type_id,
+            kind: 1,
+            i32_payload: value,
+            bool_payload: false,
+            type_payload: 0,
+            module_payload: 0,
+            valid: true,
+        };
+    };
+
+    @export
+    let comptime_bool = std::func(
+        type_id: usize,
+        value: bool,
+    ) -> ComptimeValue {
+        return ComptimeValue {
+            type_id: type_id,
+            kind: 2,
+            i32_payload: 0,
+            bool_payload: value,
+            type_payload: 0,
+            module_payload: 0,
+            valid: true,
+        };
+    };
+
+    @export
+    let comptime_type = std::func(
+        type_type_id: usize,
+        value: usize,
+    ) -> ComptimeValue {
+        return ComptimeValue {
+            type_id: type_type_id,
+            kind: 3,
+            i32_payload: 0,
+            bool_payload: false,
+            type_payload: value,
+            module_payload: 0,
+            valid: value != 0,
+        };
+    };
+
+    @export
+    let comptime_module = std::func(
+        module_type_id: usize,
+        value: usize,
+    ) -> ComptimeValue {
+        return ComptimeValue {
+            type_id: module_type_id,
+            kind: 4,
+            i32_payload: 0,
+            bool_payload: false,
+            type_payload: 0,
+            module_payload: value,
+            valid: value != 0,
+        };
+    };
+
+    @export
+    let same_comptime_value = std::func(
+        left: &ComptimeValue,
+        right: &ComptimeValue,
+    ) -> bool {
+        if !left.valid || !right.valid { return false; }
+        if left.type_id != right.type_id { return false; }
+        if left.kind != right.kind { return false; }
+        if left.kind == 1 { return left.i32_payload == right.i32_payload; }
+        if left.kind == 2 { return left.bool_payload == right.bool_payload; }
+        if left.kind == 3 { return left.type_payload == right.type_payload; }
+        if left.kind == 4 { return left.module_payload == right.module_payload; }
+        return false;
+    };
+
+    // Nominal type and module values are also phase values.  Their physical
+    // ABI shape is intentionally absent here; lowering chooses that later.
+    @export
+    let TypeValue: type = std::struct {
+        id: usize,
+        kind: i32,
+        argument_start: usize,
+        argument_count: usize,
+        nominal_owner: usize,
+        namespace: usize,
+    };
+
+    @export
+    let ModuleValue: type = std::struct {
+        id: usize,
+        namespace: usize,
+    };
+
+    @export
+    let Builtins: type = std::struct {
+        i32: usize,
+        bool: usize,
+        addr: usize,
+        unit: usize,
+        type: usize,
+        module: usize,
+        callable: usize,
+    };
+
+    // A callable's phase is part of its meta identity.  Keeping this in the
+    // standard model lets every compiler front-end agree on when a value may
+    // run, while the archive layer remains responsible for the actual
+    // interpreter boundary.
+    @export
+    let CallablePhase: type = i32;
+
+    @export
+    let callable_phase_meta = std::func() -> CallablePhase { return 1; };
+
+    @export
+    let callable_phase_comptime = std::func() -> CallablePhase { return 2; };
+
+    @export
+    let callable_phase_runtime = std::func() -> CallablePhase { return 3; };
+
+    @export
+    let callable_phase_syntax = std::func() -> CallablePhase { return 4; };
+
+    @export
+    let callable_phase_backend = std::func() -> CallablePhase { return 5; };
+
+    @export
+    let Meta = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let TypeVector: type = vector.Vec(
+            TypeValue,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+        let TypeArgumentVector: type = vector.Vec(
+            usize,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+        let ModuleVector: type = vector.Vec(
+            ModuleValue,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+        let TypeRegistry: type = std::struct {
+            values: TypeVector,
+            arguments: TypeArgumentVector,
+            modules: ModuleVector,
+            builtins: Builtins,
+        };
+
+        let new_type_registry = std::func() -> TypeRegistry
+            ! {Memory.Allocation.Effect} {
+            let state: TypeRegistry = TypeRegistry {
+                values: TypeVector.new(),
+                arguments: TypeArgumentVector.new(),
+                modules: ModuleVector.new(),
+                builtins: Builtins {
+                    i32: 1,
+                    bool: 2,
+                    addr: 3,
+                    unit: 4,
+                    type: 5,
+                    module: 6,
+                    callable: 7,
+                },
+            };
+            let id: usize = 1;
+            while id <= 7 {
+                state.values.push(TypeValue {
+                    id: id,
+                    kind: 1,
+                    argument_start: 0,
+                    argument_count: 0,
+                    nominal_owner: 0,
+                    namespace: 0,
+                });
+                id = id + 1;
+            }
+            return state;
+        };
+
+        let same_type_arguments = std::func(
+            state: &TypeRegistry,
+            value: &TypeValue,
+            arguments: &TypeArgumentVector,
+        ) -> bool ! {Memory.Bounds.Effect} {
+            if value.argument_count != arguments.length() { return false; }
+            let index: usize = 0;
+            while index < value.argument_count {
+                if *state.arguments.get(value.argument_start + index)
+                    != *arguments.get(index) {
+                    return false;
+                }
+                index = index + 1;
+            }
+            return true;
+        };
+
+        let intern_type = std::func(
+            state: &mut TypeRegistry,
+            kind: i32,
+            owner: usize,
+            namespace: usize,
+            arguments: &TypeArgumentVector,
+        ) -> usize ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let index: usize = 0;
+            while index < state.values.length() {
+                let candidate: &TypeValue = state.values.get(index);
+                if candidate.kind == kind && candidate.nominal_owner == owner
+                    && candidate.namespace == namespace
+                    && same_type_arguments(state, candidate, arguments) {
+                    return candidate.id;
+                }
+                index = index + 1;
+            }
+            let argument_start: usize = state.arguments.length();
+            let argument_index: usize = 0;
+            while argument_index < arguments.length() {
+                state.arguments.push(*arguments.get(argument_index));
+                argument_index = argument_index + 1;
+            }
+            let id: usize = state.values.length() + 1;
+            state.values.push(TypeValue {
+                id: id,
+                kind: kind,
+                argument_start: argument_start,
+                argument_count: arguments.length(),
+                nominal_owner: owner,
+                namespace: namespace,
+            });
+            return id;
+        };
+
+        let get_type = std::func(
+            state: &TypeRegistry,
+            id: usize,
+        ) -> &TypeValue ! {Memory.Bounds.Effect} {
+            if id == 0 { Memory.Bounds.check(0, state.values.length()); }
+            return state.values.get(id - 1);
+        };
+
+        let intern_module = std::func(
+            state: &mut TypeRegistry,
+            id: usize,
+            namespace: usize,
+        ) -> usize ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            if id == 0 { return 0; }
+            let index: usize = 0;
+            while index < state.modules.length() {
+                let candidate: &ModuleValue = state.modules.get(index);
+                if candidate.id == id && candidate.namespace == namespace {
+                    return candidate.id;
+                }
+                index = index + 1;
+            }
+            state.modules.push(ModuleValue {
+                id: id,
+                namespace: namespace,
+            });
+            return id;
+        };
+
+        let get_module = std::func(
+            state: &TypeRegistry,
+            id: usize,
+        ) -> &ModuleValue ! {Memory.Bounds.Effect} {
+            let index: usize = 0;
+            while index < state.modules.length() {
+                let candidate: &ModuleValue = state.modules.get(index);
+                if candidate.id == id { return candidate; }
+                index = index + 1;
+            }
+            Memory.Bounds.check(id, state.modules.length());
+            return state.modules.get(0);
+        };
+
+        let CallableId: type = usize;
+
+        let Callable: type = std::struct {
+            id: CallableId,
+            // Keep the registry record scalar-friendly.  A String value is
+            // physically a pointer to its Vec header; storing that pointer
+            // avoids aggregate record lowering through generic Vec.push.
+            name: addr,
+            procedure: usize,
+            phase: CallablePhase,
+            // Zero means the callable is registered in the ambient registry;
+            // a non-zero value ties it to a MetaProgram descriptor.
+            program: usize,
+        };
+
+        let CallableVector: type = vector.Vec(
+            Callable,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let Registry: type = std::struct {
+            callables: CallableVector,
+        };
+
+        let new_registry = std::func() -> Registry {
+            return Registry {
+                callables: CallableVector.new(),
+            };
+        };
+
+        let same_name = std::func(
+            left: addr,
+            right: addr,
+        ) -> bool {
+            if left == (0 as addr) || right == (0 as addr) { return false; }
+            let left_vec: addr = std::load_bits(64, left + 0);
+            let right_vec: addr = std::load_bits(64, right + 0);
+            if left_vec == (0 as addr) || right_vec == (0 as addr) {
+                return left_vec == right_vec;
+            }
+            let left_length: usize = std::load_bits(64, left_vec + 8);
+            let right_length: usize = std::load_bits(64, right_vec + 8);
+            if left_length != right_length { return false; }
+            let left_data: addr = std::load_bits(64, left_vec + 0) + 24;
+            let right_data: addr = std::load_bits(64, right_vec + 0) + 24;
+            let index: usize = 0;
+            while index < left_length {
+                if std::load_bits(8, left_data + index)
+                    != std::load_bits(8, right_data + index) {
+                    return false;
+                }
+                index = index + 1;
+            }
+            return true;
+        };
+
+        let register_with_phase = std::func(
+            registry: &mut Registry,
+            name: Memory.String,
+            procedure: usize,
+            phase: CallablePhase,
+        ) -> CallableId ! {Memory.Allocation.Effect} {
+            let id: CallableId = registry.callables.length();
+            let callable: Callable = Callable {
+                id: id,
+                name: name as addr,
+                procedure: procedure,
+                phase: phase,
+                program: 0,
+            };
+            registry.callables.push(callable);
+            return id;
+        };
+
+        let register = std::func(
+            registry: &mut Registry,
+            name: Memory.String,
+            procedure: usize,
+        ) -> CallableId ! {Memory.Allocation.Effect} {
+            return register_with_phase(
+                registry,
+                name,
+                procedure,
+                1,
+            );
+        };
+
+        let register_in_program = std::func(
+            registry: &mut Registry,
+            name: Memory.String,
+            procedure: usize,
+            phase: CallablePhase,
+            program: usize,
+        ) -> CallableId ! {Memory.Allocation.Effect} {
+            let id: CallableId = registry.callables.length();
+            let callable: Callable = Callable {
+                id: id,
+                name: name as addr,
+                procedure: procedure,
+                phase: phase,
+                program: program,
+            };
+            registry.callables.push(callable);
+            return id;
+        };
+
+        let find = std::func(
+            registry: &Registry,
+            name: &Memory.String,
+        ) -> CallableId ! {Memory.Bounds.Effect} {
+            let index: usize = 0;
+            while index < registry.callables.length() {
+                let callable: &Callable = registry.callables.get(index);
+                if same_name(callable.name as addr, name as addr) {
+                    return callable.id;
+                }
+                index = index + 1;
+            }
+            // The bootstrap artifact uses zero for usize_max(); returning the
+            // current vector length keeps “not found” distinct from id zero.
+            return registry.callables.length();
+        };
+
+        // Procedure id zero is the first compiler-provided Meta primitive:
+        // identity expansion.  It is intentionally a data-model helper; the
+        // archive Meta layer decides how that id is executed.
+        let register_identity = std::func(
+            registry: &mut Registry,
+        ) -> CallableId ! {Memory.Allocation.Effect} {
+            let name: Memory.String = Memory.String.new();
+            name.append_byte(105);
+            name.append_byte(100);
+            name.append_byte(101);
+            name.append_byte(110);
+            name.append_byte(116);
+            name.append_byte(105);
+            name.append_byte(116);
+            name.append_byte(121);
+            return register_with_phase(
+                registry,
+                name,
+                0,
+                1,
+            );
+        };
+
+        return std::module {
+            @export let TypeRegistry: type = TypeRegistry;
+            @export let TypeArgumentVector: type = TypeArgumentVector;
+            @export let new_type_registry = new_type_registry;
+            @export let intern_type = intern_type;
+            @export let get_type = get_type;
+            @export let intern_module = intern_module;
+            @export let get_module = get_module;
+            @export let CallablePhase: type = CallablePhase;
+            @export let callable_phase_meta = callable_phase_meta;
+            @export let callable_phase_comptime = callable_phase_comptime;
+            @export let callable_phase_runtime = callable_phase_runtime;
+            @export let CallableId: type = CallableId;
+            @export let Callable: type = Callable;
+            @export let Registry: type = Registry;
+            @export let new_registry = new_registry;
+            @export let register_with_phase = register_with_phase;
+            @export let register_in_program = register_in_program;
+            @export let register = register;
+            @export let register_identity = register_identity;
+            @export let find = find;
+        };
+    };
+};

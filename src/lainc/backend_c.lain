@@ -97,6 +97,49 @@ let find_string_end = std::func(
     return result;
 };
 
+// Canonical L1 may keep a deeply nested expression over several physical
+// source lines.  The backend consumes logical instructions, so count only
+// parentheses/brackets here and let backend_compile join such lines before
+// dispatching them to emit_line.
+let expression_delimiters = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> i32 {
+    let depth: i32 = 0;
+    let quoted: i32 = 0;
+    let escaped: i32 = 0;
+    let index: usize = start;
+    while index < end {
+        let byte: i32 = load8(source, index);
+        if escaped == 1 {
+            escaped = 0;
+        } else {
+            if quoted == 1 {
+                if byte == 92 {
+                    escaped = 1;
+                } else {
+                    if byte == 34 { quoted = 0; }
+                }
+            } else {
+                if byte == 34 {
+                    quoted = 1;
+                } else {
+                    if byte == 40 || byte == 91 {
+                        depth = depth + 1;
+                    } else {
+                        if byte == 41 || byte == 93 {
+                            depth = depth - 1;
+                        }
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return depth;
+};
+
 // Copy an expression while removing L1's SSA marker and mapping the pure
 // scalar operators to C helper macros.  Keeping the calls as macros lets the
 // backend remain textual without giving up expression nesting.
@@ -274,10 +317,14 @@ let emit_expr = std::func(
                     }
                 }
             } else {
+                if byte == 10 || byte == 13 {
+                    append(output, 32);
+                } else {
                 if byte == 46 || byte == 45 {
                     append(output, 95);
                 } else {
                     append(output, byte);
+                }
                 }
                 index = index + 1;
             }
@@ -421,11 +468,17 @@ let emit_proc = std::func(
         append_literal(output, "void", 4);
     }
     append_literal(output, ") {\n", 4);
+    append_literal(output, "  if (getenv(\"LAIN_NATIVE_TRACE_PROCS\")) { fprintf(stderr, \"proc: ", 66);
+    append_span(output, source, name_start, open);
+    append(output, 92);
+    append(output, 110);
+    append_literal(output, "\"); fflush(stderr); }\n", 22);
 };
 
-// Emit old-style C declarations in a first pass.  Empty parameter lists keep
-// the declaration compatible with the typed definition emitted in pass two,
-// while allowing calls to procedures that appear later in the L1 module.
+// Emit complete C declarations in a first pass.  The generated definitions
+// use uintptr_t for every L1 argument, so matching prototypes avoid the
+// optimizer-sensitive undefined behavior caused by old-style `proc()`
+// declarations while still allowing calls to procedures emitted later.
 let emit_proc_decl = std::func(
     source: addr,
     start: usize,
@@ -448,6 +501,13 @@ let emit_proc_decl = std::func(
         index = index + 1;
     }
     let open: usize = index;
+    let close: usize = open;
+    while close < end {
+        if load8(source, close) == 41 {
+            break;
+        }
+        close = close + 1;
+    }
     let arrow: usize = open;
     while arrow < end {
         if match_at(source, arrow, end, "->", 2) {
@@ -466,7 +526,122 @@ let emit_proc_decl = std::func(
     } else {
         append_span(output, source, name_start, open);
     }
-    append_literal(output, "();\n", 4);
+    append_literal(output, "(", 1);
+    let cursor: usize = open + 1;
+    let emitted: i32 = 0;
+    while cursor < close {
+        if load8(source, cursor) == 37 {
+            let name_cursor: usize = cursor + 1;
+            let name_end: usize = name_cursor;
+            while name_end < close {
+                let name_byte: i32 = load8(source, name_end);
+                if name_byte == 44 || name_byte == 41 || is_space(name_byte) {
+                    break;
+                }
+                name_end = name_end + 1;
+            }
+            if emitted == 1 {
+                append_literal(output, ", ", 2);
+            }
+            append_literal(output, "uintptr_t ", 10);
+            append_span(output, source, name_cursor, name_end);
+            emitted = 1;
+            cursor = name_end;
+        } else {
+            cursor = cursor + 1;
+        }
+    }
+    if emitted == 0 {
+        append_literal(output, "void", 4);
+    }
+    append_literal(output, ");\n", 3);
+};
+
+// Emit a real C prototype for an L1 extern.  The previous implementation
+// preserved extern lines only as comments, which made a C11 translation unit
+// containing a user call rely on an undeclared function.  Keep the ABI
+// conservative (uintptr_t arguments) just like procedure declarations and
+// normalize Lain's '-'/' .' symbol separators to C identifiers.
+let emit_extern_decl = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let index: usize = start + 7;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    // The canonical form is `#extern #proc ...`; tolerate the compact form
+    // as well and advance past the optional `#proc` marker.
+    if match_at(source, index, end, "#proc", 5) {
+        index = index + 5;
+    }
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    let name_start: usize = index;
+    while index < end {
+        if load8(source, index) == 40 { break; }
+        index = index + 1;
+    }
+    let open: usize = index;
+    let close: usize = open;
+    while close < end {
+        if load8(source, close) == 41 { break; }
+        close = close + 1;
+    }
+    let arrow: usize = close;
+    while arrow < end {
+        if match_at(source, arrow, end, "->", 2) { break; }
+        arrow = arrow + 1;
+    }
+    append_literal(output, "extern ", 7);
+    emit_c_type(source, arrow + 2, end, output);
+    append_literal(output, " ", 1);
+    let name_cursor: usize = name_start;
+    while name_cursor < open {
+        let byte: i32 = load8(source, name_cursor);
+        if byte == 45 || byte == 46 {
+            append(output, 95);
+        } else {
+            append(output, byte);
+        }
+        name_cursor = name_cursor + 1;
+    }
+    append_literal(output, "(", 1);
+    let cursor: usize = open + 1;
+    let emitted: i32 = 0;
+    while cursor < close {
+        if load8(source, cursor) == 37 {
+            let param_start: usize = cursor + 1;
+            let param_end: usize = param_start;
+            while param_end < close {
+                let byte: i32 = load8(source, param_end);
+                if byte == 44 || byte == 41 || is_space(byte) {
+                    break;
+                }
+                param_end = param_end + 1;
+            }
+            if emitted == 1 { append_literal(output, ", ", 2); }
+            append_literal(output, "uintptr_t ", 10);
+            append_span(output, source, param_start, param_end);
+            emitted = 1;
+            cursor = param_end;
+        } else {
+            cursor = cursor + 1;
+        }
+    }
+    if emitted == 0 { append_literal(output, "void", 4); }
+    append_literal(output, ");\n", 3);
 };
 
 let emit_store_line = std::func(
@@ -539,7 +714,18 @@ let emit_store_line = std::func(
         emit_expr(source, comma + 1, end, output);
         append_literal(output, ", ", 2);
     }
-    emit_expr(source, value_start, comma, output);
+    let value_expr_start: usize = value_start;
+    let value_expr_end: usize = comma;
+    // The L1 verifier requires an explicit truncation for an i32-to-i8
+    // store.  The C macro already performs the same narrowing conversion, so
+    // strip the wrapper before handing the expression to the C emitter.
+    if match_at(source, value_start, comma, "#trunc[#bits<8>](", 17) {
+        value_expr_start = value_start + 17;
+        if comma > value_expr_start && load8(source, comma - 1) == 41 {
+            value_expr_end = comma - 1;
+        }
+    }
+    emit_expr(source, value_expr_start, value_expr_end, output);
     append_literal(output, ");\n", 3);
 };
 
@@ -565,9 +751,7 @@ let emit_line = std::func(
         return;
     }
     if match_at(source, index, end, "#extern", 7) {
-        append_literal(output, "/* ", 3);
-        append_span(output, source, index, end);
-        append_literal(output, " */\n", 4);
+        emit_extern_decl(source, index, end, output);
         return;
     }
     if match_at(source, index, end, "} else {", 8) {
@@ -621,7 +805,20 @@ let emit_line = std::func(
             }
             equals = equals + 1;
         }
-        append_literal(output, "  int64_t ", 10);
+        append_literal(output, "  ", 2);
+        let type_start: usize = name_end;
+        while type_start < equals {
+            if is_space(load8(source, type_start)) {
+                type_start = type_start + 1;
+            } else {
+                break;
+            }
+        }
+        if type_start < equals && load8(source, type_start) == 58 {
+            type_start = type_start + 1;
+        }
+        emit_c_type(source, type_start, equals, output);
+        append_literal(output, " ", 1);
         append_span(output, source, name, name_end);
         append_literal(output, "= ", 2);
         if equals < end {
@@ -734,6 +931,7 @@ let backend_compile = std::func() -> i32 {
     std::store_bits(64, output, 0);
     append_literal(output, "#include <stdint.h>\n#include <stddef.h>\n", 40);
     append_literal(output, "#include <stdlib.h>\n", 20);
+    append_literal(output, "#include <stdio.h>\n", 19);
     append_literal(output, "static uintptr_t base, idx, scale, offset;\n", 43);
     append_literal(output, "#define L1_load8(p) (*(uint8_t*)(uintptr_t)(p))\n", 48);
     append_literal(output, "#define L1_load32(p) (*(uint32_t*)(uintptr_t)(p))\n", 50);
@@ -743,6 +941,7 @@ let backend_compile = std::func() -> i32 {
     append_literal(output, "#define L1_store64(p,v) (*(uint64_t*)(uintptr_t)(p)=(uint64_t)(v))\n", 67);
     append_literal(output, "#define L1_lea(base,idx,scale,offset) ((uintptr_t)(base)+(uintptr_t)(idx)*(uintptr_t)(scale)+(intptr_t)(offset))\n", 113);
     append_literal(output, "extern uintptr_t bootstrap_allocate_pages(uint64_t);\n", 53);
+    append_literal(output, "extern void bootstrap_release_pages(uintptr_t);\n", 48);
     append_literal(output, "extern void bootstrap_artifact_begin(void);\n", 44);
     append_literal(output, "extern void bootstrap_artifact_write_byte(uint32_t);\n", 53);
     append_literal(output, "extern void bootstrap_artifact_write_span(uintptr_t, uint64_t);\n", 64);
@@ -765,6 +964,9 @@ let backend_compile = std::func() -> i32 {
             if match_at(input_data, declaration_start, declaration_index, "#proc", 5) {
                 emit_proc_decl(input_data, declaration_start, declaration_index, output);
             }
+            if match_at(input_data, declaration_start, declaration_index, "#extern", 7) {
+                emit_extern_decl(input_data, declaration_start, declaration_index, output);
+            }
             declaration_start = declaration_index + 1;
         }
         declaration_index = declaration_index + 1;
@@ -773,13 +975,27 @@ let backend_compile = std::func() -> i32 {
         if match_at(input_data, declaration_start, input_length, "#proc", 5) {
             emit_proc_decl(input_data, declaration_start, input_length, output);
         }
+        if match_at(input_data, declaration_start, input_length, "#extern", 7) {
+            emit_extern_decl(input_data, declaration_start, input_length, output);
+        }
     }
     let line_start: usize = 0;
+    let segment_start: usize = 0;
+    let logical_depth: i32 = 0;
     let index: usize = 0;
     while index < input_length {
         if load8(input_data, index) == 10 {
-            emit_line(input_data, line_start, index, output);
-            line_start = index + 1;
+            logical_depth = logical_depth + expression_delimiters(
+                input_data,
+                segment_start,
+                index,
+            );
+            segment_start = index + 1;
+            if logical_depth <= 0 {
+                emit_line(input_data, line_start, index, output);
+                line_start = index + 1;
+                logical_depth = 0;
+            }
         }
         index = index + 1;
     }
