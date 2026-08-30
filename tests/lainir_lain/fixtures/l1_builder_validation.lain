@@ -1,0 +1,66 @@
+let memory_model: Module = import("std::memory_model");
+let arena: Module = import("std::core::arena_min");
+let bounds: Module = import("std::bounds");
+let l1_package: Module = import("packages::lain::compiler::l1_ir");
+let builder_package: Module =
+    import("packages::lain::compiler::l1_unit_builder");
+
+let memory: Module = memory_model.Model(
+    arena.arena_min.Policy,
+    bounds.bounds.Unchecked,
+);
+let L1: Module = l1_package.l1_ir.Model(memory);
+let Builder: Module = builder_package.l1_builder.Builder(memory);
+
+let main = std::func() -> i32 {
+    let unit: L1.Unit = Builder.new();
+    let i32_type: L1.TypeId = L1.add_type(
+        &mut unit,
+        L1.Type { kind: 1, bit_width: 32 },
+    );
+    let i64_type: L1.TypeId = L1.add_type(
+        &mut unit,
+        L1.Type { kind: 1, bit_width: 64 },
+    );
+    let region: L1.RegionId = Builder.begin_region(&mut unit);
+    let left: L1.ExprId = Builder.i32_literal(&mut unit, i32_type, 40);
+    let right: L1.ExprId = Builder.i32_literal(&mut unit, i64_type, 2);
+
+    // A binary expression cannot silently combine incompatible physical
+    // widths.  The builder returns the dynamic L1 invalid-id sentinel.
+    let bad_binary: L1.ExprId = Builder.binary(
+        &mut unit,
+        3,
+        i32_type,
+        left,
+        right,
+    );
+    if bad_binary != std::usize_max() { return 101; }
+
+    let procedure: L1.ProcedureId = Builder.add_procedure(
+        &mut unit,
+        memory.String.new(),
+        i32_type,
+        region,
+        false,
+    );
+    let call: L1.ExprId = Builder.call(&mut unit, i32_type, procedure);
+    Builder.append_call_argument(&mut unit, call, left);
+    if unit.expressions.get(call).arguments.length() != 0 {
+        return 102;
+    }
+    if Builder.append_return(&mut unit, region, bad_binary)
+        != std::usize_max() {
+        return 103;
+    }
+    if Builder.add_procedure(
+        &mut unit,
+        memory.String.new(),
+        i32_type,
+        99,
+        false,
+    ) != std::usize_max() {
+        return 104;
+    }
+    return 0;
+};

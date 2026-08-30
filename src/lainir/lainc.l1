@@ -7966,6 +7966,15 @@
     #call bootstrap.artifact-write-literal("compiler_compile")
     #return
   }
+  // `compiler_compile_library` is the multi-source archive entry.  It must
+  // survive the frozen compiler's first lowering unchanged so the next
+  // generation can compile the complete std/archive closure.
+  #if #call program_name_matches_text(
+    %source, %function, "compiler_compile_library", 24
+  ) {
+    #call bootstrap.artifact-write-literal("compiler_compile_library")
+    #return
+  }
   // External declarations carrying @foreign link_name use that name as the
   // extern label, so calls resolve through the host capability table.
   // The link slot is only consulted for externals; other functions never
@@ -11010,8 +11019,53 @@
   )
   #let %comma2: addr = #call raw_node_next(%address_end)
   #let %value: addr = #call raw_node_next(%comma2)
-  #call bootstrap.artifact-write-literal("#store ")
-  #call program_write_value_expression(%source, %function, %value)
+  #let %width_result: addr = #call program_parse_decimal(
+    %source, %width_node
+  )
+  #let %width: i64 = #call program_result_value(%width_result)
+  // A 64-bit store may carry an address value (the source language uses
+  // store_bits(64, ...) for pointer fields).  Preserve that physical kind;
+  // only integer values use the requested bits width.
+  #let %value_type: addr = #call program_param_type_for_field(
+    %source, %function, %value
+  )
+  #if #call raw_is_nil(%value_type) {
+    %value_type: addr = #call program_local_type_for_field(
+      %source, %function, %value
+    )
+  }
+  #let %value_is_addr: i1 = 0
+  #if #eq(#call raw_is_nil(%value_type), 0) {
+    %value_is_addr: i1 = #call program_type_is_address(
+      %source, %value_type
+    )
+  }
+  // Keep this ABI-critical helper stable across self-hosting generations.
+  // The parameter-type lookup walks the parsed declaration tree and can lose
+  // the physical kind after the first generated compiler pass.  The helper's
+  // source name is stable, and its third argument is deliberately an address.
+  #if #call program_name_matches_text(
+    %source, %function, "sb_store_addr_at", 16
+  ) {
+    %value_is_addr: i1 = 1
+  }
+  #if %value_is_addr {
+    #call bootstrap.artifact-write-literal("#store[addr] ")
+  } else {
+    #call bootstrap.artifact-write-literal("#store[#bits<")
+    #call meta_write_decimal(%width)
+    #call bootstrap.artifact-write-literal(">] ")
+    #if #eq(%width, 8) {
+      #call bootstrap.artifact-write-literal("#trunc[#bits<8>](")
+      #call program_write_value_expression(%source, %function, %value)
+      #call bootstrap.artifact-write-byte(41)
+    } else {
+      #call program_write_value_expression(%source, %function, %value)
+    }
+  }
+  #if %value_is_addr {
+    #call program_write_value_expression(%source, %function, %value)
+  }
   #call bootstrap.artifact-write-literal(", ")
   #call program_write_value_expression(%source, %function, %address)
   #return
@@ -14312,6 +14366,31 @@
 ) -> #unit {
   #let %body: addr = #call program_function_body(%function)
   #let %first: addr = #call raw_node_first(%body)
+  // The single-expression shortcut is valid only when the expression is
+  // genuinely the entire body.  A multi-statement body whose first statement
+  // is a call must go through program_write_block; otherwise the shortcut
+  // emits the first call and returns before visiting the remaining siblings.
+  #let %single_expression: i1 = 1
+  #if #call raw_is_nil(%first) {
+    %single_expression: i1 = 0
+  } else {
+    #let %first_end: addr = #call program_value_expression_end(
+      %source, %first
+    )
+    #let %first_tail: addr = #call raw_node_next(%first_end)
+    #if #call raw_is_nil(%first_tail) {
+    } else {
+      #if #call program_is_semicolon(%source, %first_tail) {
+        #if #call raw_is_nil(#call raw_node_next(%first_tail)) {
+        } else {
+          %single_expression: i1 = 0
+        }
+      } else {
+        %single_expression: i1 = 0
+      }
+    }
+  }
+  #if %single_expression {
   #if #eq(#call meta_atom_equal(%source, %first, "let", 3), 0) {
     #if #eq(#call meta_atom_equal(%source, %first, "while", 5), 0) {
       #if #eq(#call meta_atom_equal(%source, %first, "return", 6), 0) {
@@ -14344,6 +14423,7 @@
         }
       }
     }
+  }
   }
   #call program_write_block(%source, %function, %body)
   #return

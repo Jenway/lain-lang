@@ -8,7 +8,159 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* seed_run: bare interpreter without capabilities (historical l1i). */
+#ifdef _WIN32
+/* Declare the two allocator entry points locally.  Including windows.h here
+ * collides with the LAIN-IR core's EXPR_EVAL enum on current Windows SDKs. */
+#define MEM_COMMIT 0x00001000UL
+#define MEM_RESERVE 0x00002000UL
+#define MEM_RELEASE 0x00008000UL
+#define PAGE_READWRITE 0x04UL
+extern __declspec(dllimport) void *__stdcall VirtualAlloc(
+    void *, size_t, unsigned long, unsigned long);
+extern __declspec(dllimport) int __stdcall VirtualFree(
+    void *, size_t, unsigned long);
+#endif
+
+/* seed_run: interpreter with the minimal allocator needed by generated
+ * self-hosting compiler artifacts.  Other host capabilities remain opt-in;
+ * this keeps ordinary programs deterministic while allowing archive products
+ * to execute their in-process data-model allocations. */
+typedef struct {
+  struct {
+    void *pointer;
+    int virtual_alloc;
+    size_t size;
+  } *blocks;
+  size_t count;
+  size_t capacity;
+  uint64_t bytes;
+  uint64_t max_bytes;
+  int trace_allocations;
+} SeedAllocator;
+
+static void seed_allocator_release(SeedAllocator *allocator) {
+  size_t index;
+  if (!allocator) return;
+  for (index = 0; index < allocator->count; ++index) {
+#ifdef _WIN32
+    if (allocator->blocks[index].virtual_alloc)
+      VirtualFree(allocator->blocks[index].pointer, 0, MEM_RELEASE);
+    else
+      free(allocator->blocks[index].pointer);
+#else
+    free(allocator->blocks[index].pointer);
+#endif
+  }
+  free(allocator->blocks);
+  allocator->blocks = NULL;
+  allocator->count = 0;
+  allocator->capacity = 0;
+  allocator->bytes = 0;
+}
+
+static LainirRunStatus seed_allocate_pages(
+    const LainirValue *args,
+    uint32_t arg_count,
+    LainirValue *result_out,
+    const char **error_out,
+    void *user_data) {
+  SeedAllocator *allocator = user_data;
+  if (arg_count != 1 || args[0].kind != LAINIR_VALUE_BITS) {
+    if (error_out) *error_out = "bootstrap.allocate-pages expects one integer";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  size_t size = (size_t)args[0].as.bits;
+  int virtual_alloc = 0;
+  if (allocator->max_bytes &&
+      (uint64_t)size > allocator->max_bytes - allocator->bytes) {
+    if (error_out) *error_out = "bootstrap.allocate-pages exceeded run allocation budget";
+    return LAINIR_RUN_TRAP;
+  }
+  void *memory;
+#ifdef _WIN32
+  if (size >= 65536) {
+    memory = VirtualAlloc(NULL, size ? size : 1,
+                          MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    virtual_alloc = 1;
+  } else {
+    memory = calloc(1, size ? size : 1);
+  }
+#else
+  memory = calloc(1, size ? size : 1);
+#endif
+  if (!memory) {
+    if (error_out) *error_out = "bootstrap.allocate-pages failed";
+    return LAINIR_RUN_TRAP;
+  }
+  if (allocator->count == allocator->capacity) {
+    size_t next_capacity = allocator->capacity ? allocator->capacity * 2 : 64;
+    void *next = realloc(allocator->blocks,
+                         next_capacity * sizeof(*allocator->blocks));
+    if (!next) {
+#ifdef _WIN32
+      if (virtual_alloc)
+        VirtualFree(memory, 0, MEM_RELEASE);
+      else
+        free(memory);
+#else
+      free(memory);
+#endif
+      if (error_out) *error_out = "bootstrap.allocate-pages tracking failed";
+      return LAINIR_RUN_TRAP;
+    }
+    allocator->blocks = next;
+    allocator->capacity = next_capacity;
+  }
+  allocator->blocks[allocator->count].pointer = memory;
+  allocator->blocks[allocator->count].virtual_alloc = virtual_alloc;
+  allocator->blocks[allocator->count].size = size;
+  allocator->count++;
+  allocator->bytes += (uint64_t)size;
+  if (allocator->trace_allocations &&
+      (allocator->count <= 16 || (allocator->count % 1000) == 0)) {
+    fprintf(stderr, "seed alloc count=%zu size=%zu total=%llu\n",
+            allocator->count, size, (unsigned long long)allocator->bytes);
+  }
+  *result_out = lainir_value_addr(memory);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus seed_release_pages(
+    const LainirValue *args,
+    uint32_t arg_count,
+    LainirValue *result_out,
+    const char **error_out,
+    void *user_data) {
+  SeedAllocator *allocator = user_data;
+  if (arg_count != 1 || args[0].kind != LAINIR_VALUE_ADDR) {
+    if (error_out) *error_out = "bootstrap.release-pages expects one address";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  for (size_t index = 0; index < allocator->count; ++index) {
+    if (allocator->blocks[index].pointer == args[0].as.addr) {
+#ifdef _WIN32
+      if (allocator->blocks[index].virtual_alloc) {
+        if (!VirtualFree(args[0].as.addr, 0, MEM_RELEASE)) {
+          if (error_out) *error_out = "bootstrap.release-pages failed";
+          return LAINIR_RUN_BAD_CALL;
+        }
+      } else {
+        free(args[0].as.addr);
+      }
+#else
+      free(args[0].as.addr);
+#endif
+      /* Keep the tracking table compact.  Swapping with the final entry also
+       * makes a second release reliably report an unknown address. */
+      allocator->bytes -= (uint64_t)allocator->blocks[index].size;
+      allocator->blocks[index] = allocator->blocks[--allocator->count];
+      *result_out = lainir_value_unit();
+      return LAINIR_RUN_OK;
+    }
+  }
+  if (error_out) *error_out = "bootstrap.release-pages received an unknown address";
+  return LAINIR_RUN_BAD_CALL;
+}
 static int parse_arg_value(const char *text, LainirValue *out) {
   char *end = NULL;
   unsigned long long v = strtoull(text, &end, 10);
@@ -41,6 +193,7 @@ static int seed_run(int argc, char **argv) {
   const char *error = NULL;
   LainirRunStatus status;
   LainirCapabilityTable *caps = NULL;
+  SeedAllocator allocator = {0};
   L1Diagnostic diagnostic;
 
   while (input_index < argc && argv[input_index][0] == '-') {
@@ -102,13 +255,21 @@ static int seed_run(int argc, char **argv) {
   request.args = args;
   request.arg_count = argc > input_index + 2 ?
       (uint32_t)(argc - input_index - 2) : 0;
+  caps = lainir_caps_new();
+  allocator.max_bytes = max_alloc_bytes;
+  allocator.trace_allocations = getenv("LAINIR_TRACE_ALLOC") &&
+      getenv("LAINIR_TRACE_ALLOC")[0] == '1';
+  if (!caps || !lainir_caps_add(caps, "bootstrap.allocate-pages",
+                                seed_allocate_pages, &allocator) ||
+      !lainir_caps_add(caps, "bootstrap.release-pages",
+                       seed_release_pages, &allocator)) {
+    seed_allocator_release(&allocator);
+    lainir_caps_free(caps);
+    free(args);
+    lainir_free_subroutines(module);
+    return 1;
+  }
   if (max_steps || max_call_depth || max_alloc_bytes) {
-    caps = lainir_caps_new();
-    if (!caps) {
-      free(args);
-      lainir_free_subroutines(module);
-      return 1;
-    }
     lainir_caps_set_limits(caps, max_steps, (uint32_t)max_call_depth,
                            max_alloc_bytes);
   }
@@ -120,29 +281,34 @@ static int seed_run(int argc, char **argv) {
   lainir_free_subroutines(module);
 
   if (status != LAINIR_RUN_OK) {
+    seed_allocator_release(&allocator);
     fprintf(stderr, "lainir interpreter error: %s\n", error ? error : "unknown error");
     return 1;
   }
 
+  int exit_code = 0;
   switch (result.kind) {
   case LAINIR_VALUE_UNIT:
     printf("unit\n");
-    return 0;
+    break;
   case LAINIR_VALUE_BITS:
     printf("%llu\n", (unsigned long long)result.as.bits);
-    return 0;
+    break;
   case LAINIR_VALUE_STRING:
     printf("%s\n", result.as.string ? result.as.string : "");
-    return 0;
+    break;
   case LAINIR_VALUE_ADDR:
     printf("%p\n", result.as.addr);
-    return 0;
+    break;
   case LAINIR_VALUE_FUNC:
     printf("<func %s>\n", result.as.func ? result.as.func->name : "?");
-    return 0;
+    break;
   default:
-    return 1;
+    exit_code = 1;
+    break;
   }
+  seed_allocator_release(&allocator);
+  return exit_code;
 }
 
 int main(int argc, char **argv) {

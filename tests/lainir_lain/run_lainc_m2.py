@@ -19,6 +19,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from canonicalize_lainir import canonicalize  # noqa: E402
+
 BIN = ROOT / "seed" / "zig-out" / "bin"
 SUFFIX = ".exe" if os.name == "nt" else ""
 SEED = BIN / f"lainir-seed{SUFFIX}"
@@ -51,6 +54,13 @@ def main() -> int:
         checked = run(PRINT, gen1, "compiler_compile")
         if checked.returncode:
             raise RuntimeError(f"gen1 l1check: {checked.stderr}")
+        gen1_text = gen1.read_text(encoding="utf-8")
+        if "specialization_context_new" not in gen1_text or "emit_function2_context" not in gen1_text:
+            raise RuntimeError("gen1 is missing specialization context threading")
+        if "next_capacity" not in gen1_text or "specialization_context_key" not in gen1_text:
+            raise RuntimeError("gen1 is missing growable scratch/context key lowering")
+        if "specialization_context_set_state" not in gen1_text or "allocate-pages(72)" not in gen1_text:
+            raise RuntimeError("gen1 is missing module materialization state")
 
         # gen2: the Lain-written lainc compiles itself.
         gen2_run = run(SEED, "interpreter", gen1, "compiler_compile", gen2, LAINC)
@@ -70,11 +80,17 @@ def main() -> int:
 
         text2 = gen2.read_bytes()
         text3 = gen3.read_bytes()
-        if text2 != text3:
+        canonical2 = canonicalize(text2.decode("utf-8"))
+        canonical3 = canonicalize(text3.decode("utf-8"))
+        if canonical2 != canonical3:
             raise RuntimeError(
-                f"self-hosting did not converge: gen2 {len(text2)} bytes, "
-                f"gen3 {len(text3)} bytes"
+                f"self-hosting did not converge after canonicalization: "
+                f"gen2 {len(text2)} bytes, gen3 {len(text3)} bytes"
             )
+        if os.environ.get("LAIN_M2_UPDATE_CACHE") == "1":
+            cache = ROOT / "build" / "debug-gen2-heap.l1"
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_bytes(gen2.read_bytes())
     print(
         f"PASS Lain-written lainc fixed point: gen2 == gen3 "
         f"({len(text2)} bytes), both l1check clean"

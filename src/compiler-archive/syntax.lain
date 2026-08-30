@@ -62,10 +62,11 @@ let syntax: Module = std::module {
         };
 
         let new_store = std::func() -> Store {
-            return Store {
+            let result: Store = Store {
                 units: UnitVector.new(),
                 next_hygiene: 1,
             };
+            return result;
         };
 
         let invalid_node = std::func() -> NodeId {
@@ -246,6 +247,27 @@ let syntax: Module = std::module {
             return store.units.get(unit).nodes.get(id);
         };
 
+        // Keep the Unit root accessor explicit.  The bootstrap compiler's
+        // generic nested-record field lowering currently addresses the first
+        // field of Unit for `unit.root`; the physical Unit layout places root
+        // after the source and node handles.  The source compiler recognizes
+        // this accessor and emits the concrete offset.
+        let unit_root = std::func(
+            store: &Store,
+            unit: UnitId,
+        ) -> NodeId ! {Memory.Bounds.Effect} {
+            return store.units.get(unit).root;
+        };
+
+        let valid_node = std::func(
+            store: &Store,
+            unit: UnitId,
+            id: NodeId,
+        ) -> bool {
+            if unit >= store.units.length() { return false; }
+            return id < store.units.get(unit).nodes.length();
+        };
+
         let node_mut = std::func(
             store: &mut Store,
             unit: UnitId,
@@ -374,6 +396,21 @@ let syntax: Module = std::module {
             return result;
         };
 
+        let node_span_start = std::func(
+            store: &Store,
+            unit_id: UnitId,
+            node_id: NodeId,
+        ) -> usize {
+            return node(store, unit_id, node_id).span.start;
+        };
+        let node_span_end = std::func(
+            store: &Store,
+            unit_id: UnitId,
+            node_id: NodeId,
+        ) -> usize {
+            return node(store, unit_id, node_id).span.end;
+        };
+
         return std::module {
             @export let NodeId: type = NodeId;
             @export let UnitId: type = UnitId;
@@ -387,6 +424,8 @@ let syntax: Module = std::module {
             @export let new_store = new_store;
             @export let parse = parse;
             @export let node = node;
+            @export let unit_root = unit_root;
+            @export let valid_node = valid_node;
             @export let node_mut = node_mut;
             @export let unit_mut = unit_mut;
             @export let add_node = add_node;
@@ -397,6 +436,8 @@ let syntax: Module = std::module {
             @export let next_significant = next_significant;
             @export let copy_token_text = copy_token_text;
             @export let token_i32 = token_i32;
+            @export let node_span_start = node_span_start;
+            @export let node_span_end = node_span_end;
         };
     };
 };

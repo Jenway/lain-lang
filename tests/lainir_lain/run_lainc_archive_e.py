@@ -23,6 +23,15 @@ PRINT = BIN / f"lainir-print{SUFFIX}"
 FROZEN = ROOT / "src" / "lainir" / "lainc.l1"
 LAINC = ROOT / "src" / "lainc" / "lainc.lain"
 ARCHIVE = ROOT / "src" / "compiler-archive"
+STD = (
+    ROOT / "std" / "memory_model.lain",
+    ROOT / "std" / "allocation.lain",
+    ROOT / "std" / "bounds.lain",
+    ROOT / "std" / "effect.lain",
+    ROOT / "std" / "core" / "vec.lain",
+    ROOT / "std" / "core" / "string.lain",
+    ROOT / "std" / "core" / "memory.lain",
+)
 
 
 def run(*arguments: Path | str) -> subprocess.CompletedProcess[str]:
@@ -59,6 +68,7 @@ def main() -> int:
         out = tmp / "chain.l1"
         res = run(
             SEED, "interpreter", gen2, "compiler_compile_library", out,
+            *STD,
             ARCHIVE / "tokenizer.lain", ARCHIVE / "syntax.lain", entry,
         )
         if res.returncode:

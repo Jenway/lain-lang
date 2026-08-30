@@ -14,6 +14,18 @@ L1ExportName *g_declared_module_names_head = NULL;
 L1ExportName *g_declared_signature_names_head = NULL;
 int g_has_explicit_exports = 0;
 
+/*
+ * infer_expr_type() is used by verifier and emitter as a query.  The
+ * synthesized physical types it returns are not owned by either caller, so
+ * allocating a fresh L1Type for every query turns a large compile into an
+ * unbounded heap/address-space growth pattern.  These three shapes cover all
+ * synthesized types in the current IR; parsed and procedure-owned types
+ * remain ordinary allocations.
+ */
+static L1Type g_inferred_bits64 = {TY_BITS, 64};
+static L1Type g_inferred_bits1 = {TY_BITS, 1};
+static L1Type g_inferred_addr64 = {TY_ADDR, 64};
+
 static void lainir_free_block_list(L1Block *block);
 
 static void lainir_free_expr(L1Expr *expr) {
@@ -250,7 +262,7 @@ L1Type *infer_expr_type(L1Expr *expr) {
   case EXPR_VAR:
     return expr->data.var.ty;
   case EXPR_CONST:
-    return lainir_new_type(TY_BITS, 64);
+    return &g_inferred_bits64;
   case EXPR_LOAD:
     return expr->data.load.ty;
   case EXPR_ADD:
@@ -276,7 +288,7 @@ L1Type *infer_expr_type(L1Expr *expr) {
   case EXPR_UGE:
   case EXPR_FEQ:
   case EXPR_FLT:
-    return lainir_new_type(TY_BITS, 1);
+    return &g_inferred_bits1;
   case EXPR_STRING:
     /* A string literal denotes the address of immutable backing storage. */
     return expr->data.str_val.ty ? expr->data.str_val.ty
@@ -294,9 +306,9 @@ L1Type *infer_expr_type(L1Expr *expr) {
   case EXPR_LEA:
   case EXPR_INT2PTR:
   case EXPR_PROC_ADDR:
-    return lainir_new_type(TY_ADDR, 64);
+    return &g_inferred_addr64;
   case EXPR_PTR2INT:
-    return lainir_new_type(TY_BITS, 64);
+    return &g_inferred_bits64;
   case EXPR_CALL_INDIRECT:
     return expr->data.call_indirect.ret_ty;
   case EXPR_ZEXT:
@@ -312,7 +324,7 @@ L1Type *infer_expr_type(L1Expr *expr) {
   case EXPR_PRIMITIVE:
     return expr->data.primitive.result_ty;
   default:
-    return lainir_new_type(TY_BITS, 64);
+    return &g_inferred_bits64;
   }
 }
 

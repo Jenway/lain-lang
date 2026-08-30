@@ -1,0 +1,120 @@
+// std/generic.lain
+//
+// Generic parameter policy values.  The token helpers are deliberately
+// deterministic and serializable; a compiler may use them as the seed of a
+// larger M3 SpecializationKey without exposing process addresses.
+
+@export
+let generic: Module = std::module {
+    @export
+    let ParameterKind: type = i32;
+
+    @export
+    let TypeParameter: ParameterKind = 1;
+
+    @export
+    let ValueParameter: ParameterKind = 2;
+
+    @export
+    let ModuleParameter: ParameterKind = 3;
+
+    @export
+    let EffectParameter: ParameterKind = 4;
+
+    @export
+    let Constraint: type = std::struct {
+        kind: ParameterKind,
+        required: bool,
+        bound: usize,
+    };
+
+    @export
+    let SpecializationKey: type = std::struct {
+        source_id: usize,
+        type_argument: usize,
+        value_argument: usize,
+        policy: usize,
+        environment: usize,
+        target: usize,
+        backend: usize,
+    };
+
+    @export
+    let valid_parameter_kind = std::func(kind: ParameterKind) -> bool {
+        if kind < 1 { return false; }
+        if kind > 4 { return false; }
+        return true;
+    };
+
+    @export
+    let default_type_argument = std::func(argument: usize) -> usize {
+        if argument == 0 { return 1; }
+        return argument;
+    };
+
+    @export
+    let shadowing_allowed = std::func(depth: usize, explicit: bool) -> bool {
+        if explicit { return true; }
+        return depth == 0;
+    };
+
+    // A bounded mixed-radix encoding.  Inputs are facts/ids, not addresses;
+    // equal requests therefore produce equal tokens across process restarts.
+    @export
+    let specialization_token = std::func(
+        source_id: usize,
+        type_argument: usize,
+        value_argument: usize,
+        policy: usize,
+    ) -> usize {
+        return (((source_id * 257) + type_argument) * 257 + value_argument)
+            * 17 + policy;
+    };
+
+    // Full M3 key seed: source identity, arguments, outer environment,
+    // target and backend version all participate.  The encoding is pure
+    // integer arithmetic, so it is stable across process restarts.
+    @export
+    let specialization_key_token = std::func(
+        source_id: usize,
+        type_argument: usize,
+        value_argument: usize,
+        policy: usize,
+        environment: usize,
+        target: usize,
+        backend: usize,
+    ) -> usize {
+        let base: usize = generic.specialization_token(
+            source_id,
+            type_argument,
+            value_argument,
+            policy,
+        );
+        return (((base * 257) + environment) * 257 + target) * 257 + backend;
+    };
+
+    @export
+    let key_component_changed = std::func(
+        left: usize,
+        right: usize,
+    ) -> bool {
+        return left != right;
+    };
+
+    @export
+    let same_specialization = std::func(
+        left: usize,
+        right: usize,
+    ) -> bool {
+        return left == right;
+    };
+
+    @export
+    let recursion_allowed = std::func(
+        remaining: usize,
+        request_cost: usize,
+    ) -> bool {
+        if request_cost == 0 { return false; }
+        return remaining >= request_cost;
+    };
+};

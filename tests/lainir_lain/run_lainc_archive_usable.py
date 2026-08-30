@@ -22,6 +22,7 @@ CHECK = BIN / f"lainir-print{SUFFIX}"
 FROZEN = ROOT / "src" / "lainir" / "lainc.l1"
 LAINC = ROOT / "src" / "lainc" / "lainc.lain"
 FIXTURE = ROOT / "tests" / "lainir_lain" / "fixtures" / "compiler_api_compile_empty.lain"
+FIXTURE_NONEMPTY = ROOT / "tests" / "lainir_lain" / "fixtures" / "compiler_api_compile_nonempty.lain"
 # The archive compiler expects dependency-first input.  Alphabetical order
 # places compiler_core before its factories and makes specialization both
 # incorrect and dramatically slower.
@@ -59,6 +60,7 @@ STD = (
     ROOT / "std" / "allocation.lain",
     ROOT / "std" / "bounds.lain",
     ROOT / "std" / "effect.lain",
+    ROOT / "std" / "meta.lain",
     ROOT / "std" / "core" / "vec.lain",
     ROOT / "std" / "core" / "string.lain",
     ROOT / "std" / "core" / "arena_min.lain",
@@ -88,12 +90,18 @@ def main() -> int:
         gen1 = temporary / "gen1.l1"
         gen2 = temporary / "gen2.l1"
         product = temporary / "compiler-api-empty.l1"
+        product_nonempty = temporary / "compiler-api-nonempty.l1"
 
         require(run(SEED, FROZEN, "compiler_compile", gen1, LAINC), "build gen1")
         require(
             run(SEED, "interpreter", gen1, "compiler_compile", gen2, LAINC),
             "build gen2",
         )
+        if gen2.stat().st_size < 1_000:
+            raise RuntimeError(
+                "build gen2 produced only bootstrap externs; seed interpreter "
+                "did not provide source/artifact capabilities to compiler_compile"
+            )
         require(
             run(
                 SEED,
@@ -124,7 +132,32 @@ def main() -> int:
                 f"archive api.compile(empty) returned {executed.stdout.strip()!r}"
             )
 
-    print("PASS src/lainc produces and executes a real archive api.compile")
+        # A non-empty source exercises the SourceWorkspace constructor and
+        # the first real compiler pipeline call.  Keep this beside the empty
+        # smoke so a verifier-only stub cannot regress into apparent success.
+        require(
+            run(
+                SEED,
+                "interpreter",
+                gen2,
+                "compiler_compile_library",
+                product_nonempty,
+                *STD,
+                *ARCHIVE,
+                FIXTURE_NONEMPTY,
+            ),
+            "compile archive API nonempty client",
+        )
+        require(run(CHECK, product_nonempty, "main"), "verify nonempty API client")
+        executed_nonempty = run(SEED, "run", product_nonempty, "main")
+        require(executed_nonempty, "execute nonempty archive API client")
+        if executed_nonempty.stdout.strip() != "1":
+            raise RuntimeError(
+                "archive api.compile(nonempty) returned "
+                f"{executed_nonempty.stdout.strip()!r}"
+            )
+
+    print("PASS src/lainc produces and executes empty and nonempty archive api.compile")
     return 0
 
 

@@ -13,8 +13,18 @@ ROOT = Path(__file__).resolve().parents[1]
 SEED = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
+CHECK = ROOT / "seed" / "zig-out" / "bin" / (
+    "lainir-print.exe" if os.name == "nt" else "lainir-print"
+)
 BACKEND_L1 = ROOT / "build" / "backend_c_entry.l1"
 HOST = ROOT / "seed" / "src" / "host" / "native_lainc.c"
+IN_PROCESS_SOURCES = (
+    ROOT / "seed" / "src" / "core" / "lainir.c",
+    ROOT / "seed" / "src" / "core" / "verifier.c",
+    ROOT / "seed" / "src" / "text" / "parser.c",
+    ROOT / "seed" / "src" / "interpreter" / "interpreter.c",
+    ROOT / "seed" / "src" / "host" / "host_io.c",
+)
 
 
 def run(*args: Path | str, env: dict[str, str] | None = None) -> None:
@@ -30,6 +40,8 @@ def main() -> int:
     compiler_l1 = Path(sys.argv[1])
     executable = Path(sys.argv[2])
     generated_c = Path(sys.argv[3]) if len(sys.argv) == 4 else ROOT / "build" / "lainc-native.c"
+    # Never feed an unchecked compiler artifact to the Lain-written backend.
+    run(CHECK, compiler_l1, "compiler_compile")
     run(SEED, "interpreter", BACKEND_L1, "main", generated_c, compiler_l1)
 
     env = os.environ.copy()
@@ -40,7 +52,8 @@ def main() -> int:
     # archive API expressions spend minutes in those tight scan loops.
     run(
         "zig", "cc", "-std=c11", "-O2", "-DLAIN_NATIVE_LIBRARY_ENTRY",
-        generated_c, HOST, "-o", executable, env=env
+        "-I", ROOT / "seed" / "include", "-I", ROOT / "seed" / "src" / "host",
+        generated_c, HOST, *IN_PROCESS_SOURCES, "-o", executable, env=env
     )
     print(executable)
     return 0

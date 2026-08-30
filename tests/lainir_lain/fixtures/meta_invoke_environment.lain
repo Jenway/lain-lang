@@ -1,0 +1,398 @@
+let memory_model: Module = import("std::memory_model");
+let arena: Module = import("std::core::arena_min");
+let bounds: Module = import("std::bounds");
+let memory_core: Module = import("std::core::memory");
+let l1_package: Module = import("packages::lain::compiler::l1_ir");
+let syntax_package: Module = import("packages::lain::compiler::syntax");
+let meta_package: Module = import("packages::lain::compiler::meta");
+
+let memory: Module = memory_model.Model(
+    arena.arena_min.Policy,
+    bounds.bounds.Unchecked,
+);
+let L1: Module = l1_package.l1_ir.Model(memory);
+let Meta: Module = meta_package.meta.Meta(memory, L1, L1);
+let Syntax: Module = syntax_package.syntax.Syntax(memory);
+let Meta_expand = Meta.expand;
+
+let scalar_probe = std::func() -> i32 {
+    let unit: L1.Unit = L1.new();
+    let type_value: L1.Type = L1.Type { kind: 1, bit_width: 32 };
+    let type_id: L1.TypeId = L1.add_type(
+        &mut unit,
+        type_value,
+    );
+    let region: L1.RegionId = L1.begin_region(&mut unit);
+    let expression_value: L1.Expr = L1.Expr {
+        kind: 2,
+        result_type: type_id,
+        left: 0,
+        right: 0,
+        index: 0,
+        i32_value: 0,
+        procedure: std::usize_max(),
+        arguments: L1.ExprIdVector.new(),
+    };
+    let expression: L1.ExprId = L1.add_expression(
+        &mut unit,
+        expression_value,
+    );
+    let procedure: L1.ProcedureId = L1.add_procedure(
+        &mut unit,
+        memory.String.new(),
+        type_id,
+        region,
+        false,
+    );
+    L1.add_parameter(&mut unit, procedure, type_id);
+    L1.add_parameter(&mut unit, procedure, type_id);
+    let instruction_value: L1.Instruction = L1.Instruction {
+        kind: 1,
+        name: memory.String.new(),
+        expression: expression,
+        destination: 0,
+        value_type: type_id,
+        first_region: 0,
+        second_region: 0,
+    };
+    L1.append_instruction(
+        &mut unit,
+        region,
+        instruction_value,
+    );
+    let facts: Meta.DirectUnitFacts = Meta.direct_unit_facts_new(
+        L1.unit_procedure_count(&unit),
+        L1.unit_procedure_body(&unit, procedure),
+        L1.unit_procedure_external(&unit, procedure),
+        L1.unit_region_instruction_count(&unit, region),
+        L1.unit_region_first_expression(&unit, region),
+        L1.unit_expression_count(&unit),
+        L1.unit_expression_kind(&unit, expression),
+        L1.unit_expression_index(&unit, expression),
+        L1.unit_expression_i32_value(&unit, expression),
+    );
+    let program: Meta.MetaProgram = Meta.meta_program_new(11, 1, 1);
+    let meta_procedure: Meta.MetaProcedure = Meta.meta_procedure_new(
+        7,
+        11,
+        procedure,
+        Meta.callable_phase_meta(),
+        3,
+        4,
+        1,
+    );
+    let registry: Meta.Registry = Meta.new_registry();
+    let name: memory.String = memory.String.new();
+    let callable: Meta.MetaCallableId = Meta.meta_program_register(
+        &mut program,
+        &mut registry,
+        name,
+        meta_procedure,
+    );
+    let second_procedure: Meta.MetaProcedure = Meta.meta_procedure_new(
+        8,
+        11,
+        procedure,
+        Meta.callable_phase_meta(),
+        9,
+        2,
+        1,
+    );
+    Meta.meta_program_add_procedure(&mut program, second_procedure);
+    let queried_procedure: addr =
+        Meta.meta_program_procedure_handle(&program, 1);
+    if Meta.meta_procedure_id(queried_procedure) != 8 { return 130; }
+    if Meta.meta_procedure_source_start(queried_procedure) != 9 { return 131; }
+    if Meta.meta_procedure_parameter_count(queried_procedure) != 1 { return 132; }
+    let environment: Meta.MetaEnvironment = Meta.meta_environment_new(5, 0);
+    let captured: Meta.InterpreterValue =
+        Meta.interpreter_value_new(type_id, 5);
+    Meta.meta_environment_bind_value(&mut environment, 9, captured);
+    let arguments: Meta.InterpreterValueVector =
+        Meta.InterpreterValueVector.new();
+    let result: Meta.InterpreterResult = Meta.invoke_program_phase_facts(
+        &registry,
+        callable,
+        Meta.callable_phase_meta(),
+        &program,
+        &facts,
+        &environment,
+    );
+    if Meta.result_status(&result) != 0 {
+        return 100 + Meta.result_status(&result);
+    }
+    if Meta.result_value(&result) != 5 { return 110; }
+    let missing: Meta.MetaProgram = Meta.meta_program_new(0, 1, 1);
+    let missing_result: Meta.InterpreterResult =
+        Meta.invoke_program_phase_facts(
+            &registry,
+            callable,
+            Meta.callable_phase_meta(),
+            &missing,
+            &facts,
+            &environment,
+        );
+    if Meta.result_status(&missing_result) != 2908 {
+        return 120 + Meta.result_status(&missing_result);
+    }
+    let second_facts: Meta.DirectUnitFacts = Meta.direct_unit_facts_new(
+        1,
+        0,
+        false,
+        1,
+        0,
+        1,
+        1,
+        0,
+        7,
+    );
+    let second_result: Meta.InterpreterResult =
+        Meta.invoke_procedure_facts(
+            queried_procedure,
+            Meta.callable_phase_meta(),
+            &second_facts,
+            &environment,
+        );
+    if Meta.result_status(&second_result) != 0 {
+        return 520 + Meta.result_status(&second_result);
+    }
+    if Meta.result_value(&second_result) != 7 { return 521; }
+    return 5;
+};
+
+let syntax_probe = std::func() -> i32 {
+    let store: Syntax.Store = Syntax.new_store();
+    let source_unit: Syntax.UnitId = Syntax.parse(
+        &mut store,
+        memory_core.memory.byte_span("@attr xy", 8),
+    );
+    let root: Syntax.NodeId = Syntax.unit_root(&store, source_unit);
+    let unit: L1.Unit = L1.new();
+    let type_value: L1.Type = L1.Type { kind: 1, bit_width: 32 };
+    let type_id: L1.TypeId = L1.add_type(
+        &mut unit,
+        type_value,
+    );
+    let region: L1.RegionId = L1.begin_region(&mut unit);
+    let expression_value: L1.Expr = L1.Expr {
+        kind: 2,
+        result_type: type_id,
+        left: 0,
+        right: 0,
+        index: 0,
+        i32_value: 0,
+        procedure: std::usize_max(),
+        arguments: L1.ExprIdVector.new(),
+    };
+    let expression: L1.ExprId = L1.add_expression(
+        &mut unit,
+        expression_value,
+    );
+    let procedure: L1.ProcedureId = L1.add_procedure(
+        &mut unit,
+        memory.String.new(),
+        type_id,
+        region,
+        false,
+    );
+    L1.add_parameter(&mut unit, procedure, type_id);
+    let instruction_value: L1.Instruction = L1.Instruction {
+        kind: 1,
+        name: memory.String.new(),
+        expression: expression,
+        destination: 0,
+        value_type: type_id,
+        first_region: 0,
+        second_region: 0,
+    };
+    L1.append_instruction(
+        &mut unit,
+        region,
+        instruction_value,
+    );
+    let facts: Meta.DirectUnitFacts = Meta.direct_unit_facts_new(
+        L1.unit_procedure_count(&unit),
+        L1.unit_procedure_body(&unit, procedure),
+        L1.unit_procedure_external(&unit, procedure),
+        L1.unit_region_instruction_count(&unit, region),
+        L1.unit_region_first_expression(&unit, region),
+        L1.unit_expression_count(&unit),
+        L1.unit_expression_kind(&unit, expression),
+        L1.unit_expression_index(&unit, expression),
+        L1.unit_expression_i32_value(&unit, expression),
+    );
+    let program: Meta.MetaProgram = Meta.meta_program_new(
+        12,
+        2,
+        source_unit,
+    );
+    let meta_procedure: Meta.MetaProcedure = Meta.meta_procedure_new(
+        8,
+        12,
+        procedure,
+        Meta.callable_phase_syntax(),
+        0,
+        1,
+        1,
+    );
+    let registry: Meta.Registry = Meta.new_registry();
+    let name: memory.String = memory.String.new();
+    name.append_byte(97);
+    name.append_byte(116);
+    name.append_byte(116);
+    name.append_byte(114);
+    let callable: Meta.MetaCallableId = Meta.meta_program_register(
+        &mut program,
+        &mut registry,
+        name,
+        meta_procedure,
+    );
+    let environment: Meta.MetaEnvironment = Meta.meta_environment_new(6, 0);
+    let alias_name: memory.String = memory.String.new();
+    alias_name.append_byte(97);
+    alias_name.append_byte(108);
+    alias_name.append_byte(105);
+    alias_name.append_byte(97);
+    alias_name.append_byte(115);
+    let alias_procedure: Meta.MetaProcedure = Meta.meta_procedure_new(
+        10,
+        12,
+        procedure,
+        Meta.callable_phase_syntax(),
+        0,
+        1,
+        1,
+    );
+    let alias_callable: Meta.MetaCallableId = Meta.meta_program_register(
+        &mut program,
+        &mut registry,
+        alias_name,
+        alias_procedure,
+    );
+    let expansion: Meta.Expansion = Meta_expand(
+        &mut store,
+        source_unit,
+        root,
+        &registry,
+        &program,
+        &environment,
+        &unit,
+    );
+    if Meta.expansion_diagnostic(&expansion) != 0 {
+        return 200 + Meta.expansion_diagnostic(&expansion);
+    }
+    if Meta.expansion_length(&expansion) == 0 { return 300; }
+    // Alias/unknown-name and backend context probes stay disabled until the
+    // string ABI and aggregate interpreter bridge are complete.
+    if 1 == 0 {
+    let alias_source_unit: Syntax.UnitId = Syntax.parse(
+        &mut store,
+        memory_core.memory.byte_span("@alias xy", 9),
+    );
+    let alias_root: Syntax.NodeId = Syntax.unit_root(&store, alias_source_unit);
+    let alias_expansion: Meta.Expansion = Meta_expand(
+        &mut store,
+        alias_source_unit,
+        alias_root,
+        &registry,
+        &program,
+        &environment,
+        &unit,
+    );
+    if Meta.expansion_diagnostic(&alias_expansion) != 0 { return 312; }
+    if Meta.expansion_length(&alias_expansion) == 0 { return 313; }
+    let phase_arguments: Meta.InterpreterValueVector =
+        Meta.InterpreterValueVector.new();
+    let phase_result: Meta.InterpreterResult =
+        Meta.invoke_program_phase_facts(
+            &registry,
+            callable,
+            Meta.callable_phase_meta(),
+            &program,
+            &facts,
+            &environment,
+        );
+    if Meta.result_status(&phase_result) != 2907 {
+        return 400 + Meta.result_status(&phase_result);
+    }
+
+    // Backend callables require an explicit backend context.  Reuse the
+    // scalar procedure body so this probe isolates phase authorization from
+    // evaluator semantics.
+    let backend_program: Meta.MetaProgram = Meta.meta_program_new(13, 1, 1);
+    let backend_procedure: Meta.MetaProcedure = Meta.meta_procedure_new(
+        9,
+        13,
+        procedure,
+        Meta.callable_phase_backend(),
+        0,
+        0,
+        1,
+    );
+    let backend_registry: Meta.Registry = Meta.new_registry();
+    let backend_name: memory.String = memory.String.new();
+    let backend_callable: Meta.MetaCallableId = Meta.meta_program_register(
+        &mut backend_program,
+        &mut backend_registry,
+        backend_name,
+        backend_procedure,
+    );
+    let backend_context_missing: Meta.Context = Meta.context_new(
+        1,
+        source_unit,
+        root,
+        0,
+        Meta.callable_phase_meta(),
+    );
+    let backend_facts: Meta.DirectUnitFacts = Meta.direct_unit_facts_new(
+        1,
+        0,
+        false,
+        1,
+        0,
+        1,
+        1,
+        0,
+        5,
+    );
+    let backend_context_result: Meta.InterpreterResult =
+        Meta.invoke_backend_facts(
+            &backend_registry,
+            backend_callable,
+            &backend_program,
+            &backend_facts,
+            &environment,
+            &backend_context_missing,
+        );
+    if Meta.result_status(&backend_context_result) != 2911 {
+        return 500 + Meta.result_status(&backend_context_result);
+    }
+    let backend_context: Meta.Context = Meta.context_new(
+        2,
+        source_unit,
+        root,
+        0,
+        Meta.callable_phase_backend(),
+    );
+    let backend_result: Meta.InterpreterResult = Meta.invoke_backend_facts(
+        &backend_registry,
+        backend_callable,
+        &backend_program,
+        &backend_facts,
+        &environment,
+        &backend_context,
+    );
+    if Meta.result_status(&backend_result) != 0 {
+        return 510 + Meta.result_status(&backend_result);
+    }
+    if Meta.result_value(&backend_result) != 5 { return 511; }
+
+    }
+    return 0;
+};
+
+let main = std::func() -> i32 {
+    let scalar: i32 = scalar_probe();
+    if scalar != 5 { return scalar; }
+    return syntax_probe();
+};

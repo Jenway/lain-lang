@@ -13,6 +13,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 def main() -> int:
     scripts = (
+        "run_seed_allocator.py",
+        "run_artifact_canonical.py",
         "run_raw_ast.py",
         "run_ast_ops.py",
         "run_meta_record.py",
@@ -25,6 +27,13 @@ def main() -> int:
         "run_workspace.py",
         "run_driver.py",
         "run_lainc_m1.py",
+        "run_meta_invoke_environment.py",
+        "run_std_diagnostic.py",
+        "run_std_type.py",
+        "run_std_generic.py",
+        "run_std_backend.py",
+        "run_std_bounds.py",
+        "run_std_effect_ownership.py",
         "run_lainc_module.py",
         "run_lainc_archive_a.py",
         "run_lainc_archive_b.py",

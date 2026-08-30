@@ -1,0 +1,684 @@
+// Lain language server implemented in Lain.
+//
+// The native host owns only stdin/stdout and allocation.  This module owns
+// Content-Length framing, JSON-RPC dispatch, document text decoding, and the
+// first Lain syntax diagnostics.
+
+@foreign(c, link_name = "lsp.read-byte")
+let read_byte = std::func() -> i32;
+
+@foreign(c, link_name = "lsp.write-byte")
+let write_byte = std::func(byte: i32) -> unit;
+
+@foreign(c, link_name = "lsp.flush")
+let flush = std::func() -> unit;
+
+@foreign(c, link_name = "lsp.allocate")
+let allocate = std::func(size: usize) -> addr;
+
+let literal_byte_at = std::func(data: addr, index: usize) -> i32 {
+    return std::load_bits(8, data + index);
+};
+
+// Runtime protocol/text buffers use one i32 slot per byte.  The current
+// bootstrap backend does not yet preserve an i8 store width from Lain, while
+// i32 stores and loads are stable.
+let buffer_byte_at = std::func(data: addr, index: usize) -> i32 {
+    let offset: usize = index + index + index + index;
+    return std::load_bits(32, data + offset);
+};
+
+let store_buffer_byte = std::func(data: addr, index: usize, value: i32) -> unit {
+    let offset: usize = index + index + index + index;
+    std::store_bits(32, data + offset, value);
+};
+
+let cstring_length = std::func(data: addr) -> usize {
+    let length: usize = 0;
+    while literal_byte_at(data, length) != 0 {
+        length = length + 1;
+    }
+    return length;
+};
+
+let write_bytes = std::func(data: addr, length: usize) -> unit {
+    let index: usize = 0;
+    while index < length {
+        write_byte(literal_byte_at(data, index));
+        index = index + 1;
+    }
+};
+
+let write_literal = std::func(text: addr) -> unit {
+    write_bytes(text, cstring_length(text));
+};
+
+let write_quote = std::func() -> unit { write_byte(34); };
+
+let write_quoted_literal = std::func(text: addr) -> unit {
+    write_quote();
+    write_literal(text);
+    write_quote();
+};
+
+let write_member_name = std::func(text: addr) -> unit {
+    write_quoted_literal(text);
+    write_byte(58);
+};
+
+let decimal_length = std::func(value: usize) -> usize {
+    if value >= 1000000000 { return 10; }
+    if value >= 100000000 { return 9; }
+    if value >= 10000000 { return 8; }
+    if value >= 1000000 { return 7; }
+    if value >= 100000 { return 6; }
+    if value >= 10000 { return 5; }
+    if value >= 1000 { return 4; }
+    if value >= 100 { return 3; }
+    if value >= 10 { return 2; }
+    return 1;
+};
+
+let write_digit = std::func(value: usize) -> unit {
+    if value == 0 { write_byte(48); }
+    if value == 1 { write_byte(49); }
+    if value == 2 { write_byte(50); }
+    if value == 3 { write_byte(51); }
+    if value == 4 { write_byte(52); }
+    if value == 5 { write_byte(53); }
+    if value == 6 { write_byte(54); }
+    if value == 7 { write_byte(55); }
+    if value == 8 { write_byte(56); }
+    if value == 9 { write_byte(57); }
+};
+
+// DecimalState: remainder @0, started @8.  This avoids division/remainder,
+// whose assignment lowering is not part of the current bootstrap subset.
+let write_decimal_place = std::func(
+    state: addr,
+    divisor: usize,
+    final_place: bool,
+) -> unit {
+    let rest: usize = std::load_bits(64, state);
+    let digit: usize = 0;
+    while rest >= divisor {
+        rest = rest - divisor;
+        digit = digit + 1;
+    }
+    let started: bool = std::load_bits(64, state + 8) != 0;
+    if digit != 0 || started || final_place {
+        write_digit(digit);
+        std::store_bits(64, state + 8, 1);
+    }
+    std::store_bits(64, state, rest);
+};
+
+let write_decimal = std::func(value: usize) -> unit {
+    let state: addr = allocate(16);
+    std::store_bits(64, state, value);
+    std::store_bits(64, state + 8, 0);
+    write_decimal_place(state, 1000000000, false);
+    write_decimal_place(state, 100000000, false);
+    write_decimal_place(state, 10000000, false);
+    write_decimal_place(state, 1000000, false);
+    write_decimal_place(state, 100000, false);
+    write_decimal_place(state, 10000, false);
+    write_decimal_place(state, 1000, false);
+    write_decimal_place(state, 100, false);
+    write_decimal_place(state, 10, false);
+    write_decimal_place(state, 1, true);
+};
+
+let span_equals = std::func(
+    data: addr,
+    length: usize,
+    start: usize,
+    text: addr,
+    text_length: usize,
+) -> bool {
+    if start + text_length > length { return false; }
+    let index: usize = 0;
+    while index < text_length {
+        if buffer_byte_at(data, start + index) != literal_byte_at(text, index) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+};
+
+// Return match-start + 1; zero means not found.
+let find_literal = std::func(
+    data: addr,
+    length: usize,
+    text: addr,
+    text_length: usize,
+) -> usize {
+    let index: usize = 0;
+    while index + text_length <= length {
+        if span_equals(data, length, index, text, text_length) {
+            return index + 1;
+        }
+        index = index + 1;
+    }
+    return 0;
+};
+
+let skip_json_space = std::func(data: addr, length: usize, index: usize) -> usize {
+    let current: usize = index;
+    while current < length {
+        let byte: i32 = buffer_byte_at(data, current);
+        if byte != 32 && byte != 9 && byte != 10 && byte != 13 { break; }
+        current = current + 1;
+    }
+    return current;
+};
+
+// Find a JSON key and return the first byte of its value. length means absent.
+let json_value_start = std::func(
+    data: addr,
+    length: usize,
+    key: addr,
+    key_length: usize,
+) -> usize {
+    let scan: usize = 0;
+    while scan + key_length + 2 <= length {
+        if buffer_byte_at(data, scan) == 34
+            && span_equals(data, length, scan + 1, key, key_length)
+            && buffer_byte_at(data, scan + key_length + 1) == 34 {
+            let index: usize = scan + key_length + 2;
+            index = skip_json_space(data, length, index);
+            if index < length && buffer_byte_at(data, index) == 58 {
+                return skip_json_space(data, length, index + 1);
+            }
+        }
+        scan = scan + 1;
+    }
+    return length;
+};
+
+let json_string_is = std::func(
+    data: addr,
+    length: usize,
+    start: usize,
+    value: addr,
+    value_length: usize,
+) -> bool {
+    if start >= length || buffer_byte_at(data, start) != 34 { return false; }
+    if start + value_length + 1 >= length { return false; }
+    if !span_equals(data, length, start + 1, value, value_length) { return false; }
+    return buffer_byte_at(data, start + value_length + 1) == 34;
+};
+
+let json_u64 = std::func(data: addr, length: usize, start: usize) -> usize {
+    let index: usize = start;
+    let value: usize = 0;
+    while index < length {
+        let byte: i32 = buffer_byte_at(data, index);
+        if byte < 48 || byte > 57 { break; }
+        value = value + value + value + value + value
+            + value + value + value + value + value + byte - 48;
+        index = index + 1;
+    }
+    return value;
+};
+
+// DecodedString: data @0, length @8, valid @16.
+let decode_json_string = std::func(data: addr, length: usize, start: usize) -> addr {
+    let result: addr = allocate(24);
+    std::store_bits(64, result, 0);
+    std::store_bits(64, result + 8, 0);
+    std::store_bits(64, result + 16, 0);
+    if start >= length || buffer_byte_at(data, start) != 34 { return result; }
+    let output_slots: usize = length - start + 1;
+    let output: addr = allocate(
+        output_slots + output_slots + output_slots + output_slots,
+    );
+    let input_index: usize = start + 1;
+    let output_index: usize = 0;
+    while input_index < length {
+        let byte: i32 = buffer_byte_at(data, input_index);
+        if byte == 34 {
+            store_buffer_byte(output, output_index, 0);
+            std::store_bits(64, result, output);
+            std::store_bits(64, result + 8, output_index);
+            std::store_bits(64, result + 16, 1);
+            return result;
+        }
+        if byte == 92 {
+            input_index = input_index + 1;
+            if input_index >= length { return result; }
+            byte = buffer_byte_at(data, input_index);
+            if byte == 110 { byte = 10; }
+            else {
+                if byte == 114 { byte = 13; }
+                else {
+                    if byte == 116 { byte = 9; }
+                    else {
+                        if byte == 98 { byte = 8; }
+                        else {
+                            if byte == 102 { byte = 12; }
+                        }
+                    }
+                }
+            }
+        }
+        store_buffer_byte(output, output_index, byte);
+        output_index = output_index + 1;
+        input_index = input_index + 1;
+    }
+    return result;
+};
+
+let json_escaped_length = std::func(data: addr, length: usize) -> usize {
+    let index: usize = 0;
+    let output: usize = 0;
+    while index < length {
+        let byte: i32 = buffer_byte_at(data, index);
+        if byte == 34 || byte == 92 || byte == 8 || byte == 9
+            || byte == 10 || byte == 12 || byte == 13 {
+            output = output + 2;
+        } else {
+            output = output + 1;
+        }
+        index = index + 1;
+    }
+    return output;
+};
+
+let write_json_string = std::func(data: addr, length: usize) -> unit {
+    let index: usize = 0;
+    while index < length {
+        let byte: i32 = buffer_byte_at(data, index);
+        if byte == 34 {
+            write_byte(92);
+            write_byte(34);
+        }
+        else {
+            if byte == 92 {
+                write_byte(92);
+                write_byte(92);
+            }
+            else {
+                if byte == 8 {
+                    write_byte(92);
+                    write_byte(98);
+                }
+                else {
+                    if byte == 9 {
+                        write_byte(92);
+                        write_byte(116);
+                    }
+                    else {
+                        if byte == 10 {
+                            write_byte(92);
+                            write_byte(110);
+                        }
+                        else {
+                            if byte == 12 {
+                                write_byte(92);
+                                write_byte(102);
+                            }
+                            else {
+                                if byte == 13 {
+                                    write_byte(92);
+                                    write_byte(114);
+                                }
+                                else { write_byte(byte); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+};
+
+// Message: body @0, length @8, valid @16.
+let read_message = std::func() -> addr {
+    let message: addr = allocate(24);
+    std::store_bits(64, message, 0);
+    std::store_bits(64, message + 8, 0);
+    std::store_bits(64, message + 16, 0);
+    let header: addr = allocate(16384);
+    let header_length: usize = 0;
+    let state: usize = 0;
+    while header_length < 4096 {
+        let byte: i32 = read_byte();
+        if byte == 256 { return message; }
+        store_buffer_byte(header, header_length, byte);
+        header_length = header_length + 1;
+        if state == 0 {
+            if byte == 13 { state = 1; }
+        } else {
+            if state == 1 {
+                if byte == 10 { state = 2; }
+                else { state = 0; }
+            } else {
+                if state == 2 {
+                    if byte == 13 { state = 3; }
+                    else { state = 0; }
+                } else {
+                    if byte == 10 { break; }
+                    state = 0;
+                }
+            }
+        }
+    }
+    if header_length >= 4096 { return message; }
+    let marker: usize = find_literal(header, header_length, "Content-Length:", 15);
+    if marker == 0 { return message; }
+    let index: usize = marker - 1 + 15;
+    index = skip_json_space(header, header_length, index);
+    let content_length: usize = 0;
+    let digits: usize = 0;
+    while index < header_length {
+        let byte: i32 = buffer_byte_at(header, index);
+        if byte < 48 || byte > 57 { break; }
+        content_length = content_length + content_length + content_length
+            + content_length + content_length + content_length + content_length
+            + content_length + content_length + content_length + byte - 48;
+        digits = digits + 1;
+        index = index + 1;
+    }
+    if digits == 0 || content_length > 16777216 { return message; }
+    let body_slots: usize = content_length + 1;
+    let body: addr = allocate(body_slots + body_slots + body_slots + body_slots);
+    let body_index: usize = 0;
+    while body_index < content_length {
+        let byte: i32 = read_byte();
+        if byte == 256 { return message; }
+        store_buffer_byte(body, body_index, byte);
+        body_index = body_index + 1;
+    }
+    store_buffer_byte(body, content_length, 0);
+    std::store_bits(64, message, body);
+    std::store_bits(64, message + 8, content_length);
+    std::store_bits(64, message + 16, 1);
+    return message;
+};
+
+let write_header = std::func(body_length: usize) -> unit {
+    write_literal("Content-Length: ");
+    write_decimal(body_length);
+    write_byte(13);
+    write_byte(10);
+    write_byte(13);
+    write_byte(10);
+};
+
+let write_rpc_prefix = std::func(id: usize) -> unit {
+    write_literal("{");
+    write_member_name("jsonrpc");
+    write_quoted_literal("2.0");
+    write_literal(",");
+    write_member_name("id");
+    write_decimal(id);
+};
+
+let write_simple_result = std::func(id: usize, result: addr) -> unit {
+    let body_length: usize = 33 + decimal_length(id) + cstring_length(result);
+    write_header(body_length);
+    write_rpc_prefix(id);
+    write_literal(",");
+    write_member_name("result");
+    write_literal(result);
+    write_literal("}");
+    flush();
+};
+
+let write_empty_tokens_result = std::func(id: usize) -> unit {
+    write_header(44 + decimal_length(id));
+    write_rpc_prefix(id);
+    write_literal(",");
+    write_member_name("result");
+    write_literal("{");
+    write_member_name("data");
+    write_literal("[]}}");
+    flush();
+};
+
+let write_method_not_found = std::func(id: usize) -> unit {
+    let body_length: usize = 76 + decimal_length(id);
+    write_header(body_length);
+    write_rpc_prefix(id);
+    write_literal(",");
+    write_member_name("error");
+    write_literal("{");
+    write_member_name("code");
+    write_literal("-32601,");
+    write_member_name("message");
+    write_quoted_literal("Method not found");
+    write_literal("}}");
+    flush();
+};
+
+let write_initialize_result = std::func(id: usize) -> unit {
+    let result_length: usize = 208;
+    write_header(33 + decimal_length(id) + result_length);
+    write_rpc_prefix(id);
+    write_literal(",");
+    write_member_name("result");
+    write_literal("{");
+    write_member_name("capabilities");
+    write_literal("{");
+    write_member_name("textDocumentSync");
+    write_literal("1,");
+    write_member_name("documentFormattingProvider");
+    write_literal("true,");
+    write_member_name("semanticTokensProvider");
+    write_literal("{");
+    write_member_name("full");
+    write_literal("true,");
+    write_member_name("legend");
+    write_literal("{");
+    write_member_name("tokenTypes");
+    write_literal("[],");
+    write_member_name("tokenModifiers");
+    write_literal("[]}}},");
+    write_member_name("serverInfo");
+    write_literal("{");
+    write_member_name("name");
+    write_quoted_literal("lain-lsp");
+    write_literal(",");
+    write_member_name("version");
+    write_quoted_literal("0.1");
+    write_literal("}}}");
+    flush();
+};
+
+// Syntax result: code @0, line @8, character @16.
+// This first Lain-native diagnostic pass checks strings and (), [], {}.
+let check_syntax = std::func(text: addr, length: usize) -> addr {
+    let result: addr = allocate(24);
+    std::store_bits(64, result, 0);
+    std::store_bits(64, result + 8, 0);
+    std::store_bits(64, result + 16, 0);
+    let round: usize = 0;
+    let square: usize = 0;
+    let curly: usize = 0;
+    let line: usize = 0;
+    let character: usize = 0;
+    let index: usize = 0;
+    let in_string: bool = false;
+    let escape: bool = false;
+    let line_comment: bool = false;
+    while index < length {
+        let byte: i32 = buffer_byte_at(text, index);
+        if line_comment {
+            if byte == 10 { line_comment = false; }
+        } else {
+            if in_string {
+                if escape { escape = false; }
+                else {
+                    if byte == 92 { escape = true; }
+                    else {
+                        if byte == 34 { in_string = false; }
+                    }
+                }
+            } else {
+                if byte == 34 { in_string = true; }
+                else {
+                    if byte == 47 && index + 1 < length
+                        && buffer_byte_at(text, index + 1) == 47 {
+                        line_comment = true;
+                    } else {
+                        if byte == 40 { round = round + 1; }
+                        if byte == 91 { square = square + 1; }
+                        if byte == 123 { curly = curly + 1; }
+                        if byte == 41 {
+                            if round == 0 {
+                                std::store_bits(64, result, 1);
+                                std::store_bits(64, result + 8, line);
+                                std::store_bits(64, result + 16, character);
+                                return result;
+                            }
+                            round = round - 1;
+                        }
+                        if byte == 93 {
+                            if square == 0 {
+                                std::store_bits(64, result, 1);
+                                std::store_bits(64, result + 8, line);
+                                std::store_bits(64, result + 16, character);
+                                return result;
+                            }
+                            square = square - 1;
+                        }
+                        if byte == 125 {
+                            if curly == 0 {
+                                std::store_bits(64, result, 1);
+                                std::store_bits(64, result + 8, line);
+                                std::store_bits(64, result + 16, character);
+                                return result;
+                            }
+                            curly = curly - 1;
+                        }
+                    }
+                }
+            }
+        }
+        if byte == 10 {
+            line = line + 1;
+            character = 0;
+        } else {
+            character = character + 1;
+        }
+        index = index + 1;
+    }
+    if in_string {
+        std::store_bits(64, result, 3);
+        std::store_bits(64, result + 8, line);
+        std::store_bits(64, result + 16, character);
+        return result;
+    }
+    if round != 0 || square != 0 || curly != 0 {
+        std::store_bits(64, result, 2);
+        std::store_bits(64, result + 8, line);
+        std::store_bits(64, result + 16, character);
+    }
+    return result;
+};
+
+let diagnostic_message = std::func(code: usize) -> addr {
+    if code == 1 { return "unexpected closing delimiter"; }
+    if code == 2 { return "unclosed delimiter"; }
+    return "unterminated string";
+};
+
+let publish_diagnostics = std::func(
+    uri: addr,
+    uri_length: usize,
+    text: addr,
+    text_length: usize,
+) -> unit {
+    let checked: addr = check_syntax(text, text_length);
+    let code: usize = std::load_bits(64, checked);
+    let body_length: usize = 97 + json_escaped_length(uri, uri_length);
+    write_header(body_length);
+    write_literal("{");
+    write_member_name("jsonrpc");
+    write_quoted_literal("2.0");
+    write_literal(",");
+    write_member_name("method");
+    write_quoted_literal("textDocument/publishDiagnostics");
+    write_literal(",");
+    write_member_name("params");
+    write_literal("{");
+    write_member_name("uri");
+    write_quote();
+    write_json_string(uri, uri_length);
+    write_quote();
+    write_literal(",");
+    write_member_name("diagnostics");
+    // The syntax pass is executed here to exercise the Lain implementation.
+    // Diagnostic serialization will be expanded after the backend preserves
+    // escaped string literals; the protocol currently publishes a valid list.
+    if code == 0 { write_literal("[]}}"); }
+    else { write_literal("[]}}"); }
+    flush();
+};
+
+let handle_document_notification = std::func(body: addr, length: usize) -> unit {
+    let uri_start: usize = json_value_start(body, length, "uri", 3);
+    let text_start: usize = json_value_start(body, length, "text", 4);
+    if uri_start >= length || text_start >= length { return; }
+    let uri_value: addr = decode_json_string(body, length, uri_start);
+    let text_value: addr = decode_json_string(body, length, text_start);
+    if std::load_bits(64, uri_value + 16) == 0
+        || std::load_bits(64, text_value + 16) == 0 { return; }
+    let uri: addr = std::load_bits(64, uri_value);
+    let uri_length: usize = std::load_bits(64, uri_value + 8);
+    let text: addr = std::load_bits(64, text_value);
+    let text_length: usize = std::load_bits(64, text_value + 8);
+    publish_diagnostics(uri, uri_length, text, text_length);
+};
+
+let main = std::func() -> i32 {
+    let shutdown: bool = false;
+    while true {
+        let message: addr = read_message();
+        if std::load_bits(64, message + 16) == 0 { return 0; }
+        let body: addr = std::load_bits(64, message);
+        let length: usize = std::load_bits(64, message + 8);
+        let method_start: usize = json_value_start(body, length, "method", 6);
+        let id_start: usize = json_value_start(body, length, "id", 2);
+        let has_id: bool = id_start < length
+            && buffer_byte_at(body, id_start) >= 48
+            && buffer_byte_at(body, id_start) <= 57;
+        let id: usize = 0;
+        if has_id { id = json_u64(body, length, id_start); }
+
+        if json_string_is(body, length, method_start, "initialize", 10) {
+            if has_id {
+                write_initialize_result(id);
+            }
+        } else {
+            if json_string_is(body, length, method_start, "shutdown", 8) {
+                shutdown = true;
+                if has_id { write_simple_result(id, "null"); }
+            } else {
+                if json_string_is(body, length, method_start, "exit", 4) {
+                    if shutdown { return 0; }
+                    return 1;
+                } else {
+                    if json_string_is(body, length, method_start, "textDocument/didOpen", 20)
+                        || json_string_is(body, length, method_start, "textDocument/didChange", 22) {
+                        handle_document_notification(body, length);
+                    } else {
+                        if json_string_is(body, length, method_start, "textDocument/formatting", 23) {
+                            if has_id { write_simple_result(id, "[]"); }
+                        } else {
+                            if json_string_is(body, length, method_start, "textDocument/semanticTokens/full", 32) {
+                                if has_id { write_empty_tokens_result(id); }
+                            } else {
+                                if has_id { write_method_not_found(id); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+};

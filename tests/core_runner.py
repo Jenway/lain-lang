@@ -33,6 +33,26 @@ def main() -> int:
             "core/artifact-cache",
             [python, "tests/core/artifact_cache/run_artifact_cache.py"],
         ),
+        (
+            "core/build-cache",
+            [python, "tests/core/build_cache/run_build_cache_contract.py"],
+        ),
+        (
+            "core/fixed-point-proof",
+            [python, "tests/core/fixed_point_proof/run_fixed_point_proof.py"],
+        ),
+        (
+            "core/backend-manifest",
+            [python, "tests/core/backend_manifest/run_backend_manifest.py"],
+        ),
+        (
+            "core/structured-builder",
+            [python, "tests/core/structured_builder/run_structured_builder_contract.py"],
+        ),
+        (
+            "core/native-binary",
+            [python, "tests/core/native_binary/run_native_contract.py"],
+        ),
         ("core/comptime", [python, "tests/core/comptime/run_comptime_contract.py"]),
         ("core/control", [python, "tests/core/control/run_control_contract.py"]),
         (

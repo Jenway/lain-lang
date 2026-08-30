@@ -1,5 +1,32 @@
 # src/lainc meta system
 
+当前执行路线见 [`docs/lainc-meta-roadmap.md`](lainc-meta-roadmap.md)。
+
+The reusable Meta callable registry is now defined in `std/meta.lain` and
+instantiated by `src/compiler-archive/meta.lain`.  The archive layer owns
+syntax expansion and interpreter orchestration; the standard library owns the
+phase data model (`Callable`, `Registry`, registration, and lookup).
+
+`std/meta.lain` also owns `CallablePhase`, phase-aware registration, nominal
+type interning, module-value interning, and the shared `ComptimeValue`
+constructors/comparator.  `compiler-archive/types.lain` is a compatibility
+facade over these standard definitions, so compiler code can depend on
+`std::meta` without importing archive AST types.
+
+The archive Meta factory now exposes scalar-handle descriptors for
+`MetaProgram`, `MetaProcedure`, `MetaEnvironment`, `MetaBinding`, `MetaValue`,
+and `MetaDiagnostic`.  A program descriptor records its stable semantic id,
+unit/source/table handles, and procedure metadata; an environment records its
+parent and binding-table handle.  These handles keep physical L1 ids separate
+from Meta identity while avoiding premature container specialization during
+self-hosting.
+
+The archive Meta factory exposes `evaluate` and `invoke_program` as the
+structured execution bridge.  They run a selected procedure through the
+Lain-owned `l1_interpreter` with a capability-free external-call table;
+external procedures are rejected with interpreter status 7102 during Meta
+evaluation.
+
 The Lain-written compiler (`src/lainc/lainc.lain`) now carries a compile-time
 meta layer on top of its text emitter.  Following the project principle
 (*meta decides; LAIN-IR describes, executes, verifies*), the meta layer owns
@@ -7,6 +34,11 @@ binding, lookup, and compile-time evaluation; the emitter only writes the
 LAIN-IR text the meta layer decides on.
 
 ## Meta tables
+
+The standard `TypeRegistry` assigns stable built-in type ids 1–7, interns
+specialized types by kind/owner/argument tuple, and stores module values by
+their stable module id plus namespace.  Repeating an interning request returns
+the existing identity instead of allocating a second Meta value.
 
 All meta objects live in text tables (rows), referenced by 1-based row
 numbers (`usize`).  Row format: `kind|name_start|name_length|payload_start|
@@ -107,6 +139,14 @@ for bare (unqualified) constant references pick the first binding.
 
 ## Known limitations
 
+- The archive `Meta.invoke` AST-expansion boundary is phase-checked and has a
+  working procedure-0 identity primitive.  Scalar user-defined procedures can
+  use `invoke_program`, where the caller supplies the structured L1 unit and
+  argument frame.  The AST path still needs a program/environment handle so a
+  numeric procedure id can be connected to a syntax-producing callable.
+  Unknown or non-Meta phases return diagnostic 2906/2907 rather than silently
+  running.
+
 - consteval interpretation has no recursion and calls cannot nest inside a
   callee: a compile-time function may call another consteval function, but
   the callee's own body is evaluated purely (its return expression and
@@ -128,7 +168,32 @@ for bare (unqualified) constant references pick the first binding.
 
 ## Verification
 
-`python tests/lainir_lain/run_lainc_m1.py` and `run_lainc_m2.py` stay green
-(gen2 == gen3 fixed point).  Probe programs live under `build/eval-demo/`
-(not tracked): `const_probe`, `constexpr_probe`, `ce_probe`, `ce2`, `ce4`,
-`rec_probe`, `ns_probe`, `meta_integration`.
+The source-closure, compiler-API, nested-namespace, standalone Meta, and
+archive-usable tests are green; the module-consteval member fixture remains a
+known hanging gate after the first three module fixtures pass.  The generated gen2 compiler parses and
+compiles the complete std-plus-archive input, producing a real archive API
+artifact.  `lainir-print` verifies that artifact, and its `main` calls
+`api.compile` on the empty fixture and returns `0` under `lainir-seed run`.
+The seed runner supplies the minimal allocator pair
+`bootstrap.allocate-pages`/`bootstrap.release-pages` needed by generated
+self-hosting artifacts; source/artifact capabilities remain exclusive to the
+bootstrap compilation command.  On Windows, small external
+pages now use the process heap and large pages use demand-zero `VirtualAlloc`;
+the latest gen1 profile measured 112.2 MiB peak RSS and 113.9 MiB peak VMS,
+with a host allocation budget available as a safety limit.
+
+The remaining limitation is semantic coverage: the archive Meta AST-expansion
+bridge still needs a program/environment handle for arbitrary syntax-producing
+procedures.  The fixed-point compiler and the empty `api.compile` path are
+working, while full language-feature coverage still depends on completing that
+bridge and replacing the archive's remaining data-model stubs.
+
+Host allocation ownership is explicit: `lainir-seed run` registers only the
+allocator pair, while the bootstrap command owns source/artifact capabilities.
+Both paths track external pages, honor explicit release, and reclaim any
+remaining pages at run end.  `LAINIR_BOOTSTRAP_MAX_ALLOC_BYTES` and
+`--max-alloc-bytes` provide diagnostic ceilings when investigating runaway
+lowering.
+Probe programs live under `build/eval-demo/` (not tracked): `const_probe`,
+`constexpr_probe`, `ce_probe`, `ce2`, `ce4`, `rec_probe`, `ns_probe`,
+`meta_integration`.

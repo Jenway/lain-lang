@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -39,6 +40,7 @@ STD_SOURCES = (
 )
 # The exact LAIN-IR text that src/lainc/lainc.lain emits for add+main.
 PRODUCT = (
+    "#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;\n\n"
     "#proc f0_add(#bits<32> %x, #bits<32> %y) -> #bits<32> {\n"
     "  #return #add(%x, %y)\n"
     "}\n"

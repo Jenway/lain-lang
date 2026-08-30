@@ -63,7 +63,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="lainir-execution-diff-") as directory:
         work = pathlib.Path(directory)
         for source in cases:
-            interpreted = run([str(INTERPRETER), str(source), "main"])
+            # `run` is the standalone L1 execution entry point.  The first
+            # positional form now belongs to the bootstrap compiler and
+            # requires compiler/output/source arguments.
+            interpreted = run([str(INTERPRETER), "run", str(source), "main"])
             if interpreted.returncode:
                 print(f"interpreter failed for {source.name}", file=sys.stderr)
                 print(interpreted.stderr, file=sys.stderr)

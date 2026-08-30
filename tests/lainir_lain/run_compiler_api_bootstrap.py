@@ -22,6 +22,7 @@ STD_SOURCES = (
     ROOT / "std" / "allocation.lain",
     ROOT / "std" / "bounds.lain",
     ROOT / "std" / "effect.lain",
+    ROOT / "std" / "meta.lain",
     ROOT / "std" / "core" / "vec.lain",
     ROOT / "std" / "core" / "string.lain",
     ROOT / "std" / "core" / "arena_min.lain",

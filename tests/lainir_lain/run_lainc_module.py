@@ -27,10 +27,25 @@ LAINC = ROOT / "src" / "lainc" / "lainc.lain"
 FIX = Path(__file__).parent / "fixtures"
 
 
-def run(*arguments: Path | str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(a) for a in arguments], cwd=ROOT, capture_output=True, text=True
-    )
+def run(
+    *arguments: Path | str, timeout: float = 300
+) -> subprocess.CompletedProcess[str]:
+    """Run one compiler step with a hard bound for pathological fixtures."""
+    try:
+        return subprocess.run(
+            [str(a) for a in arguments],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        return subprocess.CompletedProcess(
+            [str(a) for a in arguments],
+            124,
+            stdout=error.stdout or "",
+            stderr=f"timeout after {timeout:g}s",
+        )
 
 
 def main() -> int:
@@ -43,16 +58,35 @@ def main() -> int:
         empty = tmp / "empty.lain"
         empty.write_text("", encoding="utf-8")
 
-        compiled = run(SEED, FROZEN, "compiler_compile", gen1, LAINC)
-        if compiled.returncode:
-            raise RuntimeError(compiled.stderr or compiled.stdout)
-        gen2_run = run(SEED, "interpreter", gen1, "compiler_compile", gen2, LAINC)
-        if gen2_run.returncode:
-            raise RuntimeError(gen2_run.stderr or gen2_run.stdout)
+        # The module fixtures exercise gen2's module lowering, not the costly
+        # bootstrap generation itself.  Reuse the fixed-point artifact when
+        # explicitly requested, while retaining the full chain by default.
+        cached = ROOT / "build" / "debug-gen2-heap.l1"
+        if os.environ.get("LAIN_META_USE_CACHED_GEN2") == "1" and cached.exists():
+            gen2.write_bytes(cached.read_bytes())
+            checked_cache = run(PRINT, gen2, "compiler_compile")
+            if checked_cache.returncode:
+                raise RuntimeError(f"cached gen2 l1check: {checked_cache.stderr}")
+        else:
+            compiled = run(SEED, FROZEN, "compiler_compile", gen1, LAINC)
+            if compiled.returncode:
+                raise RuntimeError(compiled.stderr or compiled.stdout)
+            gen2_run = run(SEED, "interpreter", gen1, "compiler_compile", gen2, LAINC)
+            if gen2_run.returncode:
+                raise RuntimeError(gen2_run.stderr or gen2_run.stdout)
 
         def compile_fixture(name: str) -> Path:
             out = tmp / f"{name}.l1"
-            res = run(SEED, "interpreter", gen2, "compiler_compile", out, FIX / f"{name}.lain")
+            limit = 120 if name == "module_consteval_member" else 300
+            res = run(
+                SEED,
+                "interpreter",
+                gen2,
+                "compiler_compile",
+                out,
+                FIX / f"{name}.lain",
+                timeout=limit,
+            )
             if res.returncode:
                 raise RuntimeError(f"{name}: {res.stderr or res.stdout}")
             checked = run(PRINT, out, "main")

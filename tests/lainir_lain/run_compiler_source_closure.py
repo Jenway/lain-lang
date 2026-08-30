@@ -40,6 +40,19 @@ MODULES = (
     "src/compiler-archive/compiler_api.lain",
     "src/compiler-archive/lainc.lain",
 )
+STD_MODULES = (
+    "std/memory_model.lain",
+    "std/allocation.lain",
+    "std/bounds.lain",
+    "std/effect.lain",
+    "std/meta.lain",
+    "std/core/vec.lain",
+    "std/core/string.lain",
+    "std/core/arena_min.lain",
+    "std/core/slice.lain",
+    "std/core/source.lain",
+    "std/core/memory.lain",
+)
 
 
 def run(*arguments: Path | str) -> subprocess.CompletedProcess[str]:
@@ -56,7 +69,36 @@ def main() -> int:
         raise RuntimeError(
             "frozen compiler is missing; run scripts/freeze_lainc_bootstrap.py"
         )
-    sources = [ROOT / relative for relative in MODULES]
+    sources = [ROOT / relative for relative in MODULES + STD_MODULES]
+    meta_source = (ROOT / "std" / "meta.lain").read_text(encoding="utf-8")
+    archive_meta_source = (ROOT / "src" / "compiler-archive" / "meta.lain").read_text(encoding="utf-8")
+    interpreter_source = (ROOT / "src" / "compiler-archive" / "l1_interpreter.lain").read_text(encoding="utf-8")
+    frozen_source = COMPILER.read_text(encoding="utf-8")
+    for spelling in (
+        "let ComptimeValue: type",
+        "let TypeRegistry: type",
+        "let intern_type =",
+        "let intern_module =",
+        "let CallablePhase: type",
+        "let callable_phase_syntax",
+        "let callable_phase_backend",
+        "let register_with_phase =",
+        "candidate.namespace == namespace",
+    ):
+        if spelling not in meta_source:
+            raise RuntimeError(f"std/meta.lain is missing {spelling}")
+    for spelling in (
+        "let MetaProgram: type",
+        "let MetaEnvironment: type",
+        "let MetaProcedure: type",
+        "let invoke_program_with_environment =",
+    ):
+        if spelling not in archive_meta_source:
+            raise RuntimeError(f"archive meta.lain is missing {spelling}")
+    if "expression_id >= unit.expressions.length()" not in interpreter_source:
+        raise RuntimeError("archive interpreter is missing expression bounds guards")
+    if '"compiler_compile_library", 24' not in frozen_source:
+        raise RuntimeError("frozen compiler does not preserve compiler_compile_library entry")
     with tempfile.TemporaryDirectory(prefix="lainc-source-closure-") as directory:
         output = Path(directory) / "compiler-closure.l1"
         generated = run(

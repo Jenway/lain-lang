@@ -10,6 +10,25 @@ let vector: Module = import("std::core::vec");
 @export
 let l1_ir: Module = std::module {
 
+    // Narrow interface used when a compiler service (such as Meta) receives
+    // an already-specialized L1 model from its caller.  Keeping the Unit type
+    // and its scalar accessors in a shape preserves the caller's nominal type
+    // identity across the factory boundary.
+    @export
+    let AccessShape: ModuleShape = std::module_shape {
+        let Unit: type;
+        let unit_procedure_count = std::func(unit: &Unit) -> usize;
+        let unit_procedure_body = std::func(unit: &Unit, id: usize) -> usize;
+        let unit_procedure_external = std::func(unit: &Unit, id: usize) -> bool;
+        let unit_region_count = std::func(unit: &Unit) -> usize;
+        let unit_region_instruction_count = std::func(unit: &Unit, id: usize) -> usize;
+        let unit_region_first_expression = std::func(unit: &Unit, id: usize) -> usize;
+        let unit_expression_count = std::func(unit: &Unit) -> usize;
+        let unit_expression_kind = std::func(unit: &Unit, id: usize) -> i32;
+        let unit_expression_i32_value = std::func(unit: &Unit, id: usize) -> i32;
+        let unit_expression_index = std::func(unit: &Unit, id: usize) -> usize;
+    };
+
     @export
     let Model = std::func(
         Memory: memory_model.Shape,
@@ -135,9 +154,10 @@ let l1_ir: Module = std::module {
             unit: &mut Unit,
         ) -> RegionId ! {Memory.Allocation.Effect} {
             let id: RegionId = unit.regions.length();
-            unit.regions.push(Region {
+            let value: Region = Region {
                 instructions: InstructionVector.new(),
-            });
+            };
+            unit.regions.push(value);
             return id;
         };
 
@@ -163,13 +183,14 @@ let l1_ir: Module = std::module {
             is_external: bool,
         ) -> ProcedureId ! {Memory.Allocation.Effect} {
             let id: ProcedureId = unit.procedures.length();
-            unit.procedures.push(Procedure {
+            let value: Procedure = Procedure {
                 name: name,
                 parameter_types: TypeIdVector.new(),
                 return_type: return_type,
                 body: body,
                 is_external: is_external,
-            });
+            };
+            unit.procedures.push(value);
             return id;
         };
 
@@ -198,6 +219,67 @@ let l1_ir: Module = std::module {
             target.arguments.push(argument);
         };
 
+        // Address accessors keep the inline Vec fields addressable when a
+        // caller only has an opaque Unit/Region pointer.  Returning a
+        // reference lets the physical lowerer emit the same field LEA used
+        // by the normal typed methods.
+        let unit_expressions = std::func(unit: &Unit) -> &ExprVector {
+            return &unit.expressions;
+        };
+        let unit_regions = std::func(unit: &Unit) -> &RegionVector {
+            return &unit.regions;
+        };
+        let unit_procedures = std::func(unit: &Unit) -> &ProcedureVector {
+            return &unit.procedures;
+        };
+        let region_instructions = std::func(region: &Region) -> &InstructionVector {
+            return &region.instructions;
+        };
+
+        // Scalar accessors are used by the bootstrap Meta bridge.  Keeping
+        // the indexing inside this typed module is important: the compiler
+        // can lower these Vec accesses to a dynamic LEA, while an opaque
+        // `addr` plus a runtime byte offset is not a valid LAIN-IR add.
+        let unit_procedure_count = std::func(unit: &Unit) -> usize {
+            return unit.procedures.length();
+        };
+        let unit_procedure_body = std::func(unit: &Unit, id: usize) -> usize {
+            let procedure: addr = unit.procedures.get(id);
+            return std::load_bits(64, procedure + 24);
+        };
+        let unit_procedure_external = std::func(unit: &Unit, id: usize) -> bool {
+            let procedure: addr = unit.procedures.get(id);
+            return std::load_bits(1, procedure + 32);
+        };
+        let unit_region_count = std::func(unit: &Unit) -> usize {
+            return unit.regions.length();
+        };
+        let unit_region_instruction_count = std::func(unit: &Unit, id: usize) -> usize {
+            let region: addr = unit.regions.get(id);
+            let instructions: addr = std::load_bits(64, region + 0);
+            return std::load_bits(64, instructions + 8);
+        };
+        let unit_region_first_expression = std::func(unit: &Unit, id: usize) -> usize {
+            let region: &Region = unit.regions.get(id);
+            let instruction: addr = region.instructions.get(0);
+            return std::load_bits(64, instruction + 16);
+        };
+        let unit_expression_count = std::func(unit: &Unit) -> usize {
+            return unit.expressions.length();
+        };
+        let unit_expression_kind = std::func(unit: &Unit, id: usize) -> i32 {
+            let expression: addr = unit.expressions.get(id);
+            return std::load_bits(32, expression + 0);
+        };
+        let unit_expression_i32_value = std::func(unit: &Unit, id: usize) -> i32 {
+            let expression: addr = unit.expressions.get(id);
+            return std::load_bits(32, expression + 40);
+        };
+        let unit_expression_index = std::func(unit: &Unit, id: usize) -> usize {
+            let expression: addr = unit.expressions.get(id);
+            return std::load_bits(64, expression + 32);
+        };
+
         return std::module {
             @export let TypeId: type = TypeId;
             @export let ExprId: type = ExprId;
@@ -206,10 +288,16 @@ let l1_ir: Module = std::module {
             @export let RegionId: type = RegionId;
             @export let ProcedureId: type = ProcedureId;
             @export let Type: type = Type;
+            @export let TypeVector: type = TypeVector;
             @export let Expr: type = Expr;
+            @export let ExprVector: type = ExprVector;
             @export let Instruction: type = Instruction;
+            @export let InstructionVector: type = InstructionVector;
             @export let Region: type = Region;
+            @export let RegionVector: type = RegionVector;
+            @export let TypeIdVector: type = TypeIdVector;
             @export let Procedure: type = Procedure;
+            @export let ProcedureVector: type = ProcedureVector;
             @export let Unit: type = Unit;
             @export let new = new;
             @export let add_type = add_type;
@@ -219,6 +307,20 @@ let l1_ir: Module = std::module {
             @export let add_procedure = add_procedure;
             @export let add_parameter = add_parameter;
             @export let append_call_argument = append_call_argument;
+            @export let unit_expressions = unit_expressions;
+            @export let unit_regions = unit_regions;
+            @export let unit_procedures = unit_procedures;
+            @export let region_instructions = region_instructions;
+            @export let unit_procedure_count = unit_procedure_count;
+            @export let unit_procedure_body = unit_procedure_body;
+            @export let unit_procedure_external = unit_procedure_external;
+            @export let unit_region_count = unit_region_count;
+            @export let unit_region_instruction_count = unit_region_instruction_count;
+            @export let unit_region_first_expression = unit_region_first_expression;
+            @export let unit_expression_count = unit_expression_count;
+            @export let unit_expression_kind = unit_expression_kind;
+            @export let unit_expression_i32_value = unit_expression_i32_value;
+            @export let unit_expression_index = unit_expression_index;
         };
     };
 };

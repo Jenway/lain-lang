@@ -13,6 +13,7 @@ let l1_verifier: Module =
     import("packages::lain::compiler::l1_verifier");
 let l1_printer: Module =
     import("packages::lain::compiler::l1_printer");
+let l1_ir: Module = import("packages::lain::compiler::l1_ir");
 let compiler_context: Module =
     import("packages::lain::compiler::compiler_context");
 
@@ -25,7 +26,8 @@ let compiler_core: Module = std::module {
         let Sources: Module =
             source_workspace.SourceWorkspace(Memory);
         let Elaborator: Module = elaborator.Elaborator(Memory);
-        let Meta: Module = meta.Meta(Memory);
+        let L1: Module = l1_ir.l1_ir.Model(Memory);
+        let Meta: Module = meta.Meta(Memory, L1, L1);
         let Lower: Module = lower.Lower(Memory);
         let Verifier: Module = l1_verifier.Verifier(Memory);
         let Printer: Module = l1_printer.Printer(Memory);
@@ -127,17 +129,35 @@ let compiler_core: Module = std::module {
 
             let meta_registry: Meta.Registry =
                 Meta.new_registry();
+            // Meta callables receive an explicit program, L1 unit and lexical
+            // environment.  The compiler's syntax expansion pass has no L1
+            // body of its own yet, so use an empty unit as the expansion
+            // context; callers with syntax procedures pass their populated
+            // unit through the same API.
+            let meta_unit: Meta.L1.Unit = Meta.L1.new();
+            let meta_program: Meta.MetaProgram = Meta.meta_program_new(
+                1,
+                1,
+                0,
+            );
+            let meta_environment: Meta.MetaEnvironment =
+                Meta.meta_environment_new(1, 0);
             let meta_index: usize = 0;
             while meta_index < workspace.sources.length() {
                 let syntax_unit =
                     workspace.sources.get(meta_index).syntax_unit;
-                let root = workspace.syntax.units
-                    .get(syntax_unit).root;
+                let root = Syntax.unit_root(
+                    &workspace.syntax,
+                    syntax_unit,
+                );
                 let expanded: Meta.Expansion = Meta.expand(
                     &mut workspace.syntax,
                     syntax_unit,
                     root,
                     &meta_registry,
+                    &meta_program,
+                    &meta_environment,
+                    &meta_unit,
                 );
                 if expanded.diagnostic != 0 {
                     Context.add_diagnostic(

@@ -32,16 +32,54 @@ let l1_builder: Module = std::module {
             };
         };
 
+        // Builder operations reject malformed ids and incompatible scalar
+        // types before they reach the verifier.  `usize_max()` is the
+        // existing invalid-id sentinel used by the dynamic L1 model.
+        let valid_type = std::func(
+            unit: &L1.Unit,
+            type_id: L1.TypeId,
+        ) -> bool ! {Memory.Bounds.Effect} {
+            return type_id < unit.types.length();
+        };
+
+        let same_type = std::func(
+            unit: &L1.Unit,
+            left: L1.TypeId,
+            right: L1.TypeId,
+        ) -> bool ! {Memory.Bounds.Effect} {
+            if !valid_type(unit, left) || !valid_type(unit, right) {
+                return false;
+            }
+            let left_value: &L1.Type = unit.types.get(left);
+            let right_value: &L1.Type = unit.types.get(right);
+            return left_value.kind == right_value.kind
+                && left_value.bit_width == right_value.bit_width;
+        };
+
+        let valid_expression = std::func(
+            unit: &L1.Unit,
+            expression: L1.ExprId,
+        ) -> bool ! {Memory.Bounds.Effect} {
+            if expression >= unit.expressions.length() { return false; }
+            let value: &L1.Expr = unit.expressions.get(expression);
+            return valid_type(unit, value.result_type);
+        };
+
         let i32_literal = std::func(
             unit: &mut L1.Unit,
             type_id: L1.TypeId,
             value: i32,
         ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+            if !valid_type(unit, type_id) {
+                return std::usize_max();
+            }
             let expression: L1.Expr = empty_expression();
             expression.kind = 1;
             expression.result_type = type_id;
             expression.i32_value = value;
-            return L1.add_expression(unit, expression);
+            let id: L1.ExprId = unit.expressions.length();
+            unit.expressions.push(expression);
+            return id;
         };
 
         let parameter = std::func(
@@ -49,11 +87,16 @@ let l1_builder: Module = std::module {
             type_id: L1.TypeId,
             index: usize,
         ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+            if !valid_type(unit, type_id) {
+                return std::usize_max();
+            }
             let expression: L1.Expr = empty_expression();
             expression.kind = 2;
             expression.result_type = type_id;
             expression.index = index;
-            return L1.add_expression(unit, expression);
+            let id: L1.ExprId = unit.expressions.length();
+            unit.expressions.push(expression);
+            return id;
         };
 
         let binary = std::func(
@@ -63,12 +106,30 @@ let l1_builder: Module = std::module {
             left: L1.ExprId,
             right: L1.ExprId,
         ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+            if kind < 3 || kind > 11
+                || !valid_type(unit, type_id)
+                || !valid_expression(unit, left)
+                || !valid_expression(unit, right)
+                || !same_type(
+                    unit,
+                    unit.expressions.get(left).result_type,
+                    unit.expressions.get(right).result_type,
+                )
+                || !same_type(
+                    unit,
+                    unit.expressions.get(left).result_type,
+                    type_id,
+                ) {
+                return std::usize_max();
+            }
             let expression: L1.Expr = empty_expression();
             expression.kind = kind;
             expression.result_type = type_id;
             expression.left = left;
             expression.right = right;
-            return L1.add_expression(unit, expression);
+            let id: L1.ExprId = unit.expressions.length();
+            unit.expressions.push(expression);
+            return id;
         };
 
         let call = std::func(
@@ -76,11 +137,21 @@ let l1_builder: Module = std::module {
             type_id: L1.TypeId,
             procedure: L1.ProcedureId,
         ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+            if !valid_type(unit, type_id)
+                || procedure >= unit.procedures.length() {
+                return std::usize_max();
+            }
+            let target: &L1.Procedure = unit.procedures.get(procedure);
+            if !same_type(unit, target.return_type, type_id) {
+                return std::usize_max();
+            }
             let expression: L1.Expr = empty_expression();
             expression.kind = 20;
             expression.result_type = type_id;
             expression.procedure = procedure;
-            return L1.add_expression(unit, expression);
+            let id: L1.ExprId = unit.expressions.length();
+            unit.expressions.push(expression);
+            return id;
         };
 
         let append_return = std::func(
@@ -91,7 +162,13 @@ let l1_builder: Module = std::module {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
-            return L1.append_instruction(unit, region, L1.Instruction {
+            if region >= unit.regions.length()
+                || !valid_expression(unit, value) {
+                return std::usize_max();
+            }
+            let id: L1.InstructionId =
+                unit.regions.get_mut(region).instructions.length();
+            unit.regions.get_mut(region).instructions.push(L1.Instruction {
                 kind: 1,
                 name: empty_name(),
                 expression: value,
@@ -100,6 +177,39 @@ let l1_builder: Module = std::module {
                 first_region: 0,
                 second_region: 0,
             });
+            return id;
+        };
+
+        let append_return_typed = std::func(
+            unit: &mut L1.Unit,
+            region: L1.RegionId,
+            value: L1.ExprId,
+            return_type: L1.TypeId,
+        ) -> L1.InstructionId ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            if region >= unit.regions.length()
+                || !valid_expression(unit, value)
+                || !same_type(
+                    unit,
+                    unit.expressions.get(value).result_type,
+                    return_type,
+                ) {
+                return std::usize_max();
+            }
+            let id: L1.InstructionId =
+                unit.regions.get_mut(region).instructions.length();
+            unit.regions.get_mut(region).instructions.push(L1.Instruction {
+                kind: 1,
+                name: empty_name(),
+                expression: value,
+                destination: 0,
+                value_type: return_type,
+                first_region: 0,
+                second_region: 0,
+            });
+            return id;
         };
 
         let append_if = std::func(
@@ -112,7 +222,21 @@ let l1_builder: Module = std::module {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
-            return L1.append_instruction(unit, region, L1.Instruction {
+            if region >= unit.regions.length()
+                || !valid_expression(unit, condition)
+                || then_region >= unit.regions.length()
+                || else_region >= unit.regions.length() {
+                return std::usize_max();
+            }
+            let condition_value: &L1.Expr = unit.expressions.get(condition);
+            let condition_type: &L1.Type =
+                unit.types.get(condition_value.result_type);
+            if condition_type.kind != 1 || condition_type.bit_width != 1 {
+                return std::usize_max();
+            }
+            let id: L1.InstructionId =
+                unit.regions.get_mut(region).instructions.length();
+            unit.regions.get_mut(region).instructions.push(L1.Instruction {
                 kind: 2,
                 name: empty_name(),
                 expression: condition,
@@ -121,21 +245,107 @@ let l1_builder: Module = std::module {
                 first_region: then_region,
                 second_region: else_region,
             });
+            return id;
         };
 
         return std::module {
             @export let L1: Module = L1;
-            @export let new = L1.new;
+            @export
+            let new = std::func() -> L1.Unit {
+                return L1.Unit {
+                    types: L1.TypeVector.new(),
+                    expressions: L1.ExprVector.new(),
+                    regions: L1.RegionVector.new(),
+                    procedures: L1.ProcedureVector.new(),
+                };
+            };
             @export let i32_literal = i32_literal;
             @export let parameter = parameter;
             @export let binary = binary;
             @export let call = call;
-            @export let append_call_argument = L1.append_call_argument;
-            @export let begin_region = L1.begin_region;
+            @export
+            let append_call_argument = std::func(
+                unit: &mut L1.Unit,
+                call: L1.ExprId,
+                argument: L1.ExprId,
+            ) -> unit ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            } {
+                if call >= unit.expressions.length()
+                    || argument >= unit.expressions.length() {
+                    return;
+                }
+                let target: &mut L1.Expr = unit.expressions.get_mut(call);
+                if target.kind != 20
+                    || target.procedure >= unit.procedures.length() {
+                    return;
+                }
+                let procedure: &L1.Procedure =
+                    unit.procedures.get(target.procedure);
+                let index: usize = target.arguments.length();
+                if index >= procedure.parameter_types.length()
+                    || !same_type(
+                        unit,
+                        unit.expressions.get(argument).result_type,
+                        *procedure.parameter_types.get(index),
+                    ) {
+                    return;
+                }
+                target.arguments.push(argument);
+            };
+            @export
+            let begin_region = std::func(
+                unit: &mut L1.Unit,
+            ) -> L1.RegionId ! {Memory.Allocation.Effect} {
+                let id: L1.RegionId = unit.regions.length();
+                unit.regions.push(L1.Region {
+                    instructions: L1.InstructionVector.new(),
+                });
+                return id;
+            };
             @export let append_return = append_return;
+            @export let append_return_typed = append_return_typed;
             @export let append_if = append_if;
-            @export let add_procedure = L1.add_procedure;
-            @export let add_parameter = L1.add_parameter;
+            @export
+            let add_procedure = std::func(
+                unit: &mut L1.Unit,
+                name: Memory.String,
+                return_type: L1.TypeId,
+                body: L1.RegionId,
+                is_external: bool,
+            ) -> L1.ProcedureId ! {Memory.Allocation.Effect} {
+                if !valid_type(unit, return_type)
+                    || body >= unit.regions.length() {
+                    return std::usize_max();
+                }
+                let id: L1.ProcedureId = unit.procedures.length();
+                unit.procedures.push(L1.Procedure {
+                    name: name,
+                    parameter_types: L1.TypeIdVector.new(),
+                    return_type: return_type,
+                    body: body,
+                    is_external: is_external,
+                });
+                return id;
+            };
+            @export
+            let add_parameter = std::func(
+                unit: &mut L1.Unit,
+                procedure: L1.ProcedureId,
+                parameter_type: L1.TypeId,
+            ) -> unit ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            } {
+                if procedure >= unit.procedures.length()
+                    || !valid_type(unit, parameter_type) {
+                    return;
+                }
+                let target: &mut L1.Procedure =
+                    unit.procedures.get_mut(procedure);
+                target.parameter_types.push(parameter_type);
+            };
         };
     };
 };

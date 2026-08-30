@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +17,8 @@ L1CHECK = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-print.exe" if os.name == "nt" else "lainir-print"
 )
 OUTPUT = ROOT / "build" / "lainir" / "lain_compiler.l1"
+STAMP = OUTPUT.with_suffix(".stamp.json")
+SCHEMA = "lain-compiler-bundle-v1"
 MODULES = (
     ROOT / "src" / "lainir" / "tools" / "source.l1",
     ROOT / "src" / "lainir" / "lain" / "raw_ast.l1",
@@ -54,10 +58,62 @@ def run(arguments: list[Path | str]) -> None:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
 
+def input_fingerprint() -> str:
+    digest = hashlib.sha256(SCHEMA.encode("utf-8"))
+    digest.update(BUNDLER.read_bytes())
+    for path in MODULES:
+        digest.update(str(path.relative_to(ROOT)).replace("\\", "/").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def cache_valid(fingerprint: str) -> bool:
+    if not OUTPUT.is_file() or not STAMP.is_file():
+        return False
+    try:
+        stamp = json.loads(STAMP.read_text(encoding="utf-8"))
+        output_hash = hashlib.sha256(OUTPUT.read_bytes()).hexdigest()
+    except (OSError, ValueError, TypeError):
+        return False
+    return (
+        stamp.get("schema") == SCHEMA
+        and stamp.get("inputs") == fingerprint
+        and stamp.get("output") == output_hash
+    )
+
+
+def write_stamp(fingerprint: str) -> None:
+    STAMP.write_text(
+        json.dumps(
+            {
+                "schema": SCHEMA,
+                "inputs": fingerprint,
+                "output": hashlib.sha256(OUTPUT.read_bytes()).hexdigest(),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
 def main() -> int:
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    fingerprint = input_fingerprint()
+    if cache_valid(fingerprint):
+        try:
+            run([L1CHECK, OUTPUT, "compiler_compile"])
+        except RuntimeError:
+            pass
+        else:
+            print(f"{OUTPUT.relative_to(ROOT)} (cache hit)")
+            return 0
     run([sys.executable, BUNDLER, "-o", OUTPUT, *MODULES])
     run([L1CHECK, OUTPUT, "compiler_compile"])
+    write_stamp(fingerprint)
     print(OUTPUT.relative_to(ROOT))
     return 0
 

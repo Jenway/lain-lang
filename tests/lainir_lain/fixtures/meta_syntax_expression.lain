@@ -1,0 +1,132 @@
+let memory_model: Module = import("std::memory_model");
+let arena: Module = import("std::core::arena_min");
+let bounds: Module = import("std::bounds");
+let memory_core: Module = import("std::core::memory");
+let l1_package: Module = import("packages::lain::compiler::l1_ir");
+let syntax_package: Module = import("packages::lain::compiler::syntax");
+let meta_package: Module = import("packages::lain::compiler::meta");
+
+let memory: Module = memory_model.Model(
+    arena.arena_min.Policy,
+    bounds.bounds.Unchecked,
+);
+let L1: Module = l1_package.l1_ir.Model(memory);
+let Syntax: Module = syntax_package.syntax.Syntax(memory);
+let Meta: Module = meta_package.meta.Meta(memory, L1, L1);
+
+let main = std::func() -> i32 {
+    let store: Syntax.Store = Syntax.new_store();
+    let source_unit: Syntax.UnitId = Syntax.parse(
+        &mut store,
+        memory_core.memory.byte_span("@attr x", 7),
+    );
+    let root: Syntax.NodeId = Syntax.unit_root(&store, source_unit);
+
+    let unit: L1.Unit = L1.new();
+    let type_value: L1.Type = L1.Type { kind: 1, bit_width: 32 };
+    let type_id: L1.TypeId = L1.add_type(&mut unit, type_value);
+    let region: L1.RegionId = L1.begin_region(&mut unit);
+
+    let parameter_value: L1.Expr = L1.Expr {
+        kind: 2,
+        result_type: type_id,
+        left: 0,
+        right: 0,
+        index: 0,
+        i32_value: 0,
+        procedure: std::usize_max(),
+        arguments: L1.ExprIdVector.new(),
+    };
+    let parameter: L1.ExprId = L1.add_expression(
+        &mut unit,
+        parameter_value,
+    );
+    let zero_value: L1.Expr = L1.Expr {
+        kind: 1,
+        result_type: type_id,
+        left: 0,
+        right: 0,
+        index: 0,
+        i32_value: 0,
+        procedure: std::usize_max(),
+        arguments: L1.ExprIdVector.new(),
+    };
+    let zero: L1.ExprId = L1.add_expression(&mut unit, zero_value);
+    let expression_value: L1.Expr = L1.Expr {
+        kind: 3,
+        result_type: type_id,
+        left: parameter,
+        right: zero,
+        index: 0,
+        i32_value: 0,
+        procedure: std::usize_max(),
+        arguments: L1.ExprIdVector.new(),
+    };
+    let expression: L1.ExprId = L1.add_expression(
+        &mut unit,
+        expression_value,
+    );
+    let procedure: L1.ProcedureId = L1.add_procedure(
+        &mut unit,
+        memory.String.new(),
+        type_id,
+        region,
+        false,
+    );
+    L1.add_parameter(&mut unit, procedure, type_id);
+    let instruction_value: L1.Instruction = L1.Instruction {
+        kind: 1,
+        name: memory.String.new(),
+        expression: expression,
+        destination: 0,
+        value_type: type_id,
+        first_region: 0,
+        second_region: 0,
+    };
+    L1.append_instruction(
+        &mut unit,
+        region,
+        instruction_value,
+    );
+
+    let program: Meta.MetaProgram = Meta.meta_program_new(
+        12,
+        2,
+        source_unit,
+    );
+    let meta_procedure: Meta.MetaProcedure = Meta.meta_procedure_new(
+        8,
+        12,
+        procedure,
+        Meta.callable_phase_syntax(),
+        0,
+        1,
+        1,
+    );
+    let registry: Meta.Registry = Meta.new_registry();
+    let name: memory.String = memory.String.new();
+    let callable: Meta.MetaCallableId = Meta.meta_program_register(
+        &mut program,
+        &mut registry,
+        name,
+        meta_procedure,
+    );
+    let environment: Meta.MetaEnvironment = Meta.meta_environment_new(6, 0);
+    let expansion: Meta.Expansion = Meta.expand(
+        &mut store,
+        source_unit,
+        root,
+        &registry,
+        &program,
+        &environment,
+        &unit,
+    );
+    if Meta.expansion_diagnostic(&expansion) != 0 {
+        return 200 + Meta.expansion_diagnostic(&expansion);
+    }
+    if Meta.expansion_length(&expansion) != 1 {
+        return 300;
+    }
+    if callable != 0 { return 400; }
+    return 0;
+};

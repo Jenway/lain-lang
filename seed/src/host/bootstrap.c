@@ -28,12 +28,220 @@ typedef struct {
 } BootstrapSource;
 
 typedef struct {
+  void *pointer;
+  int virtual_alloc;
+  size_t size;
+} BootstrapAllocation;
+
+typedef struct BootstrapArena BootstrapArena;
+
+/* Every small arena allocation carries a header immediately before the
+ * returned address.  The header lets bootstrap.release-pages validate and
+ * retire an individual object without handing an interior pointer to free().
+ * Arenas are reclaimed as soon as their last object is released. */
+typedef struct BootstrapArenaObject {
+  uint32_t magic;
+  uint32_t released;
+  BootstrapArena *arena;
+  size_t size;
+} BootstrapArenaObject;
+
+#define BOOTSTRAP_ARENA_OBJECT_MAGIC 0x4c414f42u /* "LAOB" */
+
+/* The compiler's physical IR builder asks for millions of tiny objects
+ * (mostly 8/16 byte records).  Giving every one of those objects to the CRT
+ * heap makes Windows retain gigabytes of virtual address space even though
+ * the live data is only a few dozen MiB.  Small allocations are therefore
+ * carved out of zeroed pages owned by this context. */
+struct BootstrapArena {
+  unsigned char *memory;
+  size_t capacity;
+  size_t used;
+  size_t live_objects;
+  int virtual_alloc;
+  BootstrapArena *next;
+};
+
+#define BOOTSTRAP_SMALL_ALLOC_LIMIT 4096u
+#define BOOTSTRAP_ARENA_BYTES (1024u * 1024u)
+
+typedef struct {
   BootstrapSource *sources;
   size_t source_count;
   const char *artifact_path;
   FILE *artifact;
   const char *error;
+  BootstrapAllocation *allocated_pages;
+  size_t allocated_page_count;
+  size_t allocated_page_capacity;
+  BootstrapArena *small_arenas;
+  uint64_t allocation_count;
+  uint64_t arena_bytes;
+  uint64_t diagnostic_count;
+  uint64_t allocated_page_bytes;
+  uint64_t max_allocated_page_bytes;
+  int trace_allocations;
 } BootstrapContext;
+
+static void bootstrap_release_pages(BootstrapContext *context) {
+  size_t index;
+  if (!context) return;
+  if (context->trace_allocations || getenv("LAINIR_TRACE_PROFILE")) {
+    fprintf(stderr,
+            "bootstrap summary allocations=%llu logical=%llu arena=%llu large=%zu diagnostics=%llu\n",
+            (unsigned long long)context->allocation_count,
+            (unsigned long long)context->allocated_page_bytes,
+            (unsigned long long)context->arena_bytes,
+            context->allocated_page_count,
+            (unsigned long long)context->diagnostic_count);
+  }
+  for (index = 0; index < context->allocated_page_count; ++index) {
+#ifdef _WIN32
+    if (context->allocated_pages[index].virtual_alloc)
+      VirtualFree(context->allocated_pages[index].pointer, 0, MEM_RELEASE);
+    else
+      free(context->allocated_pages[index].pointer);
+#else
+    free(context->allocated_pages[index].pointer);
+#endif
+  }
+  free(context->allocated_pages);
+  context->allocated_pages = NULL;
+  context->allocated_page_count = 0;
+  context->allocated_page_capacity = 0;
+  while (context->small_arenas) {
+    BootstrapArena *arena = context->small_arenas;
+#ifdef _WIN32
+    if (arena->virtual_alloc)
+      VirtualFree(arena->memory, 0, MEM_RELEASE);
+    else
+      free(arena->memory);
+#else
+    free(arena->memory);
+#endif
+    context->small_arenas = arena->next;
+    free(arena);
+  }
+  context->allocated_page_bytes = 0;
+  context->arena_bytes = 0;
+}
+
+static int bootstrap_arena_contains(
+    const BootstrapContext *context, const void *pointer) {
+  const BootstrapArena *arena;
+  uintptr_t address = (uintptr_t)pointer;
+  if (!context || !pointer) return 0;
+  for (arena = context->small_arenas; arena; arena = arena->next) {
+    uintptr_t start = (uintptr_t)arena->memory;
+    if (address >= start && address - start < arena->used)
+      return 1;
+  }
+  return 0;
+}
+
+static int bootstrap_arena_release_object(
+    BootstrapContext *context, void *pointer) {
+  BootstrapArena *arena;
+  BootstrapArena **slot;
+  BootstrapArenaObject *object;
+  uintptr_t address;
+  uintptr_t start;
+  if (!context || !pointer) return 0;
+  if (!bootstrap_arena_contains(context, pointer)) return 0;
+  address = (uintptr_t)pointer;
+  for (arena = context->small_arenas; arena; arena = arena->next) {
+    start = (uintptr_t)arena->memory;
+    if (address >= start && address - start < arena->used) break;
+  }
+  if (!arena || address - start < sizeof(BootstrapArenaObject)) return -1;
+  object = ((BootstrapArenaObject *)pointer) - 1;
+  if (object->magic != BOOTSTRAP_ARENA_OBJECT_MAGIC ||
+      object->arena != arena || object->arena->live_objects == 0)
+    return -1;
+  if (object->released) return -1;
+  arena = object->arena;
+  object->released = 1;
+  arena->live_objects--;
+  if (context->allocated_page_bytes >= (uint64_t)object->size)
+    context->allocated_page_bytes -= (uint64_t)object->size;
+  else
+    context->allocated_page_bytes = 0;
+  if (arena->live_objects != 0) return 1;
+
+  /* No object in this arena remains live, so unlink and reclaim its backing
+   * page.  The arena header itself is separate from that page. */
+  slot = &context->small_arenas;
+  while (*slot && *slot != arena) slot = &(*slot)->next;
+  if (*slot == arena) *slot = arena->next;
+#ifdef _WIN32
+  if (arena->virtual_alloc)
+    VirtualFree(arena->memory, 0, MEM_RELEASE);
+  else
+    free(arena->memory);
+#else
+  free(arena->memory);
+#endif
+  if (context->arena_bytes >= (uint64_t)arena->capacity)
+    context->arena_bytes -= (uint64_t)arena->capacity;
+  else
+    context->arena_bytes = 0;
+  free(arena);
+  return 1;
+}
+
+static void *bootstrap_arena_allocate(
+    BootstrapContext *context, size_t size) {
+  BootstrapArena *arena;
+  size_t aligned = (size + 7u) & ~(size_t)7u;
+  size_t required = sizeof(BootstrapArenaObject) + aligned;
+  if (!aligned) aligned = 8;
+  required = sizeof(BootstrapArenaObject) + aligned;
+  for (arena = context->small_arenas; arena; arena = arena->next) {
+    if (required <= arena->capacity - arena->used) {
+      BootstrapArenaObject *object =
+          (BootstrapArenaObject *)(arena->memory + arena->used);
+      arena->used += required;
+      object->magic = BOOTSTRAP_ARENA_OBJECT_MAGIC;
+      object->released = 0;
+      object->arena = arena;
+      object->size = size;
+      memset(object + 1, 0, aligned);
+      arena->live_objects++;
+      return object + 1;
+    }
+  }
+  arena = (BootstrapArena *)calloc(1, sizeof(*arena));
+  if (!arena) return NULL;
+  arena->capacity = required > BOOTSTRAP_ARENA_BYTES
+      ? required : BOOTSTRAP_ARENA_BYTES;
+#ifdef _WIN32
+  if (arena->capacity >= 65536) {
+    arena->memory = (unsigned char *)VirtualAlloc(
+        NULL, arena->capacity, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    arena->virtual_alloc = 1;
+  } else {
+    arena->memory = (unsigned char *)calloc(arena->capacity, 1);
+  }
+#else
+  arena->memory = (unsigned char *)calloc(arena->capacity, 1);
+#endif
+  if (!arena->memory) {
+    free(arena);
+    return NULL;
+  }
+  arena->next = context->small_arenas;
+  context->small_arenas = arena;
+  context->arena_bytes += (uint64_t)arena->capacity;
+  BootstrapArenaObject *object = (BootstrapArenaObject *)arena->memory;
+  arena->used = required;
+  object->magic = BOOTSTRAP_ARENA_OBJECT_MAGIC;
+  object->released = 0;
+  object->arena = arena;
+  object->size = size;
+  memset(object + 1, 0, aligned);
+  arena->live_objects = 1;
+  return object + 1;
+}
 
 static unsigned char *read_file_bytes(const char *path, size_t *length_out) {
   return lainir_host_read_file(path, length_out);
@@ -130,27 +338,90 @@ static LainirRunStatus copy_bytes(
 static LainirRunStatus allocate_pages(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
   size_t size;
   void *memory;
-  (void)user_data;
+  int virtual_alloc = 0;
   if (count != 1 || args[0].kind != LAINIR_VALUE_BITS) {
     *error = "bootstrap.allocate-pages expects one integer size";
     return LAINIR_RUN_BAD_CALL;
   }
   size = (size_t)args[0].as.bits;
+  if (context->max_allocated_page_bytes &&
+      (context->allocated_page_bytes > context->max_allocated_page_bytes ||
+       (uint64_t)size > context->max_allocated_page_bytes -
+           context->allocated_page_bytes)) {
+    *error = "bootstrap.allocate-pages exceeded host allocation budget";
+    return LAINIR_RUN_TRAP;
+  }
+  context->allocation_count++;
+
+  if (size <= BOOTSTRAP_SMALL_ALLOC_LIMIT) {
+    memory = bootstrap_arena_allocate(context, size);
+    if (!memory) {
+      *error = "bootstrap.allocate-pages arena allocation failed";
+      return LAINIR_RUN_TRAP;
+    }
+    context->allocated_page_bytes += (uint64_t)size;
+    if (context->trace_allocations &&
+        (context->allocation_count <= 16 ||
+         (context->allocation_count % 100000) == 0)) {
+      fprintf(stderr, "bootstrap alloc count=%llu size=%zu total=%llu (arena)\n",
+              (unsigned long long)context->allocation_count, size,
+              (unsigned long long)context->allocated_page_bytes);
+    }
+    *result = lainir_value_addr(memory);
+    return LAINIR_RUN_OK;
+  }
   /* VirtualAlloc returns demand-zero committed pages on Windows.  Unlike
    * calloc, it does not touch every byte up front, so the many 64 KiB/1 MiB
    * compiler buffers only consume physical memory for pages the compiler
    * actually uses. */
 #ifdef _WIN32
-  memory = VirtualAlloc(NULL, size ? size : 1,
-                        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  if (size >= 65536) {
+    memory = VirtualAlloc(NULL, size ? size : 1,
+                          MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    virtual_alloc = 1;
+  } else {
+    memory = calloc(size ? size : 1, 1);
+  }
 #else
   memory = calloc(size ? size : 1, 1);
 #endif
   if (!memory) {
     *error = "bootstrap.allocate-pages failed";
     return LAINIR_RUN_TRAP;
+  }
+  if (context->allocated_page_count == context->allocated_page_capacity) {
+    size_t next_capacity = context->allocated_page_capacity
+        ? context->allocated_page_capacity * 2 : 256;
+    BootstrapAllocation *next = realloc(
+        context->allocated_pages,
+        next_capacity * sizeof(BootstrapAllocation));
+    if (!next) {
+#ifdef _WIN32
+      if (virtual_alloc)
+        VirtualFree(memory, 0, MEM_RELEASE);
+      else
+        free(memory);
+#else
+      free(memory);
+#endif
+      *error = "bootstrap.allocate-pages tracking failed";
+      return LAINIR_RUN_TRAP;
+    }
+    context->allocated_pages = next;
+    context->allocated_page_capacity = next_capacity;
+  }
+  context->allocated_pages[context->allocated_page_count++] =
+      (BootstrapAllocation){memory, virtual_alloc, size};
+  context->allocated_page_bytes += (uint64_t)size;
+  if (context->trace_allocations &&
+      (context->allocation_count <= 16 ||
+       (context->allocation_count % 100000) == 0 || size >= 65536)) {
+    fprintf(stderr, "bootstrap alloc count=%llu size=%zu total=%llu\n",
+            (unsigned long long)context->allocation_count, size,
+            (unsigned long long)context->allocated_page_bytes);
   }
   *result = lainir_value_addr(memory);
   return LAINIR_RUN_OK;
@@ -159,21 +430,57 @@ static LainirRunStatus allocate_pages(
 static LainirRunStatus release_pages(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
-  (void)user_data;
+  BootstrapContext *context = user_data;
+  size_t index;
   if (count != 1 || args[0].kind != LAINIR_VALUE_ADDR) {
     *error = "bootstrap.release-pages expects one address";
     return LAINIR_RUN_BAD_CALL;
   }
+  for (index = 0; index < context->allocated_page_count; ++index) {
+    if (context->allocated_pages[index].pointer == args[0].as.addr) {
+      int virtual_alloc = context->allocated_pages[index].virtual_alloc;
+      size_t released_size = context->allocated_pages[index].size;
 #ifdef _WIN32
-  if (!VirtualFree(args[0].as.addr, 0, MEM_RELEASE)) {
-    *error = "bootstrap.release-pages failed";
-    return LAINIR_RUN_BAD_CALL;
-  }
+      if (virtual_alloc) {
+        if (!VirtualFree(args[0].as.addr, 0, MEM_RELEASE)) {
+          *error = "bootstrap.release-pages failed";
+          return LAINIR_RUN_BAD_CALL;
+        }
+      } else {
+        free(args[0].as.addr);
+      }
 #else
-  free(args[0].as.addr);
+      (void)virtual_alloc;
+      free(args[0].as.addr);
 #endif
-  *result = lainir_value_unit();
-  return LAINIR_RUN_OK;
+      context->allocated_pages[index] =
+          context->allocated_pages[--context->allocated_page_count];
+      context->allocated_page_bytes -= (uint64_t)released_size;
+      *result = lainir_value_unit();
+      return LAINIR_RUN_OK;
+    }
+  }
+  /* Arena-owned objects are released through their in-band header.  The
+   * backing page is reclaimed when its last object is gone; this keeps the
+   * capability safe without passing an interior pointer to the CRT allocator. */
+  {
+    int arena_release = bootstrap_arena_release_object(
+        context, args[0].as.addr);
+    if (arena_release > 0) {
+      *result = lainir_value_unit();
+      return LAINIR_RUN_OK;
+    }
+    if (arena_release < 0) {
+      *error = "bootstrap.release-pages received a stale arena address";
+      return LAINIR_RUN_BAD_CALL;
+    }
+  }
+  if (bootstrap_arena_contains(context, args[0].as.addr)) {
+    *result = lainir_value_unit();
+    return LAINIR_RUN_OK;
+  }
+  *error = "bootstrap.release-pages received an unknown address";
+  return LAINIR_RUN_BAD_CALL;
 }
 
 static LainirRunStatus write_bytes(
@@ -206,8 +513,8 @@ static LainirRunStatus write_bytes(
 static LainirRunStatus write_diagnostic(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
   const void *bytes;
-  (void)user_data;
   if (count != 2 ||
       (args[0].kind != LAINIR_VALUE_ADDR &&
        args[0].kind != LAINIR_VALUE_STRING) ||
@@ -218,6 +525,7 @@ static LainirRunStatus write_diagnostic(
   bytes = args[0].kind == LAINIR_VALUE_STRING
               ? (const void *)args[0].as.string
               : args[0].as.addr;
+  context->diagnostic_count++;
   fwrite(bytes, 1, (size_t)args[1].as.bits, stderr);
   fputc('\n', stderr);
   *result = lainir_value_unit();
@@ -429,6 +737,22 @@ int bootstrap_run_cli(int argc, char **argv) {
     if (step_limit_end != step_limit_text && *step_limit_end == '\0' && step_limit > 0)
       lainir_caps_set_limits(caps, (uint64_t)step_limit, 256, 0);
   }
+  const char *alloc_limit_text = getenv("LAINIR_BOOTSTRAP_MAX_ALLOC_BYTES");
+  if (alloc_limit_text && *alloc_limit_text) {
+    char *alloc_limit_end = NULL;
+    unsigned long long alloc_limit =
+        strtoull(alloc_limit_text, &alloc_limit_end, 10);
+    if (alloc_limit_end != alloc_limit_text && *alloc_limit_end == '\0' &&
+        alloc_limit > 0) {
+      context.max_allocated_page_bytes = (uint64_t)alloc_limit;
+      /* Apply the same ceiling to interpreter-owned #alloca memory.  Without
+       * this, a malformed self-hosting loop can bypass the host-page budget
+       * and still grow the process until the OS kills it. */
+      lainir_caps_set_limits(caps, 0, 256, (uint64_t)alloc_limit);
+    }
+  }
+  context.trace_allocations = getenv("LAINIR_TRACE_ALLOC") &&
+      getenv("LAINIR_TRACE_ALLOC")[0] == '1';
 
   request.module = module;
   request.entry_name = entry_name;
@@ -451,6 +775,7 @@ int bootstrap_run_cli(int argc, char **argv) {
 cleanup:
   if (context.artifact)
     fclose(context.artifact);
+  bootstrap_release_pages(&context);
   if (context.sources) {
     for (size_t index = 0; index < context.source_count; ++index)
       free(context.sources[index].bytes);

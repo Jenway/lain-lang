@@ -82,6 +82,8 @@ typedef struct {
   const char *fast_active_name;
   uint64_t trace_expr_kinds[64];
   uint64_t trace_inst_kinds[16];
+  uint64_t trace_meta_cache_hits;
+  uint64_t trace_meta_cache_misses;
 } LainirInterpreter;
 
 /* ── forward declarations for mutual recursion ── */
@@ -353,6 +355,10 @@ static void interp_trace_finish(LainirInterpreter *interp) {
     if (interp->trace_expr_kinds[i])
       fprintf(out, "expression\t%s\t%llu\t0\n", expr_names[i],
               (unsigned long long)interp->trace_expr_kinds[i]);
+  fprintf(out, "cache\tmeta_lookup_hits\t%llu\t0\n",
+          (unsigned long long)interp->trace_meta_cache_hits);
+  fprintf(out, "cache\tmeta_lookup_misses\t%llu\t0\n",
+          (unsigned long long)interp->trace_meta_cache_misses);
   fprintf(out, "summary\ttotal\t0\t%llu\n",
           (unsigned long long)interp->steps);
   if (out != stderr) fclose(out);
@@ -478,6 +484,18 @@ static void interp_trap(LainirInterpreter *interp, const char *error) {
   if (getenv("LAINIR_TRACE_FAST") && interp->fast_active_name)
     fprintf(stderr, "lainir fast trap: %s (%s)\n",
             interp->fast_active_name, error);
+  if (getenv("LAINIR_TRACE_TRAP") && interp->active_frame) {
+    const char *name = "<unknown>";
+    if (interp->active_frame->sub && interp->active_frame->sub->name)
+      name = interp->active_frame->sub->name;
+    fprintf(stderr, "lainir trap: %s in %s", error, name);
+    for (LainirFrame *caller = interp->active_frame->caller;
+         caller; caller = caller->caller) {
+      if (caller->sub && caller->sub->name)
+        fprintf(stderr, " caller=%s", caller->sub->name);
+    }
+    fputc('\n', stderr);
+  }
 }
 
 static uint64_t interp_value_bits(LainirInterpreter *interp, LainirValue value, const char *ctx) {
@@ -785,23 +803,26 @@ static LainirValue interp_call_host(LainirInterpreter *interp, const char *name,
 static LainirValue interp_eval_call(LainirInterpreter *interp, LainirFrame *frame,
                                      L1Expr *expr) {
   L1Subroutine *sub = interp_find_sub(interp, expr->data.call.fn_name);
-  LainirValue *args = NULL;
+  LainirValue args_inline[8];
+  LainirValue *args = args_inline;
+  int args_heap = 0;
   LainirValue result = lainir_value_unit();
-  if (expr->data.call.arg_count) {
+  if (expr->data.call.arg_count > sizeof(args_inline) / sizeof(args_inline[0])) {
     args = calloc(expr->data.call.arg_count, sizeof(LainirValue));
+    args_heap = 1;
     if (!args) { interp_trap(interp, "out of memory"); return result; }
   }
   for (uint32_t i = 0; i < expr->data.call.arg_count; i++) {
     args[i] = interp_eval_expr(interp, frame, expr->data.call.args[i]);
-    if (interp->error) { free(args); return result; }
+    if (interp->error) { if (args_heap) free(args); return result; }
   }
-  if (!sub) { free(args); interp_trap(interp, "call target not found"); return result; }
+  if (!sub) { if (args_heap) free(args); interp_trap(interp, "call target not found"); return result; }
   if (sub->is_extern && !sub->blocks) {
     result = interp_call_host(interp, expr->data.call.fn_name, args, expr->data.call.arg_count);
-    free(args); return result;
+    if (args_heap) free(args); return result;
   }
   result = interp_call_sub(interp, sub, args, expr->data.call.arg_count);
-  free(args);
+  if (args_heap) free(args);
   return result;
 }
 
@@ -1033,14 +1054,20 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
   }
   case EXPR_PRIMITIVE: {
     uint32_t c = expr->data.primitive.operand_count;
-    LainirValue *ops = calloc(c ? c : 1, sizeof(LainirValue));
-    if (!ops) { interp_trap(interp, "out of memory"); return lainir_value_unit(); }
+    LainirValue ops_inline[8];
+    LainirValue *ops = ops_inline;
+    int ops_heap = 0;
+    if (c > sizeof(ops_inline) / sizeof(ops_inline[0])) {
+      ops = calloc(c, sizeof(LainirValue));
+      ops_heap = 1;
+      if (!ops) { interp_trap(interp, "out of memory"); return lainir_value_unit(); }
+    }
     for (uint32_t i = 0; i < c; i++) {
       ops[i] = interp_eval_expr(interp, frame, expr->data.primitive.operands[i]);
-      if (interp->error) { free(ops); return lainir_value_unit(); }
+      if (interp->error) { if (ops_heap) free(ops); return lainir_value_unit(); }
     }
     LainirValue r = interp_eval_primitive(interp, expr, ops);
-    free(ops); return r;
+    if (ops_heap) free(ops); return r;
   }
   case EXPR_ALLOCA: {
     uint32_t sz = expr->data.alloca.byte_size;
@@ -1114,16 +1141,20 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
   case EXPR_CALL_INDIRECT: {
     LainirValue target = interp_eval_expr(
         interp, frame, expr->data.call_indirect.fn_ptr);
-    LainirValue *args = NULL;
+    LainirValue args_inline[8];
+    LainirValue *args = args_inline;
+    int args_heap = 0;
     LainirValue result = lainir_value_unit();
     if (interp->error) return result;
     if (target.kind != LAINIR_VALUE_FUNC || !target.as.func) {
       interp_trap(interp, "call_indirect target is not a procedure");
       return result;
     }
-    if (expr->data.call_indirect.arg_count) {
+    if (expr->data.call_indirect.arg_count >
+        sizeof(args_inline) / sizeof(args_inline[0])) {
       args = calloc(
           expr->data.call_indirect.arg_count, sizeof(LainirValue));
+      args_heap = 1;
       if (!args) {
         interp_trap(interp, "out of memory");
         return result;
@@ -1133,7 +1164,7 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
       args[i] = interp_eval_expr(
           interp, frame, expr->data.call_indirect.args[i]);
       if (interp->error) {
-        free(args);
+        if (args_heap) free(args);
         return result;
       }
     }
@@ -1145,7 +1176,7 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
       result = interp_call_sub(
           interp, target.as.func, args,
           expr->data.call_indirect.arg_count);
-    free(args);
+    if (args_heap) free(args);
     return result;
   }
   default:
@@ -1657,9 +1688,11 @@ static int interp_fast_meta_table_lookup(LainirInterpreter *interp,
     uint64_t cached = interp_fast_meta_cache_get(table, source, start,
                                                  length, mode);
     if (cached != 0) {
+      if (interp->trace_enabled) interp->trace_meta_cache_hits++;
       *result = lainir_value_bits(cached, 64);
       return 1;
     }
+    if (interp->trace_enabled) interp->trace_meta_cache_misses++;
   }
 
   uint64_t rows = interp_fast_load_u64(table, 524280);
@@ -2691,9 +2724,19 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
   interp_trace_finish(&interp);
   free(interp.sub_index);
   if (interp.error) {
+    if (getenv("LAINIR_TRACE_ALLOC")) {
+      fprintf(stderr, "interpreter alloca count=%u bytes=%llu (error)\n",
+              interp.alloca_count,
+              (unsigned long long)interp.allocated_bytes);
+    }
     interp_free_allocas(&interp);
     if (error_out) *error_out = interp.error;
     return LAINIR_RUN_TRAP;
+  }
+  if (getenv("LAINIR_TRACE_ALLOC")) {
+    fprintf(stderr, "interpreter alloca count=%u bytes=%llu\n",
+            interp.alloca_count,
+            (unsigned long long)interp.allocated_bytes);
   }
   /* Address results currently have no owner token in the public run API.
    * Preserve the historical usable-pointer behavior until that API gains one;

@@ -10,11 +10,19 @@ Run it with:
 
 ```text
 python scripts/run_lain_backend.py build/backend_fixture.l1 -o build/backend_fixture.c
+# The command also writes build/backend_fixture.c.manifest.json by default;
+# pass --manifest <path> to choose an explicit location.
 
 # Build a native compiler executable from the canonical L1 compiler
 python scripts/build_lainc_native.py \
   build/archive-usable/gen-current-src-lainc-api-real15.l1 \
   build/lainc.exe
+
+# Optional native smoke (requires the built executable):
+python tests/core/native_binary/run_native_smoke.py build/lainc.exe
+
+# Execute the emitted L1 in the same native process (no external seed run):
+python tests/core/native_binary/run_native_inprocess_smoke.py build/lainc.exe
 ```
 
 The backend currently handles:
@@ -27,6 +35,9 @@ The backend currently handles:
 - module/type-factory namespace expansion and multi-source namespace
   qualification for imported procedures;
 - native multi-source `lainc.exe -o output.l1 source.lain ...` invocation.
+- native `lainc.exe --run -o output.l1 source.lain ...` in-process L1 execution;
+  the executable links the seed parser, verifier, and interpreter for this
+  final validation path.
 - archive `Builder` lowering is emitted as concrete Lain procedures: unit,
   expression, call, return, and branch construction all write the physical
   `L1.Unit` model and no host-side Builder fallback is required.

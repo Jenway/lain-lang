@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -69,3 +71,52 @@ def write_stamp(
         encoding="utf-8",
         newline="\n",
     )
+
+
+def specialization_key(schema: str, components: Mapping[str, object]) -> str:
+    """Return a stable, serializable specialization key.
+
+    Canonical JSON makes mapping order irrelevant while preserving the
+    component names and scalar values that affect physical specialization.
+    """
+    payload = json.dumps(
+        {"schema": schema, "components": dict(components)},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return sha256_bytes(payload)
+
+
+class SpecializationCache:
+    """Small disk cache for verified specialization artifacts."""
+
+    def __init__(self, root: Path, schema: str = "lain-specialization-v1") -> None:
+        self.root = root
+        self.schema = schema
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _paths(self, key: str) -> tuple[Path, Path]:
+        return self.root / f"{key}.l1", self.root / f"{key}.stamp.json"
+
+    def get(self, key: str) -> bytes | None:
+        output, stamp = self._paths(key)
+        if not cache_matches(output, stamp, self.schema, key):
+            return None
+        try:
+            return output.read_bytes()
+        except OSError:
+            return None
+
+    def put(self, key: str, artifact: bytes) -> None:
+        output, stamp = self._paths(key)
+        with tempfile.NamedTemporaryFile(
+            dir=self.root, prefix=f".{key}.", suffix=".tmp", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(artifact)
+        try:
+            os.replace(temporary, output)
+            write_stamp(output, stamp, self.schema, key)
+        finally:
+            temporary.unlink(missing_ok=True)
