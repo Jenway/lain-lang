@@ -2,6 +2,10 @@
 
 当前执行路线见 [`docs/lainc-meta-roadmap.md`](lainc-meta-roadmap.md)。
 
+> **历史实现说明。** 本文记录 `src/lainc` 过渡编译器的现状，其中把 Meta
+> 描述为 callable registry/evaluator 的段落不再代表目标架构。当前定义是：Meta
+> 负责 AST 操作和变换，编译期执行由 Meta 生成的 LAIN-IR `#eval` 完成。
+
 The reusable Meta callable registry is now defined in `std/meta.lain` and
 instantiated by `src/compiler-archive/meta.lain`.  The archive layer owns
 syntax expansion and interpreter orchestration; the standard library owns the

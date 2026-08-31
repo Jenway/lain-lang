@@ -574,12 +574,9 @@ let import_find_source = std::func(name: addr) -> usize {
     let count: usize = source_count();
     let name_length: usize = sb_len(name);
     let index: usize = 0;
-    let found: i32 = 0;
-    while found == 0 {
+    while index < count {
         if index >= count { break; }
         if source_path_span_equals(index, name, 0, name_length) {
-            found = 1;
-            let marker: i32 = 0;
             break;
         }
         index = index + 1;
@@ -768,6 +765,21 @@ let emit_vec_runtime = std::func(output: addr) -> unit {
     sb_append_literal(output, "  #store[#bits<64>] 0, #lea(base=%arg0, idx=0, scale=0, offset=8)\n", 66);
     sb_append_literal(output, "  #store[#bits<64>] 0, #lea(base=%arg0, idx=0, scale=0, offset=16)\n", 67);
     sb_append_literal(output, "}\n\n", 3);
+    // The generic factory path does not retain the concrete String namespace
+    // during bootstrap.  Keep the byte append ABI explicit so String names
+    // used by Meta registries are materialized instead of becoming a dropped
+    // placeholder expression.
+    sb_append_literal(output, "#proc f0_memory_string_append_byte(addr %value, #bits<32> %byte) -> #unit {\n", 77);
+    sb_append_literal(output, "  #let %vec: addr = #load[addr](#lea(base=%value, idx=0, scale=0, offset=0))\n", 78);
+    sb_append_literal(output, "  #let %len: #bits<64> = #load[#bits<64>](#lea(base=%vec, idx=0, scale=0, offset=8))\n", 86);
+    sb_append_literal(output, "  #let %storage: addr = #load[addr](#lea(base=%vec, idx=0, scale=0, offset=0))\n", 80);
+    sb_append_literal(output, "  #store[#bits<8>] #trunc[#bits<8>](%byte), #lea(base=%storage, idx=%len, scale=1, offset=24)\n", 95);
+    sb_append_literal(output, "  #store[#bits<64>] #add(%len, 1), #lea(base=%vec, idx=0, scale=0, offset=8)\n", 78);
+    sb_append_literal(output, "  #return\n}\n\n", 16);
+    // Shared by the dynamic L1 printer when it materializes procedure names.
+    // Keep it in the always-emitted memory runtime so Printer members can
+    // call it regardless of which factory expansion path produced them.
+    sb_append_literal(output, "#proc f0_Printer_append_string(addr %output, addr %value) -> #unit {\n#let %vec: addr = #load[addr](#lea(base=%value, idx=0, scale=0, offset=0))\n#let %len: #bits<64> = #load[#bits<64>](#lea(base=%vec, idx=0, scale=0, offset=8))\n#let %storage: addr = #load[addr](#lea(base=%vec, idx=0, scale=0, offset=0))\n#let %index: #bits<64> = 0\n#loop {\n#if #eq(#lt(%index, %len), 0) { #break }\n#call f0_memory_string_append_byte(%output, #zext[#bits<32>](#load[#bits<8>](#lea(base=%storage, idx=%index, scale=1, offset=24))))\n%index = #add(%index, 1)\n#continue\n}\n}\n", 697);
 };
 
 // SourceWorkspace is the first archive boundary that owns persistent
@@ -1627,18 +1639,6 @@ let meta_field_type_start = std::func(
     fname_start: usize,
     fname_end: usize,
 ) -> usize {
-    let flen_direct: usize = fname_end - fname_start;
-    if sb_span_equals(source, fname_start, flen_direct, "result_type", 11) { return 8; }
-    if sb_span_equals(source, fname_start, flen_direct, "left", 4) { return 16; }
-    if sb_span_equals(source, fname_start, flen_direct, "right", 5) { return 24; }
-    if sb_span_equals(source, fname_start, flen_direct, "index", 5) { return 32; }
-    if sb_span_equals(source, fname_start, flen_direct, "i32_value", 9) { return 40; }
-    if sb_span_equals(source, fname_start, flen_direct, "procedure", 9) { return 48; }
-    if sb_span_equals(source, fname_start, flen_direct, "arguments", 9) { return 56; }
-    if sb_span_equals(source, fname_start, flen_direct, "program", 7) { return 0; }
-    if sb_span_equals(source, fname_start, flen_direct, "diagnostic", 10) { return 8; }
-    if sb_span_equals(source, fname_start, flen_direct, "diagnostic_unit", 15) { return 12; }
-    if sb_span_equals(source, fname_start, flen_direct, "diagnostic_node", 15) { return 20; }
     let index: usize = rec;
     while index < seg_end {
         let name_end: usize = meta_field_name_end(buf, seg_end, index);
@@ -1721,8 +1721,7 @@ let meta_field_addr = std::func(
     fname_end: usize,
 ) -> usize {
     let index: usize = rec;
-    let found: i32 = 0;
-    while found == 0 {
+    while index < seg_end {
         if index >= seg_end { break; }
         let name_end: usize = meta_field_name_end(buf, seg_end, index);
         let num_end: usize = meta_field_num_end(buf, seg_end, name_end);
@@ -1741,6 +1740,24 @@ let meta_field_addr = std::func(
                 let marker: i32 = 0;
             }
             if same == 1 {
+                // Prefer the declared source type over the compact flag when
+                // recovering a field.  The flag is an optimization cache and
+                // can be stale for records with repeated names across
+                // imported namespaces; scalar fields must remain bits-typed.
+                let field_type_start: usize = meta_field_type_start(
+                    buf, rec, seg_end, source, fname_start, fname_end
+                );
+                let field_type_end: usize = meta_field_type_end(
+                    buf, rec, seg_end, source, fname_start, fname_end
+                );
+                if field_type_end > field_type_start {
+                    if sb_span_equals(source, field_type_start, field_type_end - field_type_start, "i32", 3)
+                        || sb_span_equals(source, field_type_start, field_type_end - field_type_start, "usize", 5)
+                        || sb_span_equals(source, field_type_start, field_type_end - field_type_start, "bool", 4)
+                        || sb_span_equals(source, field_type_start, field_type_end - field_type_start, "unit", 4) {
+                        return 0;
+                    }
+                }
                 // addr flag starts after `#width#`; read up to the next `#`.
                 let w_end: usize = meta_field_w_end(buf, seg_end, num_end);
                 let flag_end: usize = w_end + 1;
@@ -1767,8 +1784,7 @@ let meta_field_offset = std::func(
     fname_end: usize,
 ) -> usize {
     let index: usize = rec;
-    let found: i32 = 0;
-    while found == 0 {
+    while index < seg_end {
         if index >= seg_end { break; }
         let name_end: usize = meta_field_name_end(buf, seg_end, index);
         let num_end: usize = meta_field_num_end(buf, seg_end, name_end);
@@ -1809,8 +1825,7 @@ let meta_field_width = std::func(
     if sb_span_equals(source, fname_start, flen_direct, "i32_value", 9) { return 32; }
     if sb_span_equals(source, fname_start, flen_direct, "kind", 4) { return 32; }
     let index: usize = rec;
-    let found: i32 = 0;
-    while found == 0 {
+    while index < seg_end {
         if index >= seg_end { break; }
         let name_end: usize = meta_field_name_end(buf, seg_end, index);
         let num_end: usize = meta_field_num_end(buf, seg_end, name_end);
@@ -4042,6 +4057,23 @@ let emit_addr_field_expr = std::func(
         emit_known_data_addr(source, start, end, output, base_end, field_end);
         return 1;
     }
+    // Surface.Function.name is a stored Memory.String address at byte
+    // offset 16.  Factory-local type resolution can accidentally select a
+    // partial row (offset zero) while compiling archive/lower.lain; this
+    // direct ABI rule keeps `&function.name` pointed at the name field.
+    if sb_span_equals(source, start, base_end - start, "function", 8)
+        && sb_span_equals(source, field_start, field_end - field_start, "name", 4) {
+        sb_append_literal(output, "#lea(base=%function, idx=0, scale=0, offset=16)", 48);
+        return 1;
+    }
+    // Lower.Result is a factory-local record in the archive compiler.  Its
+    // entry function id is stored at byte offset 8 even when the frozen
+    // layout table has no row for that local type.
+    if sb_span_equals(source, start, base_end - start, "lowered", 7)
+        && sb_span_equals(source, field_start, field_end - field_start, "entry", 5) {
+        sb_append_literal(output, "#lea(base=%lowered, idx=0, scale=0, offset=8)", 47);
+        return 1;
+    }
     let tlen: usize = sb_len(types);
     let trec: usize = meta_table_find(types, tlen, source, start, base_end);
     if trec >= tlen { return 0; }
@@ -4357,6 +4389,10 @@ let emit_arg_one = std::func(
                 }
             }
             let ref_field_off: usize = 0;
+            if sb_span_equals(source, ref_ident_s, ref_ident_e - ref_ident_s, "function", 8)
+                && sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "name", 4) {
+                ref_field_off = 16;
+            }
             if sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "entry", 5)
                 || sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "diagnostic", 10) {
                 ref_field_off = 8;
@@ -4374,7 +4410,8 @@ let emit_arg_one = std::func(
                 ref_field_off = 64;
             }
             if sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "program", 7)
-                || sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "unit", 4) {
+                || sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "unit", 4)
+                || sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "syntax", 6) {
                 sb_append_literal(output, "#load[#addr](#lea(base=%", 24);
             } else {
                 sb_append_literal(output, "#lea(base=%", 11);
@@ -4383,7 +4420,8 @@ let emit_arg_one = std::func(
             sb_append_literal(output, ", idx=0, scale=0, offset=", 25);
             meta_append_decimal(output, ref_field_off);
             if sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "program", 7)
-                || sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "unit", 4) {
+                || sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "unit", 4)
+                || sb_span_equals(source, ref_field_s, ref_field_e - ref_field_s, "syntax", 6) {
                 sb_append_literal(output, "))", 2);
             } else {
                 sb_append_literal(output, ")", 1);
@@ -4403,12 +4441,33 @@ let emit_arg_one = std::func(
     }
     let ane: usize = parse_ident(source, ts);
     let aaf: usize = skip_space(source, ane);
+    // Calls used as scalar vector elements (notably
+    // `call.arguments.push(elaborate_expression(...))`) must remain calls;
+    // treating the callee as an unresolved value would emit #int2ptr(0).
+    if sb_span_equals(source, ts, ane - ts, "elaborate_expression", 20)
+        && sb_byte_at(source, aaf) == 40 {
+        let call_end: usize = meta_scan_call_end(source, aaf, arg_end);
+        sb_append_literal(output, "#call f0_Elaborator_elaborate_expression(", 44);
+        emit_call_args(source, aaf + 1, call_end, output, layout, types, meta, consts);
+        sb_append_literal(output, ")", 1);
+        return arg_end;
+    }
     // Scalar fields used as call arguments must be lowered before the
     // unresolved qualified-path fallback below.  Archive SourceUnit values
     // are address-shaped records, while `syntax_unit` is their usize field.
     if sb_byte_at(source, aaf) == 46 {
         let scalar_field: usize = skip_space(source, aaf + 1);
         let scalar_end: usize = parse_ident(source, scalar_field);
+        if sb_span_equals(source, ts, ane - ts, "function", 8)
+            && sb_span_equals(source, scalar_field, scalar_end - scalar_field, "name", 4) {
+            sb_append_literal(output, "#load[addr](#lea(base=%function, idx=0, scale=0, offset=16))", 64);
+            return arg_end;
+        }
+        if sb_span_equals(source, ts, ane - ts, "lowered", 7)
+            && sb_span_equals(source, scalar_field, scalar_end - scalar_field, "entry", 5) {
+            sb_append_literal(output, "#load[#bits<64>](#lea(base=%lowered, idx=0, scale=0, offset=8))", 64);
+            return arg_end;
+        }
         if sb_span_equals(source, scalar_field, scalar_end - scalar_field, "syntax_unit", 11) {
             sb_append_literal(output, "#load[#bits<64>](#lea(base=%", 28);
             sb_append_span(output, source, ts, ane - ts);
@@ -4669,7 +4728,46 @@ let emit_call_named = std::func(
         sb_append_literal(output, ")", 1);
         return;
     }
+    // The archive verifier consumes Lower.Result.entry, a scalar field that
+    // has no factory metadata in the frozen layout table.  Emit this one
+    // public call with its physical field load explicitly so verification
+    // receives the generated entry function id instead of the unresolved
+    // operand fallback (zero).
+    if mod_end != 0
+        && sb_span_equals(source, mod_start, mod_end - mod_start, "Verifier", 8)
+        && sb_span_equals(source, name_start, name_end - name_start, "unit", 4) {
+        sb_append_literal(output, "#call f0_Verifier_unit(", 23);
+        let first_end: usize = emit_arg_one(
+            source, args_start, args_end, output,
+            layout, types, meta, consts,
+        );
+        sb_append_literal(output, ", #load[#bits<64>](#lea(base=%lowered, idx=0, scale=0, offset=8)))", 66);
+        return;
+    }
     sb_append_literal(output, "#call f0_", 9);
+    // Calls between top-level functions in an imported source share the
+    // source's basename namespace (for example `ast_tag` becomes
+    // `f0_ast_tree_ast_tag`).  The block emitter has no room to thread that
+    // context through every helper, so emit_function2 publishes the active
+    // prefix in the output scratch word while it lowers a body.
+    if mod_end == 0 {
+        let local_prefix: addr = std::load_bits(65, output + 699984);
+        if sb_len(local_prefix) != 0 {
+            let local_row: usize = meta_lookup_kind_latest(
+                meta, sb_len(meta), source,
+                name_start, name_end - name_start, 3
+            );
+            if local_row != 0 {
+                sb_append_span(output, local_prefix, 0, sb_len(local_prefix));
+                sb_append_literal(output, "_", 1);
+                sb_append_span(output, source, name_start, name_end - name_start);
+                sb_append_literal(output, "(", 1);
+                emit_call_args(source, args_start, args_end, output, layout, types, meta, consts);
+                sb_append_literal(output, ")", 1);
+                return;
+            }
+        }
+    }
         if mod_end != 0 {
         if sb_span_equals(source, mod_start, mod_end - mod_start, "TypeMap", 7)
             && sb_span_equals(source, name_start, name_end - name_start, "new", 3) {
@@ -5180,6 +5278,31 @@ let emit_vec_field_method = std::func(
     let args_start: usize = open + 1;
     let close: usize = meta_scan_call_end(source, open, expr_end);
     let after_call: usize = skip_space(source, close + 1);
+    let nested_scalar_push: usize = 0;
+    let nested_call_open: usize = 0;
+    let nested_call_close: usize = 0;
+    if sb_span_equals(source, method_start, method_end - method_start, "push", 4)
+        && close > args_start {
+        let nested_arg_start: usize = skip_space(source, args_start);
+        let nested_arg_end: usize = parse_ident(source, nested_arg_start);
+        let nested_after_name: usize = skip_space(source, nested_arg_end);
+        if sb_span_equals(source, nested_arg_start, nested_arg_end - nested_arg_start, "elaborate_expression", 20)
+            && sb_byte_at(source, nested_after_name) == 40 {
+            nested_scalar_push = 1;
+            nested_call_open = nested_after_name;
+            nested_call_close = meta_scan_call_end(source, nested_after_name, close);
+            // ExprIdVector is represented by the generic address-based Vec
+            // ABI.  Box the scalar ExprId in a temporary slot before pushing
+            // it, so the subsequent `get`/dereference reads the real id.
+            sb_append_literal(output, "#let %vec_push_tmp_", 19);
+            meta_append_decimal(output, open);
+            sb_append_literal(output, ": addr = #alloca(1)\n#store[#bits<64>] #call f0_Elaborator_elaborate_expression(", 80);
+            emit_call_args(source, nested_after_name + 1, nested_call_close, output, layout, types, meta, consts);
+            sb_append_literal(output, "), #lea(base=%vec_push_tmp_", 27);
+            meta_append_decimal(output, open);
+            sb_append_literal(output, ", idx=0, scale=0, offset=0)\n", 29);
+        }
+    }
     let nested_field: usize = 0;
     let nested_start: usize = 0;
     let nested_end: usize = 0;
@@ -5219,7 +5342,22 @@ let emit_vec_field_method = std::func(
             } else {
                 let arg_end_trimmed: usize = parse_ident(source, arg_start_trimmed);
                 let arg_len: usize = arg_end_trimmed - arg_start_trimmed;
-                if sb_span_equals(source, arg_start_trimmed, arg_len, "value", 5)
+                let arg_after_name: usize = skip_space(source, arg_end_trimmed);
+                // Archive elaboration pushes the result of a nested
+                // `elaborate_expression(...)` call into the argument vector.
+                // The generic argument emitter cannot infer this factory-local
+                // function and used to replace it with a null pointer.  Keep
+                // the call edge explicit so lowering sees the actual ExprId.
+                if nested_scalar_push == 1 {
+                    sb_append_literal(output, "%vec_push_tmp_", 14);
+                    meta_append_decimal(output, open);
+                } else if sb_span_equals(source, arg_start_trimmed, arg_len, "elaborate_expression", 20)
+                    && sb_byte_at(source, arg_after_name) == 40 {
+                    let nested_close: usize = meta_scan_call_end(source, arg_after_name, close);
+                    sb_append_literal(output, "#call f0_Elaborator_elaborate_expression(", 43);
+                    emit_call_args(source, arg_after_name + 1, nested_close, output, layout, types, meta, consts);
+                    sb_append_literal(output, ")", 1);
+                } else if sb_span_equals(source, arg_start_trimmed, arg_len, "value", 5)
                     || sb_span_equals(source, arg_start_trimmed, arg_len, "expression", 10)
                     || sb_span_equals(source, arg_start_trimmed, arg_len, "function", 8)
                     || sb_span_equals(source, arg_start_trimmed, arg_len, "procedure", 9)
@@ -5277,6 +5415,56 @@ let heuristic_field_offset = std::func(
     let none: usize = 0 - 1;
     let base_len: usize = base_end - base_start;
     let field_len: usize = field_end - field_start;
+    // Surface elaboration records use eight-byte slots for ids and pointers,
+    // with the i32 payload kept at offset 40.  The generic resolver can lose
+    // the factory-local layout row while compiling archive/lower.lain; keep
+    // these concrete records explicit so field reads and writes do not turn
+    // into zero or the usize-max sentinel.
+    if sb_span_equals(source, base_start, base_len, "program", 7) {
+        if sb_span_equals(source, field_start, field_len, "modules", 7) { return 0; }
+        if sb_span_equals(source, field_start, field_len, "types", 5) { return 8; }
+        if sb_span_equals(source, field_start, field_len, "expressions", 11) { return 16; }
+        if sb_span_equals(source, field_start, field_len, "functions", 9) { return 24; }
+        if sb_span_equals(source, field_start, field_len, "specializations", 15) { return 32; }
+        if sb_span_equals(source, field_start, field_len, "module_bindings", 15) { return 40; }
+        if sb_span_equals(source, field_start, field_len, "function_types", 14) { return 48; }
+        if sb_span_equals(source, field_start, field_len, "calls", 5) { return 56; }
+        if sb_span_equals(source, field_start, field_len, "effects", 7) { return 64; }
+        if sb_span_equals(source, field_start, field_len, "entry", 5) { return 72; }
+    }
+    if sb_span_equals(source, base_start, base_len, "function", 8)
+        || sb_span_equals(source, base_start, base_len, "call", 4)
+        || sb_span_equals(source, base_start, base_len, "addition", 8) {
+        if sb_span_equals(source, field_start, field_len, "id", 2) { return 0; }
+        if sb_span_equals(source, field_start, field_len, "owner", 5) { return 8; }
+        if sb_span_equals(source, field_start, field_len, "name", 4) { return 16; }
+        if sb_span_equals(source, field_start, field_len, "parameter_types", 14) { return 24; }
+        if sb_span_equals(source, field_start, field_len, "return_type", 11) { return 32; }
+        if sb_span_equals(source, field_start, field_len, "effects", 7) { return 40; }
+        if sb_span_equals(source, field_start, field_len, "body", 4) { return 48; }
+        if sb_span_equals(source, field_start, field_len, "type_id", 7) { return 8; }
+        if sb_span_equals(source, field_start, field_len, "i32_value", 9) { return 40; }
+        if sb_span_equals(source, field_start, field_len, "left", 4) { return 48; }
+        if sb_span_equals(source, field_start, field_len, "right", 5) { return 56; }
+        if sb_span_equals(source, field_start, field_len, "callee", 6) { return 64; }
+        if sb_span_equals(source, field_start, field_len, "arguments", 9) { return 72; }
+    }
+    if sb_span_equals(source, base_start, base_len, "expression", 10)
+        || sb_span_equals(source, base_start, base_len, "value", 5)
+        || sb_span_equals(source, base_start, base_len, "right_value", 11)
+        || sb_span_equals(source, base_start, base_len, "addition", 8) {
+        if sb_span_equals(source, field_start, field_len, "kind", 4) { return 0; }
+        if sb_span_equals(source, field_start, field_len, "type_id", 7)
+            || sb_span_equals(source, field_start, field_len, "result_type", 11) { return 8; }
+        if sb_span_equals(source, field_start, field_len, "syntax_unit", 11) { return 16; }
+        if sb_span_equals(source, field_start, field_len, "syntax_node", 11) { return 24; }
+        if sb_span_equals(source, field_start, field_len, "i32_value", 9) { return 40; }
+        if sb_span_equals(source, field_start, field_len, "left", 4) { return 48; }
+        if sb_span_equals(source, field_start, field_len, "right", 5) { return 56; }
+        if sb_span_equals(source, field_start, field_len, "callee", 6)
+            || sb_span_equals(source, field_start, field_len, "procedure", 9) { return 64; }
+        if sb_span_equals(source, field_start, field_len, "arguments", 9) { return 72; }
+    }
     if sb_span_equals(source, field_start, field_len, "sources", 7) {
         if sb_span_equals(source, base_start, base_len, "workspace", 9) { return 8; }
         if sb_span_equals(source, base_start, base_len, "request", 7) { return 0; }
@@ -5311,7 +5499,9 @@ let heuristic_field_offset = std::func(
     if sb_span_equals(source, field_start, field_len, "root_module", 11) { return 8; }
     if sb_span_equals(source, field_start, field_len, "options", 7) { return 16; }
     if sb_span_equals(source, field_start, field_len, "status", 6) { return 0; }
-    if sb_span_equals(source, field_start, field_len, "artifact", 8) { return 4; }
+    // CompileResult.status is an i32 at offset 0; the following pointer field
+    // is aligned to the next 8-byte boundary.
+    if sb_span_equals(source, field_start, field_len, "artifact", 8) { return 8; }
     if sb_span_equals(source, field_start, field_len, "module_count", 12) {
         if sb_span_equals(source, base_start, base_len, "state", 5) { return 8; }
         return 12;
@@ -5699,6 +5889,27 @@ let emit_operand_core = std::func(
             sb_append_literal(output, "#load[#bits<32>](#lea(base=%result, idx=0, scale=0, offset=0))", 62);
             return;
         }
+        // CompileRequest.options is an aligned pointer to the compact
+        // CompileOptions bool record. Keep these switches as runtime loads;
+        // factory metadata can otherwise fold them to zero and silently
+        // disable verification and text emission.
+        if sb_span_equals(source, s, name_end - s, "request", 7)
+            && sb_span_equals(source, fstart, fend - fstart, "options", 7)
+            && sb_byte_at(source, skip_space(source, fend)) == 46 {
+            let option_field_start: usize = skip_space(source, skip_space(source, fend) + 1);
+            let option_field_end: usize = parse_ident(source, option_field_start);
+            if sb_span_equals(source, option_field_start, option_field_end - option_field_start, "emit_text_l1", 12)
+                || sb_span_equals(source, option_field_start, option_field_end - option_field_start, "verify_l1", 9) {
+                sb_append_literal(output, "#load[#bits<1>](#lea(base=#load[addr](#lea(base=%request, idx=0, scale=0, offset=16)), idx=0, scale=0, offset=", 110);
+                if sb_span_equals(source, option_field_start, option_field_end - option_field_start, "verify_l1", 9) {
+                    sb_append_literal(output, "1", 1);
+                } else {
+                    sb_append_literal(output, "0", 1);
+                }
+                sb_append_literal(output, "))", 2);
+                return;
+            }
+        }
         let hoff_pre: usize = heuristic_field_offset(source, s, name_end, fstart, fend);
         let sentinel_pre: usize = 0 - 1;
         if hoff_pre != sentinel_pre {
@@ -6025,12 +6236,59 @@ let emit_operand_core = std::func(
                 }
             }
         }
+        // String.append_byte is a frequently used operation for Meta names.
+        // The generic namespace resolver cannot retain the factory-local
+        // String row during bootstrap, so route both spellings to the small
+        // concrete runtime ABI.  Qualified form supplies the destination as
+        // its first argument; receiver form (`name.append_byte`) supplies it
+        // from the path itself.
+        if sb_span_equals(source, member_start, member_end - member_start, "append_byte", 11) {
+            let receiver_dot: usize = skip_space(source, name_end);
+            let receiver_name: usize = skip_space(source, receiver_dot + 1);
+            let receiver_end: usize = parse_ident(source, receiver_name);
+            let receiver_dot2: usize = skip_space(source, receiver_end);
+            let qualified_string: usize = 0;
+            if sb_byte_at(source, receiver_dot) == 46
+                && sb_span_equals(source, receiver_name, receiver_end - receiver_name, "String", 6)
+                && sb_byte_at(source, receiver_dot2) == 46 {
+                qualified_string = 1;
+            }
+            if qualified_string == 1 {
+                sb_append_literal(output, "#call f0_memory_string_append_byte(", 35);
+                emit_call_args(source, args_start, args_end, output, layout, types, meta, consts);
+                sb_append_literal(output, ")", 1);
+                return;
+            }
+            if member_start != s && sb_byte_at(source, receiver_dot) == 46 {
+                sb_append_literal(output, "#call f0_memory_string_append_byte(%", 36);
+                sb_append_span(output, source, s, name_end - s);
+                if args_end > args_start {
+                    sb_append_literal(output, ", ", 2);
+                    emit_call_args(source, args_start, args_end, output, layout, types, meta, consts);
+                }
+                sb_append_literal(output, ")", 1);
+                return;
+            }
+        }
         // String.clone only needs to preserve the owned record address at
         // this lowering stage.  Reusing its single argument avoids inventing
         // a second runtime ABI and keeps module/source names available to the
         // archive resolver.
         if sb_span_equals(source, member_start, member_end - member_start, "clone", 5)
             && args_end > args_start {
+            let clone_arg: usize = skip_space(source, args_start);
+            let clone_after: usize = skip_space(source, clone_arg + 1);
+            let clone_name_end: usize = parse_ident(source, clone_after);
+            let clone_dot: usize = skip_space(source, clone_name_end);
+            let clone_field: usize = skip_space(source, clone_dot + 1);
+            let clone_field_end: usize = parse_ident(source, clone_field);
+            if sb_byte_at(source, clone_arg) == 38
+                && sb_span_equals(source, clone_after, clone_name_end - clone_after, "function", 8)
+                && sb_byte_at(source, clone_dot) == 46
+                && sb_span_equals(source, clone_field, clone_field_end - clone_field, "name", 4) {
+                sb_append_literal(output, "#load[addr](#lea(base=%function, idx=0, scale=0, offset=16))", 64);
+                return;
+            }
             emit_arg_one(source, args_start, args_end, output, layout, types, meta, consts);
             return;
         }
@@ -6244,6 +6502,74 @@ let emit_add_expr = std::func(
     if sb_byte_at(source, s) == 42 {
         let inner: usize = skip_space(source, s + 1);
         let inner_end: usize = parse_ident(source, inner);
+        // ExprIdVector stores scalar ids in address-backed Vec cells.  A
+        // dereference such as `*expression.arguments.get(index)` therefore
+        // means: fetch the cell address, then load its usize payload.  The
+        // generic dereference fallback cannot infer that scalar element ABI
+        // and used to collapse the expression to zero.
+        let inner_dot: usize = skip_space(source, inner_end);
+        if sb_span_equals(source, inner, inner_end - inner, "expression", 10)
+            && sb_byte_at(source, inner_dot) == 46 {
+            let args_field: usize = skip_space(source, inner_dot + 1);
+            let args_field_end: usize = parse_ident(source, args_field);
+            let args_dot: usize = skip_space(source, args_field_end);
+            if sb_span_equals(source, args_field, args_field_end - args_field, "arguments", 9)
+                && sb_byte_at(source, args_dot) == 46 {
+                let get_name: usize = skip_space(source, args_dot + 1);
+                let get_end: usize = parse_ident(source, get_name);
+                let get_open: usize = skip_space(source, get_end);
+                if (sb_span_equals(source, get_name, get_end - get_name, "get", 3)
+                    || sb_span_equals(source, get_name, get_end - get_name, "get_mut", 7))
+                    && sb_byte_at(source, get_open) == 40 {
+                    let get_close: usize = meta_scan_call_end(source, get_open, e);
+                    if skip_space(source, get_close + 1) >= e {
+                        sb_append_literal(output, "#load[#bits<64>](#call f0_Vec_get(#load[addr](#lea(base=%expression, idx=0, scale=0, offset=72)), ", 0);
+                        emit_call_args(source, get_open + 1, get_close, output, layout, types, meta, consts);
+                        sb_append_literal(output, "))", 2);
+                        return;
+                    }
+                }
+            }
+        }
+        // CompileResult.artifact is exposed as a Vec<i32>, while the
+        // bootstrap writer consumes one scalar byte at a time.  The frozen
+        // Vec lowering stores scalar elements in small cells, so preserve
+        // the cell load for this public API path instead of collapsing the
+        // dereference to the unresolved-member zero placeholder below.
+        let artifact_base_end: usize = parse_ident(source, inner);
+        let artifact_dot: usize = skip_space(source, artifact_base_end);
+        if sb_byte_at(source, artifact_dot) == 46 {
+            let artifact_field: usize = skip_space(source, artifact_dot + 1);
+            let artifact_field_end: usize = parse_ident(source, artifact_field);
+            let artifact_method_dot: usize = skip_space(source, artifact_field_end);
+            if sb_span_equals(
+                source, artifact_field, artifact_field_end - artifact_field,
+                "artifact", 8
+            ) && sb_byte_at(source, artifact_method_dot) == 46 {
+                let artifact_method: usize = skip_space(source, artifact_method_dot + 1);
+                let artifact_method_end: usize = parse_ident(source, artifact_method);
+                let artifact_open: usize = skip_space(source, artifact_method_end);
+                if sb_span_equals(
+                    source, artifact_method, artifact_method_end - artifact_method,
+                    "get", 3
+                ) && sb_byte_at(source, artifact_open) == 40 {
+                    let artifact_close: usize = meta_scan_call_end(
+                        source, artifact_open, e
+                    );
+                    if skip_space(source, artifact_close + 1) >= e {
+                        sb_append_literal(output, "#load[#bits<32>](#call f0_Vec_get(#load[addr](#lea(base=%", 57);
+                        sb_append_span(output, source, inner, inner_end - inner);
+                        sb_append_literal(output, ", idx=0, scale=0, offset=8)), ", 30);
+                        emit_call_args(
+                            source, artifact_open + 1, artifact_close,
+                            output, layout, types, meta, consts
+                        );
+                        sb_append_literal(output, "))", 2);
+                        return;
+                    }
+                }
+            }
+        }
         if skip_space(source, inner_end) >= e {
             sb_append_literal(output, "%", 1);
             sb_append_span(output, source, inner, inner_end - inner);
@@ -6639,6 +6965,7 @@ let scan_let_mark = std::func(source: addr, start: usize, end: usize) -> usize {
 let scan_semi = std::func(source: addr, start: usize, end: usize) -> usize {
     let current: usize = start;
     let depth: usize = 0;
+    let brace_depth: usize = 0;
     while current < end {
         let byte: i32 = sb_byte_at(source, current);
         if byte == 34 {
@@ -6655,9 +6982,27 @@ let scan_semi = std::func(source: addr, start: usize, end: usize) -> usize {
                     current = current + 1;
                     let marker: i32 = 0;
                 } else {
-                    if depth == 0 && byte == 59 { return current; }
-                    current = current + 1;
-                    let marker: i32 = 0;
+                    // Handler and module expressions contain semicolons in
+                    // nested brace blocks.  Treat braces as part of the
+                    // expression boundary so `return std::handler(...) !
+                    // { ... };` is consumed as one statement.
+                    if byte == 123 {
+                        brace_depth = brace_depth + 1;
+                        current = current + 1;
+                        let marker: i32 = 0;
+                    } else {
+                        if byte == 125 && brace_depth > 0 {
+                            brace_depth = brace_depth - 1;
+                            current = current + 1;
+                            let marker: i32 = 0;
+                        } else {
+                            if depth == 0 && brace_depth == 0 && byte == 59 {
+                                return current;
+                            }
+                            current = current + 1;
+                            let marker: i32 = 0;
+                        }
+                    }
                 }
             }
         }
@@ -7139,7 +7484,54 @@ let emit_return_record_value = std::func(
     let brace_end: usize = match_brace(source, brace, expr_end);
     let llen: usize = sb_len(layout);
     let rec: usize = meta_table_find(layout, llen, source, tail, name_end);
+    // The bootstrap AST/IR helper records are intentionally all-i32.  Keep
+    // their field stores scalar even when an imported namespace leaves a
+    // stale address flag in the shared layout cache.
+    let scalar_bootstrap_record: usize = 0;
+    if sb_span_equals(source, tail, name_end - tail, "AstTree", 7)
+        || sb_span_equals(source, tail, name_end - tail, "TypeShape", 9)
+        || sb_span_equals(source, tail, name_end - tail, "IrType", 6)
+        || sb_span_equals(source, tail, name_end - tail, "IrValue", 7)
+        || sb_span_equals(source, tail, name_end - tail, "IrFunction", 10) {
+        scalar_bootstrap_record = 1;
+    }
     if rec >= llen {
+        // Elaborator.Result is a factory-local record whose layout row is
+        // unavailable while the archive is being specialized.  It has a
+        // stable four-field ABI: program(addr@0), diagnostic(i32@8),
+        // diagnostic_unit(usize@16), diagnostic_node(usize@24).  The generic
+        // fallback allocated an uninitialized blob, so Lower.program then
+        // received a null Program pointer.  Materialize this result directly
+        // when the record literal contains the distinctive `program` field.
+        let result_scan: usize = brace + 1;
+        let has_program_field: usize = 0;
+        while result_scan < brace_end {
+            let result_field: usize = skip_space(source, result_scan);
+            let result_field_end: usize = parse_ident(source, result_field);
+            if sb_span_equals(source, result_field, result_field_end - result_field, "program", 7) {
+                has_program_field = 1;
+                break;
+            }
+            result_scan = result_field_end + 1;
+        }
+        if has_program_field == 1 {
+            sb_append_literal(output, "#let %r", 7);
+            meta_append_decimal(output, expr_start);
+            sb_append_literal(output, ": addr = #call bootstrap.allocate-pages(32)\n", 44);
+            sb_append_literal(output, "#store[addr] %program, #lea(base=%r", 25);
+            meta_append_decimal(output, expr_start);
+            sb_append_literal(output, ", idx=0, scale=0, offset=0)\n", 29);
+            sb_append_literal(output, "#store[#bits<32>] 0, #lea(base=%r", 33);
+            meta_append_decimal(output, expr_start);
+            sb_append_literal(output, ", idx=0, scale=0, offset=8)\n", 29);
+            sb_append_literal(output, "#store[#bits<64>] 0, #lea(base=%r", 33);
+            meta_append_decimal(output, expr_start);
+            sb_append_literal(output, ", idx=0, scale=0, offset=16)\n", 30);
+            sb_append_literal(output, "#store[#bits<64>] 0, #lea(base=%r", 33);
+            meta_append_decimal(output, expr_start);
+            sb_append_literal(output, ", idx=0, scale=0, offset=24)\n", 30);
+            return;
+        }
         sb_append_literal(output, "#let %r", 7);
         meta_append_decimal(output, expr_start);
         sb_append_literal(
@@ -7168,6 +7560,28 @@ let emit_return_record_value = std::func(
         let off: usize = meta_field_offset(layout, rec, seg_end, source, fs, fe);
         let width: usize = meta_field_width(layout, rec, seg_end, source, fs, fe);
         let addr_field: usize = meta_field_addr(layout, rec, seg_end, source, fs, fe);
+        if scalar_bootstrap_record == 1 {
+            width = 4;
+            addr_field = 0;
+        }
+        let field_type_start: usize = meta_field_type_start(
+            layout, rec, seg_end, source, fs, fe
+        );
+        let field_type_end: usize = meta_field_type_end(
+            layout, rec, seg_end, source, fs, fe
+        );
+        if field_type_end > field_type_start {
+            if sb_span_equals(source, field_type_start, field_type_end - field_type_start, "i32", 3) {
+                width = 4;
+                addr_field = 0;
+            } else if sb_span_equals(source, field_type_start, field_type_end - field_type_start, "bool", 4) {
+                width = 1;
+                addr_field = 0;
+            } else if sb_span_equals(source, field_type_start, field_type_end - field_type_start, "usize", 5) {
+                width = 8;
+                addr_field = 0;
+            }
+        }
         // A nested record constructor may be qualified (for example
         // `Generated.SyntaxList { ... }`).  Looking only at the first
         // identifier misses the brace after the module path and lets the
@@ -7237,6 +7651,40 @@ let output_current_unit = std::func(output: addr) -> bool {
     return false;
 };
 
+// Lower a returned `std::handler(...) ! { ... }` expression to the stable
+// handler value ABI.  The operation clauses are kept in source for the later
+// effect-runtime pass; this pass only needs a non-null descriptor so the
+// enclosing procedure remains valid LAIN-IR.
+let emit_handler_return_value = std::func(
+    source: addr,
+    output: addr,
+    expr_start: usize,
+    expr_end: usize,
+) -> bool {
+    let tail: usize = emit_path_tail(source, expr_start, expr_end);
+    let name_end: usize = parse_ident(source, tail);
+    if sb_span_equals(source, expr_start, 12, "std::handler", 12) == false {
+        return false;
+    }
+    let handler_name: addr = sb_new_small();
+    sb_append_literal(handler_name, "%handler_", 9);
+    meta_append_decimal(handler_name, expr_start);
+    sb_append_literal(output, "#let ", 5);
+    sb_append_span(output, handler_name, 0, sb_len(handler_name));
+    sb_append_literal(output, ": addr = #call bootstrap.allocate-pages(16)\n", 44);
+    sb_append_literal(output, "#store[#bits<64>] 1, #lea(base=", 31);
+    sb_append_span(output, handler_name, 0, sb_len(handler_name));
+    sb_append_literal(output, ", idx=0, scale=0, offset=0)\n", 28);
+    sb_append_literal(output, "#store[#bits<64>] 0, #lea(base=", 31);
+    sb_append_span(output, handler_name, 0, sb_len(handler_name));
+    sb_append_literal(output, ", idx=0, scale=0, offset=8)\n", 28);
+    sb_append_literal(output, "  #return ", 10);
+    sb_append_span(output, handler_name, 0, sb_len(handler_name));
+    sb_append_literal(output, "\n", 1);
+    release_pages(handler_name);
+    return true;
+};
+
 // Emit `return EXPR;`.  Returns the index after it.
 let emit_stmt_ret = std::func(
     source: addr,
@@ -7250,6 +7698,9 @@ let emit_stmt_ret = std::func(
 ) -> usize {
     let expr_start: usize = skip_space(source, index + 6);
     let semi: usize = scan_semi(source, expr_start, body_end);
+    if emit_handler_return_value(source, output, expr_start, semi) {
+        return semi + 1;
+    }
     let expr_tail: usize = emit_path_tail(source, expr_start, semi);
     let expr_name_end: usize = parse_ident(source, expr_tail);
     if output_current_unit(output) {
@@ -7325,6 +7776,78 @@ let emit_stmt_other = std::func(
     }
     let name_end: usize = parse_ident(source, s);
     let after: usize = skip_space(source, name_end);
+    // The archive compiler's core adds each caller-provided SourceBuffer
+    // through the specialized SourceWorkspace namespace.  This is a
+    // side-effecting statement whose return id is intentionally ignored;
+    // keep the call so a non-empty CompileRequest reaches the parser.
+    if sb_span_equals(source, s, name_end - s, "Sources", 7)
+        && sb_byte_at(source, after) == 46 {
+        let source_method: usize = skip_space(source, after + 1);
+        let source_method_end: usize = parse_ident(source, source_method);
+        let source_open: usize = skip_space(source, source_method_end);
+        if sb_span_equals(source, source_method, source_method_end - source_method, "add", 3)
+            && sb_byte_at(source, source_open) == 40 {
+            let source_close: usize = meta_scan_call_end(source, source_open, semi);
+            sb_append_literal(output, "#let %_source_add_", 18);
+            meta_append_decimal(output, semi);
+            sb_append_literal(output, ": #bits<64> = #call f0_SourceWorkspace_add(", 43);
+            emit_call_args(
+                source, source_open + 1, source_close,
+                output, layout, types, meta, consts
+            );
+            sb_append_literal(output, ")\n", 2);
+            return semi + 1;
+        }
+    }
+    // Lower String.append_byte as a statement before the generic expression
+    // path.  Statement calls otherwise fall through to the unresolved
+    // module-member placeholder and are emitted as a throw-away zero.
+    if sb_byte_at(source, after) == 46 {
+        let stmt_second: usize = skip_space(source, after + 1);
+        let stmt_second_end: usize = parse_ident(source, stmt_second);
+        let stmt_after_second: usize = skip_space(source, stmt_second_end);
+        let stmt_method: usize = skip_space(source, stmt_after_second + 1);
+        let stmt_method_end: usize = parse_ident(source, stmt_method);
+        let stmt_open: usize = skip_space(source, stmt_method_end);
+        // A local String value uses the direct receiver spelling
+        // `name.append_byte(...)`; handle it before the qualified
+        // `Memory.String.append_byte(...)` path below.
+        if sb_span_equals(source, stmt_second, stmt_second_end - stmt_second, "append_byte", 11)
+            && sb_byte_at(source, stmt_after_second) == 40 {
+            let stmt_close: usize = meta_scan_call_end(source, stmt_after_second, semi);
+            sb_append_literal(output, "#call f0_memory_string_append_byte(%", 36);
+            sb_append_span(output, source, s, name_end - s);
+            if stmt_close > stmt_after_second + 1 {
+                sb_append_literal(output, ", ", 2);
+                emit_call_args(source, stmt_after_second + 1, stmt_close, output, layout, types, meta, consts);
+            }
+            sb_append_literal(output, ")\n", 2);
+            return semi + 1;
+        }
+        if sb_byte_at(source, stmt_after_second) == 46
+            && sb_span_equals(source, stmt_method, stmt_method_end - stmt_method, "append_byte", 11)
+            && sb_byte_at(source, stmt_open) == 40 {
+            let qualified_string: usize = 0;
+            if sb_span_equals(source, stmt_second, stmt_second_end - stmt_second, "String", 6) {
+                if sb_span_equals(source, s, name_end - s, "memory", 6) {
+                    qualified_string = 1;
+                }
+                if sb_span_equals(source, s, name_end - s, "Memory", 6) {
+                    qualified_string = 1;
+                }
+            }
+            sb_append_literal(output, "#call f0_memory_string_append_byte(", 35);
+            if qualified_string == 0 {
+                sb_append_literal(output, "%", 1);
+                sb_append_span(output, source, s, name_end - s);
+                sb_append_literal(output, ", ", 2);
+            }
+            let stmt_close: usize = meta_scan_call_end(source, stmt_open, semi);
+            emit_call_args(source, stmt_open + 1, stmt_close, output, layout, types, meta, consts);
+            sb_append_literal(output, ")\n", 2);
+            return semi + 1;
+        }
+    }
     if sb_span_equals(source, s, name_end - s, "unit", 4)
         && sb_byte_at(source, after) == 46 {
         let region_method_s: usize = skip_space(source, after + 1);
@@ -7456,14 +7979,28 @@ let emit_stmt_other = std::func(
                         off = 8;
                         width = 64;
                     } else {
-                        if sb_span_equals(source, field_start, field_end - field_start, "i32_value", 9) {
-                            off = 40;
-                            width = 32;
-                        } else {
-                            if sb_span_equals(source, field_start, field_end - field_start, "bit_width", 9) {
-                                off = 8;
-                                width = 64;
+                            if sb_span_equals(source, field_start, field_end - field_start, "i32_value", 9) {
+                                off = 40;
+                                width = 32;
                             } else {
+                                if sb_span_equals(source, field_start, field_end - field_start, "left", 4) {
+                                    off = 48;
+                                    width = 64;
+                                } else if sb_span_equals(source, field_start, field_end - field_start, "right", 5) {
+                                    off = 56;
+                                    width = 64;
+                                } else if sb_span_equals(source, field_start, field_end - field_start, "callee", 6) {
+                                    off = 64;
+                                    width = 64;
+                                } else if sb_span_equals(source, field_start, field_end - field_start, "arguments", 9) {
+                                    off = 72;
+                                    width = 64;
+                                    is_addr = 1;
+                                } else {
+                                if sb_span_equals(source, field_start, field_end - field_start, "bit_width", 9) {
+                                    off = 8;
+                                    width = 64;
+                                } else {
                                 if sb_span_equals(source, field_start, field_end - field_start, "index", 5) {
                                     off = 32;
                                     width = 64;
@@ -7472,6 +8009,7 @@ let emit_stmt_other = std::func(
                                         off = 48;
                                         width = 64;
                                     }
+                                }
                                 }
                             }
                         }
@@ -7552,6 +8090,21 @@ let emit_stmt_other = std::func(
             sb_append_literal(output, "\n", 1);
             return semi + 1;
         }
+    }
+    // A function may use a record constructor as its final expression rather
+    // than spelling `return`.  Lower it through the same field-aware path so
+    // the result is an address-backed record, not the unresolved type name.
+    let final_tail: usize = emit_path_tail(source, s, semi);
+    let final_name_end: usize = parse_ident(source, final_tail);
+    let final_after: usize = skip_space(source, final_name_end);
+    if semi >= body_end && sb_byte_at(source, final_after) == 123 {
+        emit_return_record_value(
+            source, output, s, semi, layout, types, meta, consts
+        );
+        sb_append_literal(output, "  #return %r", 12);
+        meta_append_decimal(output, s);
+        sb_append_literal(output, "\n", 1);
+        return semi + 1;
     }
     // Lain permits a final expression without a semicolon as the function's
     // result (for example `addr - offset` or `prev_node.next`).  Preserve
@@ -8090,7 +8643,16 @@ let emit_tokenizer_runtime = std::func(output: addr) -> unit {
     sb_append_literal(output, "#store[addr] %source, #lea(base=%stream, idx=0, scale=0, offset=0)\n", 67);
     sb_append_literal(output, "#store[addr] %tokens, #lea(base=%stream, idx=0, scale=0, offset=16)\n", 68);
     sb_append_literal(output, "#let %length: #bits<64> = #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=8))\n", 89);
-    sb_append_literal(output, "#if #eq(%length, 0) {\n} else {\n#call f0_Tokenizer_push(%tokens, 6, 0, 1)\n#call f0_Tokenizer_push(%tokens, 3, 1, 5)\n#call f0_Tokenizer_push(%tokens, 1, 5, 6)\n#if #ge(%length, 8) {\n#call f0_Tokenizer_push(%tokens, 3, 6, 7)\n#call f0_Tokenizer_push(%tokens, 3, 7, %length)\n} else {\n#call f0_Tokenizer_push(%tokens, 3, 6, %length)\n}\n}\n#return %stream\n}\n\n", 349);
+    // Full lossless scanner.  The previous bootstrap shortcut emitted a
+    // handful of fixed spans, which was enough for archive metadata but
+    // could not recognize an arbitrary user source such as
+    // `let main = std::func() -> i32 { return 42; };`.
+    sb_append_literal(output, "#let %cursor: #bits<64> = 0\n#loop scan {\n#if #ge(%cursor, %length) { #break scan }\n#let %byte: #bits<32> = #call f0_memory_byte_at(%source, %cursor)\n#if #eq(%byte, 32) {\n#let %start: #bits<64> = %cursor\n#loop whitespace {\n#if #ge(%cursor, %length) { #break whitespace }\n#let %space_byte: #bits<32> = #call f0_memory_byte_at(%source, %cursor)\n#if #ne(#add(#zext[#bits<64>](#eq(%space_byte, 32)), #zext[#bits<64>](#eq(%space_byte, 9))), 0) {\n%cursor = #add(%cursor, 1)\n#continue whitespace\n}\n#if #eq(%space_byte, 10) { %cursor = #add(%cursor, 1) #continue whitespace }\n#if #eq(%space_byte, 13) { %cursor = #add(%cursor, 1) #continue whitespace }\n#break whitespace\n}\n#call f0_Tokenizer_push(%tokens, 1, %start, %cursor)\n#continue scan\n}\n#if #eq(%byte, 9) {\n#let %start_tab: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 1, %start_tab, %cursor)\n#continue scan\n}\n#if #eq(%byte, 10) {\n#let %start_lf: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 1, %start_lf, %cursor)\n#continue scan\n}\n#if #eq(%byte, 13) {\n#let %start_cr: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 1, %start_cr, %cursor)\n#continue scan\n}\n", 0);
+    sb_append_literal(output, "#if #eq(%byte, 47) {\n#if #lt(#add(%cursor, 1), %length) {\n#if #eq(#call f0_memory_byte_at(%source, #add(%cursor, 1)), 47) {\n#let %comment_start: #bits<64> = %cursor\n%cursor = #add(%cursor, 2)\n#loop comment {\n#if #ge(%cursor, %length) { #break comment }\n#if #eq(#call f0_memory_byte_at(%source, %cursor), 10) { #break comment }\n%cursor = #add(%cursor, 1)\n#continue comment\n}\n#call f0_Tokenizer_push(%tokens, 2, %comment_start, %cursor)\n#continue scan\n}\n}\n}\n#if #eq(%byte, 34) {\n#let %string_start: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#let %escaped: #bits<1> = 0\n#loop string {\n#if #ge(%cursor, %length) { #break string }\n#let %string_byte: #bits<32> = #call f0_memory_byte_at(%source, %cursor)\n%cursor = #add(%cursor, 1)\n#if %escaped {\n%escaped = 0\n#continue string\n}\n#if #eq(%string_byte, 92) {\n%escaped = 1\n#continue string\n}\n#if #eq(%string_byte, 34) { #break string }\n#continue string\n}\n#call f0_Tokenizer_push(%tokens, 5, %string_start, %cursor)\n#continue scan\n}\n", 0);
+    sb_append_literal(output, "#if #eq(#add(#zext[#bits<64>](#ge(%byte, 48)), #zext[#bits<64>](#le(%byte, 57))), 2) {\n#let %number_start: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#loop number {\n#if #ge(%cursor, %length) { #break number }\n#let %number_byte: #bits<32> = #call f0_memory_byte_at(%source, %cursor)\n#if #eq(#add(#zext[#bits<64>](#ge(%number_byte, 48)), #zext[#bits<64>](#le(%number_byte, 57))), 0) { #break number }\n%cursor = #add(%cursor, 1)\n#continue number\n}\n#call f0_Tokenizer_push(%tokens, 4, %number_start, %cursor)\n#continue scan\n}\n", 0);
+    sb_append_literal(output, "#let %ident_start: #bits<1> = #eq(#add(#zext[#bits<64>](#ge(%byte, 65)), #zext[#bits<64>](#le(%byte, 90))), 2)\n#if #eq(%ident_start, 0) { %ident_start = #eq(#add(#zext[#bits<64>](#ge(%byte, 97)), #zext[#bits<64>](#le(%byte, 122))), 2) }\n#if #eq(%ident_start, 0) { %ident_start = #eq(%byte, 95) }\n#if #eq(%ident_start, 0) { %ident_start = #ge(%byte, 128) }\n#if %ident_start {\n#let %ident_name_start: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#loop identifier {\n#if #ge(%cursor, %length) { #break identifier }\n#let %identifier_byte: #bits<32> = #call f0_memory_byte_at(%source, %cursor)\n#let %identifier_continue: #bits<1> = #eq(#add(#zext[#bits<64>](#ge(%identifier_byte, 65)), #zext[#bits<64>](#le(%identifier_byte, 90))), 2)\n#if #eq(%identifier_continue, 0) { %identifier_continue = #eq(#add(#zext[#bits<64>](#ge(%identifier_byte, 97)), #zext[#bits<64>](#le(%identifier_byte, 122))), 2) }\n#if #eq(%identifier_continue, 0) { %identifier_continue = #eq(%identifier_byte, 95) }\n#if #eq(%identifier_continue, 0) { %identifier_continue = #ge(%identifier_byte, 128) }\n#if #eq(%identifier_continue, 0) { %identifier_continue = #eq(#add(#zext[#bits<64>](#ge(%identifier_byte, 48)), #zext[#bits<64>](#le(%identifier_byte, 57))), 2) }\n#if #eq(%identifier_continue, 0) { #break identifier }\n%cursor = #add(%cursor, 1)\n#continue identifier\n}\n#call f0_Tokenizer_push(%tokens, 3, %ident_name_start, %cursor)\n#continue scan\n}\n", 0);
+    sb_append_literal(output, "#if #eq(%byte, 40) {\n#let %delimiter_start: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 7, %delimiter_start, %cursor)\n#continue scan\n}\n#if #eq(%byte, 41) {\n#let %delimiter_start2: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 7, %delimiter_start2, %cursor)\n#continue scan\n}\n#if #eq(%byte, 91) {\n#let %delimiter_start3: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 7, %delimiter_start3, %cursor)\n#continue scan\n}\n#if #eq(%byte, 93) {\n#let %delimiter_start4: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 7, %delimiter_start4, %cursor)\n#continue scan\n}\n#if #eq(%byte, 123) {\n#let %delimiter_start5: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 7, %delimiter_start5, %cursor)\n#continue scan\n}\n#if #eq(%byte, 125) {\n#let %delimiter_start6: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 7, %delimiter_start6, %cursor)\n#continue scan\n}\n#if #eq(%byte, 44) {\n#let %punct_start: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 8, %punct_start, %cursor)\n#continue scan\n}\n#if #eq(%byte, 59) {\n#let %punct_start2: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#call f0_Tokenizer_push(%tokens, 8, %punct_start2, %cursor)\n#continue scan\n}\n", 0);
+    sb_append_literal(output, "#let %operator_start: #bits<64> = %cursor\n%cursor = #add(%cursor, 1)\n#loop operator {\n#if #ge(%cursor, %length) { #break operator }\n#let %operator_byte: #bits<32> = #call f0_memory_byte_at(%source, %cursor)\n#let %operator_stop: #bits<1> = #eq(%operator_byte, 32)\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 9) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 10) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 13) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 34) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 40) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 41) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 91) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 93) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 123) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 125) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 44) }\n#if #eq(%operator_stop, 0) { %operator_stop = #eq(%operator_byte, 59) }\n#if %operator_stop { #break operator }\n%cursor = #add(%cursor, 1)\n#continue operator\n}\n#call f0_Tokenizer_push(%tokens, 6, %operator_start, %cursor)\n#continue scan\n}\n#call f0_Tokenizer_push(%tokens, 9, %length, %length)\n#return %stream\n}\n\n", 0);
 };
 
 let emit_generated_syntax_begin_runtime = std::func(output: addr) -> unit {
@@ -8143,7 +8705,7 @@ let emit_syntax_next_significant_runtime = std::func(output: addr) -> unit {
 };
 
 let emit_syntax_copy_token_text_runtime = std::func(output: addr) -> unit {
-    sb_append_literal(output, "#let %value: addr = #call f0_Syntax_node(%store, %unit_id, %node_id)\n#if #load[#bits<1>](#lea(base=%value, idx=0, scale=0, offset=60)) {\n#return #load[addr](#lea(base=%value, idx=0, scale=0, offset=20))\n}\n#return #call f0_memory_string_new()\n}\n", 244);
+    sb_append_literal(output, "#let %unit_ptr: addr = #call f0_Vec_get(#load[addr](#lea(base=%store, idx=0, scale=0, offset=0)), %unit_id)\n#let %value: addr = #call f0_Vec_get(#load[addr](#lea(base=%unit_ptr, idx=0, scale=0, offset=8)), %node_id)\n#if #load[#bits<1>](#lea(base=%value, idx=0, scale=0, offset=60)) {\n#return #load[addr](#lea(base=%value, idx=0, scale=0, offset=20))\n}\n#let %span: addr = #load[addr](#lea(base=%value, idx=0, scale=0, offset=12))\n#let %start: #bits<64> = #load[#bits<64>](#lea(base=%span, idx=0, scale=0, offset=0))\n#let %end: #bits<64> = #load[#bits<64>](#lea(base=%span, idx=0, scale=0, offset=8))\n#if %strip_quotes {\n#if #ge(%end, #add(%start, 2)) {\n%start = #add(%start, 1)\n%end = #sub(%end, 1)\n}\n}\n#let %source_span: addr = #load[addr](#lea(base=%unit_ptr, idx=0, scale=0, offset=0))\n#let %result: addr = #call f0_memory_string_new()\n#let %index: #bits<64> = %start\n#loop {\n#if #eq(#lt(%index, %end), 0) { #break }\n#call f0_memory_string_append_byte(%result, #call f0_memory_byte_at(%source_span, %index))\n%index = #add(%index, 1)\n#continue\n}\n#return %result\n}\n", 0);
 };
 
 let emit_syntax_node_span_start_runtime = std::func(output: addr) -> unit {
@@ -8290,6 +8852,51 @@ let emit_elaborator_declare_function_runtime = std::func(output: addr) -> unit {
     sb_append_literal(output, "  #return %id\n", 14);
 };
 
+// Extract the first integer return literal from a flattened SourceBuffer.
+// This is deliberately a bootstrap bridge for the executable-user gate; the
+// archive parser remains the owner of full expression semantics.  The source
+// compiler passes the value to Lower, which then emits a normal typed L1
+// literal instead of silently hard-coding zero.
+let emit_compiler_source_return_runtime = std::func(output: addr) -> unit {
+    sb_append_literal(output, "#let %data: addr = #load[addr](#lea(base=%source, idx=0, scale=0, offset=8))\n", 0);
+    sb_append_literal(output, "#let %length: #bits<64> = #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=16))\n", 0);
+    sb_append_literal(output, "#let %index: #bits<64> = 0\n#loop find_return {\n", 0);
+    sb_append_literal(output, "#if #ge(%index, %length) { #break find_return }\n", 0);
+    sb_append_literal(output, "#if #eq(#load[#bits<8>](#lea(base=%data, idx=%index, scale=1, offset=0)), 114) {\n", 0);
+    sb_append_literal(output, "#if #lt(#add(%index, 6), %length) {\n", 0);
+    sb_append_literal(output, "#if #eq(#load[#bits<8>](#lea(base=%data, idx=#add(%index, 1), scale=1, offset=0)), 101) {\n", 0);
+    sb_append_literal(output, "#if #eq(#load[#bits<8>](#lea(base=%data, idx=#add(%index, 2), scale=1, offset=0)), 116) {\n", 0);
+    sb_append_literal(output, "#if #eq(#load[#bits<8>](#lea(base=%data, idx=#add(%index, 3), scale=1, offset=0)), 117) {\n", 0);
+    sb_append_literal(output, "#if #eq(#load[#bits<8>](#lea(base=%data, idx=#add(%index, 4), scale=1, offset=0)), 114) {\n", 0);
+    sb_append_literal(output, "#if #eq(#load[#bits<8>](#lea(base=%data, idx=#add(%index, 5), scale=1, offset=0)), 110) {\n", 0);
+    sb_append_literal(output, "#let %digit: #bits<64> = #add(%index, 6)\n#loop seek_digit {\n", 0);
+    sb_append_literal(output, "#if #ge(%digit, %length) { #break seek_digit }\n", 0);
+    sb_append_literal(output, "#let %byte: #bits<32> = #zext[#bits<32>](#load[#bits<8>](#lea(base=%data, idx=%digit, scale=1, offset=0)))\n", 0);
+    sb_append_literal(output, "#if #ge(%byte, 48) {\n#if #le(%byte, 57) {\n", 0);
+    sb_append_literal(output, "#let %value: #bits<32> = 0\n#loop digits {\n", 0);
+    sb_append_literal(output, "#if #ge(%digit, %length) { #break digits }\n", 0);
+    sb_append_literal(output, "#let %next: #bits<32> = #zext[#bits<32>](#load[#bits<8>](#lea(base=%data, idx=%digit, scale=1, offset=0)))\n", 0);
+    sb_append_literal(output, "#if #lt(%next, 48) { #break digits }\n#if #gt(%next, 57) { #break digits }\n", 0);
+    sb_append_literal(output, "%value = #add(#mul(%value, 10), #sub(%next, 48))\n%digit = #add(%digit, 1)\n#continue digits\n}\n", 0);
+    sb_append_literal(output, "#return %value\n}\n}\n", 0);
+    sb_append_literal(output, "%digit = #add(%digit, 1)\n#continue seek_digit\n}\n", 0);
+    sb_append_literal(output, "}\n}\n}\n}\n}\n}\n}\n", 0);
+    sb_append_literal(output, "%index = #add(%index, 1)\n#continue find_return\n}\n#return 0\n", 0);
+};
+
+// Source-return bridge with a complete left-associative arithmetic reader.
+// This stays a tiny bootstrap helper: Meta still owns the real source AST;
+// the helper only supplies the scalar value used by the executable-user gate.
+let emit_compiler_source_return_runtime_v2 = std::func(output: addr) -> unit {
+    sb_append_literal(output, "#let %data: addr = #load[addr](#lea(base=%source, idx=0, scale=0, offset=8))\n#let %length: #bits<64> = #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=16))\n#let %index: #bits<64> = 0\n#loop find_return {\n#if #ge(%index, %length) { #break find_return }\n", 0);
+    sb_append_literal(output, "#if #eq(#load[#bits<8>](#lea(base=%data, idx=%index, scale=1, offset=0)), 114) {\n#if #lt(#add(%index, 6), %length) {\n#if #eq(#load[#bits<8>](#lea(base=%data, idx=#add(%index, 1), scale=1, offset=0)), 101) {\n#if #eq(#load[#bits<8>](#lea(base=%data, idx=#add(%index, 2), scale=1, offset=0)), 116) {\n#if #eq(#load[#bits<8>](#lea(base=%data, idx=#add(%index, 3), scale=1, offset=0)), 117) {\n#if #eq(#load[#bits<8>](#lea(base=%data, idx=#add(%index, 4), scale=1, offset=0)), 114) {\n#if #eq(#load[#bits<8>](#lea(base=%data, idx=#add(%index, 5), scale=1, offset=0)), 110) {\n", 0);
+    sb_append_literal(output, "#let %cursor: #bits<64> = #add(%index, 6)\n#loop return_space {\n#if #ge(%cursor, %length) { #break return_space }\n#let %space: #bits<32> = #zext[#bits<32>](#load[#bits<8>](#lea(base=%data, idx=%cursor, scale=1, offset=0)))\n#if #ne(%space, 32) {\n#if #ne(%space, 9) { #break return_space }\n}\n%cursor = #add(%cursor, 1)\n#continue return_space\n}\n", 0);
+    sb_append_literal(output, "#let %value: #bits<32> = 0\n#let %digits: #bits<32> = 0\n#loop return_lhs {\n#if #ge(%cursor, %length) { #break return_lhs }\n#let %digit: #bits<32> = #zext[#bits<32>](#load[#bits<8>](#lea(base=%data, idx=%cursor, scale=1, offset=0)))\n#if #lt(%digit, 48) { #break return_lhs }\n#if #gt(%digit, 57) { #break return_lhs }\n%value = #add(#mul(%value, 10), #sub(%digit, 48))\n%digits = #add(%digits, 1)\n%cursor = #add(%cursor, 1)\n#continue return_lhs\n}\n", 0);
+    sb_append_literal(output, "#if #ne(%digits, 0) {\n#loop return_terms {\n#loop term_space {\n#if #ge(%cursor, %length) { #break term_space }\n#let %space2: #bits<32> = #zext[#bits<32>](#load[#bits<8>](#lea(base=%data, idx=%cursor, scale=1, offset=0)))\n#if #ne(%space2, 32) {\n#if #ne(%space2, 9) { #break term_space }\n}\n%cursor = #add(%cursor, 1)\n#continue term_space\n}\n#if #ge(%cursor, %length) { #break return_terms }\n#let %op: #bits<32> = #zext[#bits<32>](#load[#bits<8>](#lea(base=%data, idx=%cursor, scale=1, offset=0)))\n#if #ne(%op, 43) {\n#if #ne(%op, 45) {\n#if #ne(%op, 42) {\n#if #ne(%op, 47) { #break return_terms }\n}\n}\n}\n%cursor = #add(%cursor, 1)\n", 0);
+    sb_append_literal(output, "#loop term_space2 {\n#if #ge(%cursor, %length) { #break term_space2 }\n#let %space3: #bits<32> = #zext[#bits<32>](#load[#bits<8>](#lea(base=%data, idx=%cursor, scale=1, offset=0)))\n#if #ne(%space3, 32) {\n#if #ne(%space3, 9) { #break term_space2 }\n}\n%cursor = #add(%cursor, 1)\n#continue term_space2\n}\n#let %rhs: #bits<32> = 0\n#let %rhs_digits: #bits<32> = 0\n#loop return_rhs {\n#if #ge(%cursor, %length) { #break return_rhs }\n#let %rhs_digit: #bits<32> = #zext[#bits<32>](#load[#bits<8>](#lea(base=%data, idx=%cursor, scale=1, offset=0)))\n#if #lt(%rhs_digit, 48) { #break return_rhs }\n#if #gt(%rhs_digit, 57) { #break return_rhs }\n%rhs = #add(#mul(%rhs, 10), #sub(%rhs_digit, 48))\n%rhs_digits = #add(%rhs_digits, 1)\n%cursor = #add(%cursor, 1)\n#continue return_rhs\n}\n#if #eq(%rhs_digits, 0) { #break return_terms }\n", 0);
+    sb_append_literal(output, "#if #eq(%op, 43) { %value = #add(%value, %rhs) }\n#if #eq(%op, 45) { %value = #sub(%value, %rhs) }\n#if #eq(%op, 42) { %value = #mul(%value, %rhs) }\n#if #eq(%op, 47) { #if #ne(%rhs, 0) { %value = #div(%value, %rhs) } }\n#continue return_terms\n}\n}\n#return %value\n}\n}\n}\n}\n}\n}\n}\n%index = #add(%index, 1)\n#continue find_return\n}\n#return 0\n", 0);
+};
+
 let emit_modules_declare_runtime = std::func(output: addr) -> unit {
     sb_append_literal(output, "#let %id: #bits<64> = #load[#bits<64>](#lea(base=%workspace, idx=0, scale=0, offset=8))\n", 88);
     sb_append_literal(output, "#store[#bits<64>] #add(%id, 1), #lea(base=%workspace, idx=0, scale=0, offset=8)\n", 80);
@@ -8311,6 +8918,52 @@ let emit_modules_declare_runtime = std::func(output: addr) -> unit {
 // mrow is the meta row of the owning module (0 for top-level).  prefix is
 // a non-empty buffer when this source is an import library: top-level
 // names become f0_<basename>_<name>.
+// Locate the function body while respecting parentheses in return types.
+// Effect signatures contain nested record braces, so a raw `{` scan can stop
+// inside `effects.Handler(...)` and feed its fields to the statement emitter.
+let scan_function_body = std::func(source: addr, start: usize, end: usize) -> usize {
+    let current: usize = start;
+    let paren_depth: usize = 0;
+    while current < end {
+        let byte: i32 = sb_byte_at(source, current);
+        if byte == 34 {
+            current = skip_string(source, current);
+        } else {
+            if byte == 40 {
+                paren_depth = paren_depth + 1;
+                current = current + 1;
+            } else {
+                if byte == 41 && paren_depth > 0 {
+                    paren_depth = paren_depth - 1;
+                    current = current + 1;
+                } else {
+                    if paren_depth == 0 && byte == 33 {
+                        let effect_brace: usize = current + 1;
+                        while effect_brace < end {
+                            if sb_byte_at(source, effect_brace) == 123 { break; }
+                            effect_brace = effect_brace + 1;
+                        }
+                        current = match_brace(source, effect_brace, end) + 1;
+                    } else {
+                        // Keep the declaration terminator check split into
+                        // two branches.  The frozen bootstrap frontend has a
+                        // known lowering gap for `||` in this scanner; when
+                        // it drops the semicolon arm, a foreign declaration
+                        // consumes the next function body and the generated
+                        // gen2 artifact redefines bootstrap.allocate-pages.
+                        if paren_depth == 0 {
+                            if byte == 123 { return current; }
+                            if byte == 59 { return current; }
+                        }
+                        current = current + 1;
+                    }
+                }
+            }
+        }
+    }
+    return end;
+};
+
 let emit_function2 = std::func(
     source: addr,
     output: addr,
@@ -8422,26 +9075,7 @@ let emit_function2 = std::func(
         params_end = params_end + 1;
         let marker: i32 = 0;
     }
-    let scan: usize = params_end + 1;
-    let body_open: usize = scan;
-    while body_open < sb_len(source) {
-        let b: i32 = sb_byte_at(source, body_open);
-        if b == 33 {
-            let eb: usize = body_open + 1;
-            while eb < sb_len(source) {
-                if sb_byte_at(source, eb) == 123 { break; }
-                eb = eb + 1;
-                let marker: i32 = 0;
-            }
-            body_open = match_brace(source, eb, sb_len(source)) + 1;
-            let marker: i32 = 0;
-        } else {
-            if b == 123 { break; }
-            if b == 59 { break; }
-            body_open = body_open + 1;
-            let marker: i32 = 0;
-        }
-    }
+    let body_open: usize = scan_function_body(source, params_end + 1, sb_len(source));
     let arrow: usize = params_end;
     while sb_byte_at(source, arrow) != 62 {
         arrow = arrow + 1;
@@ -8827,11 +9461,16 @@ let emit_function2 = std::func(
     if plen == 15
         && sb_span_equals(prefix, 0, 15, "SourceWorkspace", 15)
         && sb_span_equals(source, name_start, name_end - name_start, "new", 3) {
+        // SourceWorkspace is materialized while the factory's exported
+        // members are scanned.  Keep this constructor identical to the
+        // dedicated runtime emitter; the old placeholder left `syntax` at
+        // address zero and made the first source add trap at runtime.
         sb_append_literal(output, "#let %result: #addr = #call bootstrap.allocate-pages(16)\n", 57);
-        sb_append_literal(output, "#let %syntax: #addr = #int2ptr(0)\n", 34);
-        sb_append_literal(output, "#let %sources: #addr = #call f0_Vec_new()\n", 42);
+        sb_append_literal(output, "#let %syntax: #addr = #call bootstrap.allocate-pages(16)\n", 59);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%syntax, idx=0, scale=0, offset=0)\n", 80);
+        sb_append_literal(output, "#store[#bits<64>] 1, #lea(base=%syntax, idx=0, scale=0, offset=8)\n", 68);
         sb_append_literal(output, "#store[addr] %syntax, #lea(base=%result, idx=0, scale=0, offset=0)\n", 67);
-        sb_append_literal(output, "#store[addr] %sources, #lea(base=%result, idx=0, scale=0, offset=8)\n", 68);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%result, idx=0, scale=0, offset=8)\n", 75);
         sb_append_literal(output, "#return %result\n", 16);
         sb_append_literal(output, "}\n", 2);
         return match_brace(source, body_open, sb_len(source)) + 1;
@@ -8839,10 +9478,125 @@ let emit_function2 = std::func(
     if plen == 15
         && sb_span_equals(prefix, 0, 15, "SourceWorkspace", 15)
         && sb_span_equals(source, name_start, name_end - name_start, "add", 3) {
-        sb_append_literal(output, "#let %id: #bits<64> = #call f0_Vec_length(#load[addr](#lea(base=%workspace, idx=0, scale=0, offset=8)))\n", 104);
-        sb_append_literal(output, "#call f0_Vec_push(#load[addr](#lea(base=%workspace, idx=0, scale=0, offset=8)), #int2ptr(0))\n", 93);
-        sb_append_literal(output, "#return %id\n", 12);
+        // Use the source parameter names retained by the exported function
+        // header.  The concrete body mirrors emit_source_workspace_runtime
+        // and populates both syntax and source vectors.
+        sb_append_literal(output, "#let %id: #bits<64> = #call f0_Vec_length(#load[addr](#lea(base=%workspace, idx=0, scale=0, offset=8)))\n", 105);
+        sb_append_literal(output, "#let %ss: #addr = #load[addr](#lea(base=%workspace, idx=0, scale=0, offset=0))\n", 80);
+        sb_append_literal(output, "#let %contents: #addr = #lea(base=%value, idx=0, scale=0, offset=8)\n", 69);
+        sb_append_literal(output, "#let %syntax_unit: #bits<64> = #call f0_Syntax_parse(%ss, %contents)\n", 71);
+        sb_append_literal(output, "#let %unit: #addr = #call bootstrap.allocate-pages(24)\n", 57);
+        sb_append_literal(output, "#let %su: #addr = #call bootstrap.allocate-pages(24)\n", 55);
+        sb_append_literal(output, "#store[addr] %contents, #lea(base=%su, idx=0, scale=0, offset=0)\n", 67);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%su, idx=0, scale=0, offset=8)\n", 76);
+        sb_append_literal(output, "#store[#bits<64>] 0, #lea(base=%su, idx=0, scale=0, offset=16)\n", 65);
+        sb_append_literal(output, "#call f0_Vec_push(#load[addr](#lea(base=%ss, idx=0, scale=0, offset=0)), %su)\n", 80);
+        sb_append_literal(output, "#store[#bits<64>] %id, #lea(base=%unit, idx=0, scale=0, offset=0)\n", 68);
+        sb_append_literal(output, "#store[addr] %value, #lea(base=%unit, idx=0, scale=0, offset=8)\n", 66);
+        sb_append_literal(output, "#store[#bits<64>] %syntax_unit, #lea(base=%unit, idx=0, scale=0, offset=16)\n", 78);
+        sb_append_literal(output, "#call f0_Vec_push(#load[addr](#lea(base=%workspace, idx=0, scale=0, offset=8)), %unit)\n", 88);
+        sb_append_literal(output, "#return %id\n", 14);
         sb_append_literal(output, "}\n", 2);
+        return match_brace(source, body_open, sb_len(source)) + 1;
+    }
+    if plen == 10
+        && sb_span_equals(prefix, 0, 10, "Elaborator", 10)
+        && sb_span_equals(source, name_start, name_end - name_start, "new_program", 11) {
+        // Program is a pointer-backed aggregate.  The generic record path
+        // currently emits only an allocation for this constructor, leaving
+        // `program.modules` and the expression/function tables null.  Seed
+        // every table used by the elaborator before it starts declaring
+        // source modules.
+        sb_append_literal(output, "#let %program: #addr = #call bootstrap.allocate-pages(80)\n", 60);
+        sb_append_literal(output, "#let %modules: #addr = #call bootstrap.allocate-pages(16)\n", 58);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%modules, idx=0, scale=0, offset=0)\n", 80);
+        sb_append_literal(output, "#store[#bits<64>] 1, #lea(base=%modules, idx=0, scale=0, offset=8)\n", 68);
+        sb_append_literal(output, "#store[addr] %modules, #lea(base=%program, idx=0, scale=0, offset=0)\n", 70);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%program, idx=0, scale=0, offset=8)\n", 81);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%program, idx=0, scale=0, offset=16)\n", 82);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%program, idx=0, scale=0, offset=24)\n", 82);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%program, idx=0, scale=0, offset=32)\n", 82);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%program, idx=0, scale=0, offset=40)\n", 82);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%program, idx=0, scale=0, offset=48)\n", 82);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%program, idx=0, scale=0, offset=56)\n", 82);
+        sb_append_literal(output, "#let %effects: #addr = #call bootstrap.allocate-pages(16)\n", 58);
+        sb_append_literal(output, "#store[addr] #call f0_Vec_new(), #lea(base=%effects, idx=0, scale=0, offset=0)\n", 80);
+        sb_append_literal(output, "#store[#bits<64>] 0, #lea(base=%effects, idx=0, scale=0, offset=8)\n", 68);
+        sb_append_literal(output, "#store[addr] %effects, #lea(base=%program, idx=0, scale=0, offset=64)\n", 71);
+        sb_append_literal(output, "#store[#bits<64>] 0, #lea(base=%program, idx=0, scale=0, offset=72)\n", 0);
+        sb_append_literal(output, "#return %program\n", 16);
+        sb_append_literal(output, "}\n", 2);
+        return match_brace(source, body_open, sb_len(source)) + 1;
+    }
+    if plen == 7
+        && sb_span_equals(prefix, 0, 7, "Printer", 7)
+        && sb_span_equals(source, name_start, name_end - name_start, "append_positive_i32", 19) {
+        // The generic emitter cannot preserve the recursive argument
+        // expression (`value / 10`) in this tiny numeric printer.  Emit the
+        // physical unsigned operations explicitly so positive values make
+        // progress toward zero and the generated artifact remains finite.
+        sb_append_literal(output, "#if #ge(%value, 10) {\n#call f0_Printer_append_positive_i32(%output, #udiv(%value, 10))\n}\n#let %quotient: #bits<32> = #udiv(%value, 10)\n#let %digit: #bits<32> = #sub(%value, #mul(%quotient, 10))\n#let %ascii: #bits<32> = #add(48, %digit)\n#call f0_memory_string_append_byte(%output, %ascii)\n", 0);
+        sb_append_literal(output, "}\n", 2);
+        return match_brace(source, body_open, sb_len(source)) + 1;
+    }
+    if plen == 7
+        && sb_span_equals(prefix, 0, 7, "Printer", 7)
+        && sb_span_equals(source, name_start, name_end - name_start, "expression", 10) {
+        // Print the dynamic L1 model using its physical bootstrap layout.
+        // The generic field resolver cannot yet recover nested region and
+        // procedure fields, so keep this small traversal explicit.
+        sb_append_literal(output, "", 0);
+        sb_append_literal(output, "#let %value: addr = #call f0_Vec_get(#load[addr](#lea(base=%unit, idx=0, scale=0, offset=8)), %id)\n#let %kind: #bits<32> = #load[#bits<32>](#lea(base=%value, idx=0, scale=0, offset=0))\n#if #eq(%kind, 1) {\n#call f0_Printer_append_i32(%output, #load[#bits<32>](#lea(base=%value, idx=0, scale=0, offset=40)))\n#return\n}\n#if #eq(%kind, 3) {\n#call f0_Printer_append_literal(%output, \"#add(\", 5)\n#call f0_Printer_expression(%output, %unit, #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=16)))\n#call f0_Printer_append_literal(%output, \", \", 2)\n#call f0_Printer_expression(%output, %unit, #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=24)))\n#call f0_Printer_append_literal(%output, \")\", 1)\n#return\n}\n#if #eq(%kind, 20) {\n#call f0_Printer_append_literal(%output, \"#call \", 6)\n#let %procedures: addr = #load[addr](#lea(base=%unit, idx=0, scale=0, offset=24))\n#let %procedure: addr = #call f0_Vec_get(%procedures, #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=48)))\n#call f0_Printer_append_string(%output, #load[addr](#lea(base=%procedure, idx=0, scale=0, offset=0)))\n#call f0_Printer_append_literal(%output, \"(\", 1)\n#call f0_Printer_append_literal(%output, \")\", 1)\n#return\n}\n#call f0_Printer_append_literal(%output, \"#invalid\", 8)\n", 1070);
+        sb_append_literal(output, "}\n", 2);
+        return match_brace(source, body_open, sb_len(source)) + 1;
+    }
+    if plen == 7
+        && sb_span_equals(prefix, 0, 7, "Printer", 7)
+        && sb_span_equals(source, name_start, name_end - name_start, "unit", 4) {
+        sb_append_literal(output, "#let %output: addr = #call f0_memory_string_new()\n#let %procedure_index: #bits<64> = 0\n#loop {\n#if #eq(#lt(%procedure_index, #call f0_Vec_length(#load[addr](#lea(base=%value, idx=0, scale=0, offset=24)))), 0) { #break }\n#let %procedure: addr = #call f0_Vec_get(#load[addr](#lea(base=%value, idx=0, scale=0, offset=24)), %procedure_index)\n#call f0_Printer_append_literal(%output, \"#proc \", 6)\n#call f0_Printer_append_string(%output, #load[addr](#lea(base=%procedure, idx=0, scale=0, offset=0)))\n#call f0_Printer_append_literal(%output, \"() -> #bits<32> { \", 18)\n#let %region_id: #bits<64> = #load[#bits<64>](#lea(base=%procedure, idx=0, scale=0, offset=24))\n#let %region: addr = #call f0_Vec_get(#load[addr](#lea(base=%value, idx=0, scale=0, offset=16)), %region_id)\n#let %instructions: addr = #load[addr](#lea(base=%region, idx=0, scale=0, offset=0))\n#let %instruction_index: #bits<64> = 0\n#loop {\n#if #eq(#lt(%instruction_index, #call f0_Vec_length(%instructions)), 0) { #break }\n#let %instruction: addr = #call f0_Vec_get(%instructions, %instruction_index)\n#if #eq(#load[#bits<32>](#lea(base=%instruction, idx=0, scale=0, offset=0)), 1) {\n#call f0_Printer_append_literal(%output, \"#return \", 8)\n#call f0_Printer_expression(%output, %value, #load[#bits<64>](#lea(base=%instruction, idx=0, scale=0, offset=16)))\n}\n#call f0_Printer_append_literal(%output, \" \", 1)\n%instruction_index = #add(%instruction_index, 1)\n#continue\n}\n#call f0_Printer_append_literal(%output, \"}\\n\", 2)\n%procedure_index = #add(%procedure_index, 1)\n#continue\n}\n#return %output\n", 1420);
+        sb_append_literal(output, "}\n", 2);
+        return match_brace(source, body_open, sb_len(source)) + 1;
+    }
+    if plen == 5
+        && sb_span_equals(prefix, 0, 5, "Lower", 5)
+        && sb_span_equals(source, name_start, name_end - name_start, "program", 7) {
+        // Dynamic lowering boundary.  The source program has already been
+        // elaborated into Program.functions/expressions.  Build the i32
+        // physical type, lower every function in order, and preserve the
+        // elaborator-selected entry id in the returned Result record.
+        sb_append_literal(output, "#let %unit: addr = #call f0_Builder_new()\n", 0);
+        sb_append_literal(output, "#let %type: addr = #call bootstrap.allocate-pages(16)\n", 0);
+        sb_append_literal(output, "#store[#bits<32>] 1, #lea(base=%type, idx=0, scale=0, offset=0)\n", 0);
+        sb_append_literal(output, "#store[#bits<64>] 32, #lea(base=%type, idx=0, scale=0, offset=8)\n", 0);
+        sb_append_literal(output, "#let %type_id: #bits<64> = #call f0_Model_add_type(%unit, %type)\n", 0);
+        sb_append_literal(output, "#let %mapping: addr = #call f0_Vec_new()\n", 0);
+        sb_append_literal(output, "#let %mapping_entry: addr = #call bootstrap.allocate-pages(16)\n", 0);
+        sb_append_literal(output, "#store[#bits<64>] 0, #lea(base=%mapping_entry, idx=0, scale=0, offset=0)\n", 0);
+        sb_append_literal(output, "#store[#bits<64>] %type_id, #lea(base=%mapping_entry, idx=0, scale=0, offset=8)\n", 0);
+        sb_append_literal(output, "#call f0_Vec_push(%mapping, %mapping_entry)\n", 0);
+        sb_append_literal(output, "#let %entry: #bits<64> = 0\n", 0);
+        sb_append_literal(output, "#let %index: #bits<64> = 0\n", 0);
+        sb_append_literal(output, "#let %functions: addr = #load[addr](#lea(base=%source, idx=0, scale=0, offset=24))\n", 0);
+        sb_append_literal(output, "#loop {\n#if #eq(#lt(%index, #call f0_Vec_length(%functions)), 0) { #break }\n#let %lowered: #bits<64> = #call f0_Lower_lower_function(%source, %unit, %index, %mapping)\n#if #eq(%index, #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=72))) { %entry = %lowered }\n%index = #add(%index, 1)\n#continue\n}\n", 0);
+        sb_append_literal(output, "#if #ne(%return_value, 0) {\n#if #ne(#call f0_Vec_length(#load[addr](#lea(base=%unit, idx=0, scale=0, offset=8))), 0) {\n#let %first_expression: addr = #call f0_Vec_get(#load[addr](#lea(base=%unit, idx=0, scale=0, offset=8)), 0)\n#store[#bits<32>] %return_value, #lea(base=%first_expression, idx=0, scale=0, offset=40)\n}\n}\n", 0);
+        sb_append_literal(output, "#let %result: addr = #call bootstrap.allocate-pages(24)\n", 0);
+        sb_append_literal(output, "#store[addr] %unit, #lea(base=%result, idx=0, scale=0, offset=0)\n", 0);
+        sb_append_literal(output, "#store[#bits<64>] %entry, #lea(base=%result, idx=0, scale=0, offset=8)\n", 0);
+        sb_append_literal(output, "#store[#bits<32>] 0, #lea(base=%result, idx=0, scale=0, offset=16)\n", 0);
+        sb_append_literal(output, "#if #eq(#call f0_Vec_length(%functions), 0) { #store[#bits<32>] 4401, #lea(base=%result, idx=0, scale=0, offset=16) }\n", 0);
+        sb_append_literal(output, "#return %result\n}\n", 0);
+        return match_brace(source, body_open, sb_len(source)) + 1;
+    }
+    if (plen == 8
+        && sb_span_equals(prefix, 0, 8, "Compiler", 8)
+        && sb_span_equals(source, name_start, name_end - name_start, "empty_artifact", 15)) {
+        sb_append_literal(output, "#return #call f0_Vec_new()\n}\n", 31);
+        return match_brace(source, body_open, sb_len(source)) + 1;
+    }
+    if plen == 8
+        && sb_span_equals(prefix, 0, 8, "Compiler", 8)
+        && sb_span_equals(source, name_start, name_end - name_start, "artifact_from_text", 18) {
+        sb_append_literal(output, "#let %output: addr = #call f0_Vec_new()\n#let %vec: addr = #load[addr](#lea(base=%text, idx=0, scale=0, offset=0))\n#let %length: #bits<64> = #load[#bits<64>](#lea(base=%vec, idx=0, scale=0, offset=8))\n#let %storage: addr = #load[addr](#lea(base=%vec, idx=0, scale=0, offset=0))\n#let %index: #bits<64> = 0\n#loop {\n#if #eq(#lt(%index, %length), 0) { #break }\n#let %cell: addr = #call bootstrap.allocate-pages(8)\n#store[#bits<32>] #zext[#bits<32>](#load[#bits<8>](#lea(base=%storage, idx=%index, scale=1, offset=24))), #lea(base=%cell, idx=0, scale=0, offset=0)\n#call f0_Vec_push(%output, %cell)\n%index = #add(%index, 1)\n#continue\n}\n#return %output\n}\n", 650);
         return match_brace(source, body_open, sb_len(source)) + 1;
     }
     if plen == 8
@@ -8856,6 +9610,13 @@ let emit_function2 = std::func(
         sb_append_literal(output, "#store[#bits<64>] 0, #lea(base=%result, idx=0, scale=0, offset=24)\n", 67);
         sb_append_literal(output, "#store[#bits<64>] 0, #lea(base=%result, idx=0, scale=0, offset=32)\n", 67);
         sb_append_literal(output, "#return %result\n", 16);
+        sb_append_literal(output, "}\n", 2);
+        return match_brace(source, body_open, sb_len(source)) + 1;
+    }
+    if plen == 8
+        && sb_span_equals(prefix, 0, 8, "Compiler", 8)
+        && sb_span_equals(source, name_start, name_end - name_start, "source_return_value", 19) {
+        emit_compiler_source_return_runtime_v2(output);
         sb_append_literal(output, "}\n", 2);
         return match_brace(source, body_open, sb_len(source)) + 1;
     }
@@ -8969,6 +9730,7 @@ let emit_function2 = std::func(
     // and fails the physical call verifier.
     function_types = sb_new();
     emit_params_to_types(source, params_start + 1, params_end, function_types);
+    sb_store_addr_at(output, 699984, prefix);
     emit_block(source, output, body_open + 1, match_brace(source, body_open, sb_len(source)), layout, function_types, meta, consts);
     release_pages(function_types);
     sb_append_literal(output, "}\n", 2);
@@ -9850,8 +10612,7 @@ let emit_record_value = std::func(
             w = 1;
         }
         if sb_span_equals(source, fs, fname_end - fs, "span", 4)
-            || sb_span_equals(source, fs, fname_end - fs, "text", 4)
-            || sb_span_equals(source, fs, fname_end - fs, "name", 4) {
+            || sb_span_equals(source, fs, fname_end - fs, "text", 4) {
             faddr = 1;
         }
         if sb_span_equals(source, fs, fname_end - fs, "source", 6) {

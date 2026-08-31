@@ -7,7 +7,13 @@
 
 #extern #proc bootstrap.source-count() -> i64;
 #extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
-#extern #proc lain_lower_program(addr %request, addr %syntax_index) -> i32;
+#extern #proc lain_std_abi_version() -> i64;
+#extern #proc lain_std_initialize(addr %context) -> i32;
+#extern #proc lain_std_expand(addr %context, addr %source_unit, addr %root) -> addr;
+#extern #proc lain_std_elaborate(addr %context, addr %expanded_root) -> addr;
+#extern #proc lain_std_lower(addr %context, addr %elaborated_root, addr %l1_unit) -> addr;
+#extern #proc lain_meta_pass_result_v1_status(addr %value) -> i32;
+#extern #proc lain_meta_pass_result_v1_result(addr %value) -> addr;
 #extern #proc syntax_units_build() -> addr;
 #extern #proc syntax_index_count(addr %index) -> i64;
 
@@ -68,7 +74,42 @@
 }
 
 #proc compiler_compile_request(addr %request) -> addr {
+  // The compiler core knows only this stable ABI.  The implementation lives
+  // in the separately bundled bootstrap standard library.
+  #let %std_status: i32 = #call lain_std_initialize(%request)
+  #if #ne(%std_status, 0) {
+    #return #call compiler_result_new(%std_status, %std_status, 0, 0)
+  }
+  #if #ne(#call lain_std_abi_version(), 1) {
+    #return #call compiler_result_new(5201, 5201, 0, 0)
+  }
   #let %syntax_index: addr = #call syntax_units_build()
+  // The standard library owns the semantic passes. The core only supplies
+  // the source/index handles and consumes their versioned results.
+  #let %expanded: addr = #call lain_std_expand(
+    %request, %syntax_index, %syntax_index
+  )
+  #let %expanded_status: i32 = #call lain_meta_pass_result_v1_status(%expanded)
+  #if #ne(%expanded_status, 0) {
+    #return #call compiler_result_new(
+      %expanded_status, %expanded_status, 0, 0
+    )
+  }
+  #let %elaborated: addr = #call lain_std_elaborate(
+    %request, #call lain_meta_pass_result_v1_result(%expanded)
+  )
+  #let %elaborated_status: i32 = #call lain_meta_pass_result_v1_status(%elaborated)
+  #if #ne(%elaborated_status, 0) {
+    #return #call compiler_result_new(
+      %elaborated_status, %elaborated_status, 0, 0
+    )
+  }
+  #let %lowered: addr = #call lain_std_lower(
+    %request,
+    #call lain_meta_pass_result_v1_result(%elaborated),
+    %syntax_index
+  )
+  #let %lower_status: i32 = #call lain_meta_pass_result_v1_status(%lowered)
   #let %source_begin: i64 = #load[i64](
     #lea(base=%request, idx=0, scale=0, offset=24)
   )
@@ -76,7 +117,7 @@
     #lea(base=%request, idx=0, scale=0, offset=32)
   )
   #let %module_count: i64 = #sub(%source_end, %source_begin)
-  #let %status: i32 = #call lain_lower_program(%request, %syntax_index)
+  #let %status: i32 = %lower_status
   #let %artifact: i8 = 0
   #if #eq(%status, 0) { %artifact: i8 = 1 }
   #return #call compiler_result_new(
