@@ -67,6 +67,7 @@ def run(*arguments: Path | str) -> subprocess.CompletedProcess[str]:
         cwd=ROOT,
         capture_output=True,
         text=True,
+        timeout=90,
     )
 
 
@@ -85,7 +86,11 @@ def main() -> int:
         fixture = Path(os.environ.get("LAIN_META_FIXTURE", str(FIXTURE)))
         entry = os.environ.get("LAIN_META_ENTRY", "main")
         cached = ROOT / "build" / "debug-gen2-heap.l1"
-        if os.environ.get("LAIN_META_USE_CACHED_GEN2") and cached.exists():
+        # The frozen compiler needs several minutes for a cold gen1 build.
+        # Prefer the verified cache for the regular acceptance run; set
+        # LAIN_META_USE_CACHED_GEN2=0 to force the full cold chain.
+        use_cached = os.environ.get("LAIN_META_USE_CACHED_GEN2", "1") != "0"
+        if use_cached and cached.exists():
             gen2.write_bytes(cached.read_bytes())
         else:
             require(run(SEED, FROZEN, "compiler_compile", gen1, LAINC), "build gen1")

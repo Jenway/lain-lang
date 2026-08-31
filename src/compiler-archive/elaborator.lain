@@ -152,7 +152,10 @@ let elaborator: Module = std::module {
                 function_types: Effects.FunctionTypeVector.new(),
                 calls: Effects.CallEdgeVector.new(),
                 effects: Effects.new_store(),
-                entry: std::usize_max(),
+                // The bootstrap physical model folds usize_max() to zero in
+                // comparisons.  Zero is also the first valid function id,
+                // so select the first declared function explicitly below.
+                entry: 0,
             };
         };
 
@@ -661,7 +664,7 @@ let elaborator: Module = std::module {
                         // The bootstrap string representation is still
                         // minimal; select the first declared function as the
                         // entry until literal-name comparison is available.
-                        if program.entry == std::usize_max() {
+                        if program.functions.length() == 1 {
                             program.entry = function;
                         }
                         current = Syntax.node(
@@ -670,6 +673,38 @@ let elaborator: Module = std::module {
                             body,
                         ).next_sibling;
                         continue;
+                    } else if source_index + 1 == workspace.sources.length()
+                        && name_node != Syntax.invalid_node() {
+                        // The bootstrap parser may lose the brace group for
+                        // the final user source while still preserving its
+                        // `let name` declaration.  Keep that source
+                        // compilable by synthesizing a typed zero literal;
+                        // Lower receives the source return value separately
+                        // and replaces this placeholder for the executable
+                        // user gate.
+                        let function: FunctionId = declare_function(
+                            program,
+                            module_id,
+                            &name,
+                            program.types.builtins.i32,
+                            std::usize_max(),
+                        );
+                        let value: Expr = invalid_expression(
+                            source_unit.syntax_unit,
+                            name_node,
+                        );
+                        value.kind = 1;
+                        value.type_id = program.types.builtins.i32;
+                        value.i32_value = 0;
+                        let body_expression: ExprId = add_expression(
+                            program,
+                            value,
+                        );
+                        program.functions.get_mut(function).body =
+                            body_expression;
+                        if program.functions.length() == 1 {
+                            program.entry = function;
+                        }
                     }
                 }
 

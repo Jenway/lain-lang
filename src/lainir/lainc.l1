@@ -95,24 +95,19 @@
   #store 0, #lea(base=%source, idx=0, scale=0, offset=72)
   #store %nil, #lea(base=%source, idx=0, scale=0, offset=80)
   #store %length, #lea(base=%source, idx=0, scale=0, offset=88)
-  // Cache a compact content fingerprint once, when the source object is
-  // created.  This value is only a cheap filter for captured-environment
-  // lookup; the source span and name checks still decide the actual match.
-  // Sampling the two ends keeps construction O(1).  The old implementation
-  // walked every byte, so creating the source object for lainc.lain itself
-  // consumed millions of interpreter steps before parsing even started.
-  #let %fingerprint: i64 = #mul(%length, 131)
-  #if #ge(%length, 1) {
+  // Cache a content fingerprint once, when the source object is created.
+  // Meta lookup can then compare source identity in O(1) without rescanning
+  // the complete file for every captured generic function.
+  #let %fingerprint: i64 = 1469598103934665603
+  #let %index: i64 = 0
+  #loop fingerprint_bytes {
+    #if #ge(%index, %length) { #break fingerprint_bytes }
     %fingerprint: i64 = #add(
-      %fingerprint,
-      #zext[#bits<64>](#load[i8](#lea(base=%data, idx=0, scale=1, offset=0)))
+      #mul(%fingerprint, 131),
+      #zext[#bits<64>](#load[i8](#lea(base=%data, idx=%index, scale=1, offset=0)))
     )
-  }
-  #if #ge(%length, 2) {
-    %fingerprint: i64 = #add(
-      #mul(%fingerprint, 257),
-      #zext[#bits<64>](#load[i8](#lea(base=%data, idx=#sub(%length,1), scale=1, offset=0)))
-    )
+    %index: i64 = #add(%index, 1)
+    #continue fingerprint_bytes
   }
   #store %fingerprint, #lea(base=%source, idx=0, scale=0, offset=96)
   #return %source
@@ -2926,6 +2921,257 @@
   #return %status
 }
 
+// Stable AstApi v1 handles for Meta and the bootstrap standard library.
+//
+// The implementation stays in raw_ast.l1.  This file is the versioned ABI
+// surface: callers use these names and do not depend on RawAst field offsets.
+// A returned addr is an AST handle owned by the current compile context.
+
+#proc lain_ast_v1_nil() -> addr {
+  #return #call raw_node_nil()
+}
+
+#proc lain_ast_v1_is_nil(addr %node) -> i1 {
+  #return #call raw_is_nil(%node)
+}
+
+#proc lain_ast_v1_node_kind(addr %node) -> i32 {
+  #return #call raw_node_kind(%node)
+}
+
+#proc lain_ast_v1_node_delimiter(addr %node) -> i32 {
+  #return #call raw_node_delimiter(%node)
+}
+
+#proc lain_ast_v1_node_start(addr %node) -> i64 {
+  #return #call raw_node_start(%node)
+}
+
+#proc lain_ast_v1_node_length(addr %node) -> i64 {
+  #return #call raw_node_length(%node)
+}
+
+#proc lain_ast_v1_first_child(addr %node) -> addr {
+  #return #call raw_node_first(%node)
+}
+
+#proc lain_ast_v1_last_child(addr %node) -> addr {
+  #return #call raw_node_last(%node)
+}
+
+#proc lain_ast_v1_next_sibling(addr %node) -> addr {
+  #return #call raw_node_next(%node)
+}
+
+#proc lain_ast_v1_parent(addr %root, addr %node) -> addr {
+  #return #call ast_find_parent(%root, %node)
+}
+
+#proc lain_ast_v1_new_atom(
+  i64 %start, i64 %length, i32 %token_kind
+) -> addr {
+  #return #call raw_node_new(1, 0, %start, %length, %token_kind)
+}
+
+#proc lain_ast_v1_new_group(
+  i32 %delimiter, i64 %start, i64 %length
+) -> addr {
+  #return #call raw_node_new(2, %delimiter, %start, %length, 0)
+}
+
+#proc lain_ast_v1_append(addr %parent, addr %child) -> #unit {
+  #call raw_append(%parent, %child)
+  #return
+}
+
+#proc lain_ast_v1_copy(addr %node) -> addr {
+  #return #call ast_copy(%node)
+}
+
+#proc lain_ast_v1_replace(
+  addr %parent, addr %old_child, addr %new_child
+) -> i1 {
+  #return #call ast_replace_child(%parent, %old_child, %new_child)
+}
+
+#proc lain_ast_v1_remove(addr %parent, addr %child) -> i1 {
+  #return #call ast_remove_child(%parent, %child)
+}
+
+#proc lain_ast_v1_from_text(
+  addr %source, i64 %start, i64 %length
+) -> addr {
+  #return #call ast_from_text(%source, %start, %length)
+}
+
+#proc lain_ast_v1_write(addr %source, addr %node) -> #unit {
+  #call ast_write(%source, %node)
+  #return
+}
+
+// Versioned compiler-context and pass-result layouts shared by Meta passes.
+// These are plain LAIN-IR records. Handles are addresses owned by the current
+// compile request; the fields give the standard library a stable ABI.
+
+
+// MetaPassResultV1 layout:
+//   status @0 (i32), changed @4 (i8), result handle @8,
+//   diagnostic handle @16, dependencies handle @24, owner @32.
+#proc lain_meta_pass_result_v1_new(
+  i32 %status, i64 %changed, addr %result,
+  addr %diagnostic, addr %dependencies, addr %owner
+) -> addr {
+  #let %value: addr = #call bootstrap.allocate-pages(40)
+  #store %status, #lea(base=%value, idx=0, scale=0, offset=0)
+  #store #trunc[#bits<8>](%changed), #lea(base=%value, idx=0, scale=0, offset=4)
+  #store %result, #lea(base=%value, idx=0, scale=0, offset=8)
+  #store %diagnostic, #lea(base=%value, idx=0, scale=0, offset=16)
+  #store %dependencies, #lea(base=%value, idx=0, scale=0, offset=24)
+  #store %owner, #lea(base=%value, idx=0, scale=0, offset=32)
+  #return %value
+}
+
+#proc lain_meta_pass_result_v1_status(addr %value) -> i32 {
+  #return #load[i32](#lea(base=%value, idx=0, scale=0, offset=0))
+}
+
+#proc lain_meta_pass_result_v1_changed(addr %value) -> i1 {
+  #return #ne(#load[i8](#lea(base=%value, idx=0, scale=0, offset=4)), 0)
+}
+
+#proc lain_meta_pass_result_v1_result(addr %value) -> addr {
+  #return #load[addr](#lea(base=%value, idx=0, scale=0, offset=8))
+}
+
+#proc lain_meta_pass_result_v1_diagnostic(addr %value) -> addr {
+  #return #load[addr](#lea(base=%value, idx=0, scale=0, offset=16))
+}
+
+#proc lain_meta_pass_result_v1_dependencies(addr %value) -> addr {
+  #return #load[addr](#lea(base=%value, idx=0, scale=0, offset=24))
+}
+
+#proc lain_meta_pass_result_v1_owner(addr %value) -> addr {
+  #return #load[addr](#lea(base=%value, idx=0, scale=0, offset=32))
+}
+
+// DiagnosticV1 layout:
+//   code @0 (i32), severity @4 (i8), span start/length @8/@16,
+//   message handle @24, owner @32.
+#proc lain_diagnostic_v1_new(
+  i32 %code, i8 %severity, i64 %start, i64 %length,
+  addr %message, addr %owner
+) -> addr {
+  #let %value: addr = #call bootstrap.allocate-pages(40)
+  #store %code, #lea(base=%value, idx=0, scale=0, offset=0)
+  #store %severity, #lea(base=%value, idx=0, scale=0, offset=4)
+  #store %start, #lea(base=%value, idx=0, scale=0, offset=8)
+  #store %length, #lea(base=%value, idx=0, scale=0, offset=16)
+  #store %message, #lea(base=%value, idx=0, scale=0, offset=24)
+  #store %owner, #lea(base=%value, idx=0, scale=0, offset=32)
+  #return %value
+}
+
+#proc lain_diagnostic_v1_code(addr %value) -> i32 {
+  #return #load[i32](#lea(base=%value, idx=0, scale=0, offset=0))
+}
+
+#proc lain_diagnostic_v1_severity(addr %value) -> i8 {
+  #return #load[i8](#lea(base=%value, idx=0, scale=0, offset=4))
+}
+
+#proc lain_diagnostic_v1_start(addr %value) -> i64 {
+  #return #load[i64](#lea(base=%value, idx=0, scale=0, offset=8))
+}
+
+#proc lain_diagnostic_v1_length(addr %value) -> i64 {
+  #return #load[i64](#lea(base=%value, idx=0, scale=0, offset=16))
+}
+
+#proc lain_diagnostic_v1_message(addr %value) -> addr {
+  #return #load[addr](#lea(base=%value, idx=0, scale=0, offset=24))
+}
+
+#proc lain_diagnostic_v1_owner(addr %value) -> addr {
+  #return #load[addr](#lea(base=%value, idx=0, scale=0, offset=32))
+}
+
+// CompileContextV1 layout shared by every standard-library pass:
+//   owner @0, step limit @8, allocation limit @16, recursion limit @24,
+//   capability mask @32, steps used @40, bytes used @48, recursion used @56.
+#proc lain_compile_context_v1_new(
+  addr %owner, i64 %step_limit, i64 %allocation_limit,
+  i64 %recursion_limit, i64 %capability_mask
+) -> addr {
+  #let %value: addr = #call bootstrap.allocate-pages(64)
+  #store %owner, #lea(base=%value, idx=0, scale=0, offset=0)
+  #store %step_limit, #lea(base=%value, idx=0, scale=0, offset=8)
+  #store %allocation_limit, #lea(base=%value, idx=0, scale=0, offset=16)
+  #store %recursion_limit, #lea(base=%value, idx=0, scale=0, offset=24)
+  #store %capability_mask, #lea(base=%value, idx=0, scale=0, offset=32)
+  #store 0, #lea(base=%value, idx=0, scale=0, offset=40)
+  #store 0, #lea(base=%value, idx=0, scale=0, offset=48)
+  #store 0, #lea(base=%value, idx=0, scale=0, offset=56)
+  #return %value
+}
+
+#proc lain_compile_context_v1_owner(addr %value) -> addr {
+  #return #load[addr](#lea(base=%value, idx=0, scale=0, offset=0))
+}
+#proc lain_compile_context_v1_step_limit(addr %value) -> i64 {
+  #return #load[i64](#lea(base=%value, idx=0, scale=0, offset=8))
+}
+#proc lain_compile_context_v1_allocation_limit(addr %value) -> i64 {
+  #return #load[i64](#lea(base=%value, idx=0, scale=0, offset=16))
+}
+#proc lain_compile_context_v1_recursion_limit(addr %value) -> i64 {
+  #return #load[i64](#lea(base=%value, idx=0, scale=0, offset=24))
+}
+#proc lain_compile_context_v1_capability_mask(addr %value) -> i64 {
+  #return #load[i64](#lea(base=%value, idx=0, scale=0, offset=32))
+}
+#proc lain_compile_context_v1_steps_used(addr %value) -> i64 {
+  #return #load[i64](#lea(base=%value, idx=0, scale=0, offset=40))
+}
+#proc lain_compile_context_v1_bytes_used(addr %value) -> i64 {
+  #return #load[i64](#lea(base=%value, idx=0, scale=0, offset=48))
+}
+#proc lain_compile_context_v1_recursion_used(addr %value) -> i64 {
+  #return #load[i64](#lea(base=%value, idx=0, scale=0, offset=56))
+}
+
+// Return 1 and consume one unit when the step budget permits it.
+#proc lain_compile_context_v1_consume_step(addr %value) -> i1 {
+  #let %used: i64 = #load[i64](#lea(base=%value, idx=0, scale=0, offset=40))
+  #let %limit: i64 = #load[i64](#lea(base=%value, idx=0, scale=0, offset=8))
+  #if #ge(%used, %limit) { #return 0 }
+  #store #add(%used, 1), #lea(base=%value, idx=0, scale=0, offset=40)
+  #return 1
+}
+
+#proc lain_compile_context_v1_charge_bytes(addr %value, i64 %bytes) -> i1 {
+  #let %used: i64 = #load[i64](#lea(base=%value, idx=0, scale=0, offset=48))
+  #let %limit: i64 = #load[i64](#lea(base=%value, idx=0, scale=0, offset=16))
+  #if #gt(%bytes, #sub(%limit, %used)) { #return 0 }
+  #store #add(%used, %bytes), #lea(base=%value, idx=0, scale=0, offset=48)
+  #return 1
+}
+
+#proc lain_compile_context_v1_enter_recursion(addr %value) -> i1 {
+  #let %used: i64 = #load[i64](#lea(base=%value, idx=0, scale=0, offset=56))
+  #let %limit: i64 = #load[i64](#lea(base=%value, idx=0, scale=0, offset=24))
+  #if #ge(%used, %limit) { #return 0 }
+  #store #add(%used, 1), #lea(base=%value, idx=0, scale=0, offset=56)
+  #return 1
+}
+
+// Compiler-core declarations for semantic procedures implemented by the
+// bootstrap standard library.  Keeping these declarations in one small file
+// makes the split explicit and gives every core pass the same ABI signatures.
+
+
+
+
 // Minimal Lain meta substrate built on the generic RawAst.
 //
 // This file is intentionally a semantic library, not a parser extension:
@@ -4160,290 +4406,6 @@
   #return #call meta_value_new(
     5, %source, %node, %node, %environment, 0
   )
-}
-
-// Meta-owned module descriptor.
-//
-// `std::module { ... }` is deliberately recognized here, not by RawAst.  The
-// descriptor stores only source spans and a linked member list; visibility,
-// imports, and code generation remain later phases.
-
-
-
-// Module descriptor: kind @0, name start/length @8/@16, member count @24,
-// first/last member @32/@40, diagnostic @48.
-// Member descriptor: name start/length @0/@8, next @16.
-#proc module_member_new(addr %name) -> addr {
-  #let %member: addr = #call bootstrap.allocate-pages(24)
-  #let %nil: addr = #call bootstrap.allocate-pages(8)
-  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
-  #store #call raw_node_start(%name), #lea(base=%member, idx=0, scale=0, offset=0)
-  #store #call raw_node_length(%name), #lea(base=%member, idx=0, scale=0, offset=8)
-  #store %nil, #lea(base=%member, idx=0, scale=0, offset=16)
-  #return %member
-}
-
-#proc module_descriptor_new(addr %name) -> addr {
-  #let %descriptor: addr = #call bootstrap.allocate-pages(56)
-  #let %nil: addr = #call bootstrap.allocate-pages(8)
-  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
-  #store 2, #lea(base=%descriptor, idx=0, scale=0, offset=0)
-  #store #call raw_node_start(%name), #lea(base=%descriptor, idx=0, scale=0, offset=8)
-  #store #call raw_node_length(%name), #lea(base=%descriptor, idx=0, scale=0, offset=16)
-  #store 0, #lea(base=%descriptor, idx=0, scale=0, offset=24)
-  #store %nil, #lea(base=%descriptor, idx=0, scale=0, offset=32)
-  #store %nil, #lea(base=%descriptor, idx=0, scale=0, offset=40)
-  #store 0, #lea(base=%descriptor, idx=0, scale=0, offset=48)
-  #return %descriptor
-}
-
-#proc module_group(addr %source, addr %root) -> addr {
-  #let %current: addr = #call raw_node_first(%root)
-  #loop find_module {
-    #if #call raw_is_nil(%current) { #return %current }
-    #if #call meta_atom_equal(%source, %current, "module", 6) {
-      #let %candidate: addr = #call raw_node_next(%current)
-      #if #ne(#call raw_node_kind(%candidate), 2) {
-        %current: addr = #call raw_node_next(%current)
-        #continue find_module
-      }
-      #if #eq(#call raw_node_delimiter(%candidate), 123) {
-        #return %candidate
-      }
-    }
-    %current: addr = #call raw_node_next(%current)
-    #continue find_module
-  }
-}
-
-#proc module_member_duplicate(addr %source, addr %descriptor, addr %name) -> i1 {
-  #let %data: addr = #call tool_source_data(%source)
-  #let %member: addr = #load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))
-  #let %name_start: i64 = #call raw_node_start(%name)
-  #let %name_length: i64 = #call raw_node_length(%name)
-  #loop members {
-    #if #call raw_is_nil(%member) { #break members }
-    #if #eq(#load[i64](#lea(base=%member, idx=0, scale=0, offset=8)), %name_length) {
-      #let %index: i64 = 0
-      #let %same: i1 = 1
-      #loop compare {
-        #if #ge(%index, %name_length) { #break compare }
-        #if #ne(
-          #call tool_byte_at(%data, #add(#load[i64](#lea(base=%member, idx=0, scale=0, offset=0)), %index)),
-          #call tool_byte_at(%data, #add(%name_start, %index))
-        ) {
-          %same: i1 = 0
-          #break compare
-        }
-        %index: i64 = #add(%index, 1)
-        #continue compare
-      }
-      #if %same { #return 1 }
-    }
-    %member: addr = #load[addr](#lea(base=%member, idx=0, scale=0, offset=16))
-    #continue members
-  }
-  #return 0
-}
-
-#proc module_group_from_binding(
-  addr %source, addr %let_node
-) -> addr {
-  #let %node: addr = #call raw_node_next(%let_node)
-  #loop declaration {
-    #if #call raw_is_nil(%node) { #return %node }
-    #if #call meta_atom_equal(%source, %node, "module", 6) {
-      #let %group: addr = #call raw_node_next(%node)
-      #if #eq(#call raw_node_kind(%group), 2) {
-        #if #eq(#call raw_node_delimiter(%group), 123) {
-          #return %group
-        }
-      }
-      #return %group
-    }
-    #if #call meta_atom_equal(%source, %node, ";", 1) { #return %node }
-    %node: addr = #call raw_node_next(%node)
-    #continue declaration
-  }
-}
-
-#proc meta_module_annotation_is_valid(
-  addr %source, addr %annotation
-) -> i1 {
-  #if #call meta_atom_equal(%source, %annotation, "Module", 6) {
-    #return 1
-  }
-  #if #call meta_atom_equal(%source, %annotation, "ModuleShape", 11) {
-    #return 1
-  }
-  #if #ne(#call raw_node_kind(%annotation), 1) { #return 0 }
-  #let %data: addr = #call tool_source_data(%source)
-  #let %index: i64 = 0
-  #loop qualified {
-    #if #ge(%index, #call raw_node_length(%annotation)) {
-      #break qualified
-    }
-    #if #eq(
-      #call tool_byte_at(
-        %data, #add(#call raw_node_start(%annotation), %index)
-      ),
-      46
-    ) { #return 1 }
-    %index: i64 = #add(%index, 1)
-    #continue qualified
-  }
-  #return 0
-}
-
-#proc meta_module_validate_binding(
-  addr %source, addr %let_node
-) -> i32 {
-  #let %name: addr = #call raw_node_next(%let_node)
-  #if #call raw_is_nil(%name) { #return 3010 }
-  #let %colon: addr = #call raw_node_next(%name)
-  #let %annotation: addr = #call raw_node_next(%colon)
-  #let %equals: addr = #call raw_node_next(%annotation)
-  #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
-    #return 3011
-  }
-  #if #eq(
-    #call meta_module_annotation_is_valid(%source, %annotation),
-    0
-  ) {
-    #return 3011
-  }
-  #if #eq(#call meta_atom_equal(%source, %equals, "=", 1), 0) {
-    #return 3011
-  }
-  #let %group: addr = #call module_group_from_binding(
-    %source, %let_node
-  )
-  #if #call raw_is_nil(%group) { #return 3011 }
-  #let %descriptor: addr = #call module_descriptor_new(%name)
-  #let %member: addr = #call raw_node_first(%group)
-  #let %count: i64 = 0
-  #loop members {
-    #if #call raw_is_nil(%member) { #break members }
-    #if #call meta_atom_equal(%source, %member, "let", 3) {
-      #let %member_name: addr = #call raw_node_next(%member)
-      #if #call raw_is_nil(%member_name) { #return 3012 }
-      #if #call module_member_duplicate(
-        %source, %descriptor, %member_name
-      ) { #return 3013 }
-      #let %new_member: addr = #call module_member_new(%member_name)
-      #if #call raw_is_nil(
-        #load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))
-      ) {
-        #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=32)
-      } else {
-        #store %new_member, #lea(
-          base=#load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=40)),
-          idx=0, scale=1, offset=16
-        )
-      }
-      #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=40)
-      %count: i64 = #add(%count, 1)
-    }
-    %member: addr = #call raw_node_next(%member)
-    #continue members
-  }
-  #store %count, #lea(base=%descriptor, idx=0, scale=0, offset=24)
-  #return #load[i32](#lea(base=%descriptor, idx=0, scale=0, offset=48))
-}
-
-#proc meta_module_build(addr %source, addr %root) -> addr {
-  #let %name: addr = #call meta_binding_name(%source, %root)
-  #let %descriptor: addr = #call module_descriptor_new(%name)
-  #if #call raw_is_nil(%name) {
-    #store 3010, #lea(base=%descriptor, idx=0, scale=0, offset=48)
-    #return %descriptor
-  }
-  #let %group: addr = #call module_group(%source, %root)
-  #if #call raw_is_nil(%group) {
-    #store 3011, #lea(base=%descriptor, idx=0, scale=0, offset=48)
-    #return %descriptor
-  }
-  #let %member: addr = #call raw_node_first(%group)
-  #let %count: i64 = 0
-  #loop bindings {
-    #if #call raw_is_nil(%member) { #break bindings }
-    #if #call meta_atom_equal(%source, %member, "let", 3) {
-      #let %member_name: addr = #call raw_node_next(%member)
-      #if #call raw_is_nil(%member_name) {
-        #store 3012, #lea(base=%descriptor, idx=0, scale=0, offset=48)
-        #return %descriptor
-      }
-      #if #call module_member_duplicate(%source, %descriptor, %member_name) {
-        #store 3013, #lea(base=%descriptor, idx=0, scale=0, offset=48)
-        #return %descriptor
-      }
-      #let %new_member: addr = #call module_member_new(%member_name)
-      #if #call raw_is_nil(#load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))) {
-        #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=32)
-      } else {
-        #store %new_member, #lea(
-          base=#load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=40)),
-          idx=0, scale=1, offset=16
-        )
-      }
-      #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=40)
-      %count: i64 = #add(%count, 1)
-    }
-    %member: addr = #call raw_node_next(%member)
-    #continue bindings
-  }
-  #store %count, #lea(base=%descriptor, idx=0, scale=0, offset=24)
-  #return %descriptor
-}
-
-#proc meta_module_dump(addr %source, addr %root) -> #unit {
-  #let %descriptor: addr = #call meta_module_build(%source, %root)
-  #let %diagnostic: i32 = #load[i32](#lea(base=%descriptor, idx=0, scale=0, offset=48))
-  #if #ne(%diagnostic, 0) {
-    #call bootstrap.artifact-write-literal("(error ")
-    #call meta_write_decimal(#zext[#bits<64>](%diagnostic))
-    #call bootstrap.artifact-write-byte(41)
-    #call bootstrap.artifact-write-byte(10)
-    #return
-  }
-  #call bootstrap.artifact-write-literal("(meta-module ")
-  #call meta_write_span(
-    %source,
-    #load[i64](#lea(base=%descriptor, idx=0, scale=0, offset=8)),
-    #load[i64](#lea(base=%descriptor, idx=0, scale=0, offset=16))
-  )
-  #call bootstrap.artifact-write-literal(" members=")
-  #call meta_write_decimal(#load[i64](#lea(base=%descriptor, idx=0, scale=0, offset=24)))
-  #let %member: addr = #load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))
-  #loop write_members {
-    #if #call raw_is_nil(%member) { #break write_members }
-    #call bootstrap.artifact-write-literal(" (member ")
-    #call meta_write_span(
-      %source,
-      #load[i64](#lea(base=%member, idx=0, scale=0, offset=0)),
-      #load[i64](#lea(base=%member, idx=0, scale=0, offset=8))
-    )
-    #call bootstrap.artifact-write-byte(41)
-    %member: addr = #load[addr](#lea(base=%member, idx=0, scale=0, offset=16))
-    #continue write_members
-  }
-  #call bootstrap.artifact-write-byte(41)
-  #call bootstrap.artifact-write-byte(10)
-  #return
-}
-
-#proc lain_meta_module_dump() -> i32 {
-  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
-  #let %data: addr = #call bootstrap.source-data(0)
-  #let %length: i64 = #call bootstrap.source-length(0)
-  #let %source: addr = #call tool_source_new(%data, %length)
-  #let %tokens: addr = #call tool_lex_all(%source)
-  #let %root: addr = #call raw_parse(%source, %tokens)
-  #call bootstrap.artifact-begin()
-  #call meta_module_dump(%source, %root)
-  #call bootstrap.artifact-finish()
-  #call bootstrap.release-pages(%source)
-  #return 0
 }
 
 // Compile-time evaluator slice for the Lain meta frontend.
@@ -7966,15 +7928,6 @@
     #call bootstrap.artifact-write-literal("compiler_compile")
     #return
   }
-  // `compiler_compile_library` is the multi-source archive entry.  It must
-  // survive the frozen compiler's first lowering unchanged so the next
-  // generation can compile the complete std/archive closure.
-  #if #call program_name_matches_text(
-    %source, %function, "compiler_compile_library", 24
-  ) {
-    #call bootstrap.artifact-write-literal("compiler_compile_library")
-    #return
-  }
   // External declarations carrying @foreign link_name use that name as the
   // extern label, so calls resolve through the host capability table.
   // The link slot is only consulted for externals; other functions never
@@ -10862,25 +10815,6 @@
   #return 0
 }
 
-// Some RawAst call shapes lose the delimiter group while the physical
-// writer is walking a statement (the source span is still a qualified
-// `std::name(...)` path).  Keep a name-only predicate for the intrinsic
-// lowering fallback.  The writer below still obtains the argument group
-// through `program_operand_group`; this predicate only avoids turning a
-// known std intrinsic into an undeclared runtime call when the regular
-// call-shape check is conservative.
-#proc program_is_std_intrinsic_name(
-  addr %source, addr %node, addr %name_text, i64 %name_length
-) -> i1 {
-  #if #call program_is_std_path(%source, %node) {
-    #return #call meta_atom_equal(
-      %source, #call program_operand_name(%source, %node),
-      %name_text, %name_length
-    )
-  }
-  #return 0
-}
-
 // A record is physically represented by an address.  `Vec(T)` therefore
 // stores one record address per slot when T is a record.  `std::ref_at(T,
 // slot)` must load that address before returning it to code that reads the
@@ -10955,29 +10889,12 @@
   #let %width: i64 = #call program_result_value(%width_result)
   #let %comma: addr = #call raw_node_next(%width_node)
   #let %address: addr = #call raw_node_next(%comma)
-  // A `load_bits(64, ...)` expression can feed an address-typed return
-  // value (the source compiler's `sb_load_addr_at` helper).  LAIN-IR keeps
-  // integer and address physical kinds distinct, so preserve that declared
-  // function result with an explicit int2ptr conversion.
-  #let %return_type: addr = #load[addr](
-    #lea(base=%function, idx=0, scale=0, offset=24)
-  )
-  #let %return_is_addr: i1 = 0
-  #if #eq(#call raw_is_nil(%return_type), 0) {
-    %return_is_addr: i1 = #call program_type_is_address(%source, %return_type)
-  }
-  #if %return_is_addr {
-    #call bootstrap.artifact-write-literal("#int2ptr(")
-  }
   #call bootstrap.artifact-write-literal("#load[#bits<")
   #call meta_write_decimal(%width)
   #call bootstrap.artifact-write-literal(">]("
   )
   #call program_write_value_expression(%source, %function, %address)
   #call bootstrap.artifact-write-byte(41)
-  #if %return_is_addr {
-    #call bootstrap.artifact-write-byte(41)
-  }
   #return
 }
 
@@ -11019,74 +10936,10 @@
   )
   #let %comma2: addr = #call raw_node_next(%address_end)
   #let %value: addr = #call raw_node_next(%comma2)
-  #let %width_result: addr = #call program_parse_decimal(
-    %source, %width_node
-  )
-  #let %width: i64 = #call program_result_value(%width_result)
-  // A 64-bit store may carry an address value (the source language uses
-  // store_bits(64, ...) for pointer fields).  Preserve that physical kind;
-  // only integer values use the requested bits width.
-  #let %value_type: addr = #call program_param_type_for_field(
-    %source, %function, %value
-  )
-  #if #call raw_is_nil(%value_type) {
-    %value_type: addr = #call program_local_type_for_field(
-      %source, %function, %value
-    )
-  }
-  #let %value_is_addr: i1 = 0
-  #if #eq(#call raw_is_nil(%value_type), 0) {
-    %value_is_addr: i1 = #call program_type_is_address(
-      %source, %value_type
-    )
-  }
-  // Keep this ABI-critical helper stable across self-hosting generations.
-  // The parameter-type lookup walks the parsed declaration tree and can lose
-  // the physical kind after the first generated compiler pass.  The helper's
-  // source name is stable, and its third argument is deliberately an address.
-  #if #call program_name_matches_text(
-    %source, %function, "sb_store_addr_at", 16
-  ) {
-    %value_is_addr: i1 = 1
-  }
-  #if %value_is_addr {
-    #call bootstrap.artifact-write-literal("#store[addr] ")
-  } else {
-    #call bootstrap.artifact-write-literal("#store[#bits<")
-    #call meta_write_decimal(%width)
-    #call bootstrap.artifact-write-literal(">] ")
-    #if #eq(%width, 8) {
-      #call bootstrap.artifact-write-literal("#trunc[#bits<8>](")
-      #call program_write_value_expression(%source, %function, %value)
-      #call bootstrap.artifact-write-byte(41)
-    } else {
-      #call program_write_value_expression(%source, %function, %value)
-    }
-  }
-  #if %value_is_addr {
-    #call program_write_value_expression(%source, %function, %value)
-  }
+  #call bootstrap.artifact-write-literal("#store ")
+  #call program_write_value_expression(%source, %function, %value)
   #call bootstrap.artifact-write-literal(", ")
   #call program_write_value_expression(%source, %function, %address)
-  #return
-}
-
-#proc program_write_intrinsic_div(
-  addr %source, addr %function, addr %node, i1 %remainder
-) -> #unit {
-  #let %group: addr = #call program_operand_group(%source, %node)
-  #let %left: addr = #call raw_node_first(%group)
-  #let %comma: addr = #call raw_node_next(%left)
-  #let %right: addr = #call raw_node_next(%comma)
-  #if %remainder {
-    #call bootstrap.artifact-write-literal("#urem(")
-  } else {
-    #call bootstrap.artifact-write-literal("#udiv(")
-  }
-  #call program_write_value_expression(%source, %function, %left)
-  #call bootstrap.artifact-write-literal(", ")
-  #call program_write_value_expression(%source, %function, %right)
-  #call bootstrap.artifact-write-byte(41)
   #return
 }
 
@@ -11842,37 +11695,19 @@
     #call meta_write_decimal(#call eval_value(%consteval))
     #return
   }
-  #if #call program_is_std_intrinsic_name(
+  #if #call program_is_std_intrinsic_call(
     %source, %node, "load_bits", 9
   ) {
     #call program_write_intrinsic_load_bits(%source, %function, %node)
     #return
   }
-  #if #call program_is_std_intrinsic_name(
-    %source, %node, "store_bits", 10
-  ) {
-    #call program_write_intrinsic_store_bits(%source, %function, %node)
-    #return
-  }
-  #if #call program_is_std_intrinsic_name(
+  #if #call program_is_std_intrinsic_call(
     %source, %node, "store", 5
   ) {
     #call program_write_intrinsic_store(%source, %function, %node)
     #return
   }
-  #if #call program_is_std_intrinsic_name(
-    %source, %node, "udiv", 4
-  ) {
-    #call program_write_intrinsic_div(%source, %function, %node, 0)
-    #return
-  }
-  #if #call program_is_std_intrinsic_name(
-    %source, %node, "urem", 4
-  ) {
-    #call program_write_intrinsic_div(%source, %function, %node, 1)
-    #return
-  }
-  #if #call program_is_std_intrinsic_name(
+  #if #call program_is_std_intrinsic_call(
     %source, %node, "usize_max", 9
   ) {
     // `usize_max` is a pure target-width sentinel.  Keep it in LAIN-IR so
@@ -11880,7 +11715,7 @@
     #call bootstrap.artifact-write-literal("#sub(0, 1)")
     #return
   }
-  #if #call program_is_std_intrinsic_name(
+  #if #call program_is_std_intrinsic_call(
     %source, %node, "size_of", 7
   ) {
     #call meta_write_decimal(
@@ -11890,7 +11725,7 @@
     )
     #return
   }
-  #if #call program_is_std_intrinsic_name(
+  #if #call program_is_std_intrinsic_call(
     %source, %node, "align_of", 8
   ) {
     #call bootstrap.artifact-write-literal("8")
@@ -12213,6 +12048,52 @@
 #proc program_write_value_expression(
   addr %source, addr %function, addr %left
 ) -> #unit {
+  // `udiv`/`urem` are compiler intrinsics, not runtime calls.  Keep the
+  // fallback keyed by the final path name for the same qualified-path shape
+  // handled above for `store_bits`.
+  #let %intrinsic_name: addr = #call program_operand_name(%source, %left)
+  #let %intrinsic_group: addr = #call program_operand_group(%source, %left)
+  #if #eq(#call raw_is_nil(%intrinsic_group), 0) {
+    #let %is_udiv: i1 = #call meta_atom_equal(
+      %source, %intrinsic_name, "udiv", 4
+    )
+    #let %is_urem: i1 = #call meta_atom_equal(
+      %source, %intrinsic_name, "urem", 4
+    )
+    #if %is_udiv {
+      #call bootstrap.artifact-write-literal("#udiv(")
+      #let %left_arg: addr = #call raw_node_first(%intrinsic_group)
+      #let %comma: addr = #call raw_node_next(%left_arg)
+      #let %right_arg: addr = #call raw_node_next(%comma)
+      #call program_write_value_expression(%source, %function, %left_arg)
+      #call bootstrap.artifact-write-literal(", ")
+      #call program_write_value_expression(%source, %function, %right_arg)
+      #call bootstrap.artifact-write-byte(41)
+      #return
+    }
+    #if %is_urem {
+      #call bootstrap.artifact-write-literal("#urem(")
+      #let %left_arg: addr = #call raw_node_first(%intrinsic_group)
+      #let %comma: addr = #call raw_node_next(%left_arg)
+      #let %right_arg: addr = #call raw_node_next(%comma)
+      #call program_write_value_expression(%source, %function, %left_arg)
+      #call bootstrap.artifact-write-literal(", ")
+      #call program_write_value_expression(%source, %function, %right_arg)
+      #call bootstrap.artifact-write-byte(41)
+      #return
+    }
+  }
+  // Keep the store intrinsic recognized even when the parser presents a
+  // qualified `std::store_bits` path without its leading namespace node.  The
+  // operand's final name is sufficient to select the physical store writer;
+  // falling through would emit an undeclared runtime `store_bits` call.
+  #if #call meta_atom_equal(
+    %source, #call program_operand_name(%source, %left),
+    "store_bits", 10
+  ) {
+    #call program_write_intrinsic_store_bits(%source, %function, %left)
+    #return
+  }
   #let %left_end: addr = #call program_operand_end_source(%source, %left)
   // A call can be followed by a record projection, for example
   // `unit.nodes.get(tail).next_sibling`.  The call resolver handles `get`,
@@ -13097,9 +12978,22 @@
     } else {
       #call bootstrap.artifact-write-literal("  ")
     }
-    #if #call program_is_std_intrinsic_name(
+    #let %store_bits_statement: i1 = #call program_is_std_intrinsic_call(
       %source, %statement, "store_bits", 10
-    ) {
+    )
+    // Some source forms are tokenized as a qualified path whose leading
+    // `std::` pair is hidden by the statement walker.  The final operand name
+    // is still unambiguous here, so accept it as a fallback for the intrinsic
+    // lowering instead of emitting an undeclared runtime `store_bits` call.
+    #if #eq(%store_bits_statement, 0) {
+      #if #call meta_atom_equal(
+        %source, #call program_operand_name(%source, %statement),
+        "store_bits", 10
+      ) {
+        %store_bits_statement: i1 = 1
+      }
+    }
+    #if %store_bits_statement {
       #call program_write_intrinsic_store_bits(
         %source, %function, %statement
       )
@@ -13577,24 +13471,24 @@
     )
   }
   #call bootstrap.artifact-write-literal(" = ")
-  // `std::load_bits(64, ...)` is an integer load even when the source
-  // declaration says `addr`.  Preserve the declared physical kind at the
-  // local boundary; otherwise the generated artifact contains an invalid
-  // `addr` binding initialized from `#load[#bits<64>]`.
-  #let %declared_addr: i1 = 0
+  // `std::load_bits(64, p)` is an integer-width load at the IR level, while
+  // an explicitly address-typed local needs the pointer representation.  The
+  // source compiler's old path inserted this conversion; keep it in the
+  // second compiler too so a freshly generated lainc remains verifier-safe.
+  #let %address_load: i1 = 0
   #if #eq(#call raw_is_nil(%type), 0) {
-    %declared_addr: i1 = #call program_type_is_address(%source, %type)
-  }
-  #if %declared_addr {
-    #if #call program_is_std_intrinsic_name(
-      %source, %value, "load_bits", 9
-    ) {
-      #call bootstrap.artifact-write-literal("#int2ptr(")
-      #call program_write_value_expression(%source, %function, %value)
-      #call bootstrap.artifact-write-byte(41)
-    } else {
-      #call program_write_value_expression(%source, %function, %value)
+    #if #call program_type_is_address(%source, %type) {
+      #if #call program_is_std_intrinsic_call(
+        %source, %value, "load_bits", 9
+      ) {
+        %address_load: i1 = 1
+      }
     }
+  }
+  #if %address_load {
+    #call bootstrap.artifact-write-literal("#int2ptr(")
+    #call program_write_value_expression(%source, %function, %value)
+    #call bootstrap.artifact-write-byte(41)
   } else {
     #call program_write_value_expression(%source, %function, %value)
   }
@@ -13901,7 +13795,7 @@
                   %function, %statement
                 )
                 #call bootstrap.artifact-write-literal("    ")
-                #if #call program_is_std_intrinsic_name(
+                #if #call program_is_std_intrinsic_call(
                   %source, %statement, "store_bits", 10
                 ) {
                   #call program_write_intrinsic_store_bits(
@@ -14366,31 +14260,6 @@
 ) -> #unit {
   #let %body: addr = #call program_function_body(%function)
   #let %first: addr = #call raw_node_first(%body)
-  // The single-expression shortcut is valid only when the expression is
-  // genuinely the entire body.  A multi-statement body whose first statement
-  // is a call must go through program_write_block; otherwise the shortcut
-  // emits the first call and returns before visiting the remaining siblings.
-  #let %single_expression: i1 = 1
-  #if #call raw_is_nil(%first) {
-    %single_expression: i1 = 0
-  } else {
-    #let %first_end: addr = #call program_value_expression_end(
-      %source, %first
-    )
-    #let %first_tail: addr = #call raw_node_next(%first_end)
-    #if #call raw_is_nil(%first_tail) {
-    } else {
-      #if #call program_is_semicolon(%source, %first_tail) {
-        #if #call raw_is_nil(#call raw_node_next(%first_tail)) {
-        } else {
-          %single_expression: i1 = 0
-        }
-      } else {
-        %single_expression: i1 = 0
-      }
-    }
-  }
-  #if %single_expression {
   #if #eq(#call meta_atom_equal(%source, %first, "let", 3), 0) {
     #if #eq(#call meta_atom_equal(%source, %first, "while", 5), 0) {
       #if #eq(#call meta_atom_equal(%source, %first, "return", 6), 0) {
@@ -14423,7 +14292,6 @@
         }
       }
     }
-  }
   }
   #call program_write_block(%source, %function, %body)
   #return
@@ -14624,29 +14492,7 @@
   #return
 }
 
-#proc program_meta_status(addr %source, addr %root) -> i32 {
-  #let %record: addr = #call meta_record_group(%source, %root)
-  #if #call raw_is_nil(%record) {
-  } else {
-    #let %descriptor: addr = #call meta_record_build(%source, %root)
-    #let %status: i32 = #load[i32](
-      #lea(base=%descriptor, idx=0, scale=0, offset=64)
-    )
-    #if #ne(%status, 0) { #return %status }
-  }
-  #let %module: addr = #call module_group(%source, %root)
-  #if #call raw_is_nil(%module) {
-  } else {
-    #let %descriptor: addr = #call meta_module_build(%source, %root)
-    #let %status: i32 = #load[i32](
-      #lea(base=%descriptor, idx=0, scale=0, offset=48)
-    )
-    #if #ne(%status, 0) { #return %status }
-  }
-  #return 0
-}
-
-#proc lain_lower_program(addr %request, addr %syntax_index) -> i32 {
+#proc lain_core_lower_program(addr %request, addr %syntax_index) -> i32 {
   #let %available_count: i64 = #call syntax_index_count(%syntax_index)
   #let %source_begin: i64 = #load[i64](
     #lea(base=%request, idx=0, scale=0, offset=24)
@@ -14737,7 +14583,7 @@
     %syntax_index, %source_begin, %source_end
   )
   #if #eq(%status, 0) {
-    %status: i32 = #call program_meta_status(%source, %root)
+    %status: i32 = #call lain_std_meta_status(%source, %root)
   }
   #if #eq(%status, 0) {
     %status: i32 = #call program_collect_types(
@@ -14758,7 +14604,7 @@
     #store %source_root,
       #lea(base=%roots, idx=%index, scale=8, offset=0)
     #if #eq(%status, 0) {
-      %status: i32 = #call program_meta_status(
+      %status: i32 = #call lain_std_meta_status(
         %source_value, %source_root
       )
       #if #eq(%status, 0) {
@@ -14927,494 +14773,383 @@
   #return %status
 }
 
-// Type-related Meta queries used by the lowering pipeline.
+// Meta binding collection for top-level functions and constants.
+
+
+
+#proc program_collect_function_candidate(
+  addr %unit, addr %source, #bits<64> %source_index, addr %let_node,
+  addr %environment
+) -> #bits<32> {
+  #let %function: addr = #call program_parse_function(
+    %unit, %source, %source_index, %let_node
+  )
+  #call program_function_set_environment(%function, %environment)
+  // A pending @foreign link name (unit slot 184) attaches to this
+  // function's extern label; store it in the descriptor (slot 112).
+  #let %foreign_link: i64 = #load[i64](
+    #lea(base=%unit, idx=0, scale=0, offset=184)
+  )
+  #if #ne(%foreign_link, 0) {
+    #store %foreign_link, #lea(base=%function, idx=0, scale=0, offset=112)
+    #store 0, #lea(base=%unit, idx=0, scale=0, offset=184)
+  }
+  #let %status: #bits<32> = #call program_function_status(%function)
+  #if #ne(%status, 0) {
+    #call program_unit_set_debug_module_kind(%unit, 4701)
+    #call program_unit_set_validation_function(%unit, %function)
+    #call program_set_unit_status(%unit, %status)
+    #return %status
+  }
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %existing_value: addr = #call meta_env_lookup_local(
+    %environment, %source, %name
+  )
+  #if #call raw_is_nil(%existing_value) {
+    #if #eq(#call program_unit_collecting_import(%unit), 0) {
+      #if #eq(#call program_unit_lazy_nonroot(%unit), 0) {
+        #call program_append_function_if_missing(%unit, %function)
+      } else {
+        #if #eq(
+          %source_index, #call program_unit_physical_root_index(%unit)
+        ) {
+          #call program_append_function_if_missing(%unit, %function)
+        } else {
+          // Small user source closures historically allow an unqualified
+          // helper from a second file. Keep those top-level descriptors
+          // available; large compiler closures use explicit module paths and
+          // retain lazy physical materialization.
+          #if #le(#call program_unit_source_count(%unit), 4) {
+            #call program_append_function_if_missing(%unit, %function)
+          }
+        }
+      }
+    }
+    #call program_meta_bind_function(
+      %environment, %source, %let_node, %function
+    )
+    #return 0
+  }
+  #call program_unit_set_validation_function(%unit, %function)
+  #call program_unit_set_validation_node(%unit, %source, %name)
+  #call program_set_unit_status(%unit, 5110)
+  #return 5110
+}
+
+#proc program_collect_constant_candidate(
+  addr %unit, addr %source, addr %let_node, addr %environment
+) -> #bits<32> {
+  #let %constant: addr = #call program_parse_constant(
+    %unit, %source, %let_node
+  )
+  #let %status: #bits<32> = #call program_constant_status(%constant)
+  #if #ne(%status, 0) {
+    #call program_set_unit_status(%unit, %status)
+    #return %status
+  }
+  #let %existing: addr = #call program_find_constant(
+    %unit, %source, #call raw_node_next(%let_node)
+  )
+  #if #call raw_is_nil(%existing) {
+    #call program_append_constant(%unit, %constant)
+    #call program_meta_bind_constant(
+      %environment, %source, %let_node, %constant
+    )
+    #return 0
+  }
+  #call program_unit_set_validation_node(
+    %unit, %source, #call raw_node_next(%let_node)
+  )
+  #call program_set_unit_status(%unit, 5113)
+  #return 5113
+}
+
+#proc program_collect_literal_candidate(
+  addr %unit, addr %source, addr %let_node, addr %environment
+) -> #bits<32> {
+  #let %constant: addr = #call program_parse_literal_constant(
+    %source, %let_node
+  )
+  #let %status: #bits<32> = #call program_constant_status(%constant)
+  #if #ne(%status, 0) {
+    #call program_set_unit_status(%unit, %status)
+    #return %status
+  }
+  #let %existing: addr = #call program_find_constant(
+    %unit, %source, #call raw_node_next(%let_node)
+  )
+  #if #call raw_is_nil(%existing) {
+    #call program_append_constant(%unit, %constant)
+    #call program_meta_bind_constant(
+      %environment, %source, %let_node, %constant
+    )
+    #return 0
+  }
+  #call program_unit_set_validation_node(
+    %unit, %source, #call raw_node_next(%let_node)
+  )
+  #call program_set_unit_status(%unit, 5113)
+  #return 5113
+}
+
+// LAIN-IR-owned request/result boundary for the compiler.
 //
-// These helpers inspect Meta environments and resolve a source-level type
-// value.  They do not emit LAIN-IR.  Physical spelling remains in the lower
-// and emit layers; this file only answers which Meta value a type name denotes.
+// The bootstrap host still supplies sources through capabilities and receives
+// the final status as the entry return value.  The request/result objects keep
+// the compiler policy in LAIN-IR so the host does not grow a second semantic
+// API while the later phases are added.
 
 
-// Transitional program_* names are kept so the lowering call sites can move
-// incrementally.  The implementation now lives in this Meta-owned module.
-#proc program_type_width(addr %source, addr %node) -> #bits<64> {
-  #return #call meta_builtin_width(%source, %node)
+// CompilerRequest:
+//   source count @0, emit-l1 @8, verify-l1 @16,
+//   source begin/end @24/@32, root source @40, require-main @48.
+#proc compiler_request_new() -> addr {
+  #let %request: addr = #call bootstrap.allocate-pages(56)
+  #let %source_count: i64 = #call bootstrap.source-count()
+  #store #call bootstrap.source-count(),
+    #lea(base=%request, idx=0, scale=0, offset=0)
+  #store 1, #lea(base=%request, idx=0, scale=0, offset=8)
+  #store 1, #lea(base=%request, idx=0, scale=0, offset=16)
+  #store 0, #lea(base=%request, idx=0, scale=0, offset=24)
+  #store %source_count, #lea(base=%request, idx=0, scale=0, offset=32)
+  #store 0, #lea(base=%request, idx=0, scale=0, offset=40)
+  #store 1, #lea(base=%request, idx=0, scale=0, offset=48)
+  #return %request
 }
 
-#proc program_type_is_address(addr %source, addr %node) -> i1 {
-  #return #call meta_type_is_address(%source, %node)
+#proc compiler_request_set_root(addr %request, i64 %root) -> #unit {
+  #store %root, #lea(base=%request, idx=0, scale=0, offset=40)
+  #return
 }
 
-#proc program_type_valid(addr %source, addr %node) -> i1 {
-  #if #call program_type_is_address(%source, %node) { #return 1 }
-  #return #ne(#call program_type_width(%source, %node), 0)
+#proc compiler_request_set_require_main(addr %request, i1 %required) -> #unit {
+  #store %required, #lea(base=%request, idx=0, scale=0, offset=48)
+  #return
 }
 
-#proc program_type_width_in_unit(
-  addr %unit, addr %source, addr %node
-) -> #bits<64> {
-  #let %builtin: #bits<64> = #call program_type_width(%source, %node)
-  #if #ne(%builtin, 0) { #return %builtin }
-  #let %known: addr = #call program_find_type(%unit, %source, %node)
-  #if #call raw_is_nil(%known) {
-    %known: addr = #call program_find_type_final_member(
-      %unit, %source, %node
+// CompilerResult:
+//   status @0, diagnostic @8, syntax-unit count @16, artifact-present @24.
+#proc compiler_result_new(
+  i32 %status, i32 %diagnostic, i64 %module_count, i8 %artifact
+) -> addr {
+  #let %result: addr = #call bootstrap.allocate-pages(32)
+  #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
+  #store %diagnostic, #lea(base=%result, idx=0, scale=0, offset=8)
+  #store %module_count, #lea(base=%result, idx=0, scale=0, offset=16)
+  #store %artifact, #lea(base=%result, idx=0, scale=0, offset=24)
+  #return %result
+}
+
+#proc compiler_result_status(addr %result) -> i32 {
+  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=0))
+}
+
+#proc compiler_result_diagnostic(addr %result) -> i32 {
+  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=8))
+}
+
+#proc compiler_result_module_count(addr %result) -> i64 {
+  #return #load[i64](#lea(base=%result, idx=0, scale=0, offset=16))
+}
+
+#proc compiler_result_has_artifact(addr %result) -> i1 {
+  #return #ne(#load[i8](#lea(base=%result, idx=0, scale=0, offset=24)), 0)
+}
+
+#proc compiler_compile_request(addr %request) -> addr {
+  // The compiler core knows only this stable ABI.  The implementation lives
+  // in the separately bundled bootstrap standard library.
+  #let %std_status: i32 = #call lain_std_initialize(%request)
+  #if #ne(%std_status, 0) {
+    #return #call compiler_result_new(%std_status, %std_status, 0, 0)
+  }
+  #if #ne(#call lain_std_abi_version(), 1) {
+    #return #call compiler_result_new(5201, 5201, 0, 0)
+  }
+  #let %syntax_index: addr = #call syntax_units_build()
+  // The standard library owns the semantic passes. The core only supplies
+  // the source/index handles and consumes their versioned results.
+  #let %expanded: addr = #call lain_std_expand(
+    %request, %syntax_index, %syntax_index
+  )
+  #let %expanded_status: i32 = #call lain_meta_pass_result_v1_status(%expanded)
+  #if #ne(%expanded_status, 0) {
+    #return #call compiler_result_new(
+      %expanded_status, %expanded_status, 0, 0
     )
   }
-  #if #call raw_is_nil(%known) { #return 0 }
-  #return #call program_type_width_value(%known)
-}
-
-#proc program_type_valid_in_unit(
-  addr %unit, addr %source, addr %node
-) -> i1 {
-  #if #call meta_type_is_unit(%source, %node) { #return 1 }
-  #if #call program_type_is_address(%source, %node) { #return 1 }
-  #if #ne(#call program_type_width(%source, %node), 0) { #return 1 }
-  #if #call meta_type_is_nominal(%source, %node) { #return 1 }
-  #let %arguments: addr = #call raw_node_next(%node)
-  #if #eq(#call raw_node_kind(%arguments), 2) {
-    #if #eq(#call raw_node_delimiter(%arguments), 40) { #return 1 }
+  #let %elaborated: addr = #call lain_std_elaborate(
+    %request, #call lain_meta_pass_result_v1_result(%expanded)
+  )
+  #let %elaborated_status: i32 = #call lain_meta_pass_result_v1_status(%elaborated)
+  #if #ne(%elaborated_status, 0) {
+    #return #call compiler_result_new(
+      %elaborated_status, %elaborated_status, 0, 0
+    )
   }
-  #return #eq(
-    #call raw_is_nil(#call program_find_type(%unit, %source, %node)), 0
+  #let %lowered: addr = #call lain_std_lower(
+    %request,
+    #call lain_meta_pass_result_v1_result(%elaborated),
+    %syntax_index
+  )
+  #let %lower_status: i32 = #call lain_meta_pass_result_v1_status(%lowered)
+  #let %source_begin: i64 = #load[i64](
+    #lea(base=%request, idx=0, scale=0, offset=24)
+  )
+  #let %source_end: i64 = #load[i64](
+    #lea(base=%request, idx=0, scale=0, offset=32)
+  )
+  #let %module_count: i64 = #sub(%source_end, %source_begin)
+  #let %status: i32 = %lower_status
+  #let %artifact: i8 = 0
+  #if #eq(%status, 0) { %artifact: i8 = 1 }
+  #return #call compiler_result_new(
+    %status, %status, %module_count, %artifact
   )
 }
 
-#proc program_type_is_address_in_unit(
-  addr %unit, addr %source, addr %node
-) -> i1 {
-  #if #call meta_type_is_unit(%source, %node) { #return 0 }
-  #if #call program_type_is_address(%source, %node) { #return 1 }
-  #let %arguments: addr = #call raw_node_next(%node)
-  #if #eq(#call raw_node_kind(%arguments), 2) {
-    #if #eq(#call raw_node_delimiter(%arguments), 40) { #return 1 }
+// Transitional compiler entry.
+//
+// The entry is deliberately named `compiler_compile` so the bootstrap host
+// can stabilize around one call.  Its first accepted source form is the
+// function slice in lower_func.l1; later Meta/elaboration/lowering phases will
+// be added behind this same boundary.
+
+
+#proc compiler_compile() -> i32 {
+  #let %request: addr = #call compiler_request_new()
+  #let %result: addr = #call compiler_compile_request(%request)
+  #return #call compiler_result_status(%result)
+}
+
+// Library compilation is the entry used for a source closure that does not
+// itself declare a native `main` (for example the canonical compiler modules).
+#proc compiler_compile_library() -> i32 {
+  #let %request: addr = #call compiler_request_new()
+  #call compiler_request_set_root(
+    %request, #sub(#call bootstrap.source-count(), 1)
+  )
+  #call compiler_request_set_require_main(%request, 0)
+  #let %result: addr = #call compiler_compile_request(%request)
+  #return #call compiler_result_status(%result)
+}
+
+// LAIN-IR bootstrap boundary. The stage-0 interpreter accepts a verified
+// LAIN-IR bundle as its source. This entry preserves that bundle through a
+// LAIN-IR-owned entry so stage2 and stage3 do not depend on a native lainc.
+#proc compiler_reemit_l1() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 5000 }
+  #let %data: addr = #call bootstrap.source-data(0)
+  #let %length: i64 = #call bootstrap.source-length(0)
+  #call bootstrap.artifact-begin()
+  #let %index: i64 = 0
+  #loop bytes {
+    #if #ge(%index, %length) { #break bytes }
+    #call bootstrap.artifact-write-byte(
+      #load[i8](#lea(base=%data, idx=%index, scale=1, offset=0))
+    )
+    %index: i64 = #add(%index, 1)
+    #continue bytes
   }
-  #let %known: addr = #call program_find_type(%unit, %source, %node)
-  #if #eq(#call raw_is_nil(%known), 0) {
-    #return #eq(#call program_type_width_value(%known), 0)
-  }
-  #if #call meta_type_is_nominal(%source, %node) { #return 1 }
+  #call bootstrap.artifact-finish()
   #return 0
 }
 
-#proc program_is_type_binding(
-  addr %source, addr %let_node
-) -> i1 {
-  #let %name: addr = #call raw_node_next(%let_node)
-  #let %colon: addr = #call raw_node_next(%name)
-  #let %annotation: addr = #call raw_node_next(%colon)
-  #if #call raw_is_nil(%annotation) { #return 0 }
-  #return #eq(#call meta_atom_equal(%source, %annotation, "type", 4), 1)
-}
+// Core runtime declarations consumed by the bootstrap Meta evaluator.
 
-#proc program_type_binding_value(
+
+// Import path parsing used by the Meta/workspace layer.
+//
+// These helpers only inspect the RawAst spelling of an import declaration.
+// They do not resolve the workspace target or emit code.
+
+
+#proc program_import_argument(
   addr %source, addr %let_node
 ) -> addr {
   #let %node: addr = #call raw_node_next(%let_node)
   #loop declaration {
-    #if #call raw_is_nil(%node) { #return %node }
+    #if #call raw_is_nil(%node) { #return #call program_nil() }
     #if #call meta_atom_equal(%source, %node, "=", 1) {
-      #return #call raw_node_next(%node)
+      #let %value: addr = #call raw_node_next(%node)
+      #if #call raw_is_nil(%value) { #return #call program_nil() }
+      #if #eq(
+        #call meta_atom_equal(%source, %value, "import", 6),
+        0
+      ) { #return #call program_nil() }
+      #let %group: addr = #call raw_node_next(%value)
+      #if #call raw_is_nil(%group) { #return #call program_nil() }
+      #if #ne(#call raw_node_kind(%group), 2) {
+        #return #call program_nil()
+      }
+      #if #ne(#call raw_node_delimiter(%group), 40) {
+        #return #call program_nil()
+      }
+      #return #call raw_node_first(%group)
     }
-    #if #call program_is_semicolon(%source, %node) { #return %node }
+    #if #call meta_atom_equal(%source, %node, ";", 1) {
+      #return #call program_nil()
+    }
     %node: addr = #call raw_node_next(%node)
     #continue declaration
   }
 }
 
-#proc program_type_value_is_std_constructor(
-  addr %source, addr %value
-) -> i1 {
-  #if #eq(#call meta_atom_equal(%source, %value, "std", 3), 0) {
-    #return 0
-  }
-  #let %colon1: addr = #call raw_node_next(%value)
-  #let %colon2: addr = #call raw_node_next(%colon1)
-  #return #call meta_atom_equal(%source, %colon2, ":", 1)
-}
-
-#proc program_type_value_is_constructor(
-  addr %source, addr %value
-) -> i1 {
-  #if #call program_type_value_is_std_constructor(%source, %value) {
-    #return 1
-  }
-  #let %arguments: addr = #call raw_node_next(%value)
-  #if #call raw_is_nil(%arguments) { #return 0 }
-  #if #ne(#call raw_node_kind(%arguments), 2) { #return 0 }
-  #return #eq(#call raw_node_delimiter(%arguments), 40)
-}
-
-#proc program_collect_type_candidate(
-  addr %unit, addr %source, #bits<64> %source_index, addr %let_node
-) -> #bits<32> {
-  #let %name: addr = #call raw_node_next(%let_node)
-  #let %value: addr = #call program_type_binding_value(%source, %let_node)
-  #if #call raw_is_nil(%name) { #return 5117 }
-  #if #call raw_is_nil(%value) { #return 5117 }
-  #let %existing: addr = #call program_find_type_in_source(
-    %unit, %source, %source_index, %name
-  )
-  #if #eq(#call raw_is_nil(%existing), 0) {
-    #if #call meta_type_is_nominal(%source, %value) { #return 0 }
-    #if #call program_type_value_is_constructor(%source, %value) {
-      #return 0
-    }
-    #return 5117
-  }
-  #let %width: #bits<64> = #call program_type_width(%source, %value)
-  #let %status: #bits<32> = 0
-  #if #eq(%width, 0) {
-    #if #call program_type_is_address(%source, %value) {
-      // Address aliases keep the physical address representation.
-      %width: #bits<64> = 0
-    } else {
-    #if #call program_type_value_is_constructor(%source, %value) {
-      %width: #bits<64> = 0
-    } else {
-      #if #call meta_type_is_nominal(%source, %value) {
-        %width: #bits<64> = 0
-      } else {
-        #let %alias: addr = #call program_find_type_in_source(
-          %unit, %source, %source_index, %value
-        )
-        #if #call raw_is_nil(%alias) {
-          #let %global_alias: addr = #call program_find_type(
-            %unit, %source, %value
-          )
-          %alias: addr = %global_alias
-        }
-        #if #call raw_is_nil(%alias) {
-          %status: #bits<32> = 5117
-        } else {
-          %width: #bits<64> = #call program_type_width_value(%alias)
-        }
-      }
-    }
-    }
-  }
-  #let %type: addr = #call program_type_new(
-    %source, %name, %width, %status, %source_index, %let_node
-  )
-  #call program_append_type(%unit, %type)
-  #if #eq(%status, 0) {
-    #if #eq(
-      #call program_type_value_is_constructor(%source, %value), 0
-    ) {
-      #call program_meta_bind_type(
-        #call program_unit_meta_environment(%unit),
-        %source, %let_node, %type
-      )
-    } else {
-      #if #call program_type_value_is_std_constructor(%source, %value) {
-        #call program_meta_bind_type(
-          #call program_unit_meta_environment(%unit),
-          %source, %let_node, %type
-        )
-      }
-    }
-  }
-  #return %status
-}
-
-#proc program_register_local_type(
-  addr %unit, addr %source, #bits<64> %source_index, addr %let_node
-) -> #bits<32> {
-  #let %name: addr = #call raw_node_next(%let_node)
-  #let %value: addr = #call program_type_binding_value(%source, %let_node)
-  #if #call raw_is_nil(%name) { #return 0 }
-  #if #call raw_is_nil(%value) { #return 0 }
-  #let %existing: addr = #call program_find_type_in_source(
-    %unit, %source, %source_index, %name
-  )
-  #if #eq(#call raw_is_nil(%existing), 0) { #return 0 }
-  #let %width: #bits<64> = #call program_type_width(%source, %value)
-  #let %type: addr = #call program_type_new(
-    %source, %name, %width, 0, %source_index, %let_node
-  )
-  #call program_append_type(%unit, %type)
-  #return 0
-}
-
-#proc program_type_end(addr %source, addr %node) -> addr {
-  #return #call meta_type_end(%source, %node)
-}
-
-#proc meta_lookup_type_binding(
-  addr %environment, addr %source, addr %node
-) -> addr {
+#proc program_import_name_start(
+  addr %source, addr %argument
+) -> #bits<64> {
   #let %data: addr = #call tool_source_data(%source)
-  #let %start: #bits<64> = #call raw_node_start(%node)
-  #let %length: #bits<64> = #call raw_node_length(%node)
-  #let %current: addr = %environment
-  #let %depth: #bits<64> = 0
-  #loop environments {
-    #if #ge(%depth, 256) { #return #call meta_value_nil() }
-    %depth: #bits<64> = #add(%depth, 1)
-    #if #call meta_env_is_nil(%current) {
-      #return #call meta_value_nil()
-    }
-    #let %binding: addr = #load[addr](
-      #lea(base=%current, idx=0, scale=0, offset=16)
+  #let %length: #bits<64> = #call raw_node_length(%argument)
+  #let %inner_length: #bits<64> = #sub(%length, 2)
+  #let %index: #bits<64> = 0
+  #let %component: #bits<64> = 0
+  #loop separators {
+    #if #ge(%index, %inner_length) { #break separators }
+    #let %byte: i8 = #call tool_byte_at(
+      %data, #add(#call raw_node_start(%argument), #add(1, %index))
     )
-    #loop bindings {
-      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
-      #if #eq(
-        #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=24)),
-        %length
-      ) {
-        #let %binding_source: addr = #load[addr](
-          #lea(base=%binding, idx=0, scale=0, offset=8)
-        )
-        #let %binding_data: addr = #call tool_source_data(
-          %binding_source
-        )
-        #let %index: #bits<64> = 0
-        #let %same: i1 = 1
-        #loop compare {
-          #if #ge(%index, %length) { #break compare }
-          #if #ne(
-            #call tool_byte_at(%data, #add(%start, %index)),
-            #call tool_byte_at(
-              %binding_data,
-              #add(
-                #load[#bits<64>](
-                  #lea(base=%binding, idx=0, scale=0, offset=16)
-                ),
-                %index
-              )
-            )
-          ) {
-            %same: i1 = 0
-            #break compare
-          }
+    #if #eq(%byte, 58) {
+      #if #lt(#add(%index, 1), %inner_length) {
+        #if #eq(
+          #call tool_byte_at(
+            %data,
+            #add(#call raw_node_start(%argument), #add(2, %index))
+          ),
+          58
+        ) {
+          %component: #bits<64> = #add(%index, 2)
           %index: #bits<64> = #add(%index, 1)
-          #continue compare
-        }
-        #if %same {
-          #return #load[addr](
-            #lea(base=%binding, idx=0, scale=0, offset=32)
-          )
         }
       }
-      %binding: addr = #load[addr](
-        #lea(base=%binding, idx=0, scale=0, offset=40)
-      )
-      #continue bindings
+    } else {
+      #if #eq(%byte, 47) {
+        %component: #bits<64> = #add(%index, 1)
+      }
+      #if #eq(%byte, 92) {
+        %component: #bits<64> = #add(%index, 1)
+      }
     }
-    %current: addr = #call meta_env_parent(%current)
-    #continue environments
+    %index: #bits<64> = #add(%index, 1)
+    #continue separators
   }
+  #return #add(#call raw_node_start(%argument), #add(1, %component))
 }
 
-#proc meta_lookup_first_type_value(addr %environment) -> addr {
-  #let %current: addr = %environment
-  #let %depth: #bits<64> = 0
-  #loop environments {
-    #if #ge(%depth, 256) { #return #call meta_value_nil() }
-    %depth: #bits<64> = #add(%depth, 1)
-    #if #call meta_env_is_nil(%current) {
-      #return #call meta_value_nil()
-    }
-    #let %binding: addr = #load[addr](
-      #lea(base=%current, idx=0, scale=0, offset=16)
-    )
-    #loop bindings {
-      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
-      #let %value: addr = #load[addr](
-        #lea(base=%binding, idx=0, scale=0, offset=32)
-      )
-      #if #eq(#call meta_value_kind(%value), 4) {
-        #return %value
-      }
-      %binding: addr = #load[addr](
-        #lea(base=%binding, idx=0, scale=0, offset=40)
-      )
-      #continue bindings
-    }
-    %current: addr = #call meta_env_parent(%current)
-    #continue environments
-  }
-}
-
-#proc meta_lookup_concrete_type_value(
-  addr %environment, addr %source
-) -> addr {
-  #let %current: addr = %environment
-  #let %depth: #bits<64> = 0
-  #loop environments {
-    #if #ge(%depth, 256) { #return #call meta_value_nil() }
-    %depth: #bits<64> = #add(%depth, 1)
-    #if #call meta_env_is_nil(%current) {
-      #return #call meta_value_nil()
-    }
-    #let %binding: addr = #load[addr](
-      #lea(base=%current, idx=0, scale=0, offset=16)
-    )
-    #loop bindings {
-      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
-      #let %value: addr = #load[addr](
-        #lea(base=%binding, idx=0, scale=0, offset=32)
-      )
-      #if #eq(
-        #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=24)),
-        1
-      ) {
-        #let %binding_source: addr = #load[addr](
-          #lea(base=%binding, idx=0, scale=0, offset=8)
-        )
-        #let %binding_data: addr = #call tool_source_data(%binding_source)
-        #if #eq(
-          #call tool_byte_at(
-            %binding_data,
-            #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=16))
-          ),
-          84
-        ) {
-          #if #eq(#call meta_value_kind(%value), 4) {
-            #let %value_source: addr = #call meta_value_source(%value)
-            #let %value_width: #bits<64> = #call meta_builtin_width_span(
-              %value_source,
-              #call meta_value_start(%value),
-              #call meta_value_length(%value)
-            )
-            #if #ne(%value_width, 0) {
-              #return %value
-            }
-          }
-        }
-      }
-      %binding: addr = #load[addr](
-        #lea(base=%binding, idx=0, scale=0, offset=40)
-      )
-      #continue bindings
-    }
-    %current: addr = #call meta_env_parent(%current)
-    #continue environments
-  }
-}
-
-// Return the concrete `T` captured by a generic factory even when `T` is a
-// record type.  `meta_lookup_concrete_type_value` intentionally filters for
-// builtin-width values because it is also used by scalar inference; record
-// projections need the nominal binding as well (`Vec(Unit)` -> `Unit`).
-#proc meta_lookup_type_parameter_value(addr %environment) -> addr {
-  #let %current: addr = %environment
-  #let %depth: #bits<64> = 0
-  #loop environments {
-    #if #ge(%depth, 256) { #return #call meta_value_nil() }
-    %depth: #bits<64> = #add(%depth, 1)
-    #if #call meta_env_is_nil(%current) {
-      #return #call meta_value_nil()
-    }
-    #let %binding: addr = #load[addr](
-      #lea(base=%current, idx=0, scale=0, offset=16)
-    )
-    #loop bindings {
-      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
-      #let %value: addr = #load[addr](
-        #lea(base=%binding, idx=0, scale=0, offset=32)
-      )
-      #if #eq(
-        #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=24)),
-        1
-      ) {
-        #let %binding_source: addr = #load[addr](
-          #lea(base=%binding, idx=0, scale=0, offset=8)
-        )
-        #let %binding_data: addr = #call tool_source_data(%binding_source)
-        #if #eq(
-          #call tool_byte_at(
-            %binding_data,
-            #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=16))
-          ),
-          84
-        ) {
-          #if #eq(#call meta_value_kind(%value), 4) {
-            #return %value
-          }
-        }
-      }
-      %binding: addr = #load[addr](
-        #lea(base=%binding, idx=0, scale=0, offset=40)
-      )
-      #continue bindings
-    }
-    %current: addr = #call meta_env_parent(%current)
-    #continue environments
-  }
-}
-
-#proc meta_function_type_value(
-  addr %environment, addr %source, addr %type
-) -> addr {
-  #let %nil: addr = #call meta_value_nil()
-  #if #eq(#call raw_is_nil(%environment), 0) {
-    #let %path_value: addr = #call meta_env_lookup_path(
-      %environment, %source, %type
-    )
-    #if #ne(#call meta_value_kind(%path_value), 0) {
-      #if #eq(#call meta_value_kind(%path_value), 4) {
-        #return %path_value
-      }
-    }
-    #if #call program_is_generic_type_name(%source, %type) {
-      #let %resolved: addr = #call meta_env_lookup_span(
-        %environment, %source,
-        #call raw_node_start(%type), #call raw_node_length(%type)
-      )
-      // The binding was created from the factory parameter node, while the
-      // use site can come from a different RawAst source span.  Match the
-      // actual identifier text as a final step so captured `T`/`U` values do
-      // not disappear merely because their source offsets differ.
-      #if #eq(#call meta_value_kind(%resolved), 0) {
-      #let %type_text: addr = #lea(
-        base=#call tool_source_data(%source),
-        idx=#call raw_node_start(%type), scale=1, offset=0
-      )
-        %resolved: addr = #call meta_env_lookup_text(
-          %environment, %source, %type_text,
-          #call raw_node_length(%type)
-        )
-      }
-      #if #ne(#call meta_value_kind(%resolved), 0) {
-        #if #eq(#call meta_value_kind(%resolved), 4) {
-          #let %resolved_source: addr = #call meta_value_source(%resolved)
-          #let %resolved_payload: addr = #call meta_value_payload(%resolved)
-          #let %payload_is_T: i1 = #call meta_atom_equal(
-            %resolved_source, %resolved_payload, "T", 1
-          )
-          #if %payload_is_T {
-            #let %concrete: addr = #call meta_lookup_concrete_type_value(
-              %environment, %source
-            )
-            #if #eq(#call raw_is_nil(%concrete), 0) {
-              #return %concrete
-            }
-          }
-          // A generic parameter binding whose payload does not point at the
-          // parameter name can carry a stale/overwritten payload (the span
-          // and payload disagree).  Recover the concrete type parameter from
-          // the environment instead of trusting the inconsistent payload.
-          #if #eq(%payload_is_T, 0) {
-            #if #ne(
-              #call raw_node_start(%resolved_payload),
-              #call meta_value_start(%resolved)
-            ) {
-              #let %concrete: addr = #call meta_lookup_concrete_type_value(
-                %environment, %source
-              )
-              #if #eq(#call raw_is_nil(%concrete), 0) {
-                #return %concrete
-              }
-            }
-          }
-        }
-      }
-      #return %resolved
+#proc program_import_name_length(
+  addr %source, addr %argument, #bits<64> %name_start
+) -> #bits<64> {
+  #let %data: addr = #call tool_source_data(%source)
+  #let %end: #bits<64> = #sub(
+    #add(#call raw_node_start(%argument), #call raw_node_length(%argument)),
+    1
+  )
+  #let %length: #bits<64> = #sub(%end, %name_start)
+  #if #ge(%length, 5) {
+    #if #eq(#call tool_byte_at(%data, #sub(%end, 5)), 46) {
+      %length: #bits<64> = #sub(%length, 5)
     }
   }
-  #return %nil
+  #return %length
 }
 
 // Record field queries used by Meta-aware lowering.
@@ -16533,367 +16268,494 @@
   }
 }
 
-// Module and namespace Meta bindings.
+// Type-related Meta queries used by the lowering pipeline.
 //
-// Module shells are created before their bodies are collected so imports and
-// recursive references can resolve a stable Meta value.
+// These helpers inspect Meta environments and resolve a source-level type
+// value.  They do not emit LAIN-IR.  Physical spelling remains in the lower
+// and emit layers; this file only answers which Meta value a type name denotes.
 
 
-#proc program_meta_bind_function(
-  addr %environment, addr %source, addr %let_node, addr %function
-) -> #unit {
-  #let %name: addr = #call raw_node_next(%let_node)
-  #let %value: addr = #call meta_value_function(
-    %source, %name, %function, %environment
-  )
-  #call meta_env_bind(%environment, %source, %name, %value)
-  #return
+// Transitional program_* names are kept so the lowering call sites can move
+// incrementally.  The implementation now lives in this Meta-owned module.
+#proc program_type_width(addr %source, addr %node) -> #bits<64> {
+  #return #call meta_builtin_width(%source, %node)
 }
 
-#proc program_meta_bind_constant(
-  addr %environment, addr %source, addr %let_node, addr %constant
-) -> #unit {
-  #let %name: addr = #call raw_node_next(%let_node)
-  #let %value: addr = #call meta_value_scalar(
-    %source, %name, #call program_constant_value(%constant)
-  )
-  #call meta_env_bind(%environment, %source, %name, %value)
-  #return
+#proc program_type_is_address(addr %source, addr %node) -> i1 {
+  #return #call meta_type_is_address(%source, %node)
 }
 
-#proc program_meta_bind_type(
-  addr %environment, addr %source, addr %let_node, addr %type
-) -> #unit {
-  #let %name: addr = #call raw_node_next(%let_node)
-  #let %value: addr = #call meta_value_type_with_namespace(
-    %source, %name, %let_node, %environment
-  )
-  #call meta_env_bind(%environment, %source, %name, %value)
-  #return
+#proc program_type_valid(addr %source, addr %node) -> i1 {
+  #if #call program_type_is_address(%source, %node) { #return 1 }
+  #return #ne(#call program_type_width(%source, %node), 0)
 }
 
-#proc program_meta_bind_module(
-  addr %environment, addr %source, addr %let_node
-) -> addr {
-  #let %name: addr = #call raw_node_next(%let_node)
-  #let %existing: addr = #call meta_env_lookup_local(
-    %environment, %source, %name
-  )
-  #if #ne(#call meta_value_kind(%existing), 0) {
-    #if #eq(#call meta_value_kind(%existing), 2) {
-      #return #call meta_value_environment(%existing)
-    }
+#proc program_type_width_in_unit(
+  addr %unit, addr %source, addr %node
+) -> #bits<64> {
+  #let %builtin: #bits<64> = #call program_type_width(%source, %node)
+  #if #ne(%builtin, 0) { #return %builtin }
+  #let %known: addr = #call program_find_type(%unit, %source, %node)
+  #if #call raw_is_nil(%known) {
+    %known: addr = #call program_find_type_final_member(
+      %unit, %source, %node
+    )
   }
-  #let %group: addr = #call program_module_group(%source, %let_node)
-  #let %module_environment: addr = #call meta_env_new(%environment)
-  #let %value: addr = #call meta_value_module(
-    %source, %name, %group, %module_environment
-  )
-  #call meta_env_bind(%environment, %source, %name, %value)
-  // Module bodies may refer to their own exported namespace, for example
-  // `bounds.Check(Checked)` inside the `bounds` module.  Keep the same module
-  // value visible from its body environment as well as from the parent.
-  #call meta_env_bind(
-    %module_environment, %source, %name, %value
-  )
-  #return %module_environment
+  #if #call raw_is_nil(%known) { #return 0 }
+  #return #call program_type_width_value(%known)
 }
 
-#proc program_is_module_declaration(
+#proc program_type_valid_in_unit(
+  addr %unit, addr %source, addr %node
+) -> i1 {
+  #if #call meta_type_is_unit(%source, %node) { #return 1 }
+  #if #call program_type_is_address(%source, %node) { #return 1 }
+  #if #ne(#call program_type_width(%source, %node), 0) { #return 1 }
+  #if #call meta_type_is_nominal(%source, %node) { #return 1 }
+  #let %arguments: addr = #call raw_node_next(%node)
+  #if #eq(#call raw_node_kind(%arguments), 2) {
+    #if #eq(#call raw_node_delimiter(%arguments), 40) { #return 1 }
+  }
+  #return #eq(
+    #call raw_is_nil(#call program_find_type(%unit, %source, %node)), 0
+  )
+}
+
+#proc program_type_is_address_in_unit(
+  addr %unit, addr %source, addr %node
+) -> i1 {
+  #if #call meta_type_is_unit(%source, %node) { #return 0 }
+  #if #call program_type_is_address(%source, %node) { #return 1 }
+  #let %arguments: addr = #call raw_node_next(%node)
+  #if #eq(#call raw_node_kind(%arguments), 2) {
+    #if #eq(#call raw_node_delimiter(%arguments), 40) { #return 1 }
+  }
+  #let %known: addr = #call program_find_type(%unit, %source, %node)
+  #if #eq(#call raw_is_nil(%known), 0) {
+    #return #eq(#call program_type_width_value(%known), 0)
+  }
+  #if #call meta_type_is_nominal(%source, %node) { #return 1 }
+  #return 0
+}
+
+#proc program_is_type_binding(
   addr %source, addr %let_node
 ) -> i1 {
-  #let %node: addr = #call raw_node_next(%let_node)
-  #loop declaration {
-    #if #call raw_is_nil(%node) { #return 0 }
-    #if #call meta_atom_equal(%source, %node, "module", 6) {
-      #return 1
-    }
-    #if #call meta_atom_equal(%source, %node, ";", 1) { #return 0 }
-    %node: addr = #call raw_node_next(%node)
-    #continue declaration
-  }
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %colon: addr = #call raw_node_next(%name)
+  #let %annotation: addr = #call raw_node_next(%colon)
+  #if #call raw_is_nil(%annotation) { #return 0 }
+  #return #eq(#call meta_atom_equal(%source, %annotation, "type", 4), 1)
 }
 
-#proc program_is_record_declaration(
-  addr %source, addr %let_node
-) -> i1 {
-  #let %node: addr = #call raw_node_next(%let_node)
-  #loop declaration {
-    #if #call raw_is_nil(%node) { #return 0 }
-    #if #call meta_atom_equal(%source, %node, "struct", 6) {
-      #return 1
-    }
-    #if #call meta_atom_equal(%source, %node, ";", 1) { #return 0 }
-    %node: addr = #call raw_node_next(%node)
-    #continue declaration
-  }
-}
-
-#proc program_module_group(
+#proc program_type_binding_value(
   addr %source, addr %let_node
 ) -> addr {
   #let %node: addr = #call raw_node_next(%let_node)
   #loop declaration {
     #if #call raw_is_nil(%node) { #return %node }
-    #if #call meta_atom_equal(%source, %node, "module", 6) {
-      #let %group: addr = #call raw_node_next(%node)
-      #if #eq(#call raw_node_kind(%group), 2) {
-        #if #eq(#call raw_node_delimiter(%group), 123) {
-          #return %group
+    #if #call meta_atom_equal(%source, %node, "=", 1) {
+      #return #call raw_node_next(%node)
+    }
+    #if #call program_is_semicolon(%source, %node) { #return %node }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_type_value_is_std_constructor(
+  addr %source, addr %value
+) -> i1 {
+  #if #eq(#call meta_atom_equal(%source, %value, "std", 3), 0) {
+    #return 0
+  }
+  #let %colon1: addr = #call raw_node_next(%value)
+  #let %colon2: addr = #call raw_node_next(%colon1)
+  #return #call meta_atom_equal(%source, %colon2, ":", 1)
+}
+
+#proc program_type_value_is_constructor(
+  addr %source, addr %value
+) -> i1 {
+  #if #call program_type_value_is_std_constructor(%source, %value) {
+    #return 1
+  }
+  #let %arguments: addr = #call raw_node_next(%value)
+  #if #call raw_is_nil(%arguments) { #return 0 }
+  #if #ne(#call raw_node_kind(%arguments), 2) { #return 0 }
+  #return #eq(#call raw_node_delimiter(%arguments), 40)
+}
+
+#proc program_collect_type_candidate(
+  addr %unit, addr %source, #bits<64> %source_index, addr %let_node
+) -> #bits<32> {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %value: addr = #call program_type_binding_value(%source, %let_node)
+  #if #call raw_is_nil(%name) { #return 5117 }
+  #if #call raw_is_nil(%value) { #return 5117 }
+  #let %existing: addr = #call program_find_type_in_source(
+    %unit, %source, %source_index, %name
+  )
+  #if #eq(#call raw_is_nil(%existing), 0) {
+    #if #call meta_type_is_nominal(%source, %value) { #return 0 }
+    #if #call program_type_value_is_constructor(%source, %value) {
+      #return 0
+    }
+    #return 5117
+  }
+  #let %width: #bits<64> = #call program_type_width(%source, %value)
+  #let %status: #bits<32> = 0
+  #if #eq(%width, 0) {
+    #if #call program_type_is_address(%source, %value) {
+      // Address aliases keep the physical address representation.
+      %width: #bits<64> = 0
+    } else {
+    #if #call program_type_value_is_constructor(%source, %value) {
+      %width: #bits<64> = 0
+    } else {
+      #if #call meta_type_is_nominal(%source, %value) {
+        %width: #bits<64> = 0
+      } else {
+        #let %alias: addr = #call program_find_type_in_source(
+          %unit, %source, %source_index, %value
+        )
+        #if #call raw_is_nil(%alias) {
+          #let %global_alias: addr = #call program_find_type(
+            %unit, %source, %value
+          )
+          %alias: addr = %global_alias
+        }
+        #if #call raw_is_nil(%alias) {
+          %status: #bits<32> = 5117
+        } else {
+          %width: #bits<64> = #call program_type_width_value(%alias)
         }
       }
-      #return %group
     }
-    #if #call meta_atom_equal(%source, %node, ";", 1) { #return %node }
-    %node: addr = #call raw_node_next(%node)
-    #continue declaration
+    }
   }
-}
-
-#proc program_is_std_module_value(
-  addr %source, addr %node
-) -> i1 {
-  #if #eq(#call meta_atom_equal(%source, %node, "std", 3), 0) {
-    #return 0
-  }
-  #let %colon1: addr = #call raw_node_next(%node)
-  #let %colon2: addr = #call raw_node_next(%colon1)
-  #let %member: addr = #call raw_node_next(%colon2)
-  #let %group: addr = #call raw_node_next(%member)
-  #if #eq(#call meta_atom_equal(%source, %colon1, ":", 1), 0) {
-    #return 0
-  }
-  #if #eq(#call meta_atom_equal(%source, %colon2, ":", 1), 0) {
-    #return 0
-  }
-  #if #eq(#call meta_atom_equal(%source, %member, "module", 6), 0) {
-    #return 0
-  }
-  #if #call raw_is_nil(%group) { #return 0 }
-  #if #ne(#call raw_node_kind(%group), 2) { #return 0 }
-  #return #eq(#call raw_node_delimiter(%group), 123)
-}
-
-#proc program_std_module_value_group(
-  addr %source, addr %node
-) -> addr {
-  #return #call raw_node_next(
-    #call raw_node_next(
-      #call raw_node_next(#call raw_node_next(%node))
-    )
+  #let %type: addr = #call program_type_new(
+    %source, %name, %width, %status, %source_index, %let_node
   )
+  #call program_append_type(%unit, %type)
+  #if #eq(%status, 0) {
+    #if #eq(
+      #call program_type_value_is_constructor(%source, %value), 0
+    ) {
+      #call program_meta_bind_type(
+        #call program_unit_meta_environment(%unit),
+        %source, %let_node, %type
+      )
+    } else {
+      #if #call program_type_value_is_std_constructor(%source, %value) {
+        #call program_meta_bind_type(
+          #call program_unit_meta_environment(%unit),
+          %source, %let_node, %type
+        )
+      }
+    }
+  }
+  #return %status
 }
 
-// Import path parsing used by the Meta/workspace layer.
-//
-// These helpers only inspect the RawAst spelling of an import declaration.
-// They do not resolve the workspace target or emit code.
+#proc program_register_local_type(
+  addr %unit, addr %source, #bits<64> %source_index, addr %let_node
+) -> #bits<32> {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %value: addr = #call program_type_binding_value(%source, %let_node)
+  #if #call raw_is_nil(%name) { #return 0 }
+  #if #call raw_is_nil(%value) { #return 0 }
+  #let %existing: addr = #call program_find_type_in_source(
+    %unit, %source, %source_index, %name
+  )
+  #if #eq(#call raw_is_nil(%existing), 0) { #return 0 }
+  #let %width: #bits<64> = #call program_type_width(%source, %value)
+  #let %type: addr = #call program_type_new(
+    %source, %name, %width, 0, %source_index, %let_node
+  )
+  #call program_append_type(%unit, %type)
+  #return 0
+}
 
+#proc program_type_end(addr %source, addr %node) -> addr {
+  #return #call meta_type_end(%source, %node)
+}
 
-#proc program_import_argument(
-  addr %source, addr %let_node
+#proc meta_lookup_type_binding(
+  addr %environment, addr %source, addr %node
 ) -> addr {
-  #let %node: addr = #call raw_node_next(%let_node)
-  #loop declaration {
-    #if #call raw_is_nil(%node) { #return #call program_nil() }
-    #if #call meta_atom_equal(%source, %node, "=", 1) {
-      #let %value: addr = #call raw_node_next(%node)
-      #if #call raw_is_nil(%value) { #return #call program_nil() }
+  #let %data: addr = #call tool_source_data(%source)
+  #let %start: #bits<64> = #call raw_node_start(%node)
+  #let %length: #bits<64> = #call raw_node_length(%node)
+  #let %current: addr = %environment
+  #let %depth: #bits<64> = 0
+  #loop environments {
+    #if #ge(%depth, 256) { #return #call meta_value_nil() }
+    %depth: #bits<64> = #add(%depth, 1)
+    #if #call meta_env_is_nil(%current) {
+      #return #call meta_value_nil()
+    }
+    #let %binding: addr = #load[addr](
+      #lea(base=%current, idx=0, scale=0, offset=16)
+    )
+    #loop bindings {
+      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
       #if #eq(
-        #call meta_atom_equal(%source, %value, "import", 6),
-        0
-      ) { #return #call program_nil() }
-      #let %group: addr = #call raw_node_next(%value)
-      #if #call raw_is_nil(%group) { #return #call program_nil() }
-      #if #ne(#call raw_node_kind(%group), 2) {
-        #return #call program_nil()
+        #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=24)),
+        %length
+      ) {
+        #let %binding_source: addr = #load[addr](
+          #lea(base=%binding, idx=0, scale=0, offset=8)
+        )
+        #let %binding_data: addr = #call tool_source_data(
+          %binding_source
+        )
+        #let %index: #bits<64> = 0
+        #let %same: i1 = 1
+        #loop compare {
+          #if #ge(%index, %length) { #break compare }
+          #if #ne(
+            #call tool_byte_at(%data, #add(%start, %index)),
+            #call tool_byte_at(
+              %binding_data,
+              #add(
+                #load[#bits<64>](
+                  #lea(base=%binding, idx=0, scale=0, offset=16)
+                ),
+                %index
+              )
+            )
+          ) {
+            %same: i1 = 0
+            #break compare
+          }
+          %index: #bits<64> = #add(%index, 1)
+          #continue compare
+        }
+        #if %same {
+          #return #load[addr](
+            #lea(base=%binding, idx=0, scale=0, offset=32)
+          )
+        }
       }
-      #if #ne(#call raw_node_delimiter(%group), 40) {
-        #return #call program_nil()
-      }
-      #return #call raw_node_first(%group)
+      %binding: addr = #load[addr](
+        #lea(base=%binding, idx=0, scale=0, offset=40)
+      )
+      #continue bindings
     }
-    #if #call meta_atom_equal(%source, %node, ";", 1) {
-      #return #call program_nil()
-    }
-    %node: addr = #call raw_node_next(%node)
-    #continue declaration
+    %current: addr = #call meta_env_parent(%current)
+    #continue environments
   }
 }
 
-#proc program_import_name_start(
-  addr %source, addr %argument
-) -> #bits<64> {
-  #let %data: addr = #call tool_source_data(%source)
-  #let %length: #bits<64> = #call raw_node_length(%argument)
-  #let %inner_length: #bits<64> = #sub(%length, 2)
-  #let %index: #bits<64> = 0
-  #let %component: #bits<64> = 0
-  #loop separators {
-    #if #ge(%index, %inner_length) { #break separators }
-    #let %byte: i8 = #call tool_byte_at(
-      %data, #add(#call raw_node_start(%argument), #add(1, %index))
+#proc meta_lookup_first_type_value(addr %environment) -> addr {
+  #let %current: addr = %environment
+  #let %depth: #bits<64> = 0
+  #loop environments {
+    #if #ge(%depth, 256) { #return #call meta_value_nil() }
+    %depth: #bits<64> = #add(%depth, 1)
+    #if #call meta_env_is_nil(%current) {
+      #return #call meta_value_nil()
+    }
+    #let %binding: addr = #load[addr](
+      #lea(base=%current, idx=0, scale=0, offset=16)
     )
-    #if #eq(%byte, 58) {
-      #if #lt(#add(%index, 1), %inner_length) {
+    #loop bindings {
+      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
+      #let %value: addr = #load[addr](
+        #lea(base=%binding, idx=0, scale=0, offset=32)
+      )
+      #if #eq(#call meta_value_kind(%value), 4) {
+        #return %value
+      }
+      %binding: addr = #load[addr](
+        #lea(base=%binding, idx=0, scale=0, offset=40)
+      )
+      #continue bindings
+    }
+    %current: addr = #call meta_env_parent(%current)
+    #continue environments
+  }
+}
+
+#proc meta_lookup_concrete_type_value(
+  addr %environment, addr %source
+) -> addr {
+  #let %current: addr = %environment
+  #let %depth: #bits<64> = 0
+  #loop environments {
+    #if #ge(%depth, 256) { #return #call meta_value_nil() }
+    %depth: #bits<64> = #add(%depth, 1)
+    #if #call meta_env_is_nil(%current) {
+      #return #call meta_value_nil()
+    }
+    #let %binding: addr = #load[addr](
+      #lea(base=%current, idx=0, scale=0, offset=16)
+    )
+    #loop bindings {
+      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
+      #let %value: addr = #load[addr](
+        #lea(base=%binding, idx=0, scale=0, offset=32)
+      )
+      #if #eq(
+        #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=24)),
+        1
+      ) {
+        #let %binding_source: addr = #load[addr](
+          #lea(base=%binding, idx=0, scale=0, offset=8)
+        )
+        #let %binding_data: addr = #call tool_source_data(%binding_source)
         #if #eq(
           #call tool_byte_at(
-            %data,
-            #add(#call raw_node_start(%argument), #add(2, %index))
+            %binding_data,
+            #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=16))
           ),
-          58
+          84
         ) {
-          %component: #bits<64> = #add(%index, 2)
-          %index: #bits<64> = #add(%index, 1)
-        }
-      }
-    } else {
-      #if #eq(%byte, 47) {
-        %component: #bits<64> = #add(%index, 1)
-      }
-      #if #eq(%byte, 92) {
-        %component: #bits<64> = #add(%index, 1)
-      }
-    }
-    %index: #bits<64> = #add(%index, 1)
-    #continue separators
-  }
-  #return #add(#call raw_node_start(%argument), #add(1, %component))
-}
-
-#proc program_import_name_length(
-  addr %source, addr %argument, #bits<64> %name_start
-) -> #bits<64> {
-  #let %data: addr = #call tool_source_data(%source)
-  #let %end: #bits<64> = #sub(
-    #add(#call raw_node_start(%argument), #call raw_node_length(%argument)),
-    1
-  )
-  #let %length: #bits<64> = #sub(%end, %name_start)
-  #if #ge(%length, 5) {
-    #if #eq(#call tool_byte_at(%data, #sub(%end, 5)), 46) {
-      %length: #bits<64> = #sub(%length, 5)
-    }
-  }
-  #return %length
-}
-
-// Meta binding collection for top-level functions and constants.
-
-
-#proc program_collect_function_candidate(
-  addr %unit, addr %source, #bits<64> %source_index, addr %let_node,
-  addr %environment
-) -> #bits<32> {
-  #let %function: addr = #call program_parse_function(
-    %unit, %source, %source_index, %let_node
-  )
-  #call program_function_set_environment(%function, %environment)
-  // A pending @foreign link name (unit slot 184) attaches to this
-  // function's extern label; store it in the descriptor (slot 112).
-  #let %foreign_link: i64 = #load[i64](
-    #lea(base=%unit, idx=0, scale=0, offset=184)
-  )
-  #if #ne(%foreign_link, 0) {
-    #store %foreign_link, #lea(base=%function, idx=0, scale=0, offset=112)
-    #store 0, #lea(base=%unit, idx=0, scale=0, offset=184)
-  }
-  #let %status: #bits<32> = #call program_function_status(%function)
-  #if #ne(%status, 0) {
-    #call program_unit_set_debug_module_kind(%unit, 4701)
-    #call program_unit_set_validation_function(%unit, %function)
-    #call program_set_unit_status(%unit, %status)
-    #return %status
-  }
-  #let %name: addr = #call raw_node_next(%let_node)
-  #let %existing_value: addr = #call meta_env_lookup_local(
-    %environment, %source, %name
-  )
-  #if #call raw_is_nil(%existing_value) {
-    #if #eq(#call program_unit_collecting_import(%unit), 0) {
-      #if #eq(#call program_unit_lazy_nonroot(%unit), 0) {
-        #call program_append_function_if_missing(%unit, %function)
-      } else {
-        #if #eq(
-          %source_index, #call program_unit_physical_root_index(%unit)
-        ) {
-          #call program_append_function_if_missing(%unit, %function)
-        } else {
-          // Small user source closures historically allow an unqualified
-          // helper from a second file. Keep those top-level descriptors
-          // available; large compiler closures use explicit module paths and
-          // retain lazy physical materialization.
-          #if #le(#call program_unit_source_count(%unit), 4) {
-            #call program_append_function_if_missing(%unit, %function)
+          #if #eq(#call meta_value_kind(%value), 4) {
+            #let %value_source: addr = #call meta_value_source(%value)
+            #let %value_width: #bits<64> = #call meta_builtin_width_span(
+              %value_source,
+              #call meta_value_start(%value),
+              #call meta_value_length(%value)
+            )
+            #if #ne(%value_width, 0) {
+              #return %value
+            }
           }
         }
       }
+      %binding: addr = #load[addr](
+        #lea(base=%binding, idx=0, scale=0, offset=40)
+      )
+      #continue bindings
     }
-    #call program_meta_bind_function(
-      %environment, %source, %let_node, %function
-    )
-    #return 0
+    %current: addr = #call meta_env_parent(%current)
+    #continue environments
   }
-  #call program_unit_set_validation_function(%unit, %function)
-  #call program_unit_set_validation_node(%unit, %source, %name)
-  #call program_set_unit_status(%unit, 5110)
-  #return 5110
 }
 
-#proc program_collect_constant_candidate(
-  addr %unit, addr %source, addr %let_node, addr %environment
-) -> #bits<32> {
-  #let %constant: addr = #call program_parse_constant(
-    %unit, %source, %let_node
-  )
-  #let %status: #bits<32> = #call program_constant_status(%constant)
-  #if #ne(%status, 0) {
-    #call program_set_unit_status(%unit, %status)
-    #return %status
-  }
-  #let %existing: addr = #call program_find_constant(
-    %unit, %source, #call raw_node_next(%let_node)
-  )
-  #if #call raw_is_nil(%existing) {
-    #call program_append_constant(%unit, %constant)
-    #call program_meta_bind_constant(
-      %environment, %source, %let_node, %constant
+// Return the concrete `T` captured by a generic factory even when `T` is a
+// record type.  `meta_lookup_concrete_type_value` intentionally filters for
+// builtin-width values because it is also used by scalar inference; record
+// projections need the nominal binding as well (`Vec(Unit)` -> `Unit`).
+#proc meta_lookup_type_parameter_value(addr %environment) -> addr {
+  #let %current: addr = %environment
+  #let %depth: #bits<64> = 0
+  #loop environments {
+    #if #ge(%depth, 256) { #return #call meta_value_nil() }
+    %depth: #bits<64> = #add(%depth, 1)
+    #if #call meta_env_is_nil(%current) {
+      #return #call meta_value_nil()
+    }
+    #let %binding: addr = #load[addr](
+      #lea(base=%current, idx=0, scale=0, offset=16)
     )
-    #return 0
+    #loop bindings {
+      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
+      #let %value: addr = #load[addr](
+        #lea(base=%binding, idx=0, scale=0, offset=32)
+      )
+      #if #eq(
+        #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=24)),
+        1
+      ) {
+        #let %binding_source: addr = #load[addr](
+          #lea(base=%binding, idx=0, scale=0, offset=8)
+        )
+        #let %binding_data: addr = #call tool_source_data(%binding_source)
+        #if #eq(
+          #call tool_byte_at(
+            %binding_data,
+            #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=16))
+          ),
+          84
+        ) {
+          #if #eq(#call meta_value_kind(%value), 4) {
+            #return %value
+          }
+        }
+      }
+      %binding: addr = #load[addr](
+        #lea(base=%binding, idx=0, scale=0, offset=40)
+      )
+      #continue bindings
+    }
+    %current: addr = #call meta_env_parent(%current)
+    #continue environments
   }
-  #call program_unit_set_validation_node(
-    %unit, %source, #call raw_node_next(%let_node)
-  )
-  #call program_set_unit_status(%unit, 5113)
-  #return 5113
 }
 
-#proc program_collect_literal_candidate(
-  addr %unit, addr %source, addr %let_node, addr %environment
-) -> #bits<32> {
-  #let %constant: addr = #call program_parse_literal_constant(
-    %source, %let_node
-  )
-  #let %status: #bits<32> = #call program_constant_status(%constant)
-  #if #ne(%status, 0) {
-    #call program_set_unit_status(%unit, %status)
-    #return %status
-  }
-  #let %existing: addr = #call program_find_constant(
-    %unit, %source, #call raw_node_next(%let_node)
-  )
-  #if #call raw_is_nil(%existing) {
-    #call program_append_constant(%unit, %constant)
-    #call program_meta_bind_constant(
-      %environment, %source, %let_node, %constant
+#proc meta_function_type_value(
+  addr %environment, addr %source, addr %type
+) -> addr {
+  #let %nil: addr = #call meta_value_nil()
+  #if #eq(#call raw_is_nil(%environment), 0) {
+    #let %path_value: addr = #call meta_env_lookup_path(
+      %environment, %source, %type
     )
-    #return 0
+    #if #ne(#call meta_value_kind(%path_value), 0) {
+      #if #eq(#call meta_value_kind(%path_value), 4) {
+        #return %path_value
+      }
+    }
+    #if #call program_is_generic_type_name(%source, %type) {
+      #let %resolved: addr = #call meta_env_lookup_span(
+        %environment, %source,
+        #call raw_node_start(%type), #call raw_node_length(%type)
+      )
+      // The binding was created from the factory parameter node, while the
+      // use site can come from a different RawAst source span.  Match the
+      // actual identifier text as a final step so captured `T`/`U` values do
+      // not disappear merely because their source offsets differ.
+      #if #eq(#call meta_value_kind(%resolved), 0) {
+      #let %type_text: addr = #lea(
+        base=#call tool_source_data(%source),
+        idx=#call raw_node_start(%type), scale=1, offset=0
+      )
+        %resolved: addr = #call meta_env_lookup_text(
+          %environment, %source, %type_text,
+          #call raw_node_length(%type)
+        )
+      }
+      #if #ne(#call meta_value_kind(%resolved), 0) {
+        #if #eq(#call meta_value_kind(%resolved), 4) {
+          #let %resolved_source: addr = #call meta_value_source(%resolved)
+          #let %resolved_payload: addr = #call meta_value_payload(%resolved)
+          #let %payload_is_T: i1 = #call meta_atom_equal(
+            %resolved_source, %resolved_payload, "T", 1
+          )
+          #if %payload_is_T {
+            #let %concrete: addr = #call meta_lookup_concrete_type_value(
+              %environment, %source
+            )
+            #if #eq(#call raw_is_nil(%concrete), 0) {
+              #return %concrete
+            }
+          }
+          // A generic parameter binding whose payload does not point at the
+          // parameter name can carry a stale/overwritten payload (the span
+          // and payload disagree).  Recover the concrete type parameter from
+          // the environment instead of trusting the inconsistent payload.
+          #if #eq(%payload_is_T, 0) {
+            #if #ne(
+              #call raw_node_start(%resolved_payload),
+              #call meta_value_start(%resolved)
+            ) {
+              #let %concrete: addr = #call meta_lookup_concrete_type_value(
+                %environment, %source
+              )
+              #if #eq(#call raw_is_nil(%concrete), 0) {
+                #return %concrete
+              }
+            }
+          }
+        }
+      }
+      #return %resolved
+    }
   }
-  #call program_unit_set_validation_node(
-    %unit, %source, #call raw_node_next(%let_node)
-  )
-  #call program_set_unit_status(%unit, 5113)
-  #return 5113
+  #return %nil
 }
 
 // Small compile-time Meta classification helpers.
@@ -17179,6 +17041,7 @@
 // resulting function/module descriptors.
 
 
+
 #proc program_eval_bind_local_function(
   addr %unit, addr %source, addr %function_owner,
   addr %let_node, addr %environment
@@ -17322,6 +17185,7 @@
 //
 // The evaluator returns Meta/eval result objects.  It does not emit runtime
 // LAIN-IR; runtime lowering stays in lower_program and the later lower_* files.
+
 
 #proc program_eval_param_value(
   addr %source, addr %function, addr %node, addr %arguments
@@ -18082,7 +17946,7 @@
   )
 }
 
-#proc program_eval_consteval_group(
+#proc program_eval_consteval_group_direct(
   addr %unit, addr %source, addr %group
 ) -> addr {
   #let %first: addr = #call raw_node_first(%group)
@@ -18098,11 +17962,27 @@
   #return #call eval_group(%source, %group)
 }
 
+// All compile-time execution crosses the LAIN-IR #eval boundary here.  The
+// evaluator body remains an ordinary L1 routine so it can share the existing
+// Meta data structures; the block is the explicit phase boundary used by the
+// compiler when invoking it.
+#proc program_eval_consteval_group(
+  addr %unit, addr %source, addr %group
+) -> addr {
+  #let %result: addr = #eval {
+    #return #call program_eval_consteval_group_direct(
+      %unit, %source, %group
+    )
+  }
+  #return %result
+}
+
 // Meta-call binding helpers.
 //
 // A top-level Meta call is evaluated while collecting the module environment.
 // This module extracts the declaration-value lookup and the call-to-binding
 // bridge from the physical lowering pass.
+
 
 #proc program_meta_call_value_node(
   addr %source, addr %let_node
@@ -18939,130 +18819,508 @@
   #return %unit
 }
 
-// LAIN-IR-owned request/result boundary for the compiler.
+// Meta-owned module descriptor.
 //
-// The bootstrap host still supplies sources through capabilities and receives
-// the final status as the entry return value.  The request/result objects keep
-// the compiler policy in LAIN-IR so the host does not grow a second semantic
-// API while the later phases are added.
+// `std::module { ... }` is deliberately recognized here, not by RawAst.  The
+// descriptor stores only source spans and a linked member list; visibility,
+// imports, and code generation remain later phases.
 
 
-// CompilerRequest:
-//   source count @0, emit-l1 @8, verify-l1 @16,
-//   source begin/end @24/@32, root source @40, require-main @48.
-#proc compiler_request_new() -> addr {
-  #let %request: addr = #call bootstrap.allocate-pages(56)
-  #let %source_count: i64 = #call bootstrap.source-count()
-  #store #call bootstrap.source-count(),
-    #lea(base=%request, idx=0, scale=0, offset=0)
-  #store 1, #lea(base=%request, idx=0, scale=0, offset=8)
-  #store 1, #lea(base=%request, idx=0, scale=0, offset=16)
-  #store 0, #lea(base=%request, idx=0, scale=0, offset=24)
-  #store %source_count, #lea(base=%request, idx=0, scale=0, offset=32)
-  #store 0, #lea(base=%request, idx=0, scale=0, offset=40)
-  #store 1, #lea(base=%request, idx=0, scale=0, offset=48)
-  #return %request
+
+// Module descriptor: kind @0, name start/length @8/@16, member count @24,
+// first/last member @32/@40, diagnostic @48.
+// Member descriptor: name start/length @0/@8, next @16.
+#proc module_member_new(addr %name) -> addr {
+  #let %member: addr = #call bootstrap.allocate-pages(24)
+  #let %nil: addr = #call bootstrap.allocate-pages(8)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
+  #store #call raw_node_start(%name), #lea(base=%member, idx=0, scale=0, offset=0)
+  #store #call raw_node_length(%name), #lea(base=%member, idx=0, scale=0, offset=8)
+  #store %nil, #lea(base=%member, idx=0, scale=0, offset=16)
+  #return %member
 }
 
-#proc compiler_request_set_root(addr %request, i64 %root) -> #unit {
-  #store %root, #lea(base=%request, idx=0, scale=0, offset=40)
-  #return
+#proc module_descriptor_new(addr %name) -> addr {
+  #let %descriptor: addr = #call bootstrap.allocate-pages(56)
+  #let %nil: addr = #call bootstrap.allocate-pages(8)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
+  #store 2, #lea(base=%descriptor, idx=0, scale=0, offset=0)
+  #store #call raw_node_start(%name), #lea(base=%descriptor, idx=0, scale=0, offset=8)
+  #store #call raw_node_length(%name), #lea(base=%descriptor, idx=0, scale=0, offset=16)
+  #store 0, #lea(base=%descriptor, idx=0, scale=0, offset=24)
+  #store %nil, #lea(base=%descriptor, idx=0, scale=0, offset=32)
+  #store %nil, #lea(base=%descriptor, idx=0, scale=0, offset=40)
+  #store 0, #lea(base=%descriptor, idx=0, scale=0, offset=48)
+  #return %descriptor
 }
 
-#proc compiler_request_set_require_main(addr %request, i1 %required) -> #unit {
-  #store %required, #lea(base=%request, idx=0, scale=0, offset=48)
-  #return
+#proc module_group(addr %source, addr %root) -> addr {
+  #let %current: addr = #call raw_node_first(%root)
+  #loop find_module {
+    #if #call raw_is_nil(%current) { #return %current }
+    #if #call meta_atom_equal(%source, %current, "module", 6) {
+      #let %candidate: addr = #call raw_node_next(%current)
+      #if #ne(#call raw_node_kind(%candidate), 2) {
+        %current: addr = #call raw_node_next(%current)
+        #continue find_module
+      }
+      #if #eq(#call raw_node_delimiter(%candidate), 123) {
+        #return %candidate
+      }
+    }
+    %current: addr = #call raw_node_next(%current)
+    #continue find_module
+  }
 }
 
-// CompilerResult:
-//   status @0, diagnostic @8, syntax-unit count @16, artifact-present @24.
-#proc compiler_result_new(
-  i32 %status, i32 %diagnostic, i64 %module_count, i8 %artifact
+#proc module_member_duplicate(addr %source, addr %descriptor, addr %name) -> i1 {
+  #let %data: addr = #call tool_source_data(%source)
+  #let %member: addr = #load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))
+  #let %name_start: i64 = #call raw_node_start(%name)
+  #let %name_length: i64 = #call raw_node_length(%name)
+  #loop members {
+    #if #call raw_is_nil(%member) { #break members }
+    #if #eq(#load[i64](#lea(base=%member, idx=0, scale=0, offset=8)), %name_length) {
+      #let %index: i64 = 0
+      #let %same: i1 = 1
+      #loop compare {
+        #if #ge(%index, %name_length) { #break compare }
+        #if #ne(
+          #call tool_byte_at(%data, #add(#load[i64](#lea(base=%member, idx=0, scale=0, offset=0)), %index)),
+          #call tool_byte_at(%data, #add(%name_start, %index))
+        ) {
+          %same: i1 = 0
+          #break compare
+        }
+        %index: i64 = #add(%index, 1)
+        #continue compare
+      }
+      #if %same { #return 1 }
+    }
+    %member: addr = #load[addr](#lea(base=%member, idx=0, scale=0, offset=16))
+    #continue members
+  }
+  #return 0
+}
+
+#proc module_group_from_binding(
+  addr %source, addr %let_node
 ) -> addr {
-  #let %result: addr = #call bootstrap.allocate-pages(32)
-  #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
-  #store %diagnostic, #lea(base=%result, idx=0, scale=0, offset=8)
-  #store %module_count, #lea(base=%result, idx=0, scale=0, offset=16)
-  #store %artifact, #lea(base=%result, idx=0, scale=0, offset=24)
-  #return %result
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return %node }
+    #if #call meta_atom_equal(%source, %node, "module", 6) {
+      #let %group: addr = #call raw_node_next(%node)
+      #if #eq(#call raw_node_kind(%group), 2) {
+        #if #eq(#call raw_node_delimiter(%group), 123) {
+          #return %group
+        }
+      }
+      #return %group
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return %node }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
 }
 
-#proc compiler_result_status(addr %result) -> i32 {
-  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=0))
+#proc meta_module_annotation_is_valid(
+  addr %source, addr %annotation
+) -> i1 {
+  #if #call meta_atom_equal(%source, %annotation, "Module", 6) {
+    #return 1
+  }
+  #if #call meta_atom_equal(%source, %annotation, "ModuleShape", 11) {
+    #return 1
+  }
+  #if #ne(#call raw_node_kind(%annotation), 1) { #return 0 }
+  #let %data: addr = #call tool_source_data(%source)
+  #let %index: i64 = 0
+  #loop qualified {
+    #if #ge(%index, #call raw_node_length(%annotation)) {
+      #break qualified
+    }
+    #if #eq(
+      #call tool_byte_at(
+        %data, #add(#call raw_node_start(%annotation), %index)
+      ),
+      46
+    ) { #return 1 }
+    %index: i64 = #add(%index, 1)
+    #continue qualified
+  }
+  #return 0
 }
 
-#proc compiler_result_diagnostic(addr %result) -> i32 {
-  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=8))
-}
-
-#proc compiler_result_module_count(addr %result) -> i64 {
-  #return #load[i64](#lea(base=%result, idx=0, scale=0, offset=16))
-}
-
-#proc compiler_result_has_artifact(addr %result) -> i1 {
-  #return #ne(#load[i8](#lea(base=%result, idx=0, scale=0, offset=24)), 0)
-}
-
-#proc compiler_compile_request(addr %request) -> addr {
-  #let %syntax_index: addr = #call syntax_units_build()
-  #let %source_begin: i64 = #load[i64](
-    #lea(base=%request, idx=0, scale=0, offset=24)
+#proc meta_module_validate_binding(
+  addr %source, addr %let_node
+) -> i32 {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #if #call raw_is_nil(%name) { #return 3010 }
+  #let %colon: addr = #call raw_node_next(%name)
+  #let %annotation: addr = #call raw_node_next(%colon)
+  #let %equals: addr = #call raw_node_next(%annotation)
+  #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
+    #return 3011
+  }
+  #if #eq(
+    #call meta_module_annotation_is_valid(%source, %annotation),
+    0
+  ) {
+    #return 3011
+  }
+  #if #eq(#call meta_atom_equal(%source, %equals, "=", 1), 0) {
+    #return 3011
+  }
+  #let %group: addr = #call module_group_from_binding(
+    %source, %let_node
   )
-  #let %source_end: i64 = #load[i64](
-    #lea(base=%request, idx=0, scale=0, offset=32)
-  )
-  #let %module_count: i64 = #sub(%source_end, %source_begin)
-  #let %status: i32 = #call lain_lower_program(%request, %syntax_index)
-  #let %artifact: i8 = 0
-  #if #eq(%status, 0) { %artifact: i8 = 1 }
-  #return #call compiler_result_new(
-    %status, %status, %module_count, %artifact
-  )
+  #if #call raw_is_nil(%group) { #return 3011 }
+  #let %descriptor: addr = #call module_descriptor_new(%name)
+  #let %member: addr = #call raw_node_first(%group)
+  #let %count: i64 = 0
+  #loop members {
+    #if #call raw_is_nil(%member) { #break members }
+    #if #call meta_atom_equal(%source, %member, "let", 3) {
+      #let %member_name: addr = #call raw_node_next(%member)
+      #if #call raw_is_nil(%member_name) { #return 3012 }
+      #if #call module_member_duplicate(
+        %source, %descriptor, %member_name
+      ) { #return 3013 }
+      #let %new_member: addr = #call module_member_new(%member_name)
+      #if #call raw_is_nil(
+        #load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))
+      ) {
+        #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=32)
+      } else {
+        #store %new_member, #lea(
+          base=#load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=40)),
+          idx=0, scale=1, offset=16
+        )
+      }
+      #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=40)
+      %count: i64 = #add(%count, 1)
+    }
+    %member: addr = #call raw_node_next(%member)
+    #continue members
+  }
+  #store %count, #lea(base=%descriptor, idx=0, scale=0, offset=24)
+  #return #load[i32](#lea(base=%descriptor, idx=0, scale=0, offset=48))
 }
 
-// Transitional compiler entry.
-//
-// The entry is deliberately named `compiler_compile` so the bootstrap host
-// can stabilize around one call.  Its first accepted source form is the
-// function slice in lower_func.l1; later Meta/elaboration/lowering phases will
-// be added behind this same boundary.
-
-
-#proc compiler_compile() -> i32 {
-  #let %request: addr = #call compiler_request_new()
-  #let %result: addr = #call compiler_compile_request(%request)
-  #return #call compiler_result_status(%result)
+#proc meta_module_build(addr %source, addr %root) -> addr {
+  #let %name: addr = #call meta_binding_name(%source, %root)
+  #let %descriptor: addr = #call module_descriptor_new(%name)
+  #if #call raw_is_nil(%name) {
+    #store 3010, #lea(base=%descriptor, idx=0, scale=0, offset=48)
+    #return %descriptor
+  }
+  #let %group: addr = #call module_group(%source, %root)
+  #if #call raw_is_nil(%group) {
+    #store 3011, #lea(base=%descriptor, idx=0, scale=0, offset=48)
+    #return %descriptor
+  }
+  #let %member: addr = #call raw_node_first(%group)
+  #let %count: i64 = 0
+  #loop bindings {
+    #if #call raw_is_nil(%member) { #break bindings }
+    #if #call meta_atom_equal(%source, %member, "let", 3) {
+      #let %member_name: addr = #call raw_node_next(%member)
+      #if #call raw_is_nil(%member_name) {
+        #store 3012, #lea(base=%descriptor, idx=0, scale=0, offset=48)
+        #return %descriptor
+      }
+      #if #call module_member_duplicate(%source, %descriptor, %member_name) {
+        #store 3013, #lea(base=%descriptor, idx=0, scale=0, offset=48)
+        #return %descriptor
+      }
+      #let %new_member: addr = #call module_member_new(%member_name)
+      #if #call raw_is_nil(#load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))) {
+        #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=32)
+      } else {
+        #store %new_member, #lea(
+          base=#load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=40)),
+          idx=0, scale=1, offset=16
+        )
+      }
+      #store %new_member, #lea(base=%descriptor, idx=0, scale=0, offset=40)
+      %count: i64 = #add(%count, 1)
+    }
+    %member: addr = #call raw_node_next(%member)
+    #continue bindings
+  }
+  #store %count, #lea(base=%descriptor, idx=0, scale=0, offset=24)
+  #return %descriptor
 }
 
-// Library compilation is the entry used for a source closure that does not
-// itself declare a native `main` (for example the canonical compiler modules).
-#proc compiler_compile_library() -> i32 {
-  #let %request: addr = #call compiler_request_new()
-  #call compiler_request_set_root(
-    %request, #sub(#call bootstrap.source-count(), 1)
+#proc meta_module_dump(addr %source, addr %root) -> #unit {
+  #let %descriptor: addr = #call meta_module_build(%source, %root)
+  #let %diagnostic: i32 = #load[i32](#lea(base=%descriptor, idx=0, scale=0, offset=48))
+  #if #ne(%diagnostic, 0) {
+    #call bootstrap.artifact-write-literal("(error ")
+    #call meta_write_decimal(#zext[#bits<64>](%diagnostic))
+    #call bootstrap.artifact-write-byte(41)
+    #call bootstrap.artifact-write-byte(10)
+    #return
+  }
+  #call bootstrap.artifact-write-literal("(meta-module ")
+  #call meta_write_span(
+    %source,
+    #load[i64](#lea(base=%descriptor, idx=0, scale=0, offset=8)),
+    #load[i64](#lea(base=%descriptor, idx=0, scale=0, offset=16))
   )
-  #call compiler_request_set_require_main(%request, 0)
-  #let %result: addr = #call compiler_compile_request(%request)
-  #return #call compiler_result_status(%result)
+  #call bootstrap.artifact-write-literal(" members=")
+  #call meta_write_decimal(#load[i64](#lea(base=%descriptor, idx=0, scale=0, offset=24)))
+  #let %member: addr = #load[addr](#lea(base=%descriptor, idx=0, scale=0, offset=32))
+  #loop write_members {
+    #if #call raw_is_nil(%member) { #break write_members }
+    #call bootstrap.artifact-write-literal(" (member ")
+    #call meta_write_span(
+      %source,
+      #load[i64](#lea(base=%member, idx=0, scale=0, offset=0)),
+      #load[i64](#lea(base=%member, idx=0, scale=0, offset=8))
+    )
+    #call bootstrap.artifact-write-byte(41)
+    %member: addr = #load[addr](#lea(base=%member, idx=0, scale=0, offset=16))
+    #continue write_members
+  }
+  #call bootstrap.artifact-write-byte(41)
+  #call bootstrap.artifact-write-byte(10)
+  #return
 }
 
-// LAIN-IR bootstrap boundary. The stage-0 interpreter accepts a verified
-// LAIN-IR bundle as its source. This entry preserves that bundle through a
-// LAIN-IR-owned entry so stage2 and stage3 do not depend on a native lainc.
-#proc compiler_reemit_l1() -> i32 {
-  #if #ne(#call bootstrap.source-count(), 1) { #return 5000 }
+#proc lain_meta_module_dump() -> i32 {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
   #let %data: addr = #call bootstrap.source-data(0)
   #let %length: i64 = #call bootstrap.source-length(0)
+  #let %source: addr = #call tool_source_new(%data, %length)
+  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %root: addr = #call raw_parse(%source, %tokens)
   #call bootstrap.artifact-begin()
-  #let %index: i64 = 0
-  #loop bytes {
-    #if #ge(%index, %length) { #break bytes }
-    #call bootstrap.artifact-write-byte(
-      #load[i8](#lea(base=%data, idx=%index, scale=1, offset=0))
-    )
-    %index: i64 = #add(%index, 1)
-    #continue bytes
-  }
+  #call meta_module_dump(%source, %root)
   #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
   #return 0
+}
+
+// Module and namespace Meta bindings.
+//
+// Module shells are created before their bodies are collected so imports and
+// recursive references can resolve a stable Meta value.
+
+
+#proc program_meta_bind_function(
+  addr %environment, addr %source, addr %let_node, addr %function
+) -> #unit {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %value: addr = #call meta_value_function(
+    %source, %name, %function, %environment
+  )
+  #call meta_env_bind(%environment, %source, %name, %value)
+  #return
+}
+
+#proc program_meta_bind_constant(
+  addr %environment, addr %source, addr %let_node, addr %constant
+) -> #unit {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %value: addr = #call meta_value_scalar(
+    %source, %name, #call program_constant_value(%constant)
+  )
+  #call meta_env_bind(%environment, %source, %name, %value)
+  #return
+}
+
+#proc program_meta_bind_type(
+  addr %environment, addr %source, addr %let_node, addr %type
+) -> #unit {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %value: addr = #call meta_value_type_with_namespace(
+    %source, %name, %let_node, %environment
+  )
+  #call meta_env_bind(%environment, %source, %name, %value)
+  #return
+}
+
+#proc program_meta_bind_module(
+  addr %environment, addr %source, addr %let_node
+) -> addr {
+  #let %name: addr = #call raw_node_next(%let_node)
+  #let %existing: addr = #call meta_env_lookup_local(
+    %environment, %source, %name
+  )
+  #if #ne(#call meta_value_kind(%existing), 0) {
+    #if #eq(#call meta_value_kind(%existing), 2) {
+      #return #call meta_value_environment(%existing)
+    }
+  }
+  #let %group: addr = #call program_module_group(%source, %let_node)
+  #let %module_environment: addr = #call meta_env_new(%environment)
+  #let %value: addr = #call meta_value_module(
+    %source, %name, %group, %module_environment
+  )
+  #call meta_env_bind(%environment, %source, %name, %value)
+  // Module bodies may refer to their own exported namespace, for example
+  // `bounds.Check(Checked)` inside the `bounds` module.  Keep the same module
+  // value visible from its body environment as well as from the parent.
+  #call meta_env_bind(
+    %module_environment, %source, %name, %value
+  )
+  #return %module_environment
+}
+
+#proc program_is_module_declaration(
+  addr %source, addr %let_node
+) -> i1 {
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call meta_atom_equal(%source, %node, "module", 6) {
+      #return 1
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return 0 }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_is_record_declaration(
+  addr %source, addr %let_node
+) -> i1 {
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call meta_atom_equal(%source, %node, "struct", 6) {
+      #return 1
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return 0 }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_module_group(
+  addr %source, addr %let_node
+) -> addr {
+  #let %node: addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return %node }
+    #if #call meta_atom_equal(%source, %node, "module", 6) {
+      #let %group: addr = #call raw_node_next(%node)
+      #if #eq(#call raw_node_kind(%group), 2) {
+        #if #eq(#call raw_node_delimiter(%group), 123) {
+          #return %group
+        }
+      }
+      #return %group
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return %node }
+    %node: addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_is_std_module_value(
+  addr %source, addr %node
+) -> i1 {
+  #if #eq(#call meta_atom_equal(%source, %node, "std", 3), 0) {
+    #return 0
+  }
+  #let %colon1: addr = #call raw_node_next(%node)
+  #let %colon2: addr = #call raw_node_next(%colon1)
+  #let %member: addr = #call raw_node_next(%colon2)
+  #let %group: addr = #call raw_node_next(%member)
+  #if #eq(#call meta_atom_equal(%source, %colon1, ":", 1), 0) {
+    #return 0
+  }
+  #if #eq(#call meta_atom_equal(%source, %colon2, ":", 1), 0) {
+    #return 0
+  }
+  #if #eq(#call meta_atom_equal(%source, %member, "module", 6), 0) {
+    #return 0
+  }
+  #if #call raw_is_nil(%group) { #return 0 }
+  #if #ne(#call raw_node_kind(%group), 2) { #return 0 }
+  #return #eq(#call raw_node_delimiter(%group), 123)
+}
+
+#proc program_std_module_value_group(
+  addr %source, addr %node
+) -> addr {
+  #return #call raw_node_next(
+    #call raw_node_next(
+      #call raw_node_next(#call raw_node_next(%node))
+    )
+  )
+}
+
+// First semantic slice owned by the bootstrap standard library.
+//
+// The core still owns the descriptor builders for now.  The decision that a
+// source unit contains a `struct` or `module`, and the corresponding status
+// policy, lives behind this standard-library entry so it can be replaced by
+// the formal std implementation later.
+
+
+#proc lain_std_meta_status(addr %source, addr %root) -> i32 {
+  #let %record: addr = #call meta_record_group(%source, %root)
+  #if #call raw_is_nil(%record) {
+  } else {
+    #let %descriptor: addr = #call meta_record_build(%source, %root)
+    #let %status: i32 = #load[i32](
+      #lea(base=%descriptor, idx=0, scale=0, offset=64)
+    )
+    #if #ne(%status, 0) { #return %status }
+  }
+  #let %module: addr = #call module_group(%source, %root)
+  #if #call raw_is_nil(%module) {
+  } else {
+    #let %descriptor: addr = #call meta_module_build(%source, %root)
+    #let %status: i32 = #load[i32](
+      #lea(base=%descriptor, idx=0, scale=0, offset=48)
+    )
+    #if #ne(%status, 0) { #return %status }
+  }
+  #return 0
+}
+
+// Bootstrap Standard Library ABI v1.
+//
+// This first slice is intentionally tiny.  It proves that the LAIN-IR-written
+// compiler can call a separately bundled standard-library artifact.  Language
+// rules are added behind this ABI in later slices; they do not move into the
+// compiler core.
+
+
+#proc lain_std_abi_version() -> i64 {
+  #return 1
+}
+
+#proc lain_std_initialize(addr %context) -> i32 {
+  #return 0
+}
+
+#proc lain_std_expand(
+  addr %context, addr %source_unit, addr %root
+) -> addr {
+  #return #call lain_meta_pass_result_v1_new(
+    0, 0, %root, #call lain_ast_v1_nil(), #call lain_ast_v1_nil(), %context
+  )
+}
+
+#proc lain_std_elaborate(addr %context, addr %expanded_root) -> addr {
+  #return #call lain_meta_pass_result_v1_new(
+    0, 0, %expanded_root,
+    #call lain_ast_v1_nil(), #call lain_ast_v1_nil(), %context
+  )
+}
+
+#proc lain_std_lower(
+  addr %context, addr %elaborated_root, addr %l1_unit
+) -> addr {
+  #let %status: i32 = #call lain_core_lower_program(%context, %l1_unit)
+  #return #call lain_meta_pass_result_v1_new(
+    %status, 1, %l1_unit,
+    #call lain_ast_v1_nil(), #call lain_ast_v1_nil(), %context
+  )
 }

@@ -38,6 +38,70 @@ typedef struct {
   int trace_allocations;
 } SeedAllocator;
 
+/* Optional artifact sink for programs that exercise the compiler API from
+ * inside `lainir-seed run`.  Ordinary runs do not get this capability; a
+ * caller opts in by setting LAINIR_RUN_ARTIFACT to an output path.  This
+ * keeps the seed interpreter small while allowing an API result to be fed
+ * back into the parser/verifier in a second process. */
+typedef struct {
+  const char *path;
+  FILE *file;
+} SeedArtifact;
+
+static LainirRunStatus seed_artifact_begin(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  SeedArtifact *artifact = user_data;
+  (void)args;
+  if (count != 0 || !artifact || artifact->file) {
+    if (error) *error = "bootstrap.artifact-begin has invalid state";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  artifact->file = fopen(artifact->path, "wb");
+  if (!artifact->file) {
+    if (error) *error = "bootstrap.artifact-begin could not open output";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus seed_artifact_write_byte(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  SeedArtifact *artifact = user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !artifact || !artifact->file) {
+    if (error) *error = "bootstrap.artifact-write-byte has invalid arguments or state";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (fputc((int)(args[0].as.bits & 255u), artifact->file) == EOF) {
+    if (error) *error = "bootstrap.artifact-write-byte failed";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus seed_artifact_finish(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  SeedArtifact *artifact = user_data;
+  (void)args;
+  if (count != 0 || !artifact || !artifact->file) {
+    if (error) *error = "bootstrap.artifact-finish has invalid state";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (fclose(artifact->file) != 0) {
+    artifact->file = NULL;
+    if (error) *error = "bootstrap.artifact-finish failed";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  artifact->file = NULL;
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
 static void seed_allocator_release(SeedAllocator *allocator) {
   size_t index;
   if (!allocator) return;
@@ -194,6 +258,7 @@ static int seed_run(int argc, char **argv) {
   LainirRunStatus status;
   LainirCapabilityTable *caps = NULL;
   SeedAllocator allocator = {0};
+  SeedArtifact artifact = {0};
   L1Diagnostic diagnostic;
 
   while (input_index < argc && argv[input_index][0] == '-') {
@@ -256,6 +321,7 @@ static int seed_run(int argc, char **argv) {
   request.arg_count = argc > input_index + 2 ?
       (uint32_t)(argc - input_index - 2) : 0;
   caps = lainir_caps_new();
+  artifact.path = getenv("LAINIR_RUN_ARTIFACT");
   allocator.max_bytes = max_alloc_bytes;
   allocator.trace_allocations = getenv("LAINIR_TRACE_ALLOC") &&
       getenv("LAINIR_TRACE_ALLOC")[0] == '1';
@@ -269,6 +335,19 @@ static int seed_run(int argc, char **argv) {
     lainir_free_subroutines(module);
     return 1;
   }
+  if (artifact.path && *artifact.path &&
+      (!lainir_caps_add(caps, "bootstrap.artifact-begin",
+                        seed_artifact_begin, &artifact) ||
+       !lainir_caps_add(caps, "bootstrap.artifact-write-byte",
+                        seed_artifact_write_byte, &artifact) ||
+       !lainir_caps_add(caps, "bootstrap.artifact-finish",
+                        seed_artifact_finish, &artifact))) {
+    seed_allocator_release(&allocator);
+    lainir_caps_free(caps);
+    free(args);
+    lainir_free_subroutines(module);
+    return 1;
+  }
   if (max_steps || max_call_depth || max_alloc_bytes) {
     lainir_caps_set_limits(caps, max_steps, (uint32_t)max_call_depth,
                            max_alloc_bytes);
@@ -276,6 +355,10 @@ static int seed_run(int argc, char **argv) {
   request.caps = caps;
 
   status = lainir_run(&request, &result, &error);
+  if (artifact.file) {
+    fclose(artifact.file);
+    artifact.file = NULL;
+  }
   lainir_caps_free(caps);
   free(args);
   lainir_free_subroutines(module);

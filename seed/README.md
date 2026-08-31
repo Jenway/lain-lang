@@ -26,7 +26,10 @@ The build produces:
 - `lainir-seed`: the C-written LAIN-IR interpreter.  Its `interpreter`
   subcommand runs an explicitly selected frozen compiler artifact with the
   bootstrap capabilities; its `run` subcommand executes a plain LAIN-IR
-  entry procedure without capabilities.
+  entry procedure with only the allocator by default.  For compiler-API
+  refeed tests, set `LAINIR_RUN_ARTIFACT` to a path; the run then exposes the
+  three artifact-write capabilities and closes that file when the program
+  finishes.
 
 The frozen Lain compiler artifact is not part of this directory; it lives at
 `src/lainir/lainc.l1` (see `src/lainir/README.md`).

@@ -97,7 +97,7 @@ def main() -> int:
             raise RuntimeError(f"archive meta.lain is missing {spelling}")
     if "expression_id >= unit.expressions.length()" not in interpreter_source:
         raise RuntimeError("archive interpreter is missing expression bounds guards")
-    if '"compiler_compile_library", 24' not in frozen_source:
+    if "#proc compiler_compile_library() -> i32" not in frozen_source:
         raise RuntimeError("frozen compiler does not preserve compiler_compile_library entry")
     with tempfile.TemporaryDirectory(prefix="lainc-source-closure-") as directory:
         output = Path(directory) / "compiler-closure.l1"

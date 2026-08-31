@@ -64,6 +64,12 @@ The accepted lowering remains an executable function subset with a native
 zero-parameter `main` entry; the host no longer needs a second semantic entry
 point.
 
+The compiler API now dispatches `lain_std_expand`, `lain_std_elaborate`, and
+`lain_std_lower` through the bootstrap standard-library artifact.  Module and
+struct, record, and type status recognition is supplied by bootstrap-stdlib
+procedures; import/eval/call lowering is still a core implementation scheduled
+for migration.
+
 The evaluator currently handles left-associative integer `+`, `-`, `*`, and
 `/`, returning a phase diagnostic for unsupported syntax or division by zero.
 

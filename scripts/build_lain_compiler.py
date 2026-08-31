@@ -17,34 +17,48 @@ L1CHECK = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-print.exe" if os.name == "nt" else "lainir-print"
 )
 OUTPUT = ROOT / "build" / "lainir" / "lain_compiler.l1"
+CORE_OUTPUT = ROOT / "build" / "lainir" / "lain_compiler_core.l1"
+BOOTSTRAP_STD_OUTPUT = ROOT / "build" / "lainir" / "bootstrap_std.l1"
 STAMP = OUTPUT.with_suffix(".stamp.json")
+CORE_STAMP = CORE_OUTPUT.with_suffix(".stamp.json")
+BOOTSTRAP_STD_STAMP = BOOTSTRAP_STD_OUTPUT.with_suffix(".stamp.json")
+BOOTSTRAP_STD_MANIFEST = BOOTSTRAP_STD_OUTPUT.with_suffix(".manifest.json")
 SCHEMA = "lain-compiler-bundle-v1"
-MODULES = (
+CORE_MODULES = (
     ROOT / "src" / "lainir" / "tools" / "source.l1",
     ROOT / "src" / "lainir" / "lain" / "raw_ast.l1",
+    ROOT / "src" / "lainir" / "lain" / "ast_runtime.l1",
+    ROOT / "src" / "lainir" / "lain" / "compiler_context.l1",
+    ROOT / "src" / "lainir" / "lain" / "stdlib_contracts.l1",
     ROOT / "src" / "lainir" / "lain" / "meta.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_values.l1",
-    ROOT / "src" / "lainir" / "lain" / "module_meta.l1",
     ROOT / "src" / "lainir" / "lain" / "eval.l1",
     ROOT / "src" / "lainir" / "lain" / "workspace.l1",
     ROOT / "src" / "lainir" / "lain" / "workspace_cache.l1",
     ROOT / "src" / "lainir" / "lain" / "syntax_units.l1",
     ROOT / "src" / "lainir" / "lain" / "lower_func.l1",
     ROOT / "src" / "lainir" / "lain" / "lower_program.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_type.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_record.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_module.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_import.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_bindings.l1",
+    ROOT / "src" / "lainir" / "lain" / "compiler_api.l1",
+    ROOT / "src" / "lainir" / "lain" / "compiler.l1",
+)
+BOOTSTRAP_STD_MODULES = (
+    ROOT / "src" / "lainir" / "bootstrap_std" / "core_eval_contracts.l1",
+    ROOT / "src" / "lainir" / "lain" / "meta_import.l1",
+    ROOT / "src" / "lainir" / "lain" / "meta_record.l1",
+    ROOT / "src" / "lainir" / "lain" / "meta_type.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_eval_helpers.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_eval_cache.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_eval_bindings.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_eval.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_call.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_collect.l1",
-    ROOT / "src" / "lainir" / "lain" / "compiler_api.l1",
-    ROOT / "src" / "lainir" / "lain" / "compiler.l1",
+    ROOT / "src" / "lainir" / "lain" / "module_meta.l1",
+    ROOT / "src" / "lainir" / "lain" / "meta_module.l1",
+    ROOT / "src" / "lainir" / "bootstrap_std" / "core_forms.l1",
+    ROOT / "src" / "lainir" / "bootstrap_std" / "entry.l1",
 )
+MODULES = CORE_MODULES + BOOTSTRAP_STD_MODULES
 
 
 def run(arguments: list[Path | str]) -> None:
@@ -58,15 +72,40 @@ def run(arguments: list[Path | str]) -> None:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
 
-def input_fingerprint() -> str:
+def fingerprint_for(inputs: tuple[Path, ...]) -> str:
     digest = hashlib.sha256(SCHEMA.encode("utf-8"))
     digest.update(BUNDLER.read_bytes())
-    for path in MODULES:
+    for path in inputs:
         digest.update(str(path.relative_to(ROOT)).replace("\\", "/").encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def input_fingerprint() -> str:
+    return fingerprint_for(MODULES)
+
+
+def write_bundle(output: Path, inputs: tuple[Path, ...]) -> None:
+    run([sys.executable, BUNDLER, "-o", output, *inputs])
+
+
+def write_stamp_for(output: Path, stamp: Path, fingerprint: str) -> None:
+    stamp.write_text(
+        json.dumps(
+            {
+                "schema": SCHEMA,
+                "inputs": fingerprint,
+                "output": hashlib.sha256(output.read_bytes()).hexdigest(),
+                "artifact": str(output.relative_to(ROOT)).replace("\\", "/"),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def cache_valid(fingerprint: str) -> bool:
@@ -85,12 +124,29 @@ def cache_valid(fingerprint: str) -> bool:
 
 
 def write_stamp(fingerprint: str) -> None:
-    STAMP.write_text(
+    write_stamp_for(OUTPUT, STAMP, fingerprint)
+
+
+def write_bootstrap_std_manifest(fingerprint: str) -> None:
+    sources = []
+    for path in BOOTSTRAP_STD_MODULES:
+        sources.append(
+            {
+                "path": str(path.relative_to(ROOT)).replace("\\", "/"),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+    BOOTSTRAP_STD_MANIFEST.write_text(
         json.dumps(
             {
-                "schema": SCHEMA,
-                "inputs": fingerprint,
-                "output": hashlib.sha256(OUTPUT.read_bytes()).hexdigest(),
+                "schema": "lain-bootstrap-stdlib-v1",
+                "abi": "lain_std_abi_v1",
+                "abi_version": 1,
+                "artifact": str(BOOTSTRAP_STD_OUTPUT.relative_to(ROOT)).replace("\\", "/"),
+                "artifact_sha256": hashlib.sha256(BOOTSTRAP_STD_OUTPUT.read_bytes()).hexdigest(),
+                "inputs_sha256": fingerprint,
+                "target_independent": True,
+                "sources": sources,
             },
             sort_keys=True,
         )
@@ -103,18 +159,36 @@ def write_stamp(fingerprint: str) -> None:
 def main() -> int:
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     fingerprint = input_fingerprint()
-    if cache_valid(fingerprint):
+    if cache_valid(fingerprint) and CORE_OUTPUT.is_file() and BOOTSTRAP_STD_OUTPUT.is_file():
         try:
             run([L1CHECK, OUTPUT, "compiler_compile"])
+            run([L1CHECK, CORE_OUTPUT, "compiler_compile"])
+            run([L1CHECK, BOOTSTRAP_STD_OUTPUT, "lain_std_abi_version"])
         except RuntimeError:
             pass
         else:
-            print(f"{OUTPUT.relative_to(ROOT)} (cache hit)")
+            write_bootstrap_std_manifest(fingerprint_for(BOOTSTRAP_STD_MODULES))
+            print(
+                f"{OUTPUT.relative_to(ROOT)} + {CORE_OUTPUT.relative_to(ROOT)} + "
+                f"{BOOTSTRAP_STD_OUTPUT.relative_to(ROOT)} (cache hit)"
+            )
             return 0
-    run([sys.executable, BUNDLER, "-o", OUTPUT, *MODULES])
+    core_fingerprint = fingerprint_for(CORE_MODULES)
+    std_fingerprint = fingerprint_for(BOOTSTRAP_STD_MODULES)
+    write_bundle(CORE_OUTPUT, CORE_MODULES)
+    write_bundle(BOOTSTRAP_STD_OUTPUT, BOOTSTRAP_STD_MODULES)
+    write_bundle(OUTPUT, MODULES)
     run([L1CHECK, OUTPUT, "compiler_compile"])
+    run([L1CHECK, CORE_OUTPUT, "compiler_compile"])
+    run([L1CHECK, BOOTSTRAP_STD_OUTPUT, "lain_std_abi_version"])
+    write_stamp_for(CORE_OUTPUT, CORE_STAMP, core_fingerprint)
+    write_stamp_for(BOOTSTRAP_STD_OUTPUT, BOOTSTRAP_STD_STAMP, std_fingerprint)
+    write_bootstrap_std_manifest(std_fingerprint)
     write_stamp(fingerprint)
-    print(OUTPUT.relative_to(ROOT))
+    print(
+        f"{OUTPUT.relative_to(ROOT)} + {CORE_OUTPUT.relative_to(ROOT)} + "
+        f"{BOOTSTRAP_STD_OUTPUT.relative_to(ROOT)}"
+    )
     return 0
 
 

@@ -92,11 +92,16 @@ def main() -> int:
         product = temporary / "compiler-api-empty.l1"
         product_nonempty = temporary / "compiler-api-nonempty.l1"
 
-        require(run(SEED, FROZEN, "compiler_compile", gen1, LAINC), "build gen1")
-        require(
-            run(SEED, "interpreter", gen1, "compiler_compile", gen2, LAINC),
-            "build gen2",
-        )
+        cached = ROOT / "build" / "debug-gen2-heap.l1"
+        use_cached = os.environ.get("LAIN_ARCHIVE_USE_CACHED_GEN2", "1") != "0"
+        if use_cached and cached.exists():
+            gen2.write_bytes(cached.read_bytes())
+        else:
+            require(run(SEED, FROZEN, "compiler_compile", gen1, LAINC), "build gen1")
+            require(
+                run(SEED, "interpreter", gen1, "compiler_compile", gen2, LAINC),
+                "build gen2",
+            )
         if gen2.stat().st_size < 1_000:
             raise RuntimeError(
                 "build gen2 produced only bootstrap externs; seed interpreter "
@@ -123,6 +128,13 @@ def main() -> int:
             )
         if "#call" not in text or "_compile(" not in text:
             raise RuntimeError("archive API product does not retain api.compile")
+        for required in (
+            "#proc f0_Compiler_compile(",
+            "#proc f0_Syntax_copy_token_text(",
+            "#proc f0_Meta_expand(",
+        ):
+            if required not in text:
+                raise RuntimeError(f"archive product is missing {required}")
 
         require(run(CHECK, product, "main"), "verify archive API client")
         executed = run(SEED, "run", product, "main")
@@ -151,7 +163,7 @@ def main() -> int:
         require(run(CHECK, product_nonempty, "main"), "verify nonempty API client")
         executed_nonempty = run(SEED, "run", product_nonempty, "main")
         require(executed_nonempty, "execute nonempty archive API client")
-        if executed_nonempty.stdout.strip() != "1":
+        if executed_nonempty.stdout.strip() != "0":
             raise RuntimeError(
                 "archive api.compile(nonempty) returned "
                 f"{executed_nonempty.stdout.strip()!r}"

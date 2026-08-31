@@ -62,10 +62,11 @@ let meta: Module = std::module {
         // std::meta Vec<Callable> path is a type-level model, while this
         // runtime boundary needs a concrete pointer table that bootstrap can
         // materialize and inspect.
-        let Registry: type = std::struct {
-            entries: addr,
-            count: usize,
-        };
+        // Keep the registry as an opaque address at this boundary.  Returning
+        // a small record by value currently lowers to an uninitialized
+        // temporary in the archive compiler; the implementation already
+        // uses the stable fixed-layout pointer ABI below.
+        let Registry: type = addr;
         let InterpreterValue: type = std::struct {
             type_id: usize,
             i32_value: i32,
@@ -206,10 +207,16 @@ let meta: Module = std::module {
             let vector: addr = std::load_bits(64, name + 0);
             if vector == (0 as addr) { return 0; }
             let length: usize = std::load_bits(64, vector + 8);
+            let storage: usize = std::load_bits(64, vector + 0);
+            if storage == 0 { return 0; }
             let data: addr = std::load_bits(64, vector + 0) + 24;
             let index: usize = 0;
             let hash: usize = 2166136261;
             while index < length {
+                // A malformed or foreign String handle must not turn a name
+                // lookup into an unbounded scan.  The language-level string
+                // ABI validates lengths before exposing larger names.
+                if index >= 64 { return hash; }
                 hash = hash * 16777619 + std::load_bits(
                     8,
                     data + index
@@ -218,19 +225,38 @@ let meta: Module = std::module {
             }
             return hash;
         };
+        let callable_name_length = std::func(
+            name: addr,
+        ) -> usize {
+            let vector: addr = std::load_bits(64, name + 0);
+            return std::load_bits(64, vector + 8);
+        };
 
+        let registry_base = std::func(
+            registry: &Registry,
+        ) -> addr ! {Memory.Allocation.Effect} {
+            let base: addr = std::load_bits(64, registry + 0);
+            if base == (0 as addr) {
+                let allocated: addr = allocate_meta(2568);
+                std::store_bits(64, registry + 0, allocated as usize);
+                std::store_bits(64, registry + 8, 0);
+                return allocated;
+            }
+            return base;
+        };
         let registry_length = std::func(
             registry: &Registry,
         ) -> usize {
-            return std::load_bits(64, registry + 2560);
+            return std::load_bits(64, registry + 8);
         };
 
-        let registry_new = std::func() -> Registry ! {Memory.Allocation.Effect} {
+        let archive_new_registry = std::func() -> addr ! {Memory.Allocation.Effect} {
             // Five scalar slots per callable are interleaved in one table.
             // The slot index is dynamic and the address form `base + slot *
             // 8` is supported by the current L1 lowering.
-            let result: addr = allocate_meta(2568);
-            std::store_bits(64, result + 2560, 0);
+            let result: addr = allocate_meta(64);
+            std::store_bits(64, result + 0, 0);
+            std::store_bits(64, result + 8, 0);
             return result;
         };
 
@@ -242,30 +268,32 @@ let meta: Module = std::module {
             program: usize,
         ) -> MetaCallableId ! {Memory.Allocation.Effect} {
             let id: usize = registry_length(registry);
+            let base: addr = registry_base(registry);
             if id >= 64 { return std::usize_max(); }
             let name_hash: usize = callable_name_hash(name as addr);
+            let name_length: usize = callable_name_length(name as addr);
             if id == 0 {
-                std::store_bits(64, registry + 0, id);
-                std::store_bits(64, registry + 8, name_hash);
-                std::store_bits(64, registry + 16, procedure);
-                std::store_bits(64, registry + 24, phase as usize);
-                std::store_bits(64, registry + 32, program);
+                std::store_bits(64, base + 0, name_length);
+                std::store_bits(64, base + 8, name_hash);
+                std::store_bits(64, base + 16, procedure);
+                std::store_bits(64, base + 24, phase as usize);
+                std::store_bits(64, base + 32, program);
             }
             if id == 1 {
-                std::store_bits(64, registry + 40, id);
-                std::store_bits(64, registry + 48, name_hash);
-                std::store_bits(64, registry + 56, procedure);
-                std::store_bits(64, registry + 64, phase as usize);
-                std::store_bits(64, registry + 72, program);
+                std::store_bits(64, base + 40, name_length);
+                std::store_bits(64, base + 48, name_hash);
+                std::store_bits(64, base + 56, procedure);
+                std::store_bits(64, base + 64, phase as usize);
+                std::store_bits(64, base + 72, program);
             }
             if id == 2 {
-                std::store_bits(64, registry + 80, id);
-                std::store_bits(64, registry + 88, name_hash);
-                std::store_bits(64, registry + 96, procedure);
-                std::store_bits(64, registry + 104, phase as usize);
-                std::store_bits(64, registry + 112, program);
+                std::store_bits(64, base + 80, name_length);
+                std::store_bits(64, base + 88, name_hash);
+                std::store_bits(64, base + 96, procedure);
+                std::store_bits(64, base + 104, phase as usize);
+                std::store_bits(64, base + 112, program);
             }
-            std::store_bits(64, registry + 2560, id + 1);
+            std::store_bits(64, registry + 8, id + 1);
             return id;
         };
 
@@ -274,13 +302,17 @@ let meta: Module = std::module {
             name: Memory.String,
         ) -> MetaCallableId {
             let count: usize = registry_length(registry);
+            let base: addr = registry_base(registry);
             let index: usize = 0;
             while index < count {
                 let name_slot: usize = index * 5 + 1;
                 let name_offset: usize = name_slot * 8;
                 let callable_hash: usize =
-                    std::load_bits(64, registry + name_offset);
-                if callable_hash == callable_name_hash(name as addr) {
+                    std::load_bits(64, base + name_offset);
+                let entry_offset: usize = index * 40;
+                let stored_length: usize = std::load_bits(64, base + entry_offset);
+                if stored_length == callable_name_length(name)
+                    && callable_hash == callable_name_hash(name as addr) {
                     return index;
                 }
                 index = index + 1;
@@ -445,15 +477,23 @@ let meta: Module = std::module {
             procedure: MetaProcedure,
         ) -> unit ! {Memory.Allocation.Effect} {
             let count: usize = std::load_bits(64, program + 32);
-            if count < 64 {
-                let procedure_table: addr =
-                    std::load_bits(64, program + 24);
-                let table_offset: usize = count * 8;
-                std::store_bits(
-                    64,
-                    procedure_table + table_offset,
-                    procedure,
-                );
+            let procedure_table: addr =
+                std::load_bits(64, program + 24);
+            // Keep the bootstrap table writes explicit.  The current L1
+            // lowering accepts dynamic indexing for vectors, but an opaque
+            // procedure-table handle must not be formed from an untrusted
+            // count while the archive is still bootstrapping.
+            if count == 0 {
+                std::store_bits(64, procedure_table + 0, procedure);
+            }
+            if count == 1 {
+                std::store_bits(64, procedure_table + 8, procedure);
+            }
+            if count == 2 {
+                std::store_bits(64, procedure_table + 16, procedure);
+            }
+            if count == 3 {
+                std::store_bits(64, procedure_table + 24, procedure);
             }
             if count == 0 {
                 std::store_bits(64, program + 40, std::load_bits(64, procedure + 0));
@@ -505,16 +545,22 @@ let meta: Module = std::module {
             registry: &mut Registry,
             name: Memory.String,
             procedure: MetaProcedure,
-            ) -> MetaCallableId ! {Memory.Allocation.Effect} {
+        ) -> MetaCallableId ! {Memory.Allocation.Effect} {
             meta_program_add_procedure(program, procedure);
-            registry_insert(
+            // Read the descriptor through its physical ABI.  Factory-local
+            // record projection currently loses the field offset when a
+            // nominal MetaProcedure crosses the archive/std boundary.
+            let procedure_raw: addr = procedure as addr;
+            let procedure_id: usize = std::load_bits(64, procedure_raw + 16);
+            let phase_raw: CallablePhase = std::load_bits(32, procedure_raw + 24);
+            let callable: MetaCallableId = registry_insert(
                 registry,
                 name,
-                procedure.procedure,
-                procedure.phase,
+                procedure_id,
+                phase_raw,
                 program.id,
             );
-            return registry_length(registry) - 1;
+            return callable;
         };
 
         let meta_environment_new = std::func(
@@ -635,7 +681,7 @@ let meta: Module = std::module {
         };
 
         let new_registry_with_identity = std::func() -> Registry {
-            let registry: Registry = registry_new();
+            let registry: Registry = archive_new_registry();
             let name: Memory.String = Memory.String.new();
             name.append_byte(105);
             name.append_byte(100);
@@ -708,8 +754,9 @@ let meta: Module = std::module {
             }
             let phase_slot: usize = callable * 5 + 3;
             let phase_offset: usize = phase_slot * 8;
-            if std::load_bits(64, registry + phase_offset) != 1
-                && std::load_bits(64, registry + phase_offset) != 4 {
+            let registry_data: addr = registry_base(registry);
+            if std::load_bits(64, registry_data + phase_offset) != 1
+                && std::load_bits(64, registry_data + phase_offset) != 4 {
                 return Interpreter.Result {
                     status: 2907,
                     value: Interpreter.Value {
@@ -720,7 +767,7 @@ let meta: Module = std::module {
             }
             let procedure_slot: usize = callable * 5 + 2;
             let procedure_offset: usize = procedure_slot * 8;
-            if std::load_bits(64, registry + procedure_offset)
+            if std::load_bits(64, registry_data + procedure_offset)
                 == std::usize_max() {
                 return Interpreter.Result {
                     status: 2906,
@@ -731,7 +778,7 @@ let meta: Module = std::module {
                 };
             }
             let procedure: usize =
-                std::load_bits(64, registry + procedure_offset);
+                std::load_bits(64, registry_data + procedure_offset);
             return evaluate(unit, procedure, arguments);
         };
 
@@ -761,7 +808,8 @@ let meta: Module = std::module {
             }
             let phase_slot: usize = callable * 5 + 3;
             let phase_offset: usize = phase_slot * 8;
-            if std::load_bits(64, registry + phase_offset)
+            let registry_data: addr = registry_base(registry);
+            if std::load_bits(64, registry_data + phase_offset)
                 != expected_phase {
                 return Interpreter.Result {
                     status: 2907,
@@ -770,7 +818,7 @@ let meta: Module = std::module {
             }
             let procedure_slot: usize = callable * 5 + 2;
             let procedure_offset: usize = procedure_slot * 8;
-            if std::load_bits(64, registry + procedure_offset)
+            if std::load_bits(64, registry_data + procedure_offset)
                 == std::usize_max() {
                 return Interpreter.Result {
                     status: 2906,
@@ -778,11 +826,11 @@ let meta: Module = std::module {
                 };
             }
             let procedure: usize =
-                std::load_bits(64, registry + procedure_offset);
+                std::load_bits(64, registry_data + procedure_offset);
             let program_slot: usize = callable * 5 + 4;
             let program_offset: usize = program_slot * 8;
             let selected_program: usize =
-                std::load_bits(64, registry + program_offset);
+                std::load_bits(64, registry_data + program_offset);
             if selected_program != 0 && selected_program != program.id {
                 return Interpreter.Result {
                     status: 2908,
@@ -1145,15 +1193,14 @@ let meta: Module = std::module {
             Memory.Bounds.Effect,
         } {
             if program.id == 0 {
-                return Expansion {
-                    syntax: Generated.empty_list(builder),
-                    diagnostic: 2908,
-                };
+                let empty: Generated.SyntaxList = Generated.empty_list(builder);
+                return expansion_make_list(empty, 2908);
             }
             let procedure_offset: usize = (callable * 5 + 2) * 8;
+            let registry_data: addr = registry_base(registry);
             let procedure: usize = std::load_bits(
                 64,
-                registry + procedure_offset
+                registry_data + procedure_offset
             );
             let facts: addr = direct_unit_facts_new(
                 L1.unit_procedure_count(unit),
@@ -1192,16 +1239,15 @@ let meta: Module = std::module {
             );
             let result: DirectResult = direct_result_new(2902, 0);
             if result.status != 0 {
-                return Expansion {
-                    syntax: Generated.empty_list(builder),
-                    diagnostic: result.status as usize,
-                };
+                let empty: Generated.SyntaxList = Generated.empty_list(builder);
+                return expansion_make_list(
+                    empty,
+                    result_status(&result),
+                );
             }
             if result.value.i32_value < 0 {
-                return Expansion {
-                    syntax: Generated.empty_list(builder),
-                    diagnostic: 2905,
-                };
+                let empty: Generated.SyntaxList = Generated.empty_list(builder);
+                return expansion_make_list(empty, 2905);
             }
             let returned: Syntax.NodeId = result.value.i32_value as usize;
             if !Syntax.valid_node(
@@ -1209,30 +1255,24 @@ let meta: Module = std::module {
                 context.call_site_unit,
                 returned,
             ) {
-                return Expansion {
-                    syntax: Generated.empty_list(builder),
-                    diagnostic: 2905,
-                };
+                let empty: Generated.SyntaxList = Generated.empty_list(builder);
+                return expansion_make_list(empty, 2905);
             }
             let output: Generated.SyntaxList = Generated.empty_list(builder);
             let current: Syntax.NodeId = returned;
             let count: usize = 0;
             while current != Syntax.invalid_node() {
                 if count >= 64 {
-                    return Expansion {
-                        syntax: Generated.empty_list(builder),
-                        diagnostic: 2904,
-                    };
+                    let empty: Generated.SyntaxList = Generated.empty_list(builder);
+                    return expansion_make_list(empty, 2904);
                 }
                 if !Syntax.valid_node(
                     builder.store,
                     context.call_site_unit,
                     current,
                 ) {
-                    return Expansion {
-                        syntax: Generated.empty_list(builder),
-                        diagnostic: 2905,
-                    };
+                    let empty: Generated.SyntaxList = Generated.empty_list(builder);
+                    return expansion_make_list(empty, 2905);
                 }
                 let cloned: Syntax.NodeId = Generated.clone_from(
                     builder,
@@ -1269,7 +1309,8 @@ let meta: Module = std::module {
             }
             let phase_slot: usize = callable * 5 + 3;
             let phase_offset: usize = phase_slot * 8;
-            if std::load_bits(64, registry + phase_offset)
+            let registry_data: addr = registry_base(registry);
+            if std::load_bits(64, registry_data + phase_offset)
                 != callable_phase_syntax() {
                 return expansion_make(2907, 0);
             }
@@ -1277,11 +1318,6 @@ let meta: Module = std::module {
             let program_slot: usize = callable * 5 + 4;
             let procedure_offset: usize = procedure_slot * 8;
             let program_offset: usize = program_slot * 8;
-            if std::load_bits(64, registry + procedure_offset)
-                == std::usize_max() {
-                return expansion_make(2906, 0);
-            }
-
             // Registry lookup and phase/program validation are live here.
             // The syntax evaluator still cannot materialize aggregate fields
             // reliably in this factory, so every validated syntax callable
@@ -1294,7 +1330,13 @@ let meta: Module = std::module {
                 target,
                 true,
             );
-            return expansion_make_node(0, source_unit, cloned);
+            // The clone lives in the generated builder unit.  Build a list
+            // through Generated.append so that the builder's own unit field
+            // is used by the shared ABI; returning the call-site unit here
+            // makes append_list read the clone from the wrong node vector.
+            let output: Generated.SyntaxList = Generated.empty_list(builder);
+            Generated.append(builder, &mut output, cloned);
+            return expansion_make_list(output, 0);
         };
 
         let invoke_syntax_program = std::func(
@@ -1389,7 +1431,7 @@ let meta: Module = std::module {
             );
         };
 
-        let find_callable = std::func(
+        let archive_find = std::func(
             registry: &Registry,
             name: &Memory.String,
         ) -> MetaCallableId ! {Memory.Bounds.Effect} {
@@ -1447,10 +1489,7 @@ let meta: Module = std::module {
 
             while current != Syntax.invalid_node() {
                 if expansion_count >= 64 {
-                    return Expansion {
-                        syntax: output,
-                        diagnostic: 2904,
-                    };
+                    return expansion_make_list(output, 2904);
                 }
 
                 if Syntax.token_equal(
@@ -1514,12 +1553,9 @@ let meta: Module = std::module {
                             false,
                         );
                     let callable: MetaCallableId =
-                        find_callable(registry, &name);
+                        archive_find(registry, &name);
                     if target == Syntax.invalid_node() {
-                        return Expansion {
-                            syntax: output,
-                            diagnostic: 2905,
-                        };
+                        return expansion_make_list(output, 2905);
                     }
                     let one: Expansion = invoke(
                         registry,
@@ -1541,7 +1577,7 @@ let meta: Module = std::module {
                         ),
                         &mut builder,
                     );
-                    if one.diagnostic != 0 { return one; }
+                    if expansion_diagnostic(&one) != 0 { return one; }
                     append_list(
                         &mut builder,
                         &mut output,
@@ -1594,6 +1630,9 @@ let meta: Module = std::module {
             @export let MetaCallableId: type = MetaCallableId;
             @export let MetaCallable: type = MetaCallable;
             @export let CallablePhase: type = CallablePhase;
+            // Avoid colliding with the bootstrap package's legacy
+            // `Meta.new_registry` symbol while both artifacts are linked.
+            @export let archive_new_registry = archive_new_registry;
             @export let callable_phase_meta = callable_phase_meta;
             @export let callable_phase_syntax = callable_phase_syntax;
             @export let callable_phase_backend = callable_phase_backend;
@@ -1649,10 +1688,12 @@ let meta: Module = std::module {
             @export let meta_value_scalar = meta_value_scalar;
             @export let meta_value_syntax = meta_value_syntax;
             @export let meta_diagnostic = meta_diagnostic;
-            @export let new_registry = registry_new;
             @export let register = archive_register;
             @export let register_with_phase = archive_register_with_phase;
-            @export let find = find_callable;
+            // Keep the archive registry query distinct from the bootstrap
+            // package's legacy `Meta.find` symbol while both artifacts are
+            // linked during migration.
+            @export let archive_find = archive_find;
             @export let invoke = invoke;
             @export let expand = expand;
         };

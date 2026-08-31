@@ -3,6 +3,10 @@
 // The evaluator returns Meta/eval result objects.  It does not emit runtime
 // LAIN-IR; runtime lowering stays in lower_program and the later lower_* files.
 
+#extern #proc program_is_std_module_value(
+  addr %source, addr %value_node
+) -> i1;
+
 #proc program_eval_param_value(
   addr %source, addr %function, addr %node, addr %arguments
 ) -> addr {
@@ -762,7 +766,7 @@
   )
 }
 
-#proc program_eval_consteval_group(
+#proc program_eval_consteval_group_direct(
   addr %unit, addr %source, addr %group
 ) -> addr {
   #let %first: addr = #call raw_node_first(%group)
@@ -776,4 +780,19 @@
     }
   }
   #return #call eval_group(%source, %group)
+}
+
+// All compile-time execution crosses the LAIN-IR #eval boundary here.  The
+// evaluator body remains an ordinary L1 routine so it can share the existing
+// Meta data structures; the block is the explicit phase boundary used by the
+// compiler when invoking it.
+#proc program_eval_consteval_group(
+  addr %unit, addr %source, addr %group
+) -> addr {
+  #let %result: addr = #eval {
+    #return #call program_eval_consteval_group_direct(
+      %unit, %source, %group
+    )
+  }
+  #return %result
 }

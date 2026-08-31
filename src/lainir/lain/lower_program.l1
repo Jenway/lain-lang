@@ -50,6 +50,12 @@
 #extern #proc meta_align_up(i64 %value, i64 %alignment) -> i64;
 #extern #proc module_group(addr %source, addr %root) -> addr;
 #extern #proc meta_module_build(addr %source, addr %root) -> addr;
+#extern #proc program_is_module_declaration(
+  addr %source, addr %let_node
+) -> i1;
+#extern #proc program_module_group(
+  addr %source, addr %let_node
+) -> addr;
 #extern #proc meta_module_validate_binding(
   addr %source, addr %let_node
 ) -> i32;
@@ -59,6 +65,11 @@
 ) -> i64;
 #extern #proc meta_type_is_nominal(addr %source, addr %node) -> i1;
 #extern #proc meta_type_is_unit(addr %source, addr %node) -> i1;
+#extern #proc lain_std_meta_status(addr %source, addr %root) -> i32;
+#extern #proc program_bind_import_aliases(
+  addr %unit, addr %source, #bits<64> %source_index,
+  addr %root, addr %environment
+) -> #unit;
 #extern #proc meta_env_new(addr %parent) -> addr;
 #extern #proc meta_env_is_nil(addr %environment) -> i1;
 #extern #proc meta_env_binding_is_nil(addr %binding) -> i1;
@@ -6421,6 +6432,52 @@
 #proc program_write_value_expression(
   addr %source, addr %function, addr %left
 ) -> #unit {
+  // `udiv`/`urem` are compiler intrinsics, not runtime calls.  Keep the
+  // fallback keyed by the final path name for the same qualified-path shape
+  // handled above for `store_bits`.
+  #let %intrinsic_name: addr = #call program_operand_name(%source, %left)
+  #let %intrinsic_group: addr = #call program_operand_group(%source, %left)
+  #if #eq(#call raw_is_nil(%intrinsic_group), 0) {
+    #let %is_udiv: i1 = #call meta_atom_equal(
+      %source, %intrinsic_name, "udiv", 4
+    )
+    #let %is_urem: i1 = #call meta_atom_equal(
+      %source, %intrinsic_name, "urem", 4
+    )
+    #if %is_udiv {
+      #call bootstrap.artifact-write-literal("#udiv(")
+      #let %left_arg: addr = #call raw_node_first(%intrinsic_group)
+      #let %comma: addr = #call raw_node_next(%left_arg)
+      #let %right_arg: addr = #call raw_node_next(%comma)
+      #call program_write_value_expression(%source, %function, %left_arg)
+      #call bootstrap.artifact-write-literal(", ")
+      #call program_write_value_expression(%source, %function, %right_arg)
+      #call bootstrap.artifact-write-byte(41)
+      #return
+    }
+    #if %is_urem {
+      #call bootstrap.artifact-write-literal("#urem(")
+      #let %left_arg: addr = #call raw_node_first(%intrinsic_group)
+      #let %comma: addr = #call raw_node_next(%left_arg)
+      #let %right_arg: addr = #call raw_node_next(%comma)
+      #call program_write_value_expression(%source, %function, %left_arg)
+      #call bootstrap.artifact-write-literal(", ")
+      #call program_write_value_expression(%source, %function, %right_arg)
+      #call bootstrap.artifact-write-byte(41)
+      #return
+    }
+  }
+  // Keep the store intrinsic recognized even when the parser presents a
+  // qualified `std::store_bits` path without its leading namespace node.  The
+  // operand's final name is sufficient to select the physical store writer;
+  // falling through would emit an undeclared runtime `store_bits` call.
+  #if #call meta_atom_equal(
+    %source, #call program_operand_name(%source, %left),
+    "store_bits", 10
+  ) {
+    #call program_write_intrinsic_store_bits(%source, %function, %left)
+    #return
+  }
   #let %left_end: addr = #call program_operand_end_source(%source, %left)
   // A call can be followed by a record projection, for example
   // `unit.nodes.get(tail).next_sibling`.  The call resolver handles `get`,
@@ -7305,9 +7362,22 @@
     } else {
       #call bootstrap.artifact-write-literal("  ")
     }
-    #if #call program_is_std_intrinsic_call(
+    #let %store_bits_statement: i1 = #call program_is_std_intrinsic_call(
       %source, %statement, "store_bits", 10
-    ) {
+    )
+    // Some source forms are tokenized as a qualified path whose leading
+    // `std::` pair is hidden by the statement walker.  The final operand name
+    // is still unambiguous here, so accept it as a fallback for the intrinsic
+    // lowering instead of emitting an undeclared runtime `store_bits` call.
+    #if #eq(%store_bits_statement, 0) {
+      #if #call meta_atom_equal(
+        %source, #call program_operand_name(%source, %statement),
+        "store_bits", 10
+      ) {
+        %store_bits_statement: i1 = 1
+      }
+    }
+    #if %store_bits_statement {
       #call program_write_intrinsic_store_bits(
         %source, %function, %statement
       )
@@ -7785,7 +7855,27 @@
     )
   }
   #call bootstrap.artifact-write-literal(" = ")
-  #call program_write_value_expression(%source, %function, %value)
+  // `std::load_bits(64, p)` is an integer-width load at the IR level, while
+  // an explicitly address-typed local needs the pointer representation.  The
+  // source compiler's old path inserted this conversion; keep it in the
+  // second compiler too so a freshly generated lainc remains verifier-safe.
+  #let %address_load: i1 = 0
+  #if #eq(#call raw_is_nil(%type), 0) {
+    #if #call program_type_is_address(%source, %type) {
+      #if #call program_is_std_intrinsic_call(
+        %source, %value, "load_bits", 9
+      ) {
+        %address_load: i1 = 1
+      }
+    }
+  }
+  #if %address_load {
+    #call bootstrap.artifact-write-literal("#int2ptr(")
+    #call program_write_value_expression(%source, %function, %value)
+    #call bootstrap.artifact-write-byte(41)
+  } else {
+    #call program_write_value_expression(%source, %function, %value)
+  }
   #call bootstrap.artifact-write-byte(10)
   #return
 }
@@ -8786,29 +8876,7 @@
   #return
 }
 
-#proc program_meta_status(addr %source, addr %root) -> i32 {
-  #let %record: addr = #call meta_record_group(%source, %root)
-  #if #call raw_is_nil(%record) {
-  } else {
-    #let %descriptor: addr = #call meta_record_build(%source, %root)
-    #let %status: i32 = #load[i32](
-      #lea(base=%descriptor, idx=0, scale=0, offset=64)
-    )
-    #if #ne(%status, 0) { #return %status }
-  }
-  #let %module: addr = #call module_group(%source, %root)
-  #if #call raw_is_nil(%module) {
-  } else {
-    #let %descriptor: addr = #call meta_module_build(%source, %root)
-    #let %status: i32 = #load[i32](
-      #lea(base=%descriptor, idx=0, scale=0, offset=48)
-    )
-    #if #ne(%status, 0) { #return %status }
-  }
-  #return 0
-}
-
-#proc lain_lower_program(addr %request, addr %syntax_index) -> i32 {
+#proc lain_core_lower_program(addr %request, addr %syntax_index) -> i32 {
   #let %available_count: i64 = #call syntax_index_count(%syntax_index)
   #let %source_begin: i64 = #load[i64](
     #lea(base=%request, idx=0, scale=0, offset=24)
@@ -8899,7 +8967,7 @@
     %syntax_index, %source_begin, %source_end
   )
   #if #eq(%status, 0) {
-    %status: i32 = #call program_meta_status(%source, %root)
+    %status: i32 = #call lain_std_meta_status(%source, %root)
   }
   #if #eq(%status, 0) {
     %status: i32 = #call program_collect_types(
@@ -8920,7 +8988,7 @@
     #store %source_root,
       #lea(base=%roots, idx=%index, scale=8, offset=0)
     #if #eq(%status, 0) {
-      %status: i32 = #call program_meta_status(
+      %status: i32 = #call lain_std_meta_status(
         %source_value, %source_root
       )
       #if #eq(%status, 0) {

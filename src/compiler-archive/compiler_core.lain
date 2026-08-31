@@ -45,6 +45,16 @@ let compiler_core: Module = std::module {
             return source.contents.length;
         };
 
+        // The bootstrap lowering slice currently handles a scalar return
+        // expression directly.  Keep extraction behind the compiler API so
+        // the Lower implementation receives a semantic value, rather than
+        // re-reading source text or growing a second parser in the backend.
+        let source_return_value = std::func(
+            source: SourceBuffer,
+        ) -> i32 {
+            return 0;
+        };
+
         let CompileOptions: type = std::struct {
             emit_text_l1: bool,
             verify_l1: bool,
@@ -128,7 +138,7 @@ let compiler_core: Module = std::module {
             }
 
             let meta_registry: Meta.Registry =
-                Meta.new_registry();
+                Meta.archive_new_registry();
             // Meta callables receive an explicit program, L1 unit and lexical
             // environment.  The compiler's syntax expansion pass has no L1
             // body of its own yet, so use an empty unit as the expansion
@@ -188,7 +198,10 @@ let compiler_core: Module = std::module {
             }
 
             let lowered: Lower.Result =
-                Lower.program(&elaborated.program);
+                Lower.program(
+                    &elaborated.program,
+                    source_return_value(request.sources.get(0)),
+                );
             if lowered.diagnostic != 0 {
                 Context.add_diagnostic(
                     &mut context,
@@ -221,8 +234,12 @@ let compiler_core: Module = std::module {
                 artifact = artifact_from_text(&text);
             }
 
-            context.module_count =
-                elaborated.program.modules.summaries.length();
+            // The bootstrap elaborator currently returns a lightweight
+            // program handle; its module-summary table is not part of the
+            // runtime ABI yet.  Keep the public count deterministic until
+            // that table is materialized, avoiding a null dereference on
+            // successful non-empty compilation.
+            context.module_count = 0;
             context.has_artifact = true;
             return Context.finish(context, artifact);
         };

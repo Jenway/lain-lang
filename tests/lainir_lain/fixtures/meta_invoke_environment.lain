@@ -81,7 +81,7 @@ let scalar_probe = std::func() -> i32 {
         4,
         1,
     );
-    let registry: Meta.Registry = Meta.new_registry();
+    let registry: Meta.Registry = Meta.archive_new_registry();
     let name: memory.String = memory.String.new();
     let callable: Meta.MetaCallableId = Meta.meta_program_register(
         &mut program,
@@ -237,10 +237,10 @@ let syntax_probe = std::func() -> i32 {
     );
     let registry: Meta.Registry = Meta.new_registry();
     let name: memory.String = memory.String.new();
-    name.append_byte(97);
-    name.append_byte(116);
-    name.append_byte(116);
-    name.append_byte(114);
+    memory.String.append_byte(&mut name, 97);
+    memory.String.append_byte(&mut name, 116);
+    memory.String.append_byte(&mut name, 116);
+    memory.String.append_byte(&mut name, 114);
     let callable: Meta.MetaCallableId = Meta.meta_program_register(
         &mut program,
         &mut registry,
@@ -249,11 +249,10 @@ let syntax_probe = std::func() -> i32 {
     );
     let environment: Meta.MetaEnvironment = Meta.meta_environment_new(6, 0);
     let alias_name: memory.String = memory.String.new();
+    alias_name.append_byte(98);
+    alias_name.append_byte(101);
+    alias_name.append_byte(116);
     alias_name.append_byte(97);
-    alias_name.append_byte(108);
-    alias_name.append_byte(105);
-    alias_name.append_byte(97);
-    alias_name.append_byte(115);
     let alias_procedure: Meta.MetaProcedure = Meta.meta_procedure_new(
         10,
         12,
@@ -269,6 +268,31 @@ let syntax_probe = std::func() -> i32 {
         alias_name,
         alias_procedure,
     );
+    let attr_at: Syntax.NodeId = Syntax.node(&store, source_unit, root).first_child;
+    let attr_name_node: Syntax.NodeId = Syntax.next_significant(
+        &store,
+        source_unit,
+        Syntax.node(&store, source_unit, attr_at).next_sibling,
+    );
+    let attr_name: memory.String = Syntax.copy_token_text(
+        &store,
+        source_unit,
+        attr_name_node,
+        false,
+    );
+    if Meta.archive_find(&registry, &attr_name) != callable { return 309; }
+    let attr_query: memory.String = memory.String.new();
+    memory.String.append_byte(&mut attr_query, 97);
+    memory.String.append_byte(&mut attr_query, 116);
+    memory.String.append_byte(&mut attr_query, 116);
+    memory.String.append_byte(&mut attr_query, 114);
+    if Meta.archive_find(&registry, &attr_query) != callable { return 305; }
+    let alias_query: memory.String = memory.String.new();
+    alias_query.append_byte(98);
+    alias_query.append_byte(101);
+    alias_query.append_byte(116);
+    alias_query.append_byte(97);
+    if Meta.archive_find(&registry, &alias_query) != alias_callable { return 306; }
     let expansion: Meta.Expansion = Meta_expand(
         &mut store,
         source_unit,
@@ -282,14 +306,27 @@ let syntax_probe = std::func() -> i32 {
         return 200 + Meta.expansion_diagnostic(&expansion);
     }
     if Meta.expansion_length(&expansion) == 0 { return 300; }
-    // Alias/unknown-name and backend context probes stay disabled until the
-    // string ABI and aggregate interpreter bridge are complete.
-    if 1 == 0 {
+    // The alias name exercises the local-receiver String ABI and verifies
+    // that registry lookup is based on the materialized token text.
     let alias_source_unit: Syntax.UnitId = Syntax.parse(
         &mut store,
-        memory_core.memory.byte_span("@alias xy", 9),
+        memory_core.memory.byte_span("@beta xy", 8),
     );
     let alias_root: Syntax.NodeId = Syntax.unit_root(&store, alias_source_unit);
+    let alias_at: Syntax.NodeId = Syntax.node(&store, alias_source_unit, alias_root).first_child;
+    let alias_name_node: Syntax.NodeId = Syntax.next_significant(
+        &store,
+        alias_source_unit,
+        Syntax.node(&store, alias_source_unit, alias_at).next_sibling,
+    );
+    let alias_source_name: memory.String = Syntax.copy_token_text(
+        &store,
+        alias_source_unit,
+        alias_name_node,
+        false,
+    );
+    if !Syntax.token_equal(&store, alias_source_unit, alias_name_node, "beta", 4) { return 311; }
+    if Meta.archive_find(&registry, &alias_source_name) != alias_callable { return 310; }
     let alias_expansion: Meta.Expansion = Meta_expand(
         &mut store,
         alias_source_unit,
@@ -299,8 +336,40 @@ let syntax_probe = std::func() -> i32 {
         &environment,
         &unit,
     );
-    if Meta.expansion_diagnostic(&alias_expansion) != 0 { return 312; }
+    if Meta.expansion_diagnostic(&alias_expansion) != 0 {
+        return 312 + Meta.expansion_diagnostic(&alias_expansion);
+    }
     if Meta.expansion_length(&alias_expansion) == 0 { return 313; }
+    let unknown_source_unit: Syntax.UnitId = Syntax.parse(
+        &mut store,
+        memory_core.memory.byte_span("@missing xy", 11),
+    );
+    let unknown_root: Syntax.NodeId = Syntax.unit_root(&store, unknown_source_unit);
+    let unknown_at: Syntax.NodeId = Syntax.node(&store, unknown_source_unit, unknown_root).first_child;
+    let unknown_name_node: Syntax.NodeId = Syntax.next_significant(
+        &store,
+        unknown_source_unit,
+        Syntax.node(&store, unknown_source_unit, unknown_at).next_sibling,
+    );
+    let unknown_name: memory.String = Syntax.copy_token_text(
+        &store,
+        unknown_source_unit,
+        unknown_name_node,
+        false,
+    );
+    if Meta.archive_find(&registry, &unknown_name) != 2 { return 308; }
+    let unknown_expansion: Meta.Expansion = Meta_expand(
+        &mut store,
+        unknown_source_unit,
+        unknown_root,
+        &registry,
+        &program,
+        &environment,
+        &unit,
+    );
+    if Meta.expansion_diagnostic(&unknown_expansion) != 2902 {
+        return 320 + Meta.expansion_diagnostic(&unknown_expansion);
+    }
     let phase_arguments: Meta.InterpreterValueVector =
         Meta.InterpreterValueVector.new();
     let phase_result: Meta.InterpreterResult =
@@ -329,7 +398,7 @@ let syntax_probe = std::func() -> i32 {
         0,
         1,
     );
-    let backend_registry: Meta.Registry = Meta.new_registry();
+    let backend_registry: Meta.Registry = Meta.archive_new_registry();
     let backend_name: memory.String = memory.String.new();
     let backend_callable: Meta.MetaCallableId = Meta.meta_program_register(
         &mut backend_program,
@@ -387,7 +456,6 @@ let syntax_probe = std::func() -> i32 {
     }
     if Meta.result_value(&backend_result) != 5 { return 511; }
 
-    }
     return 0;
 };
 
