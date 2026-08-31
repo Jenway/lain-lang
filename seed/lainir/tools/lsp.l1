@@ -1,0 +1,1038 @@
+// LAIN-IR LSP core.
+//
+// This file deliberately contains no editor or JSON implementation in C.
+// The host boundary is a byte stream plus allocation.  The stream uses a
+// 16-bit return value so 0x100 is an unambiguous EOF marker.
+
+#extern #proc lsp.read-byte() -> #bits<16>;
+#extern #proc lsp.write-byte(#bits<8> %byte) -> #unit;
+#extern #proc lsp.flush() -> #unit;
+#extern #proc lsp.allocate(#bits<64> %size) -> #addr;
+
+// Feature serializers are implemented by lsp_tools.l1.  Keeping these as
+// imports lets the protocol loop stay small while the standalone lainir-print
+// target remains useful.
+#extern #proc lsp_write_semantic_tokens_response(#bits<64> %id, #addr %document) -> #unit;
+#extern #proc lsp_write_formatting_response(#bits<64> %id, #addr %document) -> #unit;
+#extern #proc lsp_tools_prepare_document(#addr %document) -> #addr;
+#extern #proc lsp_write_publish_diagnostics(#addr %document, #addr %source) -> #unit;
+
+#proc lsp_byte_at(#addr %data, #bits<64> %index) -> #bits<8> {
+  #return #load[#bits<8>](#lea(base=%data, idx=%index, scale=1, offset=0))
+}
+
+#proc lsp_store64(#addr %base, #bits<64> %offset, #bits<64> %value) -> #unit {
+  #store[#bits<64>] %value, #lea(base=%base, idx=%offset, scale=1, offset=0)
+  #return
+}
+
+#proc lsp_load64(#addr %base, #bits<64> %offset) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%base, idx=%offset, scale=1, offset=0))
+}
+
+#proc lsp_store_addr(#addr %base, #bits<64> %offset, #addr %value) -> #unit {
+  #store[#addr] %value, #lea(base=%base, idx=%offset, scale=1, offset=0)
+  #return
+}
+
+#proc lsp_load_addr(#addr %base, #bits<64> %offset) -> #addr {
+  #return #load[#addr](#lea(base=%base, idx=%offset, scale=1, offset=0))
+}
+
+#proc lsp_zero_addr() -> #addr {
+  #let %slot: #addr = #call lsp.allocate(8)
+  #store[#bits<64>] 0, %slot
+  #return #load[#addr](%slot)
+}
+
+// LAIN-IR equality is for bits values.  Pointer links therefore carry an
+// explicit tag instead of being compared with integer zero.
+#proc lsp_document_is_nil(#addr %document) -> #bits<1> {
+  #if #eq(#load[#bits<64>](#lea(base=%document, idx=0, scale=1, offset=48)), 0) {
+    #return 1
+  }
+  #return 0
+}
+
+#proc lsp_document_link_nil() -> #addr {
+  #let %nil: #addr = #call lsp.allocate(64)
+  #call lsp_store64(%nil, 48, 0)
+  #return %nil
+}
+
+#proc lsp_message_nil() -> #addr {
+  #let %value: #addr = #call lsp.allocate(24)
+  #store[#bits<64>] 0, #lea(base=%value, idx=0, scale=1, offset=16)
+  #return %value
+}
+
+#proc lsp_message_is_nil(#addr %message) -> #bits<1> {
+  #if #eq(#load[#bits<64>](#lea(base=%message, idx=0, scale=1, offset=16)), 0) {
+    #return 1
+  }
+  #return 0
+}
+
+#proc lsp_same(#addr %data, #bits<64> %length, #bits<64> %start, #addr %text, #bits<64> %text_length) -> #bits<1> {
+  #if #gt(#add(%start, %text_length), %length) { #return 0 }
+  #let %index: #bits<64> = 0
+  #loop same {
+    #if #ge(%index, %text_length) { #break same }
+    #if #ne(#call lsp_byte_at(%data, #add(%start, %index)), #call lsp_byte_at(%text, %index)) { #return 0 }
+    %index: #bits<64> = #add(%index, 1)
+    #continue same
+  }
+  #return 1
+}
+
+#proc lsp_contains(#addr %data, #bits<64> %length, #addr %text, #bits<64> %text_length) -> #bits<1> {
+  #let %index: #bits<64> = 0
+  #loop contains {
+    #if #gt(#add(%index, %text_length), %length) { #break contains }
+    #if #call lsp_same(%data, %length, %index, %text, %text_length) { #return 1 }
+    %index: #bits<64> = #add(%index, 1)
+    #continue contains
+  }
+  #return 0
+}
+
+#proc lsp_cstring_length(#addr %data) -> #bits<64> {
+  #let %length: #bits<64> = 0
+  #loop cstring {
+    #if #eq(#call lsp_byte_at(%data, %length), 0) { #break cstring }
+    %length: #bits<64> = #add(%length, 1)
+    #continue cstring
+  }
+  #return %length
+}
+
+// ---------------------------- document model ----------------------------
+// Document URIs are NUL-terminated buffers owned by the document source.
+// Document: uri @0, uri_length @8, text @16, length @24, version @32,
+// open @40, kind @48, next @56, cached source @64, cached tokens @72,
+// cached AST @80, cache dirty @88, dirty new start/end @96/@104,
+// dirty old start/end @112/@120, dirty start line/character @128/@136,
+// dirty end line/character @144/@152, edit generation @160, last token scan
+// start/end @168/@176, token scan count @184, last scan full flag @192,
+// replacement end line/character @200/@208, previous document length @216,
+// ranged-edit flag @224.
+#proc lsp_document_new(#addr %uri, #addr %text, #bits<64> %length, #bits<64> %version) -> #addr {
+  #let %document: #addr = #call lsp.allocate(232)
+  #call lsp_store_addr(%document, 0, %uri)
+  #call lsp_store64(%document, 8, #call lsp_cstring_length(%uri))
+  #call lsp_store_addr(%document, 16, %text)
+  #call lsp_store64(%document, 24, %length)
+  #call lsp_store64(%document, 32, %version)
+  #call lsp_store64(%document, 40, 1)
+  #call lsp_store64(%document, 48, 1)
+  #call lsp_store_addr(%document, 56, #call lsp_document_link_nil())
+  #call lsp_store_addr(%document, 64, #call lsp_zero_addr())
+  #call lsp_store_addr(%document, 72, #call lsp_zero_addr())
+  #call lsp_store_addr(%document, 80, #call lsp_zero_addr())
+  #call lsp_store64(%document, 88, 1)
+  #call lsp_store64(%document, 96, 0)
+  #call lsp_store64(%document, 104, %length)
+  #call lsp_store64(%document, 112, 0)
+  #call lsp_store64(%document, 120, %length)
+  #call lsp_store64(%document, 128, 0)
+  #call lsp_store64(%document, 136, 0)
+  #call lsp_store64(%document, 144, 0)
+  #call lsp_store64(%document, 152, 0)
+  #call lsp_store64(%document, 160, 1)
+  #call lsp_store64(%document, 200, 0)
+  #call lsp_store64(%document, 208, 0)
+  #call lsp_store64(%document, 216, %length)
+  #call lsp_store64(%document, 224, 0)
+  #call lsp_store64(%document, 168, 0)
+  #call lsp_store64(%document, 176, 0)
+  #call lsp_store64(%document, 184, 0)
+  #call lsp_store64(%document, 192, 1)
+  #call lsp_store64(%document, 200, 0)
+  #call lsp_store64(%document, 208, 0)
+  #return %document
+}
+
+// DocumentStore: first @0, last @8, count @16.
+#proc lsp_documents_new() -> #addr {
+  #let %store: #addr = #call lsp.allocate(32)
+  #let %nil: #addr = #call lsp_document_link_nil()
+  #call lsp_store_addr(%store, 0, %nil)
+  #call lsp_store_addr(%store, 8, %nil)
+  #call lsp_store64(%store, 16, 0)
+  #return %store
+}
+
+#proc lsp_document_uri(#addr %document) -> #addr { #return #call lsp_load_addr(%document, 0) }
+#proc lsp_document_text(#addr %document) -> #addr { #return #call lsp_load_addr(%document, 16) }
+#proc lsp_document_length(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 24) }
+#proc lsp_document_version(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 32) }
+#proc lsp_document_next(#addr %document) -> #addr { #return #call lsp_load_addr(%document, 56) }
+#proc lsp_document_cache_source(#addr %document) -> #addr { #return #call lsp_load_addr(%document, 64) }
+#proc lsp_document_cache_tokens(#addr %document) -> #addr { #return #call lsp_load_addr(%document, 72) }
+#proc lsp_document_cache_ast(#addr %document) -> #addr { #return #call lsp_load_addr(%document, 80) }
+#proc lsp_document_cache_dirty(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 88) }
+#proc lsp_document_dirty_start(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 96) }
+#proc lsp_document_dirty_end(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 104) }
+#proc lsp_document_dirty_old_start(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 112) }
+#proc lsp_document_dirty_old_end(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 120) }
+#proc lsp_document_dirty_start_line(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 128) }
+#proc lsp_document_dirty_start_character(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 136) }
+#proc lsp_document_dirty_end_line(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 144) }
+#proc lsp_document_dirty_end_character(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 152) }
+#proc lsp_document_edit_generation(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 160) }
+#proc lsp_document_token_scan_start(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 168) }
+#proc lsp_document_token_scan_end(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 176) }
+#proc lsp_document_token_scan_count(#addr %document) -> #bits<64> { #return #call lsp_load64(%document, 184) }
+#proc lsp_document_token_scan_is_full(#addr %document) -> #bits<1> {
+  #return #ne(#call lsp_load64(%document, 192), 0)
+}
+#proc lsp_document_replacement_end_line(#addr %document) -> #bits<64> {
+  #return #call lsp_load64(%document, 200)
+}
+#proc lsp_document_replacement_end_character(#addr %document) -> #bits<64> {
+  #return #call lsp_load64(%document, 208)
+}
+#proc lsp_document_previous_length(#addr %document) -> #bits<64> {
+  #return #call lsp_load64(%document, 216)
+}
+#proc lsp_document_change_is_range(#addr %document) -> #bits<1> {
+  #return #ne(#call lsp_load64(%document, 224), 0)
+}
+#proc lsp_document_token_scan_set(
+  #addr %document, #bits<64> %start, #bits<64> %end, #bits<1> %full
+) -> #unit {
+  #call lsp_store64(%document, 168, %start)
+  #call lsp_store64(%document, 176, %end)
+  #call lsp_store64(%document, 184, #add(#call lsp_load64(%document, 184), 1))
+  #call lsp_store64(%document, 192, #zext[#bits<64>](%full))
+  #return
+}
+#proc lsp_document_cache_set(#addr %document, #addr %source, #addr %tokens, #addr %ast) -> #unit {
+  #call lsp_store_addr(%document, 64, %source)
+  #call lsp_store_addr(%document, 72, %tokens)
+  #call lsp_store_addr(%document, 80, %ast)
+  #call lsp_store64(%document, 88, 0)
+  #return
+}
+
+#proc lsp_document_find(#addr %store, #addr %uri, #bits<64> %uri_length) -> #addr {
+  #let %current: #addr = #call lsp_load_addr(%store, 0)
+  #loop find {
+    #if #call lsp_document_is_nil(%current) { #break find }
+    #let %current_uri: #addr = #call lsp_document_uri(%current)
+    // A URI match must include its length; otherwise `file:///x` would
+    // incorrectly match `file:///xy`.
+    #if #eq(#call lsp_load64(%current, 8), %uri_length) {
+      #if #call lsp_same(%current_uri, %uri_length, 0, %uri, %uri_length) { #return %current }
+    }
+    %current: #addr = #call lsp_document_next(%current)
+    #continue find
+  }
+  #return #call lsp_load_addr(%store, 0)
+}
+
+#proc lsp_document_open(#addr %store, #addr %uri, #addr %text, #bits<64> %length, #bits<64> %version) -> #addr {
+  #let %existing: #addr = #call lsp_document_find(%store, %uri, #call lsp_cstring_length(%uri))
+  #if #eq(#call lsp_document_is_nil(%existing), 0) {
+    #call lsp_store64(%existing, 216, #call lsp_load64(%existing, 24))
+    #call lsp_store_addr(%existing, 16, %text)
+    #call lsp_store64(%existing, 24, %length)
+    #call lsp_store64(%existing, 32, %version)
+    #call lsp_store64(%existing, 40, 1)
+    #call lsp_store64(%existing, 88, 1)
+    #call lsp_store64(%existing, 96, 0)
+    #call lsp_store64(%existing, 104, %length)
+    #call lsp_store64(%existing, 112, 0)
+    #call lsp_store64(%existing, 120, %length)
+    #call lsp_store64(%existing, 128, 0)
+    #call lsp_store64(%existing, 136, 0)
+    #call lsp_store64(%existing, 144, 0)
+    #call lsp_store64(%existing, 152, 0)
+    #call lsp_store64(%existing, 160, #add(#call lsp_load64(%existing, 160), 1))
+    #call lsp_store64(%existing, 200, 0)
+    #call lsp_store64(%existing, 208, 0)
+    #call lsp_store64(%existing, 224, 0)
+    #return %existing
+  }
+  #let %document: #addr = #call lsp_document_new(%uri, %text, %length, %version)
+  #let %last: #addr = #call lsp_load_addr(%store, 8)
+  #if #call lsp_document_is_nil(%last) {
+    #call lsp_store_addr(%store, 0, %document)
+  } else {
+    #call lsp_store_addr(%last, 56, %document)
+  }
+  #call lsp_store_addr(%store, 8, %document)
+  #call lsp_store64(%store, 16, #add(#call lsp_load64(%store, 16), 1))
+  #return %document
+}
+
+#proc lsp_document_change(#addr %document, #addr %text, #bits<64> %length, #bits<64> %version) -> #bits<1> {
+  #if #call lsp_document_is_nil(%document) { #return 0 }
+  #call lsp_store64(%document, 216, #call lsp_load64(%document, 24))
+  #call lsp_store_addr(%document, 16, %text)
+  #call lsp_store64(%document, 24, %length)
+  #call lsp_store64(%document, 32, %version)
+  #call lsp_store64(%document, 88, 1)
+  #call lsp_store64(%document, 96, 0)
+  #call lsp_store64(%document, 104, %length)
+  #call lsp_store64(%document, 112, 0)
+  #call lsp_store64(%document, 120, %length)
+  #call lsp_store64(%document, 128, 0)
+  #call lsp_store64(%document, 136, 0)
+  #call lsp_store64(%document, 144, 0)
+  #call lsp_store64(%document, 152, 0)
+  #call lsp_store64(%document, 160, #add(#call lsp_load64(%document, 160), 1))
+  #call lsp_store64(%document, 200, 0)
+  #call lsp_store64(%document, 208, 0)
+  #call lsp_store64(%document, 224, 0)
+  #return 1
+}
+
+// LSP positions are translated to byte offsets.  LAIN-IR tooling currently
+// treats a character as one source byte; this is explicit and deterministic
+// for ASCII LAIN-IR, and keeps the host-independent edit operation simple.
+#proc lsp_position_offset(#addr %text, #bits<64> %length, #bits<64> %line, #bits<64> %character) -> #bits<64> {
+  #let %index: #bits<64> = 0
+  #let %current_line: #bits<64> = 0
+  #let %current_character: #bits<64> = 0
+  #loop position {
+    #if #ge(%index, %length) { #break position }
+    #if #gt(%current_line, %line) { #break position }
+    #if #eq(%current_line, %line) {
+      #if #ge(%current_character, %character) { #break position }
+    }
+    #let %byte: #bits<8> = #call lsp_byte_at(%text, %index)
+    %index: #bits<64> = #add(%index, 1)
+    #if #eq(%byte, 10) {
+      %current_line: #bits<64> = #add(%current_line, 1)
+      %current_character: #bits<64> = 0
+    } else {
+      %current_character: #bits<64> = #add(%current_character, 1)
+    }
+    #continue position
+  }
+  #return %index
+}
+
+#proc lsp_replacement_end_line(
+  #addr %text, #bits<64> %length, #bits<64> %start_line
+) -> #bits<64> {
+  #let %line: #bits<64> = %start_line
+  #let %index: #bits<64> = 0
+  #loop replacement_line {
+    #if #ge(%index, %length) { #break replacement_line }
+    #if #eq(#call lsp_byte_at(%text, %index), 10) {
+      %line: #bits<64> = #add(%line, 1)
+    }
+    %index: #bits<64> = #add(%index, 1)
+    #continue replacement_line
+  }
+  #return %line
+}
+
+#proc lsp_replacement_end_character(
+  #addr %text, #bits<64> %length, #bits<64> %start_character
+) -> #bits<64> {
+  #let %column: #bits<64> = %start_character
+  #let %index: #bits<64> = 0
+  #loop replacement_column {
+    #if #ge(%index, %length) { #break replacement_column }
+    #if #eq(#call lsp_byte_at(%text, %index), 10) {
+      %column: #bits<64> = 0
+    } else {
+      %column: #bits<64> = #add(%column, 1)
+    }
+    %index: #bits<64> = #add(%index, 1)
+    #continue replacement_column
+  }
+  #return %column
+}
+
+#proc lsp_document_change_range(
+  #addr %document, #addr %replacement, #bits<64> %replacement_length,
+  #bits<64> %version, #bits<64> %start_line, #bits<64> %start_character,
+  #bits<64> %end_line, #bits<64> %end_character
+) -> #bits<1> {
+  #if #call lsp_document_is_nil(%document) { #return 0 }
+  #let %old_text: #addr = #call lsp_document_text(%document)
+  #let %old_length: #bits<64> = #call lsp_document_length(%document)
+  #call lsp_store64(%document, 216, %old_length)
+  #let %start: #bits<64> = #call lsp_position_offset(%old_text, %old_length, %start_line, %start_character)
+  #let %end: #bits<64> = #call lsp_position_offset(%old_text, %old_length, %end_line, %end_character)
+  #if #lt(%end, %start) { #return 0 }
+  #if #gt(%start, %old_length) { #return 0 }
+  #if #gt(%end, %old_length) { #return 0 }
+  #let %removed: #bits<64> = #sub(%end, %start)
+  #let %new_length: #bits<64> = #add(#sub(%old_length, %removed), %replacement_length)
+  #let %new_text: #addr = #call lsp.allocate(#add(%new_length, 1))
+  #let %index: #bits<64> = 0
+  #loop prefix {
+    #if #ge(%index, %start) { #break prefix }
+    #store[#bits<8>] #call lsp_byte_at(%old_text, %index), #lea(base=%new_text, idx=%index, scale=1, offset=0)
+    %index: #bits<64> = #add(%index, 1)
+    #continue prefix
+  }
+  #let %replacement_index: #bits<64> = 0
+  #loop replacement {
+    #if #ge(%replacement_index, %replacement_length) { #break replacement }
+    #store[#bits<8>] #call lsp_byte_at(%replacement, %replacement_index), #lea(base=%new_text, idx=#add(%start, %replacement_index), scale=1, offset=0)
+    %replacement_index: #bits<64> = #add(%replacement_index, 1)
+    #continue replacement
+  }
+  #let %suffix_index: #bits<64> = %end
+  #loop suffix {
+    #if #ge(%suffix_index, %old_length) { #break suffix }
+    #store[#bits<8>] #call lsp_byte_at(%old_text, %suffix_index), #lea(base=%new_text, idx=#add(%start, #add(%replacement_length, #sub(%suffix_index, %end))), scale=1, offset=0)
+    %suffix_index: #bits<64> = #add(%suffix_index, 1)
+    #continue suffix
+  }
+  #store[#bits<8>] 0, #lea(base=%new_text, idx=%new_length, scale=1, offset=0)
+  #call lsp_store_addr(%document, 16, %new_text)
+  #call lsp_store64(%document, 24, %new_length)
+  #call lsp_store64(%document, 32, %version)
+  #call lsp_store64(%document, 88, 1)
+  #call lsp_store64(%document, 96, %start)
+  #call lsp_store64(%document, 104, #add(%start, %replacement_length))
+  #call lsp_store64(%document, 112, %start)
+  #call lsp_store64(%document, 120, %end)
+  #call lsp_store64(%document, 128, %start_line)
+  #call lsp_store64(%document, 136, %start_character)
+  #call lsp_store64(%document, 144, %end_line)
+  #call lsp_store64(%document, 152, %end_character)
+  #call lsp_store64(%document, 200, #call lsp_replacement_end_line(%replacement, %replacement_length, %start_line))
+  #call lsp_store64(%document, 208, #call lsp_replacement_end_character(%replacement, %replacement_length, %start_character))
+  #call lsp_store64(%document, 224, 1)
+  #call lsp_store64(%document, 160, #add(#call lsp_load64(%document, 160), 1))
+  #return 1
+}
+
+#proc lsp_document_close(#addr %document) -> #bits<1> {
+  #if #call lsp_document_is_nil(%document) { #return 0 }
+  #call lsp_store64(%document, 40, 0)
+  #return 1
+}
+
+// ---------------------------- result models ------------------------------
+// Diagnostic: severity @0, code @8, start_line @16, start_char @24,
+// end_line @32, end_char @40, message @48, message_length @56, next @64.
+#proc lsp_diagnostic_new(#bits<64> %severity, #bits<64> %code, #bits<64> %start_line, #bits<64> %start_char, #bits<64> %end_line, #bits<64> %end_char, #addr %message, #bits<64> %message_length) -> #addr {
+  #let %item: #addr = #call lsp.allocate(72)
+  #call lsp_store64(%item, 0, %severity)
+  #call lsp_store64(%item, 8, %code)
+  #call lsp_store64(%item, 16, %start_line)
+  #call lsp_store64(%item, 24, %start_char)
+  #call lsp_store64(%item, 32, %end_line)
+  #call lsp_store64(%item, 40, %end_char)
+  #call lsp_store_addr(%item, 48, %message)
+  #call lsp_store64(%item, 56, %message_length)
+  #call lsp_store_addr(%item, 64, #call lsp_zero_addr())
+  #return %item
+}
+
+// FormattingEdit: start_line @0, start_char @8, end_line @16,
+// end_char @24, text @32, text_length @40, next @48.
+#proc lsp_format_edit_new(#bits<64> %start_line, #bits<64> %start_char, #bits<64> %end_line, #bits<64> %end_char, #addr %text, #bits<64> %text_length) -> #addr {
+  #let %item: #addr = #call lsp.allocate(56)
+  #call lsp_store64(%item, 0, %start_line)
+  #call lsp_store64(%item, 8, %start_char)
+  #call lsp_store64(%item, 16, %end_line)
+  #call lsp_store64(%item, 24, %end_char)
+  #call lsp_store_addr(%item, 32, %text)
+  #call lsp_store64(%item, 40, %text_length)
+  #call lsp_store_addr(%item, 48, #call lsp_zero_addr())
+  #return %item
+}
+
+// SemanticToken: delta_line @0, delta_start @8, length @16,
+// token_type @24, modifiers @32, next @40.
+#proc lsp_semantic_token_new(#bits<64> %delta_line, #bits<64> %delta_start, #bits<64> %length, #bits<64> %token_type, #bits<64> %modifiers) -> #addr {
+  #let %item: #addr = #call lsp.allocate(48)
+  #call lsp_store64(%item, 0, %delta_line)
+  #call lsp_store64(%item, 8, %delta_start)
+  #call lsp_store64(%item, 16, %length)
+  #call lsp_store64(%item, 24, %token_type)
+  #call lsp_store64(%item, 32, %modifiers)
+  #call lsp_store_addr(%item, 40, #call lsp_zero_addr())
+  #return %item
+}
+
+// --------------------------- JSON-RPC framing -----------------------------
+// Read a Content-Length framed message.  Returns a three-word result: data
+// @0, length @8, present @16.  A zero-present record is the EOF/malformed
+// sentinel, avoiding pointer-vs-bits comparisons in the interpreter.
+#proc lsp_read_message() -> #addr {
+  #let %header: #addr = #call lsp.allocate(4096)
+  #let %count: #bits<64> = 0
+  #loop header {
+    #let %raw: #bits<16> = #call lsp.read-byte()
+    #if #eq(%raw, 256) { #return #call lsp_message_nil() }
+    #if #ge(%count, 4096) { #return #call lsp_message_nil() }
+    #store[#bits<8>] #trunc[#bits<8>](%raw), #lea(base=%header, idx=%count, scale=1, offset=0)
+    %count: #bits<64> = #add(%count, 1)
+    #if #ge(%count, 4) {
+      #let %a: #bits<8> = #call lsp_byte_at(%header, #sub(%count, 4))
+      #let %b: #bits<8> = #call lsp_byte_at(%header, #sub(%count, 3))
+      #let %c: #bits<8> = #call lsp_byte_at(%header, #sub(%count, 2))
+      #let %d: #bits<8> = #call lsp_byte_at(%header, #sub(%count, 1))
+      #if #eq(%a, 13) {
+        #if #eq(%b, 10) {
+          #if #eq(%c, 13) {
+            #if #eq(%d, 10) { #break header }
+          }
+        }
+      }
+    }
+    #continue header
+  }
+  #let %length: #bits<64> = #call lsp_header_length(%header, %count)
+  #if #eq(%length, 0) { #return #call lsp_message_nil() }
+  // Keep a malformed or hostile Content-Length from turning into an
+  // unbounded host allocation.  The protocol loop treats this as a clean
+  // end-of-stream and never emits a partial response frame.
+  #if #gt(%length, 16777216) { #return #call lsp_message_nil() }
+  #let %body: #addr = #call lsp.allocate(#add(%length, 1))
+  #let %index: #bits<64> = 0
+  #loop body {
+    #if #ge(%index, %length) { #break body }
+    #let %raw: #bits<16> = #call lsp.read-byte()
+    #if #eq(%raw, 256) { #return #call lsp_message_nil() }
+    #store[#bits<8>] #trunc[#bits<8>](%raw), #lea(base=%body, idx=%index, scale=1, offset=0)
+    %index: #bits<64> = #add(%index, 1)
+    #continue body
+  }
+  #let %result: #addr = #call lsp.allocate(24)
+  #call lsp_store_addr(%result, 0, %body)
+  #call lsp_store64(%result, 8, %length)
+  #call lsp_store64(%result, 16, 1)
+  #return %result
+}
+
+#proc lsp_header_length(#addr %header, #bits<64> %length) -> #bits<64> {
+  #let %index: #bits<64> = 0
+  #loop scan {
+    #if #ge(%index, %length) { #break scan }
+    #if #call lsp_same(%header, %length, %index, "Content-Length:", 15) {
+      #let %cursor: #bits<64> = #add(%index, 15)
+      #loop spaces {
+        #if #ge(%cursor, %length) { #break spaces }
+        #if #ne(#call lsp_byte_at(%header, %cursor), 32) { #break spaces }
+        %cursor: #bits<64> = #add(%cursor, 1)
+        #continue spaces
+      }
+      #let %value: #bits<64> = 0
+      #let %digits: #bits<64> = 0
+      #loop digits {
+        #if #ge(%cursor, %length) { #break digits }
+        #let %byte: #bits<8> = #call lsp_byte_at(%header, %cursor)
+        #if #lt(%byte, 48) { #break digits }
+        #if #gt(%byte, 57) { #break digits }
+        %value: #bits<64> = #add(#mul(%value, 10), #sub(%byte, 48))
+        %digits: #bits<64> = #add(%digits, 1)
+        %cursor: #bits<64> = #add(%cursor, 1)
+        #continue digits
+      }
+      #if #ne(%digits, 0) { #return %value }
+    }
+    %index: #bits<64> = #add(%index, 1)
+    #continue scan
+  }
+  #return 0
+}
+
+#proc lsp_write_bytes(#addr %data, #bits<64> %length) -> #unit {
+  #let %index: #bits<64> = 0
+  #loop write {
+    #if #ge(%index, %length) { #break write }
+    #call lsp.write-byte(#call lsp_byte_at(%data, %index))
+    %index: #bits<64> = #add(%index, 1)
+    #continue write
+  }
+  #return
+}
+
+#proc lsp_write_literal(#addr %text) -> #unit {
+  // Literals are NUL-terminated by the LAIN-IR compiler data segment.
+  #let %index: #bits<64> = 0
+  #loop literal {
+    #let %byte: #bits<8> = #call lsp_byte_at(%text, %index)
+    #if #eq(%byte, 0) { #break literal }
+    #call lsp.write-byte(%byte)
+    %index: #bits<64> = #add(%index, 1)
+    #continue literal
+  }
+  #return
+}
+
+#proc lsp_write_decimal(#bits<64> %value) -> #unit {
+  #let %buffer: #addr = #call lsp.allocate(32)
+  #let %index: #bits<64> = 31
+  #let %remaining: #bits<64> = %value
+  #store[#bits<8>] 0, #lea(base=%buffer, idx=%index, scale=1, offset=0)
+  #if #eq(%remaining, 0) {
+    #store[#bits<8>] 48, #lea(base=%buffer, idx=30, scale=1, offset=0)
+    #call lsp_write_bytes(#lea(base=%buffer, idx=30, scale=1, offset=0), 1)
+    #return
+  }
+  #loop digits {
+    #if #eq(%remaining, 0) { #break digits }
+    #let %digit: #bits<64> = #sub(%remaining, #mul(#udiv(%remaining, 10), 10))
+    %index: #bits<64> = #sub(%index, 1)
+    #store[#bits<8>] #trunc[#bits<8>](#add(%digit, 48)), #lea(base=%buffer, idx=%index, scale=1, offset=0)
+    %remaining: #bits<64> = #udiv(%remaining, 10)
+    #continue digits
+  }
+  #call lsp_write_bytes(#lea(base=%buffer, idx=%index, scale=1, offset=0), #sub(31, %index))
+  #return
+}
+
+#proc lsp_decimal_length(#bits<64> %value) -> #bits<64> {
+  #if #eq(%value, 0) { #return 1 }
+  #let %remaining: #bits<64> = %value
+  #let %length: #bits<64> = 0
+  #loop decimal_length {
+    #if #eq(%remaining, 0) { #break decimal_length }
+    %remaining: #bits<64> = #udiv(%remaining, 10)
+    %length: #bits<64> = #add(%length, 1)
+    #continue decimal_length
+  }
+  #return %length
+}
+
+#proc lsp_write_json_response(#bits<64> %id, #addr %result) -> #unit {
+  #let %prefix: #addr = "{\"jsonrpc\":\"2.0\",\"id\":"
+  #let %middle: #addr = ",\"result\":"
+  #let %suffix: #addr = "}"
+  #let %body_length: #bits<64> = #add(
+    #add(#call lsp_cstring_length(%prefix), #call lsp_decimal_length(%id)),
+    #add(#call lsp_cstring_length(%middle), #add(#call lsp_cstring_length(%result), 1))
+  )
+  #call lsp_write_literal("Content-Length: ")
+  #call lsp_write_decimal(%body_length)
+  #call lsp.write-byte(13)
+  #call lsp.write-byte(10)
+  #call lsp.write-byte(13)
+  #call lsp.write-byte(10)
+  #call lsp_write_literal(%prefix)
+  #call lsp_write_decimal(%id)
+  #call lsp_write_literal(%middle)
+  #call lsp_write_literal(%result)
+  #call lsp_write_literal(%suffix)
+  #call lsp.flush()
+  #return
+}
+
+#proc lsp_write_invalid_request(#bits<64> %id) -> #unit {
+  #let %prefix: #addr = "{\"jsonrpc\":\"2.0\",\"id\":"
+  #let %middle: #addr = ",\"error\":{\"code\":-32600,\"message\":\"invalid JSON string\"}}"
+  #let %body_length: #bits<64> = #add(
+    #add(#call lsp_cstring_length(%prefix), #call lsp_decimal_length(%id)),
+    #call lsp_cstring_length(%middle)
+  )
+  #call lsp_write_literal("Content-Length: ")
+  #call lsp_write_decimal(%body_length)
+  #call lsp_write_literal("\r\n\r\n")
+  #call lsp_write_literal(%prefix)
+  #call lsp_write_decimal(%id)
+  #call lsp_write_literal(%middle)
+  #call lsp.flush()
+  #return
+}
+
+// --------------------------- JSON request model --------------------------
+// The parser below intentionally handles only the JSON shapes used by LSP.
+// It is still a real parser: whitespace around ':' is accepted, field order
+// does not matter, and strings are copied/unescaped into owned buffers.  The
+// host only supplies bytes; request interpretation stays in LAIN-IR.
+#proc lsp_json_field_start_from(#addr %body, #bits<64> %length, #addr %key, #bits<64> %key_length, #bits<64> %begin) -> #bits<64> {
+  #let %index: #bits<64> = %begin
+  #loop fields {
+    #if #ge(%index, %length) { #break fields }
+    #if #eq(#call lsp_byte_at(%body, %index), 34) {
+      // A JSON field name follows `{` or `,` (possibly after whitespace).
+      // This prevents a string value containing `"uri"` from being treated
+      // as the request's URI field.
+      #let %context: #bits<1> = 0
+      #let %look: #bits<64> = %index
+      #loop field_context {
+        #if #eq(%look, 0) {
+          %context: #bits<1> = 1
+          #break field_context
+        }
+        %look: #bits<64> = #sub(%look, 1)
+        #let %before: #bits<8> = #call lsp_byte_at(%body, %look)
+        #if #ne(%before, 32) {
+          #if #ne(%before, 9) {
+            #if #ne(%before, 10) {
+              #if #ne(%before, 13) {
+                #if #eq(%before, 123) { %context: #bits<1> = 1 }
+                #if #eq(%before, 44) { %context: #bits<1> = 1 }
+                #break field_context
+              }
+            }
+          }
+        }
+        #continue field_context
+      }
+      #if #eq(%context, 0) {
+        %index: #bits<64> = #add(%index, 1)
+        #continue fields
+      }
+      #let %after_key: #bits<64> = #add(#add(%index, 1), %key_length)
+      #if #le(%after_key, %length) {
+        #if #call lsp_same(%body, %length, #add(%index, 1), %key, %key_length) {
+          #if #eq(#call lsp_byte_at(%body, %after_key), 34) {
+            #let %cursor: #bits<64> = #add(%after_key, 1)
+            #loop field_space {
+              #if #ge(%cursor, %length) { #break field_space }
+              #let %space: #bits<8> = #call lsp_byte_at(%body, %cursor)
+              #if #ne(%space, 32) {
+                #if #ne(%space, 9) {
+                  #if #ne(%space, 10) {
+                    #if #ne(%space, 13) { #break field_space }
+                  }
+                }
+              }
+              %cursor: #bits<64> = #add(%cursor, 1)
+              #continue field_space
+            }
+            #if #lt(%cursor, %length) {
+              #if #eq(#call lsp_byte_at(%body, %cursor), 58) {
+                %cursor: #bits<64> = #add(%cursor, 1)
+                #loop value_space {
+                  #if #ge(%cursor, %length) { #break value_space }
+                  #let %space: #bits<8> = #call lsp_byte_at(%body, %cursor)
+                  #if #ne(%space, 32) {
+                    #if #ne(%space, 9) {
+                      #if #ne(%space, 10) {
+                        #if #ne(%space, 13) { #break value_space }
+                      }
+                    }
+                  }
+                  %cursor: #bits<64> = #add(%cursor, 1)
+                  #continue value_space
+                }
+                #return %cursor
+              }
+            }
+          }
+        }
+      }
+    }
+    %index: #bits<64> = #add(%index, 1)
+    #continue fields
+  }
+  #return %length
+}
+
+#proc lsp_json_field_start(#addr %body, #bits<64> %length, #addr %key, #bits<64> %key_length) -> #bits<64> {
+  #return #call lsp_json_field_start_from(%body, %length, %key, %key_length, 0)
+}
+
+#proc lsp_json_string_equals_at(#addr %body, #bits<64> %length, #bits<64> %start, #addr %text, #bits<64> %text_length) -> #bits<1> {
+  #if #ge(%start, %length) { #return 0 }
+  #if #ne(#call lsp_byte_at(%body, %start), 34) { #return 0 }
+  #let %cursor: #bits<64> = #add(%start, 1)
+  #let %index: #bits<64> = 0
+  #loop string_equal {
+    #if #ge(%cursor, %length) { #return 0 }
+    #let %byte: #bits<8> = #call lsp_byte_at(%body, %cursor)
+    #if #eq(%byte, 34) {
+      #if #eq(%index, %text_length) { #return 1 }
+      #return 0
+    }
+    #if #eq(%byte, 92) {
+      %cursor: #bits<64> = #add(%cursor, 1)
+      #if #ge(%cursor, %length) { #return 0 }
+      %byte: #bits<8> = #call lsp_byte_at(%body, %cursor)
+      // The method names used below do not contain escapes.  Rejecting an
+      // escaped method byte avoids accidentally accepting malformed JSON.
+      #return 0
+    }
+    #if #ge(%index, %text_length) { #return 0 }
+    #if #ne(%byte, #call lsp_byte_at(%text, %index)) { #return 0 }
+    %cursor: #bits<64> = #add(%cursor, 1)
+    %index: #bits<64> = #add(%index, 1)
+    #continue string_equal
+  }
+  #return 0
+}
+
+#proc lsp_json_escape_allowed(#bits<8> %byte) -> #bits<1> {
+  #if #eq(%byte, 34) { #return 1 }
+  #if #eq(%byte, 47) { #return 1 }
+  #if #eq(%byte, 92) { #return 1 }
+  #if #eq(%byte, 98) { #return 1 }
+  #if #eq(%byte, 102) { #return 1 }
+  #if #eq(%byte, 110) { #return 1 }
+  #if #eq(%byte, 114) { #return 1 }
+  #if #eq(%byte, 116) { #return 1 }
+  #return 0
+}
+
+// Validate a JSON string without decoding it.  In particular, reject \u
+// escapes for now instead of silently turning them into the letter `u`.
+#proc lsp_json_string_valid_at(#addr %body, #bits<64> %length, #bits<64> %start) -> #bits<1> {
+  #if #ge(%start, %length) { #return 0 }
+  #if #ne(#call lsp_byte_at(%body, %start), 34) { #return 0 }
+  #let %cursor: #bits<64> = #add(%start, 1)
+  #loop string_valid {
+    #if #ge(%cursor, %length) { #return 0 }
+    #let %byte: #bits<8> = #call lsp_byte_at(%body, %cursor)
+    #if #eq(%byte, 34) { #return 1 }
+    #if #lt(%byte, 32) { #return 0 }
+    #if #eq(%byte, 92) {
+      %cursor: #bits<64> = #add(%cursor, 1)
+      #if #ge(%cursor, %length) { #return 0 }
+      #if #eq(#call lsp_json_escape_allowed(#call lsp_byte_at(%body, %cursor)), 0) {
+        #return 0
+      }
+    }
+    %cursor: #bits<64> = #add(%cursor, 1)
+    #continue string_valid
+  }
+  #return 0
+}
+
+#proc lsp_json_string_copy_at(#addr %body, #bits<64> %length, #bits<64> %start) -> #addr {
+  #let %out: #addr = #call lsp.allocate(#add(#sub(%length, %start), 1))
+  #let %cursor: #bits<64> = #add(%start, 1)
+  #let %index: #bits<64> = 0
+  #if #ge(%start, %length) {
+    #store[#bits<8>] 0, %out
+    #return %out
+  }
+  #loop string_copy {
+    #if #ge(%cursor, %length) { #break string_copy }
+    #let %byte: #bits<8> = #call lsp_byte_at(%body, %cursor)
+    #if #eq(%byte, 34) { #break string_copy }
+    #if #eq(%byte, 92) {
+      %cursor: #bits<64> = #add(%cursor, 1)
+      #if #ge(%cursor, %length) { #break string_copy }
+      %byte: #bits<8> = #call lsp_byte_at(%body, %cursor)
+      #if #eq(%byte, 110) { %byte: #bits<8> = 10 }
+      #if #eq(%byte, 114) { %byte: #bits<8> = 13 }
+      #if #eq(%byte, 116) { %byte: #bits<8> = 9 }
+      #if #eq(%byte, 34) { %byte: #bits<8> = 34 }
+      #if #eq(%byte, 92) { %byte: #bits<8> = 92 }
+    }
+    #store[#bits<8>] %byte, #lea(base=%out, idx=%index, scale=1, offset=0)
+    %index: #bits<64> = #add(%index, 1)
+    %cursor: #bits<64> = #add(%cursor, 1)
+    #continue string_copy
+  }
+  #store[#bits<8>] 0, #lea(base=%out, idx=%index, scale=1, offset=0)
+  #return %out
+}
+
+#proc lsp_json_string_field(#addr %body, #bits<64> %length, #addr %key, #bits<64> %key_length) -> #addr {
+  #return #call lsp_json_string_copy_at(%body, %length, #call lsp_json_field_start(%body, %length, %key, %key_length))
+}
+
+#proc lsp_json_number_field(#addr %body, #bits<64> %length, #addr %key, #bits<64> %key_length) -> #bits<64> {
+  #let %cursor: #bits<64> = #call lsp_json_field_start(%body, %length, %key, %key_length)
+  #if #ge(%cursor, %length) { #return 0 }
+  #let %value: #bits<64> = 0
+  #let %digits: #bits<64> = 0
+  #loop number {
+    #if #ge(%cursor, %length) { #break number }
+    #let %byte: #bits<8> = #call lsp_byte_at(%body, %cursor)
+    #if #lt(%byte, 48) { #break number }
+    #if #gt(%byte, 57) { #break number }
+    %value: #bits<64> = #add(#mul(%value, 10), #sub(%byte, 48))
+    %digits: #bits<64> = #add(%digits, 1)
+    %cursor: #bits<64> = #add(%cursor, 1)
+    #continue number
+  }
+  #return %value
+}
+
+#proc lsp_json_number_field_from(
+  #addr %body, #bits<64> %length, #addr %key, #bits<64> %key_length,
+  #bits<64> %begin
+) -> #bits<64> {
+  #let %cursor: #bits<64> = #call lsp_json_field_start_from(
+    %body, %length, %key, %key_length, %begin
+  )
+  #if #ge(%cursor, %length) { #return 0 }
+  #let %value: #bits<64> = 0
+  #loop number_from {
+    #if #ge(%cursor, %length) { #break number_from }
+    #let %byte: #bits<8> = #call lsp_byte_at(%body, %cursor)
+    #if #lt(%byte, 48) { #break number_from }
+    #if #gt(%byte, 57) { #break number_from }
+    %value: #bits<64> = #add(#mul(%value, 10), #sub(%byte, 48))
+    %cursor: #bits<64> = #add(%cursor, 1)
+    #continue number_from
+  }
+  #return %value
+}
+
+#proc lsp_json_range_number(#addr %body, #bits<64> %length, #addr %side, #bits<64> %side_length, #addr %key, #bits<64> %key_length) -> #bits<64> {
+  #let %range: #bits<64> = #call lsp_json_field_start(%body, %length, "range", 5)
+  #if #ge(%range, %length) { #return 0 }
+  #let %side_start: #bits<64> = #call lsp_json_field_start_from(
+    %body, %length, %side, %side_length, %range
+  )
+  #if #ge(%side_start, %length) { #return 0 }
+  #return #call lsp_json_number_field_from(
+    %body, %length, %key, %key_length, %side_start
+  )
+}
+
+#proc lsp_json_has_range(#addr %body, #bits<64> %length) -> #bits<1> {
+  #let %range: #bits<64> = #call lsp_json_field_start(%body, %length, "range", 5)
+  #if #ge(%range, %length) { #return 0 }
+  #return 1
+}
+
+// Method classification: 1 initialize, 2 shutdown, 3 formatting,
+// 4 semantic tokens, 5 didOpen, 6 didChange, 7 didClose, 0 unknown.
+#proc lsp_method_kind(#addr %body, #bits<64> %length) -> #bits<64> {
+  #let %method: #bits<64> = #call lsp_json_field_start(%body, %length, "method", 6)
+  #if #call lsp_json_string_equals_at(%body, %length, %method, "initialize", 10) { #return 1 }
+  #if #call lsp_json_string_equals_at(%body, %length, %method, "shutdown", 8) { #return 2 }
+  #if #call lsp_json_string_equals_at(%body, %length, %method, "textDocument/formatting", 23) { #return 3 }
+  #if #call lsp_json_string_equals_at(%body, %length, %method, "textDocument/semanticTokens/full", 32) { #return 4 }
+  #if #call lsp_json_string_equals_at(%body, %length, %method, "textDocument/didOpen", 20) { #return 5 }
+  #if #call lsp_json_string_equals_at(%body, %length, %method, "textDocument/didChange", 22) { #return 6 }
+  #if #call lsp_json_string_equals_at(%body, %length, %method, "textDocument/didClose", 21) { #return 7 }
+  #return 0
+}
+
+// Request: id @0, method @8, uri @16, uri_length @24, text @32,
+// text_length @40, version @48, malformed @56, has_range @64,
+// start_line @72, start_character @80, end_line @88, end_character @96.
+// All string pointers reference owned, NUL-terminated buffers, so document
+// notifications can update the store.
+#proc lsp_request_parse(#addr %body, #bits<64> %length) -> #addr {
+  #let %request: #addr = #call lsp.allocate(112)
+  #call lsp_store64(%request, 56, 0)
+  #call lsp_store64(%request, 64, 0)
+  #call lsp_store64(%request, 72, 0)
+  #call lsp_store64(%request, 80, 0)
+  #call lsp_store64(%request, 88, 0)
+  #call lsp_store64(%request, 96, 0)
+  #call lsp_store64(%request, 0, #call lsp_json_number_field(%body, %length, "id", 2))
+  #call lsp_store64(%request, 8, #call lsp_method_kind(%body, %length))
+  #let %method_start: #bits<64> = #call lsp_json_field_start(%body, %length, "method", 6)
+  #if #ge(%method_start, %length) { #call lsp_store64(%request, 56, 1) }
+  #if #lt(%method_start, %length) {
+    #if #eq(#call lsp_json_string_valid_at(%body, %length, %method_start), 0) {
+      #call lsp_store64(%request, 56, 1)
+    }
+  }
+  #let %uri_start: #bits<64> = #call lsp_json_field_start(%body, %length, "uri", 3)
+  #if #lt(%uri_start, %length) {
+    #if #eq(#call lsp_json_string_valid_at(%body, %length, %uri_start), 0) {
+      #call lsp_store64(%request, 56, 1)
+    }
+  }
+  #let %uri: #addr = #call lsp_json_string_copy_at(%body, %length, %uri_start)
+  #call lsp_store_addr(%request, 16, %uri)
+  #call lsp_store64(%request, 24, #call lsp_cstring_length(%uri))
+  #let %text_start: #bits<64> = #call lsp_json_field_start(%body, %length, "text", 4)
+  #if #lt(%text_start, %length) {
+    #if #eq(#call lsp_json_string_valid_at(%body, %length, %text_start), 0) {
+      #call lsp_store64(%request, 56, 1)
+    }
+  }
+  #let %text: #addr = #call lsp_json_string_copy_at(%body, %length, %text_start)
+  #call lsp_store_addr(%request, 32, %text)
+  #call lsp_store64(%request, 40, #call lsp_cstring_length(%text))
+  #call lsp_store64(%request, 48, #call lsp_json_number_field(%body, %length, "version", 7))
+  #if #eq(#call lsp_request_kind(%request), 6) {
+    #if #call lsp_json_has_range(%body, %length) {
+      #call lsp_store64(%request, 64, 1)
+      #call lsp_store64(%request, 72, #call lsp_json_range_number(%body, %length, "start", 5, "line", 4))
+      #call lsp_store64(%request, 80, #call lsp_json_range_number(%body, %length, "start", 5, "character", 9))
+      #call lsp_store64(%request, 88, #call lsp_json_range_number(%body, %length, "end", 3, "line", 4))
+      #call lsp_store64(%request, 96, #call lsp_json_range_number(%body, %length, "end", 3, "character", 9))
+    }
+  }
+  #return %request
+}
+
+#proc lsp_request_id(#addr %request) -> #bits<64> { #return #call lsp_load64(%request, 0) }
+#proc lsp_request_kind(#addr %request) -> #bits<64> { #return #call lsp_load64(%request, 8) }
+#proc lsp_request_uri(#addr %request) -> #addr { #return #call lsp_load_addr(%request, 16) }
+#proc lsp_request_uri_length(#addr %request) -> #bits<64> { #return #call lsp_load64(%request, 24) }
+#proc lsp_request_text(#addr %request) -> #addr { #return #call lsp_load_addr(%request, 32) }
+#proc lsp_request_text_length(#addr %request) -> #bits<64> { #return #call lsp_load64(%request, 40) }
+#proc lsp_request_version(#addr %request) -> #bits<64> { #return #call lsp_load64(%request, 48) }
+#proc lsp_request_has_range(#addr %request) -> #bits<1> {
+  #return #ne(#call lsp_load64(%request, 64), 0)
+}
+#proc lsp_request_start_line(#addr %request) -> #bits<64> { #return #call lsp_load64(%request, 72) }
+#proc lsp_request_start_character(#addr %request) -> #bits<64> { #return #call lsp_load64(%request, 80) }
+#proc lsp_request_end_line(#addr %request) -> #bits<64> { #return #call lsp_load64(%request, 88) }
+#proc lsp_request_end_character(#addr %request) -> #bits<64> { #return #call lsp_load64(%request, 96) }
+#proc lsp_request_malformed(#addr %request) -> #bits<1> {
+  #return #ne(#call lsp_load64(%request, 56), 0)
+}
+
+// Protocol loop.  Every response uses the numeric request id parsed from
+// that message.  Notifications update the document store and emit no reply.
+#proc lsp_run() -> #bits<32> {
+  #let %documents: #addr = #call lsp_documents_new()
+  #loop server {
+    #let %message: #addr = #call lsp_read_message()
+    #if #call lsp_message_is_nil(%message) { #break server }
+    #let %body: #addr = #call lsp_load_addr(%message, 0)
+    #let %length: #bits<64> = #call lsp_load64(%message, 8)
+    #let %request: #addr = #call lsp_request_parse(%body, %length)
+    #let %method: #bits<64> = #call lsp_request_kind(%request)
+    #let %id: #bits<64> = #call lsp_request_id(%request)
+    #if #call lsp_request_malformed(%request) {
+      #call lsp_write_invalid_request(%id)
+      #continue server
+    }
+    #if #eq(%method, 1) {
+      #call lsp_write_json_response(%id, "{\"capabilities\":{\"documentFormattingProvider\":true,\"semanticTokensProvider\":{\"full\":true,\"legend\":{\"tokenTypes\":[\"comment\",\"string\",\"number\",\"directive\",\"variable\",\"operator\",\"punctuation\",\"invalid\",\"keyword\",\"type\",\"function\",\"property\"],\"tokenModifiers\":[]}}}}")
+    }
+    #if #eq(%method, 2) {
+      #call lsp_write_json_response(%id, "null")
+      #break server
+    }
+    #if #eq(%method, 3) {
+      #let %document: #addr = #call lsp_document_find(%documents, #call lsp_request_uri(%request), #call lsp_request_uri_length(%request))
+      #if #eq(#call lsp_document_is_nil(%document), 0) {
+        #call lsp_write_publish_diagnostics(%document, #call lsp_tools_prepare_document(%document))
+      }
+      #call lsp_write_formatting_response(%id, %document)
+    }
+    #if #eq(%method, 4) {
+      #let %document: #addr = #call lsp_document_find(%documents, #call lsp_request_uri(%request), #call lsp_request_uri_length(%request))
+      #if #eq(#call lsp_document_is_nil(%document), 0) {
+        #call lsp_write_publish_diagnostics(%document, #call lsp_tools_prepare_document(%document))
+      }
+      #call lsp_write_semantic_tokens_response(%id, %document)
+    }
+    #if #eq(%method, 5) {
+      #let %document: #addr = #call lsp_document_open(%documents, #call lsp_request_uri(%request), #call lsp_request_text(%request), #call lsp_request_text_length(%request), #call lsp_request_version(%request))
+      #call lsp_write_publish_diagnostics(%document, #call lsp_tools_prepare_document(%document))
+    }
+    #if #eq(%method, 6) {
+      #let %document: #addr = #call lsp_document_find(%documents, #call lsp_request_uri(%request), #call lsp_request_uri_length(%request))
+      #if #call lsp_request_has_range(%request) {
+        #call lsp_document_change_range(
+          %document, #call lsp_request_text(%request), #call lsp_request_text_length(%request),
+          #call lsp_request_version(%request),
+          #call lsp_request_start_line(%request), #call lsp_request_start_character(%request),
+          #call lsp_request_end_line(%request), #call lsp_request_end_character(%request)
+        )
+      } else {
+        #call lsp_document_change(%document, #call lsp_request_text(%request), #call lsp_request_text_length(%request), #call lsp_request_version(%request))
+      }
+      #if #eq(#call lsp_document_is_nil(%document), 0) {
+        #call lsp_write_publish_diagnostics(%document, #call lsp_tools_prepare_document(%document))
+      }
+    }
+    #if #eq(%method, 7) {
+      #let %document: #addr = #call lsp_document_find(%documents, #call lsp_request_uri(%request), #call lsp_request_uri_length(%request))
+      #call lsp_document_close(%document)
+    }
+    %documents: #addr = %documents
+    #continue server
+  }
+  #return 0
+}

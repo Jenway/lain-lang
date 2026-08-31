@@ -1,0 +1,234 @@
+// Semantic highlight extraction for LAIN-IR.
+//
+// This module consumes the lossless token/trivia records from source.l1.  It
+// does not inspect or rewrite source bytes, so editor clients can use the
+// returned spans directly and still retain comments and original spelling.
+
+#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+
+#extern #proc tool_source_nil(addr %source) -> addr;
+#extern #proc tool_source_data(addr %source) -> addr;
+#extern #proc tool_is_nil(addr %source, addr %value) -> i1;
+#extern #proc tool_token_kind(addr %token) -> i32;
+#extern #proc tool_token_start(addr %token) -> i64;
+#extern #proc tool_token_length(addr %token) -> i64;
+#extern #proc tool_token_line(addr %token) -> i64;
+#extern #proc tool_token_column(addr %token) -> i64;
+#extern #proc tool_token_leading_trivia(addr %token) -> addr;
+#extern #proc tool_token_next(addr %token) -> addr;
+#extern #proc tool_trivia_kind(addr %trivia) -> i32;
+#extern #proc tool_trivia_start(addr %trivia) -> i64;
+#extern #proc tool_trivia_length(addr %trivia) -> i64;
+#extern #proc tool_trivia_line(addr %trivia) -> i64;
+#extern #proc tool_trivia_column(addr %trivia) -> i64;
+#extern #proc tool_trivia_next(addr %trivia) -> addr;
+
+// Highlight categories: 1 comment, 2 string, 3 number, 4 unknown directive,
+// 5 identifier, 6 operator, 7 punctuation, 8 invalid, 9 keyword, 10 type,
+// 11 function, 12 field.
+
+// Highlight item layout: category i32 @0, modifiers i32 @4, start i64 @8,
+// length i64 @16, line i64 @24, column i64 @32, next addr @40.
+#proc tool_highlight_new(
+  addr %source, i32 %category, i32 %modifiers,
+  i64 %start, i64 %length, i64 %line, i64 %column
+) -> addr {
+  #let %item: addr = #call bootstrap.allocate-pages(48)
+  #store %category, #lea(base=%item, idx=0, scale=0, offset=0)
+  #store %modifiers, #lea(base=%item, idx=0, scale=0, offset=4)
+  #store %start, #lea(base=%item, idx=0, scale=0, offset=8)
+  #store %length, #lea(base=%item, idx=0, scale=0, offset=16)
+  #store %line, #lea(base=%item, idx=0, scale=0, offset=24)
+  #store %column, #lea(base=%item, idx=0, scale=0, offset=32)
+  #store #call tool_source_nil(%source), #lea(base=%item, idx=0, scale=0, offset=40)
+  #return %item
+}
+
+#proc tool_highlight_link(addr %last, addr %next) -> #unit {
+  #store %next, #lea(base=%last, idx=0, scale=0, offset=40)
+  #return
+}
+
+#proc tool_highlight_category(addr %item) -> i32 {
+  #return #load[i32](#lea(base=%item, idx=0, scale=0, offset=0))
+}
+
+#proc tool_highlight_modifiers(addr %item) -> i32 {
+  #return #load[i32](#lea(base=%item, idx=0, scale=0, offset=4))
+}
+
+#proc tool_highlight_start(addr %item) -> i64 {
+  #return #load[i64](#lea(base=%item, idx=0, scale=0, offset=8))
+}
+
+#proc tool_highlight_length(addr %item) -> i64 {
+  #return #load[i64](#lea(base=%item, idx=0, scale=0, offset=16))
+}
+
+#proc tool_highlight_line(addr %item) -> i64 {
+  #return #load[i64](#lea(base=%item, idx=0, scale=0, offset=24))
+}
+
+#proc tool_highlight_column(addr %item) -> i64 {
+  #return #load[i64](#lea(base=%item, idx=0, scale=0, offset=32))
+}
+
+#proc tool_highlight_next(addr %item) -> addr {
+  #return #load[addr](#lea(base=%item, idx=0, scale=0, offset=40))
+}
+
+#proc tool_highlight_kind_from_token(i32 %kind) -> i32 {
+  #if #eq(%kind, 1) { #return 5 }
+  #if #eq(%kind, 2) { #return 3 }
+  #if #eq(%kind, 3) { #return 2 }
+  #if #eq(%kind, 4) { #return 4 }
+  #if #eq(%kind, 5) { #return 7 }
+  #if #eq(%kind, 6) { #return 6 }
+  #if #eq(%kind, 7) { #return 8 }
+  #return 0
+}
+
+#proc tool_highlight_byte_at(addr %data, i64 %index) -> i8 {
+  #return #load[i8](#lea(base=%data, idx=%index, scale=1, offset=0))
+}
+
+#proc tool_highlight_text_is(
+  addr %source, addr %token, addr %text, i64 %text_length
+) -> i1 {
+  #if #ne(#call tool_token_length(%token), %text_length) { #return 0 }
+  #let %data: addr = #call tool_source_data(%source)
+  #let %start: i64 = #call tool_token_start(%token)
+  #let %index: i64 = 0
+  #loop compare {
+    #if #ge(%index, %text_length) { #break compare }
+    #if #ne(
+      #call tool_highlight_byte_at(%data, #add(%start, %index)),
+      #call tool_highlight_byte_at(%text, %index)
+    ) { #return 0 }
+    %index: i64 = #add(%index, 1)
+    #continue compare
+  }
+  #return 1
+}
+
+#proc tool_highlight_next_is_colon(addr %source, addr %token) -> i1 {
+  #let %next: addr = #call tool_token_next(%token)
+  #if #call tool_is_nil(%source, %next) { #return 0 }
+  #if #ne(#call tool_token_kind(%next), 5) { #return 0 }
+  #let %data: addr = #call tool_source_data(%source)
+  #return #eq(
+    #call tool_highlight_byte_at(%data, #call tool_token_start(%next)), 58
+  )
+}
+
+#proc tool_highlight_is_type_name(addr %source, addr %token) -> i1 {
+  #if #call tool_highlight_text_is(%source, %token, "#bits", 5) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#addr", 5) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#unit", 5) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#bool", 5) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#i8", 3) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#i16", 4) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#i32", 4) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#i64", 4) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "bits", 4) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "addr", 4) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "unit", 4) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "bool", 4) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "i8", 2) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "i16", 3) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "i32", 3) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "i64", 3) { #return 1 }
+  #return 0
+}
+
+#proc tool_highlight_is_keyword_directive(addr %source, addr %token) -> i1 {
+  #if #call tool_highlight_text_is(%source, %token, "#proc", 5) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#extern", 7) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#let", 4) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#if", 3) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#else", 5) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#loop", 5) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#break", 6) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#continue", 9) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#return", 7) { #return 1 }
+  #if #call tool_highlight_text_is(%source, %token, "#call", 5) { #return 1 }
+  #return 0
+}
+
+#proc tool_highlight_semantic_category(
+  addr %source, addr %token, i1 %expect_function
+) -> i32 {
+  #let %kind: i32 = #call tool_token_kind(%token)
+  #if #eq(%kind, 4) {
+    #if #call tool_highlight_is_type_name(%source, %token) { #return 10 }
+    #if #call tool_highlight_is_keyword_directive(%source, %token) { #return 9 }
+    #return 4
+  }
+  #if #eq(%kind, 1) {
+    #if #eq(%expect_function, 1) { #return 11 }
+    #if #call tool_highlight_is_type_name(%source, %token) { #return 10 }
+    #if #call tool_highlight_next_is_colon(%source, %token) { #return 12 }
+  }
+  #return #call tool_highlight_kind_from_token(%kind)
+}
+
+// Build a linked semantic-span list.  Leading trivia is emitted before its
+// token, preserving source order for comments and whitespace-adjacent code.
+#proc tool_highlight_collect(addr %source, addr %tokens) -> addr {
+  #let %nil: addr = #call tool_source_nil(%source)
+  #let %first: addr = %nil
+  #let %last: addr = %nil
+  #let %token: addr = %tokens
+  #let %expect_function: i1 = 0
+  #loop highlights {
+    #if #call tool_is_nil(%source, %token) { #break highlights }
+
+    #let %trivia: addr = #call tool_token_leading_trivia(%token)
+    #loop trivia {
+      #if #call tool_is_nil(%source, %trivia) { #break trivia }
+      #if #ne(#call tool_trivia_kind(%trivia), 1) {
+        #let %comment: addr = #call tool_highlight_new(
+          %source, 1, 0,
+          #call tool_trivia_start(%trivia),
+          #call tool_trivia_length(%trivia),
+          #call tool_trivia_line(%trivia),
+          #call tool_trivia_column(%trivia)
+        )
+        #if #call tool_is_nil(%source, %first) {
+          %first: addr = %comment
+        } else {
+          #call tool_highlight_link(%last, %comment)
+        }
+        %last: addr = %comment
+      }
+      %trivia: addr = #call tool_trivia_next(%trivia)
+      #continue trivia
+    }
+
+    #let %kind: i32 = #call tool_token_kind(%token)
+    #if #eq(%kind, 0) { #break highlights }
+    #let %category: i32 = #call tool_highlight_semantic_category(
+      %source, %token, %expect_function
+    )
+    #let %item: addr = #call tool_highlight_new(
+      %source, %category, 0,
+      #call tool_token_start(%token),
+      #call tool_token_length(%token),
+      #call tool_token_line(%token),
+      #call tool_token_column(%token)
+    )
+    #if #call tool_is_nil(%source, %first) {
+      %first: addr = %item
+    } else {
+      #call tool_highlight_link(%last, %item)
+    }
+    %last: addr = %item
+    %expect_function: i1 = 0
+    #if #call tool_highlight_text_is(%source, %token, "#proc", 5) {
+      %expect_function: i1 = 1
+    }
+    %token: addr = #call tool_token_next(%token)
+    #continue highlights
+  }
+  #return %first
+}
