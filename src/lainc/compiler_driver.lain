@@ -1,0 +1,101 @@
+// The compiler driver installs platform handlers outside compiler core.
+
+let effects: Module = import("std::effect");
+let memory_model: Module = import("std::memory_model");
+let vector: Module = import("std::core::vec");
+let slice: Module = import("std::core::slice");
+let source: Module = import("std::core::source");
+let platform: Module = import("std::platform::api");
+let compiler_core: Module =
+    import("packages::lain::compiler::compiler_core");
+
+@export
+let compiler_driver: Module = std::module {
+    @export
+    let Driver = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let Platform: Module = platform.API(Memory);
+        let Compiler: Module = compiler_core.Compiler(Memory);
+        let SourceBuffer: type = source.SourceBuffer(Memory);
+        let SourceVector: type = vector.Vec(
+            SourceBuffer,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+        let PathSlice: type = slice.Slice(
+            Memory.String,
+            Memory.Bounds,
+        );
+
+        let Request: type = std::struct {
+            source_paths: PathSlice,
+            artifact_path: Memory.String,
+            root_module: Memory.String,
+            options: Compiler.CompileOptions,
+        };
+
+        let write_diagnostics = std::func(
+            diagnostics,
+        ) -> unit ! {
+            Memory.Bounds.Effect,
+            Platform.ConsoleWrite,
+        } {
+            let index: usize = 0;
+            while index < diagnostics.length() {
+                let item = diagnostics.get(index);
+                perform Platform.write_console(&item.message);
+                index = index + 1;
+            }
+        };
+
+        let Namespace: Module = std::module {
+            @export
+            let Request: type = Request;
+
+            @export
+            let run = std::func(
+                request: Request,
+            ) -> i32 ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+                Platform.SourceRead,
+                Platform.ArtifactWrite,
+                Platform.ConsoleWrite,
+            } {
+                let sources: SourceVector = SourceVector.new();
+                let index: usize = 0;
+
+                while index < request.source_paths.length {
+                    let path: &Memory.String =
+                        request.source_paths.get(index);
+                    SourceVector.push(
+                        &mut sources,
+                        perform Platform.read_source(path),
+                    );
+                    index = index + 1;
+                }
+
+                let result: Compiler.CompileResult =
+                    Compiler.compile(Compiler.CompileRequest {
+                        sources: SourceVector.as_slice(),
+                        root_module: request.root_module,
+                        options: request.options,
+                    });
+
+                if result.status != 0 {
+                    write_diagnostics(&result.diagnostics);
+                    return 1;
+                }
+
+                perform Platform.write_artifact(
+                    &request.artifact_path,
+                    &result.artifact,
+                );
+                return 0;
+            };
+        };
+
+        return Namespace;
+    };
+};
