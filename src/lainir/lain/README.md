@@ -70,6 +70,10 @@ struct, record, and type status recognition is supplied by bootstrap-stdlib
 procedures; import/eval/call lowering is still a core implementation scheduled
 for migration.
 
+`eval_result.l1` is the shared result ABI for compile-time evaluation.  It keeps
+the scalar/object kind and resource owner in one layout; the evaluator and Meta
+passes use the owner transfer helpers instead of inventing a second result record.
+
 The evaluator currently handles left-associative integer `+`, `-`, `*`, and
 `/`, returning a phase diagnostic for unsupported syntax or division by zero.
 

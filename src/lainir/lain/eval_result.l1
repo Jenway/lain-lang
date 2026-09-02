@@ -1,0 +1,94 @@
+// Typed EvalResult ABI shared by the bootstrap evaluator and Meta passes.
+//
+// EvalResult: status @0, kind @4, scalar value @8, object handle @16,
+// resource owner @24.  The owner is an ABI handle, not a language-level
+// ownership or borrow-checking construct.
+// Kind 0 is a scalar; 1 is an unclassified Meta value; 2 is a type;
+// 3 is a module; 4 is an AST/syntax value.  Status 0 means success.
+
+#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+#extern #proc meta_value_kind(addr %value) -> i32;
+
+#proc eval_result_new_owned(
+  i32 %status, i64 %value, addr %owner
+) -> addr {
+  #let %result: addr = #call bootstrap.allocate-pages(32)
+  #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
+  #store 0, #lea(base=%result, idx=0, scale=0, offset=4)
+  #store %value, #lea(base=%result, idx=0, scale=0, offset=8)
+  #store 0, #lea(base=%result, idx=0, scale=0, offset=16)
+  #store %owner, #lea(base=%result, idx=0, scale=0, offset=24)
+  #return %result
+}
+
+#proc eval_result_new(i32 %status, i64 %value) -> addr {
+  #return #call eval_result_new_owned(%status, %value, #int2ptr(0))
+}
+
+#proc eval_result_object_owned(
+  i32 %status, addr %object, addr %owner
+) -> addr {
+  #let %result: addr = #call bootstrap.allocate-pages(32)
+  #let %meta_kind: i32 = #call meta_value_kind(%object)
+  #let %kind: i32 = 1
+  #if #eq(%meta_kind, 4) { %kind: i32 = 2 }
+  #if #eq(%meta_kind, 2) { %kind: i32 = 3 }
+  #if #eq(%meta_kind, 5) { %kind: i32 = 4 }
+  #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
+  #store %kind, #lea(base=%result, idx=0, scale=0, offset=4)
+  #store 0, #lea(base=%result, idx=0, scale=0, offset=8)
+  #store %object, #lea(base=%result, idx=0, scale=0, offset=16)
+  #store %owner, #lea(base=%result, idx=0, scale=0, offset=24)
+  #return %result
+}
+
+#proc eval_result_object(i32 %status, addr %object) -> addr {
+  #return #call eval_result_object_owned(%status, %object, #int2ptr(0))
+}
+
+#proc eval_status(addr %result) -> i32 {
+  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=0))
+}
+
+#proc eval_value(addr %result) -> i64 {
+  #return #load[i64](#lea(base=%result, idx=0, scale=0, offset=8))
+}
+
+#proc eval_result_is_object(addr %result) -> i1 {
+  #return #ne(#load[i32](#lea(base=%result, idx=0, scale=0, offset=4)), 0)
+}
+
+#proc eval_result_kind(addr %result) -> i32 {
+  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=4))
+}
+
+#proc eval_object(addr %result) -> addr {
+  #return #load[addr](#lea(base=%result, idx=0, scale=0, offset=16))
+}
+
+#proc eval_result_owner(addr %result) -> addr {
+  #return #load[addr](#lea(base=%result, idx=0, scale=0, offset=24))
+}
+
+#proc eval_result_set_owner(addr %result, addr %owner) -> #unit {
+  #store %owner, #lea(base=%result, idx=0, scale=0, offset=24)
+  #return
+}
+
+#proc eval_result_owner_matches_owner(
+  addr %result, addr %owner
+) -> i1 {
+  #return #eq(
+    #ptr2int(#call eval_result_owner(%result)), #ptr2int(%owner)
+  )
+}
+
+#proc eval_result_transfer_owner(
+  addr %result, addr %from_owner, addr %to_owner
+) -> i1 {
+  #if #eq(#call eval_result_owner_matches_owner(%result, %from_owner), 0) {
+    #return 0
+  }
+  #call eval_result_set_owner(%result, %to_owner)
+  #return 1
+}

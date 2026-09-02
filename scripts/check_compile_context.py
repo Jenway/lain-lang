@@ -14,6 +14,7 @@ SEED = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
 CONTEXT = ROOT / "src" / "lainir" / "lain" / "compiler_context.l1"
+EVAL = ROOT / "src" / "lainir" / "lain" / "eval_result.l1"
 
 TEST = r'''
 #proc main() -> #bits<32> {
@@ -80,18 +81,50 @@ TEST = r'''
   ), 1) {
     #return 110
   }
+  #let %eval_result: addr = #call eval_result_new_owned(
+    0, 42, %owner_a
+  )
+  #if #eq(#call eval_result_owner_matches_owner(
+    %eval_result, %owner_a
+  ), 0) {
+    #return 120
+  }
+  #if #eq(#call eval_result_transfer_owner(
+    %eval_result, %owner_a, %owner_b
+  ), 0) {
+    #return 121
+  }
+  #if #eq(#call eval_result_owner_matches_owner(
+    %eval_result, %owner_b
+  ), 0) {
+    #return 122
+  }
+  #if #eq(#call eval_result_transfer_owner(
+    %eval_result, %owner_a, %owner_a
+  ), 1) {
+    #return 123
+  }
   #return 0
 }
 '''
 
 
 def main() -> int:
-    if not SEED.is_file() or not CONTEXT.is_file():
-        raise SystemExit("compile context check: seed or context source missing")
+    if not SEED.is_file() or not CONTEXT.is_file() or not EVAL.is_file():
+        raise SystemExit("compile context check: seed, context, or eval source missing")
     with tempfile.TemporaryDirectory(prefix="lain-context-contract-") as directory:
         source = Path(directory) / "context_test.l1"
+        eval_source = EVAL.read_text(encoding="utf-8").replace(
+            "#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;\n",
+            "",
+            1,
+        )
         source.write_text(
-            CONTEXT.read_text(encoding="utf-8") + "\n" + TEST,
+            CONTEXT.read_text(encoding="utf-8")
+            + "\n"
+            + eval_source
+            + "\n"
+            + TEST,
             encoding="utf-8",
             newline="\n",
         )

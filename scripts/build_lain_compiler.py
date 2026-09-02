@@ -36,6 +36,7 @@ CORE_MODULES = (
 )
 BOOTSTRAP_STD_MODULES = (
     ROOT / "src" / "lainir" / "bootstrap_std" / "core_eval_contracts.l1",
+    ROOT / "src" / "lainir" / "lain" / "eval_result.l1",
     # Compile-time expression evaluation is a standard-library capability.
     # Keep its implementation out of compiler core; the core only consumes
     # the declarations in core_eval_contracts.l1 and dispatches the pass.
