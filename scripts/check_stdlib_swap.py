@@ -154,6 +154,65 @@ def main() -> int:
                 + owner_diagnostics.strip()
             )
 
+        # A pass must also be rejected when it returns no result handle at
+        # all.  The compiler boundary checks the pointer before reading the
+        # versioned pass-result record and turns this into 5202.
+        nil_expand = (
+            "#proc lain_std_expand(\n"
+            "  addr %context, addr %source_unit, addr %root\n"
+            ") -> addr {\n"
+            "  #return #call lain_ast_v1_nil()\n"
+            "}\n\n"
+        )
+        nil_std = work / "bootstrap_std_null_expand.l1"
+        nil_compiler = work / "compiler_null_expand.l1"
+        nil_output = work / "null_expand_output.l1"
+        nil_std.write_text(
+            stdlib[:expand_start] + nil_expand + stdlib[expand_end:],
+            encoding="utf-8",
+            newline="\n",
+        )
+        nil_bundle = subprocess.run(
+            [
+                os.fspath(sys.executable),
+                os.fspath(BUNDLER),
+                "-o",
+                os.fspath(nil_compiler),
+                os.fspath(CORE),
+                os.fspath(nil_std),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if nil_bundle.returncode != 0:
+            return fail(
+                nil_bundle.stderr.strip() or
+                "failed to bundle null-expand stdlib"
+            )
+        nil_result = subprocess.run(
+            [
+                os.fspath(SEED),
+                "interpreter",
+                os.fspath(nil_compiler),
+                "compiler_compile_library",
+                os.fspath(nil_output),
+                os.fspath(ROOT / "std" / "meta.lain"),
+                os.fspath(ROOT / "std" / "type.lain"),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if nil_result.returncode == 0:
+            return fail("null-expand stdlib result was accepted")
+        nil_diagnostics = nil_result.stdout + nil_result.stderr
+        if "5202" not in nil_diagnostics:
+            return fail(
+                "null-expand stdlib returned an unexpected diagnostic: "
+                + nil_diagnostics.strip()
+            )
+
     if hashlib.sha256(CORE.read_bytes()).digest() != core_hash:
         return fail("compiler core changed during stdlib swap")
     print("PASS bootstrap stdlib swap changes behavior without core rebuild")

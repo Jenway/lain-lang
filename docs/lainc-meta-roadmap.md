@@ -327,7 +327,8 @@ src/compiler-archive/*.lain 最终 compiler，调用正式标准库
 - [~] 五个 `lain_std_*` ABI 入口均已定义并接入编译器调度；当前
   expand/elaborate 仍是 identity pass，lower 通过内部 hook 调用现有 lowering，
   语义迁移尚未完成。
-- [~] 已覆盖错误版本负例；空 handle、跨 owner handle、重复释放仍待补齐。
+- [~] 已覆盖错误版本、空 pass-result handle 和跨 owner handle 负例；空 AST/IR
+  对象和重复释放语义仍待补齐。空 pass-result 会在边界返回 `5202`，不会被解引用。
 - [x] 添加 `tests/lainir_lain/run_bootstrap_std_bundle.py`，覆盖 ABI、AST wrapper、
   pass-result 布局和合并包执行。
 
@@ -348,7 +349,8 @@ src/compiler-archive/*.lain 最终 compiler，调用正式标准库
   lowering、workspace/import 和 syntax-index 实现已从 compiler core 清单移入
   bootstrap stdlib 清单。`scripts/build_lain_compiler.py` 现在会同时构建并校验
   三个 artifact，缺失的职责模块会在构建阶段直接暴露。
-- [ ] `raw_ast` 存储、compiler context、IR builder 和 eval 调度留在底座。
+- [x] `raw_ast` 存储、compiler context、IR builder 和 eval 调度留在底座；标准库
+  只通过这些底座接口取得句柄并提交 pass 结果。
 - [x] 分别生成 `build/lainir/lain_compiler_core.l1` 和
   `build/lainir/bootstrap_std.l1`，再由 bundler 连接。
 - [x] build stamp 分别记录 compiler core 和 bootstrap stdlib 的输入/输出 hash。
