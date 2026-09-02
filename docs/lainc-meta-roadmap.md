@@ -381,6 +381,8 @@ attributes/import
 - [x] 加 boundary lint：`scripts/check_lainir_boundaries.py` 检查 core artifact
   不含高级形式字符串和语义实现过程，并确认对应实现存在于 bootstrap stdlib；
   构建脚本每次都会运行该检查。
+- [x] `scripts/check_stdlib_swap.py` 已验证：只替换 bootstrap stdlib 中的
+  `lain_std_meta_status`，不重建 core，编译行为会变为替换库提供的诊断码。
 - [~] evaluator 的统一入口已放进 bootstrap stdlib，并在入口内部通过显式
   `#eval` block 调用原有 evaluator；现在已具备正确的执行边界，待下一步把
   AST -> 完整 L1 Unit 的生成也移到这个入口。
