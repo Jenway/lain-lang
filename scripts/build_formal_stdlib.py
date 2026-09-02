@@ -38,6 +38,8 @@ FORMAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_return.lain"
 FORMAL_IF_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_if_true_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_if_false_return.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_if_eq_return.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_if_ne_return.lain", "42"),
 )
 FORMAL_INVALID_PROBE = ROOT / "scripts" / "fixtures" / "formal_invalid_return.lain"
 FORMAL_EXTRA_ARITHMETIC_PROBES = (

@@ -404,6 +404,29 @@ let formal_is_false = std::func(source: addr, node: addr) -> bool {
     return byte_at(data, start + 4) == 101;
 };
 
+let formal_is_comparison_operator = std::func(
+    source: addr,
+    node: addr,
+) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) == 0 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    let length: i64 = raw_length(node);
+    if length == 2 {
+        let first: i8 = byte_at(data, start);
+        let second: i8 = byte_at(data, start + 1);
+        if first == 61 && second == 61 { return true; }
+        if first == 33 && second == 61 { return true; }
+        if first == 60 && second == 61 { return true; }
+        if first == 62 && second == 61 { return true; }
+    }
+    if length == 1 {
+        let value: i8 = byte_at(data, start);
+        if value == 60 || value == 62 { return true; }
+    }
+    return false;
+};
+
 let formal_find_if_list = std::func(source: addr, node: addr) -> addr {
     if raw_nil(node) { return ast_nil(); }
     if formal_is_if(source, node) {
@@ -422,6 +445,27 @@ let formal_find_if_list = std::func(source: addr, node: addr) -> addr {
                 }
             }
         }
+        if formal_is_comparison_operator(source, then_group) {
+            let right: addr = raw_next(then_group);
+            let branch: addr = raw_next(right);
+            if formal_is_decimal(source, condition) {
+                if formal_is_decimal(source, right) {
+                    if raw_kind(branch) == 2 {
+                        if raw_delimiter(branch) == 123 {
+                            let else_word: addr = raw_next(branch);
+                            if formal_is_else(source, else_word) {
+                                let else_group: addr = raw_next(else_word);
+                                if raw_kind(else_group) == 2 {
+                                    if raw_delimiter(else_group) == 123 {
+                                        return node;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     return formal_find_if_list(source, raw_next(node));
 };
@@ -435,6 +479,15 @@ let formal_find_if_body = std::func(source: addr, node: addr) -> addr {
         }
     }
     return formal_find_if_body(source, raw_next(node));
+};
+
+let formal_if_then_group = std::func(source: addr, condition: addr) -> addr {
+    let candidate: addr = raw_next(condition);
+    if formal_is_comparison_operator(source, candidate) {
+        let right: addr = raw_next(candidate);
+        return raw_next(right);
+    }
+    return candidate;
 };
 
 let formal_literal_length = std::func(text: addr) -> i64 {
@@ -563,7 +616,7 @@ let formal_emit_if = std::func(
     if_node: addr,
 ) -> unit {
     let condition: addr = raw_next(if_node);
-    let then_group: addr = raw_next(condition);
+    let then_group: addr = formal_if_then_group(source, condition);
     let else_word: addr = raw_next(then_group);
     let else_group: addr = raw_next(else_word);
     let then_return: addr = formal_find_return_list(
@@ -581,6 +634,42 @@ let formal_emit_if = std::func(
     }
     if formal_is_false(source, condition) {
         offset = formal_copy_literal(buffer, offset, "#eq(0, 1)");
+    }
+    if formal_is_comparison_operator(source, raw_next(condition)) {
+        let comparison_operator: addr = raw_next(condition);
+        let comparison_right: addr = raw_next(comparison_operator);
+        let operator_length: i64 = raw_length(comparison_operator);
+        let operator_data: addr = source_bytes(source);
+        let operator_start: i64 = raw_start(comparison_operator);
+        if operator_length == 2 {
+            let first: i8 = byte_at(operator_data, operator_start);
+            let second: i8 = byte_at(operator_data, operator_start + 1);
+            if first == 61 && second == 61 {
+                offset = formal_copy_literal(buffer, offset, "#eq(");
+            }
+            if first == 33 && second == 61 {
+                offset = formal_copy_literal(buffer, offset, "#ne(");
+            }
+            if first == 60 && second == 61 {
+                offset = formal_copy_literal(buffer, offset, "#le(");
+            }
+            if first == 62 && second == 61 {
+                offset = formal_copy_literal(buffer, offset, "#ge(");
+            }
+        }
+        if operator_length == 1 {
+            let value: i8 = byte_at(operator_data, operator_start);
+            if value == 60 {
+                offset = formal_copy_literal(buffer, offset, "#lt(");
+            }
+            if value == 62 {
+                offset = formal_copy_literal(buffer, offset, "#gt(");
+            }
+        }
+        offset = formal_copy_source(buffer, offset, source, condition);
+        offset = formal_copy_literal(buffer, offset, ", ");
+        offset = formal_copy_source(buffer, offset, source, comparison_right);
+        offset = formal_copy_literal(buffer, offset, ")");
     }
     offset = formal_copy_literal(buffer, offset, " {\n    #return ");
     offset = formal_copy_return_expression(
@@ -602,7 +691,7 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
     let if_node: addr = formal_find_if_body(source, raw_first(root));
     if raw_nil(if_node) == false {
         let condition: addr = raw_next(if_node);
-        let then_group: addr = raw_next(condition);
+        let then_group: addr = formal_if_then_group(source, condition);
         let else_word: addr = raw_next(then_group);
         let else_group: addr = raw_next(else_word);
         let then_return: addr = formal_find_return_list(
@@ -620,6 +709,14 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
             }
         }
         if formal_is_false(source, condition) {
+            if raw_nil(then_return) == false {
+                if raw_nil(else_return) == false {
+                    formal_emit_if(source, if_node);
+                    return true;
+                }
+            }
+        }
+        if formal_is_comparison_operator(source, raw_next(condition)) {
             if raw_nil(then_return) == false {
                 if raw_nil(else_return) == false {
                     formal_emit_if(source, if_node);
