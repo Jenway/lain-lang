@@ -17,7 +17,8 @@
 > 已能由第 2 套编译并通过 verifier 和运行 smoke；`scripts/build_formal_stdlib.py`
 > 现在可以从全部 `std/**/*.lain` 生成并验证 `build/lainir/formal_stdlib.l1`。
 > 该 artifact 还会检查并导出五个 `lain_std_*` ABI 入口；当前正式库的
-> `expand` 已对首个源根节点执行 AstApi 复制，`elaborate` 仍传递该句柄，
+> `expand` 已对首个源根节点执行 AstApi 复制，复制动作由正式 `std::meta`
+> 导出的库函数调用 seed ABI 完成；`elaborate` 仍传递该句柄，
 > `lower` 已能为十进制常量 `return`、简单 `+ - * /` 算术、同一源文件内的
 > 无参数/一至两个标量参数的函数调用以及布尔/数值比较的 `if ... else` 双分支返回生成并运行最小
 > LAIN-IR；算术 lowering 生成的表达式现在包在 `#eval` 块中，由 seed evaluator
@@ -465,7 +466,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
 - [~] Meta 工厂内部的局部 `std::func`、`Module`/`ModuleShape` 返回值和
   `effects.Handler` 返回值已按编译期对象处理，避免生成未定义的 `%module`；
   正式标准库现在已导出五个 `lain_std_*` ABI 名称，expand 已完成首个根节点
-  的 AstApi 复制，elaborate 仍为句柄传递，lower 在语义迁移完成前明确返回
+  的 AstApi 复制且复制动作由 `std::meta` 库函数委托给 seed ABI，elaborate 仍为
+  句柄传递，lower 在语义迁移完成前明确返回
   `5203`；十进制常量 `return`、简单二元算术（`+`、`-`、`*`、`/`）、同源无参数
   调用（无参数或一至两个十进制参数）和布尔/数值比较的 `if ... else` 双分支已完成正式库 lowering 及 artifact
   回灌，
@@ -475,7 +477,7 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
   实现仍待接入这些入口；当前正式库会解析全部输入源，并为每个源生成真实的
   syntax-index 条目（源句柄、根节点、首节点、节点数、import 数和根 span）；
-  expand 已通过 AstApi 复制首个根节点，并对未解析 import 返回 `4101`；import
+  expand 已通过 `std::meta` 库函数调用 AstApi 复制首个根节点，并对未解析 import 返回 `4101`；import
   目标解析和循环依赖诊断仍待迁移。elaborate 仍只传递句柄，lower 对常量
   `return`、简单二元算术、同源无参数/一至两参数调用和布尔/数值比较双分支已生成可执行
   artifact，
