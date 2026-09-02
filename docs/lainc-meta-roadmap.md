@@ -502,8 +502,9 @@ fixture 使用编译后的 artifact 运行。
   `%missing` 的零偏移加载；writer 的未知字段路径也不再猜测类型或输出
   offset-zero load，未知成员赋值也不会生成零偏移写入。合法 record 成员
   的读写已通过小例验证。局部 `Module` 别名现在会进入同一 Meta 环境，合法
-  的 `M.value` 已生成正确标量返回，未知模块成员仍返回 `5108`；post-call
-  projection 仍由已验证的调用解析路径处理，factory 和完整模块成员覆盖待补齐。
+  的 `M.value` 已生成正确标量返回，未知模块成员仍返回 `5108`；工厂返回的
+  record type 也能在局部绑定后实例化并完成字段读写。post-call projection
+  仍由已验证的调用解析路径处理，factory 和完整模块成员覆盖待补齐。
 
 验收：第 2 套生成的 archive artifact 通过四项强 gate：
 
