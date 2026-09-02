@@ -89,6 +89,71 @@ def main() -> int:
                 + diagnostics.strip()
             )
 
+        # A pass result owned by another context must be rejected at the
+        # compiler boundary before the next pass sees it.
+        expand_marker = "#proc lain_std_expand"
+        expand_start = stdlib.find(expand_marker)
+        if expand_start < 0:
+            return fail("bootstrap stdlib has no lain_std_expand")
+        expand_end = stdlib.find("#proc ", expand_start + len(expand_marker))
+        if expand_end < 0:
+            expand_end = len(stdlib)
+        expand_body = stdlib[expand_start:expand_end]
+        owner_position = expand_body.rfind("%owner")
+        if owner_position < 0:
+            return fail("unexpected expand result owner layout")
+        owner_swapped = (
+            stdlib[:expand_start]
+            + expand_body[:owner_position]
+            + "#call bootstrap.allocate-pages(1)"
+            + expand_body[owner_position + len("%owner"):]
+            + stdlib[expand_end:]
+        )
+        owner_std = work / "bootstrap_std_wrong_owner.l1"
+        owner_compiler = work / "compiler_wrong_owner.l1"
+        owner_output = work / "wrong_owner_output.l1"
+        owner_std.write_text(owner_swapped, encoding="utf-8", newline="\n")
+        owner_bundle = subprocess.run(
+            [
+                os.fspath(sys.executable),
+                os.fspath(BUNDLER),
+                "-o",
+                os.fspath(owner_compiler),
+                os.fspath(CORE),
+                os.fspath(owner_std),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if owner_bundle.returncode != 0:
+            return fail(
+                owner_bundle.stderr.strip() or
+                "failed to bundle wrong-owner stdlib"
+            )
+        owner_result = subprocess.run(
+            [
+                os.fspath(SEED),
+                "interpreter",
+                os.fspath(owner_compiler),
+                "compiler_compile_library",
+                os.fspath(owner_output),
+                os.fspath(ROOT / "std" / "meta.lain"),
+                os.fspath(ROOT / "std" / "type.lain"),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if owner_result.returncode == 0:
+            return fail("wrong-owner stdlib result was accepted")
+        owner_diagnostics = owner_result.stdout + owner_result.stderr
+        if "5202" not in owner_diagnostics:
+            return fail(
+                "wrong-owner stdlib returned an unexpected diagnostic: "
+                + owner_diagnostics.strip()
+            )
+
     if hashlib.sha256(CORE.read_bytes()).digest() != core_hash:
         return fail("compiler core changed during stdlib swap")
     print("PASS bootstrap stdlib swap changes behavior without core rebuild")

@@ -322,6 +322,8 @@ src/compiler-archive/*.lain 最终 compiler，调用正式标准库
 - [x] `MetaPassResultV1` 已提供 owner 匹配和从旧 owner 转交到 CompileContext
   的 ABI 操作；`scripts/check_compile_context.py` 已覆盖成功转交、转交后旧
   owner 拒绝和 owner 匹配负例。
+- [x] compiler API 在 expand、elaborate、lower 三个边界校验结果 owner，错误
+  owner 返回 `5202`，不会把外部结果继续交给下一阶段。
 - [~] 五个 `lain_std_*` ABI 入口均已定义并接入编译器调度；当前
   expand/elaborate 仍是 identity pass，lower 通过内部 hook 调用现有 lowering，
   语义迁移尚未完成。
@@ -403,12 +405,16 @@ attributes/import
   Unit 生成和结果 owner 转交尚未完成。
 - [~] Meta step limit 已从 `program_unit_meta_step_inc` 的硬编码移到 unit ABI
   字段，并由 compiler request 创建的 CompileContext 注入；request 现在可配置
-  step/allocation/recursion/capability 四类预算。独立 allocation/recursion 消费
-  和诊断仍待接通。seed 的 `bootstrap.allocate-pages` 已接入 allocation limit
-  下发接口；native host 和细粒度递归计费仍待补齐。
+  step/allocation/recursion/capability 四类预算。带 CompileContext 的 unit 已将
+  step 消费和递归 enter/leave 接入 `program_eval_function`，递归超限返回
+  `5125`；seed 的 `bootstrap.allocate-pages` 已接入 allocation limit 下发接口。
+  allocation 的逐对象计费、capability 的实际使用和 native host 诊断仍待补齐。
 - [ ] evaluator 支持返回 scalar、type handle、module handle 和 AST handle。
-- [ ] 结果 owner 转交 compile context，并能被下一次 Meta pass 使用。
+- [~] pass 结果已在 compiler API 中校验并带 CompileContext owner 后交给下一阶段；
+  不同 owner 的真实转交和后续 AST/Unit 生命周期仍待接通。
 - [ ] 递归、step、allocation、capability 各有独立上限和诊断。
+- [x] `scripts/check_compile_context.py` 已验证 step/recursion 的成功、超限和
+  leave 后重入，以及 capability 查询和 owner 转交的 ABI 行为。
 - [ ] 删除第 2 套中的整数 consteval 专用解释路径。
 - [x] `run_std_eval_bridge.py` 已检查标准库 artifact 含 `#eval` 入口，并通过
   consteval 编译、verifier 和运行回归；独立的 type/module/AST 返回值矩阵仍待补齐。
