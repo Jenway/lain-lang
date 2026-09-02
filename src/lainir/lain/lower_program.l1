@@ -498,6 +498,16 @@
   #let %return_type: addr = #load[addr](
     #lea(base=%function, idx=0, scale=0, offset=24)
   )
+  // Return-type atoms are already the phase boundary.  Check the raw type
+  // node before deriving its operand name; qualified/grouped type syntax can
+  // make `program_operand_name` point at a delimiter and otherwise leak a
+  // Meta-only module return into physical emission as an undefined `%module`.
+  #if #call meta_atom_equal(%source, %return_type, "Module", 6) {
+    #return 1
+  }
+  #if #call meta_atom_equal(%source, %return_type, "ModuleShape", 11) {
+    #return 1
+  }
   #if #call meta_atom_equal(%source, %return_type, "type", 4) {
     #return 1
   }
@@ -535,6 +545,12 @@
     #return 1
   }
   #if #call meta_atom_equal(%source, %return_name, "EffectSet", 9) {
+    #return 1
+  }
+  #if #call meta_atom_equal(%source, %return_name, "Handler", 7) {
+    #return 1
+  }
+  #if #call meta_atom_equal(%source, %return_type, "effects.Handler", 15) {
     #return 1
   }
   #if #call meta_atom_equal(%source, %return_type, "effects.Effect", 14) {
@@ -2741,6 +2757,12 @@
 #proc program_is_meta_binding(
   addr %source, addr %let_node
 ) -> i1 {
+  // A local `std::func` is a compile-time closure binding.  Keep it out of
+  // runtime initializer emission; its physical descriptor is materialized by
+  // the Meta binding pass and calls resolve through that descriptor.
+  #if #call program_is_function_declaration(%source, %let_node) {
+    #return 1
+  }
   #if #call program_is_type_binding(%source, %let_node) { #return 1 }
   #let %name: addr = #call raw_node_next(%let_node)
   #let %colon: addr = #call raw_node_next(%name)
@@ -3494,6 +3516,15 @@
 #proc program_validate_local(
   addr %unit, addr %source, addr %function, addr %let_node
 ) -> i32 {
+  #if #call program_is_function_declaration(%source, %let_node) {
+    #let %environment: addr = #call program_function_environment(%function)
+    #if #call raw_is_nil(%environment) {
+      %environment: addr = #call program_unit_meta_environment(%unit)
+    }
+    #return #call program_eval_local_binding(
+      %unit, %source, %function, %let_node, %environment
+    )
+  }
   #if #call program_is_meta_binding(%source, %let_node) {
     // Module aliases are compile-time values, but they can be referenced by
     // ordinary runtime functions (`let M: Module = ...; return M.value`).
