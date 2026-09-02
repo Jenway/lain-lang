@@ -49,6 +49,9 @@ let raw_first = std::func(node: addr) -> addr;
 @foreign(c, link_name = "raw_node_next")
 let raw_next = std::func(node: addr) -> addr;
 
+@foreign(c, link_name = "raw_node_kind")
+let raw_kind = std::func(node: addr) -> i32;
+
 @foreign(c, link_name = "raw_node_start")
 let raw_start = std::func(node: addr) -> i64;
 
@@ -58,11 +61,44 @@ let raw_length = std::func(node: addr) -> i64;
 @foreign(c, link_name = "raw_is_nil")
 let raw_nil = std::func(node: addr) -> bool;
 
+@foreign(c, link_name = "tool_source_data")
+let source_bytes = std::func(source: addr) -> addr;
+
+@foreign(c, link_name = "tool_byte_at")
+let byte_at = std::func(data: addr, index: i64) -> i8;
+
 // Syntax-index layout: count @0, cache @8, then 64-byte entries at @16.
 // Every entry stores source index, source, root, first node, node count,
 // import count, root span start and root span length.  Import target
 // resolution remains the next migration slice; parsing and indexing all
 // supplied sources already happens here.
+let formal_is_import = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 { return false; }
+    if raw_length(node) != 6 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 105 { return false; }
+    if byte_at(data, start + 1) != 109 { return false; }
+    if byte_at(data, start + 2) != 112 { return false; }
+    if byte_at(data, start + 3) != 111 { return false; }
+    if byte_at(data, start + 4) != 114 { return false; }
+    if byte_at(data, start + 5) != 116 { return false; }
+    return true;
+};
+
+let formal_import_count = std::func(source: addr, node: addr) -> i64 {
+    // Import declarations are represented by the root's lossless sibling
+    // stream (`let name = import(...)`).  Counting that stream avoids walking
+    // nested argument groups twice while still covering every declaration.
+    if raw_nil(node) { return 0; }
+    let count: i64 = 0;
+    if formal_is_import(source, node) {
+        count = count + 1;
+    }
+    count = count + formal_import_count(source, raw_next(node));
+    return count;
+};
+
 let syntax_node_count = std::func(node: addr) -> i64 {
     if raw_nil(node) {
         return 0;
@@ -105,7 +141,7 @@ let syntax_units_build = std::func() -> addr {
         std::store_bits(64, entry + 16, root as usize);
         std::store_bits(64, entry + 24, first as usize);
         std::store_bits(64, entry + 32, node_count);
-        std::store_bits(64, entry + 40, 0);
+        std::store_bits(64, entry + 40, formal_import_count(source, first));
         std::store_bits(64, entry + 48, raw_start(root));
         std::store_bits(64, entry + 56, raw_length(root));
         ordinal = ordinal + 1;
@@ -124,6 +160,24 @@ let syntax_index_entry = std::func(index: addr, ordinal: i64) -> addr {
 };
 
 @abi_export
+let syntax_index_imports = std::func(index: addr, ordinal: i64) -> i64 {
+    let entry: addr = syntax_entry_at(index, ordinal);
+    return std::load_bits(64, entry + 40);
+};
+
+let formal_import_status = std::func(index: addr) -> i32 {
+    let count: i64 = syntax_index_count(index);
+    let ordinal: i64 = 0;
+    while ordinal < count {
+        if syntax_index_imports(index, ordinal) > 0 {
+            return 4101;
+        }
+        ordinal = ordinal + 1;
+    }
+    return 0;
+};
+
+@abi_export
 let lain_std_abi_version = std::func() -> i64 {
     return 1;
 };
@@ -139,6 +193,17 @@ let lain_std_expand = std::func(
     source_unit: addr,
     root: addr,
 ) -> addr {
+    let import_status: i32 = formal_import_status(source_unit);
+    if import_status != 0 {
+        return pass_result_new(
+            import_status,
+            0,
+            root,
+            ast_nil(),
+            ast_nil(),
+            context_owner(context),
+        );
+    }
     return pass_result_new(
         0,
         0,
