@@ -233,85 +233,129 @@ let formal_is_decimal = std::func(source: addr, node: addr) -> bool {
     );
 };
 
-let formal_find_constant_list = std::func(source: addr, node: addr) -> addr {
+let formal_find_return_list = std::func(source: addr, node: addr) -> addr {
     if raw_nil(node) { return ast_nil(); }
     if formal_is_return(source, node) {
         let value: addr = raw_next(node);
-        if formal_is_decimal(source, value) { return value; }
+        if formal_is_decimal(source, value) { return node; }
     }
-    return formal_find_constant_list(source, raw_next(node));
+    return formal_find_return_list(source, raw_next(node));
 };
 
-let formal_find_constant_body = std::func(source: addr, node: addr) -> addr {
+let formal_find_return_body = std::func(source: addr, node: addr) -> addr {
     if raw_nil(node) { return ast_nil(); }
     if raw_kind(node) == 2 && raw_delimiter(node) == 123 {
-        let value: addr = formal_find_constant_list(source, raw_first(node));
+        let value: addr = formal_find_return_list(source, raw_first(node));
         if raw_nil(value) == false { return value; }
     }
-    return formal_find_constant_body(source, raw_next(node));
+    return formal_find_return_body(source, raw_next(node));
 };
 
-let formal_emit_constant = std::func(source: addr, value: addr) -> unit {
-    let prefix: addr = "#proc main() -> #bits<64> {\n  #return ";
-    let suffix: addr = "\n}\n";
-    let prefix_length: i64 = 0;
-    let suffix_length: i64 = 0;
-    while std::load_bits(8, prefix + prefix_length) != 0 {
-        prefix_length = prefix_length + 1;
+let formal_is_operator = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 1 { return false; }
+    let value: i8 = byte_at(source_bytes(source), raw_start(node));
+    if value == 43 || value == 45 || value == 42 || value == 47 {
+        return true;
     }
-    while std::load_bits(8, suffix + suffix_length) != 0 {
-        suffix_length = suffix_length + 1;
+    return false;
+};
+
+let formal_literal_length = std::func(text: addr) -> i64 {
+    let length: i64 = 0;
+    while std::load_bits(8, text + length) != 0 {
+        length = length + 1;
     }
-    let value_length: i64 = raw_length(value);
-    if prefix_length + value_length + suffix_length > 256 {
-        return;
-    }
-    let buffer: addr = allocate_pages(256);
+    return length;
+};
+
+let formal_copy_literal = std::func(
+    buffer: addr,
+    offset: i64,
+    text: addr,
+) -> i64 {
+    let length: i64 = formal_literal_length(text);
     let index: i64 = 0;
-    while index < prefix_length {
+    while index < length {
+        let target: i64 = offset + index;
         std::store_bits(
             8,
-            buffer + index,
-            std::load_bits(8, prefix + index),
+            buffer + target,
+            std::load_bits(8, text + index),
         );
         index = index + 1;
     }
-    let value_index: i64 = 0;
-    let value_data: addr = source_bytes(source) + raw_start(value);
-    while value_index < value_length {
-        let value_offset: i64 = prefix_length + value_index;
+    return offset + length;
+};
+
+let formal_copy_source = std::func(
+    buffer: addr,
+    offset: i64,
+    source: addr,
+    node: addr,
+) -> i64 {
+    let data: addr = source_bytes(source) + raw_start(node);
+    let length: i64 = raw_length(node);
+    let index: i64 = 0;
+    while index < length {
+        let target: i64 = offset + index;
         std::store_bits(
             8,
-            buffer + value_offset,
-            std::load_bits(8, value_data + value_index),
+            buffer + target,
+            std::load_bits(8, data + index),
         );
-        value_index = value_index + 1;
+        index = index + 1;
     }
-    let suffix_index: i64 = 0;
-    while suffix_index < suffix_length {
-        let suffix_offset: i64 = prefix_length + value_length;
-        suffix_offset = suffix_offset + suffix_index;
-        std::store_bits(
-            8,
-            buffer + suffix_offset,
-            std::load_bits(8, suffix + suffix_index),
-        );
-        suffix_index = suffix_index + 1;
+    return offset + length;
+};
+
+let formal_emit_constant = std::func(source: addr, return_node: addr) -> unit {
+    let value: addr = raw_next(return_node);
+    let operator: addr = raw_next(value);
+    let right: addr = raw_next(operator);
+    let prefix: addr = "#proc main() -> #bits<64> {\n  #return ";
+    let suffix: addr = "\n}\n";
+    let buffer: addr = allocate_pages(256);
+    let offset: i64 = formal_copy_literal(buffer, 0, prefix);
+    let arithmetic: bool = false;
+    if formal_is_operator(source, operator) {
+        if formal_is_decimal(source, right) {
+            arithmetic = true;
+        }
     }
-    let total_length: i64 = prefix_length + value_length;
-    total_length = total_length + suffix_length;
-    artifact_write(buffer, total_length);
+    if arithmetic {
+        let operator_value: i8 = byte_at(source_bytes(source), raw_start(operator));
+        if operator_value == 43 {
+            offset = formal_copy_literal(buffer, offset, "#add(");
+        }
+        if operator_value == 45 {
+            offset = formal_copy_literal(buffer, offset, "#sub(");
+        }
+        if operator_value == 42 {
+            offset = formal_copy_literal(buffer, offset, "#mul(");
+        }
+        if operator_value == 47 {
+            offset = formal_copy_literal(buffer, offset, "#div(");
+        }
+        offset = formal_copy_source(buffer, offset, source, value);
+        offset = formal_copy_literal(buffer, offset, ", ");
+        offset = formal_copy_source(buffer, offset, source, right);
+        offset = formal_copy_literal(buffer, offset, ")");
+    } else {
+        offset = formal_copy_source(buffer, offset, source, value);
+    }
+    offset = formal_copy_literal(buffer, offset, suffix);
+    artifact_write(buffer, offset);
 };
 
 let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
     let count: i64 = syntax_index_count(index);
     if ordinal >= count { return false; }
     let source: addr = syntax_index_source(index, ordinal);
-    let value: addr = formal_find_constant_body(
+    let return_node: addr = formal_find_return_body(
         source, raw_first(syntax_index_root(index, ordinal))
     );
-    if raw_nil(value) == false {
-        formal_emit_constant(source, value);
+    if raw_nil(return_node) == false {
+        formal_emit_constant(source, return_node);
         return true;
     }
     return formal_lower_source(index, ordinal + 1);

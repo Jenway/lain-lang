@@ -33,6 +33,7 @@ MANIFEST = ROOT / "build" / "lainir" / "formal_stdlib.manifest.json"
 ABI_PROBE = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"
 ABI_OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib_abi_output.l1"
 FORMAL_CONSTANT_PROBE = ROOT / "scripts" / "fixtures" / "formal_constant_return.lain"
+FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain"
 ABI_ENTRIES = (
     "lain_std_abi_version",
     "lain_std_initialize",
@@ -121,6 +122,38 @@ def verify_abi_entry() -> None:
         detail = constant_run.stderr.strip() or constant_run.stdout.strip()
         raise RuntimeError(
             "formal stdlib constant artifact did not run as 42"
+            + (f": {detail}" if detail else "")
+        )
+    arithmetic_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_ARITHMETIC_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if arithmetic_probe.returncode:
+        detail = arithmetic_probe.stderr.strip() or arithmetic_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib arithmetic lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    arithmetic_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if arithmetic_run.returncode or arithmetic_run.stdout.strip() != "42":
+        detail = arithmetic_run.stderr.strip() or arithmetic_run.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib arithmetic artifact did not run as 42"
             + (f": {detail}" if detail else "")
         )
     import_probe = subprocess.run(
