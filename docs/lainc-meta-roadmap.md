@@ -1,6 +1,6 @@
 # Lain 标准库自举与 archive lainc 路线图
 
-> 基线日期：2026-08-31
+> 基线日期：2026-09-02
 > 本文是当前自举主线。它取代旧版“Meta.invoke 执行环境”路线。
 >
 > 核心修正：Meta 只负责 AST 操作和语言规则变换；编译期执行由
@@ -431,6 +431,10 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
 - [~] 已通过 bootstrap artifact 编译并运行正式 `std::meta` 核心（见
   `run_stdlib_bootstrap.py`）；type、module、diagnostic、
   generic、effect、bounds 和 backend contract。
+- [x] 正式 `std/*.lain` 的完整 source closure 已由第 2 套生成
+  `build/formal-stdlib-fixed.l1`，并通过 `lainir-print` 的普通解析/验证；
+  本轮修复了“单语句字段赋值被误判为返回表达式”的路径，`&mut Diagnostic`
+  等字段更新现在走正常赋值降级。
 - [ ] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口。
 - [x] 生成版本化标准库 artifact 和 manifest，记录 ABI、source hash、依赖和
   target-independent 标记；产物为 `build/lainir/bootstrap_std.manifest.json`。
