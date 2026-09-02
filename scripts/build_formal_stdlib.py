@@ -39,7 +39,12 @@ ABI_ENTRIES = (
     "lain_std_elaborate",
     "lain_std_lower",
 )
-ABI_SUPPORT_ENTRIES = ("syntax_units_build",)
+ABI_SUPPORT_ENTRIES = (
+    "syntax_units_build",
+    "syntax_index_count",
+    "syntax_index_entry",
+    "syntax_index_imports",
+)
 
 
 def run(arguments: list[Path | str]) -> None:
@@ -84,6 +89,25 @@ def verify_abi_entry() -> None:
     if selected.returncode == 0 or "5203" not in selected_diagnostics:
         raise RuntimeError(
             "formal stdlib replacement did not reach the pending lower pass"
+        )
+    import_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(ROOT / "std" / "meta.lain"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    import_diagnostics = import_probe.stdout + import_probe.stderr
+    if import_probe.returncode == 0 or "4101" not in import_diagnostics:
+        raise RuntimeError(
+            "formal stdlib syntax-index did not report an unresolved import"
         )
 
 
