@@ -426,6 +426,41 @@ let formal_find_named_body = std::func(
     return formal_find_named_body(source, raw_next(node), wanted);
 };
 
+let formal_find_parameter_group_after = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if raw_kind(node) == 2 {
+        if raw_delimiter(node) == 40 { return node; }
+    }
+    return formal_find_parameter_group_after(source, raw_next(node));
+};
+
+let formal_find_named_parameter_group = std::func(
+    source: addr,
+    node: addr,
+    wanted: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_let(source, node) {
+        let name: addr = raw_next(node);
+        if formal_name_matches(source, name, wanted) {
+            return formal_find_parameter_group_after(source, raw_next(name));
+        }
+    }
+    return formal_find_named_parameter_group(source, raw_next(node), wanted);
+};
+
+let formal_second_parameter = std::func(source: addr, group: addr) -> addr {
+    let first: addr = raw_first(group);
+    let colon: addr = raw_next(first);
+    let type_name: addr = raw_next(colon);
+    let comma: addr = raw_next(type_name);
+    if formal_is_comma(source, comma) { return raw_next(comma); }
+    return ast_nil();
+};
+
 let formal_find_call_return_list = std::func(
     source: addr,
     node: addr,
@@ -695,6 +730,7 @@ let formal_copy_parameter_return_expression = std::func(
     offset: i64,
     source: addr,
     return_node: addr,
+    parameter: addr,
 ) -> i64 {
     let value: addr = raw_next(return_node);
     let operator: addr = raw_next(value);
@@ -704,17 +740,19 @@ let formal_copy_parameter_return_expression = std::func(
         if formal_is_decimal(source, right) {
             let operator_value: i8 = byte_at(source_bytes(source), raw_start(operator));
             if operator_value == 43 {
-                cursor = formal_copy_literal(buffer, cursor, "#add(%x, ");
+                cursor = formal_copy_literal(buffer, cursor, "#add(%");
             }
             if operator_value == 45 {
-                cursor = formal_copy_literal(buffer, cursor, "#sub(%x, ");
+                cursor = formal_copy_literal(buffer, cursor, "#sub(%");
             }
             if operator_value == 42 {
-                cursor = formal_copy_literal(buffer, cursor, "#mul(%x, ");
+                cursor = formal_copy_literal(buffer, cursor, "#mul(%");
             }
             if operator_value == 47 {
-                cursor = formal_copy_literal(buffer, cursor, "#div(%x, ");
+                cursor = formal_copy_literal(buffer, cursor, "#div(%");
             }
+            cursor = formal_copy_source(buffer, cursor, source, parameter);
+            cursor = formal_copy_literal(buffer, cursor, ", ");
             cursor = formal_copy_source(buffer, cursor, source, right);
             return formal_copy_literal(buffer, cursor, ")");
         }
@@ -727,23 +765,40 @@ let formal_copy_two_parameter_expression = std::func(
     offset: i64,
     source: addr,
     return_node: addr,
+    first_parameter: addr,
+    second_parameter: addr,
 ) -> i64 {
-    let operator: addr = raw_next(raw_next(return_node));
+    let left: addr = raw_next(return_node);
+    let operator: addr = raw_next(left);
+    let right: addr = raw_next(operator);
     let operator_value: i8 = byte_at(source_bytes(source), raw_start(operator));
     let cursor: i64 = offset;
+    let left_is_first: bool = formal_name_matches(source, left, first_parameter);
+    let right_is_first: bool = formal_name_matches(source, right, first_parameter);
     if operator_value == 43 {
-        cursor = formal_copy_literal(buffer, cursor, "#add(%x, %y)");
+        cursor = formal_copy_literal(buffer, cursor, "#add(%");
     }
     if operator_value == 45 {
-        cursor = formal_copy_literal(buffer, cursor, "#sub(%x, %y)");
+        cursor = formal_copy_literal(buffer, cursor, "#sub(%");
     }
     if operator_value == 42 {
-        cursor = formal_copy_literal(buffer, cursor, "#mul(%x, %y)");
+        cursor = formal_copy_literal(buffer, cursor, "#mul(%");
     }
     if operator_value == 47 {
-        cursor = formal_copy_literal(buffer, cursor, "#div(%x, %y)");
+        cursor = formal_copy_literal(buffer, cursor, "#div(%");
     }
-    return cursor;
+    if left_is_first {
+        cursor = formal_copy_source(buffer, cursor, source, first_parameter);
+    } else {
+        cursor = formal_copy_source(buffer, cursor, source, second_parameter);
+    }
+    cursor = formal_copy_literal(buffer, cursor, ", %");
+    if right_is_first {
+        cursor = formal_copy_source(buffer, cursor, source, first_parameter);
+    } else {
+        cursor = formal_copy_source(buffer, cursor, source, second_parameter);
+    }
+    return formal_copy_literal(buffer, cursor, ")");
 };
 
 let formal_emit_constant = std::func(source: addr, return_node: addr) -> unit {
@@ -810,15 +865,18 @@ let formal_emit_call_arg = std::func(
     callee: addr,
     argument: addr,
     callee_return: addr,
+    parameter: addr,
 ) -> unit {
     let buffer: addr = allocate_pages(512);
     let offset: i64 = formal_copy_literal(buffer, 0, "#proc ");
     offset = formal_copy_source(buffer, offset, source, callee);
     offset = formal_copy_literal(
-        buffer, offset, "(#bits<64> %x) -> #bits<64> {\n  #return "
+        buffer, offset, "(#bits<64> %"
     );
+    offset = formal_copy_source(buffer, offset, source, parameter);
+    offset = formal_copy_literal(buffer, offset, ") -> #bits<64> {\n  #return ");
     offset = formal_copy_parameter_return_expression(
-        buffer, offset, source, callee_return
+        buffer, offset, source, callee_return, parameter
     );
     offset = formal_copy_literal(
         buffer, offset,
@@ -836,6 +894,8 @@ let formal_emit_call_two_args = std::func(
     callee: addr,
     arguments: addr,
     callee_return: addr,
+    first_parameter: addr,
+    second_parameter: addr,
 ) -> unit {
     let first: addr = raw_first(arguments);
     let comma: addr = raw_next(first);
@@ -844,10 +904,15 @@ let formal_emit_call_two_args = std::func(
     let offset: i64 = formal_copy_literal(buffer, 0, "#proc ");
     offset = formal_copy_source(buffer, offset, source, callee);
     offset = formal_copy_literal(
-        buffer, offset, "(#bits<64> %x, #bits<64> %y) -> #bits<64> {\n  #return "
+        buffer, offset, "(#bits<64> %"
     );
+    offset = formal_copy_source(buffer, offset, source, first_parameter);
+    offset = formal_copy_literal(buffer, offset, ", #bits<64> %");
+    offset = formal_copy_source(buffer, offset, source, second_parameter);
+    offset = formal_copy_literal(buffer, offset, ") -> #bits<64> {\n  #return ");
     offset = formal_copy_two_parameter_expression(
-        buffer, offset, source, callee_return
+        buffer, offset, source, callee_return,
+        first_parameter, second_parameter
     );
     offset = formal_copy_literal(
         buffer, offset,
@@ -989,15 +1054,30 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
         );
         let argument: addr = raw_first(arguments);
         if formal_is_two_decimal_arguments(source, arguments) {
+            let parameter_group: addr = formal_find_named_parameter_group(
+                source, raw_first(root), callee
+            );
+            let first_parameter: addr = raw_first(parameter_group);
+            let second_parameter: addr = formal_second_parameter(
+                source, parameter_group
+            );
             let two_parameter_return: addr = formal_find_two_parameter_return_list(
                 source, raw_first(callee_body)
             );
             if raw_nil(callee_body) == false {
-                if raw_nil(two_parameter_return) == false {
-                    formal_emit_call_two_args(
-                        source, callee, arguments, two_parameter_return
-                    );
-                    return true;
+                if raw_nil(parameter_group) == false {
+                    if raw_nil(first_parameter) == false {
+                        if raw_nil(second_parameter) == false {
+                            if raw_nil(two_parameter_return) == false {
+                                formal_emit_call_two_args(
+                                    source, callee, arguments,
+                                    two_parameter_return,
+                                    first_parameter, second_parameter
+                                );
+                                return true;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1005,15 +1085,24 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
             source, raw_first(callee_body)
         );
         if raw_nil(argument) == false {
+            let parameter_group: addr = formal_find_named_parameter_group(
+                source, raw_first(root), callee
+            );
+            let parameter: addr = raw_first(parameter_group);
             let parameter_return: addr = formal_find_parameter_return_list(
                 source, raw_first(callee_body)
             );
             if raw_nil(callee_body) == false {
-                if raw_nil(parameter_return) == false {
-                    formal_emit_call_arg(
-                        source, callee, argument, parameter_return
-                    );
-                    return true;
+                if raw_nil(parameter_group) == false {
+                    if raw_nil(parameter) == false {
+                        if raw_nil(parameter_return) == false {
+                            formal_emit_call_arg(
+                                source, callee, argument, parameter_return,
+                                parameter
+                            );
+                            return true;
+                        }
+                    }
                 }
             }
         }

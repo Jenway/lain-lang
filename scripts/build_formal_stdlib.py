@@ -37,6 +37,7 @@ FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_ret
 FORMAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_return.lain"
 FORMAL_CALL_ARGUMENT_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_argument_return.lain"
 FORMAL_CALL_TWO_ARGUMENTS_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_two_arguments_return.lain"
+FORMAL_CALL_NAMED_ARGUMENTS_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_named_arguments_return.lain"
 FORMAL_CALL_ARGUMENT_EXPRESSION_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_argument_expression.lain"
 FORMAL_IF_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_if_true_return.lain", "42"),
@@ -305,6 +306,38 @@ def verify_abi_entry() -> None:
         detail = call_two_run.stderr.strip() or call_two_run.stdout.strip()
         raise RuntimeError(
             "formal stdlib two-argument call artifact did not run as 42"
+            + (f": {detail}" if detail else "")
+        )
+    named_call_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_CALL_NAMED_ARGUMENTS_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if named_call_probe.returncode:
+        detail = named_call_probe.stderr.strip() or named_call_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib named-parameter call lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    named_call_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if named_call_run.returncode or named_call_run.stdout.strip() != "42":
+        detail = named_call_run.stderr.strip() or named_call_run.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib named-parameter call artifact did not run as 42"
             + (f": {detail}" if detail else "")
         )
     invalid_argument_probe = subprocess.run(
