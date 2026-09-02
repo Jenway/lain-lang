@@ -34,6 +34,12 @@ ABI_PROBE = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"
 ABI_OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib_abi_output.l1"
 FORMAL_CONSTANT_PROBE = ROOT / "scripts" / "fixtures" / "formal_constant_return.lain"
 FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain"
+FORMAL_INVALID_PROBE = ROOT / "scripts" / "fixtures" / "formal_invalid_return.lain"
+FORMAL_EXTRA_ARITHMETIC_PROBES = (
+    (ROOT / "scripts" / "fixtures" / "formal_subtraction_return.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_multiplication_return.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_division_return.lain", "42"),
+)
 ABI_ENTRIES = (
     "lain_std_abi_version",
     "lain_std_initialize",
@@ -155,6 +161,58 @@ def verify_abi_entry() -> None:
         raise RuntimeError(
             "formal stdlib arithmetic artifact did not run as 42"
             + (f": {detail}" if detail else "")
+        )
+    for arithmetic_fixture, expected in FORMAL_EXTRA_ARITHMETIC_PROBES:
+        extra_probe = subprocess.run(
+            [
+                str(SEED_RUN),
+                "interpreter",
+                str(ABI_PROBE),
+                "compiler_compile_library",
+                str(ABI_OUTPUT),
+                str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+                str(arithmetic_fixture),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if extra_probe.returncode:
+            detail = extra_probe.stderr.strip() or extra_probe.stdout.strip()
+            raise RuntimeError(
+                f"formal stdlib arithmetic lowering failed for {arithmetic_fixture.name}"
+                + (f": {detail}" if detail else "")
+            )
+        extra_run = subprocess.run(
+            [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if extra_run.returncode or extra_run.stdout.strip() != expected:
+            detail = extra_run.stderr.strip() or extra_run.stdout.strip()
+            raise RuntimeError(
+                f"formal stdlib arithmetic artifact failed for {arithmetic_fixture.name}"
+                + (f": {detail}" if detail else "")
+            )
+    invalid_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_INVALID_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    invalid_diagnostics = invalid_probe.stdout + invalid_probe.stderr
+    if invalid_probe.returncode == 0 or "5203" not in invalid_diagnostics:
+        raise RuntimeError(
+            "formal stdlib accepted an incomplete arithmetic return"
         )
     import_probe = subprocess.run(
         [
