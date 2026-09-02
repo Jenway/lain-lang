@@ -34,6 +34,7 @@ ABI_PROBE = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"
 ABI_OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib_abi_output.l1"
 FORMAL_CONSTANT_PROBE = ROOT / "scripts" / "fixtures" / "formal_constant_return.lain"
 FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain"
+FORMAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_return.lain"
 FORMAL_INVALID_PROBE = ROOT / "scripts" / "fixtures" / "formal_invalid_return.lain"
 FORMAL_EXTRA_ARITHMETIC_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_subtraction_return.lain", "42"),
@@ -195,6 +196,38 @@ def verify_abi_entry() -> None:
                 f"formal stdlib arithmetic artifact failed for {arithmetic_fixture.name}"
                 + (f": {detail}" if detail else "")
             )
+    call_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_CALL_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if call_probe.returncode:
+        detail = call_probe.stderr.strip() or call_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib function-call lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    call_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if call_run.returncode or call_run.stdout.strip() != "40":
+        detail = call_run.stderr.strip() or call_run.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib function-call artifact did not run as 40"
+            + (f": {detail}" if detail else "")
+        )
     invalid_probe = subprocess.run(
         [
             str(SEED_RUN),
