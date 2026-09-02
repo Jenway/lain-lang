@@ -360,6 +360,7 @@ struct L1Subroutine {
   L1Type *ret_ty;
   uint32_t param_count;
   L1Type **param_tys;
+  char **param_names;
   L1Block *blocks;
   L1Block *blocks_tail;
   int is_extern;
