@@ -365,6 +365,78 @@ let formal_find_call_return_body = std::func(
     return formal_find_call_return_body(source, raw_next(node));
 };
 
+let formal_is_if = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 2 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 105 { return false; }
+    return byte_at(data, start + 1) == 102;
+};
+
+let formal_is_else = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 4 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 101 { return false; }
+    if byte_at(data, start + 1) != 108 { return false; }
+    if byte_at(data, start + 2) != 115 { return false; }
+    return byte_at(data, start + 3) == 101;
+};
+
+let formal_is_true = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 4 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 116 { return false; }
+    if byte_at(data, start + 1) != 114 { return false; }
+    if byte_at(data, start + 2) != 117 { return false; }
+    return byte_at(data, start + 3) == 101;
+};
+
+let formal_is_false = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 5 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 102 { return false; }
+    if byte_at(data, start + 1) != 97 { return false; }
+    if byte_at(data, start + 2) != 108 { return false; }
+    if byte_at(data, start + 3) != 115 { return false; }
+    return byte_at(data, start + 4) == 101;
+};
+
+let formal_find_if_list = std::func(source: addr, node: addr) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_if(source, node) {
+        let condition: addr = raw_next(node);
+        let then_group: addr = raw_next(condition);
+        if raw_kind(then_group) == 2 {
+            if raw_delimiter(then_group) == 123 {
+                let else_word: addr = raw_next(then_group);
+                if formal_is_else(source, else_word) {
+                    let else_group: addr = raw_next(else_word);
+                    if raw_kind(else_group) == 2 {
+                        if raw_delimiter(else_group) == 123 {
+                            return node;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return formal_find_if_list(source, raw_next(node));
+};
+
+let formal_find_if_body = std::func(source: addr, node: addr) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if raw_kind(node) == 2 {
+        if raw_delimiter(node) == 123 {
+            let value: addr = formal_find_if_list(source, raw_first(node));
+            if raw_nil(value) == false { return value; }
+        }
+    }
+    return formal_find_if_body(source, raw_next(node));
+};
+
 let formal_literal_length = std::func(text: addr) -> i64 {
     let length: i64 = 0;
     while std::load_bits(8, text + length) != 0 {
@@ -486,11 +558,76 @@ let formal_emit_call = std::func(
     artifact_write(buffer, offset);
 };
 
+let formal_emit_if = std::func(
+    source: addr,
+    if_node: addr,
+) -> unit {
+    let condition: addr = raw_next(if_node);
+    let then_group: addr = raw_next(condition);
+    let else_word: addr = raw_next(then_group);
+    let else_group: addr = raw_next(else_word);
+    let then_return: addr = formal_find_return_list(
+        source, raw_first(then_group)
+    );
+    let else_return: addr = formal_find_return_list(
+        source, raw_first(else_group)
+    );
+    let buffer: addr = allocate_pages(512);
+    let offset: i64 = formal_copy_literal(
+        buffer, 0, "#proc main() -> #bits<64> {\n  #if "
+    );
+    if formal_is_true(source, condition) {
+        offset = formal_copy_literal(buffer, offset, "#eq(1, 1)");
+    }
+    if formal_is_false(source, condition) {
+        offset = formal_copy_literal(buffer, offset, "#eq(0, 1)");
+    }
+    offset = formal_copy_literal(buffer, offset, " {\n    #return ");
+    offset = formal_copy_return_expression(
+        buffer, offset, source, then_return
+    );
+    offset = formal_copy_literal(buffer, offset, "\n  } else {\n    #return ");
+    offset = formal_copy_return_expression(
+        buffer, offset, source, else_return
+    );
+    offset = formal_copy_literal(buffer, offset, "\n  }\n}\n");
+    artifact_write(buffer, offset);
+};
+
 let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
     let count: i64 = syntax_index_count(index);
     if ordinal >= count { return false; }
     let source: addr = syntax_index_source(index, ordinal);
     let root: addr = syntax_index_root(index, ordinal);
+    let if_node: addr = formal_find_if_body(source, raw_first(root));
+    if raw_nil(if_node) == false {
+        let condition: addr = raw_next(if_node);
+        let then_group: addr = raw_next(condition);
+        let else_word: addr = raw_next(then_group);
+        let else_group: addr = raw_next(else_word);
+        let then_return: addr = formal_find_return_list(
+            source, raw_first(then_group)
+        );
+        let else_return: addr = formal_find_return_list(
+            source, raw_first(else_group)
+        );
+        if formal_is_true(source, condition) {
+            if raw_nil(then_return) == false {
+                if raw_nil(else_return) == false {
+                    formal_emit_if(source, if_node);
+                    return true;
+                }
+            }
+        }
+        if formal_is_false(source, condition) {
+            if raw_nil(then_return) == false {
+                if raw_nil(else_return) == false {
+                    formal_emit_if(source, if_node);
+                    return true;
+                }
+            }
+        }
+    }
     let call_return: addr = formal_find_call_return_body(source, raw_first(root));
     if raw_nil(call_return) == false {
         let callee: addr = raw_next(call_return);

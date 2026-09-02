@@ -35,6 +35,10 @@ ABI_OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib_abi_output.l1"
 FORMAL_CONSTANT_PROBE = ROOT / "scripts" / "fixtures" / "formal_constant_return.lain"
 FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain"
 FORMAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_return.lain"
+FORMAL_IF_PROBES = (
+    (ROOT / "scripts" / "fixtures" / "formal_if_true_return.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_if_false_return.lain", "42"),
+)
 FORMAL_INVALID_PROBE = ROOT / "scripts" / "fixtures" / "formal_invalid_return.lain"
 FORMAL_EXTRA_ARITHMETIC_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_subtraction_return.lain", "42"),
@@ -228,6 +232,39 @@ def verify_abi_entry() -> None:
             "formal stdlib function-call artifact did not run as 40"
             + (f": {detail}" if detail else "")
         )
+    for if_fixture, expected in FORMAL_IF_PROBES:
+        if_probe = subprocess.run(
+            [
+                str(SEED_RUN),
+                "interpreter",
+                str(ABI_PROBE),
+                "compiler_compile_library",
+                str(ABI_OUTPUT),
+                str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+                str(if_fixture),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if if_probe.returncode:
+            detail = if_probe.stderr.strip() or if_probe.stdout.strip()
+            raise RuntimeError(
+                f"formal stdlib if lowering failed for {if_fixture.name}"
+                + (f": {detail}" if detail else "")
+            )
+        if_run = subprocess.run(
+            [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if if_run.returncode or if_run.stdout.strip() != expected:
+            detail = if_run.stderr.strip() or if_run.stdout.strip()
+            raise RuntimeError(
+                f"formal stdlib if artifact failed for {if_fixture.name}"
+                + (f": {detail}" if detail else "")
+            )
     invalid_probe = subprocess.run(
         [
             str(SEED_RUN),
