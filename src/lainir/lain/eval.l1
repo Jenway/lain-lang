@@ -30,8 +30,11 @@
 #extern #proc meta_atom_equal(addr %source, addr %node, addr %text, i64 %length) -> i1;
 #extern #proc meta_write_decimal(i64 %value) -> #unit;
 #extern #proc meta_value_nil() -> addr;
+#extern #proc meta_value_kind(addr %value) -> i32;
 
-// EvalResult: status @0, value @8.  Status 0 means success.
+// EvalResult: status @0, kind @4, scalar value @8, object handle @16.
+// Kind 0 is a scalar; 1 is an unclassified Meta value; 2 is a type;
+// 3 is a module; 4 is an AST/syntax value.  Status 0 means success.
 #proc eval_result_new(i32 %status, i64 %value) -> addr {
   #let %result: addr = #call bootstrap.allocate-pages(24)
   #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
@@ -43,8 +46,13 @@
 
 #proc eval_result_object(i32 %status, addr %object) -> addr {
   #let %result: addr = #call bootstrap.allocate-pages(24)
+  #let %meta_kind: i32 = #call meta_value_kind(%object)
+  #let %kind: i32 = 1
+  #if #eq(%meta_kind, 4) { %kind: i32 = 2 }
+  #if #eq(%meta_kind, 2) { %kind: i32 = 3 }
+  #if #eq(%meta_kind, 5) { %kind: i32 = 4 }
   #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
-  #store 1, #lea(base=%result, idx=0, scale=0, offset=4)
+  #store %kind, #lea(base=%result, idx=0, scale=0, offset=4)
   #store 0, #lea(base=%result, idx=0, scale=0, offset=8)
   #store %object, #lea(base=%result, idx=0, scale=0, offset=16)
   #return %result
@@ -59,7 +67,11 @@
 }
 
 #proc eval_result_is_object(addr %result) -> i1 {
-  #return #eq(#load[i32](#lea(base=%result, idx=0, scale=0, offset=4)), 1)
+  #return #ne(#load[i32](#lea(base=%result, idx=0, scale=0, offset=4)), 0)
+}
+
+#proc eval_result_kind(addr %result) -> i32 {
+  #return #load[i32](#lea(base=%result, idx=0, scale=0, offset=4))
 }
 
 #proc eval_object(addr %result) -> addr {
