@@ -14,7 +14,9 @@
 > artifact 编译并运行；archive 的 Meta 结构调用、AST 克隆、字符串 ABI、token
 > 名称解析、alias 查询和未知名称诊断探针已可重复通过。第二套生成的 archive
 > API 现在也能通过 empty/nonempty 两个客户端验收；完整正式 std/archive 源码
-> 已能由第 2 套编译并通过 verifier 和运行 smoke。archive API 的空输入和非空
+> 已能由第 2 套编译并通过 verifier 和运行 smoke；`scripts/build_formal_stdlib.py`
+> 现在可以从全部 `std/**/*.lain` 生成并验证 `build/lainir/formal_stdlib.l1`。
+> archive API 的空输入和非空
 > 输入客户端已经可用；简单标量 `return` 的真实用户程序已能生成并回灌执行；
 > 完整 L1 Unit 生成、正式标准库全面替换、复杂真实用户程序、native `lainc`
 > 以及 archive 自举固定点仍未完成。
@@ -447,6 +449,12 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `build/formal-stdlib-fixed.l1`，并通过 `lainir-print` 的普通解析/验证；
   本轮修复了“单语句字段赋值被误判为返回表达式”的路径，`&mut Diagnostic`
   等字段更新现在走正常赋值降级。
+- [x] `scripts/build_formal_stdlib.py` 已固定正式标准库闭包的源码清单、排序、
+  hash manifest 和验证步骤；当前产物为 `build/lainir/formal_stdlib.l1`，全部
+  `std/**/*.lain` 均可生成 verifier-valid LAIN-IR。
+- [~] Meta 工厂内部的局部 `std::func`、`Module`/`ModuleShape` 返回值和
+  `effects.Handler` 返回值已按编译期对象处理，避免生成未定义的 `%module`；
+  正式标准库的 ABI 入口仍未导出。
 - [ ] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口。
 - [x] 生成版本化标准库 artifact 和 manifest，记录 ABI、source hash、依赖和
   target-independent 标记；产物为 `build/lainir/bootstrap_std.manifest.json`。
