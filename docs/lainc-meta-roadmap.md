@@ -18,8 +18,9 @@
 > 现在可以从全部 `std/**/*.lain` 生成并验证 `build/lainir/formal_stdlib.l1`。
 > 该 artifact 还会检查并导出五个 `lain_std_*` ABI 入口；当前正式库的
 > `expand` 已对首个源根节点执行 AstApi 复制，`elaborate` 仍传递该句柄，
-> `lower` 已能为十进制常量 `return`、简单 `+ - * /` 算术以及同一源文件内的
-> 无参数函数调用生成并运行最小 LAIN-IR，且不完整表达式会被拒绝；其他形式
+> `lower` 已能为十进制常量 `return`、简单 `+ - * /` 算术、同一源文件内的
+> 无参数函数调用以及 `if true/if false` 双分支返回生成并运行最小 LAIN-IR，
+> 且不完整表达式会被拒绝；其他形式
 > 明确返回迁移中的 `5203`。
 > `run_lain_compiler.py --stdlib-artifact` 已能用同一个 compiler core 实际加载
 > formal artifact，并在该 lowering 边界得到 `5203`。
@@ -463,9 +464,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `effects.Handler` 返回值已按编译期对象处理，避免生成未定义的 `%module`；
   正式标准库现在已导出五个 `lain_std_*` ABI 名称，expand 已完成首个根节点
   的 AstApi 复制，elaborate 仍为句柄传递，lower 在语义迁移完成前明确返回
-  `5203`；十进制常量 `return` 和简单二元算术（`+`、`-`、`*`、`/`）已完成
-  正式库 lowering 及 artifact 回灌，不完整表达式会被拒绝，调用、控制流和
-  完整 L1 Unit 仍待迁移。
+  `5203`；十进制常量 `return`、简单二元算术（`+`、`-`、`*`、`/`）、同源无参数
+  调用和 `if true/if false` 双分支已完成正式库 lowering 及 artifact 回灌，
+  不完整表达式会被拒绝，复杂调用、一般控制流和完整 L1 Unit 仍待迁移。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
@@ -473,7 +474,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   syntax-index 条目（源句柄、根节点、首节点、节点数、import 数和根 span）；
   expand 已通过 AstApi 复制首个根节点，并对未解析 import 返回 `4101`；import
   目标解析和循环依赖诊断仍待迁移。elaborate 仍只传递句柄，lower 对常量
-  `return` 和简单二元算术已生成可执行 artifact，其余形式明确返回 `5203`。
+  `return`、简单二元算术、同源无参数调用和布尔双分支已生成可执行 artifact，
+  其余形式明确返回 `5203`。
   `run_lain_compiler.py --stdlib-artifact build/lainir/formal_stdlib.l1`
   已验证实际替换链。
 - [x] 生成版本化标准库 artifact 和 manifest，记录 ABI、source hash、依赖和
