@@ -18,8 +18,8 @@
 > 现在可以从全部 `std/**/*.lain` 生成并验证 `build/lainir/formal_stdlib.l1`。
 > 该 artifact 还会检查并导出五个 `lain_std_*` ABI 入口；当前正式库的
 > `expand` 已对首个源根节点执行 AstApi 复制，`elaborate` 仍传递该句柄，
-> `lower` 已能为十进制常量 `return` 和简单 `+` 算术生成并运行最小 LAIN-IR，
-> `-`、`*`、`/` 的表达式生成也已接入，且不完整表达式会被拒绝；其他形式
+> `lower` 已能为十进制常量 `return`、简单 `+ - * /` 算术以及同一源文件内的
+> 无参数函数调用生成并运行最小 LAIN-IR，且不完整表达式会被拒绝；其他形式
 > 明确返回迁移中的 `5203`。
 > `run_lain_compiler.py --stdlib-artifact` 已能用同一个 compiler core 实际加载
 > formal artifact，并在该 lowering 边界得到 `5203`。
