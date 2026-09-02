@@ -912,6 +912,15 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
     LainirValue l = interp_eval_expr(interp, frame, expr->data.bin.left);
     LainirValue r = interp_eval_expr(interp, frame, expr->data.bin.right);
     if (interp->error) return lainir_value_unit();
+    /* LAIN-IR uses #add for byte-address arithmetic in generated code.  Keep
+     * integer addition unchanged, while allowing an address plus a scalar
+     * offset to produce another address.  This is the runtime counterpart of
+     * the verifier's address expressions and lets formal stdlib code use the
+     * same memory helpers as hand-written LAIN-IR. */
+    if (l.kind == LAINIR_VALUE_ADDR && r.kind == LAINIR_VALUE_BITS)
+      return lainir_value_addr((uint8_t *)l.as.addr + (size_t)r.as.bits);
+    if (l.kind == LAINIR_VALUE_BITS && r.kind == LAINIR_VALUE_ADDR)
+      return lainir_value_addr((uint8_t *)r.as.addr + (size_t)l.as.bits);
     return lainir_value_bits(interp_value_bits(interp,l,"expected bits for add") + interp_value_bits(interp,r,"expected bits for add"), l.bit_width ? l.bit_width : 32);
   }
   case EXPR_SUB: {

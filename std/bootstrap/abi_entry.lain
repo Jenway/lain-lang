@@ -6,26 +6,6 @@
 // keeps the replacement boundary explicit instead of silently falling back to
 // compiler-core code.
 
-// This is the physical syntax-index header plus its first entry.  Additional
-// entries will be supplied by the formal workspace pass once import and path
-// resolution have moved out of bootstrap std.
-//
-// Keep the type declaration before foreign function bindings.  The current
-// Meta collector's type pass expects local record declarations to be visible
-// before body-less capability declarations.
-let FormalSyntaxIndex: type = std::struct {
-    count: i64,
-    cache: addr,
-    source_index: i64,
-    source: addr,
-    root: addr,
-    first: addr,
-    nodes: i64,
-    imports: i64,
-    span_start: i64,
-    span_length: i64,
-};
-
 @foreign(c, link_name = "lain_ast_v1_nil")
 let ast_nil = std::func() -> addr;
 
@@ -51,6 +31,9 @@ let source_data = std::func(index: i64) -> addr;
 @foreign(c, link_name = "bootstrap.source-length")
 let source_length = std::func(index: i64) -> i64;
 
+@foreign(c, link_name = "bootstrap.allocate-pages")
+let allocate_pages = std::func(size: i64) -> addr;
+
 @foreign(c, link_name = "tool_source_new")
 let source_new = std::func(data: addr, length: i64) -> addr;
 
@@ -63,43 +46,81 @@ let raw_parse = std::func(source: addr, tokens: addr) -> addr;
 @foreign(c, link_name = "raw_node_first")
 let raw_first = std::func(node: addr) -> addr;
 
+@foreign(c, link_name = "raw_node_next")
+let raw_next = std::func(node: addr) -> addr;
+
 @foreign(c, link_name = "raw_node_start")
 let raw_start = std::func(node: addr) -> i64;
 
 @foreign(c, link_name = "raw_node_length")
 let raw_length = std::func(node: addr) -> i64;
 
-// The compiler core asks the active standard library for a syntax-index
-// handle.  The full workspace/import index is still being migrated from
-// bootstrap std.  This first formal slice parses the first supplied source so
-// the handle is real and has the same physical header/entry shape.
-@abi_export
-let syntax_units_build = std::func() -> FormalSyntaxIndex {
-    let count: i64 = source_count();
-    let source: addr = 0;
-    let root: addr = 0;
-    let first: addr = 0;
-    let span_start: i64 = 0;
-    let span_length: i64 = 0;
-    if count > 0 {
-        source = source_new(source_data(0), source_length(0));
-        root = raw_parse(source, lex_all(source));
-        first = raw_first(root);
-        span_start = raw_start(root);
-        span_length = raw_length(root);
+@foreign(c, link_name = "raw_is_nil")
+let raw_nil = std::func(node: addr) -> bool;
+
+// Syntax-index layout: count @0, cache @8, then 64-byte entries at @16.
+// Every entry stores source index, source, root, first node, node count,
+// import count, root span start and root span length.  Import target
+// resolution remains the next migration slice; parsing and indexing all
+// supplied sources already happens here.
+let syntax_node_count = std::func(node: addr) -> i64 {
+    if raw_nil(node) {
+        return 0;
     }
-    return FormalSyntaxIndex {
-        count: count,
-        cache: 0,
-        source_index: 0,
-        source: source,
-        root: root,
-        first: first,
-        nodes: 0,
-        imports: 0,
-        span_start: span_start,
-        span_length: span_length,
-    };
+    let next: addr = raw_next(node);
+    return 1 + syntax_node_count(next);
+};
+
+let syntax_entry_at = std::func(index: addr, ordinal: i64) -> addr {
+    if ordinal == 0 {
+        return index + 16;
+    }
+    return syntax_entry_at(index, ordinal - 1) + 64;
+};
+
+@abi_export
+let syntax_units_build = std::func() -> addr {
+    let count: i64 = source_count();
+    let bytes: i64 = 16;
+    let size_ordinal: i64 = 0;
+    while size_ordinal < count {
+        bytes = bytes + 64;
+        size_ordinal = size_ordinal + 1;
+    }
+    let index: addr = allocate_pages(bytes);
+    std::store_bits(64, index + 0, count);
+    std::store_bits(64, index + 8, 0);
+    let ordinal: i64 = 0;
+    while ordinal < count {
+        let source: addr = source_new(
+            source_data(ordinal),
+            source_length(ordinal),
+        );
+        let root: addr = raw_parse(source, lex_all(source));
+        let first: addr = raw_first(root);
+        let node_count: i64 = syntax_node_count(first);
+        let entry: addr = syntax_entry_at(index, ordinal);
+        std::store_bits(64, entry + 0, ordinal);
+        std::store_bits(64, entry + 8, source as usize);
+        std::store_bits(64, entry + 16, root as usize);
+        std::store_bits(64, entry + 24, first as usize);
+        std::store_bits(64, entry + 32, node_count);
+        std::store_bits(64, entry + 40, 0);
+        std::store_bits(64, entry + 48, raw_start(root));
+        std::store_bits(64, entry + 56, raw_length(root));
+        ordinal = ordinal + 1;
+    }
+    return index;
+};
+
+@abi_export
+let syntax_index_count = std::func(index: addr) -> i64 {
+    return std::load_bits(64, index + 0);
+};
+
+@abi_export
+let syntax_index_entry = std::func(index: addr, ordinal: i64) -> addr {
+    return syntax_entry_at(index, ordinal);
 };
 
 @abi_export

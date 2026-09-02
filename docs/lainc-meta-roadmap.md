@@ -463,10 +463,11 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
-  实现仍待接入这些入口；当前正式库会解析首个输入源并生成真实的
-  syntax-index 头和首项，其余 workspace/import 索引仍待迁移；expand/elaborate
-  只做原样传递，lower 明确返回 `5203`。`run_lain_compiler.py
-  --stdlib-artifact build/lainir/formal_stdlib.l1` 已验证实际替换链。
+  实现仍待接入这些入口；当前正式库会解析全部输入源，并为每个源生成真实的
+  syntax-index 条目（源句柄、根节点、首节点、节点数和根 span）；import 目标
+  解析和循环依赖诊断仍待迁移。expand/elaborate 只做原样传递，lower 明确返回
+  `5203`。`run_lain_compiler.py --stdlib-artifact build/lainir/formal_stdlib.l1`
+  已验证实际替换链。
 - [x] 生成版本化标准库 artifact 和 manifest，记录 ABI、source hash、依赖和
   target-independent 标记；产物为 `build/lainir/bootstrap_std.manifest.json`。
 - [x] 添加 `tests/lainir_lain/run_stdlib_bootstrap.py`。
