@@ -319,8 +319,9 @@ src/compiler-archive/*.lain 最终 compiler，调用正式标准库
   `src/lainir/lain/compiler_context.l1`；owner、step/allocation/recursion limit
   和 capability mask 均有固定字段及消费接口；零预算表示不设限，递归预算支持
   enter/leave，单 capability bit 可查询。
-- [~] `MetaPassResultV1` 已提供 owner 匹配和从旧 owner 转交到 CompileContext
-  的 ABI 操作；跨 owner 的实际负例仍需接入运行时测试矩阵。
+- [x] `MetaPassResultV1` 已提供 owner 匹配和从旧 owner 转交到 CompileContext
+  的 ABI 操作；`scripts/check_compile_context.py` 已覆盖成功转交、转交后旧
+  owner 拒绝和 owner 匹配负例。
 - [~] 五个 `lain_std_*` ABI 入口均已定义并接入编译器调度；当前
   expand/elaborate 仍是 identity pass，lower 通过内部 hook 调用现有 lowering，
   语义迁移尚未完成。
