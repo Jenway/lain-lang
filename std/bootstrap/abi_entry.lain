@@ -245,6 +245,29 @@ let formal_is_single_decimal_argument = std::func(
     return false;
 };
 
+let formal_is_comma = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 1 { return false; }
+    return byte_at(source_bytes(source), raw_start(node)) == 44;
+};
+
+let formal_is_two_decimal_arguments = std::func(
+    source: addr,
+    arguments: addr,
+) -> bool {
+    let first: addr = raw_first(arguments);
+    if formal_is_decimal(source, first) {
+        let comma: addr = raw_next(first);
+        if formal_is_comma(source, comma) {
+            let second: addr = raw_next(comma);
+            if formal_is_decimal(source, second) {
+                let tail: addr = raw_next(second);
+                if raw_nil(tail) { return true; }
+            }
+        }
+    }
+    return false;
+};
+
 let formal_is_operator = std::func(source: addr, node: addr) -> bool {
     if raw_kind(node) != 1 || raw_length(node) != 1 { return false; }
     let value: i8 = byte_at(source_bytes(source), raw_start(node));
@@ -312,6 +335,32 @@ let formal_find_parameter_return_list = std::func(
         }
     }
     return formal_find_parameter_return_list(source, raw_next(node));
+};
+
+let formal_find_two_parameter_return_list = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_return(source, node) {
+        let left: addr = raw_next(node);
+        let operator: addr = raw_next(left);
+        let right: addr = raw_next(operator);
+        if raw_kind(left) == 1 {
+            if raw_kind(right) == 1 {
+                if formal_is_operator(source, operator) {
+                    if formal_is_decimal(source, left) == false {
+                        if formal_is_decimal(source, right) == false {
+                            if formal_is_semicolon(source, raw_next(right)) {
+                                return node;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return formal_find_two_parameter_return_list(source, raw_next(node));
 };
 
 let formal_find_return_body = std::func(source: addr, node: addr) -> addr {
@@ -392,6 +441,9 @@ let formal_find_call_return_list = std::func(
                         return node;
                     }
                     if formal_is_single_decimal_argument(source, probe1) {
+                        return node;
+                    }
+                    if formal_is_two_decimal_arguments(source, probe1) {
                         return node;
                     }
                 }
@@ -660,6 +712,30 @@ let formal_copy_parameter_return_expression = std::func(
     return formal_copy_source(buffer, cursor, source, value);
 };
 
+let formal_copy_two_parameter_expression = std::func(
+    buffer: addr,
+    offset: i64,
+    source: addr,
+    return_node: addr,
+) -> i64 {
+    let operator: addr = raw_next(raw_next(return_node));
+    let operator_value: i8 = byte_at(source_bytes(source), raw_start(operator));
+    let cursor: i64 = offset;
+    if operator_value == 43 {
+        cursor = formal_copy_literal(buffer, cursor, "#add(%x, %y)");
+    }
+    if operator_value == 45 {
+        cursor = formal_copy_literal(buffer, cursor, "#sub(%x, %y)");
+    }
+    if operator_value == 42 {
+        cursor = formal_copy_literal(buffer, cursor, "#mul(%x, %y)");
+    }
+    if operator_value == 47 {
+        cursor = formal_copy_literal(buffer, cursor, "#div(%x, %y)");
+    }
+    return cursor;
+};
+
 let formal_emit_constant = std::func(source: addr, return_node: addr) -> unit {
     let prefix: addr = "#proc main() -> #bits<64> {\n  #return ";
     let suffix: addr = "\n}\n";
@@ -741,6 +817,37 @@ let formal_emit_call_arg = std::func(
     offset = formal_copy_source(buffer, offset, source, callee);
     offset = formal_copy_literal(buffer, offset, "(");
     offset = formal_copy_source(buffer, offset, source, argument);
+    offset = formal_copy_literal(buffer, offset, ")\n}\n");
+    artifact_write(buffer, offset);
+};
+
+let formal_emit_call_two_args = std::func(
+    source: addr,
+    callee: addr,
+    arguments: addr,
+    callee_return: addr,
+) -> unit {
+    let first: addr = raw_first(arguments);
+    let comma: addr = raw_next(first);
+    let second: addr = raw_next(comma);
+    let buffer: addr = allocate_pages(512);
+    let offset: i64 = formal_copy_literal(buffer, 0, "#proc ");
+    offset = formal_copy_source(buffer, offset, source, callee);
+    offset = formal_copy_literal(
+        buffer, offset, "(#bits<64> %x, #bits<64> %y) -> #bits<64> {\n  #return "
+    );
+    offset = formal_copy_two_parameter_expression(
+        buffer, offset, source, callee_return
+    );
+    offset = formal_copy_literal(
+        buffer, offset,
+        "\n}\n\n#proc main() -> #bits<64> {\n  #return #call "
+    );
+    offset = formal_copy_source(buffer, offset, source, callee);
+    offset = formal_copy_literal(buffer, offset, "(");
+    offset = formal_copy_source(buffer, offset, source, first);
+    offset = formal_copy_literal(buffer, offset, ", ");
+    offset = formal_copy_source(buffer, offset, source, second);
     offset = formal_copy_literal(buffer, offset, ")\n}\n");
     artifact_write(buffer, offset);
 };
@@ -867,6 +974,19 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
             source, raw_first(root), callee
         );
         let argument: addr = raw_first(arguments);
+        if formal_is_two_decimal_arguments(source, arguments) {
+            let two_parameter_return: addr = formal_find_two_parameter_return_list(
+                source, raw_first(callee_body)
+            );
+            if raw_nil(callee_body) == false {
+                if raw_nil(two_parameter_return) == false {
+                    formal_emit_call_two_args(
+                        source, callee, arguments, two_parameter_return
+                    );
+                    return true;
+                }
+            }
+        }
         let callee_return: addr = formal_find_return_list(
             source, raw_first(callee_body)
         );

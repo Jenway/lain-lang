@@ -19,7 +19,7 @@
 > 该 artifact 还会检查并导出五个 `lain_std_*` ABI 入口；当前正式库的
 > `expand` 已对首个源根节点执行 AstApi 复制，`elaborate` 仍传递该句柄，
 > `lower` 已能为十进制常量 `return`、简单 `+ - * /` 算术、同一源文件内的
-> 无参数/单个标量参数的函数调用以及布尔/数值比较的 `if ... else` 双分支返回生成并运行最小
+> 无参数/一至两个标量参数的函数调用以及布尔/数值比较的 `if ... else` 双分支返回生成并运行最小
 > LAIN-IR；算术 lowering 生成的表达式现在包在 `#eval` 块中，由 seed evaluator
 > 执行后再返回标量，
 > 且不完整表达式会被拒绝；其他形式
@@ -467,7 +467,7 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   正式标准库现在已导出五个 `lain_std_*` ABI 名称，expand 已完成首个根节点
   的 AstApi 复制，elaborate 仍为句柄传递，lower 在语义迁移完成前明确返回
   `5203`；十进制常量 `return`、简单二元算术（`+`、`-`、`*`、`/`）、同源无参数
-  调用（无参数或单个十进制参数）和布尔/数值比较的 `if ... else` 双分支已完成正式库 lowering 及 artifact
+  调用（无参数或一至两个十进制参数）和布尔/数值比较的 `if ... else` 双分支已完成正式库 lowering 及 artifact
   回灌，
   不完整表达式会被拒绝，复杂调用、一般控制流和完整 L1 Unit 仍待迁移。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
@@ -477,7 +477,7 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   syntax-index 条目（源句柄、根节点、首节点、节点数、import 数和根 span）；
   expand 已通过 AstApi 复制首个根节点，并对未解析 import 返回 `4101`；import
   目标解析和循环依赖诊断仍待迁移。elaborate 仍只传递句柄，lower 对常量
-  `return`、简单二元算术、同源无参数/单参数调用和布尔/数值比较双分支已生成可执行
+  `return`、简单二元算术、同源无参数/一至两参数调用和布尔/数值比较双分支已生成可执行
   artifact，
   其余形式明确返回 `5203`。
   `run_lain_compiler.py --stdlib-artifact build/lainir/formal_stdlib.l1`
