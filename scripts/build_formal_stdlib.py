@@ -39,6 +39,7 @@ ABI_ENTRIES = (
     "lain_std_elaborate",
     "lain_std_lower",
 )
+ABI_SUPPORT_ENTRIES = ("syntax_units_build",)
 
 
 def run(arguments: list[Path | str]) -> None:
@@ -117,6 +118,7 @@ def write_manifest(paths: tuple[Path, ...], fingerprint: str) -> None:
                 "abi": "lain_std_abi_v1",
                 "abi_status": "entry-contract",
                 "abi_entries": list(ABI_ENTRIES),
+                "support_entries": list(ABI_SUPPORT_ENTRIES),
                 "sources": [
                     {
                         "path": path.relative_to(ROOT).as_posix(),
@@ -151,7 +153,7 @@ def main() -> int:
     run([SEED_PRINT, OUTPUT])
     artifact = OUTPUT.read_text(encoding="utf-8")
     missing = [
-        name for name in ABI_ENTRIES
+        name for name in ABI_ENTRIES + ABI_SUPPORT_ENTRIES
         if f"#proc {name}(" not in artifact
     ]
     if missing:

@@ -6,6 +6,26 @@
 // keeps the replacement boundary explicit instead of silently falling back to
 // compiler-core code.
 
+// This is the physical syntax-index header plus its first entry.  Additional
+// entries will be supplied by the formal workspace pass once import and path
+// resolution have moved out of bootstrap std.
+//
+// Keep the type declaration before foreign function bindings.  The current
+// Meta collector's type pass expects local record declarations to be visible
+// before body-less capability declarations.
+let FormalSyntaxIndex: type = std::struct {
+    count: i64,
+    cache: addr,
+    source_index: i64,
+    source: addr,
+    root: addr,
+    first: addr,
+    nodes: i64,
+    imports: i64,
+    span_start: i64,
+    span_length: i64,
+};
+
 @foreign(c, link_name = "lain_ast_v1_nil")
 let ast_nil = std::func() -> addr;
 
@@ -22,13 +42,64 @@ let pass_result_new = std::func(
 @foreign(c, link_name = "lain_compile_context_v1_owner")
 let context_owner = std::func(context: addr) -> addr;
 
+@foreign(c, link_name = "bootstrap.source-count")
+let source_count = std::func() -> i64;
+
+@foreign(c, link_name = "bootstrap.source-data")
+let source_data = std::func(index: i64) -> addr;
+
+@foreign(c, link_name = "bootstrap.source-length")
+let source_length = std::func(index: i64) -> i64;
+
+@foreign(c, link_name = "tool_source_new")
+let source_new = std::func(data: addr, length: i64) -> addr;
+
+@foreign(c, link_name = "tool_lex_all")
+let lex_all = std::func(source: addr) -> addr;
+
+@foreign(c, link_name = "raw_parse")
+let raw_parse = std::func(source: addr, tokens: addr) -> addr;
+
+@foreign(c, link_name = "raw_node_first")
+let raw_first = std::func(node: addr) -> addr;
+
+@foreign(c, link_name = "raw_node_start")
+let raw_start = std::func(node: addr) -> i64;
+
+@foreign(c, link_name = "raw_node_length")
+let raw_length = std::func(node: addr) -> i64;
+
 // The compiler core asks the active standard library for a syntax-index
 // handle.  The full workspace/import index is still being migrated from
-// bootstrap std, so the formal entry keeps this as a null placeholder.  The
-// lower pass reports the migration status before attempting to consume it.
+// bootstrap std.  This first formal slice parses the first supplied source so
+// the handle is real and has the same physical header/entry shape.
 @abi_export
-let syntax_units_build = std::func() -> addr {
-    return 0;
+let syntax_units_build = std::func() -> FormalSyntaxIndex {
+    let count: i64 = source_count();
+    let source: addr = 0;
+    let root: addr = 0;
+    let first: addr = 0;
+    let span_start: i64 = 0;
+    let span_length: i64 = 0;
+    if count > 0 {
+        source = source_new(source_data(0), source_length(0));
+        root = raw_parse(source, lex_all(source));
+        first = raw_first(root);
+        span_start = raw_start(root);
+        span_length = raw_length(root);
+    }
+    return FormalSyntaxIndex {
+        count: count,
+        cache: 0,
+        source_index: 0,
+        source: source,
+        root: root,
+        first: first,
+        nodes: 0,
+        imports: 0,
+        span_start: span_start,
+        span_length: span_length,
+    };
 };
 
 @abi_export
