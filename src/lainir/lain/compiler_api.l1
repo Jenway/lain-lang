@@ -7,6 +7,22 @@
 
 #extern #proc bootstrap.source-count() -> i64;
 #extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+#extern #proc lain_compile_context_v1_new(
+  addr %owner, i64 %step_limit, i64 %allocation_limit,
+  i64 %recursion_limit, i64 %capability_mask
+) -> addr;
+#extern #proc lain_compile_context_v1_set_step_limit(
+  addr %context, i64 %limit
+) -> #unit;
+#extern #proc lain_compile_context_v1_set_allocation_limit(
+  addr %context, i64 %limit
+) -> #unit;
+#extern #proc lain_compile_context_v1_set_recursion_limit(
+  addr %context, i64 %limit
+) -> #unit;
+#extern #proc lain_compile_context_v1_set_capability_mask(
+  addr %context, i64 %mask
+) -> #unit;
 #extern #proc lain_std_abi_version() -> i64;
 #extern #proc lain_std_initialize(addr %context) -> i32;
 #extern #proc lain_std_expand(addr %context, addr %source_unit, addr %root) -> addr;
@@ -19,9 +35,10 @@
 
 // CompilerRequest:
 //   source count @0, emit-l1 @8, verify-l1 @16,
-//   source begin/end @24/@32, root source @40, require-main @48.
+//   source begin/end @24/@32, root source @40, require-main @48,
+//   CompileContextV1 @56.
 #proc compiler_request_new() -> addr {
-  #let %request: addr = #call bootstrap.allocate-pages(56)
+  #let %request: addr = #call bootstrap.allocate-pages(64)
   #let %source_count: i64 = #call bootstrap.source-count()
   #store #call bootstrap.source-count(),
     #lea(base=%request, idx=0, scale=0, offset=0)
@@ -31,7 +48,15 @@
   #store %source_count, #lea(base=%request, idx=0, scale=0, offset=32)
   #store 0, #lea(base=%request, idx=0, scale=0, offset=40)
   #store 1, #lea(base=%request, idx=0, scale=0, offset=48)
+  // Keep the existing bootstrap step guard while leaving allocation,
+  // recursion and capabilities configurable through the context ABI.
+  #store #call lain_compile_context_v1_new(%request, 50000, 0, 0, 0),
+    #lea(base=%request, idx=0, scale=0, offset=56)
   #return %request
+}
+
+#proc compiler_request_context(addr %request) -> addr {
+  #return #load[addr](#lea(base=%request, idx=0, scale=0, offset=56))
 }
 
 #proc compiler_request_set_root(addr %request, i64 %root) -> #unit {
@@ -41,6 +66,40 @@
 
 #proc compiler_request_set_require_main(addr %request, i1 %required) -> #unit {
   #store %required, #lea(base=%request, idx=0, scale=0, offset=48)
+  #return
+}
+
+#proc compiler_request_set_step_limit(addr %request, i64 %limit) -> #unit {
+  #call lain_compile_context_v1_set_step_limit(
+    #call compiler_request_context(%request), %limit
+  )
+  #return
+}
+
+#proc compiler_request_set_allocation_limit(
+  addr %request, i64 %limit
+) -> #unit {
+  #call lain_compile_context_v1_set_allocation_limit(
+    #call compiler_request_context(%request), %limit
+  )
+  #return
+}
+
+#proc compiler_request_set_recursion_limit(
+  addr %request, i64 %limit
+) -> #unit {
+  #call lain_compile_context_v1_set_recursion_limit(
+    #call compiler_request_context(%request), %limit
+  )
+  #return
+}
+
+#proc compiler_request_set_capability_mask(
+  addr %request, i64 %mask
+) -> #unit {
+  #call lain_compile_context_v1_set_capability_mask(
+    #call compiler_request_context(%request), %mask
+  )
   #return
 }
 
@@ -76,7 +135,8 @@
 #proc compiler_compile_request(addr %request) -> addr {
   // The compiler core knows only this stable ABI.  The implementation lives
   // in the separately bundled bootstrap standard library.
-  #let %std_status: i32 = #call lain_std_initialize(%request)
+  #let %context: addr = #call compiler_request_context(%request)
+  #let %std_status: i32 = #call lain_std_initialize(%context)
   #if #ne(%std_status, 0) {
     #return #call compiler_result_new(%std_status, %std_status, 0, 0)
   }
@@ -87,7 +147,7 @@
   // The standard library owns the semantic passes. The core only supplies
   // the source/index handles and consumes their versioned results.
   #let %expanded: addr = #call lain_std_expand(
-    %request, %syntax_index, %syntax_index
+    %context, %syntax_index, %syntax_index
   )
   #let %expanded_status: i32 = #call lain_meta_pass_result_v1_status(%expanded)
   #if #ne(%expanded_status, 0) {
@@ -96,7 +156,7 @@
     )
   }
   #let %elaborated: addr = #call lain_std_elaborate(
-    %request, #call lain_meta_pass_result_v1_result(%expanded)
+    %context, #call lain_meta_pass_result_v1_result(%expanded)
   )
   #let %elaborated_status: i32 = #call lain_meta_pass_result_v1_status(%elaborated)
   #if #ne(%elaborated_status, 0) {
@@ -105,7 +165,7 @@
     )
   }
   #let %lowered: addr = #call lain_std_lower(
-    %request,
+    %context,
     #call lain_meta_pass_result_v1_result(%elaborated),
     %syntax_index
   )
