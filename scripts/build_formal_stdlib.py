@@ -32,6 +32,7 @@ OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib.l1"
 MANIFEST = ROOT / "build" / "lainir" / "formal_stdlib.manifest.json"
 ABI_PROBE = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"
 ABI_OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib_abi_output.l1"
+FORMAL_CONSTANT_PROBE = ROOT / "scripts" / "fixtures" / "formal_constant_return.lain"
 ABI_ENTRIES = (
     "lain_std_abi_version",
     "lain_std_initialize",
@@ -89,6 +90,38 @@ def verify_abi_entry() -> None:
     if selected.returncode == 0 or "5203" not in selected_diagnostics:
         raise RuntimeError(
             "formal stdlib replacement did not reach the pending lower pass"
+        )
+    constant_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_CONSTANT_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if constant_probe.returncode:
+        detail = constant_probe.stderr.strip() or constant_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib constant lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    constant_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if constant_run.returncode or constant_run.stdout.strip() != "42":
+        detail = constant_run.stderr.strip() or constant_run.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib constant artifact did not run as 42"
+            + (f": {detail}" if detail else "")
         )
     import_probe = subprocess.run(
         [
