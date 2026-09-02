@@ -7,6 +7,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -16,6 +17,8 @@ L1BOOTSTRAP = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
 BUNDLE = ROOT / "build" / "lainir" / "lain_compiler.l1"
+CORE_BUNDLE = ROOT / "build" / "lainir" / "lain_compiler_core.l1"
+BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 
 
 def run(arguments: list[Path | str]) -> subprocess.CompletedProcess[str]:
@@ -35,21 +38,53 @@ def main() -> int:
         action="store_true",
         help="compile a source closure without requiring a native main entry",
     )
+    parser.add_argument(
+        "--stdlib-artifact",
+        type=Path,
+        help=(
+            "use this standard-library artifact with compiler core instead "
+            "of the default bootstrap stdlib"
+        ),
+    )
     parser.add_argument("source", type=Path, nargs="+")
     args = parser.parse_args()
     built = run([sys.executable, BUILD])
     if built.returncode:
         print(built.stderr or built.stdout, file=sys.stderr)
         return built.returncode
-    executed = run(
-        [
-            L1BOOTSTRAP,
-            BUNDLE,
-            "compiler_compile_library" if args.library else "compiler_compile",
-            args.output,
-            *(ROOT / source for source in args.source),
-        ]
-    )
+    selected_bundle = BUNDLE
+    with tempfile.TemporaryDirectory(prefix="lain-stdlib-select-") as temp:
+        if args.stdlib_artifact:
+            stdlib = args.stdlib_artifact
+            if not stdlib.is_absolute():
+                stdlib = ROOT / stdlib
+            if not stdlib.is_file():
+                print(f"standard-library artifact not found: {stdlib}", file=sys.stderr)
+                return 1
+            selected_bundle = Path(temp) / "lain_compiler.l1"
+            bundled = run(
+                [
+                    sys.executable,
+                    BUNDLER,
+                    "-o",
+                    selected_bundle,
+                    CORE_BUNDLE,
+                    stdlib,
+                ]
+            )
+            if bundled.returncode:
+                print(bundled.stderr or bundled.stdout, file=sys.stderr)
+                return bundled.returncode
+        executed = run(
+            [
+                L1BOOTSTRAP,
+                selected_bundle,
+                "compiler_compile_library" if args.library else "compiler_compile",
+                args.output,
+                *(ROOT / source for source in args.source),
+            ]
+        )
+
     if executed.returncode:
         print(executed.stderr or executed.stdout, file=sys.stderr)
         return executed.returncode

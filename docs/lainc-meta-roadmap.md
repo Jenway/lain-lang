@@ -18,6 +18,8 @@
 > 现在可以从全部 `std/**/*.lain` 生成并验证 `build/lainir/formal_stdlib.l1`。
 > 该 artifact 还会检查并导出五个 `lain_std_*` ABI 入口；当前
 > `expand/elaborate` 是 identity pass，`lower` 明确返回迁移中的 `5203`。
+> `run_lain_compiler.py --stdlib-artifact` 已能用同一个 compiler core 实际加载
+> formal artifact，并在该 lowering 边界得到 `5203`。
 > archive API 的空输入和非空
 > 输入客户端已经可用；简单标量 `return` 的真实用户程序已能生成并回灌执行；
 > 完整 L1 Unit 生成、正式标准库全面替换、复杂真实用户程序、native `lainc`
@@ -461,7 +463,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
-  实现仍待接入这些入口；当前 lower 明确返回 `5203`。
+  实现仍待接入这些入口；当前 expand/elaborate 只做原样传递，syntax-index
+  由占位句柄提供，lower 明确返回 `5203`。`run_lain_compiler.py
+  --stdlib-artifact build/lainir/formal_stdlib.l1` 已验证实际替换链。
 - [x] 生成版本化标准库 artifact 和 manifest，记录 ABI、source hash、依赖和
   target-independent 标记；产物为 `build/lainir/bootstrap_std.manifest.json`。
 - [x] 添加 `tests/lainir_lain/run_stdlib_bootstrap.py`。

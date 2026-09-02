@@ -31,6 +31,7 @@ SEED_RUN = ROOT / "seed" / "zig-out" / "bin" / (
 OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib.l1"
 MANIFEST = ROOT / "build" / "lainir" / "formal_stdlib.manifest.json"
 ABI_PROBE = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"
+ABI_OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib_abi_output.l1"
 ABI_ENTRIES = (
     "lain_std_abi_version",
     "lain_std_initialize",
@@ -64,6 +65,24 @@ def verify_abi_entry() -> None:
         raise RuntimeError(
             "formal stdlib ABI version entry failed"
             + (f": {detail}" if detail else "")
+        )
+    selected = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    selected_diagnostics = selected.stdout + selected.stderr
+    if selected.returncode == 0 or "5203" not in selected_diagnostics:
+        raise RuntimeError(
+            "formal stdlib replacement did not reach the pending lower pass"
         )
 
 
