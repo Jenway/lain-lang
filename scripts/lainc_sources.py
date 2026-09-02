@@ -5,13 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 
-MANIFEST = Path("src/lainc") / "parts" / "MANIFEST"
+MANIFEST = Path("src/lainc") / "COMPILER_SOURCES.txt"
 
 
 def compiler_source_dir(root: Path) -> Path:
     """Return the unified compiler module directory."""
 
-    return root / "src" / "lainc" / "parts"
+    return root / "src" / "lainc"
 
 
 def compiler_sources(root: Path) -> tuple[Path, ...]:
@@ -25,7 +25,9 @@ def compiler_sources(root: Path) -> tuple[Path, ...]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        path = compiler_source_dir(root) / (line if line.endswith(".lain") else f"{line}.lain")
+        path = root / line
+        if not path.is_absolute():
+            path = compiler_source_dir(root) / path
         if path.suffix != ".lain" or not path.exists():
             raise FileNotFoundError(f"manifest source is missing: {path}")
         sources.append(path)
