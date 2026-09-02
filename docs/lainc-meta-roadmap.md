@@ -384,7 +384,8 @@ attributes/import
   syntax-index 的未解析 import/循环依赖诊断。完整 AST 变换和 lowering 仍待迁移。
 - [~] compiler API 已只调用 `lain_std_expand/elaborate/lower`；完整 lowering
   实现已经进入 bootstrap std artifact，并通过 `lain_std_lower_program` 暴露，
-  但 expand/elaborate 的完整 AST 变换和正式 ABI 仍待完成。
+  但 expand/elaborate 的完整 AST 变换和正式 ABI 仍待完成。普通运行函数中
+  出现局部 `std::module`/`std::struct` 时不会再被误判为 Meta 函数。
 - [x] 加 boundary lint：`scripts/check_lainir_boundaries.py` 检查 core artifact
   不含高级形式字符串和语义实现过程，并确认对应实现存在于 bootstrap stdlib；
   构建脚本每次都会运行该检查。
@@ -500,8 +501,9 @@ fixture 使用编译后的 artifact 运行。
   lowering；缺少 receiver binding 时现在返回诊断 `5108`，不再生成
   `%missing` 的零偏移加载；writer 的未知字段路径也不再猜测类型或输出
   offset-zero load，未知成员赋值也不会生成零偏移写入。合法 record 成员
-  的读写仍已通过小例验证。post-call projection 仍由已验证的调用解析路径
-  处理，模块/工厂的未解析成员还需要补齐覆盖。
+  的读写仍已通过小例验证。局部模块的未解析成员现在也会返回 `5108`，但
+  合法的模块成员解析尚未接通；post-call projection 仍由已验证的调用解析
+  路径处理，模块/factory 的完整成员覆盖待补齐。
 
 验收：第 2 套生成的 archive artifact 通过四项强 gate：
 
