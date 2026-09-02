@@ -26,6 +26,7 @@ FIXTURES = (
     (ROOT / "scripts" / "fixtures" / "formal_call_return.lain", "40"),
     (ROOT / "scripts" / "fixtures" / "formal_call_argument_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_call_two_arguments_return.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_call_named_arguments_return.lain", "42"),
 )
 
 
