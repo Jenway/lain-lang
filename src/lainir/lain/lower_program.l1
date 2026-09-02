@@ -171,8 +171,8 @@
   // materialized-module construction states @288, Meta-evaluation cache
   // head/tail @264/@272, physical-function hash buckets @280,
   // import-collection flag @320, physical root index @328,
-  // lazy-nonroot flag @336.
-  #let %unit: addr = #call bootstrap.allocate-pages(344)
+  // lazy-nonroot flag @336, Meta step limit @344.
+  #let %unit: addr = #call bootstrap.allocate-pages(352)
   #let %nil: addr = #call program_nil()
   #let %function_buckets: addr = #call bootstrap.allocate-pages(32768)
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=0)
@@ -215,6 +215,9 @@
   #store 0, #lea(base=%unit, idx=0, scale=0, offset=320)
   #store 0, #lea(base=%unit, idx=0, scale=0, offset=328)
   #store 0, #lea(base=%unit, idx=0, scale=0, offset=336)
+  // Preserve the previous runaway-evaluation guard as the default policy;
+  // callers can replace it through program_unit_set_meta_step_limit.
+  #store 50000, #lea(base=%unit, idx=0, scale=0, offset=344)
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=264)
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=272)
   #store %function_buckets,
@@ -557,14 +560,26 @@
     #load[#bits<64>](#lea(base=%unit, idx=0, scale=0, offset=224)), 1
   )
   #store %step, #lea(base=%unit, idx=0, scale=0, offset=224)
-  // This protects compile-time Meta evaluation from an accidental recursive
-  // factory.  The limit is deliberately generous for the current bootstrap,
-  // while making a runaway evaluation report a normal compiler diagnostic.
-  #return #ge(%step, 50000)
+  #let %limit: i64 = #load[i64](
+    #lea(base=%unit, idx=0, scale=0, offset=344)
+  )
+  // A zero limit disables the guard.  Non-zero limits preserve the old
+  // inclusive boundary and make the policy explicit per compilation unit.
+  #if #eq(%limit, 0) { #return 0 }
+  #return #ge(%step, %limit)
 }
 
 #proc program_unit_meta_step(addr %unit) -> i64 {
   #return #load[#bits<64>](#lea(base=%unit, idx=0, scale=0, offset=224))
+}
+
+#proc program_unit_set_meta_step_limit(addr %unit, i64 %limit) -> #unit {
+  #store %limit, #lea(base=%unit, idx=0, scale=0, offset=344)
+  #return
+}
+
+#proc program_unit_meta_step_limit(addr %unit) -> i64 {
+  #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=344))
 }
 
 #proc program_unit_set_meta_stage(addr %unit, i32 %stage) -> #unit {
