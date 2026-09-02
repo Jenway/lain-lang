@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
+BOUNDARY_CHECK = ROOT / "scripts" / "check_lainir_boundaries.py"
 L1CHECK = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-print.exe" if os.name == "nt" else "lainir-print"
 )
@@ -30,20 +31,28 @@ CORE_MODULES = (
     ROOT / "src" / "lainir" / "lain" / "ast_runtime.l1",
     ROOT / "src" / "lainir" / "lain" / "compiler_context.l1",
     ROOT / "src" / "lainir" / "lain" / "stdlib_contracts.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_values.l1",
-    ROOT / "src" / "lainir" / "lain" / "eval.l1",
-    ROOT / "src" / "lainir" / "lain" / "workspace.l1",
-    ROOT / "src" / "lainir" / "lain" / "workspace_cache.l1",
-    ROOT / "src" / "lainir" / "lain" / "syntax_units.l1",
-    ROOT / "src" / "lainir" / "lain" / "lower_func.l1",
-    ROOT / "src" / "lainir" / "lain" / "lower_program.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_bindings.l1",
     ROOT / "src" / "lainir" / "lain" / "compiler_api.l1",
     ROOT / "src" / "lainir" / "lain" / "compiler.l1",
 )
 BOOTSTRAP_STD_MODULES = (
     ROOT / "src" / "lainir" / "bootstrap_std" / "core_eval_contracts.l1",
+    # Compile-time expression evaluation is a standard-library capability.
+    # Keep its implementation out of compiler core; the core only consumes
+    # the declarations in core_eval_contracts.l1 and dispatches the pass.
+    ROOT / "src" / "lainir" / "lain" / "eval.l1",
+    # Semantic Meta and lowering implementations belong to the bootstrap
+    # standard library.  The compiler core sees only their ABI declarations.
+    ROOT / "src" / "lainir" / "lain" / "meta.l1",
+    ROOT / "src" / "lainir" / "lain" / "meta_values.l1",
+    ROOT / "src" / "lainir" / "lain" / "lower_func.l1",
+    ROOT / "src" / "lainir" / "lain" / "lower_record.l1",
+    ROOT / "src" / "lainir" / "lain" / "lower_program.l1",
+    ROOT / "src" / "lainir" / "lain" / "meta_bindings.l1",
+    # Import discovery and syntax-index construction are language policy;
+    # keep them with the bootstrap library rather than the core driver.
+    ROOT / "src" / "lainir" / "lain" / "workspace.l1",
+    ROOT / "src" / "lainir" / "lain" / "workspace_cache.l1",
+    ROOT / "src" / "lainir" / "lain" / "syntax_units.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_import.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_record.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_type.l1",
@@ -164,6 +173,7 @@ def main() -> int:
             run([L1CHECK, OUTPUT, "compiler_compile"])
             run([L1CHECK, CORE_OUTPUT, "compiler_compile"])
             run([L1CHECK, BOOTSTRAP_STD_OUTPUT, "lain_std_abi_version"])
+            run([sys.executable, BOUNDARY_CHECK])
         except RuntimeError:
             pass
         else:
@@ -181,6 +191,7 @@ def main() -> int:
     run([L1CHECK, OUTPUT, "compiler_compile"])
     run([L1CHECK, CORE_OUTPUT, "compiler_compile"])
     run([L1CHECK, BOOTSTRAP_STD_OUTPUT, "lain_std_abi_version"])
+    run([sys.executable, BOUNDARY_CHECK])
     write_stamp_for(CORE_OUTPUT, CORE_STAMP, core_fingerprint)
     write_stamp_for(BOOTSTRAP_STD_OUTPUT, BOOTSTRAP_STD_STAMP, std_fingerprint)
     write_bootstrap_std_manifest(std_fingerprint)
