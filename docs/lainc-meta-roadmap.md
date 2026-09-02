@@ -493,8 +493,9 @@ fixture 使用编译后的 artifact 运行。
   验收使用 `tests/lainir_lain/run_lainc_archive_arithmetic.py`。
 - [~] 已禁止未解析的普通成员路径（例如 `missing.member`）继续进入物理
   lowering；缺少 receiver binding 时现在返回诊断 `5108`，不再生成
-  `%missing` 的零偏移加载。post-call projection 仍由已验证的调用解析路径
-  处理，模块/工厂的未解析成员还需要补齐覆盖。
+  `%missing` 的零偏移加载；writer 的未知字段路径也不再猜测类型或输出
+  offset-zero load。post-call projection 仍由已验证的调用解析路径处理，
+  模块/工厂的未解析成员还需要补齐覆盖。
 
 验收：第 2 套生成的 archive artifact 通过四项强 gate：
 
