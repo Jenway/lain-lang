@@ -18,7 +18,9 @@
 > 现在可以从全部 `std/**/*.lain` 生成并验证 `build/lainir/formal_stdlib.l1`。
 > 该 artifact 还会检查并导出五个 `lain_std_*` ABI 入口；当前正式库的
 > `expand` 已对首个源根节点执行 AstApi 复制，复制动作由正式 `std::meta`
-> 导出的库函数调用 seed ABI 完成；`elaborate` 仍传递该句柄，
+> 导出的库函数调用 seed ABI 完成；正式 bootstrap 入口的 AST 只读访问
+> （first/next/kind/delimiter/start/length/nil）也已统一经由 `std::meta`
+> 包装；`elaborate` 仍传递该句柄，
 > `lower` 已能为十进制常量 `return`、简单 `+ - * /` 算术、同一源文件内的
 > 无参数/一至两个标量参数的函数调用以及布尔/数值比较的 `if ... else` 双分支返回生成并运行最小
 > LAIN-IR；算术 lowering 生成的表达式现在包在 `#eval` 块中，由 seed evaluator
@@ -472,6 +474,11 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   调用（无参数或一至两个十进制参数）和布尔/数值比较的 `if ... else` 双分支已完成正式库 lowering 及 artifact
   回灌，
   不完整表达式会被拒绝，复杂调用、一般控制流和完整 L1 Unit 仍待迁移。
+- [~] 正式 `std::meta` 已导出 AstApi 的只读访问包装；
+  `std/bootstrap/abi_entry.lain` 不再直接声明
+  `raw_node_first/next/kind/delimiter/start/length` 和 `raw_is_nil`，
+  这些调用经过正式 Meta 库再落到 seed ABI。解析入口 `raw_parse` 和源字节
+  capability 仍保留在 ABI 边界，后续继续迁移为 `SourceApi`/`AstApi` 接口。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
