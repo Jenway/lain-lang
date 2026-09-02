@@ -319,6 +319,8 @@ src/compiler-archive/*.lain 最终 compiler，调用正式标准库
   `src/lainir/lain/compiler_context.l1`；owner、step/allocation/recursion limit
   和 capability mask 均有固定字段及消费接口；零预算表示不设限，递归预算支持
   enter/leave，单 capability bit 可查询。
+- [~] `MetaPassResultV1` 已提供 owner 匹配和从旧 owner 转交到 CompileContext
+  的 ABI 操作；跨 owner 的实际负例仍需接入运行时测试矩阵。
 - [~] 五个 `lain_std_*` ABI 入口均已定义并接入编译器调度；当前
   expand/elaborate 仍是 identity pass，lower 通过内部 hook 调用现有 lowering，
   语义迁移尚未完成。
@@ -392,8 +394,9 @@ attributes/import
 
 目标：编译期计算只通过 LAIN-IR 执行。
 
-- [~] 标准库 evaluator 已通过 `#eval` block 执行并返回 `EvalResult`；CompileContextV1
-  已提供有界/无界预算、capability 查询和 owner 字段，最小 L1 Unit 与 artifact 回灌 smoke 已通过，完整
+- [~] 标准库 evaluator 已通过 `#eval` block 执行并返回 `EvalResult`；结果现在带有
+  scalar/meta/type/module/syntax 标签，CompileContextV1 已提供有界/无界预算、
+  capability 查询和 owner 字段，最小 L1 Unit 与 artifact 回灌 smoke 已通过，完整
   Unit 生成和结果 owner 转交尚未完成。
 - [ ] evaluator 支持返回 scalar、type handle、module handle 和 AST handle。
 - [ ] 结果 owner 转交 compile context，并能被下一次 Meta pass 使用。
