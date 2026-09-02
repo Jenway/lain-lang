@@ -116,6 +116,10 @@
 #extern #proc meta_value_payload(addr %value) -> addr;
 #extern #proc meta_value_environment(addr %value) -> addr;
 #extern #proc meta_value_scalar_number(addr %value) -> i64;
+#extern #proc program_eval_local_binding(
+  addr %unit, addr %source, addr %function,
+  addr %let_node, addr %environment
+) -> #bits<32>;
 #extern #proc program_unit_meta_step_inc(addr %unit) -> i1;
 #extern #proc compiler_request_context(addr %request) -> addr;
 #extern #proc lain_compile_context_v1_step_limit(addr %context) -> i64;
@@ -3490,7 +3494,23 @@
 #proc program_validate_local(
   addr %unit, addr %source, addr %function, addr %let_node
 ) -> i32 {
-  #if #call program_is_meta_binding(%source, %let_node) { #return 0 }
+  #if #call program_is_meta_binding(%source, %let_node) {
+    // Module aliases are compile-time values, but they can be referenced by
+    // ordinary runtime functions (`let M: Module = ...; return M.value`).
+    // Evaluate the binding into the function's Meta environment so member
+    // lookup sees the same module namespace used by factory calls.  Type
+    // declarations keep their existing registration path.
+    #if #call program_is_type_binding(%source, %let_node) {
+      #return 0
+    }
+    #let %environment: addr = #call program_function_environment(%function)
+    #if #call raw_is_nil(%environment) {
+      %environment: addr = #call program_unit_meta_environment(%unit)
+    }
+    #return #call program_eval_local_binding(
+      %unit, %source, %function, %let_node, %environment
+    )
+  }
   #let %name: addr = #call raw_node_next(%let_node)
   #let %annotation_or_equals: addr = #call raw_node_next(%name)
   #if #call raw_is_nil(%name) {
