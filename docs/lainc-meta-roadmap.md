@@ -400,19 +400,21 @@ attributes/import
 目标：编译期计算只通过 LAIN-IR 执行。
 
 - [~] 标准库 evaluator 已通过 `#eval` block 执行并返回 `EvalResult`；结果现在带有
-  scalar/meta/type/module/syntax 标签，CompileContextV1 已提供有界/无界预算、
-  capability 查询和 owner 字段，最小 L1 Unit 与 artifact 回灌 smoke 已通过，完整
-  Unit 生成和结果 owner 转交尚未完成。
+  scalar/meta/type/module/syntax 标签和独立 owner 字段，CompileContextV1 已提供
+  有界/无界预算、capability 查询和 owner 字段，最小 L1 Unit 与 artifact 回灌 smoke
+  已通过，完整 Unit 生成和对象结果矩阵尚未完成。
 - [~] Meta step limit 已从 `program_unit_meta_step_inc` 的硬编码移到 unit ABI
   字段，并由 compiler request 创建的 CompileContext 注入；request 现在可配置
   step/allocation/recursion/capability 四类预算。带 CompileContext 的 unit 已将
   step 消费和递归 enter/leave 接入 `program_eval_function`，递归超限返回
   `5125`；seed 的 `bootstrap.allocate-pages` 已接入 allocation limit 下发接口。
   allocation 的逐对象计费、capability 的实际使用和 native host 诊断仍待补齐。
-- [ ] evaluator 支持返回 scalar、type handle、module handle 和 AST handle。
+- [~] evaluator 的 `EvalResult` 已能携带 scalar、type/module/AST handle 及类型标签；
+  真实 `#eval` 输入分别返回这三类对象的完整矩阵仍待补齐。
 - [~] pass 结果已在 compiler API 中校验并带 CompileContext owner 后交给下一阶段；
   不同 owner 的真实转交和后续 AST/Unit 生命周期仍待接通。
-- [ ] 递归、step、allocation、capability 各有独立上限和诊断。
+- [~] 递归和 step 已有独立消费与诊断，allocation 已接入 seed host 上限；逐对象
+  allocation 计费、capability 的实际调用约束和统一诊断仍待补齐。
 - [x] `scripts/check_compile_context.py` 已验证 step/recursion 的成功、超限和
   leave 后重入，以及 capability 查询和 owner 转交的 ABI 行为。
 - [ ] 删除第 2 套中的整数 consteval 专用解释路径。
