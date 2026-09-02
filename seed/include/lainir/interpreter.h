@@ -67,6 +67,11 @@ typedef struct {
   LainirCapabilityTable *caps;
 } LainirRunRequest;
 
+/* Optional observer invoked immediately after each scalar #eval is
+ * materialized by lainir_fold_module.  The value is borrowed by the caller
+ * and remains valid for the duration of the callback. */
+typedef void (*LainirEvalSink)(const LainirValue *value, void *user_data);
+
 LainirCapabilityTable *lainir_caps_new(void);
 void lainir_caps_free(LainirCapabilityTable *caps);
 int lainir_caps_add(
@@ -101,13 +106,80 @@ LainirRunStatus lainir_eval_block(
   LainirValue *result_out,
   const char **error_out);
 
-/* Fold all #eval expressions in a module.  Only scalar bit results are
- * materialized; address, function and unit results remain invalid in value
- * positions and return LAINIR_RUN_BAD_CALL. */
+/* Fold all #eval expressions in a module.  Scalar bit results are materialized
+ * as constants. Unit results remain as evaluated EXPR_EVAL nodes for the
+ * backend to lower; address and function results are rejected in this phase. */
 LainirRunStatus lainir_fold_module(
   L1Subroutine *module,
   LainirCapabilityTable *caps,
   const char **error_out);
+
+LainirRunStatus lainir_fold_module_with_sink(
+  L1Subroutine *module,
+  LainirCapabilityTable *caps,
+  const char **error_out,
+  LainirEvalSink sink,
+  void *sink_user_data);
+
+/* Read-only views used by compiler adapters.  Returned pointers are borrowed
+ * from the module and remain valid only while it is alive.  Every accessor
+ * accepts NULL and returns a neutral failure value; indexed accessors return
+ * NULL when the index is out of bounds.  In particular, enum accessors return
+ * -1 for a NULL object, while scalar widths/counts return 0. */
+const L1Subroutine *lainir_module_first_procedure(const L1Subroutine *module);
+const L1Subroutine *lainir_procedure_next(const L1Subroutine *procedure);
+const char *lainir_procedure_name(const L1Subroutine *procedure);
+uint32_t lainir_procedure_name_length(const L1Subroutine *procedure);
+const char *lainir_procedure_link_name(const L1Subroutine *procedure);
+const L1Type *lainir_procedure_return_type(const L1Subroutine *procedure);
+int lainir_procedure_is_external(const L1Subroutine *procedure);
+uint32_t lainir_procedure_parameter_count(const L1Subroutine *procedure);
+const L1Type *lainir_procedure_parameter_type(const L1Subroutine *procedure, uint32_t index);
+const char *lainir_procedure_parameter_name(const L1Subroutine *procedure, uint32_t index);
+const L1Block *lainir_procedure_first_block(const L1Subroutine *procedure);
+const L1Block *lainir_block_next(const L1Block *block);
+L1ExprKind lainir_expr_kind(const L1Expr *expr);
+const L1Type *lainir_expr_type(const L1Expr *expr);
+const L1Expr *lainir_expr_left(const L1Expr *expr);
+const L1Expr *lainir_expr_right(const L1Expr *expr);
+/* For LEA, left/right are the base/index operands; for binary expressions
+ * they are the ordinary left/right operands. */
+/* Expressions are stored as arrays for call/primitive operands, so this
+ * legacy linked-list view always returns NULL.  Use argument_count and
+ * argument_at for operand traversal. */
+const L1Expr *lainir_expr_next(const L1Expr *expr);
+uint32_t lainir_expr_argument_count(const L1Expr *expr);
+const L1Expr *lainir_expr_argument_at(const L1Expr *expr, uint32_t index);
+int64_t lainir_expr_const_value(const L1Expr *expr);
+uint32_t lainir_expr_arg_index(const L1Expr *expr);
+const char *lainir_expr_name(const L1Expr *expr);
+const char *lainir_expr_callee_name(const L1Expr *expr);
+const char *lainir_expr_string(const L1Expr *expr);
+const L1Expr *lainir_expr_operand(const L1Expr *expr);
+const L1Block *lainir_expr_block(const L1Expr *expr);
+uint32_t lainir_expr_scale(const L1Expr *expr);
+uint32_t lainir_expr_offset(const L1Expr *expr);
+uint32_t lainir_expr_field_index(const L1Expr *expr);
+uint32_t lainir_expr_byte_size(const L1Expr *expr);
+const char *lainir_diagnostic_message(const L1Diagnostic *diagnostic);
+int lainir_diagnostic_code(const L1Diagnostic *diagnostic);
+int lainir_diagnostic_line(const L1Diagnostic *diagnostic);
+int lainir_diagnostic_column(const L1Diagnostic *diagnostic);
+void lainir_diagnostic_clear(L1Diagnostic *diagnostic);
+int lainir_type_kind(const L1Type *type);
+uint32_t lainir_type_width(const L1Type *type);
+const L1Instruction *lainir_block_first_instruction(const L1Block *block);
+const L1Instruction *lainir_instruction_next(const L1Instruction *instruction);
+L1InstKind lainir_instruction_kind(const L1Instruction *instruction);
+const char *lainir_instruction_name(const L1Instruction *instruction);
+const char *lainir_instruction_label(const L1Instruction *instruction);
+const L1Type *lainir_instruction_type(const L1Instruction *instruction);
+const L1Expr *lainir_instruction_value(const L1Instruction *instruction);
+const L1Expr *lainir_instruction_destination(const L1Instruction *instruction);
+const L1Expr *lainir_instruction_condition(const L1Instruction *instruction);
+const L1Block *lainir_instruction_then_block(const L1Instruction *instruction);
+const L1Block *lainir_instruction_else_block(const L1Instruction *instruction);
+const L1Block *lainir_instruction_loop_block(const L1Instruction *instruction);
 
 LainirValue lainir_value_unit(void);
 LainirValue lainir_value_bits(uint64_t bits, uint32_t bit_width);

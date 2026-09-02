@@ -305,7 +305,10 @@ static int expression_is_condition(L1Expr *expr) {
 static int value_type_compatible(L1Type *type, L1Expr *value) {
   L1Type *actual;
   if (!type) return 0;
-  if (type->kind == TY_UNIT) return value == NULL;
+  if (type->kind == TY_UNIT)
+    return value == NULL ||
+           (value && value->kind == EXPR_EVAL && value->data.eval.ret_ty &&
+            value->data.eval.ret_ty->kind == TY_UNIT);
   if (!value) return 0;
   /* Textual #load deliberately carries no redundant result annotation.  Its
      result is contextually typed by the binding/return/store contract that
