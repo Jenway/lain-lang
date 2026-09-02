@@ -55,6 +55,9 @@ let raw_next = std::func(node: addr) -> addr;
 @foreign(c, link_name = "raw_node_kind")
 let raw_kind = std::func(node: addr) -> i32;
 
+@foreign(c, link_name = "raw_node_delimiter")
+let raw_delimiter = std::func(node: addr) -> i32;
+
 @foreign(c, link_name = "raw_node_start")
 let raw_start = std::func(node: addr) -> i64;
 
@@ -69,6 +72,9 @@ let source_bytes = std::func(source: addr) -> addr;
 
 @foreign(c, link_name = "tool_byte_at")
 let byte_at = std::func(data: addr, index: i64) -> i8;
+
+@foreign(c, link_name = "bootstrap.write-artifact")
+let artifact_write = std::func(data: addr, length: i64) -> unit;
 
 // Syntax-index layout: count @0, cache @8, then 64-byte entries at @16.
 // Every entry stores source index, source, root, first node, node count,
@@ -174,6 +180,12 @@ let syntax_index_root = std::func(index: addr, ordinal: i64) -> addr {
     return root;
 };
 
+let syntax_index_source = std::func(index: addr, ordinal: i64) -> addr {
+    let entry: addr = syntax_entry_at(index, ordinal);
+    let source: addr = std::load_bits(64, entry + 8);
+    return source;
+};
+
 let formal_import_status = std::func(index: addr) -> i32 {
     let count: i64 = syntax_index_count(index);
     let ordinal: i64 = 0;
@@ -184,6 +196,125 @@ let formal_import_status = std::func(index: addr) -> i32 {
         ordinal = ordinal + 1;
     }
     return 0;
+};
+
+let formal_is_return = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 { return false; }
+    if raw_length(node) != 6 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 114 { return false; }
+    if byte_at(data, start + 1) != 101 { return false; }
+    if byte_at(data, start + 2) != 116 { return false; }
+    if byte_at(data, start + 3) != 117 { return false; }
+    if byte_at(data, start + 4) != 114 { return false; }
+    if byte_at(data, start + 5) != 110 { return false; }
+    return true;
+};
+
+let formal_decimal_bytes = std::func(
+    data: addr,
+    start: i64,
+    length: i64,
+    index: i64,
+) -> bool {
+    if index >= length { return true; }
+    let value: i8 = byte_at(data, start + index);
+    if value < 48 || value > 57 { return false; }
+    return formal_decimal_bytes(data, start, length, index + 1);
+};
+
+let formal_is_decimal = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 { return false; }
+    let length: i64 = raw_length(node);
+    if length == 0 { return false; }
+    return formal_decimal_bytes(
+        source_bytes(source), raw_start(node), length, 0
+    );
+};
+
+let formal_find_constant_list = std::func(source: addr, node: addr) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_return(source, node) {
+        let value: addr = raw_next(node);
+        if formal_is_decimal(source, value) { return value; }
+    }
+    return formal_find_constant_list(source, raw_next(node));
+};
+
+let formal_find_constant_body = std::func(source: addr, node: addr) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if raw_kind(node) == 2 && raw_delimiter(node) == 123 {
+        let value: addr = formal_find_constant_list(source, raw_first(node));
+        if raw_nil(value) == false { return value; }
+    }
+    return formal_find_constant_body(source, raw_next(node));
+};
+
+let formal_emit_constant = std::func(source: addr, value: addr) -> unit {
+    let prefix: addr = "#proc main() -> #bits<64> {\n  #return ";
+    let suffix: addr = "\n}\n";
+    let prefix_length: i64 = 0;
+    let suffix_length: i64 = 0;
+    while std::load_bits(8, prefix + prefix_length) != 0 {
+        prefix_length = prefix_length + 1;
+    }
+    while std::load_bits(8, suffix + suffix_length) != 0 {
+        suffix_length = suffix_length + 1;
+    }
+    let value_length: i64 = raw_length(value);
+    if prefix_length + value_length + suffix_length > 256 {
+        return;
+    }
+    let buffer: addr = allocate_pages(256);
+    let index: i64 = 0;
+    while index < prefix_length {
+        std::store_bits(
+            8,
+            buffer + index,
+            std::load_bits(8, prefix + index),
+        );
+        index = index + 1;
+    }
+    let value_index: i64 = 0;
+    let value_data: addr = source_bytes(source) + raw_start(value);
+    while value_index < value_length {
+        let value_offset: i64 = prefix_length + value_index;
+        std::store_bits(
+            8,
+            buffer + value_offset,
+            std::load_bits(8, value_data + value_index),
+        );
+        value_index = value_index + 1;
+    }
+    let suffix_index: i64 = 0;
+    while suffix_index < suffix_length {
+        let suffix_offset: i64 = prefix_length + value_length;
+        suffix_offset = suffix_offset + suffix_index;
+        std::store_bits(
+            8,
+            buffer + suffix_offset,
+            std::load_bits(8, suffix + suffix_index),
+        );
+        suffix_index = suffix_index + 1;
+    }
+    let total_length: i64 = prefix_length + value_length;
+    total_length = total_length + suffix_length;
+    artifact_write(buffer, total_length);
+};
+
+let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
+    let count: i64 = syntax_index_count(index);
+    if ordinal >= count { return false; }
+    let source: addr = syntax_index_source(index, ordinal);
+    let value: addr = formal_find_constant_body(
+        source, raw_first(syntax_index_root(index, ordinal))
+    );
+    if raw_nil(value) == false {
+        formal_emit_constant(source, value);
+        return true;
+    }
+    return formal_lower_source(index, ordinal + 1);
 };
 
 @abi_export
@@ -251,9 +382,21 @@ let lain_std_lower = std::func(
     elaborated_root: addr,
     l1_unit: addr,
 ) -> addr {
-    // 5203 is the stable "formal std lowering unavailable" boundary
-    // diagnostic.  The bootstrap implementation remains the active lowering
-    // provider until this pass is migrated from LAIN-IR into formal std.
+    // The first executable formal lowering slice handles only a constant
+    // return.  All other forms retain the explicit migration boundary below.
+    if formal_lower_source(l1_unit, 0) {
+        return pass_result_new(
+            0,
+            1,
+            l1_unit,
+            ast_nil(),
+            ast_nil(),
+            context_owner(context),
+        );
+    }
+    // 5203 is the stable "formal std lowering unavailable" boundary.
+    // The bootstrap implementation remains the active provider for every
+    // form outside this deliberately small slice.
     return pass_result_new(
         5203,
         0,
