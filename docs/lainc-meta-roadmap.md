@@ -338,6 +338,10 @@ src/compiler-archive/*.lain 最终 compiler，调用正式标准库
   `meta_import.l1`、`meta_eval*.l1`、`meta_call.l1`、`meta_collect.l1` 已通过
   build manifest 纳入标准库包（首轮仍保留原路径）。这些文件现在通过
   `core_eval_contracts.l1` 声明所需的底座接口，核心包不再携带这组实现。
+- [~] 源码扫描器已从旧 monolith 抽出到 `src/lainir/tools/source.l1`；求值、Meta、
+  lowering、workspace/import 和 syntax-index 实现已从 compiler core 清单移入
+  bootstrap stdlib 清单。`scripts/build_lain_compiler.py` 现在会同时构建并校验
+  三个 artifact，缺失的职责模块会在构建阶段直接暴露。
 - [ ] `raw_ast` 存储、compiler context、IR builder 和 eval 调度留在底座。
 - [x] 分别生成 `build/lainir/lain_compiler_core.l1` 和
   `build/lainir/bootstrap_std.l1`，再由 bundler 连接。
@@ -368,7 +372,9 @@ attributes/import
   中对应的字符串判断。
 - [~] compiler API 已只调用 `lain_std_expand/elaborate/lower`；底层 lowering 实现
   仍暂存在 core hook 中，尚未全部迁出。
-- [ ] 加 boundary lint：compiler core 中禁止出现上述高级形式的语义字符串。
+- [x] 加 boundary lint：`scripts/check_lainir_boundaries.py` 检查 core artifact
+  不含高级形式字符串和语义实现过程，并确认对应实现存在于 bootstrap stdlib；
+  构建脚本每次都会运行该检查。
 - [~] evaluator 的统一入口已放进 bootstrap stdlib，并在入口内部通过显式
   `#eval` block 调用原有 evaluator；现在已具备正确的执行边界，待下一步把
   AST -> 完整 L1 Unit 的生成也移到这个入口。
