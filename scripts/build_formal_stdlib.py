@@ -44,6 +44,7 @@ FORMAL_IF_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_if_eq_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_if_ne_return.lain", "42"),
 )
+FORMAL_IF_WITHOUT_ELSE_PROBE = ROOT / "scripts" / "fixtures" / "formal_if_without_else.lain"
 FORMAL_INVALID_PROBE = ROOT / "scripts" / "fixtures" / "formal_invalid_return.lain"
 FORMAL_EXTRA_ARITHMETIC_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_subtraction_return.lain", "42"),
@@ -360,6 +361,25 @@ def verify_abi_entry() -> None:
                 f"formal stdlib if artifact failed for {if_fixture.name}"
                 + (f": {detail}" if detail else "")
             )
+    incomplete_if_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_IF_WITHOUT_ELSE_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    incomplete_if_diagnostics = (
+        incomplete_if_probe.stdout + incomplete_if_probe.stderr
+    )
+    if incomplete_if_probe.returncode == 0 or "5203" not in incomplete_if_diagnostics:
+        raise RuntimeError("formal stdlib accepted an if without an else branch")
     invalid_probe = subprocess.run(
         [
             str(SEED_RUN),
