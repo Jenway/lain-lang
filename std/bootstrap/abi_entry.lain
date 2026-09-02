@@ -313,6 +313,39 @@ let formal_find_return_list = std::func(source: addr, node: addr) -> addr {
     return formal_find_return_list(source, raw_next(node));
 };
 
+let formal_is_unit_return = std::func(source: addr, node: addr) -> bool {
+    if formal_is_return(source, node) {
+        let value: addr = raw_next(node);
+        if formal_is_semicolon(source, value) { return true; }
+    }
+    return false;
+};
+
+let formal_find_unit_return_list = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_unit_return(source, node) { return node; }
+    return formal_find_unit_return_list(source, raw_next(node));
+};
+
+let formal_find_unit_return_body = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if raw_kind(node) == 2 {
+        if raw_delimiter(node) == 123 {
+            let value: addr = formal_find_unit_return_list(
+                source, raw_first(node)
+            );
+            if raw_nil(value) == false { return value; }
+        }
+    }
+    return formal_find_unit_return_body(source, raw_next(node));
+};
+
 let formal_find_parameter_return_list = std::func(
     source: addr,
     node: addr,
@@ -381,6 +414,16 @@ let formal_is_let = std::func(source: addr, node: addr) -> bool {
     return byte_at(data, start + 2) == 116;
 };
 
+let formal_is_main = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 4 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 109 { return false; }
+    if byte_at(data, start + 1) != 97 { return false; }
+    if byte_at(data, start + 2) != 105 { return false; }
+    return byte_at(data, start + 3) == 110;
+};
+
 let formal_name_matches = std::func(
     source: addr,
     left: addr,
@@ -407,6 +450,17 @@ let formal_find_body_after = std::func(source: addr, node: addr) -> addr {
         if raw_delimiter(node) == 123 { return node; }
     }
     return formal_find_body_after(source, raw_next(node));
+};
+
+let formal_find_main_body = std::func(source: addr, node: addr) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_let(source, node) {
+        let name: addr = raw_next(node);
+        if formal_is_main(source, name) {
+            return formal_find_body_after(source, raw_next(name));
+        }
+    }
+    return formal_find_main_body(source, raw_next(node));
 };
 
 let formal_find_named_body = std::func(
@@ -822,6 +876,14 @@ let formal_emit_constant = std::func(source: addr, return_node: addr) -> unit {
     artifact_write(buffer, offset);
 };
 
+let formal_emit_unit = std::func() -> unit {
+    let buffer: addr = allocate_pages(128);
+    let offset: i64 = formal_copy_literal(
+        buffer, 0, "#proc main() -> #unit {\n  #return\n}\n"
+    );
+    artifact_write(buffer, offset);
+};
+
 let formal_emit_call = std::func(
     source: addr,
     callee: addr,
@@ -1002,7 +1064,18 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
     if ordinal >= count { return false; }
     let source: addr = syntax_index_source(index, ordinal);
     let root: addr = syntax_index_root(index, ordinal);
-    let if_node: addr = formal_find_if_body(source, raw_first(root));
+    let main_body: addr = formal_find_main_body(source, raw_first(root));
+    if raw_nil(main_body) {
+        return formal_lower_source(index, ordinal + 1);
+    }
+    let unit_return: addr = formal_find_unit_return_list(
+        source, raw_first(main_body)
+    );
+    if raw_nil(unit_return) == false {
+        formal_emit_unit();
+        return true;
+    }
+    let if_node: addr = formal_find_if_list(source, raw_first(main_body));
     if raw_nil(if_node) == false {
         let condition: addr = raw_next(if_node);
         let then_group: addr = formal_if_then_group(source, condition);
@@ -1039,11 +1112,13 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
             }
         }
     }
-    let any_if: addr = formal_find_if_token(source, raw_first(root));
+    let any_if: addr = formal_find_if_token(source, raw_first(main_body));
     if raw_nil(any_if) == false {
         return formal_lower_source(index, ordinal + 1);
     }
-    let call_return: addr = formal_find_call_return_body(source, raw_first(root));
+    let call_return: addr = formal_find_call_return_list(
+        source, raw_first(main_body)
+    );
     if raw_nil(call_return) == false {
         let callee: addr = raw_next(call_return);
         let arguments: addr = raw_next(callee);
@@ -1111,8 +1186,8 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
             }
         }
     }
-    let return_node: addr = formal_find_return_body(
-        source, raw_first(root)
+    let return_node: addr = formal_find_return_list(
+        source, raw_first(main_body)
     );
     if raw_nil(return_node) == false {
         formal_emit_constant(source, return_node);

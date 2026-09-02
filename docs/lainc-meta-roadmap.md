@@ -23,7 +23,7 @@
 > 无参数/一至两个标量参数的函数调用以及布尔/数值比较的 `if ... else` 双分支返回生成并运行最小
 > LAIN-IR；算术 lowering 生成的表达式现在包在 `#eval` 块中，由 seed evaluator
 > 执行后再返回标量，
-> 且不完整表达式会被拒绝；其他形式
+> `unit` 空返回也能生成并通过 verifier，且不完整表达式会被拒绝；其他形式
 > 明确返回迁移中的 `5203`。
 > `run_lain_compiler.py --stdlib-artifact` 已能用同一个 compiler core 实际加载
 > formal artifact，并在该 lowering 边界得到 `5203`。
@@ -480,7 +480,7 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   expand 已通过 `std::meta` 库函数调用 AstApi 复制首个根节点，并对未解析 import 返回 `4101`；import
   目标解析和循环依赖诊断仍待迁移。elaborate 仍只传递句柄，lower 对常量
   `return`、简单二元算术、同源无参数/一至两参数调用和布尔/数值比较双分支已生成可执行
-  artifact，
+  artifact；`unit` 空返回已加入正式库验证，
   其余形式明确返回 `5203`。
   `run_lain_compiler.py --stdlib-artifact build/lainir/formal_stdlib.l1`
   已验证实际替换链。
