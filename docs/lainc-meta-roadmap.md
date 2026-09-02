@@ -494,8 +494,10 @@ fixture 使用编译后的 artifact 运行。
 
 目标：证明正式标准库可以替换第一代标准库。
 
-- [ ] 同一批 source/AST 分别交给两套标准库。
-- [ ] 比较 canonical AST、诊断、依赖、生成的 LAIN-IR 和运行结果。
+- [~] `scripts/check_stdlib_conformance.py` 已把共同支持的常量、算术、无参数调用、
+  单参数调用和双参数调用分别交给第一代与正式标准库；过程名哈希和透明 `#eval`
+  包装会在 canonical 比较时消除，五个样例的生成 IR 与运行值一致。
+- [ ] 将同一批 source/AST 的比较扩展到完整 AST、诊断和依赖结果。
 - [ ] 对 func、struct、module、import、type factory、generic、effect、bounds、
   attribute 和 `#eval` 各设正负例；ownership 暂不纳入必需矩阵。
 - [ ] 差异报告精确到第一个 pass、节点 span 和 IR procedure。
