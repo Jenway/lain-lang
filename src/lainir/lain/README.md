@@ -66,16 +66,20 @@ point.
 
 The compiler API now dispatches `lain_std_expand`, `lain_std_elaborate`, and
 `lain_std_lower` through the bootstrap standard-library artifact.  Module and
-struct, record, and type status recognition is supplied by bootstrap-stdlib
-procedures; import/eval/call lowering is still a core implementation scheduled
-for migration.
+struct, record, type, import, evaluation, call, and program-lowering
+implementations are bundled in that artifact.  The exported lowering helper is
+named `lain_std_lower_program`; the old `lain_core_lower_program` spelling is
+kept out of the active source so ownership is explicit.
 
 `eval_result.l1` is the shared result ABI for compile-time evaluation.  It keeps
 the scalar/object kind and resource owner in one layout; the evaluator and Meta
 passes use the owner transfer helpers instead of inventing a second result record.
 
-The evaluator currently handles left-associative integer `+`, `-`, `*`, and
-`/`, returning a phase diagnostic for unsupported syntax or division by zero.
+The unified Meta evaluator currently handles left-associative integer `+`, `-`,
+`*`, and `/`, returning a phase diagnostic for unsupported syntax or division
+by zero.  The compiler artifact no longer includes the old standalone integer
+evaluator; the legacy inspection frontend still has a compatibility source
+until that frontend is migrated to the compiler API.
 
 Build and run the current frontend boundary with:
 

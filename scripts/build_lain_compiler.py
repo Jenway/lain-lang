@@ -37,10 +37,8 @@ CORE_MODULES = (
 BOOTSTRAP_STD_MODULES = (
     ROOT / "src" / "lainir" / "bootstrap_std" / "core_eval_contracts.l1",
     ROOT / "src" / "lainir" / "lain" / "eval_result.l1",
-    # Compile-time expression evaluation is a standard-library capability.
-    # Keep its implementation out of compiler core; the core only consumes
-    # the declarations in core_eval_contracts.l1 and dispatches the pass.
-    ROOT / "src" / "lainir" / "lain" / "eval.l1",
+    # Compile-time expression evaluation is implemented by meta_eval.l1
+    # below; the old standalone integer evaluator is not part of this artifact.
     # Semantic Meta and lowering implementations belong to the bootstrap
     # standard library.  The compiler core sees only their ABI declarations.
     ROOT / "src" / "lainir" / "lain" / "meta.l1",

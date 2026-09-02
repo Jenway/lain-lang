@@ -60,11 +60,25 @@ def main() -> int:
         "#proc lain_std_expand",
         "#proc lain_std_elaborate",
         "#proc lain_std_lower",
+        "#proc lain_std_lower_program",
+        "#proc program_eval_consteval_arithmetic",
         "#proc program_eval_consteval_group",
     )
     missing = [name for name in required if name not in stdlib_text]
     if missing:
         print("boundary check: bootstrap stdlib is missing:", ", ".join(missing), file=sys.stderr)
+        return 1
+    if "lain_core_lower_program" in stdlib_text:
+        print(
+            "boundary check: bootstrap stdlib still exposes the core-owned lowering name",
+            file=sys.stderr,
+        )
+        return 1
+    if "#proc eval_group" in stdlib_text or "#proc eval_consteval_group" in stdlib_text:
+        print(
+            "boundary check: bootstrap stdlib still contains the standalone integer evaluator",
+            file=sys.stderr,
+        )
         return 1
 
     print("PASS compiler-core/bootstrap-stdlib boundary")

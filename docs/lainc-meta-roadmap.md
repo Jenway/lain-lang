@@ -379,8 +379,9 @@ attributes/import
 - [~] `lain_std_expand` 已遍历 syntax index，并对每个源单元调用
   `lain_std_meta_status`；因此 module/struct/record 的状态诊断已进入真实的
   stdlib pass 调度，而不再只是单独的探针。完整 AST 变换和 lowering 仍待迁移。
-- [~] compiler API 已只调用 `lain_std_expand/elaborate/lower`；底层 lowering 实现
-  仍暂存在 core hook 中，尚未全部迁出。
+- [~] compiler API 已只调用 `lain_std_expand/elaborate/lower`；完整 lowering
+  实现已经进入 bootstrap std artifact，并通过 `lain_std_lower_program` 暴露，
+  但 expand/elaborate 的完整 AST 变换和正式 ABI 仍待完成。
 - [x] 加 boundary lint：`scripts/check_lainir_boundaries.py` 检查 core artifact
   不含高级形式字符串和语义实现过程，并确认对应实现存在于 bootstrap stdlib；
   构建脚本每次都会运行该检查。
@@ -417,7 +418,9 @@ attributes/import
   allocation 计费、capability 的实际调用约束和统一诊断仍待补齐。
 - [x] `scripts/check_compile_context.py` 已验证 step/recursion 的成功、超限和
   leave 后重入，以及 capability 查询和 owner 转交的 ABI 行为。
-- [ ] 删除第 2 套中的整数 consteval 专用解释路径。
+- [~] 第 2 套已删除独立整数 consteval 解释器：bootstrap std artifact 统一走
+  `program_eval_consteval_arithmetic`；旧 `eval.l1` 仅由尚未迁移的 inspection
+  frontend 兼容入口引用，待该入口切换到 compiler API 后删除文件。
 - [x] `run_std_eval_bridge.py` 已检查标准库 artifact 含 `#eval` 入口，并通过
   consteval 编译、verifier 和运行回归；独立的 type/module/AST 返回值矩阵仍待补齐。
 

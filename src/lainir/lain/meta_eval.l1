@@ -815,6 +815,62 @@
   )
 }
 
+#proc program_eval_consteval_arithmetic(
+  addr %unit, addr %source, addr %group
+) -> addr {
+  #let %first: addr = #call raw_node_first(%group)
+  #if #call raw_is_nil(%first) {
+    #return #call eval_result_new(3102, 0)
+  }
+  #let %empty_function: addr = #call program_nil()
+  #let %value_result: addr = #call program_eval_operand(
+    %unit, %source, %empty_function, %empty_function, %first
+  )
+  #if #ne(#call eval_status(%value_result), 0) {
+    #return %value_result
+  }
+  #let %value: #bits<64> = #call eval_value(%value_result)
+  #let %operator: addr = #call raw_node_next(%first)
+  #loop terms {
+    #if #call raw_is_nil(%operator) {
+      #return #call eval_result_new(0, %value)
+    }
+    #let %right: addr = #call raw_node_next(%operator)
+    #if #call raw_is_nil(%right) {
+      #return #call eval_result_new(3102, 0)
+    }
+    #let %right_result: addr = #call program_eval_operand(
+      %unit, %source, %empty_function, %empty_function, %right
+    )
+    #if #ne(#call eval_status(%right_result), 0) {
+      #return %right_result
+    }
+    #let %right_value: #bits<64> = #call eval_value(%right_result)
+    #if #call meta_atom_equal(%source, %operator, "+", 1) {
+      %value: #bits<64> = #add(%value, %right_value)
+    } else {
+      #if #call meta_atom_equal(%source, %operator, "-", 1) {
+        %value: #bits<64> = #sub(%value, %right_value)
+      } else {
+        #if #call meta_atom_equal(%source, %operator, "*", 1) {
+          %value: #bits<64> = #mul(%value, %right_value)
+        } else {
+          #if #call meta_atom_equal(%source, %operator, "/", 1) {
+            #if #eq(%right_value, 0) {
+              #return #call eval_result_new(3103, 0)
+            }
+            %value: #bits<64> = #div(%value, %right_value)
+          } else {
+            #return #call eval_result_new(3102, 0)
+          }
+        }
+      }
+    }
+    %operator: addr = #call raw_node_next(%right)
+    #continue terms
+  }
+}
+
 #proc program_eval_consteval_group_direct(
   addr %unit, addr %source, addr %group
 ) -> addr {
@@ -828,7 +884,9 @@
       )
     }
   }
-  #return #call eval_group(%source, %group)
+  // Plain arithmetic stays on the Meta evaluator path and preserves the
+  // language's established left-to-right operator semantics.
+  #return #call program_eval_consteval_arithmetic(%unit, %source, %group)
 }
 
 // All compile-time execution crosses the LAIN-IR #eval boundary here.  The
