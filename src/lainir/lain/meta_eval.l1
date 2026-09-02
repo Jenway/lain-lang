@@ -208,77 +208,21 @@
   addr %unit, addr %source, addr %function, addr %arguments,
   addr %left
 ) -> addr {
-  #let %left_result: addr = #call program_eval_operand(
-    %unit, %source, %function, %arguments, %left
+  // Keep one implementation of binary expression evaluation.  The wrapper
+  // selects the caller's lexical environment, then delegates to the
+  // environment-aware routine below.
+  #let %environment: addr = #call program_unit_meta_environment(%unit)
+  #if #eq(#call program_function_is_nil(%function), 0) {
+    #let %function_environment: addr = #call program_function_environment(
+      %function
+    )
+    #if #eq(#call raw_is_nil(%function_environment), 0) {
+      %environment: addr = %function_environment
+    }
+  }
+  #return #call program_eval_value_environment(
+    %unit, %source, %function, %arguments, %environment, %left
   )
-  #if #ne(#call eval_status(%left_result), 0) {
-    #return %left_result
-  }
-  #let %left_end: addr = #call program_operand_end_source(%source, %left)
-  #let %operator: addr = #call raw_node_next(%left_end)
-  #if #call raw_is_nil(%operator) { #return %left_result }
-  #if #call program_is_semicolon(%source, %operator) {
-    #return %left_result
-  }
-  #if #call meta_atom_equal(%source, %operator, ",", 1) {
-    #return %left_result
-  }
-  #if #eq(#call program_is_operator(%source, %operator), 0) {
-    #return #call eval_result_new(3102, 0)
-  }
-  #let %right: addr = #call raw_node_next(%operator)
-  #if #call raw_is_nil(%right) { #return #call eval_result_new(3102, 0) }
-  #let %right_result: addr = #call program_eval_value_expression(
-    %unit, %source, %function, %arguments, %right
-  )
-  #if #ne(#call eval_status(%right_result), 0) {
-    #return %right_result
-  }
-  #let %left_value: #bits<64> = #call eval_value(%left_result)
-  #let %right_value: #bits<64> = #call eval_value(%right_result)
-  #if #call meta_atom_equal(%source, %operator, "+", 1) {
-    #return #call eval_result_new(0, #add(%left_value, %right_value))
-  }
-  #if #call meta_atom_equal(%source, %operator, "-", 1) {
-    #return #call eval_result_new(0, #sub(%left_value, %right_value))
-  }
-  #if #call meta_atom_equal(%source, %operator, "*", 1) {
-    #return #call eval_result_new(0, #mul(%left_value, %right_value))
-  }
-  #if #call meta_atom_equal(%source, %operator, "==", 2) {
-    #return #call eval_result_new(
-      0, #zext[#bits<64>](#eq(%left_value, %right_value))
-    )
-  }
-  #if #call meta_atom_equal(%source, %operator, "!=", 2) {
-    #return #call eval_result_new(
-      0, #zext[#bits<64>](#ne(%left_value, %right_value))
-    )
-  }
-  #if #call meta_atom_equal(%source, %operator, "<", 1) {
-    #return #call eval_result_new(
-      0, #zext[#bits<64>](#lt(%left_value, %right_value))
-    )
-  }
-  #if #call meta_atom_equal(%source, %operator, "<=", 2) {
-    #return #call eval_result_new(
-      0, #zext[#bits<64>](#le(%left_value, %right_value))
-    )
-  }
-  #if #call meta_atom_equal(%source, %operator, ">", 1) {
-    #return #call eval_result_new(
-      0, #zext[#bits<64>](#gt(%left_value, %right_value))
-    )
-  }
-  #if #call meta_atom_equal(%source, %operator, ">=", 2) {
-    #return #call eval_result_new(
-      0, #zext[#bits<64>](#ge(%left_value, %right_value))
-    )
-  }
-  #if #eq(%right_value, 0) {
-    #return #call eval_result_new(3103, 0)
-  }
-  #return #call eval_result_new(0, #div(%left_value, %right_value))
 }
 
 #proc program_eval_bind_parameters(

@@ -424,6 +424,8 @@ attributes/import
   leave 后重入，以及 capability 查询和 owner 转交的 ABI 行为。
 - [~] `#eval` 标量表达式现在递归处理括号组，并继续使用统一的
   `program_eval_consteval_group` 边界；嵌套算术已用实际 Lain 源码验证。
+- [~] Meta 中原先两套二元表达式求值已合并为一条带词法环境的实现，避免
+  无环境入口与环境入口产生不同的运算行为。
 - [~] 第 2 套已删除独立整数 consteval 解释器：bootstrap std artifact 统一走
   `program_eval_consteval_arithmetic`；旧 `eval.l1` 仅由尚未迁移的 inspection
   frontend 兼容入口引用，待该入口切换到 compiler API 后删除文件。
