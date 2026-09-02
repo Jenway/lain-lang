@@ -370,6 +370,9 @@ attributes/import
   bootstrap stdlib 提供；完整 AST handler 和 lowering 仍在迁移中。每迁移一种形式，先在 bootstrap
   stdlib 注册 AST handler，再删除 compiler
   中对应的字符串判断。
+- [~] `lain_std_expand` 已遍历 syntax index，并对每个源单元调用
+  `lain_std_meta_status`；因此 module/struct/record 的状态诊断已进入真实的
+  stdlib pass 调度，而不再只是单独的探针。完整 AST 变换和 lowering 仍待迁移。
 - [~] compiler API 已只调用 `lain_std_expand/elaborate/lower`；底层 lowering 实现
   仍暂存在 core hook 中，尚未全部迁出。
 - [x] 加 boundary lint：`scripts/check_lainir_boundaries.py` 检查 core artifact

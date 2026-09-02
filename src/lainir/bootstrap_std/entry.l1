@@ -11,6 +11,11 @@
   i32 %status, i64 %changed, addr %result,
   addr %diagnostic, addr %dependencies, addr %owner
 ) -> addr;
+#extern #proc lain_std_meta_status(addr %source, addr %root) -> i32;
+#extern #proc syntax_index_count(addr %index) -> i64;
+#extern #proc syntax_index_entry(addr %index, i64 %ordinal) -> addr;
+#extern #proc syntax_unit_source(addr %unit) -> addr;
+#extern #proc syntax_unit_root(addr %unit) -> addr;
 #extern #proc lain_core_lower_program(addr %context, addr %syntax_index) -> i32;
 
 #proc lain_std_abi_version() -> i64 {
@@ -24,6 +29,26 @@
 #proc lain_std_expand(
   addr %context, addr %source_unit, addr %root
 ) -> addr {
+  // The compiler passes the syntax index as source_unit.  Semantic form
+  // recognition is delegated to the bootstrap library for every unit; the
+  // core does not inspect `module`/`struct` spellings itself.
+  #let %count: i64 = #call syntax_index_count(%source_unit)
+  #let %ordinal: i64 = 0
+  #loop units {
+    #if #ge(%ordinal, %count) { #break units }
+    #let %unit: addr = #call syntax_index_entry(%source_unit, %ordinal)
+    #let %status: i32 = #call lain_std_meta_status(
+      #call syntax_unit_source(%unit), #call syntax_unit_root(%unit)
+    )
+    #if #ne(%status, 0) {
+      #return #call lain_meta_pass_result_v1_new(
+        %status, 0, %root, #call lain_ast_v1_nil(),
+        #call lain_ast_v1_nil(), %context
+      )
+    }
+    %ordinal: i64 = #add(%ordinal, 1)
+    #continue units
+  }
   #return #call lain_meta_pass_result_v1_new(
     0, 0, %root, #call lain_ast_v1_nil(), #call lain_ast_v1_nil(), %context
   )
