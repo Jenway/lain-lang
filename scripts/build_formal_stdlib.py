@@ -157,6 +157,11 @@ def verify_abi_entry() -> None:
             "formal stdlib arithmetic lowering failed"
             + (f": {detail}" if detail else "")
         )
+    arithmetic_artifact = ABI_OUTPUT.read_text(encoding="utf-8")
+    if "#eval" not in arithmetic_artifact:
+        raise RuntimeError(
+            "formal stdlib arithmetic lowering did not emit a #eval block"
+        )
     arithmetic_run = subprocess.run(
         [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
         cwd=ROOT,
