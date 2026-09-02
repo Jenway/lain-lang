@@ -176,8 +176,8 @@
   // materialized-module construction states @288, Meta-evaluation cache
   // head/tail @264/@272, physical-function hash buckets @280,
   // import-collection flag @320, physical root index @328,
-  // lazy-nonroot flag @336, Meta step limit @344.
-  #let %unit: addr = #call bootstrap.allocate-pages(352)
+  // lazy-nonroot flag @336, Meta step limit @344, compile context @352.
+  #let %unit: addr = #call bootstrap.allocate-pages(360)
   #let %nil: addr = #call program_nil()
   #let %function_buckets: addr = #call bootstrap.allocate-pages(32768)
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=0)
@@ -227,6 +227,7 @@
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=272)
   #store %function_buckets,
     #lea(base=%unit, idx=0, scale=0, offset=280)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=352)
   #let %bucket_index: i64 = 0
   #loop clear_function_buckets {
     #if #ge(%bucket_index, 4096) { #break clear_function_buckets }
@@ -585,6 +586,15 @@
 
 #proc program_unit_meta_step_limit(addr %unit) -> i64 {
   #return #load[i64](#lea(base=%unit, idx=0, scale=0, offset=344))
+}
+
+#proc program_unit_set_compile_context(addr %unit, addr %context) -> #unit {
+  #store %context, #lea(base=%unit, idx=0, scale=0, offset=352)
+  #return
+}
+
+#proc program_unit_compile_context(addr %unit) -> addr {
+  #return #load[addr](#lea(base=%unit, idx=0, scale=0, offset=352))
 }
 
 #proc program_unit_set_meta_stage(addr %unit, i32 %stage) -> #unit {
@@ -8944,6 +8954,9 @@
   #let %source: addr = #call syntax_unit_source(%first_unit)
   #let %root: addr = #call syntax_unit_root(%first_unit)
   #let %unit: addr = #call program_unit_new(%source, %root)
+  #call program_unit_set_compile_context(
+    %unit, #call compiler_request_context(%request)
+  )
   #call program_unit_set_meta_step_limit(
     %unit,
     #call lain_compile_context_v1_step_limit(

@@ -6,6 +6,19 @@
 #extern #proc program_is_std_module_value(
   addr %source, addr %value_node
 ) -> i1;
+#extern #proc program_unit_compile_context(addr %unit) -> addr;
+#extern #proc lain_compile_context_v1_consume_step(addr %context) -> i1;
+#extern #proc lain_compile_context_v1_enter_recursion(addr %context) -> i1;
+#extern #proc lain_compile_context_v1_leave_recursion(addr %context) -> #unit;
+
+#proc program_eval_function_finish(
+  addr %context, i1 %entered, addr %result
+) -> addr {
+  #if %entered {
+    #call lain_compile_context_v1_leave_recursion(%context)
+  }
+  #return %result
+}
 
 #proc program_eval_param_value(
   addr %source, addr %function, addr %node, addr %arguments
@@ -359,9 +372,26 @@
   addr %unit, addr %function, addr %arguments
 ) -> addr {
   #call program_unit_set_meta_stage(%unit, 11)
-  #if #call program_unit_meta_step_inc(%unit) {
-    #call program_unit_set_validation_function(%unit, %function)
-    #return #call eval_result_new(5124, 0)
+  #let %context: addr = #call program_unit_compile_context(%unit)
+  #let %entered: i1 = 0
+  #if #ne(#ptr2int(%context), 0) {
+    #if #eq(#call lain_compile_context_v1_consume_step(%context), 0) {
+      #call program_unit_set_validation_function(%unit, %function)
+      #return #call eval_result_new(5124, 0)
+    }
+    #if #eq(#call lain_compile_context_v1_enter_recursion(%context), 0) {
+      #call program_unit_set_validation_function(%unit, %function)
+      #return #call eval_result_new(5125, 0)
+    }
+    %entered: i1 = 1
+    // Keep the unit-local counter useful for diagnostics; the context owns
+    // the actual step decision when a compile context is attached.
+    #let %unit_step_hit: i1 = #call program_unit_meta_step_inc(%unit)
+  } else {
+    #if #call program_unit_meta_step_inc(%unit) {
+      #call program_unit_set_validation_function(%unit, %function)
+      #return #call eval_result_new(5124, 0)
+    }
   }
   #let %source: addr = #call program_function_source(%function)
   #let %old_environment: addr = #call program_function_environment(
@@ -378,7 +408,9 @@
   )
   #if #ne(%parameter_status, 0) {
     #call program_function_set_environment(%function, %old_environment)
-    #return #call eval_result_new(%parameter_status, 0)
+    #return #call program_eval_function_finish(
+      %context, %entered, #call eval_result_new(%parameter_status, 0)
+    )
   }
   #let %statement: addr = #call raw_node_first(
     #call program_function_body(%function)
@@ -386,7 +418,9 @@
   #loop statements {
     #if #call raw_is_nil(%statement) {
       #call program_function_set_environment(%function, %old_environment)
-      #return #call eval_result_new(3101, 0)
+      #return #call program_eval_function_finish(
+        %context, %entered, #call eval_result_new(3101, 0)
+      )
     }
     #if #call meta_atom_equal(%source, %statement, "let", 3) {
       #let %local_status: #bits<32> = #call program_eval_local_binding(
@@ -398,7 +432,9 @@
           %unit, #call raw_node_start(%statement)
         )
         #call program_function_set_environment(%function, %old_environment)
-        #return #call eval_result_new(%local_status, 0)
+        #return #call program_eval_function_finish(
+          %context, %entered, #call eval_result_new(%local_status, 0)
+        )
       }
       %statement: addr = #call program_skip_statement(%source, %statement)
       #continue statements
@@ -420,10 +456,14 @@
         )
         #if #ne(%module_status, 0) {
           #call program_function_set_environment(%function, %old_environment)
-          #return #call eval_result_new(%module_status, 0)
+          #return #call program_eval_function_finish(
+            %context, %entered, #call eval_result_new(%module_status, 0)
+          )
         }
         #call program_function_set_environment(%function, %old_environment)
-        #return #call eval_result_object(0, %module_value)
+        #return #call program_eval_function_finish(
+          %context, %entered, #call eval_result_object(0, %module_value)
+        )
       }
       #let %result: addr = #call program_eval_value_expression(
         %unit, %source, %function, %arguments, %value
@@ -435,10 +475,14 @@
         )
       }
       #call program_function_set_environment(%function, %old_environment)
-      #return %result
+      #return #call program_eval_function_finish(
+        %context, %entered, %result
+      )
     }
     #call program_function_set_environment(%function, %old_environment)
-    #return #call eval_result_new(3101, 0)
+    #return #call program_eval_function_finish(
+      %context, %entered, #call eval_result_new(3101, 0)
+    )
   }
 }
 

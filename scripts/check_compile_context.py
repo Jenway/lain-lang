@@ -37,6 +37,21 @@ TEST = r'''
   #if #eq(#call lain_compile_context_v1_has_capability(%context, 2), 1) {
     #return 105
   }
+  #if #eq(#call lain_compile_context_v1_enter_recursion(%context), 0) {
+    #return 111
+  }
+  #if #eq(#call lain_compile_context_v1_enter_recursion(%context), 0) {
+    #return 112
+  }
+  #if #eq(#call lain_compile_context_v1_enter_recursion(%context), 1) {
+    #return 113
+  }
+  #call lain_compile_context_v1_leave_recursion(%context)
+  #if #eq(#call lain_compile_context_v1_enter_recursion(%context), 0) {
+    #return 114
+  }
+  #call lain_compile_context_v1_leave_recursion(%context)
+  #call lain_compile_context_v1_leave_recursion(%context)
   #let %unlimited: addr = #call lain_compile_context_v1_new(
     %owner_a, 0, 0, 0, 0
   )
