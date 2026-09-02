@@ -247,6 +247,19 @@ let formal_is_semicolon = std::func(source: addr, node: addr) -> bool {
     return byte_at(source_bytes(source), raw_start(node)) == 59;
 };
 
+let formal_return_is_arithmetic = std::func(
+    source: addr,
+    return_node: addr,
+) -> bool {
+    let value: addr = raw_next(return_node);
+    let operator: addr = raw_next(value);
+    let right: addr = raw_next(operator);
+    if formal_is_operator(source, operator) {
+        if formal_is_decimal(source, right) { return true; }
+    }
+    return false;
+};
+
 let formal_find_return_list = std::func(source: addr, node: addr) -> addr {
     if raw_nil(node) { return ast_nil(); }
     if formal_is_return(source, node) {
@@ -582,7 +595,20 @@ let formal_emit_constant = std::func(source: addr, return_node: addr) -> unit {
     let prefix: addr = "#proc main() -> #bits<64> {\n  #return ";
     let suffix: addr = "\n}\n";
     let buffer: addr = allocate_pages(256);
-    let offset: i64 = formal_copy_literal(buffer, 0, prefix);
+    let offset: i64 = 0;
+    if formal_return_is_arithmetic(source, return_node) {
+        offset = formal_copy_literal(
+            buffer, offset,
+            "#proc main() -> #bits<64> {\n  #let %value: #bits<64> = #eval { #return "
+        );
+        offset = formal_copy_return_expression(buffer, offset, source, return_node);
+        offset = formal_copy_literal(
+            buffer, offset, " }\n  #return %value\n}\n"
+        );
+        artifact_write(buffer, offset);
+        return;
+    }
+    offset = formal_copy_literal(buffer, offset, prefix);
     offset = formal_copy_return_expression(buffer, offset, source, return_node);
     offset = formal_copy_literal(buffer, offset, suffix);
     artifact_write(buffer, offset);
@@ -596,16 +622,29 @@ let formal_emit_call = std::func(
     let buffer: addr = allocate_pages(512);
     let offset: i64 = formal_copy_literal(buffer, 0, "#proc ");
     offset = formal_copy_source(buffer, offset, source, callee);
-    offset = formal_copy_literal(
-        buffer, offset, "() -> #bits<64> {\n  #return "
-    );
-    offset = formal_copy_return_expression(
-        buffer, offset, source, callee_return
-    );
-    offset = formal_copy_literal(
-        buffer, offset,
-        "\n}\n\n#proc main() -> #bits<64> {\n  #return #call "
-    );
+    if formal_return_is_arithmetic(source, callee_return) {
+        offset = formal_copy_literal(
+            buffer, offset,
+            "() -> #bits<64> {\n  #let %value: #bits<64> = #eval { #return "
+        );
+        offset = formal_copy_return_expression(
+            buffer, offset, source, callee_return
+        );
+        offset = formal_copy_literal(
+            buffer, offset, " }\n  #return %value\n}\n\n#proc main() -> #bits<64> {\n  #return #call "
+        );
+    } else {
+        offset = formal_copy_literal(
+            buffer, offset, "() -> #bits<64> {\n  #return "
+        );
+        offset = formal_copy_return_expression(
+            buffer, offset, source, callee_return
+        );
+        offset = formal_copy_literal(
+            buffer, offset,
+            "\n}\n\n#proc main() -> #bits<64> {\n  #return #call "
+        );
+    }
     offset = formal_copy_source(buffer, offset, source, callee);
     offset = formal_copy_literal(buffer, offset, "()\n}\n");
     artifact_write(buffer, offset);

@@ -20,7 +20,8 @@
 > `expand` 已对首个源根节点执行 AstApi 复制，`elaborate` 仍传递该句柄，
 > `lower` 已能为十进制常量 `return`、简单 `+ - * /` 算术、同一源文件内的
 > 无参数函数调用以及布尔/数值比较的 `if ... else` 双分支返回生成并运行最小
-> LAIN-IR，
+> LAIN-IR；算术 lowering 生成的表达式现在包在 `#eval` 块中，由 seed evaluator
+> 执行后再返回标量，
 > 且不完整表达式会被拒绝；其他形式
 > 明确返回迁移中的 `5203`。
 > `run_lain_compiler.py --stdlib-artifact` 已能用同一个 compiler core 实际加载
