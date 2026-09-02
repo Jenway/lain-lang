@@ -35,6 +35,8 @@ ABI_OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib_abi_output.l1"
 FORMAL_CONSTANT_PROBE = ROOT / "scripts" / "fixtures" / "formal_constant_return.lain"
 FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain"
 FORMAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_return.lain"
+FORMAL_CALL_ARGUMENT_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_argument_return.lain"
+FORMAL_CALL_ARGUMENT_EXPRESSION_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_argument_expression.lain"
 FORMAL_IF_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_if_true_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_if_false_return.lain", "42"),
@@ -238,6 +240,59 @@ def verify_abi_entry() -> None:
         raise RuntimeError(
             "formal stdlib function-call artifact did not run as 40"
             + (f": {detail}" if detail else "")
+        )
+    call_argument_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_CALL_ARGUMENT_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if call_argument_probe.returncode:
+        detail = call_argument_probe.stderr.strip() or call_argument_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib argument call lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    call_argument_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if call_argument_run.returncode or call_argument_run.stdout.strip() != "42":
+        detail = call_argument_run.stderr.strip() or call_argument_run.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib argument call artifact did not run as 42"
+            + (f": {detail}" if detail else "")
+        )
+    invalid_argument_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_CALL_ARGUMENT_EXPRESSION_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    invalid_argument_diagnostics = (
+        invalid_argument_probe.stdout + invalid_argument_probe.stderr
+    )
+    if invalid_argument_probe.returncode == 0 or "5203" not in invalid_argument_diagnostics:
+        raise RuntimeError(
+            "formal stdlib accepted a non-scalar function argument"
         )
     for if_fixture, expected in FORMAL_IF_PROBES:
         if_probe = subprocess.run(
