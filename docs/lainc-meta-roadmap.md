@@ -401,7 +401,8 @@ attributes/import
 - [~] Meta step limit 已从 `program_unit_meta_step_inc` 的硬编码移到 unit ABI
   字段，并由 compiler request 创建的 CompileContext 注入；request 现在可配置
   step/allocation/recursion/capability 四类预算。独立 allocation/recursion 消费
-  和诊断仍待接通。
+  和诊断仍待接通。seed 的 `bootstrap.allocate-pages` 已接入 allocation limit
+  下发接口；native host 和细粒度递归计费仍待补齐。
 - [ ] evaluator 支持返回 scalar、type handle、module handle 和 AST handle。
 - [ ] 结果 owner 转交 compile context，并能被下一次 Meta pass 使用。
 - [ ] 递归、step、allocation、capability 各有独立上限和诊断。

@@ -1538,6 +1538,23 @@ static LainirRunStatus allocate_pages(
   return LAINIR_RUN_OK;
 }
 
+static LainirRunStatus set_allocation_limit(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS) {
+    *error = "bootstrap.set-allocation-limit expects one integer";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (!context) {
+    *error = "bootstrap.set-allocation-limit has no context";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  context->max_allocated_page_bytes = args[0].as.bits;
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
 static LainirRunStatus release_pages(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
@@ -1959,6 +1976,8 @@ int bootstrap_run_cli(int argc, char **argv) {
       !add_capability(caps, "bootstrap.copy-bytes", copy_bytes, &context) ||
       !add_capability(caps, "bootstrap.allocate-pages", allocate_pages,
                       &context) ||
+      !add_capability(caps, "bootstrap.set-allocation-limit",
+                      set_allocation_limit, &context) ||
       !add_capability(caps, "bootstrap.release-pages", release_pages,
                       &context) ||
       !add_capability(caps, "bootstrap.write-artifact", write_bytes, &context) ||
