@@ -3,7 +3,9 @@
 
 The result is deliberately separate from ``bootstrap_std.l1``.  The latter
 is the LAIN-IR bootstrap implementation used by the compiler; this artifact
-is the output of compiling the user-facing ``std/**/*.lain`` sources.
+is the output of compiling the user-facing ``std/**/*.lain`` sources.  The
+artifact also checks in the five stable compiler ABI entry names; the entry
+functions are a migration boundary until their semantic passes are complete.
 """
 
 from __future__ import annotations
@@ -18,11 +20,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_COMPILER = ROOT / "scripts" / "run_lain_compiler.py"
+BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
+CORE = ROOT / "build" / "lainir" / "lain_compiler_core.l1"
 SEED_PRINT = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-print.exe" if os.name == "nt" else "lainir-print"
 )
+SEED_RUN = ROOT / "seed" / "zig-out" / "bin" / (
+    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
+)
 OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib.l1"
 MANIFEST = ROOT / "build" / "lainir" / "formal_stdlib.manifest.json"
+ABI_PROBE = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"
+ABI_ENTRIES = (
+    "lain_std_abi_version",
+    "lain_std_initialize",
+    "lain_std_expand",
+    "lain_std_elaborate",
+    "lain_std_lower",
+)
 
 
 def run(arguments: list[Path | str]) -> None:
@@ -34,6 +49,22 @@ def run(arguments: list[Path | str]) -> None:
     )
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+
+
+def verify_abi_entry() -> None:
+    run([sys.executable, BUNDLER, "-o", ABI_PROBE, CORE, OUTPUT])
+    result = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_PROBE), "lain_std_abi_version"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode or result.stdout.strip() != "1":
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib ABI version entry failed"
+            + (f": {detail}" if detail else "")
+        )
 
 
 def sources() -> tuple[Path, ...]:
@@ -65,8 +96,8 @@ def write_manifest(paths: tuple[Path, ...], fingerprint: str) -> None:
                 "inputs_sha256": fingerprint,
                 "target_independent": True,
                 "abi": "lain_std_abi_v1",
-                "abi_status": "source-closure-only",
-                "abi_entries": [],
+                "abi_status": "entry-contract",
+                "abi_entries": list(ABI_ENTRIES),
                 "sources": [
                     {
                         "path": path.relative_to(ROOT).as_posix(),
@@ -99,6 +130,16 @@ def main() -> int:
         ]
     )
     run([SEED_PRINT, OUTPUT])
+    artifact = OUTPUT.read_text(encoding="utf-8")
+    missing = [
+        name for name in ABI_ENTRIES
+        if f"#proc {name}(" not in artifact
+    ]
+    if missing:
+        raise RuntimeError(
+            "formal stdlib ABI entries missing: " + ", ".join(missing)
+        )
+    verify_abi_entry()
     fingerprint = source_fingerprint(paths)
     write_manifest(paths, fingerprint)
     print(f"{OUTPUT.relative_to(ROOT)}")

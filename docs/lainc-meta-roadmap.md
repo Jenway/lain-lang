@@ -16,6 +16,8 @@
 > API 现在也能通过 empty/nonempty 两个客户端验收；完整正式 std/archive 源码
 > 已能由第 2 套编译并通过 verifier 和运行 smoke；`scripts/build_formal_stdlib.py`
 > 现在可以从全部 `std/**/*.lain` 生成并验证 `build/lainir/formal_stdlib.l1`。
+> 该 artifact 还会检查并导出五个 `lain_std_*` ABI 入口；当前
+> `expand/elaborate` 是 identity pass，`lower` 明确返回迁移中的 `5203`。
 > archive API 的空输入和非空
 > 输入客户端已经可用；简单标量 `return` 的真实用户程序已能生成并回灌执行；
 > 完整 L1 Unit 生成、正式标准库全面替换、复杂真实用户程序、native `lainc`
@@ -454,8 +456,12 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `std/**/*.lain` 均可生成 verifier-valid LAIN-IR。
 - [~] Meta 工厂内部的局部 `std::func`、`Module`/`ModuleShape` 返回值和
   `effects.Handler` 返回值已按编译期对象处理，避免生成未定义的 `%module`；
-  正式标准库的 ABI 入口仍未导出。
-- [ ] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口。
+  正式标准库现在已导出五个 `lain_std_*` ABI 名称，expand/elaborate 为
+  identity pass，lower 在语义迁移完成前明确返回 `5203`。
+- [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
+  `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
+  `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
+  实现仍待接入这些入口；当前 lower 明确返回 `5203`。
 - [x] 生成版本化标准库 artifact 和 manifest，记录 ABI、source hash、依赖和
   target-independent 标记；产物为 `build/lainir/bootstrap_std.manifest.json`。
 - [x] 添加 `tests/lainir_lain/run_stdlib_bootstrap.py`。
