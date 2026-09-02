@@ -17,6 +17,16 @@ CONTEXT = ROOT / "src" / "lainir" / "lain" / "compiler_context.l1"
 EVAL = ROOT / "src" / "lainir" / "lain" / "eval_result.l1"
 
 TEST = r'''
+#proc meta_value_nil() -> addr {
+  #let %value: addr = #call bootstrap.allocate-pages(8)
+  #store 0, #lea(base=%value, idx=0, scale=0, offset=0)
+  #return %value
+}
+
+#proc meta_value_kind(addr %value) -> i32 {
+  #return #load[i32](#lea(base=%value, idx=0, scale=0, offset=0))
+}
+
 #proc main() -> #bits<32> {
   #let %owner_a: addr = #int2ptr(1)
   #let %owner_b: addr = #int2ptr(2)
@@ -104,6 +114,13 @@ TEST = r'''
   ), 1) {
     #return 123
   }
+  #let %nil_meta: addr = #call meta_value_nil()
+  #let %nil_object_result: addr = #call eval_result_object(
+    0, %nil_meta
+  )
+  #if #ne(#call eval_status(%nil_object_result), 5108) {
+    #return 124
+  }
   #return 0
 }
 '''
@@ -116,6 +133,11 @@ def main() -> int:
         source = Path(directory) / "context_test.l1"
         eval_source = EVAL.read_text(encoding="utf-8").replace(
             "#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;\n",
+            "",
+            1,
+        )
+        eval_source = eval_source.replace(
+            "#extern #proc meta_value_kind(addr %value) -> i32;\n",
             "",
             1,
         )
