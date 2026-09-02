@@ -156,7 +156,7 @@
 //   body @32, next @40, diagnostic @48, parameter count @56,
 //   owning source @64, owning unit @72, source ordinal @80,
 //   lexical Meta environment @88, specialization key @96,
-//   linked-to-unit marker @104.
+//   linked-to-unit marker @104, ABI-export marker @120.
 #proc program_nil() -> addr {
   // Keep a second zeroed word so function descriptors can use their
   // name-length field to distinguish the sentinel from a real function.
@@ -179,7 +179,8 @@
   // materialized-module construction states @288, Meta-evaluation cache
   // head/tail @264/@272, physical-function hash buckets @280,
   // import-collection flag @320, physical root index @328,
-  // lazy-nonroot flag @336, Meta step limit @344, compile context @352.
+  // lazy-nonroot flag @336, Meta step limit @344, compile context @352,
+  // pending @abi_export marker @304.
   #let %unit: addr = #call bootstrap.allocate-pages(360)
   #let %nil: addr = #call program_nil()
   #let %function_buckets: addr = #call bootstrap.allocate-pages(32768)
@@ -220,6 +221,7 @@
   #store %nil, #lea(base=%unit, idx=0, scale=0, offset=288)
   #store 0, #lea(base=%unit, idx=0, scale=0, offset=296)
   #store 0, #lea(base=%unit, idx=0, scale=0, offset=300)
+  #store 0, #lea(base=%unit, idx=0, scale=0, offset=304)
   #store 0, #lea(base=%unit, idx=0, scale=0, offset=320)
   #store 0, #lea(base=%unit, idx=0, scale=0, offset=328)
   #store 0, #lea(base=%unit, idx=0, scale=0, offset=336)
@@ -246,7 +248,7 @@
   addr %source, addr %name, addr %params, addr %return_type, addr %body,
   i64 %source_index
 ) -> addr {
-  #let %function: addr = #call bootstrap.allocate-pages(120)
+  #let %function: addr = #call bootstrap.allocate-pages(128)
   #let %nil: addr = #call program_nil()
   #store #call raw_node_start(%name),
     #lea(base=%function, idx=0, scale=0, offset=0)
@@ -266,7 +268,13 @@
   #store 0, #lea(base=%function, idx=0, scale=0, offset=104)
   // @foreign link_name content start (0 when absent).
   #store 0, #lea(base=%function, idx=0, scale=0, offset=112)
+  // @abi_export marker (0 when absent).
+  #store 0, #lea(base=%function, idx=0, scale=0, offset=120)
   #return %function
+}
+
+#proc program_function_is_abi_exported(addr %function) -> i1 {
+  #return #load[i1](#lea(base=%function, idx=0, scale=0, offset=120))
 }
 
 #proc program_function_source(addr %function) -> addr {
@@ -2362,6 +2370,16 @@
     %source, %function, "compiler_compile", 16
   ) {
     #call bootstrap.artifact-write-literal("compiler_compile")
+    #return
+  }
+  // A dedicated @abi_export attribute reserves the source spelling as the
+  // physical procedure label.  Ordinary @export remains a module visibility
+  // marker and deliberately does not affect the physical ABI.
+  #if #call program_function_is_abi_exported(%function) {
+    #call meta_write_span(
+      %source, #call program_function_name_start(%function),
+      #call program_function_name_length(%function)
+    )
     #return
   }
   // External declarations carrying @foreign link_name use that name as the
