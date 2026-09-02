@@ -492,7 +492,9 @@ static void emit_l1_subroutine(L1Subroutine *sub, EmitState *out) {
             sub->link_name ? sub->link_name : sub->name);
     for (uint32_t i = 0; i < sub->param_count; i++) {
       emit_l1_type(sub->param_tys[i], out);
-      emitf(out, " %%arg%d", i);
+      emitf(out, " %%%s", sub->param_names && sub->param_names[i]
+                            ? sub->param_names[i] : "arg");
+      if ((!sub->param_names || !sub->param_names[i])) emitf(out, "%d", i);
       if (i < sub->param_count - 1)
         emitf(out, ", ");
     }
@@ -506,7 +508,9 @@ static void emit_l1_subroutine(L1Subroutine *sub, EmitState *out) {
   emitf(out, "#proc %s(", sub->name);
   for (uint32_t i = 0; i < sub->param_count; i++) {
     emit_l1_type(sub->param_tys[i], out);
-    emitf(out, " %%arg%d", i);
+    emitf(out, " %%%s", sub->param_names && sub->param_names[i]
+                          ? sub->param_names[i] : "arg");
+    if ((!sub->param_names || !sub->param_names[i])) emitf(out, "%d", i);
     if (i < sub->param_count - 1)
       emitf(out, ", ");
   }

@@ -38,7 +38,7 @@ pub fn build(b: *std.Build) void {
     const interpreter = addCLibrary(
         b,
         "lainir_interpreter",
-        &.{"src/interpreter/interpreter.c"},
+        &.{ "src/interpreter/interpreter.c", "src/interpreter/eval_source.c" },
         target,
         optimize,
     );

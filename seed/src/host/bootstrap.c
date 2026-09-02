@@ -1,4 +1,5 @@
 #include "lainir/interpreter.h"
+#include "lainir/eval_source.h"
 #include "lainir/parse.h"
 #include "lainir/verify.h"
 #include "bootstrap_host.h"
@@ -80,7 +81,12 @@ typedef struct {
   uint64_t diagnostic_count;
   uint64_t allocated_page_bytes;
   uint64_t max_allocated_page_bytes;
+  uint64_t *eval_values;
+  size_t eval_value_count;
+  size_t eval_value_index;
   int trace_allocations;
+  LainirCapabilityTable *caps;
+  LainirModuleHandle *prepared_module;
 } BootstrapContext;
 
 static void bootstrap_release_pages(BootstrapContext *context) {
@@ -317,6 +323,1111 @@ static LainirRunStatus source_length(
     return LAINIR_RUN_BAD_CALL;
   }
   *result = lainir_value_bits(context->sources[index].length, 64);
+  return LAINIR_RUN_OK;
+}
+/* Run the seed parser, verifier and compile-time evaluator on a complete
+ * LAIN-IR source buffer.  The compiler front-end uses this as its single
+ * #eval execution path; it does not interpret expressions itself. */
+static LainirRunStatus eval_source(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  L1Diagnostic diagnostic = {0};
+  size_t length;
+  if (count != 2 || args[0].kind != LAINIR_VALUE_ADDR ||
+      args[1].kind != LAINIR_VALUE_BITS) {
+    *error = "bootstrap.eval-source expects source address and length";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (!context) {
+    *error = "bootstrap.eval-source has no host context";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (!args[0].as.addr) {
+    *error = "bootstrap.eval-source received a null source";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (args[1].as.bits > SIZE_MAX - 1) {
+    *error = "bootstrap.eval-source length is too large";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  length = (size_t)args[1].as.bits;
+  free(context->eval_values);
+  context->eval_values = NULL;
+  context->eval_value_count = 0;
+  context->eval_value_index = 0;
+  if (context && context->source_count == 1 && context->sources &&
+      args[0].as.addr == context->sources[0].bytes &&
+      length == context->sources[0].length && context->prepared_module) {
+    if (lainir_module_handle_eval_values(
+            context->prepared_module, context->caps,
+            &context->eval_values, &context->eval_value_count,
+            &diagnostic, error) != LAINIR_RUN_OK)
+      return LAINIR_RUN_BAD_CALL;
+  } else {
+    char *source = malloc(length + 1);
+    if (!source) {
+      *error = "bootstrap.eval-source allocation failed";
+      return LAINIR_RUN_TRAP;
+    }
+    memcpy(source, args[0].as.addr, length);
+    source[length] = '\0';
+    if (lainir_eval_source_values(source, context ? context->caps : NULL,
+                                  &context->eval_values,
+                                  &context->eval_value_count,
+                                  &diagnostic, error) != LAINIR_RUN_OK) {
+      free(source);
+      return LAINIR_RUN_BAD_CALL;
+    }
+    free(source);
+  }
+  *result = lainir_value_bits(1, 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus eval_next(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  (void)error;
+  if (count != 0) {
+    *error = "bootstrap.eval-next expects no arguments";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (!context || context->eval_value_index >= context->eval_value_count) {
+    *result = lainir_value_bits(0, 64);
+    return LAINIR_RUN_OK;
+  }
+  *result = lainir_value_bits(
+      context->eval_values[context->eval_value_index++], 64);
+  return LAINIR_RUN_OK;
+}
+
+/* Validate a complete source buffer with the seed parser and verifier.  The
+ * result is deliberately only a status: the module remains owned by seed and
+ * is released before this capability returns. */
+static LainirRunStatus validate_source(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  L1Subroutine *module = NULL;
+  L1Diagnostic diagnostic = {0};
+  char *copy;
+  size_t length;
+  if (count != 2 || args[0].kind != LAINIR_VALUE_ADDR ||
+      args[1].kind != LAINIR_VALUE_BITS) {
+    *error = "bootstrap.validate-source expects source address and length";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (!args[0].as.addr) {
+    *error = "bootstrap.validate-source received a null source";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (args[1].as.bits > SIZE_MAX - 1) {
+    *error = "bootstrap.validate-source length is too large";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  length = (size_t)args[1].as.bits;
+  if (memchr(args[0].as.addr, '\0', length) != NULL) {
+    *error = "bootstrap.validate-source received an embedded NUL";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  /* Normal compiler calls refer to the source that bootstrap_run_cli already
+   * parsed and verified.  Reuse that owned handle so validation does not
+   * perform a second full parse. */
+  if (context && context->source_count == 1 && context->sources &&
+      args[0].as.addr == context->sources[0].bytes &&
+      length == context->sources[0].length && context->prepared_module) {
+    *result = lainir_value_bits(1, 1);
+    return LAINIR_RUN_OK;
+  }
+  /* Keep the capability useful for callers that provide an independent
+   * buffer; this path remains owned and released entirely inside the call. */
+  copy = malloc(length + 1);
+  if (!copy) {
+    *error = "bootstrap.validate-source allocation failed";
+    return LAINIR_RUN_TRAP;
+  }
+  memcpy(copy, args[0].as.addr, length);
+  copy[length] = '\0';
+  if (!lainir_parse_module_checked(copy, &module, &diagnostic) ||
+      !lainir_verify_module(module, NULL, &diagnostic)) {
+    free(copy);
+    lainir_free_subroutines(module);
+    *error = diagnostic.message[0] ? diagnostic.message
+                                   : "seed parser/verifier rejected source";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  free(copy);
+  lainir_free_subroutines(module);
+  *result = lainir_value_bits(1, 1);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_module_id(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  (void)args;
+  (void)error;
+  if (count != 2 || !context || !context->prepared_module) {
+    if (error) *error = "bootstrap.ir-module-id has no prepared module";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)context->prepared_module, 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_module_id_release(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  uint64_t id;
+  (void)result;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS || !context) {
+    *error = "bootstrap.ir-module-id-release expects an id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  id = args[0].as.bits;
+  if (id != (uint64_t)(uintptr_t)context->prepared_module) {
+    *error = "bootstrap.ir-module-id-release received an unknown id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  /* The prepared module is owned by the host and is released at cleanup. */
+  return LAINIR_RUN_OK;
+}
+
+static int ir_id_matches_prepared(const BootstrapContext *context,
+                                  uint64_t id) {
+  return context && context->prepared_module &&
+      id == (uint64_t)(uintptr_t)context->prepared_module;
+}
+
+/* Procedure ids are borrowed pointer values exposed as opaque integers to
+ * L1.  Validate membership before dereferencing one so a stale or forged id
+ * becomes a normal bad-call result instead of a host crash. */
+static const L1Subroutine *ir_find_prepared_procedure(
+    const BootstrapContext *context, uint64_t id) {
+  const L1Subroutine *procedure;
+  if (!context || !context->prepared_module || id == 0)
+    return NULL;
+  for (procedure = lainir_module_handle_first(context->prepared_module);
+       procedure; procedure = lainir_procedure_next(procedure)) {
+    if ((uint64_t)(uintptr_t)procedure == id)
+      return procedure;
+  }
+  return NULL;
+}
+
+static const L1Block *ir_find_block_tree(const L1Block *block, uint64_t id) {
+  for (; block; block = lainir_block_next(block)) {
+    const L1Instruction *instruction;
+    if ((uint64_t)(uintptr_t)block == id) return block;
+    for (instruction = lainir_block_first_instruction(block);
+         instruction; instruction = lainir_instruction_next(instruction)) {
+      const L1Block *nested = lainir_instruction_then_block(instruction);
+      const L1Block *found;
+      found = ir_find_block_tree(nested, id);
+      if (found) return found;
+      nested = lainir_instruction_else_block(instruction);
+      found = ir_find_block_tree(nested, id);
+      if (found) return found;
+      nested = lainir_instruction_loop_block(instruction);
+      found = ir_find_block_tree(nested, id);
+      if (found) return found;
+    }
+  }
+  return NULL;
+}
+
+static const L1Block *ir_find_prepared_block(
+    const BootstrapContext *context, uint64_t id) {
+  const L1Subroutine *procedure;
+  if (!context || !context->prepared_module || id == 0) return NULL;
+  for (procedure = lainir_module_handle_first(context->prepared_module);
+       procedure; procedure = lainir_procedure_next(procedure)) {
+    const L1Block *found = ir_find_block_tree(
+        lainir_procedure_first_block(procedure), id);
+    if (found) return found;
+  }
+  return NULL;
+}
+
+static const L1Instruction *ir_find_instruction_tree(
+    const L1Block *block, uint64_t id) {
+  for (; block; block = lainir_block_next(block)) {
+    const L1Instruction *instruction;
+    for (instruction = lainir_block_first_instruction(block);
+         instruction; instruction = lainir_instruction_next(instruction)) {
+      const L1Block *nested;
+      const L1Instruction *found;
+      if ((uint64_t)(uintptr_t)instruction == id) return instruction;
+      nested = lainir_instruction_then_block(instruction);
+      found = ir_find_instruction_tree(nested, id);
+      if (found) return found;
+      nested = lainir_instruction_else_block(instruction);
+      found = ir_find_instruction_tree(nested, id);
+      if (found) return found;
+      nested = lainir_instruction_loop_block(instruction);
+      found = ir_find_instruction_tree(nested, id);
+      if (found) return found;
+    }
+  }
+  return NULL;
+}
+
+static const L1Instruction *ir_find_prepared_instruction(
+    const BootstrapContext *context, uint64_t id) {
+  const L1Subroutine *procedure;
+  if (!context || !context->prepared_module || id == 0) return NULL;
+  for (procedure = lainir_module_handle_first(context->prepared_module);
+       procedure; procedure = lainir_procedure_next(procedure)) {
+    const L1Instruction *found = ir_find_instruction_tree(
+        lainir_procedure_first_block(procedure), id);
+    if (found) return found;
+  }
+  return NULL;
+}
+
+/* Expressions are borrowed pointers nested in instructions.  Resolve an
+ * opaque expression id by walking the prepared module before dereferencing
+ * it; forged or stale ids therefore become a normal bad-call result. */
+static const L1Expr *ir_find_expression_tree(const L1Expr *expression,
+                                              uint64_t id, unsigned depth);
+
+static const L1Expr *ir_find_expression_in_block(const L1Block *block,
+                                                  uint64_t id,
+                                                  unsigned depth) {
+  for (; block; block = lainir_block_next(block)) {
+    const L1Instruction *instruction;
+    for (instruction = lainir_block_first_instruction(block); instruction;
+         instruction = lainir_instruction_next(instruction)) {
+      const L1Expr *found;
+      if ((found = ir_find_expression_tree(
+              lainir_instruction_value(instruction), id, depth + 1))) return found;
+      if ((found = ir_find_expression_tree(
+              lainir_instruction_destination(instruction), id, depth + 1))) return found;
+      if ((found = ir_find_expression_tree(
+              lainir_instruction_condition(instruction), id, depth + 1))) return found;
+      if ((found = ir_find_expression_in_block(
+              lainir_instruction_then_block(instruction), id, depth + 1))) return found;
+      if ((found = ir_find_expression_in_block(
+              lainir_instruction_else_block(instruction), id, depth + 1))) return found;
+      if ((found = ir_find_expression_in_block(
+              lainir_instruction_loop_block(instruction), id, depth + 1))) return found;
+    }
+  }
+  return NULL;
+}
+
+static const L1Expr *ir_find_expression_tree(const L1Expr *expression,
+                                              uint64_t id, unsigned depth) {
+  uint32_t index, count;
+  const L1Expr *found;
+  if (!expression || depth > 1024) return NULL;
+  if ((uint64_t)(uintptr_t)expression == id) return expression;
+  if ((found = ir_find_expression_tree(lainir_expr_left(expression), id, depth + 1))) return found;
+  if ((found = ir_find_expression_tree(lainir_expr_right(expression), id, depth + 1))) return found;
+  if ((found = ir_find_expression_tree(lainir_expr_operand(expression), id, depth + 1))) return found;
+  if ((found = ir_find_expression_in_block(lainir_expr_block(expression), id, depth + 1))) return found;
+  count = lainir_expr_argument_count(expression);
+  for (index = 0; index < count; ++index) {
+    if ((found = ir_find_expression_tree(
+            lainir_expr_argument_at(expression, index), id, depth + 1))) return found;
+  }
+  return NULL;
+}
+
+static const L1Expr *ir_find_prepared_expression(
+    const BootstrapContext *context, uint64_t id) {
+  const L1Subroutine *procedure;
+  if (!context || !context->prepared_module || id == 0) return NULL;
+  for (procedure = lainir_module_handle_first(context->prepared_module);
+       procedure; procedure = lainir_procedure_next(procedure)) {
+    const L1Expr *found = ir_find_expression_in_block(
+        lainir_procedure_first_block(procedure), id, 0);
+    if (found) return found;
+  }
+  return NULL;
+}
+
+static LainirRunStatus ir_module_first(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *procedure;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !ir_id_matches_prepared(context, args[0].as.bits)) {
+    *error = "bootstrap.ir-module-first expects a valid module id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  procedure = lainir_module_handle_first(context->prepared_module);
+  *result = lainir_value_bits((uint64_t)(uintptr_t)procedure, 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_find(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *procedure;
+  const char *name;
+  if (count != 2 || args[0].kind != LAINIR_VALUE_BITS ||
+      args[1].kind != LAINIR_VALUE_ADDR ||
+      !context || !context->prepared_module ||
+      args[0].as.bits != (uint64_t)(uintptr_t)context->prepared_module ||
+      !(name = (const char *)args[1].as.addr)) {
+    *error = "bootstrap.ir-procedure-find expects a module id and name";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  for (procedure = lainir_module_handle_first(context->prepared_module);
+       procedure; procedure = lainir_procedure_next(procedure)) {
+    if (lainir_procedure_name(procedure) &&
+        strcmp(lainir_procedure_name(procedure), name) == 0) {
+      *result = lainir_value_bits((uint64_t)(uintptr_t)procedure, 64);
+      return LAINIR_RUN_OK;
+    }
+  }
+  *result = lainir_value_bits(0, 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_next(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Subroutine *procedure;
+  const L1Subroutine *next;
+  BootstrapContext *context = user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS) {
+    *error = "bootstrap.ir-procedure-next expects a procedure id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  procedure = ir_find_prepared_procedure(context, args[0].as.bits);
+  if (!procedure) {
+    *error = "bootstrap.ir-procedure-next received an unknown id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  next = lainir_procedure_next(procedure);
+  *result = lainir_value_bits((uint64_t)(uintptr_t)next, 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_name(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Subroutine *procedure;
+  BootstrapContext *context = user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS) {
+    *error = "bootstrap.ir-procedure-name expects a procedure id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  procedure = ir_find_prepared_procedure(context, args[0].as.bits);
+  if (!procedure) {
+    *error = "bootstrap.ir-procedure-name received an unknown id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_addr((void *)lainir_procedure_name(procedure));
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_name_length(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *procedure;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(procedure = ir_find_prepared_procedure(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-procedure-name-length expects a valid procedure id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_procedure_name_length(procedure), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_link_name(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Subroutine *procedure;
+  BootstrapContext *context = user_data;
+  const char *name;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(procedure = ir_find_prepared_procedure(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-procedure-link-name expects a procedure id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  name = lainir_procedure_link_name(procedure);
+  if (!name) {
+    *error = "bootstrap.ir-procedure-link-name is unavailable";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_addr((void *)name);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_return_width(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Subroutine *procedure;
+  BootstrapContext *context = user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS) {
+    *error = "bootstrap.ir-procedure-return-width expects a procedure id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  procedure = ir_find_prepared_procedure(context, args[0].as.bits);
+  if (!procedure) {
+    *error = "bootstrap.ir-procedure-return-width received an unknown id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      lainir_type_width(lainir_procedure_return_type(procedure)), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_return_kind(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Subroutine *procedure;
+  const L1Type *type;
+  BootstrapContext *context = user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(procedure = ir_find_prepared_procedure(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-procedure-return-kind expects a procedure id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  type = lainir_procedure_return_type(procedure);
+  *result = lainir_value_bits(type ? (uint64_t)lainir_type_kind(type) : 0, 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_parameter_count(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Subroutine *procedure;
+  BootstrapContext *context = user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS) {
+    *error = "bootstrap.ir-procedure-parameter-count expects a procedure id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  procedure = ir_find_prepared_procedure(context, args[0].as.bits);
+  if (!procedure) {
+    *error = "bootstrap.ir-procedure-parameter-count received an unknown id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_procedure_parameter_count(procedure), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_external(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Subroutine *procedure;
+  BootstrapContext *context = user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS) {
+    *error = "bootstrap.ir-procedure-external expects a procedure id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  procedure = ir_find_prepared_procedure(context, args[0].as.bits);
+  if (!procedure) {
+    *error = "bootstrap.ir-procedure-external received an unknown id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_procedure_is_external(procedure), 1);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_parameter_name(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *procedure;
+  const char *name;
+  if (count != 2 || args[0].kind != LAINIR_VALUE_BITS ||
+      args[1].kind != LAINIR_VALUE_BITS ||
+      !(procedure = ir_find_prepared_procedure(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-procedure-parameter-name expects a valid procedure and index";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (args[1].as.bits > UINT32_MAX) {
+    *error = "bootstrap.ir-procedure-parameter-name index is too large";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  name = lainir_procedure_parameter_name(procedure, (uint32_t)args[1].as.bits);
+  if (!name) {
+    *error = "bootstrap.ir-procedure-parameter-name received an out-of-range index";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_addr((void *)name);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_parameter_width(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *procedure;
+  const L1Type *type;
+  if (count != 2 || args[0].kind != LAINIR_VALUE_BITS ||
+      args[1].kind != LAINIR_VALUE_BITS ||
+      !(procedure = ir_find_prepared_procedure(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-procedure-parameter-width expects a valid procedure and index";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (args[1].as.bits > UINT32_MAX) {
+    *error = "bootstrap.ir-procedure-parameter-width index is too large";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  type = lainir_procedure_parameter_type(procedure, (uint32_t)args[1].as.bits);
+  if (!type) {
+    *error = "bootstrap.ir-procedure-parameter-width received an out-of-range index";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_type_width(type), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_parameter_kind(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *procedure;
+  const L1Type *type;
+  if (count != 2 || args[0].kind != LAINIR_VALUE_BITS ||
+      args[1].kind != LAINIR_VALUE_BITS ||
+      !(procedure = ir_find_prepared_procedure(context, args[0].as.bits)) ||
+      args[1].as.bits > UINT32_MAX) {
+    *error = "bootstrap.ir-procedure-parameter-kind expects a valid procedure and index";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  type = lainir_procedure_parameter_type(procedure, (uint32_t)args[1].as.bits);
+  if (!type) {
+    *error = "bootstrap.ir-procedure-parameter-kind received an out-of-range index";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits((uint64_t)lainir_type_kind(type), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_procedure_first_block(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *procedure;
+  const L1Block *block;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(procedure = ir_find_prepared_procedure(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-procedure-first-block expects a valid procedure id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  block = lainir_procedure_first_block(procedure);
+  *result = lainir_value_bits((uint64_t)(uintptr_t)block, 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_block_first_instruction(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Block *block;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(block = ir_find_prepared_block(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-block-first-instruction expects a valid block id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_block_first_instruction(block), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_block_next(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Block *block;
+  const L1Block *next;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(block = ir_find_prepared_block(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-block-next expects a valid block id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  next = lainir_block_next(block);
+  *result = lainir_value_bits((uint64_t)(uintptr_t)next, 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_next(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-next expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_instruction_next(instruction), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_kind(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-kind expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_instruction_kind(instruction), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_value(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-value expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_instruction_value(instruction), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_destination(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-destination expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_instruction_destination(instruction), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_name(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  const char *name;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-name expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  name = lainir_instruction_name(instruction);
+  if (!name) {
+    *error = "bootstrap.ir-instruction-name is unavailable for this instruction";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_addr((void *)name);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_label(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  const char *label;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-label expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  label = lainir_instruction_label(instruction);
+  *result = lainir_value_addr((void *)label);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_type_width(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  const L1Type *type;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-type-width expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  type = lainir_instruction_type(instruction);
+  *result = lainir_value_bits(type ? lainir_type_width(type) : 0, 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_type_kind(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  const L1Type *type;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-type-kind expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  type = lainir_instruction_type(instruction);
+  *result = lainir_value_bits(type ? (uint64_t)lainir_type_kind(type) : 0, 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_condition(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-condition expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_instruction_condition(instruction), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_then_block(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-then-block expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_instruction_then_block(instruction), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_else_block(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-else-block expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_instruction_else_block(instruction), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_instruction_loop_block(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Instruction *instruction;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(instruction = ir_find_prepared_instruction(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-instruction-loop-block expects a valid instruction id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_instruction_loop_block(instruction), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_kind(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-kind expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_expr_kind(expression), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_const(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-const expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits((uint64_t)lainir_expr_const_value(expression), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_left(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-left expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_expr_left(expression), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_right(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-right expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_expr_right(expression), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_arg_index(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-arg-index expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_expr_arg_index(expression), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_callee_name(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  const char *name;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-callee-name expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  name = lainir_expr_callee_name(expression);
+  if (!name) {
+    *error = "bootstrap.ir-expression-callee-name is unavailable for this expression";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_addr((void *)name);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_name(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  const char *name;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-name expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  name = lainir_expr_name(expression);
+  if (!name) {
+    *error = "bootstrap.ir-expression-name is unavailable for this expression";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_addr((void *)name);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_argument_count(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-argument-count expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_expr_argument_count(expression), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_argument_at(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  const L1Expr *argument;
+  (void)user_data;
+  if (count != 2 || args[0].kind != LAINIR_VALUE_BITS ||
+      args[1].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-argument-at expects an expression and index";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (args[1].as.bits > UINT32_MAX) {
+    *error = "bootstrap.ir-expression-argument-at index is too large";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  argument = lainir_expr_argument_at(expression, (uint32_t)args[1].as.bits);
+  if (!argument) {
+    *error = "bootstrap.ir-expression-argument-at received an out-of-range index";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits((uint64_t)(uintptr_t)argument, 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_type_width(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  const L1Type *type;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-type-width expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  type = lainir_expr_type(expression);
+  *result = lainir_value_bits(type ? lainir_type_width(type) : 0, 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_type_kind(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  const L1Type *type;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-type-kind expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  type = lainir_expr_type(expression);
+  *result = lainir_value_bits(type ? (uint64_t)lainir_type_kind(type) : 0, 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_operand(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-operand expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_expr_operand(expression), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_block(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-block expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(
+      (uint64_t)(uintptr_t)lainir_expr_block(expression), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_scale(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-scale expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_expr_scale(expression), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_offset(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-offset expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_expr_offset(expression), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_field_index(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-field-index expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_expr_field_index(expression), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_byte_size(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-byte-size expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_expr_byte_size(expression), 32);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_expression_string(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  const L1Expr *expression;
+  const char *string;
+  (void)user_data;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
+    *error = "bootstrap.ir-expression-string expects an expression id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  string = lainir_expr_string(expression);
+  if (!string) {
+    *error = "bootstrap.ir-expression-string is unavailable for this expression";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_addr((void *)string);
   return LAINIR_RUN_OK;
 }
 
@@ -609,6 +1720,35 @@ static LainirRunStatus artifact_write_literal(
   return LAINIR_RUN_OK;
 }
 
+/* Emit a source identifier in the C ABI spelling used by generated code.
+ * Keeping this byte loop in the host avoids interpreting one L1 call for
+ * every character while bootstrapping the compiler itself. */
+static LainirRunStatus artifact_write_identifier(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const unsigned char *name;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_ADDR || !context->artifact) {
+    *error = "bootstrap.artifact-write-identifier has invalid arguments or state";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  name = (const unsigned char *)args[0].as.addr;
+  if (!name) {
+    *error = "bootstrap.artifact-write-identifier received null";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  for (; *name; ++name) {
+    const char *replacement = NULL;
+    if (*name == '.') replacement = "_dot_";
+    else if (*name == '-') replacement = "_dash_";
+    else if (*name == '!') replacement = "_bang_";
+    if (replacement) fputs(replacement, context->artifact);
+    else fputc(*name, context->artifact);
+  }
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
 static LainirRunStatus artifact_finish(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
@@ -695,6 +1835,17 @@ int bootstrap_run_cli(int argc, char **argv) {
       goto cleanup;
     }
   }
+  if (context.source_count == 1) {
+    if (lainir_module_parse_handle(
+            (const char *)context.sources[0].bytes,
+            &context.prepared_module, &diagnostic) != LAINIR_RUN_OK ||
+        lainir_module_handle_verify(context.prepared_module, &diagnostic) !=
+            LAINIR_RUN_OK) {
+      fprintf(stderr, "input LAIN-IR rejected [%d] line %d: %s\n",
+              diagnostic.code, diagnostic.line, diagnostic.message);
+      goto cleanup;
+    }
+  }
 
   caps = lainir_caps_new();
   if (!caps ||
@@ -705,6 +1856,106 @@ int bootstrap_run_cli(int argc, char **argv) {
                       &context) ||
       !add_capability(caps, "bootstrap.source-data", source_data, &context) ||
       !add_capability(caps, "bootstrap.source-length", source_length, &context) ||
+      !add_capability(caps, "bootstrap.eval_source", eval_source, &context) ||
+      !add_capability(caps, "bootstrap.eval-next", eval_next, &context) ||
+      !add_capability(caps, "bootstrap.validate-source", validate_source,
+                      &context) ||
+      !add_capability(caps, "bootstrap.ir-module-id", ir_module_id,
+                      &context) ||
+      !add_capability(caps, "bootstrap.ir-module-id-release", ir_module_id_release,
+                      &context) ||
+      !add_capability(caps, "bootstrap.ir-module-first", ir_module_first,
+                      &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-find", ir_procedure_find,
+                      &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-next", ir_procedure_next,
+                      &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-name", ir_procedure_name,
+                      &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-name-length",
+                      ir_procedure_name_length, &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-link-name",
+                      ir_procedure_link_name, &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-return-width",
+                      ir_procedure_return_width, &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-return-kind",
+                      ir_procedure_return_kind, &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-parameter-count",
+                      ir_procedure_parameter_count, &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-external",
+                      ir_procedure_external, &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-parameter-name",
+                      ir_procedure_parameter_name, &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-parameter-width",
+                      ir_procedure_parameter_width, &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-parameter-kind",
+                      ir_procedure_parameter_kind, &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-first-block",
+                      ir_procedure_first_block, &context) ||
+      !add_capability(caps, "bootstrap.ir-block-first-instruction",
+                      ir_block_first_instruction, &context) ||
+      !add_capability(caps, "bootstrap.ir-block-next",
+                      ir_block_next, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-next",
+                      ir_instruction_next, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-kind",
+                      ir_instruction_kind, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-value",
+                      ir_instruction_value, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-destination",
+                      ir_instruction_destination, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-name",
+                      ir_instruction_name, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-label",
+                      ir_instruction_label, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-type-width",
+                      ir_instruction_type_width, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-type-kind",
+                      ir_instruction_type_kind, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-condition",
+                      ir_instruction_condition, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-then-block",
+                      ir_instruction_then_block, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-else-block",
+                      ir_instruction_else_block, &context) ||
+      !add_capability(caps, "bootstrap.ir-instruction-loop-block",
+                      ir_instruction_loop_block, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-kind",
+                      ir_expression_kind, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-const",
+                      ir_expression_const, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-left",
+                      ir_expression_left, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-right",
+                      ir_expression_right, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-arg-index",
+                      ir_expression_arg_index, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-callee-name",
+                      ir_expression_callee_name, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-name",
+                      ir_expression_name, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-argument-count",
+                      ir_expression_argument_count, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-argument-at",
+                      ir_expression_argument_at, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-type-width",
+                      ir_expression_type_width, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-type-kind",
+                      ir_expression_type_kind, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-operand",
+                      ir_expression_operand, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-block",
+                      ir_expression_block, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-scale",
+                      ir_expression_scale, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-offset",
+                      ir_expression_offset, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-field-index",
+                      ir_expression_field_index, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-byte-size",
+                      ir_expression_byte_size, &context) ||
+      !add_capability(caps, "bootstrap.ir-expression-string",
+                      ir_expression_string, &context) ||
       !add_capability(caps, "bootstrap.copy-bytes", copy_bytes, &context) ||
       !add_capability(caps, "bootstrap.allocate-pages", allocate_pages,
                       &context) ||
@@ -721,11 +1972,14 @@ int bootstrap_run_cli(int argc, char **argv) {
                       artifact_write_span, &context) ||
       !add_capability(caps, "bootstrap.artifact-write-literal",
                       artifact_write_literal, &context) ||
+      !add_capability(caps, "bootstrap.artifact-write-identifier",
+                      artifact_write_identifier, &context) ||
       !add_capability(caps, "bootstrap.artifact-finish", artifact_finish,
                       &context)) {
     fprintf(stderr, "could not initialize bootstrap capabilities\n");
     goto cleanup;
   }
+  context.caps = caps;
 
   /* Keep long archive-library runs diagnosable without changing the normal
    * bootstrap contract.  A temporary step cap can be supplied by the host
@@ -781,6 +2035,8 @@ cleanup:
       free(context.sources[index].bytes);
   }
   free(context.sources);
+  lainir_module_handle_destroy(&context.prepared_module);
+  free(context.eval_values);
   lainir_caps_free(caps);
   lainir_free_subroutines(module);
   free(compiler_text);

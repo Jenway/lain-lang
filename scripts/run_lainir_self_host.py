@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Run the real LAIN-IR compiler fixed point.
+"""Build the standalone LAIN-IR compiler from the seed interpreter.
 
-The compiler implementation is ``src/lainir/compiler.l1``.  The C bootstrap
-interpreter executes that LAIN-IR source once to produce a native gen1
-compiler.  Each later generation is produced by the preceding one, so the
-gen2/gen3 equality check covers the compiler's parser, verifier, evaluator
-and C emitter instead of merely copying an input bundle.
+The compiler implementation is ``seed/lainir/compiler.l1``. The seed executes
+that source once and this script installs the resulting native compiler at
+the repository root as ``zig-out/bin/lainir-compiler``.
 """
 
 from __future__ import annotations
@@ -19,11 +17,23 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOOTSTRAP = ROOT / "seed" / "zig-out" / "bin" / (
+SEED_BOOTSTRAP = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
-COMPILER = ROOT / "src" / "lainir" / "compiler.l1"
+COMPILER = ROOT / "seed" / "lainir" / "compiler.l1"
+COMPILER_PARTS = ROOT / "seed" / "lainir" / "compiler_parts"
 HOST = ROOT / "seed" / "src" / "host" / "native_compiler.c"
+SEED_C_SOURCES = [
+    ROOT / "seed" / "src" / "core" / "lainir.c",
+    ROOT / "seed" / "src" / "core" / "verifier.c",
+    ROOT / "seed" / "src" / "text" / "parser.c",
+    ROOT / "seed" / "src" / "text" / "emitter.c",
+    ROOT / "seed" / "src" / "interpreter" / "interpreter.c",
+    ROOT / "seed" / "src" / "interpreter" / "eval_source.c",
+]
+OUTPUT_DIR = ROOT / "zig-out" / "bin"
+BOOTSTRAP = OUTPUT_DIR / ("lainir-seed.exe" if os.name == "nt" else "lainir-seed")
+OUTPUT = OUTPUT_DIR / ("lainir-compiler.exe" if os.name == "nt" else "lainir-compiler")
 
 
 def run(arguments: list[Path | str], *, env: dict[str, str] | None = None) -> None:
@@ -55,8 +65,11 @@ def compile_native(c_compiler: list[str], source: Path, output: Path, env: dict[
         [
             *c_compiler,
             "-std=c11",
+            "-I",
+            str(ROOT / "seed" / "include"),
             str(source),
             str(HOST),
+            *[str(path) for path in SEED_C_SOURCES],
             "-o",
             str(output),
         ],
@@ -65,41 +78,59 @@ def compile_native(c_compiler: list[str], source: Path, output: Path, env: dict[
 
 
 def main() -> int:
-    if not BOOTSTRAP.exists():
-        raise RuntimeError(f"missing bootstrap interpreter: {BOOTSTRAP}")
+    if not SEED_BOOTSTRAP.exists():
+        raise RuntimeError(f"missing bootstrap interpreter: {SEED_BOOTSTRAP}")
     if not COMPILER.exists():
         raise RuntimeError(f"missing LAIN-IR compiler source: {COMPILER}")
     if not HOST.exists():
         raise RuntimeError(f"missing capability-only native host: {HOST}")
 
     c_compiler = find_c_compiler()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Keep the repository-level bin directory as the only formal artifact
+    # location.  Zig's local build directory remains an implementation detail
+    # of `zig build` under seed/.
+    shutil.copy2(SEED_BOOTSTRAP, BOOTSTRAP)
     with tempfile.TemporaryDirectory(prefix="lainir-self-host-") as temporary:
         work = Path(temporary)
+        compiler_input = work / "compiler.l1"
+        order = [line.strip() for line in (COMPILER_PARTS / "SOURCE_ORDER").read_text().splitlines() if line.strip()]
+        compiler_input.write_bytes(b"".join((COMPILER_PARTS / f"{name}.l1").read_bytes() for name in order))
+        if compiler_input.read_bytes() != COMPILER.read_bytes():
+            raise RuntimeError("compiler parts do not reconstruct compiler.l1")
         env = os.environ.copy()
         # Zig otherwise tries to create caches under a restricted user path in
         # the desktop runner.  Keep all generated state inside the workspace.
         env.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "local"))
         env.setdefault("ZIG_GLOBAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "global"))
 
-        gen1_c = work / "lainir-c-gen1.c"
-        gen2_c = work / "lainir-c-gen2.c"
-        gen3_c = work / "lainir-c-gen3.c"
+        bootstrap_c = work / "bootstrap_stage.c"
+        self_host_c = work / "self_host_stage.c"
+        self_host_check_c = work / "self_host_check.c"
         suffix = ".exe" if os.name == "nt" else ""
-        gen1 = work / f"lainir-c-gen1{suffix}"
-        gen2 = work / f"lainir-c-gen2{suffix}"
+        gen1 = OUTPUT
+        self_host = work / f"lainir-compiler-self-host{suffix}"
 
-        run([BOOTSTRAP, COMPILER, "lainir_compile_module", gen1_c, COMPILER])
-        compile_native(c_compiler, gen1_c, gen1, env)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        run([BOOTSTRAP, compiler_input, "lainir_compile_module", bootstrap_c, compiler_input])
+        compile_native(c_compiler, bootstrap_c, gen1, env)
+        # On Windows Zig's linker emits a sibling PDB by default.  The PDB is
+        # a transient debug artifact, not part of the standalone compiler
+        # contract; keep the repository-level bin directory limited to the
+        # two executable products.
+        generated_pdb = gen1.with_suffix(".pdb")
+        if generated_pdb.exists():
+            generated_pdb.unlink()
 
-        run([gen1, "--module", gen2_c, COMPILER], env=env)
-        compile_native(c_compiler, gen2_c, gen2, env)
+        run([gen1, "--module", self_host_c, compiler_input], env=env)
+        compile_native(c_compiler, self_host_c, self_host, env)
 
-        run([gen2, "--module", gen3_c, COMPILER], env=env)
+        run([self_host, "--module", self_host_check_c, compiler_input], env=env)
 
-        if gen2_c.read_bytes() != gen3_c.read_bytes():
+        if self_host_c.read_bytes() != self_host_check_c.read_bytes():
             raise RuntimeError("gen2 and gen3 C output differ")
 
-    print("PASS LAIN-IR gen1 -> gen2 -> gen3 C fixed point")
+    print(f"PASS built standalone LAIN-IR compiler: {OUTPUT}")
     return 0
 
 

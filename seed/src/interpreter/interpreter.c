@@ -697,7 +697,7 @@ static void *interp_value_addr(LainirInterpreter *interp, LainirValue value, con
         if (caller->sub && caller->sub->name)
           fprintf(stderr, " caller=%s", caller->sub->name);
       }
-      fputc('\\n', stderr);
+      fputc('\n', stderr);
     }
     interp_trap(interp, "null address");
     return NULL;
@@ -2787,14 +2787,21 @@ LainirRunStatus lainir_eval_block(
 
 /* Compiler-side #eval materialization.  This deliberately lives beside the
  * interpreter: the compiler supplies an IR module, asks the interpreter to
- * execute each eval block, then replaces the block with a constant. */
+ * execute each eval block, then replaces scalar results with constants.
+ * Unit results stay as evaluated EXPR_EVAL nodes so a backend can lower them
+ * to an effect-free expression without inventing a second unit constant. */
 static LainirRunStatus fold_expr(L1Subroutine *module, L1Expr **slot,
                                  LainirCapabilityTable *caps,
-                                 const char **error_out);
+                                 const char **error_out,
+                                 LainirEvalSink sink,
+                                 void *sink_user_data);
+static unsigned fold_eval_depth;
 
 static LainirRunStatus fold_block(L1Subroutine *module, L1Block *block,
                                   LainirCapabilityTable *caps,
-                                  const char **error_out) {
+                                  const char **error_out,
+                                  LainirEvalSink sink,
+                                  void *sink_user_data) {
   for (; block; block = block->next) {
     for (L1Instruction *inst = block->body; inst; inst = inst->next) {
       L1Expr **expr = NULL;
@@ -2802,22 +2809,22 @@ static LainirRunStatus fold_block(L1Subroutine *module, L1Block *block,
       case INST_LET: expr = &inst->data.let.val; break;
       case INST_SET: expr = &inst->data.set.val; break;
       case INST_STORE:
-        if (fold_expr(module, &inst->data.store.dest, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+        if (fold_expr(module, &inst->data.store.dest, caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
         expr = &inst->data.store.val; break;
       case INST_RETURN: expr = &inst->data.ret.val; break;
       case INST_CALL: expr = &inst->data.call_inst.expr; break;
       case INST_IF:
         expr = &inst->data.if_stmt.condition;
-        if (fold_expr(module, expr, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
-        if (fold_block(module, inst->data.if_stmt.then_body, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
-        if (fold_block(module, inst->data.if_stmt.else_body, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+        if (fold_expr(module, expr, caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+        if (fold_block(module, inst->data.if_stmt.then_body, caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+        if (fold_block(module, inst->data.if_stmt.else_body, caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
         continue;
       case INST_LOOP:
-        if (fold_block(module, inst->data.loop.body, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+        if (fold_block(module, inst->data.loop.body, caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
         continue;
       default: continue;
       }
-      if (expr && fold_expr(module, expr, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+      if (expr && fold_expr(module, expr, caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
     }
   }
   return LAINIR_RUN_OK;
@@ -2825,22 +2832,34 @@ static LainirRunStatus fold_block(L1Subroutine *module, L1Block *block,
 
 static LainirRunStatus fold_expr(L1Subroutine *module, L1Expr **slot,
                                  LainirCapabilityTable *caps,
-                                 const char **error_out) {
+                                 const char **error_out,
+                                 LainirEvalSink sink,
+                                 void *sink_user_data) {
   L1Expr *expr = slot ? *slot : NULL;
   if (!expr) return LAINIR_RUN_OK;
   switch (expr->kind) {
   case EXPR_EVAL: {
     LainirValue value;
-    if (fold_block(module, expr->data.eval.block, caps, error_out) != LAINIR_RUN_OK)
-      return LAINIR_RUN_TRAP;
+    int outer_eval = fold_eval_depth == 0;
+    LainirRunStatus nested_status;
+    fold_eval_depth++;
+    nested_status = fold_block(module, expr->data.eval.block, caps, error_out,
+                               sink, sink_user_data);
+    fold_eval_depth--;
+    if (nested_status != LAINIR_RUN_OK) return nested_status;
     LainirRunStatus status = lainir_eval_block(module, expr->data.eval.block,
                                                expr->data.eval.ret_ty, caps,
                                                &value, error_out);
     if (status != LAINIR_RUN_OK) return status;
+    if (value.kind == LAINIR_VALUE_UNIT) {
+      if (sink && outer_eval) sink(&value, sink_user_data);
+      return LAINIR_RUN_OK;
+    }
     if (value.kind != LAINIR_VALUE_BITS) {
       if (error_out) *error_out = "#eval result must be a bits value";
       return LAINIR_RUN_BAD_CALL;
     }
+    if (sink && outer_eval) sink(&value, sink_user_data);
     L1Expr *constant = lainir_new_expr(EXPR_CONST);
     if (!constant) {
       if (error_out) *error_out = "out of memory";
@@ -2851,31 +2870,87 @@ static LainirRunStatus fold_expr(L1Subroutine *module, L1Expr **slot,
     lainir_free_expr_tree(expr);
     return LAINIR_RUN_OK;
   }
-  case EXPR_LOAD: return fold_expr(module, &expr->data.load.addr, caps, error_out);
+  case EXPR_LOAD: return fold_expr(module, &expr->data.load.addr, caps, error_out, sink, sink_user_data);
   case EXPR_LEA:
-    if (fold_expr(module, &expr->data.lea.base, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
-    return fold_expr(module, &expr->data.lea.idx, caps, error_out);
-  case EXPR_FIELD: return fold_expr(module, &expr->data.field.base, caps, error_out);
-  case EXPR_CALL: for (uint32_t i = 0; i < expr->data.call.arg_count; i++) if (fold_expr(module, &expr->data.call.args[i], caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP; return LAINIR_RUN_OK;
+    if (fold_expr(module, &expr->data.lea.base, caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+    return fold_expr(module, &expr->data.lea.idx, caps, error_out, sink, sink_user_data);
+  case EXPR_FIELD: return fold_expr(module, &expr->data.field.base, caps, error_out, sink, sink_user_data);
+  case EXPR_CALL: for (uint32_t i = 0; i < expr->data.call.arg_count; i++) if (fold_expr(module, &expr->data.call.args[i], caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP; return LAINIR_RUN_OK;
   case EXPR_CALL_INDIRECT:
-    if (fold_expr(module, &expr->data.call_indirect.fn_ptr, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
-    for (uint32_t i = 0; i < expr->data.call_indirect.arg_count; i++) if (fold_expr(module, &expr->data.call_indirect.args[i], caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+    if (fold_expr(module, &expr->data.call_indirect.fn_ptr, caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+    for (uint32_t i = 0; i < expr->data.call_indirect.arg_count; i++) if (fold_expr(module, &expr->data.call_indirect.args[i], caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
     return LAINIR_RUN_OK;
-  case EXPR_PRIMITIVE: for (uint32_t i = 0; i < expr->data.primitive.operand_count; i++) if (fold_expr(module, &expr->data.primitive.operands[i], caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP; return LAINIR_RUN_OK;
+  case EXPR_PRIMITIVE: for (uint32_t i = 0; i < expr->data.primitive.operand_count; i++) if (fold_expr(module, &expr->data.primitive.operands[i], caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP; return LAINIR_RUN_OK;
   case EXPR_ADD: case EXPR_SUB: case EXPR_MUL: case EXPR_DIV: case EXPR_EQ: case EXPR_NE: case EXPR_LT: case EXPR_LE: case EXPR_GT: case EXPR_GE:
   case EXPR_SDIV: case EXPR_UDIV: case EXPR_SLT: case EXPR_SLE: case EXPR_SGT: case EXPR_SGE: case EXPR_ULT: case EXPR_ULE: case EXPR_UGT: case EXPR_UGE:
   case EXPR_FADD: case EXPR_FSUB: case EXPR_FMUL: case EXPR_FDIV: case EXPR_FEQ: case EXPR_FLT:
-    if (fold_expr(module, &expr->data.bin.left, caps, error_out) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
-    return fold_expr(module, &expr->data.bin.right, caps, error_out);
+    if (fold_expr(module, &expr->data.bin.left, caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK) return LAINIR_RUN_TRAP;
+    return fold_expr(module, &expr->data.bin.right, caps, error_out, sink, sink_user_data);
   case EXPR_POPCOUNT: case EXPR_CLZ: case EXPR_ROTL: case EXPR_INT2PTR: case EXPR_PTR2INT:
-    return fold_expr(module, &expr->data.unary.operand, caps, error_out);
+    return fold_expr(module, &expr->data.unary.operand, caps, error_out, sink, sink_user_data);
   case EXPR_ZEXT: case EXPR_SEXT: case EXPR_TRUNC: case EXPR_BITCAST:
-    return fold_expr(module, &expr->data.conversion.operand, caps, error_out);
+    return fold_expr(module, &expr->data.conversion.operand, caps, error_out, sink, sink_user_data);
   default: return LAINIR_RUN_OK;
   }
 }
 
 static uint64_t count_expr_evals(const L1Expr *expr);
+
+static void set_eval_type_expr(L1Expr *expr, L1Type *type);
+static void set_eval_type_block(L1Block *block, L1Type *type) {
+  for (; block; block = block->next) {
+    for (L1Instruction *inst = block->body; inst; inst = inst->next) {
+      switch (inst->kind) {
+      case INST_LET: set_eval_type_expr(inst->data.let.val, type); break;
+      case INST_SET: set_eval_type_expr(inst->data.set.val, type); break;
+      case INST_STORE:
+        set_eval_type_expr(inst->data.store.dest, type);
+        set_eval_type_expr(inst->data.store.val, type);
+        break;
+      case INST_RETURN: set_eval_type_expr(inst->data.ret.val, type); break;
+      case INST_CALL: set_eval_type_expr(inst->data.call_inst.expr, type); break;
+      case INST_IF:
+        set_eval_type_expr(inst->data.if_stmt.condition, type);
+        set_eval_type_block(inst->data.if_stmt.then_body, type);
+        set_eval_type_block(inst->data.if_stmt.else_body, type);
+        break;
+      case INST_LOOP: set_eval_type_block(inst->data.loop.body, type); break;
+      default: break;
+      }
+    }
+  }
+}
+
+static void set_eval_type_expr(L1Expr *expr, L1Type *type) {
+  if (!expr) return;
+  if (expr->kind == EXPR_EVAL && !expr->data.eval.ret_ty)
+    expr->data.eval.ret_ty = type;
+  switch (expr->kind) {
+  case EXPR_EVAL: set_eval_type_block(expr->data.eval.block, type); break;
+  case EXPR_LOAD: set_eval_type_expr(expr->data.load.addr, type); break;
+  case EXPR_LEA:
+    set_eval_type_expr(expr->data.lea.base, type);
+    set_eval_type_expr(expr->data.lea.idx, type);
+    break;
+  case EXPR_CALL:
+    for (uint32_t i = 0; i < expr->data.call.arg_count; i++)
+      set_eval_type_expr(expr->data.call.args[i], type);
+    break;
+  case EXPR_CALL_INDIRECT:
+    set_eval_type_expr(expr->data.call_indirect.fn_ptr, type);
+    for (uint32_t i = 0; i < expr->data.call_indirect.arg_count; i++)
+      set_eval_type_expr(expr->data.call_indirect.args[i], type);
+    break;
+  case EXPR_PRIMITIVE:
+    for (uint32_t i = 0; i < expr->data.primitive.operand_count; i++)
+      set_eval_type_expr(expr->data.primitive.operands[i], type);
+    break;
+  case EXPR_FIELD: set_eval_type_expr(expr->data.field.base, type); break;
+  case EXPR_ZEXT: case EXPR_SEXT: case EXPR_TRUNC: case EXPR_BITCAST:
+    set_eval_type_expr(expr->data.conversion.operand, type); break;
+  default: break;
+  }
+}
 
 static uint64_t count_block_evals(const L1Block *block) {
   uint64_t count = 0;
@@ -2945,9 +3020,11 @@ static uint64_t count_expr_evals(const L1Expr *expr) {
   }
 }
 
-LainirRunStatus lainir_fold_module(L1Subroutine *module,
-                                   LainirCapabilityTable *caps,
-                                   const char **error_out) {
+LainirRunStatus lainir_fold_module_with_sink(L1Subroutine *module,
+                                             LainirCapabilityTable *caps,
+                                             const char **error_out,
+                                             LainirEvalSink sink,
+                                             void *sink_user_data) {
   LainirCapabilityTable default_caps;
   uint64_t eval_count;
   if (!module) {
@@ -2969,8 +3046,301 @@ LainirRunStatus lainir_fold_module(L1Subroutine *module,
     return LAINIR_RUN_TRAP;
   }
   for (L1Subroutine *sub = module; sub; sub = sub->next)
-    if (fold_block(module, sub->blocks, caps, error_out) != LAINIR_RUN_OK)
+    set_eval_type_block(sub->blocks, sub->ret_ty);
+  fold_eval_depth = 0;
+  for (L1Subroutine *sub = module; sub; sub = sub->next)
+    if (fold_block(module, sub->blocks, caps, error_out, sink, sink_user_data) != LAINIR_RUN_OK)
       return LAINIR_RUN_TRAP;
   if (error_out) *error_out = NULL;
   return LAINIR_RUN_OK;
+}
+
+LainirRunStatus lainir_fold_module(L1Subroutine *module,
+                                   LainirCapabilityTable *caps,
+                                   const char **error_out) {
+  return lainir_fold_module_with_sink(module, caps, error_out, NULL, NULL);
+}
+
+const L1Subroutine *lainir_module_first_procedure(const L1Subroutine *module) {
+  return module;
+}
+
+const L1Subroutine *lainir_procedure_next(const L1Subroutine *procedure) {
+  return procedure ? procedure->next : NULL;
+}
+
+const char *lainir_procedure_name(const L1Subroutine *procedure) {
+  return procedure ? procedure->name : NULL;
+}
+
+uint32_t lainir_procedure_name_length(const L1Subroutine *procedure) {
+  return procedure && procedure->name ? (uint32_t)strlen(procedure->name) : 0;
+}
+
+const char *lainir_procedure_link_name(const L1Subroutine *procedure) {
+  return procedure ? procedure->link_name : NULL;
+}
+
+const L1Type *lainir_procedure_return_type(const L1Subroutine *procedure) {
+  return procedure ? procedure->ret_ty : NULL;
+}
+
+int lainir_procedure_is_external(const L1Subroutine *procedure) {
+  return procedure ? procedure->is_extern : 0;
+}
+
+uint32_t lainir_procedure_parameter_count(const L1Subroutine *procedure) {
+  return procedure ? procedure->param_count : 0;
+}
+
+const L1Type *lainir_procedure_parameter_type(const L1Subroutine *procedure, uint32_t index) {
+  if (!procedure || index >= procedure->param_count) return NULL;
+  return procedure->param_tys[index];
+}
+
+const char *lainir_procedure_parameter_name(const L1Subroutine *procedure,
+                                            uint32_t index) {
+  if (!procedure || index >= procedure->param_count || !procedure->param_names)
+    return NULL;
+  return procedure->param_names[index];
+}
+
+const L1Block *lainir_procedure_first_block(const L1Subroutine *procedure) {
+  return procedure ? procedure->blocks : NULL;
+}
+
+const L1Block *lainir_block_next(const L1Block *block) {
+  return block ? block->next : NULL;
+}
+
+L1ExprKind lainir_expr_kind(const L1Expr *expr) {
+  return expr ? expr->kind : (L1ExprKind)-1;
+}
+
+
+const L1Type *lainir_expr_type(const L1Expr *expr) {
+  if (!expr) return NULL;
+  switch (expr->kind) {
+    case EXPR_VAR: return expr->data.var.ty;
+    case EXPR_ARG: return expr->data.arg.ty;
+    case EXPR_LOAD: return expr->data.load.ty;
+    case EXPR_ZEXT: case EXPR_SEXT: case EXPR_TRUNC: case EXPR_BITCAST:
+      return expr->data.conversion.target_ty;
+    case EXPR_CALL: return expr->data.call.ret_ty;
+    case EXPR_CALL_INDIRECT: return expr->data.call_indirect.ret_ty;
+    case EXPR_STRING: return expr->data.str_val.ty;
+    case EXPR_PRIMITIVE: return expr->data.primitive.result_ty;
+    case EXPR_ALLOCA: return expr->data.alloca.result_ty;
+    case EXPR_FIELD: return expr->data.field.field_ty;
+    case EXPR_EVAL: return expr->data.eval.ret_ty;
+    default: return NULL;
+  }
+}
+
+const L1Expr *lainir_expr_left(const L1Expr *expr) {
+  if (!expr) return NULL;
+  if (expr->kind == EXPR_LEA) return expr->data.lea.base;
+  switch (expr->kind) {
+    case EXPR_ADD: case EXPR_SUB: case EXPR_MUL: case EXPR_DIV:
+    case EXPR_EQ: case EXPR_NE: case EXPR_LT: case EXPR_LE:
+    case EXPR_GT: case EXPR_GE: case EXPR_FADD: case EXPR_FSUB:
+    case EXPR_FMUL: case EXPR_FDIV: case EXPR_FEQ: case EXPR_FLT:
+    case EXPR_SDIV: case EXPR_UDIV: case EXPR_SLT: case EXPR_SLE:
+    case EXPR_SGT: case EXPR_SGE: case EXPR_ULT: case EXPR_ULE:
+    case EXPR_UGT: case EXPR_UGE:
+      return expr->data.bin.left;
+    default: return NULL;
+  }
+}
+
+const L1Expr *lainir_expr_right(const L1Expr *expr) {
+  if (!expr) return NULL;
+  if (expr->kind == EXPR_LEA) return expr->data.lea.idx;
+  switch (expr->kind) {
+    case EXPR_ADD: case EXPR_SUB: case EXPR_MUL: case EXPR_DIV:
+    case EXPR_EQ: case EXPR_NE: case EXPR_LT: case EXPR_LE:
+    case EXPR_GT: case EXPR_GE: case EXPR_FADD: case EXPR_FSUB:
+    case EXPR_FMUL: case EXPR_FDIV: case EXPR_FEQ: case EXPR_FLT:
+    case EXPR_SDIV: case EXPR_UDIV: case EXPR_SLT: case EXPR_SLE:
+    case EXPR_SGT: case EXPR_SGE: case EXPR_ULT: case EXPR_ULE:
+    case EXPR_UGT: case EXPR_UGE:
+      return expr->data.bin.right;
+    default: return NULL;
+  }
+}
+
+const L1Expr *lainir_expr_next(const L1Expr *expr) {
+  (void)expr;
+  return NULL;
+}
+
+uint32_t lainir_expr_argument_count(const L1Expr *expr) {
+  if (!expr) return 0;
+  if (expr->kind == EXPR_CALL) return expr->data.call.arg_count;
+  if (expr->kind == EXPR_CALL_INDIRECT) return expr->data.call_indirect.arg_count;
+  if (expr->kind == EXPR_PRIMITIVE) return expr->data.primitive.operand_count;
+  return 0;
+}
+
+const L1Expr *lainir_expr_argument_at(const L1Expr *expr, uint32_t index) {
+  if (!expr) return NULL;
+  if (expr->kind == EXPR_CALL && index < expr->data.call.arg_count)
+    return expr->data.call.args[index];
+  if (expr->kind == EXPR_CALL_INDIRECT && index < expr->data.call_indirect.arg_count)
+    return expr->data.call_indirect.args[index];
+  if (expr->kind == EXPR_PRIMITIVE && index < expr->data.primitive.operand_count)
+    return expr->data.primitive.operands[index];
+  return NULL;
+}
+
+int64_t lainir_expr_const_value(const L1Expr *expr) {
+  return expr && expr->kind == EXPR_CONST ? expr->data.const_val : 0;
+}
+
+uint32_t lainir_expr_arg_index(const L1Expr *expr) {
+  return expr && expr->kind == EXPR_ARG ? expr->data.arg.index : 0;
+}
+
+const char *lainir_expr_name(const L1Expr *expr) {
+  return expr && expr->kind == EXPR_VAR ? expr->data.var.name : NULL;
+}
+
+const char *lainir_expr_callee_name(const L1Expr *expr) {
+  if (!expr) return NULL;
+  if (expr->kind == EXPR_CALL) return expr->data.call.fn_name;
+  if (expr->kind == EXPR_PROC_ADDR) return expr->data.proc_addr.fn_name;
+  return NULL;
+}
+
+const char *lainir_expr_string(const L1Expr *expr) {
+  return expr && expr->kind == EXPR_STRING ? expr->data.str_val.content : NULL;
+}
+
+const L1Expr *lainir_expr_operand(const L1Expr *expr) {
+  if (!expr) return NULL;
+  switch (expr->kind) {
+    case EXPR_LOAD: return expr->data.load.addr;
+    case EXPR_FIELD: return expr->data.field.base;
+    case EXPR_EVAL: return NULL;
+    case EXPR_POPCOUNT: case EXPR_CLZ: case EXPR_ROTL:
+    case EXPR_INT2PTR: case EXPR_PTR2INT:
+      return expr->data.unary.operand;
+    case EXPR_ZEXT: case EXPR_SEXT: case EXPR_TRUNC: case EXPR_BITCAST:
+      return expr->data.conversion.operand;
+    default: return NULL;
+  }
+}
+
+const L1Block *lainir_expr_block(const L1Expr *expr) {
+  return expr && expr->kind == EXPR_EVAL ? expr->data.eval.block : NULL;
+}
+
+uint32_t lainir_expr_scale(const L1Expr *expr) {
+  return expr && expr->kind == EXPR_LEA ? expr->data.lea.scale : 0;
+}
+
+uint32_t lainir_expr_offset(const L1Expr *expr) {
+  return expr && expr->kind == EXPR_LEA ? expr->data.lea.offset : 0;
+}
+
+uint32_t lainir_expr_field_index(const L1Expr *expr) {
+  return expr && expr->kind == EXPR_FIELD ? expr->data.field.field_index : 0;
+}
+
+uint32_t lainir_expr_byte_size(const L1Expr *expr) {
+  return expr && expr->kind == EXPR_ALLOCA ? expr->data.alloca.byte_size : 0;
+}
+
+const char *lainir_diagnostic_message(const L1Diagnostic *diagnostic) {
+  return diagnostic ? diagnostic->message : "";
+}
+
+int lainir_diagnostic_code(const L1Diagnostic *diagnostic) {
+  return diagnostic ? diagnostic->code : 0;
+}
+
+int lainir_diagnostic_line(const L1Diagnostic *diagnostic) {
+  return diagnostic ? diagnostic->line : 0;
+}
+
+int lainir_diagnostic_column(const L1Diagnostic *diagnostic) {
+  return diagnostic ? diagnostic->column : 0;
+}
+
+void lainir_diagnostic_clear(L1Diagnostic *diagnostic) {
+  if (diagnostic) memset(diagnostic, 0, sizeof(*diagnostic));
+}
+
+int lainir_type_kind(const L1Type *type) { return type ? (int)type->kind : -1; }
+uint32_t lainir_type_width(const L1Type *type) { return type ? type->width : 0; }
+
+const L1Instruction *lainir_block_first_instruction(const L1Block *block) {
+  return block ? block->body : NULL;
+}
+
+const L1Instruction *lainir_instruction_next(const L1Instruction *instruction) {
+  return instruction ? instruction->next : NULL;
+}
+
+L1InstKind lainir_instruction_kind(const L1Instruction *instruction) {
+  return instruction ? instruction->kind : (L1InstKind)-1;
+}
+
+const char *lainir_instruction_name(const L1Instruction *instruction) {
+  if (!instruction) return NULL;
+  if (instruction->kind == INST_LET) return instruction->data.let.name;
+  if (instruction->kind == INST_SET) return instruction->data.set.name;
+  return NULL;
+}
+
+const char *lainir_instruction_label(const L1Instruction *instruction) {
+  if (!instruction) return NULL;
+  if (instruction->kind == INST_LOOP) return instruction->data.loop.label;
+  if (instruction->kind == INST_BREAK || instruction->kind == INST_CONTINUE)
+    return instruction->data.jump.label;
+  return NULL;
+}
+
+const L1Type *lainir_instruction_type(const L1Instruction *instruction) {
+  if (!instruction) return NULL;
+  if (instruction->kind == INST_LET) return instruction->data.let.ty;
+  if (instruction->kind == INST_SET) return instruction->data.set.ty;
+  if (instruction->kind == INST_STORE) return instruction->data.store.store_ty;
+  return NULL;
+}
+
+const L1Expr *lainir_instruction_value(const L1Instruction *instruction) {
+  if (!instruction) return NULL;
+  if (instruction->kind == INST_LET) return instruction->data.let.val;
+  if (instruction->kind == INST_SET) return instruction->data.set.val;
+  if (instruction->kind == INST_STORE) return instruction->data.store.val;
+  if (instruction->kind == INST_RETURN) return instruction->data.ret.val;
+  if (instruction->kind == INST_CALL) return instruction->data.call_inst.expr;
+  return NULL;
+}
+
+const L1Expr *lainir_instruction_destination(const L1Instruction *instruction) {
+  if (!instruction) return NULL;
+  if (instruction->kind == INST_STORE) return instruction->data.store.dest;
+  return NULL;
+}
+
+const L1Expr *lainir_instruction_condition(const L1Instruction *instruction) {
+  return instruction && instruction->kind == INST_IF
+      ? instruction->data.if_stmt.condition : NULL;
+}
+
+const L1Block *lainir_instruction_then_block(const L1Instruction *instruction) {
+  return instruction && instruction->kind == INST_IF
+      ? instruction->data.if_stmt.then_body : NULL;
+}
+
+const L1Block *lainir_instruction_else_block(const L1Instruction *instruction) {
+  return instruction && instruction->kind == INST_IF
+      ? instruction->data.if_stmt.else_body : NULL;
+}
+
+const L1Block *lainir_instruction_loop_block(const L1Instruction *instruction) {
+  return instruction && instruction->kind == INST_LOOP
+      ? instruction->data.loop.body : NULL;
 }

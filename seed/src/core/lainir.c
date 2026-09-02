@@ -227,6 +227,11 @@ void lainir_free_subroutines(L1Subroutine *head) {
     free(head->name);
     free(head->link_name);
     free(head->param_tys);
+    if (head->param_names) {
+      for (uint32_t i = 0; i < head->param_count; ++i)
+        free(head->param_names[i]);
+      free(head->param_names);
+    }
     lainir_free_block_list(head->blocks);
     free(head);
     head = next;

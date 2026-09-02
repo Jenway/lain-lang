@@ -1094,10 +1094,12 @@ static void parse_typed_params(Parser *p, L1Subroutine *sub) {
     return;
 
   sub->param_tys = calloc(cap, sizeof(L1Type *));
+  sub->param_names = calloc(cap, sizeof(char *));
   while (1) {
     if (sub->param_count == cap) {
       cap *= 2;
       sub->param_tys = realloc(sub->param_tys, sizeof(L1Type *) * cap);
+      sub->param_names = realloc(sub->param_names, sizeof(char *) * cap);
     }
     sub->param_tys[sub->param_count++] = parse_type(p);
     expect(p, TK_PERCENT);
@@ -1105,6 +1107,7 @@ static void parse_typed_params(Parser *p, L1Subroutine *sub) {
       Token token = expect(p, TK_IDENT);
       char *name = token_string(token);
       parser_add_param_name(p, name);
+      sub->param_names[sub->param_count - 1] = strdup(name);
       free(name);
     }
     if (p->current.kind != TK_COMMA)

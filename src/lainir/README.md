@@ -1,9 +1,9 @@
-# `lainir-c`
+# `lainir-compiler`
 
 This directory contains the LAIN-IR implementation of the LAIN-IR to C
-compiler.  The C bootstrap interpreter is the seed: it executes this code, but
-it does not provide parsing, verification, or C emission on the compiler's
-behalf.
+compiler.  The C bootstrap interpreter is the seed: it executes this code and
+supplies parsing, verification, and compile-time `#eval`; C emission remains
+in the LAIN-IR compiler source.
 
 ## Frozen Lain compiler
 
@@ -21,9 +21,15 @@ compiler; the earlier full `src/compiler` tree is archived at
 
 - Compiler logic is written in `.l1`.
 - Generated C may use the C standard library and platform libraries.
-- The native `lainir-c` must not link a private C implementation of LAIN-IR.
-- Bootstrap capabilities provide source bytes, diagnostics, allocation, and an
-  output byte stream only.
+- The native `lainir-compiler` links only the seed runtime needed for parsing,
+  verification, and `#eval`; it does not contain a second L1 evaluator.
+- Bootstrap capabilities provide source bytes, diagnostics, allocation,
+  `#eval` results, and an output byte stream.
+
+The seed-side `lainir_eval_source_values` API parses, verifies, folds, and
+returns scalar `#eval` results in source order. The compiler requests this
+operation through `bootstrap.eval_source`; it does not evaluate arithmetic
+itself.
 - Generated output is deterministic.
 
 The compiler accepts canonical `#bits<N>`, `#float<32>`, `#float<64>`,
@@ -48,8 +54,8 @@ The compiler resolves calls across the complete module, accepts forward
 references, rejects duplicate or missing procedures and parameters, checks
 ordered local bindings and call arity, and emits C prototypes before
 definitions. This remains an
-intentionally small instruction subset, but lexer, parser, IR, name
-verification, and emission are now separate LAIN-IR procedures.
+intentionally small instruction subset; parsing, verification, IR ownership,
+and `#eval` execution remain in seed.
 
 Structured `#if` supports optional bare `else`, branch-local bindings, and a
 following continuation. Conditions must be `i1`, and every path through a
@@ -114,28 +120,22 @@ name libc or platform ABI functions and can return either a physical value or
 The compiler now reaches a native fixed point:
 
 ```text
-seed (lainir-seed)
-  -> lainir-c-gen1.c
-  -> native lainir-c-gen1
-  -> lainir-c-gen2.c
-  -> native lainir-c-gen2
-  -> lainir-c-gen3.c
+zig-out/bin/lainir-seed.exe
+  -> zig-out/bin/lainir-compiler.exe
+  -> generated C
 ```
 
-gen2 and gen3 output are required to be byte-for-byte identical. The
+The generated compiler can compile its own LAIN-IR source and repeated output
+is required to be byte-for-byte identical. The
 small native host in `seed/src/host/native_compiler.c` supplies only
 source bytes, diagnostics, allocation, artifact I/O, and the process entry
 point. It contains no lexer, parser, verifier, IR, or emitter logic.
 
-The reference interpreter exposes `lainir_eval_block(...)` and
-`lainir_fold_module(...)` for compiler integrations. `lainir_fold_module`
-recursively executes `#eval` blocks and materializes scalar bit results as
-constants; nested evals are folded inside-out. The self-hosted compiler has a
-matching LAIN-IR evaluator for its constant integer subset, and rejects
-runtime-dependent evals instead of emitting them as runtime code. Constant
-locals and constant-argument local calls inside an eval block are substituted
-before evaluation, so nested blocks and constant `#if` branches can build
-values through ordinary `#let` bindings. Ordinary
+The reference interpreter exposes `lainir_eval_block(...)`,
+`lainir_fold_module(...)`, and `lainir_eval_source(...)` for compiler
+integrations. The self-hosted compiler delegates `#eval` execution to the
+seed interpreter through `bootstrap.eval_source`; it does not contain a
+second expression evaluator. Ordinary
 `lainir_run(...)` remains the runtime entry point. Interpreter limits can be
 configured with `lainir_caps_set_limits`.
 
@@ -144,8 +144,8 @@ configured with `lainir_caps_set_limits`.
 From the repository root, after building `seed`:
 
 ```text
-seed/zig-out/bin/lainir-seed \
-  src/lainir/compiler.l1 lainir_compile output.c input.l1
+zig-out/bin/lainir-seed.exe \
+  seed/lainir/compiler.l1 lainir_compile_module output.c input.l1
 ```
 
 Then compile `output.c` with an ordinary C compiler.  No LAIN-IR support
@@ -161,8 +161,8 @@ The reference parser keeps old `i32`/`addr` spellings only for migration;
 `lainir-print --strict` rejects those aliases.
 Legacy scalar aliases and ambiguous integer spellings remain accepted only as
 a migration surface for the existing bootstrap compiler source. The
-LAIN-IR-written compiler now also performs a small compile-time evaluator for
-constant integer eval blocks and zero-argument local calls; unsupported
-runtime-dependent evals are rejected instead of being emitted as runtime code.
+LAIN-IR-written compiler delegates compile-time `#eval` blocks to the seed
+interpreter; unsupported runtime-dependent evals are rejected instead of being
+emitted as runtime code.
 Verifier diagnostics preserve the source line of parsed instructions (direct
 C-API nodes may have line `0`).
