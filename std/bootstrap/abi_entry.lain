@@ -357,6 +357,83 @@ let formal_import_target = std::func(
     return source_count_value;
 };
 
+let formal_import_target_at = std::func(
+    source: addr,
+    root: addr,
+    source_count_value: i64,
+    ordinal: i64,
+) -> i64 {
+    let seen: i64 = 0;
+    let node: addr = raw_first(root);
+    while raw_nil(node) == false {
+        if formal_is_import(source, node) {
+            if seen == ordinal {
+                let group: addr = raw_next(node);
+                if raw_nil(group) { return source_count_value; }
+                if raw_delimiter(group) != 40 { return source_count_value; }
+                let argument: addr = raw_first(group);
+                if raw_nil(argument) { return source_count_value; }
+                if raw_kind(argument) != 1 { return source_count_value; }
+                return formal_import_target(
+                    source, argument, source_count_value
+                );
+            }
+            seen = seen + 1;
+        }
+        node = raw_next(node);
+    }
+    return source_count_value;
+};
+
+let formal_reaches_cycle = std::func(
+    index: addr,
+    start: i64,
+    current: i64,
+    source_count_value: i64,
+    states: addr,
+) -> bool {
+    let state: i64 = std::load_bits(
+        64, states + (current * 8)
+    );
+    if state == 1 { return true; }
+    if state == 2 { return false; }
+    std::store_bits(64, states + (current * 8), 1);
+    let source: addr = syntax_index_source(index, current);
+    let root: addr = syntax_index_root(index, current);
+    let imports: i64 = syntax_index_imports(index, current);
+    let ordinal: i64 = 0;
+    while ordinal < imports {
+        let target: i64 = formal_import_target_at(
+            source, root, source_count_value, ordinal
+        );
+        if target < source_count_value {
+            if target == start { return true; }
+            if formal_reaches_cycle(
+                index, start, target, source_count_value, states
+            ) { return true; }
+        }
+        ordinal = ordinal + 1;
+    }
+    std::store_bits(64, states + (current * 8), 2);
+    return false;
+};
+
+let formal_has_cycle = std::func(
+    index: addr,
+    source_index: i64,
+    source_count_value: i64,
+) -> bool {
+    let states: addr = allocate_pages(source_count_value * 8);
+    let ordinal: i64 = 0;
+    while ordinal < source_count_value {
+        std::store_bits(64, states + (ordinal * 8), 0);
+        ordinal = ordinal + 1;
+    }
+    return formal_reaches_cycle(
+        index, source_index, source_index, source_count_value, states
+    );
+};
+
 let formal_imports_resolved = std::func(
     source: addr,
     root: addr,
@@ -395,6 +472,13 @@ let formal_import_status = std::func(index: addr) -> i32 {
         let root: addr = syntax_index_root(index, ordinal);
         if formal_imports_resolved(source, root, count) == false {
             return 4101;
+        }
+        ordinal = ordinal + 1;
+    }
+    ordinal = 0;
+    while ordinal < count {
+        if formal_has_cycle(index, ordinal, count) {
+            return 4103;
         }
         ordinal = ordinal + 1;
     }
