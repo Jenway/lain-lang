@@ -513,6 +513,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   保存，并由 Meta 提供 context 创建、fresh ID、节点绑定和 context-owned
   fresh atom 文本池；复制会保留该 ID。现有宏 hygiene 探针已改用这条稳定
   接口生成并写出 `t_1`，完整的 name-resolution 规则仍待补齐。
+- [x] 简单二元算术的 LAIN-IR 文本生成已下沉到正式 Meta 的
+  `meta_copy_binary_expression`；ABI 入口只转发，现有算术、调用和 `#eval`
+  回归保持通过。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
