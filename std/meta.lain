@@ -2200,6 +2200,44 @@ let meta_operator_code = std::func(
     return 0;
 };
 
+// Decide and materialize a return expression in Meta.  The ABI entry only
+// supplies the destination buffer; whether the expression needs an emitted
+// #eval arithmetic form is a source-model rule owned here.
+@abi_export
+let meta_copy_return_expression = std::func(
+    buffer: addr,
+    offset: i64,
+    source: addr,
+    return_node: addr,
+) -> i64 {
+    let value: addr = meta_ast_next(return_node);
+    if meta_is_arithmetic_group(source, value) {
+        let first: addr = meta_ast_first(value);
+        return meta_copy_binary_expression(
+            buffer,
+            offset,
+            source,
+            first,
+            meta_ast_next(first),
+            meta_ast_next(meta_ast_next(first)),
+        );
+    }
+    let operator: addr = meta_ast_next(value);
+    let right: addr = meta_ast_next(operator);
+    let arithmetic: bool = false;
+    if meta_is_operator(source, operator) {
+        if meta_is_decimal(source, right) {
+            arithmetic = true;
+        }
+    }
+    if arithmetic {
+        return meta_copy_binary_expression(
+            buffer, offset, source, value, operator, right
+        );
+    }
+    return meta_copy_source(buffer, offset, source, value);
+};
+
 // Module declaration validation belongs to Meta.  The RawAst layer only
 // stores the lossless tree; this pass checks the declaration shape and the
 // member namespace without depending on a compiler-owned descriptor layout.
