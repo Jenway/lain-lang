@@ -44,6 +44,7 @@ FORMAL_PARENTHESIZED_RETURN_PROBE = ROOT / "scripts" / "fixtures" / "formal_pare
 FORMAL_LOCAL_BINDING_PROBE = ROOT / "scripts" / "fixtures" / "formal_local_binding_return.lain"
 FORMAL_LOCAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_local_call_return.lain"
 FORMAL_TWO_LOCAL_BINDING_PROBE = ROOT / "scripts" / "fixtures" / "formal_two_local_binding_return.lain"
+FORMAL_TWO_LOCAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_two_local_call_return.lain"
 FORMAL_IF_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_if_true_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_if_false_return.lain", "42"),
@@ -573,6 +574,41 @@ def verify_abi_entry() -> None:
         )
         raise RuntimeError(
             "formal stdlib two-local-binding artifact did not run as 42"
+            + (f": {detail}" if detail else "")
+        )
+    two_local_call_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_TWO_LOCAL_CALL_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if two_local_call_probe.returncode:
+        detail = (
+            two_local_call_probe.stderr.strip()
+            or two_local_call_probe.stdout.strip()
+        )
+        raise RuntimeError(
+            "formal stdlib two-local-argument call lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    two_local_call_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if two_local_call_run.returncode or two_local_call_run.stdout.strip() != "42":
+        detail = two_local_call_run.stderr.strip() or two_local_call_run.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib two-local-argument call artifact did not run as 42"
             + (f": {detail}" if detail else "")
         )
     for if_fixture, expected in FORMAL_IF_PROBES:
