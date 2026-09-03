@@ -471,7 +471,7 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   的 AstApi 复制且复制动作由 `std::meta` 库函数委托给 seed ABI，elaborate 仍为
   句柄传递，lower 在语义迁移完成前明确返回
   `5203`；十进制常量 `return`、简单二元算术（`+`、`-`、`*`、`/`）、同源无参数
-  调用（无参数或一至两个十进制参数）、单参数及括号包裹的算术表达式、局部标量绑定和布尔/数值比较的
+  调用（无参数或一至两个十进制参数）、单参数及括号包裹的算术表达式、局部标量绑定及其调用参数和布尔/数值比较的
   `if ... else` 双分支已完成正式库 lowering 及 artifact 回灌，
   不完整表达式会被拒绝，一般控制流和完整 L1 Unit 仍待迁移。
 - [~] 正式 `std::meta` 已导出 AstApi 的只读访问包装和 `meta_ast_count`；
@@ -491,7 +491,7 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `std::...` 逻辑路径，缺失普通模块返回 `4101`；同一入口使用三色 DFS
   检测本地依赖环并返回 `4103`。elaborate 仍只传递句柄，lower 对常量
   `return`、简单二元算术、同源无参数/一至两参数调用和布尔/数值比较双分支已生成可执行
-  artifact；`unit` 空返回、单参数算术表达式、括号表达式和局部标量绑定已加入正式库验证，
+  artifact；`unit` 空返回、单参数算术表达式、括号表达式、局部标量绑定及局部绑定调用已加入正式库验证，
   其余形式明确返回 `5203`。
   `run_lain_compiler.py --stdlib-artifact build/lainir/formal_stdlib.l1`
   已验证实际替换链。

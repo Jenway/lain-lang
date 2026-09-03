@@ -42,6 +42,7 @@ FORMAL_UNIT_PROBE = ROOT / "scripts" / "fixtures" / "formal_unit_return.lain"
 FORMAL_CALL_ARGUMENT_EXPRESSION_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_argument_expression.lain"
 FORMAL_PARENTHESIZED_RETURN_PROBE = ROOT / "scripts" / "fixtures" / "formal_parenthesized_return.lain"
 FORMAL_LOCAL_BINDING_PROBE = ROOT / "scripts" / "fixtures" / "formal_local_binding_return.lain"
+FORMAL_LOCAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_local_call_return.lain"
 FORMAL_IF_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_if_true_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_if_false_return.lain", "42"),
@@ -498,6 +499,38 @@ def verify_abi_entry() -> None:
         detail = local_binding_run.stderr.strip() or local_binding_run.stdout.strip()
         raise RuntimeError(
             "formal stdlib local-binding artifact did not run as 42"
+            + (f": {detail}" if detail else "")
+        )
+    local_call_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_LOCAL_CALL_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if local_call_probe.returncode:
+        detail = local_call_probe.stderr.strip() or local_call_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib local-binding call lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    local_call_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if local_call_run.returncode or local_call_run.stdout.strip() != "42":
+        detail = local_call_run.stderr.strip() or local_call_run.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib local-binding call artifact did not run as 42"
             + (f": {detail}" if detail else "")
         )
     for if_fixture, expected in FORMAL_IF_PROBES:
