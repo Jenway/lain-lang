@@ -111,7 +111,7 @@ Probes (each is a seed entry point):
 - `lain_macro_hygiene_probe` — hygiene step 2: fresh-name generation.
   The same fixture is expanded and the template's `t` atoms (bound and
   used) are renamed to a freshly generated `t_1`, held in an in-memory
-  text pool:
+  syntax-context-owned text pool through the stable AstApi:
   `t_occurrences:1 t1_occurrences:3 renamed:3 capture:0
    prog:lett=99;lety={lett_1=(10+1);(t_1+t_1)};`
   The caller's `t` is now the only `t` left (`capture:0`).  `ast_pool_new`

@@ -506,8 +506,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   保存来源 source/span，复制与重定位会保留或调整来源，`ast_from_text` 会把
   临时 source 重新绑定到父 source；syntax context 现在以节点上的整数 ID
   保存，并由 Meta 提供 context 创建、fresh ID、节点绑定和 context-owned
-  fresh atom 文本池；复制会保留该 ID。完整的宏 hygiene/name-resolution 规则
-  仍待补齐。
+  fresh atom 文本池；复制会保留该 ID。现有宏 hygiene 探针已改用这条稳定
+  接口生成并写出 `t_1`，完整的 name-resolution 规则仍待补齐。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
