@@ -181,6 +181,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_copy_two_parameter_expression",
     "meta_copy_binding_value",
     "meta_copy_local_binding",
+    "meta_copy_two_local_bindings",
     "meta_copy_if_condition",
     "meta_import_count",
     "meta_syntax_index_count",
