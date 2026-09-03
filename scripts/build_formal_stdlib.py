@@ -170,6 +170,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_copy_argument_expression",
     "meta_copy_parameter_return_expression",
     "meta_copy_two_parameter_expression",
+    "meta_copy_binding_value",
     "meta_is_import",
     "meta_import_is_std",
     "meta_import_target",
