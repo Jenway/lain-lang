@@ -487,8 +487,10 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   入口取出 source/root 后会通过 `meta_parse_result_release` 消费包装句柄，
   并回收已消费的 token/trivia 节点；source/AST 及共享 sentinel 保留到 pass
   生命周期结束。该 release 是一次性操作，调用方不得继续使用该 handle。
-  下一步继续将 token 序列内容、解析诊断和 parent/origin 信息从 ABI 薄包装
-  扩展为正式的源模型。
+  AST 的 last/parent/new/append/replace/remove/from-text/write 也已统一经
+  `lain_ast_v1_*` 稳定接口由正式 Meta 导出；当前仍是 seed-owned 操作句柄，
+  Meta 不复制第二套节点布局。下一步继续将 token 序列内容、解析诊断和
+  parent/origin 信息从 ABI 薄包装扩展为正式的源模型。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering

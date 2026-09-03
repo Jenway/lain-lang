@@ -85,6 +85,15 @@ ABI_ENTRIES = (
 )
 ABI_SUPPORT_ENTRIES = (
     "meta_ast_count",
+    "meta_ast_last",
+    "meta_ast_parent",
+    "meta_ast_new_atom",
+    "meta_ast_new_group",
+    "meta_ast_append",
+    "meta_ast_replace",
+    "meta_ast_remove",
+    "meta_ast_from_text",
+    "meta_ast_write",
     "meta_is_import",
     "meta_import_is_std",
     "meta_import_target",
