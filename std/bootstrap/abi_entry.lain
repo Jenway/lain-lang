@@ -835,6 +835,40 @@ let formal_is_module_constructor = std::func(
     return byte_at(data, start + 5) == 101;
 };
 
+let formal_is_type_keyword = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 4 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 116 { return false; }
+    if byte_at(data, start + 1) != 121 { return false; }
+    if byte_at(data, start + 2) != 112 { return false; }
+    return byte_at(data, start + 3) == 101;
+};
+
+let formal_is_struct_constructor = std::func(
+    source: addr,
+    node: addr,
+) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 6 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 115 { return false; }
+    if byte_at(data, start + 1) != 116 { return false; }
+    if byte_at(data, start + 2) != 114 { return false; }
+    if byte_at(data, start + 3) != 117 { return false; }
+    if byte_at(data, start + 4) != 99 { return false; }
+    return byte_at(data, start + 5) == 116;
+};
+
+let formal_is_i64_type = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 3 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 105 { return false; }
+    if byte_at(data, start + 1) != 54 { return false; }
+    return byte_at(data, start + 2) == 52;
+};
+
 let formal_path_dot = std::func(source: addr, path: addr) -> i64 {
     if raw_kind(path) != 1 { return 0; }
     let data: addr = source_bytes(source);
@@ -960,6 +994,84 @@ let formal_find_module_member = std::func(
         }
     }
     return formal_find_module_member(source, raw_next(node), path, dot);
+};
+
+let formal_find_struct_binding = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_let(source, node) {
+        let name: addr = raw_next(node);
+        let colon: addr = raw_next(name);
+        let type_name: addr = raw_next(colon);
+        let equals: addr = raw_next(type_name);
+        let std_name: addr = raw_next(equals);
+        let first_colon: addr = raw_next(std_name);
+        let second_colon: addr = raw_next(first_colon);
+        let constructor: addr = raw_next(second_colon);
+        let body: addr = raw_next(constructor);
+        if formal_is_type_keyword(source, type_name)
+            && formal_is_equals(source, equals)
+            && raw_kind(std_name) == 1
+            && raw_length(std_name) == 3
+            && formal_is_struct_constructor(source, constructor)
+            && raw_kind(body) == 2
+            && raw_delimiter(body) == 123 {
+            return node;
+        }
+    }
+    return formal_find_struct_binding(source, raw_next(node));
+};
+
+let formal_find_record_binding = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_let(source, node) {
+        let name: addr = raw_next(node);
+        let colon: addr = raw_next(name);
+        let type_name: addr = raw_next(colon);
+        let equals: addr = raw_next(type_name);
+        let constructor: addr = raw_next(equals);
+        let body: addr = formal_find_first_group_after(
+            source, raw_next(name)
+        );
+        if raw_kind(type_name) == 1
+            && formal_name_matches(source, type_name, constructor)
+            && raw_kind(body) == 2
+            && raw_delimiter(body) == 123 {
+            return node;
+        }
+    }
+    return formal_find_record_binding(source, raw_next(node));
+};
+
+let formal_find_member_return = std::func(
+    source: addr,
+    node: addr,
+    record_name: addr,
+    field_name: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_return(source, node) {
+        let value: addr = raw_next(node);
+        let dot: i64 = formal_path_dot(source, value);
+        if dot < raw_length(value)
+            && formal_name_matches_path_prefix(
+                source, record_name, value, dot
+            )
+            && formal_name_matches_path_suffix(
+                source, field_name, value, dot
+            )
+            && formal_is_semicolon(source, raw_next(value)) {
+            return node;
+        }
+    }
+    return formal_find_member_return(
+        source, raw_next(node), record_name, field_name
+    );
 };
 
 let formal_resolve_callee_body = std::func(
@@ -1530,6 +1642,44 @@ let formal_copy_binding_value = std::func(
     return formal_copy_source(buffer, offset, source, value);
 };
 
+let formal_emit_struct_field = std::func(
+    source: addr,
+    record_binding: addr,
+) -> unit {
+    let record_name: addr = raw_next(record_binding);
+    let record_body: addr = formal_find_first_group_after(
+        source, raw_next(record_name)
+    );
+    let field_value: addr = raw_next(raw_next(raw_first(record_body)));
+    let buffer: addr = allocate_pages(512);
+    let offset: i64 = formal_copy_literal(
+        buffer,
+        0,
+        "#proc main() -> #bits<64> {\n  #let %",
+    );
+    offset = formal_copy_source(buffer, offset, source, record_name);
+    offset = formal_copy_literal(
+        buffer, offset,
+        ": addr = #alloca(8)\n  #store "
+    );
+    offset = formal_copy_source(buffer, offset, source, field_value);
+    offset = formal_copy_literal(
+        buffer, offset,
+        ", #lea(base=%",
+    );
+    offset = formal_copy_source(buffer, offset, source, record_name);
+    offset = formal_copy_literal(
+        buffer, offset,
+        ", idx=0, scale=0, offset=0)\n  #return #load[#bits<64>](#lea(base=%",
+    );
+    offset = formal_copy_source(buffer, offset, source, record_name);
+    offset = formal_copy_literal(
+        buffer, offset,
+        ", idx=0, scale=0, offset=0))\n}\n",
+    );
+    artifact_write(buffer, offset);
+};
+
 let formal_copy_parameter_return_expression = std::func(
     buffer: addr,
     offset: i64,
@@ -2030,6 +2180,35 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
                 source, local_binding, local_return, local_name
             );
             return true;
+        }
+    }
+    let struct_binding: addr = formal_find_struct_binding(
+        source, raw_first(root)
+    );
+    if raw_nil(struct_binding) == false {
+        let struct_name: addr = raw_next(struct_binding);
+        let struct_body: addr = formal_find_first_group_after(
+            source, raw_next(struct_name)
+        );
+        let field_name: addr = raw_first(struct_body);
+        let field_type: addr = raw_next(raw_next(field_name));
+        if raw_nil(field_name) == false
+            && formal_is_i64_type(source, field_type) {
+            let record_binding: addr = formal_find_record_binding(
+                source, raw_first(main_body)
+            );
+            if raw_nil(record_binding) == false {
+                let record_name: addr = raw_next(record_binding);
+                let member_return: addr = formal_find_member_return(
+                    source, raw_first(main_body), record_name, field_name
+                );
+                if raw_nil(member_return) == false {
+                    formal_emit_struct_field(
+                        source, record_binding
+                    );
+                    return true;
+                }
+            }
         }
     }
     let if_node: addr = formal_find_if_list(source, raw_first(main_body));

@@ -35,6 +35,7 @@ FIXTURES = (
     (ROOT / "scripts" / "fixtures" / "formal_two_local_binding_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_two_local_call_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_module_call_return.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_struct_field_return.lain", "42"),
 )
 RESOLVED_IMPORT_SOURCES = (
     ROOT / "scripts" / "fixtures" / "formal_import_compile_main.lain",
