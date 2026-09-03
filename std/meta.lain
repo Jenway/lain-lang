@@ -1391,6 +1391,106 @@ let meta_resolve_function_scope = std::func(
     return meta_ast_first(root);
 };
 
+@abi_export
+let meta_find_local_scalar_binding = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_let(source, node) {
+        let name: addr = meta_ast_next(node);
+        let equals: addr = meta_ast_next(name);
+        let value: addr = meta_ast_next(equals);
+        let value_operator: addr = meta_ast_next(value);
+        let value_right: addr = meta_ast_next(value_operator);
+        let semicolon: addr = meta_ast_next(value);
+        let scalar_value: bool = false;
+        if meta_is_decimal(source, value)
+            && meta_is_semicolon(source, semicolon) {
+            scalar_value = true;
+        }
+        let arithmetic_value: bool = false;
+        if meta_is_decimal(source, value)
+            && meta_is_operator(source, value_operator)
+            && meta_is_decimal(source, value_right)
+            && meta_is_semicolon(
+                source, meta_ast_next(value_right)
+            ) {
+            arithmetic_value = true;
+        }
+        if meta_ast_kind(name) == 1
+            && meta_is_equals(source, equals)
+            && (scalar_value || arithmetic_value) {
+            return node;
+        }
+    }
+    return meta_find_local_scalar_binding(source, meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_named_return_list = std::func(
+    source: addr,
+    node: addr,
+    name: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_return(source, node) {
+        let value: addr = meta_ast_next(node);
+        let operator: addr = meta_ast_next(value);
+        let right: addr = meta_ast_next(operator);
+        if meta_name_matches(source, value, name) {
+            if meta_is_semicolon(source, operator) { return node; }
+            if meta_is_operator(source, operator)
+                && meta_is_decimal(source, right)
+                && meta_is_semicolon(
+                    source, meta_ast_next(right)
+                ) {
+                return node;
+            }
+        }
+    }
+    return meta_find_named_return_list(
+        source, meta_ast_next(node), name
+    );
+};
+
+@abi_export
+let meta_find_two_named_return_list = std::func(
+    source: addr,
+    node: addr,
+    first_name: addr,
+    second_name: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_return(source, node) {
+        let left: addr = meta_ast_next(node);
+        let operator: addr = meta_ast_next(left);
+        let right: addr = meta_ast_next(operator);
+        let left_known: bool = meta_name_matches(
+            source, left, first_name
+        );
+        if left_known == false {
+            left_known = meta_name_matches(source, left, second_name);
+        }
+        let right_known: bool = meta_name_matches(
+            source, right, first_name
+        );
+        if right_known == false {
+            right_known = meta_name_matches(source, right, second_name);
+        }
+        if left_known && right_known
+            && meta_is_operator(source, operator)
+            && meta_is_semicolon(
+                source, meta_ast_next(right)
+            ) {
+            return node;
+        }
+    }
+    return meta_find_two_named_return_list(
+        source, meta_ast_next(node), first_name, second_name
+    );
+};
+
 // Token classification is part of the formal source model.  The numeric
 // word codes are private to this module; exported predicates keep callers
 // independent from the spelling table and from the raw token layout.
