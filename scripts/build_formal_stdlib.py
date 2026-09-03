@@ -137,6 +137,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_is_two_decimal_arguments",
     "meta_is_two_name_arguments",
     "meta_call_argument_mode",
+    "meta_two_call_argument_mode",
     "meta_is_arithmetic_group",
     "meta_is_unit_return",
     "meta_find_return_list",

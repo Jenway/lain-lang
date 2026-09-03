@@ -526,6 +526,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   共享同一套表达式生成规则。
 - [x] 单参数调用的参数形状（十进制、算术表达式或局部绑定）已由正式 Meta
   的 `meta_call_argument_mode` 统一判断；ABI 入口不再重复决定参数模式。
+- [x] 双参数调用的十进制模式、局部绑定模式及参数顺序匹配已由正式 Meta
+  的 `meta_two_call_argument_mode` 判断；双参数 ABI 分支只保留签名和返回值校验。
 - [x] 带一个或两个函数参数的算术 return 物化已由正式 Meta 的
   `meta_copy_parameter_return_expression` 和
   `meta_copy_two_parameter_expression` 负责；ABI 入口仅保留转发。
