@@ -8,6 +8,14 @@
 let memory_model: Module = import("std::memory_model");
 let vector: Module = import("std::core::vec");
 
+@foreign(c, link_name = "lain_ast_v1_nil")
+let meta_ast_nil_foreign = std::func() -> addr;
+
+@abi_export
+let meta_ast_nil = std::func() -> addr {
+    return meta_ast_nil_foreign();
+};
+
 @foreign(c, link_name = "lain_ast_v1_copy")
 let meta_ast_copy_foreign = std::func(node: addr) -> addr;
 
@@ -697,6 +705,166 @@ let meta_import_target = std::func(
         candidate = candidate + 1;
     }
     return source_count_value;
+};
+
+// Common semantic AST searches used by module and record lowering. These
+// routines only inspect Meta handles and delegate all spelling decisions to
+// the predicates in this module.
+@abi_export
+let meta_find_first_group_after = std::func(
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_ast_kind(node) == 2 {
+        if meta_ast_delimiter(node) == 123 { return node; }
+    }
+    return meta_find_first_group_after(meta_ast_next(node));
+};
+
+@abi_export
+let meta_is_module_binding = std::func(
+    source: addr,
+    node: addr,
+) -> bool {
+    if meta_is_let(source, node) == false { return false; }
+    let name: addr = meta_ast_next(node);
+    let colon: addr = meta_ast_next(name);
+    let type_name: addr = meta_ast_next(colon);
+    let equals: addr = meta_ast_next(type_name);
+    let std_name: addr = meta_ast_next(equals);
+    let first_colon: addr = meta_ast_next(std_name);
+    let second_colon: addr = meta_ast_next(first_colon);
+    let constructor: addr = meta_ast_next(second_colon);
+    let body: addr = meta_ast_next(constructor);
+    if meta_is_module_type(source, type_name) == false { return false; }
+    if meta_is_equals(source, equals) == false { return false; }
+    if meta_ast_kind(std_name) != 1 || meta_ast_length(std_name) != 3 {
+        return false;
+    }
+    if meta_is_module(source, constructor) == false { return false; }
+    return meta_ast_kind(body) == 2 && meta_ast_delimiter(body) == 123;
+};
+
+@abi_export
+let meta_find_module_body = std::func(
+    source: addr,
+    node: addr,
+    path: addr,
+    dot: i64,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_let(source, node) {
+        let name: addr = meta_ast_next(node);
+        if meta_name_matches_path_prefix(source, name, path, dot)
+            && meta_is_module_binding(source, node) {
+            return meta_find_first_group_after(meta_ast_next(name));
+        }
+    }
+    return meta_find_module_body(
+        source, meta_ast_next(node), path, dot
+    );
+};
+
+@abi_export
+let meta_find_module_member = std::func(
+    source: addr,
+    node: addr,
+    path: addr,
+    dot: i64,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_let(source, node) {
+        let name: addr = meta_ast_next(node);
+        if meta_name_matches_path_suffix(source, name, path, dot) {
+            if meta_ast_is_nil(
+                meta_find_first_group_after(meta_ast_next(name))
+            ) == false {
+                return node;
+            }
+        }
+    }
+    return meta_find_module_member(
+        source, meta_ast_next(node), path, dot
+    );
+};
+
+@abi_export
+let meta_find_struct_binding = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_let(source, node) {
+        let name: addr = meta_ast_next(node);
+        let colon: addr = meta_ast_next(name);
+        let type_name: addr = meta_ast_next(colon);
+        let equals: addr = meta_ast_next(type_name);
+        let std_name: addr = meta_ast_next(equals);
+        let first_colon: addr = meta_ast_next(std_name);
+        let second_colon: addr = meta_ast_next(first_colon);
+        let constructor: addr = meta_ast_next(second_colon);
+        let body: addr = meta_ast_next(constructor);
+        if meta_is_type(source, type_name)
+            && meta_is_equals(source, equals)
+            && meta_ast_kind(std_name) == 1
+            && meta_ast_length(std_name) == 3
+            && meta_is_struct(source, constructor)
+            && meta_ast_kind(body) == 2
+            && meta_ast_delimiter(body) == 123 {
+            return node;
+        }
+    }
+    return meta_find_struct_binding(source, meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_record_binding = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_let(source, node) {
+        let name: addr = meta_ast_next(node);
+        let colon: addr = meta_ast_next(name);
+        let type_name: addr = meta_ast_next(colon);
+        let equals: addr = meta_ast_next(type_name);
+        let constructor: addr = meta_ast_next(equals);
+        let body: addr = meta_find_first_group_after(meta_ast_next(name));
+        if meta_ast_kind(type_name) == 1
+            && meta_name_matches(source, type_name, constructor)
+            && meta_ast_kind(body) == 2
+            && meta_ast_delimiter(body) == 123 {
+            return node;
+        }
+    }
+    return meta_find_record_binding(source, meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_member_return = std::func(
+    source: addr,
+    node: addr,
+    record_name: addr,
+    field_name: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_return(source, node) {
+        let value: addr = meta_ast_next(node);
+        let dot: i64 = meta_path_dot(source, value);
+        if dot < meta_ast_length(value)
+            && meta_name_matches_path_prefix(
+                source, record_name, value, dot
+            )
+            && meta_name_matches_path_suffix(
+                source, field_name, value, dot
+            )
+            && meta_is_semicolon(source, meta_ast_next(value)) {
+            return node;
+        }
+    }
+    return meta_find_member_return(
+        source, meta_ast_next(node), record_name, field_name
+    );
 };
 
 // Token classification is part of the formal source model.  The numeric
