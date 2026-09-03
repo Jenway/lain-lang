@@ -42,9 +42,12 @@ FORMAL_UNIT_PROBE = ROOT / "scripts" / "fixtures" / "formal_unit_return.lain"
 FORMAL_CALL_ARGUMENT_EXPRESSION_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_argument_expression.lain"
 FORMAL_PARENTHESIZED_RETURN_PROBE = ROOT / "scripts" / "fixtures" / "formal_parenthesized_return.lain"
 FORMAL_LOCAL_BINDING_PROBE = ROOT / "scripts" / "fixtures" / "formal_local_binding_return.lain"
+FORMAL_LOCAL_ARITHMETIC_BINDING_PROBE = ROOT / "scripts" / "fixtures" / "formal_local_arithmetic_binding_return.lain"
 FORMAL_LOCAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_local_call_return.lain"
 FORMAL_TWO_LOCAL_BINDING_PROBE = ROOT / "scripts" / "fixtures" / "formal_two_local_binding_return.lain"
 FORMAL_TWO_LOCAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_two_local_call_return.lain"
+FORMAL_MODULE_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_module_call_return.lain"
+FORMAL_MISSING_MODULE_MEMBER_PROBE = ROOT / "scripts" / "fixtures" / "formal_missing_module_member.lain"
 FORMAL_IF_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_if_true_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_if_false_return.lain", "42"),
@@ -503,6 +506,47 @@ def verify_abi_entry() -> None:
             "formal stdlib local-binding artifact did not run as 42"
             + (f": {detail}" if detail else "")
         )
+    local_arithmetic_binding_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_LOCAL_ARITHMETIC_BINDING_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if local_arithmetic_binding_probe.returncode:
+        detail = (
+            local_arithmetic_binding_probe.stderr.strip()
+            or local_arithmetic_binding_probe.stdout.strip()
+        )
+        raise RuntimeError(
+            "formal stdlib arithmetic local-binding lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    local_arithmetic_binding_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if (
+        local_arithmetic_binding_run.returncode
+        or local_arithmetic_binding_run.stdout.strip() != "42"
+    ):
+        detail = (
+            local_arithmetic_binding_run.stderr.strip()
+            or local_arithmetic_binding_run.stdout.strip()
+        )
+        raise RuntimeError(
+            "formal stdlib arithmetic local-binding artifact did not run as 42"
+            + (f": {detail}" if detail else "")
+        )
     local_call_probe = subprocess.run(
         [
             str(SEED_RUN),
@@ -610,6 +654,59 @@ def verify_abi_entry() -> None:
         raise RuntimeError(
             "formal stdlib two-local-argument call artifact did not run as 42"
             + (f": {detail}" if detail else "")
+        )
+    module_call_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_MODULE_CALL_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if module_call_probe.returncode:
+        detail = module_call_probe.stderr.strip() or module_call_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib module-member call lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    module_call_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if module_call_run.returncode or module_call_run.stdout.strip() != "42":
+        detail = module_call_run.stderr.strip() or module_call_run.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib module-member call artifact did not run as 42"
+            + (f": {detail}" if detail else "")
+        )
+    missing_module_member_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_MISSING_MODULE_MEMBER_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    missing_module_member_diagnostics = (
+        missing_module_member_probe.stdout + missing_module_member_probe.stderr
+    )
+    if missing_module_member_probe.returncode == 0 or "5203" not in missing_module_member_diagnostics:
+        raise RuntimeError(
+            "formal stdlib missing module member did not retain diagnostic 5203"
         )
     for if_fixture, expected in FORMAL_IF_PROBES:
         if_probe = subprocess.run(

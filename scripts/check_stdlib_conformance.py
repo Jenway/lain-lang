@@ -30,9 +30,11 @@ FIXTURES = (
     (ROOT / "scripts" / "fixtures" / "formal_call_argument_expression.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_parenthesized_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_local_binding_return.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_local_arithmetic_binding_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_local_call_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_two_local_binding_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_two_local_call_return.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_module_call_return.lain", "42"),
 )
 RESOLVED_IMPORT_SOURCES = (
     ROOT / "scripts" / "fixtures" / "formal_import_compile_main.lain",
@@ -78,6 +80,13 @@ def canonical(text: str) -> str:
         r"#let %argument_value: #bits<64> = #eval \{ #return ([^\n]+) \}\n"
         r"  #return #call ([^\(]+)\(%argument_value\)",
         r"#return #call \2(\1)",
+        normalized,
+    )
+    # Formal local initializers may materialize arithmetic through #eval;
+    # collapse that transparent temporary to the direct expression.
+    normalized = re.sub(
+        r"(#let %[A-Za-z_][A-Za-z0-9_]*: #bits<64> = )#eval \{ #return ([^\n]+) \}",
+        r"\1\2",
         normalized,
     )
     return normalized.strip() + "\n"

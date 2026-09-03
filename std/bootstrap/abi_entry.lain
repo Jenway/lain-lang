@@ -808,6 +808,226 @@ let formal_is_equals = std::func(source: addr, node: addr) -> bool {
     return byte_at(source_bytes(source), raw_start(node)) == 61;
 };
 
+let formal_is_module_type = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 6 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 77 { return false; }
+    if byte_at(data, start + 1) != 111 { return false; }
+    if byte_at(data, start + 2) != 100 { return false; }
+    if byte_at(data, start + 3) != 117 { return false; }
+    if byte_at(data, start + 4) != 108 { return false; }
+    return byte_at(data, start + 5) == 101;
+};
+
+let formal_is_module_constructor = std::func(
+    source: addr,
+    node: addr,
+) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 6 { return false; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(node);
+    if byte_at(data, start) != 109 { return false; }
+    if byte_at(data, start + 1) != 111 { return false; }
+    if byte_at(data, start + 2) != 100 { return false; }
+    if byte_at(data, start + 3) != 117 { return false; }
+    if byte_at(data, start + 4) != 108 { return false; }
+    return byte_at(data, start + 5) == 101;
+};
+
+let formal_path_dot = std::func(source: addr, path: addr) -> i64 {
+    if raw_kind(path) != 1 { return 0; }
+    let data: addr = source_bytes(source);
+    let start: i64 = raw_start(path);
+    let length: i64 = raw_length(path);
+    let index: i64 = 0;
+    while index < length {
+        if byte_at(data, start + index) == 46 { return index; }
+        index = index + 1;
+    }
+    // Returning the path length denotes “no dot” without relying on unary
+    // minus, which keeps this helper inside the scalar formal subset.
+    return length;
+};
+
+let formal_name_matches_path_prefix = std::func(
+    source: addr,
+    name: addr,
+    path: addr,
+    dot: i64,
+) -> bool {
+    if raw_kind(name) != 1 || raw_length(name) != dot { return false; }
+    let data: addr = source_bytes(source);
+    let name_start: i64 = raw_start(name);
+    let path_start: i64 = raw_start(path);
+    let index: i64 = 0;
+    while index < dot {
+        if byte_at(data, name_start + index)
+            != byte_at(data, path_start + index) { return false; }
+        index = index + 1;
+    }
+    return true;
+};
+
+let formal_name_matches_path_suffix = std::func(
+    source: addr,
+    name: addr,
+    path: addr,
+    dot: i64,
+) -> bool {
+    let path_length: i64 = raw_length(path);
+    let suffix_start: i64 = dot + 1;
+    let suffix_length: i64 = path_length - suffix_start;
+    if raw_kind(name) != 1 || raw_length(name) != suffix_length {
+        return false;
+    }
+    let data: addr = source_bytes(source);
+    let name_start: i64 = raw_start(name);
+    let path_start: i64 = raw_start(path) + suffix_start;
+    let index: i64 = 0;
+    while index < suffix_length {
+        if byte_at(data, name_start + index)
+            != byte_at(data, path_start + index) { return false; }
+        index = index + 1;
+    }
+    return true;
+};
+
+let formal_find_first_group_after = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if raw_kind(node) == 2 {
+        if raw_delimiter(node) == 123 { return node; }
+    }
+    return formal_find_first_group_after(source, raw_next(node));
+};
+
+let formal_is_module_binding = std::func(
+    source: addr,
+    node: addr,
+) -> bool {
+    if formal_is_let(source, node) == false { return false; }
+    let name: addr = raw_next(node);
+    let colon: addr = raw_next(name);
+    let type_name: addr = raw_next(colon);
+    let equals: addr = raw_next(type_name);
+    let std_name: addr = raw_next(equals);
+    let first_colon: addr = raw_next(std_name);
+    let second_colon: addr = raw_next(first_colon);
+    let constructor: addr = raw_next(second_colon);
+    let body: addr = raw_next(constructor);
+    if formal_is_module_type(source, type_name) == false { return false; }
+    if formal_is_equals(source, equals) == false { return false; }
+    if raw_kind(std_name) != 1 || raw_length(std_name) != 3 { return false; }
+    if formal_is_module_constructor(source, constructor) == false {
+        return false;
+    }
+    return raw_kind(body) == 2 && raw_delimiter(body) == 123;
+};
+
+let formal_find_module_body = std::func(
+    source: addr,
+    node: addr,
+    path: addr,
+    dot: i64,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_let(source, node) {
+        let name: addr = raw_next(node);
+        if formal_name_matches_path_prefix(source, name, path, dot)
+            && formal_is_module_binding(source, node) {
+            return formal_find_first_group_after(source, raw_next(name));
+        }
+    }
+    return formal_find_module_body(source, raw_next(node), path, dot);
+};
+
+let formal_find_module_member = std::func(
+    source: addr,
+    node: addr,
+    path: addr,
+    dot: i64,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_let(source, node) {
+        let name: addr = raw_next(node);
+        if formal_name_matches_path_suffix(source, name, path, dot) {
+            if raw_nil(formal_find_first_group_after(source, raw_next(name))) == false {
+                return node;
+            }
+        }
+    }
+    return formal_find_module_member(source, raw_next(node), path, dot);
+};
+
+let formal_resolve_callee_body = std::func(
+    source: addr,
+    root: addr,
+    callee: addr,
+) -> addr {
+    let dot: i64 = formal_path_dot(source, callee);
+    if dot < raw_length(callee) {
+        let module_body: addr = formal_find_module_body(
+            source, raw_first(root), callee, dot
+        );
+        if raw_nil(module_body) == false {
+            let member: addr = formal_find_module_member(
+                source, raw_first(module_body), callee, dot
+            );
+            if raw_nil(member) == false {
+                return formal_find_first_group_after(
+                    source, raw_next(member)
+                );
+            }
+        }
+    }
+    return formal_find_named_body(source, raw_first(root), callee);
+};
+
+let formal_resolve_callee_name = std::func(
+    source: addr,
+    root: addr,
+    callee: addr,
+) -> addr {
+    let dot: i64 = formal_path_dot(source, callee);
+    if dot < raw_length(callee) {
+        let module_body: addr = formal_find_module_body(
+            source, raw_first(root), callee, dot
+        );
+        if raw_nil(module_body) == false {
+            let member: addr = formal_find_module_member(
+                source, raw_first(module_body), callee, dot
+            );
+            if raw_nil(member) == false { return raw_next(member); }
+        }
+    }
+    return callee;
+};
+
+let formal_resolve_function_scope = std::func(
+    source: addr,
+    root: addr,
+    callee: addr,
+) -> addr {
+    let dot: i64 = formal_path_dot(source, callee);
+    if dot < raw_length(callee) {
+        let module_body: addr = formal_find_module_body(
+            source, raw_first(root), callee, dot
+        );
+        if raw_nil(module_body) == false {
+            let member: addr = formal_find_module_member(
+                source, raw_first(module_body), callee, dot
+            );
+            if raw_nil(member) == false {
+                return raw_first(module_body);
+            }
+        }
+    }
+    return raw_first(root);
+};
+
 let formal_find_local_scalar_binding = std::func(
     source: addr,
     node: addr,
@@ -817,11 +1037,23 @@ let formal_find_local_scalar_binding = std::func(
         let name: addr = raw_next(node);
         let equals: addr = raw_next(name);
         let value: addr = raw_next(equals);
+        let value_operator: addr = raw_next(value);
+        let value_right: addr = raw_next(value_operator);
         let semicolon: addr = raw_next(value);
-        if raw_kind(name) == 1
-            && formal_is_equals(source, equals)
-            && formal_is_decimal(source, value)
+        let scalar_value: bool = false;
+        if formal_is_decimal(source, value)
             && formal_is_semicolon(source, semicolon) {
+            scalar_value = true;
+        }
+        let arithmetic_value: bool = false;
+        if formal_is_decimal(source, value)
+            && formal_is_operator(source, value_operator)
+            && formal_is_decimal(source, value_right)
+            && formal_is_semicolon(source, raw_next(value_right)) {
+            arithmetic_value = true;
+        }
+        if raw_kind(name) == 1 && formal_is_equals(source, equals)
+            && (scalar_value || arithmetic_value) {
             return node;
         }
     }
@@ -1264,6 +1496,40 @@ let formal_copy_argument_expression = std::func(
     );
 };
 
+let formal_binding_value_is_arithmetic = std::func(
+    source: addr,
+    binding: addr,
+) -> bool {
+    let value: addr = raw_next(raw_next(raw_next(binding)));
+    let operator: addr = raw_next(value);
+    let right: addr = raw_next(operator);
+    return formal_is_decimal(source, value)
+        && formal_is_operator(source, operator)
+        && formal_is_decimal(source, right)
+        && formal_is_semicolon(source, raw_next(right));
+};
+
+let formal_copy_binding_value = std::func(
+    buffer: addr,
+    offset: i64,
+    source: addr,
+    binding: addr,
+) -> i64 {
+    let value: addr = raw_next(raw_next(raw_next(binding)));
+    if formal_binding_value_is_arithmetic(source, binding) {
+        let operator: addr = raw_next(value);
+        let right: addr = raw_next(operator);
+        let cursor: i64 = formal_copy_literal(
+            buffer, offset, "#eval { #return "
+        );
+        cursor = formal_copy_binary_expression(
+            buffer, cursor, source, value, operator, right
+        );
+        return formal_copy_literal(buffer, cursor, " }");
+    }
+    return formal_copy_source(buffer, offset, source, value);
+};
+
 let formal_copy_parameter_return_expression = std::func(
     buffer: addr,
     offset: i64,
@@ -1369,7 +1635,6 @@ let formal_emit_local_binding = std::func(
     return_node: addr,
     name: addr,
 ) -> unit {
-    let value: addr = raw_next(raw_next(raw_next(binding)));
     let buffer: addr = allocate_pages(512);
     let offset: i64 = formal_copy_literal(
         buffer,
@@ -1378,7 +1643,9 @@ let formal_emit_local_binding = std::func(
     );
     offset = formal_copy_source(buffer, offset, source, name);
     offset = formal_copy_literal(buffer, offset, ": #bits<64> = ");
-    offset = formal_copy_source(buffer, offset, source, value);
+    offset = formal_copy_binding_value(
+        buffer, offset, source, binding
+    );
     offset = formal_copy_literal(buffer, offset, "\n  #return ");
     let return_value: addr = raw_next(return_node);
     let operator: addr = raw_next(return_value);
@@ -1402,8 +1669,6 @@ let formal_emit_two_local_bindings = std::func(
     first_name: addr,
     second_name: addr,
 ) -> unit {
-    let first_value: addr = raw_next(raw_next(raw_next(first_binding)));
-    let second_value: addr = raw_next(raw_next(raw_next(second_binding)));
     let buffer: addr = allocate_pages(512);
     let offset: i64 = formal_copy_literal(
         buffer,
@@ -1412,11 +1677,15 @@ let formal_emit_two_local_bindings = std::func(
     );
     offset = formal_copy_source(buffer, offset, source, first_name);
     offset = formal_copy_literal(buffer, offset, ": #bits<64> = ");
-    offset = formal_copy_source(buffer, offset, source, first_value);
+    offset = formal_copy_binding_value(
+        buffer, offset, source, first_binding
+    );
     offset = formal_copy_literal(buffer, offset, "\n  #let %");
     offset = formal_copy_source(buffer, offset, source, second_name);
     offset = formal_copy_literal(buffer, offset, ": #bits<64> = ");
-    offset = formal_copy_source(buffer, offset, source, second_value);
+    offset = formal_copy_binding_value(
+        buffer, offset, source, second_binding
+    );
     offset = formal_copy_literal(buffer, offset, "\n  #return ");
     offset = formal_copy_two_parameter_expression(
         buffer, offset, source, return_node, first_name, second_name
@@ -1810,13 +2079,19 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
     if raw_nil(call_return) == false {
         let callee: addr = raw_next(call_return);
         let arguments: addr = raw_next(callee);
-        let callee_body: addr = formal_find_named_body(
-            source, raw_first(root), callee
+        let callee_body: addr = formal_resolve_callee_body(
+            source, root, callee
+        );
+        let callee_name: addr = formal_resolve_callee_name(
+            source, root, callee
+        );
+        let function_scope: addr = formal_resolve_function_scope(
+            source, root, callee
         );
         let argument: addr = raw_first(arguments);
         if formal_is_two_decimal_arguments(source, arguments) {
             let parameter_group: addr = formal_find_named_parameter_group(
-                source, raw_first(root), callee
+                source, function_scope, callee_name
             );
             let first_parameter: addr = raw_first(parameter_group);
             let second_parameter: addr = formal_second_parameter(
@@ -1831,7 +2106,7 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
                         if raw_nil(second_parameter) == false {
                             if raw_nil(two_parameter_return) == false {
                                 formal_emit_call_two_args(
-                                    source, callee, arguments,
+                                    source, callee_name, arguments,
                                     two_parameter_return,
                                     first_parameter, second_parameter
                                 );
@@ -1855,7 +2130,7 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
                         ) {
                             let parameter_group: addr =
                                 formal_find_named_parameter_group(
-                                    source, raw_first(root), callee
+                                    source, function_scope, callee_name
                                 );
                             let first_parameter: addr = raw_first(parameter_group);
                             let second_parameter: addr = formal_second_parameter(
@@ -1872,7 +2147,7 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
                                             if raw_nil(two_parameter_return) == false {
                                                 formal_emit_call_two_local_args(
                                                     source,
-                                                    callee,
+                                                    callee_name,
                                                     arguments,
                                                     two_parameter_return,
                                                     first_parameter,
@@ -1910,7 +2185,7 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
         }
         if raw_nil(argument) == false && argument_supported {
             let parameter_group: addr = formal_find_named_parameter_group(
-                source, raw_first(root), callee
+                source, function_scope, callee_name
             );
             let parameter: addr = raw_first(parameter_group);
             let parameter_return: addr = formal_find_parameter_return_list(
@@ -1921,7 +2196,7 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
                     if raw_nil(parameter) == false {
                         if raw_nil(parameter_return) == false {
                             formal_emit_call_arg(
-                                source, callee, arguments, parameter_return,
+                                source, callee_name, arguments, parameter_return,
                                 parameter, local_binding
                             );
                             return true;
@@ -1932,7 +2207,7 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
         }
         if raw_nil(callee_body) == false {
             if raw_nil(callee_return) == false {
-                formal_emit_call(source, callee, callee_return);
+                formal_emit_call(source, callee_name, callee_return);
                 return true;
             }
         }
@@ -2014,8 +2289,9 @@ let lain_std_lower = std::func(
     elaborated_root: addr,
     l1_unit: addr,
 ) -> addr {
-    // The first executable formal lowering slice handles only a constant
-    // return.  All other forms retain the explicit migration boundary below.
+    // The executable formal lowering slice currently covers scalar constants,
+    // arithmetic, simple calls, local scalar bindings, and small if/else
+    // forms.  Other forms retain the explicit migration boundary below.
     if formal_lower_source(l1_unit, 0) {
         return pass_result_new(
             0,
