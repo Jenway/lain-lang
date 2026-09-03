@@ -540,6 +540,62 @@ let meta_token_count = std::func(token: addr) -> i64 {
     return 1 + meta_token_count(meta_token_next(token));
 };
 
+// Token content stays in the source buffer; these views keep span arithmetic
+// and copying inside Meta so callers never depend on the seed token layout.
+@abi_export
+let meta_token_byte_at = std::func(
+    source: addr,
+    token: addr,
+    index: i64,
+) -> i8 {
+    if index < 0 || index >= meta_token_length(token) { return 0; }
+    return meta_source_byte_at(
+        meta_source_data(source), meta_token_start(token) + index
+    );
+};
+
+@abi_export
+let meta_token_matches = std::func(
+    source: addr,
+    token: addr,
+    text: addr,
+    length: i64,
+) -> bool {
+    if meta_token_kind(token) == 0
+        || meta_token_length(token) != length {
+        return false;
+    }
+    let index: i64 = 0;
+    while index < length {
+        if meta_token_byte_at(source, token, index)
+            != meta_source_byte_at(text, index) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+};
+
+@abi_export
+let meta_copy_token = std::func(
+    buffer: addr,
+    offset: i64,
+    source: addr,
+    token: addr,
+) -> i64 {
+    let index: i64 = 0;
+    let length: i64 = meta_token_length(token);
+    while index < length {
+        std::store_bits(
+            8,
+            buffer + offset + index,
+            meta_token_byte_at(source, token, index) as usize,
+        );
+        index = index + 1;
+    }
+    return offset + length;
+};
+
 // DiagnosticView exposes the source parser's lossless diagnostic chain through
 // Meta.  Message storage is source-owned/static; only the diagnostic records
 // themselves are released with a ParseResult handle.

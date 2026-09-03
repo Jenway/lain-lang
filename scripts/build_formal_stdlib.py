@@ -171,6 +171,9 @@ ABI_SUPPORT_ENTRIES = (
     "meta_token_length",
     "meta_token_next",
     "meta_token_count",
+    "meta_token_byte_at",
+    "meta_token_matches",
+    "meta_copy_token",
     "meta_source_diagnostics",
     "meta_source_diagnostic_count",
     "meta_diagnostic_severity",
@@ -1058,9 +1061,9 @@ def verify_meta_diagnostics() -> None:
         )
     if not META_DIAGNOSTIC_OUTPUT.exists():
         raise RuntimeError("formal Meta diagnostic probe produced no artifact")
-    if META_DIAGNOSTIC_OUTPUT.read_text(encoding="utf-8") != "status=1\n":
+    if META_DIAGNOSTIC_OUTPUT.read_text(encoding="utf-8") != "status=1 token=1\n":
         raise RuntimeError(
-            "formal Meta diagnostic probe did not return lexical status 1"
+            "formal Meta diagnostic probe did not return lexical status and token match"
         )
 
 
