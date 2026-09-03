@@ -583,6 +583,26 @@ let formal_is_two_decimal_arguments = std::func(
     return false;
 };
 
+let formal_is_two_name_arguments = std::func(
+    source: addr,
+    arguments: addr,
+) -> bool {
+    let first: addr = raw_first(arguments);
+    let comma: addr = raw_next(first);
+    let second: addr = raw_next(comma);
+    let tail: addr = raw_next(second);
+    if raw_kind(first) == 1
+        && formal_is_comma(source, comma)
+        && raw_kind(second) == 1
+        && raw_nil(tail) {
+        if formal_is_decimal(source, first) == false
+            && formal_is_decimal(source, second) == false {
+            return true;
+        }
+    }
+    return false;
+};
+
 let formal_is_operator = std::func(source: addr, node: addr) -> bool {
     if raw_kind(node) != 1 || raw_length(node) != 1 { return false; }
     let value: i8 = byte_at(source_bytes(source), raw_start(node));
@@ -955,6 +975,9 @@ let formal_find_call_return_list = std::func(
                         return node;
                     }
                     if formal_is_two_decimal_arguments(source, probe1) {
+                        return node;
+                    }
+                    if formal_is_two_name_arguments(source, probe1) {
                         return node;
                     }
                 }
@@ -1561,6 +1584,58 @@ let formal_emit_call_two_args = std::func(
     artifact_write(buffer, offset);
 };
 
+let formal_emit_call_two_local_args = std::func(
+    source: addr,
+    callee: addr,
+    arguments: addr,
+    callee_return: addr,
+    first_parameter: addr,
+    second_parameter: addr,
+    first_binding: addr,
+    second_binding: addr,
+) -> unit {
+    let first_argument: addr = raw_first(arguments);
+    let second_argument: addr = raw_next(raw_next(first_argument));
+    let first_name: addr = raw_next(first_binding);
+    let second_name: addr = raw_next(second_binding);
+    let first_value: addr = raw_next(raw_next(raw_next(first_binding)));
+    let second_value: addr = raw_next(raw_next(raw_next(second_binding)));
+    let buffer: addr = allocate_pages(768);
+    let offset: i64 = formal_copy_literal(buffer, 0, "#proc ");
+    offset = formal_copy_source(buffer, offset, source, callee);
+    offset = formal_copy_literal(
+        buffer, offset, "(#bits<64> %"
+    );
+    offset = formal_copy_source(buffer, offset, source, first_parameter);
+    offset = formal_copy_literal(buffer, offset, ", #bits<64> %");
+    offset = formal_copy_source(buffer, offset, source, second_parameter);
+    offset = formal_copy_literal(buffer, offset, ") -> #bits<64> {\n  #return ");
+    offset = formal_copy_two_parameter_expression(
+        buffer, offset, source, callee_return,
+        first_parameter, second_parameter
+    );
+    offset = formal_copy_literal(
+        buffer, offset, "\n}\n\n#proc main() -> #bits<64> {\n  #let %"
+    );
+    offset = formal_copy_source(buffer, offset, source, first_name);
+    offset = formal_copy_literal(buffer, offset, ": #bits<64> = ");
+    offset = formal_copy_source(buffer, offset, source, first_value);
+    offset = formal_copy_literal(buffer, offset, "\n  #let %");
+    offset = formal_copy_source(buffer, offset, source, second_name);
+    offset = formal_copy_literal(buffer, offset, ": #bits<64> = ");
+    offset = formal_copy_source(buffer, offset, source, second_value);
+    offset = formal_copy_literal(
+        buffer, offset, "\n  #return #call "
+    );
+    offset = formal_copy_source(buffer, offset, source, callee);
+    offset = formal_copy_literal(buffer, offset, "(%");
+    offset = formal_copy_source(buffer, offset, source, first_name);
+    offset = formal_copy_literal(buffer, offset, ", %");
+    offset = formal_copy_source(buffer, offset, source, second_name);
+    offset = formal_copy_literal(buffer, offset, ")\n}\n");
+    artifact_write(buffer, offset);
+};
+
 let formal_emit_if = std::func(
     source: addr,
     if_node: addr,
@@ -1652,9 +1727,10 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
     let local_binding: addr = formal_find_local_scalar_binding(
         source, raw_first(main_body)
     );
+    let second_binding: addr = ast_nil();
     if raw_nil(local_binding) == false {
         let local_name: addr = raw_next(local_binding);
-        let second_binding: addr = formal_find_local_scalar_binding(
+        second_binding = formal_find_local_scalar_binding(
             source, raw_next(local_binding)
         );
         if raw_nil(second_binding) == false {
@@ -1760,6 +1836,55 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
                                     first_parameter, second_parameter
                                 );
                                 return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if formal_is_two_name_arguments(source, arguments) {
+            let first_argument: addr = raw_first(arguments);
+            let second_argument: addr = raw_next(raw_next(first_argument));
+            if raw_nil(local_binding) == false {
+                if raw_nil(second_binding) == false {
+                    if formal_name_matches(
+                        source, first_argument, raw_next(local_binding)
+                    ) {
+                        if formal_name_matches(
+                            source, second_argument, raw_next(second_binding)
+                        ) {
+                            let parameter_group: addr =
+                                formal_find_named_parameter_group(
+                                    source, raw_first(root), callee
+                                );
+                            let first_parameter: addr = raw_first(parameter_group);
+                            let second_parameter: addr = formal_second_parameter(
+                                source, parameter_group
+                            );
+                            let two_parameter_return: addr =
+                                formal_find_two_parameter_return_list(
+                                    source, raw_first(callee_body)
+                                );
+                            if raw_nil(callee_body) == false {
+                                if raw_nil(parameter_group) == false {
+                                    if raw_nil(first_parameter) == false {
+                                        if raw_nil(second_parameter) == false {
+                                            if raw_nil(two_parameter_return) == false {
+                                                formal_emit_call_two_local_args(
+                                                    source,
+                                                    callee,
+                                                    arguments,
+                                                    two_parameter_return,
+                                                    first_parameter,
+                                                    second_parameter,
+                                                    local_binding,
+                                                    second_binding,
+                                                );
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
