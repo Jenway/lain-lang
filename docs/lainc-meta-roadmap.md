@@ -474,11 +474,12 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   调用（无参数或一至两个十进制参数）、单参数及括号包裹的算术表达式、局部标量绑定和布尔/数值比较的
   `if ... else` 双分支已完成正式库 lowering 及 artifact 回灌，
   不完整表达式会被拒绝，一般控制流和完整 L1 Unit 仍待迁移。
-- [~] 正式 `std::meta` 已导出 AstApi 的只读访问包装；
+- [~] 正式 `std::meta` 已导出 AstApi 的只读访问包装和 `meta_ast_count`；
   `std/bootstrap/abi_entry.lain` 不再直接声明
   `raw_node_first/next/kind/delimiter/start/length` 和 `raw_is_nil`，
-  这些调用经过正式 Meta 库再落到 seed ABI。解析入口 `raw_parse` 和源字节
-  capability 仍保留在 ABI 边界，后续继续迁移为 `SourceApi`/`AstApi` 接口。
+  这些调用经过正式 Meta 库再落到 seed ABI；源码数据和字节读取也经过
+  `meta_source_data/meta_source_byte_at`。解析入口 `raw_parse`、词法器和
+  source handle 创建仍保留在 ABI 边界，后续继续收敛为 `SourceApi` 接口。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
