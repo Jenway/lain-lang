@@ -90,6 +90,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_parse_result_tokens",
     "meta_parse_result_root",
     "meta_parse_result_status",
+    "meta_parse_result_release",
     "meta_source_new",
     "meta_source_length",
     "meta_source_lex",
