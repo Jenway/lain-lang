@@ -148,11 +148,18 @@
   #return
 }
 
-// A context handle owns a monotonically increasing ID sequence.  ID zero is
-// the parser's source context; generated syntax obtains positive IDs here.
+// A context handle owns a monotonically increasing ID sequence and a small
+// source-backed text pool for generated identifiers.  ID zero is the parser's
+// source context; generated syntax obtains positive IDs here.
 #proc raw_syntax_context_new() -> addr {
-  #let %context: addr = #call bootstrap.allocate-pages(16)
+  #let %context: addr = #call bootstrap.allocate-pages(32)
+  #let %pool: addr = #call ast_pool_new(256)
+  #let %source: addr = #call tool_source_new(
+    #call ast_pool_data(%pool), 0
+  )
   #store 1, #lea(base=%context, idx=0, scale=0, offset=0)
+  #store %pool, #lea(base=%context, idx=0, scale=0, offset=8)
+  #store %source, #lea(base=%context, idx=0, scale=0, offset=16)
   #return %context
 }
 
@@ -160,6 +167,50 @@
   #let %value: i64 = #load[i64](#lea(base=%context, idx=0, scale=0, offset=0))
   #store #add(%value, 1), #lea(base=%context, idx=0, scale=0, offset=0)
   #return %value
+}
+
+#proc raw_syntax_context_source(addr %context) -> addr {
+  #return #load[addr](#lea(base=%context, idx=0, scale=0, offset=16))
+}
+
+#proc raw_syntax_context_append(
+  addr %context, addr %text, i64 %length
+) -> i64 {
+  #let %pool: addr = #load[addr](
+    #lea(base=%context, idx=0, scale=0, offset=8)
+  )
+  #let %offset: i64 = #call ast_pool_append(%pool, %text, %length)
+  #let %source: addr = #call raw_syntax_context_source(%context)
+  #store #call ast_pool_used(%pool),
+    #lea(base=%source, idx=0, scale=0, offset=8)
+  #return %offset
+}
+
+#proc raw_syntax_context_fresh_atom(
+  addr %context, addr %text, i64 %length, i32 %token_kind
+) -> addr {
+  #let %offset: i64 = #call raw_syntax_context_append(
+    %context, %text, %length
+  )
+  #let %atom: addr = #call raw_node_new(
+    1, 0, %offset, %length, %token_kind
+  )
+  #call raw_node_set_syntax_context(
+    %atom, #call raw_syntax_context_fresh(%context)
+  )
+  #return %atom
+}
+
+#proc raw_syntax_context_release(addr %context) -> #unit {
+  #let %source: addr = #call raw_syntax_context_source(%context)
+  #let %pool: addr = #load[addr](
+    #lea(base=%context, idx=0, scale=0, offset=8)
+  )
+  #call bootstrap.release-pages(%source)
+  #call bootstrap.release-pages(#call ast_pool_data(%pool))
+  #call bootstrap.release-pages(%pool)
+  #call bootstrap.release-pages(%context)
+  #return
 }
 
 #proc raw_node_set_next(addr %node, addr %next) -> #unit {
