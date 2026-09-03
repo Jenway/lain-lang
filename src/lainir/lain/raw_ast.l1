@@ -30,9 +30,10 @@
 //   kind @0 (1 atom, 2 group), delimiter @4,
 //   source start @8, source length @16, first child @24,
 //   last child @32, next sibling @40, token kind @48,
-//   child count @56.
+//   child count @56, origin source @64, origin start @72,
+//   origin length @80, origin present @88.
 #proc raw_node_nil() -> addr {
-  #let %nil: addr = #call bootstrap.allocate-pages(64)
+  #let %nil: addr = #call bootstrap.allocate-pages(96)
   #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
   // The sentinel is a real RawAst node.  Keep every pointer slot self-linked
   // so callers may safely ask for first/last/next before checking raw_is_nil.
@@ -46,6 +47,10 @@
   #store %nil, #lea(base=%nil, idx=0, scale=0, offset=40)
   #store 0, #lea(base=%nil, idx=0, scale=0, offset=48)
   #store 0, #lea(base=%nil, idx=0, scale=0, offset=56)
+  #store %nil, #lea(base=%nil, idx=0, scale=0, offset=64)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=72)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=80)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=88)
   #return %nil
 }
 
@@ -56,7 +61,7 @@
 #proc raw_node_new(
   i32 %kind, i32 %delimiter, i64 %start, i64 %length, i32 %token_kind
 ) -> addr {
-  #let %node: addr = #call bootstrap.allocate-pages(64)
+  #let %node: addr = #call bootstrap.allocate-pages(96)
   #let %nil: addr = #call raw_node_nil()
   #store %kind, #lea(base=%node, idx=0, scale=0, offset=0)
   #store %delimiter, #lea(base=%node, idx=0, scale=0, offset=4)
@@ -67,6 +72,10 @@
   #store %nil, #lea(base=%node, idx=0, scale=0, offset=40)
   #store %token_kind, #lea(base=%node, idx=0, scale=0, offset=48)
   #store 0, #lea(base=%node, idx=0, scale=0, offset=56)
+  #store %nil, #lea(base=%node, idx=0, scale=0, offset=64)
+  #store 0, #lea(base=%node, idx=0, scale=0, offset=72)
+  #store 0, #lea(base=%node, idx=0, scale=0, offset=80)
+  #store 0, #lea(base=%node, idx=0, scale=0, offset=88)
   #return %node
 }
 
@@ -100,6 +109,32 @@
 
 #proc raw_node_token_kind(addr %node) -> i32 {
   #return #load[i32](#lea(base=%node, idx=0, scale=0, offset=48))
+}
+
+#proc raw_node_origin_source(addr %node) -> addr {
+  #return #load[addr](#lea(base=%node, idx=0, scale=0, offset=64))
+}
+
+#proc raw_node_origin_start(addr %node) -> i64 {
+  #return #load[i64](#lea(base=%node, idx=0, scale=0, offset=72))
+}
+
+#proc raw_node_origin_length(addr %node) -> i64 {
+  #return #load[i64](#lea(base=%node, idx=0, scale=0, offset=80))
+}
+
+#proc raw_node_origin_present(addr %node) -> i1 {
+  #return #load[i1](#lea(base=%node, idx=0, scale=0, offset=88))
+}
+
+#proc raw_node_set_origin(
+  addr %node, addr %source, i64 %start, i64 %length
+) -> #unit {
+  #store %source, #lea(base=%node, idx=0, scale=0, offset=64)
+  #store %start, #lea(base=%node, idx=0, scale=0, offset=72)
+  #store %length, #lea(base=%node, idx=0, scale=0, offset=80)
+  #store 1, #lea(base=%node, idx=0, scale=0, offset=88)
+  #return
 }
 
 #proc raw_node_set_next(addr %node, addr %next) -> #unit {
@@ -187,17 +222,22 @@
     #call raw_cursor_set_token(%cursor, #call tool_token_next(%token))
     #if #call raw_is_open(%byte) {
       #let %group: addr = #call raw_node_new(2, #zext[#bits<32>](%byte), %start, 0, 0)
+      #call raw_node_set_origin(%group, %source, %start, 0)
       #call raw_parse_children(
         %source, %cursor, %group, #call raw_matching_close(%byte)
       )
       #let %end: i64 = #call raw_cursor_end(%cursor)
       #if #eq(%end, 0) { %end: i64 = #add(%start, %length) }
       #store #sub(%end, %start), #lea(base=%group, idx=0, scale=0, offset=16)
+      #call raw_node_set_origin(
+        %group, %source, %start, #sub(%end, %start)
+      )
       #call raw_append(%parent, %group)
     } else {
       #let %atom: addr = #call raw_node_new(
         1, 0, %start, %length, %kind
       )
+      #call raw_node_set_origin(%atom, %source, %start, %length)
       #call raw_append(%parent, %atom)
       #call raw_cursor_set_end(%cursor, #add(%start, %length))
     }
@@ -209,6 +249,7 @@
 #proc raw_parse(addr %source, addr %tokens) -> addr {
   #let %length: i64 = #load[i64](#lea(base=%source, idx=0, scale=0, offset=8))
   #let %root: addr = #call raw_node_new(2, 0, 0, %length, 0)
+  #call raw_node_set_origin(%root, %source, 0, %length)
   #let %cursor: addr = #call raw_cursor_new(%tokens)
   #call raw_parse_children(%source, %cursor, %root, 0)
   #return %root
@@ -441,6 +482,14 @@
     #call raw_node_length(%node),
     #call raw_node_token_kind(%node)
   )
+  #if #call raw_node_origin_present(%node) {
+    #call raw_node_set_origin(
+      %copy,
+      #call raw_node_origin_source(%node),
+      #call raw_node_origin_start(%node),
+      #call raw_node_origin_length(%node)
+    )
+  }
   #let %child: addr = #call raw_node_first(%node)
   #loop children {
     #if #call raw_is_nil(%child) { #break children }
@@ -457,10 +506,34 @@
 #proc ast_relocate(addr %node, i64 %delta) -> #unit {
   #let %start: i64 = #call raw_node_start(%node)
   #store #add(%start, %delta), #lea(base=%node, idx=0, scale=0, offset=8)
+  #if #call raw_node_origin_present(%node) {
+    #let %origin_start: i64 = #call raw_node_origin_start(%node)
+    #store #add(%origin_start, %delta),
+      #lea(base=%node, idx=0, scale=0, offset=72)
+  }
   #let %child: addr = #call raw_node_first(%node)
   #loop children {
     #if #call raw_is_nil(%child) { #break children }
     #call ast_relocate(%child, %delta)
+    %child: addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return
+}
+
+#proc ast_rebase_origin(addr %node, addr %source) -> #unit {
+  #if #call raw_node_origin_present(%node) {
+    #call raw_node_set_origin(
+      %node,
+      %source,
+      #call raw_node_origin_start(%node),
+      #call raw_node_origin_length(%node)
+    )
+  }
+  #let %child: addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #call ast_rebase_origin(%child, %source)
     %child: addr = #call raw_node_next(%child)
     #continue children
   }
@@ -479,6 +552,7 @@
   #let %tokens: addr = #call tool_lex_all(%sub)
   #let %root: addr = #call raw_parse(%sub, %tokens)
   #call ast_relocate(%root, %start)
+  #call ast_rebase_origin(%root, %source)
   #call bootstrap.release-pages(%sub)
   #return %root
 }
