@@ -389,7 +389,7 @@ def verify_abi_entry() -> None:
             "formal stdlib unit-return artifact failed verification"
             + (f": {detail}" if detail else "")
         )
-    invalid_argument_probe = subprocess.run(
+    argument_expression_probe = subprocess.run(
         [
             str(SEED_RUN),
             "interpreter",
@@ -403,12 +403,32 @@ def verify_abi_entry() -> None:
         capture_output=True,
         text=True,
     )
-    invalid_argument_diagnostics = (
-        invalid_argument_probe.stdout + invalid_argument_probe.stderr
-    )
-    if invalid_argument_probe.returncode == 0 or "5203" not in invalid_argument_diagnostics:
+    if argument_expression_probe.returncode:
+        detail = (
+            argument_expression_probe.stderr.strip()
+            or argument_expression_probe.stdout.strip()
+        )
         raise RuntimeError(
-            "formal stdlib accepted a non-scalar function argument"
+            "formal stdlib arithmetic-argument lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    argument_expression_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if (
+        argument_expression_run.returncode
+        or argument_expression_run.stdout.strip() != "42"
+    ):
+        detail = (
+            argument_expression_run.stderr.strip()
+            or argument_expression_run.stdout.strip()
+        )
+        raise RuntimeError(
+            "formal stdlib arithmetic-argument artifact did not run as 42"
+            + (f": {detail}" if detail else "")
         )
     for if_fixture, expected in FORMAL_IF_PROBES:
         if_probe = subprocess.run(
