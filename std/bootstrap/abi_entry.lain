@@ -551,6 +551,15 @@ let formal_is_single_arithmetic_argument = std::func(
     return false;
 };
 
+let formal_is_single_name_argument = std::func(
+    arguments: addr,
+) -> bool {
+    let argument: addr = raw_first(arguments);
+    if raw_kind(argument) != 1 { return false; }
+    let tail: addr = raw_next(argument);
+    return raw_nil(tail);
+};
+
 let formal_is_comma = std::func(source: addr, node: addr) -> bool {
     if raw_kind(node) != 1 || raw_length(node) != 1 { return false; }
     return byte_at(source_bytes(source), raw_start(node)) == 44;
@@ -908,6 +917,9 @@ let formal_find_call_return_list = std::func(
                         return node;
                     }
                     if formal_is_single_arithmetic_argument(source, probe1) {
+                        return node;
+                    }
+                    if formal_is_single_name_argument(probe1) {
                         return node;
                     }
                     if formal_is_two_decimal_arguments(source, probe1) {
@@ -1377,8 +1389,19 @@ let formal_emit_call_arg = std::func(
     arguments: addr,
     callee_return: addr,
     parameter: addr,
+    local_binding: addr,
 ) -> unit {
     let argument: addr = raw_first(arguments);
+    let local_name: addr = ast_nil();
+    if raw_nil(local_binding) == false {
+        local_name = raw_next(local_binding);
+    }
+    let local_argument: bool = false;
+    if raw_nil(local_name) == false {
+        if formal_name_matches(source, argument, local_name) {
+            local_argument = true;
+        }
+    }
     let buffer: addr = allocate_pages(512);
     let offset: i64 = formal_copy_literal(buffer, 0, "#proc ");
     offset = formal_copy_source(buffer, offset, source, callee);
@@ -1410,14 +1433,28 @@ let formal_emit_call_arg = std::func(
             " }\n  #return #call "
         );
     } else {
-        offset = formal_copy_literal(buffer, offset, "  #return #call ");
+        if local_argument {
+            offset = formal_copy_literal(buffer, offset, "  #let %");
+            offset = formal_copy_source(buffer, offset, source, local_name);
+            offset = formal_copy_literal(buffer, offset, ": #bits<64> = ");
+            let local_value: addr = raw_next(raw_next(raw_next(local_binding)));
+            offset = formal_copy_source(buffer, offset, source, local_value);
+            offset = formal_copy_literal(buffer, offset, "\n  #return #call ");
+        } else {
+            offset = formal_copy_literal(buffer, offset, "  #return #call ");
+        }
     }
     offset = formal_copy_source(buffer, offset, source, callee);
     offset = formal_copy_literal(buffer, offset, "(");
     if formal_is_single_arithmetic_argument(source, arguments) {
         offset = formal_copy_literal(buffer, offset, "%argument_value");
     } else {
-        offset = formal_copy_source(buffer, offset, source, argument);
+        if local_argument {
+            offset = formal_copy_literal(buffer, offset, "%");
+            offset = formal_copy_source(buffer, offset, source, local_name);
+        } else {
+            offset = formal_copy_source(buffer, offset, source, argument);
+        }
     }
     offset = formal_copy_literal(buffer, offset, ")\n}\n");
     artifact_write(buffer, offset);
@@ -1646,7 +1683,21 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
         let callee_return: addr = formal_find_return_list(
             source, raw_first(callee_body)
         );
-        if raw_nil(argument) == false {
+        let argument_supported: bool = false;
+        if formal_is_single_decimal_argument(source, arguments) {
+            argument_supported = true;
+        }
+        if formal_is_single_arithmetic_argument(source, arguments) {
+            argument_supported = true;
+        }
+        if raw_nil(local_binding) == false {
+            if formal_name_matches(
+                source, argument, raw_next(local_binding)
+            ) {
+                argument_supported = true;
+            }
+        }
+        if raw_nil(argument) == false && argument_supported {
             let parameter_group: addr = formal_find_named_parameter_group(
                 source, raw_first(root), callee
             );
@@ -1660,7 +1711,7 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
                         if raw_nil(parameter_return) == false {
                             formal_emit_call_arg(
                                 source, callee, arguments, parameter_return,
-                                parameter
+                                parameter, local_binding
                             );
                             return true;
                         }
