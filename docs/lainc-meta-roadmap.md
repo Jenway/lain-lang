@@ -516,6 +516,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
 - [x] 简单二元算术的 LAIN-IR 文本生成已下沉到正式 Meta 的
   `meta_copy_binary_expression`；ABI 入口只转发，现有算术、调用和 `#eval`
   回归保持通过。
+- [x] `return` 表达式的结构判断和物化也已由正式 Meta 的
+  `meta_copy_return_expression` 负责；入口不再决定是否生成算术 `#eval`。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
