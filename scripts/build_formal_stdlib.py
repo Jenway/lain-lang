@@ -177,6 +177,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_copy_return_expression",
     "meta_copy_constant_return",
     "meta_copy_call",
+    "meta_copy_call_argument",
     "meta_copy_argument_expression",
     "meta_copy_parameter_return_expression",
     "meta_copy_two_parameter_expression",

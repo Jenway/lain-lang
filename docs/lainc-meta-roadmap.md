@@ -525,6 +525,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   的 `meta_copy_constant_return` 生成；ABI 入口只负责缓冲区和 artifact 输出。
 - [x] 无参数函数调用的完整物理文本已由正式 Meta 的 `meta_copy_call` 生成；
   调用返回值的算术 `#eval` 包装也由该库侧规则决定。
+- [x] 单参数函数调用的完整物理文本已由正式 Meta 的
+  `meta_copy_call_argument` 生成；十进制、算术参数和局部绑定参数均保持原有回归。
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。
