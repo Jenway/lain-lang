@@ -402,6 +402,9 @@ attributes/import
   `meta_struct_status` 检查结构字段并对重复字段返回 `3008`；
   `lain_std_expand` 会对每个 source unit 调用这两条规则，
   `scripts/check_meta_module_validation.py` 已证明 bootstrap/formal 两套结果一致。
+- [x] import 计数、目标解析、未解析 import 检查和循环依赖检测已统一放入
+  正式 `std::meta` 的 `meta_import_*` 规则；ABI 入口只构建 syntax index
+  并转发状态，resolved/unresolved/cycle 三类回归保持通过。
 - [~] compiler API 已只调用 `lain_std_expand/elaborate/lower`；完整 lowering
   实现已经进入 bootstrap std artifact，并通过 `lain_std_lower_program` 暴露，
   但 expand/elaborate 的完整 AST 变换和正式 ABI 仍待完成。普通运行函数中
