@@ -498,8 +498,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   return/绑定是否需要编译期算术求值的判断也已由 Meta 提供，入口只保留
   输出过程；字面量和源 span 的字节物化也已由 Meta 提供；算术和比较运算符
   的词法拼写现在统一由 `meta_operator_code` 归一化，入口不再直接读取运算符
-  字节。下一步继续将
-  token 序列内容、解析诊断和 parent/origin 信息从 ABI 薄包装扩展为正式的源模型。
+  字节。解析诊断链现在也通过 `meta_source_diagnostics` 及其只读访问器暴露，
+  `ParseResult` 会记录首个诊断码，并在释放时回收诊断节点。下一步继续将
+  token 序列内容和 parent/origin 信息从 ABI 薄包装扩展为正式的源模型。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
