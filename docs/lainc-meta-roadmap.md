@@ -521,6 +521,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   回归保持通过。
 - [x] `return` 表达式的结构判断和物化也已由正式 Meta 的
   `meta_copy_return_expression` 负责；入口不再决定是否生成算术 `#eval`。
+- [x] 常量 return 的完整物化（普通返回和算术 `#eval` 包装）已由正式 Meta
+  的 `meta_copy_constant_return` 生成；ABI 入口只负责缓冲区和 artifact 输出。
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。
