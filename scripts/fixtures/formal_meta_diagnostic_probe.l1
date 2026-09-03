@@ -20,6 +20,10 @@
 #extern #proc meta_ast_set_syntax_context(addr %node, i64 %context) -> #unit;
 #extern #proc meta_syntax_context_new() -> addr;
 #extern #proc meta_syntax_context_fresh(addr %context) -> i64;
+#extern #proc meta_syntax_context_source(addr %context) -> addr;
+#extern #proc meta_ast_fresh_atom(addr %context, addr %text, i64 %length, i32 %token_kind) -> addr;
+#extern #proc meta_ast_write(addr %source, addr %node) -> #unit;
+#extern #proc meta_syntax_context_release(addr %context) -> #unit;
 #extern #proc meta_ast_copy(addr %node) -> addr;
 #extern #proc bootstrap.artifact-begin() -> #unit;
 #extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
@@ -78,14 +82,30 @@
       }
     }
   }
+  #let %fresh_atom: #addr = #call meta_ast_fresh_atom(
+    %context, "tmp", 3, 1
+  )
+  #let %fresh_context_source: #addr = #call meta_syntax_context_source(%context)
+  #let %fresh_ok: #bits<1> = 0
+  #if #eq(#call meta_ast_syntax_context(%fresh_atom), 3) {
+    #if #eq(#call meta_ast_length(%fresh_atom), 3) {
+      %fresh_ok: #bits<1> = 1
+    }
+  }
   #call meta_parse_result_release(%valid_result)
   #call bootstrap.artifact-begin()
   #if #eq(%status, 1) {
     #if #eq(%token_ok, 1) {
       #if #gt(%token_count, 0) {
         #if #eq(%origin_ok, 1) {
-          #if #eq(%context_ok, 1) {
-            #call bootstrap.artifact-write-literal("status=1 token=1 origin=1 context=1\n")
+        #if #eq(%context_ok, 1) {
+            #if #eq(%fresh_ok, 1) {
+              #call bootstrap.artifact-write-literal("status=1 token=1 origin=1 context=1 fresh=")
+              #call meta_ast_write(%fresh_context_source, %fresh_atom)
+              #call bootstrap.artifact-write-literal(" ctx=3\n")
+            } else {
+              #call bootstrap.artifact-write-literal("status=1 token=1 origin=1 context=1 fresh=bad\n")
+            }
           } else {
             #call bootstrap.artifact-write-literal("status=1 token=1 origin=1 context=0\n")
           }
@@ -102,5 +122,6 @@
     #call bootstrap.artifact-write-literal("status=unexpected\n")
   }
   #call bootstrap.artifact-finish()
+  #call meta_syntax_context_release(%context)
   #return 0
 }
