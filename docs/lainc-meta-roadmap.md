@@ -486,8 +486,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   syntax-index 条目（源句柄、根节点、首节点、节点数、import 数和根 span）；
   expand 已通过 `std::meta` 库函数调用 AstApi 复制首个根节点；正式库已在
   `syntax_index_import_status` 中按 source path 解析本地 import 和
-  `std::...` 逻辑路径，缺失普通模块返回 `4101`，循环依赖诊断仍待迁移。
-  同一入口使用三色 DFS 检测本地依赖环并返回 `4103`。elaborate 仍只传递句柄，lower 对常量
+  `std::...` 逻辑路径，缺失普通模块返回 `4101`；同一入口使用三色 DFS
+  检测本地依赖环并返回 `4103`。elaborate 仍只传递句柄，lower 对常量
   `return`、简单二元算术、同源无参数/一至两参数调用和布尔/数值比较双分支已生成可执行
   artifact；`unit` 空返回已加入正式库验证，
   其余形式明确返回 `5203`。
