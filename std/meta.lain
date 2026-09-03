@@ -80,6 +80,102 @@ let meta_ast_count = std::func(node: addr) -> i64 {
     return 1 + meta_ast_count(meta_ast_next(node));
 };
 
+// Source-model name operations.  These helpers compare spans through the
+// SourceApi and keep path handling out of an ABI entry point.  A path without
+// a dot is represented by its full length; callers can therefore stay inside
+// the scalar formal subset without relying on unary minus.
+@abi_export
+let meta_name_matches = std::func(
+    source: addr,
+    left: addr,
+    right: addr,
+) -> bool {
+    if meta_ast_kind(left) != 1 || meta_ast_kind(right) != 1 {
+        return false;
+    }
+    let length: i64 = meta_ast_length(left);
+    if length != meta_ast_length(right) { return false; }
+    let data: addr = meta_source_data(source);
+    let left_start: i64 = meta_ast_start(left);
+    let right_start: i64 = meta_ast_start(right);
+    let index: i64 = 0;
+    while index < length {
+        if meta_source_byte_at(data, left_start + index)
+            != meta_source_byte_at(data, right_start + index) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+};
+
+@abi_export
+let meta_path_dot = std::func(source: addr, path: addr) -> i64 {
+    if meta_ast_kind(path) != 1 { return 0; }
+    let data: addr = meta_source_data(source);
+    let start: i64 = meta_ast_start(path);
+    let length: i64 = meta_ast_length(path);
+    let index: i64 = 0;
+    while index < length {
+        if meta_source_byte_at(data, start + index) == 46 {
+            return index;
+        }
+        index = index + 1;
+    }
+    return length;
+};
+
+@abi_export
+let meta_name_matches_path_prefix = std::func(
+    source: addr,
+    name: addr,
+    path: addr,
+    dot: i64,
+) -> bool {
+    if meta_ast_kind(name) != 1 || meta_ast_length(name) != dot {
+        return false;
+    }
+    let data: addr = meta_source_data(source);
+    let name_start: i64 = meta_ast_start(name);
+    let path_start: i64 = meta_ast_start(path);
+    let index: i64 = 0;
+    while index < dot {
+        if meta_source_byte_at(data, name_start + index)
+            != meta_source_byte_at(data, path_start + index) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+};
+
+@abi_export
+let meta_name_matches_path_suffix = std::func(
+    source: addr,
+    name: addr,
+    path: addr,
+    dot: i64,
+) -> bool {
+    let path_length: i64 = meta_ast_length(path);
+    let suffix_start: i64 = dot + 1;
+    let suffix_length: i64 = path_length - suffix_start;
+    if meta_ast_kind(name) != 1 || meta_ast_length(name) != suffix_length {
+        return false;
+    }
+    let data: addr = meta_source_data(source);
+    let name_start: i64 = meta_ast_start(name);
+    let path_start: i64 = meta_ast_start(path) + suffix_start;
+    let index: i64 = 0;
+    while index < suffix_length {
+        if meta_source_byte_at(data, name_start + index)
+            != meta_source_byte_at(data, path_start + index) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+};
+
 // SourceApi keeps source-byte access behind the same formal Meta boundary as
 // AstApi.  The seed still owns the storage and the C ABI, while formal
 // lowering only depends on these stable Meta operations.

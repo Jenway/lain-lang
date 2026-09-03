@@ -479,8 +479,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `raw_node_first/next/kind/delimiter/start/length` 和 `raw_is_nil`，
   这些调用经过正式 Meta 库再落到 seed ABI；源码数据和字节读取也经过
   `meta_source_data/meta_source_byte_at`，source handle、词法和解析入口
-  经过 `meta_source_new/meta_source_lex/meta_source_parse`。下一步继续
-  将这些 SourceApi 操作从 ABI 薄包装扩展为正式的源模型。
+  经过 `meta_source_new/meta_source_lex/meta_source_parse`；名称比较、成员
+  路径拆分以及路径前后缀匹配也已下沉到 `std::meta` 的源模型函数。下一步
+  继续将 source span、token 分类和解析结果从 ABI 薄包装扩展为正式的源模型。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
