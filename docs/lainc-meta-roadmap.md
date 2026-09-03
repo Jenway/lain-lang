@@ -502,8 +502,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `ParseResult` 会记录首个诊断码，并在释放时回收诊断节点；token 内容读取、
   文本匹配和复制现在通过 `meta_token_byte_at/meta_token_matches/meta_copy_token`
   由正式 Meta 提供。`formal_meta_diagnostic_probe.l1` 已同时验证未闭合注释的
-  诊断码 `1` 和首个 token 的文本匹配。下一步继续将 AST `parent/origin` 信息
-  从 ABI 薄包装扩展为正式的源模型。
+  诊断码 `1`、首个 token 的文本匹配和首个 AST 节点的 origin。RawAst 节点现在
+  保存来源 source/span，复制与重定位会保留或调整来源，`ast_from_text` 会把
+  临时 source 重新绑定到父 source；下一步继续补齐更高层的 origin 传播规则。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
