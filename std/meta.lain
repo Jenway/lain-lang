@@ -2219,7 +2219,10 @@ let meta_module_member_status = std::func(
     source: addr,
     body: addr,
 ) -> i32 {
-    if meta_ast_kind(body) != 2 || meta_ast_delimiter(body) != 123 {
+    if meta_ast_kind(body) != 2 {
+        return 3011;
+    }
+    if meta_ast_delimiter(body) != 123 {
         return 3011;
     }
     let member: addr = meta_ast_first(body);
@@ -2256,13 +2259,142 @@ let meta_module_status = std::func(
                 // form.  Its annotation and assignment tokens are part of
                 // the same Meta rule, so malformed forms receive the same
                 // stable diagnostics as the bootstrap implementation.
-                if meta_ast_is_nil(name)
-                    || meta_is_colon(source, colon) == false
-                    || meta_is_module_type(source, annotation) == false
-                    || meta_is_equals(source, equals) == false {
+                if meta_ast_is_nil(name) {
+                    return 3011;
+                }
+                if meta_is_colon(source, colon) == false {
+                    return 3011;
+                }
+                if meta_is_module_type(source, annotation) == false {
+                    return 3011;
+                }
+                if meta_is_equals(source, equals) == false {
                     return 3011;
                 }
                 let status: i32 = meta_module_member_status(source, body);
+                if status != 0 { return status; }
+            }
+        }
+        node = meta_ast_next(node);
+    }
+    return 0;
+};
+
+let meta_struct_keyword_after = std::func(
+    source: addr,
+    let_node: addr,
+) -> addr {
+    let current: addr = meta_ast_next(let_node);
+    while meta_ast_is_nil(current) == false {
+        if meta_is_struct(source, current) {
+            return current;
+        }
+        if meta_is_semicolon(source, current) {
+            return meta_ast_nil();
+        }
+        current = meta_ast_next(current);
+    }
+    return meta_ast_nil();
+};
+
+let meta_struct_next_field = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_comma(source, node) {
+        return meta_ast_next(node);
+    }
+    return meta_struct_next_field(source, meta_ast_next(node));
+};
+
+let meta_struct_field_duplicate_after = std::func(
+    source: addr,
+    name: addr,
+    candidate: addr,
+) -> i32 {
+    if meta_ast_is_nil(candidate) { return 0; }
+    let colon: addr = meta_ast_next(candidate);
+    if meta_is_colon(source, colon) {
+        if meta_name_matches(source, name, candidate) {
+            return 3008;
+        }
+    }
+    return meta_struct_field_duplicate_after(
+        source, name, meta_struct_next_field(source, colon)
+    );
+};
+
+let meta_struct_field_status = std::func(
+    source: addr,
+    body: addr,
+) -> i32 {
+    if meta_ast_kind(body) != 2 {
+        return 3002;
+    }
+    if meta_ast_delimiter(body) != 123 {
+        return 3002;
+    }
+    let field: addr = meta_ast_first(body);
+    while meta_ast_is_nil(field) == false {
+        if meta_is_comma(source, field) {
+            field = meta_ast_next(field);
+        } else {
+            let colon: addr = meta_ast_next(field);
+            let field_type: addr = meta_ast_next(colon);
+            if meta_is_colon(source, colon) == false {
+                // Keep the bootstrap rule: non-field punctuation is skipped
+                // while the declaration remains otherwise well formed.
+                field = colon;
+            } else {
+                if meta_ast_is_nil(field_type) {
+                    return 3007;
+                }
+                if meta_is_comma(source, field_type) {
+                    return 3007;
+                }
+                let duplicate_status: i32 =
+                    meta_struct_field_duplicate_after(
+                        source,
+                        field,
+                        meta_struct_next_field(source, field_type)
+                    );
+                if duplicate_status != 0 { return duplicate_status; }
+                field = meta_struct_next_field(source, field_type);
+            }
+        }
+    }
+    return 0;
+};
+
+@abi_export
+let meta_struct_status = std::func(
+    source: addr,
+    root: addr,
+) -> i32 {
+    let node: addr = meta_ast_first(root);
+    while meta_ast_is_nil(node) == false {
+        if meta_is_let(source, node) {
+            let name: addr = meta_ast_next(node);
+            let colon: addr = meta_ast_next(name);
+            let annotation: addr = meta_ast_next(colon);
+            let equals: addr = meta_ast_next(annotation);
+            let keyword: addr = meta_struct_keyword_after(source, node);
+            if meta_ast_is_nil(keyword) == false {
+                let body: addr = meta_ast_next(keyword);
+                if meta_ast_is_nil(name) {
+                    return 3004;
+                }
+                if meta_is_colon(source, colon) == false {
+                    return 3004;
+                }
+                if meta_is_type(source, annotation) == false {
+                    return 3004;
+                }
+                if meta_is_equals(source, equals) == false {
+                    return 3004;
+                }
+                let status: i32 = meta_struct_field_status(source, body);
                 if status != 0 { return status; }
             }
         }
