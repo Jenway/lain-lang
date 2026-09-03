@@ -134,6 +134,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_find_two_named_return_list",
     "meta_return_is_arithmetic",
     "meta_binding_value_is_arithmetic",
+    "meta_operator_code",
     "meta_literal_length",
     "meta_copy_literal",
     "meta_copy_source",
