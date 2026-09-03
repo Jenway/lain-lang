@@ -27,6 +27,7 @@ FIXTURES = (
     (ROOT / "scripts" / "fixtures" / "formal_call_argument_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_call_two_arguments_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_call_named_arguments_return.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_call_argument_expression.lain", "42"),
 )
 RESOLVED_IMPORT_SOURCES = (
     ROOT / "scripts" / "fixtures" / "formal_import_compile_main.lain",
@@ -63,6 +64,15 @@ def canonical(text: str) -> str:
         r"#let %value: #bits<64> = #eval \{ #return ([^\n]+) \}\n"
         r"  #return %value",
         r"#return \1",
+        normalized,
+    )
+    # Formal argument lowering materializes a compile-time argument in a
+    # local before the call.  Treat that transparent #eval temporary like the
+    # direct expression emitted by the bootstrap implementation.
+    normalized = re.sub(
+        r"#let %argument_value: #bits<64> = #eval \{ #return ([^\n]+) \}\n"
+        r"  #return #call ([^\(]+)\(%argument_value\)",
+        r"#return #call \2(\1)",
         normalized,
     )
     return normalized.strip() + "\n"

@@ -539,6 +539,23 @@ let formal_is_single_decimal_argument = std::func(
     return false;
 };
 
+let formal_is_single_arithmetic_argument = std::func(
+    source: addr,
+    arguments: addr,
+) -> bool {
+    let left: addr = raw_first(arguments);
+    let operator: addr = raw_next(left);
+    let right: addr = raw_next(operator);
+    let tail: addr = raw_next(right);
+    if formal_is_decimal(source, left)
+        && formal_is_operator(source, operator)
+        && formal_is_decimal(source, right)
+        && raw_nil(tail) {
+        return true;
+    }
+    return false;
+};
+
 let formal_is_comma = std::func(source: addr, node: addr) -> bool {
     if raw_kind(node) != 1 || raw_length(node) != 1 { return false; }
     return byte_at(source_bytes(source), raw_start(node)) == 44;
@@ -826,6 +843,9 @@ let formal_find_call_return_list = std::func(
                     if formal_is_single_decimal_argument(source, probe1) {
                         return node;
                     }
+                    if formal_is_single_arithmetic_argument(source, probe1) {
+                        return node;
+                    }
                     if formal_is_two_decimal_arguments(source, probe1) {
                         return node;
                     }
@@ -1033,6 +1053,36 @@ let formal_copy_source = std::func(
     return offset + length;
 };
 
+let formal_copy_binary_expression = std::func(
+    buffer: addr,
+    offset: i64,
+    source: addr,
+    left: addr,
+    operator: addr,
+    right: addr,
+) -> i64 {
+    let operator_value: i8 = byte_at(
+        source_bytes(source), raw_start(operator)
+    );
+    let cursor: i64 = offset;
+    if operator_value == 43 {
+        cursor = formal_copy_literal(buffer, cursor, "#add(");
+    }
+    if operator_value == 45 {
+        cursor = formal_copy_literal(buffer, cursor, "#sub(");
+    }
+    if operator_value == 42 {
+        cursor = formal_copy_literal(buffer, cursor, "#mul(");
+    }
+    if operator_value == 47 {
+        cursor = formal_copy_literal(buffer, cursor, "#div(");
+    }
+    cursor = formal_copy_source(buffer, cursor, source, left);
+    cursor = formal_copy_literal(buffer, cursor, ", ");
+    cursor = formal_copy_source(buffer, cursor, source, right);
+    return formal_copy_literal(buffer, cursor, ")");
+};
+
 let formal_copy_return_expression = std::func(
     buffer: addr,
     offset: i64,
@@ -1050,27 +1100,27 @@ let formal_copy_return_expression = std::func(
     }
     let cursor: i64 = offset;
     if arithmetic {
-        let operator_value: i8 = byte_at(source_bytes(source), raw_start(operator));
-        if operator_value == 43 {
-            cursor = formal_copy_literal(buffer, cursor, "#add(");
-        }
-        if operator_value == 45 {
-            cursor = formal_copy_literal(buffer, cursor, "#sub(");
-        }
-        if operator_value == 42 {
-            cursor = formal_copy_literal(buffer, cursor, "#mul(");
-        }
-        if operator_value == 47 {
-            cursor = formal_copy_literal(buffer, cursor, "#div(");
-        }
-        cursor = formal_copy_source(buffer, cursor, source, value);
-        cursor = formal_copy_literal(buffer, cursor, ", ");
-        cursor = formal_copy_source(buffer, cursor, source, right);
-        cursor = formal_copy_literal(buffer, cursor, ")");
+        cursor = formal_copy_binary_expression(
+            buffer, cursor, source, value, operator, right
+        );
     } else {
         cursor = formal_copy_source(buffer, cursor, source, value);
     }
     return cursor;
+};
+
+let formal_copy_argument_expression = std::func(
+    buffer: addr,
+    offset: i64,
+    source: addr,
+    arguments: addr,
+) -> i64 {
+    let left: addr = raw_first(arguments);
+    let operator: addr = raw_next(left);
+    let right: addr = raw_next(operator);
+    return formal_copy_binary_expression(
+        buffer, offset, source, left, operator, right
+    );
 };
 
 let formal_copy_parameter_return_expression = std::func(
@@ -1219,10 +1269,11 @@ let formal_emit_call = std::func(
 let formal_emit_call_arg = std::func(
     source: addr,
     callee: addr,
-    argument: addr,
+    arguments: addr,
     callee_return: addr,
     parameter: addr,
 ) -> unit {
+    let argument: addr = raw_first(arguments);
     let buffer: addr = allocate_pages(512);
     let offset: i64 = formal_copy_literal(buffer, 0, "#proc ");
     offset = formal_copy_source(buffer, offset, source, callee);
@@ -1236,11 +1287,33 @@ let formal_emit_call_arg = std::func(
     );
     offset = formal_copy_literal(
         buffer, offset,
-        "\n}\n\n#proc main() -> #bits<64> {\n  #return #call "
+        "\n}\n\n#proc main() -> #bits<64> {\n"
     );
+    if formal_is_single_arithmetic_argument(source, arguments) {
+        // Evaluate a non-scalar argument through LAIN-IR #eval before passing
+        // it to the generated procedure.  The formal library remains a
+        // compiler of syntax; seed remains the evaluator.
+        offset = formal_copy_literal(
+            buffer, offset,
+            "  #let %argument_value: #bits<64> = #eval { #return "
+        );
+        offset = formal_copy_argument_expression(
+            buffer, offset, source, arguments
+        );
+        offset = formal_copy_literal(
+            buffer, offset,
+            " }\n  #return #call "
+        );
+    } else {
+        offset = formal_copy_literal(buffer, offset, "  #return #call ");
+    }
     offset = formal_copy_source(buffer, offset, source, callee);
     offset = formal_copy_literal(buffer, offset, "(");
-    offset = formal_copy_source(buffer, offset, source, argument);
+    if formal_is_single_arithmetic_argument(source, arguments) {
+        offset = formal_copy_literal(buffer, offset, "%argument_value");
+    } else {
+        offset = formal_copy_source(buffer, offset, source, argument);
+    }
     offset = formal_copy_literal(buffer, offset, ")\n}\n");
     artifact_write(buffer, offset);
 };
@@ -1466,7 +1539,7 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
                     if raw_nil(parameter) == false {
                         if raw_nil(parameter_return) == false {
                             formal_emit_call_arg(
-                                source, callee, argument, parameter_return,
+                                source, callee, arguments, parameter_return,
                                 parameter
                             );
                             return true;
