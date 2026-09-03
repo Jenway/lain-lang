@@ -481,8 +481,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `meta_source_data/meta_source_byte_at`，source handle、词法和解析入口
   经过 `meta_source_new/meta_source_lex/meta_source_parse`；名称比较、成员
   路径拆分、路径前后缀匹配以及当前 lowering 所需的 token 分类也已下沉到
-  `std::meta` 的源模型函数。下一步继续将 source span、token 序列和解析结果
-  从 ABI 薄包装扩展为正式的源模型。
+  `std::meta` 的源模型函数；正式 Meta 现在还导出 source length、token kind、
+  span、next 和 token count。下一步继续将 token 序列和解析结果从 ABI 薄包装
+  扩展为正式的源模型。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
