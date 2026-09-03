@@ -535,6 +535,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `meta_copy_two_parameter_expression` 负责；ABI 入口仅保留转发。
 - [x] 局部绑定初始化值的复制以及算术 `#eval` 包装已由正式 Meta 的
   `meta_copy_binding_value` 负责；局部绑定回归保持通过。
+- [x] 局部绑定 lowering 的完整物理文本已由正式 Meta 的
+  `meta_copy_local_binding` 生成；ABI 入口只负责缓冲区和 artifact 输出。
 - [x] 局部绑定返回值是否直接返回绑定名已由正式 Meta 的
   `meta_binding_returns_name` 判断；ABI 入口不再读取分号语义。
 - [x] `if` 条件的真假和比较运算物化已由正式 Meta 的
