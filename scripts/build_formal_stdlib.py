@@ -145,6 +145,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_find_if_body",
     "meta_find_if_token",
     "meta_if_then_group",
+    "meta_if_supported",
     "meta_find_body_after",
     "meta_find_main_body",
     "meta_find_named_body",
