@@ -49,6 +49,7 @@ FORMAL_TWO_LOCAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_two_local_
 FORMAL_MODULE_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_module_call_return.lain"
 FORMAL_MISSING_MODULE_MEMBER_PROBE = ROOT / "scripts" / "fixtures" / "formal_missing_module_member.lain"
 FORMAL_STRUCT_FIELD_PROBE = ROOT / "scripts" / "fixtures" / "formal_struct_field_return.lain"
+FORMAL_STRUCT_TWO_FIELDS_PROBE = ROOT / "scripts" / "fixtures" / "formal_struct_two_fields_return.lain"
 FORMAL_MISSING_STRUCT_FIELD_PROBE = ROOT / "scripts" / "fixtures" / "formal_missing_struct_field.lain"
 FORMAL_IF_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_if_true_return.lain", "42"),
@@ -762,6 +763,38 @@ def verify_abi_entry() -> None:
     if missing_struct_field_probe.returncode == 0 or "5203" not in missing_struct_field_diagnostics:
         raise RuntimeError(
             "formal stdlib missing struct field did not retain diagnostic 5203"
+        )
+    struct_two_fields_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_STRUCT_TWO_FIELDS_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if struct_two_fields_probe.returncode:
+        detail = struct_two_fields_probe.stderr.strip() or struct_two_fields_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib two-field struct lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    struct_two_fields_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if struct_two_fields_run.returncode or struct_two_fields_run.stdout.strip() != "2":
+        detail = struct_two_fields_run.stderr.strip() or struct_two_fields_run.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib two-field struct artifact did not run as 2"
+            + (f": {detail}" if detail else "")
         )
     for if_fixture, expected in FORMAL_IF_PROBES:
         if_probe = subprocess.run(
