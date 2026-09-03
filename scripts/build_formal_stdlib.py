@@ -86,6 +86,11 @@ ABI_ENTRIES = (
 ABI_SUPPORT_ENTRIES = (
     "meta_ast_count",
     "meta_is_import",
+    "meta_import_is_std",
+    "meta_import_target",
+    "meta_source_count",
+    "meta_source_path_data",
+    "meta_source_path_length",
     "meta_parse_result_new",
     "meta_parse_result_source",
     "meta_parse_result_tokens",
