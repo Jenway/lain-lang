@@ -132,6 +132,8 @@ ABI_SUPPORT_ENTRIES = (
     "meta_find_local_scalar_binding",
     "meta_find_named_return_list",
     "meta_find_two_named_return_list",
+    "meta_return_is_arithmetic",
+    "meta_binding_value_is_arithmetic",
     "meta_is_import",
     "meta_import_is_std",
     "meta_import_target",
