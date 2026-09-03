@@ -32,6 +32,18 @@ OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib.l1"
 MANIFEST = ROOT / "build" / "lainir" / "formal_stdlib.manifest.json"
 ABI_PROBE = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"
 ABI_OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib_abi_output.l1"
+META_DIAGNOSTIC_PROBE = (
+    ROOT / "scripts" / "fixtures" / "formal_meta_diagnostic_probe.l1"
+)
+META_UNTERMINATED_COMMENT = (
+    ROOT / "scripts" / "fixtures" / "formal_meta_unterminated_comment.lain"
+)
+META_DIAGNOSTIC_BUNDLE = (
+    ROOT / "build" / "lainir" / "formal_meta_diagnostic_probe.l1"
+)
+META_DIAGNOSTIC_OUTPUT = (
+    ROOT / "build" / "lainir" / "formal_meta_diagnostic_output.l1"
+)
 FORMAL_CONSTANT_PROBE = ROOT / "scripts" / "fixtures" / "formal_constant_return.lain"
 FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain"
 FORMAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_return.lain"
@@ -1012,6 +1024,46 @@ def verify_abi_entry() -> None:
         )
 
 
+def verify_meta_diagnostics() -> None:
+    run(
+        [
+            sys.executable,
+            BUNDLER,
+            "-o",
+            META_DIAGNOSTIC_BUNDLE,
+            CORE,
+            OUTPUT,
+            META_DIAGNOSTIC_PROBE,
+        ]
+    )
+    result = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(META_DIAGNOSTIC_BUNDLE),
+            "main",
+            str(META_DIAGNOSTIC_OUTPUT),
+            str(META_UNTERMINATED_COMMENT),
+            str(FORMAL_CONSTANT_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            "formal Meta diagnostic probe failed"
+            + (f": {detail}" if detail else "")
+        )
+    if not META_DIAGNOSTIC_OUTPUT.exists():
+        raise RuntimeError("formal Meta diagnostic probe produced no artifact")
+    if META_DIAGNOSTIC_OUTPUT.read_text(encoding="utf-8") != "status=1\n":
+        raise RuntimeError(
+            "formal Meta diagnostic probe did not return lexical status 1"
+        )
+
+
 def sources() -> tuple[Path, ...]:
     return tuple(
         sorted(
@@ -1086,6 +1138,7 @@ def main() -> int:
             "formal stdlib ABI entries missing: " + ", ".join(missing)
         )
     verify_abi_entry()
+    verify_meta_diagnostics()
     fingerprint = source_fingerprint(paths)
     write_manifest(paths, fingerprint)
     print(f"{OUTPUT.relative_to(ROOT)}")
