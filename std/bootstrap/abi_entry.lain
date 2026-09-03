@@ -185,28 +185,6 @@ let formal_is_decimal = std::func(source: addr, node: addr) -> bool {
     return formal_meta.meta_is_decimal(source, node);
 };
 
-let formal_is_single_decimal_argument = std::func(
-    source: addr,
-    arguments: addr,
-) -> bool {
-    return formal_meta.meta_is_single_decimal_argument(source, arguments);
-};
-
-let formal_is_single_arithmetic_argument = std::func(
-    source: addr,
-    arguments: addr,
-) -> bool {
-    return formal_meta.meta_is_single_arithmetic_argument(
-        source, arguments
-    );
-};
-
-let formal_is_single_name_argument = std::func(
-    arguments: addr,
-) -> bool {
-    return formal_meta.meta_is_single_name_argument(arguments);
-};
-
 let formal_is_comma = std::func(source: addr, node: addr) -> bool {
     return formal_meta.meta_is_comma(source, node);
 };
@@ -869,12 +847,10 @@ let formal_emit_call_arg = std::func(
     if raw_nil(local_binding) == false {
         local_name = raw_next(local_binding);
     }
-    let local_argument: bool = false;
-    if raw_nil(local_name) == false {
-        if formal_name_matches(source, argument, local_name) {
-            local_argument = true;
-        }
-    }
+    let argument_mode: i32 = formal_meta.meta_call_argument_mode(
+        source, arguments, local_binding
+    );
+    let local_argument: bool = argument_mode == 3;
     let buffer: addr = allocate_pages(512);
     let offset: i64 = formal_copy_literal(buffer, 0, "#proc ");
     offset = formal_copy_source(buffer, offset, source, callee);
@@ -890,7 +866,7 @@ let formal_emit_call_arg = std::func(
         buffer, offset,
         "\n}\n\n#proc main() -> #bits<64> {\n"
     );
-    if formal_is_single_arithmetic_argument(source, arguments) {
+    if argument_mode == 2 {
         // Evaluate a non-scalar argument through LAIN-IR #eval before passing
         // it to the generated procedure.  The formal library remains a
         // compiler of syntax; seed remains the evaluator.
@@ -919,7 +895,7 @@ let formal_emit_call_arg = std::func(
     }
     offset = formal_copy_source(buffer, offset, source, callee);
     offset = formal_copy_literal(buffer, offset, "(");
-    if formal_is_single_arithmetic_argument(source, arguments) {
+    if argument_mode == 2 {
         offset = formal_copy_literal(buffer, offset, "%argument_value");
     } else {
         if local_argument {
@@ -1249,21 +1225,12 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
         let callee_return: addr = formal_find_return_list(
             source, raw_first(callee_body)
         );
-        let argument_supported: bool = false;
-        if formal_is_single_decimal_argument(source, arguments) {
-            argument_supported = true;
-        }
-        if formal_is_single_arithmetic_argument(source, arguments) {
-            argument_supported = true;
-        }
-        if raw_nil(local_binding) == false {
-            if formal_name_matches(
-                source, argument, raw_next(local_binding)
-            ) {
-                argument_supported = true;
-            }
-        }
-        if raw_nil(argument) == false && argument_supported {
+        let argument_mode: i32 = formal_meta.meta_call_argument_mode(
+            source, arguments, local_binding
+        );
+        let argument_supported: bool = argument_mode != 0;
+        if raw_nil(argument) == false {
+            if argument_supported {
             let parameter_group: addr = formal_find_named_parameter_group(
                 source, function_scope, callee_name
             );
@@ -1283,6 +1250,7 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
                         }
                     }
                 }
+            }
             }
         }
         if raw_nil(callee_body) == false {
