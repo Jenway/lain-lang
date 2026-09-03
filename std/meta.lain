@@ -891,10 +891,12 @@ let meta_is_single_arithmetic_argument = std::func(
     let operator: addr = meta_ast_next(left);
     let right: addr = meta_ast_next(operator);
     let tail: addr = meta_ast_next(right);
-    return meta_is_decimal(source, left)
+    if meta_is_decimal(source, left)
         && meta_is_operator(source, operator)
-        && meta_is_decimal(source, right)
-        && meta_ast_is_nil(tail);
+        && meta_is_decimal(source, right) {
+        if meta_ast_is_nil(tail) { return true; }
+    }
+    return false;
 };
 
 @abi_export
@@ -957,10 +959,143 @@ let meta_is_arithmetic_group = std::func(
     let operator: addr = meta_ast_next(left);
     let right: addr = meta_ast_next(operator);
     let tail: addr = meta_ast_next(right);
-    return meta_is_decimal(source, left)
+    if meta_is_decimal(source, left)
         && meta_is_operator(source, operator)
-        && meta_is_decimal(source, right)
-        && meta_ast_is_nil(tail);
+        && meta_is_decimal(source, right) {
+        if meta_ast_is_nil(tail) { return true; }
+    }
+    return false;
+};
+
+@abi_export
+let meta_is_unit_return = std::func(source: addr, node: addr) -> bool {
+    if meta_is_return(source, node) {
+        return meta_is_semicolon(source, meta_ast_next(node));
+    }
+    return false;
+};
+
+@abi_export
+let meta_find_return_list = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_return(source, node) {
+        let value: addr = meta_ast_next(node);
+        if meta_is_arithmetic_group(source, value) {
+            if meta_is_semicolon(source, meta_ast_next(value)) {
+                return node;
+            }
+        }
+        if meta_is_decimal(source, value) {
+            let operator: addr = meta_ast_next(value);
+            if meta_is_semicolon(source, operator) { return node; }
+            if meta_is_operator(source, operator) {
+                let right: addr = meta_ast_next(operator);
+                if meta_is_decimal(source, right) {
+                    if meta_is_semicolon(
+                        source, meta_ast_next(right)
+                    ) { return node; }
+                }
+            }
+        }
+    }
+    return meta_find_return_list(source, meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_unit_return_list = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_unit_return(source, node) { return node; }
+    return meta_find_unit_return_list(source, meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_unit_return_body = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_ast_kind(node) == 2
+        && meta_ast_delimiter(node) == 123 {
+        let value: addr = meta_find_unit_return_list(
+            source, meta_ast_first(node)
+        );
+        if meta_ast_is_nil(value) == false { return value; }
+    }
+    return meta_find_unit_return_body(source, meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_parameter_return_list = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_return(source, node) {
+        let value: addr = meta_ast_next(node);
+        let operator: addr = meta_ast_next(value);
+        let right: addr = meta_ast_next(operator);
+        if meta_ast_kind(value) == 1 {
+            if meta_is_operator(source, operator) {
+                if meta_is_decimal(source, right) {
+                    if meta_is_semicolon(
+                        source, meta_ast_next(right)
+                    ) { return node; }
+                }
+            }
+        }
+    }
+    return meta_find_parameter_return_list(source, meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_two_parameter_return_list = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_return(source, node) {
+        let left: addr = meta_ast_next(node);
+        let operator: addr = meta_ast_next(left);
+        let right: addr = meta_ast_next(operator);
+        if meta_ast_kind(left) == 1 {
+            if meta_ast_kind(right) == 1 {
+                if meta_is_operator(source, operator) {
+                    if meta_is_decimal(source, left) == false {
+                        if meta_is_decimal(source, right) == false {
+                            if meta_is_semicolon(
+                                source, meta_ast_next(right)
+                            ) { return node; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return meta_find_two_parameter_return_list(
+        source, meta_ast_next(node)
+    );
+};
+
+@abi_export
+let meta_find_return_body = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_ast_kind(node) == 2
+        && meta_ast_delimiter(node) == 123 {
+        let value: addr = meta_find_return_list(
+            source, meta_ast_first(node)
+        );
+        if meta_ast_is_nil(value) == false { return value; }
+    }
+    return meta_find_return_body(source, meta_ast_next(node));
 };
 
 // Token classification is part of the formal source model.  The numeric
