@@ -529,6 +529,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `meta_copy_call_argument` 生成；十进制、算术参数和局部绑定参数均保持原有回归。
 - [x] 双参数函数调用的完整物理文本已由正式 Meta 的
   `meta_copy_call_two_arguments` 生成；双参数回归保持通过。
+- [x] 双局部绑定作为双参数调用实参时的完整物理文本已由正式 Meta 的
+  `meta_copy_call_two_local_arguments` 生成；双局部调用回归保持通过。
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。
