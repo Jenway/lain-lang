@@ -234,6 +234,55 @@ let meta_source_parse = std::func(
     return meta_source_parse_foreign(source, tokens);
 };
 
+// ParseResultV1 is an opaque seed-owned handle.  Its fixed layout is private
+// to this module: source @0, token head @8, AST root @16, status @24.  Using a
+// handle keeps the ABI independent from aggregate-return lowering in the
+// current formal compiler while preserving one source/token/root tuple.
+@foreign(c, link_name = "bootstrap.allocate-pages")
+let meta_allocate_pages_foreign = std::func(size: i64) -> addr;
+
+@abi_export
+let meta_allocate_pages = std::func(size: i64) -> addr {
+    return meta_allocate_pages_foreign(size);
+};
+
+@abi_export
+let meta_parse_result_new = std::func(data: addr, length: i64) -> addr {
+    let source: addr = meta_source_new(data, length);
+    let tokens: addr = meta_source_lex(source);
+    let root: addr = meta_source_parse(source, tokens);
+    let result: addr = meta_allocate_pages(32);
+    std::store_bits(64, result + 0, source as usize);
+    std::store_bits(64, result + 8, tokens as usize);
+    std::store_bits(64, result + 16, root as usize);
+    std::store_bits(32, result + 24, 0);
+    return result;
+};
+
+@abi_export
+let meta_parse_result_source = std::func(result: addr) -> addr {
+    let value: addr = std::load_bits(64, result + 0);
+    return value;
+};
+
+@abi_export
+let meta_parse_result_tokens = std::func(result: addr) -> addr {
+    let value: addr = std::load_bits(64, result + 8);
+    return value;
+};
+
+@abi_export
+let meta_parse_result_root = std::func(result: addr) -> addr {
+    let value: addr = std::load_bits(64, result + 16);
+    return value;
+};
+
+@abi_export
+let meta_parse_result_status = std::func(result: addr) -> i32 {
+    let value: i32 = std::load_bits(32, result + 24);
+    return value;
+};
+
 @foreign(c, link_name = "tool_source_length")
 let meta_source_length_foreign = std::func(source: addr) -> i64;
 
