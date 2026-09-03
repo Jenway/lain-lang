@@ -75,6 +75,7 @@ ABI_ENTRIES = (
     "lain_std_lower",
 )
 ABI_SUPPORT_ENTRIES = (
+    "meta_ast_count",
     "syntax_units_build",
     "syntax_index_count",
     "syntax_index_entry",
