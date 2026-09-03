@@ -1,8 +1,12 @@
 #extern #proc bootstrap.source-data(i64 %index) -> addr;
 #extern #proc bootstrap.source-length(i64 %index) -> i64;
 #extern #proc meta_parse_result_new(addr %data, i64 %length) -> addr;
+#extern #proc meta_parse_result_source(addr %result) -> addr;
+#extern #proc meta_parse_result_tokens(addr %result) -> addr;
 #extern #proc meta_parse_result_status(addr %result) -> i32;
 #extern #proc meta_parse_result_release(addr %result) -> #unit;
+#extern #proc meta_token_count(addr %token) -> i64;
+#extern #proc meta_token_matches(addr %source, addr %token, addr %text, i64 %length) -> i1;
 #extern #proc bootstrap.artifact-begin() -> #unit;
 #extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
 #extern #proc bootstrap.artifact-finish() -> #unit;
@@ -13,9 +17,27 @@
   #let %result: #addr = #call meta_parse_result_new(%data, %length)
   #let %status: #bits<32> = #call meta_parse_result_status(%result)
   #call meta_parse_result_release(%result)
+  #let %valid_data: #addr = #call bootstrap.source-data(1)
+  #let %valid_length: #bits<64> = #call bootstrap.source-length(1)
+  #let %valid_result: #addr = #call meta_parse_result_new(%valid_data, %valid_length)
+  #let %valid_source: #addr = #call meta_parse_result_source(%valid_result)
+  #let %valid_tokens: #addr = #call meta_parse_result_tokens(%valid_result)
+  #let %token_ok: #bits<1> = #call meta_token_matches(
+    %valid_source, %valid_tokens, "let", 3
+  )
+  #let %token_count: #bits<64> = #call meta_token_count(%valid_tokens)
+  #call meta_parse_result_release(%valid_result)
   #call bootstrap.artifact-begin()
   #if #eq(%status, 1) {
-    #call bootstrap.artifact-write-literal("status=1\n")
+    #if #eq(%token_ok, 1) {
+      #if #gt(%token_count, 0) {
+        #call bootstrap.artifact-write-literal("status=1 token=1\n")
+      } else {
+        #call bootstrap.artifact-write-literal("status=1 token=1 count=0\n")
+      }
+    } else {
+      #call bootstrap.artifact-write-literal("status=1 token=0\n")
+    }
   } else {
     #call bootstrap.artifact-write-literal("status=unexpected\n")
   }
