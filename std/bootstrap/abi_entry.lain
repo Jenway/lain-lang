@@ -576,23 +576,7 @@ let formal_resolve_callee_body = std::func(
     root: addr,
     callee: addr,
 ) -> addr {
-    let dot: i64 = formal_path_dot(source, callee);
-    if dot < raw_length(callee) {
-        let module_body: addr = formal_find_module_body(
-            source, raw_first(root), callee, dot
-        );
-        if raw_nil(module_body) == false {
-            let member: addr = formal_find_module_member(
-                source, raw_first(module_body), callee, dot
-            );
-            if raw_nil(member) == false {
-                return formal_find_first_group_after(
-                    source, raw_next(member)
-                );
-            }
-        }
-    }
-    return formal_find_named_body(source, raw_first(root), callee);
+    return formal_meta.meta_resolve_callee_body(source, root, callee);
 };
 
 let formal_resolve_callee_name = std::func(
@@ -600,19 +584,7 @@ let formal_resolve_callee_name = std::func(
     root: addr,
     callee: addr,
 ) -> addr {
-    let dot: i64 = formal_path_dot(source, callee);
-    if dot < raw_length(callee) {
-        let module_body: addr = formal_find_module_body(
-            source, raw_first(root), callee, dot
-        );
-        if raw_nil(module_body) == false {
-            let member: addr = formal_find_module_member(
-                source, raw_first(module_body), callee, dot
-            );
-            if raw_nil(member) == false { return raw_next(member); }
-        }
-    }
-    return callee;
+    return formal_meta.meta_resolve_callee_name(source, root, callee);
 };
 
 let formal_resolve_function_scope = std::func(
@@ -620,21 +592,7 @@ let formal_resolve_function_scope = std::func(
     root: addr,
     callee: addr,
 ) -> addr {
-    let dot: i64 = formal_path_dot(source, callee);
-    if dot < raw_length(callee) {
-        let module_body: addr = formal_find_module_body(
-            source, raw_first(root), callee, dot
-        );
-        if raw_nil(module_body) == false {
-            let member: addr = formal_find_module_member(
-                source, raw_first(module_body), callee, dot
-            );
-            if raw_nil(member) == false {
-                return raw_first(module_body);
-            }
-        }
-    }
-    return raw_first(root);
+    return formal_meta.meta_resolve_function_scope(source, root, callee);
 };
 
 let formal_find_local_scalar_binding = std::func(
@@ -724,22 +682,11 @@ let formal_find_two_named_return_list = std::func(
 };
 
 let formal_find_body_after = std::func(source: addr, node: addr) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if raw_kind(node) == 2 {
-        if raw_delimiter(node) == 123 { return node; }
-    }
-    return formal_find_body_after(source, raw_next(node));
+    return formal_meta.meta_find_body_after(node);
 };
 
 let formal_find_main_body = std::func(source: addr, node: addr) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if formal_is_let(source, node) {
-        let name: addr = raw_next(node);
-        if formal_is_main(source, name) {
-            return formal_find_body_after(source, raw_next(name));
-        }
-    }
-    return formal_find_main_body(source, raw_next(node));
+    return formal_meta.meta_find_main_body(source, node);
 };
 
 let formal_find_named_body = std::func(
@@ -747,25 +694,14 @@ let formal_find_named_body = std::func(
     node: addr,
     wanted: addr,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if formal_is_let(source, node) {
-        let name: addr = raw_next(node);
-        if formal_name_matches(source, name, wanted) {
-            return formal_find_body_after(source, raw_next(name));
-        }
-    }
-    return formal_find_named_body(source, raw_next(node), wanted);
+    return formal_meta.meta_find_named_body(source, node, wanted);
 };
 
 let formal_find_parameter_group_after = std::func(
     source: addr,
     node: addr,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if raw_kind(node) == 2 {
-        if raw_delimiter(node) == 40 { return node; }
-    }
-    return formal_find_parameter_group_after(source, raw_next(node));
+    return formal_meta.meta_find_parameter_group_after(node);
 };
 
 let formal_find_named_parameter_group = std::func(
@@ -773,73 +709,27 @@ let formal_find_named_parameter_group = std::func(
     node: addr,
     wanted: addr,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if formal_is_let(source, node) {
-        let name: addr = raw_next(node);
-        if formal_name_matches(source, name, wanted) {
-            return formal_find_parameter_group_after(source, raw_next(name));
-        }
-    }
-    return formal_find_named_parameter_group(source, raw_next(node), wanted);
+    return formal_meta.meta_find_named_parameter_group(
+        source, node, wanted
+    );
 };
 
 let formal_second_parameter = std::func(source: addr, group: addr) -> addr {
-    let first: addr = raw_first(group);
-    let colon: addr = raw_next(first);
-    let type_name: addr = raw_next(colon);
-    let comma: addr = raw_next(type_name);
-    if formal_is_comma(source, comma) { return raw_next(comma); }
-    return ast_nil();
+    return formal_meta.meta_second_parameter(source, group);
 };
 
 let formal_find_call_return_list = std::func(
     source: addr,
     node: addr,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if formal_is_return(source, node) {
-        let callee: addr = raw_next(node);
-        if raw_kind(callee) == 1 {
-            let probe1: addr = raw_next(callee);
-            if raw_kind(probe1) == 2 {
-                if raw_delimiter(probe1) == 40 {
-                    if raw_nil(raw_first(probe1)) {
-                        return node;
-                    }
-                    if formal_is_single_decimal_argument(source, probe1) {
-                        return node;
-                    }
-                    if formal_is_single_arithmetic_argument(source, probe1) {
-                        return node;
-                    }
-                    if formal_is_single_name_argument(probe1) {
-                        return node;
-                    }
-                    if formal_is_two_decimal_arguments(source, probe1) {
-                        return node;
-                    }
-                    if formal_is_two_name_arguments(source, probe1) {
-                        return node;
-                    }
-                }
-            }
-        }
-    }
-    return formal_find_call_return_list(source, raw_next(node));
+    return formal_meta.meta_find_call_return_list(source, node);
 };
 
 let formal_find_call_return_body = std::func(
     source: addr,
     node: addr,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if raw_kind(node) == 2 {
-        if raw_delimiter(node) == 123 {
-            let value: addr = formal_find_call_return_list(source, raw_first(node));
-            if raw_nil(value) == false { return value; }
-        }
-    }
-    return formal_find_call_return_body(source, raw_next(node));
+    return formal_meta.meta_find_call_return_body(source, node);
 };
 
 let formal_is_if = std::func(source: addr, node: addr) -> bool {

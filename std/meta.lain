@@ -1184,6 +1184,213 @@ let meta_if_then_group = std::func(
     return candidate;
 };
 
+@abi_export
+let meta_find_body_after = std::func(
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_ast_kind(node) == 2
+        && meta_ast_delimiter(node) == 123 {
+        return node;
+    }
+    return meta_find_body_after(meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_main_body = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_let(source, node) {
+        let name: addr = meta_ast_next(node);
+        if meta_is_main(source, name) {
+            return meta_find_body_after(meta_ast_next(name));
+        }
+    }
+    return meta_find_main_body(source, meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_named_body = std::func(
+    source: addr,
+    node: addr,
+    wanted: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_let(source, node) {
+        let name: addr = meta_ast_next(node);
+        if meta_name_matches(source, name, wanted) {
+            return meta_find_body_after(meta_ast_next(name));
+        }
+    }
+    return meta_find_named_body(source, meta_ast_next(node), wanted);
+};
+
+@abi_export
+let meta_find_parameter_group_after = std::func(
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_ast_kind(node) == 2
+        && meta_ast_delimiter(node) == 40 {
+        return node;
+    }
+    return meta_find_parameter_group_after(meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_named_parameter_group = std::func(
+    source: addr,
+    node: addr,
+    wanted: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_let(source, node) {
+        let name: addr = meta_ast_next(node);
+        if meta_name_matches(source, name, wanted) {
+            return meta_find_parameter_group_after(meta_ast_next(name));
+        }
+    }
+    return meta_find_named_parameter_group(
+        source, meta_ast_next(node), wanted
+    );
+};
+
+@abi_export
+let meta_second_parameter = std::func(
+    source: addr,
+    group: addr,
+) -> addr {
+    let first: addr = meta_ast_first(group);
+    let colon: addr = meta_ast_next(first);
+    let type_name: addr = meta_ast_next(colon);
+    let comma: addr = meta_ast_next(type_name);
+    if meta_is_comma(source, comma) { return meta_ast_next(comma); }
+    return meta_ast_nil();
+};
+
+@abi_export
+let meta_find_call_return_list = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_return(source, node) {
+        let callee: addr = meta_ast_next(node);
+        if meta_ast_kind(callee) == 1 {
+            let arguments: addr = meta_ast_next(callee);
+            if meta_ast_kind(arguments) == 2
+                && meta_ast_delimiter(arguments) == 40 {
+                if meta_ast_is_nil(meta_ast_first(arguments)) {
+                    return node;
+                }
+                if meta_is_single_decimal_argument(source, arguments) {
+                    return node;
+                }
+                if meta_is_single_arithmetic_argument(source, arguments) {
+                    return node;
+                }
+                if meta_is_single_name_argument(arguments) {
+                    return node;
+                }
+                if meta_is_two_decimal_arguments(source, arguments) {
+                    return node;
+                }
+                if meta_is_two_name_arguments(source, arguments) {
+                    return node;
+                }
+            }
+        }
+    }
+    return meta_find_call_return_list(source, meta_ast_next(node));
+};
+
+@abi_export
+let meta_find_call_return_body = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_ast_kind(node) == 2
+        && meta_ast_delimiter(node) == 123 {
+        let value: addr = meta_find_call_return_list(
+            source, meta_ast_first(node)
+        );
+        if meta_ast_is_nil(value) == false { return value; }
+    }
+    return meta_find_call_return_body(source, meta_ast_next(node));
+};
+
+@abi_export
+let meta_resolve_callee_body = std::func(
+    source: addr,
+    root: addr,
+    callee: addr,
+) -> addr {
+    let dot: i64 = meta_path_dot(source, callee);
+    if dot < meta_ast_length(callee) {
+        let module_body: addr = meta_find_module_body(
+            source, meta_ast_first(root), callee, dot
+        );
+        if meta_ast_is_nil(module_body) == false {
+            let member: addr = meta_find_module_member(
+                source, meta_ast_first(module_body), callee, dot
+            );
+            if meta_ast_is_nil(member) == false {
+                return meta_find_first_group_after(meta_ast_next(member));
+            }
+        }
+    }
+    return meta_find_named_body(source, meta_ast_first(root), callee);
+};
+
+@abi_export
+let meta_resolve_callee_name = std::func(
+    source: addr,
+    root: addr,
+    callee: addr,
+) -> addr {
+    let dot: i64 = meta_path_dot(source, callee);
+    if dot < meta_ast_length(callee) {
+        let module_body: addr = meta_find_module_body(
+            source, meta_ast_first(root), callee, dot
+        );
+        if meta_ast_is_nil(module_body) == false {
+            let member: addr = meta_find_module_member(
+                source, meta_ast_first(module_body), callee, dot
+            );
+            if meta_ast_is_nil(member) == false {
+                return meta_ast_next(member);
+            }
+        }
+    }
+    return callee;
+};
+
+@abi_export
+let meta_resolve_function_scope = std::func(
+    source: addr,
+    root: addr,
+    callee: addr,
+) -> addr {
+    let dot: i64 = meta_path_dot(source, callee);
+    if dot < meta_ast_length(callee) {
+        let module_body: addr = meta_find_module_body(
+            source, meta_ast_first(root), callee, dot
+        );
+        if meta_ast_is_nil(module_body) == false {
+            let member: addr = meta_find_module_member(
+                source, meta_ast_first(module_body), callee, dot
+            );
+            if meta_ast_is_nil(member) == false {
+                return meta_ast_first(module_body);
+            }
+        }
+    }
+    return meta_ast_first(root);
+};
+
 // Token classification is part of the formal source model.  The numeric
 // word codes are private to this module; exported predicates keep callers
 // independent from the spelling table and from the raw token layout.
