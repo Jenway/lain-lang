@@ -588,6 +588,24 @@ let formal_is_operator = std::func(source: addr, node: addr) -> bool {
     return false;
 };
 
+let formal_is_arithmetic_group = std::func(
+    source: addr,
+    node: addr,
+) -> bool {
+    if raw_kind(node) != 2 || raw_delimiter(node) != 40 { return false; }
+    let left: addr = raw_first(node);
+    let operator: addr = raw_next(left);
+    let right: addr = raw_next(operator);
+    let tail: addr = raw_next(right);
+    if formal_is_decimal(source, left)
+        && formal_is_operator(source, operator)
+        && formal_is_decimal(source, right)
+        && raw_nil(tail) {
+        return true;
+    }
+    return false;
+};
+
 let formal_is_semicolon = std::func(source: addr, node: addr) -> bool {
     if raw_kind(node) != 1 || raw_length(node) != 1 { return false; }
     return byte_at(source_bytes(source), raw_start(node)) == 59;
@@ -598,6 +616,7 @@ let formal_return_is_arithmetic = std::func(
     return_node: addr,
 ) -> bool {
     let value: addr = raw_next(return_node);
+    if formal_is_arithmetic_group(source, value) { return true; }
     let operator: addr = raw_next(value);
     let right: addr = raw_next(operator);
     if formal_is_operator(source, operator) {
@@ -610,6 +629,9 @@ let formal_find_return_list = std::func(source: addr, node: addr) -> addr {
     if raw_nil(node) { return ast_nil(); }
     if formal_is_return(source, node) {
         let value: addr = raw_next(node);
+        if formal_is_arithmetic_group(source, value) {
+            if formal_is_semicolon(source, raw_next(value)) { return node; }
+        }
         if formal_is_decimal(source, value) {
             let operator: addr = raw_next(value);
             if formal_is_semicolon(source, operator) { return node; }
@@ -1090,6 +1112,16 @@ let formal_copy_return_expression = std::func(
     return_node: addr,
 ) -> i64 {
     let value: addr = raw_next(return_node);
+    if formal_is_arithmetic_group(source, value) {
+        return formal_copy_binary_expression(
+            buffer,
+            offset,
+            source,
+            raw_first(value),
+            raw_next(raw_first(value)),
+            raw_next(raw_next(raw_first(value))),
+        );
+    }
     let operator: addr = raw_next(value);
     let right: addr = raw_next(operator);
     let arithmetic: bool = false;
