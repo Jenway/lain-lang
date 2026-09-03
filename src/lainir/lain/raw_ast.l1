@@ -31,9 +31,9 @@
 //   source start @8, source length @16, first child @24,
 //   last child @32, next sibling @40, token kind @48,
 //   child count @56, origin source @64, origin start @72,
-//   origin length @80, origin present @88.
+//   origin length @80, origin present @88, syntax context @96.
 #proc raw_node_nil() -> addr {
-  #let %nil: addr = #call bootstrap.allocate-pages(96)
+  #let %nil: addr = #call bootstrap.allocate-pages(112)
   #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
   // The sentinel is a real RawAst node.  Keep every pointer slot self-linked
   // so callers may safely ask for first/last/next before checking raw_is_nil.
@@ -51,6 +51,7 @@
   #store 0, #lea(base=%nil, idx=0, scale=0, offset=72)
   #store 0, #lea(base=%nil, idx=0, scale=0, offset=80)
   #store 0, #lea(base=%nil, idx=0, scale=0, offset=88)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=96)
   #return %nil
 }
 
@@ -61,7 +62,7 @@
 #proc raw_node_new(
   i32 %kind, i32 %delimiter, i64 %start, i64 %length, i32 %token_kind
 ) -> addr {
-  #let %node: addr = #call bootstrap.allocate-pages(96)
+  #let %node: addr = #call bootstrap.allocate-pages(112)
   #let %nil: addr = #call raw_node_nil()
   #store %kind, #lea(base=%node, idx=0, scale=0, offset=0)
   #store %delimiter, #lea(base=%node, idx=0, scale=0, offset=4)
@@ -76,6 +77,7 @@
   #store 0, #lea(base=%node, idx=0, scale=0, offset=72)
   #store 0, #lea(base=%node, idx=0, scale=0, offset=80)
   #store 0, #lea(base=%node, idx=0, scale=0, offset=88)
+  #store 0, #lea(base=%node, idx=0, scale=0, offset=96)
   #return %node
 }
 
@@ -135,6 +137,29 @@
   #store %length, #lea(base=%node, idx=0, scale=0, offset=80)
   #store 1, #lea(base=%node, idx=0, scale=0, offset=88)
   #return
+}
+
+#proc raw_node_syntax_context(addr %node) -> i64 {
+  #return #load[i64](#lea(base=%node, idx=0, scale=0, offset=96))
+}
+
+#proc raw_node_set_syntax_context(addr %node, i64 %context) -> #unit {
+  #store %context, #lea(base=%node, idx=0, scale=0, offset=96)
+  #return
+}
+
+// A context handle owns a monotonically increasing ID sequence.  ID zero is
+// the parser's source context; generated syntax obtains positive IDs here.
+#proc raw_syntax_context_new() -> addr {
+  #let %context: addr = #call bootstrap.allocate-pages(16)
+  #store 1, #lea(base=%context, idx=0, scale=0, offset=0)
+  #return %context
+}
+
+#proc raw_syntax_context_fresh(addr %context) -> i64 {
+  #let %value: i64 = #load[i64](#lea(base=%context, idx=0, scale=0, offset=0))
+  #store #add(%value, 1), #lea(base=%context, idx=0, scale=0, offset=0)
+  #return %value
 }
 
 #proc raw_node_set_next(addr %node, addr %next) -> #unit {
@@ -490,6 +515,9 @@
       #call raw_node_origin_length(%node)
     )
   }
+  #call raw_node_set_syntax_context(
+    %copy, #call raw_node_syntax_context(%node)
+  )
   #let %child: addr = #call raw_node_first(%node)
   #loop children {
     #if #call raw_is_nil(%child) { #break children }
