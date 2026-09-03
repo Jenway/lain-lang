@@ -495,7 +495,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   Meta 提供，入口只保留转发；`if/else` 形状、分支 body 和嵌套 if 搜索也
   已由 Meta 提供；函数体、参数组、调用返回和 module member 的 callee
   解析也已由 Meta 提供；局部标量绑定和带参数返回值的搜索也已由 Meta 提供。
-  下一步继续将 token 序列内容、解析诊断和 parent/origin 信息从 ABI 薄包装扩展
+  return/绑定是否需要编译期算术求值的判断也已由 Meta 提供，入口只保留
+  输出过程。下一步继续将 token 序列内容、解析诊断和 parent/origin 信息从 ABI 薄包装扩展
   为正式的源模型。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
