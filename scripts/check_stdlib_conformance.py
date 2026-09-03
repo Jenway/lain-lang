@@ -28,6 +28,7 @@ FIXTURES = (
     (ROOT / "scripts" / "fixtures" / "formal_call_two_arguments_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_call_named_arguments_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_call_argument_expression.lain", "42"),
+    (ROOT / "scripts" / "fixtures" / "formal_parenthesized_return.lain", "42"),
 )
 RESOLVED_IMPORT_SOURCES = (
     ROOT / "scripts" / "fixtures" / "formal_import_compile_main.lain",
