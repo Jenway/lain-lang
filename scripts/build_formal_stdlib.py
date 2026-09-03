@@ -85,6 +85,7 @@ ABI_ENTRIES = (
 )
 ABI_SUPPORT_ENTRIES = (
     "meta_ast_count",
+    "meta_is_import",
     "meta_parse_result_new",
     "meta_parse_result_source",
     "meta_parse_result_tokens",
