@@ -6,9 +6,6 @@
 // keeps the replacement boundary explicit instead of silently falling back to
 // compiler-core code.
 
-@foreign(c, link_name = "lain_ast_v1_nil")
-let ast_nil = std::func() -> addr;
-
 @foreign(c, link_name = "lain_meta_pass_result_v1_new")
 let pass_result_new = std::func(
     status: i32,
@@ -29,6 +26,10 @@ let source_data = std::func(index: i64) -> addr;
 let source_length = std::func(index: i64) -> i64;
 
 let formal_meta: Module = import("std::meta");
+
+let ast_nil = std::func() -> addr {
+    return formal_meta.meta_ast_nil();
+};
 
 let allocate_pages = std::func(size: i64) -> addr {
     return formal_meta.meta_allocate_pages(size);
@@ -643,34 +644,14 @@ let formal_find_first_group_after = std::func(
     source: addr,
     node: addr,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if raw_kind(node) == 2 {
-        if raw_delimiter(node) == 123 { return node; }
-    }
-    return formal_find_first_group_after(source, raw_next(node));
+    return formal_meta.meta_find_first_group_after(node);
 };
 
 let formal_is_module_binding = std::func(
     source: addr,
     node: addr,
 ) -> bool {
-    if formal_is_let(source, node) == false { return false; }
-    let name: addr = raw_next(node);
-    let colon: addr = raw_next(name);
-    let type_name: addr = raw_next(colon);
-    let equals: addr = raw_next(type_name);
-    let std_name: addr = raw_next(equals);
-    let first_colon: addr = raw_next(std_name);
-    let second_colon: addr = raw_next(first_colon);
-    let constructor: addr = raw_next(second_colon);
-    let body: addr = raw_next(constructor);
-    if formal_is_module_type(source, type_name) == false { return false; }
-    if formal_is_equals(source, equals) == false { return false; }
-    if raw_kind(std_name) != 1 || raw_length(std_name) != 3 { return false; }
-    if formal_is_module_constructor(source, constructor) == false {
-        return false;
-    }
-    return raw_kind(body) == 2 && raw_delimiter(body) == 123;
+    return formal_meta.meta_is_module_binding(source, node);
 };
 
 let formal_find_module_body = std::func(
@@ -679,15 +660,7 @@ let formal_find_module_body = std::func(
     path: addr,
     dot: i64,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if formal_is_let(source, node) {
-        let name: addr = raw_next(node);
-        if formal_name_matches_path_prefix(source, name, path, dot)
-            && formal_is_module_binding(source, node) {
-            return formal_find_first_group_after(source, raw_next(name));
-        }
-    }
-    return formal_find_module_body(source, raw_next(node), path, dot);
+    return formal_meta.meta_find_module_body(source, node, path, dot);
 };
 
 let formal_find_module_member = std::func(
@@ -696,68 +669,21 @@ let formal_find_module_member = std::func(
     path: addr,
     dot: i64,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if formal_is_let(source, node) {
-        let name: addr = raw_next(node);
-        if formal_name_matches_path_suffix(source, name, path, dot) {
-            if raw_nil(formal_find_first_group_after(source, raw_next(name))) == false {
-                return node;
-            }
-        }
-    }
-    return formal_find_module_member(source, raw_next(node), path, dot);
+    return formal_meta.meta_find_module_member(source, node, path, dot);
 };
 
 let formal_find_struct_binding = std::func(
     source: addr,
     node: addr,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if formal_is_let(source, node) {
-        let name: addr = raw_next(node);
-        let colon: addr = raw_next(name);
-        let type_name: addr = raw_next(colon);
-        let equals: addr = raw_next(type_name);
-        let std_name: addr = raw_next(equals);
-        let first_colon: addr = raw_next(std_name);
-        let second_colon: addr = raw_next(first_colon);
-        let constructor: addr = raw_next(second_colon);
-        let body: addr = raw_next(constructor);
-        if formal_is_type_keyword(source, type_name)
-            && formal_is_equals(source, equals)
-            && raw_kind(std_name) == 1
-            && raw_length(std_name) == 3
-            && formal_is_struct_constructor(source, constructor)
-            && raw_kind(body) == 2
-            && raw_delimiter(body) == 123 {
-            return node;
-        }
-    }
-    return formal_find_struct_binding(source, raw_next(node));
+    return formal_meta.meta_find_struct_binding(source, node);
 };
 
 let formal_find_record_binding = std::func(
     source: addr,
     node: addr,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if formal_is_let(source, node) {
-        let name: addr = raw_next(node);
-        let colon: addr = raw_next(name);
-        let type_name: addr = raw_next(colon);
-        let equals: addr = raw_next(type_name);
-        let constructor: addr = raw_next(equals);
-        let body: addr = formal_find_first_group_after(
-            source, raw_next(name)
-        );
-        if raw_kind(type_name) == 1
-            && formal_name_matches(source, type_name, constructor)
-            && raw_kind(body) == 2
-            && raw_delimiter(body) == 123 {
-            return node;
-        }
-    }
-    return formal_find_record_binding(source, raw_next(node));
+    return formal_meta.meta_find_record_binding(source, node);
 };
 
 let formal_find_member_return = std::func(
@@ -766,23 +692,8 @@ let formal_find_member_return = std::func(
     record_name: addr,
     field_name: addr,
 ) -> addr {
-    if raw_nil(node) { return ast_nil(); }
-    if formal_is_return(source, node) {
-        let value: addr = raw_next(node);
-        let dot: i64 = formal_path_dot(source, value);
-        if dot < raw_length(value)
-            && formal_name_matches_path_prefix(
-                source, record_name, value, dot
-            )
-            && formal_name_matches_path_suffix(
-                source, field_name, value, dot
-            )
-            && formal_is_semicolon(source, raw_next(value)) {
-            return node;
-        }
-    }
-    return formal_find_member_return(
-        source, raw_next(node), record_name, field_name
+    return formal_meta.meta_find_member_return(
+        source, node, record_name, field_name
     );
 };
 
