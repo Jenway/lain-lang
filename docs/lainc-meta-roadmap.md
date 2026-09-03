@@ -521,6 +521,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。
+- [x] 带一个或两个函数参数的算术 return 物化已由正式 Meta 的
+  `meta_copy_parameter_return_expression` 和
+  `meta_copy_two_parameter_expression` 负责；ABI 入口仅保留转发。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
