@@ -2166,6 +2166,88 @@ let meta_copy_source = std::func(
     return offset + length;
 };
 
+@abi_export
+let meta_copy_struct_field = std::func(
+    buffer: addr,
+    offset: i64,
+    source: addr,
+    record_binding: addr,
+    struct_body: addr,
+    selected_field: addr,
+) -> i64 {
+    let record_name: addr = meta_ast_next(record_binding);
+    let record_body: addr = meta_find_first_group_after(
+        meta_ast_next(record_name)
+    );
+    let first_value: addr = meta_ast_next(
+        meta_ast_next(meta_ast_first(record_body))
+    );
+    let record_comma: addr = meta_ast_next(first_value);
+    let second_value: addr = meta_ast_nil();
+    if meta_is_comma(source, record_comma) {
+        let second_field: addr = meta_ast_next(record_comma);
+        second_value = meta_ast_next(meta_ast_next(second_field));
+    }
+    let storage_size: i64 = meta_struct_storage_size(
+        source, struct_body
+    );
+    let selected_offset: i64 = meta_struct_field_offset(
+        source, struct_body, selected_field
+    );
+    let has_second: bool = storage_size == 16;
+    let cursor: i64 = meta_copy_literal(
+        buffer,
+        offset,
+        "#proc main() -> #bits<64> {\n  #let %",
+    );
+    cursor = meta_copy_source(buffer, cursor, source, record_name);
+    if has_second {
+        cursor = meta_copy_literal(
+            buffer, cursor,
+            ": addr = #alloca(16)\n  #store "
+        );
+    } else {
+        cursor = meta_copy_literal(
+            buffer, cursor,
+            ": addr = #alloca(8)\n  #store "
+        );
+    }
+    cursor = meta_copy_source(buffer, cursor, source, first_value);
+    cursor = meta_copy_literal(buffer, cursor, ", #lea(base=%");
+    cursor = meta_copy_source(buffer, cursor, source, record_name);
+    cursor = meta_copy_literal(
+        buffer, cursor,
+        ", idx=0, scale=0, offset=0)\n",
+    );
+    if has_second {
+        cursor = meta_copy_literal(buffer, cursor, "  #store ");
+        cursor = meta_copy_source(buffer, cursor, source, second_value);
+        cursor = meta_copy_literal(buffer, cursor, ", #lea(base=%");
+        cursor = meta_copy_source(buffer, cursor, source, record_name);
+        cursor = meta_copy_literal(
+            buffer, cursor,
+            ", idx=0, scale=0, offset=8)\n",
+        );
+    }
+    cursor = meta_copy_literal(
+        buffer, cursor,
+        "  #return #load[#bits<64>](#lea(base=%",
+    );
+    cursor = meta_copy_source(buffer, cursor, source, record_name);
+    if selected_offset == 8 {
+        cursor = meta_copy_literal(
+            buffer, cursor,
+            ", idx=0, scale=0, offset=8))\n}\n",
+        );
+    } else {
+        cursor = meta_copy_literal(
+            buffer, cursor,
+            ", idx=0, scale=0, offset=0))\n}\n",
+        );
+    }
+    return cursor;
+};
+
 // Lower a binary arithmetic expression into LAIN-IR text.  The operator
 // spelling and both operand spans are supplied by Meta, so the ABI entry does
 // not need to interpret expression tokens while emitting the result.

@@ -172,6 +172,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_literal_length",
     "meta_copy_literal",
     "meta_copy_source",
+    "meta_copy_struct_field",
     "meta_copy_binary_expression",
     "meta_copy_return_expression",
     "meta_copy_argument_expression",
