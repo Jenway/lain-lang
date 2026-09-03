@@ -779,6 +779,53 @@ let formal_name_matches = std::func(
     return true;
 };
 
+let formal_is_equals = std::func(source: addr, node: addr) -> bool {
+    if raw_kind(node) != 1 || raw_length(node) != 1 { return false; }
+    return byte_at(source_bytes(source), raw_start(node)) == 61;
+};
+
+let formal_find_local_scalar_binding = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_let(source, node) {
+        let name: addr = raw_next(node);
+        let equals: addr = raw_next(name);
+        let value: addr = raw_next(equals);
+        let semicolon: addr = raw_next(value);
+        if raw_kind(name) == 1
+            && formal_is_equals(source, equals)
+            && formal_is_decimal(source, value)
+            && formal_is_semicolon(source, semicolon) {
+            return node;
+        }
+    }
+    return formal_find_local_scalar_binding(source, raw_next(node));
+};
+
+let formal_find_named_return_list = std::func(
+    source: addr,
+    node: addr,
+    name: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_return(source, node) {
+        let value: addr = raw_next(node);
+        let operator: addr = raw_next(value);
+        let right: addr = raw_next(operator);
+        if formal_name_matches(source, value, name) {
+            if formal_is_semicolon(source, operator) { return node; }
+            if formal_is_operator(source, operator)
+                && formal_is_decimal(source, right)
+                && formal_is_semicolon(source, raw_next(right)) {
+                return node;
+            }
+        }
+    }
+    return formal_find_named_return_list(source, raw_next(node), name);
+};
+
 let formal_find_body_after = std::func(source: addr, node: addr) -> addr {
     if raw_nil(node) { return ast_nil(); }
     if raw_kind(node) == 2 {
@@ -1254,6 +1301,37 @@ let formal_emit_constant = std::func(source: addr, return_node: addr) -> unit {
     artifact_write(buffer, offset);
 };
 
+let formal_emit_local_binding = std::func(
+    source: addr,
+    binding: addr,
+    return_node: addr,
+    name: addr,
+) -> unit {
+    let value: addr = raw_next(raw_next(raw_next(binding)));
+    let buffer: addr = allocate_pages(512);
+    let offset: i64 = formal_copy_literal(
+        buffer,
+        0,
+        "#proc main() -> #bits<64> {\n  #let %",
+    );
+    offset = formal_copy_source(buffer, offset, source, name);
+    offset = formal_copy_literal(buffer, offset, ": #bits<64> = ");
+    offset = formal_copy_source(buffer, offset, source, value);
+    offset = formal_copy_literal(buffer, offset, "\n  #return ");
+    let return_value: addr = raw_next(return_node);
+    let operator: addr = raw_next(return_value);
+    if formal_is_semicolon(source, operator) {
+        offset = formal_copy_literal(buffer, offset, "%");
+        offset = formal_copy_source(buffer, offset, source, name);
+    } else {
+        offset = formal_copy_parameter_return_expression(
+            buffer, offset, source, return_node, name
+        );
+    }
+    offset = formal_copy_literal(buffer, offset, "\n}\n");
+    artifact_write(buffer, offset);
+};
+
 let formal_emit_unit = std::func() -> unit {
     let buffer: addr = allocate_pages(128);
     let offset: i64 = formal_copy_literal(
@@ -1475,6 +1553,21 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
     if raw_nil(unit_return) == false {
         formal_emit_unit();
         return true;
+    }
+    let local_binding: addr = formal_find_local_scalar_binding(
+        source, raw_first(main_body)
+    );
+    if raw_nil(local_binding) == false {
+        let local_name: addr = raw_next(local_binding);
+        let local_return: addr = formal_find_named_return_list(
+            source, raw_first(main_body), local_name
+        );
+        if raw_nil(local_return) == false {
+            formal_emit_local_binding(
+                source, local_binding, local_return, local_name
+            );
+            return true;
+        }
     }
     let if_node: addr = formal_find_if_list(source, raw_first(main_body));
     if raw_nil(if_node) == false {
