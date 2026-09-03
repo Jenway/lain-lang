@@ -489,8 +489,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   生命周期结束。该 release 是一次性操作，调用方不得继续使用该 handle。
   AST 的 last/parent/new/append/replace/remove/from-text/write 也已统一经
   `lain_ast_v1_*` 稳定接口由正式 Meta 导出；当前仍是 seed-owned 操作句柄，
-  Meta 不复制第二套节点布局。下一步继续将 token 序列内容、解析诊断和
-  parent/origin 信息从 ABI 薄包装扩展为正式的源模型。
+  Meta 不复制第二套节点布局；module/record 的绑定、成员和 return 搜索也已
+  由正式 Meta 实现，入口只保留兼容适配器。下一步继续将 token 序列内容、
+  解析诊断和 parent/origin 信息从 ABI 薄包装扩展为正式的源模型。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
