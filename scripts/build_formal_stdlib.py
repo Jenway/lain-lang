@@ -76,6 +76,9 @@ ABI_ENTRIES = (
 )
 ABI_SUPPORT_ENTRIES = (
     "meta_ast_count",
+    "meta_source_new",
+    "meta_source_lex",
+    "meta_source_parse",
     "syntax_units_build",
     "syntax_index_count",
     "syntax_index_entry",
