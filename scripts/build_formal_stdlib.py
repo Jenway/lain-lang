@@ -48,6 +48,8 @@ FORMAL_TWO_LOCAL_BINDING_PROBE = ROOT / "scripts" / "fixtures" / "formal_two_loc
 FORMAL_TWO_LOCAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_two_local_call_return.lain"
 FORMAL_MODULE_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_module_call_return.lain"
 FORMAL_MISSING_MODULE_MEMBER_PROBE = ROOT / "scripts" / "fixtures" / "formal_missing_module_member.lain"
+FORMAL_STRUCT_FIELD_PROBE = ROOT / "scripts" / "fixtures" / "formal_struct_field_return.lain"
+FORMAL_MISSING_STRUCT_FIELD_PROBE = ROOT / "scripts" / "fixtures" / "formal_missing_struct_field.lain"
 FORMAL_IF_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_if_true_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_if_false_return.lain", "42"),
@@ -707,6 +709,59 @@ def verify_abi_entry() -> None:
     if missing_module_member_probe.returncode == 0 or "5203" not in missing_module_member_diagnostics:
         raise RuntimeError(
             "formal stdlib missing module member did not retain diagnostic 5203"
+        )
+    struct_field_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_STRUCT_FIELD_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if struct_field_probe.returncode:
+        detail = struct_field_probe.stderr.strip() or struct_field_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib struct-field lowering failed"
+            + (f": {detail}" if detail else "")
+        )
+    struct_field_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if struct_field_run.returncode or struct_field_run.stdout.strip() != "42":
+        detail = struct_field_run.stderr.strip() or struct_field_run.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib struct-field artifact did not run as 42"
+            + (f": {detail}" if detail else "")
+        )
+    missing_struct_field_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_MISSING_STRUCT_FIELD_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    missing_struct_field_diagnostics = (
+        missing_struct_field_probe.stdout + missing_struct_field_probe.stderr
+    )
+    if missing_struct_field_probe.returncode == 0 or "5203" not in missing_struct_field_diagnostics:
+        raise RuntimeError(
+            "formal stdlib missing struct field did not retain diagnostic 5203"
         )
     for if_fixture, expected in FORMAL_IF_PROBES:
         if_probe = subprocess.run(
