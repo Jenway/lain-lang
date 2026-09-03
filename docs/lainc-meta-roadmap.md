@@ -526,6 +526,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `meta_copy_two_parameter_expression` 负责；ABI 入口仅保留转发。
 - [x] 局部绑定初始化值的复制以及算术 `#eval` 包装已由正式 Meta 的
   `meta_copy_binding_value` 负责；局部绑定回归保持通过。
+- [x] `if` 条件的真假和比较运算物化已由正式 Meta 的
+  `meta_copy_if_condition` 负责；四种比较分支回归保持通过。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
