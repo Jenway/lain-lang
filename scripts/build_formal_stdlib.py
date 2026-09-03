@@ -48,6 +48,14 @@ FORMAL_IF_PROBES = (
 )
 FORMAL_IF_WITHOUT_ELSE_PROBE = ROOT / "scripts" / "fixtures" / "formal_if_without_else.lain"
 FORMAL_INVALID_PROBE = ROOT / "scripts" / "fixtures" / "formal_invalid_return.lain"
+FORMAL_UNRESOLVED_IMPORT_PROBE = (
+    ROOT / "scripts" / "fixtures" / "formal_unresolved_import.lain"
+)
+FORMAL_RESOLVED_IMPORT_PROBES = (
+    ROOT / "scripts" / "fixtures" / "formal_import_main.lain",
+    ROOT / "scripts" / "fixtures" / "formal_import_target.lain",
+    ROOT / "scripts" / "fixtures" / "formal_import_leaf.lain",
+)
 FORMAL_EXTRA_ARITHMETIC_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_subtraction_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_multiplication_return.lain", "42"),
@@ -65,6 +73,7 @@ ABI_SUPPORT_ENTRIES = (
     "syntax_index_count",
     "syntax_index_entry",
     "syntax_index_imports",
+    "syntax_index_import_status",
 )
 
 
@@ -473,10 +482,10 @@ def verify_abi_entry() -> None:
             str(SEED_RUN),
             "interpreter",
             str(ABI_PROBE),
-            "compiler_compile_library",
+            "syntax_index_import_status",
             str(ABI_OUTPUT),
             str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
-            str(ROOT / "std" / "meta.lain"),
+            str(FORMAL_UNRESOLVED_IMPORT_PROBE),
         ],
         cwd=ROOT,
         capture_output=True,
@@ -486,6 +495,29 @@ def verify_abi_entry() -> None:
     if import_probe.returncode == 0 or "4101" not in import_diagnostics:
         raise RuntimeError(
             "formal stdlib syntax-index did not report an unresolved import"
+        )
+    resolved_import_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "syntax_index_import_status",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            *(str(path) for path in FORMAL_RESOLVED_IMPORT_PROBES),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if resolved_import_probe.returncode:
+        detail = (
+            resolved_import_probe.stderr.strip()
+            or resolved_import_probe.stdout.strip()
+        )
+        raise RuntimeError(
+            "formal stdlib syntax-index rejected a resolved local import"
+            + (f": {detail}" if detail else "")
         )
 
 

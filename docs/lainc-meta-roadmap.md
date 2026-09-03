@@ -484,8 +484,10 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
   实现仍待接入这些入口；当前正式库会解析全部输入源，并为每个源生成真实的
   syntax-index 条目（源句柄、根节点、首节点、节点数、import 数和根 span）；
-  expand 已通过 `std::meta` 库函数调用 AstApi 复制首个根节点，并对未解析 import 返回 `4101`；import
-  目标解析和循环依赖诊断仍待迁移。elaborate 仍只传递句柄，lower 对常量
+  expand 已通过 `std::meta` 库函数调用 AstApi 复制首个根节点；正式库已在
+  `syntax_index_import_status` 中按 source path 解析本地 import 和
+  `std::...` 逻辑路径，缺失普通模块返回 `4101`，循环依赖诊断仍待迁移。
+  elaborate 仍只传递句柄，lower 对常量
   `return`、简单二元算术、同源无参数/一至两参数调用和布尔/数值比较双分支已生成可执行
   artifact；`unit` 空返回已加入正式库验证，
   其余形式明确返回 `5203`。
