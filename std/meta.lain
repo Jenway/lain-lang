@@ -409,11 +409,12 @@ let meta_parse_result_new = std::func(data: addr, length: i64) -> addr {
     let source: addr = meta_source_new(data, length);
     let tokens: addr = meta_source_lex(source);
     let root: addr = meta_source_parse(source, tokens);
+    let first_diagnostic: addr = meta_source_diagnostics(source);
     let result: addr = meta_allocate_pages(32);
     std::store_bits(64, result + 0, source as usize);
     std::store_bits(64, result + 8, tokens as usize);
     std::store_bits(64, result + 16, root as usize);
-    std::store_bits(32, result + 24, 0);
+    std::store_bits(32, result + 24, meta_diagnostic_code(first_diagnostic));
     return result;
 };
 
@@ -443,12 +444,19 @@ let meta_parse_result_status = std::func(result: addr) -> i32 {
 
 @abi_export
 let meta_parse_result_release = std::func(result: addr) -> unit {
+    let source: addr = meta_parse_result_source(result);
     let current: addr = meta_parse_result_tokens(result);
     while meta_token_kind(current) != 0 {
         let next: addr = meta_token_next(current);
         meta_release_trivia(meta_token_leading_trivia(current));
         meta_release_pages(current);
         current = next;
+    }
+    let diagnostic: addr = meta_source_diagnostics(source);
+    while meta_diagnostic_code(diagnostic) != 0 {
+        let next: addr = meta_diagnostic_next(diagnostic);
+        meta_release_pages(diagnostic);
+        diagnostic = next;
     }
     meta_release_pages(result);
 };
@@ -530,6 +538,97 @@ let meta_release_trivia = std::func(trivia: addr) -> unit {
 let meta_token_count = std::func(token: addr) -> i64 {
     if meta_token_kind(token) == 0 { return 0; }
     return 1 + meta_token_count(meta_token_next(token));
+};
+
+// DiagnosticView exposes the source parser's lossless diagnostic chain through
+// Meta.  Message storage is source-owned/static; only the diagnostic records
+// themselves are released with a ParseResult handle.
+@foreign(c, link_name = "tool_source_diagnostics")
+let meta_source_diagnostics_foreign = std::func(source: addr) -> addr;
+
+@abi_export
+let meta_source_diagnostics = std::func(source: addr) -> addr {
+    return meta_source_diagnostics_foreign(source);
+};
+
+@foreign(c, link_name = "tool_source_diagnostic_count")
+let meta_source_diagnostic_count_foreign = std::func(source: addr) -> i64;
+
+@abi_export
+let meta_source_diagnostic_count = std::func(source: addr) -> i64 {
+    return meta_source_diagnostic_count_foreign(source);
+};
+
+@foreign(c, link_name = "tool_diag_severity")
+let meta_diagnostic_severity_foreign = std::func(diagnostic: addr) -> i32;
+
+@abi_export
+let meta_diagnostic_severity = std::func(diagnostic: addr) -> i32 {
+    return meta_diagnostic_severity_foreign(diagnostic);
+};
+
+@foreign(c, link_name = "tool_diag_code")
+let meta_diagnostic_code_foreign = std::func(diagnostic: addr) -> i32;
+
+@abi_export
+let meta_diagnostic_code = std::func(diagnostic: addr) -> i32 {
+    return meta_diagnostic_code_foreign(diagnostic);
+};
+
+@foreign(c, link_name = "tool_diag_start")
+let meta_diagnostic_start_foreign = std::func(diagnostic: addr) -> i64;
+
+@abi_export
+let meta_diagnostic_start = std::func(diagnostic: addr) -> i64 {
+    return meta_diagnostic_start_foreign(diagnostic);
+};
+
+@foreign(c, link_name = "tool_diag_length")
+let meta_diagnostic_length_foreign = std::func(diagnostic: addr) -> i64;
+
+@abi_export
+let meta_diagnostic_length = std::func(diagnostic: addr) -> i64 {
+    return meta_diagnostic_length_foreign(diagnostic);
+};
+
+@foreign(c, link_name = "tool_diag_line")
+let meta_diagnostic_line_foreign = std::func(diagnostic: addr) -> i64;
+
+@abi_export
+let meta_diagnostic_line = std::func(diagnostic: addr) -> i64 {
+    return meta_diagnostic_line_foreign(diagnostic);
+};
+
+@foreign(c, link_name = "tool_diag_column")
+let meta_diagnostic_column_foreign = std::func(diagnostic: addr) -> i64;
+
+@abi_export
+let meta_diagnostic_column = std::func(diagnostic: addr) -> i64 {
+    return meta_diagnostic_column_foreign(diagnostic);
+};
+
+@foreign(c, link_name = "tool_diag_message")
+let meta_diagnostic_message_foreign = std::func(diagnostic: addr) -> addr;
+
+@abi_export
+let meta_diagnostic_message = std::func(diagnostic: addr) -> addr {
+    return meta_diagnostic_message_foreign(diagnostic);
+};
+
+@foreign(c, link_name = "tool_diag_message_length")
+let meta_diagnostic_message_length_foreign = std::func(diagnostic: addr) -> i64;
+
+@abi_export
+let meta_diagnostic_message_length = std::func(diagnostic: addr) -> i64 {
+    return meta_diagnostic_message_length_foreign(diagnostic);
+};
+
+@foreign(c, link_name = "tool_diag_next")
+let meta_diagnostic_next_foreign = std::func(diagnostic: addr) -> addr;
+
+@abi_export
+let meta_diagnostic_next = std::func(diagnostic: addr) -> addr {
+    return meta_diagnostic_next_foreign(diagnostic);
 };
 
 // Import path matching is a Meta rule. The source table remains supplied by
