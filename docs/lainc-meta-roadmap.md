@@ -540,6 +540,9 @@ fixture 使用编译后的 artifact 运行。
   比较了可解析本地 import、未解析 import（`4101`）和循环依赖（`4103`）的结果。
 - [~] 已将一致性比较扩展到本地 import 的成功、未解析诊断和循环依赖诊断；
   完整 AST、所有诊断种类和依赖对象内容仍待补齐。
+- [x] `scripts/check_meta_ast_conformance.py` 让第一代 RawAst 和正式
+  `std::meta` 解析同一份源码，并通过各自的 AST 访问接口输出 canonical AST；
+  当前 fixture 已逐字节一致。
 - [ ] 对 func、struct、module、import、type factory、generic、effect、bounds、
   attribute 和 `#eval` 各设正负例；ownership 暂不纳入必需矩阵。
 - [ ] 差异报告精确到第一个 pass、节点 span 和 IR procedure。
@@ -699,7 +702,8 @@ T07 [x] 删除 compiler core 对 module/struct 的直接字符串判断
 T08 [~] 接通由 bootstrap stdlib 生成的真实 #eval 路径；入口、预算和运行回归已通过，
     完整 L1 Unit 生成及结果 owner 转交仍在补齐
 T09 [x] 用该路径编译正式 std/meta AST 核心
-T10 [ ] 建立第一代/正式标准库的第一个 canonical AST 对照测试
+T10 [x] 建立第一代/正式标准库的第一个 canonical AST 对照测试；
+    `scripts/check_meta_ast_conformance.py` 已逐字节比较两边输出
 
 这十项完成后，按下面的主线继续推进，不再增加第三套编译器的功能：
 

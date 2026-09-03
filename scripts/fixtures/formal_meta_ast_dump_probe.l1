@@ -1,0 +1,80 @@
+#extern #proc bootstrap.source-count() -> i64;
+#extern #proc bootstrap.source-data(i64 %index) -> addr;
+#extern #proc bootstrap.source-length(i64 %index) -> i64;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(i8 %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+#extern #proc meta_parse_result_new(addr %data, i64 %length) -> addr;
+#extern #proc meta_parse_result_source(addr %result) -> addr;
+#extern #proc meta_parse_result_root(addr %result) -> addr;
+#extern #proc meta_parse_result_release(addr %result) -> #unit;
+#extern #proc meta_ast_is_nil(addr %node) -> i1;
+#extern #proc meta_ast_kind(addr %node) -> i32;
+#extern #proc meta_ast_delimiter(addr %node) -> i32;
+#extern #proc meta_ast_first(addr %node) -> addr;
+#extern #proc meta_ast_next(addr %node) -> addr;
+#extern #proc meta_ast_start(addr %node) -> i64;
+#extern #proc meta_ast_length(addr %node) -> i64;
+#extern #proc meta_source_data(addr %source) -> addr;
+#extern #proc meta_source_byte_at(addr %data, i64 %index) -> i8;
+
+#proc dump_bytes(addr %data, i64 %start, i64 %length) -> #unit {
+  #let %index: #bits<64> = 0
+  #loop bytes {
+    #if #ge(%index, %length) { #break bytes }
+    #call bootstrap.artifact-write-byte(
+      #call meta_source_byte_at(%data, #add(%start, %index))
+    )
+    %index: #bits<64> = #add(%index, 1)
+    #continue bytes
+  }
+}
+
+#proc dump_node(addr %source, addr %node) -> #unit {
+  #let %data: #addr = #call meta_source_data(%source)
+  #if #eq(#call meta_ast_kind(%node), 1) {
+    #call bootstrap.artifact-write-literal("(atom ")
+    #call dump_bytes(
+      %data,
+      #call meta_ast_start(%node),
+      #call meta_ast_length(%node)
+    )
+    #call bootstrap.artifact-write-byte(41)
+    #return
+  }
+  #if #eq(#call meta_ast_delimiter(%node), 0) {
+    #call bootstrap.artifact-write-literal("(root")
+  } else {
+    #call bootstrap.artifact-write-literal("(group ")
+    #call bootstrap.artifact-write-byte(
+      #trunc[#bits<8>](#trunc[#bits<32>](#zext[#bits<64>](
+        #call meta_ast_delimiter(%node)
+      )))
+    )
+  }
+  #let %child: #addr = #call meta_ast_first(%node)
+  #loop children {
+    #if #call meta_ast_is_nil(%child) { #break children }
+    #call bootstrap.artifact-write-byte(32)
+    #call dump_node(%source, %child)
+    %child: #addr = #call meta_ast_next(%child)
+    #continue children
+  }
+  #call bootstrap.artifact-write-byte(41)
+}
+
+#proc main() -> #bits<32> {
+  #if #eq(#call bootstrap.source-count(), 0) { #return 2 }
+  #let %data: #addr = #call bootstrap.source-data(0)
+  #let %length: #bits<64> = #call bootstrap.source-length(0)
+  #let %result: #addr = #call meta_parse_result_new(%data, %length)
+  #let %source: #addr = #call meta_parse_result_source(%result)
+  #let %root: #addr = #call meta_parse_result_root(%result)
+  #call bootstrap.artifact-begin()
+  #call dump_node(%source, %root)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call meta_parse_result_release(%result)
+  #return 0
+}
