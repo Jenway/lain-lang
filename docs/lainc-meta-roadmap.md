@@ -534,6 +534,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
 - [x] 当前 struct 字段 lowering 所需的存储大小和字段偏移已由正式 Meta
   的 `meta_struct_storage_size` / `meta_struct_field_offset` 决定；ABI 入口
   只按结果生成物理访问，单字段和双字段回归保持通过。
+- [x] struct 字段访问的可用性识别（字段类型、字段数量和对应成员返回）已由
+  正式 Meta 的 `meta_find_struct_field_access` 完成；ABI 入口不再逐字段判断。
 - [~] 每个正式库导出与 Bootstrap Standard Library ABI v1 对应的入口；
   `std/bootstrap/abi_entry.lain` 使用专用 `@abi_export` 导出五个物理符号，
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
