@@ -12,10 +12,17 @@ SEED = ROOT / "seed" / "zig-out" / "bin" / "lainir-seed.exe"
 FIRST_GENERATION = ROOT / "build" / "lainir" / "lain_compiler.l1"
 FORMAL_ABI = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"
 COMPILER_API = ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"
-FIXTURE = ROOT / "scripts" / "fixtures" / "formal_duplicate_module.lain"
+FIXTURES = (
+    (ROOT / "scripts" / "fixtures" / "formal_duplicate_module.lain", "3013"),
+    (ROOT / "scripts" / "fixtures" / "formal_duplicate_struct.lain", "3008"),
+)
 
 
-def run(compiler: Path, output: Path) -> subprocess.CompletedProcess[str]:
+def run(
+    compiler: Path,
+    output: Path,
+    fixture: Path,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             str(SEED),
@@ -24,7 +31,7 @@ def run(compiler: Path, output: Path) -> subprocess.CompletedProcess[str]:
             "compiler_compile_library",
             str(output),
             str(COMPILER_API),
-            str(FIXTURE),
+            str(fixture),
         ],
         cwd=ROOT,
         capture_output=True,
@@ -34,19 +41,21 @@ def run(compiler: Path, output: Path) -> subprocess.CompletedProcess[str]:
 
 def main() -> int:
     work = ROOT / "build" / "lainir"
-    results = (
-        ("bootstrap", FIRST_GENERATION, work / "bootstrap_duplicate_module.l1"),
-        ("formal", FORMAL_ABI, work / "formal_duplicate_module.l1"),
+    compilers = (
+        ("bootstrap", FIRST_GENERATION),
+        ("formal", FORMAL_ABI),
     )
-    for label, compiler, output in results:
-        result = run(compiler, output)
-        detail = result.stdout + result.stderr
-        if result.returncode == 0 or "3013" not in detail:
-            raise RuntimeError(
-                f"{label} Meta did not reject duplicate module member: "
-                f"{detail.strip()}"
-            )
-    print("PASS bootstrap/formal Meta module validation (3013)")
+    for fixture, expected in FIXTURES:
+        for label, compiler in compilers:
+            output = work / f"{label}_{fixture.stem}.l1"
+            result = run(compiler, output, fixture)
+            detail = result.stdout + result.stderr
+            if result.returncode == 0 or expected not in detail:
+                raise RuntimeError(
+                    f"{label} Meta did not reject {fixture.name} "
+                    f"with {expected}: {detail.strip()}"
+                )
+    print("PASS bootstrap/formal Meta module/struct validation (3013, 3008)")
     return 0
 
 
