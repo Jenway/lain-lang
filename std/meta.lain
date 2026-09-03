@@ -2683,6 +2683,80 @@ let meta_copy_call = std::func(
 };
 
 @abi_export
+let meta_copy_call_argument = std::func(
+    buffer: addr,
+    offset: i64,
+    source: addr,
+    callee: addr,
+    arguments: addr,
+    callee_return: addr,
+    parameter: addr,
+    local_binding: addr,
+) -> i64 {
+    let argument: addr = meta_ast_first(arguments);
+    let local_name: addr = meta_ast_nil();
+    if meta_ast_is_nil(local_binding) == false {
+        local_name = meta_ast_next(local_binding);
+    }
+    let argument_mode: i32 = meta_call_argument_mode(
+        source, arguments, local_binding
+    );
+    let local_argument: bool = argument_mode == 3;
+    let cursor: i64 = meta_copy_literal(buffer, offset, "#proc ");
+    cursor = meta_copy_source(buffer, cursor, source, callee);
+    cursor = meta_copy_literal(buffer, cursor, "(#bits<64> %");
+    cursor = meta_copy_source(buffer, cursor, source, parameter);
+    cursor = meta_copy_literal(
+        buffer, cursor, ") -> #bits<64> {\n  #return "
+    );
+    cursor = meta_copy_parameter_return_expression(
+        buffer, cursor, source, callee_return, parameter
+    );
+    cursor = meta_copy_literal(
+        buffer, cursor,
+        "\n}\n\n#proc main() -> #bits<64> {\n"
+    );
+    if argument_mode == 2 {
+        cursor = meta_copy_literal(
+            buffer, cursor,
+            "  #let %argument_value: #bits<64> = #eval { #return "
+        );
+        cursor = meta_copy_argument_expression(
+            buffer, cursor, source, arguments
+        );
+        cursor = meta_copy_literal(
+            buffer, cursor, " }\n  #return #call "
+        );
+    } else {
+        if local_argument {
+            cursor = meta_copy_literal(buffer, cursor, "  #let %");
+            cursor = meta_copy_source(buffer, cursor, source, local_name);
+            cursor = meta_copy_literal(buffer, cursor, ": #bits<64> = ");
+            let local_value: addr = meta_ast_next(
+                meta_ast_next(meta_ast_next(local_binding))
+            );
+            cursor = meta_copy_source(buffer, cursor, source, local_value);
+            cursor = meta_copy_literal(buffer, cursor, "\n  #return #call ");
+        } else {
+            cursor = meta_copy_literal(buffer, cursor, "  #return #call ");
+        }
+    }
+    cursor = meta_copy_source(buffer, cursor, source, callee);
+    cursor = meta_copy_literal(buffer, cursor, "(");
+    if argument_mode == 2 {
+        cursor = meta_copy_literal(buffer, cursor, "%argument_value");
+    } else {
+        if local_argument {
+            cursor = meta_copy_literal(buffer, cursor, "%");
+            cursor = meta_copy_source(buffer, cursor, source, local_name);
+        } else {
+            cursor = meta_copy_source(buffer, cursor, source, argument);
+        }
+    }
+    return meta_copy_literal(buffer, cursor, ")\n}\n");
+};
+
+@abi_export
 let meta_copy_argument_expression = std::func(
     buffer: addr,
     offset: i64,
