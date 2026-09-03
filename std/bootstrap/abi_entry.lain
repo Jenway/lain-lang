@@ -830,6 +830,38 @@ let formal_find_named_return_list = std::func(
     return formal_find_named_return_list(source, raw_next(node), name);
 };
 
+let formal_find_two_named_return_list = std::func(
+    source: addr,
+    node: addr,
+    first_name: addr,
+    second_name: addr,
+) -> addr {
+    if raw_nil(node) { return ast_nil(); }
+    if formal_is_return(source, node) {
+        let left: addr = raw_next(node);
+        let operator: addr = raw_next(left);
+        let right: addr = raw_next(operator);
+        let left_known: bool = formal_name_matches(source, left, first_name);
+        if left_known == false {
+            left_known = formal_name_matches(source, left, second_name);
+        }
+        let right_known: bool = formal_name_matches(
+            source, right, first_name
+        );
+        if right_known == false {
+            right_known = formal_name_matches(source, right, second_name);
+        }
+        if left_known && right_known
+            && formal_is_operator(source, operator)
+            && formal_is_semicolon(source, raw_next(right)) {
+            return node;
+        }
+    }
+    return formal_find_two_named_return_list(
+        source, raw_next(node), first_name, second_name
+    );
+};
+
 let formal_find_body_after = std::func(source: addr, node: addr) -> addr {
     if raw_nil(node) { return ast_nil(); }
     if raw_kind(node) == 2 {
@@ -1339,6 +1371,37 @@ let formal_emit_local_binding = std::func(
     artifact_write(buffer, offset);
 };
 
+let formal_emit_two_local_bindings = std::func(
+    source: addr,
+    first_binding: addr,
+    second_binding: addr,
+    return_node: addr,
+    first_name: addr,
+    second_name: addr,
+) -> unit {
+    let first_value: addr = raw_next(raw_next(raw_next(first_binding)));
+    let second_value: addr = raw_next(raw_next(raw_next(second_binding)));
+    let buffer: addr = allocate_pages(512);
+    let offset: i64 = formal_copy_literal(
+        buffer,
+        0,
+        "#proc main() -> #bits<64> {\n  #let %",
+    );
+    offset = formal_copy_source(buffer, offset, source, first_name);
+    offset = formal_copy_literal(buffer, offset, ": #bits<64> = ");
+    offset = formal_copy_source(buffer, offset, source, first_value);
+    offset = formal_copy_literal(buffer, offset, "\n  #let %");
+    offset = formal_copy_source(buffer, offset, source, second_name);
+    offset = formal_copy_literal(buffer, offset, ": #bits<64> = ");
+    offset = formal_copy_source(buffer, offset, source, second_value);
+    offset = formal_copy_literal(buffer, offset, "\n  #return ");
+    offset = formal_copy_two_parameter_expression(
+        buffer, offset, source, return_node, first_name, second_name
+    );
+    offset = formal_copy_literal(buffer, offset, "\n}\n");
+    artifact_write(buffer, offset);
+};
+
 let formal_emit_unit = std::func() -> unit {
     let buffer: addr = allocate_pages(128);
     let offset: i64 = formal_copy_literal(
@@ -1591,6 +1654,29 @@ let formal_lower_source = std::func(index: addr, ordinal: i64) -> bool {
     );
     if raw_nil(local_binding) == false {
         let local_name: addr = raw_next(local_binding);
+        let second_binding: addr = formal_find_local_scalar_binding(
+            source, raw_next(local_binding)
+        );
+        if raw_nil(second_binding) == false {
+            let second_name: addr = raw_next(second_binding);
+            let two_local_return: addr = formal_find_two_named_return_list(
+                source,
+                raw_first(main_body),
+                local_name,
+                second_name,
+            );
+            if raw_nil(two_local_return) == false {
+                formal_emit_two_local_bindings(
+                    source,
+                    local_binding,
+                    second_binding,
+                    two_local_return,
+                    local_name,
+                    second_name,
+                );
+                return true;
+            }
+        }
         let local_return: addr = formal_find_named_return_list(
             source, raw_first(main_body), local_name
         );
