@@ -507,8 +507,10 @@ fixture 使用编译后的 artifact 运行。
 
 - [~] `scripts/check_stdlib_conformance.py` 已把共同支持的常量、算术、无参数调用、
   单参数调用和双参数调用分别交给第一代与正式标准库；过程名哈希和透明 `#eval`
-  包装会在 canonical 比较时消除，五个样例的生成 IR 与运行值一致。
-- [ ] 将同一批 source/AST 的比较扩展到完整 AST、诊断和依赖结果。
+  包装会在 canonical 比较时消除，六个样例的生成 IR 与运行值一致；同一脚本还
+  比较了可解析本地 import、未解析 import（`4101`）和循环依赖（`4103`）的结果。
+- [~] 已将一致性比较扩展到本地 import 的成功、未解析诊断和循环依赖诊断；
+  完整 AST、所有诊断种类和依赖对象内容仍待补齐。
 - [ ] 对 func、struct、module、import、type factory、generic、effect、bounds、
   attribute 和 `#eval` 各设正负例；ownership 暂不纳入必需矩阵。
 - [ ] 差异报告精确到第一个 pass、节点 span 和 IR procedure。

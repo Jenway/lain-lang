@@ -28,6 +28,25 @@ FIXTURES = (
     (ROOT / "scripts" / "fixtures" / "formal_call_two_arguments_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_call_named_arguments_return.lain", "42"),
 )
+RESOLVED_IMPORT_SOURCES = (
+    ROOT / "scripts" / "fixtures" / "formal_import_compile_main.lain",
+    ROOT / "scripts" / "fixtures" / "formal_import_compile_leaf.lain",
+)
+IMPORT_DIAGNOSTIC_CASES = (
+    (
+        "formal_unresolved_import",
+        (ROOT / "scripts" / "fixtures" / "formal_unresolved_import.lain",),
+        4101,
+    ),
+    (
+        "formal_import_cycle",
+        (
+            ROOT / "scripts" / "fixtures" / "formal_cycle_a.lain",
+            ROOT / "scripts" / "fixtures" / "formal_cycle_b.lain",
+        ),
+        4103,
+    ),
+)
 
 
 def run(command: list[str], *, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
@@ -49,7 +68,11 @@ def canonical(text: str) -> str:
     return normalized.strip() + "\n"
 
 
-def compile_with(compiler: Path, fixture: Path, output: Path) -> None:
+def compile_sources(
+    compiler: Path,
+    sources: tuple[Path, ...],
+    output: Path,
+) -> subprocess.CompletedProcess[str]:
     result = run(
         [
             str(SEED),
@@ -58,12 +81,35 @@ def compile_with(compiler: Path, fixture: Path, output: Path) -> None:
             "compiler_compile_library",
             str(output),
             str(API),
-            str(fixture),
+            *(str(source) for source in sources),
         ]
     )
+    return result
+
+
+def compile_with(compiler: Path, fixture: Path, output: Path) -> None:
+    result = compile_sources(compiler, (fixture,), output)
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(f"{fixture.name}: compiler failed: {detail}")
+
+
+def compile_status(
+    compiler: Path,
+    sources: tuple[Path, ...],
+    output: Path,
+) -> int:
+    result = compile_sources(compiler, sources, output)
+    if result.returncode == 0:
+        return 0
+    diagnostics = result.stdout + result.stderr
+    match = re.search(r"returned status (\d+)", diagnostics)
+    if match is None:
+        detail = diagnostics.strip() or "no diagnostic"
+        raise RuntimeError(
+            f"{sources[0].name}: compiler failed without a status: {detail}"
+        )
+    return int(match.group(1))
 
 
 def main() -> int:
@@ -102,6 +148,55 @@ def main() -> int:
                         f"{fixture.name}: {label} result was not {expected}: {detail}"
                     )
             print(f"PASS {fixture.stem}: IR and result {expected}")
+
+        bootstrap_import_output = work / "bootstrap_formal_import_compile.l1"
+        formal_import_output = work / "formal_formal_import_compile.l1"
+        bootstrap_import_compile = compile_sources(
+            bootstrap_compiler,
+            RESOLVED_IMPORT_SOURCES,
+            bootstrap_import_output,
+        )
+        formal_import_compile = compile_sources(
+            formal_compiler,
+            RESOLVED_IMPORT_SOURCES,
+            formal_import_output,
+        )
+        if bootstrap_import_compile.returncode or formal_import_compile.returncode:
+            bootstrap_detail = (
+                bootstrap_import_compile.stderr.strip()
+                or bootstrap_import_compile.stdout.strip()
+            )
+            formal_detail = (
+                formal_import_compile.stderr.strip()
+                or formal_import_compile.stdout.strip()
+            )
+            raise RuntimeError(
+                "resolved import unexpectedly failed: "
+                f"bootstrap={bootstrap_detail}, formal={formal_detail}"
+            )
+        if canonical(
+            bootstrap_import_output.read_text(encoding="utf-8")
+        ) != canonical(formal_import_output.read_text(encoding="utf-8")):
+            raise RuntimeError("resolved import: generated LAIN-IR differs")
+        print("PASS formal_resolved_import: IR matches")
+
+        for name, sources, expected in IMPORT_DIAGNOSTIC_CASES:
+            bootstrap_status = compile_status(
+                bootstrap_compiler,
+                sources,
+                work / f"bootstrap_{name}.l1",
+            )
+            formal_status = compile_status(
+                formal_compiler,
+                sources,
+                work / f"formal_{name}.l1",
+            )
+            if bootstrap_status != expected or formal_status != expected:
+                raise RuntimeError(
+                    f"{name}: expected {expected}, got "
+                    f"bootstrap={bootstrap_status}, formal={formal_status}"
+                )
+            print(f"PASS {name}: diagnostic {expected}")
     return 0
 
 
