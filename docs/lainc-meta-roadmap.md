@@ -397,6 +397,10 @@ attributes/import
   `lain_std_meta_status`；因此 module/struct/record 的状态诊断已进入真实的
   stdlib pass 调度，而不再只是单独的探针；现在也会在 expand 阶段传播
   syntax-index 的未解析 import/循环依赖诊断。完整 AST 变换和 lowering 仍待迁移。
+- [x] 正式 `std::meta` 已接管 module 形状和成员命名空间校验：
+  `meta_module_status` 通过 AstApi 检查声明并对重复成员返回 `3013`，
+  `lain_std_expand` 会对每个 source unit 调用它；
+  `scripts/check_meta_module_validation.py` 已证明 bootstrap/formal 两套结果一致。
 - [~] compiler API 已只调用 `lain_std_expand/elaborate/lower`；完整 lowering
   实现已经进入 bootstrap std artifact，并通过 `lain_std_lower_program` 暴露，
   但 expand/elaborate 的完整 AST 变换和正式 ABI 仍待完成。普通运行函数中

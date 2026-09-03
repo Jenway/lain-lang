@@ -2168,6 +2168,109 @@ let meta_operator_code = std::func(
     return 0;
 };
 
+// Module declaration validation belongs to Meta.  The RawAst layer only
+// stores the lossless tree; this pass checks the declaration shape and the
+// member namespace without depending on a compiler-owned descriptor layout.
+let meta_is_colon = std::func(source: addr, node: addr) -> bool {
+    if meta_ast_kind(node) != 1 || meta_ast_length(node) != 1 {
+        return false;
+    }
+    return meta_source_byte_at(
+        meta_source_data(source), meta_ast_start(node)
+    ) == 58;
+};
+
+let meta_module_keyword_after = std::func(
+    source: addr,
+    let_node: addr,
+) -> addr {
+    let current: addr = meta_ast_next(let_node);
+    while meta_ast_is_nil(current) == false {
+        if meta_is_module(source, current) {
+            return current;
+        }
+        if meta_is_semicolon(source, current) {
+            return meta_ast_nil();
+        }
+        current = meta_ast_next(current);
+    }
+    return meta_ast_nil();
+};
+
+let meta_module_member_duplicate_after = std::func(
+    source: addr,
+    name: addr,
+    candidate: addr,
+) -> i32 {
+    if meta_ast_is_nil(candidate) { return 0; }
+    if meta_is_let(source, candidate) {
+        let candidate_name: addr = meta_ast_next(candidate);
+        if meta_ast_is_nil(candidate_name) { return 3012; }
+        if meta_name_matches(source, name, candidate_name) {
+            return 3013;
+        }
+    }
+    return meta_module_member_duplicate_after(
+        source, name, meta_ast_next(candidate)
+    );
+};
+
+let meta_module_member_status = std::func(
+    source: addr,
+    body: addr,
+) -> i32 {
+    if meta_ast_kind(body) != 2 || meta_ast_delimiter(body) != 123 {
+        return 3011;
+    }
+    let member: addr = meta_ast_first(body);
+    while meta_ast_is_nil(member) == false {
+        if meta_is_let(source, member) {
+            let name: addr = meta_ast_next(member);
+            if meta_ast_is_nil(name) { return 3012; }
+            let duplicate_status: i32 = meta_module_member_duplicate_after(
+                source, name, meta_ast_next(member)
+            );
+            if duplicate_status != 0 { return duplicate_status; }
+        }
+        member = meta_ast_next(member);
+    }
+    return 0;
+};
+
+@abi_export
+let meta_module_status = std::func(
+    source: addr,
+    root: addr,
+) -> i32 {
+    let node: addr = meta_ast_first(root);
+    while meta_ast_is_nil(node) == false {
+        if meta_is_let(source, node) {
+            let name: addr = meta_ast_next(node);
+            let colon: addr = meta_ast_next(name);
+            let annotation: addr = meta_ast_next(colon);
+            let equals: addr = meta_ast_next(annotation);
+            let keyword: addr = meta_module_keyword_after(source, node);
+            if meta_ast_is_nil(keyword) == false {
+                let body: addr = meta_ast_next(keyword);
+                // A `std::module` expression in a declaration is a module
+                // form.  Its annotation and assignment tokens are part of
+                // the same Meta rule, so malformed forms receive the same
+                // stable diagnostics as the bootstrap implementation.
+                if meta_ast_is_nil(name)
+                    || meta_is_colon(source, colon) == false
+                    || meta_is_module_type(source, annotation) == false
+                    || meta_is_equals(source, equals) == false {
+                    return 3011;
+                }
+                let status: i32 = meta_module_member_status(source, body);
+                if status != 0 { return status; }
+            }
+        }
+        node = meta_ast_next(node);
+    }
+    return 0;
+};
+
 @export
 let meta: Module = std::module {
 

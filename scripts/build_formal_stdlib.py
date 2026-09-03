@@ -125,6 +125,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_find_module_member",
     "meta_find_struct_binding",
     "meta_find_record_binding",
+    "meta_module_status",
     "meta_find_member_return",
     "meta_is_single_decimal_argument",
     "meta_is_single_arithmetic_argument",
