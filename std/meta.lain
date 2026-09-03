@@ -3459,6 +3459,95 @@ let meta_find_struct_field_access = std::func(
     return second_field;
 };
 
+// Return the lowering form selected for one source unit.  This is the
+// language-shape decision used by the bootstrap ABI entry; the entry only
+// materializes the handles required by the selected form.
+@abi_export
+let meta_lower_kind = std::func(
+    source: addr,
+    root: addr,
+    main_body: addr,
+) -> i32 {
+    if meta_ast_is_nil(main_body) { return 0; }
+    let body_first: addr = meta_ast_first(main_body);
+    let unit_return: addr = meta_find_unit_return_list(
+        source, body_first
+    );
+    if meta_ast_is_nil(unit_return) == false { return 1; }
+
+    let local_binding: addr = meta_find_local_scalar_binding(
+        source, body_first
+    );
+    let second_binding: addr = meta_ast_nil();
+    if meta_ast_is_nil(local_binding) == false {
+        let local_name: addr = meta_ast_next(local_binding);
+        second_binding = meta_find_local_scalar_binding(
+            source, meta_ast_next(local_binding)
+        );
+        if meta_ast_is_nil(second_binding) == false {
+            let second_name: addr = meta_ast_next(second_binding);
+            let two_local_return: addr = meta_find_two_named_return_list(
+                source, body_first, local_name, second_name
+            );
+            if meta_ast_is_nil(two_local_return) == false { return 2; }
+        }
+        let local_return: addr = meta_find_named_return_list(
+            source, body_first, local_name
+        );
+        if meta_ast_is_nil(local_return) == false { return 3; }
+    }
+
+    let selected_field: addr = meta_find_struct_field_access(
+        source, meta_ast_first(root), body_first
+    );
+    if meta_ast_is_nil(selected_field) == false { return 4; }
+
+    let if_node: addr = meta_find_if_list(source, body_first);
+    if meta_ast_is_nil(if_node) == false {
+        if meta_if_supported(source, if_node) { return 5; }
+    }
+    let any_if: addr = meta_find_if_token(source, body_first);
+    if meta_ast_is_nil(any_if) == false { return 0; }
+
+    let call_return: addr = meta_find_call_return_list(
+        source, body_first
+    );
+    if meta_ast_is_nil(call_return) == false {
+        let callee: addr = meta_ast_next(call_return);
+        let arguments: addr = meta_ast_next(callee);
+        let callee_body: addr = meta_resolve_callee_body(
+            source, root, callee
+        );
+        let callee_name: addr = meta_resolve_callee_name(
+            source, root, callee
+        );
+        let function_scope: addr = meta_resolve_function_scope(
+            source, root, callee
+        );
+        let two_argument_mode: i32 = meta_two_call_argument_mode(
+            source, arguments, local_binding, second_binding
+        );
+        if two_argument_mode == 1 { return 6; }
+        if two_argument_mode == 2 { return 7; }
+        let callee_return: addr = meta_find_return_list(
+            source, meta_ast_first(callee_body)
+        );
+        let argument: addr = meta_ast_first(arguments);
+        let argument_mode: i32 = meta_call_argument_mode(
+            source, arguments, local_binding
+        );
+        if meta_ast_is_nil(argument) == false && argument_mode != 0 {
+            return 8;
+        }
+        if meta_ast_is_nil(callee_body) == false
+            && meta_ast_is_nil(callee_return) == false { return 9; }
+    }
+
+    let return_node: addr = meta_find_return_list(source, body_first);
+    if meta_ast_is_nil(return_node) == false { return 10; }
+    return 0;
+};
+
 @export
 let meta: Module = std::module {
 

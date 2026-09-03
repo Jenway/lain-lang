@@ -535,6 +535,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   生成；布尔和数值比较回归保持通过。
 - [x] `unit` 空返回的完整物理文本已由正式 Meta 的 `meta_copy_unit` 生成；
   空返回回归保持通过。
+- [~] 启动层的 lowering 形式选择已增加正式 Meta 的 `meta_lower_kind`；
+  unit、局部绑定、struct 和 `if` 分支由该结果接管，调用分支仍保留兼容路径，
+  待完成调用模式的统一判定后删除回退逻辑。
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。
