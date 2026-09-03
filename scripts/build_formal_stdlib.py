@@ -56,6 +56,10 @@ FORMAL_RESOLVED_IMPORT_PROBES = (
     ROOT / "scripts" / "fixtures" / "formal_import_target.lain",
     ROOT / "scripts" / "fixtures" / "formal_import_leaf.lain",
 )
+FORMAL_CYCLE_IMPORT_PROBES = (
+    ROOT / "scripts" / "fixtures" / "formal_cycle_a.lain",
+    ROOT / "scripts" / "fixtures" / "formal_cycle_b.lain",
+)
 FORMAL_EXTRA_ARITHMETIC_PROBES = (
     (ROOT / "scripts" / "fixtures" / "formal_subtraction_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_multiplication_return.lain", "42"),
@@ -518,6 +522,25 @@ def verify_abi_entry() -> None:
         raise RuntimeError(
             "formal stdlib syntax-index rejected a resolved local import"
             + (f": {detail}" if detail else "")
+        )
+    cycle_import_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "syntax_index_import_status",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            *(str(path) for path in FORMAL_CYCLE_IMPORT_PROBES),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    cycle_diagnostics = cycle_import_probe.stdout + cycle_import_probe.stderr
+    if cycle_import_probe.returncode == 0 or "4103" not in cycle_diagnostics:
+        raise RuntimeError(
+            "formal stdlib syntax-index did not report an import cycle"
         )
 
 
