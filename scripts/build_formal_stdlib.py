@@ -47,6 +47,7 @@ META_DIAGNOSTIC_OUTPUT = (
 FORMAL_CONSTANT_PROBE = ROOT / "scripts" / "fixtures" / "formal_constant_return.lain"
 FORMAL_MACRO_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_return.lain"
 FORMAL_MACRO_TWO_ARGS_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_two_args_return.lain"
+FORMAL_MACRO_TWO_DECLARATIONS_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_two_declarations_return.lain"
 FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain"
 FORMAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_return.lain"
 FORMAL_CALL_ARGUMENT_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_argument_return.lain"
@@ -417,6 +418,47 @@ def verify_abi_entry() -> None:
         detail = macro_two_run.stderr.strip() or macro_two_run.stdout.strip()
         raise RuntimeError(
             "formal stdlib two-argument macro artifact did not run as 42"
+            + (f": {detail}" if detail else "")
+        )
+    macro_multi_decl_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(ABI_PROBE),
+            "compiler_compile_library",
+            str(ABI_OUTPUT),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+            str(FORMAL_MACRO_TWO_DECLARATIONS_PROBE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if macro_multi_decl_probe.returncode:
+        detail = (
+            macro_multi_decl_probe.stderr.strip()
+            or macro_multi_decl_probe.stdout.strip()
+        )
+        raise RuntimeError(
+            "formal stdlib multiple macro declarations failed"
+            + (f": {detail}" if detail else "")
+        )
+    macro_multi_decl_run = subprocess.run(
+        [str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if (
+        macro_multi_decl_run.returncode
+        or macro_multi_decl_run.stdout.strip() != "21"
+    ):
+        detail = (
+            macro_multi_decl_run.stderr.strip()
+            or macro_multi_decl_run.stdout.strip()
+        )
+        raise RuntimeError(
+            "formal stdlib multiple macro declarations did not run as 21"
             + (f": {detail}" if detail else "")
         )
     for arithmetic_fixture, expected in FORMAL_EXTRA_ARITHMETIC_PROBES:
