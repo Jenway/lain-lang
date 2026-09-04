@@ -160,6 +160,18 @@ let syntax_index_root = std::func(index: addr, ordinal: i64) -> addr {
     return root;
 };
 
+let syntax_index_set_root = std::func(
+    index: addr,
+    ordinal: i64,
+    root: addr,
+) -> unit {
+    let entry: addr = syntax_entry_at(index, ordinal);
+    let first: addr = raw_first(root);
+    std::store_bits(64, entry + 16, root as usize);
+    std::store_bits(64, entry + 24, first as usize);
+    std::store_bits(64, entry + 32, formal_meta.meta_ast_count(first));
+};
+
 let syntax_index_source = std::func(index: addr, ordinal: i64) -> addr {
     let entry: addr = syntax_entry_at(index, ordinal);
     let source: addr = std::load_bits(64, entry + 8);
@@ -966,19 +978,32 @@ let lain_std_expand = std::func(
             context_owner(context),
         );
     }
-    let expanded: addr = root;
-    if syntax_index_count(source_unit) > 0 {
-        // The first formal Meta slice proves an actual AstApi operation.  The
-        // complete per-unit rewrite is still pending, so the remaining
-        // entries stay owned by the syntax index until that pass is migrated.
-        expanded = formal_meta.meta_ast_copy(
-            syntax_index_root(source_unit, 0)
-        );
+    let count: i64 = syntax_index_count(source_unit);
+    let ordinal: i64 = 0;
+    while ordinal < count {
+        let source: addr = syntax_index_source(source_unit, ordinal);
+        let original: addr = syntax_index_root(source_unit, ordinal);
+        let copy: addr = formal_meta.meta_ast_copy(original);
+        let status: i32 = formal_meta.meta_expand_root(source, copy);
+        if status >= 4200 {
+            return pass_result_new(
+                status,
+                0,
+                root,
+                ast_nil(),
+                ast_nil(),
+                context_owner(context),
+            );
+        }
+        syntax_index_set_root(source_unit, ordinal, copy);
+        ordinal = ordinal + 1;
     }
+    let first_expanded: addr = ast_nil();
+    if count > 0 { first_expanded = syntax_index_root(source_unit, 0); }
     return pass_result_new(
         0,
         1,
-        expanded,
+        first_expanded,
         ast_nil(),
         ast_nil(),
         context_owner(context),
