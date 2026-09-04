@@ -50,6 +50,7 @@ FORMAL_MACRO_TWO_ARGS_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_two_
 FORMAL_MACRO_TWO_DECLARATIONS_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_two_declarations_return.lain"
 FORMAL_MACRO_RECURSIVE_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_recursive.lain"
 FORMAL_MACRO_MISSING_ARGUMENT_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_missing_argument.lain"
+FORMAL_MACRO_EXTRA_ARGUMENT_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_extra_argument.lain"
 FORMAL_MACRO_HYGIENE_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_hygiene.lain"
 MACRO_HYGIENE_PROBE = ROOT / "scripts" / "fixtures" / "formal_meta_macro_hygiene_probe.l1"
 MACRO_HYGIENE_BUNDLE = ROOT / "build" / "lainir" / "formal_meta_macro_hygiene_bundle.l1"
@@ -480,6 +481,7 @@ def verify_abi_entry() -> None:
     for macro_error_fixture, expected_code in (
         (FORMAL_MACRO_RECURSIVE_PROBE, "4202"),
         (FORMAL_MACRO_MISSING_ARGUMENT_PROBE, "4203"),
+        (FORMAL_MACRO_EXTRA_ARGUMENT_PROBE, "4204"),
     ):
         macro_error_probe = subprocess.run(
             [
