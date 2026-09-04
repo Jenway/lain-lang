@@ -40,6 +40,20 @@ let meta_ast_next = std::func(node: addr) -> addr {
     return meta_ast_next_foreign(node);
 };
 
+@foreign(c, link_name = "lain_ast_v1_set_next_sibling")
+let meta_ast_set_next_foreign = std::func(
+    node: addr,
+    next: addr,
+) -> unit;
+
+@abi_export
+let meta_ast_set_next = std::func(
+    node: addr,
+    next: addr,
+) -> unit {
+    meta_ast_set_next_foreign(node, next);
+};
+
 @foreign(c, link_name = "lain_ast_v1_node_kind")
 let meta_ast_kind_foreign = std::func(node: addr) -> i32;
 
@@ -3676,6 +3690,30 @@ let meta_substitute_macro = std::func(
     }
 };
 
+let meta_copy_template_chain = std::func(
+    body_group: addr,
+) -> addr {
+    let current: addr = meta_ast_first(body_group);
+    if meta_ast_is_nil(current) { return meta_ast_nil(); }
+    let head: addr = meta_ast_copy(current);
+    let tail: addr = head;
+    current = meta_ast_next(current);
+    while meta_ast_is_nil(current) == false {
+        let copy: addr = meta_ast_copy(current);
+        meta_ast_set_next(tail, copy);
+        tail = copy;
+        current = meta_ast_next(current);
+    }
+    return head;
+};
+
+let meta_template_chain_last = std::func(node: addr) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    let next: addr = meta_ast_next(node);
+    if meta_ast_is_nil(next) { return node; }
+    return meta_template_chain_last(next);
+};
+
 let meta_macro_argument_end = std::func(
     source: addr,
     node: addr,
@@ -3690,6 +3728,18 @@ let meta_macro_argument_end = std::func(
         end = meta_ast_start(current) + meta_ast_length(current);
     }
     return end;
+};
+
+let meta_substitute_macro_chain = std::func(
+    source: addr,
+    node: addr,
+    parameter: addr,
+    argument: addr,
+) -> unit {
+    if meta_ast_is_nil(node) { return; }
+    let next: addr = meta_ast_next(node);
+    meta_substitute_macro(source, node, parameter, argument);
+    meta_substitute_macro_chain(source, next, parameter, argument);
 };
 
 let meta_macro_argument_next = std::func(
@@ -3767,7 +3817,7 @@ let meta_substitute_macro_params = std::func(
             source, argument, argument_end
         );
         if meta_ast_is_nil(tree) { return 4203; }
-        meta_substitute_macro(source, node, parameter, tree);
+        meta_substitute_macro_chain(source, node, parameter, tree);
         matched = matched + 1;
         parameter = meta_macro_parameter_next(source, parameter);
         argument = meta_macro_argument_next(
@@ -3784,12 +3834,15 @@ let meta_expand_one_macro_call = std::func(
     root: addr,
     call_name: addr,
     parameter_group: addr,
-    template_body: addr,
+    template_group: addr,
 ) -> i32 {
     let call_group: addr = meta_ast_next(call_name);
     if meta_ast_kind(call_group) != 2 { return 4201; }
     if meta_ast_delimiter(call_group) != 40 { return 4201; }
-    let expansion: addr = meta_ast_copy(template_body);
+    let expansion: addr = meta_copy_template_chain(template_group);
+    if meta_ast_is_nil(expansion) { return 4208; }
+    let expansion_next: addr = meta_ast_next(expansion);
+    let expansion_tail: addr = meta_template_chain_last(expansion);
     let substitute_status: i32 = meta_substitute_macro_params(
         source, expansion, parameter_group, call_group
     );
@@ -3799,6 +3852,10 @@ let meta_expand_one_macro_call = std::func(
     if meta_ast_replace(parent, call_name, expansion) == false {
         return 4206;
     }
+    if meta_ast_is_nil(expansion_next) == false {
+        meta_ast_set_next(expansion, expansion_next);
+    }
+    meta_ast_set_next(expansion_tail, call_group);
     if meta_ast_remove(parent, call_group) == false { return 4207; }
     return 1;
 };
@@ -3814,9 +3871,8 @@ let meta_expand_macro_declaration = std::func(
     let params: addr = meta_ast_next(macro_word);
     let parameter: addr = meta_ast_first(params);
     let template_group: addr = meta_ast_next(params);
-    let template_body: addr = meta_ast_first(template_group);
     if meta_ast_is_nil(parameter) { return 4208; }
-    if meta_ast_is_nil(template_body) { return 4208; }
+    if meta_ast_is_nil(meta_ast_first(template_group)) { return 4208; }
     let expanded: i64 = 0;
     while expanded < 32 {
         let call_name: addr = meta_find_macro_call_deep(
@@ -3824,7 +3880,7 @@ let meta_expand_macro_declaration = std::func(
         );
         if meta_ast_is_nil(call_name) { break; }
         let status: i32 = meta_expand_one_macro_call(
-            source, root, call_name, params, template_body
+            source, root, call_name, params, template_group
         );
         if status != 1 { return status; }
         expanded = expanded + 1;

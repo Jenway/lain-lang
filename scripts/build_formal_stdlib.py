@@ -102,6 +102,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_ast_count",
     "meta_ast_last",
     "meta_ast_parent",
+    "meta_ast_set_next",
     "meta_ast_origin_source",
     "meta_ast_origin_start",
     "meta_ast_origin_length",

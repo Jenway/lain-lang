@@ -551,6 +551,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
 - [x] `expand` 已循环处理同一源文件中的多个宏声明；前一个宏展开后产生的调用
   会继续交给后续声明处理，未使用的宏声明也会从运行 AST 中移除。
   `formal_macro_two_declarations_return.lain` 已验证两个声明同时存在时结果为 `21`。
+- [x] AstApi 增加了受控的兄弟节点链接操作，宏模板现在会保留完整节点链；
+  `first(x) -> second(x) -> (x + 1)` 的嵌套展开已生成可执行结果 `21`，不会再
+  丢失调用参数组。
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。
