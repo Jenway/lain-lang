@@ -342,7 +342,8 @@ src/compiler-archive/*.lain 最终 compiler，调用正式标准库
 - [~] 五个 `lain_std_*` ABI 入口均已定义并接入编译器调度；expand 已执行正式
   Meta 的 AST 宏展开，elaborate 已校验展开树来源和残留宏声明，lower 仍只覆盖
   当前已迁移的 lowering 形式。
-- [~] 已覆盖错误版本、空 pass-result handle 和跨 owner handle 负例；空 AST/IR
+- [~] 已覆盖错误版本、空 pass-result handle 和跨 owner handle 负例；编译流程现在
+  会在读取 status/payload 后一次性释放自己拥有的 pass-result 记录，空 AST/IR
   对象和重复释放语义仍待补齐。空 pass-result 会在边界返回 `5202`，不会被解引用。
 - [x] 添加 `tests/lainir_lain/run_bootstrap_std_bundle.py`，覆盖 ABI、AST wrapper、
   pass-result 布局和合并包执行。
