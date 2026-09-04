@@ -555,7 +555,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `first(x) -> second(x) -> (x + 1)` 的嵌套展开已生成可执行结果 `21`，不会再
   丢失调用参数组。
 - [x] 宏展开错误边界已加入正式验收：递归展开超过 32 次返回 `4202`，缺失实参
-  返回 `4203`；这两个诊断来自 `std::meta`，不由 compiler core 猜测。
+  返回 `4203`，多余实参返回 `4204`；这些诊断来自 `std::meta`，不由 compiler
+  core 猜测。
 - [x] 宏实例化现在为模板节点分配独立的 syntax context；调用者传入的实参保留
   原 context，同一宏的不同展开使用不同 context。`formal_macro_hygiene.lain`
   已验证调用方绑定保持 context `0`，两次模板展开分别获得 context `1` 和 `2`，
