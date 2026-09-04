@@ -1,0 +1,90 @@
+#extern #proc bootstrap.source-data(i64 %index) -> addr;
+#extern #proc bootstrap.source-length(i64 %index) -> i64;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+#extern #proc meta_parse_result_new(addr %data, i64 %length) -> addr;
+#extern #proc meta_parse_result_source(addr %result) -> addr;
+#extern #proc meta_parse_result_root(addr %result) -> addr;
+#extern #proc meta_parse_result_release(addr %result) -> #unit;
+#extern #proc meta_expand_root(addr %source, addr %root) -> i32;
+#extern #proc meta_ast_is_nil(addr %node) -> i1;
+#extern #proc meta_ast_kind(addr %node) -> i32;
+#extern #proc meta_ast_first(addr %node) -> addr;
+#extern #proc meta_ast_next(addr %node) -> addr;
+#extern #proc meta_ast_start(addr %node) -> i64;
+#extern #proc meta_ast_length(addr %node) -> i64;
+#extern #proc meta_ast_syntax_context(addr %node) -> i64;
+#extern #proc meta_source_data(addr %source) -> addr;
+#extern #proc meta_source_byte_at(addr %data, i64 %index) -> i8;
+
+#proc count_t(addr %source, addr %node, i64 %wanted_context) -> i64 {
+  #let %data: #addr = #call meta_source_data(%source)
+  #let %count: #bits<64> = 0
+  #let %current: #addr = %node
+  #loop siblings {
+    #if #call meta_ast_is_nil(%current) { #break siblings }
+    #if #eq(#call meta_ast_kind(%current), 1) {
+      #if #eq(#call meta_ast_length(%current), 1) {
+        #if #eq(#call meta_source_byte_at(
+          %data, #call meta_ast_start(%current)
+        ), 116) {
+          #if #eq(
+            #call meta_ast_syntax_context(%current), %wanted_context
+          ) {
+            %count: #bits<64> = #add(%count, 1)
+          }
+        }
+      }
+    }
+    #let %child: #addr = #call meta_ast_first(%current)
+    #if #eq(#call meta_ast_is_nil(%child), 0) {
+      %count: #bits<64> = #add(
+        %count, #call count_t(%source, %child, %wanted_context)
+      )
+    }
+    %current: #addr = #call meta_ast_next(%current)
+    #continue siblings
+  }
+  #return %count
+}
+
+#proc main() -> #bits<32> {
+  #let %data: #addr = #call bootstrap.source-data(0)
+  #let %length: #bits<64> = #call bootstrap.source-length(0)
+  #let %result: #addr = #call meta_parse_result_new(%data, %length)
+  #let %source: #addr = #call meta_parse_result_source(%result)
+  #let %root: #addr = #call meta_parse_result_root(%result)
+  #let %status: #bits<32> = #call meta_expand_root(%source, %root)
+  #let %source_root: #addr = #call meta_ast_first(%root)
+  #let %source_context: #bits<64> = #call count_t(
+    %source, %source_root, 0
+  )
+  #let %first_expansion: #bits<64> = #call count_t(
+    %source, %source_root, 1
+  )
+  #let %second_expansion: #bits<64> = #call count_t(
+    %source, %source_root, 2
+  )
+  #call bootstrap.artifact-begin()
+  #if #eq(%status, 1) {
+    #if #eq(%source_context, 1) {
+      #if #eq(%first_expansion, 3) {
+        #if #eq(%second_expansion, 3) {
+          #call bootstrap.artifact-write-literal("hygiene=1\n")
+        } else {
+          #call bootstrap.artifact-write-literal("hygiene=0\n")
+        }
+      } else {
+        #call bootstrap.artifact-write-literal("hygiene=0\n")
+      }
+    } else {
+      #call bootstrap.artifact-write-literal("hygiene=0\n")
+    }
+  } else {
+    #call bootstrap.artifact-write-literal("hygiene=0\n")
+  }
+  #call bootstrap.artifact-finish()
+  #call meta_parse_result_release(%result)
+  #return 0
+}

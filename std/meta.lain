@@ -3707,6 +3707,24 @@ let meta_copy_template_chain = std::func(
     return head;
 };
 
+// Give every node introduced by one macro expansion a fresh syntax context.
+// Argument trees are substituted after this pass and keep the caller's
+// context, so only template-authored names receive the expansion context.
+let meta_recontextualize_tree = std::func(
+    node: addr,
+    context: i64,
+) -> unit {
+    let current: addr = node;
+    while meta_ast_is_nil(current) == false {
+        meta_ast_set_syntax_context(current, context);
+        let child: addr = meta_ast_first(current);
+        if meta_ast_is_nil(child) == false {
+            meta_recontextualize_tree(child, context);
+        }
+        current = meta_ast_next(current);
+    }
+};
+
 let meta_template_chain_last = std::func(node: addr) -> addr {
     if meta_ast_is_nil(node) { return meta_ast_nil(); }
     let next: addr = meta_ast_next(node);
@@ -3835,12 +3853,15 @@ let meta_expand_one_macro_call = std::func(
     call_name: addr,
     parameter_group: addr,
     template_group: addr,
+    hygiene_context: addr,
 ) -> i32 {
     let call_group: addr = meta_ast_next(call_name);
     if meta_ast_kind(call_group) != 2 { return 4201; }
     if meta_ast_delimiter(call_group) != 40 { return 4201; }
     let expansion: addr = meta_copy_template_chain(template_group);
     if meta_ast_is_nil(expansion) { return 4208; }
+    let expansion_context: i64 = meta_syntax_context_fresh(hygiene_context);
+    meta_recontextualize_tree(expansion, expansion_context);
     let expansion_next: addr = meta_ast_next(expansion);
     let expansion_tail: addr = meta_template_chain_last(expansion);
     let substitute_status: i32 = meta_substitute_macro_params(
@@ -3864,6 +3885,7 @@ let meta_expand_macro_declaration = std::func(
     source: addr,
     root: addr,
     declaration: addr,
+    hygiene_context: addr,
 ) -> i32 {
     let name: addr = meta_ast_next(declaration);
     let equals: addr = meta_ast_next(name);
@@ -3880,7 +3902,8 @@ let meta_expand_macro_declaration = std::func(
         );
         if meta_ast_is_nil(call_name) { break; }
         let status: i32 = meta_expand_one_macro_call(
-            source, root, call_name, params, template_group
+            source, root, call_name, params, template_group,
+            hygiene_context
         );
         if status != 1 { return status; }
         expanded = expanded + 1;
@@ -3906,6 +3929,7 @@ let meta_expand_root = std::func(
     source: addr,
     root: addr,
 ) -> i32 {
+    let hygiene_context: addr = meta_syntax_context_new();
     let rounds: i64 = 0;
     while rounds < 32 {
         let declaration: addr = meta_find_macro_decl(
@@ -3913,15 +3937,22 @@ let meta_expand_root = std::func(
         );
         if meta_ast_is_nil(declaration) { break; }
         let status: i32 = meta_expand_macro_declaration(
-            source, root, declaration
+            source, root, declaration, hygiene_context
         );
-        if status >= 4200 { return status; }
+        if status >= 4200 {
+            meta_syntax_context_release(hygiene_context);
+            return status;
+        }
         rounds = rounds + 1;
     }
     let residual: addr = meta_find_macro_decl(
         source, meta_ast_first(root)
     );
-    if meta_ast_is_nil(residual) == false { return 4202; }
+    if meta_ast_is_nil(residual) == false {
+        meta_syntax_context_release(hygiene_context);
+        return 4202;
+    }
+    meta_syntax_context_release(hygiene_context);
     if rounds == 0 { return 0; }
     return 1;
 };
