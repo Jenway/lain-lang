@@ -1,0 +1,81 @@
+#extern #proc bootstrap.source-data(i64 %index) -> addr;
+#extern #proc bootstrap.source-length(i64 %index) -> i64;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-literal(addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+#extern #proc tool_source_new(addr %data, i64 %length) -> addr;
+#extern #proc tool_lex_all(addr %source) -> addr;
+#extern #proc raw_parse(addr %source, addr %tokens) -> addr;
+#extern #proc bootstrap.release-pages(addr %memory) -> #unit;
+#extern #proc raw_node_first(addr %node) -> addr;
+#extern #proc meta_value_nil() -> addr;
+#extern #proc meta_value_type(addr %source, addr %name, addr %binding) -> addr;
+#extern #proc meta_value_module(
+  addr %source, addr %name, addr %group, addr %environment
+) -> addr;
+#extern #proc meta_value_syntax(
+  addr %source, addr %node, addr %environment
+) -> addr;
+#extern #proc eval_result_new(i32 %status, i64 %value) -> addr;
+#extern #proc eval_result_object(i32 %status, addr %object) -> addr;
+#extern #proc eval_result_kind(addr %result) -> i32;
+
+#proc eval_scalar_result() -> addr {
+  #return #eval {
+    #return #call eval_result_new(0, 42)
+  }
+}
+
+#proc eval_object_result(addr %object) -> addr {
+  #return #eval {
+    #return #call eval_result_object(0, %object)
+  }
+}
+
+#proc main() -> #bits<32> {
+  #let %data: #addr = #call bootstrap.source-data(0)
+  #let %length: #bits<64> = #call bootstrap.source-length(0)
+  #let %source: #addr = #call tool_source_new(%data, %length)
+  #let %tokens: #addr = #call tool_lex_all(%source)
+  #let %root: #addr = #call raw_parse(%source, %tokens)
+  #let %first: #addr = #call raw_node_first(%root)
+  #let %type_value: #addr = #call meta_value_type(
+    %source, %first, %first
+  )
+  #let %module_value: #addr = #call meta_value_module(
+    %source, %first, %root, #call meta_value_nil()
+  )
+  #let %syntax_value: #addr = #call meta_value_syntax(
+    %source, %first, #call meta_value_nil()
+  )
+  #let %scalar_result: #addr = #call eval_scalar_result()
+  #let %type_result: #addr = #call eval_object_result(%type_value)
+  #let %module_result: #addr = #call eval_object_result(%module_value)
+  #let %syntax_result: #addr = #call eval_object_result(%syntax_value)
+  #let %ok: #bits<1> = 1
+  #if #eq(#call eval_result_kind(%scalar_result), 0) {
+  } else {
+    %ok: #bits<1> = 0
+  }
+  #if #eq(#call eval_result_kind(%type_result), 2) {
+  } else {
+    %ok: #bits<1> = 0
+  }
+  #if #eq(#call eval_result_kind(%module_result), 3) {
+  } else {
+    %ok: #bits<1> = 0
+  }
+  #if #eq(#call eval_result_kind(%syntax_result), 4) {
+  } else {
+    %ok: #bits<1> = 0
+  }
+  #call bootstrap.artifact-begin()
+  #if #eq(%ok, 1) {
+    #call bootstrap.artifact-write-literal("eval_matrix=1\n")
+  } else {
+    #call bootstrap.artifact-write-literal("eval_matrix=0\n")
+  }
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return 0
+}
