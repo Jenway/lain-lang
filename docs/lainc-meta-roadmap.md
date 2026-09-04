@@ -554,6 +554,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
 - [x] AstApi 增加了受控的兄弟节点链接操作，宏模板现在会保留完整节点链；
   `first(x) -> second(x) -> (x + 1)` 的嵌套展开已生成可执行结果 `21`，不会再
   丢失调用参数组。
+- [x] 宏展开错误边界已加入正式验收：递归展开超过 32 次返回 `4202`，缺失实参
+  返回 `4203`；这两个诊断来自 `std::meta`，不由 compiler core 猜测。
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。
