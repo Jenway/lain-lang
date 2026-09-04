@@ -50,6 +50,10 @@ FORMAL_MACRO_TWO_ARGS_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_two_
 FORMAL_MACRO_TWO_DECLARATIONS_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_two_declarations_return.lain"
 FORMAL_MACRO_RECURSIVE_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_recursive.lain"
 FORMAL_MACRO_MISSING_ARGUMENT_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_missing_argument.lain"
+FORMAL_MACRO_HYGIENE_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_hygiene.lain"
+MACRO_HYGIENE_PROBE = ROOT / "scripts" / "fixtures" / "formal_meta_macro_hygiene_probe.l1"
+MACRO_HYGIENE_BUNDLE = ROOT / "build" / "lainir" / "formal_meta_macro_hygiene_bundle.l1"
+MACRO_HYGIENE_OUTPUT = ROOT / "build" / "lainir" / "formal_meta_macro_hygiene_output.l1"
 FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain"
 FORMAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_return.lain"
 FORMAL_CALL_ARGUMENT_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_argument_return.lain"
@@ -489,6 +493,41 @@ def verify_abi_entry() -> None:
                 f"formal stdlib macro diagnostic {expected_code} failed for "
                 f"{macro_error_fixture.name}"
             )
+    run(
+        [
+            sys.executable,
+            BUNDLER,
+            "-o",
+            MACRO_HYGIENE_BUNDLE,
+            CORE,
+            OUTPUT,
+            MACRO_HYGIENE_PROBE,
+        ]
+    )
+    hygiene_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(MACRO_HYGIENE_BUNDLE),
+            "main",
+            str(MACRO_HYGIENE_OUTPUT),
+            str(FORMAL_MACRO_HYGIENE_PROBE),
+            str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if (
+        hygiene_probe.returncode
+        or MACRO_HYGIENE_OUTPUT.read_text(encoding="utf-8")
+        != "hygiene=1\n"
+    ):
+        detail = hygiene_probe.stderr.strip() or hygiene_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib macro hygiene expansion failed"
+            + (f": {detail}" if detail else "")
+        )
     for arithmetic_fixture, expected in FORMAL_EXTRA_ARITHMETIC_PROBES:
         extra_probe = subprocess.run(
             [
