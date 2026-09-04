@@ -17,8 +17,8 @@
 > 已能由第 2 套编译并通过 verifier 和运行 smoke；`scripts/build_formal_stdlib.py`
 > 现在可以从全部 `std/**/*.lain` 生成并验证 `build/lainir/formal_stdlib.l1`。
 > 该 artifact 还会检查并导出五个 `lain_std_*` ABI 入口；当前正式库的
-> `expand` 已对首个源根节点执行 AstApi 复制，复制动作由正式 `std::meta`
-> 导出的库函数调用 seed ABI 完成；正式 bootstrap 入口的 AST 只读访问
+> `expand` 已对每个源根节点执行 AstApi 复制；发现单参数宏时，模板替换和声明
+> 移除也由正式 `std::meta` 完成，并通过库函数调用 seed ABI；正式 bootstrap 入口的 AST 只读访问
 > （first/next/kind/delimiter/start/length/nil）也已统一经由 `std::meta`
 > 包装；`elaborate` 仍传递该句柄，
 > `lower` 已能为十进制常量 `return`、简单 `+ - * /` 算术、同一源文件内的
@@ -540,6 +540,11 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   启动层不再重复计算调用参数模式。
 - [x] `expand` 阶段的 import、module、struct 规则已统一由正式 Meta 的
   `meta_expand_status` 返回；bootstrap 入口只封装状态和 AST 句柄。
+- [x] 正式 `std::meta` 已接管首个可执行 AST 展开规则：识别单参数
+  `let NAME = macro(PARAM) { BODY };`，复制模板、替换调用实参并移除宏声明；
+  `lain_std_expand` 对 syntax-index 中的每个源单元运行该规则，展开后的根节点
+  回写到 index，后续 lowering 直接消费展开树。`formal_macro_return.lain` 已验证
+  `twice(21)` 生成 `21 + 21` 并运行得到 `42`。
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。
@@ -572,7 +577,7 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
   实现仍待接入这些入口；当前正式库会解析全部输入源，并为每个源生成真实的
   syntax-index 条目（源句柄、根节点、首节点、节点数、import 数和根 span）；
-  expand 已通过 `std::meta` 库函数调用 AstApi 复制首个根节点；正式库已在
+  expand 已通过 `std::meta` 库函数调用 AstApi 复制并展开每个源根节点；正式库已在
   `syntax_index_import_status` 中按 source path 解析本地 import 和
   `std::...` 逻辑路径，缺失普通模块返回 `4101`；同一入口使用三色 DFS
   检测本地依赖环并返回 `4103`。elaborate 仍只传递句柄，lower 对常量

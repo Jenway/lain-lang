@@ -3597,6 +3597,179 @@ let meta_expand_status = std::func(index: addr) -> i32 {
     return 0;
 };
 
+// The first real AST expansion rule owned by formal Meta.  A macro declaration
+// has the lossless shape `let NAME = macro(PARAM) { BODY };`.  The rule below
+// deliberately supports one parameter and one call-site argument: it is the
+// smallest useful expansion that can feed the existing lowering slice while
+// keeping all tree ownership in seed's AstApi.
+let meta_is_macro = std::func(source: addr, node: addr) -> bool {
+    if meta_ast_kind(node) != 1 || meta_ast_length(node) != 5 {
+        return false;
+    }
+    let data: addr = meta_source_data(source);
+    let start: i64 = meta_ast_start(node);
+    if meta_source_byte_at(data, start) != 109 { return false; }
+    if meta_source_byte_at(data, start + 1) != 97 { return false; }
+    if meta_source_byte_at(data, start + 2) != 99 { return false; }
+    if meta_source_byte_at(data, start + 3) != 114 { return false; }
+    return meta_source_byte_at(data, start + 4) == 111;
+};
+
+let meta_find_macro_decl = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    if meta_is_let(source, node) {
+        let name: addr = meta_ast_next(node);
+        let equals: addr = meta_ast_next(name);
+        let macro_word: addr = meta_ast_next(equals);
+        let params: addr = meta_ast_next(macro_word);
+        let body: addr = meta_ast_next(params);
+        if meta_is_macro(source, macro_word)
+            && meta_ast_kind(params) == 2
+            && meta_ast_delimiter(params) == 40
+            && meta_ast_kind(body) == 2
+            && meta_ast_delimiter(body) == 123 {
+            return node;
+        }
+    }
+    return meta_find_macro_decl(source, meta_ast_next(node));
+};
+
+let meta_find_macro_call_deep = std::func(
+    source: addr,
+    node: addr,
+    wanted: addr,
+) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    let next: addr = meta_ast_next(node);
+    if meta_ast_kind(node) == 1
+        && meta_ast_kind(next) == 2
+        && meta_ast_delimiter(next) == 40
+        && meta_name_matches(source, node, wanted) {
+        return node;
+    }
+    let child: addr = meta_ast_first(node);
+    while meta_ast_is_nil(child) == false {
+        let hit: addr = meta_find_macro_call_deep(source, child, wanted);
+        if meta_ast_is_nil(hit) == false { return hit; }
+        child = meta_ast_next(child);
+    }
+    return meta_ast_nil();
+};
+
+let meta_substitute_macro = std::func(
+    source: addr,
+    node: addr,
+    parameter: addr,
+    argument: addr,
+) -> unit {
+    let child: addr = meta_ast_first(node);
+    while meta_ast_is_nil(child) == false {
+        let next: addr = meta_ast_next(child);
+        if meta_name_matches(source, child, parameter) {
+            meta_ast_replace(node, child, meta_ast_copy(argument));
+        } else {
+            meta_substitute_macro(source, child, parameter, argument);
+        }
+        child = next;
+    }
+};
+
+let meta_expand_one_macro_call = std::func(
+    source: addr,
+    root: addr,
+    call_name: addr,
+    parameter: addr,
+    template_body: addr,
+) -> i32 {
+    let call_group: addr = meta_ast_next(call_name);
+    let call_argument: addr = meta_ast_first(call_group);
+    if meta_ast_is_nil(call_argument) { return 4203; }
+    let argument_tail: addr = meta_ast_next(call_argument);
+    if meta_ast_is_nil(argument_tail) == false { return 4204; }
+    let argument_start: i64 = meta_ast_start(call_argument);
+    let argument_length: i64 = meta_ast_length(call_argument);
+    let argument_root: addr = meta_ast_from_text(
+        source, argument_start, argument_length
+    );
+    let argument_tree: addr = meta_ast_first(argument_root);
+    if meta_ast_is_nil(argument_tree) { return 4203; }
+    let expansion: addr = meta_ast_copy(template_body);
+    meta_substitute_macro(source, expansion, parameter, argument_tree);
+    let parent: addr = meta_ast_parent(root, call_name);
+    if meta_ast_is_nil(parent) { return 4205; }
+    if meta_ast_replace(parent, call_name, expansion) == false {
+        return 4206;
+    }
+    if meta_ast_remove(parent, call_group) == false { return 4207; }
+    return 1;
+};
+
+@abi_export
+let meta_expand_root = std::func(
+    source: addr,
+    root: addr,
+) -> i32 {
+    let declaration: addr = meta_ast_nil();
+    let scan: addr = meta_ast_first(root);
+    while meta_ast_is_nil(scan) == false {
+        if meta_is_let(source, scan) {
+            let scan_name: addr = meta_ast_next(scan);
+            let scan_equals: addr = meta_ast_next(scan_name);
+            let scan_macro: addr = meta_ast_next(scan_equals);
+            let scan_params: addr = meta_ast_next(scan_macro);
+            let scan_body: addr = meta_ast_next(scan_params);
+            if meta_is_macro(source, scan_macro)
+                && meta_ast_kind(scan_params) == 2
+                && meta_ast_delimiter(scan_params) == 40
+                && meta_ast_kind(scan_body) == 2
+                && meta_ast_delimiter(scan_body) == 123 {
+                declaration = scan;
+                break;
+            }
+        }
+        scan = meta_ast_next(scan);
+    }
+    if meta_ast_is_nil(declaration) { return 0; }
+    let name: addr = meta_ast_next(declaration);
+    let equals: addr = meta_ast_next(name);
+    let macro_word: addr = meta_ast_next(equals);
+    let params: addr = meta_ast_next(macro_word);
+    let parameter: addr = meta_ast_first(params);
+    let template_group: addr = meta_ast_next(params);
+    let template_body: addr = meta_ast_first(template_group);
+    if meta_ast_is_nil(parameter) { return 4208; }
+    if meta_ast_is_nil(template_body) { return 4208; }
+    let expanded: i64 = 0;
+    while expanded < 32 {
+        let call_name: addr = meta_find_macro_call_deep(
+            source, root, name
+        );
+        if meta_ast_is_nil(call_name) { break; }
+        let status: i32 = meta_expand_one_macro_call(
+            source, root, call_name, parameter, template_body
+        );
+        if status != 1 { return status; }
+        expanded = expanded + 1;
+    }
+    let residual: addr = meta_find_macro_call_deep(
+        source, root, name
+    );
+    if meta_ast_is_nil(residual) == false { return 4202; }
+    let current: addr = declaration;
+    while meta_ast_is_nil(current) == false {
+        let next: addr = meta_ast_next(current);
+        let remove_status: bool = meta_ast_remove(root, current);
+        if remove_status == false { return 4209; }
+        if meta_is_semicolon(source, current) { break; }
+        current = next;
+    }
+    if expanded == 0 { return 1; }
+    return 1;
+};
+
 @export
 let meta: Module = std::module {
 
