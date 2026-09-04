@@ -545,6 +545,9 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `lain_std_expand` 对 syntax-index 中的每个源单元运行该规则，展开后的根节点
   回写到 index，后续 lowering 直接消费展开树。`formal_macro_return.lain` 已验证
   `twice(21)` 生成 `21 + 21` 并运行得到 `42`。
+- [x] 宏参数绑定已扩展为逗号分隔的多参数匹配；Meta 按参数位置计算实参跨度，
+  对每个参数执行 AST 替换，并对缺失/多余实参返回稳定诊断。
+  `formal_macro_two_args_return.lain` 已验证 `add(20, 22)` 生成并运行得到 `42`。
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。

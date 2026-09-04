@@ -3597,11 +3597,10 @@ let meta_expand_status = std::func(index: addr) -> i32 {
     return 0;
 };
 
-// The first real AST expansion rule owned by formal Meta.  A macro declaration
-// has the lossless shape `let NAME = macro(PARAM) { BODY };`.  The rule below
-// deliberately supports one parameter and one call-site argument: it is the
-// smallest useful expansion that can feed the existing lowering slice while
-// keeping all tree ownership in seed's AstApi.
+// The first real AST expansion rules owned by formal Meta.  A macro
+// declaration has the lossless shape `let NAME = macro(PARAMS) { BODY };`.
+// Parameter and argument lists are matched positionally; all tree ownership
+// remains in seed's AstApi.
 let meta_is_macro = std::func(source: addr, node: addr) -> bool {
     if meta_ast_kind(node) != 1 || meta_ast_length(node) != 5 {
         return false;
@@ -3677,27 +3676,124 @@ let meta_substitute_macro = std::func(
     }
 };
 
+let meta_macro_argument_end = std::func(
+    source: addr,
+    node: addr,
+) -> i64 {
+    let current: addr = node;
+    let end: i64 = meta_ast_start(current) + meta_ast_length(current);
+    while meta_ast_is_nil(current) == false {
+        let next: addr = meta_ast_next(current);
+        if meta_ast_is_nil(next) { return end; }
+        if meta_is_comma(source, next) { return end; }
+        current = next;
+        end = meta_ast_start(current) + meta_ast_length(current);
+    }
+    return end;
+};
+
+let meta_macro_argument_next = std::func(
+    source: addr,
+    node: addr,
+    end: i64,
+) -> addr {
+    let current: addr = node;
+    while meta_ast_is_nil(current) == false {
+        let current_end: i64 = meta_ast_start(current)
+            + meta_ast_length(current);
+        let next: addr = meta_ast_next(current);
+        if current_end == end {
+            if meta_ast_is_nil(next) { return meta_ast_nil(); }
+            if meta_is_comma(source, next) {
+                return meta_ast_next(next);
+            }
+            return next;
+        }
+        current = next;
+    }
+    return meta_ast_nil();
+};
+
+let meta_macro_parameter_next = std::func(
+    source: addr,
+    node: addr,
+) -> addr {
+    let next: addr = meta_ast_next(node);
+    if meta_ast_is_nil(next) { return meta_ast_nil(); }
+    if meta_is_comma(source, next) { return meta_ast_next(next); }
+    return next;
+};
+
+// Parse one argument span.  A single atom is returned directly.  A compound
+// expression is put in a fresh parenthesis group so replacement still inserts
+// one AST child and preserves the expression's source span.
+let meta_macro_argument_tree = std::func(
+    source: addr,
+    node: addr,
+    end: i64,
+) -> addr {
+    let start: i64 = meta_ast_start(node);
+    let root: addr = meta_ast_from_text(source, start, end - start);
+    let first: addr = meta_ast_first(root);
+    if meta_ast_is_nil(first) { return meta_ast_nil(); }
+    let second: addr = meta_ast_next(first);
+    if meta_ast_is_nil(second) { return first; }
+    let group: addr = meta_ast_new_group(40, start, end - start);
+    meta_ast_attach_origin(group, source, start, end - start);
+    let current: addr = first;
+    while meta_ast_is_nil(current) == false {
+        let next: addr = meta_ast_next(current);
+        meta_ast_append(group, meta_ast_copy(current));
+        current = next;
+    }
+    return group;
+};
+
+let meta_substitute_macro_params = std::func(
+    source: addr,
+    node: addr,
+    parameter_group: addr,
+    argument_group: addr,
+) -> i32 {
+    let parameter: addr = meta_ast_first(parameter_group);
+    let argument: addr = meta_ast_first(argument_group);
+    let matched: i64 = 0;
+    while meta_ast_is_nil(parameter) == false {
+        if meta_ast_is_nil(argument) { return 4203; }
+        let argument_end: i64 = meta_macro_argument_end(
+            source, argument
+        );
+        let tree: addr = meta_macro_argument_tree(
+            source, argument, argument_end
+        );
+        if meta_ast_is_nil(tree) { return 4203; }
+        meta_substitute_macro(source, node, parameter, tree);
+        matched = matched + 1;
+        parameter = meta_macro_parameter_next(source, parameter);
+        argument = meta_macro_argument_next(
+            source, argument, argument_end
+        );
+    }
+    if matched == 0 { return 4208; }
+    if meta_ast_is_nil(argument) == false { return 4204; }
+    return 1;
+};
+
 let meta_expand_one_macro_call = std::func(
     source: addr,
     root: addr,
     call_name: addr,
-    parameter: addr,
+    parameter_group: addr,
     template_body: addr,
 ) -> i32 {
     let call_group: addr = meta_ast_next(call_name);
-    let call_argument: addr = meta_ast_first(call_group);
-    if meta_ast_is_nil(call_argument) { return 4203; }
-    let argument_tail: addr = meta_ast_next(call_argument);
-    if meta_ast_is_nil(argument_tail) == false { return 4204; }
-    let argument_start: i64 = meta_ast_start(call_argument);
-    let argument_length: i64 = meta_ast_length(call_argument);
-    let argument_root: addr = meta_ast_from_text(
-        source, argument_start, argument_length
-    );
-    let argument_tree: addr = meta_ast_first(argument_root);
-    if meta_ast_is_nil(argument_tree) { return 4203; }
+    if meta_ast_kind(call_group) != 2 { return 4201; }
+    if meta_ast_delimiter(call_group) != 40 { return 4201; }
     let expansion: addr = meta_ast_copy(template_body);
-    meta_substitute_macro(source, expansion, parameter, argument_tree);
+    let substitute_status: i32 = meta_substitute_macro_params(
+        source, expansion, parameter_group, call_group
+    );
+    if substitute_status != 1 { return substitute_status; }
     let parent: addr = meta_ast_parent(root, call_name);
     if meta_ast_is_nil(parent) { return 4205; }
     if meta_ast_replace(parent, call_name, expansion) == false {
@@ -3749,7 +3845,7 @@ let meta_expand_root = std::func(
         );
         if meta_ast_is_nil(call_name) { break; }
         let status: i32 = meta_expand_one_macro_call(
-            source, root, call_name, parameter, template_body
+            source, root, call_name, params, template_body
         );
         if status != 1 { return status; }
         expanded = expanded + 1;
