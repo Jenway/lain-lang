@@ -136,6 +136,7 @@ ABI_SUPPORT_ENTRIES = (
     "meta_lower_kind",
     "meta_expand_status",
     "meta_expand_root",
+    "meta_elaborate_status",
     "meta_find_member_return",
     "meta_is_single_decimal_argument",
     "meta_is_single_arithmetic_argument",

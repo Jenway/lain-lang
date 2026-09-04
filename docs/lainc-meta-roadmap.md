@@ -339,9 +339,9 @@ src/compiler-archive/*.lain 最终 compiler，调用正式标准库
   owner 拒绝和 owner 匹配负例。
 - [x] compiler API 在 expand、elaborate、lower 三个边界校验结果 owner，错误
   owner 返回 `5202`，不会把外部结果继续交给下一阶段。
-- [~] 五个 `lain_std_*` ABI 入口均已定义并接入编译器调度；当前
-  expand/elaborate 仍是 identity pass，lower 通过内部 hook 调用现有 lowering，
-  语义迁移尚未完成。
+- [~] 五个 `lain_std_*` ABI 入口均已定义并接入编译器调度；expand 已执行正式
+  Meta 的 AST 宏展开，elaborate 已校验展开树来源和残留宏声明，lower 仍只覆盖
+  当前已迁移的 lowering 形式。
 - [~] 已覆盖错误版本、空 pass-result handle 和跨 owner handle 负例；空 AST/IR
   对象和重复释放语义仍待补齐。空 pass-result 会在边界返回 `5202`，不会被解引用。
 - [x] 添加 `tests/lainir_lain/run_bootstrap_std_bundle.py`，覆盖 ABI、AST wrapper、
@@ -583,10 +583,11 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   `scripts/build_formal_stdlib.py` 会检查并运行版本入口。正式 Meta/lowering
   实现仍待接入这些入口；当前正式库会解析全部输入源，并为每个源生成真实的
   syntax-index 条目（源句柄、根节点、首节点、节点数、import 数和根 span）；
-  expand 已通过 `std::meta` 库函数调用 AstApi 复制并展开每个源根节点；正式库已在
+  expand 已通过 `std::meta` 库函数调用 AstApi 复制并展开每个源根节点；elaborate 已在
+  同一边界校验展开结果；正式库已在
   `syntax_index_import_status` 中按 source path 解析本地 import 和
   `std::...` 逻辑路径，缺失普通模块返回 `4101`；同一入口使用三色 DFS
-  检测本地依赖环并返回 `4103`。elaborate 仍只传递句柄，lower 对常量
+  检测本地依赖环并返回 `4103`。lower 对常量
   `return`、简单二元算术、同源无参数/一至两参数调用和布尔/数值比较双分支已生成可执行
   artifact；`unit` 空返回、单参数算术表达式、括号表达式、局部标量绑定（含算术初始化）、局部绑定调用、双局部绑定算术、双局部参数调用、本地模块成员调用和一至两个 `i64` 字段的 struct 读写已加入正式库验证，
   其余形式明确返回 `5203`。
