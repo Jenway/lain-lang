@@ -48,6 +48,8 @@ FORMAL_CONSTANT_PROBE = ROOT / "scripts" / "fixtures" / "formal_constant_return.
 FORMAL_MACRO_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_return.lain"
 FORMAL_MACRO_TWO_ARGS_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_two_args_return.lain"
 FORMAL_MACRO_TWO_DECLARATIONS_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_two_declarations_return.lain"
+FORMAL_MACRO_RECURSIVE_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_recursive.lain"
+FORMAL_MACRO_MISSING_ARGUMENT_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_missing_argument.lain"
 FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain"
 FORMAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_return.lain"
 FORMAL_CALL_ARGUMENT_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_argument_return.lain"
@@ -463,6 +465,30 @@ def verify_abi_entry() -> None:
             "formal stdlib multiple macro declarations did not run as 21"
             + (f": {detail}" if detail else "")
         )
+    for macro_error_fixture, expected_code in (
+        (FORMAL_MACRO_RECURSIVE_PROBE, "4202"),
+        (FORMAL_MACRO_MISSING_ARGUMENT_PROBE, "4203"),
+    ):
+        macro_error_probe = subprocess.run(
+            [
+                str(SEED_RUN),
+                "interpreter",
+                str(ABI_PROBE),
+                "compiler_compile_library",
+                str(ABI_OUTPUT),
+                str(ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"),
+                str(macro_error_fixture),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        error_text = macro_error_probe.stdout + macro_error_probe.stderr
+        if macro_error_probe.returncode == 0 or expected_code not in error_text:
+            raise RuntimeError(
+                f"formal stdlib macro diagnostic {expected_code} failed for "
+                f"{macro_error_fixture.name}"
+            )
     for arithmetic_fixture, expected in FORMAL_EXTRA_ARITHMETIC_PROBES:
         extra_probe = subprocess.run(
             [
