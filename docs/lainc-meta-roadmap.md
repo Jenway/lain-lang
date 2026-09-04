@@ -560,6 +560,10 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
   原 context，同一宏的不同展开使用不同 context。`formal_macro_hygiene.lain`
   已验证调用方绑定保持 context `0`，两次模板展开分别获得 context `1` 和 `2`，
   每次模板局部名均保持三处一致绑定。
+- [x] 正式 Meta 已通过稳定 ABI 入口转发 `std::type`、`std::generic`、
+  `std::effect` 和 `std::bounds` 的策略函数；`formal_meta_policy_probe.l1`
+  验证类型转换、特化键稳定性、effect 兼容性和边界检查均由正式标准库 artifact
+  实际执行。
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。
