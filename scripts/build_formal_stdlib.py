@@ -54,6 +54,9 @@ FORMAL_MACRO_HYGIENE_PROBE = ROOT / "scripts" / "fixtures" / "formal_macro_hygie
 MACRO_HYGIENE_PROBE = ROOT / "scripts" / "fixtures" / "formal_meta_macro_hygiene_probe.l1"
 MACRO_HYGIENE_BUNDLE = ROOT / "build" / "lainir" / "formal_meta_macro_hygiene_bundle.l1"
 MACRO_HYGIENE_OUTPUT = ROOT / "build" / "lainir" / "formal_meta_macro_hygiene_output.l1"
+POLICY_PROBE = ROOT / "scripts" / "fixtures" / "formal_meta_policy_probe.l1"
+POLICY_BUNDLE = ROOT / "build" / "lainir" / "formal_meta_policy_bundle.l1"
+POLICY_OUTPUT = ROOT / "build" / "lainir" / "formal_meta_policy_output.l1"
 FORMAL_ARITHMETIC_PROBE = ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain"
 FORMAL_CALL_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_return.lain"
 FORMAL_CALL_ARGUMENT_PROBE = ROOT / "scripts" / "fixtures" / "formal_call_argument_return.lain"
@@ -144,6 +147,11 @@ ABI_SUPPORT_ENTRIES = (
     "meta_expand_status",
     "meta_expand_root",
     "meta_elaborate_status",
+    "meta_type_conversion_allowed",
+    "meta_generic_parameter_valid",
+    "meta_generic_specialization_token",
+    "meta_effect_allowed",
+    "meta_bounds_check",
     "meta_find_member_return",
     "meta_is_single_decimal_argument",
     "meta_is_single_arithmetic_argument",
@@ -526,6 +534,39 @@ def verify_abi_entry() -> None:
         detail = hygiene_probe.stderr.strip() or hygiene_probe.stdout.strip()
         raise RuntimeError(
             "formal stdlib macro hygiene expansion failed"
+            + (f": {detail}" if detail else "")
+        )
+    run(
+        [
+            sys.executable,
+            BUNDLER,
+            "-o",
+            POLICY_BUNDLE,
+            CORE,
+            OUTPUT,
+            POLICY_PROBE,
+        ]
+    )
+    policy_probe = subprocess.run(
+        [
+            str(SEED_RUN),
+            "interpreter",
+            str(POLICY_BUNDLE),
+            "main",
+            str(POLICY_OUTPUT),
+            str(CORE),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if (
+        policy_probe.returncode
+        or POLICY_OUTPUT.read_text(encoding="utf-8") != "policy=1\n"
+    ):
+        detail = policy_probe.stderr.strip() or policy_probe.stdout.strip()
+        raise RuntimeError(
+            "formal stdlib type/generic/effect/bounds policy failed"
             + (f": {detail}" if detail else "")
         )
     for arithmetic_fixture, expected in FORMAL_EXTRA_ARITHMETIC_PROBES:
