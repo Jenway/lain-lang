@@ -538,6 +538,8 @@ lowering”，并证明禁用 stdlib 后 compiler 不会自己识别或执行该
 - [x] 启动层的 lowering 形式选择已统一由正式 Meta 的 `meta_lower_kind` 返回；
   unit、局部绑定、struct、`if` 和四种已支持的调用模式均由该结果接管，
   启动层不再重复计算调用参数模式。
+- [x] `expand` 阶段的 import、module、struct 规则已统一由正式 Meta 的
+  `meta_expand_status` 返回；bootstrap 入口只封装状态和 AST 句柄。
 - [x] 调用参数中的二元算术物化已由正式 Meta 的
   `meta_copy_argument_expression` 负责；函数调用 lowering 与 return lowering
   共享同一套表达式生成规则。
