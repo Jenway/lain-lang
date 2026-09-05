@@ -1,4 +1,6 @@
-# Lain 语言核心设计
+# Lain 语言核心设计（Scheme 时期设计快照）
+
+> 历史资料：本文保存旧 Scheme Meta 三阶段方案，不定义当前实现。当前概览见 [`docs/00-intro.md`](../00-intro.md)。
 
 ## 设计原则
 

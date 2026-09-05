@@ -836,6 +836,69 @@ static LainirRunStatus ir_procedure_external(
   return LAINIR_RUN_OK;
 }
 
+static LainirRunStatus ir_procedure_data(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *item;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(item = ir_find_prepared_procedure(context, args[0].as.bits))) {
+    *error = "bootstrap.ir-procedure-data expects a valid module item id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_procedure_is_data(item), 1);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_data_size(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *item;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(item = ir_find_prepared_procedure(context, args[0].as.bits)) ||
+      !lainir_procedure_is_data(item)) {
+    *error = "bootstrap.ir-data-size expects a valid data item id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_data_size(item), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_data_alignment(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *item;
+  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
+      !(item = ir_find_prepared_procedure(context, args[0].as.bits)) ||
+      !lainir_procedure_is_data(item)) {
+    *error = "bootstrap.ir-data-alignment expects a valid data item id";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(lainir_data_alignment(item), 64);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus ir_data_byte(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  const L1Subroutine *item;
+  const uint8_t *bytes;
+  if (count != 2 || args[0].kind != LAINIR_VALUE_BITS ||
+      args[1].kind != LAINIR_VALUE_BITS ||
+      !(item = ir_find_prepared_procedure(context, args[0].as.bits)) ||
+      !lainir_procedure_is_data(item) ||
+      args[1].as.bits >= lainir_data_size(item) ||
+      !(bytes = lainir_data_bytes(item))) {
+    *error = "bootstrap.ir-data-byte expects a valid data item and byte index";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(bytes[args[1].as.bits], 8);
+  return LAINIR_RUN_OK;
+}
+
 static LainirRunStatus ir_procedure_parameter_name(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
@@ -1383,20 +1446,6 @@ static LainirRunStatus ir_expression_offset(
   return LAINIR_RUN_OK;
 }
 
-static LainirRunStatus ir_expression_field_index(
-    const LainirValue *args, uint32_t count, LainirValue *result,
-    const char **error, void *user_data) {
-  const L1Expr *expression;
-  (void)user_data;
-  if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
-      !(expression = ir_find_prepared_expression((const BootstrapContext *)user_data, args[0].as.bits))) {
-    *error = "bootstrap.ir-expression-field-index expects an expression id";
-    return LAINIR_RUN_BAD_CALL;
-  }
-  *result = lainir_value_bits(lainir_expr_field_index(expression), 32);
-  return LAINIR_RUN_OK;
-}
-
 static LainirRunStatus ir_expression_byte_size(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
@@ -1901,6 +1950,12 @@ int bootstrap_run_cli(int argc, char **argv) {
                       ir_procedure_parameter_count, &context) ||
       !add_capability(caps, "bootstrap.ir-procedure-external",
                       ir_procedure_external, &context) ||
+      !add_capability(caps, "bootstrap.ir-procedure-data",
+                      ir_procedure_data, &context) ||
+      !add_capability(caps, "bootstrap.ir-data-size", ir_data_size, &context) ||
+      !add_capability(caps, "bootstrap.ir-data-alignment", ir_data_alignment,
+                      &context) ||
+      !add_capability(caps, "bootstrap.ir-data-byte", ir_data_byte, &context) ||
       !add_capability(caps, "bootstrap.ir-procedure-parameter-name",
                       ir_procedure_parameter_name, &context) ||
       !add_capability(caps, "bootstrap.ir-procedure-parameter-width",
@@ -1967,8 +2022,6 @@ int bootstrap_run_cli(int argc, char **argv) {
                       ir_expression_scale, &context) ||
       !add_capability(caps, "bootstrap.ir-expression-offset",
                       ir_expression_offset, &context) ||
-      !add_capability(caps, "bootstrap.ir-expression-field-index",
-                      ir_expression_field_index, &context) ||
       !add_capability(caps, "bootstrap.ir-expression-byte-size",
                       ir_expression_byte_size, &context) ||
       !add_capability(caps, "bootstrap.ir-expression-string",

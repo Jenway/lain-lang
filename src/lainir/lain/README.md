@@ -65,11 +65,14 @@ zero-parameter `main` entry; the host no longer needs a second semantic entry
 point.
 
 The compiler API now dispatches `lain_std_expand`, `lain_std_elaborate`, and
-`lain_std_lower` through the bootstrap standard-library artifact.  Module and
-struct, record, type, import, evaluation, call, and program-lowering
-implementations are bundled in that artifact.  The exported lowering helper is
-named `lain_std_lower_program`; the old `lain_core_lower_program` spelling is
-kept out of the active source so ownership is explicit.
+`lain_std_lower` through the bootstrap standard-library artifact.  Module,
+struct, record, import, evaluation, call, policy, and the currently supported
+program-lowering implementations are bundled in that artifact.  The exported
+lowering helper is named `lain_std_lower_program`; the old
+`lain_core_lower_program` spelling is kept out of the active source so
+ownership is explicit.  The remaining full type/generic/effect semantics and
+general control-flow lowering are still migration work in the standard
+library, not compiler-core work.
 
 `eval_result.l1` is the shared result ABI for compile-time evaluation.  It keeps
 the scalar/object kind and resource owner in one layout; the evaluator and Meta

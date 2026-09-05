@@ -4,10 +4,16 @@
 能够被编译以前的启动实现，不是另一套语言规范。
 
 当前已经冻结 `lain_std_abi_version`、`lain_std_initialize`、
-`lain_std_expand`、`lain_std_elaborate` 和 `lain_std_lower` 五个入口。前两个
-提供版本和上下文初始化，expand/elaborate 目前是 identity pass，lower 暂时
-调用 core hook；语言形式、类型、泛型、effect 和真正的 lowering 仍要逐步迁入，
-并由 `#eval` 承担编译期执行。
+`lain_std_expand`、`lain_std_elaborate` 和 `lain_std_lower` 五个入口。版本和
+上下文初始化由标准库提供；expand 会遍历 source unit，执行 module、record、
+struct 和 import 校验，并返回带 owner 的 pass-result；elaborate 会检查展开
+结果；lower 会调用标准库内的 lowering 实现，当前覆盖常量、算术、函数调用、
+局部绑定、模块成员、struct 字段和简单 `if`。编译期计算统一经过 LAIN-IR
+`#eval` 和 `EvalResult`，type/generic/effect/bounds 的第一代策略入口也在此
+artifact 中。
+
+完整类型/泛型语义、完整控制流和完整 L1 Unit 生成仍未完成；这些是剩余迁移项，
+不应再写回 compiler core。
 
 `scripts/build_lain_compiler.py` 会分别生成：
 

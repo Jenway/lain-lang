@@ -31,7 +31,7 @@ text --raw_parse--> RawAst --views--> semantics
 | `ast_postfix_name(node)` / `ast_postfix_args(node)` | callee atom / arg group |
 
 `Vec(i32)`, `foo(x)` and `Throws(i32)` all share the postfix topology
-(see `docs/02-meta-system.md` §14); the caller decides the view.
+(see `docs/03-meta-system.md` §8); the caller decides the view.
 
 ## Traversal and transforms
 

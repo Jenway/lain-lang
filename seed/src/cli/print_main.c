@@ -9,7 +9,6 @@
 #include <string.h>
 
 int main(int argc, char **argv) {
-  int strict = 0;
   int fold_eval = 0;
   int input_index = 1;
   unsigned char *source;
@@ -18,13 +17,12 @@ int main(int argc, char **argv) {
   L1Diagnostic diagnostic;
   const char *entry = NULL;
   while (input_index < argc && argv[input_index][0] == '-') {
-    if (strcmp(argv[input_index], "--strict") == 0) strict = 1;
-    else if (strcmp(argv[input_index], "--fold-eval") == 0) fold_eval = 1;
+    if (strcmp(argv[input_index], "--fold-eval") == 0) fold_eval = 1;
     else break;
     input_index++;
   }
   if (argc < input_index + 1 || argc > input_index + 2) {
-    fprintf(stderr, "usage: lainir-print [--strict] [--fold-eval] <input.l1> [entry]\n");
+    fprintf(stderr, "usage: lainir-print [--fold-eval] <input.l1> [entry]\n");
     return 2;
   }
   if (argc == input_index + 2) entry = argv[input_index + 1];
@@ -33,10 +31,8 @@ int main(int argc, char **argv) {
     fprintf(stderr, "cannot read %s\n", argv[input_index]);
     return 2;
   }
-  if (!(strict ? lainir_parse_module_checked_strict(
-                  (const char *)source, &module, &diagnostic)
-              : lainir_parse_module_checked(
-                  (const char *)source, &module, &diagnostic))) {
+  if (!lainir_parse_module_checked(
+          (const char *)source, &module, &diagnostic)) {
     fprintf(stderr, "parse[%d] line %d: %s\n", diagnostic.code,
             diagnostic.line, diagnostic.message);
     free(source);

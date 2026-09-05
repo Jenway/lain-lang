@@ -141,6 +141,11 @@ def main() -> int:
             "",
             1,
         )
+        eval_source = eval_source.replace(
+            "#extern #proc bootstrap.release-pages(addr %memory) -> #unit;\n",
+            "",
+            1,
+        )
         source.write_text(
             CONTEXT.read_text(encoding="utf-8")
             + "\n"

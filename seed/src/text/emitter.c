@@ -108,6 +108,26 @@ static void emit_c_string_literal(const char *text, EmitState *out) {
   emitf(out, "\"");
 }
 
+static void emit_data_literal(const uint8_t *bytes, uint32_t length,
+                              EmitState *out) {
+  emitf(out, "\"");
+  for (uint32_t i = 0; i < length; i++) {
+    unsigned char byte = bytes[i];
+    switch (byte) {
+    case '\\': emitf(out, "\\\\"); break;
+    case '"': emitf(out, "\\\""); break;
+    case '\n': emitf(out, "\\n"); break;
+    case '\r': emitf(out, "\\r"); break;
+    case '\t': emitf(out, "\\t"); break;
+    default:
+      if (byte < 32 || byte >= 127) emitf(out, "\\x%02x", (unsigned)byte);
+      else emitf(out, "%c", byte);
+      break;
+    }
+  }
+  emitf(out, "\"");
+}
+
 static void emit_l1_expr(L1Expr *expr, EmitState *out) {
   const char *explicit_integer_op = NULL;
   if (!expr) {
@@ -166,13 +186,6 @@ static void emit_l1_expr(L1Expr *expr, EmitState *out) {
     emit_l1_expr(expr->data.bin.right, out);
     emitf(out, ")");
     break;
-  case EXPR_DIV:
-    emitf(out, "#div(");
-    emit_l1_expr(expr->data.bin.left, out);
-    emitf(out, ", ");
-    emit_l1_expr(expr->data.bin.right, out);
-    emitf(out, ")");
-    break;
   case EXPR_EQ:
     emitf(out, "#eq(");
     emit_l1_expr(expr->data.bin.left, out);
@@ -182,34 +195,6 @@ static void emit_l1_expr(L1Expr *expr, EmitState *out) {
     break;
   case EXPR_NE:
     emitf(out, "#ne(");
-    emit_l1_expr(expr->data.bin.left, out);
-    emitf(out, ", ");
-    emit_l1_expr(expr->data.bin.right, out);
-    emitf(out, ")");
-    break;
-  case EXPR_LT:
-    emitf(out, "#lt(");
-    emit_l1_expr(expr->data.bin.left, out);
-    emitf(out, ", ");
-    emit_l1_expr(expr->data.bin.right, out);
-    emitf(out, ")");
-    break;
-  case EXPR_LE:
-    emitf(out, "#le(");
-    emit_l1_expr(expr->data.bin.left, out);
-    emitf(out, ", ");
-    emit_l1_expr(expr->data.bin.right, out);
-    emitf(out, ")");
-    break;
-  case EXPR_GT:
-    emitf(out, "#gt(");
-    emit_l1_expr(expr->data.bin.left, out);
-    emitf(out, ", ");
-    emit_l1_expr(expr->data.bin.right, out);
-    emitf(out, ")");
-    break;
-  case EXPR_GE:
-    emitf(out, "#ge(");
     emit_l1_expr(expr->data.bin.left, out);
     emitf(out, ", ");
     emit_l1_expr(expr->data.bin.right, out);
@@ -341,14 +326,8 @@ static void emit_l1_expr(L1Expr *expr, EmitState *out) {
   case EXPR_STRING:
     emit_c_string_literal(expr->data.str_val.content, out);
     break;
-  case EXPR_PRIMITIVE:
-    emitf(out, "#primitive %s(", expr->data.primitive.opcode);
-    for (uint32_t i = 0; i < expr->data.primitive.operand_count; i++) {
-      emit_l1_expr(expr->data.primitive.operands[i], out);
-      if (i < expr->data.primitive.operand_count - 1)
-        emitf(out, ", ");
-    }
-    emitf(out, ")");
+  case EXPR_DATA_ADDR:
+    emitf(out, "#data_addr(%s)", expr->data.data_addr.name);
     break;
   case EXPR_ALLOCA:
     emitf(out, "#alloca(");
@@ -357,15 +336,6 @@ static void emit_l1_expr(L1Expr *expr, EmitState *out) {
     else
       emit_l1_type(expr->data.alloca.element_ty, out);
     emitf(out, ")");
-    break;
-  case EXPR_FIELD:
-    emitf(out, "#field[%d](", expr->data.field.field_index);
-    emit_l1_expr(expr->data.field.base, out);
-    emitf(out, ")");
-    if (expr->data.field.field_ty) {
-      emitf(out, ":");
-      emit_l1_type(expr->data.field.field_ty, out);
-    }
     break;
   case EXPR_CALL_INDIRECT:
     emitf(out, "#call_indirect[(");
@@ -487,6 +457,15 @@ static void emit_l1_block(
 }
 
 static void emit_l1_subroutine(L1Subroutine *sub, EmitState *out) {
+  if (sub->is_data) {
+    uint32_t used = sub->data_size;
+    while (used && sub->data_bytes[used - 1] == 0) used--;
+    emitf(out, "#data %s(%u, %u, ", sub->name, sub->data_size,
+          sub->data_alignment);
+    emit_data_literal(sub->data_bytes, used, out);
+    emitf(out, ");\n\n");
+    return;
+  }
   if (sub->is_extern && !sub->blocks) {
     emitf(out, "#extern #proc %s(",
             sub->link_name ? sub->link_name : sub->name);

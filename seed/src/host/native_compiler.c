@@ -263,6 +263,30 @@ int64_t bootstrap_dot_ir_dash_procedure_dash_external(int64_t id) {
   return procedure ? (int64_t)lainir_procedure_is_external(procedure) : -1;
 }
 
+int64_t bootstrap_dot_ir_dash_procedure_dash_data(int64_t id) {
+  const L1Subroutine *item = find_prepared_procedure(id);
+  return item ? (int64_t)lainir_procedure_is_data(item) : -1;
+}
+
+int64_t bootstrap_dot_ir_dash_data_dash_size(int64_t id) {
+  const L1Subroutine *item = find_prepared_procedure(id);
+  return item && lainir_procedure_is_data(item) ? (int64_t)lainir_data_size(item) : -1;
+}
+
+int64_t bootstrap_dot_ir_dash_data_dash_alignment(int64_t id) {
+  const L1Subroutine *item = find_prepared_procedure(id);
+  return item && lainir_procedure_is_data(item) ? (int64_t)lainir_data_alignment(item) : -1;
+}
+
+int8_t bootstrap_dot_ir_dash_data_dash_byte(int64_t id, int64_t index) {
+  const L1Subroutine *item = find_prepared_procedure(id);
+  const uint8_t *bytes;
+  if (!item || !lainir_procedure_is_data(item) || index < 0 ||
+      (uint64_t)index >= lainir_data_size(item) || !(bytes = lainir_data_bytes(item)))
+    return 0;
+  return (int8_t)bytes[index];
+}
+
 int64_t bootstrap_dot_ir_dash_procedure_dash_first_dash_block(int64_t id) {
   const L1Subroutine *procedure = find_prepared_procedure(id);
   return procedure ? (int64_t)(uintptr_t)lainir_procedure_first_block(procedure) : 0;
@@ -390,11 +414,6 @@ int64_t bootstrap_dot_ir_dash_expression_dash_scale(int64_t id) {
 int64_t bootstrap_dot_ir_dash_expression_dash_offset(int64_t id) {
   const L1Expr *expression = find_prepared_expression(id);
   return expression ? (int64_t)lainir_expr_offset(expression) : 0;
-}
-
-int64_t bootstrap_dot_ir_dash_expression_dash_field_dash_index(int64_t id) {
-  const L1Expr *expression = find_prepared_expression(id);
-  return expression ? (int64_t)lainir_expr_field_index(expression) : 0;
 }
 
 int64_t bootstrap_dot_ir_dash_expression_dash_byte_dash_size(int64_t id) {

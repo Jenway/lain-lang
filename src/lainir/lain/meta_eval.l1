@@ -4,18 +4,37 @@
 // LAIN-IR; runtime lowering stays in lower_program and the later lower_* files.
 
 #extern #proc program_is_std_module_value(
-  addr %source, addr %value_node
-) -> i1;
-#extern #proc program_unit_compile_context(addr %unit) -> addr;
-#extern #proc lain_compile_context_v1_consume_step(addr %context) -> i1;
-#extern #proc lain_compile_context_v1_enter_recursion(addr %context) -> i1;
-#extern #proc lain_compile_context_v1_leave_recursion(addr %context) -> #unit;
-#extern #proc lain_compile_context_v1_owner(addr %context) -> addr;
-#extern #proc eval_result_set_owner(addr %result, addr %owner) -> #unit;
+  #addr %source, #addr %value_node
+) -> #bits<1>;
+#extern #proc program_unit_compile_context(#addr %unit) -> #addr;
+#extern #proc lain_compile_context_v1_consume_step(#addr %context) -> #bits<1>;
+#extern #proc lain_compile_context_v1_enter_recursion(#addr %context) -> #bits<1>;
+#extern #proc lain_compile_context_v1_leave_recursion(#addr %context) -> #unit;
+#extern #proc lain_compile_context_v1_owner(#addr %context) -> #addr;
+#extern #proc eval_result_set_owner(#addr %result, #addr %owner) -> #unit;
+#extern #proc eval_result_release(#addr %result) -> #unit;
+#extern #proc bootstrap.release-pages(#addr %memory) -> #unit;
+
+#proc program_eval_arguments_release(
+  #addr %arguments, #bits<64> %count
+) -> #unit {
+  #if #eq(#ptr2int(%arguments), 0) { #return }
+  #let %index: #bits<64> = 0
+  #loop release_arguments {
+    #if #sge(%index, %count) { #break release_arguments }
+    #call eval_result_release(
+      #load[#addr](#lea(base=%arguments, idx=%index, scale=8, offset=0))
+    )
+    %index: #bits<64> = #add(%index, 1)
+    #continue release_arguments
+  }
+  #call bootstrap.release-pages(%arguments)
+  #return
+}
 
 #proc program_eval_function_finish(
-  addr %context, i1 %entered, addr %result
-) -> addr {
+  #addr %context, #bits<1> %entered, #addr %result
+) -> #addr {
   #if %entered {
     #call lain_compile_context_v1_leave_recursion(%context)
     #call eval_result_set_owner(
@@ -26,15 +45,15 @@
 }
 
 #proc program_eval_param_value(
-  addr %source, addr %function, addr %node, addr %arguments
-) -> addr {
+  #addr %source, #addr %function, #addr %node, #addr %arguments
+) -> #addr {
   #if #call program_function_is_nil(%function) {
     #return #call eval_result_new(5108, 0)
   }
-  #let %params: addr = #call raw_node_first(
+  #let %params: #addr = #call raw_node_first(
     #call program_function_params(%function)
   )
-  #let %data: addr = #call tool_source_data(%source)
+  #let %data: #addr = #call tool_source_data(%source)
   #let %index: #bits<64> = 0
   #loop parameters {
     #if #call raw_is_nil(%params) { #break parameters }
@@ -42,9 +61,9 @@
       #call raw_node_length(%params), #call raw_node_length(%node)
     ) {
       #let %offset: #bits<64> = 0
-      #let %same: i1 = 1
+      #let %same: #bits<1> = 1
       #loop compare {
-        #if #ge(%offset, #call raw_node_length(%node)) {
+        #if #sge(%offset, #call raw_node_length(%node)) {
           #break compare
         }
         #if #ne(
@@ -55,24 +74,24 @@
             %data, #add(#call raw_node_start(%node), %offset)
           )
         ) {
-          %same: i1 = 0
+          %same: #bits<1> = 0
           #break compare
         }
         %offset: #bits<64> = #add(%offset, 1)
         #continue compare
       }
       #if %same {
-        #return #load[addr](
+        #return #load[#addr](
           #lea(base=%arguments, idx=%index, scale=8, offset=0)
         )
       }
     }
-    #let %colon: addr = #call raw_node_next(%params)
-    #let %type: addr = #call raw_node_next(%colon)
-    #let %type_end: addr = #call program_type_end(%source, %type)
-    #let %separator: addr = #call raw_node_next(%type_end)
+    #let %colon: #addr = #call raw_node_next(%params)
+    #let %type: #addr = #call raw_node_next(%colon)
+    #let %type_end: #addr = #call program_type_end(%source, %type)
+    #let %separator: #addr = #call raw_node_next(%type_end)
     #if #call raw_is_nil(%separator) { #break parameters }
-    %params: addr = #call raw_node_next(%separator)
+    %params: #addr = #call raw_node_next(%separator)
     %index: #bits<64> = #add(%index, 1)
     #continue parameters
   }
@@ -80,11 +99,11 @@
 }
 
 #proc program_eval_operand(
-  addr %unit, addr %source, addr %function, addr %arguments,
-  addr %node
-) -> addr {
+  #addr %unit, #addr %source, #addr %function, #addr %arguments,
+  #addr %node
+) -> #addr {
   #if #call program_is_parenthesized_operand(%node) {
-    #let %inner: addr = #call program_parenthesized_inner(%node)
+    #let %inner: #addr = #call program_parenthesized_inner(%node)
     #if #call raw_is_nil(%inner) {
       #return #call eval_result_new(3102, 0)
     }
@@ -98,23 +117,23 @@
     )
   }
   #if #call program_is_decimal(%source, %node) {
-    #let %parsed: addr = #call program_parse_decimal(%source, %node)
+    #let %parsed: #addr = #call program_parse_decimal(%source, %node)
     #return #call eval_result_new(
       #call program_result_status(%parsed),
       #call program_result_value(%parsed)
     )
   }
   #if #call program_is_external_vec_call(%source, %node) {
-    #let %environment: addr = #call program_unit_meta_environment(%unit)
+    #let %environment: #addr = #call program_unit_meta_environment(%unit)
     #if #eq(#call program_function_is_nil(%function), 0) {
-      #let %function_environment: addr = #call program_function_environment(
+      #let %function_environment: #addr = #call program_function_environment(
         %function
       )
       #if #eq(#call raw_is_nil(%function_environment), 0) {
-        %environment: addr = %function_environment
+        %environment: #addr = %function_environment
       }
     }
-    #let %existing: addr = #call meta_env_lookup_path(
+    #let %existing: #addr = #call meta_env_lookup_path(
       %environment, %source, %node
     )
     #if #eq(#call meta_value_kind(%existing), 0) {
@@ -122,7 +141,7 @@
     }
   }
   #if #call program_is_std_path(%source, %node) {
-    #let %member: addr = #call program_operand_name(%source, %node)
+    #let %member: #addr = #call program_operand_name(%source, %node)
     #if #call meta_atom_equal(
       %source, %member, "type_with_namespace", 19
     ) {
@@ -135,15 +154,15 @@
   #if #call program_is_std_meta_object(%source, %node) {
     #return #call program_eval_std_meta_object(%source, %node)
   }
-  #let %name: addr = #call program_operand_name(%source, %node)
-  #let %group: addr = #call program_operand_group(%source, %node)
+  #let %name: #addr = #call program_operand_name(%source, %node)
+  #let %group: #addr = #call program_operand_group(%source, %node)
   #if #eq(#call raw_is_nil(%group), 0) {
-    #let %environment: addr = #call program_unit_meta_environment(%unit)
+    #let %environment: #addr = #call program_unit_meta_environment(%unit)
     #if #eq(#call program_function_is_nil(%function), 0) {
-      #let %function_environment: addr =
+      #let %function_environment: #addr =
         #call program_function_environment(%function)
       #if #eq(#call raw_is_nil(%function_environment), 0) {
-        %environment: addr = %function_environment
+        %environment: #addr = %function_environment
       }
     }
     #return #call program_eval_call_environment(
@@ -152,7 +171,7 @@
     )
   }
   #if #call program_is_record_literal(%source, %node) {
-    #let %record_type: addr = #call program_find_type(
+    #let %record_type: #addr = #call program_find_type(
       %unit, %source, %name
     )
     #if #eq(#call raw_is_nil(%record_type), 0) {
@@ -165,15 +184,15 @@
       )
     }
   }
-  #let %environment: addr = #call program_unit_meta_environment(%unit)
+  #let %environment: #addr = #call program_unit_meta_environment(%unit)
   #if #eq(#call program_function_is_nil(%function), 0) {
-    #let %function_environment: addr =
+    #let %function_environment: #addr =
       #call program_function_environment(%function)
     #if #eq(#call raw_is_nil(%function_environment), 0) {
-      %environment: addr = %function_environment
+      %environment: #addr = %function_environment
     }
   }
-  #let %meta_value: addr = #call meta_env_lookup_path(
+  #let %meta_value: #addr = #call meta_env_lookup_path(
     %environment, %source, %node
   )
   #if #eq(#call raw_is_nil(%meta_value), 0) {
@@ -189,11 +208,11 @@
       0, #call meta_value_type(%source, %node, %node)
     )
   }
-  #let %parameter: addr = #call program_eval_param_value(
+  #let %parameter: #addr = #call program_eval_param_value(
     %source, %function, %name, %arguments
   )
   #if #eq(#call eval_status(%parameter), 0) { #return %parameter }
-  #let %constant: addr = #call program_find_constant(
+  #let %constant: #addr = #call program_find_constant(
     %unit, %source, %name
   )
   #if #eq(#call raw_is_nil(%constant), 0) {
@@ -205,19 +224,19 @@
 }
 
 #proc program_eval_value_expression(
-  addr %unit, addr %source, addr %function, addr %arguments,
-  addr %left
-) -> addr {
+  #addr %unit, #addr %source, #addr %function, #addr %arguments,
+  #addr %left
+) -> #addr {
   // Keep one implementation of binary expression evaluation.  The wrapper
   // selects the caller's lexical environment, then delegates to the
   // environment-aware routine below.
-  #let %environment: addr = #call program_unit_meta_environment(%unit)
+  #let %environment: #addr = #call program_unit_meta_environment(%unit)
   #if #eq(#call program_function_is_nil(%function), 0) {
-    #let %function_environment: addr = #call program_function_environment(
+    #let %function_environment: #addr = #call program_function_environment(
       %function
     )
     #if #eq(#call raw_is_nil(%function_environment), 0) {
-      %environment: addr = %function_environment
+      %environment: #addr = %function_environment
     }
   }
   #return #call program_eval_value_environment(
@@ -226,16 +245,16 @@
 }
 
 #proc program_eval_bind_parameters(
-  addr %unit, addr %source, addr %function,
-  addr %arguments, addr %environment
+  #addr %unit, #addr %source, #addr %function,
+  #addr %arguments, #addr %environment
 ) -> #bits<32> {
-  #let %param: addr = #call raw_node_first(
+  #let %param: #addr = #call raw_node_first(
     #call program_function_params(%function)
   )
   #let %index: #bits<64> = 0
   #loop parameters {
     #if #call raw_is_nil(%param) { #return 0 }
-    #let %argument: addr = #load[addr](
+    #let %argument: #addr = #load[#addr](
       #lea(base=%arguments, idx=%index, scale=8, offset=0)
     )
     #if #call eval_result_is_object(%argument) {
@@ -250,55 +269,62 @@
         )
       )
     }
-    #let %colon: addr = #call raw_node_next(%param)
-    #let %type: addr = #call raw_node_next(%colon)
-    #let %type_end: addr = #call program_type_end(%source, %type)
-    #let %separator: addr = #call raw_node_next(%type_end)
+    #call eval_result_release(%argument)
+    #let %colon: #addr = #call raw_node_next(%param)
+    #let %type: #addr = #call raw_node_next(%colon)
+    #let %type_end: #addr = #call program_type_end(%source, %type)
+    #let %separator: #addr = #call raw_node_next(%type_end)
     #if #call raw_is_nil(%separator) { #return 0 }
-    %param: addr = #call raw_node_next(%separator)
+    %param: #addr = #call raw_node_next(%separator)
     %index: #bits<64> = #add(%index, 1)
     #continue parameters
   }
 }
 
 #proc program_eval_type_with_namespace_environment(
-  addr %unit, addr %source, addr %function, addr %arguments,
-  addr %environment, addr %group
-) -> addr {
-  #let %type_argument: addr = #call raw_node_first(%group)
-  #let %comma: addr = #call raw_node_next(%type_argument)
+  #addr %unit, #addr %source, #addr %function, #addr %arguments,
+  #addr %environment, #addr %group
+) -> #addr {
+  #let %type_argument: #addr = #call raw_node_first(%group)
+  #let %comma: #addr = #call raw_node_next(%type_argument)
   #if #call raw_is_nil(%comma) {
     #return #call eval_result_new(3102, 0)
   }
-  #let %namespace_argument: addr = #call raw_node_next(%comma)
+  #let %namespace_argument: #addr = #call raw_node_next(%comma)
   #if #call raw_is_nil(%namespace_argument) {
     #return #call eval_result_new(3102, 0)
   }
-  #let %type_result: addr = #call program_eval_operand_environment(
+  #let %type_result: #addr = #call program_eval_operand_environment(
     %unit, %source, %function, %arguments, %environment, %type_argument
   )
   #if #ne(#call eval_status(%type_result), 0) {
     #return %type_result
   }
   #if #eq(#call eval_result_is_object(%type_result), 0) {
+    #call eval_result_release(%type_result)
     #return #call eval_result_new(3102, 0)
   }
-  #let %namespace_result: addr = #call program_eval_operand_environment(
+  #let %namespace_result: #addr = #call program_eval_operand_environment(
     %unit, %source, %function, %arguments,
     %environment, %namespace_argument
   )
   #if #ne(#call eval_status(%namespace_result), 0) {
+    #call eval_result_release(%type_result)
     #return %namespace_result
   }
   #if #eq(#call eval_result_is_object(%namespace_result), 0) {
+    #call eval_result_release(%type_result)
+    #call eval_result_release(%namespace_result)
     #return #call eval_result_new(3102, 0)
   }
-  #let %type_value: addr = #call eval_object(%type_result)
-  #let %namespace_value: addr = #call eval_object(%namespace_result)
+  #let %type_value: #addr = #call eval_object(%type_result)
+  #let %namespace_value: #addr = #call eval_object(%namespace_result)
   #if #ne(#call meta_value_kind(%namespace_value), 2) {
+    #call eval_result_release(%type_result)
+    #call eval_result_release(%namespace_result)
     #return #call eval_result_new(3102, 0)
   }
-  #return #call eval_result_object(
+  #let %result: #addr = #call eval_result_object(
     0,
     #call meta_value_type_with_namespace(
       %source, %type_argument,
@@ -306,18 +332,21 @@
       #call meta_value_environment(%namespace_value)
     )
   )
+  #call eval_result_release(%type_result)
+  #call eval_result_release(%namespace_result)
+  #return %result
 }
 
 #proc program_eval_type_with_namespace(
-  addr %unit, addr %source, addr %function, addr %arguments,
-  addr %group
-) -> addr {
-  #let %environment: addr = #call program_unit_meta_environment(%unit)
+  #addr %unit, #addr %source, #addr %function, #addr %arguments,
+  #addr %group
+) -> #addr {
+  #let %environment: #addr = #call program_unit_meta_environment(%unit)
   #if #eq(#call program_function_is_nil(%function), 0) {
-    #let %function_environment: addr =
+    #let %function_environment: #addr =
       #call program_function_environment(%function)
     #if #eq(#call raw_is_nil(%function_environment), 0) {
-      %environment: addr = %function_environment
+      %environment: #addr = %function_environment
     }
   }
   #return #call program_eval_type_with_namespace_environment(
@@ -327,11 +356,11 @@
 }
 
 #proc program_eval_function(
-  addr %unit, addr %function, addr %arguments
-) -> addr {
+  #addr %unit, #addr %function, #addr %arguments
+) -> #addr {
   #call program_unit_set_meta_stage(%unit, 11)
-  #let %context: addr = #call program_unit_compile_context(%unit)
-  #let %entered: i1 = 0
+  #let %context: #addr = #call program_unit_compile_context(%unit)
+  #let %entered: #bits<1> = 0
   #if #ne(#ptr2int(%context), 0) {
     #if #eq(#call lain_compile_context_v1_consume_step(%context), 0) {
       #call program_unit_set_validation_function(%unit, %function)
@@ -341,25 +370,25 @@
       #call program_unit_set_validation_function(%unit, %function)
       #return #call eval_result_new(5125, 0)
     }
-    %entered: i1 = 1
+    %entered: #bits<1> = 1
     // Keep the unit-local counter useful for diagnostics; the context owns
     // the actual step decision when a compile context is attached.
-    #let %unit_step_hit: i1 = #call program_unit_meta_step_inc(%unit)
+    #let %unit_step_hit: #bits<1> = #call program_unit_meta_step_inc(%unit)
   } else {
     #if #call program_unit_meta_step_inc(%unit) {
       #call program_unit_set_validation_function(%unit, %function)
       #return #call eval_result_new(5124, 0)
     }
   }
-  #let %source: addr = #call program_function_source(%function)
-  #let %old_environment: addr = #call program_function_environment(
+  #let %source: #addr = #call program_function_source(%function)
+  #let %old_environment: #addr = #call program_function_environment(
     %function
   )
-  #let %parent: addr = %old_environment
+  #let %parent: #addr = %old_environment
   #if #call raw_is_nil(%parent) {
-    %parent: addr = #call program_unit_meta_environment(%unit)
+    %parent: #addr = #call program_unit_meta_environment(%unit)
   }
-  #let %environment: addr = #call meta_env_new(%parent)
+  #let %environment: #addr = #call meta_env_new(%parent)
   #call program_function_set_environment(%function, %environment)
   #let %parameter_status: #bits<32> = #call program_eval_bind_parameters(
     %unit, %source, %function, %arguments, %environment
@@ -370,7 +399,7 @@
       %context, %entered, #call eval_result_new(%parameter_status, 0)
     )
   }
-  #let %statement: addr = #call raw_node_first(
+  #let %statement: #addr = #call raw_node_first(
     #call program_function_body(%function)
   )
   #loop statements {
@@ -394,14 +423,14 @@
           %context, %entered, #call eval_result_new(%local_status, 0)
         )
       }
-      %statement: addr = #call program_skip_statement(%source, %statement)
+      %statement: #addr = #call program_skip_statement(%source, %statement)
       #continue statements
     }
     #if #call meta_atom_equal(%source, %statement, "return", 6) {
-      #let %value: addr = #call raw_node_next(%statement)
+      #let %value: #addr = #call raw_node_next(%statement)
       #if #call program_is_std_module_value(%source, %value) {
-        #let %module_environment: addr = #call meta_env_new(%environment)
-        #let %module_value: addr = #call meta_value_module(
+        #let %module_environment: #addr = #call meta_env_new(%environment)
+        #let %module_value: #addr = #call meta_value_module(
           %source, %value,
           #call program_std_module_value_group(%source, %value),
           %module_environment
@@ -423,7 +452,7 @@
           %context, %entered, #call eval_result_object(0, %module_value)
         )
       }
-      #let %result: addr = #call program_eval_value_expression(
+      #let %result: #addr = #call program_eval_value_expression(
         %unit, %source, %function, %arguments, %value
       )
       #if #ne(#call eval_status(%result), 0) {
@@ -445,11 +474,11 @@
 }
 
 #proc program_eval_operand_environment(
-  addr %unit, addr %source, addr %function, addr %arguments,
-  addr %environment, addr %node
-) -> addr {
+  #addr %unit, #addr %source, #addr %function, #addr %arguments,
+  #addr %environment, #addr %node
+) -> #addr {
   #if #call program_is_parenthesized_operand(%node) {
-    #let %inner: addr = #call program_parenthesized_inner(%node)
+    #let %inner: #addr = #call program_parenthesized_inner(%node)
     #if #call raw_is_nil(%inner) {
       #return #call eval_result_new(3102, 0)
     }
@@ -463,14 +492,14 @@
     )
   }
   #if #call program_is_decimal(%source, %node) {
-    #let %parsed: addr = #call program_parse_decimal(%source, %node)
+    #let %parsed: #addr = #call program_parse_decimal(%source, %node)
     #return #call eval_result_new(
       #call program_result_status(%parsed),
       #call program_result_value(%parsed)
     )
   }
   #if #call program_is_external_vec_call(%source, %node) {
-    #let %existing: addr = #call meta_env_lookup_path(
+    #let %existing: #addr = #call meta_env_lookup_path(
       %environment, %source, %node
     )
     #if #eq(#call meta_value_kind(%existing), 0) {
@@ -478,7 +507,7 @@
     }
   }
   #if #call program_is_std_path(%source, %node) {
-    #let %member: addr = #call program_operand_name(%source, %node)
+    #let %member: #addr = #call program_operand_name(%source, %node)
     #if #call meta_atom_equal(
       %source, %member, "type_with_namespace", 19
     ) {
@@ -491,8 +520,8 @@
   #if #call program_is_std_meta_object(%source, %node) {
     #return #call program_eval_std_meta_object(%source, %node)
   }
-  #let %name: addr = #call program_operand_name(%source, %node)
-  #let %group: addr = #call program_operand_group(%source, %node)
+  #let %name: #addr = #call program_operand_name(%source, %node)
+  #let %group: #addr = #call program_operand_group(%source, %node)
   #if #eq(#call raw_is_nil(%group), 0) {
     #return #call program_eval_call_environment(
       %unit, %source, %function, %arguments,
@@ -500,7 +529,7 @@
     )
   }
   #if #call program_is_record_literal(%source, %node) {
-    #let %record_type: addr = #call program_find_type(
+    #let %record_type: #addr = #call program_find_type(
       %unit, %source, %name
     )
     #if #eq(#call raw_is_nil(%record_type), 0) {
@@ -513,7 +542,7 @@
       )
     }
   }
-  #let %meta_value: addr = #call meta_env_lookup_path(
+  #let %meta_value: #addr = #call meta_env_lookup_path(
     %environment, %source, %node
   )
   #if #eq(#call raw_is_nil(%meta_value), 0) {
@@ -529,11 +558,11 @@
       0, #call meta_value_type(%source, %node, %node)
     )
   }
-  #let %parameter: addr = #call program_eval_param_value(
+  #let %parameter: #addr = #call program_eval_param_value(
     %source, %function, %name, %arguments
   )
   #if #eq(#call eval_status(%parameter), 0) { #return %parameter }
-  #let %constant: addr = #call program_find_constant(
+  #let %constant: #addr = #call program_find_constant(
     %unit, %source, %name
   )
   #if #eq(#call raw_is_nil(%constant), 0) {
@@ -545,17 +574,17 @@
 }
 
 #proc program_eval_value_environment(
-  addr %unit, addr %source, addr %function, addr %arguments,
-  addr %environment, addr %left
-) -> addr {
-  #let %left_result: addr = #call program_eval_operand_environment(
+  #addr %unit, #addr %source, #addr %function, #addr %arguments,
+  #addr %environment, #addr %left
+) -> #addr {
+  #let %left_result: #addr = #call program_eval_operand_environment(
     %unit, %source, %function, %arguments, %environment, %left
   )
   #if #ne(#call eval_status(%left_result), 0) {
     #return %left_result
   }
-  #let %left_end: addr = #call program_operand_end_source(%source, %left)
-  #let %operator: addr = #call raw_node_next(%left_end)
+  #let %left_end: #addr = #call program_operand_end_source(%source, %left)
+  #let %operator: #addr = #call raw_node_next(%left_end)
   #if #call raw_is_nil(%operator) { #return %left_result }
   #if #call program_is_semicolon(%source, %operator) {
     #return %left_result
@@ -564,70 +593,107 @@
     #return %left_result
   }
   #if #eq(#call program_is_operator(%source, %operator), 0) {
+    #call eval_result_release(%left_result)
     #return #call eval_result_new(3102, 0)
   }
-  #let %operator_end: addr = #call program_value_operator_end(
+  #let %operator_end: #addr = #call program_value_operator_end(
     %source, %operator
   )
-  #let %right: addr = #call raw_node_next(%operator_end)
-  #if #call raw_is_nil(%right) { #return #call eval_result_new(3102, 0) }
-  #let %right_result: addr = #call program_eval_value_environment(
+  #let %right: #addr = #call raw_node_next(%operator_end)
+  #if #call raw_is_nil(%right) {
+    #call eval_result_release(%left_result)
+    #return #call eval_result_new(3102, 0)
+  }
+  #let %right_result: #addr = #call program_eval_value_environment(
     %unit, %source, %function, %arguments, %environment, %right
   )
   #if #ne(#call eval_status(%right_result), 0) {
+    #call eval_result_release(%left_result)
     #return %right_result
   }
   #let %left_value: #bits<64> = #call eval_value(%left_result)
   #let %right_value: #bits<64> = #call eval_value(%right_result)
   #if #call meta_atom_equal(%source, %operator, "+", 1) {
-    #return #call eval_result_new(0, #add(%left_value, %right_value))
+    #let %result: #addr = #call eval_result_new(0, #add(%left_value, %right_value))
+    #call eval_result_release(%left_result)
+    #call eval_result_release(%right_result)
+    #return %result
   }
   #if #call meta_atom_equal(%source, %operator, "-", 1) {
-    #return #call eval_result_new(0, #sub(%left_value, %right_value))
+    #let %result: #addr = #call eval_result_new(0, #sub(%left_value, %right_value))
+    #call eval_result_release(%left_result)
+    #call eval_result_release(%right_result)
+    #return %result
   }
   #if #call meta_atom_equal(%source, %operator, "*", 1) {
-    #return #call eval_result_new(0, #mul(%left_value, %right_value))
+    #let %result: #addr = #call eval_result_new(0, #mul(%left_value, %right_value))
+    #call eval_result_release(%left_result)
+    #call eval_result_release(%right_result)
+    #return %result
   }
   #if #call meta_atom_equal(%source, %operator, "==", 2) {
-    #return #call eval_result_new(
+    #let %result: #addr = #call eval_result_new(
       0, #zext[#bits<64>](#eq(%left_value, %right_value))
     )
+    #call eval_result_release(%left_result)
+    #call eval_result_release(%right_result)
+    #return %result
   }
   #if #call meta_atom_equal(%source, %operator, "!=", 2) {
-    #return #call eval_result_new(
+    #let %result: #addr = #call eval_result_new(
       0, #zext[#bits<64>](#ne(%left_value, %right_value))
     )
+    #call eval_result_release(%left_result)
+    #call eval_result_release(%right_result)
+    #return %result
   }
   #if #call meta_atom_equal(%source, %operator, "<", 1) {
-    #return #call eval_result_new(
-      0, #zext[#bits<64>](#lt(%left_value, %right_value))
+    #let %result: #addr = #call eval_result_new(
+      0, #zext[#bits<64>](#slt(%left_value, %right_value))
     )
+    #call eval_result_release(%left_result)
+    #call eval_result_release(%right_result)
+    #return %result
   }
   #if #call meta_atom_equal(%source, %operator, "<=", 2) {
-    #return #call eval_result_new(
-      0, #zext[#bits<64>](#le(%left_value, %right_value))
+    #let %result: #addr = #call eval_result_new(
+      0, #zext[#bits<64>](#sle(%left_value, %right_value))
     )
+    #call eval_result_release(%left_result)
+    #call eval_result_release(%right_result)
+    #return %result
   }
   #if #call meta_atom_equal(%source, %operator, ">", 1) {
-    #return #call eval_result_new(
-      0, #zext[#bits<64>](#gt(%left_value, %right_value))
+    #let %result: #addr = #call eval_result_new(
+      0, #zext[#bits<64>](#sgt(%left_value, %right_value))
     )
+    #call eval_result_release(%left_result)
+    #call eval_result_release(%right_result)
+    #return %result
   }
   #if #call meta_atom_equal(%source, %operator, ">=", 2) {
-    #return #call eval_result_new(
-      0, #zext[#bits<64>](#ge(%left_value, %right_value))
+    #let %result: #addr = #call eval_result_new(
+      0, #zext[#bits<64>](#sge(%left_value, %right_value))
     )
+    #call eval_result_release(%left_result)
+    #call eval_result_release(%right_result)
+    #return %result
   }
   #if #eq(%right_value, 0) {
+    #call eval_result_release(%left_result)
+    #call eval_result_release(%right_result)
     #return #call eval_result_new(3103, 0)
   }
-  #return #call eval_result_new(0, #div(%left_value, %right_value))
+  #let %result: #addr = #call eval_result_new(0, #udiv(%left_value, %right_value))
+  #call eval_result_release(%left_result)
+  #call eval_result_release(%right_result)
+  #return %result
 }
 
 #proc program_eval_call_environment(
-  addr %unit, addr %source, addr %caller, addr %caller_arguments,
-  addr %callee, addr %group, addr %environment
-) -> addr {
+  #addr %unit, #addr %source, #addr %caller, #addr %caller_arguments,
+  #addr %callee, #addr %group, #addr %environment
+) -> #addr {
   #call program_unit_set_meta_callee(%unit, #call raw_node_start(%callee))
   #if #call program_unit_meta_step_inc(%unit) {
     #call program_unit_set_validation_node(%unit, %source, %callee)
@@ -638,7 +704,7 @@
   // bounded: factories still return their concrete type/module descriptor,
   // while runtime method calls are resolved later by lowering.
   #if #call program_is_external_vec_call(%source, %callee) {
-    #let %existing: addr = #call meta_env_lookup_path(
+    #let %existing: #addr = #call meta_env_lookup_path(
       %environment, %source, %callee
     )
     #if #eq(#call meta_value_kind(%existing), 0) {
@@ -647,17 +713,17 @@
   }
   #let %path_start: #bits<64> = #call raw_node_start(%callee)
   #let %path_length: #bits<64> = #call raw_node_length(%callee)
-  #let %path_data: addr = #call tool_source_data(%source)
+  #let %path_data: #addr = #call tool_source_data(%source)
   #let %path_index: #bits<64> = 0
   #loop first_segment {
-    #if #ge(%path_index, %path_length) { #break first_segment }
+    #if #sge(%path_index, %path_length) { #break first_segment }
     #if #eq(
       #call tool_byte_at(%path_data, #add(%path_start, %path_index)), 46
     ) { #break first_segment }
     %path_index: #bits<64> = #add(%path_index, 1)
     #continue first_segment
   }
-  #let %first_value: addr = #call meta_env_lookup_span(
+  #let %first_value: #addr = #call meta_env_lookup_span(
     %environment, %source, %path_start, %path_index
   )
   #if #eq(#call meta_value_kind(%first_value), 0) {
@@ -667,8 +733,8 @@
       %unit, #call meta_value_kind(%first_value)
     )
   }
-  #let %target: addr = #call program_nil()
-  #let %meta_value: addr = #call meta_env_lookup_path(
+  #let %target: #addr = #call program_nil()
+  #let %meta_value: #addr = #call meta_env_lookup_path(
     %environment, %source, %callee
   )
   #if #eq(#call meta_value_kind(%meta_value), 0) {
@@ -678,11 +744,11 @@
       %unit, #call meta_value_kind(%meta_value)
     )
     #if #eq(#call meta_value_kind(%meta_value), 3) {
-      %target: addr = #call meta_value_payload(%meta_value)
+      %target: #addr = #call meta_value_payload(%meta_value)
     }
   }
   #if #call program_function_is_nil(%target) {
-    %target: addr = #call program_find_function_for_caller(
+    %target: #addr = #call program_find_function_for_caller(
       %unit, %source, %caller, %callee
     )
   }
@@ -702,14 +768,14 @@
     #call program_unit_set_validation_node(%unit, %source, %callee)
     #return #call eval_result_new(5108, 0)
   }
-  #let %argument: addr = #call raw_node_first(%group)
+  #let %argument: #addr = #call raw_node_first(%group)
   #let %count: #bits<64> = 0
   #loop count_arguments {
     #if #call raw_is_nil(%argument) { #break count_arguments }
     %count: #bits<64> = #add(%count, 1)
-    #let %separator: addr = #call raw_node_next(%argument)
+    #let %separator: #addr = #call raw_node_next(%argument)
     #if #call raw_is_nil(%separator) { #break count_arguments }
-    %argument: addr = #call raw_node_next(%separator)
+    %argument: #addr = #call raw_node_next(%separator)
     #continue count_arguments
   }
   #if #ne(%count, #call program_function_count(%target)) {
@@ -721,54 +787,60 @@
     #call program_unit_set_validation_node(%unit, %source, %callee)
     #return #call eval_result_new(5109, 0)
   }
-  #let %arguments: addr = #call bootstrap.allocate-pages(#mul(%count, 8))
-  #let %value_argument: addr = #call raw_node_first(%group)
+  #let %arguments: #addr = #call bootstrap.allocate-pages(#mul(%count, 8))
+  #let %value_argument: #addr = #call raw_node_first(%group)
   #let %index: #bits<64> = 0
   #loop evaluate_arguments {
     #if #call raw_is_nil(%value_argument) { #break evaluate_arguments }
-    #let %value: addr = #call program_eval_value_environment(
+    #let %value: #addr = #call program_eval_value_environment(
       %unit, %source, %caller, %caller_arguments,
       %environment, %value_argument
     )
-    #if #ne(#call eval_status(%value), 0) { #return %value }
+    #if #ne(#call eval_status(%value), 0) {
+      #call program_eval_arguments_release(%arguments, %index)
+      #return %value
+    }
     #store %value,
       #lea(base=%arguments, idx=%index, scale=8, offset=0)
     %index: #bits<64> = #add(%index, 1)
-    #let %argument_end: addr = #call program_value_expression_end(
+    #let %argument_end: #addr = #call program_value_expression_end(
       %source, %value_argument
     )
-    #let %separator: addr = #call raw_node_next(%argument_end)
+    #let %separator: #addr = #call raw_node_next(%argument_end)
     #if #call raw_is_nil(%separator) { #break evaluate_arguments }
-    %value_argument: addr = #call raw_node_next(%separator)
+    %value_argument: #addr = #call raw_node_next(%separator)
     #continue evaluate_arguments
   }
-  #let %cached: addr = #call program_eval_cache_lookup(
+  #let %cached: #addr = #call program_eval_cache_lookup(
     %unit, %target, %arguments, %count
   )
   #if #call program_unit_cache_hit(%unit) {
+    #call program_eval_arguments_release(%arguments, %count)
     #return %cached
   }
-  #let %evaluated: addr = #call program_eval_function(
+  #let %evaluated: #addr = #call program_eval_function(
     %unit, %target, %arguments
   )
   #if #eq(#call eval_status(%evaluated), 0) {
     #call program_eval_cache_store(
       %unit, %target, %arguments, %count, %evaluated
     )
+  } else {
+    #call program_eval_arguments_release(%arguments, %count)
   }
   #return %evaluated
 }
 
 #proc program_eval_call(
-  addr %unit, addr %source, addr %caller, addr %caller_arguments,
-  addr %callee, addr %group
-) -> addr {
-  #let %environment: addr = #call program_unit_meta_environment(%unit)
+  #addr %unit, #addr %source, #addr %caller, #addr %caller_arguments,
+  #addr %callee, #addr %group
+) -> #addr {
+  #let %environment: #addr = #call program_unit_meta_environment(%unit)
   #if #eq(#call program_function_is_nil(%caller), 0) {
-    #let %caller_environment: addr =
+    #let %caller_environment: #addr =
       #call program_function_environment(%caller)
     #if #eq(#call raw_is_nil(%caller_environment), 0) {
-      %environment: addr = %caller_environment
+      %environment: #addr = %caller_environment
     }
   }
   #return #call program_eval_call_environment(
@@ -778,36 +850,38 @@
 }
 
 #proc program_eval_consteval_arithmetic(
-  addr %unit, addr %source, addr %group
-) -> addr {
-  #let %first: addr = #call raw_node_first(%group)
+  #addr %unit, #addr %source, #addr %group
+) -> #addr {
+  #let %first: #addr = #call raw_node_first(%group)
   #if #call raw_is_nil(%first) {
     #return #call eval_result_new(3102, 0)
   }
-  #let %empty_function: addr = #call program_nil()
-  #let %value_result: addr = #call program_eval_operand(
+  #let %empty_function: #addr = #call program_nil()
+  #let %value_result: #addr = #call program_eval_operand(
     %unit, %source, %empty_function, %empty_function, %first
   )
   #if #ne(#call eval_status(%value_result), 0) {
     #return %value_result
   }
   #let %value: #bits<64> = #call eval_value(%value_result)
-  #let %operator: addr = #call raw_node_next(%first)
+  #call eval_result_release(%value_result)
+  #let %operator: #addr = #call raw_node_next(%first)
   #loop terms {
     #if #call raw_is_nil(%operator) {
       #return #call eval_result_new(0, %value)
     }
-    #let %right: addr = #call raw_node_next(%operator)
+    #let %right: #addr = #call raw_node_next(%operator)
     #if #call raw_is_nil(%right) {
       #return #call eval_result_new(3102, 0)
     }
-    #let %right_result: addr = #call program_eval_operand(
+    #let %right_result: #addr = #call program_eval_operand(
       %unit, %source, %empty_function, %empty_function, %right
     )
     #if #ne(#call eval_status(%right_result), 0) {
       #return %right_result
     }
     #let %right_value: #bits<64> = #call eval_value(%right_result)
+    #call eval_result_release(%right_result)
     #if #call meta_atom_equal(%source, %operator, "+", 1) {
       %value: #bits<64> = #add(%value, %right_value)
     } else {
@@ -821,23 +895,23 @@
             #if #eq(%right_value, 0) {
               #return #call eval_result_new(3103, 0)
             }
-            %value: #bits<64> = #div(%value, %right_value)
+            %value: #bits<64> = #udiv(%value, %right_value)
           } else {
             #return #call eval_result_new(3102, 0)
           }
         }
       }
     }
-    %operator: addr = #call raw_node_next(%right)
+    %operator: #addr = #call raw_node_next(%right)
     #continue terms
   }
 }
 
 #proc program_eval_consteval_group_direct(
-  addr %unit, addr %source, addr %group
-) -> addr {
-  #let %first: addr = #call raw_node_first(%group)
-  #let %next: addr = #call raw_node_next(%first)
+  #addr %unit, #addr %source, #addr %group
+) -> #addr {
+  #let %first: #addr = #call raw_node_first(%group)
+  #let %next: #addr = #call raw_node_next(%first)
   #if #eq(#call raw_node_kind(%next), 2) {
     #if #eq(#call raw_node_delimiter(%next), 40) {
       #return #call program_eval_call(
@@ -856,14 +930,14 @@
 // Meta data structures; the block is the explicit phase boundary used by the
 // compiler when invoking it.
 #proc program_eval_consteval_group(
-  addr %unit, addr %source, addr %group
-) -> addr {
-  #let %result: addr = #eval {
+  #addr %unit, #addr %source, #addr %group
+) -> #addr {
+  #let %result: #addr = #eval {
     #return #call program_eval_consteval_group_direct(
       %unit, %source, %group
     )
   }
-  #let %context: addr = #call program_unit_compile_context(%unit)
+  #let %context: #addr = #call program_unit_compile_context(%unit)
   #if #ne(#ptr2int(%context), 0) {
     #call eval_result_set_owner(
       %result, #call lain_compile_context_v1_owner(%context)

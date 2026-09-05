@@ -5,25 +5,26 @@
 // resulting function/module descriptors.
 
 #extern #proc program_append_function_if_missing(
-  addr %unit, addr %function
+  #addr %unit, #addr %function
 ) -> #unit;
-#extern #proc program_unit_collecting_import(addr %unit) -> i1;
-#extern #proc program_unit_lazy_nonroot(addr %unit) -> i1;
-#extern #proc program_unit_physical_root_index(addr %unit) -> i64;
-#extern #proc program_function_source_index(addr %function) -> i64;
+#extern #proc program_unit_collecting_import(#addr %unit) -> #bits<1>;
+#extern #proc program_unit_lazy_nonroot(#addr %unit) -> #bits<1>;
+#extern #proc program_unit_physical_root_index(#addr %unit) -> #bits<64>;
+#extern #proc program_function_source_index(#addr %function) -> #bits<64>;
+#extern #proc eval_result_release(#addr %result) -> #unit;
 
 #extern #proc program_is_std_module_value(
-  addr %source, addr %value_node
-) -> i1;
+  #addr %source, #addr %value_node
+) -> #bits<1>;
 #extern #proc program_std_module_value_group(
-  addr %source, addr %value_node
-) -> addr;
+  #addr %source, #addr %value_node
+) -> #addr;
 
 #proc program_eval_bind_local_function(
-  addr %unit, addr %source, addr %function_owner,
-  addr %let_node, addr %environment
+  #addr %unit, #addr %source, #addr %function_owner,
+  #addr %let_node, #addr %environment
 ) -> #bits<32> {
-  #let %function: addr = #call program_parse_function(
+  #let %function: #addr = #call program_parse_function(
     %unit, %source,
     #call program_function_source_index(%function_owner),
     %let_node
@@ -58,16 +59,16 @@
 }
 
 #proc program_eval_local_binding(
-  addr %unit, addr %source, addr %function,
-  addr %let_node, addr %environment
+  #addr %unit, #addr %source, #addr %function,
+  #addr %let_node, #addr %environment
 ) -> #bits<32> {
   #if #call program_is_function_declaration(%source, %let_node) {
     #return #call program_eval_bind_local_function(
       %unit, %source, %function, %let_node, %environment
     )
   }
-  #let %name: addr = #call raw_node_next(%let_node)
-  #let %value_node: addr = #call program_meta_call_value_node(
+  #let %name: #addr = #call raw_node_next(%let_node)
+  #let %value_node: #addr = #call program_meta_call_value_node(
     %source, %let_node
   )
   #if #call raw_is_nil(%value_node) { #return 5108 }
@@ -81,28 +82,33 @@
     )
     #if #ne(%type_status, 0) { #return %type_status }
     #if #call program_eval_special_type(%source, %value_node) {
-      #let %type_result: addr = #call program_eval_type_object_environment(
+      #let %type_result: #addr = #call program_eval_type_object_environment(
         %source, %name, %value_node, %environment
       )
       #call meta_env_bind(
         %environment, %source, %name, #call eval_object(%type_result)
       )
+      #call eval_result_release(%type_result)
       #return 0
     }
-    #let %group: addr = #call program_operand_group(%source, %value_node)
+    #let %group: #addr = #call program_operand_group(%source, %value_node)
     #if #eq(#call raw_is_nil(%group), 0) {
-      #let %call_result: addr = #call program_eval_value_expression(
+      #let %call_result: #addr = #call program_eval_value_expression(
         %unit, %source, %function, #call program_nil(), %value_node
       )
       #if #ne(#call eval_status(%call_result), 0) {
-        #return #call eval_status(%call_result)
+        #let %status: #bits<32> = #call eval_status(%call_result)
+        #call eval_result_release(%call_result)
+        #return %status
       }
       #if #call eval_result_is_object(%call_result) {
         #call meta_env_bind(
           %environment, %source, %name, #call eval_object(%call_result)
         )
+        #call eval_result_release(%call_result)
         #return 0
       }
+      #call eval_result_release(%call_result)
     }
     #call meta_env_bind(
       %environment, %source, %name,
@@ -112,9 +118,9 @@
   }
 
   #if #call program_is_std_module_value(%source, %value_node) {
-    #let %parent: addr = %environment
-    #let %module_environment: addr = #call meta_env_new(%parent)
-    #let %module_value: addr = #call meta_value_module(
+    #let %parent: #addr = %environment
+    #let %module_environment: #addr = #call meta_env_new(%parent)
+    #let %module_value: #addr = #call meta_value_module(
       %source, %name,
       #call program_std_module_value_group(%source, %value_node),
       %module_environment
@@ -131,20 +137,24 @@
   }
 
   #if #call program_eval_special_type(%source, %value_node) {
-    #let %type_result: addr = #call program_eval_type_object_environment(
+    #let %type_result: #addr = #call program_eval_type_object_environment(
       %source, %name, %value_node, %environment
     )
     #call meta_env_bind(
       %environment, %source, %name, #call eval_object(%type_result)
     )
+    #call eval_result_release(%type_result)
     #return 0
   }
 
-  #let %result: addr = #call program_eval_value_expression(
+  #let %result: #addr = #call program_eval_value_expression(
     %unit, %source, %function, #call program_nil(), %value_node
   )
   #let %status: #bits<32> = #call eval_status(%result)
-  #if #ne(%status, 0) { #return %status }
+  #if #ne(%status, 0) {
+    #call eval_result_release(%result)
+    #return %status
+  }
   #if #call eval_result_is_object(%result) {
     #call meta_env_bind(
       %environment, %source, %name, #call eval_object(%result)
@@ -155,5 +165,6 @@
       #call meta_value_scalar(%source, %name, #call eval_value(%result))
     )
   }
+  #call eval_result_release(%result)
   #return 0
 }

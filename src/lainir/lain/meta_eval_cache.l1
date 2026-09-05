@@ -4,7 +4,7 @@
 // values.  The cache belongs to the compiler's Meta layer: it prevents a
 // repeated compile-time call from rebuilding the same value/module tree.
 
-#proc program_eval_argument_same(addr %left, addr %right) -> i1 {
+#proc program_eval_argument_same(#addr %left, #addr %right) -> #bits<1> {
   #if #ne(
     #call eval_result_is_object(%left),
     #call eval_result_is_object(%right)
@@ -12,8 +12,8 @@
   #if #eq(#call eval_result_is_object(%left), 0) {
     #return #eq(#call eval_value(%left), #call eval_value(%right))
   }
-  #let %left_value: addr = #call eval_object(%left)
-  #let %right_value: addr = #call eval_object(%right)
+  #let %left_value: #addr = #call eval_object(%left)
+  #let %right_value: #addr = #call eval_object(%right)
   #if #ne(
     #call meta_value_kind(%left_value),
     #call meta_value_kind(%right_value)
@@ -28,13 +28,13 @@
   ) { #return 0 }
   // Equal offsets from different source units do not imply equal type text.
   #if #eq(#call meta_value_kind(%left_value), 4) {
-    #let %left_source: addr = #call meta_value_source(%left_value)
-    #let %right_source: addr = #call meta_value_source(%right_value)
-    #let %left_data: addr = #call tool_source_data(%left_source)
-    #let %right_data: addr = #call tool_source_data(%right_source)
+    #let %left_source: #addr = #call meta_value_source(%left_value)
+    #let %right_source: #addr = #call meta_value_source(%right_value)
+    #let %left_data: #addr = #call tool_source_data(%left_source)
+    #let %right_data: #addr = #call tool_source_data(%right_source)
     #let %text_index: #bits<64> = 0
     #loop compare_type_text {
-      #if #ge(%text_index, #call meta_value_length(%left_value)) {
+      #if #sge(%text_index, #call meta_value_length(%left_value)) {
         #break compare_type_text
       }
       #if #ne(
@@ -73,18 +73,18 @@
 }
 
 #proc program_eval_cache_lookup(
-  addr %unit, addr %function, addr %arguments, #bits<64> %count
-) -> addr {
+  #addr %unit, #addr %function, #addr %arguments, #bits<64> %count
+) -> #addr {
   #call program_unit_set_cache_hit(%unit, 0)
-  #let %entry: addr = #load[addr](
+  #let %entry: #addr = #load[#addr](
     #lea(base=%unit, idx=0, scale=0, offset=264)
   )
   #let %entry_index: #bits<64> = 0
   #let %entry_count: #bits<64> = #call program_unit_cache_count(%unit)
   #loop entries {
-    #if #ge(%entry_index, %entry_count) { #return #call program_nil() }
+    #if #sge(%entry_index, %entry_count) { #return #call program_nil() }
     #if #call program_function_same(
-      #load[addr](#lea(base=%entry, idx=0, scale=0, offset=0)),
+      #load[#addr](#lea(base=%entry, idx=0, scale=0, offset=0)),
       %function
     ) {
       #if #eq(
@@ -92,19 +92,19 @@
         %count
       ) {
         #let %index: #bits<64> = 0
-        #let %cached_arguments: addr = #load[addr](
+        #let %cached_arguments: #addr = #load[#addr](
           #lea(base=%entry, idx=0, scale=0, offset=16)
         )
-        #let %same: i1 = 1
+        #let %same: #bits<1> = 1
         #loop arguments {
-          #if #ge(%index, %count) { #break arguments }
+          #if #sge(%index, %count) { #break arguments }
           #if #eq(
             #call program_eval_argument_same(
-              #load[addr](#lea(base=%cached_arguments, idx=%index, scale=8, offset=0)),
-              #load[addr](#lea(base=%arguments, idx=%index, scale=8, offset=0))
+              #load[#addr](#lea(base=%cached_arguments, idx=%index, scale=8, offset=0)),
+              #load[#addr](#lea(base=%arguments, idx=%index, scale=8, offset=0))
             ), 0
           ) {
-            %same: i1 = 0
+            %same: #bits<1> = 0
             #break arguments
           }
           %index: #bits<64> = #add(%index, 1)
@@ -112,13 +112,13 @@
         }
         #if %same {
           #call program_unit_set_cache_hit(%unit, 1)
-          #return #load[addr](
-            #lea(base=%entry, idx=0, scale=0, offset=24)
+          #return #call eval_result_clone(
+            #load[#addr](#lea(base=%entry, idx=0, scale=0, offset=24))
           )
         }
       }
     }
-    %entry: addr = #load[addr](
+    %entry: #addr = #load[#addr](
       #lea(base=%entry, idx=0, scale=0, offset=32)
     )
     %entry_index: #bits<64> = #add(%entry_index, 1)
@@ -127,17 +127,20 @@
 }
 
 #proc program_eval_cache_store(
-  addr %unit, addr %function, addr %arguments, #bits<64> %count,
-  addr %result
+  #addr %unit, #addr %function, #addr %arguments, #bits<64> %count,
+  #addr %result
 ) -> #unit {
-  #let %entry: addr = #call bootstrap.allocate-pages(40)
+  #let %entry: #addr = #call bootstrap.allocate-pages(40)
   #store %function, #lea(base=%entry, idx=0, scale=0, offset=0)
   #store %count, #lea(base=%entry, idx=0, scale=0, offset=8)
   #store %arguments, #lea(base=%entry, idx=0, scale=0, offset=16)
-  #store %result, #lea(base=%entry, idx=0, scale=0, offset=24)
-  #let %nil: addr = #call program_nil()
+  // The cache keeps its own result record.  The caller remains free to
+  // release the result returned by program_eval_function.
+  #store #call eval_result_clone(%result),
+    #lea(base=%entry, idx=0, scale=0, offset=24)
+  #let %nil: #addr = #call program_nil()
   #store %nil, #lea(base=%entry, idx=0, scale=0, offset=32)
-  #let %head: addr = #load[addr](
+  #let %head: #addr = #load[#addr](
     #lea(base=%unit, idx=0, scale=0, offset=264)
   )
   #let %entry_count: #bits<64> = #call program_unit_cache_count(%unit)
@@ -145,7 +148,7 @@
     #store %entry, #lea(base=%unit, idx=0, scale=0, offset=264)
     #store %entry, #lea(base=%unit, idx=0, scale=0, offset=272)
   } else {
-    #let %tail: addr = #load[addr](
+    #let %tail: #addr = #load[#addr](
       #lea(base=%unit, idx=0, scale=0, offset=272)
     )
     #store %entry, #lea(base=%tail, idx=0, scale=0, offset=32)

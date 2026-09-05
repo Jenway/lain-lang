@@ -2,7 +2,7 @@
 
 > 落盘于 2025 会话。目标：让 `src/lainc/lainc.lain`（stage1，Lain 写的
 > 编译器，M2 自举固定点）能编译 `src/compiler-archive/` 闭包，并形成
-> stage2 自举闭环。对应 `docs/lainc-bootstrap-roadmap.md` 阶段四/五。
+> stage2 自举闭环。对应 [`docs/history/lainc-bootstrap-roadmap.md`](lainc-bootstrap-roadmap.md) 阶段四/五。
 > 状态：计划（未开工）。
 
 ## 1. 目标

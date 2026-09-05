@@ -1,4 +1,6 @@
-# Lain Meta 元编程系统
+# Lain Meta 元编程系统（历史设计合集）
+
+> 历史资料：本文混合了 Scheme Meta 方案、早期讨论、旧自举阶段记录和后续追加规范，不定义当前架构。当前 Meta 规范见 [`docs/03-meta-system.md`](../03-meta-system.md)。
 
 Scheme meta 负责语言改写和静态语义建模。compile-time lain 负责真正有副作用的编译期执行。编译器只负责调度二者并提供最小 substrate。三者必须分开。
 

@@ -37,23 +37,18 @@ typedef enum {
   TK_KW_BREAK,
   TK_KW_CONTINUE,
   TK_KW_LET,
-  TK_KW_PRIMITIVE,
   TK_KW_ALLOCA,
-  TK_KW_FIELD,
   TK_KW_LEA,
   TK_KW_LOAD,
   TK_KW_ADD,
   TK_KW_SUB_OP,
   TK_KW_MUL_OP,
-  TK_KW_DIV_OP,
   TK_KW_EQ_OP,
   TK_KW_NE_OP,
-  TK_KW_LT_OP,
-  TK_KW_LE_OP,
-  TK_KW_GT_OP,
-  TK_KW_GE_OP,
   TK_KW_CALL_INDIRECT,
   TK_KW_EVAL,
+  TK_KW_DATA,
+  TK_KW_DATA_ADDR,
   TK_HASH_BITS,
   TK_HASH_FLOAT,
   TK_HASH_ADDR,
@@ -101,7 +96,6 @@ typedef struct {
   uint32_t param_cap;
   jmp_buf failure;
   L1Diagnostic *diagnostic;
-  int allow_legacy_aliases;
   L1Subroutine *module_head;
 } Parser;
 
@@ -206,23 +200,16 @@ static TokenKind hash_keyword_kind(const char *text, int len) {
   if (len == 5 && memcmp(text, "break", 5) == 0) return TK_KW_BREAK;
   if (len == 8 && memcmp(text, "continue", 8) == 0) return TK_KW_CONTINUE;
   if (len == 3 && memcmp(text, "let", 3) == 0) return TK_KW_LET;
-  if (len == 9 && memcmp(text, "primitive", 9) == 0) return TK_KW_PRIMITIVE;
   if (len == 6 && memcmp(text, "alloca", 6) == 0) return TK_KW_ALLOCA;
-  if (len == 5 && memcmp(text, "field", 5) == 0) return TK_KW_FIELD;
   if (len == 3 && memcmp(text, "lea", 3) == 0) return TK_KW_LEA;
   if (len == 4 && memcmp(text, "load", 4) == 0) return TK_KW_LOAD;
   if (len == 3 && memcmp(text, "add", 3) == 0) return TK_KW_ADD;
   if (len == 3 && memcmp(text, "sub", 3) == 0) return TK_KW_SUB_OP;
   if (len == 3 && memcmp(text, "mul", 3) == 0) return TK_KW_MUL_OP;
-  if (len == 3 && memcmp(text, "div", 3) == 0) return TK_KW_DIV_OP;
   if (len == 4 && memcmp(text, "sdiv", 4) == 0) return TK_KW_SDIV;
   if (len == 4 && memcmp(text, "udiv", 4) == 0) return TK_KW_UDIV;
   if (len == 2 && memcmp(text, "eq", 2) == 0) return TK_KW_EQ_OP;
   if (len == 2 && memcmp(text, "ne", 2) == 0) return TK_KW_NE_OP;
-  if (len == 2 && memcmp(text, "lt", 2) == 0) return TK_KW_LT_OP;
-  if (len == 2 && memcmp(text, "le", 2) == 0) return TK_KW_LE_OP;
-  if (len == 2 && memcmp(text, "gt", 2) == 0) return TK_KW_GT_OP;
-  if (len == 2 && memcmp(text, "ge", 2) == 0) return TK_KW_GE_OP;
   if (len == 3 && memcmp(text, "slt", 3) == 0) return TK_KW_SLT;
   if (len == 3 && memcmp(text, "sle", 3) == 0) return TK_KW_SLE;
   if (len == 3 && memcmp(text, "sgt", 3) == 0) return TK_KW_SGT;
@@ -246,6 +233,8 @@ static TokenKind hash_keyword_kind(const char *text, int len) {
   if (len == 7 && memcmp(text, "ptr2int", 7) == 0) return TK_KW_PTR2INT;
   if (len == 13 && memcmp(text, "call_indirect", 13) == 0) return TK_KW_CALL_INDIRECT;
   if (len == 4 && memcmp(text, "eval", 4) == 0) return TK_KW_EVAL;
+  if (len == 4 && memcmp(text, "data", 4) == 0) return TK_KW_DATA;
+  if (len == 9 && memcmp(text, "data_addr", 9) == 0) return TK_KW_DATA_ADDR;
   return TK_IDENT;
 }
 
@@ -378,8 +367,6 @@ static Token expect(Parser *p, TokenKind kind) {
 static L1Type *parse_type(Parser *p) {
   Token token = p->current;
   char *text;
-  L1Type *ty;
-
   if (token.kind == TK_HASH_UNIT) {
     next_token(p);
     return lainir_new_type(TY_UNIT, 0);
@@ -412,16 +399,6 @@ static L1Type *parse_type(Parser *p) {
 
   text = token_string(token);
   next_token(p);
-
-  if (p->allow_legacy_aliases && strcmp(text, "addr") == 0) {
-    free(text);
-    return lainir_new_type(TY_ADDR, 64);
-  }
-  if (p->allow_legacy_aliases && text[0] == 'i' && isdigit((unsigned char)text[1])) {
-    ty = lainir_new_type(TY_BITS, (uint32_t)strtoul(text + 1, NULL, 10));
-    free(text);
-    return ty;
-  }
 
   free(text);
   parse_fail(p, "unknown type");
@@ -527,10 +504,8 @@ static L1Expr *parse_special_hash_call(Parser *p, TokenKind kind) {
     return expr;
   }
   if (kind == TK_KW_ADD || kind == TK_KW_SUB_OP ||
-      kind == TK_KW_MUL_OP || kind == TK_KW_DIV_OP ||
+      kind == TK_KW_MUL_OP ||
       kind == TK_KW_EQ_OP || kind == TK_KW_NE_OP ||
-      kind == TK_KW_LT_OP || kind == TK_KW_LE_OP ||
-      kind == TK_KW_GT_OP || kind == TK_KW_GE_OP ||
       kind == TK_KW_SDIV || kind == TK_KW_UDIV ||
       kind == TK_KW_SLT || kind == TK_KW_SLE ||
       kind == TK_KW_SGT || kind == TK_KW_SGE ||
@@ -544,13 +519,8 @@ static L1Expr *parse_special_hash_call(Parser *p, TokenKind kind) {
     L1ExprKind expr_kind = EXPR_ADD;
     if (kind == TK_KW_SUB_OP) expr_kind = EXPR_SUB;
     else if (kind == TK_KW_MUL_OP) expr_kind = EXPR_MUL;
-    else if (kind == TK_KW_DIV_OP) expr_kind = EXPR_DIV;
     else if (kind == TK_KW_EQ_OP) expr_kind = EXPR_EQ;
     else if (kind == TK_KW_NE_OP) expr_kind = EXPR_NE;
-    else if (kind == TK_KW_LT_OP) expr_kind = EXPR_LT;
-    else if (kind == TK_KW_LE_OP) expr_kind = EXPR_LE;
-    else if (kind == TK_KW_GT_OP) expr_kind = EXPR_GT;
-    else if (kind == TK_KW_GE_OP) expr_kind = EXPR_GE;
     else if (kind == TK_KW_SDIV) expr_kind = EXPR_SDIV;
     else if (kind == TK_KW_UDIV) expr_kind = EXPR_UDIV;
     else if (kind == TK_KW_SLT) expr_kind = EXPR_SLT;
@@ -606,31 +576,6 @@ static L1Expr *parse_ident_expr(Parser *p) {
 
   expr = new_var_expr(name);
   free(name);
-  return expr;
-}
-
-static L1Expr *parse_field_expr(Parser *p) {
-  Token token;
-  char *text;
-  L1Expr *expr = lainir_new_expr(EXPR_FIELD);
-
-  expect(p, TK_LBRACK);
-  token = expect(p, TK_NUMBER);
-  text = token_string(token);
-  expr->data.field.field_index = (uint32_t)strtoul(text, NULL, 10);
-  free(text);
-  expr->data.field.field_ty = NULL;
-  expect(p, TK_RBRACK);
-  expect(p, TK_LPAREN);
-
-  expr->data.field.base = parse_expr(p);
-  expr->data.field.struct_ty = NULL;
-
-  expect(p, TK_RPAREN);
-  if (p->current.kind == TK_COLON) {
-    next_token(p);
-    expr->data.field.field_ty = parse_type(p);
-  }
   return expr;
 }
 
@@ -779,10 +724,6 @@ static L1Expr *parse_expr(Parser *p) {
     expr->data.conversion.target_ty = target_ty;
     return expr;
   }
-  if (p->current.kind == TK_KW_FIELD) {
-    next_token(p);
-    return parse_field_expr(p);
-  }
   if (p->current.kind == TK_KW_LEA) {
     next_token(p);
     return parse_lea_expr(p);
@@ -828,6 +769,16 @@ static L1Expr *parse_expr(Parser *p) {
     expect(p, TK_RBRACE);
     expr->data.eval.ret_ty = NULL;
     return expr;
+  case TK_KW_DATA_ADDR:
+    next_token(p);
+    expect(p, TK_LPAREN);
+    token = expect(p, TK_IDENT);
+    text = token_string(token);
+    expect(p, TK_RPAREN);
+    expr = lainir_new_expr(EXPR_DATA_ADDR);
+    expr->data.data_addr.name = text;
+    expr->data.data_addr.ty = lainir_new_type(TY_ADDR, 64);
+    return expr;
 
   case TK_KW_CALL:
     next_token(p);
@@ -841,20 +792,6 @@ static L1Expr *parse_expr(Parser *p) {
     expr->data.call.args = args;
     expr->data.call.arg_count = count;
     expr->data.call.ret_ty = NULL;
-    free(text);
-    return expr;
-  case TK_KW_PRIMITIVE:
-    next_token(p);
-    token = expect(p, TK_IDENT);
-    text = token_string(token);
-    expect(p, TK_LPAREN);
-    args = parse_expr_list(p, &count);
-    expect(p, TK_RPAREN);
-    expr = lainir_new_expr(EXPR_PRIMITIVE);
-    expr->data.primitive.opcode = strdup(text);
-    expr->data.primitive.operands = args;
-    expr->data.primitive.operand_count = count;
-    expr->data.primitive.result_ty = NULL;
     free(text);
     return expr;
   case TK_KW_ALLOCA:
@@ -878,13 +815,8 @@ static L1Expr *parse_expr(Parser *p) {
   case TK_KW_ADD:
   case TK_KW_SUB_OP:
   case TK_KW_MUL_OP:
-  case TK_KW_DIV_OP:
   case TK_KW_EQ_OP:
   case TK_KW_NE_OP:
-  case TK_KW_LT_OP:
-  case TK_KW_LE_OP:
-  case TK_KW_GT_OP:
-  case TK_KW_GE_OP:
   case TK_KW_SDIV:
   case TK_KW_UDIV:
   case TK_KW_SLT:
@@ -927,18 +859,11 @@ static L1Instruction *parse_instruction_list(Parser *p) {
 
     if (p->current.kind == TK_KW_LET) {
       next_token(p);
-      /* Canonical spelling is `#let %name: type = value`.  The percent and
-         type annotation were absent from the first text grammar, so retain
-         both legacy spellings as input during the migration. */
-      if (p->current.kind == TK_PERCENT)
-        next_token(p);
+      expect(p, TK_PERCENT);
       Token token = expect(p, TK_IDENT);
       char *name = token_string(token);
-      L1Type *ty = NULL;
-      if (p->current.kind == TK_COLON) {
-        next_token(p);
-        ty = parse_type(p);
-      }
+      expect(p, TK_COLON);
+      L1Type *ty = parse_type(p);
       expect(p, TK_EQ);
       inst = lainir_new_instruction(INST_LET);
       inst->data.let.name = name;
@@ -1180,13 +1105,61 @@ static L1Subroutine *parse_subroutine(Parser *p) {
   return sub;
 }
 
-static int parse_module_checked_mode(const char *src,
-                                     L1Subroutine **out_module,
-                                     L1Diagnostic *diagnostic,
-                                     int allow_legacy_aliases) {
+static L1Subroutine *parse_data(Parser *p) {
+  Token token;
+  char *name;
+  char *text;
+  char *content;
+  uint32_t size;
+  uint32_t alignment;
+  uintptr_t raw;
+  uintptr_t aligned;
+  L1Subroutine *data;
+
+  expect(p, TK_KW_DATA);
+  token = expect(p, TK_IDENT);
+  name = token_string(token);
+  expect(p, TK_LPAREN);
+  token = expect(p, TK_NUMBER);
+  text = token_string(token);
+  size = (uint32_t)strtoul(text, NULL, 10);
+  free(text);
+  expect(p, TK_COMMA);
+  token = expect(p, TK_NUMBER);
+  text = token_string(token);
+  alignment = (uint32_t)strtoul(text, NULL, 10);
+  free(text);
+  expect(p, TK_COMMA);
+  token = expect(p, TK_STRING);
+  content = token_string_literal(token);
+  expect(p, TK_RPAREN);
+  expect(p, TK_SEMICOLON);
+  if (!size) parse_fail(p, "#data size must be non-zero");
+  if (!alignment || (alignment & (alignment - 1)) != 0)
+    parse_fail(p, "#data alignment must be a power of two");
+  if (strlen(content) > size)
+    parse_fail(p, "#data initializer exceeds declared size");
+
+  data = lainir_new_subroutine(name);
+  data->is_data = 1;
+  data->data_size = size;
+  data->data_alignment = alignment;
+  data->data_storage = calloc((size_t)size + alignment - 1, 1);
+  if (!data->data_storage) parse_fail(p, "out of memory for #data");
+  raw = (uintptr_t)data->data_storage;
+  aligned = (raw + alignment - 1) & ~((uintptr_t)alignment - 1);
+  data->data_bytes = (uint8_t *)aligned;
+  memcpy(data->data_bytes, content, strlen(content));
+  free(content);
+  free(name);
+  return data;
+}
+
+int lainir_parse_module_checked(const char *src,
+                                L1Subroutine **out_module,
+                                L1Diagnostic *diagnostic) {
   Parser p = {.src = src, .pos = 0, .line = 1,
-              .diagnostic = diagnostic,
-              .allow_legacy_aliases = allow_legacy_aliases};
+              .diagnostic = diagnostic};
   L1Subroutine *head = NULL;
   L1Subroutine *tail = NULL;
 
@@ -1202,7 +1175,8 @@ static int parse_module_checked_mode(const char *src,
 
   next_token(&p);
   while (p.current.kind != TK_EOF) {
-    L1Subroutine *sub = parse_subroutine(&p);
+    L1Subroutine *sub = p.current.kind == TK_KW_DATA
+                            ? parse_data(&p) : parse_subroutine(&p);
     if (!head)
       head = sub;
     else
@@ -1214,17 +1188,6 @@ static int parse_module_checked_mode(const char *src,
   if (out_module)
     *out_module = head;
   return 1;
-}
-
-int lainir_parse_module_checked(const char *src, L1Subroutine **out_module,
-                                L1Diagnostic *diagnostic) {
-  return parse_module_checked_mode(src, out_module, diagnostic, 1);
-}
-
-int lainir_parse_module_checked_strict(const char *src,
-                                       L1Subroutine **out_module,
-                                       L1Diagnostic *diagnostic) {
-  return parse_module_checked_mode(src, out_module, diagnostic, 0);
 }
 
 L1Subroutine *lainir_parse_module(const char *src) {

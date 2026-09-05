@@ -1,4 +1,6 @@
-# LAIN-AST Contract
+# LAIN-AST Contract（历史设计快照）
+
+> 历史资料：本文描述旧 Scheme/AstTree/Middle AST 架构及七种拓扑节点设想，不定义当前 LAIN-AST。当前规范见 [`docs/02-lain-ast.md`](../02-lain-ast.md)。
 
 本文档定义 LAIN-AST 的职责边界。
 

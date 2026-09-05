@@ -1,33 +1,33 @@
 // Small compile-time Meta classification helpers.
 
-#extern #proc program_is_std_path(addr %source, addr %node) -> i1;
-#extern #proc program_operand_name(addr %source, addr %node) -> addr;
-#extern #proc program_operand_group(addr %source, addr %node) -> addr;
-#extern #proc raw_node_next(addr %node) -> addr;
-#extern #proc raw_node_first(addr %node) -> addr;
-#extern #proc raw_is_nil(addr %node) -> i1;
-#extern #proc raw_node_start(addr %node) -> i64;
-#extern #proc tool_source_data(addr %source) -> addr;
-#extern #proc tool_byte_at(addr %data, i64 %index) -> i8;
-#extern #proc eval_result_object(#bits<32> %status, addr %value) -> addr;
+#extern #proc program_is_std_path(#addr %source, #addr %node) -> #bits<1>;
+#extern #proc program_operand_name(#addr %source, #addr %node) -> #addr;
+#extern #proc program_operand_group(#addr %source, #addr %node) -> #addr;
+#extern #proc raw_node_next(#addr %node) -> #addr;
+#extern #proc raw_node_first(#addr %node) -> #addr;
+#extern #proc raw_is_nil(#addr %node) -> #bits<1>;
+#extern #proc raw_node_start(#addr %node) -> #bits<64>;
+#extern #proc tool_source_data(#addr %source) -> #addr;
+#extern #proc tool_byte_at(#addr %data, #bits<64> %index) -> #bits<8>;
+#extern #proc eval_result_object(#bits<32> %status, #addr %value) -> #addr;
 #extern #proc meta_atom_equal(
-  addr %source, addr %node, addr %text, #bits<64> %length
-) -> i1;
+  #addr %source, #addr %node, #addr %text, #bits<64> %length
+) -> #bits<1>;
 #extern #proc meta_value_type(
-  addr %source, addr %name, addr %node
-) -> addr;
+  #addr %source, #addr %name, #addr %node
+) -> #addr;
 #extern #proc meta_value_type_with_namespace(
-  addr %source, addr %name, addr %binding, addr %environment
-) -> addr;
+  #addr %source, #addr %name, #addr %binding, #addr %environment
+) -> #addr;
 
 // `std::core::vec` is an external capability when its source is not in the
 // workspace.  The importer still needs a type value for `vector.Vec(T)` so
 // later function signatures can carry the physical address representation.
 #proc program_is_external_vec_call(
-  addr %source, addr %node
-) -> i1 {
-  #let %data: addr = #call tool_source_data(%source)
-  #let %start: i64 = #call raw_node_start(%node)
+  #addr %source, #addr %node
+) -> #bits<1> {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %start: #bits<64> = #call raw_node_start(%node)
   #if #ne(#call tool_byte_at(%data, %start), 118) { #return 0 }
   #if #ne(#call tool_byte_at(%data, #add(%start, 1)), 101) { #return 0 }
   #if #ne(#call tool_byte_at(%data, #add(%start, 2)), 99) { #return 0 }
@@ -41,9 +41,9 @@
 }
 
 #proc program_eval_external_vec(
-  addr %source, addr %node
-) -> addr {
-  #let %group: addr = #call program_operand_group(%source, %node)
+  #addr %source, #addr %node
+) -> #addr {
+  #let %group: #addr = #call program_operand_group(%source, %node)
   #if #call raw_is_nil(%group) { #return #call eval_result_new(3102, 0) }
   #return #call eval_result_object(
     0, #call meta_value_type(%source, %node, %node)
@@ -51,10 +51,10 @@
 }
 
 #proc program_eval_special_type(
-  addr %source, addr %node
-) -> i1 {
+  #addr %source, #addr %node
+) -> #bits<1> {
   #if #call program_is_std_path(%source, %node) {
-    #let %member: addr = #call program_operand_name(%source, %node)
+    #let %member: #addr = #call program_operand_name(%source, %node)
     #if #call meta_atom_equal(%source, %member, "struct", 6) {
       #return 1
     }
@@ -81,12 +81,12 @@
 }
 
 #proc program_is_std_meta_object(
-  addr %source, addr %node
-) -> i1 {
+  #addr %source, #addr %node
+) -> #bits<1> {
   #if #eq(#call program_is_std_path(%source, %node), 0) {
     #return 0
   }
-  #let %member: addr = #call program_operand_name(%source, %node)
+  #let %member: #addr = #call program_operand_name(%source, %node)
   #if #call meta_atom_equal(%source, %member, "effect", 6) { #return 1 }
   #if #call meta_atom_equal(%source, %member, "effect_operation", 16) {
     #return 1
@@ -106,16 +106,16 @@
 }
 
 #proc program_eval_std_meta_object(
-  addr %source, addr %node
-) -> addr {
+  #addr %source, #addr %node
+) -> #addr {
   #return #call eval_result_object(
     0, #call meta_value_type(%source, %node, %node)
   )
 }
 
 #proc program_eval_type_object(
-  addr %source, addr %name, addr %node
-) -> addr {
+  #addr %source, #addr %name, #addr %node
+) -> #addr {
   #return #call eval_result_object(
     0, #call meta_value_type(%source, %name, %node)
   )
@@ -126,8 +126,8 @@
 // `SourceUnitVector`; without this environment the type value contains the
 // struct layout but cannot resolve those aliases later.
 #proc program_eval_type_object_environment(
-  addr %source, addr %name, addr %node, addr %environment
-) -> addr {
+  #addr %source, #addr %name, #addr %node, #addr %environment
+) -> #addr {
   #return #call eval_result_object(
     0,
     #call meta_value_type_with_namespace(

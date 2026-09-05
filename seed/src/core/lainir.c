@@ -48,13 +48,8 @@ static void lainir_free_expr(L1Expr *expr) {
   case EXPR_ADD:
   case EXPR_SUB:
   case EXPR_MUL:
-  case EXPR_DIV:
   case EXPR_EQ:
   case EXPR_NE:
-  case EXPR_LT:
-  case EXPR_LE:
-  case EXPR_GT:
-  case EXPR_GE:
   case EXPR_SDIV:
   case EXPR_UDIV:
   case EXPR_SLT:
@@ -96,14 +91,8 @@ static void lainir_free_expr(L1Expr *expr) {
   case EXPR_STRING:
     free(expr->data.str_val.content);
     break;
-  case EXPR_PRIMITIVE:
-    free(expr->data.primitive.opcode);
-    for (i = 0; i < expr->data.primitive.operand_count; i++)
-      lainir_free_expr(expr->data.primitive.operands[i]);
-    free(expr->data.primitive.operands);
-    break;
-  case EXPR_FIELD:
-    lainir_free_expr(expr->data.field.base);
+  case EXPR_DATA_ADDR:
+    free(expr->data.data_addr.name);
     break;
   case EXPR_EVAL:
     lainir_free_block_list(expr->data.eval.block);
@@ -226,6 +215,7 @@ void lainir_free_subroutines(L1Subroutine *head) {
     L1Subroutine *next = head->next;
     free(head->name);
     free(head->link_name);
+    free(head->data_storage);
     free(head->param_tys);
     if (head->param_names) {
       for (uint32_t i = 0; i < head->param_count; ++i)
@@ -273,16 +263,11 @@ L1Type *infer_expr_type(L1Expr *expr) {
   case EXPR_ADD:
   case EXPR_SUB:
   case EXPR_MUL:
-  case EXPR_DIV:
   case EXPR_SDIV:
   case EXPR_UDIV:
     return infer_expr_type(expr->data.bin.left);
   case EXPR_EQ:
   case EXPR_NE:
-  case EXPR_LT:
-  case EXPR_LE:
-  case EXPR_GT:
-  case EXPR_GE:
   case EXPR_SLT:
   case EXPR_SLE:
   case EXPR_SGT:
@@ -298,14 +283,15 @@ L1Type *infer_expr_type(L1Expr *expr) {
     /* A string literal denotes the address of immutable backing storage. */
     return expr->data.str_val.ty ? expr->data.str_val.ty
                                  : lainir_new_type(TY_ADDR, 64);
+  case EXPR_DATA_ADDR:
+    return expr->data.data_addr.ty ? expr->data.data_addr.ty
+                                   : lainir_new_type(TY_ADDR, 64);
   case EXPR_CALL:
     return expr->data.call.ret_ty;
   case EXPR_EVAL:
     return expr->data.eval.ret_ty;
   case EXPR_ARG:
     return expr->data.arg.ty;
-  case EXPR_FIELD:
-    return expr->data.field.field_ty;
   case EXPR_ALLOCA:
     return expr->data.alloca.result_ty;
   case EXPR_LEA:
@@ -326,8 +312,6 @@ L1Type *infer_expr_type(L1Expr *expr) {
   case EXPR_FMUL:
   case EXPR_FDIV:
     return infer_expr_type(expr->data.bin.left);
-  case EXPR_PRIMITIVE:
-    return expr->data.primitive.result_ty;
   default:
     return &g_inferred_bits64;
   }

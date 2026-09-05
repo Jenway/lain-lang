@@ -61,6 +61,7 @@ BOOTSTRAP_STD_MODULES = (
     ROOT / "src" / "lainir" / "lain" / "meta_eval.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_call.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_collect.l1",
+    ROOT / "src" / "lainir" / "bootstrap_std" / "policy.l1",
     ROOT / "src" / "lainir" / "lain" / "module_meta.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_module.l1",
     ROOT / "src" / "lainir" / "bootstrap_std" / "core_forms.l1",

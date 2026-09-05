@@ -1,4 +1,6 @@
-# Architecture
+# Architecture（Scheme 时期设计快照）
+
+> 历史资料：本文保存旧 Scheme/AstTree/Middle AST 架构，不定义当前实现。当前架构见 [`docs/00-intro.md`](../00-intro.md)。
 
 本文档定义 Lain 编译器的整体分层结构，以及各层之间的职责边界。
 

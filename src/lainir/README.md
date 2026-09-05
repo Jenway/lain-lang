@@ -33,9 +33,7 @@ itself.
 - Generated output is deterministic.
 
 The compiler accepts canonical `#bits<N>`, `#float<32>`, `#float<64>`,
-`#addr`, `#unit`, and `#never` physical signatures. During bootstrap
-migration it also accepts the older `i32`/`addr` aliases used by
-`compiler.l1`. A return expression may contain decimal
+`#addr`, `#unit`, and `#never` physical signatures. A return expression may contain decimal
 constants, parameter references, nested integer arithmetic and comparisons,
 and direct calls:
 
@@ -67,23 +65,26 @@ the next iteration. Named jumps may target an active outer loop. Unknown
 targets and duplicate active labels are rejected, and loop-local bindings do
 not escape into the continuation.
 
-The first memory slice supports constant-size `#alloca`, canonical four-field
+The first memory slice supports activation-scoped `#alloca`, canonical four-field
 `#lea`, typed `#load`, and `#store` of a statically typed value. Generated C lowers loads and stores
 through `memcpy`, so unaligned addresses and C's strict-aliasing rules do not
 introduce undefined behavior:
 
 ```lain-ir
-#let %memory: addr = #alloca(4)
-#let %slot: addr = #lea(base=%memory, idx=0, scale=1, offset=0)
+#let %memory: #addr = #alloca(4)
+#let %slot: #addr = #lea(base=%memory, idx=0, scale=1, offset=0)
 #let %answer: #bits<32> = 42
-#store %answer, %slot
+#store[#bits<32>] %answer, %slot
 #let %loaded: #bits<32> = #load[#bits<32>](%slot)
 ```
 
-There is deliberately no hidden `#global` or `#data` instruction in this
-layer. Frozen compiler data is represented as ordinary immutable bytes and
-addresses supplied by the surrounding module/host boundary; named data
-segments would move source-language module semantics into the IR.
+`#data` declares named, read-only static bytes. `#data_addr(name)` obtains its
+physical address; typed loads and `#lea` provide access. Stores through such an
+address trap in the reference interpreter. Relocations and mutable global data
+are not part of the current slice.
+
+Each `#alloca` belongs to the current procedure activation. Its storage is
+released when that activation returns, and its address must not escape it.
 
 At this stage a bare integer literal has no width of its own, so it cannot be
 stored directly; bind it to a typed local first.
@@ -153,14 +154,10 @@ library is involved.
 
 ## Syntax authority
 
-Canonical public syntax is defined by `docs/02-lain-ir.md`. Both the C
+Canonical public syntax is defined by `docs/01-lain-ir.md`. Both the C
 reference front end and the LAIN-IR-written compiler accept canonical
 `#bits<N>`, `#float<N>`, `#addr`, typed `#store`, explicit signed/unsigned
 integer operations, width conversions, and signature-bearing indirect calls.
-The reference parser keeps old `i32`/`addr` spellings only for migration;
-`lainir-print --strict` rejects those aliases.
-Legacy scalar aliases and ambiguous integer spellings remain accepted only as
-a migration surface for the existing bootstrap compiler source. The
 LAIN-IR-written compiler delegates compile-time `#eval` blocks to the seed
 interpreter; unsupported runtime-dependent evals are rejected instead of being
 emitted as runtime code.

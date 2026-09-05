@@ -1,5 +1,7 @@
 # 效果系统、异步与错误处理
 
+本文描述由标准库 Meta 层定义的语言能力。effect 的对象模型、检查、传播和 lowering 规则不属于 compiler core；编译器只提供执行 lowering 结果所需的 LAINIR、阶段调度和 capability 底座。
+
 effect 是一套统一语义，描述两件事：运行时程序的不纯行为，以及 compile-time lain 的副作用行为。两者共享"显式声明、显式传播、显式处理"的原则，但 capability 来源不同——运行时 effect 依赖运行时库和目标平台，编译期 effect 依赖编译阶段注入的 capability。
 
 ## 运行时 effect
@@ -17,11 +19,11 @@ effect 是一套统一语义，描述两件事：运行时程序的不纯行为�
 
 ## 编译期 effect
 
-编译期 effect 的目标不是把 Scheme 变成大型宿主脚本语言，而是让 compile-time lain 用同一套语言机制表达副作用。
+编译期 effect 让 compile-time Lain 用同一套语言机制表达副作用。
 
 典型的编译期 effect：`CtFsRead`、`CtFsWrite`、`CtProcess`、`CtNet`、`CtEmitSource`、`CtEmitInterface`。名字只是示意，真正的 effect 集合由库定义，不由编译器硬编码。
 
-编译期 IO、网络、进程如果全塞进 Scheme VM，Lisp VM 会膨胀成大型宿主环境，语言层变换和副作用构建搅在一起，effect system 也没法统一约束这些行为。所以编译期副作用应该：Scheme 只生成、检查、变换语言，compile-time lain 执行 effectful work。
+标准库 Meta 负责生成、检查和 lowering 这些形式。需要实际执行 IO、网络或进程操作时，编译期 Lain 通过显式 capability 完成工作。所有编译期执行仍经过 LAINIR `#eval` 边界。
 
 ## 编译期 capability 模型
 
@@ -60,4 +62,4 @@ let generated = comptime {
 
 ## 与 meta 系统的关系
 
-分工：Scheme meta 定义 effect 语法、effect 对象、传播与 lowering 规则；compile-time lain 消费这些规则去执行副作用逻辑；编译器只提供 phase、artifact、diagnostic、capability substrate。`effect` 本身是语言库对象，不是编译器的语义硬编码。
+分工：标准库 Meta 定义 effect 语法、effect 对象、传播与 lowering 规则；compile-time Lain 消费这些规则并通过 `#eval` 执行副作用逻辑；编译器只提供 phase、artifact、diagnostic 和 capability substrate。`effect` 本身是标准库语言对象，不是编译器的语义硬编码。
