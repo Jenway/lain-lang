@@ -133,6 +133,10 @@ uint32_t lainir_procedure_name_length(const L1Subroutine *procedure);
 const char *lainir_procedure_link_name(const L1Subroutine *procedure);
 const L1Type *lainir_procedure_return_type(const L1Subroutine *procedure);
 int lainir_procedure_is_external(const L1Subroutine *procedure);
+int lainir_procedure_is_data(const L1Subroutine *procedure);
+uint32_t lainir_data_size(const L1Subroutine *data);
+uint32_t lainir_data_alignment(const L1Subroutine *data);
+const uint8_t *lainir_data_bytes(const L1Subroutine *data);
 uint32_t lainir_procedure_parameter_count(const L1Subroutine *procedure);
 const L1Type *lainir_procedure_parameter_type(const L1Subroutine *procedure, uint32_t index);
 const char *lainir_procedure_parameter_name(const L1Subroutine *procedure, uint32_t index);
@@ -144,7 +148,7 @@ const L1Expr *lainir_expr_left(const L1Expr *expr);
 const L1Expr *lainir_expr_right(const L1Expr *expr);
 /* For LEA, left/right are the base/index operands; for binary expressions
  * they are the ordinary left/right operands. */
-/* Expressions are stored as arrays for call/primitive operands, so this
+/* Expressions are stored as arrays for call operands, so this
  * legacy linked-list view always returns NULL.  Use argument_count and
  * argument_at for operand traversal. */
 const L1Expr *lainir_expr_next(const L1Expr *expr);
@@ -159,7 +163,6 @@ const L1Expr *lainir_expr_operand(const L1Expr *expr);
 const L1Block *lainir_expr_block(const L1Expr *expr);
 uint32_t lainir_expr_scale(const L1Expr *expr);
 uint32_t lainir_expr_offset(const L1Expr *expr);
-uint32_t lainir_expr_field_index(const L1Expr *expr);
 uint32_t lainir_expr_byte_size(const L1Expr *expr);
 const char *lainir_diagnostic_message(const L1Diagnostic *diagnostic);
 int lainir_diagnostic_code(const L1Diagnostic *diagnostic);

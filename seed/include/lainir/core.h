@@ -87,9 +87,8 @@ typedef enum {
  *  CALL          : direct call, yields a value
  *  CALL_INDIRECT : indirect call through a function pointer
  *  STRING        : string literal (address of read-only data)
- *  PRIMITIVE     : backend-specific / target intrinsic opcode
+ *  DATA_ADDR     : address of a module-level read-only physical data object
  *  ALLOCA        : stack allocation, yields an ADDR
- *  FIELD         : struct field access (sugar over LEA; lowerable)
  *  EVAL          : compile-time call , yields a runtime constant or UNIT
  */
 typedef enum {
@@ -101,13 +100,8 @@ typedef enum {
   EXPR_ADD,
   EXPR_SUB,
   EXPR_MUL,
-  EXPR_DIV,
   EXPR_EQ,
   EXPR_NE,
-  EXPR_LT,
-  EXPR_LE,
-  EXPR_GT,
-  EXPR_GE,
   EXPR_POPCOUNT,
   EXPR_CLZ,
   EXPR_ROTL,
@@ -122,9 +116,8 @@ typedef enum {
   EXPR_CALL,
   EXPR_CALL_INDIRECT,
   EXPR_STRING,
-  EXPR_PRIMITIVE,
+  EXPR_DATA_ADDR,
   EXPR_ALLOCA,
-  EXPR_FIELD,
   EXPR_EVAL,
   EXPR_SDIV,
   EXPR_UDIV,
@@ -192,8 +185,8 @@ struct L1Expr {
       uint32_t offset;
     } lea;
 
-    /* EXPR_ADD, EXPR_SUB, EXPR_MUL, EXPR_DIV, EXPR_EQ, EXPR_NE,
-       EXPR_LT, EXPR_LE, EXPR_GT, EXPR_GE, EXPR_FADD, EXPR_FSUB,
+    /* EXPR_ADD, EXPR_SUB, EXPR_MUL, EXPR_EQ, EXPR_NE,
+       EXPR_FADD, EXPR_FSUB,
        EXPR_FMUL, EXPR_FDIV, EXPR_FEQ, EXPR_FLT */
     struct {
       L1Expr *left;
@@ -240,13 +233,11 @@ struct L1Expr {
       L1Type *ty; /* TY_ADDR */
     } str_val;
 
-    /* EXPR_PRIMITIVE: target-specific opcode, arbitrary operands */
+    /* EXPR_DATA_ADDR */
     struct {
-      char *opcode;
-      L1Expr **operands;
-      uint32_t operand_count;
-      L1Type *result_ty;
-    } primitive;
+      char *name;
+      L1Type *ty; /* TY_ADDR */
+    } data_addr;
 
     /* EXPR_ALLOCA */
     struct {
@@ -254,14 +245,6 @@ struct L1Expr {
       uint32_t byte_size;
       L1Type *result_ty; /* always TY_ADDR */
     } alloca;
-
-    /* EXPR_FIELD: sugar over LEA; lower before backend */
-    struct {
-      L1Expr *base;
-      L1Type *struct_ty;
-      uint32_t field_index;
-      L1Type *field_ty;
-    } field;
 
     /* EXPR_EVAL: a block evaluated by the compiler at compile time. */
     struct {
@@ -286,9 +269,7 @@ struct L1Instruction {
     /* INST_LET: immutable binding */
     struct {
       char *name;
-      /* Declared result type.  Textual L1 bindings are typed; NULL is only
-         retained while accepting legacy input, before verification infers it.
-       */
+      /* Declared result type. Textual L1 bindings are typed. */
       L1Type *ty;
       L1Expr *val;
     } let;
@@ -364,6 +345,11 @@ struct L1Subroutine {
   L1Block *blocks;
   L1Block *blocks_tail;
   int is_extern;
+  int is_data;
+  uint8_t *data_storage;
+  uint8_t *data_bytes;
+  uint32_t data_size;
+  uint32_t data_alignment;
   L1Subroutine *next;
 };
 

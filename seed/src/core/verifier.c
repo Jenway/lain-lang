@@ -47,7 +47,14 @@ static int same_type(const L1Type *left, const L1Type *right) {
 
 static L1Subroutine *find_subroutine(L1Subroutine *head, const char *name) {
   for (; head; head = head->next)
-    if (head->name && name && strcmp(head->name, name) == 0)
+    if (!head->is_data && head->name && name && strcmp(head->name, name) == 0)
+      return head;
+  return NULL;
+}
+
+static L1Subroutine *find_data(L1Subroutine *head, const char *name) {
+  for (; head; head = head->next)
+    if (head->is_data && head->name && name && strcmp(head->name, name) == 0)
       return head;
   return NULL;
 }
@@ -96,8 +103,8 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
     /* Parser-created #arg nodes receive their type from the signature. */
     expr->data.arg.ty = ctx->sub->param_tys[expr->data.arg.index];
     return 1;
-  case EXPR_ADD: case EXPR_SUB: case EXPR_MUL: case EXPR_DIV:
-  case EXPR_EQ: case EXPR_NE: case EXPR_LT: case EXPR_LE: case EXPR_GT: case EXPR_GE:
+  case EXPR_ADD: case EXPR_SUB: case EXPR_MUL:
+  case EXPR_EQ: case EXPR_NE:
     return verify_expr(ctx, expr->data.bin.left, names) &&
            verify_expr(ctx, expr->data.bin.right, names);
   case EXPR_FADD: case EXPR_FSUB: case EXPR_FMUL: case EXPR_FDIV: case EXPR_FEQ: case EXPR_FLT: {
@@ -184,14 +191,6 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
         return fail(ctx, 2034, "#lea index is not #bits");
     }
     return 1;
-  case EXPR_FIELD:
-    if (!verify_expr(ctx, expr->data.field.base, names)) return 0;
-    {
-      L1Type *base = infer_expr_type(expr->data.field.base);
-      if (!base || base->kind != TY_ADDR)
-        return fail(ctx, 2035, "#field base is not #addr");
-    }
-    return 1;
   case EXPR_CALL:
     callee = find_subroutine(ctx->module, expr->data.call.fn_name);
     if (!callee)
@@ -256,28 +255,17 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
                       "call_indirect direct target signature mismatch");
     }
     return 1;
-  case EXPR_PRIMITIVE:
-    for (i = 0; i < expr->data.primitive.operand_count; i++)
-      if (!verify_expr(ctx, expr->data.primitive.operands[i], names)) return 0;
-    /* Legacy textual primitives do not carry a result annotation.  This is
-       still a concrete inference rule, not an unknown-type escape hatch:
-       a homogeneous primitive inherits its resolved operand type. */
-    if (!expr->data.primitive.result_ty && expr->data.primitive.operand_count) {
-      L1Type *candidate = infer_expr_type(expr->data.primitive.operands[0]);
-      int homogeneous = candidate != NULL;
-      for (i = 1; homogeneous && i < expr->data.primitive.operand_count; i++)
-        homogeneous = same_type(candidate,
-                                infer_expr_type(expr->data.primitive.operands[i]));
-      if (homogeneous)
-        expr->data.primitive.result_ty = candidate;
-    }
-    return 1;
   case EXPR_ALLOCA:
     if (!expr->data.alloca.byte_size &&
         (!expr->data.alloca.element_ty ||
          expr->data.alloca.element_ty->kind == TY_UNIT ||
          expr->data.alloca.element_ty->kind == TY_NEVER))
       return fail(ctx, 2036, "#alloca element has no physical size");
+    return 1;
+  case EXPR_DATA_ADDR:
+    if (!find_data(ctx->module, expr->data.data_addr.name))
+      return fail(ctx, 2040, "unknown #data object `%s`",
+                  expr->data.data_addr.name);
     return 1;
   case EXPR_CONST: case EXPR_STRING:
     return 1;
@@ -290,8 +278,7 @@ static int expression_is_condition(L1Expr *expr) {
   if (!expr) return 0;
   if (expr->kind == EXPR_CONST)
     return expr->data.const_val == 0 || expr->data.const_val == 1;
-  if (expr->kind == EXPR_EQ || expr->kind == EXPR_NE || expr->kind == EXPR_LT ||
-      expr->kind == EXPR_LE || expr->kind == EXPR_GT || expr->kind == EXPR_GE ||
+  if (expr->kind == EXPR_EQ || expr->kind == EXPR_NE ||
       expr->kind == EXPR_SLT || expr->kind == EXPR_SLE ||
       expr->kind == EXPR_SGT || expr->kind == EXPR_SGE ||
       expr->kind == EXPR_ULT || expr->kind == EXPR_ULE ||
@@ -425,7 +412,7 @@ int lainir_verify_module(L1Subroutine *head, const char *entry_name,
     for (L1Subroutine *other = head; other != sub; other = other->next)
       if (strcmp(other->name, sub->name) == 0)
         return fail(&ctx, 2021, "duplicate procedure `%s`", sub->name);
-    if (sub->is_extern) continue;
+    if (sub->is_data || sub->is_extern) continue;
     ctx.sub = sub;
     if (!sub->blocks)
       return fail(&ctx, 2022, "procedure `%s` has no body", sub->name);

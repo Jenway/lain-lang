@@ -1,56 +1,61 @@
-# Lain-Lang
+# Lain 概览与架构
 
-Language Experiment Lain Lang
+> [!QUOTE]
+> Language Experiment Lain Lang
+>
+> 我们能否让编译器本体尽量的精简，而让所有的高级语言特性都以库的方式实现？
+>
+> 我们希望它的 meta 功能尽可能强大，这里的 meta 指的是在编译期间对于 AST 的操作变换。
+>
+> 我们希望它的底层中间表示（也就是 Lain-IR）尽可能简洁而忠实反映现代的 CPU。
 
-## 1. Core Design
+Lain 是一个原生语言实验。它研究的问题是：编译器能否只保留稳定的通用底座，把函数、类型、模块、泛型、effect 等语言规则放进可替换、可自举的标准库 Meta 层。
 
-我们能否让编译器本体尽量的精简，而让所有的高级语言特性都以库的方式实现？
+这里的 **Meta** 指编译期间对语法树和语言对象进行解释、检查与变换。**LAINIR** 是 Meta 最终生成的物理执行层中间表示。
 
-我们希望它的 meta 功能尽可能强大，这里的 meta 指的是在编译期间对于 AST 的操作变换。
+## 1. 设计原则
 
-我们希望它的底层中间表示（也就是 Lain-IR）尽可能简洁而忠实反映现代的 CPU。
+Lain 当前遵循四条原则：
 
-## 2. Compilation Pipeline
+- Parser 只建立源码拓扑，不识别函数、类型、模块等语言含义。
+- Meta 和标准库定义高层语言规则，并负责展开、语义处理和 lowering。
+- 编译期程序由 Meta 生成 LAINIR `#eval`，再由 LAINIR 求值器执行。
+- Backend 只消费已经完成 lowering 的 LAINIR。
 
-Lain 编译流程为：
+编译器核心提供通用机制：源码和语法树访问、阶段调度、诊断、资源归属、artifact 输出以及 capability。它不通过 `host.make-type`、`host.make-module` 之类的专用接口定义语言对象。
+
+## 2. 编译流程
+
+当前主线的编译流程是：
 
 ```text
-Source Text
+Lain source
   -> RawAst
-  -> AstTree
-  -> Middle AST
-  -> Typed / Elaborated Middle AST
-  -> LAIN-IR
-  -> Backend Target
+  -> Meta expand
+  -> Meta elaborate
+  -> Meta lower
+  -> LAINIR
+  -> verify and execute #eval
+  -> remaining runtime LAINIR
+  -> interpreter or native backend
 ```
 
-各层职责如下：
+其中：
 
-```text
-RawAst
-  C parser 产出的无语义拓扑树。
+| 阶段 | 负责的事情 |
+| --- | --- |
+| RawAst | 保存 token、分隔符分组、相邻关系和源码位置 |
+| expand | 展开宏和其他产生新语法的规则 |
+| elaborate | 解释语言对象，完成名字、类型、effect、特化和布局等语义工作 |
+| lower | 把高层语言对象转换成 LAINIR 的过程、控制流、地址和物理操作 |
+| `#eval` | 执行明确标记为编译期计算的 LAINIR |
+| Backend | 解释 LAINIR，或把它转换成 C、LLVM IR、机器码等目标 |
 
-AstTree
-  RawAst 的 Meta 层值表示，仍然只保存拓扑。
+`expand`、`elaborate`、`lower` 是标准库向 compiler core 提供的阶段 ABI。当前实现仍在自举迁移中，部分 `elaborate` 语义尚未完整落地；这张表描述稳定的职责边界，不表示每项语言能力都已经完成。
 
-Middle AST
-  Meta domain parser 产出的高层语义树。
+## 3. LAIN-AST 边界
 
-Typed / Elaborated Middle AST
-  完成名称解析、类型检查、effect 检查、comptime 特化、layout 计算后的语义树。
-
-LAIN-IR
-  物理执行层中间表示。
-
-Backend Target
-  C、LLVM IR、解释器或其他目标。
-```
-
-## 3. LAIN-AST
-
-LAIN-AST 只描述源码文本的结构拓扑。
-
-它只包含物理节点形状：
+Parser 产生的 RawAst 只描述源码的结构拓扑。它可以保存：
 
 ```text
 Atom
@@ -62,10 +67,10 @@ Juxt
 Sep
 ```
 
-LAIN-AST 不包含语言语义节点：
+它不直接保存这些语义节点：
 
 ```text
-fn
+function
 struct
 module
 import
@@ -73,14 +78,11 @@ effect
 type
 call
 field
-param
-block
-stmt
-expr
+parameter
+statement
 generic
 attribute
 macro
-pattern
 ```
 
 例如：
@@ -89,328 +91,129 @@ pattern
 foo(x)
 ```
 
-在 LAIN-AST 中只是：
+在 RawAst 中只表示为一个名字后面跟着圆括号组。它可能是运行时调用、类型工厂调用、effect 应用、宏调用或 DSL 形式。Meta 根据绑定和上下文决定它的含义。
 
-```text
-Postfix(Atom("foo"), Group(paren, ...))
-```
+完整的语法树契约见 [`02-lain-ast.md`](02-lain-ast.md)。
 
-它可能是 value call、type application、effect application、macro invocation 或 DSL form。具体语义由 Meta 层根据上下文解释。
+## 4. Meta 边界
 
-## 4. Meta System
+Meta 是 Lain 的语言定义层，负责：
 
-Meta 系统是 Lain 的语言定义层。
+- 解释统一绑定以及 `std::func`、`std::struct`、`std::module` 等构造器；
+- 宏和 attribute 展开；
+- 名字解析、类型检查和 effect 检查；
+- comptime 参数传播和具体化；
+- record layout、closure conversion 和 ABI 决策；
+- 生成 LAINIR。
 
-它接收 AstTree，并通过 domain parser 生成 Middle AST：
+Meta 可以维护类型、模块、callable、effect 和编译期值等高层对象。这些对象在 lowering 后只留下运行所需的物理表示。
 
-```text
-fn/parse.scm          AstTree -> middle.fn
-struct/parse.scm      AstTree -> middle.struct
-types/parse.scm       AstTree -> type.*
-expr/parse.scm        AstTree -> expr.*
-effects/form.scm      AstTree -> effect.*
-module/parse.scm      AstTree -> module.*
-import/parse.scm      AstTree -> import.*
-attrs/parse.scm       AstTree -> attr.*
-```
+当前 bootstrap 标准库使用 LAINIR 实现这套阶段 ABI，正式标准库使用 Lain 编写并编译成 LAINIR。两者应遵守同一接口。Meta 的实现语言不改变它在编译流程中的职责。
 
-Meta 层负责：
+详细规则见 [`03-meta-system.md`](03-meta-system.md)，当前实现路线见 [`roadmaps/lainc-meta-roadmap.md`](roadmaps/lainc-meta-roadmap.md)。
 
-```text
-domain parsing
-macro expansion
-attribute expansion
-name resolution
-type checking
-effect checking
-generic / comptime specialization
-layout calculation
-closure conversion
-ABI lowering
-LAIN-IR generation
-```
+## 5. 编译期执行边界
 
-初期 Meta 层可以由 Scheme 实现，后续逐步自举为 Lain 自身。
-
-## 5. Middle AST
-
-Middle AST 是 Lain 的高层语义表示。
-
-它可以包含：
-
-```text
-middle.fn
-middle.struct
-middle.module
-middle.import
-expr.call
-expr.if
-expr.match
-expr.block
-type.ref
-type.app
-effect.set
-effect.app
-pattern.*
-```
-
-Middle AST 允许表达源语言语义，但不能直接进入 Backend。
-
-它必须经过 elaboration，消解：
-
-```text
-unresolved name
-unresolved type
-unresolved overload
-unexpanded macro
-unchecked generic
-unchecked effect
-source-only attribute
-```
-
-## 6. LAIN-IR
-
-LAIN-IR 是 Lain 的物理执行层中间表示。
-
-它只表达 lower 后的底层计算：
-
-```text
-#bits<N>
-#float<N>
-#vec<N, T>
-#addr
-#unit
-#never
-
-#alloca
-#offset
-#load
-#store
-#add
-#sub
-#smul
-#umul
-#sdiv
-#udiv
-#block
-#loop
-#break
-#continue
-#if
-#switch
-#proc
-#call
-#tail_call
-#ret
-```
-
-LAIN-IR 不保留高层语言结构：
-
-```text
-source-level fn
-source-level struct
-source-level module
-source-level effect
-generic
-macro
-method syntax
-overload set
-high-level pattern matching
-```
-
-高层结构体字段访问必须 lower 为：
-
-```text
-base address + byte offset + load/store type
-```
+Meta 决定需要执行什么编译期计算，并生成显式的 LAINIR `#eval` 块。LAINIR 求值器负责验证并执行这个块。
 
 例如：
+
+```lain
+let main = std::func() -> i64 {
+    return 40 + 2;
+};
+```
+
+当前算术 lowering 可以生成：
 
 ```lain-ir
-#set %field_ptr = #offset %obj 8
-#set %field = #load #bits<64> %field_ptr none
-```
-
-## 7. Function Model
-
-Lain 中的 callable 是由 Meta 层 `std::func` 构造器产生的高层对象。
-
-LAIN-IR 中的 `#proc` 是物理 subroutine。
-
-二者不等价：
-
-```text
-std::func callable != #proc
-```
-
-一个高层函数经过 Meta 展开后，可能 lower 为：
-
-```text
-一个 #proc
-多个 specialized #proc
-closure object + invoke #proc
-foreign wrapper
-trampoline
-comptime-only function
-inline 后不存在的代码片段
-```
-
-## 8. Generic and Comptime Model
-
-Lain 的泛型不是 Parser 级特性。
-
-泛型被建模为 comptime value parameter。
-
-推荐形式：
-
-```lain
-let identity = std::func(comptime T: type, x: T) -> T {
-    x
-}
-
-let y = identity(i32, 10);
-```
-
-类型是一等 comptime value。
-
-因此 type application、effect application 和 value call 可以共享同一种拓扑：
-
-```lain
-Vec(i32)
-Result(i32, Error)
-Throws(i32)
-foo(x)
-```
-
-Lain 不推荐将 `<T>` 作为核心泛型语法，因为 `<` 和 `>` 会迫使 Parser 判断类型上下文，从而破坏 LAIN-AST 的无语义边界。
-
-## 9. Effect System
-
-Effect 是 Meta / Middle AST 层语义。
-
-Parser 不识别 effect。
-
-LAIN-IR 不直接保留高层 effect set。
-
-例如：
-
-```lain
-let read = std::func() -> String ! {IO, Throws(Error)} {
-    ...
+#proc main() -> #bits<64> {
+  #let %value: #bits<64> = #eval {
+    #return #add(40, 2)
+  }
+  #return %value
 }
 ```
 
-其中 effect set 由 `effects/form.scm` 解析，经过 effect checking 后，在 lowering 阶段转换为具体物理实现，例如：
+这里有两条边界：
 
-```text
-错误返回值
-continuation passing
-handler table
-runtime token
-state machine
-trap / unwind path
+- Meta 把 `std::func`、`i64` 和 `+` 解释并转换成 `#proc`、`#bits<64>` 和 `#add`。
+- LAINIR 执行 `#eval`，把结果交还给后续编译过程。
+
+编译期文件、进程、网络或 artifact 操作必须通过显式 capability 获得宿主能力。Meta 语义对象本身不隐式获得这些能力。
+
+## 6. LAINIR 边界
+
+LAINIR 表达物理执行，包括：
+
+- 固定位宽整数、浮点数、地址、unit 和 never；
+- 算术、比较和位宽转换；
+- 局部绑定、分支和循环；
+- 地址计算、load 和 store；
+- 物理过程、直接调用、间接调用和外部过程；
+- 显式的编译期 `#eval`。
+
+进入 LAINIR 前，高层函数、结构体、模块、泛型、effect、宏、重载和名字解析都应当完成处理。
+
+LAINIR 的规范见 [`01-lain-ir.md`](01-lain-ir.md)。
+
+## 7. 高层 callable 与物理过程
+
+Lain 中由 `std::func` 构造的 callable 是 Meta 对象。LAINIR 中的 `#proc` 是一个具有固定物理签名的过程。
+
+一个 callable 经过展开、特化和 lowering 后，可能产生：
+
+- 一个 `#proc`；
+- 多个具有不同物理签名的 `#proc`；
+- closure 数据和对应的 invoke 过程；
+- foreign wrapper 或 trampoline；
+- 完全内联的代码；
+- 只在编译期存在、没有运行时产物的过程。
+
+因此，callable 的身份和类型属于 Meta 层，`#proc` 的参数宽度、返回宽度和调用约定属于 LAINIR 层。
+
+## 8. 类型参数与 comptime
+
+类型是编译期值。带类型参数的构造器使用普通的编译期参数和工厂调用，例如：
+
+```lain
+let identity = std::func(comptime T: type, value: T) -> T {
+    return value;
+};
+
+let answer = identity(i32, 42);
 ```
 
-## 10. Compile-Time Execution
+`Vec(i32)`、`Result(i32, Error)` 和普通的 `foo(x)` 在 RawAst 中可以具有相同的后缀调用拓扑。Meta 根据被调用对象决定这是类型构造、effect 构造、宏展开还是值调用。
 
-Lain 支持编译期执行。
+具体化完成后，类型参数必须传播到物理 lowering，使每个生成的 LAINIR 过程和数据布局都具有确定的物理形式。
 
-Meta 层可以执行纯 AST / Middle AST 变换，但不能直接执行任意宿主 I/O。
+## 9. Effect 和模块
 
-需要副作用的编译期行为必须 lower 为受约束的 LAIN-IR，并交给 Host evaluator 执行：
+effect 和 module 都是 Meta 层的语言对象。
 
-```text
-Middle AST
-  -> LAIN-IR comptime proc
-  -> Host evaluator
-  -> comptime value / generated AstTree
-```
+- effect 规则负责描述和检查能力集合，并在 lowering 时选择错误返回、handler、状态机或其他物理实现。
+- module 规则负责名字空间、import、export 和接口 artifact，并在 lowering 时留下物理链接所需的信息。
 
-编译期副作用必须受 effect system 或 host capability 限制。
+它们不会作为未经处理的高层对象进入 LAINIR。effect 与 capability 的详细设计见 [`stdlib/effect-system.md`](stdlib/effect-system.md)。
 
-典型 capability 包括：
+## 10. Backend
 
-```text
-ReadFile
-WriteFile
-ReadEnv
-RunCommand
-Network
-PackageFetch
-EmitDiagnostic
-GenerateAst
-```
+Backend 接收经过验证的 LAINIR。它可以直接解释执行，也可以生成 C、LLVM IR 或机器码。
 
-## 11. Macro and Hygiene
+Backend 只处理物理类型、控制流、内存和调用。函数构造器、结构体语法、模块、泛型、effect 和宏已经由 Meta 层处理完毕。
 
-Lain 的宏系统属于 Meta 层。
+当前工具和后端说明见 [`implementation/lainir-tools.md`](implementation/lainir-tools.md) 与 [`implementation/lain-written-backend.md`](implementation/lain-written-backend.md)。
 
-宏可以作用于：
+## 11. 当前自举结构
+
+当前代码分为四个位置：
 
 ```text
-AstTree
-Middle AST
-Attribute + target
+seed/                         C 编写的 LAINIR 解释器和最小宿主能力
+src/lainir/lainc.l1           冻结的 LAINIR compiler artifact
+src/lainc/lainc.lain          过渡编译器
+src/compiler-archive/*.lain   最终 Lain 编写的编译器源码
 ```
 
-默认规则是：
-
-```text
-macro generates AstTree or Middle AST.
-lowering generates LAIN-IR.
-```
-
-所有 AST 节点携带 `SyntaxContext`。
-
-宏展开生成的新 identifier 必须通过 hygiene context 创建，避免：
-
-```text
-宏内部临时变量污染用户作用域。
-用户变量意外捕获宏生成 identifier。
-宏生成引用绑定到错误定义。
-```
-
-## 12. Backend
-
-Backend 只消费 LAIN-IR。
-
-它可以输出：
-
-```text
-C
-LLVM IR
-native code
-interpreter bytecode
-```
-
-Backend 不重新理解 source-level Lain 语义。
-
-例如高层结构体、泛型、effect、module、macro 都应在进入 Backend 前被消解为 LAIN-IR 中的物理表示。
-
-## 13. Implementation Direction
-
-当前 Lain-Lang 的实现方向包括：
-
-```text
-C parser
-  负责 RawAst 构建。
-
-Scheme Meta
-  负责 canonicalization、domain parsing、macro / meta pass。
-
-LAIN-IR
-  负责解释执行、C emitter、未来 LLVM IR emitter。
-
-Bootstrap Layer
-  逐步将编译器核心从 Scheme / C 迁移到 Lain 自身。
-```
-
-核心迁移目标是：
-
-```text
-canonicalize.scm 只输出无语义 AstTree。
-surface/tree.scm 只保留通用 tree helper。
-type / expr / effect / fn / struct / module parser 分离到各自 domain。
-Middle AST 和 elaboration pass 承担语言语义。
-LAIN-IR 保持物理、显式、可验证。
-```
+目标是让 compiler core 通过稳定 ABI 调用标准库的 `expand`、`elaborate` 和 `lower`，由正式标准库接管语言规则，并最终让 archive 编译器完成自举固定点。
