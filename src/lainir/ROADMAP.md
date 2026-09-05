@@ -82,7 +82,7 @@ Status: complete.
 - [x] Complete the executable text language's address and memory forms:
   allocation, `lea`, typed load/store, and typed field access.
 - [x] Keep source-language aggregates and globals outside LAIN-IR, as required
-  by `docs/02-lain-ir.md`; their physical representation is ordinary memory
+  by `docs/01-lain-ir.md`; their physical representation is ordinary memory
   and address arithmetic rather than hidden backend forms.
 - [x] Explicit wrapping fixed-width integer arithmetic and checked division
   without C signed-overflow undefined behavior.

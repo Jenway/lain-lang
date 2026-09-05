@@ -5,49 +5,49 @@
 // rules are added behind this ABI in later slices; they do not move into the
 // compiler core.
 
-#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
-#extern #proc lain_ast_v1_nil() -> addr;
+#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;
+#extern #proc lain_ast_v1_nil() -> #addr;
 #extern #proc lain_meta_pass_result_v1_new(
-  i32 %status, i64 %changed, addr %result,
-  addr %diagnostic, addr %dependencies, addr %owner
-) -> addr;
-#extern #proc lain_std_meta_status(addr %source, addr %root) -> i32;
-#extern #proc syntax_index_count(addr %index) -> i64;
-#extern #proc syntax_index_status(addr %index) -> i32;
-#extern #proc syntax_index_entry(addr %index, i64 %ordinal) -> addr;
-#extern #proc syntax_unit_source(addr %unit) -> addr;
-#extern #proc syntax_unit_root(addr %unit) -> addr;
-#extern #proc lain_compile_context_v1_owner(addr %context) -> addr;
-#extern #proc lain_std_lower_program(addr %context, addr %syntax_index) -> i32;
+  #bits<32> %status, #bits<64> %changed, #addr %result,
+  #addr %diagnostic, #addr %dependencies, #addr %owner
+) -> #addr;
+#extern #proc lain_std_meta_status(#addr %source, #addr %root) -> #bits<32>;
+#extern #proc syntax_index_count(#addr %index) -> #bits<64>;
+#extern #proc syntax_index_status(#addr %index) -> #bits<32>;
+#extern #proc syntax_index_entry(#addr %index, #bits<64> %ordinal) -> #addr;
+#extern #proc syntax_unit_source(#addr %unit) -> #addr;
+#extern #proc syntax_unit_root(#addr %unit) -> #addr;
+#extern #proc lain_compile_context_v1_owner(#addr %context) -> #addr;
+#extern #proc lain_std_lower_program(#addr %context, #addr %syntax_index) -> #bits<32>;
 
-#proc lain_std_abi_version() -> i64 {
+#proc lain_std_abi_version() -> #bits<64> {
   #return 1
 }
 
-#proc lain_std_initialize(addr %context) -> i32 {
+#proc lain_std_initialize(#addr %context) -> #bits<32> {
   #return 0
 }
 
 #proc lain_std_expand(
-  addr %context, addr %source_unit, addr %root
-) -> addr {
+  #addr %context, #addr %source_unit, #addr %root
+) -> #addr {
   // The compiler passes the syntax index as source_unit.  Semantic form
   // recognition is delegated to the bootstrap library for every unit; the
   // core does not inspect `module`/`struct` spellings itself.
-  #let %owner: addr = #call lain_compile_context_v1_owner(%context)
-  #let %index_status: i32 = #call syntax_index_status(%source_unit)
+  #let %owner: #addr = #call lain_compile_context_v1_owner(%context)
+  #let %index_status: #bits<32> = #call syntax_index_status(%source_unit)
   #if #ne(%index_status, 0) {
     #return #call lain_meta_pass_result_v1_new(
       %index_status, 0, %root, #call lain_ast_v1_nil(),
       #call lain_ast_v1_nil(), %owner
     )
   }
-  #let %count: i64 = #call syntax_index_count(%source_unit)
-  #let %ordinal: i64 = 0
+  #let %count: #bits<64> = #call syntax_index_count(%source_unit)
+  #let %ordinal: #bits<64> = 0
   #loop units {
-    #if #ge(%ordinal, %count) { #break units }
-    #let %unit: addr = #call syntax_index_entry(%source_unit, %ordinal)
-    #let %status: i32 = #call lain_std_meta_status(
+    #if #sge(%ordinal, %count) { #break units }
+    #let %unit: #addr = #call syntax_index_entry(%source_unit, %ordinal)
+    #let %status: #bits<32> = #call lain_std_meta_status(
       #call syntax_unit_source(%unit), #call syntax_unit_root(%unit)
     )
     #if #ne(%status, 0) {
@@ -56,7 +56,7 @@
         #call lain_ast_v1_nil(), %owner
       )
     }
-    %ordinal: i64 = #add(%ordinal, 1)
+    %ordinal: #bits<64> = #add(%ordinal, 1)
     #continue units
   }
   #return #call lain_meta_pass_result_v1_new(
@@ -64,8 +64,8 @@
   )
 }
 
-#proc lain_std_elaborate(addr %context, addr %expanded_root) -> addr {
-  #let %owner: addr = #call lain_compile_context_v1_owner(%context)
+#proc lain_std_elaborate(#addr %context, #addr %expanded_root) -> #addr {
+  #let %owner: #addr = #call lain_compile_context_v1_owner(%context)
   #return #call lain_meta_pass_result_v1_new(
     0, 0, %expanded_root,
     #call lain_ast_v1_nil(), #call lain_ast_v1_nil(), %owner
@@ -73,13 +73,13 @@
 }
 
 #proc lain_std_lower(
-  addr %context, addr %elaborated_root, addr %l1_unit
-) -> addr {
+  #addr %context, #addr %elaborated_root, #addr %l1_unit
+) -> #addr {
   // The request is the context owner; lower_program still consumes its
   // request layout while the pass itself receives the versioned context.
-  #let %owner: addr = #call lain_compile_context_v1_owner(%context)
-  #let %request: addr = #call lain_compile_context_v1_owner(%context)
-  #let %status: i32 = #call lain_std_lower_program(%request, %l1_unit)
+  #let %owner: #addr = #call lain_compile_context_v1_owner(%context)
+  #let %request: #addr = #call lain_compile_context_v1_owner(%context)
+  #let %status: #bits<32> = #call lain_std_lower_program(%request, %l1_unit)
   #return #call lain_meta_pass_result_v1_new(
     %status, 1, %l1_unit,
     #call lain_ast_v1_nil(), #call lain_ast_v1_nil(), %owner

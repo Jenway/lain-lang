@@ -320,6 +320,8 @@ src/compiler-archive/*.lain 最终 compiler，调用正式标准库
   150 秒上限内未完成，已记录 `timed_out=true`，峰值 RSS 约 110 MB。
 - [x] baseline JSON 同时记录命令、返回值、耗时、峰值 RSS/VMS 和源码 hash；产物
   路径不写入源码 hash。
+- [x] `bundle_lainir.py` 现在使用同目录临时文件和原子替换写 artifact；构建中断或
+  并发运行不会再留下半截的正式标准库/编译器包。
 
 验收：每个结果都能在干净工作区重跑，失败也记录为失败，不把 verifier 通过写成
 “compiler 可用”。
@@ -441,6 +443,9 @@ attributes/import
 - [x] evaluator 的 `EvalResult` 已能携带 scalar、type/module/AST handle 及类型标签，
   并拒绝 tagged Meta nil 对象（返回 `5108`）；`scripts/check_eval_object_matrix.py`
   让四种真实 `#eval` 输入分别返回并检查 kind `0/2/3/4`。
+- [x] `eval_result_clone/release` 已建立调用方与求值缓存的独立记录；算术、参数
+  绑定、类型命名空间和 Meta 调用会释放已消费的临时结果；函数调用的临时参数
+  数组也会在缓存命中或求值失败时回收，缓存不再暴露可被调用方误释放的内部记录。
 - [~] pass 结果已在 compiler API 中校验并带 CompileContext owner 后交给下一阶段；
   不同 owner 的真实转交和后续 AST/Unit 生命周期仍待接通。
 - [~] 递归和 step 已有独立消费与诊断，allocation 已接入 seed host 上限；逐对象
@@ -626,11 +631,16 @@ fixture 使用编译后的 artifact 运行。
   比较了可解析本地 import、未解析 import（`4101`）和循环依赖（`4103`）的结果。
 - [~] 已将一致性比较扩展到本地 import 的成功、未解析诊断和循环依赖诊断；
   完整 AST、所有诊断种类和依赖对象内容仍待补齐。
+- [x] `scripts/check_policy_conformance.py` 已用同一组固定输入比较第一代与正式
+  标准库的 `type/generic/effect/bounds` 策略 ABI；两套 artifact 均返回
+  `policy=1`，策略入口没有绕过标准库。
 - [x] `scripts/check_meta_ast_conformance.py` 让第一代 RawAst 和正式
   `std::meta` 解析同一份源码，并通过各自的 AST 访问接口输出 canonical AST；
   当前 fixture 已逐字节一致。
-- [ ] 对 func、struct、module、import、type factory、generic、effect、bounds、
-  attribute 和 `#eval` 各设正负例；ownership 暂不纳入必需矩阵。
+- [~] 已为 generic/effect/bounds 和类型转换策略加入正负例，并由
+  `check_policy_conformance.py` 比较第一代与正式标准库；func、struct、module、
+  import、type factory、attribute 和 `#eval` 的完整正负矩阵仍待补齐，ownership
+  不纳入必需矩阵。
 - [ ] 差异报告精确到第一个 pass、节点 span 和 IR procedure。
 - [ ] 添加 `tests/lainir_lain/run_stdlib_conformance.py`。
 
@@ -706,7 +716,9 @@ API nonempty 可运行
 - [ ] 删除 archive Meta 中承担编译期 procedure 解释的代码；Meta 只保留 AST
   操作和 expansion 调度。
 - [ ] 第一代标准库保留为带 ABI/version/hash 的 bootstrap snapshot。
-- [ ] 更新 README 和所有旧路线图指向本文。
+- [~] 已更新 `src/lainir/bootstrap_std/README.md` 与
+  `src/lainir/lain/README.md`，按当前代码说明第一代标准库的职责和剩余迁移项；
+  其他旧路线图仍待统一收口。
 
 验收：boundary lint 无例外；删除过渡实现后仍可从 seed 完成 B8 全链。
 

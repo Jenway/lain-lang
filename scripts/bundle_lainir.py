@@ -7,6 +7,8 @@ module bundler; formatter, lexer, highlighting, and LSP logic remain LAIN-IR.
 from __future__ import annotations
 
 import argparse
+import os
+import tempfile
 from pathlib import Path
 
 
@@ -59,7 +61,32 @@ def main() -> int:
     parser.add_argument("inputs", nargs="+", type=Path)
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(bundle(args.inputs), encoding="utf-8", newline="\n")
+    # Never expose a partially written artifact.  A killed or concurrent
+    # bundler may leave its private temporary file behind, but readers see
+    # either the previous complete bundle or this complete replacement.
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=args.output.parent,
+            prefix=f".{args.output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_name = temporary.name
+            temporary.write(bundle(args.inputs))
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, args.output)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
     return 0
 
 

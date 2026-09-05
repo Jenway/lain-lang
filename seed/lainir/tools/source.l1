@@ -5,7 +5,7 @@
 // without reimplementing byte scanning.  The only host capability used here
 // is page allocation; source bytes are supplied by the caller.
 
-#extern #proc bootstrap.allocate-pages(i64 %size) -> addr;
+#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;
 
 // Token kinds.  The spelling remains in the source slice; consumers can
 // classify identifiers and directives without losing the original text.
@@ -16,11 +16,11 @@
 
 // Diagnostic severities: 1 error, 2 warning, 3 information.
 
-#proc tool_byte_at(addr %data, i64 %index) -> i8 {
-  #return #load[i8](#lea(base=%data, idx=%index, scale=1, offset=0))
+#proc tool_byte_at(#addr %data, #bits<64> %index) -> #bits<8> {
+  #return #load[#bits<8>](#lea(base=%data, idx=%index, scale=1, offset=0))
 }
 
-#proc tool_is_space(i8 %byte) -> i1 {
+#proc tool_is_space(#bits<8> %byte) -> #bits<1> {
   #if #eq(%byte, 32) { #return 1 }
   #if #eq(%byte, 9) { #return 1 }
   #if #eq(%byte, 10) { #return 1 }
@@ -28,42 +28,42 @@
   #return 0
 }
 
-#proc tool_is_digit(i8 %byte) -> i1 {
-  #if #ge(%byte, 48) {
-    #if #le(%byte, 57) { #return 1 }
+#proc tool_is_digit(#bits<8> %byte) -> #bits<1> {
+  #if #sge(%byte, 48) {
+    #if #sle(%byte, 57) { #return 1 }
   }
   #return 0
 }
 
-#proc tool_is_hex_digit(i8 %byte) -> i1 {
+#proc tool_is_hex_digit(#bits<8> %byte) -> #bits<1> {
   #if #call tool_is_digit(%byte) { #return 1 }
-  #if #ge(%byte, 65) {
-    #if #le(%byte, 70) { #return 1 }
+  #if #sge(%byte, 65) {
+    #if #sle(%byte, 70) { #return 1 }
   }
-  #if #ge(%byte, 97) {
-    #if #le(%byte, 102) { #return 1 }
-  }
-  #return 0
-}
-
-#proc tool_is_alpha(i8 %byte) -> i1 {
-  #if #ge(%byte, 65) {
-    #if #le(%byte, 90) { #return 1 }
-  }
-  #if #ge(%byte, 97) {
-    #if #le(%byte, 122) { #return 1 }
+  #if #sge(%byte, 97) {
+    #if #sle(%byte, 102) { #return 1 }
   }
   #return 0
 }
 
-#proc tool_is_ident_start(i8 %byte) -> i1 {
+#proc tool_is_alpha(#bits<8> %byte) -> #bits<1> {
+  #if #sge(%byte, 65) {
+    #if #sle(%byte, 90) { #return 1 }
+  }
+  #if #sge(%byte, 97) {
+    #if #sle(%byte, 122) { #return 1 }
+  }
+  #return 0
+}
+
+#proc tool_is_ident_start(#bits<8> %byte) -> #bits<1> {
   #if #call tool_is_alpha(%byte) { #return 1 }
   #if #eq(%byte, 95) { #return 1 }
   #if #eq(%byte, 46) { #return 1 }
   #return 0
 }
 
-#proc tool_is_ident_char(i8 %byte) -> i1 {
+#proc tool_is_ident_char(#bits<8> %byte) -> #bits<1> {
   #if #call tool_is_ident_start(%byte) { #return 1 }
   #if #call tool_is_digit(%byte) { #return 1 }
   #if #eq(%byte, 45) { #return 1 }
@@ -78,11 +78,11 @@
 //   80 nil/sentinel address, 88 scan-limit, 96 content fingerprint.  LAIN-IR
 //   integer literals cannot be addresses, so all nullable links use this
 //   per-source sentinel instead of address 0.
-#proc tool_source_new(addr %data, i64 %length) -> addr {
-  #let %source: addr = #call bootstrap.allocate-pages(112)
+#proc tool_source_new(#addr %data, #bits<64> %length) -> #addr {
+  #let %source: #addr = #call bootstrap.allocate-pages(112)
   // Keep the sentinel large enough for record-kind probes used by parser
   // links.  Only the first byte is the nil tag; the remaining bytes stay zero.
-  #let %nil: addr = #call bootstrap.allocate-pages(48)
+  #let %nil: #addr = #call bootstrap.allocate-pages(48)
   #store %data, #lea(base=%source, idx=0, scale=0, offset=0)
   #store %length, #lea(base=%source, idx=0, scale=0, offset=8)
   #store 0, #lea(base=%source, idx=0, scale=0, offset=16)
@@ -98,26 +98,26 @@
   // Cache a content fingerprint once, when the source object is created.
   // Meta lookup can then compare source identity in O(1) without rescanning
   // the complete file for every captured generic function.
-  #let %fingerprint: i64 = 1469598103934665603
-  #let %index: i64 = 0
+  #let %fingerprint: #bits<64> = 1469598103934665603
+  #let %index: #bits<64> = 0
   #loop fingerprint_bytes {
-    #if #ge(%index, %length) { #break fingerprint_bytes }
-    %fingerprint: i64 = #add(
+    #if #sge(%index, %length) { #break fingerprint_bytes }
+    %fingerprint: #bits<64> = #add(
       #mul(%fingerprint, 131),
-      #zext[#bits<64>](#load[i8](#lea(base=%data, idx=%index, scale=1, offset=0)))
+      #zext[#bits<64>](#load[#bits<8>](#lea(base=%data, idx=%index, scale=1, offset=0)))
     )
-    %index: i64 = #add(%index, 1)
+    %index: #bits<64> = #add(%index, 1)
     #continue fingerprint_bytes
   }
   #store %fingerprint, #lea(base=%source, idx=0, scale=0, offset=96)
   #return %source
 }
 
-#proc tool_source_nil(addr %source) -> addr {
-  #return #load[addr](#lea(base=%source, idx=0, scale=0, offset=80))
+#proc tool_source_nil(#addr %source) -> #addr {
+  #return #load[#addr](#lea(base=%source, idx=0, scale=0, offset=80))
 }
 
-#proc tool_is_nil(addr %source, addr %value) -> i1 {
+#proc tool_is_nil(#addr %source, #addr %value) -> #bits<1> {
   // Links use a zeroed one-byte sentinel.  Do not compare addresses: LAIN-IR
   // equality is a bits operation and the interpreter deliberately rejects
   // address operands at runtime.
@@ -125,60 +125,60 @@
   #return 0
 }
 
-#proc tool_source_data(addr %source) -> addr {
-  #return #load[addr](#lea(base=%source, idx=0, scale=0, offset=0))
+#proc tool_source_data(#addr %source) -> #addr {
+  #return #load[#addr](#lea(base=%source, idx=0, scale=0, offset=0))
 }
 
-#proc tool_source_length(addr %source) -> i64 {
-  #return #load[i64](#lea(base=%source, idx=0, scale=0, offset=8))
+#proc tool_source_length(#addr %source) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=8))
 }
 
-#proc tool_source_offset(addr %source) -> i64 {
-  #return #load[i64](#lea(base=%source, idx=0, scale=0, offset=16))
+#proc tool_source_offset(#addr %source) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=16))
 }
 
-#proc tool_source_line(addr %source) -> i64 {
-  #return #load[i64](#lea(base=%source, idx=0, scale=0, offset=24))
+#proc tool_source_line(#addr %source) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=24))
 }
 
-#proc tool_source_column(addr %source) -> i64 {
-  #return #load[i64](#lea(base=%source, idx=0, scale=0, offset=32))
+#proc tool_source_column(#addr %source) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=32))
 }
 
-#proc tool_source_set_cursor(addr %source, i64 %offset, i64 %line, i64 %column) -> #unit {
+#proc tool_source_set_cursor(#addr %source, #bits<64> %offset, #bits<64> %line, #bits<64> %column) -> #unit {
   #store %offset, #lea(base=%source, idx=0, scale=0, offset=16)
   #store %line, #lea(base=%source, idx=0, scale=0, offset=24)
   #store %column, #lea(base=%source, idx=0, scale=0, offset=32)
   #return
 }
 
-#proc tool_source_scan_limit(addr %source) -> i64 {
-  #return #load[i64](#lea(base=%source, idx=0, scale=0, offset=88))
+#proc tool_source_scan_limit(#addr %source) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=88))
 }
 
-#proc tool_source_fingerprint(addr %source) -> i64 {
-  #return #load[i64](#lea(base=%source, idx=0, scale=0, offset=96))
+#proc tool_source_fingerprint(#addr %source) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=96))
 }
 
-#proc tool_source_set_scan_limit(addr %source, i64 %limit) -> #unit {
+#proc tool_source_set_scan_limit(#addr %source, #bits<64> %limit) -> #unit {
   #store %limit, #lea(base=%source, idx=0, scale=0, offset=88)
   #return
 }
 
-#proc tool_advance_to(addr %source, i64 %end) -> #unit {
-  #let %data: addr = #call tool_source_data(%source)
-  #let %position: i64 = #call tool_source_offset(%source)
-  #let %line: i64 = #call tool_source_line(%source)
-  #let %column: i64 = #call tool_source_column(%source)
+#proc tool_advance_to(#addr %source, #bits<64> %end) -> #unit {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %position: #bits<64> = #call tool_source_offset(%source)
+  #let %line: #bits<64> = #call tool_source_line(%source)
+  #let %column: #bits<64> = #call tool_source_column(%source)
   #loop advance {
-    #if #ge(%position, %end) { #break advance }
+    #if #sge(%position, %end) { #break advance }
     #if #eq(#call tool_byte_at(%data, %position), 10) {
-      %line: i64 = #add(%line, 1)
-      %column: i64 = 0
+      %line: #bits<64> = #add(%line, 1)
+      %column: #bits<64> = 0
     } else {
-      %column: i64 = #add(%column, 1)
+      %column: #bits<64> = #add(%column, 1)
     }
-    %position: i64 = #add(%position, 1)
+    %position: #bits<64> = #add(%position, 1)
     #continue advance
   }
   #store %end, #lea(base=%source, idx=0, scale=0, offset=16)
@@ -187,17 +187,17 @@
   #return
 }
 
-// Trivia layout: kind i32 @0, start i64 @8, length i64 @16,
-// line i64 @24, column i64 @32, next addr @40.
-#proc tool_trivia_new(addr %source, i32 %kind, i64 %start, i64 %length) -> addr {
-  #let %trivia: addr = #call bootstrap.allocate-pages(48)
+// Trivia layout: kind #bits<32> @0, start #bits<64> @8, length #bits<64> @16,
+// line #bits<64> @24, column #bits<64> @32, next #addr @40.
+#proc tool_trivia_new(#addr %source, #bits<32> %kind, #bits<64> %start, #bits<64> %length) -> #addr {
+  #let %trivia: #addr = #call bootstrap.allocate-pages(48)
   #store %kind, #lea(base=%trivia, idx=0, scale=0, offset=0)
   #store %start, #lea(base=%trivia, idx=0, scale=0, offset=8)
   #store %length, #lea(base=%trivia, idx=0, scale=0, offset=16)
   #store #call tool_source_line(%source), #lea(base=%trivia, idx=0, scale=0, offset=24)
   #store #call tool_source_column(%source), #lea(base=%trivia, idx=0, scale=0, offset=32)
   #store #call tool_source_nil(%source), #lea(base=%trivia, idx=0, scale=0, offset=40)
-  #let %last: addr = #load[addr](#lea(base=%source, idx=0, scale=0, offset=48))
+  #let %last: #addr = #load[#addr](#lea(base=%source, idx=0, scale=0, offset=48))
   #if #eq(#call tool_is_nil(%source, %last), 0) {
     #store %trivia, #lea(base=%last, idx=0, scale=0, offset=40)
   } else {
@@ -207,18 +207,18 @@
   #return %trivia
 }
 
-#proc tool_source_pending_trivia(addr %source) -> addr {
-  #return #load[addr](#lea(base=%source, idx=0, scale=0, offset=40))
+#proc tool_source_pending_trivia(#addr %source) -> #addr {
+  #return #load[#addr](#lea(base=%source, idx=0, scale=0, offset=40))
 }
 
-// Diagnostic layout: severity i32 @0, code i32 @4, start i64 @8,
-// length i64 @16, line i64 @24, column i64 @32, message addr @40,
-// message length i64 @48, next addr @56.
+// Diagnostic layout: severity #bits<32> @0, code #bits<32> @4, start #bits<64> @8,
+// length #bits<64> @16, line #bits<64> @24, column #bits<64> @32, message #addr @40,
+// message length #bits<64> @48, next #addr @56.
 #proc tool_diag_new(
-  addr %source, i32 %severity, i32 %code, i64 %start, i64 %length,
-  addr %message, i64 %message_length
-) -> addr {
-  #let %diag: addr = #call bootstrap.allocate-pages(64)
+  #addr %source, #bits<32> %severity, #bits<32> %code, #bits<64> %start, #bits<64> %length,
+  #addr %message, #bits<64> %message_length
+) -> #addr {
+  #let %diag: #addr = #call bootstrap.allocate-pages(64)
   #store %severity, #lea(base=%diag, idx=0, scale=0, offset=0)
   #store %code, #lea(base=%diag, idx=0, scale=0, offset=4)
   #store %start, #lea(base=%diag, idx=0, scale=0, offset=8)
@@ -228,7 +228,7 @@
   #store %message, #lea(base=%diag, idx=0, scale=0, offset=40)
   #store %message_length, #lea(base=%diag, idx=0, scale=0, offset=48)
   #store #call tool_source_nil(%source), #lea(base=%diag, idx=0, scale=0, offset=56)
-  #let %last: addr = #load[addr](#lea(base=%source, idx=0, scale=0, offset=64))
+  #let %last: #addr = #load[#addr](#lea(base=%source, idx=0, scale=0, offset=64))
   #if #eq(#call tool_is_nil(%source, %last), 0) {
     #store %diag, #lea(base=%last, idx=0, scale=0, offset=56)
   } else {
@@ -236,66 +236,66 @@
   }
   #store %diag, #lea(base=%source, idx=0, scale=0, offset=64)
   #store #add(
-    #load[i64](#lea(base=%source, idx=0, scale=0, offset=72)),
+    #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=72)),
     1
   ), #lea(base=%source, idx=0, scale=0, offset=72)
   #return %diag
 }
 
-#proc tool_source_diagnostics(addr %source) -> addr {
-  #return #load[addr](#lea(base=%source, idx=0, scale=0, offset=56))
+#proc tool_source_diagnostics(#addr %source) -> #addr {
+  #return #load[#addr](#lea(base=%source, idx=0, scale=0, offset=56))
 }
 
-#proc tool_source_diagnostic_count(addr %source) -> i64 {
-  #return #load[i64](#lea(base=%source, idx=0, scale=0, offset=72))
+#proc tool_source_diagnostic_count(#addr %source) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=72))
 }
 
 // Diagnostic accessors for the LSP bridge.  The linked record layout is
-// severity i32 @0, code i32 @4, start i64 @8, length i64 @16, line i64 @24,
-// column i64 @32, message addr @40, message length i64 @48, next addr @56.
-#proc tool_diag_severity(addr %diag) -> i32 {
-  #return #load[i32](#lea(base=%diag, idx=0, scale=0, offset=0))
+// severity #bits<32> @0, code #bits<32> @4, start #bits<64> @8, length #bits<64> @16, line #bits<64> @24,
+// column #bits<64> @32, message #addr @40, message length #bits<64> @48, next #addr @56.
+#proc tool_diag_severity(#addr %diag) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%diag, idx=0, scale=0, offset=0))
 }
 
-#proc tool_diag_code(addr %diag) -> i32 {
-  #return #load[i32](#lea(base=%diag, idx=0, scale=0, offset=4))
+#proc tool_diag_code(#addr %diag) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%diag, idx=0, scale=0, offset=4))
 }
 
-#proc tool_diag_start(addr %diag) -> i64 {
-  #return #load[i64](#lea(base=%diag, idx=0, scale=0, offset=8))
+#proc tool_diag_start(#addr %diag) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%diag, idx=0, scale=0, offset=8))
 }
 
-#proc tool_diag_length(addr %diag) -> i64 {
-  #return #load[i64](#lea(base=%diag, idx=0, scale=0, offset=16))
+#proc tool_diag_length(#addr %diag) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%diag, idx=0, scale=0, offset=16))
 }
 
-#proc tool_diag_line(addr %diag) -> i64 {
-  #return #load[i64](#lea(base=%diag, idx=0, scale=0, offset=24))
+#proc tool_diag_line(#addr %diag) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%diag, idx=0, scale=0, offset=24))
 }
 
-#proc tool_diag_column(addr %diag) -> i64 {
-  #return #load[i64](#lea(base=%diag, idx=0, scale=0, offset=32))
+#proc tool_diag_column(#addr %diag) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%diag, idx=0, scale=0, offset=32))
 }
 
-#proc tool_diag_message(addr %diag) -> addr {
-  #return #load[addr](#lea(base=%diag, idx=0, scale=0, offset=40))
+#proc tool_diag_message(#addr %diag) -> #addr {
+  #return #load[#addr](#lea(base=%diag, idx=0, scale=0, offset=40))
 }
 
-#proc tool_diag_message_length(addr %diag) -> i64 {
-  #return #load[i64](#lea(base=%diag, idx=0, scale=0, offset=48))
+#proc tool_diag_message_length(#addr %diag) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%diag, idx=0, scale=0, offset=48))
 }
 
-#proc tool_diag_next(addr %diag) -> addr {
-  #return #load[addr](#lea(base=%diag, idx=0, scale=0, offset=56))
+#proc tool_diag_next(#addr %diag) -> #addr {
+  #return #load[#addr](#lea(base=%diag, idx=0, scale=0, offset=56))
 }
 
-// Token layout: kind i32 @0, flags i32 @4, start i64 @8, length i64 @16,
-// line i64 @24, column i64 @32, leading trivia addr @40, next addr @48.
+// Token layout: kind #bits<32> @0, flags #bits<32> @4, start #bits<64> @8, length #bits<64> @16,
+// line #bits<64> @24, column #bits<64> @32, leading trivia #addr @40, next #addr @48.
 #proc tool_token_new(
-  addr %source, i32 %kind, i64 %start, i64 %length,
-  i64 %line, i64 %column, addr %leading
-) -> addr {
-  #let %token: addr = #call bootstrap.allocate-pages(56)
+  #addr %source, #bits<32> %kind, #bits<64> %start, #bits<64> %length,
+  #bits<64> %line, #bits<64> %column, #addr %leading
+) -> #addr {
+  #let %token: #addr = #call bootstrap.allocate-pages(56)
   #store %kind, #lea(base=%token, idx=0, scale=0, offset=0)
   #store 0, #lea(base=%token, idx=0, scale=0, offset=4)
   #store %start, #lea(base=%token, idx=0, scale=0, offset=8)
@@ -307,78 +307,78 @@
   #return %token
 }
 
-#proc tool_token_kind(addr %token) -> i32 {
-  #return #load[i32](#lea(base=%token, idx=0, scale=0, offset=0))
+#proc tool_token_kind(#addr %token) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%token, idx=0, scale=0, offset=0))
 }
 
-#proc tool_token_start(addr %token) -> i64 {
-  #return #load[i64](#lea(base=%token, idx=0, scale=0, offset=8))
+#proc tool_token_start(#addr %token) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%token, idx=0, scale=0, offset=8))
 }
 
-#proc tool_token_length(addr %token) -> i64 {
-  #return #load[i64](#lea(base=%token, idx=0, scale=0, offset=16))
+#proc tool_token_length(#addr %token) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%token, idx=0, scale=0, offset=16))
 }
 
-#proc tool_token_line(addr %token) -> i64 {
-  #return #load[i64](#lea(base=%token, idx=0, scale=0, offset=24))
+#proc tool_token_line(#addr %token) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%token, idx=0, scale=0, offset=24))
 }
 
-#proc tool_token_column(addr %token) -> i64 {
-  #return #load[i64](#lea(base=%token, idx=0, scale=0, offset=32))
+#proc tool_token_column(#addr %token) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%token, idx=0, scale=0, offset=32))
 }
 
-#proc tool_token_leading_trivia(addr %token) -> addr {
-  #return #load[addr](#lea(base=%token, idx=0, scale=0, offset=40))
+#proc tool_token_leading_trivia(#addr %token) -> #addr {
+  #return #load[#addr](#lea(base=%token, idx=0, scale=0, offset=40))
 }
 
-#proc tool_token_next(addr %token) -> addr {
-  #return #load[addr](#lea(base=%token, idx=0, scale=0, offset=48))
+#proc tool_token_next(#addr %token) -> #addr {
+  #return #load[#addr](#lea(base=%token, idx=0, scale=0, offset=48))
 }
 
-#proc tool_token_set_location(addr %token, i64 %start, i64 %line, i64 %column) -> #unit {
+#proc tool_token_set_location(#addr %token, #bits<64> %start, #bits<64> %line, #bits<64> %column) -> #unit {
   #store %start, #lea(base=%token, idx=0, scale=0, offset=8)
   #store %line, #lea(base=%token, idx=0, scale=0, offset=24)
   #store %column, #lea(base=%token, idx=0, scale=0, offset=32)
   #return
 }
 
-#proc tool_token_link(addr %last, addr %next) -> #unit {
+#proc tool_token_link(#addr %last, #addr %next) -> #unit {
   #store %next, #lea(base=%last, idx=0, scale=0, offset=48)
   #return
 }
 
-#proc tool_trivia_kind(addr %trivia) -> i32 {
-  #return #load[i32](#lea(base=%trivia, idx=0, scale=0, offset=0))
+#proc tool_trivia_kind(#addr %trivia) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%trivia, idx=0, scale=0, offset=0))
 }
 
-#proc tool_trivia_start(addr %trivia) -> i64 {
-  #return #load[i64](#lea(base=%trivia, idx=0, scale=0, offset=8))
+#proc tool_trivia_start(#addr %trivia) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%trivia, idx=0, scale=0, offset=8))
 }
 
-#proc tool_trivia_length(addr %trivia) -> i64 {
-  #return #load[i64](#lea(base=%trivia, idx=0, scale=0, offset=16))
+#proc tool_trivia_length(#addr %trivia) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%trivia, idx=0, scale=0, offset=16))
 }
 
-#proc tool_trivia_line(addr %trivia) -> i64 {
-  #return #load[i64](#lea(base=%trivia, idx=0, scale=0, offset=24))
+#proc tool_trivia_line(#addr %trivia) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%trivia, idx=0, scale=0, offset=24))
 }
 
-#proc tool_trivia_column(addr %trivia) -> i64 {
-  #return #load[i64](#lea(base=%trivia, idx=0, scale=0, offset=32))
+#proc tool_trivia_column(#addr %trivia) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%trivia, idx=0, scale=0, offset=32))
 }
 
-#proc tool_trivia_next(addr %trivia) -> addr {
-  #return #load[addr](#lea(base=%trivia, idx=0, scale=0, offset=40))
+#proc tool_trivia_next(#addr %trivia) -> #addr {
+  #return #load[#addr](#lea(base=%trivia, idx=0, scale=0, offset=40))
 }
 
-#proc tool_trivia_set_location(addr %trivia, i64 %start, i64 %line, i64 %column) -> #unit {
+#proc tool_trivia_set_location(#addr %trivia, #bits<64> %start, #bits<64> %line, #bits<64> %column) -> #unit {
   #store %start, #lea(base=%trivia, idx=0, scale=0, offset=8)
   #store %line, #lea(base=%trivia, idx=0, scale=0, offset=24)
   #store %column, #lea(base=%trivia, idx=0, scale=0, offset=32)
   #return
 }
 
-#proc tool_is_punctuation(i8 %byte) -> i1 {
+#proc tool_is_punctuation(#bits<8> %byte) -> #bits<1> {
   #if #eq(%byte, 40) { #return 1 }
   #if #eq(%byte, 41) { #return 1 }
   #if #eq(%byte, 123) { #return 1 }
@@ -392,7 +392,7 @@
   #return 0
 }
 
-#proc tool_is_operator(i8 %byte) -> i1 {
+#proc tool_is_operator(#bits<8> %byte) -> #bits<1> {
   #if #eq(%byte, 37) { #return 1 }
   #if #eq(%byte, 43) { #return 1 }
   #if #eq(%byte, 45) { #return 1 }
@@ -410,24 +410,24 @@
 }
 
 // Consume one token, preserving all preceding whitespace/comments as trivia.
-#proc tool_lexer_next(addr %source) -> addr {
-  #let %data: addr = #call tool_source_data(%source)
+#proc tool_lexer_next(#addr %source) -> #addr {
+  #let %data: #addr = #call tool_source_data(%source)
   // A source may be prepared with a smaller scan-limit for an incremental
   // edit.  Token offsets remain absolute; only the stopping boundary moves.
-  #let %length: i64 = #call tool_source_scan_limit(%source)
-  #let %position: i64 = #call tool_source_offset(%source)
+  #let %length: #bits<64> = #call tool_source_scan_limit(%source)
+  #let %position: #bits<64> = #call tool_source_offset(%source)
 
   #loop trivia {
-    #if #ge(%position, %length) { #break trivia }
-    #let %byte: i8 = #call tool_byte_at(%data, %position)
+    #if #sge(%position, %length) { #break trivia }
+    #let %byte: #bits<8> = #call tool_byte_at(%data, %position)
     #if #call tool_is_space(%byte) {
-      #let %start: i64 = %position
+      #let %start: #bits<64> = %position
       #loop whitespace {
-        #if #ge(%position, %length) { #break whitespace }
+        #if #sge(%position, %length) { #break whitespace }
         #if #eq(#call tool_is_space(#call tool_byte_at(%data, %position)), 0) {
           #break whitespace
         }
-        %position: i64 = #add(%position, 1)
+        %position: #bits<64> = #add(%position, 1)
         #continue whitespace
       }
       #call tool_trivia_new(%source, 1, %start, #sub(%position, %start))
@@ -435,14 +435,14 @@
       #continue trivia
     }
     #if #eq(%byte, 47) {
-      #if #lt(#add(%position, 1), %length) {
+      #if #slt(#add(%position, 1), %length) {
         #if #eq(#call tool_byte_at(%data, #add(%position, 1)), 47) {
-          #let %start: i64 = %position
-          %position: i64 = #add(%position, 2)
+          #let %start: #bits<64> = %position
+          %position: #bits<64> = #add(%position, 2)
           #loop line_comment {
-            #if #ge(%position, %length) { #break line_comment }
+            #if #sge(%position, %length) { #break line_comment }
             #if #eq(#call tool_byte_at(%data, %position), 10) { #break line_comment }
-            %position: i64 = #add(%position, 1)
+            %position: #bits<64> = #add(%position, 1)
             #continue line_comment
           }
           #call tool_trivia_new(%source, 2, %start, #sub(%position, %start))
@@ -450,21 +450,21 @@
           #continue trivia
         }
         #if #eq(#call tool_byte_at(%data, #add(%position, 1)), 42) {
-          #let %start: i64 = %position
-          %position: i64 = #add(%position, 2)
-          #let %closed: i1 = 0
+          #let %start: #bits<64> = %position
+          %position: #bits<64> = #add(%position, 2)
+          #let %closed: #bits<1> = 0
           #loop block_comment {
-            #if #ge(%position, %length) { #break block_comment }
+            #if #sge(%position, %length) { #break block_comment }
             #if #eq(#call tool_byte_at(%data, %position), 42) {
-              #if #lt(#add(%position, 1), %length) {
+              #if #slt(#add(%position, 1), %length) {
                 #if #eq(#call tool_byte_at(%data, #add(%position, 1)), 47) {
-                  %position: i64 = #add(%position, 2)
-                  %closed: i1 = 1
+                  %position: #bits<64> = #add(%position, 2)
+                  %closed: #bits<1> = 1
                   #break block_comment
                 }
               }
             }
-            %position: i64 = #add(%position, 1)
+            %position: #bits<64> = #add(%position, 1)
             #continue block_comment
           }
           #call tool_trivia_new(%source, 3, %start, #sub(%position, %start))
@@ -480,123 +480,123 @@
     #break trivia
   }
 
-  #let %start: i64 = %position
-  #let %line: i64 = #call tool_source_line(%source)
-  #let %column: i64 = #call tool_source_column(%source)
-  #if #ge(%position, %length) {
-    #let %token: addr = #call tool_token_new(%source, 0, %start, 0, %line, %column,
+  #let %start: #bits<64> = %position
+  #let %line: #bits<64> = #call tool_source_line(%source)
+  #let %column: #bits<64> = #call tool_source_column(%source)
+  #if #sge(%position, %length) {
+    #let %token: #addr = #call tool_token_new(%source, 0, %start, 0, %line, %column,
       #call tool_source_pending_trivia(%source))
     #store #call tool_source_nil(%source), #lea(base=%source, idx=0, scale=0, offset=40)
     #store #call tool_source_nil(%source), #lea(base=%source, idx=0, scale=0, offset=48)
     #return %token
   }
 
-  #let %byte: i8 = #call tool_byte_at(%data, %position)
-  #let %kind: i32 = 7
+  #let %byte: #bits<8> = #call tool_byte_at(%data, %position)
+  #let %kind: #bits<32> = 7
   #if #call tool_is_ident_start(%byte) {
-    %kind: i32 = 1
-    %position: i64 = #add(%position, 1)
+    %kind: #bits<32> = 1
+    %position: #bits<64> = #add(%position, 1)
     #loop identifier {
-      #if #ge(%position, %length) { #break identifier }
+      #if #sge(%position, %length) { #break identifier }
       #if #eq(#call tool_is_ident_char(#call tool_byte_at(%data, %position)), 0) {
         #break identifier
       }
-      %position: i64 = #add(%position, 1)
+      %position: #bits<64> = #add(%position, 1)
       #continue identifier
     }
   } else {
     #if #eq(%byte, 35) {
-      %kind: i32 = 4
-      %position: i64 = #add(%position, 1)
-      #if #lt(%position, %length) {
+      %kind: #bits<32> = 4
+      %position: #bits<64> = #add(%position, 1)
+      #if #slt(%position, %length) {
         #if #call tool_is_ident_start(#call tool_byte_at(%data, %position)) {
-          %position: i64 = #add(%position, 1)
+          %position: #bits<64> = #add(%position, 1)
           #loop directive {
-            #if #ge(%position, %length) { #break directive }
+            #if #sge(%position, %length) { #break directive }
             #if #eq(#call tool_is_ident_char(#call tool_byte_at(%data, %position)), 0) {
               #break directive
             }
-            %position: i64 = #add(%position, 1)
+            %position: #bits<64> = #add(%position, 1)
             #continue directive
           }
         }
       }
     } else {
       #if #call tool_is_digit(%byte) {
-        %kind: i32 = 2
-        %position: i64 = #add(%position, 1)
+        %kind: #bits<32> = 2
+        %position: #bits<64> = #add(%position, 1)
         #if #eq(%byte, 48) {
-          #if #lt(%position, %length) {
+          #if #slt(%position, %length) {
             #if #eq(#call tool_byte_at(%data, %position), 120) {
-              %position: i64 = #add(%position, 1)
+              %position: #bits<64> = #add(%position, 1)
               #loop hex_number {
-                #if #ge(%position, %length) { #break hex_number }
+                #if #sge(%position, %length) { #break hex_number }
                 #if #eq(#call tool_is_hex_digit(#call tool_byte_at(%data, %position)), 0) {
                   #break hex_number
                 }
-                %position: i64 = #add(%position, 1)
+                %position: #bits<64> = #add(%position, 1)
                 #continue hex_number
               }
             }
           }
         } else {
           #loop number {
-            #if #ge(%position, %length) { #break number }
+            #if #sge(%position, %length) { #break number }
             #if #eq(#call tool_is_digit(#call tool_byte_at(%data, %position)), 0) {
               #break number
             }
-            %position: i64 = #add(%position, 1)
+            %position: #bits<64> = #add(%position, 1)
             #continue number
           }
         }
       } else {
         #if #eq(%byte, 34) {
-          %kind: i32 = 3
-          %position: i64 = #add(%position, 1)
-          #let %closed: i1 = 0
+          %kind: #bits<32> = 3
+          %position: #bits<64> = #add(%position, 1)
+          #let %closed: #bits<1> = 0
           #loop string {
-            #if #ge(%position, %length) { #break string }
-            #let %current: i8 = #call tool_byte_at(%data, %position)
+            #if #sge(%position, %length) { #break string }
+            #let %current: #bits<8> = #call tool_byte_at(%data, %position)
             #if #eq(%current, 92) {
-              %position: i64 = #add(%position, 1)
-              #if #ge(%position, %length) { #break string }
-              %position: i64 = #add(%position, 1)
+              %position: #bits<64> = #add(%position, 1)
+              #if #sge(%position, %length) { #break string }
+              %position: #bits<64> = #add(%position, 1)
               #continue string
             }
-            %position: i64 = #add(%position, 1)
+            %position: #bits<64> = #add(%position, 1)
             #if #eq(%current, 34) {
-              %closed: i1 = 1
+              %closed: #bits<1> = 1
               #break string
             }
             #continue string
           }
           #if #eq(%closed, 0) {
-            %kind: i32 = 7
+            %kind: #bits<32> = 7
             #call tool_diag_new(%source, 1, 2, %start, #sub(%position, %start),
               "unterminated string", 19)
           }
         } else {
           #if #call tool_is_punctuation(%byte) {
-            %kind: i32 = 5
-            %position: i64 = #add(%position, 1)
+            %kind: #bits<32> = 5
+            %position: #bits<64> = #add(%position, 1)
           } else {
             #if #call tool_is_operator(%byte) {
-              %kind: i32 = 6
-              %position: i64 = #add(%position, 1)
-              #if #lt(%position, %length) {
-                #let %next: i8 = #call tool_byte_at(%data, %position)
+              %kind: #bits<32> = 6
+              %position: #bits<64> = #add(%position, 1)
+              #if #slt(%position, %length) {
+                #let %next: #bits<8> = #call tool_byte_at(%data, %position)
                 #if #eq(%next, 61) {
                   #if #eq(%byte, 61) {
-                    %position: i64 = #add(%position, 1)
+                    %position: #bits<64> = #add(%position, 1)
                   } else {
                     #if #eq(%byte, 33) {
-                      %position: i64 = #add(%position, 1)
+                      %position: #bits<64> = #add(%position, 1)
                     } else {
                       #if #eq(%byte, 60) {
-                        %position: i64 = #add(%position, 1)
+                        %position: #bits<64> = #add(%position, 1)
                       } else {
                         #if #eq(%byte, 62) {
-                          %position: i64 = #add(%position, 1)
+                          %position: #bits<64> = #add(%position, 1)
                         }
                       }
                     }
@@ -604,8 +604,8 @@
                 }
               }
             } else {
-              %kind: i32 = 7
-              %position: i64 = #add(%position, 1)
+              %kind: #bits<32> = 7
+              %position: #bits<64> = #add(%position, 1)
               #call tool_diag_new(%source, 1, 3, %start, 1,
                 "invalid character", 17)
             }
@@ -616,7 +616,7 @@
   }
 
   #call tool_advance_to(%source, %position)
-  #let %token: addr = #call tool_token_new(
+  #let %token: #addr = #call tool_token_new(
     %source, %kind, %start, #sub(%position, %start),
     %line, %column, #call tool_source_pending_trivia(%source)
   )
@@ -626,15 +626,15 @@
 }
 
 // Lex the complete source into a linked token list, including EOF.
-#proc tool_lex_all(addr %source) -> addr {
-  #let %nil: addr = #call tool_source_nil(%source)
-  #let %first: addr = %nil
-  #let %last: addr = %nil
+#proc tool_lex_all(#addr %source) -> #addr {
+  #let %nil: #addr = #call tool_source_nil(%source)
+  #let %first: #addr = %nil
+  #let %last: #addr = %nil
   #loop tokens {
-    #let %token: addr = #call tool_lexer_next(%source)
-    #if #call tool_is_nil(%source, %first) { %first: addr = %token }
+    #let %token: #addr = #call tool_lexer_next(%source)
+    #if #call tool_is_nil(%source, %first) { %first: #addr = %token }
     #if #call tool_is_nil(%source, %last) { } else { #call tool_token_link(%last, %token) }
-    %last: addr = %token
+    %last: #addr = %token
     #if #eq(#call tool_token_kind(%token), 0) { #break tokens }
     #continue tokens
   }
@@ -646,17 +646,17 @@
 // into an existing stream drop that temporary EOF.  Keeping the source object
 // shared means lexical diagnostics and token trivia use the new snapshot.
 #proc tool_lex_window(
-  addr %source, i64 %start, i64 %end, i64 %line, i64 %column
-) -> addr {
-  #let %length: i64 = #call tool_source_length(%source)
-  #let %window_start: i64 = %start
-  #let %window_end: i64 = %end
-  #if #gt(%window_start, %length) { %window_start: i64 = %length }
-  #if #gt(%window_end, %length) { %window_end: i64 = %length }
-  #if #lt(%window_end, %window_start) { %window_end: i64 = %window_start }
+  #addr %source, #bits<64> %start, #bits<64> %end, #bits<64> %line, #bits<64> %column
+) -> #addr {
+  #let %length: #bits<64> = #call tool_source_length(%source)
+  #let %window_start: #bits<64> = %start
+  #let %window_end: #bits<64> = %end
+  #if #sgt(%window_start, %length) { %window_start: #bits<64> = %length }
+  #if #sgt(%window_end, %length) { %window_end: #bits<64> = %length }
+  #if #slt(%window_end, %window_start) { %window_end: #bits<64> = %window_start }
   #call tool_source_set_cursor(%source, %window_start, %line, %column)
   #call tool_source_set_scan_limit(%source, %window_end)
-  #let %tokens: addr = #call tool_lex_all(%source)
+  #let %tokens: #addr = #call tool_lex_all(%source)
   #call tool_source_set_scan_limit(%source, %length)
   #return %tokens
 }

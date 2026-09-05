@@ -23,6 +23,14 @@ COMPILER = ROOT / "zig-out" / "bin" / (
 )
 
 SAMPLES = {
+    "data": (
+        "#data answer(4, 4, \"*\");\n"
+        "#proc main() -> #bits<32> {\n"
+        "  #let %byte: #bits<8> = #load[#bits<8>](#data_addr(answer))\n"
+        "  #return #zext[#bits<32>](%byte)\n"
+        "}\n",
+        42,
+    ),
     "constant": ("#proc main() -> #bits<32> {\n  #return 41\n}\n", 41),
     "arithmetic": (
         "#proc main() -> #bits<32> {\n"
@@ -54,10 +62,10 @@ SAMPLES = {
     ),
     "memory": (
         "#proc main() -> #bits<32> {\n"
-        "  #let %memory: addr = #alloca(4)\n"
-        "  #let %slot: addr = #lea(base=%memory, idx=0, scale=1, offset=0)\n"
+        "  #let %memory: #addr = #alloca(4)\n"
+        "  #let %slot: #addr = #lea(base=%memory, idx=0, scale=1, offset=0)\n"
         "  #let %answer: #bits<32> = 42\n"
-        "  #store %answer, %slot\n"
+        "  #store[#bits<32>] %answer, %slot\n"
         "  #let %loaded: #bits<32> = #load[#bits<32>](%slot)\n"
         "  #return %loaded\n"
         "}\n",

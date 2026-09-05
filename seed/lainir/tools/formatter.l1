@@ -18,12 +18,12 @@
 // still works on source bytes so comments and spelling remain lossless, but
 // structural braces are accepted only at AST-reported block boundaries and a
 // malformed file is rejected before an artifact is opened.
-#extern #proc tool_source_new(addr %data, i64 %length) -> addr;
-#extern #proc tool_lex_all(addr %source) -> addr;
-#extern #proc parser_new(addr %source, addr %tokens) -> addr;
-#extern #proc parser_parse_module(addr %cursor) -> addr;
-#extern #proc parser_failed(addr %cursor) -> i1;
-#extern #proc parser_ast_boundary(addr %node, i64 %index) -> i32;
+#extern #proc tool_source_new(#addr %data, #bits<64> %length) -> #addr;
+#extern #proc tool_lex_all(#addr %source) -> #addr;
+#extern #proc parser_new(#addr %source, #addr %tokens) -> #addr;
+#extern #proc parser_parse_module(#addr %cursor) -> #addr;
+#extern #proc parser_failed(#addr %cursor) -> #bits<1>;
+#extern #proc parser_ast_boundary(#addr %node, #bits<64> %index) -> #bits<32>;
 
 #proc byte_at(#addr %data, #bits<64> %index) -> #bits<8> {
   #return #load[#bits<8>](#lea(base=%data, idx=%index, scale=1, offset=0))
@@ -44,7 +44,7 @@
 #proc emit_indent(#bits<64> %depth) -> #unit {
   #let %index: #bits<64> = 0
   #loop spaces {
-    #if #ge(%index, #mul(%depth, 2)) {
+    #if #sge(%index, #mul(%depth, 2)) {
       #break spaces
     }
     #call emit_space()
@@ -54,18 +54,18 @@
 }
 
 #proc is_word_byte(#bits<8> %byte) -> #bits<1> {
-  #if #ge(%byte, 48) {
-    #if #le(%byte, 57) {
+  #if #sge(%byte, 48) {
+    #if #sle(%byte, 57) {
       #return 1
     }
   }
-  #if #ge(%byte, 65) {
-    #if #le(%byte, 90) {
+  #if #sge(%byte, 65) {
+    #if #sle(%byte, 90) {
       #return 1
     }
   }
-  #if #ge(%byte, 97) {
-    #if #le(%byte, 122) {
+  #if #sge(%byte, 97) {
+    #if #sle(%byte, 122) {
       #return 1
     }
   }
@@ -108,14 +108,14 @@
 ) -> #bits<64> {
   #let %index: #bits<64> = %start
   #loop string {
-    #if #ge(%index, %length) {
+    #if #sge(%index, %length) {
       #return %index
     }
     #let %byte: #bits<8> = #call byte_at(%data, %index)
     #call emit_byte(%byte)
     %index: #bits<64> = #add(%index, 1)
     #if #eq(%byte, 92) {
-      #if #lt(%index, %length) {
+      #if #slt(%index, %length) {
         #call emit_byte(#call byte_at(%data, %index))
         %index: #bits<64> = #add(%index, 1)
       }
@@ -140,7 +140,7 @@
   #call emit_byte(47)
   %index: #bits<64> = #add(%index, 2)
   #loop comment {
-    #if #ge(%index, %length) {
+    #if #sge(%index, %length) {
       #return %index
     }
     #let %byte: #bits<8> = #call byte_at(%data, %index)
@@ -160,7 +160,7 @@
 ) -> #bits<64> {
   #let %index: #bits<64> = %start
   #loop word {
-    #if #ge(%index, %length) {
+    #if #sge(%index, %length) {
       #return %index
     }
     #let %byte: #bits<8> = #call byte_at(%data, %index)
@@ -197,12 +197,12 @@
 
   #call bootstrap.artifact-begin()
   #loop source {
-    #if #ge(%index, %length) {
+    #if #sge(%index, %length) {
       #break source
     }
     #let %byte: #bits<8> = #call byte_at(%data, %index)
     #let %at_start: #bits<1> = %line_start
-    #let %ast_boundary: i32 = 0
+    #let %ast_boundary: #bits<32> = 0
 
     #if #eq(%byte, 10) {
       #if #ne(%line_start, 1) {
@@ -228,7 +228,7 @@
 
     // A // comment is copied verbatim after one separating space.
     #if #eq(%byte, 47) {
-      #if #lt(#add(%index, 1), %length) {
+      #if #slt(#add(%index, 1), %length) {
         #if #eq(#call byte_at(%data, #add(%index, 1)), 47) {
           #if #eq(%need_space, 1) {
             #call emit_space()
@@ -252,7 +252,7 @@
 
     // Braces own line breaks and indentation.
     #if #eq(%byte, 123) {
-      %ast_boundary: i32 = #call parser_ast_boundary(%syntax_module, %index)
+      %ast_boundary: #bits<32> = #call parser_ast_boundary(%syntax_module, %index)
       #if #eq(%ast_boundary, 1) {
         #if #eq(%need_space, 1) {
           #call emit_space()
@@ -267,12 +267,12 @@
       }
     }
     #if #eq(%byte, 125) {
-      %ast_boundary: i32 = #call parser_ast_boundary(%syntax_module, %index)
+      %ast_boundary: #bits<32> = #call parser_ast_boundary(%syntax_module, %index)
       #if #eq(%ast_boundary, 2) {
         #if #eq(%at_start, 0) {
           #call emit_newline()
         }
-        #if #gt(%depth, 0) {
+        #if #sgt(%depth, 0) {
           %depth: #bits<64> = #sub(%depth, 1)
         }
         #call emit_indent(%depth)
@@ -319,7 +319,7 @@
       #continue source
     }
     #if #eq(%byte, 45) {
-      #if #lt(#add(%index, 1), %length) {
+      #if #slt(#add(%index, 1), %length) {
         #if #eq(#call byte_at(%data, #add(%index, 1)), 62) {
           #if #eq(%need_space, 1) {
             #call emit_space()
