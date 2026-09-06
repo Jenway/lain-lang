@@ -40,7 +40,7 @@ REQUIRED_RULES = (
     "sign_extend",
 )
 REQUIRED_PROVIDER_BUILDER = (
-    "new_unit", "discard", "bits_type", "float_type", "addr_type",
+    "new_unit", "empty_artifact", "discard", "bits_type", "float_type", "addr_type",
     "unit_type", "never_type", "add_data", "declare_extern",
     "begin_procedure", "end_procedure", "begin_region", "add_parameter",
     "integer_literal", "procedure_address", "data_address",
