@@ -110,7 +110,7 @@ Meta 可以维护类型、模块、callable、effect 和编译期值等高层对
 
 当前 bootstrap 标准库使用 LAINIR 实现这套阶段 ABI，正式标准库使用 Lain 编写并编译成 LAINIR。两者应遵守同一接口。Meta 的实现语言不改变它在编译流程中的职责。
 
-详细规则见 [`03-meta-system.md`](03-meta-system.md)，当前实现路线见 [`roadmaps/lainc-meta-roadmap.md`](roadmaps/lainc-meta-roadmap.md)。
+详细规则见 [`03-meta-system.md`](03-meta-system.md)，当前实现路线见 [`roadmaps/compiler-bootstrap.md`](roadmaps/compiler-bootstrap.md)。
 
 ## 5. 编译期执行边界
 
@@ -207,13 +207,12 @@ Backend 只处理物理类型、控制流、内存和调用。函数构造器、
 
 ## 11. 当前自举结构
 
-当前代码分为四个位置：
+当前自举代码分为三个位置：
 
 ```text
 seed/                         C 编写的 LAINIR 解释器和最小宿主能力
 src/lainir/lainc.l1           冻结的 LAINIR compiler artifact
-src/lainc/lainc.lain          过渡编译器
-src/compiler-archive/*.lain   最终 Lain 编写的编译器源码
+src/lainc/*.lain              Lain 编写的正式编译器源码
 ```
 
-目标是让 compiler core 通过稳定 ABI 调用标准库的 `expand`、`elaborate` 和 `lower`，由正式标准库接管语言规则，并最终让 archive 编译器完成自举固定点。
+目标是让 compiler core 通过稳定 ABI 调用标准库的 `expand`、`elaborate` 和 `lower`，由正式标准库接管语言规则，并最终让 `src/lainc` 编译器完成自举固定点。
