@@ -64,6 +64,20 @@ class RecordingCapabilities:
     external_calls: bool
 
 
+@dataclass(frozen=True)
+class RecordingHandle:
+    owner: int
+    text: str
+
+
+def use_recording_handle(owner: int, handle: RecordingHandle) -> str:
+    """Model the v1 rule that handles cannot cross their owning unit."""
+
+    if handle.owner != owner:
+        raise ValueError("handle belongs to another unit")
+    return handle.text
+
+
 class RecordingEval:
     """Independent capability model for the API contract test provider."""
 
@@ -127,6 +141,16 @@ def main() -> int:
         raise SystemExit("invalid data layout was accepted")
     if builder.data != data_before_failure:
         raise SystemExit("failed builder operation left a partial data entry")
+
+    owned_handle = RecordingHandle(owner=1, text="value-0")
+    if use_recording_handle(1, owned_handle) != "value-0":
+        raise SystemExit("owner accepted handle was not usable")
+    try:
+        use_recording_handle(2, owned_handle)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("cross-owner handle use was accepted")
 
     def dispatcher(name: str, arguments: tuple[int, ...]) -> tuple[int, int]:
         dispatches.append((name, arguments))
