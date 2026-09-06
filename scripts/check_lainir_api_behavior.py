@@ -166,6 +166,22 @@ def main() -> int:
         if execute(data) != 42:
             raise SystemExit("data capability contract returned the wrong value")
 
+        binary_data = root / "binary_data.l1"
+        binary_data.write_text(
+            """#data bytes(4, 4, "A\\x00B");
+#proc main() -> #bits<32> {
+  #return #zext[#bits<32>](#load[#bits<8>](#lea(base=#data_addr(bytes), idx=0, scale=1, offset=1)))
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+        binary_canonical = canonical(binary_data)
+        if '#data bytes(4, 4, "A\\x00B");' not in binary_canonical:
+            raise SystemExit("binary #data did not survive canonical round trip")
+        if execute(binary_data) != 0:
+            raise SystemExit("binary #data embedded zero byte was not preserved")
+
         eval_source = root / "eval.l1"
         eval_source.write_text(
             """#proc main() -> #bits<32> {
