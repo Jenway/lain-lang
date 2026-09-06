@@ -122,6 +122,22 @@ def main() -> int:
         if execute(indirect) != 42:
             raise SystemExit("indirect call behavior differs from contract")
 
+        invalid_indirect = root / "invalid_indirect_signature.l1"
+        invalid_indirect.write_text(
+            """#proc identity(#bits<32> %value) -> #bits<32> {
+  #return %value
+}
+#proc main() -> #bits<64> {
+  #return #call_indirect[(#bits<64>) -> #bits<64>](#proc_addr(identity), 42)
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+        rejected = command(PRINT, invalid_indirect, "main")
+        if rejected.returncode == 0:
+            raise SystemExit("mismatched direct indirect-call signature was accepted")
+
         integer_cases = (
             ("sub", "#bits<32>", 44, 2, 42),
             ("mul", "#bits<32>", 21, 2, 42),
