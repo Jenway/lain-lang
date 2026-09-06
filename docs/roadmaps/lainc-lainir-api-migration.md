@@ -13,7 +13,7 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 | --- | --- | --- | --- |
 | 0 行为基线 | 部分完成 | seed recording provider 覆盖明确整数、memory、二进制 data 与 eval；legacy 语法拒绝检查已建立 | compiler 成功/失败 fixture 与 canonical 快照 |
 | 1 API v1 | 部分完成 | `api_contract.lain` 已定义 Builder/Artifact/Eval shape 与 schema v1；Eval 的 `Capabilities` 是显式参数，空 capability 为默认值 | owner、失败原子性、capability 的跨 provider 可执行 contract tests |
-| 2 默认 provider | 进行中 | 独立 source manifest、组合构建入口、默认 provider 已存在 | 完整 printer/evaluator、seed adapter 与差分报告 |
+| 2 默认 provider | 进行中 | 独立 source manifest、组合构建入口、默认 provider 已存在；整数、data/activation memory、procedure address 与 indirect call 已由纯 Lain evaluator 执行 | 浮点执行（等待 literal/ABI 规范）、完整 printer、seed adapter 与差分报告 |
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
 | 4 artifact | 已完成边界迁移 | compiler core 通过 Artifact API verify/print | 诊断位置与公开 compiler API gate |
 | 5 Meta eval | 进行中 | Meta 只通过 Eval 构造器/访问器交互，不读取 IR 或 Eval value/result 布局；默认 evaluator 已执行 step/call-depth/allocation 限制、结构化控制流、位宽整数与 64-bit typed activation memory；只读 data 写入与 activation 地址逃逸会 trap。每次 Meta eval 显式传递空 capability；带外部调用 capability 的执行只由 LAINIR provider 的 dispatcher 工厂提供 | 非 scalar 对象 owner、nested-eval 限制、跨 provider capability 执行测试 |
@@ -230,6 +230,11 @@ Eval.evaluate(verified, procedure, arguments, limits, capabilities)
 - 将现有 `#eval` 执行入口接到 EvalApi；
 - 建立一个临时适配器，使旧 lowering 结果可以与新 provider 做差分比较；
 - 保证 provider 不引入源语言类型、module、generic、effect 或 AST 概念。
+
+浮点物理类型和操作名称已经进入 Builder API，但 float literal 文本与调用 ABI 尚未
+进入 LAINIR 规范。因此默认 Lain evaluator 在该规范冻结前不实现浮点算术；完成时
+必须以 seed interpreter 的 IEEE 语义做 differential test，不能在 provider 中引入
+host 类型或 ad-hoc 浮点表示。
 
 完成条件：contract tests 全部通过；同一 fixture 经旧路径和 provider 得到相同 canonical LAINIR、诊断和执行结果。
 
