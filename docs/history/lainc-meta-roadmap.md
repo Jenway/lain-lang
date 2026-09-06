@@ -1,5 +1,8 @@
 # Lain 标准库自举与 archive lainc 路线图
 
+> **历史实施记录。** 本文保存 2026-09-02 以前的完成项、阶段划分和当时判断。当前计划见 [`../roadmaps/compiler-bootstrap.md`](../roadmaps/compiler-bootstrap.md)。
+> 文中的 archive lainc 与 `src/compiler-archive` 后来已经合并为当前的 `src/lainc` 源码树。
+
 > 基线日期：2026-09-02
 > 本文是当前自举主线。它取代旧版“Meta.invoke 执行环境”路线。
 >

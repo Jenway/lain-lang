@@ -1,5 +1,7 @@
 # 编译 `src/compiler-archive` 计划（src/lainc 路线）
 
+> **历史计划。** `src/compiler-archive` 后来已经合并进 `src/lainc`，当前仓库不存在独立的 archive lainc。现行自举计划见 [`../roadmaps/compiler-bootstrap.md`](../roadmaps/compiler-bootstrap.md)。下文保留合并前的目录名和阶段名，用于记录当时方案。
+
 > 落盘于 2025 会话。目标：让 `src/lainc/lainc.lain`（stage1，Lain 写的
 > 编译器，M2 自举固定点）能编译 `src/compiler-archive/` 闭包，并形成
 > stage2 自举闭环。对应 [`docs/history/lainc-bootstrap-roadmap.md`](lainc-bootstrap-roadmap.md) 阶段四/五。

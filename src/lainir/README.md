@@ -14,8 +14,8 @@ LAIN-IR-written Lain frontend (`src/lainir/lain/*.l1` plus
 currently covers the executable Lain subset exercised by `tests/lainir_lain`,
 including functions, calls, modules, and the first compile-time
 closure/module cases.  It is the bootstrap seed for a Lain-written
-compiler; the earlier full `src/compiler` tree is archived at
-`src/compiler-archive`.
+compiler. The Lain-written compiler source now lives together under
+`src/lainc`; there is no separate archive compiler source tree.
 
 ## Boundary
 

@@ -1,5 +1,7 @@
 # LAIN-IR 编译器路线图
 
+> **历史实施记录。** 本文保存已经完成的 LAINIR 编译器自举过程。当前后续工作见 [`../roadmaps/lainir-maintenance.md`](../roadmaps/lainir-maintenance.md)。
+
 > 计划版本：2026-09-02
 >
 > 本文只规划 LAIN-IR 编译器，不规划 Lain 前端、Meta 高级特性、标准库迁移、

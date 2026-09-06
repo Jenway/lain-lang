@@ -9,11 +9,8 @@ let elaborator: Module =
     import("packages::lain::compiler::elaborator");
 let meta: Module = import("packages::lain::compiler::meta");
 let lower: Module = import("packages::lain::compiler::lower");
-let l1_verifier: Module =
-    import("packages::lain::compiler::l1_verifier");
-let l1_printer: Module =
-    import("packages::lain::compiler::l1_printer");
-let l1_ir: Module = import("packages::lain::compiler::l1_ir");
+let lainir_api: Module =
+    import("packages::lain::lainir::api_contract");
 let compiler_context: Module =
     import("packages::lain::compiler::compiler_context");
 
@@ -22,15 +19,14 @@ let compiler_core: Module = std::module {
     @export
     let Compiler = std::func(
         Memory: memory_model.Shape,
+        Ir: lainir_api.CapabilitiesShape,
     ) -> Module {
         let Sources: Module =
             source_workspace.SourceWorkspace(Memory);
         let Elaborator: Module = elaborator.Elaborator(Memory);
-        let L1: Module = l1_ir.l1_ir.Model(Memory);
-        let Meta: Module = meta.Meta(Memory, L1, L1);
-        let Lower: Module = lower.Lower(Memory);
-        let Verifier: Module = l1_verifier.Verifier(Memory);
-        let Printer: Module = l1_printer.Printer(Memory);
+        let Meta: Module = meta.Meta(Memory, Ir);
+        let Lower: Module = lower.Lower(Memory, Ir);
+        let ArtifactApi: Module = Ir.Artifact;
         let Context: Module = compiler_context.Context(Memory);
 
         let SourceBuffer: type = source.SourceBuffer(Memory);
@@ -43,16 +39,6 @@ let compiler_core: Module = std::module {
             source: SourceBuffer,
         ) -> usize {
             return source.contents.length;
-        };
-
-        // The bootstrap lowering slice currently handles a scalar return
-        // expression directly.  Keep extraction behind the compiler API so
-        // the Lower implementation receives a semantic value, rather than
-        // re-reading source text or growing a second parser in the backend.
-        let source_return_value = std::func(
-            source: SourceBuffer,
-        ) -> i32 {
-            return 0;
         };
 
         let CompileOptions: type = std::struct {
@@ -144,7 +130,8 @@ let compiler_core: Module = std::module {
             // body of its own yet, so use an empty unit as the expansion
             // context; callers with syntax procedures pass their populated
             // unit through the same API.
-            let meta_unit: Meta.L1.Unit = Meta.L1.new();
+            let meta_unit: Meta.Artifact =
+                Ir.Builder.empty_artifact();
             let meta_program: Meta.MetaProgram = Meta.meta_program_new(
                 1,
                 1,
@@ -198,10 +185,7 @@ let compiler_core: Module = std::module {
             }
 
             let lowered: Lower.Result =
-                Lower.program(
-                    &elaborated.program,
-                    source_return_value(request.sources.get(0)),
-                );
+                Lower.program(&elaborated.program);
             if lowered.diagnostic != 0 {
                 Context.add_diagnostic(
                     &mut context,
@@ -211,9 +195,8 @@ let compiler_core: Module = std::module {
             }
 
             if request.options.verify_l1 {
-                let verify_code: i32 = Verifier.unit(
-                    &lowered.unit,
-                    lowered.entry,
+                let verify_code: i32 = ArtifactApi.verify(
+                    &lowered.artifact,
                 );
                 if verify_code != 0 {
                     Context.add_diagnostic(
@@ -230,7 +213,9 @@ let compiler_core: Module = std::module {
             let artifact: Memory.Bytes = empty_artifact();
             if request.options.emit_text_l1 {
                 let text: Memory.String =
-                    Printer.unit(&lowered.unit);
+                    ArtifactApi.write_canonical_text(
+                        &lowered.artifact,
+                    );
                 artifact = artifact_from_text(&text);
             }
 
