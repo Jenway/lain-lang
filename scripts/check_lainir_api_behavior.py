@@ -59,6 +59,34 @@ class RecordingBuilder:
         return "\n\n".join(chunks) + "\n"
 
 
+@dataclass(frozen=True)
+class RecordingCapabilities:
+    external_calls: bool
+
+
+class RecordingEval:
+    """Independent capability model for the API contract test provider."""
+
+    @staticmethod
+    def empty_capabilities() -> RecordingCapabilities:
+        return RecordingCapabilities(external_calls=False)
+
+    @staticmethod
+    def external_call_capabilities() -> RecordingCapabilities:
+        return RecordingCapabilities(external_calls=True)
+
+    @staticmethod
+    def evaluate_external(
+        capabilities: RecordingCapabilities,
+        dispatcher: callable,
+        name: str,
+        arguments: tuple[int, ...],
+    ) -> tuple[int, int]:
+        if not capabilities.external_calls:
+            return (7102, 0)
+        return dispatcher(name, arguments)
+
+
 def command(*args: Path | str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(arg) for arg in args], cwd=ROOT, text=True, capture_output=True
@@ -84,6 +112,21 @@ def main() -> int:
         raise SystemExit("LAINIR API behavior check requires a built seed")
 
     builder = RecordingBuilder()
+    evaluator = RecordingEval()
+    dispatches: list[tuple[str, tuple[int, ...]]] = []
+
+    def dispatcher(name: str, arguments: tuple[int, ...]) -> tuple[int, int]:
+        dispatches.append((name, arguments))
+        return (0, sum(arguments))
+
+    if evaluator.evaluate_external(
+        evaluator.empty_capabilities(), dispatcher, "add", (40, 2)
+    ) != (7102, 0) or dispatches:
+        raise SystemExit("empty capability reached external dispatcher")
+    if evaluator.evaluate_external(
+        evaluator.external_call_capabilities(), dispatcher, "add", (40, 2)
+    ) != (0, 42) or dispatches != [("add", (40, 2))]:
+        raise SystemExit("explicit capability did not dispatch external call")
     i32 = builder.bits_type(32)
     builder.procedure(
         "main",
