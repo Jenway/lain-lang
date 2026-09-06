@@ -152,6 +152,11 @@ Eval.evaluate(verified, procedure, arguments, limits, capabilities)
 
 `Builder` 接收已经确定的物理类型、offset 和操作。它不查询 Lain 类型，也不替 `lainc` 推导字段布局。`Eval.evaluate` 的 capabilities 是显式输入；文件、进程、网络和宿主符号都不会因执行发生在编译期而自动可用。`empty_capabilities()` 是 compiler Meta 路径唯一可构造的默认值。provider 可以在构造时接收外部 dispatcher；只有调用方同时传入该 provider 所属的 `external_call_capabilities()`，外部 procedure 才会交给 dispatcher。capability 不携带 LAINIR 存储地址或 host 回调布局。
 
+`Limits.nested_evals` 为共享 Eval session 保留配额。当前 structured L1 model
+没有 `#eval` expression kind，单次 `Eval.evaluate` 不会在 evaluator 内递归启动另一轮
+eval；因此 provider 不得将这个字段表述为已经执行的限制。实现嵌套 eval 前，必须先引入
+session/context 生命周期，再由 `#eval` lowering 在每次嵌套调用时传递它。
+
 ## API 合约要求
 
 第一版 API 必须写成独立于具体实现的约定，并由至少两个 provider 验证：正式 seed/LAINIR provider 和测试 provider。
