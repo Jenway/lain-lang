@@ -199,11 +199,13 @@ provider-owned opaque API，并由默认 provider 和 test provider 共同执行
 builder -> finish -> verify -> evaluate 的完整路径。`build_srclainc.py` 只验证包含
 provider source closure 的编译结果，不能证明这个 factory 已被实例化或执行。
 
-已尝试把这个 probe 放进 provider source closure；当前编译器在该调用处分别返回
-bootstrap 的 `5106` 和 formal compiler 的 `5203`，因此这两项不能被当作 provider
-执行证据。下一步要先把 provider factory 的模块/Memory specialization 作为独立的
-编译输入固定下来，再接 allocation/bounds handler；在此之前保持 provider 与 `lainc`
-的 factory 调用面分离。
+已尝试把这个 probe 放进 provider source closure。默认 provider 的七个源码模块可以
+单独由 bootstrap compiler 编译；一旦加入 `Provider(Memory)` 的公开 probe，bootstrap
+返回 `5108`，formal compiler 返回 `5203`（放入完整 source closure 时还会触发
+`5106`）。因此这些结果不能被当作 provider 执行证据，当前阻塞点已经收窄到模块
+factory/`Memory` specialization 的 lowering。下一步要先把这类调用作为独立的编译
+输入固定下来，再接 allocation/bounds handler；在此之前保持 provider 与 `lainc` 的
+factory 调用面分离。
 
 ### Eval owner/session 的迁移顺序
 
