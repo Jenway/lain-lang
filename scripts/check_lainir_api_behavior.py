@@ -106,6 +106,22 @@ def main() -> int:
         if execute(recorded) != 42:
             raise SystemExit("recording provider artifact returned the wrong value")
 
+        indirect = root / "indirect_call.l1"
+        indirect.write_text(
+            """#proc add(#bits<32> %left, #bits<32> %right) -> #bits<32> {
+  #return #add(%left, %right)
+}
+#proc main() -> #bits<32> {
+  #return #call_indirect[(#bits<32>, #bits<32>) -> #bits<32>](#proc_addr(add), 40, 2)
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+        canonical(indirect)
+        if execute(indirect) != 42:
+            raise SystemExit("indirect call behavior differs from contract")
+
         integer_cases = (
             ("sub", "#bits<32>", 44, 2, 42),
             ("mul", "#bits<32>", 21, 2, 42),
