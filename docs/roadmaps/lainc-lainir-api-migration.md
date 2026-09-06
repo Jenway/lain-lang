@@ -202,14 +202,14 @@ provider source closure 的编译结果，不能证明这个 factory 已被实�
 当前 probe 的证据已经分成两层。若测试输入只包含 provider 文件而没有完整的 `std/`
 source closure，会得到 `5108`，这只是缺少 `std::memory_model` 等导入源；补齐完整
 `std/` 后，单独的 `memory_model.Model(arena_min.Policy, bounds.Unchecked)` 可以编译。
-把同一闭包扩展到 `Provider(Memory)` 后，bootstrap compiler 仍在专门化
-`l1_unit_builder` 的 `i32_literal` 路径返回 `5106`。最小化实验进一步确认：构造
-`L1.Expr`、修改其字段，以及在 `&L1.Unit` 上读取字段都可以通过；只要在
-`&mut L1.Unit` 上执行 `unit.expressions.length()` 这样的字段投影，就会复现同一个
-`5106`，并伴随 `debug-bounds-kind=363`。因此当前阻塞点是可变 record 引用的字段投影
-没有完成物理 lowering，不再是未解析的 `memory_model` 导入，也不是 provider 组合本身。
-下一步应先为 `&mut record.field` 建立独立的 lowering fixture 和物理地址规则，再接
-allocation/bounds handler；在此之前保持 provider 与 `lainc` 的 factory 调用面分离。
+同一闭包扩展到 `Provider(Memory)` 后，先后暴露了几处 provider 源码自身尚未适配
+当前 lowering 的表达式。`l1_unit_builder` 的 `i32_literal` 已通过独立 specialization
+probe：它补齐了 `Memory.Bounds.Effect`，并将 `i32 -> i64 -> u64` 链式 cast 拆成中间
+值；实验也确认 `&mut L1.Unit` 的字段读取本身可以通过。随后修正了 interpreter 中的
+移位表达式和 `while true`，provider probe 又推进到 `l1_interpreter.execute_region`
+内的 `5512`，当前上下文落在循环分支里的 `body.status`/`return body` 路径。
+因此默认 provider 仍没有实际实例化证据；下一步先把这个 record result 在嵌套控制流
+中的返回路径缩成独立 fixture，再接 allocation/bounds handler。
 
 ### Eval owner/session 的迁移顺序
 
