@@ -1,0 +1,316 @@
+// Stable capability contract between a Lain compiler and a LAINIR provider.
+//
+// This module contains types and shapes only.  It owns no IR storage and does
+// not select a parser, verifier, printer, interpreter, or native backend.
+
+let memory_model: Module = import("std::memory_model");
+
+@export
+let lainir_api_contract: Module = std::module {
+    // Non-dependent outer shape used at compiler factory boundaries.  The
+    // nested capability modules carry the Memory-specialized handle and
+    // result types defined by Contract(Memory).
+    @export
+    let CapabilitiesShape: ModuleShape = std::module_shape {
+        let SourceLocation: type;
+        let unknown_location = std::func() -> SourceLocation;
+        let Builder: Module;
+        let Artifact: Module;
+        let Eval: Module;
+        let schema_version = std::func() -> i32;
+    };
+
+    @export
+    let Contract = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let SourceLocation: type = usize;
+        let Diagnostic: type = std::struct {
+            code: i32,
+            location: SourceLocation,
+        };
+
+        let Limits: type = std::struct {
+            steps: usize,
+            call_depth: usize,
+            allocation_bytes: usize,
+            nested_evals: usize,
+        };
+
+        // Builder handles are provider-owned and valid only for their Unit.
+        // Artifact becomes immutable after finish succeeds.
+        let BuilderShape: ModuleShape = std::module_shape {
+            let Unit: type;
+            let Artifact: type;
+            let Type: type;
+            let Value: type;
+            let Procedure: type;
+            let Region: type;
+
+            let new_unit = std::func() -> Unit ! {
+                Memory.Allocation.Effect,
+            };
+            let discard = std::func(unit: Unit) -> unit;
+
+            let bits_type = std::func(
+                unit: &mut Unit,
+                width: usize,
+            ) -> Type;
+            let float_type = std::func(
+                unit: &mut Unit,
+                width: usize,
+            ) -> Type;
+            let addr_type = std::func(unit: &mut Unit) -> Type;
+            let unit_type = std::func(unit: &mut Unit) -> Type;
+            let never_type = std::func(unit: &mut Unit) -> Type;
+
+            let add_data = std::func(
+                unit: &mut Unit,
+                name: Memory.String,
+                size: usize,
+                alignment: usize,
+                initializer: Memory.Bytes,
+                location: SourceLocation,
+            ) -> Value ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            };
+            let declare_extern = std::func(
+                unit: &mut Unit,
+                name: Memory.String,
+                return_type: Type,
+                location: SourceLocation,
+            ) -> Procedure ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            };
+            let begin_procedure = std::func(
+                unit: &mut Unit,
+                name: Memory.String,
+                return_type: Type,
+                location: SourceLocation,
+            ) -> Procedure ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            };
+            let end_procedure = std::func(
+                unit: &mut Unit,
+                procedure: Procedure,
+                body: Region,
+                location: SourceLocation,
+            ) -> i32;
+            let begin_region = std::func(
+                unit: &mut Unit,
+                location: SourceLocation,
+            ) -> Region ! {Memory.Allocation.Effect};
+
+            let add_parameter = std::func(
+                unit: &mut Unit,
+                procedure: Procedure,
+                name: Memory.String,
+                value_type: Type,
+                location: SourceLocation,
+            ) -> Value ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            };
+            let integer_literal = std::func(
+                unit: &mut Unit,
+                value_type: Type,
+                value: i64,
+                location: SourceLocation,
+            ) -> Value ! {Memory.Allocation.Effect};
+            let procedure_address = std::func(
+                unit: &mut Unit,
+                procedure: Procedure,
+                location: SourceLocation,
+            ) -> Value ! {Memory.Allocation.Effect};
+            let data_address = std::func(
+                unit: &mut Unit,
+                data: Value,
+                location: SourceLocation,
+            ) -> Value ! {Memory.Allocation.Effect};
+
+            let add = std::func(
+                unit: &mut Unit,
+                result_type: Type,
+                left: Value,
+                right: Value,
+                location: SourceLocation,
+            ) -> Value ! {Memory.Allocation.Effect};
+            let subtract = std::func(unit: &mut Unit, result_type: Type, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let multiply = std::func(unit: &mut Unit, result_type: Type, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let signed_divide = std::func(unit: &mut Unit, result_type: Type, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let unsigned_divide = std::func(unit: &mut Unit, result_type: Type, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let equal = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let not_equal = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let signed_less = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let unsigned_less = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let signed_less_equal = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let unsigned_less_equal = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let signed_greater = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let unsigned_greater = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let signed_greater_equal = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let unsigned_greater_equal = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let float_add = std::func(unit: &mut Unit, result_type: Type, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let float_subtract = std::func(unit: &mut Unit, result_type: Type, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let float_multiply = std::func(unit: &mut Unit, result_type: Type, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let float_divide = std::func(unit: &mut Unit, result_type: Type, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let float_equal = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let float_less = std::func(unit: &mut Unit, left: Value, right: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let zero_extend = std::func(
+                unit: &mut Unit,
+                result_type: Type,
+                value: Value,
+                location: SourceLocation,
+            ) -> Value ! {Memory.Allocation.Effect};
+            let sign_extend = std::func(unit: &mut Unit, result_type: Type, value: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let truncate = std::func(unit: &mut Unit, result_type: Type, value: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let bitcast = std::func(unit: &mut Unit, result_type: Type, value: Value, location: SourceLocation) -> Value ! {Memory.Allocation.Effect};
+            let call = std::func(
+                unit: &mut Unit,
+                result_type: Type,
+                procedure: Procedure,
+                location: SourceLocation,
+            ) -> Value ! {Memory.Allocation.Effect};
+            let append_call_argument = std::func(
+                unit: &mut Unit,
+                call: Value,
+                argument: Value,
+            ) -> i32 ! {Memory.Allocation.Effect};
+            let call_indirect = std::func(
+                unit: &mut Unit,
+                result_type: Type,
+                address: Value,
+                location: SourceLocation,
+            ) -> Value ! {Memory.Allocation.Effect};
+
+            let alloca = std::func(
+                unit: &mut Unit,
+                size: usize,
+                location: SourceLocation,
+            ) -> Value ! {Memory.Allocation.Effect};
+            let lea = std::func(
+                unit: &mut Unit,
+                base: Value,
+                index: Value,
+                scale: usize,
+                offset: i64,
+                location: SourceLocation,
+            ) -> Value ! {Memory.Allocation.Effect};
+            let load = std::func(
+                unit: &mut Unit,
+                value_type: Type,
+                address: Value,
+                location: SourceLocation,
+            ) -> Value ! {Memory.Allocation.Effect};
+            let store = std::func(
+                unit: &mut Unit,
+                region: Region,
+                value_type: Type,
+                value: Value,
+                address: Value,
+                location: SourceLocation,
+            ) -> i32 ! {Memory.Allocation.Effect};
+
+            let append_if = std::func(
+                unit: &mut Unit,
+                region: Region,
+                condition: Value,
+                then_region: Region,
+                else_region: Region,
+                location: SourceLocation,
+            ) -> i32 ! {Memory.Allocation.Effect};
+            let append_loop = std::func(
+                unit: &mut Unit,
+                region: Region,
+                body: Region,
+                location: SourceLocation,
+            ) -> i32 ! {Memory.Allocation.Effect};
+            let append_break = std::func(
+                unit: &mut Unit,
+                region: Region,
+                location: SourceLocation,
+            ) -> i32 ! {Memory.Allocation.Effect};
+            let append_continue = std::func(
+                unit: &mut Unit,
+                region: Region,
+                location: SourceLocation,
+            ) -> i32 ! {Memory.Allocation.Effect};
+            let append_return = std::func(
+                unit: &mut Unit,
+                region: Region,
+                value: Value,
+                return_type: Type,
+                location: SourceLocation,
+            ) -> i32 ! {Memory.Allocation.Effect};
+
+            let finish = std::func(
+                unit: Unit,
+                entry: Procedure,
+            ) -> Artifact ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            };
+        };
+
+        let ArtifactShape: ModuleShape = std::module_shape {
+            let Artifact: type;
+            let Diagnostic: type;
+
+            let schema_version = std::func() -> i32;
+            let verify = std::func(
+                artifact: &Artifact,
+            ) -> Diagnostic ! {Memory.Bounds.Effect};
+            let write_canonical_text = std::func(
+                artifact: &Artifact,
+            ) -> Memory.String ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            };
+            let hash = std::func(artifact: &Artifact) -> u64 ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            };
+            let equal = std::func(
+                left: &Artifact,
+                right: &Artifact,
+            ) -> bool ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            };
+        };
+
+        let EvalShape: ModuleShape = std::module_shape {
+            let Artifact: type;
+            let Procedure: type;
+            let Value: type;
+            let ValueVector: type;
+            let Result: type;
+            let Limits: type;
+
+            let default_limits = std::func() -> Limits;
+
+            let evaluate = std::func(
+                artifact: &Artifact,
+                procedure: Procedure,
+                arguments: &ValueVector,
+                limits: Limits,
+            ) -> Result ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            };
+        };
+
+        return std::module {
+            @export let SourceLocation: type = SourceLocation;
+            @export let Diagnostic: type = Diagnostic;
+            @export let Limits: type = Limits;
+            @export let BuilderShape: ModuleShape = BuilderShape;
+            @export let ArtifactShape: ModuleShape = ArtifactShape;
+            @export let EvalShape: ModuleShape = EvalShape;
+            @export let schema_version = std::func() -> i32 { return 1; };
+        };
+    };
+
+};

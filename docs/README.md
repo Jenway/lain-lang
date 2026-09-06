@@ -1,6 +1,6 @@
 # Lain 文档索引
 
-本目录把文档分为语言设计、当前实现、路线图和历史资料。文档正在逐篇校准；在校准完成前，当前实现事实以代码和 `roadmaps/lainc-meta-roadmap.md` 为准。
+本目录把文档分为语言设计、当前实现、路线图和历史资料。文档正在逐篇校准；在校准完成前，当前实现事实以代码和 [`roadmaps/`](roadmaps/) 中的当前路线图为准。
 
 ## 建议阅读顺序
 
@@ -38,8 +38,10 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [`roadmaps/lainc-meta-roadmap.md`](roadmaps/lainc-meta-roadmap.md) | 标准库自举、Meta/`#eval` 边界和 archive lainc 主线 |
-| [`roadmaps/lainir-compiler-roadmap.md`](roadmaps/lainir-compiler-roadmap.md) | LAINIR 编译器与 native 固定点路线 |
+| [`roadmaps/README.md`](roadmaps/README.md) | 当前进度、路线图阅读顺序和最近阻塞 |
+| [`roadmaps/compiler-bootstrap.md`](roadmaps/compiler-bootstrap.md) | 正式标准库、`src/lainc` 固定点和工具链切换主线 |
+| [`roadmaps/lainc-lainir-api-migration.md`](roadmaps/lainc-lainir-api-migration.md) | `lainc` 到 LAINIR 能力 API 的依赖反转和迁移步骤 |
+| [`roadmaps/lainir-maintenance.md`](roadmaps/lainir-maintenance.md) | LAINIR 后续物理能力和维护工作 |
 
 ## 历史资料
 
@@ -49,6 +51,9 @@
 | --- | --- |
 | [`history/lainc-bootstrap-roadmap.md`](history/lainc-bootstrap-roadmap.md) | 旧自举路线快照 |
 | [`history/lainc-archive-plan.md`](history/lainc-archive-plan.md) | 旧 `src/lainc` archive 编译计划 |
+| [`history/lainc-meta-roadmap.md`](history/lainc-meta-roadmap.md) | 2026-09-02 标准库与旧 archive 自举实施记录 |
+| [`history/lainir-compiler-roadmap.md`](history/lainir-compiler-roadmap.md) | 已完成的 LAINIR 编译器自举路线 |
+| [`history/lainir-implementation-roadmap.md`](history/lainir-implementation-roadmap.md) | LAINIR frontend 和 compiler boundary 的旧实现清单 |
 | [`history/lainc-meta-system.md`](history/lainc-meta-system.md) | `src/lainc` 过渡 Meta 实现记录 |
 | [`history/lainc-performance-analysis-2026-08-21.md`](history/lainc-performance-analysis-2026-08-21.md) | 2026-08-21 自举性能分析 |
 | [`history/scheme-era-intro.md`](history/scheme-era-intro.md) | Scheme 时期的语言总览 |

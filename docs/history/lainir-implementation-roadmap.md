@@ -1,5 +1,8 @@
 # LAIN-IR compiler roadmap
 
+> **Historical implementation record.** This file preserves completed frontend and compiler-boundary milestones. Current work is tracked in [`../roadmaps/compiler-bootstrap.md`](../roadmaps/compiler-bootstrap.md) and [`../roadmaps/lainir-maintenance.md`](../roadmaps/lainir-maintenance.md).
+> The former `src/compiler-archive` tree was later merged into `src/lainc`.
+
 The implementation grows as executable vertical slices.  A phase is complete
 only when seed can execute it and a native C compiler can compile its
 output.

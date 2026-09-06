@@ -1,10 +1,11 @@
 # src/lainc meta system
 
-当前执行路线见 [`docs/roadmaps/lainc-meta-roadmap.md`](../roadmaps/lainc-meta-roadmap.md)。
+当前执行路线见 [`docs/roadmaps/compiler-bootstrap.md`](../roadmaps/compiler-bootstrap.md)。
 
 > **历史实现说明。** 本文记录 `src/lainc` 过渡编译器的现状，其中把 Meta
 > 描述为 callable registry/evaluator 的段落不再代表目标架构。当前定义是：Meta
 > 负责 AST 操作和变换，编译期执行由 Meta 生成的 LAIN-IR `#eval` 完成。
+> 文中的 `src/compiler-archive` 后来已经合并进 `src/lainc`。
 
 The reusable Meta callable registry is now defined in `std/meta.lain` and
 instantiated by `src/compiler-archive/meta.lain`.  The archive layer owns

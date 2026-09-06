@@ -334,10 +334,10 @@ owner
 - 正式标准库尚未覆盖完整 Lain 语义；
 - `elaborate` 入口已经存在，但完整类型、泛型、effect 和 module 语义仍需接入；
 - `lower` 当前只接受已迁移的可执行子集，未覆盖形式返回稳定诊断 `5203`；
-- archive lainc 尚未完成完整自举固定点；
+- `src/lainc` 尚未完成完整自举固定点；
 - ownership/borrow checking 不属于当前必需自举路径。
 
-进度和验收门槛见 [`roadmaps/lainc-meta-roadmap.md`](roadmaps/lainc-meta-roadmap.md)。
+进度和验收门槛见 [`roadmaps/compiler-bootstrap.md`](roadmaps/compiler-bootstrap.md)。
 
 ## 15. 边界总结
 

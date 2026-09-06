@@ -1,0 +1,749 @@
+// Transitional LAINIR capability provider for the Lain-written compiler.
+//
+// Composition lives with LAINIR.  Compiler modules receive the resulting
+// module as an argument and do not select these implementations themselves.
+
+let memory_model: Module = import("std::memory_model");
+let api_contract: Module = import("packages::lain::lainir::api_contract");
+let l1_ir: Module = import("packages::lain::lainir::api::l1_ir");
+let l1_builder: Module =
+    import("packages::lain::lainir::api::l1_unit_builder");
+let l1_verifier: Module =
+    import("packages::lain::lainir::api::l1_verifier");
+let l1_printer: Module =
+    import("packages::lain::lainir::api::l1_printer");
+let l1_interpreter: Module =
+    import("packages::lain::lainir::api::l1_interpreter");
+
+@export
+let lainir_default_provider: Module = std::module {
+    @export
+    let Provider = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let SourceLocation: type = usize;
+        let L1: Module = l1_ir.Model(Memory);
+        let Builder: Module = l1_builder.Builder(Memory);
+        let Verifier: Module = l1_verifier.Verifier(Memory);
+        let Printer: Module = l1_printer.Printer(Memory);
+        let ExternalCalls: l1_interpreter.ExternalCallShape =
+            std::module {
+                @export
+                let call = std::func(
+                    name: addr,
+                    arguments: addr,
+                    argument_count: usize,
+                ) -> i32 {
+                    return 7002;
+                };
+            };
+        let Interpreter: Module =
+            l1_interpreter.Interpreter(
+                Memory,
+                ExternalCalls,
+                L1,
+            );
+
+        // The provider keeps the concrete L1 model behind capability
+        // modules.  These aliases are intentionally defined here so compiler
+        // clients cannot reach the representation by importing its owner.
+        let BuilderApi: Module = std::module {
+            @export let Unit: type = L1.Unit;
+            @export let Artifact: type = L1.Unit;
+            @export let Type: type = L1.TypeId;
+            @export let Value: type = L1.ExprId;
+            @export let Instruction: type = L1.InstructionId;
+            @export let Region: type = L1.RegionId;
+            @export let Procedure: type = L1.ProcedureId;
+
+            let empty_expression = std::func() -> L1.Expr {
+                return L1.Expr {
+                    kind: 0, result_type: 0, left: 0, right: 0,
+                    index: 0, i32_value: 0, wide_value: 0,
+                    procedure: std::usize_max(), size: 0, scale: 0,
+                    offset: 0, arguments: L1.ExprIdVector.new(),
+                };
+            };
+
+            let append_expression = std::func(
+                unit: &mut L1.Unit, expression: L1.Expr,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return L1.add_expression(unit, expression);
+            };
+
+            @export let new_unit = Builder.new;
+
+            @export
+            let empty_artifact = std::func() -> L1.Unit {
+                return Builder.new();
+            };
+
+            @export
+            let discard = std::func(unit: L1.Unit) -> unit { return; };
+
+            @export
+            let begin_region = std::func(
+                unit: &mut L1.Unit,
+                location: SourceLocation,
+            ) -> L1.RegionId ! {Memory.Allocation.Effect} {
+                return Builder.begin_region(unit);
+            };
+
+            @export
+            let integer_literal = std::func(
+                unit: &mut L1.Unit,
+                value_type: L1.TypeId,
+                value: i64,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return Builder.i32_literal(unit, value_type, value as i32);
+            };
+
+            @export
+            let procedure_address = std::func(
+                unit: &mut L1.Unit, procedure: L1.ProcedureId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                let expression: L1.Expr = empty_expression();
+                expression.kind = 40;
+                expression.result_type = addr_type(unit);
+                expression.procedure = procedure;
+                return append_expression(unit, expression);
+            };
+
+            @export
+            let add_data = std::func(
+                unit: &mut L1.Unit, name: Memory.String,
+                size: usize, alignment: usize,
+                initializer: Memory.Bytes, location: SourceLocation,
+            ) -> L1.ExprId ! {
+                Memory.Allocation.Effect, Memory.Bounds.Effect,
+            } {
+                if size == 0 || alignment == 0
+                    || initializer.length() > size {
+                    return std::usize_max();
+                }
+                let index: usize = unit.data.length();
+                unit.data.push(L1.Data {
+                    name: name, size: size, alignment: alignment,
+                    initializer: initializer,
+                });
+                let expression: L1.Expr = empty_expression();
+                expression.kind = 41;
+                expression.result_type = addr_type(unit);
+                expression.index = index;
+                return append_expression(unit, expression);
+            };
+
+            @export
+            let data_address = std::func(
+                unit: &mut L1.Unit, data: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId {
+                return data;
+            };
+
+            @export
+            let call = std::func(
+                unit: &mut L1.Unit,
+                result_type: L1.TypeId,
+                procedure: L1.ProcedureId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return Builder.call(unit, result_type, procedure);
+            };
+
+            @export
+            let call_indirect = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                address: L1.ExprId, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                let expression: L1.Expr = empty_expression();
+                expression.kind = 21; expression.result_type = result_type;
+                expression.left = address;
+                return append_expression(unit, expression);
+            };
+
+            @export
+            let alloca = std::func(
+                unit: &mut L1.Unit, size: usize,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                let expression: L1.Expr = empty_expression();
+                expression.kind = 42; expression.result_type = addr_type(unit);
+                expression.size = size;
+                return append_expression(unit, expression);
+            };
+
+            @export
+            let lea = std::func(
+                unit: &mut L1.Unit, base: L1.ExprId, index: L1.ExprId,
+                scale: usize, offset: i64, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                let expression: L1.Expr = empty_expression();
+                expression.kind = 43; expression.result_type = addr_type(unit);
+                expression.left = base; expression.right = index;
+                expression.scale = scale; expression.offset = offset;
+                return append_expression(unit, expression);
+            };
+
+            @export
+            let load = std::func(
+                unit: &mut L1.Unit, value_type: L1.TypeId,
+                address: L1.ExprId, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                let expression: L1.Expr = empty_expression();
+                expression.kind = 44; expression.result_type = value_type;
+                expression.left = address;
+                return append_expression(unit, expression);
+            };
+
+            @export
+            let store = std::func(
+                unit: &mut L1.Unit, region: L1.RegionId,
+                value_type: L1.TypeId, value: L1.ExprId,
+                address: L1.ExprId, location: SourceLocation,
+            ) -> i32 ! {
+                Memory.Allocation.Effect, Memory.Bounds.Effect,
+            } {
+                if region >= unit.regions.length() { return 7203; }
+                let id: usize = unit.regions.get_mut(region).instructions.length();
+                let name: Memory.String = Memory.String.new();
+                unit.regions.get_mut(region).instructions.push(L1.Instruction {
+                    kind: 6, name: name, expression: value,
+                    destination: address, value_type: value_type,
+                    first_region: 0, second_region: 0,
+                });
+                return id as i32;
+            };
+
+            @export
+            let append_call_argument = std::func(
+                unit: &mut L1.Unit,
+                call: L1.ExprId,
+                argument: L1.ExprId,
+            ) -> i32 ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            } {
+                Builder.append_call_argument(unit, call, argument);
+                return 0;
+            };
+
+            @export
+            let append_return = std::func(
+                unit: &mut L1.Unit,
+                region: L1.RegionId,
+                value: L1.ExprId,
+                return_type: L1.TypeId,
+                location: SourceLocation,
+            ) -> i32 ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            } {
+                return Builder.append_return_typed(
+                    unit, region, value, return_type
+                ) as i32;
+            };
+
+            @export
+            let begin_procedure = std::func(
+                unit: &mut L1.Unit,
+                name: Memory.String,
+                return_type: L1.TypeId,
+                location: SourceLocation,
+            ) -> L1.ProcedureId ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            } {
+                let body: L1.RegionId = Builder.begin_region(unit);
+                return Builder.add_procedure(
+                    unit, name, return_type, body, false
+                );
+            };
+
+            @export
+            let end_procedure = std::func(
+                unit: &mut L1.Unit,
+                procedure: L1.ProcedureId,
+                body: L1.RegionId,
+                location: SourceLocation,
+            ) -> i32 ! {Memory.Bounds.Effect} {
+                if procedure >= unit.procedures.length()
+                    || body >= unit.regions.length() {
+                    return 7201;
+                }
+                unit.procedures.get_mut(procedure).body = body;
+                return 0;
+            };
+
+            @export
+            let add = std::func(
+                unit: &mut L1.Unit,
+                result_type: L1.TypeId,
+                left: L1.ExprId,
+                right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return Builder.binary(
+                    unit,
+                    3,
+                    result_type,
+                    left,
+                    right,
+                );
+            };
+
+            @export
+            let subtract = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return Builder.binary(unit, 4, result_type, left, right);
+            };
+
+            @export
+            let multiply = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return Builder.binary(unit, 5, result_type, left, right);
+            };
+
+            @export
+            let signed_divide = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return Builder.binary(unit, 12, result_type, left, right);
+            };
+
+            @export
+            let unsigned_divide = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return Builder.binary(unit, 13, result_type, left, right);
+            };
+
+            let comparison = std::func(
+                unit: &mut L1.Unit, kind: i32,
+                left: L1.ExprId, right: L1.ExprId,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                let result_type: L1.TypeId = L1.add_type(
+                    unit, L1.Type { kind: 1, bit_width: 1 }
+                );
+                return Builder.binary(unit, kind, result_type, left, right);
+            };
+
+            @export
+            let equal = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return comparison(unit, 6, left, right);
+            };
+
+            @export
+            let not_equal = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return comparison(unit, 7, left, right);
+            };
+
+            @export
+            let signed_less = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return comparison(unit, 8, left, right);
+            };
+
+            @export
+            let signed_less_equal = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return comparison(unit, 9, left, right);
+            };
+
+            @export
+            let signed_greater = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return comparison(unit, 10, left, right);
+            };
+
+            @export
+            let signed_greater_equal = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return comparison(unit, 11, left, right);
+            };
+
+            @export
+            let unsigned_less = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return comparison(unit, 14, left, right);
+            };
+
+            @export
+            let unsigned_less_equal = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return comparison(unit, 15, left, right);
+            };
+
+            @export
+            let unsigned_greater = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return comparison(unit, 16, left, right);
+            };
+
+            @export
+            let unsigned_greater_equal = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return comparison(unit, 17, left, right);
+            };
+
+            let unary = std::func(
+                unit: &mut L1.Unit, kind: i32,
+                result_type: L1.TypeId, value: L1.ExprId,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                let expression: L1.Expr = empty_expression();
+                expression.kind = kind;
+                expression.result_type = result_type;
+                expression.left = value;
+                return append_expression(unit, expression);
+            };
+
+            @export let zero_extend = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                value: L1.ExprId, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return unary(unit, 30, result_type, value);
+            };
+            @export let sign_extend = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                value: L1.ExprId, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return unary(unit, 31, result_type, value);
+            };
+            @export let truncate = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                value: L1.ExprId, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return unary(unit, 32, result_type, value);
+            };
+            @export let bitcast = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                value: L1.ExprId, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return unary(unit, 33, result_type, value);
+            };
+
+            let float_binary = std::func(
+                unit: &mut L1.Unit, kind: i32, result_type: L1.TypeId,
+                left: L1.ExprId, right: L1.ExprId,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                let expression: L1.Expr = empty_expression();
+                expression.kind = kind; expression.result_type = result_type;
+                expression.left = left; expression.right = right;
+                return append_expression(unit, expression);
+            };
+
+            @export let float_add = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                left: L1.ExprId, right: L1.ExprId, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return float_binary(unit, 60, result_type, left, right);
+            };
+            @export let float_subtract = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                left: L1.ExprId, right: L1.ExprId, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return float_binary(unit, 61, result_type, left, right);
+            };
+            @export let float_multiply = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                left: L1.ExprId, right: L1.ExprId, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return float_binary(unit, 62, result_type, left, right);
+            };
+            @export let float_divide = std::func(
+                unit: &mut L1.Unit, result_type: L1.TypeId,
+                left: L1.ExprId, right: L1.ExprId, location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                return float_binary(unit, 63, result_type, left, right);
+            };
+            @export let float_equal = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                let result_type: L1.TypeId = bits_type(unit, 1);
+                return float_binary(unit, 64, result_type, left, right);
+            };
+            @export let float_less = std::func(
+                unit: &mut L1.Unit, left: L1.ExprId, right: L1.ExprId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {Memory.Allocation.Effect} {
+                let result_type: L1.TypeId = bits_type(unit, 1);
+                return float_binary(unit, 65, result_type, left, right);
+            };
+
+            @export
+            let bits_type = std::func(
+                unit: &mut L1.Unit,
+                width: usize,
+            ) -> L1.TypeId ! {Memory.Allocation.Effect} {
+                return L1.add_type(
+                    unit,
+                    L1.Type { kind: 1, bit_width: width },
+                );
+            };
+
+            @export
+            let float_type = std::func(
+                unit: &mut L1.Unit, width: usize,
+            ) -> L1.TypeId ! {Memory.Allocation.Effect} {
+                return L1.add_type(unit, L1.Type { kind: 5, bit_width: width });
+            };
+
+            @export
+            let addr_type = std::func(
+                unit: &mut L1.Unit,
+            ) -> L1.TypeId ! {Memory.Allocation.Effect} {
+                return L1.add_type(unit, L1.Type { kind: 2, bit_width: 0 });
+            };
+
+            @export
+            let unit_type = std::func(
+                unit: &mut L1.Unit,
+            ) -> L1.TypeId ! {Memory.Allocation.Effect} {
+                return L1.add_type(unit, L1.Type { kind: 3, bit_width: 0 });
+            };
+
+            @export
+            let never_type = std::func(
+                unit: &mut L1.Unit,
+            ) -> L1.TypeId ! {Memory.Allocation.Effect} {
+                return L1.add_type(unit, L1.Type { kind: 4, bit_width: 0 });
+            };
+
+            @export
+            let declare_extern = std::func(
+                unit: &mut L1.Unit,
+                name: Memory.String,
+                return_type: L1.TypeId,
+                location: SourceLocation,
+            ) -> L1.ProcedureId ! {Memory.Allocation.Effect} {
+                let body: L1.RegionId = Builder.begin_region(unit);
+                return Builder.add_procedure(
+                    unit, name, return_type, body, true
+                );
+            };
+
+            @export
+            let add_parameter = std::func(
+                unit: &mut L1.Unit,
+                procedure: L1.ProcedureId,
+                name: Memory.String,
+                value_type: L1.TypeId,
+                location: SourceLocation,
+            ) -> L1.ExprId ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            } {
+                if procedure >= unit.procedures.length() {
+                    return std::usize_max();
+                }
+                let index: usize =
+                    unit.procedures.get(procedure).parameter_types.length();
+                Builder.add_parameter(unit, procedure, value_type);
+                return Builder.parameter(unit, value_type, index);
+            };
+
+            @export
+            let append_if = std::func(
+                unit: &mut L1.Unit, region: L1.RegionId,
+                condition: L1.ExprId, then_region: L1.RegionId,
+                else_region: L1.RegionId, location: SourceLocation,
+            ) -> i32 ! {
+                Memory.Allocation.Effect, Memory.Bounds.Effect,
+            } {
+                return Builder.append_if(
+                    unit, region, condition, then_region, else_region
+                ) as i32;
+            };
+
+            @export
+            let append_loop = std::func(
+                unit: &mut L1.Unit, region: L1.RegionId,
+                body: L1.RegionId, location: SourceLocation,
+            ) -> i32 ! {
+                Memory.Allocation.Effect, Memory.Bounds.Effect,
+            } {
+                return Builder.append_control(unit, region, 3, body) as i32;
+            };
+
+            @export
+            let append_break = std::func(
+                unit: &mut L1.Unit, region: L1.RegionId,
+                location: SourceLocation,
+            ) -> i32 ! {
+                Memory.Allocation.Effect, Memory.Bounds.Effect,
+            } {
+                return Builder.append_control(unit, region, 4, 0) as i32;
+            };
+
+            @export
+            let append_continue = std::func(
+                unit: &mut L1.Unit, region: L1.RegionId,
+                location: SourceLocation,
+            ) -> i32 ! {
+                Memory.Allocation.Effect, Memory.Bounds.Effect,
+            } {
+                return Builder.append_control(unit, region, 5, 0) as i32;
+            };
+
+            @export
+            let finish = std::func(
+                unit: L1.Unit,
+                entry: L1.ProcedureId,
+            ) -> L1.Unit {
+                unit.entry = entry;
+                return unit;
+            };
+        };
+
+        let ArtifactApi: Module = std::module {
+            @export let Artifact: type = L1.Unit;
+            @export let Procedure: type = L1.ProcedureId;
+
+            @export let schema_version =
+                std::func() -> i32 { return 1; };
+
+            @export
+            let verify = std::func(
+                artifact: &L1.Unit,
+            ) -> i32 ! {Memory.Bounds.Effect} {
+                return Verifier.unit(artifact, artifact.entry);
+            };
+
+            @export
+            let write_canonical_text = std::func(
+                artifact: &L1.Unit,
+            ) -> Memory.String ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            } {
+                return Printer.unit(artifact);
+            };
+
+            @export
+            let hash = std::func(
+                artifact: &L1.Unit,
+            ) -> u64 ! {
+                Memory.Allocation.Effect, Memory.Bounds.Effect,
+            } {
+                let text: Memory.String = Printer.unit(artifact);
+                let value: u64 = 1469598103934665603;
+                let index: usize = 0;
+                while index < Memory.String.length(&text) {
+                    value = value * 131
+                        + (Memory.String.byte_at(&text, index) as u64);
+                    index = index + 1;
+                }
+                return value;
+            };
+
+            @export
+            let equal = std::func(
+                left: &L1.Unit, right: &L1.Unit,
+            ) -> bool ! {
+                Memory.Allocation.Effect, Memory.Bounds.Effect,
+            } {
+                let left_text: Memory.String = Printer.unit(left);
+                let right_text: Memory.String = Printer.unit(right);
+                if Memory.String.length(&left_text)
+                    != Memory.String.length(&right_text) { return false; }
+                let index: usize = 0;
+                while index < Memory.String.length(&left_text) {
+                    if Memory.String.byte_at(&left_text, index)
+                        != Memory.String.byte_at(&right_text, index) {
+                        return false;
+                    }
+                    index = index + 1;
+                }
+                return true;
+            };
+        };
+
+        let EvalApi: Module = std::module {
+            @export let Artifact: type = L1.Unit;
+            @export let Procedure: type = L1.ProcedureId;
+            @export let Value: type = Interpreter.Value;
+            @export let ValueVector: type = Interpreter.ValueVector;
+            @export let Result: type = Interpreter.Result;
+            @export let Limits: type = std::struct {
+                steps: usize,
+                call_depth: usize,
+                allocation_bytes: usize,
+                nested_evals: usize,
+            };
+
+            @export
+            let default_limits = std::func() -> Limits {
+                return Limits {
+                    steps: 0,
+                    call_depth: 128,
+                    allocation_bytes: 0,
+                    nested_evals: 0,
+                };
+            };
+
+            @export
+            let evaluate = std::func(
+                artifact: &L1.Unit,
+                procedure: L1.ProcedureId,
+                arguments: &Interpreter.ValueVector,
+                limits: Limits,
+            ) -> Interpreter.Result ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+            } {
+                return Interpreter.execute(
+                    artifact,
+                    procedure,
+                    arguments,
+                );
+            };
+        };
+
+        return std::module {
+            @export let SourceLocation: type = SourceLocation;
+            @export let unknown_location = std::func() -> SourceLocation {
+                return 0;
+            };
+            @export let schema_version =
+                std::func() -> i32 { return 1; };
+            @export let Builder: Module = BuilderApi;
+            @export let Artifact: Module = ArtifactApi;
+            @export let Eval: Module = EvalApi;
+        };
+    };
+};

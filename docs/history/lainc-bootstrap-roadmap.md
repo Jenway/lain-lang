@@ -3,13 +3,14 @@
 > 计划快照：2026-08-16
 
 > **历史快照。** 当前执行路线以
-> [`docs/roadmaps/lainc-meta-roadmap.md`](../roadmaps/lainc-meta-roadmap.md) 为准。新路线将高级
+> [`docs/roadmaps/compiler-bootstrap.md`](../roadmaps/compiler-bootstrap.md) 为准。新路线将高级
 > 语言规则放入可替换的标准库：第一代标准库用 LAIN-IR 编写，正式标准库用
 > Lain 编写；Meta 只操作 AST，编译期执行统一通过 LAIN-IR `#eval`。
+> 文中的 `src/compiler-archive` 后来已经合并进 `src/lainc`，当前没有独立的 archive 编译器。
 
-> 这是当前长期计划的本地序列化文件。后续进度以这里的勾选项和“下一项实现任务”为准。
+> 下文是当时长期计划的本地序列化文件，其中勾选项只记录历史进度。
 
-这份文档是当前路线的本地序列化版本。阶段勾选项记录已经完成的工作，
+这份文档是旧路线的本地序列化版本。阶段勾选项记录当时已经完成的工作，
 “下一项实现任务”记录下一轮开发入口。
 
 ## 目标
