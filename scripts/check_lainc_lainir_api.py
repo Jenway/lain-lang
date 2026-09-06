@@ -27,6 +27,7 @@ REQUIRED_COMPILER_DIAGNOSTIC_ACCESSORS = (
     "diagnostic_source_id",
     "diagnostic_start",
     "diagnostic_end",
+    "diagnostic_message",
 )
 REQUIRED_RULES = (
     "schema_version",
@@ -108,8 +109,8 @@ def main() -> int:
     for name in REQUIRED_COMPILER_DIAGNOSTIC_ACCESSORS:
         if not re.search(rf"\blet\s+{re.escape(name)}\b", compiler_api_text):
             failures.append(f"compiler API is missing {name}")
-    if not re.search(r"schema_version\s*=\s*\n?\s*std::func\(\)\s*->\s*i32\s*\{\s*return\s+2;", compiler_api_text):
-        failures.append("compiler API schema version is not 2")
+    if not re.search(r"schema_version\s*=\s*\n?\s*std::func\(\)\s*->\s*i32\s*\{\s*return\s+3;", compiler_api_text):
+        failures.append("compiler API schema version is not 3")
 
     provider_path = ROOT / "src" / "lainir" / "api" / "default_provider.lain"
     provider_text = provider_path.read_text(encoding="utf-8") if provider_path.is_file() else ""

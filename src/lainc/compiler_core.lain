@@ -6,6 +6,8 @@ let source: Module = import("std::core::source");
 let source_workspace: Module =
     import("packages::lain::compiler::source_workspace");
 let syntax: Module = import("packages::lain::compiler::syntax");
+let diagnostic_messages: Module =
+    import("packages::lain::compiler::diagnostics");
 let elaborator: Module =
     import("packages::lain::compiler::elaborator");
 let meta: Module = import("packages::lain::compiler::meta");
@@ -76,8 +78,24 @@ let compiler_core: Module = std::module {
         let diagnostic = std::func(
             code: i32,
             source_id: usize,
-        ) -> Context.Diagnostic {
+        ) -> Context.Diagnostic ! {Memory.Allocation.Effect} {
             return diagnostic_at(code, source_id, 0, 0);
+        };
+
+        let message_for_code = std::func(
+            code: i32,
+        ) -> Memory.String ! {Memory.Allocation.Effect} {
+            let text: addr = diagnostic_messages.diagnostic_message(code);
+            let message: Memory.String = Memory.String.new();
+            let index: usize = 0;
+            while std::load_bits(8, text + index) != 0 {
+                Memory.String.append_byte(
+                    &mut message,
+                    std::load_bits(8, text + index),
+                );
+                index = index + 1;
+            }
+            return message;
         };
 
         let diagnostic_at = std::func(
@@ -85,10 +103,10 @@ let compiler_core: Module = std::module {
             source_id: usize,
             start: usize,
             end: usize,
-        ) -> Context.Diagnostic {
+        ) -> Context.Diagnostic ! {Memory.Allocation.Effect} {
             return Context.Diagnostic {
                 code: code,
-                message: Memory.String.new(),
+                message: message_for_code(code),
                 source_id: source_id,
                 start: start,
                 end: end,
