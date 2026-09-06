@@ -199,18 +199,14 @@ provider-owned opaque API，并由默认 provider 和 test provider 共同执行
 builder -> finish -> verify -> evaluate 的完整路径。`build_srclainc.py` 只验证包含
 provider source closure 的编译结果，不能证明这个 factory 已被实例化或执行。
 
-已尝试把这个 probe 放进 provider source closure。默认 provider 的七个源码模块可以
-单独由 bootstrap compiler 编译；一旦加入 `Provider(Memory)` 的公开 probe，bootstrap
-返回 `5108`，formal compiler 返回 `5203`（放入完整 source closure 时还会触发
-`5106`）。因此这些结果不能被当作 provider 执行证据，当前阻塞点已经收窄到模块
-factory/`Memory` specialization 的 lowering。下一步要先把这类调用作为独立的编译
-输入固定下来，再接 allocation/bounds handler；在此之前保持 provider 与 `lainc` 的
-factory 调用面分离。
-
-最小化实验进一步表明，只有普通 import 和普通无参 procedure 的 fixture 可以通过；
-单独调用 `memory_model.Model(arena_min.Policy, bounds.Unchecked)` 也返回 `5108`。
-因此不能通过换一个更小的 provider probe 绕过问题，修复对象是通用的模块值 factory
-专门化路径。
+当前 probe 的证据已经分成两层。若测试输入只包含 provider 文件而没有完整的 `std/`
+source closure，会得到 `5108`，这只是缺少 `std::memory_model` 等导入源；补齐完整
+`std/` 后，单独的 `memory_model.Model(arena_min.Policy, bounds.Unchecked)` 可以编译。
+把同一闭包扩展到 `Provider(Memory)` 后，bootstrap compiler 仍在专门化
+`l1_unit_builder` 的 `i32_literal` 路径返回 `5106`。因此当前阻塞点是 provider body
+在模块 factory 专门化后的物理 lowering，不再是未解析的 `memory_model` 导入。
+下一步先固定这个最小化专门化输入并定位 `5106` 的具体表达式，再接 allocation/bounds
+handler；在此之前保持 provider 与 `lainc` 的 factory 调用面分离。
 
 ### Eval owner/session 的迁移顺序
 
