@@ -5,6 +5,7 @@ let slice: Module = import("std::core::slice");
 let source: Module = import("std::core::source");
 let source_workspace: Module =
     import("packages::lain::compiler::source_workspace");
+let syntax: Module = import("packages::lain::compiler::syntax");
 let elaborator: Module =
     import("packages::lain::compiler::elaborator");
 let meta: Module = import("packages::lain::compiler::meta");
@@ -23,6 +24,7 @@ let compiler_core: Module = std::module {
     ) -> Module {
         let Sources: Module =
             source_workspace.SourceWorkspace(Memory);
+        let Syntax: Module = syntax.Syntax(Memory);
         let Elaborator: Module = elaborator.Elaborator(Memory);
         let Meta: Module = meta.Meta(Memory, Ir);
         let Lower: Module = lower.Lower(Memory, Ir);
@@ -75,20 +77,21 @@ let compiler_core: Module = std::module {
             code: i32,
             source_id: usize,
         ) -> Context.Diagnostic {
-            return diagnostic_at(code, source_id, 0);
+            return diagnostic_at(code, source_id, 0, 0);
         };
 
         let diagnostic_at = std::func(
             code: i32,
             source_id: usize,
             start: usize,
+            end: usize,
         ) -> Context.Diagnostic {
             return Context.Diagnostic {
                 code: code,
                 message: Memory.String.new(),
                 source_id: source_id,
                 start: start,
-                end: start,
+                end: end,
             };
         };
 
@@ -182,11 +185,27 @@ let compiler_core: Module = std::module {
             let elaborated: Elaborator.Result =
                 Elaborator.elaborate(&workspace);
             if elaborated.diagnostic != 0 {
+                let diagnostic_start: usize = 0;
+                let diagnostic_end: usize = 0;
+                if elaborated.diagnostic_node != Syntax.invalid_node() {
+                    diagnostic_start = Syntax.node_span_start(
+                        &workspace.syntax,
+                        elaborated.diagnostic_unit,
+                        elaborated.diagnostic_node,
+                    );
+                    diagnostic_end = Syntax.node_span_end(
+                        &workspace.syntax,
+                        elaborated.diagnostic_unit,
+                        elaborated.diagnostic_node,
+                    );
+                }
                 Context.add_diagnostic(
                     &mut context,
-                    diagnostic(
+                    diagnostic_at(
                         elaborated.diagnostic,
                         elaborated.diagnostic_unit,
+                        diagnostic_start,
+                        diagnostic_end,
                     ),
                 );
                 return Context.finish(context, empty_artifact());
@@ -214,7 +233,9 @@ let compiler_core: Module = std::module {
                         ArtifactApi.diagnostic_location(&verify_diagnostic);
                     Context.add_diagnostic(
                         &mut context,
-                        diagnostic_at(verify_code, 0, verify_location),
+                        diagnostic_at(
+                            verify_code, 0, verify_location, verify_location,
+                        ),
                     );
                     return Context.finish(
                         context,

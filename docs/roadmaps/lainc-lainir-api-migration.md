@@ -11,11 +11,11 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 
 | 阶段 | 状态 | 已有证据 | 尚缺内容 |
 | --- | --- | --- | --- |
-| 0 行为基线 | 部分完成 | `check_lainc_lainir_api_baseline.py` 汇总 source boundary、seed/recording provider 行为、formal/bootstrap compiler fixture parity、三个 formal compiler canonical artifact 静态快照和 source-closure 双构建确定性；16 个成功 fixture 的 canonical IR/执行结果、resolved import 与 4101/4103 import failure 已覆盖，失败路径也固定为不产生 artifact；legacy 语法拒绝检查已建立；compiler API v2 已公开诊断字段访问器 | source offset 传递后的位置快照 |
+| 0 行为基线 | 部分完成 | `check_lainc_lainir_api_baseline.py` 汇总 source boundary、seed/recording provider 行为、formal/bootstrap compiler fixture parity、三个 formal compiler canonical artifact 静态快照和 source-closure 双构建确定性；16 个成功 fixture 的 canonical IR/执行结果、resolved import 与 4101/4103 import failure 已覆盖，失败路径也固定为不产生 artifact；legacy 语法拒绝检查已建立；compiler API v2 已公开诊断字段访问器，source elaborator 的 unresolved-import 路径已传递 token span | 其余前端路径的 source offset 与位置快照 |
 | 1 API v1 | 部分完成 | `api_contract.lain` 已定义 Builder/Artifact/Eval shape 与 schema v1；Eval 的 `Capabilities` 是显式参数，空 capability 为默认值 | owner、失败原子性、capability 的跨 provider 可执行 contract tests |
 | 2 默认 provider | 进行中 | 独立 source manifest、组合构建入口、默认 provider 已存在；整数、data/activation memory、procedure address 与 indirect call 已由纯 Lain evaluator 执行 | 浮点执行（等待 literal/ABI 规范）、完整 printer、seed adapter 与差分报告 |
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
-| 4 artifact | 已完成边界迁移 | compiler core 通过 Artifact API verify/print；compiler API v2 已公开诊断数量、错误码、source id 与 span 访问器 | 前端 span 到 diagnostic location 的传递与位置 gate |
+| 4 artifact | 已完成边界迁移 | compiler core 通过 Artifact API verify/print；compiler API v2 已公开诊断数量、错误码、source id 与 span 访问器；unresolved import 已由 elaborator 的 syntax node 传递 start/end | 其余前端 span 传递与位置 gate |
 | 5 Meta eval | 进行中 | Meta 只通过 Eval 构造器/访问器交互，不读取 IR 或 Eval value/result 布局；默认 evaluator 已执行 step/call-depth/allocation 限制、结构化控制流、位宽整数与 64-bit typed activation memory；只读 data 写入与 activation 地址逃逸会 trap。每次 Meta eval 显式传递空 capability；带外部调用 capability 的执行只由 LAINIR provider 的 dispatcher 工厂提供 | 非 scalar 对象 owner、nested-eval 限制、默认 Lain provider 的 capability 执行测试 |
 | 6 清理与固定点 | 部分完成 | 五个 `src/lainc/l1_*` 已从仓库删除，静态检查拒绝重新导入；formal stdlib 可重建；`build_srclainc.py` 会验证输出为可解析的 LAINIR artifact；`check_srclainc_artifact.py` 已以双构建验证 source-closure 确定性 | gen2/gen3、native 差分与 `bootstrap_lainc.lain` 中遗留 L1 兼容/注释特例清理 |
 
@@ -179,7 +179,8 @@ session/context 生命周期，再由 `#eval` lowering 在每次嵌套调用时�
 
 `src/lainc/compiler_context.lain` 的内部 `Diagnostic` 已有 `source_id`、`start`
 和 `end` 字段，但现有 compiler core 对 tokenizer/parser/elaborator/lower 的失败路径尚未
-传递具体 span；默认 Artifact provider 也尚未产生非零 location。公开的
+传递具体 span；当前已覆盖 elaborator 的 unresolved import，但 tokenizer/parser、其余
+elaborator、lower 和默认 Artifact provider 仍未产生可用的非零 location。公开的
 `compiler_api.API` v2 已导出诊断计数、错误码、source id、start 与 end 的访问器，
 但这些 accessor 只能暴露现有数据。因此现有 4101/4103 fixture 固定的是错误码和无
 artifact 的原子性，不能被表述为位置诊断 contract；必须先补 source span，再加入位置

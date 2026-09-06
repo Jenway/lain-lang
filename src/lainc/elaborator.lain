@@ -140,6 +140,14 @@ let elaborator: Module = std::module {
             diagnostic_node: Syntax.NodeId,
         };
 
+        // Internal elaboration helpers carry the node that caused a failure.
+        // Result exposes it to compiler core, which owns conversion to a
+        // public source diagnostic.
+        let SourceResult: type = std::struct {
+            code: i32,
+            node: Syntax.NodeId,
+        };
+
         let new_program = std::func() -> Program
             ! {Memory.Allocation.Effect} {
             return Program {
@@ -502,7 +510,7 @@ let elaborator: Module = std::module {
             program: &mut Program,
             workspace: &Sources.Workspace,
             source_index: usize,
-        ) -> i32 ! {
+        ) -> SourceResult ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
@@ -622,7 +630,12 @@ let elaborator: Module = std::module {
                                 &program.modules,
                                 &path,
                             );
-                        if imported.id == 0 { return 2504; }
+                        if imported.id == 0 {
+                            return SourceResult {
+                                code: 2504,
+                                node: import_call,
+                            };
+                        }
                         program.module_bindings.push(ModuleBinding {
                             owner: module_id,
                             name: name,
@@ -714,7 +727,10 @@ let elaborator: Module = std::module {
                     current,
                 ).next_sibling;
             }
-            return 0;
+            return SourceResult {
+                code: 0,
+                node: Syntax.invalid_node(),
+            };
         };
 
         let elaborate = std::func(
@@ -741,18 +757,18 @@ let elaborator: Module = std::module {
 
             index = 0;
             while index < workspace.sources.length() {
-                let code: i32 = elaborate_source(
+                let source_result: SourceResult = elaborate_source(
                     &mut program,
                     workspace,
                     index,
                 );
-                if code != 0 {
+                if source_result.code != 0 {
                     return Result {
                         program: program,
-                        diagnostic: code,
+                        diagnostic: source_result.code,
                         diagnostic_unit:
                             workspace.sources.get(index).syntax_unit,
-                        diagnostic_node: 0,
+                        diagnostic_node: source_result.node,
                     };
                 }
                 index = index + 1;
@@ -802,6 +818,7 @@ let elaborator: Module = std::module {
             @export let ModuleBinding: type = ModuleBinding;
             @export let Program: type = Program;
             @export let Result: type = Result;
+            @export let SourceResult: type = SourceResult;
             @export let same_specialization_key =
                 same_specialization_key;
             @export let begin_specialization =
