@@ -203,10 +203,13 @@ provider source closure 的编译结果，不能证明这个 factory 已被实�
 source closure，会得到 `5108`，这只是缺少 `std::memory_model` 等导入源；补齐完整
 `std/` 后，单独的 `memory_model.Model(arena_min.Policy, bounds.Unchecked)` 可以编译。
 把同一闭包扩展到 `Provider(Memory)` 后，bootstrap compiler 仍在专门化
-`l1_unit_builder` 的 `i32_literal` 路径返回 `5106`。因此当前阻塞点是 provider body
-在模块 factory 专门化后的物理 lowering，不再是未解析的 `memory_model` 导入。
-下一步先固定这个最小化专门化输入并定位 `5106` 的具体表达式，再接 allocation/bounds
-handler；在此之前保持 provider 与 `lainc` 的 factory 调用面分离。
+`l1_unit_builder` 的 `i32_literal` 路径返回 `5106`。最小化实验进一步确认：构造
+`L1.Expr`、修改其字段，以及在 `&L1.Unit` 上读取字段都可以通过；只要在
+`&mut L1.Unit` 上执行 `unit.expressions.length()` 这样的字段投影，就会复现同一个
+`5106`，并伴随 `debug-bounds-kind=363`。因此当前阻塞点是可变 record 引用的字段投影
+没有完成物理 lowering，不再是未解析的 `memory_model` 导入，也不是 provider 组合本身。
+下一步应先为 `&mut record.field` 建立独立的 lowering fixture 和物理地址规则，再接
+allocation/bounds handler；在此之前保持 provider 与 `lainc` 的 factory 调用面分离。
 
 ### Eval owner/session 的迁移顺序
 
