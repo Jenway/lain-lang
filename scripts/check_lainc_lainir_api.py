@@ -151,23 +151,21 @@ def main() -> int:
                 failures.append(f"legacy provider surface remains: {path.relative_to(ROOT)}")
             if "DirectUnitFacts" in text:
                 failures.append(f"direct unit inspection remains: {path.relative_to(ROOT)}")
-            if path.name != "bootstrap_lainc.lain":
-                # Every capability member used by active compiler sources
-                # must be named by the frozen v1 contract.  This prevents a
-                # provider-specific convenience member from silently becoming
-                # an API dependency.  The historical bootstrap monolith is
-                # outside COMPILER_SOURCES.txt and has its own legacy ABI.
-                for pattern, surface, label in (
-                    (r"\b(?:Ir\.)?Builder\.([A-Za-z_][A-Za-z0-9_]*)", BUILDER_SURFACE, "Builder"),
-                    (r"\bArtifactApi\.([A-Za-z_][A-Za-z0-9_]*)", ARTIFACT_SURFACE, "Artifact"),
-                    (r"\bEval\.([A-Za-z_][A-Za-z0-9_]*)", EVAL_SURFACE, "Eval"),
-                ):
-                    for member in re.findall(pattern, text):
-                        if member not in surface:
-                            failures.append(
-                                f"contract-undeclared {label} member {member}: "
-                                f"{path.relative_to(ROOT)}"
-                            )
+            # Every capability member used by active compiler sources must be
+            # named by the frozen v1 contract.  This prevents a
+            # provider-specific convenience member from silently becoming an
+            # API dependency.
+            for pattern, surface, label in (
+                (r"\b(?:Ir\.)?Builder\.([A-Za-z_][A-Za-z0-9_]*)", BUILDER_SURFACE, "Builder"),
+                (r"\bArtifactApi\.([A-Za-z_][A-Za-z0-9_]*)", ARTIFACT_SURFACE, "Artifact"),
+                (r"\bEval\.([A-Za-z_][A-Za-z0-9_]*)", EVAL_SURFACE, "Eval"),
+            ):
+                for member in re.findall(pattern, text):
+                    if member not in surface:
+                        failures.append(
+                            f"contract-undeclared {label} member {member}: "
+                            f"{path.relative_to(ROOT)}"
+                        )
 
         lower_text = (ROOT / "src" / "lainc" / "lower.lain").read_text(
             encoding="utf-8"
@@ -213,20 +211,6 @@ def main() -> int:
         ):
             if required not in core_text:
                 failures.append(label)
-
-        bootstrap_text = (
-            ROOT / "src" / "lainc" / "bootstrap_lainc.lain"
-        ).read_text(encoding="utf-8")
-        for spelling in (
-            "Meta_direct_eval",
-            "Meta_direct_eval_facts",
-            "Meta_direct_result_new",
-            "invoke_backend_facts",
-            "invoke_program_phase_facts",
-            "invoke_procedure_facts",
-        ):
-            if spelling in bootstrap_text:
-                failures.append(f"bootstrap Meta evaluator special case remains: {spelling}")
 
     if failures:
         for failure in failures:
