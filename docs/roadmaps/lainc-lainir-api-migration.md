@@ -16,7 +16,7 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 | 2 默认 provider | 进行中 | 独立 source manifest、组合构建入口、默认 provider 已存在 | 完整 printer/evaluator、seed adapter 与差分报告 |
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
 | 4 artifact | 已完成边界迁移 | compiler core 通过 Artifact API verify/print | 诊断位置与公开 compiler API gate |
-| 5 Meta eval | 进行中 | Meta 只调用 Eval API，不读取 IR 表；默认 evaluator 已执行 step/call-depth 限制和结构化控制流 | activation allocation、owner、capability 与 nested-eval 限制 |
+| 5 Meta eval | 进行中 | Meta 只调用 Eval API，不读取 IR 表；默认 evaluator 已执行 step/call-depth/allocation 限制、结构化控制流及 32-bit typed activation memory；只读 data 写入与 activation 地址逃逸会 trap | 64-bit scalar/memory、对象 owner、capability 与 nested-eval 限制 |
 | 6 清理与固定点 | 部分完成 | 五个 `src/lainc/l1_*` 已移出 compiler；formal stdlib 与 `srclainc.l1` 可构建 | clean rebuild、gen2/gen3、native 差分与旧 kind 特例清理 |
 
 ## 目标
