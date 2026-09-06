@@ -52,7 +52,11 @@ REQUIRED_PROVIDER_BUILDER = (
 REQUIRED_PROVIDER_ARTIFACT = (
     "verify", "write_canonical_text", "hash", "equal",
 )
-REQUIRED_PROVIDER_EVAL = ("default_limits", "evaluate")
+REQUIRED_PROVIDER_EVAL = (
+    "default_limits", "make_i32", "make_bits", "value_type", "value_i32",
+    "value_bits",
+    "make_result", "result_status", "result_value", "evaluate",
+)
 
 
 def main() -> int:
@@ -118,6 +122,19 @@ def main() -> int:
         for field in ("types", "expressions", "regions", "procedures"):
             if re.search(rf"\bunit\s*\.\s*{field}\b", lower_text):
                 failures.append(f"lowering reads provider storage field {field}")
+
+        meta_text = (ROOT / "src" / "lainc" / "meta.lain").read_text(
+            encoding="utf-8"
+        )
+        for pattern in (
+            r"(?:return|push\s*\()\s*Eval\.Value\s*\{",
+            r"(?:return|=)\s*Eval\.Result\s*\{",
+            r"\bresult\s*\.\s*(?:status|value)\b",
+            r"\bvalue\s*\.\s*(?:type_id|i32_value|bits_value)\b",
+        ):
+            if re.search(pattern, meta_text):
+                failures.append("Meta reads or constructs the Eval provider layout")
+                break
 
         bootstrap_text = (
             ROOT / "src" / "lainc" / "bootstrap_lainc.lain"

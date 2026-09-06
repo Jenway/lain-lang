@@ -136,6 +136,17 @@ def main() -> int:
             if execute(case) != expected_value:
                 raise SystemExit(f"{operation} behavior differs from contract")
 
+        wide_integer = root / "integer_add_64.l1"
+        wide_integer.write_text(
+            "#proc main() -> #bits<1> "
+            "{ #return #eq(#add(4294967296, 42), 4294967338) }\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        canonical(wide_integer)
+        if execute(wide_integer) != 1:
+            raise SystemExit("64-bit integer behavior differs from contract")
+
         memory = root / "memory.l1"
         memory.write_text(
             """#proc main() -> #bits<32> {
@@ -152,6 +163,21 @@ def main() -> int:
         canonical(memory)
         if execute(memory) != 42:
             raise SystemExit("memory capability contract returned the wrong value")
+
+        wide_memory = root / "memory_64.l1"
+        wide_memory.write_text(
+            """#proc main() -> #bits<1> {
+  #let %memory: #addr = #alloca(8)
+  #store[#bits<64>] 4294967338, %memory
+  #return #eq(#load[#bits<64>](%memory), 4294967338)
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+        canonical(wide_memory)
+        if execute(wide_memory) != 1:
+            raise SystemExit("64-bit memory behavior differs from contract")
 
         data_builder = RecordingBuilder()
         data_builder.add_data("answer", 1, 1, "*")
