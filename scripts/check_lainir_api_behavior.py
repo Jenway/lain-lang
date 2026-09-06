@@ -115,6 +115,19 @@ def main() -> int:
     evaluator = RecordingEval()
     dispatches: list[tuple[str, tuple[int, ...]]] = []
 
+    # Builder failures are atomic: validation must happen before the provider
+    # mutates its unit.  This mirrors the contract even though this recording
+    # provider stores only canonical text.
+    data_before_failure = list(builder.data)
+    try:
+        builder.add_data("invalid", 0, 1, "")
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("invalid data layout was accepted")
+    if builder.data != data_before_failure:
+        raise SystemExit("failed builder operation left a partial data entry")
+
     def dispatcher(name: str, arguments: tuple[int, ...]) -> tuple[int, int]:
         dispatches.append((name, arguments))
         return (0, sum(arguments))
