@@ -70,17 +70,28 @@ let l1_interpreter: Module = std::module {
             addresses: AddressVector,
         };
 
+        let append_address = std::func(
+            state: &mut ExecutionState,
+            address: Address,
+        ) -> unit ! {Memory.Allocation.Effect} {
+            state.addresses.push(address);
+        };
+
         let address_value = std::func(
             state: &mut ExecutionState,
             type_id: L1.TypeId,
             address: Address,
         ) -> Result ! {Memory.Allocation.Effect} {
-            state.addresses.push(address);
-            return success(Value {
+            if state.addresses.length() >= 0 {
+                append_address(state, address);
+            }
+            let value: Value = Value {
                 type_id: type_id,
                 i32_value: state.addresses.length() as i32,
                 bits_value: state.addresses.length() as u64,
-            });
+            };
+            let result: Result = success(value);
+            return result;
         };
 
         let address_at = std::func(
@@ -132,7 +143,8 @@ let l1_interpreter: Module = std::module {
             let sign: u64 = power_of_two(width - 1);
             let normalized: u64 = bits & mask;
             if (normalized & sign) != 0 {
-                return (normalized | !mask) as i64;
+                return (normalized as i64)
+                    - (power_of_two(width) as i64);
             }
             return normalized as i64;
         };
@@ -509,6 +521,7 @@ let l1_interpreter: Module = std::module {
                 }
 
                 if instruction.kind == 3 {
+                    let loop_status: i32 = 7997;
                     while 1 == 1 {
                         let body: Result = execute_region(
                             unit, instruction.first_region, arguments,
@@ -516,7 +529,11 @@ let l1_interpreter: Module = std::module {
                         );
                         if body.status == 7999 { continue; }
                         if body.status == 7998 || body.status == 7997 { break; }
-                        return body;
+                        loop_status = body.status;
+                        break;
+                    }
+                    if loop_status != 7997 {
+                        return fail(loop_status);
                     }
                 }
 
