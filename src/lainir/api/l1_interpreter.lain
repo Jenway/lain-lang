@@ -179,6 +179,19 @@ let l1_interpreter: Module = std::module {
                 return success(*arguments.get(expression.index));
             }
 
+            // Procedure addresses are callable capabilities, distinct from
+            // activation and readonly-data addresses.  They can be consumed
+            // by #call_indirect, but cannot be loaded from or stored to.
+            if expression.kind == 40 {
+                if expression.procedure >= unit.procedures.length() {
+                    return fail(7101);
+                }
+                return address_value(state, expression.result_type, Address {
+                    kind: 3, activation: 0, object: expression.procedure,
+                    offset: 0, length: 0,
+                });
+            }
+
             if expression.kind == 41 {
                 if expression.index >= unit.data.length() { return fail(7113); }
                 let item: &L1.Data = unit.data.get(expression.index);
@@ -386,6 +399,35 @@ let l1_interpreter: Module = std::module {
                     &call_arguments,
                     depth + 1,
                     state,
+                );
+            }
+
+            if expression.kind == 21 {
+                let target: Result = evaluate_expression(
+                    unit, expression.left, arguments, depth + 1, state,
+                );
+                if target.status != 0 { return target; }
+                let address_index: usize = address_at(state, target.value);
+                if address_index == std::usize_max() { return fail(7116); }
+                let address: &Address = state.addresses.get(address_index);
+                if address.kind != 3 { return fail(7121); }
+
+                let call_arguments: ValueVector = ValueVector.new();
+                let argument_index: usize = 0;
+                while argument_index < expression.arguments.length() {
+                    let argument: Result = evaluate_expression(
+                        unit,
+                        *expression.arguments.get(argument_index),
+                        arguments,
+                        depth + 1,
+                        state,
+                    );
+                    if argument.status != 0 { return argument; }
+                    call_arguments.push(argument.value);
+                    argument_index = argument_index + 1;
+                }
+                return execute_procedure(
+                    unit, address.object, &call_arguments, depth + 1, state,
                 );
             }
 
