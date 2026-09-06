@@ -17,7 +17,7 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
 | 4 artifact | 已完成边界迁移 | compiler core 通过 Artifact API verify/print | 诊断位置与公开 compiler API gate |
 | 5 Meta eval | 进行中 | Meta 只通过 Eval 构造器/访问器交互，不读取 IR 或 Eval value/result 布局；默认 evaluator 已执行 step/call-depth/allocation 限制、结构化控制流、位宽整数与 64-bit typed activation memory；只读 data 写入与 activation 地址逃逸会 trap。每次 Meta eval 显式传递空 capability；带外部调用 capability 的执行只由 LAINIR provider 的 dispatcher 工厂提供 | 非 scalar 对象 owner、nested-eval 限制、跨 provider capability 执行测试 |
-| 6 清理与固定点 | 部分完成 | 五个 `src/lainc/l1_*` 已移出 compiler；formal stdlib 可重建；`build_srclainc.py` 会验证输出为可解析的 LAINIR artifact | source-closure 双构建确定性、gen2/gen3、native 差分与旧 kind 特例清理 |
+| 6 清理与固定点 | 部分完成 | 五个 `src/lainc/l1_*` 已从仓库删除，静态检查拒绝重新导入；formal stdlib 可重建；`build_srclainc.py` 会验证输出为可解析的 LAINIR artifact；`check_srclainc_artifact.py` 已以双构建验证 source-closure 确定性 | gen2/gen3、native 差分与 `bootstrap_lainc.lain` 中遗留 L1 兼容/注释特例清理 |
 
 ## 目标
 
@@ -38,7 +38,7 @@ src/lainir 或 seed
   -> 实现 BuilderApi、ArtifactApi 和 EvalApi
 ```
 
-这个迁移是编译器自举主线的一部分。当前 `src/lainc/l1_*.lain` 是旧动态 L1 模型的实现和使用者；只有调用点全部切到能力 API 后，才能安全移除这些文件。
+这个迁移是编译器自举主线的一部分。五个 `src/lainc/l1_*.lain` 旧动态 L1 模块已经删除；静态检查保留它们的路径清单，以阻止重新引入。`bootstrap_lainc.lain` 仍含为旧 bootstrap ABI 服务的 L1 名称和 kind 特例，它不属于新的 compiler source closure，必须在 gen2/gen3 固定点建立后单独清理。
 
 ## 边界决定
 
@@ -301,12 +301,9 @@ host 类型或 ad-hoc 浮点表示。
 
 工作：
 
-- 从 `COMPILER_SOURCES.txt` 移除五个旧模块；
-- 删除 `src/lainc/l1_ir.lain`；
-- 删除 `src/lainc/l1_unit_builder.lain`；
-- 删除 `src/lainc/l1_verifier.lain`；
-- 删除 `src/lainc/l1_printer.lain`；
-- 删除 `src/lainc/l1_interpreter.lain`；
+- 保持五个旧模块不再出现于 `COMPILER_SOURCES.txt`，并由静态检查阻止重新引入；
+- 保持 `src/lainc/l1_ir.lain`、`l1_unit_builder.lain`、`l1_verifier.lain`、`l1_printer.lain` 和 `l1_interpreter.lain` 不存在；
+- 清理 `bootstrap_lainc.lain` 中仅为旧 L1 ABI 留存的名称、kind 特例和注释；
 - 搜索并删除旧 L1 kind 数字、兼容注释和 bootstrap 特例；
 - 重新生成 bootstrap/compiler artifact，并运行固定点比较。
 
