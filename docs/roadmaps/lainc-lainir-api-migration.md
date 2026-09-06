@@ -11,7 +11,7 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 
 | 阶段 | 状态 | 已有证据 | 尚缺内容 |
 | --- | --- | --- | --- |
-| 0 行为基线 | 部分完成 | seed recording provider 覆盖明确整数、memory、二进制 data 与 eval；legacy 语法拒绝检查已建立 | compiler 成功/失败 fixture 与 canonical 快照 |
+| 0 行为基线 | 部分完成 | `check_lainc_lainir_api_baseline.py` 汇总 source boundary、seed/recording provider 行为和 source-closure 双构建确定性；legacy 语法拒绝检查已建立 | compiler 成功/失败 fixture 与 canonical 快照 |
 | 1 API v1 | 部分完成 | `api_contract.lain` 已定义 Builder/Artifact/Eval shape 与 schema v1；Eval 的 `Capabilities` 是显式参数，空 capability 为默认值 | owner、失败原子性、capability 的跨 provider 可执行 contract tests |
 | 2 默认 provider | 进行中 | 独立 source manifest、组合构建入口、默认 provider 已存在；整数、data/activation memory、procedure address 与 indirect call 已由纯 Lain evaluator 执行 | 浮点执行（等待 literal/ABI 规范）、完整 printer、seed adapter 与差分报告 |
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
@@ -201,7 +201,7 @@ Eval.evaluate(verified, procedure, arguments, limits, capabilities)
 
 完成条件：有一个可重复运行的迁移 gate，覆盖当前成功和失败路径。
 
-交付物：fixture 清单、旧调用点清单、canonical artifact/diagnostic 快照，以及单一的 `check_lainc_lainir_api_baseline` 入口。
+交付物：fixture 清单、旧调用点清单、canonical artifact/diagnostic 快照，以及单一的 `check_lainc_lainir_api_baseline.py` 入口。
 
 ### 阶段 1：冻结 API v1
 
