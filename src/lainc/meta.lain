@@ -538,8 +538,8 @@ let meta: Module = std::module {
         ) -> MetaBinding {
             let result: addr = allocate_meta(24);
             std::store_bits(64, result + 0, name_handle);
-            std::store_bits(64, result + 8, value.type_id);
-            std::store_bits(32, result + 16, value.i32_value);
+            std::store_bits(64, result + 8, Eval.value_type(&value));
+            std::store_bits(32, result + 16, Eval.value_i32(&value));
             return result;
         };
 
@@ -547,10 +547,7 @@ let meta: Module = std::module {
             type_id: usize,
             i32_value: i32,
         ) -> Eval.Value {
-            let result: addr = allocate_meta(16);
-            std::store_bits(64, result + 0, type_id);
-            std::store_bits(32, result + 8, i32_value);
-            return result;
+            return Eval.make_i32(type_id, i32_value);
         };
 
         let meta_environment_bind_value = std::func(
@@ -561,8 +558,8 @@ let meta: Module = std::module {
             let count: usize = std::load_bits(64, environment + 24);
             if count == 0 {
                 std::store_bits(64, environment + 32, name_handle);
-                std::store_bits(64, environment + 40, std::load_bits(64, value + 0));
-                std::store_bits(32, environment + 48, std::load_bits(32, value + 8));
+                std::store_bits(64, environment + 40, Eval.value_type(&value));
+                std::store_bits(32, environment + 48, Eval.value_i32(&value));
             }
             std::store_bits(64, environment + 24, count + 1);
         };
@@ -575,10 +572,7 @@ let meta: Module = std::module {
             meta_environment_bind_value(
                 environment,
                 name_handle,
-                Eval.Value {
-                    type_id: 0,
-                    i32_value: value_handle as i32,
-                },
+                Eval.make_i32(0, value_handle as i32),
             );
         };
 
@@ -693,6 +687,10 @@ let meta: Module = std::module {
             );
         };
 
+        let eval_failure = std::func(code: i32) -> Eval.Result {
+            return Eval.make_result(code, Eval.make_i32(0, 0));
+        };
+
         let invoke_program = std::func(
             registry: &Registry,
             callable: MetaCallableId,
@@ -703,38 +701,20 @@ let meta: Module = std::module {
             Memory.Bounds.Effect,
         } {
             if callable >= registry_length(registry) {
-                return Eval.Result {
-                    status: 2902,
-                    value: Eval.Value {
-                        type_id: 0,
-                        i32_value: 0,
-                    },
-                };
+                return eval_failure(2902);
             }
             let phase_slot: usize = callable * 5 + 3;
             let phase_offset: usize = phase_slot * 8;
             let registry_data: addr = registry_base(registry);
             if std::load_bits(64, registry_data + phase_offset) != 1
                 && std::load_bits(64, registry_data + phase_offset) != 4 {
-                return Eval.Result {
-                    status: 2907,
-                    value: Eval.Value {
-                        type_id: 0,
-                        i32_value: 0,
-                    },
-                };
+                return eval_failure(2907);
             }
             let procedure_slot: usize = callable * 5 + 2;
             let procedure_offset: usize = procedure_slot * 8;
             if std::load_bits(64, registry_data + procedure_offset)
                 == std::usize_max() {
-                return Eval.Result {
-                    status: 2906,
-                    value: Eval.Value {
-                        type_id: 0,
-                        i32_value: 0,
-                    },
-                };
+                return eval_failure(2906);
             }
             let procedure: usize =
                 std::load_bits(64, registry_data + procedure_offset);
@@ -754,35 +734,23 @@ let meta: Module = std::module {
             Memory.Bounds.Effect,
         } {
             if program.id == 0 {
-                return Eval.Result {
-                    status: 2908,
-                    value: Eval.Value { type_id: 0, i32_value: 0 },
-                };
+                return eval_failure(2908);
             }
             if callable >= registry_length(registry) {
-                return Eval.Result {
-                    status: 2902,
-                    value: Eval.Value { type_id: 0, i32_value: 0 },
-                };
+                return eval_failure(2902);
             }
             let phase_slot: usize = callable * 5 + 3;
             let phase_offset: usize = phase_slot * 8;
             let registry_data: addr = registry_base(registry);
             if std::load_bits(64, registry_data + phase_offset)
                 != expected_phase {
-                return Eval.Result {
-                    status: 2907,
-                    value: Eval.Value { type_id: 0, i32_value: 0 },
-                };
+                return eval_failure(2907);
             }
             let procedure_slot: usize = callable * 5 + 2;
             let procedure_offset: usize = procedure_slot * 8;
             if std::load_bits(64, registry_data + procedure_offset)
                 == std::usize_max() {
-                return Eval.Result {
-                    status: 2906,
-                    value: Eval.Value { type_id: 0, i32_value: 0 },
-                };
+                return eval_failure(2906);
             }
             let procedure: usize =
                 std::load_bits(64, registry_data + procedure_offset);
@@ -791,23 +759,17 @@ let meta: Module = std::module {
             let selected_program: usize =
                 std::load_bits(64, registry_data + program_offset);
             if selected_program != 0 && selected_program != program.id {
-                return Eval.Result {
-                    status: 2908,
-                    value: Eval.Value { type_id: 0, i32_value: 0 },
-                };
+                return eval_failure(2908);
             }
             if environment.binding_count > 1 {
-                return Eval.Result {
-                    status: 2909,
-                    value: Eval.Value { type_id: 0, i32_value: 0 },
-                };
+                return eval_failure(2909);
             }
             let frame: Eval.ValueVector = Eval.ValueVector.new();
             if environment.binding_count == 1 {
-                frame.push(Eval.Value {
-                    type_id: environment.first_capture_type,
-                    i32_value: environment.first_capture_value,
-                });
+                frame.push(Eval.make_i32(
+                    environment.first_capture_type,
+                    environment.first_capture_value,
+                ));
             }
             let argument_index: usize = 0;
             while argument_index < arguments.length() {
@@ -816,10 +778,7 @@ let meta: Module = std::module {
             }
             if program.first_procedure_parameter_count != 0 &&
                 frame.length() != program.first_procedure_parameter_count {
-                return Eval.Result {
-                    status: 2910,
-                    value: Eval.Value { type_id: 0, i32_value: 0 },
-                };
+                return eval_failure(2910);
             }
             return evaluate(unit, procedure, &frame);
         };
@@ -887,10 +846,7 @@ let meta: Module = std::module {
             Memory.Bounds.Effect,
         } {
             if context.phase != callable_phase_backend() {
-                return Eval.Result {
-                    status: 2911,
-                    value: Eval.Value { type_id: 0, i32_value: 0 },
-                };
+                return eval_failure(2911);
             }
             return invoke_program_phase(
                 registry,
@@ -956,10 +912,7 @@ let meta: Module = std::module {
             Memory.Bounds.Effect,
         } {
             let arguments: Eval.ValueVector = Eval.ValueVector.new();
-            arguments.push(Eval.Value {
-                type_id: 0,
-                i32_value: invocation.target as i32,
-            });
+            arguments.push(Eval.make_i32(0, invocation.target as i32));
             let result: Eval.Result = invoke_program_phase(
                 registry,
                 callable,
@@ -969,16 +922,19 @@ let meta: Module = std::module {
                 environment,
                 &arguments,
             );
-            if result.status != 0 {
-                return expansion_make(result.status, 0);
+            let result_status: i32 = Eval.result_status(&result);
+            if result_status != 0 {
+                return expansion_make(result_status, 0);
             }
-            if result.value.i32_value < 0 {
+            let result_value: Eval.Value = Eval.result_value(&result);
+            let result_i32: i32 = Eval.value_i32(&result_value);
+            if result_i32 < 0 {
                 return expansion_make(2905, 0);
             }
             return expansion_make_node(
                 0,
                 context.call_site_unit,
-                result.value.i32_value as usize,
+                result_i32 as usize,
             );
         };
         let invoke_direct = std::func(

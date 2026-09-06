@@ -29,6 +29,7 @@ let l1_interpreter: Module = std::module {
         let Value: type = std::struct {
             type_id: L1.TypeId,
             i32_value: i32,
+            bits_value: u64,
         };
 
         let ValueVector: type = vector.Vec(
@@ -74,6 +75,7 @@ let l1_interpreter: Module = std::module {
             return success(Value {
                 type_id: type_id,
                 i32_value: state.addresses.length() as i32,
+                bits_value: state.addresses.length() as u64,
             });
         };
 
@@ -97,12 +99,36 @@ let l1_interpreter: Module = std::module {
         let fail = std::func(code: i32) -> Result {
             return Result {
                 status: code,
-                value: Value { type_id: 0, i32_value: 0 },
+                value: Value { type_id: 0, i32_value: 0, bits_value: 0 },
             };
         };
 
         let success = std::func(value: Value) -> Result {
             return Result { status: 0, value: value };
+        };
+
+        let bit_mask = std::func(width: usize) -> u64 {
+            if width >= 64 { return std::usize_max() as u64; }
+            return ((1 as u64) << width) - 1;
+        };
+
+        let signed_bits = std::func(bits: u64, width: usize) -> i64 {
+            if width >= 64 { return bits as i64; }
+            let mask: u64 = bit_mask(width);
+            let sign: u64 = (1 as u64) << (width - 1);
+            let normalized: u64 = bits & mask;
+            if (normalized & sign) != 0 {
+                return (normalized | !mask) as i64;
+            }
+            return normalized as i64;
+        };
+
+        let scalar = std::func(type_id: L1.TypeId, bits: u64) -> Value {
+            return Value {
+                type_id: type_id,
+                i32_value: bits as i32,
+                bits_value: bits,
+            };
         };
 
         // Internal structured-control results.  They never cross the public
@@ -137,10 +163,9 @@ let l1_interpreter: Module = std::module {
                 unit.expressions.get(expression_id);
 
             if expression.kind == 1 {
-                return success(Value {
-                    type_id: expression.result_type,
-                    i32_value: expression.i32_value,
-                });
+                return success(scalar(
+                    expression.result_type, expression.wide_value,
+                ));
             }
 
             if expression.kind == 2 {
@@ -215,11 +240,11 @@ let l1_interpreter: Module = std::module {
                 let address: &Address = state.addresses.get(address_index);
                 let value_type: &L1.Type = unit.types.get(expression.result_type);
                 if value_type.kind != 1 || value_type.bit_width == 0
-                    || value_type.bit_width > 32
+                    || value_type.bit_width > 64
                     || value_type.bit_width % 8 != 0 { return fail(7118); }
                 let count: usize = value_type.bit_width / 8;
                 if count > address.length { return fail(7117); }
-                let bits: i32 = 0;
+                let bits: u64 = 0;
                 let byte_index: usize = 0;
                 while byte_index < count {
                     let byte: i32 = 0;
@@ -232,12 +257,10 @@ let l1_interpreter: Module = std::module {
                             byte = *data.initializer.get(data_offset);
                         }
                     } else { return fail(7116); }
-                    bits = bits + (byte << (byte_index * 8));
+                    bits = bits + ((byte as u64) << (byte_index * 8));
                     byte_index = byte_index + 1;
                 }
-                return success(Value {
-                    type_id: expression.result_type, i32_value: bits,
-                });
+                return success(scalar(expression.result_type, bits));
             }
 
             if expression.kind >= 3 {
@@ -260,59 +283,73 @@ let l1_interpreter: Module = std::module {
                     );
                     if right.status != 0 { return right; }
 
-                    let value: i32 = 0;
+                    let operand_type: &L1.Type =
+                        unit.types.get(left.value.type_id);
+                    let width: usize = operand_type.bit_width;
+                    let value: u64 = 0;
                     if expression.kind == 3 {
-                        value = left.value.i32_value
-                            + right.value.i32_value;
+                        value = (left.value.bits_value
+                            + right.value.bits_value) & bit_mask(width);
                     } else if expression.kind == 4 {
-                        value = left.value.i32_value
-                            - right.value.i32_value;
+                        value = (left.value.bits_value
+                            - right.value.bits_value) & bit_mask(width);
                     } else if expression.kind == 5 {
-                        value = left.value.i32_value
-                            * right.value.i32_value;
+                        value = (left.value.bits_value
+                            * right.value.bits_value) & bit_mask(width);
                     } else if expression.kind == 12 {
-                        if right.value.i32_value == 0 { return fail(7110); }
-                        value = left.value.i32_value / right.value.i32_value;
+                        if right.value.bits_value == 0 { return fail(7110); }
+                        value = (signed_bits(left.value.bits_value, width)
+                            / signed_bits(right.value.bits_value, width)) as u64
+                            & bit_mask(width);
                     } else if expression.kind == 13 {
-                        if right.value.i32_value == 0 { return fail(7110); }
-                        value = (left.value.i32_value as u32
-                            / right.value.i32_value as u32) as i32;
+                        if right.value.bits_value == 0 { return fail(7110); }
+                        value = (left.value.bits_value & bit_mask(width))
+                            / (right.value.bits_value & bit_mask(width));
                     } else if expression.kind == 6 {
-                        value =
-                            left.value.i32_value == right.value.i32_value;
+                        value = left.value.bits_value == right.value.bits_value;
                     } else if expression.kind == 7 {
-                        value =
-                            left.value.i32_value != right.value.i32_value;
+                        value = left.value.bits_value != right.value.bits_value;
                     } else if expression.kind == 8 {
-                        value =
-                            left.value.i32_value < right.value.i32_value;
+                        value = signed_bits(left.value.bits_value, width)
+                            < signed_bits(right.value.bits_value, width);
                     } else if expression.kind == 9 {
-                        value =
-                            left.value.i32_value <= right.value.i32_value;
+                        value = signed_bits(left.value.bits_value, width)
+                            <= signed_bits(right.value.bits_value, width);
                     } else if expression.kind == 10 {
-                        value =
-                            left.value.i32_value > right.value.i32_value;
+                        value = signed_bits(left.value.bits_value, width)
+                            > signed_bits(right.value.bits_value, width);
                     } else if expression.kind == 11 {
-                        value =
-                            left.value.i32_value >= right.value.i32_value;
+                        value = signed_bits(left.value.bits_value, width)
+                            >= signed_bits(right.value.bits_value, width);
                     } else if expression.kind == 14 {
-                        value = (left.value.i32_value as u32)
-                            < (right.value.i32_value as u32);
+                        value = left.value.bits_value < right.value.bits_value;
                     } else if expression.kind == 15 {
-                        value = (left.value.i32_value as u32)
-                            <= (right.value.i32_value as u32);
+                        value = left.value.bits_value <= right.value.bits_value;
                     } else if expression.kind == 16 {
-                        value = (left.value.i32_value as u32)
-                            > (right.value.i32_value as u32);
+                        value = left.value.bits_value > right.value.bits_value;
                     } else if expression.kind == 17 {
-                        value = (left.value.i32_value as u32)
-                            >= (right.value.i32_value as u32);
+                        value = left.value.bits_value >= right.value.bits_value;
                     }
-                    return success(Value {
-                        type_id: expression.result_type,
-                        i32_value: value,
-                    });
+                    return success(scalar(expression.result_type, value));
                 }
+            }
+
+            if expression.kind >= 30 && expression.kind <= 33 {
+                let input: Result = evaluate_expression(
+                    unit, expression.left, arguments, depth + 1, state,
+                );
+                if input.status != 0 { return input; }
+                let source_type: &L1.Type = unit.types.get(input.value.type_id);
+                let result_type: &L1.Type = unit.types.get(expression.result_type);
+                let bits: u64 = input.value.bits_value;
+                if expression.kind == 30 {
+                    bits = bits & bit_mask(source_type.bit_width);
+                } else if expression.kind == 31 {
+                    bits = signed_bits(bits, source_type.bit_width) as u64;
+                } else if expression.kind == 32 {
+                    bits = bits & bit_mask(result_type.bit_width);
+                }
+                return success(scalar(expression.result_type, bits));
             }
 
             // Procedure lookup and nested calls are deliberately expressed in
@@ -444,14 +481,15 @@ let l1_interpreter: Module = std::module {
                     if address.kind != 1 { return fail(7116); }
                     let value_type: &L1.Type = unit.types.get(instruction.value_type);
                     if value_type.kind != 1 || value_type.bit_width == 0
-                        || value_type.bit_width > 32
+                        || value_type.bit_width > 64
                         || value_type.bit_width % 8 != 0 { return fail(7118); }
                     let count: usize = value_type.bit_width / 8;
                     if count > address.length { return fail(7117); }
                     let byte_index: usize = 0;
                     while byte_index < count {
                         *state.storage.get_mut(address.offset + byte_index) =
-                            (stored.value.i32_value >> (byte_index * 8)) & 255;
+                            ((stored.value.bits_value >> (byte_index * 8))
+                                & 255) as i32;
                         byte_index = byte_index + 1;
                     }
                 }
