@@ -27,6 +27,8 @@ REQUIRED_RULES = (
     "new_unit",
     "finish",
     "verify",
+    "diagnostic_code",
+    "diagnostic_location",
     "write_canonical_text",
     "evaluate",
     "Capabilities",
@@ -53,7 +55,8 @@ REQUIRED_PROVIDER_BUILDER = (
     "append_continue", "append_return", "finish",
 )
 REQUIRED_PROVIDER_ARTIFACT = (
-    "verify", "write_canonical_text", "hash", "equal",
+    "verify", "diagnostic_code", "diagnostic_location",
+    "write_canonical_text", "hash", "equal",
 )
 REQUIRED_PROVIDER_EVAL = (
     "default_limits", "make_i32", "make_bits", "value_type", "value_i32",
