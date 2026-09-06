@@ -453,11 +453,12 @@ Provider(Memory) 的第一轮真实特化已经越过 API 源码编译阶段。�
 formal stdlib + API + `default_provider` source closure 现在可以生成 provider
 artifact，说明 provider 不再依赖一组未声明的 compiler 内部特例。
 
-下一道门已经从“源码能否特化”推进到“生成 artifact 能否通过 seed verifier”。
-当前 probe 在 `execute_region` 的结构化循环中失败：Lain 源码里的显式
-`break`/`continue` 会被当前 lowering 同时保留为结构化终结符和循环尾部的隐式
-`continue`，形成 `#break` 后跟 `#continue` 的非法序列（诊断 2010）。这属于
-source-language lowering 与解释器实现的控制流表达问题，不能通过放宽 verifier
-解决。下一步应先为循环控制流确定一种不产生双终结符的 lowering 形状，再恢复
-provider artifact 的 verifier/run gate；在该 gate 通过前，不把 Provider(Memory)
-迁移标记为完成。
+下一道门曾经是生成 artifact 的 seed verifier：Lain 源码里的显式 `break`/`continue`
+会被 lowering 同时保留为结构化终结符和循环尾部的隐式 `continue`，形成诊断
+2010。现在 `program_write_while` 会识别循环体尾部的显式终结符，避免重复追加；
+provider 中的链式可变字段访问、unit 调用包装和 `as` 物理转换也已同步修正。
+固定 smoke fixture `scripts/fixtures/lainir_provider_smoke.lain` 经过完整
+Provider(Memory) source closure 生成的 artifact，已通过 seed verifier 并运行
+成功，返回 schema version `1`。Provider 的实现边界因此具备可重复的源码特化和
+artifact 执行证据；下一步转入把该 smoke gate 纳入自动化脚本，并继续迁移真实
+`lainc` 编译调用面。
