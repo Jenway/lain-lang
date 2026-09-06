@@ -73,7 +73,7 @@ API 分为三个窄接口，避免 builder、输出格式和执行环境互相�
 
 负责构造一个 LAINIR unit。第一版至少覆盖当前 lowering 和近期自举需要的操作：
 
-- 生命周期：`new_unit`、`finish`、`discard`；
+- 生命周期：`new_unit`、`finish`、`discard`；失败结果需要时可携带不可验证、不可发布的 `empty_artifact` marker；
 - 物理类型：`bits_type`、`float_type`、`addr_type`、`unit_type`、`never_type`；
 - module item：`add_data`、`declare_extern`、`begin_procedure`、`end_procedure`；
 - region：`begin_region`；
