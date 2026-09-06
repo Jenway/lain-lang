@@ -21,12 +21,7 @@ let lainir_default_provider: Module = std::module {
     let Provider = std::func(
         Memory: memory_model.Shape,
     ) -> Module {
-        let SourceLocation: type = usize;
-        let L1: Module = l1_ir.Model(Memory);
-        let Builder: Module = l1_builder.Builder(Memory);
-        let Verifier: Module = l1_verifier.Verifier(Memory);
-        let Printer: Module = l1_printer.Printer(Memory);
-        let ExternalCalls: l1_interpreter.ExternalCallShape =
+        let DenyExternalCalls: l1_interpreter.ExternalCallShape =
             std::module {
                 @export
                 let call = std::func(
@@ -34,9 +29,26 @@ let lainir_default_provider: Module = std::module {
                     arguments: addr,
                     argument_count: usize,
                 ) -> i32 {
-                    return 7002;
+                    return 0;
                 };
             };
+        return ProviderWithExternalCalls(Memory, DenyExternalCalls);
+    };
+
+    // A host or conformance provider may install this factory with its own
+    // dispatcher.  It is intentionally owned by LAINIR rather than by lainc:
+    // Eval still receives a per-invocation capability before that dispatcher
+    // is reachable.
+    @export
+    let ProviderWithExternalCalls = std::func(
+        Memory: memory_model.Shape,
+        ExternalCalls: l1_interpreter.ExternalCallShape,
+    ) -> Module {
+        let SourceLocation: type = usize;
+        let L1: Module = l1_ir.Model(Memory);
+        let Builder: Module = l1_builder.Builder(Memory);
+        let Verifier: Module = l1_verifier.Verifier(Memory);
+        let Printer: Module = l1_printer.Printer(Memory);
         let Interpreter: Module =
             l1_interpreter.Interpreter(
                 Memory,
@@ -720,6 +732,9 @@ let lainir_default_provider: Module = std::module {
                 allocation_bytes: usize,
                 nested_evals: usize,
             };
+            @export let Capabilities: type = std::struct {
+                external_calls: bool,
+            };
 
             @export
             let default_limits = std::func() -> Limits {
@@ -729,6 +744,14 @@ let lainir_default_provider: Module = std::module {
                     allocation_bytes: 0,
                     nested_evals: 0,
                 };
+            };
+
+            @export let empty_capabilities = std::func() -> Capabilities {
+                return Capabilities { external_calls: false };
+            };
+            @export let external_call_capabilities = std::func()
+                -> Capabilities {
+                return Capabilities { external_calls: true };
             };
 
             @export let make_i32 = std::func(
@@ -775,6 +798,7 @@ let lainir_default_provider: Module = std::module {
                 procedure: L1.ProcedureId,
                 arguments: &Interpreter.ValueVector,
                 limits: Limits,
+                capabilities: Capabilities,
             ) -> Interpreter.Result ! {
                 Memory.Allocation.Effect,
                 Memory.Bounds.Effect,
@@ -786,6 +810,7 @@ let lainir_default_provider: Module = std::module {
                     limits.steps,
                     limits.call_depth,
                     limits.allocation_bytes,
+                    capabilities.external_calls,
                 );
             };
         };
