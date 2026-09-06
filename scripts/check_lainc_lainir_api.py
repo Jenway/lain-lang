@@ -202,6 +202,7 @@ def main() -> int:
         for required, label in (
             ("let SourceResult: type", "elaborator does not carry source diagnostic nodes"),
             ("node: import_call", "unresolved import does not retain its syntax node"),
+            ("diagnostic_source_id: usize", "elaborator does not carry a source id separately from syntax unit"),
         ):
             if required not in elaborator_text:
                 failures.append(label)
