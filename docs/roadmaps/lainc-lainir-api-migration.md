@@ -11,12 +11,12 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 
 | 阶段 | 状态 | 已有证据 | 尚缺内容 |
 | --- | --- | --- | --- |
-| 0 行为基线 | 部分完成 | seed recording provider 覆盖明确整数、memory、data 与 eval；legacy 语法拒绝检查已建立 | compiler 成功/失败 fixture 与 canonical 快照 |
+| 0 行为基线 | 部分完成 | seed recording provider 覆盖明确整数、memory、二进制 data 与 eval；legacy 语法拒绝检查已建立 | compiler 成功/失败 fixture 与 canonical 快照 |
 | 1 API v1 | 部分完成 | `api_contract.lain` 已定义 Builder/Artifact/Eval shape 与 schema v1 | owner、失败原子性、capability 的可执行 contract tests |
 | 2 默认 provider | 进行中 | 独立 source manifest、组合构建入口、默认 provider 已存在 | 完整 printer/evaluator、seed adapter 与差分报告 |
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
 | 4 artifact | 已完成边界迁移 | compiler core 通过 Artifact API verify/print | 诊断位置与公开 compiler API gate |
-| 5 Meta eval | 已完成调用面迁移 | Meta 只调用 Eval API，不读取 IR 表 | owner、limit、capability 与嵌套 eval 语义 |
+| 5 Meta eval | 进行中 | Meta 只调用 Eval API，不读取 IR 表；默认 evaluator 已执行 step/call-depth 限制和结构化控制流 | activation allocation、owner、capability 与 nested-eval 限制 |
 | 6 清理与固定点 | 部分完成 | 五个 `src/lainc/l1_*` 已移出 compiler；formal stdlib 与 `srclainc.l1` 可构建 | clean rebuild、gen2/gen3、native 差分与旧 kind 特例清理 |
 
 ## 目标

@@ -237,6 +237,53 @@ let l1_printer: Module = std::module {
             append_literal(output, "#invalid", 8);
         };
 
+        let region = std::func(
+            output: &mut Memory.String,
+            unit: &L1.Unit,
+            id: L1.RegionId,
+        ) -> unit ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let value: &L1.Region = unit.regions.get(id);
+            let index: usize = 0;
+            while index < value.instructions.length() {
+                let instruction: &L1.Instruction =
+                    value.instructions.get(index);
+                if instruction.kind == 1 {
+                    append_literal(output, "#return ", 8);
+                    expression(output, unit, instruction.expression);
+                } else if instruction.kind == 2 {
+                    append_literal(output, "#if ", 4);
+                    expression(output, unit, instruction.expression);
+                    append_literal(output, " { ", 3);
+                    region(output, unit, instruction.first_region);
+                    append_literal(output, "} else { ", 9);
+                    region(output, unit, instruction.second_region);
+                    append_literal(output, "}", 1);
+                } else if instruction.kind == 3 {
+                    append_literal(output, "#loop { ", 8);
+                    region(output, unit, instruction.first_region);
+                    append_literal(output, "}", 1);
+                } else if instruction.kind == 4 {
+                    append_literal(output, "#break", 6);
+                } else if instruction.kind == 5 {
+                    append_literal(output, "#continue", 9);
+                } else if instruction.kind == 6 {
+                    append_literal(output, "#store[", 7);
+                    physical_type(output, unit, instruction.value_type);
+                    append_literal(output, "] ", 2);
+                    expression(output, unit, instruction.expression);
+                    append_literal(output, ", ", 2);
+                    expression(output, unit, instruction.destination);
+                } else {
+                    append_literal(output, "#invalid", 8);
+                }
+                append_literal(output, " ", 1);
+                index = index + 1;
+            }
+        };
+
         let unit = std::func(
             value: &L1.Unit,
         ) -> Memory.String ! {
@@ -272,32 +319,7 @@ let l1_printer: Module = std::module {
                     continue;
                 }
                 append_literal(&mut output, " { ", 3);
-                let region: &L1.Region =
-                    value.regions.get(procedure.body);
-                let instruction_index: usize = 0;
-                while instruction_index
-                    < region.instructions.length() {
-                    let instruction: &L1.Instruction =
-                        region.instructions.get(instruction_index);
-                    if instruction.kind == 1 {
-                        append_literal(&mut output, "#return ", 8);
-                        expression(
-                            &mut output,
-                            value,
-                            instruction.expression,
-                        );
-                    }
-                    if instruction.kind == 6 {
-                        append_literal(&mut output, "#store[", 7);
-                        physical_type(&mut output, value, instruction.value_type);
-                        append_literal(&mut output, "] ", 2);
-                        expression(&mut output, value, instruction.expression);
-                        append_literal(&mut output, ", ", 2);
-                        expression(&mut output, value, instruction.destination);
-                    }
-                    append_literal(&mut output, " ", 1);
-                    instruction_index = instruction_index + 1;
-                }
+                region(&mut output, value, procedure.body);
                 append_literal(&mut output, "}\n", 2);
                 procedure_index = procedure_index + 1;
             }

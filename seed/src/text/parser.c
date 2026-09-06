@@ -130,7 +130,14 @@ static char *token_string(Token token) {
   return copy;
 }
 
-static char *token_string_literal(Token token) {
+static int hex_digit_value(char value) {
+  if (value >= '0' && value <= '9') return value - '0';
+  if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+  if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+  return -1;
+}
+
+static char *token_string_literal(Token token, size_t *decoded_length) {
   size_t input = 0;
   size_t output = 0;
   char *copy = malloc((size_t)token.len + 1);
@@ -146,6 +153,20 @@ static char *token_string_literal(Token token) {
       case 't': current = '\t'; break;
       case '\\': current = '\\'; break;
       case '"': current = '"'; break;
+      case 'x': {
+        int high = input < (size_t)token.len
+                       ? hex_digit_value(token.text[input]) : -1;
+        int low = input + 1 < (size_t)token.len
+                      ? hex_digit_value(token.text[input + 1]) : -1;
+        if (high >= 0 && low >= 0) {
+          current = (char)((high << 4) | low);
+          input += 2;
+        } else {
+          copy[output++] = '\\';
+          current = escaped;
+        }
+        break;
+      }
       default:
         copy[output++] = '\\';
         current = escaped;
@@ -155,6 +176,7 @@ static char *token_string_literal(Token token) {
     copy[output++] = current;
   }
   copy[output] = '\0';
+  if (decoded_length) *decoded_length = output;
   return copy;
 }
 
@@ -756,7 +778,7 @@ static L1Expr *parse_expr(Parser *p) {
   case TK_STRING:
     token = expect(p, TK_STRING);
     expr = lainir_new_expr(EXPR_STRING);
-    expr->data.str_val.content = token_string_literal(token);
+    expr->data.str_val.content = token_string_literal(token, NULL);
     expr->data.str_val.ty = lainir_new_type(TY_ADDR, 64);
     return expr;
   case TK_PERCENT:
@@ -1110,6 +1132,7 @@ static L1Subroutine *parse_data(Parser *p) {
   char *name;
   char *text;
   char *content;
+  size_t content_length;
   uint32_t size;
   uint32_t alignment;
   uintptr_t raw;
@@ -1131,13 +1154,13 @@ static L1Subroutine *parse_data(Parser *p) {
   free(text);
   expect(p, TK_COMMA);
   token = expect(p, TK_STRING);
-  content = token_string_literal(token);
+  content = token_string_literal(token, &content_length);
   expect(p, TK_RPAREN);
   expect(p, TK_SEMICOLON);
   if (!size) parse_fail(p, "#data size must be non-zero");
   if (!alignment || (alignment & (alignment - 1)) != 0)
     parse_fail(p, "#data alignment must be a power of two");
-  if (strlen(content) > size)
+  if (content_length > size)
     parse_fail(p, "#data initializer exceeds declared size");
 
   data = lainir_new_subroutine(name);
@@ -1149,7 +1172,7 @@ static L1Subroutine *parse_data(Parser *p) {
   raw = (uintptr_t)data->data_storage;
   aligned = (raw + alignment - 1) & ~((uintptr_t)alignment - 1);
   data->data_bytes = (uint8_t *)aligned;
-  memcpy(data->data_bytes, content, strlen(content));
+  memcpy(data->data_bytes, content, content_length);
   free(content);
   free(name);
   return data;

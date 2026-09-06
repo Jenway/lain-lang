@@ -42,6 +42,20 @@ let l1_interpreter: Module = std::module {
             value: Value,
         };
 
+        let ExecutionState: type = std::struct {
+            steps: usize,
+            step_limit: usize,
+            depth_limit: usize,
+        };
+
+        let consume_step = std::func(state: &mut ExecutionState) -> bool {
+            if state.step_limit != 0 && state.steps >= state.step_limit {
+                return false;
+            }
+            state.steps = state.steps + 1;
+            return true;
+        };
+
         let fail = std::func(code: i32) -> Result {
             return Result {
                 status: code,
@@ -53,16 +67,24 @@ let l1_interpreter: Module = std::module {
             return Result { status: 0, value: value };
         };
 
+        // Internal structured-control results.  They never cross the public
+        // execute boundary.
+        let fallthrough = std::func() -> Result { return fail(7997); };
+        let break_flow = std::func() -> Result { return fail(7998); };
+        let continue_flow = std::func() -> Result { return fail(7999); };
+
         let evaluate_expression = std::func(
             unit: &L1.Unit,
             expression_id: L1.ExprId,
             arguments: &ValueVector,
             depth: usize,
+            state: &mut ExecutionState,
         ) -> Result ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
-            if depth >= 128 {
+            if !consume_step(state) { return fail(7109); }
+            if state.depth_limit != 0 && depth >= state.depth_limit {
                 return fail(7108);
             }
 
@@ -97,6 +119,7 @@ let l1_interpreter: Module = std::module {
                         expression.left,
                         arguments,
                         depth + 1,
+                        state,
                     );
                     if left.status != 0 { return left; }
 
@@ -105,6 +128,7 @@ let l1_interpreter: Module = std::module {
                         expression.right,
                         arguments,
                         depth + 1,
+                        state,
                     );
                     if right.status != 0 { return right; }
 
@@ -181,6 +205,7 @@ let l1_interpreter: Module = std::module {
                         *expression.arguments.get(argument_index),
                         arguments,
                         depth + 1,
+                        state,
                     );
                     if argument.status != 0 { return argument; }
                     call_arguments.push(argument.value);
@@ -191,6 +216,7 @@ let l1_interpreter: Module = std::module {
                     expression.procedure,
                     &call_arguments,
                     depth + 1,
+                    state,
                 );
             }
 
@@ -202,6 +228,7 @@ let l1_interpreter: Module = std::module {
             region_id: L1.RegionId,
             arguments: &ValueVector,
             depth: usize,
+            state: &mut ExecutionState,
         ) -> Result ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
@@ -213,6 +240,7 @@ let l1_interpreter: Module = std::module {
             let offset: usize = 0;
 
             while offset < region.instructions.length() {
+                if !consume_step(state) { return fail(7109); }
                 let instruction: &L1.Instruction =
                     region.instructions.get(offset);
 
@@ -222,6 +250,7 @@ let l1_interpreter: Module = std::module {
                         instruction.expression,
                         arguments,
                         depth,
+                        state,
                     );
                 }
 
@@ -231,30 +260,57 @@ let l1_interpreter: Module = std::module {
                         instruction.expression,
                         arguments,
                         depth,
+                        state,
                     );
                     if condition.status != 0 {
                         return condition;
                     }
                     if condition.value.i32_value != 0 {
-                        return execute_region(
+                        let branch: Result = execute_region(
                             unit,
                             instruction.first_region,
                             arguments,
                             depth + 1,
+                            state,
                         );
+                        if branch.status != 7997 { return branch; }
+                    } else {
+                        let branch: Result = execute_region(
+                            unit,
+                            instruction.second_region,
+                            arguments,
+                            depth + 1,
+                            state,
+                        );
+                        if branch.status != 7997 { return branch; }
                     }
-                    return execute_region(
-                        unit,
-                        instruction.second_region,
-                        arguments,
-                        depth + 1,
-                    );
+                }
+
+                if instruction.kind == 3 {
+                    while true {
+                        let body: Result = execute_region(
+                            unit, instruction.first_region, arguments,
+                            depth + 1, state,
+                        );
+                        if body.status == 7999 { continue; }
+                        if body.status == 7998 || body.status == 7997 { break; }
+                        return body;
+                    }
+                }
+
+                if instruction.kind == 4 { return break_flow(); }
+                if instruction.kind == 5 { return continue_flow(); }
+                if instruction.kind == 6 {
+                    // Memory execution is added with the activation storage
+                    // model; rejecting it is preferable to silently dropping
+                    // a store.
+                    return fail(7111);
                 }
 
                 offset = offset + 1;
             }
 
-            return fail(7103);
+            return fallthrough();
         };
 
         let execute = std::func(
@@ -265,11 +321,37 @@ let l1_interpreter: Module = std::module {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
+            let state: ExecutionState = ExecutionState {
+                steps: 0,
+                step_limit: 0,
+                depth_limit: 128,
+            };
             return execute_procedure(
                 unit,
                 procedure_id,
                 arguments,
                 0,
+                &mut state,
+            );
+        };
+
+        let execute_limited = std::func(
+            unit: &L1.Unit,
+            procedure_id: L1.ProcedureId,
+            arguments: &ValueVector,
+            step_limit: usize,
+            depth_limit: usize,
+        ) -> Result ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let state: ExecutionState = ExecutionState {
+                steps: 0,
+                step_limit: step_limit,
+                depth_limit: depth_limit,
+            };
+            return execute_procedure(
+                unit, procedure_id, arguments, 0, &mut state
             );
         };
 
@@ -278,11 +360,14 @@ let l1_interpreter: Module = std::module {
             procedure_id: L1.ProcedureId,
             arguments: &ValueVector,
             depth: usize,
+            state: &mut ExecutionState,
         ) -> Result ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
-            if depth >= 128 { return fail(7108); }
+            if state.depth_limit != 0 && depth >= state.depth_limit {
+                return fail(7108);
+            }
             if procedure_id >= unit.procedures.length() {
                 return fail(7101);
             }
@@ -294,12 +379,19 @@ let l1_interpreter: Module = std::module {
             if procedure.parameter_types.length() != arguments.length() {
                 return fail(7105);
             }
-            return execute_region(
+            let result: Result = execute_region(
                 unit,
                 procedure.body,
                 arguments,
                 depth + 1,
+                state,
             );
+            if result.status == 7997
+                || result.status == 7998
+                || result.status == 7999 {
+                return fail(7103);
+            }
+            return result;
         };
 
         return std::module {
@@ -308,6 +400,7 @@ let l1_interpreter: Module = std::module {
             @export let ValueVector: type = ValueVector;
             @export let Result: type = Result;
             @export let execute = execute;
+            @export let execute_limited = execute_limited;
         };
     };
 };
