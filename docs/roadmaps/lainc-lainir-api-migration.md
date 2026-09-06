@@ -443,3 +443,21 @@ formal stdlib、真实 compiler artifact 和固定点作为 gate。API 迁移不
 5. Meta 检查：编译期值、对象 owner、错误和资源限制 gate 通过；
 6. 自举检查：formal stdlib 可重建，gen2/gen3 canonical artifact 一致；
 7. 清理检查：五个 `src/lainc/l1_*` 模块及其 kind-number 特例全部删除。
+
+## 当前实施记录（2026-09-07）
+
+Provider(Memory) 的第一轮真实特化已经越过 API 源码编译阶段。独立的
+`l1_unit_builder.Builder(Memory)` probe 先确认了 `i32_literal`、`parameter` 的
+`Memory.Bounds.Effect` 要求；随后修正宽度转换、builder 的可变字段访问、verifier
+的参数类型读取、printer 的偏移输出，以及 `as` 在 lowering 中的物理转换。完整的
+formal stdlib + API + `default_provider` source closure 现在可以生成 provider
+artifact，说明 provider 不再依赖一组未声明的 compiler 内部特例。
+
+下一道门已经从“源码能否特化”推进到“生成 artifact 能否通过 seed verifier”。
+当前 probe 在 `execute_region` 的结构化循环中失败：Lain 源码里的显式
+`break`/`continue` 会被当前 lowering 同时保留为结构化终结符和循环尾部的隐式
+`continue`，形成 `#break` 后跟 `#continue` 的非法序列（诊断 2010）。这属于
+source-language lowering 与解释器实现的控制流表达问题，不能通过放宽 verifier
+解决。下一步应先为循环控制流确定一种不产生双终结符的 lowering 形状，再恢复
+provider artifact 的 verifier/run gate；在该 gate 通过前，不把 Provider(Memory)
+迁移标记为完成。

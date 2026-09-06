@@ -6979,9 +6979,40 @@
     }
   }
   #if #call meta_atom_equal(%source, %operator, "as", 2) {
-    // Casts are a surface type assertion.  The current physical boundary
-    // keeps the value expression and lets the target type be enforced by the
-    // surrounding parameter/return contract.
+    // Casts must cross the physical width boundary explicitly.  Erasing a
+    // cast leaves a narrow SSA value bound to a wider LAIN-IR type, which the
+    // verifier correctly rejects.  Source-level integer casts currently carry
+    // signed semantics when widening; same-width casts remain assertions.
+    #let %unit: #addr = #call program_function_unit(%function)
+    #let %source_type: #addr = #call program_record_type_for_field(
+      %source, %function, %left
+    )
+    #let %source_width: #bits<64> = #call program_type_width_in_unit(
+      %unit, %source, %source_type
+    )
+    #let %target_width: #bits<64> = #call program_type_width_in_unit(
+      %unit, %source, %right
+    )
+    #if #ne(%source_width, 0) {
+      #if #ne(%target_width, 0) {
+        #if #sgt(%target_width, %source_width) {
+          #call bootstrap.artifact-write-literal("#sext[#bits<")
+          #call meta_write_decimal(%target_width)
+          #call bootstrap.artifact-write-literal(">](")
+          #call program_write_operand(%source, %function, %left)
+          #call bootstrap.artifact-write-byte(41)
+          #return
+        }
+        #if #slt(%target_width, %source_width) {
+          #call bootstrap.artifact-write-literal("#trunc[#bits<")
+          #call meta_write_decimal(%target_width)
+          #call bootstrap.artifact-write-literal(">](")
+          #call program_write_operand(%source, %function, %left)
+          #call bootstrap.artifact-write-byte(41)
+          #return
+        }
+      }
+    }
     #call program_write_operand(%source, %function, %left)
     #return
   }
