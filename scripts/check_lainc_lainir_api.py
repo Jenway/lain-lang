@@ -29,6 +29,9 @@ REQUIRED_RULES = (
     "verify",
     "write_canonical_text",
     "evaluate",
+    "Capabilities",
+    "empty_capabilities",
+    "external_call_capabilities",
     "signed_divide",
     "unsigned_divide",
     "zero_extend",
@@ -56,6 +59,7 @@ REQUIRED_PROVIDER_EVAL = (
     "default_limits", "make_i32", "make_bits", "value_type", "value_i32",
     "value_bits",
     "make_result", "result_status", "result_value", "evaluate",
+    "empty_capabilities", "external_call_capabilities",
 )
 
 
@@ -131,9 +135,12 @@ def main() -> int:
             r"(?:return|=)\s*Eval\.Result\s*\{",
             r"\bresult\s*\.\s*(?:status|value)\b",
             r"\bvalue\s*\.\s*(?:type_id|i32_value|bits_value)\b",
+            r"\bEval\.external_call_capabilities\s*\(",
         ):
             if re.search(pattern, meta_text):
-                failures.append("Meta reads or constructs the Eval provider layout")
+                failures.append(
+                    "Meta reads Eval layout or grants itself external capability"
+                )
                 break
 
         bootstrap_text = (

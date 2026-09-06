@@ -60,6 +60,7 @@ let l1_interpreter: Module = std::module {
             depth_limit: usize,
             allocation_bytes: usize,
             allocation_limit: usize,
+            external_calls_allowed: bool,
             current_activation: usize,
             next_activation: usize,
             storage: Memory.Bytes,
@@ -513,7 +514,8 @@ let l1_interpreter: Module = std::module {
                 step_limit: 0,
                 depth_limit: 128,
                 allocation_bytes: 0,
-                allocation_limit: 0,
+            allocation_limit: 0,
+                external_calls_allowed: false,
                 current_activation: 0,
                 next_activation: 1,
                 storage: Memory.Bytes.new(),
@@ -535,6 +537,7 @@ let l1_interpreter: Module = std::module {
             step_limit: usize,
             depth_limit: usize,
             allocation_limit: usize,
+            external_calls_allowed: bool,
         ) -> Result ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
@@ -545,6 +548,7 @@ let l1_interpreter: Module = std::module {
                 depth_limit: depth_limit,
                 allocation_bytes: 0,
                 allocation_limit: allocation_limit,
+                external_calls_allowed: external_calls_allowed,
                 current_activation: 0,
                 next_activation: 1,
                 storage: Memory.Bytes.new(),
@@ -574,7 +578,24 @@ let l1_interpreter: Module = std::module {
             let procedure: &L1.Procedure =
                 unit.procedures.get(procedure_id);
             if procedure.is_external {
-                return fail(7102);
+                // An external procedure can only cross the evaluator boundary
+                // after the individual Eval invocation explicitly grants the
+                // external-call capability.  The dispatcher itself remains a
+                // LAINIR-provider dependency, never a hidden host facility.
+                if !state.external_calls_allowed { return fail(7102); }
+                if procedure.parameter_types.length() != arguments.length() {
+                    return fail(7105);
+                }
+                let name: addr = Memory.Allocation.address(
+                    procedure.name.bytes.storage,
+                );
+                let raw_arguments: addr = Memory.Allocation.address(
+                    arguments.storage,
+                );
+                return success(scalar(
+                    procedure.return_type,
+                    ExternalCalls.call(name, raw_arguments, arguments.length()),
+                ));
             }
             if procedure.parameter_types.length() != arguments.length() {
                 return fail(7105);
