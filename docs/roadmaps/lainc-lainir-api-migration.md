@@ -13,7 +13,7 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 | --- | --- | --- | --- |
 | 0 行为基线 | 部分完成 | `check_lainc_lainir_api_baseline.py` 汇总 source boundary、seed/recording provider 行为、formal/bootstrap compiler fixture parity、三个 formal compiler canonical artifact 静态快照和 source-closure 双构建确定性；16 个成功 fixture 的 canonical IR/执行结果、resolved import 与 4101/4103 import failure 已覆盖，失败路径也固定为不产生 artifact；legacy 语法拒绝检查已建立；compiler API v3 已公开诊断字段与 message 访问器，source elaborator 的 unresolved-import 路径已传递 token span | 其余前端路径的 source offset 与位置快照 |
 | 1 API v1 | 部分完成 | `api_contract.lain` 已定义 Builder/Artifact/Eval shape 与 schema v1；Eval 的 `Capabilities` 是显式参数，空 capability 为默认值；recording provider 已验证非法 data layout 失败且不留下部分状态，以及跨 owner handle 使用失败 | 正式 provider 的 owner/失败原子性、capability 的跨 provider 可执行 contract tests |
-| 2 默认 provider | 进行中 | 独立 source manifest、组合构建入口、默认 provider 已存在；`l1_interpreter.lain` 已定义整数、data/activation memory、procedure address 与 indirect call，seed executable 的行为 gate 已覆盖这些 LAINIR 语义 | 默认 provider module 的实际实例化/调用、浮点执行（等待 literal/ABI 规范）、完整 printer、seed adapter 与差分报告 |
+| 2 默认 provider | 进行中 | 独立 source manifest、组合构建入口、默认 provider 已存在；`l1_interpreter.lain` 已定义整数、data/activation memory、procedure address 与 indirect call；`check_lainir_provider_smoke.py` 已验证 `Provider(Memory)` 特化、artifact verifier 和最小执行路径 | 浮点执行（等待 literal/ABI 规范）、完整 printer、seed adapter 与差分报告 |
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
 | 4 artifact | 已完成边界迁移 | compiler core 通过 Artifact API verify/print；compiler API v3 已公开诊断数量、错误码、source id、span 与 message 访问器；unresolved import 已由 elaborator 的 syntax node 传递 start/end | 其余前端 span 传递与位置 gate |
 | 5 Meta eval | 进行中 | Meta 只通过 Eval 构造器/访问器交互，不读取 IR 或 Eval value/result 布局；`l1_interpreter.lain` 定义 step/call-depth/allocation 限制、结构化控制流、位宽整数与 64-bit typed activation memory，seed 行为 gate 覆盖已落地的 scalar/memory 语义；每次 Meta eval 显式传递空 capability，外部 capability 只由 LAINIR provider 的 dispatcher 工厂提供 | 默认 provider module 的实际 Eval 调用、非 scalar 对象 owner、nested-eval 限制 |
@@ -193,23 +193,20 @@ bootstrap ABI，`check_eval_object_matrix.py` 覆盖的是这条 seed `#eval` �
 provider-owned opaque API，并由默认 provider 和 test provider 共同执行；不得把旧 ABI
 的通过结果计入这一完成条件。
 
-默认 provider smoke test 仍需要独立执行 harness：用具体的
-`Memory.Model` specialization 实例化 `lainir_default_provider.Provider`，并为
-`Memory.Allocation.Effect` 与 `Memory.Bounds.Effect` 安装可观察的 handler，执行一个
-builder -> finish -> verify -> evaluate 的完整路径。`build_srclainc.py` 只验证包含
-provider source closure 的编译结果，不能证明这个 factory 已被实例化或执行。
+默认 provider smoke test 已有独立 harness：
+`scripts/check_lainir_provider_smoke.py` 用具体的
+`memory_model.Model(arena_min.Policy, bounds.Unchecked)` 实例化
+`lainir_default_provider.Provider`，编译完整 `std/` 与 provider source closure，
+再交给 seed verifier 和 runner。固定 fixture
+`scripts/fixtures/lainir_provider_smoke.lain` 返回 schema version `1`；这条 gate
+同时证明 factory specialization、artifact 验证和最小执行路径都能工作。
 
-当前 probe 的证据已经分成两层。若测试输入只包含 provider 文件而没有完整的 `std/`
-source closure，会得到 `5108`，这只是缺少 `std::memory_model` 等导入源；补齐完整
-`std/` 后，单独的 `memory_model.Model(arena_min.Policy, bounds.Unchecked)` 可以编译。
-同一闭包扩展到 `Provider(Memory)` 后，先后暴露了几处 provider 源码自身尚未适配
-当前 lowering 的表达式。`l1_unit_builder` 的 `i32_literal` 已通过独立 specialization
-probe：它补齐了 `Memory.Bounds.Effect`，并将 `i32 -> i64 -> u64` 链式 cast 拆成中间
-值；实验也确认 `&mut L1.Unit` 的字段读取本身可以通过。随后修正了 interpreter 中的
-移位表达式和 `while true`，provider probe 又推进到 `l1_interpreter.execute_region`
-内的 `5512`，当前上下文落在循环分支里的 `body.status`/`return body` 路径。
-因此默认 provider 仍没有实际实例化证据；下一步先把这个 record result 在嵌套控制流
-中的返回路径缩成独立 fixture，再接 allocation/bounds handler。
+该 probe 的调试过程也留下了实现层面的修正：`l1_unit_builder` 的
+`i32_literal`/`parameter` 补齐了 `Memory.Bounds.Effect`，`as` 转换在 lowering 中
+落成显式 `#sext/#trunc`，provider 的可变字段访问改为先取得局部引用，interpreter
+的位运算改成现有明确整数指令，循环 lowering 会跳过显式终结符后的重复尾
+`#continue`。这些修正使源码特化和 artifact verifier gate 都能重复通过；后续工作
+集中在真实 compiler 调用面、Eval owner/session 和第二个 provider contract test。
 
 ### Eval owner/session 的迁移顺序
 
