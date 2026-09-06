@@ -17,7 +17,7 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
 | 4 artifact | 已完成边界迁移 | compiler core 通过 Artifact API verify/print；compiler API v3 已公开诊断数量、错误码、source id、span 与 message 访问器；unresolved import 已由 elaborator 的 syntax node 传递 start/end | 其余前端 span 传递与位置 gate |
 | 5 Meta eval | 进行中 | Meta 只通过 Eval 构造器/访问器交互，不读取 IR 或 Eval value/result 布局；`l1_interpreter.lain` 定义 step/call-depth/allocation 限制、结构化控制流、位宽整数与 64-bit typed activation memory，seed 行为 gate 覆盖已落地的 scalar/memory 语义；每次 Meta eval 显式传递空 capability，外部 capability 只由 LAINIR provider 的 dispatcher 工厂提供 | 默认 provider module 的实际 Eval 调用、非 scalar 对象 owner、nested-eval 限制 |
-| 6 清理与固定点 | 部分完成 | 五个 `src/lainc/l1_*` 已从仓库删除，静态检查拒绝重新导入；formal stdlib 可重建；`build_srclainc.py` 会验证输出为可解析的 LAINIR artifact；`check_srclainc_artifact.py` 已以双构建验证 source-closure 确定性 | gen2/gen3、native 差分与 `bootstrap_lainc.lain` 中遗留 L1 兼容/注释特例清理 |
+| 6 清理与固定点 | 进行中 | 五个 `src/lainc/l1_*` 已从仓库删除，静态检查拒绝重新导入；formal stdlib 可重建；`build_srclainc.py` 会验证输出为可解析的 LAINIR artifact；`check_srclainc_artifact.py` 已以双构建验证 source-closure 确定性；`run_lainir_self_host.py` 已完成 gen1→gen2→gen3 native 编译并确认 gen2/gen3 C 输出一致 | 将 self-host gate 纳入迁移总 baseline，并清理 `bootstrap_lainc.lain` 中遗留 L1 兼容/注释特例 |
 
 ## 目标
 
