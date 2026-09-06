@@ -459,6 +459,6 @@ artifact，说明 provider 不再依赖一组未声明的 compiler 内部特例�
 provider 中的链式可变字段访问、unit 调用包装和 `as` 物理转换也已同步修正。
 固定 smoke fixture `scripts/fixtures/lainir_provider_smoke.lain` 经过完整
 Provider(Memory) source closure 生成的 artifact，已通过 seed verifier 并运行
-成功，返回 schema version `1`。Provider 的实现边界因此具备可重复的源码特化和
-artifact 执行证据；下一步转入把该 smoke gate 纳入自动化脚本，并继续迁移真实
-`lainc` 编译调用面。
+成功，返回 schema version `1`。`scripts/check_lainir_provider_smoke.py` 已把这条
+检查固化为自动化 gate。Provider 的实现边界因此具备可重复的源码特化和 artifact
+执行证据；下一步继续迁移真实 `lainc` 编译调用面。
