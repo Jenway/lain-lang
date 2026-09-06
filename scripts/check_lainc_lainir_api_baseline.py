@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECKS = (
     ("source boundary", "check_lainc_lainir_api.py", "--final"),
     ("provider behavior", "check_lainir_api_behavior.py"),
+    ("compiler fixture parity", "check_stdlib_conformance.py"),
     ("source-closure determinism", "check_srclainc_artifact.py"),
 )
 
