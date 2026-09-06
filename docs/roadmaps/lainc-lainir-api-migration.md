@@ -363,8 +363,7 @@ host 类型或 ad-hoc 浮点表示。
 
 - 保持五个旧模块不再出现于 `COMPILER_SOURCES.txt`，并由静态检查阻止重新引入；
 - 保持 `src/lainc/l1_ir.lain`、`l1_unit_builder.lain`、`l1_verifier.lain`、`l1_printer.lain` 和 `l1_interpreter.lain` 不存在；
-- 清理 `bootstrap_lainc.lain` 中仅为旧 L1 ABI 留存的名称、kind 特例和注释；
-- 搜索并删除旧 L1 kind 数字、兼容注释和 bootstrap 特例；
+- 搜索 active compiler source closure，确认旧 L1 kind 数字、兼容注释和 bootstrap 特例均未重新引入；
 - 重新生成 bootstrap/compiler artifact，并运行固定点比较。
 
 完成条件：`src/lainc` 中没有第二套 LAINIR model、verifier、printer 或 interpreter；clean build、真实程序 gate、formal stdlib gate 和 gen2/gen3 gate 全部通过。
