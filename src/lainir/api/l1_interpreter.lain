@@ -42,10 +42,48 @@ let l1_interpreter: Module = std::module {
             value: Value,
         };
 
+        let Address: type = std::struct {
+            kind: i32,
+            activation: usize,
+            object: usize,
+            offset: usize,
+            length: usize,
+        };
+        let AddressVector: type = vector.Vec(
+            Address, Memory.Allocation, Memory.Bounds,
+        );
+
         let ExecutionState: type = std::struct {
             steps: usize,
             step_limit: usize,
             depth_limit: usize,
+            allocation_bytes: usize,
+            allocation_limit: usize,
+            current_activation: usize,
+            next_activation: usize,
+            storage: Memory.Bytes,
+            addresses: AddressVector,
+        };
+
+        let address_value = std::func(
+            state: &mut ExecutionState,
+            type_id: L1.TypeId,
+            address: Address,
+        ) -> Result ! {Memory.Allocation.Effect} {
+            state.addresses.push(address);
+            return success(Value {
+                type_id: type_id,
+                i32_value: state.addresses.length() as i32,
+            });
+        };
+
+        let address_at = std::func(
+            state: &ExecutionState, value: Value,
+        ) -> usize {
+            if value.i32_value <= 0 { return std::usize_max(); }
+            let index: usize = (value.i32_value - 1) as usize;
+            if index >= state.addresses.length() { return std::usize_max(); }
+            return index;
         };
 
         let consume_step = std::func(state: &mut ExecutionState) -> bool {
@@ -110,6 +148,96 @@ let l1_interpreter: Module = std::module {
                     return fail(7105);
                 }
                 return success(*arguments.get(expression.index));
+            }
+
+            if expression.kind == 41 {
+                if expression.index >= unit.data.length() { return fail(7113); }
+                let item: &L1.Data = unit.data.get(expression.index);
+                return address_value(state, expression.result_type, Address {
+                    kind: 2, activation: 0, object: expression.index,
+                    offset: 0, length: item.size,
+                });
+            }
+
+            if expression.kind == 42 {
+                if expression.size == 0 { return fail(7114); }
+                if state.allocation_limit != 0
+                    && state.allocation_bytes + expression.size
+                        > state.allocation_limit { return fail(7115); }
+                let start: usize = state.storage.length();
+                let byte_index: usize = 0;
+                while byte_index < expression.size {
+                    state.storage.push(0);
+                    byte_index = byte_index + 1;
+                }
+                state.allocation_bytes =
+                    state.allocation_bytes + expression.size;
+                return address_value(state, expression.result_type, Address {
+                    kind: 1, activation: state.current_activation,
+                    object: 0, offset: start, length: expression.size,
+                });
+            }
+
+            if expression.kind == 43 {
+                let base_result: Result = evaluate_expression(
+                    unit, expression.left, arguments, depth + 1, state,
+                );
+                if base_result.status != 0 { return base_result; }
+                let index_result: Result = evaluate_expression(
+                    unit, expression.right, arguments, depth + 1, state,
+                );
+                if index_result.status != 0 { return index_result; }
+                let address_index: usize = address_at(state, base_result.value);
+                if address_index == std::usize_max() { return fail(7116); }
+                let base: &Address = state.addresses.get(address_index);
+                let displacement: i64 =
+                    (index_result.value.i32_value as i64)
+                    * (expression.scale as i64) + expression.offset;
+                if displacement < 0 { return fail(7117); }
+                let next_offset: usize = base.offset + displacement as usize;
+                if next_offset < base.offset || next_offset > base.offset + base.length {
+                    return fail(7117);
+                }
+                return address_value(state, expression.result_type, Address {
+                    kind: base.kind, activation: base.activation,
+                    object: base.object, offset: next_offset,
+                    length: base.length - displacement as usize,
+                });
+            }
+
+            if expression.kind == 44 {
+                let address_result: Result = evaluate_expression(
+                    unit, expression.left, arguments, depth + 1, state,
+                );
+                if address_result.status != 0 { return address_result; }
+                let address_index: usize = address_at(state, address_result.value);
+                if address_index == std::usize_max() { return fail(7116); }
+                let address: &Address = state.addresses.get(address_index);
+                let value_type: &L1.Type = unit.types.get(expression.result_type);
+                if value_type.kind != 1 || value_type.bit_width == 0
+                    || value_type.bit_width > 32
+                    || value_type.bit_width % 8 != 0 { return fail(7118); }
+                let count: usize = value_type.bit_width / 8;
+                if count > address.length { return fail(7117); }
+                let bits: i32 = 0;
+                let byte_index: usize = 0;
+                while byte_index < count {
+                    let byte: i32 = 0;
+                    if address.kind == 1 {
+                        byte = *state.storage.get(address.offset + byte_index);
+                    } else if address.kind == 2 {
+                        let data: &L1.Data = unit.data.get(address.object);
+                        let data_offset: usize = address.offset + byte_index;
+                        if data_offset < data.initializer.length() {
+                            byte = *data.initializer.get(data_offset);
+                        }
+                    } else { return fail(7116); }
+                    bits = bits + (byte << (byte_index * 8));
+                    byte_index = byte_index + 1;
+                }
+                return success(Value {
+                    type_id: expression.result_type, i32_value: bits,
+                });
             }
 
             if expression.kind >= 3 {
@@ -301,10 +429,31 @@ let l1_interpreter: Module = std::module {
                 if instruction.kind == 4 { return break_flow(); }
                 if instruction.kind == 5 { return continue_flow(); }
                 if instruction.kind == 6 {
-                    // Memory execution is added with the activation storage
-                    // model; rejecting it is preferable to silently dropping
-                    // a store.
-                    return fail(7111);
+                    let stored: Result = evaluate_expression(
+                        unit, instruction.expression, arguments, depth, state,
+                    );
+                    if stored.status != 0 { return stored; }
+                    let destination: Result = evaluate_expression(
+                        unit, instruction.destination, arguments, depth, state,
+                    );
+                    if destination.status != 0 { return destination; }
+                    let address_index: usize = address_at(state, destination.value);
+                    if address_index == std::usize_max() { return fail(7116); }
+                    let address: &Address = state.addresses.get(address_index);
+                    if address.kind == 2 { return fail(7119); }
+                    if address.kind != 1 { return fail(7116); }
+                    let value_type: &L1.Type = unit.types.get(instruction.value_type);
+                    if value_type.kind != 1 || value_type.bit_width == 0
+                        || value_type.bit_width > 32
+                        || value_type.bit_width % 8 != 0 { return fail(7118); }
+                    let count: usize = value_type.bit_width / 8;
+                    if count > address.length { return fail(7117); }
+                    let byte_index: usize = 0;
+                    while byte_index < count {
+                        *state.storage.get_mut(address.offset + byte_index) =
+                            (stored.value.i32_value >> (byte_index * 8)) & 255;
+                        byte_index = byte_index + 1;
+                    }
                 }
 
                 offset = offset + 1;
@@ -325,6 +474,12 @@ let l1_interpreter: Module = std::module {
                 steps: 0,
                 step_limit: 0,
                 depth_limit: 128,
+                allocation_bytes: 0,
+                allocation_limit: 0,
+                current_activation: 0,
+                next_activation: 1,
+                storage: Memory.Bytes.new(),
+                addresses: AddressVector.new(),
             };
             return execute_procedure(
                 unit,
@@ -341,6 +496,7 @@ let l1_interpreter: Module = std::module {
             arguments: &ValueVector,
             step_limit: usize,
             depth_limit: usize,
+            allocation_limit: usize,
         ) -> Result ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
@@ -349,6 +505,12 @@ let l1_interpreter: Module = std::module {
                 steps: 0,
                 step_limit: step_limit,
                 depth_limit: depth_limit,
+                allocation_bytes: 0,
+                allocation_limit: allocation_limit,
+                current_activation: 0,
+                next_activation: 1,
+                storage: Memory.Bytes.new(),
+                addresses: AddressVector.new(),
             };
             return execute_procedure(
                 unit, procedure_id, arguments, 0, &mut state
@@ -379,6 +541,10 @@ let l1_interpreter: Module = std::module {
             if procedure.parameter_types.length() != arguments.length() {
                 return fail(7105);
             }
+            let previous_activation: usize = state.current_activation;
+            let activation: usize = state.next_activation;
+            state.next_activation = state.next_activation + 1;
+            state.current_activation = activation;
             let result: Result = execute_region(
                 unit,
                 procedure.body,
@@ -386,10 +552,20 @@ let l1_interpreter: Module = std::module {
                 depth + 1,
                 state,
             );
+            state.current_activation = previous_activation;
             if result.status == 7997
                 || result.status == 7998
                 || result.status == 7999 {
                 return fail(7103);
+            }
+            if result.status == 0 {
+                let returned_address: usize = address_at(state, result.value);
+                if returned_address != std::usize_max()
+                    && state.addresses.get(returned_address).kind == 1
+                    && state.addresses.get(returned_address).activation
+                        == activation {
+                    return fail(7120);
+                }
             }
             return result;
         };
