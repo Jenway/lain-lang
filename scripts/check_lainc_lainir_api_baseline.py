@@ -13,6 +13,7 @@ CHECKS = (
     ("source boundary", "check_lainc_lainir_api.py", "--final"),
     ("provider behavior", "check_lainir_api_behavior.py"),
     ("compiler fixture parity", "check_stdlib_conformance.py"),
+    ("compiler artifact snapshots", "check_lainc_lainir_api_snapshots.py"),
     ("source-closure determinism", "check_srclainc_artifact.py"),
 )
 

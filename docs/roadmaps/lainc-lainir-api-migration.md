@@ -11,7 +11,7 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 
 | 阶段 | 状态 | 已有证据 | 尚缺内容 |
 | --- | --- | --- | --- |
-| 0 行为基线 | 部分完成 | `check_lainc_lainir_api_baseline.py` 汇总 source boundary、seed/recording provider 行为、formal/bootstrap compiler fixture parity 和 source-closure 双构建确定性；16 个成功 fixture 的 canonical IR/执行结果、resolved import 与 4101/4103 import failure 已覆盖；legacy 语法拒绝检查已建立 | compiler 诊断位置与 canonical artifact 静态快照 |
+| 0 行为基线 | 部分完成 | `check_lainc_lainir_api_baseline.py` 汇总 source boundary、seed/recording provider 行为、formal/bootstrap compiler fixture parity、三个 formal compiler canonical artifact 静态快照和 source-closure 双构建确定性；16 个成功 fixture 的 canonical IR/执行结果、resolved import 与 4101/4103 import failure 已覆盖，失败路径也固定为不产生 artifact；legacy 语法拒绝检查已建立 | compiler 诊断位置快照 |
 | 1 API v1 | 部分完成 | `api_contract.lain` 已定义 Builder/Artifact/Eval shape 与 schema v1；Eval 的 `Capabilities` 是显式参数，空 capability 为默认值 | owner、失败原子性、capability 的跨 provider 可执行 contract tests |
 | 2 默认 provider | 进行中 | 独立 source manifest、组合构建入口、默认 provider 已存在；整数、data/activation memory、procedure address 与 indirect call 已由纯 Lain evaluator 执行 | 浮点执行（等待 literal/ABI 规范）、完整 printer、seed adapter 与差分报告 |
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
