@@ -12,6 +12,7 @@ from lainc_sources import compiler_source_names, lainir_api_sources
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "src" / "lainir" / "api_contract.lain"
 ROADMAP = ROOT / "docs" / "roadmaps" / "lainc-lainir-api-migration.md"
+COMPILER_API = ROOT / "src" / "lainc" / "compiler_api.lain"
 LEGACY_MODULES = (
     "src/lainc/l1_ir.lain",
     "src/lainc/l1_unit_builder.lain",
@@ -20,6 +21,13 @@ LEGACY_MODULES = (
     "src/lainc/l1_interpreter.lain",
 )
 REQUIRED_SHAPES = ("BuilderShape", "ArtifactShape", "EvalShape")
+REQUIRED_COMPILER_DIAGNOSTIC_ACCESSORS = (
+    "diagnostic_count",
+    "diagnostic_code",
+    "diagnostic_source_id",
+    "diagnostic_start",
+    "diagnostic_end",
+)
 REQUIRED_RULES = (
     "schema_version",
     "SourceLocation",
@@ -91,6 +99,17 @@ def main() -> int:
 
     if not ROADMAP.is_file():
         failures.append("missing API migration roadmap")
+
+    compiler_api_text = (
+        COMPILER_API.read_text(encoding="utf-8") if COMPILER_API.is_file() else ""
+    )
+    if not compiler_api_text:
+        failures.append("missing src/lainc/compiler_api.lain")
+    for name in REQUIRED_COMPILER_DIAGNOSTIC_ACCESSORS:
+        if not re.search(rf"\blet\s+{re.escape(name)}\b", compiler_api_text):
+            failures.append(f"compiler API is missing {name}")
+    if not re.search(r"schema_version\s*=\s*\n?\s*std::func\(\)\s*->\s*i32\s*\{\s*return\s+2;", compiler_api_text):
+        failures.append("compiler API schema version is not 2")
 
     provider_path = ROOT / "src" / "lainir" / "api" / "default_provider.lain"
     provider_text = provider_path.read_text(encoding="utf-8") if provider_path.is_file() else ""
