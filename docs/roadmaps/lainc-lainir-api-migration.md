@@ -208,6 +208,12 @@ provider-owned opaque API，并由默认 provider 和 test provider 共同执行
 `#continue`。这些修正使源码特化和 artifact verifier gate 都能重复通过；后续工作
 集中在真实 compiler 调用面、Eval owner/session 和第二个 provider contract test。
 
+尝试把 Builder -> `finish` -> `verify` -> `evaluate` 直接放入 smoke fixture 的
+顶层初始化会得到 5109：这些调用携带 `Memory.Allocation/Bounds` effect，而顶层
+初始化没有可安装 handler 的执行上下文。这个结果确认了 Eval smoke 不能靠额外的
+顶层调用伪造完成；下一项应提供显式 handler 环境，在一次受控 procedure 中执行
+完整 builder/artifact/eval 链，并同时检查成功、失败和资源限制路径。
+
 ### Eval owner/session 的迁移顺序
 
 这部分按三个可独立验收的 contract 进入 API：
