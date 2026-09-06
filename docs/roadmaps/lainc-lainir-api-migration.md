@@ -193,6 +193,27 @@ bootstrap ABI，`check_eval_object_matrix.py` 覆盖的是这条 seed `#eval` �
 provider-owned opaque API，并由默认 provider 和 test provider 共同执行；不得把旧 ABI
 的通过结果计入这一完成条件。
 
+### Eval owner/session 的迁移顺序
+
+这部分按三个可独立验收的 contract 进入 API：
+
+1. **Session**：provider 创建一个不透明 session，持有一次评估的 activation arena、
+   resource counters 和 capability snapshot。`Eval.evaluate` 要么创建并消费自己的
+   session，要么由显式的 `evaluate_in(session, ...)` 加入调用方 session；调用方不能
+   从 scalar `Value` 反推出 session 地址。
+2. **Object**：provider 定义不透明 `Object` 和 `ObjectOwner`，`Result` 通过 kind、
+   object accessor 和 owner accessor 返回它们。成功、trap、limit 和取消都必须有
+   明确的 release/transfer 规则；`Value` 与 `Object` 不能互相伪装成物理 address。
+3. **Nested eval**：只有在 session 存在后，`Limits.nested_evals` 才由每次
+   `evaluate_in` 消耗。配额耗尽必须返回稳定诊断，并释放当前 nested session；没有
+   `#eval` expression kind 的 provider 不得通过调用深度或普通 procedure call 冒充
+   nested-eval 计数。
+
+阶段 5 的实现顺序是 Session contract tests、默认 provider 的 session 生命周期、
+Object/Owner contract tests、默认 provider 的 object adapter，最后才是 nested-eval
+lowering。旧 `eval_result.l1` 可以继续作为 bootstrap compatibility fixture，但不能
+直接成为这些 shape 的布局。
+
 ## 迁移阶段
 
 阶段之间的依赖为：
