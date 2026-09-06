@@ -193,6 +193,25 @@ def main() -> int:
                 )
                 break
 
+        elaborator_text = (ROOT / "src" / "lainc" / "elaborator.lain").read_text(
+            encoding="utf-8"
+        )
+        core_text = (ROOT / "src" / "lainc" / "compiler_core.lain").read_text(
+            encoding="utf-8"
+        )
+        for required, label in (
+            ("let SourceResult: type", "elaborator does not carry source diagnostic nodes"),
+            ("node: import_call", "unresolved import does not retain its syntax node"),
+        ):
+            if required not in elaborator_text:
+                failures.append(label)
+        for required, label in (
+            ("Syntax.node_span_start", "compiler core does not read diagnostic start span"),
+            ("Syntax.node_span_end", "compiler core does not read diagnostic end span"),
+        ):
+            if required not in core_text:
+                failures.append(label)
+
         bootstrap_text = (
             ROOT / "src" / "lainc" / "bootstrap_lainc.lain"
         ).read_text(encoding="utf-8")
