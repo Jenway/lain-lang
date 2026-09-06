@@ -64,6 +64,17 @@ REQUIRED_PROVIDER_EVAL = (
     "make_result", "result_status", "result_value", "evaluate",
     "empty_capabilities", "external_call_capabilities",
 )
+BUILDER_SURFACE = frozenset(
+    REQUIRED_PROVIDER_BUILDER
+    + ("Unit", "Artifact", "Type", "Value", "Procedure", "Region")
+)
+ARTIFACT_SURFACE = frozenset(
+    REQUIRED_PROVIDER_ARTIFACT + ("Artifact", "Procedure", "Diagnostic")
+)
+EVAL_SURFACE = frozenset(
+    REQUIRED_PROVIDER_EVAL
+    + ("Artifact", "Procedure", "Value", "ValueVector", "Result", "Limits", "Capabilities")
+)
 
 
 def main() -> int:
@@ -120,6 +131,23 @@ def main() -> int:
                 failures.append(f"legacy provider surface remains: {path.relative_to(ROOT)}")
             if "DirectUnitFacts" in text:
                 failures.append(f"direct unit inspection remains: {path.relative_to(ROOT)}")
+            if path.name != "bootstrap_lainc.lain":
+                # Every capability member used by active compiler sources
+                # must be named by the frozen v1 contract.  This prevents a
+                # provider-specific convenience member from silently becoming
+                # an API dependency.  The historical bootstrap monolith is
+                # outside COMPILER_SOURCES.txt and has its own legacy ABI.
+                for pattern, surface, label in (
+                    (r"\b(?:Ir\.)?Builder\.([A-Za-z_][A-Za-z0-9_]*)", BUILDER_SURFACE, "Builder"),
+                    (r"\bArtifactApi\.([A-Za-z_][A-Za-z0-9_]*)", ARTIFACT_SURFACE, "Artifact"),
+                    (r"\bEval\.([A-Za-z_][A-Za-z0-9_]*)", EVAL_SURFACE, "Eval"),
+                ):
+                    for member in re.findall(pattern, text):
+                        if member not in surface:
+                            failures.append(
+                                f"contract-undeclared {label} member {member}: "
+                                f"{path.relative_to(ROOT)}"
+                            )
 
         lower_text = (ROOT / "src" / "lainc" / "lower.lain").read_text(
             encoding="utf-8"
