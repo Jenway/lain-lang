@@ -193,6 +193,13 @@ bootstrap ABI，`check_eval_object_matrix.py` 覆盖的是这条 seed `#eval` �
 provider-owned opaque API，并由默认 provider 和 test provider 共同执行；不得把旧 ABI
 的通过结果计入这一完成条件。
 
+默认 provider smoke test 还需要一个独立的执行 harness：用具体的
+`Memory.Model` specialization（allocation/bounds policy）实例化
+`lainir_default_provider.Provider`，并为 `Memory.Allocation.Effect` 与
+`Memory.Bounds.Effect` 安装可观察的 handler。`build_srclainc.py` 只验证包含 provider
+source closure 的编译结果，不能证明这个 factory 已被实例化或执行；该 harness 是
+阶段 2/5 的单独交付物。
+
 ### Eval owner/session 的迁移顺序
 
 这部分按三个可独立验收的 contract 进入 API：
