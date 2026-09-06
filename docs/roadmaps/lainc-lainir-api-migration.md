@@ -207,6 +207,11 @@ factory/`Memory` specialization 的 lowering。下一步要先把这类调用作
 输入固定下来，再接 allocation/bounds handler；在此之前保持 provider 与 `lainc` 的
 factory 调用面分离。
 
+最小化实验进一步表明，只有普通 import 和普通无参 procedure 的 fixture 可以通过；
+单独调用 `memory_model.Model(arena_min.Policy, bounds.Unchecked)` 也返回 `5108`。
+因此不能通过换一个更小的 provider probe 绕过问题，修复对象是通用的模块值 factory
+专门化路径。
+
 ### Eval owner/session 的迁移顺序
 
 这部分按三个可独立验收的 contract 进入 API：
