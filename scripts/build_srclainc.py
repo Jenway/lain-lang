@@ -70,7 +70,11 @@ def main() -> int:
     except RuntimeError as error:
         print(error, file=sys.stderr)
         return 1
-    print(output.relative_to(ROOT))
+    try:
+        display_path = output.relative_to(ROOT)
+    except ValueError:
+        display_path = output
+    print(display_path)
     return 0
 
 
