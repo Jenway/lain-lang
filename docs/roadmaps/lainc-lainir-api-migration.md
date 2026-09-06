@@ -17,7 +17,7 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
 | 4 artifact | 已完成边界迁移 | compiler core 通过 Artifact API verify/print | 诊断位置与公开 compiler API gate |
 | 5 Meta eval | 进行中 | Meta 只通过 Eval 构造器/访问器交互，不读取 IR 或 Eval value/result 布局；默认 evaluator 已执行 step/call-depth/allocation 限制、结构化控制流、位宽整数与 64-bit typed activation memory；只读 data 写入与 activation 地址逃逸会 trap。每次 Meta eval 显式传递空 capability；带外部调用 capability 的执行只由 LAINIR provider 的 dispatcher 工厂提供 | 非 scalar 对象 owner、nested-eval 限制、跨 provider capability 执行测试 |
-| 6 清理与固定点 | 部分完成 | 五个 `src/lainc/l1_*` 已移出 compiler；formal stdlib 与 `srclainc.l1` 可构建 | clean rebuild、gen2/gen3、native 差分与旧 kind 特例清理 |
+| 6 清理与固定点 | 部分完成 | 五个 `src/lainc/l1_*` 已移出 compiler；formal stdlib 可重建；`build_srclainc.py` 会验证输出为可解析的 LAINIR artifact | source-closure 双构建确定性、gen2/gen3、native 差分与旧 kind 特例清理 |
 
 ## 目标
 
@@ -309,6 +309,10 @@ Eval.evaluate(verified, procedure, arguments, limits, capabilities)
 ```text
 python scripts/build_srclainc.py
 ```
+
+`python scripts/check_srclainc_artifact.py` 从相同源闭包构建两次，并比较
+canonical artifact、extern 集、procedure header 与每个 body hash。它是当前
+source-closure 的确定性 gate；它不替代 compiler 自举后的 gen2/gen3 gate。
 
 该入口显式组合 formal stdlib、`src/lainc/COMPILER_SOURCES.txt` 与所选 LAINIR provider source closure；compiler 与 provider 两份 manifest 的所有权保持分离。
 
