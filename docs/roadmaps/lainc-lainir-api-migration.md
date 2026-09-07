@@ -506,3 +506,10 @@ owner 转交仍未闭合，下一步应先增加独立的 activation-lifetime fi
 `l1_interpreter` 同时修正了一个独立误判：`address_at` 现在先检查值的物理类型为
 `addr`，不会再把普通整数 payload 当作 compact address handle。该修正尚未消除
 上述真实 activation escape，后续 fixture 仍需定位返回值内部的临时地址来源。
+
+进一步追踪确认，当前 smoke 走的是 seed C interpreter；它在
+`seed/src/interpreter/interpreter.c` 的 procedure return 边界直接拒绝 callee frame
+拥有的所有地址。Provider 的 `Value`、`Result`、`Limits` 等 record 都以物理 `addr`
+承载，因此这里必须先定义“按值 record 返回”的复制 ABI，再决定如何保留真正裸地址
+逃逸的诊断。一次临时 promotion 实验会导致 Eval fixture 不终止，已撤回；目前不把
+seed interpreter 的行为改成未经验证的隐式复制。
