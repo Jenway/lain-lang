@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run the first Lain-written canonical-L1 -> C backend kernel.
 
-The generated backend L1 is bootstrapped by the frozen compiler.  Its only
-host dependencies are the source-data and artifact byte-stream capabilities
-already provided by ``lainir-seed``.
+The generated backend L1 is bootstrapped by the frozen compiler. Its host
+dependencies are tracked by the backend capability ABI; the source-level
+legacy inventory is checked before compilation.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ SEED = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
 BACKEND = ROOT / "src" / "lainc" / "backend_c.lain"
+ABI_CHECK = ROOT / "scripts" / "check_lain_backend_abi.py"
 COMPILE = ROOT / "scripts" / "run_lain_compiler.py"
 CHECK = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-print.exe" if os.name == "nt" else "lainir-print"
@@ -60,6 +61,9 @@ def main() -> int:
 
     # Backend output is never allowed to bypass the canonical L1 verifier.
     run(CHECK, args.input)
+    # Fail at the source boundary with the actionable ABI inventory instead
+    # of exposing the compiler's generic legacy-attribute diagnostic.
+    run(sys.executable, ABI_CHECK)
     manifest = args.manifest or args.output.with_suffix(args.output.suffix + ".manifest.json")
     write_manifest(args.input, manifest)
     run(sys.executable, COMPILE, "-o", args.backend_l1, BACKEND)
