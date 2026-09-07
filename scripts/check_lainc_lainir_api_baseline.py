@@ -14,6 +14,7 @@ CHECKS = (
     ("backend manifest", "check_backend_manifest.py"),
     ("backend ABI contract", "check_backend_abi_contract.py"),
     ("seed backend adapter", "check_seed_backend_adapter.py"),
+    ("native backend migration", "check_native_backend_migration.py"),
     ("provider behavior", "check_lainir_api_behavior.py"),
     ("default provider smoke", "check_lainir_provider_smoke.py"),
     ("compiler fixture parity", "check_stdlib_conformance.py"),

@@ -17,7 +17,7 @@ provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/l
 | 3 lowering | 已完成边界迁移 | `lower.lain` 只使用 provider handle；静态边界检查通过 | 真实程序输出差分 gate |
 | 4 artifact | 已完成边界迁移 | compiler core 通过 Artifact API verify/print；compiler API v3 已公开诊断数量、错误码、source id、span 与 message 访问器；unresolved import 已由 elaborator 的 syntax node 传递 start/end | 其余前端 span 传递与位置 gate |
 | 5 Meta eval | 进行中 | Meta 只通过 Eval 构造器/访问器交互，不读取 IR 或 Eval value/result 布局；`l1_interpreter.lain` 定义 step/call-depth/allocation 限制、结构化控制流、位宽整数与 64-bit typed activation memory，seed 行为 gate 覆盖已落地的 scalar/memory 语义；每次 Meta eval 显式传递空 capability，外部 capability 只由 LAINIR provider 的 dispatcher 工厂提供 | 默认 provider module 的实际 Eval 调用、非 scalar 对象 owner、nested-eval 限制 |
-| 6 清理与固定点 | 进行中 | 五个 `src/lainc/l1_*` 与旧 `bootstrap_lainc.lain` 已从仓库删除，静态检查拒绝重新导入；formal stdlib 可重建；`build_srclainc.py` 会验证输出为可解析的 LAINIR artifact，clean output 已实际生成；`check_lainir_boundaries.py`、`check_srclainc_artifact.py`、backend manifest/ABI consistency、seed backend adapter gate 均通过；`run_lainir_self_host.py` 已完成 gen1→gen2→gen3 native 编译并确认 gen2/gen3 C 输出一致，且已纳入迁移总 baseline | native backend 实际编译/差分、最终 clean build |
+| 6 清理与固定点 | 进行中 | 五个 `src/lainc/l1_*` 与旧 `bootstrap_lainc.lain` 已从仓库删除，静态检查拒绝重新导入；formal stdlib 可重建；`build_srclainc.py` 会验证输出为可解析的 LAINIR artifact，clean output 已实际生成；`check_lainir_boundaries.py`、`check_srclainc_artifact.py`、backend manifest/ABI consistency、seed backend adapter、native backend migration gate 均通过；`run_lainir_self_host.py` 已完成 gen1→gen2→gen3 native 编译并确认 gen2/gen3 C 输出一致，且已纳入迁移总 baseline | native backend 与历史输出的正式差分、最终 clean build |
 
 ## 目标
 
@@ -228,11 +228,13 @@ provider-owned opaque API，并由默认 provider 和 test provider 共同执行
 顶层调用伪造完成；下一项应提供显式 handler 环境，在一次受控 procedure 中执行
 完整 builder/artifact/eval 链，并同时检查成功、失败和资源限制路径。
 
-native backend 仍是独立缺口：`scripts/run_lain_backend.py` 对固定 artifact 的
-验证本身可以通过，但编译 `src/lainc/backend_c.lain` 会在旧的 `@foreign` 声明处
-得到 1001（当前 active compiler 不接受该语法）。因此 gen1/gen2/gen3 self-host
-只证明 compiler source closure 的固定点，不代表 Lain-written C backend 已完成
-API 迁移；backend 的外部 capability 声明需要单独改为当前 contract 支持的形式。
+native backend 曾经是独立缺口：seed 的 source-compiler 单源调用边界和 backend
+的旧 host link name 已经修正。`backend_c.lain` 现在生成八个逻辑 `backend.*`
+extern，seed provider 在运行时把它们绑定到 bootstrap host 函数；
+`scripts/check_native_backend_migration.py` 已覆盖 backend compile、artifact
+verify、capability manifest、multi-procedure C emission 和 native in-process
+执行。gen1/gen2/gen3 self-host 仍只证明 compiler source closure 的固定点，二者
+分别作为迁移 gate 保留。
 
 ### Eval owner/session 的迁移顺序
 
@@ -485,33 +487,25 @@ Provider(Memory) source closure 生成的 artifact，已通过 seed verifier 并
 检查固化为自动化 gate。Provider 的实现边界因此具备可重复的源码特化和 artifact
 执行证据；下一步继续迁移真实 `lainc` 编译调用面。
 
-当前真实调用面的验证还暴露出 native backend 的独立缺口。`scripts/run_lain_backend.py`
-可以验证输入 artifact，但随后用 active compiler（以及同一份已构建的 compiler artifact）
-编译 `src/lainc/backend_c.lain` 时，在首个 `@foreign` 声明处失败，诊断为
-`1001 unexpected character near '@'`。因此 gen1/gen2/gen3 的固定点只覆盖 compiler
-frontend 和 LAINIR provider，不足以证明 Lain-written native backend 已完成迁移。
-冻结 seed compiler 复测得到相同结果，说明问题属于 backend 源码仍依赖未纳入当前
-source-language/API 合约的外部能力声明，不是 backend 脚本选错 compiler。
-
-后续工作单独列为 native backend migration：先定义 backend 所需的 host capability
-声明 ABI，再把 `@foreign` 声明迁移到该 ABI或将 backend 暂时移出 active compiler
-source closure；完成后增加 backend compile、artifact verify、native emission 和
-in-process execution 四段 gate。在此之前，`docs/implementation/lain-written-backend.md`
-中的 executable backend 描述仅代表历史实现目标，不能作为当前迁移完成证据。
+native backend 的 gate 已经推进到可执行状态：`backend_c.lain` 通过
+`--library` 编译为含八个逻辑 `backend.*` extern 的 artifact，seed provider 将
+这些逻辑 capability 绑定到 bootstrap host 函数；`scripts/check_native_backend_migration.py`
+覆盖 backend compile、artifact verify、capability manifest、multi-procedure C
+emission 和 native in-process 执行。剩余工作是把当前 fixture 的成功证据扩展为
+与历史实现的正式 canonical C 差分，并完成最终 clean native compiler build。
 ABI v1 的第一版草案见
 [`docs/implementation/lain-backend-capability-abi.md`](../implementation/lain-backend-capability-abi.md)。
 它把 host link name 留在 provider/driver，把 backend 源码看到的边界收敛为
 `backend.source_*`、`backend.allocate`、`backend.copy_bytes` 和
 `backend.artifact_*` 八个逻辑 capability；该草案须在 gate 1 的实际 lowering
-结果上验证后才能冻结。
-源码 legacy inventory 已由 `scripts/check_lain_backend_abi.py --report` 固化；当前
-报告七个已知 `@foreign` 声明并按 ABI v1 给出逻辑 capability 映射，迁移完成后该
-命令将作为零 legacy 的第一道 gate。
+结果上验证后才能冻结。源码 capability inventory 已由
+`scripts/check_lain_backend_abi.py --report` 固化；该命令现在要求恰好八个逻辑
+`backend.*` 声明，并拒绝把 bootstrap link name 写回 backend 源码。
 `src/lainir/api_contract.lain` 现在同时公开 `BackendShape`；它只冻结逻辑函数形状，
 不要求默认 provider 在 backend migration 完成前提供实现。
-在 capability ABI 完成前，`src/lainc/backend_c.lain` 必须继续保持在 active compiler
-source closure 之外；source-boundary checker 现在会阻止它被误加入
-`COMPILER_SOURCES.txt`。
+`src/lainc/backend_c.lain` 仍保持在 active compiler source closure 之外；
+source-boundary checker 继续阻止它被误加入 `COMPILER_SOURCES.txt`，因为它是
+backend provider/driver 的独立 artifact，而不是 compiler core 的源模块。
 
 阶段 5 的一次真实尝试也已经给出明确缺口：在 Provider(Memory) smoke 中构造一个
 只返回整数 literal 的 unit，再通过 `Eval.evaluate` 执行，artifact verifier 可以通过，
