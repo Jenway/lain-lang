@@ -20,7 +20,7 @@ LEGACY_MODULES = (
     "src/lainc/l1_printer.lain",
     "src/lainc/l1_interpreter.lain",
 )
-REQUIRED_SHAPES = ("BuilderShape", "ArtifactShape", "EvalShape")
+REQUIRED_SHAPES = ("BuilderShape", "ArtifactShape", "EvalShape", "BackendShape")
 REQUIRED_COMPILER_DIAGNOSTIC_ACCESSORS = (
     "diagnostic_count",
     "diagnostic_code",
@@ -73,6 +73,10 @@ REQUIRED_PROVIDER_EVAL = (
     "make_result", "result_status", "result_value", "evaluate",
     "empty_capabilities", "external_call_capabilities",
 )
+REQUIRED_BACKEND = (
+    "source_count", "source_data", "source_length", "allocate", "copy_bytes",
+    "artifact_begin", "artifact_write_byte", "artifact_finish",
+)
 BUILDER_SURFACE = frozenset(
     REQUIRED_PROVIDER_BUILDER
     + ("Unit", "Artifact", "Type", "Value", "Procedure", "Region")
@@ -97,6 +101,9 @@ def main() -> int:
     for name in REQUIRED_SHAPES + REQUIRED_RULES:
         if not re.search(rf"\b{re.escape(name)}\b", contract_text):
             failures.append(f"contract is missing {name}")
+    for name in REQUIRED_BACKEND:
+        if not re.search(rf"\blet\s+{re.escape(name)}\b", contract_text):
+            failures.append(f"backend contract is missing {name}")
 
     if not ROADMAP.is_file():
         failures.append("missing API migration roadmap")

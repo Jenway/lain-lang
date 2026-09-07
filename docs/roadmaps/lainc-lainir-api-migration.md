@@ -493,3 +493,5 @@ ABI v1 的第一版草案见
 源码 legacy inventory 已由 `scripts/check_lain_backend_abi.py --report` 固化；当前
 报告七个已知 `@foreign` 声明并按 ABI v1 给出逻辑 capability 映射，迁移完成后该
 命令将作为零 legacy 的第一道 gate。
+`src/lainir/api_contract.lain` 现在同时公开 `BackendShape`；它只冻结逻辑函数形状，
+不要求默认 provider 在 backend migration 完成前提供实现。
