@@ -490,3 +490,6 @@ ABI v1 的第一版草案见
 `backend.source_*`、`backend.allocate`、`backend.copy_bytes` 和
 `backend.artifact_*` 八个逻辑 capability；该草案须在 gate 1 的实际 lowering
 结果上验证后才能冻结。
+源码 legacy inventory 已由 `scripts/check_lain_backend_abi.py --report` 固化；当前
+报告七个已知 `@foreign` 声明并按 ABI v1 给出逻辑 capability 映射，迁移完成后该
+命令将作为零 legacy 的第一道 gate。
