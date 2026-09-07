@@ -516,3 +516,6 @@ owner 转交仍未闭合，下一步应先增加独立的 activation-lifetime fi
 承载，因此这里必须先定义“按值 record 返回”的复制 ABI，再决定如何保留真正裸地址
 逃逸的诊断。一次临时 promotion 实验会导致 Eval fixture 不终止，已撤回；目前不把
 seed interpreter 的行为改成未经验证的隐式复制。
+
+阶段 6 的 native backend 当前差分证据见
+[`docs/implementation/native-backend-migration-report.md`](../implementation/native-backend-migration-report.md)。
