@@ -495,3 +495,10 @@ ABI v1 的第一版草案见
 命令将作为零 legacy 的第一道 gate。
 `src/lainir/api_contract.lain` 现在同时公开 `BackendShape`；它只冻结逻辑函数形状，
 不要求默认 provider 在 backend migration 完成前提供实现。
+
+阶段 5 的一次真实尝试也已经给出明确缺口：在 Provider(Memory) smoke 中构造一个
+只返回整数 literal 的 unit，再通过 `Eval.evaluate` 执行，artifact verifier 可以通过，
+但 evaluator 运行时报告 `#alloca address escaped procedure activation`。该路径已从
+现有 smoke 撤回，避免把失败实验混入绿色 baseline；它说明 Eval 的结果/临时对象
+owner 转交仍未闭合，下一步应先增加独立的 activation-lifetime fixture，再修改
+`l1_interpreter` 的返回值封装和释放规则。
