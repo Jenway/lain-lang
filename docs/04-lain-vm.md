@@ -9,6 +9,18 @@
 方向；它们尚未成为 LAINIR 指令、provider API 或 seed 运行时对象。任何实现工作
 必须先更新 LAINIR 规范和 API contract，再把这些提案纳入 provider 与测试。
 
+### 审阅结论
+
+这份文档适合作为长期架构提案，暂时不应作为 LAINIR 或标准库的实现承诺。它
+把三个层次放在了一张图里：`#eval` 的受限执行、未来的运行时调度抽象、以及
+操作系统或裸机的物理下沉。当前 roadmap 只接受第一层已经存在的约束；第二、
+三层必须分别形成 API contract、可运行 provider 和验证用例后才能进入实现。
+
+因此，本文中的对象名和操作名（例如 `VSpace`、`TCB`、`Endpoint`、`Trap`、
+`CSpace`、`#swap_context`）均为保留的设计词汇，不是当前可编写的 Lain 语法。
+尤其是 `#data` 的只读语义、`#alloca` 的 activation 生命周期、capability 的
+显式传入和 Eval 配额，应继续以 LAINIR 与 API 文档为准；本文不重新定义它们。
+
 LAIN-VM 是 Lain 系统中的**虚拟控制面与微内核抽象（Virtual Microkernel Control Plane）**。它不作为运行时的重量级虚拟机（如 JVM 或 BEAM）存在，而是为编译期计算（`#eval`）、解释器自举、以及运行期特权降级提供一套严格正交的物理环境模型。
 
 LAIN-VM 继承 **seL4 / Mach 的极简微内核哲学**，坚决摒弃宏内核（Monolithic Kernel）将调度、内存、权限和文件强行绑定的混乱设计。LAIN-VM 将系统的物理控制权严格拆解为五个正交的物理基石：**空间（VSpace）**、**执行上下文（TCB）**、**同步端点（Endpoint）**、**异常控制（Trap）** 与 **能力（CSpace）**。
