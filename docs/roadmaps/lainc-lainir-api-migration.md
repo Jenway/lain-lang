@@ -214,6 +214,12 @@ provider-owned opaque API，并由默认 provider 和 test provider 共同执行
 顶层调用伪造完成；下一项应提供显式 handler 环境，在一次受控 procedure 中执行
 完整 builder/artifact/eval 链，并同时检查成功、失败和资源限制路径。
 
+native backend 仍是独立缺口：`scripts/run_lain_backend.py` 对固定 artifact 的
+验证本身可以通过，但编译 `src/lainc/backend_c.lain` 会在旧的 `@foreign` 声明处
+得到 1001（当前 active compiler 不接受该语法）。因此 gen1/gen2/gen3 self-host
+只证明 compiler source closure 的固定点，不代表 Lain-written C backend 已完成
+API 迁移；backend 的外部 capability 声明需要单独改为当前 contract 支持的形式。
+
 ### Eval owner/session 的迁移顺序
 
 这部分按三个可独立验收的 contract 进入 API：
