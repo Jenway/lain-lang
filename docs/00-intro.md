@@ -110,7 +110,7 @@ Meta 可以维护类型、模块、callable、effect 和编译期值等高层对
 
 当前 bootstrap 标准库使用 LAINIR 实现这套阶段 ABI，正式标准库使用 Lain 编写并编译成 LAINIR。两者应遵守同一接口。Meta 的实现语言不改变它在编译流程中的职责。
 
-详细规则见 [`03-meta-system.md`](03-meta-system.md)，当前实现路线见 [`roadmaps/compiler-bootstrap.md`](roadmaps/compiler-bootstrap.md)。
+详细规则见 [`03-meta-system.md`](03-meta-system.md)，当前实现路线见 [`roadmaps/lain-roadmap.md`](roadmaps/lain-roadmap.md)。
 
 ## 5. 编译期执行边界
 

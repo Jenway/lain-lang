@@ -337,7 +337,7 @@ owner
 - `src/lainc` 尚未完成完整自举固定点；
 - ownership/borrow checking 不属于当前必需自举路径。
 
-进度和验收门槛见 [`roadmaps/compiler-bootstrap.md`](roadmaps/compiler-bootstrap.md)。
+进度和验收门槛见 [`roadmaps/lain-roadmap.md`](roadmaps/lain-roadmap.md)。
 
 ## 15. 边界总结
 
