@@ -42,6 +42,20 @@ src/lainir 或 seed
 
 ## 边界决定
 
+### `04-lain-vm.md` 的定位
+
+`docs/04-lain-vm.md` 当前是未来执行环境的架构提案，不是本迁移的实现规范，也不计入
+阶段 2、5 或 6 的完成证据。文档中的 VSpace、TCB、Endpoint、Trap、CSpace、软件
+MMU、`#swap_context` 和 demand paging 尚未成为 LAINIR 指令、provider API 或 seed
+运行时对象；它们不能被现有 compiler、evaluator 或 native backend 当作已存在的
+能力使用。
+
+当前实现只冻结以下相关语义：命名的只读静态 `#data`、当前 procedure activation
+内的 `#alloca`、`#lea` 与 typed `#load/#store`、Eval 的 step/depth/allocation
+限制，以及显式传入的 capability。未来若引入 VM 执行环境，必须先把新增对象和
+操作写入 LAINIR 规范与 API contract，再由 provider 和测试 provider 共同实现；
+提案中的 VM 概念不能反向扩大当前 API。
+
 ### lainc 拥有的内容
 
 - 从 elaborated program 到物理操作的 lowering 决策；
