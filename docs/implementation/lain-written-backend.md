@@ -6,12 +6,17 @@ lowering policy and text emission remain in Lain, while
 still uses legacy `@foreign` declarations, so it is currently a migration
 target rather than a runnable part of the active compiler closure.
 
-Run it with:
+The historical driver was invoked with:
 
 ```text
 python scripts/run_lain_backend.py build/backend_fixture.l1 -o build/backend_fixture.c
 # The command also writes build/backend_fixture.c.manifest.json by default;
 # pass --manifest <path> to choose an explicit location.
+
+At the current migration baseline this command stops while compiling
+`backend_c.lain`: the source uses legacy `@foreign` declarations, which the
+active source-language closure does not accept yet. The command is retained
+as the eventual end-to-end gate while the capability ABI is migrated.
 
 # Build a native compiler executable from the canonical L1 compiler
 python scripts/build_lainc_native.py \
