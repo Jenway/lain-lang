@@ -3,7 +3,7 @@
 > 计划快照：2026-08-16
 
 > **历史快照。** 当前执行路线以
-> [`docs/roadmaps/compiler-bootstrap.md`](../roadmaps/compiler-bootstrap.md) 为准。新路线将高级
+> [`docs/roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md) 为准。新路线将高级
 > 语言规则放入可替换的标准库：第一代标准库用 LAIN-IR 编写，正式标准库用
 > Lain 编写；Meta 只操作 AST，编译期执行统一通过 LAIN-IR `#eval`。
 > 文中的 `src/compiler-archive` 后来已经合并进 `src/lainc`，当前没有独立的 archive 编译器。
@@ -368,3 +368,4 @@ C lainir-seed
 workspace、source factory、slice、parts 等路径。下一步先解决空输入的运行时
 崩溃，再按六个工厂补齐回归并检查 `memory.Span` 的专用化缓存是否覆盖所有
 调用环境。
+

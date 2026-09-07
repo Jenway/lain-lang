@@ -1,26 +1,7 @@
 # 当前路线图
 
-本目录从 2026-09-06 的代码状态重新开始，只记录尚未完成的工作。旧里程碑、完成项和实施记录见 [`../history/`](../history/)。
+当前路线图只有 [`lain-roadmap.md`](lain-roadmap.md) 一份。它合并了编译器自举、lainc→LAINIR API 迁移、单 TCB/单 VSpace Eval VM 和 LAINIR 物理层维护计划。
 
-当前有三份相互配合的计划：
+历史版本和已经完成的旧路线见 [`../history/`](../history/)。其中带有 `roadmap-2026-09-07` 的文件是本次合并前的内容快照，不再作为当前计划入口。
 
-1. [`compiler-bootstrap.md`](compiler-bootstrap.md)：项目主线。先恢复正式标准库构建，再完成 `src/lainc` 自举和工具链切换。
-2. [`lainc-lainir-api-migration.md`](lainc-lainir-api-migration.md)：主线中的依赖反转计划，固定 `lainc` 生成和执行 LAINIR 的能力 API，并移除 `src/lainc/l1_*`。
-3. [`lainir-maintenance.md`](lainir-maintenance.md)：API provider 之外的 LAINIR 维护工作；一般不阻塞编译器自举。
-4. [`lain-vm.md`](lain-vm.md)：`#eval` 所需的最小执行环境，以及后续 VM 控制面和平台下沉。
-
-当前主线：
-
-```text
-formal stdlib 可重建
-  -> formal stdlib 成为默认语义实现
-  -> lainc 通过稳定 API 使用 LAINIR
-  -> EvalApi 接入 LAIN-VM session contract
-  -> src/lainc 可编译真实程序
-  -> lainc gen2/gen3 固定点
-  -> native 工具链切换
-  -> 删除过渡实现
-  -> VM 控制面与平台 lowering
-```
-
-每一阶段都以可执行检查为完成条件。路线图不保存逐日进度；完成后的阶段整体移入历史文档，再从新的代码基线更新本目录。
+所有阶段都必须以可执行检查、contract test 或固定点比较作为完成条件。新增 VM 或 LAINIR 能力必须先更新规范和 API contract，再进入 provider 或 compiler 实现。

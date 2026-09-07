@@ -1,6 +1,6 @@
 # 编译 `src/compiler-archive` 计划（src/lainc 路线）
 
-> **历史计划。** `src/compiler-archive` 后来已经合并进 `src/lainc`，当前仓库不存在独立的 archive lainc。现行自举计划见 [`../roadmaps/compiler-bootstrap.md`](../roadmaps/compiler-bootstrap.md)。下文保留合并前的目录名和阶段名，用于记录当时方案。
+> **历史计划。** `src/compiler-archive` 后来已经合并进 `src/lainc`，当前仓库不存在独立的 archive lainc。现行自举计划见 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md)。下文保留合并前的目录名和阶段名，用于记录当时方案。
 
 > 落盘于 2025 会话。目标：让 `src/lainc/lainc.lain`（stage1，Lain 写的
 > 编译器，M2 自举固定点）能编译 `src/compiler-archive/` 闭包，并形成
@@ -290,3 +290,4 @@ effects（tokenizer+syntax+generated_syntax+types 四模块 l1check 干净）：
 - scan_cmp 不再把 ! 当比较符（!= 才比较）
 - get()/get_mut() 调用链实参 → #int2ptr(0)（addr 参数类型检查）
 - 参数登记到 types 表 + & 剥离
+

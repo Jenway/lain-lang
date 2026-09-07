@@ -1,6 +1,6 @@
 # LAIN-IR 编译器路线图
 
-> **历史实施记录。** 本文保存已经完成的 LAINIR 编译器自举过程。当前后续工作见 [`../roadmaps/lainir-maintenance.md`](../roadmaps/lainir-maintenance.md)。
+> **历史实施记录。** 本文保存已经完成的 LAINIR 编译器自举过程。当前后续工作见 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md)。
 
 > 计划版本：2026-09-02
 >
@@ -380,3 +380,4 @@ lainir-compiler.exe --module <output.c> <input.l1>
 不带 `--module` 时要求输入含有合法的 `main() -> #bits<32>`；`--module` 允许
 只含库过程的模块。成功退出码为 `0`，输入解析/验证失败为 `2`，seed-backed
 emitter 不支持的 IR 形状为 `3`。输出文件只在成功完成 artifact 后保留。
+

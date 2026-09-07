@@ -39,10 +39,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [`roadmaps/README.md`](roadmaps/README.md) | 当前进度、路线图阅读顺序和最近阻塞 |
-| [`roadmaps/compiler-bootstrap.md`](roadmaps/compiler-bootstrap.md) | 正式标准库、`src/lainc` 固定点和工具链切换主线 |
-| [`roadmaps/lainc-lainir-api-migration.md`](roadmaps/lainc-lainir-api-migration.md) | `lainc` 到 LAINIR 能力 API 的依赖反转和迁移步骤 |
-| [`roadmaps/lainir-maintenance.md`](roadmaps/lainir-maintenance.md) | LAINIR 后续物理能力和维护工作 |
-| [`roadmaps/lain-vm.md`](roadmaps/lain-vm.md) | `#eval` 执行环境、VM contract 和后续平台下沉 |
+| [`roadmaps/lain-roadmap.md`](roadmaps/lain-roadmap.md) | 编译器自举、LAINIR API、Eval VM 和物理层维护总路线图 |
 
 ## 历史资料
 
