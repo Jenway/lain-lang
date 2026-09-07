@@ -1,6 +1,13 @@
 # 04-LAIN-VM：虚拟微内核与执行环境
 
-状态：架构提案 / 编译期与虚拟执行环境规范。
+状态：架构提案 / 编译期与虚拟执行环境规范。本文不是当前 LAINIR 实现规范。
+
+当前迁移基线只实现并验证了命名的只读静态 `#data`、当前 procedure activation
+内的 `#alloca`、`#lea` 与 typed `#load/#store`、Eval 的 step/depth/allocation
+限制，以及显式传入的 capability。下文的 VSpace、TCB、Endpoint、Trap、CSpace、
+软件 MMU、`#swap_context`、demand paging 和 OS/bare-metal lowering 都是未来设计
+方向；它们尚未成为 LAINIR 指令、provider API 或 seed 运行时对象。任何实现工作
+必须先更新 LAINIR 规范和 API contract，再把这些提案纳入 provider 与测试。
 
 LAIN-VM 是 Lain 系统中的**虚拟控制面与微内核抽象（Virtual Microkernel Control Plane）**。它不作为运行时的重量级虚拟机（如 JVM 或 BEAM）存在，而是为编译期计算（`#eval`）、解释器自举、以及运行期特权降级提供一套严格正交的物理环境模型。
 
