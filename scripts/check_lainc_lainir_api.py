@@ -130,6 +130,10 @@ def main() -> int:
             failures.append(f"default provider is missing {name}")
 
     sources = compiler_source_names(ROOT)
+    if "src/lainc/backend_c.lain" in sources:
+        failures.append(
+            "legacy Lain-written backend must remain outside compiler source closure"
+        )
     provider_sources = tuple(
         path.relative_to(ROOT).as_posix() for path in lainir_api_sources(ROOT)
     )
