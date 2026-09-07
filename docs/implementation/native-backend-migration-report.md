@@ -16,6 +16,7 @@ not migrated yet:
 | Backend capability inventory | expected failure | `check_lain_backend_abi.py --report` finds eight legacy `@foreign` declarations |
 | Active compiler backend compile | blocked | diagnostic `1001 unexpected character near '@'` |
 | Frozen seed compiler backend compile | blocked | the same diagnostic, so this is not a compiler selection error |
+| Formal compiler bundle backend compile | blocked | the same diagnostic at line 10, confirming the gap is shared by the current source frontend |
 | Native C emission | not reached | backend L1 is not produced |
 | In-process execution | not reached | no migrated backend artifact exists |
 
