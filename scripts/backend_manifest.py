@@ -21,7 +21,7 @@ def build_manifest(text: str, *, source: str = "") -> dict[str, object]:
         if not match:
             continue
         symbol, parameters, result = match.groups()
-        if symbol.startswith("bootstrap."):
+        if symbol.startswith(("bootstrap.", "backend.")):
             capability = symbol
         else:
             capability = "foreign"
