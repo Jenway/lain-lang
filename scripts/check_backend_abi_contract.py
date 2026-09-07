@@ -21,7 +21,7 @@ NAMES = (
     "artifact_write_byte",
     "artifact_finish",
 )
-INVENTORY_NAMES = tuple(name for name in NAMES if name != "source_count")
+INVENTORY_NAMES = NAMES
 
 
 def main() -> int:
