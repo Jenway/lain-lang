@@ -510,6 +510,12 @@ let emit_proc_decl = std::func(
         }
         close = close + 1;
     }
+    // A multiline procedure header is collected by the main emitter pass.
+    // The declaration pass sees only its first physical line; do not turn
+    // that partial header into an incorrect `(void)` prototype.
+    if close == end {
+        return;
+    }
     let arrow: usize = open;
     while arrow < end {
         if match_at(source, arrow, end, "->", 2) {
@@ -601,6 +607,9 @@ let emit_extern_decl = std::func(
     // prologue. Canonical compiler artifacts may carry older source-level
     // bootstrap externs with incompatible physical types.
     if match_at(source, name_start, name_end, "bootstrap_", 10) {
+        return;
+    }
+    if match_at(source, name_start, name_end, "bootstrap.", 10) {
         return;
     }
     let close: usize = open;
@@ -909,16 +918,53 @@ let emit_line = std::func(
                 break;
             }
         }
-        if match_at(source, body, end, "#return", 7) {
-            append_literal(output, "  return ", 9);
-            emit_expr(source, body + 7, end - 1, output);
-            append_literal(output, ";\n", 2);
-            append_literal(output, "}\n", 2);
-        } else {
-            if match_at(source, body, end, "#break", 6) {
-                append_literal(output, "  break;\n", 9);
-                append_literal(output, "}\n", 2);
+        let body_end: usize = body;
+        while body_end < end {
+            if load8(source, body_end) == 125 {
+                break;
             }
+            body_end = body_end + 1;
+        }
+        // A block whose closing brace is on a later physical line remains
+        // open; the normal `}` line will close it on a subsequent pass.
+        if body_end == end {
+            return;
+        }
+        if body < body_end {
+            emit_line(source, body, body_end, output);
+        }
+        append_literal(output, "}\n", 2);
+        let else_start: usize = body_end + 1;
+        let else_cursor: usize = else_start;
+        while else_cursor < end {
+            if is_space(load8(source, else_cursor)) {
+                else_cursor = else_cursor + 1;
+            } else {
+                break;
+            }
+        }
+        if match_at(source, else_cursor, end, "else", 4) {
+            append_literal(output, " else {\n", 8);
+            let else_body: usize = else_cursor + 4;
+            let else_body_start: usize = else_body;
+            while else_body < end {
+                if is_space(load8(source, else_body)) {
+                    else_body = else_body + 1;
+                } else {
+                    break;
+                }
+            }
+            let else_end: usize = else_body;
+            while else_end < end {
+                if load8(source, else_end) == 125 {
+                    break;
+                }
+                else_end = else_end + 1;
+            }
+            if else_body < else_end {
+                emit_line(source, else_body, else_end, output);
+            }
+            append_literal(output, "}\n", 2);
         }
         return;
     }
@@ -1008,9 +1054,27 @@ let backend_compile = std::func() -> i32 {
             );
             segment_start = index + 1;
             if logical_depth <= 0 {
-                emit_line(input_data, line_start, index, output);
-                line_start = index + 1;
-                logical_depth = 0;
+                let next: usize = index + 1;
+                while next < input_length {
+                    if is_space(load8(input_data, next)) {
+                        next = next + 1;
+                    } else {
+                        break;
+                    }
+                }
+                // L1 permits a store/call argument list to continue after a
+                // balanced sub-call, for example `#store #call f(),` followed
+                // by a destination `#lea(...)` on the next physical line.
+                // Keep those lines in one logical instruction.
+                if match_at(input_data, next, input_length, "#lea", 4) ||
+                   match_at(input_data, next, input_length, "#load", 5) ||
+                   match_at(input_data, next, input_length, "#call", 5) {
+                    logical_depth = 1;
+                } else {
+                    emit_line(input_data, line_start, index, output);
+                    line_start = index + 1;
+                    logical_depth = 0;
+                }
             }
         }
         index = index + 1;
