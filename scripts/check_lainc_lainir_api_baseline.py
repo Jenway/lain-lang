@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = (
     ("source boundary", "check_lainc_lainir_api.py", "--final"),
+    ("backend manifest", "check_backend_manifest.py"),
     ("provider behavior", "check_lainir_api_behavior.py"),
     ("default provider smoke", "check_lainir_provider_smoke.py"),
     ("compiler fixture parity", "check_stdlib_conformance.py"),
