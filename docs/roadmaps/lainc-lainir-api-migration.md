@@ -495,6 +495,9 @@ ABI v1 的第一版草案见
 命令将作为零 legacy 的第一道 gate。
 `src/lainir/api_contract.lain` 现在同时公开 `BackendShape`；它只冻结逻辑函数形状，
 不要求默认 provider 在 backend migration 完成前提供实现。
+在 capability ABI 完成前，`src/lainc/backend_c.lain` 必须继续保持在 active compiler
+source closure 之外；source-boundary checker 现在会阻止它被误加入
+`COMPILER_SOURCES.txt`。
 
 阶段 5 的一次真实尝试也已经给出明确缺口：在 Provider(Memory) smoke 中构造一个
 只返回整数 literal 的 unit，再通过 `Eval.evaluate` 执行，artifact verifier 可以通过，
