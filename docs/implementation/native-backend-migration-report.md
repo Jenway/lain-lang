@@ -12,6 +12,7 @@ not migrated yet:
 | Check | Result | Evidence |
 | --- | --- | --- |
 | Input artifact verification | pass | seed verifier accepts the formal constant-return artifact |
+| Backend runner ABI preflight | expected failure | `run_lain_backend.py` stops before compilation while legacy inventory is non-empty |
 | Backend capability inventory | expected failure | `check_lain_backend_abi.py --report` finds eight legacy `@foreign` declarations |
 | Active compiler backend compile | blocked | diagnostic `1001 unexpected character near '@'` |
 | Frozen seed compiler backend compile | blocked | the same diagnostic, so this is not a compiler selection error |
