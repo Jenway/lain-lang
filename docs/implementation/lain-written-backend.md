@@ -1,10 +1,10 @@
 # Lain-written backend and native driver
 
-`src/lainc/backend_c.lain` is an executable L1-to-C backend written in Lain.
-It reads canonical L1 through the source capability and emits C through the
-artifact capability.  `seed/src/host/native_lainc.c` supplies the small native
-driver (argv, file I/O, allocation and artifact output); lowering policy and
-text emission remain in Lain.
+`src/lainc/backend_c.lain` is the intended Lain-written L1-to-C backend. Its
+lowering policy and text emission remain in Lain, while
+`seed/src/host/native_lainc.c` supplies the native driver. The backend source
+still uses legacy `@foreign` declarations, so it is currently a migration
+target rather than a runnable part of the active compiler closure.
 
 Run it with:
 
@@ -25,7 +25,7 @@ python tests/core/native_binary/run_native_smoke.py build/lainc.exe
 python tests/core/native_binary/run_native_inprocess_smoke.py build/lainc.exe
 ```
 
-The backend currently handles:
+The historical backend implementation handles:
 
 - multiple procedures and parameters, with forward declarations;
 - `#return`, `#let`, SSA assignments, `#call`, `#if`, `#loop`, `#break`,
@@ -42,6 +42,8 @@ The backend currently handles:
   expression, call, return, and branch construction all write the physical
   `L1.Unit` model and no host-side Builder fallback is required.
 
+These capabilities are not covered by the current migration baseline because
+compiling the backend source stops at `@foreign` with diagnostic 1001.
 Unsupported L1 lines are preserved as `/* unsupported L1: ... */` comments.
 The native driver uses `-O2`; the generated compiler's metadata scans are
 dramatically slower at `-O0`.  Artifact generation does not inject API,

@@ -470,3 +470,17 @@ Provider(Memory) source closure 生成的 artifact，已通过 seed verifier 并
 成功，返回 schema version `1`。`scripts/check_lainir_provider_smoke.py` 已把这条
 检查固化为自动化 gate。Provider 的实现边界因此具备可重复的源码特化和 artifact
 执行证据；下一步继续迁移真实 `lainc` 编译调用面。
+
+当前真实调用面的验证还暴露出 native backend 的独立缺口。`scripts/run_lain_backend.py`
+可以验证输入 artifact，但随后用 active compiler（以及同一份已构建的 compiler artifact）
+编译 `src/lainc/backend_c.lain` 时，在首个 `@foreign` 声明处失败，诊断为
+`1001 unexpected character near '@'`。因此 gen1/gen2/gen3 的固定点只覆盖 compiler
+frontend 和 LAINIR provider，不足以证明 Lain-written native backend 已完成迁移。
+冻结 seed compiler 复测得到相同结果，说明问题属于 backend 源码仍依赖未纳入当前
+source-language/API 合约的外部能力声明，不是 backend 脚本选错 compiler。
+
+后续工作单独列为 native backend migration：先定义 backend 所需的 host capability
+声明 ABI，再把 `@foreign` 声明迁移到该 ABI或将 backend 暂时移出 active compiler
+source closure；完成后增加 backend compile、artifact verify、native emission 和
+in-process execution 四段 gate。在此之前，`docs/implementation/lain-written-backend.md`
+中的 executable backend 描述仅代表历史实现目标，不能作为当前迁移完成证据。
