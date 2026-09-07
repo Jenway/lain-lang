@@ -5,15 +5,16 @@
 
 当前迁移基线只实现并验证了命名的只读静态 `#data`、当前 procedure activation
 内的 `#alloca`、`#lea` 与 typed `#load/#store`、Eval 的 step/depth/allocation
-限制，以及显式传入的 capability。下文的 VSpace、TCB、Endpoint、Trap、CSpace、
-软件 MMU、`#swap_context`、demand paging 和 OS/bare-metal lowering 都是未来设计
-方向；它们尚未成为 LAINIR 指令、provider API 或 seed 运行时对象。任何实现工作
-必须先更新 LAINIR 规范和 API contract，再把这些提案纳入 provider 与测试。
+限制，以及显式传入的 capability。下一步要把这些约束装入一个单 TCB/单 VSpace
+的 Eval session；这部分属于当前自举计划。多 TCB 调度、Endpoint、完整 CSpace、
+软件 MMU、`#swap_context`、demand paging 和 OS/bare-metal lowering 仍是后续方向，
+尚未成为 LAINIR 指令、provider API 或 seed 运行时对象。任何实现工作必须先更新
+LAINIR 规范和 API contract，再把这些提案纳入 provider 与测试。
 
 ### 审阅结论
 
-这份文档适合作为长期架构提案，暂时不应作为 LAINIR 或标准库的实现承诺。它
-把三个层次放在了一张图里：`#eval` 的受限执行、未来的运行时调度抽象、以及
+这份文档同时描述 Eval VM 的最小执行环境和长期架构提案，不能直接替代 LAINIR
+或标准库实现规范。它把三个层次放在了一张图里：`#eval` 的受限执行、未来的运行时调度抽象、以及
 操作系统或裸机的物理下沉。当前 roadmap 只接受第一层已经存在的约束；第二、
 三层必须分别形成 API contract、可运行 provider 和验证用例后才能进入实现。
 
