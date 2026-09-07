@@ -502,3 +502,7 @@ ABI v1 的第一版草案见
 现有 smoke 撤回，避免把失败实验混入绿色 baseline；它说明 Eval 的结果/临时对象
 owner 转交仍未闭合，下一步应先增加独立的 activation-lifetime fixture，再修改
 `l1_interpreter` 的返回值封装和释放规则。
+
+`l1_interpreter` 同时修正了一个独立误判：`address_at` 现在先检查值的物理类型为
+`addr`，不会再把普通整数 payload 当作 compact address handle。该修正尚未消除
+上述真实 activation escape，后续 fixture 仍需定位返回值内部的临时地址来源。

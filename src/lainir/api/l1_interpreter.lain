@@ -95,8 +95,19 @@ let l1_interpreter: Module = std::module {
         };
 
         let address_at = std::func(
-            state: &ExecutionState, value: Value,
+            unit: &L1.Unit,
+            state: &ExecutionState,
+            value: Value,
         ) -> usize {
+            // Scalar values use the same integer fields as the compact
+            // address handle.  Inspect the physical type before treating
+            // the payload as an address; otherwise returning literal 42
+            // could be mistaken for an alloca handle and reported as an
+            // activation escape.
+            if value.type_id >= unit.types.length() { return std::usize_max(); }
+            if unit.types.get(value.type_id).kind != 2 {
+                return std::usize_max();
+            }
             if value.i32_value <= 0 { return std::usize_max(); }
             let index: usize = (value.i32_value - 1) as usize;
             if index >= state.addresses.length() { return std::usize_max(); }
@@ -251,7 +262,7 @@ let l1_interpreter: Module = std::module {
                     unit, expression.right, arguments, depth + 1, state,
                 );
                 if index_result.status != 0 { return index_result; }
-                let address_index: usize = address_at(state, base_result.value);
+                let address_index: usize = address_at(unit, state, base_result.value);
                 if address_index == std::usize_max() { return fail(7116); }
                 let base: &Address = state.addresses.get(address_index);
                 let displacement: i64 =
@@ -274,7 +285,7 @@ let l1_interpreter: Module = std::module {
                     unit, expression.left, arguments, depth + 1, state,
                 );
                 if address_result.status != 0 { return address_result; }
-                let address_index: usize = address_at(state, address_result.value);
+                let address_index: usize = address_at(unit, state, address_result.value);
                 if address_index == std::usize_max() { return fail(7116); }
                 let address: &Address = state.addresses.get(address_index);
                 let value_type: &L1.Type = unit.types.get(expression.result_type);
@@ -430,7 +441,7 @@ let l1_interpreter: Module = std::module {
                     unit, expression.left, arguments, depth + 1, state,
                 );
                 if target.status != 0 { return target; }
-                let address_index: usize = address_at(state, target.value);
+                    let address_index: usize = address_at(unit, state, target.value);
                 if address_index == std::usize_max() { return fail(7116); }
                 let address: &Address = state.addresses.get(address_index);
                 if address.kind != 3 { return fail(7121); }
@@ -548,7 +559,7 @@ let l1_interpreter: Module = std::module {
                         unit, instruction.destination, arguments, depth, state,
                     );
                     if destination.status != 0 { return destination; }
-                    let address_index: usize = address_at(state, destination.value);
+                    let address_index: usize = address_at(unit, state, destination.value);
                     if address_index == std::usize_max() { return fail(7116); }
                     let address: &Address = state.addresses.get(address_index);
                     if address.kind == 2 { return fail(7119); }
@@ -698,7 +709,7 @@ let l1_interpreter: Module = std::module {
                 return fail(7103);
             }
             if result.status == 0 {
-                let returned_address: usize = address_at(state, result.value);
+                let returned_address: usize = address_at(unit, state, result.value);
                 if returned_address != std::usize_max()
                     && state.addresses.get(returned_address).kind == 1
                     && state.addresses.get(returned_address).activation
