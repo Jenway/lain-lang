@@ -66,14 +66,16 @@ them an explicit capability family.
 
 ## Migration gates
 
-The source-level legacy inventory is checked independently with:
+The source-level declaration check is independent of the compiler:
 
 ```text
 python scripts/check_lain_backend_abi.py --report
 ```
 
-It currently exits with failure while the seven `@foreign` declarations are
-present. After migration it becomes the first zero-legacy gate.
+It requires exactly the eight logical `backend.*` declarations and rejects
+bootstrap link names in the backend source. Provider-side bootstrap names are
+kept as implementation details in the seed host and are bound to the same
+logical capability entries.
 
 1. Compile `backend_c.lain` with the active compiler and emit only logical
    `backend.*` externs.
@@ -83,5 +85,6 @@ present. After migration it becomes the first zero-legacy gate.
 4. Build and run the native in-process smoke, including capability rejection
    for a missing capability and invalid artifact lifecycle.
 
-Until gate 1 passes, `@foreign` declarations in `backend_c.lain` are legacy
-input and must not be copied into new compiler or provider APIs.
+The source currently uses the compiler's external declaration attribute to
+attach these logical names. The attribute carries no host link name; the
+provider and native driver own that mapping.

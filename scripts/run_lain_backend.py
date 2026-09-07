@@ -2,8 +2,8 @@
 """Run the first Lain-written canonical-L1 -> C backend kernel.
 
 The generated backend L1 is bootstrapped by the frozen compiler. Its host
-dependencies are tracked by the backend capability ABI; the source-level
-legacy inventory is checked before compilation.
+dependencies are tracked by the backend capability ABI; the logical
+declaration inventory is checked before compilation.
 """
 
 from __future__ import annotations
@@ -65,8 +65,15 @@ def main() -> int:
     # of exposing the compiler's generic legacy-attribute diagnostic.
     run(sys.executable, ABI_CHECK)
     manifest = args.manifest or args.output.with_suffix(args.output.suffix + ".manifest.json")
-    write_manifest(args.input, manifest)
-    run(sys.executable, COMPILE, "-o", args.backend_l1, BACKEND)
+    # The backend is a library artifact with an explicit `main` entry used by
+    # the seed driver.  `--library` selects the source-compiler path without
+    # applying the user-program main-return policy (which rejects the backend
+    # driver's i32 entry as status 5112).
+    run(sys.executable, COMPILE, "--library", "-o", args.backend_l1, BACKEND)
+    # The capability manifest describes the backend artifact that is about to
+    # run.  The input artifact may have its own user externs and must not be
+    # mistaken for the backend provider contract.
+    write_manifest(args.backend_l1, manifest)
     run(SEED, "interpreter", args.backend_l1, "main", args.output, args.input)
     print(args.output)
     return 0

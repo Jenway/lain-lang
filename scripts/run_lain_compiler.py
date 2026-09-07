@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "scripts" / "build_lain_compiler.py"
+EMPTY_SOURCE = ROOT / "scripts" / "fixtures" / "empty_source.lain"
 L1BOOTSTRAP = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
@@ -75,19 +76,34 @@ def main() -> int:
             if bundled.returncode:
                 print(bundled.stderr or bundled.stdout, file=sys.stderr)
                 return bundled.returncode
+        # The seed interpreter reserves the one-source form for an already
+        # parsed LAIN-IR input.  Source compilation must therefore always
+        # provide a second source unit, even when the caller requested one
+        # Lain source file.  The empty unit has no declarations and does not
+        # affect name resolution; it only selects the source-compiler path.
+        sources = [ROOT / source for source in args.source]
+        if len(sources) == 1:
+            sources.append(EMPTY_SOURCE)
         executed = run(
             [
                 L1BOOTSTRAP,
                 selected_bundle,
                 "compiler_compile_library" if args.library else "compiler_compile",
                 args.output,
-                *(ROOT / source for source in args.source),
+                *sources,
             ]
         )
 
-    if executed.returncode:
-        print(executed.stderr or executed.stdout, file=sys.stderr)
-        return executed.returncode
+        if executed.returncode:
+            print(executed.stderr or executed.stdout, file=sys.stderr)
+            return executed.returncode
+        if not args.output.is_file():
+            print(f"compiler did not write {args.output}", file=sys.stderr)
+            return 1
+        output_text = args.output.read_text(encoding="utf-8")
+        if output_text.lstrip().startswith("(error "):
+            print(output_text.strip(), file=sys.stderr)
+            return 1
     print(args.output)
     return 0
 

@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Check the Lain-written backend against capability ABI v1.
-
-The check is intentionally independent of the compiler.  During migration it
-provides a deterministic inventory of legacy ``@foreign`` declarations; once
-the source is migrated, the same command becomes a zero-legacy gate.
-"""
+"""Check the Lain-written backend against capability ABI v1."""
 
 from __future__ import annotations
 
@@ -18,14 +13,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "src" / "lainc" / "backend_c.lain"
 EXPECTED = {
-    "bootstrap.allocate-pages": "backend.allocate",
-    "bootstrap.artifact-begin": "backend.artifact_begin",
-    "bootstrap.artifact-write-byte": "backend.artifact_write_byte",
-    "bootstrap.artifact-finish": "backend.artifact_finish",
-    "bootstrap.source-length": "backend.source_length",
-    "bootstrap.source-data": "backend.source_data",
-    "bootstrap.source-count": "backend.source_count",
-    "bootstrap.copy-bytes": "backend.copy_bytes",
+    "backend.allocate": "backend.allocate",
+    "backend.artifact_begin": "backend.artifact_begin",
+    "backend.artifact_write_byte": "backend.artifact_write_byte",
+    "backend.artifact_finish": "backend.artifact_finish",
+    "backend.source_length": "backend.source_length",
+    "backend.source_data": "backend.source_data",
+    "backend.source_count": "backend.source_count",
+    "backend.copy_bytes": "backend.copy_bytes",
 }
 FOREIGN = re.compile(
     r'@foreign\(c,\s*link_name\s*=\s*"([^"]+)"\)\s*\n'
@@ -43,7 +38,7 @@ def inventory() -> list[dict[str, str]]:
         result.append(
             {
                 "binding": binding,
-                "legacy_link_name": link_name,
+                "link_name": link_name,
                 "logical_name": EXPECTED.get(link_name, ""),
                 "parameters": " ".join(parameters.split()),
                 "result": result_type,
@@ -59,18 +54,20 @@ def main() -> int:
     entries = inventory()
     if args.report:
         print(json.dumps(entries, indent=2, sort_keys=True))
-    unknown = [entry for entry in entries if not entry["logical_name"]]
-    if unknown:
-        names = ", ".join(entry["legacy_link_name"] for entry in unknown)
-        print(f"unknown legacy backend capabilities: {names}", file=sys.stderr)
+    names = {entry["link_name"] for entry in entries}
+    missing = sorted(set(EXPECTED) - names)
+    unexpected = sorted(names - set(EXPECTED))
+    if missing or unexpected or len(entries) != len(EXPECTED):
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if unexpected:
+            detail.append("unexpected " + ", ".join(unexpected))
+        if len(entries) != len(EXPECTED):
+            detail.append(f"expected {len(EXPECTED)} declarations, found {len(entries)}")
+        print("backend capability ABI mismatch: " + "; ".join(detail), file=sys.stderr)
         return 1
-    if entries:
-        names = ", ".join(entry["legacy_link_name"] for entry in entries)
-        print(
-            "legacy backend @foreign declarations remain: " + names,
-            file=sys.stderr,
-        )
-        return 1
+    print("PASS backend capability ABI v1 source declarations")
     return 0
 
 

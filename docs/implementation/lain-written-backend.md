@@ -1,10 +1,11 @@
 # Lain-written backend and native driver
 
-`src/lainc/backend_c.lain` is the intended Lain-written L1-to-C backend. Its
-lowering policy and text emission remain in Lain, while
-`seed/src/host/native_lainc.c` supplies the native driver. The backend source
-still uses legacy `@foreign` declarations, so it is currently a migration
-target rather than a runnable part of the active compiler closure.
+`src/lainc/backend_c.lain` is the Lain-written L1-to-C backend. Its lowering
+policy and text emission remain in Lain, while `seed/src/host/native_lainc.c`
+supplies the native driver. The source declares the eight logical `backend.*`
+capabilities; the seed provider maps those names to its bootstrap host
+functions. The backend remains outside the compiler core source closure, but
+its standalone migration gate is executable.
 
 The historical driver was invoked with:
 
@@ -13,10 +14,14 @@ python scripts/run_lain_backend.py build/backend_fixture.l1 -o build/backend_fix
 # The command also writes build/backend_fixture.c.manifest.json by default;
 # pass --manifest <path> to choose an explicit location.
 
-At the current migration baseline this command stops while compiling
-`backend_c.lain`: the source uses legacy `@foreign` declarations, which the
-active source-language closure does not accept yet. The command is retained
-as the eventual end-to-end gate while the capability ABI is migrated.
+The migration gate for this command is:
+
+```text
+python scripts/check_native_backend_migration.py
+```
+
+It compiles the backend, verifies its logical capability manifest, emits C for
+a multi-procedure fixture, and runs the generated native program.
 
 # Build a native compiler executable from the canonical L1 compiler
 python scripts/build_lainc_native.py \
@@ -47,8 +52,9 @@ The historical backend implementation handles:
   expression, call, return, and branch construction all write the physical
   `L1.Unit` model and no host-side Builder fallback is required.
 
-These capabilities are not covered by the current migration baseline because
-compiling the backend source stops at `@foreign` with diagnostic 1001.
+These capabilities are covered by the native backend migration gate for the
+current multi-procedure fixture. The remaining unclosed evidence is the
+historical canonical C diff and the final clean native compiler build.
 Unsupported L1 lines are preserved as `/* unsupported L1: ... */` comments.
 The native driver uses `-O2`; the generated compiler's metadata scans are
 dramatically slower at `-O0`.  Artifact generation does not inject API,

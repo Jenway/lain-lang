@@ -14,14 +14,14 @@ HOST_SOURCES = (
     ROOT / "seed" / "src" / "cli" / "seed_main.c",
 )
 LINKS = {
-    "backend.allocate": "bootstrap.allocate-pages",
-    "backend.artifact_begin": "bootstrap.artifact-begin",
-    "backend.artifact_write_byte": "bootstrap.artifact-write-byte",
-    "backend.artifact_finish": "bootstrap.artifact-finish",
-    "backend.source_count": "bootstrap.source-count",
-    "backend.source_length": "bootstrap.source-length",
-    "backend.source_data": "bootstrap.source-data",
-    "backend.copy_bytes": "bootstrap.copy-bytes",
+    "backend.allocate": "backend.allocate",
+    "backend.artifact_begin": "backend.artifact_begin",
+    "backend.artifact_write_byte": "backend.artifact_write_byte",
+    "backend.artifact_finish": "backend.artifact_finish",
+    "backend.source_count": "backend.source_count",
+    "backend.source_length": "backend.source_length",
+    "backend.source_data": "backend.source_data",
+    "backend.copy_bytes": "backend.copy_bytes",
 }
 
 

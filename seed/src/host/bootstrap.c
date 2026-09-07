@@ -2047,6 +2047,20 @@ int bootstrap_run_cli(int argc, char **argv) {
       !add_capability(caps, "bootstrap.artifact-write-identifier",
                       artifact_write_identifier, &context) ||
       !add_capability(caps, "bootstrap.artifact-finish", artifact_finish,
+                      &context) ||
+      /* Backend ABI v1 uses logical names.  Keep the provider-side bootstrap
+       * names above for compiler compatibility, and bind the same operations
+       * under the capability names consumed by backend_c.lain. */
+      !add_capability(caps, "backend.source_count", source_count, &context) ||
+      !add_capability(caps, "backend.source_data", source_data, &context) ||
+      !add_capability(caps, "backend.source_length", source_length, &context) ||
+      !add_capability(caps, "backend.allocate", allocate_pages, &context) ||
+      !add_capability(caps, "backend.copy_bytes", copy_bytes, &context) ||
+      !add_capability(caps, "backend.artifact_begin", artifact_begin,
+                      &context) ||
+      !add_capability(caps, "backend.artifact_write_byte",
+                      artifact_write_byte, &context) ||
+      !add_capability(caps, "backend.artifact_finish", artifact_finish,
                       &context)) {
     fprintf(stderr, "could not initialize bootstrap capabilities\n");
     goto cleanup;
