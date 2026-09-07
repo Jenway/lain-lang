@@ -237,11 +237,12 @@ verify、capability manifest、multi-procedure C emission 和 native in-process
 分别作为迁移 gate 保留。
 
 继续尝试 clean native build 时，后端发射器已经修正了多行过程声明、内联结构化
-`#if`、跨行 `#store` 参数和旧 bootstrap extern 的重复声明；迁移 baseline 与
-native backend gate 均保持通过。当前剩余失败集中在 `tool_lexer_next` 这类包含
-多层 `#loop/#if` 的 canonical L1 块：生成 C 在内层循环结束处仍缺少外层闭合，
-因此还不能把 clean native build 记为完成。下一步应让 emitter 按结构化控制流
-深度消费 canonical block，而不是继续按物理换行推断块边界。
+`#if`、跨行 `#store` 参数、结构化块的物理换行边界和旧 bootstrap extern 的重复
+声明；迁移 baseline 与 native backend gate 均保持通过。当前 clean build 已经
+进入更深的 C 编译阶段，剩余错误集中在完整 canonical L1 指令覆盖：`#trunc`、
+`#alloca` 等表达式尚未被 native emitter 降低，部分复杂控制流仍会被收进
+unsupported 注释而造成函数闭合不完整。因此还不能把 clean native build 记为完成；
+下一步应补齐这些明确物理操作的发射规则，并为 unsupported 输出建立失败 gate。
 
 ### Eval owner/session 的迁移顺序
 
