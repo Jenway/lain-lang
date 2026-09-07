@@ -236,6 +236,13 @@ verify、capability manifest、multi-procedure C emission 和 native in-process
 执行。gen1/gen2/gen3 self-host 仍只证明 compiler source closure 的固定点，二者
 分别作为迁移 gate 保留。
 
+继续尝试 clean native build 时，后端发射器已经修正了多行过程声明、内联结构化
+`#if`、跨行 `#store` 参数和旧 bootstrap extern 的重复声明；迁移 baseline 与
+native backend gate 均保持通过。当前剩余失败集中在 `tool_lexer_next` 这类包含
+多层 `#loop/#if` 的 canonical L1 块：生成 C 在内层循环结束处仍缺少外层闭合，
+因此还不能把 clean native build 记为完成。下一步应让 emitter 按结构化控制流
+深度消费 canonical block，而不是继续按物理换行推断块边界。
+
 ### Eval owner/session 的迁移顺序
 
 这部分按三个可独立验收的 contract 进入 API：
