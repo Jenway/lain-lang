@@ -24,6 +24,7 @@ EXPECTED = {
     "bootstrap.artifact-finish": "backend.artifact_finish",
     "bootstrap.source-length": "backend.source_length",
     "bootstrap.source-data": "backend.source_data",
+    "bootstrap.source-count": "backend.source_count",
     "bootstrap.copy-bytes": "backend.copy_bytes",
 }
 FOREIGN = re.compile(
