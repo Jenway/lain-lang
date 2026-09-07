@@ -966,7 +966,26 @@ let emit_line = std::func(
             return;
         }
         if body < body_end {
-            emit_line(source, body, body_end, output);
+            // Canonical L1 may keep a call and an early return in one inline
+            // block. Emit the two statements independently instead of
+            // passing `#call ... #return ...` as one expression.
+            let statement_marker: usize = body;
+            while statement_marker < body_end {
+                if match_at(source, statement_marker, body_end, "#return", 7) {
+                    break;
+                } else {
+                    if match_at(source, statement_marker, body_end, "#break", 6) {
+                        break;
+                    }
+                }
+                statement_marker = statement_marker + 1;
+            }
+            if statement_marker > body && statement_marker < body_end {
+                emit_line(source, body, statement_marker, output);
+                emit_line(source, statement_marker, body_end, output);
+            } else {
+                emit_line(source, body, body_end, output);
+            }
         }
         append_literal(output, "}\n", 2);
         let else_start: usize = body_end + 1;
@@ -997,7 +1016,23 @@ let emit_line = std::func(
                 else_end = else_end + 1;
             }
             if else_body < else_end {
-                emit_line(source, else_body, else_end, output);
+                let else_statement: usize = else_body;
+                while else_statement < else_end {
+                    if match_at(source, else_statement, else_end, "#return", 7) {
+                        break;
+                    } else {
+                        if match_at(source, else_statement, else_end, "#break", 6) {
+                            break;
+                        }
+                    }
+                    else_statement = else_statement + 1;
+                }
+                if else_statement > else_body && else_statement < else_end {
+                    emit_line(source, else_body, else_statement, output);
+                    emit_line(source, else_statement, else_end, output);
+                } else {
+                    emit_line(source, else_body, else_end, output);
+                }
             }
             append_literal(output, "}\n", 2);
         }
@@ -1056,28 +1091,59 @@ let backend_compile = std::func() -> i32 {
     append_literal(output, "#define L1_add(a,b) ((a)+(b))\n#define L1_sub(a,b) ((a)-(b))\n#define L1_mul(a,b) ((a)*(b))\n#define L1_eq(a,b) ((a)==(b))\n#define L1_lt(a,b) ((a)<(b))\n#define L1_le(a,b) ((a)<=(b))\n#define L1_and(a,b) ((a)&&(b))\n#define L1_or(a,b) ((a)||(b))\n", 240);
     append_literal(output, "#define L1_ne(a,b) ((a)!=(b))\n#define L1_gt(a,b) ((a)>(b))\n#define L1_ge(a,b) ((a)>=(b))\n", 89);
     append_literal(output, "#define L1_udiv(a,b) ((a)/(b))\n#define L1_urem(a,b) ((a)%(b))\n", 62);
-    // Pass one collects procedure declarations so calls may target later
-    // definitions in the same canonical module.
+    // Pass one collects procedure/extern declarations so calls may target
+    // later definitions. Headers may span physical lines, so collect a
+    // candidate until its parameter parentheses are balanced.
     let declaration_start: usize = 0;
+    let declaration_candidate: usize = 0;
+    let declaration_segment: usize = 0;
+    let declaration_depth: i32 = 0;
+    let declaration_active: i32 = 0;
     let declaration_index: usize = 0;
     while declaration_index < input_length {
         if load8(input_data, declaration_index) == 10 {
-            if match_at(input_data, declaration_start, declaration_index, "#proc", 5) {
-                emit_proc_decl(input_data, declaration_start, declaration_index, output);
+            if declaration_active == 0 {
+                if match_at(input_data, declaration_start, declaration_index, "#proc", 5) {
+                    declaration_active = 1;
+                } else {
+                    if match_at(input_data, declaration_start, declaration_index, "#extern", 7) {
+                        declaration_active = 1;
+                    }
+                }
+                if declaration_active == 1 {
+                    declaration_candidate = declaration_start;
+                    declaration_segment = declaration_start;
+                    declaration_depth = 0;
+                }
             }
-            if match_at(input_data, declaration_start, declaration_index, "#extern", 7) {
-                emit_extern_decl(input_data, declaration_start, declaration_index, output);
+            if declaration_active == 1 {
+                declaration_depth = declaration_depth + expression_delimiters(
+                    input_data,
+                    declaration_segment,
+                    declaration_index,
+                );
+                declaration_segment = declaration_index + 1;
+                if declaration_depth <= 0 {
+                    if match_at(input_data, declaration_candidate, declaration_index, "#proc", 5) {
+                        emit_proc_decl(input_data, declaration_candidate, declaration_index, output);
+                    }
+                    if match_at(input_data, declaration_candidate, declaration_index, "#extern", 7) {
+                        emit_extern_decl(input_data, declaration_candidate, declaration_index, output);
+                    }
+                    declaration_active = 0;
+                    declaration_depth = 0;
+                }
             }
             declaration_start = declaration_index + 1;
         }
         declaration_index = declaration_index + 1;
     }
-    if declaration_start < input_length {
-        if match_at(input_data, declaration_start, input_length, "#proc", 5) {
-            emit_proc_decl(input_data, declaration_start, input_length, output);
+    if declaration_active == 1 && declaration_candidate < input_length {
+        if match_at(input_data, declaration_candidate, input_length, "#proc", 5) {
+            emit_proc_decl(input_data, declaration_candidate, input_length, output);
         }
-        if match_at(input_data, declaration_start, input_length, "#extern", 7) {
-            emit_extern_decl(input_data, declaration_start, input_length, output);
+        if match_at(input_data, declaration_candidate, input_length, "#extern", 7) {
+            emit_extern_decl(input_data, declaration_candidate, input_length, output);
         }
     }
     let line_start: usize = 0;
@@ -1122,6 +1188,7 @@ let backend_compile = std::func() -> i32 {
                         }
                     }
                     let split_let_call: i32 = 0;
+                    let split_let_rhs: i32 = 0;
                     if previous_end >= 5 {
                         if match_at(input_data, previous_end - 5, previous_end, "#call", 5) {
                             if match_at(input_data, line_start, index, "  #let", 6) {
@@ -1129,8 +1196,27 @@ let backend_compile = std::func() -> i32 {
                             }
                         }
                     }
-                    if match_at(input_data, next, input_length, "#lea", 4) ||
-                       split_let_call == 1 {
+                    if previous_end > 0 {
+                        if load8(input_data, previous_end - 1) == 61 {
+                            if match_at(input_data, line_start, index, "  #let", 6) &&
+                               match_at(input_data, next, input_length, "#call", 5) {
+                                split_let_rhs = 1;
+                            }
+                        }
+                    }
+                    let should_continue: i32 = 0;
+                    if match_at(input_data, next, input_length, "#lea", 4) {
+                        should_continue = 1;
+                    } else {
+                        if split_let_call == 1 {
+                            should_continue = 1;
+                        } else {
+                            if split_let_rhs == 1 {
+                                should_continue = 1;
+                            }
+                        }
+                    }
+                    if should_continue == 1 {
                         continuation = 1;
                     } else {
                         emit_line(input_data, line_start, index, output);
