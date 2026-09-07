@@ -44,11 +44,12 @@ src/lainir 或 seed
 
 ### `04-lain-vm.md` 的定位
 
-`docs/04-lain-vm.md` 当前是未来执行环境的架构提案，不是本迁移的实现规范，也不计入
-阶段 2、5 或 6 的完成证据。文档中的 VSpace、TCB、Endpoint、Trap、CSpace、软件
-MMU、`#swap_context` 和 demand paging 尚未成为 LAINIR 指令、provider API 或 seed
-运行时对象；它们不能被现有 compiler、evaluator 或 native backend 当作已存在的
-能力使用。
+`docs/04-lain-vm.md` 当前是未来执行环境的架构提案；其实施顺序和验收门槛见
+[`lain-vm.md`](lain-vm.md)。本迁移的阶段 5 必须接入该路线图的阶段 0/1：EvalApi
+需要由 VM session 承载 activation、quota、capability、trap 和 owner 语义。
+VSpace、TCB、Endpoint、Trap、CSpace、软件 MMU、`#swap_context` 和 demand paging
+的完整实现仍不计入当前阶段 2、5 或 6 的完成证据；它们要在固定点之后按 VM
+contract 推进。当前阶段只接受已经存在并由 contract tests 固定的 Eval 约束。
 
 当前实现只冻结以下相关语义：命名的只读静态 `#data`、当前 procedure activation
 内的 `#alloca`、`#lea` 与 typed `#load/#store`、Eval 的 step/depth/allocation
