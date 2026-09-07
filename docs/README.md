@@ -42,6 +42,7 @@
 | [`roadmaps/compiler-bootstrap.md`](roadmaps/compiler-bootstrap.md) | 正式标准库、`src/lainc` 固定点和工具链切换主线 |
 | [`roadmaps/lainc-lainir-api-migration.md`](roadmaps/lainc-lainir-api-migration.md) | `lainc` 到 LAINIR 能力 API 的依赖反转和迁移步骤 |
 | [`roadmaps/lainir-maintenance.md`](roadmaps/lainir-maintenance.md) | LAINIR 后续物理能力和维护工作 |
+| [`roadmaps/lain-vm.md`](roadmaps/lain-vm.md) | `#eval` 执行环境、VM contract 和后续平台下沉 |
 
 ## 历史资料
 
