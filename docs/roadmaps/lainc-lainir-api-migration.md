@@ -239,10 +239,12 @@ verify、capability manifest、multi-procedure C emission 和 native in-process
 继续尝试 clean native build 时，后端发射器已经修正了多行过程声明、内联结构化
 `#if`、跨行 `#store` 参数、结构化块的物理换行边界和旧 bootstrap extern 的重复
 声明；迁移 baseline 与 native backend gate 均保持通过。当前 clean build 已经
-进入更深的 C 编译阶段，剩余错误集中在完整 canonical L1 指令覆盖：`#trunc`、
-`#alloca` 等表达式尚未被 native emitter 降低，部分复杂控制流仍会被收进
-unsupported 注释而造成函数闭合不完整。因此还不能把 clean native build 记为完成；
-下一步应补齐这些明确物理操作的发射规则，并为 unsupported 输出建立失败 gate。
+进入更深的 C 编译阶段后，`#trunc/#sext` 的表达式覆盖已经补齐；当前剩余错误
+集中在 `#alloca`、`#eval` 和一条跨行 `#call` 的表达，以及前向
+`ast_substitute` 声明和 `bootstrap_set_allocation_limit` provider 声明。部分
+复杂控制流仍会被收进 unsupported 注释而造成函数闭合不完整。因此还不能把
+clean native build 记为完成；下一步应逐项补齐这些明确 lowering 和声明规则，
+并为 unsupported 输出建立失败 gate。
 
 ### Eval owner/session 的迁移顺序
 
