@@ -114,6 +114,17 @@ let expression_delimiters = std::func(
     let index: usize = start;
     while index < end {
         let byte: i32 = load8(source, index);
+        // Ignore parentheses in a line comment when computing logical
+        // expression depth. Canonical source comments may contain examples
+        // such as `parse twice(` and must not swallow the rest of the module.
+        if byte == 47 {
+            let comment_next: usize = index + 1;
+            if comment_next < end {
+                if load8(source, comment_next) == 47 {
+                    break;
+                }
+            }
+        }
         if escaped == 1 {
             escaped = 0;
         } else {
@@ -273,8 +284,14 @@ let emit_expr = std::func(
                                                 }
                                                 index = cursor;
                                             } else {
-                                            if match_at(source, index, end, "#zext", 5) {
-                                                index = index + 5;
+                                            if match_at(source, index, end, "#trunc", 6) ||
+                                               match_at(source, index, end, "#sext", 5) ||
+                                               match_at(source, index, end, "#zext", 5) {
+                                                if match_at(source, index, end, "#trunc", 6) {
+                                                    index = index + 6;
+                                                } else {
+                                                    index = index + 5;
+                                                }
                                                 while index < end {
                                                     if load8(source, index) == 93 {
                                                         index = index + 1;
@@ -616,6 +633,11 @@ let emit_extern_decl = std::func(
     while close < end {
         if load8(source, close) == 41 { break; }
         close = close + 1;
+    }
+    // The declaration pass sees only one physical line of a multiline extern;
+    // wait for the complete logical declaration instead of emitting `(void)`.
+    if close == end {
+        return;
     }
     let arrow: usize = close;
     while arrow < end {
