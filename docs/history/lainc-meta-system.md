@@ -1,6 +1,6 @@
 # src/lainc meta system
 
-当前执行路线见 [`docs/roadmaps/compiler-bootstrap.md`](../roadmaps/compiler-bootstrap.md)。
+当前执行路线见 [`docs/roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md)。
 
 > **历史实现说明。** 本文记录 `src/lainc` 过渡编译器的现状，其中把 Meta
 > 描述为 callable registry/evaluator 的段落不再代表目标架构。当前定义是：Meta
@@ -202,3 +202,4 @@ lowering.
 Probe programs live under `build/eval-demo/` (not tracked): `const_probe`,
 `constexpr_probe`, `ce_probe`, `ce2`, `ce4`, `rec_probe`, `ns_probe`,
 `meta_integration`.
+

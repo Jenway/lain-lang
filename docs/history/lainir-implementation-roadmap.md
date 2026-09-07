@@ -1,6 +1,6 @@
 # LAIN-IR compiler roadmap
 
-> **Historical implementation record.** This file preserves completed frontend and compiler-boundary milestones. Current work is tracked in [`../roadmaps/compiler-bootstrap.md`](../roadmaps/compiler-bootstrap.md) and [`../roadmaps/lainir-maintenance.md`](../roadmaps/lainir-maintenance.md).
+> **Historical implementation record.** This file preserves completed frontend and compiler-boundary milestones. Current work is tracked in [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md) and [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md).
 > The former `src/compiler-archive` tree was later merged into `src/lainc`.
 
 The implementation grows as executable vertical slices.  A phase is complete
@@ -297,3 +297,4 @@ execution dereferences a null address in `lainir-seed run` (access violation
 - [ ] **Regression gate.** Re-enable the core suites that currently require
   `zig-out/bin/lainc`, then run the Lain frontend/tooling suites and the full
   self-hosting gate together.
+

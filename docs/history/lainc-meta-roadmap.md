@@ -1,6 +1,6 @@
 # Lain 标准库自举与 archive lainc 路线图
 
-> **历史实施记录。** 本文保存 2026-09-02 以前的完成项、阶段划分和当时判断。当前计划见 [`../roadmaps/compiler-bootstrap.md`](../roadmaps/compiler-bootstrap.md)。
+> **历史实施记录。** 本文保存 2026-09-02 以前的完成项、阶段划分和当时判断。当前计划见 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md)。
 > 文中的 archive lainc 与 `src/compiler-archive` 后来已经合并为当前的 `src/lainc` 源码树。
 
 > 基线日期：2026-09-02
@@ -855,3 +855,4 @@ archive 可用   -> 四个强 gate 全部通过
 
 T01-T04 完成前，不继续扩展第 3 套。T05-T08 完成前，不宣称高级特性已经由
 标准库实现。B7 完成前，不宣称第 2 套已经编译出可用的 archive lainc。
+
