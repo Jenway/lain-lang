@@ -61,6 +61,15 @@ does not know the native function table.
 
 ## Migration gates
 
+The source-level legacy inventory is checked independently with:
+
+```text
+python scripts/check_lain_backend_abi.py --report
+```
+
+It currently exits with failure while the seven `@foreign` declarations are
+present. After migration it becomes the first zero-legacy gate.
+
 1. Compile `backend_c.lain` with the active compiler and emit only logical
    `backend.*` externs.
 2. Verify the artifact and manifest with the seed verifier.
