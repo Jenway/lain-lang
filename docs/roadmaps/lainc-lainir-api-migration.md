@@ -484,3 +484,9 @@ source-language/API 合约的外部能力声明，不是 backend 脚本选错 co
 source closure；完成后增加 backend compile、artifact verify、native emission 和
 in-process execution 四段 gate。在此之前，`docs/implementation/lain-written-backend.md`
 中的 executable backend 描述仅代表历史实现目标，不能作为当前迁移完成证据。
+ABI v1 的第一版草案见
+[`docs/implementation/lain-backend-capability-abi.md`](../implementation/lain-backend-capability-abi.md)。
+它把 host link name 留在 provider/driver，把 backend 源码看到的边界收敛为
+`backend.source_*`、`backend.allocate`、`backend.copy_bytes` 和
+`backend.artifact_*` 八个逻辑 capability；该草案须在 gate 1 的实际 lowering
+结果上验证后才能冻结。
