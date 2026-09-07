@@ -19,6 +19,11 @@ not migrated yet:
 | Native C emission | not reached | backend L1 is not produced |
 | In-process execution | not reached | no migrated backend artifact exists |
 
+The native build entry has the same dependency explicitly: `build_lainc_native.py`
+requires `build/backend_c_entry.l1`. That file is absent while backend source
+compilation is blocked, so native clean build cannot be treated as an
+independent failure.
+
 The eight declarations are mapped in
 [`lain-backend-capability-abi.md`](lain-backend-capability-abi.md). Their host
 link names remain provider/driver details; the intended source-level names are
