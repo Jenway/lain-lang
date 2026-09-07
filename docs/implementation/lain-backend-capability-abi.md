@@ -59,6 +59,11 @@ The provider owns the mapping from these names to native functions. The
 compiler core only validates declaration shape and capability presence; it
 does not know the native function table.
 
+`scripts/backend_manifest.py` preserves `backend.*` symbols as logical
+capabilities in the link manifest, just as it already does for `bootstrap.*`.
+Other extern names remain classified as `foreign` until a future ABI assigns
+them an explicit capability family.
+
 ## Migration gates
 
 The source-level legacy inventory is checked independently with:
