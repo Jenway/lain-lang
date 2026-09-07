@@ -1,6 +1,7 @@
 # 04-LAIN-VM：虚拟微内核与执行环境
 
-状态：架构提案 / 编译期与虚拟执行环境规范。本文不是当前 LAINIR 实现规范。
+状态：架构提案 / 编译期与虚拟执行环境规范。实施阶段见
+[`roadmaps/lain-vm.md`](roadmaps/lain-vm.md)；本文不是当前 LAINIR 实现规范。
 
 当前迁移基线只实现并验证了命名的只读静态 `#data`、当前 procedure activation
 内的 `#alloca`、`#lea` 与 typed `#load/#store`、Eval 的 step/depth/allocation

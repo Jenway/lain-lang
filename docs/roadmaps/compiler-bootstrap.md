@@ -69,6 +69,8 @@ python scripts/build_formal_stdlib.py
 - 依次迁移 lowering、compiler result 和 Meta eval；
 - 删除 `src/lainc/l1_ir.lain`、builder、verifier、printer 和 interpreter；
 - 在迁移过程中保持 canonical artifact、诊断和执行结果的差分测试。
+- EvalApi 同时接入 [`lain-vm.md`](lain-vm.md) 定义的 session、activation、quota、
+  capability 和 trap contract。
 
 完成条件：`src/lainc` 中没有第二套 LAINIR 实现，所有 LAINIR 构造与执行都通过已版本化的能力 API。
 
@@ -120,3 +122,5 @@ python scripts/build_formal_stdlib.py
 - 新增另一套 parser、IR、Meta evaluator 或编译器；
 - 在 C host 中实现 Lain 类型、module、effect 或宏语义；
 - 通过 LAINIR compatibility mode 绕过 Meta 类型传播问题。
+- 在编译器固定点之前实现完整 LAIN-VM 微内核对象或平台 lowering；当前只推进
+  `#eval` 所需的 VM session contract，详见 [`lain-vm.md`](lain-vm.md)。

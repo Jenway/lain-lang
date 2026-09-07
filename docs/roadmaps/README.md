@@ -7,6 +7,7 @@
 1. [`compiler-bootstrap.md`](compiler-bootstrap.md)：项目主线。先恢复正式标准库构建，再完成 `src/lainc` 自举和工具链切换。
 2. [`lainc-lainir-api-migration.md`](lainc-lainir-api-migration.md)：主线中的依赖反转计划，固定 `lainc` 生成和执行 LAINIR 的能力 API，并移除 `src/lainc/l1_*`。
 3. [`lainir-maintenance.md`](lainir-maintenance.md)：API provider 之外的 LAINIR 维护工作；一般不阻塞编译器自举。
+4. [`lain-vm.md`](lain-vm.md)：`#eval` 所需的最小执行环境，以及后续 VM 控制面和平台下沉。
 
 当前主线：
 
@@ -14,10 +15,12 @@
 formal stdlib 可重建
   -> formal stdlib 成为默认语义实现
   -> lainc 通过稳定 API 使用 LAINIR
+  -> EvalApi 接入 LAIN-VM session contract
   -> src/lainc 可编译真实程序
   -> lainc gen2/gen3 固定点
   -> native 工具链切换
   -> 删除过渡实现
+  -> VM 控制面与平台 lowering
 ```
 
 每一阶段都以可执行检查为完成条件。路线图不保存逐日进度；完成后的阶段整体移入历史文档，再从新的代码基线更新本目录。
