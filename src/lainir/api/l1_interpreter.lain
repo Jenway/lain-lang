@@ -112,7 +112,9 @@ let l1_interpreter: Module = std::module {
             current_activation: usize,
             next_activation: usize,
             procedure: usize,
+            region: usize,
             position: usize,
+            suspend_reason: i32,
             trap: Trap,
         };
 
@@ -295,14 +297,23 @@ let l1_interpreter: Module = std::module {
             return true;
         };
 
-        let suspend_tcb = std::func(state: &mut LainVm) -> bool {
+        let suspend_tcb_reason = std::func(
+            state: &mut LainVm,
+            reason: i32,
+        ) -> bool {
             if state.tcb.status != 1 { return false; }
+            state.tcb.suspend_reason = reason;
             state.tcb.status = 2;
             return true;
         };
 
+        let suspend_tcb = std::func(state: &mut LainVm) -> bool {
+            return suspend_tcb_reason(state, 0);
+        };
+
         let resume_tcb = std::func(state: &mut LainVm) -> bool {
             if state.tcb.status != 2 { return false; }
+            state.tcb.suspend_reason = 0;
             state.tcb.status = 1;
             return true;
         };
@@ -707,6 +718,7 @@ let l1_interpreter: Module = std::module {
             }
             let region: &L1.Region = unit.regions.get(region_id);
             let offset: usize = 0;
+            state.tcb.region = region_id;
 
             while offset < region.instructions.length() {
                 state.tcb.position = offset;
@@ -853,7 +865,9 @@ let l1_interpreter: Module = std::module {
                     current_activation: 0,
                     next_activation: 1,
                     procedure: 0,
+                    region: 0,
                     position: 0,
+                    suspend_reason: 0,
                     trap: Trap {
                         kind: 0, status: 0, procedure: 0,
                         position: 0, active: false,
@@ -1041,6 +1055,7 @@ let l1_interpreter: Module = std::module {
             @export let new_vm = new_vm;
             @export let start_tcb = start_tcb;
             @export let suspend_tcb = suspend_tcb;
+            @export let suspend_tcb_reason = suspend_tcb_reason;
             @export let resume_tcb = resume_tcb;
             @export let execute = execute;
             @export let execute_limited = execute_limited;
