@@ -117,6 +117,7 @@ pub fn build(b: *std.Build) void {
         optimize,
     );
     vm_control_test.root_module.linkLibrary(core);
+    vm_control_test.root_module.linkLibrary(text);
     vm_control_test.root_module.linkLibrary(interpreter);
     _ = installNamed(
         b,
