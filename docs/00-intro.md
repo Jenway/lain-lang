@@ -211,7 +211,7 @@ Backend 只处理物理类型、控制流、内存和调用。函数构造器、
 
 ```text
 seed/                         C 编写的 LAINIR 解释器和最小宿主能力
-src/lainir/lainc.l1           冻结的 LAINIR compiler artifact
+bootstrap/lainc.l1            冻结的 LAINIR compiler artifact
 src/lainc/*.lain              Lain 编写的正式编译器源码
 ```
 

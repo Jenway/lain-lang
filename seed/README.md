@@ -32,7 +32,7 @@ The build produces:
   finishes.
 
 The frozen Lain compiler artifact is not part of this directory; it lives at
-`src/lainir/lainc.l1` (see `src/lainir/README.md`).
+`bootstrap/lainc.l1` (see `bootstrap/README.md`).
 
 Build from this directory with:
 

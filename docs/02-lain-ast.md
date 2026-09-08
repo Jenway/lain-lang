@@ -331,7 +331,7 @@ AST 资源归属是编译器运行时生命周期规则，不是 Lain 源语言�
 
 ## 12. 当前实现状态
 
-当前 `src/lainir/lain/raw_ast.l1` 已实现：
+当前 `bootstrap/compiler/raw_ast.l1` 已实现：
 
 - Atom 和 Group；
 - source span、origin 和 syntax context；
