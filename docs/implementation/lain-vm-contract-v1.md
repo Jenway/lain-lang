@@ -1,0 +1,93 @@
+# LAIN-VM 单 TCB / 单 VSpace contract v1
+
+状态：contract 草案，当前只覆盖 `#eval` 的单 session。它把已经存在的
+`CompileContextV1` 和 `EvalResultV1` 约束整理成 VM 边界；它不引入新的 LAINIR
+指令，也不宣称多 TCB、Endpoint、Trap 或软件 MMU 已经有真实 provider 实现。
+
+## 当前对象映射
+
+| VM 术语 | 当前实现 | 生命周期 |
+| --- | --- | --- |
+| 单 TCB | 一个 `CompileContextV1` 执行 session | 一次 compile/eval request |
+| 单 VSpace | provider 的 request-owned allocation pool | request 结束统一释放 |
+| CSpace | `capability_mask` 与显式 capability provider | session 内只读授权 |
+| Trap | status/diagnostic/result contract | 通过 `MetaPassResultV1` 返回 |
+| Eval result | `EvalResultV1` | owner transfer/release 明确 |
+
+`CompileContextV1` 当前字段为 owner、step limit、allocation limit、recursion
+limit、capability mask 及其使用计数。limit 为零表示该项不设上限；任何计数器
+超限都返回失败状态，不能静默继续执行。
+
+TCB 的控制面状态遵循 `READY -> RUNNING -> BLOCKED -> RUNNING -> DEAD`。suspend 只
+接受 owner 持有的 RUNNING TCB，并保存 execution position；resume 只接受同一 owner
+持有的 BLOCKED TCB，并恢复保存的位置。执行位置属于 VM control API 的状态，不是
+LAINIR 中的 TCB 数据字段。
+
+当前 scheduler contract 只允许一个 current runnable TCB：READY TCB 可以加入 runnable
+集合并被选中启动；当前 TCB suspend 后释放 current 槽位，BLOCKED TCB 才能被 resume
+并重新成为 current。fixture 已覆盖两个 TCB 的 handoff 和 resume，仍不代表递归 evaluator
+已经可以从任意 instruction offset 继续执行。
+
+Endpoint contract 支持单发送者和单接收者 rendezvous。没有对端时发送或接收会留下等待
+状态；对端到达后一次性交接并清空等待状态。发送者或接收者可以取消自己的等待，取消
+是幂等边界之外的第二次操作并不会再次清理其他状态。
+
+`EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
+必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。
+
+## v1 不变量
+
+1. 一次 session 只有一个执行上下文和一个资源空间。
+2. `#alloca` 仍属于当前 procedure activation；它不是 VSpace 的长期对象。
+3. `#data` 是只读静态数据；任何写入保护由 verifier/provider contract 负责。
+4. `#eval` 只能通过显式 evaluator/provider 能力执行，Meta 不维护第二套物理求值器。
+5. session 结束时，未转移的 request-owned object 由 owner 统一回收。
+6. TCB、VSpace、Endpoint、Trap、CSpace 的名称不能直接变成新的 LAINIR 指令或
+   模糊的 `#primitive` 入口。
+
+参考 evaluator 的 external call 先经过 VM capability gate；gate 同时检查 TCB 状态和
+VM capability context。当前 context 由 `LainVm.cspace` 的两个 slot owner/active/external
+capability objects 表示，完整 CSpace capability table 和 transfer/revoke API 仍待接入。
+
+provider-neutral CSpace contract 已定义 capability object：每个对象带 name、owner 和
+active 状态，可以由当前 owner transfer 或 revoke；foreign owner、非 active capability
+和未绑定到 CSpace 的对象都会被拒绝。这个对象 contract 还没有替换参考 evaluator 中的
+布尔 policy。参考 evaluator 现在已经提供按 slot 的 `capability_transfer` 和
+`capability_revoke` VM control API，并由 external-call gate 使用更新后的状态。
+
+## 已有验证
+
+```text
+python scripts/check_compile_context.py
+python scripts/check_eval_object_matrix.py
+python scripts/check_lain_vm_contract.py
+python scripts/check_lainir_physical_safety.py
+python scripts/check_lainc_lainir_api_baseline.py
+```
+
+这些检查覆盖 owner transfer/release、step/allocation/recursion quota、capability mask，
+以及 scalar/type/module/AST result kind。owner handle 在 transfer 后只能由新 owner 使用，
+release 后不能再次使用或重复释放。
+
+`check_lain_vm_contract.py` 使用独立 recording provider 验证 VSpace owner/quota/reset
+和 TCB owner/state/step/suspend/resume/scheduler 规则，以及 Endpoint 的 rendezvous/cancel、CSpace
+的 capability allow/deny、Trap 的 kind/source/status 字段。这个 fixture 只固定对象之间
+的 API 语义，不伪装成 LAINIR 指令或真实运行时对象实现。
+
+`check_lainir_physical_safety.py` 验证参考解释器拒绝写入只读 `#data`、拒绝返回当前
+procedure activation 的 `#alloca` 地址，并拒绝 activation 内的越界 load。
+
+当前 evaluator 还会在 procedure 返回时失活该 activation 派生的地址句柄；后续地址
+解析拒绝使用失活句柄。这是向 LainVM activation lifetime 迁移的第一步，尚不等同于
+完整的 VSpace region table 或 TCB runtime。当前参考 evaluator 还为 VSpace 和地址句柄
+记录 owner，并在 VM 返回时通过 `release_vspace` 关闭逻辑 VSpace、失活所有地址句柄和
+activation frame；底层 `Memory.Bytes` 的物理释放仍由 provider 负责，不能由 evaluator
+直接清空 storage。
+
+## 后续扩展顺序
+
+多 TCB 扩展必须先增加独立的 `VSpaceV1`、`TCBV1`、`EndpointV1`、`TrapV1` 和
+`CSpaceV1` contract，分别提供 provider 实现和 fixture。上下文创建、挂起、恢复和
+销毁属于 VM control API。TCB 对 LAINIR 保持 opaque；上下文创建、挂起、恢复和销毁
+通过 VM scheduler 与 Endpoint contract 完成。只有这些 contract 在至少一个 provider
+上通过后，才进入软件 MMU、demand paging 或 Linux/bare-metal lowering。
