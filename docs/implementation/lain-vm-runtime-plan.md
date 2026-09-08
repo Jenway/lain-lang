@@ -423,7 +423,8 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    `Address`，地址解析和 `#lea` 派生都会拒绝过期 generation；release 会递增 VSpace
    generation，并清空 storage、Address 表和 activation 表。LAINIR 的 `EvalShape` 已把 object 判断、kind、owner、
    generation、owner transfer 和 release 纳入 provider API；当前 default provider 明确
-   声明自己只返回 scalar result，并以拒绝/空实现保持该边界。
+   声明自己只返回 scalar result。formal provider 的 compile-time evaluator 仍允许
+   `#addr` 作为内部 Value 返回，object adapter 接入前不能把它当作可跨 session 的结果。
 9. **后续：平台 lowering。** 在 nested continuation、单 TCB VSpace、
    Endpoint、Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和
    裸机 lowering。

@@ -161,6 +161,9 @@ owner transfer 和 release 组成；只支持 scalar 的 provider 必须显式�
 formal provider 的 VSpace 地址表也保存 generation；`address_at` 和 `#lea` 派生地址
 都会检查该字段，VSpace release 后旧地址不能再次解析，同时释放 storage、Address 表和
 activation 表。
+formal provider 的 compile-time evaluator 仍允许 `#addr` 作为内部 Value 返回；在
+object adapter 接入前，这些地址只能在 evaluator 生命周期内使用，不能直接跨 session
+发布。
 
 object payload 的 provider 责任按结果种类区分：`addr` 由 provider 声明指向的 backing
 对象及析构策略；`string` 必须区分静态借用与拥有的字符串存储；`func` 通常指向 artifact
