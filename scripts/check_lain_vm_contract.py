@@ -25,6 +25,17 @@ class ArenaHandle:
 
 
 @dataclass
+class ContinuationFrame:
+    procedure: int
+    region: int
+    position: int
+    activation: int
+    return_procedure: int
+    return_region: int
+    return_position: int
+
+
+@dataclass
 class VSpace:
     owner: int
     allocation_limit: int
@@ -83,6 +94,11 @@ class TCB:
     position: int = 0
     saved_position: int = 0
     suspend_reason: str = ""
+    frames: list[ContinuationFrame] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.frames is None:
+            self.frames = []
 
     def start(self, owner: int) -> None:
         if owner != self.owner or self.state != "READY":
@@ -100,6 +116,34 @@ class TCB:
         if self.state != "RUNNING" or position < 0:
             raise ValueError("TCB position update rejected")
         self.position = position
+        if self.frames:
+            self.frames[-1].position = position
+
+    def push_frame(self, procedure: int, region: int, activation: int) -> None:
+        if self.state != "RUNNING":
+            raise ValueError("continuation push rejected")
+        self.frames.append(
+            ContinuationFrame(
+                procedure=procedure,
+                region=region,
+                position=0,
+                activation=activation,
+                return_procedure=self.procedure,
+                return_region=self.region,
+                return_position=self.position,
+            )
+        )
+        self.procedure = procedure
+        self.region = region
+        self.position = 0
+
+    def pop_frame(self) -> None:
+        if self.state != "RUNNING" or not self.frames:
+            raise ValueError("continuation pop rejected")
+        frame = self.frames.pop()
+        self.procedure = frame.return_procedure
+        self.region = frame.return_region
+        self.position = frame.return_position
 
     def suspend(self, owner: int, reason: str = "yield") -> None:
         if owner != self.owner or self.state != "RUNNING":
@@ -281,9 +325,20 @@ def main() -> int:
     vspace.allocate(7, 8)
     expect_failure(lambda: vspace.allocate(7, 9), MemoryError)
     tcb.start(7)
-    tcb.procedure = 3
-    tcb.region = 5
+    tcb.push_frame(3, 5, 1)
     tcb.set_position(17)
+    tcb.push_frame(4, 6, 2)
+    tcb.set_position(23)
+    if (
+        len(tcb.frames) != 2
+        or tcb.procedure != 4
+        or tcb.region != 6
+        or tcb.frames[-1].position != 23
+    ):
+        raise SystemExit("continuation frame push lost current position")
+    tcb.pop_frame()
+    if tcb.procedure != 3 or tcb.region != 5 or tcb.position != 17:
+        raise SystemExit("continuation frame pop did not restore caller")
     tcb.consume_step()
     tcb.consume_step()
     expect_failure(tcb.consume_step, RuntimeError)
