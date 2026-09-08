@@ -38,7 +38,11 @@ pub fn build(b: *std.Build) void {
     const interpreter = addCLibrary(
         b,
         "lainir_interpreter",
-        &.{ "src/interpreter/interpreter.c", "src/interpreter/eval_source.c" },
+        &.{
+            "src/interpreter/interpreter.c",
+            "src/interpreter/eval_source.c",
+            "src/interpreter/vm_control.c",
+        },
         target,
         optimize,
     );
@@ -103,6 +107,22 @@ pub fn build(b: *std.Build) void {
         lainir_seed,
         "lainir-seed",
         "Run the LAIN-IR interpreter (interpreter|run subcommands)",
+    );
+
+    const vm_control_test = addCExecutable(
+        b,
+        "lainir-vm-control-test",
+        "src/cli/vm_control_test.c",
+        target,
+        optimize,
+    );
+    vm_control_test.root_module.linkLibrary(core);
+    vm_control_test.root_module.linkLibrary(interpreter);
+    _ = installNamed(
+        b,
+        vm_control_test,
+        "lainir-vm-control-test",
+        "Check the opaque LainVM control plane",
     );
 
     const lainir_lsp = addCExecutable(

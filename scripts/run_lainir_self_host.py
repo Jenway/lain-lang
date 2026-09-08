@@ -30,6 +30,7 @@ SEED_C_SOURCES = [
     ROOT / "seed" / "src" / "text" / "emitter.c",
     ROOT / "seed" / "src" / "interpreter" / "interpreter.c",
     ROOT / "seed" / "src" / "interpreter" / "eval_source.c",
+    ROOT / "seed" / "src" / "interpreter" / "vm_control.c",
 ]
 OUTPUT_DIR = ROOT / "zig-out" / "bin"
 BOOTSTRAP = OUTPUT_DIR / ("lainir-seed.exe" if os.name == "nt" else "lainir-seed")
