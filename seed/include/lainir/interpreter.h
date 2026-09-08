@@ -209,6 +209,13 @@ int lainir_vm_scheduler_resume(LainirVmScheduler *scheduler, uint64_t owner,
 int lainir_vm_scheduler_release(LainirVmScheduler *scheduler, uint64_t owner);
 int lainir_vm_scheduler_admit(LainirVmScheduler *scheduler, uint64_t owner,
                               LainirVmControl *control, uint64_t control_owner);
+/* Run one evaluator slice for the scheduler's current TCB.  The scheduler
+ * supplies the opaque control object to the backend and automatically
+ * releases current when the slice blocks or terminates. */
+LainirRunStatus lainir_vm_scheduler_run(
+    LainirVmScheduler *scheduler, uint64_t owner, uint64_t fuel,
+    const LainirRunRequest *request, LainirValue *result_out,
+    const char **error_out);
 LainirVmSliceResult lainir_vm_scheduler_finish(
     LainirVmScheduler *scheduler, uint64_t owner);
 

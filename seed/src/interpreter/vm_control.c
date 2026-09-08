@@ -581,6 +581,35 @@ int lainir_vm_scheduler_admit(LainirVmScheduler *scheduler, uint64_t owner,
   return 1;
 }
 
+LainirRunStatus lainir_vm_scheduler_run(
+    LainirVmScheduler *scheduler, uint64_t owner, uint64_t fuel,
+    const LainirRunRequest *request, LainirValue *result_out,
+    const char **error_out) {
+  LainirRunRequest run_request;
+  LainirVmControl *control;
+  uint64_t control_owner;
+  LainirRunStatus status;
+  if (!scheduler_owned(scheduler, owner) || !scheduler->current || !request ||
+      !result_out || fuel == 0)
+    return LAINIR_RUN_TRAP;
+  control = scheduler->current;
+  control_owner = scheduler->current_owner;
+  if (lainir_vm_control_state(control) != LAINIR_VM_RUNNING ||
+      (request->vm_control && request->vm_control != control))
+    return LAINIR_RUN_TRAP;
+  if (!lainir_vm_control_begin_slice(control, control_owner, fuel))
+    return LAINIR_RUN_TRAP;
+  run_request = *request;
+  run_request.vm_control = control;
+  run_request.vm_owner = control_owner;
+  status = lainir_run(&run_request, result_out, error_out);
+  if (lainir_vm_control_state(control) == LAINIR_VM_BLOCKED ||
+      lainir_vm_control_state(control) == LAINIR_VM_DEAD) {
+    (void)lainir_vm_scheduler_release(scheduler, owner);
+  }
+  return status;
+}
+
 LainirVmSliceResult lainir_vm_scheduler_finish(
     LainirVmScheduler *scheduler, uint64_t owner) {
   LainirVmSliceResult result;

@@ -73,14 +73,17 @@ Nested continuation 的完成标准是：挂起时保存每个 frame 的 locals�
 返回位置和表达式游标；恢复时消费带类型的 pending call result，不重新执行已完成的参数
 表达式；重复 resume、错误 owner、失活 activation 和残留 Endpoint wait 都必须被拒绝或
 转为 Trap。当前实现已覆盖多层 nested frame、表达式 cache、分支内挂起与按目标 frame
-匹配的 Endpoint `send` pending-result 队列；多个 TCB/Endpoint 的并行等待仍需接入 scheduler。
+匹配的 Endpoint `send` pending-result 队列；单个 Endpoint 的两个 TCB handoff 已接入
+scheduler 的 evaluator slice，多个并行等待仍需定义统一调度规则。
 
 多 TCB handoff 的 contract 是：scheduler 同时只选择一个 current TCB；Endpoint wait 只保留
 TCB control object、owner 和 payload；唤醒只作用于登记的 TCB；pending result 绑定目标
 TCB/frame；当前 Endpoint 保持单 sender/单 receiver rendezvous，不隐式提供 fanout 或广播。
 seed runtime 的 `LainirVmScheduler` 已实现 attach、start、suspend、release、resume、admit
 和 finish，并由 control fixture 验证唯一 current 槽位、Endpoint 阻塞释放、对端唤醒重新
-admit 和 pending result 消费；多个 TCB 共享同一 evaluator 执行循环仍是后续阶段。
+admit 和 pending result 消费；`lainir_vm_scheduler_run` 已将 current TCB 的一个 fuel
+slice 接入 `lainir_run`，并验证 sender/receiver 在同一 evaluator 入口上的交接。自动
+选择多个 runnable TCB、公平策略和并行 Endpoint wait 仍属于后续 contract。
 
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
 必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。

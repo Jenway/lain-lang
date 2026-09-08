@@ -327,6 +327,96 @@ static int scheduler_endpoint_handoff_test(void) {
   return ok;
 }
 
+static int scheduler_evaluator_handoff_test(void) {
+  const char *source =
+      "#extern #proc endpoint.send(#bits<64> %value) -> #bits<32>;\n"
+      "#extern #proc endpoint.receive() -> #bits<64>;\n"
+      "#proc receive() -> #bits<64> {\n"
+      "  #return #call endpoint.receive()\n"
+      "}\n"
+      "#proc send() -> #bits<32> {\n"
+      "  #return #call endpoint.send(42)\n"
+      "}\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  LainirVmScheduler *scheduler = NULL;
+  LainirVmEndpoint *endpoint = NULL;
+  LainirVmControl *sender = NULL;
+  LainirVmControl *receiver = NULL;
+  LainirCapabilityTable *sender_caps = NULL;
+  LainirCapabilityTable *receiver_caps = NULL;
+  LainirValue sender_result = {0};
+  LainirValue receiver_result = {0};
+  LainirRunRequest sender_request = {0};
+  LainirRunRequest receiver_request = {0};
+  const char *error = NULL;
+  int ok = 0;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
+    goto cleanup;
+  scheduler = lainir_vm_scheduler_new(7);
+  endpoint = lainir_vm_endpoint_new(7);
+  sender = lainir_vm_control_new(16);
+  receiver = lainir_vm_control_new(16);
+  sender_caps = lainir_caps_new();
+  receiver_caps = lainir_caps_new();
+  if (!scheduler || !endpoint || !sender || !receiver || !sender_caps ||
+      !receiver_caps || !lainir_vm_scheduler_attach(scheduler, 7, sender, 7) ||
+      !lainir_vm_scheduler_attach(scheduler, 7, receiver, 7))
+    goto cleanup;
+  LainirVmEndpointBinding sender_binding = {endpoint, sender, 7};
+  LainirVmEndpointBinding receiver_binding = {endpoint, receiver, 7};
+  if (!lainir_vm_endpoint_bind(sender_caps, "endpoint.send", "endpoint.receive",
+                               &sender_binding) ||
+      !lainir_vm_endpoint_bind(receiver_caps, "endpoint.send", "endpoint.receive",
+                               &receiver_binding) ||
+      !lainir_vm_scheduler_start(scheduler, 7, sender, 7))
+    goto cleanup;
+  sender_request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  sender_request.entry_name = "send";
+  sender_request.caps = sender_caps;
+  receiver_request.module = sender_request.module;
+  receiver_request.entry_name = "receive";
+  receiver_request.caps = receiver_caps;
+  if (lainir_vm_scheduler_run(scheduler, 7, 8, &sender_request,
+                              &sender_result, &error) != LAINIR_RUN_BLOCKED ||
+      lainir_vm_scheduler_current(scheduler) != NULL ||
+      lainir_vm_control_state(sender) != LAINIR_VM_BLOCKED) {
+    goto cleanup;
+  }
+  error = NULL;
+  if (!lainir_vm_scheduler_start(scheduler, 7, receiver, 7) ||
+      lainir_vm_scheduler_run(scheduler, 7, 8, &receiver_request,
+                              &receiver_result, &error) != LAINIR_RUN_OK ||
+      error || receiver_result.kind != LAINIR_VALUE_BITS ||
+      receiver_result.as.bits != 42 ||
+      lainir_vm_scheduler_current(scheduler) != NULL) {
+    goto cleanup;
+  }
+  error = NULL;
+  if (!lainir_vm_scheduler_admit(scheduler, 7, sender, 7) ||
+      lainir_vm_scheduler_run(scheduler, 7, 8, &sender_request,
+                              &sender_result, &error) != LAINIR_RUN_OK ||
+      error || sender_result.kind != LAINIR_VALUE_BITS ||
+      sender_result.as.bits != 1 ||
+      lainir_vm_scheduler_current(scheduler) != NULL) {
+    goto cleanup;
+  }
+  ok = 1;
+cleanup:
+  if (sender && lainir_vm_control_state(sender) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(sender, 7);
+  if (receiver && lainir_vm_control_state(receiver) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(receiver, 7);
+  lainir_caps_free(sender_caps);
+  lainir_caps_free(receiver_caps);
+  lainir_vm_scheduler_free(scheduler);
+  lainir_vm_endpoint_free(endpoint);
+  lainir_vm_control_free(sender);
+  lainir_vm_control_free(receiver);
+  lainir_module_handle_destroy(&handle);
+  return ok;
+}
+
 int main(void) {
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
@@ -367,6 +457,8 @@ int main(void) {
   if (!scheduler_handoff_test()) return fail("scheduler handoff failed");
   if (!scheduler_endpoint_handoff_test())
     return fail("scheduler endpoint handoff failed");
+  if (!scheduler_evaluator_handoff_test())
+    return fail("scheduler evaluator handoff failed");
 
   /* The interpreter consumes the provider-owned fuel gate at each instruction
    * boundary, exposes the active nested frame to a host callback, and resumes
