@@ -78,8 +78,11 @@ class TCB:
     capability_mask: int
     state: str = "READY"
     steps_used: int = 0
+    procedure: int = 0
+    region: int = 0
     position: int = 0
     saved_position: int = 0
+    suspend_reason: str = ""
 
     def start(self, owner: int) -> None:
         if owner != self.owner or self.state != "READY":
@@ -98,16 +101,18 @@ class TCB:
             raise ValueError("TCB position update rejected")
         self.position = position
 
-    def suspend(self, owner: int) -> None:
+    def suspend(self, owner: int, reason: str = "yield") -> None:
         if owner != self.owner or self.state != "RUNNING":
             raise ValueError("TCB suspend rejected")
         self.saved_position = self.position
+        self.suspend_reason = reason
         self.state = "BLOCKED"
 
     def resume(self, owner: int) -> None:
         if owner != self.owner or self.state != "BLOCKED":
             raise ValueError("TCB resume rejected")
         self.position = self.saved_position
+        self.suspend_reason = ""
         self.state = "RUNNING"
 
     def finish(self, owner: int) -> None:
@@ -276,17 +281,23 @@ def main() -> int:
     vspace.allocate(7, 8)
     expect_failure(lambda: vspace.allocate(7, 9), MemoryError)
     tcb.start(7)
+    tcb.procedure = 3
+    tcb.region = 5
     tcb.set_position(17)
     tcb.consume_step()
     tcb.consume_step()
     expect_failure(tcb.consume_step, RuntimeError)
-    tcb.suspend(7)
-    if tcb.state != "BLOCKED" or tcb.saved_position != 17:
+    tcb.suspend(7, "endpoint")
+    if (
+        tcb.state != "BLOCKED"
+        or tcb.saved_position != 17
+        or tcb.suspend_reason != "endpoint"
+    ):
         raise SystemExit("TCB suspend did not preserve execution position")
     expect_failure(lambda: tcb.suspend(7), ValueError)
     tcb.position = 99
     tcb.resume(7)
-    if tcb.state != "RUNNING" or tcb.position != 17:
+    if tcb.state != "RUNNING" or tcb.position != 17 or tcb.suspend_reason:
         raise SystemExit("TCB resume did not restore execution position")
     expect_failure(lambda: tcb.resume(7), ValueError)
     scheduler = Scheduler()
