@@ -167,6 +167,46 @@ class TCB:
 
 
 @dataclass
+class VmControl:
+    """Opaque provider-owned controller for a resumable instruction slice."""
+
+    owner: int
+    tcb: TCB
+    program: dict[tuple[int, int], list[tuple]]
+    root_procedure: int
+    root_region: int
+
+    def __post_init__(self) -> None:
+        self.tcb.start(self.owner)
+        self.tcb.push_frame(self.root_procedure, self.root_region, 1)
+
+    def run_slice(self, fuel: int) -> str:
+        if fuel <= 0 or self.tcb.state != "RUNNING":
+            raise ValueError("VM slice rejected")
+        consumed = 0
+        while consumed < fuel:
+            if not self.tcb.frames:
+                self.tcb.finish(self.owner)
+                return "DONE"
+            frame = self.tcb.frames[-1]
+            code = self.program.get((frame.procedure, frame.region))
+            if code is None:
+                raise ValueError("missing continuation code")
+            if frame.position >= len(code):
+                self.tcb.pop_frame()
+                continue
+            operation = code[frame.position]
+            self.tcb.set_position(frame.position + 1)
+            self.tcb.consume_step()
+            consumed += 1
+            if operation[0] == "call":
+                self.tcb.push_frame(operation[1], operation[2], operation[3])
+            elif operation[0] == "return":
+                self.tcb.pop_frame()
+        return "RUNNABLE"
+
+
+@dataclass
 class Scheduler:
     """Single-runnable control plane used before multi-TCB scheduling."""
 
@@ -401,6 +441,35 @@ def main() -> int:
     vspace.reset(7)
     if vspace.generation != generation_after_finish + 1:
         raise SystemExit("VSpace reset did not advance its generation")
+    slice_space = VSpace(owner=7, allocation_limit=0)
+    slice_tcb = TCB(owner=7, vspace=slice_space, step_limit=0, capability_mask=0)
+    slice_vm = VmControl(
+        owner=7,
+        tcb=slice_tcb,
+        root_procedure=1,
+        root_region=0,
+        program={
+            (1, 0): [("call", 2, 1, 2), ("nop",), ("return",)],
+            (2, 1): [("nop",), ("return",)],
+        },
+    )
+    if slice_vm.run_slice(1) != "RUNNABLE":
+        raise SystemExit("VM slice did not yield after fuel exhaustion")
+    if (
+        len(slice_tcb.frames) != 2
+        or slice_tcb.procedure != 2
+        or slice_tcb.region != 1
+        or slice_tcb.position != 0
+    ):
+        raise SystemExit("VM slice did not preserve callee continuation")
+    if slice_vm.run_slice(1) != "RUNNABLE":
+        raise SystemExit("VM slice did not resume callee")
+    if slice_tcb.procedure != 2 or slice_tcb.position != 1:
+        raise SystemExit("VM slice lost callee position")
+    while slice_tcb.state != "DEAD":
+        slice_vm.run_slice(1)
+    if slice_space.reset_count != 1:
+        raise SystemExit("VM completion did not release its VSpace")
     released_space = VSpace(owner=7, allocation_limit=0)
     released_handle = released_space.allocate_handle(7)
     released_space.release(7)
