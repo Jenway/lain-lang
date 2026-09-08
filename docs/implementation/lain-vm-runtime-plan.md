@@ -165,7 +165,8 @@ slice 的 fuel，返回 `RUNNABLE`、`BLOCKED`、`DONE` 或 `TRAPPED`；它不�
 Endpoint 或 continuation 编译成 LAINIR 数据，也不增加 `#init_context`、`#swap_context`
 之类的 LAINIR 指令。挂起时 activation 保持有效，TCB 终止时才统一失活其 activation
 地址并释放 VSpace。只有实现这条恢复路径后，才可以把 scheduler fixture 描述为真实协程
-行为。
+行为。参考 evaluator 的 slice fuel 只在 instruction boundary 检查；表达式内部只计全局
+step quota，避免在表达式副作用执行到一半时暂停。
 
 ## 3. 阶段一：建立 LainVM 核心对象
 
@@ -290,7 +291,10 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    执行，不能从保存的 instruction position 恢复。下一步先把 root region 切成可保存的
    VM slice，再将 procedure/region/position、suspend reason 和调用帧链放入 TCB 的
    continuation 状态；当前 `CallFrame` 已记录调用链，下一步将用
-   `run_slice` 返回值接入 scheduler。没有真实恢复路径前，不宣称已经支持协程。
+   `run_slice` 返回值接入 scheduler。参考 evaluator 已有内部 `run_slice` 入口，但
+   `LainVm` 含有动态 arena，不能作为普通 Lain struct value 返回；持久 scheduler state
+   必须由 VM/provider 的 opaque control object 持有，再由 backend control API 驱动。仍需要
+   针对可暂停 root region 的行为 fixture；没有真实恢复路径前，不宣称已经支持协程。
 4. **接入 Endpoint 的真实 ownership 检查**：fixture 已覆盖 rendezvous 和取消，下一步
    让 Endpoint 等待项只保存受 capability 授权的 TCB/owned handle，不保存裸 activation
    地址，并把非法状态转换转成统一 Trap。

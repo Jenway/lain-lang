@@ -37,9 +37,11 @@ Endpoint contract 支持单发送者和单接收者 rendezvous。没有对端时
 continuation 属于 TCB 的 VM 内部状态。参考 evaluator 当前已经保存 procedure、region、
 instruction offset、suspend reason 和 `CallFrame` 调用帧链。可恢复的 slice 仍需要把该
 调用帧链接入 scheduler；切换只发生在 instruction boundary 或
-Endpoint 等待点。`run_slice` 的结果固定为 `RUNNABLE`、`BLOCKED`、`DONE` 或 `TRAPPED`。
-当前参考 evaluator 还没有这个恢复循环，现有 suspend/resume API 只验证状态转换和
-position 保存。
+Endpoint 等待点。`run_slice` 的结果固定为 `RUNNABLE`、`BLOCKED`、`DONE` 或 `TRAPPED`；
+参考 VM 内部已提供该入口，slice fuel 只在 instruction boundary 检查，表达式内部只计
+全局 step quota。含有动态 arena 的 `LainVm` 不通过普通 Lain struct value 返回；持久
+scheduler state 由 VM/provider 的 opaque control object 持有。当前 contract 还缺少可暂停
+root region 的行为 fixture，现有 suspend/resume API 仍同时验证状态转换和 position 保存。
 
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
 必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。
