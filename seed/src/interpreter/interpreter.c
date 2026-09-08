@@ -38,6 +38,18 @@ typedef struct LainirFrame {
   struct LainirFrame *caller;
 } LainirFrame;
 
+/* A resumable root invocation owns its frame storage across calls to
+ * lainir_run.  Nested calls remain atomic within a slice for now; yielding is
+ * only permitted at the root instruction boundary so an expression is never
+ * re-entered after a partial side effect. */
+typedef struct {
+  L1Subroutine *module;
+  L1Subroutine *entry;
+  LainirFrame frame;
+  L1Block *next_block;
+  L1Instruction *next_inst;
+} LainirContinuation;
+
 typedef struct {
   const char *name;
   L1Subroutine *sub;
@@ -81,6 +93,9 @@ typedef struct {
   LainirVmControl *vm_control;
   uint64_t vm_owner;
   int vm_slice_yielded;
+  LainirContinuation *continuation;
+  int continuation_tracking;
+  int instruction_boundary;
   uint64_t trace_expr_kinds[64];
   uint64_t trace_inst_kinds[16];
   uint64_t trace_meta_cache_hits;
@@ -92,6 +107,8 @@ static LainirValue interp_eval_expr(LainirInterpreter *, LainirFrame *, L1Expr *
 static void interp_exec_block(LainirInterpreter *, LainirFrame *, L1Block *);
 static LainirValue interp_call_sub(LainirInterpreter *, L1Subroutine *,
                                     const LainirValue *, uint32_t);
+static LainirValue interp_call_root_resumable(
+    LainirInterpreter *, L1Subroutine *, const LainirValue *, uint32_t);
 static void interp_trap(LainirInterpreter *, const char *);
 static void interp_trace_finish(LainirInterpreter *);
 static int interp_try_fast_builtin(LainirInterpreter *, L1Subroutine *,
@@ -263,7 +280,8 @@ static L1Subroutine *interp_find_sub(LainirInterpreter *interp,
 }
 
 static int interp_tick(LainirInterpreter *interp) {
-  if (interp->vm_control &&
+  if (interp->vm_control && interp->instruction_boundary &&
+      interp->call_depth <= 1 &&
       !lainir_vm_control_consume_step(interp->vm_control, interp->vm_owner)) {
     if (lainir_vm_control_slice_exhausted(interp->vm_control)) {
       interp->vm_slice_yielded = 1;
@@ -1189,8 +1207,26 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
 static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
                                L1Block *block) {
   L1Instruction *inst = block->body;
+  int track = interp->continuation_tracking && interp->continuation &&
+              frame == &interp->continuation->frame;
+  if (track && interp->continuation->next_block == block &&
+      interp->continuation->next_inst)
+    inst = interp->continuation->next_inst;
   while (inst) {
-    if (!interp_tick(interp)) return;
+    if (track) {
+      interp->continuation->next_block = block;
+      interp->continuation->next_inst = inst;
+      if (interp->vm_control)
+        lainir_vm_control_set_position(
+            interp->vm_control, interp->vm_owner,
+            (uint64_t)(uintptr_t)block,
+            (uint64_t)(uintptr_t)inst);
+    }
+    int saved_boundary = interp->instruction_boundary;
+    interp->instruction_boundary = 1;
+    int ticked = interp_tick(interp);
+    interp->instruction_boundary = saved_boundary;
+    if (!ticked) return;
     if (interp->trace_enabled && (uint32_t)inst->kind < 16)
       interp->trace_inst_kinds[inst->kind]++;
     if (interp->should_return || interp->should_break || interp->should_continue)
@@ -1237,11 +1273,17 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
       LainirValue cond = interp_eval_expr(interp, frame, inst->data.if_stmt.condition);
       if (interp->error) return;
       if (interp_value_bits(interp, cond, "expected bits for if condition")) {
+        int saved_tracking = interp->continuation_tracking;
+        interp->continuation_tracking = 0;
         if (inst->data.if_stmt.then_body)
           interp_exec_block(interp, frame, inst->data.if_stmt.then_body);
+        interp->continuation_tracking = saved_tracking;
       } else {
+        int saved_tracking = interp->continuation_tracking;
+        interp->continuation_tracking = 0;
         if (inst->data.if_stmt.else_body)
           interp_exec_block(interp, frame, inst->data.if_stmt.else_body);
+        interp->continuation_tracking = saved_tracking;
       }
       break;
     }
@@ -1252,7 +1294,10 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
       interp->should_break = 0;
       interp->should_continue = 0;
       while (1) {
+        int saved_tracking = interp->continuation_tracking;
+        interp->continuation_tracking = 0;
         interp_exec_block(interp, frame, inst->data.loop.body);
+        interp->continuation_tracking = saved_tracking;
         if (interp->error) return;
         if (interp->should_return) break;
         if (interp->should_break) { interp->should_break = 0; break; }
@@ -1282,6 +1327,10 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
       (void)interp_eval_expr(interp, frame, inst->data.call_inst.expr);
       if (interp->error || interp->vm_slice_yielded) return;
       break;
+    }
+    if (track) {
+      interp->continuation->next_block = inst->next ? block : block->next;
+      interp->continuation->next_inst = inst->next;
     }
     inst = inst->next;
   }
@@ -2522,11 +2571,117 @@ static int interp_try_fast_builtin(LainirInterpreter *interp,
  * Subroutine call
  * ═══════════════════════════════════════════════════════════════ */
 
+static void interp_destroy_continuation(LainirContinuation *continuation) {
+  if (!continuation) return;
+  interp_free_frame(&continuation->frame);
+  free(continuation);
+}
+
+static LainirValue interp_call_root_resumable(
+    LainirInterpreter *interp, L1Subroutine *sub,
+    const LainirValue *args, uint32_t arg_count) {
+  LainirContinuation *continuation = NULL;
+  void *saved_state = lainir_vm_control_backend_state(interp->vm_control);
+  if (saved_state) {
+    continuation = (LainirContinuation *)saved_state;
+    if (continuation->module != interp->module || continuation->entry != sub) {
+      interp_trap(interp, "VM continuation entry mismatch");
+      return lainir_value_unit();
+    }
+  } else {
+    continuation = calloc(1, sizeof(*continuation));
+    if (!continuation) {
+      interp_trap(interp, "out of memory");
+      return lainir_value_unit();
+    }
+    continuation->module = interp->module;
+    continuation->entry = sub;
+    continuation->frame.sub = sub;
+    continuation->frame.args = continuation->frame.args_inline;
+    continuation->frame.locals = continuation->frame.locals_inline;
+    continuation->frame.local_cap =
+        sizeof(continuation->frame.locals_inline) /
+        sizeof(continuation->frame.locals_inline[0]);
+    if (arg_count) {
+      if (arg_count > sizeof(continuation->frame.args_inline) /
+                          sizeof(continuation->frame.args_inline[0])) {
+        continuation->frame.args = calloc(arg_count, sizeof(LainirValue));
+        continuation->frame.args_heap = 1;
+      }
+      if (!continuation->frame.args) {
+        interp_destroy_continuation(continuation);
+        interp_trap(interp, "out of memory");
+        return lainir_value_unit();
+      }
+      for (uint32_t i = 0; i < arg_count; i++) {
+        continuation->frame.args[i] = interp_coerce_physical(
+            interp, args[i], i < sub->param_count ? sub->param_tys[i] : NULL);
+        if (interp->error) {
+          interp_destroy_continuation(continuation);
+          return lainir_value_unit();
+        }
+      }
+    }
+    continuation->frame.arg_count = arg_count;
+    if (!lainir_vm_control_set_backend_state(
+            interp->vm_control, interp->vm_owner, continuation) ||
+        !lainir_vm_control_push_frame(
+            interp->vm_control, interp->vm_owner,
+            (uint64_t)(uintptr_t)sub, (uint64_t)(uintptr_t)sub->blocks,
+            (uint64_t)(uintptr_t)&continuation->frame)) {
+      (void)lainir_vm_control_set_backend_state(
+          interp->vm_control, interp->vm_owner, NULL);
+      interp_destroy_continuation(continuation);
+      interp_trap(interp, "VM continuation setup rejected");
+      return lainir_value_unit();
+    }
+  }
+
+  interp->continuation = continuation;
+  interp->active_frame = &continuation->frame;
+  interp->call_depth = 1;
+  interp->should_return = 0;
+  interp->return_value = lainir_value_unit();
+
+  L1Block *block = continuation->next_block
+                       ? continuation->next_block : sub->blocks;
+  while (block) {
+    interp->continuation_tracking = 1;
+    interp_exec_block(interp, &continuation->frame, block);
+    interp->continuation_tracking = 0;
+    if (interp->vm_slice_yielded) return lainir_value_unit();
+    if (interp->error || interp->should_return) break;
+    block = block->next;
+  }
+  if (interp->error) {
+    (void)lainir_vm_control_set_backend_state(
+        interp->vm_control, interp->vm_owner, NULL);
+    interp_destroy_continuation(continuation);
+    return lainir_value_unit();
+  }
+  LainirValue result = interp->return_value;
+  if (!interp->should_return) {
+    interp_trap(interp, "procedure did not return");
+    (void)lainir_vm_control_set_backend_state(
+        interp->vm_control, interp->vm_owner, NULL);
+    interp_destroy_continuation(continuation);
+    return lainir_value_unit();
+  }
+  (void)lainir_vm_control_pop_frame(interp->vm_control, interp->vm_owner);
+  (void)lainir_vm_control_set_backend_state(
+      interp->vm_control, interp->vm_owner, NULL);
+  interp_destroy_continuation(continuation);
+  (void)lainir_vm_control_finish(interp->vm_control, interp->vm_owner);
+  return result;
+}
+
 static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
                                     const LainirValue *args, uint32_t arg_count) {
   LainirValue fast_result;
   if (interp_try_fast_builtin(interp, sub, args, arg_count, &fast_result))
     return fast_result;
+  if (interp->vm_control && interp->call_depth == 0)
+    return interp_call_root_resumable(interp, sub, args, arg_count);
   LainirFrame frame; memset(&frame, 0, sizeof(frame));
   frame.args = frame.args_inline;
   frame.locals = frame.locals_inline;

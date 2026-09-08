@@ -50,7 +50,8 @@ int main(void) {
       "  #return 42\n"
       "}\n"
       "#proc main() -> #bits<32> {\n"
-      "  #return #call helper()\n"
+      "  #let %value: #bits<32> = #call helper()\n"
+      "  #return %value\n"
       "}\n";
   L1Diagnostic diagnostic = {0};
   LainirModuleHandle *handle = NULL;
@@ -80,7 +81,25 @@ int main(void) {
     lainir_vm_control_free(control);
     return fail("interpreter did not report a VM slice boundary");
   }
-  lainir_vm_control_finish(control, 9);
+  const LainirVmFrame *saved_frame = lainir_vm_control_current_frame(control);
+  if (!saved_frame || !saved_frame->procedure || !saved_frame->position) {
+    lainir_module_handle_destroy(&handle);
+    lainir_vm_control_free(control);
+    return fail("interpreter did not save continuation position");
+  }
+  if (!lainir_vm_control_begin_slice(control, 9, 1)) {
+    lainir_module_handle_destroy(&handle);
+    lainir_vm_control_free(control);
+    return fail("interpreter resume slice setup failed");
+  }
+  error = NULL;
+  run_status = lainir_run(&request, &result, &error);
+  if (run_status != LAINIR_RUN_OK || error || result.kind != LAINIR_VALUE_BITS ||
+      result.as.bits != 42 || lainir_vm_control_state(control) != LAINIR_VM_DEAD) {
+    lainir_module_handle_destroy(&handle);
+    lainir_vm_control_free(control);
+    return fail("interpreter continuation did not resume to completion");
+  }
   lainir_vm_control_free(control);
   lainir_module_handle_destroy(&handle);
   puts("PASS LAIN-VM opaque control API");

@@ -253,7 +253,7 @@ static int seed_run(int argc, char **argv) {
   L1Subroutine *module;
   LainirValue *args = NULL;
   LainirValue result = lainir_value_unit();
-  LainirRunRequest request;
+  LainirRunRequest request = {0};
   const char *error = NULL;
   LainirRunStatus status;
   LainirCapabilityTable *caps = NULL;

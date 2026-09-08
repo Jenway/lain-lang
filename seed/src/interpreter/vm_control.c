@@ -15,6 +15,7 @@ struct LainirVmControl {
   LainirVmFrame *frames;
   uint32_t frame_count;
   uint32_t frame_capacity;
+  void *backend_state;
 };
 
 static int vm_owned(const LainirVmControl *control, uint64_t owner) {
@@ -165,11 +166,24 @@ const LainirVmFrame *lainir_vm_control_current_frame(
   return &control->frames[control->frame_count - 1];
 }
 
+void *lainir_vm_control_backend_state(const LainirVmControl *control) {
+  return control ? control->backend_state : NULL;
+}
+
+int lainir_vm_control_set_backend_state(LainirVmControl *control,
+                                        uint64_t owner, void *state) {
+  if (!vm_owned(control, owner) || control->state == LAINIR_VM_DEAD)
+    return 0;
+  control->backend_state = state;
+  return 1;
+}
+
 LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
                                              uint64_t owner) {
   if (!vm_owned(control, owner) || control->state != LAINIR_VM_RUNNING)
     return LAINIR_VM_TRAPPED;
   control->frame_count = 0;
+  control->backend_state = NULL;
   control->state = LAINIR_VM_DEAD;
   control->slice_fuel = 0;
   control->result = LAINIR_VM_DONE;
