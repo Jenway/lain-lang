@@ -8,7 +8,8 @@ typedef enum {
   LAINIR_RUN_NO_ENTRY = 1,
   LAINIR_RUN_BAD_CALL = 2,
   LAINIR_RUN_TRAP = 3,
-  LAINIR_RUN_SLICE = 4
+  LAINIR_RUN_SLICE = 4,
+  LAINIR_RUN_BLOCKED = 5
 } LainirRunStatus;
 
 typedef enum {
@@ -64,6 +65,12 @@ typedef struct LainirVmControl LainirVmControl;
 typedef struct LainirVmEndpoint LainirVmEndpoint;
 
 typedef struct {
+  LainirVmEndpoint *endpoint;
+  LainirVmControl *control;
+  uint64_t owner;
+} LainirVmEndpointBinding;
+
+typedef struct {
   L1Subroutine *module;
   const char *entry_name;
   const LainirValue *args;
@@ -94,6 +101,12 @@ typedef enum {
 enum {
   LAINIR_VM_SUSPEND_YIELD = 1,
   LAINIR_VM_SUSPEND_ENDPOINT = 2
+};
+
+enum {
+  LAINIR_VM_ENDPOINT_RESULT_SEND = 1,
+  LAINIR_VM_ENDPOINT_RESULT_RECEIVE = 2,
+  LAINIR_VM_ENDPOINT_RESULT_CANCELLED = 3
 };
 
 typedef struct {
@@ -132,6 +145,9 @@ const LainirVmFrame *lainir_vm_control_current_frame(
 void *lainir_vm_control_backend_state(const LainirVmControl *control);
 int lainir_vm_control_set_backend_state(LainirVmControl *control,
                                          uint64_t owner, void *state);
+int lainir_vm_control_take_endpoint_result(LainirVmControl *control,
+                                            uint64_t owner, uint32_t *kind_out,
+                                            uint64_t *value_out);
 LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
                                              uint64_t owner);
 
@@ -148,7 +164,10 @@ int lainir_vm_endpoint_receive(LainirVmEndpoint *endpoint, uint64_t owner,
                                LainirVmControl *receiver,
                                uint64_t receiver_owner, uint64_t *value_out);
 int lainir_vm_endpoint_cancel(LainirVmEndpoint *endpoint, uint64_t owner,
-                               LainirVmControl *control, uint64_t control_owner);
+                              LainirVmControl *control, uint64_t control_owner);
+int lainir_vm_endpoint_bind(LainirCapabilityTable *caps,
+                            const char *send_name, const char *receive_name,
+                            LainirVmEndpointBinding *binding);
 
 /* Optional observer invoked immediately after each scalar #eval is
  * materialized by lainir_fold_module.  The value is borrowed by the caller
