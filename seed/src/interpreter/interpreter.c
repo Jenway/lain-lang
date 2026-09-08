@@ -2955,6 +2955,8 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
   interp_trace_finish(&interp);
   free(interp.sub_index);
   if (interp.error) {
+    if (interp.vm_control)
+      (void)lainir_vm_control_abort(interp.vm_control, interp.vm_owner);
     if (error_out) *error_out = interp.error;
     return LAINIR_RUN_TRAP;
   }

@@ -180,6 +180,8 @@ int lainir_vm_control_take_endpoint_result(LainirVmControl *control,
                                             uint64_t *value_out);
 LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
                                              uint64_t owner);
+LainirVmSliceResult lainir_vm_control_abort(LainirVmControl *control,
+                                            uint64_t owner);
 
 /* Provider-owned single-sender/single-receiver rendezvous.  Waiting entries
  * retain only the TCB control object, its owner token, and a scalar payload;

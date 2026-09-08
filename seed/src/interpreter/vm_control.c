@@ -440,3 +440,16 @@ LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
   control->result = LAINIR_VM_DONE;
   return control->result;
 }
+
+LainirVmSliceResult lainir_vm_control_abort(LainirVmControl *control,
+                                            uint64_t owner) {
+  if (!vm_owned(control, owner) || control->state == LAINIR_VM_DEAD)
+    return LAINIR_VM_TRAPPED;
+  control->frame_count = 0;
+  control->backend_state = NULL;
+  control->state = LAINIR_VM_DEAD;
+  control->slice_fuel = 0;
+  control->slice_exhausted = 0;
+  control->result = LAINIR_VM_TRAPPED;
+  return control->result;
+}
