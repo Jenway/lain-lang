@@ -148,6 +148,11 @@ stale，并在 session reset/release 或显式 release/free 时调用 provider p
 仍负责定义 payload 本身的所有权。`lainir_vm_session_free` 也会执行同一兜底回收并使
 残留 handle 脱离 session，避免 handle 在 session 内存释放后继续保存悬空指针。
 
+object payload 的 provider 责任按结果种类区分：`addr` 由 provider 声明指向的 backing
+对象及析构策略；`string` 必须区分静态借用与拥有的字符串存储；`func` 通常指向 artifact
+内不可变的 procedure，不应由 VM 任意释放。VM 只保存 `LainirValue` 描述和注册的回调，
+不根据 kind 猜测 payload 的物理释放方式。
+
 provider-neutral CSpace contract 已定义 capability object：每个对象带 name、owner 和
 active 状态，可以由当前 owner transfer 或 revoke；foreign owner、非 active capability
 和未绑定到 CSpace 的对象都会被拒绝。参考 evaluator 已用两个 capability slot 替换旧的

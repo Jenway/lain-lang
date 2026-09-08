@@ -153,11 +153,17 @@ static int result_handle_generation_test(void) {
   LainirVmSession *session = lainir_vm_session_new(7);
   LainirVmSession *foreign = lainir_vm_session_new(8);
   LainirVmSession *orphan = NULL;
+  LainirVmSession *typed_session = NULL;
   LainirVmResultHandle *handle = NULL;
   LainirVmResultHandle *stale = NULL;
   LainirVmResultHandle *orphan_handle = NULL;
   LainirValue source = lainir_value_bits(55, 32);
   LainirValue copied = {0};
+  LainirValue object_values[3] = {
+      lainir_value_addr((void *)(uintptr_t)0x10),
+      lainir_value_string("owned-string"),
+      lainir_value_func((L1Subroutine *)(uintptr_t)0x20),
+  };
   result_payload_free_calls = 0;
   int ok = 0;
   if (!session || !foreign ||
@@ -189,14 +195,29 @@ static int result_handle_generation_test(void) {
   lainir_vm_session_free(orphan);
   orphan = NULL;
   if (lainir_vm_result_handle_use(orphan_handle, NULL, 7, &copied) ||
-      result_payload_free_calls != 3)
+      result_payload_free_calls != 3 ||
+      !(typed_session = lainir_vm_session_new(7)))
     goto cleanup;
+  for (uint32_t i = 0; i < 3; i++) {
+    LainirVmResultHandle *typed =
+        lainir_vm_result_handle_new(
+            typed_session, 7, &object_values[i], NULL, NULL);
+    if (!typed ||
+        !lainir_vm_result_handle_use(typed, typed_session, 7, &copied) ||
+        copied.kind != object_values[i].kind ||
+        !lainir_vm_result_handle_release(typed, 7)) {
+      lainir_vm_result_handle_free(typed);
+      goto cleanup;
+    }
+    lainir_vm_result_handle_free(typed);
+  }
   ok = 1;
 cleanup:
   lainir_vm_result_handle_free(orphan_handle);
   lainir_vm_result_handle_free(stale);
   lainir_vm_result_handle_free(handle);
   lainir_vm_session_free(orphan);
+  lainir_vm_session_free(typed_session);
   lainir_vm_session_free(foreign);
   lainir_vm_session_free(session);
   return ok;

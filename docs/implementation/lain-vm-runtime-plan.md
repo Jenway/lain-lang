@@ -153,7 +153,9 @@ seed control plane 现在提供最小的 `LainirVmSession` opaque 对象：它�
 use；session reset/release 会调用注册的 payload destructor。`lainir_run_owned_result` 已把
 实际 evaluator 的 object result 包装成该 handle；剩余工作是为不同 payload 类型接入各
 provider 的析构策略。session free 也会执行兜底析构并解除残留 handle 的 session 引用，
-避免释放顺序造成悬空句柄。
+避免释放顺序造成悬空句柄。当前 contract fixture 已覆盖 addr、string、func 三类描述符；
+下一步只需为各 provider 的具体 backing object 注册对应 destructor，不改变 VM 的统一
+generation 规则。
 
 这些检查是迁移的起点，不代表 LainVM runtime 已经存在。
 
