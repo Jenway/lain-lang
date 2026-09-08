@@ -102,7 +102,7 @@ static int endpoint_dispatch_test(void) {
       "  #return #call endpoint.receive()\n"
       "}\n"
       "#proc receive_helper() -> #bits<64> {\n"
-      "  #return #call receive_leaf()\n"
+      "  #return #add(#call test.make_value(), #call receive_leaf())\n"
       "}\n"
       "#proc receive_main() -> #bits<64> {\n"
       "  #return #call receive_helper()\n"
@@ -145,6 +145,8 @@ static int endpoint_dispatch_test(void) {
       !lainir_vm_control_start(sender, 7) ||
       !lainir_vm_endpoint_bind(receiver_caps, "endpoint.send",
                                "endpoint.receive", &receiver_binding) ||
+      !lainir_caps_add(receiver_caps, "test.make_value", make_value,
+                       &counter) ||
       !lainir_vm_endpoint_bind(sender_caps, "endpoint.send",
                                "endpoint.receive", &sender_binding) ||
       !lainir_caps_add(sender_caps, "test.make_value", make_value,
@@ -175,14 +177,14 @@ static int endpoint_dispatch_test(void) {
   if (!lainir_vm_control_begin_slice(receiver, 7, 1) ||
       lainir_run(&receiver_request, &receiver_result, &error) != LAINIR_RUN_OK ||
       error || receiver_result.kind != LAINIR_VALUE_BITS ||
-      receiver_result.as.bits != 99 ||
+      receiver_result.as.bits != 198 ||
       lainir_vm_control_state(receiver) != LAINIR_VM_DEAD)
     goto cleanup;
   error = NULL;
   if (!lainir_vm_control_begin_slice(sender, 7, 1) ||
       lainir_run(&sender_request, &sender_result, &error) != LAINIR_RUN_OK ||
       error || sender_result.kind != LAINIR_VALUE_BITS ||
-      sender_result.as.bits != 1 || counter.calls != 1 ||
+      sender_result.as.bits != 1 || counter.calls != 2 ||
       lainir_vm_control_state(sender) != LAINIR_VM_DEAD)
     goto cleanup;
   ok = 1;

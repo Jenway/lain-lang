@@ -39,6 +39,11 @@ typedef struct LainirFrame {
 } LainirFrame;
 
 typedef struct LainirNestedContinuation LainirNestedContinuation;
+typedef struct {
+  LainirFrame *frame;
+  L1Expr *expr;
+  LainirValue value;
+} LainirExprCacheEntry;
 
 /* A resumable root invocation owns its frame storage across calls to
  * lainir_run.  Nested frames are kept as a linked stack when an Endpoint
@@ -61,6 +66,9 @@ typedef struct {
   int pending_nested_result;
   L1Subroutine *pending_nested_target;
   LainirValue pending_nested_value;
+  LainirExprCacheEntry *expr_cache;
+  uint32_t expr_cache_count;
+  uint32_t expr_cache_capacity;
 } LainirContinuation;
 
 typedef struct {
@@ -976,8 +984,65 @@ static LainirValue interp_eval_block(LainirInterpreter *interp,
   return result;
 }
 
-static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *frame,
-                                     L1Expr *expr) {
+static int interp_expr_cache_lookup(LainirInterpreter *interp,
+                                    LainirFrame *frame, L1Expr *expr,
+                                    LainirValue *value_out) {
+  LainirContinuation *continuation = interp->continuation;
+  if (!continuation) return 0;
+  for (uint32_t i = 0; i < continuation->expr_cache_count; i++) {
+    LainirExprCacheEntry *entry = &continuation->expr_cache[i];
+    if (entry->frame == frame && entry->expr == expr) {
+      if (value_out) *value_out = entry->value;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void interp_expr_cache_store(LainirInterpreter *interp,
+                                    LainirFrame *frame, L1Expr *expr,
+                                    LainirValue value) {
+  LainirContinuation *continuation = interp->continuation;
+  if (!continuation || interp->error || interp->vm_blocked ||
+      interp->vm_slice_yielded)
+    return;
+  if (continuation->expr_cache_count == continuation->expr_cache_capacity) {
+    uint32_t next = continuation->expr_cache_capacity
+        ? continuation->expr_cache_capacity * 2 : 16;
+    LainirExprCacheEntry *entries = realloc(
+        continuation->expr_cache, next * sizeof(*entries));
+    if (!entries) return;
+    continuation->expr_cache = entries;
+    continuation->expr_cache_capacity = next;
+  }
+  continuation->expr_cache[continuation->expr_cache_count++] =
+      (LainirExprCacheEntry){frame, expr, value};
+}
+
+static void interp_expr_cache_clear_frame(LainirInterpreter *interp,
+                                          LainirFrame *frame) {
+  LainirContinuation *continuation = interp->continuation;
+  if (!continuation) return;
+  uint32_t write = 0;
+  for (uint32_t i = 0; i < continuation->expr_cache_count; i++) {
+    if (continuation->expr_cache[i].frame != frame)
+      continuation->expr_cache[write++] = continuation->expr_cache[i];
+  }
+  continuation->expr_cache_count = write;
+}
+
+static void interp_expr_cache_rekey(LainirInterpreter *interp,
+                                    LainirFrame *old_frame,
+                                    LainirFrame *new_frame) {
+  LainirContinuation *continuation = interp->continuation;
+  if (!continuation) return;
+  for (uint32_t i = 0; i < continuation->expr_cache_count; i++)
+    if (continuation->expr_cache[i].frame == old_frame)
+      continuation->expr_cache[i].frame = new_frame;
+}
+
+static LainirValue interp_eval_expr_inner(LainirInterpreter *interp,
+                                          LainirFrame *frame, L1Expr *expr) {
   if (!expr) return lainir_value_unit();
   if (expr->source_end > expr->source_start) {
     interp->current_source_start = expr->source_start;
@@ -1277,6 +1342,17 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
   }
 }
 
+static LainirValue interp_eval_expr(LainirInterpreter *interp,
+                                     LainirFrame *frame, L1Expr *expr) {
+  LainirValue cached = lainir_value_unit();
+  if (!expr) return cached;
+  if (interp_expr_cache_lookup(interp, frame, expr, &cached))
+    return cached;
+  cached = interp_eval_expr_inner(interp, frame, expr);
+  interp_expr_cache_store(interp, frame, expr, cached);
+  return cached;
+}
+
 /* ═══════════════════════════════════════════════════════════════
  * Block executor (structured IR — no terminators)
  * ═══════════════════════════════════════════════════════════════ */
@@ -1416,6 +1492,7 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
       if (interp->error || interp->vm_slice_yielded || interp->vm_blocked) return;
       break;
     }
+    interp_expr_cache_clear_frame(interp, frame);
     if (track) {
       interp->continuation->next_block = inst->next ? block : block->next;
       interp->continuation->next_inst = inst->next;
@@ -2707,6 +2784,7 @@ static void interp_destroy_continuation(LainirContinuation *continuation) {
     free(nested);
     nested = parent;
   }
+  free(continuation->expr_cache);
   interp_free_frame(&continuation->frame);
   free(continuation);
 }
@@ -3041,6 +3119,7 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
           free(saved);
           interp_trap(interp, "out of memory for nested continuation");
         } else {
+          interp_expr_cache_rekey(interp, &frame, saved);
           nested->frame = saved;
           nested->sub = sub;
           nested->block = interp->active_block;

@@ -65,15 +65,15 @@ instruction 保存在 control object 的 opaque backend state 中，下一次 `l
 procedure 进入和返回时更新 control plane 的 CallFrame 栈，当前 nested
 调用仍在一个 slice 内原子执行。linked continuation stack 已支持多层 nested helper 的
 阻塞/恢复回归测试（包含带 `make_value` 前置副作用的双层 `send_outer -> send_helper`）；
-每层 frame、locals、alloca、当前 instruction 和 pending result 会跨 slice 保存，恢复后
-不重复执行 payload 表达式。任意表达式中间点、分支内挂起和多个并行 pending call 的通用
-保存仍留在后续阶段。
+每层 frame、locals、alloca、当前 instruction 和 pending result 会跨 slice 保存；表达式
+cache 会随 frame detach 重挂载，因此已完成的 sibling expression 不会在恢复时重复执行。
+分支内挂起和多个并行 pending call 的通用保存仍留在后续阶段。
 
 Nested continuation 的完成标准是：挂起时保存每个 frame 的 locals、参数、activation、
 返回位置和表达式游标；恢复时消费带类型的 pending call result，不重新执行已完成的参数
 表达式；重复 resume、错误 owner、失活 activation 和残留 Endpoint wait 都必须被拒绝或
-转为 Trap。当前实现已覆盖多层 nested frame 与 Endpoint `send` 的 pending-result，仍不
-宣称任意表达式中间点和并行 pending call 的 continuation 已完成。
+转为 Trap。当前实现已覆盖多层 nested frame、表达式 cache 与 Endpoint `send` 的
+pending-result，仍不宣称分支内挂起和并行 pending call 的 continuation 已完成。
 
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
 必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。
