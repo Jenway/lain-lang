@@ -553,6 +553,21 @@ def main() -> int:
     expect_failure(lambda: sibling_result.use(vspace, 7), ValueError)
     sibling_arena.use(sibling_space, 7)
     sibling_result.use(sibling_space, 7)
+    first_space = VSpace(owner=7, allocation_limit=0)
+    second_space = VSpace(owner=7, allocation_limit=0)
+    first_arena = first_space.allocate_handle(7)
+    second_arena = second_space.allocate_handle(7)
+    first_tcb = TCB(owner=7, vspace=first_space, step_limit=0, capability_mask=0)
+    second_tcb = TCB(owner=7, vspace=second_space, step_limit=0, capability_mask=0)
+    first_tcb.start(7)
+    second_tcb.start(7)
+    second_generation = second_space.generation
+    first_tcb.finish(7)
+    expect_failure(lambda: first_arena.use(first_space, 7), ValueError)
+    second_arena.use(second_space, 7)
+    if second_space.generation != second_generation or second_tcb.state != "RUNNING":
+        raise SystemExit("TCB finish crossed VSpace lifetime boundary")
+    second_tcb.finish(7)
     endpoint = Endpoint()
     if endpoint.send(1, 42) is not None:
         raise SystemExit("endpoint send without receiver did not block")

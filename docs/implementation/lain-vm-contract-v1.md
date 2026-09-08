@@ -146,7 +146,8 @@ release 后不能再次使用或重复释放。
 
 `check_lain_vm_contract.py` 使用独立 recording provider 验证 VSpace owner/quota/reset、
 arena/result generation、跨 VSpace stale-handle 拒绝以及每次 reset/release 恰好释放一次
-provider backing arena。
+provider backing arena。fixture 还验证两个 TCB 各自结束时只 reset 自己的 VSpace，不能
+跨 TCB 影响另一个 VSpace 的 generation 或存活句柄。
 和 TCB owner/state/step/suspend/resume/scheduler 规则，以及 Endpoint 的 rendezvous/cancel、CSpace
 的 capability allow/deny、Trap 的 kind/source/status 字段。这个 fixture 只固定对象之间
 的 API 语义，不伪装成 LAINIR 指令或真实运行时对象实现。
