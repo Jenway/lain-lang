@@ -304,58 +304,30 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 
 ## 10. 当前实施顺序
 
-按当前代码和验证结果，后续工作按以下顺序推进：
+按当前代码和验证结果，已完成的部分不再作为待办，当前顺序如下：
 
-1. **完成单 TCB 的 VM 执行入口收敛**：这一项已完成。`execute`、`execute_limited` 和
-   错误返回都经过同一个 LainVM root-TCB 路径；后续只需把回归检查保持在这个入口上。
-2. **完成 VSpace 的物理 reset contract**：provider-neutral owner transfer/release fixture
-   已增加 arena generation 和旧 handle 失效检查，参考 evaluator 的 `release_vspace` 已
-   在终止路径释放 backing arena。下一步验证真实 result、arena address 和 activation
-   storage 在 release 后全部失效，并把 provider 的 release 计数纳入 smoke fixture。
-3. **把 scheduler 状态接入真实 evaluator**：单 runnable、两个 TCB 的 handoff/resume
-   fixture 和参考 VM 的最小 suspend/resume API 已完成，但 evaluator 仍在宿主递归调用中
-   执行，不能从保存的 instruction position 恢复。下一步先把 root region 切成可保存的
-   VM slice，再将 procedure/region/position、suspend reason 和调用帧链放入 TCB 的
-   continuation 状态；当前 `CallFrame` 已记录调用链，下一步将用
-   `run_slice` 返回值接入 scheduler。参考 evaluator 已有内部 `run_slice` 入口，provider-neutral
-   `VmControl` fixture 已覆盖跨 procedure 的 fuel yield 和 frame resume；seed runtime
-   也已把 root procedure 的真实 frame、locals、instruction position 接到 provider-owned
-opaque control object，并由第二次 `lainir_run` 恢复；slice 之间可以先将该 TCB 置为
-BLOCKED，再 resume 后继续同一个 root frame。真实 interpreter 现在也在 nested
-procedure 进入/返回时维护该 CallFrame 栈。下一步扩大保存范围到 nested procedure
-   被挂起时的完整 frame/locals 状态和 Endpoint blocked continuation；验收必须满足 2.2
-   的 nested continuation 条件；当前实现只承诺
-   root boundary 的可恢复 slice。
+1. **已完成：单 TCB 执行入口收敛。** `execute`、`execute_limited` 和错误返回都经过
+   同一个 LainVM root-TCB 路径。
+2. **基本完成：VSpace release contract。** owner transfer/release、arena generation、
+   旧 handle 失效和 backing arena 回收已经接入；剩余工作是把 provider release 计数纳入
+   smoke fixture，并继续验证 result、arena address 和 activation storage 的失效。
+3. **已完成：root scheduler slice。** seed runtime 的 opaque control plane 已接入真实
+   interpreter；root frame、locals、activation、下一条 instruction、fuel、suspend/resume
+   和 CallFrame 观察均有 fixture。当前限制是 nested call 在一个 slice 内原子执行。
+4. **已完成：Endpoint ownership 与 Trap control plane。** Endpoint 等待只保存 TCB、owner
+   和 payload；pending result 可唤醒 TCB；Trap 可记录、abort、由 scheduler 消费，并带有
+   instruction/expression span 和实际 nested procedure。
+5. **当前阶段：nested continuation。** 先实现 2.2 中定义的 continuation record：
+   nested frame/locals、activation、返回位置、表达式游标和带类型的 pending call result。
+   先覆盖“前置副作用 + Endpoint wait + 恢复”的 fixture，再把恢复点从 root instruction
+   重试改为 nested call point。
+6. **后续：多 TCB 与平台 lowering。** nested continuation、单 TCB VSpace、Endpoint、Trap
+   和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和裸机 lowering。
 
-seed runtime 现在提供独立的 opaque C control plane：`LainirVmControl` 持有 owner、TCB
-状态、fuel、CallFrame 栈和 slice result；`lainir-vm-control-test` 已验证 owner 检查、
-READY/RUNNING/BLOCKED/DEAD、fuel exhaustion、嵌套 frame 恢复和 DONE。`LainirRunRequest`
-可以携带该 control object；解释器在每个 instruction boundary 调用
-`lainir_vm_control_consume_step`，fuel 用尽时返回 `LAINIR_RUN_SLICE`。当前这一步已经
-把 control gate 接入真实 dispatch；root procedure 的 frame、locals、activation 和下条
-instruction 已绑定到 control object 的 backend state，第二次 `lainir_run` 可以恢复并
-返回结果。nested procedure 进入/返回时已经更新 control plane 的 CallFrame 栈；当前嵌套
-调用在切片内原子完成；Endpoint receiver 通过一个只包含等待操作的 nested helper 的
-回归测试已经覆盖阻塞和恢复，但它依赖 root instruction 重试，不能代表通用的 nested
-continuation。下一步必须把 nested frame/locals、表达式执行游标和 pending call result
-接入同一保存格式，挂起后恢复到调用点而不是重新执行已完成的前置表达式。当前
-Endpoint pending result 已先于 `send` 参数求值被识别，恢复的 send 不会再次执行
-payload 表达式；这只覆盖 Endpoint 重试，不覆盖任意外部调用。
-4. **接入 Endpoint 的真实 ownership 检查**：seed `LainirVmEndpoint` 已让等待项只保存
-   TCB/owner/payload，并由 `lainir_vm_endpoint_bind` 接入真实 evaluator；无对端返回
-   `LAINIR_RUN_BLOCKED`，交接后恢复 pending call，非法 owner、重复等待和状态转换返回
-   capability failure；control plane 现在记录结构化 Trap 的 kind、status、procedure、
-   region 和 position；`L1Instruction` 的 line/column 以及 source byte range 现在也进入
-   control-owned Trap。Trap 发生后通过统一 abort 路径转为 `DEAD/TRAPPED`。scheduler
-   可以通过 `lainir_vm_control_take_trap` 复制并确认终止诊断；确认只清除控制面中的
-   诊断记录，不改变 TCB 的 `DEAD/TRAPPED` 结果。parser 现在为每条指令和表达式保留
-   首 token 起点及最后消费 token 的结束位置；解释器在表达式求值时将触发点写入 Trap，
-   因此能力调用和嵌套表达式错误可以定位到表达式范围。
-5. **完善 Trap 定位**：已完成。指令级和表达式级源码字节范围由 parser 与解释器接入，
-   nested CallFrame 也会把 Trap procedure 归属到实际触发错误的过程；Trap 字段继续由
-   VM 统一生成，provider 只读取结果。后续定位工作归入 nested continuation 的恢复测试。
-6. **再进入多 TCB 和平台 lowering**：参考后端通过单 TCB、VSpace、Trap、CSpace 和
-   Endpoint contract 后，才开始 native、线程、用户态地址空间和裸机 lowering。
+当前 seed runtime 的已验证能力包括：owner 检查、READY/RUNNING/BLOCKED/DEAD、fuel
+exhaustion、root continuation、nested frame observation、Endpoint rendezvous、pending
+result、Trap abort/acknowledgement 和源码定位。通用 nested continuation 仍是唯一的
+主线 runtime 未完成项。
 
 当前基线命令：
 
