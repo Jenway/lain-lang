@@ -328,11 +328,11 @@ instruction 已绑定到 control object 的 backend state，第二次 `lainir_ru
    region 和 position；`L1Instruction` 的 line/column 以及 source byte range 现在也进入
    control-owned Trap。Trap 发生后通过统一 abort 路径转为 `DEAD/TRAPPED`。scheduler
    可以通过 `lainir_vm_control_take_trap` 复制并确认终止诊断；确认只清除控制面中的
-   诊断记录，不改变 TCB 的 `DEAD/TRAPPED` 结果。parser 现在为每条指令保留首 token
-   起点和最后消费 token 的结束位置，Trap 可以携带该指令的源码字节范围；后续再把
-   更细的表达式 token span 接入同一记录。
-5. **完善 Trap 定位**：当前指令的源码字节范围已经由 parser 接入，继续扩展真实调用栈
-   procedure 与表达式级 source span；Trap 字段保持由 VM 统一生成，provider 只读取结果。
+   诊断记录，不改变 TCB 的 `DEAD/TRAPPED` 结果。parser 现在为每条指令和表达式保留
+   首 token 起点及最后消费 token 的结束位置；解释器在表达式求值时将触发点写入 Trap，
+   因此能力调用和嵌套表达式错误可以定位到表达式范围。
+5. **完善 Trap 定位**：指令级和表达式级源码字节范围已经由 parser 与解释器接入，继续
+   扩展真实调用栈 procedure；Trap 字段保持由 VM 统一生成，provider 只读取结果。
 6. **再进入多 TCB 和平台 lowering**：参考后端通过单 TCB、VSpace、Trap、CSpace 和
    Endpoint contract 后，才开始 native、线程、用户态地址空间和裸机 lowering。
 

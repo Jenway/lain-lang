@@ -935,6 +935,10 @@ static LainirValue interp_eval_block(LainirInterpreter *interp,
 static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *frame,
                                      L1Expr *expr) {
   if (!expr) return lainir_value_unit();
+  if (expr->source_end > expr->source_start) {
+    interp->current_source_start = expr->source_start;
+    interp->current_source_end = expr->source_end;
+  }
   if (!interp_tick(interp)) return lainir_value_unit();
   if (interp->trace_enabled && (uint32_t)expr->kind < 64)
     interp->trace_expr_kinds[expr->kind]++;

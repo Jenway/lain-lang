@@ -668,7 +668,7 @@ static L1Expr *parse_lea_expr(Parser *p) {
   }
 }
 
-static L1Expr *parse_expr(Parser *p) {
+static L1Expr *parse_expr_inner(Parser *p) {
   Token token;
   char *text;
   uint32_t count;
@@ -887,6 +887,20 @@ static L1Expr *parse_expr(Parser *p) {
   }
 
   return NULL;
+}
+
+/* Keep source ownership at the expression boundary without duplicating span
+ * bookkeeping in every expression constructor.  Recursive calls use this
+ * wrapper too, so the outer expression receives the final token consumed by
+ * its full subtree. */
+static L1Expr *parse_expr(Parser *p) {
+  int start = p->current.start;
+  L1Expr *expr = parse_expr_inner(p);
+  if (expr) {
+    expr->source_start = (uint64_t)start;
+    expr->source_end = (uint64_t)p->last_token_end;
+  }
+  return expr;
 }
 
 static L1Instruction *parse_instruction_list(Parser *p) {

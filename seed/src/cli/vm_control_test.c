@@ -2,6 +2,7 @@
 #include "lainir/eval_source.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static int fail(const char *message) {
   fprintf(stderr, "vm control test: %s\n", message);
@@ -197,6 +198,7 @@ static int trap_record_test(void) {
            trap->region && trap->position && trap->line == 2 &&
            trap->column > 0 && trap->source_end > trap->source_start &&
            source[trap->source_start] == '#' &&
+           !strncmp(source + trap->source_start, "#call", 5) &&
            source[trap->source_end - 1] == ')' &&
            lainir_vm_control_state(control) == LAINIR_VM_DEAD &&
            lainir_vm_control_slice_result(control) == LAINIR_VM_TRAPPED;
