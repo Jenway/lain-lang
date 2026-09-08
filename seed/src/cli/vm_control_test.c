@@ -36,6 +36,20 @@ static void count_result_payload_free(const LainirValue *value,
   if (calls) (*calls)++;
 }
 
+typedef struct {
+  LainirValueKind expected;
+  uint32_t calls;
+  int mismatch;
+} TypedPayloadContext;
+
+static void count_typed_payload_free(const LainirValue *value,
+                                     void *user_data) {
+  TypedPayloadContext *context = user_data;
+  if (!context || !value) return;
+  context->calls++;
+  if (value->kind != context->expected) context->mismatch = 1;
+}
+
 static LainirRunStatus make_addr_value(
     const LainirValue *args, uint32_t arg_count, LainirValue *result_out,
     const char **error_out, void *user_data) {
@@ -199,13 +213,20 @@ static int result_handle_generation_test(void) {
       !(typed_session = lainir_vm_session_new(7)))
     goto cleanup;
   for (uint32_t i = 0; i < 3; i++) {
+    TypedPayloadContext payload = {
+        .expected = object_values[i].kind,
+        .calls = 0,
+        .mismatch = 0,
+    };
     LainirVmResultHandle *typed =
         lainir_vm_result_handle_new(
-            typed_session, 7, &object_values[i], NULL, NULL);
+            typed_session, 7, &object_values[i], count_typed_payload_free,
+            &payload);
     if (!typed ||
         !lainir_vm_result_handle_use(typed, typed_session, 7, &copied) ||
         copied.kind != object_values[i].kind ||
-        !lainir_vm_result_handle_release(typed, 7)) {
+        !lainir_vm_result_handle_release(typed, 7) || payload.calls != 1 ||
+        payload.mismatch) {
       lainir_vm_result_handle_free(typed);
       goto cleanup;
     }
