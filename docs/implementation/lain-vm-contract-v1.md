@@ -8,15 +8,17 @@
 
 | VM 术语 | 当前实现 | 生命周期 |
 | --- | --- | --- |
-| 单 TCB | 一个 `CompileContextV1` 执行 session | 一次 compile/eval request |
-| 单 VSpace | provider 的 request-owned allocation pool | request 结束统一释放 |
-| CSpace | `capability_mask` 与显式 capability provider | session 内只读授权 |
+| 单 TCB | 参考 evaluator 的 `LainVm.tcb` | 一次 root execution request |
+| 单 VSpace | 参考 evaluator 的 `LainVm.vspace` | request 结束逻辑释放，物理回收由 provider 负责 |
+| CSpace | `LainVm.cspace` 的 capability object table | slot 级 owner/active 授权 |
 | Trap | status/diagnostic/result contract | 通过 `MetaPassResultV1` 返回 |
 | Eval result | `EvalResultV1` | owner transfer/release 明确 |
 
-`CompileContextV1` 当前字段为 owner、step limit、allocation limit、recursion
-limit、capability mask 及其使用计数。limit 为零表示该项不设上限；任何计数器
-超限都返回失败状态，不能静默继续执行。
+参考 evaluator 的 TCB 当前字段为状态、step/depth limit、使用计数、current activation、
+next activation 和 Trap；VSpace 保存 owner、release 状态、storage、地址/activation
+表和 allocation quota。provider contract 仍以 `CompileContextV1` 的 owner、limit 和
+计数规则作为边界语义。limit 为零表示该项不设上限；任何计数器超限都返回失败状态，
+不能静默继续执行。
 
 TCB 的控制面状态遵循 `READY -> RUNNING -> BLOCKED -> RUNNING -> DEAD`。suspend 只
 接受 owner 持有的 RUNNING TCB，并保存 execution position；resume 只接受同一 owner
@@ -46,14 +48,15 @@ Endpoint contract 支持单发送者和单接收者 rendezvous。没有对端时
    模糊的 `#primitive` 入口。
 
 参考 evaluator 的 external call 先经过 VM capability gate；gate 同时检查 TCB 状态和
-VM capability context。当前 context 由 `LainVm.cspace` 的两个 slot owner/active/external
-capability objects 表示，完整 CSpace capability table 和 transfer/revoke API 仍待接入。
+VM capability context。当前 context 由 `LainVm.cspace` 的两个 slot
+owner/active/external capability objects 表示。gate 扫描有效 slot，要求至少一个
+external capability；slot 身份和权限语义分开。
 
 provider-neutral CSpace contract 已定义 capability object：每个对象带 name、owner 和
 active 状态，可以由当前 owner transfer 或 revoke；foreign owner、非 active capability
-和未绑定到 CSpace 的对象都会被拒绝。这个对象 contract 还没有替换参考 evaluator 中的
-布尔 policy。参考 evaluator 现在已经提供按 slot 的 `capability_transfer` 和
-`capability_revoke` VM control API，并由 external-call gate 使用更新后的状态。
+和未绑定到 CSpace 的对象都会被拒绝。参考 evaluator 已用两个 capability slot 替换旧的
+布尔 policy，并提供按 slot 的 `capability_transfer` 和 `capability_revoke` VM control
+API；external-call gate 使用更新后的 owner/active/external 状态。
 
 ## 已有验证
 
