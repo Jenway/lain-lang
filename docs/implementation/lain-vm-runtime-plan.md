@@ -113,7 +113,10 @@ position 使用这个物理 offset，procedure 仍沿用当前 root execution bo
 真实调用栈和 source span。position 归属已从 `LainVm` 根对象收敛到 TCB，但宿主递归调用
 仍未变成可恢复 continuation。TCB 现在同时记录当前 region 和 suspend reason；默认
 `suspend_tcb` 使用 yield reason，Endpoint 等控制面可以通过 `suspend_tcb_reason` 记录
-具体阻塞原因，resume 时清除该原因。
+具体阻塞原因，resume 时清除该原因。参考 VM 还保存了 `CallFrame` 向量；非 external
+procedure 进入时压入 procedure、region、activation 和返回位置，region instruction
+boundary 更新帧位置，返回时弹出并恢复调用者位置。这提供了 continuation 的调用栈来源，
+尚未让 scheduler 从该栈恢复执行。
 Eval result 现在提供只读的 Trap kind、procedure 和 position 访问器。Provider smoke
 已通过该迁移。
 
@@ -286,7 +289,7 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    fixture 和参考 VM 的最小 suspend/resume API 已完成，但 evaluator 仍在宿主递归调用中
    执行，不能从保存的 instruction position 恢复。下一步先把 root region 切成可保存的
    VM slice，再将 procedure/region/position、suspend reason 和调用帧链放入 TCB 的
-   continuation 状态；随后用
+   continuation 状态；当前 `CallFrame` 已记录调用链，下一步将用
    `run_slice` 返回值接入 scheduler。没有真实恢复路径前，不宣称已经支持协程。
 4. **接入 Endpoint 的真实 ownership 检查**：fixture 已覆盖 rendezvous 和取消，下一步
    让 Endpoint 等待项只保存受 capability 授权的 TCB/owned handle，不保存裸 activation

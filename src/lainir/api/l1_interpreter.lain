@@ -93,6 +93,21 @@ let l1_interpreter: Module = std::module {
             Memory.Bounds,
         );
 
+        let CallFrame: type = std::struct {
+            procedure: usize,
+            region: usize,
+            position: usize,
+            activation: usize,
+            return_procedure: usize,
+            return_region: usize,
+            return_position: usize,
+        };
+        let CallFrameVector: type = vector.Vec(
+            CallFrame,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
         let VSpace: type = std::struct {
             owner: usize,
             released: bool,
@@ -115,6 +130,7 @@ let l1_interpreter: Module = std::module {
             region: usize,
             position: usize,
             suspend_reason: i32,
+            frames: CallFrameVector,
             trap: Trap,
         };
 
@@ -722,6 +738,10 @@ let l1_interpreter: Module = std::module {
 
             while offset < region.instructions.length() {
                 state.tcb.position = offset;
+                if state.tcb.frames.length() > 0 {
+                    let top_frame: usize = state.tcb.frames.length() - 1;
+                    state.tcb.frames.get_mut(top_frame).position = offset;
+                }
                 if !consume_step(state) { return fail(7109); }
                 let instruction: &L1.Instruction =
                     region.instructions.get(offset);
@@ -868,6 +888,7 @@ let l1_interpreter: Module = std::module {
                     region: 0,
                     position: 0,
                     suspend_reason: 0,
+                    frames: CallFrameVector.new(),
                     trap: Trap {
                         kind: 0, status: 0, procedure: 0,
                         position: 0, active: false,
@@ -979,10 +1000,25 @@ let l1_interpreter: Module = std::module {
             if procedure.parameter_types.length() != arguments.length() {
                 return fail(7105);
             }
+            let previous_procedure: usize = state.tcb.procedure;
+            let previous_region: usize = state.tcb.region;
+            let previous_position: usize = state.tcb.position;
             let previous_activation: usize = state.tcb.current_activation;
             let activation: usize = state.tcb.next_activation;
             state.tcb.next_activation = state.tcb.next_activation + 1;
             state.tcb.current_activation = activation;
+            state.tcb.procedure = procedure_id;
+            state.tcb.region = procedure.body;
+            state.tcb.position = 0;
+            state.tcb.frames.push(CallFrame {
+                procedure: procedure_id,
+                region: procedure.body,
+                position: 0,
+                activation: activation,
+                return_procedure: previous_procedure,
+                return_region: previous_region,
+                return_position: previous_position,
+            });
             state.vspace.activations.push(Activation {
                 id: activation,
                 parent: previous_activation,
@@ -1033,6 +1069,14 @@ let l1_interpreter: Module = std::module {
                 activation_index = activation_index + 1;
             }
             state.tcb.current_activation = previous_activation;
+            if state.tcb.frames.length() > 0 {
+                state.tcb.frames.length = state.tcb.frames.length() - 1;
+            }
+            if previous_activation != 0 {
+                state.tcb.procedure = previous_procedure;
+                state.tcb.region = previous_region;
+                state.tcb.position = previous_position;
+            }
             if activation_escape { return fail(7120); }
             if result.status == 7997
                 || result.status == 7998
@@ -1049,6 +1093,8 @@ let l1_interpreter: Module = std::module {
             @export let Result: type = Result;
             @export let Capability: type = Capability;
             @export let CapabilityVector: type = CapabilityVector;
+            @export let CallFrame: type = CallFrame;
+            @export let CallFrameVector: type = CallFrameVector;
             @export let LainVm: type = LainVm;
             @export let capability_transfer = capability_transfer;
             @export let capability_revoke = capability_revoke;

@@ -35,7 +35,8 @@ Endpoint contract 支持单发送者和单接收者 rendezvous。没有对端时
 是幂等边界之外的第二次操作并不会再次清理其他状态。
 
 continuation 属于 TCB 的 VM 内部状态。参考 evaluator 当前已经保存 procedure、region、
-instruction offset 和 suspend reason。可恢复的 slice 还需要保存调用帧链；切换只发生在 instruction boundary 或
+instruction offset、suspend reason 和 `CallFrame` 调用帧链。可恢复的 slice 仍需要把该
+调用帧链接入 scheduler；切换只发生在 instruction boundary 或
 Endpoint 等待点。`run_slice` 的结果固定为 `RUNNABLE`、`BLOCKED`、`DONE` 或 `TRAPPED`。
 当前参考 evaluator 还没有这个恢复循环，现有 suspend/resume API 只验证状态转换和
 position 保存。
