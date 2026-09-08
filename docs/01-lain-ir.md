@@ -4,7 +4,8 @@
 
 LAIN-IR 是 Lain 编译流程中的物理执行语言。它描述已经确定尺寸、调用约定和内存访问方式的程序。语法分析、名称解析、类型构造、泛型、effect 和宏都由 Lain/Meta 层完成，不作为 LAIN-IR 指令存在。
 
-当前实现由同一套 C 数据结构支撑：`lainir-print` 负责解析、验证和规范化输出；`lainir-seed run` 负责解释执行；自举编译器把同一份 IR 降低为 C。
+当前 C seed 由同一套 C 数据结构支撑：`lainir-print` 负责解析、验证和规范化输出；
+`lainir-seed run` 是 LAINVM 的参考执行实现；自举编译器把同一份 IR 降低为 C。
 
 ## 1. 物理类型
 
@@ -130,7 +131,21 @@ LAIN-IR 暂不公开 CFG basic-block label。后端可在降低结构化控制�
 
 ## 8. 编译期执行
 
-`#eval { ... }` 使用同一套 LAIN-IR 执行语义求值，并把结果折叠进运行时 IR。Meta 先把编译期计算降低为物理 IR，LAINIR 再负责验证、限制资源、执行和返回物理结果。
+`#eval { ... }` 是一个有静态物理类型的编译期执行表达式。Meta 先把编译期计算降低为
+物理 IR；LAINIR 验证该 IR；LAINVM 执行已经验证的块。正常结束时，表达式产生其已验证的
+普通 LAINIR 值；失败时产生 Trap，Trap 不属于表达式值。
+
+`#eval` 在最终 backend 前必须执行并从产物中消失。它不会向 runtime IR 残留一个需要
+backend 特判的节点。TCB、VSpace、Trap 和预算是 LAINVM 的执行状态，不是 LAINIR 类型、
+值或指令。
+
+`#eval` 的静态类型由它所在的表达式位置确定。验证器把块视为一个返回该预期物理类型的
+匿名过程：所有可达 `#return` 必须返回该类型，缺少返回值或返回不同物理类型都是验证错误。
+它不再以外围 `#proc` 的返回类型猜测自己的类型。
+
+块可读取外围过程中的自由 `%local`。lowering 按词法绑定收集这些值，作为临时根过程的
+参数按值传入；块不持有调用者的 frame。捕获 `#addr` 只复制地址值，不复制其指向存储；
+该地址仍受原来区域和 activation 的生命周期约束。
 
 解释器可限制 step count、call depth、累计 `#alloca` 字节数和模块中的 eval block 数量。零表示不设该项限制。
 
