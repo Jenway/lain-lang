@@ -44,51 +44,102 @@ let l1_interpreter: Module = std::module {
         let Result: type = std::struct {
             status: i32,
             value: Value,
+            trap_kind: i32,
+            trap_procedure: usize,
+            trap_position: usize,
         };
 
         let Address: type = std::struct {
+            owner: usize,
             kind: i32,
             activation: usize,
             object: usize,
             offset: usize,
             length: usize,
+            active: bool,
         };
         let AddressVector: type = vector.Vec(
             Address, Memory.Allocation, Memory.Bounds,
         );
 
-        let ExecutionState: type = std::struct {
+        let Activation: type = std::struct {
+            id: usize,
+            parent: usize,
+            storage_start: usize,
+            storage_length: usize,
+            active: bool,
+        };
+        let ActivationVector: type = vector.Vec(
+            Activation, Memory.Allocation, Memory.Bounds,
+        );
+
+        let Trap: type = std::struct {
+            // 1 execution, 2 quota, 3 capability, 4 memory/lifetime.
+            kind: i32,
+            status: i32,
+            procedure: usize,
+            position: usize,
+            active: bool,
+        };
+
+        let Capability: type = std::struct {
+            owner: usize,
+            active: bool,
+            external: bool,
+        };
+        let CapabilityVector: type = vector.Vec(
+            Capability,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let VSpace: type = std::struct {
+            owner: usize,
+            released: bool,
+            storage: Memory.Bytes,
+            addresses: AddressVector,
+            activations: ActivationVector,
+            allocation_bytes: usize,
+            allocation_limit: usize,
+        };
+
+        let TCB: type = std::struct {
+            // 0 READY, 1 RUNNING, 2 BLOCKED, 3 DEAD.
+            status: i32,
             steps: usize,
             step_limit: usize,
             depth_limit: usize,
-            allocation_bytes: usize,
-            allocation_limit: usize,
-            external_calls_allowed: bool,
             current_activation: usize,
             next_activation: usize,
-            storage: Memory.Bytes,
-            addresses: AddressVector,
+            trap: Trap,
+        };
+
+        let LainVm: type = std::struct {
+            vspace: VSpace,
+            tcb: TCB,
+            cspace: CapabilityVector,
+            position: usize,
         };
 
         let append_address = std::func(
-            state: &mut ExecutionState,
+            state: &mut LainVm,
             address: Address,
         ) -> unit ! {Memory.Allocation.Effect} {
-            state.addresses.push(address);
+            state.vspace.addresses.push(address);
         };
 
         let address_value = std::func(
-            state: &mut ExecutionState,
+            state: &mut LainVm,
             type_id: L1.TypeId,
             address: Address,
         ) -> Result ! {Memory.Allocation.Effect} {
-            if state.addresses.length() >= 0 {
+            if state.vspace.addresses.length() >= 0 {
                 append_address(state, address);
             }
             let value: Value = Value {
                 type_id: type_id,
-                i32_value: state.addresses.length() as i32,
-                bits_value: state.addresses.length() as u64,
+                i32_value: state.vspace.addresses.length() as i32,
+                bits_value: state.vspace.addresses.length() as u64,
             };
             let result: Result = success(value);
             return result;
@@ -96,7 +147,7 @@ let l1_interpreter: Module = std::module {
 
         let address_at = std::func(
             unit: &L1.Unit,
-            state: &ExecutionState,
+            state: &LainVm,
             value: Value,
         ) -> usize {
             // Scalar values use the same integer fields as the compact
@@ -110,15 +161,31 @@ let l1_interpreter: Module = std::module {
             }
             if value.i32_value <= 0 { return std::usize_max(); }
             let index: usize = (value.i32_value - 1) as usize;
-            if index >= state.addresses.length() { return std::usize_max(); }
+            if index >= state.vspace.addresses.length() { return std::usize_max(); }
+            let address: &Address = state.vspace.addresses.get(index);
+            if state.vspace.released || address.owner != state.vspace.owner {
+                return std::usize_max();
+            }
+            if address.kind == 1 && !address.active {
+                return std::usize_max();
+            }
+            if address.kind == 1 {
+                if address.activation >= state.vspace.activations.length() {
+                    return std::usize_max();
+                }
+                if !state.vspace.activations.get(address.activation).active {
+                    return std::usize_max();
+                }
+            }
             return index;
         };
 
-        let consume_step = std::func(state: &mut ExecutionState) -> bool {
-            if state.step_limit != 0 && state.steps >= state.step_limit {
+        let consume_step = std::func(state: &mut LainVm) -> bool {
+            if state.tcb.status != 1 { return false; }
+            if state.tcb.step_limit != 0 && state.tcb.steps >= state.tcb.step_limit {
                 return false;
             }
-            state.steps = state.steps + 1;
+            state.tcb.steps = state.tcb.steps + 1;
             return true;
         };
 
@@ -126,11 +193,17 @@ let l1_interpreter: Module = std::module {
             return Result {
                 status: code,
                 value: Value { type_id: 0, i32_value: 0, bits_value: 0 },
+                trap_kind: 0,
+                trap_procedure: 0,
+                trap_position: 0,
             };
         };
 
         let success = std::func(value: Value) -> Result {
-            return Result { status: 0, value: value };
+            return Result {
+                status: 0, value: value,
+                trap_kind: 0, trap_procedure: 0, trap_position: 0,
+            };
         };
 
         let power_of_two = std::func(width: usize) -> u64 {
@@ -174,18 +247,147 @@ let l1_interpreter: Module = std::module {
         let break_flow = std::func() -> Result { return fail(7998); };
         let continue_flow = std::func() -> Result { return fail(7999); };
 
+        let trap_kind = std::func(code: i32) -> i32 {
+            if code == 7108 || code == 7109 || code == 7115 {
+                return 2;
+            }
+            if code == 7102 { return 3; }
+            if code == 7116 || code == 7117 || code == 7119
+                || code == 7120 {
+                return 4;
+            }
+            return 1;
+        };
+
+        let release_vspace = std::func(
+            state: &mut LainVm,
+        ) -> unit ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            // Logical release closes every handle before the provider decides
+            // when the backing Memory.Bytes can be reclaimed.
+            let address_index: usize = 0;
+            while address_index < state.vspace.addresses.length() {
+                let address: &mut Address =
+                    state.vspace.addresses.get_mut(address_index);
+                address.active = false;
+                address_index = address_index + 1;
+            }
+            let activation_index: usize = 0;
+            while activation_index < state.vspace.activations.length() {
+                let frame: &mut Activation =
+                    state.vspace.activations.get_mut(activation_index);
+                frame.active = false;
+                activation_index = activation_index + 1;
+            }
+            state.vspace.released = true;
+        };
+
+        let start_tcb = std::func(state: &mut LainVm) -> bool {
+            if state.tcb.status != 0 { return false; }
+            state.tcb.status = 1;
+            return true;
+        };
+
+        // CSpace migration starts at this VM gate.  The stored policy is still
+        // the legacy boolean until the provider-level capability object can be
+        // specialized without crossing the current Meta type boundary.
+        let external_capability_allowed = std::func(
+            state: &LainVm,
+        ) -> bool {
+            if state.tcb.status != 1 { return false; }
+            let index: usize = 0;
+            while index < state.cspace.length() {
+                let capability: &Capability = state.cspace.get(index);
+                if capability.active
+                    && capability.owner != 0
+                    && capability.external {
+                    return true;
+                }
+                index = index + 1;
+            }
+            return false;
+        };
+
+        let capability_transfer = std::func(
+            state: &mut LainVm,
+            index: usize,
+            owner: usize,
+            target: usize,
+        ) -> bool ! {
+            Memory.Bounds.Effect,
+        } {
+            if index >= state.cspace.length() || target == owner {
+                return false;
+            }
+            let capability: &mut Capability = state.cspace.get_mut(index);
+            if !capability.active || capability.owner != owner {
+                return false;
+            }
+            capability.owner = target;
+            return true;
+        };
+
+        let capability_revoke = std::func(
+            state: &mut LainVm,
+            index: usize,
+            owner: usize,
+        ) -> bool ! {
+            Memory.Bounds.Effect,
+        } {
+            if index >= state.cspace.length() { return false; }
+            let capability: &mut Capability = state.cspace.get_mut(index);
+            if !capability.active || capability.owner != owner {
+                return false;
+            }
+            capability.active = false;
+            return true;
+        };
+
+        let finish_vm = std::func(
+            state: &mut LainVm,
+            procedure_id: L1.ProcedureId,
+            result: Result,
+        ) -> Result ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            if result.status != 0 {
+                state.tcb.trap = Trap {
+                    kind: trap_kind(result.status),
+                    status: result.status,
+                    procedure: procedure_id,
+                    position: state.position,
+                    active: true,
+                };
+            }
+            release_vspace(state);
+            state.tcb.status = 3;
+            if result.status != 0 {
+                return Result {
+                    status: result.status,
+                    value: result.value,
+                    trap_kind: state.tcb.trap.kind,
+                    trap_procedure: state.tcb.trap.procedure,
+                    trap_position: state.tcb.trap.position,
+                };
+            }
+            return result;
+        };
+
         let evaluate_expression = std::func(
             unit: &L1.Unit,
             expression_id: L1.ExprId,
             arguments: &ValueVector,
             depth: usize,
-            state: &mut ExecutionState,
+            state: &mut LainVm,
         ) -> Result ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
             if !consume_step(state) { return fail(7109); }
-            if state.depth_limit != 0 && depth >= state.depth_limit {
+            if state.tcb.depth_limit != 0 && depth >= state.tcb.depth_limit {
                 return fail(7108);
             }
 
@@ -220,8 +422,9 @@ let l1_interpreter: Module = std::module {
                     return fail(7101);
                 }
                 return address_value(state, expression.result_type, Address {
+                    owner: state.vspace.owner,
                     kind: 3, activation: 0, object: expression.procedure,
-                    offset: 0, length: 0,
+                    offset: 0, length: 0, active: true,
                 });
             }
 
@@ -229,27 +432,30 @@ let l1_interpreter: Module = std::module {
                 if expression.index >= unit.data.length() { return fail(7113); }
                 let item: &L1.Data = unit.data.get(expression.index);
                 return address_value(state, expression.result_type, Address {
+                    owner: state.vspace.owner,
                     kind: 2, activation: 0, object: expression.index,
-                    offset: 0, length: item.size,
+                    offset: 0, length: item.size, active: true,
                 });
             }
 
             if expression.kind == 42 {
                 if expression.size == 0 { return fail(7114); }
-                if state.allocation_limit != 0
-                    && state.allocation_bytes + expression.size
-                        > state.allocation_limit { return fail(7115); }
-                let start: usize = state.storage.length();
+                if state.vspace.allocation_limit != 0
+                    && state.vspace.allocation_bytes + expression.size
+                        > state.vspace.allocation_limit { return fail(7115); }
+                let start: usize = state.vspace.storage.length();
                 let byte_index: usize = 0;
                 while byte_index < expression.size {
-                    state.storage.push(0);
+                    state.vspace.storage.push(0);
                     byte_index = byte_index + 1;
                 }
-                state.allocation_bytes =
-                    state.allocation_bytes + expression.size;
+                state.vspace.allocation_bytes =
+                    state.vspace.allocation_bytes + expression.size;
                 return address_value(state, expression.result_type, Address {
-                    kind: 1, activation: state.current_activation,
+                    owner: state.vspace.owner,
+                    kind: 1, activation: state.tcb.current_activation,
                     object: 0, offset: start, length: expression.size,
+                    active: true,
                 });
             }
 
@@ -264,7 +470,7 @@ let l1_interpreter: Module = std::module {
                 if index_result.status != 0 { return index_result; }
                 let address_index: usize = address_at(unit, state, base_result.value);
                 if address_index == std::usize_max() { return fail(7116); }
-                let base: &Address = state.addresses.get(address_index);
+                let base: &Address = state.vspace.addresses.get(address_index);
                 let displacement: i64 =
                     (index_result.value.i32_value as i64)
                     * (expression.scale as i64) + expression.offset;
@@ -274,9 +480,11 @@ let l1_interpreter: Module = std::module {
                     return fail(7117);
                 }
                 return address_value(state, expression.result_type, Address {
+                    owner: base.owner,
                     kind: base.kind, activation: base.activation,
                     object: base.object, offset: next_offset,
                     length: base.length - displacement as usize,
+                    active: base.active,
                 });
             }
 
@@ -287,7 +495,7 @@ let l1_interpreter: Module = std::module {
                 if address_result.status != 0 { return address_result; }
                 let address_index: usize = address_at(unit, state, address_result.value);
                 if address_index == std::usize_max() { return fail(7116); }
-                let address: &Address = state.addresses.get(address_index);
+                let address: &Address = state.vspace.addresses.get(address_index);
                 let value_type: &L1.Type = unit.types.get(expression.result_type);
                 if value_type.kind != 1 || value_type.bit_width == 0
                     || value_type.bit_width > 64
@@ -299,7 +507,7 @@ let l1_interpreter: Module = std::module {
                 while byte_index < count {
                     let byte: i32 = 0;
                     if address.kind == 1 {
-                        byte = *state.storage.get(address.offset + byte_index);
+                        byte = *state.vspace.storage.get(address.offset + byte_index);
                     } else if address.kind == 2 {
                         let data: &L1.Data = unit.data.get(address.object);
                         let data_offset: usize = address.offset + byte_index;
@@ -443,7 +651,7 @@ let l1_interpreter: Module = std::module {
                 if target.status != 0 { return target; }
                     let address_index: usize = address_at(unit, state, target.value);
                 if address_index == std::usize_max() { return fail(7116); }
-                let address: &Address = state.addresses.get(address_index);
+                let address: &Address = state.vspace.addresses.get(address_index);
                 if address.kind != 3 { return fail(7121); }
 
                 let call_arguments: ValueVector = ValueVector.new();
@@ -473,7 +681,7 @@ let l1_interpreter: Module = std::module {
             region_id: L1.RegionId,
             arguments: &ValueVector,
             depth: usize,
-            state: &mut ExecutionState,
+            state: &mut LainVm,
         ) -> Result ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
@@ -485,6 +693,7 @@ let l1_interpreter: Module = std::module {
             let offset: usize = 0;
 
             while offset < region.instructions.length() {
+                state.position = offset;
                 if !consume_step(state) { return fail(7109); }
                 let instruction: &L1.Instruction =
                     region.instructions.get(offset);
@@ -561,7 +770,7 @@ let l1_interpreter: Module = std::module {
                     if destination.status != 0 { return destination; }
                     let address_index: usize = address_at(unit, state, destination.value);
                     if address_index == std::usize_max() { return fail(7116); }
-                    let address: &Address = state.addresses.get(address_index);
+                    let address: &Address = state.vspace.addresses.get(address_index);
                     if address.kind == 2 { return fail(7119); }
                     if address.kind != 1 { return fail(7116); }
                     let value_type: &L1.Type = unit.types.get(instruction.value_type);
@@ -572,7 +781,7 @@ let l1_interpreter: Module = std::module {
                     if count > address.length { return fail(7117); }
                     let byte_index: usize = 0;
                     while byte_index < count {
-                        *state.storage.get_mut(address.offset + byte_index) =
+                        *state.vspace.storage.get_mut(address.offset + byte_index) =
                             ((stored.value.bits_value
                                 / power_of_two(byte_index * 8)) & 255) as i32;
                         byte_index = byte_index + 1;
@@ -585,6 +794,58 @@ let l1_interpreter: Module = std::module {
             return fallthrough();
         };
 
+        // Every public execution entry point starts the same root TCB.  Keeping
+        // construction here prevents execute() and execute_limited() from
+        // drifting into separate evaluator paths as VM state grows.
+        let new_vm = std::func(
+            step_limit: usize,
+            depth_limit: usize,
+            allocation_limit: usize,
+            external_calls_allowed: bool,
+        ) -> LainVm ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let capability_active: bool = external_calls_allowed;
+            let cspace: CapabilityVector = CapabilityVector.new();
+            cspace.push(Capability {
+                owner: 1,
+                active: capability_active,
+                external: capability_active,
+            });
+            cspace.push(Capability {
+                owner: 1,
+                active: true,
+                external: false,
+            });
+            return LainVm {
+                vspace: VSpace {
+                    owner: 1,
+                    released: false,
+                    storage: Memory.Bytes.new(),
+                    addresses: AddressVector.new(),
+                    activations: ActivationVector.new(),
+                    allocation_bytes: 0,
+                    allocation_limit: allocation_limit,
+                },
+                tcb: TCB {
+                    // 0 READY, 1 RUNNING, 2 BLOCKED, 3 DEAD.
+                    status: 0,
+                    steps: 0,
+                    step_limit: step_limit,
+                    depth_limit: depth_limit,
+                    current_activation: 0,
+                    next_activation: 1,
+                    trap: Trap {
+                        kind: 0, status: 0, procedure: 0,
+                        position: 0, active: false,
+                    },
+                },
+                cspace: cspace,
+                position: 0,
+            };
+        };
+
         let execute = std::func(
             unit: &L1.Unit,
             procedure_id: L1.ProcedureId,
@@ -593,25 +854,20 @@ let l1_interpreter: Module = std::module {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
-            let state: ExecutionState = ExecutionState {
-                steps: 0,
-                step_limit: 0,
-                depth_limit: 128,
-                allocation_bytes: 0,
-            allocation_limit: 0,
-                external_calls_allowed: false,
-                current_activation: 0,
-                next_activation: 1,
-                storage: Memory.Bytes.new(),
-                addresses: AddressVector.new(),
-            };
-            return execute_procedure(
+            let state: LainVm = new_vm(0, 128, 0, false);
+            if !start_tcb(&mut state) {
+                return finish_vm(
+                    &mut state, procedure_id, fail(7103),
+                );
+            }
+            let result: Result = execute_procedure(
                 unit,
                 procedure_id,
                 arguments,
                 0,
                 &mut state,
             );
+            return finish_vm(&mut state, procedure_id, result);
         };
 
         let execute_limited = std::func(
@@ -626,21 +882,19 @@ let l1_interpreter: Module = std::module {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
-            let state: ExecutionState = ExecutionState {
-                steps: 0,
-                step_limit: step_limit,
-                depth_limit: depth_limit,
-                allocation_bytes: 0,
-                allocation_limit: allocation_limit,
-                external_calls_allowed: external_calls_allowed,
-                current_activation: 0,
-                next_activation: 1,
-                storage: Memory.Bytes.new(),
-                addresses: AddressVector.new(),
-            };
-            return execute_procedure(
+            let state: LainVm = new_vm(
+                step_limit, depth_limit, allocation_limit,
+                external_calls_allowed,
+            );
+            if !start_tcb(&mut state) {
+                return finish_vm(
+                    &mut state, procedure_id, fail(7103),
+                );
+            }
+            let result: Result = execute_procedure(
                 unit, procedure_id, arguments, 0, &mut state
             );
+            return finish_vm(&mut state, procedure_id, result);
         };
 
         let execute_procedure = std::func(
@@ -648,12 +902,12 @@ let l1_interpreter: Module = std::module {
             procedure_id: L1.ProcedureId,
             arguments: &ValueVector,
             depth: usize,
-            state: &mut ExecutionState,
+            state: &mut LainVm,
         ) -> Result ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
-            if state.depth_limit != 0 && depth >= state.depth_limit {
+            if state.tcb.depth_limit != 0 && depth >= state.tcb.depth_limit {
                 return fail(7108);
             }
             if procedure_id >= unit.procedures.length() {
@@ -666,7 +920,9 @@ let l1_interpreter: Module = std::module {
                 // after the individual Eval invocation explicitly grants the
                 // external-call capability.  The dispatcher itself remains a
                 // LAINIR-provider dependency, never a hidden host facility.
-                if !state.external_calls_allowed { return fail(7102); }
+                if !external_capability_allowed(state) {
+                    return fail(7102);
+                }
                 if procedure.parameter_types.length() != arguments.length() {
                     return fail(7105);
                 }
@@ -691,10 +947,17 @@ let l1_interpreter: Module = std::module {
             if procedure.parameter_types.length() != arguments.length() {
                 return fail(7105);
             }
-            let previous_activation: usize = state.current_activation;
-            let activation: usize = state.next_activation;
-            state.next_activation = state.next_activation + 1;
-            state.current_activation = activation;
+            let previous_activation: usize = state.tcb.current_activation;
+            let activation: usize = state.tcb.next_activation;
+            state.tcb.next_activation = state.tcb.next_activation + 1;
+            state.tcb.current_activation = activation;
+            state.vspace.activations.push(Activation {
+                id: activation,
+                parent: previous_activation,
+                storage_start: state.vspace.storage.length(),
+                storage_length: 0,
+                active: true,
+            });
             let result: Result = execute_region(
                 unit,
                 procedure.body,
@@ -702,20 +965,47 @@ let l1_interpreter: Module = std::module {
                 depth + 1,
                 state,
             );
-            state.current_activation = previous_activation;
+            let activation_escape: bool = false;
+            if result.status == 0 {
+                let returned_address: usize = address_at(unit, state, result.value);
+                if returned_address != std::usize_max()
+                    && state.vspace.addresses.get(returned_address).kind == 1
+                    && state.vspace.addresses.get(returned_address).activation
+                        == activation {
+                    activation_escape = true;
+                }
+            }
+            // Activation-owned address handles become invalid as soon as the
+            // procedure returns.  Keep the handles in the table for stable
+            // scalar representation, but mark every derived handle dead so
+            // later #lea/#load/#store paths reject use-after-return.
+            let address_index: usize = 0;
+            while address_index < state.vspace.addresses.length() {
+                let address: &mut Address = state.vspace.addresses.get_mut(address_index);
+                if address.kind == 1 && address.activation == activation {
+                    address.active = false;
+                }
+                address_index = address_index + 1;
+            }
+            let activation_index: usize = 0;
+            let activation_storage_length: usize =
+                state.vspace.storage.length();
+            while activation_index < state.vspace.activations.length() {
+                let frame: &mut Activation =
+                    state.vspace.activations.get_mut(activation_index);
+                if frame.id == activation {
+                    frame.storage_length =
+                        activation_storage_length - frame.storage_start;
+                    frame.active = false;
+                }
+                activation_index = activation_index + 1;
+            }
+            state.tcb.current_activation = previous_activation;
+            if activation_escape { return fail(7120); }
             if result.status == 7997
                 || result.status == 7998
                 || result.status == 7999 {
                 return fail(7103);
-            }
-            if result.status == 0 {
-                let returned_address: usize = address_at(unit, state, result.value);
-                if returned_address != std::usize_max()
-                    && state.addresses.get(returned_address).kind == 1
-                    && state.addresses.get(returned_address).activation
-                        == activation {
-                    return fail(7120);
-                }
             }
             return result;
         };
@@ -725,6 +1015,10 @@ let l1_interpreter: Module = std::module {
             @export let Value: type = Value;
             @export let ValueVector: type = ValueVector;
             @export let Result: type = Result;
+            @export let Capability: type = Capability;
+            @export let CapabilityVector: type = CapabilityVector;
+            @export let capability_transfer = capability_transfer;
+            @export let capability_revoke = capability_revoke;
             @export let execute = execute;
             @export let execute_limited = execute_limited;
         };
