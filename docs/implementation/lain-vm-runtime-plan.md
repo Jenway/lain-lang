@@ -319,8 +319,10 @@ READY/RUNNING/BLOCKED/DEAD、fuel exhaustion、嵌套 frame 恢复和 DONE。`La
 把 control gate 接入真实 dispatch；root procedure 的 frame、locals、activation 和下条
 instruction 已绑定到 control object 的 backend state，第二次 `lainir_run` 可以恢复并
 返回结果。nested procedure 进入/返回时已经更新 control plane 的 CallFrame 栈；当前嵌套
-调用在切片内原子完成，下一步才把 nested frame/locals 和 Endpoint blocked continuation
-接入同一保存格式。
+调用在切片内原子完成；Endpoint receiver 通过一个只包含等待操作的 nested helper 的
+回归测试已经覆盖阻塞和恢复，但它依赖 root instruction 重试，不能代表通用的 nested
+continuation。下一步必须把 nested frame/locals、表达式执行游标和 pending call result
+接入同一保存格式，挂起后恢复到调用点而不是重新执行已完成的前置表达式。
 4. **接入 Endpoint 的真实 ownership 检查**：seed `LainirVmEndpoint` 已让等待项只保存
    TCB/owner/payload，并由 `lainir_vm_endpoint_bind` 接入真实 evaluator；无对端返回
    `LAINIR_RUN_BLOCKED`，交接后恢复 pending call，非法 owner、重复等待和状态转换返回

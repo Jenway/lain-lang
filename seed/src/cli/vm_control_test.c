@@ -81,8 +81,11 @@ static int endpoint_dispatch_test(void) {
   const char *source =
       "#extern #proc endpoint.send(#bits<64> %value) -> #bits<32>;\n"
       "#extern #proc endpoint.receive() -> #bits<64>;\n"
-      "#proc receive_main() -> #bits<64> {\n"
+      "#proc receive_helper() -> #bits<64> {\n"
       "  #return #call endpoint.receive()\n"
+      "}\n"
+      "#proc receive_main() -> #bits<64> {\n"
+      "  #return #call receive_helper()\n"
       "}\n"
       "#proc send_main() -> #bits<32> {\n"
       "  #return #call endpoint.send(99)\n"
