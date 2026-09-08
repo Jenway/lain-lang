@@ -220,6 +220,13 @@ LainirRunStatus lainir_vm_scheduler_run(
     LainirVmScheduler *scheduler, uint64_t owner, uint64_t fuel,
     const LainirRunRequest *request, LainirValue *result_out,
     const char **error_out);
+/* Run one slice and expose the scheduler-level outcome.  run_status_out is
+ * the underlying evaluator status; the return value is the TCB transition
+ * result used by scheduler policy. */
+LainirVmSliceResult lainir_vm_scheduler_run_slice(
+    LainirVmScheduler *scheduler, uint64_t owner, uint64_t fuel,
+    const LainirRunRequest *request, LainirRunStatus *run_status_out,
+    LainirValue *result_out, const char **error_out);
 LainirVmSliceResult lainir_vm_scheduler_finish(
     LainirVmScheduler *scheduler, uint64_t owner);
 
