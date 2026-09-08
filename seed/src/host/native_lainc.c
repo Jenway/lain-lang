@@ -270,7 +270,7 @@ static int run_emitted_artifact(const char *path) {
   request.module = module;
   request.entry_name = "main";
   request.caps = caps;
-  status = lainir_run_backend_result(&request, &result, &error);
+  status = lainir_run(&request, &result, &error);
   lainir_caps_free(caps);
   native_run_release_allocations(&run_context);
   lainir_free_subroutines(module);

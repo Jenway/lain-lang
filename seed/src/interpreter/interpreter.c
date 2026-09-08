@@ -3278,13 +3278,6 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
     if (error_out) *error_out = "invalid run request";
     return LAINIR_RUN_TRAP;
   }
-  if (request->vm_session &&
-      !lainir_vm_session_accepts(request->vm_session,
-                                  request->vm_session_owner,
-                                  request->vm_control, request->vm_owner)) {
-    if (error_out) *error_out = "VM session rejected control";
-    return LAINIR_RUN_TRAP;
-  }
   interp.module = request->module;
   interp.caps = request->caps;
   interp.vm_control = request->vm_control;
@@ -3318,62 +3311,6 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
     if (error_out) *error_out = NULL;
     return LAINIR_RUN_SLICE;
   }
-  if (error_out) *error_out = NULL;
-  return LAINIR_RUN_OK;
-}
-
-LainirRunStatus lainir_run_owned_result(
-    const LainirRunRequest *request, LainirValue *scalar_out,
-    LainirVmResultHandle **handle_out,
-    LainirVmResultPayloadFree payload_free, void *payload_user_data,
-    const char **error_out) {
-  LainirValue value = lainir_value_unit();
-  LainirRunStatus status;
-  if (handle_out) *handle_out = NULL;
-  status = lainir_run(request, &value, error_out);
-  if (status != LAINIR_RUN_OK) return status;
-  if (value.kind == LAINIR_VALUE_ADDR || value.kind == LAINIR_VALUE_STRING ||
-      value.kind == LAINIR_VALUE_FUNC) {
-    if (!request || !request->vm_session || !handle_out) {
-      if (error_out) *error_out = "object result requires VM session";
-      return LAINIR_RUN_TRAP;
-    }
-    LainirVmResultAdapter adapter = {
-        .session = request->vm_session,
-        .owner = request->vm_session_owner,
-        .session_generation =
-            lainir_vm_session_generation(request->vm_session),
-        .value = value,
-        .ownership = LAINIR_VM_PAYLOAD_OWNED,
-        .payload_free = payload_free,
-        .payload_user_data = payload_user_data,
-    };
-    *handle_out = lainir_vm_result_handle_adapt(&adapter);
-    if (!*handle_out) {
-      if (error_out) *error_out = "object result handle allocation failed";
-      return LAINIR_RUN_TRAP;
-    }
-    if (scalar_out) *scalar_out = lainir_value_unit();
-    return LAINIR_RUN_OK;
-  }
-  if (scalar_out) *scalar_out = value;
-  return LAINIR_RUN_OK;
-}
-
-LainirRunStatus lainir_run_backend_result(
-    const LainirRunRequest *request, LainirValue *scalar_out,
-    const char **error_out) {
-  LainirValue value = lainir_value_unit();
-  LainirRunStatus status = lainir_run(request, &value, error_out);
-  if (status != LAINIR_RUN_OK) return status;
-  if (value.kind == LAINIR_VALUE_ADDR ||
-      value.kind == LAINIR_VALUE_STRING ||
-      value.kind == LAINIR_VALUE_FUNC) {
-    if (error_out)
-      *error_out = "object result requires a provider payload adapter";
-    return LAINIR_RUN_BAD_CALL;
-  }
-  if (scalar_out) *scalar_out = value;
   if (error_out) *error_out = NULL;
   return LAINIR_RUN_OK;
 }

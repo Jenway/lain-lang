@@ -35,17 +35,12 @@ CORE_MODULES = (
     ROOT / "src" / "lainir" / "lain" / "compiler.l1",
 )
 BOOTSTRAP_STD_MODULES = (
-    ROOT / "src" / "lainir" / "bootstrap_std" / "core_eval_contracts.l1",
-    ROOT / "src" / "lainir" / "lain" / "eval_result.l1",
-    # Compile-time expression evaluation is implemented by meta_eval.l1
-    # below; the old standalone integer evaluator is not part of this artifact.
     # Semantic Meta and lowering implementations belong to the bootstrap
     # standard library.  The compiler core sees only their ABI declarations.
     ROOT / "src" / "lainir" / "lain" / "meta.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_values.l1",
     ROOT / "src" / "lainir" / "lain" / "lower_func.l1",
     ROOT / "src" / "lainir" / "lain" / "lower_record.l1",
-    ROOT / "src" / "lainir" / "lain" / "lower_program.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_bindings.l1",
     # Import discovery and syntax-index construction are language policy;
     # keep them with the bootstrap library rather than the core driver.
@@ -55,11 +50,6 @@ BOOTSTRAP_STD_MODULES = (
     ROOT / "src" / "lainir" / "lain" / "meta_import.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_record.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_type.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_eval_helpers.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_eval_cache.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_eval_bindings.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_eval.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_call.l1",
     ROOT / "src" / "lainir" / "lain" / "meta_collect.l1",
     ROOT / "src" / "lainir" / "bootstrap_std" / "policy.l1",
     ROOT / "src" / "lainir" / "lain" / "module_meta.l1",

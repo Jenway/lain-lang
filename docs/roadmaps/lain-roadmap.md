@@ -5,6 +5,9 @@
 本文只追踪尚未完成的工作。已经完成并有可执行证据的内容归档到
 [`../history/`](../history/)；历史文档不定义当前架构。
 
+C0 的完成记录见
+[`../history/roadmap-eval-c0-2026-09-09.md`](../history/roadmap-eval-c0-2026-09-09.md)。
+
 当前最高优先级是纠正 `#eval` 与 LAINVM 的实现方向。正确性优先于兼容性：错误的
 抽象直接删除，允许旧 Meta 和自举链在迁移期间暂时不可用。
 
@@ -31,47 +34,20 @@
 | 领域 | 当前状态 | 下一步 |
 | --- | --- | --- |
 | LAINIR 物理语义 | 基线可用 | 保持物理边界，不加入 Meta 返回分类 |
-| LAINVM 基础 | 已有部分 TCB、VSpace、Trap 和预算实现 | 删除错误结果传输协议，接入真实 `#eval` |
+| LAINVM 基础 | 错误结果传输协议已删除；已有部分 TCB、VSpace、Trap 和预算实现 | 固定并实现真实 `#eval` 约定 |
 | `#eval` | C seed 仍在当前解释器中内联执行 | 改为共享 VSpace 的临时 TCB |
-| Meta 编译期求值 | 依赖 `EvalResult`，当前工作区还绕过了 `#eval` | 删除旧路径后重新接入 |
+| Meta 编译期求值 | 旧求值路径已删除，暂不可用 | 在 LAINVM 路径完成后重新接入 |
 | 自举 | 冻结产物暂时可用 | 新路径完成后重新生成并恢复固定点 |
 | C backend 与发布 | 非当前主线 | 纠偏完成后继续收口和 CI 验证 |
 
 当前实施顺序：
 
 ```text
-C0 删除 EvalResult 和错误传输协议
-  -> C1 冻结 #eval / TCB / Trap 语义
+C1 冻结 #eval / TCB / Trap 语义
   -> C2 C seed 通过临时 TCB 执行 #eval
   -> C3 Lain 解释器实现相同语义
   -> C4 Meta 重新通过 #eval 执行编译期计算
   -> C5 恢复自举并替换冻结产物
-```
-
-## C0：删除 `EvalResult` 和错误传输协议
-
-目标：彻底移除由“每个 `#eval` 拥有独立 VSpace”这一错误前提产生的接口和代码。
-
-工作：
-
-- 删除 `src/lainir/lain/eval_result.l1`；
-- 删除有效源码中的 `eval_result_*`、`eval_status`、`eval_value` 和 `eval_object`；
-- 删除 scalar/type/module/AST result kind；
-- 删除 `ResultAdapter`、sidecar、payload adapter、owner transfer 和 result generation；
-- 删除只验证上述协议的 fixture 和检查脚本；
-- 删除无法脱离 `EvalResult` 独立存在的旧 Meta 求值、缓存和辅助模块，并从构建清单移除；
-- 删除当前文档和 roadmap 中的相关设计；历史文件可以保留原文用于追溯；
-- 保留独立成立的地址边界、activation 生命周期、Trap、执行预算、TCB 和 VSpace 实现。
-
-允许结果：旧 Meta 或源码自举暂时不能构建。冻结的 `lainc.l1` 继续作为临时引导工具。
-
-完成条件：除历史文件和冻结引导产物外，有效源码、API、fixture 和当前文档中不存在
-`EvalResult` 及其衍生接口；剩余 LAINVM 代码不依赖 Meta 值分类。
-
-阶段提交：
-
-```text
-lain: remove the EvalResult abstraction
 ```
 
 ## C1：冻结 `#eval`、TCB 和 Trap 语义

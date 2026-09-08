@@ -8,9 +8,11 @@
 上下文初始化由标准库提供；expand 会遍历 source unit，执行 module、record、
 struct 和 import 校验，并返回带 owner 的 pass-result；elaborate 会检查展开
 结果；lower 会调用标准库内的 lowering 实现，当前覆盖常量、算术、函数调用、
-局部绑定、模块成员、struct 字段和简单 `if`。编译期计算统一经过 LAIN-IR
-`#eval` 和 `EvalResult`，type/generic/effect/bounds 的第一代策略入口也在此
-artifact 中。
+局部绑定、模块成员、struct 字段和简单 `if`。
+
+旧的 LAIN-IR Meta 求值器、lowering 和求值结果包装已经删除。正式标准库重新接入
+LAIN-VM 的 `#eval` 路径以前，这个目录不提供可用的编译期求值实现，也不能单独
+重建旧的 frontend artifact。
 
 完整类型/泛型语义、完整控制流和完整 L1 Unit 生成仍未完成；这些是剩余迁移项，
 不应再写回 compiler core。

@@ -62,30 +62,9 @@ typedef struct {
 } LainirCapability;
 
 typedef struct LainirVmControl LainirVmControl;
-typedef struct LainirVmSession LainirVmSession;
-typedef struct LainirVmResultHandle LainirVmResultHandle;
 typedef struct LainirVmEndpoint LainirVmEndpoint;
 typedef struct LainirVmScheduler LainirVmScheduler;
 typedef void (*LainirVmBackendStateFree)(void *state);
-typedef void (*LainirVmResultPayloadFree)(const LainirValue *value,
-                                          void *user_data);
-
-typedef enum {
-  LAINIR_VM_PAYLOAD_BORROWED = 0,
-  LAINIR_VM_PAYLOAD_OWNED = 1
-} LainirVmPayloadOwnership;
-
-/* Provider-facing result adapter.  The adapter makes the payload lifetime
- * explicit before it becomes a generation-bound VM result handle. */
-typedef struct {
-  LainirVmSession *session;
-  uint64_t owner;
-  uint64_t session_generation;
-  LainirValue value;
-  LainirVmPayloadOwnership ownership;
-  LainirVmResultPayloadFree payload_free;
-  void *payload_user_data;
-} LainirVmResultAdapter;
 
 typedef struct {
   LainirVmEndpoint *endpoint;
@@ -103,10 +82,6 @@ typedef struct {
    * instruction fuel gate and may retain a resumable root continuation. */
   LainirVmControl *vm_control;
   uint64_t vm_owner;
-  /* Optional long-lived session.  When present, the control must be attached
-   * to this session and the session generation remains the ownership boundary. */
-  LainirVmSession *vm_session;
-  uint64_t vm_session_owner;
 } LainirRunRequest;
 
 /* Opaque VM control plane.  The execution backend owns this object; it is
@@ -168,39 +143,6 @@ typedef struct {
 
 LainirVmControl *lainir_vm_control_new(uint64_t max_steps);
 void lainir_vm_control_free(LainirVmControl *control);
-
-/* Opaque long-lived VSpace/session control.  The session retains no TCB
- * memory; attached controls must reach DEAD before reset or release. */
-LainirVmSession *lainir_vm_session_new(uint64_t owner);
-void lainir_vm_session_free(LainirVmSession *session);
-uint64_t lainir_vm_session_generation(const LainirVmSession *session);
-int lainir_vm_session_accepts(const LainirVmSession *session, uint64_t owner,
-                              const LainirVmControl *control,
-                              uint64_t control_owner);
-int lainir_vm_session_attach(LainirVmSession *session, uint64_t owner,
-                             LainirVmControl *control, uint64_t control_owner);
-int lainir_vm_session_detach(LainirVmSession *session, uint64_t owner,
-                             LainirVmControl *control, uint64_t control_owner);
-int lainir_vm_session_reset(LainirVmSession *session, uint64_t owner);
-int lainir_vm_session_release(LainirVmSession *session, uint64_t owner);
-
-/* A result handle snapshots its session identity and generation.  It copies
- * the value descriptor; provider payload ownership remains explicit. */
-LainirVmResultHandle *lainir_vm_result_handle_new(
-    LainirVmSession *session, uint64_t owner, const LainirValue *value,
-    LainirVmResultPayloadFree payload_free, void *payload_user_data);
-LainirVmResultHandle *lainir_vm_result_handle_adapt(
-    const LainirVmResultAdapter *adapter);
-void lainir_vm_result_handle_free(LainirVmResultHandle *handle);
-uint64_t lainir_vm_result_handle_generation(
-    const LainirVmResultHandle *handle);
-int lainir_vm_result_handle_transfer(LainirVmResultHandle *handle,
-                                     uint64_t owner, uint64_t target);
-int lainir_vm_result_handle_release(LainirVmResultHandle *handle,
-                                    uint64_t owner);
-int lainir_vm_result_handle_use(const LainirVmResultHandle *handle,
-                                const LainirVmSession *session, uint64_t owner,
-                                LainirValue *value_out);
 
 LainirVmState lainir_vm_control_state(const LainirVmControl *control);
 uint32_t lainir_vm_control_suspend_reason(const LainirVmControl *control);
@@ -341,22 +283,6 @@ void lainir_caps_set_eval_limit(
 LainirRunStatus lainir_run(
     const LainirRunRequest *request,
     LainirValue *result_out,
-    const char **error_out);
-
-/* Run once and materialize object results as a generation-bound handle.  Unit
- * and scalar results are copied to scalar_out; object results require a
- * session on the request. */
-LainirRunStatus lainir_run_owned_result(
-    const LainirRunRequest *request, LainirValue *scalar_out,
-    LainirVmResultHandle **handle_out,
-    LainirVmResultPayloadFree payload_free, void *payload_user_data,
-    const char **error_out);
-
-/* Backend boundary helper.  Native/formal lowerings may consume scalar and
- * unit results directly; object results must first be adapted into a
- * generation-bound LainirVmResultHandle. */
-LainirRunStatus lainir_run_backend_result(
-    const LainirRunRequest *request, LainirValue *scalar_out,
     const char **error_out);
 
 /* Execute one already-parsed block in an explicit compile-time context.

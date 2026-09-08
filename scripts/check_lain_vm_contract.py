@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the provider-neutral single-VSpace/single-TCB VM contract."""
+"""Exercise the provider-neutral TCB, VSpace, Trap, and scheduler contract."""
 
 from __future__ import annotations
 
@@ -91,26 +91,6 @@ class VSpace:
 
 
 @dataclass
-class ReusableSession:
-    """Long-lived owner of a VSpace with an explicit reset boundary."""
-
-    owner: int
-    vspace: VSpace
-    released: bool = False
-
-    def reset(self, owner: int) -> None:
-        if owner != self.owner or self.released:
-            raise ValueError("session reset rejected")
-        self.vspace.reset(owner)
-
-    def release(self, owner: int) -> None:
-        if owner != self.owner or self.released:
-            raise ValueError("session release rejected")
-        self.vspace.release(owner)
-        self.released = True
-
-
-@dataclass
 class TCB:
     owner: int
     vspace: VSpace
@@ -192,7 +172,6 @@ class TCB:
         if owner != self.owner or self.state != "RUNNING":
             raise ValueError("TCB finish rejected")
         self.state = "DEAD"
-        self.vspace.reset(owner)
 
 
 @dataclass
@@ -357,58 +336,6 @@ class Capability:
             raise PermissionError("capability owner or active state rejected")
 
 
-@dataclass
-class OwnedHandle:
-    """A provider-neutral result/arena handle with explicit ownership."""
-
-    owner: int
-    released: bool = False
-
-    def transfer(self, owner: int, target: int) -> None:
-        if self.released or owner != self.owner or target == owner:
-            raise ValueError("handle ownership transfer rejected")
-        self.owner = target
-
-    def release(self, owner: int) -> None:
-        if self.released or owner != self.owner:
-            raise ValueError("handle release rejected")
-        self.released = True
-
-    def use(self, owner: int) -> None:
-        if self.released or owner != self.owner:
-            raise ValueError("released or foreign handle used")
-
-
-@dataclass
-class ResultHandle:
-    """An Eval result whose storage belongs to one VSpace generation."""
-
-    owner: int
-    generation: int
-    vspace_id: int
-    released: bool = False
-
-    def transfer(self, owner: int, target: int) -> None:
-        if self.released or owner != self.owner or target == owner:
-            raise ValueError("result ownership transfer rejected")
-        self.owner = target
-
-    def release(self, owner: int) -> None:
-        if self.released or owner != self.owner:
-            raise ValueError("result release rejected")
-        self.released = True
-
-    def use(self, vspace: VSpace, owner: int) -> None:
-        if (
-            self.released
-            or owner != self.owner
-            or self.generation != vspace.generation
-            or self.vspace_id != id(vspace)
-            or vspace.released
-        ):
-            raise ValueError("stale or foreign result handle")
-
-
 def expect_failure(action, error: type[BaseException]) -> None:
     try:
         action()
@@ -487,21 +414,22 @@ def main() -> int:
     arena_handle = vspace.allocate_handle(7)
     arena_handle.use(vspace, 7)
     generation_before_finish = vspace.generation
+    bytes_before_finish = vspace.bytes_used
     tcb.finish(7)
     if (
-        vspace.bytes_used != 0
-        or vspace.reset_count != 1
-        or vspace.provider_release_count != 1
-        or vspace.generation != generation_before_finish + 1
+        vspace.bytes_used != bytes_before_finish
+        or vspace.reset_count != 0
+        or vspace.provider_release_count != 0
+        or vspace.generation != generation_before_finish
         or tcb.state != "DEAD"
     ):
-        raise SystemExit("TCB finish did not reset its VSpace")
-    expect_failure(lambda: arena_handle.use(vspace, 7), ValueError)
+        raise SystemExit("TCB finish changed its shared VSpace")
+    arena_handle.use(vspace, 7)
     generation_after_finish = vspace.generation
     vspace.reset(7)
     if (
         vspace.generation != generation_after_finish + 1
-        or vspace.provider_release_count != 2
+        or vspace.provider_release_count != 1
     ):
         raise SystemExit("VSpace reset did not advance its generation")
     slice_space = VSpace(owner=7, allocation_limit=0)
@@ -531,8 +459,8 @@ def main() -> int:
         raise SystemExit("VM slice lost callee position")
     while slice_tcb.state != "DEAD":
         slice_vm.run_slice(1)
-    if slice_space.reset_count != 1:
-        raise SystemExit("VM completion did not release its VSpace")
+    if slice_space.reset_count != 0:
+        raise SystemExit("VM completion changed its shared VSpace")
     released_space = VSpace(owner=7, allocation_limit=0)
     released_handle = released_space.allocate_handle(7)
     released_space.release(7)
@@ -540,39 +468,10 @@ def main() -> int:
         raise SystemExit("VSpace release did not release its provider arena")
     expect_failure(lambda: released_handle.use(released_space, 7), ValueError)
     expect_failure(lambda: released_space.release(7), ValueError)
-    handle = OwnedHandle(owner=7)
-    handle.use(7)
-    handle.transfer(7, 9)
-    handle.use(9)
-    expect_failure(lambda: handle.use(7), ValueError)
-    handle.release(9)
-    expect_failure(lambda: handle.use(9), ValueError)
-    expect_failure(lambda: handle.release(9), ValueError)
-    result_handle = ResultHandle(
-        owner=7,
-        generation=vspace.generation,
-        vspace_id=id(vspace),
-    )
-    result_handle.use(vspace, 7)
-    result_handle.transfer(7, 9)
-    result_handle.use(vspace, 9)
-    expect_failure(lambda: result_handle.use(vspace, 7), ValueError)
-    vspace.reset(7)
-    expect_failure(lambda: result_handle.use(vspace, 9), ValueError)
-    expect_failure(lambda: result_handle.release(7), ValueError)
-    result_handle.release(9)
-    expect_failure(lambda: result_handle.release(9), ValueError)
     sibling_space = VSpace(owner=7, allocation_limit=0)
     sibling_arena = sibling_space.allocate_handle(7)
-    sibling_result = ResultHandle(
-        owner=7,
-        generation=sibling_space.generation,
-        vspace_id=id(sibling_space),
-    )
     expect_failure(lambda: sibling_arena.use(vspace, 7), ValueError)
-    expect_failure(lambda: sibling_result.use(vspace, 7), ValueError)
     sibling_arena.use(sibling_space, 7)
-    sibling_result.use(sibling_space, 7)
     first_space = VSpace(owner=7, allocation_limit=0)
     second_space = VSpace(owner=7, allocation_limit=0)
     first_arena = first_space.allocate_handle(7)
@@ -583,29 +482,11 @@ def main() -> int:
     second_tcb.start(7)
     second_generation = second_space.generation
     first_tcb.finish(7)
-    expect_failure(lambda: first_arena.use(first_space, 7), ValueError)
+    first_arena.use(first_space, 7)
     second_arena.use(second_space, 7)
     if second_space.generation != second_generation or second_tcb.state != "RUNNING":
         raise SystemExit("TCB finish crossed VSpace lifetime boundary")
     second_tcb.finish(7)
-    session_space = VSpace(owner=7, allocation_limit=0)
-    session = ReusableSession(owner=7, vspace=session_space)
-    session_handle = session_space.allocate_handle(7)
-    session_handle.use(session_space, 7)
-    session.reset(7)
-    expect_failure(lambda: session_handle.use(session_space, 7), ValueError)
-    reset_generation = session_space.generation
-    session_handle = session_space.allocate_handle(7)
-    session_handle.use(session_space, 7)
-    session.release(7)
-    if (
-        not session.released
-        or session_space.generation != reset_generation + 1
-        or session_space.provider_release_count != 2
-    ):
-        raise SystemExit("reusable session did not release its VSpace")
-    expect_failure(lambda: session.reset(7), ValueError)
-    expect_failure(lambda: session.release(7), ValueError)
     endpoint = Endpoint()
     if endpoint.send(1, 42) is not None:
         raise SystemExit("endpoint send without receiver did not block")
@@ -638,7 +519,7 @@ def main() -> int:
     trap = Trap("quota", "eval.main", 7101)
     if (trap.kind, trap.source, trap.status) != ("quota", "eval.main", 7101):
         raise SystemExit("trap record lost its classification")
-    print("PASS LAIN-VM single-VSpace/single-TCB contract")
+    print("PASS LAIN-VM TCB/VSpace contract")
     return 0
 
 

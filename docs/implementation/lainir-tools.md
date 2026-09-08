@@ -75,18 +75,9 @@ token 的边界（包括相邻 trivia），只替换这段 token 链；后续 pa
 
 ## 下一阶段计划
 
-Lain frontend 的 LAIN-IR vertical slice 现在也有固定入口：
-
-```text
-python scripts/build_lain_frontend.py
-python scripts/run_lain_frontend.py -o build/lainir/result.txt source.lain
-```
-
-它生成 RawAst、模块摘要、record/module meta 描述和 `std::consteval` 结果，并在
-未解析模块、循环依赖或 phase 诊断时返回非零状态；这是独立的 frontend
-inspection artifact，不是 `compiler_compile` 的最终语言覆盖面。
-多文件执行会先把每个源文件的 RawAst 和 import 边缓存下来，后续 meta 与循环检查
-复用这份缓存。
+早期用于检查 RawAst、module、record 和 `std::consteval` 的独立 frontend artifact
+已经移除。编译器只保留 `compiler_compile` 这一条正式入口；Meta 编译期执行会在
+LAIN-VM 的临时 TCB 路径完成后重新接入。
 
 首个正式编译入口也已经可以运行：
 

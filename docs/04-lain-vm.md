@@ -1,213 +1,180 @@
-# 04-LAIN-VM：虚拟微内核与执行环境
+# LAIN-VM：虚拟控制面与执行环境
 
-状态：架构提案 / 编译期与虚拟执行环境规范。实施阶段见
-[`roadmaps/lain-roadmap.md`](roadmaps/lain-roadmap.md)；本文不是当前 LAINIR 实现规范。
+状态：当前架构设计。`#eval` 的临时 TCB 执行路径尚在实现中。
 
-当前迁移基线只实现并验证了命名的只读静态 `#data`、当前 procedure activation
-内的 `#alloca`、`#lea` 与 typed `#load/#store`、Eval 的 step/depth/allocation
-限制，以及显式传入的 capability。下一步要把这些约束装入一个单 TCB/单 VSpace
-的 Eval session；这部分属于当前自举计划。多 TCB 调度、Endpoint、完整 CSpace、
-软件 MMU、`#swap_context`、demand paging 和 OS/bare-metal lowering 仍是后续方向，
-尚未成为 LAINIR 指令、provider API 或 seed 运行时对象。任何实现工作必须先更新
-LAINIR 规范和 API contract，再把这些提案纳入 provider 与测试。
+LAIN-VM 是 Lain 的执行控制面。它为编译期 `#eval`、解释器自举、运行期特权降级和未来的并发执行提供统一的物理环境模型。
 
-### 审阅结论
+LAIN-VM 与 LAINIR 分层：LAINIR 描述已经确定尺寸、调用约定和内存访问方式的物理程序；LAIN-VM 管理这些程序运行时的地址空间、执行上下文、同步、异常和能力。LAIN-VM 不替代 LAINIR，也不向 LAINIR 引入源语言类型或对象布局。
 
-这份文档同时描述 Eval VM 的最小执行环境和长期架构提案，不能直接替代 LAINIR
-或标准库实现规范。它把三个层次放在了一张图里：`#eval` 的受限执行、未来的运行时调度抽象、以及
-操作系统或裸机的物理下沉。当前 roadmap 只接受第一层已经存在的约束；第二、
-三层必须分别形成 API contract、可运行 provider 和验证用例后才能进入实现。
+## 1. 控制面对象
 
-因此，本文中的对象名和操作名（例如 `VSpace`、`TCB`、`Endpoint`、`Trap`、
-`CSpace`、`#swap_context`）均为保留的设计词汇，不是当前可编写的 Lain 语法。
-尤其是 `#data` 的只读语义、`#alloca` 的 activation 生命周期、capability 的
-显式传入和 Eval 配额，应继续以 LAINIR 与 API 文档为准；本文不重新定义它们。
+LAIN-VM 由五类正交对象组成：
 
-LAIN-VM 是 Lain 系统中的**虚拟控制面与微内核抽象（Virtual Microkernel Control Plane）**。它不作为运行时的重量级虚拟机（如 JVM 或 BEAM）存在，而是为编译期计算（`#eval`）、解释器自举、以及运行期特权降级提供一套严格正交的物理环境模型。
+| 对象 | 职责 |
+| --- | --- |
+| VSpace | 地址空间、区域和访问权限 |
+| TCB | 一个执行流的 procedure、instruction position、activation、限制和状态 |
+| Endpoint | TCB 之间的同步和结果交接 |
+| Trap | 非法物理操作、资源耗尽、断言和外部事件的统一出口 |
+| CSpace | 当前执行流可使用的 capability 集合 |
 
-LAIN-VM 继承 **seL4 / Mach 的极简微内核哲学**，坚决摒弃宏内核（Monolithic Kernel）将调度、内存、权限和文件强行绑定的混乱设计。LAIN-VM 将系统的物理控制权严格拆解为五个正交的物理基石：**空间（VSpace）**、**执行上下文（TCB）**、**同步端点（Endpoint）**、**异常控制（Trap）** 与 **能力（CSpace）**。
+VSpace 不负责执行；TCB 不拥有地址空间；Endpoint 不拥有执行流；Trap 不代替诊断系统；CSpace 不改变 LAINIR 指令的含义。对象之间通过 VM contract 组合。
 
-在最终的代码生成中，LAIN-VM 的抽象在编译期被完全擦除（Zero-Overhead Erasure），直接下沉为目标硬件指令或宿主操作系统的系统调用。
+这些对象是 VM 的逻辑对象。它们可以由解释器中的宿主结构体、native backend 中的寄存器和栈、或操作系统中的线程和地址空间实现。它们不是 LAINIR 的 struct、record 或 `#data` 声明。
 
----
+## 2. 与 LAINIR 的边界
 
-## 1. 架构总览与五大正交基石
-
-LAIN-VM 拒绝类似 Linux `task_struct` 的“全能任务”设计，内核只管理五种正交物理对象：
-
-```text
-       ┌─────────────────────────────────────────────────────────────┐
-       │                           LAIN-VM                           │
-       └───┬─────────────┬─────────────┬─────────────┬─────────────┬─┘
-           │             │             │             │             │
-           ▼             ▼             ▼             ▼             ▼
-     【 VSpace 】   【  TCB  】   【Endpoint】   【  Trap  】   【 CSpace 】
-     - 连续无类型   - 寄存器现场  - 同步会合点   - 硬件级中断  - 不可伪造Token
-     - 软件 MMU     - 栈空间与SP  - 阻塞与唤醒   - 断言违例    - 拦截 #extern
-     - 瞬时 Arena   - 协同换栈    - 多核数据交接 - 诊断升格    - 编译期沙盒
-```
-
-1. **VSpace（虚拟内存空间）**：纯粹的资源容器。负责划定物理地址范围、访问权限及生命周期。VSpace 不具备执行能力。
-2. **TCB（线程控制块）**：纯粹的动态执行现场。包含指令指针（IP）、栈指针（SP）和通用寄存器快照。TCB 不拥有内存，它只在一个指定的 VSpace 内运行。
-3. **Endpoint（同步端点）**：TCB 之间进行**零拷贝同步与会合（Rendezvous）**的纯粹门牌号，解决执行流阻塞与多核交接。
-4. **Trap（异常与中断分发）**：硬件级故障、只读越界、断言违例及外部物理 IRQ 的拦截中枢。
-5. **CSpace（能力空间）**：基于权标（Capability）的权限控制表，决定当前执行流可以向宿主请求哪些特权操作。
-
----
-
-## 2. 虚拟内存空间（VSpace）与软件 MMU
-
-每个 `#eval` 任务或虚拟进程都在一个独立的 VSpace 内运行。VSpace 对标 seL4 的 Untyped Memory 与地址空间模型：
-
-### 2.1 基于 Scoped Arena 的瞬时内存回收
-- VSpace 向宿主申请一段连续的物理内存作为内部存储池；
-- 空间内的静态 `#data` 与过程局部 `#alloca` 均通过线性指针推进（Bump Allocation）进行分配；
-- **生命周期清算**：当一次 `#eval` 结束时，LAIN-VM 仅将最终的计算结果（字面量或紧凑对象）复制出沙盒，随后**直接重置 VSpace 的分配指针（Reset）**，实现 $O(1)$ 复杂度的瞬时物理内存回收，彻底杜绝编译期内存泄漏。
-
-### 2.2 虚拟缺页与软件 MMU（Virtual PageFault）
-LAINIR 的物理指令（`#load` / `#store`）保持对虚拟内存机制的无知，而 LAIN-VM 充当软件 MMU 守门人：
-- **只读保护拦截**：当 `#store` 试图写入标记为只读的 `#data` 地址段时，LAIN-VM 触发写保护异常（Write-Protection Fault）；
-- **哨兵页与防穿透（Guard Page）**：在 VSpace 分配的栈底设置不可访问的虚拟哨兵页，当栈指针 `%sp` 发生越界碰撞时立即拦截，防止宿主编译器崩溃（Segfault）；
-- **按需分配（Demand Paging）**：对于编译期声明的大块稀疏内存，LAIN-VM 仅在首次写入触发缺页拦截时按需向宿主申请物理页，抑制编译期内存膨胀。
-
----
-
-## 3. 虚拟执行流（TCB）与上下文切换
-
-LAIN-VM 是上层代数效应（Algebraic Effects）、协程及并发模型在物理底层的承载者。
-
-### 3.1 物理 TCB 结构
-TCB 是一个极简的定长物理状态结构体，描述一段独立的计算历史：
+LAINIR 当前只表达物理值和物理操作：
 
 ```lain-ir
-#data virtual_tcb {
-  #bits<64> %virtual_ip,       // 当前程序计数器
-  #addr     %virtual_sp,       // 当前栈指针
-  #addr     %stack_limit,      // 栈溢出检查边界
-  #bits<64> %registers[16],    // 虚拟通用寄存器现场
-  #bits<32> %status            // READY, RUNNING, BLOCKED, DEAD
-}
+#bits<N>
+#float<N>
+#addr
+#unit
+#never
 ```
 
-### 3.2 纯软件换栈（#swap_context）
-在编译期执行 `#eval` 时，LAIN-VM 避免调用宿主机的物理汇编换栈指令：
-- 当遇到 `#swap_context(old_tcb_addr, new_tcb_addr)` 时，LAIN-VM 拦截该物理操作；
-- VM 将解释器当前的寄存器与状态写入 `old_tcb_addr`；
-- VM 将内部的活跃 TCB 指针切换为 `new_tcb_addr`，并从该 TCB 恢复寄存器快照与 `%virtual_ip`；
-- 解释器继续单线程推进，**无需触碰任何宿主机的物理调用栈**，从而在编译期安全原生跑通代数效应与纤程（Fiber）。
+静态数据使用只读 `#data`，activation 局部存储使用 `#alloca`，地址计算使用 `#lea`，访问使用带宽度的 `#load/#store`。这些定义见 [`01-lain-ir.md`](01-lain-ir.md)。
 
----
+LAIN-VM 为这些操作提供执行环境：
 
-## 4. 同步与会合端点（Endpoint）
+- 将 `#data` 映射为当前 VSpace 中的只读区域；
+- 将 `#alloca` 绑定到当前 TCB 的 activation 生命周期；
+- 检查地址是否属于当前 VSpace 和当前 activation；
+- 将非法访问和资源耗尽转为 Trap；
+- 通过 CSpace 决定 `#extern` 等外部能力是否可用。
 
-针对非协同式的多执行流交接、跨核并行或阻塞等待，LAIN-VM 提供类似 seL4 的原子同步原语：
+TCB、VSpace、Endpoint、Trap 和 CSpace 不属于当前 LAINIR v1 指令集。需要向 Lain 或标准库公开 VM 控制操作时，必须先定义 VM API、权限、生命周期和 backend lowering。
 
-1. **会合语义（Rendezvous IPC）**：
-   - Endpoint 本身不持有消息队列，它只是一个**没有缓冲区的同步挂起点**；
-   - 当 TCB-A 执行 `Endpoint.Send(ep, data)` 而无接收者时，TCB-A 状态置为 `BLOCKED`，进入等待队列；
-   - 当 TCB-B 执行 `Endpoint.Recv(ep)` 到达时，两者瞬间完成寄存器级数据交接，双双激活。
-2. **多核与并发支持**：
-   - 彻底解耦“直接点名换栈（`#swap_context`）”带来的强依赖，为标准库实现 Mutex、Channel 和任务池调度器提供最底层的无锁阻塞支撑。
+## 3. VSpace
 
----
+VSpace 管理一组执行流可以看到的地址区域和权限。`#eval` 默认创建临时 TCB，并让它使用调用者当前的 VSpace；它不会仅因进入编译期计算就另建地址空间。
 
-## 5. 故障、断言与编译器诊断（Trap & Diagnostics）
+### 3.1 区域
 
-LAIN-VM 充当虚拟 CPU 的中断向量控制器，严禁将未定义行为（UB）或非法物理操作泄露给宿主机。
+- `#data` 是静态只读区域。它只保存物理字节和对齐信息，没有源语言字符串、对象或模块语义。
+- `#alloca` 属于当前 procedure activation。activation 结束后，其中的地址立即失效，不能通过返回值、全局状态、Endpoint 或 capability 逃逸。
+- procedure 和外部 capability 通过 VM 的对象表或 provider 句柄关联，不使用伪造的 LAINIR 结构体地址。
 
-1. **硬件级 Trap 捕获**：
-   - 算术除零（Division by Zero）；
-   * 空间未对齐访问（Alignment Fault）；
-   * 栈逃逸（Activation Escaping，即检查到 `#alloca` 地址被返回或脱离作用域）；
-   * 外部物理硬件中断（IRQ，作为异步 Trap 注入）。
-2. **断言消费与验证**：
-   - LAINIR 中附着在 `#addr` 上的几何断言（如 `#assert_not_null`、`#assert_align`）由 VM 进行运行时断言；
-   - 一旦断言失败，立即触发断言违例 Trap。
-3. **诊断提升（Diagnostic Reflection）**：
-   - 发生 Trap 时，LAIN-VM 封冻当前 TCB 的状态快照，解析 `%virtual_ip` 对应的源码调试信息映射（Source Map）；
-   - 将底层段错误或断言失败，升格为优雅、精准的编译期报错：
-     `"Comptime Trap: [Memory Access Fault] attempted to dereference null address at src/parser.lain:88:12"`。
+### 3.2 地址检查
 
----
+VSpace 在 `#lea`、`#load` 和 `#store` 的执行路径上提供边界和权限检查。至少需要拒绝：
 
-## 6. 确定性与资源配额（Fuel & Quotas）
+- 写入只读 `#data`；
+- 从 activation 外访问 `#alloca`；
+- 越过区域边界的 load/store；
+- 使用已经结束的 activation 或已经撤销的 VM 句柄。
 
-为了保证编译期计算图灵完备性下的**有界终止（Bounded Termination）**，LAIN-VM 内置虚拟时钟与资源度量机制：
+具体实现可以使用连续 arena、保护页、软件边界表或宿主虚拟内存，但这些实现选择不改变 VM contract。
 
-- **指令燃料（Fuel Counter）**：
-  每次 `#eval` 启动时被注入确定的 Step 预算（例如 $1,000,000$ 步）。解释器每执行一次分支、循环回跳或内存操作消耗对应燃料。燃料耗尽强制中断，杜绝编译期死循环；
-- **调用栈深度（Call Depth Limit）**：
-  限制嵌套 `#call` 的最大层级，提前拦截无限递归；
-- **分配预算（Allocation Quota）**：
-  限制单个 Task 内累积申请的内存上限，防范恶意宏引发的宿主 OOM。
+## 4. TCB
 
----
+TCB 描述一段独立的执行历史。它至少保存以下逻辑状态：
 
-## 7. 关于时间与异步事件的非侵入设计（Non-intrusive Time Architecture）
+| 状态 | 含义 |
+| --- | --- |
+| procedure / instruction position | 当前执行的过程和指令位置 |
+| activation state | 当前调用 activation、局部存储和返回边界 |
+| execution limits | step、call-depth、allocation quota 的预算和消耗 |
+| capability context | 当前 TCB 使用的 CSpace |
+| status | ready、running、blocked 或 dead |
+| trap / return state | 挂起的 Trap 和过程返回状态 |
 
-LAIN-VM **严禁内置任何时钟（Clock）、定时器或异步事件循环（Event Loop）机制**。所有时间流逝与异步 IO 必须在标准库层通过代数效应自愈：
+当前实现不规定这些字段的物理布局。解释器可以保存宿主结构，native backend 可以使用寄存器和栈，系统级 lowering 可以使用硬件线程现场。任何表示都必须保持相同的 TCB 生命周期、过程返回和 Trap 语义。
 
-1. **时间的物理本质**：
-   - 获取时间戳被降级为读取硬件寄存器（如 x86 `RDTSC` / ARM `CNTVCT`），作为普通指令或外部符号处理；
-2. **异步事件的组合消除**：
-   - 外部硬件中断被统一视为异步 **Trap** 捕获；
-   - 唤醒挂起任务统一通过 **Endpoint** 投递；
-   - 标准库通过 `effect Clock` 暴露 `now()` 与 `sleep()` 接口。生产环境对接物理定时器中断；单元测试与 `#eval` 中可直接注入虚拟步进时钟（Virtual Time），实现确定性瞬间快进测试。
+### 4.1 上下文切换
 
----
+上下文切换由 VM scheduler 驱动。TCB 对 LAINIR 保持 opaque，切换过程不会把 TCB
+地址作为物理值传入程序。
 
-## 8. 能力访问控制（CSpace & Capability）
+VM control API 提供以下操作：
 
-根据 Lain 核心设计准则，任何环境交互必须通过显式能力授权。
+| 操作 | 语义 |
+| --- | --- |
+| `create_tcb(entry, vspace, cspace)` | 创建 TCB，绑定入口 procedure、VSpace 和 CSpace |
+| `suspend_tcb(tcb, reason)` | 保存执行状态并将 TCB 置为 blocked 或 suspended |
+| `resume_tcb(tcb)` | 检查 capability 和状态后，将 TCB 放入 runnable 集合 |
+| `terminate_tcb(tcb)` | 结束 TCB，交付过程返回值或 Trap，并释放其 activation |
 
-- **调用隔离**：解释器内部遇到 `#extern` 过程调用时，无权直接链接宿主符号；
-- **调用网关（Gateway Dispatcher）**：
-  外部调用被转换为向 LAIN-VM 提出的能力调用请求（Capability Invocation）。
-  LAIN-VM 检索当前 Task 的 CSpace：
-  - 若具有 `Cap::FsRead` 权标，转发给宿主执行文件读取；
-  - 若缺乏对应权标，当场终止执行并抛出安全越权异常；
-- **构建无菌性**：默认情况下，任何 `#eval` 任务拥有空的 CSpace，数学上保证宏展开与编译期特化完全纯粹、跨机器可复现、且免疫任何供应链恶意代码投毒。
+协程通过 scheduler request 或 Endpoint 操作主动让出执行。解释器保存宿主状态，
+native backend 保存寄存器和栈状态，系统级 backend 使用平台线程或硬件上下文；这些
+实现共享同一组 TCB 状态转换和生命周期规则。
 
----
+## 5. Endpoint
 
-## 9. `#eval` 的标准生命周期
+Endpoint 是 TCB 之间的同步会合点。它不改变 LAINIR 的值语义，也不承担通用消息队列。
 
-当编译管线遇到一个 `#eval { ... }` 块时，LAIN-VM 驱动其完整的沙盒生命周期：
+基本语义如下：
+
+1. 发送方到达而没有接收方时，发送方 TCB 进入 `blocked`；
+2. 接收方到达时，VM 按 contract 完成交接，双方恢复为可运行状态；
+3. 交接的数据必须经过 capability 和生命周期检查，不能把 activation 地址变成长期对象；
+4. Endpoint 的等待、唤醒和取消都必须能产生稳定的状态转换或 Trap。
+
+解释器可以使用内部等待表，native backend 可以降低到宿主同步原语，裸机实现可以使用原子指令和中断。它们共享同一 Endpoint contract。
+
+## 6. Trap
+
+Trap 是 VM 对非法物理操作和资源边界的统一响应。至少包括：
+
+- 除零、未对齐访问和越界访问；
+- 写入只读 `#data`；
+- activation 地址逃逸和 use-after-return；
+- step、call-depth 或 allocation quota 耗尽；
+- capability 拒绝；
+- Endpoint 或上下文切换的非法状态；
+- provider 或宿主注入的外部事件。
+
+Trap 至少保留 TCB、procedure、instruction position、错误分类和必要的 source location。编译器可以把 Trap 转换为诊断，native backend 可以把它转换为平台异常；Trap 的物理来源不能直接泄露为宿主崩溃。
+
+## 7. CSpace 与外部能力
+
+执行流不能直接访问宿主文件系统、时钟、网络或其他外部资源。`#extern` 的解析和调用必须经过当前 TCB 的 CSpace。
+
+默认 `#eval` 临时 TCB 使用受限的 capability 集合。调用外部能力时，VM 检查：
+
+- 当前 TCB 是否拥有相应 capability；
+- capability 是否允许当前 TCB 使用；
+- 参数中的地址是否仍在允许的 VSpace 范围内；
+- 调用完成后是否产生合法的物理结果。
+
+拒绝访问产生 Trap，不产生部分 artifact，也不允许通过宿主异常绕过 CSpace。
+
+## 8. `#eval` 生命周期
+
+一次 `#eval` 的最小生命周期是：
 
 ```text
-[进入 #eval]
-    │
-    ▼
-1. VSpace 实例化 ───► 向宿主借用连续空间，划定 Arena 与只读段
-    │
-    ▼
-2. TCB 与 CSpace ───► 创建根 TCB，配置 %sp 指向栈顶，注入授权 Token
-    │
-    ▼
-3. 驱动解释执行 ───► LAIN-IR 解释器接管取指，消耗 Fuel，处理换栈与 Endpoint
-    │
-    ▼
-4. 结果萃取 ───────► 拦截正常退出，从栈顶或寄存器提取目标 #bits<N>
-    │
-    ▼
-5. 资源清盘 ───────► 强制释放/重置整个 VSpace，销毁 TCB
-    │
-    ▼
-[返回常量，折叠进外部静态 IR]
+调用者 TCB 执行 #eval
+  -> VM 创建共享调用者 VSpace 的临时 TCB
+  -> 为临时 TCB 建立根 activation 和执行预算
+  -> 执行 LAINIR
+  -> 正常完成时返回声明的 LAINIR 物理值，失败时产生 Trap
+  -> 结束临时 TCB 并释放它的 activation
 ```
 
----
+临时 TCB 结束时不会销毁共享的 VSpace。返回值遵守普通 LAINIR 过程返回规则；其中若包含 `#addr`，地址的有效性仍由它所指向区域的生命周期决定。嵌套 `#eval` 依次创建临时 TCB，并继续使用同一个 VSpace。
 
-## 10. 运行时特化与物理下沉（Lowering）
+## 9. 确定性与时间
 
-LAIN-VM 虽是编译期的控制中枢，但它同时定义了**代码如何面向操作系统下沉**的抽象模型：
+编译期执行需要确定的 step、call-depth 和 allocation 预算。相同 artifact、输入和 capability 集合应得到相同的结果或相同的 Trap 分类。
 
-| LAIN-VM 概念 | 编译期执行 (#eval) 的实现 | 用户态系统 (Linux/OS) 的 Lowering | 裸机环境 (Bare-Metal) 的 Lowering |
-| :--- | :--- | :--- | :--- |
-| **VSpace** | 内存 Arena / 宿主堆池 | `mmap` / 虚拟内存段 (VMA) | 物理页表基址 (`CR3` / `SATP`) |
-| **TCB** | 结构体快照 + 解释器循环 | 用户态汇编换栈 / OS 线程池 | 物理硬件栈帧 / `IRET` 现场 |
-| **Endpoint** | 解释器内部挂起队列 / 寄存器换入 | Linux `futex` / Windows `WaitOnAddress` | 硬件原子指令 (CAS) + 自旋锁 / `WFI` |
-| **Trap** | 解释器拦截升格为 Diagnostic | 注册 OS 信号处理 (`SIGSEGV` / `SIGFPE`) | 硬件中断向量表 (IDT / IVT) 处理函数 |
-| **CSpace** | 虚拟 Token 查找表 | 文件句柄 (fd) / 操作权限鉴权 | 硬件特权级 (Ring 0 / PMP 物理内存保护) |
+LAIN-VM 不内置业务时钟、定时器或事件循环。时间和异步 IO 通过显式 capability、Endpoint 和标准库 effect 接入；`#eval` 可以注入虚拟时间或完全拒绝相关能力，以保持可复现性。
 
-在将 LAINIR 降低为本机机器码时，**LAIN-VM 作为实体完全消解**，它在上层建立的控制面契约直接转化为硬件指令或最小系统调用，实现真正意义上的**零运行时抽象开销（Zero-Overhead Abstraction）**。
+## 10. 平台 lowering
+
+同一 VM contract 可以有不同的执行后端：
+
+| VM 对象 | 参考解释器 | 用户态系统 | 裸机 |
+| --- | --- | --- | --- |
+| VSpace | 受检的 arena/区域表 | 虚拟内存区域 | 页表和物理保护 |
+| TCB | 宿主状态对象 | 线程或用户态上下文 | 硬件栈帧 |
+| Endpoint | 等待表 | futex 或平台同步原语 | 原子指令和中断 |
+| Trap | 解释器错误结果 | 信号/异常转换 | 中断向量 |
+| CSpace | capability 表 | 句柄和权限表 | 特权级和物理保护 |
+
+LAIN-VM 的对象在最终 lowering 中可以被消除，但对象之间的权限、生命周期和 Trap 关系必须保留。零开销是 lowering 的目标，不是省略 VM contract 的理由。
+
+## 11. 实施顺序
+
+实施阶段与验收条件统一记录在 [`roadmaps/lain-roadmap.md`](roadmaps/lain-roadmap.md)。当前首先删除旧的求值结果包装协议；随后固定临时 TCB、共享 VSpace、过程返回和 Trap 的接口，再分别接入 seed 解释器、Lain 编写的解释器和 Meta。
