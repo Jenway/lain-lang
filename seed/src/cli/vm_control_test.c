@@ -300,6 +300,35 @@ cleanup:
   return ok;
 }
 
+static int backend_result_adapter_gate_test(void) {
+  const char *source =
+      "#extern #proc make_addr() -> #addr;\n"
+      "#proc root() -> #addr { #return #call make_addr() }\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  LainirCapabilityTable *caps = NULL;
+  LainirRunRequest request = {0};
+  LainirValue result = lainir_value_unit();
+  const char *error = NULL;
+  int ok = 0;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
+    goto cleanup;
+  caps = lainir_caps_new();
+  if (!caps || !lainir_caps_add(caps, "make_addr", make_addr_value, NULL))
+    goto cleanup;
+  request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  request.entry_name = "root";
+  request.caps = caps;
+  if (lainir_run_backend_result(&request, &result, &error) != LAINIR_RUN_BAD_CALL ||
+      !error || strcmp(error, "object result requires a provider payload adapter") != 0)
+    goto cleanup;
+  ok = 1;
+cleanup:
+  lainir_caps_free(caps);
+  lainir_module_handle_destroy(&handle);
+  return ok;
+}
+
 static LainirRunStatus make_value(
     const LainirValue *args, uint32_t arg_count, LainirValue *result_out,
     const char **error_out, void *user_data) {
@@ -1391,6 +1420,8 @@ int main(void) {
     return fail("result handle generation failed");
   if (!evaluator_owned_result_test())
     return fail("evaluator owned result failed");
+  if (!backend_result_adapter_gate_test())
+    return fail("backend result adapter gate failed");
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
   if (!lainir_vm_control_start(control, 7)) return fail("start failed");

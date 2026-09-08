@@ -3352,6 +3352,24 @@ LainirRunStatus lainir_run_owned_result(
   return LAINIR_RUN_OK;
 }
 
+LainirRunStatus lainir_run_backend_result(
+    const LainirRunRequest *request, LainirValue *scalar_out,
+    const char **error_out) {
+  LainirValue value = lainir_value_unit();
+  LainirRunStatus status = lainir_run(request, &value, error_out);
+  if (status != LAINIR_RUN_OK) return status;
+  if (value.kind == LAINIR_VALUE_ADDR ||
+      value.kind == LAINIR_VALUE_STRING ||
+      value.kind == LAINIR_VALUE_FUNC) {
+    if (error_out)
+      *error_out = "object result requires a provider payload adapter";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  if (scalar_out) *scalar_out = value;
+  if (error_out) *error_out = NULL;
+  return LAINIR_RUN_OK;
+}
+
 LainirRunStatus lainir_eval_block(
     L1Subroutine *module,
     L1Block *block,

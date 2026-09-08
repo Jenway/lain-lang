@@ -413,9 +413,10 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    沿用严格 round-robin，不引入 priority/weight。
 8. **当前阶段：provider payload adapter 与 lowering 前置。** 为 addr、string、func 及
    type/module/AST object result 定义 borrowed/owned payload adapter 和 destructor 注册
-   规则；让 native/formal backend 在没有 adapter 时拒绝 object result，只允许 scalar/unit
-   结果跨 backend 边界；把 session generation 元数据纳入 adapter 验收，并用现有 native/
-   formal matrix 回归。
+   规则。seed 已提供 `lainir_run_backend_result` 作为 native/formal lowering 的共同门槛：
+   scalar/unit 可直接通过，object result 在没有 adapter 时返回明确错误；带所有权的路径
+   使用 `lainir_run_owned_result` 和 generation-bound handle。下一步把各 provider 的
+   borrowed/owned adapter、destructor 和 session generation 验收接入 native/formal matrix。
 9. **后续：平台 lowering。** 在 nested continuation、单 TCB VSpace、
    Endpoint、Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和
    裸机 lowering。
@@ -424,8 +425,8 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 exhaustion、root continuation、nested frame observation、Endpoint rendezvous、pending
 result、Trap abort/acknowledgement、源码定位，以及 scheduler 驱动的双 TCB evaluator
 handoff、按 attachment 顺序的 runnable 选择、fuel-yield 轮转和多个 Endpoint wait 隔离。
-v1 严格 round-robin 的等待上界已固定；result handle/session generation 和 object payload
-析构边界已有 fixture，provider-specific adapter 仍是当前阶段。
+v1 严格 round-robin 的等待上界已固定；result handle/session generation、object payload
+析构边界和无 adapter 的 backend 拒绝门槛已有 fixture，provider-specific adapter 仍是当前阶段。
 
 当前基线命令：
 

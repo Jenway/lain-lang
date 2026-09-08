@@ -333,6 +333,13 @@ LainirRunStatus lainir_run_owned_result(
     LainirVmResultPayloadFree payload_free, void *payload_user_data,
     const char **error_out);
 
+/* Backend boundary helper.  Native/formal lowerings may consume scalar and
+ * unit results directly; object results must first be adapted into a
+ * generation-bound LainirVmResultHandle. */
+LainirRunStatus lainir_run_backend_result(
+    const LainirRunRequest *request, LainirValue *scalar_out,
+    const char **error_out);
+
 /* Execute one already-parsed block in an explicit compile-time context.
  * The block is borrowed; the interpreter does not free it.  This is the
  * entry point a compiler uses for #eval. */

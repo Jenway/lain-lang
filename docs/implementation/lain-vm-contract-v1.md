@@ -147,6 +147,10 @@ stale，并在 session reset/release 或显式 release/free 时调用 provider p
 `lainir_run_owned_result` 已把实际 evaluator 的 object result 接入这一包装路径，provider
 仍负责定义 payload 本身的所有权。`lainir_vm_session_free` 也会执行同一兜底回收并使
 残留 handle 脱离 session，避免 handle 在 session 内存释放后继续保存悬空指针。
+native/formal lowering 若只接受标量结果，应通过 `lainir_run_backend_result`；该入口对
+`addr`、`string`、`func` 返回明确的 adapter 缺失错误，不让裸 object descriptor 穿过
+backend 边界。需要保留 object payload 时，调用方必须改用 `lainir_run_owned_result` 并
+注册对应的 provider destructor。
 
 object payload 的 provider 责任按结果种类区分：`addr` 由 provider 声明指向的 backing
 对象及析构策略；`string` 必须区分静态借用与拥有的字符串存储；`func` 通常指向 artifact
