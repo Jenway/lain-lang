@@ -7,7 +7,8 @@ typedef enum {
   LAINIR_RUN_OK = 0,
   LAINIR_RUN_NO_ENTRY = 1,
   LAINIR_RUN_BAD_CALL = 2,
-  LAINIR_RUN_TRAP = 3
+  LAINIR_RUN_TRAP = 3,
+  LAINIR_RUN_SLICE = 4
 } LainirRunStatus;
 
 typedef enum {
@@ -59,18 +60,22 @@ typedef struct {
   void *user_data;
 } LainirCapability;
 
+typedef struct LainirVmControl LainirVmControl;
+
 typedef struct {
   L1Subroutine *module;
   const char *entry_name;
   const LainirValue *args;
   uint32_t arg_count;
   LainirCapabilityTable *caps;
+  /* Optional backend-owned control plane.  A non-NULL value enables the
+   * instruction fuel gate; the one-shot frame stack remains evaluator-owned. */
+  LainirVmControl *vm_control;
+  uint64_t vm_owner;
 } LainirRunRequest;
 
 /* Opaque VM control plane.  The execution backend owns this object; it is
  * deliberately separate from LainirRunRequest, which remains one-shot. */
-typedef struct LainirVmControl LainirVmControl;
-
 typedef enum {
   LAINIR_VM_READY = 0,
   LAINIR_VM_RUNNING = 1,
