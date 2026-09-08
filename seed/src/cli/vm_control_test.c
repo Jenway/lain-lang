@@ -417,6 +417,144 @@ cleanup:
   return ok;
 }
 
+static int scheduler_parallel_endpoint_wait_test(void) {
+  const char *source =
+      "#extern #proc endpoint.a_send(#bits<64> %value) -> #bits<32>;\n"
+      "#extern #proc endpoint.a_receive() -> #bits<64>;\n"
+      "#extern #proc endpoint.b_send(#bits<64> %value) -> #bits<32>;\n"
+      "#extern #proc endpoint.b_receive() -> #bits<64>;\n"
+      "#proc send_a() -> #bits<32> {\n"
+      "  #return #call endpoint.a_send(10)\n"
+      "}\n"
+      "#proc send_b() -> #bits<32> {\n"
+      "  #return #call endpoint.b_send(20)\n"
+      "}\n"
+      "#proc receive_a() -> #bits<64> {\n"
+      "  #return #call endpoint.a_receive()\n"
+      "}\n"
+      "#proc receive_b() -> #bits<64> {\n"
+      "  #return #call endpoint.b_receive()\n"
+      "}\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  LainirVmScheduler *scheduler = NULL;
+  LainirVmEndpoint *endpoint_a = NULL;
+  LainirVmEndpoint *endpoint_b = NULL;
+  LainirVmControl *send_a = NULL;
+  LainirVmControl *send_b = NULL;
+  LainirVmControl *receive_a = NULL;
+  LainirVmControl *receive_b = NULL;
+  LainirCapabilityTable *send_a_caps = NULL;
+  LainirCapabilityTable *send_b_caps = NULL;
+  LainirCapabilityTable *receive_a_caps = NULL;
+  LainirCapabilityTable *receive_b_caps = NULL;
+  LainirValue result_a = {0};
+  LainirValue result_b = {0};
+  LainirValue received_a = {0};
+  LainirValue received_b = {0};
+  LainirRunRequest request_a = {0};
+  LainirRunRequest request_b = {0};
+  LainirRunRequest receive_request_a = {0};
+  LainirRunRequest receive_request_b = {0};
+  const char *error = NULL;
+  int ok = 0;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
+    goto cleanup;
+  scheduler = lainir_vm_scheduler_new(7);
+  endpoint_a = lainir_vm_endpoint_new(7);
+  endpoint_b = lainir_vm_endpoint_new(7);
+  send_a = lainir_vm_control_new(16);
+  send_b = lainir_vm_control_new(16);
+  receive_a = lainir_vm_control_new(16);
+  receive_b = lainir_vm_control_new(16);
+  send_a_caps = lainir_caps_new();
+  send_b_caps = lainir_caps_new();
+  receive_a_caps = lainir_caps_new();
+  receive_b_caps = lainir_caps_new();
+  if (!scheduler || !endpoint_a || !endpoint_b || !send_a || !send_b ||
+      !receive_a || !receive_b || !send_a_caps || !send_b_caps ||
+      !receive_a_caps || !receive_b_caps ||
+      !lainir_vm_scheduler_attach(scheduler, 7, send_a, 7) ||
+      !lainir_vm_scheduler_attach(scheduler, 7, send_b, 7) ||
+      !lainir_vm_scheduler_attach(scheduler, 7, receive_a, 7) ||
+      !lainir_vm_scheduler_attach(scheduler, 7, receive_b, 7))
+    goto cleanup;
+  LainirVmEndpointBinding send_a_binding = {endpoint_a, send_a, 7};
+  LainirVmEndpointBinding receive_a_binding = {endpoint_a, receive_a, 7};
+  LainirVmEndpointBinding send_b_binding = {endpoint_b, send_b, 7};
+  LainirVmEndpointBinding receive_b_binding = {endpoint_b, receive_b, 7};
+  if (!lainir_vm_endpoint_bind(send_a_caps, "endpoint.a_send",
+                               "endpoint.a_receive", &send_a_binding) ||
+      !lainir_vm_endpoint_bind(receive_a_caps, "endpoint.a_send",
+                               "endpoint.a_receive", &receive_a_binding) ||
+      !lainir_vm_endpoint_bind(send_b_caps, "endpoint.b_send",
+                               "endpoint.b_receive", &send_b_binding) ||
+      !lainir_vm_endpoint_bind(receive_b_caps, "endpoint.b_send",
+                               "endpoint.b_receive", &receive_b_binding) ||
+      !lainir_vm_scheduler_select(scheduler, 7, NULL))
+    goto cleanup;
+  request_a.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  request_a.entry_name = "send_a";
+  request_a.caps = send_a_caps;
+  request_b = request_a;
+  request_b.entry_name = "send_b";
+  request_b.caps = send_b_caps;
+  receive_request_a = request_a;
+  receive_request_a.entry_name = "receive_a";
+  receive_request_a.caps = receive_a_caps;
+  receive_request_b = request_a;
+  receive_request_b.entry_name = "receive_b";
+  receive_request_b.caps = receive_b_caps;
+  if (lainir_vm_scheduler_run(scheduler, 7, 8, &request_a, &result_a, &error) !=
+          LAINIR_RUN_BLOCKED ||
+      !lainir_vm_scheduler_select(scheduler, 7, NULL) || error ||
+      lainir_vm_scheduler_run(scheduler, 7, 8, &request_b, &result_b, &error) !=
+          LAINIR_RUN_BLOCKED ||
+      !lainir_vm_scheduler_select(scheduler, 7, NULL) || error)
+    goto cleanup;
+  if (lainir_vm_scheduler_run(scheduler, 7, 8, &receive_request_a,
+                              &received_a, &error) != LAINIR_RUN_OK ||
+      error || received_a.kind != LAINIR_VALUE_BITS || received_a.as.bits != 10 ||
+      !lainir_vm_scheduler_select(scheduler, 7, NULL) ||
+      lainir_vm_scheduler_run(scheduler, 7, 8, &receive_request_b,
+                              &received_b, &error) != LAINIR_RUN_OK ||
+      error || received_b.kind != LAINIR_VALUE_BITS || received_b.as.bits != 20 ||
+      !lainir_vm_scheduler_select(scheduler, 7, NULL))
+    goto cleanup;
+  if (lainir_vm_scheduler_run(scheduler, 7, 8, &request_a, &result_a, &error) !=
+          LAINIR_RUN_OK ||
+      error || result_a.kind != LAINIR_VALUE_BITS || result_a.as.bits != 1 ||
+      !lainir_vm_scheduler_select(scheduler, 7, NULL) ||
+      lainir_vm_scheduler_run(scheduler, 7, 8, &request_b, &result_b, &error) !=
+          LAINIR_RUN_OK ||
+      error || result_b.kind != LAINIR_VALUE_BITS || result_b.as.bits != 1 ||
+      lainir_vm_scheduler_current(scheduler) != NULL)
+    goto cleanup;
+  ok = 1;
+cleanup:
+  if (send_a && lainir_vm_control_state(send_a) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(send_a, 7);
+  if (send_b && lainir_vm_control_state(send_b) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(send_b, 7);
+  if (receive_a && lainir_vm_control_state(receive_a) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(receive_a, 7);
+  if (receive_b && lainir_vm_control_state(receive_b) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(receive_b, 7);
+  lainir_caps_free(send_a_caps);
+  lainir_caps_free(send_b_caps);
+  lainir_caps_free(receive_a_caps);
+  lainir_caps_free(receive_b_caps);
+  lainir_vm_scheduler_free(scheduler);
+  lainir_vm_endpoint_free(endpoint_a);
+  lainir_vm_endpoint_free(endpoint_b);
+  lainir_vm_control_free(send_a);
+  lainir_vm_control_free(send_b);
+  lainir_vm_control_free(receive_a);
+  lainir_vm_control_free(receive_b);
+  lainir_module_handle_destroy(&handle);
+  return ok;
+}
+
 int main(void) {
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
@@ -459,6 +597,8 @@ int main(void) {
     return fail("scheduler endpoint handoff failed");
   if (!scheduler_evaluator_handoff_test())
     return fail("scheduler evaluator handoff failed");
+  if (!scheduler_parallel_endpoint_wait_test())
+    return fail("scheduler parallel endpoint wait failed");
 
   /* The interpreter consumes the provider-owned fuel gate at each instruction
    * boundary, exposes the active nested frame to a host callback, and resumes
