@@ -320,9 +320,18 @@ void lainir_caps_set_eval_limit(
   uint64_t max_eval_blocks);
 
 LainirRunStatus lainir_run(
-  const LainirRunRequest *request,
-  LainirValue *result_out,
-  const char **error_out);
+    const LainirRunRequest *request,
+    LainirValue *result_out,
+    const char **error_out);
+
+/* Run once and materialize object results as a generation-bound handle.  Unit
+ * and scalar results are copied to scalar_out; object results require a
+ * session on the request. */
+LainirRunStatus lainir_run_owned_result(
+    const LainirRunRequest *request, LainirValue *scalar_out,
+    LainirVmResultHandle **handle_out,
+    LainirVmResultPayloadFree payload_free, void *payload_user_data,
+    const char **error_out);
 
 /* Execute one already-parsed block in an explicit compile-time context.
  * The block is borrowed; the interpreter does not free it.  This is the
