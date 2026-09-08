@@ -1449,6 +1449,9 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
           interp_exec_block(interp, frame, inst->data.if_stmt.else_body);
         interp->continuation_tracking = saved_tracking;
       }
+      if (interp->error || interp->vm_slice_yielded || interp->vm_blocked ||
+          interp->should_return)
+        return;
       break;
     }
     case INST_LOOP: {

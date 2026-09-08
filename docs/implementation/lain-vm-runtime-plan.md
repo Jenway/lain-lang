@@ -191,7 +191,8 @@ Endpoint 或 continuation 编译成 LAINIR 数据，也不增加 `#init_context`
 block/instruction，并逐层通过 pending result 把返回值交回 caller；表达式 cache 也会随
 frame detach 重挂载。现有 fixture 包含双层 nested `send_outer -> send_helper`，以及
 receiver 在 Endpoint wait 前完成的 sibling `make_value`，确认恢复后两处副作用都只执行
-一次。仍未完成的是分支内挂起和多个并行 pending call 的通用保存格式。
+一次；同一 fixture 也覆盖 `#if` 分支内的 Endpoint wait。仍未完成的是多个并行 pending
+call 的通用保存格式。
 
 ## 3. 阶段一：建立 LainVM 核心对象
 
@@ -319,7 +320,7 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    和 payload；pending result 可唤醒 TCB；Trap 可记录、abort、由 scheduler 消费，并带有
    instruction/expression span 和实际 nested procedure。
 5. **当前阶段：nested continuation。** 多层 nested frame、表达式 cache、Endpoint wait、
-   逐层恢复和 pending result 已完成；下一步实现分支内挂起和多个并行 pending call 的
+   分支内挂起、逐层恢复和 pending result 已完成；下一步实现多个并行 pending call 的
    continuation record，再把所有恢复点从 root instruction 重试完全迁移到 nested call point。
 6. **后续：多 TCB 与平台 lowering。** nested continuation、单 TCB VSpace、Endpoint、Trap
    和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和裸机 lowering。

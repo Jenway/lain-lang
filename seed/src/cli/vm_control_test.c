@@ -102,14 +102,20 @@ static int endpoint_dispatch_test(void) {
       "  #return #call endpoint.receive()\n"
       "}\n"
       "#proc receive_helper() -> #bits<64> {\n"
-      "  #return #add(#call test.make_value(), #call receive_leaf())\n"
+      "  #if 1 {\n"
+      "    #return #add(#call test.make_value(), #call receive_leaf())\n"
+      "  }\n"
+      "  #return 0\n"
       "}\n"
       "#proc receive_main() -> #bits<64> {\n"
       "  #return #call receive_helper()\n"
       "}\n"
       "#proc send_helper() -> #bits<32> {\n"
       "  #let %value: #bits<64> = #call test.make_value()\n"
-      "  #return #call endpoint.send(%value)\n"
+      "  #if 1 {\n"
+      "    #return #call endpoint.send(%value)\n"
+      "  }\n"
+      "  #return 0\n"
       "}\n"
       "#proc send_outer() -> #bits<32> {\n"
       "  #return #call send_helper()\n"
@@ -171,22 +177,25 @@ static int endpoint_dispatch_test(void) {
       lainir_run(&sender_request, &sender_result, &error) !=
           LAINIR_RUN_BLOCKED || error ||
       counter.calls != 1 ||
-      lainir_vm_control_state(sender) != LAINIR_VM_BLOCKED)
+      lainir_vm_control_state(sender) != LAINIR_VM_BLOCKED) {
     goto cleanup;
+  }
   error = NULL;
   if (!lainir_vm_control_begin_slice(receiver, 7, 1) ||
       lainir_run(&receiver_request, &receiver_result, &error) != LAINIR_RUN_OK ||
       error || receiver_result.kind != LAINIR_VALUE_BITS ||
       receiver_result.as.bits != 198 ||
-      lainir_vm_control_state(receiver) != LAINIR_VM_DEAD)
+      lainir_vm_control_state(receiver) != LAINIR_VM_DEAD) {
     goto cleanup;
+  }
   error = NULL;
   if (!lainir_vm_control_begin_slice(sender, 7, 1) ||
       lainir_run(&sender_request, &sender_result, &error) != LAINIR_RUN_OK ||
       error || sender_result.kind != LAINIR_VALUE_BITS ||
       sender_result.as.bits != 1 || counter.calls != 2 ||
-      lainir_vm_control_state(sender) != LAINIR_VM_DEAD)
+      lainir_vm_control_state(sender) != LAINIR_VM_DEAD) {
     goto cleanup;
+  }
   ok = 1;
 cleanup:
   if (receiver && lainir_vm_control_state(receiver) == LAINIR_VM_RUNNING)
