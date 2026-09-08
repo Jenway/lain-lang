@@ -128,6 +128,15 @@ int main(void) {
     lainir_vm_control_free(control);
     return fail("interpreter did not save continuation position");
   }
+  if (!lainir_vm_control_suspend(control, 9, 3) ||
+      lainir_vm_control_state(control) != LAINIR_VM_BLOCKED ||
+      !lainir_vm_control_resume(control, 9) ||
+      lainir_vm_control_state(control) != LAINIR_VM_RUNNING) {
+    lainir_module_handle_destroy(&handle);
+    lainir_caps_free(caps);
+    lainir_vm_control_free(control);
+    return fail("interpreter continuation suspend/resume failed");
+  }
   if (!lainir_vm_control_begin_slice(control, 9, 1)) {
     lainir_module_handle_destroy(&handle);
     lainir_caps_free(caps);

@@ -298,8 +298,9 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    `run_slice` 返回值接入 scheduler。参考 evaluator 已有内部 `run_slice` 入口，provider-neutral
    `VmControl` fixture 已覆盖跨 procedure 的 fuel yield 和 frame resume；seed runtime
    也已把 root procedure 的真实 frame、locals、instruction position 接到 provider-owned
-   opaque control object，并由第二次 `lainir_run` 恢复。真实 interpreter 现在也在 nested
-   procedure 进入/返回时维护该 CallFrame 栈。下一步扩大保存范围到 nested procedure
+opaque control object，并由第二次 `lainir_run` 恢复；slice 之间可以先将该 TCB 置为
+BLOCKED，再 resume 后继续同一个 root frame。真实 interpreter 现在也在 nested
+procedure 进入/返回时维护该 CallFrame 栈。下一步扩大保存范围到 nested procedure
    被挂起时的完整 frame/locals 状态和 Endpoint blocked continuation；当前实现只承诺
    root boundary 的可恢复 slice。
 
