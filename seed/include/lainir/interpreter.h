@@ -111,6 +111,8 @@ typedef struct {
   uint64_t procedure;
   uint64_t region;
   uint64_t position;
+  uint32_t line;
+  uint32_t column;
   int active;
 } LainirVmTrap;
 
@@ -161,6 +163,9 @@ const LainirVmFrame *lainir_vm_control_current_frame(
 const LainirVmTrap *lainir_vm_control_trap(const LainirVmControl *control);
 int lainir_vm_control_record_trap(LainirVmControl *control, uint64_t owner,
                                    LainirVmTrapKind kind, int32_t status);
+int lainir_vm_control_record_trap_at(
+    LainirVmControl *control, uint64_t owner, LainirVmTrapKind kind,
+    int32_t status, uint32_t line, uint32_t column);
 void *lainir_vm_control_backend_state(const LainirVmControl *control);
 int lainir_vm_control_set_backend_state(LainirVmControl *control,
                                          uint64_t owner, void *state);
