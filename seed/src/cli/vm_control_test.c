@@ -38,6 +38,8 @@ static int endpoint_contract_test(void) {
   LainirVmControl *receiver = lainir_vm_control_new(16);
   LainirVmControl *foreign = lainir_vm_control_new(16);
   uint64_t value = 0;
+  uint32_t result_kind = 0;
+  uint64_t result_value = 0;
   int ok = endpoint && sender && receiver &&
            lainir_vm_control_start(sender, 7) &&
            lainir_vm_control_start(receiver, 7) &&
@@ -50,6 +52,10 @@ static int endpoint_contract_test(void) {
            lainir_vm_endpoint_send(endpoint, 7, sender, 7, 100) == -1 &&
            lainir_vm_endpoint_receive(endpoint, 7, receiver, 7, &value) == 1 &&
            value == 99 && lainir_vm_control_state(sender) == LAINIR_VM_RUNNING &&
+           lainir_vm_control_take_endpoint_result(
+               sender, 7, &result_kind, &result_value) &&
+           result_kind == LAINIR_VM_ENDPOINT_RESULT_SEND &&
+           result_value == 1 &&
            lainir_vm_endpoint_receive(endpoint, 7, receiver, 7, NULL) == 0 &&
            lainir_vm_control_state(receiver) == LAINIR_VM_BLOCKED &&
            lainir_vm_endpoint_cancel(endpoint, 7, receiver, 7) == 1 &&
@@ -67,6 +73,95 @@ static int endpoint_contract_test(void) {
   if (foreign && lainir_vm_control_state(foreign) == LAINIR_VM_RUNNING)
     (void)lainir_vm_control_finish(foreign, 8);
   lainir_vm_control_free(foreign);
+  return ok;
+}
+
+static int endpoint_dispatch_test(void) {
+  const char *source =
+      "#extern #proc endpoint.send(#bits<64> %value) -> #bits<32>;\n"
+      "#extern #proc endpoint.receive() -> #bits<64>;\n"
+      "#proc receive_main() -> #bits<64> {\n"
+      "  #return #call endpoint.receive()\n"
+      "}\n"
+      "#proc send_main() -> #bits<32> {\n"
+      "  #return #call endpoint.send(99)\n"
+      "}\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  LainirVmEndpoint *endpoint = NULL;
+  LainirVmControl *receiver = NULL;
+  LainirVmControl *sender = NULL;
+  LainirCapabilityTable *receiver_caps = NULL;
+  LainirCapabilityTable *sender_caps = NULL;
+  int ok = 0;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
+    goto cleanup;
+  if (lainir_module_handle_verify_entry(handle, "receive_main", &diagnostic) !=
+          LAINIR_RUN_OK ||
+      lainir_module_handle_verify_entry(handle, "send_main", &diagnostic) !=
+          LAINIR_RUN_OK)
+    goto cleanup;
+  endpoint = lainir_vm_endpoint_new(7);
+  receiver = lainir_vm_control_new(16);
+  sender = lainir_vm_control_new(16);
+  receiver_caps = lainir_caps_new();
+  sender_caps = lainir_caps_new();
+  LainirVmEndpointBinding receiver_binding = {endpoint, receiver, 7};
+  LainirVmEndpointBinding sender_binding = {endpoint, sender, 7};
+  if (!endpoint || !receiver || !sender || !receiver_caps || !sender_caps ||
+      !lainir_vm_control_start(receiver, 7) ||
+      !lainir_vm_control_start(sender, 7) ||
+      !lainir_vm_endpoint_bind(receiver_caps, "endpoint.send",
+                               "endpoint.receive", &receiver_binding) ||
+      !lainir_vm_endpoint_bind(sender_caps, "endpoint.send",
+                               "endpoint.receive", &sender_binding))
+    goto cleanup;
+  LainirRunRequest receiver_request = {0};
+  receiver_request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  receiver_request.entry_name = "receive_main";
+  receiver_request.caps = receiver_caps;
+  receiver_request.vm_control = receiver;
+  receiver_request.vm_owner = 7;
+  LainirValue receiver_result = {0};
+  const char *error = NULL;
+  if (!lainir_vm_control_begin_slice(receiver, 7, 1) ||
+      lainir_run(&receiver_request, &receiver_result, &error) !=
+          LAINIR_RUN_BLOCKED || error ||
+      lainir_vm_control_state(receiver) != LAINIR_VM_BLOCKED)
+    goto cleanup;
+  LainirRunRequest sender_request = {0};
+  sender_request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  sender_request.entry_name = "send_main";
+  sender_request.caps = sender_caps;
+  sender_request.vm_control = sender;
+  sender_request.vm_owner = 7;
+  LainirValue sender_result = {0};
+  error = NULL;
+  if (!lainir_vm_control_begin_slice(sender, 7, 1) ||
+      lainir_run(&sender_request, &sender_result, &error) != LAINIR_RUN_OK ||
+      error || sender_result.kind != LAINIR_VALUE_BITS ||
+      sender_result.as.bits != 1 ||
+      lainir_vm_control_state(sender) != LAINIR_VM_DEAD)
+    goto cleanup;
+  error = NULL;
+  if (!lainir_vm_control_begin_slice(receiver, 7, 1) ||
+      lainir_run(&receiver_request, &receiver_result, &error) != LAINIR_RUN_OK ||
+      error || receiver_result.kind != LAINIR_VALUE_BITS ||
+      receiver_result.as.bits != 99 ||
+      lainir_vm_control_state(receiver) != LAINIR_VM_DEAD)
+    goto cleanup;
+  ok = 1;
+cleanup:
+  if (receiver && lainir_vm_control_state(receiver) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(receiver, 7);
+  if (sender && lainir_vm_control_state(sender) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(sender, 7);
+  lainir_caps_free(receiver_caps);
+  lainir_caps_free(sender_caps);
+  lainir_vm_control_free(receiver);
+  lainir_vm_control_free(sender);
+  lainir_vm_endpoint_free(endpoint);
+  lainir_module_handle_destroy(&handle);
   return ok;
 }
 
@@ -104,6 +199,8 @@ int main(void) {
     return fail("finish did not reach DEAD");
   lainir_vm_control_free(control);
   if (!endpoint_contract_test()) return fail("endpoint rendezvous contract failed");
+  if (!endpoint_dispatch_test())
+    return fail("endpoint capability dispatch failed");
 
   /* The interpreter consumes the provider-owned fuel gate at each instruction
    * boundary, exposes the active nested frame to a host callback, and resumes

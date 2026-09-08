@@ -93,6 +93,7 @@ typedef struct {
   LainirVmControl *vm_control;
   uint64_t vm_owner;
   int vm_slice_yielded;
+  int vm_blocked;
   LainirContinuation *continuation;
   int continuation_tracking;
   int instruction_boundary;
@@ -850,7 +851,13 @@ static LainirValue interp_call_host(LainirInterpreter *interp, const char *name,
   LainirValue result = lainir_value_unit();
   const char *error = NULL;
   if (!entry) { interp_trap(interp, "extern capability not found"); return result; }
-  if (entry->fn(args, arg_count, &result, &error, entry->user_data) != LAINIR_RUN_OK)
+  LainirRunStatus status =
+      entry->fn(args, arg_count, &result, &error, entry->user_data);
+  if (status == LAINIR_RUN_BLOCKED) {
+    interp->vm_blocked = 1;
+    return result;
+  }
+  if (status != LAINIR_RUN_OK)
     interp_trap(interp, error ? error : "extern capability call failed");
   return result;
 }
@@ -1235,7 +1242,7 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     switch (inst->kind) {
     case INST_LET: {
       LainirValue value = interp_eval_expr(interp, frame, inst->data.let.val);
-      if (interp->error) return;
+      if (interp->error || interp->vm_blocked) return;
       value = interp_coerce_physical(interp, value, inst->data.let.ty);
       if (interp->error) return;
       interp_set_local(frame, inst->data.let.name, value);
@@ -1243,7 +1250,7 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     }
     case INST_SET: {
       LainirValue value = interp_eval_expr(interp, frame, inst->data.set.val);
-      if (interp->error) return;
+      if (interp->error || interp->vm_blocked) return;
       value = interp_coerce_physical(interp, value, inst->data.set.ty);
       if (interp->error) return;
       if (!interp_set_local(frame, inst->data.set.name, value))
@@ -1253,10 +1260,10 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     case INST_STORE: {
       LainirValue dest  = interp_eval_expr(interp, frame, inst->data.store.dest);
       LainirValue value = interp_eval_expr(interp, frame, inst->data.store.val);
-      if (interp->error) return;
+      if (interp->error || interp->vm_blocked) return;
       value = interp_coerce_physical(
           interp, value, inst->data.store.store_ty);
-      if (interp->error) return;
+      if (interp->error || interp->vm_blocked) return;
       uint8_t *addr = (uint8_t *)interp_value_addr(interp, dest, "expected address for store");
       if (interp->error) return;
       if (interp_addr_is_readonly_data(interp, addr)) {
@@ -1271,7 +1278,7 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     }
     case INST_IF: {
       LainirValue cond = interp_eval_expr(interp, frame, inst->data.if_stmt.condition);
-      if (interp->error) return;
+      if (interp->error || interp->vm_blocked) return;
       if (interp_value_bits(interp, cond, "expected bits for if condition")) {
         int saved_tracking = interp->continuation_tracking;
         interp->continuation_tracking = 0;
@@ -1298,7 +1305,7 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
         interp->continuation_tracking = 0;
         interp_exec_block(interp, frame, inst->data.loop.body);
         interp->continuation_tracking = saved_tracking;
-        if (interp->error) return;
+        if (interp->error || interp->vm_blocked) return;
         if (interp->should_return) break;
         if (interp->should_break) { interp->should_break = 0; break; }
         if (interp->should_continue) { interp->should_continue = 0; continue; }
@@ -1316,7 +1323,7 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
       return;
     case INST_RETURN: {
       LainirValue value = interp_eval_expr(interp, frame, inst->data.ret.val);
-      if (interp->error || interp->vm_slice_yielded) return;
+      if (interp->error || interp->vm_slice_yielded || interp->vm_blocked) return;
       value = interp_coerce_physical(interp, value, frame->sub->ret_ty);
       if (interp->error) return;
       interp->should_return = 1;
@@ -1325,7 +1332,7 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     }
     case INST_CALL:
       (void)interp_eval_expr(interp, frame, inst->data.call_inst.expr);
-      if (interp->error || interp->vm_slice_yielded) return;
+      if (interp->error || interp->vm_slice_yielded || interp->vm_blocked) return;
       break;
     }
     if (track) {
@@ -2649,7 +2656,8 @@ static LainirValue interp_call_root_resumable(
     interp->continuation_tracking = 1;
     interp_exec_block(interp, &continuation->frame, block);
     interp->continuation_tracking = 0;
-    if (interp->vm_slice_yielded) return lainir_value_unit();
+    if (interp->vm_slice_yielded || interp->vm_blocked)
+      return lainir_value_unit();
     if (interp->error || interp->should_return) break;
     block = block->next;
   }
@@ -2826,7 +2834,7 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
   L1Block *block = sub->blocks;
   while (block) {
     interp_exec_block(interp, &frame, block);
-    if (interp->vm_slice_yielded) {
+    if (interp->vm_slice_yielded || interp->vm_blocked) {
       interp_free_frame(&frame);
       if (vm_frame_pushed)
         (void)lainir_vm_control_pop_frame(interp->vm_control, interp->vm_owner);
@@ -2928,6 +2936,10 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
   if (interp.error) {
     if (error_out) *error_out = interp.error;
     return LAINIR_RUN_TRAP;
+  }
+  if (interp.vm_blocked) {
+    if (error_out) *error_out = NULL;
+    return LAINIR_RUN_BLOCKED;
   }
   if (interp.vm_slice_yielded) {
     if (error_out) *error_out = NULL;

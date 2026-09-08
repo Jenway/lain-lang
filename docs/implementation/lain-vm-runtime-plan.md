@@ -74,7 +74,9 @@ Endpoint fixture 现在覆盖单发送者/单接收者 rendezvous 和等待取�
 opaque `LainirVmEndpoint`：等待项只保存 TCB control object、owner 和标量 payload，
 发送/接收会驱动 TCB 的 `BLOCKED` 与 `RUNNING` 转换，并把 suspend reason 固定为
 `LAINIR_VM_SUSPEND_ENDPOINT`，不保存 activation 地址。LAINIR
-当前没有 Endpoint 指令；真实 evaluator 的 endpoint capability 分派仍待接入。
+当前没有 Endpoint 指令；provider 可以通过 `lainir_vm_endpoint_bind` 将 send/receive
+capability 注册到真实 evaluator。无对端调用返回 `LAINIR_RUN_BLOCKED`，root instruction
+保持为待重试位置；对端到达后 pending result 唤醒 TCB，下一次 `lainir_run` 消费该结果。
 
 scheduler fixture 已扩展到两个 TCB：同一时刻只允许一个 current，挂起第一个 TCB 后
 才能启动第二个，第二个挂起后可以恢复第一个。这个 handoff 仍然是 control-plane
@@ -238,7 +240,8 @@ VSpace reset 后旧 region 不能再次访问；所有状态转换有单元 fixt
 5. 将 Endpoint 交接纳入 owner、capability 和 activation lifetime 检查。
 6. 单 TCB scheduler 和 Endpoint recording fixture 已覆盖状态转换、rendezvous 和取消；
    两个 TCB 的 handoff/resume fixture 也已完成。seed runtime 的 Endpoint control API
-   已完成同一 TCB 状态转换和 owner 检查，下一步把 capability 分派接入真实 evaluator。
+   已完成同一 TCB 状态转换、owner 检查和 evaluator capability dispatch；无对端阻塞、
+   对端交接和下一次 `lainir_run` 恢复已有 seed integration test。
 
 验收：一个 TCB 可以主动让出并恢复；Endpoint 不保存悬空 activation 地址；非法状态、
 owner 和 capability 操作均进入 Trap。
@@ -319,9 +322,9 @@ instruction 已绑定到 control object 的 backend state，第二次 `lainir_ru
 调用在切片内原子完成，下一步才把 nested frame/locals 和 Endpoint blocked continuation
 接入同一保存格式。
 4. **接入 Endpoint 的真实 ownership 检查**：seed `LainirVmEndpoint` 已让等待项只保存
-   TCB/owner/payload，并验证 rendezvous、取消和 BLOCKED/RUNNING 转换；下一步让真实
-   evaluator 的 endpoint capability 分派调用该 API，把非法 owner、capability 和状态
-   转换统一成 Trap。
+   TCB/owner/payload，并由 `lainir_vm_endpoint_bind` 接入真实 evaluator；无对端返回
+   `LAINIR_RUN_BLOCKED`，交接后恢复 pending call，非法 owner、重复等待和状态转换返回
+   capability failure。下一步把这些 provider failure 统一映射为结构化 Trap。
 5. **完善 Trap 定位**：保留当前物理 region offset，随后接入真实调用栈 procedure 与
    source span；Trap 字段保持由 VM 统一生成，provider 只读取结果。
 6. **再进入多 TCB 和平台 lowering**：参考后端通过单 TCB、VSpace、Trap、CSpace 和
