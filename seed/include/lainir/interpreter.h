@@ -67,6 +67,8 @@ typedef struct LainirVmResultHandle LainirVmResultHandle;
 typedef struct LainirVmEndpoint LainirVmEndpoint;
 typedef struct LainirVmScheduler LainirVmScheduler;
 typedef void (*LainirVmBackendStateFree)(void *state);
+typedef void (*LainirVmResultPayloadFree)(const LainirValue *value,
+                                          void *user_data);
 
 typedef struct {
   LainirVmEndpoint *endpoint;
@@ -168,7 +170,8 @@ int lainir_vm_session_release(LainirVmSession *session, uint64_t owner);
 /* A result handle snapshots its session identity and generation.  It copies
  * the value descriptor; provider payload ownership remains explicit. */
 LainirVmResultHandle *lainir_vm_result_handle_new(
-    LainirVmSession *session, uint64_t owner, const LainirValue *value);
+    LainirVmSession *session, uint64_t owner, const LainirValue *value,
+    LainirVmResultPayloadFree payload_free, void *payload_user_data);
 void lainir_vm_result_handle_free(LainirVmResultHandle *handle);
 uint64_t lainir_vm_result_handle_generation(
     const LainirVmResultHandle *handle);
