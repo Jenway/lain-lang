@@ -440,6 +440,7 @@ provider-specific adapter 仍是当前阶段。
 python scripts/check_lainir_provider_smoke.py
 python scripts/check_lain_vm_contract.py
 python scripts/check_lainc_lainir_api_baseline.py
+python scripts/check_eval_result_vspace.py
 ```
 
 三者均通过时，才允许推进下一项；任一失败都先修复当前 VM slice，再扩展对象模型。

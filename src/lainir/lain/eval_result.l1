@@ -1,8 +1,8 @@
 // Typed EvalResult ABI shared by the bootstrap evaluator and Meta passes.
 //
 // EvalResult: status @0, kind @4, scalar value @8, object handle @16,
-// resource owner @24.  The owner is an ABI handle, not a language-level
-// ownership or borrow-checking construct.
+// resource owner @24, VSpace identity @32, generation @40.  The owner is an
+// ABI handle, not a language-level ownership or borrow-checking construct.
 // Kind 0 is a scalar; 1 is an unclassified Meta value; 2 is a type;
 // 3 is a module; 4 is an AST/syntax value.  Status 0 means success.
 
@@ -10,16 +10,27 @@
 #extern #proc bootstrap.release-pages(#addr %memory) -> #unit;
 #extern #proc meta_value_kind(#addr %value) -> #bits<32>;
 
-#proc eval_result_new_owned(
-  #bits<32> %status, #bits<64> %value, #addr %owner
+#proc eval_result_new_owned_vspace(
+  #bits<32> %status, #bits<64> %value, #addr %owner,
+  #addr %vspace, #bits<64> %generation
 ) -> #addr {
-  #let %result: #addr = #call bootstrap.allocate-pages(32)
+  #let %result: #addr = #call bootstrap.allocate-pages(48)
   #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
   #store 0, #lea(base=%result, idx=0, scale=0, offset=4)
   #store %value, #lea(base=%result, idx=0, scale=0, offset=8)
   #store 0, #lea(base=%result, idx=0, scale=0, offset=16)
   #store %owner, #lea(base=%result, idx=0, scale=0, offset=24)
+  #store %vspace, #lea(base=%result, idx=0, scale=0, offset=32)
+  #store %generation, #lea(base=%result, idx=0, scale=0, offset=40)
   #return %result
+}
+
+#proc eval_result_new_owned(
+  #bits<32> %status, #bits<64> %value, #addr %owner
+) -> #addr {
+  #return #call eval_result_new_owned_vspace(
+    %status, %value, %owner, %owner, 1
+  )
 }
 
 #proc eval_result_new(#bits<32> %status, #bits<64> %value) -> #addr {
@@ -31,7 +42,7 @@
 // after consuming the scalar/object handle without invalidating cached data.
 #proc eval_result_clone(#addr %result) -> #addr {
   #if #eq(#ptr2int(%result), 0) { #return #int2ptr(0) }
-  #let %copy: #addr = #call bootstrap.allocate-pages(32)
+  #let %copy: #addr = #call bootstrap.allocate-pages(48)
   #store #call eval_status(%result),
     #lea(base=%copy, idx=0, scale=0, offset=0)
   #store #call eval_result_kind(%result),
@@ -42,6 +53,10 @@
     #lea(base=%copy, idx=0, scale=0, offset=16)
   #store #call eval_result_owner(%result),
     #lea(base=%copy, idx=0, scale=0, offset=24)
+  #store #call eval_result_vspace(%result),
+    #lea(base=%copy, idx=0, scale=0, offset=32)
+  #store #call eval_result_generation(%result),
+    #lea(base=%copy, idx=0, scale=0, offset=40)
   #return %copy
 }
 
@@ -51,8 +66,9 @@
   #return
 }
 
-#proc eval_result_object_owned(
-  #bits<32> %status, #addr %object, #addr %owner
+#proc eval_result_object_owned_vspace(
+  #bits<32> %status, #addr %object, #addr %owner,
+  #addr %vspace, #bits<64> %generation
 ) -> #addr {
   // Object results carry a Meta value handle.  Meta nil is represented by a
   // tagged value rather than a raw null pointer, so inspect its tag before
@@ -63,7 +79,7 @@
     #if #eq(%error, 0) { %error: #bits<32> = 5108 }
     #return #call eval_result_new_owned(%error, 0, %owner)
   }
-  #let %result: #addr = #call bootstrap.allocate-pages(32)
+  #let %result: #addr = #call bootstrap.allocate-pages(48)
   #let %kind: #bits<32> = 1
   #if #eq(%meta_kind, 4) { %kind: #bits<32> = 2 }
   #if #eq(%meta_kind, 2) { %kind: #bits<32> = 3 }
@@ -73,7 +89,17 @@
   #store 0, #lea(base=%result, idx=0, scale=0, offset=8)
   #store %object, #lea(base=%result, idx=0, scale=0, offset=16)
   #store %owner, #lea(base=%result, idx=0, scale=0, offset=24)
+  #store %vspace, #lea(base=%result, idx=0, scale=0, offset=32)
+  #store %generation, #lea(base=%result, idx=0, scale=0, offset=40)
   #return %result
+}
+
+#proc eval_result_object_owned(
+  #bits<32> %status, #addr %object, #addr %owner
+) -> #addr {
+  #return #call eval_result_object_owned_vspace(
+    %status, %object, %owner, %owner, 1
+  )
 }
 
 #proc eval_result_object(#bits<32> %status, #addr %object) -> #addr {
@@ -102,6 +128,14 @@
 
 #proc eval_result_owner(#addr %result) -> #addr {
   #return #load[#addr](#lea(base=%result, idx=0, scale=0, offset=24))
+}
+
+#proc eval_result_vspace(#addr %result) -> #addr {
+  #return #load[#addr](#lea(base=%result, idx=0, scale=0, offset=32))
+}
+
+#proc eval_result_generation(#addr %result) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%result, idx=0, scale=0, offset=40))
 }
 
 #proc eval_result_set_owner(#addr %result, #addr %owner) -> #unit {
