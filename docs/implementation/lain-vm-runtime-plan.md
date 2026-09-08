@@ -54,8 +54,9 @@ result/arena handle 只能转移给新 owner，release 后不能使用或重复�
 
 当前 evaluator 已把这条边界落到地址表：VSpace 带有 owner 和 released 标记，每个地址
 句柄携带 owner；地址解析会拒绝 foreign owner 或已 released 的 VSpace。VM 返回时先关闭
-逻辑地址生命周期；`release_vspace` 会统一失活地址句柄和 activation frame，底层 storage
-的物理回收仍由 provider 的 owner/release contract 负责。
+逻辑地址生命周期；`release_vspace` 会统一失活地址句柄和 activation frame，并调用
+`Memory.Bytes.release` 回收 backing arena，再替换为空 storage。物理回收仍遵循 provider
+的 allocation policy，但已经由参考 VM 的返回路径触发。
 
 root TCB 的状态转换也已显式化：`new_vm` 创建 READY TCB，`start_tcb` 将其置为 RUNNING，
 执行完成后 `finish_vm` 置为 DEAD；step accounting 仍只接受 RUNNING 状态。
@@ -276,9 +277,9 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 1. **完成单 TCB 的 VM 执行入口收敛**：这一项已完成。`execute`、`execute_limited` 和
    错误返回都经过同一个 LainVM root-TCB 路径；后续只需把回归检查保持在这个入口上。
 2. **完成 VSpace 的物理 reset contract**：provider-neutral owner transfer/release fixture
-   已增加 arena generation 和旧 handle 失效检查，evaluator 的逻辑 `release_vspace` 也已
-   完成。下一步让真实 provider 在 runtime 终止时负责物理 arena reset，并验证旧的 result、
-   arena address 和 activation storage 全部失效。
+   已增加 arena generation 和旧 handle 失效检查，参考 evaluator 的 `release_vspace` 已
+   在终止路径释放 backing arena。下一步验证真实 result、arena address 和 activation
+   storage 在 release 后全部失效，并把 provider 的 release 计数纳入 smoke fixture。
 3. **把 scheduler 状态接入真实 evaluator**：单 runnable、两个 TCB 的 handoff/resume
    fixture 和参考 VM 的最小 suspend/resume API 已完成，但 evaluator 仍在宿主递归调用中
    执行，不能从保存的 instruction position 恢复。下一步先把 root region 切成可保存的

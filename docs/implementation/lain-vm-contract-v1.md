@@ -89,10 +89,10 @@ procedure activation 的 `#alloca` 地址，并拒绝 activation 内的越界 lo
 
 当前 evaluator 还会在 procedure 返回时失活该 activation 派生的地址句柄；后续地址
 解析拒绝使用失活句柄。这是向 LainVM activation lifetime 迁移的第一步，尚不等同于
-完整的 VSpace region table 或 TCB runtime。当前参考 evaluator 还为 VSpace 和地址句柄
+完整的 VSpace region table 或 TCB runtime。当前参考 evaluator 为 VSpace 和地址句柄
 记录 owner，并在 VM 返回时通过 `release_vspace` 关闭逻辑 VSpace、失活所有地址句柄和
-activation frame；底层 `Memory.Bytes` 的物理释放仍由 provider 负责，不能由 evaluator
-直接清空 storage。
+activation frame，再调用 `Memory.Bytes.release` 释放 backing arena。具体的物理分配策略
+仍由 provider 决定。
 
 ## 后续扩展顺序
 
