@@ -94,6 +94,8 @@ attached TCB，一个 TCB 在自己 yield 后最多等待其余 `N-1` 个 runnab
 BLOCKED/DEAD TCB 不计入 `N`，所有 TCB 都不可运行时 `select` 返回空，不进行忙等。
 两个 Endpoint 的并行 fixture 现在让两个发送方分别经过 nested helper 后阻塞；恢复时
 各自的 pending result 必须回到对应 helper frame，随后才完成各自 root procedure。
+Endpoint 销毁会取消并唤醒仍在等待的 TCB；已 DEAD 的 TCB 也可以从 Endpoint wait 中移除，
+避免 Endpoint 保留悬空 control object。
 
 参考 evaluator 现在也暴露了最小 VM control API：`new_vm`、`start_tcb`、`suspend_tcb`
 和 `resume_tcb`。它们只改变 TCB 的 READY/RUNNING/BLOCKED 状态并保留 TCB position；
@@ -205,7 +207,8 @@ block/instruction，并逐层通过 pending result 把返回值交回 caller；�
 frame detach 重挂载。现有 fixture 包含双层 nested `send_outer -> send_helper`，以及
 receiver 在 Endpoint wait 前完成的 sibling `make_value`，确认恢复后两处副作用都只执行
 一次；同一 fixture 也覆盖 `#if` 分支内的 Endpoint wait。仍未完成的是多个并行 pending
-call 的通用保存格式。
+call 的通用保存格式。新增 fixture 覆盖 nested Endpoint wait 的取消恢复、Endpoint 销毁
+时的 CANCELLED 结果，以及 TCB abort 后清除已登记 wait。
 
 ### 2.3 多 TCB/Endpoint handoff 的边界
 
@@ -360,8 +363,9 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    回到各自 frame。slice 结果到 scheduler 状态的统一转换、fuel-yield 轮转和严格
    round-robin 等待上界已有验证；v1 不引入 priority/weight。
 6. **当前阶段：nested continuation 的并行 pending-call。** 两个 TCB 的 nested Endpoint
-   result 已有隔离 fixture；继续验证多个挂起 call 的 frame、表达式游标和 pending result
-   队列不会互相覆盖，并明确 Trap、取消和 TCB 销毁时的清理边界。
+   result 已有隔离 fixture，取消、Endpoint 销毁和 TCB abort 的 wait 清理也已有验证；继续
+   验证多个挂起 call 的 frame、表达式游标和 pending result 队列不会互相覆盖，并补齐
+   Trap 路径下的统一清理边界。
 7. **后续：多 TCB 调度策略与平台 lowering。** 在 nested continuation、单 TCB VSpace、
    Endpoint、Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和
    裸机 lowering。

@@ -38,6 +38,8 @@ Endpoint contract 支持单发送者和单接收者 rendezvous。没有对端时
 TCB control object、owner 和标量 payload，不保存 activation 地址；owner、重复等待和
 非法状态都会被拒绝。`lainir_vm_endpoint_bind` 可将 send/receive 注册为 evaluator
 capability；无对端返回 `LAINIR_RUN_BLOCKED`，恢复后消费 control-owned pending result。
+释放 Endpoint 会将仍在等待的 sender/receiver 标记为 CANCELLED 并唤醒；已 DEAD 的 TCB
+可以先从等待表移除，Endpoint 不得保留已销毁 TCB 的引用。
 `LainirVmControl` 暴露只读 suspend reason，Endpoint 等待固定为
 `LAINIR_VM_SUSPEND_ENDPOINT`，scheduler 可以据此区分主动 yield 与资源等待。
 解释器 Trap 和 capability rejection 会写入同一个 control-owned `LainirVmTrap`，调用者

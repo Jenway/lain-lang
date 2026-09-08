@@ -93,6 +93,29 @@ static int endpoint_contract_test(void) {
   return ok;
 }
 
+static int endpoint_destroy_cleanup_test(void) {
+  LainirVmEndpoint *endpoint = lainir_vm_endpoint_new(7);
+  LainirVmControl *aborted = lainir_vm_control_new(8);
+  LainirVmControl *waiting = lainir_vm_control_new(8);
+  uint32_t kind = 0;
+  uint64_t value = 0;
+  int ok = endpoint && aborted && waiting &&
+           lainir_vm_control_start(aborted, 7) &&
+           lainir_vm_endpoint_send(endpoint, 7, aborted, 7, 1) == 0 &&
+           lainir_vm_control_abort(aborted, 7) == LAINIR_VM_TRAPPED &&
+           lainir_vm_endpoint_cancel(endpoint, 7, aborted, 7) == 1 &&
+           lainir_vm_control_start(waiting, 7) &&
+           lainir_vm_endpoint_receive(endpoint, 7, waiting, 7, NULL) == 0;
+  lainir_vm_endpoint_free(endpoint);
+  ok = ok && lainir_vm_control_state(waiting) == LAINIR_VM_RUNNING &&
+       lainir_vm_control_take_endpoint_result(
+           waiting, 7, &kind, &value) &&
+       kind == LAINIR_VM_ENDPOINT_RESULT_CANCELLED && value == 0;
+  if (aborted) lainir_vm_control_free(aborted);
+  if (waiting) lainir_vm_control_free(waiting);
+  return ok;
+}
+
 static int endpoint_dispatch_test(void) {
   const char *source =
       "#extern #proc endpoint.send(#bits<64> %value) -> #bits<32>;\n"
@@ -568,6 +591,71 @@ cleanup:
   return ok;
 }
 
+static int scheduler_nested_cancel_test(void) {
+  const char *source =
+      "#extern #proc endpoint.send(#bits<64> %value) -> #bits<32>;\n"
+      "#proc send_leaf() -> #bits<32> {\n"
+      "  #return #call endpoint.send(42)\n"
+      "}\n"
+      "#proc send() -> #bits<32> {\n"
+      "  #return #call send_leaf()\n"
+      "}\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  LainirVmScheduler *scheduler = NULL;
+  LainirVmEndpoint *endpoint = NULL;
+  LainirVmControl *control = NULL;
+  LainirCapabilityTable *caps = NULL;
+  LainirVmEndpointBinding binding = {0};
+  LainirRunRequest request = {0};
+  LainirValue result = {0};
+  LainirRunStatus run_status = LAINIR_RUN_TRAP;
+  const char *error = NULL;
+  int ok = 0;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
+    goto cleanup;
+  scheduler = lainir_vm_scheduler_new(7);
+  endpoint = lainir_vm_endpoint_new(7);
+  control = lainir_vm_control_new(16);
+  caps = lainir_caps_new();
+  binding.endpoint = endpoint;
+  binding.control = control;
+  binding.owner = 7;
+  if (!scheduler || !endpoint || !control || !caps ||
+      !lainir_vm_scheduler_attach(scheduler, 7, control, 7) ||
+      !lainir_vm_endpoint_bind(caps, "endpoint.send", "endpoint.receive",
+                               &binding) ||
+      !lainir_vm_scheduler_select(scheduler, 7, NULL))
+    goto cleanup;
+  request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  request.entry_name = "send";
+  request.caps = caps;
+  if (lainir_vm_scheduler_run_slice(
+          scheduler, 7, 8, &request, &run_status, &result, &error) !=
+          LAINIR_VM_BLOCKED_RESULT ||
+      run_status != LAINIR_RUN_BLOCKED || error ||
+      lainir_vm_control_state(control) != LAINIR_VM_BLOCKED ||
+      lainir_vm_scheduler_current(scheduler) != NULL ||
+      lainir_vm_endpoint_cancel(endpoint, 7, control, 7) != 1 ||
+      !lainir_vm_scheduler_select(scheduler, 7, NULL) ||
+      lainir_vm_scheduler_run_slice(
+          scheduler, 7, 8, &request, &run_status, &result, &error) !=
+          LAINIR_VM_DONE ||
+      run_status != LAINIR_RUN_OK || error || result.kind != LAINIR_VALUE_BITS ||
+      result.as.bits != 0 || lainir_vm_scheduler_current(scheduler) != NULL)
+    goto cleanup;
+  ok = 1;
+cleanup:
+  if (control && lainir_vm_control_state(control) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(control, 7);
+  lainir_caps_free(caps);
+  lainir_vm_scheduler_free(scheduler);
+  lainir_vm_endpoint_free(endpoint);
+  lainir_vm_control_free(control);
+  lainir_module_handle_destroy(&handle);
+  return ok;
+}
+
 static int scheduler_fair_rotation_test(void) {
   const char *source =
       "#proc work() -> #bits<32> {\n"
@@ -663,6 +751,8 @@ int main(void) {
     return fail("finish did not reach DEAD");
   lainir_vm_control_free(control);
   if (!endpoint_contract_test()) return fail("endpoint rendezvous contract failed");
+  if (!endpoint_destroy_cleanup_test())
+    return fail("endpoint destroy cleanup failed");
   if (!endpoint_dispatch_test())
     return fail("endpoint capability dispatch failed");
   if (!trap_record_test()) return fail("structured trap record failed");
@@ -673,6 +763,8 @@ int main(void) {
     return fail("scheduler evaluator handoff failed");
   if (!scheduler_parallel_endpoint_wait_test())
     return fail("scheduler parallel endpoint wait failed");
+  if (!scheduler_nested_cancel_test())
+    return fail("scheduler nested cancellation failed");
   if (!scheduler_fair_rotation_test())
     return fail("scheduler fair rotation failed");
 

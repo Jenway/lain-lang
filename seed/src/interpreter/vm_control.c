@@ -292,6 +292,26 @@ LainirVmEndpoint *lainir_vm_endpoint_new(uint64_t owner) {
 
 void lainir_vm_endpoint_free(LainirVmEndpoint *endpoint) {
   if (!endpoint) return;
+  if (endpoint->sender) {
+    LainirVmControl *sender = endpoint->sender;
+    uint64_t sender_owner = endpoint->sender_owner;
+    if (lainir_vm_control_state(sender) == LAINIR_VM_BLOCKED &&
+        endpoint_set_result(sender, sender_owner,
+                            LAINIR_VM_ENDPOINT_RESULT_CANCELLED, 0))
+      (void)lainir_vm_control_resume(sender, sender_owner);
+    endpoint->sender = NULL;
+    endpoint->sender_owner = 0;
+  }
+  if (endpoint->receiver) {
+    LainirVmControl *receiver = endpoint->receiver;
+    uint64_t receiver_owner = endpoint->receiver_owner;
+    if (lainir_vm_control_state(receiver) == LAINIR_VM_BLOCKED &&
+        endpoint_set_result(receiver, receiver_owner,
+                            LAINIR_VM_ENDPOINT_RESULT_CANCELLED, 0))
+      (void)lainir_vm_control_resume(receiver, receiver_owner);
+    endpoint->receiver = NULL;
+    endpoint->receiver_owner = 0;
+  }
   free(endpoint);
 }
 
@@ -359,20 +379,22 @@ int lainir_vm_endpoint_cancel(LainirVmEndpoint *endpoint, uint64_t owner,
   if (!endpoint_owned(endpoint, owner) || !vm_owned(control, control_owner))
     return -1;
   if (endpoint->sender == control && endpoint->sender_owner == control_owner) {
+    endpoint->sender = NULL;
+    endpoint->sender_owner = 0;
+    if (lainir_vm_control_state(control) == LAINIR_VM_DEAD) return 1;
     if (!endpoint_set_result(control, control_owner,
                              LAINIR_VM_ENDPOINT_RESULT_CANCELLED, 0))
       return -1;
-    endpoint->sender = NULL;
-    endpoint->sender_owner = 0;
     return lainir_vm_control_resume(control, control_owner) ? 1 : -1;
   }
   if (endpoint->receiver == control &&
       endpoint->receiver_owner == control_owner) {
+    endpoint->receiver = NULL;
+    endpoint->receiver_owner = 0;
+    if (lainir_vm_control_state(control) == LAINIR_VM_DEAD) return 1;
     if (!endpoint_set_result(control, control_owner,
                              LAINIR_VM_ENDPOINT_RESULT_CANCELLED, 0))
       return -1;
-    endpoint->receiver = NULL;
-    endpoint->receiver_owner = 0;
     return lainir_vm_control_resume(control, control_owner) ? 1 : -1;
   }
   return 0;
