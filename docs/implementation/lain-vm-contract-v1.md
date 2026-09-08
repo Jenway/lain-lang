@@ -86,6 +86,8 @@ Nested continuation 的完成标准是：挂起时保存每个 frame 的 locals�
 匹配的 Endpoint `send` pending-result 队列；单个 Endpoint 的两个 TCB handoff 已接入
 scheduler 的 evaluator slice；两个 Endpoint 的并行等待和 pending result 隔离已有 fixture，
 多个 runnable TCB 使用严格 round-robin；统一选择规则和等待上界由 attachment 数量确定。
+同一 root 先后完成两个 nested Endpoint wait 后再触发 interpreter Trap 的 fixture 还确认：
+两个已消费结果、剩余 nested frame、pending queue 和 backend state 会在 Trap 收尾中统一释放。
 
 多 TCB handoff 的 contract 是：scheduler 同时只选择一个 current TCB；Endpoint wait 只保留
 TCB control object、owner 和 payload；唤醒只作用于登记的 TCB；pending result 绑定目标
