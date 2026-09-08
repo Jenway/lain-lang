@@ -153,6 +153,10 @@ typedef struct {
  * ------------------------------------------------------------------------- */
 struct L1Expr {
   L1ExprKind kind;
+  /* Source range of the expression's first and last consumed tokens.
+     Programmatically constructed nodes may leave both fields at zero. */
+  uint64_t source_start;
+  uint64_t source_end;
   union {
 
     /* EXPR_VAR */
