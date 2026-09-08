@@ -1,6 +1,6 @@
 # 当前路线图
 
-当前路线图只有 [`lain-roadmap.md`](lain-roadmap.md) 一份。错误的求值结果协议已经删除；当前主线是固定 `#eval`、临时 TCB、共享 VSpace 与 Trap 的语义，然后在 seed 中实现这条执行路径。
+当前路线图只有 [`lain-roadmap.md`](lain-roadmap.md) 一份。错误的求值结果协议已经删除，`seed`、`bootstrap` 和 `src` 已经分离；下一阶段固定 `#eval`、临时 TCB、共享 VSpace 与 Trap 的语义，并在 seed 中实现这条执行路径。
 
 已经完成的阶段归档在 [`../history/roadmap-lain-completed-2026-09-07.md`](../history/roadmap-lain-completed-2026-09-07.md)。更早的路线版本和旧方案见 [`../history/`](../history/)，它们只用于追溯。
 

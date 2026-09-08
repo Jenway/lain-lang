@@ -8,6 +8,9 @@
 C0 的完成记录见
 [`../history/roadmap-eval-c0-2026-09-09.md`](../history/roadmap-eval-c0-2026-09-09.md)。
 
+C0.5 的完成记录见
+[`../history/roadmap-project-structure-c0.5-2026-09-09.md`](../history/roadmap-project-structure-c0.5-2026-09-09.md)。
+
 当前最高优先级是纠正 `#eval` 与 LAINVM 的实现方向。正确性优先于兼容性：错误的
 抽象直接删除，允许旧 Meta 和自举链在迁移期间暂时不可用。
 
@@ -26,8 +29,12 @@ C0 的完成记录见
 6. Trap 与普通返回值分开。解释器可以在宿主调用边界使用执行报告来区分成功和 Trap，
    但该报告不属于 `#eval` 的值语义，也不能携带 Meta 分类。
 7. `#eval` 必须在交给最终 backend 前执行并从产物中消失。
-8. 冻结的 `src/lainir/lainc.l1` 及其 snapshot 暂时保留为引导工具。它们可以包含待替换
+8. 冻结的 `bootstrap/lainc.l1` 及其 snapshot 暂时保留为引导工具。它们可以包含待替换
    的旧实现，但不再定义架构，也不得作为新增接口的依据。
+9. 项目按 `seed -> bootstrap -> src` 分层：`seed` 是最小可信执行底座，`bootstrap` 是
+   启动正式编译器所需的 LAINIR 源码和冻结产物，`src` 只放用 Lain 编写的正式实现。
+   正式实现继续分为 `src/lainc`、`src/lainir` 和 `src/lainvm`；LAINIR 定义并验证
+   物理程序，LAINVM 执行已经验证的物理程序。
 
 ## 当前进度
 
@@ -38,6 +45,7 @@ C0 的完成记录见
 | `#eval` | C seed 仍在当前解释器中内联执行 | 改为共享 VSpace 的临时 TCB |
 | Meta 编译期求值 | 旧求值路径已删除，暂不可用 | 在 LAINVM 路径完成后重新接入 |
 | 自举 | 冻结产物暂时可用 | 新路径完成后重新生成并恢复固定点 |
+| 项目结构 | `seed`、`bootstrap` 与 `src` 已分离；`src/lainvm/` 已建立边界 | C1 冻结 LAINIR/LAINVM 接口 |
 | C backend 与发布 | 非当前主线 | 纠偏完成后继续收口和 CI 验证 |
 
 当前实施顺序：
@@ -53,6 +61,10 @@ C1 冻结 #eval / TCB / Trap 语义
 ## C1：冻结 `#eval`、TCB 和 Trap 语义
 
 目标：让 C seed、Lain 解释器和 compiler 共享一份最小且明确的执行约定。
+
+C1 同时定义 LAINIR 与 LAINVM 的接口：LAINIR 提供已验证的 procedure、block、
+instruction 和物理值；LAINVM 管理 TCB、VSpace、Trap、调度并执行这些物理操作。
+接口确定以前，不从 `l1_interpreter.lain` 抽取正式实现。
 
 需要写入规范的行为：
 
@@ -114,7 +126,9 @@ seed: execute eval blocks through temporary TCBs
 - 增加执行 LAINIR block 的入口；
 - 复用调用者 VSpace，并创建临时 TCB；
 - 用普通 `Value` 表示正常结果，用 Trap 表示失败；
-- 删除 provider API 中的 Meta result kind 和资源转移接口；
+- 把 `src/lainir/api/l1_interpreter.lain` 中的执行状态、TCB、VSpace、Trap、调度和
+  指令执行代码迁入 `src/lainvm/`；
+- `src/lainir/` 只保留 IR 表示、解析、构造、打印和验证；
 - 使用同一组 fixture 比较 C seed 与 Lain 实现的值和 Trap。
 
 阶段提交：
@@ -152,7 +166,7 @@ lainc: route compile-time evaluation through LAINVM
 
 工作：
 
-- 重新生成 `src/lainir/lainc.l1` 和 snapshot；
+- 重新生成 `bootstrap/lainc.l1` 和 snapshot；
 - 验证新产物不含 `EvalResult` 及衍生接口；
 - 完成 gen1 -> gen2 -> gen3 固定点比较；
 - 运行 native compiler matrix、LAINIR API baseline 和 release gate；

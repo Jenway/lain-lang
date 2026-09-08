@@ -33,7 +33,7 @@ BIN = ROOT / "seed" / "zig-out" / "bin"
 SUFFIX = ".exe" if os.name == "nt" else ""
 SEED = BIN / f"lainir-seed{SUFFIX}"
 PRINT = BIN / f"lainir-print{SUFFIX}"
-FROZEN = ROOT / "src" / "lainir" / "lainc.l1"
+FROZEN = ROOT / "bootstrap" / "lainc.l1"
 LAINC = ROOT / "src" / "lainc" / "lainc.lain"
 ARCHIVE = ROOT / "src" / "compiler-archive"
 

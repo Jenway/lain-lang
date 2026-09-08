@@ -1,6 +1,6 @@
 # Lain AST operations
 
-`src/lainir/lain/raw_ast.l1` now carries the first semantic views and
+`bootstrap/compiler/raw_ast.l1` now carries the first semantic views and
 structural transforms over the topology-only RawAst tree, together with a
 working macro pipeline.  Everything below runs through the seed bundle
 (`source.l1` + `raw_ast.l1`) and is exercised by
