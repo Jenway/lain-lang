@@ -12,6 +12,7 @@ provider control API，但仍通过 VM control plane 保持 opaque。
 | 单 TCB | 参考 evaluator 的 `LainVm.tcb` | 一次 root execution request |
 | 单 VSpace | 参考 evaluator 的 `LainVm.vspace` | request 结束逻辑释放，物理回收由 provider 负责 |
 | CSpace | `LainVm.cspace` 的 capability object table | slot 级 owner/active 授权 |
+| Endpoint | seed `LainirVmEndpoint` control object | 单发送者/单接收者等待、交接和取消 |
 | Trap | status/diagnostic/result contract | 通过 `MetaPassResultV1` 返回 |
 | Eval result | `EvalResultV1` | owner transfer/release 明确 |
 
