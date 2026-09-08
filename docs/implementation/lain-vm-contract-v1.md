@@ -141,7 +141,9 @@ seed runtime 已提供对应的最小 opaque control API：`LainirVmSession` 只
 绑定和 stale 检查使用。session fixture 覆盖 reset 前的活跃 TCB 拒绝、逐个 finish 后
 reset、detach，以及 release 后禁止再次操作。`LainirRunRequest` 可携带 session；
 `lainir_run` 会拒绝未 attached、owner 不匹配或已 DEAD 的 control，避免 evaluator
-绕过 session 生命周期。
+绕过 session 生命周期。seed 还提供 `LainirVmResultHandle`：它复制结果描述并捕获
+session identity/generation，transfer 后只能由新 owner 使用，reset/release 后统一变为
+stale；provider 仍需为其 payload 提供自己的释放策略。
 
 provider-neutral CSpace contract 已定义 capability object：每个对象带 name、owner 和
 active 状态，可以由当前 owner transfer 或 revoke；foreign owner、非 active capability

@@ -129,6 +129,41 @@ cleanup:
   return ok;
 }
 
+static int result_handle_generation_test(void) {
+  LainirVmSession *session = lainir_vm_session_new(7);
+  LainirVmSession *foreign = lainir_vm_session_new(8);
+  LainirVmResultHandle *handle = NULL;
+  LainirVmResultHandle *stale = NULL;
+  LainirValue source = lainir_value_bits(55, 32);
+  LainirValue copied = {0};
+  int ok = 0;
+  if (!session || !foreign ||
+      !(handle = lainir_vm_result_handle_new(session, 7, &source)) ||
+      lainir_vm_result_handle_generation(handle) !=
+          lainir_vm_session_generation(session) ||
+      !lainir_vm_result_handle_use(handle, session, 7, &copied) ||
+      copied.kind != LAINIR_VALUE_BITS || copied.as.bits != 55 ||
+      !lainir_vm_result_handle_transfer(handle, 7, 9) ||
+      lainir_vm_result_handle_use(handle, session, 7, &copied) ||
+      !lainir_vm_result_handle_use(handle, session, 9, &copied) ||
+      lainir_vm_result_handle_use(handle, foreign, 9, &copied) ||
+      !lainir_vm_session_reset(session, 7) ||
+      lainir_vm_result_handle_use(handle, session, 9, &copied) ||
+      !lainir_vm_result_handle_release(handle, 9) ||
+      lainir_vm_result_handle_release(handle, 9) ||
+      !(stale = lainir_vm_result_handle_new(session, 7, &source)) ||
+      !lainir_vm_session_release(session, 7) ||
+      lainir_vm_result_handle_use(stale, session, 7, &copied))
+    goto cleanup;
+  ok = 1;
+cleanup:
+  lainir_vm_result_handle_free(stale);
+  lainir_vm_result_handle_free(handle);
+  lainir_vm_session_free(foreign);
+  lainir_vm_session_free(session);
+  return ok;
+}
+
 static LainirRunStatus make_value(
     const LainirValue *args, uint32_t arg_count, LainirValue *result_out,
     const char **error_out, void *user_data) {
@@ -1216,6 +1251,8 @@ int main(void) {
     return fail("session lifecycle failed");
   if (!session_request_gate_test())
     return fail("session request gate failed");
+  if (!result_handle_generation_test())
+    return fail("result handle generation failed");
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
   if (!lainir_vm_control_start(control, 7)) return fail("start failed");

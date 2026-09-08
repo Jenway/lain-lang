@@ -50,6 +50,14 @@ struct LainirVmSession {
   uint32_t attached_count;
 };
 
+struct LainirVmResultHandle {
+  LainirVmSession *session;
+  uint64_t session_generation;
+  uint64_t owner;
+  int released;
+  LainirValue value;
+};
+
 static int vm_owned(const LainirVmControl *control, uint64_t owner) {
   return control && control->owner != 0 && control->owner == owner;
 }
@@ -171,6 +179,56 @@ int lainir_vm_session_release(LainirVmSession *session, uint64_t owner) {
   if (!session_owned(session, owner) || !session_all_dead(session)) return 0;
   session->released = 1;
   session->generation++;
+  return 1;
+}
+
+LainirVmResultHandle *lainir_vm_result_handle_new(
+    LainirVmSession *session, uint64_t owner, const LainirValue *value) {
+  LainirVmResultHandle *handle;
+  if (!session_owned(session, owner) || !value) return NULL;
+  handle = calloc(1, sizeof(*handle));
+  if (!handle) return NULL;
+  handle->session = session;
+  handle->session_generation = session->generation;
+  handle->owner = owner;
+  handle->value = *value;
+  return handle;
+}
+
+void lainir_vm_result_handle_free(LainirVmResultHandle *handle) {
+  free(handle);
+}
+
+uint64_t lainir_vm_result_handle_generation(
+    const LainirVmResultHandle *handle) {
+  return handle ? handle->session_generation : 0;
+}
+
+int lainir_vm_result_handle_transfer(LainirVmResultHandle *handle,
+                                     uint64_t owner, uint64_t target) {
+  if (!handle || handle->released || owner != handle->owner || !target ||
+      target == owner)
+    return 0;
+  handle->owner = target;
+  return 1;
+}
+
+int lainir_vm_result_handle_release(LainirVmResultHandle *handle,
+                                    uint64_t owner) {
+  if (!handle || handle->released || owner != handle->owner) return 0;
+  handle->released = 1;
+  return 1;
+}
+
+int lainir_vm_result_handle_use(const LainirVmResultHandle *handle,
+                                const LainirVmSession *session, uint64_t owner,
+                                LainirValue *value_out) {
+  if (!handle || !session || !value_out || handle->released ||
+      handle->session != session || owner != handle->owner ||
+      !session_owned(session, session->owner) ||
+      handle->session_generation != session->generation)
+    return 0;
+  *value_out = handle->value;
   return 1;
 }
 
