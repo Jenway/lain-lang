@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 static int fail(const char *message) {
@@ -33,6 +34,17 @@ static void count_result_payload_free(const LainirValue *value,
   uint32_t *calls = user_data;
   (void)value;
   if (calls) (*calls)++;
+}
+
+static LainirRunStatus make_addr_value(
+    const LainirValue *args, uint32_t arg_count, LainirValue *result_out,
+    const char **error_out, void *user_data) {
+  (void)args;
+  (void)error_out;
+  (void)user_data;
+  if (arg_count != 0 || !result_out) return LAINIR_RUN_BAD_CALL;
+  *result_out = lainir_value_addr((void *)(uintptr_t)0x1234);
+  return LAINIR_RUN_OK;
 }
 
 static int backend_state_cleanup_test(void) {
@@ -174,6 +186,62 @@ cleanup:
   lainir_vm_result_handle_free(handle);
   lainir_vm_session_free(foreign);
   lainir_vm_session_free(session);
+  return ok;
+}
+
+static int evaluator_owned_result_test(void) {
+  const char *source =
+      "#extern #proc make_addr() -> #addr;\n"
+      "#proc root() -> #addr { #return #call make_addr() }\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  LainirCapabilityTable *caps = NULL;
+  LainirVmSession *session = NULL;
+  LainirVmControl *control = NULL;
+  LainirRunRequest request = {0};
+  LainirValue scalar = {0};
+  LainirValue object = {0};
+  LainirVmResultHandle *result_handle = NULL;
+  const char *error = NULL;
+  uint32_t destructor_calls = 0;
+  int ok = 0;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
+    goto cleanup;
+  caps = lainir_caps_new();
+  session = lainir_vm_session_new(7);
+  control = lainir_vm_control_new(8);
+  if (!caps || !session || !control ||
+      !lainir_caps_add(caps, "make_addr", make_addr_value, NULL) ||
+      !lainir_vm_session_attach(session, 7, control, 7) ||
+      !lainir_vm_control_start(control, 7) ||
+      !lainir_vm_control_begin_slice(control, 7, 8))
+    goto cleanup;
+  request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  request.entry_name = "root";
+  request.caps = caps;
+  request.vm_control = control;
+  request.vm_owner = 7;
+  request.vm_session = session;
+  request.vm_session_owner = 7;
+  if (lainir_run_owned_result(
+          &request, &scalar, &result_handle, count_result_payload_free,
+          &destructor_calls, &error) != LAINIR_RUN_OK || error ||
+      scalar.kind != LAINIR_VALUE_UNIT || !result_handle ||
+      !lainir_vm_result_handle_use(result_handle, session, 7, &object) ||
+      object.kind != LAINIR_VALUE_ADDR ||
+      object.as.addr != (void *)(uintptr_t)0x1234 ||
+      !lainir_vm_session_release(session, 7) || destructor_calls != 1 ||
+      lainir_vm_result_handle_use(result_handle, session, 7, &object))
+    goto cleanup;
+  ok = 1;
+cleanup:
+  lainir_vm_result_handle_free(result_handle);
+  if (control && lainir_vm_control_state(control) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(control, 7);
+  lainir_vm_control_free(control);
+  lainir_vm_session_free(session);
+  lainir_caps_free(caps);
+  lainir_module_handle_destroy(&handle);
   return ok;
 }
 
@@ -1266,6 +1334,8 @@ int main(void) {
     return fail("session request gate failed");
   if (!result_handle_generation_test())
     return fail("result handle generation failed");
+  if (!evaluator_owned_result_test())
+    return fail("evaluator owned result failed");
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
   if (!lainir_vm_control_start(control, 7)) return fail("start failed");

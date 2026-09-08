@@ -3322,6 +3322,36 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
   return LAINIR_RUN_OK;
 }
 
+LainirRunStatus lainir_run_owned_result(
+    const LainirRunRequest *request, LainirValue *scalar_out,
+    LainirVmResultHandle **handle_out,
+    LainirVmResultPayloadFree payload_free, void *payload_user_data,
+    const char **error_out) {
+  LainirValue value = lainir_value_unit();
+  LainirRunStatus status;
+  if (handle_out) *handle_out = NULL;
+  status = lainir_run(request, &value, error_out);
+  if (status != LAINIR_RUN_OK) return status;
+  if (value.kind == LAINIR_VALUE_ADDR || value.kind == LAINIR_VALUE_STRING ||
+      value.kind == LAINIR_VALUE_FUNC) {
+    if (!request || !request->vm_session || !handle_out) {
+      if (error_out) *error_out = "object result requires VM session";
+      return LAINIR_RUN_TRAP;
+    }
+    *handle_out = lainir_vm_result_handle_new(
+        request->vm_session, request->vm_session_owner, &value,
+        payload_free, payload_user_data);
+    if (!*handle_out) {
+      if (error_out) *error_out = "object result handle allocation failed";
+      return LAINIR_RUN_TRAP;
+    }
+    if (scalar_out) *scalar_out = lainir_value_unit();
+    return LAINIR_RUN_OK;
+  }
+  if (scalar_out) *scalar_out = value;
+  return LAINIR_RUN_OK;
+}
+
 LainirRunStatus lainir_eval_block(
     L1Subroutine *module,
     L1Block *block,

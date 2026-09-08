@@ -144,7 +144,8 @@ reset、detach，以及 release 后禁止再次操作。`LainirRunRequest` 可�
 绕过 session 生命周期。seed 还提供 `LainirVmResultHandle`：它复制结果描述并捕获
 session identity/generation，transfer 后只能由新 owner 使用，reset/release 后统一变为
 stale，并在 session reset/release 或显式 release/free 时调用 provider payload destructor；
-provider 仍负责定义 payload 本身的所有权。
+`lainir_run_owned_result` 已把实际 evaluator 的 object result 接入这一包装路径，provider
+仍负责定义 payload 本身的所有权。
 
 provider-neutral CSpace contract 已定义 capability object：每个对象带 name、owner 和
 active 状态，可以由当前 owner transfer 或 revoke；foreign owner、非 active capability
