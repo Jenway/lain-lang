@@ -325,8 +325,9 @@ instruction 已绑定到 control object 的 backend state，第二次 `lainir_ru
    TCB/owner/payload，并由 `lainir_vm_endpoint_bind` 接入真实 evaluator；无对端返回
    `LAINIR_RUN_BLOCKED`，交接后恢复 pending call，非法 owner、重复等待和状态转换返回
    capability failure；control plane 现在记录结构化 Trap 的 kind、status、procedure、
-   region 和 position。下一步接入 source span，并让 scheduler 统一消费 Trap。
-5. **完善 Trap 定位**：保留当前物理 region offset，随后接入真实调用栈 procedure 与
+   region 和 position；`L1Instruction` 的 line/column 现在也进入 control-owned Trap。
+   下一步让 scheduler 统一消费 Trap，并把更完整的 source span 接入同一记录。
+5. **完善 Trap 定位**：保留当前物理 region offset，继续扩展真实调用栈 procedure 与
    source span；Trap 字段保持由 VM 统一生成，provider 只读取结果。
 6. **再进入多 TCB 和平台 lowering**：参考后端通过单 TCB、VSpace、Trap、CSpace 和
    Endpoint contract 后，才开始 native、线程、用户态地址空间和裸机 lowering。

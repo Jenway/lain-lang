@@ -94,6 +94,8 @@ typedef struct {
   uint64_t vm_owner;
   int vm_slice_yielded;
   int vm_blocked;
+  uint32_t current_line;
+  uint32_t current_column;
   LainirContinuation *continuation;
   int continuation_tracking;
   int instruction_boundary;
@@ -567,9 +569,10 @@ static LainirCapabilityEntry *interp_lookup_cap(LainirCapabilityTable *caps, con
 static void interp_trap(LainirInterpreter *interp, const char *error) {
   if (!interp->error) interp->error = error;
   if (interp->vm_control)
-    (void)lainir_vm_control_record_trap(
+    (void)lainir_vm_control_record_trap_at(
         interp->vm_control, interp->vm_owner,
-        LAINIR_VM_TRAP_INTERPRETER, LAINIR_RUN_TRAP);
+        LAINIR_VM_TRAP_INTERPRETER, LAINIR_RUN_TRAP,
+        interp->current_line, interp->current_column);
   if (getenv("LAINIR_TRACE_FAST") && interp->fast_active_name)
     fprintf(stderr, "lainir fast trap: %s (%s)\n",
             interp->fast_active_name, error);
@@ -863,9 +866,10 @@ static LainirValue interp_call_host(LainirInterpreter *interp, const char *name,
   }
   if (status != LAINIR_RUN_OK) {
     if (interp->vm_control)
-      (void)lainir_vm_control_record_trap(
+      (void)lainir_vm_control_record_trap_at(
           interp->vm_control, interp->vm_owner,
-          LAINIR_VM_TRAP_CAPABILITY, status);
+          LAINIR_VM_TRAP_CAPABILITY, status,
+          interp->current_line, interp->current_column);
     interp_trap(interp, error ? error : "extern capability call failed");
   }
   return result;
@@ -1229,6 +1233,8 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
       interp->continuation->next_inst)
     inst = interp->continuation->next_inst;
   while (inst) {
+    interp->current_line = inst->line > 0 ? (uint32_t)inst->line : 0;
+    interp->current_column = inst->column > 0 ? (uint32_t)inst->column : 0;
     if (track) {
       interp->continuation->next_block = block;
       interp->continuation->next_inst = inst;
