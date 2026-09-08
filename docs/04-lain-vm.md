@@ -155,6 +155,33 @@ Trap 至少保留 TCB、procedure、instruction position、错误分类和必要
 
 临时 TCB 结束时不会销毁共享的 VSpace。返回值遵守普通 LAINIR 过程返回规则；其中若包含 `#addr`，地址的有效性仍由它所指向区域的生命周期决定。嵌套 `#eval` 依次创建临时 TCB，并继续使用同一个 VSpace。
 
+### 8.1 捕获、根过程与返回
+
+`#eval` 是同步操作。它的块可以引用外围 `%local`，但临时 TCB 不借用调用者的解释器
+frame 或调用栈。compiler lowering 收集块的自由局部绑定，按词法绑定把它们作为值传给
+临时根过程。根过程的静态返回类型就是 `#eval` 表达式的已验证类型。
+
+传入 `#addr` 时仅复制地址值。父 TCB 在子 TCB 同步运行期间仍保持其 activation；子 TCB
+结束时释放自己的 activation。因此子 TCB 的 `#alloca` 地址不能作为结果返回，指向
+`#data` 或仍存活父 activation 的地址可以返回。过程地址和其他已验证的物理 `#addr` 同样
+遵守其原有的 VSpace 规则。
+
+### 8.2 预算与 capability
+
+最外层 `#eval` 建立一个预算账户。它的临时 TCB 和全部嵌套 `#eval` TCB 共同消耗其中的
+step 与 allocation 配额；嵌套计算不能重新获得完整限额。call-depth 从外层调用深度连续
+计数，进入每个临时根过程增加一层。任一账户耗尽立刻产生 quota Trap。
+
+临时 TCB 使用调用者当前 VSpace，并只得到编译请求授权且调用者拥有的 capability 子集。
+嵌套 TCB 不能扩大这个集合。外部调用、地址范围和返回值都在该集合和共享 VSpace 下检查。
+
+### 8.3 Trap 传播
+
+子 TCB 正常结束时只交付普通 LAINIR 值。发生 Trap 时，VM 记录错误分类、procedure 和
+instruction position，结束子 TCB 并释放其 activation；随后把 Trap 同步传播到执行
+`#eval` 的调用点。调用点没有备用值，编译器把 Trap 转换为诊断。Trap 不作为 `#eval`
+表达式的字段、`Result` 对象或 Meta handle 返回。
+
 ## 9. 确定性与时间
 
 编译期执行需要确定的 step、call-depth 和 allocation 预算。相同 artifact、输入和 capability 集合应得到相同的结果或相同的 Trap 分类。
