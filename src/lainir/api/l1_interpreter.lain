@@ -98,6 +98,7 @@ let l1_interpreter: Module = std::module {
             region: usize,
             position: usize,
             activation: usize,
+            arguments: ValueVector,
             return_procedure: usize,
             return_region: usize,
             return_position: usize,
@@ -130,6 +131,10 @@ let l1_interpreter: Module = std::module {
             region: usize,
             position: usize,
             suspend_reason: i32,
+            slice_limit: usize,
+            slice_steps: usize,
+            yielded: bool,
+            resume_pending: bool,
             frames: CallFrameVector,
             trap: Trap,
         };
@@ -204,6 +209,23 @@ let l1_interpreter: Module = std::module {
             if state.tcb.step_limit != 0 && state.tcb.steps >= state.tcb.step_limit {
                 return false;
             }
+            if state.tcb.slice_limit != 0
+                && state.tcb.slice_steps >= state.tcb.slice_limit {
+                state.tcb.yielded = true;
+                return false;
+            }
+            state.tcb.steps = state.tcb.steps + 1;
+            if state.tcb.slice_limit != 0 {
+                state.tcb.slice_steps = state.tcb.slice_steps + 1;
+            }
+            return true;
+        };
+
+        let consume_expression_step = std::func(state: &mut LainVm) -> bool {
+            if state.tcb.status != 1 { return false; }
+            if state.tcb.step_limit != 0 && state.tcb.steps >= state.tcb.step_limit {
+                return false;
+            }
             state.tcb.steps = state.tcb.steps + 1;
             return true;
         };
@@ -265,6 +287,7 @@ let l1_interpreter: Module = std::module {
         let fallthrough = std::func() -> Result { return fail(7997); };
         let break_flow = std::func() -> Result { return fail(7998); };
         let continue_flow = std::func() -> Result { return fail(7999); };
+        let yield_flow = std::func() -> Result { return fail(7996); };
 
         let trap_kind = std::func(code: i32) -> i32 {
             if code == 7108 || code == 7109 || code == 7115 {
@@ -429,7 +452,10 @@ let l1_interpreter: Module = std::module {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
-            if !consume_step(state) { return fail(7109); }
+            if !consume_expression_step(state) {
+                if state.tcb.yielded { return yield_flow(); }
+                return fail(7109);
+            }
             if state.tcb.depth_limit != 0 && depth >= state.tcb.depth_limit {
                 return fail(7108);
             }
@@ -734,15 +760,23 @@ let l1_interpreter: Module = std::module {
             }
             let region: &L1.Region = unit.regions.get(region_id);
             let offset: usize = 0;
+            if state.tcb.resume_pending && state.tcb.region == region_id {
+                offset = state.tcb.position;
+                state.tcb.resume_pending = false;
+            }
             state.tcb.region = region_id;
 
             while offset < region.instructions.length() {
                 state.tcb.position = offset;
                 if state.tcb.frames.length() > 0 {
                     let top_frame: usize = state.tcb.frames.length() - 1;
+                    state.tcb.frames.get_mut(top_frame).region = region_id;
                     state.tcb.frames.get_mut(top_frame).position = offset;
                 }
-                if !consume_step(state) { return fail(7109); }
+                if !consume_step(state) {
+                    if state.tcb.yielded { return yield_flow(); }
+                    return fail(7109);
+                }
                 let instruction: &L1.Instruction =
                     region.instructions.get(offset);
 
@@ -888,6 +922,10 @@ let l1_interpreter: Module = std::module {
                     region: 0,
                     position: 0,
                     suspend_reason: 0,
+                    slice_limit: 0,
+                    slice_steps: 0,
+                    yielded: false,
+                    resume_pending: false,
                     frames: CallFrameVector.new(),
                     trap: Trap {
                         kind: 0, status: 0, procedure: 0,
@@ -947,6 +985,59 @@ let l1_interpreter: Module = std::module {
                 unit, procedure_id, arguments, 0, &mut state
             );
             return finish_vm(&mut state, procedure_id, result);
+        };
+
+        let run_slice = std::func(
+            state: &mut LainVm,
+            unit: &L1.Unit,
+            procedure_id: L1.ProcedureId,
+            arguments: &ValueVector,
+            fuel: usize,
+        ) -> Result ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            if fuel == 0 { return fail(7109); }
+            if state.tcb.status == 0 && !start_tcb(state) {
+                return fail(7103);
+            }
+            if state.tcb.status != 1 { return fail(7103); }
+            state.tcb.slice_limit = fuel;
+            state.tcb.slice_steps = 0;
+            state.tcb.yielded = false;
+            let result: Result = fail(7103);
+            if state.tcb.resume_pending && state.tcb.frames.length() > 0 {
+                let top_frame: usize = state.tcb.frames.length() - 1;
+                let resume_region: L1.RegionId =
+                    state.tcb.frames.get(top_frame).region;
+                let resume_arguments: ValueVector = ValueVector.new();
+                let resume_source: &ValueVector =
+                    &state.tcb.frames.get(top_frame).arguments;
+                let resume_argument_index: usize = 0;
+                while resume_argument_index < resume_source.length() {
+                    resume_arguments.push(
+                        *resume_source.get(resume_argument_index),
+                    );
+                    resume_argument_index = resume_argument_index + 1;
+                }
+                result = execute_region(
+                    unit,
+                    resume_region,
+                    &resume_arguments,
+                    state.tcb.frames.length(),
+                    state,
+                );
+            } else {
+                result = execute_procedure(
+                    unit, procedure_id, arguments, 0, state,
+                );
+            }
+            state.tcb.slice_limit = 0;
+            if result.status == 7996 {
+                state.tcb.resume_pending = true;
+                return result;
+            }
+            return finish_vm(state, procedure_id, result);
         };
 
         let execute_procedure = std::func(
@@ -1010,11 +1101,18 @@ let l1_interpreter: Module = std::module {
             state.tcb.procedure = procedure_id;
             state.tcb.region = procedure.body;
             state.tcb.position = 0;
+            let frame_arguments: ValueVector = ValueVector.new();
+            let frame_argument_index: usize = 0;
+            while frame_argument_index < arguments.length() {
+                frame_arguments.push(*arguments.get(frame_argument_index));
+                frame_argument_index = frame_argument_index + 1;
+            }
             state.tcb.frames.push(CallFrame {
                 procedure: procedure_id,
                 region: procedure.body,
                 position: 0,
                 activation: activation,
+                arguments: frame_arguments,
                 return_procedure: previous_procedure,
                 return_region: previous_region,
                 return_position: previous_position,
@@ -1033,6 +1131,9 @@ let l1_interpreter: Module = std::module {
                 depth + 1,
                 state,
             );
+            if result.status == 7996 {
+                return result;
+            }
             let activation_escape: bool = false;
             if result.status == 0 {
                 let returned_address: usize = address_at(unit, state, result.value);
@@ -1103,6 +1204,7 @@ let l1_interpreter: Module = std::module {
             @export let suspend_tcb = suspend_tcb;
             @export let suspend_tcb_reason = suspend_tcb_reason;
             @export let resume_tcb = resume_tcb;
+            @export let run_slice = run_slice;
             @export let execute = execute;
             @export let execute_limited = execute_limited;
         };
