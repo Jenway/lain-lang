@@ -21,10 +21,18 @@ typedef struct {
 } CounterContext;
 
 static uint32_t backend_state_free_calls;
+static uint32_t result_payload_free_calls;
 
 static void count_backend_state_free(void *state) {
   backend_state_free_calls++;
   free(state);
+}
+
+static void count_result_payload_free(const LainirValue *value,
+                                      void *user_data) {
+  uint32_t *calls = user_data;
+  (void)value;
+  if (calls) (*calls)++;
 }
 
 static int backend_state_cleanup_test(void) {
@@ -136,9 +144,12 @@ static int result_handle_generation_test(void) {
   LainirVmResultHandle *stale = NULL;
   LainirValue source = lainir_value_bits(55, 32);
   LainirValue copied = {0};
+  result_payload_free_calls = 0;
   int ok = 0;
   if (!session || !foreign ||
-      !(handle = lainir_vm_result_handle_new(session, 7, &source)) ||
+      !(handle = lainir_vm_result_handle_new(
+          session, 7, &source, count_result_payload_free,
+          &result_payload_free_calls)) ||
       lainir_vm_result_handle_generation(handle) !=
           lainir_vm_session_generation(session) ||
       !lainir_vm_result_handle_use(handle, session, 7, &copied) ||
@@ -149,11 +160,13 @@ static int result_handle_generation_test(void) {
       lainir_vm_result_handle_use(handle, foreign, 9, &copied) ||
       !lainir_vm_session_reset(session, 7) ||
       lainir_vm_result_handle_use(handle, session, 9, &copied) ||
-      !lainir_vm_result_handle_release(handle, 9) ||
       lainir_vm_result_handle_release(handle, 9) ||
-      !(stale = lainir_vm_result_handle_new(session, 7, &source)) ||
+      !(stale = lainir_vm_result_handle_new(
+          session, 7, &source, count_result_payload_free,
+          &result_payload_free_calls)) ||
       !lainir_vm_session_release(session, 7) ||
-      lainir_vm_result_handle_use(stale, session, 7, &copied))
+      lainir_vm_result_handle_use(stale, session, 7, &copied) ||
+      result_payload_free_calls != 2)
     goto cleanup;
   ok = 1;
 cleanup:

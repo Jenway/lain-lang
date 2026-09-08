@@ -41,6 +41,16 @@ struct LainirVmScheduler {
   uint32_t next_index;
 };
 
+struct LainirVmResultHandle {
+  LainirVmSession *session;
+  uint64_t session_generation;
+  uint64_t owner;
+  int released;
+  LainirValue value;
+  LainirVmResultPayloadFree payload_free;
+  void *payload_user_data;
+};
+
 struct LainirVmSession {
   uint64_t owner;
   uint64_t generation;
@@ -48,14 +58,8 @@ struct LainirVmSession {
   LainirVmControl *attached[8];
   uint64_t attached_owner[8];
   uint32_t attached_count;
-};
-
-struct LainirVmResultHandle {
-  LainirVmSession *session;
-  uint64_t session_generation;
-  uint64_t owner;
-  int released;
-  LainirValue value;
+  LainirVmResultHandle *results[16];
+  uint32_t result_count;
 };
 
 static int vm_owned(const LainirVmControl *control, uint64_t owner) {
@@ -76,6 +80,40 @@ static int session_all_dead(const LainirVmSession *session) {
       return 0;
   }
   return 1;
+}
+
+static void result_release_payload(LainirVmResultHandle *handle) {
+  if (!handle || handle->released) return;
+  if (handle->payload_free)
+    handle->payload_free(&handle->value, handle->payload_user_data);
+  handle->released = 1;
+}
+
+static void session_invalidate_results(LainirVmSession *session) {
+  uint32_t i;
+  if (!session) return;
+  for (i = 0; i < session->result_count; i++)
+    result_release_payload(session->results[i]);
+}
+
+static int session_register_result(LainirVmSession *session,
+                                   LainirVmResultHandle *handle) {
+  if (!session || !handle || session->result_count >= 16) return 0;
+  session->results[session->result_count++] = handle;
+  return 1;
+}
+
+static void session_unregister_result(LainirVmSession *session,
+                                      LainirVmResultHandle *handle) {
+  uint32_t i;
+  if (!session || !handle) return;
+  for (i = 0; i < session->result_count; i++) {
+    if (session->results[i] != handle) continue;
+    session->results[i] = session->results[session->result_count - 1];
+    session->results[session->result_count - 1] = NULL;
+    session->result_count--;
+    return;
+  }
 }
 
 static void vm_release_backend_state(LainirVmControl *control) {
@@ -171,19 +209,22 @@ int lainir_vm_session_detach(LainirVmSession *session, uint64_t owner,
 
 int lainir_vm_session_reset(LainirVmSession *session, uint64_t owner) {
   if (!session_owned(session, owner) || !session_all_dead(session)) return 0;
+  session_invalidate_results(session);
   session->generation++;
   return 1;
 }
 
 int lainir_vm_session_release(LainirVmSession *session, uint64_t owner) {
   if (!session_owned(session, owner) || !session_all_dead(session)) return 0;
+  session_invalidate_results(session);
   session->released = 1;
   session->generation++;
   return 1;
 }
 
 LainirVmResultHandle *lainir_vm_result_handle_new(
-    LainirVmSession *session, uint64_t owner, const LainirValue *value) {
+    LainirVmSession *session, uint64_t owner, const LainirValue *value,
+    LainirVmResultPayloadFree payload_free, void *payload_user_data) {
   LainirVmResultHandle *handle;
   if (!session_owned(session, owner) || !value) return NULL;
   handle = calloc(1, sizeof(*handle));
@@ -192,10 +233,19 @@ LainirVmResultHandle *lainir_vm_result_handle_new(
   handle->session_generation = session->generation;
   handle->owner = owner;
   handle->value = *value;
+  handle->payload_free = payload_free;
+  handle->payload_user_data = payload_user_data;
+  if (!session_register_result(session, handle)) {
+    free(handle);
+    return NULL;
+  }
   return handle;
 }
 
 void lainir_vm_result_handle_free(LainirVmResultHandle *handle) {
+  if (!handle) return;
+  result_release_payload(handle);
+  session_unregister_result(handle->session, handle);
   free(handle);
 }
 
@@ -216,7 +266,7 @@ int lainir_vm_result_handle_transfer(LainirVmResultHandle *handle,
 int lainir_vm_result_handle_release(LainirVmResultHandle *handle,
                                     uint64_t owner) {
   if (!handle || handle->released || owner != handle->owner) return 0;
-  handle->released = 1;
+  result_release_payload(handle);
   return 1;
 }
 
