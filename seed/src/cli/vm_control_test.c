@@ -1,4 +1,5 @@
 #include "lainir/interpreter.h"
+#include "lainir/eval_source.h"
 
 #include <stdio.h>
 
@@ -40,6 +41,48 @@ int main(void) {
       lainir_vm_control_state(control) != LAINIR_VM_DEAD)
     return fail("finish did not reach DEAD");
   lainir_vm_control_free(control);
+
+  /* The interpreter consumes the provider-owned fuel gate at each tick and
+   * reports a slice boundary through the ordinary run status.  The one-shot
+   * evaluator frame is intentionally not resumed by this test yet. */
+  const char *source =
+      "#proc helper() -> #bits<32> {\n"
+      "  #return 42\n"
+      "}\n"
+      "#proc main() -> #bits<32> {\n"
+      "  #return #call helper()\n"
+      "}\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK) {
+    return fail("interpreter fixture parse failed");
+  }
+  if (lainir_module_handle_verify_entry(handle, "main", &diagnostic) !=
+      LAINIR_RUN_OK) {
+    lainir_module_handle_destroy(&handle);
+    return fail("interpreter fixture verification failed");
+  }
+  control = lainir_vm_control_new(32);
+  if (!control || !lainir_vm_control_start(control, 9) ||
+      !lainir_vm_control_begin_slice(control, 9, 1))
+    return fail("interpreter control setup failed");
+  LainirRunRequest request = {0};
+  request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  request.entry_name = "main";
+  request.vm_control = control;
+  request.vm_owner = 9;
+  LainirValue result = {0};
+  const char *error = NULL;
+  LainirRunStatus run_status = lainir_run(&request, &result, &error);
+  if (run_status != LAINIR_RUN_SLICE ||
+      !lainir_vm_control_slice_exhausted(control) || error) {
+    lainir_module_handle_destroy(&handle);
+    lainir_vm_control_free(control);
+    return fail("interpreter did not report a VM slice boundary");
+  }
+  lainir_vm_control_finish(control, 9);
+  lainir_vm_control_free(control);
+  lainir_module_handle_destroy(&handle);
   puts("PASS LAIN-VM opaque control API");
   return 0;
 }

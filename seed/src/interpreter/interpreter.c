@@ -78,6 +78,9 @@ typedef struct {
   uint32_t trace_procedure_count;
   LainirTraceProcedure *trace_active;
   const char *fast_active_name;
+  LainirVmControl *vm_control;
+  uint64_t vm_owner;
+  int vm_slice_yielded;
   uint64_t trace_expr_kinds[64];
   uint64_t trace_inst_kinds[16];
   uint64_t trace_meta_cache_hits;
@@ -260,6 +263,15 @@ static L1Subroutine *interp_find_sub(LainirInterpreter *interp,
 }
 
 static int interp_tick(LainirInterpreter *interp) {
+  if (interp->vm_control &&
+      !lainir_vm_control_consume_step(interp->vm_control, interp->vm_owner)) {
+    if (lainir_vm_control_slice_exhausted(interp->vm_control)) {
+      interp->vm_slice_yielded = 1;
+      return 0;
+    }
+    interp_trap(interp, "VM control step rejected");
+    return 0;
+  }
   uint64_t limit = interp->caps ? interp->caps->max_steps : 0;
   if (limit && interp->steps >= limit) {
     interp_trap(interp, "interpreter step limit exceeded");
@@ -322,6 +334,37 @@ static int interp_addr_is_readonly_data(LainirInterpreter *interp,
     if (value >= begin && value < begin + item->data_size) return 1;
   }
   return 0;
+}
+
+/* Validate accesses into interpreter-owned activation storage.  Host-owned
+ * capability buffers remain opaque to the interpreter; accesses into an
+ * active #alloca are checked against the complete allocation range. */
+static int interp_validate_memory_access(
+    LainirInterpreter *interp, LainirFrame *frame, const void *address,
+    uint32_t width, int write) {
+  uintptr_t value = (uintptr_t)address;
+  if (!address) {
+    interp_trap(interp, write ? "store to null" : "load from null");
+    return 0;
+  }
+  for (LainirFrame *owner = frame; owner; owner = owner->caller) {
+    for (uint32_t i = 0; i < owner->alloca_count; i++) {
+      uintptr_t begin = (uintptr_t)owner->allocas[i].data;
+      uintptr_t end = begin + (owner->allocas[i].size ? owner->allocas[i].size : 1);
+      if (value >= begin && value <= end) {
+        if (value == end || width > end - value) {
+          interp_trap(interp, "memory access out of bounds");
+          return 0;
+        }
+        return 1;
+      }
+    }
+  }
+  /* #data write protection is handled by interp_addr_is_readonly_data at the
+   * store site.  Do not scan the complete module for every load: compiler
+   * Meta walks perform millions of host-owned reads, which must stay on the
+   * existing opaque capability path. */
+  return 1;
 }
 
 static int interp_trace_compare_steps(const void *left, const void *right) {
@@ -1072,9 +1115,12 @@ static LainirValue interp_eval_expr(LainirInterpreter *interp, LainirFrame *fram
   case EXPR_LOAD: {
     LainirValue av = interp_eval_expr(interp, frame, expr->data.load.addr);
     if (interp->error) return lainir_value_unit();
-    return interp_load_typed(
-        interp, interp_value_addr(interp, av, "expected address for load"),
-        expr->data.load.ty);
+    void *address = interp_value_addr(interp, av, "expected address for load");
+    if (interp->error) return lainir_value_unit();
+    if (!interp_validate_memory_access(
+            interp, frame, address, interp_type_size(expr->data.load.ty), 0))
+      return lainir_value_unit();
+    return interp_load_typed(interp, address, expr->data.load.ty);
   }
   case EXPR_PROC_ADDR: {
     L1Subroutine *target = interp_find_sub(
@@ -1182,6 +1228,8 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
         return;
       }
       uint32_t width = interp_store_width(inst->data.store.store_ty, value);
+      if (!interp_validate_memory_access(interp, frame, addr, width, 1))
+        return;
       memcpy(addr, &value.as.bits, width);
       break;
     }
@@ -1223,7 +1271,7 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
       return;
     case INST_RETURN: {
       LainirValue value = interp_eval_expr(interp, frame, inst->data.ret.val);
-      if (interp->error) return;
+      if (interp->error || interp->vm_slice_yielded) return;
       value = interp_coerce_physical(interp, value, frame->sub->ret_ty);
       if (interp->error) return;
       interp->should_return = 1;
@@ -1232,7 +1280,7 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     }
     case INST_CALL:
       (void)interp_eval_expr(interp, frame, inst->data.call_inst.expr);
-      if (interp->error) return;
+      if (interp->error || interp->vm_slice_yielded) return;
       break;
     }
     inst = inst->next;
@@ -2607,6 +2655,14 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
   L1Block *block = sub->blocks;
   while (block) {
     interp_exec_block(interp, &frame, block);
+    if (interp->vm_slice_yielded) {
+      interp_free_frame(&frame);
+      interp->should_return = saved_ret;
+      interp->call_depth--;
+      interp->trace_active = saved_trace;
+      interp->active_frame = saved_frame;
+      return lainir_value_unit();
+    }
     if (interp->error) { interp_free_frame(&frame); interp->should_return = saved_ret; interp->call_depth--; interp->trace_active = saved_trace; interp->active_frame = saved_frame; return lainir_value_unit(); }
     if (interp->should_return) break;
     block = block->next;
@@ -2668,6 +2724,8 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
   }
   interp.module = request->module;
   interp.caps = request->caps;
+  interp.vm_control = request->vm_control;
+  interp.vm_owner = request->vm_owner;
   /* Diagnostic and fast-path environment switches are read once per run;
    * getenv must not sit on the interpreter's step/call hot paths. */
   interp_init_env_flags(&interp);
@@ -2686,6 +2744,10 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
   if (interp.error) {
     if (error_out) *error_out = interp.error;
     return LAINIR_RUN_TRAP;
+  }
+  if (interp.vm_slice_yielded) {
+    if (error_out) *error_out = NULL;
+    return LAINIR_RUN_SLICE;
   }
   if (error_out) *error_out = NULL;
   return LAINIR_RUN_OK;

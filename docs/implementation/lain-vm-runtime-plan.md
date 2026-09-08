@@ -299,9 +299,12 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 
 seed runtime 现在提供独立的 opaque C control plane：`LainirVmControl` 持有 owner、TCB
 状态、fuel、CallFrame 栈和 slice result；`lainir-vm-control-test` 已验证 owner 检查、
-READY/RUNNING/BLOCKED/DEAD、fuel exhaustion、嵌套 frame 恢复和 DONE。它还没有接管旧
-递归 evaluator 的 instruction dispatch；下一步是让 evaluator 在 instruction boundary
-调用 `lainir_vm_control_consume_step`，再把真实 frame 与该 control object 绑定。
+READY/RUNNING/BLOCKED/DEAD、fuel exhaustion、嵌套 frame 恢复和 DONE。`LainirRunRequest`
+可以携带该 control object；解释器在每个 instruction boundary 调用
+`lainir_vm_control_consume_step`，fuel 用尽时返回 `LAINIR_RUN_SLICE`。当前这一步已经
+把 control gate 接入真实 dispatch，但一次 `lainir_run` 仍会释放宿主递归 frame，不能凭此
+恢复到下一条指令。下一步是让真实 frame/region/position 与该 opaque control object
+绑定，并实现跨 `lainir_run` 的恢复。
 4. **接入 Endpoint 的真实 ownership 检查**：fixture 已覆盖 rendezvous 和取消，下一步
    让 Endpoint 等待项只保存受 capability 授权的 TCB/owned handle，不保存裸 activation
    地址，并把非法状态转换转成统一 Trap。

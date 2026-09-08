@@ -43,8 +43,10 @@ Endpoint 等待点。`run_slice` 的结果固定为 `RUNNABLE`、`BLOCKED`、`DO
 scheduler state 由 VM/provider 的 opaque control object 持有。`VmControl` fixture 已覆盖
 跨 procedure 的 fuel yield、callee frame resume 和最终 VSpace release；现有 suspend/resume
 API 仍同时验证状态转换和 position 保存。seed runtime 还提供 `LainirVmControl` opaque C
-API，并由 `lainir-vm-control-test` 验证同一组 control-plane 不变量；旧递归 evaluator
-尚未调用该 API。
+API，并由 `lainir-vm-control-test` 验证同一组 control-plane 不变量。`LainirRunRequest`
+现在可以携带该对象，解释器在 instruction boundary 消耗 fuel，并以
+`LAINIR_RUN_SLICE` 报告切片边界；当前一次运行仍不保存宿主递归 frame，跨调用的真实
+恢复路径留在后续阶段。
 
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
 必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。
