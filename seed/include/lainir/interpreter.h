@@ -238,6 +238,8 @@ LainirVmSliceResult lainir_vm_scheduler_finish(
  * they never retain an activation address.  send/receive return 0 when the
  * caller blocks, 1 when a rendezvous completes, and -1 on rejection. */
 LainirVmEndpoint *lainir_vm_endpoint_new(uint64_t owner);
+/* Freeing an endpoint cancels any blocked sender/receiver and publishes a
+ * CANCELLED result before releasing the endpoint object. */
 void lainir_vm_endpoint_free(LainirVmEndpoint *endpoint);
 int lainir_vm_endpoint_send(LainirVmEndpoint *endpoint, uint64_t owner,
                             LainirVmControl *sender, uint64_t sender_owner,
