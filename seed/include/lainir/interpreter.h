@@ -213,6 +213,9 @@ int lainir_vm_scheduler_admit(LainirVmScheduler *scheduler, uint64_t owner,
  * round-robin over the attachment order and leaves BLOCKED/DEAD TCBs alone. */
 LainirVmControl *lainir_vm_scheduler_select(
     LainirVmScheduler *scheduler, uint64_t owner, uint64_t *control_owner_out);
+/* Yield a RUNNING current TCB after its slice fuel is exhausted.  The TCB
+ * remains RUNNING and can be selected again; this only releases current. */
+int lainir_vm_scheduler_yield(LainirVmScheduler *scheduler, uint64_t owner);
 /* Run one evaluator slice for the scheduler's current TCB.  The scheduler
  * supplies the opaque control object to the backend and automatically
  * releases current when the slice blocks or terminates. */
