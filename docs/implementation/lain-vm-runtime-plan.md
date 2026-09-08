@@ -143,6 +143,23 @@ LainVM
 可以用明确的内部对象表示，native/backend 可以将它们 lowering 到寄存器、栈、线程和
 操作系统资源。它们对 LAINIR 保持 opaque。
 
+### 2.1 continuation slice 的边界
+
+真实 scheduler slice 需要保存 TCB 的执行 continuation，而不是只保存一个诊断 offset。
+参考实现的下一步固定为以下 VM 内部状态：
+
+- 当前 procedure、region 和下一条 instruction offset；
+- 从 root 到当前 activation 的调用帧链，每帧包含返回位置和 activation id；
+- 当前 TCB 的 RUNNING/BLOCKED 状态以及挂起原因；
+- 仍然存活的 activation frame 和它们所属的 VSpace。
+
+调度器只在 instruction boundary 或 Endpoint 等待点切换 TCB。`run_slice` 消耗本次
+slice 的 fuel，返回 `RUNNABLE`、`BLOCKED`、`DONE` 或 `TRAPPED`；它不把 TCB、VSpace、
+Endpoint 或 continuation 编译成 LAINIR 数据，也不增加 `#init_context`、`#swap_context`
+之类的 LAINIR 指令。挂起时 activation 保持有效，TCB 终止时才统一失活其 activation
+地址并释放 VSpace。只有实现这条恢复路径后，才可以把 scheduler fixture 描述为真实协程
+行为。
+
 ## 3. 阶段一：建立 LainVM 核心对象
 
 目标：在现有 provider/interpreter 旁边建立真正的 VM 状态，而不改变 LAINIR 指令集。
@@ -263,8 +280,8 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 3. **把 scheduler 状态接入真实 evaluator**：单 runnable、两个 TCB 的 handoff/resume
    fixture 和参考 VM 的最小 suspend/resume API 已完成，但 evaluator 仍在宿主递归调用中
    执行，不能从保存的 instruction position 恢复。下一步先把 root region 切成可保存的
-   VM slice，再将 activation/position 放入 TCB 的 continuation 状态；没有真实恢复路径前，
-   不宣称已经支持协程。
+   VM slice，再将 activation/position 和调用帧链放入 TCB 的 continuation 状态；随后用
+   `run_slice` 返回值接入 scheduler。没有真实恢复路径前，不宣称已经支持协程。
 4. **接入 Endpoint 的真实 ownership 检查**：fixture 已覆盖 rendezvous 和取消，下一步
    让 Endpoint 等待项只保存受 capability 授权的 TCB/owned handle，不保存裸 activation
    地址，并把非法状态转换转成统一 Trap。
