@@ -64,6 +64,7 @@ typedef struct {
 typedef struct LainirVmControl LainirVmControl;
 typedef struct LainirVmEndpoint LainirVmEndpoint;
 typedef struct LainirVmScheduler LainirVmScheduler;
+typedef void (*LainirVmBackendStateFree)(void *state);
 
 typedef struct {
   LainirVmEndpoint *endpoint;
@@ -181,6 +182,8 @@ int lainir_vm_control_record_trap_span(
 void *lainir_vm_control_backend_state(const LainirVmControl *control);
 int lainir_vm_control_set_backend_state(LainirVmControl *control,
                                          uint64_t owner, void *state);
+int lainir_vm_control_set_backend_state_destructor(
+    LainirVmControl *control, uint64_t owner, LainirVmBackendStateFree destroy);
 int lainir_vm_control_take_endpoint_result(LainirVmControl *control,
                                             uint64_t owner, uint32_t *kind_out,
                                             uint64_t *value_out);
