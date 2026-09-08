@@ -51,6 +51,7 @@ let l1_interpreter: Module = std::module {
 
         let Address: type = std::struct {
             owner: usize,
+            generation: usize,
             kind: i32,
             activation: usize,
             object: usize,
@@ -111,6 +112,7 @@ let l1_interpreter: Module = std::module {
 
         let VSpace: type = std::struct {
             owner: usize,
+            generation: usize,
             released: bool,
             storage: Memory.Bytes,
             addresses: AddressVector,
@@ -187,7 +189,8 @@ let l1_interpreter: Module = std::module {
             let index: usize = (value.i32_value - 1) as usize;
             if index >= state.vspace.addresses.length() { return std::usize_max(); }
             let address: &Address = state.vspace.addresses.get(index);
-            if state.vspace.released || address.owner != state.vspace.owner {
+            if state.vspace.released || address.owner != state.vspace.owner
+                || address.generation != state.vspace.generation {
                 return std::usize_max();
             }
             if address.kind == 1 && !address.active {
@@ -326,6 +329,7 @@ let l1_interpreter: Module = std::module {
                 activation_index = activation_index + 1;
             }
             state.vspace.released = true;
+            state.vspace.generation = state.vspace.generation + 1;
             state.vspace.storage.release();
             state.vspace.storage = Memory.Bytes.new();
         };
@@ -492,6 +496,7 @@ let l1_interpreter: Module = std::module {
                 }
                 return address_value(state, expression.result_type, Address {
                     owner: state.vspace.owner,
+                    generation: state.vspace.generation,
                     kind: 3, activation: 0, object: expression.procedure,
                     offset: 0, length: 0, active: true,
                 });
@@ -502,6 +507,7 @@ let l1_interpreter: Module = std::module {
                 let item: &L1.Data = unit.data.get(expression.index);
                 return address_value(state, expression.result_type, Address {
                     owner: state.vspace.owner,
+                    generation: state.vspace.generation,
                     kind: 2, activation: 0, object: expression.index,
                     offset: 0, length: item.size, active: true,
                 });
@@ -522,6 +528,7 @@ let l1_interpreter: Module = std::module {
                     state.vspace.allocation_bytes + expression.size;
                 return address_value(state, expression.result_type, Address {
                     owner: state.vspace.owner,
+                    generation: state.vspace.generation,
                     kind: 1, activation: state.tcb.current_activation,
                     object: 0, offset: start, length: expression.size,
                     active: true,
@@ -550,6 +557,7 @@ let l1_interpreter: Module = std::module {
                 }
                 return address_value(state, expression.result_type, Address {
                     owner: base.owner,
+                    generation: base.generation,
                     kind: base.kind, activation: base.activation,
                     object: base.object, offset: next_offset,
                     length: base.length - displacement as usize,
@@ -903,6 +911,7 @@ let l1_interpreter: Module = std::module {
             return LainVm {
                 vspace: VSpace {
                     owner: 1,
+                    generation: 1,
                     released: false,
                     storage: Memory.Bytes.new(),
                     addresses: AddressVector.new(),

@@ -158,6 +158,8 @@ adapter 必须带 destructor，borrowed adapter 必须省略 destructor。genera
 同一边界在 LAINIR provider API 的 `EvalShape` 中由 object 判断、kind、owner、generation、
 owner transfer 和 release 组成；只支持 scalar 的 provider 必须显式返回空 object 状态，
 不能把原始 object 地址当作普通 `Value` 交给 backend。
+formal provider 的 VSpace 地址表也保存 generation；`address_at` 和 `#lea` 派生地址
+都会检查该字段，VSpace release 后旧地址不能再次解析。
 
 object payload 的 provider 责任按结果种类区分：`addr` 由 provider 声明指向的 backing
 对象及析构策略；`string` 必须区分静态借用与拥有的字符串存储；`func` 通常指向 artifact
