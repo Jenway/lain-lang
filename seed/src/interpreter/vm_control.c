@@ -194,6 +194,14 @@ int lainir_vm_control_record_trap(LainirVmControl *control, uint64_t owner,
 int lainir_vm_control_record_trap_at(
     LainirVmControl *control, uint64_t owner, LainirVmTrapKind kind,
     int32_t status, uint32_t line, uint32_t column) {
+  return lainir_vm_control_record_trap_span(
+      control, owner, kind, status, line, column, 0, 0);
+}
+
+int lainir_vm_control_record_trap_span(
+    LainirVmControl *control, uint64_t owner, LainirVmTrapKind kind,
+    int32_t status, uint32_t line, uint32_t column,
+    uint64_t source_start, uint64_t source_end) {
   if (!vm_owned(control, owner) || control->trap.active) return 0;
   const LainirVmFrame *frame = lainir_vm_control_current_frame(control);
   control->trap.kind = kind;
@@ -203,6 +211,8 @@ int lainir_vm_control_record_trap_at(
   control->trap.position = frame ? frame->position : 0;
   control->trap.line = line;
   control->trap.column = column;
+  control->trap.source_start = source_start;
+  control->trap.source_end = source_end;
   control->trap.active = 1;
   control->result = LAINIR_VM_TRAPPED;
   return 1;

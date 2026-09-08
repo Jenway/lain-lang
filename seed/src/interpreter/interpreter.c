@@ -96,6 +96,8 @@ typedef struct {
   int vm_blocked;
   uint32_t current_line;
   uint32_t current_column;
+  uint64_t current_source_start;
+  uint64_t current_source_end;
   LainirContinuation *continuation;
   int continuation_tracking;
   int instruction_boundary;
@@ -569,10 +571,11 @@ static LainirCapabilityEntry *interp_lookup_cap(LainirCapabilityTable *caps, con
 static void interp_trap(LainirInterpreter *interp, const char *error) {
   if (!interp->error) interp->error = error;
   if (interp->vm_control)
-    (void)lainir_vm_control_record_trap_at(
+    (void)lainir_vm_control_record_trap_span(
         interp->vm_control, interp->vm_owner,
         LAINIR_VM_TRAP_INTERPRETER, LAINIR_RUN_TRAP,
-        interp->current_line, interp->current_column);
+        interp->current_line, interp->current_column,
+        interp->current_source_start, interp->current_source_end);
   if (getenv("LAINIR_TRACE_FAST") && interp->fast_active_name)
     fprintf(stderr, "lainir fast trap: %s (%s)\n",
             interp->fast_active_name, error);
@@ -866,10 +869,11 @@ static LainirValue interp_call_host(LainirInterpreter *interp, const char *name,
   }
   if (status != LAINIR_RUN_OK) {
     if (interp->vm_control)
-      (void)lainir_vm_control_record_trap_at(
+      (void)lainir_vm_control_record_trap_span(
           interp->vm_control, interp->vm_owner,
           LAINIR_VM_TRAP_CAPABILITY, status,
-          interp->current_line, interp->current_column);
+          interp->current_line, interp->current_column,
+          interp->current_source_start, interp->current_source_end);
     interp_trap(interp, error ? error : "extern capability call failed");
   }
   return result;
@@ -1235,6 +1239,8 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
   while (inst) {
     interp->current_line = inst->line > 0 ? (uint32_t)inst->line : 0;
     interp->current_column = inst->column > 0 ? (uint32_t)inst->column : 0;
+    interp->current_source_start = inst->source_start;
+    interp->current_source_end = inst->source_end;
     if (track) {
       interp->continuation->next_block = block;
       interp->continuation->next_inst = inst;

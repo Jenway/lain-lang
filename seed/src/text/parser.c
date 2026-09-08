@@ -878,6 +878,7 @@ static L1Instruction *parse_instruction_list(Parser *p) {
   while (p->current.kind != TK_RBRACE && p->current.kind != TK_EOF) {
     L1Instruction *inst = NULL;
     int instruction_line = p->current.line;
+    size_t instruction_start = p->pos;
 
     if (p->current.kind == TK_KW_LET) {
       next_token(p);
@@ -977,6 +978,8 @@ static L1Instruction *parse_instruction_list(Parser *p) {
     if (inst) {
       inst->line = instruction_line;
       inst->column = 1;
+      inst->source_start = (uint64_t)instruction_start;
+      inst->source_end = (uint64_t)p->pos;
     }
 
     if (!head)

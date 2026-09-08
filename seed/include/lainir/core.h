@@ -264,6 +264,8 @@ struct L1Instruction {
      programmatic clients may leave this at zero. */
   int line;
   int column;
+  uint64_t source_start;
+  uint64_t source_end;
   union {
 
     /* INST_LET: immutable binding */

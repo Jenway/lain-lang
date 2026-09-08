@@ -195,7 +195,7 @@ static int trap_record_test(void) {
            trap->kind == LAINIR_VM_TRAP_INTERPRETER &&
            trap->status == LAINIR_RUN_TRAP && trap->procedure &&
            trap->region && trap->position && trap->line == 2 &&
-           trap->column > 0;
+           trap->column > 0 && trap->source_end > trap->source_start;
   lainir_vm_control_free(control);
   lainir_module_handle_destroy(&handle);
   return ok;
