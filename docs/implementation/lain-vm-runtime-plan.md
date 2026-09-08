@@ -148,7 +148,8 @@ reset 的替代品。
 seed control plane 现在提供最小的 `LainirVmSession` opaque 对象：它登记 attached TCB，
 要求全部 attached TCB 进入 DEAD 后才能 reset/release，并提供单调 generation。它暂时不
 拥有 TCB 或 provider storage；这一步只固定 session 生命周期与 stale-handle 检查的控制面
-边界，实际 evaluator 的跨 root execution 复用仍留在后续实现。
+边界，`LainirRunRequest` 已能携带 session 并由 `lainir_run` 检查 control attachment；
+实际 evaluator 的跨 root execution 复用和 result handle 物理绑定仍留在后续实现。
 
 这些检查是迁移的起点，不代表 LainVM runtime 已经存在。
 

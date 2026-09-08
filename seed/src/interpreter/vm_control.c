@@ -112,6 +112,21 @@ uint64_t lainir_vm_session_generation(const LainirVmSession *session) {
   return session ? session->generation : 0;
 }
 
+int lainir_vm_session_accepts(const LainirVmSession *session, uint64_t owner,
+                              const LainirVmControl *control,
+                              uint64_t control_owner) {
+  uint32_t i;
+  if (!session_owned(session, owner) || !control || control_owner != owner ||
+      control->state == LAINIR_VM_DEAD)
+    return 0;
+  for (i = 0; i < session->attached_count; i++) {
+    if (session->attached[i] == control &&
+        session->attached_owner[i] == control_owner)
+      return 1;
+  }
+  return 0;
+}
+
 int lainir_vm_session_attach(LainirVmSession *session, uint64_t owner,
                              LainirVmControl *control, uint64_t control_owner) {
   uint32_t i;

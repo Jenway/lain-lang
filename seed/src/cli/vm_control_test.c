@@ -51,6 +51,8 @@ static int session_lifecycle_test(void) {
   if (!session || !first || !second || initial_generation == 0 ||
       !lainir_vm_session_attach(session, 7, first, 7) ||
       !lainir_vm_session_attach(session, 7, second, 7) ||
+      !lainir_vm_session_accepts(session, 7, first, 7) ||
+      lainir_vm_session_accepts(session, 8, first, 7) ||
       lainir_vm_session_reset(session, 7) ||
       !lainir_vm_control_start(first, 7) ||
       !lainir_vm_control_start(second, 7) ||
@@ -64,13 +66,66 @@ static int session_lifecycle_test(void) {
       lainir_vm_session_detach(session, 7, second, 7) ||
       !lainir_vm_session_release(session, 7) ||
       lainir_vm_session_reset(session, 7) ||
-      lainir_vm_session_attach(session, 7, first, 7))
+      lainir_vm_session_attach(session, 7, first, 7) ||
+      lainir_vm_session_accepts(session, 7, first, 7))
     goto cleanup;
   ok = 1;
 cleanup:
   lainir_vm_control_free(first);
   lainir_vm_control_free(second);
   lainir_vm_session_free(session);
+  return ok;
+}
+
+static int session_request_gate_test(void) {
+  const char *source =
+      "#proc value() -> #bits<32> {\n"
+      "  #return 1\n"
+      "}\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  LainirVmSession *session = NULL;
+  LainirVmSession *foreign_session = NULL;
+  LainirVmControl *control = NULL;
+  LainirRunRequest request = {0};
+  LainirValue result = {0};
+  const char *error = NULL;
+  int ok = 0;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
+    goto cleanup;
+  session = lainir_vm_session_new(7);
+  foreign_session = lainir_vm_session_new(8);
+  control = lainir_vm_control_new(8);
+  if (!session || !foreign_session || !control ||
+      !lainir_vm_session_attach(session, 7, control, 7) ||
+      !lainir_vm_control_start(control, 7) ||
+      !lainir_vm_control_begin_slice(control, 7, 8))
+    goto cleanup;
+  request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  request.entry_name = "value";
+  request.vm_control = control;
+  request.vm_owner = 7;
+  request.vm_session = session;
+  request.vm_session_owner = 7;
+  LainirRunStatus first_status = lainir_run(&request, &result, &error);
+  if (first_status != LAINIR_RUN_OK || error ||
+      result.kind != LAINIR_VALUE_BITS || result.as.bits != 1 ||
+      lainir_vm_control_state(control) != LAINIR_VM_DEAD)
+    goto cleanup;
+  request.vm_session = foreign_session;
+  request.vm_session_owner = 8;
+  error = NULL;
+  if (lainir_run(&request, &result, &error) != LAINIR_RUN_TRAP ||
+      !error || strcmp(error, "VM session rejected control") != 0)
+    goto cleanup;
+  ok = 1;
+cleanup:
+  if (control && lainir_vm_control_state(control) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(control, 7);
+  lainir_vm_control_free(control);
+  lainir_vm_session_free(foreign_session);
+  lainir_vm_session_free(session);
+  lainir_module_handle_destroy(&handle);
   return ok;
 }
 
@@ -1159,6 +1214,8 @@ int main(void) {
     return fail("backend state cleanup failed");
   if (!session_lifecycle_test())
     return fail("session lifecycle failed");
+  if (!session_request_gate_test())
+    return fail("session request gate failed");
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
   if (!lainir_vm_control_start(control, 7)) return fail("start failed");

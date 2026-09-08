@@ -139,7 +139,9 @@ seed runtime 已提供对应的最小 opaque control API：`LainirVmSession` 只
 `lainir_vm_session_release` 都拒绝仍为 READY、RUNNING 或 BLOCKED 的 attached TCB。
 `lainir_vm_session_generation` 提供单调 generation，供 provider result/arena handle
 绑定和 stale 检查使用。session fixture 覆盖 reset 前的活跃 TCB 拒绝、逐个 finish 后
-reset、detach，以及 release 后禁止再次操作。
+reset、detach，以及 release 后禁止再次操作。`LainirRunRequest` 可携带 session；
+`lainir_run` 会拒绝未 attached、owner 不匹配或已 DEAD 的 control，避免 evaluator
+绕过 session 生命周期。
 
 provider-neutral CSpace contract 已定义 capability object：每个对象带 name、owner 和
 active 状态，可以由当前 owner transfer 或 revoke；foreign owner、非 active capability

@@ -3278,6 +3278,13 @@ LainirRunStatus lainir_run(const LainirRunRequest *request,
     if (error_out) *error_out = "invalid run request";
     return LAINIR_RUN_TRAP;
   }
+  if (request->vm_session &&
+      !lainir_vm_session_accepts(request->vm_session,
+                                  request->vm_session_owner,
+                                  request->vm_control, request->vm_owner)) {
+    if (error_out) *error_out = "VM session rejected control";
+    return LAINIR_RUN_TRAP;
+  }
   interp.module = request->module;
   interp.caps = request->caps;
   interp.vm_control = request->vm_control;

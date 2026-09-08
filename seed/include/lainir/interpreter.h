@@ -83,6 +83,10 @@ typedef struct {
    * instruction fuel gate and may retain a resumable root continuation. */
   LainirVmControl *vm_control;
   uint64_t vm_owner;
+  /* Optional long-lived session.  When present, the control must be attached
+   * to this session and the session generation remains the ownership boundary. */
+  LainirVmSession *vm_session;
+  uint64_t vm_session_owner;
 } LainirRunRequest;
 
 /* Opaque VM control plane.  The execution backend owns this object; it is
@@ -150,6 +154,9 @@ void lainir_vm_control_free(LainirVmControl *control);
 LainirVmSession *lainir_vm_session_new(uint64_t owner);
 void lainir_vm_session_free(LainirVmSession *session);
 uint64_t lainir_vm_session_generation(const LainirVmSession *session);
+int lainir_vm_session_accepts(const LainirVmSession *session, uint64_t owner,
+                              const LainirVmControl *control,
+                              uint64_t control_owner);
 int lainir_vm_session_attach(LainirVmSession *session, uint64_t owner,
                              LainirVmControl *control, uint64_t control_owner);
 int lainir_vm_session_detach(LainirVmSession *session, uint64_t owner,
