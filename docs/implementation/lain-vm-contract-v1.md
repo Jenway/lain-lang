@@ -44,7 +44,8 @@ capability；无对端返回 `LAINIR_RUN_BLOCKED`，恢复后消费 control-owne
 可以在 `LAINIR_RUN_TRAP` 后读取记录；当前 seed 已记录 instruction line/column 和
 source byte range，并通过 `lainir_vm_control_abort` 将 TCB 转为 `DEAD/TRAPPED`。scheduler
 可通过 `lainir_vm_control_take_trap` 复制并确认该终止诊断；确认只清除诊断记录，不改变
-TCB 的终态或 `TRAPPED` 结果。parser token 的精确结束边界仍待接入。
+TCB 的终态或 `TRAPPED` 结果。parser 已为指令保存首 token 起点和最后消费 token 的结束
+位置，Trap 的 source byte range 因此覆盖完整指令；表达式级 token span 仍待接入。
 
 continuation 属于 TCB 的 VM 内部状态。参考 evaluator 当前已经保存 procedure、region、
 instruction offset、suspend reason 和 `CallFrame` 调用帧链。可恢复的 slice 仍需要把该

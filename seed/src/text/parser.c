@@ -84,12 +84,15 @@ typedef struct {
   const char *text;
   int len;
   int line;
+  int start;
+  int end;
 } Token;
 
 typedef struct {
   const char *src;
   int pos;
   int line;
+  int last_token_end;
   Token current;
   char **param_names;
   uint32_t param_count;
@@ -261,6 +264,8 @@ static TokenKind hash_keyword_kind(const char *text, int len) {
 }
 
 static void next_token(Parser *p) {
+  int token_start;
+  p->last_token_end = p->current.end;
   while (p->src[p->pos]) {
     char c = p->src[p->pos];
     if (c == ' ' || c == '\t' || c == '\r') {
@@ -280,13 +285,17 @@ static void next_token(Parser *p) {
     break;
   }
 
+  token_start = p->pos;
+
   p->current.text = p->src + p->pos;
   p->current.line = p->line;
+  p->current.start = token_start;
   p->current.len = 1;
 
   if (!p->src[p->pos]) {
     p->current.kind = TK_EOF;
     p->current.len = 0;
+    p->current.end = p->pos;
     return;
   }
 
@@ -297,6 +306,8 @@ static void next_token(Parser *p) {
     p->current.kind = TK_NUMBER;
     p->current.text = p->src + start;
     p->current.len = p->pos - start;
+    p->current.start = start;
+    p->current.end = p->pos;
     return;
   }
 
@@ -314,6 +325,8 @@ static void next_token(Parser *p) {
     p->current.len = p->pos - start;
     if (p->src[p->pos] == '"')
       p->pos++;
+    p->current.start = start - 1;
+    p->current.end = p->pos;
     return;
   }
 
@@ -332,6 +345,8 @@ static void next_token(Parser *p) {
     if (kind == TK_IDENT)
       parse_fail(p, "unknown `#` keyword");
     p->current.kind = kind;
+    p->current.start = token_start;
+    p->current.end = p->pos;
     return;
   }
 
@@ -345,6 +360,8 @@ static void next_token(Parser *p) {
       p->current.kind = TK_KW_ELSE;
     else
       p->current.kind = TK_IDENT;
+    p->current.start = start;
+    p->current.end = p->pos;
     return;
   }
 
@@ -375,6 +392,7 @@ static void next_token(Parser *p) {
     parse_fail(p, "unexpected character");
     break;
   }
+  p->current.end = p->pos;
 }
 
 static Token expect(Parser *p, TokenKind kind) {
@@ -878,7 +896,7 @@ static L1Instruction *parse_instruction_list(Parser *p) {
   while (p->current.kind != TK_RBRACE && p->current.kind != TK_EOF) {
     L1Instruction *inst = NULL;
     int instruction_line = p->current.line;
-    size_t instruction_start = p->pos;
+    size_t instruction_start = (size_t)p->current.start;
 
     if (p->current.kind == TK_KW_LET) {
       next_token(p);
@@ -979,7 +997,7 @@ static L1Instruction *parse_instruction_list(Parser *p) {
       inst->line = instruction_line;
       inst->column = 1;
       inst->source_start = (uint64_t)instruction_start;
-      inst->source_end = (uint64_t)p->pos;
+      inst->source_end = (uint64_t)p->last_token_end;
     }
 
     if (!head)
