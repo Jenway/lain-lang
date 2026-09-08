@@ -78,7 +78,8 @@ python scripts/check_lainc_lainir_api_baseline.py
 以及 scalar/type/module/AST result kind。owner handle 在 transfer 后只能由新 owner 使用，
 release 后不能再次使用或重复释放。
 
-`check_lain_vm_contract.py` 使用独立 recording provider 验证 VSpace owner/quota/reset
+`check_lain_vm_contract.py` 使用独立 recording provider 验证 VSpace owner/quota/reset、
+arena generation 和 stale-handle 拒绝
 和 TCB owner/state/step/suspend/resume/scheduler 规则，以及 Endpoint 的 rendezvous/cancel、CSpace
 的 capability allow/deny、Trap 的 kind/source/status 字段。这个 fixture 只固定对象之间
 的 API 语义，不伪装成 LAINIR 指令或真实运行时对象实现。

@@ -7,11 +7,36 @@ from dataclasses import dataclass
 
 
 @dataclass
+class ArenaHandle:
+    """Provider-owned handle invalidated by the VSpace generation reset."""
+
+    owner: int
+    generation: int
+    released: bool = False
+
+    def use(self, vspace: "VSpace", owner: int) -> None:
+        if (
+            self.released
+            or owner != self.owner
+            or self.generation != vspace.generation
+            or vspace.released
+        ):
+            raise ValueError("stale or foreign arena handle")
+
+
+@dataclass
 class VSpace:
     owner: int
     allocation_limit: int
     bytes_used: int = 0
     reset_count: int = 0
+    generation: int = 1
+    released: bool = False
+    handles: list[ArenaHandle] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.handles is None:
+            self.handles = []
 
     def allocate(self, owner: int, size: int) -> None:
         if owner != self.owner or size < 0:
@@ -21,10 +46,28 @@ class VSpace:
         self.bytes_used += size
 
     def reset(self, owner: int) -> None:
-        if owner != self.owner:
+        if owner != self.owner or self.released:
             raise ValueError("VSpace reset by a non-owner")
+        for handle in self.handles:
+            handle.released = True
         self.bytes_used = 0
+        self.generation += 1
         self.reset_count += 1
+
+    def allocate_handle(self, owner: int) -> ArenaHandle:
+        if owner != self.owner or self.released:
+            raise ValueError("VSpace handle allocation rejected")
+        handle = ArenaHandle(owner=owner, generation=self.generation)
+        self.handles.append(handle)
+        return handle
+
+    def release(self, owner: int) -> None:
+        if owner != self.owner or self.released:
+            raise ValueError("VSpace release rejected")
+        for handle in self.handles:
+            handle.released = True
+        self.released = True
+        self.generation += 1
 
 
 @dataclass
@@ -276,9 +319,27 @@ def main() -> int:
         raise SystemExit("scheduler did not resume the first TCB")
     scheduler.suspend(3, scheduled, 7)
     expect_failure(lambda: tcb.finish(8), ValueError)
+    arena_handle = vspace.allocate_handle(7)
+    arena_handle.use(vspace, 7)
+    generation_before_finish = vspace.generation
     tcb.finish(7)
-    if vspace.bytes_used != 0 or vspace.reset_count != 1 or tcb.state != "DEAD":
+    if (
+        vspace.bytes_used != 0
+        or vspace.reset_count != 1
+        or vspace.generation != generation_before_finish + 1
+        or tcb.state != "DEAD"
+    ):
         raise SystemExit("TCB finish did not reset its VSpace")
+    expect_failure(lambda: arena_handle.use(vspace, 7), ValueError)
+    generation_after_finish = vspace.generation
+    vspace.reset(7)
+    if vspace.generation != generation_after_finish + 1:
+        raise SystemExit("VSpace reset did not advance its generation")
+    released_space = VSpace(owner=7, allocation_limit=0)
+    released_handle = released_space.allocate_handle(7)
+    released_space.release(7)
+    expect_failure(lambda: released_handle.use(released_space, 7), ValueError)
+    expect_failure(lambda: released_space.release(7), ValueError)
     handle = OwnedHandle(owner=7)
     handle.use(7)
     handle.transfer(7, 9)

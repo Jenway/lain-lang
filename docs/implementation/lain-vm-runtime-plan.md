@@ -49,7 +49,8 @@ fixture 和 361-procedure source-closure gate 通过。
 
 owner/release 的 provider-neutral fixture 也已补齐：VSpace 和 TCB 只能由 owner 操作，
 result/arena handle 只能转移给新 owner，release 后不能使用或重复释放。这个 contract
-目前仍是边界规范，尚未把 evaluator 内部的 `Memory.Bytes` reset 接到返回路径。
+目前仍是边界规范，尚未把 evaluator 内部的 `Memory.Bytes` reset 接到返回路径；fixture
+现在额外固定了 provider arena generation，VSpace reset/release 会使旧 arena handle 失效。
 
 当前 evaluator 已把这条边界落到地址表：VSpace 带有 owner 和 released 标记，每个地址
 句柄携带 owner；地址解析会拒绝 foreign owner 或已 released 的 VSpace。VM 返回时先关闭
@@ -275,8 +276,9 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 1. **完成单 TCB 的 VM 执行入口收敛**：这一项已完成。`execute`、`execute_limited` 和
    错误返回都经过同一个 LainVM root-TCB 路径；后续只需把回归检查保持在这个入口上。
 2. **完成 VSpace 的物理 reset contract**：provider-neutral owner transfer/release fixture
-   和 evaluator 的逻辑 `release_vspace` 已完成。下一步让 provider 在 runtime 终止时负责
-   物理 arena reset，并验证旧的 result、arena address 和 activation storage 全部失效。
+   已增加 arena generation 和旧 handle 失效检查，evaluator 的逻辑 `release_vspace` 也已
+   完成。下一步让真实 provider 在 runtime 终止时负责物理 arena reset，并验证旧的 result、
+   arena address 和 activation storage 全部失效。
 3. **把 scheduler 状态接入真实 evaluator**：单 runnable、两个 TCB 的 handoff/resume
    fixture 和参考 VM 的最小 suspend/resume API 已完成，但 evaluator 仍在宿主递归调用中
    执行，不能从保存的 instruction position 恢复。下一步先把 root region 切成可保存的
