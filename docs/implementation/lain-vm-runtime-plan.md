@@ -187,10 +187,11 @@ Endpoint 或 continuation 编译成 LAINIR 数据，也不增加 `#init_context`
 4. 一个 nested call 只能完成一次，重复 resume、错误 owner 和失活 activation 都进入 Trap；
 5. Trap 或 TCB 销毁时，所有 nested frame 和 activation 一起释放，不能留下 Endpoint 等待项。
 
-当前实现已经保存单个 nested frame 的 locals、alloca、当前 block/instruction，并通过
-pending result 把返回值交回 root call；现有 fixture 包含 nested `send_helper` 和有副作用
-的 `make_value`，确认恢复后 payload 只执行一次。仍未完成的是多层 nested frame、任意
-表达式中间点和多个 pending call 的通用保存格式。
+当前实现已经用 linked continuation stack 保存多层 nested frame 的 locals、alloca、当前
+block/instruction，并逐层通过 pending result 把返回值交回 caller；现有 fixture 包含
+双层 nested `send_outer -> send_helper` 和有副作用的 `make_value`，确认恢复后 payload
+只执行一次。仍未完成的是任意表达式中间点、分支内挂起和多个并行 pending call 的通用
+保存格式。
 
 ## 3. 阶段一：建立 LainVM 核心对象
 
@@ -317,10 +318,10 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 4. **已完成：Endpoint ownership 与 Trap control plane。** Endpoint 等待只保存 TCB、owner
    和 payload；pending result 可唤醒 TCB；Trap 可记录、abort、由 scheduler 消费，并带有
    instruction/expression span 和实际 nested procedure。
-5. **当前阶段：nested continuation。** 单个 nested frame 的保存、Endpoint wait、恢复和
-   pending result 已完成；下一步实现多层 nested frame、任意表达式中间点和多个 pending
-   call 的 continuation record，再把恢复点从 root instruction 重试完全迁移到 nested call
-   point。
+5. **当前阶段：nested continuation。** 多层 nested frame 的保存、Endpoint wait、逐层恢复
+   和 pending result 已完成；下一步实现任意表达式中间点、分支内挂起和多个并行 pending
+   call 的 continuation record，再把所有恢复点从 root instruction 重试完全迁移到 nested
+   call point。
 6. **后续：多 TCB 与平台 lowering。** nested continuation、单 TCB VSpace、Endpoint、Trap
    和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和裸机 lowering。
 

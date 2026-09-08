@@ -98,8 +98,11 @@ static int endpoint_dispatch_test(void) {
       "#extern #proc endpoint.send(#bits<64> %value) -> #bits<32>;\n"
       "#extern #proc endpoint.receive() -> #bits<64>;\n"
       "#extern #proc test.make_value() -> #bits<64>;\n"
-      "#proc receive_helper() -> #bits<64> {\n"
+      "#proc receive_leaf() -> #bits<64> {\n"
       "  #return #call endpoint.receive()\n"
+      "}\n"
+      "#proc receive_helper() -> #bits<64> {\n"
+      "  #return #call receive_leaf()\n"
       "}\n"
       "#proc receive_main() -> #bits<64> {\n"
       "  #return #call receive_helper()\n"
@@ -108,8 +111,11 @@ static int endpoint_dispatch_test(void) {
       "  #let %value: #bits<64> = #call test.make_value()\n"
       "  #return #call endpoint.send(%value)\n"
       "}\n"
-      "#proc send_main() -> #bits<32> {\n"
+      "#proc send_outer() -> #bits<32> {\n"
       "  #return #call send_helper()\n"
+      "}\n"
+      "#proc send_main() -> #bits<32> {\n"
+      "  #return #call send_outer()\n"
       "}\n";
   L1Diagnostic diagnostic = {0};
   LainirModuleHandle *handle = NULL;
