@@ -11,6 +11,7 @@ provider control API，但仍通过 VM control plane 保持 opaque。
 | --- | --- | --- |
 | 单 TCB | 参考 evaluator 的 `LainVm.tcb` | 一次 root execution request |
 | 单 VSpace | 参考 evaluator 的 `LainVm.vspace` | request 结束逻辑释放，物理回收由 provider 负责 |
+| Session | seed `LainirVmSession` opaque control object | attached TCB 全部 DEAD 后 reset/release，generation 单调递增 |
 | CSpace | `LainVm.cspace` 的 capability object table | slot 级 owner/active 授权 |
 | Endpoint | seed `LainirVmEndpoint` control object | 单发送者/单接收者等待、交接和取消 |
 | Trap | `LainirVmTrap` control record | kind/status/procedure/region/position/line/column/source range |
@@ -132,6 +133,13 @@ external capability；slot 身份和权限语义分开。
 root execution 使用；`release(owner)` 终止 session 并释放 backing arena。release 后不得
 再次 reset、分配或使用旧 handle。session reset 不由普通 TCB finish 隐式替代，TCB 与
 session 的生命周期必须分别检查。
+
+seed runtime 已提供对应的最小 opaque control API：`LainirVmSession` 只登记 attached
+`LainirVmControl`，不拥有 TCB 内存；`lainir_vm_session_reset` 和
+`lainir_vm_session_release` 都拒绝仍为 READY、RUNNING 或 BLOCKED 的 attached TCB。
+`lainir_vm_session_generation` 提供单调 generation，供 provider result/arena handle
+绑定和 stale 检查使用。session fixture 覆盖 reset 前的活跃 TCB 拒绝、逐个 finish 后
+reset、detach，以及 release 后禁止再次操作。
 
 provider-neutral CSpace contract 已定义 capability object：每个对象带 name、owner 和
 active 状态，可以由当前 owner transfer 或 revoke；foreign owner、非 active capability

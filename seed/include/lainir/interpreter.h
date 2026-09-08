@@ -62,6 +62,7 @@ typedef struct {
 } LainirCapability;
 
 typedef struct LainirVmControl LainirVmControl;
+typedef struct LainirVmSession LainirVmSession;
 typedef struct LainirVmEndpoint LainirVmEndpoint;
 typedef struct LainirVmScheduler LainirVmScheduler;
 typedef void (*LainirVmBackendStateFree)(void *state);
@@ -143,6 +144,19 @@ typedef struct {
 
 LainirVmControl *lainir_vm_control_new(uint64_t max_steps);
 void lainir_vm_control_free(LainirVmControl *control);
+
+/* Opaque long-lived VSpace/session control.  The session retains no TCB
+ * memory; attached controls must reach DEAD before reset or release. */
+LainirVmSession *lainir_vm_session_new(uint64_t owner);
+void lainir_vm_session_free(LainirVmSession *session);
+uint64_t lainir_vm_session_generation(const LainirVmSession *session);
+int lainir_vm_session_attach(LainirVmSession *session, uint64_t owner,
+                             LainirVmControl *control, uint64_t control_owner);
+int lainir_vm_session_detach(LainirVmSession *session, uint64_t owner,
+                             LainirVmControl *control, uint64_t control_owner);
+int lainir_vm_session_reset(LainirVmSession *session, uint64_t owner);
+int lainir_vm_session_release(LainirVmSession *session, uint64_t owner);
+
 LainirVmState lainir_vm_control_state(const LainirVmControl *control);
 uint32_t lainir_vm_control_suspend_reason(const LainirVmControl *control);
 uint64_t lainir_vm_control_steps(const LainirVmControl *control);

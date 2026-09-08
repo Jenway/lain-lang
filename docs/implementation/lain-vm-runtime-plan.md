@@ -145,6 +145,10 @@ activation handle 并释放 backing arena。尚未接入的是长生命周期 se
 如果以后允许一个 VSpace 跨多个 root execution 复用，就必须把 generation、result handle
 和 activation storage 的失效规则暴露为独立 contract，不能把一次性 `finish_vm` 当作 session
 reset 的替代品。
+seed control plane 现在提供最小的 `LainirVmSession` opaque 对象：它登记 attached TCB，
+要求全部 attached TCB 进入 DEAD 后才能 reset/release，并提供单调 generation。它暂时不
+拥有 TCB 或 provider storage；这一步只固定 session 生命周期与 stale-handle 检查的控制面
+边界，实际 evaluator 的跨 root execution 复用仍留在后续实现。
 
 这些检查是迁移的起点，不代表 LainVM runtime 已经存在。
 

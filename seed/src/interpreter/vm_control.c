@@ -41,8 +41,33 @@ struct LainirVmScheduler {
   uint32_t next_index;
 };
 
+struct LainirVmSession {
+  uint64_t owner;
+  uint64_t generation;
+  int released;
+  LainirVmControl *attached[8];
+  uint64_t attached_owner[8];
+  uint32_t attached_count;
+};
+
 static int vm_owned(const LainirVmControl *control, uint64_t owner) {
   return control && control->owner != 0 && control->owner == owner;
+}
+
+static int session_owned(const LainirVmSession *session, uint64_t owner) {
+  return session && !session->released && session->owner != 0 &&
+         session->owner == owner;
+}
+
+static int session_all_dead(const LainirVmSession *session) {
+  uint32_t i;
+  if (!session) return 0;
+  for (i = 0; i < session->attached_count; i++) {
+    if (!session->attached[i] ||
+        session->attached[i]->state != LAINIR_VM_DEAD)
+      return 0;
+  }
+  return 1;
 }
 
 static void vm_release_backend_state(LainirVmControl *control) {
@@ -67,6 +92,71 @@ void lainir_vm_control_free(LainirVmControl *control) {
   vm_release_backend_state(control);
   free(control->frames);
   free(control);
+}
+
+LainirVmSession *lainir_vm_session_new(uint64_t owner) {
+  LainirVmSession *session;
+  if (!owner) return NULL;
+  session = calloc(1, sizeof(*session));
+  if (!session) return NULL;
+  session->owner = owner;
+  session->generation = 1;
+  return session;
+}
+
+void lainir_vm_session_free(LainirVmSession *session) {
+  free(session);
+}
+
+uint64_t lainir_vm_session_generation(const LainirVmSession *session) {
+  return session ? session->generation : 0;
+}
+
+int lainir_vm_session_attach(LainirVmSession *session, uint64_t owner,
+                             LainirVmControl *control, uint64_t control_owner) {
+  uint32_t i;
+  if (!session_owned(session, owner) || !control || control_owner != owner ||
+      (control->owner != 0 && control->owner != control_owner) ||
+      session->attached_count >= 8)
+    return 0;
+  for (i = 0; i < session->attached_count; i++)
+    if (session->attached[i] == control) return 0;
+  session->attached[session->attached_count] = control;
+  session->attached_owner[session->attached_count] = control_owner;
+  session->attached_count++;
+  return 1;
+}
+
+int lainir_vm_session_detach(LainirVmSession *session, uint64_t owner,
+                             LainirVmControl *control, uint64_t control_owner) {
+  uint32_t i;
+  if (!session_owned(session, owner) || !control || control_owner != owner)
+    return 0;
+  for (i = 0; i < session->attached_count; i++) {
+    if (session->attached[i] != control) continue;
+    if (control->state != LAINIR_VM_DEAD) return 0;
+    session->attached[i] = session->attached[session->attached_count - 1];
+    session->attached_owner[i] =
+        session->attached_owner[session->attached_count - 1];
+    session->attached[session->attached_count - 1] = NULL;
+    session->attached_owner[session->attached_count - 1] = 0;
+    session->attached_count--;
+    return 1;
+  }
+  return 0;
+}
+
+int lainir_vm_session_reset(LainirVmSession *session, uint64_t owner) {
+  if (!session_owned(session, owner) || !session_all_dead(session)) return 0;
+  session->generation++;
+  return 1;
+}
+
+int lainir_vm_session_release(LainirVmSession *session, uint64_t owner) {
+  if (!session_owned(session, owner) || !session_all_dead(session)) return 0;
+  session->released = 1;
+  session->generation++;
+  return 1;
 }
 
 LainirVmState lainir_vm_control_state(const LainirVmControl *control) {

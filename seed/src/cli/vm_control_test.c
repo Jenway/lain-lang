@@ -42,6 +42,38 @@ static int backend_state_cleanup_test(void) {
   return ok;
 }
 
+static int session_lifecycle_test(void) {
+  LainirVmSession *session = lainir_vm_session_new(7);
+  LainirVmControl *first = lainir_vm_control_new(8);
+  LainirVmControl *second = lainir_vm_control_new(8);
+  uint64_t initial_generation = lainir_vm_session_generation(session);
+  int ok = 0;
+  if (!session || !first || !second || initial_generation == 0 ||
+      !lainir_vm_session_attach(session, 7, first, 7) ||
+      !lainir_vm_session_attach(session, 7, second, 7) ||
+      lainir_vm_session_reset(session, 7) ||
+      !lainir_vm_control_start(first, 7) ||
+      !lainir_vm_control_start(second, 7) ||
+      !lainir_vm_control_finish(first, 7) ||
+      lainir_vm_session_reset(session, 7) ||
+      !lainir_vm_control_finish(second, 7) ||
+      !lainir_vm_session_reset(session, 7) ||
+      lainir_vm_session_generation(session) != initial_generation + 1 ||
+      !lainir_vm_session_detach(session, 7, first, 7) ||
+      !lainir_vm_session_detach(session, 7, second, 7) ||
+      lainir_vm_session_detach(session, 7, second, 7) ||
+      !lainir_vm_session_release(session, 7) ||
+      lainir_vm_session_reset(session, 7) ||
+      lainir_vm_session_attach(session, 7, first, 7))
+    goto cleanup;
+  ok = 1;
+cleanup:
+  lainir_vm_control_free(first);
+  lainir_vm_control_free(second);
+  lainir_vm_session_free(session);
+  return ok;
+}
+
 static LainirRunStatus make_value(
     const LainirValue *args, uint32_t arg_count, LainirValue *result_out,
     const char **error_out, void *user_data) {
@@ -1125,6 +1157,8 @@ cleanup:
 int main(void) {
   if (!backend_state_cleanup_test())
     return fail("backend state cleanup failed");
+  if (!session_lifecycle_test())
+    return fail("session lifecycle failed");
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
   if (!lainir_vm_control_start(control, 7)) return fail("start failed");
