@@ -101,9 +101,10 @@ storage 起点、存储长度和 active 状态。过程进入时创建 frame，�
 
 当前第四个 runtime slice 已落地：TCB 保存独立的 Trap 记录，包含 kind、status、
 procedure、position 和 active 状态；root TCB 完成时将非零执行结果归档为 Trap。当前
-LainVM 根状态会在执行循环中记录当前 region instruction offset；Trap position 已使用
-这个物理 offset，procedure 仍沿用当前 root execution boundary，后续再接入真实调用栈
-和 source span。
+LainVM 的 TCB 已在执行循环中记录当前 procedure 和 region instruction offset；Trap
+position 使用这个物理 offset，procedure 仍沿用当前 root execution boundary，后续再接入
+真实调用栈和 source span。position 归属已从 `LainVm` 根对象收敛到 TCB，但宿主递归调用
+仍未变成可恢复 continuation。
 Eval result 现在提供只读的 Trap kind、procedure 和 position 访问器。Provider smoke
 已通过该迁移。
 

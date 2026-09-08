@@ -22,8 +22,8 @@ next activation 和 Trap；VSpace 保存 owner、release 状态、storage、地�
 
 TCB 的控制面状态遵循 `READY -> RUNNING -> BLOCKED -> RUNNING -> DEAD`。suspend 只
 接受 owner 持有的 RUNNING TCB，并保存 execution position；resume 只接受同一 owner
-持有的 BLOCKED TCB，并恢复保存的位置。执行位置属于 VM control API 的状态，不是
-LAINIR 中的 TCB 数据字段。
+持有的 BLOCKED TCB，并恢复保存的位置。参考 evaluator 现在把当前 procedure 和 region
+offset 保存在内部 TCB；这些字段属于 VM control state，不是 LAINIR 中的 TCB 数据字段。
 
 当前 scheduler contract 只允许一个 current runnable TCB：READY TCB 可以加入 runnable
 集合并被选中启动；当前 TCB suspend 后释放 current 槽位，BLOCKED TCB 才能被 resume

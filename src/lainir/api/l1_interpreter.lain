@@ -111,6 +111,8 @@ let l1_interpreter: Module = std::module {
             depth_limit: usize,
             current_activation: usize,
             next_activation: usize,
+            procedure: usize,
+            position: usize,
             trap: Trap,
         };
 
@@ -118,7 +120,6 @@ let l1_interpreter: Module = std::module {
             vspace: VSpace,
             tcb: TCB,
             cspace: CapabilityVector,
-            position: usize,
         };
 
         let append_address = std::func(
@@ -290,9 +291,8 @@ let l1_interpreter: Module = std::module {
             return true;
         };
 
-        // CSpace migration starts at this VM gate.  The stored policy is still
-        // the legacy boolean until the provider-level capability object can be
-        // specialized without crossing the current Meta type boundary.
+        // External calls cross the VM gate only through an active capability
+        // object owned by the current VM context.
         let external_capability_allowed = std::func(
             state: &LainVm,
         ) -> bool {
@@ -358,7 +358,7 @@ let l1_interpreter: Module = std::module {
                     kind: trap_kind(result.status),
                     status: result.status,
                     procedure: procedure_id,
-                    position: state.position,
+                    position: state.tcb.position,
                     active: true,
                 };
             }
@@ -693,7 +693,7 @@ let l1_interpreter: Module = std::module {
             let offset: usize = 0;
 
             while offset < region.instructions.length() {
-                state.position = offset;
+                state.tcb.position = offset;
                 if !consume_step(state) { return fail(7109); }
                 let instruction: &L1.Instruction =
                     region.instructions.get(offset);
@@ -836,13 +836,14 @@ let l1_interpreter: Module = std::module {
                     depth_limit: depth_limit,
                     current_activation: 0,
                     next_activation: 1,
+                    procedure: 0,
+                    position: 0,
                     trap: Trap {
                         kind: 0, status: 0, procedure: 0,
                         position: 0, active: false,
                     },
                 },
                 cspace: cspace,
-                position: 0,
             };
         };
 
@@ -913,6 +914,7 @@ let l1_interpreter: Module = std::module {
             if procedure_id >= unit.procedures.length() {
                 return fail(7101);
             }
+            state.tcb.procedure = procedure_id;
             let procedure: &L1.Procedure =
                 unit.procedures.get(procedure_id);
             if procedure.is_external {
