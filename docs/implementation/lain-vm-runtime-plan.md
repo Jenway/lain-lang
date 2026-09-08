@@ -425,6 +425,9 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    generation、owner transfer 和 release 纳入 provider API；当前 default provider 明确
    声明自己只返回 scalar result。formal provider 的 compile-time evaluator 仍允许
    `#addr` 作为内部 Value 返回，object adapter 接入前不能把它当作可跨 session 的结果。
+   formal `Interpreter.Result` 的现有物理布局属于 compile-time ABI，不能直接追加 object
+   字段；实验性 layout widening 会让 provider smoke 返回 5108。formal object adapter
+   必须采用旁路 sidecar，保持现有 `Result` scalar ABI 不变，再显式绑定 VSpace generation。
 9. **后续：平台 lowering。** 在 nested continuation、单 TCB VSpace、
    Endpoint、Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和
    裸机 lowering。
