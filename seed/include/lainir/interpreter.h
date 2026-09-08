@@ -70,6 +70,23 @@ typedef void (*LainirVmBackendStateFree)(void *state);
 typedef void (*LainirVmResultPayloadFree)(const LainirValue *value,
                                           void *user_data);
 
+typedef enum {
+  LAINIR_VM_PAYLOAD_BORROWED = 0,
+  LAINIR_VM_PAYLOAD_OWNED = 1
+} LainirVmPayloadOwnership;
+
+/* Provider-facing result adapter.  The adapter makes the payload lifetime
+ * explicit before it becomes a generation-bound VM result handle. */
+typedef struct {
+  LainirVmSession *session;
+  uint64_t owner;
+  uint64_t session_generation;
+  LainirValue value;
+  LainirVmPayloadOwnership ownership;
+  LainirVmResultPayloadFree payload_free;
+  void *payload_user_data;
+} LainirVmResultAdapter;
+
 typedef struct {
   LainirVmEndpoint *endpoint;
   LainirVmControl *control;
@@ -172,6 +189,8 @@ int lainir_vm_session_release(LainirVmSession *session, uint64_t owner);
 LainirVmResultHandle *lainir_vm_result_handle_new(
     LainirVmSession *session, uint64_t owner, const LainirValue *value,
     LainirVmResultPayloadFree payload_free, void *payload_user_data);
+LainirVmResultHandle *lainir_vm_result_handle_adapt(
+    const LainirVmResultAdapter *adapter);
 void lainir_vm_result_handle_free(LainirVmResultHandle *handle);
 uint64_t lainir_vm_result_handle_generation(
     const LainirVmResultHandle *handle);
