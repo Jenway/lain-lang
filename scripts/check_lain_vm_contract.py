@@ -12,6 +12,7 @@ class ArenaHandle:
 
     owner: int
     generation: int
+    vspace_id: int
     released: bool = False
 
     def use(self, vspace: "VSpace", owner: int) -> None:
@@ -19,6 +20,7 @@ class ArenaHandle:
             self.released
             or owner != self.owner
             or self.generation != vspace.generation
+            or self.vspace_id != id(vspace)
             or vspace.released
         ):
             raise ValueError("stale or foreign arena handle")
@@ -70,7 +72,11 @@ class VSpace:
     def allocate_handle(self, owner: int) -> ArenaHandle:
         if owner != self.owner or self.released:
             raise ValueError("VSpace handle allocation rejected")
-        handle = ArenaHandle(owner=owner, generation=self.generation)
+        handle = ArenaHandle(
+            owner=owner,
+            generation=self.generation,
+            vspace_id=id(self),
+        )
         self.handles.append(handle)
         return handle
 
@@ -359,6 +365,7 @@ class ResultHandle:
 
     owner: int
     generation: int
+    vspace_id: int
     released: bool = False
 
     def transfer(self, owner: int, target: int) -> None:
@@ -376,6 +383,7 @@ class ResultHandle:
             self.released
             or owner != self.owner
             or self.generation != vspace.generation
+            or self.vspace_id != id(vspace)
             or vspace.released
         ):
             raise ValueError("stale or foreign result handle")
@@ -520,7 +528,11 @@ def main() -> int:
     handle.release(9)
     expect_failure(lambda: handle.use(9), ValueError)
     expect_failure(lambda: handle.release(9), ValueError)
-    result_handle = ResultHandle(owner=7, generation=vspace.generation)
+    result_handle = ResultHandle(
+        owner=7,
+        generation=vspace.generation,
+        vspace_id=id(vspace),
+    )
     result_handle.use(vspace, 7)
     result_handle.transfer(7, 9)
     result_handle.use(vspace, 9)
@@ -530,6 +542,17 @@ def main() -> int:
     expect_failure(lambda: result_handle.release(7), ValueError)
     result_handle.release(9)
     expect_failure(lambda: result_handle.release(9), ValueError)
+    sibling_space = VSpace(owner=7, allocation_limit=0)
+    sibling_arena = sibling_space.allocate_handle(7)
+    sibling_result = ResultHandle(
+        owner=7,
+        generation=sibling_space.generation,
+        vspace_id=id(sibling_space),
+    )
+    expect_failure(lambda: sibling_arena.use(vspace, 7), ValueError)
+    expect_failure(lambda: sibling_result.use(vspace, 7), ValueError)
+    sibling_arena.use(sibling_space, 7)
+    sibling_result.use(sibling_space, 7)
     endpoint = Endpoint()
     if endpoint.send(1, 42) is not None:
         raise SystemExit("endpoint send without receiver did not block")
