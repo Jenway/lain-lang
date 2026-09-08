@@ -27,35 +27,35 @@ BOOTSTRAP_STD_MANIFEST = BOOTSTRAP_STD_OUTPUT.with_suffix(".manifest.json")
 SCHEMA = "lain-compiler-bundle-v1"
 CORE_MODULES = (
     ROOT / "src" / "lainir" / "tools" / "source.l1",
-    ROOT / "src" / "lainir" / "lain" / "raw_ast.l1",
-    ROOT / "src" / "lainir" / "lain" / "ast_runtime.l1",
-    ROOT / "src" / "lainir" / "lain" / "compiler_context.l1",
-    ROOT / "src" / "lainir" / "lain" / "stdlib_contracts.l1",
-    ROOT / "src" / "lainir" / "lain" / "compiler_api.l1",
-    ROOT / "src" / "lainir" / "lain" / "compiler.l1",
+    ROOT / "bootstrap" / "compiler" / "raw_ast.l1",
+    ROOT / "bootstrap" / "compiler" / "ast_runtime.l1",
+    ROOT / "bootstrap" / "compiler" / "compiler_context.l1",
+    ROOT / "bootstrap" / "compiler" / "stdlib_contracts.l1",
+    ROOT / "bootstrap" / "compiler" / "compiler_api.l1",
+    ROOT / "bootstrap" / "compiler" / "compiler.l1",
 )
 BOOTSTRAP_STD_MODULES = (
     # Semantic Meta and lowering implementations belong to the bootstrap
     # standard library.  The compiler core sees only their ABI declarations.
-    ROOT / "src" / "lainir" / "lain" / "meta.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_values.l1",
-    ROOT / "src" / "lainir" / "lain" / "lower_func.l1",
-    ROOT / "src" / "lainir" / "lain" / "lower_record.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_bindings.l1",
+    ROOT / "bootstrap" / "compiler" / "meta.l1",
+    ROOT / "bootstrap" / "compiler" / "meta_values.l1",
+    ROOT / "bootstrap" / "compiler" / "lower_func.l1",
+    ROOT / "bootstrap" / "compiler" / "lower_record.l1",
+    ROOT / "bootstrap" / "compiler" / "meta_bindings.l1",
     # Import discovery and syntax-index construction are language policy;
     # keep them with the bootstrap library rather than the core driver.
-    ROOT / "src" / "lainir" / "lain" / "workspace.l1",
-    ROOT / "src" / "lainir" / "lain" / "workspace_cache.l1",
-    ROOT / "src" / "lainir" / "lain" / "syntax_units.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_import.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_record.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_type.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_collect.l1",
-    ROOT / "src" / "lainir" / "bootstrap_std" / "policy.l1",
-    ROOT / "src" / "lainir" / "lain" / "module_meta.l1",
-    ROOT / "src" / "lainir" / "lain" / "meta_module.l1",
-    ROOT / "src" / "lainir" / "bootstrap_std" / "core_forms.l1",
-    ROOT / "src" / "lainir" / "bootstrap_std" / "entry.l1",
+    ROOT / "bootstrap" / "compiler" / "workspace.l1",
+    ROOT / "bootstrap" / "compiler" / "workspace_cache.l1",
+    ROOT / "bootstrap" / "compiler" / "syntax_units.l1",
+    ROOT / "bootstrap" / "compiler" / "meta_import.l1",
+    ROOT / "bootstrap" / "compiler" / "meta_record.l1",
+    ROOT / "bootstrap" / "compiler" / "meta_type.l1",
+    ROOT / "bootstrap" / "compiler" / "meta_collect.l1",
+    ROOT / "bootstrap" / "std" / "policy.l1",
+    ROOT / "bootstrap" / "compiler" / "module_meta.l1",
+    ROOT / "bootstrap" / "compiler" / "meta_module.l1",
+    ROOT / "bootstrap" / "std" / "core_forms.l1",
+    ROOT / "bootstrap" / "std" / "entry.l1",
 )
 MODULES = CORE_MODULES + BOOTSTRAP_STD_MODULES
 
