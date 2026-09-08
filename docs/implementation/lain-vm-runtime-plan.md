@@ -188,8 +188,9 @@ Endpoint 或 continuation 编译成 LAINIR 数据，也不增加 `#init_context`
 5. Trap 或 TCB 销毁时，所有 nested frame 和 activation 一起释放，不能留下 Endpoint 等待项。
 
 当前实现只满足 root instruction boundary 和 Endpoint `send` pending-result 的特例；这些
-特例不计入 nested continuation 完成。下一次实现必须先增加一个包含前置副作用和 Endpoint
-等待的 nested fixture，再扩展保存格式。
+特例不计入 nested continuation 完成。现有 fixture 已包含 nested `send_helper` 和有副作用
+的 `make_value`，确认恢复后 payload 只执行一次；下一次实现仍需把完整 nested frame/locals
+和表达式游标接入保存格式。
 
 ## 3. 阶段一：建立 LainVM 核心对象
 

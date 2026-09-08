@@ -104,8 +104,11 @@ static int endpoint_dispatch_test(void) {
       "#proc receive_main() -> #bits<64> {\n"
       "  #return #call receive_helper()\n"
       "}\n"
-      "#proc send_main() -> #bits<32> {\n"
+      "#proc send_helper() -> #bits<32> {\n"
       "  #return #call endpoint.send(#call test.make_value())\n"
+      "}\n"
+      "#proc send_main() -> #bits<32> {\n"
+      "  #return #call send_helper()\n"
       "}\n";
   L1Diagnostic diagnostic = {0};
   LainirModuleHandle *handle = NULL;

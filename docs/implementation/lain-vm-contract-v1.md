@@ -64,7 +64,8 @@ instruction 保存在 control object 的 opaque backend state 中，下一次 `l
 恢复；slice 之间允许 TCB 经过 BLOCKED/RESUME 状态转换后继续该 continuation。nested
 procedure 进入和返回时更新 control plane 的 CallFrame 栈，当前 nested
 调用仍在一个 slice 内原子执行。一个只包含 Endpoint 等待的 nested helper 已有阻塞/恢复
-回归测试，但恢复依赖 root instruction 重试；Endpoint pending result 会在恢复的 `send`
+回归测试（包含带 `make_value` 前置副作用的 nested `send_helper`），但恢复依赖 root
+instruction 重试；Endpoint pending result 会在恢复的 `send`
 参数求值前被识别，避免重复执行 payload 表达式。通用 nested frame/locals、表达式游标
 和 pending call result 的跨 slice 保存留在后续阶段。
 
