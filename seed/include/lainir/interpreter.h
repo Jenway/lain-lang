@@ -183,6 +183,9 @@ int lainir_vm_control_set_backend_state(LainirVmControl *control,
 int lainir_vm_control_take_endpoint_result(LainirVmControl *control,
                                             uint64_t owner, uint32_t *kind_out,
                                             uint64_t *value_out);
+int lainir_vm_control_has_endpoint_result(const LainirVmControl *control,
+                                           uint64_t owner,
+                                           uint32_t *kind_out);
 LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
                                              uint64_t owner);
 LainirVmSliceResult lainir_vm_control_abort(LainirVmControl *control,
