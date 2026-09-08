@@ -48,6 +48,13 @@ typedef struct {
   LainirFrame frame;
   L1Block *next_block;
   L1Instruction *next_inst;
+  LainirFrame *nested_frame;
+  L1Subroutine *nested_sub;
+  L1Block *nested_block;
+  L1Instruction *nested_inst;
+  int pending_nested_result;
+  L1Subroutine *pending_nested_target;
+  LainirValue pending_nested_value;
 } LainirContinuation;
 
 typedef struct {
@@ -100,6 +107,8 @@ typedef struct {
   uint64_t current_source_end;
   LainirContinuation *continuation;
   int continuation_tracking;
+  L1Block *active_block;
+  L1Instruction *active_inst;
   int instruction_boundary;
   uint64_t trace_expr_kinds[64];
   uint64_t trace_inst_kinds[16];
@@ -891,6 +900,15 @@ static LainirValue interp_eval_call(LainirInterpreter *interp, LainirFrame *fram
   int args_heap = 0;
   int endpoint_resume = 0;
   LainirValue result = lainir_value_unit();
+  if (sub && interp->continuation &&
+      interp->continuation->pending_nested_result &&
+      interp->continuation->pending_nested_target == sub) {
+    result = interp->continuation->pending_nested_value;
+    interp->continuation->pending_nested_result = 0;
+    interp->continuation->pending_nested_target = NULL;
+    interp->continuation->pending_nested_value = lainir_value_unit();
+    return result;
+  }
   if (expr->data.call.arg_count > sizeof(args_inline) / sizeof(args_inline[0])) {
     args = calloc(expr->data.call.arg_count, sizeof(LainirValue));
     args_heap = 1;
@@ -1253,10 +1271,17 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
   L1Instruction *inst = block->body;
   int track = interp->continuation_tracking && interp->continuation &&
               frame == &interp->continuation->frame;
+  int nested_track = interp->continuation &&
+                     frame == interp->continuation->nested_frame &&
+                     block == interp->continuation->nested_block &&
+                     interp->continuation->nested_inst;
   if (track && interp->continuation->next_block == block &&
       interp->continuation->next_inst)
     inst = interp->continuation->next_inst;
+  if (nested_track) inst = interp->continuation->nested_inst;
   while (inst) {
+    interp->active_block = block;
+    interp->active_inst = inst;
     interp->current_line = inst->line > 0 ? (uint32_t)inst->line : 0;
     interp->current_column = inst->column > 0 ? (uint32_t)inst->column : 0;
     interp->current_source_start = inst->source_start;
@@ -1382,6 +1407,43 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     }
     inst = inst->next;
   }
+}
+
+/* Move a suspended nested frame off the C stack.  Inline argument/local
+ * storage is copied into the heap frame; alloca buffers and heap-owned tables
+ * are transferred, so address values remain valid across the suspension. */
+static LainirFrame *interp_detach_frame(LainirFrame *source,
+                                        LainirFrame *caller) {
+  LainirFrame *frame = calloc(1, sizeof(*frame));
+  if (!frame) return NULL;
+  *frame = *source;
+  frame->caller = caller;
+  if (source->args == source->args_inline) {
+    memcpy(frame->args_inline, source->args_inline,
+           sizeof(source->args_inline));
+    frame->args = frame->args_inline;
+    frame->args_heap = 0;
+  } else {
+    source->args = NULL;
+    source->args_heap = 0;
+  }
+  if (source->locals == source->locals_inline) {
+    memcpy(frame->locals_inline, source->locals_inline,
+           sizeof(source->locals_inline));
+    frame->locals = frame->locals_inline;
+    frame->locals_heap = 0;
+    for (uint32_t i = 0; i < source->local_count; i++)
+      source->locals_inline[i].name = NULL;
+  } else {
+    source->locals = NULL;
+    source->locals_heap = 0;
+  }
+  source->local_count = 0;
+  source->local_index = NULL;
+  source->allocas = NULL;
+  source->alloca_count = 0;
+  source->alloca_cap = 0;
+  return frame;
 }
 
 /* A small opt-in native path for the bootstrap compiler's leaf procedures.
@@ -2621,8 +2683,71 @@ static int interp_try_fast_builtin(LainirInterpreter *interp,
 
 static void interp_destroy_continuation(LainirContinuation *continuation) {
   if (!continuation) return;
+  interp_free_frame(continuation->nested_frame);
+  free(continuation->nested_frame);
   interp_free_frame(&continuation->frame);
   free(continuation);
+}
+
+static int interp_resume_nested_continuation(LainirInterpreter *interp) {
+  LainirContinuation *continuation = interp->continuation;
+  LainirFrame *frame;
+  L1Block *block;
+  if (!continuation || !continuation->nested_frame) return 1;
+  frame = continuation->nested_frame;
+  interp->active_frame = frame;
+  interp->call_depth = 2;
+  interp->should_return = 0;
+  interp->return_value = lainir_value_unit();
+  if (interp->vm_control &&
+      !lainir_vm_control_push_frame(
+          interp->vm_control, interp->vm_owner,
+          (uint64_t)(uintptr_t)frame->sub,
+          (uint64_t)(uintptr_t)frame->sub->blocks,
+          (uint64_t)(uintptr_t)frame)) {
+    interp_trap(interp, "VM nested continuation frame rejected");
+    return 0;
+  }
+  block = continuation->nested_block;
+  while (block) {
+    interp->continuation_tracking = 0;
+    interp_exec_block(interp, frame, block);
+    if (interp->vm_slice_yielded || interp->vm_blocked) {
+      continuation->nested_block = interp->active_block;
+      continuation->nested_inst = interp->active_inst;
+      (void)lainir_vm_control_pop_frame(interp->vm_control, interp->vm_owner);
+      interp->active_frame = &continuation->frame;
+      interp->call_depth = 1;
+      return 0;
+    }
+    if (interp->error) return 0;
+    if (interp->should_return) break;
+    block = block->next;
+    continuation->nested_block = block;
+    continuation->nested_inst = NULL;
+  }
+  if (!interp->should_return) {
+    interp_trap(interp, "nested procedure did not return");
+    return 0;
+  }
+  if (interp_frame_owns_addr(frame, interp->return_value.as.addr) &&
+      interp->return_value.kind == LAINIR_VALUE_ADDR) {
+    interp_trap(interp, "#alloca address escaped nested continuation");
+    return 0;
+  }
+  continuation->pending_nested_result = 1;
+  continuation->pending_nested_target = continuation->nested_sub;
+  continuation->pending_nested_value = interp->return_value;
+  continuation->nested_frame = NULL;
+  continuation->nested_sub = NULL;
+  continuation->nested_block = NULL;
+  continuation->nested_inst = NULL;
+  (void)lainir_vm_control_pop_frame(interp->vm_control, interp->vm_owner);
+  interp_free_frame(frame);
+  free(frame);
+  interp->active_frame = &continuation->frame;
+  interp->call_depth = 1;
+  return 1;
 }
 
 static LainirValue interp_call_root_resumable(
@@ -2690,6 +2815,10 @@ static LainirValue interp_call_root_resumable(
   interp->call_depth = 1;
   interp->should_return = 0;
   interp->return_value = lainir_value_unit();
+
+  if (continuation->nested_frame &&
+      !interp_resume_nested_continuation(interp))
+    return lainir_value_unit();
 
   L1Block *block = continuation->next_block
                        ? continuation->next_block : sub->blocks;
@@ -2876,6 +3005,19 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
   while (block) {
     interp_exec_block(interp, &frame, block);
     if (interp->vm_slice_yielded || interp->vm_blocked) {
+      if (interp->vm_blocked && interp->continuation &&
+          !interp->continuation->nested_frame) {
+        LainirFrame *saved = interp_detach_frame(
+            &frame, &interp->continuation->frame);
+        if (!saved) {
+          interp_trap(interp, "out of memory for nested continuation");
+        } else {
+          interp->continuation->nested_frame = saved;
+          interp->continuation->nested_sub = sub;
+          interp->continuation->nested_block = interp->active_block;
+          interp->continuation->nested_inst = interp->active_inst;
+        }
+      }
       interp_free_frame(&frame);
       if (vm_frame_pushed)
         (void)lainir_vm_control_pop_frame(interp->vm_control, interp->vm_owner);
