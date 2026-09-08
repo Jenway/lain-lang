@@ -28,6 +28,12 @@ TEST = r'''
     #return 101
   }
   #if #ne(#call eval_result_generation(%result), 7) { #return 102 }
+  #if #eq(#call eval_result_matches_vspace(%result, %vspace, 7), 0) {
+    #return 108
+  }
+  #if #eq(#call eval_result_matches_vspace(%result, %vspace, 8), 1) {
+    #return 109
+  }
   #let %copy: #addr = #call eval_result_clone(%result)
   #if #ne(#ptr2int(#call eval_result_vspace(%copy)), #ptr2int(%vspace)) {
     #return 103
