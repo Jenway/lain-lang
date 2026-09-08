@@ -419,7 +419,9 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    回调。`lainir_run_backend_result` 作为 native/formal lowering 的共同门槛，只允许
    scalar/unit 直接通过；带所有权的路径使用 `lainir_run_owned_result` 和
    generation-bound handle。下一步把各 provider 的 adapter、destructor 和 generation
-   验收接入 native/formal matrix。
+   验收接入 native/formal matrix。LAINIR 的 `EvalShape` 已把 object 判断、kind、owner、
+   generation、owner transfer 和 release 纳入 provider API；当前 default provider 明确
+   声明自己只返回 scalar result，并以拒绝/空实现保持该边界。
 9. **后续：平台 lowering。** 在 nested continuation、单 TCB VSpace、
    Endpoint、Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和
    裸机 lowering。
