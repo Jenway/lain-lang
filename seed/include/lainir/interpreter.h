@@ -163,6 +163,11 @@ int lainir_vm_control_pop_frame(LainirVmControl *control, uint64_t owner);
 const LainirVmFrame *lainir_vm_control_current_frame(
     const LainirVmControl *control);
 const LainirVmTrap *lainir_vm_control_trap(const LainirVmControl *control);
+/* Copy and acknowledge the terminal Trap for scheduler consumption.  The
+ * TCB remains DEAD/TRAPPED after acknowledgement; only the diagnostic record
+ * is cleared from the control plane. */
+int lainir_vm_control_take_trap(LainirVmControl *control, uint64_t owner,
+                                LainirVmTrap *trap_out);
 int lainir_vm_control_record_trap(LainirVmControl *control, uint64_t owner,
                                    LainirVmTrapKind kind, int32_t status);
 int lainir_vm_control_record_trap_at(

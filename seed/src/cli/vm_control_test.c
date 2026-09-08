@@ -198,6 +198,13 @@ static int trap_record_test(void) {
            trap->column > 0 && trap->source_end > trap->source_start &&
            lainir_vm_control_state(control) == LAINIR_VM_DEAD &&
            lainir_vm_control_slice_result(control) == LAINIR_VM_TRAPPED;
+  LainirVmTrap consumed = {0};
+  ok = ok && lainir_vm_control_take_trap(control, 7, &consumed) &&
+       consumed.kind == LAINIR_VM_TRAP_INTERPRETER && consumed.active &&
+       lainir_vm_control_trap(control) == NULL &&
+       lainir_vm_control_state(control) == LAINIR_VM_DEAD &&
+       lainir_vm_control_slice_result(control) == LAINIR_VM_TRAPPED &&
+       !lainir_vm_control_take_trap(control, 7, &consumed);
   lainir_vm_control_free(control);
   lainir_module_handle_destroy(&handle);
   return ok;

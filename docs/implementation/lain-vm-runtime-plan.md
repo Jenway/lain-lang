@@ -326,8 +326,10 @@ instruction 已绑定到 control object 的 backend state，第二次 `lainir_ru
    `LAINIR_RUN_BLOCKED`，交接后恢复 pending call，非法 owner、重复等待和状态转换返回
    capability failure；control plane 现在记录结构化 Trap 的 kind、status、procedure、
    region 和 position；`L1Instruction` 的 line/column 以及 source byte range 现在也进入
-   control-owned Trap。Trap 发生后通过统一 abort 路径转为 `DEAD/TRAPPED`，下一步让
-   scheduler 统一消费 Trap，并把 parser token span 的更细边界接入同一记录。
+   control-owned Trap。Trap 发生后通过统一 abort 路径转为 `DEAD/TRAPPED`。scheduler
+   可以通过 `lainir_vm_control_take_trap` 复制并确认终止诊断；确认只清除控制面中的
+   诊断记录，不改变 TCB 的 `DEAD/TRAPPED` 结果。后续再把 parser token span 的更细
+   边界接入同一记录。
 5. **完善 Trap 定位**：保留当前物理 region offset，继续扩展真实调用栈 procedure 与
    source span；Trap 字段保持由 VM 统一生成，provider 只读取结果。
 6. **再进入多 TCB 和平台 lowering**：参考后端通过单 TCB、VSpace、Trap、CSpace 和

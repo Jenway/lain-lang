@@ -186,6 +186,17 @@ const LainirVmTrap *lainir_vm_control_trap(const LainirVmControl *control) {
   return control && control->trap.active ? &control->trap : NULL;
 }
 
+int lainir_vm_control_take_trap(LainirVmControl *control, uint64_t owner,
+                                LainirVmTrap *trap_out) {
+  if (!vm_owned(control, owner) || !trap_out ||
+      control->state != LAINIR_VM_DEAD ||
+      control->result != LAINIR_VM_TRAPPED || !control->trap.active)
+    return 0;
+  *trap_out = control->trap;
+  control->trap.active = 0;
+  return 1;
+}
+
 int lainir_vm_control_record_trap(LainirVmControl *control, uint64_t owner,
                                   LainirVmTrapKind kind, int32_t status) {
   return lainir_vm_control_record_trap_at(control, owner, kind, status, 0, 0);
