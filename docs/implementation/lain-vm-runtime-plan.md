@@ -75,6 +75,11 @@ scheduler fixture 已扩展到两个 TCB：同一时刻只允许一个 current�
 才能启动第二个，第二个挂起后可以恢复第一个。这个 handoff 仍然是 control-plane
 验证，尚未把两个 TCB 接到真实 evaluator 的执行 continuation。
 
+参考 evaluator 现在也暴露了最小 VM control API：`new_vm`、`start_tcb`、`suspend_tcb`
+和 `resume_tcb`。它们只改变 TCB 的 READY/RUNNING/BLOCKED 状态并保留 TCB position；
+执行入口仍会在完成后转为 DEAD，control API 的存在不等于递归 evaluator 已经具备可恢复
+的 instruction continuation。
+
 external call 现在经过 `external_capability_allowed` VM gate；它会同时检查 TCB 是否
 处于 RUNNING 和当前 VM capability context。这一步先固定了 provider dispatcher 不能绕过
 VM 状态的边界。
@@ -256,9 +261,10 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    和 evaluator 的逻辑 `release_vspace` 已完成。下一步让 provider 在 runtime 终止时负责
    物理 arena reset，并验证旧的 result、arena address 和 activation storage 全部失效。
 3. **把 scheduler 状态接入真实 evaluator**：单 runnable、两个 TCB 的 handoff/resume
-   fixture 已完成，但 evaluator 仍在宿主递归调用中执行，不能从保存的 instruction position
-   恢复。下一步先把 root region 切成可保存的 VM slice，再将 activation/position 放入
-   TCB 的 continuation 状态；没有真实恢复路径前，不宣称已经支持协程。
+   fixture 和参考 VM 的最小 suspend/resume API 已完成，但 evaluator 仍在宿主递归调用中
+   执行，不能从保存的 instruction position 恢复。下一步先把 root region 切成可保存的
+   VM slice，再将 activation/position 放入 TCB 的 continuation 状态；没有真实恢复路径前，
+   不宣称已经支持协程。
 4. **接入 Endpoint 的真实 ownership 检查**：fixture 已覆盖 rendezvous 和取消，下一步
    让 Endpoint 等待项只保存受 capability 授权的 TCB/owned handle，不保存裸 activation
    地址，并把非法状态转换转成统一 Trap。
