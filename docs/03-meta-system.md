@@ -2,7 +2,8 @@
 
 Meta 是 Lain 的语言定义层。它读取无语义的 RawAst，解释语言规则，完成语法展开和静态语义处理，并生成 LAINIR。
 
-Meta 负责决定程序的含义。LAINIR 负责验证和执行已经确定的物理操作。所有编译期执行都通过显式的 LAINIR `#eval` 发生。
+Meta 负责决定程序的含义。LAINIR 负责验证已经确定的物理操作；LAINVM 负责执行它们。
+所有编译期执行都通过显式的 LAINIR `#eval` 发生。
 
 ## 1. 在编译流程中的位置
 
@@ -13,7 +14,8 @@ Lain source
   -> Meta elaborate
   -> Meta lower
   -> LAINIR
-  -> verify and execute #eval
+  -> LAINIR verify
+  -> LAINVM execute #eval
   -> remaining runtime LAINIR
   -> backend
 ```
@@ -28,7 +30,8 @@ Meta 覆盖 RawAst 与 LAINIR 之间的语言解释过程。它可以在内部�
 | --- | --- |
 | Parser / RawAst | token、分隔符、拓扑、span、syntax context |
 | Meta / 标准库 | 绑定、函数、类型、模块、宏、effect、特化、布局等语言语义 |
-| LAINIR | 固定物理类型、过程、控制流、内存操作、调用和 `#eval` |
+| LAINIR | 固定物理类型、过程、控制流、内存操作、调用和 `#eval` 语法 |
+| LAINVM | TCB、VSpace、Trap、预算、capability 与 `#eval` 执行 |
 | Backend | 目标代码布局、目标 ABI 和产物生成 |
 
 Parser 不判断 `std::func`、`std::struct`、`std::module`、`import`、类型应用或 effect 的含义。Backend 不重新解释这些源语言概念。
@@ -170,7 +173,7 @@ source AST
   -> Meta interprets language rules
   -> Meta generates LAINIR containing #eval
   -> LAINIR verifier checks the block
-  -> LAINIR evaluator executes it
+  -> LAINVM executes it through a temporary TCB
   -> declared LAINIR value returns to the compilation flow
 ```
 
@@ -193,9 +196,17 @@ let main = std::func() -> i64 {
 }
 ```
 
-Meta 生成 `#add` 和 `#eval`。LAINIR evaluator 执行加法。Meta 不需要实现第二套整数表达式求值语义。
+Meta 生成 `#add` 和 `#eval`。LAINVM 执行加法。Meta 不需要实现第二套整数表达式求值语义。
 
 `#eval` 正常完成时返回其声明的 LAINIR 物理值；执行失败时由 LAIN-VM 产生 Trap。LAIN-VM 不判断这个物理值在 Meta 中代表整数、类型、模块还是 AST，也不为它添加对象类别、资源归属或代际信息。
+
+Meta 为 `#eval` 提供静态预期类型，并允许块引用外围的物理局部值。lowering 把每个自由
+`%local` 转换为临时根过程的按值参数；这不是把 Meta frame、类型对象或 AST 对象交给
+VM。若捕获值是 `#addr`，Meta 也不能借此延长该地址原有区域的生命周期。
+
+一次失败的 `#eval` 没有普通值可供 Meta 检查。VM 将 Trap 交给编译器的诊断路径，当前
+Meta 阶段停止处理该计算；不得用 `status` 字段、空值、对象 handle 或额外结果包装把失败
+伪装成值。
 
 ## 8. AST 操作与 hygiene
 
