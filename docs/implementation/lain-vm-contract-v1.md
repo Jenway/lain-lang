@@ -81,9 +81,10 @@ TCB control object、owner 和 payload；唤醒只作用于登记的 TCB；pendi
 TCB/frame；当前 Endpoint 保持单 sender/单 receiver rendezvous，不隐式提供 fanout 或广播。
 seed runtime 的 `LainirVmScheduler` 已实现 attach、start、suspend、release、resume、admit
 和 finish，并由 control fixture 验证唯一 current 槽位、Endpoint 阻塞释放、对端唤醒重新
-admit 和 pending result 消费；`lainir_vm_scheduler_run` 已将 current TCB 的一个 fuel
-slice 接入 `lainir_run`，并验证 sender/receiver 在同一 evaluator 入口上的交接。自动
-选择多个 runnable TCB、公平策略和并行 Endpoint wait 仍属于后续 contract。
+admit 和 pending result 消费；`lainir_vm_scheduler_select` 已按 attachment 顺序选择
+READY 或被唤醒的 RUNNING TCB，`lainir_vm_scheduler_run` 已将 current TCB 的一个 fuel
+slice 接入 `lainir_run`，并验证 sender/receiver 在同一 evaluator 入口上的交接。公平
+策略和并行 Endpoint wait 仍属于后续 contract。
 
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
 必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。

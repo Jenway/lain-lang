@@ -369,7 +369,7 @@ static int scheduler_evaluator_handoff_test(void) {
                                &sender_binding) ||
       !lainir_vm_endpoint_bind(receiver_caps, "endpoint.send", "endpoint.receive",
                                &receiver_binding) ||
-      !lainir_vm_scheduler_start(scheduler, 7, sender, 7))
+      !lainir_vm_scheduler_select(scheduler, 7, NULL))
     goto cleanup;
   sender_request.module = (L1Subroutine *)lainir_module_handle_first(handle);
   sender_request.entry_name = "send";
@@ -384,7 +384,7 @@ static int scheduler_evaluator_handoff_test(void) {
     goto cleanup;
   }
   error = NULL;
-  if (!lainir_vm_scheduler_start(scheduler, 7, receiver, 7) ||
+  if (!lainir_vm_scheduler_select(scheduler, 7, NULL) ||
       lainir_vm_scheduler_run(scheduler, 7, 8, &receiver_request,
                               &receiver_result, &error) != LAINIR_RUN_OK ||
       error || receiver_result.kind != LAINIR_VALUE_BITS ||
@@ -393,7 +393,7 @@ static int scheduler_evaluator_handoff_test(void) {
     goto cleanup;
   }
   error = NULL;
-  if (!lainir_vm_scheduler_admit(scheduler, 7, sender, 7) ||
+  if (!lainir_vm_scheduler_select(scheduler, 7, NULL) ||
       lainir_vm_scheduler_run(scheduler, 7, 8, &sender_request,
                               &sender_result, &error) != LAINIR_RUN_OK ||
       error || sender_result.kind != LAINIR_VALUE_BITS ||

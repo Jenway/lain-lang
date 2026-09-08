@@ -37,6 +37,7 @@ struct LainirVmScheduler {
   LainirVmControl *attached[8];
   uint64_t attached_owner[8];
   uint32_t attached_count;
+  uint32_t next_index;
 };
 
 static int vm_owned(const LainirVmControl *control, uint64_t owner) {
@@ -579,6 +580,32 @@ int lainir_vm_scheduler_admit(LainirVmScheduler *scheduler, uint64_t owner,
   scheduler->current = control;
   scheduler->current_owner = control_owner;
   return 1;
+}
+
+LainirVmControl *lainir_vm_scheduler_select(
+    LainirVmScheduler *scheduler, uint64_t owner, uint64_t *control_owner_out) {
+  if (!scheduler_owned(scheduler, owner) || scheduler->current ||
+      !scheduler->attached_count)
+    return NULL;
+  for (uint32_t offset = 0; offset < scheduler->attached_count; offset++) {
+    uint32_t index = (scheduler->next_index + offset) % scheduler->attached_count;
+    LainirVmControl *control = scheduler->attached[index];
+    uint64_t control_owner = scheduler->attached_owner[index];
+    LainirVmState state = lainir_vm_control_state(control);
+    int admitted = 0;
+    if (state == LAINIR_VM_READY)
+      admitted = lainir_vm_scheduler_start(
+          scheduler, owner, control, control_owner);
+    else if (state == LAINIR_VM_RUNNING)
+      admitted = lainir_vm_scheduler_admit(
+          scheduler, owner, control, control_owner);
+    if (admitted) {
+      scheduler->next_index = (index + 1) % scheduler->attached_count;
+      if (control_owner_out) *control_owner_out = control_owner;
+      return control;
+    }
+  }
+  return NULL;
 }
 
 LainirRunStatus lainir_vm_scheduler_run(

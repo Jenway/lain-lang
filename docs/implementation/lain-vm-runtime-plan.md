@@ -81,8 +81,9 @@ capability 注册到真实 evaluator。无对端调用返回 `LAINIR_RUN_BLOCKED
 scheduler fixture 已扩展到两个 TCB：同一时刻只允许一个 current，挂起第一个 TCB 后
 才能启动第二个，第二个挂起后可以恢复第一个。这个 handoff 仍然是 control-plane
 验证，当前已由 scheduler 的 `run` 入口把一个真实 evaluator slice 接到 current TCB：
-入口注入该 TCB 的 control object 和 owner，Endpoint 阻塞或终止后自动释放 current，
-下一次由 scheduler admit 被唤醒的 TCB。多个 runnable TCB 的自动选择和公平策略仍未定义。
+入口注入该 TCB 的 control object 和 owner，Endpoint 阻塞或终止后自动释放 current。
+`lainir_vm_scheduler_select` 现在按 attachment 顺序轮转选择 READY 或已被唤醒的 RUNNING
+TCB；阻塞和终止的 TCB 会被跳过。更细的公平、优先级和饥饿避免策略仍未定义。
 
 参考 evaluator 现在也暴露了最小 VM control API：`new_vm`、`start_tcb`、`suspend_tcb`
 和 `resume_tcb`。它们只改变 TCB 的 READY/RUNNING/BLOCKED 状态并保留 TCB position；
@@ -211,9 +212,10 @@ call 的通用保存格式。
 seed runtime 现在提供 opaque `LainirVmScheduler`，维护 attached TCB 集合和唯一 current
 槽位；`lainir-vm-control-test` 已覆盖 attach、start、suspend、resume、release、admit、
 finish、重复启动和 current-slot 冲突，也覆盖 Endpoint 阻塞后释放 current、对端交接、
-唤醒后重新 admit 和 pending result 消费。`lainir_vm_scheduler_run` 已把单个 current
+唤醒后重新 admit 和 pending result 消费。`lainir_vm_scheduler_select` 已提供按 attachment
+顺序轮转的 runnable 选择，`lainir_vm_scheduler_run` 已把单个 current
 TCB 的 fuel slice 接到 `lainir_run`，并验证 sender/receiver 两个 TCB 的真实 evaluator
-交接；它仍不负责自动选择多个 runnable TCB，也不定义公平或优先级策略。
+交接；它仍不定义公平、优先级或饥饿避免策略。
 
 ## 3. 阶段一：建立 LainVM 核心对象
 
@@ -341,17 +343,18 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    和 payload；pending result 可唤醒 TCB；Trap 可记录、abort、由 scheduler 消费，并带有
    instruction/expression span 和实际 nested procedure。
 5. **当前阶段：多 TCB evaluator handoff。** scheduler 已能把一个 current TCB 的真实
-   evaluator slice 运行到 Endpoint 阻塞或完成，并把另一个已登记 TCB 接入同一个
-   `lainir_run` 入口；下一步是自动选择 runnable TCB、处理多个 Endpoint wait，并定义
-   slice 结果到 scheduler 状态的统一转换。nested continuation 的通用并行 pending-call
-   保存格式仍需继续验证。
+   evaluator slice 运行到 Endpoint 阻塞或完成，并按 attachment 顺序选择另一个 READY 或
+   被唤醒的 TCB 接入同一个 `lainir_run` 入口；下一步是处理多个 Endpoint wait、定义
+   slice 结果到 scheduler 状态的统一转换，并验证公平与饥饿边界。nested continuation
+   的通用并行 pending-call 保存格式仍需继续验证。
 6. **后续：多 TCB 调度策略与平台 lowering。** 在多 TCB handoff、单 TCB VSpace、Endpoint、
    Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和裸机 lowering。
 
 当前 seed runtime 的已验证能力包括：owner 检查、READY/RUNNING/BLOCKED/DEAD、fuel
 exhaustion、root continuation、nested frame observation、Endpoint rendezvous、pending
 result、Trap abort/acknowledgement、源码定位，以及 scheduler 驱动的双 TCB evaluator
-handoff。自动 runnable 选择、公平策略和通用并行 pending continuation 仍未完成。
+handoff 和按 attachment 顺序的 runnable 选择。公平策略、多个 Endpoint wait 和通用
+并行 pending continuation 仍未完成。
 
 当前基线命令：
 
