@@ -124,6 +124,15 @@ VM capability context。当前 context 由 `LainVm.cspace` 的两个 slot
 owner/active/external capability objects 表示。gate 扫描有效 slot，要求至少一个
 external capability；slot 身份和权限语义分开。
 
+## 可复用 session 的预备 contract
+
+当前 `execute` 仍是一次性 root request。为了支持未来长生命周期 session，预备 contract
+单独定义 `ReusableSession`：session 持有一个 VSpace；`reset(owner)` 只允许由当前 owner
+调用，递增 VSpace generation、失活所有旧 arena/result handle，并保留 session 供下一次
+root execution 使用；`release(owner)` 终止 session 并释放 backing arena。release 后不得
+再次 reset、分配或使用旧 handle。session reset 不由普通 TCB finish 隐式替代，TCB 与
+session 的生命周期必须分别检查。
+
 provider-neutral CSpace contract 已定义 capability object：每个对象带 name、owner 和
 active 状态，可以由当前 owner transfer 或 revoke；foreign owner、非 active capability
 和未绑定到 CSpace 的对象都会被拒绝。参考 evaluator 已用两个 capability slot 替换旧的

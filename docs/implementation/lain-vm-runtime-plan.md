@@ -397,7 +397,8 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    继续补充不同表达式形状的恢复覆盖；fan-out/fan-in 仍需单独的 Endpoint 模型决策。
 7. **当前阶段：长生命周期 VM contract 与平台 lowering 前置。** 先定义可复用 VSpace 的
    generation/reset contract、带 VSpace identity 和 generation 的 result handle 归属以及
-   多 TCB/多 VSpace 生命周期边界（一个 TCB 的 finish 不得 reset 另一个 VSpace），再进入 native、
+   多 TCB/多 VSpace 生命周期边界（一个 TCB 的 finish 不得 reset 另一个 VSpace），并固定
+   可复用 session 的显式 reset/release API，再进入 native、
    线程、用户态地址空间和裸机 lowering。多 TCB 调度仍沿用已固定的严格 round-robin，
    不在本阶段引入 priority/weight。
 8. **后续：平台 lowering。** 在 nested continuation、单 TCB VSpace、
