@@ -296,6 +296,12 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    `LainVm` 含有动态 arena，不能作为普通 Lain struct value 返回；持久 scheduler state
    必须由 VM/provider 的 opaque control object 持有，再由 backend control API 驱动。仍需要
    将同一行为接到真实 provider-owned control object；没有真实恢复路径前，不宣称已经支持协程。
+
+seed runtime 现在提供独立的 opaque C control plane：`LainirVmControl` 持有 owner、TCB
+状态、fuel、CallFrame 栈和 slice result；`lainir-vm-control-test` 已验证 owner 检查、
+READY/RUNNING/BLOCKED/DEAD、fuel exhaustion、嵌套 frame 恢复和 DONE。它还没有接管旧
+递归 evaluator 的 instruction dispatch；下一步是让 evaluator 在 instruction boundary
+调用 `lainir_vm_control_consume_step`，再把真实 frame 与该 control object 绑定。
 4. **接入 Endpoint 的真实 ownership 检查**：fixture 已覆盖 rendezvous 和取消，下一步
    让 Endpoint 等待项只保存受 capability 授权的 TCB/owned handle，不保存裸 activation
    地址，并把非法状态转换转成统一 Trap。

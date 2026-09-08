@@ -42,7 +42,9 @@ Endpoint 等待点。`run_slice` 的结果固定为 `RUNNABLE`、`BLOCKED`、`DO
 全局 step quota。含有动态 arena 的 `LainVm` 不通过普通 Lain struct value 返回；持久
 scheduler state 由 VM/provider 的 opaque control object 持有。`VmControl` fixture 已覆盖
 跨 procedure 的 fuel yield、callee frame resume 和最终 VSpace release；现有 suspend/resume
-API 仍同时验证状态转换和 position 保存。
+API 仍同时验证状态转换和 position 保存。seed runtime 还提供 `LainirVmControl` opaque C
+API，并由 `lainir-vm-control-test` 验证同一组 control-plane 不变量；旧递归 evaluator
+尚未调用该 API。
 
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
 必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。

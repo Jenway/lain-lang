@@ -67,6 +67,59 @@ typedef struct {
   LainirCapabilityTable *caps;
 } LainirRunRequest;
 
+/* Opaque VM control plane.  The execution backend owns this object; it is
+ * deliberately separate from LainirRunRequest, which remains one-shot. */
+typedef struct LainirVmControl LainirVmControl;
+
+typedef enum {
+  LAINIR_VM_READY = 0,
+  LAINIR_VM_RUNNING = 1,
+  LAINIR_VM_BLOCKED = 2,
+  LAINIR_VM_DEAD = 3
+} LainirVmState;
+
+typedef enum {
+  LAINIR_VM_RUNNABLE = 0,
+  LAINIR_VM_BLOCKED_RESULT = 1,
+  LAINIR_VM_DONE = 2,
+  LAINIR_VM_TRAPPED = 3
+} LainirVmSliceResult;
+
+typedef struct {
+  uint64_t procedure;
+  uint64_t region;
+  uint64_t position;
+  uint64_t activation;
+  uint64_t return_procedure;
+  uint64_t return_region;
+  uint64_t return_position;
+} LainirVmFrame;
+
+LainirVmControl *lainir_vm_control_new(uint64_t max_steps);
+void lainir_vm_control_free(LainirVmControl *control);
+LainirVmState lainir_vm_control_state(const LainirVmControl *control);
+uint64_t lainir_vm_control_steps(const LainirVmControl *control);
+int lainir_vm_control_start(LainirVmControl *control, uint64_t owner);
+int lainir_vm_control_suspend(LainirVmControl *control, uint64_t owner,
+                               uint32_t reason);
+int lainir_vm_control_resume(LainirVmControl *control, uint64_t owner);
+int lainir_vm_control_begin_slice(LainirVmControl *control, uint64_t owner,
+                                   uint64_t fuel);
+int lainir_vm_control_consume_step(LainirVmControl *control, uint64_t owner);
+int lainir_vm_control_slice_exhausted(const LainirVmControl *control);
+LainirVmSliceResult lainir_vm_control_slice_result(
+    const LainirVmControl *control);
+int lainir_vm_control_push_frame(LainirVmControl *control, uint64_t owner,
+                                 uint64_t procedure, uint64_t region,
+                                 uint64_t activation);
+int lainir_vm_control_set_position(LainirVmControl *control, uint64_t owner,
+                                   uint64_t region, uint64_t position);
+int lainir_vm_control_pop_frame(LainirVmControl *control, uint64_t owner);
+const LainirVmFrame *lainir_vm_control_current_frame(
+    const LainirVmControl *control);
+LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
+                                             uint64_t owner);
+
 /* Optional observer invoked immediately after each scalar #eval is
  * materialized by lainir_fold_module.  The value is borrowed by the caller
  * and remains valid for the duration of the callback. */

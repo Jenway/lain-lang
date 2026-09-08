@@ -23,6 +23,7 @@ IN_PROCESS_SOURCES = (
     ROOT / "seed" / "src" / "core" / "verifier.c",
     ROOT / "seed" / "src" / "text" / "parser.c",
     ROOT / "seed" / "src" / "interpreter" / "interpreter.c",
+    ROOT / "seed" / "src" / "interpreter" / "vm_control.c",
     ROOT / "seed" / "src" / "host" / "host_io.c",
 )
 
