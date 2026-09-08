@@ -82,7 +82,7 @@ VM 状态的边界。
 第一步结构迁移已经完成：布尔 policy 不再存放在 TCB，而由 `LainVm.cspace` 中的
 capability objects 保存；TCB 只保留执行状态，gate 从 VM capability context 读取 owner、
 active 和 `external` 权限。当前 CSpace 表已有两个 slot，其中一个用于 external 权限，
-另一个作为非 external capability，后续再接入完整 transfer/revoke API。
+另一个作为非 external capability。
 
 CSpace contract fixture 现在有带 name、owner、active 状态的 capability object，覆盖
 transfer、revoke、foreign owner 拒绝和未绑定对象拒绝；参考 evaluator 已经接入最小
@@ -90,7 +90,7 @@ CSpace 表和 owner/active capability object。
 
 VM control API 已增加按 slot 的 `capability_transfer` 与 `capability_revoke`；操作只在
 当前 owner、有效 slot 和 active capability 条件满足时成功，gate 会立即反映 revoke 或
-owner 转移后的状态。
+owner 转移后的状态。该 API 和最小 CSpace 表已经进入参考 evaluator。
 
 external dispatcher 现在扫描 CSpace，要求至少一个有效 capability 的 `external` 权限
 为真；slot 身份和权限语义已经分开。
@@ -106,10 +106,6 @@ LainVM 根状态会在执行循环中记录当前 region instruction offset；Tr
 和 source span。
 Eval result 现在提供只读的 Trap kind、procedure 和 position 访问器。Provider smoke
 已通过该迁移。
-
-CSpace 尚未迁移：当前 TCB 仍保留兼容性的单一 external-call 开关。尝试直接把它替换
-为新的嵌套 capability 类型会触发当前 Meta 类型实例化的 `5108`，该尝试已撤回。下一次
-CSpace 迁移必须先增加独立的 provider contract 和更小的类型切片，再接入 evaluator。
 
 VSpace 的 session 级 reset 也尚未接入。直接在当前 `execute` 返回点重置地址表会让
 provider 仍持有的 arena 地址变成 stale address；因此当前实现只关闭 activation frame，
@@ -255,16 +251,16 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 
 1. **完成单 TCB 的 VM 执行入口收敛**：这一项已完成。`execute`、`execute_limited` 和
    错误返回都经过同一个 LainVM root-TCB 路径；后续只需把回归检查保持在这个入口上。
-2. **补齐 VSpace owner/release contract**：provider-neutral owner transfer/release fixture
-   已完成，evaluator 也已在 VM 返回点执行逻辑 `release_vspace`。下一步把同一规则映射到
-   result、arena address 和 activation storage，再实现 provider 负责的物理 VSpace reset。
-3. **以小切片迁移 CSpace**：provider-level capability allow/deny 和 capability object
-   contract 已完成，external call 也已经过 VM capability gate，单 slot CSpace 表已进入
-   `LainVm`。下一步接入 capability transfer/revoke；每一步都单独
-   通过 Meta 类型实例化和 provider smoke，避免把 CSpace 引入问题与 evaluator 迁移混在一起。
-4. **把 scheduler 状态接入现有 TCB**：单 runnable TCB 的 ready/running/dead 转换已接入
-   evaluator，provider-neutral suspend/resume fixture 已完成。下一步把真实执行循环切成
-   可保存和恢复的 scheduler slice，再增加第二个 TCB；Endpoint 只在状态转换稳定后接入。
+2. **完成 VSpace 的物理 reset contract**：provider-neutral owner transfer/release fixture
+   和 evaluator 的逻辑 `release_vspace` 已完成。下一步让 provider 在 runtime 终止时负责
+   物理 arena reset，并验证旧的 result、arena address 和 activation storage 全部失效。
+3. **把 scheduler 状态接入真实 evaluator**：单 runnable、两个 TCB 的 handoff/resume
+   fixture 已完成，但 evaluator 仍在宿主递归调用中执行，不能从保存的 instruction position
+   恢复。下一步先把 root region 切成可保存的 VM slice，再将 activation/position 放入
+   TCB 的 continuation 状态；没有真实恢复路径前，不宣称已经支持协程。
+4. **接入 Endpoint 的真实 ownership 检查**：fixture 已覆盖 rendezvous 和取消，下一步
+   让 Endpoint 等待项只保存受 capability 授权的 TCB/owned handle，不保存裸 activation
+   地址，并把非法状态转换转成统一 Trap。
 5. **完善 Trap 定位**：保留当前物理 region offset，随后接入真实调用栈 procedure 与
    source span；Trap 字段保持由 VM 统一生成，provider 只读取结果。
 6. **再进入多 TCB 和平台 lowering**：参考后端通过单 TCB、VSpace、Trap、CSpace 和
