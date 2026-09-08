@@ -350,6 +350,7 @@ static int scheduler_evaluator_handoff_test(void) {
   LainirRunRequest sender_request = {0};
   LainirRunRequest receiver_request = {0};
   const char *error = NULL;
+  LainirRunStatus run_status = LAINIR_RUN_TRAP;
   int ok = 0;
   if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
     goto cleanup;
@@ -377,16 +378,20 @@ static int scheduler_evaluator_handoff_test(void) {
   receiver_request.module = sender_request.module;
   receiver_request.entry_name = "receive";
   receiver_request.caps = receiver_caps;
-  if (lainir_vm_scheduler_run(scheduler, 7, 8, &sender_request,
-                              &sender_result, &error) != LAINIR_RUN_BLOCKED ||
+  if (lainir_vm_scheduler_run_slice(
+          scheduler, 7, 8, &sender_request, &run_status, &sender_result,
+          &error) != LAINIR_VM_BLOCKED_RESULT ||
+      run_status != LAINIR_RUN_BLOCKED ||
       lainir_vm_scheduler_current(scheduler) != NULL ||
       lainir_vm_control_state(sender) != LAINIR_VM_BLOCKED) {
     goto cleanup;
   }
   error = NULL;
   if (!lainir_vm_scheduler_select(scheduler, 7, NULL) ||
-      lainir_vm_scheduler_run(scheduler, 7, 8, &receiver_request,
-                              &receiver_result, &error) != LAINIR_RUN_OK ||
+      lainir_vm_scheduler_run_slice(
+          scheduler, 7, 8, &receiver_request, &run_status, &receiver_result,
+          &error) != LAINIR_VM_DONE ||
+      run_status != LAINIR_RUN_OK ||
       error || receiver_result.kind != LAINIR_VALUE_BITS ||
       receiver_result.as.bits != 42 ||
       lainir_vm_scheduler_current(scheduler) != NULL) {
@@ -394,8 +399,10 @@ static int scheduler_evaluator_handoff_test(void) {
   }
   error = NULL;
   if (!lainir_vm_scheduler_select(scheduler, 7, NULL) ||
-      lainir_vm_scheduler_run(scheduler, 7, 8, &sender_request,
-                              &sender_result, &error) != LAINIR_RUN_OK ||
+      lainir_vm_scheduler_run_slice(
+          scheduler, 7, 8, &sender_request, &run_status, &sender_result,
+          &error) != LAINIR_VM_DONE ||
+      run_status != LAINIR_RUN_OK ||
       error || sender_result.kind != LAINIR_VALUE_BITS ||
       sender_result.as.bits != 1 ||
       lainir_vm_scheduler_current(scheduler) != NULL) {

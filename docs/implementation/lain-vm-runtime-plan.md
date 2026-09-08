@@ -80,7 +80,7 @@ capability 注册到真实 evaluator。无对端调用返回 `LAINIR_RUN_BLOCKED
 
 scheduler fixture 已扩展到两个 TCB：同一时刻只允许一个 current，挂起第一个 TCB 后
 才能启动第二个，第二个挂起后可以恢复第一个。这个 handoff 仍然是 control-plane
-验证，当前已由 scheduler 的 `run` 入口把一个真实 evaluator slice 接到 current TCB：
+验证，当前已由 scheduler 的 `run` / `run_slice` 入口把一个真实 evaluator slice 接到 current TCB：
 入口注入该 TCB 的 control object 和 owner，Endpoint 阻塞或终止后自动释放 current。
 `lainir_vm_scheduler_select` 现在按 attachment 顺序轮转选择 READY 或已被唤醒的 RUNNING
 TCB；阻塞和终止的 TCB 会被跳过。更细的公平、优先级和饥饿避免策略仍未定义。
@@ -215,9 +215,10 @@ seed runtime 现在提供 opaque `LainirVmScheduler`，维护 attached TCB 集�
 槽位；`lainir-vm-control-test` 已覆盖 attach、start、suspend、resume、release、admit、
 finish、重复启动和 current-slot 冲突，也覆盖 Endpoint 阻塞后释放 current、对端交接、
 唤醒后重新 admit 和 pending result 消费。`lainir_vm_scheduler_select` 已提供按 attachment
-顺序轮转的 runnable 选择，`lainir_vm_scheduler_run` 已把单个 current
-TCB 的 fuel slice 接到 `lainir_run`，并验证 sender/receiver 两个 TCB 的真实 evaluator
-交接；它仍不定义公平、优先级或饥饿避免策略。
+顺序轮转的 runnable 选择，`lainir_vm_scheduler_run_slice` 已把单个 current TCB 的 fuel
+slice 接到 `lainir_run`，并把 evaluator status 规范化为 RUNNABLE、BLOCKED_RESULT、DONE
+或 TRAPPED；sender/receiver 两个 TCB 的真实 evaluator 交接已有验证。它仍不定义公平、
+优先级或饥饿避免策略。
 
 ## 3. 阶段一：建立 LainVM 核心对象
 
@@ -347,8 +348,8 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 5. **当前阶段：多 TCB evaluator handoff。** scheduler 已能把一个 current TCB 的真实
    evaluator slice 运行到 Endpoint 阻塞或完成，并按 attachment 顺序选择另一个 READY 或
    被唤醒的 TCB 接入同一个 `lainir_run` 入口；两个 Endpoint 的并行等待和 pending result
-   隔离已有 fixture。下一步是定义 slice 结果到 scheduler 状态的统一转换，并验证公平与
-   饥饿边界。nested continuation 的通用并行 pending-call 保存格式仍需继续验证。
+   隔离已有 fixture。slice 结果到 scheduler 状态的统一转换已有 `run_slice` API；下一步
+   是验证公平与饥饿边界，并继续完善 nested continuation 的通用并行 pending-call 保存格式。
 6. **后续：多 TCB 调度策略与平台 lowering。** 在多 TCB handoff、单 TCB VSpace、Endpoint、
    Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和裸机 lowering。
 
