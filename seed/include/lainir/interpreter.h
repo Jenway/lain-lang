@@ -63,6 +63,7 @@ typedef struct {
 
 typedef struct LainirVmControl LainirVmControl;
 typedef struct LainirVmSession LainirVmSession;
+typedef struct LainirVmResultHandle LainirVmResultHandle;
 typedef struct LainirVmEndpoint LainirVmEndpoint;
 typedef struct LainirVmScheduler LainirVmScheduler;
 typedef void (*LainirVmBackendStateFree)(void *state);
@@ -163,6 +164,21 @@ int lainir_vm_session_detach(LainirVmSession *session, uint64_t owner,
                              LainirVmControl *control, uint64_t control_owner);
 int lainir_vm_session_reset(LainirVmSession *session, uint64_t owner);
 int lainir_vm_session_release(LainirVmSession *session, uint64_t owner);
+
+/* A result handle snapshots its session identity and generation.  It copies
+ * the value descriptor; provider payload ownership remains explicit. */
+LainirVmResultHandle *lainir_vm_result_handle_new(
+    LainirVmSession *session, uint64_t owner, const LainirValue *value);
+void lainir_vm_result_handle_free(LainirVmResultHandle *handle);
+uint64_t lainir_vm_result_handle_generation(
+    const LainirVmResultHandle *handle);
+int lainir_vm_result_handle_transfer(LainirVmResultHandle *handle,
+                                     uint64_t owner, uint64_t target);
+int lainir_vm_result_handle_release(LainirVmResultHandle *handle,
+                                    uint64_t owner);
+int lainir_vm_result_handle_use(const LainirVmResultHandle *handle,
+                                const LainirVmSession *session, uint64_t owner,
+                                LainirValue *value_out);
 
 LainirVmState lainir_vm_control_state(const LainirVmControl *control);
 uint32_t lainir_vm_control_suspend_reason(const LainirVmControl *control);
