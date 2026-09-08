@@ -171,7 +171,7 @@ source AST
   -> Meta generates LAINIR containing #eval
   -> LAINIR verifier checks the block
   -> LAINIR evaluator executes it
-  -> value or object returns to the compilation flow
+  -> declared LAINIR value returns to the compilation flow
 ```
 
 例如：
@@ -195,7 +195,7 @@ let main = std::func() -> i64 {
 
 Meta 生成 `#add` 和 `#eval`。LAINIR evaluator 执行加法。Meta 不需要实现第二套整数表达式求值语义。
 
-求值结果使用统一的结果 ABI，记录标量或对象种类、状态、资源 owner 和诊断。返回的 AST 或其他对象必须转交给当前 compile context，或者在阶段结束时释放。
+`#eval` 正常完成时返回其声明的 LAINIR 物理值；执行失败时由 LAIN-VM 产生 Trap。LAIN-VM 不判断这个物理值在 Meta 中代表整数、类型、模块还是 AST，也不为它添加对象类别、资源归属或代际信息。
 
 ## 8. AST 操作与 hygiene
 
