@@ -104,7 +104,9 @@ attached TCB 在最多其余 `N-1` 个 runnable TCB 选择后重新获得机会�
 上界，所有 TCB 都不可运行时 `select` 返回空。
 
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
-必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。
+必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。若 object
+handle 引用了 VSpace backing storage，还必须携带创建时的 generation；VSpace reset 或
+release 后，即使 owner 没变，也必须拒绝再次使用该 handle。
 
 ## v1 不变量
 
@@ -142,7 +144,7 @@ python scripts/check_lainc_lainir_api_baseline.py
 release 后不能再次使用或重复释放。
 
 `check_lain_vm_contract.py` 使用独立 recording provider 验证 VSpace owner/quota/reset、
-arena generation 和 stale-handle 拒绝
+arena/result generation 和 stale-handle 拒绝
 和 TCB owner/state/step/suspend/resume/scheduler 规则，以及 Endpoint 的 rendezvous/cancel、CSpace
 的 capability allow/deny、Trap 的 kind/source/status 字段。这个 fixture 只固定对象之间
 的 API 语义，不伪装成 LAINIR 指令或真实运行时对象实现。
