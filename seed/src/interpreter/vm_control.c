@@ -151,6 +151,13 @@ LainirVmSession *lainir_vm_session_new(uint64_t owner) {
 }
 
 void lainir_vm_session_free(LainirVmSession *session) {
+  uint32_t i;
+  if (!session) return;
+  session_invalidate_results(session);
+  for (i = 0; i < session->result_count; i++) {
+    if (session->results[i]) session->results[i]->session = NULL;
+  }
+  session->released = 1;
   free(session);
 }
 

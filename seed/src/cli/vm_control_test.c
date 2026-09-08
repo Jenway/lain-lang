@@ -152,8 +152,10 @@ cleanup:
 static int result_handle_generation_test(void) {
   LainirVmSession *session = lainir_vm_session_new(7);
   LainirVmSession *foreign = lainir_vm_session_new(8);
+  LainirVmSession *orphan = NULL;
   LainirVmResultHandle *handle = NULL;
   LainirVmResultHandle *stale = NULL;
+  LainirVmResultHandle *orphan_handle = NULL;
   LainirValue source = lainir_value_bits(55, 32);
   LainirValue copied = {0};
   result_payload_free_calls = 0;
@@ -178,12 +180,23 @@ static int result_handle_generation_test(void) {
           &result_payload_free_calls)) ||
       !lainir_vm_session_release(session, 7) ||
       lainir_vm_result_handle_use(stale, session, 7, &copied) ||
-      result_payload_free_calls != 2)
+      result_payload_free_calls != 2 ||
+      !(orphan = lainir_vm_session_new(7)) ||
+      !(orphan_handle = lainir_vm_result_handle_new(
+          orphan, 7, &source, count_result_payload_free,
+          &result_payload_free_calls)))
+    goto cleanup;
+  lainir_vm_session_free(orphan);
+  orphan = NULL;
+  if (lainir_vm_result_handle_use(orphan_handle, NULL, 7, &copied) ||
+      result_payload_free_calls != 3)
     goto cleanup;
   ok = 1;
 cleanup:
+  lainir_vm_result_handle_free(orphan_handle);
   lainir_vm_result_handle_free(stale);
   lainir_vm_result_handle_free(handle);
+  lainir_vm_session_free(orphan);
   lainir_vm_session_free(foreign);
   lainir_vm_session_free(session);
   return ok;
