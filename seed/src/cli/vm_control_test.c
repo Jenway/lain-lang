@@ -294,6 +294,39 @@ static int scheduler_handoff_test(void) {
   return ok;
 }
 
+static int scheduler_endpoint_handoff_test(void) {
+  LainirVmScheduler *scheduler = lainir_vm_scheduler_new(7);
+  LainirVmEndpoint *endpoint = lainir_vm_endpoint_new(7);
+  LainirVmControl *sender = lainir_vm_control_new(8);
+  LainirVmControl *receiver = lainir_vm_control_new(8);
+  uint32_t result_kind = 0;
+  uint64_t result_value = 0;
+  uint64_t received = 0;
+  int ok = scheduler && endpoint && sender && receiver &&
+           lainir_vm_scheduler_attach(scheduler, 7, sender, 11) &&
+           lainir_vm_scheduler_attach(scheduler, 7, receiver, 12) &&
+           lainir_vm_scheduler_start(scheduler, 7, sender, 11) &&
+           lainir_vm_endpoint_send(endpoint, 7, sender, 11, 42) == 0 &&
+           lainir_vm_control_state(sender) == LAINIR_VM_BLOCKED &&
+           lainir_vm_scheduler_release(scheduler, 7) &&
+           lainir_vm_scheduler_start(scheduler, 7, receiver, 12) &&
+           lainir_vm_endpoint_receive(endpoint, 7, receiver, 12, &received) == 1 &&
+           received == 42 &&
+           lainir_vm_scheduler_finish(scheduler, 7) == LAINIR_VM_DONE &&
+           lainir_vm_scheduler_admit(scheduler, 7, sender, 11) &&
+           lainir_vm_control_take_endpoint_result(
+               sender, 11, &result_kind, &result_value) &&
+           result_kind == LAINIR_VM_ENDPOINT_RESULT_SEND &&
+           result_value == 1;
+  if (sender && lainir_vm_control_state(sender) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(sender, 11);
+  lainir_vm_scheduler_free(scheduler);
+  lainir_vm_endpoint_free(endpoint);
+  lainir_vm_control_free(sender);
+  lainir_vm_control_free(receiver);
+  return ok;
+}
+
 int main(void) {
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
@@ -332,6 +365,8 @@ int main(void) {
     return fail("endpoint capability dispatch failed");
   if (!trap_record_test()) return fail("structured trap record failed");
   if (!scheduler_handoff_test()) return fail("scheduler handoff failed");
+  if (!scheduler_endpoint_handoff_test())
+    return fail("scheduler endpoint handoff failed");
 
   /* The interpreter consumes the provider-owned fuel gate at each instruction
    * boundary, exposes the active nested frame to a host callback, and resumes

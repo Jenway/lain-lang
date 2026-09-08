@@ -207,8 +207,10 @@ call 的通用保存格式。
    并确认两个 TCB 的 activation/VSpace 生命周期互不越界。
 
 seed runtime 现在提供 opaque `LainirVmScheduler`，维护 attached TCB 集合和唯一 current
-槽位；`lainir-vm-control-test` 已覆盖 attach、start、suspend、resume、finish、重复启动
-和 current-slot 冲突。它仍是 control-plane，不代表多个 TCB 已共享一个 evaluator 执行循环。
+槽位；`lainir-vm-control-test` 已覆盖 attach、start、suspend、resume、release、admit、
+finish、重复启动和 current-slot 冲突，也覆盖 Endpoint 阻塞后释放 current、对端交接、
+唤醒后重新 admit 和 pending result 消费。它仍是 control-plane，不代表多个 TCB 已共享
+一个 evaluator 执行循环。
 
 ## 3. 阶段一：建立 LainVM 核心对象
 

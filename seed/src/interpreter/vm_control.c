@@ -560,6 +560,27 @@ int lainir_vm_scheduler_resume(LainirVmScheduler *scheduler, uint64_t owner,
   return 1;
 }
 
+int lainir_vm_scheduler_release(LainirVmScheduler *scheduler, uint64_t owner) {
+  if (!scheduler_owned(scheduler, owner) || !scheduler->current ||
+      (lainir_vm_control_state(scheduler->current) != LAINIR_VM_BLOCKED &&
+       lainir_vm_control_state(scheduler->current) != LAINIR_VM_DEAD))
+    return 0;
+  scheduler->current = NULL;
+  scheduler->current_owner = 0;
+  return 1;
+}
+
+int lainir_vm_scheduler_admit(LainirVmScheduler *scheduler, uint64_t owner,
+                              LainirVmControl *control, uint64_t control_owner) {
+  if (!scheduler_owned(scheduler, owner) || scheduler->current ||
+      !scheduler_attached(scheduler, control, control_owner) ||
+      lainir_vm_control_state(control) != LAINIR_VM_RUNNING)
+    return 0;
+  scheduler->current = control;
+  scheduler->current_owner = control_owner;
+  return 1;
+}
+
 LainirVmSliceResult lainir_vm_scheduler_finish(
     LainirVmScheduler *scheduler, uint64_t owner) {
   LainirVmSliceResult result;
