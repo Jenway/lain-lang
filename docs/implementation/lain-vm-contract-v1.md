@@ -42,6 +42,7 @@ capability；无对端返回 `LAINIR_RUN_BLOCKED`，恢复后消费 control-owne
 可以先从等待表移除，Endpoint 不得保留已销毁 TCB 的引用。
 TCB backend state 必须注册 destructor；abort/free/finish 负责释放挂起 continuation，正常
 恢复路径在转移所有权后清空 state，析构函数不得重复调用。
+state 清空时必须同时清除 destructor registration，TCB 复用时不得调用旧 state 的析构函数。
 nested Endpoint 取消后若 caller 继续触发 interpreter Trap，TCB 必须进入 DEAD/TRAPPED，
 保留 Trap record，同时 scheduler 不得继续持有 current。
 同一 root 的多层 sibling nested call 必须在 child 返回后清除 child return flag，并从保存的

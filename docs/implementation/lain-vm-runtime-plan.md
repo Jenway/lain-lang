@@ -211,6 +211,8 @@ call 的通用保存格式。新增 fixture 覆盖 nested Endpoint wait 的取�
 时的 CANCELLED 结果，以及 TCB abort 后清除已登记 wait。
 VM control 的 backend state 现在带显式 destructor；TCB abort/free/finish 会释放仍挂起的
 continuation，interpreter 正常完成路径会先清空 state 再自行收尾，避免重复析构。
+显式将 backend state 设为 NULL 也会同时清除 destructor，后续 TCB 复用不会沿用旧 state
+的析构函数。
 Trap fixture 还覆盖了 nested Endpoint wait 取消后 caller 继续执行并触发 interpreter Trap；
 结果是 DEAD/TRAPPED，Trap 记录保留，scheduler current 已释放。
 顺序 sibling nested call fixture 还覆盖同一 root 先后经过两层 `wrapper -> leaf` 等待

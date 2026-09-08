@@ -45,6 +45,14 @@ static int vm_owned(const LainirVmControl *control, uint64_t owner) {
   return control && control->owner != 0 && control->owner == owner;
 }
 
+static void vm_release_backend_state(LainirVmControl *control) {
+  if (!control) return;
+  if (control->backend_state && control->backend_state_free)
+    control->backend_state_free(control->backend_state);
+  control->backend_state = NULL;
+  control->backend_state_free = NULL;
+}
+
 LainirVmControl *lainir_vm_control_new(uint64_t max_steps) {
   LainirVmControl *control = calloc(1, sizeof(*control));
   if (!control) return NULL;
@@ -56,8 +64,7 @@ LainirVmControl *lainir_vm_control_new(uint64_t max_steps) {
 
 void lainir_vm_control_free(LainirVmControl *control) {
   if (!control) return;
-  if (control->backend_state && control->backend_state_free)
-    control->backend_state_free(control->backend_state);
+  vm_release_backend_state(control);
   free(control->frames);
   free(control);
 }
@@ -251,6 +258,7 @@ int lainir_vm_control_set_backend_state(LainirVmControl *control,
   if (!vm_owned(control, owner) || control->state == LAINIR_VM_DEAD)
     return 0;
   control->backend_state = state;
+  if (!state) control->backend_state_free = NULL;
   return 1;
 }
 
@@ -496,10 +504,8 @@ LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
                                              uint64_t owner) {
   if (!vm_owned(control, owner) || control->state != LAINIR_VM_RUNNING)
     return LAINIR_VM_TRAPPED;
-  if (control->backend_state && control->backend_state_free)
-    control->backend_state_free(control->backend_state);
+  vm_release_backend_state(control);
   control->frame_count = 0;
-  control->backend_state = NULL;
   control->state = LAINIR_VM_DEAD;
   control->slice_fuel = 0;
   control->result = LAINIR_VM_DONE;
@@ -510,10 +516,8 @@ LainirVmSliceResult lainir_vm_control_abort(LainirVmControl *control,
                                             uint64_t owner) {
   if (!vm_owned(control, owner) || control->state == LAINIR_VM_DEAD)
     return LAINIR_VM_TRAPPED;
-  if (control->backend_state && control->backend_state_free)
-    control->backend_state_free(control->backend_state);
+  vm_release_backend_state(control);
   control->frame_count = 0;
-  control->backend_state = NULL;
   control->state = LAINIR_VM_DEAD;
   control->slice_fuel = 0;
   control->slice_exhausted = 0;
