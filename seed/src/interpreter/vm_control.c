@@ -253,6 +253,15 @@ int lainir_vm_control_take_endpoint_result(LainirVmControl *control,
   return 1;
 }
 
+int lainir_vm_control_has_endpoint_result(const LainirVmControl *control,
+                                           uint64_t owner,
+                                           uint32_t *kind_out) {
+  if (!vm_owned(control, owner) || !control->endpoint_result_kind)
+    return 0;
+  if (kind_out) *kind_out = control->endpoint_result_kind;
+  return 1;
+}
+
 static int endpoint_set_result(LainirVmControl *control, uint64_t owner,
                                uint32_t kind, uint64_t value) {
   if (!vm_owned(control, owner) ||

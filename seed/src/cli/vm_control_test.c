@@ -15,6 +15,22 @@ typedef struct {
   int observed;
 } ObserveContext;
 
+typedef struct {
+  uint32_t calls;
+} CounterContext;
+
+static LainirRunStatus make_value(
+    const LainirValue *args, uint32_t arg_count, LainirValue *result_out,
+    const char **error_out, void *user_data) {
+  (void)args;
+  (void)error_out;
+  CounterContext *context = user_data;
+  if (context) context->calls++;
+  if (arg_count != 0 || !result_out) return LAINIR_RUN_BAD_CALL;
+  *result_out = lainir_value_bits(99, 64);
+  return LAINIR_RUN_OK;
+}
+
 static LainirRunStatus observe_nested_frame(
     const LainirValue *args, uint32_t arg_count, LainirValue *result_out,
     const char **error_out, void *user_data) {
@@ -81,6 +97,7 @@ static int endpoint_dispatch_test(void) {
   const char *source =
       "#extern #proc endpoint.send(#bits<64> %value) -> #bits<32>;\n"
       "#extern #proc endpoint.receive() -> #bits<64>;\n"
+      "#extern #proc test.make_value() -> #bits<64>;\n"
       "#proc receive_helper() -> #bits<64> {\n"
       "  #return #call endpoint.receive()\n"
       "}\n"
@@ -88,7 +105,7 @@ static int endpoint_dispatch_test(void) {
       "  #return #call receive_helper()\n"
       "}\n"
       "#proc send_main() -> #bits<32> {\n"
-      "  #return #call endpoint.send(99)\n"
+      "  #return #call endpoint.send(#call test.make_value())\n"
       "}\n";
   L1Diagnostic diagnostic = {0};
   LainirModuleHandle *handle = NULL;
@@ -97,6 +114,7 @@ static int endpoint_dispatch_test(void) {
   LainirVmControl *sender = NULL;
   LainirCapabilityTable *receiver_caps = NULL;
   LainirCapabilityTable *sender_caps = NULL;
+  CounterContext counter = {0};
   int ok = 0;
   if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
     goto cleanup;
@@ -118,7 +136,9 @@ static int endpoint_dispatch_test(void) {
       !lainir_vm_endpoint_bind(receiver_caps, "endpoint.send",
                                "endpoint.receive", &receiver_binding) ||
       !lainir_vm_endpoint_bind(sender_caps, "endpoint.send",
-                               "endpoint.receive", &sender_binding))
+                               "endpoint.receive", &sender_binding) ||
+      !lainir_caps_add(sender_caps, "test.make_value", make_value,
+                       &counter))
     goto cleanup;
   LainirRunRequest receiver_request = {0};
   receiver_request.module = (L1Subroutine *)lainir_module_handle_first(handle);
@@ -127,12 +147,6 @@ static int endpoint_dispatch_test(void) {
   receiver_request.vm_control = receiver;
   receiver_request.vm_owner = 7;
   LainirValue receiver_result = {0};
-  const char *error = NULL;
-  if (!lainir_vm_control_begin_slice(receiver, 7, 1) ||
-      lainir_run(&receiver_request, &receiver_result, &error) !=
-          LAINIR_RUN_BLOCKED || error ||
-      lainir_vm_control_state(receiver) != LAINIR_VM_BLOCKED)
-    goto cleanup;
   LainirRunRequest sender_request = {0};
   sender_request.module = (L1Subroutine *)lainir_module_handle_first(handle);
   sender_request.entry_name = "send_main";
@@ -140,12 +154,12 @@ static int endpoint_dispatch_test(void) {
   sender_request.vm_control = sender;
   sender_request.vm_owner = 7;
   LainirValue sender_result = {0};
-  error = NULL;
+  const char *error = NULL;
   if (!lainir_vm_control_begin_slice(sender, 7, 1) ||
-      lainir_run(&sender_request, &sender_result, &error) != LAINIR_RUN_OK ||
-      error || sender_result.kind != LAINIR_VALUE_BITS ||
-      sender_result.as.bits != 1 ||
-      lainir_vm_control_state(sender) != LAINIR_VM_DEAD)
+      lainir_run(&sender_request, &sender_result, &error) !=
+          LAINIR_RUN_BLOCKED || error ||
+      counter.calls != 1 ||
+      lainir_vm_control_state(sender) != LAINIR_VM_BLOCKED)
     goto cleanup;
   error = NULL;
   if (!lainir_vm_control_begin_slice(receiver, 7, 1) ||
@@ -153,6 +167,13 @@ static int endpoint_dispatch_test(void) {
       error || receiver_result.kind != LAINIR_VALUE_BITS ||
       receiver_result.as.bits != 99 ||
       lainir_vm_control_state(receiver) != LAINIR_VM_DEAD)
+    goto cleanup;
+  error = NULL;
+  if (!lainir_vm_control_begin_slice(sender, 7, 1) ||
+      lainir_run(&sender_request, &sender_result, &error) != LAINIR_RUN_OK ||
+      error || sender_result.kind != LAINIR_VALUE_BITS ||
+      sender_result.as.bits != 1 || counter.calls != 1 ||
+      lainir_vm_control_state(sender) != LAINIR_VM_DEAD)
     goto cleanup;
   ok = 1;
 cleanup:

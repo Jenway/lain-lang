@@ -889,15 +889,31 @@ static LainirValue interp_eval_call(LainirInterpreter *interp, LainirFrame *fram
   LainirValue args_inline[8];
   LainirValue *args = args_inline;
   int args_heap = 0;
+  int endpoint_resume = 0;
   LainirValue result = lainir_value_unit();
   if (expr->data.call.arg_count > sizeof(args_inline) / sizeof(args_inline[0])) {
     args = calloc(expr->data.call.arg_count, sizeof(LainirValue));
     args_heap = 1;
     if (!args) { interp_trap(interp, "out of memory"); return result; }
   }
-  for (uint32_t i = 0; i < expr->data.call.arg_count; i++) {
-    args[i] = interp_eval_expr(interp, frame, expr->data.call.args[i]);
-    if (interp->error) { if (args_heap) free(args); return result; }
+  if (interp->vm_control && sub && sub->is_extern &&
+      (!strcmp(expr->data.call.fn_name, "endpoint.send") ||
+       !strcmp(expr->data.call.fn_name, "endpoint.receive"))) {
+    uint32_t pending_kind = 0;
+    endpoint_resume = lainir_vm_control_has_endpoint_result(
+        interp->vm_control, interp->vm_owner, &pending_kind);
+    (void)pending_kind;
+  }
+  if (!endpoint_resume) {
+    for (uint32_t i = 0; i < expr->data.call.arg_count; i++) {
+      args[i] = interp_eval_expr(interp, frame, expr->data.call.args[i]);
+      if (interp->error) { if (args_heap) free(args); return result; }
+    }
+  } else if (!strcmp(expr->data.call.fn_name, "endpoint.send")) {
+    /* The capability consumes the pending result before inspecting payload;
+     * provide a typed placeholder so a resumed send does not re-evaluate its
+     * argument expression. */
+    args[0] = lainir_value_bits(0, 64);
   }
   if (!sub) { if (args_heap) free(args); interp_trap(interp, "call target not found"); return result; }
   if (sub->is_extern && !sub->blocks) {
