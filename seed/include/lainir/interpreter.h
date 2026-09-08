@@ -109,6 +109,7 @@ typedef struct {
 LainirVmControl *lainir_vm_control_new(uint64_t max_steps);
 void lainir_vm_control_free(LainirVmControl *control);
 LainirVmState lainir_vm_control_state(const LainirVmControl *control);
+uint32_t lainir_vm_control_suspend_reason(const LainirVmControl *control);
 uint64_t lainir_vm_control_steps(const LainirVmControl *control);
 int lainir_vm_control_start(LainirVmControl *control, uint64_t owner);
 int lainir_vm_control_suspend(LainirVmControl *control, uint64_t owner,
