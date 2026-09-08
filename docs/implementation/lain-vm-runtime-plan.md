@@ -72,7 +72,8 @@ current 槽位，suspend 释放槽位，resume 重新选择该 TCB。它固定�
 Endpoint fixture 现在覆盖单发送者/单接收者 rendezvous 和等待取消：无对端时保留等待，
 交接后清空等待，发送方或接收方取消都会清除自己的等待状态。seed runtime 也提供了
 opaque `LainirVmEndpoint`：等待项只保存 TCB control object、owner 和标量 payload，
-发送/接收会驱动 TCB 的 `BLOCKED` 与 `RUNNING` 转换，不保存 activation 地址。LAINIR
+发送/接收会驱动 TCB 的 `BLOCKED` 与 `RUNNING` 转换，并把 suspend reason 固定为
+`LAINIR_VM_SUSPEND_ENDPOINT`，不保存 activation 地址。LAINIR
 当前没有 Endpoint 指令；真实 evaluator 的 endpoint capability 分派仍待接入。
 
 scheduler fixture 已扩展到两个 TCB：同一时刻只允许一个 current，挂起第一个 TCB 后

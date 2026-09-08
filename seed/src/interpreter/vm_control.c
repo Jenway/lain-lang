@@ -50,6 +50,10 @@ LainirVmState lainir_vm_control_state(const LainirVmControl *control) {
   return control ? control->state : LAINIR_VM_DEAD;
 }
 
+uint32_t lainir_vm_control_suspend_reason(const LainirVmControl *control) {
+  return control ? control->suspend_reason : 0;
+}
+
 uint64_t lainir_vm_control_steps(const LainirVmControl *control) {
   return control ? control->steps : 0;
 }

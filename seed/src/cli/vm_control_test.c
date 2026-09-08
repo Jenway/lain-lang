@@ -36,12 +36,18 @@ static int endpoint_contract_test(void) {
   LainirVmEndpoint *endpoint = lainir_vm_endpoint_new(7);
   LainirVmControl *sender = lainir_vm_control_new(16);
   LainirVmControl *receiver = lainir_vm_control_new(16);
+  LainirVmControl *foreign = lainir_vm_control_new(16);
   uint64_t value = 0;
   int ok = endpoint && sender && receiver &&
            lainir_vm_control_start(sender, 7) &&
            lainir_vm_control_start(receiver, 7) &&
+           lainir_vm_control_start(foreign, 8) &&
+           lainir_vm_endpoint_send(endpoint, 8, foreign, 8, 1) == -1 &&
            lainir_vm_endpoint_send(endpoint, 7, sender, 7, 99) == 0 &&
            lainir_vm_control_state(sender) == LAINIR_VM_BLOCKED &&
+           lainir_vm_control_suspend_reason(sender) ==
+               LAINIR_VM_SUSPEND_ENDPOINT &&
+           lainir_vm_endpoint_send(endpoint, 7, sender, 7, 100) == -1 &&
            lainir_vm_endpoint_receive(endpoint, 7, receiver, 7, &value) == 1 &&
            value == 99 && lainir_vm_control_state(sender) == LAINIR_VM_RUNNING &&
            lainir_vm_endpoint_receive(endpoint, 7, receiver, 7, NULL) == 0 &&
@@ -58,6 +64,9 @@ static int endpoint_contract_test(void) {
   lainir_vm_endpoint_free(endpoint);
   lainir_vm_control_free(sender);
   lainir_vm_control_free(receiver);
+  if (foreign && lainir_vm_control_state(foreign) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(foreign, 8);
+  lainir_vm_control_free(foreign);
   return ok;
 }
 
