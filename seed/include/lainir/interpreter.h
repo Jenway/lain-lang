@@ -61,6 +61,7 @@ typedef struct {
 } LainirCapability;
 
 typedef struct LainirVmControl LainirVmControl;
+typedef struct LainirVmEndpoint LainirVmEndpoint;
 
 typedef struct {
   L1Subroutine *module;
@@ -89,6 +90,11 @@ typedef enum {
   LAINIR_VM_DONE = 2,
   LAINIR_VM_TRAPPED = 3
 } LainirVmSliceResult;
+
+enum {
+  LAINIR_VM_SUSPEND_YIELD = 1,
+  LAINIR_VM_SUSPEND_ENDPOINT = 2
+};
 
 typedef struct {
   uint64_t procedure;
@@ -127,6 +133,21 @@ int lainir_vm_control_set_backend_state(LainirVmControl *control,
                                          uint64_t owner, void *state);
 LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
                                              uint64_t owner);
+
+/* Provider-owned single-sender/single-receiver rendezvous.  Waiting entries
+ * retain only the TCB control object, its owner token, and a scalar payload;
+ * they never retain an activation address.  send/receive return 0 when the
+ * caller blocks, 1 when a rendezvous completes, and -1 on rejection. */
+LainirVmEndpoint *lainir_vm_endpoint_new(uint64_t owner);
+void lainir_vm_endpoint_free(LainirVmEndpoint *endpoint);
+int lainir_vm_endpoint_send(LainirVmEndpoint *endpoint, uint64_t owner,
+                            LainirVmControl *sender, uint64_t sender_owner,
+                            uint64_t value);
+int lainir_vm_endpoint_receive(LainirVmEndpoint *endpoint, uint64_t owner,
+                               LainirVmControl *receiver,
+                               uint64_t receiver_owner, uint64_t *value_out);
+int lainir_vm_endpoint_cancel(LainirVmEndpoint *endpoint, uint64_t owner,
+                               LainirVmControl *control, uint64_t control_owner);
 
 /* Optional observer invoked immediately after each scalar #eval is
  * materialized by lainir_fold_module.  The value is borrowed by the caller
