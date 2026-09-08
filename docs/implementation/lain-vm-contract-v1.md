@@ -67,7 +67,8 @@ procedure 进入和返回时更新 control plane 的 CallFrame 栈，当前 nest
 阻塞/恢复回归测试（包含带 `make_value` 前置副作用的双层 `send_outer -> send_helper`）；
 每层 frame、locals、alloca、当前 instruction 和 pending result 会跨 slice 保存；表达式
 cache 会随 frame detach 重挂载，因此已完成的 sibling expression 不会在恢复时重复执行。
-分支内挂起已由同一回归 fixture 覆盖；多个并行 pending call 的通用保存仍留在后续阶段。
+分支内挂起已由同一回归 fixture 覆盖；两个 TCB 经过 nested helper 的并行 Endpoint
+pending result 已验证按各自 frame 隔离，更多通用并行 pending call 形式仍留在后续阶段。
 
 Nested continuation 的完成标准是：挂起时保存每个 frame 的 locals、参数、activation、
 返回位置和表达式游标；恢复时消费带类型的 pending call result，不重新执行已完成的参数

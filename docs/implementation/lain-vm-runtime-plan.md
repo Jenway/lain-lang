@@ -92,6 +92,8 @@ fuel 耗尽时 `run_slice` 会让 RUNNING TCB yield，释放 current 但保留 c
 LAIN-VM v1 采用严格 round-robin，不提供 priority 或 weight；对一组持续 runnable 的
 attached TCB，一个 TCB 在自己 yield 后最多等待其余 `N-1` 个 runnable TCB 各被选择一次。
 BLOCKED/DEAD TCB 不计入 `N`，所有 TCB 都不可运行时 `select` 返回空，不进行忙等。
+两个 Endpoint 的并行 fixture 现在让两个发送方分别经过 nested helper 后阻塞；恢复时
+各自的 pending result 必须回到对应 helper frame，随后才完成各自 root procedure。
 
 参考 evaluator 现在也暴露了最小 VM control API：`new_vm`、`start_tcb`、`suspend_tcb`
 和 `resume_tcb`。它们只改变 TCB 的 READY/RUNNING/BLOCKED 状态并保留 TCB position；
@@ -354,11 +356,12 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 5. **已完成：多 TCB evaluator handoff。** scheduler 已能把一个 current TCB 的真实
    evaluator slice 运行到 Endpoint 阻塞或完成，并按 attachment 顺序选择另一个 READY 或
    被唤醒的 TCB 接入同一个 `lainir_run` 入口；两个 Endpoint 的并行等待和 pending result
-   隔离已有 fixture。slice 结果到 scheduler 状态的统一转换、fuel-yield 轮转和严格
+   隔离已有 fixture；两个发送方经过 nested helper 的并行 Endpoint wait 也已验证结果
+   回到各自 frame。slice 结果到 scheduler 状态的统一转换、fuel-yield 轮转和严格
    round-robin 等待上界已有验证；v1 不引入 priority/weight。
-6. **当前阶段：nested continuation 的并行 pending-call。** 继续验证多个挂起 call 的
-   frame、表达式游标和 pending result 队列不会互相覆盖，并明确 Trap、取消和 TCB 销毁
-   时的清理边界。
+6. **当前阶段：nested continuation 的并行 pending-call。** 两个 TCB 的 nested Endpoint
+   result 已有隔离 fixture；继续验证多个挂起 call 的 frame、表达式游标和 pending result
+   队列不会互相覆盖，并明确 Trap、取消和 TCB 销毁时的清理边界。
 7. **后续：多 TCB 调度策略与平台 lowering。** 在 nested continuation、单 TCB VSpace、
    Endpoint、Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和
    裸机 lowering。
