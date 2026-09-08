@@ -151,6 +151,10 @@ native/formal lowering 若只接受标量结果，应通过 `lainir_run_backend_
 `addr`、`string`、`func` 返回明确的 adapter 缺失错误，不让裸 object descriptor 穿过
 backend 边界。需要保留 object payload 时，调用方必须改用 `lainir_run_owned_result` 并
 注册对应的 provider destructor。
+provider 也可以直接构造 `LainirVmResultAdapter` 交给
+`lainir_vm_result_handle_adapt`。adapter 的 session generation 必须仍然有效；owned
+adapter 必须带 destructor，borrowed adapter 必须省略 destructor。generation 失效、kind
+不是 object 或 ownership 与 destructor 不匹配时，adapter 会被拒绝。
 
 object payload 的 provider 责任按结果种类区分：`addr` 由 provider 声明指向的 backing
 对象及析构策略；`string` 必须区分静态借用与拥有的字符串存储；`func` 通常指向 artifact

@@ -3338,9 +3338,17 @@ LainirRunStatus lainir_run_owned_result(
       if (error_out) *error_out = "object result requires VM session";
       return LAINIR_RUN_TRAP;
     }
-    *handle_out = lainir_vm_result_handle_new(
-        request->vm_session, request->vm_session_owner, &value,
-        payload_free, payload_user_data);
+    LainirVmResultAdapter adapter = {
+        .session = request->vm_session,
+        .owner = request->vm_session_owner,
+        .session_generation =
+            lainir_vm_session_generation(request->vm_session),
+        .value = value,
+        .ownership = LAINIR_VM_PAYLOAD_OWNED,
+        .payload_free = payload_free,
+        .payload_user_data = payload_user_data,
+    };
+    *handle_out = lainir_vm_result_handle_adapt(&adapter);
     if (!*handle_out) {
       if (error_out) *error_out = "object result handle allocation failed";
       return LAINIR_RUN_TRAP;

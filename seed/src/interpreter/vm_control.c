@@ -249,6 +249,30 @@ LainirVmResultHandle *lainir_vm_result_handle_new(
   return handle;
 }
 
+LainirVmResultHandle *lainir_vm_result_handle_adapt(
+    const LainirVmResultAdapter *adapter) {
+  if (!adapter || !adapter->session || !session_owned(adapter->session, adapter->owner) ||
+      adapter->session_generation != adapter->session->generation ||
+      (adapter->value.kind != LAINIR_VALUE_ADDR &&
+       adapter->value.kind != LAINIR_VALUE_STRING &&
+       adapter->value.kind != LAINIR_VALUE_FUNC) ||
+      (adapter->ownership != LAINIR_VM_PAYLOAD_BORROWED &&
+       adapter->ownership != LAINIR_VM_PAYLOAD_OWNED))
+    return NULL;
+  if (adapter->ownership == LAINIR_VM_PAYLOAD_OWNED &&
+      !adapter->payload_free)
+    return NULL;
+  if (adapter->ownership == LAINIR_VM_PAYLOAD_BORROWED &&
+      adapter->payload_free)
+    return NULL;
+  return lainir_vm_result_handle_new(
+      adapter->session, adapter->owner, &adapter->value,
+      adapter->ownership == LAINIR_VM_PAYLOAD_OWNED
+          ? adapter->payload_free
+          : NULL,
+      adapter->payload_user_data);
+}
+
 void lainir_vm_result_handle_free(LainirVmResultHandle *handle) {
   if (!handle) return;
   result_release_payload(handle);
