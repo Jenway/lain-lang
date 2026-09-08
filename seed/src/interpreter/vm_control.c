@@ -30,6 +30,15 @@ struct LainirVmEndpoint {
   uint64_t receiver_owner;
 };
 
+struct LainirVmScheduler {
+  uint64_t owner;
+  LainirVmControl *current;
+  uint64_t current_owner;
+  LainirVmControl *attached[8];
+  uint64_t attached_owner[8];
+  uint32_t attached_count;
+};
+
 static int vm_owned(const LainirVmControl *control, uint64_t owner) {
   return control && control->owner != 0 && control->owner == owner;
 }
@@ -472,4 +481,95 @@ LainirVmSliceResult lainir_vm_control_abort(LainirVmControl *control,
   control->slice_exhausted = 0;
   control->result = LAINIR_VM_TRAPPED;
   return control->result;
+}
+
+LainirVmScheduler *lainir_vm_scheduler_new(uint64_t owner) {
+  LainirVmScheduler *scheduler = calloc(1, sizeof(*scheduler));
+  if (!scheduler || !owner) {
+    free(scheduler);
+    return NULL;
+  }
+  scheduler->owner = owner;
+  return scheduler;
+}
+
+void lainir_vm_scheduler_free(LainirVmScheduler *scheduler) {
+  free(scheduler);
+}
+
+static int scheduler_owned(const LainirVmScheduler *scheduler,
+                           uint64_t owner) {
+  return scheduler && scheduler->owner != 0 && scheduler->owner == owner;
+}
+
+static int scheduler_attached(const LainirVmScheduler *scheduler,
+                              LainirVmControl *control, uint64_t owner) {
+  if (!scheduler || !control) return 0;
+  for (uint32_t i = 0; i < scheduler->attached_count; i++)
+    if (scheduler->attached[i] == control && scheduler->attached_owner[i] == owner)
+      return 1;
+  return 0;
+}
+
+int lainir_vm_scheduler_attach(LainirVmScheduler *scheduler, uint64_t owner,
+                               LainirVmControl *control, uint64_t control_owner) {
+  if (!scheduler_owned(scheduler, owner) || !control || !control_owner ||
+      scheduler->attached_count == 8 ||
+      scheduler_attached(scheduler, control, control_owner))
+    return 0;
+  scheduler->attached[scheduler->attached_count] = control;
+  scheduler->attached_owner[scheduler->attached_count++] = control_owner;
+  return 1;
+}
+
+LainirVmControl *lainir_vm_scheduler_current(
+    const LainirVmScheduler *scheduler) {
+  return scheduler ? scheduler->current : NULL;
+}
+
+int lainir_vm_scheduler_start(LainirVmScheduler *scheduler, uint64_t owner,
+                              LainirVmControl *control, uint64_t control_owner) {
+  if (!scheduler_owned(scheduler, owner) || scheduler->current ||
+      !scheduler_attached(scheduler, control, control_owner) ||
+      !lainir_vm_control_start(control, control_owner))
+    return 0;
+  scheduler->current = control;
+  scheduler->current_owner = control_owner;
+  return 1;
+}
+
+int lainir_vm_scheduler_suspend(LainirVmScheduler *scheduler, uint64_t owner,
+                                uint32_t reason) {
+  if (!scheduler_owned(scheduler, owner) || !scheduler->current ||
+      !lainir_vm_control_suspend(scheduler->current, scheduler->current_owner,
+                                 reason))
+    return 0;
+  scheduler->current = NULL;
+  scheduler->current_owner = 0;
+  return 1;
+}
+
+int lainir_vm_scheduler_resume(LainirVmScheduler *scheduler, uint64_t owner,
+                               LainirVmControl *control, uint64_t control_owner) {
+  if (!scheduler_owned(scheduler, owner) || scheduler->current ||
+      !scheduler_attached(scheduler, control, control_owner) ||
+      !lainir_vm_control_resume(control, control_owner))
+    return 0;
+  scheduler->current = control;
+  scheduler->current_owner = control_owner;
+  return 1;
+}
+
+LainirVmSliceResult lainir_vm_scheduler_finish(
+    LainirVmScheduler *scheduler, uint64_t owner) {
+  LainirVmSliceResult result;
+  if (!scheduler_owned(scheduler, owner) || !scheduler->current)
+    return LAINIR_VM_TRAPPED;
+  result = lainir_vm_control_finish(scheduler->current,
+                                    scheduler->current_owner);
+  if (result == LAINIR_VM_DONE) {
+    scheduler->current = NULL;
+    scheduler->current_owner = 0;
+  }
+  return result;
 }

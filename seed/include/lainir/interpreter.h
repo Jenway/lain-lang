@@ -63,6 +63,7 @@ typedef struct {
 
 typedef struct LainirVmControl LainirVmControl;
 typedef struct LainirVmEndpoint LainirVmEndpoint;
+typedef struct LainirVmScheduler LainirVmScheduler;
 
 typedef struct {
   LainirVmEndpoint *endpoint;
@@ -190,6 +191,23 @@ LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
                                              uint64_t owner);
 LainirVmSliceResult lainir_vm_control_abort(LainirVmControl *control,
                                             uint64_t owner);
+
+/* Opaque single-current scheduler control plane.  It owns no TCB memory; it
+ * only enforces the current-slot and owner/state transitions. */
+LainirVmScheduler *lainir_vm_scheduler_new(uint64_t owner);
+void lainir_vm_scheduler_free(LainirVmScheduler *scheduler);
+int lainir_vm_scheduler_attach(LainirVmScheduler *scheduler, uint64_t owner,
+                               LainirVmControl *control, uint64_t control_owner);
+LainirVmControl *lainir_vm_scheduler_current(
+    const LainirVmScheduler *scheduler);
+int lainir_vm_scheduler_start(LainirVmScheduler *scheduler, uint64_t owner,
+                              LainirVmControl *control, uint64_t control_owner);
+int lainir_vm_scheduler_suspend(LainirVmScheduler *scheduler, uint64_t owner,
+                                uint32_t reason);
+int lainir_vm_scheduler_resume(LainirVmScheduler *scheduler, uint64_t owner,
+                               LainirVmControl *control, uint64_t control_owner);
+LainirVmSliceResult lainir_vm_scheduler_finish(
+    LainirVmScheduler *scheduler, uint64_t owner);
 
 /* Provider-owned single-sender/single-receiver rendezvous.  Waiting entries
  * retain only the TCB control object, its owner token, and a scalar payload;
