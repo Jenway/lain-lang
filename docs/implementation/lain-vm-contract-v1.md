@@ -46,7 +46,7 @@ source byte range，并通过 `lainir_vm_control_abort` 将 TCB 转为 `DEAD/TRA
 可通过 `lainir_vm_control_take_trap` 复制并确认该终止诊断；确认只清除诊断记录，不改变
 TCB 的终态或 `TRAPPED` 结果。parser 已为指令和表达式保存首 token 起点及最后消费 token
 的结束位置；解释器在表达式求值时将触发点写入 Trap，因此能力调用和嵌套表达式错误可以
-定位到表达式范围。
+定位到表达式范围，nested CallFrame 也会把 procedure 归属到实际触发错误的过程。
 
 continuation 属于 TCB 的 VM 内部状态。参考 evaluator 当前已经保存 procedure、region、
 instruction offset、suspend reason 和 `CallFrame` 调用帧链。可恢复的 slice 仍需要把该

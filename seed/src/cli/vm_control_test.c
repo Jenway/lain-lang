@@ -195,8 +195,11 @@ cleanup:
 
 static int trap_record_test(void) {
   const char *source =
-      "#proc main() -> #bits<32> {\n"
+      "#proc helper() -> #bits<32> {\n"
       "  #return #call missing()\n"
+      "}\n"
+      "#proc main() -> #bits<32> {\n"
+      "  #return #call helper()\n"
       "}\n";
   L1Diagnostic diagnostic = {0};
   LainirModuleHandle *handle = NULL;
@@ -217,11 +220,13 @@ static int trap_record_test(void) {
   request.vm_owner = 7;
   LainirValue result = {0};
   const char *error = NULL;
+  const L1Subroutine *helper = lainir_module_handle_first(handle);
   LainirRunStatus status = lainir_run(&request, &result, &error);
   const LainirVmTrap *trap = lainir_vm_control_trap(control);
   int ok = status == LAINIR_RUN_TRAP && error && trap && trap->active &&
            trap->kind == LAINIR_VM_TRAP_INTERPRETER &&
            trap->status == LAINIR_RUN_TRAP && trap->procedure &&
+           helper && trap->procedure == (uint64_t)(uintptr_t)helper &&
            trap->region && trap->position && trap->line == 2 &&
            trap->column > 0 && trap->source_end > trap->source_start &&
            source[trap->source_start] == '#' &&
