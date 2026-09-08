@@ -167,8 +167,10 @@ Endpoint 或 continuation 编译成 LAINIR 数据，也不增加 `#init_context`
 地址并释放 VSpace。seed interpreter 现在已经能把 root procedure 的 frame、locals、
 下一条 instruction 和 activation storage 放进 VM control 的 opaque backend state，跨
 两次 `lainir_run` 恢复并完成；当前切片在 root instruction boundary 生效，嵌套 procedure
-调用在同一切片内完成，避免在表达式副作用中间重入。参考 evaluator 的 slice fuel 只在
-instruction boundary 检查；表达式内部只计全局 step quota。
+调用在同一切片内完成，避免在表达式副作用中间重入。nested procedure 进入和返回时也会
+同步 VM control 的 CallFrame 栈，活动帧的 procedure、region、position 和 activation
+可被 control plane 观察。参考 evaluator 的 slice fuel 只在 instruction boundary 检查；
+表达式内部只计全局 step quota。
 
 ## 3. 阶段一：建立 LainVM 核心对象
 
@@ -296,8 +298,10 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    `run_slice` 返回值接入 scheduler。参考 evaluator 已有内部 `run_slice` 入口，provider-neutral
    `VmControl` fixture 已覆盖跨 procedure 的 fuel yield 和 frame resume；seed runtime
    也已把 root procedure 的真实 frame、locals、instruction position 接到 provider-owned
-   opaque control object，并由第二次 `lainir_run` 恢复。下一步扩大保存范围到嵌套 procedure
-   的调用帧链和阻塞点；当前实现只承诺 root boundary 的可恢复 slice。
+   opaque control object，并由第二次 `lainir_run` 恢复。真实 interpreter 现在也在 nested
+   procedure 进入/返回时维护该 CallFrame 栈。下一步扩大保存范围到 nested procedure
+   被挂起时的完整 frame/locals 状态和 Endpoint blocked continuation；当前实现只承诺
+   root boundary 的可恢复 slice。
 
 seed runtime 现在提供独立的 opaque C control plane：`LainirVmControl` 持有 owner、TCB
 状态、fuel、CallFrame 栈和 slice result；`lainir-vm-control-test` 已验证 owner 检查、
@@ -306,8 +310,9 @@ READY/RUNNING/BLOCKED/DEAD、fuel exhaustion、嵌套 frame 恢复和 DONE。`La
 `lainir_vm_control_consume_step`，fuel 用尽时返回 `LAINIR_RUN_SLICE`。当前这一步已经
 把 control gate 接入真实 dispatch；root procedure 的 frame、locals、activation 和下条
 instruction 已绑定到 control object 的 backend state，第二次 `lainir_run` 可以恢复并
-返回结果。当前嵌套调用在切片内原子完成，下一步才把完整调用帧链和 Endpoint blocked
-continuation 接入同一保存格式。
+返回结果。nested procedure 进入/返回时已经更新 control plane 的 CallFrame 栈；当前嵌套
+调用在切片内原子完成，下一步才把 nested frame/locals 和 Endpoint blocked continuation
+接入同一保存格式。
 4. **接入 Endpoint 的真实 ownership 检查**：fixture 已覆盖 rendezvous 和取消，下一步
    让 Endpoint 等待项只保存受 capability 授权的 TCB/owned handle，不保存裸 activation
    地址，并把非法状态转换转成统一 Trap。

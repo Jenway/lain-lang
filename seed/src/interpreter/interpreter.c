@@ -1216,12 +1216,12 @@ static void interp_exec_block(LainirInterpreter *interp, LainirFrame *frame,
     if (track) {
       interp->continuation->next_block = block;
       interp->continuation->next_inst = inst;
-      if (interp->vm_control)
-        lainir_vm_control_set_position(
-            interp->vm_control, interp->vm_owner,
-            (uint64_t)(uintptr_t)block,
-            (uint64_t)(uintptr_t)inst);
     }
+    if (interp->vm_control)
+      lainir_vm_control_set_position(
+          interp->vm_control, interp->vm_owner,
+          (uint64_t)(uintptr_t)block,
+          (uint64_t)(uintptr_t)inst);
     int saved_boundary = interp->instruction_boundary;
     interp->instruction_boundary = 1;
     int ticked = interp_tick(interp);
@@ -2700,6 +2700,7 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
   interp->call_depth++;
   frame.sub = sub; frame.arg_count = arg_count; frame.caller = saved_frame;
   interp->active_frame = &frame;
+  int vm_frame_pushed = 0;
   if (arg_count) {
     if (arg_count > sizeof(frame.args_inline) / sizeof(frame.args_inline[0])) {
       frame.args = calloc(arg_count, sizeof(LainirValue));
@@ -2803,6 +2804,21 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
     }
   }
 
+  if (interp->vm_control) {
+    if (!lainir_vm_control_push_frame(
+            interp->vm_control, interp->vm_owner,
+            (uint64_t)(uintptr_t)sub, (uint64_t)(uintptr_t)sub->blocks,
+            (uint64_t)(uintptr_t)&frame)) {
+      interp_trap(interp, "VM call frame push rejected");
+      interp_free_frame(&frame);
+      interp->call_depth--;
+      interp->trace_active = saved_trace;
+      interp->active_frame = saved_frame;
+      return lainir_value_unit();
+    }
+    vm_frame_pushed = 1;
+  }
+
   int saved_ret = interp->should_return;
   LainirValue saved_val = interp->return_value;
   interp->should_return = 0;
@@ -2812,13 +2828,24 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
     interp_exec_block(interp, &frame, block);
     if (interp->vm_slice_yielded) {
       interp_free_frame(&frame);
+      if (vm_frame_pushed)
+        (void)lainir_vm_control_pop_frame(interp->vm_control, interp->vm_owner);
       interp->should_return = saved_ret;
       interp->call_depth--;
       interp->trace_active = saved_trace;
       interp->active_frame = saved_frame;
       return lainir_value_unit();
     }
-    if (interp->error) { interp_free_frame(&frame); interp->should_return = saved_ret; interp->call_depth--; interp->trace_active = saved_trace; interp->active_frame = saved_frame; return lainir_value_unit(); }
+    if (interp->error) {
+      interp_free_frame(&frame);
+      if (vm_frame_pushed)
+        (void)lainir_vm_control_pop_frame(interp->vm_control, interp->vm_owner);
+      interp->should_return = saved_ret;
+      interp->call_depth--;
+      interp->trace_active = saved_trace;
+      interp->active_frame = saved_frame;
+      return lainir_value_unit();
+    }
     if (interp->should_return) break;
     block = block->next;
   }
@@ -2841,6 +2868,8 @@ static LainirValue interp_call_sub(LainirInterpreter *interp, L1Subroutine *sub,
   }
   interp->should_return = saved_ret;
   interp->return_value = saved_val;
+  if (vm_frame_pushed)
+    (void)lainir_vm_control_pop_frame(interp->vm_control, interp->vm_owner);
   interp_free_frame(&frame);
   interp->call_depth--;
   interp->trace_active = saved_trace;

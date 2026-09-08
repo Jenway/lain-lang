@@ -47,7 +47,8 @@ API，并由 `lainir-vm-control-test` 验证同一组 control-plane 不变量。
 现在可以携带该对象，解释器在 instruction boundary 消耗 fuel，并以
 `LAINIR_RUN_SLICE` 报告切片边界。root procedure 的 frame、locals、activation 和下一条
 instruction 保存在 control object 的 opaque backend state 中，下一次 `lainir_run` 可以
-恢复；嵌套 procedure 当前在一个 slice 内原子执行，完整调用帧链恢复留在后续阶段。
+恢复；nested procedure 进入和返回时更新 control plane 的 CallFrame 栈，当前 nested
+调用仍在一个 slice 内原子执行，nested frame/locals 的跨 slice 恢复留在后续阶段。
 
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
 必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。

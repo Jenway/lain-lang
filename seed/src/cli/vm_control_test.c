@@ -8,6 +8,30 @@ static int fail(const char *message) {
   return 1;
 }
 
+typedef struct {
+  LainirVmControl *control;
+  uint64_t expected_procedure;
+  int observed;
+} ObserveContext;
+
+static LainirRunStatus observe_nested_frame(
+    const LainirValue *args, uint32_t arg_count, LainirValue *result_out,
+    const char **error_out, void *user_data) {
+  (void)args;
+  (void)error_out;
+  ObserveContext *context = user_data;
+  const LainirVmFrame *frame =
+      context ? lainir_vm_control_current_frame(context->control) : NULL;
+  if (context && frame &&
+      (!context->expected_procedure ||
+       frame->procedure == context->expected_procedure) &&
+      frame->return_procedure != 0)
+    context->observed = 1;
+  if (arg_count != 0 || !result_out) return LAINIR_RUN_BAD_CALL;
+  *result_out = lainir_value_bits(42, 32);
+  return LAINIR_RUN_OK;
+}
+
 int main(void) {
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
@@ -42,12 +66,13 @@ int main(void) {
     return fail("finish did not reach DEAD");
   lainir_vm_control_free(control);
 
-  /* The interpreter consumes the provider-owned fuel gate at each tick and
-   * reports a slice boundary through the ordinary run status.  The one-shot
-   * evaluator frame is intentionally not resumed by this test yet. */
+  /* The interpreter consumes the provider-owned fuel gate at each instruction
+   * boundary, exposes the active nested frame to a host callback, and resumes
+   * the root frame on the next run. */
   const char *source =
+      "#extern #proc test.observe() -> #bits<32>;\n"
       "#proc helper() -> #bits<32> {\n"
-      "  #return 42\n"
+      "  #return #call test.observe()\n"
       "}\n"
       "#proc main() -> #bits<32> {\n"
       "  #let %value: #bits<32> = #call helper()\n"
@@ -67,9 +92,23 @@ int main(void) {
   if (!control || !lainir_vm_control_start(control, 9) ||
       !lainir_vm_control_begin_slice(control, 9, 1))
     return fail("interpreter control setup failed");
+  ObserveContext observe = {
+      .control = control,
+      .expected_procedure = 0,
+      .observed = 0,
+  };
+  LainirCapabilityTable *caps = lainir_caps_new();
+  if (!caps || !lainir_caps_add(caps, "test.observe", observe_nested_frame,
+                                &observe)) {
+    lainir_caps_free(caps);
+    lainir_module_handle_destroy(&handle);
+    lainir_vm_control_free(control);
+    return fail("interpreter observation capability setup failed");
+  }
   LainirRunRequest request = {0};
   request.module = (L1Subroutine *)lainir_module_handle_first(handle);
   request.entry_name = "main";
+  request.caps = caps;
   request.vm_control = control;
   request.vm_owner = 9;
   LainirValue result = {0};
@@ -78,29 +117,35 @@ int main(void) {
   if (run_status != LAINIR_RUN_SLICE ||
       !lainir_vm_control_slice_exhausted(control) || error) {
     lainir_module_handle_destroy(&handle);
+    lainir_caps_free(caps);
     lainir_vm_control_free(control);
     return fail("interpreter did not report a VM slice boundary");
   }
   const LainirVmFrame *saved_frame = lainir_vm_control_current_frame(control);
   if (!saved_frame || !saved_frame->procedure || !saved_frame->position) {
     lainir_module_handle_destroy(&handle);
+    lainir_caps_free(caps);
     lainir_vm_control_free(control);
     return fail("interpreter did not save continuation position");
   }
   if (!lainir_vm_control_begin_slice(control, 9, 1)) {
     lainir_module_handle_destroy(&handle);
+    lainir_caps_free(caps);
     lainir_vm_control_free(control);
     return fail("interpreter resume slice setup failed");
   }
   error = NULL;
   run_status = lainir_run(&request, &result, &error);
   if (run_status != LAINIR_RUN_OK || error || result.kind != LAINIR_VALUE_BITS ||
-      result.as.bits != 42 || lainir_vm_control_state(control) != LAINIR_VM_DEAD) {
+      result.as.bits != 42 || !observe.observed ||
+      lainir_vm_control_state(control) != LAINIR_VM_DEAD) {
     lainir_module_handle_destroy(&handle);
+    lainir_caps_free(caps);
     lainir_vm_control_free(control);
     return fail("interpreter continuation did not resume to completion");
   }
   lainir_vm_control_free(control);
+  lainir_caps_free(caps);
   lainir_module_handle_destroy(&handle);
   puts("PASS LAIN-VM opaque control API");
   return 0;
