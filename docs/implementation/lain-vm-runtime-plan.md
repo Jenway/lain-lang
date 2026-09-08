@@ -177,6 +177,20 @@ Endpoint 或 continuation 编译成 LAINIR 数据，也不增加 `#init_context`
 可被 control plane 观察。参考 evaluator 的 slice fuel 只在 instruction boundary 检查；
 表达式内部只计全局 step quota。
 
+### 2.2 nested continuation 的验收边界
+
+把 nested procedure 纳入可恢复 continuation 需要同时满足以下条件：
+
+1. 挂起点保存当前 frame、locals、参数、activation 归属和调用者返回位置；
+2. 保存表达式游标以及当前外部调用的 pending 状态，恢复时从调用点继续；
+3. pending 结果必须带有调用种类和结果值，恢复路径不能重新执行已经完成的参数表达式；
+4. 一个 nested call 只能完成一次，重复 resume、错误 owner 和失活 activation 都进入 Trap；
+5. Trap 或 TCB 销毁时，所有 nested frame 和 activation 一起释放，不能留下 Endpoint 等待项。
+
+当前实现只满足 root instruction boundary 和 Endpoint `send` pending-result 的特例；这些
+特例不计入 nested continuation 完成。下一次实现必须先增加一个包含前置副作用和 Endpoint
+等待的 nested fixture，再扩展保存格式。
+
 ## 3. 阶段一：建立 LainVM 核心对象
 
 目标：在现有 provider/interpreter 旁边建立真正的 VM 状态，而不改变 LAINIR 指令集。
@@ -308,7 +322,8 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 opaque control object，并由第二次 `lainir_run` 恢复；slice 之间可以先将该 TCB 置为
 BLOCKED，再 resume 后继续同一个 root frame。真实 interpreter 现在也在 nested
 procedure 进入/返回时维护该 CallFrame 栈。下一步扩大保存范围到 nested procedure
-   被挂起时的完整 frame/locals 状态和 Endpoint blocked continuation；当前实现只承诺
+   被挂起时的完整 frame/locals 状态和 Endpoint blocked continuation；验收必须满足 2.2
+   的 nested continuation 条件；当前实现只承诺
    root boundary 的可恢复 slice。
 
 seed runtime 现在提供独立的 opaque C control plane：`LainirVmControl` 持有 owner、TCB

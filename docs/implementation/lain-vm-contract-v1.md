@@ -68,6 +68,11 @@ procedure 进入和返回时更新 control plane 的 CallFrame 栈，当前 nest
 参数求值前被识别，避免重复执行 payload 表达式。通用 nested frame/locals、表达式游标
 和 pending call result 的跨 slice 保存留在后续阶段。
 
+Nested continuation 的完成标准是：挂起时保存每个 frame 的 locals、参数、activation、
+返回位置和表达式游标；恢复时消费带类型的 pending call result，不重新执行已完成的参数
+表达式；重复 resume、错误 owner、失活 activation 和残留 Endpoint wait 都必须被拒绝或
+转为 Trap。当前实现只覆盖 root boundary 与 Endpoint `send` 的 pending-result 特例。
+
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
 必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。
 
