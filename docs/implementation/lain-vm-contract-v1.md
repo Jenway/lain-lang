@@ -75,6 +75,10 @@ Nested continuation 的完成标准是：挂起时保存每个 frame 的 locals�
 转为 Trap。当前实现已覆盖多层 nested frame、表达式 cache、分支内挂起与按目标 frame
 匹配的 Endpoint `send` pending-result 队列；多个 TCB/Endpoint 的并行等待仍需接入 scheduler。
 
+多 TCB handoff 的 contract 是：scheduler 同时只选择一个 current TCB；Endpoint wait 只保留
+TCB control object、owner 和 payload；唤醒只作用于登记的 TCB；pending result 绑定目标
+TCB/frame；当前 Endpoint 保持单 sender/单 receiver rendezvous，不隐式提供 fanout 或广播。
+
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
 必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。
 

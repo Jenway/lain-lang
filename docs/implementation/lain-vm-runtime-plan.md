@@ -194,6 +194,18 @@ receiver 在 Endpoint wait 前完成的 sibling `make_value`，确认恢复后�
 一次；同一 fixture 也覆盖 `#if` 分支内的 Endpoint wait。仍未完成的是多个并行 pending
 call 的通用保存格式。
 
+### 2.3 多 TCB/Endpoint handoff 的边界
+
+多 TCB scheduler 接入时必须保持以下约束：
+
+1. scheduler 维护唯一 current TCB；Endpoint wait 让出 current，唤醒时只恢复登记的 TCB；
+2. Endpoint wait 项只保存 TCB control object、owner 和 payload，不保存 activation 地址；
+3. pending result 必须绑定目标 TCB/frame，不能由另一个 TCB 读取；
+4. 当前 Endpoint 仍是单 sender/单 receiver rendezvous；fanout、广播和多 receiver 排队
+   属于后续模型，不能通过隐式扩展当前 API 得到；
+5. 验收 fixture 必须覆盖两个 TCB 的 handoff、Endpoint 阻塞、对端唤醒、结果消费和取消，
+   并确认两个 TCB 的 activation/VSpace 生命周期互不越界。
+
 ## 3. 阶段一：建立 LainVM 核心对象
 
 目标：在现有 provider/interpreter 旁边建立真正的 VM 状态，而不改变 LAINIR 指令集。
@@ -320,9 +332,9 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    和 payload；pending result 可唤醒 TCB；Trap 可记录、abort、由 scheduler 消费，并带有
    instruction/expression span 和实际 nested procedure。
 5. **当前阶段：nested continuation。** 多层 nested frame、表达式 cache、Endpoint wait、
-   分支内挂起、逐层恢复和按目标 frame 匹配的 pending result 队列已完成；下一步把多个
-   TCB/Endpoint 的并行等待接入同一 scheduler，并把所有恢复点从 root instruction 重试
-   完全迁移到 nested call point。
+   分支内挂起、逐层恢复和按目标 frame 匹配的 pending result 队列已完成；下一步按 2.3
+   把多个 TCB/Endpoint 的并行等待接入同一 scheduler，并把所有恢复点从 root instruction
+   重试完全迁移到 nested call point。
 6. **后续：多 TCB 与平台 lowering。** nested continuation、单 TCB VSpace、Endpoint、Trap
    和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和裸机 lowering。
 
