@@ -2,6 +2,7 @@
 #include "lainir/eval_source.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int fail(const char *message) {
@@ -18,6 +19,28 @@ typedef struct {
 typedef struct {
   uint32_t calls;
 } CounterContext;
+
+static uint32_t backend_state_free_calls;
+
+static void count_backend_state_free(void *state) {
+  backend_state_free_calls++;
+  free(state);
+}
+
+static int backend_state_cleanup_test(void) {
+  LainirVmControl *control = lainir_vm_control_new(8);
+  void *state = malloc(1);
+  backend_state_free_calls = 0;
+  int ok = control && state && lainir_vm_control_start(control, 7) &&
+           lainir_vm_control_set_backend_state(control, 7, state) &&
+           lainir_vm_control_set_backend_state_destructor(
+               control, 7, count_backend_state_free) &&
+           lainir_vm_control_abort(control, 7) == LAINIR_VM_TRAPPED &&
+           backend_state_free_calls == 1;
+  if (!ok && state && backend_state_free_calls == 0) free(state);
+  lainir_vm_control_free(control);
+  return ok;
+}
 
 static LainirRunStatus make_value(
     const LainirValue *args, uint32_t arg_count, LainirValue *result_out,
@@ -656,6 +679,65 @@ cleanup:
   return ok;
 }
 
+static int scheduler_nested_abort_cleanup_test(void) {
+  const char *source =
+      "#extern #proc endpoint.send(#bits<64> %value) -> #bits<32>;\n"
+      "#proc send_leaf() -> #bits<32> {\n"
+      "  #return #call endpoint.send(42)\n"
+      "}\n"
+      "#proc send() -> #bits<32> {\n"
+      "  #return #call send_leaf()\n"
+      "}\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  LainirVmScheduler *scheduler = NULL;
+  LainirVmEndpoint *endpoint = NULL;
+  LainirVmControl *control = NULL;
+  LainirCapabilityTable *caps = NULL;
+  LainirVmEndpointBinding binding = {0};
+  LainirRunRequest request = {0};
+  LainirValue result = {0};
+  LainirRunStatus run_status = LAINIR_RUN_TRAP;
+  const char *error = NULL;
+  int ok = 0;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
+    goto cleanup;
+  scheduler = lainir_vm_scheduler_new(7);
+  endpoint = lainir_vm_endpoint_new(7);
+  control = lainir_vm_control_new(16);
+  caps = lainir_caps_new();
+  binding.endpoint = endpoint;
+  binding.control = control;
+  binding.owner = 7;
+  if (!scheduler || !endpoint || !control || !caps ||
+      !lainir_vm_scheduler_attach(scheduler, 7, control, 7) ||
+      !lainir_vm_endpoint_bind(caps, "endpoint.send", "endpoint.receive",
+                               &binding) ||
+      !lainir_vm_scheduler_select(scheduler, 7, NULL))
+    goto cleanup;
+  request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  request.entry_name = "send";
+  request.caps = caps;
+  if (lainir_vm_scheduler_run_slice(
+          scheduler, 7, 8, &request, &run_status, &result, &error) !=
+          LAINIR_VM_BLOCKED_RESULT ||
+      run_status != LAINIR_RUN_BLOCKED || error ||
+      lainir_vm_control_state(control) != LAINIR_VM_BLOCKED ||
+      lainir_vm_scheduler_current(scheduler) != NULL ||
+      lainir_vm_control_abort(control, 7) != LAINIR_VM_TRAPPED ||
+      lainir_vm_control_state(control) != LAINIR_VM_DEAD ||
+      lainir_vm_endpoint_cancel(endpoint, 7, control, 7) != 1)
+    goto cleanup;
+  ok = 1;
+cleanup:
+  lainir_caps_free(caps);
+  lainir_vm_scheduler_free(scheduler);
+  lainir_vm_endpoint_free(endpoint);
+  lainir_vm_control_free(control);
+  lainir_module_handle_destroy(&handle);
+  return ok;
+}
+
 static int scheduler_fair_rotation_test(void) {
   const char *source =
       "#proc work() -> #bits<32> {\n"
@@ -718,6 +800,8 @@ cleanup:
 }
 
 int main(void) {
+  if (!backend_state_cleanup_test())
+    return fail("backend state cleanup failed");
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
   if (!lainir_vm_control_start(control, 7)) return fail("start failed");
@@ -765,6 +849,8 @@ int main(void) {
     return fail("scheduler parallel endpoint wait failed");
   if (!scheduler_nested_cancel_test())
     return fail("scheduler nested cancellation failed");
+  if (!scheduler_nested_abort_cleanup_test())
+    return fail("scheduler nested abort cleanup failed");
   if (!scheduler_fair_rotation_test())
     return fail("scheduler fair rotation failed");
 

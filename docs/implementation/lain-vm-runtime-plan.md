@@ -209,6 +209,8 @@ receiver 在 Endpoint wait 前完成的 sibling `make_value`，确认恢复后�
 一次；同一 fixture 也覆盖 `#if` 分支内的 Endpoint wait。仍未完成的是多个并行 pending
 call 的通用保存格式。新增 fixture 覆盖 nested Endpoint wait 的取消恢复、Endpoint 销毁
 时的 CANCELLED 结果，以及 TCB abort 后清除已登记 wait。
+VM control 的 backend state 现在带显式 destructor；TCB abort/free/finish 会释放仍挂起的
+continuation，interpreter 正常完成路径会先清空 state 再自行收尾，避免重复析构。
 
 ### 2.3 多 TCB/Endpoint handoff 的边界
 
@@ -363,9 +365,10 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    回到各自 frame。slice 结果到 scheduler 状态的统一转换、fuel-yield 轮转和严格
    round-robin 等待上界已有验证；v1 不引入 priority/weight。
 6. **当前阶段：nested continuation 的并行 pending-call。** 两个 TCB 的 nested Endpoint
-   result 已有隔离 fixture，取消、Endpoint 销毁和 TCB abort 的 wait 清理也已有验证；继续
-   验证多个挂起 call 的 frame、表达式游标和 pending result 队列不会互相覆盖，并补齐
-   Trap 路径下的统一清理边界。
+   result 已有隔离 fixture，取消、Endpoint 销毁和 TCB abort 的 wait 清理也已有验证；
+   backend state destructor 已接入并由 nested abort fixture 验证。继续验证多个挂起 call
+   的 frame、表达式游标和 pending result 队列不会互相覆盖，并补齐 Trap 路径下的统一
+   清理边界。
 7. **后续：多 TCB 调度策略与平台 lowering。** 在 nested continuation、单 TCB VSpace、
    Endpoint、Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和
    裸机 lowering。

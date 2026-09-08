@@ -40,6 +40,8 @@ TCB control object、owner 和标量 payload，不保存 activation 地址；own
 capability；无对端返回 `LAINIR_RUN_BLOCKED`，恢复后消费 control-owned pending result。
 释放 Endpoint 会将仍在等待的 sender/receiver 标记为 CANCELLED 并唤醒；已 DEAD 的 TCB
 可以先从等待表移除，Endpoint 不得保留已销毁 TCB 的引用。
+TCB backend state 必须注册 destructor；abort/free/finish 负责释放挂起 continuation，正常
+恢复路径在转移所有权后清空 state，析构函数不得重复调用。
 `LainirVmControl` 暴露只读 suspend reason，Endpoint 等待固定为
 `LAINIR_VM_SUSPEND_ENDPOINT`，scheduler 可以据此区分主动 yield 与资源等待。
 解释器 Trap 和 capability rejection 会写入同一个 control-owned `LainirVmTrap`，调用者

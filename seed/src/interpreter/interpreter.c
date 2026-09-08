@@ -138,6 +138,7 @@ typedef struct {
 
 /* ── forward declarations for mutual recursion ── */
 static LainirValue interp_eval_expr(LainirInterpreter *, LainirFrame *, L1Expr *);
+static void interp_destroy_continuation(LainirContinuation *continuation);
 static void interp_exec_block(LainirInterpreter *, LainirFrame *, L1Block *);
 static LainirValue interp_call_sub(LainirInterpreter *, L1Subroutine *,
                                     const LainirValue *, uint32_t);
@@ -2955,6 +2956,9 @@ static LainirValue interp_call_root_resumable(
     continuation->frame.arg_count = arg_count;
     if (!lainir_vm_control_set_backend_state(
             interp->vm_control, interp->vm_owner, continuation) ||
+        !lainir_vm_control_set_backend_state_destructor(
+            interp->vm_control, interp->vm_owner,
+            (LainirVmBackendStateFree)interp_destroy_continuation) ||
         !lainir_vm_control_push_frame(
             interp->vm_control, interp->vm_owner,
             (uint64_t)(uintptr_t)sub, (uint64_t)(uintptr_t)sub->blocks,

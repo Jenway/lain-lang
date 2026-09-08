@@ -16,6 +16,7 @@ struct LainirVmControl {
   uint32_t frame_count;
   uint32_t frame_capacity;
   void *backend_state;
+  LainirVmBackendStateFree backend_state_free;
   uint32_t endpoint_result_kind;
   uint64_t endpoint_result_value;
   LainirVmTrap trap;
@@ -55,6 +56,8 @@ LainirVmControl *lainir_vm_control_new(uint64_t max_steps) {
 
 void lainir_vm_control_free(LainirVmControl *control) {
   if (!control) return;
+  if (control->backend_state && control->backend_state_free)
+    control->backend_state_free(control->backend_state);
   free(control->frames);
   free(control);
 }
@@ -248,6 +251,14 @@ int lainir_vm_control_set_backend_state(LainirVmControl *control,
   if (!vm_owned(control, owner) || control->state == LAINIR_VM_DEAD)
     return 0;
   control->backend_state = state;
+  return 1;
+}
+
+int lainir_vm_control_set_backend_state_destructor(
+    LainirVmControl *control, uint64_t owner, LainirVmBackendStateFree destroy) {
+  if (!vm_owned(control, owner) || control->state == LAINIR_VM_DEAD)
+    return 0;
+  control->backend_state_free = destroy;
   return 1;
 }
 
@@ -485,6 +496,8 @@ LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
                                              uint64_t owner) {
   if (!vm_owned(control, owner) || control->state != LAINIR_VM_RUNNING)
     return LAINIR_VM_TRAPPED;
+  if (control->backend_state && control->backend_state_free)
+    control->backend_state_free(control->backend_state);
   control->frame_count = 0;
   control->backend_state = NULL;
   control->state = LAINIR_VM_DEAD;
@@ -497,6 +510,8 @@ LainirVmSliceResult lainir_vm_control_abort(LainirVmControl *control,
                                             uint64_t owner) {
   if (!vm_owned(control, owner) || control->state == LAINIR_VM_DEAD)
     return LAINIR_VM_TRAPPED;
+  if (control->backend_state && control->backend_state_free)
+    control->backend_state_free(control->backend_state);
   control->frame_count = 0;
   control->backend_state = NULL;
   control->state = LAINIR_VM_DEAD;
