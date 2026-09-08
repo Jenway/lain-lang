@@ -2903,6 +2903,11 @@ static int interp_resume_nested_continuation(LainirInterpreter *interp) {
     if (continuation->nested_top) continue;
     interp->active_frame = &continuation->frame;
     interp->call_depth = 1;
+    /* The child return value is already queued for the root expression.  Do
+     * not let the child's return flag terminate the root before it resumes
+     * at its saved instruction and consumes that pending result. */
+    interp->should_return = 0;
+    interp->return_value = lainir_value_unit();
     return 1;
   }
   return 1;

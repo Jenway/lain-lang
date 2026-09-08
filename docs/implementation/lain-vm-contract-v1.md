@@ -44,6 +44,8 @@ TCB backend state 必须注册 destructor；abort/free/finish 负责释放挂起
 恢复路径在转移所有权后清空 state，析构函数不得重复调用。
 nested Endpoint 取消后若 caller 继续触发 interpreter Trap，TCB 必须进入 DEAD/TRAPPED，
 保留 Trap record，同时 scheduler 不得继续持有 current。
+同一 root 的 sibling nested call 必须在 child 返回后清除 child return flag，并从保存的
+root instruction 继续；Endpoint A/B 的顺序等待 fixture 固定了这一点。
 `LainirVmControl` 暴露只读 suspend reason，Endpoint 等待固定为
 `LAINIR_VM_SUSPEND_ENDPOINT`，scheduler 可以据此区分主动 yield 与资源等待。
 解释器 Trap 和 capability rejection 会写入同一个 control-owned `LainirVmTrap`，调用者
