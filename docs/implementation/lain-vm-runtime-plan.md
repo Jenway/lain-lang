@@ -406,13 +406,17 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    Endpoint 销毁和 TCB abort 的 wait 清理也已有验证，backend state destructor 已接入并由
    nested abort fixture 验证；两个结果返回后再 Trap 的 fixture 也已验证统一清理边界。
    继续补充不同表达式形状的恢复覆盖；fan-out/fan-in 仍需单独的 Endpoint 模型决策。
-7. **当前阶段：长生命周期 VM contract 与平台 lowering 前置。** 先定义可复用 VSpace 的
-   generation/reset contract、带 VSpace identity 和 generation 的 result handle 归属以及
-   多 TCB/多 VSpace 生命周期边界（一个 TCB 的 finish 不得 reset 另一个 VSpace），并固定
-   可复用 session 的显式 reset/release API，再进入 native、
-   线程、用户态地址空间和裸机 lowering。多 TCB 调度仍沿用已固定的严格 round-robin，
-   不在本阶段引入 priority/weight。
-8. **后续：平台 lowering。** 在 nested continuation、单 TCB VSpace、
+7. **已完成首轮：长生命周期 VM contract 与 session control。** VSpace 的
+   generation/reset、VSpace identity、result handle 归属、provider backing arena 回收、
+   多 TCB/多 VSpace 隔离和 opaque session reset/release API 均已有 provider-neutral 与
+   seed runtime fixture；`LainirRunRequest` 也会检查 control attachment。多 TCB 调度继续
+   沿用严格 round-robin，不引入 priority/weight。
+8. **当前阶段：provider payload adapter 与 lowering 前置。** 为 addr、string、func 及
+   type/module/AST object result 定义 borrowed/owned payload adapter 和 destructor 注册
+   规则；让 native/formal backend 在没有 adapter 时拒绝 object result，只允许 scalar/unit
+   结果跨 backend 边界；把 session generation 元数据纳入 adapter 验收，并用现有 native/
+   formal matrix 回归。
+9. **后续：平台 lowering。** 在 nested continuation、单 TCB VSpace、
    Endpoint、Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和
    裸机 lowering。
 
@@ -420,7 +424,8 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 exhaustion、root continuation、nested frame observation、Endpoint rendezvous、pending
 result、Trap abort/acknowledgement、源码定位，以及 scheduler 驱动的双 TCB evaluator
 handoff、按 attachment 顺序的 runnable 选择、fuel-yield 轮转和多个 Endpoint wait 隔离。
-v1 严格 round-robin 的等待上界已固定；通用并行 pending continuation 仍未完成。
+v1 严格 round-robin 的等待上界已固定；result handle/session generation 和 object payload
+析构边界已有 fixture，provider-specific adapter 仍是当前阶段。
 
 当前基线命令：
 
