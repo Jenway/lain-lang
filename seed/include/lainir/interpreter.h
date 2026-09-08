@@ -69,7 +69,7 @@ typedef struct {
   uint32_t arg_count;
   LainirCapabilityTable *caps;
   /* Optional backend-owned control plane.  A non-NULL value enables the
-   * instruction fuel gate; the one-shot frame stack remains evaluator-owned. */
+   * instruction fuel gate and may retain a resumable root continuation. */
   LainirVmControl *vm_control;
   uint64_t vm_owner;
 } LainirRunRequest;
@@ -122,6 +122,9 @@ int lainir_vm_control_set_position(LainirVmControl *control, uint64_t owner,
 int lainir_vm_control_pop_frame(LainirVmControl *control, uint64_t owner);
 const LainirVmFrame *lainir_vm_control_current_frame(
     const LainirVmControl *control);
+void *lainir_vm_control_backend_state(const LainirVmControl *control);
+int lainir_vm_control_set_backend_state(LainirVmControl *control,
+                                         uint64_t owner, void *state);
 LainirVmSliceResult lainir_vm_control_finish(LainirVmControl *control,
                                              uint64_t owner);
 
