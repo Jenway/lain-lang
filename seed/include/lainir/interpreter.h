@@ -206,6 +206,9 @@ int lainir_vm_scheduler_suspend(LainirVmScheduler *scheduler, uint64_t owner,
                                 uint32_t reason);
 int lainir_vm_scheduler_resume(LainirVmScheduler *scheduler, uint64_t owner,
                                LainirVmControl *control, uint64_t control_owner);
+int lainir_vm_scheduler_release(LainirVmScheduler *scheduler, uint64_t owner);
+int lainir_vm_scheduler_admit(LainirVmScheduler *scheduler, uint64_t owner,
+                              LainirVmControl *control, uint64_t control_owner);
 LainirVmSliceResult lainir_vm_scheduler_finish(
     LainirVmScheduler *scheduler, uint64_t owner);
 
