@@ -140,9 +140,11 @@ boundary 更新帧位置，返回时弹出并恢复调用者位置。这提供�
 Eval result 现在提供只读的 Trap kind、procedure 和 position 访问器。Provider smoke
 已通过该迁移。
 
-VSpace 的 session 级 reset 也尚未接入。直接在当前 `execute` 返回点重置地址表会让
-provider 仍持有的 arena 地址变成 stale address；因此当前实现只关闭 activation frame，
-完整 VSpace reset 要等 owner transfer/release contract 先落地。
+当前执行入口是一次性 root VM；它在 `finish_vm` 中已经完成 VSpace release，关闭地址和
+activation handle 并释放 backing arena。尚未接入的是长生命周期 session 的显式 reset API：
+如果以后允许一个 VSpace 跨多个 root execution 复用，就必须把 generation、result handle
+和 activation storage 的失效规则暴露为独立 contract，不能把一次性 `finish_vm` 当作 session
+reset 的替代品。
 
 这些检查是迁移的起点，不代表 LainVM runtime 已经存在。
 
@@ -219,6 +221,21 @@ Trap fixture 还覆盖了 nested Endpoint wait 取消后 caller 继续执行并�
 Endpoint A/B；每个 child 返回后不会遗留 `should_return`，root 会从保存的 instruction
 继续执行第二个 wrapper。另一个 fixture 让两个结果都回传后 caller 再触发 interpreter
 Trap，确认 pending result、nested frame 和 backend state 会在同一次 Trap 收尾中一起释放。
+
+当前 nested continuation 的覆盖边界如下：
+
+| 路径 | 状态 |
+| --- | --- |
+| 单 TCB、单 Endpoint 的 nested wait/resume | 已验证 |
+| 两个 TCB、两个 Endpoint 的 nested pending result 隔离 | 已验证 |
+| 同一 root 的连续 sibling nested wait | 已验证 |
+| 取消、Endpoint 销毁、TCB abort 后的 continuation 清理 | 已验证 |
+| 多个结果已回传后再 Trap 的统一清理 | 已验证 |
+| 多个未完成 call 的通用 fan-out/fan-in 语义 | 未定义，留待后续模型设计 |
+
+因此当前阶段剩余工作是把已定义的恢复路径推广到更多表达式形状，并继续保持
+fan-out/fan-in 不通过隐式扩展当前单 sender/单 receiver Endpoint contract。它不再包含
+已经由上述 fixture 固定的清理和结果隔离语义。
 
 ### 2.3 多 TCB/Endpoint handoff 的边界
 
@@ -372,12 +389,16 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    隔离已有 fixture；两个发送方经过 nested helper 的并行 Endpoint wait 也已验证结果
    回到各自 frame。slice 结果到 scheduler 状态的统一转换、fuel-yield 轮转和严格
    round-robin 等待上界已有验证；v1 不引入 priority/weight。
-6. **当前阶段：nested continuation 的并行 pending-call。** 两个 TCB 的 nested Endpoint
+6. **已完成首轮：nested continuation 的并行 pending-call。** 两个 TCB 的 nested Endpoint
    result 已有隔离 fixture，同一 root 的两层 sibling nested Endpoint wait 也已验证；取消、
    Endpoint 销毁和 TCB abort 的 wait 清理也已有验证，backend state destructor 已接入并由
    nested abort fixture 验证；两个结果返回后再 Trap 的 fixture 也已验证统一清理边界。
-   继续验证更多挂起 call 的 frame、表达式游标和 pending result 队列不会互相覆盖。
-7. **后续：多 TCB 调度策略与平台 lowering。** 在 nested continuation、单 TCB VSpace、
+   继续补充不同表达式形状的恢复覆盖；fan-out/fan-in 仍需单独的 Endpoint 模型决策。
+7. **当前阶段：长生命周期 VM contract 与平台 lowering 前置。** 先定义可复用 VSpace 的
+   generation/reset contract、result handle 归属和多 TCB 生命周期边界，再进入 native、
+   线程、用户态地址空间和裸机 lowering。多 TCB 调度仍沿用已固定的严格 round-robin，
+   不在本阶段引入 priority/weight。
+8. **后续：平台 lowering。** 在 nested continuation、单 TCB VSpace、
    Endpoint、Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和
    裸机 lowering。
 
