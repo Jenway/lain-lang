@@ -32,6 +32,35 @@ static LainirRunStatus observe_nested_frame(
   return LAINIR_RUN_OK;
 }
 
+static int endpoint_contract_test(void) {
+  LainirVmEndpoint *endpoint = lainir_vm_endpoint_new(7);
+  LainirVmControl *sender = lainir_vm_control_new(16);
+  LainirVmControl *receiver = lainir_vm_control_new(16);
+  uint64_t value = 0;
+  int ok = endpoint && sender && receiver &&
+           lainir_vm_control_start(sender, 7) &&
+           lainir_vm_control_start(receiver, 7) &&
+           lainir_vm_endpoint_send(endpoint, 7, sender, 7, 99) == 0 &&
+           lainir_vm_control_state(sender) == LAINIR_VM_BLOCKED &&
+           lainir_vm_endpoint_receive(endpoint, 7, receiver, 7, &value) == 1 &&
+           value == 99 && lainir_vm_control_state(sender) == LAINIR_VM_RUNNING &&
+           lainir_vm_endpoint_receive(endpoint, 7, receiver, 7, NULL) == 0 &&
+           lainir_vm_control_state(receiver) == LAINIR_VM_BLOCKED &&
+           lainir_vm_endpoint_cancel(endpoint, 7, receiver, 7) == 1 &&
+           lainir_vm_control_state(receiver) == LAINIR_VM_RUNNING &&
+           lainir_vm_endpoint_send(endpoint, 7, sender, 7, 123) == 0 &&
+           lainir_vm_endpoint_cancel(endpoint, 7, sender, 7) == 1 &&
+           lainir_vm_control_state(sender) == LAINIR_VM_RUNNING;
+  if (sender && lainir_vm_control_state(sender) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(sender, 7);
+  if (receiver && lainir_vm_control_state(receiver) == LAINIR_VM_RUNNING)
+    (void)lainir_vm_control_finish(receiver, 7);
+  lainir_vm_endpoint_free(endpoint);
+  lainir_vm_control_free(sender);
+  lainir_vm_control_free(receiver);
+  return ok;
+}
+
 int main(void) {
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
@@ -65,6 +94,7 @@ int main(void) {
       lainir_vm_control_state(control) != LAINIR_VM_DEAD)
     return fail("finish did not reach DEAD");
   lainir_vm_control_free(control);
+  if (!endpoint_contract_test()) return fail("endpoint rendezvous contract failed");
 
   /* The interpreter consumes the provider-owned fuel gate at each instruction
    * boundary, exposes the active nested frame to a host callback, and resumes

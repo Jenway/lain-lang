@@ -2,7 +2,8 @@
 
 状态：contract 草案，当前只覆盖 `#eval` 的单 session。它把已经存在的
 `CompileContextV1` 和 `EvalResultV1` 约束整理成 VM 边界；它不引入新的 LAINIR
-指令，也不宣称多 TCB、Endpoint、Trap 或软件 MMU 已经有真实 provider 实现。
+指令，也不宣称多 TCB、Trap 或软件 MMU 已经接入 LAINIR evaluator。Endpoint 已有 seed
+provider control API，但仍通过 VM control plane 保持 opaque。
 
 ## 当前对象映射
 
@@ -31,8 +32,10 @@ offset 保存在内部 TCB；这些字段属于 VM control state，不是 LAINIR
 已经可以从任意 instruction offset 继续执行。
 
 Endpoint contract 支持单发送者和单接收者 rendezvous。没有对端时发送或接收会留下等待
-状态；对端到达后一次性交接并清空等待状态。发送者或接收者可以取消自己的等待，取消
-是幂等边界之外的第二次操作并不会再次清理其他状态。
+状态并将对应 TCB 置为 `BLOCKED`；对端到达后一次性交接、清空等待并恢复对应 TCB。
+发送者或接收者可以取消自己的等待，取消会恢复该 TCB。seed `LainirVmEndpoint` 只保存
+TCB control object、owner 和标量 payload，不保存 activation 地址；owner、重复等待和
+非法状态都会被拒绝。
 
 continuation 属于 TCB 的 VM 内部状态。参考 evaluator 当前已经保存 procedure、region、
 instruction offset、suspend reason 和 `CallFrame` 调用帧链。可恢复的 slice 仍需要把该
