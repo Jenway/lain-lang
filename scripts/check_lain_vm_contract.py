@@ -350,6 +350,34 @@ class OwnedHandle:
             raise ValueError("released or foreign handle used")
 
 
+@dataclass
+class ResultHandle:
+    """An Eval result whose storage belongs to one VSpace generation."""
+
+    owner: int
+    generation: int
+    released: bool = False
+
+    def transfer(self, owner: int, target: int) -> None:
+        if self.released or owner != self.owner or target == owner:
+            raise ValueError("result ownership transfer rejected")
+        self.owner = target
+
+    def release(self, owner: int) -> None:
+        if self.released or owner != self.owner:
+            raise ValueError("result release rejected")
+        self.released = True
+
+    def use(self, vspace: VSpace, owner: int) -> None:
+        if (
+            self.released
+            or owner != self.owner
+            or self.generation != vspace.generation
+            or vspace.released
+        ):
+            raise ValueError("stale or foreign result handle")
+
+
 def expect_failure(action, error: type[BaseException]) -> None:
     try:
         action()
@@ -483,6 +511,16 @@ def main() -> int:
     handle.release(9)
     expect_failure(lambda: handle.use(9), ValueError)
     expect_failure(lambda: handle.release(9), ValueError)
+    result_handle = ResultHandle(owner=7, generation=vspace.generation)
+    result_handle.use(vspace, 7)
+    result_handle.transfer(7, 9)
+    result_handle.use(vspace, 9)
+    expect_failure(lambda: result_handle.use(vspace, 7), ValueError)
+    vspace.reset(7)
+    expect_failure(lambda: result_handle.use(vspace, 9), ValueError)
+    expect_failure(lambda: result_handle.release(7), ValueError)
+    result_handle.release(9)
+    expect_failure(lambda: result_handle.release(9), ValueError)
     endpoint = Endpoint()
     if endpoint.send(1, 42) is not None:
         raise SystemExit("endpoint send without receiver did not block")
