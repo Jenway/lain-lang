@@ -98,6 +98,22 @@ typedef enum {
   LAINIR_VM_TRAPPED = 3
 } LainirVmSliceResult;
 
+typedef enum {
+  LAINIR_VM_TRAP_NONE = 0,
+  LAINIR_VM_TRAP_INTERPRETER = 1,
+  LAINIR_VM_TRAP_CAPABILITY = 2,
+  LAINIR_VM_TRAP_STATE = 3
+} LainirVmTrapKind;
+
+typedef struct {
+  LainirVmTrapKind kind;
+  int32_t status;
+  uint64_t procedure;
+  uint64_t region;
+  uint64_t position;
+  int active;
+} LainirVmTrap;
+
 enum {
   LAINIR_VM_SUSPEND_YIELD = 1,
   LAINIR_VM_SUSPEND_ENDPOINT = 2
@@ -142,6 +158,9 @@ int lainir_vm_control_set_position(LainirVmControl *control, uint64_t owner,
 int lainir_vm_control_pop_frame(LainirVmControl *control, uint64_t owner);
 const LainirVmFrame *lainir_vm_control_current_frame(
     const LainirVmControl *control);
+const LainirVmTrap *lainir_vm_control_trap(const LainirVmControl *control);
+int lainir_vm_control_record_trap(LainirVmControl *control, uint64_t owner,
+                                   LainirVmTrapKind kind, int32_t status);
 void *lainir_vm_control_backend_state(const LainirVmControl *control);
 int lainir_vm_control_set_backend_state(LainirVmControl *control,
                                          uint64_t owner, void *state);

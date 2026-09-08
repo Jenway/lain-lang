@@ -165,6 +165,41 @@ cleanup:
   return ok;
 }
 
+static int trap_record_test(void) {
+  const char *source =
+      "#proc main() -> #bits<32> {\n"
+      "  #return #call missing()\n"
+      "}\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  LainirVmControl *control = NULL;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
+    return 0;
+  control = lainir_vm_control_new(8);
+  if (!control || !lainir_vm_control_start(control, 7) ||
+      !lainir_vm_control_begin_slice(control, 7, 1)) {
+    lainir_vm_control_free(control);
+    lainir_module_handle_destroy(&handle);
+    return 0;
+  }
+  LainirRunRequest request = {0};
+  request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  request.entry_name = "main";
+  request.vm_control = control;
+  request.vm_owner = 7;
+  LainirValue result = {0};
+  const char *error = NULL;
+  LainirRunStatus status = lainir_run(&request, &result, &error);
+  const LainirVmTrap *trap = lainir_vm_control_trap(control);
+  int ok = status == LAINIR_RUN_TRAP && error && trap && trap->active &&
+           trap->kind == LAINIR_VM_TRAP_INTERPRETER &&
+           trap->status == LAINIR_RUN_TRAP && trap->procedure &&
+           trap->region && trap->position;
+  lainir_vm_control_free(control);
+  lainir_module_handle_destroy(&handle);
+  return ok;
+}
+
 int main(void) {
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
@@ -201,6 +236,7 @@ int main(void) {
   if (!endpoint_contract_test()) return fail("endpoint rendezvous contract failed");
   if (!endpoint_dispatch_test())
     return fail("endpoint capability dispatch failed");
+  if (!trap_record_test()) return fail("structured trap record failed");
 
   /* The interpreter consumes the provider-owned fuel gate at each instruction
    * boundary, exposes the active nested frame to a host callback, and resumes

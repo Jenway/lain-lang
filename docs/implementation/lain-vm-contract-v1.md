@@ -13,7 +13,7 @@ provider control API，但仍通过 VM control plane 保持 opaque。
 | 单 VSpace | 参考 evaluator 的 `LainVm.vspace` | request 结束逻辑释放，物理回收由 provider 负责 |
 | CSpace | `LainVm.cspace` 的 capability object table | slot 级 owner/active 授权 |
 | Endpoint | seed `LainirVmEndpoint` control object | 单发送者/单接收者等待、交接和取消 |
-| Trap | status/diagnostic/result contract | 通过 `MetaPassResultV1` 返回 |
+| Trap | `LainirVmTrap` control record | kind/status/procedure/region/position |
 | Eval result | `EvalResultV1` | owner transfer/release 明确 |
 
 参考 evaluator 的 TCB 当前字段为状态、step/depth limit、使用计数、current activation、
@@ -40,6 +40,8 @@ TCB control object、owner 和标量 payload，不保存 activation 地址；own
 capability；无对端返回 `LAINIR_RUN_BLOCKED`，恢复后消费 control-owned pending result。
 `LainirVmControl` 暴露只读 suspend reason，Endpoint 等待固定为
 `LAINIR_VM_SUSPEND_ENDPOINT`，scheduler 可以据此区分主动 yield 与资源等待。
+解释器 Trap 和 capability rejection 会写入同一个 control-owned `LainirVmTrap`，调用者
+可以在 `LAINIR_RUN_TRAP` 后读取记录；source span 尚未进入 seed Trap。
 
 continuation 属于 TCB 的 VM 内部状态。参考 evaluator 当前已经保存 procedure、region、
 instruction offset、suspend reason 和 `CallFrame` 调用帧链。可恢复的 slice 仍需要把该

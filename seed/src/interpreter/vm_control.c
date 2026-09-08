@@ -18,6 +18,7 @@ struct LainirVmControl {
   void *backend_state;
   uint32_t endpoint_result_kind;
   uint64_t endpoint_result_value;
+  LainirVmTrap trap;
 };
 
 struct LainirVmEndpoint {
@@ -179,6 +180,24 @@ const LainirVmFrame *lainir_vm_control_current_frame(
     const LainirVmControl *control) {
   if (!control || !control->frame_count) return NULL;
   return &control->frames[control->frame_count - 1];
+}
+
+const LainirVmTrap *lainir_vm_control_trap(const LainirVmControl *control) {
+  return control && control->trap.active ? &control->trap : NULL;
+}
+
+int lainir_vm_control_record_trap(LainirVmControl *control, uint64_t owner,
+                                  LainirVmTrapKind kind, int32_t status) {
+  if (!vm_owned(control, owner) || control->trap.active) return 0;
+  const LainirVmFrame *frame = lainir_vm_control_current_frame(control);
+  control->trap.kind = kind;
+  control->trap.status = status;
+  control->trap.procedure = frame ? frame->procedure : 0;
+  control->trap.region = frame ? frame->region : 0;
+  control->trap.position = frame ? frame->position : 0;
+  control->trap.active = 1;
+  control->result = LAINIR_VM_TRAPPED;
+  return 1;
 }
 
 void *lainir_vm_control_backend_state(const LainirVmControl *control) {

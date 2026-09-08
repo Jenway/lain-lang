@@ -566,6 +566,10 @@ static LainirCapabilityEntry *interp_lookup_cap(LainirCapabilityTable *caps, con
 
 static void interp_trap(LainirInterpreter *interp, const char *error) {
   if (!interp->error) interp->error = error;
+  if (interp->vm_control)
+    (void)lainir_vm_control_record_trap(
+        interp->vm_control, interp->vm_owner,
+        LAINIR_VM_TRAP_INTERPRETER, LAINIR_RUN_TRAP);
   if (getenv("LAINIR_TRACE_FAST") && interp->fast_active_name)
     fprintf(stderr, "lainir fast trap: %s (%s)\n",
             interp->fast_active_name, error);
@@ -857,8 +861,13 @@ static LainirValue interp_call_host(LainirInterpreter *interp, const char *name,
     interp->vm_blocked = 1;
     return result;
   }
-  if (status != LAINIR_RUN_OK)
+  if (status != LAINIR_RUN_OK) {
+    if (interp->vm_control)
+      (void)lainir_vm_control_record_trap(
+          interp->vm_control, interp->vm_owner,
+          LAINIR_VM_TRAP_CAPABILITY, status);
     interp_trap(interp, error ? error : "extern capability call failed");
+  }
   return result;
 }
 
