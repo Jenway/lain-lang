@@ -562,6 +562,67 @@ cleanup:
   return ok;
 }
 
+static int scheduler_fair_rotation_test(void) {
+  const char *source =
+      "#proc work() -> #bits<32> {\n"
+      "  #let %a: #bits<32> = 1\n"
+      "  #let %b: #bits<32> = 2\n"
+      "  #let %c: #bits<32> = #add(%a, %b)\n"
+      "  #return #add(%c, 4)\n"
+      "}\n";
+  L1Diagnostic diagnostic = {0};
+  LainirModuleHandle *handle = NULL;
+  LainirVmScheduler *scheduler = NULL;
+  LainirVmControl *controls[3] = {NULL, NULL, NULL};
+  LainirValue results[3] = {{0}, {0}, {0}};
+  LainirRunRequest request = {0};
+  const char *error = NULL;
+  LainirRunStatus run_status = LAINIR_RUN_TRAP;
+  int ok = 0;
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) != LAINIR_RUN_OK)
+    goto cleanup;
+  scheduler = lainir_vm_scheduler_new(7);
+  if (!scheduler) goto cleanup;
+  for (int i = 0; i < 3; i++) {
+    controls[i] = lainir_vm_control_new(16);
+    if (!controls[i] || !lainir_vm_scheduler_attach(scheduler, 7, controls[i], 7))
+      goto cleanup;
+  }
+  request.module = (L1Subroutine *)lainir_module_handle_first(handle);
+  request.entry_name = "work";
+  for (int i = 0; i < 3; i++) {
+    if (lainir_vm_scheduler_select(scheduler, 7, NULL) != controls[i] ||
+        lainir_vm_scheduler_run_slice(
+            scheduler, 7, 1, &request, &run_status, &results[i], &error) !=
+            LAINIR_VM_RUNNABLE ||
+        run_status != LAINIR_RUN_SLICE || error ||
+        lainir_vm_scheduler_current(scheduler) != NULL ||
+        lainir_vm_control_state(controls[i]) != LAINIR_VM_RUNNING)
+      goto cleanup;
+    error = NULL;
+  }
+  for (int i = 0; i < 3; i++) {
+    if (lainir_vm_scheduler_select(scheduler, 7, NULL) != controls[i] ||
+        lainir_vm_scheduler_run_slice(
+            scheduler, 7, 16, &request, &run_status, &results[i], &error) !=
+            LAINIR_VM_DONE ||
+        run_status != LAINIR_RUN_OK || error || results[i].kind != LAINIR_VALUE_BITS ||
+        results[i].as.bits != 7 || lainir_vm_scheduler_current(scheduler) != NULL)
+      goto cleanup;
+    error = NULL;
+  }
+  ok = 1;
+cleanup:
+  for (int i = 0; i < 3; i++) {
+    if (controls[i] && lainir_vm_control_state(controls[i]) == LAINIR_VM_RUNNING)
+      (void)lainir_vm_control_finish(controls[i], 7);
+    lainir_vm_control_free(controls[i]);
+  }
+  lainir_vm_scheduler_free(scheduler);
+  lainir_module_handle_destroy(&handle);
+  return ok;
+}
+
 int main(void) {
   LainirVmControl *control = lainir_vm_control_new(8);
   if (!control) return fail("allocation failed");
@@ -606,6 +667,8 @@ int main(void) {
     return fail("scheduler evaluator handoff failed");
   if (!scheduler_parallel_endpoint_wait_test())
     return fail("scheduler parallel endpoint wait failed");
+  if (!scheduler_fair_rotation_test())
+    return fail("scheduler fair rotation failed");
 
   /* The interpreter consumes the provider-owned fuel gate at each instruction
    * boundary, exposes the active nested frame to a host callback, and resumes

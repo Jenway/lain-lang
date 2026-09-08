@@ -86,6 +86,8 @@ scheduler fixture 已扩展到两个 TCB：同一时刻只允许一个 current�
 TCB；阻塞和终止的 TCB 会被跳过。更细的公平、优先级和饥饿避免策略仍未定义。
 control fixture 还覆盖两个 Endpoint 上的两个发送方并行阻塞、对应接收方分别唤醒和
 pending result 隔离；Endpoint 仍保持单 sender/单 receiver rendezvous。
+fuel 耗尽时 `run_slice` 会让 RUNNING TCB yield，释放 current 但保留 continuation；
+三个 TCB 的轮转 fixture 已确认单个 TCB 不会连续占用 current。
 
 参考 evaluator 现在也暴露了最小 VM control API：`new_vm`、`start_tcb`、`suspend_tcb`
 和 `resume_tcb`。它们只改变 TCB 的 READY/RUNNING/BLOCKED 状态并保留 TCB position；
@@ -217,8 +219,8 @@ finish、重复启动和 current-slot 冲突，也覆盖 Endpoint 阻塞后释�
 唤醒后重新 admit 和 pending result 消费。`lainir_vm_scheduler_select` 已提供按 attachment
 顺序轮转的 runnable 选择，`lainir_vm_scheduler_run_slice` 已把单个 current TCB 的 fuel
 slice 接到 `lainir_run`，并把 evaluator status 规范化为 RUNNABLE、BLOCKED_RESULT、DONE
-或 TRAPPED；sender/receiver 两个 TCB 的真实 evaluator 交接已有验证。它仍不定义公平、
-优先级或饥饿避免策略。
+或 TRAPPED；fuel 耗尽会通过 `yield` 释放 current，三个 TCB 的轮转已有验证。它仍不
+定义优先级、权重或长期饥饿避免策略。
 
 ## 3. 阶段一：建立 LainVM 核心对象
 
@@ -348,16 +350,17 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 5. **当前阶段：多 TCB evaluator handoff。** scheduler 已能把一个 current TCB 的真实
    evaluator slice 运行到 Endpoint 阻塞或完成，并按 attachment 顺序选择另一个 READY 或
    被唤醒的 TCB 接入同一个 `lainir_run` 入口；两个 Endpoint 的并行等待和 pending result
-   隔离已有 fixture。slice 结果到 scheduler 状态的统一转换已有 `run_slice` API；下一步
-   是验证公平与饥饿边界，并继续完善 nested continuation 的通用并行 pending-call 保存格式。
+   隔离已有 fixture。slice 结果到 scheduler 状态的统一转换和 fuel-yield 轮转已有验证；
+   下一步是定义优先级、权重与长期饥饿边界，并继续完善 nested continuation 的通用并行
+   pending-call 保存格式。
 6. **后续：多 TCB 调度策略与平台 lowering。** 在多 TCB handoff、单 TCB VSpace、Endpoint、
    Trap 和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和裸机 lowering。
 
 当前 seed runtime 的已验证能力包括：owner 检查、READY/RUNNING/BLOCKED/DEAD、fuel
 exhaustion、root continuation、nested frame observation、Endpoint rendezvous、pending
 result、Trap abort/acknowledgement、源码定位，以及 scheduler 驱动的双 TCB evaluator
-handoff、按 attachment 顺序的 runnable 选择和多个 Endpoint wait 隔离。公平策略和通用
-并行 pending continuation 仍未完成。
+handoff、按 attachment 顺序的 runnable 选择、fuel-yield 轮转和多个 Endpoint wait 隔离。
+优先级/权重策略、长期饥饿边界和通用并行 pending continuation 仍未完成。
 
 当前基线命令：
 
