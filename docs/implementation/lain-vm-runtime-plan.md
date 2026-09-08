@@ -375,8 +375,9 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
 1. **已完成：单 TCB 执行入口收敛。** `execute`、`execute_limited` 和错误返回都经过
    同一个 LainVM root-TCB 路径。
 2. **基本完成：VSpace release contract。** owner transfer/release、arena generation、
-   旧 handle 失效和 backing arena 回收已经接入；剩余工作是把 provider release 计数纳入
-   smoke fixture，并继续验证 result、arena address 和 activation storage 的失效。
+   旧 handle 失效、带 generation 的 result handle 和 backing arena 回收已经接入；recording
+   provider fixture 已验证每次 reset/release 只释放一次 backing arena。后续继续验证
+   result、arena address 和 activation storage 的失效。
 3. **已完成：root scheduler slice。** seed runtime 的 opaque control plane 已接入真实
    interpreter；root frame、locals、activation、下一条 instruction、fuel、suspend/resume
    和 CallFrame 观察均有 fixture。当前限制是 nested call 在一个 slice 内原子执行。

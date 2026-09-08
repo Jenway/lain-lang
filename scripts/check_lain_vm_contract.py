@@ -41,6 +41,7 @@ class VSpace:
     allocation_limit: int
     bytes_used: int = 0
     reset_count: int = 0
+    provider_release_count: int = 0
     generation: int = 1
     released: bool = False
     handles: list[ArenaHandle] = None  # type: ignore[assignment]
@@ -62,6 +63,7 @@ class VSpace:
         for handle in self.handles:
             handle.released = True
         self.bytes_used = 0
+        self.provider_release_count += 1
         self.generation += 1
         self.reset_count += 1
 
@@ -78,6 +80,7 @@ class VSpace:
         for handle in self.handles:
             handle.released = True
         self.released = True
+        self.provider_release_count += 1
         self.generation += 1
 
 
@@ -460,6 +463,7 @@ def main() -> int:
     if (
         vspace.bytes_used != 0
         or vspace.reset_count != 1
+        or vspace.provider_release_count != 1
         or vspace.generation != generation_before_finish + 1
         or tcb.state != "DEAD"
     ):
@@ -467,7 +471,10 @@ def main() -> int:
     expect_failure(lambda: arena_handle.use(vspace, 7), ValueError)
     generation_after_finish = vspace.generation
     vspace.reset(7)
-    if vspace.generation != generation_after_finish + 1:
+    if (
+        vspace.generation != generation_after_finish + 1
+        or vspace.provider_release_count != 2
+    ):
         raise SystemExit("VSpace reset did not advance its generation")
     slice_space = VSpace(owner=7, allocation_limit=0)
     slice_tcb = TCB(owner=7, vspace=slice_space, step_limit=0, capability_mask=0)
@@ -501,6 +508,8 @@ def main() -> int:
     released_space = VSpace(owner=7, allocation_limit=0)
     released_handle = released_space.allocate_handle(7)
     released_space.release(7)
+    if released_space.provider_release_count != 1:
+        raise SystemExit("VSpace release did not release its provider arena")
     expect_failure(lambda: released_handle.use(released_space, 7), ValueError)
     expect_failure(lambda: released_space.release(7), ValueError)
     handle = OwnedHandle(owner=7)

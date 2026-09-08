@@ -144,7 +144,8 @@ python scripts/check_lainc_lainir_api_baseline.py
 release 后不能再次使用或重复释放。
 
 `check_lain_vm_contract.py` 使用独立 recording provider 验证 VSpace owner/quota/reset、
-arena/result generation 和 stale-handle 拒绝
+arena/result generation、stale-handle 拒绝以及每次 reset/release 恰好释放一次 provider
+backing arena。
 和 TCB owner/state/step/suspend/resume/scheduler 规则，以及 Endpoint 的 rendezvous/cancel、CSpace
 的 capability allow/deny、Trap 的 kind/source/status 字段。这个 fixture 只固定对象之间
 的 API 语义，不伪装成 LAINIR 指令或真实运行时对象实现。
