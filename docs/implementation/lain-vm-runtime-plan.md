@@ -213,8 +213,9 @@ VM control 的 backend state 现在带显式 destructor；TCB abort/free/finish 
 continuation，interpreter 正常完成路径会先清空 state 再自行收尾，避免重复析构。
 Trap fixture 还覆盖了 nested Endpoint wait 取消后 caller 继续执行并触发 interpreter Trap；
 结果是 DEAD/TRAPPED，Trap 记录保留，scheduler current 已释放。
-顺序 sibling nested call fixture 还覆盖同一 root 先后等待 Endpoint A/B；第一个 child
-返回后不会遗留 `should_return`，root 会从保存的 instruction 继续执行第二个 child。
+顺序 sibling nested call fixture 还覆盖同一 root 先后经过两层 `wrapper -> leaf` 等待
+Endpoint A/B；每个 child 返回后不会遗留 `should_return`，root 会从保存的 instruction
+继续执行第二个 wrapper。
 
 ### 2.3 多 TCB/Endpoint handoff 的边界
 
@@ -369,7 +370,7 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    回到各自 frame。slice 结果到 scheduler 状态的统一转换、fuel-yield 轮转和严格
    round-robin 等待上界已有验证；v1 不引入 priority/weight。
 6. **当前阶段：nested continuation 的并行 pending-call。** 两个 TCB 的 nested Endpoint
-   result 已有隔离 fixture，同一 root 的 sibling nested Endpoint wait 也已验证；取消、
+   result 已有隔离 fixture，同一 root 的两层 sibling nested Endpoint wait 也已验证；取消、
    Endpoint 销毁和 TCB abort 的 wait 清理也已有验证，backend state destructor 已接入并由
    nested abort fixture 验证。继续验证更多挂起 call 的 frame、表达式游标和 pending result
    队列不会互相覆盖，并补齐 Trap 路径下的统一清理边界。
