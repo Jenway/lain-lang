@@ -91,6 +91,26 @@ class VSpace:
 
 
 @dataclass
+class ReusableSession:
+    """Long-lived owner of a VSpace with an explicit reset boundary."""
+
+    owner: int
+    vspace: VSpace
+    released: bool = False
+
+    def reset(self, owner: int) -> None:
+        if owner != self.owner or self.released:
+            raise ValueError("session reset rejected")
+        self.vspace.reset(owner)
+
+    def release(self, owner: int) -> None:
+        if owner != self.owner or self.released:
+            raise ValueError("session release rejected")
+        self.vspace.release(owner)
+        self.released = True
+
+
+@dataclass
 class TCB:
     owner: int
     vspace: VSpace
@@ -568,6 +588,24 @@ def main() -> int:
     if second_space.generation != second_generation or second_tcb.state != "RUNNING":
         raise SystemExit("TCB finish crossed VSpace lifetime boundary")
     second_tcb.finish(7)
+    session_space = VSpace(owner=7, allocation_limit=0)
+    session = ReusableSession(owner=7, vspace=session_space)
+    session_handle = session_space.allocate_handle(7)
+    session_handle.use(session_space, 7)
+    session.reset(7)
+    expect_failure(lambda: session_handle.use(session_space, 7), ValueError)
+    reset_generation = session_space.generation
+    session_handle = session_space.allocate_handle(7)
+    session_handle.use(session_space, 7)
+    session.release(7)
+    if (
+        not session.released
+        or session_space.generation != reset_generation + 1
+        or session_space.provider_release_count != 2
+    ):
+        raise SystemExit("reusable session did not release its VSpace")
+    expect_failure(lambda: session.reset(7), ValueError)
+    expect_failure(lambda: session.release(7), ValueError)
     endpoint = Endpoint()
     if endpoint.send(1, 42) is not None:
         raise SystemExit("endpoint send without receiver did not block")
