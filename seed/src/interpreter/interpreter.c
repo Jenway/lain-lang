@@ -45,6 +45,14 @@ typedef struct {
   LainirValue value;
 } LainirExprCacheEntry;
 
+typedef struct LainirPendingNestedResult LainirPendingNestedResult;
+struct LainirPendingNestedResult {
+  LainirFrame *frame;
+  L1Subroutine *target;
+  LainirValue value;
+  LainirPendingNestedResult *next;
+};
+
 /* A resumable root invocation owns its frame storage across calls to
  * lainir_run.  Nested frames are kept as a linked stack when an Endpoint
  * blocks, so each completed child can return a pending value to its caller. */
@@ -63,10 +71,7 @@ typedef struct {
   L1Block *next_block;
   L1Instruction *next_inst;
   LainirNestedContinuation *nested_top;
-  int pending_nested_result;
-  L1Subroutine *pending_nested_target;
-  LainirFrame *pending_nested_frame;
-  LainirValue pending_nested_value;
+  LainirPendingNestedResult *pending_nested_results;
   LainirExprCacheEntry *expr_cache;
   uint32_t expr_cache_count;
   uint32_t expr_cache_capacity;
@@ -592,6 +597,44 @@ static LainirCapabilityEntry *interp_lookup_cap(LainirCapabilityTable *caps, con
   return NULL;
 }
 
+static int interp_take_pending_nested(LainirInterpreter *interp,
+                                      LainirFrame *frame,
+                                      L1Subroutine *target,
+                                      LainirValue *value_out) {
+  LainirContinuation *continuation = interp->continuation;
+  LainirPendingNestedResult **link;
+  if (!continuation) return 0;
+  link = &continuation->pending_nested_results;
+  while (*link) {
+    LainirPendingNestedResult *pending = *link;
+    if (pending->frame == frame && pending->target == target) {
+      *link = pending->next;
+      if (value_out) *value_out = pending->value;
+      free(pending);
+      return 1;
+    }
+    link = &pending->next;
+  }
+  return 0;
+}
+
+static int interp_queue_pending_nested(LainirInterpreter *interp,
+                                       LainirFrame *frame,
+                                       L1Subroutine *target,
+                                       LainirValue value) {
+  LainirContinuation *continuation = interp->continuation;
+  LainirPendingNestedResult *pending;
+  if (!continuation) return 0;
+  pending = calloc(1, sizeof(*pending));
+  if (!pending) return 0;
+  pending->frame = frame;
+  pending->target = target;
+  pending->value = value;
+  pending->next = continuation->pending_nested_results;
+  continuation->pending_nested_results = pending;
+  return 1;
+}
+
 static void interp_trap(LainirInterpreter *interp, const char *error) {
   if (!interp->error) interp->error = error;
   if (interp->vm_control)
@@ -915,15 +958,7 @@ static LainirValue interp_eval_call(LainirInterpreter *interp, LainirFrame *fram
   int args_heap = 0;
   int endpoint_resume = 0;
   LainirValue result = lainir_value_unit();
-  if (sub && interp->continuation &&
-      interp->continuation->pending_nested_result &&
-      interp->continuation->pending_nested_target == sub &&
-      interp->continuation->pending_nested_frame == frame) {
-    result = interp->continuation->pending_nested_value;
-    interp->continuation->pending_nested_result = 0;
-    interp->continuation->pending_nested_target = NULL;
-    interp->continuation->pending_nested_frame = NULL;
-    interp->continuation->pending_nested_value = lainir_value_unit();
+  if (sub && interp_take_pending_nested(interp, frame, sub, &result)) {
     return result;
   }
   if (expr->data.call.arg_count > sizeof(args_inline) / sizeof(args_inline[0])) {
@@ -1039,8 +1074,9 @@ static void interp_expr_cache_rekey(LainirInterpreter *interp,
                                     LainirFrame *new_frame) {
   LainirContinuation *continuation = interp->continuation;
   if (!continuation) return;
-  if (continuation->pending_nested_frame == old_frame)
-    continuation->pending_nested_frame = new_frame;
+  for (LainirPendingNestedResult *pending = continuation->pending_nested_results;
+       pending; pending = pending->next)
+    if (pending->frame == old_frame) pending->frame = new_frame;
   for (uint32_t i = 0; i < continuation->expr_cache_count; i++)
     if (continuation->expr_cache[i].frame == old_frame)
       continuation->expr_cache[i].frame = new_frame;
@@ -2792,6 +2828,11 @@ static void interp_destroy_continuation(LainirContinuation *continuation) {
     free(nested);
     nested = parent;
   }
+  while (continuation->pending_nested_results) {
+    LainirPendingNestedResult *pending = continuation->pending_nested_results;
+    continuation->pending_nested_results = pending->next;
+    free(pending);
+  }
   free(continuation->expr_cache);
   interp_free_frame(&continuation->frame);
   free(continuation);
@@ -2847,11 +2888,12 @@ static int interp_resume_nested_continuation(LainirInterpreter *interp) {
       interp_trap(interp, "#alloca address escaped nested continuation");
       return 0;
     }
-    continuation->pending_nested_result = 1;
-    continuation->pending_nested_target = nested->sub;
-    continuation->pending_nested_frame = nested->parent
-        ? nested->parent->frame : &continuation->frame;
-    continuation->pending_nested_value = interp->return_value;
+    if (!interp_queue_pending_nested(
+            interp, nested->parent ? nested->parent->frame : &continuation->frame,
+            nested->sub, interp->return_value)) {
+      interp_trap(interp, "out of memory for nested pending result");
+      return 0;
+    }
     continuation->nested_top = nested->parent;
     (void)lainir_vm_control_pop_frame(interp->vm_control, interp->vm_owner);
     interp_free_frame(frame);
