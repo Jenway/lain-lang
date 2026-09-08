@@ -320,8 +320,9 @@ LainVM 是当前主线。compiler 的类型诊断、source span、剩余 backend
    和 payload；pending result 可唤醒 TCB；Trap 可记录、abort、由 scheduler 消费，并带有
    instruction/expression span 和实际 nested procedure。
 5. **当前阶段：nested continuation。** 多层 nested frame、表达式 cache、Endpoint wait、
-   分支内挂起、逐层恢复和 pending result 已完成；下一步实现多个并行 pending call 的
-   continuation record，再把所有恢复点从 root instruction 重试完全迁移到 nested call point。
+   分支内挂起、逐层恢复和按目标 frame 匹配的 pending result 已完成；下一步实现多个
+   并行 pending call 的 continuation record，再把所有恢复点从 root instruction 重试完全
+   迁移到 nested call point。
 6. **后续：多 TCB 与平台 lowering。** nested continuation、单 TCB VSpace、Endpoint、Trap
    和 CSpace contract 稳定后，才进入 native、线程、用户态地址空间和裸机 lowering。
 

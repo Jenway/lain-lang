@@ -65,6 +65,7 @@ typedef struct {
   LainirNestedContinuation *nested_top;
   int pending_nested_result;
   L1Subroutine *pending_nested_target;
+  LainirFrame *pending_nested_frame;
   LainirValue pending_nested_value;
   LainirExprCacheEntry *expr_cache;
   uint32_t expr_cache_count;
@@ -916,10 +917,12 @@ static LainirValue interp_eval_call(LainirInterpreter *interp, LainirFrame *fram
   LainirValue result = lainir_value_unit();
   if (sub && interp->continuation &&
       interp->continuation->pending_nested_result &&
-      interp->continuation->pending_nested_target == sub) {
+      interp->continuation->pending_nested_target == sub &&
+      interp->continuation->pending_nested_frame == frame) {
     result = interp->continuation->pending_nested_value;
     interp->continuation->pending_nested_result = 0;
     interp->continuation->pending_nested_target = NULL;
+    interp->continuation->pending_nested_frame = NULL;
     interp->continuation->pending_nested_value = lainir_value_unit();
     return result;
   }
@@ -1036,6 +1039,8 @@ static void interp_expr_cache_rekey(LainirInterpreter *interp,
                                     LainirFrame *new_frame) {
   LainirContinuation *continuation = interp->continuation;
   if (!continuation) return;
+  if (continuation->pending_nested_frame == old_frame)
+    continuation->pending_nested_frame = new_frame;
   for (uint32_t i = 0; i < continuation->expr_cache_count; i++)
     if (continuation->expr_cache[i].frame == old_frame)
       continuation->expr_cache[i].frame = new_frame;
@@ -2844,6 +2849,8 @@ static int interp_resume_nested_continuation(LainirInterpreter *interp) {
     }
     continuation->pending_nested_result = 1;
     continuation->pending_nested_target = nested->sub;
+    continuation->pending_nested_frame = nested->parent
+        ? nested->parent->frame : &continuation->frame;
     continuation->pending_nested_value = interp->return_value;
     continuation->nested_top = nested->parent;
     (void)lainir_vm_control_pop_frame(interp->vm_control, interp->vm_owner);

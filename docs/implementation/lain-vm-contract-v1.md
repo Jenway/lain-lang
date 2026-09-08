@@ -72,8 +72,8 @@ cache 会随 frame detach 重挂载，因此已完成的 sibling expression 不�
 Nested continuation 的完成标准是：挂起时保存每个 frame 的 locals、参数、activation、
 返回位置和表达式游标；恢复时消费带类型的 pending call result，不重新执行已完成的参数
 表达式；重复 resume、错误 owner、失活 activation 和残留 Endpoint wait 都必须被拒绝或
-转为 Trap。当前实现已覆盖多层 nested frame、表达式 cache、分支内挂起与 Endpoint `send`
-的 pending-result，仍不宣称并行 pending call 的 continuation 已完成。
+转为 Trap。当前实现已覆盖多层 nested frame、表达式 cache、分支内挂起与按目标 frame
+匹配的 Endpoint `send` pending-result，仍不宣称并行 pending call 的 continuation 已完成。
 
 `EvalResultV1` 携带 status、kind、scalar value、object handle 和 owner。对象结果
 必须带 owner；转移只允许从当前 owner 到目标 context，释放后不得再次使用。
