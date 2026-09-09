@@ -19,10 +19,10 @@ Lain 当前遵循四条原则：
 
 - Parser 只建立源码拓扑，不识别函数、类型、模块等语言含义。
 - Meta 和标准库定义高层语言规则，并负责展开、语义处理和 lowering。
-- 编译期程序由 Meta 生成 LAINIR `#eval`，再由 LAINIR 求值器执行。
+- 编译期程序由 Meta 生成 LAINIR `#eval`，再由 LAINVM 执行。
 - Backend 只消费已经完成 lowering 的 LAINIR。
 
-编译器核心提供通用机制：源码和语法树访问、阶段调度、诊断、资源归属、artifact 输出以及 capability。它不通过 `host.make-type`、`host.make-module` 之类的专用接口定义语言对象。
+编译器核心提供通用机制：源码和语法树访问、阶段调度、诊断、资源归属、artifact 输出以及 capability。
 
 ## 2. 编译流程
 

@@ -48,9 +48,10 @@
 | 文档 | 内容 |
 | --- | --- |
 | [`history/lainc-bootstrap-roadmap.md`](history/lainc-bootstrap-roadmap.md) | 旧自举路线快照 |
-| [`history/lainc-archive-plan.md`](history/lainc-archive-plan.md) | 旧 `src/lainc` archive 编译计划 |
+| [`history/README.md`](history/README.md) | 历史文档分类、保留理由和已清理的重复路线图 |
+| [`history/roadmap-lain-completed-2026-09-07.md`](history/roadmap-lain-completed-2026-09-07.md) | 2026-09-07 前已完成工作的路线快照 |
+| [`history/roadmap-lainc-lainir-api-2026-09-07.md`](history/roadmap-lainc-lainir-api-2026-09-07.md) | lainc 与 LAINIR API 边界迁移记录 |
 | [`history/lainc-meta-roadmap.md`](history/lainc-meta-roadmap.md) | 2026-09-02 标准库与旧 archive 自举实施记录 |
-| [`history/lainir-compiler-roadmap.md`](history/lainir-compiler-roadmap.md) | 已完成的 LAINIR 编译器自举路线 |
 | [`history/lainir-implementation-roadmap.md`](history/lainir-implementation-roadmap.md) | LAINIR frontend 和 compiler boundary 的旧实现清单 |
 | [`history/lainc-meta-system.md`](history/lainc-meta-system.md) | `src/lainc` 过渡 Meta 实现记录 |
 | [`history/lainc-performance-analysis-2026-08-21.md`](history/lainc-performance-analysis-2026-08-21.md) | 2026-08-21 自举性能分析 |
