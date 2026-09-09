@@ -35,26 +35,25 @@ Lain aims to keep the compiler small and move most high-level language features 
 - Move high-level language features into libraries whenever possible.
 - Treat meta programming as a layer built on top of the IR rather than a special-purpose subsystem.
 
-## Bootstrap status
-
-`main` no longer contains the C compiler host, C RawAst implementation,
-C LAIN-IR storage/interpreter, Scheme bridge, or their Zig/Make build entry.
-This is an intentional cut: the remaining compiler implementation must be
-completed in Lain instead of silently delegating its data structures back to C.
-
-The last buildable C/Scheme bootstrap is preserved in Git history.  The next
-bootstrap target is:
+## Project layout
 
 ```text
-seed/:      C LAIN-IR interpreter (lainir-seed) + frozen compiler.l1
-main:       Lain compiler and libraries written in .lain
+seed/        minimal C execution base and the LAINIR-written LAINIR compiler
+bootstrap/   hand-maintained LAINIR sources for the startup Lain compiler
+src/         formal Lain-written implementation
+build/       generated bundles, snapshots, native programs, and test output
 ```
 
-The current tree can build a native `lainc.exe` from the Lain-written backend.
-The backend compiles the complete archive source closure to verifier-valid
-LAIN-IR and the empty-source compiler API path runs through the bootstrap
-interpreter.  The remaining work is semantic coverage for non-empty source
-programs and byte-for-byte stage2/stage3 fixed-point convergence.
+Generated compiler artifacts are never checked into `src/` or `bootstrap/`.
+`python scripts/build_lain_compiler.py` writes the startup compiler bundle to
+`build/bootstrap/lainc.l1`.
+
+## Bootstrap status
+
+The old `EvalResult` path has been removed. The current work reconnects Meta
+compile-time evaluation to LAINVM. Until that work is complete, rebuilding the
+bootstrap compiler, the native compiler matrix, and the gen2/gen3 fixed-point
+check are expected to remain unavailable.
 
 `--emit-l1` currently accepts the self-hosting core subset: `#bits<32>`/`#addr`
 callables, calls, arithmetic, explicit returns, foreign bindings, and canonical
@@ -69,13 +68,14 @@ and `import("path")`. `@` is reserved for attributes such as `@export` and
 `@foreign`; it does not introduce a second declaration grammar. Historical
 standalone `fn`, `struct`, `module`, and `import` declarations are rejected.
 
-The final gate remains `stage2.l1 == stage3.l1`; it must be restored using the
-seed interpreter without reintroducing C facilities into `main`.
-
-To build the current native compiler, run:
+Build the generated bootstrap bundle and its manifest with:
 
 ```text
-python scripts/build_lainc_native.py \
-  build/archive-usable/gen-current-src-lainc-api-real15.l1 \
-  build/lainc.exe
+python scripts/freeze_lainc_bootstrap.py
+```
+
+The command writes both files under `build/bootstrap/`. Verify them with:
+
+```text
+python scripts/check_lainc_bootstrap_snapshot.py build/bootstrap/lainc.l1
 ```
