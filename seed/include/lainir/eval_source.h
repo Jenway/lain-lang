@@ -12,6 +12,8 @@ void lainir_module_free_handle(LainirModuleHandle *handle);
 void lainir_module_handle_destroy(LainirModuleHandle **handle_ptr);
 const L1Subroutine *lainir_module_handle_first(
     const LainirModuleHandle *handle);
+const L1Subroutine *lainir_module_handle_find_procedure(
+    const LainirModuleHandle *handle, const char *name, size_t name_length);
 LainirRunStatus lainir_module_handle_verify(
     LainirModuleHandle *handle, L1Diagnostic *diagnostic);
 LainirRunStatus lainir_module_handle_verify_entry(
@@ -27,6 +29,11 @@ LainirRunStatus lainir_module_handle_eval_block(
 LainirRunStatus lainir_module_handle_eval_values(
     LainirModuleHandle *handle, LainirCapabilityTable *caps,
     uint64_t **values_out, size_t *count_out,
+    L1Diagnostic *diagnostic, const char **error_out);
+LainirRunStatus lainir_module_handle_run(
+    LainirModuleHandle *handle, const L1Subroutine *procedure,
+    const LainirValue *arguments, uint32_t argument_count,
+    LainirCapabilityTable *caps, LainirValue *result_out,
     L1Diagnostic *diagnostic, const char **error_out);
 void lainir_eval_values_free(uint64_t *values);
 

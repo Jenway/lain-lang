@@ -71,7 +71,7 @@ lainc 不依赖 LAINVM 的私有实现。
 | 领域 | 当前状态 | 下一步 |
 | --- | --- | --- |
 | LAINIR 物理语义 | 基线可用 | 保持物理边界，不加入 Meta 返回分类 |
-| LAINVM 基础 | C seed 与 Lain 源码边界均已采用 TCB、VSpace、Trap 和预算模型；Lain VM 已独立为 `src/lainvm/`，并已公开执行 API contract 与 `Eval` operation | 将 lainc 工厂和编译入口接到该 contract 与 handler |
+| LAINVM 基础 | C seed 与 Lain 源码边界均已采用 TCB、VSpace、Trap 和预算模型；bootstrap 与正式实现都已公开 Artifact、Procedure、物理参数和 eval 接口 | 将一般 Meta callable 编译成可执行 Artifact 并接到该接口 |
 | `#eval` | C seed 已通过临时 TCB 执行并在 fold 前消除；Lain VM 已提供子 TCB 原语；lainc Meta 已改为发出 `Vm.eval` effect | 在正式编译器执行入口安装 handler，并运行真实编译 fixture |
 | Meta 编译期求值 | `Ir.Eval`、`Eval.Result` 和伪造的 status/value 返回已经从正式 Meta 源码删除；语法 callable 已改用 LAINVM 物理 `Value` | 接通 handler 后，从整数与基础物理运算开始恢复真实执行 |
 | 自举 | `build/bootstrap/lainc.l1` 已可由当前启动源码重建，普通物理代码的编译与执行已恢复；算术 `consteval` 已经生成 `#eval` 并由 LAINVM 执行 | 用相同路径执行一般 Meta callable，再恢复固定点 |
@@ -94,7 +94,8 @@ effect handler（接收 `Eval` 请求并启动子 TCB 的代码）在子 TCB 中
 先完成运行时接线，再恢复语言能力：
 
 1. **C4.1：固定执行接缝。** 已完成 LAINVM `Eval` effect operation 和 API contract；
-   该 contract 只表达物理参数与物理返回值。
+   该 contract 只表达 Artifact、Procedure、物理参数与物理返回值。C seed 已实现同义的
+   bootstrap 句柄接口，并用真实双参数过程验证返回 42。
 2. **C4.2：接通编译入口。** `Vm` capability 已传入 lainc 的 compiler、API、driver 和
    Meta factory；Meta 已通过 `perform Vm.eval(...)` 发出执行请求。剩余工作是在执行正式
    编译器的 LAINVM 边界安装 `eval_handler`，让请求使用活动 TCB 运行子过程。
