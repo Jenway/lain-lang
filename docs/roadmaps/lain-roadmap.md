@@ -47,39 +47,64 @@ C2 的完成记录见
 | 领域 | 当前状态 | 下一步 |
 | --- | --- | --- |
 | LAINIR 物理语义 | 基线可用 | 保持物理边界，不加入 Meta 返回分类 |
-| LAINVM 基础 | 错误结果传输协议已删除；已有部分 TCB、VSpace、Trap 和预算实现 | 固定并实现真实 `#eval` 约定 |
+| LAINVM 基础 | 错误结果传输协议已删除；C seed 已有 TCB、VSpace、Trap 和预算实现；Lain 实现仍与 LAINIR API 混放 | 将 Lain VM 独立为执行层，并补齐同一份 `#eval` 约定 |
 | `#eval` | C seed 已通过临时 TCB 执行并在 fold 前消除 | C3 实现同一份 Lain VM 语义 |
 | Meta 编译期求值 | 旧求值路径已删除，暂不可用 | 在 LAINVM 路径完成后重新接入 |
 | 自举 | 冻结产物暂时可用 | 新路径完成后重新生成并恢复固定点 |
-| 项目结构 | `seed`、`bootstrap` 与 `src` 已分离；`src/lainvm/` 已建立边界 | C1 冻结 LAINIR/LAINVM 接口 |
+| 项目结构 | `seed`、`bootstrap` 与 `src` 已分离；`src/lainvm/` 已建立边界 | C3 完成 VM 源码迁移与执行入口 |
 | C backend 与发布 | 非当前主线 | 纠偏完成后继续收口和 CI 验证 |
 
 当前实施顺序：
 
 ```text
-C3 Lain 解释器实现相同语义
+C3 分离 LAINVM，并让 Lain 解释器实现相同语义
   -> C4 Meta 重新通过 #eval 执行编译期计算
   -> C5 恢复自举并替换冻结产物
 ```
 
-## C3：Lain 解释器实现相同语义
+## C3：分离 LAINVM，并让 Lain 解释器实现相同语义
 
-目标：让 Lain 写的 LAINIR 解释器与 C seed 使用相同的 `#eval` 行为。
+目标：把“定义 LAINIR”和“执行 LAINIR”变成两个可独立维护的正式组件；让 Lain 写的
+解释器与 C seed 使用相同的 `#eval` 行为。
+
+这里的分离是职责和源码所有权的分离：`src/lainir/` 定义、解析、构造、验证和打印
+LAINIR；`src/lainvm/` 保存执行状态，并执行已验证的 LAINIR。LAINIR 不依赖某个具体 VM
+实现，LAINVM 依赖 LAINIR 的已验证程序表示。
 
 工作：
 
-- 增加执行 LAINIR block 的入口；
-- 复用调用者 VSpace，并创建临时 TCB；
-- 用普通 `Value` 表示正常结果，用 Trap 表示失败；
-- 把 `src/lainir/api/l1_interpreter.lain` 中的执行状态、TCB、VSpace、Trap、调度和
-  指令执行代码迁入 `src/lainvm/`；
-- `src/lainir/` 只保留 IR 表示、解析、构造、打印和验证；
-- 使用同一组 fixture 比较 C seed 与 Lain 实现的值和 Trap。
+1. 将解释器、TCB、VSpace、Trap、预算、调度和指令执行代码归入 `src/lainvm/`，并由
+   `src/lainvm/SOURCES.txt` 纳入正式编译器源集合。
+2. 从 `src/lainir/api/` 删除解释器和求值 API。该目录只保留 LAINIR 的表示、构造、解析、
+   验证和打印 API。
+3. 定义 LAINVM 的执行入口：输入为已验证的 LAINIR 过程与物理参数；正常结束产生普通
+   物理 `Value`，失败产生 `Trap`。`Value` 只能是 `#bits<N>`、`#addr` 或 `#unit`；
+   不得恢复 `EvalResult` 或任何等价包装。
+4. 定义临时子 TCB 入口：LAINIR lowering 将 `#eval` 的隐式捕获物化为临时根过程的参数，
+   VM 用共享 VSpace 和独立 TCB 执行该过程，并共享步数和分配预算。临时 TCB 的栈上地址
+   不得作为 `#eval` 结果逃逸。
+5. 固定 LAINIR 与 LAINVM 的单向接口：LAINIR 不见 TCB、VSpace、调度器或 Trap 的内部
+   布局；LAINVM 不解释类型、模块或 AST 的语言含义。
+6. 使用同一组 fixture 比较 C seed 与 Lain VM 的普通结果和 Trap；覆盖外部局部变量捕获、
+   nested `#eval`、栈地址逃逸、预算，以及 `#eval` 消除。
+
+完成条件：
+
+- 正式源目录中不存在 `src/lainir/api/l1_interpreter.lain`；解释器只由 `src/lainvm/`
+  提供。
+- `src/lainir/api/` 不再公开执行状态或旧 `Eval`/`Result` 协议。
+- C seed 的临时 TCB fixture 和 Lain VM 的源码/API boundary check 都通过；最终 LAINIR
+  中不存在 `#eval`。
+
+当前冻结的 `bootstrap/lainc.l1` 属于已删除的旧 Meta/Eval 实现，不能用于证明 C3 的 Lain
+源码可编译，也不能为此恢复旧源码或旧接口。新 Lain VM 的实际编译、同一组 fixture 的
+行为对照和新的 bootstrap 固定点统一放入 C5，使用新的 Meta 路径完成。
+- 本阶段完成后单独提交，提交信息为 `lainvm: separate execution from lainir`。
 
 阶段提交：
 
 ```text
-lainvm: add temporary-TCB eval execution
+lainvm: separate execution from lainir
 ```
 
 ## C4：重新建立 Meta 编译期求值
@@ -94,8 +119,9 @@ lainvm: add temporary-TCB eval execution
 4. AST 值与宏展开；
 5. nested `#eval`、预算和 Trap 诊断。
 
-类型、模块和 AST 在 LAINVM 看来只是已经确定物理类型的普通值。对它们的解释和检查
-始终留在 Meta。
+类型、模块和 AST 的解释和检查始终留在 Meta。若 Meta 求值需要把它们暂存在内存中，
+LAINVM 只会操作相应的物理地址；它不会把这些对象识别为 `#eval` 的返回类别，也不会为
+它们引入专门的返回协议。
 
 每恢复一个切片就提交并加入真实编译 fixture，不等待整个 Meta 一次性恢复。
 

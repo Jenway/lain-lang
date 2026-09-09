@@ -12,8 +12,6 @@ let l1_verifier: Module =
     import("packages::lain::lainir::api::l1_verifier");
 let l1_printer: Module =
     import("packages::lain::lainir::api::l1_printer");
-let l1_interpreter: Module =
-    import("packages::lain::lainir::api::l1_interpreter");
 
 @export
 let lainir_default_provider: Module = std::module {
@@ -21,50 +19,11 @@ let lainir_default_provider: Module = std::module {
     let Provider = std::func(
         Memory: memory_model.Shape,
     ) -> Module {
-        let DenyExternalCalls: l1_interpreter.ExternalCallShape =
-            std::module {
-                @export let Result: type = std::struct {
-                    status: i32,
-                    bits: u64,
-                };
-                @export
-                let call = std::func(
-                    name: addr,
-                    arguments: addr,
-                    argument_count: usize,
-                ) -> Result {
-                    return Result { status: 7102, bits: 0 };
-                };
-                @export let result_status = std::func(
-                    result: &Result,
-                ) -> i32 { return result.status; };
-                @export let result_bits = std::func(
-                    result: &Result,
-                ) -> u64 { return result.bits; };
-            };
-        return ProviderWithExternalCalls(Memory, DenyExternalCalls);
-    };
-
-    // A host or conformance provider may install this factory with its own
-    // dispatcher.  It is intentionally owned by LAINIR rather than by lainc:
-    // Eval still receives a per-invocation capability before that dispatcher
-    // is reachable.
-    @export
-    let ProviderWithExternalCalls = std::func(
-        Memory: memory_model.Shape,
-        ExternalCalls: l1_interpreter.ExternalCallShape,
-    ) -> Module {
         let SourceLocation: type = usize;
         let L1: Module = l1_ir.Model(Memory);
         let Builder: Module = l1_builder.Builder(Memory);
         let Verifier: Module = l1_verifier.Verifier(Memory);
         let Printer: Module = l1_printer.Printer(Memory);
-        let Interpreter: Module =
-            l1_interpreter.Interpreter(
-                Memory,
-                ExternalCalls,
-                L1,
-            );
 
         let power_of_two = std::func(value: usize) -> bool {
             if value == 0 { return false; }
@@ -752,117 +711,6 @@ let lainir_default_provider: Module = std::module {
             };
         };
 
-        let EvalApi: Module = std::module {
-            @export let Artifact: type = L1.Unit;
-            @export let Procedure: type = L1.ProcedureId;
-            @export let Value: type = Interpreter.Value;
-            @export let ValueVector: type = Interpreter.ValueVector;
-            @export let Result: type = Interpreter.Result;
-            @export let Limits: type = std::struct {
-                steps: usize,
-                call_depth: usize,
-                allocation_bytes: usize,
-                nested_evals: usize,
-            };
-            @export let Capabilities: type = std::struct {
-                external_calls: bool,
-            };
-
-            @export
-            let default_limits = std::func() -> Limits {
-                return Limits {
-                    steps: 0,
-                    call_depth: 128,
-                    allocation_bytes: 0,
-                    nested_evals: 0,
-                };
-            };
-
-            @export let empty_capabilities = std::func() -> Capabilities {
-                return Capabilities { external_calls: false };
-            };
-            @export let external_call_capabilities = std::func()
-                -> Capabilities {
-                return Capabilities { external_calls: true };
-            };
-
-            @export let make_i32 = std::func(
-                type_id: usize, value: i32,
-            ) -> Interpreter.Value {
-                let wide_value: i64 = value as i64;
-                return Interpreter.Value {
-                    type_id: type_id, i32_value: value,
-                    bits_value: wide_value as u64,
-                };
-            };
-            @export let make_bits = std::func(
-                type_id: usize, value: u64,
-            ) -> Interpreter.Value {
-                return Interpreter.Value {
-                    type_id: type_id,
-                    i32_value: value as i32,
-                    bits_value: value,
-                };
-            };
-            @export let value_type = std::func(
-                value: &Interpreter.Value,
-            ) -> usize { return value.type_id; };
-            @export let value_i32 = std::func(
-                value: &Interpreter.Value,
-            ) -> i32 { return value.i32_value; };
-            @export let value_bits = std::func(
-                value: &Interpreter.Value,
-            ) -> u64 { return value.bits_value; };
-            @export let make_result = std::func(
-                status: i32, value: Interpreter.Value,
-            ) -> Interpreter.Result {
-                return Interpreter.Result {
-                    status: status,
-                    value: value,
-                    trap_kind: 0,
-                    trap_procedure: 0,
-                    trap_position: 0,
-                };
-            };
-            @export let result_status = std::func(
-                result: &Interpreter.Result,
-            ) -> i32 { return result.status; };
-            @export let result_value = std::func(
-                result: &Interpreter.Result,
-            ) -> Interpreter.Value { return result.value; };
-            @export let result_trap_kind = std::func(
-                result: &Interpreter.Result,
-            ) -> i32 { return result.trap_kind; };
-            @export let result_trap_procedure = std::func(
-                result: &Interpreter.Result,
-            ) -> usize { return result.trap_procedure; };
-            @export let result_trap_position = std::func(
-                result: &Interpreter.Result,
-            ) -> usize { return result.trap_position; };
-
-            @export
-            let evaluate = std::func(
-                artifact: &L1.Unit,
-                procedure: L1.ProcedureId,
-                arguments: &Interpreter.ValueVector,
-                limits: Limits,
-                capabilities: Capabilities,
-            ) -> Interpreter.Result ! {
-                Memory.Allocation.Effect,
-                Memory.Bounds.Effect,
-            } {
-                return Interpreter.execute_limited(
-                    artifact,
-                    procedure,
-                    arguments,
-                    limits.steps,
-                    limits.call_depth,
-                    limits.allocation_bytes,
-                    capabilities.external_calls,
-                );
-            };
-        };
-
         return std::module {
             @export let SourceLocation: type = SourceLocation;
             @export let unknown_location = std::func() -> SourceLocation {
@@ -872,7 +720,6 @@ let lainir_default_provider: Module = std::module {
                 std::func() -> i32 { return 1; };
             @export let Builder: Module = BuilderApi;
             @export let Artifact: Module = ArtifactApi;
-            @export let Eval: Module = EvalApi;
         };
     };
 };
