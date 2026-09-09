@@ -71,10 +71,10 @@ lainc 不依赖 LAINVM 的私有实现。
 | 领域 | 当前状态 | 下一步 |
 | --- | --- | --- |
 | LAINIR 物理语义 | 基线可用 | 保持物理边界，不加入 Meta 返回分类 |
-| LAINVM 基础 | C seed 与 Lain 源码边界均已采用 TCB、VSpace、Trap 和预算模型；bootstrap 与正式实现都已公开 Artifact、Procedure、物理参数和 eval 接口 | 将一般 Meta callable 编译成可执行 Artifact 并接到该接口 |
+| LAINVM 基础 | C seed 与 Lain 源码边界均已采用 TCB、VSpace、Trap 和预算模型；bootstrap 与正式实现都已公开 Artifact、Procedure、物理参数和 eval 接口 | 扩展通过该接口执行的 Meta callable 范围 |
 | `#eval` | C seed 已通过临时 TCB 执行并在 fold 前消除；Lain VM 已提供子 TCB 原语；lainc Meta 已改为发出 `Vm.eval` effect | 在正式编译器执行入口安装 handler，并运行真实编译 fixture |
 | Meta 编译期求值 | `Ir.Eval`、`Eval.Result` 和伪造的 status/value 返回已经从正式 Meta 源码删除；语法 callable 已改用 LAINVM 物理 `Value` | 接通 handler 后，从整数与基础物理运算开始恢复真实执行 |
-| 自举 | `build/bootstrap/lainc.l1` 已可由当前启动源码重建，普通物理代码的编译与执行已恢复；算术 `consteval` 已经生成 `#eval` 并由 LAINVM 执行 | 用相同路径执行一般 Meta callable，再恢复固定点 |
+| 自举 | `build/bootstrap/lainc.l1` 已可由当前启动源码重建，普通物理代码的编译与执行已恢复；算术、纯标量调用以及带模块参数并返回地址的 Effect factory 已经由 LAINVM 执行 | 实现 `std::effect_operation`，继续推进正式标准库闭包，再恢复固定点 |
 | 项目结构 | `seed`、`bootstrap` 与 `src` 已分离；`src/lainvm/` 已拥有执行实现 | 保持职责边界并在 C5 恢复新自举 |
 | C backend 与发布 | 非当前主线 | 纠偏完成后继续收口和 CI 验证 |
 
@@ -101,16 +101,18 @@ effect handler（接收 `Eval` 请求并启动子 TCB 的代码）在子 TCB 中
    编译器的 LAINVM 边界安装 `eval_handler`，让请求使用活动 TCB 运行子过程。
 3. **C4.3：恢复 bootstrap 物理 lowering。** 已从误删文件中恢复程序状态、类型布局、
    检查与 LAINIR 输出，同时移除旧求值协议。普通物理 fixture 已重新通过。
-4. **C4.4：逐项恢复 Meta 语义。** 算术与纯标量过程调用已经完成：bootstrap 把过程和
-   调用点编译成含 `#eval` 的临时 LAINIR，seed 验证后由临时 TCB 执行，最终 artifact
-   中不保留 `#eval`。当前首个未覆盖调用是 `allocation.Alloc(Policy)`，它需要模块参数并
-   返回 Meta effect 地址。下面的其余项目每完成一项就加入真实编译 fixture 并提交。
+4. **C4.4：逐项恢复 Meta 语义。** 算术、纯标量过程调用和
+   `allocation.Alloc(Policy)` 已经完成：bootstrap 把过程和调用点编译成含 `#eval` 的
+   临时 LAINIR，seed 验证后由临时 TCB 执行，最终 artifact 中不保留 `#eval`。
+   Effect factory 的模块参数以物理地址传入，返回的 Effect 地址保存了本次调用的形参与
+   实参绑定。当前首个未覆盖调用是 `std::effect_operation(...)`。下面的其余项目每完成
+   一项就加入真实编译 fixture 并提交。
 
 恢复顺序：
 
 1. 整数和基础物理运算（已完成 bootstrap `consteval` 切片）；
 2. 普通过程调用（已完成纯标量参数与返回值切片）；
-3. 类型值和模块值；
+3. 类型值和模块值（已完成模块参数与 Effect 地址返回的第一段）；
 4. AST 值与宏展开；
 5. nested `#eval`、预算和 Trap 诊断。
 

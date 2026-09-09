@@ -12,9 +12,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPILER = ROOT / "scripts" / "run_lain_compiler.py"
-FIXTURES = (
-    ROOT / "scripts" / "fixtures" / "formal_consteval_arithmetic.lain",
-    ROOT / "scripts" / "fixtures" / "formal_meta_scalar_call.lain",
+CASES = (
+    (
+        ROOT / "scripts" / "fixtures" / "formal_consteval_arithmetic.lain",
+    ),
+    (
+        ROOT / "scripts" / "fixtures" / "formal_meta_scalar_call.lain",
+    ),
+    (
+        ROOT / "scripts" / "fixtures" / "formal_meta_effect_factory.lain",
+    ),
 )
 SEED = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
@@ -27,7 +34,8 @@ def run(arguments: list[str]) -> subprocess.CompletedProcess[str]:
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="lain-bootstrap-consteval-") as directory:
-        for fixture in FIXTURES:
+        for sources in CASES:
+            fixture = sources[-1]
             artifact = Path(directory) / f"{fixture.stem}.l1"
             compiled = run(
                 [
@@ -36,7 +44,7 @@ def main() -> int:
                     "--library",
                     "-o",
                     str(artifact),
-                    str(fixture),
+                    *(str(source) for source in sources),
                 ]
             )
             if compiled.returncode:
@@ -56,7 +64,7 @@ def main() -> int:
                 print(executed.stderr or executed.stdout, file=sys.stderr)
                 return executed.returncode or 1
 
-    print("PASS bootstrap consteval arithmetic and scalar calls through LAINVM")
+    print("PASS bootstrap consteval arithmetic, scalar calls, and effect factories through LAINVM")
     return 0
 
 
