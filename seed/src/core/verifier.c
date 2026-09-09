@@ -222,6 +222,11 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
       eval_sub.name = "<eval>";
       eval_sub.ret_ty = expr->data.eval.ret_ty;
       eval_sub.blocks = expr->data.eval.block;
+      /* The interpreter copies the caller's argument slots into the child
+         TCB. Keep those slots visible while verifying the eval block so a
+         parameter capture has the same type and index in both phases. */
+      eval_sub.param_count = ctx->sub->param_count;
+      eval_sub.param_tys = ctx->sub->param_tys;
       eval_ctx.sub = &eval_sub;
       return verify_block(&eval_ctx, expr->data.eval.block, names, NULL);
     }
