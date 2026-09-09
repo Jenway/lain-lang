@@ -41,8 +41,15 @@ let lower: Module = std::module {
             Memory.Bounds,
         );
 
-        let unknown_location = std::func() -> Ir.SourceLocation {
-            return Ir.unknown_location();
+        // The elaborator preserves the original syntax span on every surface
+        // expression.  SourceLocation is still an opaque usize in the v1
+        // provider contract, so lowering passes the stable start offset.  The
+        // provider can later map that handle to source id and full end span
+        // without changing the elaborated source model.
+        let expression_location = std::func(
+            expression: &Surface.Expr,
+        ) -> Ir.SourceLocation {
+            return expression.source_start;
         };
 
         let physical_type = std::func(
@@ -78,7 +85,7 @@ let lower: Module = std::module {
                     unit,
                     result_type,
                     expression.i32_value,
-                    unknown_location(),
+                    expression_location(expression),
                 );
             }
 
@@ -102,7 +109,7 @@ let lower: Module = std::module {
                     result_type,
                     left,
                     right,
-                    unknown_location(),
+                    expression_location(expression),
                 );
             }
 
@@ -111,7 +118,7 @@ let lower: Module = std::module {
                     unit,
                     result_type,
                     *procedures.get(expression.callee),
-                    unknown_location(),
+                    expression_location(expression),
                 );
                 let index: usize = 0;
                 while index < expression.arguments.length() {
@@ -147,8 +154,10 @@ let lower: Module = std::module {
         } {
             let function: &Surface.Function =
                 program.functions.get(function_id);
+            let body_expression: &Surface.Expr =
+                program.expressions.get(function.body);
             let region: Builder.Region = Builder.begin_region(
-                unit, unknown_location()
+                unit, expression_location(body_expression)
             );
             let value: Builder.Value = lower_expression(
                 program,
@@ -165,14 +174,14 @@ let lower: Module = std::module {
                     region,
                     value,
                     return_type,
-                    unknown_location(),
+                    expression_location(body_expression),
                 );
             let procedure: Builder.Procedure = *procedures.get(function_id);
             let status: i32 = Builder.end_procedure(
                 unit,
                 procedure,
                 region,
-                unknown_location(),
+                expression_location(body_expression),
             );
             return procedure;
         };
@@ -202,7 +211,9 @@ let lower: Module = std::module {
                     &mut unit,
                     Memory.String.clone(&function.name),
                     return_type,
-                    unknown_location(),
+                    expression_location(
+                        source.expressions.get(function.body),
+                    ),
                 ));
                 declare_index = declare_index + 1;
             }

@@ -6,6 +6,7 @@
  */
 
 #include <stdint.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,10 +53,13 @@ typedef struct {
 static Source *sources;
 static uint64_t source_count_value;
 static const char *artifact_path;
+static const char *artifact_final_path;
+static char artifact_temp_path[4096];
 static FILE *artifact_file;
 
 typedef struct NativeRunAllocation {
   void *pointer;
+  size_t bytes;
   int virtual_alloc;
   struct NativeRunAllocation *next;
 } NativeRunAllocation;
@@ -71,6 +75,8 @@ typedef struct {
  * process exit (and --run kept all compiler memory alive while interpreting
  * the product). */
 static NativeRunContext compile_context;
+static uint64_t compile_allocation_limit;
+static uint64_t compile_allocated_bytes;
 
 #ifdef _WIN32
 static NativeWinLong __stdcall native_trace_exception(void *pointers) {
@@ -98,6 +104,10 @@ static void native_run_release_allocations(NativeRunContext *context) {
     free(allocation->pointer);
 #endif
     context->allocations = allocation->next;
+    if (compile_allocated_bytes >= (uint64_t)allocation->bytes)
+      compile_allocated_bytes -= (uint64_t)allocation->bytes;
+    else
+      compile_allocated_bytes = 0;
     free(allocation);
   }
 }
@@ -141,6 +151,7 @@ static LainirRunStatus native_run_allocate(
     return LAINIR_RUN_TRAP;
   }
   allocation->pointer = memory;
+  allocation->bytes = (size_t)size;
   allocation->virtual_alloc = virtual_alloc;
   allocation->next = context->allocations;
   context->allocations = allocation;
@@ -1063,6 +1074,10 @@ uintptr_t bootstrap_allocate_pages(uint64_t size) {
   NativeRunAllocation *allocation;
   void *memory;
   int virtual_alloc = 0;
+  if (compile_allocation_limit &&
+      (compile_allocated_bytes > compile_allocation_limit ||
+       (uint64_t)bytes > compile_allocation_limit - compile_allocated_bytes))
+    return 0;
   if (getenv("LAIN_NATIVE_TRACE"))
     fprintf(stderr, "lainc: allocate-pages %llu\n", (unsigned long long)size), fflush(stderr);
 #ifdef _WIN32
@@ -1087,9 +1102,11 @@ uintptr_t bootstrap_allocate_pages(uint64_t size) {
     return 0;
   }
   allocation->pointer = memory;
+  allocation->bytes = bytes;
   allocation->virtual_alloc = virtual_alloc;
   allocation->next = compile_context.allocations;
   compile_context.allocations = allocation;
+  compile_allocated_bytes += (uint64_t)bytes;
   return (uintptr_t)memory;
 }
 
@@ -1107,6 +1124,10 @@ void bootstrap_release_pages(uintptr_t pointer) {
       free(allocation->pointer);
 #endif
       *slot = allocation->next;
+      if (compile_allocated_bytes >= (uint64_t)allocation->bytes)
+        compile_allocated_bytes -= (uint64_t)allocation->bytes;
+      else
+        compile_allocated_bytes = 0;
       free(allocation);
       return;
     }
@@ -1124,9 +1145,27 @@ void bootstrap_artifact_write_byte(uint32_t byte) {
     fputc((unsigned char)byte, artifact_file);
 }
 
+void bootstrap_artifact_write_literal(uintptr_t data) {
+  if (artifact_file && data)
+    fputs((const char *)data, artifact_file);
+}
+
+void bootstrap_set_allocation_limit(uint64_t limit) {
+  compile_allocation_limit = limit;
+}
+
 void bootstrap_artifact_write_span(uintptr_t data, uint64_t length) {
   if (artifact_file && data && length)
     fwrite((const void *)data, 1, (size_t)length, artifact_file);
+}
+
+void bootstrap_write_artifact(uintptr_t data, uint64_t length) {
+  /* Formal stdlib lowering writes through its stable two-argument ABI and
+   * does not own stream lifetime.  Open lazily so both provider families can
+   * use the same host contract; main() still closes and publishes atomically. */
+  if (!artifact_file)
+    bootstrap_artifact_begin();
+  bootstrap_artifact_write_span(data, length);
 }
 
 void bootstrap_artifact_finish(void) {
@@ -1202,7 +1241,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: lainc.exe [--run] -o <output.l1> <source.lain> [source.lain ...]\n");
     return 2;
   }
-  artifact_path = argv[first_source + 1];
+  artifact_final_path = argv[first_source + 1];
+  if (snprintf(artifact_temp_path, sizeof(artifact_temp_path), "%s.tmp",
+               artifact_final_path) < 0 ||
+      strlen(artifact_temp_path) >= sizeof(artifact_temp_path) - 1) {
+    fprintf(stderr, "lainc: output path is too long\n");
+    return 2;
+  }
+  artifact_path = artifact_temp_path;
   first_source += 2;
   source_count_value = (uint64_t)(argc - first_source);
   if (source_count_value == 0)
@@ -1219,12 +1265,25 @@ int main(int argc, char **argv) {
   }
   int status = LAIN_NATIVE_ENTRY();
   bootstrap_artifact_finish();
+  if (status == 0) {
+    /* Publish only a complete artifact.  Remove an older destination first
+     * because Windows rename does not replace an existing file. */
+    remove(artifact_final_path);
+    if (rename(artifact_temp_path, artifact_final_path) != 0) {
+      fprintf(stderr, "lainc: cannot publish %s: %s\n", artifact_final_path,
+              strerror(errno));
+      status = 2;
+      remove(artifact_temp_path);
+    }
+  } else {
+    remove(artifact_temp_path);
+  }
   /* The compiler no longer needs its scratch pages once the artifact has
    * been flushed.  Release them before optional in-process execution so a
    * large compile cannot look like a runtime leak. */
   native_run_release_allocations(&compile_context);
   if (status == 0 && run_after_emit)
-    status = run_emitted_artifact(artifact_path);
+    status = run_emitted_artifact(artifact_final_path);
   for (uint64_t index = 0; index < source_count_value; ++index)
     free(sources[index].data);
   free(sources);

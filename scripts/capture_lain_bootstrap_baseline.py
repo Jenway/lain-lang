@@ -28,24 +28,20 @@ ROOT = Path(__file__).resolve().parents[1]
 PYTHON = Path(sys.executable)
 
 SMOKE_TESTS = (
-    "tests/lainir_lain/run_raw_ast.py",
-    "tests/lainir_lain/run_ast_ops.py",
-    "tests/lainir_lain/run_meta_record.py",
-    "tests/lainir_lain/run_meta_module.py",
-    "tests/lainir_lain/run_meta_eval.py",
+    "scripts/check_lainc_lainir_api.py",
+    "scripts/check_lainir_boundaries.py",
+    "scripts/check_backend_manifest.py",
+    "scripts/check_backend_abi_contract.py",
 )
 
 FULL_TESTS = SMOKE_TESTS + (
-    "tests/lainir_lain/run_compiler_source_closure.py",
-    "tests/lainir_lain/run_compiler_api_bootstrap.py",
-    "tests/lainir_lain/run_lainc_archive_usable.py",
+    "scripts/check_lainc_lainir_api_baseline.py",
 )
 
 SOURCE_ROOTS = (
     ROOT / "seed" / "src",
     ROOT / "src" / "lainir",
     ROOT / "src" / "lainc",
-    ROOT / "src" / "compiler-archive",
     ROOT / "std",
 )
 
@@ -165,7 +161,7 @@ def run_test(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--full", action="store_true", help="run compiler/archive gates too")
+    parser.add_argument("--full", action="store_true", help="run the complete compiler gates too")
     parser.add_argument(
         "--output-dir",
         type=Path,
