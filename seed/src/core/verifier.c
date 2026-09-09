@@ -214,8 +214,17 @@ static int verify_expr(VerifyContext *ctx, L1Expr *expr, const Name *names) {
   case EXPR_EVAL:
     if (!expr->data.eval.block)
       return fail(ctx, 2037, "#eval requires a block");
-    expr->data.eval.ret_ty = ctx->sub->ret_ty;
-    return verify_block(ctx, expr->data.eval.block, names, NULL);
+    if (!expr->data.eval.ret_ty)
+      return fail(ctx, 2041, "#eval requires an expected physical type");
+    {
+      L1Subroutine eval_sub = {0};
+      VerifyContext eval_ctx = *ctx;
+      eval_sub.name = "<eval>";
+      eval_sub.ret_ty = expr->data.eval.ret_ty;
+      eval_sub.blocks = expr->data.eval.block;
+      eval_ctx.sub = &eval_sub;
+      return verify_block(&eval_ctx, expr->data.eval.block, names, NULL);
+    }
   case EXPR_PROC_ADDR:
     if (!find_subroutine(ctx->module, expr->data.proc_addr.fn_name))
       return fail(ctx, 2025, "unknown procedure address `%s`",
@@ -332,6 +341,8 @@ static int verify_block(VerifyContext *ctx, L1Block *block, const Name *incoming
       const char *name = inst->kind == INST_LET ? inst->data.let.name : inst->data.set.name;
       L1Type **binding_ty = inst->kind == INST_LET ? &inst->data.let.ty : &inst->data.set.ty;
       L1Expr *value = inst->kind == INST_LET ? inst->data.let.val : inst->data.set.val;
+      if (value && value->kind == EXPR_EVAL && *binding_ty)
+        value->data.eval.ret_ty = *binding_ty;
       if (!verify_expr(ctx, value, names)) return 0;
       if (inst->kind == INST_LET && name_exists(names, name))
         return fail(ctx, 2011, "duplicate binding `%%%s` in `%s`", name, ctx->sub->name);
@@ -354,6 +365,9 @@ static int verify_block(VerifyContext *ctx, L1Block *block, const Name *incoming
       return 1;
     }
     case INST_STORE:
+      if (inst->data.store.val && inst->data.store.val->kind == EXPR_EVAL &&
+          inst->data.store.store_ty)
+        inst->data.store.val->data.eval.ret_ty = inst->data.store.store_ty;
       if (!verify_expr(ctx, inst->data.store.val, names) ||
           !verify_expr(ctx, inst->data.store.dest, names)) return 0;
       if (!inst->data.store.store_ty)
@@ -392,6 +406,8 @@ static int verify_block(VerifyContext *ctx, L1Block *block, const Name *incoming
       terminated = 1;
       break;
     case INST_RETURN:
+      if (inst->data.ret.val && inst->data.ret.val->kind == EXPR_EVAL)
+        inst->data.ret.val->data.eval.ret_ty = ctx->sub->ret_ty;
       if (!verify_expr(ctx, inst->data.ret.val, names) && inst->data.ret.val) return 0;
       if (!value_type_compatible(ctx->sub->ret_ty, inst->data.ret.val))
         return fail(ctx, 2014, "return type mismatch in `%s`", ctx->sub->name);
