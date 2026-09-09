@@ -6,21 +6,22 @@
 
 let memory_model: Module = import("std::memory_model");
 let vector: Module = import("std::core::vec");
+let effects: Module = import("std::effect");
 let l1_ir: Module = import("packages::lain::lainir::api::l1_ir");
 
 @export
-let l1_interpreter: Module = std::module {
+let lainvm: Module = std::module {
 
     @export
     let ExternalCallShape: ModuleShape = std::module_shape {
-        let Result: type;
+        let Response: type;
         let call: std::func(
             name: addr,
             arguments: addr,
             argument_count: usize,
-        ) -> Result;
-        let result_status = std::func(result: &Result) -> i32;
-        let result_bits = std::func(result: &Result) -> u64;
+        ) -> Response;
+        let response_status = std::func(response: &Response) -> i32;
+        let response_bits = std::func(response: &Response) -> u64;
     };
 
     @export
@@ -41,7 +42,10 @@ let l1_interpreter: Module = std::module {
             Memory.Bounds,
         );
 
-        let Result: type = std::struct {
+        // Flow is interpreter-private control state.  It is intentionally not
+        // part of the LAINVM API: callers receive a physical Value or the
+        // standard Trap effect.
+        let Flow: type = std::struct {
             status: i32,
             value: Value,
             trap_kind: i32,
@@ -158,7 +162,7 @@ let l1_interpreter: Module = std::module {
             state: &mut LainVm,
             type_id: L1.TypeId,
             address: Address,
-        ) -> Result ! {Memory.Allocation.Effect} {
+        ) -> Flow ! {Memory.Allocation.Effect} {
             if state.vspace.addresses.length() >= 0 {
                 append_address(state, address);
             }
@@ -167,7 +171,7 @@ let l1_interpreter: Module = std::module {
                 i32_value: state.vspace.addresses.length() as i32,
                 bits_value: state.vspace.addresses.length() as u64,
             };
-            let result: Result = success(value);
+            let result: Flow = success(value);
             return result;
         };
 
@@ -233,8 +237,8 @@ let l1_interpreter: Module = std::module {
             return true;
         };
 
-        let fail = std::func(code: i32) -> Result {
-            return Result {
+        let fail = std::func(code: i32) -> Flow {
+            return Flow {
                 status: code,
                 value: Value { type_id: 0, i32_value: 0, bits_value: 0 },
                 trap_kind: 0,
@@ -243,8 +247,8 @@ let l1_interpreter: Module = std::module {
             };
         };
 
-        let success = std::func(value: Value) -> Result {
-            return Result {
+        let success = std::func(value: Value) -> Flow {
+            return Flow {
                 status: 0, value: value,
                 trap_kind: 0, trap_procedure: 0, trap_position: 0,
             };
@@ -287,10 +291,10 @@ let l1_interpreter: Module = std::module {
 
         // Internal structured-control results.  They never cross the public
         // execute boundary.
-        let fallthrough = std::func() -> Result { return fail(7997); };
-        let break_flow = std::func() -> Result { return fail(7998); };
-        let continue_flow = std::func() -> Result { return fail(7999); };
-        let yield_flow = std::func() -> Result { return fail(7996); };
+        let fallthrough = std::func() -> Flow { return fail(7997); };
+        let break_flow = std::func() -> Flow { return fail(7998); };
+        let continue_flow = std::func() -> Flow { return fail(7999); };
+        let yield_flow = std::func() -> Flow { return fail(7996); };
 
         let trap_kind = std::func(code: i32) -> i32 {
             if code == 7108 || code == 7109 || code == 7115 {
@@ -420,8 +424,8 @@ let l1_interpreter: Module = std::module {
         let finish_vm = std::func(
             state: &mut LainVm,
             procedure_id: L1.ProcedureId,
-            result: Result,
-        ) -> Result ! {
+            result: Flow,
+        ) -> Flow ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
@@ -437,7 +441,7 @@ let l1_interpreter: Module = std::module {
             release_vspace(state);
             state.tcb.status = 3;
             if result.status != 0 {
-                return Result {
+                return Flow {
                     status: result.status,
                     value: result.value,
                     trap_kind: state.tcb.trap.kind,
@@ -454,7 +458,7 @@ let l1_interpreter: Module = std::module {
             arguments: &ValueVector,
             depth: usize,
             state: &mut LainVm,
-        ) -> Result ! {
+        ) -> Flow ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
@@ -538,11 +542,11 @@ let l1_interpreter: Module = std::module {
             }
 
             if expression.kind == 43 {
-                let base_result: Result = evaluate_expression(
+                let base_result: Flow = evaluate_expression(
                     unit, expression.left, arguments, depth + 1, state,
                 );
                 if base_result.status != 0 { return base_result; }
-                let index_result: Result = evaluate_expression(
+                let index_result: Flow = evaluate_expression(
                     unit, expression.right, arguments, depth + 1, state,
                 );
                 if index_result.status != 0 { return index_result; }
@@ -568,7 +572,7 @@ let l1_interpreter: Module = std::module {
             }
 
             if expression.kind == 44 {
-                let address_result: Result = evaluate_expression(
+                let address_result: Flow = evaluate_expression(
                     unit, expression.left, arguments, depth + 1, state,
                 );
                 if address_result.status != 0 { return address_result; }
@@ -603,7 +607,7 @@ let l1_interpreter: Module = std::module {
 
             if expression.kind >= 3 {
                 if expression.kind <= 17 {
-                    let left: Result = evaluate_expression(
+                    let left: Flow = evaluate_expression(
                         unit,
                         expression.left,
                         arguments,
@@ -612,7 +616,7 @@ let l1_interpreter: Module = std::module {
                     );
                     if left.status != 0 { return left; }
 
-                    let right: Result = evaluate_expression(
+                    let right: Flow = evaluate_expression(
                         unit,
                         expression.right,
                         arguments,
@@ -673,7 +677,7 @@ let l1_interpreter: Module = std::module {
             }
 
             if expression.kind >= 30 && expression.kind <= 33 {
-                let input: Result = evaluate_expression(
+                let input: Flow = evaluate_expression(
                     unit, expression.left, arguments, depth + 1, state,
                 );
                 if input.status != 0 { return input; }
@@ -703,7 +707,7 @@ let l1_interpreter: Module = std::module {
                 let argument_index: usize = 0;
                 while argument_index
                     < expression.arguments.length() {
-                    let argument: Result = evaluate_expression(
+                    let argument: Flow = evaluate_expression(
                         unit,
                         *expression.arguments.get(argument_index),
                         arguments,
@@ -724,7 +728,7 @@ let l1_interpreter: Module = std::module {
             }
 
             if expression.kind == 21 {
-                let target: Result = evaluate_expression(
+                let target: Flow = evaluate_expression(
                     unit, expression.left, arguments, depth + 1, state,
                 );
                 if target.status != 0 { return target; }
@@ -736,7 +740,7 @@ let l1_interpreter: Module = std::module {
                 let call_arguments: ValueVector = ValueVector.new();
                 let argument_index: usize = 0;
                 while argument_index < expression.arguments.length() {
-                    let argument: Result = evaluate_expression(
+                    let argument: Flow = evaluate_expression(
                         unit,
                         *expression.arguments.get(argument_index),
                         arguments,
@@ -761,7 +765,7 @@ let l1_interpreter: Module = std::module {
             arguments: &ValueVector,
             depth: usize,
             state: &mut LainVm,
-        ) -> Result ! {
+        ) -> Flow ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
@@ -801,7 +805,7 @@ let l1_interpreter: Module = std::module {
                 }
 
                 if instruction.kind == 2 {
-                    let condition: Result = evaluate_expression(
+                    let condition: Flow = evaluate_expression(
                         unit,
                         instruction.expression,
                         arguments,
@@ -812,7 +816,7 @@ let l1_interpreter: Module = std::module {
                         return condition;
                     }
                     if condition.value.i32_value != 0 {
-                        let branch: Result = execute_region(
+                        let branch: Flow = execute_region(
                             unit,
                             instruction.first_region,
                             arguments,
@@ -821,7 +825,7 @@ let l1_interpreter: Module = std::module {
                         );
                         if branch.status != 7997 { return branch; }
                     } else {
-                        let branch: Result = execute_region(
+                        let branch: Flow = execute_region(
                             unit,
                             instruction.second_region,
                             arguments,
@@ -835,7 +839,7 @@ let l1_interpreter: Module = std::module {
                 if instruction.kind == 3 {
                     let loop_status: i32 = 7997;
                     while 1 == 1 {
-                        let body: Result = execute_region(
+                        let body: Flow = execute_region(
                             unit, instruction.first_region, arguments,
                             depth + 1, state,
                         );
@@ -852,11 +856,11 @@ let l1_interpreter: Module = std::module {
                 if instruction.kind == 4 { return break_flow(); }
                 if instruction.kind == 5 { return continue_flow(); }
                 if instruction.kind == 6 {
-                    let stored: Result = evaluate_expression(
+                    let stored: Flow = evaluate_expression(
                         unit, instruction.expression, arguments, depth, state,
                     );
                     if stored.status != 0 { return stored; }
-                    let destination: Result = evaluate_expression(
+                    let destination: Flow = evaluate_expression(
                         unit, instruction.destination, arguments, depth, state,
                     );
                     if destination.status != 0 { return destination; }
@@ -947,11 +951,11 @@ let l1_interpreter: Module = std::module {
             };
         };
 
-        let execute = std::func(
+        let run_root = std::func(
             unit: &L1.Unit,
             procedure_id: L1.ProcedureId,
             arguments: &ValueVector,
-        ) -> Result ! {
+        ) -> Flow ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
@@ -961,7 +965,7 @@ let l1_interpreter: Module = std::module {
                     &mut state, procedure_id, fail(7103),
                 );
             }
-            let result: Result = execute_procedure(
+            let result: Flow = execute_procedure(
                 unit,
                 procedure_id,
                 arguments,
@@ -971,7 +975,7 @@ let l1_interpreter: Module = std::module {
             return finish_vm(&mut state, procedure_id, result);
         };
 
-        let execute_limited = std::func(
+        let run_root_limited = std::func(
             unit: &L1.Unit,
             procedure_id: L1.ProcedureId,
             arguments: &ValueVector,
@@ -979,7 +983,7 @@ let l1_interpreter: Module = std::module {
             depth_limit: usize,
             allocation_limit: usize,
             external_calls_allowed: bool,
-        ) -> Result ! {
+        ) -> Flow ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
@@ -992,10 +996,83 @@ let l1_interpreter: Module = std::module {
                     &mut state, procedure_id, fail(7103),
                 );
             }
-            let result: Result = execute_procedure(
+            let result: Flow = execute_procedure(
                 unit, procedure_id, arguments, 0, &mut state
             );
             return finish_vm(&mut state, procedure_id, result);
+        };
+
+        // Run a prepared child procedure in a fresh TCB while retaining the
+        // caller's VSpace and capability space.  LAINIR lowering materializes
+        // a source #eval's implicit captures as `arguments` before reaching
+        // this boundary.  The child has no borrowed caller frame: only the
+        // physical values in that vector cross into it.
+        let run_child = std::func(
+            state: &mut LainVm,
+            unit: &L1.Unit,
+            procedure_id: L1.ProcedureId,
+            arguments: &ValueVector,
+        ) -> Flow ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            if state.tcb.status != 1 { return fail(7103); }
+
+            let parent_tcb: TCB = state.tcb;
+            state.tcb = TCB {
+                status: 0,
+                steps: parent_tcb.steps,
+                step_limit: parent_tcb.step_limit,
+                depth_limit: parent_tcb.depth_limit,
+                current_activation: 0,
+                next_activation: parent_tcb.next_activation,
+                procedure: procedure_id,
+                region: 0,
+                position: 0,
+                suspend_reason: 0,
+                slice_limit: 0,
+                slice_steps: 0,
+                yielded: false,
+                resume_pending: false,
+                frames: CallFrameVector.new(),
+                trap: Trap {
+                    kind: 0, status: 0, procedure: 0,
+                    position: 0, active: false,
+                },
+            };
+            let flow: Flow = fail(7103);
+            if start_tcb(state) {
+                flow = execute_procedure(
+                    unit,
+                    procedure_id,
+                    arguments,
+                    parent_tcb.frames.length(),
+                    state,
+                );
+            }
+            if flow.status != 0 {
+                state.tcb.trap = Trap {
+                    kind: trap_kind(flow.status),
+                    status: flow.status,
+                    procedure: procedure_id,
+                    position: state.tcb.position,
+                    active: true,
+                };
+                flow = Flow {
+                    status: flow.status,
+                    value: flow.value,
+                    trap_kind: state.tcb.trap.kind,
+                    trap_procedure: state.tcb.trap.procedure,
+                    trap_position: state.tcb.trap.position,
+                };
+            }
+            state.tcb.status = 3;
+            let child_tcb: TCB = state.tcb;
+            parent_tcb.steps = child_tcb.steps;
+            parent_tcb.next_activation = child_tcb.next_activation;
+            if flow.status != 0 { parent_tcb.trap = child_tcb.trap; }
+            state.tcb = parent_tcb;
+            return flow;
         };
 
         let run_slice = std::func(
@@ -1004,7 +1081,7 @@ let l1_interpreter: Module = std::module {
             procedure_id: L1.ProcedureId,
             arguments: &ValueVector,
             fuel: usize,
-        ) -> Result ! {
+        ) -> Flow ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
@@ -1016,7 +1093,7 @@ let l1_interpreter: Module = std::module {
             state.tcb.slice_limit = fuel;
             state.tcb.slice_steps = 0;
             state.tcb.yielded = false;
-            let result: Result = fail(7103);
+            let result: Flow = fail(7103);
             if state.tcb.resume_pending && state.tcb.frames.length() > 0 {
                 let top_frame: usize = state.tcb.frames.length() - 1;
                 let resume_region: L1.RegionId =
@@ -1057,7 +1134,7 @@ let l1_interpreter: Module = std::module {
             arguments: &ValueVector,
             depth: usize,
             state: &mut LainVm,
-        ) -> Result ! {
+        ) -> Flow ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
         } {
@@ -1072,7 +1149,7 @@ let l1_interpreter: Module = std::module {
                 unit.procedures.get(procedure_id);
             if procedure.is_external {
                 // An external procedure can only cross the evaluator boundary
-                // after the individual Eval invocation explicitly grants the
+                // after the individual VM invocation explicitly grants the
                 // external-call capability.  The dispatcher itself remains a
                 // LAINIR-provider dependency, never a hidden host facility.
                 if !external_capability_allowed(state) {
@@ -1087,16 +1164,16 @@ let l1_interpreter: Module = std::module {
                 let raw_arguments: addr = Memory.Allocation.address(
                     arguments.storage,
                 );
-                let external_result: ExternalCalls.Result =
+                let external_response: ExternalCalls.Response =
                     ExternalCalls.call(
                         name, raw_arguments, arguments.length(),
                     );
                 let external_status: i32 =
-                    ExternalCalls.result_status(&external_result);
+                    ExternalCalls.response_status(&external_response);
                 if external_status != 0 { return fail(external_status); }
                 return success(scalar(
                     procedure.return_type,
-                    ExternalCalls.result_bits(&external_result),
+                    ExternalCalls.response_bits(&external_response),
                 ));
             }
             if procedure.parameter_types.length() != arguments.length() {
@@ -1135,7 +1212,7 @@ let l1_interpreter: Module = std::module {
                 storage_length: 0,
                 active: true,
             });
-            let result: Result = execute_region(
+            let result: Flow = execute_region(
                 unit,
                 procedure.body,
                 arguments,
@@ -1198,11 +1275,65 @@ let l1_interpreter: Module = std::module {
             return result;
         };
 
+        // The VM boundary deliberately exposes no status-and-value wrapper.
+        // A verified computation either returns its physical value or raises
+        // the standard Trap effect.  Flow stays private to this module.
+        let execute = std::func(
+            unit: &L1.Unit,
+            procedure_id: L1.ProcedureId,
+            arguments: &ValueVector,
+        ) -> Value ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+            effects.Trap,
+        } {
+            let flow: Flow = run_root(unit, procedure_id, arguments);
+            if flow.status != 0 { effects.trap(); }
+            return flow.value;
+        };
+
+        let execute_limited = std::func(
+            unit: &L1.Unit,
+            procedure_id: L1.ProcedureId,
+            arguments: &ValueVector,
+            step_limit: usize,
+            depth_limit: usize,
+            allocation_limit: usize,
+            external_calls_allowed: bool,
+        ) -> Value ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+            effects.Trap,
+        } {
+            let flow: Flow = run_root_limited(
+                unit, procedure_id, arguments, step_limit, depth_limit,
+                allocation_limit, external_calls_allowed,
+            );
+            if flow.status != 0 { effects.trap(); }
+            return flow.value;
+        };
+
+        let execute_child = std::func(
+            state: &mut LainVm,
+            unit: &L1.Unit,
+            procedure_id: L1.ProcedureId,
+            arguments: &ValueVector,
+        ) -> Value ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+            effects.Trap,
+        } {
+            let flow: Flow = run_child(
+                state, unit, procedure_id, arguments,
+            );
+            if flow.status != 0 { effects.trap(); }
+            return flow.value;
+        };
+
         return std::module {
             @export let L1: Module = L1;
             @export let Value: type = Value;
             @export let ValueVector: type = ValueVector;
-            @export let Result: type = Result;
             @export let Capability: type = Capability;
             @export let CapabilityVector: type = CapabilityVector;
             @export let CallFrame: type = CallFrame;
@@ -1215,9 +1346,9 @@ let l1_interpreter: Module = std::module {
             @export let suspend_tcb = suspend_tcb;
             @export let suspend_tcb_reason = suspend_tcb_reason;
             @export let resume_tcb = resume_tcb;
-            @export let run_slice = run_slice;
             @export let execute = execute;
             @export let execute_limited = execute_limited;
+            @export let execute_child = execute_child;
         };
     };
 };

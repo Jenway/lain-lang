@@ -24,7 +24,6 @@ API_SOURCES = (
     ROOT / "src" / "lainir" / "api" / "l1_unit_builder.lain",
     ROOT / "src" / "lainir" / "api" / "l1_verifier.lain",
     ROOT / "src" / "lainir" / "api" / "l1_printer.lain",
-    ROOT / "src" / "lainir" / "api" / "l1_interpreter.lain",
     ROOT / "src" / "lainir" / "api" / "default_provider.lain",
 )
 

@@ -150,8 +150,9 @@ IrApi
   create unit, procedure, region, expression and instruction
   verify and print
 
-EvalApi
-  execute #eval with step, allocation and recursion limits
+LainVmApi
+  execute a verified temporary root procedure for #eval
+  return a physical value or propagate Trap
 
 DiagnosticApi
   record code, severity, span and message
