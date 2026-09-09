@@ -16,8 +16,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE = ROOT / "build" / "lainir" / "lain_compiler_core.l1"
-STDLIB = ROOT / "build" / "lainir" / "bootstrap_std.l1"
+CORE = ROOT / "build" / "bootstrap" / "compiler_core.l1"
+STDLIB = ROOT / "build" / "bootstrap" / "stdlib.l1"
 
 # These names are implementation procedures, not generic ABI accessors.
 FORBIDDEN_PROC = re.compile(
@@ -61,8 +61,6 @@ def main() -> int:
         "#proc lain_std_elaborate",
         "#proc lain_std_lower",
         "#proc lain_std_lower_program",
-        "#proc program_eval_consteval_arithmetic",
-        "#proc program_eval_consteval_group",
     )
     missing = [name for name in required if name not in stdlib_text]
     if missing:
@@ -74,9 +72,18 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    if "#proc eval_group" in stdlib_text or "#proc eval_consteval_group" in stdlib_text:
+    forbidden_eval_protocol = (
+        "EvalResult",
+        "eval_result_",
+        "#proc eval_group",
+        "#proc eval_consteval_group",
+        "#proc program_eval_consteval_group",
+    )
+    present = [name for name in forbidden_eval_protocol if name in stdlib_text]
+    if present:
         print(
-            "boundary check: bootstrap stdlib still contains the standalone integer evaluator",
+            "boundary check: bootstrap stdlib contains a removed eval protocol: "
+            + ", ".join(present),
             file=sys.stderr,
         )
         return 1

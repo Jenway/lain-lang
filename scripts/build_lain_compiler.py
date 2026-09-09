@@ -41,6 +41,7 @@ BOOTSTRAP_STD_MODULES = (
     ROOT / "bootstrap" / "compiler" / "meta_values.l1",
     ROOT / "bootstrap" / "compiler" / "lower_func.l1",
     ROOT / "bootstrap" / "compiler" / "lower_record.l1",
+    ROOT / "bootstrap" / "compiler" / "lower_program.l1",
     ROOT / "bootstrap" / "compiler" / "meta_bindings.l1",
     # Import discovery and syntax-index construction are language policy;
     # keep them with the bootstrap library rather than the core driver.
@@ -50,6 +51,7 @@ BOOTSTRAP_STD_MODULES = (
     ROOT / "bootstrap" / "compiler" / "meta_import.l1",
     ROOT / "bootstrap" / "compiler" / "meta_record.l1",
     ROOT / "bootstrap" / "compiler" / "meta_type.l1",
+    ROOT / "bootstrap" / "compiler" / "meta_call.l1",
     ROOT / "bootstrap" / "compiler" / "meta_collect.l1",
     ROOT / "bootstrap" / "std" / "policy.l1",
     ROOT / "bootstrap" / "compiler" / "module_meta.l1",
