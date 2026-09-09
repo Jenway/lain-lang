@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the checked-in lainc snapshot for a bootstrap release."""
+"""Package the generated lainc bootstrap bundle and its manifest."""
 
 from __future__ import annotations
 
@@ -12,9 +12,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT = ROOT / "bootstrap" / "lainc.l1"
-SNAPSHOT = ROOT / "bootstrap" / "lainc.l1.snapshot.json"
+ARTIFACT = ROOT / "build" / "bootstrap" / "lainc.l1"
+SNAPSHOT = ROOT / "build" / "bootstrap" / "lainc.l1.snapshot.json"
 CHECK = ROOT / "scripts" / "check_lainc_bootstrap_snapshot.py"
+GENERATE = ROOT / "scripts" / "freeze_lainc_bootstrap.py"
 VERSION = ROOT / "VERSION"
 
 
@@ -25,6 +26,9 @@ def main() -> int:
     )
     args = parser.parse_args()
     output = args.output_dir if args.output_dir.is_absolute() else ROOT / args.output_dir
+    generated = subprocess.run([sys.executable, str(GENERATE)], cwd=ROOT, text=True)
+    if generated.returncode:
+        return generated.returncode
     checked = subprocess.run(
         [sys.executable, str(CHECK), str(ARTIFACT)], cwd=ROOT, text=True
     )

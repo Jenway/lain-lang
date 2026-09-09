@@ -13,7 +13,7 @@ import check_stdlib_conformance as conformance
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPILER = ROOT / "build" / "lainir" / "lain_compiler.l1"
+COMPILER = ROOT / "build" / "bootstrap" / "lainc.l1"
 FIXTURE = ROOT / "scripts" / "fixtures" / "lainir_provider_smoke.lain"
 SEED = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"

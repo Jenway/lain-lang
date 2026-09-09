@@ -33,9 +33,8 @@ BIN = ROOT / "seed" / "zig-out" / "bin"
 SUFFIX = ".exe" if os.name == "nt" else ""
 SEED = BIN / f"lainir-seed{SUFFIX}"
 PRINT = BIN / f"lainir-print{SUFFIX}"
-FROZEN = ROOT / "bootstrap" / "lainc.l1"
+FROZEN = ROOT / "build" / "bootstrap" / "lainc.l1"
 LAINC = ROOT / "src" / "lainc" / "lainc.lain"
-ARCHIVE = ROOT / "src" / "compiler-archive"
 
 
 @dataclass
@@ -339,11 +338,6 @@ def write_reports(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--include-archive",
-        action="store_true",
-        help="also compile and verify the tokenizer+syntax archive chain",
-    )
-    parser.add_argument(
         "--trace-stage",
         choices=("gen1", "gen2", "gen3"),
         help="write seed interpreter procedure/opcode counters for one stage",
@@ -432,39 +426,6 @@ def main() -> int:
         if not args.stop_after_gen1 and not args.stop_after_gen2:
             fixed_point = gen2.read_bytes() == gen3.read_bytes()
             print(f"[fixed_point] gen2 == gen3: {fixed_point}", flush=True)
-
-        if args.include_archive and not args.stop_after_gen1 and not args.stop_after_gen2:
-            entry = tmp / "entry.lain"
-            entry.write_text(
-                'let syntax: Module = import("packages::lain::compiler::syntax");\n'
-                "let sy: Module = syntax.Syntax(0);\n"
-                "let main = std::func() -> i32 {\n    return 0;\n};\n",
-                encoding="utf-8",
-                newline="\n",
-            )
-            chain = tmp / "chain.l1"
-            archive_steps = [
-                (
-                    "compile_archive_tokenizer_syntax",
-                    [
-                        SEED,
-                        "interpreter",
-                        gen2,
-                        "compiler_compile_library",
-                        chain,
-                        ARCHIVE / "tokenizer.lain",
-                        ARCHIVE / "syntax.lain",
-                        entry,
-                    ],
-                    chain,
-                ),
-                ("verify_archive_tokenizer_syntax", [PRINT, chain, "main"], None),
-            ]
-            for name, command, output in archive_steps:
-                step = run_step(name, command, report_dir, output)
-                steps.append(step)
-                if step.returncode:
-                    break
 
     trace_file = report_dir / f"{trace_stage}-internal.tsv" if trace_stage else None
     trace_summary = read_internal_trace(trace_file) if trace_file else None

@@ -38,10 +38,10 @@ C3 的完成记录见
 6. Trap 与普通返回值分开。解释器可以在宿主调用边界使用执行报告来区分成功和 Trap，
    但该报告不属于 `#eval` 的值语义，也不能携带 Meta 分类。
 7. `#eval` 必须在交给最终 backend 前执行并从产物中消失。
-8. 冻结的 `bootstrap/lainc.l1` 及其 snapshot 暂时保留为引导工具。它们可以包含待替换
-   的旧实现，但不再定义架构，也不得作为新增接口的依据。
+8. compiler bundle、snapshot 和 native executable 都是构建产物，只能写入 `build/`。
+   `bootstrap/` 只保存手写 LAINIR 启动源码，`src/` 只保存正式实现源码。
 9. 项目按 `seed -> bootstrap -> src` 分层：`seed` 是最小可信执行底座，`bootstrap` 是
-   启动正式编译器所需的 LAINIR 源码和冻结产物，`src` 只放用 Lain 编写的正式实现。
+   启动正式编译器所需的手写 LAINIR 源码，`src` 只放用 Lain 编写的正式实现。
    正式实现继续分为 `src/lainc`、`src/lainir` 和 `src/lainvm`；LAINIR 定义并验证
    物理程序，LAINVM 执行已经验证的物理程序。
 10. `src/lainvm` 是正式实现中的独立运行时层。它拥有 TCB、VSpace、执行预算、Trap 和
@@ -74,7 +74,7 @@ lainc 不依赖 LAINVM 的私有实现。
 | LAINVM 基础 | C seed 与 Lain 源码边界均已采用 TCB、VSpace、Trap 和预算模型；Lain VM 已独立为 `src/lainvm/`，并已公开执行 API contract 与 `Eval` operation | 将 lainc 工厂和编译入口接到该 contract 与 handler |
 | `#eval` | C seed 已通过临时 TCB 执行并在 fold 前消除；Lain VM 已提供子 TCB 原语 | Meta 物化捕获参数并调用 LAINVM |
 | Meta 编译期求值 | 旧求值路径已删除，暂不可用 | 从整数与基础物理运算开始重新接入 |
-| 自举 | 冻结产物暂时可用 | 新路径完成后重新生成并恢复固定点 |
+| 自举 | 启动源码仍在；旧生成产物已移出源码树，当前 C4 未完成所以暂时不能重建 | C4 完成后在 `build/bootstrap/` 重新生成并恢复固定点 |
 | 项目结构 | `seed`、`bootstrap` 与 `src` 已分离；`src/lainvm/` 已拥有执行实现 | 保持职责边界并在 C5 恢复新自举 |
 | C backend 与发布 | 非当前主线 | 纠偏完成后继续收口和 CI 验证 |
 
@@ -122,11 +122,11 @@ lainc: route compile-time evaluation through LAINVM
 
 ## C5：恢复自举并替换冻结产物
 
-目标：新 Meta 和 LAINVM 路径能够重新生成编译器，旧冻结产物退出临时引导角色。
+目标：新 Meta 和 LAINVM 路径能够从 bootstrap 源码重新生成编译器。
 
 工作：
 
-- 重新生成 `bootstrap/lainc.l1` 和 snapshot；
+- 生成 `build/bootstrap/lainc.l1` 和 snapshot；
 - 验证新产物不含 `EvalResult` 及衍生接口；
 - 完成 gen1 -> gen2 -> gen3 固定点比较；
 - 运行 native compiler matrix、LAINIR API baseline 和 release gate；

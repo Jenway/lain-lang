@@ -17,6 +17,7 @@
 - [`lainc-bootstrap-roadmap.md`](lainc-bootstrap-roadmap.md)：bootstrap 标准库、正式标准库和 compiler source closure 的阶段性实施记录。
 - [`lainir-implementation-roadmap.md`](lainir-implementation-roadmap.md)：LAINIR frontend、verifier、C backend 和 self-host 的已完成里程碑。
 - [`lainc-performance-analysis-2026-08-21.md`](lainc-performance-analysis-2026-08-21.md)：旧 bootstrap 路径的性能测量、瓶颈分析和优化结果。
+- [`lainir-tools.md`](lainir-tools.md)：已归档的 LAINIR formatter、highlight、parser 和 LSP 实现记录。
 
 ## Scheme 时期设计快照
 
@@ -37,4 +38,3 @@
 - 2026-09-07 的旧 VM 路线快照；
 - 2026-09-07 的旧 LAINIR maintenance 路线快照；
 - 重复的 LAINIR compiler roadmap。
-

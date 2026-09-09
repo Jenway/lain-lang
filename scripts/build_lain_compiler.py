@@ -17,16 +17,16 @@ BOUNDARY_CHECK = ROOT / "scripts" / "check_lainir_boundaries.py"
 L1CHECK = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-print.exe" if os.name == "nt" else "lainir-print"
 )
-OUTPUT = ROOT / "build" / "lainir" / "lain_compiler.l1"
-CORE_OUTPUT = ROOT / "build" / "lainir" / "lain_compiler_core.l1"
-BOOTSTRAP_STD_OUTPUT = ROOT / "build" / "lainir" / "bootstrap_std.l1"
+OUTPUT = ROOT / "build" / "bootstrap" / "lainc.l1"
+CORE_OUTPUT = ROOT / "build" / "bootstrap" / "compiler_core.l1"
+BOOTSTRAP_STD_OUTPUT = ROOT / "build" / "bootstrap" / "stdlib.l1"
 STAMP = OUTPUT.with_suffix(".stamp.json")
 CORE_STAMP = CORE_OUTPUT.with_suffix(".stamp.json")
 BOOTSTRAP_STD_STAMP = BOOTSTRAP_STD_OUTPUT.with_suffix(".stamp.json")
 BOOTSTRAP_STD_MANIFEST = BOOTSTRAP_STD_OUTPUT.with_suffix(".manifest.json")
 SCHEMA = "lain-compiler-bundle-v1"
 CORE_MODULES = (
-    ROOT / "src" / "lainir" / "tools" / "source.l1",
+    ROOT / "bootstrap" / "compiler" / "source.l1",
     ROOT / "bootstrap" / "compiler" / "raw_ast.l1",
     ROOT / "bootstrap" / "compiler" / "ast_runtime.l1",
     ROOT / "bootstrap" / "compiler" / "compiler_context.l1",

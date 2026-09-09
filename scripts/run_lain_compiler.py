@@ -17,8 +17,8 @@ EMPTY_SOURCE = ROOT / "scripts" / "fixtures" / "empty_source.lain"
 L1BOOTSTRAP = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
-BUNDLE = ROOT / "build" / "lainir" / "lain_compiler.l1"
-CORE_BUNDLE = ROOT / "build" / "lainir" / "lain_compiler_core.l1"
+BUNDLE = ROOT / "build" / "bootstrap" / "lainc.l1"
+CORE_BUNDLE = ROOT / "build" / "bootstrap" / "compiler_core.l1"
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 
 

@@ -46,7 +46,7 @@ keywords so editors can render syntax mistakes separately.
 Validation:
 
 ```text
-seed/zig-out/bin/lainir-print.exe src/lainir/tools/lsp.l1 lsp_run
+seed/zig-out/bin/lainir-print.exe archive/lainir-tools/lsp.l1 lsp_run
 ```
 
 End-to-end framing, fragmented input, multiple request ids, and response
@@ -84,7 +84,7 @@ guessing which braces are structural.
 
 ```text
 python scripts/bundle_lainir.py -o parser_bundle.l1 \
-  src/lainir/tools/source.l1 src/lainir/tools/parser.l1
+  archive/lainir-tools/source.l1 archive/lainir-tools/parser.l1
 seed/zig-out/bin/lainir-seed.exe parser_bundle.l1 \
   tool_parse_demo ast.json input.l1
 ```
