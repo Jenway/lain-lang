@@ -32,12 +32,12 @@ disconnected from LAINVM.
 ## Current blocker
 
 The program-unit state and physical lowering implementation have been restored
-without the removed evaluator protocol. Arithmetic `consteval` and pure scalar
-Meta procedures now lower to temporary LAINIR containing `#eval` and execute
-through LAINVM. The first remaining call is `allocation.Alloc(Policy)`, which
-accepts a module and returns a Meta effect address. Consequently the bootstrap
-compiler cannot yet compile the formal compiler source closure needed by the
-native matrix.
+without the removed evaluator protocol. Arithmetic `consteval`, pure scalar
+Meta procedures, and Effect factories with module arguments now lower to
+temporary LAINIR containing `#eval` and execute through LAINVM. The first
+remaining call is `std::effect_operation(...)` in `std/core/arena.lain`.
+Consequently the bootstrap compiler cannot yet compile the formal compiler
+source closure needed by the native matrix.
 
 The next required work is C4 in
 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md): finish the LAINVM
