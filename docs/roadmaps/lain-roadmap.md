@@ -74,7 +74,7 @@ lainc 不依赖 LAINVM 的私有实现。
 | LAINVM 基础 | C seed 与 Lain 源码边界均已采用 TCB、VSpace、Trap 和预算模型；bootstrap 与正式实现都已公开 Artifact、Procedure、物理参数和 eval 接口 | 扩展通过该接口执行的 Meta callable 范围 |
 | `#eval` | C seed 已通过临时 TCB 执行并在 fold 前消除；Lain VM 已提供子 TCB 原语；lainc Meta 已改为发出 `Vm.eval` effect | 在正式编译器执行入口安装 handler，并运行真实编译 fixture |
 | Meta 编译期求值 | `Ir.Eval`、`Eval.Result` 和伪造的 status/value 返回已经从正式 Meta 源码删除；语法 callable 已改用 LAINVM 物理 `Value` | 接通 handler 后，从整数与基础物理运算开始恢复真实执行 |
-| 自举 | `build/bootstrap/lainc.l1` 已可由当前启动源码重建，普通物理代码的编译与执行已恢复；算术、纯标量调用以及带模块参数并返回地址的 Effect factory 已经由 LAINVM 执行 | 实现 `std::effect_operation`，继续推进正式标准库闭包，再恢复固定点 |
+| 自举 | `build/bootstrap/lainc.l1` 已可由当前启动源码重建，普通物理代码的编译与执行已恢复；算术、纯标量调用、Effect factory 和 `std::effect_operation` 已经由 LAINVM 执行 | 修复 `std/meta.lain` 导入收集循环，继续推进正式标准库闭包，再恢复固定点 |
 | 项目结构 | `seed`、`bootstrap` 与 `src` 已分离；`src/lainvm/` 已拥有执行实现 | 保持职责边界并在 C5 恢复新自举 |
 | C backend 与发布 | 非当前主线 | 纠偏完成后继续收口和 CI 验证 |
 
@@ -105,8 +105,9 @@ effect handler（接收 `Eval` 请求并启动子 TCB 的代码）在子 TCB 中
    `allocation.Alloc(Policy)` 已经完成：bootstrap 把过程和调用点编译成含 `#eval` 的
    临时 LAINIR，seed 验证后由临时 TCB 执行，最终 artifact 中不保留 `#eval`。
    Effect factory 的模块参数以物理地址传入，返回的 Effect 地址保存了本次调用的形参与
-   实参绑定。当前首个未覆盖调用是 `std::effect_operation(...)`。下面的其余项目每完成
-   一项就加入真实编译 fixture 并提交。
+   实参绑定。`std::effect_operation(...)` 也已通过同一路径建立保留 effect、名称和函数
+   签名语法的 callable 描述。当前首个阻塞是收集 `std/meta.lain` 导入时未能收敛；步数
+   保护会报告 `5124`。下面的其余项目每完成一项就加入真实编译 fixture 并提交。
 
 恢复顺序：
 

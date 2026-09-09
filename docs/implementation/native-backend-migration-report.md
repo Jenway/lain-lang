@@ -33,9 +33,10 @@ disconnected from LAINVM.
 
 The program-unit state and physical lowering implementation have been restored
 without the removed evaluator protocol. Arithmetic `consteval`, pure scalar
-Meta procedures, and Effect factories with module arguments now lower to
-temporary LAINIR containing `#eval` and execute through LAINVM. The first
-remaining call is `std::effect_operation(...)` in `std/core/arena.lain`.
+Meta procedures, Effect factories with module arguments, and
+`std::effect_operation(...)` now lower to temporary LAINIR containing `#eval`
+and execute through LAINVM. The next blocker is a non-terminating import
+collection path beginning at `std/meta.lain`; the Meta step guard reports 5124.
 Consequently the bootstrap compiler cannot yet compile the formal compiler
 source closure needed by the native matrix.
 

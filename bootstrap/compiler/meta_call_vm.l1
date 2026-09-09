@@ -504,3 +504,64 @@
   #call bootstrap.release-pages(%buffer)
   #return %value
 }
+
+#proc lainvm_meta_is_effect_operation(
+  #addr %source, #addr %value
+) -> #bits<1> {
+  #if #eq(#call program_is_std_path(%source, %value), 0) { #return 0 }
+  #return #call meta_atom_equal(
+    %source, #call program_operand_name(%source, %value),
+    "effect_operation", 16
+  )
+}
+
+#proc lainvm_meta_build_effect_operation_artifact(
+  #addr %value
+) -> #addr {
+  #let %buffer: #addr = #call lainvm_eval_buffer_new()
+  #call lainvm_eval_buffer_append_literal(
+    %buffer,
+    "#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;\n#proc meta_target(#addr %meta_source, #addr %meta_node, #addr %meta_group, #addr %meta_environment) -> #addr {\n  #let %nil: #addr = #call bootstrap.allocate-pages(8)\n  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)\n  #let %result: #addr = #call bootstrap.allocate-pages(64)\n  #store 7, #lea(base=%result, idx=0, scale=0, offset=0)\n  #store %meta_source, #lea(base=%result, idx=0, scale=0, offset=8)\n  #store "
+  )
+  #call lainvm_eval_buffer_append_decimal(
+    %buffer, #call raw_node_start(%value)
+  )
+  #call lainvm_eval_buffer_append_literal(
+    %buffer, ", #lea(base=%result, idx=0, scale=0, offset=16)\n  #store "
+  )
+  #call lainvm_eval_buffer_append_decimal(
+    %buffer, #call raw_node_length(%value)
+  )
+  #call lainvm_eval_buffer_append_literal(
+    %buffer,
+    ", #lea(base=%result, idx=0, scale=0, offset=24)\n  #store %meta_group, #lea(base=%result, idx=0, scale=0, offset=32)\n  #store %meta_environment, #lea(base=%result, idx=0, scale=0, offset=40)\n  #store 0, #lea(base=%result, idx=0, scale=0, offset=48)\n  #store %nil, #lea(base=%result, idx=0, scale=0, offset=56)\n  #return %result\n}\n#proc meta_entry(#addr %meta_source, #addr %meta_node, #addr %meta_group, #addr %meta_environment) -> #addr {\n  #return #eval { #return #call meta_target(%meta_source, %meta_node, %meta_group, %meta_environment) }\n}\n"
+  )
+  #return %buffer
+}
+
+#proc lainvm_eval_meta_effect_operation(
+  #addr %source, #addr %value, #addr %group, #addr %environment
+) -> #addr {
+  #let %buffer: #addr = #call lainvm_meta_build_effect_operation_artifact(
+    %value
+  )
+  #let %artifact: #addr = #call bootstrap.vm-artifact-parse(
+    #call lainvm_eval_buffer_data(%buffer),
+    #call lainvm_eval_buffer_length(%buffer)
+  )
+  #let %procedure: #addr = #call bootstrap.vm-procedure-find(
+    %artifact, #data_addr(lainvm_meta_entry_name), 10
+  )
+  #let %arguments: #addr = #call bootstrap.vm-arguments-new()
+  #call bootstrap.vm-arguments-append-addr(%arguments, %source)
+  #call bootstrap.vm-arguments-append-addr(%arguments, %value)
+  #call bootstrap.vm-arguments-append-addr(%arguments, %group)
+  #call bootstrap.vm-arguments-append-addr(%arguments, %environment)
+  #let %operation: #addr = #call bootstrap.vm-eval-addr(
+    %artifact, %procedure, %arguments
+  )
+  #call bootstrap.vm-arguments-release(%arguments)
+  #call bootstrap.vm-artifact-release(%artifact)
+  #call bootstrap.release-pages(%buffer)
+  #return %operation
+}
