@@ -1,6 +1,6 @@
 // Attribute expansion over immutable parsed syntax and generated syntax.
 //
-// Meta callables are Lain procedures evaluated through LainIrEvalApi.
+// Meta callables are Lain procedures evaluated through the LAINVM API.
 // This module owns expansion order, hygiene and limits; it has no host syntax
 // callbacks.
 
@@ -26,9 +26,8 @@ let meta: Module = std::module {
         let Syntax: Module = syntax.Syntax(Memory);
         let Generated: Module =
             generated_syntax.GeneratedSyntax(Memory);
-        // Compile-time execution is supplied as a capability.  Meta sees an
+        // Compile-time execution is supplied as a capability. Meta sees an
         // immutable artifact and opaque procedure/value handles only.
-        let Eval: Module = Ir.Eval;
         let MetaCallableId: type = usize;
         let MetaCallable: type = std::struct {
             id: usize,
@@ -412,7 +411,7 @@ let meta: Module = std::module {
         let meta_procedure_new = std::func(
             id: usize,
             program: usize,
-            procedure: Eval.Procedure,
+            procedure: Vm.Procedure,
             phase: CallablePhase,
             source_start: usize,
             source_length: usize,
@@ -537,32 +536,32 @@ let meta: Module = std::module {
 
         let meta_binding_new = std::func(
             name_handle: usize,
-            value: Eval.Value,
+            value: Vm.Value,
         ) -> MetaBinding {
             let result: addr = allocate_meta(24);
             std::store_bits(64, result + 0, name_handle);
-            std::store_bits(64, result + 8, Eval.value_type(&value));
-            std::store_bits(32, result + 16, Eval.value_i32(&value));
+            std::store_bits(64, result + 8, Vm.value_type(&value));
+            std::store_bits(32, result + 16, Vm.value_i32(&value));
             return result;
         };
 
         let interpreter_value_new = std::func(
             type_id: usize,
             i32_value: i32,
-        ) -> Eval.Value {
-            return Eval.make_i32(type_id, i32_value);
+        ) -> Vm.Value {
+            return Vm.make_bits(type_id, i32_value as u64);
         };
 
         let meta_environment_bind_value = std::func(
             environment: &mut MetaEnvironment,
             name_handle: usize,
-            value: Eval.Value,
+            value: Vm.Value,
         ) -> unit ! {Memory.Allocation.Effect} {
             let count: usize = std::load_bits(64, environment + 24);
             if count == 0 {
                 std::store_bits(64, environment + 32, name_handle);
-                std::store_bits(64, environment + 40, Eval.value_type(&value));
-                std::store_bits(32, environment + 48, Eval.value_i32(&value));
+                std::store_bits(64, environment + 40, Vm.value_type(&value));
+                std::store_bits(32, environment + 48, Vm.value_i32(&value));
             }
             std::store_bits(64, environment + 24, count + 1);
         };
@@ -575,7 +574,7 @@ let meta: Module = std::module {
             meta_environment_bind_value(
                 environment,
                 name_handle,
-                Eval.make_i32(0, value_handle as i32),
+                Vm.make_bits(0, value_handle as u64),
             );
         };
 
@@ -670,197 +669,21 @@ let meta: Module = std::module {
             return 5;
         };
 
-        // Execute a structured L1 procedure through the same interpreter
-        // used by the compiler's runtime tests.  This is the generic scalar
-        // Meta execution bridge; syntax-producing procedure 0 remains the
-        // Meta's special AST clone primitive below.
+        // Request compile-time execution through LAINVM. The surrounding VM
+        // execution boundary handles this effect and runs the procedure in a
+        // child TCB. A successful request returns one physical value; a VM
+        // execution failure propagates as Trap from the handler.
         let evaluate = std::func(
-            unit: &Eval.Artifact,
-            procedure: Eval.Procedure,
-            arguments: &Eval.ValueVector,
-        ) -> Eval.Result ! {
+            unit: &Vm.Artifact,
+            procedure: Vm.Procedure,
+            arguments: &Vm.ValueVector,
+        ) -> Vm.Value ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
         } {
-            return Eval.evaluate(
-                unit,
-                procedure,
-                arguments,
-                Eval.default_limits(),
-                Eval.empty_capabilities(),
-            );
-        };
-
-        let eval_failure = std::func(code: i32) -> Eval.Result {
-            return Eval.make_result(code, Eval.make_i32(0, 0));
-        };
-
-        let invoke_program = std::func(
-            registry: &Registry,
-            callable: MetaCallableId,
-            unit: &Eval.Artifact,
-            arguments: &Eval.ValueVector,
-        ) -> Eval.Result ! {
-            Memory.Allocation.Effect,
-            Memory.Bounds.Effect,
-        } {
-            if callable >= registry_length(registry) {
-                return eval_failure(2902);
-            }
-            let phase_slot: usize = callable * 5 + 3;
-            let phase_offset: usize = phase_slot * 8;
-            let registry_data: addr = registry_base(registry);
-            if std::load_bits(64, registry_data + phase_offset) != 1
-                && std::load_bits(64, registry_data + phase_offset) != 4 {
-                return eval_failure(2907);
-            }
-            let procedure_slot: usize = callable * 5 + 2;
-            let procedure_offset: usize = procedure_slot * 8;
-            if std::load_bits(64, registry_data + procedure_offset)
-                == std::usize_max() {
-                return eval_failure(2906);
-            }
-            let procedure: usize =
-                std::load_bits(64, registry_data + procedure_offset);
-            return evaluate(unit, procedure, arguments);
-        };
-
-        let invoke_program_phase = std::func(
-            registry: &Registry,
-            callable: MetaCallableId,
-            expected_phase: CallablePhase,
-            program: &MetaProgram,
-            unit: &Eval.Artifact,
-            environment: &MetaEnvironment,
-            arguments: &Eval.ValueVector,
-        ) -> Eval.Result ! {
-            Memory.Allocation.Effect,
-            Memory.Bounds.Effect,
-        } {
-            if program.id == 0 {
-                return eval_failure(2908);
-            }
-            if callable >= registry_length(registry) {
-                return eval_failure(2902);
-            }
-            let phase_slot: usize = callable * 5 + 3;
-            let phase_offset: usize = phase_slot * 8;
-            let registry_data: addr = registry_base(registry);
-            if std::load_bits(64, registry_data + phase_offset)
-                != expected_phase {
-                return eval_failure(2907);
-            }
-            let procedure_slot: usize = callable * 5 + 2;
-            let procedure_offset: usize = procedure_slot * 8;
-            if std::load_bits(64, registry_data + procedure_offset)
-                == std::usize_max() {
-                return eval_failure(2906);
-            }
-            let procedure: usize =
-                std::load_bits(64, registry_data + procedure_offset);
-            let program_slot: usize = callable * 5 + 4;
-            let program_offset: usize = program_slot * 8;
-            let selected_program: usize =
-                std::load_bits(64, registry_data + program_offset);
-            if selected_program != 0 && selected_program != program.id {
-                return eval_failure(2908);
-            }
-            if environment.binding_count > 1 {
-                return eval_failure(2909);
-            }
-            let frame: Eval.ValueVector = Eval.ValueVector.new();
-            if environment.binding_count == 1 {
-                frame.push(Eval.make_i32(
-                    environment.first_capture_type,
-                    environment.first_capture_value,
-                ));
-            }
-            let argument_index: usize = 0;
-            while argument_index < arguments.length() {
-                frame.push(*arguments.get(argument_index));
-                argument_index = argument_index + 1;
-            }
-            if program.first_procedure_parameter_count != 0 &&
-                frame.length() != program.first_procedure_parameter_count {
-                return eval_failure(2910);
-            }
-            return evaluate(unit, procedure, &frame);
-        };
-
-        // Execute a callable with an explicit lexical environment.  Captured
-        // values are placed in front of the ordinary argument frame; the L1
-        // evaluator therefore sees one deterministic frame representation and
-        // never reaches into a host-side closure.  A program descriptor is
-        // carried alongside the unit so callers can validate ownership before
-        // invoking this bridge.
-        let invoke_program_with_environment_generic = std::func(
-            registry: &Registry,
-            callable: MetaCallableId,
-            program: &MetaProgram,
-            unit: &Eval.Artifact,
-            environment: &MetaEnvironment,
-            arguments: &Eval.ValueVector,
-        ) -> Eval.Result ! {
-            Memory.Allocation.Effect,
-            Memory.Bounds.Effect,
-        } {
-            return invoke_program_phase(
-                registry,
-                callable,
-                callable_phase_meta(),
-                program,
-                unit,
-                environment,
-                arguments,
-            );
-        };
-
-        let invoke_program_with_environment_exec = std::func(
-            registry: &Registry,
-            callable: MetaCallableId,
-            program: &MetaProgram,
-            unit: &Eval.Artifact,
-            environment: &MetaEnvironment,
-            arguments: &Eval.ValueVector,
-        ) -> Eval.Result ! {
-            Memory.Allocation.Effect,
-            Memory.Bounds.Effect,
-        } {
-            return invoke_program_phase(
-                registry,
-                callable,
-                callable_phase_meta(),
-                program,
-                unit,
-                environment,
-                arguments,
-            );
-        };
-
-        let invoke_backend_program = std::func(
-            registry: &Registry,
-            callable: MetaCallableId,
-            program: &MetaProgram,
-            unit: &Eval.Artifact,
-            environment: &MetaEnvironment,
-            context: &Context,
-            arguments: &Eval.ValueVector,
-        ) -> Eval.Result ! {
-            Memory.Allocation.Effect,
-            Memory.Bounds.Effect,
-        } {
-            if context.phase != callable_phase_backend() {
-                return eval_failure(2911);
-            }
-            return invoke_program_phase(
-                registry,
-                callable,
-                callable_phase_backend(),
-                program,
-                unit,
-                environment,
-                arguments,
-            );
+            return perform Vm.eval(unit, procedure, arguments);
         };
         // Syntax callables use a deliberately small ABI for this slice:
         // argument zero is the call-site target node id and the procedure
@@ -871,7 +694,7 @@ let meta: Module = std::module {
             registry: &Registry,
             callable: MetaCallableId,
             program: &MetaProgram,
-            unit: &Eval.Artifact,
+            unit: &Vm.Artifact,
             environment: &MetaEnvironment,
             context: Context,
             invocation: Invocation,
@@ -879,6 +702,8 @@ let meta: Module = std::module {
         ) -> Expansion ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
         } {
             if callable >= registry_length(registry) {
                 return expansion_make(2902, 0);
@@ -906,7 +731,7 @@ let meta: Module = std::module {
             registry: &Registry,
             callable: MetaCallableId,
             program: &MetaProgram,
-            unit: &Eval.Artifact,
+            unit: &Vm.Artifact,
             environment: &MetaEnvironment,
             context: Context,
             invocation: Invocation,
@@ -914,24 +739,57 @@ let meta: Module = std::module {
         ) -> Expansion ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
         } {
-            let arguments: Eval.ValueVector = Eval.ValueVector.new();
-            arguments.push(Eval.make_i32(0, invocation.target as i32));
-            let result: Eval.Result = invoke_program_phase(
-                registry,
-                callable,
-                callable_phase_syntax(),
-                program,
-                unit,
-                environment,
-                &arguments,
-            );
-            let result_status: i32 = Eval.result_status(&result);
-            if result_status != 0 {
-                return expansion_make(result_status, 0);
+            if program.id == 0 { return expansion_make(2908, 0); }
+            if callable >= registry_length(registry) {
+                return expansion_make(2902, 0);
             }
-            let result_value: Eval.Value = Eval.result_value(&result);
-            let result_i32: i32 = Eval.value_i32(&result_value);
+            let registry_data: addr = registry_base(registry);
+            let phase_offset: usize = (callable * 5 + 3) * 8;
+            if std::load_bits(64, registry_data + phase_offset)
+                != callable_phase_syntax() {
+                return expansion_make(2907, 0);
+            }
+            let procedure_offset: usize = (callable * 5 + 2) * 8;
+            let procedure: usize =
+                std::load_bits(64, registry_data + procedure_offset);
+            if procedure == std::usize_max() {
+                return expansion_make(2906, 0);
+            }
+            let program_offset: usize = (callable * 5 + 4) * 8;
+            let selected_program: usize =
+                std::load_bits(64, registry_data + program_offset);
+            if selected_program != 0 && selected_program != program.id {
+                return expansion_make(2908, 0);
+            }
+            if environment.binding_count > 1 {
+                return expansion_make(2909, 0);
+            }
+            let argument_count: usize = environment.binding_count + 1;
+            if program.first_procedure_parameter_count != 0 &&
+                argument_count != program.first_procedure_parameter_count {
+                return expansion_make(2910, 0);
+            }
+            let arguments: Vm.ValueVector = Vm.new_arguments();
+            if environment.binding_count == 1 {
+                Vm.append_argument(
+                    &mut arguments,
+                    Vm.make_bits(
+                        environment.first_capture_type,
+                        environment.first_capture_value as u64,
+                    ),
+                );
+            }
+            Vm.append_argument(
+                &mut arguments,
+                Vm.make_bits(0, invocation.target as u64),
+            );
+            let result_value: Vm.Value = evaluate(
+                unit, procedure, &arguments,
+            );
+            let result_i32: i32 = Vm.value_i32(&result_value);
             if result_i32 < 0 {
                 return expansion_make(2905, 0);
             }
@@ -946,11 +804,16 @@ let meta: Module = std::module {
             callable: MetaCallableId,
             program: &MetaProgram,
             environment: &MetaEnvironment,
-            unit: &Eval.Artifact,
+            unit: &Vm.Artifact,
             context: Context,
             invocation: Invocation,
             builder: &mut Generated.Builder,
         ) -> Expansion ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
+        } {
             return invoke_syntax_program(
                 registry, callable, program, unit, environment,
                 context, invocation, builder
@@ -999,10 +862,12 @@ let meta: Module = std::module {
             registry: &Registry,
             program: &MetaProgram,
             environment: &MetaEnvironment,
-            l1_unit: &Eval.Artifact,
+            l1_unit: &Vm.Artifact,
         ) -> Expansion ! {
             Memory.Allocation.Effect,
             Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
         } {
             let builder: Generated.Builder =
                 Generated.begin(store, root);
@@ -1161,14 +1026,10 @@ let meta: Module = std::module {
             @export let callable_phase_syntax = callable_phase_syntax;
             @export let callable_phase_backend = callable_phase_backend;
             @export let Registry: type = Registry;
-            @export let Artifact: type = Eval.Artifact;
-            @export let EvalValue: type = Eval.Value;
-            @export let EvalValueVector: type = Eval.ValueVector;
+            @export let Artifact: type = Vm.Artifact;
+            @export let Value: type = Vm.Value;
+            @export let ValueVector: type = Vm.ValueVector;
             @export let evaluate = evaluate;
-            @export let invoke_program = invoke_program;
-            @export let invoke_program_phase = invoke_program_phase;
-            @export let invoke_program_with_environment = invoke_program_with_environment_exec;
-            @export let invoke_backend_program = invoke_backend_program;
             @export let invoke_syntax_program = invoke_syntax_program;
             @export let Context: type = Context;
             @export let context_new = context_new;
