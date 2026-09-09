@@ -1,6 +1,6 @@
 # 当前路线图
 
-当前路线图只有 [`lain-roadmap.md`](lain-roadmap.md) 一份。错误的求值结果协议已经删除，`seed`、`bootstrap` 和 `src` 已经分离；C seed 已通过临时 TCB 执行 `#eval`。当前阶段将执行代码与 LAINIR API 分离到 `src/lainvm/`，并让 Lain VM 获得同一份 `#eval` 语义。
+当前路线图只有 [`lain-roadmap.md`](lain-roadmap.md) 一份。错误的求值结果协议已经删除，`seed`、`bootstrap` 和 `src` 已经分离；C seed 已通过临时 TCB 执行 `#eval`，Lain VM 也已分离到 `src/lainvm/`。当前阶段是让 Meta 通过该 VM 重新执行编译期计算。
 
 已经完成的阶段归档在 [`../history/roadmap-lain-completed-2026-09-07.md`](../history/roadmap-lain-completed-2026-09-07.md)。更早的路线版本和旧方案见 [`../history/`](../history/)，它们只用于追溯。
 
