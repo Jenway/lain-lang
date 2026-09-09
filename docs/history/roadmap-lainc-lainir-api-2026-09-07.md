@@ -1,8 +1,8 @@
-# lainc 到 LAINIR API 迁移计划
+# lainc 到 LAINIR API 迁移决策与实施记录
 
 基线日期：2026-09-06。
 
-状态：执行中。Builder、Artifact、Eval 三层 v1 shape 已建立，`src/lainc`
+状态：历史快照。Builder、Artifact、Eval 三层 v1 shape 已建立，`src/lainc`
 已切到注入的 capability，旧动态 L1 模块已移出 compiler source closure。默认
 provider 仍在补齐完整 verifier、canonical printer、evaluator 与 owner/limit 语义，
 因此 API 目前属于内部迁移接口，尚未发布为稳定扩展点。
@@ -45,9 +45,9 @@ src/lainir 或 seed
 ### `04-lain-vm.md` 的定位
 
 `docs/04-lain-vm.md` 当前是未来执行环境的架构提案；其实施顺序和验收门槛见
-[`lain-vm.md`](lain-vm.md)。本迁移的阶段 5 必须接入该路线图的阶段 0/1：EvalApi
+[`../04-lain-vm.md`](../04-lain-vm.md)。本迁移的阶段 5 必须接入该路线图的阶段 0/1：EvalApi
 需要由单 TCB/单 VSpace 的 VM session 承载 activation、quota、capability、trap 和
-owner 语义。Endpoint、多 TCB 调度、CSpace、软件 MMU、`#swap_context` 和 demand
+owner 语义。Endpoint、多 TCB 调度、CSpace、软件 MMU、VM 上下文切换和 demand
 paging 的完整实现仍不计入当前阶段 2、5 或 6 的完成证据；它们要在固定点之后按
 VM contract 推进。当前阶段只接受已经存在并由 contract tests 固定的 Eval 约束，
 以及为 Eval VM 新增的最小 session contract。
@@ -55,8 +55,8 @@ VM contract 推进。当前阶段只接受已经存在并由 contract tests 固�
 当前实现只冻结以下相关语义：命名的只读静态 `#data`、当前 procedure activation
 内的 `#alloca`、`#lea` 与 typed `#load/#store`、Eval 的 step/depth/allocation
 限制，以及显式传入的 capability。未来若引入 VM 执行环境，必须先把新增对象和
-操作写入 LAINIR 规范与 API contract，再由 provider 和测试 provider 共同实现；
-提案中的 VM 概念不能反向扩大当前 API。
+操作写入 VM 规范与 API contract，再由 provider 和测试 provider 共同实现；提案中的
+VM 概念不能反向扩大当前 LAINIR API。
 
 ### lainc 拥有的内容
 

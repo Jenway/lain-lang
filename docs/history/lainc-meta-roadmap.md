@@ -1,4 +1,4 @@
-# Lain 标准库自举与 archive lainc 路线图
+# Lain 标准库自举与 archive lainc 历史实施记录
 
 > **历史实施记录。** 本文保存 2026-09-02 以前的完成项、阶段划分和当时判断。当前计划见 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md)。
 > 文中的 archive lainc 与 `src/compiler-archive` 后来已经合并为当前的 `src/lainc` 源码树。

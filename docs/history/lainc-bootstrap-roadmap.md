@@ -3,7 +3,7 @@
 > 计划快照：2026-08-16
 
 > **历史快照。** 当前执行路线以
-> [`docs/roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md) 为准。新路线将高级
+> [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md) 为准。新路线将高级
 > 语言规则放入可替换的标准库：第一代标准库用 LAIN-IR 编写，正式标准库用
 > Lain 编写；Meta 只操作 AST，编译期执行统一通过 LAIN-IR `#eval`。
 > 文中的 `src/compiler-archive` 后来已经合并进 `src/lainc`，当前没有独立的 archive 编译器。

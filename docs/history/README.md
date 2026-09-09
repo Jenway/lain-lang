@@ -1,0 +1,40 @@
+# 历史文档索引
+
+这里保存已经完成、被替代或只用于解释设计来源的文档。它们不构成当前计划，也不应作为实现状态的依据；当前状态只看 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md) 和代码中的 contract checks。
+
+## 当前完成快照
+
+- [`roadmap-lain-completed-2026-09-07.md`](roadmap-lain-completed-2026-09-07.md)：截至 2026-09-07 已有可执行证据的 compiler、backend、bootstrap、Eval contract 和 LAINIR 物理语义。
+
+## 架构和迁移决策
+
+- [`roadmap-lainc-lainir-api-2026-09-07.md`](roadmap-lainc-lainir-api-2026-09-07.md)：lainc 与 LAINIR provider/API 边界的详细迁移记录。
+- [`lainc-meta-system.md`](lainc-meta-system.md)：早期 `src/lainc` Meta 表、编译期求值和模块系统的实现记录。
+- [`lainc-meta-roadmap.md`](lainc-meta-roadmap.md)：正式标准库、`#eval` 和 Meta 分工从旧方案迁移到当前方案的实施记录。
+
+## 编译器和自举实施记录
+
+- [`lainc-bootstrap-roadmap.md`](lainc-bootstrap-roadmap.md)：bootstrap 标准库、正式标准库和 compiler source closure 的阶段性实施记录。
+- [`lainir-implementation-roadmap.md`](lainir-implementation-roadmap.md)：LAINIR frontend、verifier、C backend 和 self-host 的已完成里程碑。
+- [`lainc-performance-analysis-2026-08-21.md`](lainc-performance-analysis-2026-08-21.md)：旧 bootstrap 路径的性能测量、瓶颈分析和优化结果。
+
+## Scheme 时期设计快照
+
+以下文档保留早期语言设计、AST、Meta 和编译流水线，目的是解释当前设计的来源，不代表当前语法或实现：
+
+- [`scheme-era-intro.md`](scheme-era-intro.md)
+- [`scheme-era-core-philosophy.md`](scheme-era-core-philosophy.md)
+- [`scheme-era-architecture.md`](scheme-era-architecture.md)
+- [`scheme-era-lain-ast.md`](scheme-era-lain-ast.md)
+- [`scheme-era-meta-system.md`](scheme-era-meta-system.md)
+
+## 已清理的重复路线图
+
+以下内容已从仓库删除，因为其信息已合并到当前路线图或完成快照，或者描述的对象已经不存在：
+
+- 独立 `src/compiler-archive` 的计划；
+- 2026-09-07 的旧 bootstrap 快照；
+- 2026-09-07 的旧 VM 路线快照；
+- 2026-09-07 的旧 LAINIR maintenance 路线快照；
+- 重复的 LAINIR compiler roadmap。
+
