@@ -28,11 +28,11 @@ python scripts/check_native_lainc_determinism.py build/lainc.exe
 The hand-written bootstrap source can rebuild `build/bootstrap/lainc.l1` and
 compile the ordinary physical subset, including calls, local arithmetic and
 record fields. Bootstrap `consteval` arithmetic, pure scalar Meta calls, and
-Effect factories with module arguments now generate temporary LAINIR containing
-`#eval`; the seed verifies it and executes it through LAINVM. The next missing
-Meta operation is `std::effect_operation(...)`. The native compiler matrix
-depends on finishing this Meta path because the formal compiler and standard
-library use it.
+Effect factories with module arguments and `std::effect_operation(...)` now
+generate temporary LAINIR containing `#eval`; the seed verifies it and executes
+it through LAINVM. The next blocker is the import collection loop reached in
+`std/meta.lain`. The native compiler matrix depends on finishing this Meta path
+because the formal compiler and standard library use it.
 
 Generated compiler bundles, C files, manifests and executables belong under
 `build/`. No generated backend artifact is stored in `src/` or `bootstrap/`.

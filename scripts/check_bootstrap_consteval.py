@@ -64,7 +64,10 @@ def main() -> int:
                 print(executed.stderr or executed.stdout, file=sys.stderr)
                 return executed.returncode or 1
 
-    print("PASS bootstrap consteval arithmetic, scalar calls, and effect factories through LAINVM")
+    print(
+        "PASS bootstrap consteval arithmetic, scalar calls, effect factories, "
+        "and effect operations through LAINVM"
+    )
     return 0
 
 

@@ -21,10 +21,26 @@
 #proc program_collect_meta_call_candidate(
   #addr %unit, #addr %source, #addr %let_node, #addr %environment
 ) -> #bits<32> {
+  #let %name: #addr = #call raw_node_next(%let_node)
+  #let %existing: #addr = #call meta_env_lookup_local(
+    %environment, %source, %name
+  )
+  #if #ne(#call meta_value_kind(%existing), 0) { #return 0 }
   #let %value: #addr = #call program_meta_call_value_node(%source, %let_node)
   #call program_unit_set_validation_node(%unit, %source, %value)
   #if #eq(#call raw_is_nil(%value), 0) {
     #call program_unit_set_meta_callee(%unit, #call raw_node_start(%value))
+  }
+  #if #call lainvm_meta_is_effect_operation(%source, %value) {
+    #let %operation_group: #addr = #call program_operand_group(%source, %value)
+    #if #call raw_is_nil(%operation_group) { #return 5111 }
+    #let %operation: #addr = #call lainvm_eval_meta_effect_operation(
+      %source, %value, %operation_group, %environment
+    )
+    #call meta_env_bind(
+      %environment, %source, %name, %operation
+    )
+    #return 0
   }
   #let %resolved: #addr = #call meta_env_lookup_path(
     %environment, %source, %value
@@ -58,7 +74,7 @@
       %environment, %effect_node
     )
     #call meta_env_bind(
-      %environment, %source, #call raw_node_next(%let_node), %effect
+      %environment, %source, %name, %effect
     )
     #return 0
   }
@@ -76,7 +92,7 @@
     %function_source, %function, %group, %environment
   )
   #call meta_env_bind(
-    %environment, %source, #call raw_node_next(%let_node),
+    %environment, %source, %name,
     #call meta_value_scalar(
       %source, #call raw_node_next(%let_node), %number
     )
