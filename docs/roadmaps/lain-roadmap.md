@@ -70,11 +70,13 @@ C4 Meta 重新通过 #eval 执行编译期计算
 
 恢复顺序：
 
-1. 整数和基础物理运算；
-2. 普通过程调用；
-3. 类型值和模块值；
-4. AST 值与宏展开；
-5. nested `#eval`、预算和 Trap 诊断。
+1. 定义 LAINVM `Eval` effect operation；它由当前 VM handler 使用活动 TCB 执行子过程，
+   Meta 只能请求 operation，不能接触 TCB 或 VSpace；
+2. 整数和基础物理运算；
+3. 普通过程调用；
+4. 类型值和模块值；
+5. AST 值与宏展开；
+6. nested `#eval`、预算和 Trap 诊断。
 
 类型、模块和 AST 的解释和检查始终留在 Meta。若 Meta 求值需要把它们暂存在内存中，
 LAINVM 只会操作相应的物理地址；它不会把这些对象识别为 `#eval` 的返回类别，也不会为

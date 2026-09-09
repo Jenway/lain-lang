@@ -53,6 +53,12 @@ def main() -> int:
             "            Memory.Bounds.Effect,\n            effects.Trap," in interpreter,
             "VM execution does not expose Value-or-Trap semantics",
     )
+    require("let Eval: effects.Effect = std::effect(\"LAINVM.Eval\", L1)"
+            in interpreter, "VM Eval effect is missing")
+    require("let eval_handler = std::func(" in interpreter,
+            "VM Eval handler is missing")
+    require("resume execute_child(" in interpreter,
+            "VM Eval handler does not execute a child TCB")
     print("PASS LAINIR/LAINVM source and Value-or-Trap API boundary")
     return 0
 

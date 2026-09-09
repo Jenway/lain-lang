@@ -1330,6 +1330,43 @@ let lainvm: Module = std::module {
             return flow.value;
         };
 
+        // #eval is an effect request, not a compiler-owned evaluator object.
+        // The handler is installed by the VM execution boundary, where the
+        // active TCB and VSpace are available.  Meta can therefore request a
+        // child computation without receiving either implementation object.
+        let Eval: effects.Effect = std::effect("LAINVM.Eval", L1);
+        let eval = std::effect_operation(
+            Eval,
+            "eval",
+            std::func(
+                unit: &L1.Unit,
+                procedure_id: L1.ProcedureId,
+                arguments: &ValueVector,
+            ) -> Value,
+        );
+        let eval_handler = std::func(
+            state: &mut LainVm,
+        ) -> effects.Handler(
+            Eval,
+            {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+                effects.Trap,
+            },
+        ) {
+            return std::handler(Eval) ! {
+                Memory.Allocation.Effect,
+                Memory.Bounds.Effect,
+                effects.Trap,
+            } {
+                eval(unit, procedure_id, arguments) {
+                    resume execute_child(
+                        state, unit, procedure_id, arguments,
+                    );
+                }
+            };
+        };
+
         return std::module {
             @export let L1: Module = L1;
             @export let Value: type = Value;
@@ -1349,6 +1386,9 @@ let lainvm: Module = std::module {
             @export let execute = execute;
             @export let execute_limited = execute_limited;
             @export let execute_child = execute_child;
+            @export let Eval: effects.Effect = Eval;
+            @export let eval = eval;
+            @export let eval_handler = eval_handler;
         };
     };
 };
