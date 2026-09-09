@@ -1,0 +1,288 @@
+// Bootstrap lowering for pure scalar Meta calls.
+//
+// The source procedure and its call site are translated to a temporary
+// LAINIR artifact.  LAINVM executes the generated #eval and returns one
+// ordinary physical bits value.
+
+#data lainvm_meta_target_name(11, 1, "meta_target");
+#data lainvm_meta_entry_name(10, 1, "meta_entry");
+
+#extern #proc bootstrap.vm-arguments-append-bits(
+  #addr %arguments, #bits<64> %value, #bits<64> %width
+) -> #unit;
+
+#proc lainvm_meta_scalar_width(
+  #addr %source, #addr %type
+) -> #bits<64> {
+  #if #call meta_atom_equal(%source, %type, "bool", 4) { #return 1 }
+  #if #call meta_atom_equal(%source, %type, "i8", 2) { #return 8 }
+  #if #call meta_atom_equal(%source, %type, "u8", 2) { #return 8 }
+  #if #call meta_atom_equal(%source, %type, "i16", 3) { #return 16 }
+  #if #call meta_atom_equal(%source, %type, "u16", 3) { #return 16 }
+  #if #call meta_atom_equal(%source, %type, "i32", 3) { #return 32 }
+  #if #call meta_atom_equal(%source, %type, "u32", 3) { #return 32 }
+  #if #call meta_atom_equal(%source, %type, "i64", 3) { #return 64 }
+  #if #call meta_atom_equal(%source, %type, "u64", 3) { #return 64 }
+  #if #call meta_atom_equal(%source, %type, "usize", 5) { #return 64 }
+  #return 0
+}
+
+#proc lainvm_meta_write_physical_type(
+  #addr %buffer, #bits<64> %width
+) -> #unit {
+  #call lainvm_eval_buffer_append_literal(%buffer, "#bits<")
+  #if #eq(%width, 1) {
+    #call lainvm_eval_buffer_append_literal(%buffer, "1")
+  } else {
+    #if #eq(%width, 8) {
+      #call lainvm_eval_buffer_append_literal(%buffer, "8")
+    } else {
+      #if #eq(%width, 16) {
+        #call lainvm_eval_buffer_append_literal(%buffer, "16")
+      } else {
+        #if #eq(%width, 32) {
+          #call lainvm_eval_buffer_append_literal(%buffer, "32")
+        } else {
+          #call lainvm_eval_buffer_append_literal(%buffer, "64")
+        }
+      }
+    }
+  }
+  #call lainvm_eval_buffer_append_byte(%buffer, 62)
+  #return
+}
+
+#proc lainvm_meta_parameter_type(
+  #addr %parameter
+) -> #addr {
+  #return #call raw_node_next(#call raw_node_next(%parameter))
+}
+
+#proc lainvm_meta_next_parameter(
+  #addr %source, #addr %parameter
+) -> #addr {
+  #let %type: #addr = #call lainvm_meta_parameter_type(%parameter)
+  #let %end: #addr = #call program_type_end(%source, %type)
+  #let %separator: #addr = #call raw_node_next(%end)
+  #if #call raw_is_nil(%separator) { #return %separator }
+  #if #eq(#call meta_atom_equal(%source, %separator, ",", 1), 0) {
+    #return #call program_nil()
+  }
+  #return #call raw_node_next(%separator)
+}
+
+#proc lainvm_meta_scalar_function_supported(
+  #addr %source, #addr %function
+) -> #bits<1> {
+  #if #call program_function_is_nil(%function) { #return 0 }
+  #let %return_type: #addr = #load[#addr](
+    #lea(base=%function, idx=0, scale=0, offset=24)
+  )
+  #if #eq(#call lainvm_meta_scalar_width(%source, %return_type), 0) {
+    #return 0
+  }
+  #let %body: #addr = #call program_function_body(%function)
+  #if #call raw_is_nil(%body) { #return 0 }
+  #if #ne(#call raw_node_kind(%body), 2) { #return 0 }
+  #if #ne(#call raw_node_delimiter(%body), 123) { #return 0 }
+  #let %statement: #addr = #call raw_node_first(%body)
+  #if #eq(#call meta_atom_equal(%source, %statement, "return", 6), 0) {
+    #return 0
+  }
+  #let %left: #addr = #call raw_node_next(%statement)
+  #if #call raw_is_nil(%left) { #return 0 }
+  #let %operator: #addr = #call raw_node_next(%left)
+  #if #call raw_is_nil(%operator) { #return 1 }
+  #if #eq(#call lainvm_consteval_operator_valid(%source, %operator), 0) {
+    #return 0
+  }
+  #let %right: #addr = #call raw_node_next(%operator)
+  #if #call raw_is_nil(%right) { #return 0 }
+  #let %tail: #addr = #call raw_node_next(%right)
+  #return #call meta_atom_equal(%source, %tail, ";", 1)
+}
+
+#proc lainvm_meta_write_scalar_operand(
+  #addr %buffer, #addr %source, #addr %node
+) -> #unit {
+  #if #call program_is_decimal(%source, %node) {
+    #call lainvm_eval_buffer_append_node(%buffer, %source, %node)
+    #return
+  }
+  #call lainvm_eval_buffer_append_byte(%buffer, 37)
+  #call lainvm_eval_buffer_append_node(%buffer, %source, %node)
+  #return
+}
+
+#proc lainvm_meta_write_scalar_expression(
+  #addr %buffer, #addr %source, #addr %left
+) -> #unit {
+  #let %operator: #addr = #call raw_node_next(%left)
+  #if #call raw_is_nil(%operator) {
+    #call lainvm_meta_write_scalar_operand(%buffer, %source, %left)
+    #return
+  }
+  #call lainvm_eval_buffer_append_byte(%buffer, 35)
+  #if #call meta_atom_equal(%source, %operator, "+", 1) {
+    #call lainvm_eval_buffer_append_literal(%buffer, "add(")
+  } else {
+    #if #call meta_atom_equal(%source, %operator, "-", 1) {
+      #call lainvm_eval_buffer_append_literal(%buffer, "sub(")
+    } else {
+      #if #call meta_atom_equal(%source, %operator, "*", 1) {
+        #call lainvm_eval_buffer_append_literal(%buffer, "mul(")
+      } else {
+        #call lainvm_eval_buffer_append_literal(%buffer, "sdiv(")
+      }
+    }
+  }
+  #call lainvm_meta_write_scalar_operand(%buffer, %source, %left)
+  #call lainvm_eval_buffer_append_literal(%buffer, ", ")
+  #call lainvm_meta_write_scalar_operand(
+    %buffer, %source, #call raw_node_next(%operator)
+  )
+  #call lainvm_eval_buffer_append_byte(%buffer, 41)
+  #return
+}
+
+#proc lainvm_meta_write_parameters(
+  #addr %buffer, #addr %source, #addr %function
+) -> #unit {
+  #let %parameter: #addr = #call raw_node_first(
+    #call program_function_params(%function)
+  )
+  #let %first: #bits<1> = 1
+  #loop parameters {
+    #if #call raw_is_nil(%parameter) { #return }
+    #if #eq(%first, 0) {
+      #call lainvm_eval_buffer_append_literal(%buffer, ", ")
+    }
+    #let %type: #addr = #call lainvm_meta_parameter_type(%parameter)
+    #call lainvm_meta_write_physical_type(
+      %buffer, #call lainvm_meta_scalar_width(%source, %type)
+    )
+    #call lainvm_eval_buffer_append_literal(%buffer, " %")
+    #call lainvm_eval_buffer_append_node(%buffer, %source, %parameter)
+    %first: #bits<1> = 0
+    %parameter: #addr = #call lainvm_meta_next_parameter(%source, %parameter)
+    #continue parameters
+  }
+}
+
+#proc lainvm_meta_write_parameter_names(
+  #addr %buffer, #addr %source, #addr %function
+) -> #unit {
+  #let %parameter: #addr = #call raw_node_first(
+    #call program_function_params(%function)
+  )
+  #let %first: #bits<1> = 1
+  #loop parameters {
+    #if #call raw_is_nil(%parameter) { #return }
+    #if #eq(%first, 0) {
+      #call lainvm_eval_buffer_append_literal(%buffer, ", ")
+    }
+    #call lainvm_eval_buffer_append_byte(%buffer, 37)
+    #call lainvm_eval_buffer_append_node(%buffer, %source, %parameter)
+    %first: #bits<1> = 0
+    %parameter: #addr = #call lainvm_meta_next_parameter(%source, %parameter)
+    #continue parameters
+  }
+}
+
+#proc lainvm_meta_build_scalar_artifact(
+  #addr %source, #addr %function
+) -> #addr {
+  #let %buffer: #addr = #call lainvm_eval_buffer_new()
+  #let %return_type: #addr = #load[#addr](
+    #lea(base=%function, idx=0, scale=0, offset=24)
+  )
+  #let %width: #bits<64> = #call lainvm_meta_scalar_width(
+    %source, %return_type
+  )
+  #call lainvm_eval_buffer_append_literal(%buffer, "#proc meta_target(")
+  #call lainvm_meta_write_parameters(%buffer, %source, %function)
+  #call lainvm_eval_buffer_append_literal(%buffer, ") -> ")
+  #call lainvm_meta_write_physical_type(%buffer, %width)
+  #call lainvm_eval_buffer_append_literal(%buffer, " {\n  #return ")
+  #let %body: #addr = #call program_function_body(%function)
+  #let %expression: #addr = #call raw_node_next(#call raw_node_first(%body))
+  #call lainvm_meta_write_scalar_expression(%buffer, %source, %expression)
+  #call lainvm_eval_buffer_append_literal(%buffer, "\n}\n#proc meta_entry(")
+  #call lainvm_meta_write_parameters(%buffer, %source, %function)
+  #call lainvm_eval_buffer_append_literal(%buffer, ") -> ")
+  #call lainvm_meta_write_physical_type(%buffer, %width)
+  #call lainvm_eval_buffer_append_literal(
+    %buffer, " {\n  #return #eval { #return #call meta_target("
+  )
+  #call lainvm_meta_write_parameter_names(%buffer, %source, %function)
+  #call lainvm_eval_buffer_append_literal(%buffer, ") }\n}\n")
+  #return %buffer
+}
+
+#proc lainvm_meta_append_call_arguments(
+  #addr %arguments, #addr %source, #addr %function,
+  #addr %group, #addr %environment
+) -> #bits<32> {
+  #let %argument: #addr = #call raw_node_first(%group)
+  #let %parameter: #addr = #call raw_node_first(
+    #call program_function_params(%function)
+  )
+  #loop arguments {
+    #if #call raw_is_nil(%argument) {
+      #if #call raw_is_nil(%parameter) { #return 0 }
+      #return 5111
+    }
+    #if #call raw_is_nil(%parameter) { #return 5111 }
+    #let %value: #bits<64> = 0
+    #if #call program_is_decimal(%source, %argument) {
+      %value: #bits<64> = #call program_result_value(
+        #call program_parse_decimal(%source, %argument)
+      )
+    } else {
+      #let %meta_value: #addr = #call meta_env_lookup_path(
+        %environment, %source, %argument
+      )
+      #if #ne(#call meta_value_kind(%meta_value), 1) { #return 5108 }
+      %value: #bits<64> = #call meta_value_scalar_number(%meta_value)
+    }
+    #let %type: #addr = #call lainvm_meta_parameter_type(%parameter)
+    #call bootstrap.vm-arguments-append-bits(
+      %arguments, %value, #call lainvm_meta_scalar_width(%source, %type)
+    )
+    %parameter: #addr = #call lainvm_meta_next_parameter(%source, %parameter)
+    #let %tail: #addr = #call raw_node_next(%argument)
+    #if #call raw_is_nil(%tail) { %argument: #addr = %tail } else {
+      #if #eq(#call meta_atom_equal(%source, %tail, ",", 1), 0) {
+        #return 5111
+      }
+      %argument: #addr = #call raw_node_next(%tail)
+    }
+    #continue arguments
+  }
+}
+
+#proc lainvm_eval_meta_scalar_call(
+  #addr %source, #addr %function, #addr %group, #addr %environment
+) -> #bits<64> {
+  #let %buffer: #addr = #call lainvm_meta_build_scalar_artifact(
+    %source, %function
+  )
+  #let %artifact: #addr = #call bootstrap.vm-artifact-parse(
+    #call lainvm_eval_buffer_data(%buffer),
+    #call lainvm_eval_buffer_length(%buffer)
+  )
+  #let %procedure: #addr = #call bootstrap.vm-procedure-find(
+    %artifact, #data_addr(lainvm_meta_entry_name), 10
+  )
+  #let %arguments: #addr = #call bootstrap.vm-arguments-new()
+  #call lainvm_meta_append_call_arguments(
+    %arguments, %source, %function, %group, %environment
+  )
+  #let %value: #bits<64> = #call bootstrap.vm-eval-bits(
+    %artifact, %procedure, %arguments
+  )
+  #call bootstrap.vm-arguments-release(%arguments)
+  #call bootstrap.vm-artifact-release(%artifact)
+  #call bootstrap.release-pages(%buffer)
+  #return %value
+}

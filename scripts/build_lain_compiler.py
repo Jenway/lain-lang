@@ -52,6 +52,7 @@ BOOTSTRAP_STD_MODULES = (
     ROOT / "bootstrap" / "compiler" / "meta_import.l1",
     ROOT / "bootstrap" / "compiler" / "meta_record.l1",
     ROOT / "bootstrap" / "compiler" / "meta_type.l1",
+    ROOT / "bootstrap" / "compiler" / "meta_call_vm.l1",
     ROOT / "bootstrap" / "compiler" / "meta_call.l1",
     ROOT / "bootstrap" / "compiler" / "meta_collect.l1",
     ROOT / "bootstrap" / "std" / "policy.l1",

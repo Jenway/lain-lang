@@ -27,11 +27,11 @@ python scripts/check_native_lainc_determinism.py build/lainc.exe
 
 The hand-written bootstrap source can rebuild `build/bootstrap/lainc.l1` and
 compile the ordinary physical subset, including calls, local arithmetic and
-record fields. Bootstrap `consteval` arithmetic now generates a temporary
-LAINIR source containing `#eval`; the seed verifies it and executes it through
-LAINVM. General Meta calls still return diagnostic 3101. The native compiler
-matrix depends on those calls because the formal compiler and standard library
-use Meta factories.
+record fields. Bootstrap `consteval` arithmetic and pure scalar Meta calls now
+generate temporary LAINIR containing `#eval`; the seed verifies it and executes
+it through LAINVM. Module and type factories remain incomplete. The native
+compiler matrix depends on those factories because the formal compiler and
+standard library use them.
 
 Generated compiler bundles, C files, manifests and executables belong under
 `build/`. No generated backend artifact is stored in `src/` or `bootstrap/`.

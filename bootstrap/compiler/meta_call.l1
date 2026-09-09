@@ -26,5 +26,39 @@
   #if #eq(#call raw_is_nil(%value), 0) {
     #call program_unit_set_meta_callee(%unit, #call raw_node_start(%value))
   }
-  #return 3101
+  #let %resolved: #addr = #call meta_env_lookup_path(
+    %environment, %source, %value
+  )
+  #let %function: #addr = #call program_nil()
+  #if #eq(#call meta_value_kind(%resolved), 3) {
+    %function: #addr = #call meta_value_payload(%resolved)
+  }
+  #if #call program_function_is_nil(%function) {
+    %function: #addr = #call program_find_function_for_caller(
+      %unit, %source, #call program_nil(), %value
+    )
+  }
+  #if #call program_function_is_nil(%function) { #return 3101 }
+  #let %function_source: #addr = #call program_function_source(%function)
+  #if #eq(
+    #call lainvm_meta_scalar_function_supported(%function_source, %function),
+    0
+  ) { #return 3101 }
+  #let %group: #addr = #call program_operand_group(%source, %value)
+  #let %arguments: #addr = #call bootstrap.vm-arguments-new()
+  #let %argument_status: #bits<32> = #call lainvm_meta_append_call_arguments(
+    %arguments, %source, %function, %group, %environment
+  )
+  #call bootstrap.vm-arguments-release(%arguments)
+  #if #ne(%argument_status, 0) { #return %argument_status }
+  #let %number: #bits<64> = #call lainvm_eval_meta_scalar_call(
+    %function_source, %function, %group, %environment
+  )
+  #call meta_env_bind(
+    %environment, %source, #call raw_node_next(%let_node),
+    #call meta_value_scalar(
+      %source, #call raw_node_next(%let_node), %number
+    )
+  )
+  #return 0
 }
