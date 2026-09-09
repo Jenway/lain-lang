@@ -42,6 +42,8 @@ let elaborator: Module = std::module {
             type_id: types.TypeId,
             syntax_unit: Syntax.UnitId,
             syntax_node: Syntax.NodeId,
+            source_start: usize,
+            source_end: usize,
             i32_value: i32,
             left: ExprId,
             right: ExprId,
@@ -178,6 +180,7 @@ let elaborator: Module = std::module {
         };
 
         let invalid_expression = std::func(
+            store: &Syntax.Store,
             unit: Syntax.UnitId,
             node: Syntax.NodeId,
         ) -> Expr {
@@ -186,6 +189,8 @@ let elaborator: Module = std::module {
                 type_id: 0,
                 syntax_unit: unit,
                 syntax_node: node,
+                source_start: Syntax.node_span_start(store, unit, node),
+                source_end: Syntax.node_span_end(store, unit, node),
                 i32_value: 0,
                 left: 0,
                 right: 0,
@@ -229,7 +234,7 @@ let elaborator: Module = std::module {
                 Syntax.node(store, unit, current);
 
             if current_node.token_kind == 4 {
-                let value: Expr = invalid_expression(unit, current);
+                let value: Expr = invalid_expression(store, unit, current);
                 value.kind = 1;
                 value.type_id = program.types.builtins.i32;
                 value.i32_value =
@@ -247,7 +252,7 @@ let elaborator: Module = std::module {
                 if callee == std::usize_max() {
                     return callee;
                 }
-                let call: Expr = invalid_expression(unit, current);
+                let call: Expr = invalid_expression(store, unit, current);
                 call.kind = 3;
                 call.type_id =
                     program.functions.get(callee).return_type;
@@ -343,7 +348,7 @@ let elaborator: Module = std::module {
                     ).next_sibling,
                 );
             let right_value: Expr =
-                invalid_expression(unit, right_node);
+                invalid_expression(store, unit, right_node);
             right_value.kind = 1;
             right_value.type_id = program.types.builtins.i32;
             right_value.i32_value = Syntax.token_i32(
@@ -355,7 +360,7 @@ let elaborator: Module = std::module {
                 add_expression(program, right_value);
 
             let addition: Expr =
-                invalid_expression(unit, operator_node);
+                invalid_expression(store, unit, operator_node);
             addition.kind = 2;
             addition.type_id = program.types.builtins.i32;
             addition.left = left;
@@ -704,6 +709,7 @@ let elaborator: Module = std::module {
                             std::usize_max(),
                         );
                         let value: Expr = invalid_expression(
+                            &workspace.syntax,
                             source_unit.syntax_unit,
                             name_node,
                         );
@@ -779,7 +785,7 @@ let elaborator: Module = std::module {
             // The bootstrap represents `usize_max()` as zero in the
             // lightweight physical model, while the first function also has
             // id zero.  An empty function table is the unambiguous “no
-            // entry” case for this archive slice.
+            // entry” case for this compiler slice.
             if program.functions.length() == 0 {
                 let first_unit: Syntax.UnitId =
                     workspace.sources.get(0).syntax_unit;

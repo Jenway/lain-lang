@@ -1,51 +1,42 @@
-# Native backend migration report
+# Native backend migration status
 
-Baseline: 2026-09-07. This report records the current native backend boundary
-for the `lainc` to LAINIR API migration.
+Baseline: 2026-09-10.
 
-## Current evidence
+This document records the evidence currently available for the native C
+backend. It does not mark the migration complete while the active bootstrap
+compiler cannot be rebuilt.
 
-The input side is valid: `scripts/run_lain_backend.py` verifies a canonical
-LAINIR input before attempting backend compilation. The backend source and
-seed provider now use the logical capability ABI:
+## Verified now
 
-| Check | Result | Evidence |
-| --- | --- | --- |
-| Input artifact verification | pass | seed verifier accepts the formal constant-return artifact |
-| Backend runner ABI preflight | pass | `run_lain_backend.py` validates the logical declaration inventory before compilation |
-| Backend capability inventory | pass | `check_lain_backend_abi.py --report` finds exactly eight `backend.*` declarations |
-| Active compiler backend compile | pass | `run_lain_compiler.py --library` emits a verified backend artifact |
-| Seed backend adapter | pass | seed binds the eight logical names to provider-side bootstrap functions |
-| Native C emission | pass | multi-procedure fixture emits C and a logical capability manifest |
-| In-process execution | pass | generated C runs the fixture and returns `42` |
+- `scripts/check_backend_manifest.py` passes.
+- `scripts/check_backend_abi_contract.py` passes.
+- The seed project builds.
+- The LAINIR/LAINVM boundary, temporary-TCB `#eval` contract and physical
+  memory-safety checks pass.
+- Native test scripts are valid Python and keep their outputs under `build/`
+  or a temporary directory.
 
-The native build entry still requires `build/backend_c_entry.l1`; the migration
-gate now generates and verifies that artifact. A final clean native compiler
-build remains a separate gate.
+## Implemented and awaiting end-to-end execution
 
-The eight declarations are mapped in
-[`lain-backend-capability-abi.md`](lain-backend-capability-abi.md). Their host
-link names remain provider/driver details; the intended source-level names are
-the `backend.*` logical capabilities.
+- atomic native artifact publication through a temporary file;
+- native allocation accounting and allocation limits;
+- additional C lowering for signed division, byte stores and `else` blocks;
+- source offsets propagated from elaboration into LAINIR Builder calls;
+- stable diagnostics for malformed calls and duplicate procedures;
+- a matrix of successful programs and expected diagnostic failures;
+- deterministic-output and historical-procedure comparison checks.
 
-## Required completion gate
+## Current blocker
 
-The executable gate now covers the following checks for a multi-procedure
-fixture:
+`scripts/build_lain_compiler.py` cannot verify the newly generated bootstrap
+bundle. The first reported missing procedure is
+`program_unit_meta_step_inc`; a complete inventory shows that the deleted old
+lowering module also supplied the rest of the program-unit state and lowering
+implementation. Restoring that file unchanged would restore the prohibited
+`EvalResult` evaluator.
 
-1. compile `backend_c.lain` with the active compiler;
-2. verify the generated LAINIR and capability manifest;
-3. emit C and produce the logical capability manifest;
-4. build and run the native in-process smoke.
-
-The current fixture gate is automated by:
-
-```text
-python scripts/check_native_backend_migration.py
-```
-
-The historical canonical C diff and final clean native compiler build remain
-separate completion checks.
-
-Until then, `backend_c.lain` remains outside `COMPILER_SOURCES.txt`, and the
-source-boundary check must continue to enforce that separation.
+The next required work is C4 in
+[`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md): finish the LAINVM
+handler boundary and rebuild the bootstrap lowering around physical
+`Value`-or-`Trap` execution. After that, the native matrix and fixed-point
+checks must run before this migration can be marked complete.
