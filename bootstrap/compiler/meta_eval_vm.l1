@@ -1,0 +1,190 @@
+// Bootstrap bridge from Meta arithmetic to LAINVM.
+//
+// This module translates the accepted Lain expression slice into a complete
+// LAINIR source buffer containing #eval.  The seed parses and verifies that
+// buffer, then executes #eval through a temporary TCB.
+
+#extern #proc bootstrap.eval_source(
+  #addr %source, #bits<64> %length
+) -> #bits<32>;
+#extern #proc bootstrap.eval-next() -> #bits<64>;
+
+#proc lainvm_eval_buffer_new() -> #addr {
+  #let %buffer: #addr = #call bootstrap.allocate-pages(4104)
+  #store 0, #lea(base=%buffer, idx=0, scale=0, offset=0)
+  #return %buffer
+}
+
+#proc lainvm_eval_buffer_length(#addr %buffer) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%buffer, idx=0, scale=0, offset=0))
+}
+
+#proc lainvm_eval_buffer_data(#addr %buffer) -> #addr {
+  #return #lea(base=%buffer, idx=0, scale=0, offset=8)
+}
+
+#proc lainvm_eval_buffer_append_byte(
+  #addr %buffer, #bits<8> %byte
+) -> #unit {
+  #let %length: #bits<64> = #call lainvm_eval_buffer_length(%buffer)
+  #if #sge(%length, 4096) { #return }
+  #store %byte, #lea(base=%buffer, idx=%length, scale=1, offset=8)
+  #store #add(%length, 1), #lea(base=%buffer, idx=0, scale=0, offset=0)
+  #return
+}
+
+#proc lainvm_eval_buffer_append_literal(
+  #addr %buffer, #addr %text
+) -> #unit {
+  #let %index: #bits<64> = 0
+  #loop bytes {
+    #let %byte: #bits<8> = #load[#bits<8>](
+      #lea(base=%text, idx=%index, scale=1, offset=0)
+    )
+    #if #eq(%byte, 0) { #return }
+    #call lainvm_eval_buffer_append_byte(%buffer, %byte)
+    %index: #bits<64> = #add(%index, 1)
+    #continue bytes
+  }
+}
+
+#proc lainvm_eval_buffer_append_node(
+  #addr %buffer, #addr %source, #addr %node
+) -> #unit {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %index: #bits<64> = 0
+  #loop bytes {
+    #if #sge(%index, #call raw_node_length(%node)) { #return }
+    #call lainvm_eval_buffer_append_byte(
+      %buffer,
+      #call tool_byte_at(
+        %data, #add(#call raw_node_start(%node), %index)
+      )
+    )
+    %index: #bits<64> = #add(%index, 1)
+    #continue bytes
+  }
+}
+
+#proc lainvm_consteval_operator_valid(
+  #addr %source, #addr %operator
+) -> #bits<1> {
+  #if #call meta_atom_equal(%source, %operator, "+", 1) { #return 1 }
+  #if #call meta_atom_equal(%source, %operator, "-", 1) { #return 1 }
+  #if #call meta_atom_equal(%source, %operator, "*", 1) { #return 1 }
+  #return #call meta_atom_equal(%source, %operator, "/", 1)
+}
+
+#proc lainvm_validate_consteval_operand(
+  #addr %source, #addr %node
+) -> #bits<32> {
+  #if #call raw_is_nil(%node) { #return 3101 }
+  #if #call program_is_decimal(%source, %node) { #return 0 }
+  #if #eq(#call raw_node_kind(%node), 2) {
+    #if #eq(#call raw_node_delimiter(%node), 40) {
+      #return #call lainvm_validate_consteval_expression(
+        %source, #call raw_node_first(%node)
+      )
+    }
+  }
+  #return 3101
+}
+
+#proc lainvm_validate_consteval_expression(
+  #addr %source, #addr %left
+) -> #bits<32> {
+  #let %status: #bits<32> = #call lainvm_validate_consteval_operand(
+    %source, %left
+  )
+  #if #ne(%status, 0) { #return %status }
+  #let %operator: #addr = #call raw_node_next(%left)
+  #if #call raw_is_nil(%operator) { #return 0 }
+  #if #eq(#call lainvm_consteval_operator_valid(%source, %operator), 0) {
+    #return 3102
+  }
+  #let %right: #addr = #call raw_node_next(%operator)
+  #if #call raw_is_nil(%right) { #return 3102 }
+  %status: #bits<32> = #call lainvm_validate_consteval_operand(%source, %right)
+  #if #ne(%status, 0) { #return %status }
+  #if #eq(#call raw_is_nil(#call raw_node_next(%right)), 0) { #return 3102 }
+  #return 0
+}
+
+#proc lainvm_write_consteval_operand(
+  #addr %buffer, #addr %source, #addr %node
+) -> #unit {
+  #if #call program_is_decimal(%source, %node) {
+    #call lainvm_eval_buffer_append_node(%buffer, %source, %node)
+    #return
+  }
+  #call lainvm_write_consteval_expression(
+    %buffer, %source, #call raw_node_first(%node)
+  )
+  #return
+}
+
+#proc lainvm_write_consteval_expression(
+  #addr %buffer, #addr %source, #addr %left
+) -> #unit {
+  #let %operator: #addr = #call raw_node_next(%left)
+  #if #call raw_is_nil(%operator) {
+    #call lainvm_write_consteval_operand(%buffer, %source, %left)
+    #return
+  }
+  #call lainvm_eval_buffer_append_byte(%buffer, 35)
+  #if #call meta_atom_equal(%source, %operator, "+", 1) {
+    #call lainvm_eval_buffer_append_literal(%buffer, "add(")
+  } else {
+    #if #call meta_atom_equal(%source, %operator, "-", 1) {
+      #call lainvm_eval_buffer_append_literal(%buffer, "sub(")
+    } else {
+      #if #call meta_atom_equal(%source, %operator, "*", 1) {
+        #call lainvm_eval_buffer_append_literal(%buffer, "mul(")
+      } else {
+        #call lainvm_eval_buffer_append_literal(%buffer, "sdiv(")
+      }
+    }
+  }
+  #call lainvm_write_consteval_operand(%buffer, %source, %left)
+  #call lainvm_eval_buffer_append_literal(%buffer, ", ")
+  #call lainvm_write_consteval_operand(
+    %buffer, %source, #call raw_node_next(%operator)
+  )
+  #call lainvm_eval_buffer_append_byte(%buffer, 41)
+  #return
+}
+
+#proc lainvm_validate_consteval_group(
+  #addr %source, #addr %group
+) -> #bits<32> {
+  #if #call raw_is_nil(%group) { #return 3101 }
+  #if #ne(#call raw_node_kind(%group), 2) { #return 3101 }
+  #if #ne(#call raw_node_delimiter(%group), 40) { #return 3101 }
+  #return #call lainvm_validate_consteval_expression(
+    %source, #call raw_node_first(%group)
+  )
+}
+
+#proc lainvm_eval_consteval_group(
+  #addr %source, #addr %group
+) -> #bits<64> {
+  #let %buffer: #addr = #call lainvm_eval_buffer_new()
+  #call lainvm_eval_buffer_append_literal(
+    %buffer,
+    "#proc meta_eval() -> #bits<64> {\n  #let %value: #bits<64> = #eval { #return "
+  )
+  #call lainvm_write_consteval_expression(
+    %buffer, %source, #call raw_node_first(%group)
+  )
+  #call lainvm_eval_buffer_append_literal(
+    %buffer,
+    " }\n  #return %value\n}\n"
+  )
+  #call bootstrap.eval_source(
+    #call lainvm_eval_buffer_data(%buffer),
+    #call lainvm_eval_buffer_length(%buffer)
+  )
+  #let %value: #bits<64> = #call bootstrap.eval-next()
+  #call bootstrap.release-pages(%buffer)
+  #return %value
+}

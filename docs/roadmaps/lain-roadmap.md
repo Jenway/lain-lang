@@ -74,7 +74,7 @@ lainc 不依赖 LAINVM 的私有实现。
 | LAINVM 基础 | C seed 与 Lain 源码边界均已采用 TCB、VSpace、Trap 和预算模型；Lain VM 已独立为 `src/lainvm/`，并已公开执行 API contract 与 `Eval` operation | 将 lainc 工厂和编译入口接到该 contract 与 handler |
 | `#eval` | C seed 已通过临时 TCB 执行并在 fold 前消除；Lain VM 已提供子 TCB 原语；lainc Meta 已改为发出 `Vm.eval` effect | 在正式编译器执行入口安装 handler，并运行真实编译 fixture |
 | Meta 编译期求值 | `Ir.Eval`、`Eval.Result` 和伪造的 status/value 返回已经从正式 Meta 源码删除；语法 callable 已改用 LAINVM 物理 `Value` | 接通 handler 后，从整数与基础物理运算开始恢复真实执行 |
-| 自举 | `build/bootstrap/lainc.l1` 已可由当前启动源码重建，普通物理代码的编译与执行已恢复；Meta 调用和 `consteval` 暂时报诊断 3101 | 用 LAINVM 执行替换这两个明确拒绝点，再恢复固定点 |
+| 自举 | `build/bootstrap/lainc.l1` 已可由当前启动源码重建，普通物理代码的编译与执行已恢复；算术 `consteval` 已经生成 `#eval` 并由 LAINVM 执行 | 用相同路径执行一般 Meta callable，再恢复固定点 |
 | 项目结构 | `seed`、`bootstrap` 与 `src` 已分离；`src/lainvm/` 已拥有执行实现 | 保持职责边界并在 C5 恢复新自举 |
 | C backend 与发布 | 非当前主线 | 纠偏完成后继续收口和 CI 验证 |
 
@@ -99,13 +99,14 @@ effect handler（接收 `Eval` 请求并启动子 TCB 的代码）在子 TCB 中
    Meta factory；Meta 已通过 `perform Vm.eval(...)` 发出执行请求。剩余工作是在执行正式
    编译器的 LAINVM 边界安装 `eval_handler`，让请求使用活动 TCB 运行子过程。
 3. **C4.3：恢复 bootstrap 物理 lowering。** 已从误删文件中恢复程序状态、类型布局、
-   检查与 LAINIR 输出，同时移除旧求值协议。普通物理 fixture 已重新通过；Meta 调用和
-   `consteval` 目前明确返回诊断 3101。
-4. **C4.4：逐项恢复 Meta 语义。** 下面的恢复顺序每完成一项就加入真实编译 fixture 并提交。
+   检查与 LAINIR 输出，同时移除旧求值协议。普通物理 fixture 已重新通过。
+4. **C4.4：逐项恢复 Meta 语义。** 算术切片已完成：bootstrap 生成含 `#eval` 的临时
+   LAINIR，seed 验证后由临时 TCB 执行，最终 artifact 中不保留 `#eval`。下面的其余
+   项目每完成一项就加入真实编译 fixture 并提交。
 
 恢复顺序：
 
-1. 整数和基础物理运算；
+1. 整数和基础物理运算（已完成 bootstrap `consteval` 切片）；
 2. 普通过程调用；
 3. 类型值和模块值；
 4. AST 值与宏展开；

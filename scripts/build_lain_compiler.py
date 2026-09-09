@@ -39,6 +39,7 @@ BOOTSTRAP_STD_MODULES = (
     # standard library.  The compiler core sees only their ABI declarations.
     ROOT / "bootstrap" / "compiler" / "meta.l1",
     ROOT / "bootstrap" / "compiler" / "meta_values.l1",
+    ROOT / "bootstrap" / "compiler" / "meta_eval_vm.l1",
     ROOT / "bootstrap" / "compiler" / "lower_func.l1",
     ROOT / "bootstrap" / "compiler" / "lower_record.l1",
     ROOT / "bootstrap" / "compiler" / "lower_program.l1",
