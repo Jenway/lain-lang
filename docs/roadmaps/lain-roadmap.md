@@ -8,8 +8,14 @@
 C0 的完成记录见
 [`../history/roadmap-eval-c0-2026-09-09.md`](../history/roadmap-eval-c0-2026-09-09.md)。
 
+C1 的完成记录见
+[`../history/roadmap-eval-c1-2026-09-09.md`](../history/roadmap-eval-c1-2026-09-09.md)。
+
 C0.5 的完成记录见
 [`../history/roadmap-project-structure-c0.5-2026-09-09.md`](../history/roadmap-project-structure-c0.5-2026-09-09.md)。
+
+C2 的完成记录见
+[`../history/roadmap-eval-c2-2026-09-09.md`](../history/roadmap-eval-c2-2026-09-09.md)。
 
 当前最高优先级是纠正 `#eval` 与 LAINVM 的实现方向。正确性优先于兼容性：错误的
 抽象直接删除，允许旧 Meta 和自举链在迁移期间暂时不可用。
@@ -42,7 +48,7 @@ C0.5 的完成记录见
 | --- | --- | --- |
 | LAINIR 物理语义 | 基线可用 | 保持物理边界，不加入 Meta 返回分类 |
 | LAINVM 基础 | 错误结果传输协议已删除；已有部分 TCB、VSpace、Trap 和预算实现 | 固定并实现真实 `#eval` 约定 |
-| `#eval` | C seed 仍在当前解释器中内联执行 | 改为共享 VSpace 的临时 TCB |
+| `#eval` | C seed 已通过临时 TCB 执行并在 fold 前消除 | C3 实现同一份 Lain VM 语义 |
 | Meta 编译期求值 | 旧求值路径已删除，暂不可用 | 在 LAINVM 路径完成后重新接入 |
 | 自举 | 冻结产物暂时可用 | 新路径完成后重新生成并恢复固定点 |
 | 项目结构 | `seed`、`bootstrap` 与 `src` 已分离；`src/lainvm/` 已建立边界 | C1 冻结 LAINIR/LAINVM 接口 |
@@ -51,70 +57,9 @@ C0.5 的完成记录见
 当前实施顺序：
 
 ```text
-C1 冻结 #eval / TCB / Trap 语义
-  -> C2 C seed 通过临时 TCB 执行 #eval
-  -> C3 Lain 解释器实现相同语义
+C3 Lain 解释器实现相同语义
   -> C4 Meta 重新通过 #eval 执行编译期计算
   -> C5 恢复自举并替换冻结产物
-```
-
-## C1：冻结 `#eval`、TCB 和 Trap 语义
-
-目标：让 C seed、Lain 解释器和 compiler 共享一份最小且明确的执行约定。
-
-C1 同时定义 LAINIR 与 LAINVM 的接口：LAINIR 提供已验证的 procedure、block、
-instruction 和物理值；LAINVM 管理 TCB、VSpace、Trap、调度并执行这些物理操作。
-接口确定以前，不从 `l1_interpreter.lain` 抽取正式实现。
-
-需要写入规范的行为：
-
-- `#eval` 块的参数可见性和静态返回类型；
-- 临时 TCB 与调用者共享 VSpace；
-- 临时 TCB 建立自己的根调用过程，过程内 `#alloca` 仍受 activation 生命周期约束；
-- 正常结果是普通 LAINIR 值；
-- 失败结果是 Trap，至少保存错误分类、procedure 和 instruction position；
-- nested `#eval` 同步创建另一个临时 TCB，并共享同一 VSpace；
-- step、call-depth 和 allocation 预算的继承或划分规则；
-- 编译器在 backend 前消除全部 `#eval`。
-
-完成条件：`docs/01-lain-ir.md`、`docs/03-meta-system.md` 和 `docs/04-lain-vm.md` 分别只
-描述自己负责的层次，并由同一组可执行行为检查约束。
-
-阶段提交：
-
-```text
-docs: define eval execution through temporary TCBs
-```
-
-## C2：C seed 使用临时 TCB 执行 `#eval`
-
-目标：替换当前 `interp_eval_block` 的内联控制状态保存方式。
-
-执行路径：
-
-```text
-遇到 #eval
-  -> 在当前 VSpace 创建临时 TCB
-  -> 建立 #eval 根调用过程
-  -> 调度执行块
-  -> 返回普通值或产生 Trap
-  -> 结束临时 TCB
-```
-
-验收至少覆盖：
-
-- `#bits<N>`、`#addr` 和 `#unit` 正常返回；
-- 共享 VSpace 中的有效地址可以返回；
-- 已结束 activation 的 `#alloca` 地址不可继续使用；
-- step、call-depth 和 allocation 超限产生稳定 Trap；
-- nested `#eval` 创建独立临时 TCB；
-- fold 后产物不含 `#eval`；
-- 不存在“非标量结果需要 adapter”一类错误路径。
-
-阶段提交：
-
-```text
-seed: execute eval blocks through temporary TCBs
 ```
 
 ## C3：Lain 解释器实现相同语义
