@@ -34,22 +34,22 @@ let meta: Module = std::module {
             phase: i32,
             program: usize,
         };
-        // The phase value crosses the archive/std factory boundary as a
+        // The phase value crosses the Meta/std factory boundary as a
         // scalar.  Keep its physical type explicit until generic type
         // materialization can preserve factory-local aliases.
         let CallablePhase: type = i32;
-        // Keep the executable registry in the archive layer.  The generic
+        // Keep the executable registry in the Meta layer.  The generic
         // std::meta Vec<Callable> path is a type-level model, while this
         // runtime boundary needs a concrete pointer table that bootstrap can
         // materialize and inspect.
         // Keep the registry as an opaque address at this boundary.  Returning
         // a small record by value currently lowers to an uninitialized
-        // temporary in the archive compiler; the implementation already
+        // temporary in the compiler; the implementation already
         // uses the stable fixed-layout pointer ABI below.
         let Registry: type = addr;
         // Structured handles for Meta execution.  These descriptors keep
         // semantic identity separate from physical L1 procedure numbers and
-        // make the execution environment explicit at the archive boundary.
+        // make the execution environment explicit at the Meta boundary.
         let MetaProcedure: type = std::struct {
             id: usize,
             program: usize,
@@ -204,7 +204,7 @@ let meta: Module = std::module {
             return std::load_bits(64, registry + 8);
         };
 
-        let archive_new_registry = std::func() -> addr ! {Memory.Allocation.Effect} {
+        let meta_new_registry = std::func() -> addr ! {Memory.Allocation.Effect} {
             // Five scalar slots per callable are interleaved in one table.
             // The slot index is dynamic and the address form `base + slot *
             // 8` is supported by the current L1 lowering.
@@ -436,7 +436,7 @@ let meta: Module = std::module {
             // Keep the bootstrap table writes explicit.  The current L1
             // lowering accepts dynamic indexing for vectors, but an opaque
             // procedure-table handle must not be formed from an untrusted
-            // count while the archive is still bootstrapping.
+            // count while Meta is still bootstrapping.
             if count == 0 {
                 std::store_bits(64, procedure_table + 0, procedure);
             }
@@ -503,7 +503,7 @@ let meta: Module = std::module {
             meta_program_add_procedure(program, procedure);
             // Read the descriptor through its physical ABI.  Factory-local
             // record projection currently loses the field offset when a
-            // nominal MetaProcedure crosses the archive/std boundary.
+            // nominal MetaProcedure crosses the Meta/std boundary.
             let procedure_raw: addr = procedure as addr;
             let procedure_id: usize = std::load_bits(64, procedure_raw + 16);
             let phase_raw: CallablePhase = std::load_bits(32, procedure_raw + 24);
@@ -629,7 +629,7 @@ let meta: Module = std::module {
         };
 
         let new_registry_with_identity = std::func() -> Registry {
-            let registry: Registry = archive_new_registry();
+            let registry: Registry = meta_new_registry();
             let name: Memory.String = Memory.String.new();
             name.append_byte(105);
             name.append_byte(100);
@@ -642,7 +642,7 @@ let meta: Module = std::module {
             registry_insert(&mut registry, name, 0, 1, 0);
             return registry;
         };
-        let archive_register_with_phase = std::func(
+        let meta_register_with_phase = std::func(
             registry: &mut Registry,
             name: Memory.String,
             procedure: usize,
@@ -650,12 +650,12 @@ let meta: Module = std::module {
         ) -> MetaCallableId ! {Memory.Allocation.Effect} {
             return registry_insert(registry, name, procedure, phase, 0);
         };
-        let archive_register = std::func(
+        let meta_register = std::func(
             registry: &mut Registry,
             name: Memory.String,
             procedure: usize,
         ) -> MetaCallableId ! {Memory.Allocation.Effect} {
-            return archive_register_with_phase(registry, name, procedure, 1);
+            return meta_register_with_phase(registry, name, procedure, 1);
         };
         let callable_phase_meta = std::func() -> CallablePhase {
             return 1;
@@ -670,7 +670,7 @@ let meta: Module = std::module {
         // Execute a structured L1 procedure through the same interpreter
         // used by the compiler's runtime tests.  This is the generic scalar
         // Meta execution bridge; syntax-producing procedure 0 remains the
-        // archive's special AST clone primitive below.
+        // Meta's special AST clone primitive below.
         let evaluate = std::func(
             unit: &Eval.Artifact,
             procedure: Eval.Procedure,
@@ -862,7 +862,7 @@ let meta: Module = std::module {
         // Syntax callables use a deliberately small ABI for this slice:
         // argument zero is the call-site target node id and the procedure
         // returns the first node id to emit.  The returned node may be the
-        // head of a sibling chain; the archive clones the whole bounded chain
+        // head of a sibling chain; Meta clones the whole bounded chain
         // into the generated unit while preserving each source span.
         let invoke = std::func(
             registry: &Registry,
@@ -954,7 +954,7 @@ let meta: Module = std::module {
             );
         };
 
-        let archive_find = std::func(
+        let meta_find = std::func(
             registry: &Registry,
             name: &Memory.String,
         ) -> MetaCallableId ! {Memory.Bounds.Effect} {
@@ -1076,7 +1076,7 @@ let meta: Module = std::module {
                             false,
                         );
                     let callable: MetaCallableId =
-                        archive_find(registry, &name);
+                        meta_find(registry, &name);
                     if target == Syntax.invalid_node() {
                         return expansion_make_list(output, 2905);
                     }
@@ -1153,9 +1153,7 @@ let meta: Module = std::module {
             @export let MetaCallableId: type = MetaCallableId;
             @export let MetaCallable: type = MetaCallable;
             @export let CallablePhase: type = CallablePhase;
-            // Avoid colliding with the bootstrap package's legacy
-            // `Meta.new_registry` symbol while both artifacts are linked.
-            @export let archive_new_registry = archive_new_registry;
+            @export let meta_new_registry = meta_new_registry;
             @export let callable_phase_meta = callable_phase_meta;
             @export let callable_phase_syntax = callable_phase_syntax;
             @export let callable_phase_backend = callable_phase_backend;
@@ -1201,12 +1199,9 @@ let meta: Module = std::module {
             @export let meta_value_scalar = meta_value_scalar;
             @export let meta_value_syntax = meta_value_syntax;
             @export let meta_diagnostic = meta_diagnostic;
-            @export let register = archive_register;
-            @export let register_with_phase = archive_register_with_phase;
-            // Keep the archive registry query distinct from the bootstrap
-            // package's legacy `Meta.find` symbol while both artifacts are
-            // linked during migration.
-            @export let archive_find = archive_find;
+            @export let register = meta_register;
+            @export let register_with_phase = meta_register_with_phase;
+            @export let meta_find = meta_find;
             @export let invoke = invoke;
             @export let expand = expand;
         };
