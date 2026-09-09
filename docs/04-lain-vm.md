@@ -1,6 +1,7 @@
 # LAIN-VM：虚拟控制面与执行环境
 
-状态：当前架构设计。`#eval` 的临时 TCB 执行路径尚在实现中。
+状态：当前架构设计与 C3 实现。C seed 已通过临时 TCB 执行 `#eval`；Lain VM 的解释器、
+根过程执行入口和子 TCB 执行入口已归入 `src/lainvm/`。Meta 到该入口的重新接线属于 C4。
 
 LAIN-VM 是 Lain 的执行控制面。它为编译期 `#eval`、解释器自举、运行期特权降级和未来的并发执行提供统一的物理环境模型。
 
@@ -181,6 +182,17 @@ step 与 allocation 配额；嵌套计算不能重新获得完整限额。call-d
 instruction position，结束子 TCB 并释放其 activation；随后把 Trap 同步传播到执行
 `#eval` 的调用点。调用点没有备用值，编译器把 Trap 转换为诊断。Trap 不作为 `#eval`
 表达式的字段、`Result` 对象或 Meta handle 返回。
+
+### 8.4 Lain VM 的执行入口
+
+Lain 实现将 `interpreter.lain` 置于 `src/lainvm/`。它提供根过程执行入口，以及
+`execute_child(state, procedure, arguments)`：后者要求调用者 TCB 正在运行，创建新的
+子 TCB，保留原 VSpace、CSpace、step 和 allocation 账户，并把 `arguments` 作为临时根过程
+的按值参数。子 TCB 结束后恢复父 TCB；其 activation 地址仍不能逃逸。
+
+这组入口的公开结果只有物理 `Value` 或 `Trap` effect。解释器内部可以使用控制流记录来
+组织 return、break、yield 与 Trap，但该记录不属于 LAINVM API，也不会进入 `#eval` 的
+结果语义。
 
 ## 9. 确定性与时间
 
