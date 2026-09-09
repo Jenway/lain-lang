@@ -46,6 +46,7 @@ def main() -> int:
     if not SEED.is_file():
         raise SystemExit(f"build seed first: {SEED}")
     require_success("eval_tcb_capture.l1", "42")
+    require_success("eval_tcb_argument_capture.l1", "42")
     require_success("eval_tcb_nested.l1", "42")
     require_success("eval_tcb_context_type.l1", "0")
     require_trap(
