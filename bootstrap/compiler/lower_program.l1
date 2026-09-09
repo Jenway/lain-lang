@@ -116,6 +116,12 @@
 #extern #proc meta_value_payload(#addr %value) -> #addr;
 #extern #proc meta_value_environment(#addr %value) -> #addr;
 #extern #proc meta_value_scalar_number(#addr %value) -> #bits<64>;
+#extern #proc lainvm_validate_consteval_group(
+  #addr %source, #addr %group
+) -> #bits<32>;
+#extern #proc lainvm_eval_consteval_group(
+  #addr %source, #addr %group
+) -> #bits<64>;
 #extern #proc program_unit_meta_step_inc(#addr %unit) -> #bits<1>;
 #extern #proc compiler_request_context(#addr %request) -> #addr;
 #extern #proc lain_compile_context_v1_step_limit(#addr %context) -> #bits<64>;
@@ -2687,10 +2693,14 @@
           #if #ne(#call raw_node_delimiter(%group), 40) {
             %status: #bits<32> = 3101
           } else {
-            // Compile-time execution is reconnected through LAINVM.  Until
-            // that path is available, keep this declaration invalid instead
-            // of manufacturing a physical value.
-            %status: #bits<32> = 3101
+            %status: #bits<32> = #call lainvm_validate_consteval_group(
+              %source, %group
+            )
+            #if #eq(%status, 0) {
+              %value: #bits<64> = #call lainvm_eval_consteval_group(
+                %source, %group
+              )
+            }
           }
         }
       }
@@ -5441,7 +5451,11 @@
       %unit, %source, %function, %inner
     )
   }
-  #if #call program_is_consteval_operand(%source, %node) { #return 3101 }
+  #if #call program_is_consteval_operand(%source, %node) {
+    #return #call lainvm_validate_consteval_group(
+      %source, #call program_consteval_operand_group(%source, %node)
+    )
+  }
   #let %name: #addr = #call program_operand_name(%source, %node)
   #if #call meta_atom_equal(%source, %name, "!", 1) {
     #return #call program_validate_operand(
@@ -6133,8 +6147,11 @@
     #return
   }
   #if #call program_is_consteval_operand(%source, %node) {
-    // Validation rejects this path until LAINVM compile-time execution is
-    // connected, so the writer must never receive it.
+    #call meta_write_decimal(
+      #call lainvm_eval_consteval_group(
+        %source, #call program_consteval_operand_group(%source, %node)
+      )
+    )
     #return
   }
   #if #call program_is_std_intrinsic_call(

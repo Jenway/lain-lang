@@ -32,13 +32,14 @@ disconnected from LAINVM.
 ## Current blocker
 
 The program-unit state and physical lowering implementation have been restored
-without the removed evaluator protocol. Meta calls and `consteval` are
-deliberately rejected with diagnostic 3101 until a LAINVM handler executes
-them. Consequently the bootstrap compiler cannot yet compile the formal
+without the removed evaluator protocol. Arithmetic `consteval` now lowers to
+LAINIR `#eval` and executes through LAINVM. General Meta calls are deliberately
+rejected with diagnostic 3101 until the same route supports callable
+procedures. Consequently the bootstrap compiler cannot yet compile the formal
 compiler source closure needed by the native matrix.
 
 The next required work is C4 in
 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md): finish the LAINVM
-handler boundary and replace those explicit rejections with physical
+handler boundary and replace the remaining Meta-call rejection with physical
 `Value`-or-`Trap` execution. After that, the native matrix and fixed-point
 checks must run before this migration can be marked complete.
