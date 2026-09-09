@@ -35,6 +35,20 @@ typedef struct {
 } BootstrapAllocation;
 
 typedef struct BootstrapArena BootstrapArena;
+typedef struct BootstrapVmArtifact BootstrapVmArtifact;
+typedef struct BootstrapVmArguments BootstrapVmArguments;
+
+struct BootstrapVmArtifact {
+  LainirModuleHandle *handle;
+  BootstrapVmArtifact *next;
+};
+
+struct BootstrapVmArguments {
+  LainirValue *values;
+  uint32_t count;
+  uint32_t capacity;
+  BootstrapVmArguments *next;
+};
 
 /* Every small arena allocation carries a header immediately before the
  * returned address.  The header lets bootstrap.release-pages validate and
@@ -87,7 +101,25 @@ typedef struct {
   int trace_allocations;
   LainirCapabilityTable *caps;
   LainirModuleHandle *prepared_module;
+  BootstrapVmArtifact *vm_artifacts;
+  BootstrapVmArguments *vm_arguments;
 } BootstrapContext;
+
+static void bootstrap_release_vm_objects(BootstrapContext *context) {
+  if (!context) return;
+  while (context->vm_artifacts) {
+    BootstrapVmArtifact *artifact = context->vm_artifacts;
+    context->vm_artifacts = artifact->next;
+    lainir_module_handle_destroy(&artifact->handle);
+    free(artifact);
+  }
+  while (context->vm_arguments) {
+    BootstrapVmArguments *arguments = context->vm_arguments;
+    context->vm_arguments = arguments->next;
+    free(arguments->values);
+    free(arguments);
+  }
+}
 
 static void bootstrap_release_pages(BootstrapContext *context) {
   size_t index;
@@ -401,6 +433,278 @@ static LainirRunStatus eval_next(
   *result = lainir_value_bits(
       context->eval_values[context->eval_value_index++], 64);
   return LAINIR_RUN_OK;
+}
+
+static BootstrapVmArtifact *vm_artifact_find(
+    BootstrapContext *context, const void *pointer) {
+  BootstrapVmArtifact *artifact;
+  for (artifact = context ? context->vm_artifacts : NULL; artifact;
+       artifact = artifact->next)
+    if (artifact == pointer) return artifact;
+  return NULL;
+}
+
+static BootstrapVmArguments *vm_arguments_find(
+    BootstrapContext *context, const void *pointer) {
+  BootstrapVmArguments *arguments;
+  for (arguments = context ? context->vm_arguments : NULL; arguments;
+       arguments = arguments->next)
+    if (arguments == pointer) return arguments;
+  return NULL;
+}
+
+static LainirRunStatus vm_artifact_parse(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  BootstrapVmArtifact *artifact;
+  L1Diagnostic diagnostic = {0};
+  char *source;
+  size_t length;
+  if (!context || count != 2 || args[0].kind != LAINIR_VALUE_ADDR ||
+      args[1].kind != LAINIR_VALUE_BITS || !args[0].as.addr ||
+      args[1].as.bits > SIZE_MAX - 1) {
+    *error = "bootstrap.vm-artifact-parse expects source address and length";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  length = (size_t)args[1].as.bits;
+  source = malloc(length + 1);
+  artifact = calloc(1, sizeof(*artifact));
+  if (!source || !artifact) {
+    free(source);
+    free(artifact);
+    *error = "bootstrap.vm-artifact-parse allocation failed";
+    return LAINIR_RUN_TRAP;
+  }
+  memcpy(source, args[0].as.addr, length);
+  source[length] = '\0';
+  if (lainir_module_parse_handle(source, &artifact->handle, &diagnostic) !=
+          LAINIR_RUN_OK ||
+      lainir_module_handle_verify(artifact->handle, &diagnostic) !=
+          LAINIR_RUN_OK) {
+    lainir_module_handle_destroy(&artifact->handle);
+    free(artifact);
+    free(source);
+    *error = "bootstrap.vm-artifact-parse rejected LAINIR";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  free(source);
+  artifact->next = context->vm_artifacts;
+  context->vm_artifacts = artifact;
+  *result = lainir_value_addr(artifact);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus vm_artifact_release(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  BootstrapVmArtifact **slot;
+  if (!context || count != 1 || args[0].kind != LAINIR_VALUE_ADDR) {
+    *error = "bootstrap.vm-artifact-release expects an artifact";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  for (slot = &context->vm_artifacts; *slot && *slot != args[0].as.addr;
+       slot = &(*slot)->next) {}
+  if (!*slot) {
+    *error = "bootstrap.vm-artifact-release received an unknown artifact";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  BootstrapVmArtifact *artifact = *slot;
+  *slot = artifact->next;
+  lainir_module_handle_destroy(&artifact->handle);
+  free(artifact);
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus vm_procedure_find(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapVmArtifact *artifact;
+  const L1Subroutine *procedure;
+  if (count != 3 || args[0].kind != LAINIR_VALUE_ADDR ||
+      args[1].kind != LAINIR_VALUE_ADDR ||
+      args[2].kind != LAINIR_VALUE_BITS || !args[1].as.addr) {
+    *error = "bootstrap.vm-procedure-find expects artifact, name and length";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  artifact = vm_artifact_find(user_data, args[0].as.addr);
+  if (!artifact || args[2].as.bits > SIZE_MAX) {
+    *error = "bootstrap.vm-procedure-find received an invalid artifact";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  procedure = lainir_module_handle_find_procedure(
+      artifact->handle, args[1].as.addr, (size_t)args[2].as.bits);
+  if (!procedure) {
+    *error = "bootstrap.vm-procedure-find could not find the procedure";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_addr((void *)procedure);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus vm_arguments_new(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  BootstrapVmArguments *arguments;
+  (void)args;
+  if (!context || count != 0) {
+    *error = "bootstrap.vm-arguments-new expects no arguments";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  arguments = calloc(1, sizeof(*arguments));
+  if (!arguments) {
+    *error = "bootstrap.vm-arguments-new allocation failed";
+    return LAINIR_RUN_TRAP;
+  }
+  arguments->next = context->vm_arguments;
+  context->vm_arguments = arguments;
+  *result = lainir_value_addr(arguments);
+  return LAINIR_RUN_OK;
+}
+
+static int vm_arguments_append_value(
+    BootstrapVmArguments *arguments, LainirValue value) {
+  if (arguments->count == arguments->capacity) {
+    uint32_t capacity = arguments->capacity ? arguments->capacity * 2 : 4;
+    LainirValue *values = realloc(
+        arguments->values, (size_t)capacity * sizeof(*values));
+    if (!values) return 0;
+    arguments->values = values;
+    arguments->capacity = capacity;
+  }
+  arguments->values[arguments->count++] = value;
+  return 1;
+}
+
+static LainirRunStatus vm_arguments_append_bits(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapVmArguments *arguments;
+  if (count != 3 || args[0].kind != LAINIR_VALUE_ADDR ||
+      args[1].kind != LAINIR_VALUE_BITS || args[2].kind != LAINIR_VALUE_BITS ||
+      args[2].as.bits == 0 || args[2].as.bits > 64) {
+    *error = "bootstrap.vm-arguments-append-bits expects vector, bits and width";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  arguments = vm_arguments_find(user_data, args[0].as.addr);
+  if (!arguments || !vm_arguments_append_value(
+          arguments, lainir_value_bits(args[1].as.bits,
+                                       (uint32_t)args[2].as.bits))) {
+    *error = arguments ? "bootstrap.vm argument allocation failed"
+                       : "bootstrap.vm received an unknown argument vector";
+    return arguments ? LAINIR_RUN_TRAP : LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus vm_arguments_append_addr(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapVmArguments *arguments;
+  if (count != 2 || args[0].kind != LAINIR_VALUE_ADDR ||
+      args[1].kind != LAINIR_VALUE_ADDR) {
+    *error = "bootstrap.vm-arguments-append-addr expects vector and address";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  arguments = vm_arguments_find(user_data, args[0].as.addr);
+  if (!arguments || !vm_arguments_append_value(
+          arguments, lainir_value_addr(args[1].as.addr))) {
+    *error = arguments ? "bootstrap.vm argument allocation failed"
+                       : "bootstrap.vm received an unknown argument vector";
+    return arguments ? LAINIR_RUN_TRAP : LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus vm_arguments_release(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  BootstrapVmArguments **slot;
+  if (!context || count != 1 || args[0].kind != LAINIR_VALUE_ADDR) {
+    *error = "bootstrap.vm-arguments-release expects an argument vector";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  for (slot = &context->vm_arguments; *slot && *slot != args[0].as.addr;
+       slot = &(*slot)->next) {}
+  if (!*slot) {
+    *error = "bootstrap.vm-arguments-release received an unknown vector";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  BootstrapVmArguments *arguments = *slot;
+  *slot = arguments->next;
+  free(arguments->values);
+  free(arguments);
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus vm_eval_value(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  BootstrapVmArtifact *artifact;
+  BootstrapVmArguments *arguments;
+  L1Diagnostic diagnostic = {0};
+  if (!context || count != 3 || args[0].kind != LAINIR_VALUE_ADDR ||
+      args[1].kind != LAINIR_VALUE_ADDR ||
+      args[2].kind != LAINIR_VALUE_ADDR) {
+    *error = "bootstrap.vm-eval expects artifact, procedure and arguments";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  artifact = vm_artifact_find(context, args[0].as.addr);
+  arguments = vm_arguments_find(context, args[2].as.addr);
+  if (!artifact || !arguments) {
+    *error = "bootstrap.vm-eval received an unknown handle";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  LainirRunStatus status = lainir_module_handle_run(
+      artifact->handle, args[1].as.addr, arguments->values, arguments->count,
+      context->caps, result, &diagnostic, error);
+  if (status != LAINIR_RUN_OK)
+    *error = "bootstrap.vm-eval trapped";
+  return status;
+}
+
+static LainirRunStatus vm_eval_bits(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  LainirRunStatus status = vm_eval_value(
+      args, count, result, error, user_data);
+  if (status == LAINIR_RUN_OK && result->kind != LAINIR_VALUE_BITS) {
+    *error = "bootstrap.vm-eval-bits procedure returned a non-bits value";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  return status;
+}
+
+static LainirRunStatus vm_eval_addr(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  LainirRunStatus status = vm_eval_value(
+      args, count, result, error, user_data);
+  if (status == LAINIR_RUN_OK && result->kind != LAINIR_VALUE_ADDR) {
+    *error = "bootstrap.vm-eval-addr procedure returned a non-address value";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  return status;
+}
+
+static LainirRunStatus vm_eval_unit(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  LainirRunStatus status = vm_eval_value(
+      args, count, result, error, user_data);
+  if (status == LAINIR_RUN_OK && result->kind != LAINIR_VALUE_UNIT) {
+    *error = "bootstrap.vm-eval-unit procedure returned a non-unit value";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  return status;
 }
 
 /* Validate a complete source buffer with the seed parser and verifier.  The
@@ -1924,6 +2228,23 @@ int bootstrap_run_cli(int argc, char **argv) {
       !add_capability(caps, "bootstrap.source-length", source_length, &context) ||
       !add_capability(caps, "bootstrap.eval_source", eval_source, &context) ||
       !add_capability(caps, "bootstrap.eval-next", eval_next, &context) ||
+      !add_capability(caps, "bootstrap.vm-artifact-parse", vm_artifact_parse,
+                      &context) ||
+      !add_capability(caps, "bootstrap.vm-artifact-release", vm_artifact_release,
+                      &context) ||
+      !add_capability(caps, "bootstrap.vm-procedure-find", vm_procedure_find,
+                      &context) ||
+      !add_capability(caps, "bootstrap.vm-arguments-new", vm_arguments_new,
+                      &context) ||
+      !add_capability(caps, "bootstrap.vm-arguments-append-bits",
+                      vm_arguments_append_bits, &context) ||
+      !add_capability(caps, "bootstrap.vm-arguments-append-addr",
+                      vm_arguments_append_addr, &context) ||
+      !add_capability(caps, "bootstrap.vm-arguments-release",
+                      vm_arguments_release, &context) ||
+      !add_capability(caps, "bootstrap.vm-eval-bits", vm_eval_bits, &context) ||
+      !add_capability(caps, "bootstrap.vm-eval-addr", vm_eval_addr, &context) ||
+      !add_capability(caps, "bootstrap.vm-eval-unit", vm_eval_unit, &context) ||
       !add_capability(caps, "bootstrap.validate-source", validate_source,
                       &context) ||
       !add_capability(caps, "bootstrap.ir-module-id", ir_module_id,
@@ -2112,9 +2433,10 @@ int bootstrap_run_cli(int argc, char **argv) {
   }
   exit_code = 0;
 
-cleanup:
+ cleanup:
   if (context.artifact)
     fclose(context.artifact);
+  bootstrap_release_vm_objects(&context);
   bootstrap_release_pages(&context);
   if (context.sources) {
     for (size_t index = 0; index < context.source_count; ++index)

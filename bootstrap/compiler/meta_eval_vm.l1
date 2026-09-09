@@ -4,10 +4,20 @@
 // LAINIR source buffer containing #eval.  The seed parses and verifies that
 // buffer, then executes #eval through a temporary TCB.
 
-#extern #proc bootstrap.eval_source(
+#data lainvm_meta_eval_name(9, 1, "meta_eval");
+
+#extern #proc bootstrap.vm-artifact-parse(
   #addr %source, #bits<64> %length
-) -> #bits<32>;
-#extern #proc bootstrap.eval-next() -> #bits<64>;
+) -> #addr;
+#extern #proc bootstrap.vm-artifact-release(#addr %artifact) -> #unit;
+#extern #proc bootstrap.vm-procedure-find(
+  #addr %artifact, #addr %name, #bits<64> %length
+) -> #addr;
+#extern #proc bootstrap.vm-arguments-new() -> #addr;
+#extern #proc bootstrap.vm-arguments-release(#addr %arguments) -> #unit;
+#extern #proc bootstrap.vm-eval-bits(
+  #addr %artifact, #addr %procedure, #addr %arguments
+) -> #bits<64>;
 
 #proc lainvm_eval_buffer_new() -> #addr {
   #let %buffer: #addr = #call bootstrap.allocate-pages(4104)
@@ -180,11 +190,19 @@
     %buffer,
     " }\n  #return %value\n}\n"
   )
-  #call bootstrap.eval_source(
+  #let %artifact: #addr = #call bootstrap.vm-artifact-parse(
     #call lainvm_eval_buffer_data(%buffer),
     #call lainvm_eval_buffer_length(%buffer)
   )
-  #let %value: #bits<64> = #call bootstrap.eval-next()
+  #let %procedure: #addr = #call bootstrap.vm-procedure-find(
+    %artifact, #data_addr(lainvm_meta_eval_name), 9
+  )
+  #let %arguments: #addr = #call bootstrap.vm-arguments-new()
+  #let %value: #bits<64> = #call bootstrap.vm-eval-bits(
+    %artifact, %procedure, %arguments
+  )
+  #call bootstrap.vm-arguments-release(%arguments)
+  #call bootstrap.vm-artifact-release(%artifact)
   #call bootstrap.release-pages(%buffer)
   #return %value
 }

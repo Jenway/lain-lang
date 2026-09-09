@@ -1150,6 +1150,68 @@ static int eval_fold_eliminates_nodes_test(void) {
   return ok;
 }
 
+static int artifact_procedure_eval_test(void) {
+  const char *source =
+      "#proc add(#bits<64> %left, #bits<64> %right) -> #bits<64> {\n"
+      "  #return #add(%left, %right)\n"
+      "}\n"
+      "#proc identity_addr(#addr %value) -> #addr {\n"
+      "  #return %value\n"
+      "}\n"
+      "#proc finish() -> #unit {\n"
+      "  #return\n"
+      "}\n";
+  LainirModuleHandle *handle = NULL;
+  L1Diagnostic diagnostic = {0};
+  const char *error = NULL;
+  LainirValue arguments[2] = {
+      lainir_value_bits(40, 64),
+      lainir_value_bits(2, 64),
+  };
+  LainirValue result = {0};
+  if (lainir_module_parse_handle(source, &handle, &diagnostic) !=
+      LAINIR_RUN_OK)
+    return 0;
+  const L1Subroutine *procedure = lainir_module_handle_find_procedure(
+      handle, "add", 3);
+  LainirRunStatus status = procedure
+      ? lainir_module_handle_run(
+            handle, procedure, arguments, 2, NULL, &result, &diagnostic,
+            &error)
+      : LAINIR_RUN_NO_ENTRY;
+  int ok = procedure && status == LAINIR_RUN_OK &&
+      !error && result.kind == LAINIR_VALUE_BITS &&
+      result.bit_width == 64 && result.as.bits == 42;
+  int address_value = 7;
+  LainirValue address_argument = lainir_value_addr(&address_value);
+  const L1Subroutine *address_procedure = lainir_module_handle_find_procedure(
+      handle, "identity_addr", 13);
+  status = address_procedure
+      ? lainir_module_handle_run(
+            handle, address_procedure, &address_argument, 1, NULL, &result,
+            &diagnostic, &error)
+      : LAINIR_RUN_NO_ENTRY;
+  ok = ok && status == LAINIR_RUN_OK && !error &&
+       result.kind == LAINIR_VALUE_ADDR && result.as.addr == &address_value;
+  const L1Subroutine *unit_procedure = lainir_module_handle_find_procedure(
+      handle, "finish", 6);
+  status = unit_procedure
+      ? lainir_module_handle_run(
+            handle, unit_procedure, NULL, 0, NULL, &result, &diagnostic,
+            &error)
+      : LAINIR_RUN_NO_ENTRY;
+  ok = ok && status == LAINIR_RUN_OK && !error &&
+       result.kind == LAINIR_VALUE_UNIT;
+  if (!ok)
+    fprintf(stderr,
+            "artifact eval detail: procedure=%p status=%d error=%s kind=%d width=%u bits=%llu diagnostic=%d %s\n",
+            (void *)procedure, (int)status, error ? error : "", (int)result.kind,
+            result.bit_width, (unsigned long long)result.as.bits,
+            diagnostic.code, diagnostic.message);
+  lainir_module_handle_destroy(&handle);
+  return ok;
+}
+
 int main(void) {
   if (!backend_state_cleanup_test())
     return fail("backend state cleanup failed");
@@ -1212,6 +1274,8 @@ int main(void) {
     return fail("scheduler fair rotation failed");
   if (!eval_fold_eliminates_nodes_test())
     return fail("#eval fold did not eliminate evaluated nodes");
+  if (!artifact_procedure_eval_test())
+    return fail("artifact procedure eval failed");
 
   /* The interpreter consumes the provider-owned fuel gate at each instruction
    * boundary, exposes the active nested frame to a host callback, and resumes

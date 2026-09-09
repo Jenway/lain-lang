@@ -104,6 +104,18 @@ const L1Subroutine *lainir_module_handle_first(
   return handle ? handle->module : NULL;
 }
 
+const L1Subroutine *lainir_module_handle_find_procedure(
+    const LainirModuleHandle *handle, const char *name, size_t name_length) {
+  const L1Subroutine *procedure;
+  if (!handle || !name) return NULL;
+  for (procedure = handle->module; procedure; procedure = procedure->next) {
+    if (procedure->name && strlen(procedure->name) == name_length &&
+        memcmp(procedure->name, name, name_length) == 0)
+      return procedure;
+  }
+  return NULL;
+}
+
 LainirRunStatus lainir_module_handle_verify(
     LainirModuleHandle *handle, L1Diagnostic *diagnostic) {
   return lainir_module_handle_verify_entry(handle, NULL, diagnostic);
@@ -140,6 +152,53 @@ LainirRunStatus lainir_module_handle_eval_values(
     L1Diagnostic *diagnostic, const char **error_out) {
   return collect_module_eval_values(handle, caps, values_out, count_out,
                                     diagnostic, error_out);
+}
+
+LainirRunStatus lainir_module_handle_run(
+    LainirModuleHandle *handle, const L1Subroutine *procedure,
+    const LainirValue *arguments, uint32_t argument_count,
+    LainirCapabilityTable *caps, LainirValue *result_out,
+    L1Diagnostic *diagnostic, const char **error_out) {
+  const L1Subroutine *member;
+  LainirVmControl *control;
+  LainirRunRequest request = {0};
+  LainirRunStatus status;
+  const uint64_t owner = 1;
+  if (error_out) *error_out = NULL;
+  if (!handle || !procedure || !result_out ||
+      (argument_count != 0 && !arguments)) {
+    if (error_out) *error_out = "invalid VM eval arguments";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  for (member = handle->module; member && member != procedure;
+       member = member->next) {}
+  if (!member) {
+    if (error_out) *error_out = "procedure does not belong to artifact";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  status = lainir_module_handle_verify_entry(
+      handle, procedure->name, diagnostic);
+  if (status != LAINIR_RUN_OK) {
+    if (error_out && diagnostic) *error_out = diagnostic->message;
+    return status;
+  }
+  control = lainir_vm_control_new(caps ? caps->max_steps : 0);
+  if (!control || !lainir_vm_control_start(control, owner) ||
+      !lainir_vm_control_begin_slice(control, owner, UINT64_MAX)) {
+    lainir_vm_control_free(control);
+    if (error_out) *error_out = "cannot create VM eval TCB";
+    return LAINIR_RUN_TRAP;
+  }
+  request.module = handle->module;
+  request.entry_name = procedure->name;
+  request.args = arguments;
+  request.arg_count = argument_count;
+  request.caps = caps;
+  request.vm_control = control;
+  request.vm_owner = owner;
+  status = lainir_run(&request, result_out, error_out);
+  lainir_vm_control_free(control);
+  return status;
 }
 
 LainirRunStatus lainir_eval_source(
