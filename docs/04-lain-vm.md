@@ -101,6 +101,17 @@ VM control API 提供以下操作：
 native backend 保存寄存器和栈状态，系统级 backend 使用平台线程或硬件上下文；这些
 实现共享同一组 TCB 状态转换和生命周期规则。
 
+### 4.2 编译器执行接口
+
+编译器通过四类值请求执行：已验证的 `Artifact`、其中的 `Procedure`、物理参数序列和
+过程声明的普通物理返回值。一次调用创建执行 TCB；失败产生 Trap。接口不公开 TCB、
+解释器栈或 VSpace 的实现对象。
+
+C seed 给手写 bootstrap 提供同一语义的句柄接口：解析并验证 artifact、按名称取得
+procedure、追加 `#bits<N>` 或 `#addr` 参数、执行过程。正式 Lain 实现通过
+`src/lainvm/api_contract.lain` 表达相同边界。模块、类型或 AST 若以 `#addr` 返回，地址
+所指数据仍由 Meta 解释，LAINVM 不附加分类。
+
 ## 5. Endpoint
 
 Endpoint 是 TCB 之间的同步会合点。它不改变 LAINIR 的值语义，也不承担通用消息队列。
