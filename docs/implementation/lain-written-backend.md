@@ -30,9 +30,10 @@ compile the ordinary physical subset, including calls, local arithmetic and
 record fields. Bootstrap `consteval` arithmetic, pure scalar Meta calls, and
 Effect factories with module arguments and `std::effect_operation(...)` now
 generate temporary LAINIR containing `#eval`; the seed verifies it and executes
-it through LAINVM. The next blocker is the import collection loop reached in
-`std/meta.lain`. The native compiler matrix depends on finishing this Meta path
-because the formal compiler and standard library use it.
+it through LAINVM. The complete formal standard-library source closure now
+builds and passes its ABI and conformance checks. The next gate is the
+`src/lainc` compiler source closure; the native compiler matrix follows that
+artifact.
 
 Generated compiler bundles, C files, manifests and executables belong under
 `build/`. No generated backend artifact is stored in `src/` or `bootstrap/`.

@@ -35,10 +35,10 @@ The program-unit state and physical lowering implementation have been restored
 without the removed evaluator protocol. Arithmetic `consteval`, pure scalar
 Meta procedures, Effect factories with module arguments, and
 `std::effect_operation(...)` now lower to temporary LAINIR containing `#eval`
-and execute through LAINVM. The next blocker is a non-terminating import
-collection path beginning at `std/meta.lain`; the Meta step guard reports 5124.
-Consequently the bootstrap compiler cannot yet compile the formal compiler
-source closure needed by the native matrix.
+and execute through LAINVM. The bootstrap compiler now builds and verifies the
+complete formal standard-library source closure. The next gate is compiling the
+`src/lainc` source closure and using its first concrete failure to finish the
+language surface needed by the native matrix.
 
 The next required work is C4 in
 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md): finish the LAINVM
