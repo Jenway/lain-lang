@@ -114,7 +114,7 @@ Meta 可以维护类型、模块、callable、effect 和编译期值等高层对
 
 ## 5. 编译期执行边界
 
-Meta 决定需要执行什么编译期计算，并生成显式的 LAINIR `#eval` 块。LAINIR 求值器负责验证并执行这个块。
+Meta 决定需要执行什么编译期计算，并生成显式的 LAINIR `#eval` 块。LAINVM 负责执行这个块。
 
 例如：
 
@@ -138,7 +138,7 @@ let main = std::func() -> i64 {
 这里有两条边界：
 
 - Meta 把 `std::func`、`i64` 和 `+` 解释并转换成 `#proc`、`#bits<64>` 和 `#add`。
-- LAINIR 执行 `#eval`，把结果交还给后续编译过程。
+- LAINVM 执行 `#eval`，把结果交还给后续编译过程。
 
 编译期文件、进程、网络或 artifact 操作必须通过显式 capability 获得宿主能力。Meta 语义对象本身不隐式获得这些能力。
 
@@ -203,16 +203,18 @@ Backend 接收经过验证的 LAINIR。它可以直接解释执行，也可以�
 
 Backend 只处理物理类型、控制流、内存和调用。函数构造器、结构体语法、模块、泛型、effect 和宏已经由 Meta 层处理完毕。
 
-当前工具和后端说明见 [`implementation/lainir-tools.md`](implementation/lainir-tools.md) 与 [`implementation/lain-written-backend.md`](implementation/lain-written-backend.md)。
+当前后端说明见 [`implementation/lain-written-backend.md`](implementation/lain-written-backend.md)。已归档的 LAINIR 工具说明见 [`history/lainir-tools.md`](history/lainir-tools.md)。
 
 ## 11. 当前自举结构
 
 当前自举代码分为三个位置：
 
 ```text
-seed/                         C 编写的 LAINIR 解释器和最小宿主能力
-bootstrap/lainc.l1            冻结的 LAINIR compiler artifact
+seed/                         C 编写的 LAINIR 解释器和 LAINIR 编译器源码
+bootstrap/compiler/*.l1       手写的启动编译器源码
+bootstrap/std/*.l1            手写的启动标准库源码
 src/lainc/*.lain              Lain 编写的正式编译器源码
+build/bootstrap/lainc.l1      生成的启动编译器 bundle
 ```
 
 目标是让 compiler core 通过稳定 ABI 调用标准库的 `expand`、`elaborate` 和 `lower`，由正式标准库接管语言规则，并最终让 `src/lainc` 编译器完成自举固定点。
