@@ -145,6 +145,7 @@ static LainirValue interp_call_sub(LainirInterpreter *, L1Subroutine *,
 static LainirValue interp_call_root_resumable(
     LainirInterpreter *, L1Subroutine *, const LainirValue *, uint32_t);
 static void interp_trap(LainirInterpreter *, const char *);
+static void interp_init_env_flags(LainirInterpreter *);
 static void interp_trace_finish(LainirInterpreter *);
 static int interp_try_fast_builtin(LainirInterpreter *, L1Subroutine *,
                                     const LainirValue *, uint32_t,
@@ -1000,26 +1001,123 @@ static LainirValue interp_eval_call(LainirInterpreter *interp, LainirFrame *fram
   return result;
 }
 
-/* Evaluate a compile-time block in the current frame.  The compiler owns the
- * decision to invoke the interpreter for compile-time work; once here, an
- * eval block is just another structured call frame. */
+/* Evaluate a compile-time block through a fresh, synchronous VM control.
+ *
+ * The block may use the caller's local bindings and arguments, but they are
+ * copied into a distinct root frame.  The child therefore shares the physical
+ * address space (raw addresses retain their values) without borrowing the
+ * caller's frame or control state.  Steps and allocation accounting are
+ * copied in and copied back, making nested evals consume one shared budget. */
 static LainirValue interp_eval_block(LainirInterpreter *interp,
-                                      LainirFrame *frame, L1Block *block) {
-  int saved_return = interp->should_return;
-  int saved_break = interp->should_break;
-  int saved_continue = interp->should_continue;
-  LainirValue saved_value = interp->return_value;
+                                      LainirFrame *frame, L1Block *block,
+                                      L1Type *return_type) {
+  LainirInterpreter child;
+  LainirFrame root;
+  L1Subroutine eval_sub;
+  LainirVmControl *control = NULL;
+  uint64_t owner;
   LainirValue result = lainir_value_unit();
-  interp->should_return = 0;
-  interp->should_break = 0;
-  interp->should_continue = 0;
-  interp_exec_block(interp, frame, block);
-  if (!interp->error && interp->should_return)
-    result = interp->return_value;
-  interp->should_return = saved_return;
-  interp->should_break = saved_break;
-  interp->should_continue = saved_continue;
-  interp->return_value = saved_value;
+  uint32_t max_depth = interp->caps ? interp->caps->max_call_depth : 0;
+
+  if (!block) {
+    interp_trap(interp, "#eval requires a block");
+    return result;
+  }
+  if (max_depth && interp->call_depth >= max_depth) {
+    interp_trap(interp, "interpreter call-depth limit exceeded");
+    return result;
+  }
+
+  memset(&child, 0, sizeof(child));
+  memset(&root, 0, sizeof(root));
+  memset(&eval_sub, 0, sizeof(eval_sub));
+  eval_sub.name = "<eval>";
+  eval_sub.ret_ty = return_type;
+  eval_sub.blocks = block;
+  root.sub = &eval_sub;
+  root.args = root.args_inline;
+  root.locals = root.locals_inline;
+  root.local_cap = sizeof(root.locals_inline) / sizeof(root.locals_inline[0]);
+
+  /* Capture the caller's argument slots and lexical locals by value.  The
+   * evaluator accepts a superset of the block's free variables; unused
+   * captures are not observable and this keeps the source IR immutable. */
+  if (frame && frame->arg_count) {
+    if (frame->arg_count > sizeof(root.args_inline) / sizeof(root.args_inline[0])) {
+      root.args = calloc(frame->arg_count, sizeof(*root.args));
+      root.args_heap = 1;
+    }
+    if (!root.args) {
+      interp_trap(interp, "out of memory for #eval captures");
+      return result;
+    }
+    memcpy(root.args, frame->args, frame->arg_count * sizeof(*root.args));
+    root.arg_count = frame->arg_count;
+  }
+  if (frame) {
+    for (uint32_t i = 0; i < frame->local_count; i++) {
+      if (!interp_set_local(&root, frame->locals[i].name,
+                            frame->locals[i].value)) {
+        interp_free_frame(&root);
+        interp_trap(interp, "out of memory for #eval captures");
+        return result;
+      }
+    }
+  }
+
+  child.module = interp->module;
+  child.caps = interp->caps;
+  child.steps = interp->steps;
+  child.allocated_bytes = interp->allocated_bytes;
+  child.call_depth = interp->call_depth + 1;
+  child.active_frame = &root;
+  child.active_block = block;
+  child.instruction_boundary = 1;
+  interp_init_env_flags(&child);
+  interp_build_sub_index(&child);
+
+  control = lainir_vm_control_new(0);
+  owner = (uint64_t)(uintptr_t)&child;
+  child.vm_control = control;
+  child.vm_owner = owner;
+  if (!control || !lainir_vm_control_start(control, owner) ||
+      !lainir_vm_control_begin_slice(control, owner, UINT64_MAX) ||
+      !lainir_vm_control_push_frame(
+          control, owner, (uint64_t)(uintptr_t)&eval_sub,
+          (uint64_t)(uintptr_t)block, (uint64_t)(uintptr_t)&root)) {
+    free(child.sub_index);
+    interp_free_frame(&root);
+    lainir_vm_control_free(control);
+    interp_trap(interp, "cannot create #eval temporary TCB");
+    return result;
+  }
+
+  interp_exec_block(&child, &root, block);
+  interp->steps = child.steps;
+  interp->allocated_bytes = child.allocated_bytes;
+  if (child.vm_slice_yielded || child.vm_blocked) {
+    interp_trap(interp, "#eval temporary TCB cannot suspend");
+  } else if (child.error) {
+    interp_trap(interp, child.error);
+  } else if (!child.should_return) {
+    interp_trap(interp, "#eval block did not return");
+  } else {
+    result = child.return_value;
+    if (result.kind == LAINIR_VALUE_ADDR &&
+        interp_frame_owns_addr(&root, result.as.addr)) {
+      interp_trap(interp, "#alloca address escaped #eval activation");
+      result = lainir_value_unit();
+    }
+  }
+
+  (void)lainir_vm_control_pop_frame(control, owner);
+  if (child.error || child.vm_slice_yielded || child.vm_blocked)
+    (void)lainir_vm_control_abort(control, owner);
+  else
+    (void)lainir_vm_control_finish(control, owner);
+  lainir_vm_control_free(control);
+  free(child.sub_index);
+  interp_free_frame(&root);
   return result;
 }
 
@@ -1331,7 +1429,8 @@ static LainirValue interp_eval_expr_inner(LainirInterpreter *interp,
   case EXPR_CALL:
     return interp_eval_call(interp, frame, expr);
   case EXPR_EVAL:
-    return interp_eval_block(interp, frame, expr->data.eval.block);
+    return interp_eval_block(interp, frame, expr->data.eval.block,
+                             expr->data.eval.ret_ty);
   case EXPR_CALL_INDIRECT: {
     LainirValue target = interp_eval_expr(
         interp, frame, expr->data.call_indirect.fn_ptr);
@@ -3323,7 +3422,8 @@ LainirRunStatus lainir_eval_block(
     LainirValue *result_out,
     const char **error_out) {
   LainirInterpreter interp;
-  L1Subroutine eval_sub;
+  LainirFrame caller;
+  L1Subroutine caller_sub;
 
   if (!module || !block || !result_out) {
     if (error_out) *error_out = "invalid eval block request";
@@ -3331,16 +3431,21 @@ LainirRunStatus lainir_eval_block(
   }
 
   memset(&interp, 0, sizeof(interp));
-  memset(&eval_sub, 0, sizeof(eval_sub));
-  eval_sub.name = "<eval>";
-  eval_sub.ret_ty = return_type;
-  eval_sub.blocks = block;
+  memset(&caller, 0, sizeof(caller));
+  memset(&caller_sub, 0, sizeof(caller_sub));
+  caller_sub.name = "<eval-caller>";
+  caller_sub.ret_ty = return_type;
+  caller.sub = &caller_sub;
+  caller.args = caller.args_inline;
+  caller.locals = caller.locals_inline;
+  caller.local_cap = sizeof(caller.locals_inline) /
+                     sizeof(caller.locals_inline[0]);
   interp.module = module;
   interp.caps = caps;
   interp_init_env_flags(&interp);
   interp_build_sub_index(&interp);
 
-  *result_out = interp_call_sub(&interp, &eval_sub, NULL, 0);
+  *result_out = interp_eval_block(&interp, &caller, block, return_type);
   free(interp.sub_index);
   if (interp.error) {
     if (error_out) *error_out = interp.error;
@@ -3350,11 +3455,48 @@ LainirRunStatus lainir_eval_block(
   return LAINIR_RUN_OK;
 }
 
-/* Compiler-side #eval materialization.  This deliberately lives beside the
- * interpreter: the compiler supplies an IR module, asks the interpreter to
- * execute each eval block, then replaces scalar results with constants.
- * Unit results stay as evaluated EXPR_EVAL nodes so a backend can lower them
- * to an effect-free expression without inventing a second unit constant. */
+/* Compiler-side #eval materialization.  Every successful result is rewritten
+ * to an ordinary physical expression; no EXPR_EVAL reaches a backend. */
+static L1Expr *fold_value_expr(L1Subroutine *module, LainirValue value,
+                               L1Type *return_type, const char **error_out) {
+  L1Expr *result = NULL;
+  if (value.kind == LAINIR_VALUE_UNIT) return NULL;
+  if (value.kind == LAINIR_VALUE_BITS) {
+    result = lainir_new_expr(EXPR_CONST);
+    if (result) result->data.const_val = (int64_t)value.as.bits;
+    return result;
+  }
+  if (value.kind == LAINIR_VALUE_STRING) {
+    result = lainir_new_expr(EXPR_STRING);
+    if (result) {
+      result->data.str_val.content = strdup(value.as.string ? value.as.string : "");
+      result->data.str_val.ty = return_type;
+    }
+    return result;
+  }
+  if (value.kind == LAINIR_VALUE_FUNC && value.as.func && value.as.func->name) {
+    result = lainir_new_expr(EXPR_PROC_ADDR);
+    if (result) result->data.proc_addr.fn_name = strdup(value.as.func->name);
+    return result;
+  }
+  if (value.kind == LAINIR_VALUE_ADDR) {
+    for (L1Subroutine *item = module; item; item = item->next) {
+      if (item->is_data && item->data_bytes == value.as.addr) {
+        result = lainir_new_expr(EXPR_DATA_ADDR);
+        if (result) {
+          result->data.data_addr.name = strdup(item->name);
+          result->data.data_addr.ty = return_type;
+        }
+        return result;
+      }
+    }
+    if (error_out) *error_out = "#eval address result has no stable LAINIR representation";
+    return NULL;
+  }
+  if (error_out) *error_out = "#eval result is not a physical LAINIR value";
+  return NULL;
+}
+
 static LainirRunStatus fold_expr(L1Subroutine *module, L1Expr **slot,
                                  LainirCapabilityTable *caps,
                                  const char **error_out,
@@ -3416,21 +3558,13 @@ static LainirRunStatus fold_expr(L1Subroutine *module, L1Expr **slot,
                                                expr->data.eval.ret_ty, caps,
                                                &value, error_out);
     if (status != LAINIR_RUN_OK) return status;
-    if (value.kind == LAINIR_VALUE_UNIT) {
-      if (sink && outer_eval) sink(&value, sink_user_data);
-      return LAINIR_RUN_OK;
-    }
-    if (value.kind != LAINIR_VALUE_BITS) {
-      if (error_out) *error_out = "#eval result must be a bits value";
-      return LAINIR_RUN_BAD_CALL;
-    }
     if (sink && outer_eval) sink(&value, sink_user_data);
-    L1Expr *constant = lainir_new_expr(EXPR_CONST);
-    if (!constant) {
+    L1Expr *constant = fold_value_expr(module, value, expr->data.eval.ret_ty,
+                                       error_out);
+    if (value.kind != LAINIR_VALUE_UNIT && !constant) {
       if (error_out) *error_out = "out of memory";
       return LAINIR_RUN_TRAP;
     }
-    constant->data.const_val = (int64_t)value.as.bits;
     *slot = constant;
     lainir_free_expr_tree(expr);
     return LAINIR_RUN_OK;

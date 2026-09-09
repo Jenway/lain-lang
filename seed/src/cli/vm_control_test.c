@@ -1123,6 +1123,33 @@ cleanup:
   return ok;
 }
 
+static int eval_fold_eliminates_nodes_test(void) {
+  const char *source =
+      "#data bytes(1, 1, \"x\");\n"
+      "#proc bits() -> #bits<64> {\n"
+      "  #let %value: #bits<64> = #eval { #return #add(40, 2) }\n"
+      "  #return %value\n"
+      "}\n"
+      "#proc address() -> #addr {\n"
+      "  #return #eval { #return #data_addr(bytes) }\n"
+      "}\n"
+      "#proc unit() -> #unit {\n"
+      "  #return #eval { #return }\n"
+      "}\n";
+  char *text = NULL;
+  size_t length = 0;
+  L1Diagnostic diagnostic = {0};
+  const char *error = NULL;
+  LainirRunStatus status = lainir_eval_source_text(
+      source, NULL, &text, &length, &diagnostic, &error);
+  int ok = status == LAINIR_RUN_OK && !error && text && length &&
+           !strstr(text, "#eval") && strstr(text, "#data_addr(bytes)") &&
+           strstr(text, "#bits<64> = 42") && strstr(text, "#proc unit() -> #unit") &&
+           strstr(text, "#return\n");
+  free(text);
+  return ok;
+}
+
 int main(void) {
   if (!backend_state_cleanup_test())
     return fail("backend state cleanup failed");
@@ -1183,6 +1210,8 @@ int main(void) {
     return fail("scheduler nested trap after results failed");
   if (!scheduler_fair_rotation_test())
     return fail("scheduler fair rotation failed");
+  if (!eval_fold_eliminates_nodes_test())
+    return fail("#eval fold did not eliminate evaluated nodes");
 
   /* The interpreter consumes the provider-owned fuel gate at each instruction
    * boundary, exposes the active nested frame to a host callback, and resumes
