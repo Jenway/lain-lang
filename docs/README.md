@@ -32,7 +32,6 @@
 | --- | --- |
 | [`implementation/ast-operations.md`](implementation/ast-operations.md) | AST 查询、遍历、变换和宏展开 |
 | [`implementation/lain-written-backend.md`](implementation/lain-written-backend.md) | Lain 编写的后端和 native driver |
-| [`implementation/lainir-tools.md`](implementation/lainir-tools.md) | LAINIR 工具链、构建命令和边界 |
 
 ## 当前路线图
 
@@ -55,6 +54,7 @@
 | [`history/lainir-implementation-roadmap.md`](history/lainir-implementation-roadmap.md) | LAINIR frontend 和 compiler boundary 的旧实现清单 |
 | [`history/lainc-meta-system.md`](history/lainc-meta-system.md) | `src/lainc` 过渡 Meta 实现记录 |
 | [`history/lainc-performance-analysis-2026-08-21.md`](history/lainc-performance-analysis-2026-08-21.md) | 2026-08-21 自举性能分析 |
+| [`history/lainir-tools.md`](history/lainir-tools.md) | 已归档的 LAINIR formatter、highlight、parser 和 LSP 实现记录 |
 | [`history/scheme-era-intro.md`](history/scheme-era-intro.md) | Scheme 时期的语言总览 |
 | [`history/scheme-era-core-philosophy.md`](history/scheme-era-core-philosophy.md) | Scheme 时期的核心设计说明 |
 | [`history/scheme-era-architecture.md`](history/scheme-era-architecture.md) | Scheme 时期的编译器架构说明 |

@@ -19,3 +19,6 @@
 
 工作区原有的 `bootstrap/lainc.l1`、`raw_ast.l1` 和 snapshot 编辑未纳入本阶段提交。
 它们在迁移后保留为未提交修改，后续单独处理。
+
+后续修正：生成的 `lainc.l1` 和 snapshot 不属于 `bootstrap/` 源码树，统一改为写入
+`build/bootstrap/`。`bootstrap/` 只保留手写 LAINIR 源码。

@@ -31,8 +31,8 @@ The build produces:
   three artifact-write capabilities and closes that file when the program
   finishes.
 
-The frozen Lain compiler artifact is not part of this directory; it lives at
-`bootstrap/lainc.l1` (see `bootstrap/README.md`).
+The generated Lain compiler bundle is not part of this directory; build it at
+`build/bootstrap/lainc.l1` from the sources described in `bootstrap/README.md`.
 
 Build from this directory with:
 

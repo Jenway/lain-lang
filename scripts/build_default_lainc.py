@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build native lainc from the checked-in bootstrap snapshot."""
+"""Build native lainc from the generated bootstrap bundle."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SNAPSHOT = ROOT / "bootstrap" / "lainc.l1"
+SNAPSHOT = ROOT / "build" / "bootstrap" / "lainc.l1"
+BUILD_SNAPSHOT = ROOT / "scripts" / "freeze_lainc_bootstrap.py"
 CHECK_SNAPSHOT = ROOT / "scripts" / "check_lainc_bootstrap_snapshot.py"
 BUILD_NATIVE = ROOT / "scripts" / "build_lainc_native.py"
 
@@ -24,6 +25,11 @@ def main() -> int:
     args = parser.parse_args()
     output = args.output if args.output.is_absolute() else ROOT / args.output
     c_output = args.c_output if args.c_output.is_absolute() else ROOT / args.c_output
+    generated = subprocess.run(
+        [sys.executable, str(BUILD_SNAPSHOT)], cwd=ROOT, text=True
+    )
+    if generated.returncode:
+        return generated.returncode
     checked = subprocess.run(
         [sys.executable, str(CHECK_SNAPSHOT), str(SNAPSHOT)], cwd=ROOT, text=True
     )

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a frozen lainc artifact and its source-closure snapshot manifest."""
+"""Verify a generated bootstrap bundle and its source manifest."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from lainc_sources import composed_compiler_sources
+from build_lain_compiler import MODULES
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +20,7 @@ def sha256_bytes(data: bytes) -> str:
 
 def source_closure_hash() -> str:
     digest = hashlib.sha256()
-    for path in composed_compiler_sources(ROOT):
+    for path in MODULES:
         digest.update(path.relative_to(ROOT).as_posix().encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_bytes())
