@@ -44,13 +44,34 @@ C3 的完成记录见
    启动正式编译器所需的 LAINIR 源码和冻结产物，`src` 只放用 Lain 编写的正式实现。
    正式实现继续分为 `src/lainc`、`src/lainir` 和 `src/lainvm`；LAINIR 定义并验证
    物理程序，LAINVM 执行已经验证的物理程序。
+10. `src/lainvm` 是正式实现中的独立运行时层。它拥有 TCB、VSpace、执行预算、Trap 和
+    过程执行；`src/lainir` 只拥有 IR 的构造、验证、打印和物理语义；`src/lainc` 只拥有
+    源语言与 Meta 的编译工作。lainc 只能通过 LAINVM 的执行接口约定（API contract）请求执行，不能导入
+    解释器状态或管理 TCB。
+
+## 运行时分层与验收边界
+
+`src/lainvm/` 不是 `src/lainir/` 的一个工具目录。它是将来可以有参考解释器、native
+lowering 和裸机 lowering 的共同语义所有者。当前的 Lain 解释器已经在该目录中；C seed
+保留为最小可信执行底座。
+
+| 层 | 负责的内容 | 不得负责的内容 |
+| --- | --- | --- |
+| `src/lainir` | IR 模型、builder、verifier、printer、物理指令语义 | 执行器、TCB、VSpace、Meta 值 |
+| `src/lainvm` | 执行已验证的 IR、TCB、VSpace、Trap、预算、`Eval` operation | 源语言类型、模块与 AST 的解释 |
+| `src/lainc` | 解析、Meta、elaboration、lowering，以及发起 `Eval` 请求 | 解释器内部状态、TCB 创建和 VSpace 管理 |
+
+执行接口约定（API contract）是三层之间唯一的执行接缝。它只公开 artifact、procedure、物理 `Value`、参数
+向量和 `Eval` operation；不公开解释器结构体，也不把类型、模块或 AST 包装成 VM 返回值。
+每次改变该 contract，都必须同时验证：LAINIR provider 不导入 LAINVM，LAINVM 不导入 lainc，
+lainc 不依赖 LAINVM 的私有实现。
 
 ## 当前进度
 
 | 领域 | 当前状态 | 下一步 |
 | --- | --- | --- |
 | LAINIR 物理语义 | 基线可用 | 保持物理边界，不加入 Meta 返回分类 |
-| LAINVM 基础 | C seed 与 Lain 源码边界均已采用 TCB、VSpace、Trap 和预算模型；Lain VM 已独立为 `src/lainvm/` | C4 将 Meta 调用接入子 TCB 执行入口 |
+| LAINVM 基础 | C seed 与 Lain 源码边界均已采用 TCB、VSpace、Trap 和预算模型；Lain VM 已独立为 `src/lainvm/`，并已公开执行 API contract 与 `Eval` operation | 将 lainc 工厂和编译入口接到该 contract 与 handler |
 | `#eval` | C seed 已通过临时 TCB 执行并在 fold 前消除；Lain VM 已提供子 TCB 原语 | Meta 物化捕获参数并调用 LAINVM |
 | Meta 编译期求值 | 旧求值路径已删除，暂不可用 | 从整数与基础物理运算开始重新接入 |
 | 自举 | 冻结产物暂时可用 | 新路径完成后重新生成并恢复固定点 |
@@ -64,19 +85,28 @@ C4 Meta 重新通过 #eval 执行编译期计算
   -> C5 恢复自举并替换冻结产物
 ```
 
-## C4：重新建立 Meta 编译期求值
+## C4：让 lainc 通过 LAINVM 重新建立 Meta 编译期求值
 
-目标：让 Meta 生成 `#eval`，并通过 LAINVM 执行；不修补旧 `EvalResult` 求值器。
+目标：让 Meta 生成 `#eval`，由 lainc 通过 LAINVM API contract 发起执行，且由 LAINVM 的
+effect handler（接收 `Eval` 请求并启动子 TCB 的代码）在子 TCB 中执行；不修补旧 `EvalResult`
+求值器。
+
+先完成运行时接线，再恢复语言能力：
+
+1. **C4.1：固定执行接缝。** 已完成 LAINVM `Eval` effect operation 和 API contract；
+   该 contract 只表达物理参数与物理返回值。
+2. **C4.2：接通编译入口。** 将 `Vm` capability 传入 lainc 的 compiler、API、driver 和
+   Meta factory；在编译器的 LAINVM 执行边界安装 `eval_handler`。这一步完成后，Meta 的
+   `perform Vm.eval(...)` 才能使用活动 TCB 运行子过程。
+3. **C4.3：逐项恢复 Meta 语义。** 下面的恢复顺序每完成一项就加入真实编译 fixture 并提交。
 
 恢复顺序：
 
-1. 定义 LAINVM `Eval` effect operation；它由当前 VM handler 使用活动 TCB 执行子过程，
-   Meta 只能请求 operation，不能接触 TCB 或 VSpace；
-2. 整数和基础物理运算；
-3. 普通过程调用；
-4. 类型值和模块值；
-5. AST 值与宏展开；
-6. nested `#eval`、预算和 Trap 诊断。
+1. 整数和基础物理运算；
+2. 普通过程调用；
+3. 类型值和模块值；
+4. AST 值与宏展开；
+5. nested `#eval`、预算和 Trap 诊断。
 
 类型、模块和 AST 的解释和检查始终留在 Meta。若 Meta 求值需要把它们暂存在内存中，
 LAINVM 只会操作相应的物理地址；它不会把这些对象识别为 `#eval` 的返回类别，也不会为
