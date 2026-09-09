@@ -13,6 +13,7 @@ INTERPRETER = ROOT / "src" / "lainvm" / "interpreter.lain"
 CONTRACT = ROOT / "src" / "lainvm" / "api_contract.lain"
 PROVIDER = ROOT / "src" / "lainir" / "api" / "default_provider.lain"
 OLD_INTERPRETER = ROOT / "src" / "lainir" / "api" / "l1_interpreter.lain"
+LAINC = ROOT / "src" / "lainc"
 
 
 def require(condition: bool, message: str) -> None:
@@ -69,6 +70,24 @@ def main() -> int:
         "let eval = std::func(",
     ):
         require(member in contract, f"VM API contract is missing {member}")
+
+    factory_calls = {
+        "compiler.lain": "compiler_core.Compiler(Memory, Ir, Vm)",
+        "compiler_api.lain": "compiler_core.Compiler(Memory, Ir, Vm)",
+        "compiler_driver.lain": "compiler_core.Compiler(Memory, Ir, Vm)",
+        "compiler_core.lain": "meta.Meta(Memory, Ir, Vm)",
+    }
+    for name in (*factory_calls, "meta.lain"):
+        source = (LAINC / name).read_text(encoding="utf-8")
+        require("packages::lain::lainvm::api_contract" in source,
+                f"lainc factory {name} does not import the VM contract")
+        require("Vm: lainvm_api.ExecutionShape" in source,
+                f"lainc factory {name} does not accept the VM capability")
+        require("packages::lain::lainvm::interpreter" not in source,
+                f"lainc factory {name} imports the VM implementation")
+        if name in factory_calls:
+            require(factory_calls[name] in source,
+                    f"lainc factory {name} does not forward the VM capability")
     print("PASS LAINIR/LAINVM source and Value-or-Trap API boundary")
     return 0
 
