@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SEED = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
-CONTEXT = ROOT / "src" / "lainir" / "lain" / "compiler_context.l1"
+CONTEXT = ROOT / "bootstrap" / "compiler" / "compiler_context.l1"
 
 TEST = r'''
 #proc main() -> #bits<32> {

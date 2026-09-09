@@ -65,8 +65,10 @@ def main() -> int:
     contract = CONTRACT.read_text(encoding="utf-8")
     for member in (
         "let ExecutionShape: ModuleShape",
+        "let Allocation: effects.Effect",
         "let Eval: effects.Effect",
         "let new_arguments = std::func() -> ValueVector",
+        "let append_argument = std::func(",
         "let eval = std::func(",
     ):
         require(member in contract, f"VM API contract is missing {member}")
@@ -88,6 +90,13 @@ def main() -> int:
         if name in factory_calls:
             require(factory_calls[name] in source,
                     f"lainc factory {name} does not forward the VM capability")
+    meta = (LAINC / "meta.lain").read_text(encoding="utf-8")
+    require("perform Vm.eval(" in meta,
+            "Meta does not request compile-time execution through LAINVM")
+    require("Ir.Eval" not in meta,
+            "Meta still uses the removed LAINIR evaluator")
+    require("Eval.Result" not in meta and "EvalResult" not in meta,
+            "Meta still uses an evaluation result wrapper")
     print("PASS LAINIR/LAINVM source and Value-or-Trap API boundary")
     return 0
 
