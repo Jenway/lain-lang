@@ -3,14 +3,17 @@
 Baseline: 2026-09-10.
 
 This document records the evidence currently available for the native C
-backend. It does not mark the migration complete while the active bootstrap
-compiler cannot be rebuilt.
+backend. It does not mark the migration complete while Meta execution is
+disconnected from LAINVM.
 
 ## Verified now
 
 - `scripts/check_backend_manifest.py` passes.
 - `scripts/check_backend_abi_contract.py` passes.
 - The seed project builds.
+- The active bootstrap compiler rebuilds under `build/bootstrap/` and compiles
+  the ordinary physical subset. Constant, arithmetic, call, local-binding and
+  record-field fixtures execute with their expected results.
 - The LAINIR/LAINVM boundary, temporary-TCB `#eval` contract and physical
   memory-safety checks pass.
 - Native test scripts are valid Python and keep their outputs under `build/`
@@ -28,15 +31,14 @@ compiler cannot be rebuilt.
 
 ## Current blocker
 
-`scripts/build_lain_compiler.py` cannot verify the newly generated bootstrap
-bundle. The first reported missing procedure is
-`program_unit_meta_step_inc`; a complete inventory shows that the deleted old
-lowering module also supplied the rest of the program-unit state and lowering
-implementation. Restoring that file unchanged would restore the prohibited
-`EvalResult` evaluator.
+The program-unit state and physical lowering implementation have been restored
+without the removed evaluator protocol. Meta calls and `consteval` are
+deliberately rejected with diagnostic 3101 until a LAINVM handler executes
+them. Consequently the bootstrap compiler cannot yet compile the formal
+compiler source closure needed by the native matrix.
 
 The next required work is C4 in
 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md): finish the LAINVM
-handler boundary and rebuild the bootstrap lowering around physical
+handler boundary and replace those explicit rejections with physical
 `Value`-or-`Trap` execution. After that, the native matrix and fixed-point
 checks must run before this migration can be marked complete.

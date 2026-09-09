@@ -25,11 +25,12 @@ python scripts/check_native_formal_stdlib.py build/lainc.exe
 python scripts/check_native_lainc_determinism.py build/lainc.exe
 ```
 
-These checks are not currently green. The active hand-written bootstrap source
-cannot rebuild `build/bootstrap/lainc.l1` because removal of the old
-`EvalResult` evaluator also removed the only complete bootstrap lowering
-module. C4 must reconnect Meta execution through LAINVM before the native
-compiler and the matrix can be rebuilt and executed.
+The hand-written bootstrap source can rebuild `build/bootstrap/lainc.l1` and
+compile the ordinary physical subset, including calls, local arithmetic and
+record fields. Meta calls and `consteval` currently return diagnostic 3101
+until C4 connects their execution to LAINVM. The native compiler matrix still
+depends on that connection because the formal compiler and standard library
+use Meta factories.
 
 Generated compiler bundles, C files, manifests and executables belong under
 `build/`. No generated backend artifact is stored in `src/` or `bootstrap/`.
