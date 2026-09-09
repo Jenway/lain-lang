@@ -10,6 +10,7 @@ from lainc_sources import lainir_api_sources, lainvm_sources
 
 ROOT = Path(__file__).resolve().parents[1]
 INTERPRETER = ROOT / "src" / "lainvm" / "interpreter.lain"
+CONTRACT = ROOT / "src" / "lainvm" / "api_contract.lain"
 PROVIDER = ROOT / "src" / "lainir" / "api" / "default_provider.lain"
 OLD_INTERPRETER = ROOT / "src" / "lainir" / "api" / "l1_interpreter.lain"
 
@@ -23,6 +24,7 @@ def main() -> int:
     api_sources = {path.resolve() for path in lainir_api_sources(ROOT)}
     vm_sources = {path.resolve() for path in lainvm_sources(ROOT)}
     require(INTERPRETER.resolve() in vm_sources, "VM manifest omits interpreter")
+    require(CONTRACT.resolve() in vm_sources, "VM manifest omits API contract")
     require(INTERPRETER.resolve() not in api_sources, "LAINIR manifest owns interpreter")
     require(not OLD_INTERPRETER.exists(), "old LAINIR interpreter still exists")
 
@@ -59,6 +61,14 @@ def main() -> int:
             "VM Eval handler is missing")
     require("resume execute_child(" in interpreter,
             "VM Eval handler does not execute a child TCB")
+    contract = CONTRACT.read_text(encoding="utf-8")
+    for member in (
+        "let ExecutionShape: ModuleShape",
+        "let Eval: effects.Effect",
+        "let new_arguments = std::func() -> ValueVector",
+        "let eval = std::func(",
+    ):
+        require(member in contract, f"VM API contract is missing {member}")
     print("PASS LAINIR/LAINVM source and Value-or-Trap API boundary")
     return 0
 
