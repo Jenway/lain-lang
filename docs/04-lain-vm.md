@@ -194,6 +194,11 @@ Lain 实现将 `interpreter.lain` 置于 `src/lainvm/`。它提供根过程执�
 组织 return、break、yield 与 Trap，但该记录不属于 LAINVM API，也不会进入 `#eval` 的
 结果语义。
 
+编译器中的 Meta 不直接调用带 `state` 参数的入口。LAINVM 还定义 `Eval` effect operation；
+外层 VM 在执行 compiler 时安装它的 handler，handler 使用活动 TCB 调用
+`execute_child` 并 `resume` 普通 `Value`。Meta 只能够 `perform` 此 operation，因此无法
+构造、保存或传递 TCB 与 VSpace。
+
 ## 9. 确定性与时间
 
 编译期执行需要确定的 step、call-depth 和 allocation 预算。相同 artifact、输入和 capability 集合应得到相同的结果或相同的 Trap 分类。
