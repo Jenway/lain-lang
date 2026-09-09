@@ -101,14 +101,15 @@ effect handler（接收 `Eval` 请求并启动子 TCB 的代码）在子 TCB 中
    编译器的 LAINVM 边界安装 `eval_handler`，让请求使用活动 TCB 运行子过程。
 3. **C4.3：恢复 bootstrap 物理 lowering。** 已从误删文件中恢复程序状态、类型布局、
    检查与 LAINIR 输出，同时移除旧求值协议。普通物理 fixture 已重新通过。
-4. **C4.4：逐项恢复 Meta 语义。** 算术切片已完成：bootstrap 生成含 `#eval` 的临时
-   LAINIR，seed 验证后由临时 TCB 执行，最终 artifact 中不保留 `#eval`。下面的其余
-   项目每完成一项就加入真实编译 fixture 并提交。
+4. **C4.4：逐项恢复 Meta 语义。** 算术与纯标量过程调用已经完成：bootstrap 把过程和
+   调用点编译成含 `#eval` 的临时 LAINIR，seed 验证后由临时 TCB 执行，最终 artifact
+   中不保留 `#eval`。当前首个未覆盖调用是 `allocation.Alloc(Policy)`，它需要模块参数并
+   返回 Meta effect 地址。下面的其余项目每完成一项就加入真实编译 fixture 并提交。
 
 恢复顺序：
 
 1. 整数和基础物理运算（已完成 bootstrap `consteval` 切片）；
-2. 普通过程调用；
+2. 普通过程调用（已完成纯标量参数与返回值切片）；
 3. 类型值和模块值；
 4. AST 值与宏展开；
 5. nested `#eval`、预算和 Trap 诊断。
