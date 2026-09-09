@@ -1,6 +1,6 @@
 # LAIN-IR compiler roadmap
 
-> **Historical implementation record.** This file preserves completed frontend and compiler-boundary milestones. Current work is tracked in [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md) and [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md).
+> **Historical implementation record.** This file preserves completed frontend and compiler-boundary milestones. Current work is tracked in [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md).
 > The former `src/compiler-archive` tree was later merged into `src/lainc`.
 
 The implementation grows as executable vertical slices.  A phase is complete

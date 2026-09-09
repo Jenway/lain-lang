@@ -1,6 +1,6 @@
 # src/lainc meta system
 
-当前执行路线见 [`docs/roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md)。
+当前执行路线见 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md)。
 
 > **历史实现说明。** 本文记录 `src/lainc` 过渡编译器的现状，其中把 Meta
 > 描述为 callable registry/evaluator 的段落不再代表目标架构。当前定义是：Meta
