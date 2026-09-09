@@ -11,7 +11,10 @@ from lainc_sources import compiler_source_names, lainir_api_sources
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "src" / "lainir" / "api_contract.lain"
-ROADMAP = ROOT / "docs" / "roadmaps" / "lainc-lainir-api-migration.md"
+# The migration roadmap was consolidated into the single active roadmap.  Keep
+# this source-boundary gate coupled to that document instead of resurrecting a
+# deleted roadmap filename.
+ROADMAP = ROOT / "docs" / "roadmaps" / "lain-roadmap.md"
 COMPILER_API = ROOT / "src" / "lainc" / "compiler_api.lain"
 LEGACY_MODULES = (
     "src/lainc/l1_ir.lain",
@@ -20,7 +23,7 @@ LEGACY_MODULES = (
     "src/lainc/l1_printer.lain",
     "src/lainc/l1_interpreter.lain",
 )
-REQUIRED_SHAPES = ("BuilderShape", "ArtifactShape", "EvalShape", "BackendShape")
+REQUIRED_SHAPES = ("BuilderShape", "ArtifactShape", "BackendShape")
 REQUIRED_COMPILER_DIAGNOSTIC_ACCESSORS = (
     "diagnostic_count",
     "diagnostic_code",
@@ -39,10 +42,7 @@ REQUIRED_RULES = (
     "diagnostic_code",
     "diagnostic_location",
     "write_canonical_text",
-    "evaluate",
     "Capabilities",
-    "empty_capabilities",
-    "external_call_capabilities",
     "signed_divide",
     "unsigned_divide",
     "zero_extend",
@@ -67,12 +67,6 @@ REQUIRED_PROVIDER_ARTIFACT = (
     "verify", "diagnostic_code", "diagnostic_location",
     "write_canonical_text", "hash", "equal",
 )
-REQUIRED_PROVIDER_EVAL = (
-    "default_limits", "make_i32", "make_bits", "value_type", "value_i32",
-    "value_bits",
-    "make_result", "result_status", "result_value", "evaluate",
-    "empty_capabilities", "external_call_capabilities",
-)
 REQUIRED_BACKEND = (
     "source_count", "source_data", "source_length", "allocate", "copy_bytes",
     "artifact_begin", "artifact_write_byte", "artifact_finish",
@@ -83,10 +77,6 @@ BUILDER_SURFACE = frozenset(
 )
 ARTIFACT_SURFACE = frozenset(
     REQUIRED_PROVIDER_ARTIFACT + ("Artifact", "Procedure", "Diagnostic")
-)
-EVAL_SURFACE = frozenset(
-    REQUIRED_PROVIDER_EVAL
-    + ("Artifact", "Procedure", "Value", "ValueVector", "Result", "Limits", "Capabilities")
 )
 
 
@@ -124,7 +114,6 @@ def main() -> int:
     for name in (
         REQUIRED_PROVIDER_BUILDER
         + REQUIRED_PROVIDER_ARTIFACT
-        + REQUIRED_PROVIDER_EVAL
     ):
         if not re.search(rf"\blet\s+{re.escape(name)}\b", provider_text):
             failures.append(f"default provider is missing {name}")
@@ -156,6 +145,10 @@ def main() -> int:
                 failures.append(f"legacy compiler-owned LAINIR module remains: {name}")
         for path in (ROOT / "src" / "lainc").glob("*.lain"):
             text = path.read_text(encoding="utf-8")
+            if re.search(r"\barchive_[A-Za-z0-9_]*", text):
+                failures.append(
+                    f"archive-named Meta transition symbol remains: {path.relative_to(ROOT)}"
+                )
             if re.search(r'compiler::l1_(?:ir|unit_builder|verifier|printer|interpreter)', text):
                 failures.append(f"concrete LAINIR import remains: {path.relative_to(ROOT)}")
             if re.search(r"\bIr\.(?:L1|Access|Interpreter)\b", text):
@@ -169,7 +162,6 @@ def main() -> int:
             for pattern, surface, label in (
                 (r"\b(?:Ir\.)?Builder\.([A-Za-z_][A-Za-z0-9_]*)", BUILDER_SURFACE, "Builder"),
                 (r"\bArtifactApi\.([A-Za-z_][A-Za-z0-9_]*)", ARTIFACT_SURFACE, "Artifact"),
-                (r"\bEval\.([A-Za-z_][A-Za-z0-9_]*)", EVAL_SURFACE, "Eval"),
             ):
                 for member in re.findall(pattern, text):
                     if member not in surface:
@@ -191,15 +183,13 @@ def main() -> int:
             encoding="utf-8"
         )
         for pattern in (
-            r"(?:return|push\s*\()\s*Eval\.Value\s*\{",
-            r"(?:return|=)\s*Eval\.Result\s*\{",
-            r"\bresult\s*\.\s*(?:status|value)\b",
-            r"\bvalue\s*\.\s*(?:type_id|i32_value|bits_value)\b",
-            r"\bEval\.external_call_capabilities\s*\(",
+            r"\bIr\.Eval\b",
+            r"\bEvalResult\b",
+            r"\bEval\.(?:Result|make_result|result_status|result_value)\b",
         ):
             if re.search(pattern, meta_text):
                 failures.append(
-                    "Meta reads Eval layout or grants itself external capability"
+                    "Meta still depends on the removed LAINIR Eval result interface"
                 )
                 break
 
