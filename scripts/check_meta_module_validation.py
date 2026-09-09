@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SEED = ROOT / "seed" / "zig-out" / "bin" / "lainir-seed.exe"
 FIRST_GENERATION = ROOT / "build" / "bootstrap" / "lainc.l1"
 FORMAL_ABI = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"
-COMPILER_API = ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"
+COMPILER_API = ROOT / "bootstrap" / "compiler" / "compiler_api.l1"
 FIXTURES = (
     (ROOT / "scripts" / "fixtures" / "formal_duplicate_module.lain", "3013"),
     (ROOT / "scripts" / "fixtures" / "formal_duplicate_struct.lain", "3008"),

@@ -12,8 +12,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE = ROOT / "build" / "lainir" / "lain_compiler_core.l1"
-STDLIB = ROOT / "build" / "lainir" / "bootstrap_std.l1"
+CORE = ROOT / "build" / "bootstrap" / "compiler_core.l1"
+STDLIB = ROOT / "build" / "bootstrap" / "stdlib.l1"
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 SEED = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
@@ -159,8 +159,8 @@ def main() -> int:
         # versioned pass-result record and turns this into 5202.
         nil_expand = (
             "#proc lain_std_expand(\n"
-            "  addr %context, addr %source_unit, addr %root\n"
-            ") -> addr {\n"
+            "  #addr %context, #addr %source_unit, #addr %root\n"
+            ") -> #addr {\n"
             "  #return #call lain_ast_v1_nil()\n"
             "}\n\n"
         )

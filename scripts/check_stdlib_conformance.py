@@ -13,13 +13,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
-CORE = ROOT / "build" / "lainir" / "lain_compiler_core.l1"
-BOOTSTRAP_STDLIB = ROOT / "build" / "lainir" / "bootstrap_std.l1"
+CORE = ROOT / "build" / "bootstrap" / "compiler_core.l1"
+BOOTSTRAP_STDLIB = ROOT / "build" / "bootstrap" / "stdlib.l1"
 FORMAL_STDLIB = ROOT / "build" / "lainir" / "formal_stdlib.l1"
 SEED = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
 )
-API = ROOT / "src" / "lainir" / "lain" / "compiler_api.l1"
+API = ROOT / "bootstrap" / "compiler" / "compiler_api.l1"
 FIXTURES = (
     (ROOT / "scripts" / "fixtures" / "formal_constant_return.lain", "42"),
     (ROOT / "scripts" / "fixtures" / "formal_arithmetic_return.lain", "42"),
