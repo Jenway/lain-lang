@@ -22,6 +22,9 @@ CASES = (
     (
         ROOT / "scripts" / "fixtures" / "formal_meta_effect_factory.lain",
     ),
+    (
+        ROOT / "scripts" / "fixtures" / "formal_meta_module_factory.lain",
+    ),
 )
 SEED = ROOT / "seed" / "zig-out" / "bin" / (
     "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
@@ -65,8 +68,8 @@ def main() -> int:
                 return executed.returncode or 1
 
     print(
-        "PASS bootstrap consteval arithmetic, scalar calls, effect factories, "
-        "and effect operations through LAINVM"
+        "PASS bootstrap consteval arithmetic, scalar calls, module factories, "
+        "effect factories, and effect operations through LAINVM"
     )
     return 0
 
