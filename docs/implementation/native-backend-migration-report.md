@@ -36,9 +36,10 @@ without the removed evaluator protocol. Arithmetic `consteval`, pure scalar
 Meta procedures, Effect factories with module arguments, and
 `std::effect_operation(...)` now lower to temporary LAINIR containing `#eval`
 and execute through LAINVM. The bootstrap compiler now builds and verifies the
-complete formal standard-library source closure. The next gate is compiling the
-`src/lainc` source closure and using its first concrete failure to finish the
-language surface needed by the native matrix.
+complete formal standard-library source closure and the `src/lainc` source
+closure. Two independent `srclainc.l1` builds are canonically identical across
+357 procedures. The next gate is using that generated compiler to produce gen2
+and gen3 artifacts, then proving the fixed point required by the native matrix.
 
 The next required work is C4 in
 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md): finish the LAINVM

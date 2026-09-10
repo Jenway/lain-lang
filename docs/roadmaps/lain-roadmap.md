@@ -74,7 +74,7 @@ lainc 不依赖 LAINVM 的私有实现。
 | LAINVM 基础 | C seed 与 Lain 源码边界均已采用 TCB、VSpace、Trap 和预算模型；bootstrap 与正式实现都已公开 Artifact、Procedure、物理参数和 eval 接口 | 扩展通过该接口执行的 Meta callable 范围 |
 | `#eval` | C seed 已通过临时 TCB 执行并在 fold 前消除；Lain VM 已提供子 TCB 原语；lainc Meta 已改为发出 `Vm.eval` effect | 在正式编译器执行入口安装 handler，并运行真实编译 fixture |
 | Meta 编译期求值 | `Ir.Eval`、`Eval.Result` 和伪造的 status/value 返回已经从正式 Meta 源码删除；语法 callable 已改用 LAINVM 物理 `Value` | 接通 handler 后，从整数与基础物理运算开始恢复真实执行 |
-| 自举 | `build/bootstrap/lainc.l1` 已可重建；算术、纯标量调用、Effect factory 和 `std::effect_operation` 已经由 LAINVM 执行；正式 `std/**/*.lain` 闭包已编译并通过 ABI、Meta、策略与 lowering 检查 | 编译 `src/lainc` 正式编译器闭包，定位首个剩余语言能力缺口 |
+| 自举 | `build/bootstrap/lainc.l1`、正式 `std/**/*.lain` 和 `src/lainc` 闭包均已生成并验证；两次独立构建的 `srclainc.l1` 在 357 个 procedure 上规范化一致 | 让 `srclainc.l1` 自身编译下一代产物，完成 gen1 -> gen2 -> gen3 固定点 |
 | 项目结构 | `seed`、`bootstrap` 与 `src` 已分离；`src/lainvm/` 已拥有执行实现 | 保持职责边界并在 C5 恢复新自举 |
 | C backend 与发布 | 非当前主线 | 纠偏完成后继续收口和 CI 验证 |
 
@@ -108,7 +108,10 @@ effect handler（接收 `Eval` 请求并启动子 TCB 的代码）在子 TCB 中
    实参绑定。`std::effect_operation(...)` 也已通过同一路径建立保留 effect、名称和函数
    签名语法的 callable 描述。完整正式标准库闭包现已生成并通过
    `scripts/build_formal_stdlib.py`、标准库一致性、Meta AST、模块诊断和策略检查。下一步
-   以 `scripts/build_srclainc.py` 编译正式编译器源码闭包，按它报告的首个真实缺口继续。
+   `scripts/build_srclainc.py` 也已生成并验证正式编译器源码闭包；
+   `scripts/check_srclainc_artifact.py` 证明两次独立生成的 357 个 procedure 规范化一致。
+   C4 的 bootstrap 恢复部分至此已能支撑 C5，下一步由生成的 `srclainc.l1` 自身编译
+   gen2 和 gen3。
 
 恢复顺序：
 
@@ -136,8 +139,9 @@ lainc: route compile-time evaluation through LAINVM
 
 工作：
 
-- 生成 `build/bootstrap/lainc.l1` 和 snapshot；
+- 生成 `build/bootstrap/lainc.l1` 和 snapshot（bootstrap bundle 已完成）；
 - 验证新产物不含 `EvalResult` 及衍生接口；
+- 生成并验证 `build/lainir/srclainc.l1`（已完成，357 个 procedure，独立重建一致）；
 - 完成 gen1 -> gen2 -> gen3 固定点比较；
 - 运行 native compiler matrix、LAINIR API baseline 和 release gate；
 - 把纠偏阶段的完成证据归档，主 roadmap 只留下后续工作。
