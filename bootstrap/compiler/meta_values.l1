@@ -494,10 +494,53 @@
   }
 }
 
+// Resolve a token-separated namespace path such as `std::type`.  The
+// namespace separator remains ordinary RawAst punctuation: each segment is
+// looked up in the current environment, then the value's captured namespace
+// becomes the environment for the following segment.
+#proc meta_env_lookup_colon_path(
+  #addr %environment, #addr %source, #addr %node
+) -> #addr {
+  #let %current_environment: #addr = %environment
+  #let %current: #addr = %node
+  #let %segments: #bits<64> = 0
+  #loop segments {
+    #if #sge(%segments, 256) { #return #call meta_value_nil() }
+    %segments: #bits<64> = #add(%segments, 1)
+    #let %value: #addr = #call meta_env_lookup(
+      %current_environment, %source, %current
+    )
+    #if #eq(#call meta_value_kind(%value), 0) { #return %value }
+    #let %colon1: #addr = #call raw_node_next(%current)
+    #if #eq(#call meta_atom_equal(%source, %colon1, ":", 1), 0) {
+      #return %value
+    }
+    #let %colon2: #addr = #call raw_node_next(%colon1)
+    #if #eq(#call meta_atom_equal(%source, %colon2, ":", 1), 0) {
+      #return #call meta_value_nil()
+    }
+    #let %member: #addr = #call raw_node_next(%colon2)
+    #if #call raw_is_nil(%member) { #return #call meta_value_nil() }
+    #if #ne(#call meta_value_kind(%value), 2) {
+      #if #ne(#call meta_value_kind(%value), 4) {
+        #return #call meta_value_nil()
+      }
+    }
+    %current_environment: #addr = #call meta_value_environment(%value)
+    %current: #addr = %member
+    #continue segments
+  }
+}
+
 #proc meta_env_lookup_path(
   #addr %environment, #addr %source, #addr %node
 ) -> #addr {
   #let %next: #addr = #call raw_node_next(%node)
+  #if #call meta_atom_equal(%source, %next, ":", 1) {
+    #return #call meta_env_lookup_colon_path(
+      %environment, %source, %node
+    )
+  }
   #if #call meta_atom_equal(%source, %next, ".", 1) {
     #return #call meta_env_lookup_token_path(
       %environment, %source, %node
