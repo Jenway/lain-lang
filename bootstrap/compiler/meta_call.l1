@@ -1,8 +1,8 @@
 // Top-level Meta call collection boundary.
 //
-// The physical lowering module needs the syntax helper below.  Actual Meta
-// calls must be executed by LAINVM; until that handler is connected, reject
-// them explicitly.
+// The physical lowering module needs the syntax helper below. Supported Meta
+// calls are translated to temporary LAINIR and executed by LAINVM; unsupported
+// call shapes fail explicitly.
 
 #proc program_meta_call_value_node(
   #addr %source, #addr %let_node
@@ -57,6 +57,25 @@
   #if #call program_function_is_nil(%function) { #return 3101 }
   #let %function_source: #addr = #call program_function_source(%function)
   #let %group: #addr = #call program_operand_group(%source, %value)
+  #let %module_group: #addr = #call lainvm_meta_module_factory_group(
+    %function_source, %function
+  )
+  #if #eq(#call raw_is_nil(%module_group), 0) {
+    #let %invocation_environment: #addr =
+      #call lainvm_meta_address_invocation_environment(
+        %source, %function_source, %function, %group, %environment
+      )
+    #let %module: #addr = #call lainvm_eval_meta_module_call(
+      %function_source, %name, %module_group, %invocation_environment
+    )
+    #call meta_env_bind(%environment, %source, %name, %module)
+    #let %module_status: #bits<32> = #call program_collect_module(
+      %unit, %function_source,
+      #call program_function_source_index(%function),
+      %module_group, %invocation_environment
+    )
+    #return %module_status
+  }
   #let %effect_node: #addr = #call lainvm_meta_effect_factory_node(
     %function_source, %function
   )

@@ -323,6 +323,68 @@
   #return %value
 }
 
+#proc lainvm_meta_module_factory_group(
+  #addr %source, #addr %function
+) -> #addr {
+  #if #call program_function_is_nil(%function) { #return #call program_nil() }
+  #let %body: #addr = #call program_function_body(%function)
+  #if #call raw_is_nil(%body) { #return #call program_nil() }
+  #let %statement: #addr = #call raw_node_first(%body)
+  #loop statements {
+    #if #call raw_is_nil(%statement) { #return #call program_nil() }
+    #if #call meta_atom_equal(%source, %statement, "return", 6) {
+      #let %value: #addr = #call raw_node_next(%statement)
+      #if #call program_is_std_module_value(%source, %value) {
+        #return #call program_std_module_value_group(%source, %value)
+      }
+    }
+    %statement: #addr = #call raw_node_next(%statement)
+    #continue statements
+  }
+}
+
+#proc lainvm_meta_build_module_artifact() -> #addr {
+  #let %buffer: #addr = #call lainvm_eval_buffer_new()
+  #call lainvm_eval_buffer_append_literal(
+    %buffer,
+    "#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;\n#proc meta_target(#addr %meta_source, #bits<64> %meta_start, #bits<64> %meta_length, #addr %meta_group, #addr %meta_environment) -> #addr {\n  #let %nil: #addr = #call bootstrap.allocate-pages(8)\n  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)\n  #let %result: #addr = #call bootstrap.allocate-pages(64)\n  #store 2, #lea(base=%result, idx=0, scale=0, offset=0)\n  #store %meta_source, #lea(base=%result, idx=0, scale=0, offset=8)\n  #store %meta_start, #lea(base=%result, idx=0, scale=0, offset=16)\n  #store %meta_length, #lea(base=%result, idx=0, scale=0, offset=24)\n  #store %meta_group, #lea(base=%result, idx=0, scale=0, offset=32)\n  #store %meta_environment, #lea(base=%result, idx=0, scale=0, offset=40)\n  #store 0, #lea(base=%result, idx=0, scale=0, offset=48)\n  #store %nil, #lea(base=%result, idx=0, scale=0, offset=56)\n  #return %result\n}\n#proc meta_entry(#addr %meta_source, #bits<64> %meta_start, #bits<64> %meta_length, #addr %meta_group, #addr %meta_environment) -> #addr {\n  #return #eval { #return #call meta_target(%meta_source, %meta_start, %meta_length, %meta_group, %meta_environment) }\n}\n"
+  )
+  #return %buffer
+}
+
+#proc lainvm_eval_meta_module_call(
+  #addr %function_source,
+  #addr %name, #addr %module_group, #addr %invocation_environment
+) -> #addr {
+  #let %buffer: #addr = #call lainvm_meta_build_module_artifact()
+  #let %artifact: #addr = #call bootstrap.vm-artifact-parse(
+    #call lainvm_eval_buffer_data(%buffer),
+    #call lainvm_eval_buffer_length(%buffer)
+  )
+  #let %procedure: #addr = #call bootstrap.vm-procedure-find(
+    %artifact, #data_addr(lainvm_meta_entry_name), 10
+  )
+  #let %arguments: #addr = #call bootstrap.vm-arguments-new()
+  #call bootstrap.vm-arguments-append-addr(%arguments, %function_source)
+  #call bootstrap.vm-arguments-append-bits(
+    %arguments, #call raw_node_start(%name), 64
+  )
+  #call bootstrap.vm-arguments-append-bits(
+    %arguments, #call raw_node_length(%name), 64
+  )
+  #call bootstrap.vm-arguments-append-addr(%arguments, %module_group)
+  #call bootstrap.vm-arguments-append-addr(
+    %arguments, %invocation_environment
+  )
+  #let %value: #addr = #call bootstrap.vm-eval-addr(
+    %artifact, %procedure, %arguments
+  )
+  #call bootstrap.vm-arguments-release(%arguments)
+  #call bootstrap.vm-artifact-release(%artifact)
+  #call bootstrap.release-pages(%buffer)
+  #return %value
+}
+
 #proc lainvm_meta_write_address_parameters(
   #addr %buffer, #addr %source, #addr %function
 ) -> #unit {
