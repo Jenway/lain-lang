@@ -216,7 +216,6 @@
   #if #call raw_is_nil(%node) { #return 0 }
   #if #ne(#call raw_node_kind(%node), 1) { #return 0 }
   #if #call meta_atom_equal(%source, %node, "Module", 6) { #return 1 }
-  #if #call meta_atom_equal(%source, %node, "type", 4) { #return 1 }
   #if #call meta_atom_equal(%source, %node, "unit", 4) { #return 1 }
   #let %data: #addr = #call tool_source_data(%source)
   #let %start: #bits<64> = #call raw_node_start(%node)
@@ -279,6 +278,16 @@
         %current: #addr = %member
         #continue qualified_pointee
       }
+      #if #eq(#call meta_atom_equal(%source, %dot, ":", 1), 1) {
+        #let %second_colon: #addr = #call raw_node_next(%dot)
+        #if #eq(#call meta_atom_equal(%source, %second_colon, ":", 1), 0) {
+          #break qualified_pointee
+        }
+        #let %member: #addr = #call raw_node_next(%second_colon)
+        #if #call raw_is_nil(%member) { #break qualified_pointee }
+        %current: #addr = %member
+        #continue qualified_pointee
+      }
       #break qualified_pointee
     }
     #let %arguments: #addr = #call raw_node_next(%current)
@@ -300,6 +309,16 @@
       %current: #addr = %member
       #continue qualified
     }
+    #if #eq(#call meta_atom_equal(%source, %dot, ":", 1), 1) {
+      #let %second_colon: #addr = #call raw_node_next(%dot)
+      #if #eq(#call meta_atom_equal(%source, %second_colon, ":", 1), 0) {
+        #break qualified
+      }
+      #let %member: #addr = #call raw_node_next(%second_colon)
+      #if #call raw_is_nil(%member) { #break qualified }
+      %current: #addr = %member
+      #continue qualified
+    }
     #break qualified
   }
   #let %arguments: #addr = #call raw_node_next(%current)
@@ -310,6 +329,29 @@
     }
   }
   #return %current
+}
+
+// `std::type` names the Meta type whose values are source-level types.  This
+// startup compiler only needs its terminal token while checking record forms;
+// binding and lookup are performed by meta_type.l1 through the ordinary Meta
+// environment.
+#proc meta_std_type_end(#addr %source, #addr %node) -> #addr {
+  #if #eq(#call meta_atom_equal(%source, %node, "std", 3), 0) {
+    #return 0
+  }
+  #let %first_colon: #addr = #call raw_node_next(%node)
+  #if #eq(#call meta_atom_equal(%source, %first_colon, ":", 1), 0) {
+    #return 0
+  }
+  #let %second_colon: #addr = #call raw_node_next(%first_colon)
+  #if #eq(#call meta_atom_equal(%source, %second_colon, ":", 1), 0) {
+    #return 0
+  }
+  #let %member: #addr = #call raw_node_next(%second_colon)
+  #if #eq(#call meta_atom_equal(%source, %member, "type", 4), 0) {
+    #return 0
+  }
+  #return %member
 }
 
 #proc meta_align_up(#bits<64> %value, #bits<64> %alignment) -> #bits<64> {
@@ -361,7 +403,7 @@
   #return 0
 }
 
-// Interpret `let NAME: type = std::struct { ... }` into a real meta-owned
+// Interpret `let NAME: std::type = std::struct { ... }` into a real meta-owned
 // record descriptor.  Unknown field types are reported as meta diagnostics
 // rather than silently becoming raw syntax.
 #proc meta_record_build(#addr %source, #addr %root) -> #addr {
@@ -386,11 +428,12 @@
     #store 3005, #lea(base=%type, idx=0, scale=0, offset=64)
     #return %type
   }
-  #if #eq(#call meta_atom_equal(%source, %annotation, "type", 4), 0) {
+  #let %type_end: #addr = #call meta_std_type_end(%source, %annotation)
+  #if #call raw_is_nil(%type_end) {
     #store 3005, #lea(base=%type, idx=0, scale=0, offset=64)
     #return %type
   }
-  #let %equals: #addr = #call raw_node_next(%annotation)
+  #let %equals: #addr = #call raw_node_next(%type_end)
   #if #call raw_is_nil(%equals) {
     #store 3006, #lea(base=%type, idx=0, scale=0, offset=64)
     #return %type
@@ -489,9 +532,11 @@
   #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
     #return 3004
   }
-  #if #eq(#call meta_atom_equal(%source, %annotation, "type", 4), 0) {
+  #let %type_end: #addr = #call meta_std_type_end(%source, %annotation)
+  #if #call raw_is_nil(%type_end) {
     #return 3005
   }
+  %equals: #addr = #call raw_node_next(%type_end)
   #if #eq(#call meta_atom_equal(%source, %equals, "=", 1), 0) {
     #return 3006
   }
