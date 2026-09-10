@@ -512,7 +512,9 @@
   #if #call meta_atom_equal(%source, %return_type, "ModuleShape", 11) {
     #return 1
   }
-  #if #call meta_atom_equal(%source, %return_type, "type", 4) {
+  #if #eq(
+    #call raw_is_nil(#call program_std_type_member(%source, %return_type)), 0
+  ) {
     #return 1
   }
   // A function returning Module/ModuleShape is still a physical function
@@ -2770,7 +2772,7 @@
 }
 
 #proc program_is_meta_binding(
-  #addr %source, #addr %let_node
+  #addr %unit, #addr %source, #addr %let_node
 ) -> #bits<1> {
   // A local `std::func` is a compile-time closure binding.  Keep it out of
   // runtime initializer emission; its physical descriptor is materialized by
@@ -2778,7 +2780,7 @@
   #if #call program_is_function_declaration(%source, %let_node) {
     #return 1
   }
-  #if #call program_is_type_binding(%source, %let_node) { #return 1 }
+  #if #call program_is_type_binding(%unit, %source, %let_node) { #return 1 }
   #let %name: #addr = #call raw_node_next(%let_node)
   #let %colon: #addr = #call raw_node_next(%name)
   #let %annotation: #addr = #call raw_node_next(%colon)
@@ -2792,9 +2794,9 @@
 }
 
 #proc program_is_ignored_declaration(
-  #addr %source, #addr %let_node
+  #addr %unit, #addr %source, #addr %let_node
 ) -> #bits<1> {
-  #if #call program_is_meta_binding(%source, %let_node) { #return 1 }
+  #if #call program_is_meta_binding(%unit, %source, %let_node) { #return 1 }
   #let %node: #addr = #call raw_node_next(%let_node)
   #loop declaration {
     #if #call raw_is_nil(%node) { #return 0 }
@@ -3534,7 +3536,7 @@
   #if #call program_is_function_declaration(%source, %let_node) {
     #return 3101
   }
-  #if #call program_is_meta_binding(%source, %let_node) {
+  #if #call program_is_meta_binding(%unit, %source, %let_node) {
     #return 3101
   }
   #let %name: #addr = #call raw_node_next(%let_node)
@@ -5721,7 +5723,7 @@
   #loop nodes {
     #if #call raw_is_nil(%node) { #return 0 }
     #if #call meta_atom_equal(%source, %node, "let", 3) {
-      #if #call program_is_type_binding(%source, %node) {
+      #if #call program_is_type_binding(%unit, %source, %node) {
         #let %status: #bits<32> = #call program_force_register_local_type(
           %unit, %source, %source_index, %node
         )
@@ -7359,7 +7361,9 @@
   #loop statements {
     #if #call raw_is_nil(%statement) { #return }
     #if #call meta_atom_equal(%source, %statement, "let", 3) {
-      #if #call program_is_meta_binding(%source, %statement) {
+      #if #call program_is_meta_binding(
+        #call program_function_unit(%function), %source, %statement
+      ) {
       } else {
         #call program_write_local(%source, %function, %statement)
       }
@@ -7549,7 +7553,7 @@
 
 // A field type can be a Meta alias such as `types.ModuleId`.  The physical
 // record descriptor stores the source spelling, while the Meta value stores
-// the alias binding (`let ModuleId: type = usize`).  Resolve that binding
+// the alias binding (`let ModuleId: std::type = usize`).  Resolve that binding
 // before the nominal/address fallback runs; otherwise every qualified alias
 // is emitted as `#addr`, even when its target is a scalar builtin.
 #proc program_write_meta_value_type(

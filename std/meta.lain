@@ -1361,13 +1361,14 @@ let meta_find_struct_binding = std::func(
         let name: addr = meta_ast_next(node);
         let colon: addr = meta_ast_next(name);
         let type_name: addr = meta_ast_next(colon);
-        let equals: addr = meta_ast_next(type_name);
+        let type_end: addr = meta_std_type_end(source, type_name);
+        let equals: addr = meta_ast_next(type_end);
         let std_name: addr = meta_ast_next(equals);
         let first_colon: addr = meta_ast_next(std_name);
         let second_colon: addr = meta_ast_next(first_colon);
         let constructor: addr = meta_ast_next(second_colon);
         let body: addr = meta_ast_next(constructor);
-        if meta_is_type(source, type_name)
+        if meta_ast_is_nil(type_end) == false
             && meta_is_equals(source, equals)
             && meta_ast_kind(std_name) == 1
             && meta_ast_length(std_name) == 3
@@ -2482,6 +2483,28 @@ let meta_is_type = std::func(source: addr, node: addr) -> bool {
     return meta_word_code(source, node) == 4;
 };
 
+let meta_std_type_end = std::func(source: addr, node: addr) -> addr {
+    if meta_ast_kind(node) != 1 || meta_ast_length(node) != 3 {
+        return meta_ast_nil();
+    }
+    let start: usize = meta_ast_start(node);
+    let data: addr = meta_source_data(source);
+    if meta_source_byte_at(data, start) != 115
+        || meta_source_byte_at(data, start + 1) != 116
+        || meta_source_byte_at(data, start + 2) != 100 {
+        return meta_ast_nil();
+    }
+    let first_colon: addr = meta_ast_next(node);
+    let second_colon: addr = meta_ast_next(first_colon);
+    let member: addr = meta_ast_next(second_colon);
+    if meta_is_colon(source, first_colon) == false
+        || meta_is_colon(source, second_colon) == false
+        || meta_is_type(source, member) == false {
+        return meta_ast_nil();
+    }
+    return member;
+};
+
 @abi_export
 let meta_is_i64 = std::func(source: addr, node: addr) -> bool {
     return meta_word_code(source, node) == 5;
@@ -3410,7 +3433,8 @@ let meta_struct_status = std::func(
             let name: addr = meta_ast_next(node);
             let colon: addr = meta_ast_next(name);
             let annotation: addr = meta_ast_next(colon);
-            let equals: addr = meta_ast_next(annotation);
+            let type_end: addr = meta_std_type_end(source, annotation);
+            let equals: addr = meta_ast_next(type_end);
             let keyword: addr = meta_struct_keyword_after(source, node);
             if meta_ast_is_nil(keyword) == false {
                 let body: addr = meta_ast_next(keyword);
@@ -3420,7 +3444,7 @@ let meta_struct_status = std::func(
                 if meta_is_colon(source, colon) == false {
                     return 3004;
                 }
-                if meta_is_type(source, annotation) == false {
+                if meta_ast_is_nil(type_end) {
                     return 3004;
                 }
                 if meta_is_equals(source, equals) == false {
@@ -4037,7 +4061,7 @@ let meta: Module = std::module {
     // are the common currency between type factories, elaboration and
     // compile-time evaluation.
     @export
-    let ComptimeValue: type = std::struct {
+    let ComptimeValue: std::type = std::struct {
         type_id: usize,
         kind: i32,
         i32_payload: i32,
@@ -4129,7 +4153,7 @@ let meta: Module = std::module {
     // Nominal type and module values are also phase values.  Their physical
     // ABI shape is intentionally absent here; lowering chooses that later.
     @export
-    let TypeValue: type = std::struct {
+    let TypeValue: std::type = std::struct {
         id: usize,
         kind: i32,
         argument_start: usize,
@@ -4139,13 +4163,13 @@ let meta: Module = std::module {
     };
 
     @export
-    let ModuleValue: type = std::struct {
+    let ModuleValue: std::type = std::struct {
         id: usize,
         namespace: usize,
     };
 
     @export
-    let Builtins: type = std::struct {
+    let Builtins: std::type = std::struct {
         i32: usize,
         bool: usize,
         addr: usize,
@@ -4160,7 +4184,7 @@ let meta: Module = std::module {
     // run, while the archive layer remains responsible for the actual
     // interpreter boundary.
     @export
-    let CallablePhase: type = i32;
+    let CallablePhase: std::type = i32;
 
     @export
     let callable_phase_meta = std::func() -> CallablePhase { return 1; };
@@ -4181,22 +4205,22 @@ let meta: Module = std::module {
     let Meta = std::func(
         Memory: memory_model.Shape,
     ) -> Module {
-        let TypeVector: type = vector.Vec(
+        let TypeVector: std::type = vector.Vec(
             TypeValue,
             Memory.Allocation,
             Memory.Bounds,
         );
-        let TypeArgumentVector: type = vector.Vec(
+        let TypeArgumentVector: std::type = vector.Vec(
             usize,
             Memory.Allocation,
             Memory.Bounds,
         );
-        let ModuleVector: type = vector.Vec(
+        let ModuleVector: std::type = vector.Vec(
             ModuleValue,
             Memory.Allocation,
             Memory.Bounds,
         );
-        let TypeRegistry: type = std::struct {
+        let TypeRegistry: std::type = std::struct {
             values: TypeVector,
             arguments: TypeArgumentVector,
             modules: ModuleVector,
@@ -4335,9 +4359,9 @@ let meta: Module = std::module {
             return state.modules.get(0);
         };
 
-        let CallableId: type = usize;
+        let CallableId: std::type = usize;
 
-        let Callable: type = std::struct {
+        let Callable: std::type = std::struct {
             id: CallableId,
             // Keep the registry record scalar-friendly.  A String value is
             // physically a pointer to its Vec header; storing that pointer
@@ -4350,13 +4374,13 @@ let meta: Module = std::module {
             program: usize,
         };
 
-        let CallableVector: type = vector.Vec(
+        let CallableVector: std::type = vector.Vec(
             Callable,
             Memory.Allocation,
             Memory.Bounds,
         );
 
-        let Registry: type = std::struct {
+        let Registry: std::type = std::struct {
             callables: CallableVector,
         };
 
@@ -4483,20 +4507,20 @@ let meta: Module = std::module {
         };
 
         return std::module {
-            @export let TypeRegistry: type = TypeRegistry;
-            @export let TypeArgumentVector: type = TypeArgumentVector;
+            @export let TypeRegistry: std::type = TypeRegistry;
+            @export let TypeArgumentVector: std::type = TypeArgumentVector;
             @export let new_type_registry = new_type_registry;
             @export let intern_type = intern_type;
             @export let get_type = get_type;
             @export let intern_module = intern_module;
             @export let get_module = get_module;
-            @export let CallablePhase: type = CallablePhase;
+            @export let CallablePhase: std::type = CallablePhase;
             @export let callable_phase_meta = callable_phase_meta;
             @export let callable_phase_comptime = callable_phase_comptime;
             @export let callable_phase_runtime = callable_phase_runtime;
-            @export let CallableId: type = CallableId;
-            @export let Callable: type = Callable;
-            @export let Registry: type = Registry;
+            @export let CallableId: std::type = CallableId;
+            @export let Callable: std::type = Callable;
+            @export let Registry: std::type = Registry;
             @export let new_registry = new_registry;
             @export let register_with_phase = register_with_phase;
             @export let register_in_program = register_in_program;
