@@ -63,3 +63,62 @@ let generated = comptime {
 ## 与 meta 系统的关系
 
 分工：标准库 Meta 定义 effect 语法、effect 对象、传播与 lowering 规则；compile-time Lain 消费这些规则并通过 `#eval` 执行副作用逻辑；编译器只提供 phase、artifact、diagnostic 和 capability substrate。`effect` 本身是标准库语言对象，不是编译器的语义硬编码。
+
+## 实现策略：TCB 与 CPS
+
+一个 effect 被 handle 时，handler 体里唯一与「恢复」有关的动作是 `resume`：
+
+```lain
+std::handler(E) ! { Remaining } {
+    op(args) {
+        resume EXPR
+    }
+}
+```
+
+**TCB 与 CPS 的全部差别只在 `resume` 的实现上**：被 handle 的 effect 是什么、handler 体
+怎么写，都不影响。两者是同一接口的两份实现：
+
+| 策略 | 剩余计算在哪 | 由谁提供 | 代价 |
+| --- | --- | --- | --- |
+| TCB | VM 状态（procedure、instruction position、activation、预算） | LAINVM 原语 | 上下文切换 |
+| CPS | 一个普通函数值 | 编译器变换 | 零开销，但需全程序变换 |
+
+因此两者是**同一个 effect 的两种 lowering**，而不是两个不同的 effect。
+
+### 策略由 handler 的 handler 决定
+
+`std::handler` 不需要额外的策略参数。`Handler(Handled, Remaining)` 的 `Remaining` 槽已经
+承担了这件事：它记录「本 handler 自己还需要什么」，也就是它的外层 handler 必须负责什么。
+`std/core/arena.lain` 是现成的例子——handler 的类型参数里写
+`{effects.Throws(arena.OutOfMemory)}`，函数体的 effect 行是同一集合。
+
+于是策略的可见性不是全局属性，而是**相对于外层 handler** 的：控制原语在 `Remaining` 里
+露着就可见，被外层消解掉就不可见。
+
+- **CPS**：外层变换掉控制原语，`resume` 落成一次普通调用；`Remaining` 里从此没有它。
+- **TCB**：控制原语保持为运行期机制，由 LAINVM 提供。
+
+策略选择发生在编译期，不是运行期 effect。
+
+### 与 LAINVM 的关系
+
+LAINVM 只实现 TCB 一条路径，且只提供原语（执行入口、VSpace、预算、Trap）。CPS 路径不
+涉及任何 VM 操作——变换之后没有 VM 参与，因此 LAINVM 对它是零参与。
+
+`#eval` 不属于这一层：它是 LAINIR 的概念，由 LAINIR 契约定义，LAINVM 只提供实现它所需
+的原语。见 [`../04-lain-vm.md`](../04-lain-vm.md) §8.4。
+
+### 当前实现状态
+
+策略轴目前是**退化的**。现有全部 handler 的 `resume` 都在尾位置，或根本不 `resume`
+（`std/bounds.lain` 全部是 throw/trap/落空）：
+
+- `std/core/arena.lain`：3 处 `resume`，全部尾位置；
+- `std/platform/memory.lain`：5 处 `resume`，全部尾位置；
+- `src/lainvm/interpreter.lain`：`resume execute_child(...)`，尾位置。
+
+尾位置 `resume` 正是 CPS 无需变换、TCB 退化为同步调用的情形。**没有任何 handler 多次
+`resume`、保存 continuation 或延迟 `resume`。** 这解释了为什么 Lain 实现里的
+`suspend_tcb`、`resume_tcb`、`run_slice` 与 Endpoint 都没有调用者：它们的消费者是
+非平凡 `resume` 的 handler，而这类 handler 尚未出现。
