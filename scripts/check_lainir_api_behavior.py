@@ -3,17 +3,17 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED_BIN = ROOT / "seed" / "zig-out" / "bin"
-PRINT = SEED_BIN / ("lainir-print.exe" if os.name == "nt" else "lainir-print")
-RUN = SEED_BIN / ("lainir-seed.exe" if os.name == "nt" else "lainir-seed")
+PRINT = seed_exe("lainir-print")
+RUN = seed_exe("lainir-seed")
 
 
 @dataclass

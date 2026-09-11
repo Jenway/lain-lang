@@ -3,20 +3,19 @@
 
 from __future__ import annotations
 
-import os
 import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 BOUNDARY_CHECK = ROOT / "scripts" / "check_lainir_boundaries.py"
-L1CHECK = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-print.exe" if os.name == "nt" else "lainir-print"
-)
+L1CHECK = seed_exe("lainir-print")
 OUTPUT = ROOT / "build" / "bootstrap" / "lainc.l1"
 CORE_OUTPUT = ROOT / "build" / "bootstrap" / "compiler_core.l1"
 BOOTSTRAP_STD_OUTPUT = ROOT / "build" / "bootstrap" / "stdlib.l1"

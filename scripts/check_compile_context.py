@@ -8,11 +8,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
+SEED = seed_exe("lainir-seed")
 CONTEXT = ROOT / "bootstrap" / "compiler" / "compiler_context.l1"
 
 TEST = r'''

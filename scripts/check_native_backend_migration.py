@@ -74,7 +74,7 @@ def main() -> int:
             raise RuntimeError("backend manifest has no logical backend extern")
 
         env = os.environ.copy()
-        env.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "build" / "zig-cache-local"))
+        env.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "build" / "zig-cache"))
         env.setdefault("ZIG_GLOBAL_CACHE_DIR", str(ROOT / "build" / "zig-cache-global"))
         executable = work / ("backend.exe" if os.name == "nt" else "backend")
         run(

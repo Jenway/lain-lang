@@ -9,24 +9,20 @@ declaration inventory is checked before compilation.
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 from backend_manifest import write_manifest
+from toolchain import seed_exe
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
+SEED = seed_exe("lainir-seed")
 BACKEND = ROOT / "src" / "lainc" / "backend_c.lain"
 ABI_CHECK = ROOT / "scripts" / "check_lain_backend_abi.py"
 COMPILE = ROOT / "scripts" / "run_lain_compiler.py"
-CHECK = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-print.exe" if os.name == "nt" else "lainir-print"
-)
+CHECK = seed_exe("lainir-print")
 
 
 def run(*args: Path | str) -> subprocess.CompletedProcess[str]:

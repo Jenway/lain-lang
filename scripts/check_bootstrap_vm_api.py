@@ -3,16 +3,15 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
+SEED = seed_exe("lainir-seed")
 PROBE = ROOT / "scripts" / "fixtures" / "bootstrap_vm_api_probe.l1"
 EMPTY = ROOT / "scripts" / "fixtures" / "empty_source.lain"
 

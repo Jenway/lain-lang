@@ -3,7 +3,7 @@
 
 The compiler implementation is ``seed/lainir/compiler.l1``. The seed executes
 that source once and this script installs the resulting native compiler at
-the repository root as ``zig-out/bin/lainir-compiler``.
+``build/selfhost/bin`` (see :mod:`toolchain`).
 """
 
 from __future__ import annotations
@@ -15,14 +15,21 @@ import sys
 import tempfile
 from pathlib import Path
 
+import toolchain
+from toolchain import seed_exe, selfhost_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED_BOOTSTRAP = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
+SEED_BOOTSTRAP = seed_exe("lainir-seed")
 COMPILER = ROOT / "seed" / "lainir" / "compiler.l1"
 COMPILER_PARTS = ROOT / "seed" / "lainir" / "compiler_parts"
 HOST = ROOT / "seed" / "src" / "host" / "native_compiler.c"
+# Sources linked into the standalone seed LAINIR compiler.  This list and
+# native_compiler.c serve the seed compiler; the final lainc uses a different
+# closure (see scripts/build_lainc_native.py) and both are intentional.
+# text/emitter.c is required here because interpreter/eval_source.c calls
+# lainir_emit_text_module; host/host_io.c is absent because native_compiler.c
+# does not reference it.
 SEED_C_SOURCES = [
     ROOT / "seed" / "src" / "core" / "lainir.c",
     ROOT / "seed" / "src" / "core" / "verifier.c",
@@ -32,9 +39,9 @@ SEED_C_SOURCES = [
     ROOT / "seed" / "src" / "interpreter" / "eval_source.c",
     ROOT / "seed" / "src" / "interpreter" / "vm_control.c",
 ]
-OUTPUT_DIR = ROOT / "zig-out" / "bin"
-BOOTSTRAP = OUTPUT_DIR / ("lainir-seed.exe" if os.name == "nt" else "lainir-seed")
-OUTPUT = OUTPUT_DIR / ("lainir-compiler.exe" if os.name == "nt" else "lainir-compiler")
+OUTPUT_DIR = toolchain.SELFHOST_BIN
+BOOTSTRAP = selfhost_exe("lainir-seed")
+OUTPUT = selfhost_exe("lainir-compiler")
 
 
 def run(arguments: list[Path | str], *, env: dict[str, str] | None = None) -> None:
@@ -88,9 +95,9 @@ def main() -> int:
 
     c_compiler = find_c_compiler()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    # Keep the repository-level bin directory as the only formal artifact
-    # location.  Zig's local build directory remains an implementation detail
-    # of `zig build` under seed/.
+    # Keep build/selfhost/bin as the only formal artifact location for the
+    # self-hosted compiler.  Zig's own build directories remain an
+    # implementation detail of `zig build` under seed/.
     shutil.copy2(SEED_BOOTSTRAP, BOOTSTRAP)
     with tempfile.TemporaryDirectory(prefix="lainir-self-host-") as temporary:
         work = Path(temporary)
@@ -102,8 +109,8 @@ def main() -> int:
         env = os.environ.copy()
         # Zig otherwise tries to create caches under a restricted user path in
         # the desktop runner.  Keep all generated state inside the workspace.
-        env.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "local"))
-        env.setdefault("ZIG_GLOBAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "global"))
+        env.setdefault("ZIG_LOCAL_CACHE_DIR", str(toolchain.BUILD / "zig-cache"))
+        env.setdefault("ZIG_GLOBAL_CACHE_DIR", str(toolchain.BUILD / "zig-cache-global"))
 
         bootstrap_c = work / "bootstrap_stage.c"
         self_host_c = work / "self_host_stage.c"
@@ -117,8 +124,7 @@ def main() -> int:
         compile_native(c_compiler, bootstrap_c, gen1, env)
         # On Windows Zig's linker emits a sibling PDB by default.  The PDB is
         # a transient debug artifact, not part of the standalone compiler
-        # contract; keep the repository-level bin directory limited to the
-        # two executable products.
+        # contract; keep build/selfhost/bin limited to the executable products.
         generated_pdb = gen1.with_suffix(".pdb")
         if generated_pdb.exists():
             generated_pdb.unlink()

@@ -3,14 +3,15 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED = ROOT / "seed" / "zig-out" / ("bin/lainir-seed.exe" if os.name == "nt" else "bin/lainir-seed")
+SEED = seed_exe("lainir-seed")
 
 CASES = {
     "readonly_data": (

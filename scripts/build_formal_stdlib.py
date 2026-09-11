@@ -12,22 +12,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
+
+from toolchain import seed_exe
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_COMPILER = ROOT / "scripts" / "run_lain_compiler.py"
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 CORE = ROOT / "build" / "bootstrap" / "compiler_core.l1"
-SEED_PRINT = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-print.exe" if os.name == "nt" else "lainir-print"
-)
-SEED_RUN = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
+SEED_PRINT = seed_exe("lainir-print")
+SEED_RUN = seed_exe("lainir-seed")
 OUTPUT = ROOT / "build" / "lainir" / "formal_stdlib.l1"
 MANIFEST = ROOT / "build" / "lainir" / "formal_stdlib.manifest.json"
 ABI_PROBE = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"

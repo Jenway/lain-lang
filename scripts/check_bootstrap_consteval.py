@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from toolchain import seed_exe
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,9 +27,7 @@ CASES = (
         ROOT / "scripts" / "fixtures" / "formal_meta_module_factory.lain",
     ),
 )
-SEED = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
+SEED = seed_exe("lainir-seed")
 
 
 def run(arguments: list[str]) -> subprocess.CompletedProcess[str]:

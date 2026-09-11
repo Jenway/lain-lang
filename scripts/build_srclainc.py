@@ -4,21 +4,19 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 from lainc_sources import composed_compiler_sources
+from toolchain import seed_exe
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_COMPILER = ROOT / "scripts" / "run_lain_compiler.py"
 DEFAULT_OUTPUT = ROOT / "build" / "lainir" / "srclainc.l1"
-PRINT = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-print.exe" if os.name == "nt" else "lainir-print"
-)
+PRINT = seed_exe("lainir-print")
 
 
 def verify_artifact(output: Path) -> None:
