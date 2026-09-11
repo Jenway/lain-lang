@@ -1,0 +1,399 @@
+// LAIN-IR formatter (first executable slice).
+//
+// The formatter owns the byte-level layout policy.  It deliberately does not
+// ask the host to format anything: the host only supplies source bytes and an
+// output byte stream.  The scanner keeps strings and // comments opaque, then
+// emits one canonical layout for punctuation, blocks, and indentation.  A
+// second pass therefore produces exactly the same bytes as the first pass.
+
+#extern #proc bootstrap.source-count() -> #bits<64>;
+#extern #proc bootstrap.source-data(#bits<64> %index) -> #addr;
+#extern #proc bootstrap.source-length(#bits<64> %index) -> #bits<64>;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(#bits<8> %byte) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+
+// The formatter is run as a bundled tool: source.l1 supplies the lossless
+// scanner and parser.l1 supplies the structural AST.  The layout policy below
+// still works on source bytes so comments and spelling remain lossless, but
+// structural braces are accepted only at AST-reported block boundaries and a
+// malformed file is rejected before an artifact is opened.
+#extern #proc tool_source_new(#addr %data, #bits<64> %length) -> #addr;
+#extern #proc tool_lex_all(#addr %source) -> #addr;
+#extern #proc parser_new(#addr %source, #addr %tokens) -> #addr;
+#extern #proc parser_parse_module(#addr %cursor) -> #addr;
+#extern #proc parser_failed(#addr %cursor) -> #bits<1>;
+#extern #proc parser_ast_boundary(#addr %node, #bits<64> %index) -> #bits<32>;
+
+#proc byte_at(#addr %data, #bits<64> %index) -> #bits<8> {
+  #return #load[#bits<8>](#lea(base=%data, idx=%index, scale=1, offset=0))
+}
+
+#proc emit_byte(#bits<8> %byte) -> #unit {
+  #call bootstrap.artifact-write-byte(%byte)
+}
+
+#proc emit_space() -> #unit {
+  #call emit_byte(32)
+}
+
+#proc emit_newline() -> #unit {
+  #call emit_byte(10)
+}
+
+#proc emit_indent(#bits<64> %depth) -> #unit {
+  #let %index: #bits<64> = 0
+  #loop spaces {
+    #if #sge(%index, #mul(%depth, 2)) {
+      #break spaces
+    }
+    #call emit_space()
+    %index: #bits<64> = #add(%index, 1)
+    #continue spaces
+  }
+}
+
+#proc is_word_byte(#bits<8> %byte) -> #bits<1> {
+  #if #sge(%byte, 48) {
+    #if #sle(%byte, 57) {
+      #return 1
+    }
+  }
+  #if #sge(%byte, 65) {
+    #if #sle(%byte, 90) {
+      #return 1
+    }
+  }
+  #if #sge(%byte, 97) {
+    #if #sle(%byte, 122) {
+      #return 1
+    }
+  }
+  #if #eq(%byte, 35) {
+    #return 1
+  }
+  #if #eq(%byte, 37) {
+    #return 1
+  }
+  #if #eq(%byte, 95) {
+    #return 1
+  }
+  #if #eq(%byte, 46) {
+    #return 1
+  }
+  #if #eq(%byte, 45) {
+    #return 1
+  }
+  #return 0
+}
+
+#proc is_horizontal_space(#bits<8> %byte) -> #bits<1> {
+  #if #eq(%byte, 32) {
+    #return 1
+  }
+  #if #eq(%byte, 9) {
+    #return 1
+  }
+  #if #eq(%byte, 13) {
+    #return 1
+  }
+  #return 0
+}
+
+// Copy a quoted string, including escapes, without changing its contents.
+#proc copy_string(
+  #addr %data,
+  #bits<64> %length,
+  #bits<64> %start
+) -> #bits<64> {
+  #let %index: #bits<64> = %start
+  #loop string {
+    #if #sge(%index, %length) {
+      #return %index
+    }
+    #let %byte: #bits<8> = #call byte_at(%data, %index)
+    #call emit_byte(%byte)
+    %index: #bits<64> = #add(%index, 1)
+    #if #eq(%byte, 92) {
+      #if #slt(%index, %length) {
+        #call emit_byte(#call byte_at(%data, %index))
+        %index: #bits<64> = #add(%index, 1)
+      }
+    } else {
+      #if #eq(%byte, 34) {
+        #return %index
+      }
+    }
+    #continue string
+  }
+}
+
+// Copy a line comment.  The terminating newline is consumed by the caller so
+// indentation is emitted in exactly one place.
+#proc copy_comment(
+  #addr %data,
+  #bits<64> %length,
+  #bits<64> %start
+) -> #bits<64> {
+  #let %index: #bits<64> = %start
+  #call emit_byte(47)
+  #call emit_byte(47)
+  %index: #bits<64> = #add(%index, 2)
+  #loop comment {
+    #if #sge(%index, %length) {
+      #return %index
+    }
+    #let %byte: #bits<8> = #call byte_at(%data, %index)
+    #if #eq(%byte, 10) {
+      #return %index
+    }
+    #call emit_byte(%byte)
+    %index: #bits<64> = #add(%index, 1)
+    #continue comment
+  }
+}
+
+#proc copy_word(
+  #addr %data,
+  #bits<64> %length,
+  #bits<64> %start
+) -> #bits<64> {
+  #let %index: #bits<64> = %start
+  #loop word {
+    #if #sge(%index, %length) {
+      #return %index
+    }
+    #let %byte: #bits<8> = #call byte_at(%data, %index)
+    #if #eq(#call is_word_byte(%byte), 0) {
+      #return %index
+    }
+    #call emit_byte(%byte)
+    %index: #bits<64> = #add(%index, 1)
+    #continue word
+  }
+}
+
+// Format source[0].  The state is intentionally small and explicit: a token
+// is separated from the previous token by one space, while punctuation owns
+// its surrounding whitespace.  Braces always terminate a line and increase or
+// decrease the two-space indentation depth.
+#proc lainir_format() -> #bits<32> {
+  #if #eq(#call bootstrap.source-count(), 0) {
+    #return 1
+  }
+  #let %data: #addr = #call bootstrap.source-data(0)
+  #let %length: #bits<64> = #call bootstrap.source-length(0)
+  #let %syntax_source: #addr = #call tool_source_new(%data, %length)
+  #let %syntax_tokens: #addr = #call tool_lex_all(%syntax_source)
+  #let %syntax_cursor: #addr = #call parser_new(%syntax_source, %syntax_tokens)
+  #let %syntax_module: #addr = #call parser_parse_module(%syntax_cursor)
+  #if #call parser_failed(%syntax_cursor) {
+    #return 2
+  }
+  #let %index: #bits<64> = 0
+  #let %depth: #bits<64> = 0
+  #let %line_start: #bits<1> = 1
+  #let %need_space: #bits<1> = 0
+
+  #call bootstrap.artifact-begin()
+  #loop source {
+    #if #sge(%index, %length) {
+      #break source
+    }
+    #let %byte: #bits<8> = #call byte_at(%data, %index)
+    #let %at_start: #bits<1> = %line_start
+    #let %ast_boundary: #bits<32> = 0
+
+    #if #eq(%byte, 10) {
+      #if #ne(%line_start, 1) {
+        #call emit_newline()
+      }
+      %line_start: #bits<1> = 1
+      %need_space: #bits<1> = 0
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+
+    #if #call is_horizontal_space(%byte) {
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+
+    #if #eq(%line_start, 1) {
+      #if #ne(%byte, 125) {
+        #call emit_indent(%depth)
+        %line_start: #bits<1> = 0
+      }
+    }
+
+    // A // comment is copied verbatim after one separating space.
+    #if #eq(%byte, 47) {
+      #if #slt(#add(%index, 1), %length) {
+        #if #eq(#call byte_at(%data, #add(%index, 1)), 47) {
+          #if #eq(%need_space, 1) {
+            #call emit_space()
+          }
+          %index: #bits<64> = #call copy_comment(%data, %length, %index)
+          %need_space: #bits<1> = 0
+          #continue source
+        }
+      }
+    }
+
+    // Strings are opaque, including escaped quotes.
+    #if #eq(%byte, 34) {
+      #if #eq(%need_space, 1) {
+        #call emit_space()
+      }
+      %index: #bits<64> = #call copy_string(%data, %length, %index)
+      %need_space: #bits<1> = 1
+      #continue source
+    }
+
+    // Braces own line breaks and indentation.
+    #if #eq(%byte, 123) {
+      %ast_boundary: #bits<32> = #call parser_ast_boundary(%syntax_module, %index)
+      #if #eq(%ast_boundary, 1) {
+        #if #eq(%need_space, 1) {
+          #call emit_space()
+        }
+        #call emit_byte(123)
+        #call emit_newline()
+        %depth: #bits<64> = #add(%depth, 1)
+        %line_start: #bits<1> = 1
+        %need_space: #bits<1> = 0
+        %index: #bits<64> = #add(%index, 1)
+        #continue source
+      }
+    }
+    #if #eq(%byte, 125) {
+      %ast_boundary: #bits<32> = #call parser_ast_boundary(%syntax_module, %index)
+      #if #eq(%ast_boundary, 2) {
+        #if #eq(%at_start, 0) {
+          #call emit_newline()
+        }
+        #if #sgt(%depth, 0) {
+          %depth: #bits<64> = #sub(%depth, 1)
+        }
+        #call emit_indent(%depth)
+        #call emit_byte(125)
+        #call emit_newline()
+        %line_start: #bits<1> = 1
+        %need_space: #bits<1> = 0
+        %index: #bits<64> = #add(%index, 1)
+        #continue source
+      }
+    }
+
+    // Punctuation has a single canonical spelling.
+    #if #eq(%byte, 44) {
+      #call emit_byte(44)
+      #call emit_space()
+      %need_space: #bits<1> = 0
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+    #if #eq(%byte, 59) {
+      #call emit_byte(59)
+      #call emit_newline()
+      %line_start: #bits<1> = 1
+      %need_space: #bits<1> = 0
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+    #if #eq(%byte, 58) {
+      #call emit_byte(58)
+      #call emit_space()
+      %need_space: #bits<1> = 0
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+    #if #eq(%byte, 61) {
+      #if #eq(%need_space, 1) {
+        #call emit_space()
+      }
+      #call emit_byte(61)
+      #call emit_space()
+      %need_space: #bits<1> = 0
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+    #if #eq(%byte, 45) {
+      #if #slt(#add(%index, 1), %length) {
+        #if #eq(#call byte_at(%data, #add(%index, 1)), 62) {
+          #if #eq(%need_space, 1) {
+            #call emit_space()
+          }
+          #call emit_byte(45)
+          #call emit_byte(62)
+          #call emit_space()
+          %need_space: #bits<1> = 0
+          %index: #bits<64> = #add(%index, 2)
+          #continue source
+        }
+      }
+    }
+
+    // Parentheses/brackets/angle brackets do not get interior spaces.
+    #if #eq(%byte, 40) {
+      #call emit_byte(40)
+      %need_space: #bits<1> = 0
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+    #if #eq(%byte, 41) {
+      #call emit_byte(41)
+      %need_space: #bits<1> = 1
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+    #if #eq(%byte, 91) {
+      #call emit_byte(91)
+      %need_space: #bits<1> = 0
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+    #if #eq(%byte, 93) {
+      #call emit_byte(93)
+      %need_space: #bits<1> = 1
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+    #if #eq(%byte, 60) {
+      #call emit_byte(60)
+      %need_space: #bits<1> = 0
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+    #if #eq(%byte, 62) {
+      #call emit_byte(62)
+      %need_space: #bits<1> = 1
+      %index: #bits<64> = #add(%index, 1)
+      #continue source
+    }
+
+    #if #eq(#call is_word_byte(%byte), 1) {
+      #if #eq(%need_space, 1) {
+        #call emit_space()
+      }
+      %index: #bits<64> = #call copy_word(%data, %length, %index)
+      %need_space: #bits<1> = 1
+      #continue source
+    }
+
+    // A token is copied as-is.  A pending separator is emitted once.
+    #if #eq(%need_space, 1) {
+      #call emit_space()
+    }
+    #call emit_byte(%byte)
+    %need_space: #bits<1> = #call is_word_byte(%byte)
+    %index: #bits<64> = #add(%index, 1)
+    #continue source
+  }
+
+  #if #ne(%line_start, 1) {
+    #call emit_newline()
+  }
+  #call bootstrap.artifact-finish()
+  #return 0
+}

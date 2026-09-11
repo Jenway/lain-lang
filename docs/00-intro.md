@@ -55,19 +55,16 @@ Lain source
 
 ## 3. LAIN-AST 边界
 
-Parser 产生的 RawAst 只描述源码的结构拓扑。它可以保存：
+Parser 产生的 RawAst 只描述源码的结构拓扑。它只有两种节点：
 
 ```text
 Atom
 Group
-Prefix
-Postfix
-Infix
-Juxt
-Sep
 ```
 
-它不直接保存这些语义节点：
+它不定义 `Prefix`、`Postfix`、`Infix`、`Juxt`、`Sep` 这类运算符或相邻关系节点：
+识别它们要求 Parser 预先知道运算符类别、优先级和结合性，这些规则属于标准库
+Meta。它也不直接保存这些语义节点：
 
 ```text
 function
@@ -93,7 +90,7 @@ foo(x)
 
 在 RawAst 中只表示为一个名字后面跟着圆括号组。它可能是运行时调用、类型工厂调用、effect 应用、宏调用或 DSL 形式。Meta 根据绑定和上下文决定它的含义。
 
-完整的语法树契约见 [`02-lain-ast.md`](02-lain-ast.md)。
+完整的语法树契约以 [`02-lain-ast.md`](02-lain-ast.md) 为权威来源。
 
 ## 4. Meta 边界
 
