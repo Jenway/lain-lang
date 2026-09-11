@@ -1,11 +1,27 @@
 // Meta binding collection for top-level functions and constants.
 
+// The standard root has a stable, compiler-owned spelling only to construct
+// its initial RawAst names.  Source use sites resolve it through the ordinary
+// Meta environment and `::` lookup.
+#data meta_standard_type_source(9, 1, "std::type");
+
 #extern #proc program_meta_bind_function(
   #addr %environment, #addr %source, #addr %let_node, #addr %function
 ) -> #unit;
 
 #extern #proc raw_is_nil(#addr %node) -> #bits<1>;
 #extern #proc raw_node_next(#addr %node) -> #addr;
+#extern #proc raw_node_first(#addr %node) -> #addr;
+#extern #proc tool_source_new(#addr %data, #bits<64> %length) -> #addr;
+#extern #proc tool_lex_all(#addr %source) -> #addr;
+#extern #proc raw_parse(#addr %source, #addr %tokens) -> #addr;
+#extern #proc meta_value_module(
+  #addr %source, #addr %name, #addr %group, #addr %environment
+) -> #addr;
+#extern #proc meta_value_type_with_namespace(
+  #addr %source, #addr %name, #addr %binding, #addr %environment
+) -> #addr;
+#extern #proc meta_env_new(#addr %parent) -> #addr;
 #extern #proc meta_value_function(
   #addr %source, #addr %name, #addr %function, #addr %environment
 ) -> #addr;
@@ -64,6 +80,33 @@
   #addr %source, #addr %let_node
 ) -> #addr;
 #extern #proc program_constant_value(#addr %constant) -> #bits<64>;
+
+// Every compilation unit starts with this ordinary Meta module.  The source
+// buffer is retained with the binding because Meta environments compare name
+// spans by bytes, including when a later user source supplies `std::type`.
+#proc program_bind_standard_root(#addr %environment) -> #addr {
+  #let %source: #addr = #call tool_source_new(
+    #data_addr(meta_standard_type_source), 9
+  )
+  #let %tokens: #addr = #call tool_lex_all(%source)
+  #let %root: #addr = #call raw_parse(%source, %tokens)
+  #let %standard_name: #addr = #call raw_node_first(%root)
+  #let %first_colon: #addr = #call raw_node_next(%standard_name)
+  #let %second_colon: #addr = #call raw_node_next(%first_colon)
+  #let %type_name: #addr = #call raw_node_next(%second_colon)
+  #let %standard_environment: #addr = #call meta_env_new(%environment)
+  #let %type_value: #addr = #call meta_value_type_with_namespace(
+    %source, %type_name, %type_name, %standard_environment
+  )
+  #let %standard: #addr = #call meta_value_module(
+    %source, %standard_name, %type_name, %standard_environment
+  )
+  #call meta_env_bind(%environment, %source, %standard_name, %standard)
+  #call meta_env_bind(
+    %standard_environment, %source, %type_name, %type_value
+  )
+  #return %type_value
+}
 
 #proc program_collect_function_candidate(
   #addr %unit, #addr %source, #bits<64> %source_index, #addr %let_node,
