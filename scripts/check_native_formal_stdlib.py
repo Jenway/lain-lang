@@ -8,10 +8,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "scripts" / "fixtures"
-SEED = ROOT / "seed" / "zig-out" / "bin" / "lainir-seed.exe"
+SEED = seed_exe("lainir-seed")
 SUCCESS = (
     "formal_constant_return.lain",
     "formal_if_true_return.lain",

@@ -6,9 +6,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED = ROOT / "seed" / "zig-out" / "bin" / "lainir-seed.exe"
+SEED = seed_exe("lainir-seed")
 FIRST_GENERATION = ROOT / "build" / "bootstrap" / "lainc.l1"
 FORMAL_ABI = ROOT / "build" / "lainir" / "formal_stdlib_abi_probe.l1"
 COMPILER_API = ROOT / "bootstrap" / "compiler" / "compiler_api.l1"

@@ -4,19 +4,18 @@
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "scripts" / "build_lain_compiler.py"
 EMPTY_SOURCE = ROOT / "scripts" / "fixtures" / "empty_source.lain"
-L1BOOTSTRAP = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
+L1BOOTSTRAP = seed_exe("lainir-seed")
 BUNDLE = ROOT / "build" / "bootstrap" / "lainc.l1"
 CORE_BUNDLE = ROOT / "build" / "bootstrap" / "compiler_core.l1"
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"

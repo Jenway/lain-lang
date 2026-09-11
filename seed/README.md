@@ -34,10 +34,14 @@ The build produces:
 The generated Lain compiler bundle is not part of this directory; build it at
 `build/bootstrap/lainc.l1` from the sources described in `bootstrap/README.md`.
 
-Build from this directory with:
+Build from the repository root with:
 
 ```text
-zig build
+python scripts/build_seed.py
 ```
+
+The binaries land in `build/seed/bin/` (with the `.exe` suffix on Windows).
+`seed/` itself keeps only sources: neither build output nor Zig cache
+directories are created inside it.
 
 The physical types are `BITS`, `FLOATS`, `SIMD`, `ADDR`, `UNIT`, and `NEVER`.

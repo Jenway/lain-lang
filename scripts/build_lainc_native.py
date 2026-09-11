@@ -8,16 +8,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
-CHECK = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-print.exe" if os.name == "nt" else "lainir-print"
-)
+SEED = seed_exe("lainir-seed")
+CHECK = seed_exe("lainir-print")
 BACKEND_L1 = ROOT / "build" / "backend_c_entry.l1"
 HOST = ROOT / "seed" / "src" / "host" / "native_lainc.c"
+# Sources linked into the final native lainc, alongside the C generated from
+# the canonical-L1 compiler.  This closure is intentionally distinct from
+# SEED_C_SOURCES in scripts/run_lainir_self_host.py: that one serves the seed
+# LAINIR compiler, this one serves lainc.  host/host_io.c is required here
+# because native_lainc.c's --run path calls lainir_host_read_file;
+# text/emitter.c is absent because nothing in this closure calls it.
 IN_PROCESS_SOURCES = (
     ROOT / "seed" / "src" / "core" / "lainir.c",
     ROOT / "seed" / "src" / "core" / "verifier.c",
@@ -46,8 +50,8 @@ def main() -> int:
     run(SEED, "interpreter", BACKEND_L1, "main", generated_c, compiler_l1)
 
     env = os.environ.copy()
-    env.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "local"))
-    env.setdefault("ZIG_GLOBAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "global"))
+    env.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "build" / "zig-cache"))
+    env.setdefault("ZIG_GLOBAL_CACHE_DIR", str(ROOT / "build" / "zig-cache-global"))
     # The generated C intentionally keeps the compiler's metadata walks
     # straightforward.  Native consumers need an optimized build: at -O0,
     # archive API expressions spend minutes in those tight scan loops.

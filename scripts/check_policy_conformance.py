@@ -9,15 +9,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 CORE = ROOT / "build" / "bootstrap" / "compiler_core.l1"
 BOOTSTRAP = ROOT / "build" / "bootstrap" / "stdlib.l1"
 FORMAL = ROOT / "build" / "lainir" / "formal_stdlib.l1"
-SEED = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
+SEED = seed_exe("lainir-seed")
 PROBE = ROOT / "scripts" / "fixtures" / "formal_meta_policy_probe.l1"
 
 

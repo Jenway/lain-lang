@@ -15,12 +15,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+from toolchain import selfhost_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED_DIR = ROOT / "seed"
-COMPILER = ROOT / "zig-out" / "bin" / (
-    "lainir-compiler.exe" if os.name == "nt" else "lainir-compiler"
-)
+COMPILER = selfhost_exe("lainir-compiler")
 
 SAMPLES = {
     "data": (
@@ -108,10 +107,10 @@ def main() -> int:
     if not zig:
         raise RuntimeError("zig is required")
     env = os.environ.copy()
-    env.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "local"))
-    env.setdefault("ZIG_GLOBAL_CACHE_DIR", str(ROOT / "target" / "zig-cache" / "global"))
+    env.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "build" / "zig-cache"))
+    env.setdefault("ZIG_GLOBAL_CACHE_DIR", str(ROOT / "build" / "zig-cache-global"))
 
-    run([zig, "build"], cwd=SEED_DIR, env=env)
+    run([os.fspath(Path(sys.executable)), os.fspath(ROOT / "scripts" / "build_seed.py")], env=env)
     run([os.fspath(Path(sys.executable)), os.fspath(ROOT / "scripts" / "run_lainir_self_host.py")], env=env)
     if not COMPILER.exists():
         raise RuntimeError(f"missing generated compiler: {COMPILER}")

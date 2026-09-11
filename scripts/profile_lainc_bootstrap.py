@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from toolchain import seed_exe
+
 try:
     import psutil
 except ImportError:  # pragma: no cover - optional profiling enhancement
@@ -29,10 +31,8 @@ except ImportError:  # pragma: no cover - optional profiling enhancement
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = ROOT / "seed" / "zig-out" / "bin"
-SUFFIX = ".exe" if os.name == "nt" else ""
-SEED = BIN / f"lainir-seed{SUFFIX}"
-PRINT = BIN / f"lainir-print{SUFFIX}"
+SEED = seed_exe("lainir-seed")
+PRINT = seed_exe("lainir-print")
 FROZEN = ROOT / "build" / "bootstrap" / "lainc.l1"
 LAINC = ROOT / "src" / "lainc" / "lainc.lain"
 

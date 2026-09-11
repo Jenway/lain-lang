@@ -3,21 +3,19 @@
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import tempfile
 from pathlib import Path
 
 import check_stdlib_conformance as conformance
+from toolchain import seed_exe
 
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPILER = ROOT / "build" / "bootstrap" / "lainc.l1"
 FIXTURE = ROOT / "scripts" / "fixtures" / "lainir_provider_smoke.lain"
-SEED = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
+SEED = seed_exe("lainir-seed")
 API_SOURCES = (
     ROOT / "src" / "lainir" / "api_contract.lain",
     ROOT / "src" / "lainir" / "api" / "l1_ir.lain",

@@ -7,9 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED = ROOT / "seed" / "zig-out" / "bin" / "lainir-seed.exe"
+SEED = seed_exe("lainir-seed")
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
 COMPILER = ROOT / "build" / "bootstrap" / "lainc.l1"
 CORE = ROOT / "build" / "bootstrap" / "compiler_core.l1"
