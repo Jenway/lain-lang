@@ -18,6 +18,11 @@
 - [`lainir-implementation-roadmap.md`](lainir-implementation-roadmap.md)：LAINIR frontend、verifier、C backend 和 self-host 的已完成里程碑。
 - [`lainc-performance-analysis-2026-08-21.md`](lainc-performance-analysis-2026-08-21.md)：旧 bootstrap 路径的性能测量、瓶颈分析和优化结果。
 - [`lainir-tools.md`](lainir-tools.md)：已归档的 LAINIR formatter、highlight、parser 和 LSP 实现记录。
+- [`lainir-tools/`](lainir-tools/)：上述工具的归档源码，保留归档前实现，不参与当前构建。
+
+`lainir-lsp` 的 C 宿主（`seed/src/host/lsp_host.c`、`seed/src/host/lsp_host.h`、
+`seed/src/cli/lsp_main.c`）已删除，不再参与任何构建；LAIN-IR 侧实现保留在
+`lainir-tools/`，Lain 成熟后将直接用 Lain 重写 LSP。
 
 ## Scheme 时期设计快照
 

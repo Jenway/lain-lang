@@ -1,7 +1,12 @@
 # LAIN-IR 工具链路线与当前边界
 
-> **历史实现记录。** 这套工具已移至 `archive/lainir-tools/`，不属于当前 `src/`
+> **历史实现记录。** 这套工具已移至 `docs/history/lainir-tools/`，不属于当前 `src/`
 > 或 `seed/` 构建路径。下面的路径和命令只描述归档前的实现状态。
+> 文中出现的源码路径均为归档前路径，不代表其当前位置。
+> LSP 的 C 宿主（`seed/src/host/lsp_host.c`、`seed/src/host/lsp_host.h`、
+> `seed/src/cli/lsp_main.c`）已删除：这套工具已归属历史实现，Lain 成熟后将直接
+> 用 Lain 重写 LSP，不再保留 C 适配层。LAIN-IR 侧实现保留在
+> `docs/history/lainir-tools/`。
 
 目标是让 formatter、语法高亮和 LSP 的“规则”都由 LAIN-IR 执行。C 只做宿主适配：读文件、读写标准输入输出、分配内存。C 不实现词法、格式化、JSON-RPC 或编辑器语义。
 

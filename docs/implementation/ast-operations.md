@@ -3,8 +3,13 @@
 `bootstrap/compiler/raw_ast.l1` now carries the first semantic views and
 structural transforms over the topology-only RawAst tree, together with a
 working macro pipeline.  Everything below runs through the seed bundle
-(`source.l1` + `raw_ast.l1`) and is exercised by
-`tests/lainir_lain/run_ast_ops.py`.
+(`source.l1` + `raw_ast.l1`).  The historical probe harness
+(`tests/lainir_lain/run_ast_ops.py`) was removed together with the old `tests/`
+directory; the automated RawAst coverage that remains is
+`scripts/check_meta_ast_conformance.py`, which compares the first-generation
+RawAst dump produced by `lain_raw_ast_dump` with the formal `std::meta` dump
+built from `scripts/fixtures/formal_meta_ast_dump_probe.l1`.  The macro probes
+listed below currently have no automated entry point.
 
 ## Model
 
@@ -88,9 +93,9 @@ Probes (each is a seed entry point):
   `add(2 * 3, 4)` → `(2*3+4)`)
 - `lain_macro_compile_probe` — expansion to compilable Lain: a macro
   with a bare-expression template (`macro(x) { x }`) expands
-  `val(42)` to `lety=42;` (ast_write emits no whitespace); the test
-  harness re-spaces it to `let y =42;`, appends a `main`, compiles the
-  result with the reference lainc and runs it to 42 — macro output is
+  `val(42)` to `lety=42;` (ast_write emits no whitespace); the removed test
+  harness re-spaced it to `let y =42;`, appended a `main`, compiled the
+  result with the reference lainc and ran it to 42 — macro output is
   real, compilable code, not just parseable text
 - `lain_macro_recursion_probe` — self-referential macros are caught by
   a step bound: `let loop = macro(x) { (loop(x)) };` reports
@@ -133,10 +138,16 @@ Probes (each is a seed entry point):
 
 ## Verification
 
-`tests/lainir_lain/run_ast_ops.py` asserts every probe's exact output,
-including a round trip: the expanded program text is re-parsed by
-`lain_raw_ast_dump` and must parse cleanly (macro output is ordinary,
-parseable Lain source).  Registered in `run_all.py`.
+The historical harness (`tests/lainir_lain/run_ast_ops.py`, registered in
+`run_all.py`) asserted every probe's exact output, including a round trip:
+the expanded program text was re-parsed by `lain_raw_ast_dump` and had to
+parse cleanly (macro output is ordinary, parseable Lain source).  That
+harness was removed with the old `tests/` directory and has no replacement:
+no current script runs the `lain_*_probe` entry points in
+`bootstrap/compiler/raw_ast.l1`, so their outputs are not asserted by any
+automation today.  The nearest automated coverage is
+`scripts/check_meta_ast_conformance.py`, which exercises `lain_raw_ast_dump`
+on `scripts/fixtures/formal_ast_conformance.lain`.
 
 ## LAIN-IR notes found while building this
 
