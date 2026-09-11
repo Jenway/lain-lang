@@ -41,6 +41,9 @@ Lain aims to keep the compiler small and move most high-level language features 
 seed/        minimal C execution base and the LAINIR-written LAINIR compiler
 bootstrap/   hand-maintained LAINIR sources for the startup Lain compiler
 src/         formal Lain-written implementation
+std/         Lain-written standard library and standard Meta definitions
+scripts/     build, verification and fixed-point drivers
+docs/        language design, current-implementation and roadmap documents
 build/       generated bundles, snapshots, native programs, and test output
 ```
 
@@ -50,10 +53,21 @@ Generated compiler artifacts are never checked into `src/` or `bootstrap/`.
 
 ## Bootstrap status
 
-The old `EvalResult` path has been removed. The current work reconnects Meta
-compile-time evaluation to LAINVM. Until that work is complete, rebuilding the
-bootstrap compiler, the native compiler matrix, and the gen2/gen3 fixed-point
-check are expected to remain unavailable.
+The old `EvalResult` path has been removed. Meta compile-time evaluation now
+lowers to temporary LAINIR `#eval` and executes through LAINVM. Rebuilding is
+available again: the hand-written bootstrap source can regenerate
+`build/bootstrap/lainc.l1` and compile the ordinary physical subset, the formal
+standard-library source closure passes its ABI and conformance checks, and the
+`src/lainc` source closure builds as a verified 357-procedure LAINIR artifact
+that is deterministic across independent builds.
+
+The gen2/gen3 fixed-point gate is still open. `srclainc.l1` is currently a
+library artifact with no `compiler_compile` entry point the seed can call, so
+two identical builds do not yet prove a compiler fixed point, and the native
+compiler matrix follows that result. See
+`docs/implementation/lain-written-backend.md` and
+`docs/roadmaps/lain-roadmap.md` section 3.2 for the current evidence and the
+remaining gate.
 
 `--emit-l1` currently accepts the self-hosting core subset: `#bits<32>`/`#addr`
 callables, calls, arithmetic, explicit returns, foreign bindings, and canonical

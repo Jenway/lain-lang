@@ -2,6 +2,20 @@
 
 本目录把文档分为语言设计、当前实现、路线图和历史资料。文档正在逐篇校准；在校准完成前，当前实现事实以代码和 [`roadmaps/`](roadmaps/) 中的当前路线图为准。
 
+## 文档优先级
+
+文档按以下顺序作为单一事实源，前者覆盖后者：
+
+```text
+代码
+  > docs/roadmaps/lain-roadmap.md
+  > docs/00-04 规范稿
+  > docs/implementation/
+  > docs/history/（仅追溯）
+```
+
+`docs/history/` 中的文档只用于追溯设计演变和测量结果：其中的路径与命令反映归档时的状态，可能指向已经不存在的文件（例如已删除的 `tests/` 目录），不得作为当前实现的依据。
+
 ## 建议阅读顺序
 
 1. [`00-intro.md`](00-intro.md)：语言目标、编译流程和各层边界。
@@ -30,8 +44,12 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [`implementation/ast-operations.md`](implementation/ast-operations.md) | AST 查询、遍历、变换和宏展开 |
-| [`implementation/lain-written-backend.md`](implementation/lain-written-backend.md) | Lain 编写的后端和 native driver |
+| [`implementation/ast-operations.md`](implementation/ast-operations.md) | RawAst 上的语义视图、遍历、变换和宏展开探针 |
+| [`implementation/lain-written-backend.md`](implementation/lain-written-backend.md) | Lain 编写的 LAINIR-to-C 后端与 native driver 的当前状态 |
+| [`implementation/lain-backend-capability-abi.md`](implementation/lain-backend-capability-abi.md) | backend capability ABI v1：`src/lainc/backend_c.lain` 的宿主边界、`backend.*` capability 集合与 manifest 契约 |
+| [`implementation/native-backend-migration-report.md`](implementation/native-backend-migration-report.md) | native C 后端迁移状态：已验证项、待端到端执行的改动和当前阻塞 |
+| [`implementation/c1-eval-contract-audit.md`](implementation/c1-eval-contract-audit.md) | C1 `#eval` 执行契约审计：临时 TCB、共享 VSpace、预算与 Trap 的冻结边界 |
+| [`implementation/module-namespaces.md`](implementation/module-namespaces.md) | `packages::lain::` 逻辑命名空间与 import 解析规则 |
 
 ## 当前路线图
 
