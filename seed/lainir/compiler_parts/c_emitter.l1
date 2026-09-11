@@ -338,6 +338,33 @@
   #return 0
 }
 
+// `#unit` and `#never` are physical types with no C representation: a binding
+// of such a type names no value the emitter can give a C object.  The binding
+// is still a real instruction, so its initializer keeps being emitted for its
+// effects while nothing is declared for the name.
+#proc seed_type_has_value(#bits<64> %type_kind) -> #bits<1> {
+  #if #eq(%type_kind, 4) { #return 0 }
+  #if #eq(%type_kind, 5) { #return 0 }
+  #return 1
+}
+
+#proc seed_emit_effect_only_binding(
+  #bits<64> %module_id,
+  #bits<64> %procedure_id,
+  #bits<64> %instruction_id,
+  #bits<64> %depth
+) -> #bits<1> {
+  #let %value_id: #bits<64> = #call bootstrap.ir-instruction-value(%instruction_id)
+  // A folded `#eval` has no physical result left, so there is nothing to emit.
+  #if #eq(%value_id, 0) { #return 1 }
+  #call seed_emit_indent(%depth)
+  #if #eq(#call seed_emit_full_expression(
+    %module_id, %procedure_id, %value_id, 0
+  ), 0) { #return 0 }
+  #call bootstrap.artifact-write-literal(";\n")
+  #return 1
+}
+
 #proc seed_emit_full_instruction(
   #bits<64> %module_id,
   #bits<64> %procedure_id,
@@ -346,15 +373,14 @@
 ) -> #bits<1> {
   #let %kind: #bits<64> = #call bootstrap.ir-instruction-kind(%instruction_id)
   #if #eq(%kind, 0) {
-    #call seed_emit_indent(%depth)
-    #if #eq(#call bootstrap.ir-instruction-type-kind(%instruction_id), 4) {
-      #if #eq(#call seed_emit_full_expression(
-        %module_id, %procedure_id,
-        #call bootstrap.ir-instruction-value(%instruction_id), 0
-      ), 0) { #return 0 }
-      #call bootstrap.artifact-write-literal(";\n")
-      #return 1
+    #if #eq(#call seed_type_has_value(
+      #call bootstrap.ir-instruction-type-kind(%instruction_id)
+    ), 0) {
+      #return #call seed_emit_effect_only_binding(
+        %module_id, %procedure_id, %instruction_id, %depth
+      )
     }
+    #call seed_emit_indent(%depth)
     #if #eq(#call seed_emit_c_type(
       #call bootstrap.ir-instruction-type-kind(%instruction_id),
       #call bootstrap.ir-instruction-type-width(%instruction_id)
@@ -371,6 +397,13 @@
     #return 1
   }
   #if #eq(%kind, 1) {
+    #if #eq(#call seed_type_has_value(
+      #call bootstrap.ir-instruction-type-kind(%instruction_id)
+    ), 0) {
+      #return #call seed_emit_effect_only_binding(
+        %module_id, %procedure_id, %instruction_id, %depth
+      )
+    }
     #call seed_emit_indent(%depth)
     #call seed_emit_identifier(#call bootstrap.ir-instruction-name(%instruction_id))
     #call bootstrap.artifact-write-literal(" = ")
@@ -451,6 +484,23 @@
     #return 1
   }
   #if #eq(%kind, 7) {
+    #if #eq(#call seed_type_has_value(
+      #call bootstrap.ir-procedure-return-kind(%procedure_id)
+    ), 0) {
+      // The returned value has no C representation: evaluate it for its
+      // effects and return without handing a value back.
+      #let %return_value: #bits<64> = #call bootstrap.ir-instruction-value(%instruction_id)
+      #if #ne(%return_value, 0) {
+        #call seed_emit_indent(%depth)
+        #if #eq(#call seed_emit_full_expression(
+          %module_id, %procedure_id, %return_value, 0
+        ), 0) { #return 0 }
+        #call bootstrap.artifact-write-literal(";\n")
+      }
+      #call seed_emit_indent(%depth)
+      #call bootstrap.artifact-write-literal("return;\n")
+      #return 1
+    }
     #call seed_emit_indent(%depth)
     #let %value_id: #bits<64> = #call bootstrap.ir-instruction-value(%instruction_id)
     #if #eq(%value_id, 0) {
