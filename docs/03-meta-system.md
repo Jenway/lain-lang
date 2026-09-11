@@ -151,8 +151,9 @@ IrApi
   verify and print
 
 LainVmApi
-  execute a verified temporary root procedure for #eval
+  execute a verified root procedure or child procedure
   return a physical value or propagate Trap
+  # LAINIR owns the Eval effect; the VM contributes execution primitives only
 
 DiagnosticApi
   record code, severity, span and message
@@ -200,6 +201,11 @@ let main = std::func() -> i64 {
 Meta 生成 `#add` 和 `#eval`。LAINVM 执行加法。Meta 不需要实现第二套整数表达式求值语义。
 
 `#eval` 正常完成时返回其声明的 LAINIR 物理值；执行失败时由 LAIN-VM 产生 Trap。LAIN-VM 不判断这个物理值在 Meta 中代表整数、类型、模块还是 AST，也不为它添加对象类别、资源归属或代际信息。
+
+`Eval` 是 LAINIR 的概念：LAINIR 定义并验证「这段已 lowering 的代码在编译期执行」，
+LAINVM 只提供执行所需的原语（过程入口、VSpace、预算、Trap）。因此 `Eval` effect 属于
+LAINIR 契约，不属于 VM 契约；编译器边界安装它的 handler。见
+[`04-lain-vm.md`](04-lain-vm.md) §8.4。
 
 Meta 为 `#eval` 提供静态预期类型，并允许块引用外围的物理局部值。lowering 把每个自由
 `%local` 转换为临时根过程的按值参数；这不是把 Meta frame、类型对象或 AST 对象交给

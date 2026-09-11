@@ -3,6 +3,10 @@
 状态：当前架构设计与 C3 实现。C seed 已通过临时 TCB 执行 `#eval`；Lain VM 的解释器、
 根过程执行入口和子 TCB 执行入口已归入 `src/lainvm/`。Meta 到该入口的重新接线属于 C4。
 
+职责划分（2026-09-12 校准）：`#eval` 是 LAINIR 的概念，它命名「这段已 lowering 的 IR 在
+编译期执行」。LAIN-VM 不拥有 `Eval` effect，只提供实现它所需的执行原语。effect 的实现
+策略（TCB 或 CPS）是编译期决策，见 [`stdlib/effect-system.md`](stdlib/effect-system.md)。
+
 LAIN-VM 是 Lain 的执行控制面。它为编译期 `#eval`、解释器自举、运行期特权降级和未来的并发执行提供统一的物理环境模型。
 
 LAIN-VM 与 LAINIR 分层：LAINIR 描述已经确定尺寸、调用约定和内存访问方式的物理程序；LAIN-VM 管理这些程序运行时的地址空间、执行上下文、同步、异常和能力。LAIN-VM 不替代 LAINIR，也不向 LAINIR 引入源语言类型或对象布局。
@@ -22,6 +26,17 @@ LAIN-VM 由五类正交对象组成：
 VSpace 不负责执行；TCB 不拥有地址空间；Endpoint 不拥有执行流；Trap 不代替诊断系统；CSpace 不改变 LAINIR 指令的含义。对象之间通过 VM contract 组合。
 
 这些对象是 VM 的逻辑对象。它们可以由解释器中的宿主结构体、native backend 中的寄存器和栈、或操作系统中的线程和地址空间实现。它们不是 LAINIR 的 struct、record 或 `#data` 声明。
+
+这五类对象目前不在同一成熟度上：
+
+| 对象 | 现状 |
+| --- | --- |
+| VSpace、TCB、Trap、CSpace | 已实现且被消费；C seed 的 `#eval` 路径与 `src/lainvm/interpreter.lain` 都在使用 |
+| Endpoint、scheduler、TCB 挂起/恢复 | 已设计、未激活；Lain 实现中没有 Endpoint 与 scheduler，`suspend_tcb`/`resume_tcb`/`run_slice` 都没有调用者 |
+
+原因是 `#eval` 是同步的（§8.1），当前没有任何 handler 需要挂起执行。挂起机制的消费者是
+具有非平凡 `resume` 的 handler；在这类 handler 出现之前，Endpoint 与调度不属于契约的
+活跃部分，不应据此认为 Lain 实现"缺了"它们。
 
 ## 2. 与 LAINIR 的边界
 
@@ -46,6 +61,10 @@ LAIN-VM 为这些操作提供执行环境：
 - 通过 CSpace 决定 `#extern` 等外部能力是否可用。
 
 TCB、VSpace、Endpoint、Trap 和 CSpace 不属于当前 LAINIR v1 指令集。需要向 Lain 或标准库公开 VM 控制操作时，必须先定义 VM API、权限、生命周期和 backend lowering。
+
+`#eval` 属于 LAINIR 语义：LAINIR 定义「这段已 lowering 的代码在编译期执行」这一概念并
+验证其静态类型。LAIN-VM 提供执行它所需的原语——过程入口、VSpace、预算与 Trap——但不
+定义 `Eval` effect，也不参与 `#eval` 的语义判定。
 
 ## 3. VSpace
 
@@ -205,10 +224,16 @@ Lain 实现将 `interpreter.lain` 置于 `src/lainvm/`。它提供根过程执�
 组织 return、break、yield 与 Trap，但该记录不属于 LAINVM API，也不会进入 `#eval` 的
 结果语义。
 
-编译器中的 Meta 不直接调用带 `state` 参数的入口。LAINVM 还定义 `Eval` effect operation；
-外层 VM 在执行 compiler 时安装它的 handler，handler 使用活动 TCB 调用
-`execute_child` 并 `resume` 普通 `Value`。Meta 只能够 `perform` 此 operation，因此无法
-构造、保存或传递 TCB 与 VSpace。
+编译器中的 Meta 不直接调用带 `state` 参数的入口。
+
+`Eval` 是 LAINIR 层的 effect，命名「这段已验证的 IR 在编译期执行」。LAINVM 不定义它，
+只提供实现它所需的执行原语：`execute` / `execute_child`，外加 VSpace、预算与 Trap。
+handler 由编译器边界安装——它取活动 TCB，调用 `execute_child`，并 `resume` 得到的普通
+`Value`。因此 Meta 只能够 `perform` 该 operation，无法构造、保存或传递 TCB 与 VSpace。
+
+`src/lainvm/interpreter.lain` 目前把 `Eval` effect 与 `eval_handler` 定义在 VM 模块内部，
+这是待迁移的过渡状态：二者应随 LAINIR 契约移动，VM 只保留执行原语。`eval_handler` 签名
+上的 `&mut LainVm` 参数是「本 handler 的恢复需要 TCB 机制」这一事实的未成型替身。
 
 ## 9. 确定性与时间
 
@@ -232,4 +257,11 @@ LAIN-VM 的对象在最终 lowering 中可以被消除，但对象之间的权�
 
 ## 11. 实施顺序
 
-实施阶段与验收条件统一记录在 [`roadmaps/lain-roadmap.md`](roadmaps/lain-roadmap.md)。当前首先删除旧的求值结果包装协议；随后固定临时 TCB、共享 VSpace、过程返回和 Trap 的接口，再分别接入 seed 解释器、Lain 编写的解释器和 Meta。
+实施阶段与验收条件统一记录在 [`roadmaps/lain-roadmap.md`](roadmaps/lain-roadmap.md)。
+
+当前边界校准（2026-09-12）：
+
+- `Eval` 与 `eval_handler` 归 LAINIR 契约，LAINVM 只保留执行原语；
+- LAINVM 的活跃契约收窄为「执行已验证的 LAINIR，并守住 VSpace、Trap 与预算」；
+- Endpoint、scheduler 与 TCB 挂起链，在出现非平凡 `resume` 的 handler 之前不激活；
+- CPS 策略不涉及 VM 操作——变换之后没有 VM 参与，故 LAINVM 只实现 TCB 一条路径。
