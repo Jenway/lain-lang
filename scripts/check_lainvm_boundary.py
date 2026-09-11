@@ -38,7 +38,7 @@ def main() -> int:
     interpreter = INTERPRETER.read_text(encoding="utf-8")
     require("@export\nlet lainvm: Module" in interpreter,
             "LAINVM module export is missing")
-    require("let Flow: type" in interpreter,
+    require("let Flow: std::type" in interpreter,
             "interpreter-private control flow is missing")
     require("@export let Flow" not in interpreter,
             "interpreter-private Flow is public")

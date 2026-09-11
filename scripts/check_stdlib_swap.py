@@ -10,14 +10,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "build" / "bootstrap" / "compiler_core.l1"
 STDLIB = ROOT / "build" / "bootstrap" / "stdlib.l1"
 BUNDLER = ROOT / "scripts" / "bundle_lainir.py"
-SEED = ROOT / "seed" / "zig-out" / "bin" / (
-    "lainir-seed.exe" if os.name == "nt" else "lainir-seed"
-)
+SEED = seed_exe("lainir-seed")
 
 
 def fail(message: str) -> int:
@@ -74,7 +74,7 @@ def main() -> int:
                 "compiler_compile_library",
                 os.fspath(output),
                 os.fspath(ROOT / "std" / "meta.lain"),
-                os.fspath(ROOT / "std" / "type.lain"),
+                os.fspath(ROOT / "std" / "type_policy.lain"),
             ],
             cwd=ROOT,
             text=True,
@@ -139,7 +139,7 @@ def main() -> int:
                 "compiler_compile_library",
                 os.fspath(owner_output),
                 os.fspath(ROOT / "std" / "meta.lain"),
-                os.fspath(ROOT / "std" / "type.lain"),
+                os.fspath(ROOT / "std" / "type_policy.lain"),
             ],
             cwd=ROOT,
             text=True,
@@ -198,7 +198,7 @@ def main() -> int:
                 "compiler_compile_library",
                 os.fspath(nil_output),
                 os.fspath(ROOT / "std" / "meta.lain"),
-                os.fspath(ROOT / "std" / "type.lain"),
+                os.fspath(ROOT / "std" / "type_policy.lain"),
             ],
             cwd=ROOT,
             text=True,
