@@ -21,6 +21,7 @@
 #extern #proc meta_value_start(#addr %value) -> #bits<64>;
 #extern #proc meta_value_length(#addr %value) -> #bits<64>;
 #extern #proc meta_value_payload(#addr %value) -> #addr;
+#extern #proc meta_value_environment(#addr %value) -> #addr;
 #extern #proc meta_value_module(
   #addr %source, #addr %name, #addr %group, #addr %environment
 ) -> #addr;
@@ -163,32 +164,22 @@
   #return #call meta_value_nil()
 }
 
-// The standard namespace is a normal Meta module.  Its binding is created
-// once in the unit root environment from the first source spelling of
-// `std::type`; ordinary `::` lookup resolves every later occurrence.
-#proc program_bind_std_type_universe(
-  #addr %unit, #addr %source, #addr %annotation
+// The standard root is constructed when its compilation unit is created.
+// This accessor retrieves the one stable Meta identity used by all type
+// values; use-site paths remain ordinary environment lookups.
+#proc program_standard_type_universe(
+  #addr %unit, #addr %source
 ) -> #addr {
-  #let %member: #addr = #call program_std_type_member(%source, %annotation)
-  #if #call raw_is_nil(%member) { #return #call meta_value_nil() }
   #let %root: #addr = #call program_unit_meta_environment(%unit)
-  #let %existing: #addr = #call meta_env_lookup_local(
-    %root, %source, %annotation
+  #let %standard: #addr = #call meta_env_lookup_text(
+    %root, %source, "std", 3
   )
-  #if #eq(#call meta_value_kind(%existing), 0) {
-    #let %standard_environment: #addr = #call meta_env_new(%root)
-    #let %type_value: #addr = #call meta_value_type_with_namespace(
-      %source, %member, %member, %standard_environment
-    )
-    #let %standard: #addr = #call meta_value_module(
-      %source, %annotation, %member, %standard_environment
-    )
-    #call meta_env_bind(%root, %source, %annotation, %standard)
-    #call meta_env_bind(
-      %standard_environment, %source, %member, %type_value
+  #if #eq(#call meta_value_kind(%standard), 2) {
+    #return #call meta_env_lookup_text(
+      #call meta_value_environment(%standard), %source, "type", 4
     )
   }
-  #return #call meta_env_lookup_path(%root, %source, %annotation)
+  #return #call meta_value_nil()
 }
 
 #proc program_is_type_binding(
@@ -198,8 +189,8 @@
   #let %colon: #addr = #call raw_node_next(%name)
   #let %annotation: #addr = #call raw_node_next(%colon)
   #if #call raw_is_nil(%annotation) { #return 0 }
-  #let %type_universe: #addr = #call program_bind_std_type_universe(
-    %unit, %source, %annotation
+  #let %type_universe: #addr = #call program_standard_type_universe(
+    %unit, %source
   )
   #if #eq(#call meta_value_kind(%type_universe), 0) { #return 0 }
   #return #eq(
