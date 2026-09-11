@@ -55,7 +55,8 @@
   `#unit`，失败产生 Trap。
 - `#eval` 在最终 backend 产物前执行并消失。
 - `src/lainvm/api_contract.lain` 定义 Artifact、Procedure、Value、ValueVector 和 `Eval`
-  operation；lainc 不导入 `src/lainvm/interpreter.lain` 的私有状态。
+  operation；lainc 不导入 `src/lainvm/interpreter.lain` 的私有状态。其中 `Eval` 的归属
+  已裁定为 LAINIR（§4.4），迁移尚未执行。
 - bootstrap 已能通过 LAINVM 路径执行整数表达式、标量 Meta 调用、effect 构造、effect
   operation 构造和 module factory。
 - `scripts/build_srclainc.py` 能生成可验证的 `build/lainir/srclainc.l1`；
@@ -76,20 +77,57 @@
 - `std::func` 还没有解释 `?{}` 输入行。
 - 当前裸 `type`、generic policy、`ComptimeValue` 分类和 compiler-owned specialization
   仍散布于 `std/`、`bootstrap/` 与 `src/lainc/`。
+- `Eval` 目前定义在 `src/lainvm/`，但它是 LAINIR 的概念。迁移前 LAINIR 与 LAINVM 在契约
+  层面仍然混着（见 §4.4）。
+- C seed 的编译期求值使用「传源码 + fold」模型（`bootstrap.eval_source`，宿主重新 parse、
+  verify 并原地折叠整个模块，返回值只是状态码，结果经 `bootstrap.eval-next` 侧信道取回，
+  而该 capability 目前没有调用者）；lainc 使用「执行已验证 IR」模型
+  （`Vm.eval(unit, procedure, arguments)` 返回物理 `Value`）。两者统一之前，编译期执行
+  没有单一语义。
+- Lain 实现中的 `suspend_tcb`、`resume_tcb`、`run_slice` 与 Endpoint 都没有调用者。这不是
+  "缺实现"：现有全部 handler 的 `resume` 都在尾位置或根本不 `resume`，挂起机制的消费者
+  尚不存在。见 [`../stdlib/effect-system.md`](../stdlib/effect-system.md)。
 
-### 3.3 当前已知的名称冲突
+### 3.3 编码 0：已完成（2026-09-12）
 
-`std/type.lain` 当前导出名为 `type` 的 Module，其中包含 `TypeKind`、`TypeValue`、转换策略
-等内容。目标语言中的 `std::type` 是“所有类型值所属的 Meta 类型”，二者不能共用名称。
+§6.2 名称冲突解除和 §6.3 类型宇宙绑定都已完成，并已通过 §6.5 的全部验收：
 
-当前直接使用旧模块的代码只有：
+| 验收项 | 结果 |
+| --- | --- |
+| `python scripts/check_std_type.py` | 退出码 0，`PASS std::type binding and bare type rejection` |
+| `python scripts/check_bootstrap_consteval.py` | 退出码 0 |
+| `python scripts/build_formal_stdlib.py` | 退出码 0 |
+| `python scripts/build_srclainc.py` | 退出码 0 |
+| 搜索 `import("std::type")` | 无结果 |
+| 搜索裸 `type` 标注（`std/`、`src/`） | 无结果 |
+
+反例 `scripts/fixtures/formal_bare_type_rejected.lain` 有意保留裸 `type`，由
+`scripts/check_std_type.py` 验证它必须被拒绝，因此它不计入"无结果"。
+
+工作树中尚未提交、属于本阶段的文件：
 
 ```text
-std/meta.lain -> import("std::type") -> type_policy.strict_conversion(...)
+bootstrap/compiler/meta_bindings.l1
+bootstrap/compiler/meta_type.l1
+bootstrap/compiler/lower_program.l1
+scripts/check_std_type.py
+scripts/fixtures/formal_std_type_value.lain
+scripts/fixtures/formal_bare_type_rejected.lain
 ```
 
-因此编码 0 必须先把仍需保留的转换策略移到 `std/type_policy.lain`，释放 `std::type`。不能
-让旧 Module 与新类型宇宙同时存在，也不能根据上下文猜测同一个名字的含义。
+这些改动已经过验收，可以按 §6.5 的切片提交；不要覆盖它们。
+
+### 3.4 已修复的陈旧断言
+
+编码 0 的 `std::type` 迁移改了源码拼写，但漏改了按字符串匹配源码的 gate。以下三处已修正，
+改动前它们使对应检查恒失败：
+
+- `scripts/check_lainvm_boundary.py`：`"let Flow: type"` → `"let Flow: std::type"`；
+- `scripts/check_lainc_lainir_api.py`：`"let SourceResult: type"` → `"let SourceResult: std::type"`；
+- `scripts/check_stdlib_swap.py`：三处源码清单中的 `std/type.lain` → `std/type_policy.lain`。
+
+教训：这类 gate 用字面量匹配源码，**改名时必须同步搜索 gate**。新增此类断言前，先确认它
+检查的是行为还是拼写。
 
 ## 4. 不可违反的设计决定
 
@@ -150,12 +188,23 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 类别选择不同执行协议。不得恢复 `EvalResult`、object kind、owner、generation、sidecar
 或其他 Meta 包装。
 
+`Eval` 是 LAINIR 的概念，不是 LAINVM 的。LAINIR 定义并验证「这段已 lowering 的代码在
+编译期执行」，LAINVM 只提供实现它所需的执行原语（`execute`/`execute_child`、VSpace、
+预算、Trap）。因此：
+
+- `Eval` effect 与它的 handler 归 LAINIR 契约，`src/lainvm/` 只保留原语；
+- `eval_handler` 上的 `&mut LainVm` 参数是「本 handler 的恢复需要 TCB 机制」的未成型替身；
+- LAINVM 的活跃契约收窄为「执行已验证的 LAINIR，并守住 VSpace、Trap 与预算」；
+- effect 的实现策略（TCB 或 CPS）由 handler 在编译期决定，见
+  [`../stdlib/effect-system.md`](../stdlib/effect-system.md)。LAINVM 只实现 TCB 一条路径，
+  CPS 路径不涉及任何 VM 操作。
+
 ## 5. 实施顺序
 
 | 阶段 | 状态 | 产出 |
 | --- | --- | --- |
-| 编码 0 | 下一步 | `std::type` 可解析，旧名称冲突消失，裸 `type` 被拒绝 |
-| 编码 1 | 等待编码 0 | bootstrap 中只有一条 Meta callable 执行路径 |
+| 编码 0 | 已完成（2026-09-12） | `std::type` 可解析，旧名称冲突消失，裸 `type` 被拒绝 |
+| 编码 1 | 下一步 | bootstrap 中只有一条 Meta callable 执行路径 |
 | 编码 2 | 等待编码 1 | `std::func` 完整签名可被 Meta elaborator 读取 |
 | 编码 3 | 等待编码 2 | `?{}` 能推导并从环境解析输入 |
 | 编码 4 | 等待编码 3 | 正式 std 与 lainc 全部迁移，旧泛型设施删除 |
@@ -165,7 +214,10 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 
 阶段必须按顺序推进。一个阶段内部可以拆成多个提交，但每个提交必须有独立的可执行验证。
 
-## 6. 编码 0：建立 `std::type`
+## 6. 编码 0：建立 `std::type`（已完成 2026-09-12）
+
+本节保留实施记录与验收命令，供追溯。编码 0 的所有条款均已落地并通过 §6.5 验收；后续阶段
+以 §6.5 的命令作为回归基线。阶段完成后可按既有惯例把完成证据移入 `docs/history/`。
 
 ### 6.1 前置检查
 
@@ -276,11 +328,21 @@ python scripts/build_srclainc.py
 
 ```text
 rg -n -F 'import("std::type")' std src bootstrap scripts
-rg --pcre2 -n ':\s*type\b|\bcomptime\s+[^:]+:\s*type\b' std src scripts/fixtures
+rg -n --pcre2 ':\s+type\b|\bcomptime\s+[^:]+:\s+type\b' std src
 ```
 
-第一个搜索必须无结果。第二个搜索必须无结果。搜索只证明旧拼写消失，不能替代四条执行
-命令。
+第一个搜索必须无结果。第二个搜索必须无结果。
+
+**这两个搜索的模式本身有坑，不要按早期版本的写法改回去：**
+
+- 必须用 `\s+`（一个以上空白），不能用 `\s*`。`\s*` 允许零个空白，因此会把 `std::type`
+  里的 `:type` 也匹配上——而 `std::type` 正是本阶段要引入的拼写。用 `\s*` 写这个搜索，
+  它永远不可能为空，无法作为验收条件。
+- 搜索范围必须排除 `scripts/fixtures`：反例 fixture
+  `scripts/fixtures/formal_bare_type_rejected.lain` 有意保留裸 `type`，由
+  `scripts/check_std_type.py` 验证它必须被拒绝。把它扫进"必须无结果"里是自相矛盾的。
+
+搜索只证明旧拼写消失，不能替代四条执行命令。
 
 建议提交切片：
 
