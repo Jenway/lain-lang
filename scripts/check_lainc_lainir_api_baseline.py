@@ -24,6 +24,7 @@ CHECKS = (
     ("compiler fixture parity", "check_stdlib_conformance.py"),
     ("function signature", "check_function_signature.py"),
     ("function declaration shape", "check_function_shape_conformance.py"),
+    ("frontend operator precedence", "check_operator_precedence.py"),
     ("typed input effects", "check_input_effects.py"),
     ("program entry contract", "check_program_entry.py"),
     ("bits type width", "check_bits_type.py"),
