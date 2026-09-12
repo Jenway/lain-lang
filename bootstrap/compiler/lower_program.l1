@@ -2581,23 +2581,29 @@
   #let %node: #addr = #call raw_node_first(%input_row)
   #loop entries {
     #if #call raw_is_nil(%node) { #return #call program_nil() }
-    // An entry opens with a name atom; a leading `:` (or `,`) means the
-    // name is missing and points at that node.
+    // An entry opens with a name atom.  A bare name is a legal entry meaning
+    // `name: _`, so the colon is optional; a leading `:` or `,` instead means
+    // the name is missing and that node is the offender.
     #if #ne(#call raw_node_kind(%node), 1) { #return %node }
     #if #call meta_atom_equal(%source, %node, ":", 1) { #return %node }
     #if #call meta_atom_equal(%source, %node, ",", 1) { #return %node }
-    #let %colon: #addr = #call raw_node_next(%node)
-    #if #call raw_is_nil(%colon) { #return %node }
-    // Anything other than `:` here means the previous entry was not
-    // separated from this one by a comma.
-    #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
-      #return %colon
+    #let %next: #addr = #call raw_node_next(%node)
+    // A bare name must end the row or be followed by a separator.
+    #if #call raw_is_nil(%next) { #return #call program_nil() }
+    #if #call meta_atom_equal(%source, %next, ",", 1) {
+      %node: #addr = #call raw_node_next(%next)
+      #continue entries
     }
-    #let %type: #addr = #call raw_node_next(%colon)
+    // The only other legal continuation is an explicit `: type`.  Anything
+    // else (for example the next entry's name) is a missing separator.
+    #if #eq(#call meta_atom_equal(%source, %next, ":", 1), 0) {
+      #return %next
+    }
+    #let %type: #addr = #call raw_node_next(%next)
     // A `:` with no following type (end of row or an immediate `,`) is
     // rejected; the colon is the offending node in both cases.
-    #if #call raw_is_nil(%type) { #return %colon }
-    #if #call meta_atom_equal(%source, %type, ",", 1) { #return %colon }
+    #if #call raw_is_nil(%type) { #return %next }
+    #if #call meta_atom_equal(%source, %type, ",", 1) { #return %next }
     #let %separator: #addr = #call raw_node_next(
       #call program_type_end(%source, %type)
     )
