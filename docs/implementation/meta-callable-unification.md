@@ -169,20 +169,30 @@ capture 活动期间，`artifact-write-*` 写入内存缓冲而非文件；`arti
 **编译器该提供的是原语，不是名字表**：「构造一个 kind=N 的 Meta 值，带这些字段」，
 就像它给类型构造提供原语一样。至于什么源形式对应哪种构造，属于库。
 
-#### 4.2.3 为什么会这样，以及它不该在 bootstrap 里修
+#### 4.2.3 真实原因，以及修正后的结论
 
-要做到名字无关，lowering 必须已经知道每个表达式的绑定与类型——那是 elaborate 的产出。
-`src/lainc` 有这一层（`elaborate_function_body` 产出 `ExprId`），bootstrap 没有。
-按 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md) §3.2，部分 `elaborate`
-语义尚未落地。
+分类这件事（「这个声明是编译期的还是运行期的」）**避不开要知道构造器名**：语法里没有类型
+标注（`let main = std::func() -> i64 { ... }`），所以必须问「`std::func` 是什么」。
 
-**所以七个名字是 elaborate 缺失的症状，不是设计选择。**
+**关键不是要不要比名字，而是名字表住在哪。**
 
-而 bootstrap 的定位是启动工具、不是长期架构（`bootstrap/README.md`）。**在过渡实现上
-精修这件事没有价值**——正确路径是等形式实现接管（路线图编码 4/5），届时
-`program_node_has_meta_constructor` 与 `program_function_is_meta` 整体消失。
+形式标准库已经用正确方式实现了它：
 
-结论：**1b 不新增任何名字匹配；本议题记录在案，不在 bootstrap 中推进。**
+| | `std/meta.lain`（形式库） | `bootstrap/compiler`（编译器） |
+| --- | --- | --- |
+| 名字识别 | 集中在 `meta_word_code`（`:2360`）一处，映射为整数编号 | 24 处字面量比较，散在 7 个文件 |
+| 其余代码 | 比较编号：`meta_is_module` = `== 11`（`:2539`） | 每次逐字节比较 |
+| 字面量名字比较 | **零处**（全仓库搜索确认） | 24 处 |
+
+而接缝**已经存在**：`bootstrap/std/entry.l1:50` 的 `lain_std_expand` 已经在调库函数
+`lain_std_meta_status`；`bootstrap/std/core_forms.l1` 的注释也写明「这个标准库入口之后可由
+形式 std 实现替换」。
+
+**结论（2026-09-12 修正）**：不需要等 elaborate——需要的是把编译器里那 24 处判断搬到接缝
+后面。这是**优先级高于 1b 其余部分**的工作，编号为**编码 1c**，验收与工作项见
+[`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md) §7.0.2。
+
+本文后续按「1c 先做」叙述。1b 不新增任何名字匹配。
 
 ### 4.3 统一入口的算法
 
@@ -204,22 +214,21 @@ capture 活动期间，`artifact-write-*` 写入内存缓冲而非文件；`arti
 这与路线图 §7.2 的九步一致，只是把步骤 4 的实现前提（§4.1）补齐，并把名字匹配排除在
 本阶段之外（§4.2.3）。
 
-每片独立验证、可单独回退。
+每片独立验证、可单独回退。**顺序（2026-09-12 调整）**：1c 优先，其后 1b。
 
 | 片 | 内容 | 验收 |
 | --- | --- | --- |
+| **1c** | **把形式识别移回库**：把编译器里 24 处名字比较（7 个文件）改为经标准库 ABI 询问；库按形式库的形状实现（集中词→编号表） | 路线图 §7.0.2：三条执行命令 + 一条「替换库入口则判定随之改变」的探针 + 文本验收 |
 | **1b-1** | 宿主加 capture 模式（§4.1）。纯 C 改动，无调用者变化 | `zig build`；现有全部 gate 不变 |
 | **1b-2** | `meta_eval_vm.l1` 的 buffer 与 `meta_call_vm.l1` 的写入改为 capture sink；删除 `lainvm_eval_buffer_*` | `check_bootstrap_consteval.py`（5 类 fixture 全过） |
-| ~~1b-3~~ | ~~抽出 Meta 值构造规则表~~ **已废弃**（§4.2：方向错误，不新增名字匹配） | — |
-| ~~1b-4~~ | ~~effect / type / AST 值接入规则表~~ **已废弃**（同上） | — |
-| **1b-3** | 先只把 module 的构造从手写 LAINIR 改为**复用现有调用路径**（不做名字表，不新增匹配） | `formal_meta_module_factory.lain` + 全量 baseline |
+| **1b-3** | 把 module 的构造从手写 LAINIR 改为复用现有调用路径（不做名字表，不新增匹配） | `formal_meta_module_factory.lain` + 全量 baseline |
 | **1b-4** | 4 个入口收敛为单一路径；删除 §6 的清单 | 全量 baseline + §7.4 |
 | **1b-5** | 把 scalar 的最小 expr writer（§2.3）退役，改用通用 lowering | 新增含 `let`/`if`/调用 的 Meta callable fixture |
 
-**1b-1 与 1b-2 是 sink 统一**，与构造器名争议无关，可独立推进。
+**1c 独立于其余全部工作**：它只搬判断的位置，不改变任何行为，且接缝已存在。
 
-**1b-3 之后的能力收敛依赖 elaborate 的产出**（§4.2.3）。若 elaborate 尚不能提供绑定与类型
-判定，1b-3 到 1b-5 应推迟到编码 2/3 之后，或与它们交错推进。
+**1b-3 之后依赖 elaborate 的产物与完整签名**（§4.2.3、§9）。若两者尚不可用，1b-3 到 1b-5
+应推迟到编码 2/3 之后，或与它们交错推进。
 
 **1b-5 必须放最后**：它是唯一会放大可 lower 表达式集合的一步，风险最高，且需要完整的
 参数与返回类型信息。
@@ -238,8 +247,9 @@ lainvm_meta_effect_factory_node
 
 外加本文新增的删除项：`lainvm_eval_buffer_*`（1b-2 之后零调用者）。
 
-**不在 1b 删除**：`program_node_has_meta_constructor`、`program_function_is_meta`
-（§4.2.3）。它们随形式实现接管而消失，不在这里精修。
+**编码 1c 的删除项**：不删函数，而是搬走判断——`program_node_has_meta_constructor`、
+`program_function_is_meta`、`program_is_ignored_declaration` 中的名字比较改为经库入口询问，
+24 处字面量从 `bootstrap/compiler/` 消失（§4.2.3、路线图 §7.0.2）。
 
 每项删除前必须先确认零引用（用全仓库搜索，排除 `build/` 与 `.git/`）。
 
@@ -260,12 +270,15 @@ scripts/fixtures/formal_meta_module_factory.lain       （已有）
 
 ## 8. 风险与决策点
 
-### 8.1 已解决：构造器名硬编码（原「规则表归属」问题已作废）
+### 8.1 已解决：构造器名硬编码
 
 本节原先是「规则表该住在 bootstrap 还是主 lowering」。该问题随 §4.2 的重写而作废——**不建表**。
 
-真正的结论：bootstrap 的构造器名硬编码是 elaborate 缺失的症状，应从形式实现接管中消失，
-不在 bootstrap 里精修。1b 不新增任何名字匹配。
+修正后的结论（§4.2.3）：名字表本身无法避免（语法里没有类型标注），**关键是它住在哪**。
+形式库已经做对了（集中在 `meta_word_code`），接缝也已存在，所以要做的只是把编译器里那
+24 处搬过去。这就是**编码 1c**，优先于 1b 其余部分。
+
+1b 不新增任何名字匹配；1c 只搬家，不扩表。
 
 ### 8.2 修改 C seed 的合规性
 
