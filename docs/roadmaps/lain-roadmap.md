@@ -219,13 +219,13 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 | 阶段 | 状态 | 产出 |
 | --- | --- | --- |
 | 编码 0 | 已完成（2026-09-12） | `std::type` 可解析，旧名称冲突消失，裸 `type` 被拒绝 |
-| 编码 1 | 进行中：1a 已完成；**1c 下一步**；1b 其余部分在其后 | bootstrap 中只有一条 Meta callable 执行路径 |
+| 编码 1 | 进行中：1a / 1c 已完成；1b-1、1b-2 已完成 | bootstrap 中只有一条 Meta callable 执行路径 |
 | 编码 2 | 等待编码 1 | `std::func` 完整签名可被 Meta elaborator 读取 |
 | 编码 3 | 等待编码 2 | `?{}` 能推导并从环境解析输入 |
 | 编码 4 | 等待编码 3 | 正式 std 与 lainc 全部迁移，旧泛型设施删除 |
-| 编码 5 | 等待编码 4 | 正式 lainc 通过真实 LAINVM handler 执行 Meta |
-| 编码 6 | 等待编码 5 | Lain 编译器达到 gen2 == gen3 固定点 |
-| 编码 7 | 等待编码 6 | native backend 和发布 gate 收口 |
+| 编码 5 | **受阻于归档**（§11.0 需先决定由谁提供 VM 与 provider） | 正式 lainc 通过真实 LAINVM handler 执行 Meta |
+| 编码 6 | 阻塞于编码 5 | Lain 编译器达到 gen2 == gen3 固定点 |
+| 编码 7 | 阻塞于编码 6 | native backend 和发布 gate 收口 |
 
 **编码 1 的内部顺序（2026-09-12 调整）**：
 
@@ -233,7 +233,18 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 | --- | --- | --- |
 | 1a | 已完成 | Meta 调用的 LAINVM 执行管道统一（§7.0） |
 | 1c | **已完成 2026-09-12** | 形式识别移回库：编译器中的 24 处名字字面量降为 **0**，库新增 10 个谓词（§7.0.2） |
-| **1b** | **下一步** | sink 统一（1b-1/1b-2），及其余能力收敛（1b-3+） |
+| **1b** | **进行中** | 1b-1、1b-2 已完成（sink 统一）；1b-3 进行中；1b-4/1b-5 需 body lowering |
+
+**归档的影响（2026-09-12）**：`src/lainir` 的 provider 与 `src/lainvm` 的 interpreter 已暂停
+（§2），而编码 5 的原文依赖它们。编码 5 因此多了一个前置决定（§11.0），编码 6/7 顺延。
+编码 0–4 不受影响。
+
+**1b-1 已完成 2026-09-12**：宿主加了内存 artifact capture sink
+（`artifact-capture-begin/data/length`）。它是**文件 sink 之上的一层**而非替代品——
+编译期求值在发射阶段运行时会同时持有文件 sink，capture 必须能与它并存。
+三个探针验证：缓冲增长（4104 字节越 4096 初始容量）、无静默截断、以及
+「文件内容 `file1file2` 与 capture 内容 `mem` 互不混淆」。全部由
+`scripts/check_bootstrap_vm_api.py` 覆盖。
 
 1c 的验收：`bootstrap/compiler/` 的名字字面量从 24 降到 0；
 `scripts/check_meta_form_swap.py` 证明编译器真的经库询问（替换库谓词返回值则编译行为改变）；
@@ -813,13 +824,16 @@ std/core/memory.lain
 std/memory_model.lain
 src/lainir/api_contract.lain
 src/lainvm/api_contract.lain
-src/lainvm/interpreter.lain
 src/lainc/*.lain
 ```
 
 这些文件中的类型参数都是普通 `std::type` 参数；需要环境供应的依赖放入 `?{}`；由调用者
 明确传递的策略继续作为显式参数。不要仅为了减少实参就擅自把 Allocation、Bounds 或
 Memory 移入输入行。
+
+`src/lainvm/interpreter.lain` 原在此列，但该文件已暂停并归档
+（`docs/history/formal-implementations/`，见 §2）。重写它时同样适用本节要求，但那是
+归档恢复后的工作，不阻塞本阶段。
 
 ### 10.3 验收
 
@@ -845,7 +859,23 @@ stdlib: finish ordinary meta type factories
 
 ## 11. 编码 5：接通正式 lainc 的 LAINVM handler
 
-### 11.1 当前缺口
+> **状态（2026-09-12）：受阻于归档。** 本节原文假定 `src/lainvm/interpreter.lain` 提供
+> `eval_handler`，且组合层实例化「默认 LAINIR provider」与 LAINVM。这两者都已暂停并归档
+> （§2）。要推进本节，必须先决定 LAINVM 与 LAINIR provider 由谁提供——见下方 11.0。
+
+### 11.0 前置决定：由谁提供 VM 与 provider
+
+归档后有两种可行路径，选择权在项目负责人：
+
+| 路径 | 内容 | 代价 |
+| --- | --- | --- |
+| A. 先用 C seed 兼作 provider 与 VM | 组合层直接调用宿主已有的 `bootstrap.vm-*` 能力（bootstrap 的 Meta 路径已这样工作）。`eval_handler` 由**组合层**提供，不在任何 VM 内部。 | 与 §4.4「`Eval` 归 LAINIR 契约、handler 在编译边界」一致；但 Lain 侧没有 TCB 可见，`execute_child` 语义由宿主承担。 |
+| B. 先重写 Lain 版 LAINVM 与 provider | 补齐归档版本缺的部分（浮点、表达式覆盖、成员别名 lowering），再按本节原文推进。 | 工作量大；且归档版实测贡献 0 个物理过程，重写前需先确认它能被真正执行。 |
+
+**在做出选择前不要开始本节。** 路径 A 更接近当前可运行状态；路径 B 符合「用 Lain 重写」
+的长期方向，但应先把「什么条件下算写对了」定义清楚（那正是归档 README 里记的缺口清单）。
+
+### 11.1 当前缺口（原文，保留供追溯）
 
 `src/lainc/meta.lain` 已经写出 `perform Vm.eval(...)`，`src/lainvm/interpreter.lain` 已经提供
 `eval_handler`，但 `scripts/check_lainvm_boundary.py` 只确认这些文本存在。必须建立一个
@@ -853,11 +883,11 @@ stdlib: finish ordinary meta type factories
 
 ### 11.2 实现顺序
 
-1. 在组合层实例化 Memory、默认 LAINIR provider、LAINVM 和 compiler driver。
+1. 在组合层实例化 Memory、LAINIR provider、LAINVM 和 compiler driver。
 2. 安装 Memory、Bounds、Platform、VM Allocation、VM Eval 和 Trap 所需 handler。
 3. 让 `Vm.eval` handler 调用 `execute_child`，使用临时 TCB 和调用者 VSpace。
 4. 把普通 Value 恢复给 continuation；Trap 进入 compiler diagnostic。
-5. 不允许 compiler core 导入 `src/lainvm/interpreter.lain`；只有组合层选择具体实现。
+5. 不允许 compiler core 导入任何 VM 或 provider 的实现文件；只有组合层选择具体实现。
 
 新增 `scripts/check_formal_lainc_eval.py`。它必须运行生成的正式 compiler artifact 编译一个
 确实需要 Meta 执行的 fixture，并证明 `eval_handler` 被执行。记录 provider 或检查源码文本
@@ -878,6 +908,9 @@ lainc: handle meta evaluation through lainvm
 ```
 
 ## 12. 编码 6：建立真正的 Lain 编译器固定点
+
+> **状态（2026-09-12）：间接受阻。** 固定点要求 lainc 能编译自己并运行，因此依赖编码 5
+> 提供的可运行组合（VM 与 provider）。编码 5 的选择（§11.0）决定本节何时可开始。
 
 ### 12.1 先定义可执行入口
 
