@@ -222,7 +222,7 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 | 编码 1 | 进行中：1a / 1c / 1b-1 / 1b-2 / 1b-3 已完成；1b-4、1b-5 受阻 | bootstrap 中只有一条 Meta callable 执行路径 |
 | 编码 2 | **已完成 2026-09-12**（§8.4 四条验收全过；见 §8.5 的限定） | `std::func` 完整签名可被 Meta elaborator 读取 |
 | 编码 3 | **基本完成 2026-09-12**：调用点解析、三类诊断、§9.2 四来源推导、scalar 路径、值宽度检查全部落地（§9.0.1）；仅余 §9.4 原文正例缺库符号 `Ord` | `?{}` 能推导并从环境解析输入 |
-| 编码 4 | 等待编码 3 | 正式 std 与 lainc 全部迁移，旧泛型设施删除 |
+| 编码 4 | **已完成 2026-09-12**：旧泛型设施全部删除、源码已迁移（§10）；`srclainc` 过程数 358→353 | 正式 std 与 lainc 全部迁移，旧泛型设施删除 |
 | 编码 5 | **受阻于归档**（§11.0 需先决定由谁提供 VM 与 provider） | 正式 lainc 通过真实 LAINVM handler 执行 Meta |
 | 编码 6 | 阻塞于编码 5 | Lain 编译器达到 gen2 == gen3 固定点 |
 | 编码 7 | 阻塞于编码 6 | native backend 和发布 gate 收口 |
@@ -1030,6 +1030,25 @@ python scripts/check_input_effects.py
 ```text
 stdlib: finish ordinary meta type factories
 ```
+
+**完成状态（2026-09-12）**：§10.1 的清单已全部删除并同步调用者，§10.3 的六条命令全部退出 0，
+文本搜索无结果。
+
+实测到的两处值得记下：
+
+1. **`ComptimeValue` 不能按名删除**，这与 §10.1 的预判一致：effect 参数向量仍在用它。
+   被删掉的是**旧的泛型参数分类**（按 kind 分成四路 payload）与它的四个 constructor；保留的
+   是单一 tagged 编译期值（`kind`/`type_id`/`payload`/`valid`），它不含「哪些 Meta 值可作为
+   泛型参数」的策略，也不含按返回类型分派的协议。effect store 改用 `types.MetaValue` +
+   `same_meta_value`，排序仍为 kind 再 payload。
+2. **删除是真实的代码缩减**：`srclainc.l1` 的过程数从 **358 降到 353**。因此本阶段**不能**用
+   「产物逐字节不变」作为验证判据——那是前面几个阶段的判据。本阶段的判据是两侧标准库一致性
+   （`check_policy_conformance`）、`check_stdlib_conformance`、两个构建、确定性 gate
+   （`check_srclainc_artifact`）、以及 19 道 baseline 全绿。
+
+**残留的合法提及**（不是遗漏）：`std/effect.lain:3` 的注释 "Generic Meta facilities"、
+`std/meta.lain` 的 `callable_phase_comptime`（phase 常量，与旧 `comptime` 模型无关）、以及
+`std/core/vec.lain` 里 "specialization" 的普通用法（按类型特化存储）。
 
 ## 11. 编码 5：接通正式 lainc 的 LAINVM handler
 
