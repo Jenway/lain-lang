@@ -63,19 +63,18 @@ python scripts/<name>.py [args...]
 
 ## 推荐入口
 
-- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 33 道门禁，任一失败即以该 gate 的退出码结束。
+- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 34 道门禁，任一失败即以该 gate 的退出码结束。
 - `python scripts/capture_lain_bootstrap_baseline.py` — 采集可复现的机器可读 bootstrap 基线报告（同时记录成功与失败的 gate）。
 
-`scripts/check_*.py` 共 37 个，主入口收录其中 **33** 个。**未收录的 4 个及其原因**：
+`scripts/check_*.py` 共 37 个，主入口收录其中 **34** 个。**未收录的 3 个及其原因**：
 
 | 脚本 | 原因 |
 | --- | --- |
-| `check_lainc_bootstrap_snapshot.py` | 需要一个 `build/bootstrap/lainc.l1.snapshot.json` 前置产物；先跑 `freeze_lainc_bootstrap.py` 才有（该步单独运行，不在主入口内）。 |
 | `check_native_lainc_matrix.py` | 需要 native `lainc` 可执行文件，属预期不可用（见「当前预期的不可用项」）。 |
 | `check_native_formal_stdlib.py` | 同上。 |
 | `check_native_lainc_determinism.py` | 同上。 |
 
-未收录的四个在主入口里**不会被跑**，因此主入口全绿**不代表**它们通过。
+未收录的三个在主入口里**不会被跑**，因此主入口全绿**不代表**它们通过。
 
 ## 脚本索引
 
@@ -94,7 +93,7 @@ python scripts/<name>.py [args...]
 
 | 脚本 | 作用 |
 | --- | --- |
-| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 33 道门禁。 |
+| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 34 道门禁。 |
 | `check_lainc_lainir_api.py` | 检查源码层面的 lainc → LAINIR capability 边界（`--final` 时切换为移除 gate）。 |
 | `check_lainc_lainir_api_snapshots.py` | 用 checked-in canonical artifact 基线守护 formal compiler 的回归。 |
 | `check_backend_manifest.py` | 检查 backend manifest 的 logical capability 分类。 |

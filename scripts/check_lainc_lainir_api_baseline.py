@@ -49,6 +49,9 @@ CHECKS = (
     ("core/stdlib boundary", "check_lainir_boundaries.py"),
     ("LAINIR compiler end to end", "check_lainir_compiler.py"),
     ("bootstrap release packaging", "check_lainc_bootstrap_release.py"),
+    # Reads the snapshot that the release step above writes, so it must follow
+    # it rather than run standalone.
+    ("bootstrap snapshot", "check_lainc_bootstrap_snapshot.py", "build/bootstrap/lainc.l1"),
 )
 
 def main() -> int:
