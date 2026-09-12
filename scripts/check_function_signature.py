@@ -52,6 +52,18 @@ POSITIVE = (
         "    return f(42);\n"
         "};\n",
     ),
+    (
+        # A bare name is legal and means `name: _`; the type is inferred from
+        # the signature, so the row shape alone must be accepted here.
+        "bare input name",
+        "let f = std::func(value: i64) ?{T} -> i64 {\n"
+        "    return value;\n"
+        "};\n"
+        "\n"
+        "let main = std::func() -> i64 {\n"
+        "    return f(42);\n"
+        "};\n",
+    ),
 )
 
 # Signatures that must be rejected with the listed bootstrap status code.
