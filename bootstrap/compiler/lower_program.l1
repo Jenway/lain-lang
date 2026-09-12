@@ -66,6 +66,24 @@
 #extern #proc meta_type_is_nominal(#addr %source, #addr %node) -> #bits<1>;
 #extern #proc meta_type_is_unit(#addr %source, #addr %node) -> #bits<1>;
 #extern #proc lain_std_meta_status(#addr %source, #addr %root) -> #bits<32>;
+#extern #proc lain_std_is_meta_constructor_path(
+  #addr %source, #addr %node
+) -> #bits<1>;
+#extern #proc lain_std_is_module_return_type(
+  #addr %source, #addr %node
+) -> #bits<1>;
+#extern #proc lain_std_is_module_shape_return_type(
+  #addr %source, #addr %node
+) -> #bits<1>;
+#extern #proc lain_std_is_meta_return_type(
+  #addr %source, #addr %node
+) -> #bits<1>;
+#extern #proc lain_std_is_form_keyword(
+  #addr %source, #addr %node
+) -> #bits<1>;
+#extern #proc lain_std_is_record_keyword(
+  #addr %source, #addr %node
+) -> #bits<1>;
 #extern #proc program_bind_import_aliases(
   #addr %unit, #addr %source, #bits<64> %source_index,
   #addr %root, #addr %environment
@@ -455,37 +473,9 @@
 ) -> #bits<1> {
   #if #call raw_is_nil(%node) { #return 0 }
   #if #eq(#call raw_node_kind(%node), 1) {
-    #if #call meta_atom_equal(%source, %node, "std", 3) {
-      #let %colon1: #addr = #call raw_node_next(%node)
-      #let %colon2: #addr = #call raw_node_next(%colon1)
-      #let %member: #addr = #call raw_node_next(%colon2)
-      #if #call meta_atom_equal(%source, %colon1, ":", 1) {
-        #if #call meta_atom_equal(%source, %colon2, ":", 1) {
-          #if #call meta_atom_equal(%source, %member, "module", 6) {
-            #return 1
-          }
-          #if #call meta_atom_equal(%source, %member, "effect", 6) {
-            #return 1
-          }
-          #if #call meta_atom_equal(
-            %source, %member, "handler", 7
-          ) { #return 1 }
-          #if #call meta_atom_equal(
-            %source, %member, "effect_operation", 16
-          ) { #return 1 }
-          #if #call meta_atom_equal(
-            %source, %member, "type_with_namespace", 19
-          ) { #return 1 }
-          #if #call meta_atom_equal(
-            %source, %member, "handler_type", 12
-          ) { #return 1 }
-          #if #call meta_atom_equal(
-            %source, %member, "meta_type", 9
-          ) { #return 1 }
-        }
-      }
-    }
-    #return 0
+    // `std::X` member classification is owned by the standard library; only
+    // the tree walk over nested constructor syntax stays here.
+    #return #call lain_std_is_meta_constructor_path(%source, %node)
   }
   #let %child: #addr = #call raw_node_first(%node)
   #loop children {
@@ -508,10 +498,7 @@
   // node before deriving its operand name; qualified/grouped type syntax can
   // make `program_operand_name` point at a delimiter and otherwise leak a
   // Meta-only module return into physical emission as an undefined `%module`.
-  #if #call meta_atom_equal(%source, %return_type, "Module", 6) {
-    #return 1
-  }
-  #if #call meta_atom_equal(%source, %return_type, "ModuleShape", 11) {
+  #if #call lain_std_is_meta_return_type(%source, %return_type) {
     #return 1
   }
   #if #eq(
@@ -529,7 +516,7 @@
   // module-valued identity function still has a physical ABI and is kept for
   // nominal-parameter lowering, so inspect the returned expression before
   // classifying it as Meta.
-  #if #call meta_atom_equal(%source, %return_name, "Module", 6) {
+  #if #call lain_std_is_module_return_type(%source, %return_name) {
     #let %statement: #addr = #call raw_node_first(
       #call program_function_body(%function)
     )
@@ -546,7 +533,7 @@
       #continue module_return_scan
     }
   }
-  #if #call meta_atom_equal(%source, %return_name, "ModuleShape", 11) {
+  #if #call lain_std_is_module_shape_return_type(%source, %return_name) {
     #return 1
   }
   #if #call meta_atom_equal(%source, %return_name, "Effect", 6) {
@@ -2786,10 +2773,7 @@
   #let %name: #addr = #call raw_node_next(%let_node)
   #let %colon: #addr = #call raw_node_next(%name)
   #let %annotation: #addr = #call raw_node_next(%colon)
-  #if #call meta_atom_equal(%source, %annotation, "Module", 6) {
-    #return 1
-  }
-  #if #call meta_atom_equal(%source, %annotation, "ModuleShape", 11) {
+  #if #call lain_std_is_meta_return_type(%source, %annotation) {
     #return 1
   }
   #return 0
@@ -2802,9 +2786,7 @@
   #let %node: #addr = #call raw_node_next(%let_node)
   #loop declaration {
     #if #call raw_is_nil(%node) { #return 0 }
-    #if #call meta_atom_equal(%source, %node, "struct", 6) { #return 1 }
-    #if #call meta_atom_equal(%source, %node, "module", 6) { #return 1 }
-    #if #call meta_atom_equal(%source, %node, "import", 6) { #return 1 }
+    #if #call lain_std_is_form_keyword(%source, %node) { #return 1 }
     #if #call meta_atom_equal(%source, %node, ";", 1) { #return 0 }
     %node: #addr = #call raw_node_next(%node)
     #continue declaration
@@ -5313,9 +5295,9 @@
   // declaration.  That expression has neither a builtin width nor a nominal
   // name, so recognize the constructor before the generic physical checks.
   #if #call program_is_std_path(%concrete_source, %concrete) {
-    #if #call meta_atom_equal(
+    #if #call lain_std_is_record_keyword(
       %concrete_source,
-      #call program_operand_name(%concrete_source, %concrete), "struct", 6
+      #call program_operand_name(%concrete_source, %concrete)
     ) { #return 1 }
   }
   #if #call meta_type_is_address(%concrete_source, %concrete) { #return 0 }
