@@ -121,15 +121,48 @@
   #return %type
 }
 
+// `#bits<N>` is not one Atom: the lexer splits it into four siblings
+// (`#bits`, `<`, the decimal width, `>`).  Recognise that shape on its first
+// Atom and return the declared width in bits.  Zero means the node is not
+// this shape, or the width is not a positive whole number of bytes: the
+// layout table below is byte-granular, so such a spelling stays unknown.
+#proc meta_bits_width(#addr %source, #addr %node) -> #bits<64> {
+  #if #eq(#call meta_atom_equal(%source, %node, "#bits", 5), 0) { #return 0 }
+  #let %open: #addr = #call raw_node_next(%node)
+  #if #eq(#call meta_atom_equal(%source, %open, "<", 1), 0) { #return 0 }
+  #let %digits: #addr = #call raw_node_next(%open)
+  #let %close: #addr = #call raw_node_next(%digits)
+  #if #eq(#call meta_atom_equal(%source, %close, ">", 1), 0) { #return 0 }
+  #if #ne(#call raw_node_kind(%digits), 1) { #return 0 }
+  #let %length: #bits<64> = #call raw_node_length(%digits)
+  #if #eq(%length, 0) { #return 0 }
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %start: #bits<64> = #call raw_node_start(%digits)
+  #let %index: #bits<64> = 0
+  #let %bits: #bits<64> = 0
+  #loop digits {
+    #if #sge(%index, %length) { #break digits }
+    #let %byte: #bits<8> = #call tool_byte_at(%data, #add(%start, %index))
+    #if #slt(%byte, 48) { #return 0 }
+    #if #sgt(%byte, 57) { #return 0 }
+    %bits: #bits<64> = #add(#mul(%bits, 10), #sub(%byte, 48))
+    %index: #bits<64> = #add(%index, 1)
+    #continue digits
+  }
+  #if #eq(%bits, 0) { #return 0 }
+  #if #ne(#sub(%bits, #mul(#udiv(%bits, 8), 8)), 0) { #return 0 }
+  #return %bits
+}
+
 // Built-in physical type registry.  These are layout facts, not parser
 // keywords: the RawAst still sees ordinary atoms and the meta layer decides
 // which names denote usable field types.
 #proc meta_builtin_size(#addr %source, #addr %node) -> #bits<64> {
   #if #call meta_atom_equal(%source, %node, "bool", 4) { #return 1 }
-  #if #call meta_atom_equal(%source, %node, "#bits<8>", 2) { #return 1 }
-  #if #call meta_atom_equal(%source, %node, "#bits<16>", 3) { #return 2 }
-  #if #call meta_atom_equal(%source, %node, "#bits<32>", 3) { #return 4 }
-  #if #call meta_atom_equal(%source, %node, "#bits<64>", 3) { #return 8 }
+  // Bit widths are byte sizes here so the existing bit-width helper stays
+  // `size * 8`, exactly as it is for the named builtins.
+  #let %bits: #bits<64> = #call meta_bits_width(%source, %node)
+  #if #ne(%bits, 0) { #return #udiv(%bits, 8) }
   #if #call meta_atom_equal(%source, %node, "i8", 2) { #return 1 }
   #if #call meta_atom_equal(%source, %node, "i16", 3) { #return 2 }
   #if #call meta_atom_equal(%source, %node, "i32", 3) { #return 4 }
@@ -301,6 +334,18 @@
       }
     }
     #return %current
+  }
+  // `#bits<N>` lexes as four siblings (`#bits`, `<`, digits, `>`): the type
+  // expression ends at the closing `>` rather than at its opening Atom.
+  #if #call meta_atom_equal(%source, %node, "#bits", 5) {
+    #let %open: #addr = #call raw_node_next(%node)
+    #if #call meta_atom_equal(%source, %open, "<", 1) {
+      #let %digits: #addr = #call raw_node_next(%open)
+      #let %close: #addr = #call raw_node_next(%digits)
+      #if #call meta_atom_equal(%source, %close, ">", 1) {
+        #return %close
+      }
+    }
   }
   #let %current: #addr = %node
   #loop qualified {
