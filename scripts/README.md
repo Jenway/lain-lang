@@ -63,7 +63,7 @@ python scripts/<name>.py [args...]
 
 ## 推荐入口
 
-- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 17 道 lainc → LAINIR API 迁移 gate，任一失败即以该 gate 的退出码结束。
+- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 18 道 lainc → LAINIR API 迁移 gate，任一失败即以该 gate 的退出码结束。
 - `python scripts/capture_lain_bootstrap_baseline.py` — 采集可复现的机器可读 bootstrap 基线报告（同时记录成功与失败的 gate）。
 
 ## 脚本索引
@@ -83,7 +83,7 @@ python scripts/<name>.py [args...]
 
 | 脚本 | 作用 |
 | --- | --- |
-| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 17 道 lainc → LAINIR API 迁移 gate。 |
+| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 18 道 lainc → LAINIR API 迁移 gate。 |
 | `check_lainc_lainir_api.py` | 检查源码层面的 lainc → LAINIR capability 边界（`--final` 时切换为移除 gate）。 |
 | `check_lainc_lainir_api_snapshots.py` | 用 checked-in canonical artifact 基线守护 formal compiler 的回归。 |
 | `check_backend_manifest.py` | 检查 backend manifest 的 logical capability 分类。 |
@@ -106,6 +106,7 @@ python scripts/<name>.py [args...]
 | `check_input_effects.py` | 校验 `?{}` 输入行的调用点语义：显式类型条目在调用环境按精确名解析并绑定进 invocation environment（正例断言真实运行值），裸名条目报「无法推导」(5104)，缺输入与类型不匹配报 5108 并断言诊断 span 指向声明 token。 |
 | `check_lain_backend_abi.py` | 检查 Lain 编写的 backend 是否符合 capability ABI v1。 |
 | `check_lainc_bootstrap_release.py` | 验证 lainc bootstrap release 的打包与安装。 |
+| `check_program_entry.py` | 校验 program 模式的入口契约：`main` 必须返回 32 位（`i32`/`u32` 均可，编译并真实运行），其它宽度报 5112。 |
 | `check_lainir_boundaries.py` | 检查 core artifact 只暴露 ABI 入口、不含语言级语义 pass 实现。 |
 | `check_lainvm_boundary.py` | 检查 LAINIR/LAINVM 契约边界：契约存在、lainc 只依赖契约、Meta 通过 VM 请求编译期执行、归档实现不得回到 `src/`。 |
 | `check_meta_ast_conformance.py` | 对比第一代 RawAst 输出与 formal `std::meta` 输出。 |
