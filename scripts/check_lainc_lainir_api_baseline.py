@@ -22,6 +22,7 @@ CHECKS = (
     ("LAINIR physical safety", "check_lainir_physical_safety.py"),
     ("meta form recognition via stdlib", "check_meta_form_swap.py"),
     ("compiler fixture parity", "check_stdlib_conformance.py"),
+    ("function signature", "check_function_signature.py"),
     ("compiler artifact snapshots", "check_lainc_lainir_api_snapshots.py"),
     ("source-closure determinism", "check_srclainc_artifact.py"),
     ("gen2/gen3 self-host", "run_lainir_self_host.py"),

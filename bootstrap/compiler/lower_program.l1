@@ -2570,6 +2570,46 @@
   #return 0
 }
 
+// Validate the shape of the entries in a `?{...}` input row.  Each entry
+// is a `name : type` pair; entries are separated by commas and a type is
+// any single expression (its own validity is checked elsewhere).  An empty
+// row is legal and means the same as omitting the row.  Returns the RawAst
+// node that makes the row ill-formed, or nil when the row is well shaped.
+#proc program_input_row_shape_node(
+  #addr %source, #addr %input_row
+) -> #addr {
+  #let %node: #addr = #call raw_node_first(%input_row)
+  #loop entries {
+    #if #call raw_is_nil(%node) { #return #call program_nil() }
+    // An entry opens with a name atom; a leading `:` (or `,`) means the
+    // name is missing and points at that node.
+    #if #ne(#call raw_node_kind(%node), 1) { #return %node }
+    #if #call meta_atom_equal(%source, %node, ":", 1) { #return %node }
+    #if #call meta_atom_equal(%source, %node, ",", 1) { #return %node }
+    #let %colon: #addr = #call raw_node_next(%node)
+    #if #call raw_is_nil(%colon) { #return %node }
+    // Anything other than `:` here means the previous entry was not
+    // separated from this one by a comma.
+    #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
+      #return %colon
+    }
+    #let %type: #addr = #call raw_node_next(%colon)
+    // A `:` with no following type (end of row or an immediate `,`) is
+    // rejected; the colon is the offending node in both cases.
+    #if #call raw_is_nil(%type) { #return %colon }
+    #if #call meta_atom_equal(%source, %type, ",", 1) { #return %colon }
+    #let %separator: #addr = #call raw_node_next(
+      #call program_type_end(%source, %type)
+    )
+    #if #call raw_is_nil(%separator) { #return #call program_nil() }
+    #if #eq(#call meta_atom_equal(%source, %separator, ",", 1), 0) {
+      #return %separator
+    }
+    %node: #addr = #call raw_node_next(%separator)
+    #continue entries
+  }
+}
+
 #proc program_function_runtime_params(
   #addr %source, #addr %candidate
 ) -> #addr {
@@ -2658,6 +2698,22 @@
     #if #call raw_is_nil(%input_row) { #call program_set_function_status(%function, 5102) #return %function }
     #if #ne(#call raw_node_kind(%input_row), 2) { #call program_set_function_status(%function, 5102) #return %function }
     #if #ne(#call raw_node_delimiter(%input_row), 123) { #call program_set_function_status(%function, 5102) #return %function }
+  }
+  // Validate the shape of the `name : type` entries.  A shape error keeps
+  // the offending RawAst node as the unit validation span, so the
+  // diagnostic points at the bad entry instead of the whole declaration.
+  #if %has_input_row {
+    #let %input_row_error: #addr = #call program_input_row_shape_node(
+      %source, %input_row
+    )
+    #if #eq(#call raw_is_nil(%input_row_error), 0) {
+      #call program_unit_set_validation_function(%unit, %function)
+      #call program_unit_set_validation_node(
+        %unit, %source, %input_row_error
+      )
+      #call program_set_function_status(%function, 5102)
+      #return %function
+    }
   }
   #if #call raw_is_nil(%arrow1) { #call program_set_function_status(%function, 5102) #return %function }
   #if #call raw_is_nil(%arrow2) { #call program_set_function_status(%function, 5102) #return %function }
