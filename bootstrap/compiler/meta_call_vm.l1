@@ -409,10 +409,178 @@
   }
 }
 
-#proc lainvm_meta_build_module_artifact() -> #unit {
+// Writes the local spelling (%value or %result) of the value a
+// syntax-reference constructor allocates.  The effect constructor names its
+// value %value; the module and effect-operation constructors name theirs
+// %result.  Both spellings are preserved so the generated LAINIR stays
+// byte-identical.
+#proc lainvm_meta_write_meta_value_binding(#bits<1> %value_binding) -> #unit {
+  #call bootstrap.artifact-write-byte(37)
+  #if %value_binding {
+    #call bootstrap.artifact-write-literal("value")
+  } else {
+    #call bootstrap.artifact-write-literal("result")
+  }
+  #return
+}
+
+// Writes one `, #lea(base=%<binding>, idx=0, scale=0, offset=<offset>)` store
+// destination and the statement separator that follows it.
+#proc lainvm_meta_write_meta_value_field(
+  #bits<1> %value_binding, #bits<64> %offset
+) -> #unit {
+  #call bootstrap.artifact-write-literal(", #lea(base=")
+  #call lainvm_meta_write_meta_value_binding(%value_binding)
+  #call bootstrap.artifact-write-literal(", idx=0, scale=0, offset=")
+  #call lainvm_write_decimal(%offset)
+  #call bootstrap.artifact-write-literal(")\n  #store ")
+  #return
+}
+
+// Writes the fixed Meta parameters the generated meta_target and meta_entry
+// procedures carry after any forwarded factory parameters.  %typed selects
+// the declaration spelling (#addr %meta_source) over the entry call's
+// argument spelling (%meta_source).
+#proc lainvm_meta_write_meta_value_parameters(
+  #bits<1> %forward_parameters, #bits<1> %node_span_fields,
+  #bits<1> %typed
+) -> #unit {
+  #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+  #call bootstrap.artifact-write-literal("%meta_source, ")
+  #if %forward_parameters {
+    #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+    #call bootstrap.artifact-write-literal("%meta_node, ")
+    #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+    #call bootstrap.artifact-write-literal("%meta_environment")
+    #return
+  }
+  #if %node_span_fields {
+    #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+    #call bootstrap.artifact-write-literal("%meta_node, ")
+  } else {
+    #if %typed { #call bootstrap.artifact-write-literal("#bits<64> ") }
+    #call bootstrap.artifact-write-literal("%meta_start, ")
+    #if %typed { #call bootstrap.artifact-write-literal("#bits<64> ") }
+    #call bootstrap.artifact-write-literal("%meta_length, ")
+  }
+  #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+  #call bootstrap.artifact-write-literal("%meta_group, ")
+  #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+  #call bootstrap.artifact-write-literal("%meta_environment")
+  #return
+}
+
+// Writes the factory parameters an artifact procedure forwards ahead of its
+// fixed Meta parameters.  %typed selects the declaration list over the entry
+// call's argument list.
+#proc lainvm_meta_write_factory_parameters(
+  #addr %source, #addr %function, #bits<1> %forward_parameters,
+  #bits<1> %typed
+) -> #unit {
+  #if %forward_parameters {
+    #if %typed {
+      #call lainvm_meta_write_typed_parameters(%source, %function, 1)
+    } else {
+      #call lainvm_meta_write_parameter_names(%source, %function)
+    }
+    #if #ne(#call program_function_count(%function), 0) {
+      #call bootstrap.artifact-write-literal(", ")
+    }
+  }
+  #return
+}
+
+// Writes the generated LAINIR of one syntax-reference Meta value
+// constructor.  All three constructors share one skeleton (source, start,
+// length, reference, environment, two reserved words) and differ only in the
+// stored kind, the field sources, and the fixed Meta parameter suffix:
+//   %kind                stored kind constant: 2 = module, 4 = effect,
+//                        7 = effect_operation.
+//   %forward_parameters  1 when the artifact procedures forward the factory's
+//                        own parameters as leading #addr arguments.
+//   %node_span_fields    1 when offsets 16/24 hold %node's start and length,
+//                        which the builder fixes at build time.
+//   %value_binding       1 when the allocated value is spelled %value.
+// Offset 32 holds %meta_node when the factory parameters are forwarded (the
+// effect constructor's reference) and %meta_group otherwise.
+#proc lainvm_meta_build_meta_value_artifact(
+  #bits<64> %kind, #addr %source, #addr %function, #addr %node,
+  #bits<1> %forward_parameters, #bits<1> %node_span_fields,
+  #bits<1> %value_binding
+) -> #unit {
   #call lainvm_capture_begin()
   #call bootstrap.artifact-write-literal(
-    "#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;\n#proc meta_target(#addr %meta_source, #bits<64> %meta_start, #bits<64> %meta_length, #addr %meta_group, #addr %meta_environment) -> #addr {\n  #let %nil: #addr = #call bootstrap.allocate-pages(8)\n  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)\n  #let %result: #addr = #call bootstrap.allocate-pages(64)\n  #store 2, #lea(base=%result, idx=0, scale=0, offset=0)\n  #store %meta_source, #lea(base=%result, idx=0, scale=0, offset=8)\n  #store %meta_start, #lea(base=%result, idx=0, scale=0, offset=16)\n  #store %meta_length, #lea(base=%result, idx=0, scale=0, offset=24)\n  #store %meta_group, #lea(base=%result, idx=0, scale=0, offset=32)\n  #store %meta_environment, #lea(base=%result, idx=0, scale=0, offset=40)\n  #store 0, #lea(base=%result, idx=0, scale=0, offset=48)\n  #store %nil, #lea(base=%result, idx=0, scale=0, offset=56)\n  #return %result\n}\n#proc meta_entry(#addr %meta_source, #bits<64> %meta_start, #bits<64> %meta_length, #addr %meta_group, #addr %meta_environment) -> #addr {\n  #return #eval { #return #call meta_target(%meta_source, %meta_start, %meta_length, %meta_group, %meta_environment) }\n}\n"
+    "#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;\n#proc meta_target("
+  )
+  #call lainvm_meta_write_factory_parameters(
+    %source, %function, %forward_parameters, 1
+  )
+  #call lainvm_meta_write_meta_value_parameters(
+    %forward_parameters, %node_span_fields, 1
+  )
+  #call bootstrap.artifact-write-literal(
+    ") -> #addr {\n  #let %nil: #addr = #call bootstrap.allocate-pages(8)\n  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)\n  #let "
+  )
+  #call lainvm_meta_write_meta_value_binding(%value_binding)
+  #call bootstrap.artifact-write-literal(
+    ": #addr = #call bootstrap.allocate-pages(64)\n  #store "
+  )
+  #call lainvm_write_decimal(%kind)
+  #call lainvm_meta_write_meta_value_field(%value_binding, 0)
+  #call bootstrap.artifact-write-literal("%meta_source")
+  #call lainvm_meta_write_meta_value_field(%value_binding, 8)
+  #if %node_span_fields {
+    #call lainvm_write_decimal(#call raw_node_start(%node))
+  } else {
+    #call bootstrap.artifact-write-literal("%meta_start")
+  }
+  #call lainvm_meta_write_meta_value_field(%value_binding, 16)
+  #if %node_span_fields {
+    #call lainvm_write_decimal(#call raw_node_length(%node))
+  } else {
+    #call bootstrap.artifact-write-literal("%meta_length")
+  }
+  #call lainvm_meta_write_meta_value_field(%value_binding, 24)
+  #if %forward_parameters {
+    #call bootstrap.artifact-write-literal("%meta_node")
+  } else {
+    #call bootstrap.artifact-write-literal("%meta_group")
+  }
+  #call lainvm_meta_write_meta_value_field(%value_binding, 32)
+  #call bootstrap.artifact-write-literal("%meta_environment")
+  #call lainvm_meta_write_meta_value_field(%value_binding, 40)
+  #call lainvm_write_decimal(0)
+  #call lainvm_meta_write_meta_value_field(%value_binding, 48)
+  #call bootstrap.artifact-write-literal("%nil")
+  #call bootstrap.artifact-write-literal(", #lea(base=")
+  #call lainvm_meta_write_meta_value_binding(%value_binding)
+  #call bootstrap.artifact-write-literal(
+    ", idx=0, scale=0, offset=56)\n  #return "
+  )
+  #call lainvm_meta_write_meta_value_binding(%value_binding)
+  #call bootstrap.artifact-write-literal("\n}\n#proc meta_entry(")
+  #call lainvm_meta_write_factory_parameters(
+    %source, %function, %forward_parameters, 1
+  )
+  #call lainvm_meta_write_meta_value_parameters(
+    %forward_parameters, %node_span_fields, 1
+  )
+  #call bootstrap.artifact-write-literal(
+    ") -> #addr {\n  #return #eval { #return #call meta_target("
+  )
+  #call lainvm_meta_write_factory_parameters(
+    %source, %function, %forward_parameters, 0
+  )
+  #call lainvm_meta_write_meta_value_parameters(
+    %forward_parameters, %node_span_fields, 0
+  )
+  #call bootstrap.artifact-write-literal(") }\n}\n")
+  #return
+}
+
+#proc lainvm_meta_build_module_artifact() -> #unit {
+  #call lainvm_meta_build_meta_value_artifact(
+    2, #call program_nil(), #call program_nil(), #call program_nil(), 0, 0, 0
   )
   #return
 }
@@ -444,45 +612,8 @@
 #proc lainvm_meta_build_effect_artifact(
   #addr %source, #addr %function, #addr %effect_node
 ) -> #unit {
-  #call lainvm_capture_begin()
-  #call bootstrap.artifact-write-literal(
-    "#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;\n#proc meta_target("
-  )
-  #call lainvm_meta_write_typed_parameters(%source, %function, 1)
-  #if #ne(#call program_function_count(%function), 0) {
-    #call bootstrap.artifact-write-literal(", ")
-  }
-  #call bootstrap.artifact-write-literal(
-    "#addr %meta_source, #addr %meta_node, #addr %meta_environment) -> #addr {\n"
-  )
-  #call bootstrap.artifact-write-literal(
-    "  #let %nil: #addr = #call bootstrap.allocate-pages(8)\n  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)\n  #let %value: #addr = #call bootstrap.allocate-pages(64)\n  #store 4, #lea(base=%value, idx=0, scale=0, offset=0)\n  #store %meta_source, #lea(base=%value, idx=0, scale=0, offset=8)\n  #store "
-  )
-  #call lainvm_write_decimal(
-    #call raw_node_start(%effect_node)
-  )
-  #call bootstrap.artifact-write-literal(
-    ", #lea(base=%value, idx=0, scale=0, offset=16)\n  #store "
-  )
-  #call lainvm_write_decimal(
-    #call raw_node_length(%effect_node)
-  )
-  #call bootstrap.artifact-write-literal(
-    ", #lea(base=%value, idx=0, scale=0, offset=24)\n  #store %meta_node, #lea(base=%value, idx=0, scale=0, offset=32)\n  #store %meta_environment, #lea(base=%value, idx=0, scale=0, offset=40)\n  #store 0, #lea(base=%value, idx=0, scale=0, offset=48)\n  #store %nil, #lea(base=%value, idx=0, scale=0, offset=56)\n  #return %value\n}\n#proc meta_entry("
-  )
-  #call lainvm_meta_write_typed_parameters(%source, %function, 1)
-  #if #ne(#call program_function_count(%function), 0) {
-    #call bootstrap.artifact-write-literal(", ")
-  }
-  #call bootstrap.artifact-write-literal(
-    "#addr %meta_source, #addr %meta_node, #addr %meta_environment) -> #addr {\n  #return #eval { #return #call meta_target("
-  )
-  #call lainvm_meta_write_parameter_names(%source, %function)
-  #if #ne(#call program_function_count(%function), 0) {
-    #call bootstrap.artifact-write-literal(", ")
-  }
-  #call bootstrap.artifact-write-literal(
-    "%meta_source, %meta_node, %meta_environment) }\n}\n"
+  #call lainvm_meta_build_meta_value_artifact(
+    4, %source, %function, %effect_node, 1, 1, 1
   )
   #return
 }
@@ -572,21 +703,8 @@
 #proc lainvm_meta_build_effect_operation_artifact(
   #addr %value
 ) -> #unit {
-  #call lainvm_capture_begin()
-  #call bootstrap.artifact-write-literal(
-    "#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;\n#proc meta_target(#addr %meta_source, #addr %meta_node, #addr %meta_group, #addr %meta_environment) -> #addr {\n  #let %nil: #addr = #call bootstrap.allocate-pages(8)\n  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)\n  #let %result: #addr = #call bootstrap.allocate-pages(64)\n  #store 7, #lea(base=%result, idx=0, scale=0, offset=0)\n  #store %meta_source, #lea(base=%result, idx=0, scale=0, offset=8)\n  #store "
-  )
-  #call lainvm_write_decimal(
-    #call raw_node_start(%value)
-  )
-  #call bootstrap.artifact-write-literal(
-    ", #lea(base=%result, idx=0, scale=0, offset=16)\n  #store "
-  )
-  #call lainvm_write_decimal(
-    #call raw_node_length(%value)
-  )
-  #call bootstrap.artifact-write-literal(
-    ", #lea(base=%result, idx=0, scale=0, offset=24)\n  #store %meta_group, #lea(base=%result, idx=0, scale=0, offset=32)\n  #store %meta_environment, #lea(base=%result, idx=0, scale=0, offset=40)\n  #store 0, #lea(base=%result, idx=0, scale=0, offset=48)\n  #store %nil, #lea(base=%result, idx=0, scale=0, offset=56)\n  #return %result\n}\n#proc meta_entry(#addr %meta_source, #addr %meta_node, #addr %meta_group, #addr %meta_environment) -> #addr {\n  #return #eval { #return #call meta_target(%meta_source, %meta_node, %meta_group, %meta_environment) }\n}\n"
+  #call lainvm_meta_build_meta_value_artifact(
+    7, #call program_nil(), #call program_nil(), %value, 0, 1, 0
   )
   #return
 }
