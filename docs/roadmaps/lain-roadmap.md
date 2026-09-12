@@ -827,13 +827,18 @@ elaborator 还不读签名，`std/meta.lain` 的 `meta_elaborate_status` 仍是�
 2. **§9.2 的约束来源全部未实现**：来自显式参数类型、返回类型、同行其它条目、body 的约束都没有。
    因此 §9.4 的原文正例 `?{T, ord: Ord(T)}` **不能通过**。
 3. **裸名一律报 5104**，即只实现了「没有约束就诊断」这一支，未实现「有约束则推导」。
-4. **scalar Meta 调用路径仍未读输入行**：只有会构造 invocation environment 的 module / effect
-   调用会解析输入行。顶层 `let x = f(...)` 且 `f` 是 scalar Meta 函数时，输入行仍被忽略——
-   该路径的 artifact 生成器只声明显式形参，要支持必须把输入行也写成 artifact 形参并按序追加
-   实参。这是独立的一处改动。
+4. ~~scalar Meta 调用路径不读输入行~~ **已修（2026-09-12）**：scalar 路径现在解析输入行。
+   实现要点：artifact 在显式形参之后按行序追加输入条目；调用点**复用**既有的
+   `lainvm_meta_resolve_inputs`（未复制解析逻辑），从同一 invocation environment 取回值并按序
+   追加实参。span 与码与 module/effect 路径一致。
+   **一处刻意的偏离**：票据原要求所有条目不区分地作为 `#addr` 形参，实测不可行——
+   `#proc meta_entry(#addr %local) -> #bits<32> { #return %local }` 被 verifier 以
+   `2014 return type mismatch` 拒绝，且 `#addr` 携带的是 Meta 句柄而非数值。因此**标量类型**的
+   条目按其声明宽度作 bits 形参（与既有显式标量形参同法），只有非标量条目才用 `#addr`。
 5. **只报第一条失败条目**（与编译器 first-error-abort 模型一致）。
 
-后续片应当从第 2 与第 4 项入手；第 1 项需要 Meta 值表示能携带宽度，属更深的结构改动。
+后续片应当从**第 2 项**入手——它是 §9.2 与 §9.4 原文正例的全部剩余差距。第 1 项需要 Meta 值
+表示能携带宽度，属更深的结构改动。
 
 ### 9.1 本阶段语义
 
