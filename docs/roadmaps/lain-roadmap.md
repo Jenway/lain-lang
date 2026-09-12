@@ -1203,26 +1203,51 @@ bootstrap: reach the lain compiler fixed point
 
 ## 13. 编码 7：backend 与发布 gate
 
-### 13.0 已定位的 backend 缺陷（2026-09-12）
+### 13.0 backend 行内 else 缺陷：已修（2026-09-12）
 
-`python scripts/build_default_lainc.py` 目前失败，根因已定位到 **Lain 编写的 C 后端**
-（`src/lainc/backend_c.lain` 的 `emit_line`），而**不是**固定点：**行内 `} else { ... }` 的尾部
-内容被整段丢弃**。
+`src/lainc/backend_c.lain` 的 `emit_line` 曾把 `} else {` 当**行首前缀**匹配后直接返回，
+**丢弃该行剩余内容**。于是 `} else { %r = 2 }` 只发射 `} else {`，丢掉 `%r = 2` 与结尾的 `}`，
+函数少一个闭合大括号、下一个函数嵌套进去，`zig cc` 报 `function definition is not allowed here`。
 
-最小复现（已存为 `scripts/fixtures/backend_inline_else.l1`）：源码一行写 `} else { %r = 2 }`，
-后端只发射 `} else {`，丢掉 `%r = 2` 与**结尾的 `}`**，于是函数少一个闭合大括号，下一个函数
-嵌套进去，`zig cc` 报 `function definition is not allowed here`。
+全量产物 `build/lainc-native.c` 因此有 **3 处**未闭合（都在 `program_std_type_member` 里形如
+`} else { #return #call meta_value_nil() }` 的三行）。
 
-全量产物 `build/lainc-native.c` 有 **3 处**未闭合，都在 `program_std_type_member` 里那三行形如
-`} else { #return #call meta_value_nil() }` 的语句上。
+**修复**：三个前缀分支（`} else {`、`else {`、单独 `}`）不再丢弃行尾，改为消费完整逻辑行；
+行尾若是 `}`，先把其前的内容作为语句发射，再单独发射 `}`。递归起点严格前进，故有界。
 
-两个要点：
+**独立复验**（括号扫描前先用正则剥掉字符串/字符字面量与注释——不剥会误判，我踩过）：
+`final_depth` 从 **+3 → 0**，出现在 `depth>0` 处的顶层函数定义从 **33 → 0**；
+最小复现 `scripts/fixtures/backend_inline_else.l1` 的产物现在能被 `zig cc` 编译；
+`check_native_backend_canonical_diff.py` 与 `check_native_backend_migration.py` 未回归。
 
-1. 这条路径的 C **不是** seed 的 LAINIR→C 发射器产出的，而是 Lain 后端产出的
-   （`scripts/build_lainc_native.py:50` 用 `backend_c_entry.l1` 生成）。我最初误判为 seed
-   发射器，用错工具做了几次无效复现。
-2. 后端产出畸形 C 时**退出码为 0**，没有任何诊断；失败只在 `zig cc` 阶段以 20 条级联错误暴露。
-   这是「静默产出坏结果」的失败模式，修好本缺陷后值得单独考虑加校验。
+#### 13.0.1 native 构建仍失败：两个独立的、更深的缺口
+
+修好上述缺陷后 `build_default_lainc.py` 仍失败，剩 **4 类错误共 40 条**，分成两组，
+**都不是**行内 else 的问题：
+
+1. **后端不支持 `#eval` / `#data_addr`**（4 条 `expected expression`）：产物里直接出现
+   `uintptr_t root= #eval {;` 与 `#data_addr(...)` 这样的字面文本。`#eval` 按设计必须在
+   backend 之前被消除，所以这一项本质上要等编码 5/6 把编译期执行接到 LAINVM。
+2. **native host 缺少 13 个能力符号**（36 条 `undeclared function`）：
+   `bootstrap_vm_{arguments-new,arguments-release,arguments-append-addr,arguments-append-bits,
+   artifact-parse,artifact-release,procedure-find,eval-bits,eval-addr,eval-unit}` 与
+   `bootstrap_artifact_capture_{begin,data,length}`。
+   `seed/src/host/native_lainc.c` 只提供 prologue 已声明的那 15 个；`emit_extern_decl` 又对
+   `bootstrap.` 前缀一律跳过（假定 prologue 已覆盖），于是这些符号无人声明。
+
+**注意**：把 13 个声明补进 prologue **不是修复**——`native_lainc.c` 并未实现它们，
+错误只会从编译期"未声明"变成链接期"未定义"。真正的修复要实现这 13 个宿主函数。
+
+**且它单独也解不开**：第 1 组仍在，native 构建依旧失败。所以这条路要同时具备
+「`#eval` 在 backend 之前消除」与「native host 覆盖 ABI」两项，与 §3.2 的结论一致。
+
+**追责说明**：`bootstrap_vm_*` 的依赖**早于**本次改动（改动前的
+`bootstrap/compiler/meta_eval_vm.l1` 已有 12 处引用），属既存缺口；
+`bootstrap_artifact_capture_*` 是本轮 1b-1 新增的能力，使所需符号从 10 个增至 13 个。
+两者同一性质：宿主未覆盖 artifact 实际使用的 ABI。
+
+**另一个值得单独处理的问题**：后端产出畸形 C 时**退出码为 0**，没有任何诊断，失败只在
+`zig cc` 阶段以级联错误暴露。建议后续给后端加产物校验（例如发射后自检括号平衡）。
 
 此缺陷与编码 5 的 A/B 选择无关，因此不受其阻塞。
 
