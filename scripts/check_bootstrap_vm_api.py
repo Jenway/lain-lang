@@ -2,7 +2,8 @@
 """Run the seed-facing Artifact/Procedure/arguments/eval contract.
 
 Also covers the in-memory artifact capture sink, which lets a compiler stage
-obtain generated LAINIR without a filesystem round trip.
+obtain generated LAINIR without a filesystem round trip, including while the
+emitter holds the output file open.
 """
 
 from __future__ import annotations
@@ -19,17 +20,18 @@ SEED = seed_exe("lainir-seed")
 FIXTURES = ROOT / "scripts" / "fixtures"
 PROBE = FIXTURES / "bootstrap_vm_api_probe.l1"
 CAPTURE_PROBE = FIXTURES / "bootstrap_capture_probe.l1"
+LAYER_PROBE = FIXTURES / "bootstrap_capture_layer_probe.l1"
 EMPTY = FIXTURES / "empty_source.lain"
 
 
-def run_probe(probe: Path, entry: str, directory: Path) -> int:
+def run_probe(probe: Path, entry: str, output: Path) -> int:
     result = subprocess.run(
         [
             str(SEED),
             "interpreter",
             str(probe),
             entry,
-            str(directory / "unused.l1"),
+            str(output),
             str(EMPTY),
             str(EMPTY),
         ],
@@ -44,7 +46,7 @@ def run_probe(probe: Path, entry: str, directory: Path) -> int:
 
 
 def main() -> int:
-    required = (PROBE, CAPTURE_PROBE, EMPTY)
+    required = (PROBE, CAPTURE_PROBE, LAYER_PROBE, EMPTY)
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
         print("bootstrap vm api: missing probes: " + ", ".join(missing))
@@ -52,16 +54,24 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="lain-bootstrap-vm-api-") as raw:
         directory = Path(raw)
-        status = run_probe(PROBE, "bootstrap_vm_api_probe", directory)
+        unused = directory / "unused.l1"
+        status = run_probe(PROBE, "bootstrap_vm_api_probe", unused)
         if status:
             return status
-        status = run_probe(
-            CAPTURE_PROBE, "bootstrap_capture_probe", directory
-        )
+        status = run_probe(CAPTURE_PROBE, "bootstrap_capture_probe", unused)
         if status:
             return status
+        # The layer probe writes to a real file, so its bytes can be checked.
+        layered = directory / "layered.l1"
+        status = run_probe(LAYER_PROBE, "bootstrap_capture_layer_probe", layered)
+        if status:
+            return status
+        if layered.read_text(encoding="utf-8") != "file1file2":
+            print("bootstrap vm api: capture leaked into the artifact file")
+            return 1
     print("PASS bootstrap LAINVM Artifact/Procedure/arguments/eval API")
     print("PASS in-memory artifact capture sink")
+    print("PASS capture layered over the open file sink")
     return 0
 
 
