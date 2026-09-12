@@ -204,7 +204,7 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 | 阶段 | 状态 | 产出 |
 | --- | --- | --- |
 | 编码 0 | 已完成（2026-09-12） | `std::type` 可解析，旧名称冲突消失，裸 `type` 被拒绝 |
-| 编码 1 | 下一步 | bootstrap 中只有一条 Meta callable 执行路径 |
+| 编码 1 | 进行中（1a 完成，1b 设计待确认） | bootstrap 中只有一条 Meta callable 执行路径 |
 | 编码 2 | 等待编码 1 | `std::func` 完整签名可被 Meta elaborator 读取 |
 | 编码 3 | 等待编码 2 | `?{}` 能推导并从环境解析输入 |
 | 编码 4 | 等待编码 3 | 正式 std 与 lainc 全部迁移，旧泛型设施删除 |
@@ -356,6 +356,26 @@ source: migrate type annotations to std type
 Module 和类型宇宙；为了通过构建而改写生成的 `build/**/*.l1`。
 
 ## 7. 编码 1：统一 bootstrap Meta callable
+
+设计见 [`../implementation/meta-callable-unification.md`](../implementation/meta-callable-unification.md)。
+该文档记录四道现状栅栏（§2）、已取证的关键约束（§3）、sink 统一与 Meta 值构造方案（§4）、
+分片计划（§5）与两个待确认的边界问题（§8）。
+
+### 7.0 已完成：编码 1a（2026-09-12）
+
+Meta 调用的 LAINVM 执行管道已统一（提交 `bootstrap: unify the Meta call execution pipeline`）：
+
+- 4 条路径重复的 parse → find → append → eval → release 收敛为 `lainvm_meta_run_artifact`，
+  它按物理返回类型选择 bits / addr / unit 读取器；`vm-artifact-parse` 出现次数 4 → 1。
+- 形参写入与实参追加改为按**物理参数类型**工作，取代按返回类别分的两套。
+- 4 个 `lainvm_eval_meta_*` 的对外签名与行为逐字未变；artifact 构造逻辑未动。
+
+验收：`check_bootstrap_consteval.py`、`check_lainir_boundaries.py`、`build_lain_compiler.py`、
+`check_lainc_lainir_api_baseline.py` 均退出 0。
+
+**剩余的 1b 部分不是机械收敛**：§7.2 步骤 4 的前提（「使用现有 lowering 设施把 callable body
+lower」）今天不成立——通用 lowering 有意跳过 Meta 函数，两条路径写向不同 sink，且缺少 Meta
+值构造规则。详见设计文档 §2。
 
 ### 7.1 当前要替换的代码
 
