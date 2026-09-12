@@ -801,16 +801,67 @@ let emit_line = std::func(
         emit_extern_decl(source, index, end, output);
         return;
     }
+    // Canonical L1 keeps an inline block and its closing brace on one
+    // physical line (`} else { %r = 2 }`).  Emit the opener here, then hand
+    // the rest of the same line back to the statement dispatch; discarding it
+    // silently produced C with unbalanced braces.  Each opener consumes at
+    // least one byte, so the recursion below strictly advances through the
+    // line and terminates.
+    let inline_opener: i32 = 0;
     if match_at(source, index, end, "} else {", 8) {
         append_literal(output, "} else {\n", 9);
-        return;
+        index = index + 8;
+        inline_opener = 1;
+    } else {
+        if match_at(source, index, end, "else {", 6) {
+            append_literal(output, "else {\n", 7);
+            index = index + 6;
+            inline_opener = 1;
+        } else {
+            if load8(source, index) == 125 {
+                append_literal(output, "}\n", 2);
+                index = index + 1;
+                inline_opener = 1;
+            }
+        }
     }
-    if match_at(source, index, end, "else {", 6) {
-        append_literal(output, "else {\n", 7);
-        return;
-    }
-    if load8(source, index) == 125 {
-        append_literal(output, "}\n", 2);
+    if inline_opener == 1 {
+        while index < end {
+            if is_space(load8(source, index)) {
+                index = index + 1;
+            } else {
+                break;
+            }
+        }
+        let tail_end: usize = end;
+        while tail_end > index {
+            if is_space(load8(source, tail_end - 1)) {
+                tail_end = tail_end - 1;
+            } else {
+                break;
+            }
+        }
+        if tail_end > index && load8(source, tail_end - 1) == 125 {
+            // The line's last non-space byte closes the inline block, so the
+            // statements before it are emitted first and the closing brace
+            // afterwards.
+            let body_end: usize = tail_end - 1;
+            while body_end > index {
+                if is_space(load8(source, body_end - 1)) {
+                    body_end = body_end - 1;
+                } else {
+                    break;
+                }
+            }
+            if index < body_end {
+                emit_line(source, index, body_end, output);
+            }
+            append_literal(output, "}\n", 2);
+        } else {
+            if index < end {
+                emit_line(source, index, end, output);
+            }
+        }
         return;
     }
     if match_at(source, index, end, "#store", 6) {
