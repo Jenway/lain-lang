@@ -1203,6 +1203,29 @@ bootstrap: reach the lain compiler fixed point
 
 ## 13. 编码 7：backend 与发布 gate
 
+### 13.0 已定位的 backend 缺陷（2026-09-12）
+
+`python scripts/build_default_lainc.py` 目前失败，根因已定位到 **Lain 编写的 C 后端**
+（`src/lainc/backend_c.lain` 的 `emit_line`），而**不是**固定点：**行内 `} else { ... }` 的尾部
+内容被整段丢弃**。
+
+最小复现（已存为 `scripts/fixtures/backend_inline_else.l1`）：源码一行写 `} else { %r = 2 }`，
+后端只发射 `} else {`，丢掉 `%r = 2` 与**结尾的 `}`**，于是函数少一个闭合大括号，下一个函数
+嵌套进去，`zig cc` 报 `function definition is not allowed here`。
+
+全量产物 `build/lainc-native.c` 有 **3 处**未闭合，都在 `program_std_type_member` 里那三行形如
+`} else { #return #call meta_value_nil() }` 的语句上。
+
+两个要点：
+
+1. 这条路径的 C **不是** seed 的 LAINIR→C 发射器产出的，而是 Lain 后端产出的
+   （`scripts/build_lainc_native.py:50` 用 `backend_c_entry.l1` 生成）。我最初误判为 seed
+   发射器，用错工具做了几次无效复现。
+2. 后端产出畸形 C 时**退出码为 0**，没有任何诊断；失败只在 `zig cc` 阶段以 20 条级联错误暴露。
+   这是「静默产出坏结果」的失败模式，修好本缺陷后值得单独考虑加校验。
+
+此缺陷与编码 5 的 A/B 选择无关，因此不受其阻塞。
+
 固定点完成后再处理：
 
 - C backend 剩余物理指令和 ABI；
