@@ -48,6 +48,17 @@ POSITIVE = (
     # desynchronise the artifact from its argument list.
     ("scalar inputs beside a Module entry",
      "formal_input_scalar_mixed.lain", "41"),
+    # A parameter type may name an input row entry, and the type value the call
+    # site supplies for that entry is then the parameter's type.  Both fixtures
+    # run the same callee with the same argument (300) and differ only in the
+    # caller's `T`, so the printed value is decided by the resolved width: `i8`
+    # truncates the argument to 44 while `i32` carries it whole.
+    ("dependent parameter type i8", "formal_input_dependent_i8.lain", "44"),
+    ("dependent parameter type i32", "formal_input_dependent_i32.lain", "300"),
+    # The same resolution applies to the return annotation alone: `pick` names
+    # `T` nowhere else, so only the return position can give the bare entry its
+    # kind, and only the caller's type value can give it its width.
+    ("dependent return type", "formal_input_dependent_return.lain", "44"),
 )
 
 # Negatives must fail to compile with the listed status, and the validation span
@@ -100,6 +111,17 @@ NEGATIVE = (
         5108,
         "Module",
         "local: Module",
+    ),
+    # A bare entry is only derivable when a type position uses it.  This row
+    # names `T` nowhere in the signature even though the call site does supply
+    # a type value for it, so the entry stays unconstrained and is reported
+    # instead of being guessed from the supplied value.
+    (
+        "dependent type unused entry",
+        "formal_input_dependent_unused.lain",
+        5104,
+        "T",
+        "T",
     ),
 )
 
@@ -194,6 +216,36 @@ CONTROL_POSITIVE = (
     ),
 )
 
+
+def dependent_width_source(type_name: str) -> str:
+    """The proof program with the caller's `T` set to `type_name`."""
+    return (
+        "let idf = std::func(a: T) ?{T} -> T {\n"
+        "    return a;\n"
+        "};\n"
+        "\n"
+        "let outer: Module = std::module {\n"
+        f"    let T: std::type = {type_name};\n"
+        "    @export let got: i64 = idf(4294967297);\n"
+        "};\n"
+        "\n"
+        "let main = std::func() -> i64 {\n"
+        "    return outer.got;\n"
+        "};\n"
+    )
+
+
+# The physical width a dependent annotation takes is the width of the type value
+# the call site supplies.  Both programs call the same callee with the same
+# argument (2**32 + 1) and differ only in the caller's `T`: the argument is
+# appended at the resolved width, so the constant the artifact path folds into
+# `main` is the truncated 1 for `i32` and the whole value for `i64`.  `run`
+# prints only the low 32 bits, so the emitted LAINIR is the evidence here.
+WIDTH_PROOF = (
+    ("dependent width i32", dependent_width_source("i32"), "1"),
+    ("dependent width i64", dependent_width_source("i64"), "4294967297"),
+)
+
 CONTROL_NEGATIVE = (
     (
         # An input is a requirement of the declaration, not of its uses: a row
@@ -274,6 +326,17 @@ def read_error(artifact: Path) -> tuple[int, str, int] | None:
     if status is None or node is None or start is None:
         return None
     return status, node, start
+
+
+def main_return_constant(text: str) -> str | None:
+    """The constant the compiler folded into `main`, or None when absent."""
+    start = text.find("#proc main()")
+    if start < 0:
+        return None
+    returned = text.find("#return ", start)
+    if returned < 0:
+        return None
+    return text[returned + len("#return ") :].split("\n", 1)[0].strip()
 
 
 def compile_library(artifact: Path, source: Path) -> subprocess.CompletedProcess[str]:
@@ -376,6 +439,25 @@ def main() -> int:
                 print(f"{label}: result was not {expected}: {detail}", file=sys.stderr)
                 return 1
             print(f"PASS {label}: {actual}")
+        for index, (label, source_text, expected) in enumerate(WIDTH_PROOF):
+            source = directory / f"width_proof_{index}.lain"
+            source.write_text(source_text, encoding="utf-8")
+            artifact = directory / f"width_proof_{index}.l1"
+            compiled = compile_library(artifact, source)
+            if compiled.returncode or not artifact.is_file():
+                print(compiled.stderr or compiled.stdout, file=sys.stderr)
+                print(f"{label}: proof did not compile", file=sys.stderr)
+                return 1
+            actual = main_return_constant(
+                artifact.read_text(encoding="utf-8")
+            )
+            if actual != expected:
+                print(
+                    f"{label}: artifact folded {actual}, not {expected}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"PASS {label}: artifact parameter width folded {actual}")
         for index, (label, fixture, status, token, row) in enumerate(NEGATIVE):
             source = FIXTURES / fixture
             if not check_diagnostic(
@@ -406,7 +488,8 @@ def main() -> int:
             ):
                 return 1
     print(
-        "PASS typed input effects: call-site resolution, binding, and the "
+        "PASS typed input effects: call-site resolution, binding, dependent "
+        "type widths, and the "
         f"{len(NEGATIVE) + len(CONTROL_NEGATIVE)} failure diagnostics"
     )
     return 0
