@@ -1161,7 +1161,9 @@
 // nodes belong to %function_source, which is therefore the source used to read
 // them and to report their spans; %environment is the call site's.  The kind
 // each value must have is the entry's declared type, or, for a bare entry, the
-// type value the declaration's own type positions require.
+// type value the declaration's own type positions require; a scalar entry is
+// also held to the physical width that type denotes.  A width either side does
+// not determine constrains nothing.
 #proc lainvm_meta_resolve_inputs(
   #addr %unit, #addr %function_source, #addr %function,
   #addr %environment, #addr %invocation
@@ -1208,6 +1210,28 @@
         #return #call lainvm_meta_input_status(
           %unit, %function, %function_source, %node, 5108
         )
+      }
+      // Kind alone does not pin a scalar: a declared `i64` input would accept
+      // an `i32` value just because both are scalars.  The declared width and
+      // the width the value carries must agree, and either one being unknown
+      // keeps the old kind-only behaviour instead of reporting a guess.
+      #if #eq(%expected, 1) {
+        #let %declared_width: #bits<64> = 0
+        #if #eq(#call raw_is_nil(%type), 0) {
+          %declared_width: #bits<64> = #call lainvm_meta_scalar_width(
+            %function_source, %type
+          )
+        }
+        #let %value_width: #bits<64> = #call meta_value_scalar_width(%value)
+        #if #ne(%declared_width, 0) {
+          #if #ne(%value_width, 0) {
+            #if #ne(%declared_width, %value_width) {
+              #return #call lainvm_meta_input_status(
+                %unit, %function, %function_source, %type, 5108
+              )
+            }
+          }
+        }
       }
     }
     #call meta_env_bind(%invocation, %function_source, %entry, %value)
