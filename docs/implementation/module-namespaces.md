@@ -59,8 +59,8 @@ Lain 源码中的 `import("...")` 字符串不是文件系统路径，而是一�
 
 因为非 std 导入只比较末段，**任何两个非 `std::` 源文件同名，其 import 串就无法区分**。
 
-`composed_compiler_sources()`（`scripts/lainc_sources.py:77-99`）当前闭包共 53 个文件，
-存在 3 组重复 basename：
+`composed_compiler_sources()`（`scripts/lainc_sources.py:77-99`）当前闭包共 47 个文件
+（2026-09-12 归档 6 个形式实现后从 53 减少），存在 3 组重复 basename：
 
 | basename | 文件 | 是否可区分 |
 | --- | --- | --- |

@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Check the source and public-API boundary between LAINIR and LAINVM."""
+"""Check the LAINIR/LAINVM contract boundary from the lainc side.
+
+The Lain-written LAINVM interpreter and the Lain-written LAINIR provider are
+paused and archived under docs/history/formal-implementations/ until Lain is
+mature enough to rewrite them.  Their contracts stay in src/, because that is
+what a provider must satisfy and what lainc compiles against.
+
+This gate therefore no longer inspects an implementation's shape.  It checks
+the invariants that must survive the pause:
+
+* the execution contract is present and still declares its surface;
+* lainc depends on the VM contract only, never on a VM implementation;
+* Meta asks the VM for compile-time execution instead of evaluating itself;
+* the removed evaluation-result protocol has not come back.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +23,19 @@ from lainc_sources import lainir_api_sources, lainvm_sources
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INTERPRETER = ROOT / "src" / "lainvm" / "interpreter.lain"
 CONTRACT = ROOT / "src" / "lainvm" / "api_contract.lain"
-PROVIDER = ROOT / "src" / "lainir" / "api" / "default_provider.lain"
-OLD_INTERPRETER = ROOT / "src" / "lainir" / "api" / "l1_interpreter.lain"
+LAINIR_CONTRACT = ROOT / "src" / "lainir" / "api_contract.lain"
 LAINC = ROOT / "src" / "lainc"
+# Files that must never return: the archived implementation must not be
+# reintroduced alongside the contract it implements.
+ARCHIVED = (
+    ROOT / "src" / "lainvm" / "interpreter.lain",
+    ROOT / "src" / "lainir" / "api" / "default_provider.lain",
+    ROOT / "src" / "lainir" / "api" / "l1_ir.lain",
+    ROOT / "src" / "lainir" / "api" / "l1_unit_builder.lain",
+    ROOT / "src" / "lainir" / "api" / "l1_verifier.lain",
+    ROOT / "src" / "lainir" / "api" / "l1_printer.lain",
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -24,44 +46,17 @@ def require(condition: bool, message: str) -> None:
 def main() -> int:
     api_sources = {path.resolve() for path in lainir_api_sources(ROOT)}
     vm_sources = {path.resolve() for path in lainvm_sources(ROOT)}
-    require(INTERPRETER.resolve() in vm_sources, "VM manifest omits interpreter")
-    require(CONTRACT.resolve() in vm_sources, "VM manifest omits API contract")
-    require(INTERPRETER.resolve() not in api_sources, "LAINIR manifest owns interpreter")
-    require(not OLD_INTERPRETER.exists(), "old LAINIR interpreter still exists")
-
-    provider = PROVIDER.read_text(encoding="utf-8")
-    require("lainvm::" not in provider, "LAINIR provider imports LAINVM")
-    require("@export let Eval" not in provider, "LAINIR provider exports Eval")
-    require("ProviderWithExternalCalls" not in provider,
-            "LAINIR provider owns VM external-call policy")
-
-    interpreter = INTERPRETER.read_text(encoding="utf-8")
-    require("@export\nlet lainvm: Module" in interpreter,
-            "LAINVM module export is missing")
-    require("let Flow: std::type" in interpreter,
-            "interpreter-private control flow is missing")
-    require("@export let Flow" not in interpreter,
-            "interpreter-private Flow is public")
-    require("@export let Result" not in interpreter,
-            "legacy public result wrapper remains")
-    require("@export let execute = execute" in interpreter,
-            "public VM execute entry is missing")
-    require("@export let execute_limited = execute_limited" in interpreter,
-            "public limited VM execute entry is missing")
-    require("@export let execute_child = execute_child" in interpreter,
-            "public child-TCB execution entry is missing")
-    require("let run_child = std::func(" in interpreter,
-            "child-TCB implementation is missing")
-    require(") -> Value ! {\n            Memory.Allocation.Effect,\n"
-            "            Memory.Bounds.Effect,\n            effects.Trap," in interpreter,
-            "VM execution does not expose Value-or-Trap semantics",
+    require(CONTRACT.resolve() in vm_sources, "VM manifest omits the execution contract")
+    require(
+        LAINIR_CONTRACT.resolve() in api_sources,
+        "LAINIR manifest omits the capability contract",
     )
-    require("let Eval: effects.Effect = std::effect(\"LAINVM.Eval\", L1)"
-            in interpreter, "VM Eval effect is missing")
-    require("let eval_handler = std::func(" in interpreter,
-            "VM Eval handler is missing")
-    require("resume execute_child(" in interpreter,
-            "VM Eval handler does not execute a child TCB")
+    for path in ARCHIVED:
+        require(
+            not path.exists(),
+            f"archived implementation is back in src/: {path.relative_to(ROOT)}",
+        )
+
     contract = CONTRACT.read_text(encoding="utf-8")
     for member in (
         "let ExecutionShape: ModuleShape",
@@ -71,7 +66,7 @@ def main() -> int:
         "let append_argument = std::func(",
         "let eval = std::func(",
     ):
-        require(member in contract, f"VM API contract is missing {member}")
+        require(member in contract, f"VM execution contract is missing {member}")
 
     factory_calls = {
         "compiler.lain": "compiler_core.Compiler(Memory, Ir, Vm)",
@@ -81,23 +76,39 @@ def main() -> int:
     }
     for name in (*factory_calls, "meta.lain"):
         source = (LAINC / name).read_text(encoding="utf-8")
-        require("packages::lain::lainvm::api_contract" in source,
-                f"lainc factory {name} does not import the VM contract")
-        require("Vm: lainvm_api.ExecutionShape" in source,
-                f"lainc factory {name} does not accept the VM capability")
-        require("packages::lain::lainvm::interpreter" not in source,
-                f"lainc factory {name} imports the VM implementation")
+        require(
+            "packages::lain::lainvm::api_contract" in source,
+            f"lainc factory {name} does not import the VM contract",
+        )
+        require(
+            "Vm: lainvm_api.ExecutionShape" in source,
+            f"lainc factory {name} does not accept the VM capability",
+        )
+        require(
+            "packages::lain::lainvm::interpreter" not in source,
+            f"lainc factory {name} imports a VM implementation",
+        )
+        require(
+            "packages::lain::lainir::api::" not in source,
+            f"lainc factory {name} imports a LAINIR provider implementation",
+        )
         if name in factory_calls:
-            require(factory_calls[name] in source,
-                    f"lainc factory {name} does not forward the VM capability")
+            require(
+                factory_calls[name] in source,
+                f"lainc factory {name} does not forward the VM capability",
+            )
+
     meta = (LAINC / "meta.lain").read_text(encoding="utf-8")
-    require("perform Vm.eval(" in meta,
-            "Meta does not request compile-time execution through LAINVM")
-    require("Ir.Eval" not in meta,
-            "Meta still uses the removed LAINIR evaluator")
-    require("Eval.Result" not in meta and "EvalResult" not in meta,
-            "Meta still uses an evaluation result wrapper")
-    print("PASS LAINIR/LAINVM source and Value-or-Trap API boundary")
+    require(
+        "perform Vm.eval(" in meta,
+        "Meta does not request compile-time execution through LAINVM",
+    )
+    require("Ir.Eval" not in meta, "Meta still uses the removed LAINIR evaluator")
+    require(
+        "Eval.Result" not in meta and "EvalResult" not in meta,
+        "Meta still uses an evaluation result wrapper",
+    )
+    print("PASS LAINIR/LAINVM contract boundary and Value-or-Trap API")
     return 0
 
 

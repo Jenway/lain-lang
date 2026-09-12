@@ -24,5 +24,12 @@ C0 removed the old evaluation result protocol and the bootstrap Meta evaluator
 that depended on it. This source set is therefore intentionally incomplete
 until LAINVM execution is reconnected.
 
-The formal compiler lives in `src/lainc/`. Formal LAINIR definitions and
-verification live in `src/lainir/`; LAINVM execution lives in `src/lainvm/`.
+The formal compiler lives in `src/lainc/`. The LAINIR and LAINVM **contracts**
+live in `src/lainir/api_contract.lain` and `src/lainvm/api_contract.lain`.
+
+The Lain-written implementations of those two layers are paused: they were
+moved to `docs/history/formal-implementations/` on 2026-09-12, because they
+compiled and passed the verifier but had no execution path. They will be
+rewritten in Lain once the language is mature. This does not affect the
+bootstrap sources here: bootstrap carries its own LAINIR and consteval
+machinery, and `seed/` carries its own C interpreter.
