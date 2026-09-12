@@ -133,6 +133,38 @@ Import 返回命名空间值，禁止非限定注入；结构约束用 `std::mod
 
 **LAINIR 风格：** 位宽/符号显式——用 `#sdiv`/`#udiv`、`#slt`/`#ult`、`#zext`/`#sext`/`#trunc`；没有 `#div`/`#lt`/`#field`/`#primitive`。物理类型仅 `#bits<N>`、`#float`、`#addr`、`#unit`、`#never`。
 
+**LAINIR 书写陷阱（bootstrap 编译器，2026-09-12 实测）**：**给参数赋值不会跨 `#continue` 保留。**
+若把循环游标写成被赋值的过程参数——
+
+```lainir
+#proc f(#addr %node) -> #bits<1> {
+  #loop siblings {
+    #if #call raw_is_nil(%node) { #return 0 }
+    ...
+    %node: #addr = #call raw_node_next(%node)   // ← 不生效
+    #continue siblings
+  }
+}
+```
+
+游标**不前进**，循环永不终止或反复读同一节点。必须改用局部变量：
+
+```lainir
+#proc f(#addr %node) -> #bits<1> {
+  #let %cursor: #addr = %node
+  #loop siblings {
+    ...
+    %cursor: #addr = #call raw_node_next(%cursor)
+    #continue siblings
+  }
+}
+```
+
+该缺陷曾在 `lainvm_meta_type_mentions` 中潜伏：它的注解都是**单节点**，首次迭代即命中返回，
+所以从未暴露；一旦扫描 `Vec(T)` 这类多节点类型表达式就会立刻挂死。
+**审计结论**：用「参数名在自身 proc 体内被重新赋值」这一模式扫过 `bootstrap/compiler/*.l1`，
+修复前恰有 1 处（即上述那处），修复后为 0。
+
 ## Important Files
 
 | 文件 | 用途 |
