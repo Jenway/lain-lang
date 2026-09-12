@@ -59,6 +59,15 @@ POSITIVE = (
     # `T` nowhere else, so only the return position can give the bare entry its
     # kind, and only the caller's type value can give it its width.
     ("dependent return type", "formal_input_dependent_return.lain", "44"),
+    # Two more positions can give a bare entry its kind.  The row itself: a
+    # peer entry's declared type spells `Vec(T)`, so `T` sits in a type
+    # position even though the signature never mentions it.  The body: the
+    # explicit annotation of a `let` declaration (`let probe: T = 0;`) is a
+    # type position of its own.  Each fixture names `T` in exactly one of those
+    # positions, so a derivation that reads only the signature would report
+    # 5104 instead of compiling.
+    ("input row peer type", "formal_input_row_type.lain", "41"),
+    ("body type annotation", "formal_input_body_type.lain", "41"),
 )
 
 # Negatives must fail to compile with the listed status, and the validation span
@@ -122,6 +131,18 @@ NEGATIVE = (
         5104,
         "T",
         "T",
+    ),
+    # Only a *type expression* constrains an entry.  This row's peer entry is
+    # typed (`bias: i32`), but that type mentions no entry name, and `T`
+    # appears in the row as nothing but its own entry, so `T` stays
+    # unconstrained: a derivation that counted a peer entry's own name, or the
+    # entry itself, would accept the row instead of reporting it.
+    (
+        "input row peer type unrelated",
+        "formal_input_row_type_unrelated.lain",
+        5104,
+        "T",
+        "bias: i32, T",
     ),
 )
 
