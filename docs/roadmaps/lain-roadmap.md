@@ -204,13 +204,24 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 | 阶段 | 状态 | 产出 |
 | --- | --- | --- |
 | 编码 0 | 已完成（2026-09-12） | `std::type` 可解析，旧名称冲突消失，裸 `type` 被拒绝 |
-| 编码 1 | 进行中（1a 完成，1b 设计待确认） | bootstrap 中只有一条 Meta callable 执行路径 |
+| 编码 1 | 进行中：1a 已完成；**1c 下一步**；1b 其余部分在其后 | bootstrap 中只有一条 Meta callable 执行路径 |
 | 编码 2 | 等待编码 1 | `std::func` 完整签名可被 Meta elaborator 读取 |
 | 编码 3 | 等待编码 2 | `?{}` 能推导并从环境解析输入 |
 | 编码 4 | 等待编码 3 | 正式 std 与 lainc 全部迁移，旧泛型设施删除 |
 | 编码 5 | 等待编码 4 | 正式 lainc 通过真实 LAINVM handler 执行 Meta |
 | 编码 6 | 等待编码 5 | Lain 编译器达到 gen2 == gen3 固定点 |
 | 编码 7 | 等待编码 6 | native backend 和发布 gate 收口 |
+
+**编码 1 的内部顺序（2026-09-12 调整）**：
+
+| 子阶段 | 状态 | 内容 |
+| --- | --- | --- |
+| 1a | 已完成 | Meta 调用的 LAINVM 执行管道统一（§7.0） |
+| **1c** | **下一步** | **把形式识别移回库，删除编译器中的 24 处名字硬编码（§7.0.2）** |
+| 1b | 待 1c | sink 统一，及其余能力收敛（§7，设计见 implementation/meta-callable-unification.md） |
+
+调整理由：架构正确性优先。1c 恢复的是本来就写在设计里的边界（库拥有语言规则），
+且不改变任何行为；1b 的剩余部分依赖 elaborate 与签名，晚做不会增加返工。
 
 阶段必须按顺序推进。一个阶段内部可以拆成多个提交，但每个提交必须有独立的可执行验证。
 
@@ -390,10 +401,106 @@ lower」）今天不成立——通用 lowering 有意跳过 Meta 函数，两�
 这符合 [`../00-intro.md`](../00-intro.md) 与 [`../03-meta-system.md`](../03-meta-system.md) §2
 的分层：Parser 与 lowering 不判断这些名字的含义。
 
-**判定：这是 `elaborate` 未完成（§3.2）的症状，不是设计选择。** bootstrap 是启动工具而非
-长期架构，因此**不在 bootstrap 中精修**——它随形式实现接管（编码 4/5）而消失。
+**判定：这是 `elaborate` 未完成（§3.2）的症状，不是设计选择。**
+
+**但优先级已调整**（2026-09-12）：架构正确性优先，先把这个边界恢复，再继续 1b 的其余部分。
+详见 §7.0.2 的**编码 1c**。
 
 **编码 1b 不得新增任何名字匹配。** 详见设计文档 §4.2。
+
+### 7.0.2 编码 1c：把形式识别移回库（优先级高于 1b 其余部分）
+
+#### 目标
+
+让「什么源码形式意味着什么」这个判断住在库里，而不是编译器里。删除编译器中的名字表，
+改为经标准库 ABI 询问。
+
+#### 依据
+
+形式标准库**已经**用正确方式实现了这件事，只是没人调用：
+
+| | 形式库 `std/meta.lain` | bootstrap 编译器 |
+| --- | --- | --- |
+| 名字识别 | 集中在 `meta_word_code` 一处，映射为整数编号 | 10 个名字字面量，散在 6 个文件 |
+| 其余代码 | 比较编号：`meta_is_module` = `meta_word_code(...) == 11` | 每次逐字节比较 |
+| 调用者 | 仅 `std/bootstrap/abi_entry.lain` 与测试探针 | 编译器自己 |
+
+具体证据：
+
+- `std/meta.lain:2360` `meta_word_code` 集中定义全部词→编号映射（`let`=2、`type`=4、
+  `Module`=10、`module`=11、`struct`=12、`import`=13 等）；
+- `std/meta.lain:2539-2551` 的 `meta_is_module` / `meta_is_struct` / `meta_is_import`
+  全部比较编号；
+- `std/meta.lain` 中**零处**字面量名字比较（全仓库搜索确认）；
+- 但 `meta_module_status`、`meta_struct_status`、`meta_word_code` 的调用者为**零**。
+
+#### 接缝已经存在
+
+不需要新造机制，只需把已有的洞补上：
+
+- `bootstrap/std/entry.l1:50` 的 `lain_std_expand` **已经在调**库函数
+  `lain_std_meta_status`；
+- `bootstrap/std/core_forms.l1` 的注释明确写着「核心暂时仍拥有 descriptor builder……
+  这个标准库入口之后可由形式 std 实现替换」；
+- 所以缺的是把**编译器里剩下的那些名字判断**也搬到这个接缝后面。
+
+#### 工作项
+
+1. 把 `program_node_has_meta_constructor`（`lower_program.l1:453`，7 个名字）与
+   `program_function_is_meta`（`:501`，另加 `Module`、`ModuleShape`）的判断逻辑移到
+   `bootstrap/std/`，经 ABI 暴露给编译器。
+2. 删除编译器中的这份名单，改为调用库入口。**`program_is_ignored_declaration`
+   （`:2805`，`struct`/`module`/`import`）同样处理。**
+3. 库中的实现按形式库的形状写（**集中的词→编号表**，其余比较编号），使其与
+   `std/meta.lain` 一一对应，将来可直接替换。
+
+**注意**：`program_collect_meta_call_candidate`（4 条 Meta 调用分派路径）不在此阶段，
+它属于 1b。
+
+#### 不做的事
+
+- **不改变行为**：诊断码、判定结果逐字保持。
+- **不新增名字**：只是搬家，不是扩表。
+- **不在形式编译器里做**：`src/lainc` 的 elaborator 结构上不依赖名字比较
+  （`src/lainc/elaborator.lain:575,661` 只区分 `import` 与「有无 `{...}` 体」），
+  它没有这份债务。
+
+#### 验收
+
+```text
+python scripts/check_bootstrap_consteval.py          # 5 类 Meta 路径
+python scripts/check_lainir_boundaries.py            # 边界：core 不得含语义实现
+python scripts/check_lainc_lainir_api_baseline.py    # 15 道 gate
+```
+
+加一条**新增**的关键验收，证明识别**真的**走了库而不是被绕过：
+
+按 `scripts/check_stdlib_swap.py` 已有的模式（替换库中的某个函数，观察行为随之改变）
+新增一个探针——替换库的形式识别入口，`module` 判定应当随之改变。若行为不变，说明编译器
+仍在自己做判断，本阶段未完成。
+
+外加文本验收（只能证明搬家，不能替代上面的执行命令）。当前清单是 **24 处、7 个文件**，
+形状统一为 `"<名字>", <长度>`（是 `meta_atom_equal` 一类的比较参数，长度与名字同行）：
+
+| 文件 | 处数 | 名字 |
+| --- | --- | --- |
+| `lower_program.l1` | 10 | `module`(×3)、`struct`(×2)、`effect`、`handler`、`effect_operation`、`type_with_namespace`、`handler_type`、`meta_type` |
+| `meta_module.l1` | 4 | `module`(×3)、`struct` |
+| `meta_collect.l1` | 3 | `effect`、`effect_operation`、`handler` |
+| `meta.l1` | 2 | `struct`(×2) |
+| `meta_call_vm.l1` | 2 | `effect`、`effect_operation` |
+| `module_meta.l1` | 2 | `module`(×2) |
+| `meta_record.l1` | 1 | `struct` |
+
+按名字合计：`module` 7、`struct` 6、`effect` 3、`effect_operation` 3、`handler` 2、
+`type_with_namespace` 1、`handler_type` 1、`meta_type` 1。
+
+```text
+rg -n --pcre2 '"(module|struct|effect|handler|effect_operation|type_with_namespace|handler_type|meta_type)"\s*,\s*[0-9]+' bootstrap/compiler/
+```
+
+必须无结果（`import` 不在其列——路径解析确实属于编译器，`src/lainc/elaborator.lain:575`
+同样保留它）。
 
 ### 7.1 当前要替换的代码
 
