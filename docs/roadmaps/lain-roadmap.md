@@ -847,28 +847,24 @@ elaborator 还不读签名，`std/meta.lain` 的 `meta_elaborate_status` 仍是�
    条目按其声明宽度作 bits 形参（与既有显式标量形参同法），只有非标量条目才用 `#addr`。
 5. **只报第一条失败条目**（与编译器 first-error-abort 模型一致）。
 
-#### 顺带查实的两个既有缺陷（2026-09-12，尚未修）
+#### 顺带查实的两个既有缺陷（2026-09-12）
 
-1. **`meta_builtin_size` 的四个 `#bits<N>` 分支永不匹配**
-   （`bootstrap/compiler/meta.l1:127`）：`meta_atom_equal(source, node, "#bits<8>", 2)` 的最后一个
-   参数是长度，而 `meta_atom_equal`（`meta.l1:37`）先比 `raw_node_length(node)` 与该长度——
-   `"#bits<8>"` 是 8 字符却传 2，`#bits<16>/<32>/<64>` 是 9 字符却传 3。因此这四条是死分支，
-   `#bits<N>` 注解经宽度表恒得 0（未知）。**影响是「少检查」而非误报**。实测：源码里写
-   `#bits<32>` 作注解会被 5104 拒绝（`i32` 正常）。
-2. **`run_lain_compiler.py` 的 program 模式恒失败**：`program_validate`
-   （`lower_program.l1`）要求 `main` 的返回类型节点满足
-   `meta_atom_equal(source, return_type, "#bits<32>", 3)`，而源码写的是 `i32`（3 字符）——
-   长度过了、字节比 `i32` vs `#bi` 不等 → 恒真 → **5112**。实测最简单的
-   `let main = std::func() -> i32 { return 42; };` 在 program 模式也报 5112；`--library` 模式正常。
-   **所有脚本都只用 `--library`**，所以这是「未被使用的坏路径」，不是当前红着的 gate。
+1. **`meta_builtin_size` 的四个 `#bits<N>` 分支不可达**
+   （`bootstrap/compiler/meta.l1:127`）：它们写的是 `meta_atom_equal(source, node, "#bits<8>", 2)`
+   这类形式，而**源码里的 `#bits<32>` 根本不是单个 Atom**——实测 `lain_raw_ast_dump` 得到
+   `(atom #bits) (atom <) (atom 32) (atom >)` **四个** Atom。因此无论长度参数取值如何，按整串
+   比较都不会命中，这四条是死分支。**最初我把它记成「长度参数写错（2/3 而非 8/9）」是不准确的
+   ——词法拆分才是根本原因，长度参数只是同一处错误的一部分。** 影响是「少检查」而非误报
+   （实测源码写 `#bits<32>` 作注解会被 5104 拒绝，`i32` 正常）。**未修**：让 `#bits<N>` 可解析
+   需要跨 4 个 Atom 的合成规则，属独立工作。
+2. ~~program 模式恒失败~~ **已修（2026-09-12）**：`program_validate` 原先把 `main` 的返回类型
+   节点与字面量 `"#bits<32>"`（长度 3）比较，任何源码拼写都无法满足，故恒 **5112**。
+   现改为比较**解析后的宽度**（`program_type_width_in_unit` == 32），契约因此变成语义的：
+   `i32` 与 `u32` 都能编译并真实运行，`i64`/`i8` 仍报 5112。
+   回归由新增的 `scripts/check_program_entry.py` 守住（已进 baseline，gate 总数 18）——
+   该检查有鉴别力：把编译器还原为修复前版本，它在第一个正例即失败。
 
-两者都不在编码 3 范围内，未修。
-
-#### 后续片建议
-
-编码 3 的 §9.0.1 各项已全部落地（§9.2 四来源、scalar 路径、值宽度）。**剩余的唯一实质差距是
-§9.4 原文正例**，它缺一个**库符号 `Ord`**（全仓库不存在）与输入值的成员调用——两者都属库的
-工作。因此下一步可考虑进入**编码 4**（正式 std 与 lainc 迁移），或先修上面两个既有缺陷。
+第 1 项仍待处理；它不是编码 3 的一部分。
 
 ### 9.1 本阶段语义
 
