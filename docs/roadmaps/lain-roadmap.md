@@ -639,8 +639,9 @@ bootstrap: unify meta callable execution
 
 ### 8.1 Parser 约束
 
-先在 `scripts/check_meta_ast_conformance.py` 增加 fixture，证明下面的 `?`、`!`、`->` 是
-Atom，两个花括号都是普通 Group：
+
+先在 `scripts/check_meta_ast_conformance.py` 增加 fixture，证明下面的源码形状可以由现有
+Atom/Group 表达，两个花括号都是普通 Group：
 
 ```lain
 let f = std::func(value: T) ?{T: std::type} -> T !{IO} {
@@ -648,8 +649,32 @@ let f = std::func(value: T) ?{T: std::type} -> T !{IO} {
 };
 ```
 
-除非这个 RawAst 形状无法由现有 Atom/Group 表达，否则不得修改 Parser 数据模型。可以修复
-lexer 使 `?` 成为 Atom，但不能增加 Function、InputRow 或 EffectRow AST node。
+**实测的 RawAst（2026-09-12，`lain_raw_ast_dump`）**：
+
+```text
+(root (atom let) (atom f) (atom =) (atom std) (atom :) (atom :) (atom func)
+  (group ( (atom value) (atom :) (atom T))
+  (atom ?) (group { (atom T) (atom :) (atom std) (atom :) (atom :) (atom type))
+  (atom -) (atom >)
+  (atom T) (atom !) (group { (atom IO))
+  (group { (atom return) (atom value) (atom ;))
+  (atom ;))
+```
+
+结论：
+
+- `?` 与 `!` **已经是单个 Atom**，lexer 无需修改；
+- 两处 `{...}` 都是普通 Group（delimiter 123）；
+- **`->` 不是单个 Atom，而是相邻的 `(atom -)` 与 `(atom >)`** —— 本节早先假定它是一个
+  Atom，**该假定错误**。Lain 的 tokenizer 不分关键字，因此没有 `->` token。
+  签名读取器必须把「紧跟 `>` 的 `-`」识别为箭头，而不是期待单一 Atom。
+- 参数组是普通 `(group ( ... )`，与 `{...}` 组以 delimiter 区分。
+
+**因此本节的第一条验收（"`->` 是 Atom"）不可能成立，须改为上表的等价断言。**
+
+除非该形状无法由现有 Atom/Group 表达，否则不得修改 Parser 数据模型。**不要**增加
+Function、InputRow 或 EffectRow AST node；也**不要**为 `->` 添加 lexer 特例——相邻
+`-` `>` 已经是可用的表示。
 
 ### 8.2 callable 签名表示
 
