@@ -219,21 +219,27 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 | 阶段 | 状态 | 产出 |
 | --- | --- | --- |
 | 编码 0 | 已完成（2026-09-12） | `std::type` 可解析，旧名称冲突消失，裸 `type` 被拒绝 |
-| 编码 1 | 进行中：1a / 1c 已完成；1b-1、1b-2 已完成 | bootstrap 中只有一条 Meta callable 执行路径 |
-| 编码 2 | 等待编码 1 | `std::func` 完整签名可被 Meta elaborator 读取 |
-| 编码 3 | 等待编码 2 | `?{}` 能推导并从环境解析输入 |
+| 编码 1 | 进行中：1a / 1c / 1b-1 / 1b-2 / 1b-3 已完成；1b-4、1b-5 受阻 | bootstrap 中只有一条 Meta callable 执行路径 |
+| 编码 2 | **已完成 2026-09-12**（§8.4 四条验收全过；见 §8.5 的限定） | `std::func` 完整签名可被 Meta elaborator 读取 |
+| 编码 3 | 下一步 | `?{}` 能推导并从环境解析输入 |
 | 编码 4 | 等待编码 3 | 正式 std 与 lainc 全部迁移，旧泛型设施删除 |
 | 编码 5 | **受阻于归档**（§11.0 需先决定由谁提供 VM 与 provider） | 正式 lainc 通过真实 LAINVM handler 执行 Meta |
 | 编码 6 | 阻塞于编码 5 | Lain 编译器达到 gen2 == gen3 固定点 |
 | 编码 7 | 阻塞于编码 6 | native backend 和发布 gate 收口 |
+
+**编码 2 的限定（2026-09-12）**：签名解析、存储与条目校验在 **bootstrap** 侧已完成并有
+12 个用例的 gate（`scripts/check_function_signature.py`，含 span 断言的负对照）。**形式侧
+只做到表示**：`src/lainc/effects.lain::FunctionType` 新增了 `input_row` 字段，但形式 elaborator
+尚不读取签名（连箭头与返回类型都不读），所以该字段当前恒为空，属**仅有编译验证、无行为验证**。
+详见 §8.5。
 
 **编码 1 的内部顺序（2026-09-12 调整）**：
 
 | 子阶段 | 状态 | 内容 |
 | --- | --- | --- |
 | 1a | 已完成 | Meta 调用的 LAINVM 执行管道统一（§7.0） |
+| 1b | **部分完成** | 1b-1、1b-2、1b-3 已完成（sink 统一与三类构造器合一）；1b-4 受阻于编码 2 的签名分类；1b-5 受阻于设计决定 |
 | 1c | **已完成 2026-09-12** | 形式识别移回库：编译器中的 24 处名字字面量降为 **0**，库新增 10 个谓词（§7.0.2） |
-| **1b** | **进行中** | 1b-1、1b-2 已完成（sink 统一）；1b-3 进行中；1b-4/1b-5 需 body lowering |
 
 **归档的影响（2026-09-12）**：`src/lainir` 的 provider 与 `src/lainvm` 的 interpreter 已暂停
 （§2），而编码 5 的原文依赖它们。编码 5 因此多了一个前置决定（§11.0），编码 6/7 顺延。
@@ -736,6 +742,41 @@ python scripts/build_srclainc.py
 ```text
 meta: elaborate complete function signatures
 ```
+
+### 8.5 完成状态与限定（2026-09-12）
+
+§8.4 的四条命令全部退出 0。实际落地的范围：
+
+| 项 | bootstrap | 形式（`src/lainc`） |
+| --- | --- | --- |
+| 解析 `?{}` / `!{}` 并按固定顺序读取 | ✅ | ❌ 不读签名（连箭头与返回类型都不读） |
+| 描述符存储（输入行 / effect 行 / 箭头位置） | ✅ offset 128/136/144 | ⚠️ 仅 `FunctionType.input_row` 字段 |
+| 条目形状校验与 source span | ✅ 12 用例 + span 负对照 | ❌ |
+
+**必须明说的验证限定**：`build/lainir/srclainc.l1` **从未被执行**——只有
+`check_srclainc_artifact.py` 构建两次比较确定性。因此形式侧唯一的验证是
+「`build_srclainc.py` 退出 0」。加了 `input_row` 字段后产物从 185791 变为 185770 字节
+（过程数仍 358），证明它是真实结构而非被消除的空写；但**它的行为无从验证**，因为形式
+elaborator 还不读签名，`std/meta.lain` 的 `meta_elaborate_status` 仍是边界桩。
+
+形式侧的行为验证要等到 elaborate 真的读签名——那是编码 3 的工作。
+
+#### 8.5.1 顺带发现：函数声明的形状校验住在错误的一层
+
+编码 1c 把**形式识别**（`module`/`struct`/`effect` 等拼写）移回了标准库，
+`bootstrap/std/core_forms.l1` 现在拥有词表与谓词。但**函数声明的形状校验仍留在编译器**：
+`program_parse_function`（`bootstrap/compiler/lower_program.l1`）自己做 5102/5103/5104
+这些判断。
+
+对照之下，`module` 与 `struct` 的形状校验住在库里（`lain_std_meta_status`，诊断 3008/3013），
+由 `check_meta_module_validation.py` 验证 bootstrap 与形式两套一致。
+
+**同一类规则分居两层**，与 `docs/03-meta-system.md` §2「标准库定义语言规则」不一致。
+函数签名的形状校验应当同样位于 Meta 层。
+
+处置建议：**不在编码 2 里修**（那会把本阶段扩大成又一次边界迁移），而是在编码 3 或 4
+处理——那时输入行的语义本来就要落进 Meta 层，可以顺带把函数声明的形状校验一并搬过去，
+并照 `check_meta_module_validation.py` 的模式加一条 bootstrap/formal 一致性 gate。
 
 ## 9. 编码 3：实现输入 effect
 
