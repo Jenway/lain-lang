@@ -318,8 +318,23 @@ let emit_expr = std::func(
                                                     if match_at(source, index, end, "#ptr2int", 8) {
                                                         index = index + 8;
                                                     } else {
-                                                        append(output, byte);
-                                                        index = index + 1;
+                                                        if match_at(source, index, end, "#data_addr(", 11) {
+                                                            append_literal(output, "((uint8_t *)(uintptr_t)", 23);
+                                                            let operand_start: usize = index + 11;
+                                                            let operand_end: usize = operand_start;
+                                                            while operand_end < end {
+                                                                if load8(source, operand_end) == 41 {
+                                                                    break;
+                                                                }
+                                                                operand_end = operand_end + 1;
+                                                            }
+                                                            append_span(output, source, operand_start, operand_end);
+                                                            append(output, 41);
+                                                            index = operand_end + 1;
+                                                        } else {
+                                                            append(output, byte);
+                                                            index = index + 1;
+                                                        }
                                                     }
                                                 }
                                                 }
@@ -391,6 +406,29 @@ let emit_c_type = std::func(
         return;
     }
     append_literal(output, "uint64_t", 8);
+};
+
+// An `addr` typed binding is emitted as `uintptr_t` (see emit_c_type), so its
+// initializer needs an explicit conversion to that C type.  Without it a
+// pointer valued initializer such as `#data_addr` would violate the C
+// assignment constraint instead of forming the integer address this backend
+// uses to model `addr`.
+let is_addr_type = std::func(source: addr, start: usize, end: usize) -> bool {
+    let index: usize = start;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    if match_at(source, index, end, "#addr", 5) {
+        return true;
+    }
+    if match_at(source, index, end, "addr", 4) {
+        return true;
+    }
+    return false;
 };
 
 let emit_proc = std::func(
@@ -776,6 +814,247 @@ let emit_store_line = std::func(
     append_literal(output, ");\n", 3);
 };
 
+// Emit a byte value (0..255) as decimal text.  Lain has no division
+// operator, so the digits come from repeated subtraction.  The seed emitter
+// writes a data object as a list of decimal byte values, so the initializer
+// never has to survive a second round trip through a C string literal.
+let append_decimal_byte = std::func(output: addr, value: i32) -> unit {
+    let remaining: i32 = value;
+    let hundreds: i32 = 0;
+    while remaining >= 100 {
+        remaining = remaining - 100;
+        hundreds = hundreds + 1;
+    }
+    if hundreds > 0 {
+        append(output, 48 + hundreds);
+    }
+    let tens: i32 = 0;
+    while remaining >= 10 {
+        remaining = remaining - 10;
+        tens = tens + 1;
+    }
+    if hundreds > 0 || tens > 0 {
+        append(output, 48 + tens);
+    }
+    append(output, 48 + remaining);
+};
+
+// One decoded initializer byte: keep the `, ` separator with the value so an
+// escape that expands to two bytes (the seed lexer keeps the backslash of an
+// unknown escape) still separates them.
+let append_data_byte = std::func(output: addr, byte: i32, emitted: i32) -> i32 {
+    if emitted > 0 {
+        append_literal(output, ", ", 2);
+    }
+    append_decimal_byte(output, byte);
+    return emitted + 1;
+};
+
+// Hex digit value for a `\xHH` escape, or -1 when the position is out of
+// range or is not a hex digit, which is the seed lexer's fallback condition.
+let hex_value = std::func(source: addr, index: usize, end: usize) -> i32 {
+    if index >= end {
+        return 0 - 1;
+    }
+    let byte: i32 = load8(source, index);
+    if byte >= 48 && byte <= 57 {
+        return byte - 48;
+    }
+    if byte >= 97 && byte <= 102 {
+        return byte - 87;
+    }
+    if byte >= 65 && byte <= 70 {
+        return byte - 55;
+    }
+    return 0 - 1;
+};
+
+// Emit `#data NAME(size, align, "initializer")` as a static read-only array.
+// The seed emitter places data objects after the prologue and before the
+// procedure prototypes; backend_compile runs this pass at the same point of
+// its output, so a `#data_addr` operand always names an object that is
+// already declared.  The size and alignment digits are copied verbatim from
+// the declaration and the initializer is expanded to decimal byte values,
+// zero padded to the declared size, so no C escaping applies at all.
+let emit_data_decl = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let index: usize = start + 5;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    let name_start: usize = index;
+    while index < end {
+        if load8(source, index) == 40 {
+            break;
+        }
+        index = index + 1;
+    }
+    let name_end: usize = index;
+    let size_start: usize = index + 1;
+    while size_start < end {
+        if is_space(load8(source, size_start)) {
+            size_start = size_start + 1;
+        } else {
+            break;
+        }
+    }
+    let size_end: usize = size_start;
+    while size_end < end {
+        if load8(source, size_end) >= 48 && load8(source, size_end) <= 57 {
+            size_end = size_end + 1;
+        } else {
+            break;
+        }
+    }
+    let size_value: i32 = 0;
+    let size_cursor: usize = size_start;
+    while size_cursor < size_end {
+        // The bootstrap frontend drops the additive term of an unparenthesized
+        // `a * b + c` assignment, so the product is parenthesized here.
+        size_value = (size_value * 10) + (load8(source, size_cursor) - 48);
+        size_cursor = size_cursor + 1;
+    }
+    let align_start: usize = size_end;
+    while align_start < end {
+        if load8(source, align_start) == 44 {
+            break;
+        }
+        align_start = align_start + 1;
+    }
+    align_start = align_start + 1;
+    while align_start < end {
+        if is_space(load8(source, align_start)) {
+            align_start = align_start + 1;
+        } else {
+            break;
+        }
+    }
+    let align_end: usize = align_start;
+    while align_end < end {
+        if load8(source, align_end) >= 48 && load8(source, align_end) <= 57 {
+            align_end = align_end + 1;
+        } else {
+            break;
+        }
+    }
+    let quote: usize = align_end;
+    while quote < end {
+        if load8(source, quote) == 34 {
+            break;
+        }
+        quote = quote + 1;
+    }
+    let content_start: usize = quote + 1;
+    let content_end: usize = content_start;
+    let escaped: i32 = 0;
+    while content_end < end {
+        let byte: i32 = load8(source, content_end);
+        if escaped == 1 {
+            escaped = 0;
+            content_end = content_end + 1;
+        } else {
+            if byte == 92 {
+                escaped = 1;
+                content_end = content_end + 1;
+            } else {
+                if byte == 34 {
+                    break;
+                } else {
+                    content_end = content_end + 1;
+                }
+            }
+        }
+    }
+    append_literal(output, "_Alignas(", 9);
+    append_span(output, source, align_start, align_end);
+    append_literal(output, ") static const uint8_t ", 23);
+    append_span(output, source, name_start, name_end);
+    append_literal(output, "[", 1);
+    append_span(output, source, size_start, size_end);
+    append_literal(output, "] = {", 5);
+    let emitted: i32 = 0;
+    let content_cursor: usize = content_start;
+    while content_cursor < content_end {
+        // The bootstrap frontend drops every conjunct after the first in a
+        // `while a && b` condition, so the size bound is checked here.
+        if emitted >= size_value {
+            break;
+        }
+        let byte: i32 = load8(source, content_cursor);
+        if byte != 92 {
+            emitted = append_data_byte(output, byte, emitted);
+            content_cursor = content_cursor + 1;
+            continue;
+        }
+        // `\` at the very end is not an escape; the seed lexer keeps it.
+        if content_cursor + 1 >= content_end {
+            emitted = append_data_byte(output, 92, emitted);
+            content_cursor = content_cursor + 1;
+            continue;
+        }
+        // Decode exactly like the seed lexer's token_string_literal: the
+        // named escapes, `\xHH` when both digits are hex, and otherwise the
+        // backslash together with the escaped byte.
+        let escaped_byte: i32 = load8(source, content_cursor + 1);
+        if escaped_byte == 110 {
+            emitted = append_data_byte(output, 10, emitted);
+            content_cursor = content_cursor + 2;
+            continue;
+        }
+        if escaped_byte == 114 {
+            emitted = append_data_byte(output, 13, emitted);
+            content_cursor = content_cursor + 2;
+            continue;
+        }
+        if escaped_byte == 116 {
+            emitted = append_data_byte(output, 9, emitted);
+            content_cursor = content_cursor + 2;
+            continue;
+        }
+        if escaped_byte == 92 {
+            emitted = append_data_byte(output, 92, emitted);
+            content_cursor = content_cursor + 2;
+            continue;
+        }
+        if escaped_byte == 34 {
+            emitted = append_data_byte(output, 34, emitted);
+            content_cursor = content_cursor + 2;
+            continue;
+        }
+        if escaped_byte == 120 {
+            let high: i32 = hex_value(source, content_cursor + 2, content_end);
+            let low: i32 = hex_value(source, content_cursor + 3, content_end);
+            if high >= 0 && low >= 0 {
+                // The bootstrap frontend drops the additive term of an
+                // unparenthesized `a * b + c`, so the product is parenthesized.
+                emitted = append_data_byte(output, (high * 16) + low, emitted);
+                content_cursor = content_cursor + 4;
+                continue;
+            }
+        }
+        emitted = append_data_byte(output, 92, emitted);
+        emitted = append_data_byte(output, escaped_byte, emitted);
+        content_cursor = content_cursor + 2;
+        continue;
+    }
+    while emitted < size_value {
+        if emitted > 0 {
+            append_literal(output, ", ", 2);
+        }
+        append(output, 48);
+        emitted = emitted + 1;
+    }
+    append_literal(output, "};\n", 3);
+};
+
 let emit_line = std::func(
     source: addr,
     start: usize,
@@ -800,6 +1079,15 @@ let emit_line = std::func(
     if match_at(source, index, end, "#extern", 7) {
         emit_extern_decl(source, index, end, output);
         return;
+    }
+    // `#data` declarations were already emitted by the data pass, which runs
+    // before the prototypes.  `#data_addr` shares the prefix but is an
+    // expression, so only the bare declaration keyword is dropped here.
+    if match_at(source, index, end, "#data", 5) {
+        let keyword_end: usize = index + 5;
+        if keyword_end == end || load8(source, keyword_end) != 95 {
+            return;
+        }
     }
     // Canonical L1 keeps an inline block and its closing brace on one
     // physical line (`} else { %r = 2 }`).  Emit the opener here, then hand
@@ -919,6 +1207,11 @@ let emit_line = std::func(
         append_literal(output, " ", 1);
         append_span(output, source, name, name_end);
         append_literal(output, "= ", 2);
+        if is_addr_type(source, type_start, equals) {
+            append_literal(output, "(", 1);
+            emit_c_type(source, type_start, equals, output);
+            append_literal(output, ")", 1);
+        }
         if equals < end {
             let value_start: usize = equals + 1;
             while value_start < end {
@@ -1169,6 +1462,49 @@ let backend_compile = std::func() -> i32 {
     append_literal(output, "#define L1_add(a,b) ((a)+(b))\n#define L1_sub(a,b) ((a)-(b))\n#define L1_mul(a,b) ((a)*(b))\n#define L1_eq(a,b) ((a)==(b))\n#define L1_lt(a,b) ((a)<(b))\n#define L1_le(a,b) ((a)<=(b))\n#define L1_and(a,b) ((a)&&(b))\n#define L1_or(a,b) ((a)||(b))\n", 240);
     append_literal(output, "#define L1_ne(a,b) ((a)!=(b))\n#define L1_gt(a,b) ((a)>(b))\n#define L1_ge(a,b) ((a)>=(b))\n", 89);
     append_literal(output, "#define L1_udiv(a,b) ((a)/(b))\n#define L1_sdiv(a,b) ((int64_t)(a)/(int64_t)(b))\n#define L1_urem(a,b) ((a)%(b))\n", 111);
+    // Data objects are emitted before the prototypes and definitions,
+    // matching the seed emitter's include/helper/data/prototype/definition
+    // order.  A declaration may split across physical lines, so collect its
+    // candidate until the parameter parentheses balance.
+    let data_start: usize = 0;
+    let data_candidate: usize = 0;
+    let data_segment: usize = 0;
+    let data_depth: i32 = 0;
+    let data_active: i32 = 0;
+    let data_index: usize = 0;
+    while data_index < input_length {
+        if load8(input_data, data_index) == 10 {
+            if data_active == 0 {
+                if match_at(input_data, data_start, data_index, "#data", 5) {
+                    let keyword_end: usize = data_start + 5;
+                    if keyword_end >= data_index || load8(input_data, keyword_end) != 95 {
+                        data_active = 1;
+                        data_candidate = data_start;
+                        data_segment = data_start;
+                        data_depth = 0;
+                    }
+                }
+            }
+            if data_active == 1 {
+                data_depth = data_depth + expression_delimiters(
+                    input_data,
+                    data_segment,
+                    data_index,
+                );
+                data_segment = data_index + 1;
+                if data_depth <= 0 {
+                    emit_data_decl(input_data, data_candidate, data_index, output);
+                    data_active = 0;
+                    data_depth = 0;
+                }
+            }
+            data_start = data_index + 1;
+        }
+        data_index = data_index + 1;
+    }
+    if data_active == 1 && data_candidate < input_length {
+        emit_data_decl(input_data, data_candidate, input_length, output);
+    }
     // Pass one collects procedure/extern declarations so calls may target
     // later definitions. Headers may span physical lines, so collect a
     // candidate until its parameter parentheses are balanced.

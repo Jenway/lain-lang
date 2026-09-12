@@ -36,9 +36,13 @@ SEED = ROOT / "build" / "seed" / "bin" / (
 BACKEND = ROOT / "build" / "backend_c_entry.l1"
 FIXTURES = ROOT / "scripts" / "fixtures"
 # The inline-else fixture is the regression case this check was written for.
+# The data fixture is the regression case for `#data`/#`data_addr`: a stray
+# pointer-typed initializer or an unescaped data literal breaks the emitted C
+# shape before zig cc ever sees it.
 CASES = (
     "backend_inline_else.l1",
     "backend_constant_return.l1",
+    "backend_data_addr.l1",
 )
 
 _STRING = re.compile(r'"(\\.|[^"\\])*"')
