@@ -85,13 +85,18 @@ LAINVM」这一项当前只由契约代表。
   证据。
 - `scripts/profile_lainc_bootstrap.py` 仍假定旧的单文件输入和 `compiler_compile` 入口，不能
   原样用作当前固定点驱动。
-- `scripts/check_lainvm_boundary.py` 主要检查源码和 API 形状，不能证明正式 lainc 的
-  `Vm.eval` 已经由真实 handler 执行。
+- `scripts/check_lainvm_boundary.py` 检查的是**契约边界**（契约存在、lainc 只依赖契约而非任何
+  实现、归档实现不得回到 `src/`），属源码级检查；它**不能**证明正式 lainc 的 `Vm.eval` 已经由
+  真实 handler 执行。该 gate 在 2026-09-12 随形式实现归档而重写，不再检查实现形状。
 - `bootstrap/compiler/meta_call.l1` 当前按 scalar、module 和 effect 返回类别选择不同路径；
   这只是过渡实现，不是目标架构。
-- `std::func` 还没有解释 `?{}` 输入行。
-- 当前裸 `type`、generic policy、`ComptimeValue` 分类和 compiler-owned specialization
-  仍散布于 `std/`、`bootstrap/` 与 `src/lainc/`。
+- ~~`std::func` 还没有解释 `?{}` 输入行~~ **已解决（2026-09-12，编码 3）**：输入行在调用点
+  解析、三类失败有诊断、§9.2 四个约束来源全部实现。由 `scripts/check_input_effects.py` 覆盖。
+- ~~裸 `type`、generic policy、`ComptimeValue` 分类与 compiler-owned specialization 仍散布于
+  `std/`、`bootstrap/` 与 `src/lainc/`~~ **已解决（2026-09-12）**：裸 `type` 由编码 0 移除，
+  generic policy / `ComptimeValue` 分类 / specialization 由编码 4 移除。当前源码中
+  `generic_policy`、`meta_generic_`、`ComptimeValue`、`Specialization*`、旧 `comptime` 修饰符
+  **均无匹配**（仅注释里出现 `name : type` 这类文法说明文字）。
 - `Eval` 目前定义在 `src/lainvm/`，但它是 LAINIR 的概念。迁移前 LAINIR 与 LAINVM 在契约
   层面仍然混着（见 §4.4）。
 - C seed 的编译期求值使用「传源码 + fold」模型（`bootstrap.eval_source`，宿主重新 parse、
@@ -99,9 +104,11 @@ LAINVM」这一项当前只由契约代表。
   而该 capability 目前没有调用者）；lainc 使用「执行已验证 IR」模型
   （`Vm.eval(unit, procedure, arguments)` 返回物理 `Value`）。两者统一之前，编译期执行
   没有单一语义。
-- Lain 实现中的 `suspend_tcb`、`resume_tcb`、`run_slice` 与 Endpoint 都没有调用者。这不是
-  "缺实现"：现有全部 handler 的 `resume` 都在尾位置或根本不 `resume`，挂起机制的消费者
-  尚不存在。见 [`../stdlib/effect-system.md`](../stdlib/effect-system.md)。
+- 归档的 Lain LAINVM 实现（`docs/history/formal-implementations/interpreter.lain`）中的
+  `suspend_tcb`、`resume_tcb`、`run_slice` 与 Endpoint 都没有调用者。这不是"缺实现"：现有
+  全部 handler 的 `resume` 都在尾位置或根本不 `resume`，挂起机制的消费者尚不存在。
+  见 [`../stdlib/effect-system.md`](../stdlib/effect-system.md)。该实现已于 2026-09-12 归档
+  （§2），归档本身不影响这条判断。
 
 ### 3.3 编码 0：已完成（2026-09-12）
 
