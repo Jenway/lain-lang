@@ -23,6 +23,19 @@
 #extern #proc meta_env_bind(
   #addr %environment, #addr %source, #addr %name, #addr %value
 ) -> #unit;
+#extern #proc program_type_end(#addr %source, #addr %node) -> #addr;
+#extern #proc program_nil() -> #addr;
+#extern #proc program_function_input_row(#addr %function) -> #addr;
+#extern #proc program_set_unit_status(#addr %unit, #bits<32> %status) -> #unit;
+#extern #proc program_unit_set_validation_node(
+  #addr %unit, #addr %source, #addr %node
+) -> #unit;
+#extern #proc program_unit_set_validation_function(
+  #addr %unit, #addr %function
+) -> #unit;
+#extern #proc lain_std_is_module_return_type(
+  #addr %source, #addr %node
+) -> #bits<1>;
 #extern #proc lain_std_is_effect(
   #addr %source, #addr %node
 ) -> #bits<1>;
@@ -637,8 +650,125 @@
   #return 0
 }
 
+// An input row names Meta values the call site's environment must supply.
+// An entry is `name` or `name : type`; `program_input_row_shape_node` has
+// already rejected every other shape, so walking the row reads only those two
+// forms.  `name : type` is resolved here.  A bare `name` is `name: _`, whose
+// type can only come from signature constraints that this phase does not
+// derive, so the entry is reported instead of being bound with no type.
+
+// The declared type of one input entry, or the shared nil node for a bare
+// name.
+#proc lainvm_meta_input_entry_type(
+  #addr %source, #addr %entry
+) -> #addr {
+  #let %colon: #addr = #call raw_node_next(%entry)
+  #if #call raw_is_nil(%colon) { #return #call program_nil() }
+  #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
+    #return #call program_nil()
+  }
+  #return #call raw_node_next(%colon)
+}
+
+// The Meta kind a declared input type requires, or 0 when this phase cannot
+// decide.  A scalar type name demands a scalar value, `Module` and any name
+// that resolves to a Module demand a module value, and any other name demands
+// a value of the kind it resolves to in the call environment.  A type this
+// phase cannot classify is not guessed: it constrains nothing.
+#proc lainvm_meta_input_expected_kind(
+  #addr %source, #addr %environment, #addr %type
+) -> #bits<32> {
+  #if #ne(#call lainvm_meta_scalar_width(%source, %type), 0) { #return 1 }
+  #if #call lain_std_is_module_return_type(%source, %type) { #return 2 }
+  #return #call meta_value_kind(
+    #call meta_env_lookup_path(%environment, %source, %type)
+  )
+}
+
+// Reports one input failure on the caller's unit and returns its status.  The
+// declaration that carries the row is the reported function, and the span is
+// its own token: the entry name for an absent or uninferable input, the
+// declared type for a value that does not satisfy it.
+#proc lainvm_meta_input_status(
+  #addr %unit, #addr %function, #addr %source, #addr %node,
+  #bits<32> %status
+) -> #bits<32> {
+  #call program_unit_set_validation_function(%unit, %function)
+  #call program_unit_set_validation_node(%unit, %source, %node)
+  #call program_set_unit_status(%unit, %status)
+  #return %status
+}
+
+// Look an input entry's name up in the call environment.  `meta_env_lookup_path`
+// reads a `:` that immediately follows a node as the start of a `::` path, but
+// an entry's own `name : type` separator is exactly that colon, so the entry
+// node is re-spelled as a standalone atom first.  The lookup then keeps the
+// ordinary path semantics (exact name, outward through the lexical chain, dot
+// segments resolved through Module/type values).
+#proc lainvm_meta_input_lookup(
+  #addr %environment, #addr %source, #addr %entry
+) -> #addr {
+  #let %name: #addr = #call raw_node_new(
+    1, 0, #call raw_node_start(%entry), #call raw_node_length(%entry), 3
+  )
+  #return #call meta_env_lookup_path(%environment, %source, %name)
+}
+
+// Resolves the callee's `?{...}` row against the caller's Meta environment and
+// binds every resolved input into the invocation environment under the entry's
+// own name node, so the callee body sees it exactly where the declaration says
+// it is.  Lookup is the ordinary exact-name path lookup outward through the
+// caller's lexical chain, so the nearest binding shadows the rest.  The row
+// nodes belong to %function_source, which is therefore the source used to read
+// them and to report their spans; %environment is the call site's.
+#proc lainvm_meta_resolve_inputs(
+  #addr %unit, #addr %function_source, #addr %function,
+  #addr %environment, #addr %invocation
+) -> #bits<32> {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return 0 }
+  #let %entry: #addr = #call raw_node_first(%input_row)
+  #loop entries {
+    #if #call raw_is_nil(%entry) { #return 0 }
+    #let %type: #addr = #call lainvm_meta_input_entry_type(
+      %function_source, %entry
+    )
+    #if #call raw_is_nil(%type) {
+      #return #call lainvm_meta_input_status(
+        %unit, %function, %function_source, %entry, 5104
+      )
+    }
+    #let %value: #addr = #call lainvm_meta_input_lookup(
+      %environment, %function_source, %entry
+    )
+    #if #eq(#call meta_value_kind(%value), 0) {
+      #return #call lainvm_meta_input_status(
+        %unit, %function, %function_source, %entry, 5108
+      )
+    }
+    #let %expected: #bits<32> = #call lainvm_meta_input_expected_kind(
+      %function_source, %environment, %type
+    )
+    #if #ne(%expected, 0) {
+      #if #ne(#call meta_value_kind(%value), %expected) {
+        #return #call lainvm_meta_input_status(
+          %unit, %function, %function_source, %type, 5108
+        )
+      }
+    }
+    #call meta_env_bind(%invocation, %function_source, %entry, %value)
+    // A typed entry ends at its type; the next node is the row separator or
+    // the end of the row.
+    #let %separator: #addr = #call raw_node_next(
+      #call program_type_end(%function_source, %type)
+    )
+    #if #call raw_is_nil(%separator) { #return 0 }
+    %entry: #addr = #call raw_node_next(%separator)
+  }
+}
+
 #proc lainvm_meta_address_invocation_environment(
-  #addr %call_source, #addr %function_source, #addr %function,
+  #addr %unit, #addr %call_source, #addr %function_source, #addr %function,
   #addr %group, #addr %environment
 ) -> #addr {
   #let %invocation: #addr = #call meta_env_new(
@@ -649,7 +779,7 @@
     #call program_function_params(%function)
   )
   #loop bindings {
-    #if #call raw_is_nil(%argument) { #return %invocation }
+    #if #call raw_is_nil(%argument) { #break bindings }
     #let %value: #addr = #call meta_env_lookup_path(
       %environment, %call_source, %argument
     )
@@ -665,10 +795,14 @@
     }
     #continue bindings
   }
+  #call lainvm_meta_resolve_inputs(
+    %unit, %function_source, %function, %environment, %invocation
+  )
+  #return %invocation
 }
 
 #proc lainvm_eval_meta_effect_call(
-  #addr %call_source, #addr %function_source,
+  #addr %unit, #addr %call_source, #addr %function_source,
   #addr %function, #addr %group,
   #addr %environment, #addr %effect_node
 ) -> #addr {
@@ -678,8 +812,12 @@
   #let %arguments: #addr = #call bootstrap.vm-arguments-new()
   #let %invocation_environment: #addr =
     #call lainvm_meta_address_invocation_environment(
-      %call_source, %function_source, %function, %group, %environment
+      %unit, %call_source, %function_source, %function, %group, %environment
     )
+  // A row the call site cannot satisfy aborts before the artifact runs.
+  #if #ne(#call program_unit_status(%unit), 0) {
+    #return #call program_nil()
+  }
   #call lainvm_meta_append_address_arguments(
     %arguments, %call_source, %function_source, %function,
     %group, %environment, %effect_node, %invocation_environment
