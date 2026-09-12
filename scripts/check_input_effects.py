@@ -48,6 +48,16 @@ POSITIVE = (
     # desynchronise the artifact from its argument list.
     ("scalar inputs beside a Module entry",
      "formal_input_scalar_mixed.lain", "41"),
+    # A scalar input's declared *width* is part of the requirement, not just
+    # its kind: the same call whose caller declares `i64` satisfies an `i64`
+    # input, while a caller whose declaration determines no width stays
+    # accepted because there is nothing to compare (neither side is guessed).
+    ("scalar input width match", "formal_input_scalar_width_match.lain", "41"),
+    (
+        "scalar input width unknown",
+        "formal_input_scalar_width_unknown.lain",
+        "41",
+    ),
     # A parameter type may name an input row entry, and the type value the call
     # site supplies for that entry is then the parameter's type.  Both fixtures
     # run the same callee with the same argument (300) and differ only in the
@@ -120,6 +130,16 @@ NEGATIVE = (
         5108,
         "Module",
         "local: Module",
+    ),
+    # A scalar of the wrong width does not satisfy a scalar input: `i32` is a
+    # scalar, but it is not the declared `i64`, and the failure blames the
+    # declared type in the row exactly like a kind mismatch.
+    (
+        "scalar input width mismatch",
+        "formal_input_scalar_width_mismatch.lain",
+        5108,
+        "i64",
+        "local: i64",
     ),
     # A bare entry is only derivable when a type position uses it.  This row
     # names `T` nowhere in the signature even though the call site does supply

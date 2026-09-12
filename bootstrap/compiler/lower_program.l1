@@ -122,7 +122,7 @@
   #addr %source, #addr %name, #addr %binding, #addr %environment
 ) -> #addr;
 #extern #proc meta_value_scalar(
-  #addr %source, #addr %node, #bits<64> %number
+  #addr %source, #addr %node, #bits<64> %number, #bits<64> %width
 ) -> #addr;
 #extern #proc meta_value_nil() -> #addr;
 #extern #proc meta_env_lookup_path(
@@ -135,6 +135,7 @@
 #extern #proc meta_value_payload(#addr %value) -> #addr;
 #extern #proc meta_value_environment(#addr %value) -> #addr;
 #extern #proc meta_value_scalar_number(#addr %value) -> #bits<64>;
+#extern #proc meta_value_scalar_width(#addr %value) -> #bits<64>;
 #extern #proc lainvm_validate_consteval_group(
   #addr %source, #addr %group
 ) -> #bits<32>;
@@ -1001,11 +1002,17 @@
 
 // Constant descriptor:
 //   name start/length @0/@8, value @16, diagnostic @24,
-//   owning source @32, next @40.
+//   owning source @32, next @40, declared type width @48.
+//
+// The width is the physical width the declaration's own type annotation
+// denotes, or zero when the declaration has no annotation this phase can
+// measure.  It is what tells a later Meta input check whether a scalar value
+// satisfies the width the callee declared.
 #proc program_constant_new(
-  #addr %source, #addr %name, #bits<64> %value, #bits<32> %status
+  #addr %source, #addr %name, #bits<64> %value, #bits<32> %status,
+  #bits<64> %width
 ) -> #addr {
-  #let %constant: #addr = #call bootstrap.allocate-pages(48)
+  #let %constant: #addr = #call bootstrap.allocate-pages(64)
   #let %nil: #addr = #call program_nil()
   #store #call raw_node_start(%name),
     #lea(base=%constant, idx=0, scale=0, offset=0)
@@ -1015,6 +1022,7 @@
   #store %status, #lea(base=%constant, idx=0, scale=0, offset=24)
   #store %source, #lea(base=%constant, idx=0, scale=0, offset=32)
   #store %nil, #lea(base=%constant, idx=0, scale=0, offset=40)
+  #store %width, #lea(base=%constant, idx=0, scale=0, offset=48)
   #return %constant
 }
 
@@ -1028,6 +1036,10 @@
 
 #proc program_constant_status(#addr %constant) -> #bits<32> {
   #return #load[#bits<32>](#lea(base=%constant, idx=0, scale=0, offset=24))
+}
+
+#proc program_constant_width(#addr %constant) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%constant, idx=0, scale=0, offset=48))
 }
 
 // The lexer keeps a qualified name such as `math.add` in one atom.  Namespace
@@ -2805,6 +2817,26 @@
   }
 }
 
+// The physical width a declaration's own type annotation denotes, or zero when
+// the declaration has no annotation or names something the builtin table does
+// not measure.  A declaration's shape is fixed -- `let name : type = value` --
+// so the colon is the node right after the name, exactly as
+// `program_write_local` reads it.  What this phase cannot measure stays
+// unknown rather than being given a guessed width.
+#proc program_declaration_type_width(
+  #addr %source, #addr %let_node
+) -> #bits<64> {
+  #let %name: #addr = #call raw_node_next(%let_node)
+  #let %annotation_or_equals: #addr = #call raw_node_next(%name)
+  #if #call raw_is_nil(%annotation_or_equals) { #return 0 }
+  #if #eq(#call meta_atom_equal(%source, %annotation_or_equals, ":", 1), 0) {
+    #return 0
+  }
+  #let %type: #addr = #call raw_node_next(%annotation_or_equals)
+  #if #call raw_is_nil(%type) { #return 0 }
+  #return #call meta_builtin_width(%source, %type)
+}
+
 #proc program_parse_constant(
   #addr %unit, #addr %source, #addr %let_node
 ) -> #addr {
@@ -2844,7 +2876,10 @@
     %node: #addr = #call raw_node_next(%node)
     #continue declaration
   }
-  #return #call program_constant_new(%source, %name, %value, %status)
+  #return #call program_constant_new(
+    %source, %name, %value, %status,
+    #call program_declaration_type_width(%source, %let_node)
+  )
 }
 
 #proc program_is_literal_declaration(
@@ -2898,7 +2933,10 @@
     %node: #addr = #call raw_node_next(%node)
     #continue declaration
   }
-  #return #call program_constant_new(%source, %name, %value, %status)
+  #return #call program_constant_new(
+    %source, %name, %value, %status,
+    #call program_declaration_type_width(%source, %let_node)
+  )
 }
 
 #proc program_is_meta_binding(
