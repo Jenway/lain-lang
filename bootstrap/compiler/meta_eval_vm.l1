@@ -1,8 +1,8 @@
 // Bootstrap bridge from Meta arithmetic to LAINVM.
 //
 // This module translates the accepted Lain expression slice into a complete
-// LAINIR source buffer containing #eval.  The seed parses and verifies that
-// buffer, then executes #eval through a temporary TCB.
+// LAINIR module in the host capture sink.  The seed parses and verifies that
+// generated text, then executes #eval through a temporary TCB.
 
 #data lainvm_meta_eval_name(9, 1, "meta_eval");
 
@@ -19,74 +19,54 @@
   #addr %artifact, #addr %procedure, #addr %arguments
 ) -> #bits<64>;
 
-#proc lainvm_eval_buffer_new() -> #addr {
-  #let %buffer: #addr = #call bootstrap.allocate-pages(4104)
-  #store 0, #lea(base=%buffer, idx=0, scale=0, offset=0)
-  #return %buffer
-}
+#extern #proc bootstrap.artifact-capture-begin() -> #unit;
+#extern #proc bootstrap.artifact-capture-data() -> #addr;
+#extern #proc bootstrap.artifact-capture-length() -> #bits<64>;
+#extern #proc bootstrap.artifact-write-byte(#bits<8> %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(#addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
 
-#proc lainvm_eval_buffer_length(#addr %buffer) -> #bits<64> {
-  #return #load[#bits<64>](#lea(base=%buffer, idx=0, scale=0, offset=0))
-}
-
-#proc lainvm_eval_buffer_data(#addr %buffer) -> #addr {
-  #return #lea(base=%buffer, idx=0, scale=0, offset=8)
-}
-
-#proc lainvm_eval_buffer_append_byte(
-  #addr %buffer, #bits<8> %byte
-) -> #unit {
-  #let %length: #bits<64> = #call lainvm_eval_buffer_length(%buffer)
-  #if #sge(%length, 4096) { #return }
-  #store %byte, #lea(base=%buffer, idx=%length, scale=1, offset=8)
-  #store #add(%length, 1), #lea(base=%buffer, idx=0, scale=0, offset=0)
+// The generated-LAINIR sink is the host's in-memory artifact capture.  It is
+// a layer above the output file sink, so a capture may run while the emitter
+// holds the output file open.  Each begin is paired with exactly one finish,
+// and data/length are readable only after that finish.
+#proc lainvm_capture_begin() -> #unit {
+  #call bootstrap.artifact-capture-begin()
   #return
 }
 
-#proc lainvm_eval_buffer_append_literal(
-  #addr %buffer, #addr %text
-) -> #unit {
-  #let %index: #bits<64> = 0
-  #loop bytes {
-    #let %byte: #bits<8> = #load[#bits<8>](
-      #lea(base=%text, idx=%index, scale=1, offset=0)
-    )
-    #if #eq(%byte, 0) { #return }
-    #call lainvm_eval_buffer_append_byte(%buffer, %byte)
-    %index: #bits<64> = #add(%index, 1)
-    #continue bytes
-  }
+#proc lainvm_capture_finish() -> #unit {
+  #call bootstrap.artifact-finish()
+  #return
 }
 
-#proc lainvm_eval_buffer_append_node(
-  #addr %buffer, #addr %source, #addr %node
-) -> #unit {
+#proc lainvm_capture_data() -> #addr {
+  #return #call bootstrap.artifact-capture-data()
+}
+
+#proc lainvm_capture_length() -> #bits<64> {
+  #return #call bootstrap.artifact-capture-length()
+}
+
+#proc lainvm_write_node(#addr %source, #addr %node) -> #unit {
   #let %data: #addr = #call tool_source_data(%source)
   #let %index: #bits<64> = 0
   #loop bytes {
     #if #sge(%index, #call raw_node_length(%node)) { #return }
-    #call lainvm_eval_buffer_append_byte(
-      %buffer,
-      #call tool_byte_at(
-        %data, #add(#call raw_node_start(%node), %index)
-      )
+    #call bootstrap.artifact-write-byte(
+      #call tool_byte_at(%data, #add(#call raw_node_start(%node), %index))
     )
     %index: #bits<64> = #add(%index, 1)
     #continue bytes
   }
 }
 
-#proc lainvm_eval_buffer_append_decimal(
-  #addr %buffer, #bits<64> %value
-) -> #unit {
+#proc lainvm_write_decimal(#bits<64> %value) -> #unit {
   #let %quotient: #bits<64> = #udiv(%value, 10)
   #if #sge(%value, 10) {
-    #call lainvm_eval_buffer_append_decimal(
-      %buffer, %quotient
-    )
+    #call lainvm_write_decimal(%quotient)
   }
-  #call lainvm_eval_buffer_append_byte(
-    %buffer,
+  #call bootstrap.artifact-write-byte(
     #trunc[#bits<8>](#add(#sub(%value, #mul(%quotient, 10)), 48))
   )
   #return
@@ -137,46 +117,46 @@
 }
 
 #proc lainvm_write_consteval_operand(
-  #addr %buffer, #addr %source, #addr %node
+  #addr %source, #addr %node
 ) -> #unit {
   #if #call program_is_decimal(%source, %node) {
-    #call lainvm_eval_buffer_append_node(%buffer, %source, %node)
+    #call lainvm_write_node(%source, %node)
     #return
   }
   #call lainvm_write_consteval_expression(
-    %buffer, %source, #call raw_node_first(%node)
+    %source, #call raw_node_first(%node)
   )
   #return
 }
 
 #proc lainvm_write_consteval_expression(
-  #addr %buffer, #addr %source, #addr %left
+  #addr %source, #addr %left
 ) -> #unit {
   #let %operator: #addr = #call raw_node_next(%left)
   #if #call raw_is_nil(%operator) {
-    #call lainvm_write_consteval_operand(%buffer, %source, %left)
+    #call lainvm_write_consteval_operand(%source, %left)
     #return
   }
-  #call lainvm_eval_buffer_append_byte(%buffer, 35)
+  #call bootstrap.artifact-write-byte(35)
   #if #call meta_atom_equal(%source, %operator, "+", 1) {
-    #call lainvm_eval_buffer_append_literal(%buffer, "add(")
+    #call bootstrap.artifact-write-literal("add(")
   } else {
     #if #call meta_atom_equal(%source, %operator, "-", 1) {
-      #call lainvm_eval_buffer_append_literal(%buffer, "sub(")
+      #call bootstrap.artifact-write-literal("sub(")
     } else {
       #if #call meta_atom_equal(%source, %operator, "*", 1) {
-        #call lainvm_eval_buffer_append_literal(%buffer, "mul(")
+        #call bootstrap.artifact-write-literal("mul(")
       } else {
-        #call lainvm_eval_buffer_append_literal(%buffer, "sdiv(")
+        #call bootstrap.artifact-write-literal("sdiv(")
       }
     }
   }
-  #call lainvm_write_consteval_operand(%buffer, %source, %left)
-  #call lainvm_eval_buffer_append_literal(%buffer, ", ")
+  #call lainvm_write_consteval_operand(%source, %left)
+  #call bootstrap.artifact-write-literal(", ")
   #call lainvm_write_consteval_operand(
-    %buffer, %source, #call raw_node_next(%operator)
+    %source, #call raw_node_next(%operator)
   )
-  #call lainvm_eval_buffer_append_byte(%buffer, 41)
+  #call bootstrap.artifact-write-byte(41)
   #return
 }
 
@@ -194,21 +174,20 @@
 #proc lainvm_eval_consteval_group(
   #addr %source, #addr %group
 ) -> #bits<64> {
-  #let %buffer: #addr = #call lainvm_eval_buffer_new()
-  #call lainvm_eval_buffer_append_literal(
-    %buffer,
+  #call lainvm_capture_begin()
+  #call bootstrap.artifact-write-literal(
     "#proc meta_eval() -> #bits<64> {\n  #let %value: #bits<64> = #eval { #return "
   )
   #call lainvm_write_consteval_expression(
-    %buffer, %source, #call raw_node_first(%group)
+    %source, #call raw_node_first(%group)
   )
-  #call lainvm_eval_buffer_append_literal(
-    %buffer,
+  #call bootstrap.artifact-write-literal(
     " }\n  #return %value\n}\n"
   )
+  #call lainvm_capture_finish()
   #let %artifact: #addr = #call bootstrap.vm-artifact-parse(
-    #call lainvm_eval_buffer_data(%buffer),
-    #call lainvm_eval_buffer_length(%buffer)
+    #call lainvm_capture_data(),
+    #call lainvm_capture_length()
   )
   #let %procedure: #addr = #call bootstrap.vm-procedure-find(
     %artifact, #data_addr(lainvm_meta_eval_name), 9
@@ -219,6 +198,5 @@
   )
   #call bootstrap.vm-arguments-release(%arguments)
   #call bootstrap.vm-artifact-release(%artifact)
-  #call bootstrap.release-pages(%buffer)
   #return %value
 }
