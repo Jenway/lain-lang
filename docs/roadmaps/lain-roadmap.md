@@ -232,8 +232,12 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 | 子阶段 | 状态 | 内容 |
 | --- | --- | --- |
 | 1a | 已完成 | Meta 调用的 LAINVM 执行管道统一（§7.0） |
-| **1c** | **下一步** | **把形式识别移回库，删除编译器中的 24 处名字硬编码（§7.0.2）** |
-| 1b | 待 1c | sink 统一，及其余能力收敛（§7，设计见 implementation/meta-callable-unification.md） |
+| 1c | **已完成 2026-09-12** | 形式识别移回库：编译器中的 24 处名字字面量降为 **0**，库新增 10 个谓词（§7.0.2） |
+| **1b** | **下一步** | sink 统一（1b-1/1b-2），及其余能力收敛（1b-3+） |
+
+1c 的验收：`bootstrap/compiler/` 的名字字面量从 24 降到 0；
+`scripts/check_meta_form_swap.py` 证明编译器真的经库询问（替换库谓词返回值则编译行为改变）；
+15 道 baseline 退出 0。
 
 调整理由：架构正确性优先。1c 恢复的是本来就写在设计里的边界（库拥有语言规则），
 且不改变任何行为；1b 的剩余部分依赖 elaborate 与签名，晚做不会增加返工。
@@ -244,10 +248,6 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 
 本节保留实施记录与验收命令，供追溯。编码 0 的所有条款均已落地并通过 §6.5 验收；后续阶段
 以 §6.5 的命令作为回归基线。阶段完成后可按既有惯例把完成证据移入 `docs/history/`。
-
-### 6.1 前置检查
-
-修改前运行：
 
 ```text
 python scripts/check_bootstrap_consteval.py
