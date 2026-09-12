@@ -63,7 +63,7 @@ python scripts/<name>.py [args...]
 
 ## 推荐入口
 
-- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 18 道 lainc → LAINIR API 迁移 gate，任一失败即以该 gate 的退出码结束。
+- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 19 道 lainc → LAINIR API 迁移 gate，任一失败即以该 gate 的退出码结束。
 - `python scripts/capture_lain_bootstrap_baseline.py` — 采集可复现的机器可读 bootstrap 基线报告（同时记录成功与失败的 gate）。
 
 ## 脚本索引
@@ -83,7 +83,7 @@ python scripts/<name>.py [args...]
 
 | 脚本 | 作用 |
 | --- | --- |
-| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 18 道 lainc → LAINIR API 迁移 gate。 |
+| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 19 道 lainc → LAINIR API 迁移 gate。 |
 | `check_lainc_lainir_api.py` | 检查源码层面的 lainc → LAINIR capability 边界（`--final` 时切换为移除 gate）。 |
 | `check_lainc_lainir_api_snapshots.py` | 用 checked-in canonical artifact 基线守护 formal compiler 的回归。 |
 | `check_backend_manifest.py` | 检查 backend manifest 的 logical capability 分类。 |
@@ -99,6 +99,7 @@ python scripts/<name>.py [args...]
 | `check_stdlib_conformance.py` | 在共享 scalar slice 上比较 bootstrap 与 formal stdlib。 |
 | `check_srclainc_artifact.py` | 重建 Lain compiler source closure 并证明产物确定性。 |
 | `check_lainc_bootstrap_snapshot.py` | 验证生成的 bootstrap bundle 及其 source manifest。 |
+| `check_bits_type.py` | 校验 `#bits<N>` 类型的物理宽度解析：`#bits<8>/<32>/<64>` 作为形参标注时产物给出对应位宽（`<8>` 实参 300 截断为 44），宽度非 8 的倍数或缺 `>` 报 5104。 |
 | `check_bootstrap_consteval.py` | 通过生成的 LAINIR `#eval` 验证 bootstrap Meta 算术。 |
 | `check_bootstrap_vm_api.py` | 运行 seed 侧 Artifact/Procedure/arguments/eval 契约。 |
 | `check_eval_tcb.py` | 验证 C seed 的临时 TCB `#eval` 执行契约。 |

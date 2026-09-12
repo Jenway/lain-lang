@@ -25,6 +25,7 @@ CHECKS = (
     ("function signature", "check_function_signature.py"),
     ("typed input effects", "check_input_effects.py"),
     ("program entry contract", "check_program_entry.py"),
+    ("bits type width", "check_bits_type.py"),
     ("compiler artifact snapshots", "check_lainc_lainir_api_snapshots.py"),
     ("source-closure determinism", "check_srclainc_artifact.py"),
     ("gen2/gen3 self-host", "run_lainir_self_host.py"),

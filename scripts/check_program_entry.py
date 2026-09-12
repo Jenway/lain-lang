@@ -10,6 +10,9 @@ every script drives `--library` instead.
 The entry contract is that `main` returns a 32-bit value.  This check pins the
 contract semantically: any 32-bit spelling is accepted and actually runs, while
 a different width is still refused.
+
+`#bits<N>` is spelled as four separate RawAst atoms, so it is pinned here as
+well: `#bits<32>` satisfies the contract and `#bits<64>` does not.
 """
 
 from __future__ import annotations
@@ -39,12 +42,21 @@ ACCEPTED = (
         "let main = std::func() -> u32 {\n    return 7;\n};\n",
         "7",
     ),
+    (
+        "bits-spelled 32-bit entry",
+        "let main = std::func() -> #bits<32> {\n    return 42;\n};\n",
+        "42",
+    ),
 )
 
 # (label, main body source) -- entry widths the contract must refuse.
 REFUSED = (
     ("64-bit entry", "let main = std::func() -> i64 {\n    return 42;\n};\n"),
     ("8-bit entry", "let main = std::func() -> i8 {\n    return 42;\n};\n"),
+    (
+        "bits-spelled 64-bit entry",
+        "let main = std::func() -> #bits<64> {\n    return 42;\n};\n",
+    ),
 )
 
 REFUSAL_STATUS = 5112
