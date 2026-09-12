@@ -171,7 +171,8 @@
 //   body @32, next @40, diagnostic @48, parameter count @56,
 //   owning source @64, owning unit @72, source ordinal @80,
 //   lexical Meta environment @88, specialization key @96,
-//   linked-to-unit marker @104, ABI-export marker @120.
+//   linked-to-unit marker @104, ABI-export marker @120,
+//   input row @128, output effect row @136, arrow position @144.
 #proc program_nil() -> #addr {
   // Keep a second zeroed word so function descriptors can use their
   // name-length field to distinguish the sentinel from a real function.
@@ -264,7 +265,7 @@
   #addr %source, #addr %name, #addr %params, #addr %return_type, #addr %body,
   #bits<64> %source_index
 ) -> #addr {
-  #let %function: #addr = #call bootstrap.allocate-pages(128)
+  #let %function: #addr = #call bootstrap.allocate-pages(160)
   #let %nil: #addr = #call program_nil()
   #store #call raw_node_start(%name),
     #lea(base=%function, idx=0, scale=0, offset=0)
@@ -286,6 +287,12 @@
   #store 0, #lea(base=%function, idx=0, scale=0, offset=112)
   // @abi_export marker (0 when absent).
   #store 0, #lea(base=%function, idx=0, scale=0, offset=120)
+  // Signature rows: the `?{...}` input row group, the `!{...}` output effect
+  // row group, and the `-` atom that starts the arrow.  All stay nil for a
+  // declaration that carries no explicit signature rows.
+  #store %nil, #lea(base=%function, idx=0, scale=0, offset=128)
+  #store %nil, #lea(base=%function, idx=0, scale=0, offset=136)
+  #store %nil, #lea(base=%function, idx=0, scale=0, offset=144)
   #return %function
 }
 
@@ -431,6 +438,20 @@
 
 #proc program_function_body(#addr %function) -> #addr {
   #return #load[#addr](#lea(base=%function, idx=0, scale=0, offset=32))
+}
+
+#proc program_function_input_row(#addr %function) -> #addr {
+  #return #load[#addr](#lea(base=%function, idx=0, scale=0, offset=128))
+}
+
+#proc program_function_effect_row(#addr %function) -> #addr {
+  #return #load[#addr](#lea(base=%function, idx=0, scale=0, offset=136))
+}
+
+// Source position of the `-` that starts the arrow, or the shared nil node
+// when the declaration carries no arrow.
+#proc program_function_arrow(#addr %function) -> #addr {
+  #return #load[#addr](#lea(base=%function, idx=0, scale=0, offset=144))
 }
 
 #proc program_function_source_index(#addr %function) -> #bits<64> {
@@ -2304,6 +2325,18 @@
     #call raw_node_start(#call program_function_body(%left)),
     #call raw_node_start(#call program_function_body(%right))
   ) { #return 0 }
+  // Signature rows are part of the callable identity: two declarations that
+  // differ only in their `?{...}` input row or `!{...}` effect row are not the
+  // same function.  The shared nil sentinel has start 0, so declarations
+  // without rows keep comparing exactly as before.
+  #if #ne(
+    #call raw_node_start(#call program_function_input_row(%left)),
+    #call raw_node_start(#call program_function_input_row(%right))
+  ) { #return 0 }
+  #if #ne(
+    #call raw_node_start(#call program_function_effect_row(%left)),
+    #call raw_node_start(#call program_function_effect_row(%right))
+  ) { #return 0 }
   // A generic factory reuses the same RawAst body for every specialization.
   // The captured environment key distinguishes those physical closures;
   // pointer equality is deliberately unavailable at the LAIN-IR level.
@@ -2567,19 +2600,47 @@
   #let %params: #addr = #call program_function_runtime_params(
     %source, #call raw_node_next(%func)
   )
-  #let %arrow1: #addr = #call raw_node_next(%params)
+  // An input row is an optional `?{...}` group between the parameter list
+  // and the arrow.  The `?` stays a single atom and the row stays a plain
+  // RawAst group, so no new Parser node kind and no lexer change is needed.
+  #let %signature: #addr = #call raw_node_next(%params)
+  #let %has_input_row: #bits<1> = #ne(
+    #call meta_atom_equal(%source, %signature, "?", 1), 0
+  )
+  #let %input_row: #addr = #call program_nil()
+  #let %arrow1: #addr = %signature
+  #if %has_input_row {
+    %input_row: #addr = #call raw_node_next(%signature)
+    %arrow1: #addr = #call raw_node_next(%input_row)
+  }
   #let %arrow2: #addr = #call raw_node_next(%arrow1)
   #let %return_type: #addr = #call raw_node_next(%arrow2)
   #let %return_type_end: #addr = #call program_type_end(
     %source, %return_type
   )
   #let %body_candidate: #addr = #call raw_node_next(%return_type_end)
+  // An output effect row is an optional `!{...}` group between the arrow
+  // type and the body group.
+  #let %has_effect_row: #bits<1> = #ne(
+    #call meta_atom_equal(%source, %body_candidate, "!", 1), 0
+  )
+  #let %effect_row: #addr = #call program_nil()
+  #if %has_effect_row {
+    %effect_row: #addr = #call raw_node_next(%body_candidate)
+  }
   #let %body: #addr = #call program_function_body_start(
     %source, %body_candidate
   )
   #let %function: #addr = #call program_function_new(
     %source, %name, %params, %return_type, %body, %source_index
   )
+  // Record the signature rows on the descriptor.  A declaration rejected
+  // before this point keeps the nil values program_function_new wrote.
+  #store %input_row,
+    #lea(base=%function, idx=0, scale=0, offset=128)
+  #store %effect_row,
+    #lea(base=%function, idx=0, scale=0, offset=136)
+  #store %arrow1, #lea(base=%function, idx=0, scale=0, offset=144)
   #if #call raw_is_nil(%equals) { #call program_set_function_status(%function, 5102) #return %function }
   #if #eq(#call meta_atom_equal(%source, %equals, "=", 1), 0) { #call program_set_function_status(%function, 5102) #return %function }
   #if #call raw_is_nil(%constructor) { #call program_set_function_status(%function, 5102) #return %function }
@@ -2592,6 +2653,12 @@
   #if #eq(#call meta_atom_equal(%source, %func, "func", 4), 0) { #call program_set_function_status(%function, 5102) #return %function }
   #if #call raw_is_nil(%params) { #call program_set_function_status(%function, 5103) #return %function }
   #if #ne(#call raw_node_delimiter(%params), 40) { #call program_set_function_status(%function, 5103) #return %function }
+  // The `?` input row must be exactly one `{...}` group.
+  #if %has_input_row {
+    #if #call raw_is_nil(%input_row) { #call program_set_function_status(%function, 5102) #return %function }
+    #if #ne(#call raw_node_kind(%input_row), 2) { #call program_set_function_status(%function, 5102) #return %function }
+    #if #ne(#call raw_node_delimiter(%input_row), 123) { #call program_set_function_status(%function, 5102) #return %function }
+  }
   #if #call raw_is_nil(%arrow1) { #call program_set_function_status(%function, 5102) #return %function }
   #if #call raw_is_nil(%arrow2) { #call program_set_function_status(%function, 5102) #return %function }
   #if #eq(#call meta_atom_equal(%source, %arrow1, "-", 1), 0) { #call program_set_function_status(%function, 5102) #return %function }
@@ -2607,10 +2674,22 @@
     #return %function
   }
   #if #eq(#call program_type_valid_in_unit(%unit, %source, %return_type), 0) { #call program_set_function_status(%function, 5104) #return %function }
+  // The `!` output effect row must be exactly one `{...}` group.  Checking
+  // it after the return-type test keeps a malformed row in a declaration
+  // whose arrow type is also invalid reporting 5104, as before.
+  #if %has_effect_row {
+    #if #call raw_is_nil(%effect_row) { #call program_set_function_status(%function, 5102) #return %function }
+    #if #ne(#call raw_node_kind(%effect_row), 2) { #call program_set_function_status(%function, 5102) #return %function }
+    #if #ne(#call raw_node_delimiter(%effect_row), 123) { #call program_set_function_status(%function, 5102) #return %function }
+  }
   #if #ne(#call raw_node_delimiter(%body), 123) { #call program_set_function_status(%function, 5102) #return %function }
   #return %function
 }
 
+// Skip the optional `!{...}` output effect row and return the body node.
+// This is the only place that consumes the `!` marker: program_parse_function
+// reads the row group through the same candidate without advancing, so the
+// row is stored exactly once.
 #proc program_function_body_start(
   #addr %source, #addr %candidate
 ) -> #addr {
@@ -2823,6 +2902,16 @@
   )
   %hash: #bits<64> = #call program_hash_mix(
     %hash, #call raw_node_start(#call program_function_body(%function))
+  )
+  // Signature rows participate in the bucket key.  The bucket only filters
+  // collisions; program_function_same still decides identity, and the unit
+  // list order is unaffected, so a nil row cannot change any existing
+  // de-duplication outcome.
+  %hash: #bits<64> = #call program_hash_mix(
+    %hash, #call raw_node_start(#call program_function_input_row(%function))
+  )
+  %hash: #bits<64> = #call program_hash_mix(
+    %hash, #call raw_node_start(#call program_function_effect_row(%function))
   )
   #return %hash
 }
