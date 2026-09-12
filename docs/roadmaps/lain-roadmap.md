@@ -374,8 +374,26 @@ Meta 调用的 LAINVM 执行管道已统一（提交 `bootstrap: unify the Meta 
 `check_lainc_lainir_api_baseline.py` 均退出 0。
 
 **剩余的 1b 部分不是机械收敛**：§7.2 步骤 4 的前提（「使用现有 lowering 设施把 callable body
-lower」）今天不成立——通用 lowering 有意跳过 Meta 函数，两条路径写向不同 sink，且缺少 Meta
-值构造规则。详见设计文档 §2。
+lower」）今天不成立——通用 lowering 有意跳过 Meta 函数，两条路径写向不同 sink。详见设计文档 §2。
+
+### 7.0.1 已记录的违规：构造器名硬编码
+
+`bootstrap/compiler` 用字面量比较识别 `std::module`、`std::effect`、`std::handler`、
+`std::effect_operation`、`std::type_with_namespace`、`std::handler_type`、`std::meta_type`、
+`Module`、`ModuleShape`、`struct` 等名字（散落在 `lower_program.l1`、`meta.l1`、
+`meta_collect.l1`、`meta_module.l1`、`meta_record.l1`、`module_meta.l1`）。
+
+**`src/lainc` 一个都不认识**——它只区分「是不是 `import`」（需路径解析，见
+`src/lainc/elaborator.lain:575`）与「有没有 `{...}` 体」（`:661`）。`std::module { ... }` 与
+`std::func() { ... }` 走同一条路径，含义由库的绑定决定。
+
+这符合 [`../00-intro.md`](../00-intro.md) 与 [`../03-meta-system.md`](../03-meta-system.md) §2
+的分层：Parser 与 lowering 不判断这些名字的含义。
+
+**判定：这是 `elaborate` 未完成（§3.2）的症状，不是设计选择。** bootstrap 是启动工具而非
+长期架构，因此**不在 bootstrap 中精修**——它随形式实现接管（编码 4/5）而消失。
+
+**编码 1b 不得新增任何名字匹配。** 详见设计文档 §4.2。
 
 ### 7.1 当前要替换的代码
 
