@@ -103,6 +103,126 @@
   #return #call raw_node_next(%separator)
 }
 
+// An input row names Meta values the call site's environment must supply.
+// An entry is `name` or `name : type`; `program_input_row_shape_node` has
+// already rejected every other shape, so walking the row reads only those two
+// forms.  `name : type` is resolved by `lainvm_meta_resolve_inputs`.  A bare
+// `name` is `name: _`, whose type can only come from signature constraints
+// that this phase does not derive, so that entry is reported instead of being
+// bound with no type.
+
+// The declared type of one input entry, or the shared nil node for a bare
+// name.
+#proc lainvm_meta_input_entry_type(
+  #addr %source, #addr %entry
+) -> #addr {
+  #let %colon: #addr = #call raw_node_next(%entry)
+  #if #call raw_is_nil(%colon) { #return #call program_nil() }
+  #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
+    #return #call program_nil()
+  }
+  #return #call raw_node_next(%colon)
+}
+
+// The next entry of an input row, or nil at the end of the row.  A typed entry
+// ends at its type; the next node is the row separator.  Mirrors
+// `lainvm_meta_next_parameter`, so the resolver and the scalar artifact's
+// parameter and argument walks all visit the row in the same order.
+#proc lainvm_meta_next_input_entry(
+  #addr %source, #addr %entry
+) -> #addr {
+  #let %type: #addr = #call lainvm_meta_input_entry_type(%source, %entry)
+  #if #call raw_is_nil(%type) { #return #call program_nil() }
+  #let %separator: #addr = #call raw_node_next(
+    #call program_type_end(%source, %type)
+  )
+  #if #call raw_is_nil(%separator) { #return %separator }
+  #return #call raw_node_next(%separator)
+}
+
+// Whether two nodes of one source spell the same byte text.
+#proc lainvm_meta_name_text_equal(
+  #addr %source, #addr %left, #addr %right
+) -> #bits<1> {
+  #if #ne(#call raw_node_length(%left), #call raw_node_length(%right)) {
+    #return 0
+  }
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %index: #bits<64> = 0
+  #loop equal {
+    #if #sge(%index, #call raw_node_length(%left)) { #return 1 }
+    #if #ne(
+      #call tool_byte_at(%data, #add(#call raw_node_start(%left), %index)),
+      #call tool_byte_at(%data, #add(#call raw_node_start(%right), %index))
+    ) { #return 0 }
+    %index: #bits<64> = #add(%index, 1)
+    #continue equal
+  }
+}
+
+// Whether `node` spells one of the function's scalar-typed explicit parameter
+// names.  Only a scalar parameter has a physical value the scalar artifact can
+// carry, so a parameter of any other kind stays unsupported.
+#proc lainvm_meta_scalar_parameter_matches(
+  #addr %source, #addr %function, #addr %node
+) -> #bits<1> {
+  #let %parameter: #addr = #call raw_node_first(
+    #call program_function_params(%function)
+  )
+  #loop parameters {
+    #if #call raw_is_nil(%parameter) { #return 0 }
+    #if #call lainvm_meta_name_text_equal(%source, %parameter, %node) {
+      #return #ne(
+        #call lainvm_meta_scalar_width(
+          %source, #call lainvm_meta_parameter_type(%parameter)
+        ),
+        0
+      )
+    }
+    %parameter: #addr = #call lainvm_meta_next_parameter(%source, %parameter)
+    #continue parameters
+  }
+}
+
+// Whether `node` spells one of the function's scalar-typed input entry names.
+// Only a scalar entry has a physical value the artifact can carry, so an entry
+// of any other kind stays unsupported.
+#proc lainvm_meta_scalar_input_matches(
+  #addr %source, #addr %function, #addr %node
+) -> #bits<1> {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return 0 }
+  #let %entry: #addr = #call raw_node_first(%input_row)
+  #loop entries {
+    #if #call raw_is_nil(%entry) { #return 0 }
+    #if #call lainvm_meta_name_text_equal(%source, %entry, %node) {
+      #return #ne(
+        #call lainvm_meta_scalar_width(
+          %source, #call lainvm_meta_input_entry_type(%source, %entry)
+        ),
+        0
+      )
+    }
+    %entry: #addr = #call lainvm_meta_next_input_entry(%source, %entry)
+    #continue entries
+  }
+}
+
+// Look an input entry's name up in a Meta environment.  `meta_env_lookup_path`
+// reads a `:` that immediately follows a node as the start of a `::` path, but
+// an entry's own `name : type` separator is exactly that colon, so the entry
+// node is re-spelled as a standalone atom first.  The lookup then keeps the
+// ordinary path semantics (exact name, outward through the lexical chain, dot
+// segments resolved through Module/type values).
+#proc lainvm_meta_input_lookup(
+  #addr %environment, #addr %source, #addr %entry
+) -> #addr {
+  #let %name: #addr = #call raw_node_new(
+    1, 0, #call raw_node_start(%entry), #call raw_node_length(%entry), 3
+  )
+  #return #call meta_env_lookup_path(%environment, %source, %name)
+}
+
 #proc lainvm_meta_scalar_function_supported(
   #addr %source, #addr %function
 ) -> #bits<1> {
@@ -125,6 +245,15 @@
   #if #call raw_is_nil(%left) { #return 0 }
   #let %operator: #addr = #call raw_node_next(%left)
   #if #call raw_is_nil(%operator) { #return 1 }
+  #if #call meta_atom_equal(%source, %operator, ";", 1) {
+    // `return <operand>;`: one operand, still a decimal literal, a scalar
+    // explicit parameter, or a scalar declared input entry.
+    #if #call program_is_decimal(%source, %left) { #return 1 }
+    #if #call lainvm_meta_scalar_parameter_matches(%source, %function, %left) {
+      #return 1
+    }
+    #return #call lainvm_meta_scalar_input_matches(%source, %function, %left)
+  }
   #if #eq(#call lainvm_consteval_operator_valid(%source, %operator), 0) {
     #return 0
   }
@@ -151,6 +280,10 @@
 ) -> #unit {
   #let %operator: #addr = #call raw_node_next(%left)
   #if #call raw_is_nil(%operator) {
+    #call lainvm_meta_write_scalar_operand(%source, %left)
+    #return
+  }
+  #if #call meta_atom_equal(%source, %operator, ";", 1) {
     #call lainvm_meta_write_scalar_operand(%source, %left)
     #return
   }
@@ -226,6 +359,42 @@
   }
 }
 
+// Writes the input row after the explicit parameters: every entry becomes one
+// more physical parameter.  A scalar entry carries the value itself, so
+// `meta_target` reads it exactly as it reads an explicit scalar parameter; an
+// entry of any other kind carries its Meta handle.  %typed selects the
+// declaration spelling over the entry call's argument spelling.
+#proc lainvm_meta_write_input_parameters(
+  #addr %source, #addr %function, #bits<1> %typed
+) -> #unit {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return }
+  #let %entry: #addr = #call raw_node_first(%input_row)
+  #let %first: #bits<1> = #eq(#call program_function_count(%function), 0)
+  #loop parameters {
+    #if #call raw_is_nil(%entry) { #return }
+    #if #eq(%first, 0) {
+      #call bootstrap.artifact-write-literal(", ")
+    }
+    #if %typed {
+      #let %width: #bits<64> = #call lainvm_meta_scalar_width(
+        %source, #call lainvm_meta_input_entry_type(%source, %entry)
+      )
+      #if #eq(%width, 0) {
+        #call bootstrap.artifact-write-literal("#addr")
+      } else {
+        #call lainvm_meta_write_physical_type(%width)
+      }
+      #call bootstrap.artifact-write-literal(" ")
+    }
+    #call bootstrap.artifact-write-byte(37)
+    #call lainvm_write_node(%source, %entry)
+    %first: #bits<1> = 0
+    %entry: #addr = #call lainvm_meta_next_input_entry(%source, %entry)
+    #continue parameters
+  }
+}
+
 #proc lainvm_meta_build_scalar_artifact(
   #addr %source, #addr %function
 ) -> #unit {
@@ -238,6 +407,7 @@
   )
   #call bootstrap.artifact-write-literal("#proc meta_target(")
   #call lainvm_meta_write_typed_parameters(%source, %function, 0)
+  #call lainvm_meta_write_input_parameters(%source, %function, 1)
   #call bootstrap.artifact-write-literal(") -> ")
   #call lainvm_meta_write_physical_type(%width)
   #call bootstrap.artifact-write-literal(" {\n  #return ")
@@ -246,12 +416,14 @@
   #call lainvm_meta_write_scalar_expression(%source, %expression)
   #call bootstrap.artifact-write-literal("\n}\n#proc meta_entry(")
   #call lainvm_meta_write_typed_parameters(%source, %function, 0)
+  #call lainvm_meta_write_input_parameters(%source, %function, 1)
   #call bootstrap.artifact-write-literal(") -> ")
   #call lainvm_meta_write_physical_type(%width)
   #call bootstrap.artifact-write-literal(
     " {\n  #return #eval { #return #call meta_target("
   )
   #call lainvm_meta_write_parameter_names(%source, %function)
+  #call lainvm_meta_write_input_parameters(%source, %function, 0)
   #call bootstrap.artifact-write-literal(") }\n}\n")
   #return
 }
@@ -327,6 +499,38 @@
   }
 }
 
+// Appends one physical argument per input row entry, in the same order
+// `lainvm_meta_write_input_parameters` declares them, after the explicit
+// arguments.  A scalar entry is the resolved Meta value's number carried at
+// its declared width; any other entry is the Meta handle itself.
+// `lainvm_meta_resolve_inputs` has already reported a row the call site
+// cannot satisfy, so every entry resolves here.
+#proc lainvm_meta_append_input_arguments(
+  #addr %arguments, #addr %source, #addr %function, #addr %invocation
+) -> #unit {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return }
+  #let %entry: #addr = #call raw_node_first(%input_row)
+  #loop arguments {
+    #if #call raw_is_nil(%entry) { #return }
+    #let %value: #addr = #call lainvm_meta_input_lookup(
+      %invocation, %source, %entry
+    )
+    #let %width: #bits<64> = #call lainvm_meta_scalar_width(
+      %source, #call lainvm_meta_input_entry_type(%source, %entry)
+    )
+    #if #eq(%width, 0) {
+      #call bootstrap.vm-arguments-append-addr(%arguments, %value)
+    } else {
+      #call bootstrap.vm-arguments-append-bits(
+        %arguments, #call meta_value_scalar_number(%value), %width
+      )
+    }
+    %entry: #addr = #call lainvm_meta_next_input_entry(%source, %entry)
+    #continue arguments
+  }
+}
+
 // Executes the artifact accumulated in the capture sink and reads the result
 // according to the artifact's physical return type:
 //   0 = #bits value, 1 = Meta #addr handle, 2 = #unit.
@@ -362,12 +566,16 @@
 }
 
 #proc lainvm_eval_meta_scalar_call(
-  #addr %source, #addr %function, #addr %group, #addr %environment
+  #addr %source, #addr %function, #addr %group, #addr %environment,
+  #addr %invocation
 ) -> #bits<64> {
   #call lainvm_meta_build_scalar_artifact(%source, %function)
   #let %arguments: #addr = #call bootstrap.vm-arguments-new()
   #call lainvm_meta_append_arguments(
     %arguments, %source, %source, %function, %group, %environment, 0
+  )
+  #call lainvm_meta_append_input_arguments(
+    %arguments, %source, %function, %invocation
   )
   #let %value: #bits<64> = #call lainvm_meta_run_artifact(
     %arguments, 0
@@ -650,26 +858,6 @@
   #return 0
 }
 
-// An input row names Meta values the call site's environment must supply.
-// An entry is `name` or `name : type`; `program_input_row_shape_node` has
-// already rejected every other shape, so walking the row reads only those two
-// forms.  `name : type` is resolved here.  A bare `name` is `name: _`, whose
-// type can only come from signature constraints that this phase does not
-// derive, so the entry is reported instead of being bound with no type.
-
-// The declared type of one input entry, or the shared nil node for a bare
-// name.
-#proc lainvm_meta_input_entry_type(
-  #addr %source, #addr %entry
-) -> #addr {
-  #let %colon: #addr = #call raw_node_next(%entry)
-  #if #call raw_is_nil(%colon) { #return #call program_nil() }
-  #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
-    #return #call program_nil()
-  }
-  #return #call raw_node_next(%colon)
-}
-
 // The Meta kind a declared input type requires, or 0 when this phase cannot
 // decide.  A scalar type name demands a scalar value, `Module` and any name
 // that resolves to a Module demand a module value, and any other name demands
@@ -697,21 +885,6 @@
   #call program_unit_set_validation_node(%unit, %source, %node)
   #call program_set_unit_status(%unit, %status)
   #return %status
-}
-
-// Look an input entry's name up in the call environment.  `meta_env_lookup_path`
-// reads a `:` that immediately follows a node as the start of a `::` path, but
-// an entry's own `name : type` separator is exactly that colon, so the entry
-// node is re-spelled as a standalone atom first.  The lookup then keeps the
-// ordinary path semantics (exact name, outward through the lexical chain, dot
-// segments resolved through Module/type values).
-#proc lainvm_meta_input_lookup(
-  #addr %environment, #addr %source, #addr %entry
-) -> #addr {
-  #let %name: #addr = #call raw_node_new(
-    1, 0, #call raw_node_start(%entry), #call raw_node_length(%entry), 3
-  )
-  #return #call meta_env_lookup_path(%environment, %source, %name)
 }
 
 // Resolves the callee's `?{...}` row against the caller's Meta environment and
@@ -757,13 +930,8 @@
       }
     }
     #call meta_env_bind(%invocation, %function_source, %entry, %value)
-    // A typed entry ends at its type; the next node is the row separator or
-    // the end of the row.
-    #let %separator: #addr = #call raw_node_next(
-      #call program_type_end(%function_source, %type)
-    )
-    #if #call raw_is_nil(%separator) { #return 0 }
-    %entry: #addr = #call raw_node_next(%separator)
+    %entry: #addr = #call lainvm_meta_next_input_entry(%function_source, %entry)
+    #continue entries
   }
 }
 

@@ -19,8 +19,8 @@ FIXTURES = ROOT / "scripts" / "fixtures"
 EMPTY_SOURCE = FIXTURES / "empty_source.lain"
 
 # Positives compile *and run*: the callable body uses the resolved input, so the
-# printed value is the proof that the call environment supplied it.  In both
-# fixtures the callee is declared where the name does not exist (at the top
+# printed value is the proof that the call environment supplied it.  In every
+# fixture the callee is declared where the name does not exist (at the top
 # level, or inside another module) while the call site sits inside a module that
 # binds it, so the value cannot reach the body any other way.
 POSITIVE = (
@@ -31,6 +31,23 @@ POSITIVE = (
     # body reads through the returned module, plus a second scalar input the row
     # still demands.
     ("input row maximum", "formal_input_effect_max.lain", "41"),
+    # A scalar Meta call carries each input entry as one more physical argument
+    # of the temporary LAINIR artifact, so the returned value is the caller's
+    # and not a literal the callee could have written.  The callee is declared
+    # at the top level, where `local` does not exist, and the call site sits in
+    # a module that binds it.
+    ("scalar input value", "formal_input_scalar_value.lain", "41"),
+    # Explicit parameters come first and the row's entries follow in row order,
+    # on both sides of the artifact: the callee reads `second` (100) added to
+    # the explicit `base` (1), so a reversal or a dropped entry cannot print
+    # 101.
+    ("scalar input order", "formal_input_scalar_order.lain", "101"),
+    # Every entry becomes a parameter whatever its declared kind, so a Module
+    # entry the body never reads still occupies its slot ahead of the scalar
+    # entry the body returns (41): a dropped or reordered parameter would
+    # desynchronise the artifact from its argument list.
+    ("scalar inputs beside a Module entry",
+     "formal_input_scalar_mixed.lain", "41"),
 )
 
 # Negatives must fail to compile with the listed status, and the validation span
@@ -56,6 +73,30 @@ NEGATIVE = (
     (
         "input type mismatch",
         "formal_input_effect_type_mismatch.lain",
+        5108,
+        "Module",
+        "local: Module",
+    ),
+    # The scalar Meta path reports the same three failures with the same codes
+    # and spans: the entry name for an input the call site cannot supply or
+    # cannot type, the declared type for a value that does not satisfy it.
+    (
+        "scalar missing input",
+        "formal_input_scalar_missing.lain",
+        5108,
+        "local",
+        "local: i32",
+    ),
+    (
+        "scalar uninferred input",
+        "formal_input_scalar_uninferred.lain",
+        5104,
+        "local",
+        "local",
+    ),
+    (
+        "scalar input type mismatch",
+        "formal_input_scalar_type_mismatch.lain",
         5108,
         "Module",
         "local: Module",
@@ -132,6 +173,24 @@ CONTROL_POSITIVE = (
         "    return outer.built.value;\n"
         "};\n",
         "41",
+    ),
+    (
+        # The same call whose scalar input changes with the caller's local, so
+        # the printed value cannot be a constant the callee supplied.
+        "scalar caller value, not a constant",
+        "let bias = std::func() ?{local: i32} -> i32 {\n"
+        "    return local;\n"
+        "};\n"
+        "\n"
+        "let outer: Module = std::module {\n"
+        "    let local: i32 = 7;\n"
+        "    @export let answer = bias();\n"
+        "};\n"
+        "\n"
+        "let main = std::func() -> i32 {\n"
+        "    return outer.answer;\n"
+        "};\n",
+        "7",
     ),
 )
 
