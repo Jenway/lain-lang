@@ -108,8 +108,10 @@
 // already rejected every other shape, so walking the row reads only those two
 // forms.  `name : type` is resolved by `lainvm_meta_resolve_inputs`, and a bare
 // `name` is derived to the one kind the declaration's own signature gives it:
-// an entry used in a type position is a type value, and an entry no type
-// position uses is reported instead of being bound with no type.
+// an entry a type position mentions is a type value, and an entry no type
+// position mentions is reported instead of being bound with no type.  The
+// positions counted are the signature annotations, the declared types of the
+// row's other entries, and the body's own `let` annotations.
 
 // The declared type of one input entry, or the shared nil node for a bare
 // name.
@@ -316,33 +318,120 @@
 // walk stays inside the annotation: `program_type_end` names its last node, and
 // a group inside the annotation (a type argument list such as `Vec(T)`) is
 // entered instead of being skipped.
+//
+// %cursor advances instead of %node: an assignment to a parameter inside a
+// `#loop` does not carry to the next iteration (the body sees the parameter's
+// original binding again on every `#continue`), so reassigning %node would
+// leave the walk on its first node forever.  A local advances.
 #proc lainvm_meta_type_mentions(
   #addr %source, #addr %node, #addr %end, #addr %entry, #bits<64> %depth
 ) -> #bits<1> {
   #if #sge(%depth, 64) { #return 0 }
+  #let %cursor: #addr = %node
   #loop siblings {
-    #if #call raw_is_nil(%node) { #return 0 }
-    #if #call lainvm_meta_name_text_equal(%source, %node, %entry) {
+    #if #call raw_is_nil(%cursor) { #return 0 }
+    #if #call lainvm_meta_name_text_equal(%source, %cursor, %entry) {
       #return 1
     }
-    #if #eq(#call raw_node_kind(%node), 2) {
+    #if #eq(#call raw_node_kind(%cursor), 2) {
       #if #call lainvm_meta_type_mentions(
-        %source, #call raw_node_first(%node), %end, %entry,
+        %source, #call raw_node_first(%cursor), %end, %entry,
         #add(%depth, 1)
       ) { #return 1 }
     }
-    #if #eq(%node, %end) { #return 0 }
-    %node: #addr = #call raw_node_next(%node)
+    #if #eq(%cursor, %end) { #return 0 }
+    %cursor: #addr = #call raw_node_next(%cursor)
     #continue siblings
   }
 }
 
+// Whether a *peer* entry of the same input row names `entry` inside its own
+// declared type expression.  A typed peer such as `kind: Vec(T)` writes `T`
+// in a type position, so the row itself constrains a bare entry's kind even
+// when no signature position does.  The candidate's own entry is skipped by
+// identity: a bare entry has no type expression of its own, so scanning it
+// could only ever be the self-reference that would make every bare name look
+// constrained.
+#proc lainvm_meta_row_entry_type_mentions(
+  #addr %source, #addr %function, #addr %entry
+) -> #bits<1> {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return 0 }
+  #let %other: #addr = #call raw_node_first(%input_row)
+  #loop entries {
+    #if #call raw_is_nil(%other) { #return 0 }
+    #if #ne(%other, %entry) {
+      #let %type: #addr = #call lainvm_meta_input_entry_type(%source, %other)
+      #if #eq(#call raw_is_nil(%type), 0) {
+        #if #call lainvm_meta_type_mentions(
+          %source, %type, #call program_type_end(%source, %type), %entry, 0
+        ) { #return 1 }
+      }
+    }
+    %other: #addr = #call lainvm_meta_next_input_entry(%source, %other)
+    #continue entries
+  }
+}
+
+// Whether the declaration's body writes `entry` in a type position.  One
+// position is confirmed from the grammar and recognised here: the explicit
+// annotation of a `let` declaration, `let name : type`.  The colon is checked
+// before the node after it is read, so an inferred `let name = value` writes
+// no type and contributes no constraint.  Groups are entered because a
+// statement list nests (a block, a `while` body, a module's declarations);
+// every other spelling -- a nested `std::func` parameter list, for example --
+// is left unrecognised rather than guessed, so an entry no confirmed type
+// position mentions keeps its unconstrained diagnostic.
+#proc lainvm_meta_body_type_mentions_group(
+  #addr %source, #addr %group, #addr %entry
+) -> #bits<1> {
+  #let %cursor: #addr = #call raw_node_first(%group)
+  #loop nodes {
+    #if #call raw_is_nil(%cursor) { #return 0 }
+    #if #call meta_atom_equal(%source, %cursor, "let", 3) {
+      #let %name: #addr = #call raw_node_next(%cursor)
+      #if #eq(#call raw_is_nil(%name), 0) {
+        #let %colon: #addr = #call raw_node_next(%name)
+        #if #eq(#call raw_is_nil(%colon), 0) {
+          #if #call meta_atom_equal(%source, %colon, ":", 1) {
+            #let %type: #addr = #call raw_node_next(%colon)
+            #if #eq(#call raw_is_nil(%type), 0) {
+              #if #call lainvm_meta_type_mentions(
+                %source, %type, #call program_type_end(%source, %type),
+                %entry, 0
+              ) { #return 1 }
+            }
+          }
+        }
+      }
+    }
+    #if #eq(#call raw_node_kind(%cursor), 2) {
+      #if #call lainvm_meta_body_type_mentions_group(
+        %source, %cursor, %entry
+      ) { #return 1 }
+    }
+    %cursor: #addr = #call raw_node_next(%cursor)
+    #continue nodes
+  }
+}
+
+// The body entry point of the same walk: a declaration always carries a
+// braced statement list, and any other shape contributes no constraint.
+#proc lainvm_meta_body_type_mentions(
+  #addr %source, #addr %function, #addr %entry
+) -> #bits<1> {
+  #let %body: #addr = #call program_function_body(%function)
+  #if #call raw_is_nil(%body) { #return 0 }
+  #if #ne(#call raw_node_kind(%body), 2) { #return 0 }
+  #return #call lainvm_meta_body_type_mentions_group(%source, %body, %entry)
+}
+
 // Whether a bare input entry is used as a type by the declaration's own
-// signature.  Section 9.2 takes the explicit parameter type annotations and the
-// return type annotation as the constraints that give a bare entry its kind;
-// this phase derives the kind from those positions only, so an entry that no
-// type position mentions stays unconstrained and is reported instead of being
-// guessed.
+// signature or by its body.  Section 9.2 takes four constraint sources for a
+// bare entry's kind: the explicit parameter type annotations, the return type
+// annotation, the declared types of the row's other entries, and the body's
+// own type annotations.  An entry that no such position mentions stays
+// unconstrained and is reported instead of being guessed.
 #proc lainvm_meta_entry_is_type_parameter(
   #addr %function, #addr %entry
 ) -> #bits<1> {
@@ -370,7 +459,12 @@
       #call program_type_end(%source, %return_type), %entry, 0
     ) { #return 1 }
   }
-  #return 0
+  // The row's other entries and the body's own annotations each constrain an
+  // entry that no signature position mentions.
+  #if #call lainvm_meta_row_entry_type_mentions(
+    %source, %function, %entry
+  ) { #return 1 }
+  #return #call lainvm_meta_body_type_mentions(%source, %function, %entry)
 }
 
 #proc lainvm_meta_scalar_function_supported(
@@ -1067,7 +1161,7 @@
 // nodes belong to %function_source, which is therefore the source used to read
 // them and to report their spans; %environment is the call site's.  The kind
 // each value must have is the entry's declared type, or, for a bare entry, the
-// type value its own signature use requires.
+// type value the declaration's own type positions require.
 #proc lainvm_meta_resolve_inputs(
   #addr %unit, #addr %function_source, #addr %function,
   #addr %environment, #addr %invocation
@@ -1080,7 +1174,7 @@
     #let %type: #addr = #call lainvm_meta_input_entry_type(
       %function_source, %entry
     )
-    // A bare entry's kind is the one the declaration's own signature gives
+    // A bare entry's kind is the one the declaration's type positions give
     // it: an entry a type position mentions is a type value (§9.2's kind-level
     // derivation), while an entry no type position mentions stays unknown and
     // is reported instead of being guessed.
