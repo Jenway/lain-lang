@@ -30,8 +30,26 @@ CHECKS = (
     ("compiler artifact snapshots", "check_lainc_lainir_api_snapshots.py"),
     ("source-closure determinism", "check_srclainc_artifact.py"),
     ("gen2/gen3 self-host", "run_lainir_self_host.py"),
+    # The remaining runnable gates.  They were absent from this list even
+    # though they pass, so the "main entry" ran 20 of the 37 check scripts and
+    # a green baseline said nothing about the other 17.  They come last
+    # because the steps above build the artifacts they read: run_lainir_self_host
+    # and build_srclainc drive build_lain_compiler, which writes
+    # build/bootstrap/*.
+    ("bootstrap consteval", "check_bootstrap_consteval.py"),
+    ("bootstrap LAINVM api", "check_bootstrap_vm_api.py"),
+    ("eval temporary TCB", "check_eval_tcb.py"),
+    ("lain backend ABI", "check_lain_backend_abi.py"),
+    ("LAINVM contract boundary", "check_lainvm_boundary.py"),
+    ("meta AST conformance", "check_meta_ast_conformance.py"),
+    ("meta module validation", "check_meta_module_validation.py"),
+    ("std type binding", "check_std_type.py"),
+    ("stdlib swap", "check_stdlib_swap.py"),
+    ("policy conformance", "check_policy_conformance.py"),
+    ("core/stdlib boundary", "check_lainir_boundaries.py"),
+    ("LAINIR compiler end to end", "check_lainir_compiler.py"),
+    ("bootstrap release packaging", "check_lainc_bootstrap_release.py"),
 )
-
 
 def main() -> int:
     for label, script, *arguments in CHECKS:
