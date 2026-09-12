@@ -114,22 +114,75 @@ capture 活动期间，`artifact-write-*` 写入内存缓冲而非文件；`arti
 
 **被否决的方案**：保留 buffer 只修截断。它不统一 sink，两条路径继续并存，且 buffer 的 4096 上限与 artifact sink 的无上限行为不一致。
 
-### 4.2 Meta 值构造规则
+### 4.2 构造器名硬编码：一个必须先记录的违规
 
-通用 lowering 需要能 lower 表达式位置的 Meta 值构造。这不是新的语言语义，而是**把 §2.4 手工写死的构造改成从节点推导**：
+本节最初提出的方案是「建一张 Meta 值构造规则表，按 `std::module`、`std::effect` 等名字
+查表」。**该方案方向错误，已废弃**：它把既有的设计违规编码成设计，只是把七个 `if` 换成
+七个表项。
 
-| 源形式 | Meta 上下文中的 lowering |
-| --- | --- |
-| `std::module { ... }` | 构造 kind=2 的 Meta 值：source、本节点 span、当前 environment |
-| `std::effect(...)` | 构造 kind=4 的 Meta 值（现有 effect builder 的形状） |
-| 类型值（`std::type` 成员） | 构造类型值引用 |
-| AST handle | 构造 AST 值引用 |
+#### 4.2.1 现状：bootstrap 认识七个构造器名，形式实现一个都不认识
 
-新增的是一张「Meta 值构造」规则表，由 `program_write_expression` 在 Meta 上下文下查表；普通（运行期）上下文不查表，行为不变。
+`lower_program.l1:453` 的 `program_node_has_meta_constructor` 用字面量比较识别
+`std::module`、`std::effect`、`std::handler`、`std::effect_operation`、
+`std::type_with_namespace`、`std::handler_type`、`std::meta_type` 七个名字；
+`program_function_is_meta`（`:501`）另加 `Module`、`ModuleShape`；
+`program_is_ignored_declaration`（`:2805`）另加 `struct`、`module`、`import`。
 
-**这条规则必须有明确的归属**：它是 Meta 层的能力（`std/` 定义），不是 compiler core 的语义硬编码。因此实现位置应在 bootstrap 的 Meta 部分（`meta_call*`、`meta_values`），而不是 `lower_program` 的运行期 lowering 主路径——`program_write_expression` 只需在 Meta 上下文下委托给 Meta 值的构造器。
+全仓库字面量出现次数（`"名字"` 形式）：
 
-这一点需要在动手前再确认（见 §8）。
+| 名字 | `bootstrap/compiler` | `src/lainc` |
+| --- | --- | --- |
+| `module` | 7 | 0 |
+| `struct` | 5 | 0 |
+| `effect` | 3 | 0 |
+| `handler` | 2 | 0 |
+| `effect_operation` | 3 | 0 |
+| `type_with_namespace` | 1 | 0 |
+| `handler_type` | 1 | 0 |
+| `meta_type` | 1 | 0 |
+| `import` | 6 | 1 |
+
+唯一两者都出现的是 `import`——它确实特殊，因为需要路径解析
+（`src/lainc/elaborator.lain:575`）。
+
+#### 4.2.2 正确形态：名字无关，由库决定含义
+
+`src/lainc/elaborator.lain:661`：
+
+```lain
+} else if body != Syntax.invalid_node() {
+    // 带 {...} 体的声明；名字是什么不参与判断
+    elaborate_function_body(...)
+```
+
+形式编译器只区分两件事：**是不是 `import`**（需要路径），以及**有没有 `{...}` 体**。
+`std::module { ... }` 与 `std::func() { ... }` 走同一条路径，含义由库的绑定决定。
+
+这与 [`../00-intro.md`](../00-intro.md) §3 一致：
+
+> `foo(x)` 在 RawAst 中只表示为一个名字后面跟着圆括号组。它可能是运行时调用、类型工厂
+> 调用、effect 应用、宏调用或 DSL 形式。**Meta 根据绑定和上下文决定它的含义。**
+
+也与 [`../03-meta-system.md`](../03-meta-system.md) §2 一致：Parser 不判断
+`std::func`、`std::struct`、`std::module`、`import`、类型应用或 effect 的含义。
+
+**编译器该提供的是原语，不是名字表**：「构造一个 kind=N 的 Meta 值，带这些字段」，
+就像它给类型构造提供原语一样。至于什么源形式对应哪种构造，属于库。
+
+#### 4.2.3 为什么会这样，以及它不该在 bootstrap 里修
+
+要做到名字无关，lowering 必须已经知道每个表达式的绑定与类型——那是 elaborate 的产出。
+`src/lainc` 有这一层（`elaborate_function_body` 产出 `ExprId`），bootstrap 没有。
+按 [`../roadmaps/lain-roadmap.md`](../roadmaps/lain-roadmap.md) §3.2，部分 `elaborate`
+语义尚未落地。
+
+**所以七个名字是 elaborate 缺失的症状，不是设计选择。**
+
+而 bootstrap 的定位是启动工具、不是长期架构（`bootstrap/README.md`）。**在过渡实现上
+精修这件事没有价值**——正确路径是等形式实现接管（路线图编码 4/5），届时
+`program_node_has_meta_constructor` 与 `program_function_is_meta` 整体消失。
+
+结论：**1b 不新增任何名字匹配；本议题记录在案，不在 bootstrap 中推进。**
 
 ### 4.3 统一入口的算法
 
@@ -139,7 +192,7 @@ capture 活动期间，`artifact-write-*` 写入内存缓冲而非文件；`arti
 3. 建立 invocation environment，按序绑定实参；参数个数/类型错误在执行前诊断
 4. lower callable body：
      - 运行期部分：program_write_expression 的现有规则
-     - Meta 值构造：§4.2 的规则表
+     - Meta 值构造：**不做名字匹配**（§4.2）；本阶段只沿用现有构造路径
      写入 capture sink（§4.1）
 5. 把 Meta 实参按签名要求的物理类型（bits / addr / unit）写入 VM argument vector
 6. parse capture 内容 -> 找入口 procedure -> 执行
@@ -148,9 +201,8 @@ capture 活动期间，`artifact-write-*` 写入内存缓冲而非文件；`arti
 9. Trap 直接转编译诊断；Trap 时不得制造普通返回值
 ```
 
-这与路线图 §7.2 的九步一致，只是把步骤 4 的实现前提（§4.1、§4.2）补齐。
-
-## 5. 切片计划
+这与路线图 §7.2 的九步一致，只是把步骤 4 的实现前提（§4.1）补齐，并把名字匹配排除在
+本阶段之外（§4.2.3）。
 
 每片独立验证、可单独回退。
 
@@ -158,12 +210,19 @@ capture 活动期间，`artifact-write-*` 写入内存缓冲而非文件；`arti
 | --- | --- | --- |
 | **1b-1** | 宿主加 capture 模式（§4.1）。纯 C 改动，无调用者变化 | `zig build`；现有全部 gate 不变 |
 | **1b-2** | `meta_eval_vm.l1` 的 buffer 与 `meta_call_vm.l1` 的写入改为 capture sink；删除 `lainvm_eval_buffer_*` | `check_bootstrap_consteval.py`（5 类 fixture 全过） |
-| **1b-3** | 抽出 Meta 值构造规则表（§4.2），先只让 module 走它 | 新增 module factory fixture + 现有 `formal_meta_module_factory.lain` |
-| **1b-4** | effect / effect_operation / type / AST 值分别接入规则表 | §7.4 的六类 fixture |
-| **1b-5** | 4 个入口收敛为单一路径；删除 §6 的清单 | 全量 baseline + §7.4 |
-| **1b-6** | 把 scalar 的最小 expr writer（§2.3）退役，改用通用 lowering | 新增含 `let`/`if`/调用 的 Meta callable fixture |
+| ~~1b-3~~ | ~~抽出 Meta 值构造规则表~~ **已废弃**（§4.2：方向错误，不新增名字匹配） | — |
+| ~~1b-4~~ | ~~effect / type / AST 值接入规则表~~ **已废弃**（同上） | — |
+| **1b-3** | 先只把 module 的构造从手写 LAINIR 改为**复用现有调用路径**（不做名字表，不新增匹配） | `formal_meta_module_factory.lain` + 全量 baseline |
+| **1b-4** | 4 个入口收敛为单一路径；删除 §6 的清单 | 全量 baseline + §7.4 |
+| **1b-5** | 把 scalar 的最小 expr writer（§2.3）退役，改用通用 lowering | 新增含 `let`/`if`/调用 的 Meta callable fixture |
 
-1b-1 与 1b-2 是 sink 统一；1b-3 到 1b-6 是能力收敛。**1b-6 必须放最后**，因为它是唯一会放大可 lower 表达式集合的一步，风险最高。
+**1b-1 与 1b-2 是 sink 统一**，与构造器名争议无关，可独立推进。
+
+**1b-3 之后的能力收敛依赖 elaborate 的产出**（§4.2.3）。若 elaborate 尚不能提供绑定与类型
+判定，1b-3 到 1b-5 应推迟到编码 2/3 之后，或与它们交错推进。
+
+**1b-5 必须放最后**：它是唯一会放大可 lower 表达式集合的一步，风险最高，且需要完整的
+参数与返回类型信息。
 
 ## 6. 删除清单（来自路线图 §7.3）
 
@@ -178,6 +237,9 @@ lainvm_meta_effect_factory_node
 ```
 
 外加本文新增的删除项：`lainvm_eval_buffer_*`（1b-2 之后零调用者）。
+
+**不在 1b 删除**：`program_node_has_meta_constructor`、`program_function_is_meta`
+（§4.2.3）。它们随形式实现接管而消失，不在这里精修。
 
 每项删除前必须先确认零引用（用全仓库搜索，排除 `build/` 与 `.git/`）。
 
@@ -198,13 +260,12 @@ scripts/fixtures/formal_meta_module_factory.lain       （已有）
 
 ## 8. 风险与决策点
 
-### 8.1 需要先确认：Meta 值构造规则的归属
+### 8.1 已解决：构造器名硬编码（原「规则表归属」问题已作废）
 
-§4.2 把规则表放在 bootstrap 的 Meta 部分、让 `program_write_expression` 委托。但也可以反过来：扩展 `program_write_expression` 自身，在 Meta 上下文下直接处理这些形式。
+本节原先是「规则表该住在 bootstrap 还是主 lowering」。该问题随 §4.2 的重写而作废——**不建表**。
 
-两者的差别是**边界**：前者保持 compiler core 的运行期 lowering 不知道 Meta 值；后者把 Meta 知识加进主 lowering。按 `docs/03-meta-system.md` §2 的分层，**前者更符合**。但这需要与现有 bootstrap 的模块划分对上（`program_write_expression` 在 `lower_program.l1`，而 Meta 值在 `meta_values.l1`）。
-
-**这是本设计里唯一必须先定的边界问题。**
+真正的结论：bootstrap 的构造器名硬编码是 elaborate 缺失的症状，应从形式实现接管中消失，
+不在 bootstrap 里精修。1b 不新增任何名字匹配。
 
 ### 8.2 修改 C seed 的合规性
 
@@ -225,6 +286,8 @@ scripts/fixtures/formal_meta_module_factory.lain       （已有）
 ## 9. 与其他阶段的关系
 
 - **编码 0**（已完成）：`std::type` 与标准根环境。1b-4 的「返回 std::type 的 callable」fixture 依赖它。
-- **编码 2**（`std::func` 完整签名）：1b 的步骤 2「从 callable 的静态签名取参数与返回类型」需要签名可被读取。**若签名尚未可读，1b 的步骤 2 只能继续用现有的 `program_function_params` / 返回类型节点**，那会限制 §4.3 的完整性。这可能意味着编码 1b 与编码 2 需要交错推进，或 1b 先做 sink 与值构造、把「按签名绑定」留到编码 2。
+- **编码 2**（`std::func` 完整签名）：§4.3 步骤 2「从 callable 的静态签名取参数与返回类型」需要签名可被读取。当前只能用 `program_function_params` 与返回类型节点，这会限制完整性。
+- **编码 4/5**（形式实现接管）：§4.2 记录的名字硬编码在这两个阶段消失。
 
-**这一点需要在排期时确认。**
+**排期结论**：先推进 1b-1/1b-2（sink 统一，与上述依赖无关）；1b-3 及其后的能力收敛推迟到
+编码 2/3 之后，或与它们交错。
