@@ -3432,6 +3432,239 @@ let meta_struct_status = std::func(
     return 0;
 };
 
+// ---------------------------------------------------------------------------
+// Function declaration shape.
+//
+// `let NAME = std::func<T>(params) [?{...}] -> type [!{...}] {body}` is the
+// same language rule the bootstrap standard library owns in
+// `lain_std_function_header_status` and `lain_std_function_tail_status`.
+// The declaration is judged in the same two segments because the one check
+// between them -- whether the arrow type is valid -- needs the unit's type
+// table and belongs to a later pass.
+//
+// Meta decides the shape here: the `= std::func` path, the parameter group,
+// the `?{...}` row and its entries, the arrow, the presence of a return type,
+// and the `[!{...}] {body}` tail.  One limit is stated up front: where the
+// bootstrap entry asks the type-expression scanner where an entry type ends,
+// this pass reads the entry type as the nodes up to the next comma and
+// rejects a `:` that is not part of a `::` path.  A malformed multi-token
+// type run whose defect only the scanner can see (for example a dangling
+// `& mut`) is therefore not covered here.
+// ---------------------------------------------------------------------------
+
+// `func` is not a token-table word (the table holds the words the core
+// compares positionally), so it is compared by spelling like `meta_is_macro`.
+let meta_is_func_word = std::func(source: addr, node: addr) -> bool {
+    if meta_ast_kind(node) != 1 || meta_ast_length(node) != 4 {
+        return false;
+    }
+    let data: addr = meta_source_data(source);
+    let start: i64 = meta_ast_start(node);
+    if meta_source_byte_at(data, start) != 102 { return false; }
+    if meta_source_byte_at(data, start + 1) != 117 { return false; }
+    if meta_source_byte_at(data, start + 2) != 110 { return false; }
+    return meta_source_byte_at(data, start + 3) == 99;
+};
+
+// The `std` path root, compared the way `meta_std_type_end` compares it.
+let meta_is_std_root = std::func(source: addr, node: addr) -> bool {
+    if meta_ast_kind(node) != 1 || meta_ast_length(node) != 3 {
+        return false;
+    }
+    let data: addr = meta_source_data(source);
+    let start: i64 = meta_ast_start(node);
+    if meta_source_byte_at(data, start) != 115 { return false; }
+    if meta_source_byte_at(data, start + 1) != 116 { return false; }
+    return meta_source_byte_at(data, start + 2) == 100;
+};
+
+// One-mark atoms: `?` opens the input row, `!` opens the effect row, `-` and
+// `>` spell the arrow, and `<`/`>` delimit compile-time type parameters.
+// Each is compared the way the existing punctuation predicates compare theirs.
+let meta_is_mark = std::func(source: addr, node: addr, value: i8) -> bool {
+    if meta_ast_kind(node) != 1 || meta_ast_length(node) != 1 {
+        return false;
+    }
+    return meta_source_byte_at(
+        meta_source_data(source), meta_ast_start(node)
+    ) == value;
+};
+
+// The `func` marker of a `let NAME = std::func...` declaration, or nil.
+// Mirrors the compiler's declaration scan: the marker must appear before the
+// declaration terminator or a grouped initializer.
+let meta_function_marker_after = std::func(
+    source: addr,
+    let_node: addr,
+) -> addr {
+    let current: addr = meta_ast_next(let_node);
+    while meta_ast_is_nil(current) == false {
+        if meta_is_func_word(source, current) { return current; }
+        if meta_is_semicolon(source, current) { return meta_ast_nil(); }
+        if meta_ast_kind(current) == 2 { return meta_ast_nil(); }
+        current = meta_ast_next(current);
+    }
+    return meta_ast_nil();
+};
+
+// The parameter group, after any `<...>` compile-time type parameters.
+let meta_function_params = std::func(source: addr, candidate: addr) -> addr {
+    if meta_is_mark(source, candidate, 60) == false { return candidate; }
+    let current: addr = meta_ast_next(candidate);
+    while meta_ast_is_nil(current) == false {
+        let next: addr = meta_ast_next(current);
+        if meta_is_mark(source, current, 62) { return next; }
+        current = next;
+    }
+    return meta_ast_nil();
+};
+
+// Entries of a `?{...}` row: `name`, or `name : type`, separated by commas.
+// An empty row is legal and a bare name means `name: _`.
+let meta_function_input_row_status = std::func(
+    source: addr,
+    input_row: addr,
+) -> i32 {
+    // `cursor` is declared here rather than inside the row loop: the formal
+    // lowerer resolves an assignment target through the enclosing block, and
+    // a target declared inside a loop body is lifted as a fresh `#bits<64>`
+    // binding by the verifier.
+    let cursor: addr = meta_ast_nil();
+    let node: addr = meta_ast_first(input_row);
+    while meta_ast_is_nil(node) == false {
+        // An entry opens with a name atom; a leading `:` or `,` means the
+        // name is missing.
+        if meta_ast_kind(node) != 1 { return 5102; }
+        if meta_is_colon(source, node) { return 5102; }
+        if meta_is_comma(source, node) { return 5102; }
+        let colon: addr = meta_ast_next(node);
+        if meta_ast_is_nil(colon) { return 0; }
+        if meta_is_comma(source, colon) {
+            node = meta_ast_next(colon);
+        } else {
+            if meta_is_colon(source, colon) == false { return 5102; }
+            let type_start: addr = meta_ast_next(colon);
+            if meta_ast_is_nil(type_start) { return 5102; }
+            if meta_is_comma(source, type_start) { return 5102; }
+            // The entry type runs to the next comma.  A `:` inside it is well
+            // formed only as part of a `::` path.
+            cursor = type_start;
+            while meta_ast_is_nil(cursor) == false {
+                if meta_is_comma(source, cursor) { break; }
+                if meta_is_colon(source, cursor) {
+                    let second: addr = meta_ast_next(cursor);
+                    if meta_is_colon(source, second) == false {
+                        return 5102;
+                    }
+                    cursor = meta_ast_next(second);
+                } else {
+                    cursor = meta_ast_next(cursor);
+                }
+            }
+            if meta_ast_is_nil(cursor) { return 0; }
+            node = meta_ast_next(cursor);
+        }
+    }
+    return 0;
+};
+
+// `[!{...}] {body}` after the return type.  A body that is just `;` is an
+// external declaration: it carries no body group and the compiler returns
+// before the tail check, so Meta stops there too.
+let meta_function_tail_status = std::func(
+    source: addr,
+    node: addr,
+) -> i32 {
+    let cursor: addr = node;
+    while meta_ast_is_nil(cursor) == false {
+        if meta_is_semicolon(source, cursor) { return 0; }
+        if meta_is_mark(source, cursor, 33) {
+            let effect_row: addr = meta_ast_next(cursor);
+            if meta_ast_is_nil(effect_row) { return 5102; }
+            if meta_ast_kind(effect_row) != 2 { return 5102; }
+            if meta_ast_delimiter(effect_row) != 123 { return 5102; }
+            let body: addr = meta_ast_next(effect_row);
+            if meta_ast_is_nil(body) { return 5102; }
+            if meta_ast_kind(body) != 2 { return 5102; }
+            if meta_ast_delimiter(body) != 123 { return 5102; }
+            return 0;
+        }
+        if meta_ast_kind(cursor) == 2 && meta_ast_delimiter(cursor) == 123 {
+            return 0;
+        }
+        cursor = meta_ast_next(cursor);
+    }
+    return 5102;
+};
+
+let meta_function_declaration_status = std::func(
+    source: addr,
+    let_node: addr,
+) -> i32 {
+    if meta_ast_is_nil(meta_function_marker_after(source, let_node)) {
+        return 0;
+    }
+    let name: addr = meta_ast_next(let_node);
+    let equals: addr = meta_ast_next(name);
+    let constructor: addr = meta_ast_next(equals);
+    let colon1: addr = meta_ast_next(constructor);
+    let colon2: addr = meta_ast_next(colon1);
+    // A local named `func` would look like a nested function declaration to
+    // the declaration scan, so the marker keeps its own name.
+    let marker: addr = meta_ast_next(colon2);
+    if meta_ast_is_nil(equals) { return 5102; }
+    if meta_is_equals(source, equals) == false { return 5102; }
+    if meta_ast_is_nil(constructor) { return 5102; }
+    if meta_is_std_root(source, constructor) == false { return 5102; }
+    if meta_ast_is_nil(colon1) { return 5102; }
+    if meta_ast_is_nil(colon2) { return 5102; }
+    if meta_ast_is_nil(marker) { return 5102; }
+    if meta_is_colon(source, colon1) == false { return 5102; }
+    if meta_is_colon(source, colon2) == false { return 5102; }
+    if meta_is_func_word(source, marker) == false { return 5102; }
+    let params: addr = meta_function_params(source, meta_ast_next(marker));
+    if meta_ast_is_nil(params) { return 5103; }
+    if meta_ast_kind(params) != 2 { return 5103; }
+    if meta_ast_delimiter(params) != 40 { return 5103; }
+    let signature: addr = meta_ast_next(params);
+    let arrow_head: addr = signature;
+    if meta_is_mark(source, signature, 63) {
+        let input_row: addr = meta_ast_next(signature);
+        if meta_ast_is_nil(input_row) { return 5102; }
+        if meta_ast_kind(input_row) != 2 { return 5102; }
+        if meta_ast_delimiter(input_row) != 123 { return 5102; }
+        let row_status: i32 = meta_function_input_row_status(
+            source, input_row
+        );
+        if row_status != 0 { return row_status; }
+        arrow_head = meta_ast_next(input_row);
+    }
+    if meta_ast_is_nil(arrow_head) { return 5102; }
+    if meta_is_mark(source, arrow_head, 45) == false { return 5102; }
+    let arrow_tail: addr = meta_ast_next(arrow_head);
+    if meta_ast_is_nil(arrow_tail) { return 5102; }
+    if meta_is_mark(source, arrow_tail, 62) == false { return 5102; }
+    let return_type: addr = meta_ast_next(arrow_tail);
+    if meta_ast_is_nil(return_type) { return 5104; }
+    return meta_function_tail_status(source, return_type);
+};
+
+@abi_export
+let meta_function_status = std::func(
+    source: addr,
+    root: addr,
+) -> i32 {
+    let node: addr = meta_ast_first(root);
+    while meta_ast_is_nil(node) == false {
+        if meta_is_let(source, node) {
+            let status: i32 = meta_function_declaration_status(source, node);
+            if status != 0 { return status; }
+        }
+        node = meta_ast_next(node);
+    }
+    return 0;
+};
+
 @abi_export
 let meta_struct_storage_size = std::func(
     source: addr,
@@ -3662,6 +3895,8 @@ let meta_expand_status = std::func(index: addr) -> i32 {
         if module_status != 0 { return module_status; }
         let struct_status: i32 = meta_struct_status(source, root);
         if struct_status != 0 { return struct_status; }
+        let function_status: i32 = meta_function_status(source, root);
+        if function_status != 0 { return function_status; }
         ordinal = ordinal + 1;
     }
     return 0;

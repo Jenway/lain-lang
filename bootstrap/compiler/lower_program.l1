@@ -84,6 +84,12 @@
 #extern #proc lain_std_is_record_keyword(
   #addr %source, #addr %node
 ) -> #bits<1>;
+#extern #proc lain_std_function_header_status(
+  #addr %source, #addr %let_node, #addr %body, #addr %error_node
+) -> #bits<32>;
+#extern #proc lain_std_function_tail_status(
+  #addr %source, #addr %body_candidate, #addr %body
+) -> #bits<32>;
 #extern #proc program_bind_import_aliases(
   #addr %unit, #addr %source, #bits<64> %source_index,
   #addr %root, #addr %environment
@@ -2582,52 +2588,6 @@
   #return 0
 }
 
-// Validate the shape of the entries in a `?{...}` input row.  Each entry
-// is a `name : type` pair; entries are separated by commas and a type is
-// any single expression (its own validity is checked elsewhere).  An empty
-// row is legal and means the same as omitting the row.  Returns the RawAst
-// node that makes the row ill-formed, or nil when the row is well shaped.
-#proc program_input_row_shape_node(
-  #addr %source, #addr %input_row
-) -> #addr {
-  #let %node: #addr = #call raw_node_first(%input_row)
-  #loop entries {
-    #if #call raw_is_nil(%node) { #return #call program_nil() }
-    // An entry opens with a name atom.  A bare name is a legal entry meaning
-    // `name: _`, so the colon is optional; a leading `:` or `,` instead means
-    // the name is missing and that node is the offender.
-    #if #ne(#call raw_node_kind(%node), 1) { #return %node }
-    #if #call meta_atom_equal(%source, %node, ":", 1) { #return %node }
-    #if #call meta_atom_equal(%source, %node, ",", 1) { #return %node }
-    #let %next: #addr = #call raw_node_next(%node)
-    // A bare name must end the row or be followed by a separator.
-    #if #call raw_is_nil(%next) { #return #call program_nil() }
-    #if #call meta_atom_equal(%source, %next, ",", 1) {
-      %node: #addr = #call raw_node_next(%next)
-      #continue entries
-    }
-    // The only other legal continuation is an explicit `: type`.  Anything
-    // else (for example the next entry's name) is a missing separator.
-    #if #eq(#call meta_atom_equal(%source, %next, ":", 1), 0) {
-      #return %next
-    }
-    #let %type: #addr = #call raw_node_next(%next)
-    // A `:` with no following type (end of row or an immediate `,`) is
-    // rejected; the colon is the offending node in both cases.
-    #if #call raw_is_nil(%type) { #return %next }
-    #if #call meta_atom_equal(%source, %type, ",", 1) { #return %next }
-    #let %separator: #addr = #call raw_node_next(
-      #call program_type_end(%source, %type)
-    )
-    #if #call raw_is_nil(%separator) { #return #call program_nil() }
-    #if #eq(#call meta_atom_equal(%source, %separator, ",", 1), 0) {
-      #return %separator
-    }
-    %node: #addr = #call raw_node_next(%separator)
-    #continue entries
-  }
-}
-
 #proc program_function_runtime_params(
   #addr %source, #addr %candidate
 ) -> #addr {
@@ -2699,46 +2659,30 @@
   #store %effect_row,
     #lea(base=%function, idx=0, scale=0, offset=136)
   #store %arrow1, #lea(base=%function, idx=0, scale=0, offset=144)
-  #if #call raw_is_nil(%equals) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #eq(#call meta_atom_equal(%source, %equals, "=", 1), 0) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #call raw_is_nil(%constructor) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #eq(#call meta_atom_equal(%source, %constructor, "std", 3), 0) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #call raw_is_nil(%colon1) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #call raw_is_nil(%colon2) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #call raw_is_nil(%func) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #eq(#call meta_atom_equal(%source, %colon1, ":", 1), 0) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #eq(#call meta_atom_equal(%source, %colon2, ":", 1), 0) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #eq(#call meta_atom_equal(%source, %func, "func", 4), 0) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #call raw_is_nil(%params) { #call program_set_function_status(%function, 5103) #return %function }
-  #if #ne(#call raw_node_delimiter(%params), 40) { #call program_set_function_status(%function, 5103) #return %function }
-  // The `?` input row must be exactly one `{...}` group.
-  #if %has_input_row {
-    #if #call raw_is_nil(%input_row) { #call program_set_function_status(%function, 5102) #return %function }
-    #if #ne(#call raw_node_kind(%input_row), 2) { #call program_set_function_status(%function, 5102) #return %function }
-    #if #ne(#call raw_node_delimiter(%input_row), 123) { #call program_set_function_status(%function, 5102) #return %function }
-  }
-  // Validate the shape of the `name : type` entries.  A shape error keeps
-  // the offending RawAst node as the unit validation span, so the
-  // diagnostic points at the bad entry instead of the whole declaration.
-  #if %has_input_row {
-    #let %input_row_error: #addr = #call program_input_row_shape_node(
-      %source, %input_row
-    )
+  // The header shape -- the `= std::func` path, the parameter group, the
+  // `?{...}` row and its entries, the arrow, the return type and the body --
+  // is a standard-library rule.  The extraction above stays here; only the
+  // judgement moves, so the pass keeps `program_parse_params`, the descriptor
+  // writes, the external-declaration shortcut, and the return-type check that
+  // needs the unit's type table.
+  #let %header_error: #addr = #alloca(8)
+  #let %header_status: #bits<32> = #call lain_std_function_header_status(
+    %source, %let_node, %body, %header_error
+  )
+  #if #ne(%header_status, 0) {
+    // An ill-formed `name : type` entry keeps that RawAst node as the unit
+    // validation span, so the diagnostic points at the bad entry instead of
+    // the whole declaration.  Every other shape error reports no node.
+    #let %input_row_error: #addr = #load[#addr](%header_error)
     #if #eq(#call raw_is_nil(%input_row_error), 0) {
       #call program_unit_set_validation_function(%unit, %function)
       #call program_unit_set_validation_node(
         %unit, %source, %input_row_error
       )
-      #call program_set_function_status(%function, 5102)
-      #return %function
     }
+    #call program_set_function_status(%function, %header_status)
+    #return %function
   }
-  #if #call raw_is_nil(%arrow1) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #call raw_is_nil(%arrow2) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #eq(#call meta_atom_equal(%source, %arrow1, "-", 1), 0) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #eq(#call meta_atom_equal(%source, %arrow2, ">", 1), 0) { #call program_set_function_status(%function, 5102) #return %function }
-  #if #call raw_is_nil(%return_type) { #call program_set_function_status(%function, 5104) #return %function }
-  #if #call raw_is_nil(%body) { #call program_set_function_status(%function, 5102) #return %function }
   // Parse parameters before the external check: a body-less std::func is
   // still a declaration with a real parameter list that call-site arity
   // checks must see.
@@ -2748,15 +2692,17 @@
     #return %function
   }
   #if #eq(#call program_type_valid_in_unit(%unit, %source, %return_type), 0) { #call program_set_function_status(%function, 5104) #return %function }
-  // The `!` output effect row must be exactly one `{...}` group.  Checking
-  // it after the return-type test keeps a malformed row in a declaration
-  // whose arrow type is also invalid reporting 5104, as before.
-  #if %has_effect_row {
-    #if #call raw_is_nil(%effect_row) { #call program_set_function_status(%function, 5102) #return %function }
-    #if #ne(#call raw_node_kind(%effect_row), 2) { #call program_set_function_status(%function, 5102) #return %function }
-    #if #ne(#call raw_node_delimiter(%effect_row), 123) { #call program_set_function_status(%function, 5102) #return %function }
+  // The `!{...}` output effect row and the body group are the tail of the
+  // same library rule.  Asking for them after the return-type test keeps a
+  // malformed row in a declaration whose arrow type is also invalid reporting
+  // 5104, as before.
+  #let %tail_status: #bits<32> = #call lain_std_function_tail_status(
+    %source, %body_candidate, %body
+  )
+  #if #ne(%tail_status, 0) {
+    #call program_set_function_status(%function, %tail_status)
+    #return %function
   }
-  #if #ne(#call raw_node_delimiter(%body), 123) { #call program_set_function_status(%function, 5102) #return %function }
   #return %function
 }
 
