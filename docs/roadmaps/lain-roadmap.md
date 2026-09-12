@@ -1240,36 +1240,73 @@ bootstrap: reach the lain compiler fixed point
 最小复现 `scripts/fixtures/backend_inline_else.l1` 的产物现在能被 `zig cc` 编译；
 `check_native_backend_canonical_diff.py` 与 `check_native_backend_migration.py` 未回归。
 
-#### 13.0.1 native 构建仍失败：两个独立的、更深的缺口
+#### 13.0.1 native 构建仍失败：缺口已收窄到两类
 
-修好上述缺陷后 `build_default_lainc.py` 仍失败，剩 **4 类错误共 40 条**，分成两组，
-**都不是**行内 else 的问题：
+三个缺陷修完后（行内 else、`#data`、`#data_addr`），`build_default_lainc.py` 仍失败，
+错误数 **40 → 37**，只剩两类，**都不是**上述三项：
 
-1. **后端不支持 `#eval` / `#data_addr`**（4 条 `expected expression`）：产物里直接出现
-   `uintptr_t root= #eval {;` 与 `#data_addr(...)` 这样的字面文本。`#eval` 按设计必须在
-   backend 之前被消除，所以这一项本质上要等编码 5/6 把编译期执行接到 LAINVM。
-2. **native host 缺少 13 个能力符号**（36 条 `undeclared function`）：
-   `bootstrap_vm_{arguments-new,arguments-release,arguments-append-addr,arguments-append-bits,
-   artifact-parse,artifact-release,procedure-find,eval-bits,eval-addr,eval-unit}` 与
-   `bootstrap_artifact_capture_{begin,data,length}`。
-   `seed/src/host/native_lainc.c` 只提供 prologue 已声明的那 15 个；`emit_extern_decl` 又对
-   `bootstrap.` 前缀一律跳过（假定 prologue 已覆盖），于是这些符号无人声明。
+| 类别 | 条数 | 内容 |
+| --- | --- | --- |
+| `#eval` 被原样发射 | 1 | `uintptr_t root= #eval {;`。按设计 `#eval` 必须在 backend 之前消除，故属编码 5/6 |
+| native host 缺能力符号 | 36 | 13 个符号未声明（见下） |
 
-**注意**：把 13 个声明补进 prologue **不是修复**——`native_lainc.c` 并未实现它们，
-错误只会从编译期"未声明"变成链接期"未定义"。真正的修复要实现这 13 个宿主函数。
+**已修掉的那 1 条**是 `#data_addr` 的 `-Wint-conversion`：先前按 seed 的指针形式发射，
+而本后端把 `#addr` 建模为 `uintptr_t`；改为 `((uintptr_t)NAME)` 后消失（提交 `10a0a1d`）。
 
-**且它单独也解不开**：第 1 组仍在，native 构建依旧失败。所以这条路要同时具备
-「`#eval` 在 backend 之前消除」与「native host 覆盖 ABI」两项，与 §3.2 的结论一致。
+13 个缺失符号：`bootstrap_vm_{arguments-new,arguments-release,arguments-append-addr,
+arguments-append-bits,artifact-parse,artifact-release,procedure-find,eval-bits,eval-addr,eval-unit}`
+与 `bootstrap_artifact_capture_{begin,data,length}`。
+`seed/src/host/native_lainc.c` 只提供 prologue 已声明的那 15 个；`emit_extern_decl` 又对
+`bootstrap.` 前缀一律跳过（假定 prologue 已覆盖），于是这些符号无人声明。
 
-**追责说明**：`bootstrap_vm_*` 的依赖**早于**本次改动（改动前的
+**把 13 个声明补进 prologue 不是修复**：`native_lainc.c` 并未实现它们，错误只会从编译期
+"未声明"变成链接期"未定义"。真正的修复是实现这 13 个宿主函数。
+**且它单独也解不开**：`#eval` 那条仍在。两项都要具备，与 §3.2 的结论一致。
+
+**追责说明**：`bootstrap_vm_*` 的依赖**早于**本轮改动（改动前的
 `bootstrap/compiler/meta_eval_vm.l1` 已有 12 处引用），属既存缺口；
-`bootstrap_artifact_capture_*` 是本轮 1b-1 新增的能力，使所需符号从 10 个增至 13 个。
-两者同一性质：宿主未覆盖 artifact 实际使用的 ABI。
+`bootstrap_artifact_capture_*` 由 1b-1 引入，使所需符号从 10 个增至 13 个。
+同一性质：宿主未覆盖 artifact 实际使用的 ABI。
 
-**另一个值得单独处理的问题**：后端产出畸形 C 时**退出码为 0**，没有任何诊断，失败只在
-`zig cc` 阶段以级联错误暴露。建议后续给后端加产物校验（例如发射后自检括号平衡）。
+#### 13.0.2 后端 LAINIR 覆盖面审计（2026-09-12）：无缺口
 
-此缺陷与编码 5 的 A/B 选择无关，因此不受其阻塞。
+把 `build/bootstrap/lainc.l1`（20661 行、362 过程的完整编译器）交给后端，统计产物中的
+`/* unsupported L1: ... */` 标记：**真正的未支持构造为 0 条**
+（早先看到的数十条标记全是**源码注释**被透传，不是构造）。
+
+输入 artifact 用到的构造已被全覆盖，含 `#call` 7341、`#addr` 4344、`#if` 2867、`#let` 2530、
+`#return` 2306、`#eq` 916、`#lea` 906、`#store` 478、`#add` 466、`#load` 414、`#ne` 386、
+`#continue` 368、`#loop` 312、`#break` 307、`#sge` 180、`#sub`、`#zext`、`#mul`、`#slt`、
+`#sgt`、`#sle` 等。
+
+**结论**：后端不缺指令/表达式支持；native 构建的障碍只在 `#eval`（设计上应提前消除）
+与宿主 ABI 覆盖，**不在 backend 的 lowering 广度**。
+
+#### 13.0.3 前端表达式形状审计（2026-09-12）：第二轮无缺口
+
+上一节记录的两个静默误编译修好后，又对易错形状做了两轮穷举性检查，**均正确**：
+
+| 形状 | 产物 |
+| --- | --- |
+| `1 + 2 + 3` | `#add(#add(1, 2), 3)` |
+| `v * 2 * 3` | `#mul(#mul(%v, 2), 3)` |
+| `v + d * 10` | `#add(%v, #mul(%d, 10))` |
+| `v - d - 1` | `#sub(#sub(%v, %d), 1)` |
+| `v * 2 + d - 1` | `#sub(#add(#mul(%v, 2), %d), 1)` |
+| `(v + d) * 2` | `#mul(#add(%v, %d), 2)` |
+| `v / 2 + d` | `#add(#sdiv(%v, 2), %d)` |
+| `a - -b` | `#sub(%a, #sub(#trunc(0), %b))` |
+| `(a + 1) * (a - 1)` | `#mul(#add(%a, 1), #sub(%a, 1))` |
+| `a + a * a` | `#add(%a, #mul(%a, %a))` |
+| `while i < a \|\| i < b` | 单条 `#eq(#ne(#add(#zext(#slt…), #zext(#slt…)), 0), 0)` |
+| `while i < a && i < b` | 两条 `#break` |
+| `if i < a && i < b` | `#eq(#add(#zext(#slt…), #zext(#slt…)), 2)` |
+
+**另一个值得单独处理的问题**：backend 产出畸形 C 时**退出码为 0**，没有任何诊断，失败只在
+`zig cc` 阶段以级联错误暴露。已由 `scripts/check_backend_c_shape.py` 补上（括号平衡 +
+无嵌套函数定义），该 gate 有负对照。
+
+本节各项与编码 5 的 A/B 选择无关，因此不受其阻塞。
 
 固定点完成后再处理：
 
