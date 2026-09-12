@@ -1268,19 +1268,29 @@ arguments-append-bits,artifact-parse,artifact-release,procedure-find,eval-bits,e
 `bootstrap_artifact_capture_*` 由 1b-1 引入，使所需符号从 10 个增至 13 个。
 同一性质：宿主未覆盖 artifact 实际使用的 ABI。
 
-#### 13.0.2 后端 LAINIR 覆盖面审计（2026-09-12）：无缺口
+#### 13.0.2 后端覆盖面审计（2026-09-12）：编译器闭包内无缺口，但闭包外有
 
 把 `build/bootstrap/lainc.l1`（20661 行、362 过程的完整编译器）交给后端，统计产物中的
 `/* unsupported L1: ... */` 标记：**真正的未支持构造为 0 条**
-（早先看到的数十条标记全是**源码注释**被透传，不是构造）。
+（早先看到的数十条标记全是**源码注释**被透传，不是构造）。输入 artifact 用到的构造已被全覆盖，
+含 `#call` 7341、`#addr` 4344、`#if` 2867、`#let` 2530、`#return` 2306、`#eq` 916、`#lea` 906、
+`#store` 478、`#add` 466、`#load` 414、`#ne` 386、`#continue` 368、`#loop` 312、`#break` 307、
+`#sge` 180、`#sub`、`#zext`、`#mul`、`#slt`、`#sgt`、`#sle` 等。
 
-输入 artifact 用到的构造已被全覆盖，含 `#call` 7341、`#addr` 4344、`#if` 2867、`#let` 2530、
-`#return` 2306、`#eq` 916、`#lea` 906、`#store` 478、`#add` 466、`#load` 414、`#ne` 386、
-`#continue` 368、`#loop` 312、`#break` 307、`#sge` 180、`#sub`、`#zext`、`#mul`、`#slt`、
-`#sgt`、`#sle` 等。
+**但这只说明「编译器闭包用到的构造」被覆盖，不等于「LAINIR v1 被覆盖」。** 后者我在接着
+逐条测试时发现两处真实缺口（都不被编译器闭包触发，因此前面所有 gate 都看不见）：
 
-**结论**：后端不缺指令/表达式支持；native 构建的障碍只在 `#eval`（设计上应提前消除）
-与宿主 ABI 覆盖，**不在 backend 的 lowering 广度**。
+| 缺口 | 实测 |
+| --- | --- |
+| **`emit_c_type` 的宽度/浮点映射不全** | 只处理 `#unit`、`#addr`、`addr`、`#bits<32>`、`#bits<1>`，**其余一律回落 `uint64_t`**。故 `#bits<8>` 得 `uint64_t`（应为 8 位）、`#float<32>`/`#float<64>` 也得 `uint64_t`（应为 `float`/`double`） |
+| **未知表达式被原样透传** | `#fadd(%x, %y)` 直接写进 C（`return #fadd(x, y);`），**既不支持也不报 `unsupported L1`**，静默产出非法 C |
+
+**关键差别**：seed 的发射器遇到不认识的类型**返回失败**（`seed_emit_c_type` 的兜底是
+`#return 0`），而 Lain 后端**静默替换成 `uint64_t`**。「失败」与「静默给出错误答案」是两回事，
+后者正是 §3.5 那条教训的同一形态。
+
+**修正结论**：native 构建当前的障碍仍只在 `#eval` 与宿主 ABI（对编译器闭包而言成立），
+但**后端并非「LAINIR v1 全覆盖」**——float 与部分整数宽度是未实现，而非不可达。
 
 #### 13.0.3 前端表达式形状审计（2026-09-12）：第二轮无缺口
 
