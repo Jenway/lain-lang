@@ -146,8 +146,6 @@ ABI_SUPPORT_ENTRIES = (
     "meta_expand_root",
     "meta_elaborate_status",
     "meta_type_conversion_allowed",
-    "meta_generic_parameter_valid",
-    "meta_generic_specialization_token",
     "meta_effect_allowed",
     "meta_bounds_check",
     "meta_find_member_return",
@@ -565,7 +563,7 @@ def verify_abi_entry() -> None:
     ):
         detail = policy_probe.stderr.strip() or policy_probe.stdout.strip()
         raise RuntimeError(
-            "formal stdlib type/generic/effect/bounds policy failed"
+            "formal stdlib type/effect/bounds policy failed"
             + (f": {detail}" if detail else "")
         )
     for arithmetic_fixture, expected in FORMAL_EXTRA_ARITHMETIC_PROBES:

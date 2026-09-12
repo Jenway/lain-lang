@@ -2,7 +2,7 @@
 //
 // Single-file and multi-file compilation both enter through ProgramInput.
 // Syntax remains topology-only; this module introduces bindings, functions,
-// types, ModuleValue, effects and specialization.
+// types, ModuleValue and effects.
 
 let memory_model: Module = import("std::memory_model");
 let vector: Module = import("std::core::vec");
@@ -79,37 +79,6 @@ let elaborator: Module = std::module {
             Memory.Bounds,
         );
 
-        let SpecializationArgument: std::type = std::struct {
-            kind: i32,
-            type_value: types.TypeId,
-            comptime_value: types.ComptimeValue,
-            module_value: types.ModuleId,
-        };
-
-        let SpecializationArgumentVector: std::type = vector.Vec(
-            SpecializationArgument,
-            Memory.Allocation,
-            Memory.Bounds,
-        );
-
-        let SpecializationKey: std::type = std::struct {
-            owner: types.ModuleId,
-            callable: FunctionId,
-            arguments: SpecializationArgumentVector,
-        };
-
-        let Specialization: std::type = std::struct {
-            key: SpecializationKey,
-            function: FunctionId,
-            provisional: bool,
-        };
-
-        let SpecializationVector: std::type = vector.Vec(
-            Specialization,
-            Memory.Allocation,
-            Memory.Bounds,
-        );
-
         let ModuleBinding: std::type = std::struct {
             owner: types.ModuleId,
             name: Memory.String,
@@ -127,7 +96,6 @@ let elaborator: Module = std::module {
             types: Types.State,
             expressions: ExprVector,
             functions: FunctionVector,
-            specializations: SpecializationVector,
             module_bindings: ModuleBindingVector,
             function_types: Effects.FunctionTypeVector,
             calls: Effects.CallEdgeVector,
@@ -158,7 +126,6 @@ let elaborator: Module = std::module {
                 types: Types.new(),
                 expressions: ExprVector.new(),
                 functions: FunctionVector.new(),
-                specializations: SpecializationVector.new(),
                 module_bindings: ModuleBindingVector.new(),
                 function_types: Effects.FunctionTypeVector.new(),
                 calls: Effects.CallEdgeVector.new(),
@@ -447,73 +414,6 @@ let elaborator: Module = std::module {
                 },
             );
             return id;
-        };
-
-        let same_specialization_key = std::func(
-            left: &SpecializationKey,
-            right: &SpecializationKey,
-        ) -> bool ! {Memory.Bounds.Effect} {
-            if left.owner != right.owner
-                || left.callable != right.callable
-                || left.arguments.length()
-                    != right.arguments.length() {
-                return false;
-            }
-            let index: usize = 0;
-            while index < left.arguments.length() {
-                let a: &SpecializationArgument =
-                    left.arguments.get(index);
-                let b: &SpecializationArgument =
-                    right.arguments.get(index);
-                if a.kind != b.kind
-                    || a.type_value != b.type_value
-                    || a.module_value != b.module_value {
-                    return false;
-                }
-                if a.kind == 2 {
-                    if !types.same_comptime_value(
-                        &a.comptime_value,
-                        &b.comptime_value,
-                    ) {
-                        return false;
-                    }
-                }
-                index = index + 1;
-            }
-            return true;
-        };
-
-        let begin_specialization = std::func(
-            program: &mut Program,
-            key: SpecializationKey,
-            depth: usize,
-        ) -> FunctionId ! {
-            Memory.Allocation.Effect,
-            Memory.Bounds.Effect,
-        } {
-            if depth >= 128 {
-                return std::usize_max();
-            }
-            let index: usize = 0;
-            while index < program.specializations.length() {
-                let current: &Specialization =
-                    program.specializations.get(index);
-                if same_specialization_key(&current.key, &key) {
-                    return current.function;
-                }
-                index = index + 1;
-            }
-
-            // Register before lowering the body so ordinary recursive calls
-            // see this exact specialization.
-            let provisional: FunctionId =
-                program.functions.length();
-            program.specializations.push(Specialization {
-                key: key,
-                function: provisional,
-                provisional: true,
-            });
-            return provisional;
         };
 
         let elaborate_source = std::func(
@@ -832,17 +732,10 @@ let elaborator: Module = std::module {
             @export let FunctionId: std::type = FunctionId;
             @export let Expr: std::type = Expr;
             @export let Function: std::type = Function;
-            @export let SpecializationArgument: std::type =
-                SpecializationArgument;
-            @export let SpecializationKey: std::type = SpecializationKey;
             @export let ModuleBinding: std::type = ModuleBinding;
             @export let Program: std::type = Program;
             @export let Result: std::type = Result;
             @export let SourceResult: std::type = SourceResult;
-            @export let same_specialization_key =
-                same_specialization_key;
-            @export let begin_specialization =
-                begin_specialization;
             @export let elaborate = elaborate;
         };
     };

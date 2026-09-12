@@ -64,7 +64,7 @@ def main() -> int:
 
         if outputs[0] != outputs[1]:
             raise RuntimeError("bootstrap and formal policy outputs differ")
-    print("PASS stdlib policy conformance: type/generic/effect/bounds")
+    print("PASS stdlib policy conformance: type/effect/bounds")
     return 0
 
 
