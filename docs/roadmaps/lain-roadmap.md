@@ -238,7 +238,7 @@ LAINVM 只看到物理 Artifact、Procedure、Value 和参数。Meta 可以把�
 | 子阶段 | 状态 | 内容 |
 | --- | --- | --- |
 | 1a | 已完成 | Meta 调用的 LAINVM 执行管道统一（§7.0） |
-| 1b | **部分完成** | 1b-1、1b-2、1b-3 已完成（sink 统一与三类构造器合一）；1b-4 受阻于编码 2 的签名分类；1b-5 受阻于设计决定 |
+| 1b | **部分完成** | 1b-1/2/3 已完成（sink 统一、三类构造器合一）；**1b-4 的前置已具备但需先定两个判据（§7.2 顶部）**；1b-5 受阻于设计决定 |
 | 1c | **已完成 2026-09-12** | 形式识别移回库：编译器中的 24 处名字字面量降为 **0**，库新增 10 个谓词（§7.0.2） |
 
 **归档的影响（2026-09-12）**：`src/lainir` 的 provider 与 `src/lainvm` 的 interpreter 已暂停
@@ -583,6 +583,34 @@ factory 和 scalar function。`lainvm_meta_build_scalar_artifact`、
 `lainvm_meta_build_module_artifact` 等函数分别拼接临时 LAINIR。这些分支必须收敛。
 
 ### 7.2 目标调用算法
+
+> **1b-4 的前置已具备（2026-09-12 查实）。** 原先「按签名分类」缺两样东西，现在都有了：
+> 编码 2 把签名（含返回类型节点，描述符 offset 24）存了下来，编码 1c 把形式识别移进了库。
+>
+> **分类依据确实在签名里**——库自己就是这么写的（`std/allocation.lain:15`）：
+>
+> ```lain
+> let Alloc = std::func(Policy: Module) -> effects.Effect {
+>     return std::effect("Alloc", Policy);
+> };
+> ```
+>
+> 所以 `-> effects.Effect` 是 effect factory、`-> Module`/`-> ModuleShape` 是 module factory、
+> 标量类型是 scalar call。
+>
+> **但仍有两点必须先决定，不能猜：**
+>
+> 1. **如何判定「返回类型是 effect」**。`meta_value_kind` 里 **4 同时表示类型值与 effect**
+>    （`meta_value_type` 与 `meta_value_type_with_namespace` 都用 4；而 effect 构造器在
+>    artifact 里也写 4）。所以仅凭 kind 无法区分「返回一个普通类型值」与「返回一个 effect」。
+>    可选判据：(a) 让库新增一个谓词，问「这个路径解析出的 Meta 值是不是 effect」——与 1c 的
+>    分层一致；(b) 给 effect 值一个独立 kind——会动 Meta 值表示；(c) 保留 body 扫描作为
+>    effect 与 module 的区分手段，只把 scalar 与其余分开——收敛幅度小。
+> 2. **fixture `formal_meta_effect_factory.lain` 的声明是错的**：它写 `-> Module` 却返回
+>    `std::effect(...)`。按签名分类后它会被判成 module factory。改成 `-> effects.Effect`
+>    才与库的写法一致——但这是**改 fixture 的语义**，需要确认是 fixture 笔误还是有意为之。
+>
+> **在 (1) 定下之前不要开始 1b-4。**
 
 实现一个统一入口，名称可按现有风格确定，但职责必须完整：
 
