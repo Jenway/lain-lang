@@ -112,6 +112,7 @@ python scripts/<name>.py [args...]
 | `check_lainvm_boundary.py` | 检查 LAINIR/LAINVM 契约边界：契约存在、lainc 只依赖契约、Meta 通过 VM 请求编译期执行、归档实现不得回到 `src/`。 |
 | `check_meta_ast_conformance.py` | 对比第一代 RawAst 输出与 formal `std::meta` 输出。 |
 | `check_meta_module_validation.py` | 对比 bootstrap 与 formal `std::meta` 的模块形状校验。 |
+| `check_function_shape_conformance.py` | 对比 bootstrap 与 formal `std::meta` 的函数声明形状校验（`= std::func` 头部、`?{}` 条目、箭头、`[!{}] {body}` 尾部）；形式侧无 unit 类型表且不重查类型语法，四种形状（返回类型合法性、类型 run 内部缺陷、`;` 前的类型 run）跳过并打印观察到的诊断码与原因。 |
 | `check_meta_form_swap.py` | 证明形式识别真的走了库：替换库谓词 `lain_std_is_module_declaration` 的返回值，编译行为必须随之改变；相同即失败。 |
 | `check_native_formal_stdlib.py` | 通过 native compiler 运行 formal stdlib lowering slice。 |
 | `check_native_lainc_determinism.py` | 证明 native lainc 对同一输入两次输出一致。 |
