@@ -6,6 +6,12 @@
 // the formal std implementation later.
 
 #extern #proc raw_is_nil(#addr %node) -> #bits<1>;
+#extern #proc raw_node_kind(#addr %node) -> #bits<32>;
+#extern #proc raw_node_delimiter(#addr %node) -> #bits<32>;
+#extern #proc raw_node_next(#addr %node) -> #addr;
+#extern #proc meta_atom_equal(
+  #addr %source, #addr %node, #addr %text, #bits<64> %text_length
+) -> #bits<1>;
 #extern #proc meta_record_group(#addr %source, #addr %root) -> #addr;
 #extern #proc meta_record_build(#addr %source, #addr %root) -> #addr;
 #extern #proc module_group(#addr %source, #addr %root) -> #addr;
@@ -31,4 +37,189 @@
     #if #ne(%status, 0) { #return %status }
   }
   #return 0
+}
+
+// ---------------------------------------------------------------------------
+// Form vocabulary.
+//
+// Which spelling denotes which form is a language rule, so it lives here and
+// not in the compiler.  `lain_std_word_code` is the single spelling table:
+// codes 0-13 are copied verbatim from the formal `std/meta.lain` table
+// (`meta_word_code`, line 2360), and codes 14-20 continue the same table with
+// the Meta constructor words the lowering pass must recognize.  The extension
+// adds no new accepted spelling; every name below was already compared by the
+// compiler, and every other predicate here only compares the returned number.
+// ---------------------------------------------------------------------------
+
+#proc lain_std_word_code(#addr %source, #addr %node) -> #bits<32> {
+  #if #ne(#call raw_node_kind(%node), 1) { #return 0 }
+  #if #call meta_atom_equal(%source, %node, "if", 2) { #return 1 }
+  #if #call meta_atom_equal(%source, %node, "let", 3) { #return 2 }
+  #if #call meta_atom_equal(%source, %node, "main", 4) { #return 3 }
+  #if #call meta_atom_equal(%source, %node, "type", 4) { #return 4 }
+  #if #call meta_atom_equal(%source, %node, "i64", 3) { #return 5 }
+  #if #call meta_atom_equal(%source, %node, "true", 4) { #return 6 }
+  #if #call meta_atom_equal(%source, %node, "false", 5) { #return 7 }
+  #if #call meta_atom_equal(%source, %node, "else", 4) { #return 8 }
+  #if #call meta_atom_equal(%source, %node, "return", 6) { #return 9 }
+  #if #call meta_atom_equal(%source, %node, "Module", 6) { #return 10 }
+  #if #call meta_atom_equal(%source, %node, "module", 6) { #return 11 }
+  #if #call meta_atom_equal(%source, %node, "struct", 6) { #return 12 }
+  #if #call meta_atom_equal(%source, %node, "import", 6) { #return 13 }
+  #if #call meta_atom_equal(%source, %node, "effect", 6) { #return 14 }
+  #if #call meta_atom_equal(%source, %node, "handler", 7) { #return 15 }
+  #if #call meta_atom_equal(%source, %node, "effect_operation", 16) {
+    #return 16
+  }
+  #if #call meta_atom_equal(%source, %node, "type_with_namespace", 19) {
+    #return 17
+  }
+  #if #call meta_atom_equal(%source, %node, "handler_type", 12) { #return 18 }
+  #if #call meta_atom_equal(%source, %node, "meta_type", 9) { #return 19 }
+  #if #call meta_atom_equal(%source, %node, "ModuleShape", 11) { #return 20 }
+  #return 0
+}
+
+#proc lain_std_is_module_keyword(#addr %source, #addr %node) -> #bits<1> {
+  #return #eq(#call lain_std_word_code(%source, %node), 11)
+}
+
+#proc lain_std_is_record_keyword(#addr %source, #addr %node) -> #bits<1> {
+  #return #eq(#call lain_std_word_code(%source, %node), 12)
+}
+
+#proc lain_std_is_effect(#addr %source, #addr %node) -> #bits<1> {
+  #return #eq(#call lain_std_word_code(%source, %node), 14)
+}
+
+#proc lain_std_is_handler(#addr %source, #addr %node) -> #bits<1> {
+  #return #eq(#call lain_std_word_code(%source, %node), 15)
+}
+
+#proc lain_std_is_effect_operation(#addr %source, #addr %node) -> #bits<1> {
+  #return #eq(#call lain_std_word_code(%source, %node), 16)
+}
+
+#proc lain_std_is_module_return_type(#addr %source, #addr %node) -> #bits<1> {
+  #return #eq(#call lain_std_word_code(%source, %node), 10)
+}
+
+#proc lain_std_is_module_shape_return_type(
+  #addr %source, #addr %node
+) -> #bits<1> {
+  #return #eq(#call lain_std_word_code(%source, %node), 20)
+}
+
+#proc lain_std_is_meta_return_type(#addr %source, #addr %node) -> #bits<1> {
+  #if #call lain_std_is_module_return_type(%source, %node) { #return 1 }
+  #return #call lain_std_is_module_shape_return_type(%source, %node)
+}
+
+#proc lain_std_is_effect_member(#addr %source, #addr %node) -> #bits<1> {
+  #if #call lain_std_is_effect(%source, %node) { #return 1 }
+  #if #call lain_std_is_handler(%source, %node) { #return 1 }
+  #return #call lain_std_is_effect_operation(%source, %node)
+}
+
+#proc lain_std_is_form_keyword(#addr %source, #addr %node) -> #bits<1> {
+  #if #call lain_std_is_module_keyword(%source, %node) { #return 1 }
+  #if #call lain_std_is_record_keyword(%source, %node) { #return 1 }
+  // `import` needs path resolution, but it is ignored by the same declaration
+  // scan, so the keyword classification stays in this single table.
+  #return #eq(#call lain_std_word_code(%source, %node), 13)
+}
+
+// `let A = ...` right-hand declaration kind.  The scan starts after the
+// binding name and stops at the declaration terminator, exactly like the
+// compiler-owned predicate it replaces.
+#proc lain_std_is_module_declaration(
+  #addr %source, #addr %let_node
+) -> #bits<1> {
+  #let %node: #addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call lain_std_is_module_keyword(%source, %node) { #return 1 }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return 0 }
+    %node: #addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc lain_std_is_record_declaration(
+  #addr %source, #addr %let_node
+) -> #bits<1> {
+  #let %node: #addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call lain_std_is_record_keyword(%source, %node) { #return 1 }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return 0 }
+    %node: #addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc lain_std_module_group(#addr %source, #addr %let_node) -> #addr {
+  #let %node: #addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return %node }
+    #if #call lain_std_is_module_keyword(%source, %node) {
+      #let %group: #addr = #call raw_node_next(%node)
+      #if #eq(#call raw_node_kind(%group), 2) {
+        #if #eq(#call raw_node_delimiter(%group), 123) {
+          #return %group
+        }
+      }
+      #return %group
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) { #return %node }
+    %node: #addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+// `std::X` where X is one of the Meta constructor members.  Path shape and
+// member classification both belong to the form vocabulary, so the whole
+// check lives here.
+#proc lain_std_is_meta_constructor_path(
+  #addr %source, #addr %node
+) -> #bits<1> {
+  #if #ne(#call raw_node_kind(%node), 1) { #return 0 }
+  #if #eq(#call meta_atom_equal(%source, %node, "std", 3), 0) { #return 0 }
+  #let %colon1: #addr = #call raw_node_next(%node)
+  #let %colon2: #addr = #call raw_node_next(%colon1)
+  #let %member: #addr = #call raw_node_next(%colon2)
+  #if #eq(#call meta_atom_equal(%source, %colon1, ":", 1), 0) { #return 0 }
+  #if #eq(#call meta_atom_equal(%source, %colon2, ":", 1), 0) { #return 0 }
+  #let %code: #bits<32> = #call lain_std_word_code(%source, %member)
+  #if #eq(%code, 11) { #return 1 }
+  #if #eq(%code, 14) { #return 1 }
+  #if #eq(%code, 15) { #return 1 }
+  #if #eq(%code, 16) { #return 1 }
+  #if #eq(%code, 17) { #return 1 }
+  #if #eq(%code, 18) { #return 1 }
+  #if #eq(%code, 19) { #return 1 }
+  #return 0
+}
+
+// `std::module { ... }` value form.
+#proc lain_std_is_std_module_value(
+  #addr %source, #addr %node
+) -> #bits<1> {
+  #if #eq(#call meta_atom_equal(%source, %node, "std", 3), 0) {
+    #return 0
+  }
+  #let %colon1: #addr = #call raw_node_next(%node)
+  #let %colon2: #addr = #call raw_node_next(%colon1)
+  #let %member: #addr = #call raw_node_next(%colon2)
+  #let %group: #addr = #call raw_node_next(%member)
+  #if #eq(#call meta_atom_equal(%source, %colon1, ":", 1), 0) {
+    #return 0
+  }
+  #if #eq(#call meta_atom_equal(%source, %colon2, ":", 1), 0) {
+    #return 0
+  }
+  #if #ne(#call lain_std_word_code(%source, %member), 11) { #return 0 }
+  #if #call raw_is_nil(%group) { #return 0 }
+  #if #ne(#call raw_node_kind(%group), 2) { #return 0 }
+  #return #eq(#call raw_node_delimiter(%group), 123)
 }
