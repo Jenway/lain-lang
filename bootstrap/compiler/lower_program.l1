@@ -7867,6 +7867,18 @@
 #proc program_write_function_type(
   #addr %unit, #addr %source, #addr %function, #addr %type
 ) -> #unit {
+  #call program_write_function_type_steps(
+    %unit, %source, %function, %type, 0
+  )
+  #return
+}
+
+// %steps bounds the input row chain below, so a row whose entry names itself
+// cannot recurse forever.
+#proc program_write_function_type_steps(
+  #addr %unit, #addr %source, #addr %function, #addr %type,
+  #bits<64> %steps
+) -> #unit {
   #if #call raw_is_nil(%type) {
     #call bootstrap.artifact-write-literal("#unit")
     #return
@@ -7894,6 +7906,34 @@
   #if #call program_write_resolved_function_type(
     %unit, %source, %function, %type
   ) { #return }
+  #if #sle(%steps, 8) {
+    #if #eq(#call program_function_is_nil(%function), 0) {
+      // A type annotation may name one of the declaration's own input row
+      // entries (`?{T: i32}` with `a: T`).  The entry's declared type is then
+      // the physical type of the annotation, so the same writers resolve it.
+      // The row is read only when the annotation comes from the same source,
+      // because the entry name is compared by bytes.
+      #let %function_source: #addr = #call program_function_source(
+        %function
+      )
+      #if #eq(%function_source, %source) {
+        #let %entry: #addr = #call lainvm_meta_input_entry_named(
+          %source, %function, %type
+        )
+        #if #eq(#call raw_is_nil(%entry), 0) {
+          #let %entry_type: #addr = #call lainvm_meta_input_entry_type(
+            %source, %entry
+          )
+          #if #eq(#call raw_is_nil(%entry_type), 0) {
+            #call program_write_function_type_steps(
+              %unit, %source, %function, %entry_type, #add(%steps, 1)
+            )
+            #return
+          }
+        }
+      }
+    }
+  }
   #call program_write_type(%unit, %source, %type)
   #return
 }
