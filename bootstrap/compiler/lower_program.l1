@@ -6248,13 +6248,13 @@
         #call bootstrap.artifact-write-literal("#sub(#trunc[#bits<")
         #call meta_write_decimal(%signed_value_width)
         #call bootstrap.artifact-write-literal(">](0), ")
-        #call program_write_value_expression(%source, %function, %signed_value)
+        #call program_write_operand(%source, %function, %signed_value)
         #call bootstrap.artifact-write-byte(41)
         #return
       }
     }
     #call bootstrap.artifact-write-literal("#sub(0, ")
-    #call program_write_value_expression(%source, %function, %signed_value)
+    #call program_write_operand(%source, %function, %signed_value)
     #call bootstrap.artifact-write-byte(41)
     #return
   }
@@ -6623,16 +6623,28 @@
   // projection lowering; that path writes the call base through the
   // projection-free implementation below, avoiding recursion.
   #if #call program_is_post_call_member(%source, %node) {
-    #call program_write_value_expression(%source, %function, %node)
+    // Bound the projection by the operand itself: `program_write_operand`
+    // writes one operand, so a following infix operator must stay with the
+    // caller's expression rather than being consumed here.
+    #call program_write_value_window_depth(
+      %source, %function, %node,
+      #call program_operand_end_source(%source, %node), 0
+    )
     #return
   }
   #call program_write_operand_base(%source, %function, %node)
   #return
 }
 
-#proc program_write_value_expression(
-  #addr %source, #addr %function, #addr %left
+#proc program_write_value_window_depth(
+  #addr %source, #addr %function, #addr %left, #addr %stop,
+  #bits<64> %depth
 ) -> #unit {
+  #if #call raw_is_nil(%left) { #return }
+  #if #sge(%depth, 256) {
+    #call program_write_operand(%source, %function, %left)
+    #return
+  }
   // `udiv`/`urem` are compiler intrinsics, not runtime calls.  Keep the
   // fallback keyed by the final path name for the same qualified-path shape
   // handled above for `store_bits`.
@@ -7001,16 +7013,10 @@
     #call bootstrap.artifact-write-byte(41)
     #return
   }
-  #let %operator: #addr = #call raw_node_next(%left_end)
+  #let %operator: #addr = #call program_value_window_operator(
+    %source, %left, %stop
+  )
   #if #call raw_is_nil(%operator) {
-    #call program_write_operand(%source, %function, %left)
-    #return
-  }
-  #if #call program_is_semicolon(%source, %operator) {
-    #call program_write_operand(%source, %function, %left)
-    #return
-  }
-  #if #call meta_atom_equal(%source, %operator, ",", 1) {
     #call program_write_operand(%source, %function, %left)
     #return
   }
@@ -7026,7 +7032,14 @@
     #let %left_is_address: #bits<1> = #call program_value_is_address(
       #call program_function_unit(%function), %source, %function, %left
     )
+    // The whole additive tail after the first `+` is the index expression:
+    // `p + a + b` becomes `#lea(base=p, idx=#add(a, b), ...)`, which keeps
+    // `#lea` bases as plain operands and matches the established idiom.  A
+    // tighter-binding operator first (`p * 2 + i`) is not address arithmetic
+    // and stays on the ordinary infix path.
+    #let %lea_operator: #addr = #call raw_node_next(%left_end)
     #if %left_is_address {
+      #if #call meta_atom_equal(%source, %lea_operator, "+", 1) {
       #let %base: #addr = %left
       // `Allocation.address(block)` is a surface-level identity operation
       // over the policy block.  Resolve the selected function and examine
@@ -7051,11 +7064,13 @@
           }
         }
       }
-      #let %index: #addr = %right
+      #let %index: #addr = #call raw_node_next(
+        #call program_value_operator_end(%source, %lea_operator)
+      )
       #let %scale: #bits<64> = 1
       #let %folded_scale: #bits<1> = 0
       #let %index_end: #addr = #call program_operand_end_source(
-        %source, %right
+        %source, %index
       )
       #let %index_operator: #addr = #call raw_node_next(%index_end)
       #if #call meta_atom_equal(%source, %index_operator, "*", 1) {
@@ -7076,12 +7091,15 @@
       #if %folded_scale {
         #call program_write_operand(%source, %function, %index)
       } else {
-        #call program_write_value_expression(%source, %function, %right)
+        #call program_write_value_window_depth(
+          %source, %function, %index, %stop, #add(%depth, 1)
+        )
       }
       #call bootstrap.artifact-write-literal(", scale=")
       #call meta_write_decimal(%scale)
       #call bootstrap.artifact-write-literal(", offset=0)")
       #return
+      }
     }
   }
   #if #call meta_atom_equal(%source, %operator, "as", 2) {
@@ -7105,7 +7123,9 @@
           #call bootstrap.artifact-write-literal("#sext[#bits<")
           #call meta_write_decimal(%target_width)
           #call bootstrap.artifact-write-literal(">](")
-          #call program_write_operand(%source, %function, %left)
+          #call program_write_value_window_depth(
+            %source, %function, %left, %operator, #add(%depth, 1)
+          )
           #call bootstrap.artifact-write-byte(41)
           #return
         }
@@ -7113,13 +7133,17 @@
           #call bootstrap.artifact-write-literal("#trunc[#bits<")
           #call meta_write_decimal(%target_width)
           #call bootstrap.artifact-write-literal(">](")
-          #call program_write_operand(%source, %function, %left)
+          #call program_write_value_window_depth(
+            %source, %function, %left, %operator, #add(%depth, 1)
+          )
           #call bootstrap.artifact-write-byte(41)
           #return
         }
       }
     }
-    #call program_write_operand(%source, %function, %left)
+    #call program_write_value_window_depth(
+      %source, %function, %left, %operator, #add(%depth, 1)
+    )
     #return
   }
   // The only current source-level bitwise mask is `byte & 255` in the
@@ -7127,19 +7151,29 @@
   // the mask is physically redundant at this boundary.
   #if #call meta_atom_equal(%source, %operator, "&", 1) {
     #if #call meta_atom_equal(%source, %right, "255", 3) {
-      #call program_write_operand(%source, %function, %left)
+      #call program_write_value_window_depth(
+        %source, %function, %left, %operator, #add(%depth, 1)
+      )
       #return
     }
   }
   #if #call program_is_remainder(%source, %operator) {
     #call bootstrap.artifact-write-literal("#sub(")
-    #call program_write_operand(%source, %function, %left)
+    #call program_write_value_window_depth(
+      %source, %function, %left, %operator, #add(%depth, 1)
+    )
     #call bootstrap.artifact-write-literal(", #mul(#sdiv(")
-    #call program_write_operand(%source, %function, %left)
+    #call program_write_value_window_depth(
+      %source, %function, %left, %operator, #add(%depth, 1)
+    )
     #call bootstrap.artifact-write-literal(", ")
-    #call program_write_value_expression(%source, %function, %right)
+    #call program_write_value_window_depth(
+      %source, %function, %right, %stop, #add(%depth, 1)
+    )
     #call bootstrap.artifact-write-literal("), ")
-    #call program_write_value_expression(%source, %function, %right)
+    #call program_write_value_window_depth(
+      %source, %function, %right, %stop, #add(%depth, 1)
+    )
     #call bootstrap.artifact-write-literal("))")
     #return
   }
@@ -7200,9 +7234,13 @@
       #call bootstrap.artifact-write-byte(40)
     }
   }
-  #call program_write_operand(%source, %function, %left)
+  #call program_write_value_window_depth(
+    %source, %function, %left, %operator, #add(%depth, 1)
+  )
   #call bootstrap.artifact-write-literal(", ")
-  #call program_write_operand(%source, %function, %right)
+  #call program_write_value_window_depth(
+    %source, %function, %right, %stop, #add(%depth, 1)
+  )
   #if %is_and {
     #call bootstrap.artifact-write-literal("), 0)")
   } else {
@@ -7213,6 +7251,84 @@
     }
   }
   #return
+}
+
+// Write a complete source-level value expression.  Infix operators are
+// lowered by repeatedly splitting on the lowest-precedence operator in the
+// flat operand/operator run, so `v * 10 + d` becomes `#add(#mul(%v, 10), %d)`
+// instead of stopping after the first operator it meets.
+#proc program_write_value_expression(
+  #addr %source, #addr %function, #addr %left
+) -> #unit {
+  #call program_write_value_window_depth(
+    %source, %function, %left, #call program_nil(), 0
+  )
+  #return
+}
+
+// Select the operator that splits the run `node .. stop` (exclusive).  The
+// rightmost operator of the lowest precedence binds last and therefore forms
+// the outermost node, which also gives left associativity for equal levels.
+#proc program_value_window_operator(
+  #addr %source, #addr %node, #addr %stop
+) -> #addr {
+  #let %operator: #addr = #call program_nil()
+  #let %level: #bits<64> = 0
+  #let %cursor: #addr = %node
+  #let %steps: #bits<64> = 0
+  #loop operators {
+    #if #sge(%steps, 1024) { #break operators }
+    #if #call raw_is_nil(%cursor) { #break operators }
+    #if #call program_nodes_same(%cursor, %stop) { #break operators }
+    #let %cursor_end: #addr = #call program_operand_end_source(
+      %source, %cursor
+    )
+    #let %next: #addr = #call raw_node_next(%cursor_end)
+    #if #call raw_is_nil(%next) { #break operators }
+    #if #call program_nodes_same(%next, %stop) { #break operators }
+    #if #call program_is_semicolon(%source, %next) { #break operators }
+    #if #call meta_atom_equal(%source, %next, ",", 1) { #break operators }
+    #if #eq(#call program_is_operator(%source, %next), 0) { #break operators }
+    #let %next_level: #bits<64> = #call program_operator_level(
+      %source, %next
+    )
+    #if #call raw_is_nil(%operator) {
+      %operator: #addr = %next
+      %level: #bits<64> = %next_level
+    } else {
+      #if #sle(%next_level, %level) {
+        %operator: #addr = %next
+        %level: #bits<64> = %next_level
+      }
+    }
+    #let %next_end: #addr = #call program_value_operator_end(%source, %next)
+    #let %next_right: #addr = #call raw_node_next(%next_end)
+    #if #call raw_is_nil(%next_right) { #break operators }
+    %cursor: #addr = %next_right
+    %steps: #bits<64> = #add(%steps, 1)
+    #continue operators
+  }
+  #return %operator
+}
+
+// Infix binding levels, loosest first.  `as` binds tighter than every
+// arithmetic operator so a cast applies to its immediate operand.
+#proc program_operator_level(#addr %source, #addr %operator) -> #bits<64> {
+  #if #call program_condition_is_or(%source, %operator) { #return 1 }
+  #if #call program_condition_is_and(%source, %operator) { #return 2 }
+  #if #call meta_atom_equal(%source, %operator, "==", 2) { #return 3 }
+  #if #call meta_atom_equal(%source, %operator, "!=", 2) { #return 3 }
+  #if #call meta_atom_equal(%source, %operator, "<", 1) { #return 4 }
+  #if #call meta_atom_equal(%source, %operator, "<=", 2) { #return 4 }
+  #if #call meta_atom_equal(%source, %operator, ">", 1) { #return 4 }
+  #if #call meta_atom_equal(%source, %operator, ">=", 2) { #return 4 }
+  #if #call meta_atom_equal(%source, %operator, "+", 1) { #return 5 }
+  #if #call meta_atom_equal(%source, %operator, "-", 1) { #return 5 }
+  #if #call meta_atom_equal(%source, %operator, "as", 2) { #return 7 }
+  #if #call meta_atom_equal(%source, %operator, "*", 1) { #return 6 }
+  #if #call meta_atom_equal(%source, %operator, "/", 1) { #return 6 }
+  #if #call program_is_remainder(%source, %operator) { #return 6 }
+  #return 5
 }
 
 #proc program_call_argument_type(
@@ -8329,10 +8445,92 @@
   #return
 }
 
+// Emit the loop-exit tests for a `while` condition.  A conjunction becomes one
+// exit test per conjunct (`!A || !B`), so no conjunct is silently dropped; a
+// disjunction exits when the whole condition evaluates to false.
 #proc program_write_loop_condition(
-  #addr %source, #addr %function, #addr %left,
-  #addr %operator, #addr %right, #bits<64> %label
+  #addr %source, #addr %function, #addr %node, #bits<64> %label
 ) -> #unit {
+  #let %logical: #addr = #call program_condition_logical_operator(
+    %source, %node
+  )
+  #if #call raw_is_nil(%logical) {
+    #call program_write_loop_condition_conjunct(
+      %source, %function, %node, #call program_nil(), %label
+    )
+    #return
+  }
+  #if #call program_condition_is_and(%source, %logical) {
+    #let %logical_end: #addr = #call program_condition_operator_end(
+      %source, %logical
+    )
+    #let %logical_right: #addr = #call raw_node_next(%logical_end)
+    #call program_write_loop_condition_conjunct(
+      %source, %function, %node, %logical, %label
+    )
+    #if #call raw_is_nil(%logical_right) { #return }
+    #call program_write_loop_condition(
+      %source, %function, %logical_right, %label
+    )
+    #return
+  }
+  #call bootstrap.artifact-write-literal("    #if #eq(")
+  #call program_write_condition_expression(%source, %function, %node)
+  #call bootstrap.artifact-write-literal(", 0) { #break loop")
+  #call meta_write_decimal(%label)
+  #call bootstrap.artifact-write-literal(" }\n")
+  #return
+}
+
+// Invert one conjunct of a loop condition, bounded by `stop`.
+#proc program_write_loop_condition_conjunct(
+  #addr %source, #addr %function, #addr %node, #addr %stop, #bits<64> %label
+) -> #unit {
+  #let %left_end: #addr = #call program_operand_end_source(%source, %node)
+  #let %operator: #addr = #call raw_node_next(%left_end)
+  #if #call raw_is_nil(%operator) {
+    #call program_write_loop_condition_exit(%source, %function, %node, %label)
+    #return
+  }
+  #if #call program_nodes_same(%operator, %stop) {
+    #call program_write_loop_condition_exit(%source, %function, %node, %label)
+    #return
+  }
+  #if #eq(#call program_is_operator(%source, %operator), 0) {
+    #call program_write_loop_condition_exit(%source, %function, %node, %label)
+    #return
+  }
+  #let %operator_end: #addr = #call program_condition_operator_end(
+    %source, %operator
+  )
+  #let %right: #addr = #call raw_node_next(%operator_end)
+  #if #call raw_is_nil(%right) {
+    #call program_write_loop_condition_exit(%source, %function, %node, %label)
+    #return
+  }
+  // A plain `left OP right` conjunct inverts its comparison.  When arithmetic
+  // or a nested logical operator widens either side, the conjunct is inverted
+  // as a whole through its emitted truth value instead.
+  #let %right_end: #addr = #call program_operand_end_source(%source, %right)
+  #let %after: #addr = #call raw_node_next(%right_end)
+  #let %simple: #bits<1> = 1
+  #if #eq(#call raw_is_nil(%after), 0) {
+    #if #eq(#call program_nodes_same(%after, %stop), 0) {
+      #if #call program_is_operator(%source, %after) {
+        %simple: #bits<1> = 0
+      }
+    }
+  }
+  #if #eq(%simple, 0) {
+    #call bootstrap.artifact-write-literal("    #if #eq(")
+    #call program_write_value_window_depth(
+      %source, %function, %node, %stop, 0
+    )
+    #call bootstrap.artifact-write-literal(", 0) { #break loop")
+    #call meta_write_decimal(%label)
+    #call bootstrap.artifact-write-literal(" }\n")
+    #return
+  }
   #call bootstrap.artifact-write-literal("    #if #")
   // Invert the source comparison to form the loop exit condition.
   #if #call meta_atom_equal(%source, %operator, "<", 1) {
@@ -8357,10 +8555,25 @@
     }
   }
   #call bootstrap.artifact-write-byte(40)
-  #call program_write_operand(%source, %function, %left)
+  #call program_write_condition_prefix(
+    %source, %function, %node, %operator
+  )
   #call bootstrap.artifact-write-literal(", ")
-  #call program_write_operand(%source, %function, %right)
+  #call program_write_condition_prefix(%source, %function, %right, %stop)
   #call bootstrap.artifact-write-literal(") { #break loop")
+  #call meta_write_decimal(%label)
+  #call bootstrap.artifact-write-literal(" }\n")
+  #return
+}
+
+// A conjunct without a comparison is used directly as a truth value; the loop
+// exits when it is false.
+#proc program_write_loop_condition_exit(
+  #addr %source, #addr %function, #addr %node, #bits<64> %label
+) -> #unit {
+  #call bootstrap.artifact-write-literal("    #if #eq(")
+  #call program_write_condition_operand(%source, %function, %node)
+  #call bootstrap.artifact-write-literal(", 0) { #break loop")
   #call meta_write_decimal(%label)
   #call bootstrap.artifact-write-literal(" }\n")
   #return
@@ -8370,9 +8583,6 @@
   #addr %source, #addr %function, #addr %while_node, #bits<64> %label
 ) -> #unit {
   #let %left: #addr = #call raw_node_next(%while_node)
-  #let %left_end: #addr = #call program_operand_end_source(%source, %left)
-  #let %operator: #addr = #call raw_node_next(%left_end)
-  #let %right: #addr = #call raw_node_next(%operator)
   #let %condition_end: #addr = #call program_condition_expression_end(
     %source, %left
   )
@@ -8380,9 +8590,7 @@
   #call bootstrap.artifact-write-literal("  #loop loop")
   #call meta_write_decimal(%label)
   #call bootstrap.artifact-write-literal(" {\n")
-  #call program_write_loop_condition(
-    %source, %function, %left, %operator, %right, %label
-  )
+  #call program_write_loop_condition(%source, %function, %left, %label)
   #let %tail_terminal: #bits<1> = 0
   #let %statement: #addr = #call raw_node_first(%body)
   #loop statements {
