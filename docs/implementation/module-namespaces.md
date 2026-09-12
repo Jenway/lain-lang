@@ -68,7 +68,7 @@ Lain 源码中的 `import("...")` 字符串不是文件系统路径，而是一�
 | `meta.lain` | `std/meta.lain`、`src/lainc/meta.lain` | 可区分：`std::meta` 走精确匹配 |
 | `memory.lain` | `std/core/memory.lain`、`std/platform/memory.lain` | 可区分：两侧都是 `std::` |
 
-### 4.1 待确认的高危项：`api_contract`
+### 4.1 已证实的同名项：`api_contract`
 
 闭包顺序为 `stdlib_sources`（排序后的 `std/**/*.lain`）+ `src/lainir/api/SOURCES.txt`
 + `src/lainvm/SOURCES.txt` + `src/lainc/COMPILER_SOURCES.txt`（`scripts/lainc_sources.py:77-99`）。
@@ -78,18 +78,30 @@ Lain 源码中的 `import("...")` 字符串不是文件系统路径，而是一�
 `src/lainir/api_contract.lain`。该文件导出 `CapabilitiesShape` / `Contract`；而
 `ExecutionShape` 只存在于 `src/lainvm/api_contract.lain`。
 
-**代码推理结论**：`src/lainc/compiler.lain`、`compiler_api.lain`、`compiler_core.lain`、
-`compiler_driver.lain`、`meta.lain` 中的 `lainvm_api` 绑定可能指向 LAINIR 契约而非
-LAINVM 契约。
+**已证实的后果**：`src/lainc/compiler.lain`、`compiler_api.lain`、`compiler_core.lain`、
+`compiler_driver.lain`、`meta.lain` 中的 `lainvm_api` 绑定**指向 LAINIR 契约而非 LAINVM 契约**。
 
-状态：**机制已由源码确认，具体误绑定尚未用运行时探针证实。** 需要的最小复现：构造一个
-同时包含两份 `api_contract.lain` 的 workspace，导入 `packages::lain::lainvm::api_contract`
-并引用仅在 LAINVM 版本中存在的成员。
+**实测结论（2026-09-12，运行时探针）**：
 
-现有门禁无法发现此项：`scripts/check_lainvm_boundary.py:84-89` 断言的是**源码文本**
+1. **`packages::lain::lainir::` 与 `packages::lain::lainvm::` 前缀不参与解析——只有最后一段
+   basename 起作用。** 决定性实验：只提供 `src/lainir/api_contract.lain` 而
+   `import("packages::lain::lainvm::api_contract")` → **成功**；反向（只提供
+   `src/lainvm/api_contract.lain` 而 import `packages::lain::lainir::api_contract`）→ 也成功。
+   两者都只用 basename 匹配，目录层级被忽略。
+2. 因此本闭包内 `import("packages::lain::lainvm::api_contract")` **确实解析到
+   `src/lainir/api_contract.lain`**（首匹配，索引 26 < 32）。
+3. **但该误绑定目前不可观测**：模块成员引用（无论值位置还是类型位置）**不做校验**。
+   实测 `x: vm_api.ExecutionShape`（仅 LAINVM 版有）与 `x: vm_api.NoSuchMemberAtAll`（两版都
+   没有）**产物完全相同**——形参都变成 `#addr`。所以指向哪一份契约在行为上无差别。
+
+**顺带查实的一处更广的限制**：既然成员引用不校验，**成员名拼错会被静默接受**。这既掩盖了
+上面的歧义，也是一个独立的已知缺口（要修需在 elaborator 里做成员解析，属编码 5 之后的范围）。
+
+现有门禁无法发现歧义：`scripts/check_lainvm_boundary.py` 断言的是**源码文本**
 （`"packages::lain::lainvm::api_contract" in source`），与真实解析结果无关。
 
-按 `docs/roadmaps/lain-roadmap.md` §15，此问题属于「必须先讨论」范围，不应静默修改。
+按 `docs/roadmaps/lain-roadmap.md` §15，是否给中间层级加真实解析属「必须先讨论」范围；
+**在当前"成员引用不校验"的前提下，不动它不会造成可观测错误。**
 
 ## 5. 写新源码时的约束
 
