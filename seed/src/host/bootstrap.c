@@ -85,7 +85,15 @@ typedef struct {
   size_t source_count;
   const char *artifact_path;
   FILE *artifact;
-  const char *error;
+  /* While `capturing` is set, artifact writes append to this buffer instead of
+   * the output file, so a compiler stage can obtain generated LAINIR in memory
+   * and hand it to the verifier without a filesystem round trip.  The sink
+   * mode is chosen when the artifact is opened, which keeps every write path
+   * uniform. */
+  unsigned char *capture;
+  size_t capture_length;
+  size_t capture_capacity;
+  int capturing;
   BootstrapAllocation *allocated_pages;
   size_t allocated_page_count;
   size_t allocated_page_capacity;
@@ -2013,6 +2021,48 @@ static LainirRunStatus write_diagnostic(
   return LAINIR_RUN_OK;
 }
 
+/* An artifact is open while either the output file or a capture is active.
+ * Write handlers use this instead of testing `artifact` directly, so the same
+ * handler works for both sink modes. */
+static int artifact_is_open(const BootstrapContext *context) {
+  return context->artifact != NULL || context->capturing;
+}
+
+/* Append bytes to the active artifact sink.  Both modes grow on demand, so a
+ * large generated module is never silently truncated. */
+static int artifact_sink_write(
+    BootstrapContext *context, const void *bytes, size_t length) {
+  if (!length) {
+    return artifact_is_open(context);
+  }
+  if (context->capturing) {
+    if (context->capture_length + length > context->capture_capacity) {
+      size_t capacity =
+          context->capture_capacity ? context->capture_capacity : 4096;
+      unsigned char *grown;
+      while (capacity < context->capture_length + length) {
+        capacity *= 2;
+      }
+      grown = (unsigned char *)realloc(context->capture, capacity);
+      if (!grown) return 0;
+      context->capture = grown;
+      context->capture_capacity = capacity;
+    }
+    memcpy(context->capture + context->capture_length, bytes, length);
+    context->capture_length += length;
+    return 1;
+  }
+  return context->artifact != NULL &&
+         fwrite(bytes, 1, length, context->artifact) == length;
+}
+
+/* Append a NUL-terminated string to the active artifact sink. */
+static int artifact_sink_write_text(
+    BootstrapContext *context, const char *text) {
+  return artifact_sink_write(
+      context, text ? text : "", text ? strlen(text) : 0);
+}
+
 static LainirRunStatus artifact_begin(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
@@ -2035,12 +2085,14 @@ static LainirRunStatus artifact_write_byte(
     const LainirValue *args, uint32_t count, LainirValue *result,
     const char **error, void *user_data) {
   BootstrapContext *context = user_data;
+  unsigned char byte;
   if (count != 1 || args[0].kind != LAINIR_VALUE_BITS ||
-      !context->artifact) {
+      !artifact_is_open(context)) {
     *error = "bootstrap.artifact-write-byte has invalid arguments or state";
     return LAINIR_RUN_BAD_CALL;
   }
-  if (fputc((int)(args[0].as.bits & 255), context->artifact) == EOF) {
+  byte = (unsigned char)(args[0].as.bits & 255);
+  if (!artifact_sink_write(context, &byte, 1)) {
     *error = "bootstrap.artifact-write-byte failed";
     return LAINIR_RUN_BAD_CALL;
   }
@@ -2054,12 +2106,12 @@ static LainirRunStatus artifact_write_span(
   BootstrapContext *context = user_data;
   size_t length;
   if (count != 2 || args[0].kind != LAINIR_VALUE_ADDR ||
-      args[1].kind != LAINIR_VALUE_BITS || !context->artifact) {
+      args[1].kind != LAINIR_VALUE_BITS || !artifact_is_open(context)) {
     *error = "bootstrap.artifact-write-span has invalid arguments or state";
     return LAINIR_RUN_BAD_CALL;
   }
   length = (size_t)args[1].as.bits;
-  if (length && fwrite(args[0].as.addr, 1, length, context->artifact) != length) {
+  if (!artifact_sink_write(context, args[0].as.addr, length)) {
     *error = "bootstrap.artifact-write-span failed";
     return LAINIR_RUN_BAD_CALL;
   }
@@ -2075,14 +2127,14 @@ static LainirRunStatus artifact_write_literal(
   if (count != 1 ||
       (args[0].kind != LAINIR_VALUE_STRING &&
        args[0].kind != LAINIR_VALUE_ADDR) ||
-      !context->artifact) {
+      !artifact_is_open(context)) {
     *error = "bootstrap.artifact-write-literal has invalid arguments or state";
     return LAINIR_RUN_BAD_CALL;
   }
   text = args[0].kind == LAINIR_VALUE_STRING
              ? args[0].as.string
              : (const char *)args[0].as.addr;
-  if (fputs(text ? text : "", context->artifact) == EOF) {
+  if (!artifact_sink_write_text(context, text)) {
     *error = "bootstrap.artifact-write-literal failed";
     return LAINIR_RUN_BAD_CALL;
   }
@@ -2098,7 +2150,8 @@ static LainirRunStatus artifact_write_identifier(
     const char **error, void *user_data) {
   BootstrapContext *context = user_data;
   const unsigned char *name;
-  if (count != 1 || args[0].kind != LAINIR_VALUE_ADDR || !context->artifact) {
+  if (count != 1 || args[0].kind != LAINIR_VALUE_ADDR ||
+      !artifact_is_open(context)) {
     *error = "bootstrap.artifact-write-identifier has invalid arguments or state";
     return LAINIR_RUN_BAD_CALL;
   }
@@ -2112,8 +2165,15 @@ static LainirRunStatus artifact_write_identifier(
     if (*name == '.') replacement = "_dot_";
     else if (*name == '-') replacement = "_dash_";
     else if (*name == '!') replacement = "_bang_";
-    if (replacement) fputs(replacement, context->artifact);
-    else fputc(*name, context->artifact);
+    if (replacement) {
+      if (!artifact_sink_write_text(context, replacement)) {
+        *error = "bootstrap.artifact-write-identifier failed";
+        return LAINIR_RUN_BAD_CALL;
+      }
+    } else if (!artifact_sink_write(context, name, 1)) {
+      *error = "bootstrap.artifact-write-identifier failed";
+      return LAINIR_RUN_BAD_CALL;
+    }
   }
   *result = lainir_value_unit();
   return LAINIR_RUN_OK;
@@ -2124,9 +2184,17 @@ static LainirRunStatus artifact_finish(
     const char **error, void *user_data) {
   BootstrapContext *context = user_data;
   (void)args;
-  if (count != 0 || !context->artifact) {
+  if (count != 0 || !artifact_is_open(context)) {
     *error = "bootstrap.artifact-finish has invalid state";
     return LAINIR_RUN_BAD_CALL;
+  }
+  if (context->capturing) {
+    /* A capture stays readable after it ends; artifact-capture-data and
+     * artifact-capture-length retrieve it, and the next capture-begin or the
+     * context teardown releases it. */
+    context->capturing = 0;
+    *result = lainir_value_unit();
+    return LAINIR_RUN_OK;
   }
   if (fclose(context->artifact) != 0) {
     context->artifact = NULL;
@@ -2135,6 +2203,51 @@ static LainirRunStatus artifact_finish(
   }
   context->artifact = NULL;
   *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
+/* Open the artifact sink in capture mode: writes accumulate in memory and can
+ * be read back through artifact-capture-data / artifact-capture-length.  A
+ * compiler stage uses this to hand generated LAINIR to the verifier without a
+ * filesystem round trip. */
+static LainirRunStatus artifact_capture_begin(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  (void)args;
+  if (count != 0 || artifact_is_open(context)) {
+    *error = "bootstrap.artifact-capture-begin has invalid state";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  context->capture_length = 0;
+  context->capturing = 1;
+  *result = lainir_value_unit();
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus artifact_capture_data(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  (void)args;
+  if (count != 0 || context->capturing || !context->capture) {
+    *error = "bootstrap.artifact-capture-data has invalid state";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_addr(context->capture);
+  return LAINIR_RUN_OK;
+}
+
+static LainirRunStatus artifact_capture_length(
+    const LainirValue *args, uint32_t count, LainirValue *result,
+    const char **error, void *user_data) {
+  BootstrapContext *context = user_data;
+  (void)args;
+  if (count != 0 || context->capturing) {
+    *error = "bootstrap.artifact-capture-length has invalid state";
+    return LAINIR_RUN_BAD_CALL;
+  }
+  *result = lainir_value_bits(context->capture_length, 64);
   return LAINIR_RUN_OK;
 }
 
@@ -2369,6 +2482,12 @@ int bootstrap_run_cli(int argc, char **argv) {
                       artifact_write_identifier, &context) ||
       !add_capability(caps, "bootstrap.artifact-finish", artifact_finish,
                       &context) ||
+      !add_capability(caps, "bootstrap.artifact-capture-begin",
+                      artifact_capture_begin, &context) ||
+      !add_capability(caps, "bootstrap.artifact-capture-data",
+                      artifact_capture_data, &context) ||
+      !add_capability(caps, "bootstrap.artifact-capture-length",
+                      artifact_capture_length, &context) ||
       /* Backend ABI v1 uses logical names.  Keep the provider-side bootstrap
        * names above for compiler compatibility, and bind the same operations
        * under the capability names consumed by backend_c.lain. */
@@ -2445,6 +2564,7 @@ int bootstrap_run_cli(int argc, char **argv) {
   free(context.sources);
   lainir_module_handle_destroy(&context.prepared_module);
   free(context.eval_values);
+  free(context.capture);
   lainir_caps_free(caps);
   lainir_free_subroutines(module);
   free(compiler_text);

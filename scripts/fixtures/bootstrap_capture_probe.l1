@@ -1,0 +1,50 @@
+// Prove the in-memory artifact capture mode: open the sink in capture mode,
+// write bytes, close it, then read the captured length and content back.
+//
+// Returns 0 when the captured bytes are exactly what was written.
+
+#extern #proc bootstrap.artifact-capture-begin() -> #unit;
+#extern #proc bootstrap.artifact-capture-data() -> #addr;
+#extern #proc bootstrap.artifact-capture-length() -> #bits<64>;
+#extern #proc bootstrap.artifact-write-byte(#bits<8> %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(#addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+
+// 9 bytes: "captured" plus the NUL that the literal sink terminates on.
+#data capture_probe_text(9, 1, "captured");
+
+#proc bootstrap_capture_probe() -> #bits<32> {
+  #call bootstrap.artifact-capture-begin()
+  #call bootstrap.artifact-write-literal(#data_addr(capture_probe_text))
+  // Long enough that the sink must grow past its initial capacity.
+  #let %index: #bits<64> = 0
+  #loop fill {
+    #if #sge(%index, 4096) { #break fill }
+    #call bootstrap.artifact-write-byte(120)
+    %index: #bits<64> = #add(%index, 1)
+    #continue fill
+  }
+  #call bootstrap.artifact-finish()
+
+  #let %expected: #bits<64> = #add(8, 4096)
+  #let %length: #bits<64> = #call bootstrap.artifact-capture-length()
+  #if #ne(%length, %expected) { #return 1 }
+  #let %data: #addr = #call bootstrap.artifact-capture-data()
+  #if #eq(#ptr2int(%data), 0) { #return 2 }
+  #let %first: #bits<64> = #zext[#bits<64>](
+    #load[#bits<8>](#lea(base=%data, idx=0, scale=1, offset=0))
+  )
+  #if #ne(%first, 99) { #return 3 }
+  #let %ninth: #bits<64> = #zext[#bits<64>](
+    #load[#bits<8>](#lea(base=%data, idx=8, scale=1, offset=0))
+  )
+  #if #ne(%ninth, 120) { #return 4 }
+  // The last written byte must also be there: no silent truncation.
+  #let %last: #bits<64> = #zext[#bits<64>](
+    #load[#bits<8>](
+      #lea(base=%data, idx=#sub(%length, 1), scale=1, offset=0)
+    )
+  )
+  #if #ne(%last, 120) { #return 5 }
+  #return 0
+}
