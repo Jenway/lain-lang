@@ -35,12 +35,19 @@ seed/lainir-seed + bootstrap/compiler/*.l1 + bootstrap/std/*.l1
 | `seed/` | C 最小运行时：`core <- text <- interpreter <- host <- cli`；LAINIR parser/verifier/解释器 + 宿主能力。另有 LAINIR 写的 LAINIR→C 编译器 `seed/lainir/compiler.l1` |
 | `bootstrap/` | 手写 LAINIR 文本（`.l1`）启动编译器与临时 stdlib；启动工具，非长期架构 |
 | `src/lainc/` | 正式 Lain 编译器：`tokenizer` → `syntax` → `meta` → `elaborator` → `lower`；`backend_c.lain` 为 Lain 写的 C 后端 |
-| `src/lainir/` | LAINIR 模型/构造/验证/打印 + 默认 provider；不含 VM |
-| `src/lainvm/` | 正式 LAINVM：`api_contract.lain` + `interpreter.lain`（TCB/VSpace/Trap/`execute_child`） |
+| `src/lainir/` | **只剩契约** `api_contract.lain`（provider 必须满足的接口）。第二版实现已归档：`docs/history/formal-implementations/` |
+| `src/lainvm/` | **只剩契约** `api_contract.lain`（`ExecutionShape` / `Eval`）。Lain 写的 interpreter 已归档，见上 |
 | `std/` | 正式 Lain 标准库与 Meta ABI（`std/meta.lain`、`std/core/*`、`std/platform/*`） |
 | `scripts/` | 全部构建/校验/固定点驱动（Python，扁平目录，无包） |
 | `docs/` | 设计规范、实现说明、当前路线图、历史归档 |
 | `build/` | 所有 bundle/snapshot/报告/可执行产物；**永不提交** |
+
+**形式实现已暂停**（2026-09-12）：`src/lainir` 的 provider 与 `src/lainvm` 的 interpreter 是用
+Lain 写的第二版实现，能编译、通过 verifier，但没有真正的执行路径（详见
+`docs/history/formal-implementations/README.md`）。它们已移出构建闭包，等 Lain 成熟后用 Lain
+重写。**契约保留**——`src/lainc` 只用契约里的类型，因此归档实现不影响它编译。
+C seed 与 bootstrap 各有独立实现，**不受影响**（`seed/` 的 `lainir_*` 函数名与 `bootstrap/`
+的 `lainvm_*` 函数名只是命名巧合）。
 
 ## Development Commands
 

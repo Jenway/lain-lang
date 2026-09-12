@@ -145,29 +145,41 @@ capture 活动期间，`artifact-write-*` 写入内存缓冲而非文件；`arti
 唯一两者都出现的是 `import`——它确实特殊，因为需要路径解析
 （`src/lainc/elaborator.lain:575`）。
 
-#### 4.2.2 正确形态：名字无关，由库决定含义
+#### 4.2.2 修正：它们不是绑定，是编译器内建
 
-`src/lainc/elaborator.lain:661`：
+本文早先声称「`std::module` 是一个绑定，它的值是 callable，body 是库代码」。**这是错的**，
+实测与读码都否定了它：
 
-```lain
-} else if body != Syntax.invalid_node() {
-    // 带 {...} 体的声明；名字是什么不参与判断
-    elaborate_function_body(...)
-```
+- `program_bind_standard_root`（`bootstrap/compiler/meta_bindings.l1:87`）在标准根环境中
+  **只绑定 `type` 一个名字**；
+- `program_node_has_meta_constructor` 从不查询绑定，而是**直接比较节点文本**；
+- 全仓库搜索：`module`、`struct`、`meta_type`、`handler_type`、`type_with_namespace`、
+  `effect_operation` 均**没有任何 `let` 定义**——不可解析为值；
+- 它们只被库代码**使用**（如 `std/bounds.lain:93` 写 `std::handler(Effect) {...}`），
+  没有库侧定义。
 
-形式编译器只区分两件事：**是不是 `import`**（需要路径），以及**有没有 `{...}` 体**。
-`std::module { ... }` 与 `std::func() { ... }` 走同一条路径，含义由库的绑定决定。
+所以构造器名是**编译器内建**，不是库值。
+
+**这不改变结论，但改变了目标形态的描述。** 正确的划分是：
+
+| 归属 | 知道什么 | 理由 |
+| --- | --- | --- |
+| 编译器 | **有哪些种类**（模块、结构体、effect……），以及每种的构造原语 | 原语由编译器/VM 提供，它必须知道自己的原语种类 |
+| 库 | **每种叫什么名字**（哪个拼写对应哪个种类） | 这是语言特性定义，属于库 |
+
+形式库已经是这个形状：`std/meta.lain` 把全部拼写集中在 `meta_word_code`，并导出
+`meta_is_module`、`meta_is_struct`、`meta_is_import`、`meta_is_let` 等**谓词**供编译器调用。
+编译器按**概念**提问（「这是不是模块形式」），而不是按拼写比较。
+
+**这就是编码 1c 的目标**：把 bootstrap 编译器里的拼写表换成对库谓词的调用。
+编译器保留种类常量（因为它要选择构造原语），但不保留任何拼写。
 
 这与 [`../00-intro.md`](../00-intro.md) §3 一致：
 
-> `foo(x)` 在 RawAst 中只表示为一个名字后面跟着圆括号组。它可能是运行时调用、类型工厂
-> 调用、effect 应用、宏调用或 DSL 形式。**Meta 根据绑定和上下文决定它的含义。**
+> `foo(x)` 在 RawAst 中只表示为一个名字后面跟着圆括号组。**Meta 根据绑定和上下文决定它的含义。**
 
 也与 [`../03-meta-system.md`](../03-meta-system.md) §2 一致：Parser 不判断
 `std::func`、`std::struct`、`std::module`、`import`、类型应用或 effect 的含义。
-
-**编译器该提供的是原语，不是名字表**：「构造一个 kind=N 的 Meta 值，带这些字段」，
-就像它给类型构造提供原语一样。至于什么源形式对应哪种构造，属于库。
 
 #### 4.2.3 真实原因，以及修正后的结论
 

@@ -48,35 +48,38 @@ REQUIRED_RULES = (
     "zero_extend",
     "sign_extend",
 )
-REQUIRED_PROVIDER_BUILDER = (
-    "new_unit", "empty_artifact", "discard", "bits_type", "float_type", "addr_type",
-    "unit_type", "never_type", "add_data", "declare_extern",
-    "begin_procedure", "end_procedure", "begin_region", "add_parameter",
-    "integer_literal", "procedure_address", "data_address",
-    "add", "subtract", "multiply", "signed_divide", "unsigned_divide",
-    "equal", "not_equal", "signed_less", "unsigned_less",
-    "signed_less_equal", "unsigned_less_equal", "signed_greater",
-    "unsigned_greater", "signed_greater_equal", "unsigned_greater_equal",
-    "float_add", "float_subtract", "float_multiply", "float_divide",
-    "float_equal", "float_less", "zero_extend", "sign_extend", "truncate",
-    "bitcast", "call", "append_call_argument", "call_indirect", "alloca",
-    "lea", "load", "store", "append_if", "append_loop", "append_break",
-    "append_continue", "append_return", "finish",
-)
-REQUIRED_PROVIDER_ARTIFACT = (
-    "verify", "diagnostic_code", "diagnostic_location",
-    "write_canonical_text", "hash", "equal",
-)
 REQUIRED_BACKEND = (
     "source_count", "source_data", "source_length", "allocate", "copy_bytes",
     "artifact_begin", "artifact_write_byte", "artifact_finish",
 )
-BUILDER_SURFACE = frozenset(
-    REQUIRED_PROVIDER_BUILDER
+# The members lainc is allowed to reach through the capability modules.  These
+# are the provider's surface, frozen here as an API constraint: a compiler
+# source that reaches for anything else is depending on a convenience member
+# that no provider is required to offer.  The second Lain-written provider is
+# archived under docs/history/formal-implementations/, but the constraint on
+# lainc does not change with it.
+ALLOWED_BUILDER_MEMBERS = frozenset(
+    (
+        "new_unit", "empty_artifact", "discard", "bits_type", "float_type",
+        "addr_type", "unit_type", "never_type", "add_data", "declare_extern",
+        "begin_procedure", "end_procedure", "begin_region", "add_parameter",
+        "integer_literal", "procedure_address", "data_address",
+        "add", "subtract", "multiply", "signed_divide", "unsigned_divide",
+        "equal", "not_equal", "signed_less", "unsigned_less",
+        "signed_less_equal", "unsigned_less_equal", "signed_greater",
+        "unsigned_greater", "signed_greater_equal", "unsigned_greater_equal",
+        "float_add", "float_subtract", "float_multiply", "float_divide",
+        "float_equal", "float_less", "zero_extend", "sign_extend", "truncate",
+        "bitcast", "call", "append_call_argument", "call_indirect", "alloca",
+        "lea", "load", "store", "append_if", "append_loop", "append_break",
+        "append_continue", "append_return", "finish",
+    )
     + ("Unit", "Artifact", "Type", "Value", "Procedure", "Region")
 )
-ARTIFACT_SURFACE = frozenset(
-    REQUIRED_PROVIDER_ARTIFACT + ("Artifact", "Procedure", "Diagnostic")
+ALLOWED_ARTIFACT_MEMBERS = frozenset(
+    ("verify", "diagnostic_code", "diagnostic_location",
+     "write_canonical_text", "hash", "equal")
+    + ("Artifact", "Procedure", "Diagnostic")
 )
 
 
@@ -109,14 +112,6 @@ def main() -> int:
     if not re.search(r"schema_version\s*=\s*\n?\s*std::func\(\)\s*->\s*i32\s*\{\s*return\s+3;", compiler_api_text):
         failures.append("compiler API schema version is not 3")
 
-    provider_path = ROOT / "src" / "lainir" / "api" / "default_provider.lain"
-    provider_text = provider_path.read_text(encoding="utf-8") if provider_path.is_file() else ""
-    for name in (
-        REQUIRED_PROVIDER_BUILDER
-        + REQUIRED_PROVIDER_ARTIFACT
-    ):
-        if not re.search(rf"\blet\s+{re.escape(name)}\b", provider_text):
-            failures.append(f"default provider is missing {name}")
 
     sources = compiler_source_names(ROOT)
     if "src/lainc/backend_c.lain" in sources:
@@ -160,8 +155,10 @@ def main() -> int:
             # provider-specific convenience member from silently becoming an
             # API dependency.
             for pattern, surface, label in (
-                (r"\b(?:Ir\.)?Builder\.([A-Za-z_][A-Za-z0-9_]*)", BUILDER_SURFACE, "Builder"),
-                (r"\bArtifactApi\.([A-Za-z_][A-Za-z0-9_]*)", ARTIFACT_SURFACE, "Artifact"),
+                (r"\b(?:Ir\.)?Builder\.([A-Za-z_][A-Za-z0-9_]*)",
+                 ALLOWED_BUILDER_MEMBERS, "Builder"),
+                (r"\bArtifactApi\.([A-Za-z_][A-Za-z0-9_]*)",
+                 ALLOWED_ARTIFACT_MEMBERS, "Artifact"),
             ):
                 for member in re.findall(pattern, text):
                     if member not in surface:

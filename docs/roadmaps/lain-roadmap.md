@@ -32,16 +32,31 @@
 | --- | --- | --- |
 | `seed/` | C 实现的最小 LAINIR parser、verifier、解释器和宿主能力 | 仅在物理 VM/API 缺能力时修改 |
 | `bootstrap/` | 手写 LAINIR 的启动 Lain 编译器和最小标准 Meta ABI | 新语言语义必须先在这里可执行 |
-| `src/` | 用 Lain 编写的正式 LAINIR、LAINVM 和 lainc | bootstrap 能编译新语义后同步实现 |
+| `src/` | 用 Lain 编写的 lainc（正式编译器），以及 LAINIR/LAINVM 的**契约** | bootstrap 能编译新语义后同步实现 |
 | `std/` | 用 Lain 编写的标准库与标准 Meta 定义 | bootstrap 支持新形式后迁移 |
 | `scripts/` | 构建、测试和固定点驱动 | 每个阶段增加真实验收入口 |
 | `build/` | 所有 bundle、snapshot、报告和 executable | 永远不作为源码提交 |
 
+`src/lainir` 与 `src/lainvm` 的**实现**目前已暂停并归档到
+`docs/history/formal-implementations/`（见 §2 下方说明），因此「用 Lain 编写的正式 LAINIR、
+LAINVM」这一项当前只由契约代表。
+
 正式实现的边界为：
 
-- `src/lainir/` 构造、验证和打印物理 IR；
-- `src/lainvm/` 执行物理 IR，拥有 TCB、VSpace、预算和 Trap；
+- `src/lainir/` **只剩契约** `api_contract.lain`（provider 必须满足的接口）；
+- `src/lainvm/` **只剩契约** `api_contract.lain`（`ExecutionShape` / `Eval`）；
 - `src/lainc/` 解析、执行 Meta、检查源语言并生成 LAINIR。
+
+**形式实现已暂停**（2026-09-12）：`src/lainir` 的第二版 provider（`l1_ir`、`l1_unit_builder`、
+`l1_verifier`、`l1_printer`、`default_provider`）与 `src/lainvm/interpreter.lain` 已移到
+`docs/history/formal-implementations/`，等 Lain 成熟后用 Lain 重写。
+
+原因（实测）：它们能编译、通过 verifier，但没有真正的执行路径——LAINIR provider 只被调用过
+一个返回常量的成员函数，LAINVM interpreter **零执行**。契约保留，是因为 `src/lainc` 只用契约
+里的类型，把它当参数接收；因此归档不影响 `build_srclainc.py`（仍退出 0）。
+
+**不影响 C seed 与 bootstrap**：它们各有独立实现（`seed/src/interpreter/`、
+`bootstrap/compiler/`），`seed/` 的 `lainir_*` 与 `bootstrap/` 的 `lainvm_*` 只是命名巧合。
 
 语言语义不能通过修改 `seed/` 偷渡进编译器。只有 LAINIR 指令语义、VM 控制语义或宿主
 能力确实不足时，才允许修改 C seed。
@@ -55,8 +70,8 @@
   `#unit`，失败产生 Trap。
 - `#eval` 在最终 backend 产物前执行并消失。
 - `src/lainvm/api_contract.lain` 定义 Artifact、Procedure、Value、ValueVector 和 `Eval`
-  operation；lainc 不导入 `src/lainvm/interpreter.lain` 的私有状态。其中 `Eval` 的归属
-  已裁定为 LAINIR（§4.4），迁移尚未执行。
+  operation；lainc 不导入任何 VM 实现。其中 `Eval` 的归属已裁定为 LAINIR（§4.4），迁移尚未
+  执行。
 - bootstrap 已能通过 LAINVM 路径执行整数表达式、标量 Meta 调用、effect 构造、effect
   operation 构造和 module factory。
 - `scripts/build_srclainc.py` 能生成可验证的 `build/lainir/srclainc.l1`；
@@ -444,15 +459,37 @@ lower」）今天不成立——通用 lowering 有意跳过 Meta 函数，两�
   这个标准库入口之后可由形式 std 实现替换」；
 - 所以缺的是把**编译器里剩下的那些名字判断**也搬到这个接缝后面。
 
+#### 知识与职责的划分
+
+**这些构造器名不是库里的绑定。** 已核实：
+
+- `program_bind_standard_root`（`bootstrap/compiler/meta_bindings.l1:87`）在标准根环境中
+  **只绑定 `type` 一个名字**；
+- `program_node_has_meta_constructor` 从**不查询绑定**，而是直接比较节点文本；
+- 全仓库搜索：`module`、`struct`、`meta_type`、`handler_type`、`type_with_namespace`、
+  `effect_operation` **没有任何 `let` 定义**，不可解析为值；
+- 它们只被库代码**使用**（`std/bounds.lain:93` 写 `std::handler(Effect) {...}`），
+  没有库侧定义。
+
+因此正确的划分是：
+
+| 归属 | 知道什么 | 理由 |
+| --- | --- | --- |
+| 编译器 | **有哪些种类**（模块、结构体、effect……）及每种的构造原语 | 原语由编译器/VM 提供，它必须知道自己的原语种类 |
+| 库 | **每种叫什么名字**（哪个拼写对应哪个种类） | 语言特性定义，属于库 |
+
+**编译器保留种类，库保留拼写。** 形式库已经是这个形状：把拼写集中在 `meta_word_code`
+（`std/meta.lain:2360`），并导出 `meta_is_module`、`meta_is_struct`、`meta_is_import`
+等**谓词**供按概念提问。
+
 #### 工作项
 
-1. 把 `program_node_has_meta_constructor`（`lower_program.l1:453`，7 个名字）与
-   `program_function_is_meta`（`:501`，另加 `Module`、`ModuleShape`）的判断逻辑移到
-   `bootstrap/std/`，经 ABI 暴露给编译器。
-2. 删除编译器中的这份名单，改为调用库入口。**`program_is_ignored_declaration`
-   （`:2805`，`struct`/`module`/`import`）同样处理。**
-3. 库中的实现按形式库的形状写（**集中的词→编号表**，其余比较编号），使其与
-   `std/meta.lain` 一一对应，将来可直接替换。
+1. 在 `bootstrap/std/` 新增谓词，名字识别集中在一处（照抄形式库编号，保持 1:1）：
+   `lain_std_word_code`、`lain_std_is_module_declaration`、`lain_std_is_record_declaration`、
+   `lain_std_module_group`、`lain_std_is_meta_constructor_path`、`lain_std_is_meta_return_type`、
+   `lain_std_is_form_keyword`、`lain_std_is_effect_member`、`lain_std_is_std_module_value`。
+2. 编译器用 `#extern #proc` 声明它们，把 24 处字面量比较换成按概念提问。
+3. 库只能依赖 AstApi 底座（`raw_node_*`、`meta_atom_equal`），不得调用编译器函数。
 
 **注意**：`program_collect_meta_call_candidate`（4 条 Meta 调用分派路径）不在此阶段，
 它属于 1b。
@@ -475,9 +512,17 @@ python scripts/check_lainc_lainir_api_baseline.py    # 15 道 gate
 
 加一条**新增**的关键验收，证明识别**真的**走了库而不是被绕过：
 
-按 `scripts/check_stdlib_swap.py` 已有的模式（替换库中的某个函数，观察行为随之改变）
-新增一个探针——替换库的形式识别入口，`module` 判定应当随之改变。若行为不变，说明编译器
-仍在自己做判断，本阶段未完成。
+`scripts/check_meta_form_swap.py`，按 `scripts/check_stdlib_swap.py` 已有的模式实现
+（取 `build/bootstrap/stdlib.l1` 文本、替换某函数返回值、用 `scripts/bundle_lainir.py`
+重新拼、观察行为改变）：
+
+1. 把库谓词 `lain_std_is_module_declaration` 的返回值从 1 换成 0；
+2. 用含 `std::module` 声明的 fixture 编译；
+3. **要求结果与未交换时不同**（该声明不再被识别为模块）；
+4. 若结果相同，说明编译器仍在自己判断，退出码非 0。
+
+该脚本必须登记进 `scripts/README.md` 的索引与 `scripts/check_lainc_lainir_api_baseline.py`
+的 gate 列表。
 
 外加文本验收（只能证明搬家，不能替代上面的执行命令）。当前清单是 **24 处、7 个文件**，
 形状统一为 `"<名字>", <长度>`（是 `meta_atom_equal` 一类的比较参数，长度与名字同行）：

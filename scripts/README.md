@@ -105,10 +105,10 @@ python scripts/<name>.py [args...]
 | `check_lain_backend_abi.py` | 检查 Lain 编写的 backend 是否符合 capability ABI v1。 |
 | `check_lainc_bootstrap_release.py` | 验证 lainc bootstrap release 的打包与安装。 |
 | `check_lainir_boundaries.py` | 检查 core artifact 只暴露 ABI 入口、不含语言级语义 pass 实现。 |
-| `check_lainir_compiler.py` | 走 seed → compiler → C 路径，输入全部放在临时目录。 |
-| `check_lainvm_boundary.py` | 检查 LAINIR 与 LAINVM 之间的源码与公共 API 边界。 |
+| `check_lainvm_boundary.py` | 检查 LAINIR/LAINVM 契约边界：契约存在、lainc 只依赖契约、Meta 通过 VM 请求编译期执行、归档实现不得回到 `src/`。 |
 | `check_meta_ast_conformance.py` | 对比第一代 RawAst 输出与 formal `std::meta` 输出。 |
 | `check_meta_module_validation.py` | 对比 bootstrap 与 formal `std::meta` 的模块形状校验。 |
+| `check_meta_form_swap.py` | 证明形式识别真的走了库：替换库谓词 `lain_std_is_module_declaration` 的返回值，编译行为必须随之改变；相同即失败。 |
 | `check_native_formal_stdlib.py` | 通过 native compiler 运行 formal stdlib lowering slice。 |
 | `check_native_lainc_determinism.py` | 证明 native lainc 对同一输入两次输出一致。 |
 | `check_native_lainc_matrix.py` | 用代表性源码矩阵运行 native Lain compiler。 |
@@ -116,7 +116,6 @@ python scripts/<name>.py [args...]
 | `check_stdlib_swap.py` | 证明替换 bootstrap stdlib 会改变行为而无需重建 core。 |
 
 ### `run_*`
-
 | 脚本 | 作用 |
 | --- | --- |
 | `run_lain_compiler.py` | 把第一版 Lain 源码子集编译为可执行 LAIN-IR 文本。 |

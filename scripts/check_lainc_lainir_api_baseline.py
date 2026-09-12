@@ -20,7 +20,7 @@ CHECKS = (
     ("compile context contract", "check_compile_context.py"),
     ("LAIN-VM single TCB contract", "check_lain_vm_contract.py"),
     ("LAINIR physical safety", "check_lainir_physical_safety.py"),
-    ("default provider smoke", "check_lainir_provider_smoke.py"),
+    ("meta form recognition via stdlib", "check_meta_form_swap.py"),
     ("compiler fixture parity", "check_stdlib_conformance.py"),
     ("compiler artifact snapshots", "check_lainc_lainir_api_snapshots.py"),
     ("source-closure determinism", "check_srclainc_artifact.py"),
