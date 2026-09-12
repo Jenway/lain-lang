@@ -2215,7 +2215,12 @@ static LainirRunStatus artifact_capture_begin(
     const char **error, void *user_data) {
   BootstrapContext *context = user_data;
   (void)args;
-  if (count != 0 || artifact_is_open(context)) {
+  /* A capture is a layer above the output file, not a replacement for it.
+   * Compile-time evaluation can run while the emitter holds the file sink
+   * open, and its generated LAINIR must land in memory rather than in the
+   * translation unit being emitted.  Only a second, nested capture is an
+   * error, because the sink has a single capture slot. */
+  if (count != 0 || context->capturing) {
     *error = "bootstrap.artifact-capture-begin has invalid state";
     return LAINIR_RUN_BAD_CALL;
   }

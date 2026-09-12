@@ -1,0 +1,45 @@
+// Prove that a capture is a layer above the file sink rather than a
+// replacement for it.
+//
+// Compile-time evaluation runs while the emitter holds the file artifact
+// open, so both sinks are live at once and their bytes must not mix.
+//
+// Returns 0 when the capture holds exactly the captured bytes and the file
+// holds exactly the emitted ones.
+
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+#extern #proc bootstrap.artifact-write-literal(#addr %text) -> #unit;
+#extern #proc bootstrap.artifact-capture-begin() -> #unit;
+#extern #proc bootstrap.artifact-capture-data() -> #addr;
+#extern #proc bootstrap.artifact-capture-length() -> #bits<64>;
+
+#data capture_layer_file_a(6, 1, "file1");
+#data capture_layer_file_b(6, 1, "file2");
+#data capture_layer_memory(4, 1, "mem");
+
+#proc bootstrap_capture_layer_probe() -> #bits<32> {
+  // The file sink is open first and stays open across the capture.
+  #call bootstrap.artifact-begin()
+  #call bootstrap.artifact-write-literal(#data_addr(capture_layer_file_a))
+
+  #call bootstrap.artifact-capture-begin()
+  #call bootstrap.artifact-write-literal(#data_addr(capture_layer_memory))
+  #call bootstrap.artifact-finish()
+
+  // Back to the file sink: this byte must not land in the capture.
+  #call bootstrap.artifact-write-literal(#data_addr(capture_layer_file_b))
+  #call bootstrap.artifact-finish()
+
+  // Capture holds "mem" (3 bytes), not the file text.
+  #let %length: #bits<64> = #call bootstrap.artifact-capture-length()
+  #if #ne(%length, 3) { #return 1 }
+  #let %data: #addr = #call bootstrap.artifact-capture-data()
+  #if #eq(#ptr2int(%data), 0) { #return 2 }
+  #let %first: #bits<64> = #zext[#bits<64>](
+    #load[#bits<8>](#lea(base=%data, idx=0, scale=1, offset=0))
+  )
+  // 'm' == 109
+  #if #ne(%first, 109) { #return 3 }
+  #return 0
+}
