@@ -806,6 +806,28 @@ elaborator 还不读签名，`std/meta.lain` 的 `meta_elaborate_status` 仍是�
 处理——那时输入行的语义本来就要落进 Meta 层，可以顺带把函数声明的形状校验一并搬过去，
 并照 `check_meta_module_validation.py` 的模式加一条 bootstrap/formal 一致性 gate。
 
+#### 8.5.2 搬移的实测约束（2026-09-12）
+
+编码 3 与 4 都已完成，本项未被吸收，因此现在单独处理。实测出形状校验的**顺序是行为的一部分**，
+这决定了搬移不能做成「一个全量校验器」：
+
+| 声明 | 现状诊断 |
+| --- | --- |
+| `std::func(a: i64) -> i64 !IO { return a; }` | **5102**（效果行形状） |
+| `std::func(a: i64) -> bogus !IO { return a; }` | **5104**（返回类型合法性**优先**于效果行形状） |
+| `std::func(a: i64) -> bogus { return a; }` | 5104 |
+| `std::func(a: i64) -> NotAType !IO { ... }` | 5102（大写名被当作 nominal，类型合法，故形状错误胜出） |
+
+`program_parse_function` 的既有注释已说明效果行检查刻意排在返回类型合法性之后；上表第三行证实
+该顺序**可观测**。
+
+而返回类型合法性（`program_type_valid_in_unit`）与参数解析（`program_parse_params`，填充描述符）
+**必须留在编译器**——它们依赖 unit 类型表与描述符构造。
+
+**因此可行的搬移形态是拆成两段**：签名头部形状（`= std::func`、params 组、`?` 行与条目、箭头、
+返回/body 非空）与尾部形状（`!` 行、body 组），编译器在两者之间做自己的参数解析与类型校验。
+单个全量校验器无法复现上表的优先级。
+
 ## 9. 编码 3：实现输入 effect
 
 ### 9.0 起点实测（2026-09-12）
