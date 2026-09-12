@@ -50,6 +50,7 @@
 | [`implementation/native-backend-migration-report.md`](implementation/native-backend-migration-report.md) | native C 后端迁移状态：已验证项、待端到端执行的改动和当前阻塞 |
 | [`implementation/c1-eval-contract-audit.md`](implementation/c1-eval-contract-audit.md) | C1 `#eval` 执行契约审计：临时 TCB、共享 VSpace、预算与 Trap 的冻结边界 |
 | [`implementation/module-namespaces.md`](implementation/module-namespaces.md) | `packages::lain::` 逻辑命名空间与 import 解析规则 |
+| [`implementation/meta-callable-unification.md`](implementation/meta-callable-unification.md) | 编码 1b 设计：统一 Meta callable 执行路径的现状、sink 与 Meta 值构造方案 |
 
 ## 当前路线图
 
