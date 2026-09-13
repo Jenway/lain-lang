@@ -63,10 +63,10 @@ CASES = (
     (
         "backend_narrow_types.l1",
         (
-            "int8_t byte_out(uintptr_t a);",
-            "int16_t short_out(uintptr_t b);",
-            "float float_out(uintptr_t c);",
-            "double double_out(uintptr_t d);",
+            "int8_t byte_out(int8_t a);",
+            "int16_t short_out(int16_t b);",
+            "float float_out(float c);",
+            "double double_out(double d);",
             "int8_t local_byte(void);",
             "void die(void);",
         ),

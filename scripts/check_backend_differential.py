@@ -46,6 +46,10 @@ CASES = (
     "differential_unsigned_compare.l1",
     "differential_conversions.l1",
     "differential_addresses.l1",
+    "differential_signed_division.l1",
+    "differential_signed_widths.l1",
+    "differential_signed_compare.l1",
+    "differential_bare_store.l1",
 )
 
 SEED_HARNESS = """\
@@ -80,8 +84,8 @@ def lower_through_seed(fixture: Path, output: Path) -> None:
         )
 
 
-def lower_through_lain(fixture: Path, output: Path) -> None:
-    result = run([SEED, "interpreter", LAIN_BACKEND, "main", output, fixture])
+def lower_through_lain(fixture: Path, output: Path, backend: Path = LAIN_BACKEND) -> None:
+    result = run([SEED, "interpreter", backend, "main", output, fixture])
     if result.returncode or not output.is_file():
         raise RuntimeError(
             f"Lain lowering of {fixture.name} failed: "
@@ -133,7 +137,7 @@ def build_and_run(
 
 
 def main() -> int:
-    for required in (SEED, SEED_EMITTER, LAIN_BACKEND):
+    for required in (SEED, SEED_EMITTER):
         if not required.is_file():
             print(
                 f"backend differential: {required.relative_to(ROOT)} is missing; "
@@ -148,6 +152,11 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="lain-differential-") as raw:
         work = Path(raw)
+        backend = work / "backend.l1"
+        rebuilt = run([sys.executable, ROOT / "scripts/run_lain_compiler.py", "--library", "-o", backend, ROOT / "src/lainc/backend_c.lain"])
+        if rebuilt.returncode:
+            print("backend differential: rebuilding current Lain backend failed: " + (rebuilt.stderr or rebuilt.stdout), file=sys.stderr)
+            return 1
         seed_harness = work / "seed_harness.c"
         lain_harness = work / "lain_harness.c"
         seed_harness.write_text(
@@ -161,7 +170,7 @@ def main() -> int:
                 seed_c = work / f"{fixture.stem}_seed.c"
                 lain_c = work / f"{fixture.stem}_lain.c"
                 lower_through_seed(fixture, seed_c)
-                lower_through_lain(fixture, lain_c)
+                lower_through_lain(fixture, lain_c, backend)
                 from_seed = build_and_run(
                     seed_c, seed_harness, work, f"{fixture.stem}_seed", True
                 )
@@ -180,6 +189,26 @@ def main() -> int:
                     f"seed returned {from_seed!r}, Lain backend returned {from_lain!r}",
                     file=sys.stderr,
                 )
+                return 1
+            # Agreement between the two backends is not evidence on its own: a
+            # construct they both lower the same wrong way passes this gate.  An
+            # independent expected value is what closes that hole, so every
+            # fixture whose result can be derived by hand carries one.
+            expected = {
+                "differential_signed_division.l1": "3",
+                "differential_signed_widths.l1": "42",
+                # -1 < 1 is true (1) and -1 > 1 is false; an unsigned reading
+                # swaps them and returns 10.
+                "differential_signed_compare.l1": "1",
+                # Four probes over the untyped-store value forms: a `#bits<32>`
+                # binding must not reach the reference store at +4, a
+                # `#bits<32>` call result and a `#bits<16>` load must leave
+                # their sentinels, and a `#bits<64>` literal must overwrite all
+                # eight bytes.  A single guessed width scores lower.
+                "differential_bare_store.l1": "4",
+            }.get(name)
+            if expected is not None and from_seed != expected:
+                print(f"{name}: both backends returned {from_seed}, expected {expected}", file=sys.stderr)
                 return 1
             print(f"PASS {name}: both backends returned {from_seed}")
     print("PASS backend differential: both C backends agree")
