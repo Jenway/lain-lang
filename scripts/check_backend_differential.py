@@ -42,6 +42,8 @@ SEED_ALIAS = "lainc_seed_entry"
 CASES = (
     "differential_load_store.l1",
     "differential_arithmetic_control.l1",
+    "differential_bitwise_and_conversions.l1",
+    "differential_unsigned_compare.l1",
 )
 
 SEED_HARNESS = """\
