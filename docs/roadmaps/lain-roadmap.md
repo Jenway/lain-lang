@@ -1465,7 +1465,7 @@ differential_conversions.l1: seed returned '4508', Lain backend returned '70300'
 4464；`zext(trunc<8>(200))` 得 200；`sext(trunc<8>(200))` 得 −56、`sext(trunc<8>(44))` 得 44；
 `trunc<1>` 掩码生效（3→1、2→0）。
 
-**当前五个 fixture 全部一致**：`100`、`32`、`-41`、`10110`、`4508`。
+**当前六个 fixture 全部一致**：`100`、`32`、`-41`、`10110`、`4508`、`31`。
 
 ##### 第七次扩面：`#alloca` 的两种实现不一致（2026-09-12，已记录未修）
 
@@ -1518,7 +1518,7 @@ differential_conversions.l1: seed returned '4508', Lain backend returned '70300'
    LAINIR 文本，不是真指令）——`grep` 计数会误导。真实 `#eval` 指令是否残留在闭包内需要看
    bootstrap 产物，而 `build/lainc-native.c` 确实报出 1 处未消除的 `#eval`，与 §3.2 的记录一致。
 
-**当前五个 fixture 全部一致**：`100`、`32`、`-41`、`10110`、`4508`。
+**当前六个 fixture 全部一致**：`100`、`32`、`-41`、`10110`、`4508`、`31`。
 
 固定点完成后再处理：
 
