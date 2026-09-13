@@ -12,8 +12,15 @@ exited 0 throughout, and the only symptom was zig cc cascading
 This gate therefore inspects the emitted text directly, which reports the
 defect at its source rather than 20 compiler errors later:
 
-* braces balance, and
-* no top-level function definition appears inside another function's body.
+* braces balance,
+* no top-level function definition appears inside another function's body, and
+* each case's expected type spellings and `unsupported L1` markers are present
+  (and their wrong predecessors absent).
+
+The last point covers two defects whose only symptom was plausible C: a type
+outside the emitter's known set fell back to `uint64_t`, and an L1 expression
+directive the emitter did not implement was copied into the output verbatim,
+which is invalid C with no trace of the unimplemented construct.
 
 Braces inside string literals, character literals and comments are stripped
 first; counting them raw gives a wrong answer for generated code, which is full
@@ -39,10 +46,59 @@ FIXTURES = ROOT / "scripts" / "fixtures"
 # The data fixture is the regression case for `#data`/#`data_addr`: a stray
 # pointer-typed initializer or an unescaped data literal breaks the emitted C
 # shape before zig cc ever sees it.
+#
+# Each case lists the C fragments it must and must not contain.  The shape of
+# a case's own source makes its type spellings and unsupported-directive
+# markers deterministic, so asserting them here keeps the two defects that
+# only showed up as plausible C (a wrong fallback type, and an unimplemented
+# L1 expression copied through verbatim) visible at the backend boundary.
 CASES = (
-    "backend_inline_else.l1",
-    "backend_constant_return.l1",
-    "backend_data_addr.l1",
+    ("backend_inline_else.l1", (), ()),
+    ("backend_constant_return.l1", (), ()),
+    ("backend_data_addr.l1", (), ()),
+    # `#bits<8>/<16>`, `#float<32>/<64>` and `#never` used to fall back to
+    # `uint64_t`; the seed emitter fails on a type it cannot spell, so this
+    # backend must not substitute a plausible one either.
+    (
+        "backend_narrow_types.l1",
+        (
+            "int8_t byte_out(uintptr_t a);",
+            "int16_t short_out(uintptr_t b);",
+            "float float_out(uintptr_t c);",
+            "double double_out(uintptr_t d);",
+            "int8_t local_byte(void);",
+            "void die(void);",
+        ),
+        (
+            "uint64_t byte_out(uintptr_t a);",
+            "uint64_t short_out(uintptr_t b);",
+            "uint64_t float_out(uintptr_t c);",
+            "uint64_t double_out(uintptr_t d);",
+            "uint64_t local_byte(void);",
+        ),
+    ),
+    # `#fadd` is recognised but not lowered by this backend: it must leave a
+    # marker, never reach C as source.
+    (
+        "backend_float_expr.l1",
+        ("/* unsupported L1: #fadd */",),
+        ("#fadd(x, y)",),
+    ),
+    # `#call_indirect` shares the `#call` prefix; its bracketed signature used
+    # to be copied through as `_indirect[(...) -> ...](...)`, which is not C.
+    (
+        "backend_call_indirect.l1",
+        ("/* unsupported L1: #call_indirect */",),
+        ("_indirect[",),
+    ),
+)
+
+# Modules this backend cannot lower must be refused: the run has to fail and
+# leave no artifact, so a wrong type or a construct with no lowering can never
+# reach the next stage as plausible C.
+FAILING_CASES = (
+    "backend_unknown_type.l1",
+    "backend_alloca_element_type.l1",
 )
 
 _STRING = re.compile(r'"(\\.|[^"\\])*"')
@@ -84,13 +140,17 @@ def analyse(text: str) -> tuple[int, int]:
     return depth, nested
 
 
-def generate(fixture: Path, output: Path) -> None:
-    result = subprocess.run(
+def run_backend(fixture: Path, output: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [str(SEED), "interpreter", str(BACKEND), "main", str(output), str(fixture)],
         cwd=ROOT,
         capture_output=True,
         text=True,
     )
+
+
+def generate(fixture: Path, output: Path) -> None:
+    result = run_backend(fixture, output)
     if result.returncode:
         raise RuntimeError(
             f"{fixture.name}: backend failed: "
@@ -107,17 +167,32 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    missing = [f for f in CASES if not (FIXTURES / f).is_file()]
+    case_names = tuple(case[0] for case in CASES) + FAILING_CASES
+    missing = [f for f in case_names if not (FIXTURES / f).is_file()]
     if missing:
         print("backend C shape: missing fixtures: " + ", ".join(missing), file=sys.stderr)
         return 2
 
     with tempfile.TemporaryDirectory(prefix="lain-backend-shape-", dir=ROOT / "build") as raw:
         work = Path(raw)
-        for name in CASES:
+        for name, required, forbidden in CASES:
             output = work / f"{Path(name).stem}.c"
             generate(FIXTURES / name, output)
             text = output.read_text(encoding="utf-8", errors="replace")
+            absent = [fragment for fragment in required if fragment not in text]
+            if absent:
+                print(
+                    f"{name}: emitted C is missing {absent}",
+                    file=sys.stderr,
+                )
+                return 1
+            present = [fragment for fragment in forbidden if fragment in text]
+            if present:
+                print(
+                    f"{name}: emitted C still contains {present}",
+                    file=sys.stderr,
+                )
+                return 1
             depth, nested = analyse(text)
             if depth != 0:
                 print(
@@ -134,7 +209,26 @@ def main() -> int:
                 )
                 return 1
             print(f"PASS {name}: emitted C is balanced and flat")
-    print("PASS backend C shape: balanced braces, no nested definitions")
+        for name in FAILING_CASES:
+            output = work / f"{Path(name).stem}.c"
+            result = run_backend(FIXTURES / name, output)
+            if result.returncode == 0:
+                print(
+                    f"{name}: backend accepted a module it cannot lower",
+                    file=sys.stderr,
+                )
+                return 1
+            if output.is_file():
+                print(
+                    f"{name}: backend failed but still wrote {output.name}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"PASS {name}: backend refused an unlowerable module")
+    print(
+        "PASS backend C shape: balanced braces, no nested definitions, "
+        "unlowerable modules refused"
+    )
     return 0
 
 

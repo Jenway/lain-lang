@@ -4,8 +4,9 @@
 // policy lives in Lain; the host only supplies source bytes and an artifact
 // stream.  It accepts the scalar/procedure subset used by the bootstrap
 // fixtures: #proc, #return, #let, #call, #if, #loop and arithmetic/comparison
-// expressions.  Unsupported instructions are emitted as C comments, so the
-// boundary is visible in the generated artifact instead of being silent.
+// expressions.  Unsupported statements and expressions are emitted as C
+// comments, so the boundary stays visible in the generated artifact; a type
+// with no C spelling fails the run instead of degrading to a plausible one.
 
 @foreign(c, link_name = "backend.allocate")
 let allocate_pages = std::func(size: usize) -> addr;
@@ -219,6 +220,24 @@ let emit_expr = std::func(
                                                             append_literal(output, "L1_or", 5);
                                                             index = index + 3;
                                                         } else {
+                                                    // `#call_indirect` shares this prefix,
+                                                    // but copying its `_indirect[(...) -> ...]`
+                                                    // tail into the C produced invalid source
+                                                    // with no marker.  This backend lowers only
+                                                    // direct calls, so mark the construct and
+                                                    // drop its type signature, leaving the
+                                                    // argument list to be scanned normally.
+                                                    if match_at(source, index + 5, end, "_indirect", 9) {
+                                                        append_literal(output, "/* unsupported L1: #call_indirect */", 36);
+                                                        index = index + 14;
+                                                        while index < end {
+                                                            if load8(source, index) == 93 {
+                                                                index = index + 1;
+                                                                break;
+                                                            }
+                                                            index = index + 1;
+                                                        }
+                                                    } else {
                                                     if match_at(source, index, end, "#call", 5) {
                                                         index = index + 5;
                                     } else {
@@ -300,10 +319,18 @@ let emit_expr = std::func(
                                                     index = index + 1;
                                                 }
                                             } else {
+                                                // `#sdiv` used to be tested as a sibling of
+                                                // this chain, so a match fell through to the
+                                                // unknown-token fallback below: that copied the
+                                                // `#` of `#sdiv` into the C and consumed the
+                                                // `(` of its argument list, turning
+                                                // `#sdiv(%a, %b)` into invalid C.  Leading the
+                                                // chain keeps a division mutually exclusive
+                                                // with the fallback.
                                                 if match_at(source, index, end, "#sdiv", 5) {
                                                     append_literal(output, "L1_sdiv", 7);
                                                     index = index + 5;
-                                                }
+                                                } else {
                                                 if match_at(source, index, end, "#udiv", 5) {
                                                     append_literal(output, "L1_udiv", 7);
                                                     index = index + 5;
@@ -340,10 +367,32 @@ let emit_expr = std::func(
                                                             append(output, 41);
                                                             index = operand_end + 1;
                                                         } else {
-                                                            append(output, byte);
-                                                            index = index + 1;
+                                                            // An unrecognised `#` directive must
+                                                            // not reach C as source; the previous
+                                                            // fallback emitted the directive's own
+                                                            // `#` and then copied the rest
+                                                            // verbatim, so `#fadd(x, y)` produced
+                                                            // C that failed to compile with no trace
+                                                            // of the unimplemented construct.  Mark
+                                                            // the token and keep scanning so the
+                                                            // remaining expression stays intact.
+                                                            append_literal(output, "/* unsupported L1: ", 19);
+                                                            let marker_end: usize = index;
+                                                            while marker_end < end {
+                                                                let marker_byte: i32 = load8(source, marker_end);
+                                                                if is_space(marker_byte) || marker_byte == 40 ||
+                                                                   marker_byte == 91 || marker_byte == 44 ||
+                                                                   marker_byte == 41 || marker_byte == 61 {
+                                                                    break;
+                                                                }
+                                                                marker_end = marker_end + 1;
+                                                            }
+                                                            append_span(output, source, index, marker_end);
+                                                            append_literal(output, " */", 3);
+                                                            index = marker_end;
                                                         }
                                                     }
+                                                }
                                                 }
                                                 }
                                                 }
@@ -351,6 +400,7 @@ let emit_expr = std::func(
                                             }
                                         }
                                     }
+                                                    }
                                                         }
                                                     }
                                                 }
@@ -384,6 +434,7 @@ let emit_c_type = std::func(
     start: usize,
     end: usize,
     output: addr,
+    status: addr,
 ) -> unit {
     let index: usize = start;
     while index < end {
@@ -397,6 +448,11 @@ let emit_c_type = std::func(
         append_literal(output, "void", 4);
         return;
     }
+    // `#never` is a physical type without a C representation, like `#unit`.
+    if match_at(source, index, end, "#never", 6) {
+        append_literal(output, "void", 4);
+        return;
+    }
     if match_at(source, index, end, "#addr", 5) {
         append_literal(output, "uintptr_t", 9);
         return;
@@ -405,15 +461,53 @@ let emit_c_type = std::func(
         append_literal(output, "uintptr_t", 9);
         return;
     }
-    if match_at(source, index, end, "#bits<32>", 9) {
-        append_literal(output, "uint32_t", 8);
-        return;
-    }
     if match_at(source, index, end, "#bits<1>", 8) {
         append_literal(output, "uint8_t", 7);
         return;
     }
-    append_literal(output, "uint64_t", 8);
+    if match_at(source, index, end, "#bits<8>", 8) {
+        append_literal(output, "int8_t", 6);
+        return;
+    }
+    if match_at(source, index, end, "#bits<16>", 9) {
+        append_literal(output, "int16_t", 7);
+        return;
+    }
+    // `#bits<32>` and `#bits<64>` stay unsigned: the lowered closures depend
+    // on that spelling, so only the widths that had no mapping at all are
+    // added, keeping every existing artifact byte-for-byte stable.
+    if match_at(source, index, end, "#bits<32>", 9) {
+        append_literal(output, "uint32_t", 8);
+        return;
+    }
+    if match_at(source, index, end, "#bits<64>", 9) {
+        append_literal(output, "uint64_t", 8);
+        return;
+    }
+    if match_at(source, index, end, "#float<32>", 10) {
+        append_literal(output, "float", 5);
+        return;
+    }
+    if match_at(source, index, end, "#float<64>", 10) {
+        append_literal(output, "double", 6);
+        return;
+    }
+    // An unrecognised type has no C spelling.  Substituting one (the old
+    // fallback wrote `uint64_t`) yielded C that compiled and silently
+    // mis-modelled the value, so leave the same marker the statement emitter
+    // uses and record the failure for backend_compile to abort on.
+    let marker_end: usize = index;
+    while marker_end < end {
+        let byte: i32 = load8(source, marker_end);
+        if is_space(byte) || byte == 123 || byte == 61 || byte == 44 || byte == 41 {
+            break;
+        }
+        marker_end = marker_end + 1;
+    }
+    append_literal(output, "/* unsupported L1 type: ", 24);
+    append_span(output, source, index, marker_end);
+    append_literal(output, " */", 3);
+    std::store_bits(64, status, 1);
 };
 
 // An `addr` typed binding is emitted as `uintptr_t` (see emit_c_type), so its
@@ -444,6 +538,7 @@ let emit_proc = std::func(
     start: usize,
     end: usize,
     output: addr,
+    status: addr,
 ) -> unit {
     let index: usize = start + 5;
     while index < end {
@@ -478,7 +573,7 @@ let emit_proc = std::func(
     if match_at(source, name_start, open, "main", 4) {
         append_literal(output, "int", 3);
     } else {
-        emit_c_type(source, arrow + 2, end, output);
+        emit_c_type(source, arrow + 2, end, output, status);
     }
     append_literal(output, " ", 1);
     if match_at(source, name_start, open, "main", 4) {
@@ -553,6 +648,7 @@ let emit_proc_decl = std::func(
     start: usize,
     end: usize,
     output: addr,
+    status: addr,
 ) -> unit {
     let index: usize = start + 5;
     while index < end {
@@ -593,7 +689,7 @@ let emit_proc_decl = std::func(
     if match_at(source, name_start, open, "main", 4) {
         append_literal(output, "int", 3);
     } else {
-        emit_c_type(source, arrow + 2, end, output);
+        emit_c_type(source, arrow + 2, end, output, status);
     }
     append_literal(output, " ", 1);
     if match_at(source, name_start, open, "main", 4) {
@@ -642,6 +738,7 @@ let emit_extern_decl = std::func(
     start: usize,
     end: usize,
     output: addr,
+    status: addr,
 ) -> unit {
     let index: usize = start + 7;
     while index < end {
@@ -695,7 +792,7 @@ let emit_extern_decl = std::func(
         arrow = arrow + 1;
     }
     append_literal(output, "extern ", 7);
-    emit_c_type(source, arrow + 2, end, output);
+    emit_c_type(source, arrow + 2, end, output, status);
     append_literal(output, " ", 1);
     let name_cursor: usize = name_start;
     while name_cursor < open {
@@ -1068,6 +1165,7 @@ let emit_line = std::func(
     start: usize,
     end: usize,
     output: addr,
+    status: addr,
 ) -> unit {
     let index: usize = start;
     while index < end {
@@ -1081,11 +1179,11 @@ let emit_line = std::func(
         return;
     }
     if match_at(source, index, end, "#proc", 5) {
-        emit_proc(source, index, end, output);
+        emit_proc(source, index, end, output, status);
         return;
     }
     if match_at(source, index, end, "#extern", 7) {
-        emit_extern_decl(source, index, end, output);
+        emit_extern_decl(source, index, end, output, status);
         return;
     }
     // `#data` declarations were already emitted by the data pass, which runs
@@ -1150,12 +1248,12 @@ let emit_line = std::func(
                 }
             }
             if index < body_end {
-                emit_line(source, index, body_end, output);
+                emit_line(source, index, body_end, output, status);
             }
             append_literal(output, "}\n", 2);
         } else {
             if index < end {
-                emit_line(source, index, end, output);
+                emit_line(source, index, end, output, status);
             }
         }
         return;
@@ -1211,13 +1309,13 @@ let emit_line = std::func(
         if type_start < equals && load8(source, type_start) == 58 {
             type_start = type_start + 1;
         }
-        emit_c_type(source, type_start, equals, output);
+        emit_c_type(source, type_start, equals, output, status);
         append_literal(output, " ", 1);
         append_span(output, source, name, name_end);
         append_literal(output, "= ", 2);
         if is_addr_type(source, type_start, equals) {
             append_literal(output, "(", 1);
-            emit_c_type(source, type_start, equals, output);
+            emit_c_type(source, type_start, equals, output, status);
             append_literal(output, ")", 1);
         }
         if equals < end {
@@ -1230,8 +1328,28 @@ let emit_line = std::func(
                 }
             }
             if match_at(source, value_start, end, "#alloca", 7) {
-                append_literal(output, "L1_alloca", 9);
-                append_span(output, source, value_start + 7, end);
+                // The lowered form is `#alloca(<byte size>)`.  The source-level
+                // `#alloca(<type>)` form carries a type instead of a count,
+                // which was copied through as `L1_alloca(#bits<8>)`; fail it
+                // rather than emit C that cannot compile.
+                let argument: usize = value_start + 7;
+                if argument < end && load8(source, argument) == 40 {
+                    argument = argument + 1;
+                }
+                while argument < end {
+                    if is_space(load8(source, argument)) {
+                        argument = argument + 1;
+                    } else {
+                        break;
+                    }
+                }
+                if argument < end && load8(source, argument) == 35 {
+                    append_literal(output, "/* unsupported L1: #alloca */", 29);
+                    std::store_bits(64, status, 1);
+                } else {
+                    append_literal(output, "L1_alloca", 9);
+                    append_span(output, source, value_start + 7, end);
+                }
             } else {
                 emit_expr(source, equals + 1, end, output);
             }
@@ -1340,10 +1458,10 @@ let emit_line = std::func(
                 statement_marker = statement_marker + 1;
             }
             if statement_marker > body && statement_marker < body_end {
-                emit_line(source, body, statement_marker, output);
-                emit_line(source, statement_marker, body_end, output);
+                emit_line(source, body, statement_marker, output, status);
+                emit_line(source, statement_marker, body_end, output, status);
             } else {
-                emit_line(source, body, body_end, output);
+                emit_line(source, body, body_end, output, status);
             }
         }
         append_literal(output, "}\n", 2);
@@ -1406,10 +1524,10 @@ let emit_line = std::func(
                     else_statement = else_statement + 1;
                 }
                 if else_statement > else_body && else_statement < else_end {
-                    emit_line(source, else_body, else_statement, output);
-                    emit_line(source, else_statement, else_end, output);
+                    emit_line(source, else_body, else_statement, output, status);
+                    emit_line(source, else_statement, else_end, output, status);
                 } else {
-                    emit_line(source, else_body, else_end, output);
+                    emit_line(source, else_body, else_end, output, status);
                 }
             }
             append_literal(output, "}\n", 2);
@@ -1434,7 +1552,12 @@ let emit_line = std::func(
 };
 
 let backend_compile = std::func() -> i32 {
-    let input: addr = allocate_pages(1048576);
+    // Shared emission status: 0 while the module only uses constructs this
+    // backend can lower, 1 once emit_c_type meets a type it cannot express in
+    // C.  The run then fails instead of publishing C that substituted a
+    // plausible but wrong type for the declared one.
+    let status: addr = allocate_pages(64);
+    std::store_bits(64, status, 0);
     let input_length: usize = source_length(0);
     let input_data: addr = source_data(0);
     let output: addr = allocate_pages(1048576);
@@ -1547,10 +1670,10 @@ let backend_compile = std::func() -> i32 {
                 declaration_segment = declaration_index + 1;
                 if declaration_depth <= 0 {
                     if match_at(input_data, declaration_candidate, declaration_index, "#proc", 5) {
-                        emit_proc_decl(input_data, declaration_candidate, declaration_index, output);
+                        emit_proc_decl(input_data, declaration_candidate, declaration_index, output, status);
                     }
                     if match_at(input_data, declaration_candidate, declaration_index, "#extern", 7) {
-                        emit_extern_decl(input_data, declaration_candidate, declaration_index, output);
+                        emit_extern_decl(input_data, declaration_candidate, declaration_index, output, status);
                     }
                     declaration_active = 0;
                     declaration_depth = 0;
@@ -1562,10 +1685,10 @@ let backend_compile = std::func() -> i32 {
     }
     if declaration_active == 1 && declaration_candidate < input_length {
         if match_at(input_data, declaration_candidate, input_length, "#proc", 5) {
-            emit_proc_decl(input_data, declaration_candidate, input_length, output);
+            emit_proc_decl(input_data, declaration_candidate, input_length, output, status);
         }
         if match_at(input_data, declaration_candidate, input_length, "#extern", 7) {
-            emit_extern_decl(input_data, declaration_candidate, input_length, output);
+            emit_extern_decl(input_data, declaration_candidate, input_length, output, status);
         }
     }
     let line_start: usize = 0;
@@ -1583,7 +1706,7 @@ let backend_compile = std::func() -> i32 {
             segment_start = index + 1;
             if logical_depth <= 0 {
                 if continuation == 1 {
-                    emit_line(input_data, line_start, index, output);
+                    emit_line(input_data, line_start, index, output, status);
                     line_start = index + 1;
                     continuation = 0;
                     logical_depth = 0;
@@ -1641,7 +1764,7 @@ let backend_compile = std::func() -> i32 {
                     if should_continue == 1 {
                         continuation = 1;
                     } else {
-                        emit_line(input_data, line_start, index, output);
+                        emit_line(input_data, line_start, index, output, status);
                         line_start = index + 1;
                         logical_depth = 0;
                     }
@@ -1651,7 +1774,13 @@ let backend_compile = std::func() -> i32 {
         index = index + 1;
     }
     if line_start < input_length {
-        emit_line(input_data, line_start, input_length, output);
+        emit_line(input_data, line_start, input_length, output, status);
+    }
+    // A type without a C spelling was emitted as a marker; publishing that
+    // artifact would hand the next stage C that compiles but mis-models the
+    // module, so fail the run and let the driver report it.
+    if std::load_bits(64, status) != 0 {
+        return 1;
     }
     artifact_begin();
     let out_length: usize = std::load_bits(64, output);
