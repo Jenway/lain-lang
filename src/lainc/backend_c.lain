@@ -156,12 +156,15 @@ let expression_delimiters = std::func(
 
 // Copy an expression while removing L1's SSA marker and mapping the pure
 // scalar operators to C helper macros.  Keeping the calls as macros lets the
-// backend remain textual without giving up expression nesting.
+// backend remain textual without giving up expression nesting.  An
+// unrecognised directive records the failure in `status`, because a marker
+// alone left the operands behind as a valid C comma expression.
 let emit_expr = std::func(
     source: addr,
     start: usize,
     end: usize,
     output: addr,
+    status: addr,
 ) -> unit {
     let index: usize = start;
     while index < end {
@@ -211,7 +214,28 @@ let emit_expr = std::func(
                                             if match_at(source, index, end, "#sge", 4) {
                                                 append_literal(output, "L1_ge", 5);
                                                 index = index + 4;
-                                                } else {
+                                            } else {
+                                            // The unsigned family.  A signed
+                                            // `L1_lt` here would compare the
+                                            // operands' own C types, which are
+                                            // signed for the narrow integer and
+                                            // `int32_t` spellings.
+                                            if match_at(source, index, end, "#ult", 4) {
+                                                append_literal(output, "L1_ult", 6);
+                                                index = index + 4;
+                                            } else {
+                                            if match_at(source, index, end, "#ule", 4) {
+                                                append_literal(output, "L1_ule", 6);
+                                                index = index + 4;
+                                            } else {
+                                            if match_at(source, index, end, "#ugt", 4) {
+                                                append_literal(output, "L1_ugt", 6);
+                                                index = index + 4;
+                                            } else {
+                                            if match_at(source, index, end, "#uge", 4) {
+                                                append_literal(output, "L1_uge", 6);
+                                                index = index + 4;
+                                            } else {
                                                     if match_at(source, index, end, "#and", 4) {
                                                         append_literal(output, "L1_and", 6);
                                                         index = index + 4;
@@ -301,7 +325,7 @@ let emit_expr = std::func(
                                                                     }
                                                                     equals = equals + 1;
                                                                 }
-                                                                emit_expr(source, equals + 1, cursor, output);
+                                                                emit_expr(source, equals + 1, cursor, output, status);
                                                                 append(output, 41);
                                                                 cursor = cursor + 1;
                                                                 break;
@@ -317,7 +341,7 @@ let emit_expr = std::func(
                                                                         }
                                                                         equals = equals + 1;
                                                                     }
-                                                                    emit_expr(source, equals + 1, cursor, output);
+                                                                    emit_expr(source, equals + 1, cursor, output, status);
                                                                     append_literal(output, ", ", 2);
                                                                     field_start = cursor + 1;
                                                                 }
@@ -393,14 +417,19 @@ let emit_expr = std::func(
                                                             index = operand_end + 1;
                                                         } else {
                                                             // An unrecognised `#` directive must
-                                                            // not reach C as source; the previous
-                                                            // fallback emitted the directive's own
-                                                            // `#` and then copied the rest
-                                                            // verbatim, so `#fadd(x, y)` produced
-                                                            // C that failed to compile with no trace
-                                                            // of the unimplemented construct.  Mark
-                                                            // the token and keep scanning so the
-                                                            // remaining expression stays intact.
+                                                            // not reach C as source.  Marking it
+                                                            // alone was not enough: a marker is a C
+                                                            // *comment*, so the operands stayed
+                                                            // behind, `#fadd(x, y)` emitted
+                                                            // `(x, y)`, and a comma expression is
+                                                            // valid C that silently evaluates to
+                                                            // `y`.  An expression this backend
+                                                            // cannot lower now records the failure
+                                                            // in the shared status, and
+                                                            // backend_compile refuses to publish
+                                                            // the artifact.  The marker stays so a
+                                                            // rejected buffer still shows where the
+                                                            // unimplemented construct was.
                                                             append_literal(output, "/* unsupported L1: ", 19);
                                                             let marker_end: usize = index;
                                                             while marker_end < end {
@@ -414,6 +443,7 @@ let emit_expr = std::func(
                                                             }
                                                             append_span(output, source, index, marker_end);
                                                             append_literal(output, " */", 3);
+                                                            std::store_bits(64, status, 1);
                                                             index = marker_end;
                                                         }
                                                     }
@@ -437,6 +467,14 @@ let emit_expr = std::func(
                         }
                     }
                 }
+                                            // The four unsigned branches each
+                                            // add one block to this chain, so
+                                            // four closers join the run that
+                                            // unwinds it.
+                                            }
+                                            }
+                                            }
+                                            }
             } else {
                 if byte == 10 || byte == 13 {
                     append(output, 32);
@@ -861,6 +899,7 @@ let emit_store_line = std::func(
     start: usize,
     end: usize,
     output: addr,
+    status: addr,
 ) -> unit {
     let width: i32 = 64;
     let index: usize = start + 6;
@@ -947,7 +986,7 @@ let emit_store_line = std::func(
         }
     }
     if comma < end {
-        emit_expr(source, comma + 1, end, output);
+        emit_expr(source, comma + 1, end, output, status);
         append_literal(output, ", ", 2);
     }
     let value_expr_start: usize = value_start;
@@ -961,7 +1000,7 @@ let emit_store_line = std::func(
             value_expr_end = comma - 1;
         }
     }
-    emit_expr(source, value_expr_start, value_expr_end, output);
+    emit_expr(source, value_expr_start, value_expr_end, output, status);
     append_literal(output, ");\n", 3);
 };
 
@@ -1305,12 +1344,12 @@ let emit_line = std::func(
         return;
     }
     if match_at(source, index, end, "#store", 6) {
-        emit_store_line(source, index, end, output);
+        emit_store_line(source, index, end, output, status);
         return;
     }
     if match_at(source, index, end, "#return", 7) {
         append_literal(output, "  return ", 9);
-        emit_expr(source, index + 7, end, output);
+        emit_expr(source, index + 7, end, output, status);
         append_literal(output, ";\n", 2);
         return;
     }
@@ -1397,7 +1436,7 @@ let emit_line = std::func(
                     append_span(output, source, value_start + 7, end);
                 }
             } else {
-                emit_expr(source, equals + 1, end, output);
+                emit_expr(source, equals + 1, end, output, status);
             }
         }
         append_literal(output, ";\n", 2);
@@ -1434,14 +1473,14 @@ let emit_line = std::func(
         append_span(output, source, name, colon);
         append_literal(output, " = ", 3);
         if equals < end {
-            emit_expr(source, equals + 1, end, output);
+            emit_expr(source, equals + 1, end, output, status);
         }
         append_literal(output, ";\n", 2);
         return;
     }
     if match_at(source, index, end, "#call", 5) {
         append_literal(output, "  ", 2);
-        emit_expr(source, index + 5, end, output);
+        emit_expr(source, index + 5, end, output, status);
         append_literal(output, ";\n", 2);
         return;
     }
@@ -1466,7 +1505,7 @@ let emit_line = std::func(
             condition_end = condition_end + 1;
         }
         append_literal(output, "  if (", 6);
-        emit_expr(source, index + 3, condition_end, output);
+        emit_expr(source, index + 3, condition_end, output, status);
         append_literal(output, ") {\n", 4);
         let body: usize = condition_end + 1;
         while body < end {
@@ -1646,6 +1685,15 @@ let backend_compile = std::func() -> i32 {
     append_literal(output, "#define L1_add(a,b) ((a)+(b))\n#define L1_sub(a,b) ((a)-(b))\n#define L1_mul(a,b) ((a)*(b))\n#define L1_eq(a,b) ((a)==(b))\n#define L1_lt(a,b) ((a)<(b))\n#define L1_le(a,b) ((a)<=(b))\n#define L1_and(a,b) ((a)&&(b))\n#define L1_or(a,b) ((a)||(b))\n", 240);
     append_literal(output, "#define L1_ne(a,b) ((a)!=(b))\n#define L1_gt(a,b) ((a)>(b))\n#define L1_ge(a,b) ((a)>=(b))\n", 89);
     append_literal(output, "#define L1_udiv(a,b) ((a)/(b))\n#define L1_sdiv(a,b) ((int64_t)(a)/(int64_t)(b))\n#define L1_urem(a,b) ((a)%(b))\n", 111);
+    // The comparison families share a C operator, so the signed spellings
+    // cannot serve the unsigned family: `((a) < (b))` compares the operands'
+    // own types, and `int32_t` is signed.  Widening both sides to an unsigned
+    // 64-bit type first makes the comparison unsigned whatever the producer
+    // chose -- `int8_t`..`int64_t` for narrow and loaded values, `uint64_t`
+    // and `uintptr_t` for addresses.  Zero bits are introduced above the
+    // operand's width, so a 32-bit `0xFFFFFFFF` reads as 4294967295 rather
+    // than as -1.
+    append_literal(output, "#define L1_ult(a,b) ((uint64_t)(a) < (uint64_t)(b))\n#define L1_ule(a,b) ((uint64_t)(a) <= (uint64_t)(b))\n#define L1_ugt(a,b) ((uint64_t)(a) > (uint64_t)(b))\n#define L1_uge(a,b) ((uint64_t)(a) >= (uint64_t)(b))\n", 210);
     // Data objects are emitted before the prototypes and definitions,
     // matching the seed emitter's include/helper/data/prototype/definition
     // order.  A declaration may split across physical lines, so collect its

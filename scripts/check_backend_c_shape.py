@@ -48,10 +48,11 @@ FIXTURES = ROOT / "scripts" / "fixtures"
 # shape before zig cc ever sees it.
 #
 # Each case lists the C fragments it must and must not contain.  The shape of
-# a case's own source makes its type spellings and unsupported-directive
-# markers deterministic, so asserting them here keeps the two defects that
-# only showed up as plausible C (a wrong fallback type, and an unimplemented
-# L1 expression copied through verbatim) visible at the backend boundary.
+# a case's own source makes its type spellings deterministic, so asserting
+# them here keeps the defects that only showed up as plausible C -- a wrong
+# fallback type, and an unimplemented L1 expression -- visible at the backend
+# boundary.  An unimplemented *expression* is no longer one of them: the
+# backend refuses it, so its case belongs to FAILING_CASES.
 CASES = (
     ("backend_inline_else.l1", (), ()),
     ("backend_constant_return.l1", (), ()),
@@ -76,13 +77,6 @@ CASES = (
             "uint64_t double_out(uintptr_t d);",
             "uint64_t local_byte(void);",
         ),
-    ),
-    # `#fadd` is recognised but not lowered by this backend: it must leave a
-    # marker, never reach C as source.
-    (
-        "backend_float_expr.l1",
-        ("/* unsupported L1: #fadd */",),
-        ("#fadd(x, y)",),
     ),
     # `#call_indirect` shares the `#call` prefix; its bracketed signature used
     # to be copied through as `_indirect[(...) -> ...](...)`, which is not C.
@@ -129,6 +123,11 @@ CASES = (
 FAILING_CASES = (
     "backend_unknown_type.l1",
     "backend_alloca_element_type.l1",
+    # `#fadd` is recognised but not lowered by this backend.  A marker in an
+    # expression was worse than a failure: the operands survived as the comma
+    # expression `(x, y)`, which is valid C and silently evaluates to `y`.  The
+    # gate therefore requires the refusal, not the marker.
+    "backend_float_expr.l1",
 )
 
 _STRING = re.compile(r'"(\\.|[^"\\])*"')
