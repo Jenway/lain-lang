@@ -2691,7 +2691,12 @@
   #if #call meta_atom_equal(%source, %body, ";", 1) {
     #return %function
   }
-  #if #eq(#call program_type_valid_in_unit(%unit, %source, %return_type), 0) { #call program_set_function_status(%function, 5104) #return %function }
+  #if #eq(#call program_type_valid_in_unit(%unit, %source, %return_type), 0) {
+    #call program_unit_set_validation_function(%unit, %function)
+    #call program_unit_set_validation_node(%unit, %source, %return_type)
+    #call program_set_function_status(%function, 5104)
+    #return %function
+  }
   // The `!{...}` output effect row and the body group are the tail of the
   // same library rule.  Asking for them after the return-type test keeps a
   // malformed row in a declaration whose arrow type is also invalid reporting
@@ -9346,7 +9351,26 @@
   #return
 }
 
-#proc lain_std_lower_program(#addr %request, #addr %syntax_index) -> #bits<32> {
+// Library-stage payloads are ordinary unit addresses, opaque to compiler core.
+// Sources and RawAst roots stay borrowed from the syntax workspace; vectors
+// survive elaboration until lower finishes or elaboration reports a failure.
+#proc lain_std_release_program_vectors(#addr %unit) -> #unit {
+  #call bootstrap.release-pages(#call program_unit_sources(%unit))
+  #call bootstrap.release-pages(#call program_unit_roots(%unit))
+  #call bootstrap.release-pages(#call program_unit_materialized_modules(%unit))
+  #call bootstrap.release-pages(#call program_unit_materialized_states(%unit))
+  #return
+}
+
+#proc lain_std_write_program_diagnostic(#addr %unit, #bits<32> %status) -> #unit {
+  #call bootstrap.artifact-begin()
+  #call program_write_error(%status)
+  #call program_write_error_context(%unit)
+  #call bootstrap.artifact-finish()
+  #return
+}
+
+#proc lain_std_elaborate_program(#addr %request, #addr %syntax_index) -> #addr {
   #let %available_count: #bits<64> = #call syntax_index_count(%syntax_index)
   #let %source_begin: #bits<64> = #load[#bits<64>](
     #lea(base=%request, idx=0, scale=0, offset=24)
@@ -9361,31 +9385,31 @@
     #call bootstrap.artifact-begin()
     #call program_write_error(5100)
     #call bootstrap.artifact-finish()
-    #return 5100
+    #return #call program_nil()
   }
   #if #sgt(%source_begin, %source_end) {
     #call bootstrap.artifact-begin()
     #call program_write_error(5100)
     #call bootstrap.artifact-finish()
-    #return 5100
+    #return #call program_nil()
   }
   #if #sgt(%source_end, %available_count) {
     #call bootstrap.artifact-begin()
     #call program_write_error(5100)
     #call bootstrap.artifact-finish()
-    #return 5100
+    #return #call program_nil()
   }
   #if #slt(%root_index, %source_begin) {
     #call bootstrap.artifact-begin()
     #call program_write_error(5100)
     #call bootstrap.artifact-finish()
-    #return 5100
+    #return #call program_nil()
   }
   #if #sge(%root_index, %source_end) {
     #call bootstrap.artifact-begin()
     #call program_write_error(5100)
     #call bootstrap.artifact-finish()
-    #return 5100
+    #return #call program_nil()
   }
   #let %source_count: #bits<64> = #sub(%source_end, %source_begin)
   #let %first_unit: #addr = #call syntax_index_entry(
@@ -9603,6 +9627,21 @@
       #ne(#load[#bits<1>](#lea(base=%request, idx=0, scale=0, offset=48)), 0)
     )
   }
+  // The checked language unit is the library-owned payload passed to lower.
+  // A failed elaborate publishes diagnostics, never a physical program.
+  #store %status, #lea(base=%unit, idx=0, scale=0, offset=24)
+  #if #ne(%status, 0) {
+    #call lain_std_write_program_diagnostic(%unit, %status)
+    #call lain_std_release_program_vectors(%unit)
+  }
+  #return %unit
+}
+
+#proc lain_std_emit_program(#addr %unit) -> #bits<32> {
+  #if #eq(#ptr2int(%unit), 0) { #return 5100 }
+  #let %status: #bits<32> = #call program_unit_status(%unit)
+  // Failed units have already emitted diagnostics and released their vectors.
+  #if #ne(%status, 0) { #return %status }
   #call program_unit_set_writing(%unit, 1)
   #call bootstrap.artifact-begin()
   #if #ne(%status, 0) {
@@ -9626,13 +9665,13 @@
   }
   #call bootstrap.artifact-finish()
   #call program_unit_set_writing(%unit, 0)
-  // Source objects and RawAst roots are borrowed from syntax_index.  The
-  // workspace cache owns them; only the temporary pointer vector belongs to
-  // this lowering pass.
-  #call bootstrap.release-pages(%sources)
-  #call bootstrap.release-pages(%roots)
-  #call bootstrap.release-pages(%materialized_modules)
-  #call bootstrap.release-pages(%materialized_states)
+  #call lain_std_release_program_vectors(%unit)
   #return %status
 }
 
+// Compatibility entry for embeddings using the library's older combined API.
+// The compiler pipeline uses the separate stages, consuming the same payload.
+#proc lain_std_lower_program(#addr %request, #addr %syntax_index) -> #bits<32> {
+  #let %unit: #addr = #call lain_std_elaborate_program(%request, %syntax_index)
+  #return #call lain_std_emit_program(%unit)
+}
