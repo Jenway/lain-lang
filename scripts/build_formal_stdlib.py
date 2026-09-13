@@ -400,6 +400,17 @@ def verify_abi_entry() -> None:
             "formal stdlib macro artifact did not run as 42"
             + (f": {detail}" if detail else "")
         )
+    for macro_case in ("formal_macro_caller_argument", "formal_macro_compound_argument", "formal_macro_atom_return",
+                       "formal_macro_precedence", "formal_macro_associativity", "formal_macro_nested_arguments"):
+        run([SEED_RUN, "interpreter", ABI_PROBE, "compiler_compile_library", ABI_OUTPUT,
+             ROOT / "bootstrap/compiler/compiler_api.l1", ROOT / "scripts/fixtures" / (macro_case + ".lain")])
+        executed = subprocess.run([str(SEED_RUN), "run", str(ABI_OUTPUT), "main"],
+                                  cwd=ROOT, capture_output=True, text=True)
+        if executed.returncode or executed.stdout.strip() != "42":
+            raise RuntimeError(f"formal macro {macro_case}: expected 42, got {executed.stdout!r}: {executed.stderr}")
+
+    run([sys.executable, ROOT / "scripts/check_formal_expression_lowering.py", "--compiler", ABI_PROBE])
+
     macro_two_probe = subprocess.run(
         [
             str(SEED_RUN),

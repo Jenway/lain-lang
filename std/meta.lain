@@ -1536,6 +1536,88 @@ let meta_two_call_argument_mode = std::func(
     return 2;
 };
 
+// Recursive scalar AST rules shared by ordinary expression lowering.
+// Source spans identify Atom text; Group operands are lowered from children.
+let meta_scalar_expression_end = std::func(source: addr, node: addr) -> addr {
+    let cursor: addr = node;
+    while meta_ast_is_nil(cursor) == false {
+        if meta_is_semicolon(source, cursor) { return cursor; }
+        cursor = meta_ast_next(cursor);
+    }
+    return cursor;
+};
+
+let meta_scalar_expression_valid = std::func(source: addr, node: addr, end: addr, name: addr) -> bool {
+    let cursor: addr = node;
+    let operand: bool = true;
+    let seen: bool = false;
+    while cursor != end && meta_ast_is_nil(cursor) == false {
+        if meta_ast_is_nil(cursor) { return false; }
+        if operand {
+            let valid: bool = meta_is_decimal(source, cursor);
+            if meta_ast_kind(cursor) == 2 && meta_ast_delimiter(cursor) == 40 {
+                valid = meta_scalar_expression_valid(source, meta_ast_first(cursor), meta_ast_nil(), name);
+            }
+            if meta_ast_is_nil(name) == false {
+                if meta_ast_syntax_context(cursor) == meta_ast_syntax_context(name)
+                    && meta_name_matches(source, cursor, name) { valid = true; }
+            }
+            if valid == false { return false; }
+        } else {
+            let code: i32 = meta_operator_code(source, cursor);
+            if code < 1 || code > 4 { return false; }
+        }
+        seen = true;
+        operand = operand == false;
+        cursor = meta_ast_next(cursor);
+    }
+    return seen && operand == false;
+};
+
+let meta_scalar_expression_split = std::func(source: addr, node: addr, end: addr) -> addr {
+    let cursor: addr = node;
+    let selected: addr = meta_ast_nil();
+    let priority: i64 = 3;
+    while cursor != end && meta_ast_is_nil(cursor) == false {
+        let code: i32 = meta_operator_code(source, cursor);
+        let current: i64 = 3;
+        if code == 1 || code == 2 { current = 1; }
+        if code == 3 || code == 4 { current = 2; }
+        if current < 3 && current <= priority {
+            selected = cursor;
+            priority = current;
+        }
+        cursor = meta_ast_next(cursor);
+    }
+    return selected;
+};
+
+let meta_copy_scalar_expression = std::func(buffer: addr, offset: i64, source: addr, node: addr, end: addr, name: addr) -> i64 {
+    let split: addr = meta_scalar_expression_split(source, node, end);
+    if meta_ast_is_nil(split) {
+        if meta_ast_kind(node) == 2 && meta_ast_delimiter(node) == 40 {
+            return meta_copy_scalar_expression(buffer, offset, source, meta_ast_first(node), meta_ast_nil(), name);
+        }
+        let cursor: i64 = offset;
+        if meta_ast_is_nil(name) == false {
+            if meta_name_matches(source, node, name) {
+                cursor = meta_copy_literal(buffer, cursor, "%");
+            }
+        }
+        return meta_copy_source(buffer, cursor, source, node);
+    }
+    let code: i32 = meta_operator_code(source, split);
+    let cursor: i64 = offset;
+    if code == 1 { cursor = meta_copy_literal(buffer, cursor, "#add("); }
+    if code == 2 { cursor = meta_copy_literal(buffer, cursor, "#sub("); }
+    if code == 3 { cursor = meta_copy_literal(buffer, cursor, "#mul("); }
+    if code == 4 { cursor = meta_copy_literal(buffer, cursor, "#sdiv("); }
+    cursor = meta_copy_scalar_expression(buffer, cursor, source, node, split, name);
+    cursor = meta_copy_literal(buffer, cursor, ", ");
+    cursor = meta_copy_scalar_expression(buffer, cursor, source, meta_ast_next(split), end, name);
+    return meta_copy_literal(buffer, cursor, ")");
+};
+
 @abi_export
 let meta_is_arithmetic_group = std::func(
     source: addr,
@@ -1544,16 +1626,7 @@ let meta_is_arithmetic_group = std::func(
     if meta_ast_kind(node) != 2 || meta_ast_delimiter(node) != 40 {
         return false;
     }
-    let left: addr = meta_ast_first(node);
-    let operator: addr = meta_ast_next(left);
-    let right: addr = meta_ast_next(operator);
-    let tail: addr = meta_ast_next(right);
-    if meta_is_decimal(source, left)
-        && meta_is_operator(source, operator)
-        && meta_is_decimal(source, right) {
-        if meta_ast_is_nil(tail) { return true; }
-    }
-    return false;
+    return meta_scalar_expression_valid(source, meta_ast_first(node), meta_ast_nil(), meta_ast_nil());
 };
 
 @abi_export
@@ -1572,22 +1645,9 @@ let meta_find_return_list = std::func(
     if meta_ast_is_nil(node) { return meta_ast_nil(); }
     if meta_is_return(source, node) {
         let value: addr = meta_ast_next(node);
-        if meta_is_arithmetic_group(source, value) {
-            if meta_is_semicolon(source, meta_ast_next(value)) {
-                return node;
-            }
-        }
-        if meta_is_decimal(source, value) {
-            let operator: addr = meta_ast_next(value);
-            if meta_is_semicolon(source, operator) { return node; }
-            if meta_is_operator(source, operator) {
-                let right: addr = meta_ast_next(operator);
-                if meta_is_decimal(source, right) {
-                    if meta_is_semicolon(
-                        source, meta_ast_next(right)
-                    ) { return node; }
-                }
-            }
+        let end: addr = meta_scalar_expression_end(source, value);
+        if meta_is_semicolon(source, end) {
+            if meta_scalar_expression_valid(source, value, end, meta_ast_nil()) { return node; }
         }
     }
     return meta_find_return_list(source, meta_ast_next(node));
@@ -2059,18 +2119,8 @@ let meta_find_named_return_list = std::func(
     if meta_ast_is_nil(node) { return meta_ast_nil(); }
     if meta_is_return(source, node) {
         let value: addr = meta_ast_next(node);
-        let operator: addr = meta_ast_next(value);
-        let right: addr = meta_ast_next(operator);
-        if meta_name_matches(source, value, name) {
-            if meta_is_semicolon(source, operator) { return node; }
-            if meta_is_operator(source, operator)
-                && meta_is_decimal(source, right)
-                && meta_is_semicolon(
-                    source, meta_ast_next(right)
-                ) {
-                return node;
-            }
-        }
+        let end: addr = meta_scalar_expression_end(source, value);
+        if meta_scalar_expression_valid(source, value, end, name) { return node; }
     }
     return meta_find_named_return_list(
         source, meta_ast_next(node), name
@@ -2120,13 +2170,8 @@ let meta_return_is_arithmetic = std::func(
     return_node: addr,
 ) -> bool {
     let value: addr = meta_ast_next(return_node);
-    if meta_is_arithmetic_group(source, value) { return true; }
-    let operator: addr = meta_ast_next(value);
-    let right: addr = meta_ast_next(operator);
-    if meta_is_operator(source, operator) {
-        if meta_is_decimal(source, right) { return true; }
-    }
-    return false;
+    if meta_ast_kind(value) == 2 { return true; }
+    return meta_is_operator(source, meta_ast_next(value));
 };
 
 @abi_export
@@ -2654,31 +2699,8 @@ let meta_copy_return_expression = std::func(
     return_node: addr,
 ) -> i64 {
     let value: addr = meta_ast_next(return_node);
-    if meta_is_arithmetic_group(source, value) {
-        let first: addr = meta_ast_first(value);
-        return meta_copy_binary_expression(
-            buffer,
-            offset,
-            source,
-            first,
-            meta_ast_next(first),
-            meta_ast_next(meta_ast_next(first)),
-        );
-    }
-    let operator: addr = meta_ast_next(value);
-    let right: addr = meta_ast_next(operator);
-    let arithmetic: bool = false;
-    if meta_is_operator(source, operator) {
-        if meta_is_decimal(source, right) {
-            arithmetic = true;
-        }
-    }
-    if arithmetic {
-        return meta_copy_binary_expression(
-            buffer, offset, source, value, operator, right
-        );
-    }
-    return meta_copy_source(buffer, offset, source, value);
+    let end: addr = meta_scalar_expression_end(source, value);
+    return meta_copy_scalar_expression(buffer, offset, source, value, end, meta_ast_nil());
 };
 
 @abi_export
@@ -2957,31 +2979,8 @@ let meta_copy_parameter_return_expression = std::func(
     parameter: addr,
 ) -> i64 {
     let value: addr = meta_ast_next(return_node);
-    let operator: addr = meta_ast_next(value);
-    let right: addr = meta_ast_next(operator);
-    if meta_is_operator(source, operator) {
-        if meta_is_decimal(source, right) {
-            let operator_value: i32 = meta_operator_code(source, operator);
-            let cursor: i64 = offset;
-            if operator_value == 1 {
-                cursor = meta_copy_literal(buffer, cursor, "#add(%");
-            }
-            if operator_value == 2 {
-                cursor = meta_copy_literal(buffer, cursor, "#sub(%");
-            }
-            if operator_value == 3 {
-                cursor = meta_copy_literal(buffer, cursor, "#mul(%");
-            }
-            if operator_value == 4 {
-                cursor = meta_copy_literal(buffer, cursor, "#sdiv(%");
-            }
-            cursor = meta_copy_source(buffer, cursor, source, parameter);
-            cursor = meta_copy_literal(buffer, cursor, ", ");
-            cursor = meta_copy_source(buffer, cursor, source, right);
-            return meta_copy_literal(buffer, cursor, ")");
-        }
-    }
-    return meta_copy_source(buffer, offset, source, value);
+    let end: addr = meta_scalar_expression_end(source, value);
+    return meta_copy_scalar_expression(buffer, offset, source, value, end, parameter);
 };
 
 @abi_export
@@ -3074,14 +3073,9 @@ let meta_copy_local_binding = std::func(
         buffer, cursor, source, binding
     );
     cursor = meta_copy_literal(buffer, cursor, "\n  #return ");
-    if meta_binding_returns_name(source, return_node) {
-        cursor = meta_copy_literal(buffer, cursor, "%");
-        cursor = meta_copy_source(buffer, cursor, source, name);
-    } else {
-        cursor = meta_copy_parameter_return_expression(
-            buffer, cursor, source, return_node, name
-        );
-    }
+    cursor = meta_copy_parameter_return_expression(
+        buffer, cursor, source, return_node, name
+    );
     return meta_copy_literal(buffer, cursor, "\n}\n");
 };
 
@@ -3519,6 +3513,101 @@ let meta_function_params = std::func(source: addr, candidate: addr) -> addr {
     return meta_ast_nil();
 };
 
+// Parse a type expression's AST boundary; semantic type validity is a later library check.
+let meta_ast_atom_matches = std::func(source: addr, node: addr, text: addr, length: i64) -> bool {
+    if meta_ast_is_nil(node) { return false; }
+    if meta_ast_kind(node) != 1 || meta_ast_length(node) != length { return false; }
+    let data: addr = meta_source_data(source);
+    let start: i64 = meta_ast_start(node);
+    let index: i64 = 0;
+    while index < length {
+        if meta_source_byte_at(data, start + index) != meta_source_byte_at(text, index) { return false; }
+        index = index + 1;
+    }
+    return true;
+};
+let meta_type_name_range = std::func(source: addr, node: addr, offset: i64) -> bool {
+    if meta_ast_is_nil(node) { return false; }
+    if meta_ast_kind(node) != 1 || meta_ast_length(node) == 0 { return false; }
+    let data: addr = meta_source_data(source);
+    let start: i64 = meta_ast_start(node);
+    let length: i64 = meta_ast_length(node);
+    if offset >= length { return false; }
+    let index: i64 = offset;
+    let segment_start: bool = true;
+    while index < length {
+        let value: i8 = meta_source_byte_at(data, start + index);
+        let letter: bool = (value >= 65 && value <= 90) || (value >= 97 && value <= 122) || value == 95 || value < 0;
+        if segment_start {
+            if letter == false {
+                if index != 0 || value != 35 { return false; }
+            }
+            segment_start = false;
+        } else {
+            if letter == false {
+                if value >= 48 && value <= 57 {} else {
+                    if value != 46 { return false; }
+                    segment_start = true;
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return segment_start == false;
+};
+let meta_type_name_atom = std::func(source: addr, node: addr) -> bool {
+    return meta_type_name_range(source, node, 0);
+};
+let meta_type_member_atom = std::func(source: addr, node: addr) -> bool {
+    if meta_ast_is_nil(node) { return false; }
+    if meta_ast_kind(node) != 1 || meta_ast_length(node) < 2 { return false; }
+    if meta_source_byte_at(meta_source_data(source), meta_ast_start(node)) != 46 { return false; }
+    return meta_type_name_range(source, node, 1);
+};
+let meta_type_expression_end = std::func(source: addr, node: addr) -> addr {
+    if meta_ast_is_nil(node) { return meta_ast_nil(); }
+    let pointee: addr = meta_ast_nil();
+    let member: addr = meta_ast_nil();
+    if meta_is_mark(source, node, 38) {
+        pointee = meta_ast_next(node);
+        if meta_ast_atom_matches(source, pointee, "mut", 3) { pointee = meta_ast_next(pointee); }
+        return meta_type_expression_end(source, pointee);
+    }
+    if meta_type_name_atom(source, node) == false { return meta_ast_nil(); }
+    let current: addr = node;
+    if meta_ast_atom_matches(source, node, "#bits", 5) {
+        let open: addr = meta_ast_next(node);
+        let digits: addr = meta_ast_next(open);
+        let close: addr = meta_ast_next(digits);
+        if meta_is_mark(source, open, 60) == false { return meta_ast_nil(); }
+        if meta_is_decimal(source, digits) == false { return meta_ast_nil(); }
+        if meta_is_mark(source, close, 62) == false { return meta_ast_nil(); }
+        current = close;
+    }
+    while meta_ast_is_nil(current) == false {
+        let next: addr = meta_ast_next(current);
+        if meta_ast_kind(next) == 2 && meta_ast_delimiter(next) == 40 {
+            current = next;
+        } else {
+            member = meta_ast_nil();
+            if meta_type_member_atom(source, next) {
+                current = next;
+            } else {
+            if meta_is_mark(source, next, 46) { member = meta_ast_next(next); } else {
+                if meta_is_colon(source, next) {
+                    let second: addr = meta_ast_next(next);
+                    if meta_is_colon(source, second) == false { return meta_ast_nil(); }
+                    member = meta_ast_next(second);
+                } else { return current; }
+            }
+            if meta_type_name_atom(source, member) == false { return meta_ast_nil(); }
+            current = member;
+            }
+        }
+    }
+    return meta_ast_nil();
+};
+
 // Entries of a `?{...}` row: `name`, or `name : type`, separated by commas.
 // An empty row is legal and a bare name means `name: _`.
 let meta_function_input_row_status = std::func(
@@ -3546,22 +3635,11 @@ let meta_function_input_row_status = std::func(
             let type_start: addr = meta_ast_next(colon);
             if meta_ast_is_nil(type_start) { return 5102; }
             if meta_is_comma(source, type_start) { return 5102; }
-            // The entry type runs to the next comma.  A `:` inside it is well
-            // formed only as part of a `::` path.
-            cursor = type_start;
-            while meta_ast_is_nil(cursor) == false {
-                if meta_is_comma(source, cursor) { break; }
-                if meta_is_colon(source, cursor) {
-                    let second: addr = meta_ast_next(cursor);
-                    if meta_is_colon(source, second) == false {
-                        return 5102;
-                    }
-                    cursor = meta_ast_next(second);
-                } else {
-                    cursor = meta_ast_next(cursor);
-                }
-            }
+            let type_end: addr = meta_type_expression_end(source, type_start);
+            if meta_ast_is_nil(type_end) { return 5102; }
+            cursor = meta_ast_next(type_end);
             if meta_ast_is_nil(cursor) { return 0; }
+            if meta_is_comma(source, cursor) == false { return 5102; }
             node = meta_ast_next(cursor);
         }
     }
@@ -3575,26 +3653,17 @@ let meta_function_tail_status = std::func(
     source: addr,
     node: addr,
 ) -> i32 {
-    let cursor: addr = node;
-    while meta_ast_is_nil(cursor) == false {
-        if meta_is_semicolon(source, cursor) { return 0; }
-        if meta_is_mark(source, cursor, 33) {
-            let effect_row: addr = meta_ast_next(cursor);
-            if meta_ast_is_nil(effect_row) { return 5102; }
-            if meta_ast_kind(effect_row) != 2 { return 5102; }
-            if meta_ast_delimiter(effect_row) != 123 { return 5102; }
-            let body: addr = meta_ast_next(effect_row);
-            if meta_ast_is_nil(body) { return 5102; }
-            if meta_ast_kind(body) != 2 { return 5102; }
-            if meta_ast_delimiter(body) != 123 { return 5102; }
-            return 0;
-        }
-        if meta_ast_kind(cursor) == 2 && meta_ast_delimiter(cursor) == 123 {
-            return 0;
-        }
-        cursor = meta_ast_next(cursor);
+    if meta_is_semicolon(source, node) { return 0; }
+    let body: addr = node;
+    if meta_is_mark(source, node, 33) {
+        let effect_row: addr = meta_ast_next(node);
+        if meta_ast_is_nil(effect_row) { return 5102; }
+        if meta_ast_kind(effect_row) != 2 || meta_ast_delimiter(effect_row) != 123 { return 5102; }
+        body = meta_ast_next(effect_row);
     }
-    return 5102;
+    if meta_ast_is_nil(body) { return 5102; }
+    if meta_ast_kind(body) != 2 || meta_ast_delimiter(body) != 123 { return 5102; }
+    return 0;
 };
 
 let meta_function_declaration_status = std::func(
@@ -3646,7 +3715,9 @@ let meta_function_declaration_status = std::func(
     if meta_is_mark(source, arrow_tail, 62) == false { return 5102; }
     let return_type: addr = meta_ast_next(arrow_tail);
     if meta_ast_is_nil(return_type) { return 5104; }
-    return meta_function_tail_status(source, return_type);
+    let type_end: addr = meta_type_expression_end(source, return_type);
+    if meta_ast_is_nil(type_end) { return 5104; }
+    return meta_function_tail_status(source, meta_ast_next(type_end));
 };
 
 @abi_export
@@ -3968,34 +4039,19 @@ let meta_substitute_macro = std::func(
     node: addr,
     parameter: addr,
     argument: addr,
+    template_context: i64,
 ) -> unit {
     let child: addr = meta_ast_first(node);
     while meta_ast_is_nil(child) == false {
         let next: addr = meta_ast_next(child);
-        if meta_name_matches(source, child, parameter) {
+        if meta_ast_syntax_context(child) == template_context
+            && meta_name_matches(source, child, parameter) {
             meta_ast_replace(node, child, meta_ast_copy(argument));
         } else {
-            meta_substitute_macro(source, child, parameter, argument);
+            meta_substitute_macro(source, child, parameter, argument, template_context);
         }
         child = next;
     }
-};
-
-let meta_copy_template_chain = std::func(
-    body_group: addr,
-) -> addr {
-    let current: addr = meta_ast_first(body_group);
-    if meta_ast_is_nil(current) { return meta_ast_nil(); }
-    let head: addr = meta_ast_copy(current);
-    let tail: addr = head;
-    current = meta_ast_next(current);
-    while meta_ast_is_nil(current) == false {
-        let copy: addr = meta_ast_copy(current);
-        meta_ast_set_next(tail, copy);
-        tail = copy;
-        current = meta_ast_next(current);
-    }
-    return head;
 };
 
 // Give every node introduced by one macro expansion a fresh syntax context.
@@ -4023,52 +4079,14 @@ let meta_template_chain_last = std::func(node: addr) -> addr {
     return meta_template_chain_last(next);
 };
 
-let meta_macro_argument_end = std::func(
-    source: addr,
-    node: addr,
-) -> i64 {
-    let current: addr = node;
-    let end: i64 = meta_ast_start(current) + meta_ast_length(current);
-    while meta_ast_is_nil(current) == false {
-        let next: addr = meta_ast_next(current);
-        if meta_ast_is_nil(next) { return end; }
-        if meta_is_comma(source, next) { return end; }
-        current = next;
-        end = meta_ast_start(current) + meta_ast_length(current);
-    }
-    return end;
-};
-
-let meta_substitute_macro_chain = std::func(
-    source: addr,
-    node: addr,
-    parameter: addr,
-    argument: addr,
-) -> unit {
-    if meta_ast_is_nil(node) { return; }
-    let next: addr = meta_ast_next(node);
-    meta_substitute_macro(source, node, parameter, argument);
-    meta_substitute_macro_chain(source, next, parameter, argument);
-};
-
 let meta_macro_argument_next = std::func(
     source: addr,
     node: addr,
-    end: i64,
 ) -> addr {
     let current: addr = node;
     while meta_ast_is_nil(current) == false {
-        let current_end: i64 = meta_ast_start(current)
-            + meta_ast_length(current);
-        let next: addr = meta_ast_next(current);
-        if current_end == end {
-            if meta_ast_is_nil(next) { return meta_ast_nil(); }
-            if meta_is_comma(source, next) {
-                return meta_ast_next(next);
-            }
-            return next;
-        }
-        current = next;
+        if meta_is_comma(source, current) { return meta_ast_next(current); }
+        current = meta_ast_next(current);
     }
     return meta_ast_nil();
 };
@@ -4083,27 +4101,35 @@ let meta_macro_parameter_next = std::func(
     return next;
 };
 
-// Parse one argument span.  A single atom is returned directly.  A compound
+// Copy the caller argument AST and preserve its context and origin. A compound
 // expression is put in a fresh parenthesis group so replacement still inserts
 // one AST child and preserves the expression's source span.
 let meta_macro_argument_tree = std::func(
     source: addr,
     node: addr,
-    end: i64,
 ) -> addr {
+    let next: addr = meta_ast_next(node);
+    if meta_ast_is_nil(next) { return meta_ast_copy(node); }
+    if meta_is_comma(source, next) { return meta_ast_copy(node); }
     let start: i64 = meta_ast_start(node);
-    let root: addr = meta_ast_from_text(source, start, end - start);
-    let first: addr = meta_ast_first(root);
-    if meta_ast_is_nil(first) { return meta_ast_nil(); }
-    let second: addr = meta_ast_next(first);
-    if meta_ast_is_nil(second) { return first; }
-    let group: addr = meta_ast_new_group(40, start, end - start);
-    meta_ast_attach_origin(group, source, start, end - start);
-    let current: addr = first;
+    let span_end: i64 = start + meta_ast_length(node);
+    let span_node: addr = node;
+    while meta_ast_is_nil(span_node) == false {
+        if meta_is_comma(source, span_node) { break; }
+        let position: i64 = meta_ast_start(span_node);
+        let finish: i64 = position + meta_ast_length(span_node);
+        if position < start { start = position; }
+        if finish > span_end { span_end = finish; }
+        span_node = meta_ast_next(span_node);
+    }
+    let group: addr = meta_ast_new_group(40, start, span_end - start);
+    meta_ast_attach_origin(group, source, start, span_end - start);
+    meta_ast_set_syntax_context(group, meta_ast_syntax_context(node));
+    let current: addr = node;
     while meta_ast_is_nil(current) == false {
-        let next: addr = meta_ast_next(current);
+        if meta_is_comma(source, current) { break; }
         meta_ast_append(group, meta_ast_copy(current));
-        current = next;
+        current = meta_ast_next(current);
     }
     return group;
 };
@@ -4113,24 +4139,20 @@ let meta_substitute_macro_params = std::func(
     node: addr,
     parameter_group: addr,
     argument_group: addr,
+    template_context: i64,
 ) -> i32 {
     let parameter: addr = meta_ast_first(parameter_group);
     let argument: addr = meta_ast_first(argument_group);
     let matched: i64 = 0;
     while meta_ast_is_nil(parameter) == false {
         if meta_ast_is_nil(argument) { return 4203; }
-        let argument_end: i64 = meta_macro_argument_end(
-            source, argument
-        );
-        let tree: addr = meta_macro_argument_tree(
-            source, argument, argument_end
-        );
+        let tree: addr = meta_macro_argument_tree(source, argument);
         if meta_ast_is_nil(tree) { return 4203; }
-        meta_substitute_macro_chain(source, node, parameter, tree);
+        meta_substitute_macro(source, node, parameter, tree, template_context);
         matched = matched + 1;
         parameter = meta_macro_parameter_next(source, parameter);
         argument = meta_macro_argument_next(
-            source, argument, argument_end
+            source, argument
         );
     }
     if matched == 0 { return 4208; }
@@ -4149,16 +4171,18 @@ let meta_expand_one_macro_call = std::func(
     let call_group: addr = meta_ast_next(call_name);
     if meta_ast_kind(call_group) != 2 { return 4201; }
     if meta_ast_delimiter(call_group) != 40 { return 4201; }
-    let expansion: addr = meta_copy_template_chain(template_group);
-    if meta_ast_is_nil(expansion) { return 4208; }
+    // Keep a holder so substitutions can replace the first template Atom too.
+    let holder: addr = meta_ast_copy(template_group);
     let expansion_context: i64 = meta_syntax_context_fresh(hygiene_context);
-    meta_recontextualize_tree(expansion, expansion_context);
-    let expansion_next: addr = meta_ast_next(expansion);
-    let expansion_tail: addr = meta_template_chain_last(expansion);
+    meta_recontextualize_tree(meta_ast_first(holder), expansion_context);
     let substitute_status: i32 = meta_substitute_macro_params(
-        source, expansion, parameter_group, call_group
+        source, holder, parameter_group, call_group, expansion_context
     );
     if substitute_status != 1 { return substitute_status; }
+    let expansion: addr = meta_ast_first(holder);
+    if meta_ast_is_nil(expansion) { return 4208; }
+    let expansion_next: addr = meta_ast_next(expansion);
+    let expansion_tail: addr = meta_template_chain_last(expansion);
     let parent: addr = meta_ast_parent(root, call_name);
     if meta_ast_is_nil(parent) { return 4205; }
     if meta_ast_replace(parent, call_name, expansion) == false {
