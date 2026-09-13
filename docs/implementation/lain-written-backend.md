@@ -32,7 +32,7 @@ Effect factories with module arguments and `std::effect_operation(...)` now
 generate temporary LAINIR containing `#eval`; the seed verifies it and executes
 it through LAINVM. The complete formal standard-library source closure now
 builds and passes its ABI and conformance checks. The `src/lainc` compiler
-source closure also builds as a verified 357-procedure LAINIR artifact and is
+source closure also builds as a verified 362-procedure LAINIR artifact and is
 deterministic across independent builds. The next gate is executing that
 artifact as the compiler for gen2 and gen3 fixed-point verification; the native
 compiler matrix follows that result.
