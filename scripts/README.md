@@ -66,7 +66,7 @@ python scripts/<name>.py [args...]
 - `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 36 道门禁，任一失败即以该 gate 的退出码结束。
 - `python scripts/capture_lain_bootstrap_baseline.py` — 采集可复现的机器可读 bootstrap 基线报告（同时记录成功与失败的 gate）。
 
-`scripts/check_*.py` 共 37 个，主入口收录其中 **36** 个。**未收录的 3 个及其原因**：
+`scripts/check_*.py` 共 39 个，主入口收录其中 **36** 个。**未收录的 3 个及其原因**：
 
 | 脚本 | 原因 |
 | --- | --- |
