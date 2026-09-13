@@ -35,11 +35,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+from toolchain import seed_exe
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SEED = ROOT / "build" / "seed" / "bin" / (
-    "lainir-seed.exe" if sys.platform == "win32" else "lainir-seed"
-)
+SEED = seed_exe("lainir-seed")
 BACKEND = ROOT / "build" / "backend_c_entry.l1"
 FIXTURES = ROOT / "scripts" / "fixtures"
 # The inline-else fixture is the regression case this check was written for.
