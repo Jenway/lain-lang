@@ -1,0 +1,51 @@
+// Differential fixture: address computation and comparison.
+//
+// Covers the constructs the earlier fixtures leave out: `#lea` with a non-zero
+// scale and offset, an `#alloca` buffer large enough that the accesses land in
+// different places, and equality between addresses, including `#ptr2int` of the
+// same address taken twice.
+//
+// Each part contributes a distinct amount so a wrong address computation
+// changes the total rather than being masked by a coincidental match.
+#proc main() -> #bits<32> {
+  #let %base: #addr = #alloca(64)
+
+  // Store at base + 2 * 4 + 1 = base + 9 and read it back through the same
+  // address.  A backend that ignored the scale or the offset would read zero
+  // because the buffer starts zeroed.  Worth 1.
+  #let %at_offset: #addr = #lea(base=%base, idx=2, scale=4, offset=1)
+  #store[#bits<32>] 4242, %at_offset
+  #let %round_trip: #bits<32> = #load[#bits<32>](%at_offset)
+  #let %offset_ok: #bits<32> = #eq(%round_trip, 4242)
+
+  // Store 99 at base + 16 and look at base + 32, which must not see it.  Both
+  // cells are written first: `#alloca` memory is not initialised, and the seed
+  // zeroes it while the Lain backend mallocs it, so reading an unwritten cell
+  // would compare two different implementation choices rather than the address
+  // computation.  Worth 2: a backend treating `#lea` as identity would see 99.
+  #store[#bits<32>] 99, #lea(base=%base, idx=1, scale=16, offset=0)
+  #store[#bits<32>] 0, #lea(base=%base, idx=2, scale=16, offset=0)
+  #let %other: #bits<32> = #load[#bits<32>](
+    #lea(base=%base, idx=2, scale=16, offset=0)
+  )
+  #let %separate: #bits<32> = #eq(%other, 0)
+
+  // The same address computed twice must compare equal, and converting both to
+  // integers must also compare equal.  Worth 4 and 8.
+  #let %same_a: #addr = #lea(base=%base, idx=3, scale=8, offset=2)
+  #let %same_b: #addr = #lea(base=%base, idx=3, scale=8, offset=2)
+  #let %address_eq: #bits<32> = #eq(%same_a, %same_b)
+  #let %integer_eq: #bits<32> = #eq(#ptr2int(%same_a), #ptr2int(%same_b))
+
+  // A different address must compare unequal.  Worth 16.
+  #let %different: #bits<32> = #ne(
+    %same_a,
+    #lea(base=%base, idx=3, scale=8, offset=3)
+  )
+
+  // 1 + 2 + 4 + 8 + 16 = 31.
+  #return #add(
+    #add(%offset_ok, #mul(2, %separate)),
+    #add(#mul(4, %address_eq), #add(#mul(8, %integer_eq), #mul(16, %different)))
+  )
+}
