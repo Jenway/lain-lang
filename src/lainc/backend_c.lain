@@ -154,6 +154,215 @@ let expression_delimiters = std::func(
     return depth;
 };
 
+// Width of the `#bits<N>` annotation at `start`, or 0 when the text there is
+// not such an annotation.  This backend lowers expressions textually and
+// keeps no type table, so a conversion's width has to come from its own
+// annotation: `#trunc` uses it for the modular narrowing and the widening
+// conversions for the C type they widen to.  A construct whose width cannot
+// be read off the text is refused rather than guessed.
+let bits_width_from_annotation = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> i32 {
+    let cursor: usize = start;
+    while cursor < end {
+        if is_space(load8(source, cursor)) {
+            cursor = cursor + 1;
+        } else {
+            break;
+        }
+    }
+    if match_at(source, cursor, end, "#bits<", 6) {
+        let width: i32 = 0;
+        cursor = cursor + 6;
+        while cursor < end {
+            let byte: i32 = load8(source, cursor);
+            if byte >= 48 && byte <= 57 {
+                width = width * 10 + (byte - 48);
+                cursor = cursor + 1;
+            } else {
+                break;
+            }
+        }
+        return width;
+    }
+    return 0;
+};
+
+// Source width of a `#zext`/`#sext` operand, read from the result type the
+// operand's own text carries, or 0 when the operand's width cannot be read
+// off the text (a binding or parameter name, whose type is only recorded at
+// its declaration).  A sign extension needs this: the operand's bits must be
+// reinterpreted as a signed value of their own width before the widening
+// cast, and a `#load` is the one construct that reads a value wider than the
+// C type the backend carries it in.
+let operand_bits_width = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> i32 {
+    let cursor: usize = start;
+    while cursor < end {
+        if is_space(load8(source, cursor)) {
+            cursor = cursor + 1;
+        } else {
+            break;
+        }
+    }
+    let open: usize = cursor;
+    if match_at(source, cursor, end, "#trunc", 6) {
+        open = cursor + 6;
+    } else {
+        if match_at(source, cursor, end, "#sext", 5) {
+            open = cursor + 5;
+        } else {
+            if match_at(source, cursor, end, "#zext", 5) {
+                open = cursor + 5;
+            } else {
+                if match_at(source, cursor, end, "#load", 5) {
+                    open = cursor + 5;
+                } else {
+                    return 0;
+                }
+            }
+        }
+    }
+    while open < end {
+        if load8(source, open) == 91 {
+            return bits_width_from_annotation(source, open + 1, end);
+        }
+        open = open + 1;
+    }
+    return 0;
+};
+
+// The C spelling that opens one integer conversion, and 1 when the
+// conversion has one.  The converted value keeps the width and the
+// signedness of the L1 result type, so conversions nest: the next cast reads
+// the value at the width the inner one produced.
+//
+// `#trunc` casts to `uintN_t`.  Unsigned conversion is modular, so for
+// `#bits<8>/<16>/<32>/<64>` -- every width this backend can name -- the cast
+// keeps exactly the low N bits.  It must not be a cast to `intN_t`: the
+// result is a bit pattern, and `(int8_t)200` is -56, which then sign-extends
+// to 0xFFFFFFC8 at the next widening instead of reading as 200.  `#bits<1>`
+// is carried in uint8_t, which has seven spare value bits, so that one width
+// masks explicitly (see conversion_suffix).
+//
+// `#sext` reinterprets the operand as signed at `source_width` before
+// widening, which is what puts the source's top bit at the top of the
+// result.  `source_width` is 0 when it could not be read off the operand
+// text; the widening cast alone is still right whenever the operand's C type
+// already carries its own width, which is the case for a binding, a
+// parameter, a call result and a literal, but not for a `#load`, whose
+// unsigned helper type would widen by zero extension.
+//
+// `#zext` is a plain unsigned widening cast.  Nothing else is needed: the
+// operand's C type already carries its width and is unsigned for every
+// construct that produces bits (a conversion, `#load`), so the cast zero
+// extends.
+let conversion_prefix = std::func(
+    kind: i32,
+    width: i32,
+    source_width: i32,
+    output: addr,
+) -> i32 {
+    if kind == 0 {
+        if width == 1 {
+            append_literal(output, "((uint8_t)((", 12);
+            return 1;
+        }
+        if width == 8 {
+            append_literal(output, "((uint8_t)(", 11);
+            return 1;
+        }
+        if width == 16 {
+            append_literal(output, "((uint16_t)(", 12);
+            return 1;
+        }
+        if width == 32 {
+            append_literal(output, "((uint32_t)(", 12);
+            return 1;
+        }
+        if width == 64 {
+            append_literal(output, "((uint64_t)(", 12);
+            return 1;
+        }
+    }
+    if kind == 1 {
+        if width == 8 {
+            append_literal(output, "((int8_t)", 9);
+        } else {
+            if width == 16 {
+                append_literal(output, "((int16_t)", 10);
+            } else {
+                if width == 32 {
+                    append_literal(output, "((int32_t)", 10);
+                } else {
+                    if width == 64 {
+                        append_literal(output, "((int64_t)", 10);
+                    } else {
+                        return 0;
+                    }
+                }
+            }
+        }
+        if source_width == 0 {
+            append_literal(output, "(", 1);
+            return 1;
+        }
+        if source_width == 8 {
+            append_literal(output, "(int8_t)(", 9);
+            return 1;
+        }
+        if source_width == 16 {
+            append_literal(output, "(int16_t)(", 10);
+            return 1;
+        }
+        if source_width == 32 {
+            append_literal(output, "(int32_t)(", 10);
+            return 1;
+        }
+        if source_width == 64 {
+            append_literal(output, "(int64_t)(", 10);
+            return 1;
+        }
+        // A source width with no signed C type of its own (`#bits<1>`) has no
+        // correct spelling in this backend's type model.  Refuse it instead
+        // of widening it the way a byte would widen.
+        return 0;
+    }
+    if width == 8 {
+        append_literal(output, "((uint8_t)(", 11);
+        return 1;
+    }
+    if width == 16 {
+        append_literal(output, "((uint16_t)(", 12);
+        return 1;
+    }
+    if width == 32 {
+        append_literal(output, "((uint32_t)(", 12);
+        return 1;
+    }
+    if width == 64 {
+        append_literal(output, "((uint64_t)(", 12);
+        return 1;
+    }
+    return 0;
+};
+
+// The C spelling that closes a conversion opened by conversion_prefix.
+let conversion_suffix = std::func(kind: i32, width: i32, output: addr) -> unit {
+    if kind == 0 {
+        if width == 1 {
+            append_literal(output, ") & 1u))", 8);
+            return;
+        }
+    }
+    append_literal(output, "))", 2);
+};
+
 // Copy an expression while removing L1's SSA marker and mapping the pure
 // scalar operators to C helper macros.  Keeping the calls as macros lets the
 // backend remain textual without giving up expression nesting.  An
@@ -355,17 +564,123 @@ let emit_expr = std::func(
                                             if match_at(source, index, end, "#trunc", 6) ||
                                                match_at(source, index, end, "#sext", 5) ||
                                                match_at(source, index, end, "#zext", 5) {
+                                                let kind: i32 = 0;
+                                                let open: usize = index + 5;
                                                 if match_at(source, index, end, "#trunc", 6) {
-                                                    index = index + 6;
+                                                    kind = 0;
+                                                    open = index + 6;
                                                 } else {
-                                                    index = index + 5;
+                                                    if match_at(source, index, end, "#sext", 5) {
+                                                        kind = 1;
+                                                        open = index + 5;
+                                                    }
                                                 }
-                                                while index < end {
-                                                    if load8(source, index) == 93 {
-                                                        index = index + 1;
+                                                // The annotation between `[` and `]` is the
+                                                // width the conversion produces.  It is read
+                                                // from the text because this backend keeps no
+                                                // type table, and `#trunc` needs it to narrow
+                                                // the value by the right modulus.
+                                                let width: i32 = 0;
+                                                while open < end {
+                                                    if load8(source, open) == 91 {
+                                                        width = bits_width_from_annotation(
+                                                            source, open + 1, end
+                                                        );
                                                         break;
                                                     }
-                                                    index = index + 1;
+                                                    open = open + 1;
+                                                }
+                                                // Advance past the `]` that closes the
+                                                // annotation, then past the spaces before the
+                                                // operand.  What must follow is the
+                                                // parenthesised operand; anything else has no
+                                                // lowering here and is refused below.
+                                                while open < end {
+                                                    if load8(source, open) == 93 {
+                                                        open = open + 1;
+                                                        break;
+                                                    }
+                                                    open = open + 1;
+                                                }
+                                                while open < end {
+                                                    if is_space(load8(source, open)) {
+                                                        open = open + 1;
+                                                    } else {
+                                                        break;
+                                                    }
+                                                }
+                                                if open < end {
+                                                    if load8(source, open) != 40 {
+                                                        width = 0;
+                                                    }
+                                                } else {
+                                                    width = 0;
+                                                }
+                                                // The operand is the whole parenthesised
+                                                // expression, so its extent comes from the
+                                                // matching `)`.  Emitting it through
+                                                // emit_expr is what lets the three
+                                                // conversions nest.
+                                                let operand_start: usize = open + 1;
+                                                let operand_end: usize = open + 1;
+                                                let depth: i32 = 1;
+                                                while operand_end < end {
+                                                    let operand_byte: i32 = load8(source, operand_end);
+                                                    // A call inside the operand may carry a
+                                                    // string argument, and a parenthesis in
+                                                    // that string is not a delimiter.  Skip
+                                                    // the literal the way emit_expr does.
+                                                    if operand_byte == 34 {
+                                                        operand_end = find_string_end(
+                                                            source, operand_end, end
+                                                        );
+                                                    } else {
+                                                        if operand_byte == 40 {
+                                                            depth = depth + 1;
+                                                        } else {
+                                                            if operand_byte == 41 {
+                                                                depth = depth - 1;
+                                                                if depth == 0 {
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                        operand_end = operand_end + 1;
+                                                    }
+                                                }
+                                                index = operand_end + 1;
+                                                let source_width: i32 = 0;
+                                                if kind == 1 {
+                                                    source_width = operand_bits_width(
+                                                        source, operand_start, operand_end
+                                                    );
+                                                }
+                                                let opened: i32 = conversion_prefix(
+                                                    kind, width, source_width, output
+                                                );
+                                                if opened == 1 {
+                                                    emit_expr(
+                                                        source, operand_start, operand_end,
+                                                        output, status
+                                                    );
+                                                    conversion_suffix(kind, width, output);
+                                                } else {
+                                                    // A conversion whose width is not one the
+                                                    // backend can name is refused, not
+                                                    // approximated: the marker is a C comment,
+                                                    // so a plausible cast would hide the
+                                                    // mismatch, and the recorded status keeps
+                                                    // the artifact from being published.
+                                                    if kind == 0 {
+                                                        append_literal(output, "/* unsupported L1: #trunc */", 28);
+                                                    } else {
+                                                        if kind == 1 {
+                                                            append_literal(output, "/* unsupported L1: #sext */", 27);
+                                                        } else {
+                                                            append_literal(output, "/* unsupported L1: #zext */", 27);
+                                                        }
+                                                    }
+                                                    std::store_bits(64, status, 1);
                                                 }
                                             } else {
                                                 // `#sdiv` used to be tested as a sibling of
