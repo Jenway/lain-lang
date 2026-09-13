@@ -77,7 +77,7 @@ python scripts/run_lain_backend.py <canonical.l1> -o out.c
 **测试（见 Testing & QA）：**
 
 ```text
-python scripts/check_lainc_lainir_api_baseline.py   # 15 道 gate 顺序执行器
+python scripts/check_lainc_lainir_api_baseline.py   # 36 道 gate 顺序执行器
 python scripts/capture_lain_bootstrap_baseline.py [--full]
 ```
 
@@ -200,11 +200,11 @@ Import 返回命名空间值，禁止非限定注入；结构约束用 `std::mod
 
 **类别：**
 
-1. `scripts/check_*.py`（32 个）——契约/一致性/固定点门禁。
+1. `scripts/check_*.py`（39 个）——契约/一致性/固定点门禁；其中 36 个进主入口。
 2. 构建门禁脚本：`build_lain_compiler.py`（内含边界检查）、`build_formal_stdlib.py`、`build_srclainc.py`、`freeze_lainc_bootstrap.py`。
 3. `seed/src/cli/vm_control_test.c` → `lainir-vm-control-test`（C 控制面自检）。
 4. 自举/固定点：`run_lainir_self_host.py`（gen1→gen2→gen3，要求 gen2 C == gen3 C）、`prove_lainc_fixed_point.py`（规范文本/extern/过程标签/每过程体 SHA-256）。
-5. Fixtures：`scripts/fixtures/`（69 个 `.lain`、12 个 `.l1` 探针、1 个历史 C 基线）+ `lainc_api_migration/` 的 3 个 canonical `.l1` 快照。
+5. Fixtures：`scripts/fixtures/`（97 个 `.lain`、21 个 `.l1`、1 个历史 C 基线）+ `lainc_api_migration/` 的 3 个 canonical `.l1` 快照。
 
 **执行顺序依赖：**
 
@@ -212,11 +212,11 @@ Import 返回命名空间值，禁止非限定注入；结构约束用 `std::mod
 python scripts/build_seed.py             # 先决：所有运行时检查
 python scripts/build_lain_compiler.py    # 先决：build/bootstrap/* 相关检查
 python scripts/build_formal_stdlib.py    # 先决：conformance/policy/provider 检查
-python scripts/check_lainc_lainir_api_baseline.py   # 15 道 gate 编排入口
+python scripts/check_lainc_lainir_api_baseline.py   # 36 道 gate 编排入口
 python scripts/capture_lain_bootstrap_baseline.py   # 基线报告 build/baselines/<ts>/
 ```
 
-**CI（`.github/workflows/lain-bootstrap.yml`，唯一 workflow）**：push main/master 与 PR，ubuntu-latest、Python 3.12、Zig 0.16.0、30 分钟超时。9 步：`build_seed.py` → `check_lainvm_boundary.py` → `check_eval_tcb.py` → `check_lainir_physical_safety.py` → `build/seed/bin/lainir-vm-control-test` → `run_lainir_self_host.py`（外加 checkout 与两个 setup）。**CI 不跑其余 29 个检查，也不构建 bootstrap bundle 或固定点；`check_lainir_compiler.py` 尚未接入。**
+**CI（`.github/workflows/lain-bootstrap.yml`，唯一 workflow）**：push main/master 与 PR，ubuntu-latest、Python 3.12、Zig 0.16.0、30 分钟超时。9 步：`build_seed.py` → `check_lainvm_boundary.py` → `check_eval_tcb.py` → `check_lainir_physical_safety.py` → `build/seed/bin/lainir-vm-control-test` → `run_lainir_self_host.py`（外加 checkout 与两个 setup）。**CI 只跑 4 个检查，不构建 bootstrap bundle、不跑固定点，也不跑 `check_lainir_compiler.py`。**
 
 **当前预期的不可用项**（README「Bootstrap status」、`docs/roadmaps/lain-roadmap.md` §3.2）：**重建已可用**（bootstrap 源可重新生成 `build/bootstrap/lainc.l1`），但 **native 编译器矩阵与 gen2/gen3 固定点仍未完成**——`srclainc.l1` 是库产物、缺可供 seed 调用的 `compiler_compile` 入口，两次构建一致**不等于**编译器固定点。
 
