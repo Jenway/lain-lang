@@ -44,6 +44,7 @@ CASES = (
     "differential_arithmetic_control.l1",
     "differential_bitwise_and_conversions.l1",
     "differential_unsigned_compare.l1",
+    "differential_conversions.l1",
 )
 
 SEED_HARNESS = """\
