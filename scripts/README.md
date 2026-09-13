@@ -63,10 +63,10 @@ python scripts/<name>.py [args...]
 
 ## 推荐入口
 
-- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 36 道门禁，任一失败即以该 gate 的退出码结束。
+- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 37 道门禁，任一失败即以该 gate 的退出码结束。
 - `python scripts/capture_lain_bootstrap_baseline.py` — 采集可复现的机器可读 bootstrap 基线报告（同时记录成功与失败的 gate）。
 
-`scripts/check_*.py` 共 39 个，主入口收录其中 **36** 个。**未收录的 3 个及其原因**：
+`scripts/check_*.py` 共 40 个，主入口收录其中 **37** 个。**未收录的 3 个及其原因**：
 
 | 脚本 | 原因 |
 | --- | --- |
@@ -93,9 +93,10 @@ python scripts/<name>.py [args...]
 
 | 脚本 | 作用 |
 | --- | --- |
-| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 36 道门禁。 |
+| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 37 道门禁。 |
 | `check_lainc_lainir_api.py` | 检查源码层面的 lainc → LAINIR capability 边界（`--final` 时切换为移除 gate）。 |
 | `check_lainc_lainir_api_snapshots.py` | 用 checked-in canonical artifact 基线守护 formal compiler 的回归。 |
+| `check_backend_differential.py` | 同一份 LAINIR 交给两个 C 后端，各自编译成可执行文件，断言返回值相同。以 Debug 构建，使运行期对齐检查生效。 |
 | `check_backend_c_shape.py` | 校验 Lain 后端产出的 C 结构合法：括号平衡、无顶层函数定义嵌套在别的函数体内。补上了「后端产出畸形 C 却退出码 0」这个静默失败模式。 |
 | `check_backend_manifest.py` | 检查 backend manifest 的 logical capability 分类。 |
 | `check_backend_abi_contract.py` | 保持 `BackendShape`、ABI 文档与源码清单同步。 |

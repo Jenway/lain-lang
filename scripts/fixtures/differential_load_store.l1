@@ -1,0 +1,46 @@
+// Differential fixture: narrow load/store widths, plus mixed-precedence
+// arithmetic, all observable in the returned value.
+//
+// Both C backends lower this same LAINIR and must agree.  The defects this
+// catches produced no diagnostic and a zero exit code: a 16-bit load read
+// eight bytes, a 16-bit store wrote eight, a 32-bit load read eight, and a
+// value expression mixing two precedence levels dropped a term.
+//
+// The scratch buffer is populated with 8-bit stores so the fixture does not
+// rely on the behaviour it tests in order to set itself up:
+//   byte 0 = 3, byte 1 = 4        a 16-bit load at 0 must see 0x0403 = 1027
+//   byte 2 = 10, bytes 3..5 = 0   a 32-bit load at 2 must see 10
+// A 64-bit load at 0 would instead take in bytes 2..7.
+#proc main() -> #bits<32> {
+  #let %base: #addr = #alloca(16)
+  #store[#bits<8>] 3, #lea(base=%base, idx=0, scale=1, offset=0)
+  #store[#bits<8>] 4, #lea(base=%base, idx=0, scale=1, offset=1)
+  #store[#bits<8>] 10, #lea(base=%base, idx=0, scale=1, offset=2)
+  #store[#bits<8>] 0, #lea(base=%base, idx=0, scale=1, offset=3)
+  #store[#bits<8>] 0, #lea(base=%base, idx=0, scale=1, offset=4)
+  #store[#bits<8>] 0, #lea(base=%base, idx=0, scale=1, offset=5)
+
+  // 1027, where an eight-byte read would take in the neighbouring bytes.
+  #let %narrow: #bits<32> = #zext[#bits<32>](#load[#bits<16>](%base))
+  // Store it back with a 16-bit store at offset 8 and read the halves
+  // separately, so an eight-byte store shows up as a clobbered high half.
+  #store[#bits<16>] #trunc[#bits<16>](%narrow),
+    #lea(base=%base, idx=0, scale=1, offset=8)
+  #let %low: #bits<32> = #zext[#bits<32>](
+    #load[#bits<8>](#lea(base=%base, idx=0, scale=1, offset=8))
+  )
+  #let %high: #bits<32> = #zext[#bits<32>](
+    #load[#bits<8>](#lea(base=%base, idx=0, scale=1, offset=9))
+  )
+
+  // 10, where an eight-byte read would take in offsets 2..9.
+  #let %wide: #bits<32> = #load[#bits<32>](
+    #lea(base=%base, idx=0, scale=1, offset=2)
+  )
+
+  // Mixed precedence, in a binding rather than a bare return: 2 * 10 + 3 = 23.
+  #let %mixed: #bits<32> = #add(#mul(2, 10), 3)
+
+  // low + high * 16 + wide + mixed = 3 + 64 + 10 + 23 = 100.
+  #return #add(#add(%low, #mul(%high, 16)), #add(%wide, %mixed))
+}
