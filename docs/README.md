@@ -67,6 +67,9 @@
 | --- | --- |
 | [`history/lainc-bootstrap-roadmap.md`](history/lainc-bootstrap-roadmap.md) | 旧自举路线快照 |
 | [`history/README.md`](history/README.md) | 历史文档分类、保留理由和已清理的重复路线图 |
+| [`history/roadmap-lain-1e-stages-2026-09-13.md`](history/roadmap-lain-1e-stages-2026-09-13.md) | bootstrap 库阶段交接实现与剩余语义边界 |
+| [`history/roadmap-lain-1d-2026-09-13.md`](history/roadmap-lain-1d-2026-09-13.md) | 编码 1d 的实际归属与编译期 IR 生成路径审计 |
+| [`history/roadmap-lain-completed-2026-09-13.md`](history/roadmap-lain-completed-2026-09-13.md) | 2026-09-13 整理移出的实现、验收及历史测量记录 |
 | [`history/roadmap-lain-completed-2026-09-07.md`](history/roadmap-lain-completed-2026-09-07.md) | 2026-09-07 前已完成工作的路线快照 |
 | [`history/roadmap-lainc-lainir-api-2026-09-07.md`](history/roadmap-lainc-lainir-api-2026-09-07.md) | lainc 与 LAINIR API 边界迁移记录 |
 | [`history/lainc-meta-roadmap.md`](history/lainc-meta-roadmap.md) | 2026-09-02 标准库与旧 archive 自举实施记录 |
