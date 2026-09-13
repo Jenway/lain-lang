@@ -16,6 +16,8 @@
 
 - [`roadmap-lain-7-sdiv-2026-09-13.md`](roadmap-lain-7-sdiv-2026-09-13.md)：保留物理参数位宽，修复负数除法失败；独立重建后的差分、native、release/snapshot 检查通过。
 
+- [`roadmap-lain-7-compare-store-width-2026-09-13.md`](roadmap-lain-7-compare-store-width-2026-09-13.md)：有符号比较按操作数自身物理位宽重解释，无类型 `#store` 的位宽改由值的 C 类型决定；两条新差分用例各带负对照；整体 lower 真实产物仍被多行 `#proc` 形参表挡住。
+
 - [`roadmap-lain-1e-macros-2026-09-13.md`](roadmap-lain-1e-macros-2026-09-13.md)：20 个 bootstrap 宏辅助过程移入库、嵌套展开与库替换执行检查；完整 1e 尚未完成。
 
 - [`roadmap-lain-1e-stages-2026-09-13.md`](roadmap-lain-1e-stages-2026-09-13.md)：bootstrap elaborate/emit 结果交接、阶段替换执行检查；完整 1e 尚未完成。

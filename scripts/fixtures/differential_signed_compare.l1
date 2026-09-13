@@ -1,0 +1,31 @@
+// Differential fixture: signed comparison at 32 bits.
+//
+// `#slt`/`#sle`/`#sgt`/`#sge` were lowered to the bare C operators
+// `((a) < (b))`, which compare the operands' *own* C types.  This backend
+// carries `#bits<32>` in `uint32_t` and `#bits<64>` in `uint64_t`, so the
+// comparison came out unsigned, while the seed backend carries the same values
+// in `int32_t`/`int64_t` and compared them signed.
+//
+// Positive small operands cannot tell the two apart, which is why the earlier
+// fixtures never caught it: every operand they compare is non-negative and
+// small.  The discriminating case is a negative value.  `#sub(1, 1)` is zero
+// and `#sub(%zero, 1)` is -1 as `#bits<32>`, so a signed reading answers
+// `-1 < 1` true and `-1 > 1` false, while an unsigned reading sees 4294967295
+// and answers the other way round.
+//
+// Worth 1 and 10 respectively: the seed backend returns 1, the unsigned
+// lowering returned 10.
+//
+// `#sdiv` had the same root cause -- widening an unsigned operand to `int64_t`
+// zero-extends -- and is fixed by reinterpreting each operand at its own
+// physical width first.  The signed comparisons now share that reinterpretation.
+#proc main() -> #bits<32> {
+  #let %zero: #bits<32> = #sub(1, 1)
+  #let %neg: #bits<32> = #sub(%zero, 1)
+
+  // Signed: -1 < 1 is true, -1 > 1 is false.
+  // Unsigned: 4294967295 < 1 is false, 4294967295 > 1 is true.
+  #let %less: #bits<32> = #zext[#bits<32>](#slt(%neg, 1))
+  #let %greater: #bits<32> = #zext[#bits<32>](#sgt(%neg, 1))
+  #return #add(%less, #mul(10, %greater))
+}

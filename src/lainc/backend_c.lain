@@ -57,6 +57,18 @@ let append_span = std::func(
     std::store_bits(64, output, current + length);
 };
 
+// Append a NUL-terminated literal.  A hand-counted byte length is a silent
+// failure mode of its own: too long copies bytes past the text, short
+// truncates it, and neither shows up until the emitted C is compiled.
+let append_text = std::func(output: addr, text: addr) -> unit {
+    let length: usize = 0;
+    while load8(text, length) != 0 {
+        length = length + 1;
+    }
+    append_span(output, text, 0, length);
+    return;
+};
+
 let match_at = std::func(
     source: addr,
     start: usize,
@@ -961,6 +973,7 @@ let emit_proc = std::func(
     }
     append_literal(output, "(", 1);
     let cursor: usize = open + 1;
+    let type_cursor: usize = cursor;
     let emitted: i32 = 0;
     while cursor < close {
         if load8(source, cursor) == 37 {
@@ -982,7 +995,7 @@ let emit_proc = std::func(
             if emitted == 1 {
                 append_literal(output, ", ", 2);
             }
-            append_literal(output, "uintptr_t", 9);
+            emit_c_type(source, type_cursor, cursor, output, status);
             append_literal(output, " ", 1);
             let shadow_types: i32 = 0;
             if match_at(source, name_start, open, "f0_emit_module", 14) {
@@ -1003,6 +1016,9 @@ let emit_proc = std::func(
             emitted = 1;
             cursor = name_end;
         } else {
+            if load8(source, cursor) == 44 {
+                type_cursor = cursor + 1;
+            }
             cursor = cursor + 1;
         }
     }
@@ -1018,7 +1034,7 @@ let emit_proc = std::func(
 };
 
 // Emit complete C declarations in a first pass.  The generated definitions
-// use uintptr_t for every L1 argument, so matching prototypes avoid the
+// preserve each physical L1 parameter type. Matching prototypes avoid the
 // optimizer-sensitive undefined behavior caused by old-style `proc()`
 // declarations while still allowing calls to procedures emitted later.
 let emit_proc_decl = std::func(
@@ -1077,6 +1093,7 @@ let emit_proc_decl = std::func(
     }
     append_literal(output, "(", 1);
     let cursor: usize = open + 1;
+    let type_cursor: usize = cursor;
     let emitted: i32 = 0;
     while cursor < close {
         if load8(source, cursor) == 37 {
@@ -1092,11 +1109,15 @@ let emit_proc_decl = std::func(
             if emitted == 1 {
                 append_literal(output, ", ", 2);
             }
-            append_literal(output, "uintptr_t ", 10);
+            emit_c_type(source, type_cursor, cursor, output, status);
+            append_literal(output, " ", 1);
             append_span(output, source, name_cursor, name_end);
             emitted = 1;
             cursor = name_end;
         } else {
+            if load8(source, cursor) == 44 {
+                type_cursor = cursor + 1;
+            }
             cursor = cursor + 1;
         }
     }
@@ -1109,7 +1130,7 @@ let emit_proc_decl = std::func(
 // Emit a real C prototype for an L1 extern.  The previous implementation
 // preserved extern lines only as comments, which made a C11 translation unit
 // containing a user call rely on an undeclared function.  Keep the ABI
-// conservative (uintptr_t arguments) just like procedure declarations and
+// physical parameter types consistent with procedure declarations and
 // normalize Lain's '-'/' .' symbol separators to C identifiers.
 let emit_extern_decl = std::func(
     source: addr,
@@ -1184,6 +1205,7 @@ let emit_extern_decl = std::func(
     }
     append_literal(output, "(", 1);
     let cursor: usize = open + 1;
+    let type_cursor: usize = cursor;
     let emitted: i32 = 0;
     while cursor < close {
         if load8(source, cursor) == 37 {
@@ -1197,11 +1219,15 @@ let emit_extern_decl = std::func(
                 param_end = param_end + 1;
             }
             if emitted == 1 { append_literal(output, ", ", 2); }
-            append_literal(output, "uintptr_t ", 10);
+            emit_c_type(source, type_cursor, cursor, output, status);
+            append_literal(output, " ", 1);
             append_span(output, source, param_start, param_end);
             emitted = 1;
             cursor = param_end;
         } else {
+            if load8(source, cursor) == 44 {
+                type_cursor = cursor + 1;
+            }
             cursor = cursor + 1;
         }
     }
@@ -1216,10 +1242,16 @@ let emit_store_line = std::func(
     output: addr,
     status: addr,
 ) -> unit {
+    // `width` is the store's physical width.  When the text declares one it is
+    // read below; otherwise `from_value` stays set and the value's own physical
+    // type decides, which is the rule the L1 verifier applies to a `#store`
+    // that carries no type.
     let width: i32 = 64;
+    let from_value: i32 = 1;
     let index: usize = start + 6;
     if index < end {
         if load8(source, index) == 91 {
+            from_value = 0;
             let type_start: usize = index + 1;
             if match_at(source, type_start, end, "#bits<8>", 8) {
                 width = 8;
@@ -1275,27 +1307,48 @@ let emit_store_line = std::func(
         }
         comma = comma + 1;
     }
-    if width == 64 {
-        if match_at(source, value_start, comma, "%byte", 5) {
-            width = 8;
+    // A value whose C type carries its L1 width needs no text rule: a binding
+    // keeps its declared type, a call its return type and a `#load` its
+    // annotation, so `L1_store_auto` reads the width from the emitted
+    // expression.  Two forms are settled from the text instead, because their C
+    // spelling loses the width.  An integer literal is `#bits<64>` in L1 but a
+    // plain C `int`, and a `#trunc[#bits<8>]` wrapper is stripped below so the
+    // cast that names its width never reaches the selection.
+    //
+    // The old rule guessed 64 bits unless the value's *spelling* began with
+    // `%byte` or `#trunc[#bits<8>]`, which stored a `#bits<32>` binding as eight
+    // bytes and overwrote the fields behind it, and which also read `%bytes` as
+    // a byte value because the test was a prefix match.
+    if from_value == 1 {
+        if value_start < comma {
+            let lead: i32 = load8(source, value_start);
+            if lead >= 48 && lead <= 57 {
+                from_value = 0;
+                width = 64;
+            }
         }
         if match_at(source, value_start, comma, "#trunc[#bits<8>]", 16) {
+            from_value = 0;
             width = 8;
         }
     }
-    if width == 8 {
-        append_literal(output, "L1_store8(", 10);
+    if from_value == 1 {
+        append_text(output, "L1_store_auto(");
     } else {
-        if width == 16 {
-            append_literal(output, "L1_store16(", 11);
+        if width == 8 {
+            append_literal(output, "L1_store8(", 10);
         } else {
-            if width == 32 {
-                append_literal(output, "L1_store32(", 11);
+            if width == 16 {
+                append_literal(output, "L1_store16(", 11);
             } else {
-                if width == 64 {
-                    append_literal(output, "L1_store64(", 11);
+                if width == 32 {
+                    append_literal(output, "L1_store32(", 11);
                 } else {
-                    append_literal(output, "/* unsupported L1: #store */", 28);
+                    if width == 64 {
+                        append_literal(output, "L1_store64(", 11);
+                    } else {
+                        append_literal(output, "/* unsupported L1: #store */", 28);
+                    }
                 }
             }
         }
@@ -1979,6 +2032,24 @@ let backend_compile = std::func() -> i32 {
     append_literal(output, "static void L1_store16(uintptr_t p, uint16_t v){ memcpy((void *)p, &v, 2); }\n", 77);
     append_literal(output, "static void L1_store32(uintptr_t p, uint32_t v){ memcpy((void *)p, &v, 4); }\n", 77);
     append_literal(output, "static void L1_store64(uintptr_t p, uint64_t v){ memcpy((void *)p, &v, 8); }\n", 77);
+    // A `#store` with no declared type takes the physical type of its value:
+    // the L1 verifier infers it from the value expression and fails with 2017
+    // when it cannot.  The C type of the emitted value expression carries that
+    // width for every value form this backend produces -- a binding keeps its
+    // declared type, a call its return type, a `#load`/`#trunc` its annotation,
+    // and `#addr` is `uintptr_t`, the same type as `uint64_t` on both data
+    // models that matter.  Selecting on the C type therefore reads the width
+    // instead of guessing it from the value's spelling, which stored a
+    // `#bits<32>` binding as eight bytes and overwrote the fields behind it.
+    //
+    // The eight fixed-width types are pairwise distinct, so the selection has
+    // no duplicate association on either LLP64 or LP64.  A value of any other
+    // type -- a promoted `int`, say -- selects `default`.  Its arm is defined
+    // with an empty parameter list, so selecting it makes the call itself a
+    // compile error naming this function, while a module that never selects it
+    // compiles without a warning.
+    append_text(output, "static void L1_store_unsupported(void) { }\n");
+    append_text(output, "#define L1_store_auto(dest,val) _Generic((val), int8_t: L1_store8, uint8_t: L1_store8, int16_t: L1_store16, uint16_t: L1_store16, int32_t: L1_store32, uint32_t: L1_store32, int64_t: L1_store64, uint64_t: L1_store64, default: L1_store_unsupported)((dest), (val))\n");
     append_literal(output, "#define L1_alloca(n) ((uintptr_t)malloc((size_t)(n)))\n", 54);
     append_literal(output, "#define L1_lea(base,idx,scale,offset) ((uintptr_t)(base)+(uintptr_t)(idx)*(uintptr_t)(scale)+(intptr_t)(offset))\n", 113);
     append_literal(output, "extern uintptr_t bootstrap_allocate_pages(uint64_t);\n", 53);
@@ -1997,18 +2068,37 @@ let backend_compile = std::func() -> i32 {
     append_literal(output, "extern uint64_t bootstrap_source_path_length(uint64_t);\n", 56);
     append_literal(output, "extern void bootstrap_copy_bytes(uintptr_t, uintptr_t, uint64_t);\n", 66);
     append_literal(output, "extern void ast_substitute(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);\n", 83);
-    append_literal(output, "#define L1_add(a,b) ((a)+(b))\n#define L1_sub(a,b) ((a)-(b))\n#define L1_mul(a,b) ((a)*(b))\n#define L1_eq(a,b) ((a)==(b))\n#define L1_lt(a,b) ((a)<(b))\n#define L1_le(a,b) ((a)<=(b))\n#define L1_and(a,b) ((a)&&(b))\n#define L1_or(a,b) ((a)||(b))\n", 240);
-    append_literal(output, "#define L1_ne(a,b) ((a)!=(b))\n#define L1_gt(a,b) ((a)>(b))\n#define L1_ge(a,b) ((a)>=(b))\n", 89);
-    append_literal(output, "#define L1_udiv(a,b) ((a)/(b))\n#define L1_sdiv(a,b) ((int64_t)(a)/(int64_t)(b))\n#define L1_urem(a,b) ((a)%(b))\n", 111);
-    // The comparison families share a C operator, so the signed spellings
-    // cannot serve the unsigned family: `((a) < (b))` compares the operands'
-    // own types, and `int32_t` is signed.  Widening both sides to an unsigned
-    // 64-bit type first makes the comparison unsigned whatever the producer
-    // chose -- `int8_t`..`int64_t` for narrow and loaded values, `uint64_t`
-    // and `uintptr_t` for addresses.  Zero bits are introduced above the
-    // operand's width, so a 32-bit `0xFFFFFFFF` reads as 4294967295 rather
+    append_text(output, "#define L1_add(a,b) ((a)+(b))\n#define L1_sub(a,b) ((a)-(b))\n#define L1_mul(a,b) ((a)*(b))\n#define L1_eq(a,b) ((a)==(b))\n#define L1_and(a,b) ((a)&&(b))\n#define L1_or(a,b) ((a)||(b))\n");
+    append_text(output, "#define L1_ne(a,b) ((a)!=(b))\n");
+    // One operand reinterpretation serves every signed operation.  `#bits<32>`
+    // is carried in `uint32_t`, and widening an unsigned operand to `int64_t`
+    // zero-extends: -7 is 4294967289 there, so `(int64_t)(a)/(int64_t)(b)`
+    // divided 4294967289 by 2 and answered 2147483644 instead of -3.  Each
+    // operand is therefore reinterpreted as the signed type of its own width
+    // first -- `(int32_t)4294967289` is -7 -- and only then widened to
+    // `int64_t`, which keeps the C type the rest of the emitted expression
+    // expects; dividing or comparing in `int32_t` would instead make
+    // `uint32_t` vs `int32_t` promote to unsigned at every use site.  Only
+    // `uint32_t` needs an arm of its own: `#bits<8>` and `#bits<16>` are
+    // already signed, and `#bits<1>`, `#bits<64>` and `addr` are unsigned at
+    // their full C width, where the `(int64_t)` cast already keeps the bit
+    // pattern.  `_Generic` is C11, the standard every consumer of this
+    // artifact compiles with.  `#udiv` and `#urem` stay unsigned expressions:
+    // they are the unsigned family.
+    //
+    // The signed comparisons had the same root cause as `#sdiv`.  Spelled as
+    // the bare C operator they compared the operands' own types, which are
+    // unsigned for `#bits<32>/<64>`, so `#slt(-1, 1)` compared 4294967295 < 1
+    // and answered false where the seed backend's `int32_t` spelling answered
+    // true.  Both now read their operands through the same helper.
+    append_text(output, "#define L1_udiv(a,b) ((a)/(b))\n#define L1_signed(x) _Generic((x), uint32_t: (int64_t)(int32_t)(x), default: (int64_t)(x))\n#define L1_sdiv(a,b) (L1_signed(a)/L1_signed(b))\n#define L1_lt(a,b) (L1_signed(a) < L1_signed(b))\n#define L1_le(a,b) (L1_signed(a) <= L1_signed(b))\n#define L1_gt(a,b) (L1_signed(a) > L1_signed(b))\n#define L1_ge(a,b) (L1_signed(a) >= L1_signed(b))\n#define L1_urem(a,b) ((a)%(b))\n");
+    // The unsigned family cannot share `L1_signed`: widening both sides to an
+    // unsigned 64-bit type first is what makes the comparison unsigned whatever
+    // the producer chose -- `int8_t`..`int64_t` for narrow and loaded values,
+    // `uint64_t` and `uintptr_t` for addresses.  Zero bits are introduced above
+    // the operand's width, so a 32-bit `0xFFFFFFFF` reads as 4294967295 rather
     // than as -1.
-    append_literal(output, "#define L1_ult(a,b) ((uint64_t)(a) < (uint64_t)(b))\n#define L1_ule(a,b) ((uint64_t)(a) <= (uint64_t)(b))\n#define L1_ugt(a,b) ((uint64_t)(a) > (uint64_t)(b))\n#define L1_uge(a,b) ((uint64_t)(a) >= (uint64_t)(b))\n", 210);
+    append_text(output, "#define L1_ult(a,b) ((uint64_t)(a) < (uint64_t)(b))\n#define L1_ule(a,b) ((uint64_t)(a) <= (uint64_t)(b))\n#define L1_ugt(a,b) ((uint64_t)(a) > (uint64_t)(b))\n#define L1_uge(a,b) ((uint64_t)(a) >= (uint64_t)(b))\n");
     // Data objects are emitted before the prototypes and definitions,
     // matching the seed emitter's include/helper/data/prototype/definition
     // order.  A declaration may split across physical lines, so collect its

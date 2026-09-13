@@ -1,0 +1,83 @@
+// Differential fixture: the width of a `#store` with no declared type.
+//
+// A `#store` may omit its physical type.  The L1 verifier then infers it from
+// the value expression and fails with 2017 when it cannot, and the seed emitter
+// stores the width that inference produced.  This backend had no type
+// information -- it reads the module as text -- so it guessed 64 bits unless the
+// value's *spelling* began with `%byte` or `#trunc[#bits<8>]`.  A `#bits<32>`
+// binding named anything else was therefore stored as eight bytes.
+//
+// Two techniques are used, and neither depends on the two backends agreeing
+// about C signedness -- the seed carries `#bits<32>` in `int32_t` and this
+// backend in `uint32_t`, so a check that compares a loaded value against a large
+// literal would measure that difference instead of the store width.
+//
+//   An over-wide store is caught by an eight-byte sentinel placed in the bytes
+//   the store must not reach, and a too-narrow one by a reference store of the
+//   declared width written first, whose bytes a wider candidate store destroys.
+//
+//   binding, four bytes: a reference store at +4 must still read back equal
+//   call, four bytes:    sentinel at +4 survives
+//   load, two bytes:     sentinel at +2 survives
+//   literal, eight bytes: the literal is `#bits<64>`, so it must overwrite all
+//                        eight bytes of a sentinel whose high half is set
+//
+// Four points in total.  A single guessed width scores lower: guessing 64 for
+// everything destroys the reference store and all three sentinels, and guessing
+// 8 narrows the literal.
+//
+// The non-literal forms are the ones the real compiler artifact uses most: 281
+// of its 472 untyped stores store a binding, 57 store a call result and 13
+// store an arithmetic expression.
+#proc narrow32(#bits<32> %x) -> #bits<32> {
+  #return %x
+}
+
+#proc main() -> #bits<32> {
+  #let %p: #addr = #alloca(192)
+
+  // A binding keeps its declared type.  The reference store is written first and
+  // carries the same `#bits<32>` value at +4, so a candidate store that reaches
+  // past four bytes overwrites it and the two reads stop matching.  The value
+  // has every byte set, so a candidate store that is too narrow also stops
+  // matching.
+  #let %binding: #bits<32> = 4294967295
+  #store[#bits<32>] %binding, #lea(base=%p, idx=0, scale=0, offset=4)
+  #store %binding, #lea(base=%p, idx=0, scale=0, offset=0)
+  #let %binding_same: #bits<32> = #zext[#bits<32>](
+    #eq(
+      #load[#bits<32>](#lea(base=%p, idx=0, scale=0, offset=0)),
+      #load[#bits<32>](#lea(base=%p, idx=0, scale=0, offset=4))
+    )
+  )
+
+  // A call keeps its callee's return type: four bytes here.
+  #store[#bits<64>] 1, #lea(base=%p, idx=0, scale=0, offset=36)
+  #store #call narrow32(7), #lea(base=%p, idx=0, scale=0, offset=32)
+  #let %call_sentinel: #bits<32> = #zext[#bits<32>](
+    #eq(#load[#bits<64>](#lea(base=%p, idx=0, scale=0, offset=36)), 1)
+  )
+
+  // A load keeps its annotation: two bytes here, so the sentinel at +2 survives
+  // while either of the wider guesses would reach it.
+  #store[#bits<64>] 1, #lea(base=%p, idx=0, scale=0, offset=66)
+  #store[#bits<16>] 65535, #lea(base=%p, idx=0, scale=0, offset=76)
+  #let %loaded: #bits<16> = #load[#bits<16>](#lea(base=%p, idx=0, scale=0, offset=76))
+  #store %loaded, #lea(base=%p, idx=0, scale=0, offset=64)
+  #let %load_sentinel: #bits<32> = #zext[#bits<32>](
+    #eq(#load[#bits<64>](#lea(base=%p, idx=0, scale=0, offset=66)), 1)
+  )
+
+  // An integer literal is `#bits<64>` in L1 even though C spells it `int`.  The
+  // sentinel's high half is set, so only an eight-byte store answers 7.
+  #store[#bits<64>] 4294967296, #lea(base=%p, idx=0, scale=0, offset=96)
+  #store 7, #lea(base=%p, idx=0, scale=0, offset=96)
+  #let %literal_width: #bits<32> = #zext[#bits<32>](
+    #eq(#load[#bits<64>](#lea(base=%p, idx=0, scale=0, offset=96)), 7)
+  )
+
+  #return #add(
+    #add(%binding_same, %call_sentinel),
+    #add(%load_sentinel, %literal_width)
+  )
+}
