@@ -1,0 +1,59 @@
+// Differential fixture: the integer operators and conversions that neither
+// existing fixture exercises -- `#udiv`, `#sdiv` beside it, the full signed and
+// unsigned comparison families, and a `#ptr2int`/`#int2ptr` round trip.
+//
+// Each contributes a small distinct value, so a mis-lowered operator changes
+// the total instead of cancelling out.
+#proc main() -> #bits<32> {
+  // Unsigned division: 100 / 7 = 14, and the remainder recomputed by hand must
+  // agree: 100 - 14 * 7 = 2.  Together 16.
+  #let %quotient: #bits<32> = #udiv(100, 7)
+  #let %remainder: #bits<32> = #sub(100, #mul(%quotient, 7))
+  #let %divmod: #bits<32> = #add(%quotient, %remainder)
+
+  // Signed division, exercising the operator that emitted `L1_sdiv#a, b)`.
+  #let %signed_div: #bits<32> = #sdiv(7, 2)
+
+  // Signed and unsigned comparison on the same operands.  As signed, 1 < 2;
+  // as unsigned, 2 < 1 is false, so the pair pins both directions -> 1 + 0.
+  #let %compare: #bits<32> = #add(
+    #zext[#bits<32>](#slt(1, 2)),
+    #zext[#bits<32>](#ult(2, 1))
+  )
+
+  // The remaining families, each worth one: <=, >, >=, !=.
+  #let %more: #bits<32> = #add(
+    #add(#zext[#bits<32>](#sle(2, 2)), #zext[#bits<32>](#sgt(3, 2))),
+    #add(#zext[#bits<32>](#uge(3, 3)), #zext[#bits<32>](#ne(1, 2)))
+  )
+
+  // A pointer round trip must preserve the address: take a buffer, convert to
+  // an integer, convert back, and read through the result.
+  #let %buffer: #addr = #alloca(8)
+  #store[#bits<8>] 9, %buffer
+  #let %as_int: #bits<64> = #ptr2int(%buffer)
+  #let %back: #addr = #int2ptr(%as_int)
+  #let %round_trip: #bits<32> = #zext[#bits<32>](#load[#bits<8>](%back))
+
+  // Truncation then extension: 291 = 0x123, narrowed to a byte = 0x23 = 35.
+  #let %narrow: #bits<8> = #trunc[#bits<8>](291)
+  #let %widened: #bits<32> = #zext[#bits<32>](%narrow)
+
+  // Sign extension of a byte whose top bit is set: 0x93 sign-extends to a
+  // negative int32, and truncating that back to 32 bits and taking it modulo
+  // 256 must give 147 again.  A zero-extension would give 147 directly, so the
+  // two agree only if sign extension really widened.
+  #let %negative: #bits<8> = #trunc[#bits<8>](147)
+  #let %sign_extended: #bits<32> = #sext[#bits<32>](%negative)
+  #let %back_to_byte: #bits<8> = #trunc[#bits<8>](%sign_extended)
+  #let %sext_round_trip: #bits<32> = #zext[#bits<32>](%back_to_byte)
+
+  // 16 + 3 + 1 + 4 + 9 + 35 + 147 = 215
+  #return #add(
+    #add(%divmod, %signed_div),
+    #add(
+      #add(%compare, %more),
+      #add(%round_trip, #add(%widened, %sext_round_trip))
+    )
+  )
+}

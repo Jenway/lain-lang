@@ -1,0 +1,28 @@
+// Differential fixture: the unsigned comparison family.
+//
+// The Lain backend supports `#slt`/`#sle`/`#sgt`/`#sge` but has no case for
+// `#ult`/`#ule`/`#ugt`/`#uge`.  It falls through to the unsupported marker,
+// which is a C *comment*, so the operands are left behind as a comma
+// expression: `ult(2, 1)` became `(2, 1)`, which is valid C and evaluates to 1
+// -- the wrong answer with no diagnostic and no failing build.
+//
+// The compiler closure does not use these four operators, which is why the gap
+// went unnoticed.  Each comparison here is worth a distinct amount so a wrong
+// result changes the total rather than cancelling: the two true ones contribute
+// 1 and 20, and the two false ones contribute 0 each.
+#proc main() -> #bits<32> {
+  // True: 1 < 2 unsigned.  Contributes 1.
+  #let %first: #bits<32> = #zext[#bits<32>](#ult(1, 2))
+
+  // False: 2 > 1 unsigned is false; a comma expression would make it 1.
+  #let %second: #bits<32> = #mul(20, #zext[#bits<32>](#ugt(1, 2)))
+
+  // False: 2 <= 1 unsigned is false.
+  #let %third: #bits<32> = #mul(4, #zext[#bits<32>](#ule(2, 1)))
+
+  // True: 2 >= 2 unsigned.  Contributes 8 would double-count, so scale it.
+  #let %fourth: #bits<32> = #mul(8, #zext[#bits<32>](#uge(2, 2)))
+
+  // 1 + 0 + 0 + 8 = 9.
+  #return #add(#add(%first, %second), #add(%third, %fourth))
+}
