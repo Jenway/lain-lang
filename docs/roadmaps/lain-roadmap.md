@@ -1337,6 +1337,25 @@ arguments-append-bits,artifact-parse,artifact-release,procedure-find,eval-bits,e
 
 本节各项与编码 5 的 A/B 选择无关，因此不受其阻塞。
 
+#### 13.0.4 建议：给两个 C 后端加差分测试
+
+本轮定位到的后端缺陷里，**最有诊断力的一步是拿两个后端对同一输入做对照**——
+`seed` 的发射器与 Lain 后端都能把同一份 LAINIR 翻成 C，而它们的产物本应语义一致。实测例：
+
+| 输入 | seed | Lain 后端 |
+| --- | --- | --- |
+| `#load[#bits<32>]` | `lainir_load_i32` | **`L1_load64`** ← 越界读 |
+| `#load[#bits<16>]` | `lainir_load_i16` | **`L1_load64`** |
+| `#store[#bits<16>]` | 16 位写 | **`L1_store64`** ← 破坏相邻字节 |
+
+**文本比对不可行**（两者命名与 addr 表示不同：`lainir_*` + `uint8_t *` 对 `L1_*` + `uintptr_t`），
+所以差分必须是**语义级**：两份 C 各自编译成可执行文件，对同一组 fixture 断言**相同输出或相同
+退出码**。
+
+这与 §11.0 那条「Lain VM 与 C seed 的行为差分」是同一手段，可用同一套 fixture 语料。
+**建议在编码 7 之前建立**，因为它是目前唯一能系统性发现「两个后端对同一 LAINIR 给出不同行为」
+的机制——本轮的三个后端缺陷都是靠人工对照偶然发现的。
+
 固定点完成后再处理：
 
 - C backend 剩余物理指令和 ABI；
