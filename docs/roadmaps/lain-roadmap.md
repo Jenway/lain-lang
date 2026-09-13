@@ -1363,7 +1363,7 @@ arguments-append-bits,artifact-parse,artifact-release,procedure-find,eval-bits,e
 两个新宏，外加**两处 load 从 64 位纠正为 8 位与 32 位**（偏移 8 的 1 字节 tag、偏移 24 的 4 字节
 字段，此前都在越界读）。也就是说**编译器自己的产物里就有被误编译的 load**。
 
-#### 13.0.4 建议：给两个 C 后端加差分测试
+#### 13.0.4 已交付：两个 C 后端的差分测试
 
 本轮定位到的后端缺陷里，**最有诊断力的一步是拿两个后端对同一输入做对照**——
 `seed` 的发射器与 Lain 后端都能把同一份 LAINIR 翻成 C，而它们的产物本应语义一致。实测例：
@@ -1379,8 +1379,18 @@ arguments-append-bits,artifact-parse,artifact-release,procedure-find,eval-bits,e
 退出码**。
 
 这与 §11.0 那条「Lain VM 与 C seed 的行为差分」是同一手段，可用同一套 fixture 语料。
-**建议在编码 7 之前建立**，因为它是目前唯一能系统性发现「两个后端对同一 LAINIR 给出不同行为」
-的机制——本轮的三个后端缺陷都是靠人工对照偶然发现的。
+**已交付（2026-09-12，提交 `26d80ef`）**：`scripts/check_backend_differential.py` 实现了上述语义差分，
+并已进入主入口（gate 总数 37）。两个 fixture：`differential_load_store.l1`（窄 load/store 宽度）、
+`differential_arithmetic_control.l1`（优先级、`&&` 条件、除法）。
+
+**它第一次运行就找到一个真缺陷**：Lain 后端的 load/store helper 是**解引用强转指针**，
+而 seed 走 `memcpy`。`#alloca(n)` 给出的是字节数组，故偏移 2 上的 32 位访问**真的未对齐**——
+seed 能处理，Lain 后端则 panic（`load of misaligned address ... requires 4 byte alignment`）。
+helper 已改为 memcpy 形式并接收 `uintptr_t`。
+
+**关于这个 gate 自身的一条教训**：用 `-O2` 构建时，**即使后端未修复它也通过**——
+优化会去掉对齐检查，而 x86 容忍未对齐读，两者只在 Debug 构建下才显现差异。
+因此该 gate **不启用优化**，原因写进了脚本注释。
 
 固定点完成后再处理：
 
