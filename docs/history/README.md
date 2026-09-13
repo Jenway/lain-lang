@@ -6,6 +6,21 @@
 
 - [`roadmap-lain-completed-2026-09-07.md`](roadmap-lain-completed-2026-09-07.md)：截至 2026-09-07 已有可执行证据的 compiler、backend、bootstrap、Eval contract 和 LAINIR 物理语义。
 
+### Eval 契约与项目结构完成记录（2026-09-09）
+
+以下五份是 C0–C3 与 C0.5 的完成快照，记录了 `#eval` 执行契约的固定和 `seed → bootstrap → src`
+源码边界的分离过程：
+
+- [`roadmap-eval-c0-2026-09-09.md`](roadmap-eval-c0-2026-09-09.md)：删除错误的求值结果协议（`EvalResult`、结果种类、资源归属、代际、sidecar、payload adapter 和 `LainirVmSession`）。
+- [`roadmap-eval-c1-2026-09-09.md`](roadmap-eval-c1-2026-09-09.md)：固定 `#eval`、临时 TCB 与 Trap 的执行契约（按值捕获、共享 VSpace、共同预算、只交付普通 LAINIR 值）。
+- [`roadmap-eval-c2-2026-09-09.md`](roadmap-eval-c2-2026-09-09.md)：C seed 改为通过临时 TCB 执行 `#eval`（独立 VM control 与根 frame）。
+- [`roadmap-eval-c3-2026-09-09.md`](roadmap-eval-c3-2026-09-09.md)：把 Lain 写的解释器从 `src/lainir/api/` 分离到 LAINVM。
+- [`roadmap-project-structure-c0.5-2026-09-09.md`](roadmap-project-structure-c0.5-2026-09-09.md)：完成 `seed → bootstrap → src` 的源码边界分离。
+
+**注意**：C3 记录的 Lain LAINVM 解释器后来被**暂停并归档**（见
+[`formal-implementations/`](formal-implementations/) 与本索引末尾的说明），该快照描述的是
+归档前的状态。
+
 ## 架构和迁移决策
 
 - [`roadmap-lainc-lainir-api-2026-09-07.md`](roadmap-lainc-lainir-api-2026-09-07.md)：lainc 与 LAINIR provider/API 边界的详细迁移记录。
