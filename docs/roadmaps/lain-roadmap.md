@@ -1289,8 +1289,27 @@ arguments-append-bits,artifact-parse,artifact-release,procedure-find,eval-bits,e
 `#return 0`），而 Lain 后端**静默替换成 `uint64_t`**。「失败」与「静默给出错误答案」是两回事，
 后者正是 §3.5 那条教训的同一形态。
 
+**已修（2026-09-12，提交 `5c0a5ff`）**：
+
+- `emit_c_type` 补齐 `#bits<8>`→`int8_t`、`#bits<16>`→`int16_t`、`#float<32>`→`float`、
+  `#float<64>`→`double`，显式写出 `#bits<64>`→`uint64_t` 与 `#never`→`void`；
+  兜底改为**标记并失败**（不发 artifact，seed 驱动报 status 1）。
+  **`#bits<32>` 仍是 `uint32_t`、`#bits<1>` 仍是 `uint8_t`**：实测若把 `#bits<32>` 改成 seed 的
+  `int32_t`，闭包产物会有 125 处差异，其中 14 处是 host ABI 的 `extern` 原型（真实 C 签名是
+  `uint32_t`/`int`），改动会扩散到 ABI 边界，故保留。
+- `emit_expr` 的未知 `#` 构造不再透传，改走既有的 `/* unsupported L1: ... */` 通道。
+  **另外三个同源泄漏一并修掉**，均无任何 gate 覆盖：
+  - `#sdiv` 曾被匹配但落在 else 链之外，仍落入兜底 → 除法产出 `L1_sdiv#a, b)`，
+    **即除法在后端里本来就是坏的**；
+  - `#call_indirect` 与 `#call` 共享前缀，尾部被泄漏；
+  - `#alloca(<类型>)` 被透传成 `L1_alloca(#bits<8>)`。
+- **float 运算有意未实现**：本后端把一切值（含地址）都当 `uintptr_t` 传参，浮点值没有跨调用边界的
+  表示；正确实现需要位转换 helper 与调用约定改动，属新特性而非修复。边界由 fixture 钉住
+  （断言出现 marker），不伪造 lowering。
+
 **修正结论**：native 构建当前的障碍仍只在 `#eval` 与宿主 ABI（对编译器闭包而言成立），
-但**后端并非「LAINIR v1 全覆盖」**——float 与部分整数宽度是未实现，而非不可达。
+但后端**并非「LAINIR v1 全覆盖」**——float 运算是未实现（现已显式标记而非静默产出非法 C），
+整数宽度与类型映射已补齐。
 
 #### 13.0.3 前端表达式形状审计（2026-09-12）：第二轮无缺口
 
