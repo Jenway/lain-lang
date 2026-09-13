@@ -1441,6 +1441,32 @@ kind 33–36（`EXPR_ULT`/`ULE`/`UGT`/`UGE`）映射到与 kind 29–32（有符
 
 **当前四个 fixture 全部一致**：`100`、`32`、`-41`、`10110`。
 
+##### 后端覆盖面对照（2026-09-12，逐字面量核查）
+
+扩面过程中顺带把两个后端对各构造的支持做了逐条对照（`grep -cF`，非正则）：
+
+| 构造 | seed | Lain 后端 | 编译器闭包使用 |
+| --- | --- | --- | --- |
+| `#call_indirect` | **0（不支持，status 3）** | 2 | 0 |
+| `#bitcast` | **0** | **0** | 0 |
+| `#proc_addr` | **0** | **0** | 0 |
+| `#trunc`/`#sext`/`#zext` | 支持 | 匹配但**不发射**（见下） | — |
+| `#ult`/`#ule`/`#ugt`/`#uge` | 曾错（已修） | 曾缺（已修） | 0 |
+
+三条结论：
+
+1. **两个后端的覆盖面不同向**：`#call_indirect` 只有 Lain 后端支持，seed 在该输入上直接
+   `seed-backed emitter does not support this IR`（status 3）。因此差分测试**无法**覆盖它——
+   seed 侧根本产不出 C。这不是缺陷（Lain 后端领先是允许的），但意味着**该构造没有交叉验证**。
+2. **`#bitcast` 与 `#proc_addr` 两个后端都不支持**，而 `docs/01-lain-ir.md` 定义了 `#bitcast`、
+   seed 的解析器也认识 `bitcast` 关键字。即**LAINIR v1 里有构造没有任何 C lowering**，
+   属于编码 7「C backend 剩余物理指令」的范畴。
+3. **`#eval` 在 `srclainc.l1` 里的 4 处全部位于字符串字面量内**（是编译器为 Meta 调用生成的
+   LAINIR 文本，不是真指令）——`grep` 计数会误导。真实 `#eval` 指令是否残留在闭包内需要看
+   bootstrap 产物，而 `build/lainc-native.c` 确实报出 1 处未消除的 `#eval`，与 §3.2 的记录一致。
+
+**当前四个 fixture 全部一致**：`100`、`32`、`-41`、`10110`。
+
 固定点完成后再处理：
 
 - C backend 剩余物理指令和 ABI；
