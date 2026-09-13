@@ -100,9 +100,16 @@ CASES = (
     (
         "backend_load_store_widths.l1",
         (
-            "#define L1_load16(p) (*(uint16_t*)(uintptr_t)(p))",
-            "#define L1_load32(p) (*(uint32_t*)(uintptr_t)(p))",
-            "#define L1_store16(p,v) (*(uint16_t*)(uintptr_t)(p)=(uint16_t)(v))",
+            "static uint16_t L1_load16(uintptr_t p){",
+            "static uint32_t L1_load32(uintptr_t p){",
+            "static void L1_store16(uintptr_t p, uint16_t v){",
+            # The helpers read through memcpy rather than dereferencing a cast
+            # pointer, because `#alloca` produces a byte array and a 32-bit
+            # access at an odd offset is therefore unaligned.  Asserting the
+            # memcpy keeps a future edit from reintroducing the direct
+            # dereference, which panics under a runtime that checks alignment.
+            "memcpy(&v, (const void *)p, 2)",
+            "memcpy((void *)p, &v, 2)",
             "int16_t b=  L1_load16(p);",
             "L1_store16( p, b);",
             "uint32_t c=  L1_load32(p);",

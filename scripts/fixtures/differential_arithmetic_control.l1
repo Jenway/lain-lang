@@ -1,0 +1,39 @@
+// Differential fixture: arithmetic precedence and control flow.
+//
+// Both C backends lower this same LAINIR and must agree.  These are the shapes
+// where the frontend silently miscompiled: a value expression mixing two
+// precedence levels dropped a term, a `while` condition kept only its first
+// `&&` conjunct, and division emitted `L1_sdiv#a, b)`.
+//
+// Values are chosen so each defect changes the result rather than coinciding:
+//   23 from 2 * 10 + 3      (a dropped term gives 20 or 3)
+//   loop stops at 3         (conjunct dropped gives 10)
+//   7 / 2 = 3               (a mangled division does not compile at all)
+//   7 % 2 = 1
+//   an `if` taken only when both conjuncts hold
+// Total: 23 + 3 + 3 + 1 + 2 = 32.
+#proc main() -> #bits<32> {
+  // Mixed precedence, bound to a name rather than returned directly.
+  #let %mixed: #bits<32> = #add(#mul(2, 10), 3)
+
+  // A `while` whose second conjunct stops the loop early.
+  #let %i: #bits<32> = 0
+  #loop counting {
+    #if #eq(#add(#zext[#bits<32>](#slt(%i, 10)), #zext[#bits<32>](#slt(%i, 3))), 2) {
+    } else { #break counting }
+    %i: #bits<32> = #add(%i, 1)
+    #continue counting
+  }
+
+  // Division and remainder, which the backend emitted as `L1_sdiv#a, b)`.
+  #let %quotient: #bits<32> = #sdiv(7, 2)
+  #let %remainder: #bits<32> = #sub(7, #mul(%quotient, 2))
+
+  // An `if` taken only when both comparisons hold.
+  #let %bonus: #bits<32> = 0
+  #if #eq(#add(#zext[#bits<32>](#slt(%i, 4)), #zext[#bits<32>](#slt(0, %i))), 2) {
+    %bonus: #bits<32> = 2
+  }
+
+  #return #add(#add(%mixed, %i), #add(%quotient, #add(%remainder, %bonus)))
+}
