@@ -91,6 +91,29 @@ CASES = (
         ("/* unsupported L1: #call_indirect */",),
         ("_indirect[",),
     ),
+    # A load or store used to widen to 64 bits whenever its declared width
+    # was not 8 (load) or 8/32 (store): `#bits<16>` and `#bits<32>` loads and
+    # the `#bits<16>` store emitted the 64-bit helper.  A 16-bit store then
+    # overwrote the six bytes after its destination and a 16- or 32-bit load
+    # read them.  The required fragments pin each width to its own helper and
+    # the forbidden ones are the widened emissions this fixture regressed.
+    (
+        "backend_load_store_widths.l1",
+        (
+            "#define L1_load16(p) (*(uint16_t*)(uintptr_t)(p))",
+            "#define L1_load32(p) (*(uint32_t*)(uintptr_t)(p))",
+            "#define L1_store16(p,v) (*(uint16_t*)(uintptr_t)(p)=(uint16_t)(v))",
+            "int16_t b=  L1_load16(p);",
+            "L1_store16( p, b);",
+            "uint32_t c=  L1_load32(p);",
+            "L1_store32( p, c);",
+        ),
+        (
+            "int16_t b=  L1_load64(p);",
+            "L1_store64( p, b);",
+            "uint32_t c=  L1_load64(p);",
+        ),
+    ),
 )
 
 # Modules this backend cannot lower must be refused: the run has to fail and

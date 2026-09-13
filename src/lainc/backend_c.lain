@@ -243,10 +243,35 @@ let emit_expr = std::func(
                                     } else {
                                         if match_at(source, index, end, "#load", 5) {
                                             let type_start: usize = index + 6;
+                                            // Dispatch on the declared width.  `#addr`
+                                            // is a pointer-width read and `#bits<1>` is
+                                            // a byte-sized boolean; anything else has no
+                                            // C helper, so it leaves a marker rather than
+                                            // reading eight bytes past the object.
                                             if match_at(source, type_start, end, "#bits<8>", 8) {
                                                 append_literal(output, "L1_load8", 8);
                                             } else {
-                                                append_literal(output, "L1_load64", 9);
+                                                if match_at(source, type_start, end, "#bits<16>", 9) {
+                                                    append_literal(output, "L1_load16", 9);
+                                                } else {
+                                                    if match_at(source, type_start, end, "#bits<32>", 9) {
+                                                        append_literal(output, "L1_load32", 9);
+                                                    } else {
+                                                        if match_at(source, type_start, end, "#bits<64>", 9) {
+                                                            append_literal(output, "L1_load64", 9);
+                                                        } else {
+                                                            if match_at(source, type_start, end, "#addr", 5) {
+                                                                append_literal(output, "L1_load64", 9);
+                                                            } else {
+                                                                if match_at(source, type_start, end, "#bits<1>", 8) {
+                                                                    append_literal(output, "L1_load8", 8);
+                                                                } else {
+                                                                    append_literal(output, "/* unsupported L1: #load */", 27);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                             index = index + 5;
                                             while index < end {
@@ -845,8 +870,21 @@ let emit_store_line = std::func(
             if match_at(source, type_start, end, "#bits<8>", 8) {
                 width = 8;
             } else {
-                if match_at(source, type_start, end, "#bits<32>", 9) {
-                    width = 32;
+                if match_at(source, type_start, end, "#bits<16>", 9) {
+                    width = 16;
+                } else {
+                    if match_at(source, type_start, end, "#bits<32>", 9) {
+                        width = 32;
+                    } else {
+                        if match_at(source, type_start, end, "#bits<64>", 9) {
+                            width = 64;
+                        } else {
+                            // A declared width without a C helper must not widen
+                            // to 64 bits: the store would overwrite the bytes
+                            // after its destination.  Zero selects the marker.
+                            width = 0;
+                        }
+                    }
                 }
             }
             while index < end {
@@ -894,10 +932,18 @@ let emit_store_line = std::func(
     if width == 8 {
         append_literal(output, "L1_store8(", 10);
     } else {
-        if width == 32 {
-            append_literal(output, "L1_store32(", 11);
+        if width == 16 {
+            append_literal(output, "L1_store16(", 11);
         } else {
-            append_literal(output, "L1_store64(", 11);
+            if width == 32 {
+                append_literal(output, "L1_store32(", 11);
+            } else {
+                if width == 64 {
+                    append_literal(output, "L1_store64(", 11);
+                } else {
+                    append_literal(output, "/* unsupported L1: #store */", 28);
+                }
+            }
         }
     }
     if comma < end {
@@ -1567,9 +1613,11 @@ let backend_compile = std::func() -> i32 {
     append_literal(output, "#include <stdio.h>\n", 19);
     append_literal(output, "static uintptr_t base, idx, scale, offset;\n", 43);
     append_literal(output, "#define L1_load8(p) (*(uint8_t*)(uintptr_t)(p))\n", 48);
+    append_literal(output, "#define L1_load16(p) (*(uint16_t*)(uintptr_t)(p))\n", 50);
     append_literal(output, "#define L1_load32(p) (*(uint32_t*)(uintptr_t)(p))\n", 50);
     append_literal(output, "#define L1_load64(p) (*(uint64_t*)(uintptr_t)(p))\n", 50);
     append_literal(output, "#define L1_store8(p,v) (*(uint8_t*)(uintptr_t)(p)=(uint8_t)(v))\n", 64);
+    append_literal(output, "#define L1_store16(p,v) (*(uint16_t*)(uintptr_t)(p)=(uint16_t)(v))\n", 67);
     append_literal(output, "#define L1_store32(p,v) (*(uint32_t*)(uintptr_t)(p)=(uint32_t)(v))\n", 67);
     append_literal(output, "#define L1_store64(p,v) (*(uint64_t*)(uintptr_t)(p)=(uint64_t)(v))\n", 67);
     append_literal(output, "#define L1_alloca(n) ((uintptr_t)malloc((size_t)(n)))\n", 54);
