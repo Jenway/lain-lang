@@ -63,7 +63,7 @@ python scripts/<name>.py [args...]
 
 ## 推荐入口
 
-- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 37 道门禁，任一失败即以该 gate 的退出码结束。
+- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 42 道门禁，任一失败即以该 gate 的退出码结束。
 - `python scripts/capture_lain_bootstrap_baseline.py` — 采集可复现的机器可读 bootstrap 基线报告（同时记录成功与失败的 gate）。
 
 `scripts/check_*.py` 共 40 个，主入口收录其中 **37** 个。**未收录的 3 个及其原因**：
@@ -93,10 +93,10 @@ python scripts/<name>.py [args...]
 
 | 脚本 | 作用 |
 | --- | --- |
-| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 37 道门禁。 |
+| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 42 道门禁，正式库在消费者检查前从当前源码重建并运行内置验收。 |
 | `check_lainc_lainir_api.py` | 检查源码层面的 lainc → LAINIR capability 边界（`--final` 时切换为移除 gate）。 |
 | `check_lainc_lainir_api_snapshots.py` | 用 checked-in canonical artifact 基线守护 formal compiler 的回归。 |
-| `check_backend_differential.py` | 同一份 LAINIR 交给两个 C 后端，各自编译成可执行文件，断言返回值相同。以 Debug 构建，使运行期对齐检查生效。 |
+| `check_backend_differential.py` | 先重建当前 Lain 后端；同一份 LAINIR 交给两个 C 后端并实际执行，比较返回值，负数除法与 8/16/32/64 位参数用例还检查独立预期值。以 Debug 构建，使运行期对齐检查生效。 |
 | `check_backend_c_shape.py` | 校验 Lain 后端产出的 C 结构合法：括号平衡、无顶层函数定义嵌套在别的函数体内。补上了「后端产出畸形 C 却退出码 0」这个静默失败模式。 |
 | `check_backend_manifest.py` | 检查 backend manifest 的 logical capability 分类。 |
 | `check_backend_abi_contract.py` | 保持 `BackendShape`、ABI 文档与源码清单同步。 |
@@ -112,6 +112,10 @@ python scripts/<name>.py [args...]
 | `check_srclainc_artifact.py` | 重建 Lain compiler source closure 并证明产物确定性。 |
 | `check_lainc_bootstrap_snapshot.py` | 验证生成的 bootstrap bundle 及其 source manifest。 |
 | `check_bits_type.py` | 校验 `#bits<N>` 类型的物理宽度解析：`#bits<8>/<32>/<64>` 作为形参标注时产物给出对应位宽（`<8>` 实参 300 截断为 44），宽度非 8 的倍数或缺 `>` 报 5104。 |
+| `check_meta_stage_swap.py` | 替换库 expand 的 AST、elaborate 的语义结果及 lower，实际运行观察结果；验证 origin/hygiene、错误 span 与 elaborate 失败后不执行 lower，core 过程体不变。 |
+| `check_library_ast_macros.py` | 验证宏辅助过程归属库、core 边界拒绝宏规则，并执行嵌套宏展开探针；不证明默认 expand ABI 支持任意用户宏。 |
+| `check_bootstrap_macro_expand.py` | 默认编译流水线实际展开单/多参数宏，运行产物并验证递归/参数数量诊断、调用者同名参数与复合表达式；可指定独立 compiler bundle。 |
+| `check_meta_pipeline_audit.py` | 审计实际 core/stdlib 归属；五条临时捕获探针验证生成的显式 #eval 与 IR，原 bundle 编译运行基线；报告保留 effect main 未消费语义的限制。 |
 | `check_bootstrap_consteval.py` | 通过生成的 LAINIR `#eval` 验证 bootstrap Meta 算术。 |
 | `check_bootstrap_vm_api.py` | 运行 seed 侧 Artifact/Procedure/arguments/eval 契约。 |
 | `check_eval_tcb.py` | 验证 C seed 的临时 TCB `#eval` 执行契约。 |
@@ -172,3 +176,28 @@ python scripts/<name>.py [args...]
 - **gen2/gen3 固定点 gate 尚未完成**：`srclainc.l1` 目前是库产物，没有可供 seed 调用的 `compiler_compile` 入口，两次构建一致并不等于编译器固定点。依据 `README.md` 的 Bootstrap status 与 `docs/roadmaps/lain-roadmap.md` §3.2、§12。
 - `run_lainir_self_host.py` 自举的是 **LAINIR 编译器**，不能作为 Lain 编译器的固定点证据。
 - `profile_lainc_bootstrap.py` 仍假定旧的单文件输入和 `compiler_compile` 入口，不能原样用作当前固定点驱动。
+
+### 正式标量表达式迁移回归（编码 1h）
+
+`python scripts/check_formal_expression_lowering.py --compiler build/lainir/formal_stdlib_abi_probe.l1`
+验证普通返回的混合优先级、左结合和嵌套括号，检查显式 `#eval`，经 verifier 后实际执行到 42。
+修复前正式库返回 5203；修复已写入正式源码，隔离重建通过三个正例和两个诊断反例、完整 ABI/metadata 及 12 个宏用例。
+五项回归已登记到 `build_formal_stdlib.py`，生产重建及相关正式库回归通过。
+实施范围与执行证据见 [`1h 表达式快照`](../docs/history/roadmap-lain-1h-expressions-2026-09-13.md)。
+
+### 普通局部赋值与词法绑定回归（编码 1h，未完成）
+
+`python scripts/check_local_assignment_types.py [--compiler <bundle>]` 验证条件块/循环中的
+addr、bool、参数和推导类型赋值，以及遮蔽恢复和后声明绑定，产物经 verifier 后实际运行到 42。
+测试中的显式 foreign allocator 由执行驱动注入，用于获得真实 addr；此入口不证明 effect/handler 执行。
+当前默认编译器在第一项返回 verifier 2016，尚未登记主门禁。
+隔离源码原型使用词法作用域解析、共享声明/赋值类型、确定的局部名称及参数局部化，
+九项产物均通过 verifier 并实际运行到 42，包括初始化期间的遮蔽和参数循环更新。
+原型尚未写入主源码；记录/成员引用、完整闭包和名称确定性仍需回归。
+
+### 正式类型表达式边界回归（编码 2）
+
+`check_function_shape_conformance.py` 使用 `formal_function_shape_probe.l1` 直接执行正式 Meta
+语法 hook，断言三个合法语法正例；反例同时要求 hook 与完整编译流水线返回约定诊断。
+生产正式库重建和默认 gate 已通过 12 项对比，剩余 1 项未知返回类型的优先级 SKIP。
+`--formal-abi <bundle>` 用于显式隔离 core + formal stdlib 产物；默认入口自动保证正式库重建。
