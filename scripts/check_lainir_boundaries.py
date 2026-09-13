@@ -21,14 +21,14 @@ STDLIB = ROOT / "build" / "bootstrap" / "stdlib.l1"
 
 # These names are implementation procedures, not generic ABI accessors.
 FORBIDDEN_PROC = re.compile(
-    r"^#proc (?:meta_|program_|lower_|eval_|workspace_|syntax_)"
+    r"^#proc (?:meta_|program_|lower_|eval_|workspace_|syntax_|lain_macro_|ast_\w*macro|ast_arg_expr_end|ast_substitute_params|lain_ast_all_probe)"
 )
 
 # Semantic spelling must be interpreted by the standard library.  Keep this
 # list restricted to quoted source literals so comments and ABI identifiers do
 # not create false positives.
 FORBIDDEN_LITERAL = re.compile(
-    r'"(?:func|struct|module|import|effect|generic|bounds|record)"'
+    r'"(?:func|struct|module|import|effect|generic|bounds|record|macro)"'
 )
 
 

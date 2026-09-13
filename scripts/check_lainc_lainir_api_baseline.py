@@ -16,11 +16,15 @@ CHECKS = (
     ("seed backend adapter", "check_seed_backend_adapter.py"),
     ("native backend migration", "check_native_backend_migration.py"),
     ("historical native C procedure diff", "check_native_backend_canonical_diff.py"),
+    ("formal stdlib build and execution", "build_formal_stdlib.py"),
     ("provider behavior", "check_lainir_api_behavior.py"),
     ("compile context contract", "check_compile_context.py"),
     ("LAIN-VM single TCB contract", "check_lain_vm_contract.py"),
     ("LAINIR physical safety", "check_lainir_physical_safety.py"),
     ("meta form recognition via stdlib", "check_meta_form_swap.py"),
+    ("library Meta stage result consumption", "check_meta_stage_swap.py"),
+    ("library AST macro helpers", "check_library_ast_macros.py"),
+    ("bootstrap default macro expansion", "check_bootstrap_macro_expand.py"),
     ("compiler fixture parity", "check_stdlib_conformance.py"),
     ("function signature", "check_function_signature.py"),
     ("function declaration shape", "check_function_shape_conformance.py"),
@@ -38,6 +42,7 @@ CHECKS = (
     # and build_srclainc drive build_lain_compiler, which writes
     # build/bootstrap/*.
     ("bootstrap consteval", "check_bootstrap_consteval.py"),
+    ("bootstrap Meta pipeline audit", "check_meta_pipeline_audit.py"),
     ("bootstrap LAINVM api", "check_bootstrap_vm_api.py"),
     ("eval temporary TCB", "check_eval_tcb.py"),
     ("lain backend ABI", "check_lain_backend_abi.py"),

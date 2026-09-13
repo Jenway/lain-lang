@@ -1,0 +1,207 @@
+// Bootstrap library AST expansion. Compiler core supplies generic AstApi only.
+// Ordinary let-bound macro factories are library syntax, as in formal Meta.
+#extern #proc meta_atom_equal(#addr %source, #addr %node, #addr %text, #bits<64> %length) -> #bits<1>;
+#extern #proc ast_find_macro_call_deep(#addr %source, #addr %root, #addr %text, #bits<64> %length) -> #addr;
+#extern #proc tool_source_data(#addr %source) -> #addr;
+#extern #proc lain_ast_v1_nil() -> #addr;
+#extern #proc lain_ast_v1_is_nil(#addr %node) -> #bits<1>;
+#extern #proc lain_ast_v1_node_kind(#addr %node) -> #bits<32>;
+#extern #proc lain_ast_v1_node_delimiter(#addr %node) -> #bits<32>;
+#extern #proc lain_ast_v1_node_start(#addr %node) -> #bits<64>;
+#extern #proc lain_ast_v1_node_length(#addr %node) -> #bits<64>;
+#extern #proc lain_ast_v1_node_syntax_context(#addr %node) -> #bits<64>;
+#extern #proc lain_ast_v1_set_syntax_context(#addr %node, #bits<64> %context) -> #unit;
+#extern #proc lain_ast_v1_attach_origin(#addr %node, #addr %source, #bits<64> %start, #bits<64> %length) -> #unit;
+#extern #proc lain_ast_v1_first_child(#addr %node) -> #addr;
+#extern #proc lain_ast_v1_next_sibling(#addr %node) -> #addr;
+#extern #proc lain_ast_v1_set_next_sibling(#addr %node, #addr %next) -> #unit;
+#extern #proc lain_ast_v1_parent(#addr %root, #addr %node) -> #addr;
+#extern #proc lain_ast_v1_new_group(#bits<32> %delimiter, #bits<64> %start, #bits<64> %length) -> #addr;
+#extern #proc lain_ast_v1_copy(#addr %node) -> #addr;
+#extern #proc lain_ast_v1_append(#addr %parent, #addr %node) -> #unit;
+#extern #proc lain_ast_v1_replace(#addr %parent, #addr %old, #addr %replacement) -> #bits<1>;
+#extern #proc lain_ast_v1_remove(#addr %parent, #addr %node) -> #bits<1>;
+#extern #proc lain_ast_v1_syntax_context_new() -> #addr;
+#extern #proc lain_ast_v1_syntax_context_fresh(#addr %context) -> #bits<64>;
+#extern #proc lain_ast_v1_syntax_context_release(#addr %context) -> #unit;
+
+#proc lain_std_macro_find_declaration(#addr %source, #addr %root) -> #addr {
+  #let %cursor: #addr = #call lain_ast_v1_first_child(%root)
+  #loop declarations {
+    #if #call lain_ast_v1_is_nil(%cursor) { #return %cursor }
+    #if #call meta_atom_equal(%source, %cursor, "let", 3) {
+      #let %name: #addr = #call lain_ast_v1_next_sibling(%cursor)
+      #let %equals: #addr = #call lain_ast_v1_next_sibling(%name)
+      #let %factory: #addr = #call lain_ast_v1_next_sibling(%equals)
+      #let %params: #addr = #call lain_ast_v1_next_sibling(%factory)
+      #let %body: #addr = #call lain_ast_v1_next_sibling(%params)
+      #if #call meta_atom_equal(%source, %equals, "=", 1) {
+        #if #call meta_atom_equal(%source, %factory, "macro", 5) {
+          #if #eq(#call lain_ast_v1_node_delimiter(%params), 40) {
+            #if #eq(#call lain_ast_v1_node_delimiter(%body), 123) { #return %cursor }
+          }
+        }
+      }
+    }
+    %cursor: #addr = #call lain_ast_v1_next_sibling(%cursor)
+    #continue declarations
+  }
+}
+
+#proc lain_std_macro_contextualize(#addr %node, #bits<64> %context) -> #unit {
+  #let %cursor: #addr = %node
+  #loop nodes {
+    #if #call lain_ast_v1_is_nil(%cursor) { #return }
+    #call lain_ast_v1_set_syntax_context(%cursor, %context)
+    #call lain_std_macro_contextualize(#call lain_ast_v1_first_child(%cursor), %context)
+    %cursor: #addr = #call lain_ast_v1_next_sibling(%cursor)
+    #continue nodes
+  }
+}
+
+#proc lain_std_macro_substitute(#addr %source, #addr %parent, #addr %parameter, #addr %argument, #bits<64> %template_context) -> #unit {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %text: #addr = #lea(base=%data, idx=#call lain_ast_v1_node_start(%parameter), scale=1, offset=0)
+  #let %length: #bits<64> = #call lain_ast_v1_node_length(%parameter)
+  #let %cursor: #addr = #call lain_ast_v1_first_child(%parent)
+  #loop children {
+    #if #call lain_ast_v1_is_nil(%cursor) { #return }
+    #let %next: #addr = #call lain_ast_v1_next_sibling(%cursor)
+    #let %matches: #bits<1> = #call meta_atom_equal(%source, %cursor, %text, %length)
+    #if #ne(#call lain_ast_v1_node_syntax_context(%cursor), %template_context) { %matches: #bits<1> = 0 }
+    #if %matches {
+      #let %changed: #bits<1> = #call lain_ast_v1_replace(%parent, %cursor, #call lain_ast_v1_copy(%argument))
+    } else {
+      #call lain_std_macro_substitute(%source, %cursor, %parameter, %argument, %template_context)
+    }
+    %cursor: #addr = %next
+    #continue children
+  }
+}
+
+#proc lain_std_macro_bind_arguments(#addr %source, #addr %body, #addr %params, #addr %args) -> #bits<32> {
+  #let %template_context: #bits<64> = #call lain_ast_v1_node_syntax_context(#call lain_ast_v1_first_child(%body))
+  #let %parameter: #addr = #call lain_ast_v1_first_child(%params)
+  #let %argument: #addr = #call lain_ast_v1_first_child(%args)
+  #loop parameters {
+    #if #call lain_ast_v1_is_nil(%parameter) {
+      #if #call lain_ast_v1_is_nil(%argument) { #return 0 }
+      #return 4204
+    }
+    #if #call lain_ast_v1_is_nil(%argument) { #return 4203 }
+    #if #call meta_atom_equal(%source, %argument, ",", 1) { #return 4203 }
+    #if #ne(#call lain_ast_v1_node_kind(%parameter), 1) { #return 4208 }
+    #let %end_node: #addr = %argument
+    #let %next: #addr = #call lain_ast_v1_next_sibling(%argument)
+    #loop expression {
+      #if #call lain_ast_v1_is_nil(%next) { #break expression }
+      #if #call meta_atom_equal(%source, %next, ",", 1) { #break expression }
+      %end_node: #addr = %next
+      %next: #addr = #call lain_ast_v1_next_sibling(%next)
+      #continue expression
+    }
+    #let %tree: #addr = %argument
+    #if #ne(%end_node, %argument) {
+      #let %start: #bits<64> = #call lain_ast_v1_node_start(%argument)
+      #let %end: #bits<64> = #add(#call lain_ast_v1_node_start(%end_node), #call lain_ast_v1_node_length(%end_node))
+      #let %span_cursor: #addr = %argument
+      #loop span {
+        #if #eq(%span_cursor, %next) { #break span }
+        #let %position: #bits<64> = #call lain_ast_v1_node_start(%span_cursor)
+        #let %finish: #bits<64> = #add(%position, #call lain_ast_v1_node_length(%span_cursor))
+        #if #ult(%position, %start) { %start: #bits<64> = %position }
+        #if #ugt(%finish, %end) { %end: #bits<64> = %finish }
+        %span_cursor: #addr = #call lain_ast_v1_next_sibling(%span_cursor)
+        #continue span
+      }
+      %tree: #addr = #call lain_ast_v1_new_group(40, %start, #sub(%end, %start))
+      #call lain_ast_v1_attach_origin(%tree, %source, %start, #sub(%end, %start))
+      #call lain_ast_v1_set_syntax_context(%tree, #call lain_ast_v1_node_syntax_context(%argument))
+      #let %cursor: #addr = %argument
+      #loop copy_expression {
+        #if #eq(%cursor, %next) { #break copy_expression }
+        #call lain_ast_v1_append(%tree, #call lain_ast_v1_copy(%cursor))
+        %cursor: #addr = #call lain_ast_v1_next_sibling(%cursor)
+        #continue copy_expression
+      }
+    }
+    #call lain_std_macro_substitute(%source, %body, %parameter, %tree, %template_context)
+    %parameter: #addr = #call lain_ast_v1_next_sibling(%parameter)
+    #if #call meta_atom_equal(%source, %parameter, ",", 1) {
+      %parameter: #addr = #call lain_ast_v1_next_sibling(%parameter)
+    }
+    %argument: #addr = %next
+    #if #call meta_atom_equal(%source, %argument, ",", 1) {
+      %argument: #addr = #call lain_ast_v1_next_sibling(%argument)
+    }
+    #continue parameters
+  }
+}
+
+#proc lain_std_macro_expand_call(#addr %source, #addr %root, #addr %name, #addr %params, #addr %template, #addr %context) -> #bits<32> {
+  #let %args: #addr = #call lain_ast_v1_next_sibling(%name)
+  #let %holder: #addr = #call lain_ast_v1_copy(%template)
+  #call lain_std_macro_contextualize(#call lain_ast_v1_first_child(%holder), #call lain_ast_v1_syntax_context_fresh(%context))
+  #let %status: #bits<32> = #call lain_std_macro_bind_arguments(%source, %holder, %params, %args)
+  #if #ne(%status, 0) { #return %status }
+  #let %head: #addr = #call lain_ast_v1_first_child(%holder)
+  #if #call lain_ast_v1_is_nil(%head) { #return 4208 }
+  #let %next: #addr = #call lain_ast_v1_next_sibling(%head)
+  #let %tail: #addr = %head
+  #loop tail {
+    #let %following: #addr = #call lain_ast_v1_next_sibling(%tail)
+    #if #call lain_ast_v1_is_nil(%following) { #break tail }
+    %tail: #addr = %following
+    #continue tail
+  }
+  #let %parent: #addr = #call lain_ast_v1_parent(%root, %name)
+  #if #call lain_ast_v1_is_nil(%parent) { #return 4205 }
+  #if #eq(#call lain_ast_v1_replace(%parent, %name, %head), 0) { #return 4206 }
+  #if #ne(%head, %tail) { #call lain_ast_v1_set_next_sibling(%head, %next) }
+  #call lain_ast_v1_set_next_sibling(%tail, %args)
+  #if #eq(#call lain_ast_v1_remove(%parent, %args), 0) { #return 4207 }
+  #return 0
+}
+
+#proc lain_std_macro_expand_root(#addr %source, #addr %root) -> #bits<32> {
+  #let %context: #addr = #call lain_ast_v1_syntax_context_new()
+  #let %rounds: #bits<64> = 0
+  #let %status: #bits<32> = 0
+  #loop declarations {
+    #let %declaration: #addr = #call lain_std_macro_find_declaration(%source, %root)
+    #if #call lain_ast_v1_is_nil(%declaration) { #break declarations }
+    #if #uge(%rounds, 32) { %status: #bits<32> = 4202 #break declarations }
+    #let %name: #addr = #call lain_ast_v1_next_sibling(%declaration)
+    #let %factory: #addr = #call lain_ast_v1_next_sibling(#call lain_ast_v1_next_sibling(%name))
+    #let %params: #addr = #call lain_ast_v1_next_sibling(%factory)
+    #let %template: #addr = #call lain_ast_v1_next_sibling(%params)
+    #let %data: #addr = #call tool_source_data(%source)
+    #let %text: #addr = #lea(base=%data, idx=#call lain_ast_v1_node_start(%name), scale=1, offset=0)
+    #let %length: #bits<64> = #call lain_ast_v1_node_length(%name)
+    #let %expanded: #bits<64> = 0
+    #loop calls {
+      #let %call: #addr = #call ast_find_macro_call_deep(%source, %root, %text, %length)
+      #if #call lain_ast_v1_is_nil(%call) { #break calls }
+      #if #uge(%expanded, 32) { %status: #bits<32> = 4202 #break calls }
+      %status: #bits<32> = #call lain_std_macro_expand_call(%source, %root, %call, %params, %template, %context)
+      #if #ne(%status, 0) { #break calls }
+      %expanded: #bits<64> = #add(%expanded, 1)
+      #continue calls
+    }
+    #if #ne(%status, 0) { #break declarations }
+    #let %cursor: #addr = %declaration
+    #loop remove_declaration {
+      #if #call lain_ast_v1_is_nil(%cursor) { #break remove_declaration }
+      #let %next: #addr = #call lain_ast_v1_next_sibling(%cursor)
+      #if #eq(#call lain_ast_v1_remove(%root, %cursor), 0) { %status: #bits<32> = 4209 #break remove_declaration }
+      #if #call meta_atom_equal(%source, %cursor, ";", 1) { #break remove_declaration }
+      %cursor: #addr = %next
+      #continue remove_declaration
+    }
+    #if #ne(%status, 0) { #break declarations }
+    %rounds: #bits<64> = #add(%rounds, 1)
+    #continue declarations
+  }
+  #call lain_ast_v1_syntax_context_release(%context)
+  #return %status
+}

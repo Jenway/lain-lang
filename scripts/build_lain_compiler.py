@@ -34,6 +34,8 @@ CORE_MODULES = (
     ROOT / "bootstrap" / "compiler" / "compiler.l1",
 )
 BOOTSTRAP_STD_MODULES = (
+    ROOT / "bootstrap" / "std" / "ast_macros.l1",
+    ROOT / "bootstrap" / "std" / "macro_expand.l1",
     # Semantic Meta and lowering implementations belong to the bootstrap
     # standard library.  The compiler core sees only their ABI declarations.
     ROOT / "bootstrap" / "compiler" / "meta.l1",

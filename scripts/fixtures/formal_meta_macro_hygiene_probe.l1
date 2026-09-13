@@ -49,13 +49,65 @@
   #return %count
 }
 
+#extern #proc meta_ast_set_syntax_context(#addr %node, #bits<64> %context) -> #unit;
+#extern #proc meta_ast_origin_source(#addr %node) -> #addr;
+#extern #proc meta_ast_origin_start(#addr %node) -> #bits<64>;
+#extern #proc meta_ast_origin_length(#addr %node) -> #bits<64>;
+
+#proc is_caller_number(#addr %source, #addr %node) -> #bits<1> {
+  #if #ne(#call meta_ast_kind(%node), 1) { #return 0 }
+  #if #ne(#call meta_ast_length(%node), 2) { #return 0 }
+  #let %data: #addr = #call meta_source_data(%source)
+  #let %start: #bits<64> = #call meta_ast_start(%node)
+  #if #ne(#call meta_source_byte_at(%data, #add(%start, 1)), 48) { #return 0 }
+  #let %first: #bits<8> = #call meta_source_byte_at(%data, %start)
+  #if #eq(%first, 49) { #return 1 }
+  #if #eq(%first, 50) { #return 1 }
+  #return 0
+}
+
+#proc mark_caller_arguments(#addr %source, #addr %node) -> #unit {
+  #let %cursor: #addr = %node
+  #loop siblings {
+    #if #call meta_ast_is_nil(%cursor) { #return }
+    #if #call is_caller_number(%source, %cursor) { #call meta_ast_set_syntax_context(%cursor, 123) }
+    #call mark_caller_arguments(%source, #call meta_ast_first(%cursor))
+    %cursor: #addr = #call meta_ast_next(%cursor)
+    #continue siblings
+  }
+}
+
+#proc count_preserved_arguments(#addr %source, #addr %node) -> #bits<64> {
+  #let %cursor: #addr = %node
+  #let %count: #bits<64> = 0
+  #loop siblings {
+    #if #call meta_ast_is_nil(%cursor) { #return %count }
+    #if #call is_caller_number(%source, %cursor) {
+      #if #eq(#call meta_ast_syntax_context(%cursor), 123) {
+        #if #eq(#call meta_ast_origin_source(%cursor), %source) {
+          #if #eq(#call meta_ast_origin_start(%cursor), #call meta_ast_start(%cursor)) {
+            #if #eq(#call meta_ast_origin_length(%cursor), #call meta_ast_length(%cursor)) {
+              %count: #bits<64> = #add(%count, 1)
+            }
+          }
+        }
+      }
+    }
+    %count: #bits<64> = #add(%count, #call count_preserved_arguments(%source, #call meta_ast_first(%cursor)))
+    %cursor: #addr = #call meta_ast_next(%cursor)
+    #continue siblings
+  }
+}
+
 #proc main() -> #bits<32> {
   #let %data: #addr = #call bootstrap.source-data(0)
   #let %length: #bits<64> = #call bootstrap.source-length(0)
   #let %result: #addr = #call meta_parse_result_new(%data, %length)
   #let %source: #addr = #call meta_parse_result_source(%result)
   #let %root: #addr = #call meta_parse_result_root(%result)
+  #call mark_caller_arguments(%source, #call meta_ast_first(%root))
   #let %status: #bits<32> = #call meta_expand_root(%source, %root)
+  #if #ne(#call count_preserved_arguments(%source, #call meta_ast_first(%root)), 2) { #return 9 }
   #let %source_root: #addr = #call meta_ast_first(%root)
   #let %source_context: #bits<64> = #call count_t(
     %source, %source_root, 0
