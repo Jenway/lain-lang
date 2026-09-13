@@ -1,25 +1,18 @@
 #!/usr/bin/env python3
-"""Compare function-declaration shape validation in bootstrap and formal std::meta.
+"""Compare library function/type syntax hooks and pipeline diagnostics.
 
-The shape of `let NAME = std::func<T>(params) [?{...}] -> type [!{...}] {body}`
-is a language rule, so it lives in the standard library on both sides:
-`lain_std_function_header_status` / `lain_std_function_tail_status` in
-`bootstrap/std/core_forms.l1`, and `meta_function_status` in `std/meta.lain`.
-This gate feeds one source to both compilers and requires the same status code,
-the way `check_meta_module_validation.py` does for `module` and `struct`.
-
-The declaration is judged in two segments because one check between them is not
-a shape rule: whether the arrow type is valid needs the unit's type table, which
-only the lowering pass owns.  Formal Meta has no such table at the expand stage,
-and its entry and tail rules read a type run instead of asking the type
-grammar's scanner, so a few malformed sources are shapes it cannot decide.
-`UNCOVERED` names those; each one still asserts the bootstrap status and prints
-the observed formal code with the reason, rather than being dropped or asserted
-equal.
+Formal Meta parses references, qualified names, physical bits spelling and
+ordinary factory-call/member groups when locating type boundaries. Positive
+syntax is asserted through the actual formal hook, independently of the
+incomplete formal lowering pass. Negative syntax must also produce the same
+stable diagnostic through both compiler pipelines. Semantic return-type
+validity before a malformed effect row still needs the formal type environment;
+UNCOVERED preserves that remaining diagnostic-priority gap.
 """
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 import tempfile
@@ -39,94 +32,42 @@ POSITIVE = ROOT / "scripts" / "fixtures" / "formal_function_shape_full.lain"
 
 # Shapes both compilers must reject with the same status, as
 # (label, source, status).
-CASES = (
-    (
-        "missing arrow",
-        "let f = std::func(v: i64) i64 {\n    return v;\n};\n",
-        "5102",
-    ),
-    (
-        "parameter list is not a group",
-        "let f = std::func[v: i64] -> i64 {\n    return v;\n};\n",
-        "5103",
-    ),
-    (
-        "input row is not a group",
-        "let f = std::func(v: i64) ?IO -> i64 {\n    return v;\n};\n",
-        "5102",
-    ),
-    (
-        "input entry missing a name",
-        "let f = std::func(v: i64) ?{: i64} -> i64 {\n    return v;\n};\n",
-        "5102",
-    ),
-    (
-        "input entry missing a type",
-        "let f = std::func(v: i64) ?{T:} -> i64 {\n    return v;\n};\n",
-        "5102",
-    ),
-    (
-        "input entries missing a separator",
-        "let f = std::func(v: i64) ?{T: i64 U: i64} -> i64 {\n"
-        "    return v;\n};\n",
-        "5102",
-    ),
-    (
-        "effect row is not a group",
-        "let f = std::func(v: i64) -> i64 !IO {\n    return v;\n};\n",
-        "5102",
-    ),
-    (
-        "body is not a group",
-        "let f = std::func(v: i64) -> i64 !{IO} 5;\n",
-        "5102",
-    ),
-    (
-        "body is missing",
-        "let f = std::func(v: i64) -> i64 !{IO}\n",
-        "5102",
-    ),
-)
+CASES = (('missing arrow', 'let f = std::func(v: i64) i64 {\n    return v;\n};\n', '5102'),
+ ('parameter list is not a group',
+  'let f = std::func[v: i64] -> i64 {\n    return v;\n};\n',
+  '5103'),
+ ('input row is not a group',
+  'let f = std::func(v: i64) ?IO -> i64 {\n    return v;\n};\n',
+  '5102'),
+ ('input entry missing a name',
+  'let f = std::func(v: i64) ?{: i64} -> i64 {\n    return v;\n};\n',
+  '5102'),
+ ('input entry missing a type',
+  'let f = std::func(v: i64) ?{T:} -> i64 {\n    return v;\n};\n',
+  '5102'),
+ ('input entries missing a separator',
+  'let f = std::func(v: i64) ?{T: i64 U: i64} -> i64 {\n    return v;\n};\n',
+  '5102'),
+ ('effect row is not a group',
+  'let f = std::func(v: i64) -> i64 !IO {\n    return v;\n};\n',
+  '5102'),
+ ('body is not a group', 'let f = std::func(v: i64) -> i64 !{IO} 5;\n', '5102'),
+ ('body is missing', 'let f = std::func(v: i64) -> i64 !{IO}\n', '5102'),
+ ('entry type run with a dangling reference',
+  'let f = std::func(a: i64) ?{T: & mut, U: i64} -> i64 {\n    return a;\n};\n',
+  '5102'),
+ ('entry type run with a trailing token',
+  'let f = std::func(a: i64) ?{T: std::type i64, U: i64} -> i64 {\n    return a;\n};\n',
+  '5102'),
+ ('return type run before a declaration terminator',
+  'let f = std::func(v: i64) -> i64 5;\n',
+  '5102'))
 
-# Shapes the formal expand stage cannot decide, as (label, source, bootstrap
-# status, reason).  Return-type validity needs the unit's type table, and the
-# entry and return-type rules here are stated in terms of the type-expression
-# grammar the bootstrap entry shares with the lowering pass.  The bootstrap
-# status is still required; the formal code is printed with the reason instead
-# of being asserted equal, so the boundary stays visible instead of being
-# papered over.
-UNCOVERED = (
-    (
-        # Priority: the arrow type is invalid *and* the effect row is
-        # malformed.  The bootstrap entries straddle the type check, so the
-        # arrow type wins; formal Meta cannot judge the arrow type at all.
-        "invalid arrow type before a malformed effect row",
-        "let f = std::func(v: i64) -> bogus !IO {\n    return v;\n};\n",
-        "5104",
-        "the formal expand stage owns no unit type table",
-    ),
-    (
-        "entry type run with a dangling reference",
-        "let f = std::func(a: i64) ?{T: & mut, U: i64} -> i64 {\n"
-        "    return a;\n};\n",
-        "5102",
-        "the formal entry rule does not re-check the type grammar",
-    ),
-    (
-        "entry type run with a trailing token",
-        "let f = std::func(a: i64) ?{T: std::type i64, U: i64} -> i64 {\n"
-        "    return a;\n};\n",
-        "5102",
-        "the formal entry rule does not re-check the type grammar",
-    ),
-    (
-        "return type run before a declaration terminator",
-        "let f = std::func(v: i64) -> i64 5;\n",
-        "5102",
-        "the formal tail reads `;` as an external declaration",
-    ),
-)
-
+# Semantic return-type validity and its diagnostic priority remain uncovered.
+UNCOVERED = (('invalid arrow type before a malformed effect row',
+  'let f = std::func(v: i64) -> bogus !IO {\n    return v;\n};\n',
+  '5104',
+  'the formal expand stage owns no unit type table'),)
 
 def run(arguments: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -195,13 +136,45 @@ def status_in(message: str, code: str) -> bool:
 
 
 def main() -> int:
+    global FORMAL_ABI
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--formal-abi", type=Path, help="explicit isolated core + formal library bundle")
+    args = parser.parse_args()
+    if args.formal_abi is not None:
+        FORMAL_ABI = args.formal_abi.resolve()
     if not POSITIVE.is_file():
         raise RuntimeError(f"missing fixture: {POSITIVE}")
-    ensure_probe()
+    if args.formal_abi is None:
+        ensure_probe()
+    cases = CASES
+    uncovered = UNCOVERED
     compared = 0
     skipped = 0
     with tempfile.TemporaryDirectory(prefix="lain-function-shape-") as temp:
         directory = Path(temp)
+        hook_bundle = directory / "formal_shape_hook.l1"
+        bundled = run([sys.executable, str(ROOT / "scripts/bundle_lainir.py"), "-o", str(hook_bundle),
+                       str(FORMAL_ABI), str(ROOT / "scripts/fixtures/formal_function_shape_probe.l1")])
+        if bundled.returncode:
+            raise RuntimeError(detail(bundled))
+        def hook_status(source: Path, output: Path) -> str:
+            result = run([str(SEED), "interpreter", str(hook_bundle), "main", str(output), str(source),
+                          str(ROOT / "scripts/fixtures/empty_source.lain")])
+            if result.returncode:
+                raise RuntimeError(detail(result))
+            return output.read_text(encoding="utf-8").strip()
+        if hook_status(POSITIVE, directory / "positive_shape.txt") != "0":
+            raise RuntimeError("formal Meta rejected the positive function syntax")
+        # Syntax is checked independently of formal lowering, which does not
+        # yet support every body/type in the positive fixture.
+        for index, source in enumerate((
+            "let f = std::func() ?{items: & mut ns::Vec(i64), limit: std::type} -> i64 { return 0; };\n",
+            "let f = std::func() ?{bits: #bits<32>, T, ord: Ord(T)} -> Factory(T).Item;\n",
+        )):
+            fixture = directory / f"positive_type_{index}.lain"
+            fixture.write_text(source, encoding="utf-8")
+            if hook_status(fixture, directory / f"positive_type_{index}.txt") != "0":
+                raise RuntimeError(f"formal Meta rejected positive type syntax {index}")
         compiled = bootstrap(POSITIVE, directory / "positive_bootstrap.l1")
         if compiled.returncode:
             raise RuntimeError(
@@ -209,7 +182,7 @@ def main() -> int:
                 f"{detail(compiled).strip()}"
             )
         compiled = formal(POSITIVE, directory / "positive_formal.l1")
-        for index, (label, source, expected) in enumerate(CASES):
+        for index, (label, source, expected) in enumerate(cases):
             fixture = directory / f"case_{index}.lain"
             fixture.write_text(source, encoding="utf-8")
             observed = bootstrap(
@@ -220,6 +193,8 @@ def main() -> int:
                     f"{label}: bootstrap expected status {expected}, got "
                     f"{detail(observed).strip()}"
                 )
+            if hook_status(fixture, directory / f"case_{index}_shape.txt") != expected:
+                raise RuntimeError(f"{label}: formal Meta hook expected {expected}")
             observed = formal(fixture, directory / f"case_{index}_formal.l1")
             if not status_in(detail(observed), expected):
                 raise RuntimeError(
@@ -228,7 +203,7 @@ def main() -> int:
                 )
             compared += 1
 
-        for label, source, expected, reason in UNCOVERED:
+        for label, source, expected, reason in uncovered:
             fixture = directory / "uncovered.lain"
             fixture.write_text(source, encoding="utf-8")
             observed = bootstrap(fixture, directory / "uncovered_bootstrap.l1")
