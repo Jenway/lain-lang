@@ -58,7 +58,7 @@ lowers to temporary LAINIR `#eval` and executes through LAINVM. Rebuilding is
 available again: the hand-written bootstrap source can regenerate
 `build/bootstrap/lainc.l1` and compile the ordinary physical subset, the formal
 standard-library source closure passes its ABI and conformance checks, and the
-`src/lainc` source closure builds as a verified 357-procedure LAINIR artifact
+`src/lainc` source closure builds as a verified 362-procedure LAINIR artifact
 that is deterministic across independent builds.
 
 The gen2/gen3 fixed-point gate is still open. `srclainc.l1` is currently a
