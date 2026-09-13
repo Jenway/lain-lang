@@ -4,6 +4,23 @@
 
 ## 当前完成快照
 
+- [正式类型语法切片](roadmap-lain-2-type-syntax-2026-09-13.md)：生产重建和 12 项形状对比通过，完整编码 2 未完成。
+
+- [整理核验记录](roadmap-lain-review-2026-09-13.md)：已实现切片归属、移出的执行记录与本次校验范围。
+
+- [`roadmap-lain-1h-expressions-2026-09-13.md`](roadmap-lain-1h-expressions-2026-09-13.md)：正式普通返回使用共同递归 AST 表达式规则；生产重建、五项回归与相关正式库检查通过；后续源码闭包比较通过（363 个过程），完整 1h 未完成。
+
+- [`roadmap-lain-1e-formal-arguments-2026-09-13.md`](roadmap-lain-1e-formal-arguments-2026-09-13.md)：正式宏参数 context/origin 保留、单 Atom 和递归表达式部分实现；12 个共用用例通过。
+
+- [`roadmap-lain-1e-default-macros-2026-09-13.md`](roadmap-lain-1e-default-macros-2026-09-13.md)：bootstrap 默认宏基本展开、9 个流水线用例；正式库同名参数隔离仍失败，完整 1e 未完成。
+
+- [`roadmap-lain-7-sdiv-2026-09-13.md`](roadmap-lain-7-sdiv-2026-09-13.md)：保留物理参数位宽，修复负数除法失败；独立重建后的差分、native、release/snapshot 检查通过。
+
+- [`roadmap-lain-1e-macros-2026-09-13.md`](roadmap-lain-1e-macros-2026-09-13.md)：20 个 bootstrap 宏辅助过程移入库、嵌套展开与库替换执行检查；完整 1e 尚未完成。
+
+- [`roadmap-lain-1e-stages-2026-09-13.md`](roadmap-lain-1e-stages-2026-09-13.md)：bootstrap elaborate/emit 结果交接、阶段替换执行检查；完整 1e 尚未完成。
+- [`roadmap-lain-1d-2026-09-13.md`](roadmap-lain-1d-2026-09-13.md)：实际产物归属、五条 #eval 捕获探针、行为基线与剩余阶段数据流缺口。
+- [`roadmap-lain-completed-2026-09-13.md`](roadmap-lain-completed-2026-09-13.md)：从当前路线图移出的实现、验收与历史测量；区分部分实现、正式侧未覆盖项与仍失败的负数除法。
 - [`roadmap-lain-completed-2026-09-07.md`](roadmap-lain-completed-2026-09-07.md)：截至 2026-09-07 已有可执行证据的 compiler、backend、bootstrap、Eval contract 和 LAINIR 物理语义。
 
 ### Eval 契约与项目结构完成记录（2026-09-09）
