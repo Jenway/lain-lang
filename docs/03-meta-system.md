@@ -3,7 +3,10 @@
 Meta 是 Lain 的语言定义层。它读取无语义的 RawAst，解释语言规则，完成语法展开和静态语义处理，并生成 LAINIR。
 
 Meta 负责决定程序的含义。LAINIR 负责验证已经确定的物理操作；LAINVM 负责执行它们。
-所有编译期执行都通过显式的 LAINIR `#eval` 发生。
+需要在产物中形成结果的编译期求值通过显式的 LAINIR `#eval` 发生。
+Meta 使用对象协议中的 opaque handle 引用 AST 与语义对象，不要求对象必须是
+编译期地址。若实现以 `#addr` 承载 handle，地址由 LAINVM 执行环境管理；
+对象引用的交付通过 LAINIR 可表述的 VM 接口进行，不由 `#eval` 承担。
 
 ## 1. 在编译流程中的位置
 
@@ -63,7 +66,7 @@ Meta 和标准库负责：
 Meta 不负责：
 
 - 执行另一套源语言表达式解释器；
-- 绕过 `#eval` 直接执行 Lain procedure；
+- 为形成产物结果绕过 `#eval` 直接执行 Lain procedure；
 - 把函数、类型、模块或 effect 固化成 Parser 节点；
 - 把未消解的高层语义带入 LAINIR；
 - 隐式访问文件、进程、环境变量或网络。
@@ -168,7 +171,7 @@ ArtifactApi
 
 ## 7. 编译期执行：`#eval`
 
-`#eval` 是唯一的编译期执行边界：
+`#eval` 是产物求值的编译期执行边界：
 
 ```text
 source AST
@@ -200,7 +203,10 @@ let main = std::func() -> i64 {
 
 Meta 生成 `#add` 和 `#eval`。LAINVM 执行加法。Meta 不需要实现第二套整数表达式求值语义。
 
-`#eval` 正常完成时返回其声明的 LAINIR 物理值；执行失败时由 LAIN-VM 产生 Trap。LAIN-VM 不判断这个物理值在 Meta 中代表整数、类型、模块还是 AST，也不为它添加对象类别、资源归属或代际信息。
+`#eval` 正常完成时形成其已验证的产物结果；执行失败时由 LAIN-VM 产生 Trap。
+LAIN-VM 不判断物理值在 Meta 中代表什么，也不为它添加对象类别、资源归属或代际信息。
+Meta 对象引用的编译期交付由 VM 执行接口和 Meta 对象协议负责，不能用 `#eval`
+的产物结果协议代替。
 
 `Eval` 是 LAINIR 的概念：LAINIR 定义并验证「这段已 lowering 的代码在编译期执行」，
 LAINVM 只提供执行所需的原语（过程入口、VSpace、预算、Trap）。因此 `Eval` effect 属于
@@ -210,6 +216,8 @@ LAINIR 契约，不属于 VM 契约；编译器边界安装它的 handler。见
 Meta 为 `#eval` 提供静态预期类型，并允许块引用外围的物理局部值。lowering 把每个自由
 `%local` 转换为临时根过程的按值参数；这不是把 Meta frame、类型对象或 AST 对象交给
 VM。若捕获值是 `#addr`，Meta 也不能借此延长该地址原有区域的生命周期。
+执行 TCB 没有自带 VSpace；捕获地址只传递地址值，所需内存能力须由执行请求
+另行显式授权。
 
 一次失败的 `#eval` 没有普通值可供 Meta 检查。VM 将 Trap 交给编译器的诊断路径，当前
 Meta 阶段停止处理该计算；不得用 `status` 字段、空值、对象 handle 或额外结果包装把失败

@@ -66,9 +66,16 @@ TCB、VSpace、Endpoint、Trap 和 CSpace 不属于当前 LAINIR v1 指令集。
 验证其静态类型。LAIN-VM 提供执行它所需的原语——过程入口、VSpace、预算与 Trap——但不
 定义 `Eval` effect，也不参与 `#eval` 的语义判定。
 
+编译期地址由 VM 的 VSpace、activation 和 capability 边界管理。Meta 需要引用
+AST 与语义对象，但对象协议不要求这些引用必须是地址。若某实现以 `#addr`
+承载对象 handle，VM 执行接口须按生命周期交付该值；调用必须有 LAINIR 可表述的
+VM 边界，不能从高层语言绕过 LAINIR，也不能借 `#eval` 的产物结果协议完成。
+
 ## 3. VSpace
 
-VSpace 管理一组执行流可以看到的地址区域和权限。`#eval` 默认创建临时 TCB，并让它使用调用者当前的 VSpace；它不会仅因进入编译期计算就另建地址空间。
+VSpace 管理地址区域和访问权限，独立于 TCB。TCB 本身没有 VSpace，也不因执行
+`#eval` 自动取得调用者的地址空间。执行请求须显式提供允许使用的地址值和相应的
+内存能力；没有这些输入时，临时 TCB 没有可用的外部地址。
 
 ### 3.1 区域
 
@@ -107,11 +114,12 @@ TCB 描述一段独立的执行历史。它至少保存以下逻辑状态：
 上下文切换由 VM scheduler 驱动。TCB 对 LAINIR 保持 opaque，切换过程不会把 TCB
 地址作为物理值传入程序。
 
-VM control API 提供以下操作：
+VM control API 的顶层操作草案如下；名称、参数表示和 LAINIR 调用 ABI 尚未固化：
 
 | 操作 | 语义 |
 | --- | --- |
-| `create_tcb(entry, vspace, cspace)` | 创建 TCB，绑定入口 procedure、VSpace 和 CSpace |
+| `create_tcb(entry)` | 创建 TCB 并指定入口 procedure；TCB 不自带 VSpace |
+| `start_tcb(tcb, execution_request)` | 用独立的执行请求提供参数、内存能力和 capability 授权后开始执行 |
 | `suspend_tcb(tcb, reason)` | 保存执行状态并将 TCB 置为 blocked 或 suspended |
 | `resume_tcb(tcb)` | 检查 capability 和状态后，将 TCB 放入 runnable 集合 |
 | `terminate_tcb(tcb)` | 结束 TCB，交付过程返回值或 Trap，并释放其 activation |
@@ -177,14 +185,17 @@ Trap 至少保留 TCB、procedure、instruction position、错误分类和必要
 
 ```text
 调用者 TCB 执行 #eval
-  -> VM 创建共享调用者 VSpace 的临时 TCB
+  -> VM 创建不自带 VSpace 的临时 TCB
+  -> 显式传入捕获值及获授权的执行能力
   -> 为临时 TCB 建立根 activation 和执行预算
   -> 执行 LAINIR
   -> 正常完成时返回声明的 LAINIR 物理值，失败时产生 Trap
   -> 结束临时 TCB 并释放它的 activation
 ```
 
-临时 TCB 结束时不会销毁共享的 VSpace。返回值遵守普通 LAINIR 过程返回规则；其中若包含 `#addr`，地址的有效性仍由它所指向区域的生命周期决定。嵌套 `#eval` 依次创建临时 TCB，并继续使用同一个 VSpace。
+临时 TCB 结束时不会销毁外部提供的 VSpace。VM 内部执行结果若包含 `#addr`，
+其有效性仍由所指区域的生命周期决定；这并不授权求值阶段把编译期地址写入产物。
+嵌套 `#eval` 也只能使用显式传递且获授权的地址及能力。
 
 ### 8.1 捕获、根过程与返回
 
@@ -193,9 +204,8 @@ frame 或调用栈。compiler lowering 收集块的自由局部绑定，按词�
 临时根过程。根过程的静态返回类型就是 `#eval` 表达式的已验证类型。
 
 传入 `#addr` 时仅复制地址值。父 TCB 在子 TCB 同步运行期间仍保持其 activation；子 TCB
-结束时释放自己的 activation。因此子 TCB 的 `#alloca` 地址不能作为结果返回，指向
-`#data` 或仍存活父 activation 的地址可以返回。过程地址和其他已验证的物理 `#addr` 同样
-遵守其原有的 VSpace 规则。
+结束时释放自己的 activation。VM 执行接口不能交付子 TCB 已释放的 `#alloca` 地址；
+仍存活的地址遵守原有 VSpace 规则。地址的编译期交付和 `#eval` 的产物结果是两份契约。
 
 ### 8.2 预算与 capability
 
@@ -203,8 +213,9 @@ frame 或调用栈。compiler lowering 收集块的自由局部绑定，按词�
 step 与 allocation 配额；嵌套计算不能重新获得完整限额。call-depth 从外层调用深度连续
 计数，进入每个临时根过程增加一层。任一账户耗尽立刻产生 quota Trap。
 
-临时 TCB 使用调用者当前 VSpace，并只得到编译请求授权且调用者拥有的 capability 子集。
-嵌套 TCB 不能扩大这个集合。外部调用、地址范围和返回值都在该集合和共享 VSpace 下检查。
+临时 TCB 不隐式继承调用者 VSpace。编译请求须为执行显式提供内存能力与调用者
+拥有的 capability 子集；嵌套 TCB 不能扩大这些授权。外部调用和地址访问按
+显式传入的能力与地址有效性检查。
 
 ### 8.3 Trap 传播
 
