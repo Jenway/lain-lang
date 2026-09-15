@@ -220,8 +220,15 @@ def main() -> int:
             if compiled.returncode == 0:
                 print(f"invalid signature accepted: {label}", file=sys.stderr)
                 return 1
+            if artifact.exists():
+                print(f"failed signature left an artifact: {label}", file=sys.stderr)
+                return 1
             message = (compiled.stderr or "") + (compiled.stdout or "")
-            if f"status {code}" not in message:
+            diagnostic_lines = message.splitlines()
+            if (
+                f"(error {code})" not in diagnostic_lines
+                and f"bootstrap compiler returned status {code}" not in diagnostic_lines
+            ):
                 print(
                     f"{label}: expected bootstrap status {code}, got {message.strip()}",
                     file=sys.stderr,

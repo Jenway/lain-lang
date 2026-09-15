@@ -132,7 +132,11 @@ def ensure_probe() -> None:
 
 
 def status_in(message: str, code: str) -> bool:
-    return f"status {code}" in message
+    lines = message.splitlines()
+    return (
+        f"(error {code})" in lines
+        or f"bootstrap compiler returned status {code}" in lines
+    )
 
 
 def main() -> int:

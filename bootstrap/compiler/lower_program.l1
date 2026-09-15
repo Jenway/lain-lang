@@ -30,6 +30,8 @@
 #extern #proc raw_node_length(#addr %node) -> #bits<64>;
 #extern #proc raw_node_first(#addr %node) -> #addr;
 #extern #proc raw_node_next(#addr %node) -> #addr;
+#extern #proc raw_node_syntax_context(#addr %node) -> #bits<64>;
+#extern #proc ast_find_parent(#addr %root, #addr %node) -> #addr;
 #extern #proc raw_node_set_next(#addr %node, #addr %next) -> #unit;
 #extern #proc raw_node_token_kind(#addr %node) -> #bits<32>;
 #extern #proc tool_byte_at(#addr %data, #bits<64> %index) -> #bits<8>;
@@ -3420,7 +3422,7 @@
       #let %status: #bits<32> = #call program_validate_local(
         %unit, %source, %function, %statement
       )
-      #if #ne(%status, 0) { #return 5511 }
+      #if #ne(%status, 0) { #return %status }
       %statement: #addr = #call program_skip_statement(%source, %statement)
       #continue statements
     }
@@ -3428,7 +3430,7 @@
       #let %status: #bits<32> = #call program_validate_while(
         %unit, %source, %function, %statement
       )
-      #if #ne(%status, 0) { #return 5512 }
+      #if #ne(%status, 0) { #return %status }
       %statement: #addr = #call program_skip_statement(%source, %statement)
       #continue statements
     }
@@ -3451,7 +3453,7 @@
       #let %status: #bits<32> = #call program_validate_return_statement(
         %unit, %source, %function, %statement
       )
-      #if #ne(%status, 0) { #return 5513 }
+      #if #ne(%status, 0) { #return %status }
       #return 0
     }
     #if #call meta_atom_equal(%source, %statement, "break", 5) {
@@ -3751,7 +3753,9 @@
   #let %value: #addr = #call raw_node_next(%equals)
   #if #call raw_is_nil(%equals) { #return 5115 }
   #if #call raw_is_nil(%value) { #return 5115 }
-  #if #call program_local_matches(%source, %function, %assignment) {
+  #let %known_target: #bits<1> = #eq(#call raw_is_nil(#call program_local_binding(%source, %function, %assignment)), 0)
+  #if #call program_param_matches(%source, %function, %assignment) { %known_target: #bits<1> = 1 }
+  #if %known_target {
   } else {
     #if #eq(#call program_name_prefix_length(%source, %assignment), 0) {
       #return 5108
@@ -3822,16 +3826,8 @@
     #call program_unit_set_debug_module_kind(%unit, 4501)
     #return 5116
   }
-  #if #call raw_is_nil(%operator) {
-    #call program_unit_set_debug_module_kind(%unit, 4502)
-    #return 5116
-  }
   #if #call raw_is_nil(%body) {
     #call program_unit_set_debug_module_kind(%unit, 4503)
-    #return 5116
-  }
-  #if #eq(#call program_is_comparison(%source, %operator), 0) {
-    #call program_unit_set_debug_module_kind(%unit, 4504)
     #return 5116
   }
   #let %status: #bits<32> = #call program_validate_condition_expression(
@@ -3956,53 +3952,8 @@
   }
 }
 
-#proc program_local_matches(
-  #addr %source, #addr %function, #addr %node
-) -> #bits<1> {
-  #return #call program_local_matches_group(
-    %source, #call program_function_body(%function), %node
-  )
-}
-
-#proc program_local_matches_group(
-  #addr %source, #addr %group, #addr %node
-) -> #bits<1> {
-  #let %statement: #addr = #call raw_node_first(%group)
-  #loop statements {
-    #if #call raw_is_nil(%statement) { #return 0 }
-    #if #call meta_atom_equal(%source, %statement, "let", 3) {
-      #let %name: #addr = #call raw_node_next(%statement)
-      #if #call raw_is_nil(%name) { #return 0 }
-      #if #eq(#call raw_node_length(%name), #call raw_node_length(%node)) {
-        #let %data: #addr = #call tool_source_data(%source)
-        #let %index: #bits<64> = 0
-        #let %same: #bits<1> = 1
-        #loop compare {
-          #if #sge(%index, #call raw_node_length(%node)) { #break compare }
-          #if #ne(
-            #call tool_byte_at(%data, #add(#call raw_node_start(%name), %index)),
-            #call tool_byte_at(%data, #add(#call raw_node_start(%node), %index))
-          ) { %same: #bits<1> = 0 #break compare }
-          %index: #bits<64> = #add(%index, 1)
-          #continue compare
-        }
-        #if %same { #return 1 }
-      }
-    }
-    #if #eq(#call raw_node_kind(%statement), 2) {
-      #if #call program_local_matches_group(
-        %source, %statement, %node
-      ) { #return 1 }
-    }
-    %statement: #addr = #call raw_node_next(%statement)
-    #continue statements
-  }
-}
-
-// The lexer keeps `base.field` in one atom.  Keep the split in this lowering
-// helper instead of teaching RawAst about member access: the prefix identifies
-// a parameter/local storage slot and the suffix is resolved by the record
-// Meta descriptor.
+// The lexer keeps `base.field` in one atom. Keep member splitting in the
+// library lowering helper and resolve the prefix through lexical bindings.
 #proc program_name_prefix_length(#addr %source, #addr %node) -> #bits<64> {
   #let %data: #addr = #call tool_source_data(%source)
   #let %length: #bits<64> = #call raw_node_length(%node)
@@ -4102,36 +4053,12 @@
   }
 }
 
-#proc program_local_type_for_field_group(
-  #addr %source, #addr %group, #addr %node
-) -> #addr {
-  #let %statement: #addr = #call raw_node_first(%group)
-  #loop statements {
-    #if #call raw_is_nil(%statement) { #return #call program_nil() }
-    #if #call meta_atom_equal(%source, %statement, "let", 3) {
-      #let %name: #addr = #call raw_node_next(%statement)
-      #if #call program_name_matches_field(%source, %name, %node) {
-        #let %colon: #addr = #call raw_node_next(%name)
-        #return #call raw_node_next(%colon)
-      }
-    }
-    #if #eq(#call raw_node_kind(%statement), 2) {
-      #let %nested: #addr = #call program_local_type_for_field_group(
-        %source, %statement, %node
-      )
-      #if #eq(#call raw_is_nil(%nested), 0) { #return %nested }
-    }
-    %statement: #addr = #call raw_node_next(%statement)
-    #continue statements
-  }
-}
-
-#proc program_local_type_for_field(
-  #addr %source, #addr %function, #addr %node
-) -> #addr {
-  #return #call program_local_type_for_field_group(
-    %source, #call program_function_body(%function), %node
-  )
+#proc program_local_type_for_field(#addr %source, #addr %function, #addr %node) -> #addr {
+  #let %binding: #addr = #call program_local_binding(%source, %function, %node)
+  #if #call raw_is_nil(%binding) { #return #call program_nil() }
+  #let %separator: #addr = #call raw_node_next(#call raw_node_next(%binding))
+  #if #call meta_atom_equal(%source, %separator, ":", 1) { #return #call raw_node_next(%separator) }
+  #return #call program_nil()
 }
 
 #proc program_operand_receiver_field(#addr %source, #addr %node) -> #addr {
@@ -4232,12 +4159,16 @@
   #return 0
 }
 
-#proc program_write_field_base(#addr %source, #addr %node) -> #unit {
+#proc program_write_field_base(#addr %source, #addr %function, #addr %node) -> #unit {
   #call bootstrap.artifact-write-byte(37)
-  #call meta_write_span(
-    %source, #call raw_node_start(%node),
-    #call program_name_prefix_length(%source, %node)
-  )
+  #let %binding: #addr = #call program_local_binding(%source, %function, %node)
+  #if #eq(#call raw_is_nil(%binding), 0) {
+    #call program_write_binding_name(%source, %function, #call raw_node_next(%binding))
+    #return
+  }
+  #let %index: #bits<64> = #call program_parameter_index(%source, %function, %node)
+  #if #ne(%index, 0) { #call program_write_parameter_id(%source, %function, %node, 1) #return }
+  #call meta_write_span(%source, #call raw_node_start(%node), #call program_name_prefix_length(%source, %node))
   #return
 }
 
@@ -4276,7 +4207,7 @@
           #call program_write_type(%unit, %record_source, %member_type)
         }
         #call bootstrap.artifact-write-literal("](#lea(base=")
-        #call program_write_field_base(%source, %node)
+        #call program_write_field_base(%source, %function, %node)
         #call bootstrap.artifact-write-literal(", idx=0, scale=0, offset=")
         #call meta_write_decimal(%offset)
         #call bootstrap.artifact-write-literal("))")
@@ -4485,7 +4416,7 @@
           #call bootstrap.artifact-write-literal(
             "](#lea(base=#load[#addr](#lea(base="
           )
-          #call program_write_field_base(%source, %node)
+          #call program_write_field_base(%source, %function, %node)
           #call bootstrap.artifact-write-literal(
             ", idx=0, scale=0, offset="
           )
@@ -4509,7 +4440,7 @@
   )
   #if %alias_type {
     #call bootstrap.artifact-write-literal("](#lea(base=")
-    #call program_write_field_base(%source, %node)
+    #call program_write_field_base(%source, %function, %node)
     #call bootstrap.artifact-write-literal(", idx=0, scale=0, offset=")
     #call meta_write_decimal(%offset)
     #call bootstrap.artifact-write-literal("))")
@@ -4523,7 +4454,7 @@
     )
   }
   #call bootstrap.artifact-write-literal("](#lea(base=")
-  #call program_write_field_base(%source, %node)
+  #call program_write_field_base(%source, %function, %node)
   #call bootstrap.artifact-write-literal(", idx=0, scale=0, offset=")
   #call meta_write_decimal(%offset)
   #call bootstrap.artifact-write-literal("))")
@@ -4606,7 +4537,7 @@
   #let %size: #bits<64> = #call program_record_size(%record_source, %binding)
   #if #eq(%size, 0) { %size: #bits<64> = 16 }
   #call bootstrap.artifact-write-literal("  #let ")
-  #call program_write_record_base(%source, %literal, 1)
+  #call program_write_record_base(%source, %function, %literal, 1)
   #call bootstrap.artifact-write-literal(": #addr = #alloca(")
   #call meta_write_decimal(%size)
   #call bootstrap.artifact-write-literal(")\n")
@@ -4664,16 +4595,14 @@
 }
 
 #proc program_write_record_base(
-  #addr %source, #addr %base, #bits<1> %temporary
+  #addr %source, #addr %function, #addr %base, #bits<1> %temporary
 ) -> #unit {
   #call bootstrap.artifact-write-byte(37)
   #if %temporary {
     #call bootstrap.artifact-write-literal("record")
     #call meta_write_decimal(#call raw_node_start(%base))
   } else {
-    #call meta_write_span(
-      %source, #call raw_node_start(%base), #call raw_node_length(%base)
-    )
+    #call program_write_binding_name(%source, %function, %base)
   }
   #return
 }
@@ -4700,10 +4629,12 @@
     #let %offset: #bits<64> = #call program_record_field_offset(
       %source, %record_source, %binding, %field
     )
-    #call bootstrap.artifact-write-literal("  #store ")
+    #call bootstrap.artifact-write-literal("  #store[")
+    #call program_write_function_type(%unit, %record_source, %function, #call program_record_field_type(%record_source, %field_def))
+    #call bootstrap.artifact-write-literal("] ")
     #call program_write_value_expression(%source, %function, %value)
     #call bootstrap.artifact-write-literal(", #lea(base=")
-    #call program_write_record_base(%source, %base, %temporary)
+    #call program_write_record_base(%source, %function, %base, %temporary)
     #call bootstrap.artifact-write-literal(", idx=0, scale=0, offset=")
     #call meta_write_decimal(%offset)
     #call bootstrap.artifact-write-literal(")\n")
@@ -4735,7 +4666,7 @@
     %unit, %source, %function, %literal
   )
   #call bootstrap.artifact-write-literal("  #let ")
-  #call program_write_record_base(%source, %literal, 1)
+  #call program_write_record_base(%source, %function, %literal, 1)
   #call bootstrap.artifact-write-literal(": #addr = #alloca(")
   #call meta_write_decimal(%size)
   #call bootstrap.artifact-write-literal(")\n")
@@ -4743,7 +4674,7 @@
     %unit, %source, %function, %literal, %literal, 1
   )
   #call bootstrap.artifact-write-literal("  #return ")
-  #call program_write_record_base(%source, %literal, 1)
+  #call program_write_record_base(%source, %function, %literal, 1)
   #call bootstrap.artifact-write-byte(10)
   #return
 }
@@ -5222,11 +5153,7 @@
   // String literals are compile-time values consumed by Meta intrinsics.
   #if #call program_is_string(%source, %node) { #return 0 }
   #if #call program_param_matches(%source, %function, %node) { #return 0 }
-  #if #call program_local_matches(%source, %function, %node) { #return 0 }
-  // Generic type parameters (`T` in std::func<T>(...)) are compile-time
-  // names.  Their concrete layout is supplied by the specialization; this
-  // physical pass only needs to keep the expression well-formed.
-  #if #call program_is_generic_type_name(%source, %node) { #return 0 }
+  #if #eq(#call raw_is_nil(#call program_local_binding(%source, %function, %node)), 0) { #return 0 }
   #let %constant: #addr = #call program_find_constant(
     #call program_function_unit(%function), %source, %node
   )
@@ -6440,7 +6367,7 @@
     #if #eq(#call raw_is_nil(%record_binding), 0) {
       // The statement writer has already materialized this literal.  Here it
       // is only a value expression, so pass the initialized temporary.
-      #call program_write_record_base(%source, %node, 1)
+      #call program_write_record_base(%source, %function, %node, 1)
       #return
     }
   }
@@ -6484,10 +6411,7 @@
   }
   #if #call raw_is_nil(%group) {
     #call bootstrap.artifact-write-byte(37)
-    #call meta_write_span(
-      %source, #call program_name_start(%source, %name),
-      #call program_name_length(%source, %name)
-    )
+    #call program_write_variable_name(%source, %function, %node)
     #return
   }
   #call bootstrap.artifact-write-literal("#call ")
@@ -6627,6 +6551,12 @@
   // call is followed by a record field.  Reuse the value-expression
   // projection lowering; that path writes the call base through the
   // projection-free implementation below, avoiding recursion.
+  #if #call meta_atom_equal(%source, %node, "!", 1) {
+    #call bootstrap.artifact-write-literal("#eq(")
+    #call program_write_operand(%source, %function, #call raw_node_next(%node))
+    #call bootstrap.artifact-write-literal(", 0)")
+    #return
+  }
   #if #call program_is_post_call_member(%source, %node) {
     // Bound the projection by the operand itself: `program_write_operand`
     // writes one operand, so a following infix operator must stay with the
@@ -7185,10 +7115,10 @@
   #let %is_and: #bits<1> = #call program_condition_is_and(%source, %operator)
   #let %is_or: #bits<1> = #call program_condition_is_or(%source, %operator)
   #if %is_and {
-    #call bootstrap.artifact-write-literal("#ne(#mul(")
+    #call bootstrap.artifact-write-literal("#eq(#add(#zext[#bits<64>](#ne(")
   } else {
     #if %is_or {
-      #call bootstrap.artifact-write-literal("#ne(#add(")
+      #call bootstrap.artifact-write-literal("#ne(#add(#zext[#bits<64>](#ne(")
     } else {
       #call bootstrap.artifact-write-literal("#")
       #if #call meta_atom_equal(%source, %operator, "+", 1) {
@@ -7242,15 +7172,21 @@
   #call program_write_value_window_depth(
     %source, %function, %left, %operator, #add(%depth, 1)
   )
-  #call bootstrap.artifact-write-literal(", ")
+  #if %is_and {
+    #call bootstrap.artifact-write-literal(", 0)), #zext[#bits<64>](#ne(")
+  } else {
+    #if %is_or {
+      #call bootstrap.artifact-write-literal(", 0)), #zext[#bits<64>](#ne(")
+    } else { #call bootstrap.artifact-write-literal(", ") }
+  }
   #call program_write_value_window_depth(
     %source, %function, %right, %stop, #add(%depth, 1)
   )
   #if %is_and {
-    #call bootstrap.artifact-write-literal("), 0)")
+    #call bootstrap.artifact-write-literal(", 0))), 2)")
   } else {
     #if %is_or {
-      #call bootstrap.artifact-write-literal("), 0)")
+      #call bootstrap.artifact-write-literal(", 0))), 0)")
     } else {
       #call bootstrap.artifact-write-byte(41)
     }
@@ -7284,13 +7220,13 @@
   #loop operators {
     #if #sge(%steps, 1024) { #break operators }
     #if #call raw_is_nil(%cursor) { #break operators }
-    #if #call program_nodes_same(%cursor, %stop) { #break operators }
+    #if #eq(%cursor, %stop) { #break operators }
     #let %cursor_end: #addr = #call program_operand_end_source(
       %source, %cursor
     )
     #let %next: #addr = #call raw_node_next(%cursor_end)
     #if #call raw_is_nil(%next) { #break operators }
-    #if #call program_nodes_same(%next, %stop) { #break operators }
+    #if #eq(%next, %stop) { #break operators }
     #if #call program_is_semicolon(%source, %next) { #break operators }
     #if #call meta_atom_equal(%source, %next, ",", 1) { #break operators }
     #if #eq(#call program_is_operator(%source, %next), 0) { #break operators }
@@ -8211,9 +8147,7 @@
         #call program_function_unit(%function), %source, %function, %value
       )
       #call bootstrap.artifact-write-literal("  #let %")
-      #call meta_write_span(
-        %source, #call raw_node_start(%name), #call raw_node_length(%name)
-      )
+      #call program_write_binding_name(%source, %function, %name)
       #call bootstrap.artifact-write-literal(": ")
       #call program_write_local_type(
         #call program_function_unit(%function), %source, %function,
@@ -8233,9 +8167,7 @@
     #call program_function_unit(%function), %source, %function, %value
   )
   #call bootstrap.artifact-write-literal("  #let %")
-  #call meta_write_span(
-    %source, #call raw_node_start(%name), #call raw_node_length(%name)
-  )
+  #call program_write_binding_name(%source, %function, %name)
   #call bootstrap.artifact-write-literal(": ")
   // `Syntax.UnitId` is a usize alias.  Its qualified parser call can be
   // represented by a dotted token path that loses the call group before the
@@ -8275,38 +8207,129 @@
   #return
 }
 
-#proc program_local_type(
+// Resolve a preceding declaration in the nearest lexical group; sibling
+// groups and later declarations cannot supply an assignment target's type.
+#proc program_local_binding(
   #addr %source, #addr %function, #addr %node
 ) -> #addr {
-  #let %statement: #addr = #call raw_node_first(
-    #call program_function_body(%function)
-  )
-  #loop statements {
-    #if #call raw_is_nil(%statement) { #return %node }
-    #if #call meta_atom_equal(%source, %statement, "let", 3) {
-      #let %name: #addr = #call raw_node_next(%statement)
-      #if #eq(#call raw_node_length(%name), #call raw_node_length(%node)) {
-        #let %data: #addr = #call tool_source_data(%source)
-        #let %index: #bits<64> = 0
-        #let %same: #bits<1> = 1
-        #loop compare {
-          #if #sge(%index, #call raw_node_length(%node)) { #break compare }
-          #if #ne(
-            #call tool_byte_at(%data, #add(#call raw_node_start(%name), %index)),
-            #call tool_byte_at(%data, #add(#call raw_node_start(%node), %index))
-          ) { %same: #bits<1> = 0 #break compare }
-          %index: #bits<64> = #add(%index, 1)
-          #continue compare
-        }
-        #if %same {
-          #let %colon: #addr = #call raw_node_next(%name)
-          #return #call raw_node_next(%colon)
+  #let %root: #addr = #call program_function_body(%function)
+  #let %limit: #addr = %node
+  #let %scope: #addr = #call ast_find_parent(%root, %limit)
+  #loop scopes {
+    #if #call raw_is_nil(%scope) { #return #call program_nil() }
+    #let %binding: #addr = #call program_nil()
+    #let %pending: #addr = #call program_nil()
+    #let %statement: #addr = #call raw_node_first(%scope)
+    #loop preceding {
+      #if #call raw_is_nil(%statement) { #break preceding }
+      #if #eq(%statement, %limit) { #break preceding }
+      #if #call meta_atom_equal(%source, %statement, "let", 3) {
+        #let %name: #addr = #call raw_node_next(%statement)
+        #if #eq(#call raw_node_syntax_context(%name), #call raw_node_syntax_context(%node)) {
+          #if #call program_name_matches_field(%source, %name, %node) {
+            %pending: #addr = %statement
+          }
         }
       }
+      #if #call meta_atom_equal(%source, %statement, ";", 1) {
+        #if #eq(#call raw_is_nil(%pending), 0) { %binding: #addr = %pending }
+        %pending: #addr = #call program_nil()
+      }
+      %statement: #addr = #call raw_node_next(%statement)
+      #continue preceding
     }
-    %statement: #addr = #call raw_node_next(%statement)
-    #continue statements
+    #if #eq(#call raw_is_nil(%binding), 0) { #return %binding }
+    #if #eq(%scope, %root) { #return #call program_nil() }
+    %limit: #addr = %scope
+    %scope: #addr = #call ast_find_parent(%root, %scope)
+    #continue scopes
   }
+}
+
+// Preorder numbering is determined by AST topology, independent of addresses,
+// source positions and syntax-context allocation. Copied macro spans stay unique.
+#proc program_binding_index_walk(#addr %root, #addr %target, #addr %counter) -> #bits<64> {
+  #if #call raw_is_nil(%root) { #return 0 }
+  #let %index: #bits<64> = #add(#load[#bits<64>](%counter), 1)
+  #store %index, %counter
+  #if #eq(%root, %target) { #return %index }
+  #let %child: #addr = #call raw_node_first(%root)
+  #loop children {
+    #if #call raw_is_nil(%child) { #return 0 }
+    #let %found: #bits<64> = #call program_binding_index_walk(%child, %target, %counter)
+    #if #ne(%found, 0) { #return %found }
+    %child: #addr = #call raw_node_next(%child)
+    #continue children
+  }
+}
+
+#proc program_write_binding_name(#addr %source, #addr %function, #addr %name) -> #unit {
+  #let %counter: #addr = #alloca(8)
+  #store 0, %counter
+  #let %index: #bits<64> = #call program_binding_index_walk(#call program_function_body(%function), %name, %counter)
+  #call bootstrap.artifact-write-literal("lain_local_")
+  #call meta_write_decimal(%index)
+  #return
+}
+
+#proc program_parameter_index(#addr %source, #addr %function, #addr %node) -> #bits<64> {
+  #let %param: #addr = #call raw_node_first(#call program_function_params(%function))
+  #let %index: #bits<64> = 1
+  #loop params {
+    #if #call raw_is_nil(%param) { #return 0 }
+    #if #call program_name_matches_field(%source, %param, %node) { #return %index }
+    #let %type: #addr = #call raw_node_next(#call raw_node_next(%param))
+    #let %end: #addr = #call program_type_end(%source, %type)
+    %param: #addr = #call raw_node_next(%end)
+    #if #call raw_is_nil(%param) { #return 0 }
+    %param: #addr = #call raw_node_next(%param)
+    %index: #bits<64> = #add(%index, 1)
+    #continue params
+  }
+}
+
+#proc program_write_parameter_id(#addr %source, #addr %function, #addr %node, #bits<1> %local) -> #unit {
+  #if %local { #call bootstrap.artifact-write-literal("lain_parameter_") }
+  else { #call bootstrap.artifact-write-literal("lain_argument_") }
+  #call meta_write_decimal(#call program_parameter_index(%source, %function, %node))
+  #return
+}
+
+#proc program_write_variable_name(#addr %source, #addr %function, #addr %node) -> #unit {
+  #let %binding: #addr = #call program_local_binding(%source, %function, %node)
+  #if #eq(#call raw_is_nil(%binding), 0) {
+    #call program_write_binding_name(%source, %function, #call raw_node_next(%binding))
+    #return
+  }
+  #let %index: #bits<64> = #call program_parameter_index(%source, %function, %node)
+  #if #ne(%index, 0) {
+    #call program_write_parameter_id(%source, %function, %node, 1)
+    #return
+  }
+  #call meta_write_span(%source, #call program_name_start(%source, %node), #call program_name_length(%source, %node))
+  #return
+}
+
+#proc program_write_assignment_type(
+  #addr %source, #addr %function, #addr %node
+) -> #unit {
+  #let %unit: #addr = #call program_function_unit(%function)
+  #let %binding: #addr = #call program_local_binding(%source, %function, %node)
+  #if #eq(#call raw_is_nil(%binding), 0) {
+    #let %name: #addr = #call raw_node_next(%binding)
+    #let %separator: #addr = #call raw_node_next(%name)
+    #let %type: #addr = #call program_nil()
+    #if #call meta_atom_equal(%source, %separator, ":", 1) {
+      %type: #addr = #call raw_node_next(%separator)
+    }
+    #let %value: #addr = #call program_meta_call_value_node(%source, %binding)
+    #call program_write_local_type(%unit, %source, %function, %type, %value)
+    #return
+  }
+  #let %type: #addr = #call program_param_type_for_field(%source, %function, %node)
+  #if #call raw_is_nil(%type) { %type: #addr = %node }
+  #call program_write_function_type(%unit, %source, %function, %type)
+  #return
 }
 
 #proc program_write_assignment(
@@ -8421,10 +8444,12 @@
     #call program_write_record_literals_in_expression(
       %unit, %source, %function, %value
     )
-    #call bootstrap.artifact-write-literal("  #store ")
+    #call bootstrap.artifact-write-literal("  #store[")
+    #call program_write_function_type(%unit, %record_source, %function, %field_type)
+    #call bootstrap.artifact-write-literal("] ")
     #call program_write_value_expression(%source, %function, %value)
     #call bootstrap.artifact-write-literal(", #lea(base=")
-    #call program_write_field_base(%source, %assignment)
+    #call program_write_field_base(%source, %function, %assignment)
     #call bootstrap.artifact-write-literal(", idx=0, scale=0, offset=")
     #call meta_write_decimal(%offset)
     #call bootstrap.artifact-write-literal(")\n")
@@ -8435,15 +8460,10 @@
   #call program_write_record_literals_in_expression(
     #call program_function_unit(%function), %source, %function, %value
   )
-  #let %type: #addr = #call program_local_type(%source, %function, %assignment)
   #call bootstrap.artifact-write-literal("  %")
-  #call meta_write_span(
-    %source, #call raw_node_start(%assignment), #call raw_node_length(%assignment)
-  )
+  #call program_write_variable_name(%source, %function, %assignment)
   #call bootstrap.artifact-write-literal(": ")
-      #call program_write_function_type(
-        #call program_function_unit(%function), %source, %function, %type
-  )
+  #call program_write_assignment_type(%source, %function, %assignment)
   #call bootstrap.artifact-write-literal(" = ")
   #call program_write_value_expression(%source, %function, %value)
   #call bootstrap.artifact-write-byte(10)
@@ -8692,62 +8712,14 @@
   #return
 }
 
-#proc program_condition_last_operator(
-  #addr %source, #addr %node
-) -> #addr {
-  #let %left_end: #addr = #call program_condition_operand_end(
-    %source, %node
-  )
-  #let %operator: #addr = #call raw_node_next(%left_end)
-  #if #call raw_is_nil(%operator) { #return #call program_nil() }
-  #if #eq(#call program_is_operator(%source, %operator), 0) {
-    #return #call program_nil()
-  }
-  #let %operator_end: #addr = #call program_condition_operator_end(
-    %source, %operator
-  )
-  #let %right: #addr = #call raw_node_next(%operator_end)
-  #if #call raw_is_nil(%right) { #return %operator }
-  #let %nested: #addr = #call program_condition_last_operator(
-    %source, %right
-  )
-  #if #call raw_is_nil(%nested) { #return %operator }
-  #return %nested
-}
-
 #proc program_condition_logical_operator(
   #addr %source, #addr %node
 ) -> #addr {
-  #let %left_end: #addr = #call program_condition_operand_end(
-    %source, %node
-  )
-  #let %operator: #addr = #call raw_node_next(%left_end)
-  #loop operators {
-    #if #call raw_is_nil(%operator) {
-      #return #call program_nil()
-    }
-    #if #call program_condition_is_and(%source, %operator) {
-      #return %operator
-    }
-    #if #call program_condition_is_or(%source, %operator) {
-      #return %operator
-    }
-    #if #eq(#call program_is_operator(%source, %operator), 0) {
-      #return #call program_nil()
-    }
-    #let %operator_end: #addr = #call program_condition_operator_end(
-      %source, %operator
-    )
-    #let %right: #addr = #call raw_node_next(%operator_end)
-    #if #call raw_is_nil(%right) {
-      #return #call program_nil()
-    }
-    %left_end: #addr = #call program_condition_operand_end(
-      %source, %right
-    )
-    %operator: #addr = #call raw_node_next(%left_end)
-    #continue operators
-  }
+  #let %end: #addr = #call program_condition_expression_end(%source, %node)
+  #let %operator: #addr = #call program_value_window_operator(%source, %node, #call raw_node_next(%end))
+  #if #call program_condition_is_and(%source, %operator) { #return %operator }
+  #if #call program_condition_is_or(%source, %operator) { #return %operator }
+  #return #call program_nil()
 }
 
 #proc program_nodes_same(#addr %left, #addr %right) -> #bits<1> {
@@ -8767,231 +8739,17 @@
 #proc program_write_condition_prefix(
   #addr %source, #addr %function, #addr %node, #addr %stop_operator
 ) -> #unit {
-  #let %left_end: #addr = #call program_condition_operand_end(
-    %source, %node
-  )
-  #let %operator: #addr = #call raw_node_next(%left_end)
-  #if #call raw_is_nil(%operator) {
-    #call program_write_condition_operand(%source, %function, %node)
-    #return
-  }
-  #if #call program_nodes_same(%operator, %stop_operator) {
-    #call program_write_condition_operand(%source, %function, %node)
-    #return
-  }
-  #if #eq(#call program_is_operator(%source, %operator), 0) {
-    #call program_write_condition_operand(%source, %function, %node)
-    #return
-  }
-  #let %operator_end: #addr = #call program_condition_operator_end(
-    %source, %operator
-  )
-  #let %right: #addr = #call raw_node_next(%operator_end)
-  // LAIN-IR has comparison primitives, while source-level \`&&\` and \`||\`
-  // are lowered through widened boolean arithmetic.  Keep this handling
-  // here so a logical operator can appear inside the left prefix of a
-  // larger comparison (\`a != b || c != d\`).
-  #if #call program_condition_is_and(%source, %operator) {
-    #call bootstrap.artifact-write-literal(
-      "#eq(#add(#zext[#bits<64>]("
-    )
-    #call program_write_condition_operand(%source, %function, %node)
-    #call bootstrap.artifact-write-literal(
-      "), #zext[#bits<64>]("
-    )
-    #call program_write_condition_prefix(
-      %source, %function, %right, %stop_operator
-    )
-    #call bootstrap.artifact-write-literal(")), 2)")
-    #return
-  }
-  #if #call program_condition_is_or(%source, %operator) {
-    #call bootstrap.artifact-write-literal(
-      "#ne(#add(#zext[#bits<64>]("
-    )
-    #call program_write_condition_operand(%source, %function, %node)
-    #call bootstrap.artifact-write-literal(
-      "), #zext[#bits<64>]("
-    )
-    #call program_write_condition_prefix(
-      %source, %function, %right, %stop_operator
-    )
-    #call bootstrap.artifact-write-literal(")), 0)")
-    #return
-  }
-  #call bootstrap.artifact-write-byte(35)
-  #if #call meta_atom_equal(%source, %operator, "+", 1) {
-    #call bootstrap.artifact-write-literal("add")
-  } else {
-    #if #call meta_atom_equal(%source, %operator, "-", 1) {
-      #call bootstrap.artifact-write-literal("sub")
-    } else {
-      #if #call meta_atom_equal(%source, %operator, "*", 1) {
-        #call bootstrap.artifact-write-literal("mul")
-      } else {
-        #if #call meta_atom_equal(%source, %operator, "/", 1) {
-          #call bootstrap.artifact-write-literal("sdiv")
-        } else {
-          #if #call meta_atom_equal(%source, %operator, "==", 2) {
-            #call bootstrap.artifact-write-literal("eq")
-          } else {
-            #if #call meta_atom_equal(%source, %operator, "!=", 2) {
-              #call bootstrap.artifact-write-literal("ne")
-            } else {
-              #if #call meta_atom_equal(%source, %operator, "<", 1) {
-                #call bootstrap.artifact-write-literal("slt")
-              } else {
-                #if #call meta_atom_equal(%source, %operator, "<=", 2) {
-                  #call bootstrap.artifact-write-literal("sle")
-                } else {
-                  #if #call meta_atom_equal(%source, %operator, ">", 1) {
-                    #call bootstrap.artifact-write-literal("sgt")
-                  } else {
-                    #if #call meta_atom_equal(%source, %operator, ">=", 2) {
-                      #call bootstrap.artifact-write-literal("sge")
-                    } else {
-                      #call bootstrap.artifact-write-literal("add")
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  #call bootstrap.artifact-write-byte(40)
-  #call program_write_condition_operand(%source, %function, %node)
-  #call bootstrap.artifact-write-literal(", ")
-  #call program_write_condition_prefix(
-    %source, %function, %right, %stop_operator
-  )
-  #call bootstrap.artifact-write-byte(41)
+  #call program_write_value_window_depth(%source, %function, %node, %stop_operator, 0)
   #return
 }
 
 #proc program_write_condition_expression(
   #addr %source, #addr %function, #addr %node
 ) -> #unit {
-  #let %logical: #addr = #call program_condition_logical_operator(
-    %source, %node
-  )
-  #if #eq(#call raw_is_nil(%logical), 0) {
-    #let %logical_end: #addr = #call program_condition_operator_end(
-      %source, %logical
-    )
-    #let %logical_right: #addr = #call raw_node_next(%logical_end)
-    #if #call program_condition_is_and(%source, %logical) {
-      #call bootstrap.artifact-write-literal(
-        "#eq(#add(#zext[#bits<64>]("
-      )
-      #call program_write_condition_prefix(
-        %source, %function, %node, %logical
-      )
-      #call bootstrap.artifact-write-literal(
-        "), #zext[#bits<64>]("
-      )
-      #call program_write_condition_expression(
-        %source, %function, %logical_right
-      )
-      #call bootstrap.artifact-write-literal(")), 2)")
-      #return
-    }
-    #call bootstrap.artifact-write-literal(
-      "#ne(#add(#zext[#bits<64>]("
-    )
-    #call program_write_condition_prefix(
-      %source, %function, %node, %logical
-    )
-    #call bootstrap.artifact-write-literal(
-      "), #zext[#bits<64>]("
-    )
-    #call program_write_condition_expression(
-      %source, %function, %logical_right
-    )
-    #call bootstrap.artifact-write-literal(")), 0)")
-    #return
-  }
-  #let %operator: #addr = #call program_condition_last_operator(
-    %source, %node
-  )
-  #if #call raw_is_nil(%operator) {
-    #call program_write_condition_operand(%source, %function, %node)
-    #return
-  }
-  #let %operator_end: #addr = #call program_condition_operator_end(
-    %source, %operator
-  )
-  #let %right: #addr = #call raw_node_next(%operator_end)
-  #if #call program_condition_is_and(%source, %operator) {
-    #call bootstrap.artifact-write-literal(
-      "#eq(#add(#zext[#bits<64>]("
-    )
-    #call program_write_condition_prefix(
-      %source, %function, %node, %operator
-    )
-    #call bootstrap.artifact-write-literal(
-      "), #zext[#bits<64>]("
-    )
-    #call program_write_condition_expression(
-      %source, %function, %right
-    )
-    #call bootstrap.artifact-write-literal(")), 2)")
-    #return
-  }
-  #if #call program_condition_is_or(%source, %operator) {
-    #call bootstrap.artifact-write-literal(
-      "#ne(#add(#zext[#bits<64>]("
-    )
-    #call program_write_condition_prefix(
-      %source, %function, %node, %operator
-    )
-    #call bootstrap.artifact-write-literal(
-      "), #zext[#bits<64>]("
-    )
-    #call program_write_condition_expression(
-      %source, %function, %right
-    )
-    #call bootstrap.artifact-write-literal(")), 0)")
-    #return
-  }
-  #let %comparison: #bits<1> = #call program_is_comparison(%source, %operator)
-  #if %comparison {
-    #call bootstrap.artifact-write-byte(35)
-    #if #call meta_atom_equal(%source, %operator, "==", 2) {
-      #call bootstrap.artifact-write-literal("eq")
-    } else {
-      #if #call meta_atom_equal(%source, %operator, "!=", 2) {
-        #call bootstrap.artifact-write-literal("ne")
-      } else {
-        #if #call meta_atom_equal(%source, %operator, "<", 1) {
-          #call bootstrap.artifact-write-literal("slt")
-        } else {
-          #if #call meta_atom_equal(%source, %operator, "<=", 2) {
-            #call bootstrap.artifact-write-literal("sle")
-          } else {
-            #if #call meta_atom_equal(%source, %operator, ">", 1) {
-              #call bootstrap.artifact-write-literal("sgt")
-            } else {
-              #call bootstrap.artifact-write-literal("sge")
-            }
-          }
-        }
-      }
-    }
-    #call bootstrap.artifact-write-byte(40)
-    #call program_write_condition_prefix(
-      %source, %function, %node, %operator
-    )
-    #call bootstrap.artifact-write-literal(", ")
-    #call program_write_condition_operand(%source, %function, %right)
-    #call bootstrap.artifact-write-byte(41)
-    #return
-  }
-  // A bare arithmetic/logical expression is interpreted as a truth value.
+  #let %end: #addr = #call program_condition_expression_end(%source, %node)
+  #let %stop: #addr = #call raw_node_next(%end)
   #call bootstrap.artifact-write-literal("#ne(")
-  #call program_write_value_expression(%source, %function, %node)
+  #call program_write_value_window_depth(%source, %function, %node, %stop, 0)
   #call bootstrap.artifact-write-literal(", 0)")
   #return
 }
@@ -9156,6 +8914,26 @@
   #return
 }
 
+#proc program_write_parameter_locals(#addr %source, #addr %function) -> #unit {
+  #let %param: #addr = #call raw_node_first(#call program_function_params(%function))
+  #loop params {
+    #if #call raw_is_nil(%param) { #return }
+    #let %type: #addr = #call raw_node_next(#call raw_node_next(%param))
+    #let %end: #addr = #call program_type_end(%source, %type)
+    #call bootstrap.artifact-write-literal("  #let %")
+    #call program_write_parameter_id(%source, %function, %param, 1)
+    #call bootstrap.artifact-write-literal(": ")
+    #call program_write_function_type(#call program_function_unit(%function), %source, %function, %type)
+    #call bootstrap.artifact-write-literal(" = %")
+    #call program_write_parameter_id(%source, %function, %param, 0)
+    #call bootstrap.artifact-write-byte(10)
+    %param: #addr = #call raw_node_next(%end)
+    #if #call raw_is_nil(%param) { #return }
+    %param: #addr = #call raw_node_next(%param)
+    #continue params
+  }
+}
+
 #proc program_write_function(#addr %source, #addr %function) -> #unit {
   #if #call program_function_is_external(%source, %function) {
     // A body-less std::func is an external procedure declaration.  Emit it
@@ -9182,9 +8960,7 @@
         #call program_function_unit(%function), %source, %function, %type
       )
       #call bootstrap.artifact-write-literal(" %")
-      #call meta_write_span(
-        %source, #call raw_node_start(%param), #call raw_node_length(%param)
-      )
+      #call program_write_parameter_id(%source, %function, %param, 0)
       %first: #bits<1> = 0
       %param: #addr = #call raw_node_next(%type_end)
       #if #call raw_is_nil(%param) { #break params }
@@ -9221,9 +8997,7 @@
       #call program_function_unit(%function), %source, %function, %type
     )
     #call bootstrap.artifact-write-literal(" %")
-    #call meta_write_span(
-      %source, #call raw_node_start(%param), #call raw_node_length(%param)
-    )
+    #call program_write_parameter_id(%source, %function, %param, 0)
     %first: #bits<1> = 0
     %param: #addr = #call raw_node_next(%type_end)
     #if #call raw_is_nil(%param) { #break params }
@@ -9236,6 +9010,7 @@
     #load[#addr](#lea(base=%function, idx=0, scale=0, offset=24))
   )
   #call bootstrap.artifact-write-literal(" {\n")
+  #call program_write_parameter_locals(%source, %function)
   #call program_write_expression(%source, %function)
   #call bootstrap.artifact-write-literal("}\n\n")
   #return

@@ -54,6 +54,8 @@ FIXTURES = ROOT / "scripts" / "fixtures"
 # boundary.  An unimplemented *expression* is no longer one of them: the
 # backend refuses it, so its case belongs to FAILING_CASES.
 CASES = (
+    ("backend_multiline_extern.l1", ("uint32_t external_value(int8_t byte, uint32_t word);",), ("external_value(void)",)),
+    ("differential_multiline_header.l1", ("uint64_t multiline(uintptr_t storage, int8_t small, uint32_t middle, uint64_t large);",), ("multiline(void)",)),
     ("backend_inline_else.l1", (), ()),
     ("backend_constant_return.l1", (), ()),
     ("backend_data_addr.l1", (), ()),

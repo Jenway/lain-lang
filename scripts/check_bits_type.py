@@ -17,6 +17,7 @@ compiler that only recognises the named builtins.
 from __future__ import annotations
 
 import subprocess
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -91,7 +92,8 @@ def main() -> int:
                 )
                 return 1
             text = artifact.read_text(encoding="utf-8")
-            if signature not in text:
+            physical_signature = re.escape(signature).replace(re.escape("%x"), r"%[A-Za-z_][A-Za-z0-9_]*")
+            if re.search(physical_signature, text) is None:
                 print(
                     f"{label}: emitted signature is missing {signature!r}: "
                     f"{text.strip()}",
@@ -107,7 +109,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
-            print(f"PASS {label}: {signature} emitted, ran to {actual}")
+            print(f"PASS {label}: declared physical width emitted, ran to {actual}")
 
         for index, (label, source, status) in enumerate(REFUSED):
             fixture = work / f"refused_{index}.lain"

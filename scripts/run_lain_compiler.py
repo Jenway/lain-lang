@@ -94,7 +94,13 @@ def main() -> int:
         )
 
         if executed.returncode:
-            print(executed.stderr or executed.stdout, file=sys.stderr)
+            detail = executed.stderr or executed.stdout
+            if args.output.is_file():
+                output_text = args.output.read_text(encoding="utf-8")
+                if output_text.lstrip().startswith("(error "):
+                    detail = output_text.strip()
+                args.output.unlink()
+            print(detail, file=sys.stderr)
             return executed.returncode
         if not args.output.is_file():
             print(f"compiler did not write {args.output}", file=sys.stderr)
@@ -102,7 +108,13 @@ def main() -> int:
         output_text = args.output.read_text(encoding="utf-8")
         if output_text.lstrip().startswith("(error "):
             print(output_text.strip(), file=sys.stderr)
+            args.output.unlink()
             return 1
+        verified = run([seed_exe("lainir-print"), args.output])
+        if verified.returncode:
+            print(verified.stderr or verified.stdout, file=sys.stderr)
+            args.output.unlink()
+            return verified.returncode
     print(args.output)
     return 0
 

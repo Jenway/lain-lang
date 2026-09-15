@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import re
 import tempfile
 from pathlib import Path
 
@@ -60,7 +61,7 @@ EXPECTED = "37"
 TEXT_CASES = (
     ("scripts/fixtures/formal_while_and_condition.lain", "#break loop0", 2,
      "a `while` condition keeps every `&&` conjunct"),
-    ("scripts/fixtures/formal_assignment_precedence.lain", "#mul(%v, 10)", 2,
+    ("scripts/fixtures/formal_assignment_precedence.lain", r"#add\(#mul\(%[A-Za-z0-9_]+, 10\), %[A-Za-z0-9_]+\)", 2,
      "a mixed-precedence assignment keeps its lower-precedence term"),
 )
 
@@ -113,7 +114,8 @@ def main() -> int:
             if built.returncode:
                 print(built.stdout + built.stderr, file=sys.stderr)
                 return 1
-            count = out.read_text(encoding="utf-8", errors="replace").count(needle)
+            text = out.read_text(encoding="utf-8", errors="replace")
+            count = len(re.findall(needle, text)) if "assignment_precedence" in name else text.count(needle)
             if count != expected_count:
                 print(
                     f"operator precedence: {label}: expected {expected_count} "
