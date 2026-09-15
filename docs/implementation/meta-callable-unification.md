@@ -72,6 +72,36 @@ AstApi 只操作拓扑、文本、span、origin/hygiene；IrApi 只构造和验�
 
 ## 5. 删除与验收
 
+### 5.1 effect 构造迁移的实际起点（2026-09-15）
+
+严格传播导入收集诊断后，仅导入 `std::effect` 就在
+`Trap = std::effect("Trap")` 失败 3101。库已经识别这个表达式为调用，
+但标准根绑定只建立 `std::type`，普通函数查找不能解析 effect 构造器。
+旧导入收集会忽略这个失败并缓存部分模块；因此旧闭包通过不能作为构造成功证据。
+这里的 `std/effect.lain::Trap` 是过渡期的库包装。物理 Trap 是 LAINVM 的
+终止/失败能力，可以承接宿主或 OS 注入的外部事件；库请求它，VM 记录并
+停止执行。修复库导入不等于实现物理 Trap，也不能把 Trap 的 VM 状态当成
+普通 effect 值传递。普通 effect operation/handler 与 VM Trap 应分别验收。
+
+现有 `lainvm_meta_run_artifact(arguments, physical_kind)` 已提供 bits/addr/unit
+物理结果执行边界，缺口在它之前的库 elaboration/lowering。现有
+`lainvm_meta_build_meta_value_artifact(kind, ...)` 按语义类别合成对象字段，
+不能继续为直接 effect 构造增加委托或新类别参数。
+
+实施应先让库的构造规则把 effect 表达式转换为可组合的物理构造计算，
+由共同函数体 lowering 接收它；构造规则拥有语义数据布局和检查，生成的
+分配、写入与返回只使用物理 IR。显式输入由库环境解析并作为物理参数传递，
+不得把宿主地址常量冻结进运行时产物。共同 artifact 生成与 `#eval` 调用只依据
+已确定的物理签名处理结果，不依据 effect/type/module 类别选择 builder。
+
+迁移验收要分别证明：构造出的 effect 实际进入库环境；operation 使用该 effect；
+handler 消费 operation 的结果并恢复计算；错误返回签名被拒绝且诊断属于原声明；
+导入失败不缓存残缺模块。`main` 单独返回 42 只用于定位导入收集失败，
+不作为 effect/handler 运行成功的证据。
+
+最小复现和失败缓存探针当前位于 `build/local-address-review/`，后续稳定执行
+检查需进入 scripts 并登记 baseline。该迁移尚未实现，不以本节设计作为完成证明。
+
 删除清单以路线图 §7.3 为准，包含 scalar 专用 writer、module/effect/operation 的 builder、
 eval wrapper 和源码形状分派。可复用纯物理部分须拆出；改名不能代替删除。
 
