@@ -22,6 +22,7 @@ in another.
 from __future__ import annotations
 
 import subprocess
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -50,6 +51,7 @@ CASES = (
     "differential_signed_widths.l1",
     "differential_signed_compare.l1",
     "differential_bare_store.l1",
+    "differential_multiline_header.l1",
 )
 
 SEED_HARNESS = """\
@@ -67,11 +69,15 @@ int main(void) {{ printf("%lld\\n", (long long)lainc_entry()); return 0; }}
 
 
 def run(command: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment.setdefault("ZIG_LOCAL_CACHE_DIR", str(ROOT / "build/zig-cache"))
+    environment.setdefault("ZIG_GLOBAL_CACHE_DIR", str(ROOT / "build/zig-cache-global"))
     return subprocess.run(
         [str(part) for part in command],
         cwd=cwd or ROOT,
         capture_output=True,
         text=True,
+        env=environment,
     )
 
 
@@ -150,7 +156,7 @@ def main() -> int:
         print("backend differential: missing fixtures: " + ", ".join(missing), file=sys.stderr)
         return 2
 
-    with tempfile.TemporaryDirectory(prefix="lain-differential-") as raw:
+    with tempfile.TemporaryDirectory(prefix="lain-differential-", dir=ROOT / "build") as raw:
         work = Path(raw)
         backend = work / "backend.l1"
         rebuilt = run([sys.executable, ROOT / "scripts/run_lain_compiler.py", "--library", "-o", backend, ROOT / "src/lainc/backend_c.lain"])
@@ -206,6 +212,7 @@ def main() -> int:
                 # their sentinels, and a `#bits<64>` literal must overwrite all
                 # eight bytes.  A single guessed width scores lower.
                 "differential_bare_store.l1": "4",
+                "differential_multiline_header.l1": "42",
             }.get(name)
             if expected is not None and from_seed != expected:
                 print(f"{name}: both backends returned {from_seed}, expected {expected}", file=sys.stderr)

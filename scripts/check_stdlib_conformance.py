@@ -66,6 +66,9 @@ def canonical(text: str) -> str:
     # The bootstrap compiler uses deterministic fN_source_hash_ prefixes for
     # local procedures; those prefixes are not part of the semantic ABI.
     normalized = re.sub(r"f\d+_[0-9]+_[0-9]+_", "", text)
+    # Seed infers an unannotated integer literal store as bits<64>. Keep the
+    # physical width explicit; narrower typed stores must still differ.
+    normalized = re.sub(r"#store (-?\d+),", r"#store[#bits<64>] \1,", normalized)
     # Formal scalar arithmetic deliberately goes through #eval.  Collapse
     # that transparent scalar wrapper before comparing the generated IR.
     normalized = re.sub(
@@ -90,7 +93,32 @@ def canonical(text: str) -> str:
         r"\1\2",
         normalized,
     )
-    return normalized.strip() + "\n"
+    # Physical binding names are local implementation details. Collapse only
+    # unchanged, type-identical parameter copies, then alpha-rename each proc.
+    # Mutable parameter locals stay visible in the structural comparison.
+    parts = re.split(r"(?=^#proc )", normalized, flags=re.MULTILINE)
+    for index, part in enumerate(parts):
+        if not part.startswith("#proc "):
+            continue
+        header = part.split("{", 1)[0]
+        copies = list(re.finditer(
+            r"^  #let %(lain_parameter_\d+): (#[^\s]+) = %(lain_argument_\d+)\n",
+            part, re.MULTILINE,
+        ))
+        for copy in copies:
+            local, physical_type, argument = copy.groups()
+            if re.search(r"^\s*%" + re.escape(local) + r"\s*:", part, re.MULTILINE):
+                continue
+            if not re.search(re.escape(physical_type) + r"\s+%" + re.escape(argument) + r"\b", header):
+                continue
+            part = part.replace(copy.group(0), "", 1)
+            part = re.sub(r"%" + re.escape(local) + r"\b", "%" + argument, part)
+        names: dict[str, str] = {}
+        def rename(match: re.Match[str]) -> str:
+            name = match.group(0)
+            return names.setdefault(name, f"%binding_{len(names)}")
+        parts[index] = re.sub(r"%[A-Za-z_][A-Za-z0-9_]*", rename, part)
+    return "".join(parts).strip() + "\n"
 
 
 def compile_sources(

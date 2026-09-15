@@ -27,7 +27,7 @@ def build(output: Path) -> None:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="srclainc-artifact-") as directory:
+    with tempfile.TemporaryDirectory(prefix="srclainc-artifact-", dir=ROOT / "build") as directory:
         root = Path(directory)
         first = root / "first.l1"
         second = root / "second.l1"

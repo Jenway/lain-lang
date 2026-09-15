@@ -90,7 +90,7 @@ let match_at = std::func(
 };
 
 let is_space = std::func(byte: i32) -> bool {
-    return byte == 32 || byte == 9 || byte == 13;
+    return byte == 32 || byte == 9 || byte == 10 || byte == 13;
 };
 
 let find_string_end = std::func(
@@ -116,6 +116,35 @@ let find_string_end = std::func(
 // source lines.  The backend consumes logical instructions, so count only
 // parentheses/brackets here and let backend_compile join such lines before
 // dispatching them to emit_line.
+// A physical header ends at the body opener or extern terminator, even when
+// its parameter list and return type occupy different source lines.
+let procedure_header_pending = std::func(source: addr, start: usize, end: usize) -> bool {
+    let index: usize = start;
+    while index < end && is_space(load8(source, index)) { index = index + 1; }
+    let terminator: i32 = 123;
+    if match_at(source, index, end, "#extern", 7) {
+        terminator = 59;
+    } else {
+        if !match_at(source, index, end, "#proc", 5) { return false; }
+    }
+    let comment: bool = false;
+    while index < end {
+        let byte: i32 = load8(source, index);
+        let next: usize = index + 1;
+        if comment {
+            if byte == 10 { comment = false; }
+        } else {
+            if byte == 47 && next < end && load8(source, next) == 47 {
+                comment = true;
+            } else {
+                if byte == terminator { return false; }
+            }
+        }
+        index = index + 1;
+    }
+    return true;
+};
+
 let expression_delimiters = std::func(
     source: addr,
     start: usize,
@@ -2174,7 +2203,7 @@ let backend_compile = std::func() -> i32 {
                     declaration_index,
                 );
                 declaration_segment = declaration_index + 1;
-                if declaration_depth <= 0 {
+                if declaration_depth <= 0 && !procedure_header_pending(input_data, declaration_candidate, declaration_index) {
                     if match_at(input_data, declaration_candidate, declaration_index, "#proc", 5) {
                         emit_proc_decl(input_data, declaration_candidate, declaration_index, output, status);
                     }
@@ -2210,7 +2239,7 @@ let backend_compile = std::func() -> i32 {
                 index,
             );
             segment_start = index + 1;
-            if logical_depth <= 0 {
+            if logical_depth <= 0 && !procedure_header_pending(input_data, line_start, index) {
                 if continuation == 1 {
                     emit_line(input_data, line_start, index, output, status);
                     line_start = index + 1;
