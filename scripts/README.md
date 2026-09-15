@@ -63,7 +63,7 @@ python scripts/<name>.py [args...]
 
 ## 推荐入口
 
-- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 42 道门禁，任一失败即以该 gate 的退出码结束。
+- `python scripts/check_lainc_lainir_api_baseline.py` — 主入口：顺序执行 44 道门禁，任一失败即以该 gate 的退出码结束。
 - `python scripts/capture_lain_bootstrap_baseline.py` — 采集可复现的机器可读 bootstrap 基线报告（同时记录成功与失败的 gate）。
 
 `scripts/check_*.py` 共 40 个，主入口收录其中 **37** 个。**未收录的 3 个及其原因**：
@@ -93,7 +93,7 @@ python scripts/<name>.py [args...]
 
 | 脚本 | 作用 |
 | --- | --- |
-| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 42 道门禁，正式库在消费者检查前从当前源码重建并运行内置验收。 |
+| `check_lainc_lainir_api_baseline.py` | 主入口：顺序执行 44 道门禁，正式库在消费者检查前从当前源码重建并运行内置验收。 |
 | `check_lainc_lainir_api.py` | 检查源码层面的 lainc → LAINIR capability 边界（`--final` 时切换为移除 gate）。 |
 | `check_lainc_lainir_api_snapshots.py` | 用 checked-in canonical artifact 基线守护 formal compiler 的回归。 |
 | `check_backend_differential.py` | 先重建当前 Lain 后端；同一份 LAINIR 交给两个 C 后端并实际执行，比较返回值，负数除法与 8/16/32/64 位参数用例还检查独立预期值。以 Debug 构建，使运行期对齐检查生效。 |
@@ -187,13 +187,19 @@ python scripts/<name>.py [args...]
 
 ### 普通局部赋值与词法绑定回归（编码 1h，未完成）
 
-`python scripts/check_local_assignment_types.py [--compiler <bundle>]` 验证条件块/循环中的
+`python scripts/check_local_assignment_types.py [--compiler <bundle>] [--deterministic]` 验证条件块/循环中的
 addr、bool、参数和推导类型赋值，以及遮蔽恢复和后声明绑定，产物经 verifier 后实际运行到 42。
 测试中的显式 foreign allocator 由执行驱动注入，用于获得真实 addr；此入口不证明 effect/handler 执行。
-当前默认编译器在第一项返回 verifier 2016，尚未登记主门禁。
-隔离源码原型使用词法作用域解析、共享声明/赋值类型、确定的局部名称及参数局部化，
-九项产物均通过 verifier 并实际运行到 42，包括初始化期间的遮蔽和参数循环更新。
-原型尚未写入主源码；记录/成员引用、完整闭包和名称确定性仍需回归。
+当前源码使用词法作用域解析、共享声明/赋值类型、AST 顺序编号及参数局部化。
+默认编译器十五项均通过 verifier、运行到 42，两次独立编译输出字节一致，已登记主门禁。
+覆盖初始化期间遮蔽、参数循环更新、记录布局遮蔽、宏生成绑定及参数名称冲突。
+新编号原型的 46 文件完整闭包已编译并通过 verifier；合入时另保留表达式窗口身份修复，
+删除无消费者的旧条件扫描函数。正式库当前组合、完整 44 项和更广的成员/调用语义仍待验证。
+
+`--check-scope-errors` 要求九项非法引用返回 5108：未声明大写名、块外、兄弟块、
+前向读取、嵌套初始化、嵌套循环条件、记录字段、取地址及条件。读取修复已合入，
+默认入口十五项正例和九项负例通过，已纳入主门禁。带读取修复的原型完整源码
+闭包也通过 verifier；完整 44 项仍待重跑。直接 seed ABI 的失败输出是诊断文本。
 
 ### 正式类型表达式边界回归（编码 2）
 
@@ -201,3 +207,22 @@ addr、bool、参数和推导类型赋值，以及遮蔽恢复和后声明绑定
 语法 hook，断言三个合法语法正例；反例同时要求 hook 与完整编译流水线返回约定诊断。
 生产正式库重建和默认 gate 已通过 12 项对比，剩余 1 项未知返回类型的优先级 SKIP。
 `--formal-abi <bundle>` 用于显式隔离 core + formal stdlib 产物；默认入口自动保证正式库重建。
+
+### 多行物理过程头回归（编码 7）
+
+`check_backend_differential.py` 现有 11 个用例，新 `differential_multiline_header.l1`
+跨行读取 addr、窄整数参数及返回类型，两个 C 后端实际运行到独立预期值 42。
+`check_backend_c_shape.py` 同时检查多行 extern 原型与定义的实际物理类型。
+过程头修复后 compiler core 整体 C 已编译成对象；宿主链接和 native 运行仍需单独验证。
+
+### 普通条件表达式 lowering（编码 1h）
+
+`python scripts/check_condition_expression_lowering.py [--compiler <bundle>] [--deterministic]` 验证 12 个
+普通函数条件/布尔值/循环用例，产物通过 verifier 并实际运行到独立预期值 42。
+条件与普通值复用同一 AST 表达式窗口；最低优先级的最右运算符形成外层节点。
+旧实现负对照在首个算术/比较/布尔混用反例被 verifier 2024 拒绝。
+此入口已登记为主门禁第 43 项；完整词法绑定、类型环境与 effect lowering 仍未完成。
+# 常量作用域回归
+
+`python scripts/check_constant_scopes.py` 重建默认 bootstrap 编译器，执行独立
+模块同名常量正例和根作用域/同模块重复声明反例。已加入主基线入口。

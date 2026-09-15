@@ -4,6 +4,18 @@
 
 ## 当前完成快照
 
+- [绑定迁移后的 fixture 对比](roadmap-lain-parity-bindings-2026-09-14.md)：16 项 IR/运行及导入回归通过，完整门禁仍待重跑结果。
+
+- [词法读取与诊断传播](roadmap-lain-1h-lexical-reads-2026-09-14.md)：十五项正例、九项非法引用和独立编译一致性通过，完整类型环境仍待完成。
+
+- [局部绑定与参数更新切片](roadmap-lain-1h-lexical-bindings-2026-09-14.md)：默认编译器 15 项运行及独立编译一致性通过，完整类型环境尚未完成。
+
+- [宏复制节点的表达式边界](roadmap-lain-1h-macro-window-2026-09-14.md)：窗口终点按节点身份判断，12 项条件/表达式运行和独立编译一致性通过。
+
+- [共同条件表达式切片](roadmap-lain-1h-conditions-2026-09-14.md)：11 项运行回归、生产正式库和相关 gate 通过，完整 1h 未完成。
+
+- [多行过程头切片](roadmap-lain-7-multiline-headers-2026-09-14.md)：定义/extern 跨行类型读取、11 项差分通过，compiler core 整体 C 编译成对象；完整 native 未完成。
+
 - [正式类型语法切片](roadmap-lain-2-type-syntax-2026-09-13.md)：生产重建和 12 项形状对比通过，完整编码 2 未完成。
 
 - [整理核验记录](roadmap-lain-review-2026-09-13.md)：已实现切片归属、移出的执行记录与本次校验范围。
@@ -69,6 +81,11 @@
 - [`scheme-era-meta-system.md`](scheme-era-meta-system.md)
 
 ## 已清理的重复路线图
+
+新增完成切片：[类型表达式末尾节点修复](roadmap-lain-type-terminal-2026-09-14.md)。
+新增完成切片：[常量作用域重复检查](roadmap-lain-constant-scopes-2026-09-14.md)。
+新增完成切片：[编译入口的产物验证](roadmap-lain-cli-artifact-verification-2026-09-15.md)。
+新增完成切片：[编译失败输出清理](roadmap-lain-cli-failure-cleanup-2026-09-15.md)。
 
 以下内容已从仓库删除，因为其信息已合并到当前路线图或完成快照，或者描述的对象已经不存在：
 
