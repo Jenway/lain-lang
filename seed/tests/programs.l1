@@ -8,6 +8,9 @@
 
 data bytes ro { 7 8 9 }
 
+// 模块级**可写**数据：状态跨调用保留（.data 段）。
+data counter rw { 0 0 0 0 0 0 0 0 }
+
 #proc answer() -> #bits<64> {
   %r = #add[#bits<64>](40, 2)
   #return %r
@@ -109,4 +112,76 @@ data bytes ro { 7 8 9 }
   %p = #data_addr bytes
   %r = #call_indirect[#bits<64>](%p)
   #return %r
+}
+
+// --- 下面几条是**形状覆盖**：它们曾经是「能跑但零覆盖」的路径。---
+
+// 通过内存改状态：状态跨调用保留。
+#proc bump() -> #bits<64> {
+  %p = #data_addr counter
+  %v = #load[#bits<64>](%p)
+  %n = #add[#bits<64>](%v, 1)
+  #store[#bits<64>](%n, %p)
+  #return %n
+}
+
+#proc bump_three() -> #bits<64> {
+  %a = #call bump()
+  %b = #call bump()
+  %c = #call bump()
+  %s = #add[#bits<64>](#add[#bits<64>](%a, %b), %c)
+  #return %s
+}
+
+// 无结果过程 + 无结果调用 + 无操作数 #return。
+#proc nop(%x: #bits<64>) {
+  #return
+}
+
+#proc void_driver() -> #bits<64> {
+  #call nop(7)
+  #call nop(8)
+  #return 42
+}
+
+// 多结果区域：一个区域交出两个值，绑成两个名字。
+// 新 IR 没有复合类型，所以多结果就是多个结果。
+#proc pick(%c: #bits<1>) -> #bits<64> {
+  %a, %b = #if %c -> (#bits<64>, #bits<64>) {
+    #yield 1, 2
+  } else {
+    #yield 30, 4
+  }
+  %s = #add[#bits<64>](%a, %b)
+  #return %s
+}
+
+#proc pick_true() -> #bits<64> {
+  %r = #call pick(1)
+  #return %r
+}
+
+#proc pick_false() -> #bits<64> {
+  %r = #call pick(0)
+  #return %r
+}
+
+// 嵌套表达式：输入糖会自动摊平成 _tmp<N>。canonical 形式里没有嵌套。
+#proc nested(%a: #bits<64>, %b: #bits<64>) -> #bits<64> {
+  %v = #add[#bits<64>](#mul[#bits<64>](%a, 10), #sub[#bits<64>](%b, 48))
+  #return %v
+}
+
+// 循环携带状态：新 IR 里游标是循环参数，不是被赋值的绑定。
+#proc count_up(%n: #bits<64>) -> #bits<64> {
+  %total = #loop steps(%i: #bits<64> = 0, %acc: #bits<64> = 0) -> (#bits<64>) {
+    %c = #uge[#bits<64>](%i, %n)
+    #if %c {
+      #break steps(%acc)
+    }
+    %next = #add[#bits<64>](%i, 1)
+    %sum = #add[#bits<64>](%acc, %i)
+    #continue steps(%next, %sum)
+  }
+  #return %total
 }

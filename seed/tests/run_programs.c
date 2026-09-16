@@ -228,6 +228,25 @@ int main(void) {
   expect_bits(tcb, "via_ptr", NULL, 0, 42, "via_ptr");
   expect_trap(tcb, "bad_call", NULL, 0, "bad_call");
 
+  /* --- 形状覆盖：这些路径曾经「能跑但零覆盖」 --- */
+  expect_bits(tcb, "bump_three", NULL, 0, 6, "rw-data");
+  expect_bits(tcb, "void_driver", NULL, 0, 42, "void");
+  expect_bits(tcb, "pick_true", NULL, 0, 3, "multi=true");
+  expect_bits(tcb, "pick_false", NULL, 0, 34, "multi=false");
+  {
+    L1Value args[2];
+    memset(args, 0, sizeof(args));
+    args[0] = (L1Value){L1_VALUE_BITS, 64, {.bits = 2}};
+    args[1] = (L1Value){L1_VALUE_BITS, 64, {.bits = 50}};
+    expect_bits(tcb, "nested", args, 2, 22, "nested");
+  }
+  {
+    L1Value args[1];
+    memset(args, 0, sizeof(args));
+    args[0] = (L1Value){L1_VALUE_BITS, 64, {.bits = 5}};
+    expect_bits(tcb, "count_up", args, 1, 10, "loop-carry");
+  }
+
   printf("---\n");
   printf("%s\n", failures == 0 ? "ALL PASS" : "FAILURES");
 
