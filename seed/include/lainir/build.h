@@ -9,6 +9,7 @@
 #define LAINIR_BUILD_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "lainir/core.h"
@@ -17,6 +18,12 @@ typedef struct L1Builder L1Builder;
 
 L1Builder *lainir_builder_new(void);
 void lainir_builder_free(L1Builder *builder);
+
+/* 从 arena 切一块裸内存，调用方自己管布局。切出来的东西不移动。
+ *
+ * 用途：**任何随模块增长的数组都不该有定长上限**。解析器的过程表和数据表
+ * 用它按需扩容——上限只该来自模块本身。 */
+void *lainir_builder_alloc(L1Builder *builder, size_t size);
 
 /* 把一段文本拷进 builder 的 arena。模块引用传进去的字符串，所以解析器
  * 必须用它来持有自己读到的名字。 */

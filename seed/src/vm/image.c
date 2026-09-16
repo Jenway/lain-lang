@@ -81,17 +81,20 @@ static bool resolve_name(const Loader *L, uint32_t region_id, const char *name,
 
 /* --- 区域树 ---------------------------------------------------------------- */
 
+/* 下面几个 push 的容量检查是**防御性的**：容量由 count_region() 预先数出来，
+ * 超了说明计数器和装载器对不上——那是装载器的 bug，不是模块被拒。
+ * 所以给它们单独的码，别和「模块非法」混在一起。 */
 static bool reserve_insts(Loader *L, uint32_t count) {
-  if (L->image->inst_count + count > LAINVM_IMAGE_MAX_INSTS) {
-    load_fail(L, 9001, "image: too many instructions");
+  if (L->image->inst_count + count > L->image->inst_cap) {
+    load_fail(L, 9001, "image: instruction count does not match the module");
     return false;
   }
   return true;
 }
 
 static bool push_operand(Loader *L, LainVmOperandRef ref, uint32_t *out) {
-  if (L->image->operand_count >= LAINVM_IMAGE_MAX_OPERANDS) {
-    load_fail(L, 9002, "image: too many operands");
+  if (L->image->operand_count >= L->image->operand_cap) {
+    load_fail(L, 9002, "image: operand count does not match the module");
     return false;
   }
   *out = L->image->operand_count;
@@ -100,8 +103,8 @@ static bool push_operand(Loader *L, LainVmOperandRef ref, uint32_t *out) {
 }
 
 static bool push_result(Loader *L, uint32_t slot, uint32_t *out) {
-  if (L->image->result_count >= LAINVM_IMAGE_MAX_RESULTS) {
-    load_fail(L, 9003, "image: too many results");
+  if (L->image->result_count >= L->image->result_cap) {
+    load_fail(L, 9003, "image: result count does not match the module");
     return false;
   }
   *out = L->image->result_count;
@@ -116,8 +119,8 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
   LainVmImageRegion *rec;
   uint32_t pos;
 
-  if (L->image->region_count >= LAINVM_IMAGE_MAX_REGIONS) {
-    load_fail(L, 9004, "image: too many regions");
+  if (L->image->region_count >= L->image->region_cap) {
+    load_fail(L, 9004, "image: region count does not match the module");
     return LAINVM_IMAGE_NO_REGION;
   }
   id = L->image->region_count++;
@@ -195,8 +198,8 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
       meta->default_region =
           add_region(L, inst->default_case, id, depth + 1, NULL, 0);
     if (inst->case_count > 0) {
-      if (L->image->case_count + inst->case_count > LAINVM_IMAGE_MAX_CASES) {
-        load_fail(L, 9005, "image: too many switch cases");
+      if (L->image->case_count + inst->case_count > L->image->case_cap) {
+        load_fail(L, 9005, "image: case count does not match the module");
         return LAINVM_IMAGE_NO_REGION;
       }
       meta->case_base = L->image->case_count;
@@ -255,8 +258,8 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
 static uint32_t add_symbol(Loader *L, const char *symbol, uintptr_t addr,
                            uint32_t size, uint32_t rights) {
   uint32_t index;
-  if (L->image->symbol_count >= LAINVM_IMAGE_MAX_SYMBOLS) {
-    load_fail(L, 9009, "image: too many symbols");
+  if (L->image->symbol_count >= L->image->symbol_cap) {
+    load_fail(L, 9009, "image: symbol count does not match the module");
     return LAINVM_IMAGE_NO_INDEX;
   }
   index = L->image->symbol_count++;
@@ -371,6 +374,101 @@ static void resolve_symbols(LainVmImage *image) {
   }
 }
 
+/* --- 按模块量尺寸 ----------------------------------------------------------
+ *
+ * 装载器在递归里会持有 regions[] / insts[] 的指针，所以不能边装边长
+ * （realloc 会把它们挪走）。改成一趟纯计数的先序遍历，先把容量数准，
+ * 再一次性分配——分配之后映像的尺寸就固定了。
+ * ------------------------------------------------------------------------- */
+
+typedef struct {
+  uint32_t regions;
+  uint32_t insts;
+  uint32_t operands;
+  uint32_t results;
+  uint32_t cases;
+} ImageTotals;
+
+/* 必须和 add_region 的 push 次数逐项对上：
+ *   每个区域 +1；+param_count 个循环参数初值；每个区域 +inst_count 条指令；
+ *   每条指令 +operand_count 个操作数、+result_count 个结果、+case_count 个 case；
+ *   子区域按 add_region 的递归顺序走一遍（loop 只有 body，其余有 body/else/default）。 */
+static void count_region(const L1Region *region, ImageTotals *t) {
+  uint32_t pos;
+  uint32_t i;
+  if (!region) return;
+  t->regions++;
+  t->insts += region->inst_count;
+  t->operands += region->param_count;
+  for (pos = 0; pos < region->inst_count; pos++) {
+    const L1Inst *inst = &region->insts[pos];
+    t->operands += inst->operand_count;
+    t->results += inst->result_count;
+    t->cases += inst->case_count;
+    if (inst->kind == INST_LOOP) {
+      count_region(inst->body, t);
+    } else {
+      count_region(inst->body, t);
+      count_region(inst->else_body, t);
+    }
+    count_region(inst->default_case, t);
+    for (i = 0; i < inst->case_count; i++) count_region(inst->cases[i].body, t);
+  }
+}
+
+/* 按 count 分配一块表；count 为 0 时返回 NULL 且不算失败。 */
+static void *alloc_table(uint32_t count, size_t elem_size, Loader *L,
+                         int code) {
+  void *table;
+  if (count == 0) return NULL;
+  table = calloc((size_t)count, elem_size);
+  if (!table) load_fail(L, code, "image: cannot allocate the image tables");
+  return table;
+}
+
+static bool size_image(Loader *L, const L1Module *module) {
+  ImageTotals t;
+  LainVmImage *image = L->image;
+  uint32_t i;
+
+  memset(&t, 0, sizeof(t));
+  for (i = 0; i < module->subroutine_count; i++) {
+    const L1Subroutine *sub = &module->subroutines[i];
+    if (!(sub->flags & SUBROUTINE_EXTERN) && sub->body) count_region(sub->body, &t);
+  }
+
+  image->region_cap = t.regions;
+  image->inst_cap = t.insts;
+  image->operand_cap = t.operands;
+  image->result_cap = t.results;
+  image->case_cap = t.cases;
+  image->symbol_cap = module->data_count;
+  image->sub_cap = module->subroutine_count;
+
+  image->regions = (LainVmImageRegion *)alloc_table(
+      t.regions, sizeof(LainVmImageRegion), L, 9018);
+  if (t.regions && !image->regions) return false;
+  image->insts =
+      (LainVmImageInstMeta *)alloc_table(t.insts, sizeof(LainVmImageInstMeta), L,
+                                         9018);
+  if (t.insts && !image->insts) return false;
+  image->operands = (LainVmOperandRef *)alloc_table(
+      t.operands, sizeof(LainVmOperandRef), L, 9018);
+  if (t.operands && !image->operands) return false;
+  image->results = (uint32_t *)alloc_table(t.results, sizeof(uint32_t), L, 9018);
+  if (t.results && !image->results) return false;
+  image->case_regions =
+      (uint32_t *)alloc_table(t.cases, sizeof(uint32_t), L, 9018);
+  if (t.cases && !image->case_regions) return false;
+  image->symbols = (LainVmImageSymbol *)alloc_table(
+      image->symbol_cap, sizeof(LainVmImageSymbol), L, 9018);
+  if (image->symbol_cap && !image->symbols) return false;
+  image->subs = (LainVmImageSub *)alloc_table(image->sub_cap,
+                                              sizeof(LainVmImageSub), L, 9018);
+  if (image->sub_cap && !image->subs) return false;
+  return true;
+}
+
 LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
                                L1Diagnostic *diag) {
   LainVmImage *image;
@@ -391,13 +489,12 @@ LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
     diag->message[0] = '\0';
   }
 
-  if (!map_data(&loader, module)) {
+  if (!size_image(&loader, module)) {
     lainvm_image_free(image);
     return NULL;
   }
 
-  if (module->subroutine_count > LAINVM_IMAGE_MAX_SUBS) {
-    load_fail(&loader, 9014, "image: too many subroutines");
+  if (!map_data(&loader, module)) {
     lainvm_image_free(image);
     return NULL;
   }
@@ -452,6 +549,13 @@ void lainvm_image_free(LainVmImage *image) {
   free(image->ro_arena);
   free(image->rw_arena);
   free(image->code_arena);
+  free(image->regions);
+  free(image->insts);
+  free(image->operands);
+  free(image->results);
+  free(image->case_regions);
+  free(image->symbols);
+  free(image->subs);
   free(image);
 }
 

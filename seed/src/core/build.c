@@ -75,6 +75,11 @@ static void *arena_copy(L1Builder *builder, const void *src, size_t size) {
   return dst;
 }
 
+void *lainir_builder_alloc(L1Builder *builder, size_t size) {
+  if (!builder) return NULL;
+  return arena_alloc(builder, size);
+}
+
 const char *lainir_builder_string(L1Builder *builder, const char *text) {
   size_t n;
   if (!text) return NULL;
