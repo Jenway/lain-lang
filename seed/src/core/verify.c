@@ -3,11 +3,14 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lainir/infer.h"
 
-#define L1V_MAX_BINDINGS 1024u
+/* 绑定表的**起始**容量，不是上限：按需翻倍。一个过程的活跃绑定数只该由
+ * 这个过程自己决定。 */
+#define L1V_MIN_BINDINGS 256u
 
 typedef struct Binding {
   const char *name;
@@ -26,8 +29,9 @@ typedef struct {
   LainIrTypes types;
   L1Diagnostic *diag;
   const L1Subroutine *sub;
-  Binding bindings[L1V_MAX_BINDINGS];
+  Binding *bindings;
   uint32_t binding_count;
+  uint32_t binding_cap;
   bool failed;
 } Verifier;
 
@@ -61,9 +65,16 @@ static const Binding *find_binding(const Verifier *v, const Binding *head,
 static const Binding *push_binding(Verifier *v, const Binding *head,
                                    const char *name, const L1Type *ty) {
   Binding *b;
-  if (v->binding_count >= L1V_MAX_BINDINGS) {
-    fail(v, L1V_DUPLICATE_BINDING, 0, 0, "too many bindings");
-    return head;
+  if (v->binding_count >= v->binding_cap) {
+    uint32_t next = v->binding_cap ? v->binding_cap * 2u : L1V_MIN_BINDINGS;
+    Binding *grown =
+        (Binding *)realloc(v->bindings, sizeof(Binding) * (size_t)next);
+    if (!grown) {
+      fail(v, L1V_OUT_OF_MEMORY, 0, 0, "out of memory for bindings");
+      return head;
+    }
+    v->bindings = grown;
+    v->binding_cap = next;
   }
   b = &v->bindings[v->binding_count++];
   b->name = name;
@@ -777,10 +788,45 @@ static bool verify_subroutine(Verifier *v, const L1Subroutine *sub) {
   return true;
 }
 
-int lainir_verify(const L1Module *module, L1Diagnostic *diag) {
-  Verifier v;
+/* 模块级检查。**这里每个失败都必须返回非 0**：`fail()` 返回的是 bool，
+ * 写成 `return fail(...)` 会返回 0 = 成功，而 diag 里却写着错误——
+ * 「重复子过程」和「重复数据」曾经就是这样漏出去的（返回 0，
+ * 于是装载器照样收下，find_sub 按名字静默取第一个）。 */
+static int verify_module(Verifier *v, const L1Module *module) {
   uint32_t i;
   uint32_t j;
+
+  for (i = 0; i < module->subroutine_count; i++) {
+    for (j = 0; j < i; j++) {
+      if (module->subroutines[i].name && module->subroutines[j].name &&
+          strcmp(module->subroutines[i].name, module->subroutines[j].name) == 0) {
+        fail(v, L1V_DUPLICATE_SUBROUTINE, 0, 0, "duplicate subroutine `%s`",
+             module->subroutines[i].name);
+        return 1;
+      }
+    }
+  }
+  for (i = 0; i < module->data_count; i++) {
+    for (j = 0; j < i; j++) {
+      if (module->data[i].symbol && module->data[j].symbol &&
+          strcmp(module->data[i].symbol, module->data[j].symbol) == 0) {
+        fail(v, L1V_DUPLICATE_DATA, 0, 0, "duplicate data `%s`",
+             module->data[i].symbol);
+        return 1;
+      }
+    }
+  }
+
+  for (i = 0; i < module->subroutine_count; i++) {
+    v->binding_count = 0;
+    if (!verify_subroutine(v, &module->subroutines[i])) return 1;
+  }
+  return 0;
+}
+
+int lainir_verify(const L1Module *module, L1Diagnostic *diag) {
+  Verifier v;
+  int result;
 
   if (!module) return 1;
   memset(&v, 0, sizeof(v));
@@ -792,26 +838,7 @@ int lainir_verify(const L1Module *module, L1Diagnostic *diag) {
     diag->message[0] = '\0';
   }
 
-  for (i = 0; i < module->subroutine_count; i++) {
-    for (j = 0; j < i; j++) {
-      if (module->subroutines[i].name && module->subroutines[j].name &&
-          strcmp(module->subroutines[i].name, module->subroutines[j].name) == 0)
-        return fail(&v, L1V_DUPLICATE_SUBROUTINE, 0, 0,
-                    "duplicate subroutine `%s`", module->subroutines[i].name);
-    }
-  }
-  for (i = 0; i < module->data_count; i++) {
-    for (j = 0; j < i; j++) {
-      if (module->data[i].symbol && module->data[j].symbol &&
-          strcmp(module->data[i].symbol, module->data[j].symbol) == 0)
-        return fail(&v, L1V_DUPLICATE_DATA, 0, 0, "duplicate data `%s`",
-                    module->data[i].symbol);
-    }
-  }
-
-  for (i = 0; i < module->subroutine_count; i++) {
-    v.binding_count = 0;
-    if (!verify_subroutine(&v, &module->subroutines[i])) return 1;
-  }
-  return 0;
+  result = verify_module(&v, module);
+  free(v.bindings);
+  return result;
 }
