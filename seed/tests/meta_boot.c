@@ -1,0 +1,324 @@
+/* 驱动：端到端跑通 Meta 机制。
+ *
+ * 链路（seed/bootstrap/ 是手写 LAINIR，用来自举的那一层）：
+ *
+ *   1. 把 bootstrap 的源文件按 SOURCE_ORDER 拼成一份 LAINIR 文本，
+ *      这就是**初代 Meta**，它自己也是 LAINIR —— 打破鸡生蛋的那一步。
+ *   2. 解析 / 验证 / 装载它，admit 一个 TCB。
+ *   3. 登记宿主能力（源码读入 + 产物写出），把 host 的地址作为 #addr
+ *      传给 lain_std_lower。
+ *   4. Meta 读源码、按语言规则产出 canonical LAINIR 文本。
+ *   5. 驱动拿这段文本再 parse + verify + 装载 + 执行，检查结果。
+ *
+ * 这个测试证明的不是「Meta 认识多少 Lain」，而是**机制通了**：
+ * 语言规则住在 LAINIR 写的库里，底座只提供源码、产物和 `#eval` 三类原语。
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "lainir/build.h"
+#include "lainir/parse.h"
+#include "lainir/verify.h"
+#include "lainmeta/host.h"
+#include "lainvm/engine.h"
+#include "lainvm/space.h"
+
+static int failures = 0;
+
+static void report_fail(const char *what, const char *why) {
+  printf("FAIL %-22s %s\n", what, why);
+  failures++;
+}
+
+static char *read_text_file(const char *path, uint32_t *length_out) {
+  FILE *file = fopen(path, "rb");
+  long size;
+  char *text;
+  if (!file) return NULL;
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  size = ftell(file);
+  if (size < 0) {
+    fclose(file);
+    return NULL;
+  }
+  rewind(file);
+  text = (char *)malloc((size_t)size + 1);
+  if (!text) {
+    fclose(file);
+    return NULL;
+  }
+  if (fread(text, 1, (size_t)size, file) != (size_t)size) {
+    free(text);
+    fclose(file);
+    return NULL;
+  }
+  text[size] = '\0';
+  fclose(file);
+  if (length_out) *length_out = (uint32_t)size;
+  return text;
+}
+
+/* 按 SOURCE_ORDER 把 bootstrap 源拼成一份文本。 */
+static char *load_bootstrap(const char *order_path, uint32_t *length_out) {
+  char *order = read_text_file(order_path, NULL);
+  char *joined;
+  size_t used = 0;
+  size_t cap = 4096;
+  char *line;
+  if (!order) return NULL;
+  joined = (char *)malloc(cap);
+  if (!joined) {
+    free(order);
+    return NULL;
+  }
+  joined[0] = '\0';
+  line = strtok(order, "\r\n");
+  while (line) {
+    char path[512];
+    char *text;
+    size_t need;
+    if (line[0] != '#' && line[0] != '\0') {
+      uint32_t text_length = 0;
+      snprintf(path, sizeof(path), "seed/bootstrap/%s", line);
+      text = read_text_file(path, &text_length);
+      if (!text) {
+        printf("cannot read bootstrap source: %s\n", path);
+        free(joined);
+        free(order);
+        return NULL;
+      }
+      need = used + text_length + 2u;
+      if (need > cap) {
+        char *grown;
+        while (cap < need) cap *= 2u;
+        grown = (char *)realloc(joined, cap);
+        if (!grown) {
+          free(text);
+          free(joined);
+          free(order);
+          return NULL;
+        }
+        joined = grown;
+      }
+      memcpy(joined + used, text, text_length);
+      used += text_length;
+      joined[used++] = '\n';
+      joined[used] = '\0';
+      free(text);
+    }
+    line = strtok(NULL, "\r\n");
+  }
+  free(order);
+  if (length_out) *length_out = (uint32_t)used;
+  return joined;
+}
+
+/* 解析 + 验证 + 装载 + admit，返回可执行的 TCB。 */
+static LainVmTcb *prepare(L1Builder *builder, const char *text,
+                          LainVmSpace *space, LainVmImage **image_out,
+                          const char *what) {
+  L1Diagnostic diag;
+  const L1Module *module;
+  LainVmImage *image;
+  LainVmTcb *tcb;
+  diag.code = 0;
+  module = lainir_parse(builder, text, &diag);
+  if (!module) {
+    char buffer[192];
+    snprintf(buffer, sizeof(buffer), "parse: %d line %u %s", diag.code,
+             diag.line, diag.message);
+    report_fail(what, buffer);
+    return NULL;
+  }
+  if (lainir_verify(module, &diag) != 0) {
+    char buffer[192];
+    snprintf(buffer, sizeof(buffer), "verify: %d %s", diag.code, diag.message);
+    report_fail(what, buffer);
+    return NULL;
+  }
+  image = lainvm_image_load(module, space, &diag);
+  if (!image) {
+    char buffer[192];
+    snprintf(buffer, sizeof(buffer), "load: %d %s", diag.code, diag.message);
+    report_fail(what, buffer);
+    return NULL;
+  }
+  /* 递归深度是 admit 参数，不是硬上限：Meta 的十进制输出是递归的，
+   * 二十来层足够，给 64 留余量。 */
+  tcb = lainvm_tcb_new(image, space, 1, 1, 64, 4096);
+  if (!tcb) {
+    report_fail(what, "admit failed");
+    lainvm_image_free(image);
+    return NULL;
+  }
+  *image_out = image;
+  return tcb;
+}
+
+int main(int argc, char **argv) {
+  const char *source_path = argc > 1 ? argv[1] : "seed/tests/meta_source.lain";
+  /* 入口名由调用方给：名字是从源码里**搬过来**的，不是写死的，
+   * 换个源码就要换个入口。 */
+  const char *entry = argc > 2 ? argv[2] : "main";
+  long want = argc > 3 ? strtol(argv[3], NULL, 10) : 42;
+  L1Builder *meta_builder = lainir_builder_new();
+  L1Builder *out_builder = lainir_builder_new();
+  LainMetaHost *host = lainmeta_host_new();
+  LainVmSpace meta_space;
+  LainVmSpace out_space;
+  LainVmImage *meta_image = NULL;
+  LainVmImage *out_image = NULL;
+  LainVmTcb *meta_tcb = NULL;
+  LainVmTcb *out_tcb = NULL;
+  LainVmCaps *caps = NULL;
+  LainVmSliceResult slice;
+  L1Diagnostic diag;
+  char *bootstrap;
+  char *source;
+  uint32_t source_length = 0;
+  char *produced;
+  uint32_t produced_length = 0;
+  const char *output;
+  int rc = 1;
+
+  setvbuf(stdout, NULL, _IONBF, 0);
+
+  bootstrap = load_bootstrap("seed/bootstrap/SOURCE_ORDER", NULL);
+  if (!bootstrap) {
+    printf("cannot load the bootstrap sources\n");
+    return 1;
+  }
+  source = read_text_file(source_path, &source_length);
+  if (!source) {
+    printf("cannot read the source: %s\n", source_path);
+    return 1;
+  }
+  printf("bootstrap: %u bytes of hand-written LAINIR\n",
+         (unsigned)strlen(bootstrap));
+  printf("source:    %s (%u bytes)\n", source_path, source_length);
+
+  if (lainmeta_host_add_source(host, source_path, source, source_length) != 0) {
+    printf("cannot register the source\n");
+    return 1;
+  }
+
+  /* --- 1. Meta 自己 --- */
+  lainvm_space_init(&meta_space);
+  /* 源码字节**必须显式授权**：Meta 的 TCB 不自带地址空间，源码地址
+   * 也不是它自己的映像的一部分。不授权的话它第一次 #load 就会被
+   * 确定性拒绝（1004）——这是设计要的行为，不是缺陷。 */
+  if (lainvm_space_add_region(&meta_space, (uintptr_t)source, source_length,
+                              LAINVM_MEM_READ, 0) == LAINVM_SPACE_NO_REGION) {
+    report_fail("source grant", "the address space rejected the source bytes");
+    goto cleanup;
+  }
+  meta_tcb = prepare(meta_builder, bootstrap, &meta_space, &meta_image, "meta");
+  if (!meta_tcb) goto cleanup;
+
+  caps = lainvm_caps_new();
+  if (!caps || lainmeta_host_register(host, caps) != 0) {
+    report_fail("caps", "cannot register the host services");
+    goto cleanup;
+  }
+  diag.code = 0;
+  if (lainvm_tcb_set_caps(meta_tcb, caps, &diag) != 0) {
+    report_fail("caps", "cannot resolve the host services");
+    goto cleanup;
+  }
+  printf("caps:      %u registered, %u resolved\n", lainvm_caps_count(caps),
+         meta_tcb->resolved_count);
+
+  /* --- 2. 跑 Meta --- */
+  {
+    L1Value args[2];
+    memset(args, 0, sizeof(args));
+    args[0] = (L1Value){L1_VALUE_ADDR, 0, {.addr = (void *)host}};
+    args[1] = (L1Value){L1_VALUE_BITS, 64, {.bits = 0}};
+    diag.code = 0;
+    if (lainvm_tcb_start(meta_tcb, "lain_std_lower", args, 2, &diag) != 0) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer), "start: %d %s", diag.code, diag.message);
+      report_fail("meta run", buffer);
+      goto cleanup;
+    }
+    slice = lainvm_engine_run(meta_tcb, 10000000);
+    if (slice != LAINVM_SLICE_DONE) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer),
+               "slice=%d trap kind=%d status=%d region=%u pos=%u steps=%llu",
+               (int)slice, (int)meta_tcb->trap.kind, meta_tcb->trap.status,
+               meta_tcb->trap.region, meta_tcb->trap.position,
+               (unsigned long long)meta_tcb->steps);
+      report_fail("meta run", buffer);
+      goto cleanup;
+    }
+    if (meta_tcb->result.as.bits != 0) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer), "Meta returned status %llu",
+               (unsigned long long)meta_tcb->result.as.bits);
+      report_fail("meta run", buffer);
+      goto cleanup;
+    }
+    printf("meta:      ok, %llu steps, host status %u\n",
+           (unsigned long long)meta_tcb->steps,
+           lainmeta_host_status(host));
+  }
+
+  /* --- 3. 产物 --- */
+  output = lainmeta_host_output(host);
+  produced_length = lainmeta_host_output_length(host);
+  produced = (char *)malloc(produced_length + 1u);
+  if (!produced) goto cleanup;
+  memcpy(produced, output, produced_length);
+  produced[produced_length] = '\0';
+  printf("--- produced LAINIR (%u bytes) ---\n%s", produced_length, produced);
+  printf("---\n");
+
+  lainvm_space_init(&out_space);
+  out_tcb = prepare(out_builder, produced, &out_space, &out_image, "produced");
+  if (!out_tcb) goto cleanup;
+
+  {
+    LainVmSliceResult out_slice;
+    diag.code = 0;
+    if (lainvm_tcb_start(out_tcb, entry, NULL, 0, &diag) != 0) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer), "start: %d %s", diag.code, diag.message);
+      report_fail("produced run", buffer);
+      goto cleanup;
+    }
+    out_slice = lainvm_engine_run(out_tcb, 1000000);
+    if (out_slice != LAINVM_SLICE_DONE) {
+      report_fail("produced run", "trapped");
+      goto cleanup;
+    }
+    printf("%s()%*s= %llu\n", entry, (int)(10 - strlen(entry)) > 0 ? (int)(10 - strlen(entry)) : 0, " ",
+           (unsigned long long)out_tcb->result.as.bits);
+    if ((long)out_tcb->result.as.bits != want) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer), "expected %ld", want);
+      report_fail(entry, buffer);
+      goto cleanup;
+    }
+  }
+
+  printf("---\n%s\n", failures == 0 ? "ALL PASS" : "FAILURES");
+  rc = failures == 0 ? 0 : 1;
+
+cleanup:
+  free(bootstrap);
+  free(source);
+  if (caps) lainvm_caps_free(caps);
+  if (meta_tcb) lainvm_tcb_free(meta_tcb);
+  if (out_tcb) lainvm_tcb_free(out_tcb);
+  if (meta_image) lainvm_image_free(meta_image);
+  if (out_image) lainvm_image_free(out_image);
+  lainmeta_host_free(host);
+  lainir_builder_free(meta_builder);
+  lainir_builder_free(out_builder);
+  return rc;
+}

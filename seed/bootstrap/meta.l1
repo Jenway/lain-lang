@@ -1,0 +1,102 @@
+// Meta v0 —— 语言定义层，手写 LAINIR。
+//
+// 它是「编译器的哪一部分必须能用 Lain 重写」这条边界的第一个落点：
+// 它读源码字节，按语言规则决定含义，产出 canonical LAINIR 文本，
+// 交给驱动去 parse + verify + 执行。它不认识任何物理算子，
+// 底座也不认识任何 Lain 概念。
+//
+// v0 的语言只有一条规则：
+//     let NAME = INTEGER;
+// 产出：
+//     #proc NAME() -> #bits<64> {
+//       #return INTEGER
+//     }
+//
+// 三个入口对应三个标准阶段。v0 里 expand 是恒等（还没有宏），
+// elaborate 与 lower 合成一条直线——等形状长出来再拆。
+
+#proc lain_std_abi_version() -> #bits<64> {
+  #return 1
+}
+
+#proc lain_std_initialize(%host: #addr) -> #bits<32> {
+  #return 0
+}
+
+// 产出：把 source 那份源码 lowering 成 LAINIR 文本，写进宿主的输出缓冲。
+// 返回 0 = 成功。
+#proc lain_std_lower(%host: #addr, %source: #bits<64>) -> #bits<32> {
+  %reset = #call lain_meta_emit_reset(%host)
+  %len = #call lain_meta_source_length(%host, %source)
+  %base = #call lain_meta_source_data(%host, %source)
+  %status = #call meta_lower_source(%host, %base, %len)
+  #return %status
+}
+
+#proc meta_lower_source(%host: #addr, %base: #addr, %len: #bits<64>) -> #bits<32> {
+  %at = #call bs_skip_space(%base, 0, %len)
+  %is_let = #call bs_match_let(%base, %at, %len)
+  %status = #if %is_let -> (#bits<32>) {
+    %s = #call meta_lower_let(%host, %base, %len, %at)
+    #yield %s
+  } else {
+    %f = #call lain_meta_fail(%host, 4)
+    #yield 4
+  }
+  #return %status
+}
+
+#proc meta_lower_let(%host: #addr, %base: #addr, %len: #bits<64>, %let_at: #bits<64>) -> #bits<32> {
+  %after = #add[#bits<64>](%let_at, 3)
+  %name_lo = #call bs_skip_space(%base, %after, %len)
+  %name_hi = #call bs_skip_ident(%base, %name_lo, %len)
+  %has_name = #ult[#bits<64>](%name_lo, %name_hi)
+  %status = #if %has_name -> (#bits<32>) {
+    %s = #call meta_lower_binding(%host, %base, %len, %name_lo, %name_hi)
+    #yield %s
+  } else {
+    %f = #call lain_meta_fail(%host, 4)
+    #yield 4
+  }
+  #return %status
+}
+
+// 名字后面必须是 '='，然后是十进制数。
+#proc meta_lower_binding(%host: #addr, %base: #addr, %len: #bits<64>, %name_lo: #bits<64>, %name_hi: #bits<64>) -> #bits<32> {
+  %eq_at = #call bs_skip_space(%base, %name_hi, %len)
+  %is_eq = #call bs_is_byte(%base, %eq_at, 61)
+  %status = #if %is_eq -> (#bits<32>) {
+    %after_eq = #add[#bits<64>](%eq_at, 1)
+    %num_lo = #call bs_skip_space(%base, %after_eq, %len)
+    %num_hi = #call bs_skip_ident(%base, %num_lo, %len)
+    %has_num = #ult[#bits<64>](%num_lo, %num_hi)
+    %inner = #if %has_num -> (#bits<32>) {
+      %s = #call meta_emit_let(%host, %base, %len, %name_lo, %name_hi, %num_lo)
+      #yield %s
+    } else {
+      %f = #call lain_meta_fail(%host, 3)
+      #yield 3
+    }
+    #yield %inner
+  } else {
+    %f = #call lain_meta_fail(%host, 4)
+    #yield 4
+  }
+  #return %status
+}
+
+// 把这条绑定写成 LAINIR。
+#proc meta_emit_let(%host: #addr, %base: #addr, %len: #bits<64>, %name_lo: #bits<64>, %name_hi: #bits<64>, %num_lo: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %name_at = #lea(%base, %name_lo, 1, 0)
+  %name_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %w2 = #call lain_meta_emit_write(%host, %name_at, %name_len)
+  %p2 = #data_addr meta_p2
+  %w3 = #call lain_meta_emit_write(%host, %p2, 28)
+  %value = #call bs_read_uint(%base, %num_lo, %len)
+  %w4 = #call meta_emit_uint(%host, %value)
+  %p3 = #data_addr meta_p3
+  %w5 = #call lain_meta_emit_write(%host, %p3, 3)
+  #return 0
+}

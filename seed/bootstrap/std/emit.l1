@@ -1,0 +1,58 @@
+// 初代标准库 v0 —— 宿主 ABI 与产物输出。
+//
+// 这里声明 Meta 用到的**全部**宿主能力。它们是 link_name，同时是链接符号名，
+// 所以必须是合法 C 标识符（SYMBOL 策略下后端按这个名字发外部符号引用）。
+//
+// 每个能力的第一个参数都是 host 地址：驱动把它作为 #addr 传进 Meta，
+// Meta 原样传回来。宿主 ABI 不带 user_data，所以指针是**显式输入**，
+// 而不是让产物去某个全局里捞。
+
+#proc lain_meta_source_count(%host: #addr) -> #bits<64> #extern "lain_meta_source_count"
+#proc lain_meta_source_data(%host: #addr, %index: #bits<64>) -> #addr #extern "lain_meta_source_data"
+#proc lain_meta_source_length(%host: #addr, %index: #bits<64>) -> #bits<64> #extern "lain_meta_source_length"
+#proc lain_meta_source_path_data(%host: #addr, %index: #bits<64>) -> #addr #extern "lain_meta_source_path_data"
+#proc lain_meta_emit_reset(%host: #addr) -> #bits<32> #extern "lain_meta_emit_reset"
+#proc lain_meta_emit_write(%host: #addr, %data: #addr, %length: #bits<64>) -> #bits<32> #extern "lain_meta_emit_write"
+#proc lain_meta_emit_data(%host: #addr) -> #addr #extern "lain_meta_emit_data"
+#proc lain_meta_emit_length(%host: #addr) -> #bits<64> #extern "lain_meta_emit_length"
+#proc lain_meta_fail(%host: #addr, %code: #bits<32>) -> #bits<32> #extern "lain_meta_fail"
+
+// 输出模板。产物长这样：
+//   #proc <NAME>() -> #bits<64> {
+//     #return <VALUE>
+//   }
+// 三段固定文本 + 从源码原样搬过来的名字 + 十进制数字。
+data meta_p1 ro { 35 112 114 111 99 32 }
+data meta_p2 ro { 40 41 32 45 62 32 35 98 105 116 115 60 54 52 62 32 123 10 32 32 35 114 101 116 117 114 110 32 }
+data meta_p3 ro { 10 125 10 }
+
+// 一个字节的暂存：能力只接受 (地址, 长度)，所以单字节要有个落脚点。
+data meta_scratch rw { 0 }
+
+// 写一个字节出去。
+#proc meta_emit_byte(%host: #addr, %b: #bits<8>) -> #bits<32> {
+  %p = #data_addr meta_scratch
+  #store[#bits<8>](%b, %p)
+  %r = #call lain_meta_emit_write(%host, %p, 1)
+  #return %r
+}
+
+// 写一个十进制无符号整数。高位先出，所以先递归再落位。
+#proc meta_emit_uint(%host: #addr, %v: #bits<64>) -> #bits<32> {
+  %big = #uge[#bits<64>](%v, 10)
+  %status = #if %big -> (#bits<32>) {
+    %q = #udiv[#bits<64>](%v, 10)
+    %skip = #call meta_emit_uint(%host, %q)
+    %rem = #urem[#bits<64>](%v, 10)
+    %ch = #add[#bits<64>](%rem, 48)
+    %b = #trunc[#bits<8>](%ch)
+    %w = #call meta_emit_byte(%host, %b)
+    #yield %w
+  } else {
+    %ch = #add[#bits<64>](%v, 48)
+    %b = #trunc[#bits<8>](%ch)
+    %w = #call meta_emit_byte(%host, %b)
+    #yield %w
+  }
+  #return %status
+}
