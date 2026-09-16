@@ -1,7 +1,11 @@
 #ifndef LAINIR_EVAL_SOURCE_H
 #define LAINIR_EVAL_SOURCE_H
 
-#include "lainir/interpreter.h"
+/* Transitional: this header still declares parse, verify, fold and direct-run
+ * entries together.  Step 1 of seed/REFACTOR_PLAN.md splits it so that a folded
+ * Artifact and a direct procedure run stop looking like one request; until then
+ * it only needs the artifact-side types. */
+#include "lainir/artifact.h"
 
 typedef struct LainirModuleHandle LainirModuleHandle;
 
@@ -37,9 +41,13 @@ LainirRunStatus lainir_module_handle_run(
     L1Diagnostic *diagnostic, const char **error_out);
 void lainir_eval_values_free(uint64_t *values);
 
+/* Parse, verify and fold a source module, returning the artifact handle that
+ * owns it.  The caller releases it with lainir_module_free_handle(); the raw
+ * module pointer is never handed out on its own, because the module must not
+ * outlive its builder. */
 LainirRunStatus lainir_eval_source(
     const char *source, LainirCapabilityTable *caps,
-    L1Subroutine **module_out, L1Diagnostic *diagnostic,
+    LainirModuleHandle **handle_out, L1Diagnostic *diagnostic,
     const char **error_out);
 
 LainirRunStatus lainir_eval_source_text(
