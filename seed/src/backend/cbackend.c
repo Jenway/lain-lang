@@ -20,9 +20,6 @@
 
 #include "lainir/infer.h"
 
-#define CBE_MAX_REGIONS 128u
-#define CBE_MAX_SLOTS 512u
-
 typedef struct {
   const L1Region *region;
   const L1Region *parent;
@@ -45,10 +42,19 @@ struct LainBackend {
   const L1Module *module;
   const L1Subroutine *sub;
   LainIrTypes types;
-  RegionBase regions[CBE_MAX_REGIONS];
+  /* 两张表都按模块自己的计数在 emit 开始时分配，之后不变。
+   * 这里曾经是 regions[128] / widths[512]：槽数是**整个模块**的扁平计数，
+   * 512 对一个真编译器远远不够，而越界时 set_width 悄悄丢掉、slot_width
+   * 悄悄按 64 位算——那是静默错编，不是拒绝。 */
+  RegionBase *regions;
   uint32_t region_count;
-  uint8_t widths[CBE_MAX_SLOTS];
+  uint32_t region_cap;
+  uint8_t *widths;
+  uint32_t slot_cap;
   uint32_t next_slot;
+  /* #eval 检查用的工作表；容量取区域总数这个安全上界。 */
+  const L1Region **worklist;
+  uint32_t worklist_cap;
   uint32_t label_seq;
   uint32_t indent;
   bool failed;
@@ -120,14 +126,73 @@ static const L1Region *region_parent(const LainBackend *be,
 }
 
 static void set_width(LainBackend *be, uint32_t slot, uint32_t width) {
-  if (slot < CBE_MAX_SLOTS) be->widths[slot] = (uint8_t)(width ? width : 64);
+  if (slot >= be->slot_cap) {
+    /* 容量是按模块数出来的，越界就是数漏了——不能静默按 64 位算。 */
+    fail(be, 9226, "cbackend: slot layout does not match the module");
+    return;
+  }
+  be->widths[slot] = (uint8_t)(width ? width : 64);
 }
 
 static uint32_t slot_width(const LainBackend *be, uint32_t slot) {
-  if (slot >= CBE_MAX_SLOTS) return 64;
+  if (slot >= be->slot_cap) return 64;
   return be->widths[slot] ? be->widths[slot] : 64;
 }
 
+/* 量尺寸：区域总数、扁平槽总数、区域嵌套深度。
+ * 遍历顺序必须和 assign_regions 一致（loop 不看 else_body），
+ * 否则数出来的槽数和实际用的对不上。 */
+static void measure_regions(LainBackend *be, const L1Region *region,
+                            uint32_t depth) {
+  uint32_t pos;
+  if (!region) return;
+  be->region_cap++;
+  be->next_slot += region->param_count;
+  for (pos = 0; pos < region->inst_count; pos++) {
+    const L1Inst *inst = &region->insts[pos];
+    be->next_slot += inst->result_count;
+    if (inst->kind != INST_LOOP)
+      measure_regions(be, inst->else_body, depth + 1);
+    measure_regions(be, inst->body, depth + 1);
+    measure_regions(be, inst->default_case, depth + 1);
+  }
+}
+
+/* 按模块量一次尺寸并分配。emit 一开始就调用。
+ *
+ * 槽号是**每个过程内部**从 0 重排的（emit_subroutine 会重置 next_slot），
+ * 所以取各过程的最大值，不是全模块求和。 */
+static bool size_backend(LainBackend *be, const L1Module *module) {
+  uint32_t i;
+  uint32_t max_regions = 0;
+  uint32_t max_slots = 0;
+
+  for (i = 0; i < module->subroutine_count; i++) {
+    const L1Subroutine *sub = &module->subroutines[i];
+    if ((sub->flags & SUBROUTINE_EXTERN) || !sub->body) continue;
+    be->region_cap = 0;
+    be->next_slot = sub->param_count;
+    measure_regions(be, sub->body, 1);
+    if (be->region_cap > max_regions) max_regions = be->region_cap;
+    if (be->next_slot > max_slots) max_slots = be->next_slot;
+  }
+
+  be->region_cap = max_regions;
+  be->slot_cap = max_slots;
+  be->regions = (RegionBase *)calloc(max_regions ? max_regions : 1u,
+                                     sizeof(RegionBase));
+  be->widths = (uint8_t *)calloc(max_slots ? max_slots : 1u, 1u);
+  be->worklist = (const L1Region **)calloc(max_regions ? max_regions : 1u,
+                                           sizeof(const L1Region *));
+  be->worklist_cap = max_regions;
+  if (!be->regions || !be->widths || !be->worklist) {
+    fail(be, 9227, "cbackend: cannot allocate the layout tables");
+    return false;
+  }
+  be->region_count = 0;
+  be->next_slot = 0;
+  return true;
+}
 /* 一个物理类型占多少位。#addr 的 width 无意义，按指针宽度算。 */
 static uint32_t width_of_type(const L1Type *ty);
 
@@ -152,8 +217,13 @@ static void assign_regions(LainBackend *be, const L1Region *region,
   uint32_t pos;
   uint32_t i;
   if (!region) return;
-  if (be->region_count >= CBE_MAX_REGIONS) {
-    fail(be, 9201, "cbackend: too many regions");
+  if (be->region_count >= be->region_cap) {
+    char buffer[192];
+    snprintf(buffer, sizeof(buffer),
+             "cbackend: region layout does not match the module "
+             "(%u regions, capacity %u)",
+             be->region_count, be->region_cap);
+    fail(be, 9226, buffer);
     return;
   }
   be->regions[be->region_count].region = region;
@@ -978,7 +1048,7 @@ static void emit_subroutine(LainBackend *be, const L1Subroutine *sub) {
   be->sub = sub;
   be->region_count = 0;
   be->next_slot = sub->param_count;
-  memset(be->widths, 0, sizeof(be->widths));
+  memset(be->widths, 0, (size_t)be->slot_cap);
   for (i = 0; i < sub->param_count; i++)
     set_width(be, i, width_of_type(sub->params[i].ty));
   assign_regions(be, sub->body, NULL);
@@ -1085,20 +1155,41 @@ LainBackend *lainbackend_new(const LainTarget *target,
   return be;
 }
 
-void lainbackend_free(LainBackend *backend) { free(backend); }
+void lainbackend_free(LainBackend *backend) {
+  if (!backend) return;
+  free(backend->regions);
+  free(backend->widths);
+  free(backend->worklist);
+  free(backend);
+}
 
-/* #eval 必须已经被折叠消掉。 */
+/* 往工作表里压一个区域；容量是区域总数上界，压不下就是计数错了。 */
+static bool push_work(LainBackend *be, uint32_t *depth,
+                      const L1Region *region) {
+  if (!region) return true;
+  if (*depth >= be->worklist_cap) {
+    fail(be, 9226, "cbackend: region layout does not match the module");
+    return false;
+  }
+  be->worklist[(*depth)++] = region;
+  return true;
+}
+
+/* #eval 必须已经被折叠消掉。
+ *
+ * 工作表容量取区域总数（区域是树，每个区域最多压一次），所以不存在
+ * 「压不下就跳过」这条静默路径——这里曾经是 stack[128] + 越界就静默丢弃，
+ * 于是深嵌套里的 #eval 会被漏检。 */
 static bool check_no_eval(LainBackend *be) {
   uint32_t i;
   for (i = 0; i < be->module->subroutine_count; i++) {
-    const L1Region *stack[128];
     uint32_t depth = 0;
     if ((be->module->subroutines[i].flags & SUBROUTINE_EXTERN) ||
         !be->module->subroutines[i].body)
       continue;
-    stack[depth++] = be->module->subroutines[i].body;
+    if (!push_work(be, &depth, be->module->subroutines[i].body)) return false;
     while (depth > 0) {
-      const L1Region *region = stack[--depth];
+      const L1Region *region = be->worklist[--depth];
       uint32_t pos;
       for (pos = 0; pos < region->inst_count; pos++) {
         const L1Inst *inst = &region->insts[pos];
@@ -1106,11 +1197,9 @@ static bool check_no_eval(LainBackend *be) {
           fail(be, 9225, "cbackend: #eval must be folded away before codegen");
           return false;
         }
-        if (depth + 3 < 128) {
-          if (inst->body) stack[depth++] = inst->body;
-          if (inst->else_body) stack[depth++] = inst->else_body;
-          if (inst->default_case) stack[depth++] = inst->default_case;
-        }
+        if (!push_work(be, &depth, inst->body)) return false;
+        if (!push_work(be, &depth, inst->else_body)) return false;
+        if (!push_work(be, &depth, inst->default_case)) return false;
       }
     }
   }
@@ -1123,6 +1212,14 @@ int lainbackend_emit(LainBackend *be, const L1Module *module) {
   be->module = module;
   be->failed = false;
   lainir_types_init(&be->types, module);
+  /* 先按模块量尺寸：槽数和区域数都由模块自己决定。 */
+  free(be->regions);
+  free(be->widths);
+  free(be->worklist);
+  be->regions = NULL;
+  be->widths = NULL;
+  be->worklist = NULL;
+  if (!size_backend(be, module)) return 1;
   if (!check_no_eval(be)) return 1;
 
   emit_prologue(be);

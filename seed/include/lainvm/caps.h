@@ -44,9 +44,6 @@ typedef enum {
 typedef struct LainVmCaps LainVmCaps;
 typedef struct LainVmCapEntry LainVmCapEntry;
 
-/* 定长表：内核结构不做动态扩容。 */
-#define LAINVM_CAPS_MAX 64u
-
 LainVmCaps *lainvm_caps_new(void);
 void lainvm_caps_free(LainVmCaps *caps);
 

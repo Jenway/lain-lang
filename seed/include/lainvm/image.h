@@ -6,7 +6,9 @@
  *
  * 映像绑定地址空间（数据地址是烤进去的），换 VSpace 就要重新装载。
  *
- * 定长表：内核结构不做动态扩容；满了是装载失败，不是扩容。
+ * 表在装载时按**模块自己的计数**一次分配，装载完就不再变。
+ * 这里曾经是 data[128] 这种定长数组：一个 852 过程的模块直接装不进来，
+ * 而那个数字还和解析器的 64 对不上。定长上限只该来自模块本身。
  */
 #ifndef LAINVM_IMAGE_H
 #define LAINVM_IMAGE_H
@@ -18,14 +20,6 @@
 #include "lainvm/space.h"
 
 typedef struct LainVmImage LainVmImage;
-
-#define LAINVM_IMAGE_MAX_REGIONS 128u
-#define LAINVM_IMAGE_MAX_INSTS 2048u
-#define LAINVM_IMAGE_MAX_OPERANDS 8192u
-#define LAINVM_IMAGE_MAX_RESULTS 2048u
-#define LAINVM_IMAGE_MAX_CASES 512u
-#define LAINVM_IMAGE_MAX_SYMBOLS 128u
-#define LAINVM_IMAGE_MAX_SUBS 128u
 
 #define LAINVM_IMAGE_NO_REGION 0xFFFFFFFFu
 #define LAINVM_IMAGE_NO_INDEX 0xFFFFFFFFu
@@ -101,20 +95,29 @@ struct LainVmImage {
   uint8_t *rw_arena;
   LainVmCodeEntry *code_arena;
 
-  LainVmImageRegion regions[LAINVM_IMAGE_MAX_REGIONS];
+  /* 装载时按模块计数分配，之后不变。*_cap 是分配时的容量，只用于
+   * 检出装载器自己的计数错误——它不是上限，超了就是 bug 不是拒绝。 */
+  LainVmImageRegion *regions;
   uint32_t region_count;
-  LainVmImageInstMeta insts[LAINVM_IMAGE_MAX_INSTS];
+  uint32_t region_cap;
+  LainVmImageInstMeta *insts;
   uint32_t inst_count;
-  LainVmOperandRef operands[LAINVM_IMAGE_MAX_OPERANDS];
+  uint32_t inst_cap;
+  LainVmOperandRef *operands;
   uint32_t operand_count;
-  uint32_t results[LAINVM_IMAGE_MAX_RESULTS];
+  uint32_t operand_cap;
+  uint32_t *results;
   uint32_t result_count;
-  uint32_t case_regions[LAINVM_IMAGE_MAX_CASES];
+  uint32_t result_cap;
+  uint32_t *case_regions;
   uint32_t case_count;
-  LainVmImageSymbol symbols[LAINVM_IMAGE_MAX_SYMBOLS];
+  uint32_t case_cap;
+  LainVmImageSymbol *symbols;
   uint32_t symbol_count;
-  LainVmImageSub subs[LAINVM_IMAGE_MAX_SUBS];
+  uint32_t symbol_cap;
+  LainVmImageSub *subs;
   uint32_t sub_count;
+  uint32_t sub_cap;
 
   /* admit 用来算上界：一个子过程里最深的词法嵌套、单个区域最多的槽数。 */
   uint32_t max_region_depth;
