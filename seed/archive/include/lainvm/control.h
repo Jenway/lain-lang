@@ -1,67 +1,18 @@
-#ifndef LAINIR_INTERPRETER_H
-#define LAINIR_INTERPRETER_H
+#ifndef LAINVM_CONTROL_H
+#define LAINVM_CONTROL_H
 
-#include "lainir/core.h"
+/* LAINVM control plane: TCBs, the single-current scheduler, rendezvous
+ * endpoints, slices and Trap records.
+ *
+ * These are execution state, not LAINIR types, values or instructions: no
+ * instruction refers to a TCB, and a TCB address never enters a program.
+ * Nothing here reaches the backend — the backend input is a verified Artifact.
+ *
+ * The header was separated from lainir/interpreter.h by step 2 of
+ * seed/REFACTOR_PLAN.md ("保持行为的机械拆分"); the declarations are unchanged. */
 
-typedef enum {
-  LAINIR_RUN_OK = 0,
-  LAINIR_RUN_NO_ENTRY = 1,
-  LAINIR_RUN_BAD_CALL = 2,
-  LAINIR_RUN_TRAP = 3,
-  LAINIR_RUN_SLICE = 4,
-  LAINIR_RUN_BLOCKED = 5
-} LainirRunStatus;
+#include "lainvm/execute.h"
 
-typedef enum {
-  LAINIR_VALUE_UNIT = 0,
-  LAINIR_VALUE_BITS = 1,
-  LAINIR_VALUE_ADDR = 2,
-  LAINIR_VALUE_STRING = 3,
-  LAINIR_VALUE_FUNC = 4
-} LainirValueKind;
-
-typedef struct {
-  LainirValueKind kind;
-  uint32_t bit_width;
-  union {
-    uint64_t bits;
-    void *addr;
-    const char *string;
-    L1Subroutine *func;
-  } as;
-} LainirValue;
-
-typedef LainirRunStatus (*LainirHostFn)(
-  const LainirValue *args,
-  uint32_t arg_count,
-  LainirValue *result_out,
-  const char **error_out,
-  void *user_data);
-
-typedef struct {
-  const char *name;
-  LainirHostFn fn;
-  void *user_data;
-} LainirCapabilityEntry;
-
-typedef struct {
-  LainirCapabilityEntry *entries;
-  uint32_t count;
-  uint32_t cap;
-  /* Optional execution limits. Zero means unlimited. */
-  uint64_t max_steps;
-  uint32_t max_call_depth;
-  uint64_t max_alloc_bytes;
-  uint64_t max_eval_blocks;
-} LainirCapabilityTable;
-
-typedef struct {
-  const char *name;
-  LainirHostFn fn;
-  void *user_data;
-} LainirCapability;
-
-typedef struct LainirVmControl LainirVmControl;
 typedef struct LainirVmEndpoint LainirVmEndpoint;
 typedef struct LainirVmScheduler LainirVmScheduler;
 typedef void (*LainirVmBackendStateFree)(void *state);
@@ -71,18 +22,6 @@ typedef struct {
   LainirVmControl *control;
   uint64_t owner;
 } LainirVmEndpointBinding;
-
-typedef struct {
-  L1Subroutine *module;
-  const char *entry_name;
-  const LainirValue *args;
-  uint32_t arg_count;
-  LainirCapabilityTable *caps;
-  /* Optional backend-owned control plane.  A non-NULL value enables the
-   * instruction fuel gate and may retain a resumable root continuation. */
-  LainirVmControl *vm_control;
-  uint64_t vm_owner;
-} LainirRunRequest;
 
 /* Opaque VM control plane.  The execution backend owns this object; it is
  * deliberately separate from LainirRunRequest, which remains one-shot. */
@@ -257,127 +196,4 @@ int lainir_vm_endpoint_bind(LainirCapabilityTable *caps,
                             const char *send_name, const char *receive_name,
                             LainirVmEndpointBinding *binding);
 
-/* Optional observer invoked immediately after each scalar #eval is
- * materialized by lainir_fold_module.  The value is borrowed by the caller
- * and remains valid for the duration of the callback. */
-typedef void (*LainirEvalSink)(const LainirValue *value, void *user_data);
-
-LainirCapabilityTable *lainir_caps_new(void);
-void lainir_caps_free(LainirCapabilityTable *caps);
-int lainir_caps_add(
-  LainirCapabilityTable *caps,
-  const char *name,
-  LainirHostFn fn,
-  void *user_data);
-
-void lainir_caps_set_limits(
-  LainirCapabilityTable *caps,
-  uint64_t max_steps,
-  uint32_t max_call_depth,
-  uint64_t max_alloc_bytes);
-
-void lainir_caps_set_eval_limit(
-  LainirCapabilityTable *caps,
-  uint64_t max_eval_blocks);
-
-LainirRunStatus lainir_run(
-    const LainirRunRequest *request,
-    LainirValue *result_out,
-    const char **error_out);
-
-/* Execute one already-parsed block in an explicit compile-time context.
- * The block is borrowed; the interpreter does not free it.  This is the
- * entry point a compiler uses for #eval. */
-LainirRunStatus lainir_eval_block(
-  L1Subroutine *module,
-  L1Block *block,
-  L1Type *return_type,
-  LainirCapabilityTable *caps,
-  LainirValue *result_out,
-  const char **error_out);
-
-/* Fold all #eval expressions in a module.  Scalar bit results are materialized
- * as constants. Unit results remain as evaluated EXPR_EVAL nodes for the
- * backend to lower; address and function results are rejected in this phase. */
-LainirRunStatus lainir_fold_module(
-  L1Subroutine *module,
-  LainirCapabilityTable *caps,
-  const char **error_out);
-
-LainirRunStatus lainir_fold_module_with_sink(
-  L1Subroutine *module,
-  LainirCapabilityTable *caps,
-  const char **error_out,
-  LainirEvalSink sink,
-  void *sink_user_data);
-
-/* Read-only views used by compiler adapters.  Returned pointers are borrowed
- * from the module and remain valid only while it is alive.  Every accessor
- * accepts NULL and returns a neutral failure value; indexed accessors return
- * NULL when the index is out of bounds.  In particular, enum accessors return
- * -1 for a NULL object, while scalar widths/counts return 0. */
-const L1Subroutine *lainir_module_first_procedure(const L1Subroutine *module);
-const L1Subroutine *lainir_procedure_next(const L1Subroutine *procedure);
-const char *lainir_procedure_name(const L1Subroutine *procedure);
-uint32_t lainir_procedure_name_length(const L1Subroutine *procedure);
-const char *lainir_procedure_link_name(const L1Subroutine *procedure);
-const L1Type *lainir_procedure_return_type(const L1Subroutine *procedure);
-int lainir_procedure_is_external(const L1Subroutine *procedure);
-int lainir_procedure_is_data(const L1Subroutine *procedure);
-uint32_t lainir_data_size(const L1Subroutine *data);
-uint32_t lainir_data_alignment(const L1Subroutine *data);
-const uint8_t *lainir_data_bytes(const L1Subroutine *data);
-uint32_t lainir_procedure_parameter_count(const L1Subroutine *procedure);
-const L1Type *lainir_procedure_parameter_type(const L1Subroutine *procedure, uint32_t index);
-const char *lainir_procedure_parameter_name(const L1Subroutine *procedure, uint32_t index);
-const L1Block *lainir_procedure_first_block(const L1Subroutine *procedure);
-const L1Block *lainir_block_next(const L1Block *block);
-L1ExprKind lainir_expr_kind(const L1Expr *expr);
-const L1Type *lainir_expr_type(const L1Expr *expr);
-const L1Expr *lainir_expr_left(const L1Expr *expr);
-const L1Expr *lainir_expr_right(const L1Expr *expr);
-/* For LEA, left/right are the base/index operands; for binary expressions
- * they are the ordinary left/right operands. */
-/* Expressions are stored as arrays for call operands, so this
- * legacy linked-list view always returns NULL.  Use argument_count and
- * argument_at for operand traversal. */
-const L1Expr *lainir_expr_next(const L1Expr *expr);
-uint32_t lainir_expr_argument_count(const L1Expr *expr);
-const L1Expr *lainir_expr_argument_at(const L1Expr *expr, uint32_t index);
-int64_t lainir_expr_const_value(const L1Expr *expr);
-uint32_t lainir_expr_arg_index(const L1Expr *expr);
-const char *lainir_expr_name(const L1Expr *expr);
-const char *lainir_expr_callee_name(const L1Expr *expr);
-const char *lainir_expr_string(const L1Expr *expr);
-const L1Expr *lainir_expr_operand(const L1Expr *expr);
-const L1Block *lainir_expr_block(const L1Expr *expr);
-uint32_t lainir_expr_scale(const L1Expr *expr);
-uint32_t lainir_expr_offset(const L1Expr *expr);
-uint32_t lainir_expr_byte_size(const L1Expr *expr);
-const char *lainir_diagnostic_message(const L1Diagnostic *diagnostic);
-int lainir_diagnostic_code(const L1Diagnostic *diagnostic);
-int lainir_diagnostic_line(const L1Diagnostic *diagnostic);
-int lainir_diagnostic_column(const L1Diagnostic *diagnostic);
-void lainir_diagnostic_clear(L1Diagnostic *diagnostic);
-int lainir_type_kind(const L1Type *type);
-uint32_t lainir_type_width(const L1Type *type);
-const L1Instruction *lainir_block_first_instruction(const L1Block *block);
-const L1Instruction *lainir_instruction_next(const L1Instruction *instruction);
-L1InstKind lainir_instruction_kind(const L1Instruction *instruction);
-const char *lainir_instruction_name(const L1Instruction *instruction);
-const char *lainir_instruction_label(const L1Instruction *instruction);
-const L1Type *lainir_instruction_type(const L1Instruction *instruction);
-const L1Expr *lainir_instruction_value(const L1Instruction *instruction);
-const L1Expr *lainir_instruction_destination(const L1Instruction *instruction);
-const L1Expr *lainir_instruction_condition(const L1Instruction *instruction);
-const L1Block *lainir_instruction_then_block(const L1Instruction *instruction);
-const L1Block *lainir_instruction_else_block(const L1Instruction *instruction);
-const L1Block *lainir_instruction_loop_block(const L1Instruction *instruction);
-
-LainirValue lainir_value_unit(void);
-LainirValue lainir_value_bits(uint64_t bits, uint32_t bit_width);
-LainirValue lainir_value_addr(void *addr);
-LainirValue lainir_value_string(const char *string);
-LainirValue lainir_value_func(L1Subroutine *func);
-
-#endif
+#endif /* LAINVM_CONTROL_H */
