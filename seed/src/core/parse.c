@@ -29,6 +29,24 @@ typedef struct {
   uint32_t temp_seq;
 } Parser;
 
+/* 把一张表按需加倍扩容。返回 false 只表示 arena 也拿不出内存了。
+ *
+ * 解析器里凡「随模块增长」的表都走这里——过程表、数据表、单个数据对象的
+ * 字节。定长上限只该来自模块本身，不该来自解析器。 */
+static bool grow_table(L1Builder *builder, void **items, uint32_t *cap,
+                       uint32_t count, size_t elem_size) {
+  uint32_t next;
+  void *fresh;
+  if (count < *cap) return true;
+  next = *cap ? *cap * 2u : 32u;
+  fresh = lainir_builder_alloc(builder, elem_size * (size_t)next);
+  if (!fresh) return false;
+  if (*items && count) memcpy(fresh, *items, elem_size * (size_t)count);
+  *items = fresh;
+  *cap = next;
+  return true;
+}
+
 /* --- 词法 ----------------------------------------------------------------- */
 
 static char cur(const Parser *p) { return p->src[p->pos]; }
@@ -856,8 +874,10 @@ static bool parse_proc(Parser *p, L1Subroutine *out) {
 static bool parse_data(Parser *p, L1Data *out) {
   char symbol[128];
   bool writable = false;
-  uint8_t bytes[4096];
+  /* 字节也按需增长：单个数组成员数同样只该来自模块本身。 */
+  uint8_t *bytes = NULL;
   uint32_t size = 0;
+  uint32_t byte_cap = 0;
 
   if (!symbol_name(p, symbol, sizeof(symbol))) return false;
   skip(p);
@@ -878,7 +898,9 @@ static bool parse_data(Parser *p, L1Data *out) {
     skip(p);
     if (match(p, '}')) break;
     if (!integer(p, &byte)) return false;
-    if (size >= sizeof(bytes)) return fail(p, 3012, "data object too large");
+    if (!grow_table(p->builder, (void **)&bytes, &byte_cap, size, 1u)) {
+      return fail(p, 3012, "out of memory for the data object");
+    }
     bytes[size++] = (uint8_t)byte;
   }
   *out = *lainir_data(p->builder, lainir_builder_string(p->builder, symbol),
@@ -889,10 +911,16 @@ static bool parse_data(Parser *p, L1Data *out) {
 const L1Module *lainir_parse(L1Builder *builder, const char *text,
                              L1Diagnostic *diag) {
   Parser p;
-  L1Data data[64];
-  L1Subroutine subs[64];
+  /* 过程表和数据表按需增长：**上限只该来自模块本身**。
+   * 这两张表曾经是 data[64] / subs[64]，一个 852 过程的模块直接编不了。
+   * 旧块留在 arena 里不回收——这是宿主侧工具，而且 lainir_module 随后会
+   * 拷成精确大小的一份。 */
+  L1Data *data = NULL;
+  L1Subroutine *subs = NULL;
   uint32_t data_count = 0;
+  uint32_t data_cap = 0;
   uint32_t sub_count = 0;
+  uint32_t sub_cap = 0;
 
   if (!builder || !text) return NULL;
   memset(&p, 0, sizeof(p));
@@ -914,8 +942,9 @@ const L1Module *lainir_parse(L1Builder *builder, const char *text,
       p.pos += 4;
       p.column += 4;
       skip(&p);
-      if (data_count >= 64) {
-        fail(&p, 3013, "too many data objects");
+      if (!grow_table(builder, (void **)&data, &data_cap, data_count,
+                      sizeof(L1Data))) {
+        fail(&p, 3013, "out of memory for data objects");
         return NULL;
       }
       if (!parse_data(&p, &data[data_count])) return NULL;
@@ -926,8 +955,9 @@ const L1Module *lainir_parse(L1Builder *builder, const char *text,
       p.pos += 5;
       p.column += 5;
       skip(&p);
-      if (sub_count >= 64) {
-        fail(&p, 3014, "too many subroutines");
+      if (!grow_table(builder, (void **)&subs, &sub_cap, sub_count,
+                      sizeof(L1Subroutine))) {
+        fail(&p, 3014, "out of memory for subroutines");
         return NULL;
       }
       if (!parse_proc(&p, &subs[sub_count])) return NULL;
