@@ -1,0 +1,135 @@
+// 初代标准库 v0 —— 字节与词法。
+//
+// 这是**手写 LAINIR**：还没有 Lain 编译器，所以 Meta 只能用物理 IR 直接写。
+// 这一层存在的唯一理由就是打破鸡生蛋（v0 的语言只有 `let NAME = INT;`）。
+//
+// 书写约定（新方言，和归档里的旧塔不同）：
+//   - 没有 #let：绑定就是 `%x = #op[...](...)`，单赋值。
+//   - 算子的类型实参**必须写**（缺了验证器报 2008）。
+//   - 循环的携带状态写在循环头部的参数表里，#continue 传新值。
+//   - #break / #continue 带括号；#yield / #return 不带。
+
+// 十进制数字？
+#proc bs_is_digit(%b: #bits<8>) -> #bits<1> {
+  %lo = #uge[#bits<8>](%b, 48)
+  %hi = #ule[#bits<8>](%b, 57)
+  %r = #and[#bits<1>](%lo, %hi)
+  #return %r
+}
+
+// 标识符字符（字母、数字、下划线）？
+#proc bs_is_ident(%b: #bits<8>) -> #bits<1> {
+  %digit = #call bs_is_digit(%b)
+  %llo = #uge[#bits<8>](%b, 97)
+  %lhi = #ule[#bits<8>](%b, 122)
+  %lower = #and[#bits<1>](%llo, %lhi)
+  %ulo = #uge[#bits<8>](%b, 65)
+  %uhi = #ule[#bits<8>](%b, 90)
+  %upper = #and[#bits<1>](%ulo, %uhi)
+  %us = #eq[#bits<8>](%b, 95)
+  %t1 = #or[#bits<1>](%lower, %upper)
+  %t2 = #or[#bits<1>](%t1, %us)
+  %r = #or[#bits<1>](%t2, %digit)
+  #return %r
+}
+
+// 跳过空白（空格、换行、制表、回车：字节 <= 32），返回第一个非空白字节的下标；
+// 走到头就返回 len。v0 还没有注释语法，所以 `//` 会被当成普通字节。
+#proc bs_skip_space(%base: #addr, %start: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %end = #loop scan(%i: #bits<64> = %start) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %is_sp = #ule[#bits<8>](%b, 32)
+      #if %is_sp {
+        %n = #add[#bits<64>](%i, 1)
+        #continue scan(%n)
+      } else {
+        #break scan(%i)
+      }
+    } else {
+      #break scan(%i)
+    }
+  }
+  #return %end
+}
+
+// 读一个标识符，返回它的结束下标（一个字符都没读到就返回 start）。
+#proc bs_skip_ident(%base: #addr, %start: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %end = #loop scan(%i: #bits<64> = %start) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %is_id = #call bs_is_ident(%b)
+      #if %is_id {
+        %n = #add[#bits<64>](%i, 1)
+        #continue scan(%n)
+      } else {
+        #break scan(%i)
+      }
+    } else {
+      #break scan(%i)
+    }
+  }
+  #return %end
+}
+
+// 从 start 起读一个十进制无符号整数；遇到第一个非数字就停。
+#proc bs_read_uint(%base: #addr, %start: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %value = #loop scan(%i: #bits<64> = %start, %v: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %is_d = #call bs_is_digit(%b)
+      #if %is_d {
+        %w = #zext[#bits<64>](%b)
+        %d = #sub[#bits<64>](%w, 48)
+        %v10 = #mul[#bits<64>](%v, 10)
+        %v2 = #add[#bits<64>](%v10, %d)
+        %n = #add[#bits<64>](%i, 1)
+        #continue scan(%n, %v2)
+      } else {
+        #break scan(%v)
+      }
+    } else {
+      #break scan(%v)
+    }
+  }
+  #return %value
+}
+
+// 下标 i 处的三个字节是不是 "let"？
+#proc bs_match_let(%base: #addr, %i: #bits<64>, %len: #bits<64>) -> #bits<1> {
+  %need = #add[#bits<64>](%i, 3)
+  %fits = #ule[#bits<64>](%need, %len)
+  %r = #if %fits -> (#bits<1>) {
+    %i1 = #add[#bits<64>](%i, 1)
+    %i2 = #add[#bits<64>](%i, 2)
+    %p0 = #lea(%base, %i, 1, 0)
+    %p1 = #lea(%base, %i1, 1, 0)
+    %p2 = #lea(%base, %i2, 1, 0)
+    %b0 = #load[#bits<8>](%p0)
+    %b1 = #load[#bits<8>](%p1)
+    %b2 = #load[#bits<8>](%p2)
+    %c0 = #eq[#bits<8>](%b0, 108)
+    %c1 = #eq[#bits<8>](%b1, 101)
+    %c2 = #eq[#bits<8>](%b2, 116)
+    %t = #and[#bits<1>](%c0, %c1)
+    %all = #and[#bits<1>](%t, %c2)
+    #yield %all
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+// 下标 i 处的字节是不是 c？
+#proc bs_is_byte(%base: #addr, %i: #bits<64>, %c: #bits<8>) -> #bits<1> {
+  %p = #lea(%base, %i, 1, 0)
+  %b = #load[#bits<8>](%p)
+  %r = #eq[#bits<8>](%b, %c)
+  #return %r
+}
