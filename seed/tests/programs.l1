@@ -1,0 +1,112 @@
+// LAINIR 测试程序：文本形式。
+//
+// 这份文件是 run_programs 的输入：解析 -> 验证 -> 装载 -> 在 VM 里跑。
+// 它是**手写**的，所以允许任意排版；canonical 形式由打印器给出。
+//
+// 里面有三个反面对照（bad_load / write_ro / bad_call）：它们是合法程序，
+// 但运行时会碰到域外行为，应当被 VM 确定性拒绝。
+
+data bytes ro { 7 8 9 }
+
+#proc answer() -> #bits<64> {
+  %r = #add[#bits<64>](40, 2)
+  #return %r
+}
+
+#proc max(%a: #bits<64>, %b: #bits<64>) -> #bits<64> {
+  %c = #sgt[#bits<64>](%a, %b)
+  %r = #if %c -> (#bits<64>) {
+    #yield %a
+  } else {
+    #yield %b
+  }
+  #return %r
+}
+
+#proc fact(%n: #bits<64>) -> #bits<64> {
+  %c = #sle[#bits<64>](%n, 1)
+  %r = #if %c -> (#bits<64>) {
+    #yield 1
+  } else {
+    %m = #sub[#bits<64>](%n, 1)
+    %f = #call fact(%m)
+    %p = #mul[#bits<64>](%n, %f)
+    #yield %p
+  }
+  #return %r
+}
+
+#proc sum_bytes(%p: #addr, %n: #bits<64>) -> #bits<64> {
+  %sum = #loop bytes(%i: #bits<64> = 0, %s: #bits<64> = 0) -> (#bits<64>) {
+    %c = #uge[#bits<64>](%i, %n)
+    #if %c {
+      #break bytes(%s)
+    }
+    %a = #lea(%p, %i, 1, 0)
+    %b = #load[#bits<8>](%a)
+    %w = #zext[#bits<64>](%b)
+    %s2 = #add[#bits<64>](%s, %w)
+    %i2 = #add[#bits<64>](%i, 1)
+    #continue bytes(%i2, %s2)
+  }
+  #return %sum
+}
+
+#proc first_byte() -> #bits<64> {
+  %p = #data_addr bytes
+  %b = #load[#bits<8>](%p)
+  %w = #zext[#bits<64>](%b)
+  #return %w
+}
+
+// 访问一块从来没登记过的地址：VM 应当拒绝。
+#proc bad_load() -> #bits<64> {
+  %p = #int2ptr[#addr](4096)
+  %b = #load[#bits<8>](%p)
+  %w = #zext[#bits<64>](%b)
+  #return %w
+}
+
+#proc alloca_store() -> #bits<64> {
+  %slot = #alloca[#bits<64>](1)
+  #store[#bits<64>](5, %slot)
+  %v = #load[#bits<64>](%slot)
+  #return %v
+}
+
+// 往只读段写：VM 应当拒绝。
+#proc write_ro() -> #bits<64> {
+  %p = #data_addr bytes
+  #store[#bits<8>](1, %p)
+  #return 0
+}
+
+// 32 位有符号比较：0xFFFFFFFF 是 -1，应当小于 1。
+#proc slt32() -> #bits<64> {
+  %c = #slt[#bits<32>](0xFFFFFFFF, 1)
+  %w = #zext[#bits<64>](%c)
+  #return %w
+}
+
+#proc inc(%x: #bits<64>) -> #bits<64> {
+  %r = #add[#bits<64>](%x, 1)
+  #return %r
+}
+
+#proc apply(%f: #addr, %x: #bits<64>) -> #bits<64> {
+  %r = #call_indirect[#bits<64>](%f, %x)
+  #return %r
+}
+
+#proc via_ptr() -> #bits<64> {
+  %f = #proc_addr inc
+  %v = #call apply(%f, 41)
+  #return %v
+}
+
+// 拿数据地址去间接调用：区段没有 CALL 权限，VM 应当拒绝。
+#proc bad_call() -> #bits<64> {
+  %p = #data_addr bytes
+  %r = #call_indirect[#bits<64>](%p)
+  #return %r
+}
