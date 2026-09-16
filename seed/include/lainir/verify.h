@@ -51,6 +51,9 @@ enum {
    * 都要跟着改；在那之前，规范里就不允许。 */
   L1V_WIDTH_TOO_WIDE = 2026,
   L1V_ZERO_WIDTH = 2027,
+  /* 验证器自己的资源耗尽（绑定表扩容失败）。它说的不是「模块非法」，
+   * 而是「这次验证没做完」——不要和后一类混。 */
+  L1V_OUT_OF_MEMORY = 2028,
 };
 
 #endif /* LAINIR_VERIFY_H */
