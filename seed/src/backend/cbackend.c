@@ -1099,7 +1099,11 @@ static void emit_subroutine(LainBackend *be, const L1Subroutine *sub) {
       emitf(be, "%sl1v p%u", i ? ", " : "", i);
   }
   emit_text(be, ") {\n");
-  emitf(be, "  l1v r[%u] = {0};\n", be->next_slot ? be->next_slot : 1);
+  /* assign_regions 已经把实参和局部槽都算进 next_slot 了。一个槽都没有的
+     过程（体里只有常量和调用）就别声明数组——声明了没人用，`-Werror` 下
+     是编译错误。 */
+  if (be->next_slot > 0)
+    emitf(be, "  l1v r[%u] = {0};\n", be->next_slot);
   for (i = 0; i < sub->param_count; i++)
     emitf(be, "  r[%u] = p%u & l1_mask(%u);\n", i, i, slot_width(be, i));
 

@@ -1,0 +1,286 @@
+// 初代标准库 v0 —— 和类型：tag、载荷、投影。
+//
+// 和积类型同源（都是 align_up 累加出来的布局），多出来的只有**判别字段**：
+//
+//   tag     `#bits<8>`，偏移 0
+//   载荷区  从 align_up(tag 大小, 最大对齐) 开始，所有变体共用
+//   总大小  align_up(载荷区起点 + 最大载荷, 最大对齐)
+//
+// v0 限制：每个变体最多一个载荷字段（`Circle(i32)`），且 tag 固定 `#bits<8>`。
+//
+// 和积类型一样，这里也是**回源码里再走一遍**声明来算，不建记录表。
+
+// 在源码里找 `enum <name> {` 之后的位置。找不到返回 NOT_FOUND。
+// 和 `meta_find_rec_body` 一样：声明的名字不匹配就接着找下一个 `enum`，
+// 返回 0 是「继续找」的哨兵。
+#proc meta_find_enum_body(%src: #addr, %len: #bits<64>, %enum_lo: #bits<64>,
+                          %enum_hi: #bits<64>) -> #bits<64> {
+  %kw = #data_addr meta_kw_enum
+  %found = #loop s(%at: #bits<64> = 0) -> (#bits<64>) {
+    %kw_at = #call meta_find_keyword(%src, %len, %kw, 4, %at)
+    %missing = #eq[#bits<64>](%kw_at, 0xFFFFFFFFFFFFFFFF)
+    #if %missing {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+    %after = #add[#bits<64>](%kw_at, 4)
+    %n_lo = #call bs_skip_space(%src, %after, %len)
+    %n_hi = #call bs_skip_ident(%src, %n_lo, %len)
+    %mine = #sub[#bits<64>](%enum_hi, %enum_lo)
+    %theirs = #sub[#bits<64>](%n_hi, %n_lo)
+    %len_ok = #eq[#bits<64>](%mine, %theirs)
+    %same = #if %len_ok -> (#bits<1>) {
+      %a = #lea(%src, %n_lo, 1, 0)
+      %b = #lea(%src, %enum_lo, 1, 0)
+      %eq = #call meta_bytes_equal(%a, %b, %mine)
+      #yield %eq
+    } else {
+      #yield 0
+    }
+    %body = #if %same -> (#bits<64>) {
+      %brace = #call bs_skip_space(%src, %n_hi, %len)
+      %one = #add[#bits<64>](%brace, 1)
+      #yield %one
+    } else {
+      #yield 0
+    }
+    %hit = #ne[#bits<64>](%body, 0)
+    #if %hit {
+      #break s(%body)
+    }
+    %next_at = #add[#bits<64>](%kw_at, 4)
+    #continue s(%next_at)
+  }
+  #return %found
+}
+
+// 这个类型名是不是 enum？用来区分积类型的字段访问和和类型的投影。
+#proc meta_is_enum(%src: #addr, %len: #bits<64>, %name_lo: #bits<64>,
+                   %name_hi: #bits<64>) -> #bits<1> {
+  %body = #call meta_find_enum_body(%src, %len, %name_lo, %name_hi)
+  %found = #ne[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
+  #return %found
+}
+
+// 走一遍变体，找 var_lo/var_hi 那一个，同时把最大载荷大小/对齐写进 scratch。
+//   返回 packed：tag 0..7、kind 8..11、width 12..19、size 20..51、align 52..55、
+//   命中 63。
+//   没命中返回 0。v0 假设变体列表良构（名字后面可选 `(类型)`）。
+#proc meta_enum_walk(%src: #addr, %len: #bits<64>, %body: #bits<64>,
+                     %var_lo: #bits<64>, %var_hi: #bits<64>,
+                     %scratch: #addr) -> #bits<64> {
+  %r = #loop vars(%at: #bits<64> = %body, %tag: #bits<64> = 0,
+                  %maxsz: #bits<64> = 0, %maxal: #bits<64> = 1,
+                  %hit: #bits<64> = 0) -> (#bits<64>) {
+    %here = #call bs_skip_space(%src, %at, %len)
+    %byte = #call bs_byte_at(%src, %here, %len)
+    %is_close = #eq[#bits<8>](%byte, 125)
+    #if %is_close {
+      %s = #call meta_store_scratch(%scratch, %maxsz, %maxal)
+      #break vars(%hit)
+    }
+    %name_hi = #call bs_skip_ident(%src, %here, %len)
+    %paren = #call bs_skip_space(%src, %name_hi, %len)
+    %pb = #call bs_byte_at(%src, %paren, %len)
+    %has_payload = #eq[#bits<8>](%pb, 40)
+    // 有载荷就读类型名，算大小/对齐；没有的话下面直接用字面量。
+    #if %has_payload {
+      %one = #add[#bits<64>](%paren, 1)
+      %t_lo = #call bs_skip_space(%src, %one, %len)
+      %t_hi = #call bs_skip_ident(%src, %t_lo, %len)
+      %tbl = #data_addr meta_types
+      %tname = #lea(%src, %t_lo, 1, 0)
+      %tlen = #sub[#bits<64>](%t_hi, %t_lo)
+      %entry = #call meta_type_find(%tbl, %tname, %tlen)
+      %k = #call meta_type_kind(%tbl, %entry)
+      %w = #call meta_type_width(%tbl, %entry)
+      %sz = #call bs_repr_size(%k, %w)
+      %al = #call bs_repr_align(%k, %w)
+      %close = #call bs_skip_space(%src, %t_hi, %len)
+      %after2 = #add[#bits<64>](%close, 1)
+      // 名字匹配？
+      %want = #sub[#bits<64>](%var_hi, %var_lo)
+      %have = #sub[#bits<64>](%name_hi, %here)
+      %len_ok = #eq[#bits<64>](%want, %have)
+      %mine = #if %len_ok -> (#bits<1>) {
+        %a = #lea(%src, %here, 1, 0)
+        %b = #lea(%src, %var_lo, 1, 0)
+        %eq = #call meta_bytes_equal(%a, %b, %want)
+        #yield %eq
+      } else {
+        #yield 0
+      }
+      %packed = #call meta_pack_variant(%tag, %k, %w, %sz, %al)
+      %new_hit = #if %mine -> (#bits<64>) {
+        #yield %packed
+      } else {
+        #yield %hit
+      }
+      %bigsz = #ugt[#bits<64>](%sz, %maxsz)
+      %nsz = #if %bigsz -> (#bits<64>) { #yield %sz } else { #yield %maxsz }
+      %bigal = #ugt[#bits<64>](%al, %maxal)
+      %nal = #if %bigal -> (#bits<64>) { #yield %al } else { #yield %maxal }
+      %tag2 = #add[#bits<64>](%tag, 1)
+      #continue vars(%after2, %tag2, %nsz, %nal, %new_hit)
+    }
+    // 没有载荷
+    %want2 = #sub[#bits<64>](%var_hi, %var_lo)
+    %have2 = #sub[#bits<64>](%name_hi, %here)
+    %len_ok2 = #eq[#bits<64>](%want2, %have2)
+    %mine2 = #if %len_ok2 -> (#bits<1>) {
+      %a2 = #lea(%src, %here, 1, 0)
+      %b2 = #lea(%src, %var_lo, 1, 0)
+      %eq2 = #call meta_bytes_equal(%a2, %b2, %want2)
+      #yield %eq2
+    } else {
+      #yield 0
+    }
+    %packed2 = #call meta_pack_variant(%tag, 0, 0, 0, 1)
+    %hit2 = #if %mine2 -> (#bits<64>) {
+      #yield %packed2
+    } else {
+      #yield %hit
+    }
+    %tag3 = #add[#bits<64>](%tag, 1)
+    #continue vars(%paren, %tag3, %maxsz, %maxal, %hit2)
+  }
+  #return %r
+}
+
+// 把 (tag, kind, width, size, align) 打包；命中位置最高位。
+#proc meta_pack_variant(%tag: #bits<64>, %kind: #bits<64>, %width: #bits<64>,
+                        %size: #bits<64>, %align: #bits<64>) -> #bits<64> {
+  %a = #or[#bits<64>](%tag, #shl[#bits<64>](%kind, 8))
+  %b = #or[#bits<64>](%a, #shl[#bits<64>](%width, 12))
+  %c = #or[#bits<64>](%b, #shl[#bits<64>](%size, 20))
+  %d = #or[#bits<64>](%c, #shl[#bits<64>](%align, 52))
+  %e = #or[#bits<64>](%d, 0x8000000000000000)
+  #return %e
+}
+
+// 把最大载荷大小/对齐写进 scratch+0 / scratch+8。
+#proc meta_store_scratch(%scratch: #addr, %maxsz: #bits<64>,
+                        %maxal: #bits<64>) -> #bits<32> {
+  #store[#bits<64>](%maxsz, %scratch)
+  %p = #lea(%scratch, 8, 1, 0)
+  #store[#bits<64>](%maxal, %p)
+  #return 0
+}
+
+#proc meta_scratch_max_size(%scratch: #addr) -> #bits<64> {
+  %v = #load[#bits<64>](%scratch)
+  #return %v
+}
+
+#proc meta_scratch_max_align(%scratch: #addr) -> #bits<64> {
+  %p = #lea(%scratch, 8, 1, 0)
+  %v = #load[#bits<64>](%p)
+  #return %v
+}
+
+// 载荷区起点 = align_up(tag 大小=1, 最大对齐)
+#proc meta_enum_payload_off(%scratch: #addr) -> #bits<64> {
+  %al = #call meta_scratch_max_align(%scratch)
+  %off = #call bs_align_up(1, %al)
+  #return %off
+}
+
+// 总大小 = align_up(载荷起点 + 最大载荷, 最大对齐)
+#proc meta_enum_size(%scratch: #addr) -> #bits<64> {
+  %al = #call meta_scratch_max_align(%scratch)
+  %off = #call meta_enum_payload_off(%scratch)
+  %sz = #call meta_scratch_max_size(%scratch)
+  %sum = #add[#bits<64>](%off, %sz)
+  %total = #call bs_align_up(%sum, %al)
+  #return %total
+}
+
+// --- 发射 -----------------------------------------------------------------
+
+// 发一个 `<Enum>__<Variant><后缀>() -> #bits<64> { #return <value> }`
+#proc meta_emit_enum_case(%host: #addr, %base: #addr, %enum_lo: #bits<64>,
+                          %enum_hi: #bits<64>, %var_lo: #bits<64>,
+                          %var_hi: #bits<64>, %suf: #addr, %suf_len: #bits<64>,
+                          %value: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %e_at = #lea(%base, %enum_lo, 1, 0)
+  %e_len = #sub[#bits<64>](%enum_hi, %enum_lo)
+  %w2 = #call lain_meta_emit_write(%host, %e_at, %e_len)
+  %d = #data_addr meta_dsep
+  %w3 = #call lain_meta_emit_write(%host, %d, 2)
+  %v_at = #lea(%base, %var_lo, 1, 0)
+  %v_len = #sub[#bits<64>](%var_hi, %var_lo)
+  %w4 = #call lain_meta_emit_write(%host, %v_at, %v_len)
+  %w5 = #call lain_meta_emit_write(%host, %suf, %suf_len)
+  %p2a = #data_addr meta_p2a
+  %w6 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w7 = #call meta_emit_repr(%host, 0, 64)
+  %p2b = #data_addr meta_p2b
+  %w8 = #call lain_meta_emit_write(%host, %p2b, 13)
+  %w9 = #call meta_emit_uint(%host, %value)
+  %p3 = #data_addr meta_p3
+  %w10 = #call lain_meta_emit_write(%host, %p3, 3)
+  #return 0
+}
+
+// 逐变体发 `<V>_tag`，有载荷的再发 `<V>_off`。
+#proc meta_emit_enum_variants(%host: #addr, %base: #addr, %len: #bits<64>,
+                              %enum_lo: #bits<64>, %enum_hi: #bits<64>,
+                              %body: #bits<64>, %poff: #bits<64>) -> #bits<32> {
+  %tag_suf = #data_addr meta_etag
+  %off_suf = #data_addr meta_eoff
+  %st = #loop vars(%at: #bits<64> = %body, %tag: #bits<64> = 0) -> (#bits<32>) {
+    %here = #call bs_skip_space(%base, %at, %len)
+    %byte = #call bs_byte_at(%base, %here, %len)
+    %is_close = #eq[#bits<8>](%byte, 125)
+    #if %is_close {
+      #break vars(0)
+    }
+    %name_hi = #call bs_skip_ident(%base, %here, %len)
+    %paren = #call bs_skip_space(%base, %name_hi, %len)
+    %pb = #call bs_byte_at(%base, %paren, %len)
+    %has_payload = #eq[#bits<8>](%pb, 40)
+    %e1 = #call meta_emit_enum_case(%host, %base, %enum_lo, %enum_hi, %here,
+                                    %name_hi, %tag_suf, 4, %tag)
+    %next = #if %has_payload -> (#bits<64>) {
+      %one = #add[#bits<64>](%paren, 1)
+      %t_lo = #call bs_skip_space(%base, %one, %len)
+      %t_hi = #call bs_skip_ident(%base, %t_lo, %len)
+      %close = #call bs_skip_space(%base, %t_hi, %len)
+      %past = #add[#bits<64>](%close, 1)
+      %e2 = #call meta_emit_enum_case(%host, %base, %enum_lo, %enum_hi, %here,
+                                      %name_hi, %off_suf, 4, %poff)
+      #yield %past
+    } else {
+      #yield %paren
+    }
+    %tag2 = #add[#bits<64>](%tag, 1)
+    #continue vars(%next, %tag2)
+  }
+  #return %st
+}
+
+// `enum NAME { V1 V2(T) ... }` —— 发出每个变体的 tag、载荷偏移，和总大小。
+#proc meta_lower_enum(%host: #addr, %base: #addr, %len: #bits<64>,
+                      %kw_at: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %after = #add[#bits<64>](%kw_at, 4)
+  %name_lo = #call bs_skip_space(%base, %after, %len)
+  %name_hi = #call bs_skip_ident(%base, %name_lo, %len)
+  %body = #call meta_find_enum_body(%base, %len, %name_lo, %name_hi)
+  %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
+  %status = #if %missing -> (#bits<32>) {
+    %f0 = #call lain_meta_fail(%host, 4)
+    #yield 4
+  } else {
+    // 第一遍只为把最大载荷大小/对齐算进 scratch（第二个参数给 0 表示不找变体）
+    %pass1 = #call meta_enum_walk(%base, %len, %body, 0, 0, %scratch)
+    %poff = #call meta_enum_payload_off(%scratch)
+    %size = #call meta_enum_size(%scratch)
+    %s1 = #call meta_emit_enum_variants(%host, %base, %len, %name_lo, %name_hi,
+                                        %body, %poff)
+    %s2 = #call meta_emit_size(%host, %base, %name_lo, %name_hi, %size)
+    #yield %s1
+  }
+  #return %status
+}
