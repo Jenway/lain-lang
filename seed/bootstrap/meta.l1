@@ -233,20 +233,38 @@
 }
 
 // NAME [: TYPE] = INT
+// NAME = import("逻辑路径") 是一种**不产出 LAINIR** 的绑定：它是编译期的
+// 命名空间绑定，用到时再回源码里找回来。所以它在类型标注之前分叉。
 #proc meta_lower_binding(%host: #addr, %base: #addr, %len: #bits<64>,
                          %name_lo: #bits<64>, %name_hi: #bits<64>) -> #bits<32> {
   %at = #call bs_skip_space(%base, %name_hi, %len)
-  %is_colon = #call bs_is_byte(%base, %at, 58)
-  %status = #if %is_colon -> (#bits<32>) {
-    %after = #add[#bits<64>](%at, 1)
-    %t_lo = #call bs_skip_space(%base, %after, %len)
-    %t_hi = #call bs_skip_ident(%base, %t_lo, %len)
-    %s = #call meta_lower_typed(%host, %base, %len, %name_lo, %name_hi, %t_lo,
-                                %t_hi)
-    #yield %s
+  %is_eq = #call bs_is_byte(%base, %at, 61)
+  %is_import = #if %is_eq -> (#bits<1>) {
+    %one = #add[#bits<64>](%at, 1)
+    %kw_at = #call bs_skip_space(%base, %one, %len)
+    %kw = #data_addr meta_kw_import
+    %k = #call bs_match_keyword(%base, %kw_at, %len, %kw, 6)
+    #yield %k
   } else {
-    %s = #call meta_lower_typed(%host, %base, %len, %name_lo, %name_hi, 0, 0)
-    #yield %s
+    #yield 0
+  }
+  %status = #if %is_import -> (#bits<32>) {
+    %s0 = #call meta_lower_import(%host, %base, %len, %at)
+    #yield %s0
+  } else {
+    %is_colon = #call bs_is_byte(%base, %at, 58)
+    %s1 = #if %is_colon -> (#bits<32>) {
+      %after = #add[#bits<64>](%at, 1)
+      %t_lo = #call bs_skip_space(%base, %after, %len)
+      %t_hi = #call bs_skip_ident(%base, %t_lo, %len)
+      %s = #call meta_lower_typed(%host, %base, %len, %name_lo, %name_hi, %t_lo,
+                                  %t_hi)
+      #yield %s
+    } else {
+      %s = #call meta_lower_typed(%host, %base, %len, %name_lo, %name_hi, 0, 0)
+      #yield %s
+    }
+    #yield %s1
   }
   #return %status
 }
@@ -344,17 +362,31 @@
     } else {
       %s3 = #if %is_dot -> (#bits<32>) {
         %dot = #add[#bits<64>](%after, 1)
-        // `A.b` 里的 `A` 是 struct 还是 enum？决定是「字段访问」还是
-        // 「变体构造／投影」——两者形状完全不同。
+        %m_lo = #call bs_skip_space(%base, %dot, %len)
+        %m_hi = #call bs_skip_ident(%base, %m_lo, %len)
+        // `A.b` 里的 `A` 可能是三种东西，形状完全不同：
+        //   import 绑定 → 跨模块取值（mangle 成扁平名 + #call）
+        //   enum        → 变体构造／投影
+        //   其余        → struct 字段访问
+        %ns_at = #call meta_find_import_binding(%base, %len, %lhs_lo, %rec_hi)
+        %is_ns = #ne[#bits<64>](%ns_at, 0)
         %is_sum = #call meta_is_enum(%base, %len, %lhs_lo, %rec_hi)
-        %r2 = #if %is_sum -> (#bits<32>) {
-          %r5 = #call meta_lower_sum_access(%host, %base, %len, %name_lo,
-                                            %name_hi, %lhs_lo, %rec_hi, %dot)
-          #yield %r5
+        %r2 = #if %is_ns -> (#bits<32>) {
+          %r7 = #call meta_lower_ns_value(%host, %base, %len, %name_lo,
+                                          %name_hi, %lhs_lo, %rec_hi, %m_lo,
+                                          %m_hi, %kind, %width)
+          #yield %r7
         } else {
-          %r6 = #call meta_lower_field_access(%host, %base, %len, %name_lo,
+          %r3 = #if %is_sum -> (#bits<32>) {
+            %r5 = #call meta_lower_sum_access(%host, %base, %len, %name_lo,
                                               %name_hi, %lhs_lo, %rec_hi, %dot)
-          #yield %r6
+            #yield %r5
+          } else {
+            %r6 = #call meta_lower_field_access(%host, %base, %len, %name_lo,
+                                                %name_hi, %lhs_lo, %rec_hi, %dot)
+            #yield %r6
+          }
+          #yield %r3
         }
         #yield %r2
       } else {

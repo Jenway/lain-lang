@@ -34,6 +34,9 @@ SOURCE_ORDER   链接顺序；驱动按它把文件拼成一份文本再解析�
 std/lex.l1     初代标准库：字节与词法（空白、标识符、十进制数、关键字）
 std/emit.l1    初代标准库：宿主 ABI 声明 + 产物输出 + repr 的文本
 std/types.l1   初代标准库：类型表 + 查表
+std/modules.l1 初代标准库：源码注册表、import 解析、命名空间成员的 mangle
+std/records.l1 初代标准库：积类型（布局、构造、字段访问）
+std/sums.l1    初代标准库：和类型（布局、构造、投影）
 meta.l1        Meta 的三个入口与 v0 的语言规则
 ```
 
@@ -227,6 +230,47 @@ data c_storage rw { 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 }
 **还没接的**：`p.left` 这种写法（要先有一张「值名 → 类型名」的表），以及和类型的
 `#switch`——投影现在是「比一次 tag」，变体多了应该换成分派。
 
+## 模块与 import
+
+输入语言现在可以有多份源码。`import("逻辑路径")` 拿到的命名空间**不是物理值**，
+是编译期绑定——所以 `let M = import(...)` **不产出任何 LAINIR**：
+
+```lain
+let M = import("std::math");
+let main = M.answer;
+```
+
+```lainir
+#proc std__math__answer() -> #bits<64> {
+  #return 42
+}
+#proc main() -> #bits<64> {
+  #return #call std__math__answer()
+}
+```
+
+三件事值得记：
+
+- **解析规则是全逻辑路径精确匹配，不做末段回退。** `import("std::math")` 规范化成
+  `std/math.lain`（`::` 对 `/`，末尾补 `.lain`），然后和宿主注册的每一份源码的路径
+  **逐字节比整条**。find 不到就是 11，不会退化成「谁的 basename 像就绑谁」。
+  旧塔正是后者，已证实会把 `packages::lain::lainvm::api_contract` 静默绑到
+  `src/lainir/api_contract.lain`。回归里有一条专门钉这条规则：模块按
+  `other/math.lain` 注册、源码 import `std::math` → 必须 11。
+- **命名空间成员要 mangle 成扁平名**才落得到物理层（LAINIR 的名字是平的）：
+  `std::math` → `std__math`，再拼 `__` 和成员名。`::` 是两字节分隔符，mangle 成
+  **两个**下划线——只发一个的话 `std::a::b` 和 `std::a_b` 会撞成同一个扁平名。
+- **不建编译期符号表**：`let M = import(...)` 不留记录，用到 `M.x` 时再回源码里
+  扫这条 import 找回来，和积/和类型重算布局是同一个办法。代价是 O(n²)。
+
+注册表就是宿主那份源码列表：每份源码有一个**逻辑路径**，`import` 拿它匹配。
+驱动必须**显式授权**每一份源码的文本**和路径**（`lain_meta_source_path_data`
+返回的是宿主地址，不在 Meta 的映像里），少授权一次就是 trap 1004。
+
+v0 的缺口：导入的绑定只支持 `let NAME = INT;` 这一种形状，repr 固定 `#bits<64>`；
+类型还不能 import；没有 `export` 声明（模块里所有 `let` 都是导出的）；没有循环
+检测；重名 import 绑定（`let M = ...` 两次）不报错，后一条会赢。
+
 ## 类型表
 
 在 `std/types.l1`，是一段**静态字节**：不需要 init 过程，也没有手算的偏移
@@ -263,7 +307,7 @@ v0 不认注释、不认识换行以外的排版差异（空白 = 字节 ≤ 32�
 | `lain_meta_source_count` | — | 源码份数 |
 | `lain_meta_source_data` | index | 源码字节地址 |
 | `lain_meta_source_length` | index | 字节数 |
-| `lain_meta_source_path_data` | index | 路径地址 |
+| `lain_meta_source_path_data` | index | 逻辑路径地址（NUL 结尾，import 的注册表） |
 | `lain_meta_emit_reset` | — | 0 |
 | `lain_meta_emit_write` | addr, length | 0 |
 | `lain_meta_emit_data` | — | 产物文本地址 |
@@ -294,7 +338,15 @@ clang -std=c11 -Iseed/include -o build/tmp-probe/meta_boot.exe seed/tests/meta_b
   seed/src/core/*.c seed/src/vm/*.c seed/src/meta/host.c
 build/tmp-probe/meta_boot.exe                                   # let main = 42
 build/tmp-probe/meta_boot.exe seed/tests/meta_source2.lain answer 1234
+# 参数：<src> <入口> <期望值> [断言文本] [模式] [逻辑路径=文件]...
+build/tmp-probe/meta_boot.exe seed/tests/meta_import2.lain main 42 std__math__answer - \
+  std/math.lain=seed/tests/modules/std/math.lain
 ```
+
+模块从第 7 个参数起，写成 `逻辑路径=文件`。逻辑路径必须是**规范化之后**的样子
+（`std/math.lain`），因为解析是全路径逐字节匹配。真驱动会从一个模块根递归收集
+`.lain` 自动算相对路径；这里显式给，免掉目录递归，也让注册表的内容在命令行上
+看得见。
 
 `build/tmp-probe/run_all.ps1` 把两条都纳入回归。
 
@@ -304,8 +356,15 @@ build/tmp-probe/meta_boot.exe seed/tests/meta_source2.lain answer 1234
 
 1. **`expand` 阶段**：现在还只是恒等，没有宏/attribute。
 2. **注释与真正的词法**：v0 只跳空白。
-3. **多源码与模块**：`source_count` 已经在能力面里，Meta 还没用。
+3. **类型也能 import**：现在 import 只导出 `let NAME = INT;`，标量还锁在
+   `std/types.l1` 的字节表里（`i32` 是硬编码的名字，不是模块的导出）。
+   要让 `M.i32` 成立，得先把标量变成声明、Meta 扫声明建表——那样
+   `meta_type_find` 查的就从「静态字节」变成「声明」。
 4. **表达式与类型**：v0 只会 `let NAME = INT;`。
 5. **AST 面**：Meta 现在直接扫源码字节。真正的设计里，Parser 出无语义的
    RawAst，Meta 用语言中立的 AstApi（拓扑/位置/上下文）操作它 —— 那需要给
    底座加一层 AST 对象模型，是**新的一大片**，不在 v0 里。
+
+硬编码清单（还没还的债）：顶层形式 `let`/`struct`/`enum` 是字面字节模式、
+由 `meta_lower_source` 的 if 链分派；`struct`/`enum` 的分隔符是手打的 `__`。
+两者都该由「声明按形状识别 + 命名空间 mangle」接管。

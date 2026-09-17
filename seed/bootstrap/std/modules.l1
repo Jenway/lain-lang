@@ -1,0 +1,552 @@
+// 初代标准库 v0 —— 源码注册表与 import。
+//
+// 解析规则：**逻辑路径全路径精确匹配，不做末段回退。**
+//
+//   import("std::math")  →  注册路径 "std/math.lain"
+//
+// `::` 对 `/`，末尾补 `.lain`（逻辑路径里自己写了 `.lain` 也接受）。逐字节比较
+// 整条路径，找不到就是错误（status 11）。这和旧塔不同：旧塔对非 std 的 import
+// **只比 basename**，已证实会把 `packages::lain::lainvm::api_contract` 绑到
+// `src/lainir/api_contract.lain`（见 docs/implementation/module-namespaces.md §4.1）。
+// 全路径匹配让那类歧义在机制上不可能发生。
+//
+// 注册表里每份源码的路径由宿主给（`lain_meta_source_path_data`），是 NUL 结尾的
+// C 字符串——所以这里靠扫 0 取长度，不需要额外的长度能力。
+//
+// 命名空间绑定 `let M = import("std::math");` **不产出任何 LAINIR**：它是纯编译期
+// 绑定。后面用到 `M.x` 时再回源码里扫这条 import 找回来——和积/和类型重算布局是
+// 同一个办法，不建编译期表。
+//
+// 暂存区分段（宿主给 64 KiB）：
+//   +0    和类型的最大载荷大小
+//   +8    和类型的最大对齐
+//   +64   import 逻辑路径的规范化缓冲区
+
+data meta_kw_import ro { 105 109 112 111 114 116 }      // "import"  6
+data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
+
+// --- 宿主字符串与缓冲区 ---------------------------------------------------
+
+// 注册表里的路径是 NUL 结尾的 C 字符串。扫到 0 就是长度。
+#proc meta_cstr_len(%addr: #addr) -> #bits<64> {
+  %n = #loop scan(%i: #bits<64> = 0) -> (#bits<64>) {
+    %p = #lea(%addr, %i, 1, 0)
+    %b = #load[#bits<8>](%p)
+    %end = #eq[#bits<8>](%b, 0)
+    #if %end {
+      #break scan(%i)
+    }
+    %i2 = #add[#bits<64>](%i, 1)
+    #continue scan(%i2)
+  }
+  #return %n
+}
+
+// 两个 NUL 结尾字符串相等？同时走到 0 才算相等。
+#proc meta_cstr_equal(%a: #addr, %b: #addr) -> #bits<1> {
+  %r = #loop walk(%i: #bits<64> = 0) -> (#bits<1>) {
+    %pa = #lea(%a, %i, 1, 0)
+    %pb = #lea(%b, %i, 1, 0)
+    %ba = #load[#bits<8>](%pa)
+    %bb = #load[#bits<8>](%pb)
+    %diff = #ne[#bits<8>](%ba, %bb)
+    #if %diff {
+      #break walk(0)
+    }
+    %end = #eq[#bits<8>](%ba, 0)
+    #if %end {
+      #break walk(1)
+    }
+    %i2 = #add[#bits<64>](%i, 1)
+    #continue walk(%i2)
+  }
+  #return %r
+}
+
+#proc meta_buf_put(%buf: #addr, %at: #bits<64>, %b: #bits<8>) -> #bits<32> {
+  %p = #lea(%buf, %at, 1, 0)
+  #store[#bits<8>](%b, %p)
+  #return 0
+}
+
+// 往缓冲区写 n 个字节，返回写完后的下标。
+#proc meta_buf_puts(%buf: #addr, %at: #bits<64>, %src: #addr,
+                    %n: #bits<64>) -> #bits<64> {
+  %end = #loop put(%k: #bits<64> = 0, %j: #bits<64> = %at) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%k, %n)
+    #if %more {
+      %p = #lea(%src, %k, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %q = #lea(%buf, %j, 1, 0)
+      #store[#bits<8>](%b, %q)
+      %k2 = #add[#bits<64>](%k, 1)
+      %j2 = #add[#bits<64>](%j, 1)
+      #continue put(%k2, %j2)
+    } else {
+      #break put(%j)
+    }
+  }
+  #return %end
+}
+
+// 同一份缓冲区里两段相等？（跨源的比较用 meta_bytes_equal，那个收两个地址）
+#proc meta_slice_equals(%base: #addr, %a_lo: #bits<64>, %a_hi: #bits<64>,
+                        %b_lo: #bits<64>, %b_hi: #bits<64>) -> #bits<1> {
+  %al = #sub[#bits<64>](%a_hi, %a_lo)
+  %bl = #sub[#bits<64>](%b_hi, %b_lo)
+  %same_len = #eq[#bits<64>](%al, %bl)
+  %r = #if %same_len -> (#bits<1>) {
+    %pa = #lea(%base, %a_lo, 1, 0)
+    %pb = #lea(%base, %b_lo, 1, 0)
+    %eq = #call meta_bytes_equal(%pa, %pb, %al)
+    #yield %eq
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+// --- 路径规范化 -----------------------------------------------------------
+
+// 逻辑路径末尾是不是已经写了 `.lain`？
+#proc meta_ends_with_lain(%logical: #addr, %len: #bits<64>) -> #bits<1> {
+  %enough = #uge[#bits<64>](%len, 5)
+  %r = #if %enough -> (#bits<1>) {
+    %off = #sub[#bits<64>](%len, 5)
+    %p = #lea(%logical, %off, 1, 0)
+    %suf = #data_addr meta_suffix_lain
+    %eq = #call meta_bytes_equal(%p, %suf, 5)
+    #yield %eq
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+// 把逻辑路径规范化成注册路径的形状，写进 buf（NUL 结尾）。调用方保证 buf 够大。
+#proc meta_build_path(%logical: #addr, %len: #bits<64>,
+                      %buf: #addr) -> #bits<32> {
+  // `::` 变 `/`（吃掉第二个冒号）；单个 `:` 原样留着，它匹配不上就是匹配不上。
+  %j = #loop put(%i: #bits<64> = 0, %j: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %is_colon = #call bs_is_byte(%logical, %i, 58)
+      %raw = #call bs_byte_at(%logical, %i, %len)
+      %out = #if %is_colon -> (#bits<8>) {
+        #yield 47
+      } else {
+        #yield %raw
+      }
+      %p = #lea(%buf, %j, 1, 0)
+      #store[#bits<8>](%out, %p)
+      %j2 = #add[#bits<64>](%j, 1)
+      %step = #if %is_colon -> (#bits<64>) {
+        %i1 = #add[#bits<64>](%i, 1)
+        %also = #call bs_is_byte(%logical, %i1, 58)
+        %s = #if %also -> (#bits<64>) {
+          #yield 2
+        } else {
+          #yield 1
+        }
+        #yield %s
+      } else {
+        #yield 1
+      }
+      %i2 = #add[#bits<64>](%i, %step)
+      #continue put(%i2, %j2)
+    } else {
+      #break put(%j)
+    }
+  }
+  %has = #call meta_ends_with_lain(%logical, %len)
+  %end = #if %has -> (#bits<64>) {
+    #yield %j
+  } else {
+    %suf = #data_addr meta_suffix_lain
+    %e = #call meta_buf_puts(%buf, %j, %suf, 5)
+    #yield %e
+  }
+  %zero = #call meta_buf_put(%buf, %end, 0)
+  #return 0
+}
+
+// --- 查注册表 -------------------------------------------------------------
+
+// 逻辑路径 → 源码下标；找不到返回 NOT_FOUND。查不到就**不回退**。
+#proc meta_source_find(%host: #addr, %logical: #addr,
+                       %logical_len: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %size = #call lain_meta_scratch_size(%host)
+  %cap = #sub[#bits<64>](%size, 64)
+  // `::` 只会变短，补 `.lain` 和 NUL 是最坏情况 +6
+  %need = #add[#bits<64>](%logical_len, 6)
+  %fits = #ule[#bits<64>](%need, %cap)
+  %r = #if %fits -> (#bits<64>) {
+    %buf = #lea(%scratch, 64, 1, 0)
+    %b = #call meta_build_path(%logical, %logical_len, %buf)
+    %count = #call lain_meta_source_count(%host)
+    %idx = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
+      %more = #ult[#bits<64>](%i, %count)
+      #if %more {
+        %p = #call lain_meta_source_path_data(%host, %i)
+        %same = #call meta_cstr_equal(%p, %buf)
+        #if %same {
+          #break s(%i)
+        }
+        %i2 = #add[#bits<64>](%i, 1)
+        #continue s(%i2)
+      } else {
+        #break s(0xFFFFFFFFFFFFFFFF)
+      }
+    }
+    #yield %idx
+  } else {
+    // 缓冲区装不下 → 它不可能等于任何注册路径
+    #yield 0xFFFFFFFFFFFFFFFF
+  }
+  #return %r
+}
+
+// --- import 的语法与降级 ---------------------------------------------------
+
+// 找下一个 `let`，要求 `let` 后面是空白（否则 `letter` 也算）。
+#proc bs_next_let(%base: #addr, %from: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %found = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %is = #call bs_match_let(%base, %i, %len)
+      #if %is {
+        %i3 = #add[#bits<64>](%i, 3)
+        %sep = #call bs_byte_at(%base, %i3, %len)
+        %spaced = #ule[#bits<8>](%sep, 32)
+        #if %spaced {
+          #break scan(%i)
+        }
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    } else {
+      #break scan(0xFFFFFFFFFFFFFFFF)
+    }
+  }
+  #return %found
+}
+
+// 从 `import` 的位置往下读 `("逻辑路径")`，返回逻辑路径首字节的下标；
+// 形状不对返回 NOT_FOUND。
+#proc meta_import_logical(%base: #addr, %len: #bits<64>,
+                          %kw_at: #bits<64>) -> #bits<64> {
+  %p = #add[#bits<64>](%kw_at, 6)
+  %p1 = #call bs_skip_space(%base, %p, %len)
+  %open = #call bs_is_byte(%base, %p1, 40)
+  %r = #if %open -> (#bits<64>) {
+    %q0 = #call bs_skip_space(%base, %p1, %len)
+    %q1 = #add[#bits<64>](%q0, 1)
+    %quote = #call bs_is_byte(%base, %q1, 34)
+    %v = #if %quote -> (#bits<64>) {
+      %start = #add[#bits<64>](%q1, 1)
+      #yield %start
+    } else {
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    #yield %v
+  } else {
+    #yield 0xFFFFFFFFFFFFFFFF
+  }
+  #return %r
+}
+
+// 逻辑路径到收尾引号为止的长度。
+#proc meta_logical_len(%base: #addr, %from: #bits<64>,
+                        %len: #bits<64>) -> #bits<64> {
+  %n = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
+    %b = #call bs_byte_at(%base, %i, %len)
+    %stop = #eq[#bits<8>](%b, 34)
+    %past = #uge[#bits<64>](%i, %len)
+    %done = #or[#bits<1>](%stop, %past)
+    #if %done {
+      #break scan(%i)
+    }
+    %i2 = #add[#bits<64>](%i, 1)
+    #continue scan(%i2)
+  }
+  %r = #sub[#bits<64>](%n, %from)
+  #return %r
+}
+
+// `let <ns> = import("...")` 里的逻辑路径下标；这条 let 不是那个形状就返回 NOT_FOUND。
+#proc meta_import_at(%base: #addr, %len: #bits<64>, %let_at: #bits<64>,
+                     %ns_lo: #bits<64>, %ns_hi: #bits<64>) -> #bits<64> {
+  %after = #add[#bits<64>](%let_at, 3)
+  %n_lo = #call bs_skip_space(%base, %after, %len)
+  %n_hi = #call bs_skip_ident(%base, %n_lo, %len)
+  %same = #call meta_slice_equals(%base, %n_lo, %n_hi, %ns_lo, %ns_hi)
+  %r = #if %same -> (#bits<64>) {
+    %eq_at = #call bs_skip_space(%base, %n_hi, %len)
+    %is_eq = #call bs_is_byte(%base, %eq_at, 61)
+    %v = #if %is_eq -> (#bits<64>) {
+      %one = #add[#bits<64>](%eq_at, 1)
+      %kw_at = #call bs_skip_space(%base, %one, %len)
+      %kw = #data_addr meta_kw_import
+      %is_imp = #call bs_match_keyword(%base, %kw_at, %len, %kw, 6)
+      %w = #if %is_imp -> (#bits<64>) {
+        %lp = #call meta_import_logical(%base, %len, %kw_at)
+        #yield %lp
+      } else {
+        #yield 0xFFFFFFFFFFFFFFFF
+      }
+      #yield %w
+    } else {
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    #yield %v
+  } else {
+    #yield 0xFFFFFFFFFFFFFFFF
+  }
+  #return %r
+}
+
+// 按绑定名回源码里找回它的 import 逻辑路径下标。返回 0 当作「没找到」的哨兵
+// ——`let` 之后的引号位置永远大于 0。
+#proc meta_find_import_binding(%base: #addr, %len: #bits<64>,
+                               %ns_lo: #bits<64>,
+                               %ns_hi: #bits<64>) -> #bits<64> {
+  %found = #loop s(%at: #bits<64> = 0) -> (#bits<64>) {
+    %let_at = #call bs_next_let(%base, %at, %len)
+    %none = #eq[#bits<64>](%let_at, 0xFFFFFFFFFFFFFFFF)
+    #if %none {
+      #break s(0)
+    }
+    %lp = #call meta_import_at(%base, %len, %let_at, %ns_lo, %ns_hi)
+    %hit = #ne[#bits<64>](%lp, 0xFFFFFFFFFFFFFFFF)
+    #if %hit {
+      #break s(%lp)
+    }
+    %next = #add[#bits<64>](%let_at, 3)
+    #continue s(%next)
+  }
+  #return %found
+}
+
+// `let NAME = import("逻辑路径");` —— 解析并登记。**不产出任何 LAINIR**。
+#proc meta_lower_import(%host: #addr, %base: #addr, %len: #bits<64>,
+                        %eq_at: #bits<64>) -> #bits<32> {
+  %one = #add[#bits<64>](%eq_at, 1)
+  %kw_at = #call bs_skip_space(%base, %one, %len)
+  %lp = #call meta_import_logical(%base, %len, %kw_at)
+  %bad = #eq[#bits<64>](%lp, 0xFFFFFFFFFFFFFFFF)
+  %status = #if %bad -> (#bits<32>) {
+    %f0 = #call lain_meta_fail(%host, 11)
+    #yield 11
+  } else {
+    %n = #call meta_logical_len(%base, %lp, %len)
+    %path = #lea(%base, %lp, 1, 0)
+    %idx = #call meta_source_find(%host, %path, %n)
+    %miss = #eq[#bits<64>](%idx, 0xFFFFFFFFFFFFFFFF)
+    %s = #if %miss -> (#bits<32>) {
+      %f1 = #call lain_meta_fail(%host, 11)
+      #yield 11
+    } else {
+      #yield 0
+    }
+    #yield %s
+  }
+  #return %status
+}
+
+// --- 命名空间成员：`M.x` ----------------------------------------------------
+//
+// LAINIR 的名字是扁平的，所以命名空间成员要 **mangle 成扁平名**才落得到物理层：
+//
+//   std/math.lain 里的 answer   →   std__math__answer
+//
+// 规则：去掉 `.lain`，`::`（也就是规范化之后的 `/` 的位置…不，是**逻辑路径里的
+// `::`**）变 `__`，再拼 `__` 和成员名。v0 里导入的绑定只支持 `let NAME = INT;`
+// 这一种形状，所以 repr 固定 `#bits<64>`——类型标注的导入是下一步。
+
+// 逻辑路径 → mangle 前缀，写进 buf，返回长度。
+#proc meta_build_mangle(%logical: #addr, %len: #bits<64>,
+                         %buf: #addr) -> #bits<64> {
+  %has_suffix = #call meta_ends_with_lain(%logical, %len)
+  %body = #if %has_suffix -> (#bits<64>) {
+    %five = #sub[#bits<64>](%len, 5)
+    #yield %five
+  } else {
+    #yield %len
+  }
+  %j = #loop put(%i: #bits<64> = 0, %j: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %body)
+    #if %more {
+      %is_colon = #call bs_is_byte(%logical, %i, 58)
+      %raw = #call bs_byte_at(%logical, %i, %body)
+      %out = #if %is_colon -> (#bits<8>) {
+        #yield 95
+      } else {
+        #yield %raw
+      }
+      %p = #lea(%buf, %j, 1, 0)
+      #store[#bits<8>](%out, %p)
+      %j2 = #add[#bits<64>](%j, 1)
+      %i1 = #add[#bits<64>](%i, 1)
+      %also = #call bs_is_byte(%logical, %i1, 58)
+      %dbl = #and[#bits<1>](%is_colon, %also)
+      // `::` 是两字节的分隔符，mangle 成两个下划线（`std::math` → `std__math`）。
+      // 只发一个的话 `std::a::b` 和 `std::a_b` 会撞成同一个扁平名。
+      %j3 = #if %dbl -> (#bits<64>) {
+        %q = #lea(%buf, %j2, 1, 0)
+        #store[#bits<8>](95, %q)
+        %j4 = #add[#bits<64>](%j2, 1)
+        #yield %j4
+      } else {
+        #yield %j2
+      }
+      %step = #if %dbl -> (#bits<64>) {
+        #yield 2
+      } else {
+        #yield 1
+      }
+      %i2 = #add[#bits<64>](%i, %step)
+      #continue put(%i2, %j3)
+    } else {
+      #break put(%j)
+    }
+  }
+  #return %j
+}
+
+// 在 base 里找绑定，返回它 `=` 的下标；找不到返回 NOT_FOUND。
+// 名字用**地址 + 长度**给，因为它可能在另一份源码里。
+#proc meta_find_binding_in(%base: #addr, %len: #bits<64>, %name: #addr,
+                            %name_len: #bits<64>) -> #bits<64> {
+  %found = #loop s(%at: #bits<64> = 0) -> (#bits<64>) {
+    %let_at = #call bs_next_let(%base, %at, %len)
+    %none = #eq[#bits<64>](%let_at, 0xFFFFFFFFFFFFFFFF)
+    #if %none {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+    %after = #add[#bits<64>](%let_at, 3)
+    %n_lo = #call bs_skip_space(%base, %after, %len)
+    %n_hi = #call bs_skip_ident(%base, %n_lo, %len)
+    %have = #sub[#bits<64>](%n_hi, %n_lo)
+    %same_len = #eq[#bits<64>](%have, %name_len)
+    %same = #if %same_len -> (#bits<1>) {
+      %p = #lea(%base, %n_lo, 1, 0)
+      %eq = #call meta_bytes_equal(%p, %name, %name_len)
+      #yield %eq
+    } else {
+      #yield 0
+    }
+    #if %same {
+      %eq = #call bs_skip_space(%base, %n_hi, %len)
+      #break s(%eq)
+    }
+    %next = #add[#bits<64>](%let_at, 3)
+    #continue s(%next)
+  }
+  #return %found
+}
+
+// 发「被导入的绑定」本身：`#proc <mangle>__<member>() -> #bits<64> { #return v }`
+// member 是**调用方源码里**写的那个名字（用户写的是 `M.answer`，输出里就该是
+// `answer`），只有值来自被导入的源码。
+#proc meta_emit_exported(%host: #addr, %mag: #addr, %mag_len: #bits<64>,
+                          %b_base: #addr, %b_lo: #bits<64>, %b_hi: #bits<64>,
+                          %value: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %w2 = #call lain_meta_emit_write(%host, %mag, %mag_len)
+  %d = #data_addr meta_dsep
+  %w3 = #call lain_meta_emit_write(%host, %d, 2)
+  %at = #lea(%b_base, %b_lo, 1, 0)
+  %n = #sub[#bits<64>](%b_hi, %b_lo)
+  %w4 = #call lain_meta_emit_write(%host, %at, %n)
+  %p2a = #data_addr meta_p2a
+  %w5 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w6 = #call meta_emit_repr(%host, 0, 64)
+  %p2b = #data_addr meta_p2b
+  %w7 = #call lain_meta_emit_write(%host, %p2b, 13)
+  %w8 = #call meta_emit_uint(%host, %value)
+  %p3 = #data_addr meta_p3
+  %w9 = #call lain_meta_emit_write(%host, %p3, 3)
+  #return 0
+}
+
+// 发调用方：`#proc <bind>() -> <repr> { #return #call <mangle>__<member>() }`
+#proc meta_emit_ns_call(%host: #addr, %b_base: #addr, %b_lo: #bits<64>,
+                         %b_hi: #bits<64>, %kind: #bits<64>, %width: #bits<64>,
+                         %mag: #addr, %mag_len: #bits<64>, %m_base: #addr,
+                         %m_lo: #bits<64>, %m_hi: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %bat = #lea(%b_base, %b_lo, 1, 0)
+  %bn = #sub[#bits<64>](%b_hi, %b_lo)
+  %w2 = #call lain_meta_emit_write(%host, %bat, %bn)
+  %p2a = #data_addr meta_p2a
+  %w3 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w4 = #call meta_emit_repr(%host, %kind, %width)
+  %x1 = #data_addr meta_x1
+  %w5 = #call lain_meta_emit_write(%host, %x1, 19)
+  %w6 = #call lain_meta_emit_write(%host, %mag, %mag_len)
+  %d = #data_addr meta_dsep
+  %w7 = #call lain_meta_emit_write(%host, %d, 2)
+  %mat = #lea(%m_base, %m_lo, 1, 0)
+  %mn = #sub[#bits<64>](%m_hi, %m_lo)
+  %w8 = #call lain_meta_emit_write(%host, %mat, %mn)
+  %x2 = #data_addr meta_x2
+  %w9 = #call lain_meta_emit_write(%host, %x2, 5)
+  #return 0
+}
+
+// `let NAME = M.member;` —— 解析命名空间绑定，去被导入的源码里找那条绑定，
+// 把它和调用方**一起**发出来（两张过程共用同一个 mangle 前缀）。
+#proc meta_lower_ns_value(%host: #addr, %base: #addr, %len: #bits<64>,
+                           %bind_lo: #bits<64>, %bind_hi: #bits<64>,
+                           %ns_lo: #bits<64>, %ns_hi: #bits<64>,
+                           %m_lo: #bits<64>, %m_hi: #bits<64>,
+                           %kind: #bits<64>, %width: #bits<64>) -> #bits<32> {
+  %lp = #call meta_find_import_binding(%base, %len, %ns_lo, %ns_hi)
+  %nons = #eq[#bits<64>](%lp, 0)
+  %status = #if %nons -> (#bits<32>) {
+    // `M` 不是这条源码里的 import 绑定
+    %f0 = #call lain_meta_fail(%host, 12)
+    #yield 12
+  } else {
+    %n = #call meta_logical_len(%base, %lp, %len)
+    %path = #lea(%base, %lp, 1, 0)
+    %idx = #call meta_source_find(%host, %path, %n)
+    %miss = #eq[#bits<64>](%idx, 0xFFFFFFFFFFFFFFFF)
+    %s1 = #if %miss -> (#bits<32>) {
+      %f1 = #call lain_meta_fail(%host, 11)
+      #yield 11
+    } else {
+      %m_base = #call lain_meta_source_data(%host, %idx)
+      %m_len = #call lain_meta_source_length(%host, %idx)
+      %m_name = #lea(%base, %m_lo, 1, 0)
+      %m_name_len = #sub[#bits<64>](%m_hi, %m_lo)
+      %eq_at = #call meta_find_binding_in(%m_base, %m_len, %m_name, %m_name_len)
+      %gone = #eq[#bits<64>](%eq_at, 0xFFFFFFFFFFFFFFFF)
+      %s2 = #if %gone -> (#bits<32>) {
+        // 模块里没有这个成员
+        %f2 = #call lain_meta_fail(%host, 13)
+        #yield 13
+      } else {
+        // v0：被导入的绑定必须是 `let NAME = INT;`
+        %one = #add[#bits<64>](%eq_at, 1)
+        %v_lo = #call bs_skip_space(%m_base, %one, %m_len)
+        %value = #call bs_read_uint(%m_base, %v_lo, %m_len)
+        %scratch = #call lain_meta_scratch_data(%host)
+        %buf = #lea(%scratch, 64, 1, 0)
+        %mag_len = #call meta_build_mangle(%path, %n, %buf)
+        %e1 = #call meta_emit_exported(%host, %buf, %mag_len, %base, %m_lo,
+                                       %m_hi, %value)
+        %e2 = #call meta_emit_ns_call(%host, %base, %bind_lo, %bind_hi, %kind,
+                                      %width, %buf, %mag_len, %base, %m_lo,
+                                      %m_hi)
+        #yield %e2
+      }
+      #yield %s2
+    }
+    #yield %s1
+  }
+  #return %status
+}
