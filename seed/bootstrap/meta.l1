@@ -61,9 +61,65 @@
   #return %status
 }
 
-// 名字后面必须是 '='，然后是十进制数。
-#proc meta_lower_binding(%host: #addr, %base: #addr, %len: #bits<64>, %name_lo: #bits<64>, %name_hi: #bits<64>) -> #bits<32> {
-  %eq_at = #call bs_skip_space(%base, %name_hi, %len)
+// NAME [: TYPE] = INT
+#proc meta_lower_binding(%host: #addr, %base: #addr, %len: #bits<64>,
+                         %name_lo: #bits<64>, %name_hi: #bits<64>) -> #bits<32> {
+  %at = #call bs_skip_space(%base, %name_hi, %len)
+  %is_colon = #call bs_is_byte(%base, %at, 58)
+  %status = #if %is_colon -> (#bits<32>) {
+    %after = #add[#bits<64>](%at, 1)
+    %t_lo = #call bs_skip_space(%base, %after, %len)
+    %t_hi = #call bs_skip_ident(%base, %t_lo, %len)
+    %s = #call meta_lower_typed(%host, %base, %len, %name_lo, %name_hi, %t_lo,
+                                %t_hi)
+    #yield %s
+  } else {
+    %s = #call meta_lower_typed(%host, %base, %len, %name_lo, %name_hi, 0, 0)
+    #yield %s
+  }
+  #return %status
+}
+
+// 查类型表拿到 repr，再 `= INT`，最后把整条绑定写出去。
+#proc meta_lower_typed(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %name_lo: #bits<64>, %name_hi: #bits<64>,
+                       %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<32> {
+  %has_type = #ult[#bits<64>](%t_lo, %t_hi)
+  // kind 在低 8 位、width 在 8..15 位；找不到是 0xFFFF...FF
+  %info = #if %has_type -> (#bits<64>) {
+    %tbl = #data_addr meta_types
+    %tname = #lea(%base, %t_lo, 1, 0)
+    %tlen = #sub[#bits<64>](%t_hi, %t_lo)
+    %entry = #call meta_type_find(%tbl, %tname, %tlen)
+    %miss = #eq[#bits<64>](%entry, 0xFFFFFFFFFFFFFFFF)
+    %r = #if %miss -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %p = #call meta_type_info(%tbl, %entry)
+      #yield %p
+    }
+    #yield %r
+  } else {
+    // 没有标注：v0 的形式，默认 #bits<64>
+    %d = #shl[#bits<64>](64, 8)
+    #yield %d
+  }
+  %bad = #eq[#bits<64>](%info, 0xFFFFFFFFFFFFFFFF)
+  #if %bad {
+    %f0 = #call lain_meta_fail(%host, 5)
+    #return 5
+  }
+
+  // 从类型名之后接着解析；没有标注就从名字之后
+  %resume = #if %has_type -> (#bits<64>) {
+    #yield %t_hi
+  } else {
+    #yield %name_hi
+  }
+  %kind = #and[#bits<64>](%info, 255)
+  %width = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
+
+  %eq_at = #call bs_skip_space(%base, %resume, %len)
   %is_eq = #call bs_is_byte(%base, %eq_at, 61)
   %status = #if %is_eq -> (#bits<32>) {
     %after_eq = #add[#bits<64>](%eq_at, 1)
@@ -71,7 +127,8 @@
     %num_hi = #call bs_skip_ident(%base, %num_lo, %len)
     %has_num = #ult[#bits<64>](%num_lo, %num_hi)
     %inner = #if %has_num -> (#bits<32>) {
-      %s = #call meta_emit_let(%host, %base, %len, %name_lo, %name_hi, %num_lo)
+      %s = #call meta_emit_let(%host, %base, %len, %name_lo, %name_hi, %kind,
+                               %width, %num_lo)
       #yield %s
     } else {
       %f = #call lain_meta_fail(%host, 3)
@@ -86,17 +143,23 @@
 }
 
 // 把这条绑定写成 LAINIR。
-#proc meta_emit_let(%host: #addr, %base: #addr, %len: #bits<64>, %name_lo: #bits<64>, %name_hi: #bits<64>, %num_lo: #bits<64>) -> #bits<32> {
+#proc meta_emit_let(%host: #addr, %base: #addr, %len: #bits<64>,
+                    %name_lo: #bits<64>, %name_hi: #bits<64>,
+                    %kind: #bits<64>, %width: #bits<64>,
+                    %num_lo: #bits<64>) -> #bits<32> {
   %p1 = #data_addr meta_p1
   %w1 = #call lain_meta_emit_write(%host, %p1, 6)
   %name_at = #lea(%base, %name_lo, 1, 0)
   %name_len = #sub[#bits<64>](%name_hi, %name_lo)
   %w2 = #call lain_meta_emit_write(%host, %name_at, %name_len)
-  %p2 = #data_addr meta_p2
-  %w3 = #call lain_meta_emit_write(%host, %p2, 28)
+  %p2a = #data_addr meta_p2a
+  %w3 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w4 = #call meta_emit_repr(%host, %kind, %width)
+  %p2b = #data_addr meta_p2b
+  %w5 = #call lain_meta_emit_write(%host, %p2b, 13)
   %value = #call bs_read_uint(%base, %num_lo, %len)
-  %w4 = #call meta_emit_uint(%host, %value)
+  %w6 = #call meta_emit_uint(%host, %value)
   %p3 = #data_addr meta_p3
-  %w5 = #call lain_meta_emit_write(%host, %p3, 3)
+  %w7 = #call lain_meta_emit_write(%host, %p3, 3)
   #return 0
 }

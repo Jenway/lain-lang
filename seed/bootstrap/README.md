@@ -32,25 +32,39 @@ IR 内省能力。这一层是新方言、从零重写的，两者不共享任�
 ```text
 SOURCE_ORDER   链接顺序；驱动按它把文件拼成一份文本再解析（确定性来源）
 std/lex.l1     初代标准库：字节与词法（空白、标识符、十进制数、关键字）
-std/emit.l1    初代标准库：宿主 ABI 声明 + 产物输出
+std/emit.l1    初代标准库：宿主 ABI 声明 + 产物输出 + repr 的文本
+std/types.l1   初代标准库：类型表 + 查表
 meta.l1        Meta 的三个入口与 v0 的语言规则
 ```
 
 ## v0 的语言
 
-只有一条规则：
-
 ```lain
-let NAME = INTEGER;
+let NAME [: TYPE] = INTEGER;
 ```
 
-产出：
+`TYPE` 缺省时是 `#bits<64>`（老形式）。写了类型就去**类型表**里查它：
 
 ```lainir
-#proc NAME() -> #bits<64> {
+#proc NAME() -> <TYPE 的 repr> {
   #return INTEGER
 }
 ```
+
+类型表在 `std/types.l1`，是一段**静态字节**：不需要 init 过程，也没有手算的
+偏移——条目自描述，Meta 走一遍就查到了。
+
+```text
+类型:  [1]名字长度 [L]名字 [1]repr kind [1]repr width [1]op 数 [op 条目 × op 数]
+op:    [1]符号长度 [S]符号 [1]物理名长度 [P]物理名
+```
+
+repr kind 就是 LAINIR 的四个类型构造子：`0=#bits<N>`、`1=#f<N>`、
+`2=#vec<N>`、`3=#addr`。表以「名字长度 0」终止。
+
+v0 表里有 `i32 u32 i64 i8 u8 bool usize addr` 八项。**表少一个字节就会产出错的
+repr**（少 ops 数字节时，下一项的长度会被当成 ops 数，走表直接跳飞），所以
+驱动带了一条「产物里必须出现某段文本」的断言守着它。
 
 v0 不认注释、不认识换行以外的排版差异（空白 = 字节 ≤ 32）、没有 `expand`
 阶段（还没有宏）。这些是**缺口，不是设计**。

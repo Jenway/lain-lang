@@ -165,6 +165,9 @@ int main(int argc, char **argv) {
    * 换个源码就要换个入口。 */
   const char *entry = argc > 2 ? argv[2] : "main";
   long want = argc > 3 ? strtol(argv[3], NULL, 10) : 42;
+  /* 可选：断言产物里出现某段文本。类型表的验收靠它——表少一个字节
+   * 就会产出错的 repr，光看返回值看不出来。 */
+  const char *want_text = argc > 4 ? argv[4] : NULL;
   L1Builder *meta_builder = lainir_builder_new();
   L1Builder *out_builder = lainir_builder_new();
   LainMetaHost *host = lainmeta_host_new();
@@ -277,6 +280,13 @@ int main(int argc, char **argv) {
   produced[produced_length] = '\0';
   printf("--- produced LAINIR (%u bytes) ---\n%s", produced_length, produced);
   printf("---\n");
+
+  if (want_text && strstr(produced, want_text) == NULL) {
+    char buffer[192];
+    snprintf(buffer, sizeof(buffer), "produced text lacks `%s`", want_text);
+    report_fail("repr", buffer);
+    goto cleanup;
+  }
 
   lainvm_space_init(&out_space);
   out_tcb = prepare(out_builder, produced, &out_space, &out_image, "produced");
