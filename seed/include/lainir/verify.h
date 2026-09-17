@@ -46,7 +46,9 @@ enum {
   L1V_DUPLICATE_SUBROUTINE = 2022,
   L1V_DUPLICATE_DATA = 2023,
   L1V_BAD_ALLOCA_COUNT = 2024,
-  L1V_SWITCH_UNSUPPORTED = 2025,
+  /* 2025 曾经是「#switch 还不支持」。#switch 现在已经支持了，这个码退休，
+   * 号码不再复用。 */
+  L1V_SWITCH_NO_DEFAULT = 2029,
   /* 宽度上限：一个值就是机器的一个字。>64 位需要多字表示，VM 和 C 后端
    * 都要跟着改；在那之前，规范里就不允许。 */
   L1V_WIDTH_TOO_WIDE = 2026,

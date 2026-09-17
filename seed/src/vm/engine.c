@@ -684,6 +684,41 @@ static LainVmSliceResult op_if(LainVmTcb *tcb, const L1Inst *inst) {
   return push_region(tcb, target, frame->position, NULL, false);
 }
 
+static LainVmSliceResult op_switch(LainVmTcb *tcb, const L1Inst *inst) {
+  const LainVmFrame *frame = ctop(tcb);
+  LainVmImageInstMeta meta =
+      lainvm_image_inst_meta(tcb->image, frame->region, frame->position);
+  L1Value selector = lainvm_operand_read(tcb, inst, 0);
+  uint64_t raw = selector.kind == L1_VALUE_ADDR
+                     ? (uint64_t)(uintptr_t)selector.as.addr
+                     : selector.as.bits;
+  uint32_t width = selector.bit_width ? selector.bit_width : 64u;
+  uint64_t mask;
+  uint32_t target = meta.default_region;
+  uint32_t i;
+
+  /* 选择子的宽度：有类型实参就按它，否则按值自己的宽度。
+   * 两边都掩码，写宽了的常量不会意外匹配窄的选择子。 */
+  if (inst->has_ty && inst->ty)
+    width = inst->ty->kind == TY_ADDR ? 64u : inst->ty->width;
+  mask = width_mask(width);
+
+  if (inst->case_count > 0) {
+    if (meta.case_base == LAINVM_IMAGE_NO_INDEX)
+      return trap_now(tcb, LAINVM_TRAP_STATE, 1042, inst);
+    for (i = 0; i < inst->case_count; i++) {
+      if ((inst->cases[i].value & mask) == (raw & mask)) {
+        target = tcb->image->case_regions[meta.case_base + i];
+        break;
+      }
+    }
+  }
+  /* 验证器要求 default 一定在，所以这里只可能是没验证过的模块。 */
+  if (target == LAINVM_IMAGE_NO_REGION)
+    return trap_now(tcb, LAINVM_TRAP_STATE, 1043, inst);
+  return push_region(tcb, target, frame->position, NULL, false);
+}
+
 static LainVmSliceResult op_loop(LainVmTcb *tcb, const L1Inst *inst) {
   const LainVmFrame *frame = ctop(tcb);
   LainVmImageInstMeta meta =
@@ -906,6 +941,7 @@ static const LainVmOp k_ops[INST_COUNT] = {
     [INST_CALL_INDIRECT] = op_call_indirect,
     [INST_IF] = op_if,
     [INST_LOOP] = op_loop,
+    [INST_SWITCH] = op_switch,
     [INST_YIELD] = op_yield,
     [INST_BREAK] = op_break,
     [INST_CONTINUE] = op_continue,
@@ -988,7 +1024,7 @@ LainVmSliceResult lainvm_op_call(LainVmTcb *t, const L1Inst *i) { return op_call
 LainVmSliceResult lainvm_op_call_indirect(LainVmTcb *t, const L1Inst *i) { return op_call_indirect(t, i); }
 LainVmSliceResult lainvm_op_if(LainVmTcb *t, const L1Inst *i) { return op_if(t, i); }
 LainVmSliceResult lainvm_op_loop(LainVmTcb *t, const L1Inst *i) { return op_loop(t, i); }
-LainVmSliceResult lainvm_op_switch(LainVmTcb *t, const L1Inst *i) { return op_unimplemented(t, i); }
+LainVmSliceResult lainvm_op_switch(LainVmTcb *t, const L1Inst *i) { return op_switch(t, i); }
 LainVmSliceResult lainvm_op_yield(LainVmTcb *t, const L1Inst *i) { return op_yield(t, i); }
 LainVmSliceResult lainvm_op_break(LainVmTcb *t, const L1Inst *i) { return op_break(t, i); }
 LainVmSliceResult lainvm_op_continue(LainVmTcb *t, const L1Inst *i) { return op_continue(t, i); }

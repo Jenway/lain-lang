@@ -628,16 +628,86 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
   case INST_SWITCH: {
     uint32_t a;
     uint32_t b;
+    const L1Type *sel;
+    uint32_t want_results;
+
+    if (inst->operand_count != 1)
+      return fail(v, L1V_BAD_CONDITION, inst->line, inst->column,
+                  "#switch takes one selector");
+    /* 常量选择子没有"值"可以比，那是一次恒真的分派——多半是写错了。 */
+    if (inst->operands[0].kind != OPERAND_VALUE)
+      return fail(v, L1V_BAD_CONDITION, inst->line, inst->column,
+                  "#switch selector must be a value");
+    sel = operand_ty(v, names, region, inst, 0, loops);
+    if (sel && sel->kind == TY_FLOATS)
+      return fail(v, L1V_BAD_CONDITION, inst->line, inst->column,
+                  "#switch selector must not be a float");
+    /* 类型实参是掩码宽度的唯一来源，它必须就是选择子的类型。 */
+    if (!inst->has_ty || !inst->ty)
+      return fail(v, L1V_MISSING_TYPE, inst->line, inst->column,
+                  "#switch needs the selector type");
+    if (sel && !same_type(sel, inst->ty))
+      return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                  "#switch selector has a different type than declared");
+    /* 结果数由分支区域声明；default 缺失时拿第一个 case 当参照
+     * （"缺 default"本身在下面报，先把更具体的错报出来）。 */
+    {
+      const L1Region *declaring = inst->default_case;
+      if (!declaring && inst->case_count > 0) declaring = inst->cases[0].body;
+      want_results = declaring ? declaring->result_count : 0;
+    }
+    if (!check_result_count(v, inst, want_results)) return false;
+
     for (a = 0; a < inst->case_count; a++) {
+      const L1Region *body = inst->cases[a].body;
+      unsigned long long value = (unsigned long long)inst->cases[a].value;
+      if (!body)
+        return fail(v, L1V_BAD_CONDITION, inst->line, inst->column,
+                    "#switch case %llu has no body", value);
+      if (body->result_count != want_results)
+        return fail(v, L1V_BAD_RESULT_COUNT, inst->line, inst->column,
+                    "#switch case %llu yields %u value(s), the default yields %u",
+                    value, body->result_count, want_results);
       for (b = 0; b < a; b++) {
         if (inst->cases[a].value == inst->cases[b].value)
           return fail(v, L1V_DUPLICATE_CASE, inst->line, inst->column,
-                      "#switch case value %llu appears twice",
-                      (unsigned long long)inst->cases[a].value);
+                      "#switch case value %llu appears twice", value);
       }
     }
-    return fail(v, L1V_SWITCH_UNSUPPORTED, inst->line, inst->column,
-                "#switch is not supported yet");
+
+    /* 语义必须显式（core.h 的 L1Inst）：没有 default 的 #switch 是漏写的。
+     * 引擎也因此永远不需要"没匹配上"这条路径。 */
+    if (!inst->default_case)
+      return fail(v, L1V_SWITCH_NO_DEFAULT, inst->line, inst->column,
+                  "#switch needs an explicit default case");
+
+    /* 产出值的区域必须每条路径都交值（和 #if 同一条规则）。 */
+    if (want_results > 0) {
+      for (a = 0; a < inst->case_count; a++) {
+        if (!yields_values(v, inst->cases[a].body, want_results, NULL))
+          return fail(v, L1V_MISSING_YIELD, inst->line, inst->column,
+                      "#switch case %llu produces a value on a path that does not yield",
+                      (unsigned long long)inst->cases[a].value);
+      }
+      if (!yields_values(v, inst->default_case, want_results, NULL))
+        return fail(v, L1V_MISSING_YIELD, inst->line, inst->column,
+                    "#switch default produces a value on a path that does not yield");
+    }
+
+    /* 每个分支当普通区域查：终结子、名字、嵌套都走同一套。 */
+    for (a = 0; a < inst->case_count; a++) {
+      uint32_t saved = v->binding_count;
+      if (!verify_region(v, inst->cases[a].body, names, loops, saved))
+        return false;
+      v->binding_count = saved;
+    }
+    {
+      uint32_t saved = v->binding_count;
+      if (!verify_region(v, inst->default_case, names, loops, saved))
+        return false;
+      v->binding_count = saved;
+    }
+    return true;
   }
 
   case INST_YIELD:
