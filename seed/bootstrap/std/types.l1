@@ -1,91 +1,10 @@
-// 初代标准库 v0 —— 类型表。
+// 初代标准库 v0 —— 通用小工具。
 //
-// 这是「Meta 维护一张类型表」的第一个落点。表是**静态字节**：不需要 init
-// 过程，也没有手算的偏移——条目自描述，Meta 走一遍就能查。
-//
-// 条目格式（变长）：
-//   类型:  [1]名字长度  [L]名字  [1]repr kind  [1]repr width  [1]op 数
-//          [op 条目 × op 数]
-//   op:    [1]符号长度  [S]符号  [1]物理名长度  [P]物理名
-//
-// repr kind 的编号 = LAINIR 的类型构造子：
-//   0 = #bits<N>   1 = #f<N>   2 = #vec<N>   3 = #addr
-//
-// op 条目就是「源码里这个符号 → 发哪条物理算子」。i32 和 u32 的差别
-// 全在这张表里：repr 一样，op 条目不同。
-
-data meta_types ro {
-  // "i32" bits 32，两个 op： "/" -> sdiv、"+" -> add
-  3 105 51 50 0 32 2
-  1 47 4 115 100 105 118
-  1 43 3 97 100 100
-  // "u32" bits 32，同样两个 op，但 "/" 是 udiv —— 差别全在这里
-  3 117 51 50 0 32 2
-  1 47 4 117 100 105 118
-  1 43 3 97 100 100
-  // "i64" bits 64
-  3 105 54 52 0 64 0
-  // "i8" bits 8
-  2 105 56 0 8 0
-  // "u8" bits 8
-  2 117 56 0 8 0
-  // "bool" bits 1
-  4 98 111 111 108 0 1 0
-  // "usize" bits 64
-  5 117 115 105 122 101 0 64 0
-  // "addr" #addr（width 无意义）
-  4 97 100 100 114 3 0 0
-  // 终止符：名字长度 0 不可能是合法条目，走表走到它就停。
-  0
-}
-
-// --- 表遍历 ---------------------------------------------------------------
-
-// 读 base[at] 一个字节，零扩展成 64 位。
-// 单独一个过程是为了摊平嵌套：输入糖只支持一层嵌套。
-#proc meta_byte_at(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %p = #lea(%base, %at, 1, 0)
-  %b = #load[#bits<8>](%p)
-  %w = #zext[#bits<64>](%b)
-  #return %w
-}
-
-// 跳过一条 op 条目，返回下一条的偏移。
-#proc meta_skip_op(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %sym_len = #call meta_byte_at(%base, %at)
-  %after_sym = #add[#bits<64>](%at, #add[#bits<64>](%sym_len, 1))
-  %phys_len = #call meta_byte_at(%base, %after_sym)
-  %end = #add[#bits<64>](%after_sym, #add[#bits<64>](%phys_len, 1))
-  #return %end
-}
-
-// 从 at 起跳过 n 条 op 条目。
-#proc meta_skip_ops(%base: #addr, %at: #bits<64>, %n: #bits<64>) -> #bits<64> {
-  %end = #loop scan(%i: #bits<64> = 0, %cur: #bits<64> = %at) -> (#bits<64>) {
-    %more = #ult[#bits<64>](%i, %n)
-    #if %more {
-      %next = #call meta_skip_op(%base, %cur)
-      %i2 = #add[#bits<64>](%i, 1)
-      #continue scan(%i2, %next)
-    } else {
-      #break scan(%cur)
-    }
-  }
-  #return %end
-}
-
-// 从类型条目 at 的偏移走到下一条类型条目。
-#proc meta_type_next(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %name_len = #call meta_byte_at(%base, %at)
-  %after_name = #add[#bits<64>](%at, #add[#bits<64>](%name_len, 1))
-  %ops_at = #add[#bits<64>](%after_name, 2)
-  %op_count = #call meta_byte_at(%base, %ops_at)
-  %body_at = #add[#bits<64>](%after_name, 3)
-  %end = #call meta_skip_ops(%base, %body_at, %op_count)
-  #return %end
-}
-
-// --- 查名字 ---------------------------------------------------------------
+// 类型表**已经不在这里了**。标量曾经是一段手打的静态字节（`data meta_types`），
+// 加一个类型要改字节、错一个字节就产出错的 repr；现在标量是**声明**
+// （`scalar i32 = bits<32> { "/" = sdiv "+" = add }`），住在源文件里，由
+// `std/scalars.l1` 按名字扫。这个文件只剩下跟「哪来的」无关的三样东西：
+// 字节比较、暂存区单元、repr 的字节数与对齐。
 
 // 两个字节串相等？长度也要相等。
 #proc meta_bytes_equal(%a: #addr, %b: #addr, %n: #bits<64>) -> #bits<1> {
@@ -108,139 +27,20 @@ data meta_types ro {
   #return %same
 }
 
-// 查类型条目，返回它在表里的偏移；找不到返回 0xFFFFFFFFFFFFFFFF。
-// 表以「名字长度 0」终止，所以不需要总长度。
-#proc meta_type_find(%base: #addr, %name: #addr,
-                     %name_len: #bits<64>) -> #bits<64> {
-  %found = #loop scan(%at: #bits<64> = 0) -> (#bits<64>) {
-    // 越界护栏：表坏了（条目少一个字节之类）应当是「找不到」，
-    // 而不是拿一个野地址去 load。4096 是安全上限，不是表的大小。
-    %oob = #uge[#bits<64>](%at, 4096)
-    #if %oob {
-      #break scan(0xFFFFFFFFFFFFFFFF)
-    }
-    %entry_len = #call meta_byte_at(%base, %at)
-    %at_end = #eq[#bits<64>](%entry_len, 0)
-    #if %at_end {
-      #break scan(0xFFFFFFFFFFFFFFFF)
-    }
-    %len_ok = #eq[#bits<64>](%entry_len, %name_len)
-    %hit = #if %len_ok -> (#bits<1>) {
-      %name_at = #lea(%base, #add[#bits<64>](%at, 1), 1, 0)
-      %same = #call meta_bytes_equal(%name_at, %name, %name_len)
-      #yield %same
-    } else {
-      #yield 0
-    }
-    #if %hit {
-      #break scan(%at)
-    }
-    %next = #call meta_type_next(%base, %at)
-    #continue scan(%next)
-  }
-  #return %found
-}
-
-// --- 读字段（at 是 meta_type_find 给的偏移）--------------------------------
-
-// repr kind：0=bits 1=f 2=vec 3=addr
-#proc meta_type_kind(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %name_len = #call meta_byte_at(%base, %at)
-  %after_name = #add[#bits<64>](%at, #add[#bits<64>](%name_len, 1))
-  %kind = #call meta_byte_at(%base, %after_name)
-  #return %kind
-}
-
-// repr width
-#proc meta_type_width(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %name_len = #call meta_byte_at(%base, %at)
-  %after_name = #add[#bits<64>](%at, #add[#bits<64>](%name_len, 1))
-  %width_at = #add[#bits<64>](%after_name, 1)
-  %width = #call meta_byte_at(%base, %width_at)
-  #return %width
-}
-
-#proc meta_type_name_len(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %len = #call meta_byte_at(%base, %at)
-  #return %len
-}
-
-// 打包一个类型条目的 (kind, width)：kind 在低 8 位，width 在 8..15 位。
-// 过程只能回一个值，所以这里打包。
-#proc meta_type_info(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %kind = #call meta_type_kind(%base, %at)
-  %width = #call meta_type_width(%base, %at)
-  %shifted = #shl[#bits<64>](%width, 8)
-  %packed = #or[#bits<64>](%kind, %shifted)
-  #return %packed
-}
-
-// --- op 表 ---------------------------------------------------------------
+// --- 暂存区单元 -----------------------------------------------------------
 //
-// 每个类型自带一组 op：源码里的符号 → 要发的物理算子名。
-// i32 和 u32 的差别就在这里，Meta 里没有一行写着「如果是 i32」。
+// 过程只能回一个值，而解析常常要多回几个（比如「标量在哪份源码的哪个位置」）。
+// 这些中间结果写进暂存区，调用方按固定的分段读回来。分段表见
+// `std/modules.l1` 的头注释。
 
-#proc meta_ops_at(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %name_len = #call meta_byte_at(%base, %at)
-  %after_name = #add[#bits<64>](%at, #add[#bits<64>](%name_len, 1))
-  %ops = #add[#bits<64>](%after_name, 3)
-  #return %ops
+#proc meta_cell_put(%cell: #addr, %v: #bits<64>) -> #bits<32> {
+  #store[#bits<64>](%v, %cell)
+  #return 0
 }
 
-#proc meta_ops_count(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %name_len = #call meta_byte_at(%base, %at)
-  %after_name = #add[#bits<64>](%at, #add[#bits<64>](%name_len, 1))
-  %count_at = #add[#bits<64>](%after_name, 2)
-  %n = #call meta_byte_at(%base, %count_at)
-  #return %n
-}
-
-// 在类型 at 的 op 区里按符号查，返回 op 条目的绝对偏移；找不到返回 NOT_FOUND。
-#proc meta_op_find(%base: #addr, %at: #bits<64>, %sym: #addr,
-                   %sym_len: #bits<64>) -> #bits<64> {
-  %ops = #call meta_ops_at(%base, %at)
-  %n = #call meta_ops_count(%base, %at)
-  %found = #loop scan(%i: #bits<64> = 0,
-                      %cur: #bits<64> = %ops) -> (#bits<64>) {
-    %more = #ult[#bits<64>](%i, %n)
-    #if %more {
-      %slen = #call meta_byte_at(%base, %cur)
-      %slen_ok = #eq[#bits<64>](%slen, %sym_len)
-      %hit = #if %slen_ok -> (#bits<1>) {
-        %sat = #add[#bits<64>](%cur, 1)
-        %saddr = #lea(%base, %sat, 1, 0)
-        %same = #call meta_bytes_equal(%saddr, %sym, %sym_len)
-        #yield %same
-      } else {
-        #yield 0
-      }
-      #if %hit {
-        #break scan(%cur)
-      }
-      %next = #call meta_skip_op(%base, %cur)
-      %i2 = #add[#bits<64>](%i, 1)
-      #continue scan(%i2, %next)
-    } else {
-      #break scan(0xFFFFFFFFFFFFFFFF)
-    }
-  }
-  #return %found
-}
-
-// op 条目里的物理名
-#proc meta_op_phys_at(%base: #addr, %at: #bits<64>) -> #addr {
-  %slen = #call meta_byte_at(%base, %at)
-  %after = #add[#bits<64>](%at, #add[#bits<64>](%slen, 1))
-  %at2 = #add[#bits<64>](%after, 1)
-  %p = #lea(%base, %at2, 1, 0)
-  #return %p
-}
-
-#proc meta_op_phys_len(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %slen = #call meta_byte_at(%base, %at)
-  %after = #add[#bits<64>](%at, #add[#bits<64>](%slen, 1))
-  %n = #call meta_byte_at(%base, %after)
-  #return %n
+#proc meta_cell_get(%cell: #addr) -> #bits<64> {
+  %v = #load[#bits<64>](%cell)
+  #return %v
 }
 
 // --- repr 的字节数与对齐 ---------------------------------------------------

@@ -1,0 +1,350 @@
+// 初代标准库 v0 —— 标量声明、类型名解析、算子解析。
+//
+// 标量**不是表**，是声明：
+//
+//   scalar i32 = bits<32> { "/" = sdiv "+" = add }
+//
+// repr 的四种写法对应 LAINIR 的四个类型构造子：
+//
+//   bits<N>  0    f<N>  1    vec<N>  2    addr  3
+//
+// 解析规则：
+//   - 不带点的名字（`i32`）→ **root 环境**，也就是逻辑路径 `std::prelude`
+//     指向的那份源码。旧塔的正式语言里 `i64` 也是不带点的，所以保留这个形状。
+//   - 带点的名字（`T.i32`）→ `T` 必须是本条源码里的 import 绑定，成员在
+//     被 import 的那份源码里找。
+//   - 用户源码自己声明的 `scalar` **不参与解析**（v0）：只有 prelude 和被
+//     import 的模块。这样「写了个不会被看到的声明」不会静默生效，而是报 14。
+//
+// 和 struct/enum 一样，这里是**回源码里扫声明**，不建编译期类型表。
+
+data meta_kw_scalar ro { 115 99 97 108 97 114 }        // "scalar"       6
+data meta_kw_bits ro { 98 105 116 115 }                // "bits"         4
+data meta_kw_f ro { 102 }                              // "f"            1
+data meta_kw_vec ro { 118 101 99 }                     // "vec"          3
+data meta_kw_addr ro { 97 100 100 114 }                // "addr"         4
+data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } // "std::prelude" 12
+
+// 暂存区分段（本文件用的部分，全部是 bits<64>——地址不进单元，只存源码下标，
+// 用的时候再拿下标去问宿主，省掉 addr ↔ bits 的转换）：
+//   +16  命中的标量所在**源码下标**
+//   +24  op 物理名的位置        +32  它的长度
+//   +40  那份源码的长度          +48  标量的 repr 位置
+
+// --- 词法小工具 -----------------------------------------------------------
+
+// base[lo..hi) 是不是关键字 kw？
+#proc meta_word_is(%base: #addr, %lo: #bits<64>, %hi: #bits<64>,
+                    %kw: #addr, %kw_len: #bits<64>) -> #bits<1> {
+  %have = #sub[#bits<64>](%hi, %lo)
+  %ok = #eq[#bits<64>](%have, %kw_len)
+  %r = #if %ok -> (#bits<1>) {
+    %p = #lea(%base, %lo, 1, 0)
+    %same = #call meta_bytes_equal(%p, %kw, %kw_len)
+    #yield %same
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+// 在 [lo, hi) 里找 `.`，返回它的下标；找不到 NOT_FOUND。
+#proc meta_find_dot(%base: #addr, %lo: #bits<64>,
+                    %hi: #bits<64>) -> #bits<64> {
+  %found = #loop scan(%i: #bits<64> = %lo) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %hi)
+    #if %more {
+      %is = #call bs_is_byte(%base, %i, 46)
+      #if %is {
+        #break scan(%i)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    } else {
+      #break scan(0xFFFFFFFFFFFFFFFF)
+    }
+  }
+  #return %found
+}
+
+// --- repr -----------------------------------------------------------------
+
+// 读 `<repr>`（`bits<32>` / `f<64>` / `vec<4>` / `addr`），返回打包的
+// (kind, width)：kind 低 8 位、width 8..15 位。形状不对返回 NOT_FOUND。
+#proc meta_repr_at(%base: #addr, %at: #bits<64>,
+                    %len: #bits<64>) -> #bits<64> {
+  %lo = #call bs_skip_space(%base, %at, %len)
+  %hi = #call bs_skip_ident(%base, %lo, %len)
+  %kw_bits = #data_addr meta_kw_bits
+  %kw_f = #data_addr meta_kw_f
+  %kw_vec = #data_addr meta_kw_vec
+  %kw_addr = #data_addr meta_kw_addr
+  %is_bits = #call meta_word_is(%base, %lo, %hi, %kw_bits, 4)
+  %is_f = #call meta_word_is(%base, %lo, %hi, %kw_f, 1)
+  %is_vec = #call meta_word_is(%base, %lo, %hi, %kw_vec, 3)
+  %is_addr = #call meta_word_is(%base, %lo, %hi, %kw_addr, 4)
+  %r = #if %is_addr -> (#bits<64>) {
+    // #addr 没有宽度参数
+    #yield 3
+  } else {
+    %parametric = #or[#bits<1>](%is_bits, %is_vec)
+    %any = #or[#bits<1>](%parametric, %is_f)
+    %w = #if %any -> (#bits<64>) {
+      // `<N>`：宽度是一个括号里的十进制数
+      %lt = #call bs_skip_space(%base, %hi, %len)
+      %is_lt = #call bs_is_byte(%base, %lt, 60)
+      %inner = #if %is_lt -> (#bits<64>) {
+        %one = #add[#bits<64>](%lt, 1)
+        %wlo = #call bs_skip_space(%base, %one, %len)
+        %n = #call bs_read_uint(%base, %wlo, %len)
+        #yield %n
+      } else {
+        #yield 0
+      }
+      %kind = #if %is_bits -> (#bits<64>) {
+        #yield 0
+      } else {
+        %k = #if %is_f -> (#bits<64>) {
+          #yield 1
+        } else {
+          #yield 2
+        }
+        #yield %k
+      }
+      %packed = #or[#bits<64>](%kind, #shl[#bits<64>](%inner, 8))
+      #yield %packed
+    } else {
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    #yield %w
+  }
+  #return %r
+}
+
+// --- 找声明 ---------------------------------------------------------------
+
+// 在 base 里找 `scalar <name> =`，返回 repr 的下标；找不到 NOT_FOUND。
+#proc meta_find_scalar(%base: #addr, %len: #bits<64>, %name: #addr,
+                        %name_len: #bits<64>) -> #bits<64> {
+  %kw = #data_addr meta_kw_scalar
+  %found = #loop s(%at: #bits<64> = 0) -> (#bits<64>) {
+    %kw_at = #call meta_find_keyword(%base, %len, %kw, 6, %at)
+    %none = #eq[#bits<64>](%kw_at, 0xFFFFFFFFFFFFFFFF)
+    #if %none {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+    %after = #add[#bits<64>](%kw_at, 6)
+    %n_lo = #call bs_skip_space(%base, %after, %len)
+    %n_hi = #call bs_skip_ident(%base, %n_lo, %len)
+    %have = #sub[#bits<64>](%n_hi, %n_lo)
+    %same_len = #eq[#bits<64>](%have, %name_len)
+    %same = #if %same_len -> (#bits<1>) {
+      %p = #lea(%base, %n_lo, 1, 0)
+      %eq = #call meta_bytes_equal(%p, %name, %name_len)
+      #yield %eq
+    } else {
+      #yield 0
+    }
+    #if %same {
+      %eq_at = #call bs_skip_space(%base, %n_hi, %len)
+      %one = #add[#bits<64>](%eq_at, 1)
+      #break s(%one)
+    }
+    %next = #add[#bits<64>](%kw_at, 6)
+    #continue s(%next)
+  }
+  #return %found
+}
+
+// 标量声明里 `{` 的下标（op 表起点之后一格）。`at` 是 repr 的下标。
+#proc meta_scalar_ops_at(%base: #addr, %at: #bits<64>,
+                          %len: #bits<64>) -> #bits<64> {
+  %lo = #call bs_skip_space(%base, %at, %len)
+  %hi = #call bs_skip_ident(%base, %lo, %len)
+  %lt = #call bs_skip_space(%base, %hi, %len)
+  %is_lt = #call bs_is_byte(%base, %lt, 60)
+  %after = #if %is_lt -> (#bits<64>) {
+    // 跳过 `<N>`：找 `>` 之后接着找 `{`
+    %one = #add[#bits<64>](%lt, 1)
+    %gt = #loop scan(%i: #bits<64> = %one) -> (#bits<64>) {
+      %is = #call bs_is_byte(%base, %i, 62)
+      #if %is {
+        #break scan(%i)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    }
+    %one2 = #add[#bits<64>](%gt, 1)
+    #yield %one2
+  } else {
+    #yield %hi
+  }
+  %brace = #loop scan(%i: #bits<64> = %after) -> (#bits<64>) {
+    %is = #call bs_is_byte(%base, %i, 123)
+    #if %is {
+      #break scan(%i)
+    }
+    %i2 = #add[#bits<64>](%i, 1)
+    #continue scan(%i2)
+  }
+  %one3 = #add[#bits<64>](%brace, 1)
+  #return %one3
+}
+
+// 在标量的 op 表里查符号 `"<sym>"`，返回物理名的下标；查不到 NOT_FOUND。
+#proc meta_scalar_op(%base: #addr, %at: #bits<64>, %len: #bits<64>,
+                      %sym: #addr, %sym_len: #bits<64>) -> #bits<64> {
+  %ops = #call meta_scalar_ops_at(%base, %at, %len)
+  %found = #loop s(%cur: #bits<64> = %ops) -> (#bits<64>) {
+    %here = #call bs_skip_space(%base, %cur, %len)
+    %byte = #call bs_byte_at(%base, %here, %len)
+    %close = #eq[#bits<8>](%byte, 125)
+    #if %close {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+    %quote = #eq[#bits<8>](%byte, 34)
+    %bad = #eq[#bits<1>](%quote, 0)
+    #if %bad {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+    %s_lo = #add[#bits<64>](%here, 1)
+    %s_hi = #loop scan(%i: #bits<64> = %s_lo) -> (#bits<64>) {
+      %is = #call bs_is_byte(%base, %i, 34)
+      #if %is {
+        #break scan(%i)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    }
+    %have = #sub[#bits<64>](%s_hi, %s_lo)
+    %same_len = #eq[#bits<64>](%have, %sym_len)
+    %same = #if %same_len -> (#bits<1>) {
+      %p = #lea(%base, %s_lo, 1, 0)
+      %eq = #call meta_bytes_equal(%p, %sym, %sym_len)
+      #yield %eq
+    } else {
+      #yield 0
+    }
+    // 不管中不中，都要把整条 `"sym" = phys` 走完再进下一轮——只跳过收尾引号
+    // 的话下一轮会落在 `=` 上，直接判成「表坏了」。
+    %after_sym = #add[#bits<64>](%s_hi, 1)
+    %eq_at = #call bs_skip_space(%base, %after_sym, %len)
+    %one = #add[#bits<64>](%eq_at, 1)
+    %phys = #call bs_skip_space(%base, %one, %len)
+    %phys_hi = #call bs_skip_ident(%base, %phys, %len)
+    #if %same {
+      #break s(%phys)
+    }
+    #continue s(%phys_hi)
+  }
+  #return %found
+}
+
+// --- 类型名解析 ------------------------------------------------------------
+
+// 把名字解析到「哪份源码（下标）的哪个位置」，写进暂存区 +16 / +40 / +48。
+// 返回 0 = 成功，NOT_FOUND = 没有这个名字。
+#proc meta_select_scalar(%host: #addr, %base: #addr, %len: #bits<64>,
+                         %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %dot = #call meta_find_dot(%base, %t_lo, %t_hi)
+  %is_qualified = #ne[#bits<64>](%dot, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %is_qualified -> (#bits<64>) {
+    // `T.i32`：T 必须是本条源码里的 import 绑定
+    %lp = #call meta_find_import_binding(%base, %len, %t_lo, %dot)
+    %nons = #eq[#bits<64>](%lp, 0)
+    %v = #if %nons -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %n = #call meta_logical_len(%base, %lp, %len)
+      %path = #lea(%base, %lp, 1, 0)
+      %idx = #call meta_source_find(%host, %path, %n)
+      %miss = #eq[#bits<64>](%idx, 0xFFFFFFFFFFFFFFFF)
+      %w = #if %miss -> (#bits<64>) {
+        #yield 0xFFFFFFFFFFFFFFFF
+      } else {
+        %m_base = #call lain_meta_source_data(%host, %idx)
+        %m_len = #call lain_meta_source_length(%host, %idx)
+        %m_lo = #add[#bits<64>](%dot, 1)
+        %m_hi = #call bs_skip_ident(%base, %m_lo, %len)
+        %member = #lea(%base, %m_lo, 1, 0)
+        %member_len = #sub[#bits<64>](%m_hi, %m_lo)
+        %pos = #call meta_find_scalar(%m_base, %m_len, %member, %member_len)
+        %s1 = #call meta_cell_put(#lea(%scratch, 16, 1, 0), %idx)
+        %s2 = #call meta_cell_put(#lea(%scratch, 40, 1, 0), %m_len)
+        %s3 = #call meta_cell_put(#lea(%scratch, 48, 1, 0), %pos)
+        #yield %pos
+      }
+      #yield %w
+    }
+    #yield %v
+  } else {
+    // 不带点：root 环境 = 逻辑路径 `std::prelude` 那份源码
+    %kw = #data_addr meta_logical_prelude
+    %idx = #call meta_source_find(%host, %kw, 12)
+    %miss = #eq[#bits<64>](%idx, 0xFFFFFFFFFFFFFFFF)
+    %w = #if %miss -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %p_base = #call lain_meta_source_data(%host, %idx)
+      %p_len = #call lain_meta_source_length(%host, %idx)
+      %name = #lea(%base, %t_lo, 1, 0)
+      %name_len = #sub[#bits<64>](%t_hi, %t_lo)
+      %pos = #call meta_find_scalar(%p_base, %p_len, %name, %name_len)
+      %s1 = #call meta_cell_put(#lea(%scratch, 16, 1, 0), %idx)
+      %s2 = #call meta_cell_put(#lea(%scratch, 40, 1, 0), %p_len)
+      %s3 = #call meta_cell_put(#lea(%scratch, 48, 1, 0), %pos)
+      #yield %pos
+    }
+    #yield %w
+  }
+  #return %r
+}
+
+// 类型名 → 打包的 (kind, width)；没有这个名字返回 NOT_FOUND。
+#proc meta_type_resolve(%host: #addr, %base: #addr, %len: #bits<64>,
+                        %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<64> {
+  %pos = #call meta_select_scalar(%host, %base, %len, %t_lo, %t_hi)
+  %miss = #eq[#bits<64>](%pos, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %miss -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %scratch = #call lain_meta_scratch_data(%host)
+    %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
+    %m_len = #call meta_cell_get(#lea(%scratch, 40, 1, 0))
+    %m_base = #call lain_meta_source_data(%host, %idx)
+    %info = #call meta_repr_at(%m_base, %pos, %m_len)
+    #yield %info
+  }
+  #return %r
+}
+
+// 类型名 + 算子符号 → 物理算子名。物理名的**源码下标/位置/长度**写进暂存区
+// +16 / +24 / +32。返回 0 = 成功，NOT_FOUND = 这个名字或这个符号没有。
+#proc meta_op_resolve(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %t_lo: #bits<64>, %t_hi: #bits<64>, %sym: #addr,
+                       %sym_len: #bits<64>) -> #bits<64> {
+  %pos = #call meta_select_scalar(%host, %base, %len, %t_lo, %t_hi)
+  %miss = #eq[#bits<64>](%pos, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %miss -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %scratch = #call lain_meta_scratch_data(%host)
+    %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
+    %m_len = #call meta_cell_get(#lea(%scratch, 40, 1, 0))
+    %m_base = #call lain_meta_source_data(%host, %idx)
+    %phys = #call meta_scalar_op(%m_base, %pos, %m_len, %sym, %sym_len)
+    %gone = #eq[#bits<64>](%phys, 0xFFFFFFFFFFFFFFFF)
+    %w = #if %gone -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %p_hi = #call bs_skip_ident(%m_base, %phys, %m_len)
+      %p_len = #sub[#bits<64>](%p_hi, %phys)
+      %s1 = #call meta_cell_put(#lea(%scratch, 24, 1, 0), %phys)
+      %s2 = #call meta_cell_put(#lea(%scratch, 32, 1, 0), %p_len)
+      #yield 0
+    }
+    #yield %w
+  }
+  #return %r
+}
