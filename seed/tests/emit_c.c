@@ -33,7 +33,8 @@ enum {
   SUB_HOST_REFUSED = 15,
   SUB_HOST_MISSING = 16,
   SUB_HOST_MISSING_CALLER = 17,
-  SUB_COUNT = 18
+  SUB_CLASSIFY = 18,
+  SUB_COUNT = 19
 };
 
 static FILE *g_out;
@@ -372,6 +373,41 @@ int main(void) {
     nsubs++;
   }
 
+  /* --- classify(x)：#switch 也要和编译产物对拍 --- */
+  {
+    L1Param params[1];
+    L1Operand sel[1], ret[1];
+    const L1Inst *insts[2], *arm_i[1];
+    const L1Type *rtypes[1];
+    const L1Region *arm0, *arm1, *dflt;
+    L1SwitchCase sw_cases[2];
+
+    params[0] = lainir_proc_param("%x", u64);
+    rtypes[0] = u64;
+
+    arm_i[0] = lainir_inst(b, INST_YIELD, NULL, NULL,
+                           (L1Operand[]){lainir_int(100)}, 1);
+    arm0 = lainir_region(b, NULL, 0, rtypes, 1, arm_i, 1);
+    arm_i[0] = lainir_inst(b, INST_YIELD, NULL, NULL,
+                           (L1Operand[]){lainir_int(200)}, 1);
+    arm1 = lainir_region(b, NULL, 0, rtypes, 1, arm_i, 1);
+    arm_i[0] = lainir_inst(b, INST_YIELD, NULL, NULL,
+                           (L1Operand[]){lainir_int(999)}, 1);
+    dflt = lainir_region(b, NULL, 0, rtypes, 1, arm_i, 1);
+
+    sw_cases[0].value = 0;
+    sw_cases[0].body = arm0;
+    sw_cases[1].value = 1;
+    sw_cases[1].body = arm1;
+    sel[0] = lainir_ref("%x");
+    insts[0] = lainir_inst_switch(b, "%r", sel[0], u64, sw_cases, 2, dflt);
+    ret[0] = lainir_ref("%r");
+    insts[1] = lainir_inst(b, INST_RETURN, NULL, NULL, ret, 1);
+    subs[nsubs] = *lainir_subroutine(b, "classify", params, 1, rtypes, 1,
+                                     lainir_region(b, NULL, 0, NULL, 0, insts, 2));
+    nsubs++;
+  }
+
   data[0] = *lainir_data(b, "bytes", bytes, 3, false);
   /* --- 装载 + 跑 --- */
   lainvm_space_init(&space);
@@ -451,7 +487,7 @@ int main(void) {
   }
 
   {
-    Case cases[16];
+    Case cases[24];
     uint32_t count = 0;
     uint32_t i;
     cases[count].name = "answer"; cases[count].sub = SUB_ANSWER; cases[count].nargs = 0; count++;
@@ -474,6 +510,12 @@ int main(void) {
     cases[count].name = "host_caller(5)"; cases[count].sub = SUB_HOST_CALLER; cases[count].nargs = 1;
     cases[count].args[0] = 5; count++;
     cases[count].name = "host_sum()"; cases[count].sub = SUB_HOST_SUM; cases[count].nargs = 0; count++;
+    cases[count].name = "classify(0)"; cases[count].sub = SUB_CLASSIFY; cases[count].nargs = 1;
+    cases[count].args[0] = 0; count++;
+    cases[count].name = "classify(1)"; cases[count].sub = SUB_CLASSIFY; cases[count].nargs = 1;
+    cases[count].args[0] = 1; count++;
+    cases[count].name = "classify(9)"; cases[count].sub = SUB_CLASSIFY; cases[count].nargs = 1;
+    cases[count].args[0] = 9; count++;
 
     printf("# VM\n");
     for (i = 0; i < count; i++) {

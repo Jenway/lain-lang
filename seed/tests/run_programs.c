@@ -247,6 +247,30 @@ int main(void) {
     expect_bits(tcb, "count_up", args, 1, 10, "loop-carry");
   }
 
+  /* --- #switch --- */
+  {
+    L1Value args[1];
+    memset(args, 0, sizeof(args));
+    args[0] = (L1Value){L1_VALUE_BITS, 64, {.bits = 0}};
+    expect_bits(tcb, "classify", args, 1, 100, "switch=0");
+    args[0].as.bits = 1;
+    expect_bits(tcb, "classify", args, 1, 200, "switch=1");
+    args[0].as.bits = 5;
+    expect_bits(tcb, "classify", args, 1, 999, "switch=default");
+    args[0].as.bits = 7;
+    expect_bits(tcb, "route", args, 1, 11, "switch-void=7");
+    args[0].as.bits = 8;
+    expect_bits(tcb, "route", args, 1, 33, "switch-void=default");
+    {
+      L1Value narrow_args[1];
+      memset(narrow_args, 0, sizeof(narrow_args));
+      narrow_args[0] = (L1Value){L1_VALUE_BITS, 8, {.bits = 255}};
+      expect_bits(tcb, "narrow", narrow_args, 1, 2, "switch=255");
+      narrow_args[0].as.bits = 4;
+      expect_bits(tcb, "narrow", narrow_args, 1, 3, "switch-narrow=default");
+    }
+  }
+
   printf("---\n");
   printf("%s\n", failures == 0 ? "ALL PASS" : "FAILURES");
 

@@ -150,11 +150,15 @@ static void measure_regions(LainBackend *be, const L1Region *region,
   be->next_slot += region->param_count;
   for (pos = 0; pos < region->inst_count; pos++) {
     const L1Inst *inst = &region->insts[pos];
+    uint32_t k;
     be->next_slot += inst->result_count;
     if (inst->kind != INST_LOOP)
       measure_regions(be, inst->else_body, depth + 1);
     measure_regions(be, inst->body, depth + 1);
     measure_regions(be, inst->default_case, depth + 1);
+    /* #switch 的分支体也要算：漏了它们，槽位就会和别的区域重叠。 */
+    for (k = 0; k < inst->case_count; k++)
+      measure_regions(be, inst->cases[k].body, depth + 1);
   }
 }
 
@@ -242,9 +246,13 @@ static void assign_regions(LainBackend *be, const L1Region *region,
   }
   for (pos = 0; pos < region->inst_count; pos++) {
     const L1Inst *inst = &region->insts[pos];
+    uint32_t k;
     if (inst->kind != INST_LOOP) assign_regions(be, inst->else_body, region);
     assign_regions(be, inst->body, region);
     assign_regions(be, inst->default_case, region);
+    /* 和 measure_regions 必须逐项对上：#switch 的分支体也占槽。 */
+    for (k = 0; k < inst->case_count; k++)
+      assign_regions(be, inst->cases[k].body, region);
   }
 }
 
@@ -949,9 +957,37 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
   case INST_LOOP:
     emit_loop(be, inst, region, position, loops);
     return;
-  case INST_SWITCH:
-    fail(be, 9218, "cbackend: #switch is not implemented yet");
+  case INST_SWITCH: {
+    char sel[192];
+    uint32_t k;
+    uint32_t width = (inst->has_ty && inst->ty) ? width_of_type(inst->ty) : 64u;
+    uint64_t mask = width >= 64u ? ~(uint64_t)0
+                                 : ((((uint64_t)1u) << width) - 1u);
+    /* 选择子和 case 常量都掩到同一个宽度：和引擎逐字对齐，
+     * 否则写宽了的常量在两边会有不同的匹配行为。 */
+    operand_masked(be, region, inst, 0, width, sel, sizeof(sel));
+    emitf(be, "switch (%s) {\n", sel);
+    for (k = 0; k < inst->case_count; k++) {
+      emit_indent(be);
+      emitf(be, "case %llu: {\n",
+            (unsigned long long)(inst->cases[k].value & mask));
+      be->indent++;
+      emit_region(be, inst->cases[k].body, region, position, loops);
+      be->indent--;
+      emit_indent(be);
+      emit_text(be, "} break;\n");
+    }
+    emit_indent(be);
+    emit_text(be, "default: {\n");
+    be->indent++;
+    emit_region(be, inst->default_case, region, position, loops);
+    be->indent--;
+    emit_indent(be);
+    emit_text(be, "} break;\n");
+    emit_indent(be);
+    emit_text(be, "}\n");
     return;
+  }
 
   case INST_YIELD:
     if (!parent) {
@@ -1193,6 +1229,7 @@ static bool check_no_eval(LainBackend *be) {
       uint32_t pos;
       for (pos = 0; pos < region->inst_count; pos++) {
         const L1Inst *inst = &region->insts[pos];
+        uint32_t k;
         if (inst->is_eval) {
           fail(be, 9225, "cbackend: #eval must be folded away before codegen");
           return false;
@@ -1200,6 +1237,10 @@ static bool check_no_eval(LainBackend *be) {
         if (!push_work(be, &depth, inst->body)) return false;
         if (!push_work(be, &depth, inst->else_body)) return false;
         if (!push_work(be, &depth, inst->default_case)) return false;
+        /* 分支体也要查：不然深埋在 case 里的 #eval 会被漏掉。 */
+        for (k = 0; k < inst->case_count; k++) {
+          if (!push_work(be, &depth, inst->cases[k].body)) return false;
+        }
       }
     }
   }
