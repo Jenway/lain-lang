@@ -35,15 +35,160 @@
 
 #proc meta_lower_source(%host: #addr, %base: #addr, %len: #bits<64>) -> #bits<32> {
   %at = #call bs_skip_space(%base, 0, %len)
+  %kw = #data_addr meta_kw_struct
+  %is_struct = #call bs_match_keyword(%base, %at, %len, %kw, 6)
   %is_let = #call bs_match_let(%base, %at, %len)
-  %status = #if %is_let -> (#bits<32>) {
-    %s = #call meta_lower_let(%host, %base, %len, %at)
+  %status = #if %is_struct -> (#bits<32>) {
+    %s = #call meta_lower_struct(%host, %base, %len, %at)
     #yield %s
+  } else {
+    %s2 = #if %is_let -> (#bits<32>) {
+      %s3 = #call meta_lower_let(%host, %base, %len, %at)
+      #yield %s3
+    } else {
+      %f = #call lain_meta_fail(%host, 4)
+      #yield 4
+    }
+    #yield %s2
+  }
+  #return %status
+}
+
+// --- 积类型 ---------------------------------------------------------------
+//
+// `struct Rec { f: T ... }` 只产出两个东西：每个字段的字节偏移，和总大小。
+// 偏移是**算出来的**（逐个 align_up 累加），不是查表查来的——这正是积类型
+// 和标量的区别所在。
+//
+// v0 假设输入是良构的：字段名后面一定有 `:` 和类型名。写坏了会产出错的
+// 偏移，而产物过不了验证——失败是响的，只是诊断不好看。
+
+#proc meta_lower_struct(%host: #addr, %base: #addr, %len: #bits<64>,
+                        %kw_at: #bits<64>) -> #bits<32> {
+  %after = #add[#bits<64>](%kw_at, 6)
+  %name_lo = #call bs_skip_space(%base, %after, %len)
+  %name_hi = #call bs_skip_ident(%base, %name_lo, %len)
+  %has_name = #ult[#bits<64>](%name_lo, %name_hi)
+  %status = #if %has_name -> (#bits<32>) {
+    %brace = #call bs_skip_space(%base, %name_hi, %len)
+    %is_open = #call bs_is_byte(%base, %brace, 123)
+    %inner = #if %is_open -> (#bits<32>) {
+      %body = #add[#bits<64>](%brace, 1)
+      %size = #call meta_struct_fields(%host, %base, %len, %name_lo, %name_hi,
+                                       %body, 0, 1)
+      %w = #call meta_emit_size(%host, %base, %name_lo, %name_hi, %size)
+      %ok = #eq[#bits<64>](%size, 0xFFFFFFFFFFFFFFFF)
+      %s = #if %ok -> (#bits<32>) {
+        %f2 = #call lain_meta_fail(%host, 7)
+        #yield 7
+      } else {
+        #yield 0
+      }
+      #yield %s
+    } else {
+      %f = #call lain_meta_fail(%host, 4)
+      #yield 4
+    }
+    #yield %inner
   } else {
     %f = #call lain_meta_fail(%host, 4)
     #yield 4
   }
   #return %status
+}
+
+// 走字段列表，每个字段发一个 offset 过程。返回总大小；出错返回 NOT_FOUND。
+// 循环携带 (下一个位置, 当前偏移, 当前最大对齐)。
+#proc meta_struct_fields(%host: #addr, %base: #addr, %len: #bits<64>,
+                        %rec_lo: #bits<64>, %rec_hi: #bits<64>,
+                        %at: #bits<64>, %off: #bits<64>,
+                        %max_align: #bits<64>) -> #bits<64> {
+  %size = #loop fields(%at: #bits<64> = %at, %off: #bits<64> = %off,
+                       %al: #bits<64> = %max_align) -> (#bits<64>) {
+    %here = #call bs_skip_space(%base, %at, %len)
+    %byte = #call bs_byte_at(%base, %here, %len)
+    %is_close = #eq[#bits<8>](%byte, 125)
+    #if %is_close {
+      %rounded = #call bs_align_up(%off, %al)
+      #break fields(%rounded)
+    }
+    // 字段名 : 类型名
+    %f_hi = #call bs_skip_ident(%base, %here, %len)
+    %colon = #call bs_skip_space(%base, %f_hi, %len)
+    %one = #add[#bits<64>](%colon, 1)
+    %t_lo = #call bs_skip_space(%base, %one, %len)
+    %t_hi = #call bs_skip_ident(%base, %t_lo, %len)
+    // 查字段类型的大小与对齐
+    %tbl = #data_addr meta_types
+    %tname = #lea(%base, %t_lo, 1, 0)
+    %tlen = #sub[#bits<64>](%t_hi, %t_lo)
+    %entry = #call meta_type_find(%tbl, %tname, %tlen)
+    %kind = #call meta_type_kind(%tbl, %entry)
+    %width = #call meta_type_width(%tbl, %entry)
+    %fsize = #call bs_repr_size(%kind, %width)
+    %falign = #call bs_repr_align(%kind, %width)
+    %aligned = #call bs_align_up(%off, %falign)
+    %emit = #call meta_emit_field_offset(%host, %base, %len, %rec_lo, %rec_hi,
+                                         %here, %f_hi, %aligned)
+    %next_off = #add[#bits<64>](%aligned, %fsize)
+    %bigger = #ugt[#bits<64>](%falign, %al)
+    %new_al = #if %bigger -> (#bits<64>) {
+      #yield %falign
+    } else {
+      #yield %al
+    }
+    #continue fields(%t_hi, %next_off, %new_al)
+  }
+  #return %size
+}
+
+// 发一个 `<Rec>__<field>_offset() -> #bits<64> { #return <offset> }`。
+#proc meta_emit_field_offset(%host: #addr, %base: #addr, %len: #bits<64>,
+                            %rec_lo: #bits<64>, %rec_hi: #bits<64>,
+                            %f_lo: #bits<64>, %f_hi: #bits<64>,
+                            %value: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %rec_at = #lea(%base, %rec_lo, 1, 0)
+  %rec_len = #sub[#bits<64>](%rec_hi, %rec_lo)
+  %w2 = #call lain_meta_emit_write(%host, %rec_at, %rec_len)
+  %d = #data_addr meta_dsep
+  %w3 = #call lain_meta_emit_write(%host, %d, 2)
+  %f_at = #lea(%base, %f_lo, 1, 0)
+  %f_len = #sub[#bits<64>](%f_hi, %f_lo)
+  %w4 = #call lain_meta_emit_write(%host, %f_at, %f_len)
+  %suf = #data_addr meta_foff
+  %w5 = #call lain_meta_emit_write(%host, %suf, 7)
+  %p2a = #data_addr meta_p2a
+  %w6 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w7 = #call meta_emit_repr(%host, 0, 64)
+  %p2b = #data_addr meta_p2b
+  %w8 = #call lain_meta_emit_write(%host, %p2b, 13)
+  %w9 = #call meta_emit_uint(%host, %value)
+  %p3 = #data_addr meta_p3
+  %w10 = #call lain_meta_emit_write(%host, %p3, 3)
+  #return 0
+}
+
+// 发一个 `<Rec>__size() -> #bits<64> { #return <size> }`。
+#proc meta_emit_size(%host: #addr, %base: #addr, %rec_lo: #bits<64>,
+                    %rec_hi: #bits<64>, %value: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %rec_at = #lea(%base, %rec_lo, 1, 0)
+  %rec_len = #sub[#bits<64>](%rec_hi, %rec_lo)
+  %w2 = #call lain_meta_emit_write(%host, %rec_at, %rec_len)
+  %suf = #data_addr meta_rsize
+  %w3 = #call lain_meta_emit_write(%host, %suf, 6)
+  %p2a = #data_addr meta_p2a
+  %w4 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w5 = #call meta_emit_repr(%host, 0, 64)
+  %p2b = #data_addr meta_p2b
+  %w6 = #call lain_meta_emit_write(%host, %p2b, 13)
+  %w7 = #call meta_emit_uint(%host, %value)
+  %p3 = #data_addr meta_p3
+  %w8 = #call lain_meta_emit_write(%host, %p3, 3)
+  #return 0
 }
 
 #proc meta_lower_let(%host: #addr, %base: #addr, %len: #bits<64>, %let_at: #bits<64>) -> #bits<32> {
