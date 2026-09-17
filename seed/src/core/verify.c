@@ -405,6 +405,12 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
   uint32_t i;
 
   (void)position;
+  /* 引擎的定长缓冲区按这个数分配：超了它在运行时会 trap 1103。
+   * 验证器必须在这里拦住，否则「验证通过」就不等于「跑得起来」。 */
+  if (inst->operand_count > L1_MAX_OPERANDS)
+    return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                "instruction has %u operands, the encoding allows %u",
+                inst->operand_count, (unsigned)L1_MAX_OPERANDS);
   if (!check_arity(v, inst)) return false;
   if (!check_operands(v, region, inst, names, loops)) return false;
 

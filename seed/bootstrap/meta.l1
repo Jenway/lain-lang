@@ -85,30 +85,35 @@
                        %name_lo: #bits<64>, %name_hi: #bits<64>,
                        %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<32> {
   %has_type = #ult[#bits<64>](%t_lo, %t_hi)
-  // kind 在低 8 位、width 在 8..15 位；找不到是 0xFFFF...FF
-  %info = #if %has_type -> (#bits<64>) {
-    %tbl = #data_addr meta_types
+  %tbl = #data_addr meta_types
+
+  // 查类型条目；没有标注时给 0（下面不会用它）
+  %entry = #if %has_type -> (#bits<64>) {
     %tname = #lea(%base, %t_lo, 1, 0)
     %tlen = #sub[#bits<64>](%t_hi, %t_lo)
-    %entry = #call meta_type_find(%tbl, %tname, %tlen)
-    %miss = #eq[#bits<64>](%entry, 0xFFFFFFFFFFFFFFFF)
-    %r = #if %miss -> (#bits<64>) {
-      #yield 0xFFFFFFFFFFFFFFFF
-    } else {
-      %p = #call meta_type_info(%tbl, %entry)
-      #yield %p
-    }
-    #yield %r
+    %e = #call meta_type_find(%tbl, %tname, %tlen)
+    #yield %e
+  } else {
+    #yield 0
+  }
+  %miss = #eq[#bits<64>](%entry, 0xFFFFFFFFFFFFFFFF)
+  %unknown = #and[#bits<1>](%has_type, %miss)
+  #if %unknown {
+    %f0 = #call lain_meta_fail(%host, 5)
+    #return 5
+  }
+
+  // kind 在低 8 位、width 在 8..15 位
+  %info = #if %has_type -> (#bits<64>) {
+    %p = #call meta_type_info(%tbl, %entry)
+    #yield %p
   } else {
     // 没有标注：v0 的形式，默认 #bits<64>
     %d = #shl[#bits<64>](64, 8)
     #yield %d
   }
-  %bad = #eq[#bits<64>](%info, 0xFFFFFFFFFFFFFFFF)
-  #if %bad {
-    %f0 = #call lain_meta_fail(%host, 5)
-    #return 5
-  }
+  %kind = #and[#bits<64>](%info, 255)
+  %width = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
 
   // 从类型名之后接着解析；没有标注就从名字之后
   %resume = #if %has_type -> (#bits<64>) {
@@ -116,19 +121,16 @@
   } else {
     #yield %name_hi
   }
-  %kind = #and[#bits<64>](%info, 255)
-  %width = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
-
   %eq_at = #call bs_skip_space(%base, %resume, %len)
   %is_eq = #call bs_is_byte(%base, %eq_at, 61)
   %status = #if %is_eq -> (#bits<32>) {
     %after_eq = #add[#bits<64>](%eq_at, 1)
-    %num_lo = #call bs_skip_space(%base, %after_eq, %len)
-    %num_hi = #call bs_skip_ident(%base, %num_lo, %len)
-    %has_num = #ult[#bits<64>](%num_lo, %num_hi)
-    %inner = #if %has_num -> (#bits<32>) {
-      %s = #call meta_emit_let(%host, %base, %len, %name_lo, %name_hi, %kind,
-                               %width, %num_lo)
+    %lhs_lo = #call bs_skip_space(%base, %after_eq, %len)
+    %lhs_hi = #call bs_skip_ident(%base, %lhs_lo, %len)
+    %has_lhs = #ult[#bits<64>](%lhs_lo, %lhs_hi)
+    %inner = #if %has_lhs -> (#bits<32>) {
+      %s = #call meta_emit_value(%host, %base, %len, %name_lo, %name_hi, %kind,
+                                 %width, %tbl, %entry, %lhs_lo, %lhs_hi)
       #yield %s
     } else {
       %f = #call lain_meta_fail(%host, 3)
@@ -138,6 +140,49 @@
   } else {
     %f = #call lain_meta_fail(%host, 4)
     #yield 4
+  }
+  #return %status
+}
+
+// 右值：一个整数，或者 `整数 OP 整数`。
+// 后者拿符号去**类型的 op 表**里查该发哪条物理算子——Meta 不知道
+// "div" 对有符号和无符号是不同的。
+#proc meta_emit_value(%host: #addr, %base: #addr, %len: #bits<64>,
+                      %name_lo: #bits<64>, %name_hi: #bits<64>,
+                      %kind: #bits<64>, %width: #bits<64>, %tbl: #addr,
+                      %entry: #bits<64>, %lhs_lo: #bits<64>,
+                      %lhs_hi: #bits<64>) -> #bits<32> {
+  %op_at = #call bs_skip_space(%base, %lhs_hi, %len)
+  %op_byte = #call bs_byte_at(%base, %op_at, %len)
+  %is_op = #call bs_is_operator(%op_byte)
+  %status = #if %is_op -> (#bits<32>) {
+    %sym_at = #add[#bits<64>](%op_at, 1)
+    %rhs_lo = #call bs_skip_space(%base, %sym_at, %len)
+    %rhs_hi = #call bs_skip_ident(%base, %rhs_lo, %len)
+    %has_rhs = #ult[#bits<64>](%rhs_lo, %rhs_hi)
+    %inner = #if %has_rhs -> (#bits<32>) {
+      %sym = #lea(%base, %op_at, 1, 0)
+      %op_entry = #call meta_op_find(%tbl, %entry, %sym, 1)
+      %op_miss = #eq[#bits<64>](%op_entry, 0xFFFFFFFFFFFFFFFF)
+      %r = #if %op_miss -> (#bits<32>) {
+        %f = #call lain_meta_fail(%host, 6)
+        #yield 6
+      } else {
+        %s = #call meta_emit_binary(%host, %base, %len, %name_lo, %name_hi,
+                                    %kind, %width, %tbl, %op_entry, %lhs_lo,
+                                    %rhs_lo)
+        #yield %s
+      }
+      #yield %r
+    } else {
+      %f = #call lain_meta_fail(%host, 3)
+      #yield 3
+    }
+    #yield %inner
+  } else {
+    %s = #call meta_emit_let(%host, %base, %len, %name_lo, %name_hi, %kind,
+                             %width, %lhs_lo)
+    #yield %s
   }
   #return %status
 }
@@ -161,5 +206,43 @@
   %w6 = #call meta_emit_uint(%host, %value)
   %p3 = #data_addr meta_p3
   %w7 = #call lain_meta_emit_write(%host, %p3, 3)
+  #return 0
+}
+
+// 带算子的一条：`%r = #<物理算子>[<repr>](lhs, rhs)`。
+// 物理算子名是从类型的 op 表里读出来的，不是这里选的。
+#proc meta_emit_binary(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %name_lo: #bits<64>, %name_hi: #bits<64>,
+                       %kind: #bits<64>, %width: #bits<64>, %tbl: #addr,
+                       %op_entry: #bits<64>, %lhs_lo: #bits<64>,
+                       %rhs_lo: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %name_at = #lea(%base, %name_lo, 1, 0)
+  %name_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %w2 = #call lain_meta_emit_write(%host, %name_at, %name_len)
+  %p2a = #data_addr meta_p2a
+  %w3 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w4 = #call meta_emit_repr(%host, %kind, %width)
+  %o1 = #data_addr meta_o1
+  %w5 = #call lain_meta_emit_write(%host, %o1, 11)
+  %phys = #call meta_op_phys_at(%tbl, %op_entry)
+  %phys_len = #call meta_op_phys_len(%tbl, %op_entry)
+  %w6 = #call lain_meta_emit_write(%host, %phys, %phys_len)
+  %o2 = #data_addr meta_o2
+  %w7 = #call lain_meta_emit_write(%host, %o2, 1)
+  %w8 = #call meta_emit_repr(%host, %kind, %width)
+  %o3 = #data_addr meta_o3
+  %w9 = #call lain_meta_emit_write(%host, %o3, 2)
+  %lhs = #call bs_read_uint(%base, %lhs_lo, %len)
+  %w10 = #call meta_emit_uint(%host, %lhs)
+  %o4 = #data_addr meta_o4
+  %w11 = #call lain_meta_emit_write(%host, %o4, 2)
+  %rhs = #call bs_read_uint(%base, %rhs_lo, %len)
+  %w12 = #call meta_emit_uint(%host, %rhs)
+  %o5 = #data_addr meta_o5
+  %w13 = #call lain_meta_emit_write(%host, %o5, 15)
+  %o6 = #data_addr meta_o6
+  %w14 = #call lain_meta_emit_write(%host, %o6, 2)
   #return 0
 }

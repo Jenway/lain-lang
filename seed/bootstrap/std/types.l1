@@ -15,10 +15,14 @@
 // 全在这张表里：repr 一样，op 条目不同。
 
 data meta_types ro {
-  // "i32" bits 32
-  3 105 51 50 0 32 0
-  // "u32" bits 32
-  3 117 51 50 0 32 0
+  // "i32" bits 32，两个 op： "/" -> sdiv、"+" -> add
+  3 105 51 50 0 32 2
+  1 47 4 115 100 105 118
+  1 43 3 97 100 100
+  // "u32" bits 32，同样两个 op，但 "/" 是 udiv —— 差别全在这里
+  3 117 51 50 0 32 2
+  1 47 4 117 100 105 118
+  1 43 3 97 100 100
   // "i64" bits 64
   3 105 54 52 0 64 0
   // "i8" bits 8
@@ -169,4 +173,72 @@ data meta_types ro {
   %shifted = #shl[#bits<64>](%width, 8)
   %packed = #or[#bits<64>](%kind, %shifted)
   #return %packed
+}
+
+// --- op 表 ---------------------------------------------------------------
+//
+// 每个类型自带一组 op：源码里的符号 → 要发的物理算子名。
+// i32 和 u32 的差别就在这里，Meta 里没有一行写着「如果是 i32」。
+
+#proc meta_ops_at(%base: #addr, %at: #bits<64>) -> #bits<64> {
+  %name_len = #call meta_byte_at(%base, %at)
+  %after_name = #add[#bits<64>](%at, #add[#bits<64>](%name_len, 1))
+  %ops = #add[#bits<64>](%after_name, 3)
+  #return %ops
+}
+
+#proc meta_ops_count(%base: #addr, %at: #bits<64>) -> #bits<64> {
+  %name_len = #call meta_byte_at(%base, %at)
+  %after_name = #add[#bits<64>](%at, #add[#bits<64>](%name_len, 1))
+  %count_at = #add[#bits<64>](%after_name, 2)
+  %n = #call meta_byte_at(%base, %count_at)
+  #return %n
+}
+
+// 在类型 at 的 op 区里按符号查，返回 op 条目的绝对偏移；找不到返回 NOT_FOUND。
+#proc meta_op_find(%base: #addr, %at: #bits<64>, %sym: #addr,
+                   %sym_len: #bits<64>) -> #bits<64> {
+  %ops = #call meta_ops_at(%base, %at)
+  %n = #call meta_ops_count(%base, %at)
+  %found = #loop scan(%i: #bits<64> = 0,
+                      %cur: #bits<64> = %ops) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %n)
+    #if %more {
+      %slen = #call meta_byte_at(%base, %cur)
+      %slen_ok = #eq[#bits<64>](%slen, %sym_len)
+      %hit = #if %slen_ok -> (#bits<1>) {
+        %sat = #add[#bits<64>](%cur, 1)
+        %saddr = #lea(%base, %sat, 1, 0)
+        %same = #call meta_bytes_equal(%saddr, %sym, %sym_len)
+        #yield %same
+      } else {
+        #yield 0
+      }
+      #if %hit {
+        #break scan(%cur)
+      }
+      %next = #call meta_skip_op(%base, %cur)
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2, %next)
+    } else {
+      #break scan(0xFFFFFFFFFFFFFFFF)
+    }
+  }
+  #return %found
+}
+
+// op 条目里的物理名
+#proc meta_op_phys_at(%base: #addr, %at: #bits<64>) -> #addr {
+  %slen = #call meta_byte_at(%base, %at)
+  %after = #add[#bits<64>](%at, #add[#bits<64>](%slen, 1))
+  %at2 = #add[#bits<64>](%after, 1)
+  %p = #lea(%base, %at2, 1, 0)
+  #return %p
+}
+
+#proc meta_op_phys_len(%base: #addr, %at: #bits<64>) -> #bits<64> {
+  %slen = #call meta_byte_at(%base, %at)
+  %after = #add[#bits<64>](%at, #add[#bits<64>](%slen, 1))
+  %n = #call meta_byte_at(%base, %after)
+  #return %n
 }
