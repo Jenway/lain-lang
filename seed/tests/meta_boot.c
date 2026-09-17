@@ -150,7 +150,8 @@ static LainVmTcb *prepare(L1Builder *builder, const char *text,
   }
   if (lainir_verify(module, &diag) != 0) {
     char buffer[192];
-    snprintf(buffer, sizeof(buffer), "verify: %d %s", diag.code, diag.message);
+    snprintf(buffer, sizeof(buffer), "verify: %d line %u %s", diag.code,
+             diag.line, diag.message);
     report_fail(what, buffer);
     return NULL;
   }
@@ -354,6 +355,17 @@ int main(int argc, char **argv) {
       char buffer[192];
       snprintf(buffer, sizeof(buffer), "Meta returned status %llu",
                (unsigned long long)meta_tcb->result.as.bits);
+      report_fail("meta run", buffer);
+      goto cleanup;
+    }
+    /* 宿主状态是**诊断通道**：`lain_meta_fail` 里的码记在这里。深层的辅助
+     * 过程（比如算布局的）只能回一个打包值，没法把状态带上来，所以它们
+     * 用这个通道报错。不看它的话那些错误就没人管了——实测过一次：
+     * 类型名没解析出来，布局照算，`__size` 静静变成 62。 */
+    if (lainmeta_host_status(host) != 0) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer), "host status %u",
+               lainmeta_host_status(host));
       report_fail("meta run", buffer);
       goto cleanup;
     }

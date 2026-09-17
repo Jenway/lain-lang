@@ -101,6 +101,23 @@
   #return %value
 }
 
+// 读一个限定名 `a.b.c`，返回结束下标。类型名可能是命名空间成员（`T.i32`），
+// 而 `bs_skip_ident` 遇到 `.` 就停。
+#proc bs_skip_qualified(%base: #addr, %start: #bits<64>,
+                        %len: #bits<64>) -> #bits<64> {
+  %end = #loop scan(%at: #bits<64> = %start) -> (#bits<64>) {
+    %hi = #call bs_skip_ident(%base, %at, %len)
+    %dot = #call bs_skip_space(%base, %hi, %len)
+    %is_dot = #call bs_is_byte(%base, %dot, 46)
+    #if %is_dot {
+      %one = #add[#bits<64>](%dot, 1)
+      #continue scan(%one)
+    }
+    #break scan(%hi)
+  }
+  #return %end
+}
+
 // 下标 i 处的三个字节是不是 "let"？
 #proc bs_match_let(%base: #addr, %i: #bits<64>, %len: #bits<64>) -> #bits<1> {
   %need = #add[#bits<64>](%i, 3)
@@ -200,14 +217,17 @@
 #proc bs_next_form(%base: #addr, %from: #bits<64>, %len: #bits<64>) -> #bits<64> {
   %kw = #data_addr meta_kw_struct
   %ekw = #data_addr meta_kw_enum
+  %skw = #data_addr meta_kw_scalar
   %found = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
     %more = #ult[#bits<64>](%i, %len)
     #if %more {
       %is_let = #call bs_match_let(%base, %i, %len)
       %is_struct = #call bs_match_keyword(%base, %i, %len, %kw, 6)
       %is_enum = #call bs_match_keyword(%base, %i, %len, %ekw, 4)
+      %is_scalar = #call bs_match_keyword(%base, %i, %len, %skw, 6)
       %h1 = #or[#bits<1>](%is_let, %is_struct)
-      %hit = #or[#bits<1>](%h1, %is_enum)
+      %h2 = #or[#bits<1>](%is_enum, %is_scalar)
+      %hit = #or[#bits<1>](%h1, %h2)
       #if %hit {
         #break scan(%i)
       }

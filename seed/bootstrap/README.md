@@ -33,8 +33,9 @@ IR 内省能力。这一层是新方言、从零重写的，两者不共享任�
 SOURCE_ORDER   链接顺序；驱动按它把文件拼成一份文本再解析（确定性来源）
 std/lex.l1     初代标准库：字节与词法（空白、标识符、十进制数、关键字）
 std/emit.l1    初代标准库：宿主 ABI 声明 + 产物输出 + repr 的文本
-std/types.l1   初代标准库：类型表 + 查表
+std/types.l1   初代标准库：字节比较、暂存区单元、repr 的字节数与对齐
 std/modules.l1 初代标准库：源码注册表、import 解析、命名空间成员的 mangle
+std/scalars.l1 初代标准库：标量声明、类型名解析、算子解析
 std/records.l1 初代标准库：积类型（布局、构造、字段访问）
 std/sums.l1    初代标准库：和类型（布局、构造、投影）
 meta.l1        Meta 的三个入口与 v0 的语言规则
@@ -47,7 +48,8 @@ let NAME [: TYPE] = INTEGER;
 let NAME : TYPE = INTEGER OP INTEGER;
 ```
 
-`TYPE` 缺省时是 `#bits<64>`（老形式）。写了类型就去**类型表**里查它：
+`TYPE` 缺省时是 `#bits<64>`（老形式）。写了类型就去**声明**里查它——不带点的名字
+查 root 环境（逻辑路径 `std::prelude`），带点的名字（`W.w32`）查被 import 的模块：
 
 ```lainir
 #proc NAME() -> <TYPE 的 repr> {
@@ -271,25 +273,45 @@ v0 的缺口：导入的绑定只支持 `let NAME = INT;` 这一种形状，repr
 类型还不能 import；没有 `export` 声明（模块里所有 `let` 都是导出的）；没有循环
 检测；重名 import 绑定（`let M = ...` 两次）不报错，后一条会赢。
 
-## 类型表
+## 标量：从字节表到声明
 
-在 `std/types.l1`，是一段**静态字节**：不需要 init 过程，也没有手算的偏移
-——条目自描述，Meta 走一遍就查到了。
+标量**曾经**是一段手打的静态字节表（`data meta_types`）——加一个类型要改字节，
+错一个字节就产出错的 repr。现在它是**声明**，住在源码里：
 
-```text
-类型:  [1]名字长度 [L]名字 [1]repr kind [1]repr width [1]op 数 [op 条目 × op 数]
-op:    [1]符号长度 [S]符号 [1]物理名长度 [P]物理名
+```lain
+scalar i32 = bits<32> { "/" = sdiv "+" = add }
+scalar u32 = bits<32> { "/" = udiv "+" = add }
+scalar addr = addr { }
 ```
 
-repr kind 就是 LAINIR 的四个类型构造子：`0=#bits<N>`、`1=#f<N>`、
-`2=#vec<N>`、`3=#addr`。表以「名字长度 0」终止。
+repr 的四种写法对应 LAINIR 的四个类型构造子：
+`bits<N>`=0、`f<N>`=1、`vec<N>`=2、`addr`=3。op 表是「源码里的符号 → 要发的物理
+算子」——`i32` 和 `u32` 的 repr 一样，差别全在 `"/"` 那一行，Meta 里没有一行写着
+「如果是 i32」。
 
-v0 表里有 `i32 u32 i64 i8 u8 bool usize addr` 八项。**表少一个字节就会产出错的
-repr**（少 ops 数字节时，下一项的长度会被当成 ops 数，走表直接跳飞），所以
-驱动带了一条「产物里必须出现某段文本」的断言守着它。
+**root 环境就是一份源码**：逻辑路径 `std/prelude.lain`（仓库里是
+`seed/lain/std/prelude.lain`）。不带点的类型名去那里查。旧塔的正式语言里 `i64`
+也不带点，所以保留这个形状：
+
+```lain
+let a: i32 = 12 / 3;              // i32 → prelude
+let W = import("std::widths");
+let b: W.w32 = 12 / 3;            // W.w32 → 被 import 的那份源码
+```
+
+解析和 struct/enum 一样是**回源码里扫声明**，不建编译期类型表。被降级的那份
+源码自己写 `scalar` 会被拒（14）——只有 prelude 和被 import 的模块参与解析，
+这样「写了个不会被看到的声明」不会静默生效。
 
 v0 不认注释、不认识换行以外的排版差异（空白 = 字节 ≤ 32）、没有 `expand`
 阶段（还没有宏）。这些是**缺口，不是设计**。
+
+## 宿主状态是诊断通道
+
+深层的辅助过程（算布局、查算子）只能回一个打包值，没法把状态带上来。它们用
+`lain_meta_fail` 把码记在**宿主状态**里，驱动必须看。不看会出事——实测过一次：
+类型名没解析出来，布局照算，`__size` 静静变成 62，一路跑到产物里才发现不对。
+现在驱动的这条检查在回归里由「没注册 prelude → 5」钉着。
 
 ## 机制：谁提供什么
 
@@ -356,15 +378,18 @@ build/tmp-probe/meta_boot.exe seed/tests/meta_import2.lain main 42 std__math__an
 
 1. **`expand` 阶段**：现在还只是恒等，没有宏/attribute。
 2. **注释与真正的词法**：v0 只跳空白。
-3. **类型也能 import**：现在 import 只导出 `let NAME = INT;`，标量还锁在
-   `std/types.l1` 的字节表里（`i32` 是硬编码的名字，不是模块的导出）。
-   要让 `M.i32` 成立，得先把标量变成声明、Meta 扫声明建表——那样
-   `meta_type_find` 查的就从「静态字节」变成「声明」。
+3. **值也能带类型过模块**：现在 import 只导出 `let NAME = INT;`（repr 固定
+   `#bits<64>`）。标量已经能过模块（`W.w32`），值还不能带自己的类型。
 4. **表达式与类型**：v0 只会 `let NAME = INT;`。
 5. **AST 面**：Meta 现在直接扫源码字节。真正的设计里，Parser 出无语义的
    RawAst，Meta 用语言中立的 AstApi（拓扑/位置/上下文）操作它 —— 那需要给
    底座加一层 AST 对象模型，是**新的一大片**，不在 v0 里。
 
-硬编码清单（还没还的债）：顶层形式 `let`/`struct`/`enum` 是字面字节模式、
-由 `meta_lower_source` 的 if 链分派；`struct`/`enum` 的分隔符是手打的 `__`。
-两者都该由「声明按形状识别 + 命名空间 mangle」接管。
+硬编码清单（还没还的债）：顶层形式 `let`/`struct`/`enum`/`scalar` 是字面字节
+模式、由 `meta_lower_source` 的 if 链分派；`struct`/`enum` 的分隔符是手打的
+`__`；root 环境的名字 `std::prelude` 是写死的一条逻辑路径。三者都该由「声明按
+形状识别 + 命名空间 mangle」接管。
+
+顺手记一条**已经还掉的**：`i32` 曾经是编译器里写死的名字（一段手打字节），
+现在它只是 prelude 模块的一条 `scalar` 声明——没注册 prelude 就没有 `i32`，
+回归里那条「没注册 prelude → 5」钉着这个事实。
