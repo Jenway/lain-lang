@@ -194,6 +194,183 @@
   #return %total
 }
 
+// --- 构造与投影 -----------------------------------------------------------
+//
+// `let c = Shape.Circle { 7 }` 和积类型的构造同形：一块静态存储 + 一条 tag 存
+// + 一条载荷存。区别只在于「字段偏移」换成了「变体 tag + 载荷偏移」。
+//
+// `let v: i32 = Shape.Circle(c)` 没有积类型的对应物：积类型的字段访问是**一条
+// `#load`**（偏移编译期就知道，字段一定在），和类型的投影要**先看判别字段**
+// ——别的变体也有那块载荷区。v0 把不命中折叠成 0（全函数），不做 panic 路径。
+
+// 走一遍声明，拿到变体的 tag/载荷形状；返回 0 表示没有这个变体。
+#proc meta_sum_variant(%base: #addr, %len: #bits<64>, %enum_lo: #bits<64>,
+                       %enum_hi: #bits<64>, %var_lo: #bits<64>,
+                       %var_hi: #bits<64>, %scratch: #addr) -> #bits<64> {
+  %body = #call meta_find_enum_body(%base, %len, %enum_lo, %enum_hi)
+  %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
+  %info = #if %missing -> (#bits<64>) {
+    #yield 0
+  } else {
+    %w = #call meta_enum_walk(%base, %len, %body, %var_lo, %var_hi, %scratch)
+    #yield %w
+  }
+  #return %info
+}
+
+// `let NAME = Enum.Variant { 值 }`
+#proc meta_lower_sum_construct(%host: #addr, %base: #addr, %len: #bits<64>,
+                               %bind_lo: #bits<64>, %bind_hi: #bits<64>,
+                               %enum_lo: #bits<64>, %enum_hi: #bits<64>,
+                               %var_lo: #bits<64>, %var_hi: #bits<64>,
+                               %brace_at: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %info = #call meta_sum_variant(%base, %len, %enum_lo, %enum_hi, %var_lo,
+                                 %var_hi, %scratch)
+  %bit = #lshr[#bits<64>](%info, 63)
+  %found = #eq[#bits<64>](%bit, 1)
+  %status = #if %found -> (#bits<32>) {
+    %tag = #and[#bits<64>](%info, 255)
+    %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 15)
+    %width = #and[#bits<64>](#lshr[#bits<64>](%info, 12), 255)
+    %psize = #and[#bits<64>](#lshr[#bits<64>](%info, 20), 0xFFFFFFFF)
+    %poff = #call meta_enum_payload_off(%scratch)
+    %total = #call meta_enum_size(%scratch)
+    %bind_at = #lea(%base, %bind_lo, 1, 0)
+    %bind_len = #sub[#bits<64>](%bind_hi, %bind_lo)
+
+    %d1 = #data_addr meta_c1
+    %w1 = #call lain_meta_emit_write(%host, %d1, 5)
+    %w2 = #call lain_meta_emit_write(%host, %bind_at, %bind_len)
+    %d2 = #data_addr meta_c2
+    %w3 = #call lain_meta_emit_write(%host, %d2, 14)
+    %w4 = #call meta_emit_zeros(%host, %total)
+    %d3 = #data_addr meta_c4
+    %w5 = #call lain_meta_emit_write(%host, %d3, 8)
+
+    %w6 = #call lain_meta_emit_write(%host, %bind_at, %bind_len)
+    %d4 = #data_addr meta_c5
+    %w7 = #call lain_meta_emit_write(%host, %d4, 14)
+    %d5 = #data_addr meta_c6
+    %w8 = #call lain_meta_emit_write(%host, %d5, 21)
+    %w9 = #call lain_meta_emit_write(%host, %bind_at, %bind_len)
+    %d6 = #data_addr meta_c7
+    %w10 = #call lain_meta_emit_write(%host, %d6, 9)
+
+    // tag 是 `#bits<8>`，在偏移 0——这是 v0 的固定选择，不从声明读。
+    %s1 = #call meta_emit_store(%host, 0, 8, %tag, 0)
+
+    // 有载荷才发第二条 store。空变体（`Empty`）只有 tag。
+    %has_payload = #ugt[#bits<64>](%psize, 0)
+    %s2 = #if %has_payload -> (#bits<32>) {
+      %raw_lo = #add[#bits<64>](%brace_at, 1)
+      %v_lo = #call bs_skip_space(%base, %raw_lo, %len)
+      %value = #call bs_read_uint(%base, %v_lo, %len)
+      %s = #call meta_emit_store(%host, %kind, %width, %value, %poff)
+      #yield %s
+    } else {
+      #yield 0
+    }
+
+    %d7 = #data_addr meta_c12
+    %w11 = #call lain_meta_emit_write(%host, %d7, 18)
+    #yield %s2
+  } else {
+    %f = #call lain_meta_fail(%host, 9)
+    #yield 9
+  }
+  #return %status
+}
+
+// `let NAME: T = Enum.Variant(值)`：读 tag、比、命中才读载荷。
+#proc meta_lower_sum_project(%host: #addr, %base: #addr, %len: #bits<64>,
+                            %bind_lo: #bits<64>, %bind_hi: #bits<64>,
+                            %enum_lo: #bits<64>, %enum_hi: #bits<64>,
+                            %var_lo: #bits<64>, %var_hi: #bits<64>,
+                            %at: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %info = #call meta_sum_variant(%base, %len, %enum_lo, %enum_hi, %var_lo,
+                                 %var_hi, %scratch)
+  %bit = #lshr[#bits<64>](%info, 63)
+  %found = #eq[#bits<64>](%bit, 1)
+  %status = #if %found -> (#bits<32>) {
+    %tag = #and[#bits<64>](%info, 255)
+    %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 15)
+    %width = #and[#bits<64>](#lshr[#bits<64>](%info, 12), 255)
+    %psize = #and[#bits<64>](#lshr[#bits<64>](%info, 20), 0xFFFFFFFF)
+    %empty = #eq[#bits<64>](%psize, 0)
+    %s = #if %empty -> (#bits<32>) {
+      // 空变体没有载荷可投——这是错的输入，不是「0」。
+      %f = #call lain_meta_fail(%host, 10)
+      #yield 10
+    } else {
+      %poff = #call meta_enum_payload_off(%scratch)
+      %one = #add[#bits<64>](%at, 1)
+      %v_lo = #call bs_skip_space(%base, %one, %len)
+      %v_hi = #call bs_skip_ident(%base, %v_lo, %len)
+      %bind_at = #lea(%base, %bind_lo, 1, 0)
+      %bind_len = #sub[#bits<64>](%bind_hi, %bind_lo)
+      %var_at = #lea(%base, %v_lo, 1, 0)
+      %var_len = #sub[#bits<64>](%v_hi, %v_lo)
+
+      %p1 = #data_addr meta_p1
+      %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+      %w2 = #call lain_meta_emit_write(%host, %bind_at, %bind_len)
+      %p2a = #data_addr meta_p2a
+      %w3 = #call lain_meta_emit_write(%host, %p2a, 6)
+      %w4 = #call meta_emit_repr(%host, %kind, %width)
+      %f1 = #data_addr meta_f1
+      %w5 = #call lain_meta_emit_write(%host, %f1, 16)
+      %w6 = #call lain_meta_emit_write(%host, %var_at, %var_len)
+
+      %e1 = #data_addr meta_e1
+      %w7 = #call lain_meta_emit_write(%host, %e1, 55)
+      %w8 = #call meta_emit_uint(%host, %tag)
+      %e2 = #data_addr meta_e2
+      %w9 = #call lain_meta_emit_write(%host, %e2, 20)
+      %w10 = #call meta_emit_repr(%host, %kind, %width)
+      %e3 = #data_addr meta_e3
+      %w11 = #call lain_meta_emit_write(%host, %e3, 28)
+      %w12 = #call meta_emit_uint(%host, %poff)
+      %e4 = #data_addr meta_e4
+      %w13 = #call lain_meta_emit_write(%host, %e4, 17)
+      %w14 = #call meta_emit_repr(%host, %kind, %width)
+      %e5 = #data_addr meta_e5
+      %w15 = #call lain_meta_emit_write(%host, %e5, 63)
+      #yield 0
+    }
+    #yield %s
+  } else {
+    %f2 = #call lain_meta_fail(%host, 9)
+    #yield 9
+  }
+  #return %status
+}
+
+// `Enum.Variant { ... }` 还是 `Enum.Variant(v)`？`at` 是点号之后。
+#proc meta_lower_sum_access(%host: #addr, %base: #addr, %len: #bits<64>,
+                            %bind_lo: #bits<64>, %bind_hi: #bits<64>,
+                            %enum_lo: #bits<64>, %enum_hi: #bits<64>,
+                            %at: #bits<64>) -> #bits<32> {
+  %var_lo = #call bs_skip_space(%base, %at, %len)
+  %var_hi = #call bs_skip_ident(%base, %var_lo, %len)
+  %after = #call bs_skip_space(%base, %var_hi, %len)
+  %b = #call bs_byte_at(%base, %after, %len)
+  %is_brace = #eq[#bits<8>](%b, 123)
+  %status = #if %is_brace -> (#bits<32>) {
+    %s1 = #call meta_lower_sum_construct(%host, %base, %len, %bind_lo, %bind_hi,
+                                         %enum_lo, %enum_hi, %var_lo, %var_hi,
+                                         %after)
+    #yield %s1
+  } else {
+    %s2 = #call meta_lower_sum_project(%host, %base, %len, %bind_lo, %bind_hi,
+                                       %enum_lo, %enum_hi, %var_lo, %var_hi,
+                                       %after)
+    #yield %s2
+  }
+  #return %status
+}
+
 // --- 发射 -----------------------------------------------------------------
 
 // 发一个 `<Enum>__<Variant><后缀>() -> #bits<64> { #return <value> }`
