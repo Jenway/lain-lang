@@ -1135,6 +1135,9 @@ static void emit_subroutine(LainBackend *be, const L1Subroutine *sub) {
 static void emit_indirect(LainBackend *be) {
   uint32_t i;
   emit_text(be, "l1v l1_indirect(l1v target, const l1v *a, uint32_t n) {\n");
+  /* 模块里可能没有任何带体的子过程，那时这几个参数一个都用不到。
+   * 产物必须能带 -Wunused-parameter 编译。 */
+  emit_text(be, "  (void)target; (void)a; (void)n;\n");
   for (i = 0; i < be->module->subroutine_count; i++) {
     const L1Subroutine *sub = &be->module->subroutines[i];
     char name[128];
@@ -1155,6 +1158,7 @@ static void emit_entry(LainBackend *be) {
   emit_text(be,
             "/* 统一入口：按子过程序号调用。 */\n"
             "l1v l1_call(uint32_t sub_index, const l1v *args, uint32_t nargs) {\n"
+            "  (void)sub_index; (void)args; (void)nargs;\n"
             "  switch (sub_index) {\n");
   for (i = 0; i < be->module->subroutine_count; i++) {
     const L1Subroutine *sub = &be->module->subroutines[i];
