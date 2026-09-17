@@ -225,15 +225,77 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  /* 第 7 个参数起是模块：`逻辑路径=文件`。逻辑路径必须是规范化之后的样子
+   * （`std/math.lain`），因为 import 解析是**全路径逐字节匹配**——写成别的
+   * 形状就会解析失败，那是要的行为，不是缺陷。
+   *
+   * 真驱动会从一个模块根递归收集 .lain 自动算相对路径；这里显式给，
+   * 免掉目录递归，也让注册表的内容在命令行上看得见。 */
+  {
+    int i;
+    for (i = 6; i < argc; i++) {
+      const char *spec = argv[i];
+      const char *eq = strchr(spec, '=');
+      char logical[512];
+      char file[512];
+      char *module_text;
+      uint32_t module_length = 0;
+      size_t logical_length;
+      if (!eq || eq == spec) {
+        printf("bad module argument (want 逻辑路径=文件): %s\n", spec);
+        return 1;
+      }
+      logical_length = (size_t)(eq - spec);
+      if (logical_length >= sizeof(logical)) {
+        printf("module logical path too long: %s\n", spec);
+        return 1;
+      }
+      memcpy(logical, spec, logical_length);
+      logical[logical_length] = '\0';
+      snprintf(file, sizeof(file), "%s", eq + 1);
+      module_text = read_text_file(file, &module_length);
+      if (!module_text) {
+        printf("cannot read module source: %s\n", file);
+        return 1;
+      }
+      /* 文本按引用持有：这块内存要活到 Meta 跑完，所以不 free。 */
+      if (lainmeta_host_add_source(host, logical, module_text,
+                                   module_length) != 0) {
+        printf("cannot register module: %s\n", logical);
+        return 1;
+      }
+      printf("module:    %s <- %s (%u bytes)\n", logical, file,
+             (unsigned)module_length);
+    }
+  }
+
   /* --- 1. Meta 自己 --- */
   lainvm_space_init(&meta_space);
   /* 源码字节**必须显式授权**：Meta 的 TCB 不自带地址空间，源码地址
    * 也不是它自己的映像的一部分。不授权的话它第一次 #load 就会被
-   * 确定性拒绝（1004）——这是设计要的行为，不是缺陷。 */
-  if (lainvm_space_add_region(&meta_space, (uintptr_t)source, source_length,
-                              LAINVM_MEM_READ, 0) == LAINVM_SPACE_NO_REGION) {
-    report_fail("source grant", "the address space rejected the source bytes");
-    goto cleanup;
+   * 确定性拒绝（1004）——这是设计要的行为，不是缺陷。
+   *
+   * import 解析要读**注册表里的路径**，所以每份源码的路径也要授权——
+   * 它同样在宿主那边，不在 Meta 的映像里。少授权一次就是 1004。 */
+  {
+    uint32_t count = lainmeta_host_source_count(host);
+    uint32_t index;
+    for (index = 0; index < count; index++) {
+      uint32_t text_length = 0;
+      const char *text = lainmeta_host_source_text(host, index, &text_length);
+      const char *path = lainmeta_host_source_path(host, index);
+      size_t path_length = strlen(path) + 1u; /* 连 NUL 一起授权 */
+      if (!text ||
+          lainvm_space_add_region(&meta_space, (uintptr_t)text, text_length,
+                                  LAINVM_MEM_READ,
+                                  0) == LAINVM_SPACE_NO_REGION ||
+          lainvm_space_add_region(&meta_space, (uintptr_t)path, (uint32_t)path_length,
+                                  LAINVM_MEM_READ,
+                                  0) == LAINVM_SPACE_NO_REGION) {
+        report_fail("source grant", "the address space rejected a source");
+        goto cleanup;
+      }
+    }
   }
   /* Meta 的暂存区（表格建在这里）也要授权，而且是**可写**的。
    * 它不属于 Meta 的映像，所以不授权就写不了。 */
