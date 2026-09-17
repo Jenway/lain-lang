@@ -21,7 +21,9 @@ enum {
   SUB_HOST_ADD_100 = 10,
   SUB_HOST_CALLER = 11,
   SUB_HOST_SUM_BYTES = 12,
-  SUB_HOST_SUM = 13
+  SUB_HOST_SUM = 13,
+  /* 和 emit_c.c 的枚举值必须一致（14-17 是 VM 侧独有的负例）。 */
+  SUB_CLASSIFY = 18
 };
 
 typedef struct {
@@ -32,7 +34,7 @@ typedef struct {
 } Case;
 
 int main(void) {
-  Case cases[16];
+  Case cases[24];
   uint32_t count = 0;
   uint32_t i;
   uint64_t data_addr;
@@ -63,6 +65,12 @@ int main(void) {
   cases[count].name = "host_caller(5)"; cases[count].sub = SUB_HOST_CALLER; cases[count].nargs = 1;
   cases[count].args[0] = 5; count++;
   cases[count].name = "host_sum()"; cases[count].sub = SUB_HOST_SUM; cases[count].nargs = 0; count++;
+  cases[count].name = "classify(0)"; cases[count].sub = SUB_CLASSIFY; cases[count].nargs = 1;
+  cases[count].args[0] = 0; count++;
+  cases[count].name = "classify(1)"; cases[count].sub = SUB_CLASSIFY; cases[count].nargs = 1;
+  cases[count].args[0] = 1; count++;
+  cases[count].name = "classify(9)"; cases[count].sub = SUB_CLASSIFY; cases[count].nargs = 1;
+  cases[count].args[0] = 9; count++;
 
   printf("# C\n");
   for (i = 0; i < count; i++) {

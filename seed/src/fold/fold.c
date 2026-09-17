@@ -225,17 +225,54 @@ static const L1Region *rewrite_region(LainFold *f, const L1Region *region) {
     const L1Operand *ops;
     bool changed = false;
 
-    if (inst->kind == INST_SWITCH) {
-      /* #switch 在引擎和后端里都还没实现；折叠也不假装支持它。 */
-      fold_fail(f, 9310, "fold: #switch is not supported yet");
-      break;
-    }
-
     ops = rewrite_operands(f, inst, &changed);
     if (f->failed) {
       free((void *)ops);
       break;
     }
+
+    /* #switch 的分支在 cases[] 里，lainir_inst_rewrite 管不到它们
+     * （它只换 body/else_body），所以单独走一条。 */
+    if (inst->kind == INST_SWITCH) {
+      L1SwitchCase *rewritten = NULL;
+      const L1Region *new_default = inst->default_case;
+      L1Operand selector;
+      uint32_t k;
+
+      memset(&selector, 0, sizeof(selector));
+      if (inst->operand_count > 0) selector = ops[0];
+      if (inst->case_count > 0) {
+        rewritten =
+            (L1SwitchCase *)malloc(sizeof(L1SwitchCase) * inst->case_count);
+        if (!rewritten) {
+          free((void *)ops);
+          fold_fail(f, 9309, "fold: out of memory");
+          break;
+        }
+      }
+      for (k = 0; k < inst->case_count && !f->failed; k++) {
+        rewritten[k].value = inst->cases[k].value;
+        rewritten[k].body = rewrite_region(f, inst->cases[k].body);
+      }
+      if (!f->failed && inst->default_case)
+        new_default = rewrite_region(f, inst->default_case);
+      if (f->failed) {
+        free(rewritten);
+        free((void *)ops);
+        break;
+      }
+      insts[written] = lainir_inst_rewrite_switch(
+          f->builder, inst, selector, rewritten, inst->case_count, new_default);
+      free(rewritten);
+      free((void *)ops);
+      if (!insts[written]) {
+        fold_fail(f, 9311, "fold: out of memory");
+        break;
+      }
+      written++;
+      continue;
+    }
+
     body = inst->body ? rewrite_region(f, inst->body) : inst->body;
     else_body = inst->else_body ? rewrite_region(f, inst->else_body) : NULL;
     if (f->failed) {

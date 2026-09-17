@@ -708,8 +708,73 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     return list_push(p, into, inst);
   }
 
-  case INST_SWITCH:
-    return fail(p, 3010, "#switch is not supported yet");
+  case INST_SWITCH: {
+    L1Operand selector;
+    const L1Type *selector_ty = NULL;
+    const L1Type *results[L1P_MAX_RESULTS];
+    uint32_t result_count = 0;
+    /* cases 按需增长：分支数只该由模块自己决定。 */
+    L1SwitchCase *cases = NULL;
+    uint32_t case_cap = 0;
+    uint32_t case_count = 0;
+    const L1Region *default_case = NULL;
+    L1Inst *inst;
+
+    skip(p);
+    /* 选择子的类型实参是**必须**的：引擎和后端都要靠它把常量掩到
+     * 选择子的宽度上，否则宽出来的常量在两边会有不同的匹配行为。 */
+    if (!match(p, '['))
+      return fail(p, 3001, "#switch needs the selector type in []");
+    if (!parse_type(p, &selector_ty)) return false;
+    skip(p);
+    if (!expect(p, ']', "to end the selector type")) return false;
+    memset(&selector, 0, sizeof(selector));
+    if (!parse_operand(p, &selector, into, selector_ty)) return false;
+    if (!parse_region_results(p, results, L1P_MAX_RESULTS, &result_count))
+      return false;
+    skip(p);
+    if (!expect(p, '{', "to start the #switch body")) return false;
+    for (;;) {
+      skip(p);
+      if (p->failed) return false;
+      if (match(p, '}')) break;
+      if (at_word(p, "case")) {
+        uint64_t value = 0;
+        const L1Region *body;
+        p->pos += 4;
+        p->column += 4;
+        skip(p);
+        if (!integer(p, &value)) return false;
+        if (!grow_table(p->builder, (void **)&cases, &case_cap, case_count,
+                        sizeof(L1SwitchCase))) {
+          return fail(p, 3015, "out of memory for #switch cases");
+        }
+        body = parse_block(p, NULL, 0, results, result_count);
+        if (!body) return false;
+        cases[case_count].value = value;
+        cases[case_count].body = body;
+        case_count++;
+        continue;
+      }
+      if (at_word(p, "default")) {
+        p->pos += 7;
+        p->column += 7;
+        if (default_case)
+          return fail(p, 3016, "a #switch takes one default");
+        default_case = parse_block(p, NULL, 0, results, result_count);
+        if (!default_case) return false;
+        continue;
+      }
+      return fail(p, 3001, "expected `case`, `default` or `}`");
+    }
+    inst = (L1Inst *)lainir_inst_switch(p->builder,
+                                        name_count ? names[0] : NULL, selector,
+                                        selector_ty, cases, case_count,
+                                        default_case);
+    if (!inst) return fail(p, 3002, "cannot build #switch");
+    set_results(inst, names, name_count);
+    return list_push(p, into, inst);
+  }
 
   case INST_BREAK:
   case INST_CONTINUE: {

@@ -59,6 +59,21 @@ static const char k_text[] =
     "    #continue bytes(%i2, %s2)\n"
     "  }\n"
     "  #return %sum\n"
+    "}\n"
+    "\n"
+    "#proc classify(%x: #bits<64>) -> #bits<64> {\n"
+    "  %r = #switch[#bits<64>] %x -> (#bits<64>) {\n"
+    "    case 0 {\n"
+    "      #yield 100\n"
+    "    }\n"
+    "    case 1 {\n"
+    "      #yield 200\n"
+    "    }\n"
+    "    default {\n"
+    "      #yield 999\n"
+    "    }\n"
+    "  }\n"
+    "  #return %r\n"
     "}\n";
 
 /* 操作数位置上的嵌套指令：糖。 */
@@ -194,6 +209,9 @@ int main(void) {
     v = 0;
     check(run_bits(m2, "sum_bytes", 0, 3, 2, 0, &v) == 0 && v == 24,
           "canonical 文本跑出来一样（sum_bytes = 24）");
+    v = 0;
+    check(run_bits(m2, "classify", 1, 0, 1, 0xFFFFFFFFu, &v) == 0 && v == 200,
+          "canonical 文本跑出来一样（classify(1) = 200）");
     free(again);
     lainir_builder_free(b2);
   }
@@ -205,6 +223,9 @@ int main(void) {
         "canonical 里类型实参总是写出来");
   check(strstr(canonical, "%sum = #loop bytes(%i: #bits<64> = 0") != NULL,
         "canonical 里循环头带参数与初值");
+  /* #switch 的选择子类型实参必须打出来：解析器要求它，往返靠它成立。 */
+  check(strstr(canonical, "#switch[#bits<64>] %x -> (#bits<64>)") != NULL,
+        "canonical 里 #switch 带选择子类型");
 
   /* 4. 输入糖 */
   {

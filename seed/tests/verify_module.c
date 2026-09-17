@@ -451,12 +451,65 @@ static const L1Module *case_body_declares_results(Fx *fx) {
   }
 }
 
-static const L1Module *case_switch_unsupported(Fx *fx) {
+/* #switch 的语义必须显式：没有 default 就是漏写。
+ * 先给一个正常的 case，好让"缺 default"是这里唯一的错。 */
+static const L1Module *case_switch_no_default(Fx *fx) {
+  static L1SwitchCase cases[1];
   const L1Inst *insts[2];
   L1Operand sel[1], ret[1];
-  ret[0] = lainir_int(0);
+  const L1Inst *arm[1];
+  const L1Type *r[1];
+  L1Region *arm0;
+  L1Type *u64 = (L1Type *)fx->u64;
+
+  r[0] = fx->u64;
+  arm[0] = lainir_inst(fx->b, INST_YIELD, NULL, NULL,
+                       (L1Operand[]){lainir_int(1)}, 1);
+  arm0 = (L1Region *)lainir_region(fx->b, NULL, 0, r, 1, arm, 1);
+  cases[0].value = 0;
+  cases[0].body = arm0;
   sel[0] = lainir_ref("%n");
-  insts[0] = lainir_inst(fx->b, INST_SWITCH, "%r", (L1Type *)fx->u64, sel, 1);
+  insts[0] = lainir_inst(fx->b, INST_SWITCH, "%r", u64, sel, 1);
+  ((L1Inst *)insts[0])->cases = cases;
+  ((L1Inst *)insts[0])->case_count = 1;
+  ret[0] = lainir_ref("%r");
+  insts[1] = lainir_inst(fx->b, INST_RETURN, NULL, NULL, ret, 1);
+  return simple(fx, insts, 2);
+}
+
+/* 正例：case 和 default 都在，每个分支都交值。 */
+static const L1Module *case_switch_ok(Fx *fx) {
+  static L1SwitchCase cases[2];
+  const L1Inst *insts[2];
+  L1Operand sel[1], ret[1];
+  const L1Inst *arm[1];
+  const L1Type *r[1];
+  L1Region *arm0;
+  L1Region *arm1;
+  L1Region *dflt;
+  L1Type *u64 = (L1Type *)fx->u64;
+
+  r[0] = fx->u64;
+  arm[0] = lainir_inst(fx->b, INST_YIELD, NULL, NULL,
+                       (L1Operand[]){lainir_int(1)}, 1);
+  arm0 = (L1Region *)lainir_region(fx->b, NULL, 0, r, 1, arm, 1);
+  arm[0] = lainir_inst(fx->b, INST_YIELD, NULL, NULL,
+                       (L1Operand[]){lainir_int(2)}, 1);
+  arm1 = (L1Region *)lainir_region(fx->b, NULL, 0, r, 1, arm, 1);
+  arm[0] = lainir_inst(fx->b, INST_YIELD, NULL, NULL,
+                       (L1Operand[]){lainir_int(3)}, 1);
+  dflt = (L1Region *)lainir_region(fx->b, NULL, 0, r, 1, arm, 1);
+
+  cases[0].value = 0;
+  cases[0].body = arm0;
+  cases[1].value = 1;
+  cases[1].body = arm1;
+  sel[0] = lainir_ref("%n");
+  insts[0] = lainir_inst(fx->b, INST_SWITCH, "%r", u64, sel, 1);
+  ((L1Inst *)insts[0])->cases = cases;
+  ((L1Inst *)insts[0])->case_count = 2;
+  ((L1Inst *)insts[0])->default_case = dflt;
+  ret[0] = lainir_ref("%r");
   insts[1] = lainir_inst(fx->b, INST_RETURN, NULL, NULL, ret, 1);
   return simple(fx, insts, 2);
 }
@@ -492,7 +545,8 @@ int main(void) {
       {"结果个数不对", case_bad_result_count, L1V_BAD_RESULT_COUNT},
       {"过程体声明了区域结果", case_body_declares_results,
        L1V_BODY_DECLARES_RESULTS},
-      {"switch 还不支持", case_switch_unsupported, L1V_SWITCH_UNSUPPORTED},
+      {"#switch 缺 default", case_switch_no_default, L1V_SWITCH_NO_DEFAULT},
+      {"#switch 正例", case_switch_ok, 0},
   };
   Fx fx;
   uint32_t i;
