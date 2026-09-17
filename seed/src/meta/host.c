@@ -23,6 +23,9 @@ struct LainMetaHost {
   uint32_t out_length;
   uint32_t out_cap;
   uint32_t status;
+  /* Meta 的可写暂存：表格建在这里。驱动负责把这块范围登记进 VSpace。 */
+  unsigned char *scratch;
+  uint32_t scratch_size;
 };
 
 /* --- 能力名 ---------------------------------------------------------------
@@ -59,7 +62,22 @@ static int reserve_output(LainMetaHost *host, uint32_t extra) {
 }
 
 LainMetaHost *lainmeta_host_new(void) {
-  return (LainMetaHost *)calloc(1, sizeof(LainMetaHost));
+  LainMetaHost *host = (LainMetaHost *)calloc(1, sizeof(LainMetaHost));
+  if (!host) return NULL;
+  /* 64 KiB：够建几千条表格项。宿主侧一次分配，Meta 侧不许分配。 */
+  host->scratch_size = 65536u;
+  host->scratch = (unsigned char *)calloc(1, host->scratch_size);
+  if (!host->scratch) {
+    free(host);
+    return NULL;
+  }
+  return host;
+}
+
+void *lainmeta_host_scratch(const LainMetaHost *host, uint32_t *size_out) {
+  if (!host) return NULL;
+  if (size_out) *size_out = host->scratch_size;
+  return host->scratch;
 }
 
 void lainmeta_host_free(LainMetaHost *host) {
@@ -68,6 +86,7 @@ void lainmeta_host_free(LainMetaHost *host) {
   for (i = 0; i < host->source_count; i++) free((void *)host->sources[i].path);
   free(host->sources);
   free(host->out);
+  free(host->scratch);
   free(host);
 }
 
@@ -221,6 +240,22 @@ static uint32_t cap_fail(const uint64_t *args, uint32_t count, uint64_t *out) {
   return 0;
 }
 
+static uint32_t cap_scratch_data(const uint64_t *args, uint32_t count,
+                                 uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  if (!host || count < 1) return LAINMETA_ERR_OOM;
+  if (out) *out = (uint64_t)(uintptr_t)host->scratch;
+  return 0;
+}
+
+static uint32_t cap_scratch_size(const uint64_t *args, uint32_t count,
+                                 uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  if (!host || count < 1) return LAINMETA_ERR_OOM;
+  if (out) *out = host->scratch_size;
+  return 0;
+}
+
 typedef struct {
   const char *name;
   LainVmHostFn fn;
@@ -236,6 +271,8 @@ static const MetaCapability k_capabilities[] = {
     {"lain_meta_emit_data", cap_emit_data},
     {"lain_meta_emit_length", cap_emit_length},
     {"lain_meta_fail", cap_fail},
+    {"lain_meta_scratch_data", cap_scratch_data},
+    {"lain_meta_scratch_size", cap_scratch_size},
 };
 
 int lainmeta_host_register(LainMetaHost *host, LainVmCaps *caps) {
