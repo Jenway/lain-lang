@@ -15,7 +15,7 @@
 
 #include "lainvm/image.h"
 
-#define LAINVM_MAX_OPERANDS 8u
+#define LAINVM_MAX_OPERANDS L1_MAX_OPERANDS
 
 /* --- 基本换算 ------------------------------------------------------------- */
 
