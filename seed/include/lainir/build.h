@@ -59,6 +59,15 @@ const L1Inst *lainir_inst_if(L1Builder *builder, const char *result,
 const L1Inst *lainir_inst_loop(L1Builder *builder, const char *result,
                                const char *label, const L1Region *body);
 
+/* #switch：一个选择子 + 常量到区域的映射 + **必须显式**的 default。
+ * ty 是选择子的类型实参——引擎和后端都靠它把常量掩到选择子的宽度上，
+ * 所以它是必须的，不是可选的。cases 数组会拷进 arena。
+ * default_case 为 NULL 是允许构造的，但验证器会拒绝（语义必须显式）。 */
+const L1Inst *lainir_inst_switch(L1Builder *builder, const char *result,
+                                 L1Operand selector, const L1Type *ty,
+                                 const L1SwitchCase *cases, uint32_t case_count,
+                                 const L1Region *default_case);
+
 const L1Inst *lainir_inst_jump(L1Builder *builder, L1InstKind kind,
                                const char *label, const L1Operand *operands,
                                uint32_t operand_count);
@@ -86,6 +95,16 @@ const L1Inst *lainir_inst_rewrite(L1Builder *builder, const L1Inst *inst,
                                   const L1Operand *operands,
                                   uint32_t operand_count, const L1Region *body,
                                   const L1Region *else_body);
+
+/* 复制一条 #switch 并替换选择子、分支和 default。
+ * lainir_inst_rewrite 只管 body/else_body，管不到 cases——折叠时需要它。
+ * cases 数组会拷进 arena；default_case 传 NULL 表示沿用原来的。 */
+const L1Inst *lainir_inst_rewrite_switch(L1Builder *builder,
+                                         const L1Inst *inst,
+                                         L1Operand selector,
+                                         const L1SwitchCase *cases,
+                                         uint32_t case_count,
+                                         const L1Region *default_case);
 
 /* --- 过程 --- */
 L1Param lainir_proc_param(const char *name, const L1Type *ty);

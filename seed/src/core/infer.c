@@ -76,6 +76,18 @@ const L1Type *lainir_inst_result_type(const LainIrTypes *types,
       return inst->body->results[index];
     return NULL;
   }
+  /* #switch 的结果由各分支区域的声明给；验证器保证它们一致，
+   * 所以取 default（验证器要求它一定在）。 */
+  if (inst->kind == INST_SWITCH) {
+    const L1Region *declaring = inst->default_case
+                                    ? inst->default_case
+                                    : (inst->case_count > 0
+                                           ? inst->cases[0].body
+                                           : NULL);
+    if (declaring && index < declaring->result_count)
+      return declaring->results[index];
+    return NULL;
+  }
   if (inst->kind == INST_CALL) {
     const L1Subroutine *callee =
         lainir_find_subroutine(types->module, inst->symbol);

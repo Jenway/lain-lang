@@ -218,6 +218,8 @@ static void print_inst(Printer *p, const L1Region *region, const L1Inst *inst) {
   case INST_SWITCH: {
     uint32_t i;
     print_opcode(p, inst);
+    /* 选择子的类型实参必须打出来：解析器要求它，往返靠它成立。 */
+    print_type_arg(p, inst);
     if (inst->operand_count > 0) {
       out(p, " ");
       print_operand(p, &inst->operands[0], NULL);

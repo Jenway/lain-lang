@@ -221,6 +221,28 @@ const L1Inst *lainir_inst_loop(L1Builder *builder, const char *result,
   return finish_inst(builder, inst, NULL, 0);
 }
 
+const L1Inst *lainir_inst_switch(L1Builder *builder, const char *result,
+                                 L1Operand selector, const L1Type *ty,
+                                 const L1SwitchCase *cases, uint32_t case_count,
+                                 const L1Region *default_case) {
+  L1Inst *inst =
+      (L1Inst *)new_inst(builder, INST_SWITCH, result, result ? 1u : 0u);
+  if (!inst) return NULL;
+  inst->ty = ty;
+  inst->has_ty = ty != NULL;
+  if (cases && case_count) {
+    L1SwitchCase *copied = (L1SwitchCase *)arena_alloc(
+        builder, sizeof(L1SwitchCase) * (size_t)case_count);
+    uint32_t i;
+    if (!copied) return NULL;
+    for (i = 0; i < case_count; i++) copied[i] = cases[i];
+    inst->cases = copied;
+  }
+  inst->case_count = case_count;
+  inst->default_case = default_case;
+  return finish_inst(builder, inst, &selector, 1);
+}
+
 const L1Inst *lainir_inst_jump(L1Builder *builder, L1InstKind kind,
                                const char *label, const L1Operand *operands,
                                uint32_t operand_count) {
@@ -277,6 +299,32 @@ const L1Inst *lainir_inst_rewrite(L1Builder *builder, const L1Inst *inst,
   if (body) copy->body = body;
   if (else_body) copy->else_body = else_body;
   return copy;
+}
+
+const L1Inst *lainir_inst_rewrite_switch(L1Builder *builder,
+                                         const L1Inst *inst,
+                                         L1Operand selector,
+                                         const L1SwitchCase *cases,
+                                         uint32_t case_count,
+                                         const L1Region *default_case) {
+  L1Inst *copy;
+  if (!builder || !inst) return NULL;
+  copy = (L1Inst *)arena_alloc(builder, sizeof(L1Inst));
+  if (!copy) return NULL;
+  *copy = *inst;
+  if (cases && case_count) {
+    L1SwitchCase *copied = (L1SwitchCase *)arena_alloc(
+        builder, sizeof(L1SwitchCase) * (size_t)case_count);
+    uint32_t i;
+    if (!copied) return NULL;
+    for (i = 0; i < case_count; i++) copied[i] = cases[i];
+    copy->cases = copied;
+  } else {
+    copy->cases = NULL;
+  }
+  copy->case_count = case_count;
+  if (default_case) copy->default_case = default_case;
+  return finish_inst(builder, copy, &selector, 1);
 }
 
 const L1Subroutine *lainir_subroutine(L1Builder *builder, const char *name,                                      const L1Param *params, uint32_t param_count,

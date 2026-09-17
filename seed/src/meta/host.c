@@ -1,0 +1,250 @@
+/* lainmeta/host.h 的实现。
+ *
+ * 每个宿主函数都是 LainVmHostFn：拿原始 64 位值，返回 0 = 成功。
+ * args[0] 永远是 host 自己的地址——Meta 从 initialize 收到它，之后每次调用
+ * 都原样传回来。没有全局，也没有 user_data。
+ */
+#include "lainmeta/host.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+  const char *path;
+  const char *text;
+  uint32_t length;
+} LainMetaSource;
+
+struct LainMetaHost {
+  LainMetaSource *sources;
+  uint32_t source_count;
+  uint32_t source_cap;
+  char *out;
+  uint32_t out_length;
+  uint32_t out_cap;
+  uint32_t status;
+};
+
+/* --- 能力名 ---------------------------------------------------------------
+ *   名字                          参数                      结果
+ *   lain_meta_source_count        ()                        count
+ *   lain_meta_source_data         (index)                   文本地址
+ *   lain_meta_source_length       (index)                   字节数
+ *   lain_meta_source_path_data    (index)                   路径地址
+ *   lain_meta_emit_reset          ()                        0
+ *   lain_meta_emit_write          (addr, length)            0
+ *   lain_meta_emit_data           ()                        文本地址
+ *   lain_meta_emit_length         ()                        字节数
+ *   lain_meta_fail                (code)                    0
+ * 每个的第一个参数都是 host 地址。
+ * ------------------------------------------------------------------------- */
+
+#define HOST_OF(args) ((LainMetaHost *)(uintptr_t)(args)[0])
+
+static int reserve_output(LainMetaHost *host, uint32_t extra) {
+  uint32_t need = host->out_length + extra + 1u;
+  uint32_t next;
+  char *grown;
+  if (need <= host->out_cap) return 0;
+  next = host->out_cap ? host->out_cap : 256u;
+  while (next < need) next *= 2u;
+  grown = (char *)realloc(host->out, next);
+  if (!grown) {
+    host->status = LAINMETA_ERR_OOM;
+    return 1;
+  }
+  host->out = grown;
+  host->out_cap = next;
+  return 0;
+}
+
+LainMetaHost *lainmeta_host_new(void) {
+  return (LainMetaHost *)calloc(1, sizeof(LainMetaHost));
+}
+
+void lainmeta_host_free(LainMetaHost *host) {
+  uint32_t i;
+  if (!host) return;
+  for (i = 0; i < host->source_count; i++) free((void *)host->sources[i].path);
+  free(host->sources);
+  free(host->out);
+  free(host);
+}
+
+int lainmeta_host_add_source(LainMetaHost *host, const char *path,
+                             const char *text, uint32_t length) {
+  LainMetaSource *grown;
+  char *copy;
+  if (!host || !text) return 1;
+  if (host->source_count >= host->source_cap) {
+    uint32_t next = host->source_cap ? host->source_cap * 2u : 8u;
+    grown = (LainMetaSource *)realloc(host->sources,
+                                      sizeof(LainMetaSource) * (size_t)next);
+    if (!grown) return 2;
+    host->sources = grown;
+    host->source_cap = next;
+  }
+  copy = (char *)malloc(path ? strlen(path) + 1u : 1u);
+  if (!copy) return 2;
+  if (path)
+    strcpy(copy, path);
+  else
+    copy[0] = '\0';
+  host->sources[host->source_count].path = copy;
+  host->sources[host->source_count].text = text;
+  host->sources[host->source_count].length = length;
+  host->source_count++;
+  return 0;
+}
+
+uint32_t lainmeta_host_source_count(const LainMetaHost *host) {
+  return host ? host->source_count : 0;
+}
+
+const char *lainmeta_host_output(const LainMetaHost *host) {
+  if (!host) return NULL;
+  return host->out ? host->out : "";
+}
+
+uint32_t lainmeta_host_output_length(const LainMetaHost *host) {
+  return host ? host->out_length : 0;
+}
+
+uint32_t lainmeta_host_status(const LainMetaHost *host) {
+  return host ? host->status : LAINMETA_ERR_OOM;
+}
+
+void lainmeta_host_clear_status(LainMetaHost *host) {
+  if (host) host->status = LAINMETA_OK;
+}
+
+/* --- 能力实现 ------------------------------------------------------------- */
+
+static uint32_t cap_source_count(const uint64_t *args, uint32_t count,
+                                 uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  if (!host || count < 1) return LAINMETA_ERR_OOM;
+  if (out) *out = host->source_count;
+  return 0;
+}
+
+static uint32_t cap_source_data(const uint64_t *args, uint32_t count,
+                                uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  uint64_t index;
+  if (!host || count < 2) return LAINMETA_ERR_OOM;
+  index = args[1];
+  if (index >= host->source_count) {
+    host->status = LAINMETA_ERR_NO_SOURCE;
+    return LAINMETA_ERR_NO_SOURCE;
+  }
+  if (out) *out = (uint64_t)(uintptr_t)host->sources[index].text;
+  return 0;
+}
+
+static uint32_t cap_source_length(const uint64_t *args, uint32_t count,
+                                  uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  uint64_t index;
+  if (!host || count < 2) return LAINMETA_ERR_OOM;
+  index = args[1];
+  if (index >= host->source_count) {
+    host->status = LAINMETA_ERR_NO_SOURCE;
+    return LAINMETA_ERR_NO_SOURCE;
+  }
+  if (out) *out = host->sources[index].length;
+  return 0;
+}
+
+static uint32_t cap_source_path_data(const uint64_t *args, uint32_t count,
+                                     uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  uint64_t index;
+  if (!host || count < 2) return LAINMETA_ERR_OOM;
+  index = args[1];
+  if (index >= host->source_count) {
+    host->status = LAINMETA_ERR_NO_SOURCE;
+    return LAINMETA_ERR_NO_SOURCE;
+  }
+  if (out) *out = (uint64_t)(uintptr_t)host->sources[index].path;
+  return 0;
+}
+
+static uint32_t cap_emit_reset(const uint64_t *args, uint32_t count,
+                               uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  if (!host || count < 1) return LAINMETA_ERR_OOM;
+  host->out_length = 0;
+  if (host->out) host->out[0] = '\0';
+  if (out) *out = 0;
+  return 0;
+}
+
+static uint32_t cap_emit_write(const uint64_t *args, uint32_t count,
+                               uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  const char *bytes;
+  uint64_t length;
+  if (!host || count < 3) return LAINMETA_ERR_OOM;
+  bytes = (const char *)(uintptr_t)args[1];
+  length = args[2];
+  if (!bytes && length > 0) return LAINMETA_ERR_UNSUPPORTED;
+  if (reserve_output(host, (uint32_t)length)) return LAINMETA_ERR_OOM;
+  if (length) memcpy(host->out + host->out_length, bytes, (size_t)length);
+  host->out_length += (uint32_t)length;
+  host->out[host->out_length] = '\0';
+  if (out) *out = 0;
+  return 0;
+}
+
+static uint32_t cap_emit_data(const uint64_t *args, uint32_t count,
+                              uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  if (!host || count < 1) return LAINMETA_ERR_OOM;
+  if (out) *out = (uint64_t)(uintptr_t)(host->out ? host->out : "");
+  return 0;
+}
+
+static uint32_t cap_emit_length(const uint64_t *args, uint32_t count,
+                                uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  if (!host || count < 1) return LAINMETA_ERR_OOM;
+  if (out) *out = host->out_length;
+  return 0;
+}
+
+static uint32_t cap_fail(const uint64_t *args, uint32_t count, uint64_t *out) {
+  LainMetaHost *host = HOST_OF(args);
+  if (!host || count < 2) return 1;
+  host->status = (uint32_t)args[1];
+  if (out) *out = 0;
+  return 0;
+}
+
+typedef struct {
+  const char *name;
+  LainVmHostFn fn;
+} MetaCapability;
+
+static const MetaCapability k_capabilities[] = {
+    {"lain_meta_source_count", cap_source_count},
+    {"lain_meta_source_data", cap_source_data},
+    {"lain_meta_source_length", cap_source_length},
+    {"lain_meta_source_path_data", cap_source_path_data},
+    {"lain_meta_emit_reset", cap_emit_reset},
+    {"lain_meta_emit_write", cap_emit_write},
+    {"lain_meta_emit_data", cap_emit_data},
+    {"lain_meta_emit_length", cap_emit_length},
+    {"lain_meta_fail", cap_fail},
+};
+
+int lainmeta_host_register(LainMetaHost *host, LainVmCaps *caps) {
+  size_t i;
+  if (!host || !caps) return 1;
+  for (i = 0; i < sizeof(k_capabilities) / sizeof(k_capabilities[0]); i++) {
+    if (lainvm_caps_add(caps, k_capabilities[i].name, LAINVM_CAP_FUNCTION,
+                        k_capabilities[i].fn) != 0)
+      return 2;
+  }
+  return 0;
+}
