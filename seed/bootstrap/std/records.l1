@@ -11,10 +11,10 @@
 // 打包：`偏移` 在低 40 位、`kind` 在 40..43、`width` 在 44..51、命中在最高位。
 // 走到 `}` 时返回的是**总大小**（最高位 0）——同一个走法服务两种问题。
 
-// 在源码里找关键字，返回它的位置；找不到返回 NOT_FOUND。
+// 在源码里找关键字，从 `from` 起，返回它的位置；找不到返回 NOT_FOUND。
 #proc meta_find_keyword(%src: #addr, %len: #bits<64>, %kw: #addr,
-                        %kw_len: #bits<64>) -> #bits<64> {
-  %found = #loop scan(%i: #bits<64> = 0) -> (#bits<64>) {
+                        %kw_len: #bits<64>, %from: #bits<64>) -> #bits<64> {
+  %found = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
     %more = #ult[#bits<64>](%i, %len)
     #if %more {
       %hit = #call bs_match_keyword(%src, %i, %len, %kw, %kw_len)
@@ -30,15 +30,20 @@
   #return %found
 }
 
-// 找到 `struct <rec> {` 之后的位置。名字不匹配或找不到返回 NOT_FOUND。
+// 找到 `struct <rec> {` 之后的位置。找不到返回 NOT_FOUND。
+//
+// 同名声明不止一条时（`struct` 和 `struct` 混排），只看第一条是不够的：
+// 名字不匹配要接着往下找，所以这里是**在关键字上循环**，不是找一次就算。
+// 返回 0 当「继续找」的哨兵——正文起点永远大于 0。
 #proc meta_find_rec_body(%src: #addr, %len: #bits<64>, %rec_lo: #bits<64>,
                          %rec_hi: #bits<64>) -> #bits<64> {
   %kw = #data_addr meta_kw_struct
-  %kw_at = #call meta_find_keyword(%src, %len, %kw, 6)
-  %missing = #eq[#bits<64>](%kw_at, 0xFFFFFFFFFFFFFFFF)
-  %r = #if %missing -> (#bits<64>) {
-    #yield 0xFFFFFFFFFFFFFFFF
-  } else {
+  %found = #loop s(%at: #bits<64> = 0) -> (#bits<64>) {
+    %kw_at = #call meta_find_keyword(%src, %len, %kw, 6, %at)
+    %missing = #eq[#bits<64>](%kw_at, 0xFFFFFFFFFFFFFFFF)
+    #if %missing {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
     %after = #add[#bits<64>](%kw_at, 6)
     %n_lo = #call bs_skip_space(%src, %after, %len)
     %n_hi = #call bs_skip_ident(%src, %n_lo, %len)
@@ -58,12 +63,18 @@
       %one = #add[#bits<64>](%brace, 1)
       #yield %one
     } else {
-      #yield 0xFFFFFFFFFFFFFFFF
+      #yield 0
     }
-    #yield %body
+    %hit = #ne[#bits<64>](%body, 0)
+    #if %hit {
+      #break s(%body)
+    }
+    %next_at = #add[#bits<64>](%kw_at, 6)
+    #continue s(%next_at)
   }
-  #return %r
+  #return %found
 }
+
 
 // 走字段列表累加偏移。
 //   命中 f_lo/f_hi  → 返回 packed（最高位 1）

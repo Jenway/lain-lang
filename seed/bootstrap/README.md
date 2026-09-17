@@ -156,6 +156,35 @@ data p_storage rw { 0 0 0 0 0 0 0 0 }
 它不看上下文，所以字段名叫 `letter` 之类的会被误判——v0 的输入里没这种名字，
 真做法是让每条降级返回「这条形式到哪结束」。
 
+## 和类型
+
+`std/sums.l1`。规则（v0）：tag 固定 `#bits<8>` 在偏移 0，载荷区从
+`align_up(1, 最大对齐)` 开始，所有变体共用，总大小按最大对齐取整。
+每个变体**最多一个**载荷字段。
+
+```lain
+enum Shape { Empty Circle(i32) Square(i64) }
+```
+
+```lainir
+#proc Shape__Empty_tag() -> #bits<64> { #return 0 }     // 无载荷 → 不发 _off
+#proc Shape__Circle_tag() -> #bits<64> { #return 1 }
+#proc Shape__Circle_off() -> #bits<64> { #return 8 }
+#proc Shape__Square_tag() -> #bits<64> { #return 2 }
+#proc Shape__Square_off() -> #bits<64> { #return 8 }
+#proc Shape__size() -> #bits<64> { #return 16 }
+```
+
+载荷起点是 8（最大对齐来自 `i64`），`Circle` 的 `i32` 放得下，所以两个变体
+偏移相同、总大小 16。上面缩写了；实际产出每条过程都占 3 行。
+
+和积类型同源——布局都是 `align_up` 累加出来的——多出来的只有**判别字段**。
+所以 `std/sums.l1` 也沿用「回源码再走一遍」的做法，不建表。
+
+**还没接的**：变体的构造（`Shape.Circle { 7 }`）和投影（`Shape.Circle(v)`）。
+两者都要先分清楚「这个名字是 struct 还是 enum」，`meta_is_enum` 已经在了
+（它按名字找 `enum` 声明），但构造/投影的降级还没写。
+
 ## 类型表
 
 在 `std/types.l1`，是一段**静态字节**：不需要 init 过程，也没有手算的偏移
