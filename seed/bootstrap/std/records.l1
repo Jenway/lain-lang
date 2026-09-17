@@ -1,0 +1,316 @@
+// 初代标准库 v0 —— 积类型：构造与字段访问。
+//
+// 降级 `p.a` 的时候，发 `#load[#bits<32>]` 要**编译期就知道**偏移和宽度。
+// 字段偏移是 struct 声明时算出来的，但目前只有那几个 offset/size **过程**
+// ——过程是运行时才叫得动的，编译期用不上。
+//
+// 所以这里的办法是：**按需回源码里再走一遍那条 struct 声明**，累加偏移
+// 直到命中字段名。手写引导阶段的折中，慢（每个字段一次 O(n) 扫描）但不需要
+// 建记录表。真正的做法是一张编译期符号表，那是下一步。
+//
+// 打包：`偏移` 在低 40 位、`kind` 在 40..43、`width` 在 44..51、命中在最高位。
+// 走到 `}` 时返回的是**总大小**（最高位 0）——同一个走法服务两种问题。
+
+// 在源码里找关键字，返回它的位置；找不到返回 NOT_FOUND。
+#proc meta_find_keyword(%src: #addr, %len: #bits<64>, %kw: #addr,
+                        %kw_len: #bits<64>) -> #bits<64> {
+  %found = #loop scan(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %hit = #call bs_match_keyword(%src, %i, %len, %kw, %kw_len)
+      #if %hit {
+        #break scan(%i)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    } else {
+      #break scan(0xFFFFFFFFFFFFFFFF)
+    }
+  }
+  #return %found
+}
+
+// 找到 `struct <rec> {` 之后的位置。名字不匹配或找不到返回 NOT_FOUND。
+#proc meta_find_rec_body(%src: #addr, %len: #bits<64>, %rec_lo: #bits<64>,
+                         %rec_hi: #bits<64>) -> #bits<64> {
+  %kw = #data_addr meta_kw_struct
+  %kw_at = #call meta_find_keyword(%src, %len, %kw, 6)
+  %missing = #eq[#bits<64>](%kw_at, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %missing -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %after = #add[#bits<64>](%kw_at, 6)
+    %n_lo = #call bs_skip_space(%src, %after, %len)
+    %n_hi = #call bs_skip_ident(%src, %n_lo, %len)
+    %mine = #sub[#bits<64>](%rec_hi, %rec_lo)
+    %theirs = #sub[#bits<64>](%n_hi, %n_lo)
+    %len_ok = #eq[#bits<64>](%mine, %theirs)
+    %same = #if %len_ok -> (#bits<1>) {
+      %a = #lea(%src, %n_lo, 1, 0)
+      %b = #lea(%src, %rec_lo, 1, 0)
+      %eq = #call meta_bytes_equal(%a, %b, %mine)
+      #yield %eq
+    } else {
+      #yield 0
+    }
+    %body = #if %same -> (#bits<64>) {
+      %brace = #call bs_skip_space(%src, %n_hi, %len)
+      %one = #add[#bits<64>](%brace, 1)
+      #yield %one
+    } else {
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    #yield %body
+  }
+  #return %r
+}
+
+// 走字段列表累加偏移。
+//   命中 f_lo/f_hi  → 返回 packed（最高位 1）
+//   走到 `}`        → 返回按最大对齐取整后的总大小（最高位 0）
+// f_lo == f_hi 表示「不匹配任何字段」，那就只算大小。
+#proc meta_walk_fields(%src: #addr, %len: #bits<64>, %at: #bits<64>,
+                       %f_lo: #bits<64>, %f_hi: #bits<64>,
+                       %off0: #bits<64>, %al0: #bits<64>) -> #bits<64> {
+  %r = #loop fields(%at: #bits<64> = %at, %off: #bits<64> = %off0,
+                    %al: #bits<64> = %al0) -> (#bits<64>) {
+    %here = #call bs_skip_space(%src, %at, %len)
+    %byte = #call bs_byte_at(%src, %here, %len)
+    %is_close = #eq[#bits<8>](%byte, 125)
+    #if %is_close {
+      %rounded = #call bs_align_up(%off, %al)
+      #break fields(%rounded)
+    }
+    %name_hi = #call bs_skip_ident(%src, %here, %len)
+    %colon = #call bs_skip_space(%src, %name_hi, %len)
+    %one = #add[#bits<64>](%colon, 1)
+    %t_lo = #call bs_skip_space(%src, %one, %len)
+    %t_hi = #call bs_skip_ident(%src, %t_lo, %len)
+    %tbl = #data_addr meta_types
+    %tname = #lea(%src, %t_lo, 1, 0)
+    %tlen = #sub[#bits<64>](%t_hi, %t_lo)
+    %entry = #call meta_type_find(%tbl, %tname, %tlen)
+    %kind = #call meta_type_kind(%tbl, %entry)
+    %width = #call meta_type_width(%tbl, %entry)
+    %fsize = #call bs_repr_size(%kind, %width)
+    %falign = #call bs_repr_align(%kind, %width)
+    %aligned = #call bs_align_up(%off, %falign)
+    %want = #sub[#bits<64>](%f_hi, %f_lo)
+    %have = #sub[#bits<64>](%name_hi, %here)
+    %len_ok = #eq[#bits<64>](%want, %have)
+    %same = #if %len_ok -> (#bits<1>) {
+      %a = #lea(%src, %here, 1, 0)
+      %b = #lea(%src, %f_lo, 1, 0)
+      %eq = #call meta_bytes_equal(%a, %b, %want)
+      #yield %eq
+    } else {
+      #yield 0
+    }
+    #if %same {
+      %k = #shl[#bits<64>](%kind, 40)
+      %w = #shl[#bits<64>](%width, 44)
+      %pk1 = #or[#bits<64>](%aligned, %k)
+      %pk2 = #or[#bits<64>](%pk1, %w)
+      %set = #or[#bits<64>](%pk2, 0x8000000000000000)
+      #break fields(%set)
+    }
+    %next_off = #add[#bits<64>](%aligned, %fsize)
+    %bigger = #ugt[#bits<64>](%falign, %al)
+    %new_al = #if %bigger -> (#bits<64>) {
+      #yield %falign
+    } else {
+      #yield %al
+    }
+    #continue fields(%t_hi, %next_off, %new_al)
+  }
+  #return %r
+}
+
+// 某个字段的 (偏移, kind, width)。找不到返回 0。
+#proc meta_layout_field(%src: #addr, %len: #bits<64>, %rec_lo: #bits<64>,
+                        %rec_hi: #bits<64>, %f_lo: #bits<64>,
+                        %f_hi: #bits<64>) -> #bits<64> {
+  %body = #call meta_find_rec_body(%src, %len, %rec_lo, %rec_hi)
+  %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %missing -> (#bits<64>) {
+    #yield 0
+  } else {
+    %info = #call meta_walk_fields(%src, %len, %body, %f_lo, %f_hi, 0, 1)
+    #yield %info
+  }
+  #return %r
+}
+
+// 记录的总大小。
+#proc meta_layout_size(%src: #addr, %len: #bits<64>, %rec_lo: #bits<64>,
+                       %rec_hi: #bits<64>) -> #bits<64> {
+  %body = #call meta_find_rec_body(%src, %len, %rec_lo, %rec_hi)
+  %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %missing -> (#bits<64>) {
+    #yield 0
+  } else {
+    %info = #call meta_walk_fields(%src, %len, %body, 0, 0, 0, 1)
+    %size = #and[#bits<64>](%info, 0xFFFFFFFFFF)
+    #yield %size
+  }
+  #return %r
+}
+
+// --- 发射 -----------------------------------------------------------------
+
+// 写 n 个 "0 "（给 data 的初值）
+#proc meta_emit_zeros(%host: #addr, %n: #bits<64>) -> #bits<32> {
+  %z = #data_addr meta_c3
+  %st = #loop scan(%i: #bits<64> = 0) -> (#bits<32>) {
+    %more = #ult[#bits<64>](%i, %n)
+    #if %more {
+      %w = #call lain_meta_emit_write(%host, %z, 2)
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    } else {
+      #break scan(0)
+    }
+  }
+  #return %st
+}
+
+// 写一条 `  #store[repr](value, #lea(%base, 0, 0, off))`
+#proc meta_emit_store(%host: #addr, %kind: #bits<64>, %width: #bits<64>,
+                      %value: #bits<64>, %off: #bits<64>) -> #bits<32> {
+  %o = #data_addr meta_c8
+  %a = #call lain_meta_emit_write(%host, %o, 9)
+  %b = #call meta_emit_repr(%host, %kind, %width)
+  %p = #data_addr meta_c9
+  %c = #call lain_meta_emit_write(%host, %p, 2)
+  %d = #call meta_emit_uint(%host, %value)
+  %t = #data_addr meta_c10
+  %e = #call lain_meta_emit_write(%host, %t, 20)
+  %f = #call meta_emit_uint(%host, %off)
+  %n = #data_addr meta_c11
+  %g = #call lain_meta_emit_write(%host, %n, 3)
+  #return 0
+}
+
+// 初始化列表 `{ f: v f: v }`：每个字段一条 store。
+#proc meta_construct_fields(%host: #addr, %base: #addr, %len: #bits<64>,
+                            %rec_lo: #bits<64>, %rec_hi: #bits<64>,
+                            %at: #bits<64>) -> #bits<32> {
+  %st = #loop fields(%at: #bits<64> = %at) -> (#bits<32>) {
+    %here = #call bs_skip_space(%base, %at, %len)
+    %byte = #call bs_byte_at(%base, %here, %len)
+    %is_close = #eq[#bits<8>](%byte, 125)
+    #if %is_close {
+      #break fields(0)
+    }
+    %f_hi = #call bs_skip_ident(%base, %here, %len)
+    %colon = #call bs_skip_space(%base, %f_hi, %len)
+    %one = #add[#bits<64>](%colon, 1)
+    %v_lo = #call bs_skip_space(%base, %one, %len)
+    %v_hi = #call bs_skip_ident(%base, %v_lo, %len)
+    %info = #call meta_layout_field(%base, %len, %rec_lo, %rec_hi, %here, %f_hi)
+    // 走表不中就是错的：不能把「走到 } 得到的总大小」当成字段偏移用。
+    %found = #lshr[#bits<64>](%info, 63)
+    %missing = #eq[#bits<64>](%found, 0)
+    #if %missing {
+      %f = #call lain_meta_fail(%host, 8)
+      #break fields(8)
+    }
+    %off = #and[#bits<64>](%info, 0xFFFFFFFFFF)
+    %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 40), 15)
+    %width = #and[#bits<64>](#lshr[#bits<64>](%info, 44), 255)
+    %value = #call bs_read_uint(%base, %v_lo, %len)
+    %e = #call meta_emit_store(%host, %kind, %width, %value, %off)
+    // 初始化列表里可能有逗号，跳掉
+    %gap = #call bs_skip_space(%base, %v_hi, %len)
+    %sep = #call bs_byte_at(%base, %gap, %len)
+    %is_comma = #eq[#bits<8>](%sep, 44)
+    %next_at = #if %is_comma -> (#bits<64>) {
+      %past = #add[#bits<64>](%gap, 1)
+      #yield %past
+    } else {
+      #yield %gap
+    }
+    #continue fields(%next_at)
+  }
+  #return %st
+}
+
+// `let NAME = Rec { ... }`：
+//   data NAME_storage rw { 0 ... }
+//   #proc NAME() -> #addr { %base = #data_addr NAME_storage; stores; #return %base }
+#proc meta_lower_construct(%host: #addr, %base: #addr, %len: #bits<64>,
+                           %bind_lo: #bits<64>, %bind_hi: #bits<64>,
+                           %rec_lo: #bits<64>, %rec_hi: #bits<64>,
+                           %brace_at: #bits<64>) -> #bits<32> {
+  %size = #call meta_layout_size(%base, %len, %rec_lo, %rec_hi)
+  %bind_at = #lea(%base, %bind_lo, 1, 0)
+  %bind_len = #sub[#bits<64>](%bind_hi, %bind_lo)
+
+  %d1 = #data_addr meta_c1
+  %w1 = #call lain_meta_emit_write(%host, %d1, 5)
+  %w2 = #call lain_meta_emit_write(%host, %bind_at, %bind_len)
+  %d2 = #data_addr meta_c2
+  %w3 = #call lain_meta_emit_write(%host, %d2, 14)
+  %w4 = #call meta_emit_zeros(%host, %size)
+  %d3 = #data_addr meta_c4
+  %w5 = #call lain_meta_emit_write(%host, %d3, 8)
+
+  %w6 = #call lain_meta_emit_write(%host, %bind_at, %bind_len)
+  %d4 = #data_addr meta_c5
+  %w7 = #call lain_meta_emit_write(%host, %d4, 14)
+  %d5 = #data_addr meta_c6
+  %w8 = #call lain_meta_emit_write(%host, %d5, 21)
+  %w9 = #call lain_meta_emit_write(%host, %bind_at, %bind_len)
+  %d6 = #data_addr meta_c7
+  %w10 = #call lain_meta_emit_write(%host, %d6, 9)
+
+  %body = #add[#bits<64>](%brace_at, 1)
+  %st = #call meta_construct_fields(%host, %base, %len, %rec_lo, %rec_hi, %body)
+
+  %d7 = #data_addr meta_c12
+  %w11 = #call lain_meta_emit_write(%host, %d7, 18)
+  #return %st
+}
+
+// `let NAME = Rec.field(VAR)` —— v0 里记录名和值名都写出来，
+// 所以不需要值表。`p.left` 那种写法要一张「值名 → 类型名」的表，是下一步。
+#proc meta_lower_field_access(%host: #addr, %base: #addr, %len: #bits<64>,
+                              %bind_lo: #bits<64>, %bind_hi: #bits<64>,
+                              %rec_lo: #bits<64>, %rec_hi: #bits<64>,
+                              %at: #bits<64>) -> #bits<32> {
+  %f_lo = #call bs_skip_space(%base, %at, %len)
+  %f_hi = #call bs_skip_ident(%base, %f_lo, %len)
+  %paren = #call bs_skip_space(%base, %f_hi, %len)
+  %one = #add[#bits<64>](%paren, 1)
+  %v_lo = #call bs_skip_space(%base, %one, %len)
+  %v_hi = #call bs_skip_ident(%base, %v_lo, %len)
+
+  %info = #call meta_layout_field(%base, %len, %rec_lo, %rec_hi, %f_lo, %f_hi)
+  %off = #and[#bits<64>](%info, 0xFFFFFFFFFF)
+  %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 40), 15)
+  %width = #and[#bits<64>](#lshr[#bits<64>](%info, 44), 255)
+
+  %bind_at = #lea(%base, %bind_lo, 1, 0)
+  %bind_len = #sub[#bits<64>](%bind_hi, %bind_lo)
+  %var_at = #lea(%base, %v_lo, 1, 0)
+  %var_len = #sub[#bits<64>](%v_hi, %v_lo)
+
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %w2 = #call lain_meta_emit_write(%host, %bind_at, %bind_len)
+  %p2a = #data_addr meta_p2a
+  %w3 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w4 = #call meta_emit_repr(%host, %kind, %width)
+  %f1 = #data_addr meta_f1
+  %w5 = #call lain_meta_emit_write(%host, %f1, 16)
+  %w6 = #call lain_meta_emit_write(%host, %var_at, %var_len)
+  %f2 = #data_addr meta_f2
+  %w7 = #call lain_meta_emit_write(%host, %f2, 26)
+  %w8 = #call meta_emit_uint(%host, %off)
+  %f3 = #data_addr meta_f3
+  %w9 = #call lain_meta_emit_write(%host, %f3, 15)
+  %w10 = #call meta_emit_repr(%host, %kind, %width)
+  %f4 = #data_addr meta_f4
+  %w11 = #call lain_meta_emit_write(%host, %f4, 21)
+  #return 0
+}

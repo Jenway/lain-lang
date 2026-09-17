@@ -235,6 +235,19 @@ int main(int argc, char **argv) {
     report_fail("source grant", "the address space rejected the source bytes");
     goto cleanup;
   }
+  /* Meta 的暂存区（表格建在这里）也要授权，而且是**可写**的。
+   * 它不属于 Meta 的映像，所以不授权就写不了。 */
+  {
+    uint32_t scratch_size = 0;
+    void *scratch = lainmeta_host_scratch(host, &scratch_size);
+    if (!scratch ||
+        lainvm_space_add_region(&meta_space, (uintptr_t)scratch, scratch_size,
+                                LAINVM_MEM_READ | LAINVM_MEM_WRITE,
+                                0) == LAINVM_SPACE_NO_REGION) {
+      report_fail("scratch grant", "the address space rejected the scratch");
+      goto cleanup;
+    }
+  }
   meta_tcb = prepare(meta_builder, bootstrap, &meta_space, &meta_image, "meta");
   if (!meta_tcb) goto cleanup;
 

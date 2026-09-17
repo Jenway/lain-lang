@@ -190,3 +190,29 @@
   }
   #return %r
 }
+
+// 从 from 起找下一个顶层形式（`let` 或 `struct`），返回它的位置。
+// 找不到返回 NOT_FOUND。
+//
+// 这是手写阶段的权宜之计：各降级过程不返回「这条形式到哪结束」，所以靠
+// 扫关键字找下一条。它不看上下文，所以字段名叫 `letter` 之类的会被误判
+// ——v0 的输入里没这种名字，真做法是让每条降级返回结束位置。
+#proc bs_next_form(%base: #addr, %from: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %kw = #data_addr meta_kw_struct
+  %found = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %is_let = #call bs_match_let(%base, %i, %len)
+      %is_struct = #call bs_match_keyword(%base, %i, %len, %kw, 6)
+      %hit = #or[#bits<1>](%is_let, %is_struct)
+      #if %hit {
+        #break scan(%i)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    } else {
+      #break scan(0xFFFFFFFFFFFFFFFF)
+    }
+  }
+  #return %found
+}
