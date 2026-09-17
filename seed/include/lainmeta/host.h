@@ -40,6 +40,18 @@ int lainmeta_host_add_source(LainMetaHost *host, const char *path,
 
 uint32_t lainmeta_host_source_count(const LainMetaHost *host);
 
+/* 第 index 份源码的**逻辑路径**（NUL 结尾）。这是 import 解析的注册表：
+ * `import("std::math")` 规范化成 `std/math.lain` 之后和它逐字节比较。
+ *
+ * 返回的是宿主的地址，不在 Meta 的映像里——驱动要用它就得先授权，
+ * 和源码文本、暂存区是同一个规矩。越界返回 ""。 */
+const char *lainmeta_host_source_path(const LainMetaHost *host,
+                                      uint32_t index);
+
+/* 第 index 份源码的文本地址与字节数（读到 length_out）。同样要驱动授权。 */
+const char *lainmeta_host_source_text(const LainMetaHost *host, uint32_t index,
+                                      uint32_t *length_out);
+
 /* Meta 的可写暂存区。表格（记录表、值表）建在这里。
  *
  * 由**驱动显式授权**：Meta 的 TCB 不自带地址空间，这块内存不是它映像的

@@ -120,6 +120,24 @@ uint32_t lainmeta_host_source_count(const LainMetaHost *host) {
   return host ? host->source_count : 0;
 }
 
+const char *lainmeta_host_source_path(const LainMetaHost *host,
+                                      uint32_t index) {
+  if (!host || index >= host->source_count) return "";
+  return host->sources[index].path ? host->sources[index].path : "";
+}
+
+/* 第 index 份源码的文本地址与字节数。驱动要授权它们，所以需要读得到
+ * ——和路径一样，这些地址都在宿主这边，不在 Meta 的映像里。 */
+const char *lainmeta_host_source_text(const LainMetaHost *host,
+                                      uint32_t index, uint32_t *length_out) {
+  if (!host || index >= host->source_count) {
+    if (length_out) *length_out = 0;
+    return "";
+  }
+  if (length_out) *length_out = host->sources[index].length;
+  return host->sources[index].text;
+}
+
 const char *lainmeta_host_output(const LainMetaHost *host) {
   if (!host) return NULL;
   return host->out ? host->out : "";
