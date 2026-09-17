@@ -9,7 +9,8 @@
 #include "lainir/opname.h"
 
 #define L1P_MAX_RESULTS 4u
-#define L1P_MAX_PARAMS 16u
+/* 和 core.h 的 L1_MAX_OPERANDS 同一个数：解析器、验证器、引擎不能各说各话。 */
+#define L1P_MAX_PARAMS L1_MAX_OPERANDS
 
 typedef struct {
   const L1Inst **items;
