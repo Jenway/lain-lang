@@ -181,9 +181,51 @@ enum Shape { Empty Circle(i32) Square(i64) }
 和积类型同源——布局都是 `align_up` 累加出来的——多出来的只有**判别字段**。
 所以 `std/sums.l1` 也沿用「回源码再走一遍」的做法，不建表。
 
-**还没接的**：变体的构造（`Shape.Circle { 7 }`）和投影（`Shape.Circle(v)`）。
-两者都要先分清楚「这个名字是 struct 还是 enum」，`meta_is_enum` 已经在了
-（它按名字找 `enum` 声明），但构造/投影的降级还没写。
+**构造和投影**：
+
+```lain
+enum Shape { Empty Circle(i32) Square(i64) }
+let c = Shape.Circle { 7 };
+let v: i32 = Shape.Circle(c);
+```
+
+```lainir
+data c_storage rw { 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 }
+
+#proc c() -> #addr {
+  %base = #data_addr c_storage
+  #store[#bits<8>](1, #lea(%base, 0, 0, 0))
+  #store[#bits<32>](7, #lea(%base, 0, 0, 8))
+  #return %base
+}
+
+#proc v() -> #bits<32> {
+  %b = #call c()
+  %t = #load[#bits<8>](%b)
+  %m = #eq[#bits<8>](%t, 1)
+  %r = #if %m -> (#bits<32>) {
+    %p = #lea(%b, 0, 0, 8)
+    %v = #load[#bits<32>](%p)
+    #yield %v
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+```
+
+构造和积类型同形（一块静态存储、一条 tag 存、一条载荷存），投影没有对应物：
+积类型的字段访问是**一条 `#load`**（偏移编译期就知道，字段一定在），和类型的投影
+必须**先看判别字段**——别的变体共用同一块载荷区。v0 把不命中折叠成 0（全函数）。
+
+`A.b` 里的 `A` 是 struct 还是 enum，靠 `meta_is_enum` 按名字回源码找 `enum` 声明
+来分——这决定走「字段访问」还是「变体构造／投影」，两者形状完全不同。
+
+两条错误路径是有状态码的，不是静默的 0：投影无载荷的变体 → 10，投一个声明里
+没有的变体 → 9。
+
+**还没接的**：`p.left` 这种写法（要先有一张「值名 → 类型名」的表），以及和类型的
+`#switch`——投影现在是「比一次 tag」，变体多了应该换成分派。
 
 ## 类型表
 
