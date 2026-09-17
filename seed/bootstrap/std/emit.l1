@@ -18,16 +18,57 @@
 #proc lain_meta_fail(%host: #addr, %code: #bits<32>) -> #bits<32> #extern "lain_meta_fail"
 
 // 输出模板。产物长这样：
-//   #proc <NAME>() -> #bits<64> {
+//   #proc <NAME>() -> <REPR> {
 //     #return <VALUE>
 //   }
-// 三段固定文本 + 从源码原样搬过来的名字 + 十进制数字。
+// 三段固定文本 + 从源码原样搬过来的名字 + 类型实参 + 十进制数字。
 data meta_p1 ro { 35 112 114 111 99 32 }
-data meta_p2 ro { 40 41 32 45 62 32 35 98 105 116 115 60 54 52 62 32 123 10 32 32 35 114 101 116 117 114 110 32 }
+data meta_p2a ro { 40 41 32 45 62 32 }
+data meta_p2b ro { 32 123 10 32 32 35 114 101 116 117 114 110 32 }
 data meta_p3 ro { 10 125 10 }
 
 // 一个字节的暂存：能力只接受 (地址, 长度)，所以单字节要有个落脚点。
 data meta_scratch rw { 0 }
+
+// 类型实参的词素。kind 决定用哪一组。
+data meta_t_bits ro { 35 98 105 116 115 60 }
+data meta_t_f ro { 35 102 60 }
+data meta_t_vec ro { 35 118 101 99 60 }
+data meta_t_addr ro { 35 97 100 100 114 }
+data meta_t_gt ro { 62 }
+
+// 把 repr 写成 LAINIR 的类型实参：0 -> #bits<N>，1 -> #f<N>，
+// 2 -> #vec<N>，3 -> #addr（#addr 没有宽度可言）。
+#proc meta_emit_repr(%host: #addr, %kind: #bits<64>,
+                     %width: #bits<64>) -> #bits<32> {
+  #if #eq[#bits<64>](%kind, 3) {
+    %p = #data_addr meta_t_addr
+    %w = #call lain_meta_emit_write(%host, %p, 5)
+    #return %w
+  }
+  #if #eq[#bits<64>](%kind, 1) {
+    %p = #data_addr meta_t_f
+    %a = #call lain_meta_emit_write(%host, %p, 3)
+    %b = #call meta_emit_uint(%host, %width)
+    %g = #data_addr meta_t_gt
+    %c = #call lain_meta_emit_write(%host, %g, 1)
+    #return %c
+  }
+  #if #eq[#bits<64>](%kind, 2) {
+    %p = #data_addr meta_t_vec
+    %a = #call lain_meta_emit_write(%host, %p, 5)
+    %b = #call meta_emit_uint(%host, %width)
+    %g = #data_addr meta_t_gt
+    %c = #call lain_meta_emit_write(%host, %g, 1)
+    #return %c
+  }
+  %bits = #data_addr meta_t_bits
+  %w1 = #call lain_meta_emit_write(%host, %bits, 6)
+  %w2 = #call meta_emit_uint(%host, %width)
+  %gt = #data_addr meta_t_gt
+  %w3 = #call lain_meta_emit_write(%host, %gt, 1)
+  #return %w3
+}
 
 // 写一个字节出去。
 #proc meta_emit_byte(%host: #addr, %b: #bits<8>) -> #bits<32> {
