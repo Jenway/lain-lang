@@ -20,9 +20,23 @@
 #include "lainir/build.h"
 #include "lainir/parse.h"
 #include "lainir/verify.h"
+#include "lainbackend/emit.h"
+#include "lainbackend/target.h"
 #include "lainmeta/host.h"
 #include "lainvm/engine.h"
 #include "lainvm/space.h"
+
+/* 出 C 模式用：把后端写出来的字节直接打到 stdout。 */
+static void stdout_write(void *user, const char *bytes, uint32_t size) {
+  (void)user;
+  fwrite(bytes, 1, size, stdout);
+}
+
+static void ignore_symbol(void *user, const char *symbol, bool is_extern) {
+  (void)user;
+  (void)symbol;
+  (void)is_extern;
+}
 
 static int failures = 0;
 
@@ -168,6 +182,8 @@ int main(int argc, char **argv) {
   /* 可选：断言产物里出现某段文本。类型表的验收靠它——表少一个字节
    * 就会产出错的 repr，光看返回值看不出来。 */
   const char *want_text = argc > 4 ? argv[4] : NULL;
+  /* 第 5 个参数是 "c" 时：把产物编成 C 打出来，不执行它。 */
+  const char *mode = argc > 5 ? argv[5] : NULL;
   L1Builder *meta_builder = lainir_builder_new();
   L1Builder *out_builder = lainir_builder_new();
   LainMetaHost *host = lainmeta_host_new();
@@ -285,6 +301,59 @@ int main(int argc, char **argv) {
     char buffer[192];
     snprintf(buffer, sizeof(buffer), "produced text lacks `%s`", want_text);
     report_fail("repr", buffer);
+    goto cleanup;
+  }
+
+  /* 出 C：把 Meta 产出的 LAINIR 交给 C 后端。这是整条链的最后一跳。 */
+  if (mode && strcmp(mode, "c") == 0) {
+    const L1Module *prod_module;
+    static const uint32_t ints[4] = {8, 16, 32, 64};
+    static const uint32_t floats[2] = {32, 64};
+    LainTarget target;
+    LainBackendSink sink;
+    LainBackend *backend;
+
+    diag.code = 0;
+    prod_module = lainir_parse(out_builder, produced, &diag);
+    if (!prod_module) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer), "parse: %d %s", diag.code, diag.message);
+      report_fail("produced parse", buffer);
+      goto cleanup;
+    }
+    if (lainir_verify(prod_module, &diag) != 0) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer), "verify: %d %s", diag.code,
+               diag.message);
+      report_fail("produced verify", buffer);
+      goto cleanup;
+    }
+    target.name = "c";
+    target.address_bits = 64;
+    target.int_widths = ints;
+    target.int_width_count = 4;
+    target.float_formats = floats;
+    target.float_format_count = 2;
+    target.max_alignment = 16;
+    target.unaligned_ok = true;
+    target.little_endian = true;
+    target.capability = LAINBC_CAP_SYMBOL;
+    sink.write = stdout_write;
+    sink.symbol = ignore_symbol;
+    sink.user = NULL;
+    diag.code = 0;
+    backend = lainbackend_new(&target, &sink, &diag);
+    if (!backend) {
+      report_fail("backend", "cannot create");
+      goto cleanup;
+    }
+    if (lainbackend_emit(backend, prod_module) != 0) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer), "emit: %d %s", diag.code, diag.message);
+      report_fail("backend", buffer);
+    }
+    lainbackend_free(backend);
+    rc = failures == 0 ? 0 : 1;
     goto cleanup;
   }
 
