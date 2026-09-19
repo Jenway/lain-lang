@@ -11,68 +11,38 @@
 // 打包：`偏移` 在低 40 位、`kind` 在 40..43、`width` 在 44..51、命中在最高位。
 // 走到 `}` 时返回的是**总大小**（最高位 0）——同一个走法服务两种问题。
 
-// 在源码里找关键字，从 `from` 起，返回它的位置；找不到返回 NOT_FOUND。
-#proc meta_find_keyword(%src: #addr, %len: #bits<64>, %kw: #addr,
-                        %kw_len: #bits<64>, %from: #bits<64>) -> #bits<64> {
-  %found = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
-    %more = #ult[#bits<64>](%i, %len)
-    #if %more {
-      %hit = #call bs_match_keyword(%src, %i, %len, %kw, %kw_len)
-      #if %hit {
-        #break scan(%i)
-      }
-      %i2 = #add[#bits<64>](%i, 1)
-      #continue scan(%i2)
-    } else {
-      #break scan(0xFFFFFFFFFFFFFFFF)
-    }
-  }
-  #return %found
-}
+// `meta_find_keyword`（从某个位置起逐字节找关键字）**已经删了**：按名字找声明
+// 现在走语法树（`meta_find_decl`）。它和 `bs_next_form` 是同一类东西——「搜」，
+// 而不是「认」。
 
-// 找到 `struct <rec> {` 之后的位置。找不到返回 NOT_FOUND。
+// 找到 `struct <rec> {` 之后的正文起点（`{` 后面一个字符）。找不到返回 NOT_FOUND。
 //
-// 同名声明不止一条时（`struct` 和 `struct` 混排），只看第一条是不够的：
-// 名字不匹配要接着往下找，所以这里是**在关键字上循环**，不是找一次就算。
-// 返回 0 当「继续找」的哨兵——正文起点永远大于 0。
-#proc meta_find_rec_body(%src: #addr, %len: #bits<64>, %rec_lo: #bits<64>,
+// **走语法树**：以前是从头逐字节搜 `struct` 这个词，名字不对就接着搜下一处。
+// 现在问的是「这个节点是不是内容为 struct 的词」，名字是不是那个词的下一个节点。
+#proc meta_find_rec_body(%host: #addr, %src: #addr, %len: #bits<64>,
+                         %rec_lo: #bits<64>,
                          %rec_hi: #bits<64>) -> #bits<64> {
   %kw = #data_addr meta_kw_struct
-  %found = #loop s(%at: #bits<64> = 0) -> (#bits<64>) {
-    %kw_at = #call meta_find_keyword(%src, %len, %kw, 6, %at)
-    %missing = #eq[#bits<64>](%kw_at, 0xFFFFFFFFFFFFFFFF)
-    #if %missing {
-      #break s(0xFFFFFFFFFFFFFFFF)
-    }
-    %after = #add[#bits<64>](%kw_at, 6)
-    %n_lo = #call bs_skip_space(%src, %after, %len)
-    %n_hi = #call bs_skip_ident(%src, %n_lo, %len)
-    %mine = #sub[#bits<64>](%rec_hi, %rec_lo)
-    %theirs = #sub[#bits<64>](%n_hi, %n_lo)
-    %len_ok = #eq[#bits<64>](%mine, %theirs)
-    %same = #if %len_ok -> (#bits<1>) {
-      %a = #lea(%src, %n_lo, 1, 0)
-      %b = #lea(%src, %rec_lo, 1, 0)
-      %eq = #call meta_bytes_equal(%a, %b, %mine)
-      #yield %eq
-    } else {
-      #yield 0
-    }
-    %body = #if %same -> (#bits<64>) {
-      %brace = #call bs_skip_space(%src, %n_hi, %len)
-      %one = #add[#bits<64>](%brace, 1)
+  %name = #lea(%src, %rec_lo, 1, 0)
+  %name_len = #sub[#bits<64>](%rec_hi, %rec_lo)
+  %after = #call meta_find_decl(%host, %src, %len, %kw, 6, %name, %name_len)
+  %gone = #eq[#bits<64>](%after, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %gone -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    // 名字后面应该是那个花括号组；正文从 `{` 后面一个字符开始
+    %kind = #call meta_node_kind(%host, %after)
+    %is_group = #eq[#bits<64>](%kind, 2)
+    %v = #if %is_group -> (#bits<64>) {
+      %st = #call meta_node_start(%host, %after)
+      %one = #add[#bits<64>](%st, 1)
       #yield %one
     } else {
-      #yield 0
+      #yield 0xFFFFFFFFFFFFFFFF
     }
-    %hit = #ne[#bits<64>](%body, 0)
-    #if %hit {
-      #break s(%body)
-    }
-    %next_at = #add[#bits<64>](%kw_at, 6)
-    #continue s(%next_at)
+    #yield %v
   }
-  #return %found
+  #return %r
 }
 
 
@@ -149,7 +119,7 @@
                         %rec_lo: #bits<64>,
                         %rec_hi: #bits<64>, %f_lo: #bits<64>,
                         %f_hi: #bits<64>) -> #bits<64> {
-  %body = #call meta_find_rec_body(%src, %len, %rec_lo, %rec_hi)
+  %body = #call meta_find_rec_body(%host, %src, %len, %rec_lo, %rec_hi)
   %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
   %r = #if %missing -> (#bits<64>) {
     #yield 0
@@ -164,7 +134,7 @@
 #proc meta_layout_size(%host: #addr, %src: #addr, %len: #bits<64>,
                        %rec_lo: #bits<64>,
                        %rec_hi: #bits<64>) -> #bits<64> {
-  %body = #call meta_find_rec_body(%src, %len, %rec_lo, %rec_hi)
+  %body = #call meta_find_rec_body(%host, %src, %len, %rec_lo, %rec_hi)
   %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
   %r = #if %missing -> (#bits<64>) {
     #yield 0

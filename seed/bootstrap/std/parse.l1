@@ -323,6 +323,104 @@
   #return %r
 }
 
+// 这个地址属于哪份源码？——查找函数靠它知道该走哪棵树，不用让调用方一层层把
+// 源码下标传下来。地址之间不能直接比，所以先转成整数。
+#proc meta_source_of(%host: #addr, %base: #addr) -> #bits<64> {
+  %count = #call lain_meta_source_count(%host)
+  %want = #ptr2int[#bits<64>](%base)
+  %found = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %p = #call lain_meta_source_data(%host, %i)
+      %have = #ptr2int[#bits<64>](%p)
+      %same = #eq[#bits<64>](%have, %want)
+      #if %same {
+        #break s(%i)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue s(%i2)
+    } else {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+  }
+  #return %found
+}
+
+// 在源码 base 的顶层找 `关键字 名字`，返回**名字后面那个节点**的下标（对
+// `scalar` 是 `=`，对 `struct`/`enum` 是那个花括号组）。找不到返回 NONE。
+//
+// 这就是「按名字找声明」的那一半：从前的做法是拿关键字的字节在源码里从头搜，
+// 每个使用点搜一遍；现在问的是「这个节点是不是内容为 scalar 的词」。
+#proc meta_find_decl(%host: #addr, %base: #addr, %len: #bits<64>,
+                      %kw: #addr, %kw_len: #bits<64>, %name: #addr,
+                      %name_len: #bits<64>) -> #bits<64> {
+  %src = #call meta_source_of(%host, %base)
+  %missing = #eq[#bits<64>](%src, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %missing -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %root = #call meta_root_of(%host, %src)
+    %start_node = #call meta_node_child(%host, %root)
+    %found = #loop s(%node: #bits<64> = %start_node) -> (#bits<64>) {
+      %more = #ne[#bits<64>](%node, 0xFFFFFFFFFFFFFFFF)
+      #if %more {
+        %is_kw = #call meta_node_is_word(%host, %node, %base, %kw, %kw_len)
+        %hit = #if %is_kw -> (#bits<64>) {
+          %name_node = #call meta_node_next(%host, %node)
+          %none = #eq[#bits<64>](%name_node, 0xFFFFFFFFFFFFFFFF)
+          %v = #if %none -> (#bits<64>) {
+            #yield 0xFFFFFFFFFFFFFFFF
+          } else {
+            %nl = #call meta_node_len(%host, %name_node)
+            %same_len = #eq[#bits<64>](%nl, %name_len)
+            %same = #if %same_len -> (#bits<1>) {
+              %st = #call meta_node_start(%host, %name_node)
+              %p = #lea(%base, %st, 1, 0)
+              %eqb = #call meta_bytes_equal(%p, %name, %name_len)
+              #yield %eqb
+            } else {
+              #yield 0
+            }
+            %after = #if %same -> (#bits<64>) {
+              %nx = #call meta_node_next(%host, %name_node)
+              #yield %nx
+            } else {
+              #yield 0xFFFFFFFFFFFFFFFF
+            }
+            #yield %after
+          }
+          #yield %v
+        } else {
+          #yield 0xFFFFFFFFFFFFFFFF
+        }
+        %gone = #ne[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
+        #if %gone {
+          #break s(%hit)
+        }
+        %next = #call meta_node_next(%host, %node)
+        #continue s(%next)
+      } else {
+        #break s(0xFFFFFFFFFFFFFFFF)
+      }
+    }
+    #yield %found
+  }
+  #return %r
+}
+
+// 一份源码的树根。
+#proc meta_root_of_source(%host: #addr, %base: #addr) -> #bits<64> {
+  %src = #call meta_source_of(%host, %base)
+  %missing = #eq[#bits<64>](%src, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %missing -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %root = #call meta_root_of(%host, %src)
+    #yield %root
+  }
+  #return %r
+}
+
 // 把一份源码读成一棵树，根是一个覆盖全文的组节点。根下标按源码下标记下来。
 #proc meta_parse_source(%host: #addr, %source: #bits<64>) -> #bits<32> {
   %len = #call lain_meta_source_length(%host, %source)

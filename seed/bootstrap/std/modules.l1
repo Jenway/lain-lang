@@ -209,28 +209,9 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
 
 // --- import 的语法与降级 ---------------------------------------------------
 
-// 找下一个 `let`，要求 `let` 后面是空白（否则 `letter` 也算）。
-#proc bs_next_let(%base: #addr, %from: #bits<64>, %len: #bits<64>) -> #bits<64> {
-  %found = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
-    %more = #ult[#bits<64>](%i, %len)
-    #if %more {
-      %is = #call bs_match_let(%base, %i, %len)
-      #if %is {
-        %i3 = #add[#bits<64>](%i, 3)
-        %sep = #call bs_byte_at(%base, %i3, %len)
-        %spaced = #ule[#bits<8>](%sep, 32)
-        #if %spaced {
-          #break scan(%i)
-        }
-      }
-      %i2 = #add[#bits<64>](%i, 1)
-      #continue scan(%i2)
-    } else {
-      #break scan(0xFFFFFFFFFFFFFFFF)
-    }
-  }
-  #return %found
-}
+// `bs_next_let`（逐字节找下一个 `let`）**已经删了**：顶层形式现在从语法树上走，
+// 不用找。它当时还得额外要求「`let` 后面是空白」才能不把 `letter` 认错——那个补丁
+// 正说明「搜字节」这条路本身不对。
 
 // 从 `import` 的位置往下读 `("逻辑路径")`，返回逻辑路径首字节的下标；
 // 形状不对返回 NOT_FOUND。
@@ -274,37 +255,8 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
   #return %r
 }
 
-// `let <ns> = import("...")` 里的逻辑路径下标；这条 let 不是那个形状就返回 NOT_FOUND。
-#proc meta_import_at(%base: #addr, %len: #bits<64>, %let_at: #bits<64>,
-                     %ns_lo: #bits<64>, %ns_hi: #bits<64>) -> #bits<64> {
-  %after = #add[#bits<64>](%let_at, 3)
-  %n_lo = #call bs_skip_space(%base, %after, %len)
-  %n_hi = #call bs_skip_ident(%base, %n_lo, %len)
-  %same = #call meta_slice_equals(%base, %n_lo, %n_hi, %ns_lo, %ns_hi)
-  %r = #if %same -> (#bits<64>) {
-    %eq_at = #call bs_skip_space(%base, %n_hi, %len)
-    %is_eq = #call bs_is_byte(%base, %eq_at, 61)
-    %v = #if %is_eq -> (#bits<64>) {
-      %one = #add[#bits<64>](%eq_at, 1)
-      %kw_at = #call bs_skip_space(%base, %one, %len)
-      %kw = #data_addr meta_kw_import
-      %is_imp = #call bs_match_keyword(%base, %kw_at, %len, %kw, 6)
-      %w = #if %is_imp -> (#bits<64>) {
-        %lp = #call meta_import_logical(%base, %len, %kw_at)
-        #yield %lp
-      } else {
-        #yield 0xFFFFFFFFFFFFFFFF
-      }
-      #yield %w
-    } else {
-      #yield 0xFFFFFFFFFFFFFFFF
-    }
-    #yield %v
-  } else {
-    #yield 0xFFFFFFFFFFFFFFFF
-  }
-  #return %r
-}
+// `meta_import_at`（按绑定名回源码里找 `let X = import(...)`）**已经删了**：
+// 查作用域表就够，逻辑路径位置记在条目的 aux 里。
 
 // 按绑定名找回它的 import 逻辑路径下标（== `let M = import("...")` 里引号内的起点）。
 // 查**作用域表**：命中的条目 kind 必须是 1（模块引用），逻辑路径位置记在 aux。
@@ -418,37 +370,8 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
   #return %j
 }
 
-// 在 base 里找绑定，返回它 `=` 的下标；找不到返回 NOT_FOUND。
-// 名字用**地址 + 长度**给，因为它可能在另一份源码里。
-#proc meta_find_binding_in(%base: #addr, %len: #bits<64>, %name: #addr,
-                            %name_len: #bits<64>) -> #bits<64> {
-  %found = #loop s(%at: #bits<64> = 0) -> (#bits<64>) {
-    %let_at = #call bs_next_let(%base, %at, %len)
-    %none = #eq[#bits<64>](%let_at, 0xFFFFFFFFFFFFFFFF)
-    #if %none {
-      #break s(0xFFFFFFFFFFFFFFFF)
-    }
-    %after = #add[#bits<64>](%let_at, 3)
-    %n_lo = #call bs_skip_space(%base, %after, %len)
-    %n_hi = #call bs_skip_ident(%base, %n_lo, %len)
-    %have = #sub[#bits<64>](%n_hi, %n_lo)
-    %same_len = #eq[#bits<64>](%have, %name_len)
-    %same = #if %same_len -> (#bits<1>) {
-      %p = #lea(%base, %n_lo, 1, 0)
-      %eq = #call meta_bytes_equal(%p, %name, %name_len)
-      #yield %eq
-    } else {
-      #yield 0
-    }
-    #if %same {
-      %eq = #call bs_skip_space(%base, %n_hi, %len)
-      #break s(%eq)
-    }
-    %next = #add[#bits<64>](%let_at, 3)
-    #continue s(%next)
-  }
-  #return %found
-}
+// `meta_find_binding_in`（回模块源码里找一条 `let`，返回 `=` 的下标）**已经删了**：
+// 取模块成员现在压入那个模块的作用域、在表里查（见 `meta_emit_module_binding`）。
 
 // 发「被导入的绑定」本身：`#proc <mangle>__<member>() -> #bits<64> { #return v }`
 // member 是**调用方源码里**写的那个名字（用户写的是 `M.answer`，输出里就该是
