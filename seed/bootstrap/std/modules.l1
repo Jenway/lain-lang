@@ -176,13 +176,13 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
 #proc meta_source_find(%host: #addr, %logical: #addr,
                        %logical_len: #bits<64>) -> #bits<64> {
   %scratch = #call lain_meta_scratch_data(%host)
-  // 路径缓冲区是 +96 起的 416 字节；注册表从 +512 开始，别写过去
+  // 路径缓冲区是 +160 起的 352 字节
   %cap = #call meta_cell_get(#data_addr meta_path_cap)
   // `::` 只会变短，补 `.lain` 和 NUL 是最坏情况 +6
   %need = #add[#bits<64>](%logical_len, 6)
   %fits = #ule[#bits<64>](%need, %cap)
   %r = #if %fits -> (#bits<64>) {
-    %buf = #lea(%scratch, 96, 1, 0)
+    %buf = #lea(%scratch, 160, 1, 0)
     %b = #call meta_build_path(%logical, %logical_len, %buf)
     %count = #call lain_meta_source_count(%host)
     %idx = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
@@ -501,8 +501,112 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
   #return 0
 }
 
-// `let NAME = M.member;` —— 解析命名空间绑定，去被导入的源码里找那条绑定，
-// 把它和调用方**一起**发出来（两张过程共用同一个 mangle 前缀）。
+// 模块**内部**的一条绑定调用同一个模块里的另一条：
+//   `#proc <mangle>__<b>() -> #bits<64> { #return #call <mangle>__<a>() }`
+//
+// 和 `meta_emit_ns_call` 的区别：那个是给调用方用的，只有被调方带 mangle；这里
+// 两边都是模块自己的绑定，**两个名字都要带前缀**。
+#proc meta_emit_module_call(%host: #addr, %m_base: #addr, %b_lo: #bits<64>,
+                             %b_hi: #bits<64>, %mag: #addr,
+                             %mag_len: #bits<64>, %m_lo: #bits<64>,
+                             %m_hi: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %w2 = #call lain_meta_emit_write(%host, %mag, %mag_len)
+  %d = #data_addr meta_dsep
+  %w3 = #call lain_meta_emit_write(%host, %d, 2)
+  %bat = #lea(%m_base, %b_lo, 1, 0)
+  %bn = #sub[#bits<64>](%b_hi, %b_lo)
+  %w4 = #call lain_meta_emit_write(%host, %bat, %bn)
+  %p2a = #data_addr meta_p2a
+  %w5 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w6 = #call meta_emit_repr(%host, 0, 64)
+  %x1 = #data_addr meta_x1
+  %w7 = #call lain_meta_emit_write(%host, %x1, 19)
+  %w8 = #call lain_meta_emit_write(%host, %mag, %mag_len)
+  %w9 = #call lain_meta_emit_write(%host, %d, 2)
+  %mat = #lea(%m_base, %m_lo, 1, 0)
+  %mn = #sub[#bits<64>](%m_hi, %m_lo)
+  %w10 = #call lain_meta_emit_write(%host, %mat, %mn)
+  %x2 = #data_addr meta_x2
+  %w11 = #call lain_meta_emit_write(%host, %x2, 5)
+  #return 0
+}
+
+// 发出模块里的一条值绑定，名字是 `<mangle>__<名字>`。
+//
+// 初始化式有两种形状（v0）：
+//   数字 → 一个字面量
+//   标识符 → **同一个模块里的另一条绑定**：先把那条递归发出来，再发调用它的这条
+//
+// 同一个绑定被引用两次只会发一次：条目里的 `emitted` 是防重入的标记，先置位再
+// 展开函数体，所以自引用也不会转圈。遇到别的形状报 4（响的，不是静默给 0）。
+#proc meta_emit_module_binding(%host: #addr, %m_base: #addr,
+                                %m_len: #bits<64>, %name_addr: #addr,
+                                %name_len: #bits<64>, %mag: #addr,
+                                %mag_len: #bits<64>) -> #bits<32> {
+  %i = #call meta_scope_find(%host, %name_addr, %name_len)
+  %gone = #eq[#bits<64>](%i, 0xFFFFFFFFFFFFFFFF)
+  %status = #if %gone -> (#bits<32>) {
+    %f0 = #call lain_meta_fail(%host, 13)
+    #yield 13
+  } else {
+    %kind = #call meta_scope_kind(%host, %i)
+    %is_value = #eq[#bits<64>](%kind, 3)
+    %s0 = #if %is_value -> (#bits<32>) {
+      %done = #call meta_scope_emitted(%host, %i)
+      %skip = #ne[#bits<64>](%done, 0)
+      %s1 = #if %skip -> (#bits<32>) {
+        #yield 0
+      } else {
+        %mark = #call meta_scope_set_emitted(%host, %i, 1)
+        // 名字在模块源码里的位置：条目里存着
+        %n_off = #call meta_scope_word(%host, %i, 8)
+        %n_len = #call meta_scope_word(%host, %i, 16)
+        %n_hi = #add[#bits<64>](%n_off, %n_len)
+        %init = #call meta_scope_payload(%host, %i)
+        %first = #call bs_byte_at(%m_base, %init, %m_len)
+        %is_num = #call bs_is_digit(%first)
+        %s2 = #if %is_num -> (#bits<32>) {
+          %value = #call bs_read_uint(%m_base, %init, %m_len)
+          %e0 = #call meta_emit_exported(%host, %mag, %mag_len, %m_base,
+                                         %n_off, %n_hi, %value)
+          #yield %e0
+        } else {
+          // 标识符：同模块里的另一条绑定
+          %id_hi = #call bs_skip_ident(%m_base, %init, %m_len)
+          %ref = #lea(%m_base, %init, 1, 0)
+          %ref_len = #sub[#bits<64>](%id_hi, %init)
+          %e1 = #call meta_emit_module_binding(%host, %m_base, %m_len,
+                                               %ref, %ref_len, %mag, %mag_len)
+          %bad = #ne[#bits<32>](%e1, 0)
+          %s3 = #if %bad -> (#bits<32>) {
+            #yield %e1
+          } else {
+            %e2 = #call meta_emit_module_call(%host, %m_base, %n_off, %n_hi,
+                                              %mag, %mag_len, %init, %id_hi)
+            #yield %e2
+          }
+          #yield %s3
+        }
+        #yield %s2
+      }
+      #yield %s1
+    } else {
+      // v0：模块里能取用的只有值绑定。取一个标量类型或别的，报 4。
+      %f1 = #call lain_meta_fail(%host, 4)
+      #yield 4
+    }
+    #yield %s0
+  }
+  #return %status
+}
+
+// `let NAME = M.member;` —— 解析命名空间绑定，**进入那个模块的作用域**去取成员。
+//
+// 关键在这里：取成员时要压入模块自己那一层（链变成 [root, 那个模块]），所以模块
+// 内部 `let b = a;` 里的 `a` 能解析到同一个模块里的 `a`。以前是拿模块源码的字节
+// 硬读一个字面量，读到字母就给 0 —— 静默的错值。
 #proc meta_lower_ns_value(%host: #addr, %base: #addr, %len: #bits<64>,
                            %bind_lo: #bits<64>, %bind_hi: #bits<64>,
                            %ns_lo: #bits<64>, %ns_hi: #bits<64>,
@@ -525,28 +629,37 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
     } else {
       %m_base = #call lain_meta_source_data(%host, %idx)
       %m_len = #call lain_meta_source_length(%host, %idx)
-      %m_name = #lea(%base, %m_lo, 1, 0)
-      %m_name_len = #sub[#bits<64>](%m_hi, %m_lo)
-      %eq_at = #call meta_find_binding_in(%m_base, %m_len, %m_name, %m_name_len)
-      %gone = #eq[#bits<64>](%eq_at, 0xFFFFFFFFFFFFFFFF)
-      %s2 = #if %gone -> (#bits<32>) {
-        // 模块里没有这个成员
-        %f2 = #call lain_meta_fail(%host, 13)
-        #yield 13
+      %scratch = #call lain_meta_scratch_data(%host)
+      %buf = #lea(%scratch, 160, 1, 0)
+      %mag_len = #call meta_build_mangle(%path, %n, %buf)
+
+      // 切到模块那一层；**扫一次就留着**（见 meta_scope_has_source 的注释）。
+      %old_src = #call meta_scope_enter(%host, %idx)
+      %already = #call meta_scope_has_source(%host, %idx)
+      %ready = #if %already -> (#bits<32>) {
+        #yield 0
       } else {
-        // v0：被导入的绑定必须是 `let NAME = INT;`
-        %one = #add[#bits<64>](%eq_at, 1)
-        %v_lo = #call bs_skip_space(%m_base, %one, %m_len)
-        %value = #call bs_read_uint(%m_base, %v_lo, %m_len)
-        %scratch = #call lain_meta_scratch_data(%host)
-        %buf = #lea(%scratch, 96, 1, 0)
-        %mag_len = #call meta_build_mangle(%path, %n, %buf)
-        %e1 = #call meta_emit_exported(%host, %buf, %mag_len, %base, %m_lo,
-                                       %m_hi, %value)
+        %mark = #call meta_scope_count(%host)
+        %scan = #call meta_scope_scan(%host, %m_base, %m_len, %idx, %mark)
+        #yield %scan
+      }
+      %bad = #ne[#bits<32>](%ready, 0)
+      %s2 = #if %bad -> (#bits<32>) {
+        %rest0 = #call meta_scope_set_current(%host, %old_src)
+        #yield %ready
+      } else {
+        // 成员名写在**调用方**的源码里，值在模块的源码里
+        %m_name = #lea(%base, %m_lo, 1, 0)
+        %m_name_len = #sub[#bits<64>](%m_hi, %m_lo)
+        %e1 = #call meta_emit_module_binding(%host, %m_base, %m_len,
+                                             %m_name, %m_name_len, %buf,
+                                             %mag_len)
+        // 调用方那条：`#proc <bind>() -> <repr> { #return #call <mangle>__<member>() }`
         %e2 = #call meta_emit_ns_call(%host, %base, %bind_lo, %bind_hi, %kind,
                                       %width, %buf, %mag_len, %base, %m_lo,
                                       %m_hi)
-        #yield %e2
+        %rest = #call meta_scope_set_current(%host, %old_src)
+        #yield %e1
       }
       #yield %s2
     }
