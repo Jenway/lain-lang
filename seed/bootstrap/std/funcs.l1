@@ -1,31 +1,40 @@
 // 初代标准库 v0 —— 普通函数：参数、返回类型、函数体、带实参的调用。
 //
-// 这是「Meta 用 Lain 写」的第一块地基：解析器的每一个组件都是一个**带参数的过程**，
+// 这是「Meta 用 Lain 写」的地基：解析器的每一个组件都是一个**带参数的过程**，
 // 没有这一层，语言里连一个解析器都放不下。
 //
-//   func add(a: i32, b: i32) -> i32 { a + b }
+//   func add(a: i32, b: i32) -> i32 { return a + b; }
 //   let main: i32 = add(3, 4);
 //   →
 //   #proc add(%a: #bits<32>, %b: #bits<32>) -> #bits<32> {
-//     %r = #add[#bits<32>](%a, %b)
-//     #return %r
+//     %r1 = #add[#bits<32>](%a, %b)
+//     #return %r1
 //   }
 //   #proc main() -> #bits<32> {
 //     #return #call add(3, 4)
 //   }
 //
 // 参数名**直接当 LAINIR 的参数名用**：LAINIR 的过程参数是有名字的（`%a: #bits<32>`），
-// 所以源码里的 `a` 到产物里还是 `a`，中间不需要一张槽位表。这是这一版最省事的地方。
+// 所以源码里的 `a` 到产物里还是 `a`，中间不需要槽位表。
+//
+// 函数体是**语句序列**：
+//
+//   let NAME : TYPE = <表达式> ;
+//   return <表达式> ;
+//   NAME = <表达式> ;        （只在 for 里合法，见循环那一节）
+//
+// 表达式是 `值` 或 `值 算子 值`。算子从**类型自己的 op 表**里查（和顶层 `let`
+// 那条路同一个来源）。
 //
 // v0 的限制（都写在这里，别猜）：
 //
-//   - 函数体是**一个表达式**：`值` 或 `值 算子 值`。没有局部变量、没有语句序列、
-//     没有 if / loop。这些要一步一步来。
-//   - 参数类型只支持**一个词**（`i32`），不支持限定名（`T.i32`）。
-//   - 二元运算的物理算子**按返回类型**查 op 表。`a + b` 返回 i32 时这是对的；
-//     真正的规则应该看操作数类型，等有了类型检查再说。
-//   - 函数体里的标识符**只按这张参数表解析**，不走作用域表。所以参数遮蔽不了
-//     外面的同名绑定——单表达式函数体里也没有「外面」可言。遮蔽要等块级作用域。
+//   - **局部变量必须写类型标注。** 不是懒：`%x = 0` 在 LAINIR 里不是合法指令
+//     （每个绑定都得来自一条指令），而给一个字面量造绑定需要知道 repr 和 op 表。
+//   - **同一个函数体里不能重复绑定同一个名字**（LAINIR 是单赋值的）。所以
+//     `let x = a; ... let x = b;` 会被拒（22），而不是悄悄用后一个。
+//   - **只有 `返回值` 或 `返回 值 算子 值`**，没有嵌套表达式（`a + b + c` 要拆成两条）。
+//   - 函数体里的标识符**只按参数表解析**，不走作用域表——参数遮蔽不了外面的同名
+//     绑定，而且函数体里本来也没有「外面」。遮蔽要等块级作用域。
 //   - 不是参数的标识符会原样发成 `%名字`，被验证器拒（未定义的值）——响的，不是
 //     静默给错值。
 
@@ -49,14 +58,40 @@
   #return %st
 }
 
-// 函数体里的一条二元运算：`%r = #<物理算子>[<repr>](lhs, rhs)` + `#return %r`。
-// 物理算子名是 `meta_op_resolve` 查出来写进暂存区的（和 `let` 那条路同一个来源）。
-#proc meta_emit_body_binary(%host: #addr, %base: #addr, %len: #bits<64>,
-                             %kind: #bits<64>, %width: #bits<64>,
-                             %l_lo: #bits<64>, %l_hi: #bits<64>,
-                             %r_lo: #bits<64>, %r_hi: #bits<64>) -> #bits<32> {
-  %o1 = #data_addr meta_o1
-  %w1 = #call lain_meta_emit_write(%host, %o1, 11)
+// 这条语句的 `;` 在哪。找不到返回 NONE。
+#proc meta_find_semi(%host: #addr, %base: #addr,
+                      %from: #bits<64>) -> #bits<64> {
+  %kw = #data_addr meta_kw_semi
+  %found = #loop s(%c: #bits<64> = %from) -> (#bits<64>) {
+    %more = #ne[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+    #if %more {
+      %is = #call meta_node_is_word(%host, %c, %base, %kw, 1)
+      #if %is {
+        #break s(%c)
+      }
+      %nx = #call meta_node_next(%host, %c)
+      #continue s(%nx)
+    } else {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+  }
+  #return %found
+}
+
+// 临时值的编号（`%r1`、`%r2`…）。解析早就跑完了，+144 那个单元空着。
+#proc meta_next_temp(%host: #addr) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %n = #call meta_cell_get(#lea(%scratch, 144, 1, 0))
+  %n2 = #add[#bits<64>](%n, 1)
+  %s = #call meta_cell_put(#lea(%scratch, 144, 1, 0), %n2)
+  #return %n2
+}
+
+// 发射 `#<物理算子>[<repr>](`，物理算子名从暂存区读（meta_op_resolve 填的）。
+#proc meta_emit_op_mid(%host: #addr, %kind: #bits<64>,
+                       %width: #bits<64>) -> #bits<32> {
+  %h = #data_addr meta_hash
+  %w1 = #call lain_meta_emit_write(%host, %h, 1)
   %scratch = #call lain_meta_scratch_data(%host)
   %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
   %pos = #call meta_cell_get(#lea(%scratch, 24, 1, 0))
@@ -64,23 +99,263 @@
   %m_base = #call lain_meta_source_data(%host, %idx)
   %phys = #lea(%m_base, %pos, 1, 0)
   %w2 = #call lain_meta_emit_write(%host, %phys, %plen)
-  %o2 = #data_addr meta_o2
-  %w3 = #call lain_meta_emit_write(%host, %o2, 1)
+  %lb = #data_addr meta_o2
+  %w3 = #call lain_meta_emit_write(%host, %lb, 1)
   %w4 = #call meta_emit_repr(%host, %kind, %width)
-  %o3 = #data_addr meta_o3
-  %w5 = #call lain_meta_emit_write(%host, %o3, 2)
-  %w6 = #call meta_emit_operand(%host, %base, %l_lo, %l_hi, %len)
-  %o4 = #data_addr meta_o4
-  %w7 = #call lain_meta_emit_write(%host, %o4, 2)
-  %w8 = #call meta_emit_operand(%host, %base, %r_lo, %r_hi, %len)
-  %o5 = #data_addr meta_o5
-  %w9 = #call lain_meta_emit_write(%host, %o5, 15)
-  %o6 = #data_addr meta_o6
-  %w10 = #call lain_meta_emit_write(%host, %o6, 2)
+  %rl = #data_addr meta_o3
+  %w5 = #call lain_meta_emit_write(%host, %rl, 2)
   #return 0
 }
 
-// `func NAME(p: T, ...) -> T { <表达式> }`
+// 发一个临时值名字 `%r<n>`。
+#proc meta_emit_temp_name(%host: #addr, %n: #bits<64>) -> #bits<32> {
+  %pct = #data_addr meta_fn_pct
+  %w1 = #call lain_meta_emit_write(%host, %pct, 1)
+  %r = #data_addr meta_char_r
+  %w2 = #call lain_meta_emit_write(%host, %r, 1)
+  %w3 = #call meta_emit_uint(%host, %n)
+  #return 0
+}
+
+// `  %NAME = #<phys>[repr](<a>, <b>)\n`
+#proc meta_emit_binding_bin(%host: #addr, %base: #addr, %len: #bits<64>,
+                            %name_lo: #bits<64>, %name_hi: #bits<64>,
+                            %kind: #bits<64>, %width: #bits<64>,
+                            %a_lo: #bits<64>, %a_hi: #bits<64>,
+                            %b_lo: #bits<64>, %b_hi: #bits<64>) -> #bits<32> {
+  %p = #data_addr meta_st_pct
+  %w1 = #call lain_meta_emit_write(%host, %p, 3)
+  %n_at = #lea(%base, %name_lo, 1, 0)
+  %n_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %w2 = #call lain_meta_emit_write(%host, %n_at, %n_len)
+  %e = #data_addr meta_st_eqop
+  %w3 = #call lain_meta_emit_write(%host, %e, 3)
+  %w4 = #call meta_emit_op_mid(%host, %kind, %width)
+  %w5 = #call meta_emit_operand(%host, %base, %a_lo, %a_hi, %len)
+  %c = #data_addr meta_o4
+  %w6 = #call lain_meta_emit_write(%host, %c, 2)
+  %w7 = #call meta_emit_operand(%host, %base, %b_lo, %b_hi, %len)
+  %rp = #data_addr meta_rparen
+  %w8 = #call lain_meta_emit_write(%host, %rp, 1)
+  %nl = #data_addr meta_st_nl
+  %w9 = #call lain_meta_emit_write(%host, %nl, 1)
+  #return 0
+}
+
+// `  %NAME = #<phys>[repr](<值>, 0)\n` —— 常量绑定（加零就是复制）
+#proc meta_emit_binding_const(%host: #addr, %base: #addr, %len: #bits<64>,
+                              %name_lo: #bits<64>, %name_hi: #bits<64>,
+                              %kind: #bits<64>, %width: #bits<64>,
+                              %v_lo: #bits<64>,
+                              %v_hi: #bits<64>) -> #bits<32> {
+  %p = #data_addr meta_st_pct
+  %w1 = #call lain_meta_emit_write(%host, %p, 3)
+  %n_at = #lea(%base, %name_lo, 1, 0)
+  %n_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %w2 = #call lain_meta_emit_write(%host, %n_at, %n_len)
+  %e = #data_addr meta_st_eqop
+  %w3 = #call lain_meta_emit_write(%host, %e, 3)
+  %w4 = #call meta_emit_op_mid(%host, %kind, %width)
+  %w5 = #call meta_emit_operand(%host, %base, %v_lo, %v_hi, %len)
+  %c = #data_addr meta_o4
+  %w6 = #call lain_meta_emit_write(%host, %c, 2)
+  %zero = #call meta_emit_uint(%host, 0)
+  %rp = #data_addr meta_rparen
+  %w7 = #call lain_meta_emit_write(%host, %rp, 1)
+  %nl = #data_addr meta_st_nl
+  %w8 = #call lain_meta_emit_write(%host, %nl, 1)
+  #return 0
+}
+
+// `  #return <值>\n`
+#proc meta_emit_return(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %v_lo: #bits<64>, %v_hi: #bits<64>) -> #bits<32> {
+  %r = #data_addr meta_st_ret
+  %w1 = #call lain_meta_emit_write(%host, %r, 10)
+  %w2 = #call meta_emit_operand(%host, %base, %v_lo, %v_hi, %len)
+  %nl = #data_addr meta_st_nl
+  %w3 = #call lain_meta_emit_write(%host, %nl, 1)
+  #return 0
+}
+
+// `  %r<n> = #<phys>[repr](<a>, <b>)\n  #return %r<n>\n`
+#proc meta_emit_ret_bin(%host: #addr, %base: #addr, %len: #bits<64>,
+                        %kind: #bits<64>, %width: #bits<64>,
+                        %a_lo: #bits<64>, %a_hi: #bits<64>,
+                        %b_lo: #bits<64>, %b_hi: #bits<64>) -> #bits<32> {
+  // 缩进 2 格，然后 `%r<n>`——`meta_emit_temp_name` 自己带 `%`
+  %p = #data_addr meta_st_ind
+  %w1 = #call lain_meta_emit_write(%host, %p, 2)
+  %n = #call meta_next_temp(%host)
+  %w2 = #call meta_emit_temp_name(%host, %n)
+  %e = #data_addr meta_st_eqop
+  %w3 = #call lain_meta_emit_write(%host, %e, 3)
+  %w4 = #call meta_emit_op_mid(%host, %kind, %width)
+  %w5 = #call meta_emit_operand(%host, %base, %a_lo, %a_hi, %len)
+  %c = #data_addr meta_o4
+  %w6 = #call lain_meta_emit_write(%host, %c, 2)
+  %w7 = #call meta_emit_operand(%host, %base, %b_lo, %b_hi, %len)
+  %rp = #data_addr meta_rparen
+  %w8 = #call lain_meta_emit_write(%host, %rp, 1)
+  %nl = #data_addr meta_st_nl
+  %w9 = #call lain_meta_emit_write(%host, %nl, 1)
+  %r = #data_addr meta_st_ret
+  %w10 = #call lain_meta_emit_write(%host, %r, 10)
+  %w11 = #call meta_emit_temp_name(%host, %n)
+  %w12 = #call lain_meta_emit_write(%host, %nl, 1)
+  #return 0
+}
+
+// 一条语句。is_ret 决定它是 `return` 还是 `let`。
+//   t_lo/t_hi 是这条语句用的类型名（`let` 是标注的那个，`return` 是返回类型）。
+#proc meta_lower_stmt(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %first: #bits<64>, %semi: #bits<64>,
+                       %is_ret: #bits<1>, %name_lo: #bits<64>,
+                       %name_hi: #bits<64>, %t_lo: #bits<64>,
+                       %t_hi: #bits<64>, %v: #bits<64>) -> #bits<32> {
+  %tid = #call meta_type_resolve(%host, %base, %len, %t_lo, %t_hi)
+  %no_type = #eq[#bits<64>](%tid, 0)
+  %status = #if %no_type -> (#bits<32>) {
+    %f0 = #call lain_meta_fail(%host, 5)
+    #yield 5
+  } else {
+    %info = #call meta_tid_repr(%host, %tid)
+    %kind = #and[#bits<64>](%info, 255)
+    %width = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
+    %v2 = #call meta_node_next(%host, %v)
+    %is_bin = #ne[#bits<64>](%v2, %semi)
+    %s = #if %is_bin -> (#bits<32>) {
+      // `值 算子 值`
+      %op_lo = #call meta_node_start(%host, %v2)
+      %rhs = #call meta_node_next(%host, %v2)
+      %sym = #lea(%base, %op_lo, 1, 0)
+      %found = #call meta_op_resolve(%host, %base, %len, %t_lo, %t_hi, %sym, 1)
+      %miss = #eq[#bits<64>](%found, 0xFFFFFFFFFFFFFFFF)
+      %w = #if %miss -> (#bits<32>) {
+        %f1 = #call lain_meta_fail(%host, 6)
+        #yield 6
+      } else {
+        %a_lo = #call meta_node_start(%host, %v)
+        %a_hi = #add[#bits<64>](%a_lo, #call meta_node_len(%host, %v))
+        %b_lo = #call meta_node_start(%host, %rhs)
+        %b_hi = #add[#bits<64>](%b_lo, #call meta_node_len(%host, %rhs))
+        %e = #if %is_ret -> (#bits<32>) {
+          %rb = #call meta_emit_ret_bin(%host, %base, %len, %kind, %width,
+                                        %a_lo, %a_hi, %b_lo, %b_hi)
+          #yield %rb
+        } else {
+          %bb = #call meta_emit_binding_bin(%host, %base, %len, %name_lo,
+                                            %name_hi, %kind, %width, %a_lo,
+                                            %a_hi, %b_lo, %b_hi)
+          #yield %bb
+        }
+        #yield %e
+      }
+      #yield %w
+    } else {
+      %v_lo = #call meta_node_start(%host, %v)
+      %v_hi = #add[#bits<64>](%v_lo, #call meta_node_len(%host, %v))
+      %t = #if %is_ret -> (#bits<32>) {
+        %r = #call meta_emit_return(%host, %base, %len, %v_lo, %v_hi)
+        #yield %r
+      } else {
+        // 常量或复制：走类型自己的 `+`，加零
+        %plus = #data_addr meta_sym_plus
+        %found2 = #call meta_op_resolve(%host, %base, %len, %t_lo, %t_hi, %plus, 1)
+        %miss2 = #eq[#bits<64>](%found2, 0xFFFFFFFFFFFFFFFF)
+        %c = #if %miss2 -> (#bits<32>) {
+          %f2 = #call lain_meta_fail(%host, 6)
+          #yield 6
+        } else {
+          %cc = #call meta_emit_binding_const(%host, %base, %len, %name_lo,
+                                              %name_hi, %kind, %width, %v_lo,
+                                              %v_hi)
+          #yield %cc
+        }
+        #yield %c
+      }
+      #yield %t
+    }
+    #yield %s
+  }
+  #return %status
+}
+
+// 函数体：`{` 语句* `}`。最后一条必须是 `return`。
+#proc meta_lower_body(%host: #addr, %base: #addr, %len: #bits<64>,
+                      %body: #bits<64>, %r_t_lo: #bits<64>,
+                      %r_t_hi: #bits<64>) -> #bits<32> {
+  %lkw = #data_addr meta_kw_let
+  %rkw = #data_addr meta_kw_return
+  %first = #call meta_node_child(%host, %body)
+  %st = #loop stmts(%c: #bits<64> = %first,
+                    %saw_ret: #bits<1> = 0) -> (#bits<32>) {
+    %more = #ne[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+    #if %more {
+      %semi = #call meta_find_semi(%host, %base, %c)
+      %nosemi = #eq[#bits<64>](%semi, 0xFFFFFFFFFFFFFFFF)
+      #if %nosemi {
+        %f0 = #call lain_meta_fail(%host, 21)
+        #break stmts(21)
+      }
+      %is_ret = #call meta_node_is_word(%host, %c, %base, %rkw, 6)
+      %is_let = #call meta_node_is_word(%host, %c, %base, %lkw, 3)
+      %s = #if %is_ret -> (#bits<32>) {
+        %v = #call meta_node_next(%host, %c)
+        %r = #call meta_lower_stmt(%host, %base, %len, %c, %semi, 1, 0, 0,
+                                   %r_t_lo, %r_t_hi, %v)
+        #yield %r
+      } else {
+        %l = #if %is_let -> (#bits<32>) {
+          %name_node = #call meta_node_next(%host, %c)
+          %after = #call meta_node_next(%host, %name_node)
+          %ckw = #data_addr meta_kw_colon
+          %has_colon = #call meta_node_is_word(%host, %after, %base, %ckw, 1)
+          %x = #if %has_colon -> (#bits<32>) {
+            %t_node = #call meta_node_next(%host, %after)
+            %eq_node = #call meta_node_next(%host, %t_node)
+            %v = #call meta_node_next(%host, %eq_node)
+            %t_lo = #call meta_node_start(%host, %t_node)
+            %t_hi = #add[#bits<64>](%t_lo, #call meta_node_len(%host, %t_node))
+            %n_lo = #call meta_node_start(%host, %name_node)
+            %n_hi = #add[#bits<64>](%n_lo,
+                                    #call meta_node_len(%host, %name_node))
+            %b = #call meta_lower_stmt(%host, %base, %len, %c, %semi, 0, %n_lo,
+                                       %n_hi, %t_lo, %t_hi, %v)
+            #yield %b
+          } else {
+            // 本地变量必须写类型标注
+            %f1 = #call lain_meta_fail(%host, 21)
+            #yield 21
+          }
+          #yield %x
+        } else {
+          %f2 = #call lain_meta_fail(%host, 4)
+          #yield 4
+        }
+        #yield %l
+      }
+      %bad = #ne[#bits<32>](%s, 0)
+      #if %bad {
+        #break stmts(%s)
+      }
+      %next = #call meta_node_next(%host, %semi)
+      #continue stmts(%next, %is_ret)
+    } else {
+      %ok = #if %saw_ret -> (#bits<32>) {
+        #yield 0
+      } else {
+        // 函数体结尾没有 return：LAINIR 的过程体必须以终结子收尾
+        %f3 = #call lain_meta_fail(%host, 20)
+        #yield 20
+      }
+      #break stmts(%ok)
+    }
+  }
+  #return %st
+}
+
+// `func NAME(p: T, ...) -> T { 语句* }`
 #proc meta_lower_func(%host: #addr, %base: #addr, %len: #bits<64>,
                       %node: #bits<64>) -> #bits<32> {
   %name_node = #call meta_node_next(%host, %node)
@@ -89,7 +364,6 @@
   %ret_node = #call meta_node_next(%host, %arrow)
   %body = #call meta_node_next(%host, %ret_node)
 
-  // 返回类型 → repr（走作用域表）
   %r_lo = #call meta_node_start(%host, %ret_node)
   %r_n = #call meta_node_len(%host, %ret_node)
   %r_hi = #add[#bits<64>](%r_lo, %r_n)
@@ -110,8 +384,7 @@
     %n_n = #call meta_node_len(%host, %name_node)
     %n_hi = #add[#bits<64>](%n_lo, %n_n)
     %n_at = #lea(%base, %n_lo, 1, 0)
-    %n_len = #sub[#bits<64>](%n_hi, %n_lo)
-    %w2 = #call lain_meta_emit_write(%host, %n_at, %n_len)
+    %w2 = #call lain_meta_emit_write(%host, %n_at, %n_n)
     %lp = #data_addr meta_fn_lparen
     %w3 = #call lain_meta_emit_write(%host, %lp, 1)
 
@@ -164,48 +437,22 @@
       #return %pst
     }
 
-    // `) -> ` + 返回类型的 repr
+    // `) -> ` + 返回类型的 repr + ` {\n`
     %rr = #data_addr meta_fn_rret
     %w4 = #call lain_meta_emit_write(%host, %rr, 5)
     %w5 = #call meta_emit_repr(%host, %kind, %width)
+    %ob = #data_addr meta_fn_open
+    %w6 = #call lain_meta_emit_write(%host, %ob, 3)
 
-    // 函数体：一个表达式
-    %bc = #call meta_node_child(%host, %body)
-    %bn = #call meta_node_next(%host, %bc)
-    %has_op = #ne[#bits<64>](%bn, 0xFFFFFFFFFFFFFFFF)
-    %bst = #if %has_op -> (#bits<32>) {
-      // `值 算子 值`
-      %b_lo = #call meta_node_start(%host, %bc)
-      %b_hi = #add[#bits<64>](%b_lo, #call meta_node_len(%host, %bc))
-      %op_lo = #call meta_node_start(%host, %bn)
-      %rhs = #call meta_node_next(%host, %bn)
-      %rhs_lo = #call meta_node_start(%host, %rhs)
-      %rhs_hi = #add[#bits<64>](%rhs_lo, #call meta_node_len(%host, %rhs))
-      // 物理算子按返回类型查（v0 的简化，见文件头）
-      %sym = #lea(%base, %op_lo, 1, 0)
-      %found = #call meta_op_resolve(%host, %base, %len, %r_lo, %r_hi, %sym, 1)
-      %miss = #eq[#bits<64>](%found, 0xFFFFFFFFFFFFFFFF)
-      %s = #if %miss -> (#bits<32>) {
-        %f2 = #call lain_meta_fail(%host, 6)
-        #yield 6
-      } else {
-        %e = #call meta_emit_body_binary(%host, %base, %len, %kind, %width,
-                                         %b_lo, %b_hi, %rhs_lo, %rhs_hi)
-        #yield %e
-      }
-      #yield %s
-    } else {
-      // 单个值
-      %v_lo = #call meta_node_start(%host, %bc)
-      %v_hi = #add[#bits<64>](%v_lo, #call meta_node_len(%host, %bc))
-      %p2b = #data_addr meta_p2b
-      %w6 = #call lain_meta_emit_write(%host, %p2b, 13)
-      %w7 = #call meta_emit_operand(%host, %base, %v_lo, %v_hi, %len)
-      %p3 = #data_addr meta_p3
-      %w8 = #call lain_meta_emit_write(%host, %p3, 3)
-      #yield 0
+    // 语句序列
+    %bst = #call meta_lower_body(%host, %base, %len, %body, %r_lo, %r_hi)
+    %bfail = #ne[#bits<32>](%bst, 0)
+    #if %bfail {
+      #return %bst
     }
-    #yield %bst
+    %ob2 = #data_addr meta_o6
+    %w7 = #call lain_meta_emit_write(%host, %ob2, 2)
+    #yield 0
   }
   #return %status
 }
