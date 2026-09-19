@@ -37,7 +37,8 @@ seed/lainir-seed + bootstrap/compiler/*.l1 + bootstrap/std/*.l1
 | `src/lainc/` | 正式 Lain 编译器：`tokenizer` → `syntax` → `meta` → `elaborator` → `lower`；`backend_c.lain` 为 Lain 写的 C 后端 |
 | `src/lainir/` | **只剩契约** `api_contract.lain`（provider 必须满足的接口）。第二版实现已归档：`docs/history/formal-implementations/` |
 | `src/lainvm/` | **只剩契约** `api_contract.lain`（`ExecutionShape` / `Eval`）。Lain 写的 interpreter 已归档，见上 |
-| `std/` | 正式 Lain 标准库与 Meta ABI（`std/meta.lain`、`std/core/*`、`std/platform/*`） |
+| `archive/` | 已归档的第一代实现：`archive/src/**`（C 运行时，14003 行）、`archive/{include,lainir}/**`、`archive/std/**`（绑在第一代宿主 ABI 上的 `meta.lain` 与 `abi_entry.lain`，2026-09-20 从 `std/` 移入）。**只读参考，不进构建闭包** |
+| `std/` | 正式 Lain 标准库（`std/core/*`、`std/platform/*`、`std/effect.lain`、`std/type_policy.lain` …），不含任何 `@foreign`。其第一代 Meta ABI 的两份已移入 `archive/std/` |
 | `scripts/` | 全部构建/校验/固定点驱动（Python，扁平目录，无包） |
 | `docs/` | 设计规范、实现说明、当前路线图、历史归档 |
 | `build/` | 所有 bundle/snapshot/报告/可执行产物；**永不提交** |
@@ -177,9 +178,9 @@ Import 返回命名空间值，禁止非限定注入；结构约束用 `std::mod
 | `src/lainc/meta.lain`、`elaborator.lain`、`lower.lain` | Meta 展开 / 语义处理 / lowering 引擎 |
 | `src/lainir/api_contract.lain` | 编译器 ↔ provider 的能力契约 |
 | `src/lainvm/interpreter.lain` | 纯 Lain VM 求值器与 `execute_child` |
-| `std/meta.lain` | 正式 Meta ABI（`@abi_export`，镜像 bootstrap） |
+| `archive/std/meta.lain` | **第一代** Meta ABI（178 个 `@abi_export`、61 个 `@foreign`，全部指向第一代宿主能力名）。2026-09-20 从 `std/` 移入 `archive/`：第二代宿主只有 11 个能力，两边交集为 0，属两套 ABI |
 | `src/lainc/COMPILER_SOURCES.txt`、`src/lainir/api/SOURCES.txt`、`src/lainvm/SOURCES.txt` | 源码闭包清单（语义顺序） |
-| `seed/lainir/compiler_parts/SOURCE_ORDER`、`src/lainc/LAIN_SOURCE_ORDER` | 分段顺序，必须能逐字节重建原文件 |
+| `archive/lainir/compiler_parts/SOURCE_ORDER`、`src/lainc/LAIN_SOURCE_ORDER` | 分段顺序，必须能逐字节重建原文件 |
 | `scripts/lainc_sources.py`、`scripts/backend_manifest.py` | 共享闭包解析 / 确定性 manifest 生成 |
 | `docs/implementation/module-namespaces.md` | `packages::lain::` 逻辑命名空间、import 解析规则与 basename 歧义风险 |
 

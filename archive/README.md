@@ -45,3 +45,29 @@ The binaries land in `build/seed/bin/` (with the `.exe` suffix on Windows).
 directories are created inside it.
 
 The physical types are `BITS`, `FLOATS`, `SIMD`, `ADDR`, `UNIT`, and `NEVER`.
+
+## `archive/std/` — the two Lain sources bound to the first-generation host ABI
+
+Moved out of `std/` on 2026-09-20. The rule applied: **anything that does not match the second
+generation goes to `archive/`** — there is no compatibility to preserve (no users, no release).
+The mechanical test for "does not match" is whether a file has `@foreign` bound to a
+first-generation host capability name (`lain_ast_v1_*`, `tool_*`, or the dash-named
+`bootstrap.*`).
+
+| File | Lines | Why it is here |
+| --- | --- | --- |
+| `std/meta.lain` | 4675 | **178** `@abi_export`, **61** `@foreign`, all pointing at the first-generation host (30 × `lain_ast_v1_*`, 25 × `tool_*`, `raw_parse`, 5 × dash-named `bootstrap.*`) |
+| `std/bootstrap/abi_entry.lain` | 1070 | First-generation Meta ABI entry; imports `std::meta` and calls through the dash-named capabilities |
+
+The second-generation host (`seed/src/meta/host.c`) exposes **11** capabilities. The intersection
+with those 61 is **empty**, so these two files are not "not yet finished" — they are a different ABI.
+
+The 23 files left in `std/` (2027 lines) contain **zero** `@foreign`: `core/{arena,memory,result,
+slice,source,string,vec}.lain`, `allocation/backend/bounds/control/diagnostic/effect/intrusive/
+mem/memory_model/type_policy.lain`, `platform/*`, `bootstrap/{ast_tree,ir_builder,type_shape}.lain`.
+They are the **goal**, not first-generation interface code — the second generation cannot parse
+them yet only because its input language is still a v0 subset.
+
+Live consumers that now point at the moved files: `src/lainc/meta.lain:15`,
+`src/lainc/types.lain:13` (both `import("std::meta")`).
+
