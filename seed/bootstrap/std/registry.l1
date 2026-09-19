@@ -1,0 +1,183 @@
+// 初代标准库 v0 —— 类型注册表：类型身份。
+//
+// 在这之前，「类型」是一次**回源码重算**的结果：给出名字，扫一遍源码，算出一个
+// repr（kind + width）。两个 repr 之间没有「是不是同一个类型」可言——同一个名字
+// 问两次，是两个互不相干的重新计算。签名、抽象、模块实例全都建立不起来。
+//
+// 这个文件补的就是那一层：类型是一条**被 interning 的记录**，有 id、有归属。
+//
+//   TypeValue: id  kind  repr_kind  repr_width  owner  namespace  arg_start  arg_count
+//
+// 两个类型是不是同一个 = 两条记录的 key 一不一样：
+//
+//   key = (kind, owner, namespace)      // v0 没有参数化类型，实参区恒空
+//
+// **repr 不进 key。** 这是关键：`i32` 和 `u32` 的 repr 都是 bits/32，但它们是
+// 两个类型（op 表不同）。让它们不同的不是 repr，是 owner ——owner 指的是**哪一条
+// 声明**，不是哪一份源码。所以身份是**名义的**（来自声明），不是结构的。
+//
+//   owner = ((源码下标 + 1) << 32) | (声明位置 + 1)
+//   owner = 0 留给合成的类型（比如没写类型标注时的默认 #bits<64>）
+//
+// 这套形状是照正式设计抄的（`std/meta.lain` 的 TypeValue / intern_type）：那边
+// 用的 key 是 (kind, nominal_owner, namespace, arguments)，id 从 1 开始，注册表
+// 是 values/arguments/modules 三个向量。这里 v0 只留 values，实参区先空着。
+//
+// 暂存区分段（宿主给 64 KiB）：
+//   +0    和类型的最大载荷大小        +8    和类型的最大对齐
+//   +16   命中标量所在源码下标         +24   op 物理名位置
+//   +32   op 物理名长度               +40   那份源码长度
+//   +48   标量的 repr 位置            +56   （空）
+//   +64   逻辑路径/mangle 缓冲区，448 字节（+64..+511）
+//   +512  注册表条目数
+//   +520  注册表条目区，每条 64 字节
+
+data meta_path_off ro { 64 0 0 0 0 0 0 0 }     // 路径缓冲区起点
+data meta_path_cap ro { 192 1 0 0 0 0 0 0 }    // 448 字节
+data meta_reg_count_off ro { 0 2 0 0 0 0 0 0 } // 512
+data meta_reg_entry_off ro { 8 2 0 0 0 0 0 0 } // 520
+data meta_reg_entry_size ro { 64 0 0 0 0 0 0 0 }
+
+// 第 index 条记录的地址。
+#proc meta_reg_entry(%scratch: #addr, %index: #bits<64>) -> #addr {
+  %base = #lea(%scratch, 520, 1, 0)
+  // index * 64 = index << 6
+  %off = #shl[#bits<64>](%index, 6)
+  %p = #lea(%base, %off, 1, 0)
+  #return %p
+}
+
+// 找 key 相同的记录，返回它的 id；没有返回 0。
+#proc meta_reg_lookup(%scratch: #addr, %kind: #bits<64>, %owner: #bits<64>,
+                      %ns: #bits<64>) -> #bits<64> {
+  %count = #call meta_cell_get(#lea(%scratch, 512, 1, 0))
+  %found = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %e = #call meta_reg_entry(%scratch, %i)
+      %k = #call meta_cell_get(#lea(%e, 8, 1, 0))
+      %o = #call meta_cell_get(#lea(%e, 32, 1, 0))
+      %n = #call meta_cell_get(#lea(%e, 40, 1, 0))
+      %k_ok = #eq[#bits<64>](%k, %kind)
+      %o_ok = #eq[#bits<64>](%o, %owner)
+      %n_ok = #eq[#bits<64>](%n, %ns)
+      %t1 = #and[#bits<1>](%k_ok, %o_ok)
+      %hit = #and[#bits<1>](%t1, %n_ok)
+      #if %hit {
+        %id = #call meta_cell_get(%e)
+        #break s(%id)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue s(%i2)
+    } else {
+      #break s(0)
+    }
+  }
+  #return %found
+}
+
+// key 已经在表里就回那个 id，否则追加一条。返回 id（从 1 开始）。
+//
+// 容量：条目区从 +520 到暂存区末尾。**需求来自模块**——表能装多少条是资源，
+// 装不下必须响（15），不能截断。注册表填满意味着单次编译的类型声明数超过了
+// 宿主给的暂存区，那是要调暂存区，不是要静默丢类型。
+#proc meta_intern(%host: #addr, %kind: #bits<64>, %owner: #bits<64>,
+                  %ns: #bits<64>, %rk: #bits<64>, %rw: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %id = #call meta_reg_lookup(%scratch, %kind, %owner, %ns)
+  %hit = #ne[#bits<64>](%id, 0)
+  %r = #if %hit -> (#bits<64>) {
+    #yield %id
+  } else {
+    %size = #call lain_meta_scratch_size(%host)
+    %avail = #sub[#bits<64>](%size, 520)
+    %cap = #udiv[#bits<64>](%avail, 64)
+    %count = #call meta_cell_get(#lea(%scratch, 512, 1, 0))
+    %full = #uge[#bits<64>](%count, %cap)
+    %w = #if %full -> (#bits<64>) {
+      %f = #call lain_meta_fail(%host, 15)
+      #yield 0
+    } else {
+      %e = #call meta_reg_entry(%scratch, %count)
+      %new_id = #add[#bits<64>](%count, 1)
+      %s0 = #call meta_cell_put(%e, %new_id)
+      %s1 = #call meta_cell_put(#lea(%e, 8, 1, 0), %kind)
+      %s2 = #call meta_cell_put(#lea(%e, 16, 1, 0), %rk)
+      %s3 = #call meta_cell_put(#lea(%e, 24, 1, 0), %rw)
+      %s4 = #call meta_cell_put(#lea(%e, 32, 1, 0), %owner)
+      %s5 = #call meta_cell_put(#lea(%e, 40, 1, 0), %ns)
+      %s6 = #call meta_cell_put(#lea(%e, 48, 1, 0), 0)
+      %s7 = #call meta_cell_put(#lea(%e, 56, 1, 0), 0)
+      %s8 = #call meta_cell_put(#lea(%scratch, 512, 1, 0), %new_id)
+      #yield %new_id
+    }
+    #yield %w
+  }
+  #return %r
+}
+
+// --- 读记录 ---------------------------------------------------------------
+//
+// id 从 1 开始，所以记录下标是 id - 1。
+
+#proc meta_tid_word(%host: #addr, %id: #bits<64>,
+                     %off: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %i = #sub[#bits<64>](%id, 1)
+  %e = #call meta_reg_entry(%scratch, %i)
+  %p = #lea(%e, %off, 1, 0)
+  %v = #call meta_cell_get(%p)
+  #return %v
+}
+
+// kind：v0 只有 1（内建标量），和正式设计的 builtins 对齐
+#proc meta_tid_kind(%host: #addr, %id: #bits<64>) -> #bits<64> {
+  %v = #call meta_tid_word(%host, %id, 8)
+  #return %v
+}
+
+#proc meta_tid_owner(%host: #addr, %id: #bits<64>) -> #bits<64> {
+  %v = #call meta_tid_word(%host, %id, 32)
+  #return %v
+}
+
+#proc meta_tid_namespace(%host: #addr, %id: #bits<64>) -> #bits<64> {
+  %v = #call meta_tid_word(%host, %id, 40)
+  #return %v
+}
+
+// repr 打包成 (kind 低 8 位, width 8..15 位)，和别处一致。
+#proc meta_tid_repr(%host: #addr, %id: #bits<64>) -> #bits<64> {
+  %rk = #call meta_tid_word(%host, %id, 16)
+  %rw = #call meta_tid_word(%host, %id, 24)
+  %shifted = #shl[#bits<64>](%rw, 8)
+  %p = #or[#bits<64>](%rk, %shifted)
+  #return %p
+}
+
+#proc meta_tid_repr_kind(%host: #addr, %id: #bits<64>) -> #bits<64> {
+  %p = #call meta_tid_repr(%host, %id)
+  %v = #and[#bits<64>](%p, 255)
+  #return %v
+}
+
+#proc meta_tid_repr_width(%host: #addr, %id: #bits<64>) -> #bits<64> {
+  %p = #call meta_tid_repr(%host, %id)
+  %v = #and[#bits<64>](#lshr[#bits<64>](%p, 8), 255)
+  #return %v
+}
+
+// 大小与对齐走 repr —— 布局是物理形状推出来的，不是身份的一部分。
+#proc meta_tid_size(%host: #addr, %id: #bits<64>) -> #bits<64> {
+  %rk = #call meta_tid_repr_kind(%host, %id)
+  %rw = #call meta_tid_repr_width(%host, %id)
+  %v = #call bs_repr_size(%rk, %rw)
+  #return %v
+}
+
+#proc meta_tid_align(%host: #addr, %id: #bits<64>) -> #bits<64> {
+  %rk = #call meta_tid_repr_kind(%host, %id)
+  %rw = #call meta_tid_repr_width(%host, %id)
+  %v = #call bs_repr_align(%rk, %rw)
+  #return %v
+}

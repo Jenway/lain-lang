@@ -34,6 +34,7 @@ SOURCE_ORDER   链接顺序；驱动按它把文件拼成一份文本再解析�
 std/lex.l1     初代标准库：字节与词法（空白、标识符、十进制数、关键字）
 std/emit.l1    初代标准库：宿主 ABI 声明 + 产物输出 + repr 的文本
 std/types.l1   初代标准库：字节比较、暂存区单元、repr 的字节数与对齐
+std/registry.l1 初代标准库：类型注册表（身份 / interning）
 std/modules.l1 初代标准库：源码注册表、import 解析、命名空间成员的 mangle
 std/scalars.l1 初代标准库：标量声明、类型名解析、算子解析
 std/records.l1 初代标准库：积类型（布局、构造、字段访问）
@@ -272,6 +273,45 @@ let main = M.answer;
 v0 的缺口：导入的绑定只支持 `let NAME = INT;` 这一种形状，repr 固定 `#bits<64>`；
 类型还不能 import；没有 `export` 声明（模块里所有 `let` 都是导出的）；没有循环
 检测；重名 import 绑定（`let M = ...` 两次）不报错，后一条会赢。
+
+## 类型身份：注册表
+
+在这之前，「类型」是一次**回源码重算**的结果：给出名字，扫一遍源码，算出一个 repr。
+两个 repr 之间没有「是不是同一个类型」可言——同一个名字问两次，是两个互不相干的
+重新计算。签名、抽象、模块实例全都建立在「类型有身份」之上，所以这一层得先有。
+
+`std/registry.l1` 补的就是它。类型是一条被 **interning** 的记录：
+
+```text
+TypeValue: id  kind  repr_kind  repr_width  owner  namespace  arg_start  arg_count
+key      = (kind, owner, namespace)          // v0 没有参数化类型，实参区恒空
+```
+
+`owner = ((源码下标 + 1) << 32) | (声明位置 + 1)`，`owner = 0` 留给合成类型
+（没写类型标注时的默认 `#bits<64>`）。id 从 1 开始。这套形状是照正式设计抄的
+（`std/meta.lain` 的 `TypeValue` / `intern_type`：那边的 key 是
+`(kind, nominal_owner, namespace, arguments)`，注册表是 values/arguments/modules
+三个向量；这里 v0 只留 values，实参区先空着）。
+
+**repr 不进 key，这是关键。** `i32` 和 `u32` 的 repr 都是 bits/32，它们却是两个
+类型（op 表不同）。让它们不同的不是 repr，是 owner——owner 指的是**哪一条声明**，
+不是哪一份源码。所以身份是**名义的**，来自声明，不是结构的。
+
+回归里那两条断言钉着这件事：
+
+```text
+PASS  tid: i32 用两次 -> 1 条                    （同一条声明 → 同一个 id）
+PASS  tid: i32 + u32 -> 2 条，repr 相同          （repr=0/32，owner 不同）
+```
+
+想看见类型 id，得看**编译期状态**——产出的 LAINIR 里没有它。驱动把注册表读出来
+打印（`types: N registered`，模式 `types` 时列全表）。这是 harness 和 Meta 之间
+唯一的内部耦合，就三个偏移量，在 `meta_boot.c` 顶上写着。
+
+**和正式设计的一处偏离**：正式设计里 `TypeValue` **不带物理形状**（注释写的是
+"their physical ABI shape is intentionally absent here; lowering chooses that
+later"），这里为了 v0 把 repr 放在同一条记录里——因为现在唯一的类型种类就是标量，
+而标量的定义就是它的 repr。等有了结构类型，形状就该挪出去，由 lowering 决定。
 
 ## 标量：从字节表到声明
 

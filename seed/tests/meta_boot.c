@@ -131,6 +131,45 @@ static char *load_bootstrap(const char *order_path, uint32_t *length_out) {
   return joined;
 }
 
+/* Meta 的编译期状态：类型注册表。
+ *
+ * 布局是 Meta 侧定的（`seed/bootstrap/std/registry.l1` 头注释里的分段表），这里
+ * 复述一遍。驱动读它不是在解释语言语义，是在**检查编译期状态**——产出的 LAINIR
+ * 里看不见类型 id，所以「同一个类型查两次是不是同一个」只能从这里看。
+ *
+ * 这是 harness 和 Meta 之间唯一的内部耦合，就这三行。 */
+#define META_REG_COUNT_OFF 512u
+#define META_REG_ENTRY_OFF 520u
+#define META_REG_ENTRY_BYTES 64u
+
+static uint64_t meta_reg_count(const LainMetaHost *host) {
+  uint32_t scratch_size = 0;
+  void *scratch = lainmeta_host_scratch(host, &scratch_size);
+  uint64_t count = 0;
+  if (!scratch || scratch_size < META_REG_ENTRY_OFF) return 0;
+  memcpy(&count, (const unsigned char *)scratch + META_REG_COUNT_OFF, sizeof(count));
+  return count;
+}
+
+static void report_type_registry(const LainMetaHost *host, int verbose) {
+  uint32_t scratch_size = 0;
+  void *scratch = lainmeta_host_scratch(host, &scratch_size);
+  const unsigned char *base = (const unsigned char *)scratch;
+  uint64_t count = meta_reg_count(host);
+  uint64_t i;
+  printf("types:     %llu registered\n", (unsigned long long)count);
+  if (!verbose || !scratch) return;
+  for (i = 0; i < count; i++) {
+    uint64_t w[8];
+    memcpy(w, base + META_REG_ENTRY_OFF + i * META_REG_ENTRY_BYTES, sizeof(w));
+    printf("type %llu: kind=%llu repr=%llu/%llu owner=%llu ns=%llu args=%llu+%llu\n",
+           (unsigned long long)w[0], (unsigned long long)w[1],
+           (unsigned long long)w[2], (unsigned long long)w[3],
+           (unsigned long long)w[4], (unsigned long long)w[5],
+           (unsigned long long)w[6], (unsigned long long)w[7]);
+  }
+}
+
 /* 解析 + 验证 + 装载 + admit，返回可执行的 TCB。 */
 static LainVmTcb *prepare(L1Builder *builder, const char *text,
                           LainVmSpace *space, LainVmImage **image_out,
@@ -372,6 +411,7 @@ int main(int argc, char **argv) {
     printf("meta:      ok, %llu steps, host status %u\n",
            (unsigned long long)meta_tcb->steps,
            lainmeta_host_status(host));
+    report_type_registry(host, mode && strcmp(mode, "types") == 0);
   }
 
   /* --- 3. 产物 --- */
