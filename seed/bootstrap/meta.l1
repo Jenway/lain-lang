@@ -71,12 +71,15 @@
       %is_enum = #call meta_node_is_word(%host, %node, %base, %ekw, 4)
       %is_scalar = #call meta_node_is_word(%host, %node, %base, %skw, 6)
       %is_let = #call meta_node_is_word(%host, %node, %base, %lkw, 3)
+      %fkw = #data_addr meta_kw_func
+      %is_func = #call meta_node_is_word(%host, %node, %base, %fkw, 4)
       %h1 = #or[#bits<1>](%is_struct, %is_enum)
       %h2 = #or[#bits<1>](%is_scalar, %is_let)
-      %any = #or[#bits<1>](%h1, %h2)
+      %h3 = #or[#bits<1>](%h1, %h2)
+      %any = #or[#bits<1>](%h3, %is_func)
       %s = #if %any -> (#bits<32>) {
-        %d = #call meta_lower_form(%host, %base, %len, %here, %is_struct,
-                                    %is_enum, %is_scalar, %is_let)
+        %d = #call meta_lower_form(%host, %base, %len, %here, %node, %is_struct,
+                                    %is_enum, %is_scalar, %is_let, %is_func)
         #yield %d
       } else {
         // **顶层树的孩子是词，不是形式**——一条形式跨好几个孩子（`struct`
@@ -106,9 +109,9 @@
 
 // 一条顶层形式：关键字已经认出来了，按它分派。
 #proc meta_lower_form(%host: #addr, %base: #addr, %len: #bits<64>,
-                       %here: #bits<64>, %is_struct: #bits<1>,
+                       %here: #bits<64>, %node: #bits<64>, %is_struct: #bits<1>,
                        %is_enum: #bits<1>, %is_scalar: #bits<1>,
-                       %is_let: #bits<1>) -> #bits<32> {
+                       %is_let: #bits<1>, %is_func: #bits<1>) -> #bits<32> {
   %s = #if %is_struct -> (#bits<32>) {
     %r1 = #call meta_lower_struct(%host, %base, %len, %here)
     #yield %r1
@@ -117,18 +120,24 @@
       %r4 = #call meta_lower_enum(%host, %base, %len, %here)
       #yield %r4
     } else {
-      %r3 = #if %is_scalar -> (#bits<32>) {
-        // 标量声明只在**模块**里有效（prelude / 被 import 的源码）。
-        // 被降级的那份源码自己写 `scalar` 会静默变成不可见，所以直接拒。
-        %f2 = #call lain_meta_fail(%host, 14)
-        #yield 14
+      %r3 = #if %is_func -> (#bits<32>) {
+        %r7 = #call meta_lower_func(%host, %base, %len, %node)
+        #yield %r7
       } else {
-        %r5 = #if %is_let -> (#bits<32>) {
-          %r6 = #call meta_lower_let(%host, %base, %len, %here)
-          #yield %r6
+        %r5 = #if %is_scalar -> (#bits<32>) {
+          // 标量声明只在**模块**里有效（prelude / 被 import 的源码）。
+          // 被降级的那份源码自己写 `scalar` 会静默变成不可见，所以直接拒。
+          %f2 = #call lain_meta_fail(%host, 14)
+          #yield 14
         } else {
-          %f = #call lain_meta_fail(%host, 4)
-          #yield 4
+          %r6 = #if %is_let -> (#bits<32>) {
+            %r8 = #call meta_lower_let(%host, %base, %len, %here)
+            #yield %r8
+          } else {
+            %f = #call lain_meta_fail(%host, 4)
+            #yield 4
+          }
+          #yield %r6
         }
         #yield %r5
       }
@@ -448,8 +457,8 @@
         #yield %r2
       } else {
         %s4 = #if %is_paren -> (#bits<32>) {
-          %r4 = #call meta_emit_call(%host, %base, %name_lo, %name_hi, %kind,
-                                     %width, %lhs_lo, %rec_hi)
+          %r4 = #call meta_emit_call(%host, %base, %len, %name_lo, %name_hi,
+                                     %kind, %width, %lhs_lo, %rec_hi, %after)
           #yield %r4
         } else {
           %f = #call lain_meta_fail(%host, 4)
@@ -506,11 +515,17 @@
   #return %status
 }
 
-// `let a = f();` —— 直接把已声明过程的结果当成这条绑定的值。
-// v0 只支持零实参：实参表原样跳过，不检查。
-#proc meta_emit_call(%host: #addr, %base: #addr, %name_lo: #bits<64>,
-                     %name_hi: #bits<64>, %kind: #bits<64>, %width: #bits<64>,
-                     %callee_lo: #bits<64>, %callee_hi: #bits<64>) -> #bits<32> {
+// `let a = f(3, 4);` —— 直接把已声明过程的结果当成这条绑定的值。
+//
+// 实参**原样搬运**：从 `(` 后面到第一个 `)` 之间的字节照抄进 `#call`。这对字面量
+// 是对的；换成别的东西（比如一个名字）会产出 `#call f(someName)`，被验证器拒
+// （未定义的值）——响的，不是静默给错值。真正的做法是把实参当表达式降级，等有
+// 局部变量和表达式 lowering 再说。
+#proc meta_emit_call(%host: #addr, %base: #addr, %len: #bits<64>,
+                     %name_lo: #bits<64>, %name_hi: #bits<64>,
+                     %kind: #bits<64>, %width: #bits<64>,
+                     %callee_lo: #bits<64>, %callee_hi: #bits<64>,
+                     %at: #bits<64>) -> #bits<32> {
   %p1 = #data_addr meta_p1
   %w1 = #call lain_meta_emit_write(%host, %p1, 6)
   %name_at = #lea(%base, %name_lo, 1, 0)
@@ -524,8 +539,28 @@
   %callee_at = #lea(%base, %callee_lo, 1, 0)
   %callee_len = #sub[#bits<64>](%callee_hi, %callee_lo)
   %w6 = #call lain_meta_emit_write(%host, %callee_at, %callee_len)
-  %x2 = #data_addr meta_x2
-  %w7 = #call lain_meta_emit_write(%host, %x2, 5)
+  %lp = #data_addr meta_fn_lparen
+  %w7 = #call lain_meta_emit_write(%host, %lp, 1)
+  // 实参：`(` 后面到第一个 `)`（实参里没有嵌套调用时成立）
+  %a_lo = #add[#bits<64>](%at, 1)
+  %a_hi = #loop scan(%i: #bits<64> = %a_lo) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %is = #call bs_is_byte(%base, %i, 41)
+      #if %is {
+        #break scan(%i)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    } else {
+      #break scan(%i)
+    }
+  }
+  %a_at = #lea(%base, %a_lo, 1, 0)
+  %a_len = #sub[#bits<64>](%a_hi, %a_lo)
+  %w8 = #call lain_meta_emit_write(%host, %a_at, %a_len)
+  %rp = #data_addr meta_call_rparen
+  %w9 = #call lain_meta_emit_write(%host, %rp, 4)
   #return 0
 }
 

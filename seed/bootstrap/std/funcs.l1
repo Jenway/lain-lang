@@ -1,0 +1,211 @@
+// 初代标准库 v0 —— 普通函数：参数、返回类型、函数体、带实参的调用。
+//
+// 这是「Meta 用 Lain 写」的第一块地基：解析器的每一个组件都是一个**带参数的过程**，
+// 没有这一层，语言里连一个解析器都放不下。
+//
+//   func add(a: i32, b: i32) -> i32 { a + b }
+//   let main: i32 = add(3, 4);
+//   →
+//   #proc add(%a: #bits<32>, %b: #bits<32>) -> #bits<32> {
+//     %r = #add[#bits<32>](%a, %b)
+//     #return %r
+//   }
+//   #proc main() -> #bits<32> {
+//     #return #call add(3, 4)
+//   }
+//
+// 参数名**直接当 LAINIR 的参数名用**：LAINIR 的过程参数是有名字的（`%a: #bits<32>`），
+// 所以源码里的 `a` 到产物里还是 `a`，中间不需要一张槽位表。这是这一版最省事的地方。
+//
+// v0 的限制（都写在这里，别猜）：
+//
+//   - 函数体是**一个表达式**：`值` 或 `值 算子 值`。没有局部变量、没有语句序列、
+//     没有 if / loop。这些要一步一步来。
+//   - 参数类型只支持**一个词**（`i32`），不支持限定名（`T.i32`）。
+//   - 二元运算的物理算子**按返回类型**查 op 表。`a + b` 返回 i32 时这是对的；
+//     真正的规则应该看操作数类型，等有了类型检查再说。
+//   - 函数体里的标识符**只按这张参数表解析**，不走作用域表。所以参数遮蔽不了
+//     外面的同名绑定——单表达式函数体里也没有「外面」可言。遮蔽要等块级作用域。
+//   - 不是参数的标识符会原样发成 `%名字`，被验证器拒（未定义的值）——响的，不是
+//     静默给错值。
+
+// 发射一个运算数：是十进制数字就发数字，否则发 `%名字`。
+#proc meta_emit_operand(%host: #addr, %base: #addr, %lo: #bits<64>,
+                         %hi: #bits<64>, %len: #bits<64>) -> #bits<32> {
+  %b = #call bs_byte_at(%base, %lo, %len)
+  %is_num = #call bs_is_digit(%b)
+  %st = #if %is_num -> (#bits<32>) {
+    %v = #call bs_read_uint(%base, %lo, %len)
+    %w = #call meta_emit_uint(%host, %v)
+    #yield %w
+  } else {
+    %pct = #data_addr meta_fn_pct
+    %w1 = #call lain_meta_emit_write(%host, %pct, 1)
+    %at = #lea(%base, %lo, 1, 0)
+    %n = #sub[#bits<64>](%hi, %lo)
+    %w2 = #call lain_meta_emit_write(%host, %at, %n)
+    #yield %w2
+  }
+  #return %st
+}
+
+// 函数体里的一条二元运算：`%r = #<物理算子>[<repr>](lhs, rhs)` + `#return %r`。
+// 物理算子名是 `meta_op_resolve` 查出来写进暂存区的（和 `let` 那条路同一个来源）。
+#proc meta_emit_body_binary(%host: #addr, %base: #addr, %len: #bits<64>,
+                             %kind: #bits<64>, %width: #bits<64>,
+                             %l_lo: #bits<64>, %l_hi: #bits<64>,
+                             %r_lo: #bits<64>, %r_hi: #bits<64>) -> #bits<32> {
+  %o1 = #data_addr meta_o1
+  %w1 = #call lain_meta_emit_write(%host, %o1, 11)
+  %scratch = #call lain_meta_scratch_data(%host)
+  %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
+  %pos = #call meta_cell_get(#lea(%scratch, 24, 1, 0))
+  %plen = #call meta_cell_get(#lea(%scratch, 32, 1, 0))
+  %m_base = #call lain_meta_source_data(%host, %idx)
+  %phys = #lea(%m_base, %pos, 1, 0)
+  %w2 = #call lain_meta_emit_write(%host, %phys, %plen)
+  %o2 = #data_addr meta_o2
+  %w3 = #call lain_meta_emit_write(%host, %o2, 1)
+  %w4 = #call meta_emit_repr(%host, %kind, %width)
+  %o3 = #data_addr meta_o3
+  %w5 = #call lain_meta_emit_write(%host, %o3, 2)
+  %w6 = #call meta_emit_operand(%host, %base, %l_lo, %l_hi, %len)
+  %o4 = #data_addr meta_o4
+  %w7 = #call lain_meta_emit_write(%host, %o4, 2)
+  %w8 = #call meta_emit_operand(%host, %base, %r_lo, %r_hi, %len)
+  %o5 = #data_addr meta_o5
+  %w9 = #call lain_meta_emit_write(%host, %o5, 15)
+  %o6 = #data_addr meta_o6
+  %w10 = #call lain_meta_emit_write(%host, %o6, 2)
+  #return 0
+}
+
+// `func NAME(p: T, ...) -> T { <表达式> }`
+#proc meta_lower_func(%host: #addr, %base: #addr, %len: #bits<64>,
+                      %node: #bits<64>) -> #bits<32> {
+  %name_node = #call meta_node_next(%host, %node)
+  %params = #call meta_node_next(%host, %name_node)
+  %arrow = #call meta_node_next(%host, %params)
+  %ret_node = #call meta_node_next(%host, %arrow)
+  %body = #call meta_node_next(%host, %ret_node)
+
+  // 返回类型 → repr（走作用域表）
+  %r_lo = #call meta_node_start(%host, %ret_node)
+  %r_n = #call meta_node_len(%host, %ret_node)
+  %r_hi = #add[#bits<64>](%r_lo, %r_n)
+  %tid = #call meta_type_resolve(%host, %base, %len, %r_lo, %r_hi)
+  %no_type = #eq[#bits<64>](%tid, 0)
+  %status = #if %no_type -> (#bits<32>) {
+    %f0 = #call lain_meta_fail(%host, 5)
+    #yield 5
+  } else {
+    %info = #call meta_tid_repr(%host, %tid)
+    %kind = #and[#bits<64>](%info, 255)
+    %width = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
+
+    // `#proc NAME(`
+    %p1 = #data_addr meta_p1
+    %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+    %n_lo = #call meta_node_start(%host, %name_node)
+    %n_n = #call meta_node_len(%host, %name_node)
+    %n_hi = #add[#bits<64>](%n_lo, %n_n)
+    %n_at = #lea(%base, %n_lo, 1, 0)
+    %n_len = #sub[#bits<64>](%n_hi, %n_lo)
+    %w2 = #call lain_meta_emit_write(%host, %n_at, %n_len)
+    %lp = #data_addr meta_fn_lparen
+    %w3 = #call lain_meta_emit_write(%host, %lp, 1)
+
+    // 参数表：走参数组的孩子，认「名字 : 类型」这一种形状
+    %colon = #data_addr meta_kw_colon
+    %pct = #data_addr meta_fn_pct
+    %col2 = #data_addr meta_fn_colon
+    %comma = #data_addr meta_o4
+    %first = #call meta_node_child(%host, %params)
+    %pst = #loop ps(%c: #bits<64> = %first,
+                    %lead: #bits<1> = 0) -> (#bits<32>) {
+      %more = #ne[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+      #if %more {
+        %nx = #call meta_node_next(%host, %c)
+        %is_colon = #call meta_node_is_word(%host, %nx, %base, %colon, 1)
+        #if %is_colon {
+          // 分隔符发在参数**前面**，所以第一个不发
+          #if %lead {
+            %wc = #call lain_meta_emit_write(%host, %comma, 2)
+          }
+          %wp = #call lain_meta_emit_write(%host, %pct, 1)
+          %a_lo = #call meta_node_start(%host, %c)
+          %a_n = #call meta_node_len(%host, %c)
+          %a_at = #lea(%base, %a_lo, 1, 0)
+          %wa = #call lain_meta_emit_write(%host, %a_at, %a_n)
+          %wk = #call lain_meta_emit_write(%host, %col2, 2)
+          %tn = #call meta_node_next(%host, %nx)
+          %t_lo = #call meta_node_start(%host, %tn)
+          %t_n = #call meta_node_len(%host, %tn)
+          %t_hi = #add[#bits<64>](%t_lo, %t_n)
+          %ptid = #call meta_type_resolve(%host, %base, %len, %t_lo, %t_hi)
+          %pbad = #eq[#bits<64>](%ptid, 0)
+          #if %pbad {
+            %f1 = #call lain_meta_fail(%host, 5)
+            #break ps(5)
+          }
+          %pinfo = #call meta_tid_repr(%host, %ptid)
+          %pk = #and[#bits<64>](%pinfo, 255)
+          %pw = #and[#bits<64>](#lshr[#bits<64>](%pinfo, 8), 255)
+          %wr = #call meta_emit_repr(%host, %pk, %pw)
+        }
+        %next = #call meta_node_next(%host, %c)
+        #continue ps(%next, 1)
+      } else {
+        #break ps(0)
+      }
+    }
+    %pfail = #ne[#bits<32>](%pst, 0)
+    #if %pfail {
+      #return %pst
+    }
+
+    // `) -> ` + 返回类型的 repr
+    %rr = #data_addr meta_fn_rret
+    %w4 = #call lain_meta_emit_write(%host, %rr, 5)
+    %w5 = #call meta_emit_repr(%host, %kind, %width)
+
+    // 函数体：一个表达式
+    %bc = #call meta_node_child(%host, %body)
+    %bn = #call meta_node_next(%host, %bc)
+    %has_op = #ne[#bits<64>](%bn, 0xFFFFFFFFFFFFFFFF)
+    %bst = #if %has_op -> (#bits<32>) {
+      // `值 算子 值`
+      %b_lo = #call meta_node_start(%host, %bc)
+      %b_hi = #add[#bits<64>](%b_lo, #call meta_node_len(%host, %bc))
+      %op_lo = #call meta_node_start(%host, %bn)
+      %rhs = #call meta_node_next(%host, %bn)
+      %rhs_lo = #call meta_node_start(%host, %rhs)
+      %rhs_hi = #add[#bits<64>](%rhs_lo, #call meta_node_len(%host, %rhs))
+      // 物理算子按返回类型查（v0 的简化，见文件头）
+      %sym = #lea(%base, %op_lo, 1, 0)
+      %found = #call meta_op_resolve(%host, %base, %len, %r_lo, %r_hi, %sym, 1)
+      %miss = #eq[#bits<64>](%found, 0xFFFFFFFFFFFFFFFF)
+      %s = #if %miss -> (#bits<32>) {
+        %f2 = #call lain_meta_fail(%host, 6)
+        #yield 6
+      } else {
+        %e = #call meta_emit_body_binary(%host, %base, %len, %kind, %width,
+                                         %b_lo, %b_hi, %rhs_lo, %rhs_hi)
+        #yield %e
+      }
+      #yield %s
+    } else {
+      // 单个值
+      %v_lo = #call meta_node_start(%host, %bc)
+      %v_hi = #add[#bits<64>](%v_lo, #call meta_node_len(%host, %bc))
+      %p2b = #data_addr meta_p2b
+      %w6 = #call lain_meta_emit_write(%host, %p2b, 13)
+      %w7 = #call meta_emit_operand(%host, %base, %v_lo, %v_hi, %len)
+      %p3 = #data_addr meta_p3
+      %w8 = #call lain_meta_emit_write(%host, %p3, 3)
+      #yield 0
+    }
+    #yield %bst
+  }
+  #return %status
+}
