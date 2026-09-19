@@ -147,21 +147,23 @@ static char *load_bootstrap(const char *order_path, uint32_t *length_out) {
  * LAINIR 里看不出来。 */
 #define META_TREE_BASE_OFF 112u
 #define META_TREE_COUNT_OFF 120u
-#define META_TREE_ROOT_OFF 128u
+#define META_TREE_ROOTS_OFF 128u
 #define META_NODE_BYTES 40u
 
 static void report_tree(LainMetaHost *host, const char *source_text) {
   uint32_t scratch_size = 0;
   void *scratch = lainmeta_host_scratch(host, &scratch_size);
   const unsigned char *base = (const unsigned char *)scratch;
-  uint64_t tree_base = 0, count = 0, root = 0;
+  uint64_t tree_base = 0, count = 0, root = 0, roots_base = 0;
   uint64_t i;
-  if (!scratch || scratch_size < META_TREE_ROOT_OFF + 8u) return;
+  if (!scratch || scratch_size < META_TREE_ROOTS_OFF + 8u) return;
   memcpy(&tree_base, base + META_TREE_BASE_OFF, 8);
   memcpy(&count, base + META_TREE_COUNT_OFF, 8);
-  memcpy(&root, base + META_TREE_ROOT_OFF, 8);
-  printf("tree:      %llu nodes, root #%llu\n", (unsigned long long)count,
-         (unsigned long long)root);
+  /* 每份源码各有一棵树，根下标按源码下标存；这里看第 0 份（被降级的那份）。 */
+  memcpy(&roots_base, base + META_TREE_ROOTS_OFF, 8);
+  memcpy(&root, base + roots_base, 8);
+  printf("tree:      %llu nodes total, source 0 root #%llu\n",
+         (unsigned long long)count, (unsigned long long)root);
   if (!source_text) return;
   for (i = 0; i < count; i++) {
     const unsigned char *node = base + tree_base + i * META_NODE_BYTES;
@@ -441,6 +443,12 @@ int main(int argc, char **argv) {
       report_fail("meta run", buffer);
       goto cleanup;
     }
+    printf("meta:      %llu steps, host status %u\n",
+           (unsigned long long)meta_tcb->steps,
+           lainmeta_host_status(host));
+    /* 编译期状态先打：跑挂了的时候，最想看的正是「它把源码读成了什么样」。 */
+    report_type_registry(host, mode && strcmp(mode, "types") == 0);
+    if (mode && strcmp(mode, "tree") == 0) report_tree(host, source);
     if (meta_tcb->result.as.bits != 0) {
       char buffer[192];
       snprintf(buffer, sizeof(buffer), "Meta returned status %llu",
@@ -459,11 +467,6 @@ int main(int argc, char **argv) {
       report_fail("meta run", buffer);
       goto cleanup;
     }
-    printf("meta:      ok, %llu steps, host status %u\n",
-           (unsigned long long)meta_tcb->steps,
-           lainmeta_host_status(host));
-    report_type_registry(host, mode && strcmp(mode, "types") == 0);
-    if (mode && strcmp(mode, "tree") == 0) report_tree(host, source);
   }
 
   /* --- 3. 产物 --- */

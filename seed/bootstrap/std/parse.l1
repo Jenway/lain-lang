@@ -260,7 +260,70 @@
   #return %end
 }
 
-// 把一份源码读成一棵树，根是一个覆盖全文的组节点。
+// 节点的字段（0 = 种类，1 = 起点，2 = 长度，3 = 第一个孩子，4 = 下一个兄弟）。
+// 名字写短一点，调用点才看得清。
+#proc meta_node_kind(%host: #addr, %i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%host, %i, 0)
+  #return %v
+}
+
+#proc meta_node_start(%host: #addr, %i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%host, %i, 1)
+  #return %v
+}
+
+#proc meta_node_len(%host: #addr, %i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%host, %i, 2)
+  #return %v
+}
+
+#proc meta_node_child(%host: #addr, %i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%host, %i, 3)
+  #return %v
+}
+
+#proc meta_node_next(%host: #addr, %i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%host, %i, 4)
+  #return %v
+}
+
+// 这份源码的根节点。每份源码各有一棵树，根下标按源码下标存。
+#proc meta_root_of(%host: #addr, %source: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %base = #call meta_cell_get(#lea(%scratch, 128, 1, 0))
+  %p = #lea(%scratch, %base, 1, 0)
+  %off = #mul[#bits<64>](%source, 8)
+  %q = #lea(%p, %off, 1, 0)
+  %v = #call meta_cell_get(%q)
+  #return %v
+}
+
+// 这个节点是不是「字面量 kw」，也就是一个词，内容正好是那串字节？
+// **这就是「按形状认，不按字节搜」的落点**：不再问「源码里哪儿有 struct 这三个
+// 字母」，而是问「这个节点是不是一个内容为 struct 的词」。
+#proc meta_node_is_word(%host: #addr, %i: #bits<64>, %base: #addr,
+                         %kw: #addr, %kw_len: #bits<64>) -> #bits<1> {
+  %kind = #call meta_node_kind(%host, %i)
+  %is_word = #eq[#bits<64>](%kind, 1)
+  %r = #if %is_word -> (#bits<1>) {
+    %n = #call meta_node_len(%host, %i)
+    %same_len = #eq[#bits<64>](%n, %kw_len)
+    %e = #if %same_len -> (#bits<1>) {
+      %st = #call meta_node_start(%host, %i)
+      %p = #lea(%base, %st, 1, 0)
+      %eqb = #call meta_bytes_equal(%p, %kw, %kw_len)
+      #yield %eqb
+    } else {
+      #yield 0
+    }
+    #yield %e
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+// 把一份源码读成一棵树，根是一个覆盖全文的组节点。根下标按源码下标记下来。
 #proc meta_parse_source(%host: #addr, %source: #bits<64>) -> #bits<32> {
   %len = #call lain_meta_source_length(%host, %source)
   %base = #call lain_meta_source_data(%host, %source)
@@ -269,6 +332,10 @@
   %cfirst = #call meta_cell_get(#lea(%scratch, 144, 1, 0))
   %root = #call meta_tree_add(%host, 2, 0, %len)
   %set = #call meta_tree_set(%host, %root, 3, %cfirst)
-  %s = #call meta_cell_put(#lea(%scratch, 128, 1, 0), %root)
+  %rb = #call meta_cell_get(#lea(%scratch, 128, 1, 0))
+  %rp = #lea(%scratch, %rb, 1, 0)
+  %off = #mul[#bits<64>](%source, 8)
+  %slot = #lea(%rp, %off, 1, 0)
+  %s = #call meta_cell_put(%slot, %root)
   #return 0
 }
