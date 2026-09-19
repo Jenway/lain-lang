@@ -200,11 +200,14 @@ Import 返回命名空间值，禁止非限定注入；结构约束用 `std::mod
 
 **类别：**
 
-1. `scripts/check_*.py`（39 个）——契约/一致性/固定点门禁；其中 36 个进主入口。
+1. `scripts/check_*.py`（53 个）——契约/一致性/固定点门禁；其中 36 个进主入口。
 2. 构建门禁脚本：`build_lain_compiler.py`（内含边界检查）、`build_formal_stdlib.py`、`build_srclainc.py`、`freeze_lainc_bootstrap.py`。
 3. `seed/src/cli/vm_control_test.c` → `lainir-vm-control-test`（C 控制面自检）。
 4. 自举/固定点：`run_lainir_self_host.py`（gen1→gen2→gen3，要求 gen2 C == gen3 C）、`prove_lainc_fixed_point.py`（规范文本/extern/过程标签/每过程体 SHA-256）。
 5. Fixtures：`scripts/fixtures/`（97 个 `.lain`、21 个 `.l1`、1 个历史 C 基线）+ `lainc_api_migration/` 的 3 个 canonical `.l1` 快照。
+6. seed 手写 Meta 的端到端回归：`scripts/check_seed_meta_bootstrap.py`（84 条，跑 `seed/bootstrap/*.l1`
+   降级出的 LAINIR，并真的链成可执行去跑）。需要本地 C 编译器，默认 `zig cc`，可用 `--cc` 覆盖；
+   产物落 `build/tmp-probe/`（`seed/tests/emit_c.c` 的路径写死在那里）。**不在 CI 里。**
 
 **执行顺序依赖：**
 
