@@ -487,7 +487,11 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
         %n_off = #call meta_scope_word(%host, %i, 8)
         %n_len = #call meta_scope_word(%host, %i, 16)
         %n_hi = #add[#bits<64>](%n_off, %n_len)
-        %init = #call meta_scope_payload(%host, %i)
+        // 初始化式的**节点下标**：条目里存着。位置的直接读节点，不用 skip。
+        %init_node = #call meta_scope_payload(%host, %i)
+        %init = #call meta_node_start(%host, %init_node)
+        %init_hi = #add[#bits<64>](%init,
+                                   #call meta_node_len(%host, %init_node))
         %first = #call bs_byte_at(%m_base, %init, %m_len)
         %is_num = #call bs_is_digit(%first)
         %s2 = #if %is_num -> (#bits<32>) {
@@ -496,10 +500,9 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
                                          %n_off, %n_hi, %value)
           #yield %e0
         } else {
-          // 标识符：同模块里的另一条绑定
-          %id_hi = #call bs_skip_ident(%m_base, %init, %m_len)
+          // 标识符：同模块里的另一条绑定。引用的名字就是那个节点本身。
           %ref = #lea(%m_base, %init, 1, 0)
-          %ref_len = #sub[#bits<64>](%id_hi, %init)
+          %ref_len = #sub[#bits<64>](%init_hi, %init)
           %e1 = #call meta_emit_module_binding(%host, %m_base, %m_len,
                                                %ref, %ref_len, %mag, %mag_len)
           %bad = #ne[#bits<32>](%e1, 0)
@@ -507,7 +510,7 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
             #yield %e1
           } else {
             %e2 = #call meta_emit_module_call(%host, %m_base, %n_off, %n_hi,
-                                              %mag, %mag_len, %init, %id_hi)
+                                              %mag, %mag_len, %init, %init_hi)
             #yield %e2
           }
           #yield %s3

@@ -8,42 +8,26 @@
 //
 // v0 限制：每个变体最多一个载荷字段（`Circle(i32)`），且 tag 固定 `#bits<8>`。
 //
-// 和积类型一样，这里也是**回源码里再走一遍**声明来算，不建记录表。
-
-// 在源码里找 `enum <name> {` 之后的正文起点。找不到返回 NOT_FOUND。
-// 和 `meta_find_rec_body` 一样走语法树：问「这个节点是不是内容为 enum 的词」，
-// 名字是它的下一个节点。
-#proc meta_find_enum_body(%host: #addr, %src: #addr, %len: #bits<64>,
-                          %enum_lo: #bits<64>,
-                          %enum_hi: #bits<64>) -> #bits<64> {
-  %kw = #data_addr meta_kw_enum
-  %name = #lea(%src, %enum_lo, 1, 0)
-  %name_len = #sub[#bits<64>](%enum_hi, %enum_lo)
-  %after = #call meta_find_decl(%host, %src, %len, %kw, 4, %name, %name_len)
-  %gone = #eq[#bits<64>](%after, 0xFFFFFFFFFFFFFFFF)
-  %r = #if %gone -> (#bits<64>) {
-    #yield 0xFFFFFFFFFFFFFFFF
-  } else {
-    %kind = #call meta_node_kind(%host, %after)
-    %is_group = #eq[#bits<64>](%kind, 2)
-    %v = #if %is_group -> (#bits<64>) {
-      %st = #call meta_node_start(%host, %after)
-      %one = #add[#bits<64>](%st, 1)
-      #yield %one
-    } else {
-      #yield 0xFFFFFFFFFFFFFFFF
-    }
-    #yield %v
-  }
-  #return %r
-}
+// 正文起点**从符号表取**（`meta_scope_body`），不回源码里搜——条目里存的就是
+// 那条 enum 声明的节点。
 
 // 这个类型名是不是 enum？用来区分积类型的字段访问和和类型的投影。
+//
+// 现在**只查作用域表**：条目里就写着这个名字是哪一种声明，不用去看它的正文。
 #proc meta_is_enum(%host: #addr, %src: #addr, %len: #bits<64>,
                    %name_lo: #bits<64>, %name_hi: #bits<64>) -> #bits<1> {
-  %body = #call meta_find_enum_body(%host, %src, %len, %name_lo, %name_hi)
-  %found = #ne[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
-  #return %found
+  %name = #lea(%src, %name_lo, 1, 0)
+  %name_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %i = #call meta_scope_find(%host, %name, %name_len)
+  %miss = #eq[#bits<64>](%i, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %miss -> (#bits<1>) {
+    #yield 0
+  } else {
+    %kind = #call meta_scope_kind(%host, %i)
+    %is = #eq[#bits<64>](%kind, 5)
+    #yield %is
+  }
+  #return %r
 }
 
 // 走一遍变体，找 var_lo/var_hi 那一个，同时把最大载荷大小/对齐写进 scratch。
@@ -199,7 +183,8 @@
                        %enum_lo: #bits<64>,
                        %enum_hi: #bits<64>, %var_lo: #bits<64>,
                        %var_hi: #bits<64>, %scratch: #addr) -> #bits<64> {
-  %body = #call meta_find_enum_body(%host, %base, %len, %enum_lo, %enum_hi)
+  // 正文起点**问符号表**（条目里存的是声明节点），不回源码里搜
+  %body = #call meta_scope_body(%host, %base, %enum_lo, %enum_hi, 5)
   %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
   %info = #if %missing -> (#bits<64>) {
     #yield 0
@@ -436,7 +421,7 @@
   %after = #add[#bits<64>](%kw_at, 4)
   %name_lo = #call bs_skip_space(%base, %after, %len)
   %name_hi = #call bs_skip_ident(%base, %name_lo, %len)
-  %body = #call meta_find_enum_body(%host, %base, %len, %name_lo, %name_hi)
+  %body = #call meta_scope_body(%host, %base, %name_lo, %name_hi, 5)
   %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
   %status = #if %missing -> (#bits<32>) {
     %f0 = #call lain_meta_fail(%host, 4)

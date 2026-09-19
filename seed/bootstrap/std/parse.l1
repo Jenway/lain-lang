@@ -346,67 +346,14 @@
   #return %found
 }
 
-// 在源码 base 的顶层找 `关键字 名字`，返回**名字后面那个节点**的下标（对
-// `scalar` 是 `=`，对 `struct`/`enum` 是那个花括号组）。找不到返回 NONE。
+// `meta_find_decl`（按名字在源码顶层找一个 `关键字 名字`）**已经删了**。
 //
-// 这就是「按名字找声明」的那一半：从前的做法是拿关键字的字节在源码里从头搜，
-// 每个使用点搜一遍；现在问的是「这个节点是不是内容为 scalar 的词」。
-#proc meta_find_decl(%host: #addr, %base: #addr, %len: #bits<64>,
-                      %kw: #addr, %kw_len: #bits<64>, %name: #addr,
-                      %name_len: #bits<64>) -> #bits<64> {
-  %src = #call meta_source_of(%host, %base)
-  %missing = #eq[#bits<64>](%src, 0xFFFFFFFFFFFFFFFF)
-  %r = #if %missing -> (#bits<64>) {
-    #yield 0xFFFFFFFFFFFFFFFF
-  } else {
-    %root = #call meta_root_of(%host, %src)
-    %start_node = #call meta_node_child(%host, %root)
-    %found = #loop s(%node: #bits<64> = %start_node) -> (#bits<64>) {
-      %more = #ne[#bits<64>](%node, 0xFFFFFFFFFFFFFFFF)
-      #if %more {
-        %is_kw = #call meta_node_is_word(%host, %node, %base, %kw, %kw_len)
-        %hit = #if %is_kw -> (#bits<64>) {
-          %name_node = #call meta_node_next(%host, %node)
-          %none = #eq[#bits<64>](%name_node, 0xFFFFFFFFFFFFFFFF)
-          %v = #if %none -> (#bits<64>) {
-            #yield 0xFFFFFFFFFFFFFFFF
-          } else {
-            %nl = #call meta_node_len(%host, %name_node)
-            %same_len = #eq[#bits<64>](%nl, %name_len)
-            %same = #if %same_len -> (#bits<1>) {
-              %st = #call meta_node_start(%host, %name_node)
-              %p = #lea(%base, %st, 1, 0)
-              %eqb = #call meta_bytes_equal(%p, %name, %name_len)
-              #yield %eqb
-            } else {
-              #yield 0
-            }
-            %after = #if %same -> (#bits<64>) {
-              %nx = #call meta_node_next(%host, %name_node)
-              #yield %nx
-            } else {
-              #yield 0xFFFFFFFFFFFFFFFF
-            }
-            #yield %after
-          }
-          #yield %v
-        } else {
-          #yield 0xFFFFFFFFFFFFFFFF
-        }
-        %gone = #ne[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
-        #if %gone {
-          #break s(%hit)
-        }
-        %next = #call meta_node_next(%host, %node)
-        #continue s(%next)
-      } else {
-        #break s(0xFFFFFFFFFFFFFFFF)
-      }
-    }
-    #yield %found
-  }
-  #return %r
-}
+// 它是「按名字找声明」那一半的过渡形态：从「拿字节从头搜」改成「走树找」。但真正
+// 的答案是**符号表**——作用域表的条目里直接记着声明的节点下标，根本不用找。所以
+// 连它一起删掉了：`meta_scope_body`（积/和类型）和 `meta_scope_type_id`（标量）
+// 各自从条目里读。
+//
+// 留在 parse.l1 的只有「把源码读成树」和「节点怎么读」——找名字不是这一层的事。
 
 // 一份源码的树根。
 #proc meta_root_of_source(%host: #addr, %base: #addr) -> #bits<64> {
