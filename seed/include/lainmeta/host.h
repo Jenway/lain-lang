@@ -40,12 +40,26 @@ int lainmeta_host_add_source(LainMetaHost *host, const char *path,
 
 uint32_t lainmeta_host_source_count(const LainMetaHost *host);
 
-/* Meta 的可写暂存区。表格（记录表、值表）建在这里。
+/* 第 index 份源码的**逻辑路径**（NUL 结尾）。这是 import 解析的注册表：
+ * `import("std::math")` 规范化成 `std/math.lain` 之后和它逐字节比较。
  *
+ * 返回的是宿主的地址，不在 Meta 的映像里——驱动要用它就得先授权，
+ * 和源码文本、暂存区是同一个规矩。越界返回 ""。 */
+const char *lainmeta_host_source_path(const LainMetaHost *host,
+                                      uint32_t index);
+
+/* 第 index 份源码的文本地址与字节数（读到 length_out）。同样要驱动授权。 */
+const char *lainmeta_host_source_text(const LainMetaHost *host, uint32_t index,
+                                      uint32_t *length_out);
+
+/* Meta 的可写暂存区。类型注册表、作用域表、语法树都建在这里。
+ *
+ * 大小**由编译单元决定**（已登记源码的总字节数），所以是**按需分配**的：要等
+ * 源码都登记完再拿，不是创建 host 的时候。
  * 由**驱动显式授权**：Meta 的 TCB 不自带地址空间，这块内存不是它映像的
  * 一部分。不给授权就别想写——和源码只读那次是同一个道理。
  * 返回 NULL 表示宿主分配失败。 */
-void *lainmeta_host_scratch(const LainMetaHost *host, uint32_t *size_out);
+void *lainmeta_host_scratch(LainMetaHost *host, uint32_t *size_out);
 
 /* Meta 写出来的 canonical LAINIR 文本。 */
 const char *lainmeta_host_output(const LainMetaHost *host);
