@@ -56,6 +56,7 @@
 
 // `let` 三个字母，单独放一份当关键字用。
 data meta_kw_let ro { 108 101 116 }                     // "let"  3
+data meta_kw_eq ro { 61 }                              // "="    1
 
 // 跳过空白（空格、换行、制表、回车：字节 <= 32）**和注释**（`#` 到本行末尾），
 // 返回第一个有效字节的下标；走到头就返回 len。
@@ -150,30 +151,11 @@ data meta_kw_let ro { 108 101 116 }                     // "let"  3
   #return %end
 }
 
-// 下标 i 处的三个字节是不是 "let"？
-#proc bs_match_let(%base: #addr, %i: #bits<64>, %len: #bits<64>) -> #bits<1> {
-  %need = #add[#bits<64>](%i, 3)
-  %fits = #ule[#bits<64>](%need, %len)
-  %r = #if %fits -> (#bits<1>) {
-    %i1 = #add[#bits<64>](%i, 1)
-    %i2 = #add[#bits<64>](%i, 2)
-    %p0 = #lea(%base, %i, 1, 0)
-    %p1 = #lea(%base, %i1, 1, 0)
-    %p2 = #lea(%base, %i2, 1, 0)
-    %b0 = #load[#bits<8>](%p0)
-    %b1 = #load[#bits<8>](%p1)
-    %b2 = #load[#bits<8>](%p2)
-    %c0 = #eq[#bits<8>](%b0, 108)
-    %c1 = #eq[#bits<8>](%b1, 101)
-    %c2 = #eq[#bits<8>](%b2, 116)
-    %t = #and[#bits<1>](%c0, %c1)
-    %all = #and[#bits<1>](%t, %c2)
-    #yield %all
-  } else {
-    #yield 0
-  }
-  #return %r
-}
+// 下标 i 处的三个字节是不是 "let"？——**已经没人用了**。
+//
+// 它是「逐字节找关键字」时代的零件：`bs_next_form` 靠它扫出下一条顶层形式。
+// 形式发现改成走语法树之后，`bs_next_form` 和它一起删了。
+// `meta_kw_let` 那份数据还留着——现在由 `meta_node_is_word` 用。
 
 // 下标 i 处的字节是不是 c？
 #proc bs_is_byte(%base: #addr, %i: #bits<64>, %c: #bits<8>) -> #bits<1> {
@@ -240,34 +222,12 @@ data meta_kw_let ro { 108 101 116 }                     // "let"  3
   #return %r
 }
 
-// 从 from 起找下一个顶层形式（`let` 或 `struct`），返回它的位置。
-// 找不到返回 NOT_FOUND。
+// `bs_next_form`（从某个位置起逐字节找下一条顶层形式）**已经删了**。
 //
-// 这是手写阶段的权宜之计：各降级过程不返回「这条形式到哪结束」，所以靠
-// 扫关键字找下一条。它不看上下文，所以字段名叫 `letter` 之类的会被误判
-// ——v0 的输入里没这种名字，真做法是让每条降级返回结束位置。
-#proc bs_next_form(%base: #addr, %from: #bits<64>, %len: #bits<64>) -> #bits<64> {
-  %kw = #data_addr meta_kw_struct
-  %ekw = #data_addr meta_kw_enum
-  %skw = #data_addr meta_kw_scalar
-  %found = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
-    %more = #ult[#bits<64>](%i, %len)
-    #if %more {
-      %is_let = #call bs_match_let(%base, %i, %len)
-      %is_struct = #call bs_match_keyword(%base, %i, %len, %kw, 6)
-      %is_enum = #call bs_match_keyword(%base, %i, %len, %ekw, 4)
-      %is_scalar = #call bs_match_keyword(%base, %i, %len, %skw, 6)
-      %h1 = #or[#bits<1>](%is_let, %is_struct)
-      %h2 = #or[#bits<1>](%is_enum, %is_scalar)
-      %hit = #or[#bits<1>](%h1, %h2)
-      #if %hit {
-        #break scan(%i)
-      }
-      %i2 = #add[#bits<64>](%i, 1)
-      #continue scan(%i2)
-    } else {
-      #break scan(0xFFFFFFFFFFFFFFFF)
-    }
-  }
-  #return %found
-}
+// 它是手写阶段的权宜之计：各降级过程不返回「这条形式到哪结束」，所以靠扫关键字
+// 找下一条。它是这个文件里出过最多事的一个：不看注释（prelude 注释里的 `scalar`
+// 被当成声明，报过重名 16），而且只能靠「关键字后面必须是空白」这个约束勉强躲开
+// `letter` 这类名字。
+//
+// 现在形式发现和分派都走语法树（`std/parse.l1`）：问的是「这个节点是不是内容为
+// `struct` 的词」，一条形式从哪到哪由节点给出。不需要找，也就不需要这个。

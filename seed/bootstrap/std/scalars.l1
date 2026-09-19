@@ -124,36 +124,34 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
 // --- 找声明 ---------------------------------------------------------------
 
 // 在 base 里找 `scalar <name> =`，返回 repr 的下标；找不到 NOT_FOUND。
-#proc meta_find_scalar(%base: #addr, %len: #bits<64>, %name: #addr,
-                        %name_len: #bits<64>) -> #bits<64> {
+// **走语法树**：问「这个节点是不是内容为 scalar 的词」，名字是它的下一个节点，
+// repr 是 `=` 的下一个节点。
+#proc meta_find_scalar(%host: #addr, %base: #addr, %len: #bits<64>,
+                        %name: #addr, %name_len: #bits<64>) -> #bits<64> {
   %kw = #data_addr meta_kw_scalar
-  %found = #loop s(%at: #bits<64> = 0) -> (#bits<64>) {
-    %kw_at = #call meta_find_keyword(%base, %len, %kw, 6, %at)
-    %none = #eq[#bits<64>](%kw_at, 0xFFFFFFFFFFFFFFFF)
-    #if %none {
-      #break s(0xFFFFFFFFFFFFFFFF)
-    }
-    %after = #add[#bits<64>](%kw_at, 6)
-    %n_lo = #call bs_skip_space(%base, %after, %len)
-    %n_hi = #call bs_skip_ident(%base, %n_lo, %len)
-    %have = #sub[#bits<64>](%n_hi, %n_lo)
-    %same_len = #eq[#bits<64>](%have, %name_len)
-    %same = #if %same_len -> (#bits<1>) {
-      %p = #lea(%base, %n_lo, 1, 0)
-      %eq = #call meta_bytes_equal(%p, %name, %name_len)
-      #yield %eq
+  %after = #call meta_find_decl(%host, %base, %len, %kw, 6, %name, %name_len)
+  %gone = #eq[#bits<64>](%after, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %gone -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %eq_kw = #data_addr meta_kw_eq
+    %is_eq = #call meta_node_is_word(%host, %after, %base, %eq_kw, 1)
+    %v = #if %is_eq -> (#bits<64>) {
+      %repr = #call meta_node_next(%host, %after)
+      %none = #eq[#bits<64>](%repr, 0xFFFFFFFFFFFFFFFF)
+      %s = #if %none -> (#bits<64>) {
+        #yield 0xFFFFFFFFFFFFFFFF
+      } else {
+        %st = #call meta_node_start(%host, %repr)
+        #yield %st
+      }
+      #yield %s
     } else {
-      #yield 0
+      #yield 0xFFFFFFFFFFFFFFFF
     }
-    #if %same {
-      %eq_at = #call bs_skip_space(%base, %n_hi, %len)
-      %one = #add[#bits<64>](%eq_at, 1)
-      #break s(%one)
-    }
-    %next = #add[#bits<64>](%kw_at, 6)
-    #continue s(%next)
+    #yield %v
   }
-  #return %found
+  #return %r
 }
 
 // 标量声明里 `{` 的下标（op 表起点之后一格）。`at` 是 repr 的下标。
@@ -269,7 +267,7 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
         %m_hi = #call bs_skip_ident(%base, %m_lo, %len)
         %member = #lea(%base, %m_lo, 1, 0)
         %member_len = #sub[#bits<64>](%m_hi, %m_lo)
-        %pos = #call meta_find_scalar(%m_base, %m_len, %member, %member_len)
+        %pos = #call meta_find_scalar(%host, %m_base, %m_len, %member, %member_len)
         %s1 = #call meta_cell_put(#lea(%scratch, 16, 1, 0), %idx)
         %s2 = #call meta_cell_put(#lea(%scratch, 40, 1, 0), %m_len)
         %s3 = #call meta_cell_put(#lea(%scratch, 48, 1, 0), %pos)
@@ -290,7 +288,7 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
       %p_len = #call lain_meta_source_length(%host, %idx)
       %name = #lea(%base, %t_lo, 1, 0)
       %name_len = #sub[#bits<64>](%t_hi, %t_lo)
-      %pos = #call meta_find_scalar(%p_base, %p_len, %name, %name_len)
+      %pos = #call meta_find_scalar(%host, %p_base, %p_len, %name, %name_len)
       %s1 = #call meta_cell_put(#lea(%scratch, 16, 1, 0), %idx)
       %s2 = #call meta_cell_put(#lea(%scratch, 40, 1, 0), %p_len)
       %s3 = #call meta_cell_put(#lea(%scratch, 48, 1, 0), %pos)
