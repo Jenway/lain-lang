@@ -142,7 +142,58 @@ static char *load_bootstrap(const char *order_path, uint32_t *length_out) {
 #define META_REG_ENTRY_OFF 520u
 #define META_REG_ENTRY_BYTES 64u
 
-static uint64_t meta_reg_count(const LainMetaHost *host) {
+/* Meta 的编译期状态：语法树（布局见 `seed/bootstrap/std/parse.l1` 头注释）。
+ * 和类型注册表一样，这是 harness 在**检查编译期状态**——树长什么样，产出的
+ * LAINIR 里看不出来。 */
+#define META_TREE_BASE_OFF 112u
+#define META_TREE_COUNT_OFF 120u
+#define META_TREE_ROOT_OFF 128u
+#define META_NODE_BYTES 40u
+
+static void report_tree(LainMetaHost *host, const char *source_text) {
+  uint32_t scratch_size = 0;
+  void *scratch = lainmeta_host_scratch(host, &scratch_size);
+  const unsigned char *base = (const unsigned char *)scratch;
+  uint64_t tree_base = 0, count = 0, root = 0;
+  uint64_t i;
+  if (!scratch || scratch_size < META_TREE_ROOT_OFF + 8u) return;
+  memcpy(&tree_base, base + META_TREE_BASE_OFF, 8);
+  memcpy(&count, base + META_TREE_COUNT_OFF, 8);
+  memcpy(&root, base + META_TREE_ROOT_OFF, 8);
+  printf("tree:      %llu nodes, root #%llu\n", (unsigned long long)count,
+         (unsigned long long)root);
+  if (!source_text) return;
+  for (i = 0; i < count; i++) {
+    const unsigned char *node = base + tree_base + i * META_NODE_BYTES;
+    uint64_t w[5];
+    uint64_t start, length, first;
+    memcpy(w, node, sizeof(w));
+    start = w[1];
+    length = w[2];
+    first = w[3];
+    if (w[0] == 2) {
+      /* 组：印出它的孩子链，这样「谁是谁的孩子」一眼能核对 */
+      uint64_t k = first;
+      printf("  #%-3llu 组   [%2llu..%2llu] 孩子:",
+             (unsigned long long)i, (unsigned long long)start,
+             (unsigned long long)(start + length));
+      while (k != 0xFFFFFFFFFFFFFFFFull) {
+        uint64_t cw[5];
+        memcpy(cw, base + tree_base + k * META_NODE_BYTES, sizeof(cw));
+        printf(" #%llu", (unsigned long long)k);
+        k = cw[4];
+      }
+      printf("\n");
+    } else {
+      printf("  #%-3llu 词   [%2llu..%2llu] \"%.*s\"\n",
+             (unsigned long long)i, (unsigned long long)start,
+             (unsigned long long)(start + length), (int)length,
+             source_text + start);
+    }
+  }
+}
+
+static uint64_t meta_reg_count(LainMetaHost *host) {
   uint32_t scratch_size = 0;
   void *scratch = lainmeta_host_scratch(host, &scratch_size);
   uint64_t count = 0;
@@ -151,7 +202,7 @@ static uint64_t meta_reg_count(const LainMetaHost *host) {
   return count;
 }
 
-static void report_type_registry(const LainMetaHost *host, int verbose) {
+static void report_type_registry(LainMetaHost *host, int verbose) {
   uint32_t scratch_size = 0;
   void *scratch = lainmeta_host_scratch(host, &scratch_size);
   const unsigned char *base = (const unsigned char *)scratch;
@@ -412,6 +463,7 @@ int main(int argc, char **argv) {
            (unsigned long long)meta_tcb->steps,
            lainmeta_host_status(host));
     report_type_registry(host, mode && strcmp(mode, "types") == 0);
+    if (mode && strcmp(mode, "tree") == 0) report_tree(host, source);
   }
 
   /* --- 3. 产物 --- */

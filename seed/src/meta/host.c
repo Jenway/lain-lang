@@ -64,18 +64,44 @@ static int reserve_output(LainMetaHost *host, uint32_t extra) {
 LainMetaHost *lainmeta_host_new(void) {
   LainMetaHost *host = (LainMetaHost *)calloc(1, sizeof(LainMetaHost));
   if (!host) return NULL;
-  /* 64 KiB：够建几千条表格项。宿主侧一次分配，Meta 侧不许分配。 */
-  host->scratch_size = 65536u;
-  host->scratch = (unsigned char *)calloc(1, host->scratch_size);
-  if (!host->scratch) {
-    free(host);
-    return NULL;
-  }
+  /* 工作区**按需分配**：大小要等源码都登记完才知道（见下）。 */
+  host->scratch = NULL;
+  host->scratch_size = 0;
   return host;
 }
 
-void *lainmeta_host_scratch(const LainMetaHost *host, uint32_t *size_out) {
+/* 工作区的大小**由编译单元决定**，不是一个常数。
+ *
+ * 以前这里是写死的 64 KiB，理由是「够建几千条表格项」。加了语法树之后不够了：
+ * 树是每个 token 一个节点，节点数跟源码字节数是同一个量级。写死大小的后果不是
+ * 「慢」，是编译一份稍大的源码就报「装不下」——而那是宿主的资源配得不对，不是
+ * 源码有问题，不该让用户看见。
+ *
+ * 所以按已登记源码的总字节数给：每字节 128 字节工作区（树 + 类型表 + 作用域表），
+ * 再保底 64 KiB。**这只是资源配额，不是语言规则**——Meta 仍然自己算它要多少，
+ * 装不下照样报 17，不会踩坏。 */
+static uint32_t decide_scratch_size(const LainMetaHost *host) {
+  uint64_t total = 0;
+  uint32_t i;
+  uint64_t size;
+  for (i = 0; i < host->source_count; i++)
+    total += host->sources[i].length;
+  size = 65536u + total * 128u;
+  if (size > 0x40000000u) size = 0x40000000u; /* 上限 1 GiB，别拿坏输入去要内存 */
+  return (uint32_t)size;
+}
+
+void *lainmeta_host_scratch(LainMetaHost *host, uint32_t *size_out) {
   if (!host) return NULL;
+  if (!host->scratch) {
+    host->scratch_size = decide_scratch_size(host);
+    host->scratch = (unsigned char *)calloc(1, host->scratch_size);
+    if (!host->scratch) {
+      host->scratch_size = 0;
+      if (size_out) *size_out = 0;
+      return NULL;
+    }
+  }
   if (size_out) *size_out = host->scratch_size;
   return host->scratch;
 }

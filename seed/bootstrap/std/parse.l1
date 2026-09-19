@@ -1,0 +1,274 @@
+// 初代标准库 v0 —— 语法树：切词，按括号分组，摊平成一排格子。
+//
+// 在这之前，「读源码」是拿字符找模式：跳空白、读标识符、匹配关键字字节、猜一条
+// 形式到哪结束。它不知道程序是有结构的，所以每个使用点都要重搜一遍，而且
+// 「`letter` 里的 let」「注释里的 scalar」这类东西会被当成声明——都真的出过。
+//
+// 这个文件把源码读成**一棵树**，之后所有问题都在树上问。
+//
+// 树只有两种节点：
+//
+//   词 —— 一段连续的字母数字（`struct`、`Pair`、`i32`、`42`），或者一个标点
+//   组 —— 一对括号，连同里面装的东西
+//
+// 没有第三种。**它不认识 let / struct / enum**——那些是 Meta 的事。正因如此这层
+// 是跟语言无关的。
+//
+// 每个节点摊平成一格，40 字节，五个数：
+//
+//   +0  节点种类（1 = 词，2 = 组）
+//   +8  它在源码里的起点
+//   +16 它的长度
+//   +24 它的第一个孩子（组的才有意义；没有孩子是「无」）
+//   +32 它的下一个兄弟（没有兄弟是「无」）
+//
+// 「第一个孩子 + 下一个兄弟」两句话就能表达任意形状的树，不需要指针——只有一排
+// 格子，正好合上「Meta 手里只有整数、地址、和一块可写内存」这个约束。
+//
+// 建法是**后序**的：孩子先追加，父节点最后追加并记下第一个孩子的下标。兄弟链在
+// 每追加一个孩子时接一次。这样递归下降走一遍就建完，不用第二遍。
+//
+// 两个值要同时带出来（「走到哪了」和「这一层的孩子起点」）时，用固定单元传出参：
+// 递归调用返回后**立刻**读，此时单元里装的正是那次调用的结果。
+//
+//   +144  最近一次 meta_parse_seq 的第一个孩子
+//   +152  最近一次 meta_parse_seq的最后一个孩子
+
+// 节点的第 word 个数（0..4）
+#proc meta_tree_field(%host: #addr, %index: #bits<64>,
+                       %word: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %base = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
+  %p = #lea(%scratch, %base, 1, 0)
+  %off = #mul[#bits<64>](%index, 40)
+  %q = #lea(%p, %off, 1, 0)
+  %shift = #mul[#bits<64>](%word, 8)
+  %cell = #lea(%q, %shift, 1, 0)
+  %v = #call meta_cell_get(%cell)
+  #return %v
+}
+
+#proc meta_tree_set(%host: #addr, %index: #bits<64>, %word: #bits<64>,
+                     %v: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %base = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
+  %p = #lea(%scratch, %base, 1, 0)
+  %off = #mul[#bits<64>](%index, 40)
+  %q = #lea(%p, %off, 1, 0)
+  %shift = #mul[#bits<64>](%word, 8)
+  %cell = #lea(%q, %shift, 1, 0)
+  %s = #call meta_cell_put(%cell, %v)
+  #return 0
+}
+
+#proc meta_tree_count(%host: #addr) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %v = #call meta_cell_get(#lea(%scratch, 120, 1, 0))
+  #return %v
+}
+
+#proc meta_tree_root(%host: #addr) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %v = #call meta_cell_get(#lea(%scratch, 128, 1, 0))
+  #return %v
+}
+
+// 追加一格，返回它的下标。装不下报 17——**不截断**：截断会读出一棵残缺的树，
+// 而「树里没有」和「源码里没有」就分不开了。
+#proc meta_tree_add(%host: #addr, %kind: #bits<64>, %start: #bits<64>,
+                     %length: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %count = #call meta_cell_get(#lea(%scratch, 120, 1, 0))
+  %cap = #call meta_cell_get(#lea(%scratch, 136, 1, 0))
+  %full = #uge[#bits<64>](%count, %cap)
+  %idx = #if %full -> (#bits<64>) {
+    %f = #call lain_meta_fail(%host, 17)
+    #yield %count
+  } else {
+    %s0 = #call meta_tree_set(%host, %count, 0, %kind)
+    %s1 = #call meta_tree_set(%host, %count, 1, %start)
+    %s2 = #call meta_tree_set(%host, %count, 2, %length)
+    %s3 = #call meta_tree_set(%host, %count, 3, 0xFFFFFFFFFFFFFFFF)
+    %s4 = #call meta_tree_set(%host, %count, 4, 0xFFFFFFFFFFFFFFFF)
+    %new = #add[#bits<64>](%count, 1)
+    %s5 = #call meta_cell_put(#lea(%scratch, 120, 1, 0), %new)
+    #yield %count
+  }
+  #return %idx
+}
+
+// 是不是开括号？返回配对的闭括号字节（0 = 不是括号）。
+#proc meta_open_bracket(%b: #bits<8>) -> #bits<8> {
+  %curly = #eq[#bits<8>](%b, 123)
+  %paren = #eq[#bits<8>](%b, 40)
+  %square = #eq[#bits<8>](%b, 91)
+  %r = #if %curly -> (#bits<8>) {
+    #yield 125
+  } else {
+    %p = #if %paren -> (#bits<8>) {
+      #yield 41
+    } else {
+      %q = #if %square -> (#bits<8>) {
+        #yield 93
+      } else {
+        #yield 0
+      }
+      #yield %q
+    }
+    #yield %p
+  }
+  #return %r
+}
+
+// 一个 token 多长。种类由第一个字节判：字母或下划线打头就是「词」，连续吃到
+// 不再是字母数字；数字打头同理；其余是标点，各算一块。
+// `::` 例外——它是两字节的一个符号，拆开会让路径变难认。
+#proc meta_token_len(%base: #addr, %at: #bits<64>,
+                      %len: #bits<64>) -> #bits<64> {
+  %b = #call bs_byte_at(%base, %at, %len)
+  %is_ident = #call bs_is_ident(%b)
+  %is_digit = #call bs_is_digit(%b)
+  %wordish = #or[#bits<1>](%is_ident, %is_digit)
+  %n = #if %wordish -> (#bits<64>) {
+    %end = #loop scan(%i: #bits<64> = %at) -> (#bits<64>) {
+      %more = #ult[#bits<64>](%i, %len)
+      #if %more {
+        %c = #call bs_byte_at(%base, %i, %len)
+        %a = #call bs_is_ident(%c)
+        %d = #call bs_is_digit(%c)
+        %keep = #or[#bits<1>](%a, %d)
+        #if %keep {
+          %i2 = #add[#bits<64>](%i, 1)
+          #continue scan(%i2)
+        }
+        #break scan(%i)
+      } else {
+        #break scan(%i)
+      }
+    }
+    %w = #sub[#bits<64>](%end, %at)
+    #yield %w
+  } else {
+    %is_quote = #eq[#bits<8>](%b, 34)
+    %s = #if %is_quote -> (#bits<64>) {
+      // 引号串整体算一块。这是跟语言无关的词法概念（几乎每门语言都有），
+      // 而且拆开之后 `import("std::chain")` 会变成五个节点，很难认。
+      %from = #add[#bits<64>](%at, 1)
+      %q = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
+        %more = #ult[#bits<64>](%i, %len)
+        #if %more {
+          %c = #call bs_byte_at(%base, %i, %len)
+          %hit = #eq[#bits<8>](%c, 34)
+          #if %hit {
+            %i2 = #add[#bits<64>](%i, 1)
+            #break scan(%i2)
+          }
+          %i3 = #add[#bits<64>](%i, 1)
+          #continue scan(%i3)
+        } else {
+          #break scan(%i)
+        }
+      }
+      %ql = #sub[#bits<64>](%q, %at)
+      #yield %ql
+    } else {
+      %i1 = #add[#bits<64>](%at, 1)
+      %c1 = #call bs_byte_at(%base, %i1, %len)
+      %is_colon = #eq[#bits<8>](%b, 58)
+      %also = #eq[#bits<8>](%c1, 58)
+      %two = #and[#bits<1>](%is_colon, %also)
+      %t = #if %two -> (#bits<64>) {
+        #yield 2
+      } else {
+        #yield 1
+      }
+      #yield %t
+    }
+    #yield %s
+  }
+  #return %n
+}
+
+// 把一个刚追加的孩子接进「本层」的兄弟链。本层的首/末孩子记在 +144 / +152。
+#proc meta_tree_link(%host: #addr, %child: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %last = #call meta_cell_get(#lea(%scratch, 152, 1, 0))
+  %empty = #eq[#bits<64>](%last, 0xFFFFFFFFFFFFFFFF)
+  %s = #if %empty -> (#bits<32>) {
+    %a = #call meta_cell_put(#lea(%scratch, 144, 1, 0), %child)
+    #yield %a
+  } else {
+    %b = #call meta_tree_set(%host, %last, 4, %child)
+    #yield %b
+  }
+  %c = #call meta_cell_put(#lea(%scratch, 152, 1, 0), %child)
+  #return %s
+}
+
+// 走一串，直到遇见 close（0 = 走到文件尾就停）。返回「下一个位置」。
+// 本层的首/末孩子写进 +144 / +152 —— 调用方**紧接着**读。
+#proc meta_parse_seq(%host: #addr, %base: #addr, %len: #bits<64>,
+                      %at: #bits<64>, %close: #bits<8>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %s0 = #call meta_cell_put(#lea(%scratch, 144, 1, 0), 0xFFFFFFFFFFFFFFFF)
+  %s1 = #call meta_cell_put(#lea(%scratch, 152, 1, 0), 0xFFFFFFFFFFFFFFFF)
+  %end = #loop seq(%i: #bits<64> = %at) -> (#bits<64>) {
+    %here = #call bs_skip_space(%base, %i, %len)
+    %done = #uge[#bits<64>](%here, %len)
+    #if %done {
+      #break seq(%here)
+    }
+    %b = #call bs_byte_at(%base, %here, %len)
+    %is_close = #eq[#bits<8>](%b, %close)
+    %has_close = #ne[#bits<8>](%close, 0)
+    %stop = #and[#bits<1>](%is_close, %has_close)
+    #if %stop {
+      #break seq(%here)
+    }
+    %open = #call meta_open_bracket(%b)
+    %is_open = #ne[#bits<8>](%open, 0)
+    %next = #if %is_open -> (#bits<64>) {
+      // 组：里面的东西先走完，再追加这一格（后序）。
+      //
+      // **递归会覆盖 +144 / +152**（那是「最近一次调用」的出参），所以先把本层
+      // 已经攒下的首/末孩子存起来，读完孩子的结果再放回去。少了这一步，父节点
+      // 会被接到自己孩子的链子里——真出过，组节点的孩子列表里出现了它自己。
+      %one = #add[#bits<64>](%here, 1)
+      %save_first = #call meta_cell_get(#lea(%scratch, 144, 1, 0))
+      %save_last = #call meta_cell_get(#lea(%scratch, 152, 1, 0))
+      %r = #call meta_parse_seq(%host, %base, %len, %one, %open)
+      %cfirst = #call meta_cell_get(#lea(%scratch, 144, 1, 0))
+      %r1 = #call meta_cell_put(#lea(%scratch, 144, 1, 0), %save_first)
+      %r2 = #call meta_cell_put(#lea(%scratch, 152, 1, 0), %save_last)
+      // 组**吃掉自己的闭括号**：内层停在 `}` 上，外层要从它后面接着走。跨度也
+      // 算进去——不然「这个组盖住哪段原文」少了收尾那个字符。
+      %past = #add[#bits<64>](%r, 1)
+      %span = #sub[#bits<64>](%past, %here)
+      %g = #call meta_tree_add(%host, 2, %here, %span)
+      %set = #call meta_tree_set(%host, %g, 3, %cfirst)
+      %link = #call meta_tree_link(%host, %g)
+      #yield %past
+    } else {
+      %n = #call meta_token_len(%base, %here, %len)
+      %leaf = #call meta_tree_add(%host, 1, %here, %n)
+      %link2 = #call meta_tree_link(%host, %leaf)
+      %nx = #add[#bits<64>](%here, %n)
+      #yield %nx
+    }
+    #continue seq(%next)
+  }
+  #return %end
+}
+
+// 把一份源码读成一棵树，根是一个覆盖全文的组节点。
+#proc meta_parse_source(%host: #addr, %source: #bits<64>) -> #bits<32> {
+  %len = #call lain_meta_source_length(%host, %source)
+  %base = #call lain_meta_source_data(%host, %source)
+  %scratch = #call lain_meta_scratch_data(%host)
+  %end = #call meta_parse_seq(%host, %base, %len, 0, 0)
+  %cfirst = #call meta_cell_get(#lea(%scratch, 144, 1, 0))
+  %root = #call meta_tree_add(%host, 2, 0, %len)
+  %set = #call meta_tree_set(%host, %root, 3, %cfirst)
+  %s = #call meta_cell_put(#lea(%scratch, 128, 1, 0), %root)
+  #return 0
+}

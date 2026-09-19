@@ -52,12 +52,14 @@ const char *lainmeta_host_source_path(const LainMetaHost *host,
 const char *lainmeta_host_source_text(const LainMetaHost *host, uint32_t index,
                                       uint32_t *length_out);
 
-/* Meta 的可写暂存区。表格（记录表、值表）建在这里。
+/* Meta 的可写暂存区。类型注册表、作用域表、语法树都建在这里。
  *
+ * 大小**由编译单元决定**（已登记源码的总字节数），所以是**按需分配**的：要等
+ * 源码都登记完再拿，不是创建 host 的时候。
  * 由**驱动显式授权**：Meta 的 TCB 不自带地址空间，这块内存不是它映像的
  * 一部分。不给授权就别想写——和源码只读那次是同一个道理。
  * 返回 NULL 表示宿主分配失败。 */
-void *lainmeta_host_scratch(const LainMetaHost *host, uint32_t *size_out);
+void *lainmeta_host_scratch(LainMetaHost *host, uint32_t *size_out);
 
 /* Meta 写出来的 canonical LAINIR 文本。 */
 const char *lainmeta_host_output(const LainMetaHost *host);

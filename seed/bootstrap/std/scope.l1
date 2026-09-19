@@ -35,10 +35,15 @@
 //   +80   作用域表条目容量          +88   作用域表条目数
 //   +96   root 环境（prelude）的源码下标
 //   +104  当前正在降级的源码下标
+//   +112  语法树起点（偏移）
+//   +120  语法树的节点数
+//   +128  语法树的根节点下标
+//   +136  语法树的节点容量
 //   +160  逻辑路径 / mangle 缓冲区，352 字节（+160..+511）
 //   +512  注册表条目数
 //   +520  注册表条目区，每条 64 字节
 //        作用域表条目区，每条 56 字节，起点 = 520 + 64 × 注册表容量
+//        语法树节点区，每条 40 字节，起点 = 作用域表之后
 //
 // **查找只认两份源码：当前这份，和 root 环境那份。**
 //
@@ -78,7 +83,13 @@
   %reg_bytes = #mul[#bits<64>](%tcap, 64)
   %sc_base = #add[#bits<64>](%reg_bytes, 520)
   %sc_bytes = #mul[#bits<64>](%scap, 56)
-  %need = #add[#bits<64>](%sc_base, %sc_bytes)
+  // 语法树：一个 token 一个节点，再加一层括号一个组节点。
+  // 每个 token 至少占 1 字节，所以节点数不超过 2 × 字节数。
+  %nodes0 = #mul[#bits<64>](%total, 2)
+  %nodes = #add[#bits<64>](%nodes0, 8)
+  %tree_base = #add[#bits<64>](%sc_base, %sc_bytes)
+  %tree_bytes = #mul[#bits<64>](%nodes, 40)
+  %need = #add[#bits<64>](%tree_base, %tree_bytes)
   %fits = #ule[#bits<64>](%need, %size)
   %r = #if %fits -> (#bits<32>) {
     %s1 = #call meta_cell_put(#lea(%scratch, 56, 1, 0), %total)
@@ -86,6 +97,10 @@
     %s3 = #call meta_cell_put(#lea(%scratch, 72, 1, 0), %sc_base)
     %s4 = #call meta_cell_put(#lea(%scratch, 80, 1, 0), %scap)
     %s5 = #call meta_cell_put(#lea(%scratch, 88, 1, 0), 0)
+    %t1 = #call meta_cell_put(#lea(%scratch, 112, 1, 0), %tree_base)
+    %t2 = #call meta_cell_put(#lea(%scratch, 120, 1, 0), 0)
+    %t3 = #call meta_cell_put(#lea(%scratch, 128, 1, 0), 0xFFFFFFFFFFFFFFFF)
+    %t4 = #call meta_cell_put(#lea(%scratch, 136, 1, 0), %nodes)
     // 外层 = root 环境。它先扫，所以它在下层。
     %kw = #data_addr meta_logical_prelude
     %prelude = #call meta_source_find(%host, %kw, 12)
