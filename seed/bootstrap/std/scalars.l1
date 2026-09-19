@@ -301,20 +301,38 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
   #return %r
 }
 
-// 类型名 → 打包的 (kind, width)；没有这个名字返回 NOT_FOUND。
+// 类型名 → **类型 id**（注册表里的身份）；没有这个名字返回 0。
+//
+// 身份不是 repr。`i32` 和 `u32` 的 repr 都是 bits/32，但它们是两个类型——让它们
+// 不同的是 owner，也就是「哪一条 scalar 声明」。同一条声明查两次，注册表里有
+// interning，回的是同一个 id。
 #proc meta_type_resolve(%host: #addr, %base: #addr, %len: #bits<64>,
                         %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<64> {
   %pos = #call meta_select_scalar(%host, %base, %len, %t_lo, %t_hi)
   %miss = #eq[#bits<64>](%pos, 0xFFFFFFFFFFFFFFFF)
   %r = #if %miss -> (#bits<64>) {
-    #yield 0xFFFFFFFFFFFFFFFF
+    #yield 0
   } else {
     %scratch = #call lain_meta_scratch_data(%host)
     %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
     %m_len = #call meta_cell_get(#lea(%scratch, 40, 1, 0))
     %m_base = #call lain_meta_source_data(%host, %idx)
-    %info = #call meta_repr_at(%m_base, %pos, %m_len)
-    #yield %info
+    %repr = #call meta_repr_at(%m_base, %pos, %m_len)
+    %bad = #eq[#bits<64>](%repr, 0xFFFFFFFFFFFFFFFF)
+    %w = #if %bad -> (#bits<64>) {
+      #yield 0
+    } else {
+      %rk = #and[#bits<64>](%repr, 255)
+      %rw = #and[#bits<64>](#lshr[#bits<64>](%repr, 8), 255)
+      // owner = ((源码下标 + 1) << 32) | (声明位置 + 1)；0 留给合成类型
+      %one_idx = #add[#bits<64>](%idx, 1)
+      %high = #shl[#bits<64>](%one_idx, 32)
+      %one_pos = #add[#bits<64>](%pos, 1)
+      %owner = #or[#bits<64>](%high, %one_pos)
+      %id = #call meta_intern(%host, 1, %owner, 0, %rk, %rw)
+      #yield %id
+    }
+    #yield %w
   }
   #return %r
 }
