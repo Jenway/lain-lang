@@ -33,8 +33,33 @@
   #return %r
 }
 
-// 跳过空白（空格、换行、制表、回车：字节 <= 32），返回第一个非空白字节的下标；
-// 走到头就返回 len。v0 还没有注释语法，所以 `//` 会被当成普通字节。
+// 跳到本行末尾之后（`#` 到换行为止是注释）。到头返回 len。
+#proc bs_skip_line(%base: #addr, %from: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %end = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %is_nl = #eq[#bits<8>](%b, 10)
+      #if %is_nl {
+        %n = #add[#bits<64>](%i, 1)
+        #break scan(%n)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    } else {
+      #break scan(%i)
+    }
+  }
+  #return %end
+}
+
+// 跳过空白（空格、换行、制表、回车：字节 <= 32）**和注释**（`#` 到本行末尾），
+// 返回第一个有效字节的下标；走到头就返回 len。
+//
+// 注释是必须的，不是装饰：没有它，一份源码里出现的 `scalar` 字样（比如注释里
+// 提到的）会**被当成声明扫进来**。prelude 自己的注释就撞过这个——两条名字长度
+// 为 0 的假声明，直接报重名。
 #proc bs_skip_space(%base: #addr, %start: #bits<64>, %len: #bits<64>) -> #bits<64> {
   %end = #loop scan(%i: #bits<64> = %start) -> (#bits<64>) {
     %more = #ult[#bits<64>](%i, %len)
@@ -45,9 +70,13 @@
       #if %is_sp {
         %n = #add[#bits<64>](%i, 1)
         #continue scan(%n)
-      } else {
-        #break scan(%i)
       }
+      %is_hash = #eq[#bits<8>](%b, 35)
+      #if %is_hash {
+        %n2 = #call bs_skip_line(%base, %i, %len)
+        #continue scan(%n2)
+      }
+      #break scan(%i)
     } else {
       #break scan(%i)
     }

@@ -251,7 +251,7 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
   %is_qualified = #ne[#bits<64>](%dot, 0xFFFFFFFFFFFFFFFF)
   %r = #if %is_qualified -> (#bits<64>) {
     // `T.i32`：T 必须是本条源码里的 import 绑定
-    %lp = #call meta_find_import_binding(%base, %len, %t_lo, %dot)
+    %lp = #call meta_find_import_binding(%host, %base, %len, %t_lo, %dot)
     %nons = #eq[#bits<64>](%lp, 0)
     %v = #if %nons -> (#bits<64>) {
       #yield 0xFFFFFFFFFFFFFFFF
@@ -303,36 +303,55 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
 
 // 类型名 → **类型 id**（注册表里的身份）；没有这个名字返回 0。
 //
+// 不带点的名字（`i32`）走**作用域表**：外层是 root 环境，内层是被降级的源码。
+// 带点的名字（`T.i32`）还是回被 import 的那份源码里找声明——把模块当一层作用域
+// 压进来是下一步，那时候两条路会合成一条。
+//
 // 身份不是 repr。`i32` 和 `u32` 的 repr 都是 bits/32，但它们是两个类型——让它们
 // 不同的是 owner，也就是「哪一条 scalar 声明」。同一条声明查两次，注册表里有
 // interning，回的是同一个 id。
 #proc meta_type_resolve(%host: #addr, %base: #addr, %len: #bits<64>,
                         %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<64> {
-  %pos = #call meta_select_scalar(%host, %base, %len, %t_lo, %t_hi)
-  %miss = #eq[#bits<64>](%pos, 0xFFFFFFFFFFFFFFFF)
-  %r = #if %miss -> (#bits<64>) {
-    #yield 0
-  } else {
-    %scratch = #call lain_meta_scratch_data(%host)
-    %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
-    %m_len = #call meta_cell_get(#lea(%scratch, 40, 1, 0))
-    %m_base = #call lain_meta_source_data(%host, %idx)
-    %repr = #call meta_repr_at(%m_base, %pos, %m_len)
-    %bad = #eq[#bits<64>](%repr, 0xFFFFFFFFFFFFFFFF)
-    %w = #if %bad -> (#bits<64>) {
+  %dot = #call meta_find_dot(%base, %t_lo, %t_hi)
+  %is_qualified = #ne[#bits<64>](%dot, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %is_qualified -> (#bits<64>) {
+    %pos = #call meta_select_scalar(%host, %base, %len, %t_lo, %t_hi)
+    %miss = #eq[#bits<64>](%pos, 0xFFFFFFFFFFFFFFFF)
+    %q = #if %miss -> (#bits<64>) {
       #yield 0
     } else {
-      %rk = #and[#bits<64>](%repr, 255)
-      %rw = #and[#bits<64>](#lshr[#bits<64>](%repr, 8), 255)
-      // owner = ((源码下标 + 1) << 32) | (声明位置 + 1)；0 留给合成类型
-      %one_idx = #add[#bits<64>](%idx, 1)
-      %high = #shl[#bits<64>](%one_idx, 32)
-      %one_pos = #add[#bits<64>](%pos, 1)
-      %owner = #or[#bits<64>](%high, %one_pos)
-      %id = #call meta_intern(%host, 1, %owner, 0, %rk, %rw)
+      %scratch = #call lain_meta_scratch_data(%host)
+      %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
+      %m_len = #call meta_cell_get(#lea(%scratch, 40, 1, 0))
+      %m_base = #call lain_meta_source_data(%host, %idx)
+      %repr = #call meta_repr_at(%m_base, %pos, %m_len)
+      %bad = #eq[#bits<64>](%repr, 0xFFFFFFFFFFFFFFFF)
+      %w = #if %bad -> (#bits<64>) {
+        #yield 0
+      } else {
+        %rk = #and[#bits<64>](%repr, 255)
+        %rw = #and[#bits<64>](#lshr[#bits<64>](%repr, 8), 255)
+        %one_idx = #add[#bits<64>](%idx, 1)
+        %high = #shl[#bits<64>](%one_idx, 32)
+        %one_pos = #add[#bits<64>](%pos, 1)
+        %owner = #or[#bits<64>](%high, %one_pos)
+        %id = #call meta_intern(%host, 1, %owner, 0, %rk, %rw)
+        #yield %id
+      }
+      #yield %w
+    }
+    #yield %q
+  } else {
+    %name = #lea(%base, %t_lo, 1, 0)
+    %name_len = #sub[#bits<64>](%t_hi, %t_lo)
+    %id = #call meta_scope_type_id(%host, %base, %len, %name, %name_len)
+    %gone = #eq[#bits<64>](%id, 0xFFFFFFFFFFFFFFFF)
+    %v = #if %gone -> (#bits<64>) {
+      #yield 0
+    } else {
       #yield %id
     }
-    #yield %w
+    #yield %v
   }
   #return %r
 }

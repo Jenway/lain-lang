@@ -23,19 +23,12 @@
 // 用的 key 是 (kind, nominal_owner, namespace, arguments)，id 从 1 开始，注册表
 // 是 values/arguments/modules 三个向量。这里 v0 只留 values，实参区先空着。
 //
-// 暂存区分段（宿主给 64 KiB）：
-//   +0    和类型的最大载荷大小        +8    和类型的最大对齐
-//   +16   命中标量所在源码下标         +24   op 物理名位置
-//   +32   op 物理名长度               +40   那份源码长度
-//   +48   标量的 repr 位置            +56   （空）
-//   +64   逻辑路径/mangle 缓冲区，448 字节（+64..+511）
-//   +512  注册表条目数
-//   +520  注册表条目区，每条 64 字节
+// 暂存区分段（宿主给 64 KiB）：见 `std/scope.l1` 头注释的完整分段表。
+// 这里只管注册表那一块：+64 容量、+512 条目数、+520 起条目区（每条 64 字节）。
 
-data meta_path_off ro { 64 0 0 0 0 0 0 0 }     // 路径缓冲区起点
-data meta_path_cap ro { 192 1 0 0 0 0 0 0 }    // 448 字节
 data meta_reg_count_off ro { 0 2 0 0 0 0 0 0 } // 512
 data meta_reg_entry_off ro { 8 2 0 0 0 0 0 0 } // 520
+data meta_path_cap ro { 160 1 0 0 0 0 0 0 }    // 逻辑路径缓冲区 416 字节（+96..+511）
 data meta_reg_entry_size ro { 64 0 0 0 0 0 0 0 }
 
 // 第 index 条记录的地址。
@@ -89,9 +82,9 @@ data meta_reg_entry_size ro { 64 0 0 0 0 0 0 0 }
   %r = #if %hit -> (#bits<64>) {
     #yield %id
   } else {
-    %size = #call lain_meta_scratch_size(%host)
-    %avail = #sub[#bits<64>](%size, 520)
-    %cap = #udiv[#bits<64>](%avail, 64)
+    // 容量是 meta_scope_setup 按模块算好放在 +64 的。**不截断**：装不下就响，
+    // 让「表里没有」和「真的没有」分得开。
+    %cap = #call meta_cell_get(#lea(%scratch, 64, 1, 0))
     %count = #call meta_cell_get(#lea(%scratch, 512, 1, 0))
     %full = #uge[#bits<64>](%count, %cap)
     %w = #if %full -> (#bits<64>) {
