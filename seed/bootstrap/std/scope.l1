@@ -1,0 +1,460 @@
+// 初代标准库 v0 —— 作用域表。
+//
+// 在这之前，「解析一个名字」的实际动作是**拿名字的字节回源码里搜一段长得像声明
+// 的字节**，搜到就用。这里面没有「名字是在哪个范围里被绑定的」这个信息，所以：
+//
+//   - 搜的是整份文件，没有「内层 / 外层」之分；
+//   - 没有一份「这个范围里有哪些名字」的清单，重名无从检测；
+//   - 每个使用点都要重搜一遍。
+//
+// 这个文件补的是**作用域结构**：一张表，条目记「哪个范围的哪个名字是什么」。
+//
+//   ScopeEntry: source  name_off  name_len  kind  payload  aux  emitted
+//
+//   kind 1 = 模块引用（import 绑定）  payload = 被 import 的源码下标，aux = 逻辑路径位置
+//   kind 2 = 标量类型                 payload = 类型 id（注册表里的身份；0 = 还没查过）
+//   kind 3 = 值绑定                   payload = 初始化式的位置
+//   kind 4 = 积类型（struct）         payload = 声明位置
+//   kind 5 = 和类型（enum）           payload = 声明位置
+//
+// 查找规则：**从表尾往前找**，也就是「最内层优先，再往外」。表按范围逐层追加，
+// 所以「倒着找、第一个命中」天然就是词法作用域的语义。
+//
+// 重名规则：**只在本层里比**。同一个名字可以在内层重新绑定（遮蔽＝），但不许在
+// 同一层绑两次——那是重名，报 16。所以每条条目都带自己那一层的起点。
+//
+// 层次：外层是 root 环境（逻辑路径 `std::prelude` 那份源码），内层是被降级的
+// 那份源码。被 import 的模块取用时再压一层，用完退掉（mark / release）。
+//
+// 暂存区分段（宿主给 64 KiB）：
+//   +0    和类型最大载荷大小       +8    和类型最大对齐
+//   +16   命中标量所在源码下标      +24   op 物理名位置
+//   +32   op 物理名长度            +40   那份源码长度
+//   +48   标量的 repr 位置         +56   全部输入字节数
+//   +64   注册表条目容量           +72   作用域表起点（偏移）
+//   +80   作用域表条目容量          +88   作用域表条目数
+//   +96   逻辑路径 / mangle 缓冲区，416 字节（+96..+511）
+//   +512  注册表条目数
+//   +520  注册表条目区，每条 64 字节
+//        作用域表条目区，每条 56 字节，起点 = 520 + 64 × 注册表容量
+
+// --- 建表 -----------------------------------------------------------------
+
+// 按模块算容量再定布局。**容量必须来自模块**：声明数上界按最少字节数的声明估
+// ——`scalar a = addr { }` 是 18 字节，`let a=1;` 是 8 字节。装不下要响（17），
+// 不能截断：截断会让「表里没有」和「真的没有」分不开。
+#proc meta_scope_setup(%host: #addr) -> #bits<32> {
+  %count = #call lain_meta_source_count(%host)
+  %total = #loop sum(%i: #bits<64> = 0, %acc: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %n = #call lain_meta_source_length(%host, %i)
+      %acc2 = #add[#bits<64>](%acc, %n)
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue sum(%i2, %acc2)
+    } else {
+      #break sum(%acc)
+    }
+  }
+  %scratch = #call lain_meta_scratch_data(%host)
+  %size = #call lain_meta_scratch_size(%host)
+
+  %t16 = #udiv[#bits<64>](%total, 16)
+  %tcap = #add[#bits<64>](%t16, 8)
+  %t8 = #udiv[#bits<64>](%total, 8)
+  %scap = #add[#bits<64>](%t8, 8)
+
+  %reg_bytes = #mul[#bits<64>](%tcap, 64)
+  %sc_base = #add[#bits<64>](%reg_bytes, 520)
+  %sc_bytes = #mul[#bits<64>](%scap, 56)
+  %need = #add[#bits<64>](%sc_base, %sc_bytes)
+  %fits = #ule[#bits<64>](%need, %size)
+  %r = #if %fits -> (#bits<32>) {
+    %s1 = #call meta_cell_put(#lea(%scratch, 56, 1, 0), %total)
+    %s2 = #call meta_cell_put(#lea(%scratch, 64, 1, 0), %tcap)
+    %s3 = #call meta_cell_put(#lea(%scratch, 72, 1, 0), %sc_base)
+    %s4 = #call meta_cell_put(#lea(%scratch, 80, 1, 0), %scap)
+    %s5 = #call meta_cell_put(#lea(%scratch, 88, 1, 0), 0)
+    // 外层 = root 环境。它先扫，所以它在下层。
+    %kw = #data_addr meta_logical_prelude
+    %prelude = #call meta_source_find(%host, %kw, 12)
+    %present = #ne[#bits<64>](%prelude, 0xFFFFFFFFFFFFFFFF)
+    %w = #if %present -> (#bits<32>) {
+      %p_len = #call lain_meta_source_length(%host, %prelude)
+      %p_base = #call lain_meta_source_data(%host, %prelude)
+      %st = #call meta_scope_scan(%host, %p_base, %p_len, %prelude, 0)
+      #yield %st
+    } else {
+      // 没有 root 环境不是错——只是 `i32` 这类名字解析不出来，用到才报 5
+      #yield 0
+    }
+    #yield %w
+  } else {
+    %f = #call lain_meta_fail(%host, 17)
+    #yield 17
+  }
+  #return %r
+}
+
+#proc meta_scope_count(%host: #addr) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %v = #call meta_cell_get(#lea(%scratch, 88, 1, 0))
+  #return %v
+}
+
+#proc meta_scope_release(%host: #addr, %mark: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %s = #call meta_cell_put(#lea(%scratch, 88, 1, 0), %mark)
+  #return 0
+}
+
+#proc meta_scope_entry(%host: #addr, %index: #bits<64>) -> #addr {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %base = #call meta_cell_get(#lea(%scratch, 72, 1, 0))
+  %p = #lea(%scratch, %base, 1, 0)
+  %off = #mul[#bits<64>](%index, 56)
+  %q = #lea(%p, %off, 1, 0)
+  #return %q
+}
+
+#proc meta_scope_word(%host: #addr, %index: #bits<64>,
+                      %off: #bits<64>) -> #bits<64> {
+  %e = #call meta_scope_entry(%host, %index)
+  %p = #lea(%e, %off, 1, 0)
+  %v = #call meta_cell_get(%p)
+  #return %v
+}
+
+#proc meta_scope_kind(%host: #addr, %index: #bits<64>) -> #bits<64> {
+  %v = #call meta_scope_word(%host, %index, 24)
+  #return %v
+}
+
+#proc meta_scope_payload(%host: #addr, %index: #bits<64>) -> #bits<64> {
+  %v = #call meta_scope_word(%host, %index, 32)
+  #return %v
+}
+
+#proc meta_scope_aux(%host: #addr, %index: #bits<64>) -> #bits<64> {
+  %v = #call meta_scope_word(%host, %index, 40)
+  #return %v
+}
+
+#proc meta_scope_set_payload(%host: #addr, %index: #bits<64>,
+                             %v: #bits<64>) -> #bits<32> {
+  %e = #call meta_scope_entry(%host, %index)
+  %p = #lea(%e, 32, 1, 0)
+  %s = #call meta_cell_put(%p, %v)
+  #return 0
+}
+
+#proc meta_scope_emitted(%host: #addr, %index: #bits<64>) -> #bits<64> {
+  %v = #call meta_scope_word(%host, %index, 48)
+  #return %v
+}
+
+#proc meta_scope_set_emitted(%host: #addr, %index: #bits<64>,
+                             %v: #bits<64>) -> #bits<32> {
+  %e = #call meta_scope_entry(%host, %index)
+  %p = #lea(%e, 48, 1, 0)
+  %s = #call meta_cell_put(%p, %v)
+  #return 0
+}
+
+// 同一层里两条条目的名字是不是同一个？跨源码比，所以两个地址都要算出来。
+#proc meta_scope_name_eq(%host: #addr, %index: #bits<64>,
+                          %name_src: #bits<64>, %name_off: #bits<64>,
+                          %name_len: #bits<64>) -> #bits<1> {
+  %have = #call meta_scope_word(%host, %index, 16)
+  %same_len = #eq[#bits<64>](%have, %name_len)
+  %r = #if %same_len -> (#bits<1>) {
+    %src_a = #call meta_scope_word(%host, %index, 0)
+    %off_a = #call meta_scope_word(%host, %index, 8)
+    %base_a = #call lain_meta_source_data(%host, %src_a)
+    %a = #lea(%base_a, %off_a, 1, 0)
+    %base_b = #call lain_meta_source_data(%host, %name_src)
+    %b = #lea(%base_b, %name_off, 1, 0)
+    %eqb = #call meta_bytes_equal(%a, %b, %name_len)
+    #yield %eqb
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+// 追加一条。同层重名 → 16；表满 → 17。
+#proc meta_scope_add(%host: #addr, %level_start: #bits<64>, %source: #bits<64>,
+                     %name_off: #bits<64>, %name_len: #bits<64>,
+                     %kind: #bits<64>, %payload: #bits<64>,
+                     %aux: #bits<64>) -> #bits<32> {
+  %count = #call meta_scope_count(%host)
+  %dup = #loop d(%i: #bits<64> = %level_start) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %same = #call meta_scope_name_eq(%host, %i, %source, %name_off, %name_len)
+      #if %same {
+        #break d(1)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue d(%i2)
+    } else {
+      #break d(0)
+    }
+  }
+  %bad = #ne[#bits<64>](%dup, 0)
+  %r = #if %bad -> (#bits<32>) {
+    %f0 = #call lain_meta_fail(%host, 16)
+    #yield 16
+  } else {
+    %scratch = #call lain_meta_scratch_data(%host)
+    %cap = #call meta_cell_get(#lea(%scratch, 80, 1, 0))
+    %full = #uge[#bits<64>](%count, %cap)
+    %w = #if %full -> (#bits<32>) {
+      %f1 = #call lain_meta_fail(%host, 17)
+      #yield 17
+    } else {
+      %e = #call meta_scope_entry(%host, %count)
+      %s0 = #call meta_cell_put(%e, %source)
+      %s1 = #call meta_cell_put(#lea(%e, 8, 1, 0), %name_off)
+      %s2 = #call meta_cell_put(#lea(%e, 16, 1, 0), %name_len)
+      %s3 = #call meta_cell_put(#lea(%e, 24, 1, 0), %kind)
+      %s4 = #call meta_cell_put(#lea(%e, 32, 1, 0), %payload)
+      %s5 = #call meta_cell_put(#lea(%e, 40, 1, 0), %aux)
+      %s6 = #call meta_cell_put(#lea(%e, 48, 1, 0), 0)
+      %new = #add[#bits<64>](%count, 1)
+      %s7 = #call meta_cell_put(#lea(%scratch, 88, 1, 0), %new)
+      #yield 0
+    }
+    #yield %w
+  }
+  #return %r
+}
+
+// 按名字找，**从表尾往前**（最内层优先）。返回条目下标；没有返回 NOT_FOUND。
+#proc meta_scope_find(%host: #addr, %name_addr: #addr,
+                      %name_len: #bits<64>) -> #bits<64> {
+  %count = #call meta_scope_count(%host)
+  %found = #loop s(%i: #bits<64> = %count) -> (#bits<64>) {
+    %more = #ugt[#bits<64>](%i, 0)
+    #if %more {
+      %k = #sub[#bits<64>](%i, 1)
+      %src = #call meta_scope_word(%host, %k, 0)
+      %off = #call meta_scope_word(%host, %k, 8)
+      %p = #call meta_scope_name_at(%host, %src, %off)
+      %have = #call meta_scope_word(%host, %k, 16)
+      %same_len = #eq[#bits<64>](%have, %name_len)
+      %hit = #if %same_len -> (#bits<1>) {
+        %eqb = #call meta_bytes_equal(%p, %name_addr, %name_len)
+        #yield %eqb
+      } else {
+        #yield 0
+      }
+      #if %hit {
+        #break s(%k)
+      }
+      %i2 = #sub[#bits<64>](%i, 1)
+      #continue s(%i2)
+    } else {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+  }
+  #return %found
+}
+
+#proc meta_scope_name_at(%host: #addr, %source: #bits<64>,
+                         %off: #bits<64>) -> #addr {
+  %base = #call lain_meta_source_data(%host, %source)
+  %p = #lea(%base, %off, 1, 0)
+  #return %p
+}
+
+// --- 预扫一份源码的顶层形式 -------------------------------------------------
+
+// `scalar` / `struct` / `enum`：名字跟在关键字后面。
+// payload 由调用方给——标量给 0（类型 id 还没查），积/和类型给声明位置。
+#proc meta_scope_add_kw(%host: #addr, %base: #addr, %len: #bits<64>,
+                        %source: #bits<64>, %level_start: #bits<64>,
+                        %here: #bits<64>, %kw_len: #bits<64>,
+                        %kind: #bits<64>, %payload: #bits<64>) -> #bits<32> {
+  %after = #add[#bits<64>](%here, %kw_len)
+  %n_lo = #call bs_skip_space(%base, %after, %len)
+  %n_hi = #call bs_skip_ident(%base, %n_lo, %len)
+  %n_len = #sub[#bits<64>](%n_hi, %n_lo)
+  %st = #call meta_scope_add(%host, %level_start, %source, %n_lo, %n_len,
+                             %kind, %payload, 0)
+  #return %st
+}
+
+// `let NAME = import("...")` vs `let NAME = 值`
+#proc meta_scope_add_let(%host: #addr, %base: #addr, %len: #bits<64>,
+                         %source: #bits<64>, %level_start: #bits<64>,
+                         %here: #bits<64>) -> #bits<32> {
+  %after = #add[#bits<64>](%here, 3)
+  %n_lo = #call bs_skip_space(%base, %after, %len)
+  %n_hi = #call bs_skip_ident(%base, %n_lo, %len)
+  %n_len = #sub[#bits<64>](%n_hi, %n_lo)
+  %eq_at = #call bs_skip_space(%base, %n_hi, %len)
+  %is_eq = #call bs_is_byte(%base, %eq_at, 61)
+  %st = #if %is_eq -> (#bits<32>) {
+    %one = #add[#bits<64>](%eq_at, 1)
+    %rhs = #call bs_skip_space(%base, %one, %len)
+    %kw = #data_addr meta_kw_import
+    %is_import = #call bs_match_keyword(%base, %rhs, %len, %kw, 6)
+    %v = #if %is_import -> (#bits<32>) {
+      // 模块引用：把逻辑路径解析成源码下标，两样都记下来（aux 用来拼扁平名）
+      %lp = #call meta_import_logical(%base, %len, %rhs)
+      %bad = #eq[#bits<64>](%lp, 0xFFFFFFFFFFFFFFFF)
+      %s = #if %bad -> (#bits<32>) {
+        %f = #call lain_meta_fail(%host, 11)
+        #yield 11
+      } else {
+        %n = #call meta_logical_len(%base, %lp, %len)
+        %path = #lea(%base, %lp, 1, 0)
+        %idx = #call meta_source_find(%host, %path, %n)
+        %miss = #eq[#bits<64>](%idx, 0xFFFFFFFFFFFFFFFF)
+        %s2 = #if %miss -> (#bits<32>) {
+          %f2 = #call lain_meta_fail(%host, 11)
+          #yield 11
+        } else {
+          %a = #call meta_scope_add(%host, %level_start, %source, %n_lo, %n_len,
+                                    1, %idx, %lp)
+          #yield %a
+        }
+        #yield %s2
+      }
+      #yield %s
+    } else {
+      %a2 = #call meta_scope_add(%host, %level_start, %source, %n_lo, %n_len,
+                                 3, %rhs, 0)
+      #yield %a2
+    }
+    #yield %v
+  } else {
+    %a3 = #call meta_scope_add(%host, %level_start, %source, %n_lo, %n_len,
+                               3, 0, 0)
+    #yield %a3
+  }
+  #return %st
+}
+
+// 预扫顶层形式，把绑定记进表。level_start 是本次那一层的起点（重名只在本层比）。
+#proc meta_scope_scan(%host: #addr, %base: #addr, %len: #bits<64>,
+                      %source: #bits<64>,
+                      %level_start: #bits<64>) -> #bits<32> {
+  %st = #loop forms(%at: #bits<64> = 0) -> (#bits<32>) {
+    %here = #call bs_skip_space(%base, %at, %len)
+    %done = #uge[#bits<64>](%here, %len)
+    #if %done {
+      #break forms(0)
+    }
+    %skw = #data_addr meta_kw_scalar
+    %is_scalar = #call bs_match_keyword(%base, %here, %len, %skw, 6)
+    %kw = #data_addr meta_kw_struct
+    %is_struct = #call bs_match_keyword(%base, %here, %len, %kw, 6)
+    %ekw = #data_addr meta_kw_enum
+    %is_enum = #call bs_match_keyword(%base, %here, %len, %ekw, 4)
+    %is_let = #call bs_match_let(%base, %here, %len)
+    %s = #if %is_scalar -> (#bits<32>) {
+      // 标量的 payload 先给 0：类型 id 等第一次用到才 intern，然后缓存回来
+      %r1 = #call meta_scope_add_kw(%host, %base, %len, %source, %level_start,
+                                    %here, 6, 2, 0)
+      #yield %r1
+    } else {
+      %r2 = #if %is_struct -> (#bits<32>) {
+        %x1 = #call meta_scope_add_kw(%host, %base, %len, %source, %level_start,
+                                      %here, 6, 4, %here)
+        #yield %x1
+      } else {
+        %r3 = #if %is_enum -> (#bits<32>) {
+          %x2 = #call meta_scope_add_kw(%host, %base, %len, %source,
+                                        %level_start, %here, 4, 5, %here)
+          #yield %x2
+        } else {
+          %r4 = #if %is_let -> (#bits<32>) {
+            %x3 = #call meta_scope_add_let(%host, %base, %len, %source,
+                                           %level_start, %here)
+            #yield %x3
+          } else {
+            #yield 0
+          }
+          #yield %r4
+        }
+        #yield %r3
+      }
+      #yield %r2
+    }
+    %bad = #ne[#bits<32>](%s, 0)
+    #if %bad {
+      #break forms(%s)
+    }
+    %after = #add[#bits<64>](%here, 1)
+    %next = #call bs_next_form(%base, %after, %len)
+    %none = #eq[#bits<64>](%next, 0xFFFFFFFFFFFFFFFF)
+    #if %none {
+      #break forms(0)
+    }
+    #continue forms(%next)
+  }
+  #return %st
+}
+
+// --- 查类型 ---------------------------------------------------------------
+
+// 名字 → 类型 id。查表；标量条目第一次查到时才去 intern，结果缓存回条目里。
+// 找到但**不是类型**（是模块引用或值）返回 NOT_FOUND —— 调用方按「没有这个类型」
+// 处理，也就是 5。
+#proc meta_scope_type_id(%host: #addr, %base: #addr, %len: #bits<64>,
+                          %name_addr: #addr,
+                          %name_len: #bits<64>) -> #bits<64> {
+  %i = #call meta_scope_find(%host, %name_addr, %name_len)
+  %miss = #eq[#bits<64>](%i, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %miss -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %kind = #call meta_scope_kind(%host, %i)
+    %is_type = #eq[#bits<64>](%kind, 2)
+    %w = #if %is_type -> (#bits<64>) {
+      %cached = #call meta_scope_payload(%host, %i)
+      %have = #ne[#bits<64>](%cached, 0)
+      %v = #if %have -> (#bits<64>) {
+        #yield %cached
+      } else {
+        // 第一次用到：去那份源码里找声明，intern，然后把 id 缓存回条目
+        %src = #call meta_scope_word(%host, %i, 0)
+        %off = #call meta_scope_word(%host, %i, 8)
+        %m_len = #call lain_meta_source_length(%host, %src)
+        %m_base = #call lain_meta_source_data(%host, %src)
+        %pos = #call meta_find_scalar(%m_base, %m_len, %name_addr, %name_len)
+        %gone = #eq[#bits<64>](%pos, 0xFFFFFFFFFFFFFFFF)
+        %id = #if %gone -> (#bits<64>) {
+          #yield 0
+        } else {
+          %repr = #call meta_repr_at(%m_base, %pos, %m_len)
+          %bad = #eq[#bits<64>](%repr, 0xFFFFFFFFFFFFFFFF)
+          %z = #if %bad -> (#bits<64>) {
+            #yield 0
+          } else {
+            %rk = #and[#bits<64>](%repr, 255)
+            %rw = #and[#bits<64>](#lshr[#bits<64>](%repr, 8), 255)
+            // owner = ((源码下标 + 1) << 32) | (声明位置 + 1)
+            %one_src = #add[#bits<64>](%src, 1)
+            %high = #shl[#bits<64>](%one_src, 32)
+            %one_pos = #add[#bits<64>](%pos, 1)
+            %owner = #or[#bits<64>](%high, %one_pos)
+            %new_id = #call meta_intern(%host, 1, %owner, 0, %rk, %rw)
+            %put = #call meta_scope_set_payload(%host, %i, %new_id)
+            #yield %new_id
+          }
+          #yield %z
+        }
+        #yield %id
+      }
+      #yield %v
+    } else {
+      // 名字在表里，但不是类型
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    #yield %w
+  }
+  #return %r
+}

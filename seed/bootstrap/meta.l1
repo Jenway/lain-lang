@@ -27,9 +27,26 @@
 // 返回 0 = 成功。
 #proc lain_std_lower(%host: #addr, %source: #bits<64>) -> #bits<32> {
   %reset = #call lain_meta_emit_reset(%host)
-  %len = #call lain_meta_source_length(%host, %source)
-  %base = #call lain_meta_source_data(%host, %source)
-  %status = #call meta_lower_source(%host, %base, %len)
+  // 作用域表要先建：外层是 root 环境，内层是这份源码。名字按表查，
+  // 不再回源码搜字节。
+  %setup = #call meta_scope_setup(%host)
+  %ok = #eq[#bits<32>](%setup, 0)
+  %status = #if %ok -> (#bits<32>) {
+    %len = #call lain_meta_source_length(%host, %source)
+    %base = #call lain_meta_source_data(%host, %source)
+    %mark = #call meta_scope_count(%host)
+    %scan = #call meta_scope_scan(%host, %base, %len, %source, %mark)
+    %b2 = #eq[#bits<32>](%scan, 0)
+    %s = #if %b2 -> (#bits<32>) {
+      %r = #call meta_lower_source(%host, %base, %len)
+      #yield %r
+    } else {
+      #yield %scan
+    }
+    #yield %s
+  } else {
+    #yield %setup
+  }
   #return %status
 }
 
@@ -372,7 +389,7 @@
         //   import 绑定 → 跨模块取值（mangle 成扁平名 + #call）
         //   enum        → 变体构造／投影
         //   其余        → struct 字段访问
-        %ns_at = #call meta_find_import_binding(%base, %len, %lhs_lo, %rec_hi)
+        %ns_at = #call meta_find_import_binding(%host, %base, %len, %lhs_lo, %rec_hi)
         %is_ns = #ne[#bits<64>](%ns_at, 0)
         %is_sum = #call meta_is_enum(%base, %len, %lhs_lo, %rec_hi)
         %r2 = #if %is_ns -> (#bits<32>) {

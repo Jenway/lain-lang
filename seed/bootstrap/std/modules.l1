@@ -176,13 +176,13 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
 #proc meta_source_find(%host: #addr, %logical: #addr,
                        %logical_len: #bits<64>) -> #bits<64> {
   %scratch = #call lain_meta_scratch_data(%host)
-  // 路径缓冲区是 +64 起的 448 字节；注册表从 +512 开始，别写过去
+  // 路径缓冲区是 +96 起的 416 字节；注册表从 +512 开始，别写过去
   %cap = #call meta_cell_get(#data_addr meta_path_cap)
   // `::` 只会变短，补 `.lain` 和 NUL 是最坏情况 +6
   %need = #add[#bits<64>](%logical_len, 6)
   %fits = #ule[#bits<64>](%need, %cap)
   %r = #if %fits -> (#bits<64>) {
-    %buf = #lea(%scratch, 64, 1, 0)
+    %buf = #lea(%scratch, 96, 1, 0)
     %b = #call meta_build_path(%logical, %logical_len, %buf)
     %count = #call lain_meta_source_count(%host)
     %idx = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
@@ -306,26 +306,30 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
   #return %r
 }
 
-// 按绑定名回源码里找回它的 import 逻辑路径下标。返回 0 当作「没找到」的哨兵
-// ——`let` 之后的引号位置永远大于 0。
-#proc meta_find_import_binding(%base: #addr, %len: #bits<64>,
+// 按绑定名找回它的 import 逻辑路径下标（== `let M = import("...")` 里引号内的起点）。
+// 查**作用域表**：命中的条目 kind 必须是 1（模块引用），逻辑路径位置记在 aux。
+// 不是模块引用、或表里没有，都返回 0（「没找到」的哨兵——引号位置永远大于 0）。
+#proc meta_find_import_binding(%host: #addr, %base: #addr, %len: #bits<64>,
                                %ns_lo: #bits<64>,
                                %ns_hi: #bits<64>) -> #bits<64> {
-  %found = #loop s(%at: #bits<64> = 0) -> (#bits<64>) {
-    %let_at = #call bs_next_let(%base, %at, %len)
-    %none = #eq[#bits<64>](%let_at, 0xFFFFFFFFFFFFFFFF)
-    #if %none {
-      #break s(0)
+  %name = #lea(%base, %ns_lo, 1, 0)
+  %name_len = #sub[#bits<64>](%ns_hi, %ns_lo)
+  %i = #call meta_scope_find(%host, %name, %name_len)
+  %miss = #eq[#bits<64>](%i, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %miss -> (#bits<64>) {
+    #yield 0
+  } else {
+    %kind = #call meta_scope_kind(%host, %i)
+    %is_ns = #eq[#bits<64>](%kind, 1)
+    %v = #if %is_ns -> (#bits<64>) {
+      %aux = #call meta_scope_aux(%host, %i)
+      #yield %aux
+    } else {
+      #yield 0
     }
-    %lp = #call meta_import_at(%base, %len, %let_at, %ns_lo, %ns_hi)
-    %hit = #ne[#bits<64>](%lp, 0xFFFFFFFFFFFFFFFF)
-    #if %hit {
-      #break s(%lp)
-    }
-    %next = #add[#bits<64>](%let_at, 3)
-    #continue s(%next)
+    #yield %v
   }
-  #return %found
+  #return %r
 }
 
 // `let NAME = import("逻辑路径");` —— 解析并登记。**不产出任何 LAINIR**。
@@ -504,7 +508,7 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
                            %ns_lo: #bits<64>, %ns_hi: #bits<64>,
                            %m_lo: #bits<64>, %m_hi: #bits<64>,
                            %kind: #bits<64>, %width: #bits<64>) -> #bits<32> {
-  %lp = #call meta_find_import_binding(%base, %len, %ns_lo, %ns_hi)
+  %lp = #call meta_find_import_binding(%host, %base, %len, %ns_lo, %ns_hi)
   %nons = #eq[#bits<64>](%lp, 0)
   %status = #if %nons -> (#bits<32>) {
     // `M` 不是这条源码里的 import 绑定
@@ -535,7 +539,7 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
         %v_lo = #call bs_skip_space(%m_base, %one, %m_len)
         %value = #call bs_read_uint(%m_base, %v_lo, %m_len)
         %scratch = #call lain_meta_scratch_data(%host)
-        %buf = #lea(%scratch, 64, 1, 0)
+        %buf = #lea(%scratch, 96, 1, 0)
         %mag_len = #call meta_build_mangle(%path, %n, %buf)
         %e1 = #call meta_emit_exported(%host, %buf, %mag_len, %base, %m_lo,
                                        %m_hi, %value)
