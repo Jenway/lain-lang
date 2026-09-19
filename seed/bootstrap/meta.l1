@@ -39,17 +39,9 @@
     %scan = #call meta_scope_scan(%host, %base, %len, %source, %mark)
     %b2 = #eq[#bits<32>](%scan, 0)
     %s = #if %b2 -> (#bits<32>) {
-      // 语法树：**这一步还不影响任何现有行为**，只是把源码读成一棵树放着，
-      // 让后面的解析可以改成问树而不是问字节。
-      %tree = #call meta_parse_source(%host, %source)
-      %b3 = #eq[#bits<32>](%tree, 0)
-      %t = #if %b3 -> (#bits<32>) {
-        %r = #call meta_lower_source(%host, %base, %len)
-        #yield %r
-      } else {
-        #yield %tree
-      }
-      #yield %t
+      // 语法树在 meta_scope_setup 里已经把每份源码都读好了。
+      %r = #call meta_lower_source(%host, %source)
+      #yield %r
     } else {
       #yield %scan
     }
@@ -60,61 +52,91 @@
   #return %status
 }
 
-#proc meta_lower_source(%host: #addr, %base: #addr, %len: #bits<64>) -> #bits<32> {
-  // 一份源码里可以有多条顶层形式；一条一条走，出错就停。
-  %status = #loop forms(%at: #bits<64> = 0) -> (#bits<32>) {
-    %here = #call bs_skip_space(%base, %at, %len)
-    %done = #uge[#bits<64>](%here, %len)
-    #if %done {
-      #break forms(0)
-    }
-    %kw = #data_addr meta_kw_struct
-    %is_struct = #call bs_match_keyword(%base, %here, %len, %kw, 6)
-    %ekw = #data_addr meta_kw_enum
-    %is_enum = #call bs_match_keyword(%base, %here, %len, %ekw, 4)
-    %skw = #data_addr meta_kw_scalar
-    %is_scalar = #call bs_match_keyword(%base, %here, %len, %skw, 6)
-    %is_let = #call bs_match_let(%base, %here, %len)
-    %s = #if %is_struct -> (#bits<32>) {
-      %r1 = #call meta_lower_struct(%host, %base, %len, %here)
-      #yield %r1
-    } else {
-      %r2 = #if %is_enum -> (#bits<32>) {
-        %r4 = #call meta_lower_enum(%host, %base, %len, %here)
-        #yield %r4
+// 一条一条走顶层形式。**形式从语法树上走**——「一条形式从哪到哪」由节点给出，
+// 不再靠「从某个位置起找下一处长得像关键字的地方」。
+#proc meta_lower_source(%host: #addr, %source: #bits<64>) -> #bits<32> {
+  %len = #call lain_meta_source_length(%host, %source)
+  %base = #call lain_meta_source_data(%host, %source)
+  %root = #call meta_root_of(%host, %source)
+  %first = #call meta_node_child(%host, %root)
+  %skw = #data_addr meta_kw_scalar
+  %kw = #data_addr meta_kw_struct
+  %ekw = #data_addr meta_kw_enum
+  %lkw = #data_addr meta_kw_let
+  %status = #loop forms(%node: #bits<64> = %first) -> (#bits<32>) {
+    %more = #ne[#bits<64>](%node, 0xFFFFFFFFFFFFFFFF)
+    #if %more {
+      %here = #call meta_node_start(%host, %node)
+      %is_struct = #call meta_node_is_word(%host, %node, %base, %kw, 6)
+      %is_enum = #call meta_node_is_word(%host, %node, %base, %ekw, 4)
+      %is_scalar = #call meta_node_is_word(%host, %node, %base, %skw, 6)
+      %is_let = #call meta_node_is_word(%host, %node, %base, %lkw, 3)
+      %h1 = #or[#bits<1>](%is_struct, %is_enum)
+      %h2 = #or[#bits<1>](%is_scalar, %is_let)
+      %any = #or[#bits<1>](%h1, %h2)
+      %s = #if %any -> (#bits<32>) {
+        %d = #call meta_lower_form(%host, %base, %len, %here, %is_struct,
+                                    %is_enum, %is_scalar, %is_let)
+        #yield %d
       } else {
-        %r3 = #if %is_scalar -> (#bits<32>) {
-          // 标量声明只在**模块**里有效（prelude / 被 import 的源码）。
-          // 被降级的那份源码自己写 `scalar` 会静默变成不可见，所以直接拒。
-          %f2 = #call lain_meta_fail(%host, 14)
-          #yield 14
+        // **顶层树的孩子是词，不是形式**——一条形式跨好几个孩子（`struct`
+        // `Pair` `{...}`）。所以跳过一条形式内部那些非关键字的词是正常的；
+        // 但**整份文件的第一个孩子必须是能被认出的形式**，否则就是坏输入。
+        %is_first = #eq[#bits<64>](%node, %first)
+        %x = #if %is_first -> (#bits<32>) {
+          %f = #call lain_meta_fail(%host, 4)
+          #yield 4
         } else {
-          %r5 = #if %is_let -> (#bits<32>) {
-            %r6 = #call meta_lower_let(%host, %base, %len, %here)
-            #yield %r6
-          } else {
-            %f = #call lain_meta_fail(%host, 4)
-            #yield 4
-          }
-          #yield %r5
+          #yield 0
         }
-        #yield %r3
+        #yield %x
       }
-      #yield %r2
-    }
-    %bad = #ne[#bits<32>](%s, 0)
-    #if %bad {
-      #break forms(%s)
-    }
-    %after = #add[#bits<64>](%here, 1)
-    %next = #call bs_next_form(%base, %after, %len)
-    %none = #eq[#bits<64>](%next, 0xFFFFFFFFFFFFFFFF)
-    #if %none {
+      %bad = #ne[#bits<32>](%s, 0)
+      #if %bad {
+        #break forms(%s)
+      }
+      %next = #call meta_node_next(%host, %node)
+      #continue forms(%next)
+    } else {
       #break forms(0)
     }
-    #continue forms(%next)
   }
   #return %status
+}
+
+// 一条顶层形式：关键字已经认出来了，按它分派。
+#proc meta_lower_form(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %here: #bits<64>, %is_struct: #bits<1>,
+                       %is_enum: #bits<1>, %is_scalar: #bits<1>,
+                       %is_let: #bits<1>) -> #bits<32> {
+  %s = #if %is_struct -> (#bits<32>) {
+    %r1 = #call meta_lower_struct(%host, %base, %len, %here)
+    #yield %r1
+  } else {
+    %r2 = #if %is_enum -> (#bits<32>) {
+      %r4 = #call meta_lower_enum(%host, %base, %len, %here)
+      #yield %r4
+    } else {
+      %r3 = #if %is_scalar -> (#bits<32>) {
+        // 标量声明只在**模块**里有效（prelude / 被 import 的源码）。
+        // 被降级的那份源码自己写 `scalar` 会静默变成不可见，所以直接拒。
+        %f2 = #call lain_meta_fail(%host, 14)
+        #yield 14
+      } else {
+        %r5 = #if %is_let -> (#bits<32>) {
+          %r6 = #call meta_lower_let(%host, %base, %len, %here)
+          #yield %r6
+        } else {
+          %f = #call lain_meta_fail(%host, 4)
+          #yield 4
+        }
+        #yield %r5
+      }
+      #yield %r3
+    }
+    #yield %r2
+  }
+  #return %s
 }
 
 // --- 积类型 ---------------------------------------------------------------
