@@ -40,17 +40,41 @@ std/parse.l1   初代标准库：语法树（切词、按括号分组、摊成�
 std/modules.l1 初代标准库：源码注册表、import 解析、命名空间成员的 mangle
 std/scalars.l1 初代标准库：标量声明、类型名解析、算子解析
 std/records.l1 初代标准库：积类型（布局、构造、字段访问）
-std/funcs.l1   初代标准库：普通函数（参数、返回类型、函数体、带实参的调用）
+std/funcs.l1   初代标准库：普通函数（参数、返回类型、语句体、调用）+ for 循环
 std/sums.l1    初代标准库：和类型（布局、构造、投影）
 meta.l1        Meta 的三个入口与 v0 的语言规则
 ```
 
 ## v0 的语言
 
+顶层形式。分派走的是**形状**（「这个节点是不是内容为 `struct` 的词」），不是逐字节
+搜关键字：
+
 ```lain
-let NAME [: TYPE] = INTEGER;
-let NAME : TYPE = INTEGER OP INTEGER;
+let NAME [: TYPE] = <值或构造>;                   # 绑定
+struct NAME { f: T ... }                          # 积类型
+enum   NAME { V V(T) ... }                        # 和类型
+func   NAME(p: T, ...) -> T { 语句* }             # 普通函数
+scalar NAME = <repr> { "符号" = <物理算子> ... }   # 标量；只在模块里有效
 ```
+
+`scalar` 写在**被降级的那份源码**里会报状态码 14——标量声明只在模块（prelude、
+被 import 的源码）里有效，静默让它不可见不如直接拒。
+
+函数体里的语句（`std/funcs.l1`）：
+
+```lain
+let NAME : TYPE = <值或构造>;      # 局部变量。类型标注**必须写**，见下面
+return <值或构造>;                 # 最后一条必须是它，否则报 20
+let NAME : TYPE = for I in LO..HI acc = INIT { acc = A OP B; };   # for → #loop
+```
+
+`<值或构造>` 现在有这些：`整数`、`整数 OP 整数`、`名字`、`名字 OP 名字`、`F(...)`
+（调用）、`M.name`（模块成员）、`Rec { f: v ... }`（积类型构造）、`Rec.f(v)`（字段访问）、
+`E.V { v }`（和类型构造）、`E.V(v)`（投影）、`import("路径")`。
+
+`for` 里的 `acc` 是**语言定的名字**，所以循环体里唯一合法的赋值目标就是它；循环
+变量名直接当 LAINIR 的循环变量名用（写 `i` 产物里就是 `%i`）。
 
 `TYPE` 缺省时是 `#bits<64>`（老形式）。写了类型就去**声明**里查它——不带点的名字
 查 root 环境（逻辑路径 `std::prelude`），带点的名字（`W.w32`）查被 import 的模块：
@@ -87,8 +111,9 @@ let b: u32 = 12 / 3;
 而 Meta 里没有一行写着「如果类型是 i32」——它只是查了表。**这就是这张表存在
 的理由**：语言规则住在数据里，不住在编译器的分支里。
 
-v0 的 i32/u32 各带两个 op（`/` 和 `+`），别的类型一个都没有。写一个表里没有的
-算子（比如 `i32` 上的 `%`）会得到状态码 6，不是静默用别的算子顶上。
+v0 的 i32/u32 各带三个 op（`/`、`+`、`<`；`<` 是 `for` 的条件要用的），别的类型
+一个都没有。写一个表里没有的算子（比如 `i32` 上的 `%`）会得到状态码 6，不是静默
+用别的算子顶上。
 
 ## 积类型
 
@@ -541,7 +566,7 @@ struct Pair { left: i32 right: i32 }
 降了 7%–28%。没有更多是因为「按名字找声明」本身还是**线性扫一遍形式**——只是现在
 扫的是节点、不是字节。真正的 O(n²) 要等编译期符号表（名字 → 声明）建起来才算还清。
 
-### 工作区大小由编译单元决定
+### 解析器踩过的两个坑
 
 两个踩过的坑，都留在代码注释里：
 
@@ -551,7 +576,7 @@ struct Pair { left: i32 right: i32 }
 - **组要吃掉自己的闭括号**。内层停在 `}` 上，外层得从它后面接着走，跨度也要把
   闭括号算进去。不然根节点会把 `}` 当成一个普通的词收进孩子里。
 
-### 工作区大小由编译单元决定
+### 暂存区大小由编译单元决定
 
 宿主那块可写内存以前写死 64 KiB。加了树之后不够了——树是每个 token 一个节点，
 节点数和源码字节数同一个量级。写死大小的后果不是「慢」，是编译一份稍大的源码就
@@ -649,7 +674,7 @@ v0 不认注释、不认识换行以外的排版差异（空白 = 字节 ≤ 32�
 | 宿主服务（`seed/src/meta/host.c`） | 源码读入、产物写出、失败上报 —— **不含任何语言知识** |
 | Meta（本目录） | `let` 是什么、`NAME` 是名字、`INTEGER` 是数值、这些怎么变成 LAINIR |
 
-### 能力面（9 个）
+### 能力面（11 个）
 
 | 名字 | 参数（第一个永远是 host 地址） | 结果 |
 | --- | --- | --- |
@@ -661,6 +686,8 @@ v0 不认注释、不认识换行以外的排版差异（空白 = 字节 ≤ 32�
 | `lain_meta_emit_write` | addr, length | 0 |
 | `lain_meta_emit_data` | — | 产物文本地址 |
 | `lain_meta_emit_length` | — | 产物字节数 |
+| `lain_meta_scratch_data` | — | 暂存区地址 |
+| `lain_meta_scratch_size` | — | 暂存区字节数 |
 | `lain_meta_fail` | code | 0 |
 
 名字同时是 link_name，所以**必须是合法 C 标识符**（SYMBOL 策略下后端按它发
@@ -682,10 +709,16 @@ Meta 的 TCB 不自带地址空间，源码字节也不是它自己映像的一�
 
 ## 怎么跑
 
+整套回归（84 条）一条命令，它自己会把 `meta_boot` 编出来，产物落 `build/tmp-probe/`：
+
 ```text
-clang -std=c11 -Iseed/include -o build/tmp-probe/meta_boot.exe seed/tests/meta_boot.c \
-  seed/src/core/*.c seed/src/vm/*.c seed/src/meta/host.c
-build/tmp-probe/meta_boot.exe                                   # let main = 42
+python scripts/check_seed_meta_bootstrap.py
+```
+
+想手工喂一个输入，直接跑驱动：
+
+```text
+build/tmp-probe/meta_boot.exe                                   # 默认：let main = 42
 build/tmp-probe/meta_boot.exe seed/tests/meta_source2.lain answer 1234
 # 参数：<src> <入口> <期望值> [断言文本] [模式] [逻辑路径=文件]...
 build/tmp-probe/meta_boot.exe seed/tests/meta_import2.lain main 42 std__math__answer - \
@@ -697,14 +730,12 @@ build/tmp-probe/meta_boot.exe seed/tests/meta_import2.lain main 42 std__math__an
 `.lain` 自动算相对路径；这里显式给，免掉目录递归，也让注册表的内容在命令行上
 看得见。
 
-`build/tmp-probe/run_all.ps1` 把两条都纳入回归。
-
 ## 下一步该长什么
 
 按依赖顺序：
 
-1. **函数体长大**：局部变量、语句序列、`if`、`loop`。没有这些，函数体只能是一个
-   表达式，写不出解析器那样的过程。
+1. **函数体继续长大**：局部变量、语句序列、`for` 循环已经有了；还差 `if`、嵌套
+   表达式、循环体多条语句。没有这些，写不出解析器那样的过程。
 2. **`expand` 阶段**：现在还只是恒等，没有宏/attribute。
 3. **值也能带类型过模块**：现在 import 只导出 `let NAME = INT;`（repr 固定
    `#bits<64>`）。
