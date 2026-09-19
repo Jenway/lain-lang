@@ -28,7 +28,7 @@
 | 文档 | 内容 | 当前状态 |
 | --- | --- | --- |
 | [`00-intro.md`](00-intro.md) | Lain 总览、核心原则和编译器架构 | 已合并初稿，待逐节复核 |
-| [`01-lain-ir.md`](01-lain-ir.md) | LAINIR 语言规范 | 当前规范，仍需与实现逐项核对 |
+| [`01-lain-ir.md`](01-lain-ir.md) | LAINIR 语言规范（**第一代方言**：用 `#let`、类型实参可省） | 代码示例已与实现不符。**第二代的实际规范是 [`../seed/docs/LAINIR.md`](../seed/docs/LAINIR.md)**（类型实参必写、`#loop` 体落下即离开循环）；两份尚未归一 |
 | [`02-lain-ast.md`](02-lain-ast.md) | LAIN-AST 契约 | 待校准 |
 | [`03-meta-system.md`](03-meta-system.md) | Meta 系统、标准阶段 ABI 与 `#eval` 边界 | 已重写初稿，待逐节复核 |
 
@@ -51,6 +51,8 @@
 | [`implementation/c1-eval-contract-audit.md`](implementation/c1-eval-contract-audit.md) | C1 `#eval` 执行契约审计：临时 TCB、共享 VSpace、预算与 Trap 的冻结边界 |
 | [`implementation/module-namespaces.md`](implementation/module-namespaces.md) | `packages::lain::` 逻辑命名空间与 import 解析规则 |
 | [`implementation/meta-callable-unification.md`](implementation/meta-callable-unification.md) | 编码 1b 设计：统一 Meta callable 执行路径的现状、sink 与 Meta 值构造方案 |
+| [`implementation/architecture-review-2026-09-20.md`](implementation/architecture-review-2026-09-20.md) | 架构评审与路线合并结论：两套 Meta ABI 的实测对照、证据分级（R/D/A/U）、四项可执行证明的验收设计、`std/` 归属决定、差异台账。**路线图 §5 的依据** |
+| [`implementation/architecture-review-astra-2026-09-20.md`](implementation/architecture-review-astra-2026-09-20.md) | 同一轮的外部评审（未运行任何命令，纯读代码）；上一条的差异台账逐条对照它 |
 
 ## 当前路线图
 

@@ -172,7 +172,9 @@ Import 返回命名空间值，禁止非限定注入；结构约束用 `std::mod
 | --- | --- |
 | `README.md` / `VERSION` | 概览、设计原则、布局、声明语法、bootstrap 状态、版本 |
 | `docs/00-intro.md` … `docs/04-lain-vm.md` | 语言总览 / LAINIR 规范 / LAIN-AST 契约 / Meta 系统 / LAINVM 设计 |
-| `docs/roadmaps/lain-roadmap.md` | **当前唯一有效路线图**（基线 2026-09-11）：术语、三套代码规则、不可违反的设计决定、编码 0–7 阶段与验收命令 |
+| `docs/roadmaps/lain-roadmap.md` | **当前唯一有效路线图**（基线 2026-09-11；**2026-09-20 调整**：载体为第二代、四项可执行证明 P1–P4、里程碑 M0–M5，见其 §5）：术语、实现归属、不可违反的边界、编码 1–7 的边界原则与验收命令 |
+| `docs/implementation/architecture-review-2026-09-20.md` | 架构评审与路线合并结论：两套 Meta ABI 的实测对照、证据分级（R/D/A/U）、四项证明的验收设计、`std/` 归属决定、差异台账。路线图 §5 的依据 |
+| `docs/implementation/architecture-review-astra-2026-09-20.md` | 同一轮的外部评审（未运行任何命令，读代码得出）；合并版的差异台账逐条对照它 |
 | `src/lainc/compiler_core.lain` | 无平台依赖的编译流水线 |
 | `src/lainc/compiler_api.lain`、`compiler.lain` | 公开 API 与 `Compiler(Memory, Ir, Vm)` 工厂 |
 | `src/lainc/meta.lain`、`elaborator.lain`、`lower.lain` | Meta 展开 / 语义处理 / lowering 引擎 |
