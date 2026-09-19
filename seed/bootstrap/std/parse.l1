@@ -35,16 +35,25 @@
 //   +152  最近一次 meta_parse_seq的最后一个孩子
 
 // 节点的第 word 个数（0..4）
+// 越界的下标（NONE）直接回 NONE，不去算地址：源码写残了的时候，`next`/`child`
+// 会一路把 NONE 传回来，要是照样乘 40 就是读到暂存区外面去了。
+// 这一条让所有节点访问器对 NONE 都是安全的——形状检查才敢「先问再取」。
 #proc meta_tree_field(%host: #addr, %index: #bits<64>,
                        %word: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data(%host)
-  %base = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
-  %p = #lea(%scratch, %base, 1, 0)
-  %off = #mul[#bits<64>](%index, 40)
-  %q = #lea(%p, %off, 1, 0)
-  %shift = #mul[#bits<64>](%word, 8)
-  %cell = #lea(%q, %shift, 1, 0)
-  %v = #call meta_cell_get(%cell)
+  %none = #eq[#bits<64>](%index, 0xFFFFFFFFFFFFFFFF)
+  %v = #if %none -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %scratch = #call lain_meta_scratch_data(%host)
+    %base = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
+    %p = #lea(%scratch, %base, 1, 0)
+    %off = #mul[#bits<64>](%index, 40)
+    %q = #lea(%p, %off, 1, 0)
+    %shift = #mul[#bits<64>](%word, 8)
+    %cell = #lea(%q, %shift, 1, 0)
+    %f = #call meta_cell_get(%cell)
+    #yield %f
+  }
   #return %v
 }
 
@@ -174,14 +183,18 @@
     } else {
       %i1 = #add[#bits<64>](%at, 1)
       %c1 = #call bs_byte_at(%base, %i1, %len)
-      // 两字节的符号：`::` 和 `->`。拆开的话路径和函数签名都会变难认。
+      // 两字节的符号：`::`、`->`、`..`。拆开的话路径、函数签名、区间都会变难认。
       %is_colon = #eq[#bits<8>](%b, 58)
       %also = #eq[#bits<8>](%c1, 58)
       %two = #and[#bits<1>](%is_colon, %also)
       %is_dash = #eq[#bits<8>](%b, 45)
       %gt = #eq[#bits<8>](%c1, 62)
       %arrow = #and[#bits<1>](%is_dash, %gt)
-      %pair = #or[#bits<1>](%two, %arrow)
+      %colon_or_arrow = #or[#bits<1>](%two, %arrow)
+      %is_dot = #eq[#bits<8>](%b, 46)
+      %dot2 = #eq[#bits<8>](%c1, 46)
+      %dots = #and[#bits<1>](%is_dot, %dot2)
+      %pair = #or[#bits<1>](%colon_or_arrow, %dots)
       %t = #if %pair -> (#bits<64>) {
         #yield 2
       } else {
