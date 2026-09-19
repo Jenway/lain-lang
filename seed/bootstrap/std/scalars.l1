@@ -123,36 +123,8 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
 
 // --- 找声明 ---------------------------------------------------------------
 
-// 在 base 里找 `scalar <name> =`，返回 repr 的下标；找不到 NOT_FOUND。
-// **走语法树**：问「这个节点是不是内容为 scalar 的词」，名字是它的下一个节点，
-// repr 是 `=` 的下一个节点。
-#proc meta_find_scalar(%host: #addr, %base: #addr, %len: #bits<64>,
-                        %name: #addr, %name_len: #bits<64>) -> #bits<64> {
-  %kw = #data_addr meta_kw_scalar
-  %after = #call meta_find_decl(%host, %base, %len, %kw, 6, %name, %name_len)
-  %gone = #eq[#bits<64>](%after, 0xFFFFFFFFFFFFFFFF)
-  %r = #if %gone -> (#bits<64>) {
-    #yield 0xFFFFFFFFFFFFFFFF
-  } else {
-    %eq_kw = #data_addr meta_kw_eq
-    %is_eq = #call meta_node_is_word(%host, %after, %base, %eq_kw, 1)
-    %v = #if %is_eq -> (#bits<64>) {
-      %repr = #call meta_node_next(%host, %after)
-      %none = #eq[#bits<64>](%repr, 0xFFFFFFFFFFFFFFFF)
-      %s = #if %none -> (#bits<64>) {
-        #yield 0xFFFFFFFFFFFFFFFF
-      } else {
-        %st = #call meta_node_start(%host, %repr)
-        #yield %st
-      }
-      #yield %s
-    } else {
-      #yield 0xFFFFFFFFFFFFFFFF
-    }
-    #yield %v
-  }
-  #return %r
-}
+// `meta_find_scalar`（按名字回源码里找 `scalar X = ...`）**已经删了**：作用域表
+// 的条目里记着 repr 那个节点的下标，读一下就有，不用搜。
 
 // 标量声明里 `{` 的下标（op 表起点之后一格）。`at` 是 repr 的下标。
 #proc meta_scalar_ops_at(%base: #addr, %at: #bits<64>,
@@ -240,8 +212,12 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
 
 // --- 类型名解析 ------------------------------------------------------------
 
-// 把名字解析到「哪份源码（下标）的哪个位置」，写进暂存区 +16 / +40 / +48。
-// 返回 0 = 成功，NOT_FOUND = 没有这个名字。
+// 名字解析到「哪份源码（下标）的哪个位置」，写进暂存区 +16 / +40 / +48。
+// 返回 repr 的位置；返回 NOT_FOUND = 没有这个名字。
+//
+// **走作用域表**：条目的 `aux` 就是 repr 那个节点的下标，读一下就有。以前这里要
+// 调 `meta_find_scalar` 把源码扫一遍。带点的名字（`T.i32`）会把那个模块的作用域
+// 压进来查——和取模块成员走的是同一条路。
 #proc meta_select_scalar(%host: #addr, %base: #addr, %len: #bits<64>,
                          %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<64> {
   %scratch = #call lain_meta_scratch_data(%host)
@@ -261,40 +237,65 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
       %w = #if %miss -> (#bits<64>) {
         #yield 0xFFFFFFFFFFFFFFFF
       } else {
-        %m_base = #call lain_meta_source_data(%host, %idx)
-        %m_len = #call lain_meta_source_length(%host, %idx)
         %m_lo = #add[#bits<64>](%dot, 1)
         %m_hi = #call bs_skip_ident(%base, %m_lo, %len)
         %member = #lea(%base, %m_lo, 1, 0)
         %member_len = #sub[#bits<64>](%m_hi, %m_lo)
-        %pos = #call meta_find_scalar(%host, %m_base, %m_len, %member, %member_len)
-        %s1 = #call meta_cell_put(#lea(%scratch, 16, 1, 0), %idx)
-        %s2 = #call meta_cell_put(#lea(%scratch, 40, 1, 0), %m_len)
-        %s3 = #call meta_cell_put(#lea(%scratch, 48, 1, 0), %pos)
-        #yield %pos
+        // 压入那个模块的作用域，查完再还原
+        %old = #call meta_scope_enter(%host, %idx)
+        %ens = #call meta_scope_ensure_scanned(%host, %idx)
+        %e = #call meta_scope_find(%host, %member, %member_len)
+        %restore = #call meta_scope_set_current(%host, %old)
+        %gone = #eq[#bits<64>](%e, 0xFFFFFFFFFFFFFFFF)
+        %w2 = #if %gone -> (#bits<64>) {
+          #yield 0xFFFFFFFFFFFFFFFF
+        } else {
+          %kind = #call meta_scope_kind(%host, %e)
+          %is_type = #eq[#bits<64>](%kind, 2)
+          %t = #if %is_type -> (#bits<64>) {
+            %repr_node = #call meta_scope_aux(%host, %e)
+            %pos = #call meta_node_start(%host, %repr_node)
+            %m_len = #call lain_meta_source_length(%host, %idx)
+            %s1 = #call meta_cell_put(#lea(%scratch, 16, 1, 0), %idx)
+            %s2 = #call meta_cell_put(#lea(%scratch, 40, 1, 0), %m_len)
+            %s3 = #call meta_cell_put(#lea(%scratch, 48, 1, 0), %pos)
+            #yield %pos
+          } else {
+            #yield 0xFFFFFFFFFFFFFFFF
+          }
+          #yield %t
+        }
+        #yield %w2
       }
       #yield %w
     }
     #yield %v
   } else {
-    // 不带点：root 环境 = 逻辑路径 `std::prelude` 那份源码
-    %kw = #data_addr meta_logical_prelude
-    %idx = #call meta_source_find(%host, %kw, 12)
-    %miss = #eq[#bits<64>](%idx, 0xFFFFFFFFFFFFFFFF)
-    %w = #if %miss -> (#bits<64>) {
+    // 不带点：在**当前作用域链**里查（root 环境是最外层）
+    %name = #lea(%base, %t_lo, 1, 0)
+    %name_len = #sub[#bits<64>](%t_hi, %t_lo)
+    %e2 = #call meta_scope_find(%host, %name, %name_len)
+    %gone2 = #eq[#bits<64>](%e2, 0xFFFFFFFFFFFFFFFF)
+    %w3 = #if %gone2 -> (#bits<64>) {
       #yield 0xFFFFFFFFFFFFFFFF
     } else {
-      %p_base = #call lain_meta_source_data(%host, %idx)
-      %p_len = #call lain_meta_source_length(%host, %idx)
-      %name = #lea(%base, %t_lo, 1, 0)
-      %name_len = #sub[#bits<64>](%t_hi, %t_lo)
-      %pos = #call meta_find_scalar(%host, %p_base, %p_len, %name, %name_len)
-      %s1 = #call meta_cell_put(#lea(%scratch, 16, 1, 0), %idx)
-      %s2 = #call meta_cell_put(#lea(%scratch, 40, 1, 0), %p_len)
-      %s3 = #call meta_cell_put(#lea(%scratch, 48, 1, 0), %pos)
-      #yield %pos
+      %kind2 = #call meta_scope_kind(%host, %e2)
+      %is_type2 = #eq[#bits<64>](%kind2, 2)
+      %t2 = #if %is_type2 -> (#bits<64>) {
+        %src = #call meta_scope_word(%host, %e2, 0)
+        %repr_node2 = #call meta_scope_aux(%host, %e2)
+        %pos2 = #call meta_node_start(%host, %repr_node2)
+        %m_len2 = #call lain_meta_source_length(%host, %src)
+        %s4 = #call meta_cell_put(#lea(%scratch, 16, 1, 0), %src)
+        %s5 = #call meta_cell_put(#lea(%scratch, 40, 1, 0), %m_len2)
+        %s6 = #call meta_cell_put(#lea(%scratch, 48, 1, 0), %pos2)
+        #yield %pos2
+      } else {
+        #yield 0xFFFFFFFFFFFFFFFF
+      }
+      #yield %t2
     }
-    #yield %w
+    #yield %w3
   }
   #return %r
 }

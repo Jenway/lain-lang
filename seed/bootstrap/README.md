@@ -337,6 +337,43 @@ kind 3 = 值绑定  kind 4 = struct  kind 5 = enum
 作用域的语义（最内层优先，再往外）。**重名只在本层里比**——同一个名字可以在内层
 重新绑定（遮蔽），但不许在同一层绑两次，报 16。
 
+### 条目记的是**声明节点下标**，不是「等用到再去源码里找」的位置
+
+这是这张表被叫成符号表的原因，也是它真正省下来的东西：
+
+```text
+kind 2 标量    payload = 类型 id（0 = 还没 intern）  aux = repr 的节点下标
+kind 4 积类型  payload = 声明的节点下标              aux = 0
+kind 5 和类型  payload = 声明的节点下标              aux = 0
+kind 1 模块引用 payload = 被 import 的源码下标        aux = 逻辑路径的位置
+kind 3 值绑定  payload = 初始化式的节点下标           aux = 0
+```
+
+拿字段访问说：以前每写一次 `Pair.left(p)`，都要**回源码里把 `struct Pair` 那条声明
+搜一遍**（`meta_find_rec_body`），再从头累加字段偏移。现在条目里就指着那条声明的
+节点，读一下就有——`meta_scope_body` 是 O(1)。标量同理：`i32` 的条目指着它的 repr
+节点，`meta_scope_type_id` 不用再搜。
+
+**搜索式的名字查找全删了**：`bs_next_form`、`meta_find_keyword`、`bs_next_let`、
+`bs_match_let`、`meta_import_at`、`meta_find_binding_in`、还有过渡形态
+`meta_find_decl` / `meta_find_scalar` / `meta_find_rec_body` / `meta_find_enum_body`。
+留在 `std/parse.l1` 的只有「把源码读成树」和「节点怎么读」——**找名字不是那一层的
+事**。
+
+步骤数（三轮累积）：
+
+| 用例 | 走字节 | 走树 | 走符号表 |
+| --- | --- | --- | --- |
+| `struct: Mixed 大小 24` | 80144 | 58333 | **53860** |
+| `sum: Shape 大小 16` | 79786 | 57480 | **54822** |
+| `sum: Circle { 7 } 构造 + 投影` | 102398 | 84027 | **82158** |
+| `product: Mixed.b(m)` | 127339 | 110661 | **102380** |
+
+**注意还没到 O(1)**：作用域表自己的查找还是**线性扫一遍条目**。条目数等于声明数
+（比源码字节数小得多），所以那部分不刺眼，但严格说还是 O(声明数 × 查找次数)。
+真正 O(1) 要哈希或者排序索引——现在不值得，等有真实规模的输入再说。
+
+
 层次：外层是 root 环境（`std::prelude` 那份源码），内层是被降级的源码。被 import
 的模块取用时再压一层、用完退掉（`meta_scope_mark` / `meta_scope_release`）——那一
 步还没接，所以现在带点的名字（`T.i32`）仍然回模块源码里搜声明，两条路以后会合成

@@ -4,9 +4,13 @@
 // 字段偏移是 struct 声明时算出来的，但目前只有那几个 offset/size **过程**
 // ——过程是运行时才叫得动的，编译期用不上。
 //
-// 所以这里的办法是：**按需回源码里再走一遍那条 struct 声明**，累加偏移
-// 直到命中字段名。手写引导阶段的折中，慢（每个字段一次 O(n) 扫描）但不需要
-// 建记录表。真正的做法是一张编译期符号表，那是下一步。
+// 所以这里要在编译期把布局再算一遍：从这个类型的正文起点开始，累加偏移直到
+// 命中字段名。**正文起点来自符号表**（`meta_scope_body`：条目里记的就是那条
+// 声明的节点），所以不用回源码里找声明。
+//
+// 以前这里是「按需回源码里再走一遍那条 struct 声明」，每个字段一次 O(n) 扫描；
+// 那句注释当时写着「真正的做法是一张编译期符号表，那是下一步」——现在它在
+// `std/scope.l1` 里了。
 //
 // 打包：`偏移` 在低 40 位、`kind` 在 40..43、`width` 在 44..51、命中在最高位。
 // 走到 `}` 时返回的是**总大小**（最高位 0）——同一个走法服务两种问题。
@@ -15,28 +19,49 @@
 // 现在走语法树（`meta_find_decl`）。它和 `bs_next_form` 是同一类东西——「搜」，
 // 而不是「认」。
 
-// 找到 `struct <rec> {` 之后的正文起点（`{` 后面一个字符）。找不到返回 NOT_FOUND。
-//
-// **走语法树**：以前是从头逐字节搜 `struct` 这个词，名字不对就接着搜下一处。
-// 现在问的是「这个节点是不是内容为 struct 的词」，名字是不是那个词的下一个节点。
-#proc meta_find_rec_body(%host: #addr, %src: #addr, %len: #bits<64>,
-                         %rec_lo: #bits<64>,
-                         %rec_hi: #bits<64>) -> #bits<64> {
-  %kw = #data_addr meta_kw_struct
-  %name = #lea(%src, %rec_lo, 1, 0)
-  %name_len = #sub[#bits<64>](%rec_hi, %rec_lo)
-  %after = #call meta_find_decl(%host, %src, %len, %kw, 6, %name, %name_len)
-  %gone = #eq[#bits<64>](%after, 0xFFFFFFFFFFFFFFFF)
+// 一条声明自己的正文从哪开始：`struct X { ... }` 里 `{` 后面一个字符。
+// **O(1)**：节点下标 → 名字节点 → 花括号组 → 起点。不搜。
+#proc meta_decl_body(%host: #addr, %node: #bits<64>) -> #bits<64> {
+  %name_node = #call meta_node_next(%host, %node)
+  %grp = #call meta_node_next(%host, %name_node)
+  %gone = #eq[#bits<64>](%grp, 0xFFFFFFFFFFFFFFFF)
   %r = #if %gone -> (#bits<64>) {
     #yield 0xFFFFFFFFFFFFFFFF
   } else {
-    // 名字后面应该是那个花括号组；正文从 `{` 后面一个字符开始
-    %kind = #call meta_node_kind(%host, %after)
+    %kind = #call meta_node_kind(%host, %grp)
     %is_group = #eq[#bits<64>](%kind, 2)
     %v = #if %is_group -> (#bits<64>) {
-      %st = #call meta_node_start(%host, %after)
+      %st = #call meta_node_start(%host, %grp)
       %one = #add[#bits<64>](%st, 1)
       #yield %one
+    } else {
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    #yield %v
+  }
+  #return %r
+}
+
+// 按名字从**作用域表**里取出「这个类型的正文从哪开始」。找不到返回 NOT_FOUND。
+//
+// 这是符号表真正省下来的那件事：以前每访问一次字段就回源码里把声明搜一遍
+// （`meta_find_rec_body`），现在条目里存的就是声明节点，读一下就有。
+// expect 是期望的种类：4 = 积类型，5 = 和类型。
+#proc meta_scope_body(%host: #addr, %base: #addr, %name_lo: #bits<64>,
+                       %name_hi: #bits<64>, %expect: #bits<64>) -> #bits<64> {
+  %name = #lea(%base, %name_lo, 1, 0)
+  %name_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %i = #call meta_scope_find(%host, %name, %name_len)
+  %miss = #eq[#bits<64>](%i, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %miss -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %kind = #call meta_scope_kind(%host, %i)
+    %ok = #eq[#bits<64>](%kind, %expect)
+    %v = #if %ok -> (#bits<64>) {
+      %node = #call meta_scope_payload(%host, %i)
+      %body = #call meta_decl_body(%host, %node)
+      #yield %body
     } else {
       #yield 0xFFFFFFFFFFFFFFFF
     }
@@ -114,12 +139,11 @@
   #return %r
 }
 
-// 某个字段的 (偏移, kind, width)。找不到返回 0。
+// 某个字段的 (偏移, kind, width)。`body` 是那个 type 的正文起点（由
+// `meta_scope_body` 从符号表里取，不用搜）。找不到返回 0。
 #proc meta_layout_field(%host: #addr, %src: #addr, %len: #bits<64>,
-                        %rec_lo: #bits<64>,
-                        %rec_hi: #bits<64>, %f_lo: #bits<64>,
+                        %body: #bits<64>, %f_lo: #bits<64>,
                         %f_hi: #bits<64>) -> #bits<64> {
-  %body = #call meta_find_rec_body(%host, %src, %len, %rec_lo, %rec_hi)
   %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
   %r = #if %missing -> (#bits<64>) {
     #yield 0
@@ -132,9 +156,7 @@
 
 // 记录的总大小。
 #proc meta_layout_size(%host: #addr, %src: #addr, %len: #bits<64>,
-                       %rec_lo: #bits<64>,
-                       %rec_hi: #bits<64>) -> #bits<64> {
-  %body = #call meta_find_rec_body(%host, %src, %len, %rec_lo, %rec_hi)
+                       %body: #bits<64>) -> #bits<64> {
   %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
   %r = #if %missing -> (#bits<64>) {
     #yield 0
@@ -183,7 +205,7 @@
 
 // 初始化列表 `{ f: v f: v }`：每个字段一条 store。
 #proc meta_construct_fields(%host: #addr, %base: #addr, %len: #bits<64>,
-                            %rec_lo: #bits<64>, %rec_hi: #bits<64>,
+                            %body: #bits<64>,
                             %at: #bits<64>) -> #bits<32> {
   %st = #loop fields(%at: #bits<64> = %at) -> (#bits<32>) {
     %here = #call bs_skip_space(%base, %at, %len)
@@ -197,7 +219,7 @@
     %one = #add[#bits<64>](%colon, 1)
     %v_lo = #call bs_skip_space(%base, %one, %len)
     %v_hi = #call bs_skip_ident(%base, %v_lo, %len)
-    %info = #call meta_layout_field(%host, %base, %len, %rec_lo, %rec_hi, %here, %f_hi)
+    %info = #call meta_layout_field(%host, %base, %len, %body, %here, %f_hi)
     // 走表不中就是错的：不能把「走到 } 得到的总大小」当成字段偏移用。
     %found = #lshr[#bits<64>](%info, 63)
     %missing = #eq[#bits<64>](%found, 0)
@@ -228,11 +250,14 @@
 // `let NAME = Rec { ... }`：
 //   data NAME_storage rw { 0 ... }
 //   #proc NAME() -> #addr { %base = #data_addr NAME_storage; stores; #return %base }
+//
+// `type_body` 是那个类型声明的正文起点——**从符号表取**（`meta_scope_body`），
+// 不是每次回源码里找一遍。`at` 是初始化列表 `{` 的位置。
 #proc meta_lower_construct(%host: #addr, %base: #addr, %len: #bits<64>,
                            %bind_lo: #bits<64>, %bind_hi: #bits<64>,
-                           %rec_lo: #bits<64>, %rec_hi: #bits<64>,
-                           %brace_at: #bits<64>) -> #bits<32> {
-  %size = #call meta_layout_size(%host, %base, %len, %rec_lo, %rec_hi)
+                           %type_body: #bits<64>,
+                           %at: #bits<64>) -> #bits<32> {
+  %size = #call meta_layout_size(%host, %base, %len, %type_body)
   %bind_at = #lea(%base, %bind_lo, 1, 0)
   %bind_len = #sub[#bits<64>](%bind_hi, %bind_lo)
 
@@ -254,8 +279,8 @@
   %d6 = #data_addr meta_c7
   %w10 = #call lain_meta_emit_write(%host, %d6, 9)
 
-  %body = #add[#bits<64>](%brace_at, 1)
-  %st = #call meta_construct_fields(%host, %base, %len, %rec_lo, %rec_hi, %body)
+  %body = #add[#bits<64>](%at, 1)
+  %st = #call meta_construct_fields(%host, %base, %len, %type_body, %body)
 
   %d7 = #data_addr meta_c12
   %w11 = #call lain_meta_emit_write(%host, %d7, 18)
@@ -266,7 +291,7 @@
 // 所以不需要值表。`p.left` 那种写法要一张「值名 → 类型名」的表，是下一步。
 #proc meta_lower_field_access(%host: #addr, %base: #addr, %len: #bits<64>,
                               %bind_lo: #bits<64>, %bind_hi: #bits<64>,
-                              %rec_lo: #bits<64>, %rec_hi: #bits<64>,
+                              %type_body: #bits<64>,
                               %at: #bits<64>) -> #bits<32> {
   %f_lo = #call bs_skip_space(%base, %at, %len)
   %f_hi = #call bs_skip_ident(%base, %f_lo, %len)
@@ -275,7 +300,7 @@
   %v_lo = #call bs_skip_space(%base, %one, %len)
   %v_hi = #call bs_skip_ident(%base, %v_lo, %len)
 
-  %info = #call meta_layout_field(%host, %base, %len, %rec_lo, %rec_hi, %f_lo, %f_hi)
+  %info = #call meta_layout_field(%host, %base, %len, %type_body, %f_lo, %f_hi)
   %off = #and[#bits<64>](%info, 0xFFFFFFFFFF)
   %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 40), 15)
   %width = #and[#bits<64>](#lshr[#bits<64>](%info, 44), 255)
