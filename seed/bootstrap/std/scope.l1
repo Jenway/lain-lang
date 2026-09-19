@@ -33,10 +33,21 @@
 //   +48   标量的 repr 位置         +56   全部输入字节数
 //   +64   注册表条目容量           +72   作用域表起点（偏移）
 //   +80   作用域表条目容量          +88   作用域表条目数
-//   +96   逻辑路径 / mangle 缓冲区，416 字节（+96..+511）
+//   +96   root 环境（prelude）的源码下标
+//   +104  当前正在降级的源码下标
+//   +160  逻辑路径 / mangle 缓冲区，352 字节（+160..+511）
 //   +512  注册表条目数
 //   +520  注册表条目区，每条 64 字节
 //        作用域表条目区，每条 56 字节，起点 = 520 + 64 × 注册表容量
+//
+// **查找只认两份源码：当前这份，和 root 环境那份。**
+//
+// 命名空间成员被取用时，链是 [root, 那个模块]——**调用方那一层不在链里**。所以
+// 「模块内部的绑定能不能看见调用方的绑定」这件事，答案是看不见（那是动态作用域）。
+// 用「当前源码 + root」两个条件表达这条链，不需要通用的层级表。
+//
+// 代价说清楚：这只够表达深度 2 的作用域链。将来要有块级作用域、函数内作用域，
+// 就得换成真正的层级表（每层记起点和父层）。
 
 // --- 建表 -----------------------------------------------------------------
 
@@ -79,6 +90,7 @@
     %kw = #data_addr meta_logical_prelude
     %prelude = #call meta_source_find(%host, %kw, 12)
     %present = #ne[#bits<64>](%prelude, 0xFFFFFFFFFFFFFFFF)
+    %s6 = #call meta_cell_put(#lea(%scratch, 96, 1, 0), %prelude)
     %w = #if %present -> (#bits<32>) {
       %p_len = #call lain_meta_source_length(%host, %prelude)
       %p_base = #call lain_meta_source_data(%host, %prelude)
@@ -231,20 +243,34 @@
 }
 
 // 按名字找，**从表尾往前**（最内层优先）。返回条目下标；没有返回 NOT_FOUND。
+//
+// 只认两份源码的条目：**当前正在降级的那份**（+104）和 root 环境那份（+96）。
+// 别的源码的条目一律看不见——这就是「调用方那一层不在模块的链里」那条规则。
 #proc meta_scope_find(%host: #addr, %name_addr: #addr,
                       %name_len: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %root = #call meta_cell_get(#lea(%scratch, 96, 1, 0))
+  %current = #call meta_cell_get(#lea(%scratch, 104, 1, 0))
   %count = #call meta_scope_count(%host)
   %found = #loop s(%i: #bits<64> = %count) -> (#bits<64>) {
     %more = #ugt[#bits<64>](%i, 0)
     #if %more {
       %k = #sub[#bits<64>](%i, 1)
       %src = #call meta_scope_word(%host, %k, 0)
-      %off = #call meta_scope_word(%host, %k, 8)
-      %p = #call meta_scope_name_at(%host, %src, %off)
-      %have = #call meta_scope_word(%host, %k, 16)
-      %same_len = #eq[#bits<64>](%have, %name_len)
-      %hit = #if %same_len -> (#bits<1>) {
-        %eqb = #call meta_bytes_equal(%p, %name_addr, %name_len)
+      %mine = #eq[#bits<64>](%src, %current)
+      %rooted = #eq[#bits<64>](%src, %root)
+      %visible = #or[#bits<1>](%mine, %rooted)
+      %hit = #if %visible -> (#bits<1>) {
+        %off = #call meta_scope_word(%host, %k, 8)
+        %p = #call meta_scope_name_at(%host, %src, %off)
+        %have = #call meta_scope_word(%host, %k, 16)
+        %same_len = #eq[#bits<64>](%have, %name_len)
+        %eqb = #if %same_len -> (#bits<1>) {
+          %e = #call meta_bytes_equal(%p, %name_addr, %name_len)
+          #yield %e
+        } else {
+          #yield 0
+        }
         #yield %eqb
       } else {
         #yield 0
@@ -259,6 +285,47 @@
     }
   }
   #return %found
+}
+
+// 表里有没有这份源码的条目？——用来判断「这个模块扫过了没有」。
+//
+// 模块的作用域**扫一次就留着**，不退掉。原因：`emitted` 标记是记在条目上的，
+// 退掉再扫一遍会得到一批标记全为 0 的新条目，于是同一条绑定被发两次——产物里
+// 出现两个同名过程。留着条目，第二次取用就看得见「已经发过」。
+//
+// 留着不违反可见性：查找只认「当前源码 + root」两份，别人的条目看不见。代价是
+// 表会随被取用的模块数增长，而容量本来就是按模块算的。
+#proc meta_scope_has_source(%host: #addr, %source: #bits<64>) -> #bits<1> {
+  %count = #call meta_scope_count(%host)
+  %found = #loop s(%i: #bits<64> = 0) -> (#bits<1>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %src = #call meta_scope_word(%host, %i, 0)
+      %same = #eq[#bits<64>](%src, %source)
+      #if %same {
+        #break s(1)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue s(%i2)
+    } else {
+      #break s(0)
+    }
+  }
+  #return %found
+}
+
+// 进出一份源码的作用域。链是 [root, 当前]，所以只需要存一个「当前」。
+#proc meta_scope_enter(%host: #addr, %source: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %old = #call meta_cell_get(#lea(%scratch, 104, 1, 0))
+  %s1 = #call meta_cell_put(#lea(%scratch, 104, 1, 0), %source)
+  #return %old
+}
+
+#proc meta_scope_set_current(%host: #addr, %source: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %s1 = #call meta_cell_put(#lea(%scratch, 104, 1, 0), %source)
+  #return 0
 }
 
 #proc meta_scope_name_at(%host: #addr, %source: #bits<64>,
