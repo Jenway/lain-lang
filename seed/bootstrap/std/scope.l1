@@ -506,13 +506,16 @@
       %is_struct = #call meta_node_is_word(%host, %node, %base, %kw, 6)
       %is_enum = #call meta_node_is_word(%host, %node, %base, %ekw, 4)
       %is_let = #call meta_node_is_word(%host, %node, %base, %lkw, 3)
+      %fkw = #data_addr meta_kw_func
+      %is_func = #call meta_node_is_word(%host, %node, %base, %fkw, 4)
       %h1 = #or[#bits<1>](%is_scalar, %is_struct)
       %h2 = #or[#bits<1>](%is_enum, %is_let)
-      %any = #or[#bits<1>](%h1, %h2)
+      %h3 = #or[#bits<1>](%h1, %h2)
+      %any = #or[#bits<1>](%h3, %is_func)
       %s = #if %any -> (#bits<32>) {
         %d = #call meta_scope_add_form(%host, %base, %len, %source,
                                        %level_start, %node, %is_scalar,
-                                       %is_struct, %is_enum, %is_let)
+                                       %is_struct, %is_enum, %is_let, %is_func)
         #yield %d
       } else {
         // 顶层树的孩子是词，不是形式——见 meta_lower_source 同处的说明。
@@ -545,6 +548,7 @@
 //   kind 2 标量   payload = 类型 id（0 = 还没 intern）  aux = repr 的**节点下标**
 //   kind 4 积类型 payload = 声明的**节点下标**          aux = 0
 //   kind 5 和类型 payload = 声明的**节点下标**          aux = 0
+//   kind 6 函数   payload = 声明的**节点下标**          aux = 0
 //   kind 1 模块引用 payload = 被 import 的源码下标       aux = 逻辑路径的位置
 //   kind 3 值绑定 payload = 初始化式的**节点下标**       aux = 0
 //
@@ -554,7 +558,7 @@
                            %source: #bits<64>, %level_start: #bits<64>,
                            %node: #bits<64>, %is_scalar: #bits<1>,
                            %is_struct: #bits<1>, %is_enum: #bits<1>,
-                           %is_let: #bits<1>) -> #bits<32> {
+                           %is_let: #bits<1>, %is_func: #bits<1>) -> #bits<32> {
   %s = #if %is_scalar -> (#bits<32>) {
     %r1 = #call meta_scope_add_scalar(%host, %base, %len, %source,
                                       %level_start, %node)
@@ -570,14 +574,21 @@
                                         %level_start, %node, 5)
         #yield %x2
       } else {
-        %r4 = #if %is_let -> (#bits<32>) {
-          %x3 = #call meta_scope_add_let(%host, %base, %len, %source,
-                                         %level_start, %node)
-          #yield %x3
+        %r7 = #if %is_func -> (#bits<32>) {
+          %x4 = #call meta_scope_add_decl(%host, %base, %len, %source,
+                                          %level_start, %node, 6)
+          #yield %x4
         } else {
-          #yield 0
+          %r4 = #if %is_let -> (#bits<32>) {
+            %x3 = #call meta_scope_add_let(%host, %base, %len, %source,
+                                           %level_start, %node)
+            #yield %x3
+          } else {
+            #yield 0
+          }
+          #yield %r4
         }
-        #yield %r4
+        #yield %r7
       }
       #yield %r3
     }
