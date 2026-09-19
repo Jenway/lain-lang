@@ -19,6 +19,7 @@
 
 #include "lainir/build.h"
 #include "lainir/parse.h"
+#include "lainir/print.h"
 #include "lainir/verify.h"
 #include "lainbackend/emit.h"
 #include "lainbackend/target.h"
@@ -76,14 +77,34 @@ static char *read_text_file(const char *path, uint32_t *length_out) {
   return text;
 }
 
-/* 按 SOURCE_ORDER 把 bootstrap 源拼成一份文本。 */
+/* 按清单把 Meta 的源文件拼成一份文本。
+ *
+ * 清单里的路径是**相对于清单文件所在目录**的，不是相对仓库根、也不是硬拼
+ * `seed/bootstrap/`。这条是"换一份 Meta"能成立的前提之一：候选 Meta 的清单
+ * 可以放在任何地方，不必挤进主线那个目录。 */
 static char *load_bootstrap(const char *order_path, uint32_t *length_out) {
   char *order = read_text_file(order_path, NULL);
   char *joined;
   size_t used = 0;
   size_t cap = 4096;
   char *line;
+  char prefix[512];
+  const char *slash_fwd;
+  const char *slash_bwd;
+  const char *last_slash;
   if (!order) return NULL;
+  /* 清单路径的目录部分。没有目录分隔符时前缀为空。 */
+  slash_fwd = strrchr(order_path, '/');
+  slash_bwd = strrchr(order_path, '\\');
+  last_slash = slash_fwd;
+  if (slash_bwd && (!last_slash || slash_bwd > last_slash)) last_slash = slash_bwd;
+  if (last_slash && (size_t)(last_slash - order_path) + 2u < sizeof(prefix)) {
+    size_t n = (size_t)(last_slash - order_path) + 1u;
+    memcpy(prefix, order_path, n);
+    prefix[n] = '\0';
+  } else {
+    prefix[0] = '\0';
+  }
   joined = (char *)malloc(cap);
   if (!joined) {
     free(order);
@@ -97,7 +118,7 @@ static char *load_bootstrap(const char *order_path, uint32_t *length_out) {
     size_t need;
     if (line[0] != '#' && line[0] != '\0') {
       uint32_t text_length = 0;
-      snprintf(path, sizeof(path), "seed/bootstrap/%s", line);
+      snprintf(path, sizeof(path), "%s%s", prefix, line);
       text = read_text_file(path, &text_length);
       if (!text) {
         printf("cannot read bootstrap source: %s\n", path);
@@ -299,9 +320,18 @@ int main(int argc, char **argv) {
 
   setvbuf(stdout, NULL, _IONBF, 0);
 
-  bootstrap = load_bootstrap("seed/bootstrap/SOURCE_ORDER", NULL);
+  /* 换一份 Meta：清单路径由 `LAIN_META_MANIFEST` 给，默认是主线那份。
+   * 用环境变量而不是 argv，是为了不动已经在用的位置参数契约
+   * （`<src> <入口> <期望值> [断言文本] [模式] [逻辑路径=文件]...`）——
+   * 那套契约有 80 多条既有调用，加一个位置参数会把它们全部错位。 */
+  {
+    const char *manifest = getenv("LAIN_META_MANIFEST");
+    if (!manifest || !*manifest) manifest = "seed/bootstrap/SOURCE_ORDER";
+    printf("meta order: %s\n", manifest);
+    bootstrap = load_bootstrap(manifest, NULL);
+  }
   if (!bootstrap) {
-    printf("cannot load the bootstrap sources\n");
+    printf("cannot load the Meta sources\n");
     return 1;
   }
   source = read_text_file(source_path, &source_length);
@@ -484,6 +514,40 @@ int main(int argc, char **argv) {
     snprintf(buffer, sizeof(buffer), "produced text lacks `%s`", want_text);
     report_fail("repr", buffer);
     goto cleanup;
+  }
+
+  /* 规范形：把 Meta 产出的文本 parse + verify 再打一遍。
+   *
+   * 语料比较要的是**唯一**的规范形——C 侧的 `lainir-print` 定义它（平坦、类型
+   * 实参总写出来、十进制、模块项之间一个空行）。有了它，"两份不同的 Meta 产出
+   * 同一份 IR"才是**逐字节可比**的，而不是"看起来差不多"。 */
+  if (mode && strcmp(mode, "canonical") == 0) {
+    const L1Module *canon_module;
+    char *canonical;
+    diag.code = 0;
+    canon_module = lainir_parse(out_builder, produced, &diag);
+    if (!canon_module) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer), "canonical parse: %d %s", diag.code,
+               diag.message);
+      report_fail("canonical", buffer);
+      goto cleanup;
+    }
+    if (lainir_verify(canon_module, &diag) != 0) {
+      char buffer[192];
+      snprintf(buffer, sizeof(buffer), "canonical verify: %d %s", diag.code,
+               diag.message);
+      report_fail("canonical", buffer);
+      goto cleanup;
+    }
+    canonical = lainir_print_to_string(canon_module);
+    if (!canonical) {
+      report_fail("canonical", "cannot print the canonical form");
+      goto cleanup;
+    }
+    printf("--- canonical LAINIR ---\n%s", canonical);
+    printf("--- end canonical ---\n");
+    free(canonical);
   }
 
   /* 出 C：把 Meta 产出的 LAINIR 交给 C 后端。这是整条链的最后一跳。 */

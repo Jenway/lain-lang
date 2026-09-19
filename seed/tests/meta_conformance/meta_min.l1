@@ -1,0 +1,252 @@
+// 极简第二 Meta —— **独立实现**，只认 `let NAME = INT;`。
+//
+// 它存在的唯一目的是让"Meta 可替换"变成**可判定**：主线 Meta 是 4938 行、12 个文件、
+// 认一整套语言；这一份只有一百多行、一个文件、认一条形式。但如果宿主、驱动和规范形
+// 契约是干净的，这两份就应该能在**同一个输入集**上产出**逐字节相同**的启动 LAINIR。
+//
+// 它与主线 Meta **不共享任何代码**：连空白/注释跳过、标识符判断、关键字匹配都是
+// 自己重写的一份。共享的话，"可替换"就退化成"同一份实现的两个分支"。
+//
+// 它只调宿主公开的 5 个能力：source_length / source_data / emit_reset / emit_write /
+// fail。**不碰 scratch**，所以它对暂存区布局毫无假设——这正是要证明的东西。
+//
+// 明确的限制（不假装支持）：不认 import、不认类型标注、不认 struct/enum/func、
+// 不认文件里有多条形式（第一条之后的内容不检查）。这些不是缺陷，是这份实现的边界；
+// 语料里 level=core 的那一档就是按这个边界划的。
+
+// 固定文本段。
+data min_t_head ro { 35 112 114 111 99 32 }                     // "#proc "          6
+data min_t_sig ro { 40 41 32 45 62 32 35 98 105 116 115 60 54 52 62 32 123 } // "() -> #bits<64> {"  17
+data min_t_ret ro { 10 32 32 35 114 101 116 117 114 110 32 }    // "\n  #return "    11
+data min_t_tail ro { 10 125 10 }                                // "\n}\n"           3
+
+// 关键字。
+data min_kw_let ro { 108 101 116 }                              // "let"  3
+data min_kw_eq ro { 61 }                                        // "="    1
+data min_kw_semi ro { 59 }                                      // ";"    1
+
+// 用到的宿主能力。**自己声明一份**，不从主线 Meta 借——包括这份声明本身，
+// 都是"独立实现"的一部分。五个名字都是宿主公开能力表里的。
+#proc lain_meta_source_length(%host: #addr, %index: #bits<64>) -> #bits<64> #extern "lain_meta_source_length"
+#proc lain_meta_source_data(%host: #addr, %index: #bits<64>) -> #addr #extern "lain_meta_source_data"
+#proc lain_meta_emit_reset(%host: #addr) -> #bits<32> #extern "lain_meta_emit_reset"
+#proc lain_meta_emit_write(%host: #addr, %data: #addr, %length: #bits<64>) -> #bits<32> #extern "lain_meta_emit_write"
+#proc lain_meta_fail(%host: #addr, %code: #bits<32>) -> #bits<32> #extern "lain_meta_fail"
+
+#proc min_is_digit(%b: #bits<8>) -> #bits<1> {
+  %lo = #uge[#bits<8>](%b, 48)
+  %hi = #ule[#bits<8>](%b, 57)
+  %r = #and[#bits<1>](%lo, %hi)
+  #return %r
+}
+
+#proc min_is_ident(%b: #bits<8>) -> #bits<1> {
+  %d = #call min_is_digit(%b)
+  %llo = #uge[#bits<8>](%b, 97)
+  %lhi = #ule[#bits<8>](%b, 122)
+  %lower = #and[#bits<1>](%llo, %lhi)
+  %ulo = #uge[#bits<8>](%b, 65)
+  %uhi = #ule[#bits<8>](%b, 90)
+  %upper = #and[#bits<1>](%ulo, %uhi)
+  %us = #eq[#bits<8>](%b, 95)
+  %t1 = #or[#bits<1>](%lower, %upper)
+  %t2 = #or[#bits<1>](%t1, %us)
+  %r = #or[#bits<1>](%t2, %d)
+  #return %r
+}
+
+// 跳到本行之后（`#` 到换行为止是注释）。
+#proc min_skip_line(%base: #addr, %at: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %r = #loop s(%i: #bits<64> = %at) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %nl = #eq[#bits<8>](%b, 10)
+      #if %nl {
+        %n1 = #add[#bits<64>](%i, 1)
+        #break s(%n1)
+      }
+      %n2 = #add[#bits<64>](%i, 1)
+      #continue s(%n2)
+    } else {
+      #break s(%i)
+    }
+  }
+  #return %r
+}
+
+// 跳过空白（字节 <= 32）和注释。
+#proc min_skip(%base: #addr, %at: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %r = #loop s(%i: #bits<64> = %at) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %ws = #ule[#bits<8>](%b, 32)
+      #if %ws {
+        %n1 = #add[#bits<64>](%i, 1)
+        #continue s(%n1)
+      }
+      %is_hash = #eq[#bits<8>](%b, 35)
+      #if %is_hash {
+        %e = #call min_skip_line(%base, %i, %len)
+        #continue s(%e)
+      }
+      #break s(%i)
+    } else {
+      #break s(%i)
+    }
+  }
+  #return %r
+}
+
+#proc min_skip_ident(%base: #addr, %at: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %r = #loop s(%i: #bits<64> = %at) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %ok = #call min_is_ident(%b)
+      #if %ok {
+        %n1 = #add[#bits<64>](%i, 1)
+        #continue s(%n1)
+      }
+      #break s(%i)
+    } else {
+      #break s(%i)
+    }
+  }
+  #return %r
+}
+
+#proc min_skip_digits(%base: #addr, %at: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %r = #loop s(%i: #bits<64> = %at) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %ok = #call min_is_digit(%b)
+      #if %ok {
+        %n1 = #add[#bits<64>](%i, 1)
+        #continue s(%n1)
+      }
+      #break s(%i)
+    } else {
+      #break s(%i)
+    }
+  }
+  #return %r
+}
+
+// 下标 at 处的字节是不是正好等于 kw 那串？
+#proc min_match(%base: #addr, %at: #bits<64>, %len: #bits<64>,
+                 %kw: #addr, %kw_len: #bits<64>) -> #bits<1> {
+  %need = #add[#bits<64>](%at, %kw_len)
+  %fits = #ule[#bits<64>](%need, %len)
+  %r = #if %fits -> (#bits<1>) {
+    %pa = #lea(%base, %at, 1, 0)
+    %same = #loop s(%i: #bits<64> = 0) -> (#bits<1>) {
+      %more = #ult[#bits<64>](%i, %kw_len)
+      #if %more {
+        %pb = #lea(%pa, %i, 1, 0)
+        %a = #load[#bits<8>](%pb)
+        %q = #lea(%kw, %i, 1, 0)
+        %b = #load[#bits<8>](%q)
+        %eq = #eq[#bits<8>](%a, %b)
+        #if %eq {
+          %n1 = #add[#bits<64>](%i, 1)
+          #continue s(%n1)
+        }
+        #break s(0)
+      } else {
+        #break s(1)
+      }
+    }
+    #yield %same
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+#proc lain_std_abi_version() -> #bits<64> {
+  #return 1
+}
+
+#proc lain_std_initialize(%host: #addr) -> #bits<32> {
+  #return 0
+}
+
+// `let NAME = INT;` -> `#proc NAME() -> #bits<64> {\n  #return INT\n}\n`
+//
+// 数字**不解析**：它在源码里已经是十进制文本，原样搬过去就行。这是这份实现能这么短的
+// 主要原因，也是它对"值是几"这件事完全不表态的原因。
+#proc lain_std_lower(%host: #addr, %source: #bits<64>) -> #bits<32> {
+  %reset = #call lain_meta_emit_reset(%host)
+  %len = #call lain_meta_source_length(%host, %source)
+  %base = #call lain_meta_source_data(%host, %source)
+  %kw_let = #data_addr min_kw_let
+  %kw_eq = #data_addr min_kw_eq
+  %kw_semi = #data_addr min_kw_semi
+
+  %at = #call min_skip(%base, 0, %len)
+  %ok_let = #call min_match(%base, %at, %len, %kw_let, 3)
+  %bad_let = #eq[#bits<1>](%ok_let, 0)
+  #if %bad_let {
+    %f1 = #call lain_meta_fail(%host, 4)
+    #return 4
+  }
+
+  %after_let = #add[#bits<64>](%at, 3)
+  %name_lo = #call min_skip(%base, %after_let, %len)
+  %name_hi = #call min_skip_ident(%base, %name_lo, %len)
+  %has_name = #ult[#bits<64>](%name_lo, %name_hi)
+  %bad_name = #eq[#bits<1>](%has_name, 0)
+  #if %bad_name {
+    %f2 = #call lain_meta_fail(%host, 4)
+    #return 4
+  }
+
+  %eq_at = #call min_skip(%base, %name_hi, %len)
+  %ok_eq = #call min_match(%base, %eq_at, %len, %kw_eq, 1)
+  %bad_eq = #eq[#bits<1>](%ok_eq, 0)
+  #if %bad_eq {
+    %f3 = #call lain_meta_fail(%host, 4)
+    #return 4
+  }
+
+  %after_eq = #add[#bits<64>](%eq_at, 1)
+  %num_lo = #call min_skip(%base, %after_eq, %len)
+  %num_hi = #call min_skip_digits(%base, %num_lo, %len)
+  %has_num = #ult[#bits<64>](%num_lo, %num_hi)
+  %bad_num = #eq[#bits<1>](%has_num, 0)
+  #if %bad_num {
+    %f4 = #call lain_meta_fail(%host, 4)
+    #return 4
+  }
+
+  %semi_at = #call min_skip(%base, %num_hi, %len)
+  %ok_semi = #call min_match(%base, %semi_at, %len, %kw_semi, 1)
+  %bad_semi = #eq[#bits<1>](%ok_semi, 0)
+  #if %bad_semi {
+    %f5 = #call lain_meta_fail(%host, 4)
+    #return 4
+  }
+
+  %t_head = #data_addr min_t_head
+  %w1 = #call lain_meta_emit_write(%host, %t_head, 6)
+  %n_at = #lea(%base, %name_lo, 1, 0)
+  %n_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %w2 = #call lain_meta_emit_write(%host, %n_at, %n_len)
+  %t_sig = #data_addr min_t_sig
+  %w3 = #call lain_meta_emit_write(%host, %t_sig, 17)
+  %t_ret = #data_addr min_t_ret
+  %w4 = #call lain_meta_emit_write(%host, %t_ret, 11)
+  %v_at = #lea(%base, %num_lo, 1, 0)
+  %v_len = #sub[#bits<64>](%num_hi, %num_lo)
+  %w5 = #call lain_meta_emit_write(%host, %v_at, %v_len)
+  %t_tail = #data_addr min_t_tail
+  %w6 = #call lain_meta_emit_write(%host, %t_tail, 3)
+  #return 0
+}
