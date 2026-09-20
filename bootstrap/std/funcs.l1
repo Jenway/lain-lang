@@ -742,6 +742,30 @@
         #if %bfail {
           #return %bst
         }
+        // `else` 可选。它自己带收掉 `if` 块的那个 `}`，所以有它就先写 `  } else {`，
+        // 没有就直接写 `  }\n`；两种情况都在最后收一次尾。
+        %af = #call meta_node_next(%host, %block)
+        %ekw = #data_addr meta_kw_else
+        %is_else = #call meta_node_is_word(%host, %af, %base, %ekw, 4)
+        #if %is_else {
+          %egrp = #call meta_node_next(%host, %af)
+          %ek = #call meta_node_kind(%host, %egrp)
+          %eisgrp = #eq[#bits<64>](%ek, 2)
+          %enotgrp = #eq[#bits<1>](%eisgrp, 0)
+          #if %enotgrp {
+            // `else` 后面不是块
+            %f3 = #call lain_meta_fail(%host, 4)
+            #return 4
+          }
+          %ew = #data_addr meta_st_else
+          %w5 = #call lain_meta_emit_write(%host, %ew, 11)
+          %bst2 = #call meta_lower_body(%host, %base, %len, %egrp, %r_t_lo,
+                                        %r_t_hi)
+          %bf2 = #ne[#bits<32>](%bst2, 0)
+          #if %bf2 {
+            #return %bst2
+          }
+        }
         %cl2 = #data_addr meta_st_lend
         %w4 = #call lain_meta_emit_write(%host, %cl2, 4)
         #yield 0
@@ -779,8 +803,21 @@
         }
         %cnd = #call meta_node_next(%host, %c)
         %blk = #call meta_node_next(%host, %cnd)
-        %next0 = #call meta_node_next(%host, %blk)
-        #continue stmts(%next0, %saw_ret)
+        %n1 = #call meta_node_next(%host, %blk)
+        // 有 `else` 就再跳过一个块。**`else` 后面那个块不是一条新语句** —— 不跳的
+        // 话它会被当成语句去 `meta_find_semi`，报一个跟真实原因无关的 21。
+        %ekw2 = #data_addr meta_kw_else
+        %has_else = #call meta_node_is_word(%host, %n1, %base, %ekw2, 4)
+        %next0 = #if %has_else -> (#bits<64>) {
+          %eg = #call meta_node_next(%host, %n1)
+          %nx = #call meta_node_next(%host, %eg)
+          #yield %nx
+        } else {
+          #yield %n1
+        }
+        // 有 `else` 说明两支都以 `return` 收尾（`meta_lower_body` 逼的），所以这条
+        // 语句一定终结 —— `saw_ret` 跟着置 1。没有 `else` 就保持原样。
+        #continue stmts(%next0, %has_else)
       }
       %semi = #call meta_find_semi(%host, %base, %c)
       %nosemi = #eq[#bits<64>](%semi, 0xFFFFFFFFFFFFFFFF)
