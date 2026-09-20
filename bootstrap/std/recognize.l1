@@ -199,10 +199,11 @@
   #return %st
 }
 
-// 找从 %at 起头的那个叶子节点，回它的**下标**（找不到回「无」）。
+// 找从 %at 起头的那个节点，回它的**下标**（找不到回「无」）。
 //
-// 一份源码里每个 token 的起点各不相同，所以兄弟链里第一个命中就是它。组不是叶，
-// 要说进它的孩子里找。
+// **组也算**：组的 `start` 就是它那个开括号的位置，而那个位置上没有叶子，所以不会
+// 和叶子的匹配打架。`(1 + 2) + 3` 的值的第一个节点就是那个组 —— 只认叶子的话查不到它，
+// 形状就成了「无」，整段被当成常量走错路。
 #proc meta_node_at(%host: #addr, %base: #addr, %at: #bits<64>) -> #bits<64> {
   %root = #call meta_root_of_source(%host, %base)
   %missing = #eq[#bits<64>](%root, 0xFFFFFFFFFFFFFFFF)
@@ -216,6 +217,7 @@
   #return %r
 }
 
+// 一份源码里每个 token 的起点各不相同，所以兄弟链里第一个起点相符的就是它。
 #proc meta_node_find_at(%host: #addr, %first: #bits<64>,
                         %at: #bits<64>) -> #bits<64> {
   %found = #loop s(%c: #bits<64> = %first) -> (#bits<64>) {
@@ -223,28 +225,26 @@
     #if %done {
       #break s(0xFFFFFFFFFFFFFFFF)
     }
+    %st = #call meta_node_start(%host, %c)
+    %same = #eq[#bits<64>](%st, %at)
+    #if %same {
+      #break s(%c)
+    }
     %k = #call meta_node_kind(%host, %c)
     %is_group = #eq[#bits<64>](%k, 2)
-    %hit = #if %is_group -> (#bits<64>) {
+    %sub = #if %is_group -> (#bits<64>) {
       %kid = #call meta_node_child(%host, %c)
       %r = #call meta_node_find_at(%host, %kid, %at)
       #yield %r
     } else {
-      %st = #call meta_node_start(%host, %c)
-      %same = #eq[#bits<64>](%st, %at)
-      %me = #if %same -> (#bits<64>) {
-        #yield %c
-      } else {
-        #yield 0xFFFFFFFFFFFFFFFF
-      }
-      #yield %me
+      #yield 0xFFFFFFFFFFFFFFFF
     }
-    %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
+    %miss = #eq[#bits<64>](%sub, 0xFFFFFFFFFFFFFFFF)
     #if %miss {
       %nx = #call meta_node_next(%host, %c)
       #continue s(%nx)
     }
-    #break s(%hit)
+    #break s(%sub)
   }
   #return %found
 }
