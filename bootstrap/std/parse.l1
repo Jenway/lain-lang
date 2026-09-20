@@ -351,7 +351,14 @@
 #proc meta_node_is_word(%host: #addr, %i: #bits<64>, %base: #addr,
                          %kw: #addr, %kw_len: #bits<64>) -> #bits<1> {
   %kind = #call meta_node_kind(%host, %i)
-  %is_word = #eq[#bits<64>](%kind, 1)
+  // 「是词」= 不是组、也不是「无」。**不能写 `kind == 1`**：识别 pass 会把词的种类
+  // 从 1 改成 3..10（声明/二元/调用/字段/…），写死 1 的话识别之后一个关键字都认不
+  // 出来。组永远是 2，所以「不是组」这个判据在整个识别前后都成立。
+  %is_group = #eq[#bits<64>](%kind, 2)
+  %is_none = #eq[#bits<64>](%kind, 0xFFFFFFFFFFFFFFFF)
+  %not_group = #eq[#bits<1>](%is_group, 0)
+  %not_none = #eq[#bits<1>](%is_none, 0)
+  %is_word = #and[#bits<1>](%not_group, %not_none)
   %r = #if %is_word -> (#bits<1>) {
     %n = #call meta_node_len(%host, %i)
     %same_len = #eq[#bits<64>](%n, %kw_len)
@@ -416,6 +423,9 @@
 }
 
 // 把一份源码读成一棵树，根是一个覆盖全文的组节点。根下标按源码下标记下来。
+//
+// 建完树紧接着跑一遍**识别 pass**（`std/recognize.l1`，语言相关的那一层）。这样
+// 「读到树的时候形状已经写好」是个不变式，由一个调用点保证，不靠调用方记得。
 #proc meta_parse_source(%host: #addr, %source: #bits<64>) -> #bits<32> {
   %len = #call lain_meta_source_length(%host, %source)
   %base = #call lain_meta_source_data(%host, %source)
@@ -429,5 +439,6 @@
   %off = #mul[#bits<64>](%source, 8)
   %slot = #lea(%rp, %off, 1, 0)
   %s = #call meta_cell_put(%slot, %root)
+  %rec = #call meta_recognize_source(%host, %source)
   #return 0
 }

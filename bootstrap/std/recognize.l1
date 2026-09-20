@@ -1,0 +1,244 @@
+// 识别 pass —— 走一遍树，把「这个节点开始了什么形状」写进节点的种类格。
+//
+// 为什么要有这一层：在这之前，每个降级点各自按**位置的字节**重新认形状。
+// `meta_emit_value` 看值的头一个字节判数字/构造，又看第一个标识符之后的字节判
+// `{` / `.` / `(`；`meta_emit_numeric` 看值后面第一个非空白字节是不是算子。同一条
+// 形状规则因此在三处各写一遍，改一处漏两处 —— `1 + 2 + 3` 只发 `#add(1,2)` 就是
+// 这么漏的。
+//
+// 这一遍算完写进种类格，之后降级只读它。**判据只用形状**（自己/下一个兄弟的字节、
+// 兄弟是不是组），不看类型 —— 类型是第 3 步的事。所以 `bits<32> { … }` 里的 `>`
+// 会被记成「构造」：它确实是「后面跟了个花括号组」。只有真正当值用的位置才来读这个
+// 形状，而 `bits<32>` 不在值位置上。
+//
+// 种类格的取值（1 / 2 是建树时给的，3 起是这里写的）：
+//
+//   1  词      普通词，没认出更具体的
+//   2  组      括号组
+//   3  声明    let / func / struct / enum / scalar 之一
+//   4  二元    这里开始一条算子链（下一个兄弟是算子符号）
+//   5  调用    下一个兄弟是 `(` 组
+//   6  字段    下一个兄弟是 `.`
+//   7  常量    字面量数字
+//   8  返回    return
+//   9  算子    这个词是单字节算子符号
+//   10 构造    下一个兄弟是 `{` 组
+//
+// 优先级：声明 > 返回 > 自己是算子 > 调用 > 构造 > 字段 > 二元 > 常量 > 词。
+// 「自己是算子」排在调用前面，是因为算子符号后面不可能跟一个组；反过来 `f(x)` 的
+// `f` 不是算子，所以两条不会争。
+
+// 「这一段字节是不是关键字 kw」用 `scalars.l1` 已有的 `meta_word_is`：它收
+// [lo, hi)，这里手里是起点 + 长度，加一下就是 hi。不另写一份。
+
+// 这个词是不是单个算子符号？长度必须是 1，而且那一个字节得是算子。
+// 位置越界时 `bs_byte_at` 给 0，所以兄弟是「无」的时候在这里是安全的。
+#proc meta_rec_is_op(%base: #addr, %at: #bits<64>, %n: #bits<64>,
+                      %len: #bits<64>) -> #bits<1> {
+  %one = #eq[#bits<64>](%n, 1)
+  %r = #if %one -> (#bits<1>) {
+    %b = #call bs_byte_at(%base, %at, %len)
+    %o = #call bs_is_operator(%b)
+    #yield %o
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+// 这个词是不是单个 `.`？
+#proc meta_rec_is_dot(%base: #addr, %at: #bits<64>, %n: #bits<64>,
+                       %len: #bits<64>) -> #bits<1> {
+  %one = #eq[#bits<64>](%n, 1)
+  %r = #if %one -> (#bits<1>) {
+    %b = #call bs_byte_at(%base, %at, %len)
+    %d = #eq[#bits<8>](%b, 46)
+    #yield %d
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+// 给一个词节点算形状，写回它的种类格。
+#proc meta_recognize_word(%host: #addr, %base: #addr, %len: #bits<64>,
+                          %i: #bits<64>) -> #bits<32> {
+  %at = #call meta_node_start(%host, %i)
+  %n = #call meta_node_len(%host, %i)
+  %hi = #add[#bits<64>](%at, %n)
+
+  // 自己是不是「一条声明」的开头。构造器 `std::func` 之类也是拿 `let` 声明的，
+  // 所以这里是 `let` 而不是 `func`；`func` / `struct` 等是过渡写法留下的。
+  %kl = #data_addr meta_kw_let
+  %kf = #data_addr meta_kw_func
+  %ks = #data_addr meta_kw_struct
+  %ke = #data_addr meta_kw_enum
+  %kc = #data_addr meta_kw_scalar
+  %kr = #data_addr meta_kw_return
+  %is_let = #call meta_word_is(%base, %at, %hi, %kl, 3)
+  %is_func = #call meta_word_is(%base, %at, %hi, %kf, 4)
+  %is_struct = #call meta_word_is(%base, %at, %hi, %ks, 6)
+  %is_enum = #call meta_word_is(%base, %at, %hi, %ke, 4)
+  %is_scalar = #call meta_word_is(%base, %at, %hi, %kc, 6)
+  %is_ret = #call meta_word_is(%base, %at, %hi, %kr, 6)
+  %d1 = #or[#bits<1>](%is_let, %is_func)
+  %d2 = #or[#bits<1>](%is_struct, %is_enum)
+  %d3 = #or[#bits<1>](%d2, %is_scalar)
+  %is_decl = #or[#bits<1>](%d1, %d3)
+
+  %self_op = #call meta_rec_is_op(%base, %at, %n, %len)
+  %self_b = #call bs_byte_at(%base, %at, %len)
+  %self_digit = #call bs_is_digit(%self_b)
+
+  // 下一个兄弟决定「这里开始的是什么」。兄弟是「无」时下面每个判断都给假。
+  %nx = #call meta_node_next(%host, %i)
+  %nx_kind = #call meta_node_kind(%host, %nx)
+  %nx_is_group = #eq[#bits<64>](%nx_kind, 2)
+  %nx_at = #call meta_node_start(%host, %nx)
+  %nx_n = #call meta_node_len(%host, %nx)
+  %nx_is_op = #call meta_rec_is_op(%base, %nx_at, %nx_n, %len)
+  %nx_is_dot = #call meta_rec_is_dot(%base, %nx_at, %nx_n, %len)
+  // 组节点从它自己的开括号起（`meta_parse_seq` 里就是这么记的），所以看那一格
+  // 就知道是 `(` 还是 `{`。这两个形状完全不同：调用 vs 构造。
+  %nx_b = #call bs_byte_at(%base, %nx_at, %len)
+  %nx_paren = #eq[#bits<8>](%nx_b, 40)
+  %nx_brace = #eq[#bits<8>](%nx_b, 123)
+  %callish = #and[#bits<1>](%nx_is_group, %nx_paren)
+  %construct = #and[#bits<1>](%nx_is_group, %nx_brace)
+
+  %form = #if %is_decl -> (#bits<64>) {
+    #yield 3
+  } else {
+    %f2 = #if %is_ret -> (#bits<64>) {
+      #yield 8
+    } else {
+      %f3 = #if %self_op -> (#bits<64>) {
+        #yield 9
+      } else {
+        %f4 = #if %callish -> (#bits<64>) {
+          #yield 5
+        } else {
+          %f5 = #if %construct -> (#bits<64>) {
+            #yield 10
+          } else {
+            %f6 = #if %nx_is_dot -> (#bits<64>) {
+              #yield 6
+            } else {
+              %f7 = #if %nx_is_op -> (#bits<64>) {
+                #yield 4
+              } else {
+                %f8 = #if %self_digit -> (#bits<64>) {
+                  #yield 7
+                } else {
+                  #yield 1
+                }
+                #yield %f8
+              }
+              #yield %f7
+            }
+            #yield %f6
+          }
+          #yield %f5
+        }
+        #yield %f4
+      }
+      #yield %f3
+    }
+    #yield %f2
+  }
+  %s = #call meta_node_set_kind(%host, %i, %form)
+  #return 0
+}
+
+// 走一条兄弟链，组要说进孩子里。组自己不改种类（它本来就是 2 = 组）。
+#proc meta_recognize_all(%host: #addr, %base: #addr, %len: #bits<64>,
+                         %first: #bits<64>) -> #bits<32> {
+  %st = #loop s(%c: #bits<64> = %first) -> (#bits<32>) {
+    %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+    #if %done {
+      #break s(0)
+    }
+    %k = #call meta_node_kind(%host, %c)
+    %is_group = #eq[#bits<64>](%k, 2)
+    %w = #if %is_group -> (#bits<32>) {
+      %kid = #call meta_node_child(%host, %c)
+      %r = #call meta_recognize_all(%host, %base, %len, %kid)
+      #yield %r
+    } else {
+      %r2 = #call meta_recognize_word(%host, %base, %len, %c)
+      #yield %r2
+    }
+    %nx = #call meta_node_next(%host, %c)
+    #continue s(%nx)
+  }
+  #return %st
+}
+
+// 一份源码识别一遍。`meta_parse_source` 建完树就调它，所以读到树的时候形状一定
+// 已经写好了 —— 这个不变式由一个调用点保证，不靠调用方记得。
+#proc meta_recognize_source(%host: #addr, %source: #bits<64>) -> #bits<32> {
+  %base = #call lain_meta_source_data(%host, %source)
+  %len = #call lain_meta_source_length(%host, %source)
+  %root = #call meta_root_of(%host, %source)
+  %none = #eq[#bits<64>](%root, 0xFFFFFFFFFFFFFFFF)
+  %st = #if %none -> (#bits<32>) {
+    #yield 0
+  } else {
+    %kid = #call meta_node_child(%host, %root)
+    %r = #call meta_recognize_all(%host, %base, %len, %kid)
+    #yield %r
+  }
+  #return %st
+}
+
+// 从 %at 起头的那个叶子的形状。找不到回「无」。
+//
+// 这是给**还按字节偏移工作**的降级点用的桥：它们手里只有位置，靠这个把位置换成
+// 预先算好的形状，而不是再去看字节。等降级改成按节点下标走，这座桥就不需要了。
+#proc meta_form_at(%host: #addr, %base: #addr, %at: #bits<64>) -> #bits<64> {
+  %root = #call meta_root_of_source(%host, %base)
+  %missing = #eq[#bits<64>](%root, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %missing -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %kid = #call meta_node_child(%host, %root)
+    %f = #call meta_form_find(%host, %kid, %at)
+    #yield %f
+  }
+  #return %r
+}
+
+// 在兄弟链里找从 %at 起头的叶子。组不是叶，要说进它的孩子里找。
+// 一份源码里每个 token 的起点各不相同，所以第一个命中就是它。
+#proc meta_form_find(%host: #addr, %first: #bits<64>,
+                      %at: #bits<64>) -> #bits<64> {
+  %found = #loop s(%c: #bits<64> = %first) -> (#bits<64>) {
+    %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+    #if %done {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+    %k = #call meta_node_kind(%host, %c)
+    %is_group = #eq[#bits<64>](%k, 2)
+    %hit = #if %is_group -> (#bits<64>) {
+      %kid = #call meta_node_child(%host, %c)
+      %r = #call meta_form_find(%host, %kid, %at)
+      #yield %r
+    } else {
+      %st = #call meta_node_start(%host, %c)
+      %same = #eq[#bits<64>](%st, %at)
+      %me = #if %same -> (#bits<64>) {
+        #yield %k
+      } else {
+        #yield 0xFFFFFFFFFFFFFFFF
+      }
+      #yield %me
+    }
+    %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
+    #if %miss {
+      %nx = #call meta_node_next(%host, %c)
+      #continue s(%nx)
+    }
+    #break s(%hit)
+  }
+  #return %found
+}
