@@ -1,0 +1,71 @@
+// 初代标准库 v0 —— 通用小工具。
+//
+// 类型表**已经不在这里了**。标量曾经是一段手打的静态字节（`data meta_types`），
+// 加一个类型要改字节、错一个字节就产出错的 repr；现在标量是**声明**
+// （`scalar i32 = bits<32> { "/" = sdiv "+" = add }`），住在源文件里，由
+// `std/scalars.l1` 按名字扫。这个文件只剩下跟「哪来的」无关的三样东西：
+// 字节比较、暂存区单元、repr 的字节数与对齐。
+
+// 两个字节串相等？长度也要相等。
+#proc meta_bytes_equal(%a: #addr, %b: #addr, %n: #bits<64>) -> #bits<1> {
+  %same = #loop cmp(%i: #bits<64> = 0) -> (#bits<1>) {
+    %more = #ult[#bits<64>](%i, %n)
+    #if %more {
+      %ba = #load[#bits<8>](#lea(%a, %i, 1, 0))
+      %bb = #load[#bits<8>](#lea(%b, %i, 1, 0))
+      %eq = #eq[#bits<8>](%ba, %bb)
+      #if %eq {
+        %i2 = #add[#bits<64>](%i, 1)
+        #continue cmp(%i2)
+      } else {
+        #break cmp(0)
+      }
+    } else {
+      #break cmp(1)
+    }
+  }
+  #return %same
+}
+
+// --- 暂存区单元 -----------------------------------------------------------
+//
+// 过程只能回一个值，而解析常常要多回几个（比如「标量在哪份源码的哪个位置」）。
+// 这些中间结果写进暂存区，调用方按固定的分段读回来。分段表见
+// `std/modules.l1` 的头注释。
+
+#proc meta_cell_put(%cell: #addr, %v: #bits<64>) -> #bits<32> {
+  #store[#bits<64>](%v, %cell)
+  #return 0
+}
+
+#proc meta_cell_get(%cell: #addr) -> #bits<64> {
+  %v = #load[#bits<64>](%cell)
+  #return %v
+}
+
+// --- repr 的字节数与对齐 ---------------------------------------------------
+//
+// 标量按自然对齐：大小 = 位数/8（不足一字节当一字节），对齐 = 大小。
+// #addr 是 8/8。
+
+#proc bs_repr_size(%kind: #bits<64>, %width: #bits<64>) -> #bits<64> {
+  %is_addr = #eq[#bits<64>](%kind, 3)
+  %r = #if %is_addr -> (#bits<64>) {
+    #yield 8
+  } else {
+    %bytes = #udiv[#bits<64>](%width, 8)
+    %zero = #eq[#bits<64>](%bytes, 0)
+    %b = #if %zero -> (#bits<64>) {
+      #yield 1
+    } else {
+      #yield %bytes
+    }
+    #yield %b
+  }
+  #return %r
+}
+
+#proc bs_repr_align(%kind: #bits<64>, %width: #bits<64>) -> #bits<64> {
+  %a = #call bs_repr_size(%kind, %width)
+  #return %a
+}

@@ -1,0 +1,685 @@
+// Meta v0 —— 语言定义层，手写 LAINIR。
+//
+// 它是「编译器的哪一部分必须能用 Lain 重写」这条边界的第一个落点：
+// 它读源码字节，按语言规则决定含义，产出 canonical LAINIR 文本，
+// 交给驱动去 parse + verify + 执行。它不认识任何物理算子，
+// 底座也不认识任何 Lain 概念。
+//
+// v0 认的顶层形式：`let` / `struct` / `enum` / `func` / `scalar`（只在模块里有效）
+// / `import(...)`。分派按**形状**走（`meta_lower_form` 问的是「这个节点是不是内容
+// 为 struct 的词」），不按字节搜关键字。语言面的清单见 README「v0 的语言」。
+//
+// 三个入口对应三个标准阶段。v0 里 expand 是恒等（还没有宏），
+// elaborate 与 lower 合成一条直线——等形状长出来再拆。
+
+#proc lain_std_abi_version() -> #bits<64> {
+  #return 1
+}
+
+#proc lain_std_initialize(%host: #addr) -> #bits<32> {
+  #return 0
+}
+
+// 产出：把 source 那份源码 lowering 成 LAINIR 文本，写进宿主的输出缓冲。
+// 返回 0 = 成功。
+#proc lain_std_lower(%host: #addr, %source: #bits<64>) -> #bits<32> {
+  %reset = #call lain_meta_emit_reset(%host)
+  // 作用域表要先建：外层是 root 环境，内层是这份源码。名字按表查，
+  // 不再回源码搜字节。
+  %setup = #call meta_scope_setup(%host)
+  %ok = #eq[#bits<32>](%setup, 0)
+  %status = #if %ok -> (#bits<32>) {
+    %len = #call lain_meta_source_length(%host, %source)
+    %base = #call lain_meta_source_data(%host, %source)
+    %mark = #call meta_scope_count(%host)
+    %cur = #call meta_scope_set_current(%host, %source)
+    %scan = #call meta_scope_scan(%host, %base, %len, %source, %mark)
+    %b2 = #eq[#bits<32>](%scan, 0)
+    %s = #if %b2 -> (#bits<32>) {
+      // 语法树在 meta_scope_setup 里已经把每份源码都读好了。
+      %r = #call meta_lower_source(%host, %source)
+      #yield %r
+    } else {
+      #yield %scan
+    }
+    #yield %s
+  } else {
+    #yield %setup
+  }
+  #return %status
+}
+
+// 一条一条走顶层形式。**形式从语法树上走**——「一条形式从哪到哪」由节点给出，
+// 不再靠「从某个位置起找下一处长得像关键字的地方」。
+#proc meta_lower_source(%host: #addr, %source: #bits<64>) -> #bits<32> {
+  %len = #call lain_meta_source_length(%host, %source)
+  %base = #call lain_meta_source_data(%host, %source)
+  %root = #call meta_root_of(%host, %source)
+  %first = #call meta_node_child(%host, %root)
+  %skw = #data_addr meta_kw_scalar
+  %kw = #data_addr meta_kw_struct
+  %ekw = #data_addr meta_kw_enum
+  %lkw = #data_addr meta_kw_let
+  %status = #loop forms(%node: #bits<64> = %first) -> (#bits<32>) {
+    %more = #ne[#bits<64>](%node, 0xFFFFFFFFFFFFFFFF)
+    #if %more {
+      %here = #call meta_node_start(%host, %node)
+      %is_struct = #call meta_node_is_word(%host, %node, %base, %kw, 6)
+      %is_enum = #call meta_node_is_word(%host, %node, %base, %ekw, 4)
+      %is_scalar = #call meta_node_is_word(%host, %node, %base, %skw, 6)
+      %is_let = #call meta_node_is_word(%host, %node, %base, %lkw, 3)
+      %fkw = #data_addr meta_kw_func
+      %is_func = #call meta_node_is_word(%host, %node, %base, %fkw, 4)
+      %h1 = #or[#bits<1>](%is_struct, %is_enum)
+      %h2 = #or[#bits<1>](%is_scalar, %is_let)
+      %h3 = #or[#bits<1>](%h1, %h2)
+      %any = #or[#bits<1>](%h3, %is_func)
+      %s = #if %any -> (#bits<32>) {
+        %d = #call meta_lower_form(%host, %base, %len, %here, %node, %is_struct,
+                                    %is_enum, %is_scalar, %is_let, %is_func)
+        #yield %d
+      } else {
+        // **顶层树的孩子是词，不是形式**——一条形式跨好几个孩子（`struct`
+        // `Pair` `{...}`）。所以跳过一条形式内部那些非关键字的词是正常的；
+        // 但**整份文件的第一个孩子必须是能被认出的形式**，否则就是坏输入。
+        %is_first = #eq[#bits<64>](%node, %first)
+        %x = #if %is_first -> (#bits<32>) {
+          %f = #call lain_meta_fail(%host, 4)
+          #yield 4
+        } else {
+          #yield 0
+        }
+        #yield %x
+      }
+      %bad = #ne[#bits<32>](%s, 0)
+      #if %bad {
+        #break forms(%s)
+      }
+      %next = #call meta_node_next(%host, %node)
+      #continue forms(%next)
+    } else {
+      #break forms(0)
+    }
+  }
+  #return %status
+}
+
+// 一条顶层形式：关键字已经认出来了，按它分派。
+#proc meta_lower_form(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %here: #bits<64>, %node: #bits<64>, %is_struct: #bits<1>,
+                       %is_enum: #bits<1>, %is_scalar: #bits<1>,
+                       %is_let: #bits<1>, %is_func: #bits<1>) -> #bits<32> {
+  %s = #if %is_struct -> (#bits<32>) {
+    %r1 = #call meta_lower_struct(%host, %base, %len, %here)
+    #yield %r1
+  } else {
+    %r2 = #if %is_enum -> (#bits<32>) {
+      %r4 = #call meta_lower_enum(%host, %base, %len, %here)
+      #yield %r4
+    } else {
+      %r3 = #if %is_func -> (#bits<32>) {
+        %r7 = #call meta_lower_func(%host, %base, %len, %node)
+        #yield %r7
+      } else {
+        %r5 = #if %is_scalar -> (#bits<32>) {
+          // 标量声明只在**模块**里有效（prelude / 被 import 的源码）。
+          // 被降级的那份源码自己写 `scalar` 会静默变成不可见，所以直接拒。
+          %f2 = #call lain_meta_fail(%host, 14)
+          #yield 14
+        } else {
+          %r6 = #if %is_let -> (#bits<32>) {
+            %r8 = #call meta_lower_let(%host, %base, %len, %here)
+            #yield %r8
+          } else {
+            %f = #call lain_meta_fail(%host, 4)
+            #yield 4
+          }
+          #yield %r6
+        }
+        #yield %r5
+      }
+      #yield %r3
+    }
+    #yield %r2
+  }
+  #return %s
+}
+
+// --- 积类型 ---------------------------------------------------------------
+//
+// `struct Rec { f: T ... }` 只产出两个东西：每个字段的字节偏移，和总大小。
+// 偏移是**算出来的**（逐个 align_up 累加），不是查表查来的——这正是积类型
+// 和标量的区别所在。
+//
+// v0 假设输入是良构的：字段名后面一定有 `:` 和类型名。写坏了会产出错的
+// 偏移，而产物过不了验证——失败是响的，只是诊断不好看。
+
+#proc meta_lower_struct(%host: #addr, %base: #addr, %len: #bits<64>,
+                        %kw_at: #bits<64>) -> #bits<32> {
+  %after = #add[#bits<64>](%kw_at, 6)
+  %name_lo = #call bs_skip_space(%base, %after, %len)
+  %name_hi = #call bs_skip_ident(%base, %name_lo, %len)
+  %has_name = #ult[#bits<64>](%name_lo, %name_hi)
+  %status = #if %has_name -> (#bits<32>) {
+    %brace = #call bs_skip_space(%base, %name_hi, %len)
+    %is_open = #call bs_is_byte(%base, %brace, 123)
+    %inner = #if %is_open -> (#bits<32>) {
+      %body = #add[#bits<64>](%brace, 1)
+      %size = #call meta_struct_fields(%host, %base, %len, %name_lo, %name_hi,
+                                       %body, 0, 1)
+      %w = #call meta_emit_size(%host, %base, %name_lo, %name_hi, %size)
+      %ok = #eq[#bits<64>](%size, 0xFFFFFFFFFFFFFFFF)
+      %s = #if %ok -> (#bits<32>) {
+        %f2 = #call lain_meta_fail(%host, 7)
+        #yield 7
+      } else {
+        #yield 0
+      }
+      #yield %s
+    } else {
+      %f = #call lain_meta_fail(%host, 4)
+      #yield 4
+    }
+    #yield %inner
+  } else {
+    %f = #call lain_meta_fail(%host, 4)
+    #yield 4
+  }
+  #return %status
+}
+
+// 走字段列表，每个字段发一个 offset 过程。返回总大小；出错返回 NOT_FOUND。
+// 循环携带 (下一个位置, 当前偏移, 当前最大对齐)。
+#proc meta_struct_fields(%host: #addr, %base: #addr, %len: #bits<64>,
+                        %rec_lo: #bits<64>, %rec_hi: #bits<64>,
+                        %at: #bits<64>, %off: #bits<64>,
+                        %max_align: #bits<64>) -> #bits<64> {
+  %size = #loop fields(%at: #bits<64> = %at, %off: #bits<64> = %off,
+                       %al: #bits<64> = %max_align) -> (#bits<64>) {
+    %here = #call bs_skip_space(%base, %at, %len)
+    %byte = #call bs_byte_at(%base, %here, %len)
+    %is_close = #eq[#bits<8>](%byte, 125)
+    #if %is_close {
+      %rounded = #call bs_align_up(%off, %al)
+      #break fields(%rounded)
+    }
+    // 字段名 : 类型名
+    %f_hi = #call bs_skip_ident(%base, %here, %len)
+    %colon = #call bs_skip_space(%base, %f_hi, %len)
+    %one = #add[#bits<64>](%colon, 1)
+    %t_lo = #call bs_skip_space(%base, %one, %len)
+    %t_hi = #call bs_skip_qualified(%base, %t_lo, %len)
+    // 查字段类型（root 环境或命名空间成员）——拿到的是类型 id
+    %tid = #call meta_type_resolve(%host, %base, %len, %t_lo, %t_hi)
+    %bad_type = #eq[#bits<64>](%tid, 0)
+    #if %bad_type {
+      %f3 = #call lain_meta_fail(%host, 5)
+      #return 5
+    }
+    %tinfo = #call meta_tid_repr(%host, %tid)
+    %kind = #and[#bits<64>](%tinfo, 255)
+    %width = #and[#bits<64>](#lshr[#bits<64>](%tinfo, 8), 255)
+    %fsize = #call meta_tid_size(%host, %tid)
+    %falign = #call meta_tid_align(%host, %tid)
+    %aligned = #call bs_align_up(%off, %falign)
+    %emit = #call meta_emit_field_offset(%host, %base, %len, %rec_lo, %rec_hi,
+                                         %here, %f_hi, %aligned)
+    %next_off = #add[#bits<64>](%aligned, %fsize)
+    %bigger = #ugt[#bits<64>](%falign, %al)
+    %new_al = #if %bigger -> (#bits<64>) {
+      #yield %falign
+    } else {
+      #yield %al
+    }
+    #continue fields(%t_hi, %next_off, %new_al)
+  }
+  #return %size
+}
+
+// 发一个 `<Rec>__<field>_offset() -> #bits<64> { #return <offset> }`。
+#proc meta_emit_field_offset(%host: #addr, %base: #addr, %len: #bits<64>,
+                            %rec_lo: #bits<64>, %rec_hi: #bits<64>,
+                            %f_lo: #bits<64>, %f_hi: #bits<64>,
+                            %value: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %rec_at = #lea(%base, %rec_lo, 1, 0)
+  %rec_len = #sub[#bits<64>](%rec_hi, %rec_lo)
+  %w2 = #call lain_meta_emit_write(%host, %rec_at, %rec_len)
+  %d = #data_addr meta_dsep
+  %w3 = #call lain_meta_emit_write(%host, %d, 2)
+  %f_at = #lea(%base, %f_lo, 1, 0)
+  %f_len = #sub[#bits<64>](%f_hi, %f_lo)
+  %w4 = #call lain_meta_emit_write(%host, %f_at, %f_len)
+  %suf = #data_addr meta_foff
+  %w5 = #call lain_meta_emit_write(%host, %suf, 7)
+  %p2a = #data_addr meta_p2a
+  %w6 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w7 = #call meta_emit_repr(%host, 0, 64)
+  %p2b = #data_addr meta_p2b
+  %w8 = #call lain_meta_emit_write(%host, %p2b, 13)
+  %w9 = #call meta_emit_uint(%host, %value)
+  %p3 = #data_addr meta_p3
+  %w10 = #call lain_meta_emit_write(%host, %p3, 3)
+  #return 0
+}
+
+// 发一个 `<Rec>__size() -> #bits<64> { #return <size> }`。
+#proc meta_emit_size(%host: #addr, %base: #addr, %rec_lo: #bits<64>,
+                    %rec_hi: #bits<64>, %value: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %rec_at = #lea(%base, %rec_lo, 1, 0)
+  %rec_len = #sub[#bits<64>](%rec_hi, %rec_lo)
+  %w2 = #call lain_meta_emit_write(%host, %rec_at, %rec_len)
+  %suf = #data_addr meta_rsize
+  %w3 = #call lain_meta_emit_write(%host, %suf, 6)
+  %p2a = #data_addr meta_p2a
+  %w4 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w5 = #call meta_emit_repr(%host, 0, 64)
+  %p2b = #data_addr meta_p2b
+  %w6 = #call lain_meta_emit_write(%host, %p2b, 13)
+  %w7 = #call meta_emit_uint(%host, %value)
+  %p3 = #data_addr meta_p3
+  %w8 = #call lain_meta_emit_write(%host, %p3, 3)
+  #return 0
+}
+
+#proc meta_lower_let(%host: #addr, %base: #addr, %len: #bits<64>, %let_at: #bits<64>) -> #bits<32> {
+  %after = #add[#bits<64>](%let_at, 3)
+  %name_lo = #call bs_skip_space(%base, %after, %len)
+  %name_hi = #call bs_skip_ident(%base, %name_lo, %len)
+  %has_name = #ult[#bits<64>](%name_lo, %name_hi)
+  %status = #if %has_name -> (#bits<32>) {
+    %s = #call meta_lower_binding(%host, %base, %len, %name_lo, %name_hi)
+    #yield %s
+  } else {
+    %f = #call lain_meta_fail(%host, 4)
+    #yield 4
+  }
+  #return %status
+}
+
+// NAME [: TYPE] = INT
+// NAME = import("逻辑路径") 是一种**不产出 LAINIR** 的绑定：它是编译期的
+// 命名空间绑定，用到时再回源码里找回来。所以它在类型标注之前分叉。
+#proc meta_lower_binding(%host: #addr, %base: #addr, %len: #bits<64>,
+                         %name_lo: #bits<64>, %name_hi: #bits<64>) -> #bits<32> {
+  %at = #call bs_skip_space(%base, %name_hi, %len)
+  %is_eq = #call bs_is_byte(%base, %at, 61)
+  %is_import = #if %is_eq -> (#bits<1>) {
+    %one = #add[#bits<64>](%at, 1)
+    %kw_at = #call bs_skip_space(%base, %one, %len)
+    %kw = #data_addr meta_kw_import
+    %k = #call bs_match_keyword(%base, %kw_at, %len, %kw, 6)
+    #yield %k
+  } else {
+    #yield 0
+  }
+  %status = #if %is_import -> (#bits<32>) {
+    %s0 = #call meta_lower_import(%host, %base, %len, %at)
+    #yield %s0
+  } else {
+    %is_colon = #call bs_is_byte(%base, %at, 58)
+    %s1 = #if %is_colon -> (#bits<32>) {
+      %after = #add[#bits<64>](%at, 1)
+      %t_lo = #call bs_skip_space(%base, %after, %len)
+      // 类型名可能是限定名（`W.w32`），所以不是 bs_skip_ident
+      %t_hi = #call bs_skip_qualified(%base, %t_lo, %len)
+      %s = #call meta_lower_typed(%host, %base, %len, %name_lo, %name_hi, %t_lo,
+                                  %t_hi)
+      #yield %s
+    } else {
+      %s = #call meta_lower_typed(%host, %base, %len, %name_lo, %name_hi, 0, 0)
+      #yield %s
+    }
+    #yield %s1
+  }
+  #return %status
+}
+
+// 解析类型名拿到 repr，再 `= INT`，最后把整条绑定写出去。
+#proc meta_lower_typed(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %name_lo: #bits<64>, %name_hi: #bits<64>,
+                       %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<32> {
+  %has_type = #ult[#bits<64>](%t_lo, %t_hi)
+
+  // 类型名 → 注册表里的**类型 id**。没有标注时给合成的 `#bits<64>`（owner 0）。
+  %resolved = #if %has_type -> (#bits<64>) {
+    %e = #call meta_type_resolve(%host, %base, %len, %t_lo, %t_hi)
+    #yield %e
+  } else {
+    %d = #call meta_intern(%host, 1, 0, 0, 0, 64)
+    #yield %d
+  }
+  %unknown = #eq[#bits<64>](%resolved, 0)
+  #if %unknown {
+    %f0 = #call lain_meta_fail(%host, 5)
+    #return 5
+  }
+
+  // repr 从注册表里读——它是身份的**后果**，不是身份本身
+  %info = #call meta_tid_repr(%host, %resolved)
+  %kind = #and[#bits<64>](%info, 255)
+  %width = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
+
+  // 从类型名之后接着解析；没有标注就从名字之后
+  %resume = #if %has_type -> (#bits<64>) {
+    #yield %t_hi
+  } else {
+    #yield %name_hi
+  }
+  %eq_at = #call bs_skip_space(%base, %resume, %len)
+  %is_eq = #call bs_is_byte(%base, %eq_at, 61)
+  %status = #if %is_eq -> (#bits<32>) {
+    %after_eq = #add[#bits<64>](%eq_at, 1)
+    %lhs_lo = #call bs_skip_space(%base, %after_eq, %len)
+    %lhs_hi = #call bs_skip_ident(%base, %lhs_lo, %len)
+    %has_lhs = #ult[#bits<64>](%lhs_lo, %lhs_hi)
+    %inner = #if %has_lhs -> (#bits<32>) {
+      %s = #call meta_emit_value(%host, %base, %len, %name_lo, %name_hi, %kind,
+                                 %width, %t_lo, %t_hi, %lhs_lo, %lhs_hi)
+      #yield %s
+    } else {
+      %f = #call lain_meta_fail(%host, 3)
+      #yield 3
+    }
+    #yield %inner
+  } else {
+    %f = #call lain_meta_fail(%host, 4)
+    #yield 4
+  }
+  #return %status
+}
+
+// 右值：一个整数，或者 `整数 OP 整数`。
+// 后者拿符号去**类型的 op 表**里查该发哪条物理算子——Meta 不知道
+// "div" 对有符号和无符号是不同的。
+#proc meta_emit_value(%host: #addr, %base: #addr, %len: #bits<64>,
+                      %name_lo: #bits<64>, %name_hi: #bits<64>,
+                      %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
+                      %t_hi: #bits<64>, %lhs_lo: #bits<64>,
+                      %lhs_hi: #bits<64>) -> #bits<32> {
+  // 数字打头 → 数值路径；字母打头 → `Rec { ... }` 构造或 `Rec.field(v)` 取字段。
+  %first = #call bs_byte_at(%base, %lhs_lo, %len)
+  %is_num = #call bs_is_digit(%first)
+  %status = #if %is_num -> (#bits<32>) {
+    %s = #call meta_emit_numeric(%host, %base, %len, %name_lo, %name_hi, %kind,
+                                 %width, %t_lo, %t_hi, %lhs_lo, %lhs_hi)
+    #yield %s
+  } else {
+    %rec_hi = #call bs_skip_ident(%base, %lhs_lo, %len)
+    %after = #call bs_skip_space(%base, %rec_hi, %len)
+    %b = #call bs_byte_at(%base, %after, %len)
+    %is_brace = #eq[#bits<8>](%b, 123)
+    %is_dot = #eq[#bits<8>](%b, 46)
+    %is_paren = #eq[#bits<8>](%b, 40)
+    %s2 = #if %is_brace -> (#bits<32>) {
+      // 构造：这个类型的正文从哪开始，**问符号表**，不回源码里找
+      %tb = #call meta_scope_body(%host, %base, %lhs_lo, %rec_hi, 4)
+      %r1 = #call meta_lower_construct(%host, %base, %len, %name_lo, %name_hi,
+                                       %tb, %after)
+      #yield %r1
+    } else {
+      %s3 = #if %is_dot -> (#bits<32>) {
+        %dot = #add[#bits<64>](%after, 1)
+        %m_lo = #call bs_skip_space(%base, %dot, %len)
+        %m_hi = #call bs_skip_ident(%base, %m_lo, %len)
+        // `A.b` 里的 `A` 可能是三种东西，形状完全不同：
+        //   import 绑定 → 跨模块取值（mangle 成扁平名 + #call）
+        //   enum        → 变体构造／投影
+        //   其余        → struct 字段访问
+        %ns_at = #call meta_find_import_binding(%host, %base, %len, %lhs_lo, %rec_hi)
+        %is_ns = #ne[#bits<64>](%ns_at, 0)
+        %is_sum = #call meta_is_enum(%host, %base, %len, %lhs_lo, %rec_hi)
+        // struct 字段访问要的正文起点，也问符号表
+        %tb2 = #call meta_scope_body(%host, %base, %lhs_lo, %rec_hi, 4)
+        %r2 = #if %is_ns -> (#bits<32>) {
+          %r7 = #call meta_lower_ns_value(%host, %base, %len, %name_lo,
+                                          %name_hi, %lhs_lo, %rec_hi, %m_lo,
+                                          %m_hi, %kind, %width)
+          #yield %r7
+        } else {
+          %r3 = #if %is_sum -> (#bits<32>) {
+            %r5 = #call meta_lower_sum_access(%host, %base, %len, %name_lo,
+                                              %name_hi, %lhs_lo, %rec_hi, %dot)
+            #yield %r5
+          } else {
+            %r6 = #call meta_lower_field_access(%host, %base, %len, %name_lo,
+                                                %name_hi, %tb2, %dot)
+            #yield %r6
+          }
+          #yield %r3
+        }
+        #yield %r2
+      } else {
+        %s4 = #if %is_paren -> (#bits<32>) {
+          %r4 = #call meta_emit_call(%host, %base, %len, %name_lo, %name_hi,
+                                     %kind, %width, %lhs_lo, %rec_hi, %after)
+          #yield %r4
+        } else {
+          %f = #call lain_meta_fail(%host, 4)
+          #yield 4
+        }
+        #yield %s4
+      }
+      #yield %s3
+    }
+    #yield %s2
+  }
+  #return %status
+}
+
+// 这段字节**全是**十进制数字吗？`0x10` 不是：`bs_read_uint` 在 `x` 停下，
+// 只读出 `0`，剩下的悄悄丢掉。
+#proc meta_all_digits(%base: #addr, %lo: #bits<64>, %hi: #bits<64>,
+                       %len: #bits<64>) -> #bits<1> {
+  %r = #loop s(%i: #bits<64> = %lo) -> (#bits<1>) {
+    %more = #ult[#bits<64>](%i, %hi)
+    #if %more {
+      %b = #call bs_byte_at(%base, %i, %len)
+      %ok = #call bs_is_digit(%b)
+      #if %ok {
+        %n = #add[#bits<64>](%i, 1)
+        #continue s(%n)
+      }
+      #break s(0)
+    } else {
+      #break s(1)
+    }
+  }
+  #return %r
+}
+
+// 从 at 起跳过空白之后是不是 `;`？
+#proc meta_at_semi(%base: #addr, %at: #bits<64>, %len: #bits<64>) -> #bits<1> {
+  %p = #call bs_skip_space(%base, %at, %len)
+  // 用 `bs_byte_at`（越界给 0）而不是 `bs_is_byte`：源码没有以 `;` 收尾时
+  // `bs_skip_space` 会返回 `len`，而 `bs_is_byte` 在 `len` 处是**越界读**——
+  // 那会被 VM 以 trap 1004 拒掉。响是响了，但那是崩溃，不是诊断。
+  %b = #call bs_byte_at(%base, %p, %len)
+  %r = #eq[#bits<8>](%b, 59)
+  #return %r
+}
+
+// 数值右值：一个整数，或 `整数 OP 整数`。
+//
+// **两条尾巴检查**，都是给"静默给错值"堵口：
+//
+//   1. 数字必须**全是数字** —— 否则 `0x10` 被 `bs_read_uint` 读成 `0`，
+//      剩下的 `x10` 丢掉；
+//   2. 值之后跳过空白必须**紧跟 `;`** —— 否则 `1 + 2 + 3` 会只发 `#add(1,2)`，
+//      把 `+ 3` 丢掉，算出一个**错的但是合法的**结果。
+//
+// 少了这两条，写错的东西会被当成对的算出来。这正是文档里禁止的失败方式：
+// 失败要响，不能静默给错值。
+#proc meta_emit_numeric(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %name_lo: #bits<64>, %name_hi: #bits<64>,
+                       %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
+                       %t_hi: #bits<64>, %lhs_lo: #bits<64>,
+                       %lhs_hi: #bits<64>) -> #bits<32> {
+  %op_at = #call bs_skip_space(%base, %lhs_hi, %len)
+  %op_byte = #call bs_byte_at(%base, %op_at, %len)
+  %is_op = #call bs_is_operator(%op_byte)
+  %status = #if %is_op -> (#bits<32>) {
+    %sym_at = #add[#bits<64>](%op_at, 1)
+    %rhs_lo = #call bs_skip_space(%base, %sym_at, %len)
+    %rhs_hi = #call bs_skip_ident(%base, %rhs_lo, %len)
+    %has_rhs = #ult[#bits<64>](%rhs_lo, %rhs_hi)
+    %inner = #if %has_rhs -> (#bits<32>) {
+      %rhs_digits = #call meta_all_digits(%base, %rhs_lo, %rhs_hi, %len)
+      %rhs_semi = #call meta_at_semi(%base, %rhs_hi, %len)
+      %rhs_ok = #and[#bits<1>](%rhs_digits, %rhs_semi)
+      %rhs_bad = #eq[#bits<1>](%rhs_ok, 0)
+      #if %rhs_bad {
+        %ft = #call lain_meta_fail(%host, 4)
+        #return 4
+      }
+      // 符号去**类型的 op 表**里查该发哪条物理算子。表里的 `"/"` 对 i32 是
+      // sdiv、对 u32 是 udiv——Meta 里没有一行写着「如果是 i32」。
+      %sym = #lea(%base, %op_at, 1, 0)
+      %op_at2 = #call meta_op_resolve(%host, %base, %len, %t_lo, %t_hi, %sym, 1)
+      %op_miss = #eq[#bits<64>](%op_at2, 0xFFFFFFFFFFFFFFFF)
+      %r = #if %op_miss -> (#bits<32>) {
+        %f = #call lain_meta_fail(%host, 6)
+        #yield 6
+      } else {
+        %s = #call meta_emit_binary(%host, %base, %len, %name_lo, %name_hi,
+                                    %kind, %width, %lhs_lo, %rhs_lo)
+        #yield %s
+      }
+      #yield %r
+    } else {
+      %f = #call lain_meta_fail(%host, 3)
+      #yield 3
+    }
+    #yield %inner
+  } else {
+    %lhs_digits = #call meta_all_digits(%base, %lhs_lo, %lhs_hi, %len)
+    %lhs_semi = #call meta_at_semi(%base, %lhs_hi, %len)
+    %lhs_ok = #and[#bits<1>](%lhs_digits, %lhs_semi)
+    %lhs_bad = #eq[#bits<1>](%lhs_ok, 0)
+    #if %lhs_bad {
+      %ft2 = #call lain_meta_fail(%host, 4)
+      #return 4
+    }
+    %s = #call meta_emit_let(%host, %base, %len, %name_lo, %name_hi, %kind,
+                             %width, %lhs_lo)
+    #yield %s
+  }
+  #return %status
+}
+
+// `let a = f(3, 4);` —— 直接把已声明过程的结果当成这条绑定的值。
+//
+// 实参**原样搬运**：从 `(` 后面到第一个 `)` 之间的字节照抄进 `#call`。这对字面量
+// 是对的；换成别的东西（比如一个名字）会产出 `#call f(someName)`，被验证器拒
+// （未定义的值）——响的，不是静默给错值。真正的做法是把实参当表达式降级，等有
+// 局部变量和表达式 lowering 再说。
+#proc meta_emit_call(%host: #addr, %base: #addr, %len: #bits<64>,
+                     %name_lo: #bits<64>, %name_hi: #bits<64>,
+                     %kind: #bits<64>, %width: #bits<64>,
+                     %callee_lo: #bits<64>, %callee_hi: #bits<64>,
+                     %at: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %name_at = #lea(%base, %name_lo, 1, 0)
+  %name_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %w2 = #call lain_meta_emit_write(%host, %name_at, %name_len)
+  %p2a = #data_addr meta_p2a
+  %w3 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w4 = #call meta_emit_repr(%host, %kind, %width)
+  %x1 = #data_addr meta_x1
+  %w5 = #call lain_meta_emit_write(%host, %x1, 19)
+  %callee_at = #lea(%base, %callee_lo, 1, 0)
+  %callee_len = #sub[#bits<64>](%callee_hi, %callee_lo)
+  %w6 = #call lain_meta_emit_write(%host, %callee_at, %callee_len)
+  %lp = #data_addr meta_fn_lparen
+  %w7 = #call lain_meta_emit_write(%host, %lp, 1)
+  // 实参：`(` 后面到第一个 `)`（实参里没有嵌套调用时成立）
+  %a_lo = #add[#bits<64>](%at, 1)
+  %a_hi = #loop scan(%i: #bits<64> = %a_lo) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %is = #call bs_is_byte(%base, %i, 41)
+      #if %is {
+        #break scan(%i)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    } else {
+      #break scan(%i)
+    }
+  }
+  %a_at = #lea(%base, %a_lo, 1, 0)
+  %a_len = #sub[#bits<64>](%a_hi, %a_lo)
+  %w8 = #call lain_meta_emit_write(%host, %a_at, %a_len)
+  %rp = #data_addr meta_call_rparen
+  %w9 = #call lain_meta_emit_write(%host, %rp, 4)
+  #return 0
+}
+
+// 把这条绑定写成 LAINIR。
+#proc meta_emit_let(%host: #addr, %base: #addr, %len: #bits<64>,
+                    %name_lo: #bits<64>, %name_hi: #bits<64>,
+                    %kind: #bits<64>, %width: #bits<64>,
+                    %num_lo: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %name_at = #lea(%base, %name_lo, 1, 0)
+  %name_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %w2 = #call lain_meta_emit_write(%host, %name_at, %name_len)
+  %p2a = #data_addr meta_p2a
+  %w3 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w4 = #call meta_emit_repr(%host, %kind, %width)
+  %p2b = #data_addr meta_p2b
+  %w5 = #call lain_meta_emit_write(%host, %p2b, 13)
+  %value = #call bs_read_uint(%base, %num_lo, %len)
+  %w6 = #call meta_emit_uint(%host, %value)
+  %p3 = #data_addr meta_p3
+  %w7 = #call lain_meta_emit_write(%host, %p3, 3)
+  #return 0
+}
+
+// 带算子的一条：`%r = #<物理算子>[<repr>](lhs, rhs)`。
+// 物理算子名是从类型的 op 表里读出来的，不是这里选的。
+#proc meta_emit_binary(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %name_lo: #bits<64>, %name_hi: #bits<64>,
+                       %kind: #bits<64>, %width: #bits<64>,
+                       %lhs_lo: #bits<64>,
+                       %rhs_lo: #bits<64>) -> #bits<32> {
+  %p1 = #data_addr meta_p1
+  %w1 = #call lain_meta_emit_write(%host, %p1, 6)
+  %name_at = #lea(%base, %name_lo, 1, 0)
+  %name_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %w2 = #call lain_meta_emit_write(%host, %name_at, %name_len)
+  %p2a = #data_addr meta_p2a
+  %w3 = #call lain_meta_emit_write(%host, %p2a, 6)
+  %w4 = #call meta_emit_repr(%host, %kind, %width)
+  %o1 = #data_addr meta_o1
+  %w5 = #call lain_meta_emit_write(%host, %o1, 11)
+  // 物理算子名是 meta_op_resolve 从类型的声明里查出来、写进暂存区的
+  %scratch = #call lain_meta_scratch_data(%host)
+  %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
+  %phys_pos = #call meta_cell_get(#lea(%scratch, 24, 1, 0))
+  %phys_len = #call meta_cell_get(#lea(%scratch, 32, 1, 0))
+  %m_base = #call lain_meta_source_data(%host, %idx)
+  %phys = #lea(%m_base, %phys_pos, 1, 0)
+  %w6 = #call lain_meta_emit_write(%host, %phys, %phys_len)
+  %o2 = #data_addr meta_o2
+  %w7 = #call lain_meta_emit_write(%host, %o2, 1)
+  %w8 = #call meta_emit_repr(%host, %kind, %width)
+  %o3 = #data_addr meta_o3
+  %w9 = #call lain_meta_emit_write(%host, %o3, 2)
+  %lhs = #call bs_read_uint(%base, %lhs_lo, %len)
+  %w10 = #call meta_emit_uint(%host, %lhs)
+  %o4 = #data_addr meta_o4
+  %w11 = #call lain_meta_emit_write(%host, %o4, 2)
+  %rhs = #call bs_read_uint(%base, %rhs_lo, %len)
+  %w12 = #call meta_emit_uint(%host, %rhs)
+  %o5 = #data_addr meta_o5
+  %w13 = #call lain_meta_emit_write(%host, %o5, 15)
+  %o6 = #data_addr meta_o6
+  %w14 = #call lain_meta_emit_write(%host, %o6, 2)
+  #return 0
+}

@@ -1,0 +1,243 @@
+// 初代标准库 v0 —— 字节与词法。
+//
+// 这是**手写 LAINIR**：还没有 Lain 编译器，所以 Meta 只能用物理 IR 直接写。
+// 这一层存在的唯一理由就是打破鸡生蛋（v0 的语言只有 `let NAME = INT;`）。
+//
+// 书写约定（新方言，和归档里的旧塔不同）：
+//   - 没有 #let：绑定就是 `%x = #op[...](...)`，单赋值。
+//   - 算子的类型实参**必须写**（缺了验证器报 2008）。
+//   - 循环的携带状态写在循环头部的参数表里，#continue 传新值。
+//   - #break / #continue 带括号；#yield / #return 不带。
+
+// 十进制数字？
+#proc bs_is_digit(%b: #bits<8>) -> #bits<1> {
+  %lo = #uge[#bits<8>](%b, 48)
+  %hi = #ule[#bits<8>](%b, 57)
+  %r = #and[#bits<1>](%lo, %hi)
+  #return %r
+}
+
+// 标识符字符（字母、数字、下划线）？
+#proc bs_is_ident(%b: #bits<8>) -> #bits<1> {
+  %digit = #call bs_is_digit(%b)
+  %llo = #uge[#bits<8>](%b, 97)
+  %lhi = #ule[#bits<8>](%b, 122)
+  %lower = #and[#bits<1>](%llo, %lhi)
+  %ulo = #uge[#bits<8>](%b, 65)
+  %uhi = #ule[#bits<8>](%b, 90)
+  %upper = #and[#bits<1>](%ulo, %uhi)
+  %us = #eq[#bits<8>](%b, 95)
+  %t1 = #or[#bits<1>](%lower, %upper)
+  %t2 = #or[#bits<1>](%t1, %us)
+  %r = #or[#bits<1>](%t2, %digit)
+  #return %r
+}
+
+// 跳到本行末尾之后（`#` 到换行为止是注释）。到头返回 len。
+#proc bs_skip_line(%base: #addr, %from: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %end = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %is_nl = #eq[#bits<8>](%b, 10)
+      #if %is_nl {
+        %n = #add[#bits<64>](%i, 1)
+        #break scan(%n)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    } else {
+      #break scan(%i)
+    }
+  }
+  #return %end
+}
+
+// `let` 三个字母，单独放一份当关键字用。
+data meta_kw_let ro { 108 101 116 }                     // "let"  3
+data meta_kw_eq ro { 61 }                              // "="    1
+data meta_kw_colon ro { 58 }                           // ":"    1
+data meta_kw_func ro { 102 117 110 99 }                // "func" 4
+data meta_kw_return ro { 114 101 116 117 114 110 }     // "return" 6
+data meta_kw_semi ro { 59 }                            // ";"    1
+data meta_kw_arrow ro { 45 62 }                        // "->"   2
+// for 循环的形状词：`for I in LO .. HI acc = INIT { ... }`。`acc` 这个名字是
+// 语言定的，所以它也是一份关键字数据，而不是「用户在源码里起的名字」。
+data meta_kw_for ro { 102 111 114 }                    // "for"  3
+data meta_kw_in ro { 105 110 }                         // "in"   2
+data meta_kw_acc ro { 97 99 99 }                       // "acc"  3
+
+// 跳过空白（空格、换行、制表、回车：字节 <= 32）**和注释**（`#` 到本行末尾），
+// 返回第一个有效字节的下标；走到头就返回 len。
+//
+// 注释是必须的，不是装饰：没有它，一份源码里出现的 `scalar` 字样（比如注释里
+// 提到的）会**被当成声明扫进来**。prelude 自己的注释就撞过这个——两条名字长度
+// 为 0 的假声明，直接报重名。
+#proc bs_skip_space(%base: #addr, %start: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %end = #loop scan(%i: #bits<64> = %start) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %is_sp = #ule[#bits<8>](%b, 32)
+      #if %is_sp {
+        %n = #add[#bits<64>](%i, 1)
+        #continue scan(%n)
+      }
+      %is_hash = #eq[#bits<8>](%b, 35)
+      #if %is_hash {
+        %n2 = #call bs_skip_line(%base, %i, %len)
+        #continue scan(%n2)
+      }
+      #break scan(%i)
+    } else {
+      #break scan(%i)
+    }
+  }
+  #return %end
+}
+
+// 读一个标识符，返回它的结束下标（一个字符都没读到就返回 start）。
+#proc bs_skip_ident(%base: #addr, %start: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %end = #loop scan(%i: #bits<64> = %start) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %is_id = #call bs_is_ident(%b)
+      #if %is_id {
+        %n = #add[#bits<64>](%i, 1)
+        #continue scan(%n)
+      } else {
+        #break scan(%i)
+      }
+    } else {
+      #break scan(%i)
+    }
+  }
+  #return %end
+}
+
+// 从 start 起读一个十进制无符号整数；遇到第一个非数字就停。
+#proc bs_read_uint(%base: #addr, %start: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %value = #loop scan(%i: #bits<64> = %start, %v: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %is_d = #call bs_is_digit(%b)
+      #if %is_d {
+        %w = #zext[#bits<64>](%b)
+        %d = #sub[#bits<64>](%w, 48)
+        %v10 = #mul[#bits<64>](%v, 10)
+        %v2 = #add[#bits<64>](%v10, %d)
+        %n = #add[#bits<64>](%i, 1)
+        #continue scan(%n, %v2)
+      } else {
+        #break scan(%v)
+      }
+    } else {
+      #break scan(%v)
+    }
+  }
+  #return %value
+}
+
+// 读一个限定名 `a.b.c`，返回结束下标。类型名可能是命名空间成员（`T.i32`），
+// 而 `bs_skip_ident` 遇到 `.` 就停。
+#proc bs_skip_qualified(%base: #addr, %start: #bits<64>,
+                        %len: #bits<64>) -> #bits<64> {
+  %end = #loop scan(%at: #bits<64> = %start) -> (#bits<64>) {
+    %hi = #call bs_skip_ident(%base, %at, %len)
+    %dot = #call bs_skip_space(%base, %hi, %len)
+    %is_dot = #call bs_is_byte(%base, %dot, 46)
+    #if %is_dot {
+      %one = #add[#bits<64>](%dot, 1)
+      #continue scan(%one)
+    }
+    #break scan(%hi)
+  }
+  #return %end
+}
+
+// 下标 i 处的三个字节是不是 "let"？——**已经没人用了**。
+//
+// 它是「逐字节找关键字」时代的零件：`bs_next_form` 靠它扫出下一条顶层形式。
+// 形式发现改成走语法树之后，`bs_next_form` 和它一起删了。
+// `meta_kw_let` 那份数据还留着——现在由 `meta_node_is_word` 用。
+
+// 下标 i 处的字节是不是 c？
+#proc bs_is_byte(%base: #addr, %i: #bits<64>, %c: #bits<8>) -> #bits<1> {
+  %p = #lea(%base, %i, 1, 0)
+  %b = #load[#bits<8>](%p)
+  %r = #eq[#bits<8>](%b, %c)
+  #return %r
+}
+
+// 读一个字节；越界给 0。省掉每个调用点都写一遍边界判断。
+#proc bs_byte_at(%base: #addr, %at: #bits<64>, %len: #bits<64>) -> #bits<8> {
+  %in = #ult[#bits<64>](%at, %len)
+  %b = #if %in -> (#bits<8>) {
+    %p = #lea(%base, %at, 1, 0)
+    %v = #load[#bits<8>](%p)
+    #yield %v
+  } else {
+    #yield 0
+  }
+  #return %b
+}
+
+// 二元运算符？+ - * / %
+#proc bs_is_operator(%b: #bits<8>) -> #bits<1> {
+  %plus = #eq[#bits<8>](%b, 43)
+  %minus = #eq[#bits<8>](%b, 45)
+  %star = #eq[#bits<8>](%b, 42)
+  %slash = #eq[#bits<8>](%b, 47)
+  %percent = #eq[#bits<8>](%b, 37)
+  %t1 = #or[#bits<1>](%plus, %minus)
+  %t2 = #or[#bits<1>](%star, %slash)
+  %t3 = #or[#bits<1>](%t1, %t2)
+  %r = #or[#bits<1>](%t3, %percent)
+  #return %r
+}
+
+// 下标 at 处的关键字是不是 kw？长度也要对得上，且不能越界。
+#proc bs_match_keyword(%base: #addr, %at: #bits<64>, %len: #bits<64>,
+                      %kw: #addr, %kw_len: #bits<64>) -> #bits<1> {
+  %need = #add[#bits<64>](%at, %kw_len)
+  %fits = #ule[#bits<64>](%need, %len)
+  %r = #if %fits -> (#bits<1>) {
+    %p = #lea(%base, %at, 1, 0)
+    %same = #call meta_bytes_equal(%p, %kw, %kw_len)
+    #yield %same
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+// 把 v 向上取到 a 的倍数。a 为 0 时原样返回。
+#proc bs_align_up(%v: #bits<64>, %a: #bits<64>) -> #bits<64> {
+  %zero = #eq[#bits<64>](%a, 0)
+  %r = #if %zero -> (#bits<64>) {
+    #yield %v
+  } else {
+    %back = #sub[#bits<64>](%a, 1)
+    %sum = #add[#bits<64>](%v, %back)
+    %q = #udiv[#bits<64>](%sum, %a)
+    %aligned = #mul[#bits<64>](%q, %a)
+    #yield %aligned
+  }
+  #return %r
+}
+
+// `bs_next_form`（从某个位置起逐字节找下一条顶层形式）**已经删了**。
+//
+// 它是手写阶段的权宜之计：各降级过程不返回「这条形式到哪结束」，所以靠扫关键字
+// 找下一条。它是这个文件里出过最多事的一个：不看注释（prelude 注释里的 `scalar`
+// 被当成声明，报过重名 16），而且只能靠「关键字后面必须是空白」这个约束勉强躲开
+// `letter` 这类名字。
+//
+// 现在形式发现和分派都走语法树（`std/parse.l1`）：问的是「这个节点是不是内容为
+// `struct` 的词」，一条形式从哪到哪由节点给出。不需要找，也就不需要这个。

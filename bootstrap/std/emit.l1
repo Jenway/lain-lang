@@ -1,0 +1,224 @@
+// 初代标准库 v0 —— 宿主 ABI 与产物输出。
+//
+// 这里声明 Meta 用到的**全部**宿主能力。它们是 link_name，同时是链接符号名，
+// 所以必须是合法 C 标识符（SYMBOL 策略下后端按这个名字发外部符号引用）。
+//
+// 每个能力的第一个参数都是 host 地址：驱动把它作为 #addr 传进 Meta，
+// Meta 原样传回来。宿主 ABI 不带 user_data，所以指针是**显式输入**，
+// 而不是让产物去某个全局里捞。
+
+#proc lain_meta_source_count(%host: #addr) -> #bits<64> #extern "lain_meta_source_count"
+#proc lain_meta_source_data(%host: #addr, %index: #bits<64>) -> #addr #extern "lain_meta_source_data"
+#proc lain_meta_source_length(%host: #addr, %index: #bits<64>) -> #bits<64> #extern "lain_meta_source_length"
+#proc lain_meta_source_path_data(%host: #addr, %index: #bits<64>) -> #addr #extern "lain_meta_source_path_data"
+#proc lain_meta_emit_reset(%host: #addr) -> #bits<32> #extern "lain_meta_emit_reset"
+#proc lain_meta_emit_write(%host: #addr, %data: #addr, %length: #bits<64>) -> #bits<32> #extern "lain_meta_emit_write"
+#proc lain_meta_emit_data(%host: #addr) -> #addr #extern "lain_meta_emit_data"
+#proc lain_meta_emit_length(%host: #addr) -> #bits<64> #extern "lain_meta_emit_length"
+#proc lain_meta_fail(%host: #addr, %code: #bits<32>) -> #bits<32> #extern "lain_meta_fail"
+
+// Meta 的可写暂存（表格建在这里）。驱动负责把这块范围授权成 READ|WRITE。
+#proc lain_meta_scratch_data(%host: #addr) -> #addr #extern "lain_meta_scratch_data"
+#proc lain_meta_scratch_size(%host: #addr) -> #bits<64> #extern "lain_meta_scratch_size"
+
+// 输出模板。产物长这样：
+//   #proc <NAME>() -> <REPR> {
+//     #return <VALUE>
+//   }
+// 三段固定文本 + 从源码原样搬过来的名字 + 类型实参 + 十进制数字。
+data meta_p1 ro { 35 112 114 111 99 32 }
+data meta_p2a ro { 40 41 32 45 62 32 }
+data meta_p2b ro { 32 123 10 32 32 35 114 101 116 117 114 110 32 }
+data meta_p3 ro { 10 125 10 }
+
+// 带算子的形式：
+//   #proc <NAME>() -> <REPR> {
+//     %r = #<PHYS>[<REPR>](<LHS>, <RHS>)
+//     #return %r
+//   }
+data meta_o1 ro { 32 123 10 32 32 37 114 32 61 32 35 }
+data meta_o2 ro { 91 }
+data meta_o3 ro { 93 40 }
+data meta_o4 ro { 44 32 }
+data meta_o5 ro { 41 10 32 32 35 114 101 116 117 114 110 32 37 114 10 }
+data meta_o6 ro { 125 10 }
+
+// 积类型：声明 `struct Rec { f: T ... }` 时，Meta 给每个字段发一个
+// 「它的字节偏移」的过程，再发一个「总大小」的过程。
+// 名字拼成 <Rec>__<field>_offset 和 <Rec>__size。
+data meta_kw_struct ro { 115 116 114 117 99 116 }
+data meta_dsep ro { 95 95 }
+data meta_foff ro { 95 111 102 102 115 101 116 }
+data meta_rsize ro { 95 95 115 105 122 101 }
+
+// 构造与字段访问要发多语句的过程体，模板就多几个。
+// 每行后面的数字是字节数——错一个就产出畸形文本，产物解析会直接失败。
+data meta_c1 ro { 100 97 116 97 32 }                                    // "data "            5
+data meta_c2 ro { 95 115 116 111 114 97 103 101 32 114 119 32 123 32 } // "_storage rw { "  14
+data meta_c3 ro { 48 32 }                                               // "0 "               2
+data meta_c4 ro { 125 10 35 112 114 111 99 32 }                         // "}\n#proc "        8
+data meta_c5 ro { 40 41 32 45 62 32 35 97 100 100 114 32 123 10 }      // "() -> #addr {\n" 14
+data meta_c6 ro { 32 32 37 98 97 115 101 32 61 32 35 100 97 116 97 95 97 100 100 114 32 } // "  %base = #data_addr " 21
+data meta_c7 ro { 95 115 116 111 114 97 103 101 10 }                   // "_storage\n"       9
+data meta_c8 ro { 32 32 35 115 116 111 114 101 91 }                    // "  #store["        9
+data meta_c9 ro { 93 40 }                                               // "]("               2
+data meta_c10 ro { 44 32 35 108 101 97 40 37 98 97 115 101 44 32 48 44 32 48 44 32 } // ", #lea(%base, 0, 0, " 20
+data meta_c11 ro { 41 41 10 }                                           // "))\n"             3
+data meta_c12 ro { 32 32 35 114 101 116 117 114 110 32 37 98 97 115 101 10 125 10 } // "  #return %base\n}\n" 18
+// 字段访问
+data meta_f1 ro { 32 123 10 32 32 37 98 32 61 32 35 99 97 108 108 32 } // " {\n  %b = #call " 16
+data meta_f2 ro { 40 41 10 32 32 37 98 50 32 61 32 35 108 101 97 40 37 98 44 32 48 44 32 48 44 32 } // "()\n  %b2 = #lea(%b, 0, 0, " 26
+data meta_f3 ro { 41 10 32 32 37 118 32 61 32 35 108 111 97 100 91 }   // ")\n  %v = #load["  15
+data meta_f4 ro { 93 40 37 98 50 41 10 32 32 35 114 101 116 117 114 110 32 37 118 10 125 10 } // "](%b2)\n  #return %v\n}\n" 21
+
+// 直接调用一个已声明过程：`let a = f();` → `#return #call f()`。
+// v0 只支持零实参。
+data meta_x1 ro { 32 123 10 32 32 35 114 101 116 117 114 110 32 35 99 97 108 108 32 } // " {\n  #return #call " 19
+data meta_x2 ro { 40 41 10 125 10 }                                                    // "()\n}\n"           5
+
+// 带参数的函数签名：`(`, `) -> `, 参数前的 `%`, 名字和类型之间的 `: `。
+// 函数体的二元运算复用 meta_o1..o6——那边发的是 `%r = #<phys>[repr](lhs, rhs)`。
+data meta_fn_lparen ro { 40 }                          // "("      1
+data meta_fn_rret ro { 41 32 45 62 32 }                // ") -> "  5
+data meta_fn_pct ro { 37 }                             // "%"      1
+data meta_fn_colon ro { 58 32 }                        // ": "     2
+data meta_call_rparen ro { 41 10 125 10 }              // ")\n}\n"  4
+
+// 函数体里的语句。模板和字节数由 build/tmp-probe/gen2.py 生成——手数字节数
+// 在这上面已经错过三次。
+data meta_st_pct ro { 32 32 37 }                       // "  %"      3
+data meta_st_eqop ro { 32 61 32 }                      // " = "      3
+data meta_st_rp ro { 41 10 }                           // ")\n"      2
+data meta_st_ret ro { 32 32 35 114 101 116 117 114 110 32 } // "  #return " 10
+data meta_st_nl ro { 10 }                              // "\n"       1
+data meta_hash ro { 35 }                               // "#"        1
+data meta_rparen ro { 41 }                             // ")"        1
+data meta_char_r ro { 114 }                            // "r"        1
+data meta_sym_plus ro { 43 }                           // "+"        1
+data meta_fn_open ro { 32 123 10 }                     // " {\n"      3
+data meta_st_ind ro { 32 32 }                          // "  "        2
+
+// for 循环。目标形状：
+//   `  %<结果>` + ` = #loop L` + <编号> + `(` + `%<循环变量>: <repr> = <下界>`
+//   + `, %acc: <repr> = <初值>` + `) -> (` + <repr> + `) {\n`
+// 循环体在 4 格缩进里：`%c<n> = ...` / `#if %c<n> {` / `#continue L<n>(...)` /
+// `#break L<n>(%acc)`，最后 `  }\n` 收掉循环。
+//
+// 4 格缩进有两个版本：`meta_st_ind4pct` 自己带 `%`（给 `%c<n>` 用），
+// `meta_st_ind4` 不带（`meta_emit_temp_name` 会自己发那个 `%`）。
+data meta_st_ind4 ro { 32 32 32 32 }                   // "    "      4
+data meta_st_ind4pct ro { 32 32 32 32 37 }             // "    %"     5
+data meta_st_loopopen ro { 32 61 32 35 108 111 111 112 32 76 } // " = #loop L"   10
+data meta_st_rlpar ro { 41 32 45 62 32 40 }            // ") -> ("    6
+data meta_st_lhead ro { 41 32 123 10 }                 // ") {\n"     4
+data meta_st_ind4if ro { 32 32 32 32 35 105 102 32 37 } // "    #if %" 9
+data meta_st_ind4cl ro { 32 32 32 32 125 10 }          // "    }\n"   6
+data meta_st_ind4cont ro { 32 32 32 32 35 99 111 110 116 105 110 117 101 32 76 } // "    #continue L" 15
+data meta_st_ind4brk ro { 32 32 32 32 35 98 114 101 97 107 32 76 }              // "    #break L"    12
+data meta_st_lend ro { 32 32 125 10 }                  // "  }\n"     4
+data meta_char_c ro { 99 }                             // "c"         1
+data meta_sym_lt ro { 60 }                             // "<"         1
+data meta_sym_dotdot ro { 46 46 }                      // ".."        2
+
+// 和类型。tag 是 `#bits<8>`，在偏移 0；载荷区从 max_align 对齐之后开始。
+data meta_kw_enum ro { 101 110 117 109 }                               // "enum"             4
+data meta_etag ro { 95 116 97 103 }                                     // "_tag"             4
+data meta_eoff ro { 95 111 102 102 }                                    // "_off"             4
+
+// 投影 `let v: T = Shape.Circle(c)`：先读 tag 比一比，命中才读载荷，不命中给 0。
+//   #proc <NAME>() -> <REPR> {
+//     %b = #call <值>()
+//     %t = #load[#bits<8>](%b)
+//     %m = #eq[#bits<8>](%t, <TAG>)
+//     %r = #if %m -> (<REPR>) {
+//       %p = #lea(%b, 0, 0, <载荷偏移>)
+//       %v = #load[<REPR>](%p)
+//       #yield %v
+//     } else {
+//       #yield 0
+//     }
+//     #return %r
+//   }
+// 头两段（`#proc `/`() -> `）和 `%b = #call ` 复用积类型那几段。
+data meta_e1 ro { 40 41 10 32 32 37 116 32 61 32 35 108 111 97 100 91 35 98 105 116 115 60 56 62 93 40 37 98 41 10 32 32 37 109 32 61 32 35 101 113 91 35 98 105 116 115 60 56 62 93 40 37 116 44 32 } // "()\n  %t = #load[#bits<8>](%b)\n  %m = #eq[#bits<8>](%t, " 55
+data meta_e2 ro { 41 10 32 32 37 114 32 61 32 35 105 102 32 37 109 32 45 62 32 40 }   // ")\n  %r = #if %m -> ("                    20
+data meta_e3 ro { 41 32 123 10 32 32 32 32 37 112 32 61 32 35 108 101 97 40 37 98 44 32 48 44 32 48 44 32 } // ") {\n    %p = #lea(%b, 0, 0, " 28
+data meta_e4 ro { 41 10 32 32 32 32 37 118 32 61 32 35 108 111 97 100 91 }            // ")\n    %v = #load["                      17
+data meta_e5 ro { 93 40 37 112 41 10 32 32 32 32 35 121 105 101 108 100 32 37 118 10 32 32 125 32 101 108 115 101 32 123 10 32 32 32 32 35 121 105 101 108 100 32 48 10 32 32 125 10 32 32 35 114 101 116 117 114 110 32 37 114 10 125 10 } // "](%p)\n    #yield %v\n  } else {\n    #yield 0\n  }\n  #return %r\n}\n" 63
+// 投影：读 tag → 比 → 命中就读载荷，否则给 0
+data meta_s2 ro { 40 41 10 32 32 37 116 32 61 32 35 108 111 97 100 91 35 98 105 116 115 60 56 62 93 40 37 98 41 10 32 32 37 105 115 32 61 32 35 101 113 91 35 98 105 116 115 60 56 62 93 40 37 116 44 32 } // "()\n  %t = #load[#bits<8>](%b)\n  %is = #eq[#bits<8>](%t, " 56
+data meta_s3a ro { 41 10 32 32 37 114 32 61 32 35 105 102 32 37 105 115 32 45 62 32 40 } // ")\n  %r = #if %is -> ("  21
+data meta_s3b ro { 41 32 123 10 32 32 32 32 37 112 32 61 32 35 108 101 97 40 37 98 44 32 48 44 32 48 44 32 } // ") {\n    %p = #lea(%b, 0, 0, " 28
+data meta_s4a ro { 41 10 32 32 32 32 37 120 32 61 32 35 108 111 97 100 91 } // ")\n    %x = #load["      17
+data meta_s4b ro { 93 40 37 112 41 10 32 32 32 32 35 121 105 101 108 100 32 37 120 10 32 32 125 32 101 108 115 101 32 123 10 32 32 32 32 35 121 105 101 108 100 32 48 10 32 32 125 10 32 32 35 114 101 116 117 114 110 32 37 114 10 125 10 } // "](%p)\n    #yield %x\n  } else {\n    #yield 0\n  }\n  #return %r\n}\n" 63
+
+// 一个字节的暂存：能力只接受 (地址, 长度)，所以单字节要有个落脚点。
+data meta_scratch rw { 0 }
+
+// 类型实参的词素。kind 决定用哪一组。
+data meta_t_bits ro { 35 98 105 116 115 60 }
+data meta_t_f ro { 35 102 60 }
+data meta_t_vec ro { 35 118 101 99 60 }
+data meta_t_addr ro { 35 97 100 100 114 }
+data meta_t_gt ro { 62 }
+
+// 把 repr 写成 LAINIR 的类型实参：0 -> #bits<N>，1 -> #f<N>，
+// 2 -> #vec<N>，3 -> #addr（#addr 没有宽度可言）。
+#proc meta_emit_repr(%host: #addr, %kind: #bits<64>,
+                     %width: #bits<64>) -> #bits<32> {
+  #if #eq[#bits<64>](%kind, 3) {
+    %p = #data_addr meta_t_addr
+    %w = #call lain_meta_emit_write(%host, %p, 5)
+    #return %w
+  }
+  #if #eq[#bits<64>](%kind, 1) {
+    %p = #data_addr meta_t_f
+    %a = #call lain_meta_emit_write(%host, %p, 3)
+    %b = #call meta_emit_uint(%host, %width)
+    %g = #data_addr meta_t_gt
+    %c = #call lain_meta_emit_write(%host, %g, 1)
+    #return %c
+  }
+  #if #eq[#bits<64>](%kind, 2) {
+    %p = #data_addr meta_t_vec
+    %a = #call lain_meta_emit_write(%host, %p, 5)
+    %b = #call meta_emit_uint(%host, %width)
+    %g = #data_addr meta_t_gt
+    %c = #call lain_meta_emit_write(%host, %g, 1)
+    #return %c
+  }
+  %bits = #data_addr meta_t_bits
+  %w1 = #call lain_meta_emit_write(%host, %bits, 6)
+  %w2 = #call meta_emit_uint(%host, %width)
+  %gt = #data_addr meta_t_gt
+  %w3 = #call lain_meta_emit_write(%host, %gt, 1)
+  #return %w3
+}
+
+// 写一个字节出去。
+#proc meta_emit_byte(%host: #addr, %b: #bits<8>) -> #bits<32> {
+  %p = #data_addr meta_scratch
+  #store[#bits<8>](%b, %p)
+  %r = #call lain_meta_emit_write(%host, %p, 1)
+  #return %r
+}
+
+// 写一个十进制无符号整数。高位先出，所以先递归再落位。
+#proc meta_emit_uint(%host: #addr, %v: #bits<64>) -> #bits<32> {
+  %big = #uge[#bits<64>](%v, 10)
+  %status = #if %big -> (#bits<32>) {
+    %q = #udiv[#bits<64>](%v, 10)
+    %skip = #call meta_emit_uint(%host, %q)
+    %rem = #urem[#bits<64>](%v, 10)
+    %ch = #add[#bits<64>](%rem, 48)
+    %b = #trunc[#bits<8>](%ch)
+    %w = #call meta_emit_byte(%host, %b)
+    #yield %w
+  } else {
+    %ch = #add[#bits<64>](%v, 48)
+    %b = #trunc[#bits<8>](%ch)
+    %w = #call meta_emit_byte(%host, %b)
+    #yield %w
+  }
+  #return %status
+}
