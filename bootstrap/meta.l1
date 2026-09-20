@@ -590,10 +590,15 @@
 
 // `let a = f(3, 4);` —— 直接把已声明过程的结果当成这条绑定的值。
 //
-// 实参**原样搬运**：从 `(` 后面到第一个 `)` 之间的字节照抄进 `#call`。这对字面量
-// 是对的；换成别的东西（比如一个名字）会产出 `#call f(someName)`，被验证器拒
-// （未定义的值）——响的，不是静默给错值。真正的做法是把实参当表达式降级，等有
-// 局部变量和表达式 lowering 再说。
+// 实参从**树上**那个组节点的孩子链上取（`meta_emit_args`），不按字节扫。
+//
+// 这里原来是从 `(` 后面一路扫到**第一个** `)` 然后照抄字节。那样有两处坏：
+// `f((1))` 会在里层那个 `)` 上停住，发出 `#call f((1)`（少一个括号，驱动重解析时才
+// 炸）；`f(1 + 2)` 会照抄出 `#call f(1 + 2)` —— **LAINIR 的实参不能是任意表达式**，
+// 只能是操作数或嵌套的 `#call`，所以那条也过不去。
+//
+// 现在实参走 `meta_emit_args`：一个 token 一个实参，数字照发、名字加 `%`，实参里出现
+// 组或算子就报 4。**报出来比发一段坏的强** —— 静默发坏正是这个仓库明文禁止的失败方式。
 #proc meta_emit_call(%host: #addr, %base: #addr, %len: #bits<64>,
                      %name_lo: #bits<64>, %name_hi: #bits<64>,
                      %kind: #bits<64>, %width: #bits<64>,
@@ -614,24 +619,14 @@
   %w6 = #call lain_meta_emit_write(%host, %callee_at, %callee_len)
   %lp = #data_addr meta_fn_lparen
   %w7 = #call lain_meta_emit_write(%host, %lp, 1)
-  // 实参：`(` 后面到第一个 `)`（实参里没有嵌套调用时成立）
-  %a_lo = #add[#bits<64>](%at, 1)
-  %a_hi = #loop scan(%i: #bits<64> = %a_lo) -> (#bits<64>) {
-    %more = #ult[#bits<64>](%i, %len)
-    #if %more {
-      %is = #call bs_is_byte(%base, %i, 41)
-      #if %is {
-        #break scan(%i)
-      }
-      %i2 = #add[#bits<64>](%i, 1)
-      #continue scan(%i2)
-    } else {
-      #break scan(%i)
-    }
+  // 被调用者那个节点的下一个兄弟就是实参那个组
+  %cnode = #call meta_node_at(%host, %base, %callee_lo)
+  %grp = #call meta_node_next(%host, %cnode)
+  %ast = #call meta_emit_args(%host, %base, %len, %grp)
+  %abad = #ne[#bits<32>](%ast, 0)
+  #if %abad {
+    #return %ast
   }
-  %a_at = #lea(%base, %a_lo, 1, 0)
-  %a_len = #sub[#bits<64>](%a_hi, %a_lo)
-  %w8 = #call lain_meta_emit_write(%host, %a_at, %a_len)
   %rp = #data_addr meta_call_rparen
   %w9 = #call lain_meta_emit_write(%host, %rp, 4)
   #return 0
