@@ -493,7 +493,8 @@
       } else {
         %s4 = #if %f_call -> (#bits<32>) {
           %r4 = #call meta_emit_call(%host, %base, %len, %name_lo, %name_hi,
-                                     %kind, %width, %lhs_lo, %rec_hi, %after)
+                                     %kind, %width, %t_lo, %t_hi, %lhs_lo,
+                                     %rec_hi, %after)
           #yield %r4
         } else {
           %f = #call lain_meta_fail(%host, 4)
@@ -601,9 +602,13 @@
 // 组或算子就报 4。**报出来比发一段坏的强** —— 静默发坏正是这个仓库明文禁止的失败方式。
 #proc meta_emit_call(%host: #addr, %base: #addr, %len: #bits<64>,
                      %name_lo: #bits<64>, %name_hi: #bits<64>,
-                     %kind: #bits<64>, %width: #bits<64>,
+                     %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
+                     %t_hi: #bits<64>,
                      %callee_lo: #bits<64>, %callee_hi: #bits<64>,
                      %at: #bits<64>) -> #bits<32> {
+  // 顺序很要紧：`#proc NAME() -> repr {\n` 这个**头**先写，然后才降级实参（实参里的
+  // 子表达式要发指令，那些指令得落在过程体**里面**），最后写 `  #return #call f(实参)`。
+  // 反过来（先降级实参）子指令会跑到 `#proc` 前面去。
   %p1 = #data_addr meta_p1
   %w1 = #call lain_meta_emit_write(%host, %p1, 6)
   %name_at = #lea(%base, %name_lo, 1, 0)
@@ -612,20 +617,29 @@
   %p2a = #data_addr meta_p2a
   %w3 = #call lain_meta_emit_write(%host, %p2a, 6)
   %w4 = #call meta_emit_repr(%host, %kind, %width)
-  %x1 = #data_addr meta_x1
-  %w5 = #call lain_meta_emit_write(%host, %x1, 19)
-  %callee_at = #lea(%base, %callee_lo, 1, 0)
-  %callee_len = #sub[#bits<64>](%callee_hi, %callee_lo)
-  %w6 = #call lain_meta_emit_write(%host, %callee_at, %callee_len)
-  %lp = #data_addr meta_fn_lparen
-  %w7 = #call lain_meta_emit_write(%host, %lp, 1)
-  // 被调用者那个节点的下一个兄弟就是实参那个组
+  %open = #data_addr meta_fn_open
+  %w5 = #call lain_meta_emit_write(%host, %open, 3)
+  // 头写完了，现在降级实参
   %cnode = #call meta_node_at(%host, %base, %callee_lo)
   %grp = #call meta_node_next(%host, %cnode)
-  %ast = #call meta_emit_args(%host, %base, %len, %grp)
+  %ast = #call meta_args_prepare(%host, %base, %len, %kind, %width, %t_lo,
+                                 %t_hi, %grp)
   %abad = #ne[#bits<32>](%ast, 0)
   #if %abad {
     #return %ast
+  }
+  // `  #return #call <callee>(`
+  %x1 = #data_addr meta_st_retcall
+  %w6 = #call lain_meta_emit_write(%host, %x1, 16)
+  %callee_at = #lea(%base, %callee_lo, 1, 0)
+  %callee_len = #sub[#bits<64>](%callee_hi, %callee_lo)
+  %w7 = #call lain_meta_emit_write(%host, %callee_at, %callee_len)
+  %lp = #data_addr meta_fn_lparen
+  %w8 = #call lain_meta_emit_write(%host, %lp, 1)
+  %wst = #call meta_args_write(%host, %base, %len)
+  %wbad = #ne[#bits<32>](%wst, 0)
+  #if %wbad {
+    #return %wst
   }
   %rp = #data_addr meta_call_rparen
   %w9 = #call lain_meta_emit_write(%host, %rp, 4)
@@ -751,7 +765,8 @@
       %c_lo = #call meta_node_start(%host, %node)
       %c_hi = #add[#bits<64>](%c_lo, #call meta_node_len(%host, %node))
       %grp = #call meta_node_next(%host, %node)
-      %st3 = #call meta_emit_call_temp(%host, %base, %len, %c_lo, %c_hi, %grp)
+      %st3 = #call meta_emit_call_temp(%host, %base, %len, %kind, %width,
+                                       %t_lo, %t_hi, %c_lo, %c_hi, %grp)
       #yield %st3
     } else {
       // 一个 token：直接用源码那段。**源码范围也要写进 +176/+184** —— 组的那个分支
@@ -774,8 +789,18 @@
 // 子表达式里的调用要**先算进一个临时值**才能当操作数用 —— `f(1) + 2` 得先有
 // `%r1 = #call f(1)`，才有 `%r2 = #add(%r1, 2)`。
 #proc meta_emit_call_temp(%host: #addr, %base: #addr, %len: #bits<64>,
+                          %kind: #bits<64>, %width: #bits<64>,
+                          %t_lo: #bits<64>, %t_hi: #bits<64>,
                           %callee_lo: #bits<64>, %callee_hi: #bits<64>,
                           %args: #bits<64>) -> #bits<32> {
+  // 先把实参降级好（子表达式的指令现在发），再写这一行 —— 反过来那些指令会插进
+  // `#call f(` 后面。
+  %ast = #call meta_args_prepare(%host, %base, %len, %kind, %width, %t_lo,
+                                 %t_hi, %args)
+  %abad = #ne[#bits<32>](%ast, 0)
+  #if %abad {
+    #return %ast
+  }
   %ind = #data_addr meta_st_ind
   %w1 = #call lain_meta_emit_write(%host, %ind, 2)
   %tn = #call meta_next_temp(%host)
@@ -789,10 +814,10 @@
   %w5 = #call lain_meta_emit_write(%host, %c_at, %c_len)
   %lp = #data_addr meta_fn_lparen
   %w6 = #call lain_meta_emit_write(%host, %lp, 1)
-  %ast = #call meta_emit_args(%host, %base, %len, %args)
-  %abad = #ne[#bits<32>](%ast, 0)
-  #if %abad {
-    #return %ast
+  %wst = #call meta_args_write(%host, %base, %len)
+  %wbad = #ne[#bits<32>](%wst, 0)
+  #if %wbad {
+    #return %wst
   }
   %rp = #data_addr meta_rparen
   %w7 = #call lain_meta_emit_write(%host, %rp, 1)
@@ -870,7 +895,10 @@
     %bb = #call bs_byte_at(%base, %bat, %len)
     %isnone2 = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
     %issemi2 = #eq[#bits<8>](%bb, 59)
-    %anyend = #or[#bits<1>](%isnone2, %issemi2)
+    %iscomma2 = #eq[#bits<8>](%bb, 44)
+    %any1 = #or[#bits<1>](%isnone2, %issemi2)
+    // `,` 也是终点：实参位置上一条表达式到逗号为止（见 `meta_emit_args`）。
+    %anyend = #or[#bits<1>](%any1, %iscomma2)
     %endok = #if %need_semi -> (#bits<1>) {
       #yield %issemi2
     } else {
@@ -881,6 +909,8 @@
       %s1 = #call meta_cell_put(#lea(%sc2, 168, 1, 0), %acc)
       %s2 = #call meta_cell_put(#lea(%sc2, 176, 1, 0), %alo)
       %s3 = #call meta_cell_put(#lea(%sc2, 184, 1, 0), %ahi)
+      // 终点节点也带出去：调用方（实参那个循环）要靠它找下一个实参从哪开始。
+      %s4 = #call meta_cell_put(#lea(%sc2, 192, 1, 0), %c)
       #break e(0)
     }
     %isop = #call bs_is_operator(%bb)
