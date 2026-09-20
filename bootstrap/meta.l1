@@ -502,17 +502,17 @@
   #return %r
 }
 
-// 数值右值：一个整数，或 `整数 OP 整数`。
+// 数值右值：一个整数，或 `整数 OP 整数 [OP 整数 …]`。
 //
-// **两条尾巴检查**，都是给"静默给错值"堵口：
+// 分支点是**值后面第一个非空白字节**：
 //
-//   1. 数字必须**全是数字** —— 否则 `0x10` 被 `bs_read_uint` 读成 `0`，
-//      剩下的 `x10` 丢掉；
-//   2. 值之后跳过空白必须**紧跟 `;`** —— 否则 `1 + 2 + 3` 会只发 `#add(1,2)`，
-//      把 `+ 3` 丢掉，算出一个**错的但是合法的**结果。
+//   - 是算子 → 交给 `meta_emit_chain`，它自己把整条链吃到 `;` 为止；
+//   - 不是算子 → 这段话到这里就该完了，于是要求它后面**紧跟 `;`**。
 //
-// 少了这两条，写错的东西会被当成对的算出来。这正是文档里禁止的失败方式：
-// 失败要响，不能静默给错值。
+// 这些尾巴检查都是给"静默给错值"堵口：`0x10` 会被 `bs_read_uint` 读成 `0`
+// 而把 `x10` 丢掉；`1 + 2 + 3` 曾被只发成 `#add(1,2)` 而把 `+ 3` 丢掉——
+// 后者算出一个**错的但是合法的**结果。缺少检查，写错的东西会被当成对的算出
+// 来。这正是文档里禁止的失败方式：失败要响，不能静默给错值。
 #proc meta_emit_numeric(%host: #addr, %base: #addr, %len: #bits<64>,
                        %name_lo: #bits<64>, %name_hi: #bits<64>,
                        %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
@@ -522,38 +522,11 @@
   %op_byte = #call bs_byte_at(%base, %op_at, %len)
   %is_op = #call bs_is_operator(%op_byte)
   %status = #if %is_op -> (#bits<32>) {
-    %sym_at = #add[#bits<64>](%op_at, 1)
-    %rhs_lo = #call bs_skip_space(%base, %sym_at, %len)
-    %rhs_hi = #call bs_skip_ident(%base, %rhs_lo, %len)
-    %has_rhs = #ult[#bits<64>](%rhs_lo, %rhs_hi)
-    %inner = #if %has_rhs -> (#bits<32>) {
-      %rhs_digits = #call meta_all_digits(%base, %rhs_lo, %rhs_hi, %len)
-      %rhs_semi = #call meta_at_semi(%base, %rhs_hi, %len)
-      %rhs_ok = #and[#bits<1>](%rhs_digits, %rhs_semi)
-      %rhs_bad = #eq[#bits<1>](%rhs_ok, 0)
-      #if %rhs_bad {
-        %ft = #call lain_meta_fail(%host, 4)
-        #return 4
-      }
-      // 符号去**类型的 op 表**里查该发哪条物理算子。表里的 `"/"` 对 i32 是
-      // sdiv、对 u32 是 udiv——Meta 里没有一行写着「如果是 i32」。
-      %sym = #lea(%base, %op_at, 1, 0)
-      %op_at2 = #call meta_op_resolve(%host, %base, %len, %t_lo, %t_hi, %sym, 1)
-      %op_miss = #eq[#bits<64>](%op_at2, 0xFFFFFFFFFFFFFFFF)
-      %r = #if %op_miss -> (#bits<32>) {
-        %f = #call lain_meta_fail(%host, 6)
-        #yield 6
-      } else {
-        %s = #call meta_emit_binary(%host, %base, %len, %name_lo, %name_hi,
-                                    %kind, %width, %lhs_lo, %rhs_lo)
-        #yield %s
-      }
-      #yield %r
-    } else {
-      %f = #call lain_meta_fail(%host, 3)
-      #yield 3
-    }
-    #yield %inner
+    // 有算子 —— 整段交给链式发射器。它自己把这条链一直吃到 `;`，吃到不该
+    // 有的东西就报错；调用方不再替它检查尾巴。
+    %s = #call meta_emit_chain(%host, %base, %len, %name_lo, %name_hi, %kind,
+                               %width, %t_lo, %t_hi, %lhs_lo, %lhs_hi)
+    #yield %s
   } else {
     %lhs_digits = #call meta_all_digits(%base, %lhs_lo, %lhs_hi, %len)
     %lhs_semi = #call meta_at_semi(%base, %lhs_hi, %len)
@@ -641,13 +614,28 @@
   #return 0
 }
 
-// 带算子的一条：`%r = #<物理算子>[<repr>](lhs, rhs)`。
-// 物理算子名是从类型的 op 表里读出来的，不是这里选的。
-#proc meta_emit_binary(%host: #addr, %base: #addr, %len: #bits<64>,
-                       %name_lo: #bits<64>, %name_hi: #bits<64>,
-                       %kind: #bits<64>, %width: #bits<64>,
-                       %lhs_lo: #bits<64>,
-                       %rhs_lo: #bits<64>) -> #bits<32> {
+// `let NAME: T = A OP B [OP C …];` —— 左结合链，每个算子发一条指令。
+//
+// 这是"值识别"的第一步，要点是**它负责把整段吃完**。每读到一个算子就核对右
+// 操作数（必须存在、必须全是数字），读到不是算子的地方才停，然后要求那里
+// **正好是 `;`**。"整块吃完了没有"于是成了这一步的结构属性，不再靠调用方记得
+// 检查——旧版正是靠调用方检查，才漏出过 `1 + 2 + 3` 只发 `#add(1,2)`。
+//
+// 一条 `1 + 2 + 3` 发成：
+//
+//     %r1 = #add[#bits<32>](1, 2)
+//     %r2 = #add[#bits<32>](%r1, 3)
+//
+// 中转值编号在 `meta_next_temp` 里，`%cur == 0` 表示"还没有中转值"——此时左
+// 操作数直接来自源码的 `%first_lo`。物理算子名依旧是 `meta_op_resolve` 从
+// **类型的 op 表**里查出来的（`"/"` 对 i32 是 sdiv、对 u32 是 udiv），这里没有
+// 一行写着「如果是 i32」。查不到就是 6，不是换一个算子硬发。
+#proc meta_emit_chain(%host: #addr, %base: #addr, %len: #bits<64>,
+                      %name_lo: #bits<64>, %name_hi: #bits<64>,
+                      %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
+                      %t_hi: #bits<64>, %first_lo: #bits<64>,
+                      %first_hi: #bits<64>) -> #bits<32> {
+  // `#proc NAME() -> <repr> {\n`
   %p1 = #data_addr meta_p1
   %w1 = #call lain_meta_emit_write(%host, %p1, 6)
   %name_at = #lea(%base, %name_lo, 1, 0)
@@ -656,30 +644,84 @@
   %p2a = #data_addr meta_p2a
   %w3 = #call lain_meta_emit_write(%host, %p2a, 6)
   %w4 = #call meta_emit_repr(%host, %kind, %width)
-  %o1 = #data_addr meta_o1
-  %w5 = #call lain_meta_emit_write(%host, %o1, 11)
-  // 物理算子名是 meta_op_resolve 从类型的声明里查出来、写进暂存区的
-  %scratch = #call lain_meta_scratch_data(%host)
-  %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
-  %phys_pos = #call meta_cell_get(#lea(%scratch, 24, 1, 0))
-  %phys_len = #call meta_cell_get(#lea(%scratch, 32, 1, 0))
-  %m_base = #call lain_meta_source_data(%host, %idx)
-  %phys = #lea(%m_base, %phys_pos, 1, 0)
-  %w6 = #call lain_meta_emit_write(%host, %phys, %phys_len)
-  %o2 = #data_addr meta_o2
-  %w7 = #call lain_meta_emit_write(%host, %o2, 1)
-  %w8 = #call meta_emit_repr(%host, %kind, %width)
-  %o3 = #data_addr meta_o3
-  %w9 = #call lain_meta_emit_write(%host, %o3, 2)
-  %lhs = #call bs_read_uint(%base, %lhs_lo, %len)
-  %w10 = #call meta_emit_uint(%host, %lhs)
-  %o4 = #data_addr meta_o4
-  %w11 = #call lain_meta_emit_write(%host, %o4, 2)
-  %rhs = #call bs_read_uint(%base, %rhs_lo, %len)
-  %w12 = #call meta_emit_uint(%host, %rhs)
-  %o5 = #data_addr meta_o5
-  %w13 = #call lain_meta_emit_write(%host, %o5, 15)
-  %o6 = #data_addr meta_o6
-  %w14 = #call lain_meta_emit_write(%host, %o6, 2)
-  #return 0
+  %open = #data_addr meta_fn_open
+  %w5 = #call lain_meta_emit_write(%host, %open, 3)
+
+  %done = #loop ops(%cur: #bits<64> = 0, %end: #bits<64> = %first_hi) -> (#bits<32>) {
+    %at = #call bs_skip_space(%base, %end, %len)
+    %b = #call bs_byte_at(%base, %at, %len)
+    %is_op = #call bs_is_operator(%b)
+    #if %is_op {
+      %sym_at = #add[#bits<64>](%at, 1)
+      %rhs_lo = #call bs_skip_space(%base, %sym_at, %len)
+      %rhs_hi = #call bs_skip_ident(%base, %rhs_lo, %len)
+      %has_rhs = #ult[#bits<64>](%rhs_lo, %rhs_hi)
+      // 右操作数必须存在，且**全是数字**。哨兵用 `-1` 区分这两件事：
+      // 缺操作数是 3（源码没写完），不是数字是 4（写了但不是这里该有的东西）。
+      %rhs = #if %has_rhs -> (#bits<64>) {
+        %digits = #call meta_all_digits(%base, %rhs_lo, %rhs_hi, %len)
+        %not_num = #eq[#bits<1>](%digits, 0)
+        #if %not_num {
+          %f4 = #call lain_meta_fail(%host, 4)
+          #return 4
+        }
+        #yield %rhs_hi
+      } else {
+        %f3 = #call lain_meta_fail(%host, 3)
+        #yield 0xFFFFFFFFFFFFFFFF
+      }
+      %no_rhs = #eq[#bits<64>](%rhs, 0xFFFFFFFFFFFFFFFF)
+      #if %no_rhs {
+        #return 3
+      }
+      // 符号去类型的 op 表里查该发哪条物理算子。
+      %sym = #lea(%base, %at, 1, 0)
+      %phys = #call meta_op_resolve(%host, %base, %len, %t_lo, %t_hi, %sym, 1)
+      %miss = #eq[#bits<64>](%phys, 0xFFFFFFFFFFFFFFFF)
+      #if %miss {
+        %f6 = #call lain_meta_fail(%host, 6)
+        #return 6
+      }
+      // `  %r<n> = #<物理>[<repr>](<左>, <右>)\n`
+      %tn = #call meta_next_temp(%host)
+      %ind = #data_addr meta_st_ind
+      %x1 = #call lain_meta_emit_write(%host, %ind, 2)
+      %x2 = #call meta_emit_temp_name(%host, %tn)
+      %eqop = #data_addr meta_st_eqop
+      %x3 = #call lain_meta_emit_write(%host, %eqop, 3)
+      %x4 = #call meta_emit_op_mid(%host, %kind, %width)
+      %from_src = #eq[#bits<64>](%cur, 0)
+      %left = #if %from_src -> (#bits<32>) {
+        %l1 = #call meta_emit_operand(%host, %base, %first_lo, %first_hi, %len)
+        #yield %l1
+      } else {
+        %l2 = #call meta_emit_temp_name(%host, %cur)
+        #yield %l2
+      }
+      %comma = #data_addr meta_o4
+      %x5 = #call lain_meta_emit_write(%host, %comma, 2)
+      %x6 = #call meta_emit_operand(%host, %base, %rhs_lo, %rhs_hi, %len)
+      %rp = #data_addr meta_rparen
+      %x7 = #call lain_meta_emit_write(%host, %rp, 1)
+      %nl = #data_addr meta_st_nl
+      %x8 = #call lain_meta_emit_write(%host, %nl, 1)
+      #continue ops(%tn, %rhs)
+    }
+    // 不再是算子 —— 链到此结束，这里必须**正好是 `;`**，否则后面还有没有
+    // 吃进去的东西（`1 + 2 3` 之类），不能当没看见。
+    %semi = #call meta_at_semi(%base, %end, %len)
+    %no_semi = #eq[#bits<1>](%semi, 0)
+    #if %no_semi {
+      %f5 = #call lain_meta_fail(%host, 4)
+      #return 4
+    }
+    // `  #return %r<n>\n}\n`
+    %ret = #data_addr meta_st_ret
+    %z1 = #call lain_meta_emit_write(%host, %ret, 10)
+    %z2 = #call meta_emit_temp_name(%host, %cur)
+    %close = #data_addr meta_o6
+    %z3 = #call lain_meta_emit_write(%host, %close, 2)
+    #break ops(0)
+  }
+  #return %done
 }
