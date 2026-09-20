@@ -1,0 +1,223 @@
+// First physical lowering slice for a meta-defined numeric record.
+// The source parser and record semantics remain in raw_ast.l1/meta.l1; this
+// module only consumes the descriptor and writes ordinary LAIN-IR text.
+
+#extern #proc bootstrap.source-count() -> #bits<64>;
+#extern #proc bootstrap.source-data(#bits<64> %index) -> #addr;
+#extern #proc bootstrap.source-length(#bits<64> %index) -> #bits<64>;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(#bits<8> %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(#addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+#extern #proc bootstrap.release-pages(#addr %memory) -> #unit;
+
+#extern #proc tool_source_new(#addr %data, #bits<64> %length) -> #addr;
+#extern #proc tool_source_data(#addr %source) -> #addr;
+#extern #proc tool_byte_at(#addr %data, #bits<64> %index) -> #bits<8>;
+#extern #proc tool_lex_all(#addr %source) -> #addr;
+#extern #proc raw_parse(#addr %source, #addr %tokens) -> #addr;
+#extern #proc meta_record_build(#addr %source, #addr %root) -> #addr;
+#extern #proc meta_write_decimal(#bits<64> %value) -> #unit;
+#extern #proc raw_is_nil(#addr %node) -> #bits<1>;
+#extern #proc raw_node_next(#addr %node) -> #addr;
+
+#proc lower_type_matches(
+  #addr %source, #addr %field, #addr %text, #bits<64> %length
+) -> #bits<1> {
+  #if #ne(#load[#bits<64>](#lea(base=%field, idx=0, scale=0, offset=24)), %length) {
+    #return 0
+  }
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %type_start: #bits<64> = #load[#bits<64>](#lea(base=%field, idx=0, scale=0, offset=16))
+  #let %index: #bits<64> = 0
+  #loop compare {
+    #if #sge(%index, %length) { #break compare }
+    #if #ne(
+      #call tool_byte_at(%data, #add(%type_start, %index)),
+      #call tool_byte_at(%text, %index)
+    ) { #return 0 }
+    %index: #bits<64> = #add(%index, 1)
+    #continue compare
+  }
+  #return 1
+}
+
+#proc lower_field_width(#addr %source, #addr %field) -> #bits<64> {
+  #if #call lower_type_matches(%source, %field, "bool", 4) { #return 1 }
+  #if #call lower_type_matches(%source, %field, "#bits<8>", 2) { #return 8 }
+  #if #call lower_type_matches(%source, %field, "#bits<16>", 3) { #return 16 }
+  #if #call lower_type_matches(%source, %field, "#bits<32>", 3) { #return 32 }
+  #if #call lower_type_matches(%source, %field, "#bits<64>", 3) { #return 64 }
+  #if #call lower_type_matches(%source, %field, "u8", 2) { #return 8 }
+  #if #call lower_type_matches(%source, %field, "u16", 3) { #return 16 }
+  #if #call lower_type_matches(%source, %field, "u32", 3) { #return 32 }
+  #if #call lower_type_matches(%source, %field, "u64", 3) { #return 64 }
+  #return 0
+}
+
+#proc lower_field_unsigned(#addr %source, #addr %field) -> #bits<1> {
+  #if #call lower_type_matches(%source, %field, "u8", 2) { #return 1 }
+  #if #call lower_type_matches(%source, %field, "u16", 3) { #return 1 }
+  #if #call lower_type_matches(%source, %field, "u32", 3) { #return 1 }
+  #if #call lower_type_matches(%source, %field, "u64", 3) { #return 1 }
+  #return 0
+}
+
+#proc lower_write_physical_type(#addr %source, #addr %field) -> #unit {
+  #call bootstrap.artifact-write-literal("#bits<")
+  #call meta_write_decimal(#call lower_field_width(%source, %field))
+  #call bootstrap.artifact-write-byte(62)
+  #return
+}
+
+#proc lower_write_field_load(#addr %source, #addr %field, #bits<64> %index) -> #unit {
+  #call bootstrap.artifact-write-literal("  #let %value")
+  #call meta_write_decimal(%index)
+  #call bootstrap.artifact-write-literal(": #bits<64> = ")
+  #if #eq(#call lower_field_width(%source, %field), 1) {
+    #call bootstrap.artifact-write-literal("#zext[#bits<64>](#load[#bits<1>](#lea(base=%point, idx=0, scale=1, offset=")
+  } else {
+    #if #eq(#call lower_field_width(%source, %field), 64) {
+    #call bootstrap.artifact-write-literal("#load[#bits<64>](#lea(base=%point, idx=0, scale=1, offset=")
+    } else {
+      #if #call lower_field_unsigned(%source, %field) {
+        #call bootstrap.artifact-write-literal("#zext[#bits<64>](#load[#bits<")
+      } else {
+        #call bootstrap.artifact-write-literal("#sext[#bits<64>](#load[#bits<")
+      }
+      #call meta_write_decimal(#call lower_field_width(%source, %field))
+      #call bootstrap.artifact-write-literal(">](#lea(base=%point, idx=0, scale=1, offset=")
+    }
+  }
+  #call meta_write_decimal(
+    #load[#bits<64>](#lea(base=%field, idx=0, scale=0, offset=32))
+  )
+  #if #eq(#call lower_field_width(%source, %field), 1) {
+    #call bootstrap.artifact-write-literal(")))\n")
+  } else {
+    #if #eq(#call lower_field_width(%source, %field), 64) {
+    #call bootstrap.artifact-write-literal("))\n")
+    } else {
+      #call bootstrap.artifact-write-literal(")))\n")
+    }
+  }
+  #return
+}
+
+#proc lower_write_store(#addr %source, #addr %field, #bits<64> %value, #bits<64> %index) -> #unit {
+  #call bootstrap.artifact-write-literal("  #let %value")
+  #call meta_write_decimal(%index)
+  #call bootstrap.artifact-write-literal(": ")
+  #call lower_write_physical_type(%source, %field)
+  #call bootstrap.artifact-write-literal(" = ")
+  #call meta_write_decimal(%value)
+  #call bootstrap.artifact-write-literal("\n  #store %value")
+  #call meta_write_decimal(%index)
+  #call bootstrap.artifact-write-literal(
+    ", #lea(base=%point, idx=0, scale=1, offset="
+  )
+  #call meta_write_decimal(
+    #load[#bits<64>](#lea(base=%field, idx=0, scale=0, offset=32))
+  )
+  #call bootstrap.artifact-write-literal(")\n")
+  #return
+}
+
+#proc lower_write_sum(#bits<64> %index) -> #unit {
+  #call bootstrap.artifact-write-literal("  #let %sum")
+  #call meta_write_decimal(%index)
+  #call bootstrap.artifact-write-literal(": #bits<64> = #add(%")
+  #if #eq(%index, 1) {
+    #call bootstrap.artifact-write-literal("value0")
+  } else {
+    #call bootstrap.artifact-write-literal("sum")
+    #call meta_write_decimal(#sub(%index, 1))
+  }
+  #call bootstrap.artifact-write-literal(", %value")
+  #call meta_write_decimal(%index)
+  #call bootstrap.artifact-write-literal(")\n")
+  #return
+}
+
+#proc lower_write_return(#bits<64> %count) -> #unit {
+  #call bootstrap.artifact-write-literal("  #return %")
+  #if #eq(%count, 1) {
+    #call bootstrap.artifact-write-literal("value0")
+  } else {
+    #call bootstrap.artifact-write-literal("sum")
+    #call meta_write_decimal(#sub(%count, 1))
+  }
+  #call bootstrap.artifact-write-literal("\n}\n\n")
+  #return
+}
+
+#proc lain_lower_record() -> #bits<32> {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: #addr = #call bootstrap.source-data(0)
+  #let %length: #bits<64> = #call bootstrap.source-length(0)
+  #let %source: #addr = #call tool_source_new(%data, %length)
+  #let %tokens: #addr = #call tool_lex_all(%source)
+  #let %root: #addr = #call raw_parse(%source, %tokens)
+  #let %type: #addr = #call meta_record_build(%source, %root)
+  #let %count: #bits<64> = #load[#bits<64>](#lea(base=%type, idx=0, scale=0, offset=24))
+  #if #ne(#load[#bits<32>](#lea(base=%type, idx=0, scale=0, offset=64)), 0) {
+    #call bootstrap.release-pages(%source)
+    #return 3200
+  }
+  #if #eq(%count, 0) { #call bootstrap.release-pages(%source) #return 3201 }
+  #if #sgt(%count, 9) { #call bootstrap.release-pages(%source) #return 3202 }
+  #let %field: #addr = #load[#addr](#lea(base=%type, idx=0, scale=0, offset=48))
+  #let %index: #bits<64> = 0
+  #loop validate {
+    #if #call raw_is_nil(%field) { #break validate }
+    #if #eq(#call lower_field_width(%source, %field), 0) {
+      #call bootstrap.release-pages(%source)
+      #return 3202
+    }
+    %field: #addr = #load[#addr](#lea(base=%field, idx=0, scale=0, offset=48))
+    %index: #bits<64> = #add(%index, 1)
+    #continue validate
+  }
+  #call bootstrap.artifact-begin()
+  #call bootstrap.artifact-write-literal(
+    "#proc sum(#addr %point) -> #bits<64> {\n"
+  )
+  #let %load_field: #addr = #load[#addr](#lea(base=%type, idx=0, scale=0, offset=48))
+  #let %load_index: #bits<64> = 0
+  #loop loads {
+    #if #call raw_is_nil(%load_field) { #break loads }
+    #call lower_write_field_load(%source, %load_field, %load_index)
+    %load_field: #addr = #load[#addr](#lea(base=%load_field, idx=0, scale=0, offset=48))
+    %load_index: #bits<64> = #add(%load_index, 1)
+    #continue loads
+  }
+  #let %sum_index: #bits<64> = 1
+  #loop sums {
+    #if #sge(%sum_index, %count) { #break sums }
+    #call lower_write_sum(%sum_index)
+    %sum_index: #bits<64> = #add(%sum_index, 1)
+    #continue sums
+  }
+  #call lower_write_return(%count)
+  #call bootstrap.artifact-write-literal("#proc main() -> #bits<32> {\n  #let %point: #addr = #alloca(")
+  #call meta_write_decimal(#load[#bits<64>](#lea(base=%type, idx=0, scale=0, offset=32)))
+  #call bootstrap.artifact-write-literal(")\n")
+  #let %store_field: #addr = #load[#addr](#lea(base=%type, idx=0, scale=0, offset=48))
+  #let %store_index: #bits<64> = 0
+  #loop stores {
+    #if #call raw_is_nil(%store_field) { #break stores }
+    #let %value: #bits<64> = 0
+    #if #eq(%store_index, 0) { %value: #bits<64> = 40 }
+    #if #eq(%store_index, 1) { %value: #bits<64> = 2 }
+    #call lower_write_store(%source, %store_field, %value, %store_index)
+    %store_field: #addr = #load[#addr](#lea(base=%store_field, idx=0, scale=0, offset=48))
+    %store_index: #bits<64> = #add(%store_index, 1)
+    #continue stores
+  }
+  #call bootstrap.artifact-write-literal(
+    "  #return #trunc[#bits<32>](#call sum(%point))\n}\n"
+  )
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return 0
+}

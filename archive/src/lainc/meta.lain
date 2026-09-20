@@ -1,0 +1,1073 @@
+// Attribute expansion over immutable parsed syntax and generated syntax.
+//
+// Meta callables are Lain procedures evaluated through the LAINVM API.
+// This module owns expansion order, hygiene and limits; it has no host syntax
+// callbacks.
+
+let memory_model: Module = import("std::memory_model");
+let syntax: Module = import("packages::lain::compiler::syntax");
+let generated_syntax: Module =
+    import("packages::lain::compiler::generated_syntax");
+let lainir_api: Module =
+    import("packages::lain::lainir::api_contract");
+let lainvm_api: Module =
+    import("packages::lain::lainvm::api_contract");
+let formal_meta: Module = import("std::meta");
+
+@export
+let meta: Module = std::module {
+
+    @export
+    let Meta = std::func(
+        Memory: memory_model.Shape,
+        Ir: lainir_api.CapabilitiesShape,
+        Vm: lainvm_api.ExecutionShape,
+    ) -> Module {
+        let Syntax: Module = syntax.Syntax(Memory);
+        let Generated: Module =
+            generated_syntax.GeneratedSyntax(Memory);
+        // Compile-time execution is supplied as a capability. Meta sees an
+        // immutable artifact and opaque procedure/value handles only.
+        let MetaCallableId: std::type = usize;
+        let MetaCallable: std::type = std::struct {
+            id: usize,
+            name: addr,
+            procedure: usize,
+            phase: i32,
+            program: usize,
+        };
+        // The phase value crosses the Meta/std factory boundary as a
+        // scalar.  Keep its physical type explicit until generic type
+        // materialization can preserve factory-local aliases.
+        let CallablePhase: std::type = i32;
+        // Keep the executable registry in the Meta layer.  The generic
+        // std::meta Vec<Callable> path is a type-level model, while this
+        // runtime boundary needs a concrete pointer table that bootstrap can
+        // materialize and inspect.
+        // Keep the registry as an opaque address at this boundary.  Returning
+        // a small record by value currently lowers to an uninitialized
+        // temporary in the compiler; the implementation already
+        // uses the stable fixed-layout pointer ABI below.
+        let Registry: std::type = addr;
+        // Structured handles for Meta execution.  These descriptors keep
+        // semantic identity separate from physical L1 procedure numbers and
+        // make the execution environment explicit at the Meta boundary.
+        let MetaProcedure: std::type = std::struct {
+            id: usize,
+            program: usize,
+            procedure: usize,
+            phase: CallablePhase,
+            source_start: usize,
+            source_length: usize,
+            parameter_count: usize,
+        };
+        let MetaProgram: std::type = std::struct {
+            id: usize,
+            unit_handle: usize,
+            source_handle: usize,
+            procedure_table: usize,
+            procedure_count: usize,
+            first_procedure: usize,
+            first_procedure_physical: usize,
+            first_procedure_phase: CallablePhase,
+            first_procedure_source_start: usize,
+            first_procedure_source_length: usize,
+            first_procedure_parameter_count: usize,
+        };
+        let MetaBinding: std::type = std::struct {
+            name_handle: usize,
+            value_type: usize,
+            value: i32,
+        };
+        let MetaEnvironment: std::type = std::struct {
+            id: usize,
+            parent: usize,
+            binding_table: usize,
+            binding_count: usize,
+            first_binding: usize,
+            first_capture_type: usize,
+            first_capture_value: i32,
+        };
+        let MetaValue: std::type = std::struct {
+            kind: usize,
+            type_id: usize,
+            payload: usize,
+            unit_id: usize,
+            node_id: usize,
+            valid: usize,
+        };
+        let MetaDiagnostic: std::type = std::struct {
+            code: usize,
+            phase: usize,
+            source_start: usize,
+            source_length: usize,
+        };
+
+        let Context: std::type = std::struct {
+            expansion_id: usize,
+            call_site_unit: Syntax.UnitId,
+            call_site: Syntax.NodeId,
+            hygiene: Syntax.HygieneId,
+            // A backend callable must carry an explicit backend context.
+            // Syntax expansion uses phase 4; backend lowering uses phase 5.
+            // Keeping the phase in the context prevents a generic caller from
+            // smuggling a backend procedure through the syntax bridge.
+            phase: CallablePhase,
+        };
+
+        let Invocation: std::type = std::struct {
+            attribute: Syntax.NodeId,
+            arguments: Syntax.NodeId,
+            target: Syntax.NodeId,
+        };
+
+        let allocate_meta = std::func(
+            size: usize,
+        ) -> addr ! {Memory.Allocation.Effect} {
+            // The stdlib owns the bootstrap page capability declaration.
+            // Reusing its ABI wrapper avoids a duplicate foreign procedure
+            // when the compiler and formal stdlib share one source closure.
+            return formal_meta.meta_allocate_pages(size as i64);
+        };
+
+        let same_callable_name = std::func(
+            left: addr,
+            right: addr,
+        ) -> bool {
+            if left == (0 as addr) || right == (0 as addr) { return false; }
+            let left_vec: addr = std::load_bits(64, left + 0);
+            let right_vec: addr = std::load_bits(64, right + 0);
+            if left_vec == (0 as addr) || right_vec == (0 as addr) {
+                return left_vec == right_vec;
+            }
+            let left_length: usize = std::load_bits(64, left_vec + 8);
+            let right_length: usize = std::load_bits(64, right_vec + 8);
+            if left_length != right_length { return false; }
+            let left_data: addr = std::load_bits(64, left_vec + 0) + 24;
+            let right_data: addr = std::load_bits(64, right_vec + 0) + 24;
+            let index: usize = 0;
+            while index < left_length {
+                if std::load_bits(8, left_data + index)
+                    != std::load_bits(8, right_data + index) {
+                    return false;
+                }
+                index = index + 1;
+            }
+            return true;
+        };
+
+        let callable_name_hash = std::func(
+            name: addr,
+        ) -> usize {
+            if name == (0 as addr) { return 0; }
+            let vector: addr = std::load_bits(64, name + 0);
+            if vector == (0 as addr) { return 0; }
+            let length: usize = std::load_bits(64, vector + 8);
+            let storage: usize = std::load_bits(64, vector + 0);
+            if storage == 0 { return 0; }
+            let data: addr = std::load_bits(64, vector + 0) + 24;
+            let index: usize = 0;
+            let hash: usize = 2166136261;
+            while index < length {
+                // A malformed or foreign String handle must not turn a name
+                // lookup into an unbounded scan.  The language-level string
+                // ABI validates lengths before exposing larger names.
+                if index >= 64 { return hash; }
+                hash = hash * 16777619 + std::load_bits(
+                    8,
+                    data + index
+                );
+                index = index + 1;
+            }
+            return hash;
+        };
+        let callable_name_length = std::func(
+            name: addr,
+        ) -> usize {
+            let vector: addr = std::load_bits(64, name + 0);
+            return std::load_bits(64, vector + 8);
+        };
+
+        let registry_base = std::func(
+            registry: &Registry,
+        ) -> addr ! {Memory.Allocation.Effect} {
+            let base: addr = std::load_bits(64, registry + 0);
+            if base == (0 as addr) {
+                let allocated: addr = allocate_meta(2568);
+                std::store_bits(64, registry + 0, allocated as usize);
+                std::store_bits(64, registry + 8, 0);
+                return allocated;
+            }
+            return base;
+        };
+        let registry_length = std::func(
+            registry: &Registry,
+        ) -> usize {
+            return std::load_bits(64, registry + 8);
+        };
+
+        let meta_new_registry = std::func() -> addr ! {Memory.Allocation.Effect} {
+            // Five scalar slots per callable are interleaved in one table.
+            // The slot index is dynamic and the address form `base + slot *
+            // 8` is supported by the current L1 lowering.
+            let result: addr = allocate_meta(64);
+            std::store_bits(64, result + 0, 0);
+            std::store_bits(64, result + 8, 0);
+            return result;
+        };
+
+        let registry_insert = std::func(
+            registry: &mut Registry,
+            name: Memory.String,
+            procedure: usize,
+            phase: CallablePhase,
+            program: usize,
+        ) -> MetaCallableId ! {Memory.Allocation.Effect} {
+            let id: usize = registry_length(registry);
+            let base: addr = registry_base(registry);
+            if id >= 64 { return std::usize_max(); }
+            let name_hash: usize = callable_name_hash(name as addr);
+            let name_length: usize = callable_name_length(name as addr);
+            if id == 0 {
+                std::store_bits(64, base + 0, name_length);
+                std::store_bits(64, base + 8, name_hash);
+                std::store_bits(64, base + 16, procedure);
+                std::store_bits(64, base + 24, phase as usize);
+                std::store_bits(64, base + 32, program);
+            }
+            if id == 1 {
+                std::store_bits(64, base + 40, name_length);
+                std::store_bits(64, base + 48, name_hash);
+                std::store_bits(64, base + 56, procedure);
+                std::store_bits(64, base + 64, phase as usize);
+                std::store_bits(64, base + 72, program);
+            }
+            if id == 2 {
+                std::store_bits(64, base + 80, name_length);
+                std::store_bits(64, base + 88, name_hash);
+                std::store_bits(64, base + 96, procedure);
+                std::store_bits(64, base + 104, phase as usize);
+                std::store_bits(64, base + 112, program);
+            }
+            std::store_bits(64, registry + 8, id + 1);
+            return id;
+        };
+
+        let registry_find = std::func(
+            registry: &Registry,
+            name: Memory.String,
+        ) -> MetaCallableId {
+            let count: usize = registry_length(registry);
+            let base: addr = registry_base(registry);
+            let index: usize = 0;
+            while index < count {
+                let name_slot: usize = index * 5 + 1;
+                let name_offset: usize = name_slot * 8;
+                let callable_hash: usize =
+                    std::load_bits(64, base + name_offset);
+                let entry_offset: usize = index * 40;
+                let stored_length: usize = std::load_bits(64, base + entry_offset);
+                if stored_length == callable_name_length(name)
+                    && callable_hash == callable_name_hash(name as addr) {
+                    return index;
+                }
+                index = index + 1;
+            }
+            return count;
+        };
+
+        let Expansion: std::type = std::struct {
+            syntax: Generated.SyntaxList,
+            diagnostic: i32,
+        };
+        let expansion_make = std::func(
+            diagnostic: i32,
+            length: usize,
+        ) -> Expansion ! {Memory.Allocation.Effect} {
+            let result: addr = allocate_meta(40);
+            std::store_bits(64, result + 0, 0);
+            std::store_bits(64, result + 8, 0);
+            std::store_bits(64, result + 16, 0);
+            std::store_bits(64, result + 24, length);
+            std::store_bits(32, result + 32, diagnostic);
+            return result;
+        };
+        let expansion_make_list = std::func(
+            output: Generated.SyntaxList,
+            diagnostic: i32,
+        ) -> Expansion ! {Memory.Allocation.Effect} {
+            let result: addr = allocate_meta(40);
+            std::store_bits(64, result + 0,
+                std::load_bits(64, output + 0));
+            std::store_bits(64, result + 8,
+                std::load_bits(64, output + 8));
+            std::store_bits(64, result + 16,
+                std::load_bits(64, output + 16));
+            std::store_bits(64, result + 24,
+                std::load_bits(64, output + 24));
+            std::store_bits(32, result + 32, diagnostic);
+            return result;
+        };
+        let expansion_make_node = std::func(
+            diagnostic: i32,
+            unit: Syntax.UnitId,
+            node: Syntax.NodeId,
+        ) -> Expansion ! {Memory.Allocation.Effect} {
+            let result: addr = allocate_meta(40);
+            let syntax: addr = allocate_meta(32);
+            // `Meta.append_list` consumes the bootstrap physical view where
+            // first/length live at offsets 0/8.  Keep the canonical trailing
+            // fields populated as well for Generated helpers.
+            std::store_bits(64, syntax + 0, node);
+            std::store_bits(64, syntax + 8, 1);
+            std::store_bits(64, syntax + 16, node);
+            std::store_bits(64, syntax + 24, 1);
+            std::store_bits(64, result + 0, unit);
+            std::store_bits(64, result + 8, node);
+            std::store_bits(64, result + 16, node);
+            std::store_bits(64, result + 24, 1);
+            std::store_bits(32, result + 32, diagnostic);
+            return result;
+        };
+        let expansion_diagnostic = std::func(
+            expansion: &Expansion,
+        ) -> i32 {
+            return std::load_bits(32, expansion + 32);
+        };
+        let expansion_length = std::func(
+            expansion: &Expansion,
+        ) -> usize {
+            return std::load_bits(64, expansion + 24);
+        };
+        let expansion_unit = std::func(
+            expansion: &Expansion,
+        ) -> Syntax.UnitId {
+            // `Meta.expand` materializes the sealed generated unit at the
+            // first physical field of the returned Expansion.
+            return std::load_bits(64, expansion + 0);
+        };
+        let expansion_first = std::func(
+            expansion: &Expansion,
+        ) -> Syntax.NodeId {
+            return std::load_bits(64, expansion + 8);
+        };
+
+        // Keep aggregate construction in named helpers.  The source-owned
+        // compiler lowers a record literal reliably as a return value, while
+        // an inline record passed as a call argument can leak field labels
+        // into the physical LAIN-IR stream during self-hosting.
+        let context_new = std::func(
+            expansion_id: usize,
+            call_site_unit: Syntax.UnitId,
+            call_site: Syntax.NodeId,
+            hygiene: Syntax.HygieneId,
+            phase: CallablePhase,
+        ) -> Context {
+            return Context {
+                expansion_id: expansion_id,
+                call_site_unit: call_site_unit,
+                call_site: call_site,
+                hygiene: hygiene,
+                phase: phase,
+            };
+        };
+        let invocation_new = std::func(
+            attribute: Syntax.NodeId,
+            arguments: Syntax.NodeId,
+            target: Syntax.NodeId,
+        ) -> Invocation {
+            return Invocation {
+                attribute: attribute,
+                arguments: arguments,
+                target: target,
+            };
+        };
+
+        let meta_program_new = std::func(
+            id: usize,
+            unit_handle: usize,
+            source_handle: usize,
+        ) -> MetaProgram ! {Memory.Allocation.Effect} {
+            let result: addr = allocate_meta(88);
+            let procedure_table: addr = allocate_meta(512);
+            std::store_bits(64, result + 0, id);
+            std::store_bits(64, result + 8, unit_handle);
+            std::store_bits(64, result + 16, source_handle);
+            // The table is a bounded pointer array for the current Meta
+            // runtime slice.  Each entry points at a fully materialized
+            // MetaProcedure descriptor; the bound keeps malformed programs
+            // from turning a lookup into an unbounded allocation.
+            std::store_bits(64, result + 24, procedure_table);
+            std::store_bits(64, result + 32, 0);
+            std::store_bits(64, result + 40, std::usize_max());
+            std::store_bits(64, result + 48, 0);
+            std::store_bits(64, result + 56, 0);
+            std::store_bits(64, result + 64, 0);
+            std::store_bits(64, result + 72, 0);
+            std::store_bits(64, result + 80, 0);
+            return result;
+        };
+
+        let meta_procedure_new = std::func(
+            id: usize,
+            program: usize,
+            procedure: Vm.Procedure,
+            phase: CallablePhase,
+            source_start: usize,
+            source_length: usize,
+            parameter_count: usize,
+        ) -> MetaProcedure {
+            let result: addr = allocate_meta(56);
+            std::store_bits(64, result + 0, id);
+            std::store_bits(64, result + 8, program);
+            std::store_bits(64, result + 16, procedure);
+            std::store_bits(64, result + 24, phase as usize);
+            std::store_bits(64, result + 32, source_start);
+            std::store_bits(64, result + 40, source_length);
+            std::store_bits(64, result + 48, parameter_count);
+            return result;
+        };
+
+        let meta_program_add_procedure = std::func(
+            program: &mut MetaProgram,
+            procedure: MetaProcedure,
+        ) -> unit ! {Memory.Allocation.Effect} {
+            let count: usize = std::load_bits(64, program + 32);
+            let procedure_table: addr =
+                std::load_bits(64, program + 24);
+            // Keep the bootstrap table writes explicit.  The current L1
+            // lowering accepts dynamic indexing for vectors, but an opaque
+            // procedure-table handle must not be formed from an untrusted
+            // count while Meta is still bootstrapping.
+            if count == 0 {
+                std::store_bits(64, procedure_table + 0, procedure);
+            }
+            if count == 1 {
+                std::store_bits(64, procedure_table + 8, procedure);
+            }
+            if count == 2 {
+                std::store_bits(64, procedure_table + 16, procedure);
+            }
+            if count == 3 {
+                std::store_bits(64, procedure_table + 24, procedure);
+            }
+            if count == 0 {
+                std::store_bits(64, program + 40, std::load_bits(64, procedure + 0));
+                std::store_bits(64, program + 48, std::load_bits(64, procedure + 16));
+                std::store_bits(64, program + 56, std::load_bits(64, procedure + 24));
+                std::store_bits(64, program + 64, std::load_bits(64, procedure + 32));
+                std::store_bits(64, program + 72, std::load_bits(64, procedure + 40));
+                std::store_bits(64, program + 80, std::load_bits(64, procedure + 48));
+            }
+            std::store_bits(64, program + 32, count + 1);
+        };
+
+        let meta_program_procedure = std::func(
+            program: &MetaProgram,
+            id: usize,
+        ) -> MetaProcedure ! {Memory.Bounds.Effect} {
+            Memory.Bounds.check(id, program.procedure_count);
+            let procedure_table: addr =
+                std::load_bits(64, program + 24);
+            return std::load_bits(64, procedure_table + id * 8);
+        };
+        let meta_program_procedure_handle = std::func(
+            program: &MetaProgram,
+            id: usize,
+        ) -> addr ! {Memory.Bounds.Effect} {
+            Memory.Bounds.check(id, program.procedure_count);
+            let procedure_table: addr =
+                std::load_bits(64, program + 24);
+            return std::load_bits(64, procedure_table + id * 8);
+        };
+        let meta_procedure_id = std::func(
+            procedure: addr,
+        ) -> usize {
+            return std::load_bits(64, procedure + 0);
+        };
+        let meta_procedure_source_start = std::func(
+            procedure: addr,
+        ) -> usize {
+            return std::load_bits(64, procedure + 32);
+        };
+        let meta_procedure_parameter_count = std::func(
+            procedure: addr,
+        ) -> usize {
+            return std::load_bits(64, procedure + 48);
+        };
+
+        let meta_program_register = std::func(
+            program: &mut MetaProgram,
+            registry: &mut Registry,
+            name: Memory.String,
+            procedure: MetaProcedure,
+        ) -> MetaCallableId ! {Memory.Allocation.Effect} {
+            meta_program_add_procedure(program, procedure);
+            // Read the descriptor through its physical ABI.  Factory-local
+            // record projection currently loses the field offset when a
+            // nominal MetaProcedure crosses the Meta/std boundary.
+            let procedure_raw: addr = procedure as addr;
+            let procedure_id: usize = std::load_bits(64, procedure_raw + 16);
+            let phase_raw: CallablePhase = std::load_bits(32, procedure_raw + 24);
+            let callable: MetaCallableId = registry_insert(
+                registry,
+                name,
+                procedure_id,
+                phase_raw,
+                program.id,
+            );
+            return callable;
+        };
+
+        let meta_environment_new = std::func(
+            id: usize,
+            parent: usize,
+        ) -> MetaEnvironment ! {Memory.Allocation.Effect} {
+            let result: addr = allocate_meta(56);
+            std::store_bits(64, result + 0, id);
+            std::store_bits(64, result + 8, parent);
+            std::store_bits(64, result + 16, 0);
+            std::store_bits(64, result + 24, 0);
+            std::store_bits(64, result + 32, 0);
+            std::store_bits(64, result + 40, 0);
+            std::store_bits(32, result + 48, 0);
+            return result;
+        };
+
+        let meta_binding_new = std::func(
+            name_handle: usize,
+            value: Vm.Value,
+        ) -> MetaBinding {
+            let result: addr = allocate_meta(24);
+            std::store_bits(64, result + 0, name_handle);
+            std::store_bits(64, result + 8, Vm.value_type(&value));
+            std::store_bits(32, result + 16, Vm.value_i32(&value));
+            return result;
+        };
+
+        let interpreter_value_new = std::func(
+            type_id: usize,
+            i32_value: i32,
+        ) -> Vm.Value {
+            return Vm.make_bits(type_id, i32_value as u64);
+        };
+
+        let meta_environment_bind_value = std::func(
+            environment: &mut MetaEnvironment,
+            name_handle: usize,
+            value: Vm.Value,
+        ) -> unit ! {Memory.Allocation.Effect} {
+            let count: usize = std::load_bits(64, environment + 24);
+            if count == 0 {
+                std::store_bits(64, environment + 32, name_handle);
+                std::store_bits(64, environment + 40, Vm.value_type(&value));
+                std::store_bits(32, environment + 48, Vm.value_i32(&value));
+            }
+            std::store_bits(64, environment + 24, count + 1);
+        };
+
+        let meta_environment_bind = std::func(
+            environment: &mut MetaEnvironment,
+            name_handle: usize,
+            value_handle: usize,
+        ) -> unit ! {Memory.Allocation.Effect} {
+            meta_environment_bind_value(
+                environment,
+                name_handle,
+                Vm.make_bits(0, value_handle as u64),
+            );
+        };
+
+        let meta_environment_binding = std::func(
+            environment: &MetaEnvironment,
+            index: usize,
+        ) -> usize ! {Memory.Bounds.Effect} {
+            if index >= environment.binding_count {
+                Memory.Bounds.check(index, environment.binding_count);
+            }
+            return environment.first_binding;
+        };
+
+        let meta_value_scalar = std::func(
+            type_id: usize,
+            value: usize,
+        ) -> MetaValue {
+            return MetaValue {
+                kind: 1,
+                type_id: type_id,
+                payload: value,
+                unit_id: 0,
+                node_id: 0,
+                valid: 1,
+            };
+        };
+
+        let meta_value_syntax = std::func(
+            unit: usize,
+            node: usize,
+        ) -> MetaValue {
+            return MetaValue {
+                kind: 2,
+                type_id: 0,
+                payload: 0,
+                unit_id: unit,
+                node_id: node,
+                valid: node != 0,
+            };
+        };
+
+        let meta_diagnostic = std::func(
+            code: usize,
+            phase: CallablePhase,
+            source_start: usize,
+            source_length: usize,
+        ) -> MetaDiagnostic {
+            return MetaDiagnostic {
+                code: code,
+                phase: phase,
+                source_start: source_start,
+                source_length: source_length,
+            };
+        };
+
+        let new_registry_with_identity = std::func() -> Registry {
+            let registry: Registry = meta_new_registry();
+            let name: Memory.String = Memory.String.new();
+            name.append_byte(105);
+            name.append_byte(100);
+            name.append_byte(101);
+            name.append_byte(110);
+            name.append_byte(116);
+            name.append_byte(105);
+            name.append_byte(116);
+            name.append_byte(121);
+            registry_insert(&mut registry, name, 0, 1, 0);
+            return registry;
+        };
+        let meta_register_with_phase = std::func(
+            registry: &mut Registry,
+            name: Memory.String,
+            procedure: usize,
+            phase: CallablePhase,
+        ) -> MetaCallableId ! {Memory.Allocation.Effect} {
+            return registry_insert(registry, name, procedure, phase, 0);
+        };
+        let meta_register = std::func(
+            registry: &mut Registry,
+            name: Memory.String,
+            procedure: usize,
+        ) -> MetaCallableId ! {Memory.Allocation.Effect} {
+            return meta_register_with_phase(registry, name, procedure, 1);
+        };
+        let callable_phase_meta = std::func() -> CallablePhase {
+            return 1;
+        };
+        let callable_phase_syntax = std::func() -> CallablePhase {
+            return 4;
+        };
+        let callable_phase_backend = std::func() -> CallablePhase {
+            return 5;
+        };
+
+        // Request compile-time execution through LAINVM. The surrounding VM
+        // execution boundary handles this effect and runs the procedure in a
+        // child TCB. A successful request returns one physical value; a VM
+        // execution failure propagates as Trap from the handler.
+        let evaluate = std::func(
+            unit: &Vm.Artifact,
+            procedure: Vm.Procedure,
+            arguments: &Vm.ValueVector,
+        ) -> Vm.Value ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
+        } {
+            return perform Vm.eval(unit, procedure, arguments);
+        };
+        // Syntax callables use a deliberately small ABI for this slice:
+        // argument zero is the call-site target node id and the procedure
+        // returns the first node id to emit.  The returned node may be the
+        // head of a sibling chain; Meta clones the whole bounded chain
+        // into the generated unit while preserving each source span.
+        let invoke = std::func(
+            registry: &Registry,
+            callable: MetaCallableId,
+            program: &MetaProgram,
+            unit: &Vm.Artifact,
+            environment: &MetaEnvironment,
+            context: Context,
+            invocation: Invocation,
+            builder: &mut Generated.Builder,
+        ) -> Expansion ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
+        } {
+            if callable >= registry_length(registry) {
+                return expansion_make(2902, 0);
+            }
+            let phase_slot: usize = callable * 5 + 3;
+            let phase_offset: usize = phase_slot * 8;
+            let registry_data: addr = registry_base(registry);
+            if std::load_bits(64, registry_data + phase_offset)
+                != callable_phase_syntax() {
+                return expansion_make(2907, 0);
+            }
+            return invoke_syntax_program(
+                registry,
+                callable,
+                program,
+                unit,
+                environment,
+                context,
+                invocation,
+                builder,
+            );
+        };
+
+        let invoke_syntax_program = std::func(
+            registry: &Registry,
+            callable: MetaCallableId,
+            program: &MetaProgram,
+            unit: &Vm.Artifact,
+            environment: &MetaEnvironment,
+            context: Context,
+            invocation: Invocation,
+            builder: &mut Generated.Builder,
+        ) -> Expansion ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
+        } {
+            if program.id == 0 { return expansion_make(2908, 0); }
+            if callable >= registry_length(registry) {
+                return expansion_make(2902, 0);
+            }
+            let registry_data: addr = registry_base(registry);
+            let phase_offset: usize = (callable * 5 + 3) * 8;
+            if std::load_bits(64, registry_data + phase_offset)
+                != callable_phase_syntax() {
+                return expansion_make(2907, 0);
+            }
+            let procedure_offset: usize = (callable * 5 + 2) * 8;
+            let procedure: usize =
+                std::load_bits(64, registry_data + procedure_offset);
+            if procedure == std::usize_max() {
+                return expansion_make(2906, 0);
+            }
+            let program_offset: usize = (callable * 5 + 4) * 8;
+            let selected_program: usize =
+                std::load_bits(64, registry_data + program_offset);
+            if selected_program != 0 && selected_program != program.id {
+                return expansion_make(2908, 0);
+            }
+            if environment.binding_count > 1 {
+                return expansion_make(2909, 0);
+            }
+            let argument_count: usize = environment.binding_count + 1;
+            if program.first_procedure_parameter_count != 0 &&
+                argument_count != program.first_procedure_parameter_count {
+                return expansion_make(2910, 0);
+            }
+            let arguments: Vm.ValueVector = Vm.new_arguments();
+            if environment.binding_count == 1 {
+                Vm.append_argument(
+                    &mut arguments,
+                    Vm.make_bits(
+                        environment.first_capture_type,
+                        environment.first_capture_value as u64,
+                    ),
+                );
+            }
+            Vm.append_argument(
+                &mut arguments,
+                Vm.make_bits(0, invocation.target as u64),
+            );
+            let result_value: Vm.Value = evaluate(
+                unit, procedure, &arguments,
+            );
+            let result_i32: i32 = Vm.value_i32(&result_value);
+            if result_i32 < 0 {
+                return expansion_make(2905, 0);
+            }
+            return expansion_make_node(
+                0,
+                context.call_site_unit,
+                result_i32 as usize,
+            );
+        };
+        let invoke_direct = std::func(
+            registry: &Registry,
+            callable: MetaCallableId,
+            program: &MetaProgram,
+            environment: &MetaEnvironment,
+            unit: &Vm.Artifact,
+            context: Context,
+            invocation: Invocation,
+            builder: &mut Generated.Builder,
+        ) -> Expansion ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
+        } {
+            return invoke_syntax_program(
+                registry, callable, program, unit, environment,
+                context, invocation, builder
+            );
+        };
+
+        let meta_find = std::func(
+            registry: &Registry,
+            name: &Memory.String,
+        ) -> MetaCallableId ! {Memory.Bounds.Effect} {
+            return registry_find(registry, name);
+        };
+
+        let append_list = std::func(
+            builder: &mut Generated.Builder,
+            output: &mut Generated.SyntaxList,
+            input: Generated.SyntaxList,
+        ) -> unit ! {Memory.Bounds.Effect} {
+            let current: Syntax.NodeId = input.first;
+            let remaining: usize = input.length;
+            while remaining != 0 {
+                let next: Syntax.NodeId = Syntax.node(
+                    builder.store,
+                    input.unit,
+                    current,
+                ).next_sibling;
+                Syntax.node_mut(
+                    builder.store,
+                    input.unit,
+                    current,
+                ).next_sibling = Syntax.invalid_node();
+                Generated.append(
+                    builder,
+                    output,
+                    current,
+                );
+                current = next;
+                remaining = remaining - 1;
+            }
+        };
+
+        let expand = std::func(
+            store: &mut Syntax.Store,
+            unit: Syntax.UnitId,
+            root: Syntax.NodeId,
+            registry: &Registry,
+            program: &MetaProgram,
+            environment: &MetaEnvironment,
+            l1_unit: &Vm.Artifact,
+        ) -> Expansion ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
+        } {
+            let builder: Generated.Builder =
+                Generated.begin(store, root);
+            let output: Generated.SyntaxList =
+                Generated.empty_list(&builder);
+
+            let current: Syntax.NodeId =
+                Syntax.node(store, unit, root).first_child;
+            let expansion_count: usize = 0;
+
+            while current != Syntax.invalid_node() {
+                if expansion_count >= 64 {
+                    return expansion_make_list(output, 2904);
+                }
+
+                if Syntax.token_equal(
+                    store,
+                    unit,
+                    current,
+                    "@",
+                    1,
+                ) {
+                    let name_node: Syntax.NodeId =
+                        Syntax.next_significant(
+                            store,
+                            unit,
+                            Syntax.node(
+                                store,
+                                unit,
+                                current,
+                                ).next_sibling,
+                            );
+                    let after_name: Syntax.NodeId =
+                        Syntax.next_significant(
+                            store,
+                            unit,
+                            Syntax.node(
+                                store,
+                                unit,
+                                name_node,
+                            ).next_sibling,
+                        );
+                    let arguments: Syntax.NodeId =
+                        Syntax.invalid_node();
+                    let target: Syntax.NodeId =
+                        after_name;
+                    if after_name != Syntax.invalid_node()
+                        && Syntax.node(
+                            store,
+                            unit,
+                            after_name,
+                        ).kind == 2
+                        && Syntax.node(
+                            store,
+                            unit,
+                            after_name,
+                        ).delimiter == 1 {
+                        arguments = after_name;
+                        target = Syntax.next_significant(
+                            store,
+                            unit,
+                            Syntax.node(
+                                store,
+                                unit,
+                                after_name,
+                            ).next_sibling,
+                        );
+                    }
+                    let name: Memory.String =
+                        Syntax.copy_token_text(
+                            store,
+                            unit,
+                            name_node,
+                            false,
+                        );
+                    let callable: MetaCallableId =
+                        meta_find(registry, &name);
+                    if target == Syntax.invalid_node() {
+                        return expansion_make_list(output, 2905);
+                    }
+                    let one: Expansion = invoke(
+                        registry,
+                        callable,
+                        program,
+                        l1_unit,
+                        environment,
+                        context_new(
+                            expansion_count + 1,
+                            unit,
+                            current,
+                            builder.hygiene,
+                            callable_phase_syntax(),
+                        ),
+                        invocation_new(
+                            name_node,
+                            arguments,
+                            target,
+                        ),
+                        &mut builder,
+                    );
+                    if expansion_diagnostic(&one) != 0 { return one; }
+                    append_list(
+                        &mut builder,
+                        &mut output,
+                        one,
+                    );
+                    current = target;
+                } else {
+                    let cloned: Syntax.NodeId =
+                        Generated.clone_from(
+                            &mut builder,
+                            unit,
+                            current,
+                            true,
+                        );
+                    Generated.append(
+                        &mut builder,
+                        &mut output,
+                        cloned,
+                    );
+                    // Keep this unit-valued call an expression statement;
+                    // the bootstrap lowerer otherwise treats a final call in
+                    // a branch as the function's return expression.
+                    let append_done: usize = 0;
+                }
+
+                current = Syntax.node(
+                    store,
+                    unit,
+                    current,
+                ).next_sibling;
+                expansion_count = expansion_count + 1;
+            }
+
+            let sealed: Syntax.UnitId =
+                Generated.seal(&mut builder, output);
+            // Materialize the nested Expansion layout explicitly.  The
+            // bootstrap compiler currently lowers a returned record with a
+            // nested SyntaxList as an uninitialized placeholder; these
+            // stores preserve the concrete fields consumed by callers.
+            let result: addr = allocate_meta(40);
+            std::store_bits(64, result + 0, sealed);
+            std::store_bits(64, result + 8, output.first);
+            std::store_bits(64, result + 16, output.last);
+            std::store_bits(64, result + 24, std::load_bits(64, output + 24));
+            std::store_bits(32, result + 32, 0);
+            return result;
+        };
+
+        return std::module {
+            @export let MetaCallableId: std::type = MetaCallableId;
+            @export let MetaCallable: std::type = MetaCallable;
+            @export let CallablePhase: std::type = CallablePhase;
+            @export let meta_new_registry = meta_new_registry;
+            @export let callable_phase_meta = callable_phase_meta;
+            @export let callable_phase_syntax = callable_phase_syntax;
+            @export let callable_phase_backend = callable_phase_backend;
+            @export let Registry: std::type = Registry;
+            @export let Artifact: std::type = Vm.Artifact;
+            @export let Value: std::type = Vm.Value;
+            @export let ValueVector: std::type = Vm.ValueVector;
+            @export let evaluate = evaluate;
+            @export let invoke_syntax_program = invoke_syntax_program;
+            @export let Context: std::type = Context;
+            @export let context_new = context_new;
+            @export let Invocation: std::type = Invocation;
+            @export let Expansion: std::type = Expansion;
+            @export let expansion_diagnostic = expansion_diagnostic;
+            @export let expansion_length = expansion_length;
+            @export let expansion_unit = expansion_unit;
+            @export let expansion_first = expansion_first;
+            @export let MetaProcedure: std::type = MetaProcedure;
+            @export let MetaProgram: std::type = MetaProgram;
+            @export let MetaBinding: std::type = MetaBinding;
+            @export let MetaEnvironment: std::type = MetaEnvironment;
+            @export let MetaValue: std::type = MetaValue;
+            @export let MetaDiagnostic: std::type = MetaDiagnostic;
+            @export let meta_program_new = meta_program_new;
+            @export let meta_procedure_new = meta_procedure_new;
+            @export let meta_program_add_procedure = meta_program_add_procedure;
+            @export let meta_program_procedure = meta_program_procedure;
+            @export let meta_program_procedure_handle = meta_program_procedure_handle;
+            @export let meta_procedure_id = meta_procedure_id;
+            @export let meta_procedure_source_start = meta_procedure_source_start;
+            @export let meta_procedure_parameter_count = meta_procedure_parameter_count;
+            @export let meta_program_register = meta_program_register;
+            @export let meta_environment_new = meta_environment_new;
+            @export let meta_binding_new = meta_binding_new;
+            @export let interpreter_value_new = interpreter_value_new;
+            @export let meta_environment_bind_value = meta_environment_bind_value;
+            @export let meta_environment_bind = meta_environment_bind;
+            @export let meta_environment_binding = meta_environment_binding;
+            @export let meta_value_scalar = meta_value_scalar;
+            @export let meta_value_syntax = meta_value_syntax;
+            @export let meta_diagnostic = meta_diagnostic;
+            @export let register = meta_register;
+            @export let register_with_phase = meta_register_with_phase;
+            @export let meta_find = meta_find;
+            @export let invoke = invoke;
+            @export let expand = expand;
+        };
+    };
+};

@@ -1,0 +1,84 @@
+// Compiler-owned diagnostics and final result storage.
+
+let memory_model: Module = import("std::memory_model");
+let vector: Module = import("std::core::vec");
+
+@export
+let compiler_context: Module = std::module {
+    @export
+    let Context = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let Diagnostic: std::type = std::struct {
+            code: i32,
+            message: Memory.String,
+            source_id: usize,
+            start: usize,
+            end: usize,
+        };
+
+        let DiagnosticVector: std::type = vector.Vec(
+            Diagnostic,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        // Keep the internal state name distinct from other factory-local State types.
+        // All modules share the specialization namespace while a factory is
+        // elaborated, so a generic short name here can resolve to the formal
+        // std module when both are present in one library build.
+        let CompilerContextState: std::type = std::struct {
+            diagnostics: DiagnosticVector,
+            module_count: usize,
+            has_artifact: bool,
+        };
+
+        let CompileResult: std::type = std::struct {
+            status: i32,
+            artifact: Memory.Bytes,
+            module_count: usize,
+            diagnostics: DiagnosticVector,
+        };
+
+        let new = std::func() -> CompilerContextState {
+            return CompilerContextState {
+                diagnostics: DiagnosticVector.new(),
+                module_count: 0,
+                has_artifact: false,
+            };
+        };
+
+        let add_diagnostic = std::func(
+            state: &mut CompilerContextState,
+            diagnostic: Diagnostic,
+        ) -> unit ! {Memory.Allocation.Effect} {
+            state.diagnostics.push(diagnostic);
+        };
+
+        let finish = std::func(
+            state: CompilerContextState,
+            artifact: Memory.Bytes,
+        ) -> CompileResult {
+            let status: i32 = 0;
+            if state.diagnostics.length() != 0 {
+                status = 1;
+            }
+            return CompileResult {
+                status: status,
+                artifact: artifact,
+                module_count: state.module_count,
+                diagnostics: state.diagnostics,
+            };
+        };
+
+        return std::module {
+            @export let Diagnostic: std::type = Diagnostic;
+            @export let DiagnosticVector: std::type = DiagnosticVector;
+            @export let State: std::type = CompilerContextState;
+            @export let CompileResult: std::type = CompileResult;
+            @export let new = new;
+            @export let add_diagnostic = add_diagnostic;
+            @export let finish = finish;
+        };
+    };
+};

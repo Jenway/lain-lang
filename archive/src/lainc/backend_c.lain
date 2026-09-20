@@ -1,0 +1,2335 @@
+// Lain-written canonical L1 -> C backend.
+//
+// This is deliberately a small, executable backend kernel.  The lowering
+// policy lives in Lain; the host only supplies source bytes and an artifact
+// stream.  It accepts the scalar/procedure subset used by the bootstrap
+// fixtures: #proc, #return, #let, #call, #if, #loop and arithmetic/comparison
+// expressions.  Unsupported statements and expressions are emitted as C
+// comments, so the boundary stays visible in the generated artifact; a type
+// with no C spelling fails the run instead of degrading to a plausible one.
+
+@foreign(c, link_name = "backend.allocate")
+let allocate_pages = std::func(size: usize) -> addr;
+@foreign(c, link_name = "backend.artifact_begin")
+let artifact_begin = std::func() -> unit;
+@foreign(c, link_name = "backend.artifact_write_byte")
+let artifact_write_byte = std::func(byte: i32) -> unit;
+@foreign(c, link_name = "backend.artifact_finish")
+let artifact_finish = std::func() -> unit;
+@foreign(c, link_name = "backend.source_length")
+let source_length = std::func(index: usize) -> usize;
+@foreign(c, link_name = "backend.source_data")
+let source_data = std::func(index: usize) -> addr;
+@foreign(c, link_name = "backend.source_count")
+let source_count = std::func() -> usize;
+@foreign(c, link_name = "backend.copy_bytes")
+let copy_bytes = std::func(destination: addr, source: addr, length: usize) -> unit;
+
+let load8 = std::func(data: addr, index: usize) -> i32 {
+    return std::load_bits(8, data + index);
+};
+
+let append = std::func(output: addr, byte: i32) -> unit {
+    let length: usize = std::load_bits(64, output);
+    std::store_bits(8, output + 8 + length, byte);
+    std::store_bits(64, output, length + 1);
+};
+
+let append_literal = std::func(
+    output: addr,
+    literal: addr,
+    length: usize,
+) -> unit {
+    let current: usize = std::load_bits(64, output);
+    copy_bytes(output + 8 + current, literal, length);
+    std::store_bits(64, output, current + length);
+};
+
+let append_span = std::func(
+    output: addr,
+    source: addr,
+    start: usize,
+    end: usize,
+) -> unit {
+    let length: usize = end - start;
+    let current: usize = std::load_bits(64, output);
+    copy_bytes(output + 8 + current, source + start, length);
+    std::store_bits(64, output, current + length);
+};
+
+// Append a NUL-terminated literal.  A hand-counted byte length is a silent
+// failure mode of its own: too long copies bytes past the text, short
+// truncates it, and neither shows up until the emitted C is compiled.
+let append_text = std::func(output: addr, text: addr) -> unit {
+    let length: usize = 0;
+    while load8(text, length) != 0 {
+        length = length + 1;
+    }
+    append_span(output, text, 0, length);
+    return;
+};
+
+let match_at = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    literal: addr,
+    length: usize,
+) -> bool {
+    if start + length > end {
+        return false;
+    }
+    let index: usize = 0;
+    while index < length {
+        if load8(source, start + index) != std::load_bits(8, literal + index) {
+            return false;
+        }
+        index = index + 1;
+    }
+    return true;
+};
+
+let is_space = std::func(byte: i32) -> bool {
+    return byte == 32 || byte == 9 || byte == 10 || byte == 13;
+};
+
+let find_string_end = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> usize {
+    let index: usize = start + 1;
+    let result: usize = end;
+    while index < end {
+        let byte: i32 = load8(source, index);
+        if byte == 34 {
+            result = index + 1;
+            index = end;
+        } else {
+            index = index + 1;
+        }
+    }
+    return result;
+};
+
+// Canonical L1 may keep a deeply nested expression over several physical
+// source lines.  The backend consumes logical instructions, so count only
+// parentheses/brackets here and let backend_compile join such lines before
+// dispatching them to emit_line.
+// A physical header ends at the body opener or extern terminator, even when
+// its parameter list and return type occupy different source lines.
+let procedure_header_pending = std::func(source: addr, start: usize, end: usize) -> bool {
+    let index: usize = start;
+    while index < end && is_space(load8(source, index)) { index = index + 1; }
+    let terminator: i32 = 123;
+    if match_at(source, index, end, "#extern", 7) {
+        terminator = 59;
+    } else {
+        if !match_at(source, index, end, "#proc", 5) { return false; }
+    }
+    let comment: bool = false;
+    while index < end {
+        let byte: i32 = load8(source, index);
+        let next: usize = index + 1;
+        if comment {
+            if byte == 10 { comment = false; }
+        } else {
+            if byte == 47 && next < end && load8(source, next) == 47 {
+                comment = true;
+            } else {
+                if byte == terminator { return false; }
+            }
+        }
+        index = index + 1;
+    }
+    return true;
+};
+
+let expression_delimiters = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> i32 {
+    let depth: i32 = 0;
+    let quoted: i32 = 0;
+    let escaped: i32 = 0;
+    let index: usize = start;
+    while index < end {
+        let byte: i32 = load8(source, index);
+        // Ignore parentheses in a line comment when computing logical
+        // expression depth. Canonical source comments may contain examples
+        // such as `parse twice(` and must not swallow the rest of the module.
+        if byte == 47 {
+            let comment_next: usize = index + 1;
+            if comment_next < end {
+                if load8(source, comment_next) == 47 {
+                    break;
+                }
+            }
+        }
+        if escaped == 1 {
+            escaped = 0;
+        } else {
+            if quoted == 1 {
+                if byte == 92 {
+                    escaped = 1;
+                } else {
+                    if byte == 34 { quoted = 0; }
+                }
+            } else {
+                if byte == 34 {
+                    quoted = 1;
+                    } else {
+                        if byte == 40 || byte == 91 {
+                            depth = depth + 1;
+                    } else {
+                        if byte == 41 || byte == 93 {
+                            depth = depth - 1;
+                        }
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return depth;
+};
+
+// Width of the `#bits<N>` annotation at `start`, or 0 when the text there is
+// not such an annotation.  This backend lowers expressions textually and
+// keeps no type table, so a conversion's width has to come from its own
+// annotation: `#trunc` uses it for the modular narrowing and the widening
+// conversions for the C type they widen to.  A construct whose width cannot
+// be read off the text is refused rather than guessed.
+let bits_width_from_annotation = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> i32 {
+    let cursor: usize = start;
+    while cursor < end {
+        if is_space(load8(source, cursor)) {
+            cursor = cursor + 1;
+        } else {
+            break;
+        }
+    }
+    if match_at(source, cursor, end, "#bits<", 6) {
+        let width: i32 = 0;
+        cursor = cursor + 6;
+        while cursor < end {
+            let byte: i32 = load8(source, cursor);
+            if byte >= 48 && byte <= 57 {
+                width = width * 10 + (byte - 48);
+                cursor = cursor + 1;
+            } else {
+                break;
+            }
+        }
+        return width;
+    }
+    return 0;
+};
+
+// Source width of a `#zext`/`#sext` operand, read from the result type the
+// operand's own text carries, or 0 when the operand's width cannot be read
+// off the text (a binding or parameter name, whose type is only recorded at
+// its declaration).  A sign extension needs this: the operand's bits must be
+// reinterpreted as a signed value of their own width before the widening
+// cast, and a `#load` is the one construct that reads a value wider than the
+// C type the backend carries it in.
+let operand_bits_width = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+) -> i32 {
+    let cursor: usize = start;
+    while cursor < end {
+        if is_space(load8(source, cursor)) {
+            cursor = cursor + 1;
+        } else {
+            break;
+        }
+    }
+    let open: usize = cursor;
+    if match_at(source, cursor, end, "#trunc", 6) {
+        open = cursor + 6;
+    } else {
+        if match_at(source, cursor, end, "#sext", 5) {
+            open = cursor + 5;
+        } else {
+            if match_at(source, cursor, end, "#zext", 5) {
+                open = cursor + 5;
+            } else {
+                if match_at(source, cursor, end, "#load", 5) {
+                    open = cursor + 5;
+                } else {
+                    return 0;
+                }
+            }
+        }
+    }
+    while open < end {
+        if load8(source, open) == 91 {
+            return bits_width_from_annotation(source, open + 1, end);
+        }
+        open = open + 1;
+    }
+    return 0;
+};
+
+// The C spelling that opens one integer conversion, and 1 when the
+// conversion has one.  The converted value keeps the width and the
+// signedness of the L1 result type, so conversions nest: the next cast reads
+// the value at the width the inner one produced.
+//
+// `#trunc` casts to `uintN_t`.  Unsigned conversion is modular, so for
+// `#bits<8>/<16>/<32>/<64>` -- every width this backend can name -- the cast
+// keeps exactly the low N bits.  It must not be a cast to `intN_t`: the
+// result is a bit pattern, and `(int8_t)200` is -56, which then sign-extends
+// to 0xFFFFFFC8 at the next widening instead of reading as 200.  `#bits<1>`
+// is carried in uint8_t, which has seven spare value bits, so that one width
+// masks explicitly (see conversion_suffix).
+//
+// `#sext` reinterprets the operand as signed at `source_width` before
+// widening, which is what puts the source's top bit at the top of the
+// result.  `source_width` is 0 when it could not be read off the operand
+// text; the widening cast alone is still right whenever the operand's C type
+// already carries its own width, which is the case for a binding, a
+// parameter, a call result and a literal, but not for a `#load`, whose
+// unsigned helper type would widen by zero extension.
+//
+// `#zext` is a plain unsigned widening cast.  Nothing else is needed: the
+// operand's C type already carries its width and is unsigned for every
+// construct that produces bits (a conversion, `#load`), so the cast zero
+// extends.
+let conversion_prefix = std::func(
+    kind: i32,
+    width: i32,
+    source_width: i32,
+    output: addr,
+) -> i32 {
+    if kind == 0 {
+        if width == 1 {
+            append_literal(output, "((uint8_t)((", 12);
+            return 1;
+        }
+        if width == 8 {
+            append_literal(output, "((uint8_t)(", 11);
+            return 1;
+        }
+        if width == 16 {
+            append_literal(output, "((uint16_t)(", 12);
+            return 1;
+        }
+        if width == 32 {
+            append_literal(output, "((uint32_t)(", 12);
+            return 1;
+        }
+        if width == 64 {
+            append_literal(output, "((uint64_t)(", 12);
+            return 1;
+        }
+    }
+    if kind == 1 {
+        if width == 8 {
+            append_literal(output, "((int8_t)", 9);
+        } else {
+            if width == 16 {
+                append_literal(output, "((int16_t)", 10);
+            } else {
+                if width == 32 {
+                    append_literal(output, "((int32_t)", 10);
+                } else {
+                    if width == 64 {
+                        append_literal(output, "((int64_t)", 10);
+                    } else {
+                        return 0;
+                    }
+                }
+            }
+        }
+        if source_width == 0 {
+            append_literal(output, "(", 1);
+            return 1;
+        }
+        if source_width == 8 {
+            append_literal(output, "(int8_t)(", 9);
+            return 1;
+        }
+        if source_width == 16 {
+            append_literal(output, "(int16_t)(", 10);
+            return 1;
+        }
+        if source_width == 32 {
+            append_literal(output, "(int32_t)(", 10);
+            return 1;
+        }
+        if source_width == 64 {
+            append_literal(output, "(int64_t)(", 10);
+            return 1;
+        }
+        // A source width with no signed C type of its own (`#bits<1>`) has no
+        // correct spelling in this backend's type model.  Refuse it instead
+        // of widening it the way a byte would widen.
+        return 0;
+    }
+    if width == 8 {
+        append_literal(output, "((uint8_t)(", 11);
+        return 1;
+    }
+    if width == 16 {
+        append_literal(output, "((uint16_t)(", 12);
+        return 1;
+    }
+    if width == 32 {
+        append_literal(output, "((uint32_t)(", 12);
+        return 1;
+    }
+    if width == 64 {
+        append_literal(output, "((uint64_t)(", 12);
+        return 1;
+    }
+    return 0;
+};
+
+// The C spelling that closes a conversion opened by conversion_prefix.
+let conversion_suffix = std::func(kind: i32, width: i32, output: addr) -> unit {
+    if kind == 0 {
+        if width == 1 {
+            append_literal(output, ") & 1u))", 8);
+            return;
+        }
+    }
+    append_literal(output, "))", 2);
+};
+
+// Copy an expression while removing L1's SSA marker and mapping the pure
+// scalar operators to C helper macros.  Keeping the calls as macros lets the
+// backend remain textual without giving up expression nesting.  An
+// unrecognised directive records the failure in `status`, because a marker
+// alone left the operands behind as a valid C comma expression.
+let emit_expr = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+    status: addr,
+) -> unit {
+    let index: usize = start;
+    while index < end {
+        let byte: i32 = load8(source, index);
+        if byte == 34 {
+            let string_end: usize = find_string_end(source, index, end);
+            append_literal(output, "(uintptr_t)", 11);
+            append_span(output, source, index, string_end);
+            index = string_end;
+        } else {
+        if byte == 37 {
+            index = index + 1;
+        } else {
+            if byte == 35 {
+                if match_at(source, index, end, "#add", 4) {
+                    append_literal(output, "L1_add", 6);
+                    index = index + 4;
+                } else {
+                    if match_at(source, index, end, "#sub", 4) {
+                        append_literal(output, "L1_sub", 6);
+                        index = index + 4;
+                    } else {
+                        if match_at(source, index, end, "#mul", 4) {
+                            append_literal(output, "L1_mul", 6);
+                            index = index + 4;
+                        } else {
+                            if match_at(source, index, end, "#eq", 3) {
+                                append_literal(output, "L1_eq", 5);
+                                index = index + 3;
+                            } else {
+                                if match_at(source, index, end, "#ne", 3) {
+                                    append_literal(output, "L1_ne", 5);
+                                    index = index + 3;
+                                } else {
+                                    if match_at(source, index, end, "#slt", 4) {
+                                        append_literal(output, "L1_lt", 5);
+                                        index = index + 4;
+                                    } else {
+                                        if match_at(source, index, end, "#sle(", 5) {
+                                            append_literal(output, "L1_le", 5);
+                                            index = index + 4;
+                                        } else {
+                                            if match_at(source, index, end, "#sgt", 4) {
+                                                append_literal(output, "L1_gt", 5);
+                                                index = index + 4;
+                                            } else {
+                                            if match_at(source, index, end, "#sge", 4) {
+                                                append_literal(output, "L1_ge", 5);
+                                                index = index + 4;
+                                            } else {
+                                            // The unsigned family.  A signed
+                                            // `L1_lt` here would compare the
+                                            // operands' own C types, which are
+                                            // signed for the narrow integer and
+                                            // `int32_t` spellings.
+                                            if match_at(source, index, end, "#ult", 4) {
+                                                append_literal(output, "L1_ult", 6);
+                                                index = index + 4;
+                                            } else {
+                                            if match_at(source, index, end, "#ule", 4) {
+                                                append_literal(output, "L1_ule", 6);
+                                                index = index + 4;
+                                            } else {
+                                            if match_at(source, index, end, "#ugt", 4) {
+                                                append_literal(output, "L1_ugt", 6);
+                                                index = index + 4;
+                                            } else {
+                                            if match_at(source, index, end, "#uge", 4) {
+                                                append_literal(output, "L1_uge", 6);
+                                                index = index + 4;
+                                            } else {
+                                                    if match_at(source, index, end, "#and", 4) {
+                                                        append_literal(output, "L1_and", 6);
+                                                        index = index + 4;
+                                                    } else {
+                                                        if match_at(source, index, end, "#or", 3) {
+                                                            append_literal(output, "L1_or", 5);
+                                                            index = index + 3;
+                                                        } else {
+                                                    // `#call_indirect` shares this prefix,
+                                                    // but copying its `_indirect[(...) -> ...]`
+                                                    // tail into the C produced invalid source
+                                                    // with no marker.  This backend lowers only
+                                                    // direct calls, so mark the construct and
+                                                    // drop its type signature, leaving the
+                                                    // argument list to be scanned normally.
+                                                    if match_at(source, index + 5, end, "_indirect", 9) {
+                                                        append_literal(output, "/* unsupported L1: #call_indirect */", 36);
+                                                        index = index + 14;
+                                                        while index < end {
+                                                            if load8(source, index) == 93 {
+                                                                index = index + 1;
+                                                                break;
+                                                            }
+                                                            index = index + 1;
+                                                        }
+                                                    } else {
+                                                    if match_at(source, index, end, "#call", 5) {
+                                                        index = index + 5;
+                                    } else {
+                                        if match_at(source, index, end, "#load", 5) {
+                                            let type_start: usize = index + 6;
+                                            // Dispatch on the declared width.  `#addr`
+                                            // is a pointer-width read and `#bits<1>` is
+                                            // a byte-sized boolean; anything else has no
+                                            // C helper, so it leaves a marker rather than
+                                            // reading eight bytes past the object.
+                                            if match_at(source, type_start, end, "#bits<8>", 8) {
+                                                append_literal(output, "L1_load8", 8);
+                                            } else {
+                                                if match_at(source, type_start, end, "#bits<16>", 9) {
+                                                    append_literal(output, "L1_load16", 9);
+                                                } else {
+                                                    if match_at(source, type_start, end, "#bits<32>", 9) {
+                                                        append_literal(output, "L1_load32", 9);
+                                                    } else {
+                                                        if match_at(source, type_start, end, "#bits<64>", 9) {
+                                                            append_literal(output, "L1_load64", 9);
+                                                        } else {
+                                                            if match_at(source, type_start, end, "#addr", 5) {
+                                                                append_literal(output, "L1_load64", 9);
+                                                            } else {
+                                                                if match_at(source, type_start, end, "#bits<1>", 8) {
+                                                                    append_literal(output, "L1_load8", 8);
+                                                                } else {
+                                                                    append_literal(output, "/* unsupported L1: #load */", 27);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            index = index + 5;
+                                            while index < end {
+                                                if load8(source, index) == 93 {
+                                                    index = index + 1;
+                                                    break;
+                                                }
+                                                index = index + 1;
+                                            }
+                                        } else {
+                                            if match_at(source, index, end, "#lea", 4) {
+                                                append_literal(output, "L1_lea(", 7);
+                                                let field_start: usize = index + 5;
+                                                let cursor: usize = field_start;
+                                                let depth: i32 = 0;
+                                                while cursor < end {
+                                                    let field_byte: i32 = load8(source, cursor);
+                                                    if field_byte == 40 {
+                                                        depth = depth + 1;
+                                                    } else {
+                                                        if field_byte == 41 {
+                                                            if depth == 0 {
+                                                                let equals: usize = field_start;
+                                                                while equals < cursor {
+                                                                    if load8(source, equals) == 61 {
+                                                                        break;
+                                                                    }
+                                                                    equals = equals + 1;
+                                                                }
+                                                                emit_expr(source, equals + 1, cursor, output, status);
+                                                                append(output, 41);
+                                                                cursor = cursor + 1;
+                                                                break;
+                                                            }
+                                                            depth = depth - 1;
+                                                        } else {
+                                                            if field_byte == 44 {
+                                                                if depth == 0 {
+                                                                    let equals: usize = field_start;
+                                                                    while equals < cursor {
+                                                                        if load8(source, equals) == 61 {
+                                                                            break;
+                                                                        }
+                                                                        equals = equals + 1;
+                                                                    }
+                                                                    emit_expr(source, equals + 1, cursor, output, status);
+                                                                    append_literal(output, ", ", 2);
+                                                                    field_start = cursor + 1;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    cursor = cursor + 1;
+                                                }
+                                                index = cursor;
+                                            } else {
+                                            if match_at(source, index, end, "#trunc", 6) ||
+                                               match_at(source, index, end, "#sext", 5) ||
+                                               match_at(source, index, end, "#zext", 5) {
+                                                let kind: i32 = 0;
+                                                let open: usize = index + 5;
+                                                if match_at(source, index, end, "#trunc", 6) {
+                                                    kind = 0;
+                                                    open = index + 6;
+                                                } else {
+                                                    if match_at(source, index, end, "#sext", 5) {
+                                                        kind = 1;
+                                                        open = index + 5;
+                                                    }
+                                                }
+                                                // The annotation between `[` and `]` is the
+                                                // width the conversion produces.  It is read
+                                                // from the text because this backend keeps no
+                                                // type table, and `#trunc` needs it to narrow
+                                                // the value by the right modulus.
+                                                let width: i32 = 0;
+                                                while open < end {
+                                                    if load8(source, open) == 91 {
+                                                        width = bits_width_from_annotation(
+                                                            source, open + 1, end
+                                                        );
+                                                        break;
+                                                    }
+                                                    open = open + 1;
+                                                }
+                                                // Advance past the `]` that closes the
+                                                // annotation, then past the spaces before the
+                                                // operand.  What must follow is the
+                                                // parenthesised operand; anything else has no
+                                                // lowering here and is refused below.
+                                                while open < end {
+                                                    if load8(source, open) == 93 {
+                                                        open = open + 1;
+                                                        break;
+                                                    }
+                                                    open = open + 1;
+                                                }
+                                                while open < end {
+                                                    if is_space(load8(source, open)) {
+                                                        open = open + 1;
+                                                    } else {
+                                                        break;
+                                                    }
+                                                }
+                                                if open < end {
+                                                    if load8(source, open) != 40 {
+                                                        width = 0;
+                                                    }
+                                                } else {
+                                                    width = 0;
+                                                }
+                                                // The operand is the whole parenthesised
+                                                // expression, so its extent comes from the
+                                                // matching `)`.  Emitting it through
+                                                // emit_expr is what lets the three
+                                                // conversions nest.
+                                                let operand_start: usize = open + 1;
+                                                let operand_end: usize = open + 1;
+                                                let depth: i32 = 1;
+                                                while operand_end < end {
+                                                    let operand_byte: i32 = load8(source, operand_end);
+                                                    // A call inside the operand may carry a
+                                                    // string argument, and a parenthesis in
+                                                    // that string is not a delimiter.  Skip
+                                                    // the literal the way emit_expr does.
+                                                    if operand_byte == 34 {
+                                                        operand_end = find_string_end(
+                                                            source, operand_end, end
+                                                        );
+                                                    } else {
+                                                        if operand_byte == 40 {
+                                                            depth = depth + 1;
+                                                        } else {
+                                                            if operand_byte == 41 {
+                                                                depth = depth - 1;
+                                                                if depth == 0 {
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                        operand_end = operand_end + 1;
+                                                    }
+                                                }
+                                                index = operand_end + 1;
+                                                let source_width: i32 = 0;
+                                                if kind == 1 {
+                                                    source_width = operand_bits_width(
+                                                        source, operand_start, operand_end
+                                                    );
+                                                }
+                                                let opened: i32 = conversion_prefix(
+                                                    kind, width, source_width, output
+                                                );
+                                                if opened == 1 {
+                                                    emit_expr(
+                                                        source, operand_start, operand_end,
+                                                        output, status
+                                                    );
+                                                    conversion_suffix(kind, width, output);
+                                                } else {
+                                                    // A conversion whose width is not one the
+                                                    // backend can name is refused, not
+                                                    // approximated: the marker is a C comment,
+                                                    // so a plausible cast would hide the
+                                                    // mismatch, and the recorded status keeps
+                                                    // the artifact from being published.
+                                                    if kind == 0 {
+                                                        append_literal(output, "/* unsupported L1: #trunc */", 28);
+                                                    } else {
+                                                        if kind == 1 {
+                                                            append_literal(output, "/* unsupported L1: #sext */", 27);
+                                                        } else {
+                                                            append_literal(output, "/* unsupported L1: #zext */", 27);
+                                                        }
+                                                    }
+                                                    std::store_bits(64, status, 1);
+                                                }
+                                            } else {
+                                                // `#sdiv` used to be tested as a sibling of
+                                                // this chain, so a match fell through to the
+                                                // unknown-token fallback below: that copied the
+                                                // `#` of `#sdiv` into the C and consumed the
+                                                // `(` of its argument list, turning
+                                                // `#sdiv(%a, %b)` into invalid C.  Leading the
+                                                // chain keeps a division mutually exclusive
+                                                // with the fallback.
+                                                if match_at(source, index, end, "#sdiv", 5) {
+                                                    append_literal(output, "L1_sdiv", 7);
+                                                    index = index + 5;
+                                                } else {
+                                                if match_at(source, index, end, "#udiv", 5) {
+                                                    append_literal(output, "L1_udiv", 7);
+                                                    index = index + 5;
+                                                } else {
+                                                if match_at(source, index, end, "#urem", 5) {
+                                                    append_literal(output, "L1_urem", 7);
+                                                    index = index + 5;
+                                                } else {
+                                                if match_at(source, index, end, "#int2ptr", 8) {
+                                                    index = index + 8;
+                                                } else {
+                                                    if match_at(source, index, end, "#ptr2int", 8) {
+                                                        index = index + 8;
+                                                    } else {
+                                                        if match_at(source, index, end, "#data_addr(", 11) {
+                                                            // This backend models `#addr` as
+                                                            // uintptr_t (see emit_c_type), so
+                                                            // the address of a data object is
+                                                            // that type rather than a pointer;
+                                                            // emitting a pointer here would be
+                                                            // inconsistent with every other
+                                                            // address value and would need a
+                                                            // cast at each use site.
+                                                            append_literal(output, "((uintptr_t)", 12);
+                                                            let operand_start: usize = index + 11;
+                                                            let operand_end: usize = operand_start;
+                                                            while operand_end < end {
+                                                                if load8(source, operand_end) == 41 {
+                                                                    break;
+                                                                }
+                                                                operand_end = operand_end + 1;
+                                                            }
+                                                            append_span(output, source, operand_start, operand_end);
+                                                            append(output, 41);
+                                                            index = operand_end + 1;
+                                                        } else {
+                                                            // An unrecognised `#` directive must
+                                                            // not reach C as source.  Marking it
+                                                            // alone was not enough: a marker is a C
+                                                            // *comment*, so the operands stayed
+                                                            // behind, `#fadd(x, y)` emitted
+                                                            // `(x, y)`, and a comma expression is
+                                                            // valid C that silently evaluates to
+                                                            // `y`.  An expression this backend
+                                                            // cannot lower now records the failure
+                                                            // in the shared status, and
+                                                            // backend_compile refuses to publish
+                                                            // the artifact.  The marker stays so a
+                                                            // rejected buffer still shows where the
+                                                            // unimplemented construct was.
+                                                            append_literal(output, "/* unsupported L1: ", 19);
+                                                            let marker_end: usize = index;
+                                                            while marker_end < end {
+                                                                let marker_byte: i32 = load8(source, marker_end);
+                                                                if is_space(marker_byte) || marker_byte == 40 ||
+                                                                   marker_byte == 91 || marker_byte == 44 ||
+                                                                   marker_byte == 41 || marker_byte == 61 {
+                                                                    break;
+                                                                }
+                                                                marker_end = marker_end + 1;
+                                                            }
+                                                            append_span(output, source, index, marker_end);
+                                                            append_literal(output, " */", 3);
+                                                            std::store_bits(64, status, 1);
+                                                            index = marker_end;
+                                                        }
+                                                    }
+                                                }
+                                                }
+                                                }
+                                                }
+                                            }
+                                            }
+                                        }
+                                    }
+                                                    }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                                            // The four unsigned branches each
+                                            // add one block to this chain, so
+                                            // four closers join the run that
+                                            // unwinds it.
+                                            }
+                                            }
+                                            }
+                                            }
+            } else {
+                if byte == 10 || byte == 13 {
+                    append(output, 32);
+                } else {
+                if byte == 46 || byte == 45 {
+                    append(output, 95);
+                } else {
+                    append(output, byte);
+                }
+                }
+                index = index + 1;
+            }
+        }
+        }
+    }
+};
+
+let emit_c_type = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+    status: addr,
+) -> unit {
+    let index: usize = start;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    if match_at(source, index, end, "#unit", 5) {
+        append_literal(output, "void", 4);
+        return;
+    }
+    // `#never` is a physical type without a C representation, like `#unit`.
+    if match_at(source, index, end, "#never", 6) {
+        append_literal(output, "void", 4);
+        return;
+    }
+    if match_at(source, index, end, "#addr", 5) {
+        append_literal(output, "uintptr_t", 9);
+        return;
+    }
+    if match_at(source, index, end, "addr", 4) {
+        append_literal(output, "uintptr_t", 9);
+        return;
+    }
+    if match_at(source, index, end, "#bits<1>", 8) {
+        append_literal(output, "uint8_t", 7);
+        return;
+    }
+    if match_at(source, index, end, "#bits<8>", 8) {
+        append_literal(output, "int8_t", 6);
+        return;
+    }
+    if match_at(source, index, end, "#bits<16>", 9) {
+        append_literal(output, "int16_t", 7);
+        return;
+    }
+    // `#bits<32>` and `#bits<64>` stay unsigned: the lowered closures depend
+    // on that spelling, so only the widths that had no mapping at all are
+    // added, keeping every existing artifact byte-for-byte stable.
+    if match_at(source, index, end, "#bits<32>", 9) {
+        append_literal(output, "uint32_t", 8);
+        return;
+    }
+    if match_at(source, index, end, "#bits<64>", 9) {
+        append_literal(output, "uint64_t", 8);
+        return;
+    }
+    if match_at(source, index, end, "#float<32>", 10) {
+        append_literal(output, "float", 5);
+        return;
+    }
+    if match_at(source, index, end, "#float<64>", 10) {
+        append_literal(output, "double", 6);
+        return;
+    }
+    // An unrecognised type has no C spelling.  Substituting one (the old
+    // fallback wrote `uint64_t`) yielded C that compiled and silently
+    // mis-modelled the value, so leave the same marker the statement emitter
+    // uses and record the failure for backend_compile to abort on.
+    let marker_end: usize = index;
+    while marker_end < end {
+        let byte: i32 = load8(source, marker_end);
+        if is_space(byte) || byte == 123 || byte == 61 || byte == 44 || byte == 41 {
+            break;
+        }
+        marker_end = marker_end + 1;
+    }
+    append_literal(output, "/* unsupported L1 type: ", 24);
+    append_span(output, source, index, marker_end);
+    append_literal(output, " */", 3);
+    std::store_bits(64, status, 1);
+};
+
+// An `addr` typed binding is emitted as `uintptr_t` (see emit_c_type), so its
+// initializer needs an explicit conversion to that C type.  Without it a
+// pointer valued initializer such as `#data_addr` would violate the C
+// assignment constraint instead of forming the integer address this backend
+// uses to model `addr`.
+let is_addr_type = std::func(source: addr, start: usize, end: usize) -> bool {
+    let index: usize = start;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    if match_at(source, index, end, "#addr", 5) {
+        return true;
+    }
+    if match_at(source, index, end, "addr", 4) {
+        return true;
+    }
+    return false;
+};
+
+let emit_proc = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+    status: addr,
+) -> unit {
+    let index: usize = start + 5;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    let name_start: usize = index;
+    while index < end {
+        if load8(source, index) == 40 {
+            break;
+        }
+        index = index + 1;
+    }
+    let open: usize = index;
+    let close: usize = open;
+    while close < end {
+        if load8(source, close) == 41 {
+            break;
+        }
+        close = close + 1;
+    }
+    let arrow: usize = close;
+    while arrow < end {
+        if match_at(source, arrow, end, "->", 2) {
+            break;
+        }
+        arrow = arrow + 1;
+    }
+    if match_at(source, name_start, open, "main", 4) {
+        append_literal(output, "int", 3);
+    } else {
+        emit_c_type(source, arrow + 2, end, output, status);
+    }
+    append_literal(output, " ", 1);
+    if match_at(source, name_start, open, "main", 4) {
+        append_literal(output, "lainc_entry", 11);
+    } else {
+        append_span(output, source, name_start, open);
+    }
+    append_literal(output, "(", 1);
+    let cursor: usize = open + 1;
+    let type_cursor: usize = cursor;
+    let emitted: i32 = 0;
+    while cursor < close {
+        if load8(source, cursor) == 37 {
+            let name_cursor: usize = cursor + 1;
+            let name_end: usize = name_cursor;
+            while name_end < close {
+                let name_byte: i32 = load8(source, name_end);
+                if name_byte == 44 {
+                    break;
+                }
+                if name_byte == 41 {
+                    break;
+                }
+                if is_space(name_byte) {
+                    break;
+                }
+                name_end = name_end + 1;
+            }
+            if emitted == 1 {
+                append_literal(output, ", ", 2);
+            }
+            emit_c_type(source, type_cursor, cursor, output, status);
+            append_literal(output, " ", 1);
+            let shadow_types: i32 = 0;
+            if match_at(source, name_start, open, "f0_emit_module", 14) {
+                shadow_types = 1;
+            }
+            if match_at(source, name_start, open, "f0_emit_function2", 17) {
+                shadow_types = 1;
+            }
+            if shadow_types == 1 {
+                if match_at(source, name_cursor, name_end, "types", 5) {
+                    append_literal(output, "param_types", 11);
+                } else {
+                    append_span(output, source, name_cursor, name_end);
+                }
+            } else {
+                append_span(output, source, name_cursor, name_end);
+            }
+            emitted = 1;
+            cursor = name_end;
+        } else {
+            if load8(source, cursor) == 44 {
+                type_cursor = cursor + 1;
+            }
+            cursor = cursor + 1;
+        }
+    }
+    if emitted == 0 {
+        append_literal(output, "void", 4);
+    }
+    append_literal(output, ") {\n", 4);
+    append_literal(output, "  if (getenv(\"LAIN_NATIVE_TRACE_PROCS\")) { fprintf(stderr, \"proc: ", 66);
+    append_span(output, source, name_start, open);
+    append(output, 92);
+    append(output, 110);
+    append_literal(output, "\"); fflush(stderr); }\n", 22);
+};
+
+// Emit complete C declarations in a first pass.  The generated definitions
+// preserve each physical L1 parameter type. Matching prototypes avoid the
+// optimizer-sensitive undefined behavior caused by old-style `proc()`
+// declarations while still allowing calls to procedures emitted later.
+let emit_proc_decl = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+    status: addr,
+) -> unit {
+    let index: usize = start + 5;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    let name_start: usize = index;
+    while index < end {
+        if load8(source, index) == 40 {
+            break;
+        }
+        index = index + 1;
+    }
+    let open: usize = index;
+    let close: usize = open;
+    while close < end {
+        if load8(source, close) == 41 {
+            break;
+        }
+        close = close + 1;
+    }
+    // A multiline procedure header is collected by the main emitter pass.
+    // The declaration pass sees only its first physical line; do not turn
+    // that partial header into an incorrect `(void)` prototype.
+    if close == end {
+        return;
+    }
+    let arrow: usize = open;
+    while arrow < end {
+        if match_at(source, arrow, end, "->", 2) {
+            break;
+        }
+        arrow = arrow + 1;
+    }
+    if match_at(source, name_start, open, "main", 4) {
+        append_literal(output, "int", 3);
+    } else {
+        emit_c_type(source, arrow + 2, end, output, status);
+    }
+    append_literal(output, " ", 1);
+    if match_at(source, name_start, open, "main", 4) {
+        append_literal(output, "lainc_entry", 11);
+    } else {
+        append_span(output, source, name_start, open);
+    }
+    append_literal(output, "(", 1);
+    let cursor: usize = open + 1;
+    let type_cursor: usize = cursor;
+    let emitted: i32 = 0;
+    while cursor < close {
+        if load8(source, cursor) == 37 {
+            let name_cursor: usize = cursor + 1;
+            let name_end: usize = name_cursor;
+            while name_end < close {
+                let name_byte: i32 = load8(source, name_end);
+                if name_byte == 44 || name_byte == 41 || is_space(name_byte) {
+                    break;
+                }
+                name_end = name_end + 1;
+            }
+            if emitted == 1 {
+                append_literal(output, ", ", 2);
+            }
+            emit_c_type(source, type_cursor, cursor, output, status);
+            append_literal(output, " ", 1);
+            append_span(output, source, name_cursor, name_end);
+            emitted = 1;
+            cursor = name_end;
+        } else {
+            if load8(source, cursor) == 44 {
+                type_cursor = cursor + 1;
+            }
+            cursor = cursor + 1;
+        }
+    }
+    if emitted == 0 {
+        append_literal(output, "void", 4);
+    }
+    append_literal(output, ");\n", 3);
+};
+
+// Emit a real C prototype for an L1 extern.  The previous implementation
+// preserved extern lines only as comments, which made a C11 translation unit
+// containing a user call rely on an undeclared function.  Keep the ABI
+// physical parameter types consistent with procedure declarations and
+// normalize Lain's '-'/' .' symbol separators to C identifiers.
+let emit_extern_decl = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+    status: addr,
+) -> unit {
+    let index: usize = start + 7;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    // The canonical form is `#extern #proc ...`; tolerate the compact form
+    // as well and advance past the optional `#proc` marker.
+    if match_at(source, index, end, "#proc", 5) {
+        index = index + 5;
+    }
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    let name_start: usize = index;
+    while index < end {
+        if load8(source, index) == 40 { break; }
+        index = index + 1;
+    }
+    let open: usize = index;
+    let name_end: usize = open;
+    // The native wrapper declares the bootstrap ABI once in the generated
+    // prologue. Canonical compiler artifacts may carry older source-level
+    // bootstrap externs with incompatible physical types.
+    if match_at(source, name_start, name_end, "bootstrap_", 10) {
+        return;
+    }
+    if match_at(source, name_start, name_end, "bootstrap.", 10) {
+        return;
+    }
+    let close: usize = open;
+    while close < end {
+        if load8(source, close) == 41 { break; }
+        close = close + 1;
+    }
+    // The declaration pass sees only one physical line of a multiline extern;
+    // wait for the complete logical declaration instead of emitting `(void)`.
+    if close == end {
+        return;
+    }
+    let arrow: usize = close;
+    while arrow < end {
+        if match_at(source, arrow, end, "->", 2) { break; }
+        arrow = arrow + 1;
+    }
+    append_literal(output, "extern ", 7);
+    emit_c_type(source, arrow + 2, end, output, status);
+    append_literal(output, " ", 1);
+    let name_cursor: usize = name_start;
+    while name_cursor < open {
+        let byte: i32 = load8(source, name_cursor);
+        if byte == 45 || byte == 46 {
+            append(output, 95);
+        } else {
+            append(output, byte);
+        }
+        name_cursor = name_cursor + 1;
+    }
+    append_literal(output, "(", 1);
+    let cursor: usize = open + 1;
+    let type_cursor: usize = cursor;
+    let emitted: i32 = 0;
+    while cursor < close {
+        if load8(source, cursor) == 37 {
+            let param_start: usize = cursor + 1;
+            let param_end: usize = param_start;
+            while param_end < close {
+                let byte: i32 = load8(source, param_end);
+                if byte == 44 || byte == 41 || is_space(byte) {
+                    break;
+                }
+                param_end = param_end + 1;
+            }
+            if emitted == 1 { append_literal(output, ", ", 2); }
+            emit_c_type(source, type_cursor, cursor, output, status);
+            append_literal(output, " ", 1);
+            append_span(output, source, param_start, param_end);
+            emitted = 1;
+            cursor = param_end;
+        } else {
+            if load8(source, cursor) == 44 {
+                type_cursor = cursor + 1;
+            }
+            cursor = cursor + 1;
+        }
+    }
+    if emitted == 0 { append_literal(output, "void", 4); }
+    append_literal(output, ");\n", 3);
+};
+
+let emit_store_line = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+    status: addr,
+) -> unit {
+    // `width` is the store's physical width.  When the text declares one it is
+    // read below; otherwise `from_value` stays set and the value's own physical
+    // type decides, which is the rule the L1 verifier applies to a `#store`
+    // that carries no type.
+    let width: i32 = 64;
+    let from_value: i32 = 1;
+    let index: usize = start + 6;
+    if index < end {
+        if load8(source, index) == 91 {
+            from_value = 0;
+            let type_start: usize = index + 1;
+            if match_at(source, type_start, end, "#bits<8>", 8) {
+                width = 8;
+            } else {
+                if match_at(source, type_start, end, "#bits<16>", 9) {
+                    width = 16;
+                } else {
+                    if match_at(source, type_start, end, "#bits<32>", 9) {
+                        width = 32;
+                    } else {
+                        if match_at(source, type_start, end, "#bits<64>", 9) {
+                            width = 64;
+                        } else {
+                            // A declared width without a C helper must not widen
+                            // to 64 bits: the store would overwrite the bytes
+                            // after its destination.  Zero selects the marker.
+                            width = 0;
+                        }
+                    }
+                }
+            }
+            while index < end {
+                if load8(source, index) == 93 {
+                    index = index + 1;
+                    break;
+                }
+                index = index + 1;
+            }
+        }
+    }
+    let value_start: usize = index;
+    while value_start < end {
+        if is_space(load8(source, value_start)) {
+            value_start = value_start + 1;
+        } else {
+            break;
+        }
+    }
+    let comma: usize = value_start;
+    let depth: i32 = 0;
+    while comma < end {
+        let byte: i32 = load8(source, comma);
+        if byte == 40 {
+            depth = depth + 1;
+        } else {
+            if byte == 41 {
+                depth = depth - 1;
+            } else {
+                if byte == 44 && depth == 0 {
+                    break;
+                }
+            }
+        }
+        comma = comma + 1;
+    }
+    // A value whose C type carries its L1 width needs no text rule: a binding
+    // keeps its declared type, a call its return type and a `#load` its
+    // annotation, so `L1_store_auto` reads the width from the emitted
+    // expression.  Two forms are settled from the text instead, because their C
+    // spelling loses the width.  An integer literal is `#bits<64>` in L1 but a
+    // plain C `int`, and a `#trunc[#bits<8>]` wrapper is stripped below so the
+    // cast that names its width never reaches the selection.
+    //
+    // The old rule guessed 64 bits unless the value's *spelling* began with
+    // `%byte` or `#trunc[#bits<8>]`, which stored a `#bits<32>` binding as eight
+    // bytes and overwrote the fields behind it, and which also read `%bytes` as
+    // a byte value because the test was a prefix match.
+    if from_value == 1 {
+        if value_start < comma {
+            let lead: i32 = load8(source, value_start);
+            if lead >= 48 && lead <= 57 {
+                from_value = 0;
+                width = 64;
+            }
+        }
+        if match_at(source, value_start, comma, "#trunc[#bits<8>]", 16) {
+            from_value = 0;
+            width = 8;
+        }
+    }
+    if from_value == 1 {
+        append_text(output, "L1_store_auto(");
+    } else {
+        if width == 8 {
+            append_literal(output, "L1_store8(", 10);
+        } else {
+            if width == 16 {
+                append_literal(output, "L1_store16(", 11);
+            } else {
+                if width == 32 {
+                    append_literal(output, "L1_store32(", 11);
+                } else {
+                    if width == 64 {
+                        append_literal(output, "L1_store64(", 11);
+                    } else {
+                        append_literal(output, "/* unsupported L1: #store */", 28);
+                    }
+                }
+            }
+        }
+    }
+    if comma < end {
+        emit_expr(source, comma + 1, end, output, status);
+        append_literal(output, ", ", 2);
+    }
+    let value_expr_start: usize = value_start;
+    let value_expr_end: usize = comma;
+    // The L1 verifier requires an explicit truncation for an i32-to-i8
+    // store.  The C macro already performs the same narrowing conversion, so
+    // strip the wrapper before handing the expression to the C emitter.
+    if match_at(source, value_start, comma, "#trunc[#bits<8>](", 17) {
+        value_expr_start = value_start + 17;
+        if comma > value_expr_start && load8(source, comma - 1) == 41 {
+            value_expr_end = comma - 1;
+        }
+    }
+    emit_expr(source, value_expr_start, value_expr_end, output, status);
+    append_literal(output, ");\n", 3);
+};
+
+// Emit a byte value (0..255) as decimal text.  Lain has no division
+// operator, so the digits come from repeated subtraction.  The seed emitter
+// writes a data object as a list of decimal byte values, so the initializer
+// never has to survive a second round trip through a C string literal.
+let append_decimal_byte = std::func(output: addr, value: i32) -> unit {
+    let remaining: i32 = value;
+    let hundreds: i32 = 0;
+    while remaining >= 100 {
+        remaining = remaining - 100;
+        hundreds = hundreds + 1;
+    }
+    if hundreds > 0 {
+        append(output, 48 + hundreds);
+    }
+    let tens: i32 = 0;
+    while remaining >= 10 {
+        remaining = remaining - 10;
+        tens = tens + 1;
+    }
+    if hundreds > 0 || tens > 0 {
+        append(output, 48 + tens);
+    }
+    append(output, 48 + remaining);
+};
+
+// One decoded initializer byte: keep the `, ` separator with the value so an
+// escape that expands to two bytes (the seed lexer keeps the backslash of an
+// unknown escape) still separates them.
+let append_data_byte = std::func(output: addr, byte: i32, emitted: i32) -> i32 {
+    if emitted > 0 {
+        append_literal(output, ", ", 2);
+    }
+    append_decimal_byte(output, byte);
+    return emitted + 1;
+};
+
+// Hex digit value for a `\xHH` escape, or -1 when the position is out of
+// range or is not a hex digit, which is the seed lexer's fallback condition.
+let hex_value = std::func(source: addr, index: usize, end: usize) -> i32 {
+    if index >= end {
+        return 0 - 1;
+    }
+    let byte: i32 = load8(source, index);
+    if byte >= 48 && byte <= 57 {
+        return byte - 48;
+    }
+    if byte >= 97 && byte <= 102 {
+        return byte - 87;
+    }
+    if byte >= 65 && byte <= 70 {
+        return byte - 55;
+    }
+    return 0 - 1;
+};
+
+// Emit `#data NAME(size, align, "initializer")` as a static read-only array.
+// The seed emitter places data objects after the prologue and before the
+// procedure prototypes; backend_compile runs this pass at the same point of
+// its output, so a `#data_addr` operand always names an object that is
+// already declared.  The size and alignment digits are copied verbatim from
+// the declaration and the initializer is expanded to decimal byte values,
+// zero padded to the declared size, so no C escaping applies at all.
+let emit_data_decl = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+) -> unit {
+    let index: usize = start + 5;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    let name_start: usize = index;
+    while index < end {
+        if load8(source, index) == 40 {
+            break;
+        }
+        index = index + 1;
+    }
+    let name_end: usize = index;
+    let size_start: usize = index + 1;
+    while size_start < end {
+        if is_space(load8(source, size_start)) {
+            size_start = size_start + 1;
+        } else {
+            break;
+        }
+    }
+    let size_end: usize = size_start;
+    while size_end < end {
+        if load8(source, size_end) >= 48 && load8(source, size_end) <= 57 {
+            size_end = size_end + 1;
+        } else {
+            break;
+        }
+    }
+    let size_value: i32 = 0;
+    let size_cursor: usize = size_start;
+    while size_cursor < size_end {
+        // The bootstrap frontend drops the additive term of an unparenthesized
+        // `a * b + c` assignment, so the product is parenthesized here.
+        size_value = (size_value * 10) + (load8(source, size_cursor) - 48);
+        size_cursor = size_cursor + 1;
+    }
+    let align_start: usize = size_end;
+    while align_start < end {
+        if load8(source, align_start) == 44 {
+            break;
+        }
+        align_start = align_start + 1;
+    }
+    align_start = align_start + 1;
+    while align_start < end {
+        if is_space(load8(source, align_start)) {
+            align_start = align_start + 1;
+        } else {
+            break;
+        }
+    }
+    let align_end: usize = align_start;
+    while align_end < end {
+        if load8(source, align_end) >= 48 && load8(source, align_end) <= 57 {
+            align_end = align_end + 1;
+        } else {
+            break;
+        }
+    }
+    let quote: usize = align_end;
+    while quote < end {
+        if load8(source, quote) == 34 {
+            break;
+        }
+        quote = quote + 1;
+    }
+    let content_start: usize = quote + 1;
+    let content_end: usize = content_start;
+    let escaped: i32 = 0;
+    while content_end < end {
+        let byte: i32 = load8(source, content_end);
+        if escaped == 1 {
+            escaped = 0;
+            content_end = content_end + 1;
+        } else {
+            if byte == 92 {
+                escaped = 1;
+                content_end = content_end + 1;
+            } else {
+                if byte == 34 {
+                    break;
+                } else {
+                    content_end = content_end + 1;
+                }
+            }
+        }
+    }
+    append_literal(output, "_Alignas(", 9);
+    append_span(output, source, align_start, align_end);
+    append_literal(output, ") static const uint8_t ", 23);
+    append_span(output, source, name_start, name_end);
+    append_literal(output, "[", 1);
+    append_span(output, source, size_start, size_end);
+    append_literal(output, "] = {", 5);
+    let emitted: i32 = 0;
+    let content_cursor: usize = content_start;
+    while content_cursor < content_end {
+        // The bootstrap frontend drops every conjunct after the first in a
+        // `while a && b` condition, so the size bound is checked here.
+        if emitted >= size_value {
+            break;
+        }
+        let byte: i32 = load8(source, content_cursor);
+        if byte != 92 {
+            emitted = append_data_byte(output, byte, emitted);
+            content_cursor = content_cursor + 1;
+            continue;
+        }
+        // `\` at the very end is not an escape; the seed lexer keeps it.
+        if content_cursor + 1 >= content_end {
+            emitted = append_data_byte(output, 92, emitted);
+            content_cursor = content_cursor + 1;
+            continue;
+        }
+        // Decode exactly like the seed lexer's token_string_literal: the
+        // named escapes, `\xHH` when both digits are hex, and otherwise the
+        // backslash together with the escaped byte.
+        let escaped_byte: i32 = load8(source, content_cursor + 1);
+        if escaped_byte == 110 {
+            emitted = append_data_byte(output, 10, emitted);
+            content_cursor = content_cursor + 2;
+            continue;
+        }
+        if escaped_byte == 114 {
+            emitted = append_data_byte(output, 13, emitted);
+            content_cursor = content_cursor + 2;
+            continue;
+        }
+        if escaped_byte == 116 {
+            emitted = append_data_byte(output, 9, emitted);
+            content_cursor = content_cursor + 2;
+            continue;
+        }
+        if escaped_byte == 92 {
+            emitted = append_data_byte(output, 92, emitted);
+            content_cursor = content_cursor + 2;
+            continue;
+        }
+        if escaped_byte == 34 {
+            emitted = append_data_byte(output, 34, emitted);
+            content_cursor = content_cursor + 2;
+            continue;
+        }
+        if escaped_byte == 120 {
+            let high: i32 = hex_value(source, content_cursor + 2, content_end);
+            let low: i32 = hex_value(source, content_cursor + 3, content_end);
+            if high >= 0 && low >= 0 {
+                // The bootstrap frontend drops the additive term of an
+                // unparenthesized `a * b + c`, so the product is parenthesized.
+                emitted = append_data_byte(output, (high * 16) + low, emitted);
+                content_cursor = content_cursor + 4;
+                continue;
+            }
+        }
+        emitted = append_data_byte(output, 92, emitted);
+        emitted = append_data_byte(output, escaped_byte, emitted);
+        content_cursor = content_cursor + 2;
+        continue;
+    }
+    while emitted < size_value {
+        if emitted > 0 {
+            append_literal(output, ", ", 2);
+        }
+        append(output, 48);
+        emitted = emitted + 1;
+    }
+    append_literal(output, "};\n", 3);
+};
+
+let emit_line = std::func(
+    source: addr,
+    start: usize,
+    end: usize,
+    output: addr,
+    status: addr,
+) -> unit {
+    let index: usize = start;
+    while index < end {
+        if is_space(load8(source, index)) {
+            index = index + 1;
+        } else {
+            break;
+        }
+    }
+    if index == end {
+        return;
+    }
+    if match_at(source, index, end, "#proc", 5) {
+        emit_proc(source, index, end, output, status);
+        return;
+    }
+    if match_at(source, index, end, "#extern", 7) {
+        emit_extern_decl(source, index, end, output, status);
+        return;
+    }
+    // `#data` declarations were already emitted by the data pass, which runs
+    // before the prototypes.  `#data_addr` shares the prefix but is an
+    // expression, so only the bare declaration keyword is dropped here.
+    if match_at(source, index, end, "#data", 5) {
+        let keyword_end: usize = index + 5;
+        if keyword_end == end || load8(source, keyword_end) != 95 {
+            return;
+        }
+    }
+    // Canonical L1 keeps an inline block and its closing brace on one
+    // physical line (`} else { %r = 2 }`).  Emit the opener here, then hand
+    // the rest of the same line back to the statement dispatch; discarding it
+    // silently produced C with unbalanced braces.  Each opener consumes at
+    // least one byte, so the recursion below strictly advances through the
+    // line and terminates.
+    let inline_opener: i32 = 0;
+    if match_at(source, index, end, "} else {", 8) {
+        append_literal(output, "} else {\n", 9);
+        index = index + 8;
+        inline_opener = 1;
+    } else {
+        if match_at(source, index, end, "else {", 6) {
+            append_literal(output, "else {\n", 7);
+            index = index + 6;
+            inline_opener = 1;
+        } else {
+            if load8(source, index) == 125 {
+                append_literal(output, "}\n", 2);
+                index = index + 1;
+                inline_opener = 1;
+            }
+        }
+    }
+    if inline_opener == 1 {
+        while index < end {
+            if is_space(load8(source, index)) {
+                index = index + 1;
+            } else {
+                break;
+            }
+        }
+        let tail_end: usize = end;
+        while tail_end > index {
+            if is_space(load8(source, tail_end - 1)) {
+                tail_end = tail_end - 1;
+            } else {
+                break;
+            }
+        }
+        if tail_end > index && load8(source, tail_end - 1) == 125 {
+            // The line's last non-space byte closes the inline block, so the
+            // statements before it are emitted first and the closing brace
+            // afterwards.
+            let body_end: usize = tail_end - 1;
+            while body_end > index {
+                if is_space(load8(source, body_end - 1)) {
+                    body_end = body_end - 1;
+                } else {
+                    break;
+                }
+            }
+            if index < body_end {
+                emit_line(source, index, body_end, output, status);
+            }
+            append_literal(output, "}\n", 2);
+        } else {
+            if index < end {
+                emit_line(source, index, end, output, status);
+            }
+        }
+        return;
+    }
+    if match_at(source, index, end, "#store", 6) {
+        emit_store_line(source, index, end, output, status);
+        return;
+    }
+    if match_at(source, index, end, "#return", 7) {
+        append_literal(output, "  return ", 9);
+        emit_expr(source, index + 7, end, output, status);
+        append_literal(output, ";\n", 2);
+        return;
+    }
+    if match_at(source, index, end, "#let", 4) {
+        let name: usize = index + 4;
+        while name < end {
+            if is_space(load8(source, name)) {
+                name = name + 1;
+            } else {
+                break;
+            }
+        }
+        if name < end {
+            if load8(source, name) == 37 {
+                name = name + 1;
+            }
+        }
+        let name_end: usize = name;
+        while name_end < end {
+            let name_byte: i32 = load8(source, name_end);
+            if name_byte == 58 || is_space(name_byte) {
+                break;
+            }
+            name_end = name_end + 1;
+        }
+        let equals: usize = name;
+        while equals < end {
+            if load8(source, equals) == 61 {
+                break;
+            }
+            equals = equals + 1;
+        }
+        append_literal(output, "  ", 2);
+        let type_start: usize = name_end;
+        while type_start < equals {
+            if is_space(load8(source, type_start)) {
+                type_start = type_start + 1;
+            } else {
+                break;
+            }
+        }
+        if type_start < equals && load8(source, type_start) == 58 {
+            type_start = type_start + 1;
+        }
+        emit_c_type(source, type_start, equals, output, status);
+        append_literal(output, " ", 1);
+        append_span(output, source, name, name_end);
+        append_literal(output, "= ", 2);
+        if is_addr_type(source, type_start, equals) {
+            append_literal(output, "(", 1);
+            emit_c_type(source, type_start, equals, output, status);
+            append_literal(output, ")", 1);
+        }
+        if equals < end {
+            let value_start: usize = equals + 1;
+            while value_start < end {
+                if is_space(load8(source, value_start)) {
+                    value_start = value_start + 1;
+                } else {
+                    break;
+                }
+            }
+            if match_at(source, value_start, end, "#alloca", 7) {
+                // The lowered form is `#alloca(<byte size>)`.  The source-level
+                // `#alloca(<type>)` form carries a type instead of a count,
+                // which was copied through as `L1_alloca(#bits<8>)`; fail it
+                // rather than emit C that cannot compile.
+                let argument: usize = value_start + 7;
+                if argument < end && load8(source, argument) == 40 {
+                    argument = argument + 1;
+                }
+                while argument < end {
+                    if is_space(load8(source, argument)) {
+                        argument = argument + 1;
+                    } else {
+                        break;
+                    }
+                }
+                if argument < end && load8(source, argument) == 35 {
+                    append_literal(output, "/* unsupported L1: #alloca */", 29);
+                    std::store_bits(64, status, 1);
+                } else {
+                    append_literal(output, "L1_alloca", 9);
+                    append_span(output, source, value_start + 7, end);
+                }
+            } else {
+                emit_expr(source, equals + 1, end, output, status);
+            }
+        }
+        append_literal(output, ";\n", 2);
+        return;
+    }
+    if load8(source, index) == 37 {
+        let name: usize = index + 1;
+        let colon: usize = name;
+        while colon < end {
+            let name_byte: i32 = load8(source, colon);
+            if name_byte == 58 {
+                break;
+            }
+            if name_byte == 61 {
+                break;
+            }
+            if is_space(name_byte) {
+                break;
+            }
+            colon = colon + 1;
+        }
+        let equals: usize = colon;
+        if equals < end {
+            if load8(source, equals) != 61 {
+                while equals < end {
+                    if load8(source, equals) == 61 {
+                        break;
+                    }
+                    equals = equals + 1;
+                }
+            }
+        }
+        append_literal(output, "  ", 2);
+        append_span(output, source, name, colon);
+        append_literal(output, " = ", 3);
+        if equals < end {
+            emit_expr(source, equals + 1, end, output, status);
+        }
+        append_literal(output, ";\n", 2);
+        return;
+    }
+    if match_at(source, index, end, "#call", 5) {
+        append_literal(output, "  ", 2);
+        emit_expr(source, index + 5, end, output, status);
+        append_literal(output, ";\n", 2);
+        return;
+    }
+    if match_at(source, index, end, "#if", 3) {
+        let condition_end: usize = index + 3;
+        let quoted: i32 = 0;
+        while condition_end < end {
+            let condition_byte: i32 = load8(source, condition_end);
+            if condition_byte == 34 {
+                if quoted == 0 {
+                    quoted = 1;
+                } else {
+                    quoted = 0;
+                }
+            } else {
+                if condition_byte == 123 {
+                    if quoted == 0 {
+                        break;
+                    }
+                }
+            }
+            condition_end = condition_end + 1;
+        }
+        append_literal(output, "  if (", 6);
+        emit_expr(source, index + 3, condition_end, output, status);
+        append_literal(output, ") {\n", 4);
+        let body: usize = condition_end + 1;
+        while body < end {
+            if is_space(load8(source, body)) {
+                body = body + 1;
+            } else {
+                break;
+            }
+        }
+        let body_end: usize = body;
+        while body_end < end {
+            if load8(source, body_end) == 125 {
+                break;
+            }
+            body_end = body_end + 1;
+        }
+        // A block whose closing brace is on a later physical line remains
+        // open; the normal `}` line will close it on a subsequent pass.
+        if body_end == end {
+            return;
+        }
+        if body < body_end {
+            // Canonical L1 may keep a call and an early return in one inline
+            // block. Emit the two statements independently instead of
+            // passing `#call ... #return ...` as one expression.
+            let statement_marker: usize = body;
+            while statement_marker < body_end {
+                if match_at(source, statement_marker, body_end, "#return", 7) {
+                    break;
+                } else {
+                    if match_at(source, statement_marker, body_end, "#break", 6) {
+                        break;
+                    }
+                }
+                statement_marker = statement_marker + 1;
+            }
+            if statement_marker > body && statement_marker < body_end {
+                emit_line(source, body, statement_marker, output, status);
+                emit_line(source, statement_marker, body_end, output, status);
+            } else {
+                emit_line(source, body, body_end, output, status);
+            }
+        }
+        append_literal(output, "}\n", 2);
+        let else_start: usize = body_end + 1;
+        let else_cursor: usize = else_start;
+        while else_cursor < end {
+            if is_space(load8(source, else_cursor)) {
+                else_cursor = else_cursor + 1;
+            } else {
+                break;
+            }
+        }
+        if match_at(source, else_cursor, end, "else", 4) {
+            append_literal(output, " else {\n", 8);
+            let else_body: usize = else_cursor + 4;
+            let else_body_start: usize = else_body;
+            while else_body < end {
+                if is_space(load8(source, else_body)) {
+                    else_body = else_body + 1;
+                } else {
+                    break;
+                }
+            }
+            // Inline else clauses carry their own opening brace. Skip it so
+            // the body emitter sees the statements inside the block rather
+            // than treating the brace as an unsupported L1 directive.
+            if load8(source, else_body) == 123 {
+                else_body = else_body + 1;
+                while else_body < end {
+                    if is_space(load8(source, else_body)) {
+                        else_body = else_body + 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            let else_end: usize = else_body;
+            while else_end < end {
+                if load8(source, else_end) == 125 {
+                    break;
+                }
+                else_end = else_end + 1;
+            }
+            // The opening `else {` may be on this line while its body and
+            // closing brace continue on later physical lines. Keep that
+            // block open for the normal line emitter in that case.
+            if else_end == end {
+                return;
+            }
+            if else_body < else_end {
+                let else_statement: usize = else_body;
+                while else_statement < else_end {
+                    if match_at(source, else_statement, else_end, "#return", 7) {
+                        break;
+                    } else {
+                        if match_at(source, else_statement, else_end, "#break", 6) {
+                            break;
+                        }
+                    }
+                    else_statement = else_statement + 1;
+                }
+                if else_statement > else_body && else_statement < else_end {
+                    emit_line(source, else_body, else_statement, output, status);
+                    emit_line(source, else_statement, else_end, output, status);
+                } else {
+                    emit_line(source, else_body, else_end, output, status);
+                }
+            }
+            append_literal(output, "}\n", 2);
+        }
+        return;
+    }
+    if match_at(source, index, end, "#loop", 5) {
+        append_literal(output, "  for (;;) {\n", 13);
+        return;
+    }
+    if match_at(source, index, end, "#break", 6) {
+        append_literal(output, "  break;\n", 9);
+        return;
+    }
+    if match_at(source, index, end, "#continue", 9) {
+        append_literal(output, "  continue;\n", 12);
+        return;
+    }
+    append_literal(output, "/* unsupported L1: ", 19);
+    append_span(output, source, index, end);
+    append_literal(output, " */\n", 4);
+};
+
+let backend_compile = std::func() -> i32 {
+    // Shared emission status: 0 while the module only uses constructs this
+    // backend can lower, 1 once emit_c_type meets a type it cannot express in
+    // C.  The run then fails instead of publishing C that substituted a
+    // plausible but wrong type for the declared one.
+    let status: addr = allocate_pages(64);
+    std::store_bits(64, status, 0);
+    let input_length: usize = source_length(0);
+    let input_data: addr = source_data(0);
+    let output: addr = allocate_pages(1048576);
+    std::store_bits(64, output, 0);
+    append_literal(output, "#include <stdint.h>\n#include <stddef.h>\n", 40);
+    append_literal(output, "#include <stdlib.h>\n", 20);
+    append_literal(output, "#include <stdio.h>\n", 19);
+    // LAINIR loads and stores must tolerate an unaligned address: `#alloca(n)`
+    // produces a byte array, so a 32-bit load at offset 2 is genuinely
+    // unaligned.  The seed emitter reads and writes through memcpy for that
+    // reason; dereferencing a cast pointer only works when the address happens
+    // to be aligned, and panics otherwise under a runtime that checks it.
+    append_literal(output, "#include <string.h>\n", 20);
+    append_literal(output, "static uint8_t L1_load8(uintptr_t p){ uint8_t v; memcpy(&v, (const void *)p, 1); return v; }\n", 93);
+    append_literal(output, "static uint16_t L1_load16(uintptr_t p){ uint16_t v; memcpy(&v, (const void *)p, 2); return v; }\n", 96);
+    append_literal(output, "static uint32_t L1_load32(uintptr_t p){ uint32_t v; memcpy(&v, (const void *)p, 4); return v; }\n", 96);
+    append_literal(output, "static uint64_t L1_load64(uintptr_t p){ uint64_t v; memcpy(&v, (const void *)p, 8); return v; }\n", 96);
+    append_literal(output, "static void L1_store8(uintptr_t p, uint8_t v){ memcpy((void *)p, &v, 1); }\n", 75);
+    append_literal(output, "static void L1_store16(uintptr_t p, uint16_t v){ memcpy((void *)p, &v, 2); }\n", 77);
+    append_literal(output, "static void L1_store32(uintptr_t p, uint32_t v){ memcpy((void *)p, &v, 4); }\n", 77);
+    append_literal(output, "static void L1_store64(uintptr_t p, uint64_t v){ memcpy((void *)p, &v, 8); }\n", 77);
+    // A `#store` with no declared type takes the physical type of its value:
+    // the L1 verifier infers it from the value expression and fails with 2017
+    // when it cannot.  The C type of the emitted value expression carries that
+    // width for every value form this backend produces -- a binding keeps its
+    // declared type, a call its return type, a `#load`/`#trunc` its annotation,
+    // and `#addr` is `uintptr_t`, the same type as `uint64_t` on both data
+    // models that matter.  Selecting on the C type therefore reads the width
+    // instead of guessing it from the value's spelling, which stored a
+    // `#bits<32>` binding as eight bytes and overwrote the fields behind it.
+    //
+    // The eight fixed-width types are pairwise distinct, so the selection has
+    // no duplicate association on either LLP64 or LP64.  A value of any other
+    // type -- a promoted `int`, say -- selects `default`.  Its arm is defined
+    // with an empty parameter list, so selecting it makes the call itself a
+    // compile error naming this function, while a module that never selects it
+    // compiles without a warning.
+    append_text(output, "static void L1_store_unsupported(void) { }\n");
+    append_text(output, "#define L1_store_auto(dest,val) _Generic((val), int8_t: L1_store8, uint8_t: L1_store8, int16_t: L1_store16, uint16_t: L1_store16, int32_t: L1_store32, uint32_t: L1_store32, int64_t: L1_store64, uint64_t: L1_store64, default: L1_store_unsupported)((dest), (val))\n");
+    append_literal(output, "#define L1_alloca(n) ((uintptr_t)malloc((size_t)(n)))\n", 54);
+    append_literal(output, "#define L1_lea(base,idx,scale,offset) ((uintptr_t)(base)+(uintptr_t)(idx)*(uintptr_t)(scale)+(intptr_t)(offset))\n", 113);
+    append_literal(output, "extern uintptr_t bootstrap_allocate_pages(uint64_t);\n", 53);
+    append_literal(output, "extern void bootstrap_release_pages(uintptr_t);\n", 48);
+    append_literal(output, "extern void bootstrap_artifact_begin(void);\n", 44);
+    append_literal(output, "extern void bootstrap_artifact_write_byte(uint32_t);\n", 53);
+    append_literal(output, "extern void bootstrap_artifact_write_span(uintptr_t, uint64_t);\n", 64);
+    append_literal(output, "extern void bootstrap_write_artifact(uintptr_t, uint64_t);\n", 59);
+    append_literal(output, "extern void bootstrap_artifact_write_literal(uintptr_t);\n", 57);
+    append_literal(output, "extern void bootstrap_artifact_finish(void);\n", 45);
+    append_literal(output, "extern void bootstrap_set_allocation_limit(uint64_t);\n", 54);
+    append_literal(output, "extern uint64_t bootstrap_source_count(void);\n", 46);
+    append_literal(output, "extern uint64_t bootstrap_source_length(uint64_t);\n", 51);
+    append_literal(output, "extern uintptr_t bootstrap_source_data(uint64_t);\n", 50);
+    append_literal(output, "extern uintptr_t bootstrap_source_path_data(uint64_t);\n", 55);
+    append_literal(output, "extern uint64_t bootstrap_source_path_length(uint64_t);\n", 56);
+    append_literal(output, "extern void bootstrap_copy_bytes(uintptr_t, uintptr_t, uint64_t);\n", 66);
+    append_literal(output, "extern void ast_substitute(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);\n", 83);
+    append_text(output, "#define L1_add(a,b) ((a)+(b))\n#define L1_sub(a,b) ((a)-(b))\n#define L1_mul(a,b) ((a)*(b))\n#define L1_eq(a,b) ((a)==(b))\n#define L1_and(a,b) ((a)&&(b))\n#define L1_or(a,b) ((a)||(b))\n");
+    append_text(output, "#define L1_ne(a,b) ((a)!=(b))\n");
+    // One operand reinterpretation serves every signed operation.  `#bits<32>`
+    // is carried in `uint32_t`, and widening an unsigned operand to `int64_t`
+    // zero-extends: -7 is 4294967289 there, so `(int64_t)(a)/(int64_t)(b)`
+    // divided 4294967289 by 2 and answered 2147483644 instead of -3.  Each
+    // operand is therefore reinterpreted as the signed type of its own width
+    // first -- `(int32_t)4294967289` is -7 -- and only then widened to
+    // `int64_t`, which keeps the C type the rest of the emitted expression
+    // expects; dividing or comparing in `int32_t` would instead make
+    // `uint32_t` vs `int32_t` promote to unsigned at every use site.  Only
+    // `uint32_t` needs an arm of its own: `#bits<8>` and `#bits<16>` are
+    // already signed, and `#bits<1>`, `#bits<64>` and `addr` are unsigned at
+    // their full C width, where the `(int64_t)` cast already keeps the bit
+    // pattern.  `_Generic` is C11, the standard every consumer of this
+    // artifact compiles with.  `#udiv` and `#urem` stay unsigned expressions:
+    // they are the unsigned family.
+    //
+    // The signed comparisons had the same root cause as `#sdiv`.  Spelled as
+    // the bare C operator they compared the operands' own types, which are
+    // unsigned for `#bits<32>/<64>`, so `#slt(-1, 1)` compared 4294967295 < 1
+    // and answered false where the seed backend's `int32_t` spelling answered
+    // true.  Both now read their operands through the same helper.
+    append_text(output, "#define L1_udiv(a,b) ((a)/(b))\n#define L1_signed(x) _Generic((x), uint32_t: (int64_t)(int32_t)(x), default: (int64_t)(x))\n#define L1_sdiv(a,b) (L1_signed(a)/L1_signed(b))\n#define L1_lt(a,b) (L1_signed(a) < L1_signed(b))\n#define L1_le(a,b) (L1_signed(a) <= L1_signed(b))\n#define L1_gt(a,b) (L1_signed(a) > L1_signed(b))\n#define L1_ge(a,b) (L1_signed(a) >= L1_signed(b))\n#define L1_urem(a,b) ((a)%(b))\n");
+    // The unsigned family cannot share `L1_signed`: widening both sides to an
+    // unsigned 64-bit type first is what makes the comparison unsigned whatever
+    // the producer chose -- `int8_t`..`int64_t` for narrow and loaded values,
+    // `uint64_t` and `uintptr_t` for addresses.  Zero bits are introduced above
+    // the operand's width, so a 32-bit `0xFFFFFFFF` reads as 4294967295 rather
+    // than as -1.
+    append_text(output, "#define L1_ult(a,b) ((uint64_t)(a) < (uint64_t)(b))\n#define L1_ule(a,b) ((uint64_t)(a) <= (uint64_t)(b))\n#define L1_ugt(a,b) ((uint64_t)(a) > (uint64_t)(b))\n#define L1_uge(a,b) ((uint64_t)(a) >= (uint64_t)(b))\n");
+    // Data objects are emitted before the prototypes and definitions,
+    // matching the seed emitter's include/helper/data/prototype/definition
+    // order.  A declaration may split across physical lines, so collect its
+    // candidate until the parameter parentheses balance.
+    let data_start: usize = 0;
+    let data_candidate: usize = 0;
+    let data_segment: usize = 0;
+    let data_depth: i32 = 0;
+    let data_active: i32 = 0;
+    let data_index: usize = 0;
+    while data_index < input_length {
+        if load8(input_data, data_index) == 10 {
+            if data_active == 0 {
+                if match_at(input_data, data_start, data_index, "#data", 5) {
+                    let keyword_end: usize = data_start + 5;
+                    if keyword_end >= data_index || load8(input_data, keyword_end) != 95 {
+                        data_active = 1;
+                        data_candidate = data_start;
+                        data_segment = data_start;
+                        data_depth = 0;
+                    }
+                }
+            }
+            if data_active == 1 {
+                data_depth = data_depth + expression_delimiters(
+                    input_data,
+                    data_segment,
+                    data_index,
+                );
+                data_segment = data_index + 1;
+                if data_depth <= 0 {
+                    emit_data_decl(input_data, data_candidate, data_index, output);
+                    data_active = 0;
+                    data_depth = 0;
+                }
+            }
+            data_start = data_index + 1;
+        }
+        data_index = data_index + 1;
+    }
+    if data_active == 1 && data_candidate < input_length {
+        emit_data_decl(input_data, data_candidate, input_length, output);
+    }
+    // Pass one collects procedure/extern declarations so calls may target
+    // later definitions. Headers may span physical lines, so collect a
+    // candidate until its parameter parentheses are balanced.
+    let declaration_start: usize = 0;
+    let declaration_candidate: usize = 0;
+    let declaration_segment: usize = 0;
+    let declaration_depth: i32 = 0;
+    let declaration_active: i32 = 0;
+    let declaration_index: usize = 0;
+    while declaration_index < input_length {
+        if load8(input_data, declaration_index) == 10 {
+            if declaration_active == 0 {
+                if match_at(input_data, declaration_start, declaration_index, "#proc", 5) {
+                    declaration_active = 1;
+                } else {
+                    if match_at(input_data, declaration_start, declaration_index, "#extern", 7) {
+                        declaration_active = 1;
+                    }
+                }
+                if declaration_active == 1 {
+                    declaration_candidate = declaration_start;
+                    declaration_segment = declaration_start;
+                    declaration_depth = 0;
+                }
+            }
+            if declaration_active == 1 {
+                declaration_depth = declaration_depth + expression_delimiters(
+                    input_data,
+                    declaration_segment,
+                    declaration_index,
+                );
+                declaration_segment = declaration_index + 1;
+                if declaration_depth <= 0 && !procedure_header_pending(input_data, declaration_candidate, declaration_index) {
+                    if match_at(input_data, declaration_candidate, declaration_index, "#proc", 5) {
+                        emit_proc_decl(input_data, declaration_candidate, declaration_index, output, status);
+                    }
+                    if match_at(input_data, declaration_candidate, declaration_index, "#extern", 7) {
+                        emit_extern_decl(input_data, declaration_candidate, declaration_index, output, status);
+                    }
+                    declaration_active = 0;
+                    declaration_depth = 0;
+                }
+            }
+            declaration_start = declaration_index + 1;
+        }
+        declaration_index = declaration_index + 1;
+    }
+    if declaration_active == 1 && declaration_candidate < input_length {
+        if match_at(input_data, declaration_candidate, input_length, "#proc", 5) {
+            emit_proc_decl(input_data, declaration_candidate, input_length, output, status);
+        }
+        if match_at(input_data, declaration_candidate, input_length, "#extern", 7) {
+            emit_extern_decl(input_data, declaration_candidate, input_length, output, status);
+        }
+    }
+    let line_start: usize = 0;
+    let segment_start: usize = 0;
+    let logical_depth: i32 = 0;
+    let continuation: i32 = 0;
+    let index: usize = 0;
+    while index < input_length {
+        if load8(input_data, index) == 10 {
+            logical_depth = logical_depth + expression_delimiters(
+                input_data,
+                segment_start,
+                index,
+            );
+            segment_start = index + 1;
+            if logical_depth <= 0 && !procedure_header_pending(input_data, line_start, index) {
+                if continuation == 1 {
+                    emit_line(input_data, line_start, index, output, status);
+                    line_start = index + 1;
+                    continuation = 0;
+                    logical_depth = 0;
+                } else {
+                    let next: usize = index + 1;
+                    while next < input_length {
+                        if is_space(load8(input_data, next)) {
+                            next = next + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    // A destination #lea may follow a balanced sub-call on
+                    // the next physical line. The one declaration form that
+                    // can split before the callee name is an indented #let
+                    // binding ending in #call; keep this narrow so inline
+                    // #if/#call lines and comments cannot become continuations.
+                    let previous_end: usize = index;
+                    while previous_end > 0 {
+                        if is_space(load8(input_data, previous_end - 1)) {
+                            previous_end = previous_end - 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    let split_let_call: i32 = 0;
+                    let split_let_rhs: i32 = 0;
+                    if previous_end >= 5 {
+                        if match_at(input_data, previous_end - 5, previous_end, "#call", 5) {
+                            if match_at(input_data, line_start, index, "  #let", 6) {
+                                split_let_call = 1;
+                            }
+                        }
+                    }
+                    if previous_end > 0 {
+                        if load8(input_data, previous_end - 1) == 61 {
+                            if match_at(input_data, line_start, index, "  #let", 6) &&
+                               match_at(input_data, next, input_length, "#call", 5) {
+                                split_let_rhs = 1;
+                            }
+                        }
+                    }
+                    let should_continue: i32 = 0;
+                    if match_at(input_data, next, input_length, "#lea", 4) {
+                        should_continue = 1;
+                    } else {
+                        if split_let_call == 1 {
+                            should_continue = 1;
+                        } else {
+                            if split_let_rhs == 1 {
+                                should_continue = 1;
+                            }
+                        }
+                    }
+                    if should_continue == 1 {
+                        continuation = 1;
+                    } else {
+                        emit_line(input_data, line_start, index, output, status);
+                        line_start = index + 1;
+                        logical_depth = 0;
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    if line_start < input_length {
+        emit_line(input_data, line_start, input_length, output, status);
+    }
+    // A type without a C spelling was emitted as a marker; publishing that
+    // artifact would hand the next stage C that compiles but mis-models the
+    // module, so fail the run and let the driver report it.
+    if std::load_bits(64, status) != 0 {
+        return 1;
+    }
+    artifact_begin();
+    let out_length: usize = std::load_bits(64, output);
+    let out_index: usize = 0;
+    while out_index < out_length {
+        artifact_write_byte(load8(output, 8 + out_index));
+        out_index = out_index + 1;
+    }
+    artifact_finish();
+    return 0;
+};
+
+// The wrapper keeps the module directly executable while backend_compile
+// remains a reusable entry for a future compiler driver.
+let main = std::func() -> i32 {
+    return backend_compile();
+};

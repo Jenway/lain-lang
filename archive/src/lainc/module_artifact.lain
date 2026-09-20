@@ -1,0 +1,112 @@
+// Deterministic, compiler-owned module artifact.
+//
+// This artifact contains Meta-level summaries.  It is not LAIN-IR state and
+// does not revive the historical .lci bridge.
+
+let memory_model: Module = import("std::memory_model");
+let vector: Module = import("std::core::vec");
+let modules: Module = import("packages::lain::compiler::modules");
+
+@export
+let module_artifact: Module = std::module {
+
+    @export
+    let Artifact = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let Modules: Module = modules.Modules(Memory);
+
+        let ModuleRecord: std::type = std::struct {
+            name: Memory.String,
+            source_id: usize,
+            dependency_start: usize,
+            dependency_count: usize,
+            export_start: usize,
+            export_count: usize,
+        };
+
+        let ModuleRecordVector: std::type = vector.Vec(
+            ModuleRecord,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+        let ModuleIdVector: std::type = vector.Vec(
+            usize,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+        let ExportVector: std::type = vector.Vec(
+            Modules.Export,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let Data: std::type = std::struct {
+            schema: i32,
+            modules: ModuleRecordVector,
+            dependencies: ModuleIdVector,
+            exports: ExportVector,
+        };
+
+        let build = std::func(
+            workspace: &Modules.Workspace,
+        ) -> Data ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let output: Data = Data {
+                schema: 1,
+                modules: ModuleRecordVector.new(),
+                dependencies: ModuleIdVector.new(),
+                exports: ExportVector.new(),
+            };
+
+            let index: usize = 0;
+            while index < workspace.summaries.length() {
+                let summary: &Modules.Summary =
+                    workspace.summaries.get(index);
+                let dependency_start: usize =
+                    output.dependencies.length();
+                let dependency_index: usize = 0;
+                while dependency_index
+                    < summary.dependencies.length() {
+                    output.dependencies.push(
+                        *summary.dependencies.get(dependency_index),
+                    );
+                    dependency_index = dependency_index + 1;
+                }
+
+                let export_start: usize = output.exports.length();
+                let export_index: usize = 0;
+                while export_index < summary.exports.length() {
+                    let item: &Modules.Export =
+                        summary.exports.get(export_index);
+                    output.exports.push(Modules.Export {
+                        name: Memory.String.clone(&item.name),
+                        kind: item.kind,
+                        type_id: item.type_id,
+                        value_id: item.value_id,
+                    });
+                    export_index = export_index + 1;
+                }
+
+                output.modules.push(ModuleRecord {
+                    name: Memory.String.clone(&summary.name),
+                    source_id: summary.source_id,
+                    dependency_start: dependency_start,
+                    dependency_count: summary.dependencies.length(),
+                    export_start: export_start,
+                    export_count: summary.exports.length(),
+                });
+                index = index + 1;
+            }
+            return output;
+        };
+
+        return std::module {
+            @export let ModuleRecord: std::type = ModuleRecord;
+            @export let Data: std::type = Data;
+            @export let build = build;
+        };
+    };
+};

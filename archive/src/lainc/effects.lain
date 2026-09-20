@@ -1,0 +1,344 @@
+// Deterministic parameterized effect rows without nested owned vectors.
+
+let memory_model: Module = import("std::memory_model");
+let vector: Module = import("std::core::vec");
+let types: Module = import("packages::lain::compiler::types");
+
+@export
+let compiler_effects: Module = std::module {
+
+    @export
+    let Effects = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let EffectId: std::type = usize;
+
+        let MetaValueVector: std::type = vector.Vec(
+            types.MetaValue,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        // EffectKey is trivially copyable.  Arguments live once in Store.
+        let EffectKey: std::type = std::struct {
+            constructor: EffectId,
+            argument_start: usize,
+            argument_count: usize,
+        };
+
+        let EffectKeyVector: std::type = vector.Vec(
+            EffectKey,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let Store: std::type = std::struct {
+            arguments: MetaValueVector,
+        };
+
+        let EffectSet: std::type = std::struct {
+            keys: EffectKeyVector,
+        };
+
+        let Handler: std::type = std::struct {
+            handled: EffectKey,
+            remaining: EffectSet,
+        };
+
+        // One entry of a callable's input row: a named Meta value the call
+        // site's environment must supply, and the type it must have.  The
+        // input row is a separate field on FunctionType rather than being
+        // merged into `effects`, because an input is a requirement the caller
+        // satisfies and an effect is an operation the callee may perform.
+        let InputRequirement: std::type = std::struct {
+            name_handle: usize,
+            type_id: types.TypeId,
+        };
+
+        let InputRequirementVector: std::type = vector.Vec(
+            InputRequirement,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let FunctionType: std::type = std::struct {
+            return_type: types.TypeId,
+            effects: EffectSet,
+            // Populated once elaboration reads the declaration's `?{}` row.
+            // It stays empty while no source in the closure declares one.
+            input_row: InputRequirementVector,
+        };
+
+        let FunctionTypeVector: std::type = vector.Vec(
+            FunctionType,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let CallEdge: std::type = std::struct {
+            caller: usize,
+            callee: usize,
+        };
+
+        let CallEdgeVector: std::type = vector.Vec(
+            CallEdge,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let new_store = std::func() -> Store {
+            return Store {
+                arguments: MetaValueVector.new(),
+            };
+        };
+
+        let empty = std::func() -> EffectSet {
+            return EffectSet { keys: EffectKeyVector.new() };
+        };
+
+        let make_key = std::func(
+            store: &mut Store,
+            constructor: EffectId,
+            arguments: &MetaValueVector,
+        ) -> EffectKey ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let start: usize = store.arguments.length();
+            let index: usize = 0;
+            while index < arguments.length() {
+                store.arguments.push(*arguments.get(index));
+                index = index + 1;
+            }
+            return EffectKey {
+                constructor: constructor,
+                argument_start: start,
+                argument_count: arguments.length(),
+            };
+        };
+
+        let same_key = std::func(
+            store: &Store,
+            left: &EffectKey,
+            right: &EffectKey,
+        ) -> bool ! {Memory.Bounds.Effect} {
+            if left.constructor != right.constructor
+                || left.argument_count != right.argument_count {
+                return false;
+            }
+            let index: usize = 0;
+            while index < left.argument_count {
+                if !types.same_meta_value(
+                    store.arguments.get(left.argument_start + index),
+                    store.arguments.get(right.argument_start + index),
+                ) {
+                    return false;
+                }
+                index = index + 1;
+            }
+            return true;
+        };
+
+        let compare_key = std::func(
+            store: &Store,
+            left: &EffectKey,
+            right: &EffectKey,
+        ) -> i32 ! {Memory.Bounds.Effect} {
+            if left.constructor < right.constructor { return -1; }
+            if left.constructor > right.constructor { return 1; }
+            let count: usize = left.argument_count;
+            if right.argument_count < count {
+                count = right.argument_count;
+            }
+            let index: usize = 0;
+            while index < count {
+                let a: &types.MetaValue = store.arguments.get(
+                    left.argument_start + index,
+                );
+                let b: &types.MetaValue = store.arguments.get(
+                    right.argument_start + index,
+                );
+                if a.kind < b.kind { return -1; }
+                if a.kind > b.kind { return 1; }
+                if a.payload < b.payload { return -1; }
+                if a.payload > b.payload { return 1; }
+                index = index + 1;
+            }
+            if left.argument_count < right.argument_count { return -1; }
+            if left.argument_count > right.argument_count { return 1; }
+            return 0;
+        };
+
+        let contains = std::func(
+            store: &Store,
+            effects: &EffectSet,
+            wanted: &EffectKey,
+        ) -> bool ! {Memory.Bounds.Effect} {
+            let index: usize = 0;
+            while index < effects.keys.length() {
+                if same_key(store, effects.keys.get(index), wanted) {
+                    return true;
+                }
+                index = index + 1;
+            }
+            return false;
+        };
+
+        let insert = std::func(
+            store: &Store,
+            effects: &mut EffectSet,
+            key: EffectKey,
+        ) -> i32 ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            if contains(store, effects, &key) { return 3104; }
+            effects.keys.push(key);
+            let index: usize = effects.keys.length() - 1;
+            while index > 0 {
+                let before: usize = index - 1;
+                if compare_key(
+                    store,
+                    effects.keys.get(before),
+                    effects.keys.get(index),
+                ) <= 0 {
+                    break;
+                }
+                let temporary: EffectKey =
+                    *effects.keys.get(before);
+                *effects.keys.get_mut(before) =
+                    *effects.keys.get(index);
+                *effects.keys.get_mut(index) = temporary;
+                index = before;
+            }
+            return 0;
+        };
+
+        let insert_if_missing = std::func(
+            store: &Store,
+            effects: &mut EffectSet,
+            key: EffectKey,
+        ) -> unit ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            if !contains(store, effects, &key) {
+                let ignored: i32 = insert(store, effects, key);
+            }
+        };
+
+        let contains_all = std::func(
+            store: &Store,
+            available: &EffectSet,
+            required: &EffectSet,
+        ) -> bool ! {Memory.Bounds.Effect} {
+            let index: usize = 0;
+            while index < required.keys.length() {
+                if !contains(
+                    store,
+                    available,
+                    required.keys.get(index),
+                ) {
+                    return false;
+                }
+                index = index + 1;
+            }
+            return true;
+        };
+
+        let validate_call = std::func(
+            store: &Store,
+            caller: &FunctionType,
+            callee: &FunctionType,
+        ) -> i32 ! {Memory.Bounds.Effect} {
+            if !contains_all(
+                store,
+                &caller.effects,
+                &callee.effects,
+            ) {
+                return 3103;
+            }
+            return 0;
+        };
+
+        // Row transformation: input - handled + remaining.
+        let apply_handler = std::func(
+            store: &Store,
+            input: &EffectSet,
+            handler: &Handler,
+        ) -> EffectSet ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let output: EffectSet = empty();
+            let index: usize = 0;
+            while index < input.keys.length() {
+                let key: &EffectKey = input.keys.get(index);
+                if !same_key(store, key, &handler.handled) {
+                    insert_if_missing(store, &mut output, *key);
+                }
+                index = index + 1;
+            }
+            let remaining: usize = 0;
+            while remaining < handler.remaining.keys.length() {
+                insert_if_missing(
+                    store,
+                    &mut output,
+                    *handler.remaining.keys.get(remaining),
+                );
+                remaining = remaining + 1;
+            }
+            return output;
+        };
+
+        let validate_program = std::func(
+            store: &Store,
+            functions: &FunctionTypeVector,
+            calls: &CallEdgeVector,
+        ) -> i32 ! {Memory.Bounds.Effect} {
+            let index: usize = 0;
+            while index < calls.length() {
+                let edge: &CallEdge = calls.get(index);
+                if edge.caller >= functions.length()
+                    || edge.callee >= functions.length() {
+                    return 3104;
+                }
+                let code: i32 = validate_call(
+                    store,
+                    functions.get(edge.caller),
+                    functions.get(edge.callee),
+                );
+                if code != 0 { return code; }
+                index = index + 1;
+            }
+            return 0;
+        };
+
+        return std::module {
+            @export let EffectId: std::type = EffectId;
+            @export let MetaValueVector: std::type =
+                MetaValueVector;
+            @export let EffectKey: std::type = EffectKey;
+            @export let Store: std::type = Store;
+            @export let EffectSet: std::type = EffectSet;
+            @export let Handler: std::type = Handler;
+            @export let FunctionType: std::type = FunctionType;
+            @export let FunctionTypeVector: std::type = FunctionTypeVector;
+            @export let CallEdge: std::type = CallEdge;
+            @export let CallEdgeVector: std::type = CallEdgeVector;
+            @export let InputRequirement: std::type = InputRequirement;
+            @export let InputRequirementVector: std::type =
+                InputRequirementVector;
+            @export let new_store = new_store;
+            @export let empty = empty;
+            @export let make_key = make_key;
+            @export let same_key = same_key;
+            @export let contains = contains;
+            @export let insert = insert;
+            @export let contains_all = contains_all;
+            @export let validate_call = validate_call;
+            @export let apply_handler = apply_handler;
+            @export let validate_program = validate_program;
+        };
+    };
+};

@@ -1,0 +1,643 @@
+// Meta values and lexical environments.
+//
+// These are compiler-owned objects.  They are deliberately ordinary LAIN-IR
+// heap records: RawAst remains a topology-only tree and the runtime lowering
+// pass never has to know how a compile-time Module was constructed.
+
+#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;
+#extern #proc raw_is_nil(#addr %node) -> #bits<1>;
+#extern #proc raw_node_start(#addr %node) -> #bits<64>;
+#extern #proc raw_node_length(#addr %node) -> #bits<64>;
+#extern #proc raw_node_next(#addr %node) -> #addr;
+#extern #proc raw_node_first(#addr %node) -> #addr;
+#extern #proc raw_node_kind(#addr %node) -> #bits<32>;
+#extern #proc raw_node_delimiter(#addr %node) -> #bits<32>;
+#extern #proc tool_source_data(#addr %source) -> #addr;
+#extern #proc tool_byte_at(#addr %data, #bits<64> %index) -> #bits<8>;
+#extern #proc meta_atom_equal(
+  #addr %source, #addr %node, #addr %text, #bits<64> %length
+) -> #bits<1>;
+
+// Kinds used by the first Meta value layer.
+//   1 scalar, 2 module, 3 function, 4 type, 5 syntax, 6 reference,
+//   7 effect operation.
+// Value layout:
+//   kind @0, source @8, node start/length @16/@24,
+//   payload @32, environment @40, status @48, next @56.
+#proc meta_value_nil() -> #addr {
+  #let %nil: #addr = #call bootstrap.allocate-pages(8)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
+  #return %nil
+}
+
+#proc meta_value_new(
+  #bits<32> %kind, #addr %source, #addr %node,
+  #addr %payload, #addr %environment, #bits<32> %status
+) -> #addr {
+  #let %value: #addr = #call bootstrap.allocate-pages(64)
+  #let %nil: #addr = #call meta_value_nil()
+  #store %kind, #lea(base=%value, idx=0, scale=0, offset=0)
+  #store %source, #lea(base=%value, idx=0, scale=0, offset=8)
+  #store #call raw_node_start(%node),
+    #lea(base=%value, idx=0, scale=0, offset=16)
+  #store #call raw_node_length(%node),
+    #lea(base=%value, idx=0, scale=0, offset=24)
+  #store %payload, #lea(base=%value, idx=0, scale=0, offset=32)
+  #store %environment, #lea(base=%value, idx=0, scale=0, offset=40)
+  #store %status, #lea(base=%value, idx=0, scale=0, offset=48)
+  #store %nil, #lea(base=%value, idx=0, scale=0, offset=56)
+  #return %value
+}
+
+#proc meta_value_kind(#addr %value) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%value, idx=0, scale=0, offset=0))
+}
+
+#proc meta_value_source(#addr %value) -> #addr {
+  #return #load[#addr](#lea(base=%value, idx=0, scale=0, offset=8))
+}
+
+#proc meta_value_start(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=16))
+}
+
+#proc meta_value_length(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=24))
+}
+
+#proc meta_value_payload(#addr %value) -> #addr {
+  #return #load[#addr](#lea(base=%value, idx=0, scale=0, offset=32))
+}
+
+#proc meta_value_environment(#addr %value) -> #addr {
+  #return #load[#addr](#lea(base=%value, idx=0, scale=0, offset=40))
+}
+
+#proc meta_value_status(#addr %value) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%value, idx=0, scale=0, offset=48))
+}
+
+// A scalar value's payload carries its number at offset 0 and the physical
+// width the value's declaration gave it at offset 8.  Zero means the origin
+// determined no width, so a later input check treats the value as
+// unconstrained instead of guessing one.
+#proc meta_value_scalar(
+  #addr %source, #addr %node, #bits<64> %number, #bits<64> %width
+) -> #addr {
+  #let %payload: #addr = #call bootstrap.allocate-pages(16)
+  #store %number, #lea(base=%payload, idx=0, scale=0, offset=0)
+  #store %width, #lea(base=%payload, idx=0, scale=0, offset=8)
+  #return #call meta_value_new(
+    1, %source, %node, %payload, #call meta_value_nil(), 0
+  )
+}
+
+#proc meta_value_scalar_number(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(
+    base=#call meta_value_payload(%value), idx=0, scale=0, offset=0
+  ))
+}
+
+#proc meta_value_scalar_width(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(
+    base=#call meta_value_payload(%value), idx=0, scale=0, offset=8
+  ))
+}
+
+// Environment layout: tag @0, parent @8, first/last binding @16/@24,
+// count @32, 256-bucket name index @40. Each bucket stores head/tail pointers.
+// Binding layout: tag @0, source @8, name start/length @16/@24,
+// value @32, next @40, bucket-next @48, name hash @56.
+// The explicit tags matter: a parent/source pointer
+// is not a reliable nil marker because page-aligned addresses often begin
+// with a zero byte.
+#proc meta_env_new(#addr %parent) -> #addr {
+  #let %environment: #addr = #call bootstrap.allocate-pages(48)
+  #let %buckets: #addr = #call bootstrap.allocate-pages(4096)
+  #let %nil: #addr = #call meta_value_nil()
+  #store 1, #lea(base=%environment, idx=0, scale=0, offset=0)
+  #store %parent, #lea(base=%environment, idx=0, scale=0, offset=8)
+  #store %nil, #lea(base=%environment, idx=0, scale=0, offset=16)
+  #store %nil, #lea(base=%environment, idx=0, scale=0, offset=24)
+  #store 0, #lea(base=%environment, idx=0, scale=0, offset=32)
+  #store %buckets, #lea(base=%environment, idx=0, scale=0, offset=40)
+  #let %bucket_index: #bits<64> = 0
+  #loop initialize_buckets {
+    #if #sge(%bucket_index, 256) { #break initialize_buckets }
+    #store %nil, #lea(base=%buckets, idx=%bucket_index, scale=16, offset=0)
+    #store %nil, #lea(base=%buckets, idx=%bucket_index, scale=16, offset=8)
+    %bucket_index: #bits<64> = #add(%bucket_index, 1)
+    #continue initialize_buckets
+  }
+  #return %environment
+}
+
+#proc meta_env_is_nil(#addr %environment) -> #bits<1> {
+  #return #eq(
+    #load[#bits<32>](#lea(base=%environment, idx=0, scale=0, offset=0)), 0
+  )
+}
+
+#proc meta_env_parent(#addr %environment) -> #addr {
+  #return #load[#addr](#lea(base=%environment, idx=0, scale=0, offset=8))
+}
+
+#proc meta_env_count(#addr %environment) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%environment, idx=0, scale=0, offset=32))
+}
+
+#proc meta_env_binding_new(
+  #addr %source, #addr %name, #addr %value, #bits<64> %name_hash
+) -> #addr {
+  #let %binding: #addr = #call bootstrap.allocate-pages(64)
+  #let %nil: #addr = #call meta_value_nil()
+  #store 1, #lea(base=%binding, idx=0, scale=0, offset=0)
+  #store %source, #lea(base=%binding, idx=0, scale=0, offset=8)
+  #store #call raw_node_start(%name),
+    #lea(base=%binding, idx=0, scale=0, offset=16)
+  #store #call raw_node_length(%name),
+    #lea(base=%binding, idx=0, scale=0, offset=24)
+  #store %value, #lea(base=%binding, idx=0, scale=0, offset=32)
+  #store %nil, #lea(base=%binding, idx=0, scale=0, offset=40)
+  #store %nil, #lea(base=%binding, idx=0, scale=0, offset=48)
+  #store %name_hash, #lea(base=%binding, idx=0, scale=0, offset=56)
+  #return %binding
+}
+
+#proc meta_env_binding_is_nil(#addr %binding) -> #bits<1> {
+  #return #eq(
+    #load[#bits<32>](#lea(base=%binding, idx=0, scale=0, offset=0)), 0
+  )
+}
+
+// A deliberately small rolling hash. Keeping the accumulator in [0, 255]
+// makes the value directly usable as the fixed bucket index in LAIN-IR.
+#proc meta_env_hash_span(
+  #addr %source, #bits<64> %start, #bits<64> %length
+) -> #bits<64> {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %hash: #bits<64> = %length
+  #if #sge(%hash, 256) { %hash: #bits<64> = #sub(%hash, 256) }
+  #let %index: #bits<64> = 0
+  #loop bytes {
+    #if #sge(%index, %length) { #break bytes }
+    %hash: #bits<64> = #add(
+      %hash, #call tool_byte_at(%data, #add(%start, %index))
+    )
+    #if #sge(%hash, 256) { %hash: #bits<64> = #sub(%hash, 256) }
+    %index: #bits<64> = #add(%index, 1)
+    #continue bytes
+  }
+  #return %hash
+}
+
+#proc meta_env_hash_text(#addr %text, #bits<64> %length) -> #bits<64> {
+  #let %hash: #bits<64> = %length
+  #if #sge(%hash, 256) { %hash: #bits<64> = #sub(%hash, 256) }
+  #let %index: #bits<64> = 0
+  #loop bytes {
+    #if #sge(%index, %length) { #break bytes }
+    %hash: #bits<64> = #add(%hash, #call tool_byte_at(%text, %index))
+    #if #sge(%hash, 256) { %hash: #bits<64> = #sub(%hash, 256) }
+    %index: #bits<64> = #add(%index, 1)
+    #continue bytes
+  }
+  #return %hash
+}
+
+#proc meta_env_bind(
+  #addr %environment, #addr %source, #addr %name, #addr %value
+) -> #unit {
+  #let %name_hash: #bits<64> = #call meta_env_hash_span(
+    %source, #call raw_node_start(%name), #call raw_node_length(%name)
+  )
+  #let %binding: #addr = #call meta_env_binding_new(
+    %source, %name, %value, %name_hash
+  )
+  #let %first: #addr = #load[#addr](
+    #lea(base=%environment, idx=0, scale=0, offset=16)
+  )
+  #if #call meta_env_binding_is_nil(%first) {
+    #store %binding, #lea(base=%environment, idx=0, scale=0, offset=16)
+  } else {
+    #let %last: #addr = #load[#addr](
+      #lea(base=%environment, idx=0, scale=0, offset=24)
+    )
+    #store %binding, #lea(base=%last, idx=0, scale=0, offset=40)
+  }
+  #store %binding, #lea(base=%environment, idx=0, scale=0, offset=24)
+  #let %buckets: #addr = #load[#addr](
+    #lea(base=%environment, idx=0, scale=0, offset=40)
+  )
+  #let %bucket_first: #addr = #load[#addr](
+    #lea(base=%buckets, idx=%name_hash, scale=16, offset=0)
+  )
+  #if #call meta_env_binding_is_nil(%bucket_first) {
+    #store %binding, #lea(base=%buckets, idx=%name_hash, scale=16, offset=0)
+  } else {
+    #let %bucket_last: #addr = #load[#addr](
+      #lea(base=%buckets, idx=%name_hash, scale=16, offset=8)
+    )
+    #store %binding, #lea(base=%bucket_last, idx=0, scale=0, offset=48)
+  }
+  #store %binding, #lea(base=%buckets, idx=%name_hash, scale=16, offset=8)
+  #store #add(
+    #load[#bits<64>](#lea(base=%environment, idx=0, scale=0, offset=32)), 1
+  ), #lea(base=%environment, idx=0, scale=0, offset=32)
+  #return
+}
+
+#proc meta_env_binding_source(#addr %binding) -> #addr {
+  #return #load[#addr](#lea(base=%binding, idx=0, scale=0, offset=8))
+}
+
+#proc meta_env_binding_value(#addr %binding) -> #addr {
+  #return #load[#addr](#lea(base=%binding, idx=0, scale=0, offset=32))
+}
+
+#proc meta_env_name_matches(
+  #addr %source, #addr %name, #addr %binding
+) -> #bits<1> {
+  #let %binding_source: #addr = #call meta_env_binding_source(%binding)
+  #let %left_data: #addr = #call tool_source_data(%source)
+  #let %right_data: #addr = #call tool_source_data(%binding_source)
+  #let %length: #bits<64> = #call raw_node_length(%name)
+  #if #ne(
+    %length,
+    #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=24))
+  ) { #return 0 }
+  #let %index: #bits<64> = 0
+  #loop compare {
+    #if #sge(%index, %length) { #break compare }
+    #if #ne(
+      #call tool_byte_at(
+        %left_data, #add(#call raw_node_start(%name), %index)
+      ),
+          #call tool_byte_at(
+            %right_data,
+            #add(
+              #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=16)),
+              %index
+            )
+      )
+    ) { #return 0 }
+    %index: #bits<64> = #add(%index, 1)
+    #continue compare
+  }
+  #return 1
+}
+
+#proc meta_env_lookup(
+  #addr %environment, #addr %source, #addr %name
+) -> #addr {
+  #return #call meta_env_lookup_span(
+    %environment, %source, #call raw_node_start(%name),
+    #call raw_node_length(%name)
+  )
+}
+
+#proc meta_env_lookup_local(
+  #addr %environment, #addr %source, #addr %name
+) -> #addr {
+  #let %start: #bits<64> = #call raw_node_start(%name)
+  #let %length: #bits<64> = #call raw_node_length(%name)
+  #let %hash: #bits<64> = #call meta_env_hash_span(%source, %start, %length)
+  #let %buckets: #addr = #load[#addr](
+    #lea(base=%environment, idx=0, scale=0, offset=40)
+  )
+  #let %binding: #addr = #load[#addr](
+    #lea(base=%buckets, idx=%hash, scale=16, offset=0)
+  )
+  #let %binding_steps: #bits<64> = 0
+  #loop bindings {
+    #if #call meta_env_binding_is_nil(%binding) {
+      #return #call meta_value_nil()
+    }
+    #if #sge(%binding_steps, 4096) {
+      #return #call meta_value_nil()
+    }
+    %binding_steps: #bits<64> = #add(%binding_steps, 1)
+    #if #eq(#load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=56)), %hash) {
+      #if #call meta_env_name_matches(%source, %name, %binding) {
+        #return #call meta_env_binding_value(%binding)
+      }
+    }
+    %binding: #addr = #load[#addr](
+      #lea(base=%binding, idx=0, scale=0, offset=48)
+    )
+    #continue bindings
+  }
+}
+
+// Lookup a compile-time binding by a fixed text name.  The compiler uses this
+// for conventional type namespaces such as `Concrete`/`Namespace`, where the
+// namespace name is metadata rather than a RawAst node from the current
+// source file.
+#proc meta_env_lookup_text(
+  #addr %environment, #addr %source, #addr %text, #bits<64> %length
+) -> #addr {
+  #let %current: #addr = %environment
+  #let %hash: #bits<64> = #call meta_env_hash_text(%text, %length)
+  #let %depth: #bits<64> = 0
+  #loop environments {
+    #if #sge(%depth, 256) { #return #call meta_value_nil() }
+    %depth: #bits<64> = #add(%depth, 1)
+    #if #call meta_env_is_nil(%current) {
+      #return #call meta_value_nil()
+    }
+    #let %buckets: #addr = #load[#addr](
+      #lea(base=%current, idx=0, scale=0, offset=40)
+    )
+    #let %binding: #addr = #load[#addr](
+      #lea(base=%buckets, idx=%hash, scale=16, offset=0)
+    )
+    #let %binding_steps: #bits<64> = 0
+    #loop bindings {
+      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
+      #if #sge(%binding_steps, 4096) {
+        #return #call meta_value_nil()
+      }
+      %binding_steps: #bits<64> = #add(%binding_steps, 1)
+      #if #eq(#load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=56)), %hash) {
+        #if #eq(
+        #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=24)),
+        %length
+        ) {
+          #let %binding_source: #addr = #load[#addr](
+            #lea(base=%binding, idx=0, scale=0, offset=8)
+          )
+          #let %binding_data: #addr = #call tool_source_data(
+            %binding_source
+          )
+          #let %index: #bits<64> = 0
+          #let %same: #bits<1> = 1
+          #loop compare {
+            #if #sge(%index, %length) { #break compare }
+            #if #ne(
+              #call tool_byte_at(
+                %binding_data,
+                #add(
+                  #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=16)),
+                  %index
+                )
+              ),
+              #call tool_byte_at(%text, %index)
+            ) {
+              %same: #bits<1> = 0
+              #break compare
+            }
+            %index: #bits<64> = #add(%index, 1)
+            #continue compare
+          }
+          #if %same { #return #call meta_env_binding_value(%binding) }
+        }
+      }
+      %binding: #addr = #load[#addr](
+        #lea(base=%binding, idx=0, scale=0, offset=48)
+      )
+      #continue bindings
+    }
+    %current: #addr = #call meta_env_parent(%current)
+    #continue environments
+  }
+}
+
+#proc meta_env_lookup_span(
+  #addr %environment, #addr %source, #bits<64> %start, #bits<64> %length
+) -> #addr {
+  #let %current: #addr = %environment
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %hash: #bits<64> = #call meta_env_hash_span(%source, %start, %length)
+  #let %depth: #bits<64> = 0
+  #loop environments {
+    #if #sge(%depth, 256) { #return #call meta_value_nil() }
+    %depth: #bits<64> = #add(%depth, 1)
+    #if #call meta_env_is_nil(%current) {
+      #return #call meta_value_nil()
+    }
+    #let %buckets: #addr = #load[#addr](
+      #lea(base=%current, idx=0, scale=0, offset=40)
+    )
+    #let %binding: #addr = #load[#addr](
+      #lea(base=%buckets, idx=%hash, scale=16, offset=0)
+    )
+    #let %binding_steps: #bits<64> = 0
+    #loop bindings {
+      #if #call meta_env_binding_is_nil(%binding) { #break bindings }
+      #if #sge(%binding_steps, 4096) {
+        #return #call meta_value_nil()
+      }
+      %binding_steps: #bits<64> = #add(%binding_steps, 1)
+      #if #eq(#load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=56)), %hash) {
+        #if #eq(
+          #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=24)),
+          %length
+        ) {
+          #let %binding_source: #addr = #load[#addr](
+            #lea(base=%binding, idx=0, scale=0, offset=8)
+          )
+          #let %binding_data: #addr = #call tool_source_data(
+            %binding_source
+          )
+          #let %index: #bits<64> = 0
+          #let %same: #bits<1> = 1
+          #loop compare {
+            #if #sge(%index, %length) { #break compare }
+            #if #ne(
+              #call tool_byte_at(%data, #add(%start, %index)),
+              #call tool_byte_at(
+                %binding_data,
+                #add(
+                  #load[#bits<64>](#lea(base=%binding, idx=0, scale=0, offset=16)),
+                  %index
+                )
+              )
+            ) {
+              %same: #bits<1> = 0
+              #break compare
+            }
+            %index: #bits<64> = #add(%index, 1)
+            #continue compare
+          }
+          #if %same { #return #call meta_env_binding_value(%binding) }
+        }
+      }
+      %binding: #addr = #load[#addr](
+        #lea(base=%binding, idx=0, scale=0, offset=48)
+      )
+      #continue bindings
+    }
+    %current: #addr = #call meta_env_parent(%current)
+    #continue environments
+  }
+}
+
+// Dot-qualified names are lexed as one atom (`math.add`).  Walk one segment
+// at a time through Module values, retaining the environment captured by the
+// module value.  `::` paths are handled by the compiler as external/import
+// paths until the same environment model is available for token sequences.
+#proc meta_env_lookup_token_path(
+  #addr %environment, #addr %source, #addr %node
+) -> #addr {
+  #let %current_environment: #addr = %environment
+  #let %current: #addr = %node
+  #let %segments: #bits<64> = 0
+  #loop segments {
+    #if #sge(%segments, 256) { #return #call meta_value_nil() }
+    %segments: #bits<64> = #add(%segments, 1)
+    #let %value: #addr = #call meta_env_lookup(
+      %current_environment, %source, %current
+    )
+    #if #eq(#call meta_value_kind(%value), 0) { #return %value }
+    #let %dot: #addr = #call raw_node_next(%current)
+    #if #eq(#call meta_atom_equal(%source, %dot, ".", 1), 0) {
+      #return %value
+    }
+    #let %member: #addr = #call raw_node_next(%dot)
+    #if #eq(#call raw_is_nil(%member), 1) { #return #call meta_value_nil() }
+    #if #ne(#call meta_value_kind(%value), 2) {
+      #if #ne(#call meta_value_kind(%value), 4) {
+        #return #call meta_value_nil()
+      }
+    }
+    %current_environment: #addr = #call meta_value_environment(%value)
+    %current: #addr = %member
+    #continue segments
+  }
+}
+
+// Resolve a token-separated namespace path such as `std::type`.  The
+// namespace separator remains ordinary RawAst punctuation: each segment is
+// looked up in the current environment, then the value's captured namespace
+// becomes the environment for the following segment.
+#proc meta_env_lookup_colon_path(
+  #addr %environment, #addr %source, #addr %node
+) -> #addr {
+  #let %current_environment: #addr = %environment
+  #let %current: #addr = %node
+  #let %segments: #bits<64> = 0
+  #loop segments {
+    #if #sge(%segments, 256) { #return #call meta_value_nil() }
+    %segments: #bits<64> = #add(%segments, 1)
+    #let %value: #addr = #call meta_env_lookup(
+      %current_environment, %source, %current
+    )
+    #if #eq(#call meta_value_kind(%value), 0) { #return %value }
+    #let %colon1: #addr = #call raw_node_next(%current)
+    #if #eq(#call meta_atom_equal(%source, %colon1, ":", 1), 0) {
+      #return %value
+    }
+    #let %colon2: #addr = #call raw_node_next(%colon1)
+    #if #eq(#call meta_atom_equal(%source, %colon2, ":", 1), 0) {
+      #return #call meta_value_nil()
+    }
+    #let %member: #addr = #call raw_node_next(%colon2)
+    #if #call raw_is_nil(%member) { #return #call meta_value_nil() }
+    #if #ne(#call meta_value_kind(%value), 2) {
+      #if #ne(#call meta_value_kind(%value), 4) {
+        #return #call meta_value_nil()
+      }
+    }
+    %current_environment: #addr = #call meta_value_environment(%value)
+    %current: #addr = %member
+    #continue segments
+  }
+}
+
+#proc meta_env_lookup_path(
+  #addr %environment, #addr %source, #addr %node
+) -> #addr {
+  #let %next: #addr = #call raw_node_next(%node)
+  #if #call meta_atom_equal(%source, %next, ":", 1) {
+    #return #call meta_env_lookup_colon_path(
+      %environment, %source, %node
+    )
+  }
+  #if #call meta_atom_equal(%source, %next, ".", 1) {
+    #return #call meta_env_lookup_token_path(
+      %environment, %source, %node
+    )
+  }
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %start: #bits<64> = #call raw_node_start(%node)
+  #let %length: #bits<64> = #call raw_node_length(%node)
+  #let %index: #bits<64> = 0
+  #let %current_environment: #addr = %environment
+  #let %segments: #bits<64> = 0
+  #loop segments {
+    #if #sge(%segments, 256) { #return #call meta_value_nil() }
+    %segments: #bits<64> = #add(%segments, 1)
+    #let %segment_start: #bits<64> = #add(%start, %index)
+    #let %scan: #bits<64> = %index
+    #loop segment_end {
+      #if #sge(%scan, %length) { #break segment_end }
+      #if #eq(
+        #call tool_byte_at(%data, #add(%start, %scan)), 46
+      ) { #break segment_end }
+      %scan: #bits<64> = #add(%scan, 1)
+      #continue segment_end
+    }
+    #let %segment_length: #bits<64> = #sub(%scan, %index)
+    #if #eq(%segment_length, 0) {
+      #return #call meta_value_nil()
+    }
+    #let %value: #addr = #call meta_env_lookup_span(
+      %current_environment, %source, %segment_start, %segment_length
+    )
+    #if #eq(#call meta_value_kind(%value), 0) { #return %value }
+    #if #sge(%scan, %length) { #return %value }
+    #if #ne(#call meta_value_kind(%value), 2) {
+      #if #ne(#call meta_value_kind(%value), 4) {
+        #return #call meta_value_nil()
+      }
+    }
+    %current_environment: #addr = #call meta_value_environment(%value)
+    %index: #bits<64> = #add(%scan, 1)
+    #continue segments
+  }
+}
+
+#proc meta_value_function(
+  #addr %source, #addr %name, #addr %function, #addr %environment
+) -> #addr {
+  #return #call meta_value_new(
+    3, %source, %name, %function, %environment, 0
+  )
+}
+
+#proc meta_value_module(
+  #addr %source, #addr %name, #addr %group, #addr %environment
+) -> #addr {
+  #return #call meta_value_new(
+    2, %source, %name, %group, %environment, 0
+  )
+}
+
+#proc meta_value_type(
+  #addr %source, #addr %name, #addr %binding
+) -> #addr {
+  #return #call meta_value_new(
+    4, %source, %name, %binding, #call meta_value_nil(), 0
+  )
+}
+
+// Record type values keep the declaration source with the binding.  The
+// binding points into that source's RawAst; callers must use this source when
+// walking `struct { ... }`, even when the value is consumed from another
+// module.
+
+#proc meta_value_type_with_namespace(
+  #addr %source, #addr %name, #addr %binding, #addr %environment
+) -> #addr {
+  #return #call meta_value_new(
+    4, %source, %name, %binding, %environment, 0
+  )
+}
+
+#proc meta_value_syntax(
+  #addr %source, #addr %node, #addr %environment
+) -> #addr {
+  #return #call meta_value_new(
+    5, %source, %node, %node, %environment, 0
+  )
+}

@@ -1,0 +1,260 @@
+// Versioned compiler-context and pass-result layouts shared by Meta passes.
+// These are plain LAIN-IR records. Handles are addresses owned by the current
+// compile request; the fields give the standard library a stable ABI.
+
+#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;
+#extern #proc bootstrap.release-pages(#addr %memory) -> #unit;
+
+// MetaPassResultV1 layout:
+//   status @0 (#bits<32>), changed @4 (#bits<8>), result handle @8,
+//   diagnostic handle @16, dependencies handle @24, owner @32.
+#proc lain_meta_pass_result_v1_new(
+  #bits<32> %status, #bits<64> %changed, #addr %result,
+  #addr %diagnostic, #addr %dependencies, #addr %owner
+) -> #addr {
+  #let %value: #addr = #call bootstrap.allocate-pages(40)
+  #store %status, #lea(base=%value, idx=0, scale=0, offset=0)
+  #store #trunc[#bits<8>](%changed), #lea(base=%value, idx=0, scale=0, offset=4)
+  #store %result, #lea(base=%value, idx=0, scale=0, offset=8)
+  #store %diagnostic, #lea(base=%value, idx=0, scale=0, offset=16)
+  #store %dependencies, #lea(base=%value, idx=0, scale=0, offset=24)
+  #store %owner, #lea(base=%value, idx=0, scale=0, offset=32)
+  #return %value
+}
+
+#proc lain_meta_pass_result_v1_status(#addr %value) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%value, idx=0, scale=0, offset=0))
+}
+
+#proc lain_meta_pass_result_v1_changed(#addr %value) -> #bits<1> {
+  #return #ne(#load[#bits<8>](#lea(base=%value, idx=0, scale=0, offset=4)), 0)
+}
+
+#proc lain_meta_pass_result_v1_result(#addr %value) -> #addr {
+  #return #load[#addr](#lea(base=%value, idx=0, scale=0, offset=8))
+}
+
+#proc lain_meta_pass_result_v1_diagnostic(#addr %value) -> #addr {
+  #return #load[#addr](#lea(base=%value, idx=0, scale=0, offset=16))
+}
+
+#proc lain_meta_pass_result_v1_dependencies(#addr %value) -> #addr {
+  #return #load[#addr](#lea(base=%value, idx=0, scale=0, offset=24))
+}
+
+// Pass-result records are compiler-context objects.  A result is consumed
+// exactly once by the compiler pipeline after its status and payload have
+// been read; foreign or null handles are never released here.
+#proc lain_meta_pass_result_v1_release(#addr %value) -> #unit {
+  #if #eq(#ptr2int(%value), 0) { #return }
+  #call bootstrap.release-pages(%value)
+  #return
+}
+
+#proc lain_meta_pass_result_v1_owner(#addr %value) -> #addr {
+  #return #load[#addr](#lea(base=%value, idx=0, scale=0, offset=32))
+}
+
+// Address equality is explicit at this ABI boundary.  LAIN-IR does not
+// permit comparing address-typed values with #eq directly, so owner handles
+// are compared through their stable integer representation.
+#proc lain_meta_pass_result_v1_owner_matches(
+  #addr %value, #addr %context
+) -> #bits<1> {
+  // A malformed standard-library pass may return a null result handle.  Do
+  // the pointer check before reading the versioned record so the compiler
+  // boundary reports 5202 instead of dereferencing address zero.
+  #if #eq(#ptr2int(%value), 0) { #return 0 }
+  #if #eq(#ptr2int(%context), 0) { #return 0 }
+  #let %result_owner: #bits<64> = #ptr2int(
+    #call lain_meta_pass_result_v1_owner(%value)
+  )
+  #let %context_owner: #bits<64> = #ptr2int(
+    #call lain_compile_context_v1_owner(%context)
+  )
+  #return #eq(%result_owner, %context_owner)
+}
+
+#proc lain_meta_pass_result_v1_transfer_owner(
+  #addr %value, #addr %from_owner, #addr %context
+) -> #bits<1> {
+  #if #eq(#ptr2int(%value), 0) { #return 0 }
+  #if #eq(#ptr2int(%from_owner), 0) { #return 0 }
+  #if #eq(#ptr2int(%context), 0) { #return 0 }
+  #let %current_owner: #bits<64> = #ptr2int(
+    #call lain_meta_pass_result_v1_owner(%value)
+  )
+  #if #ne(%current_owner, #ptr2int(%from_owner)) { #return 0 }
+  #store #call lain_compile_context_v1_owner(%context),
+    #lea(base=%value, idx=0, scale=0, offset=32)
+  #return 1
+}
+
+// DiagnosticV1 layout:
+//   code @0 (#bits<32>), severity @4 (#bits<8>), span start/length @8/@16,
+//   message handle @24, owner @32.
+#proc lain_diagnostic_v1_new(
+  #bits<32> %code, #bits<8> %severity, #bits<64> %start, #bits<64> %length,
+  #addr %message, #addr %owner
+) -> #addr {
+  #let %value: #addr = #call bootstrap.allocate-pages(40)
+  #store %code, #lea(base=%value, idx=0, scale=0, offset=0)
+  #store %severity, #lea(base=%value, idx=0, scale=0, offset=4)
+  #store %start, #lea(base=%value, idx=0, scale=0, offset=8)
+  #store %length, #lea(base=%value, idx=0, scale=0, offset=16)
+  #store %message, #lea(base=%value, idx=0, scale=0, offset=24)
+  #store %owner, #lea(base=%value, idx=0, scale=0, offset=32)
+  #return %value
+}
+
+#proc lain_diagnostic_v1_code(#addr %value) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%value, idx=0, scale=0, offset=0))
+}
+
+#proc lain_diagnostic_v1_severity(#addr %value) -> #bits<8> {
+  #return #load[#bits<8>](#lea(base=%value, idx=0, scale=0, offset=4))
+}
+
+#proc lain_diagnostic_v1_start(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=8))
+}
+
+#proc lain_diagnostic_v1_length(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=16))
+}
+
+#proc lain_diagnostic_v1_message(#addr %value) -> #addr {
+  #return #load[#addr](#lea(base=%value, idx=0, scale=0, offset=24))
+}
+
+#proc lain_diagnostic_v1_owner(#addr %value) -> #addr {
+  #return #load[#addr](#lea(base=%value, idx=0, scale=0, offset=32))
+}
+
+// CompileContextV1 layout shared by every standard-library pass:
+//   owner @0, step limit @8, allocation limit @16, recursion limit @24,
+//   capability mask @32, steps used @40, bytes used @48, recursion used @56.
+#proc lain_compile_context_v1_new(
+  #addr %owner, #bits<64> %step_limit, #bits<64> %allocation_limit,
+  #bits<64> %recursion_limit, #bits<64> %capability_mask
+) -> #addr {
+  #let %value: #addr = #call bootstrap.allocate-pages(64)
+  #store %owner, #lea(base=%value, idx=0, scale=0, offset=0)
+  #store %step_limit, #lea(base=%value, idx=0, scale=0, offset=8)
+  #store %allocation_limit, #lea(base=%value, idx=0, scale=0, offset=16)
+  #store %recursion_limit, #lea(base=%value, idx=0, scale=0, offset=24)
+  #store %capability_mask, #lea(base=%value, idx=0, scale=0, offset=32)
+  #store 0, #lea(base=%value, idx=0, scale=0, offset=40)
+  #store 0, #lea(base=%value, idx=0, scale=0, offset=48)
+  #store 0, #lea(base=%value, idx=0, scale=0, offset=56)
+  #return %value
+}
+
+#proc lain_compile_context_v1_owner(#addr %value) -> #addr {
+  #return #load[#addr](#lea(base=%value, idx=0, scale=0, offset=0))
+}
+#proc lain_compile_context_v1_step_limit(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=8))
+}
+#proc lain_compile_context_v1_allocation_limit(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=16))
+}
+#proc lain_compile_context_v1_recursion_limit(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=24))
+}
+#proc lain_compile_context_v1_capability_mask(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=32))
+}
+#proc lain_compile_context_v1_steps_used(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=40))
+}
+#proc lain_compile_context_v1_bytes_used(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=48))
+}
+#proc lain_compile_context_v1_recursion_used(#addr %value) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=56))
+}
+
+#proc lain_compile_context_v1_set_step_limit(
+  #addr %value, #bits<64> %limit
+) -> #unit {
+  #store %limit, #lea(base=%value, idx=0, scale=0, offset=8)
+  #return
+}
+
+#proc lain_compile_context_v1_set_allocation_limit(
+  #addr %value, #bits<64> %limit
+) -> #unit {
+  #store %limit, #lea(base=%value, idx=0, scale=0, offset=16)
+  #return
+}
+
+#proc lain_compile_context_v1_set_recursion_limit(
+  #addr %value, #bits<64> %limit
+) -> #unit {
+  #store %limit, #lea(base=%value, idx=0, scale=0, offset=24)
+  #return
+}
+
+#proc lain_compile_context_v1_set_capability_mask(
+  #addr %value, #bits<64> %mask
+) -> #unit {
+  #store %mask, #lea(base=%value, idx=0, scale=0, offset=32)
+  #return
+}
+
+// Return 1 and consume one unit when the step budget permits it.
+#proc lain_compile_context_v1_consume_step(#addr %value) -> #bits<1> {
+  #let %used: #bits<64> = #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=40))
+  #let %limit: #bits<64> = #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=8))
+  // A zero limit means that this resource is not budgeted.  This keeps the
+  // default context useful while still making every non-zero limit strict.
+  #if #eq(%limit, 0) { #return 1 }
+  #if #sge(%used, %limit) { #return 0 }
+  #store #add(%used, 1), #lea(base=%value, idx=0, scale=0, offset=40)
+  #return 1
+}
+
+#proc lain_compile_context_v1_charge_bytes(#addr %value, #bits<64> %bytes) -> #bits<1> {
+  #let %used: #bits<64> = #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=48))
+  #let %limit: #bits<64> = #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=16))
+  #if #eq(%limit, 0) { #return 1 }
+  #if #sgt(%bytes, #sub(%limit, %used)) { #return 0 }
+  #store #add(%used, %bytes), #lea(base=%value, idx=0, scale=0, offset=48)
+  #return 1
+}
+
+#proc lain_compile_context_v1_enter_recursion(#addr %value) -> #bits<1> {
+  #let %used: #bits<64> = #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=56))
+  #let %limit: #bits<64> = #load[#bits<64>](#lea(base=%value, idx=0, scale=0, offset=24))
+  #if #eq(%limit, 0) { #return 1 }
+  #if #sge(%used, %limit) { #return 0 }
+  #store #add(%used, 1), #lea(base=%value, idx=0, scale=0, offset=56)
+  #return 1
+}
+
+#proc lain_compile_context_v1_leave_recursion(#addr %value) -> #unit {
+  #let %used: #bits<64> = #load[#bits<64>](
+    #lea(base=%value, idx=0, scale=0, offset=56)
+  )
+  #if #eq(%used, 0) { #return }
+  #store #sub(%used, 1), #lea(base=%value, idx=0, scale=0, offset=56)
+  #return
+}
+
+// Capability bits are intentionally opaque to the compiler core.  The
+// standard library assigns meanings to individual (power-of-two) bits and
+// asks whether a requested bit is present in the context.  LAIN-IR currently
+// has no bitwise-and expression, so this uses arithmetic modulo for one bit.
+#proc lain_compile_context_v1_has_capability(
+  #addr %value, #bits<64> %required
+) -> #bits<1> {
+  #if #eq(%required, 0) { #return 1 }
+  #let %available: #bits<64> = #load[#bits<64>](
+    #lea(base=%value, idx=0, scale=0, offset=32)
+  )
+  #let %pair: #bits<64> = #mul(%required, 2)
+  #let %bucket: #bits<64> = #udiv(%available, %pair)
+  #let %remainder: #bits<64> = #sub(%available, #mul(%bucket, %pair))
+  #return #sge(%remainder, %required)
+}

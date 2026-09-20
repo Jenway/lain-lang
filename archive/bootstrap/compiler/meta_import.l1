@@ -1,0 +1,106 @@
+// Import path parsing used by the Meta/workspace layer.
+//
+// These helpers only inspect the RawAst spelling of an import declaration.
+// They do not resolve the workspace target or emit code.
+
+#extern #proc raw_is_nil(#addr %node) -> #bits<1>;
+#extern #proc raw_node_next(#addr %node) -> #addr;
+#extern #proc raw_node_first(#addr %node) -> #addr;
+#extern #proc raw_node_kind(#addr %node) -> #bits<32>;
+#extern #proc raw_node_delimiter(#addr %node) -> #bits<32>;
+#extern #proc raw_node_start(#addr %node) -> #bits<64>;
+#extern #proc raw_node_length(#addr %node) -> #bits<64>;
+#extern #proc tool_source_data(#addr %source) -> #addr;
+#extern #proc tool_byte_at(#addr %data, #bits<64> %index) -> #bits<8>;
+#extern #proc meta_atom_equal(
+  #addr %source, #addr %node, #addr %text, #bits<64> %length
+) -> #bits<1>;
+#extern #proc program_nil() -> #addr;
+
+#proc program_import_argument(
+  #addr %source, #addr %let_node
+) -> #addr {
+  #let %node: #addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return #call program_nil() }
+    #if #call meta_atom_equal(%source, %node, "=", 1) {
+      #let %value: #addr = #call raw_node_next(%node)
+      #if #call raw_is_nil(%value) { #return #call program_nil() }
+      #if #eq(
+        #call meta_atom_equal(%source, %value, "import", 6),
+        0
+      ) { #return #call program_nil() }
+      #let %group: #addr = #call raw_node_next(%value)
+      #if #call raw_is_nil(%group) { #return #call program_nil() }
+      #if #ne(#call raw_node_kind(%group), 2) {
+        #return #call program_nil()
+      }
+      #if #ne(#call raw_node_delimiter(%group), 40) {
+        #return #call program_nil()
+      }
+      #return #call raw_node_first(%group)
+    }
+    #if #call meta_atom_equal(%source, %node, ";", 1) {
+      #return #call program_nil()
+    }
+    %node: #addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_import_name_start(
+  #addr %source, #addr %argument
+) -> #bits<64> {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %length: #bits<64> = #call raw_node_length(%argument)
+  #let %inner_length: #bits<64> = #sub(%length, 2)
+  #let %index: #bits<64> = 0
+  #let %component: #bits<64> = 0
+  #loop separators {
+    #if #sge(%index, %inner_length) { #break separators }
+    #let %byte: #bits<8> = #call tool_byte_at(
+      %data, #add(#call raw_node_start(%argument), #add(1, %index))
+    )
+    #if #eq(%byte, 58) {
+      #if #slt(#add(%index, 1), %inner_length) {
+        #if #eq(
+          #call tool_byte_at(
+            %data,
+            #add(#call raw_node_start(%argument), #add(2, %index))
+          ),
+          58
+        ) {
+          %component: #bits<64> = #add(%index, 2)
+          %index: #bits<64> = #add(%index, 1)
+        }
+      }
+    } else {
+      #if #eq(%byte, 47) {
+        %component: #bits<64> = #add(%index, 1)
+      }
+      #if #eq(%byte, 92) {
+        %component: #bits<64> = #add(%index, 1)
+      }
+    }
+    %index: #bits<64> = #add(%index, 1)
+    #continue separators
+  }
+  #return #add(#call raw_node_start(%argument), #add(1, %component))
+}
+
+#proc program_import_name_length(
+  #addr %source, #addr %argument, #bits<64> %name_start
+) -> #bits<64> {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %end: #bits<64> = #sub(
+    #add(#call raw_node_start(%argument), #call raw_node_length(%argument)),
+    1
+  )
+  #let %length: #bits<64> = #sub(%end, %name_start)
+  #if #sge(%length, 5) {
+    #if #eq(#call tool_byte_at(%data, #sub(%end, 5)), 46) {
+      %length: #bits<64> = #sub(%length, 5)
+    }
+  }
+  #return %length
+}

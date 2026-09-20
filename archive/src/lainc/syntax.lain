@@ -1,0 +1,443 @@
+// Pure-Lain lossless syntax storage and delimiter reader.
+//
+// The tree records source topology.  It does not contain Bind, Function,
+// Struct, Module, Type, Effect or Match nodes.
+
+let memory_model: Module = import("std::memory_model");
+let vector: Module = import("std::core::vec");
+let memory: Module = import("std::core::memory");
+let tokenizer: Module =
+    import("packages::lain::compiler::tokenizer");
+
+@export
+let syntax: Module = std::module {
+
+    @export
+    let Syntax = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let Lex: Module = tokenizer.Tokenizer(Memory);
+        let NodeId: std::type = usize;
+        let UnitId: std::type = usize;
+        let HygieneId: std::type = usize;
+
+        let Node: std::type = std::struct {
+            kind: i32,
+            token_kind: i32,
+            delimiter: i32,
+            span: Lex.Span,
+            text: Memory.String,
+            first_child: NodeId,
+            next_sibling: NodeId,
+            origin: NodeId,
+            hygiene: HygieneId,
+            generated: bool,
+        };
+
+        let NodeVector: std::type = vector.Vec(
+            Node,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let Unit: std::type = std::struct {
+            source: memory.ByteSpan,
+            nodes: NodeVector,
+            root: NodeId,
+        };
+
+        let UnitVector: std::type = vector.Vec(
+            Unit,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let Store: std::type = std::struct {
+            units: UnitVector,
+            next_hygiene: HygieneId,
+        };
+
+        let Cursor: std::type = std::struct {
+            token: usize,
+        };
+
+        let new_store = std::func() -> Store {
+            let result: Store = Store {
+                units: UnitVector.new(),
+                next_hygiene: 1,
+            };
+            return result;
+        };
+
+        let invalid_node = std::func() -> NodeId {
+            return std::usize_max();
+        };
+
+        let add_node = std::func(
+            unit: &mut Unit,
+            node: Node,
+        ) -> NodeId ! {Memory.Allocation.Effect} {
+            let id: NodeId = unit.nodes.length();
+            unit.nodes.push(node);
+            return id;
+        };
+
+        let empty_node = std::func(span: Lex.Span) -> Node {
+            return Node {
+                kind: 0,
+                token_kind: 0,
+                delimiter: 0,
+                span: span,
+                text: Memory.String.new(),
+                first_child: invalid_node(),
+                next_sibling: invalid_node(),
+                origin: invalid_node(),
+                hygiene: 0,
+                generated: false,
+            };
+        };
+
+        let append_child = std::func(
+            unit: &mut Unit,
+            parent: NodeId,
+            child: NodeId,
+        ) -> unit ! {Memory.Bounds.Effect} {
+            let target: &mut Node = unit.nodes.get_mut(parent);
+            if target.first_child == invalid_node() {
+                target.first_child = child;
+                return;
+            }
+
+            let tail: NodeId = target.first_child;
+            while unit.nodes.get(tail).next_sibling
+                != invalid_node() {
+                tail = unit.nodes.get(tail).next_sibling;
+            }
+            unit.nodes.get_mut(tail).next_sibling = child;
+        };
+
+        let delimiter_code = std::func(byte: i32) -> i32 {
+            if byte == 40 { return 1; }
+            if byte == 91 { return 2; }
+            if byte == 123 { return 3; }
+            return 0;
+        };
+
+        let closes = std::func(
+            delimiter: i32,
+            byte: i32,
+        ) -> bool {
+            if delimiter == 1 { return byte == 41; }
+            if delimiter == 2 { return byte == 93; }
+            if delimiter == 3 { return byte == 125; }
+            return false;
+        };
+
+        let read_group = std::func(
+            unit: &mut Unit,
+            stream: &Lex.TokenStream,
+            cursor: &mut Cursor,
+            delimiter: i32,
+            opening_span: Lex.Span,
+        ) -> NodeId ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let group: Node = Node {
+                kind: 2,
+                token_kind: 0,
+                delimiter: delimiter,
+                span: opening_span,
+                text: memory.String.new(),
+                first_child: invalid_node(),
+                next_sibling: invalid_node(),
+                origin: invalid_node(),
+                hygiene: 0,
+                generated: false,
+            };
+            let group_id: NodeId = add_node(unit, group);
+
+            while cursor.token < stream.tokens.length() {
+                let token: &Lex.Token =
+                    stream.tokens.get(cursor.token);
+
+                if token.kind == Lex.eof() {
+                    break;
+                }
+
+                let byte: i32 = 0;
+                if token.span.start < token.span.end {
+                    byte = memory.byte_at(
+                        stream.source,
+                        token.span.start,
+                    );
+                }
+
+                if delimiter != 0 && closes(delimiter, byte) {
+                    unit.nodes.get_mut(group_id).span.end =
+                        token.span.end;
+                    cursor.token = cursor.token + 1;
+                    return group_id;
+                }
+
+                if token.kind == Lex.delimiter()
+                    && delimiter_code(byte) != 0 {
+                    cursor.token = cursor.token + 1;
+                    let child: NodeId = read_group(
+                        unit,
+                        stream,
+                        cursor,
+                        delimiter_code(byte),
+                        token.span,
+                    );
+                    append_child(unit, group_id, child);
+                } else {
+                    let node: Node = Node {
+                        kind: 1,
+                        token_kind: token.kind,
+                        delimiter: 0,
+                        span: token.span,
+                        text: memory.String.new(),
+                        first_child: invalid_node(),
+                        next_sibling: invalid_node(),
+                        origin: invalid_node(),
+                        hygiene: 0,
+                        generated: false,
+                    };
+                    let child: NodeId = add_node(unit, node);
+                    append_child(unit, group_id, child);
+                    cursor.token = cursor.token + 1;
+                }
+            }
+
+            return group_id;
+        };
+
+        let parse = std::func(
+            store: &mut Store,
+            source: memory.ByteSpan,
+        ) -> UnitId ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let stream: Lex.TokenStream = Lex.tokenize(source);
+            let unit: Unit = Unit {
+                source: stream.source,
+                nodes: NodeVector.new(),
+                root: invalid_node(),
+            };
+            let cursor: Cursor = Cursor { token: 0 };
+            unit.root = read_group(
+                &mut unit,
+                &stream,
+                &mut cursor,
+                0,
+                Lex.Span { start: 0, end: 0 },
+            );
+            let id: UnitId = store.units.length();
+            store.units.push(&mut unit);
+            return id;
+        };
+
+        let node = std::func(
+            store: &Store,
+            unit: UnitId,
+            id: NodeId,
+        ) -> &Node ! {Memory.Bounds.Effect} {
+            return store.units.get(unit).nodes.get(id);
+        };
+
+        // Keep the Unit root accessor explicit.  The bootstrap compiler's
+        // generic nested-record field lowering currently addresses the first
+        // field of Unit for `unit.root`; the physical Unit layout places root
+        // after the source and node handles.  The source compiler recognizes
+        // this accessor and emits the concrete offset.
+        let unit_root = std::func(
+            store: &Store,
+            unit: UnitId,
+        ) -> NodeId ! {Memory.Bounds.Effect} {
+            return store.units.get(unit).root;
+        };
+
+        let valid_node = std::func(
+            store: &Store,
+            unit: UnitId,
+            id: NodeId,
+        ) -> bool {
+            if unit >= store.units.length() { return false; }
+            return id < store.units.get(unit).nodes.length();
+        };
+
+        let node_mut = std::func(
+            store: &mut Store,
+            unit: UnitId,
+            id: NodeId,
+        ) -> &mut Node ! {Memory.Bounds.Effect} {
+            return store.units.get_mut(unit).nodes.get_mut(id);
+        };
+
+        let unit_mut = std::func(
+            store: &mut Store,
+            unit: UnitId,
+        ) -> &mut Unit ! {Memory.Bounds.Effect} {
+            return store.units.get_mut(unit);
+        };
+
+        let fresh_hygiene = std::func(
+            store: &mut Store,
+        ) -> HygieneId {
+            let id: HygieneId = store.next_hygiene;
+            store.next_hygiene = store.next_hygiene + 1;
+            return id;
+        };
+
+        let token_equal = std::func(
+            store: &Store,
+            unit_id: UnitId,
+            node_id: NodeId,
+            literal: addr,
+            literal_length: usize,
+        ) -> bool ! {Memory.Bounds.Effect} {
+            let unit: &Unit = store.units.get(unit_id);
+            let value: &Node = unit.nodes.get(node_id);
+            if value.kind != 1 { return false; }
+
+            if value.generated {
+                return Memory.String.equal_literal(
+                    &value.text,
+                    literal,
+                    literal_length,
+                );
+            }
+
+            if value.span.end - value.span.start
+                != literal_length {
+                return false;
+            }
+            let index: usize = 0;
+            while index < literal_length {
+                if memory.byte_at(
+                    unit.source,
+                    value.span.start + index,
+                ) != std::load_bits(8, literal + index) {
+                    return false;
+                }
+                index = index + 1;
+            }
+            return true;
+        };
+
+        let next_significant = std::func(
+            store: &Store,
+            unit: UnitId,
+            node_id: NodeId,
+        ) -> NodeId ! {Memory.Bounds.Effect} {
+            let current: NodeId = node_id;
+            while current != invalid_node() {
+                let value: &Node = node(store, unit, current);
+                if value.token_kind != Lex.trivia()
+                    && value.token_kind != Lex.comment() {
+                    return current;
+                }
+                current = value.next_sibling;
+            }
+            return invalid_node();
+        };
+
+        let copy_token_text = std::func(
+            store: &Store,
+            unit_id: UnitId,
+            node_id: NodeId,
+            strip_quotes: bool,
+        ) -> Memory.String ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let unit: &Unit = store.units.get(unit_id);
+            let value: &Node = unit.nodes.get(node_id);
+            if value.generated {
+                return Memory.String.clone(&value.text);
+            }
+
+            let start: usize = value.span.start;
+            let end: usize = value.span.end;
+            if strip_quotes && end >= start + 2 {
+                start = start + 1;
+                end = end - 1;
+            }
+
+            let output: Memory.String = Memory.String.new();
+            let index: usize = start;
+            while index < end {
+                Memory.String.append_byte(
+                    &mut output,
+                    memory.byte_at(unit.source, index),
+                );
+                index = index + 1;
+            }
+            return output;
+        };
+
+        let token_i32 = std::func(
+            store: &Store,
+            unit_id: UnitId,
+            node_id: NodeId,
+        ) -> i32 ! {Memory.Bounds.Effect} {
+            let unit: &Unit = store.units.get(unit_id);
+            let value: &Node = unit.nodes.get(node_id);
+            let result: i32 = 0;
+            let index: usize = value.span.start;
+            while index < value.span.end {
+                let byte: i32 =
+                    memory.byte_at(unit.source, index);
+                result = result * 10 + byte - 48;
+                index = index + 1;
+            }
+            return result;
+        };
+
+        let node_span_start = std::func(
+            store: &Store,
+            unit_id: UnitId,
+            node_id: NodeId,
+        ) -> usize {
+            return node(store, unit_id, node_id).span.start;
+        };
+        let node_span_end = std::func(
+            store: &Store,
+            unit_id: UnitId,
+            node_id: NodeId,
+        ) -> usize {
+            return node(store, unit_id, node_id).span.end;
+        };
+
+        return std::module {
+            @export let NodeId: std::type = NodeId;
+            @export let UnitId: std::type = UnitId;
+            @export let HygieneId: std::type = HygieneId;
+            @export let Span: std::type = Lex.Span;
+            @export let Node: std::type = Node;
+            @export let NodeVector: std::type = NodeVector;
+            @export let Unit: std::type = Unit;
+            @export let UnitVector: std::type = UnitVector;
+            @export let Store: std::type = Store;
+            @export let new_store = new_store;
+            @export let parse = parse;
+            @export let node = node;
+            @export let unit_root = unit_root;
+            @export let valid_node = valid_node;
+            @export let node_mut = node_mut;
+            @export let unit_mut = unit_mut;
+            @export let add_node = add_node;
+            @export let append_child = append_child;
+            @export let invalid_node = invalid_node;
+            @export let fresh_hygiene = fresh_hygiene;
+            @export let token_equal = token_equal;
+            @export let next_significant = next_significant;
+            @export let copy_token_text = copy_token_text;
+            @export let token_i32 = token_i32;
+            @export let node_span_start = node_span_start;
+            @export let node_span_end = node_span_end;
+        };
+    };
+};

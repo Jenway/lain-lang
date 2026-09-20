@@ -1,0 +1,108 @@
+#extern #proc lain_std_macro_expand_root(#addr %source, #addr %root) -> #bits<32>;
+#extern #proc lain_std_macro_find_declaration(#addr %source, #addr %root) -> #addr;
+#extern #proc syntax_unit_set_root(#addr %unit, #addr %root) -> #unit;
+#extern #proc lain_ast_v1_copy(#addr %root) -> #addr;
+#extern #proc lain_ast_v1_is_nil(#addr %root) -> #bits<1>;
+// Bootstrap Standard Library ABI v1.
+//
+// This first slice is intentionally tiny.  It proves that the LAIN-IR-written
+// compiler can call a separately bundled standard-library artifact.  Language
+// rules are added behind this ABI in later slices; they do not move into the
+// compiler core.
+
+#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;
+#extern #proc lain_ast_v1_nil() -> #addr;
+#extern #proc lain_meta_pass_result_v1_new(
+  #bits<32> %status, #bits<64> %changed, #addr %result,
+  #addr %diagnostic, #addr %dependencies, #addr %owner
+) -> #addr;
+#extern #proc lain_std_meta_status(#addr %source, #addr %root) -> #bits<32>;
+#extern #proc syntax_index_count(#addr %index) -> #bits<64>;
+#extern #proc syntax_index_status(#addr %index) -> #bits<32>;
+#extern #proc syntax_index_entry(#addr %index, #bits<64> %ordinal) -> #addr;
+#extern #proc syntax_unit_source(#addr %unit) -> #addr;
+#extern #proc syntax_unit_root(#addr %unit) -> #addr;
+#extern #proc lain_compile_context_v1_owner(#addr %context) -> #addr;
+#extern #proc lain_std_elaborate_program(#addr %request, #addr %syntax_index) -> #addr;
+#extern #proc lain_std_emit_program(#addr %unit) -> #bits<32>;
+#extern #proc program_unit_status(#addr %unit) -> #bits<32>;
+
+#proc lain_std_abi_version() -> #bits<64> {
+  #return 1
+}
+
+#proc lain_std_initialize(#addr %context) -> #bits<32> {
+  #return 0
+}
+
+#proc lain_std_expand(
+  #addr %context, #addr %source_unit, #addr %root
+) -> #addr {
+  // The compiler passes the syntax index as source_unit.  Semantic form
+  // recognition is delegated to the bootstrap library for every unit; the
+  // core does not inspect `module`/`struct` spellings itself.
+  #let %owner: #addr = #call lain_compile_context_v1_owner(%context)
+  #let %index_status: #bits<32> = #call syntax_index_status(%source_unit)
+  #if #ne(%index_status, 0) {
+    #return #call lain_meta_pass_result_v1_new(
+      %index_status, 0, %root, #call lain_ast_v1_nil(),
+      #call lain_ast_v1_nil(), %owner
+    )
+  }
+  #let %count: #bits<64> = #call syntax_index_count(%source_unit)
+  #let %ordinal: #bits<64> = 0
+  #loop units {
+    #if #sge(%ordinal, %count) { #break units }
+    #let %unit: #addr = #call syntax_index_entry(%source_unit, %ordinal)
+    #let %declaration: #addr = #call lain_std_macro_find_declaration(
+      #call syntax_unit_source(%unit), #call syntax_unit_root(%unit))
+    #if #eq(#call lain_ast_v1_is_nil(%declaration), 0) {
+      #let %expanded: #addr = #call lain_ast_v1_copy(#call syntax_unit_root(%unit))
+      #let %macro_status: #bits<32> = #call lain_std_macro_expand_root(#call syntax_unit_source(%unit), %expanded)
+      #if #ne(%macro_status, 0) {
+        #return #call lain_meta_pass_result_v1_new(
+          %macro_status, 0, %root, #call lain_ast_v1_nil(), #call lain_ast_v1_nil(), %owner)
+      }
+      #call syntax_unit_set_root(%unit, %expanded)
+    }
+    #let %status: #bits<32> = #call lain_std_meta_status(
+      #call syntax_unit_source(%unit), #call syntax_unit_root(%unit)
+    )
+    #if #ne(%status, 0) {
+      #return #call lain_meta_pass_result_v1_new(
+        %status, 0, %root, #call lain_ast_v1_nil(),
+        #call lain_ast_v1_nil(), %owner
+      )
+    }
+    %ordinal: #bits<64> = #add(%ordinal, 1)
+    #continue units
+  }
+  #return #call lain_meta_pass_result_v1_new(
+    0, 0, %root, #call lain_ast_v1_nil(), #call lain_ast_v1_nil(), %owner
+  )
+}
+
+#proc lain_std_elaborate(#addr %context, #addr %expanded_root) -> #addr {
+  #let %owner: #addr = #call lain_compile_context_v1_owner(%context)
+  #let %unit: #addr = #call lain_std_elaborate_program(%owner, %expanded_root)
+  #let %status: #bits<32> = 5100
+  #if #ne(#ptr2int(%unit), 0) {
+    %status: #bits<32> = #call program_unit_status(%unit)
+  }
+  #return #call lain_meta_pass_result_v1_new(
+    %status, 1, %unit,
+    #call lain_ast_v1_nil(), #call lain_ast_v1_nil(), %owner
+  )
+}
+
+#proc lain_std_lower(
+  #addr %context, #addr %elaborated_root, #addr %l1_unit
+) -> #addr {
+  #let %owner: #addr = #call lain_compile_context_v1_owner(%context)
+  // Consume the checked language unit; do not reconstruct it from syntax_index.
+  #let %status: #bits<32> = #call lain_std_emit_program(%elaborated_root)
+  #return #call lain_meta_pass_result_v1_new(
+    %status, 1, %l1_unit,
+    #call lain_ast_v1_nil(), #call lain_ast_v1_nil(), %owner
+  )
+}

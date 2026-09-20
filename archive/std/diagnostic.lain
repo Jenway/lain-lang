@@ -1,0 +1,215 @@
+// std/diagnostic.lain
+//
+// Phase-neutral diagnostic values shared by Meta, domain parsers and the
+// backend.  The record shapes are deliberately small and contain no host
+// capability; formatting and emission stay at the compiler boundary.
+
+@export
+let diagnostic: Module = std::module {
+    // Severity is a stable scalar ABI so diagnostics can cross module
+    // boundaries without depending on a compiler-owned enum representation.
+    @export
+    let Severity: std::type = i32;
+
+    @export
+    let Error: Severity = 1;
+
+    @export
+    let Warning: Severity = 2;
+
+    @export
+    let Note: Severity = 3;
+
+    @export
+    let Help: Severity = 4;
+
+    @export
+    let Span: std::type = std::struct {
+        unit: usize,
+        start: usize,
+        end: usize,
+    };
+
+    @export
+    let span = std::func(
+        unit: usize,
+        start: usize,
+        end: usize,
+    ) -> Span {
+        return Span { unit: unit, start: start, end: end };
+    };
+
+    // Scalar helpers are also exposed for front-ends whose physical lowering
+    // does not yet support returning a record across a module boundary.
+    @export
+    let span_width = std::func(start: usize, end: usize) -> usize {
+        if end < start { return 0; }
+        return end - start;
+    };
+
+    @export
+    let severity_error = std::func() -> Severity { return 1; };
+
+    @export
+    let severity_warning = std::func() -> Severity { return 2; };
+
+    @export
+    let severity_note = std::func() -> Severity { return 3; };
+
+    @export
+    let severity_help = std::func() -> Severity { return 4; };
+
+    @export
+    let classify = std::func(code: usize) -> Severity {
+        if code < 2000 { return 1; }
+        if code < 3000 { return 2; }
+        if code < 4000 { return 3; }
+        return 4;
+    };
+
+    @export
+    let aggregate_total = std::func(errors: usize, warnings: usize) -> usize {
+        return errors + warnings;
+    };
+
+    @export
+    let Label: std::type = std::struct {
+        location: Span,
+        primary: bool,
+    };
+
+    @export
+    let primary_label = std::func(location: Span) -> Label {
+        return Label { location: location, primary: true };
+    };
+
+    @export
+    let secondary_label = std::func(location: Span) -> Label {
+        return Label { location: location, primary: false };
+    };
+
+    // A diagnostic stores one primary label and bounded counters for related
+    // labels/notes/help.  Text is identified by a code at this layer; the
+    // compiler's formatter maps that code to localized text later.
+    @export
+    let Diagnostic: std::type = std::struct {
+        severity: usize,
+        code: usize,
+        primary_unit: usize,
+        primary_start: usize,
+        primary_end: usize,
+        secondary_count: usize,
+        note_count: usize,
+        help_count: usize,
+    };
+
+    @export
+    let make = std::func(
+        severity: usize,
+        code: usize,
+        primary: Span,
+    ) -> Diagnostic {
+        return Diagnostic {
+            severity: severity,
+            code: code,
+            primary_unit: primary.unit,
+            primary_start: primary.start,
+            primary_end: primary.end,
+            secondary_count: 0,
+            note_count: 0,
+            help_count: 0,
+        };
+    };
+
+    @export
+    let error_diagnostic = std::func(code: usize, primary: Span) -> Diagnostic {
+        return diagnostic.make(1, code, primary);
+    };
+
+    @export
+    let warning_diagnostic = std::func(code: usize, primary: Span) -> Diagnostic {
+        return diagnostic.make(2, code, primary);
+    };
+
+    @export
+    let note_diagnostic = std::func(code: usize, primary: Span) -> Diagnostic {
+        return diagnostic.make(3, code, primary);
+    };
+
+    @export
+    let help_diagnostic = std::func(code: usize, primary: Span) -> Diagnostic {
+        return diagnostic.make(4, code, primary);
+    };
+
+    @export
+    let add_secondary = std::func(
+        diagnostic: &mut Diagnostic,
+        related: Label,
+    ) -> unit {
+        if !related.primary {
+            diagnostic.secondary_count = diagnostic.secondary_count + 1;
+        }
+    };
+
+    @export
+    let add_note = std::func(diagnostic: &mut Diagnostic) -> unit {
+        diagnostic.note_count = diagnostic.note_count + 1;
+    };
+
+    @export
+    let add_help = std::func(diagnostic: &mut Diagnostic) -> unit {
+        diagnostic.help_count = diagnostic.help_count + 1;
+    };
+
+    @export
+    let DiagnosticSet: std::type = std::struct {
+        total: usize,
+        errors: usize,
+        warnings: usize,
+        notes: usize,
+        helps: usize,
+    };
+
+    @export
+    let new_set = std::func() -> DiagnosticSet {
+        return DiagnosticSet {
+            total: 0,
+            errors: 0,
+            warnings: 0,
+            notes: 0,
+            helps: 0,
+        };
+    };
+
+    @export
+    let add = std::func(
+        set: &mut DiagnosticSet,
+        value: &Diagnostic,
+    ) -> unit {
+        set.total = set.total + 1;
+        if value.severity == 1 {
+            set.errors = set.errors + 1;
+        }
+        if value.severity == 2 {
+            set.warnings = set.warnings + 1;
+        }
+        if value.severity == 3 {
+            set.notes = set.notes + 1;
+        }
+        if value.severity == 4 {
+            set.helps = set.helps + 1;
+        }
+    };
+
+    @export
+    let merge = std::func(
+        destination: &mut DiagnosticSet,
+        source: &DiagnosticSet,
+    ) -> unit {
+        destination.total = destination.total + source.total;
+        destination.errors = destination.errors + source.errors;
+        destination.warnings = destination.warnings + source.warnings;
+        destination.notes = destination.notes + source.notes;
+        destination.helps = destination.helps + source.helps;
+    };
+};

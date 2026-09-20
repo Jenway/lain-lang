@@ -1,0 +1,296 @@
+// Platform-free, unified compiler entry.
+
+let memory_model: Module = import("std::memory_model");
+let slice: Module = import("std::core::slice");
+let source: Module = import("std::core::source");
+let source_workspace: Module =
+    import("packages::lain::compiler::source_workspace");
+let syntax: Module = import("packages::lain::compiler::syntax");
+let diagnostic_messages: Module =
+    import("packages::lain::compiler::diagnostics");
+let elaborator: Module =
+    import("packages::lain::compiler::elaborator");
+let meta: Module = import("packages::lain::compiler::meta");
+let lower: Module = import("packages::lain::compiler::lower");
+let lainir_api: Module =
+    import("packages::lain::lainir::api_contract");
+let lainvm_api: Module =
+    import("packages::lain::lainvm::api_contract");
+let compiler_context: Module =
+    import("packages::lain::compiler::compiler_context");
+
+@export
+let compiler_core: Module = std::module {
+    @export
+    let Compiler = std::func(
+        Memory: memory_model.Shape,
+        Ir: lainir_api.CapabilitiesShape,
+        Vm: lainvm_api.ExecutionShape,
+    ) -> Module {
+        let Sources: Module =
+            source_workspace.SourceWorkspace(Memory);
+        let Syntax: Module = syntax.Syntax(Memory);
+        let Elaborator: Module = elaborator.Elaborator(Memory);
+        let Meta: Module = meta.Meta(Memory, Ir, Vm);
+        let Lower: Module = lower.Lower(Memory, Ir);
+        let ArtifactApi: Module = Ir.Artifact;
+        let Context: Module = compiler_context.Context(Memory);
+
+        let SourceBuffer: std::type = source.SourceBuffer(Memory);
+        let SourceSlice: std::type = slice.Slice(
+            SourceBuffer,
+            Memory.Bounds,
+        );
+
+        let source_content_length = std::func(
+            source: SourceBuffer,
+        ) -> usize {
+            return source.contents.length;
+        };
+
+        let CompileOptions: std::type = std::struct {
+            emit_text_l1: bool,
+            verify_l1: bool,
+        };
+
+        let CompileRequest: std::type = std::struct {
+            sources: SourceSlice,
+            root_module: Memory.String,
+            options: CompileOptions,
+        };
+
+        let empty_artifact = std::func() -> Memory.Bytes {
+            return Memory.Bytes.new();
+        };
+
+        let artifact_from_text = std::func(
+            text: &Memory.String,
+        ) -> Memory.Bytes ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let output: Memory.Bytes = Memory.Bytes.new();
+            let index: usize = 0;
+            while index < Memory.String.length(text) {
+                output.push(Memory.String.byte_at(text, index));
+                index = index + 1;
+            }
+            return output;
+        };
+
+        let diagnostic = std::func(
+            code: i32,
+            source_id: usize,
+        ) -> Context.Diagnostic ! {Memory.Allocation.Effect} {
+            return diagnostic_at(code, source_id, 0, 0);
+        };
+
+        let message_for_code = std::func(
+            code: i32,
+        ) -> Memory.String ! {Memory.Allocation.Effect} {
+            let text: addr = diagnostic_messages.diagnostic_message(code);
+            let message: Memory.String = Memory.String.new();
+            let index: usize = 0;
+            while std::load_bits(8, text + index) != 0 {
+                Memory.String.append_byte(
+                    &mut message,
+                    std::load_bits(8, text + index),
+                );
+                index = index + 1;
+            }
+            return message;
+        };
+
+        let diagnostic_at = std::func(
+            code: i32,
+            source_id: usize,
+            start: usize,
+            end: usize,
+        ) -> Context.Diagnostic ! {Memory.Allocation.Effect} {
+            return Context.Diagnostic {
+                code: code,
+                message: message_for_code(code),
+                source_id: source_id,
+                start: start,
+                end: end,
+            };
+        };
+
+        let compile = std::func(
+            request: CompileRequest,
+        ) -> Context.CompileResult ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+            Vm.Allocation,
+            Vm.Eval,
+        } {
+            let context: Context.State = Context.new();
+
+            // An empty source list entry is a valid API smoke input.  Handle
+            // it before the tokenizer/parser pipeline: there is no syntax to
+            // elaborate, and the bootstrap Meta parser state is not
+            // needed for producing an empty successful artifact.
+            if request.sources.length == 1 {
+                let first: SourceBuffer = request.sources.get(0);
+                if source_content_length(first) == 0 {
+                    context.has_artifact = true;
+                    return Context.finish(context, empty_artifact());
+                }
+            }
+
+            let workspace: Sources.Workspace = Sources.new();
+
+            let source_index: usize = 0;
+            while source_index < request.sources.length {
+                Sources.add(
+                    &mut workspace,
+                    request.sources.get(source_index),
+                );
+                source_index = source_index + 1;
+            }
+
+            if workspace.sources.length() == 0 {
+                Context.add_diagnostic(
+                    &mut context,
+                    diagnostic(4300, 0),
+                );
+                return Context.finish(context, empty_artifact());
+            }
+
+            let meta_registry: Meta.Registry =
+                Meta.meta_new_registry();
+            // Meta callables receive an explicit program, L1 unit and lexical
+            // environment.  The compiler's syntax expansion pass has no L1
+            // body of its own yet, so use an empty unit as the expansion
+            // context; callers with syntax procedures pass their populated
+            // unit through the same API.
+            let meta_unit: Meta.Artifact =
+                Ir.Builder.new_unit();
+            let meta_program: Meta.MetaProgram = Meta.meta_program_new(
+                1,
+                1,
+                0,
+            );
+            let meta_environment: Meta.MetaEnvironment =
+                Meta.meta_environment_new(1, 0);
+            let meta_index: usize = 0;
+            while meta_index < workspace.sources.length() {
+                let syntax_unit =
+                    workspace.sources.get(meta_index).syntax_unit;
+                let root = Syntax.unit_root(
+                    &workspace.syntax,
+                    syntax_unit,
+                );
+                let expanded: Meta.Expansion = Meta.expand(
+                    &mut workspace.syntax,
+                    syntax_unit,
+                    root,
+                    &meta_registry,
+                    &meta_program,
+                    &meta_environment,
+                    &meta_unit,
+                );
+                if expanded.diagnostic != 0 {
+                    Context.add_diagnostic(
+                        &mut context,
+                        diagnostic(expanded.diagnostic, meta_index),
+                    );
+                    return Context.finish(
+                        context,
+                        empty_artifact(),
+                    );
+                }
+                workspace.sources.get_mut(meta_index).syntax_unit =
+                    expanded.syntax.unit;
+                meta_index = meta_index + 1;
+            }
+
+            let elaborated: Elaborator.Result =
+                Elaborator.elaborate(&workspace);
+            if elaborated.diagnostic != 0 {
+                let diagnostic_start: usize = 0;
+                let diagnostic_end: usize = 0;
+                if elaborated.diagnostic_node != Syntax.invalid_node() {
+                    diagnostic_start = Syntax.node_span_start(
+                        &workspace.syntax,
+                        elaborated.diagnostic_unit,
+                        elaborated.diagnostic_node,
+                    );
+                    diagnostic_end = Syntax.node_span_end(
+                        &workspace.syntax,
+                        elaborated.diagnostic_unit,
+                        elaborated.diagnostic_node,
+                    );
+                }
+                Context.add_diagnostic(
+                    &mut context,
+                    diagnostic_at(
+                        elaborated.diagnostic,
+                        elaborated.diagnostic_source_id,
+                        diagnostic_start,
+                        diagnostic_end,
+                    ),
+                );
+                return Context.finish(context, empty_artifact());
+            }
+
+            let lowered: Lower.Result =
+                Lower.program(&elaborated.program);
+            if lowered.diagnostic != 0 {
+                Context.add_diagnostic(
+                    &mut context,
+                    diagnostic(lowered.diagnostic, 0),
+                );
+                return Context.finish(context, empty_artifact());
+            }
+
+            if request.options.verify_l1 {
+                let verify_diagnostic: ArtifactApi.Diagnostic = ArtifactApi.verify(
+                    &lowered.artifact,
+                );
+                let verify_code: i32 = ArtifactApi.diagnostic_code(
+                    &verify_diagnostic,
+                );
+                if verify_code != 0 {
+                    let verify_location: usize =
+                        ArtifactApi.diagnostic_location(&verify_diagnostic);
+                    Context.add_diagnostic(
+                        &mut context,
+                        diagnostic_at(
+                            verify_code, 0, verify_location, verify_location,
+                        ),
+                    );
+                    return Context.finish(
+                        context,
+                        empty_artifact(),
+                    );
+                }
+            }
+
+            let artifact: Memory.Bytes = empty_artifact();
+            if request.options.emit_text_l1 {
+                let text: Memory.String =
+                    ArtifactApi.write_canonical_text(
+                        &lowered.artifact,
+                    );
+                artifact = artifact_from_text(&text);
+            }
+
+            // The bootstrap elaborator currently returns a lightweight
+            // program handle; its module-summary table is not part of the
+            // runtime ABI yet.  Keep the public count deterministic until
+            // that table is materialized, avoiding a null dereference on
+            // successful non-empty compilation.
+            context.module_count = 0;
+            context.has_artifact = true;
+            return Context.finish(context, artifact);
+        };
+
+        return std::module {
+            @export let CompileOptions: std::type = CompileOptions;
+            @export let CompileRequest: std::type = CompileRequest;
+            @export let CompileResult: std::type = Context.CompileResult;
+            @export let compile = compile;
+        };
+    };
+};

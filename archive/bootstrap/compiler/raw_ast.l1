@@ -1,0 +1,978 @@
+// Lain surface parser, first LAIN-IR vertical slice.
+//
+// This parser deliberately knows nothing about declaration or type syntax,
+// `module`, or any other Lain meaning.  It consumes the shared lossless lexer
+// and builds only atoms and delimiter groups.  The semantic interpretation is
+// a later meta/domain-parser phase.
+
+#extern #proc bootstrap.source-count() -> #bits<64>;
+#extern #proc bootstrap.source-data(#bits<64> %index) -> #addr;
+#extern #proc bootstrap.source-length(#bits<64> %index) -> #bits<64>;
+#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;
+#extern #proc bootstrap.release-pages(#addr %memory) -> #unit;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(#bits<8> %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(#addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+
+#extern #proc tool_source_new(#addr %data, #bits<64> %length) -> #addr;
+#extern #proc tool_source_nil(#addr %source) -> #addr;
+#extern #proc tool_is_nil(#addr %source, #addr %value) -> #bits<1>;
+#extern #proc tool_source_data(#addr %source) -> #addr;
+#extern #proc tool_lex_all(#addr %source) -> #addr;
+#extern #proc tool_byte_at(#addr %data, #bits<64> %index) -> #bits<8>;
+#extern #proc tool_token_kind(#addr %token) -> #bits<32>;
+#extern #proc tool_token_start(#addr %token) -> #bits<64>;
+#extern #proc tool_token_length(#addr %token) -> #bits<64>;
+#extern #proc tool_token_next(#addr %token) -> #addr;
+
+// RawAst node layout:
+//   kind @0 (1 atom, 2 group), delimiter @4,
+//   source start @8, source length @16, first child @24,
+//   last child @32, next sibling @40, token kind @48,
+//   child count @56, origin source @64, origin start @72,
+//   origin length @80, origin present @88, syntax context @96.
+#proc raw_node_nil() -> #addr {
+  #let %nil: #addr = #call bootstrap.allocate-pages(112)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)
+  // The sentinel is a real RawAst node.  Keep every pointer slot self-linked
+  // so callers may safely ask for first/last/next before checking raw_is_nil.
+  // The old zero-filled assumption was false for the page allocator and made
+  // a harmless traversal of the sentinel dereference address 0.
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=4)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=8)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=16)
+  #store %nil, #lea(base=%nil, idx=0, scale=0, offset=24)
+  #store %nil, #lea(base=%nil, idx=0, scale=0, offset=32)
+  #store %nil, #lea(base=%nil, idx=0, scale=0, offset=40)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=48)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=56)
+  #store %nil, #lea(base=%nil, idx=0, scale=0, offset=64)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=72)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=80)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=88)
+  #store 0, #lea(base=%nil, idx=0, scale=0, offset=96)
+  #return %nil
+}
+
+#proc raw_is_nil(#addr %node) -> #bits<1> {
+  #return #eq(#load[#bits<8>](%node), 0)
+}
+
+#proc raw_node_new(
+  #bits<32> %kind, #bits<32> %delimiter, #bits<64> %start, #bits<64> %length, #bits<32> %token_kind
+) -> #addr {
+  #let %node: #addr = #call bootstrap.allocate-pages(112)
+  #let %nil: #addr = #call raw_node_nil()
+  #store %kind, #lea(base=%node, idx=0, scale=0, offset=0)
+  #store %delimiter, #lea(base=%node, idx=0, scale=0, offset=4)
+  #store %start, #lea(base=%node, idx=0, scale=0, offset=8)
+  #store %length, #lea(base=%node, idx=0, scale=0, offset=16)
+  #store %nil, #lea(base=%node, idx=0, scale=0, offset=24)
+  #store %nil, #lea(base=%node, idx=0, scale=0, offset=32)
+  #store %nil, #lea(base=%node, idx=0, scale=0, offset=40)
+  #store %token_kind, #lea(base=%node, idx=0, scale=0, offset=48)
+  #store 0, #lea(base=%node, idx=0, scale=0, offset=56)
+  #store %nil, #lea(base=%node, idx=0, scale=0, offset=64)
+  #store 0, #lea(base=%node, idx=0, scale=0, offset=72)
+  #store 0, #lea(base=%node, idx=0, scale=0, offset=80)
+  #store 0, #lea(base=%node, idx=0, scale=0, offset=88)
+  #store 0, #lea(base=%node, idx=0, scale=0, offset=96)
+  #return %node
+}
+
+#proc raw_node_kind(#addr %node) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%node, idx=0, scale=0, offset=0))
+}
+
+#proc raw_node_delimiter(#addr %node) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%node, idx=0, scale=0, offset=4))
+}
+
+#proc raw_node_start(#addr %node) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%node, idx=0, scale=0, offset=8))
+}
+
+#proc raw_node_length(#addr %node) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%node, idx=0, scale=0, offset=16))
+}
+
+#proc raw_node_first(#addr %node) -> #addr {
+  #return #load[#addr](#lea(base=%node, idx=0, scale=0, offset=24))
+}
+
+#proc raw_node_last(#addr %node) -> #addr {
+  #return #load[#addr](#lea(base=%node, idx=0, scale=0, offset=32))
+}
+
+#proc raw_node_next(#addr %node) -> #addr {
+  #return #load[#addr](#lea(base=%node, idx=0, scale=0, offset=40))
+}
+
+#proc raw_node_token_kind(#addr %node) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%node, idx=0, scale=0, offset=48))
+}
+
+#proc raw_node_origin_source(#addr %node) -> #addr {
+  #return #load[#addr](#lea(base=%node, idx=0, scale=0, offset=64))
+}
+
+#proc raw_node_origin_start(#addr %node) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%node, idx=0, scale=0, offset=72))
+}
+
+#proc raw_node_origin_length(#addr %node) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%node, idx=0, scale=0, offset=80))
+}
+
+#proc raw_node_origin_present(#addr %node) -> #bits<1> {
+  #return #load[#bits<1>](#lea(base=%node, idx=0, scale=0, offset=88))
+}
+
+#proc raw_node_set_origin(
+  #addr %node, #addr %source, #bits<64> %start, #bits<64> %length
+) -> #unit {
+  #store %source, #lea(base=%node, idx=0, scale=0, offset=64)
+  #store %start, #lea(base=%node, idx=0, scale=0, offset=72)
+  #store %length, #lea(base=%node, idx=0, scale=0, offset=80)
+  #store 1, #lea(base=%node, idx=0, scale=0, offset=88)
+  #return
+}
+
+#proc raw_node_syntax_context(#addr %node) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%node, idx=0, scale=0, offset=96))
+}
+
+#proc raw_node_set_syntax_context(#addr %node, #bits<64> %context) -> #unit {
+  #store %context, #lea(base=%node, idx=0, scale=0, offset=96)
+  #return
+}
+
+// A context handle owns a monotonically increasing ID sequence and a small
+// source-backed text pool for generated identifiers.  ID zero is the parser's
+// source context; generated syntax obtains positive IDs here.
+#proc raw_syntax_context_new() -> #addr {
+  #let %context: #addr = #call bootstrap.allocate-pages(32)
+  #let %pool: #addr = #call ast_pool_new(256)
+  #let %source: #addr = #call tool_source_new(
+    #call ast_pool_data(%pool), 0
+  )
+  #store 1, #lea(base=%context, idx=0, scale=0, offset=0)
+  #store %pool, #lea(base=%context, idx=0, scale=0, offset=8)
+  #store %source, #lea(base=%context, idx=0, scale=0, offset=16)
+  #return %context
+}
+
+#proc raw_syntax_context_fresh(#addr %context) -> #bits<64> {
+  #let %value: #bits<64> = #load[#bits<64>](#lea(base=%context, idx=0, scale=0, offset=0))
+  #store #add(%value, 1), #lea(base=%context, idx=0, scale=0, offset=0)
+  #return %value
+}
+
+#proc raw_syntax_context_source(#addr %context) -> #addr {
+  #return #load[#addr](#lea(base=%context, idx=0, scale=0, offset=16))
+}
+
+#proc raw_syntax_context_append(
+  #addr %context, #addr %text, #bits<64> %length
+) -> #bits<64> {
+  #let %pool: #addr = #load[#addr](
+    #lea(base=%context, idx=0, scale=0, offset=8)
+  )
+  #let %offset: #bits<64> = #call ast_pool_append(%pool, %text, %length)
+  #let %source: #addr = #call raw_syntax_context_source(%context)
+  #store #call ast_pool_used(%pool),
+    #lea(base=%source, idx=0, scale=0, offset=8)
+  #return %offset
+}
+
+#proc raw_syntax_context_fresh_atom(
+  #addr %context, #addr %text, #bits<64> %length, #bits<32> %token_kind
+) -> #addr {
+  #let %offset: #bits<64> = #call raw_syntax_context_append(
+    %context, %text, %length
+  )
+  #let %atom: #addr = #call raw_node_new(
+    1, 0, %offset, %length, %token_kind
+  )
+  #call raw_node_set_syntax_context(
+    %atom, #call raw_syntax_context_fresh(%context)
+  )
+  #return %atom
+}
+
+#proc raw_syntax_context_release(#addr %context) -> #unit {
+  #let %source: #addr = #call raw_syntax_context_source(%context)
+  #let %pool: #addr = #load[#addr](
+    #lea(base=%context, idx=0, scale=0, offset=8)
+  )
+  #call bootstrap.release-pages(%source)
+  #call bootstrap.release-pages(#call ast_pool_data(%pool))
+  #call bootstrap.release-pages(%pool)
+  #call bootstrap.release-pages(%context)
+  #return
+}
+
+#proc raw_node_set_next(#addr %node, #addr %next) -> #unit {
+  #store %next, #lea(base=%node, idx=0, scale=0, offset=40)
+  #return
+}
+
+#proc raw_append(#addr %parent, #addr %child) -> #unit {
+  #let %first: #addr = #call raw_node_first(%parent)
+  #let %last: #addr = #call raw_node_last(%parent)
+  #if #call raw_is_nil(%first) {
+    #store %child, #lea(base=%parent, idx=0, scale=0, offset=24)
+  } else {
+    #call raw_node_set_next(%last, %child)
+  }
+  #store %child, #lea(base=%parent, idx=0, scale=0, offset=32)
+  #store #add(
+    #load[#bits<64>](#lea(base=%parent, idx=0, scale=0, offset=56)),
+    1
+  ), #lea(base=%parent, idx=0, scale=0, offset=56)
+  #return
+}
+
+// Cursor layout: current token @0, end position of last consumed token @8.
+#proc raw_cursor_new(#addr %token) -> #addr {
+  #let %cursor: #addr = #call bootstrap.allocate-pages(16)
+  #store %token, #lea(base=%cursor, idx=0, scale=0, offset=0)
+  #store 0, #lea(base=%cursor, idx=0, scale=0, offset=8)
+  #return %cursor
+}
+
+#proc raw_cursor_token(#addr %cursor) -> #addr {
+  #return #load[#addr](#lea(base=%cursor, idx=0, scale=0, offset=0))
+}
+
+#proc raw_cursor_set_token(#addr %cursor, #addr %token) -> #unit {
+  #store %token, #lea(base=%cursor, idx=0, scale=0, offset=0)
+  #return
+}
+
+#proc raw_cursor_end(#addr %cursor) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%cursor, idx=0, scale=0, offset=8))
+}
+
+#proc raw_cursor_set_end(#addr %cursor, #bits<64> %end) -> #unit {
+  #store %end, #lea(base=%cursor, idx=0, scale=0, offset=8)
+  #return
+}
+
+#proc raw_matching_close(#bits<8> %open) -> #bits<8> {
+  #if #eq(%open, 40) { #return 41 }
+  #if #eq(%open, 91) { #return 93 }
+  #if #eq(%open, 123) { #return 125 }
+  #return 0
+}
+
+#proc raw_is_open(#bits<8> %byte) -> #bits<1> {
+  #if #eq(%byte, 40) { #return 1 }
+  #if #eq(%byte, 91) { #return 1 }
+  #if #eq(%byte, 123) { #return 1 }
+  #return 0
+}
+
+// Parse children until EOF or the requested closing delimiter.  The cursor is
+// advanced past a matching close, so callers can continue appending siblings.
+#proc raw_parse_children(
+  #addr %source, #addr %cursor, #addr %parent, #bits<8> %close
+) -> #unit {
+  #let %data: #addr = #call tool_source_data(%source)
+  #loop children {
+    #let %token: #addr = #call raw_cursor_token(%cursor)
+    #if #call tool_is_nil(%source, %token) { #break children }
+    #let %kind: #bits<32> = #call tool_token_kind(%token)
+    #if #eq(%kind, 0) { #break children }
+    #let %start: #bits<64> = #call tool_token_start(%token)
+    #let %length: #bits<64> = #call tool_token_length(%token)
+    #let %byte: #bits<8> = #call tool_byte_at(%data, %start)
+    #if #ne(%close, 0) {
+      #if #eq(%byte, %close) {
+        #call raw_cursor_set_token(%cursor, #call tool_token_next(%token))
+        #call raw_cursor_set_end(%cursor, #add(%start, %length))
+        #return
+      }
+    }
+    #call raw_cursor_set_token(%cursor, #call tool_token_next(%token))
+    #if #call raw_is_open(%byte) {
+      #let %group: #addr = #call raw_node_new(2, #zext[#bits<32>](%byte), %start, 0, 0)
+      #call raw_node_set_origin(%group, %source, %start, 0)
+      #call raw_parse_children(
+        %source, %cursor, %group, #call raw_matching_close(%byte)
+      )
+      #let %end: #bits<64> = #call raw_cursor_end(%cursor)
+      #if #eq(%end, 0) { %end: #bits<64> = #add(%start, %length) }
+      #store #sub(%end, %start), #lea(base=%group, idx=0, scale=0, offset=16)
+      #call raw_node_set_origin(
+        %group, %source, %start, #sub(%end, %start)
+      )
+      #call raw_append(%parent, %group)
+    } else {
+      #let %atom: #addr = #call raw_node_new(
+        1, 0, %start, %length, %kind
+      )
+      #call raw_node_set_origin(%atom, %source, %start, %length)
+      #call raw_append(%parent, %atom)
+      #call raw_cursor_set_end(%cursor, #add(%start, %length))
+    }
+    #continue children
+  }
+  #return
+}
+
+#proc raw_parse(#addr %source, #addr %tokens) -> #addr {
+  #let %length: #bits<64> = #load[#bits<64>](#lea(base=%source, idx=0, scale=0, offset=8))
+  #let %root: #addr = #call raw_node_new(2, 0, 0, %length, 0)
+  #call raw_node_set_origin(%root, %source, 0, %length)
+  #let %cursor: #addr = #call raw_cursor_new(%tokens)
+  #call raw_parse_children(%source, %cursor, %root, 0)
+  #return %root
+}
+
+#proc raw_dump_bytes(#addr %data, #bits<64> %start, #bits<64> %length) -> #unit {
+  #let %index: #bits<64> = 0
+  #loop bytes {
+    #if #sge(%index, %length) { #break bytes }
+    #call bootstrap.artifact-write-byte(
+      #call tool_byte_at(%data, #add(%start, %index))
+    )
+    %index: #bits<64> = #add(%index, 1)
+    #continue bytes
+  }
+  #return
+}
+
+#proc raw_dump(#addr %source, #addr %node) -> #unit {
+  #let %data: #addr = #call tool_source_data(%source)
+  #if #eq(#call raw_node_kind(%node), 1) {
+    #call bootstrap.artifact-write-literal("(atom ")
+    #call raw_dump_bytes(
+      %data, #call raw_node_start(%node), #call raw_node_length(%node)
+    )
+    #call bootstrap.artifact-write-literal(")")
+    #return
+  }
+  #if #eq(#call raw_node_delimiter(%node), 0) {
+    #call bootstrap.artifact-write-literal("(root")
+  } else {
+    #call bootstrap.artifact-write-literal("(group ")
+    #call bootstrap.artifact-write-byte(
+      #call tool_byte_at(%data, #call raw_node_start(%node))
+    )
+  }
+  #let %child: #addr = #call raw_node_first(%node)
+  #loop dump_children {
+    #if #call raw_is_nil(%child) { #break dump_children }
+    #call bootstrap.artifact-write-literal(" ")
+    #call raw_dump(%source, %child)
+    %child: #addr = #call raw_node_next(%child)
+    #continue dump_children
+  }
+  #call bootstrap.artifact-write-literal(")")
+  #return
+}
+
+#proc lain_raw_ast_dump() -> #bits<32> {
+  #if #eq(#call bootstrap.source-count(), 0) { #return 2 }
+  #let %data: #addr = #call bootstrap.source-data(0)
+  #let %length: #bits<64> = #call bootstrap.source-length(0)
+  #let %source: #addr = #call tool_source_new(%data, %length)
+  #let %tokens: #addr = #call tool_lex_all(%source)
+  #let %root: #addr = #call raw_parse(%source, %tokens)
+  #call bootstrap.artifact-begin()
+  #call raw_dump(%source, %root)
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return 0
+}
+
+// ---------------------------------------------------------------------------
+// AST view and transform operations.
+//
+// RawAst is a topology-only tree: atoms (kind 1) and delimiter groups
+// (kind 2).  The functions below layer the first semantic views on top of
+// that topology and add the structural transforms macros and lowering will
+// need.  They are self-contained (only bootstrap/tool externs), so the same
+// bundle can be exercised directly by the seed runner.
+// ---------------------------------------------------------------------------
+
+// Compare the text of node [start, start+length) with a literal string.
+// Returns 1 when equal.  length is in bytes; text must be null-terminated.
+#proc ast_span_equal(
+  #addr %source, #addr %node, #addr %text, #bits<64> %length
+) -> #bits<1> {
+  #if #ne(#call raw_node_length(%node), %length) { #return 0 }
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %index: #bits<64> = 0
+  #loop compare {
+    #if #sge(%index, %length) { #break compare }
+    #if #ne(
+      #call tool_byte_at(%data, #add(#call raw_node_start(%node), %index)),
+      #call tool_byte_at(%text, %index)
+    ) { #return 0 }
+    %index: #bits<64> = #add(%index, 1)
+    #continue compare
+  }
+  #return 1
+}
+
+// Is node an atom (identifier) whose text equals `text`?
+#proc ast_is_atom(#addr %source, #addr %node, #addr %text, #bits<64> %length) -> #bits<1> {
+  #if #call raw_is_nil(%node) { #return 0 }
+  #if #ne(#call raw_node_kind(%node), 1) { #return 0 }
+  #return #call ast_span_equal(%source, %node, %text, %length)
+}
+
+// Is node the `Name(args)` postfix-call topology: an atom followed by a
+// parenthesised group?  Vec(#bits<32>), foo(x) and Result(#bits<32>, Error) all share
+// this shape; the caller decides whether it is a call or a type application.
+#proc ast_is_postfix_group(#addr %node) -> #bits<1> {
+  #if #call raw_is_nil(%node) { #return 0 }
+  #if #ne(#call raw_node_kind(%node), 1) { #return 0 }
+  #let %group: #addr = #call raw_node_next(%node)
+  #if #call raw_is_nil(%group) { #return 0 }
+  #if #ne(#call raw_node_kind(%group), 2) { #return 0 }
+  #if #ne(#call raw_node_delimiter(%group), 40) { #return 0 }
+  #return 1
+}
+
+// The callee/name node of a postfix-group node (the leading atom).
+#proc ast_postfix_name(#addr %node) -> #addr {
+  #if #eq(#call ast_is_postfix_group(%node), 0) { #return #call raw_node_nil() }
+  #return %node
+}
+
+// The argument group node of a postfix-group node (the following paren).
+#proc ast_postfix_args(#addr %node) -> #addr {
+  #if #eq(#call ast_is_postfix_group(%node), 0) { #return #call raw_node_nil() }
+  #return #call raw_node_next(%node)
+}
+
+// Is node a call `name(args)` (name is an identifier, group is paren)?
+// Type applications share the topology but are distinguished by context;
+// this predicate is the call view of the shared shape.
+#proc ast_is_call(#addr %node) -> #bits<1> {
+  #return #call ast_is_postfix_group(%node)
+}
+
+// Count the nodes in the subtree rooted at node (inclusive).  Iterative
+// traversal with an explicit stack of work items: each frame holds a node
+// and the next sibling to visit after its subtree.  Depth-bounded at 256.
+#proc ast_node_count(#addr %root) -> #bits<64> {
+  // Stack frame: [node @0, next @8] on a 16-byte page chain.
+  #let %stack: #addr = #call bootstrap.allocate-pages(#mul(16, 256))
+  #let %sp: #bits<64> = 0
+  #let %count: #bits<64> = 0
+  // Push (root, nil).
+  #store %root, #lea(base=%stack, idx=%sp, scale=16, offset=0)
+  #store #call raw_node_nil(), #lea(base=%stack, idx=%sp, scale=16, offset=8)
+  %sp: #bits<64> = #add(%sp, 1)
+  #loop walk {
+    #if #eq(%sp, 0) { #break walk }
+    %sp: #bits<64> = #sub(%sp, 1)
+    #let %node: #addr = #load[#addr](#lea(base=%stack, idx=%sp, scale=16, offset=0))
+    #let %next: #addr = #load[#addr](#lea(base=%stack, idx=%sp, scale=16, offset=8))
+    #if #call raw_is_nil(%node) {
+      #if #call raw_is_nil(%next) { #continue walk }
+      // Advance to the sibling.
+      #store %next, #lea(base=%stack, idx=%sp, scale=16, offset=0)
+      #store #call raw_node_nil(), #lea(base=%stack, idx=%sp, scale=16, offset=8)
+      %sp: #bits<64> = #add(%sp, 1)
+      #continue walk
+    }
+    %count: #bits<64> = #add(%count, 1)
+    // Push (first_child, next_sibling).
+    #store #call raw_node_first(%node), #lea(base=%stack, idx=%sp, scale=16, offset=0)
+    #store #call raw_node_next(%node), #lea(base=%stack, idx=%sp, scale=16, offset=8)
+    %sp: #bits<64> = #add(%sp, 1)
+    #continue walk
+  }
+  #call bootstrap.release-pages(%stack)
+  #return %count
+}
+
+// Replace the first child of parent whose address equals old_child with
+// new_child, keeping the sibling chain: the replacement takes over the
+// old child's next link.  Returns 1 when a replacement happened.
+#proc ast_replace_child(
+  #addr %parent, #addr %old_child, #addr %new_child
+) -> #bits<1> {
+  #let %child: #addr = #call raw_node_first(%parent)
+  #let %prev: #addr = #call raw_node_nil()
+  #let %replaced: #bits<1> = 0
+  #loop scan {
+    #if #call raw_is_nil(%child) { #break scan }
+    #if #eq(%child, %old_child) {
+      // The replacement continues the old child's sibling chain.
+      #call raw_node_set_next(%new_child, #call raw_node_next(%child))
+      #if #eq(#call raw_is_nil(%prev), 0) {
+        #call raw_node_set_next(%prev, %new_child)
+      } else {
+        #store %new_child, #lea(base=%parent, idx=0, scale=0, offset=24)
+      }
+      %replaced: #bits<1> = 1
+      #break scan
+    }
+    %prev: #addr = %child
+    %child: #addr = #call raw_node_next(%child)
+    #continue scan
+  }
+  #return %replaced
+}
+
+// Remove the first child of parent whose address equals child, splicing
+// the sibling chain.  Returns 1 when a removal happened.
+#proc ast_remove_child(#addr %parent, #addr %child) -> #bits<1> {
+  #let %c: #addr = #call raw_node_first(%parent)
+  #let %prev: #addr = #call raw_node_nil()
+  #let %removed: #bits<1> = 0
+  #loop scan {
+    #if #call raw_is_nil(%c) { #break scan }
+    #if #eq(%c, %child) {
+      #if #eq(#call raw_is_nil(%prev), 0) {
+        #call raw_node_set_next(%prev, #call raw_node_next(%c))
+      } else {
+        #store #call raw_node_next(%c), #lea(base=%parent, idx=0, scale=0, offset=24)
+      }
+      %removed: #bits<1> = 1
+      #break scan
+    }
+    %prev: #addr = %c
+    %c: #addr = #call raw_node_next(%c)
+    #continue scan
+  }
+  #return %removed
+}
+
+// Deep-copy the subtree rooted at node.  Returns a fresh, disconnected tree
+// with identical topology, spans and token kinds.  Depth-bounded at 256.
+#proc ast_copy(#addr %node) -> #addr {
+  #let %kind: #bits<32> = #call raw_node_kind(%node)
+  #let %copy: #addr = #call raw_node_new(
+    %kind,
+    #call raw_node_delimiter(%node),
+    #call raw_node_start(%node),
+    #call raw_node_length(%node),
+    #call raw_node_token_kind(%node)
+  )
+  #if #call raw_node_origin_present(%node) {
+    #call raw_node_set_origin(
+      %copy,
+      #call raw_node_origin_source(%node),
+      #call raw_node_origin_start(%node),
+      #call raw_node_origin_length(%node)
+    )
+  }
+  #call raw_node_set_syntax_context(
+    %copy, #call raw_node_syntax_context(%node)
+  )
+  #let %child: #addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #call raw_append(%copy, #call ast_copy(%child))
+    %child: #addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return %copy
+}
+
+// Add delta to every node start in the subtree rooted at node.  Used to
+// rebase a subtree parsed from a sub-buffer back to the parent source's
+// coordinates.  Recursive (depth bounded by tree depth).
+#proc ast_relocate(#addr %node, #bits<64> %delta) -> #unit {
+  #let %start: #bits<64> = #call raw_node_start(%node)
+  #store #add(%start, %delta), #lea(base=%node, idx=0, scale=0, offset=8)
+  #if #call raw_node_origin_present(%node) {
+    #let %origin_start: #bits<64> = #call raw_node_origin_start(%node)
+    #store #add(%origin_start, %delta),
+      #lea(base=%node, idx=0, scale=0, offset=72)
+  }
+  #let %child: #addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #call ast_relocate(%child, %delta)
+    %child: #addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return
+}
+
+#proc ast_rebase_origin(#addr %node, #addr %source) -> #unit {
+  #if #call raw_node_origin_present(%node) {
+    #call raw_node_set_origin(
+      %node,
+      %source,
+      #call raw_node_origin_start(%node),
+      #call raw_node_origin_length(%node)
+    )
+  }
+  #let %child: #addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #call ast_rebase_origin(%child, %source)
+    %child: #addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return
+}
+
+// Parse the source text [start, start+length) of source into a fresh,
+// independent AST tree.  A temporary source object is built over the same
+// data bytes, lexed and parsed; the resulting nodes are then rebased by
+// `start` so their spans refer back to the parent source.  This is the
+// text -> AST generation direction used by macro expansion.
+#proc ast_from_text(#addr %source, #bits<64> %start, #bits<64> %length) -> #addr {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %sub_data: #addr = #lea(base=%data, idx=%start, scale=1, offset=0)
+  #let %sub: #addr = #call tool_source_new(%sub_data, %length)
+  #let %tokens: #addr = #call tool_lex_all(%sub)
+  #let %root: #addr = #call raw_parse(%sub, %tokens)
+  #call ast_relocate(%root, %start)
+  #call ast_rebase_origin(%root, %source)
+  #call bootstrap.release-pages(%sub)
+  #return %root
+}
+
+// Find the first atom child of parent whose text equals `text`; returns
+// nil when absent.  Walks the sibling chain only (no descent).
+#proc ast_find_atom(
+  #addr %source, #addr %parent, #addr %text, #bits<64> %length
+) -> #addr {
+  #let %child: #addr = #call raw_node_first(%parent)
+  #loop scan {
+    #if #call raw_is_nil(%child) { #break scan }
+    #if #eq(#call ast_is_atom(%source, %child, %text, %length), 1) {
+      #return %child
+    }
+    %child: #addr = #call raw_node_next(%child)
+    #continue scan
+  }
+  #return #call raw_node_nil()
+}
+
+// Find the first atom in a whole subtree (depth-first) whose text equals
+// `text`.  Returns nil when absent.  This is the template placeholder
+// search used by macro instantiation.
+#proc ast_find_atom_deep(
+  #addr %source, #addr %node, #addr %text, #bits<64> %length
+) -> #addr {
+  #if #call raw_is_nil(%node) { #return #call raw_node_nil() }
+  #if #eq(#call ast_is_atom(%source, %node, %text, %length), 1) {
+    #return %node
+  }
+  #let %child: #addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #let %hit: #addr = #call ast_find_atom_deep(%source, %child, %text, %length)
+    #if #eq(#call raw_is_nil(%hit), 0) { #return %hit }
+    %child: #addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return #call raw_node_nil()
+}
+
+// Write the source text of an AST subtree to the artifact stream: atoms
+// emit their original bytes, groups emit the opening delimiter, each child
+// in order, and the matching closing delimiter.  A root node (delimiter 0)
+// emits its children with no wrapper.  This is the AST -> text direction:
+// together with raw_parse (text -> AST) it closes the round trip that
+// macro expansion needs.
+#proc ast_write(#addr %source, #addr %node) -> #unit {
+  #let %data: #addr = #call tool_source_data(%source)
+  #if #eq(#call raw_node_kind(%node), 1) {
+    #call raw_dump_bytes(
+      %data, #call raw_node_start(%node), #call raw_node_length(%node)
+    )
+    #return
+  }
+  #let %delim: #bits<32> = #call raw_node_delimiter(%node)
+  #if #ne(%delim, 0) {
+    #call bootstrap.artifact-write-byte(
+      #call tool_byte_at(%data, #call raw_node_start(%node))
+    )
+  }
+  #let %child: #addr = #call raw_node_first(%node)
+  #loop write_children {
+    #if #call raw_is_nil(%child) { #break write_children }
+    #call ast_write(%source, %child)
+    %child: #addr = #call raw_node_next(%child)
+    #continue write_children
+  }
+  #if #ne(%delim, 0) {
+    #call bootstrap.artifact-write-byte(
+      #call raw_matching_close(#trunc[#bits<8>](#trunc[#bits<32>](#zext[#bits<64>](%delim))))
+    )
+  }
+  #return
+}
+
+// Write a non-negative integer in decimal to the artifact stream.
+#proc ast_write_decimal(#bits<64> %value) -> #unit {
+  #if #eq(%value, 0) {
+    #call bootstrap.artifact-write-byte(48)
+    #return
+  }
+  #let %buffer: #addr = #alloca(32)
+  #let %index: #bits<64> = 32
+  #let %remaining: #bits<64> = %value
+  #loop digits {
+    #if #eq(%remaining, 0) { #break digits }
+    %index: #bits<64> = #sub(%index, 1)
+    #let %quotient: #bits<64> = #udiv(%remaining, 10)
+    #let %digit: #bits<64> = #sub(
+      %remaining, #mul(%quotient, 10)
+    )
+    #store #trunc[#bits<8>](#add(48, %digit)),
+      #lea(base=%buffer, idx=%index, scale=1, offset=0)
+    %remaining: #bits<64> = %quotient
+    #continue digits
+  }
+  #loop write_digits {
+    #if #sge(%index, 32) { #break write_digits }
+    #call bootstrap.artifact-write-byte(
+      #load[#bits<8>](#lea(base=%buffer, idx=%index, scale=1, offset=0))
+    )
+    %index: #bits<64> = #add(%index, 1)
+    #continue write_digits
+  }
+  #return
+}
+
+// Probe entry: parse `let x = foo(1, 2);`, then exercise the AST views and
+// transforms.  Writes one line per check to the artifact:
+//   call:<0|1> name:<text> args_count:<n> nodes:<n> replaced:<0|1> after:<n>
+// Returns 0 when every check produced the expected result.
+#proc lain_ast_ops_probe() -> #bits<32> {
+  #if #ne(#call bootstrap.source-count(), 1) { #return 2 }
+  #let %data: #addr = #call bootstrap.source-data(0)
+  #let %length: #bits<64> = #call bootstrap.source-length(0)
+  #let %source: #addr = #call tool_source_new(%data, %length)
+  #let %tokens: #addr = #call tool_lex_all(%source)
+  #let %root: #addr = #call raw_parse(%source, %tokens)
+  #let %status: #bits<32> = 0
+  #let %buf: #addr = #call bootstrap.allocate-pages(4096)
+  #let %buflen: #bits<64> = 0
+  #call bootstrap.artifact-begin()
+  // Find the top-level `foo(1, 2)` postfix group: the second child of the
+  // `let` statement's initializer position.  Walk top-level: root children
+  // are (let, x, =, foo-group, ;) — locate the node whose text is "foo" and
+  // which is a postfix group.
+  #let %child: #addr = #call raw_node_first(%root)
+  #let %found: #addr = #call raw_node_nil()
+  #loop scan_root {
+    #if #call raw_is_nil(%child) { #break scan_root }
+    #if #eq(#call ast_is_call(%child), 1) {
+      %found: #addr = %child
+      #break scan_root
+    }
+    %child: #addr = #call raw_node_next(%child)
+    #continue scan_root
+  }
+  #if #call raw_is_nil(%found) { %status: #bits<32> = 3 }
+  // call:1
+  #call bootstrap.artifact-write-literal("call:")
+  #call ast_write_decimal(#zext[#bits<64>](#call ast_is_call(%found)))
+  // name:foo
+  #call bootstrap.artifact-write-literal(" name:")
+  #let %name: #addr = #call ast_postfix_name(%found)
+  #call raw_dump_bytes(
+    %data, #call raw_node_start(%name), #call raw_node_length(%name)
+  )
+  // args:  the paren group child count (foo, 1, 2 => 3)
+  #call bootstrap.artifact-write-literal(" args:")
+  #call ast_write_decimal(#call ast_node_count(#call ast_postfix_args(%found)))
+  // nodes: whole-tree count
+  #call bootstrap.artifact-write-literal(" nodes:")
+  #call ast_write_decimal(#call ast_node_count(%root))
+  // replace: swap found's first arg atom (1) for a copy of the second (2)
+  #let %args: #addr = #call ast_postfix_args(%found)
+  #let %first_arg: #addr = #call raw_node_first(%args)
+  #let %second_arg: #addr = #call raw_node_next(#call raw_node_next(%first_arg))
+  #let %repl: #addr = #call ast_copy(%second_arg)
+  #let %replaced: #bits<1> = #call ast_replace_child(%args, %first_arg, %repl)
+  #call bootstrap.artifact-write-literal(" replaced:")
+  #call ast_write_decimal(#zext[#bits<64>](%replaced))
+  #call bootstrap.artifact-write-literal(" after:")
+  #call ast_write_decimal(#call ast_node_count(%args))
+  // text: the transformed call written back as source text (name + args)
+  #call bootstrap.artifact-write-literal(" text:")
+  #call ast_write(%source, %found)
+  #call ast_write(%source, %args)
+  // copy: deep copy of the paren args group preserves node count
+  #let %copy: #addr = #call ast_copy(#call ast_postfix_args(%found))
+  #call bootstrap.artifact-write-literal(" copy:")
+  #call ast_write_decimal(#call ast_node_count(%copy))
+  // gen: re-parse the original call text into a fresh AST and write it back
+  #let %gen: #addr = #call ast_from_text(
+    %source, #call raw_node_start(%found), 9
+  )
+  #call bootstrap.artifact-write-literal(" gen:")
+  #call ast_write_decimal(#call ast_node_count(%gen))
+  #call bootstrap.artifact-write-literal(" gentext:")
+  #call ast_write(%source, #call raw_node_first(%gen))
+  #call ast_write(%source, #call raw_node_next(#call raw_node_first(%gen)))
+  #call bootstrap.artifact-write-byte(10)
+  #call bootstrap.artifact-finish()
+  #call bootstrap.release-pages(%source)
+  #return %status
+}
+
+// Find the parent group whose sibling chain contains `node`, searching
+// depth-first from root.  Returns the parent or nil.
+#proc ast_find_parent(#addr %root, #addr %node) -> #addr {
+  #let %child: #addr = #call raw_node_first(%root)
+  #loop scan {
+    #if #call raw_is_nil(%child) { #break scan }
+    #if #eq(%child, %node) { #return %root }
+    #if #eq(#call raw_node_kind(%child), 2) {
+      #let %p: #addr = #call ast_find_parent(%child, %node)
+      #if #eq(#call raw_is_nil(%p), 0) { #return %p }
+    }
+    %child: #addr = #call raw_node_next(%child)
+    #continue scan
+  }
+  #return #call raw_node_nil()
+}
+
+// Replace every atom in the subtree rooted at node whose text equals
+// placeholder [ph, ph+plen) with a copy of arg_tree.  Recursive descent:
+// for each child, if it is a matching atom, replace it in this node's
+// sibling chain; otherwise recurse into the child's subtree.
+#proc ast_substitute(
+  #addr %source,
+  #addr %node,
+  #addr %ph,
+  #bits<64> %plen,
+  #addr %arg_tree
+) -> #unit {
+  #let %child: #addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #if #eq(#call ast_is_atom(%source, %child, %ph, %plen), 1) {
+      #call ast_replace_child(%node, %child, #call ast_copy(%arg_tree))
+    } else {
+      #if #eq(#call raw_node_kind(%child), 2) {
+        #call ast_substitute(%source, %child, %ph, %plen, %arg_tree)
+      }
+    }
+    %child: #addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return
+}
+
+// Count atoms whose text equals `text` (length `len`) in the subtree
+// rooted at node (recursive).  Used to detect name collisions after
+// macro expansion.
+#proc ast_count_atom(#addr %source, #addr %node, #addr %text, #bits<64> %len) -> #bits<64> {
+  #if #call raw_is_nil(%node) { #return 0 }
+  #let %count: #bits<64> = 0
+  #if #eq(#call ast_is_atom(%source, %node, %text, %len), 1) {
+    %count: #bits<64> = #add(%count, 1)
+  }
+  #let %child: #addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    %count: #bits<64> = #add(
+      %count, #call ast_count_atom(%source, %child, %text, %len)
+    )
+    %child: #addr = #call raw_node_next(%child)
+    #continue children
+  }
+  #return %count
+}
+
+// ---------------------------------------------------------------------------
+// Fresh-name generation (hygiene step 2).
+//
+// RawAst atoms are spans into the source data, so a *generated* name has
+// nowhere to live.  A text pool fixes that: copy the whole source data
+// into an allocated buffer, append generated names after it, and build a
+// new source object over the pool.  Existing spans still address their
+// bytes (the copy is at the same offsets); generated atoms address the
+// appended region.  ast_write then serialises generated and original
+// atoms alike.
+//
+// Pool layout (bytes): 0 data #addr, 8 used #bits<64>, 16 capacity #bits<64>.
+// ---------------------------------------------------------------------------
+
+#proc ast_pool_new(#bits<64> %capacity) -> #addr {
+  #let %pool: #addr = #call bootstrap.allocate-pages(24)
+  #let %data: #addr = #call bootstrap.allocate-pages(%capacity)
+  #store %data, #lea(base=%pool, idx=0, scale=0, offset=0)
+  #store 0, #lea(base=%pool, idx=0, scale=0, offset=8)
+  #store %capacity, #lea(base=%pool, idx=0, scale=0, offset=16)
+  #return %pool
+}
+
+#proc ast_pool_data(#addr %pool) -> #addr {
+  #return #load[#addr](#lea(base=%pool, idx=0, scale=0, offset=0))
+}
+
+#proc ast_pool_used(#addr %pool) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%pool, idx=0, scale=0, offset=8))
+}
+
+// Append `len` bytes from `text` to the pool; returns the start offset.
+#proc ast_pool_append(#addr %pool, #addr %text, #bits<64> %len) -> #bits<64> {
+  #let %data: #addr = #call ast_pool_data(%pool)
+  #let %used: #bits<64> = #call ast_pool_used(%pool)
+  #let %index: #bits<64> = 0
+  #loop copy_bytes {
+    #if #sge(%index, %len) { #break copy_bytes }
+    #store[#bits<8>] #load[#bits<8>](
+      #lea(base=%text, idx=%index, scale=1, offset=0)
+    ), #lea(base=%data, idx=#add(%used, %index), scale=1, offset=0)
+    %index: #bits<64> = #add(%index, 1)
+    #continue copy_bytes
+  }
+  #store #add(%used, %len), #lea(base=%pool, idx=0, scale=0, offset=8)
+  #return %used
+}
+
+// Copy the complete source data into the pool (same offsets).
+#proc ast_pool_copy_source(#addr %pool, #addr %source) -> #unit {
+  #call ast_pool_append(%pool, #call tool_source_data(%source),
+    #call tool_source_length(%source))
+  #return
+}
+
+// A source object over the pool buffer: spans up to `used` resolve to
+// the copied source plus any appended generated text.
+#proc ast_source_from_pool(#addr %pool) -> #addr {
+  #return #call tool_source_new(
+    #call ast_pool_data(%pool), #call ast_pool_used(%pool)
+  )
+}
+
+// Replace every atom whose text equals `text` (length `len`) inside the
+// subtree rooted at `node` with a deep copy of `fresh`.  Returns the
+// number of replacements.  `fresh` is an atom whose span addresses the
+// pool (generated text); each replacement gets its own copy so instances
+// stay independent.
+#proc ast_rename_in(
+  #addr %source, #addr %node, #addr %text, #bits<64> %len, #addr %fresh
+) -> #bits<64> {
+  #if #call raw_is_nil(%node) { #return 0 }
+  #let %renamed: #bits<64> = 0
+  #let %child: #addr = #call raw_node_first(%node)
+  #loop children {
+    #if #call raw_is_nil(%child) { #break children }
+    #let %next: #addr = #call raw_node_next(%child)
+    #if #eq(#call ast_is_atom(%source, %child, %text, %len), 1) {
+      #call ast_replace_child(%node, %child, #call ast_copy(%fresh))
+      %renamed: #bits<64> = #add(%renamed, 1)
+    } else {
+      %renamed: #bits<64> = #add(
+        %renamed,
+        #call ast_rename_in(%source, %child, %text, %len, %fresh)
+      )
+    }
+    %child: #addr = %next
+    #continue children
+  }
+  #return %renamed
+}

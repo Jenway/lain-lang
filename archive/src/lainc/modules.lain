@@ -1,0 +1,239 @@
+// Meta-owned module environment.
+//
+// A source module is a compile-time ModuleValue.  Imports resolve to that
+// value and never inject unqualified names into the caller.
+
+let memory_model: Module = import("std::memory_model");
+let vector: Module = import("std::core::vec");
+let types: Module = import("packages::lain::compiler::types");
+
+@export
+let modules: Module = std::module {
+
+    @export
+    let Modules = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let BindingKind: std::type = i32;
+
+        let Export: std::type = std::struct {
+            name: Memory.String,
+            kind: BindingKind,
+            type_id: types.TypeId,
+            value_id: usize,
+        };
+
+        let ResolvedExport: std::type = std::struct {
+            found: bool,
+            kind: BindingKind,
+            type_id: types.TypeId,
+            value_id: usize,
+        };
+
+        let ExportVector: std::type = vector.Vec(
+            Export,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let ModuleIdVector: std::type = vector.Vec(
+            types.ModuleId,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let Summary: std::type = std::struct {
+            id: types.ModuleId,
+            name: Memory.String,
+            source_id: usize,
+            dependencies: ModuleIdVector,
+            exports: ExportVector,
+            namespace: types.NamespaceId,
+        };
+
+        let SummaryVector: std::type = vector.Vec(
+            Summary,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let Workspace: std::type = std::struct {
+            summaries: SummaryVector,
+            next_id: types.ModuleId,
+        };
+
+        let new = std::func() -> Workspace {
+            return Workspace {
+                summaries: SummaryVector.new(),
+                next_id: 1,
+            };
+        };
+
+        let declare = std::func(
+            workspace: &mut Workspace,
+            name: Memory.String,
+            source_id: usize,
+            namespace: types.NamespaceId,
+        ) -> types.ModuleId ! {Memory.Allocation.Effect} {
+            let id: types.ModuleId = workspace.next_id;
+            workspace.next_id = workspace.next_id + 1;
+            workspace.summaries.push(Summary {
+                id: id,
+                name: name,
+                source_id: source_id,
+                dependencies: ModuleIdVector.new(),
+                exports: ExportVector.new(),
+                namespace: namespace,
+            });
+            return id;
+        };
+
+        let summary = std::func(
+            workspace: &Workspace,
+            id: types.ModuleId,
+        ) -> &Summary ! {Memory.Bounds.Effect} {
+            let index: usize = 0;
+            while index < workspace.summaries.length() {
+                let item: &Summary =
+                    workspace.summaries.get(index);
+                if item.id == id { return item; }
+                index = index + 1;
+            }
+            Memory.Bounds.check(id, workspace.summaries.length());
+            return workspace.summaries.get(0);
+        };
+
+        let summary_mut = std::func(
+            workspace: &mut Workspace,
+            id: types.ModuleId,
+        ) -> &mut Summary ! {Memory.Bounds.Effect} {
+            let index: usize = 0;
+            while index < workspace.summaries.length() {
+                if workspace.summaries.get(index).id == id {
+                    return workspace.summaries.get_mut(index);
+                }
+                index = index + 1;
+            }
+            Memory.Bounds.check(id, workspace.summaries.length());
+            return workspace.summaries.get_mut(0);
+        };
+
+        let add_dependency = std::func(
+            workspace: &mut Workspace,
+            owner: types.ModuleId,
+            dependency: types.ModuleId,
+        ) -> unit ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let target: &mut Summary =
+                summary_mut(workspace, owner);
+            let index: usize = 0;
+            while index < target.dependencies.length() {
+                if *target.dependencies.get(index) == dependency {
+                    return;
+                }
+                index = index + 1;
+            }
+            target.dependencies.push(dependency);
+        };
+
+        let export = std::func(
+            workspace: &mut Workspace,
+            owner: types.ModuleId,
+            value: Export,
+        ) -> i32 ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let target: &mut Summary =
+                summary_mut(workspace, owner);
+            let index: usize = 0;
+            while index < target.exports.length() {
+                if Memory.String.equal(
+                    &target.exports.get(index).name,
+                    &value.name,
+                ) {
+                    return 2402;
+                }
+                index = index + 1;
+            }
+            target.exports.push(value);
+            return 0;
+        };
+
+        let resolve_import = std::func(
+            workspace: &Workspace,
+            path: &Memory.String,
+        ) -> types.ModuleValue ! {Memory.Bounds.Effect} {
+            let index: usize = 0;
+            while index < workspace.summaries.length() {
+                let candidate: &Summary =
+                    workspace.summaries.get(index);
+                if Memory.String.equal(&candidate.name, path) {
+                    return types.ModuleValue {
+                        id: candidate.id,
+                        namespace: candidate.namespace,
+                        module_payload: candidate.id,
+                    };
+                }
+                index = index + 1;
+            }
+            return types.ModuleValue {
+                id: 0,
+                namespace: 0,
+                module_payload: 0,
+            };
+        };
+
+        let resolve_member = std::func(
+            workspace: &Workspace,
+            module_value: types.ModuleValue,
+            name: &Memory.String,
+        ) -> ResolvedExport ! {Memory.Bounds.Effect} {
+            if module_value.id == 0 {
+                return ResolvedExport {
+                    found: false,
+                    kind: 0,
+                    type_id: 0,
+                    value_id: 0,
+                };
+            }
+            let owner: &Summary =
+                summary(workspace, module_value.id);
+            let index: usize = 0;
+            while index < owner.exports.length() {
+                let candidate: &Export = owner.exports.get(index);
+                if Memory.String.equal(&candidate.name, name) {
+                    return ResolvedExport {
+                        found: true,
+                        kind: candidate.kind,
+                        type_id: candidate.type_id,
+                        value_id: candidate.value_id,
+                    };
+                }
+                index = index + 1;
+            }
+            return ResolvedExport {
+                found: false,
+                kind: 0,
+                type_id: 0,
+                value_id: 0,
+            };
+        };
+
+        return std::module {
+            @export let Export: std::type = Export;
+            @export let ResolvedExport: std::type = ResolvedExport;
+            @export let Summary: std::type = Summary;
+            @export let Workspace: std::type = Workspace;
+            @export let new = new;
+            @export let declare = declare;
+            @export let summary = summary;
+            @export let add_dependency = add_dependency;
+            @export let export = export;
+            @export let resolve_import = resolve_import;
+            @export let resolve_member = resolve_member;
+        };
+    };
+};

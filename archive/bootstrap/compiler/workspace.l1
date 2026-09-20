@@ -1,0 +1,572 @@
+// Minimal multi-source/module meta boundary.
+//
+// The host only supplies source bytes and paths.  This module creates one
+// RawAst per source and interprets top-level `import(...)` topology as a
+// dependency count.  It does not put module semantics into LAIN-IR.
+
+#extern #proc bootstrap.source-count() -> #bits<64>;
+#extern #proc bootstrap.source-path-data(#bits<64> %index) -> #addr;
+#extern #proc bootstrap.source-path-length(#bits<64> %index) -> #bits<64>;
+#extern #proc bootstrap.source-data(#bits<64> %index) -> #addr;
+#extern #proc bootstrap.source-length(#bits<64> %index) -> #bits<64>;
+#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;
+#extern #proc bootstrap.release-pages(#addr %memory) -> #unit;
+#extern #proc bootstrap.artifact-begin() -> #unit;
+#extern #proc bootstrap.artifact-write-byte(#bits<8> %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(#addr %text) -> #unit;
+#extern #proc bootstrap.artifact-finish() -> #unit;
+
+#extern #proc tool_source_new(#addr %data, #bits<64> %length) -> #addr;
+#extern #proc tool_source_data(#addr %source) -> #addr;
+#extern #proc tool_lex_all(#addr %source) -> #addr;
+#extern #proc raw_parse(#addr %source, #addr %tokens) -> #addr;
+#extern #proc raw_is_nil(#addr %node) -> #bits<1>;
+#extern #proc raw_node_kind(#addr %node) -> #bits<32>;
+#extern #proc raw_node_delimiter(#addr %node) -> #bits<32>;
+#extern #proc raw_node_start(#addr %node) -> #bits<64>;
+#extern #proc raw_node_length(#addr %node) -> #bits<64>;
+#extern #proc raw_node_first(#addr %node) -> #addr;
+#extern #proc raw_node_next(#addr %node) -> #addr;
+#extern #proc tool_byte_at(#addr %data, #bits<64> %index) -> #bits<8>;
+#extern #proc meta_atom_equal(#addr %source, #addr %node, #addr %text, #bits<64> %length) -> #bits<1>;
+#extern #proc meta_write_decimal(#bits<64> %value) -> #unit;
+
+// SourceUnit: source @0, path @8, root @16, node count @24, imports @32.
+#proc workspace_unit_new(
+  #addr %source, #addr %path, #addr %root, #bits<64> %nodes, #bits<64> %imports
+) -> #addr {
+  #let %unit: #addr = #call bootstrap.allocate-pages(40)
+  #store %source, #lea(base=%unit, idx=0, scale=0, offset=0)
+  #store %path, #lea(base=%unit, idx=0, scale=0, offset=8)
+  #store %root, #lea(base=%unit, idx=0, scale=0, offset=16)
+  #store %nodes, #lea(base=%unit, idx=0, scale=0, offset=24)
+  #store %imports, #lea(base=%unit, idx=0, scale=0, offset=32)
+  #return %unit
+}
+
+#proc workspace_node_count(#addr %root) -> #bits<64> {
+  #let %count: #bits<64> = 0
+  #let %node: #addr = #call raw_node_first(%root)
+  #loop nodes {
+    #if #call raw_is_nil(%node) { #break nodes }
+    %count: #bits<64> = #add(%count, 1)
+    %node: #addr = #call raw_node_next(%node)
+    #continue nodes
+  }
+  #return %count
+}
+
+#proc workspace_import_count(#addr %source, #addr %root) -> #bits<64> {
+  #let %count: #bits<64> = 0
+  #let %node: #addr = #call raw_node_first(%root)
+  #loop imports {
+    #if #call raw_is_nil(%node) { #break imports }
+    #if #call meta_atom_equal(%source, %node, "import", 6) {
+      %count: #bits<64> = #add(%count, 1)
+    }
+    %node: #addr = #call raw_node_next(%node)
+    #continue imports
+  }
+  #return %count
+}
+
+#proc workspace_import_is_std(
+  #addr %source, #addr %argument
+) -> #bits<1> {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %start: #bits<64> = #call raw_node_start(%argument)
+  #let %length: #bits<64> = #call raw_node_length(%argument)
+  #if #slt(%length, 7) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, %start), 34) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 1)), 115) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 2)), 116) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 3)), 100) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 4)), 58) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 5)), 58) { #return 0 }
+  #return 1
+}
+
+// Match an import string (including its quotes) against the final component
+// of a source path.  The first version of the workspace boundary only
+// counted import forms; this keeps resolution as a meta concern while still
+// leaving filesystem/path policy to the host.
+#proc workspace_suffix_matches(
+  #addr %path, #bits<64> %path_length, #addr %data, #bits<64> %start, #bits<64> %length
+) -> #bits<1> {
+  #if #slt(%length, 2) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, %start), 34) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #sub(#add(%start, %length), 1)), 34) {
+    #return 0
+  }
+  #let %name_start: #bits<64> = #add(%start, 1)
+  #let %name_end: #bits<64> = #sub(#add(%start, %length), 1)
+  #let %name_index: #bits<64> = %name_start
+  #loop package_name {
+    #if #sge(%name_index, %name_end) { #break package_name }
+    #let %byte: #bits<8> = #call tool_byte_at(%data, %name_index)
+    #if #eq(%byte, 58) {
+      %name_start: #bits<64> = #add(%name_index, 1)
+    }
+    %name_index: #bits<64> = #add(%name_index, 1)
+    #continue package_name
+  }
+  #let %name_length: #bits<64> = #sub(%name_end, %name_start)
+  #let %path_start: #bits<64> = 0
+  #let %path_index: #bits<64> = 0
+  #loop path_name {
+    #if #sge(%path_index, %path_length) { #break path_name }
+    #let %byte: #bits<8> = #call tool_byte_at(%path, %path_index)
+    #if #eq(%byte, 47) { %path_start: #bits<64> = #add(%path_index, 1) }
+    #if #eq(%byte, 92) { %path_start: #bits<64> = #add(%path_index, 1) }
+    %path_index: #bits<64> = #add(%path_index, 1)
+    #continue path_name
+  }
+  #let %path_name_length: #bits<64> = #sub(%path_length, %path_start)
+  #let %explicit_extension: #bits<1> = 0
+  #if #sge(%name_length, 5) {
+    #if #eq(
+      #call tool_byte_at(%data, #sub(%name_end, 5)), 46
+    ) {
+      %explicit_extension: #bits<1> = 1
+    }
+  }
+  #if #eq(%explicit_extension, 0) {
+    #if #sge(%path_name_length, 5) {
+      #if #eq(
+        #call tool_byte_at(%path, #sub(%path_length, 5)), 46
+      ) {
+        %path_name_length: #bits<64> = #sub(%path_name_length, 5)
+      }
+    }
+  }
+  #if #ne(%name_length, %path_name_length) { #return 0 }
+  #let %index: #bits<64> = 0
+  #loop suffix {
+    #if #sge(%index, %name_length) { #break suffix }
+    #if #ne(
+      #call tool_byte_at(%path, #add(%path_start, %index)),
+      #call tool_byte_at(%data, #add(%name_start, %index))
+    ) { #return 0 }
+    %index: #bits<64> = #add(%index, 1)
+    #continue suffix
+  }
+  #return 1
+}
+
+// `std::...` is an external capability only when its source is not part of
+// the requested workspace.  When the host supplies the standard-library
+// source closure, resolve its logical path precisely instead of collapsing
+// `std::core::memory` and `std::platform::memory` to the same basename.
+#proc workspace_std_path_matches(
+  #addr %path, #bits<64> %path_length, #addr %data, #bits<64> %start, #bits<64> %length
+) -> #bits<1> {
+  #if #slt(%length, 7) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, %start), 34) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 1)), 115) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 2)), 116) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 3)), 100) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 4)), 58) { #return 0 }
+  #if #ne(#call tool_byte_at(%data, #add(%start, 5)), 58) { #return 0 }
+  #if #ne(
+    #call tool_byte_at(%data, #sub(#add(%start, %length), 1)), 34
+  ) { #return 0 }
+  #let %name_start: #bits<64> = #add(%start, 6)
+  #let %name_end: #bits<64> = #sub(#add(%start, %length), 1)
+  #let %path_start: #bits<64> = 0
+  #let %path_index: #bits<64> = 0
+  #loop find_std {
+    #if #sge(#add(%path_index, 3), %path_length) {
+      #break find_std
+    }
+    #let %byte: #bits<8> = #call tool_byte_at(%path, %path_index)
+    #if #eq(%byte, 115) {
+      #if #eq(#call tool_byte_at(%path, #add(%path_index, 1)), 116) {
+        #if #eq(#call tool_byte_at(%path, #add(%path_index, 2)), 100) {
+          #let %after_std: #bits<64> = #add(%path_index, 3)
+          #if #slt(%after_std, %path_length) {
+            #let %separator: #bits<8> = #call tool_byte_at(%path, %after_std)
+            #if #eq(%separator, 47) {
+              %path_start: #bits<64> = #add(%after_std, 1)
+            } else {
+              #if #eq(%separator, 92) {
+                %path_start: #bits<64> = #add(%after_std, 1)
+              }
+            }
+          }
+        }
+      }
+    }
+    %path_index: #bits<64> = #add(%path_index, 1)
+    #continue find_std
+  }
+  #if #eq(%path_start, 0) { #return 0 }
+  // The logical import path is compared with the source path relative to
+  // `std`, so a host path such as `std/core/source.lain` starts at the `core`
+  // component.  The caller passes the complete quoted import string.
+  #let %path_end: #bits<64> = %path_length
+  #if #sge(%path_end, 5) {
+    #if #eq(#call tool_byte_at(%path, #sub(%path_end, 5)), 46) {
+      %path_end: #bits<64> = #sub(%path_end, 5)
+    }
+  }
+  #let %import_index: #bits<64> = %name_start
+  #let %candidate_index: #bits<64> = %path_start
+  #loop compare_std {
+    #if #sge(%import_index, %name_end) {
+      #return #eq(%candidate_index, %path_end)
+    }
+    #if #sge(%candidate_index, %path_end) { #return 0 }
+    #let %import_byte: #bits<8> = #call tool_byte_at(%data, %import_index)
+    #if #eq(%import_byte, 58) {
+      #if #sge(#add(%import_index, 1), %name_end) { #return 0 }
+      #if #ne(
+        #call tool_byte_at(%data, #add(%import_index, 1)), 58
+      ) { #return 0 }
+      #let %path_byte: #bits<8> = #call tool_byte_at(%path, %candidate_index)
+      #if #ne(%path_byte, 47) {
+        #if #ne(%path_byte, 92) { #return 0 }
+      }
+      %import_index: #bits<64> = #add(%import_index, 2)
+      %candidate_index: #bits<64> = #add(%candidate_index, 1)
+      #continue compare_std
+    }
+    #if #ne(
+      %import_byte,
+      #call tool_byte_at(%path, %candidate_index)
+    ) { #return 0 }
+    %import_index: #bits<64> = #add(%import_index, 1)
+    %candidate_index: #bits<64> = #add(%candidate_index, 1)
+    #continue compare_std
+  }
+}
+
+#proc workspace_std_target(
+  #addr %source, #addr %argument, #bits<64> %source_count
+) -> #bits<64> {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %candidate: #bits<64> = 0
+  #loop candidates {
+    #if #sge(%candidate, %source_count) { #return %source_count }
+    #if #call workspace_std_path_matches(
+      #call bootstrap.source-path-data(%candidate),
+      #call bootstrap.source-path-length(%candidate),
+      %data, #call raw_node_start(%argument), #call raw_node_length(%argument)
+    ) { #return %candidate }
+    %candidate: #bits<64> = #add(%candidate, 1)
+    #continue candidates
+  }
+  #return %source_count
+}
+
+#proc workspace_resolved_import_count(
+  #bits<64> %source_index, #addr %source, #addr %root, #bits<64> %source_count
+) -> #bits<64> {
+  #let %count: #bits<64> = 0
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %node: #addr = #call raw_node_first(%root)
+  #loop imports {
+    #if #call raw_is_nil(%node) { #break imports }
+    #if #call meta_atom_equal(%source, %node, "import", 6) {
+      #let %group: #addr = #call raw_node_next(%node)
+      #if #call raw_is_nil(%group) { #continue imports }
+      #if #ne(#call raw_node_delimiter(%group), 40) { #continue imports }
+      #let %argument: #addr = #call raw_node_first(%group)
+      #if #call raw_is_nil(%argument) { #continue imports }
+      #if #ne(#call raw_node_kind(%argument), 1) { #continue imports }
+      #if #ne(#load[#bits<32>](#lea(base=%argument, idx=0, scale=0, offset=48)), 3) {
+        #continue imports
+      }
+      #if #call workspace_import_is_std(%source, %argument) {
+        #let %std_target: #bits<64> = #call workspace_std_target(
+          %source, %argument, %source_count
+        )
+        // A missing std source remains an external capability and therefore
+        // counts as resolved at this boundary.
+        %count: #bits<64> = #add(%count, 1)
+        %node: #addr = #call raw_node_next(%node)
+        #continue imports
+      }
+      #let %index: #bits<64> = 0
+      #loop candidates {
+        #if #sge(%index, %source_count) { #break candidates }
+        #if #call workspace_suffix_matches(
+          #call bootstrap.source-path-data(%index),
+          #call bootstrap.source-path-length(%index),
+          %data,
+          #call raw_node_start(%argument),
+          #call raw_node_length(%argument)
+        ) {
+          %count: #bits<64> = #add(%count, 1)
+          #break candidates
+        }
+        %index: #bits<64> = #add(%index, 1)
+        #continue candidates
+      }
+    }
+    %node: #addr = #call raw_node_next(%node)
+    #continue imports
+  }
+  #return %count
+}
+
+// Return the target source index for the ordinal-th import in a module.  A
+// source-count sentinel means the import is malformed or unresolved.
+#proc workspace_import_target(
+  #bits<64> %source_index, #addr %source, #addr %root,
+  #bits<64> %source_count, #bits<64> %ordinal
+) -> #bits<64> {
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %seen: #bits<64> = 0
+  #let %node: #addr = #call raw_node_first(%root)
+  #loop imports {
+    #if #call raw_is_nil(%node) { #break imports }
+    #if #call meta_atom_equal(%source, %node, "import", 6) {
+      #if #eq(%seen, %ordinal) {
+        #let %group: #addr = #call raw_node_next(%node)
+        #if #call raw_is_nil(%group) { #return %source_count }
+        #if #ne(#call raw_node_delimiter(%group), 40) {
+          #return %source_count
+        }
+        #let %argument: #addr = #call raw_node_first(%group)
+        #if #call raw_is_nil(%argument) { #return %source_count }
+        #if #ne(#call raw_node_kind(%argument), 1) {
+          #return %source_count
+        }
+        #if #ne(#load[#bits<32>](#lea(base=%argument, idx=0, scale=0, offset=48)), 3) {
+          #return %source_count
+        }
+        #if #call workspace_import_is_std(%source, %argument) {
+          #return #call workspace_std_target(
+            %source, %argument, %source_count
+          )
+        }
+        #let %candidate: #bits<64> = 0
+        #loop candidates {
+          #if #sge(%candidate, %source_count) { #break candidates }
+          #if #call workspace_suffix_matches(
+            #call bootstrap.source-path-data(%candidate),
+            #call bootstrap.source-path-length(%candidate),
+            %data,
+            #call raw_node_start(%argument),
+            #call raw_node_length(%argument)
+          ) { #return %candidate }
+          %candidate: #bits<64> = #add(%candidate, 1)
+          #continue candidates
+        }
+        #return %source_count
+      }
+      %seen: #bits<64> = #add(%seen, 1)
+    }
+    %node: #addr = #call raw_node_next(%node)
+    #continue imports
+  }
+  #return %source_count
+}
+
+#proc workspace_import_is_std_ordinal(
+  #addr %source, #addr %root, #bits<64> %ordinal
+) -> #bits<1> {
+  #let %seen: #bits<64> = 0
+  #let %node: #addr = #call raw_node_first(%root)
+  #loop imports {
+    #if #call raw_is_nil(%node) { #return 0 }
+    #if #call meta_atom_equal(%source, %node, "import", 6) {
+      #if #eq(%seen, %ordinal) {
+        #let %group: #addr = #call raw_node_next(%node)
+        #if #call raw_is_nil(%group) { #return 0 }
+        #let %argument: #addr = #call raw_node_first(%group)
+        #if #call raw_is_nil(%argument) { #return 0 }
+        #return #call workspace_import_is_std(%source, %argument)
+      }
+      %seen: #bits<64> = #add(%seen, 1)
+    }
+    %node: #addr = #call raw_node_next(%node)
+    #continue imports
+  }
+}
+
+// Three-state DFS: zero = unseen, one = active stack, two = completed.  The
+// recursion is in LAIN-IR itself; the host is not asked to walk the graph.
+#proc workspace_reaches_cycle(
+  #bits<64> %start, #bits<64> %current, #bits<64> %source_count, #addr %states
+) -> #bits<1> {
+  #let %state: #bits<64> = #load[#bits<64>](#lea(base=%states, idx=%current, scale=8, offset=0))
+  #if #eq(%state, 1) { #return 1 }
+  #if #eq(%state, 2) { #return 0 }
+  #store 1, #lea(base=%states, idx=%current, scale=8, offset=0)
+  #let %data: #addr = #call bootstrap.source-data(%current)
+  #let %length: #bits<64> = #call bootstrap.source-length(%current)
+  #let %source: #addr = #call tool_source_new(%data, %length)
+  #let %tokens: #addr = #call tool_lex_all(%source)
+  #let %root: #addr = #call raw_parse(%source, %tokens)
+  #let %imports: #bits<64> = #call workspace_import_count(%source, %root)
+  #let %ordinal: #bits<64> = 0
+  #loop imports {
+    #if #sge(%ordinal, %imports) { #break imports }
+    #let %target: #bits<64> = #call workspace_import_target(
+      %current, %source, %root, %source_count, %ordinal
+    )
+    #if #slt(%target, %source_count) {
+      #if #eq(%target, %start) { #return 1 }
+      #if #call workspace_reaches_cycle(%start, %target, %source_count, %states) {
+        #return 1
+      }
+    }
+    %ordinal: #bits<64> = #add(%ordinal, 1)
+    #continue imports
+  }
+  #store 2, #lea(base=%states, idx=%current, scale=8, offset=0)
+  #return 0
+}
+
+#proc workspace_has_cycle(#bits<64> %source_index, #bits<64> %source_count) -> #bits<1> {
+  #let %states: #addr = #call bootstrap.allocate-pages(#mul(%source_count, 8))
+  #let %index: #bits<64> = 0
+  #loop clear {
+    #if #sge(%index, %source_count) { #break clear }
+    #store 0, #lea(base=%states, idx=%index, scale=8, offset=0)
+    %index: #bits<64> = #add(%index, 1)
+    #continue clear
+  }
+  #return #call workspace_reaches_cycle(
+    %source_index, %source_index, %source_count, %states
+  )
+}
+
+#proc workspace_write_bytes(#addr %data, #bits<64> %length) -> #unit {
+  #let %index: #bits<64> = 0
+  #loop bytes {
+    #if #sge(%index, %length) { #break bytes }
+    #call bootstrap.artifact-write-byte(#call tool_byte_at(%data, %index))
+    %index: #bits<64> = #add(%index, 1)
+    #continue bytes
+  }
+  #return
+}
+
+#proc workspace_path_less(
+  #addr %left, #bits<64> %left_length, #addr %right, #bits<64> %right_length
+) -> #bits<1> {
+  #let %index: #bits<64> = 0
+  #let %limit: #bits<64> = %left_length
+  #if #slt(%right_length, %limit) { %limit: #bits<64> = %right_length }
+  #loop compare {
+    #if #sge(%index, %limit) { #break compare }
+    #let %left_byte: #bits<8> = #call tool_byte_at(%left, %index)
+    #let %right_byte: #bits<8> = #call tool_byte_at(%right, %index)
+    #if #slt(%left_byte, %right_byte) { #return 1 }
+    #if #sgt(%left_byte, %right_byte) { #return 0 }
+    %index: #bits<64> = #add(%index, 1)
+    #continue compare
+  }
+  #return #slt(%left_length, %right_length)
+}
+
+#proc workspace_write_module(#bits<64> %index) -> #unit {
+  #let %data: #addr = #call bootstrap.source-data(%index)
+  #let %length: #bits<64> = #call bootstrap.source-length(%index)
+  #let %path: #addr = #call bootstrap.source-path-data(%index)
+  #let %path_length: #bits<64> = #call bootstrap.source-path-length(%index)
+  #let %source: #addr = #call tool_source_new(%data, %length)
+  #let %tokens: #addr = #call tool_lex_all(%source)
+  #let %root: #addr = #call raw_parse(%source, %tokens)
+  #let %nodes: #bits<64> = #call workspace_node_count(%root)
+  #let %imports: #bits<64> = #call workspace_import_count(%source, %root)
+  #let %resolved: #bits<64> = #call workspace_resolved_import_count(
+    %index, %source, %root, #call bootstrap.source-count()
+  )
+  #let %unresolved: #bits<64> = #sub(%imports, %resolved)
+  #let %cycle: #bits<1> = #call workspace_has_cycle(
+    %index, #call bootstrap.source-count()
+  )
+  #let %diagnostic: #bits<32> = 0
+  #if #sgt(%unresolved, 0) {
+    %diagnostic: #bits<32> = 4101
+  } else {
+    #if %cycle { %diagnostic: #bits<32> = 4103 }
+  }
+  #call bootstrap.artifact-write-literal(" (module ")
+  #call workspace_write_bytes(%path, %path_length)
+  #call bootstrap.artifact-write-literal(" nodes=")
+  #call meta_write_decimal(%nodes)
+  #call bootstrap.artifact-write-literal(" imports=")
+  #call meta_write_decimal(%imports)
+  #call bootstrap.artifact-write-literal(" resolved=")
+  #call meta_write_decimal(%resolved)
+  #call bootstrap.artifact-write-literal(" unresolved=")
+  #call meta_write_decimal(%unresolved)
+  #call bootstrap.artifact-write-literal(" cycle=")
+  #if %cycle {
+    #call bootstrap.artifact-write-byte(49)
+  } else {
+    #call bootstrap.artifact-write-byte(48)
+  }
+  #call bootstrap.artifact-write-literal(" diagnostic=")
+  #call meta_write_decimal(#zext[#bits<64>](%diagnostic))
+  #call bootstrap.artifact-write-byte(41)
+  #return
+}
+
+#proc workspace_sorted_indices() -> #addr {
+  #let %count: #bits<64> = #call bootstrap.source-count()
+  #let %order: #addr = #call bootstrap.allocate-pages(#add(#mul(%count, 8), 8))
+  #store %count, #lea(base=%order, idx=%count, scale=8, offset=0)
+  #let %visited: #addr = #call bootstrap.allocate-pages(#mul(%count, 8))
+  #let %emitted: #bits<64> = 0
+  #loop modules {
+    #if #sge(%emitted, %count) { #break modules }
+    #let %candidate: #bits<64> = %count
+    #let %index: #bits<64> = 0
+    #loop select {
+      #if #sge(%index, %count) { #break select }
+      #if #eq(#load[#bits<64>](#lea(base=%visited, idx=%index, scale=8, offset=0)), 0) {
+        #if #eq(%candidate, %count) {
+          %candidate: #bits<64> = %index
+        } else {
+          #if #call workspace_path_less(
+            #call bootstrap.source-path-data(%index),
+            #call bootstrap.source-path-length(%index),
+            #call bootstrap.source-path-data(%candidate),
+            #call bootstrap.source-path-length(%candidate)
+          ) {
+            %candidate: #bits<64> = %index
+          }
+        }
+      }
+      %index: #bits<64> = #add(%index, 1)
+      #continue select
+    }
+    #if #eq(%candidate, %count) { #break modules }
+    #store 1, #lea(base=%visited, idx=%candidate, scale=8, offset=0)
+    #store %candidate, #lea(base=%order, idx=%emitted, scale=8, offset=0)
+    %emitted: #bits<64> = #add(%emitted, 1)
+    #continue modules
+  }
+  #return %order
+}
+
+#proc workspace_write_sorted_modules() -> #unit {
+  #let %order: #addr = #call workspace_sorted_indices()
+  #let %count: #bits<64> = #call bootstrap.source-count()
+  #let %rank: #bits<64> = 0
+  #loop modules {
+    #if #sge(%rank, %count) { #break modules }
+    #call workspace_write_module(
+      #load[#bits<64>](#lea(base=%order, idx=%rank, scale=8, offset=0))
+    )
+    %rank: #bits<64> = #add(%rank, 1)
+    #continue modules
+  }
+  #return
+}
+
+#proc lain_workspace_dump() -> #bits<32> {
+  #let %count: #bits<64> = #call bootstrap.source-count()
+  #call bootstrap.artifact-begin()
+  #call bootstrap.artifact-write-literal("(workspace ")
+  #call meta_write_decimal(%count)
+  #call workspace_write_sorted_modules()
+  #call bootstrap.artifact-write-literal(")\n")
+  #call bootstrap.artifact-finish()
+  #return 0
+}

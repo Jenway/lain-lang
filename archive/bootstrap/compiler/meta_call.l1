@@ -1,0 +1,149 @@
+// Top-level Meta call collection boundary.
+//
+// The physical lowering module needs the syntax helper below. Supported Meta
+// calls are translated to temporary LAINIR and executed by LAINVM; unsupported
+// call shapes fail explicitly.
+
+#proc program_meta_call_value_node(
+  #addr %source, #addr %let_node
+) -> #addr {
+  #let %node: #addr = #call raw_node_next(%let_node)
+  #loop declaration {
+    #if #call raw_is_nil(%node) { #return %node }
+    #if #call meta_atom_equal(%source, %node, "=", 1) {
+      #return #call raw_node_next(%node)
+    }
+    %node: #addr = #call raw_node_next(%node)
+    #continue declaration
+  }
+}
+
+#proc program_collect_meta_call_candidate(
+  #addr %unit, #addr %source, #addr %let_node, #addr %environment
+) -> #bits<32> {
+  #let %name: #addr = #call raw_node_next(%let_node)
+  #let %existing: #addr = #call meta_env_lookup_local(
+    %environment, %source, %name
+  )
+  #if #ne(#call meta_value_kind(%existing), 0) { #return 0 }
+  #let %value: #addr = #call program_meta_call_value_node(%source, %let_node)
+  #call program_unit_set_validation_node(%unit, %source, %value)
+  #if #eq(#call raw_is_nil(%value), 0) {
+    #call program_unit_set_meta_callee(%unit, #call raw_node_start(%value))
+  }
+  #if #call lainvm_meta_is_effect_operation(%source, %value) {
+    #let %operation_group: #addr = #call program_operand_group(%source, %value)
+    #if #call raw_is_nil(%operation_group) { #return 5111 }
+    #let %operation: #addr = #call lainvm_eval_meta_effect_operation(
+      %source, %value, %operation_group, %environment
+    )
+    #call meta_env_bind(
+      %environment, %source, %name, %operation
+    )
+    #return 0
+  }
+  #let %resolved: #addr = #call meta_env_lookup_path(
+    %environment, %source, %value
+  )
+  #let %function: #addr = #call program_nil()
+  #if #eq(#call meta_value_kind(%resolved), 3) {
+    %function: #addr = #call meta_value_payload(%resolved)
+  }
+  #if #call program_function_is_nil(%function) {
+    %function: #addr = #call program_find_function_for_caller(
+      %unit, %source, #call program_nil(), %value
+    )
+  }
+  #if #call program_function_is_nil(%function) { #return 3101 }
+  #let %function_source: #addr = #call program_function_source(%function)
+  #let %group: #addr = #call program_operand_group(%source, %value)
+  #let %module_group: #addr = #call lainvm_meta_module_factory_group(
+    %function_source, %function
+  )
+  #if #eq(#call raw_is_nil(%module_group), 0) {
+    #let %invocation_environment: #addr =
+      #call lainvm_meta_address_invocation_environment(
+        %unit, %source, %function_source, %function, %group, %environment
+      )
+    // A `?{...}` row the call site cannot satisfy aborts before the module
+    // body is collected with the invocation environment.
+    #if #ne(#call program_unit_status(%unit), 0) {
+      #return #call program_unit_status(%unit)
+    }
+    #let %module: #addr = #call lainvm_eval_meta_module_call(
+      %function_source, %name, %module_group, %invocation_environment
+    )
+    #call meta_env_bind(%environment, %source, %name, %module)
+    #let %module_status: #bits<32> = #call program_collect_module(
+      %unit, %function_source,
+      #call program_function_source_index(%function),
+      %module_group, %invocation_environment
+    )
+    #return %module_status
+  }
+  #let %effect_node: #addr = #call lainvm_meta_effect_factory_node(
+    %function_source, %function
+  )
+  #if #eq(#call raw_is_nil(%effect_node), 0) {
+    #let %effect_arguments: #addr = #call bootstrap.vm-arguments-new()
+    #let %effect_argument_status: #bits<32> =
+      #call lainvm_meta_append_address_arguments(
+        %effect_arguments, %source, %function_source, %function, %group,
+        %environment, %effect_node, #call program_nil()
+      )
+    #call bootstrap.vm-arguments-release(%effect_arguments)
+    #if #ne(%effect_argument_status, 0) { #return %effect_argument_status }
+    #let %effect: #addr = #call lainvm_eval_meta_effect_call(
+      %unit, %source, %function_source, %function, %group,
+      %environment, %effect_node
+    )
+    #if #ne(#call program_unit_status(%unit), 0) {
+      #return #call program_unit_status(%unit)
+    }
+    #call meta_env_bind(
+      %environment, %source, %name, %effect
+    )
+    #return 0
+  }
+  #if #eq(
+    #call lainvm_meta_scalar_function_supported(
+      %function_source, %function, %environment
+    ),
+    0
+  ) { #return 3101 }
+  #let %arguments: #addr = #call bootstrap.vm-arguments-new()
+  #let %argument_status: #bits<32> = #call lainvm_meta_append_arguments(
+    %arguments, %source, %source, %function, %group, %environment, 0
+  )
+  #call bootstrap.vm-arguments-release(%arguments)
+  #if #ne(%argument_status, 0) { #return %argument_status }
+  // One physical argument per input row entry follows the explicit arguments,
+  // so the row is resolved into an invocation environment that
+  // `lainvm_eval_meta_scalar_call` reads back in row order.
+  #let %invocation: #addr = #call meta_env_new(
+    #call program_function_environment(%function)
+  )
+  #let %input_status: #bits<32> = #call lainvm_meta_resolve_inputs(
+    %unit, %function_source, %function, %environment, %invocation
+  )
+  #if #ne(%input_status, 0) { #return %input_status }
+  #let %number: #bits<64> = #call lainvm_eval_meta_scalar_call(
+    %function_source, %function, %group, %environment, %invocation
+  )
+  // The value carries the width the temporary artifact was built with: the
+  // callee's return annotation resolved in this call's environment, which
+  // `lainvm_meta_scalar_function_supported` already required to be non-zero.
+  #let %return_type: #addr = #load[#addr](
+    #lea(base=%function, idx=0, scale=0, offset=24)
+  )
+  #call meta_env_bind(
+    %environment, %source, %name,
+    #call meta_value_scalar(
+      %source, #call raw_node_next(%let_node), %number,
+      #call lainvm_meta_parameter_width(
+        %function, %return_type, %environment
+      )
+    )
+  )
+  #return 0
+}

@@ -1,0 +1,1340 @@
+// Bootstrap lowering for Meta calls supported by the current LAINVM bridge.
+//
+// The source procedure and its call site are translated to a temporary
+// LAINIR artifact.  LAINVM executes the generated #eval and returns one
+// ordinary physical bits value.
+
+#data lainvm_meta_target_name(11, 1, "meta_target");
+#data lainvm_meta_entry_name(10, 1, "meta_entry");
+
+#extern #proc bootstrap.vm-arguments-append-bits(
+  #addr %arguments, #bits<64> %value, #bits<64> %width
+) -> #unit;
+#extern #proc bootstrap.vm-arguments-append-addr(
+  #addr %arguments, #addr %value
+) -> #unit;
+#extern #proc bootstrap.vm-eval-addr(
+  #addr %artifact, #addr %procedure, #addr %arguments
+) -> #addr;
+#extern #proc bootstrap.vm-eval-unit(
+  #addr %artifact, #addr %procedure, #addr %arguments
+) -> #unit;
+#extern #proc meta_env_new(#addr %parent) -> #addr;
+#extern #proc meta_env_bind(
+  #addr %environment, #addr %source, #addr %name, #addr %value
+) -> #unit;
+#extern #proc program_type_end(#addr %source, #addr %node) -> #addr;
+#extern #proc program_nil() -> #addr;
+#extern #proc program_function_input_row(#addr %function) -> #addr;
+#extern #proc program_set_unit_status(#addr %unit, #bits<32> %status) -> #unit;
+#extern #proc program_unit_set_validation_node(
+  #addr %unit, #addr %source, #addr %node
+) -> #unit;
+#extern #proc program_unit_set_validation_function(
+  #addr %unit, #addr %function
+) -> #unit;
+#extern #proc lain_std_is_module_return_type(
+  #addr %source, #addr %node
+) -> #bits<1>;
+#extern #proc lain_std_is_effect(
+  #addr %source, #addr %node
+) -> #bits<1>;
+#extern #proc lain_std_is_effect_operation(
+  #addr %source, #addr %node
+) -> #bits<1>;
+#extern #proc bootstrap.artifact-write-byte(#bits<8> %byte) -> #unit;
+#extern #proc bootstrap.artifact-write-literal(#addr %text) -> #unit;
+
+#proc lainvm_meta_scalar_width(
+  #addr %source, #addr %type
+) -> #bits<64> {
+  #if #call meta_atom_equal(%source, %type, "bool", 4) { #return 1 }
+  #if #call meta_atom_equal(%source, %type, "i8", 2) { #return 8 }
+  #if #call meta_atom_equal(%source, %type, "u8", 2) { #return 8 }
+  #if #call meta_atom_equal(%source, %type, "i16", 3) { #return 16 }
+  #if #call meta_atom_equal(%source, %type, "u16", 3) { #return 16 }
+  #if #call meta_atom_equal(%source, %type, "i32", 3) { #return 32 }
+  #if #call meta_atom_equal(%source, %type, "u32", 3) { #return 32 }
+  #if #call meta_atom_equal(%source, %type, "i64", 3) { #return 64 }
+  #if #call meta_atom_equal(%source, %type, "u64", 3) { #return 64 }
+  #if #call meta_atom_equal(%source, %type, "usize", 5) { #return 64 }
+  #return 0
+}
+
+#proc lainvm_meta_write_physical_type(#bits<64> %width) -> #unit {
+  #call bootstrap.artifact-write-literal("#bits<")
+  #if #eq(%width, 1) {
+    #call bootstrap.artifact-write-literal("1")
+  } else {
+    #if #eq(%width, 8) {
+      #call bootstrap.artifact-write-literal("8")
+    } else {
+      #if #eq(%width, 16) {
+        #call bootstrap.artifact-write-literal("16")
+      } else {
+        #if #eq(%width, 32) {
+          #call bootstrap.artifact-write-literal("32")
+        } else {
+          #call bootstrap.artifact-write-literal("64")
+        }
+      }
+    }
+  }
+  #call bootstrap.artifact-write-byte(62)
+  #return
+}
+
+#proc lainvm_meta_parameter_type(
+  #addr %parameter
+) -> #addr {
+  #return #call raw_node_next(#call raw_node_next(%parameter))
+}
+
+#proc lainvm_meta_next_parameter(
+  #addr %source, #addr %parameter
+) -> #addr {
+  #let %type: #addr = #call lainvm_meta_parameter_type(%parameter)
+  #let %end: #addr = #call program_type_end(%source, %type)
+  #let %separator: #addr = #call raw_node_next(%end)
+  #if #call raw_is_nil(%separator) { #return %separator }
+  #if #eq(#call meta_atom_equal(%source, %separator, ",", 1), 0) {
+    #return #call program_nil()
+  }
+  #return #call raw_node_next(%separator)
+}
+
+// An input row names Meta values the call site's environment must supply.
+// An entry is `name` or `name : type`; the bootstrap library's
+// `lain_std_function_input_row_error` has already rejected every other shape,
+// so walking the row reads only those two forms.  `name : type` is resolved by
+// `lainvm_meta_resolve_inputs`, and a bare `name` is derived to the one kind
+// the declaration's own signature gives it: an entry a type position mentions
+// is a type value, and an entry no type position mentions is reported instead
+// of being bound with no type.  The positions counted are the signature
+// annotations, the declared types of the row's other entries, and the body's
+// own `let` annotations.
+
+// The declared type of one input entry, or the shared nil node for a bare
+// name.
+#proc lainvm_meta_input_entry_type(
+  #addr %source, #addr %entry
+) -> #addr {
+  #let %colon: #addr = #call raw_node_next(%entry)
+  #if #call raw_is_nil(%colon) { #return #call program_nil() }
+  #if #eq(#call meta_atom_equal(%source, %colon, ":", 1), 0) {
+    #return #call program_nil()
+  }
+  #return #call raw_node_next(%colon)
+}
+
+// The next entry of an input row, or nil at the end of the row.  A typed entry
+// ends at its type; the next node is the row separator.  Mirrors
+// `lainvm_meta_next_parameter`, so the resolver and the scalar artifact's
+// parameter and argument walks all visit the row in the same order.
+#proc lainvm_meta_next_input_entry(
+  #addr %source, #addr %entry
+) -> #addr {
+  #let %type: #addr = #call lainvm_meta_input_entry_type(%source, %entry)
+  #if #call raw_is_nil(%type) { #return #call program_nil() }
+  #let %separator: #addr = #call raw_node_next(
+    #call program_type_end(%source, %type)
+  )
+  #if #call raw_is_nil(%separator) { #return %separator }
+  #return #call raw_node_next(%separator)
+}
+
+// Whether two nodes of one source spell the same byte text.
+#proc lainvm_meta_name_text_equal(
+  #addr %source, #addr %left, #addr %right
+) -> #bits<1> {
+  #if #ne(#call raw_node_length(%left), #call raw_node_length(%right)) {
+    #return 0
+  }
+  #let %data: #addr = #call tool_source_data(%source)
+  #let %index: #bits<64> = 0
+  #loop equal {
+    #if #sge(%index, #call raw_node_length(%left)) { #return 1 }
+    #if #ne(
+      #call tool_byte_at(%data, #add(#call raw_node_start(%left), %index)),
+      #call tool_byte_at(%data, #add(#call raw_node_start(%right), %index))
+    ) { #return 0 }
+    %index: #bits<64> = #add(%index, 1)
+    #continue equal
+  }
+}
+
+// Whether `node` spells one of the function's scalar-typed explicit parameter
+// names.  Only a scalar parameter has a physical value the scalar artifact can
+// carry, so a parameter of any other kind stays unsupported.
+#proc lainvm_meta_scalar_parameter_matches(
+  #addr %source, #addr %function, #addr %node, #addr %environment
+) -> #bits<1> {
+  #let %parameter: #addr = #call raw_node_first(
+    #call program_function_params(%function)
+  )
+  #loop parameters {
+    #if #call raw_is_nil(%parameter) { #return 0 }
+    #if #call lainvm_meta_name_text_equal(%source, %parameter, %node) {
+      #return #ne(
+        #call lainvm_meta_parameter_width(
+          %function, #call lainvm_meta_parameter_type(%parameter),
+          %environment
+        ),
+        0
+      )
+    }
+    %parameter: #addr = #call lainvm_meta_next_parameter(%source, %parameter)
+    #continue parameters
+  }
+}
+
+// Whether `node` spells one of the function's scalar-typed input entry names.
+// Only a scalar entry has a physical value the artifact can carry, so an entry
+// of any other kind stays unsupported.
+#proc lainvm_meta_scalar_input_matches(
+  #addr %source, #addr %function, #addr %node
+) -> #bits<1> {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return 0 }
+  #let %entry: #addr = #call raw_node_first(%input_row)
+  #loop entries {
+    #if #call raw_is_nil(%entry) { #return 0 }
+    #if #call lainvm_meta_name_text_equal(%source, %entry, %node) {
+      #return #ne(
+        #call lainvm_meta_scalar_width(
+          %source, #call lainvm_meta_input_entry_type(%source, %entry)
+        ),
+        0
+      )
+    }
+    %entry: #addr = #call lainvm_meta_next_input_entry(%source, %entry)
+    #continue entries
+  }
+}
+
+// Look up the standalone spelling of one node as a Meta value.  A node is read
+// by its own byte span, but `meta_env_lookup_path` treats a `:` that
+// immediately follows the node as the start of a `::` path, and an input
+// entry's own `name : type` separator is exactly that colon.  Re-spelling the
+// node as an independent atom keeps the ordinary path semantics (exact name,
+// outward through the lexical chain, dot segments resolved through
+// Module/type values).
+#proc lainvm_meta_atom_lookup(
+  #addr %environment, #addr %source, #addr %node
+) -> #addr {
+  #let %name: #addr = #call raw_node_new(
+    1, 0, #call raw_node_start(%node), #call raw_node_length(%node), 3
+  )
+  #return #call meta_env_lookup_path(%environment, %source, %name)
+}
+
+// Look an input entry's name up in a Meta environment.
+#proc lainvm_meta_input_lookup(
+  #addr %environment, #addr %source, #addr %entry
+) -> #addr {
+  #return #call lainvm_meta_atom_lookup(%environment, %source, %entry)
+}
+
+// The physical width a Meta type value denotes.  Its payload names the type:
+// either the type expression itself or the `let` declaration that introduced
+// an alias for it, and a nominal payload is followed through the value's own
+// captured environment.  Zero means the value denotes no physical width.
+#proc lainvm_meta_type_value_width(#addr %value) -> #bits<64> {
+  #let %current: #addr = %value
+  #let %source: #addr = #call meta_value_source(%current)
+  #let %concrete: #addr = #call meta_value_payload(%current)
+  #let %depth: #bits<64> = 0
+  #loop aliases {
+    #if #sge(%depth, 8) { #return 0 }
+    %depth: #bits<64> = #add(%depth, 1)
+    #if #call meta_atom_equal(%source, %concrete, "let", 3) {
+      %concrete: #addr = #call program_type_binding_value(
+        %source, %concrete
+      )
+    }
+    #let %width: #bits<64> = #call meta_builtin_width(%source, %concrete)
+    #if #ne(%width, 0) { #return %width }
+    #if #call meta_type_is_nominal(%source, %concrete) {
+      #let %next: #addr = #call lainvm_meta_atom_lookup(
+        #call meta_value_environment(%current), %source, %concrete
+      )
+      #if #eq(#call meta_value_kind(%next), 4) {
+        %current: #addr = %next
+        %source: #addr = #call meta_value_source(%next)
+        %concrete: #addr = #call meta_value_payload(%next)
+        #continue aliases
+      }
+    }
+    #return 0
+  }
+}
+
+// The input row entry whose name is spelled exactly like `node`, or nil.
+#proc lainvm_meta_input_entry_named(
+  #addr %source, #addr %function, #addr %node
+) -> #addr {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return #call program_nil() }
+  #let %entry: #addr = #call raw_node_first(%input_row)
+  #loop entries {
+    #if #call raw_is_nil(%entry) { #return #call program_nil() }
+    #if #call lainvm_meta_name_text_equal(%source, %entry, %node) {
+      #return %entry
+    }
+    %entry: #addr = #call lainvm_meta_next_input_entry(%source, %entry)
+    #continue entries
+  }
+}
+
+// The physical width of one type spelling a declaration wrote.  A builtin name
+// is measured directly.  Otherwise the spelling may name an input row entry,
+// which is how a dependent parameter type reaches its width: the call
+// environment's value for that entry is a type value and supplies the type the
+// parameter takes, while an entry that carries a scalar value supplies the type
+// its own declaration names.  A spelling that neither the builtin table nor the
+// row explains stays unresolved (zero), so the call is reported as unsupported
+// instead of being given a guessed width.
+#proc lainvm_meta_parameter_width(
+  #addr %function, #addr %type, #addr %environment
+) -> #bits<64> {
+  #let %source: #addr = #call program_function_source(%function)
+  #let %width: #bits<64> = #call lainvm_meta_scalar_width(%source, %type)
+  #if #ne(%width, 0) { #return %width }
+  #let %value: #addr = #call lainvm_meta_atom_lookup(
+    %environment, %source, %type
+  )
+  #if #eq(#call meta_value_kind(%value), 4) {
+    #return #call lainvm_meta_type_value_width(%value)
+  }
+  #let %entry: #addr = #call lainvm_meta_input_entry_named(
+    %source, %function, %type
+  )
+  #if #call raw_is_nil(%entry) { #return 0 }
+  #return #call lainvm_meta_scalar_width(
+    %source, #call lainvm_meta_input_entry_type(%source, %entry)
+  )
+}
+
+// Whether one type spelling mentions the entry name anywhere inside it.  The
+// walk stays inside the annotation: `program_type_end` names its last node, and
+// a group inside the annotation (a type argument list such as `Vec(T)`) is
+// entered instead of being skipped.
+//
+// %cursor advances instead of %node: an assignment to a parameter inside a
+// `#loop` does not carry to the next iteration (the body sees the parameter's
+// original binding again on every `#continue`), so reassigning %node would
+// leave the walk on its first node forever.  A local advances.
+#proc lainvm_meta_type_mentions(
+  #addr %source, #addr %node, #addr %end, #addr %entry, #bits<64> %depth
+) -> #bits<1> {
+  #if #sge(%depth, 64) { #return 0 }
+  #let %cursor: #addr = %node
+  #loop siblings {
+    #if #call raw_is_nil(%cursor) { #return 0 }
+    #if #call lainvm_meta_name_text_equal(%source, %cursor, %entry) {
+      #return 1
+    }
+    #if #eq(#call raw_node_kind(%cursor), 2) {
+      #if #call lainvm_meta_type_mentions(
+        %source, #call raw_node_first(%cursor), %end, %entry,
+        #add(%depth, 1)
+      ) { #return 1 }
+    }
+    #if #eq(%cursor, %end) { #return 0 }
+    %cursor: #addr = #call raw_node_next(%cursor)
+    #continue siblings
+  }
+}
+
+// Whether a *peer* entry of the same input row names `entry` inside its own
+// declared type expression.  A typed peer such as `kind: Vec(T)` writes `T`
+// in a type position, so the row itself constrains a bare entry's kind even
+// when no signature position does.  The candidate's own entry is skipped by
+// identity: a bare entry has no type expression of its own, so scanning it
+// could only ever be the self-reference that would make every bare name look
+// constrained.
+#proc lainvm_meta_row_entry_type_mentions(
+  #addr %source, #addr %function, #addr %entry
+) -> #bits<1> {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return 0 }
+  #let %other: #addr = #call raw_node_first(%input_row)
+  #loop entries {
+    #if #call raw_is_nil(%other) { #return 0 }
+    #if #ne(%other, %entry) {
+      #let %type: #addr = #call lainvm_meta_input_entry_type(%source, %other)
+      #if #eq(#call raw_is_nil(%type), 0) {
+        #if #call lainvm_meta_type_mentions(
+          %source, %type, #call program_type_end(%source, %type), %entry, 0
+        ) { #return 1 }
+      }
+    }
+    %other: #addr = #call lainvm_meta_next_input_entry(%source, %other)
+    #continue entries
+  }
+}
+
+// Whether the declaration's body writes `entry` in a type position.  One
+// position is confirmed from the grammar and recognised here: the explicit
+// annotation of a `let` declaration, `let name : type`.  The colon is checked
+// before the node after it is read, so an inferred `let name = value` writes
+// no type and contributes no constraint.  Groups are entered because a
+// statement list nests (a block, a `while` body, a module's declarations);
+// every other spelling -- a nested `std::func` parameter list, for example --
+// is left unrecognised rather than guessed, so an entry no confirmed type
+// position mentions keeps its unconstrained diagnostic.
+#proc lainvm_meta_body_type_mentions_group(
+  #addr %source, #addr %group, #addr %entry
+) -> #bits<1> {
+  #let %cursor: #addr = #call raw_node_first(%group)
+  #loop nodes {
+    #if #call raw_is_nil(%cursor) { #return 0 }
+    #if #call meta_atom_equal(%source, %cursor, "let", 3) {
+      #let %name: #addr = #call raw_node_next(%cursor)
+      #if #eq(#call raw_is_nil(%name), 0) {
+        #let %colon: #addr = #call raw_node_next(%name)
+        #if #eq(#call raw_is_nil(%colon), 0) {
+          #if #call meta_atom_equal(%source, %colon, ":", 1) {
+            #let %type: #addr = #call raw_node_next(%colon)
+            #if #eq(#call raw_is_nil(%type), 0) {
+              #if #call lainvm_meta_type_mentions(
+                %source, %type, #call program_type_end(%source, %type),
+                %entry, 0
+              ) { #return 1 }
+            }
+          }
+        }
+      }
+    }
+    #if #eq(#call raw_node_kind(%cursor), 2) {
+      #if #call lainvm_meta_body_type_mentions_group(
+        %source, %cursor, %entry
+      ) { #return 1 }
+    }
+    %cursor: #addr = #call raw_node_next(%cursor)
+    #continue nodes
+  }
+}
+
+// The body entry point of the same walk: a declaration always carries a
+// braced statement list, and any other shape contributes no constraint.
+#proc lainvm_meta_body_type_mentions(
+  #addr %source, #addr %function, #addr %entry
+) -> #bits<1> {
+  #let %body: #addr = #call program_function_body(%function)
+  #if #call raw_is_nil(%body) { #return 0 }
+  #if #ne(#call raw_node_kind(%body), 2) { #return 0 }
+  #return #call lainvm_meta_body_type_mentions_group(%source, %body, %entry)
+}
+
+// Whether a bare input entry is used as a type by the declaration's own
+// signature or by its body.  Section 9.2 takes four constraint sources for a
+// bare entry's kind: the explicit parameter type annotations, the return type
+// annotation, the declared types of the row's other entries, and the body's
+// own type annotations.  An entry that no such position mentions stays
+// unconstrained and is reported instead of being guessed.
+#proc lainvm_meta_entry_is_type_parameter(
+  #addr %function, #addr %entry
+) -> #bits<1> {
+  #let %source: #addr = #call program_function_source(%function)
+  #let %parameter: #addr = #call raw_node_first(
+    #call program_function_params(%function)
+  )
+  #loop parameters {
+    #if #call raw_is_nil(%parameter) { #break parameters }
+    #let %type: #addr = #call lainvm_meta_parameter_type(%parameter)
+    #if #eq(#call raw_is_nil(%type), 0) {
+      #if #call lainvm_meta_type_mentions(
+        %source, %type, #call program_type_end(%source, %type), %entry, 0
+      ) { #return 1 }
+    }
+    %parameter: #addr = #call lainvm_meta_next_parameter(%source, %parameter)
+    #continue parameters
+  }
+  #let %return_type: #addr = #load[#addr](
+    #lea(base=%function, idx=0, scale=0, offset=24)
+  )
+  #if #eq(#call raw_is_nil(%return_type), 0) {
+    #if #call lainvm_meta_type_mentions(
+      %source, %return_type,
+      #call program_type_end(%source, %return_type), %entry, 0
+    ) { #return 1 }
+  }
+  // The row's other entries and the body's own annotations each constrain an
+  // entry that no signature position mentions.
+  #if #call lainvm_meta_row_entry_type_mentions(
+    %source, %function, %entry
+  ) { #return 1 }
+  #return #call lainvm_meta_body_type_mentions(%source, %function, %entry)
+}
+
+#proc lainvm_meta_scalar_function_supported(
+  #addr %source, #addr %function, #addr %environment
+) -> #bits<1> {
+  #if #call program_function_is_nil(%function) { #return 0 }
+  #let %return_type: #addr = #load[#addr](
+    #lea(base=%function, idx=0, scale=0, offset=24)
+  )
+  #if #eq(
+    #call lainvm_meta_parameter_width(
+      %function, %return_type, %environment
+    ),
+    0
+  ) {
+    #return 0
+  }
+  #let %body: #addr = #call program_function_body(%function)
+  #if #call raw_is_nil(%body) { #return 0 }
+  #if #ne(#call raw_node_kind(%body), 2) { #return 0 }
+  #if #ne(#call raw_node_delimiter(%body), 123) { #return 0 }
+  #let %statement: #addr = #call raw_node_first(%body)
+  #if #eq(#call meta_atom_equal(%source, %statement, "return", 6), 0) {
+    #return 0
+  }
+  #let %left: #addr = #call raw_node_next(%statement)
+  #if #call raw_is_nil(%left) { #return 0 }
+  #let %operator: #addr = #call raw_node_next(%left)
+  #if #call raw_is_nil(%operator) { #return 1 }
+  #if #call meta_atom_equal(%source, %operator, ";", 1) {
+    // `return <operand>;`: one operand, still a decimal literal, a scalar
+    // explicit parameter, or a scalar declared input entry.
+    #if #call program_is_decimal(%source, %left) { #return 1 }
+    #if #call lainvm_meta_scalar_parameter_matches(
+      %source, %function, %left, %environment
+    ) {
+      #return 1
+    }
+    #return #call lainvm_meta_scalar_input_matches(%source, %function, %left)
+  }
+  #if #eq(#call lainvm_consteval_operator_valid(%source, %operator), 0) {
+    #return 0
+  }
+  #let %right: #addr = #call raw_node_next(%operator)
+  #if #call raw_is_nil(%right) { #return 0 }
+  #let %tail: #addr = #call raw_node_next(%right)
+  #return #call meta_atom_equal(%source, %tail, ";", 1)
+}
+
+#proc lainvm_meta_write_scalar_operand(
+  #addr %source, #addr %node
+) -> #unit {
+  #if #call program_is_decimal(%source, %node) {
+    #call lainvm_write_node(%source, %node)
+    #return
+  }
+  #call bootstrap.artifact-write-byte(37)
+  #call lainvm_write_node(%source, %node)
+  #return
+}
+
+#proc lainvm_meta_write_scalar_expression(
+  #addr %source, #addr %left
+) -> #unit {
+  #let %operator: #addr = #call raw_node_next(%left)
+  #if #call raw_is_nil(%operator) {
+    #call lainvm_meta_write_scalar_operand(%source, %left)
+    #return
+  }
+  #if #call meta_atom_equal(%source, %operator, ";", 1) {
+    #call lainvm_meta_write_scalar_operand(%source, %left)
+    #return
+  }
+  #call bootstrap.artifact-write-byte(35)
+  #if #call meta_atom_equal(%source, %operator, "+", 1) {
+    #call bootstrap.artifact-write-literal("add(")
+  } else {
+    #if #call meta_atom_equal(%source, %operator, "-", 1) {
+      #call bootstrap.artifact-write-literal("sub(")
+    } else {
+      #if #call meta_atom_equal(%source, %operator, "*", 1) {
+        #call bootstrap.artifact-write-literal("mul(")
+      } else {
+        #call bootstrap.artifact-write-literal("sdiv(")
+      }
+    }
+  }
+  #call lainvm_meta_write_scalar_operand(%source, %left)
+  #call bootstrap.artifact-write-literal(", ")
+  #call lainvm_meta_write_scalar_operand(
+    %source, #call raw_node_next(%operator)
+  )
+  #call bootstrap.artifact-write-byte(41)
+  #return
+}
+
+#proc lainvm_meta_write_typed_parameters(
+  #addr %source, #addr %function, #addr %environment,
+  #bits<64> %physical_kind
+) -> #unit {
+  #let %parameter: #addr = #call raw_node_first(
+    #call program_function_params(%function)
+  )
+  #let %first: #bits<1> = 1
+  #loop parameters {
+    #if #call raw_is_nil(%parameter) { #return }
+    #if #eq(%first, 0) {
+      #call bootstrap.artifact-write-literal(", ")
+    }
+    #if #eq(%physical_kind, 1) {
+      #call bootstrap.artifact-write-literal("#addr")
+    } else {
+      #call lainvm_meta_write_physical_type(
+        #call lainvm_meta_parameter_width(
+          %function, #call lainvm_meta_parameter_type(%parameter),
+          %environment
+        )
+      )
+    }
+    #call bootstrap.artifact-write-literal(" %")
+    #call lainvm_write_node(%source, %parameter)
+    %first: #bits<1> = 0
+    %parameter: #addr = #call lainvm_meta_next_parameter(%source, %parameter)
+    #continue parameters
+  }
+}
+
+#proc lainvm_meta_write_parameter_names(
+  #addr %source, #addr %function
+) -> #unit {
+  #let %parameter: #addr = #call raw_node_first(
+    #call program_function_params(%function)
+  )
+  #let %first: #bits<1> = 1
+  #loop parameters {
+    #if #call raw_is_nil(%parameter) { #return }
+    #if #eq(%first, 0) {
+      #call bootstrap.artifact-write-literal(", ")
+    }
+    #call bootstrap.artifact-write-byte(37)
+    #call lainvm_write_node(%source, %parameter)
+    %first: #bits<1> = 0
+    %parameter: #addr = #call lainvm_meta_next_parameter(%source, %parameter)
+    #continue parameters
+  }
+}
+
+// Writes the input row after the explicit parameters: every entry becomes one
+// more physical parameter.  A scalar entry carries the value itself, so
+// `meta_target` reads it exactly as it reads an explicit scalar parameter; an
+// entry of any other kind carries its Meta handle.  %typed selects the
+// declaration spelling over the entry call's argument spelling.
+#proc lainvm_meta_write_input_parameters(
+  #addr %source, #addr %function, #bits<1> %typed
+) -> #unit {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return }
+  #let %entry: #addr = #call raw_node_first(%input_row)
+  #let %first: #bits<1> = #eq(#call program_function_count(%function), 0)
+  #loop parameters {
+    #if #call raw_is_nil(%entry) { #return }
+    #if #eq(%first, 0) {
+      #call bootstrap.artifact-write-literal(", ")
+    }
+    #if %typed {
+      #let %width: #bits<64> = #call lainvm_meta_scalar_width(
+        %source, #call lainvm_meta_input_entry_type(%source, %entry)
+      )
+      #if #eq(%width, 0) {
+        #call bootstrap.artifact-write-literal("#addr")
+      } else {
+        #call lainvm_meta_write_physical_type(%width)
+      }
+      #call bootstrap.artifact-write-literal(" ")
+    }
+    #call bootstrap.artifact-write-byte(37)
+    #call lainvm_write_node(%source, %entry)
+    %first: #bits<1> = 0
+    %entry: #addr = #call lainvm_meta_next_input_entry(%source, %entry)
+    #continue parameters
+  }
+}
+
+#proc lainvm_meta_build_scalar_artifact(
+  #addr %source, #addr %function, #addr %environment
+) -> #unit {
+  #call lainvm_capture_begin()
+  #let %return_type: #addr = #load[#addr](
+    #lea(base=%function, idx=0, scale=0, offset=24)
+  )
+  #let %width: #bits<64> = #call lainvm_meta_parameter_width(
+    %function, %return_type, %environment
+  )
+  #call bootstrap.artifact-write-literal("#proc meta_target(")
+  #call lainvm_meta_write_typed_parameters(
+    %source, %function, %environment, 0
+  )
+  #call lainvm_meta_write_input_parameters(%source, %function, 1)
+  #call bootstrap.artifact-write-literal(") -> ")
+  #call lainvm_meta_write_physical_type(%width)
+  #call bootstrap.artifact-write-literal(" {\n  #return ")
+  #let %body: #addr = #call program_function_body(%function)
+  #let %expression: #addr = #call raw_node_next(#call raw_node_first(%body))
+  #call lainvm_meta_write_scalar_expression(%source, %expression)
+  #call bootstrap.artifact-write-literal("\n}\n#proc meta_entry(")
+  #call lainvm_meta_write_typed_parameters(
+    %source, %function, %environment, 0
+  )
+  #call lainvm_meta_write_input_parameters(%source, %function, 1)
+  #call bootstrap.artifact-write-literal(") -> ")
+  #call lainvm_meta_write_physical_type(%width)
+  #call bootstrap.artifact-write-literal(
+    " {\n  #return #eval { #return #call meta_target("
+  )
+  #call lainvm_meta_write_parameter_names(%source, %function)
+  #call lainvm_meta_write_input_parameters(%source, %function, 0)
+  #call bootstrap.artifact-write-literal(") }\n}\n")
+  #return
+}
+
+// Appends one physical call argument.  %physical_kind 0 carries a scalar
+// #bits value; %physical_kind 1 carries a Meta address value.
+#proc lainvm_meta_append_argument(
+  #addr %arguments, #addr %source, #addr %function,
+  #addr %environment, #addr %argument, #addr %parameter,
+  #bits<64> %physical_kind
+) -> #bits<32> {
+  #if #eq(%physical_kind, 1) {
+    #let %address: #addr = #call meta_env_lookup_path(
+      %environment, %source, %argument
+    )
+    #if #eq(#call meta_value_kind(%address), 0) { #return 5108 }
+    #call bootstrap.vm-arguments-append-addr(%arguments, %address)
+    #return 0
+  }
+  #let %type: #addr = #call lainvm_meta_parameter_type(%parameter)
+  #let %width: #bits<64> = #call lainvm_meta_parameter_width(
+    %function, %type, %environment
+  )
+  #if #call program_is_decimal(%source, %argument) {
+    #call bootstrap.vm-arguments-append-bits(
+      %arguments,
+      #call program_result_value(
+        #call program_parse_decimal(%source, %argument)
+      ),
+      %width
+    )
+    #return 0
+  }
+  #let %meta_value: #addr = #call meta_env_lookup_path(
+    %environment, %source, %argument
+  )
+  #if #ne(#call meta_value_kind(%meta_value), 1) { #return 5108 }
+  #call bootstrap.vm-arguments-append-bits(
+    %arguments, #call meta_value_scalar_number(%meta_value), %width
+  )
+  #return 0
+}
+
+// Walks a call argument group, appending one value per declared parameter.
+#proc lainvm_meta_append_arguments(
+  #addr %arguments, #addr %call_source, #addr %function_source,
+  #addr %function, #addr %group, #addr %environment,
+  #bits<64> %physical_kind
+) -> #bits<32> {
+  #let %argument: #addr = #call raw_node_first(%group)
+  #let %parameter: #addr = #call raw_node_first(
+    #call program_function_params(%function)
+  )
+  #loop arguments {
+    #if #call raw_is_nil(%argument) {
+      #if #call raw_is_nil(%parameter) { #return 0 }
+      #return 5111
+    }
+    #if #call raw_is_nil(%parameter) { #return 5111 }
+    #let %status: #bits<32> = #call lainvm_meta_append_argument(
+      %arguments, %call_source, %function, %environment, %argument,
+      %parameter, %physical_kind
+    )
+    #if #ne(%status, 0) { #return %status }
+    %parameter: #addr = #call lainvm_meta_next_parameter(
+      %function_source, %parameter
+    )
+    #let %tail: #addr = #call raw_node_next(%argument)
+    #if #call raw_is_nil(%tail) { %argument: #addr = %tail } else {
+      #if #eq(#call meta_atom_equal(%call_source, %tail, ",", 1), 0) {
+        #return 5111
+      }
+      %argument: #addr = #call raw_node_next(%tail)
+    }
+    #continue arguments
+  }
+}
+
+// Appends one physical argument per input row entry, in the same order
+// `lainvm_meta_write_input_parameters` declares them, after the explicit
+// arguments.  A scalar entry is the resolved Meta value's number carried at
+// its declared width; any other entry is the Meta handle itself.
+// `lainvm_meta_resolve_inputs` has already reported a row the call site
+// cannot satisfy, so every entry resolves here.
+#proc lainvm_meta_append_input_arguments(
+  #addr %arguments, #addr %source, #addr %function, #addr %invocation
+) -> #unit {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return }
+  #let %entry: #addr = #call raw_node_first(%input_row)
+  #loop arguments {
+    #if #call raw_is_nil(%entry) { #return }
+    #let %value: #addr = #call lainvm_meta_input_lookup(
+      %invocation, %source, %entry
+    )
+    #let %width: #bits<64> = #call lainvm_meta_scalar_width(
+      %source, #call lainvm_meta_input_entry_type(%source, %entry)
+    )
+    #if #eq(%width, 0) {
+      #call bootstrap.vm-arguments-append-addr(%arguments, %value)
+    } else {
+      #call bootstrap.vm-arguments-append-bits(
+        %arguments, #call meta_value_scalar_number(%value), %width
+      )
+    }
+    %entry: #addr = #call lainvm_meta_next_input_entry(%source, %entry)
+    #continue arguments
+  }
+}
+
+// Executes the artifact accumulated in the capture sink and reads the result
+// according to the artifact's physical return type:
+//   0 = #bits value, 1 = Meta #addr handle, 2 = #unit.
+// The pending capture is closed before parsing.  The caller owns %arguments
+// and releases it after this call.
+#proc lainvm_meta_run_artifact(
+  #addr %arguments, #bits<64> %physical_kind
+) -> #bits<64> {
+  #call lainvm_capture_finish()
+  #let %artifact: #addr = #call bootstrap.vm-artifact-parse(
+    #call lainvm_capture_data(),
+    #call lainvm_capture_length()
+  )
+  #let %procedure: #addr = #call bootstrap.vm-procedure-find(
+    %artifact, #data_addr(lainvm_meta_entry_name), 10
+  )
+  #let %value: #bits<64> = 0
+  #if #eq(%physical_kind, 1) {
+    %value: #bits<64> = #ptr2int(
+      #call bootstrap.vm-eval-addr(%artifact, %procedure, %arguments)
+    )
+  } else {
+    #if #eq(%physical_kind, 2) {
+      #call bootstrap.vm-eval-unit(%artifact, %procedure, %arguments)
+    } else {
+      %value: #bits<64> = #call bootstrap.vm-eval-bits(
+        %artifact, %procedure, %arguments
+      )
+    }
+  }
+  #call bootstrap.vm-artifact-release(%artifact)
+  #return %value
+}
+
+#proc lainvm_eval_meta_scalar_call(
+  #addr %source, #addr %function, #addr %group, #addr %environment,
+  #addr %invocation
+) -> #bits<64> {
+  #call lainvm_meta_build_scalar_artifact(
+    %source, %function, %environment
+  )
+  #let %arguments: #addr = #call bootstrap.vm-arguments-new()
+  #call lainvm_meta_append_arguments(
+    %arguments, %source, %source, %function, %group, %environment, 0
+  )
+  #call lainvm_meta_append_input_arguments(
+    %arguments, %source, %function, %invocation
+  )
+  #let %value: #bits<64> = #call lainvm_meta_run_artifact(
+    %arguments, 0
+  )
+  #call bootstrap.vm-arguments-release(%arguments)
+  #return %value
+}
+
+#proc lainvm_meta_effect_factory_node(
+  #addr %source, #addr %function
+) -> #addr {
+  #if #call program_function_is_nil(%function) { #return #call program_nil() }
+  #let %body: #addr = #call program_function_body(%function)
+  #if #call raw_is_nil(%body) { #return #call program_nil() }
+  #let %statement: #addr = #call raw_node_first(%body)
+  #if #eq(#call meta_atom_equal(%source, %statement, "return", 6), 0) {
+    #return #call program_nil()
+  }
+  #let %value: #addr = #call raw_node_next(%statement)
+  #if #eq(#call program_is_std_path(%source, %value), 0) {
+    #return #call program_nil()
+  }
+  #if #eq(
+    #call lain_std_is_effect(
+      %source, #call program_operand_name(%source, %value)
+    ),
+    0
+  ) { #return #call program_nil() }
+  #if #call raw_is_nil(#call program_operand_group(%source, %value)) {
+    #return #call program_nil()
+  }
+  #return %value
+}
+
+#proc lainvm_meta_module_factory_group(
+  #addr %source, #addr %function
+) -> #addr {
+  #if #call program_function_is_nil(%function) { #return #call program_nil() }
+  #let %body: #addr = #call program_function_body(%function)
+  #if #call raw_is_nil(%body) { #return #call program_nil() }
+  #let %statement: #addr = #call raw_node_first(%body)
+  #loop statements {
+    #if #call raw_is_nil(%statement) { #return #call program_nil() }
+    #if #call meta_atom_equal(%source, %statement, "return", 6) {
+      #let %value: #addr = #call raw_node_next(%statement)
+      #if #call program_is_std_module_value(%source, %value) {
+        #return #call program_std_module_value_group(%source, %value)
+      }
+    }
+    %statement: #addr = #call raw_node_next(%statement)
+    #continue statements
+  }
+}
+
+// Writes the local spelling (%value or %result) of the value a
+// syntax-reference constructor allocates.  The effect constructor names its
+// value %value; the module and effect-operation constructors name theirs
+// %result.  Both spellings are preserved so the generated LAINIR stays
+// byte-identical.
+#proc lainvm_meta_write_meta_value_binding(#bits<1> %value_binding) -> #unit {
+  #call bootstrap.artifact-write-byte(37)
+  #if %value_binding {
+    #call bootstrap.artifact-write-literal("value")
+  } else {
+    #call bootstrap.artifact-write-literal("result")
+  }
+  #return
+}
+
+// Writes one `, #lea(base=%<binding>, idx=0, scale=0, offset=<offset>)` store
+// destination and the statement separator that follows it.
+#proc lainvm_meta_write_meta_value_field(
+  #bits<1> %value_binding, #bits<64> %offset
+) -> #unit {
+  #call bootstrap.artifact-write-literal(", #lea(base=")
+  #call lainvm_meta_write_meta_value_binding(%value_binding)
+  #call bootstrap.artifact-write-literal(", idx=0, scale=0, offset=")
+  #call lainvm_write_decimal(%offset)
+  #call bootstrap.artifact-write-literal(")\n  #store ")
+  #return
+}
+
+// Writes the fixed Meta parameters the generated meta_target and meta_entry
+// procedures carry after any forwarded factory parameters.  %typed selects
+// the declaration spelling (#addr %meta_source) over the entry call's
+// argument spelling (%meta_source).
+#proc lainvm_meta_write_meta_value_parameters(
+  #bits<1> %forward_parameters, #bits<1> %node_span_fields,
+  #bits<1> %typed
+) -> #unit {
+  #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+  #call bootstrap.artifact-write-literal("%meta_source, ")
+  #if %forward_parameters {
+    #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+    #call bootstrap.artifact-write-literal("%meta_node, ")
+    #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+    #call bootstrap.artifact-write-literal("%meta_environment")
+    #return
+  }
+  #if %node_span_fields {
+    #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+    #call bootstrap.artifact-write-literal("%meta_node, ")
+  } else {
+    #if %typed { #call bootstrap.artifact-write-literal("#bits<64> ") }
+    #call bootstrap.artifact-write-literal("%meta_start, ")
+    #if %typed { #call bootstrap.artifact-write-literal("#bits<64> ") }
+    #call bootstrap.artifact-write-literal("%meta_length, ")
+  }
+  #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+  #call bootstrap.artifact-write-literal("%meta_group, ")
+  #if %typed { #call bootstrap.artifact-write-literal("#addr ") }
+  #call bootstrap.artifact-write-literal("%meta_environment")
+  #return
+}
+
+// Writes the factory parameters an artifact procedure forwards ahead of its
+// fixed Meta parameters.  %typed selects the declaration list over the entry
+// call's argument list.
+#proc lainvm_meta_write_factory_parameters(
+  #addr %source, #addr %function, #bits<1> %forward_parameters,
+  #bits<1> %typed
+) -> #unit {
+  #if %forward_parameters {
+    #if %typed {
+      // The address spelling carries no width, so no Meta environment is
+      // needed to spell the factory's forwarded parameters.
+      #call lainvm_meta_write_typed_parameters(
+        %source, %function, #call program_nil(), 1
+      )
+    } else {
+      #call lainvm_meta_write_parameter_names(%source, %function)
+    }
+    #if #ne(#call program_function_count(%function), 0) {
+      #call bootstrap.artifact-write-literal(", ")
+    }
+  }
+  #return
+}
+
+// Writes the generated LAINIR of one syntax-reference Meta value
+// constructor.  All three constructors share one skeleton (source, start,
+// length, reference, environment, two reserved words) and differ only in the
+// stored kind, the field sources, and the fixed Meta parameter suffix:
+//   %kind                stored kind constant: 2 = module, 4 = effect,
+//                        7 = effect_operation.
+//   %forward_parameters  1 when the artifact procedures forward the factory's
+//                        own parameters as leading #addr arguments.
+//   %node_span_fields    1 when offsets 16/24 hold %node's start and length,
+//                        which the builder fixes at build time.
+//   %value_binding       1 when the allocated value is spelled %value.
+// Offset 32 holds %meta_node when the factory parameters are forwarded (the
+// effect constructor's reference) and %meta_group otherwise.
+#proc lainvm_meta_build_meta_value_artifact(
+  #bits<64> %kind, #addr %source, #addr %function, #addr %node,
+  #bits<1> %forward_parameters, #bits<1> %node_span_fields,
+  #bits<1> %value_binding
+) -> #unit {
+  #call lainvm_capture_begin()
+  #call bootstrap.artifact-write-literal(
+    "#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;\n#proc meta_target("
+  )
+  #call lainvm_meta_write_factory_parameters(
+    %source, %function, %forward_parameters, 1
+  )
+  #call lainvm_meta_write_meta_value_parameters(
+    %forward_parameters, %node_span_fields, 1
+  )
+  #call bootstrap.artifact-write-literal(
+    ") -> #addr {\n  #let %nil: #addr = #call bootstrap.allocate-pages(8)\n  #store 0, #lea(base=%nil, idx=0, scale=0, offset=0)\n  #let "
+  )
+  #call lainvm_meta_write_meta_value_binding(%value_binding)
+  #call bootstrap.artifact-write-literal(
+    ": #addr = #call bootstrap.allocate-pages(64)\n  #store "
+  )
+  #call lainvm_write_decimal(%kind)
+  #call lainvm_meta_write_meta_value_field(%value_binding, 0)
+  #call bootstrap.artifact-write-literal("%meta_source")
+  #call lainvm_meta_write_meta_value_field(%value_binding, 8)
+  #if %node_span_fields {
+    #call lainvm_write_decimal(#call raw_node_start(%node))
+  } else {
+    #call bootstrap.artifact-write-literal("%meta_start")
+  }
+  #call lainvm_meta_write_meta_value_field(%value_binding, 16)
+  #if %node_span_fields {
+    #call lainvm_write_decimal(#call raw_node_length(%node))
+  } else {
+    #call bootstrap.artifact-write-literal("%meta_length")
+  }
+  #call lainvm_meta_write_meta_value_field(%value_binding, 24)
+  #if %forward_parameters {
+    #call bootstrap.artifact-write-literal("%meta_node")
+  } else {
+    #call bootstrap.artifact-write-literal("%meta_group")
+  }
+  #call lainvm_meta_write_meta_value_field(%value_binding, 32)
+  #call bootstrap.artifact-write-literal("%meta_environment")
+  #call lainvm_meta_write_meta_value_field(%value_binding, 40)
+  #call lainvm_write_decimal(0)
+  #call lainvm_meta_write_meta_value_field(%value_binding, 48)
+  #call bootstrap.artifact-write-literal("%nil")
+  #call bootstrap.artifact-write-literal(", #lea(base=")
+  #call lainvm_meta_write_meta_value_binding(%value_binding)
+  #call bootstrap.artifact-write-literal(
+    ", idx=0, scale=0, offset=56)\n  #return "
+  )
+  #call lainvm_meta_write_meta_value_binding(%value_binding)
+  #call bootstrap.artifact-write-literal("\n}\n#proc meta_entry(")
+  #call lainvm_meta_write_factory_parameters(
+    %source, %function, %forward_parameters, 1
+  )
+  #call lainvm_meta_write_meta_value_parameters(
+    %forward_parameters, %node_span_fields, 1
+  )
+  #call bootstrap.artifact-write-literal(
+    ") -> #addr {\n  #return #eval { #return #call meta_target("
+  )
+  #call lainvm_meta_write_factory_parameters(
+    %source, %function, %forward_parameters, 0
+  )
+  #call lainvm_meta_write_meta_value_parameters(
+    %forward_parameters, %node_span_fields, 0
+  )
+  #call bootstrap.artifact-write-literal(") }\n}\n")
+  #return
+}
+
+#proc lainvm_meta_build_module_artifact() -> #unit {
+  #call lainvm_meta_build_meta_value_artifact(
+    2, #call program_nil(), #call program_nil(), #call program_nil(), 0, 0, 0
+  )
+  #return
+}
+
+#proc lainvm_eval_meta_module_call(
+  #addr %function_source,
+  #addr %name, #addr %module_group, #addr %invocation_environment
+) -> #addr {
+  #call lainvm_meta_build_module_artifact()
+  #let %arguments: #addr = #call bootstrap.vm-arguments-new()
+  #call bootstrap.vm-arguments-append-addr(%arguments, %function_source)
+  #call bootstrap.vm-arguments-append-bits(
+    %arguments, #call raw_node_start(%name), 64
+  )
+  #call bootstrap.vm-arguments-append-bits(
+    %arguments, #call raw_node_length(%name), 64
+  )
+  #call bootstrap.vm-arguments-append-addr(%arguments, %module_group)
+  #call bootstrap.vm-arguments-append-addr(
+    %arguments, %invocation_environment
+  )
+  #let %value: #bits<64> = #call lainvm_meta_run_artifact(
+    %arguments, 1
+  )
+  #call bootstrap.vm-arguments-release(%arguments)
+  #return #int2ptr(%value)
+}
+
+#proc lainvm_meta_build_effect_artifact(
+  #addr %source, #addr %function, #addr %effect_node
+) -> #unit {
+  #call lainvm_meta_build_meta_value_artifact(
+    4, %source, %function, %effect_node, 1, 1, 1
+  )
+  #return
+}
+
+#proc lainvm_meta_append_address_arguments(
+  #addr %arguments, #addr %call_source, #addr %function_source,
+  #addr %function,
+  #addr %group, #addr %environment, #addr %effect_node,
+  #addr %invocation_environment
+) -> #bits<32> {
+  #let %status: #bits<32> = #call lainvm_meta_append_arguments(
+    %arguments, %call_source, %function_source, %function,
+    %group, %environment, 1
+  )
+  #if #ne(%status, 0) { #return %status }
+  #call bootstrap.vm-arguments-append-addr(%arguments, %function_source)
+  #call bootstrap.vm-arguments-append-addr(%arguments, %effect_node)
+  #call bootstrap.vm-arguments-append-addr(
+    %arguments, %invocation_environment
+  )
+  #return 0
+}
+
+// The Meta kind a declared input type requires, or 0 when this phase cannot
+// decide.  A scalar type name demands a scalar value, `Module` and any name
+// that resolves to a Module demand a module value, and any other name demands
+// a value of the kind it resolves to in the call environment.  A type this
+// phase cannot classify is not guessed: it constrains nothing.
+#proc lainvm_meta_input_expected_kind(
+  #addr %source, #addr %environment, #addr %type
+) -> #bits<32> {
+  #if #ne(#call lainvm_meta_scalar_width(%source, %type), 0) { #return 1 }
+  #if #call lain_std_is_module_return_type(%source, %type) { #return 2 }
+  #return #call meta_value_kind(
+    #call meta_env_lookup_path(%environment, %source, %type)
+  )
+}
+
+// Reports one input failure on the caller's unit and returns its status.  The
+// declaration that carries the row is the reported function, and the span is
+// its own token: the entry name for an absent or uninferable input, the
+// declared type for a value that does not satisfy it.
+#proc lainvm_meta_input_status(
+  #addr %unit, #addr %function, #addr %source, #addr %node,
+  #bits<32> %status
+) -> #bits<32> {
+  #call program_unit_set_validation_function(%unit, %function)
+  #call program_unit_set_validation_node(%unit, %source, %node)
+  #call program_set_unit_status(%unit, %status)
+  #return %status
+}
+
+// Resolves the callee's `?{...}` row against the caller's Meta environment and
+// binds every resolved input into the invocation environment under the entry's
+// own name node, so the callee body sees it exactly where the declaration says
+// it is.  Lookup is the ordinary exact-name path lookup outward through the
+// caller's lexical chain, so the nearest binding shadows the rest.  The row
+// nodes belong to %function_source, which is therefore the source used to read
+// them and to report their spans; %environment is the call site's.  The kind
+// each value must have is the entry's declared type, or, for a bare entry, the
+// type value the declaration's own type positions require; a scalar entry is
+// also held to the physical width that type denotes.  A width either side does
+// not determine constrains nothing.
+#proc lainvm_meta_resolve_inputs(
+  #addr %unit, #addr %function_source, #addr %function,
+  #addr %environment, #addr %invocation
+) -> #bits<32> {
+  #let %input_row: #addr = #call program_function_input_row(%function)
+  #if #call raw_is_nil(%input_row) { #return 0 }
+  #let %entry: #addr = #call raw_node_first(%input_row)
+  #loop entries {
+    #if #call raw_is_nil(%entry) { #return 0 }
+    #let %type: #addr = #call lainvm_meta_input_entry_type(
+      %function_source, %entry
+    )
+    // A bare entry's kind is the one the declaration's type positions give
+    // it: an entry a type position mentions is a type value (§9.2's kind-level
+    // derivation), while an entry no type position mentions stays unknown and
+    // is reported instead of being guessed.
+    #let %expected: #bits<32> = 0
+    #if #call raw_is_nil(%type) {
+      #if #eq(
+        #call lainvm_meta_entry_is_type_parameter(%function, %entry), 0
+      ) {
+        #return #call lainvm_meta_input_status(
+          %unit, %function, %function_source, %entry, 5104
+        )
+      }
+      %expected: #bits<32> = 4
+    } else {
+      %expected: #bits<32> = #call lainvm_meta_input_expected_kind(
+        %function_source, %environment, %type
+      )
+    }
+    #let %value: #addr = #call lainvm_meta_input_lookup(
+      %environment, %function_source, %entry
+    )
+    #if #eq(#call meta_value_kind(%value), 0) {
+      #return #call lainvm_meta_input_status(
+        %unit, %function, %function_source, %entry, 5108
+      )
+    }
+    #if #ne(%expected, 0) {
+      #if #ne(#call meta_value_kind(%value), %expected) {
+        #let %node: #addr = %type
+        #if #call raw_is_nil(%node) { %node: #addr = %entry }
+        #return #call lainvm_meta_input_status(
+          %unit, %function, %function_source, %node, 5108
+        )
+      }
+      // Kind alone does not pin a scalar: a declared `i64` input would accept
+      // an `i32` value just because both are scalars.  The declared width and
+      // the width the value carries must agree, and either one being unknown
+      // keeps the old kind-only behaviour instead of reporting a guess.
+      #if #eq(%expected, 1) {
+        #let %declared_width: #bits<64> = 0
+        #if #eq(#call raw_is_nil(%type), 0) {
+          %declared_width: #bits<64> = #call lainvm_meta_scalar_width(
+            %function_source, %type
+          )
+        }
+        #let %value_width: #bits<64> = #call meta_value_scalar_width(%value)
+        #if #ne(%declared_width, 0) {
+          #if #ne(%value_width, 0) {
+            #if #ne(%declared_width, %value_width) {
+              #return #call lainvm_meta_input_status(
+                %unit, %function, %function_source, %type, 5108
+              )
+            }
+          }
+        }
+      }
+    }
+    #call meta_env_bind(%invocation, %function_source, %entry, %value)
+    %entry: #addr = #call lainvm_meta_next_input_entry(%function_source, %entry)
+    #continue entries
+  }
+}
+
+#proc lainvm_meta_address_invocation_environment(
+  #addr %unit, #addr %call_source, #addr %function_source, #addr %function,
+  #addr %group, #addr %environment
+) -> #addr {
+  #let %invocation: #addr = #call meta_env_new(
+    #call program_function_environment(%function)
+  )
+  #let %argument: #addr = #call raw_node_first(%group)
+  #let %parameter: #addr = #call raw_node_first(
+    #call program_function_params(%function)
+  )
+  #loop bindings {
+    #if #call raw_is_nil(%argument) { #break bindings }
+    #let %value: #addr = #call meta_env_lookup_path(
+      %environment, %call_source, %argument
+    )
+    #call meta_env_bind(
+      %invocation, %function_source, %parameter, %value
+    )
+    %parameter: #addr = #call lainvm_meta_next_parameter(
+      %function_source, %parameter
+    )
+    #let %tail: #addr = #call raw_node_next(%argument)
+    #if #call raw_is_nil(%tail) { %argument: #addr = %tail } else {
+      %argument: #addr = #call raw_node_next(%tail)
+    }
+    #continue bindings
+  }
+  #call lainvm_meta_resolve_inputs(
+    %unit, %function_source, %function, %environment, %invocation
+  )
+  #return %invocation
+}
+
+#proc lainvm_eval_meta_effect_call(
+  #addr %unit, #addr %call_source, #addr %function_source,
+  #addr %function, #addr %group,
+  #addr %environment, #addr %effect_node
+) -> #addr {
+  #call lainvm_meta_build_effect_artifact(
+    %function_source, %function, %effect_node
+  )
+  #let %arguments: #addr = #call bootstrap.vm-arguments-new()
+  #let %invocation_environment: #addr =
+    #call lainvm_meta_address_invocation_environment(
+      %unit, %call_source, %function_source, %function, %group, %environment
+    )
+  // A row the call site cannot satisfy aborts before the artifact runs.
+  #if #ne(#call program_unit_status(%unit), 0) {
+    #return #call program_nil()
+  }
+  #call lainvm_meta_append_address_arguments(
+    %arguments, %call_source, %function_source, %function,
+    %group, %environment, %effect_node, %invocation_environment
+  )
+  #let %value: #bits<64> = #call lainvm_meta_run_artifact(
+    %arguments, 1
+  )
+  #call bootstrap.vm-arguments-release(%arguments)
+  #return #int2ptr(%value)
+}
+
+#proc lainvm_meta_is_effect_operation(
+  #addr %source, #addr %value
+) -> #bits<1> {
+  #if #eq(#call program_is_std_path(%source, %value), 0) { #return 0 }
+  #return #call lain_std_is_effect_operation(
+    %source, #call program_operand_name(%source, %value)
+  )
+}
+
+#proc lainvm_meta_build_effect_operation_artifact(
+  #addr %value
+) -> #unit {
+  #call lainvm_meta_build_meta_value_artifact(
+    7, #call program_nil(), #call program_nil(), %value, 0, 1, 0
+  )
+  #return
+}
+
+#proc lainvm_eval_meta_effect_operation(
+  #addr %source, #addr %value, #addr %group, #addr %environment
+) -> #addr {
+  #call lainvm_meta_build_effect_operation_artifact(
+    %value
+  )
+  #let %arguments: #addr = #call bootstrap.vm-arguments-new()
+  #call bootstrap.vm-arguments-append-addr(%arguments, %source)
+  #call bootstrap.vm-arguments-append-addr(%arguments, %value)
+  #call bootstrap.vm-arguments-append-addr(%arguments, %group)
+  #call bootstrap.vm-arguments-append-addr(%arguments, %environment)
+  #let %operation: #bits<64> = #call lainvm_meta_run_artifact(
+    %arguments, 1
+  )
+  #call bootstrap.vm-arguments-release(%arguments)
+  #return #int2ptr(%operation)
+}

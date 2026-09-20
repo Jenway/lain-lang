@@ -1,0 +1,200 @@
+// std/core/arena.lain
+//
+// Arena handles allocation.Alloc(Arena.Policy) using a caller-supplied
+// memory.Region.  It never obtains pages and never calls an OS or C library.
+
+let effects: Module = import("std::effect");
+let allocation: Module = import("std::allocation");
+let memory: Module = import("std::core::memory");
+
+@export
+let arena: Module = std::module {
+    @export
+    let OutOfMemory: std::type = std::struct {
+        requested: usize,
+        alignment: usize,
+    };
+
+    @export
+    let State: std::type = std::struct {
+        memory: memory.Region,
+        used: usize,
+    };
+
+    @export
+    let Mark: std::type = std::struct {
+        used: usize,
+    };
+
+    @export
+    let Block: std::type = std::struct {
+        data: addr,
+        size: usize,
+    };
+
+    @export
+    let from_region = std::func(
+        region: memory.Region,
+    ) -> State {
+        return State {
+            memory: region,
+            used: 0,
+        };
+    };
+
+    @export
+    let mark = std::func(state: &State) -> Mark {
+        return Mark { used: state.used };
+    };
+
+    @export
+    let reset = std::func(
+        state: &mut State,
+        mark: Mark,
+    ) -> bool {
+        if mark.used > state.used { return false; }
+        state.used = mark.used;
+        return true;
+    };
+
+    let align_up = std::func(
+        value: usize,
+        alignment: usize,
+    ) -> usize ! {
+        effects.Throws(arena.OutOfMemory),
+    } {
+        if alignment == 0 {
+            effects.throw(arena.OutOfMemory {
+                requested: 0,
+                alignment: alignment,
+            });
+        }
+        let mask: usize = alignment - 1;
+        let rounded: usize = value + mask;
+        if rounded < value {
+            effects.throw(arena.OutOfMemory {
+                requested: 0,
+                alignment: alignment,
+            });
+        }
+        let aligned: usize =
+            (rounded / alignment) * alignment;
+        return aligned;
+    };
+
+    @export
+    let Policy: allocation.Policy = std::module {
+        @export let Block: std::type = arena.Block;
+        @export let Effect: effects.Effect = allocation.Alloc(Policy);
+
+        @export let empty = std::func() -> Block {
+            return Block { data: 0 as addr, size: 0 };
+        };
+
+        @export let is_empty = std::func(block: Block) -> bool {
+            return block.data == (0 as addr);
+        };
+
+        @export let address = std::func(block: Block) -> addr {
+            return block.data;
+        };
+
+        @export let allocate = std::effect_operation(
+            Effect,
+            "allocate",
+            std::func(
+                size: usize,
+                alignment: usize,
+            ) -> Block,
+        );
+
+        @export let resize = std::effect_operation(
+            Effect,
+            "resize",
+            std::func(
+                block: Block,
+                size: usize,
+                alignment: usize,
+            ) -> Block,
+        );
+
+        @export let release = std::effect_operation(
+            Effect,
+            "release",
+            std::func(block: Block) -> unit,
+        );
+
+        @export let capacity_overflow = std::effect_operation(
+            Effect,
+            "capacity_overflow",
+            std::func() -> never,
+        );
+    };
+
+    @export
+    let handler = std::func(
+        state: &mut State,
+    ) -> effects.Handler(
+        Policy.Effect,
+        {effects.Throws(arena.OutOfMemory)},
+    ) {
+        return std::handler(Policy.Effect) ! {
+            effects.Throws(arena.OutOfMemory),
+        } {
+            allocate(size, alignment) {
+                let start: usize = arena.align_up(
+                    state.used,
+                    alignment,
+                );
+                if start > state.memory.length {
+                    effects.throw(arena.OutOfMemory {
+                        requested: size,
+                        alignment: alignment,
+                    });
+                }
+                if size > state.memory.length - start {
+                    effects.throw(arena.OutOfMemory {
+                        requested: size,
+                        alignment: alignment,
+                    });
+                }
+                state.used = start + size;
+                resume arena.Block {
+                    data: state.memory.data + start,
+                    size: size,
+                };
+            }
+
+            resize(block, size, alignment) {
+                let replacement: arena.Block =
+                    perform Policy.allocate(size, alignment);
+                let copied: usize = block.size;
+                if copied > size { copied = size; }
+                memory.copy_raw(
+                    memory.Region {
+                        data: replacement.data,
+                        length: replacement.size,
+                    },
+                    memory.Region {
+                        data: block.data,
+                        length: block.size,
+                    },
+                    copied,
+                );
+                resume replacement;
+            }
+
+            release(block) {
+                // Individual bump allocations are released by reset.
+                resume ();
+            }
+
+            capacity_overflow() {
+                effects.throw(arena.OutOfMemory {
+                    requested: std::usize_max(),
+                    alignment: 1,
+                });
+            }
+        };
+    };
+};

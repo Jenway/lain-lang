@@ -1,0 +1,219 @@
+// LAIN-IR-owned request/result boundary for the compiler.
+//
+// The bootstrap host still supplies sources through capabilities and receives
+// the final status as the entry return value.  The request/result objects keep
+// the compiler policy in LAIN-IR so the host does not grow a second semantic
+// API while the later phases are added.
+
+#extern #proc bootstrap.source-count() -> #bits<64>;
+#extern #proc bootstrap.allocate-pages(#bits<64> %size) -> #addr;
+#extern #proc bootstrap.set-allocation-limit(#bits<64> %limit) -> #unit;
+#extern #proc lain_compile_context_v1_new(
+  #addr %owner, #bits<64> %step_limit, #bits<64> %allocation_limit,
+  #bits<64> %recursion_limit, #bits<64> %capability_mask
+) -> #addr;
+#extern #proc lain_compile_context_v1_set_step_limit(
+  #addr %context, #bits<64> %limit
+) -> #unit;
+#extern #proc lain_compile_context_v1_set_allocation_limit(
+  #addr %context, #bits<64> %limit
+) -> #unit;
+#extern #proc lain_compile_context_v1_set_recursion_limit(
+  #addr %context, #bits<64> %limit
+) -> #unit;
+#extern #proc lain_compile_context_v1_set_capability_mask(
+  #addr %context, #bits<64> %mask
+) -> #unit;
+#extern #proc lain_compile_context_v1_allocation_limit(#addr %context) -> #bits<64>;
+#extern #proc lain_std_abi_version() -> #bits<64>;
+#extern #proc lain_std_initialize(#addr %context) -> #bits<32>;
+#extern #proc lain_std_expand(#addr %context, #addr %source_unit, #addr %root) -> #addr;
+#extern #proc lain_std_elaborate(#addr %context, #addr %expanded_root) -> #addr;
+#extern #proc lain_std_lower(#addr %context, #addr %elaborated_root, #addr %l1_unit) -> #addr;
+#extern #proc lain_meta_pass_result_v1_status(#addr %value) -> #bits<32>;
+#extern #proc lain_meta_pass_result_v1_result(#addr %value) -> #addr;
+#extern #proc lain_meta_pass_result_v1_release(#addr %value) -> #unit;
+#extern #proc lain_meta_pass_result_v1_owner_matches(
+  #addr %value, #addr %context
+) -> #bits<1>;
+#extern #proc syntax_units_build() -> #addr;
+#extern #proc syntax_index_count(#addr %index) -> #bits<64>;
+
+// CompilerRequest:
+//   source count @0, emit-l1 @8, verify-l1 @16,
+//   source begin/end @24/@32, root source @40, require-main @48,
+//   CompileContextV1 @56.
+#proc compiler_request_new() -> #addr {
+  #let %request: #addr = #call bootstrap.allocate-pages(64)
+  #let %source_count: #bits<64> = #call bootstrap.source-count()
+  #store #call bootstrap.source-count(),
+    #lea(base=%request, idx=0, scale=0, offset=0)
+  #store 1, #lea(base=%request, idx=0, scale=0, offset=8)
+  #store 1, #lea(base=%request, idx=0, scale=0, offset=16)
+  #store 0, #lea(base=%request, idx=0, scale=0, offset=24)
+  #store %source_count, #lea(base=%request, idx=0, scale=0, offset=32)
+  #store 0, #lea(base=%request, idx=0, scale=0, offset=40)
+  #store 1, #lea(base=%request, idx=0, scale=0, offset=48)
+  // Keep the existing bootstrap step guard while leaving allocation,
+  // recursion and capabilities configurable through the context ABI.
+  #store #call lain_compile_context_v1_new(%request, 50000, 0, 0, 0),
+    #lea(base=%request, idx=0, scale=0, offset=56)
+  #return %request
+}
+
+#proc compiler_request_context(#addr %request) -> #addr {
+  #return #load[#addr](#lea(base=%request, idx=0, scale=0, offset=56))
+}
+
+#proc compiler_request_set_root(#addr %request, #bits<64> %root) -> #unit {
+  #store %root, #lea(base=%request, idx=0, scale=0, offset=40)
+  #return
+}
+
+#proc compiler_request_set_require_main(#addr %request, #bits<1> %required) -> #unit {
+  #store %required, #lea(base=%request, idx=0, scale=0, offset=48)
+  #return
+}
+
+#proc compiler_request_set_step_limit(#addr %request, #bits<64> %limit) -> #unit {
+  #call lain_compile_context_v1_set_step_limit(
+    #call compiler_request_context(%request), %limit
+  )
+  #return
+}
+
+#proc compiler_request_set_allocation_limit(
+  #addr %request, #bits<64> %limit
+) -> #unit {
+  #call lain_compile_context_v1_set_allocation_limit(
+    #call compiler_request_context(%request), %limit
+  )
+  #return
+}
+
+#proc compiler_request_set_recursion_limit(
+  #addr %request, #bits<64> %limit
+) -> #unit {
+  #call lain_compile_context_v1_set_recursion_limit(
+    #call compiler_request_context(%request), %limit
+  )
+  #return
+}
+
+#proc compiler_request_set_capability_mask(
+  #addr %request, #bits<64> %mask
+) -> #unit {
+  #call lain_compile_context_v1_set_capability_mask(
+    #call compiler_request_context(%request), %mask
+  )
+  #return
+}
+
+// CompilerResult:
+//   status @0, diagnostic @8, syntax-unit count @16, artifact-present @24.
+#proc compiler_result_new(
+  #bits<32> %status, #bits<32> %diagnostic, #bits<64> %module_count, #bits<8> %artifact
+) -> #addr {
+  #let %result: #addr = #call bootstrap.allocate-pages(32)
+  #store %status, #lea(base=%result, idx=0, scale=0, offset=0)
+  #store %diagnostic, #lea(base=%result, idx=0, scale=0, offset=8)
+  #store %module_count, #lea(base=%result, idx=0, scale=0, offset=16)
+  #store %artifact, #lea(base=%result, idx=0, scale=0, offset=24)
+  #return %result
+}
+
+#proc compiler_result_status(#addr %result) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%result, idx=0, scale=0, offset=0))
+}
+
+#proc compiler_result_diagnostic(#addr %result) -> #bits<32> {
+  #return #load[#bits<32>](#lea(base=%result, idx=0, scale=0, offset=8))
+}
+
+#proc compiler_result_module_count(#addr %result) -> #bits<64> {
+  #return #load[#bits<64>](#lea(base=%result, idx=0, scale=0, offset=16))
+}
+
+#proc compiler_result_has_artifact(#addr %result) -> #bits<1> {
+  #return #ne(#load[#bits<8>](#lea(base=%result, idx=0, scale=0, offset=24)), 0)
+}
+
+#proc compiler_compile_request(#addr %request) -> #addr {
+  // The compiler core knows only this stable ABI.  The implementation lives
+  // in the separately bundled bootstrap standard library.
+  #let %context: #addr = #call compiler_request_context(%request)
+  #let %allocation_limit: #bits<64> = #call
+    lain_compile_context_v1_allocation_limit(%context)
+  #if #sgt(%allocation_limit, 0) {
+    #call bootstrap.set-allocation-limit(%allocation_limit)
+  }
+  #let %std_status: #bits<32> = #call lain_std_initialize(%context)
+  #if #ne(%std_status, 0) {
+    #return #call compiler_result_new(%std_status, %std_status, 0, 0)
+  }
+  #if #ne(#call lain_std_abi_version(), 1) {
+    #return #call compiler_result_new(5201, 5201, 0, 0)
+  }
+  #let %syntax_index: #addr = #call syntax_units_build()
+  // The standard library owns the semantic passes. The core only supplies
+  // the source/index handles and consumes their versioned results.
+  #let %expanded: #addr = #call lain_std_expand(
+    %context, %syntax_index, %syntax_index
+  )
+  #if #eq(#call lain_meta_pass_result_v1_owner_matches(
+    %expanded, %context
+  ), 0) {
+    #return #call compiler_result_new(5202, 5202, 0, 0)
+  }
+  #let %expanded_status: #bits<32> = #call lain_meta_pass_result_v1_status(%expanded)
+  #if #ne(%expanded_status, 0) {
+    #call lain_meta_pass_result_v1_release(%expanded)
+    #return #call compiler_result_new(
+      %expanded_status, %expanded_status, 0, 0
+    )
+  }
+  #let %expanded_root: #addr = #call lain_meta_pass_result_v1_result(%expanded)
+  #let %elaborated: #addr = #call lain_std_elaborate(
+    %context, %expanded_root
+  )
+  #call lain_meta_pass_result_v1_release(%expanded)
+  #if #eq(#call lain_meta_pass_result_v1_owner_matches(
+    %elaborated, %context
+  ), 0) {
+    #return #call compiler_result_new(5202, 5202, 0, 0)
+  }
+  #let %elaborated_status: #bits<32> = #call lain_meta_pass_result_v1_status(%elaborated)
+  #if #ne(%elaborated_status, 0) {
+    #call lain_meta_pass_result_v1_release(%elaborated)
+    #return #call compiler_result_new(
+      %elaborated_status, %elaborated_status, 0, 0
+    )
+  }
+  #let %elaborated_root: #addr = #call lain_meta_pass_result_v1_result(%elaborated)
+  #let %lowered: #addr = #call lain_std_lower(
+    %context,
+    %elaborated_root,
+    %syntax_index
+  )
+  #call lain_meta_pass_result_v1_release(%elaborated)
+  #if #eq(#call lain_meta_pass_result_v1_owner_matches(
+    %lowered, %context
+  ), 0) {
+    #return #call compiler_result_new(5202, 5202, 0, 0)
+  }
+  #let %lower_status: #bits<32> = #call lain_meta_pass_result_v1_status(%lowered)
+  #let %source_begin: #bits<64> = #load[#bits<64>](
+    #lea(base=%request, idx=0, scale=0, offset=24)
+  )
+  #let %source_end: #bits<64> = #load[#bits<64>](
+    #lea(base=%request, idx=0, scale=0, offset=32)
+  )
+  #let %module_count: #bits<64> = #sub(%source_end, %source_begin)
+  #let %status: #bits<32> = %lower_status
+  #let %artifact: #bits<8> = 0
+  #if #eq(%status, 0) { %artifact: #bits<8> = 1 }
+  #call lain_meta_pass_result_v1_release(%lowered)
+  #return #call compiler_result_new(
+    %status, %status, %module_count, %artifact
+  )
+}

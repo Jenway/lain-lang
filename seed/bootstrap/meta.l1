@@ -470,7 +470,49 @@
   #return %status
 }
 
+// 这段字节**全是**十进制数字吗？`0x10` 不是：`bs_read_uint` 在 `x` 停下，
+// 只读出 `0`，剩下的悄悄丢掉。
+#proc meta_all_digits(%base: #addr, %lo: #bits<64>, %hi: #bits<64>,
+                       %len: #bits<64>) -> #bits<1> {
+  %r = #loop s(%i: #bits<64> = %lo) -> (#bits<1>) {
+    %more = #ult[#bits<64>](%i, %hi)
+    #if %more {
+      %b = #call bs_byte_at(%base, %i, %len)
+      %ok = #call bs_is_digit(%b)
+      #if %ok {
+        %n = #add[#bits<64>](%i, 1)
+        #continue s(%n)
+      }
+      #break s(0)
+    } else {
+      #break s(1)
+    }
+  }
+  #return %r
+}
+
+// 从 at 起跳过空白之后是不是 `;`？
+#proc meta_at_semi(%base: #addr, %at: #bits<64>, %len: #bits<64>) -> #bits<1> {
+  %p = #call bs_skip_space(%base, %at, %len)
+  // 用 `bs_byte_at`（越界给 0）而不是 `bs_is_byte`：源码没有以 `;` 收尾时
+  // `bs_skip_space` 会返回 `len`，而 `bs_is_byte` 在 `len` 处是**越界读**——
+  // 那会被 VM 以 trap 1004 拒掉。响是响了，但那是崩溃，不是诊断。
+  %b = #call bs_byte_at(%base, %p, %len)
+  %r = #eq[#bits<8>](%b, 59)
+  #return %r
+}
+
 // 数值右值：一个整数，或 `整数 OP 整数`。
+//
+// **两条尾巴检查**，都是给"静默给错值"堵口：
+//
+//   1. 数字必须**全是数字** —— 否则 `0x10` 被 `bs_read_uint` 读成 `0`，
+//      剩下的 `x10` 丢掉；
+//   2. 值之后跳过空白必须**紧跟 `;`** —— 否则 `1 + 2 + 3` 会只发 `#add(1,2)`，
+//      把 `+ 3` 丢掉，算出一个**错的但是合法的**结果。
+//
+// 少了这两条，写错的东西会被当成对的算出来。这正是文档里禁止的失败方式：
+// 失败要响，不能静默给错值。
 #proc meta_emit_numeric(%host: #addr, %base: #addr, %len: #bits<64>,
                        %name_lo: #bits<64>, %name_hi: #bits<64>,
                        %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
@@ -485,6 +527,14 @@
     %rhs_hi = #call bs_skip_ident(%base, %rhs_lo, %len)
     %has_rhs = #ult[#bits<64>](%rhs_lo, %rhs_hi)
     %inner = #if %has_rhs -> (#bits<32>) {
+      %rhs_digits = #call meta_all_digits(%base, %rhs_lo, %rhs_hi, %len)
+      %rhs_semi = #call meta_at_semi(%base, %rhs_hi, %len)
+      %rhs_ok = #and[#bits<1>](%rhs_digits, %rhs_semi)
+      %rhs_bad = #eq[#bits<1>](%rhs_ok, 0)
+      #if %rhs_bad {
+        %ft = #call lain_meta_fail(%host, 4)
+        #return 4
+      }
       // 符号去**类型的 op 表**里查该发哪条物理算子。表里的 `"/"` 对 i32 是
       // sdiv、对 u32 是 udiv——Meta 里没有一行写着「如果是 i32」。
       %sym = #lea(%base, %op_at, 1, 0)
@@ -505,6 +555,14 @@
     }
     #yield %inner
   } else {
+    %lhs_digits = #call meta_all_digits(%base, %lhs_lo, %lhs_hi, %len)
+    %lhs_semi = #call meta_at_semi(%base, %lhs_hi, %len)
+    %lhs_ok = #and[#bits<1>](%lhs_digits, %lhs_semi)
+    %lhs_bad = #eq[#bits<1>](%lhs_ok, 0)
+    #if %lhs_bad {
+      %ft2 = #call lain_meta_fail(%host, 4)
+      #return 4
+    }
     %s = #call meta_emit_let(%host, %base, %len, %name_lo, %name_hi, %kind,
                              %width, %lhs_lo)
     #yield %s

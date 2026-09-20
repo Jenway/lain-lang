@@ -1,0 +1,63 @@
+// Explicit phase boundary used by compiler_core and tests.
+
+let memory_model: Module = import("std::memory_model");
+let source_workspace: Module =
+    import("packages::lain::compiler::source_workspace");
+let elaborator: Module =
+    import("packages::lain::compiler::elaborator");
+let lower: Module = import("packages::lain::compiler::lower");
+let lainir_api: Module =
+    import("packages::lain::lainir::api_contract");
+
+@export
+let frontend_pipeline: Module = std::module {
+    @export
+    let Pipeline = std::func(
+        Memory: memory_model.Shape,
+        Ir: lainir_api.CapabilitiesShape,
+    ) -> Module {
+        let Sources: Module =
+            source_workspace.SourceWorkspace(Memory);
+        let Elaborator: Module = elaborator.Elaborator(Memory);
+        let Lower: Module = lower.Lower(Memory, Ir);
+
+        let Result: std::type = std::struct {
+            elaborated: Elaborator.Result,
+            lowered: Lower.Result,
+            diagnostic: i32,
+        };
+
+        let run = std::func(
+            workspace: &Sources.Workspace,
+        ) -> Result ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let elaborated: Elaborator.Result =
+                Elaborator.elaborate(workspace);
+            if elaborated.diagnostic != 0 {
+                return Result {
+                    elaborated: elaborated,
+                    lowered: Lower.Result {
+                        artifact: Lower.Builder.empty_artifact(),
+                        entry: std::usize_max(),
+                        diagnostic: elaborated.diagnostic,
+                    },
+                    diagnostic: elaborated.diagnostic,
+                };
+            }
+            let lowered: Lower.Result =
+                Lower.program(&elaborated.program);
+            return Result {
+                elaborated: elaborated,
+                lowered: lowered,
+                diagnostic: lowered.diagnostic,
+            };
+        };
+
+        return std::module {
+            @export let Result: std::type = Result;
+            @export let run = run;
+        };
+    };
+};

@@ -1,0 +1,232 @@
+// Generated syntax uses the same Node representation as parsed syntax.
+// Raw source units remain immutable to Meta code; generated nodes are placed
+// in a separate Unit and carry origin and hygiene information.
+
+let memory_model: Module = import("std::memory_model");
+let memory: Module = import("std::core::memory");
+let syntax: Module = import("packages::lain::compiler::syntax");
+
+@export
+let generated_syntax: Module = std::module {
+
+    @export
+    let GeneratedSyntax = std::func(
+        Memory: memory_model.Shape,
+    ) -> Module {
+        let Syntax: Module = syntax.Syntax(Memory);
+
+        let Builder: std::type = std::struct {
+            store: &mut Syntax.Store,
+            unit: Syntax.UnitId,
+            origin: Syntax.NodeId,
+            hygiene: Syntax.HygieneId,
+        };
+
+        let SyntaxList: std::type = std::struct {
+            unit: Syntax.UnitId,
+            first: Syntax.NodeId,
+            last: Syntax.NodeId,
+            length: usize,
+        };
+
+        let begin = std::func(
+            store: &mut Syntax.Store,
+            origin: Syntax.NodeId,
+        ) -> Builder ! {Memory.Allocation.Effect} {
+            // Reuse the parser's fully materialized empty unit.  Passing a
+            // nested Unit value through the bootstrap Vec ABI loses its
+            // address and leaves the generated unit's node vector null.
+            let unit: Syntax.UnitId = Syntax.parse(
+                store,
+                memory.empty_byte_span(),
+            );
+            let hygiene: Syntax.HygieneId =
+                Syntax.fresh_hygiene(store);
+            return Builder {
+                store: store,
+                unit: unit,
+                origin: origin,
+                hygiene: hygiene,
+            };
+        };
+
+        let empty_list = std::func(
+            builder: &Builder,
+        ) -> SyntaxList {
+            return SyntaxList {
+                unit: builder.unit,
+                first: Syntax.invalid_node(),
+                last: Syntax.invalid_node(),
+                length: 0,
+            };
+        };
+
+        let append = std::func(
+            builder: &mut Builder,
+            list: &mut SyntaxList,
+            node: Syntax.NodeId,
+        ) -> unit ! {Memory.Bounds.Effect} {
+            if list.length == 0 {
+                list.first = node;
+                list.last = node;
+            } else {
+                Syntax.node_mut(
+                    builder.store,
+                    builder.unit,
+                    list.last,
+                ).next_sibling = node;
+                list.last = node;
+            }
+            list.length = list.length + 1;
+        };
+
+        let atom = std::func(
+            builder: &mut Builder,
+            token_kind: i32,
+            text: Memory.String,
+        ) -> Syntax.NodeId ! {Memory.Allocation.Effect} {
+            let value: Syntax.Node = Syntax.Node {
+                kind: 1,
+                token_kind: token_kind,
+                delimiter: 0,
+                span: Syntax.Span { start: 0, end: 0 },
+                text: text,
+                first_child: Syntax.invalid_node(),
+                next_sibling: Syntax.invalid_node(),
+                origin: builder.origin,
+                hygiene: builder.hygiene,
+                generated: true,
+            };
+            return Syntax.add_node(
+                Syntax.unit_mut(builder.store, builder.unit),
+                value,
+            );
+        };
+
+        let group = std::func(
+            builder: &mut Builder,
+            delimiter: i32,
+            children: SyntaxList,
+        ) -> Syntax.NodeId ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let value: Syntax.Node = Syntax.Node {
+                kind: 2,
+                token_kind: 0,
+                delimiter: delimiter,
+                span: Syntax.Span { start: 0, end: 0 },
+                text: Memory.String.new(),
+                first_child: children.first,
+                next_sibling: Syntax.invalid_node(),
+                origin: builder.origin,
+                hygiene: builder.hygiene,
+                generated: true,
+            };
+            let id: Syntax.NodeId = Syntax.add_node(
+                Syntax.unit_mut(builder.store, builder.unit),
+                value,
+            );
+            return id;
+        };
+
+        let clone_from = std::func(
+            builder: &mut Builder,
+            source_unit: Syntax.UnitId,
+            source_id: Syntax.NodeId,
+            capture_call_site: bool,
+        ) -> Syntax.NodeId ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let source: &Syntax.Node = Syntax.node(
+                builder.store,
+                source_unit,
+                source_id,
+            );
+            // Snapshot every field before growing the destination vector.
+            // The destination may share the same Store and vector growth may
+            // invalidate the borrowed source node.
+            let source_first_child: Syntax.NodeId =
+                source.first_child;
+            let source_generated: bool = source.generated;
+            let source_hygiene: Syntax.HygieneId = source.hygiene;
+            // Keep conditional values in ordinary statements.  The current
+            // Lain subset accepts `if` as a statement; record fields still
+            // require a value expression, so prepare both values first.
+            let copy_text: Memory.String = Memory.String.new();
+            if source_generated {
+                copy_text = Memory.String.clone(&source.text);
+            }
+            let copy_hygiene: Syntax.HygieneId = builder.hygiene;
+            if capture_call_site {
+                copy_hygiene = source_hygiene;
+            }
+            let copy: Syntax.Node = Syntax.Node {
+                kind: source.kind,
+                token_kind: source.token_kind,
+                delimiter: source.delimiter,
+                span: source.span,
+                text: copy_text,
+                first_child: Syntax.invalid_node(),
+                next_sibling: Syntax.invalid_node(),
+                origin: source_id,
+                hygiene: copy_hygiene,
+                generated: true,
+            };
+            let id: Syntax.NodeId = Syntax.add_node(
+                Syntax.unit_mut(builder.store, builder.unit),
+                copy,
+            );
+
+            let child: Syntax.NodeId = source_first_child;
+            while child != Syntax.invalid_node() {
+                let cloned: Syntax.NodeId = clone_from(
+                    builder,
+                    source_unit,
+                    child,
+                    capture_call_site,
+                );
+                Syntax.append_child(
+                    Syntax.unit_mut(builder.store, builder.unit),
+                    id,
+                    cloned,
+                );
+                child = Syntax.node(
+                    builder.store,
+                    source_unit,
+                    child,
+                ).next_sibling;
+            }
+            return id;
+        };
+
+        let seal = std::func(
+            builder: &mut Builder,
+            forms: SyntaxList,
+        ) -> Syntax.UnitId ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let root: Syntax.NodeId = group(
+                builder,
+                0,
+                forms,
+            );
+            Syntax.unit_mut(builder.store, builder.unit).root = root;
+            return builder.unit;
+        };
+
+        return std::module {
+            @export let Builder: std::type = Builder;
+            @export let SyntaxList: std::type = SyntaxList;
+            @export let begin = begin;
+            @export let empty_list = empty_list;
+            @export let append = append;
+            @export let atom = atom;
+            @export let group = group;
+            @export let clone_from = clone_from;
+            @export let seal = seal;
+        };
+    };
+};

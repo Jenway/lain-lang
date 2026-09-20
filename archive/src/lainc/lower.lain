@@ -1,0 +1,261 @@
+// The single lowering engine from an elaborated program to a LAINIR artifact.
+// It is used for both one-source and workspace requests.
+
+let memory_model: Module = import("std::memory_model");
+let vector: Module = import("std::core::vec");
+let types: Module = import("packages::lain::compiler::types");
+let elaborator: Module = import("packages::lain::compiler::elaborator");
+let lainir_api: Module =
+    import("packages::lain::lainir::api_contract");
+@export
+let lower: Module = std::module {
+
+    @export
+    let Lower = std::func(
+        Memory: memory_model.Shape,
+        Ir: lainir_api.CapabilitiesShape,
+    ) -> Module {
+        let Surface: Module = elaborator.Elaborator(Memory);
+        let Builder: Module = Ir.Builder;
+
+        let Result: std::type = std::struct {
+            artifact: Builder.Artifact,
+            entry: Builder.Procedure,
+            diagnostic: i32,
+        };
+
+        let TypeMapEntry: std::type = std::struct {
+            meta: types.TypeId,
+            physical: Builder.Type,
+        };
+
+        let TypeMap: std::type = vector.Vec(
+            TypeMapEntry,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        let ProcedureMap: std::type = vector.Vec(
+            Builder.Procedure,
+            Memory.Allocation,
+            Memory.Bounds,
+        );
+
+        // The elaborator preserves the original syntax span on every surface
+        // expression.  SourceLocation is still an opaque usize in the v1
+        // provider contract, so lowering passes the stable start offset.  The
+        // provider can later map that handle to source id and full end span
+        // without changing the elaborated source model.
+        let expression_location = std::func(
+            expression: &Surface.Expr,
+        ) -> Ir.SourceLocation {
+            return expression.source_start;
+        };
+
+        let physical_type = std::func(
+            mapping: &TypeMap,
+            meta: types.TypeId,
+        ) -> Builder.Type ! {Memory.Bounds.Effect} {
+            let index: usize = 0;
+            while index < mapping.length() {
+                let entry: &TypeMapEntry = mapping.get(index);
+                if entry.meta == meta { return entry.physical; }
+                index = index + 1;
+            }
+            return std::usize_max();
+        };
+
+        let lower_expression = std::func(
+            program: &Surface.Program,
+            unit: &mut Builder.Unit,
+            expression_id: Surface.ExprId,
+            mapping: &TypeMap,
+            procedures: &ProcedureMap,
+        ) -> Builder.Value ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let expression: &Surface.Expr =
+                program.expressions.get(expression_id);
+            let result_type: Builder.Type =
+                physical_type(mapping, expression.type_id);
+
+            if expression.kind == 1 {
+                return Builder.integer_literal(
+                    unit,
+                    result_type,
+                    expression.i32_value,
+                    expression_location(expression),
+                );
+            }
+
+            if expression.kind == 2 {
+                let left: Builder.Value = lower_expression(
+                    program,
+                    unit,
+                    expression.left,
+                    mapping,
+                    procedures,
+                );
+                let right: Builder.Value = lower_expression(
+                    program,
+                    unit,
+                    expression.right,
+                    mapping,
+                    procedures,
+                );
+                return Builder.add(
+                    unit,
+                    result_type,
+                    left,
+                    right,
+                    expression_location(expression),
+                );
+            }
+
+            if expression.kind == 3 {
+                let call: Builder.Value = Builder.call(
+                    unit,
+                    result_type,
+                    *procedures.get(expression.callee),
+                    expression_location(expression),
+                );
+                let index: usize = 0;
+                while index < expression.arguments.length() {
+                    let argument: Builder.Value = lower_expression(
+                        program,
+                        unit,
+                        *expression.arguments.get(index),
+                        mapping,
+                        procedures,
+                    );
+                    Builder.append_call_argument(
+                        unit,
+                        call,
+                        argument,
+                    );
+                    index = index + 1;
+                }
+                return call;
+            }
+
+            return std::usize_max();
+        };
+
+        let lower_function = std::func(
+            program: &Surface.Program,
+            unit: &mut Builder.Unit,
+            function_id: Surface.FunctionId,
+            mapping: &TypeMap,
+            procedures: &ProcedureMap,
+        ) -> Builder.Procedure ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let function: &Surface.Function =
+                program.functions.get(function_id);
+            let body_expression: &Surface.Expr =
+                program.expressions.get(function.body);
+            let region: Builder.Region = Builder.begin_region(
+                unit, expression_location(body_expression)
+            );
+            let value: Builder.Value = lower_expression(
+                program,
+                unit,
+                function.body,
+                mapping,
+                procedures,
+            );
+            let return_type: Builder.Type =
+                physical_type(mapping, function.return_type);
+            let ignored: i32 =
+                Builder.append_return(
+                    unit,
+                    region,
+                    value,
+                    return_type,
+                    expression_location(body_expression),
+                );
+            let procedure: Builder.Procedure = *procedures.get(function_id);
+            let status: i32 = Builder.end_procedure(
+                unit,
+                procedure,
+                region,
+                expression_location(body_expression),
+            );
+            return procedure;
+        };
+
+        let program = std::func(
+            source: &Surface.Program,
+        ) -> Result ! {
+            Memory.Allocation.Effect,
+            Memory.Bounds.Effect,
+        } {
+            let unit: Builder.Unit = Builder.new_unit();
+            let i32_type: Builder.Type =
+                Builder.bits_type(&mut unit, 32);
+            let mapping: TypeMap = TypeMap.new();
+            mapping.push(TypeMapEntry {
+                meta: source.types.builtins.i32,
+                physical: i32_type,
+            });
+            let procedures: ProcedureMap = ProcedureMap.new();
+            let declare_index: usize = 0;
+            while declare_index < source.functions.length() {
+                let function: &Surface.Function =
+                    source.functions.get(declare_index);
+                let return_type: Builder.Type =
+                    physical_type(&mapping, function.return_type);
+                procedures.push(Builder.begin_procedure(
+                    &mut unit,
+                    Memory.String.clone(&function.name),
+                    return_type,
+                    expression_location(
+                        source.expressions.get(function.body),
+                    ),
+                ));
+                declare_index = declare_index + 1;
+            }
+            // Keep zero as the bootstrap-safe entry sentinel; function zero
+            // is the first valid entry and is selected by the source model.
+            let entry: Builder.Procedure = 0;
+
+            let index: usize = 0;
+            while index < source.functions.length() {
+                let lowered: Builder.Procedure = lower_function(
+                    source,
+                    &mut unit,
+                    index,
+                    &mapping,
+                    &procedures,
+                );
+                if index == source.entry {
+                    entry = lowered;
+                }
+                index = index + 1;
+            }
+
+            // Function id zero is a valid first entry in the bootstrap ABI;
+            // use the function table to detect the genuinely empty program.
+            if source.functions.length() == 0 {
+                return Result {
+                    artifact: Builder.finish(unit, entry),
+                    entry: entry,
+                    diagnostic: 4401,
+                };
+            }
+            return Result {
+                artifact: Builder.finish(unit, entry),
+                entry: entry,
+                diagnostic: 0,
+            };
+        };
+
+        return std::module {
+            @export let Builder: Module = Builder;
+            @export let Result: std::type = Result;
+            @export let program = program;
+        };
+    };
+};
