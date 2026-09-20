@@ -169,45 +169,71 @@ static char *load_bootstrap(const char *order_path, uint32_t *length_out) {
 #define META_TREE_BASE_OFF 112u
 #define META_TREE_COUNT_OFF 120u
 #define META_TREE_ROOTS_OFF 128u
-#define META_NODE_BYTES 40u
+#define META_NODE_BYTES 48u
+#define META_NODE_WORDS (META_NODE_BYTES / 8u)
 #define META_NIL 0xFFFFFFFFFFFFFFFFull
+
+/* 节点种类。1/2 是建树时给的，3 起是识别 pass 写上去的。 */
+static const char *node_kind_name(uint64_t k) {
+  switch (k) {
+  case 1: return "词";
+  case 2: return "组";
+  default: return NULL;
+  }
+}
 
 /* 印一棵子树。
  *
  * 文本必须按**这份源码自己的**缓冲读，而且读之前核对范围：节点偏移只在它所属
  * 那份源码里有意义。之前这里对所有节点一律用第 0 份源码的缓冲，prelude 的节点
  * 偏移（最大 944）落在 26 字节的用户源码之外，印出来的是堆上邻居 —— 实测印出了
- * 一段 PATH（`C:\Program Files\PowerShell\7;…`）。树没错，是这里读错了缓冲。 */
+ * 一段 PATH（`C:\Program Files\PowerShell\7;…`）。树没错，是这里读错了缓冲。
+ * 下标也要核：坏下标照样乘 48 就是读到暂存区外面。 */
 static void dump_subtree(const unsigned char *base, uint64_t tree_base,
-                         uint64_t index, const char *text, uint64_t text_len) {
-  const unsigned char *node = base + tree_base + index * META_NODE_BYTES;
-  uint64_t w[5], k;
+                         uint64_t count, uint64_t index, const char *text,
+                         uint64_t text_len) {
+  const unsigned char *node;
+  uint64_t w[META_NODE_WORDS], k;
+  const char *kn;
+  if (index >= count) {
+    printf("  #%-3llu <坏下标，>= 节点总数 %llu>\n", (unsigned long long)index,
+           (unsigned long long)count);
+    return;
+  }
+  node = base + tree_base + index * META_NODE_BYTES;
   memcpy(w, node, sizeof(w));
+  kn = node_kind_name(w[0]);
   if (w[0] == 2) {
-    printf("  #%-3llu 组   [%4llu..%4llu] 孩子:",
+    printf("  #%-3llu 组   [%4llu..%4llu] ty=%-2llu 孩子:",
            (unsigned long long)index, (unsigned long long)w[1],
-           (unsigned long long)(w[1] + w[2]));
+           (unsigned long long)(w[1] + w[2]), (unsigned long long)w[5]);
     for (k = w[3]; k != META_NIL;) {
-      uint64_t cw[5];
+      uint64_t cw[META_NODE_WORDS];
       printf(" #%llu", (unsigned long long)k);
       memcpy(cw, base + tree_base + k * META_NODE_BYTES, sizeof(cw));
       k = cw[4];
     }
     printf("\n");
     for (k = w[3]; k != META_NIL;) {
-      uint64_t cw[5];
-      dump_subtree(base, tree_base, k, text, text_len);
+      uint64_t cw[META_NODE_WORDS];
+      dump_subtree(base, tree_base, count, k, text, text_len);
       memcpy(cw, base + tree_base + k * META_NODE_BYTES, sizeof(cw));
       k = cw[4];
     }
-  } else if (w[1] + w[2] <= text_len) {
-    printf("  #%-3llu 词   [%4llu..%4llu] \"%.*s\"\n",
-           (unsigned long long)index, (unsigned long long)w[1],
-           (unsigned long long)(w[1] + w[2]), (int)w[2], text + w[1]);
-  } else {
-    printf("  #%-3llu 词   [%4llu..%4llu] <越界，不印>\n",
-           (unsigned long long)index, (unsigned long long)w[1],
+  } else if (w[1] + w[2] > text_len) {
+    printf("  #%-3llu %-4s [%4llu..%4llu] <越界，不印>\n",
+           (unsigned long long)index, kn ? kn : "?", (unsigned long long)w[1],
            (unsigned long long)(w[1] + w[2]));
+  } else if (kn) {
+    printf("  #%-3llu %-4s [%4llu..%4llu] ty=%-2llu \"%.*s\"\n",
+           (unsigned long long)index, kn, (unsigned long long)w[1],
+           (unsigned long long)(w[1] + w[2]), (unsigned long long)w[5],
+           (int)w[2], text + w[1]);
+  } else {
+    printf("  #%-3llu 种类%-3llu [%4llu..%4llu] ty=%-2llu \"%.*s\"\n",
+           (unsigned long long)index, (unsigned long long)w[0],
+           (unsigned long long)w[1], (unsigned long long)(w[1] + w[2]),
+           (unsigned long long)w[5], (int)w[2], text + w[1]);
   }
 }
 
@@ -234,7 +260,7 @@ static void report_tree(LainMetaHost *host) {
     printf("  source %u: %s (%u bytes) root #%llu\n", s, path ? path : "?",
            text_len, (unsigned long long)root);
     if (!text || root == META_NIL || root >= count) continue;
-    dump_subtree(base, tree_base, root, text, text_len);
+    dump_subtree(base, tree_base, count, root, text, text_len);
   }
 }
 

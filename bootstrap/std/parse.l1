@@ -14,13 +14,19 @@
 // 没有第三种。**它不认识 let / struct / enum**——那些是 Meta 的事。正因如此这层
 // 是跟语言无关的。
 //
-// 每个节点摊平成一格，40 字节，五个数：
+// 每个节点摊平成一格，48 字节，六个数：
 //
-//   +0  节点种类（1 = 词，2 = 组）
+//   +0  节点种类（1 = 词，2 = 组；识别 pass 之后往后长，见文件末 meta_recognize）
 //   +8  它在源码里的起点
 //   +16 它的长度
 //   +24 它的第一个孩子（组的才有意义；没有孩子是「无」）
 //   +32 它的下一个兄弟（没有兄弟是「无」）
+//   +40 它的类型（第 3 步「表达式带类型」要挂的地方；现在一律 0）
+//
+// 步长 48 硬编码在 `meta_tree_field` / `meta_tree_set` 两处，改要一起改。
+// 计划里原本写 8 个数（加 `end` / `origin` / `hygiene`），核过之后改成 6 个：
+// `start + len` 已经就是 extent，再加 `end` 是冗余；`origin`/`hygiene` 是「哪份
+// 源码 + 起点 + 长度」三个值，塞进一格会变成半个设计，等真有合成节点的消费者再说。
 //
 // 「第一个孩子 + 下一个兄弟」两句话就能表达任意形状的树，不需要指针——只有一排
 // 格子，正好合上「Meta 手里只有整数、地址、和一块可写内存」这个约束。
@@ -34,9 +40,9 @@
 //   +144  最近一次 meta_parse_seq 的第一个孩子
 //   +152  最近一次 meta_parse_seq的最后一个孩子
 
-// 节点的第 word 个数（0..4）
+// 节点的第 word 个数（0..5）
 // 越界的下标（NONE）直接回 NONE，不去算地址：源码写残了的时候，`next`/`child`
-// 会一路把 NONE 传回来，要是照样乘 40 就是读到暂存区外面去了。
+// 会一路把 NONE 传回来，要是照样乘 48 就是读到暂存区外面去了。
 // 这一条让所有节点访问器对 NONE 都是安全的——形状检查才敢「先问再取」。
 #proc meta_tree_field(%host: #addr, %index: #bits<64>,
                        %word: #bits<64>) -> #bits<64> {
@@ -47,7 +53,7 @@
     %scratch = #call lain_meta_scratch_data(%host)
     %base = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
     %p = #lea(%scratch, %base, 1, 0)
-    %off = #mul[#bits<64>](%index, 40)
+    %off = #mul[#bits<64>](%index, 48)
     %q = #lea(%p, %off, 1, 0)
     %shift = #mul[#bits<64>](%word, 8)
     %cell = #lea(%q, %shift, 1, 0)
@@ -62,7 +68,7 @@
   %scratch = #call lain_meta_scratch_data(%host)
   %base = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
   %p = #lea(%scratch, %base, 1, 0)
-  %off = #mul[#bits<64>](%index, 40)
+  %off = #mul[#bits<64>](%index, 48)
   %q = #lea(%p, %off, 1, 0)
   %shift = #mul[#bits<64>](%word, 8)
   %cell = #lea(%q, %shift, 1, 0)
@@ -99,6 +105,9 @@
     %s2 = #call meta_tree_set(%host, %count, 2, %length)
     %s3 = #call meta_tree_set(%host, %count, 3, 0xFFFFFFFFFFFFFFFF)
     %s4 = #call meta_tree_set(%host, %count, 4, 0xFFFFFFFFFFFFFFFF)
+    // 类型格：一律先清零。「没类型」和「类型是 0 号」必须分得开，所以 0 号类型
+    // 不能是任何真实类型（注册表从 1 开始数）。
+    %s6 = #call meta_tree_set(%host, %count, 5, 0)
     %new = #add[#bits<64>](%count, 1)
     %s5 = #call meta_cell_put(#lea(%scratch, 120, 1, 0), %new)
     #yield %count
@@ -278,8 +287,8 @@
   #return %end
 }
 
-// 节点的字段（0 = 种类，1 = 起点，2 = 长度，3 = 第一个孩子，4 = 下一个兄弟）。
-// 名字写短一点，调用点才看得清。
+// 节点的字段（0 = 种类，1 = 起点，2 = 长度，3 = 第一个孩子，4 = 下一个兄弟，
+// 5 = 类型）。名字写短一点，调用点才看得清。
 #proc meta_node_kind(%host: #addr, %i: #bits<64>) -> #bits<64> {
   %v = #call meta_tree_field(%host, %i, 0)
   #return %v
@@ -303,6 +312,26 @@
 #proc meta_node_next(%host: #addr, %i: #bits<64>) -> #bits<64> {
   %v = #call meta_tree_field(%host, %i, 4)
   #return %v
+}
+
+// 类型格。0 = 还没类型（建树时一律清零）。0 号类型不是任何真实类型，所以
+// 「没类型」和「类型是 0 号」不会混。
+#proc meta_node_type_id(%host: #addr, %i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%host, %i, 5)
+  #return %v
+}
+
+#proc meta_node_set_type_id(%host: #addr, %i: #bits<64>,
+                            %v: #bits<64>) -> #bits<32> {
+  %s = #call meta_tree_set(%host, %i, 5, %v)
+  #return 0
+}
+
+// 识别 pass 写回种类用这个（词/组 → 声明/二元/调用/字段…）。
+#proc meta_node_set_kind(%host: #addr, %i: #bits<64>,
+                         %v: #bits<64>) -> #bits<32> {
+  %s = #call meta_tree_set(%host, %i, 0, %v)
+  #return 0
 }
 
 // 这份源码的根节点。每份源码各有一棵树，根下标按源码下标存。
