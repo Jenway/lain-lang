@@ -400,28 +400,37 @@
                       %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
                       %t_hi: #bits<64>, %lhs_lo: #bits<64>,
                       %lhs_hi: #bits<64>) -> #bits<32> {
-  // 数字打头 → 数值路径；字母打头 → `Rec { ... }` 构造或 `Rec.field(v)` 取字段。
-  %first = #call bs_byte_at(%base, %lhs_lo, %len)
-  %is_num = #call bs_is_digit(%first)
+  // 形状**不问字节，问识别 pass 算好的那一格**。这里曾经看值的头一个字节判数字、
+  // 又看第一个标识符之后的字节判 `{` / `.` / `(` —— 同一套形状规则在好几处各写一
+  // 遍，改一处漏两处。现在只读 form（取值见 `std/recognize.l1`）：
+  //
+  //   4 二元 / 7 常量 → 数值路径
+  //   10 构造         → `Rec { ... }`
+  //   6 字段          → `A.b`
+  //   5 调用          → `f(x)`
+  %form = #call meta_form_at(%host, %base, %lhs_lo)
+  %f_bin = #eq[#bits<64>](%form, 4)
+  %f_const = #eq[#bits<64>](%form, 7)
+  %is_num = #or[#bits<1>](%f_bin, %f_const)
   %status = #if %is_num -> (#bits<32>) {
     %s = #call meta_emit_numeric(%host, %base, %len, %name_lo, %name_hi, %kind,
                                  %width, %t_lo, %t_hi, %lhs_lo, %lhs_hi)
     #yield %s
   } else {
+    // 标识符到哪结束仍然要算：下面的降级点按字节区间工作。那是**位置**，不是形状。
     %rec_hi = #call bs_skip_ident(%base, %lhs_lo, %len)
     %after = #call bs_skip_space(%base, %rec_hi, %len)
-    %b = #call bs_byte_at(%base, %after, %len)
-    %is_brace = #eq[#bits<8>](%b, 123)
-    %is_dot = #eq[#bits<8>](%b, 46)
-    %is_paren = #eq[#bits<8>](%b, 40)
-    %s2 = #if %is_brace -> (#bits<32>) {
+    %f_construct = #eq[#bits<64>](%form, 10)
+    %f_field = #eq[#bits<64>](%form, 6)
+    %f_call = #eq[#bits<64>](%form, 5)
+    %s2 = #if %f_construct -> (#bits<32>) {
       // 构造：这个类型的正文从哪开始，**问符号表**，不回源码里找
       %tb = #call meta_scope_body(%host, %base, %lhs_lo, %rec_hi, 4)
       %r1 = #call meta_lower_construct(%host, %base, %len, %name_lo, %name_hi,
                                        %tb, %after)
       #yield %r1
     } else {
-      %s3 = #if %is_dot -> (#bits<32>) {
+      %s3 = #if %f_field -> (#bits<32>) {
         %dot = #add[#bits<64>](%after, 1)
         %m_lo = #call bs_skip_space(%base, %dot, %len)
         %m_hi = #call bs_skip_ident(%base, %m_lo, %len)
@@ -453,7 +462,7 @@
         }
         #yield %r2
       } else {
-        %s4 = #if %is_paren -> (#bits<32>) {
+        %s4 = #if %f_call -> (#bits<32>) {
           %r4 = #call meta_emit_call(%host, %base, %len, %name_lo, %name_hi,
                                      %kind, %width, %lhs_lo, %rec_hi, %after)
           #yield %r4
