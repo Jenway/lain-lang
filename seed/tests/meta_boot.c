@@ -170,49 +170,71 @@ static char *load_bootstrap(const char *order_path, uint32_t *length_out) {
 #define META_TREE_COUNT_OFF 120u
 #define META_TREE_ROOTS_OFF 128u
 #define META_NODE_BYTES 40u
+#define META_NIL 0xFFFFFFFFFFFFFFFFull
 
-static void report_tree(LainMetaHost *host, const char *source_text) {
+/* 印一棵子树。
+ *
+ * 文本必须按**这份源码自己的**缓冲读，而且读之前核对范围：节点偏移只在它所属
+ * 那份源码里有意义。之前这里对所有节点一律用第 0 份源码的缓冲，prelude 的节点
+ * 偏移（最大 944）落在 26 字节的用户源码之外，印出来的是堆上邻居 —— 实测印出了
+ * 一段 PATH（`C:\Program Files\PowerShell\7;…`）。树没错，是这里读错了缓冲。 */
+static void dump_subtree(const unsigned char *base, uint64_t tree_base,
+                         uint64_t index, const char *text, uint64_t text_len) {
+  const unsigned char *node = base + tree_base + index * META_NODE_BYTES;
+  uint64_t w[5], k;
+  memcpy(w, node, sizeof(w));
+  if (w[0] == 2) {
+    printf("  #%-3llu 组   [%4llu..%4llu] 孩子:",
+           (unsigned long long)index, (unsigned long long)w[1],
+           (unsigned long long)(w[1] + w[2]));
+    for (k = w[3]; k != META_NIL;) {
+      uint64_t cw[5];
+      printf(" #%llu", (unsigned long long)k);
+      memcpy(cw, base + tree_base + k * META_NODE_BYTES, sizeof(cw));
+      k = cw[4];
+    }
+    printf("\n");
+    for (k = w[3]; k != META_NIL;) {
+      uint64_t cw[5];
+      dump_subtree(base, tree_base, k, text, text_len);
+      memcpy(cw, base + tree_base + k * META_NODE_BYTES, sizeof(cw));
+      k = cw[4];
+    }
+  } else if (w[1] + w[2] <= text_len) {
+    printf("  #%-3llu 词   [%4llu..%4llu] \"%.*s\"\n",
+           (unsigned long long)index, (unsigned long long)w[1],
+           (unsigned long long)(w[1] + w[2]), (int)w[2], text + w[1]);
+  } else {
+    printf("  #%-3llu 词   [%4llu..%4llu] <越界，不印>\n",
+           (unsigned long long)index, (unsigned long long)w[1],
+           (unsigned long long)(w[1] + w[2]));
+  }
+}
+
+static void report_tree(LainMetaHost *host) {
   uint32_t scratch_size = 0;
   void *scratch = lainmeta_host_scratch(host, &scratch_size);
   const unsigned char *base = (const unsigned char *)scratch;
-  uint64_t tree_base = 0, count = 0, root = 0, roots_base = 0;
-  uint64_t i;
+  uint64_t tree_base = 0, count = 0, roots_base = 0;
+  uint32_t sources, s;
   if (!scratch || scratch_size < META_TREE_ROOTS_OFF + 8u) return;
   memcpy(&tree_base, base + META_TREE_BASE_OFF, 8);
   memcpy(&count, base + META_TREE_COUNT_OFF, 8);
-  /* 每份源码各有一棵树，根下标按源码下标存；这里看第 0 份（被降级的那份）。 */
+  /* 每份源码各有一棵树，根下标按源码下标存在 roots 数组里。 */
   memcpy(&roots_base, base + META_TREE_ROOTS_OFF, 8);
-  memcpy(&root, base + roots_base, 8);
-  printf("tree:      %llu nodes total, source 0 root #%llu\n",
-         (unsigned long long)count, (unsigned long long)root);
-  if (!source_text) return;
-  for (i = 0; i < count; i++) {
-    const unsigned char *node = base + tree_base + i * META_NODE_BYTES;
-    uint64_t w[5];
-    uint64_t start, length, first;
-    memcpy(w, node, sizeof(w));
-    start = w[1];
-    length = w[2];
-    first = w[3];
-    if (w[0] == 2) {
-      /* 组：印出它的孩子链，这样「谁是谁的孩子」一眼能核对 */
-      uint64_t k = first;
-      printf("  #%-3llu 组   [%2llu..%2llu] 孩子:",
-             (unsigned long long)i, (unsigned long long)start,
-             (unsigned long long)(start + length));
-      while (k != 0xFFFFFFFFFFFFFFFFull) {
-        uint64_t cw[5];
-        memcpy(cw, base + tree_base + k * META_NODE_BYTES, sizeof(cw));
-        printf(" #%llu", (unsigned long long)k);
-        k = cw[4];
-      }
-      printf("\n");
-    } else {
-      printf("  #%-3llu 词   [%2llu..%2llu] \"%.*s\"\n",
-             (unsigned long long)i, (unsigned long long)start,
-             (unsigned long long)(start + length), (int)length,
-             source_text + start);
-    }
+  sources = lainmeta_host_source_count(host);
+  printf("tree:      %llu nodes, %u source(s), %u bytes/node\n",
+         (unsigned long long)count, sources, META_NODE_BYTES);
+  for (s = 0; s < sources; s++) {
+    uint64_t root = META_NIL;
+    uint32_t text_len = 0;
+    const char *text = lainmeta_host_source_text(host, s, &text_len);
+    const char *path = lainmeta_host_source_path(host, s);
+    memcpy(&root, base + roots_base + (uint64_t)s * 8u, 8);
+    printf("  source %u: %s (%u bytes) root #%llu\n", s, path ? path : "?",
+           text_len, (unsigned long long)root);
+    if (!text || root == META_NIL || root >= count) continue;
+    dump_subtree(base, tree_base, root, text, text_len);
   }
 }
 
@@ -478,7 +500,7 @@ int main(int argc, char **argv) {
            lainmeta_host_status(host));
     /* 编译期状态先打：跑挂了的时候，最想看的正是「它把源码读成了什么样」。 */
     report_type_registry(host, mode && strcmp(mode, "types") == 0);
-    if (mode && strcmp(mode, "tree") == 0) report_tree(host, source);
+    if (mode && strcmp(mode, "tree") == 0) report_tree(host);
     if (meta_tcb->result.as.bits != 0) {
       char buffer[192];
       snprintf(buffer, sizeof(buffer), "Meta returned status %llu",
