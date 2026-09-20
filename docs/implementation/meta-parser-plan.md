@@ -295,6 +295,11 @@ let main: i32 = f(4);          main() = 5   ALL PASS
   （`2009 #if condition must be #bits<1>`）。`meta_lower_body` 要在 `meta_find_semi`
   **之前**把 `if` 分出去：块的 `;` 在组里面、不是兄弟，`meta_find_semi` 会一路找到
   后面那条语句的 `;`。
+- `else` 也做了（`meta_st_else` = `  } else {\n`，它自己带收掉 `if` 块的那个 `}`）。
+  `meta_lower_body` 要跳过 else 那个块，否则它会被当成一条新语句报 21。
+  另外**有 `else` 就说明两支都以 `return` 收尾**，于是 `saw_ret` 置 1 —— 整条 if/else
+  自己就是一个终结语句，`func f(b: bool) -> i32 { if b { return 1; } else { return 2; } }`
+  不用再补一句 `return`。
 - `p.left` 早就通了（第 3 步就到手）。
 
 **嵌套表达式没做**，而且这里暴露了形状层最容易漏的一类错 —— 见 §2 的「静默丢算子」：
