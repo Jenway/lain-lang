@@ -408,6 +408,11 @@
   //   10 构造         → `Rec { ... }`
   //   6 字段          → `A.b`
   //   5 调用          → `f(x)`
+  //
+  // 后三条要**再加一道**：形状 5/6/10 说的是「这里开始一次调用/字段访问/构造」，
+  // 不是「整个值就是它」。`f(1) + 2` 里 `f` 的形状也是 5。那三条发射器只发构造本身，
+  // 后面跟的算子会被悄悄丢掉 —— `let main: i32 = f(1) + 2;` 曾经发成
+  // `#return #call f(1)`，验证通过，算出来 2 而不是 4。所以先问整段值里有没有算子。
   %form = #call meta_form_at(%host, %base, %lhs_lo)
   %f_bin = #eq[#bits<64>](%form, 4)
   %f_const = #eq[#bits<64>](%form, 7)
@@ -420,9 +425,15 @@
     // 标识符到哪结束仍然要算：下面的降级点按字节区间工作。那是**位置**，不是形状。
     %rec_hi = #call bs_skip_ident(%base, %lhs_lo, %len)
     %after = #call bs_skip_space(%base, %rec_hi, %len)
-    %f_construct = #eq[#bits<64>](%form, 10)
-    %f_field = #eq[#bits<64>](%form, 6)
-    %f_call = #eq[#bits<64>](%form, 5)
+    %hasop = #call meta_value_has_op(%host, %base, %len, %lhs_lo)
+    %single = #eq[#bits<1>](%hasop, 0)
+    %f_ctor0 = #eq[#bits<64>](%form, 10)
+    %f_field0 = #eq[#bits<64>](%form, 6)
+    %f_call0 = #eq[#bits<64>](%form, 5)
+    // 三段值里还带算子 → 三个都是假 → 落到最里面那个 `lain_meta_fail(4)`
+    %f_construct = #and[#bits<1>](%f_ctor0, %single)
+    %f_field = #and[#bits<1>](%f_field0, %single)
+    %f_call = #and[#bits<1>](%f_call0, %single)
     %s2 = #if %f_construct -> (#bits<32>) {
       // 构造：这个类型的正文从哪开始，**问符号表**，不回源码里找
       %tb = #call meta_scope_body(%host, %base, %lhs_lo, %rec_hi, 4)
