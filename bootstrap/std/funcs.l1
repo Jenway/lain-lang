@@ -599,11 +599,26 @@
     // `return g(x);` 上会挂：`g` 的下一个节点是那个组，于是组被当成算子，拿 `(`
     // 去查类型的 op 表 —— 报 6「没这个算子」，跟真实原因毫无关系。
     %form = #call meta_node_kind(%host, %v)
-    %f_call = #eq[#bits<64>](%form, 5)
+    // 形状 5 说的是「这里开始一次调用」，不是「整个值就是这次调用」。`return f(0) + 1;`
+    // 里 `f` 的形状也是 5 —— 那样后面那个 `+ 1` 会被悄悄丢掉（真出过）。所以先问
+    // 整段值里有没有算子。
+    %v_st = #call meta_node_start(%host, %v)
+    %hasop = #call meta_value_has_op(%host, %base, %len, %v_st)
+    %single = #eq[#bits<1>](%hasop, 0)
+    %f_call0 = #eq[#bits<64>](%form, 5)
+    %f_call = #and[#bits<1>](%f_call0, %single)
     %f_bin = #eq[#bits<64>](%form, 4)
     %f_field = #eq[#bits<64>](%form, 6)
     %f_ctor = #eq[#bits<64>](%form, 10)
-    %f_other = #or[#bits<1>](%f_field, %f_ctor)
+    // 「调用/字段/构造」这三种形状在函数体里的降级还没做。单个的和带算子的都报 4：
+    // 带算子的如果掉到常量路径会发成 `#return %f`，被验证器以「未定义的值」拒 ——
+    // 拒是拒了，但理由是假的。
+    %f_c56 = #or[#bits<1>](%f_call0, %f_field)
+    %compound = #or[#bits<1>](%f_c56, %f_ctor)
+    %notsingle = #eq[#bits<1>](%single, 0)
+    %unhandled = #and[#bits<1>](%compound, %notsingle)
+    %f_other0 = #or[#bits<1>](%f_field, %f_ctor)
+    %f_other = #or[#bits<1>](%f_other0, %unhandled)
     %s = #if %f_call -> (#bits<32>) {
       // 值是一次调用。函数体里只有 `return <call>;` 有发射器；`let x = g(1);`
       // 还没有，报 4 而不是发一段错的。
@@ -687,6 +702,60 @@
   #return %status
 }
 
+// `if <条件> { 语句* }`
+//
+// 条件只吃**一个 token**（名字或字面量）：`if b { … }`。它是不是 1 位、有没有定义，
+// 由**验证器**判 —— 条件是多 token 的表达式（`if x < 2`）要先有"算子产生自己的结果
+// 类型"，那个问题记在 plan §4 第 3 条，还没定。所以这里只发 `  #if %<条件> {`，
+// 不去猜条件该补什么（补 `#ne[#bits<W>](…)` 要知道 W，那就得知道条件的类型）。
+//
+// 块里的语句交给 `meta_lower_body`（它要求块以 `return` 收尾）。缩进不递归，块里的
+// 语句还是 2 格 —— LAINIR 不看缩进。
+#proc meta_lower_if(%host: #addr, %base: #addr, %len: #bits<64>,
+                     %c: #bits<64>, %r_t_lo: #bits<64>,
+                     %r_t_hi: #bits<64>) -> #bits<32> {
+  %cond = #call meta_node_next(%host, %c)
+  %nocond = #eq[#bits<64>](%cond, 0xFFFFFFFFFFFFFFFF)
+  %st = #if %nocond -> (#bits<32>) {
+    %f0 = #call lain_meta_fail(%host, 4)
+    #yield 4
+  } else {
+    %block = #call meta_node_next(%host, %cond)
+    %noblock = #eq[#bits<64>](%block, 0xFFFFFFFFFFFFFFFF)
+    %s = #if %noblock -> (#bits<32>) {
+      %f1 = #call lain_meta_fail(%host, 4)
+      #yield 4
+    } else {
+      %bkind = #call meta_node_kind(%host, %block)
+      %isgroup = #eq[#bits<64>](%bkind, 2)
+      %inner = #if %isgroup -> (#bits<32>) {
+        %kw = #data_addr meta_st_if
+        %w1 = #call lain_meta_emit_write(%host, %kw, 6)
+        %cl = #call meta_node_start(%host, %cond)
+        %ch = #add[#bits<64>](%cl, #call meta_node_len(%host, %cond))
+        %w2 = #call meta_emit_operand(%host, %base, %cl, %ch, %len)
+        %ob = #data_addr meta_fn_open
+        %w3 = #call lain_meta_emit_write(%host, %ob, 3)
+        %bst = #call meta_lower_body(%host, %base, %len, %block, %r_t_lo,
+                                     %r_t_hi)
+        %bfail = #ne[#bits<32>](%bst, 0)
+        #if %bfail {
+          #return %bst
+        }
+        %cl2 = #data_addr meta_st_lend
+        %w4 = #call lain_meta_emit_write(%host, %cl2, 4)
+        #yield 0
+      } else {
+        %f2 = #call lain_meta_fail(%host, 4)
+        #yield 4
+      }
+      #yield %inner
+    }
+    #yield %s
+  }
+  #return %st
+}
+
 // 函数体：`{` 语句* `}`。最后一条必须是 `return`。
 #proc meta_lower_body(%host: #addr, %base: #addr, %len: #bits<64>,
                       %body: #bits<64>, %r_t_lo: #bits<64>,
@@ -698,6 +767,21 @@
                     %saw_ret: #bits<1> = 0) -> (#bits<32>) {
     %more = #ne[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
     #if %more {
+      // `if` 先分出去：它的 `;` 语义跟别的语句不一样（`meta_find_semi` 会一路找到
+      // **后面**那条语句的 `;`，因为块里的 `;` 在组里面、不是兄弟）。
+      %ck = #call meta_node_kind(%host, %c)
+      %is_if = #eq[#bits<64>](%ck, 11)
+      #if %is_if {
+        %ist = #call meta_lower_if(%host, %base, %len, %c, %r_t_lo, %r_t_hi)
+        %ibad = #ne[#bits<32>](%ist, 0)
+        #if %ibad {
+          #break stmts(%ist)
+        }
+        %cnd = #call meta_node_next(%host, %c)
+        %blk = #call meta_node_next(%host, %cnd)
+        %next0 = #call meta_node_next(%host, %blk)
+        #continue stmts(%next0, %saw_ret)
+      }
       %semi = #call meta_find_semi(%host, %base, %c)
       %nosemi = #eq[#bits<64>](%semi, 0xFFFFFFFFFFFFFFFF)
       #if %nosemi {

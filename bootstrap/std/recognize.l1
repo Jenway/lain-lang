@@ -23,8 +23,9 @@
 //   8  返回    return
 //   9  算子    这个词是单字节算子符号
 //   10 构造    下一个兄弟是 `{` 组
+//   11 条件    if
 //
-// 优先级：声明 > 返回 > 自己是算子 > 调用 > 构造 > 字段 > 二元 > 常量 > 词。
+// 优先级：声明 > 返回 > if > 自己是算子 > 调用 > 构造 > 字段 > 二元 > 常量 > 词。
 // 「自己是算子」排在调用前面，是因为算子符号后面不可能跟一个组；反过来 `f(x)` 的
 // `f` 不是算子，所以两条不会争。
 
@@ -81,6 +82,8 @@
   %is_enum = #call meta_word_is(%base, %at, %hi, %ke, 4)
   %is_scalar = #call meta_word_is(%base, %at, %hi, %kc, 6)
   %is_ret = #call meta_word_is(%base, %at, %hi, %kr, 6)
+  %ki = #data_addr meta_kw_if
+  %is_if = #call meta_word_is(%base, %at, %hi, %ki, 2)
   %d1 = #or[#bits<1>](%is_let, %is_func)
   %d2 = #or[#bits<1>](%is_struct, %is_enum)
   %d3 = #or[#bits<1>](%d2, %is_scalar)
@@ -112,7 +115,10 @@
     %f2 = #if %is_ret -> (#bits<64>) {
       #yield 8
     } else {
-      %f3 = #if %self_op -> (#bits<64>) {
+      %f2b = #if %is_if -> (#bits<64>) {
+        #yield 11
+      } else {
+        %f3 = #if %self_op -> (#bits<64>) {
         #yield 9
       } else {
         %f4 = #if %callish -> (#bits<64>) {
@@ -143,6 +149,8 @@
         #yield %f4
       }
       #yield %f3
+      }
+      #yield %f2b
     }
     #yield %f2
   }
@@ -191,27 +199,25 @@
   #return %st
 }
 
-// 从 %at 起头的那个叶子的形状。找不到回「无」。
+// 找从 %at 起头的那个叶子节点，回它的**下标**（找不到回「无」）。
 //
-// 这是给**还按字节偏移工作**的降级点用的桥：它们手里只有位置，靠这个把位置换成
-// 预先算好的形状，而不是再去看字节。等降级改成按节点下标走，这座桥就不需要了。
-#proc meta_form_at(%host: #addr, %base: #addr, %at: #bits<64>) -> #bits<64> {
+// 一份源码里每个 token 的起点各不相同，所以兄弟链里第一个命中就是它。组不是叶，
+// 要说进它的孩子里找。
+#proc meta_node_at(%host: #addr, %base: #addr, %at: #bits<64>) -> #bits<64> {
   %root = #call meta_root_of_source(%host, %base)
   %missing = #eq[#bits<64>](%root, 0xFFFFFFFFFFFFFFFF)
   %r = #if %missing -> (#bits<64>) {
     #yield 0xFFFFFFFFFFFFFFFF
   } else {
     %kid = #call meta_node_child(%host, %root)
-    %f = #call meta_form_find(%host, %kid, %at)
+    %f = #call meta_node_find_at(%host, %kid, %at)
     #yield %f
   }
   #return %r
 }
 
-// 在兄弟链里找从 %at 起头的叶子。组不是叶，要说进它的孩子里找。
-// 一份源码里每个 token 的起点各不相同，所以第一个命中就是它。
-#proc meta_form_find(%host: #addr, %first: #bits<64>,
-                      %at: #bits<64>) -> #bits<64> {
+#proc meta_node_find_at(%host: #addr, %first: #bits<64>,
+                        %at: #bits<64>) -> #bits<64> {
   %found = #loop s(%c: #bits<64> = %first) -> (#bits<64>) {
     %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
     #if %done {
@@ -221,13 +227,13 @@
     %is_group = #eq[#bits<64>](%k, 2)
     %hit = #if %is_group -> (#bits<64>) {
       %kid = #call meta_node_child(%host, %c)
-      %r = #call meta_form_find(%host, %kid, %at)
+      %r = #call meta_node_find_at(%host, %kid, %at)
       #yield %r
     } else {
       %st = #call meta_node_start(%host, %c)
       %same = #eq[#bits<64>](%st, %at)
       %me = #if %same -> (#bits<64>) {
-        #yield %k
+        #yield %c
       } else {
         #yield 0xFFFFFFFFFFFFFFFF
       }
@@ -241,4 +247,48 @@
     #break s(%hit)
   }
   #return %found
+}
+
+// 从 %at 起头的那个叶子的形状。找不到回「无」。
+//
+// 这是给**还按字节偏移工作**的降级点用的桥：它们手里只有位置，靠这个把位置换成
+// 预先算好的形状，而不是再去看字节。等降级改成按节点下标走，这座桥就不需要了。
+#proc meta_form_at(%host: #addr, %base: #addr, %at: #bits<64>) -> #bits<64> {
+  %i = #call meta_node_at(%host, %base, %at)
+  %v = #call meta_node_kind(%host, %i)
+  #return %v
+}
+
+// 从 %at 起头的那**整个值**里有没有算子符号（形状 9）？走到 `;` 为止。
+//
+// 为什么必须有这个：形状 5/6/10 说的是「这里开始一次调用 / 字段访问 / 构造」，
+// **不是**「整个值就是它」。`f(1) + 2` 里 `f` 的形状也是 5，但值是一条链。调用 /
+// 字段 / 构造那三条发射器只发那个构造本身，后面剩下的会被**悄悄丢掉** ——
+// 真出过：`let main: i32 = f(1) + 2;` 发成 `#return #call f(1)`，验证通过，
+// 算出来 2 而不是 4。所以走那三条之前先问这个，有算子就报错，不发。
+//
+// `;` 是单个词、字节 59。组里面的 `;` 不是兄弟，所以走不到。
+#proc meta_value_has_op(%host: #addr, %base: #addr, %len: #bits<64>,
+                         %at: #bits<64>) -> #bits<1> {
+  %first = #call meta_node_at(%host, %base, %at)
+  %r = #loop s(%c: #bits<64> = %first) -> (#bits<1>) {
+    %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+    #if %done {
+      #break s(0)
+    }
+    %k = #call meta_node_kind(%host, %c)
+    %is_op = #eq[#bits<64>](%k, 9)
+    #if %is_op {
+      #break s(1)
+    }
+    %st = #call meta_node_start(%host, %c)
+    %b = #call bs_byte_at(%base, %st, %len)
+    %is_semi = #eq[#bits<8>](%b, 59)
+    #if %is_semi {
+      #break s(0)
+    }
+    %nx = #call meta_node_next(%host, %c)
+    #continue s(%nx)
+  }
+  #return %r
 }
