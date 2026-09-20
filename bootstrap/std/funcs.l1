@@ -206,6 +206,69 @@
   #return 0
 }
 
+// `  #return #call <callee>(<实参>…)\n`
+//
+// 实参从那个组的**孩子链**上取，不是照抄字节：照抄的话 `return g(x);` 会发成
+// `#call g(x)`，名字少了 `%`，被验证器拒（未定义的值）。每个实参走
+// `meta_emit_operand` —— 数字照发、名字加 `%`。
+//
+// 只吃「一个 token 一个实参」：孩子里出现组（嵌套括号）或者算子符号就报 4。
+// 实参位置的嵌套表达式和算子还没做，**报出来比发一段错的强** —— 静默发错正是这个
+// 仓库明文禁止的失败方式。
+//
+// `%args` 是实参那个组节点的下标；它的跨度含两端括号，所以只走孩子、不碰字节边界。
+#proc meta_emit_ret_call(%host: #addr, %base: #addr, %len: #bits<64>,
+                          %callee_lo: #bits<64>, %callee_hi: #bits<64>,
+                          %args: #bits<64>) -> #bits<32> {
+  %kw = #data_addr meta_st_retcall
+  %w1 = #call lain_meta_emit_write(%host, %kw, 16)
+  %c_at = #lea(%base, %callee_lo, 1, 0)
+  %c_len = #sub[#bits<64>](%callee_hi, %callee_lo)
+  %w2 = #call lain_meta_emit_write(%host, %c_at, %c_len)
+  %lp = #data_addr meta_fn_lparen
+  %w3 = #call lain_meta_emit_write(%host, %lp, 1)
+
+  %first = #call meta_node_child(%host, %args)
+  %st = #loop a(%c: #bits<64> = %first, %n: #bits<64> = 0) -> (#bits<32>) {
+    %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+    #if %done {
+      #break a(0)
+    }
+    %at = #call meta_node_start(%host, %c)
+    %al = #call meta_node_len(%host, %c)
+    %b = #call bs_byte_at(%base, %at, %len)
+    %is_comma = #eq[#bits<8>](%b, 44)
+    #if %is_comma {
+      %nx0 = #call meta_node_next(%host, %c)
+      #continue a(%nx0, %n)
+    }
+    %k = #call meta_node_kind(%host, %c)
+    %is_group = #eq[#bits<64>](%k, 2)
+    %is_op = #eq[#bits<64>](%k, 9)
+    %bad = #or[#bits<1>](%is_group, %is_op)
+    #if %bad {
+      %f = #call lain_meta_fail(%host, 4)
+      #return 4
+    }
+    // 不是第一个实参就先写 `, `
+    %notfirst = #ne[#bits<64>](%n, 0)
+    #if %notfirst {
+      %sep = #data_addr meta_o4
+      %w4 = #call lain_meta_emit_write(%host, %sep, 2)
+    }
+    %ahi = #add[#bits<64>](%at, %al)
+    %w5 = #call meta_emit_operand(%host, %base, %at, %ahi, %len)
+    %n2 = #add[#bits<64>](%n, 1)
+    %nx = #call meta_node_next(%host, %c)
+    #continue a(%nx, %n2)
+  }
+  %rp = #data_addr meta_rparen
+  %w6 = #call lain_meta_emit_write(%host, %rp, 1)
+  %nl = #data_addr meta_st_nl
+  %w7 = #call lain_meta_emit_write(%host, %nl, 1)
+  #return %st
+}
+
 // --- for 循环 ---------------------------------------------------------------
 //
 //   let total: i32 = for i in 0..n acc = 0 {
@@ -532,8 +595,38 @@
     %kind = #and[#bits<64>](%info, 255)
     %width = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
     %v2 = #call meta_node_next(%host, %v)
-    %is_bin = #ne[#bits<64>](%v2, %semi)
-    %s = #if %is_bin -> (#bits<32>) {
+    // 形状读识别 pass 算好的那一格，不再用「下一个节点是不是 `;`」猜。猜法在
+    // `return g(x);` 上会挂：`g` 的下一个节点是那个组，于是组被当成算子，拿 `(`
+    // 去查类型的 op 表 —— 报 6「没这个算子」，跟真实原因毫无关系。
+    %form = #call meta_node_kind(%host, %v)
+    %f_call = #eq[#bits<64>](%form, 5)
+    %f_bin = #eq[#bits<64>](%form, 4)
+    %f_field = #eq[#bits<64>](%form, 6)
+    %f_ctor = #eq[#bits<64>](%form, 10)
+    %f_other = #or[#bits<1>](%f_field, %f_ctor)
+    %s = #if %f_call -> (#bits<32>) {
+      // 值是一次调用。函数体里只有 `return <call>;` 有发射器；`let x = g(1);`
+      // 还没有，报 4 而不是发一段错的。
+      %notret = #eq[#bits<1>](%is_ret, 0)
+      %s_call = #if %notret -> (#bits<32>) {
+        %f1 = #call lain_meta_fail(%host, 4)
+        #yield 4
+      } else {
+        %c_lo = #call meta_node_start(%host, %v)
+        %c_ln = #call meta_node_len(%host, %v)
+        %c_hi = #add[#bits<64>](%c_lo, %c_ln)
+        %grp = #call meta_node_next(%host, %v)
+        %rc = #call meta_emit_ret_call(%host, %base, %len, %c_lo, %c_hi, %grp)
+        #yield %rc
+      }
+      #yield %s_call
+    } else {
+      %s_shape = #if %f_other -> (#bits<32>) {
+        // 字段访问 / 构造当值用：形状认出来了，函数体里的降级还没做
+        %f2 = #call lain_meta_fail(%host, 4)
+        #yield 4
+      } else {
+        %s_inner = #if %f_bin -> (#bits<32>) {
       // `值 算子 值`
       %op_lo = #call meta_node_start(%host, %v2)
       %rhs = #call meta_node_next(%host, %v2)
@@ -583,7 +676,11 @@
         }
         #yield %c
       }
-      #yield %t
+          #yield %t
+        }
+        #yield %s_inner
+      }
+      #yield %s_shape
     }
     #yield %s
   }
