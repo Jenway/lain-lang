@@ -985,11 +985,108 @@
   #return %st
 }
 
+// `%node` 这个词是不是**当前函数**的参数？是就回它**类型名**的起点（终点写进暂存区
+// `+0` —— 那儿空着），不是回「无」。
+//
+// 「当前函数」靠 `+504`（`meta_lower_func` 写进去的参数组节点）。不建表：现走参数组的
+// 孩子，找「名字 `:` 类型」这种形状，名字对上才算。**必须核对后面跟的是 `:`** ——
+// 不然参数名碰巧和某个类型名同名时会认错。
+#proc meta_word_type_name(%host: #addr, %base: #addr, %len: #bits<64>,
+                           %node: #bits<64>) -> #bits<64> {
+  %k = #call meta_node_kind(%host, %node)
+  // 「是一个词」= 不是组（2）、也不是「无」。**不能写 `k == 1`** —— 识别 pass 会把
+  // 词的种类改成 3..11；`x < 2` 里的 `x` 就是 4（二元），写死 1 的话参数查不到。
+  // 数字和算子符号也会走到这儿，但它们的文本不可能跟参数名对上。
+  %is_group = #eq[#bits<64>](%k, 2)
+  %is_none = #eq[#bits<64>](%k, 0xFFFFFFFFFFFFFFFF)
+  %not_group = #eq[#bits<1>](%is_group, 0)
+  %not_none = #eq[#bits<1>](%is_none, 0)
+  %is_word = #and[#bits<1>](%not_group, %not_none)
+  %r = #if %is_word -> (#bits<64>) {
+    %sc = #call lain_meta_scratch_data(%host)
+    %pn = #call meta_cell_get(#lea(%sc, 504, 1, 0))
+    %gone = #eq[#bits<64>](%pn, 0xFFFFFFFFFFFFFFFF)
+    %hit = #if %gone -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %n_at = #call meta_node_start(%host, %node)
+      %n_hi = #add[#bits<64>](%n_at, #call meta_node_len(%host, %node))
+      %first = #call meta_node_child(%host, %pn)
+      %f = #call meta_param_scan(%host, %base, %len, %first, %n_at, %n_hi)
+      #yield %f
+    }
+    #yield %hit
+  } else {
+    #yield 0xFFFFFFFFFFFFFFFF
+  }
+  #return %r
+}
+
+// 在参数组的孩子链里找名字是 `[n_at, n_hi)` 的那个参数，回它类型名的起点（终点写
+// `+0`）。找不到回「无」。
+#proc meta_param_scan(%host: #addr, %base: #addr, %len: #bits<64>,
+                       %first: #bits<64>, %n_at: #bits<64>,
+                       %n_hi: #bits<64>) -> #bits<64> {
+  %n_n = #sub[#bits<64>](%n_hi, %n_at)
+  %r = #loop s(%c: #bits<64> = %first) -> (#bits<64>) {
+    %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+    #if %done {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+    %c_at = #call meta_node_start(%host, %c)
+    %c_hi = #add[#bits<64>](%c_at, #call meta_node_len(%host, %c))
+    %c_n = #sub[#bits<64>](%c_hi, %c_at)
+    %same_len = #eq[#bits<64>](%c_n, %n_n)
+    %same = #if %same_len -> (#bits<1>) {
+      %p = #lea(%base, %c_at, 1, 0)
+      %q = #lea(%base, %n_at, 1, 0)
+      %e = #call meta_bytes_equal(%p, %q, %c_n)
+      #yield %e
+    } else {
+      #yield 0
+    }
+    %is_name = #if %same -> (#bits<64>) {
+      // 名字后面必须正好是 `:`
+      %nx = #call meta_node_next(%host, %c)
+      %nx_at = #call meta_node_start(%host, %nx)
+      %b = #call bs_byte_at(%base, %nx_at, %len)
+      %is_colon = #eq[#bits<8>](%b, 58)
+      %t = #if %is_colon -> (#bits<64>) {
+        %tn = #call meta_node_next(%host, %nx)
+        %t_lo = #call meta_node_start(%host, %tn)
+        %t_hi = #add[#bits<64>](%t_lo, #call meta_node_len(%host, %tn))
+        %sc = #call lain_meta_scratch_data(%host)
+        %s = #call meta_cell_put(#lea(%sc, 0, 1, 0), %t_hi)
+        #yield %t_lo
+      } else {
+        #yield 0xFFFFFFFFFFFFFFFF
+      }
+      #yield %t
+    } else {
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    %miss = #eq[#bits<64>](%is_name, 0xFFFFFFFFFFFFFFFF)
+    #if %miss {
+      %nx2 = #call meta_node_next(%host, %c)
+      #continue s(%nx2)
+    }
+    #break s(%is_name)
+  }
+  #return %r
+}
+
 // `func NAME(p: T, ...) -> T { 语句* }`
 #proc meta_lower_func(%host: #addr, %base: #addr, %len: #bits<64>,
                       %node: #bits<64>) -> #bits<32> {
   %name_node = #call meta_node_next(%host, %node)
   %params = #call meta_node_next(%host, %name_node)
+  // 当前函数的参数组节点记到暂存区 `+504`。**只用一个格子，不建表** —— 函数不能嵌套
+  // 定义，所以「当前是哪个函数」一个值就够；要查某个名字的类型时现走参数组。
+  // 为什么需要它：算子的操作数宽度该看**操作数自己**的类型，不是看绑定/返回的类型。
+  // `func f(x: i32) -> bool { return x < 2; }` 里 `<` 的两个操作数是 i32，而 bool 的
+  // op 表是空的 —— 拿绑定的类型去查表查不到 `<`。
+  %scp = #call lain_meta_scratch_data(%host)
+  %sp = #call meta_cell_put(#lea(%scp, 504, 1, 0), %params)
   %arrow = #call meta_node_next(%host, %params)
   %ret_node = #call meta_node_next(%host, %arrow)
   %body = #call meta_node_next(%host, %ret_node)
@@ -1076,6 +1173,10 @@
 
     // 语句序列
     %bst = #call meta_lower_body(%host, %base, %len, %body, %r_lo, %r_hi)
+    // 出了这个函数就把「当前参数表」抹掉。不清的话顶层降级时 `+504` 还留着**上一个**
+    // 函数的参数 —— 顶层出现同名时会被误当成参数，按错的类型/宽度发指令。
+    %sclr = #call lain_meta_scratch_data(%host)
+    %scl = #call meta_cell_put(#lea(%sclr, 504, 1, 0), 0xFFFFFFFFFFFFFFFF)
     %bfail = #ne[#bits<32>](%bst, 0)
     #if %bfail {
       #return %bst

@@ -932,14 +932,11 @@
       %f2 = #call lain_meta_fail(%host, 3)
       #break e(3)
     }
-    %sym = #lea(%base, %bat, 1, 0)
-    %phys = #call meta_op_resolve(%host, %base, %len, %t_lo, %t_hi, %sym, 1)
-    %miss = #eq[#bits<64>](%phys, 0xFFFFFFFFFFFFFFFF)
-    #if %miss {
-      %f3 = #call lain_meta_fail(%host, 6)
-      #break e(6)
-    }
-    // 右操作数也先变成可引用的东西（组/调用会先发指令）
+    // **顺序要紧**：右操作数先降级。它可能是括号，会递归，递归里又会
+    // `meta_op_resolve` 一次；而 `meta_op_resolve` 把物理算子名放在 `+24`/`+32`，
+    // `meta_emit_op_mid` 稍后才读。先查算子再降级的话，名字会被递归那一次覆盖。
+    // 真出过：`let main: i32 = 12 / (2 + 1);` 发成 `%r2 = #add[#bits<32>](12, %r1)`
+    // （该是 `#sdiv`），验证通过，算出来 15 而不是 4。
     %rst = #call meta_operand_emit(%host, %base, %len, %kind, %width, %t_lo,
                                    %t_hi, %rn)
     %rbad = #ne[#bits<32>](%rst, 0)
@@ -950,6 +947,78 @@
     %rref = #call meta_cell_get(#lea(%sc3, 168, 1, 0))
     %rn_lo2 = #call meta_cell_get(#lea(%sc3, 176, 1, 0))
     %rn_hi2 = #call meta_cell_get(#lea(%sc3, 184, 1, 0))
+    // 操作数**自己**的类型优先：参数有类型。字面量没有类型，就退回传进来的
+    // （绑定 / 返回的）类型 —— 这也是 plan §4 第 3 条那个没定的问题：`1 < 2` 的两个
+    // 操作数是裸字面量，没人告诉编译器它们是 i32。
+    %acc_tmp = #ne[#bits<64>](%acc, 0xFFFFFFFFFFFFFFFF)
+    %l_tlo = #if %acc_tmp -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %ln = #call meta_node_at(%host, %base, %alo)
+      %lt = #call meta_word_type_name(%host, %base, %len, %ln)
+      #yield %lt
+    }
+    %scp = #call lain_meta_scratch_data(%host)
+    %l_thi = #call meta_cell_get(#lea(%scp, 0, 1, 0))
+    %l_miss = #eq[#bits<64>](%l_tlo, 0xFFFFFFFFFFFFFFFF)
+    %r_tlo = #if %l_miss -> (#bits<64>) {
+      %rt = #call meta_word_type_name(%host, %base, %len, %rn)
+      #yield %rt
+    } else {
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    %r_thi = #call meta_cell_get(#lea(%scp, 0, 1, 0))
+    %r_miss = #eq[#bits<64>](%r_tlo, 0xFFFFFFFFFFFFFFFF)
+    %l_hit = #eq[#bits<1>](%l_miss, 0)
+    %r_hit = #eq[#bits<1>](%r_miss, 0)
+    %any_hit = #or[#bits<1>](%l_hit, %r_hit)
+    %tlo2 = #if %l_hit -> (#bits<64>) {
+      #yield %l_tlo
+    } else {
+      %x5a = #if %r_hit -> (#bits<64>) {
+        #yield %r_tlo
+      } else {
+        #yield %t_lo
+      }
+      #yield %x5a
+    }
+    %thi2 = #if %l_hit -> (#bits<64>) {
+      #yield %l_thi
+    } else {
+      %x5b = #if %r_hit -> (#bits<64>) {
+        #yield %r_thi
+      } else {
+        #yield %t_hi
+      }
+      #yield %x5b
+    }
+    // 指令那一格写的是**操作数**的宽度：`x < 2` 里两个操作数是 i32，所以发
+    // `#slt[#bits<32>]`；结果天生 1 位，由验证器跟返回类型对。
+    %kind2 = #if %any_hit -> (#bits<64>) {
+      %tid2 = #call meta_type_resolve(%host, %base, %len, %tlo2, %thi2)
+      %info2 = #call meta_tid_repr(%host, %tid2)
+      %kk = #and[#bits<64>](%info2, 255)
+      #yield %kk
+    } else {
+      #yield %kind
+    }
+    %width2 = #if %any_hit -> (#bits<64>) {
+      %tid3 = #call meta_type_resolve(%host, %base, %len, %tlo2, %thi2)
+      %info3 = #call meta_tid_repr(%host, %tid3)
+      %ww = #and[#bits<64>](#lshr[#bits<64>](%info3, 8), 255)
+      #yield %ww
+    } else {
+      #yield %width
+    }
+    // 现在才查物理算子。从这往后到这条指令发完，**不能再有任何递归调用** ——
+    // 否则 `+24`/`+32` 里的名字会被换掉。
+    %sym = #lea(%base, %bat, 1, 0)
+    %phys = #call meta_op_resolve(%host, %base, %len, %tlo2, %thi2, %sym, 1)
+    %miss = #eq[#bits<64>](%phys, 0xFFFFFFFFFFFFFFFF)
+    #if %miss {
+      %f3 = #call lain_meta_fail(%host, 6)
+      #break e(6)
+    }
     // `  %r<n> = #<物理>[<repr>](<左>, <右>)\n`
     %tn = #call meta_next_temp(%host)
     %ind = #data_addr meta_st_ind
@@ -957,7 +1026,7 @@
     %x2 = #call meta_emit_temp_name(%host, %tn)
     %eqop = #data_addr meta_st_eqop
     %x3 = #call lain_meta_emit_write(%host, %eqop, 3)
-    %x4 = #call meta_emit_op_mid(%host, %kind, %width)
+    %x4 = #call meta_emit_op_mid(%host, %kind2, %width2)
     %x5 = #call meta_emit_ref2(%host, %base, %len, %acc, %alo, %ahi)
     %comma = #data_addr meta_o4
     %x6 = #call lain_meta_emit_write(%host, %comma, 2)
