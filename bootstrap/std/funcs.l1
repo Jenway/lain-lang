@@ -206,28 +206,19 @@
   #return 0
 }
 
-// `  #return #call <callee>(<实参>…)\n`
+// 发一组实参：`<a>, <b>, …`（**不带括号**，括号由调用方写）。
 //
 // 实参从那个组的**孩子链**上取，不是照抄字节：照抄的话 `return g(x);` 会发成
 // `#call g(x)`，名字少了 `%`，被验证器拒（未定义的值）。每个实参走
 // `meta_emit_operand` —— 数字照发、名字加 `%`。
 //
 // 只吃「一个 token 一个实参」：孩子里出现组（嵌套括号）或者算子符号就报 4。
-// 实参位置的嵌套表达式和算子还没做，**报出来比发一段错的强** —— 静默发错正是这个
-// 仓库明文禁止的失败方式。
+// 实参位置的嵌套表达式还没做，**报出来比发一段错的强** —— 静默发错正是这个仓库明文
+// 禁止的失败方式。
 //
 // `%args` 是实参那个组节点的下标；它的跨度含两端括号，所以只走孩子、不碰字节边界。
-#proc meta_emit_ret_call(%host: #addr, %base: #addr, %len: #bits<64>,
-                          %callee_lo: #bits<64>, %callee_hi: #bits<64>,
-                          %args: #bits<64>) -> #bits<32> {
-  %kw = #data_addr meta_st_retcall
-  %w1 = #call lain_meta_emit_write(%host, %kw, 16)
-  %c_at = #lea(%base, %callee_lo, 1, 0)
-  %c_len = #sub[#bits<64>](%callee_hi, %callee_lo)
-  %w2 = #call lain_meta_emit_write(%host, %c_at, %c_len)
-  %lp = #data_addr meta_fn_lparen
-  %w3 = #call lain_meta_emit_write(%host, %lp, 1)
-
+#proc meta_emit_args(%host: #addr, %base: #addr, %len: #bits<64>,
+                      %args: #bits<64>) -> #bits<32> {
   %first = #call meta_node_child(%host, %args)
   %st = #loop a(%c: #bits<64> = %first, %n: #bits<64> = 0) -> (#bits<32>) {
     %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
@@ -248,7 +239,7 @@
     %bad = #or[#bits<1>](%is_group, %is_op)
     #if %bad {
       %f = #call lain_meta_fail(%host, 4)
-      #return 4
+      #break a(4)
     }
     // 不是第一个实参就先写 `, `
     %notfirst = #ne[#bits<64>](%n, 0)
@@ -262,11 +253,30 @@
     %nx = #call meta_node_next(%host, %c)
     #continue a(%nx, %n2)
   }
+  #return %st
+}
+
+// `  #return #call <callee>(<实参>…)\n`
+#proc meta_emit_ret_call(%host: #addr, %base: #addr, %len: #bits<64>,
+                          %callee_lo: #bits<64>, %callee_hi: #bits<64>,
+                          %args: #bits<64>) -> #bits<32> {
+  %kw = #data_addr meta_st_retcall
+  %w1 = #call lain_meta_emit_write(%host, %kw, 16)
+  %c_at = #lea(%base, %callee_lo, 1, 0)
+  %c_len = #sub[#bits<64>](%callee_hi, %callee_lo)
+  %w2 = #call lain_meta_emit_write(%host, %c_at, %c_len)
+  %lp = #data_addr meta_fn_lparen
+  %w3 = #call lain_meta_emit_write(%host, %lp, 1)
+  %ast = #call meta_emit_args(%host, %base, %len, %args)
+  %abad = #ne[#bits<32>](%ast, 0)
+  #if %abad {
+    #return %ast
+  }
   %rp = #data_addr meta_rparen
   %w6 = #call lain_meta_emit_write(%host, %rp, 1)
   %nl = #data_addr meta_st_nl
   %w7 = #call lain_meta_emit_write(%host, %nl, 1)
-  #return %st
+  #return 0
 }
 
 // --- for 循环 ---------------------------------------------------------------
