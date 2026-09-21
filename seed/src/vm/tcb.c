@@ -87,7 +87,7 @@ void lainvm_tcb_free(LainVmTcb *tcb) {
    * 的是别人的地址，free 直接堆损坏（0xC0000374，实测 R03）。 */
   if (!lainvm_space_handle_none(tcb->stack_window)) {
     LainVmSpace *window_space = (LainVmSpace *)(uintptr_t)tcb->stack_window.space;
-    lainvm_space_remove(window_space, tcb->stack_window);
+    lainvm_space_unmap_external(window_space, tcb->stack_window);
     tcb->stack_window = lainvm_space_no_handle();
     tcb->stack_window_size = 0;
   }
@@ -195,7 +195,7 @@ int lainvm_tcb_start(LainVmTcb *tcb, const char *entry, const L1Value *args,
   /* 重启时活窗口必须归零：上一次激活留下的授权要是跟着新激活一起活着，
    * 授权范围就比水位大，旧地址还能访问。 */
   if (!lainvm_space_handle_none(tcb->stack_window)) {
-    lainvm_space_remove((LainVmSpace *)(uintptr_t)tcb->stack_window.space,
+    lainvm_space_unmap_external((LainVmSpace *)(uintptr_t)tcb->stack_window.space,
                         tcb->stack_window);
     tcb->stack_window = lainvm_space_no_handle();
   }
