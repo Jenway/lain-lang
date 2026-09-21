@@ -1,13 +1,17 @@
+> 历史记录。原路径：`docs/lain-roadmap.md`。归档日期：2026-09-21。
+> 本文保留整理前的内容；其中的状态、命令、语法和结论不作为现行依据。
+> 当前文档从 [文档索引](../../../README.md) 阅读。
+
 # Lain 编译器执行路线图
 
 整理与核验日期：2026-09-13。本文只保留未完成工作、执行约束、依赖与验收条件。
-已实现切片及验收记录统一见 [`历史索引`](../history/README.md)。
+已实现切片及验收记录统一见 `历史索引`（原引用：`../history/README.md`）。
 完成一个切片后先追加完成快照，再从本文移除；历史验收不代表当前产物已重新通过。
 阶段编号保持原编码编号，删除完成项后不重编号，便于引用。
 
 **2026-09-20 调整：主线载体与实施顺序已重新指定。** 依据
-[架构评审与路线合并结论](../implementation/architecture-review-2026-09-20.md)
-与 [astra 评审](../implementation/architecture-review-astra-2026-09-20.md)：
+架构评审与路线合并结论（原引用：`../implementation/architecture-review-2026-09-20.md`）
+与 astra 评审（原引用：`../implementation/architecture-review-astra-2026-09-20.md`）：
 
 - **载体是第二代**（`seed/src/**` + `seed/bootstrap/**` + `seed/lain/**`）——它是唯一有运行闭环的
   实现（实测 `python scripts/check_seed_meta_bootstrap.py` → `==== ALL PASS (84/84) ====`）。
@@ -113,8 +117,8 @@ AST/IR/执行机制。编译期计算经过显式 LAINIR `#eval`；其执行 han
 EvalResult、Meta object kind/owner/generation/sidecar 包装协议。
 
 effect 的 TCB/CPS 实现策略由库 handler 在编译期决定。见
-[`../stdlib/effect-system.md`](../stdlib/effect-system.md) 与
-[`../03-meta-system.md`](../03-meta-system.md)。
+`../stdlib/effect-system.md`（原引用：`../stdlib/effect-system.md`） 与
+`../03-meta-system.md`（原引用：`../03-meta-system.md`）。
 当前 `std/effect.lain` 的 `Trap: Effect` 与 `effects.trap()` 是过渡中的库包装；
 实现归属和运行验收要以 LAINVM Trap 能力为准。库可以决定何时请求终止，
 VM 负责记录 Trap、停止 TCB、交付失败；宿主/OS 外部事件经能力边界注入。
@@ -187,7 +191,7 @@ VM 负责记录 Trap、停止 TCB、交付失败；宿主/OS 外部事件经能�
 ## 7. 编码 1：将语言语义归还库 Meta 层，统一生成 LAINIR 与 `#eval`
 
 计划修订：2026-09-13。设计与迁移清单见
-[`../implementation/meta-callable-unification.md`](../implementation/meta-callable-unification.md)。
+`../implementation/meta-callable-unification.md`（原引用：`../implementation/meta-callable-unification.md`）。
 本节跟踪未完成的 1e–1h。基础与路径审计证据见完成归档。
 
 ### 7.0 目标与边界
@@ -299,7 +303,7 @@ operation/handler 的验收必须运行并消费其结果。
 需统一真实环境绑定，不得把普通值读取修复推断为完整类型参数解析完成。
 
 类型表达式末尾节点修复已进入默认 bootstrap 并通过七项运行探针，完成记录见
-[`类型边界归档`](../history/roadmap-lain-type-terminal-2026-09-14.md)。
+`类型边界归档`（原引用：`../history/roadmap-lain-type-terminal-2026-09-14.md`）。
 类型工厂越过 5103 后仍有 5108，工厂普通语义尚未完成。
 
 同一工厂另以 `let Wrapped: std::type = Wrap(i64)` 绑定返回类型时，当前库
@@ -361,7 +365,7 @@ operation/handler 的验收必须运行并消费其结果。
 运行到 42。同作用域重复声明仍报 5113，同模块重复仍报 3013。证据见
 `inputs/constant-scope-results.json` 与 `inputs/function-environment-results.json`。
 该修复已独立进入正式 bootstrap 库切片，默认三项作用域正反例、Meta module
-validation 与 pipeline audit 通过，见[完成归档](../history/roadmap-lain-constant-scopes-2026-09-14.md)。常量读取的旧全单元回退
+validation 与 pipeline audit 通过，见完成归档（原引用：`../history/roadmap-lain-constant-scopes-2026-09-14.md`）。常量读取的旧全单元回退
 不能因重复检查修复而保留为语言可见性规则。
 
 当前普通体/环境隔离原型通过十五项词法绑定运行正例、九项 5108 负例和
@@ -501,7 +505,7 @@ strict 完整闭包已结束，编译失败 5117；四项正式可复用作用�
 `build/local-address-review/probe_lifecycle_failures.py`、`inputs/import-failures/result.json`。
 
 Python 编译入口的物理验证已实现并通过两项专项、既有输入行回归；完成记录见
-[产物验证归档](../history/roadmap-lain-cli-artifact-verification-2026-09-15.md)。
+产物验证归档（原引用：`../history/roadmap-lain-cli-artifact-verification-2026-09-15.md`）。
 该导入反例现报 2004 并移除输出；仍须修复导入成员语义及编译 API 内部的
 验证/诊断，不能以驱动脚本拒绝无效程序取代正确 lowering。
 
@@ -509,7 +513,7 @@ Python 编译入口的物理验证已实现并通过两项专项、既有输入�
 非零时仍设置完成状态 2，并未设置 unit status。隔离修复传播原错误、清除
 失败缓存并恢复未收集状态，调用方收取 unit status；Missing 导入反例现
 报告 5117。Python 驱动进一步在执行失败/诊断输出时保留 stderr 诊断并移除
-输出文件，三项产物专项和输入行回归通过，见[完成归档](../history/roadmap-lain-cli-failure-cleanup-2026-09-15.md)。库修复尚需独立回归与合入；见 `build/local-address-review/build_import_status.py`。
+输出文件，三项产物专项和输入行回归通过，见完成归档（原引用：`../history/roadmap-lain-cli-failure-cleanup-2026-09-15.md`）。库修复尚需独立回归与合入；见 `build/local-address-review/build_import_status.py`。
 
 import-status 隔离版本已通过十六项类型作用域回归和既有输入行正反例。
 同一 unit 内连续两次 materialize 失败模块，均返回 nil、诊断 5117、缓存状态 0；
@@ -831,7 +835,7 @@ backend 输入必须经过求值阶段；残留真实 `#eval` 属编码 1/5/6 �
 3. 明确 activation 地址不得逃逸的验证/执行边界，覆盖嵌套调用、返回地址与错误路径。
 
 生命周期要求已有规范，不把“是否释放”列为新的语言决定。实现前确认具体物理机制和检查
-策略；零初始化尚未规定的部分先讨论。见 [`../01-lain-ir.md`](../01-lain-ir.md) 的内存和地址计算一节。
+策略；零初始化尚未规定的部分先讨论。见 `../01-lain-ir.md`（原引用：`../01-lain-ir.md`） 的内存和地址计算一节。
 
 ### 13.5 发布验收
 

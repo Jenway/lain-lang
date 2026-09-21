@@ -1,3 +1,7 @@
+> 历史记录。原路径：`docs/00-intro.md`。归档日期：2026-09-21。
+> 本文保留整理前的内容；其中的状态、命令、语法和结论不作为现行依据。
+> 当前文档从 [文档索引](../../../README.md) 阅读。
+
 # Lain 概览与架构
 
 > [!QUOTE]
@@ -107,7 +111,7 @@ Meta 可以维护类型、模块、callable、effect 和编译期值等高层对
 
 当前 bootstrap 标准库使用 LAINIR 实现这套阶段 ABI，正式标准库使用 Lain 编写并编译成 LAINIR。两者应遵守同一接口。Meta 的实现语言不改变它在编译流程中的职责。
 
-详细规则见 [`03-meta-system.md`](03-meta-system.md)，当前实现路线见 [`roadmaps/lain-roadmap.md`](roadmaps/lain-roadmap.md)。
+详细规则见 [`03-meta-system.md`](03-meta-system.md)，当前实现路线见 `roadmaps/lain-roadmap.md`（原引用：`roadmaps/lain-roadmap.md`）。
 
 ## 5. 编译期执行边界
 
@@ -200,7 +204,7 @@ Backend 接收经过验证的 LAINIR。它可以直接解释执行，也可以�
 
 Backend 只处理物理类型、控制流、内存和调用。函数构造器、结构体语法、模块、泛型、effect 和宏已经由 Meta 层处理完毕。
 
-当前后端说明见 [`implementation/lain-written-backend.md`](implementation/lain-written-backend.md)。已归档的 LAINIR 工具说明见 [`history/lainir-tools.md`](history/lainir-tools.md)。
+当前后端说明见 `implementation/lain-written-backend.md`（原引用：`implementation/lain-written-backend.md`）。已归档的 LAINIR 工具说明见 `history/lainir-tools.md`（原引用：`history/lainir-tools.md`）。
 
 ## 11. 当前自举结构
 

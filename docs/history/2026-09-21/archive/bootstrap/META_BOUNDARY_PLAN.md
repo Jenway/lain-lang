@@ -1,3 +1,7 @@
+> 历史记录。原路径：`archive/bootstrap/META_BOUNDARY_PLAN.md`。归档日期：2026-09-21。
+> 本文保留整理前的内容；其中的状态、命令、语法和结论不作为现行依据。
+> 当前文档从 [文档索引](../../../../README.md) 阅读。
+
 # bootstrap Meta 边界与迁移计划
 
 状态：计划，2026-09-16。本文只规定 bootstrap 的 Meta 机制如何分层、当前代码如何迁移和怎样验收；它不表示迁移已经完成。seed 的物理执行边界另见 `../seed/REFACTOR_PLAN.md`，总路线与阶段编号以 `../docs/roadmaps/lain-roadmap.md` 为准。

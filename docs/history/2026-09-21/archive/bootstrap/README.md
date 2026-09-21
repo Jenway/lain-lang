@@ -1,3 +1,7 @@
+> 历史记录。原路径：`archive/bootstrap/README.md`。归档日期：2026-09-21。
+> 本文保留整理前的内容；其中的状态、命令、语法和结论不作为现行依据。
+> 当前文档从 [文档索引](../../../../README.md) 阅读。
+
 # Lain-IR bootstrap
 
 This directory contains the small C runtime used to start the Lain-written
@@ -70,4 +74,3 @@ them yet only because its input language is still a v0 subset.
 
 Live consumers that now point at the moved files: `src/lainc/meta.lain:15`,
 `src/lainc/types.lain:13` (both `import("std::meta")`).
-

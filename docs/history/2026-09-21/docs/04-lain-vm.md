@@ -1,3 +1,7 @@
+> 历史记录。原路径：`docs/04-lain-vm.md`。归档日期：2026-09-21。
+> 本文保留整理前的内容；其中的状态、命令、语法和结论不作为现行依据。
+> 当前文档从 [文档索引](../../../README.md) 阅读。
+
 # LAIN-VM：虚拟控制面与执行环境
 
 状态：当前架构设计与 C3 实现。C seed 已通过临时 TCB 执行 `#eval`；Lain VM 的解释器、
@@ -268,7 +272,7 @@ LAIN-VM 的对象在最终 lowering 中可以被消除，但对象之间的权�
 
 ## 11. 实施顺序
 
-实施阶段与验收条件统一记录在 [`roadmaps/lain-roadmap.md`](roadmaps/lain-roadmap.md)。
+实施阶段与验收条件统一记录在 `roadmaps/lain-roadmap.md`（原引用：`roadmaps/lain-roadmap.md`）。
 
 当前边界校准（2026-09-12）：
 

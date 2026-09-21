@@ -1,3 +1,7 @@
+> 历史记录。原路径：`docs/stdlib/effect-system.md`。归档日期：2026-09-21。
+> 本文保留整理前的内容；其中的状态、命令、语法和结论不作为现行依据。
+> 当前文档从 [文档索引](../../../../README.md) 阅读。
+
 # 效果系统、异步与错误处理
 
 本文描述由标准库 Meta 层定义的语言能力。effect 的对象模型、检查、传播和 lowering 规则不属于 compiler core；编译器只提供执行 lowering 结果所需的 LAINIR、阶段调度和 capability 底座。

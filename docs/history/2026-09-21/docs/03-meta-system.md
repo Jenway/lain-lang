@@ -1,3 +1,7 @@
+> 历史记录。原路径：`docs/03-meta-system.md`。归档日期：2026-09-21。
+> 本文保留整理前的内容；其中的状态、命令、语法和结论不作为现行依据。
+> 当前文档从 [文档索引](../../../README.md) 阅读。
+
 # Lain Meta 系统
 
 Meta 是 Lain 的语言定义层。它读取无语义的 RawAst，解释语言规则，完成语法展开和静态语义处理，并生成 LAINIR。
@@ -238,7 +242,7 @@ Meta 通过稳定的 AstApi 操作 opaque AST handle。它不依赖宿主内存�
 
 宏展开生成的 identifier 必须携带正确的 syntax context。普通复制保留已有上下文；宏内部临时名字使用 fresh symbol；有意引用调用方名字时必须通过明确的 capture 操作表达。
 
-AST 操作的实现说明见 [`implementation/ast-operations.md`](implementation/ast-operations.md)，语法树契约见 [`02-lain-ast.md`](02-lain-ast.md)。
+AST 操作的实现说明见 `implementation/ast-operations.md`（原引用：`implementation/ast-operations.md`），语法树契约见 [`02-lain-ast.md`](02-lain-ast.md)。
 
 ## 9. 语言对象
 
@@ -363,7 +367,7 @@ owner
 - `src/lainc` 尚未完成完整自举固定点；
 - ownership/borrow checking 不属于当前必需自举路径。
 
-进度和验收门槛见 [`roadmaps/lain-roadmap.md`](roadmaps/lain-roadmap.md)。
+进度和验收门槛见 `roadmaps/lain-roadmap.md`（原引用：`roadmaps/lain-roadmap.md`）。
 
 ## 15. 边界总结
 
