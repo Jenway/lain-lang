@@ -312,9 +312,9 @@ static bool map_data(Loader *L, const L1Module *module) {
       load_fail(L, 9010, "image: cannot map read-only data");
       return false;
     }
-    if (lainvm_space_add_region(L->image->space, (uintptr_t)L->image->ro_arena,
-                                ro_size, LAINVM_MEM_READ, 0) ==
-        LAINVM_SPACE_NO_REGION) {
+    if (lainvm_space_handle_none(
+            lainvm_space_add(L->image->space, (uintptr_t)L->image->ro_arena,
+                             ro_size, LAINVM_MEM_READ, 0))) {
       load_fail(L, 9011, "image: address space rejected read-only data");
       return false;
     }
@@ -325,9 +325,9 @@ static bool map_data(Loader *L, const L1Module *module) {
       load_fail(L, 9012, "image: cannot map writable data");
       return false;
     }
-    if (lainvm_space_add_region(
+    if (lainvm_space_handle_none(lainvm_space_add(
             L->image->space, (uintptr_t)L->image->rw_arena, rw_size,
-            LAINVM_MEM_READ | LAINVM_MEM_WRITE, 0) == LAINVM_SPACE_NO_REGION) {
+            LAINVM_MEM_READ | LAINVM_MEM_WRITE, 0))) {
       load_fail(L, 9013, "image: address space rejected writable data");
       return false;
     }
@@ -508,10 +508,10 @@ LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
       lainvm_image_free(image);
       return NULL;
     }
-    if (lainvm_space_add_region(image->space, (uintptr_t)image->code_arena,
-                                (uint64_t)bytes,
-                                LAINVM_MEM_READ | LAINVM_MEM_CALL, 0) ==
-        LAINVM_SPACE_NO_REGION) {
+    if (lainvm_space_handle_none(
+            lainvm_space_add(image->space, (uintptr_t)image->code_arena,
+                             (uint64_t)bytes,
+                             LAINVM_MEM_READ | LAINVM_MEM_CALL, 0))) {
       load_fail(&loader, 9017, "image: address space rejected code");
       lainvm_image_free(image);
       return NULL;

@@ -103,9 +103,26 @@ static uint8_t *new_buffer(size_t bytes) {
   return p;
 }
 
-static int32_t add(LainVmSpace *space, uintptr_t base, uint64_t size,
-                   uint32_t rights, uint64_t owner) {
-  return lainvm_space_add_region(space, base, size, rights, owner);
+/* 只关心"登记成没成"的用例用这个：0 = 成功，-1 = 失败。 */
+static int add(LainVmSpace *space, uintptr_t base, uint64_t size,
+               uint32_t rights, uint64_t owner) {
+  return lainvm_space_handle_none(
+             lainvm_space_add(space, base, size, rights, owner))
+             ? -1
+             : 0;
+}
+
+/* 需要句柄的用例（"这个引用还指得到原对象吗"）用这个。 */
+static LainVmRegionHandle add_handle(LainVmSpace *space, uintptr_t base,
+                                     uint64_t size, uint32_t rights,
+                                     uint64_t owner) {
+  return lainvm_space_add(space, base, size, rights, owner);
+}
+
+/* 句柄现在指向哪个 base；无效 / 已撤销 → 0。 */
+static uintptr_t base_of(const LainVmSpace *space, LainVmRegionHandle handle) {
+  const LainVmRegion *region = lainvm_space_slot(space, handle);
+  return region ? region->base : (uintptr_t)0;
 }
 
 /* --- 装载 + 执行的台架 ------------------------------------------------------ */
@@ -327,12 +344,13 @@ static int case_load_outside_region(void) {
   return 0;
 }
 
-/* R01：先登记高地址，再登记低地址（低地址插到前面）—— 旧引用还指得到原对象吗？ */
+/* R01：先登记高地址，再登记低地址（内部索引会把它排到前面）——
+ * 旧引用还指得到原对象吗？句柄化之后必须**指得到**：重排只发生在内部索引上。 */
 static int case_region_insert_identity(void) {
   LainVmSpace space;
   uint8_t *buf = new_buffer(4096);
+  LainVmRegionHandle ref;
   uintptr_t low, high, high_base, seen;
-  int32_t ref_high;
 
   if (!buf) {
     obs_facts("malloc 失败");
@@ -341,23 +359,23 @@ static int case_region_insert_identity(void) {
   low = (uintptr_t)buf;
   high = (uintptr_t)buf + 2048;
   lainvm_space_init(&space);
-  ref_high = add(&space, high, 1024, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 21);
-  if (ref_high < 0) {
+  ref = add_handle(&space, high, 1024, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 21);
+  if (lainvm_space_handle_none(ref)) {
     free(buf);
     obs_facts("登记高地址段失败");
     return 0;
   }
-  high_base = space.regions[ref_high].base;
+  high_base = base_of(&space, ref);
   if (add(&space, low, 1024, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 22) < 0) {
     free(buf);
     obs_facts("登记低地址段失败");
     return 0;
   }
-  seen = space.regions[ref_high].base;
+  seen = base_of(&space, ref);
   free(buf);
   if (seen != high_base) {
-    obs_facts("R01 复现：插入低地址后，引用 %d 从 base=%llu 变成 base=%llu",
-              (int)ref_high, (unsigned long long)high_base,
+    obs_facts("R01 复现：插入低地址后，槽 %u 从 base=%llu 变成 base=%llu",
+              (unsigned)ref.slot, (unsigned long long)high_base,
               (unsigned long long)seen);
     return 0;
   }
@@ -365,45 +383,53 @@ static int case_region_insert_identity(void) {
   return 0;
 }
 
-/* R02：三段，移除第一段，后两段的旧引用还指得到原对象吗？ */
+/* R02：三段，按**句柄**撤销第一段——后两段的句柄还指得到原对象吗？ */
 static int case_region_remove_identity(void) {
   LainVmSpace space;
   uint8_t *buf = new_buffer(4096);
-  int32_t ref_b, ref_c;
-  uintptr_t base_b, seen;
+  LainVmRegionHandle ref_a, ref_b, ref_c;
+  uintptr_t base_b, base_c, seen_b, seen_c;
 
   if (!buf) {
     obs_facts("malloc 失败");
     return 0;
   }
   lainvm_space_init(&space);
-  if (add(&space, (uintptr_t)buf, 1024, LAINVM_MEM_READ, 11) < 0 ||
-      add(&space, (uintptr_t)buf + 1024, 1024, LAINVM_MEM_READ, 12) < 0 ||
-      add(&space, (uintptr_t)buf + 2048, 1024, LAINVM_MEM_READ, 13) < 0) {
+  ref_a = add_handle(&space, (uintptr_t)buf, 1024, LAINVM_MEM_READ, 11);
+  ref_b = add_handle(&space, (uintptr_t)buf + 1024, 1024, LAINVM_MEM_READ, 12);
+  ref_c = add_handle(&space, (uintptr_t)buf + 2048, 1024, LAINVM_MEM_READ, 13);
+  if (lainvm_space_handle_none(ref_a) || lainvm_space_handle_none(ref_b) ||
+      lainvm_space_handle_none(ref_c)) {
     free(buf);
     obs_facts("登记三段失败");
     return 0;
   }
-  ref_b = 1;
-  ref_c = 2;
-  base_b = space.regions[ref_b].base;
-  lainvm_space_release_owner(&space, 11); /* 移除第一段（owner=11） */
-  seen = space.regions[ref_b].base;
-  free(buf);
-  if (seen != base_b) {
-    obs_facts("R02 复现：移除第一段后，引用 %d（base=%llu）现在指向 base=%llu",
-              (int)ref_b, (unsigned long long)base_b, (unsigned long long)seen);
+  base_b = base_of(&space, ref_b);
+  base_c = base_of(&space, ref_c);
+  if (!lainvm_space_remove(&space, ref_a)) {
+    free(buf);
+    obs_facts("按句柄撤销第一段失败");
     return 0;
   }
-  (void)ref_c;
+  seen_b = base_of(&space, ref_b);
+  seen_c = base_of(&space, ref_c);
+  free(buf);
+  if (seen_b != base_b || seen_c != base_c) {
+    obs_facts("R02 复现：撤销第一段后 B 从 %llu 变 %llu、C 从 %llu 变 %llu",
+              (unsigned long long)base_b, (unsigned long long)seen_b,
+              (unsigned long long)base_c, (unsigned long long)seen_c);
+    return 0;
+  }
   obs_value(1);
   return 0;
 }
 
-/* owner=0 是「模块/装载器的」保留值。一次 release_owner(0) 该不该把它们清掉？ */
-static int case_region_owner_zero(void) {
+/* 撤销只认句柄：撤销一段不能影响别的段 —— **owner 相同的也不行**。
+ * （"按 owner 扫表删"这条路已经删掉了：它会一次清掉 owner=0 的装载器段。） */
+static int case_region_remove_precise(void) {
   LainVmSpace space;
   uint8_t *buf = new_buffer(4096);
+  LainVmRegionHandle loader_a, loader_b, tcb_seg;
   uint32_t before, after;
 
   if (!buf) {
@@ -411,23 +437,31 @@ static int case_region_owner_zero(void) {
     return 0;
   }
   lainvm_space_init(&space);
-  if (add(&space, (uintptr_t)buf, 1024, LAINVM_MEM_READ, 0) < 0 ||
-      add(&space, (uintptr_t)buf + 2048, 1024, LAINVM_MEM_READ, 0) < 0 ||
-      add(&space, (uintptr_t)buf + 1024, 512, LAINVM_MEM_READ, 7) < 0) {
+  loader_a = add_handle(&space, (uintptr_t)buf, 1024, LAINVM_MEM_READ, 0);
+  loader_b = add_handle(&space, (uintptr_t)buf + 2048, 1024, LAINVM_MEM_READ, 0);
+  tcb_seg = add_handle(&space, (uintptr_t)buf + 1024, 512, LAINVM_MEM_READ, 7);
+  if (lainvm_space_handle_none(loader_a) ||
+      lainvm_space_handle_none(loader_b) ||
+      lainvm_space_handle_none(tcb_seg)) {
     free(buf);
     obs_facts("登记失败");
     return 0;
   }
-  before = space.region_count;
-  lainvm_space_release_owner(&space, 0);
-  after = space.region_count;
-  free(buf);
-  if (after != before - 1) {
-    obs_facts("owner=0 被当成普通 owner：一次 release_owner(0) 把 %u 段里的 %u 段删了"
-              "（只剩 %u；按契约只该删 owner=7 那一段）",
-              (unsigned)before, (unsigned)(before - after), (unsigned)after);
+  before = space.live_count;
+  (void)lainvm_space_remove(&space, tcb_seg);
+  after = space.live_count;
+  if (after != before - 1 || lainvm_space_slot(&space, loader_a) == NULL ||
+      lainvm_space_slot(&space, loader_b) == NULL ||
+      lainvm_space_slot(&space, tcb_seg) != NULL) {
+    free(buf);
+    obs_facts("精确撤销不对：活段 %u -> %u，装载器段还在=%d/%d，被撤销那段还在=%d",
+              (unsigned)before, (unsigned)after,
+              lainvm_space_slot(&space, loader_a) != NULL,
+              lainvm_space_slot(&space, loader_b) != NULL,
+              lainvm_space_slot(&space, tcb_seg) != NULL);
     return 0;
   }
+  free(buf);
   obs_value(1);
   return 0;
 }
@@ -436,7 +470,9 @@ static int case_region_owner_zero(void) {
 static int case_region_full_64(void) {
   LainVmSpace space;
   uint8_t *buf = new_buffer(64 * 64 + 64);
-  int32_t idx;
+  LainVmRegionHandle first = lainvm_space_no_handle();
+  LainVmRegionHandle last = lainvm_space_no_handle();
+  LainVmRegionHandle extra;
   uint32_t i;
   uintptr_t first_base, last_base;
 
@@ -446,25 +482,28 @@ static int case_region_full_64(void) {
   }
   lainvm_space_init(&space);
   for (i = 0; i < 64; i++) {
-    idx = add(&space, (uintptr_t)buf + i * 64, 64, LAINVM_MEM_READ, 1);
-    if (idx < 0) {
+    LainVmRegionHandle handle =
+        add_handle(&space, (uintptr_t)buf + i * 64, 64, LAINVM_MEM_READ, 1);
+    if (lainvm_space_handle_none(handle)) {
       obs_facts("第 %u 段就登记失败了（应当能到 64）", (unsigned)(i + 1));
       free(buf);
       return 0;
     }
+    if (i == 0) first = handle;
+    if (i == 63) last = handle;
   }
-  first_base = space.regions[0].base;
-  last_base = space.regions[63].base;
-  idx = add(&space, (uintptr_t)buf + 64 * 64, 64, LAINVM_MEM_READ, 1);
-  if (idx >= 0) {
-    obs_facts("第 65 段被接受了（region_count=%u）", (unsigned)space.region_count);
+  first_base = base_of(&space, first);
+  last_base = base_of(&space, last);
+  extra = add_handle(&space, (uintptr_t)buf + 64 * 64, 64, LAINVM_MEM_READ, 1);
+  if (!lainvm_space_handle_none(extra)) {
+    obs_facts("第 65 段被接受了（活段 %u）", (unsigned)space.live_count);
     free(buf);
     return 0;
   }
-  if (space.region_count != 64 || space.regions[0].base != first_base ||
-      space.regions[63].base != last_base) {
-    obs_facts("第 65 段被拒，但前 64 段被改动了（count=%u）",
-              (unsigned)space.region_count);
+  if (space.live_count != 64 || base_of(&space, first) != first_base ||
+      base_of(&space, last) != last_base) {
+    obs_facts("第 65 段被拒，但前 64 段被改动了（活段 %u）",
+              (unsigned)space.live_count);
     free(buf);
     return 0;
   }
@@ -566,25 +605,136 @@ static int case_region_range_tail(void) {
   return 0;
 }
 
+/* --- region：句柄契约本身 ---------------------------------------------------- */
+
+/* 槽被重用之后，旧句柄必须失效（不能"活过来"指到新对象）。 */
+static int case_region_handle_stale(void) {
+  LainVmSpace space;
+  uint8_t *buf = new_buffer(4096);
+  LainVmRegionHandle old_handle, new_handle;
+
+  if (!buf) {
+    obs_facts("malloc 失败");
+    return 0;
+  }
+  lainvm_space_init(&space);
+  old_handle = add_handle(&space, (uintptr_t)buf, 1024, LAINVM_MEM_READ, 1);
+  if (lainvm_space_handle_none(old_handle) ||
+      !lainvm_space_remove(&space, old_handle)) {
+    free(buf);
+    obs_facts("登记/撤销第一段失败");
+    return 0;
+  }
+  new_handle =
+      add_handle(&space, (uintptr_t)buf + 2048, 1024, LAINVM_MEM_READ, 2);
+  free(buf);
+  if (lainvm_space_handle_none(new_handle)) {
+    obs_facts("撤销之后新的登记失败（槽没有被回收）");
+    return 0;
+  }
+  if (lainvm_space_slot(&space, old_handle) != NULL) {
+    obs_facts("旧句柄在槽被重用之后仍然有效（slot=%u gen=%u -> gen=%u）",
+              (unsigned)old_handle.slot, (unsigned)old_handle.generation,
+              (unsigned)space.slots[old_handle.slot].generation);
+    return 0;
+  }
+  if (lainvm_space_slot(&space, new_handle) == NULL) {
+    obs_facts("新句柄无效");
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 跨空间使用句柄必须失败，且对方空间不变。 */
+static int case_region_handle_cross_space(void) {
+  LainVmSpace a, b;
+  uint8_t *buf = new_buffer(4096);
+  LainVmRegionHandle in_a;
+  uint32_t live_b;
+
+  if (!buf) {
+    obs_facts("malloc 失败");
+    return 0;
+  }
+  lainvm_space_init(&a);
+  lainvm_space_init(&b);
+  in_a = add_handle(&a, (uintptr_t)buf, 1024, LAINVM_MEM_READ, 1);
+  if (lainvm_space_handle_none(in_a)) {
+    free(buf);
+    obs_facts("登记失败");
+    return 0;
+  }
+  live_b = b.live_count;
+  if (lainvm_space_slot(&b, in_a) != NULL || lainvm_space_remove(&b, in_a) ||
+      b.live_count != live_b) {
+    free(buf);
+    obs_facts("另一个空间接受了别人的句柄（活段 %u -> %u）", (unsigned)live_b,
+              (unsigned)b.live_count);
+    return 0;
+  }
+  free(buf);
+  obs_value(1);
+  return 0;
+}
+
+/* 重复撤销：第二次必须失败，且表不变。 */
+static int case_region_handle_double_remove(void) {
+  LainVmSpace space;
+  uint8_t *buf = new_buffer(4096);
+  LainVmRegionHandle handle;
+  uint32_t live;
+
+  if (!buf) {
+    obs_facts("malloc 失败");
+    return 0;
+  }
+  lainvm_space_init(&space);
+  handle = add_handle(&space, (uintptr_t)buf, 1024, LAINVM_MEM_READ, 1);
+  if (lainvm_space_handle_none(handle) || !lainvm_space_remove(&space, handle)) {
+    free(buf);
+    obs_facts("登记 / 第一次撤销失败");
+    return 0;
+  }
+  live = space.live_count;
+  if (lainvm_space_remove(&space, handle)) {
+    free(buf);
+    obs_facts("第二次撤销被当成成功");
+    return 0;
+  }
+  if (space.live_count != live) {
+    free(buf);
+    obs_facts("第二次撤销改动了表（活段 %u -> %u）", (unsigned)live,
+              (unsigned)space.live_count);
+    return 0;
+  }
+  free(buf);
+  obs_value(1);
+  return 0;
+}
+
 /* --- stack 组 --------------------------------------------------------------- */
 
-/* R03：TCB 缓存的栈区段引用，在表被插入后还指得到它自己的栈吗？ */
+/* R03：TCB 的栈引用是**句柄**——在它下面插入别的区段之后，它还指得到自己的栈吗？
+ * 而且销毁时 free 的还是不是自己那块？ */
 static int case_stack_lease_identity(void) {
   Rig rig;
-  uintptr_t stack_base, seen, restored;
-  int32_t ref;
+  LainVmRegionHandle ref;
+  uintptr_t stack_base, seen;
   int rc;
 
   if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
-  ref = rig.tcb->stack_region;
-  if (ref < 0) {
+  ref = rig.tcb->stack;
+  if (lainvm_space_handle_none(ref)) {
     rig_free(&rig);
-    obs_facts("TCB 没有栈区段（stack_bytes=4096 却拿到 NO_REGION）");
+    obs_facts("TCB 没有栈区段（stack_bytes=4096 却拿到 no_handle）");
     return 0;
   }
-  stack_base = rig.space.regions[ref].base;
-  /* 在这块栈的**正下方**登记一段合成区段：base 更低 → 有序插入会把它放到前面。
-     只登记、不解引用，所以不碰任何未映射内存。 */
+  stack_base = base_of(&rig.space, ref);
+  /* 在这块栈的**正下方**登记一段合成区段：base 更低 → 内部索引会把它排到前面。
+     只登记、不解引用，所以不碰任何未映射内存。
+     （这里曾经必须"先撤销这次插入再销毁"：那时销毁按缓存的表下标取地址去 free，
+      下标一挪就 free 到别人的地址，直接把进程打成堆损坏 0xC0000374。） */
   rc = add(&rig.space, stack_base - 4096, 4096, LAINVM_MEM_READ, 99);
   if (rc < 0) {
     rig_free(&rig);
@@ -592,24 +742,13 @@ static int case_stack_lease_identity(void) {
               (unsigned long long)stack_base);
     return 0;
   }
-  seen = rig.space.regions[ref].base;
+  seen = base_of(&rig.space, ref);
+  rig_free(&rig); /* 句柄化之后这里应当是安全的：撤销精确，free 的是自己那块 */
   if (seen != stack_base) {
-    /* 复现了。销毁之前必须把这次插入**撤回去**：lainvm_tcb_free 会按那个已经错位
-       的缓存下标取地址去 free（tcb.c:83-85），实测直接把进程打成堆损坏
-       （0xC0000374）。方案 §3.2 要求这类复现「检查出下标已指错对象后安全退出」，
-       所以这里先还原表、再销毁。 */
-    lainvm_space_release_owner(&rig.space, 99);
-    restored = (ref < (int32_t)rig.space.region_count)
-                   ? rig.space.regions[ref].base
-                   : (uintptr_t)0;
-    rig_free(&rig);
-    obs_facts("R03 复现：栈区段引用 %d 从 base=%llu 变成 base=%llu（指到别人）；"
-              "撤销插入后恢复成 base=%llu",
-              (int)ref, (unsigned long long)stack_base, (unsigned long long)seen,
-              (unsigned long long)restored);
+    obs_facts("R03 复现：栈句柄在插入别人之后指到 base=%llu（自己是 %llu）",
+              (unsigned long long)seen, (unsigned long long)stack_base);
     return 0;
   }
-  rig_free(&rig);
   obs_value(1);
   return 0;
 }
@@ -856,7 +995,8 @@ static const Case k_cases[] = {
      case_region_insert_identity},
     {"region_remove_identity", "region", EXP_VALUE, 1, 0,
      case_region_remove_identity},
-    {"region_owner_zero", "region", EXP_VALUE, 1, 0, case_region_owner_zero},
+    {"region_remove_precise", "region", EXP_VALUE, 1, 0,
+     case_region_remove_precise},
     {"region_full_64", "region", EXP_VALUE, 1, 0, case_region_full_64},
     {"region_overlap_reject", "region", EXP_VALUE, 1, 0,
      case_region_overlap_reject},
@@ -865,13 +1005,20 @@ static const Case k_cases[] = {
     {"region_bad_size_reject", "region", EXP_VALUE, 1, 0,
      case_region_bad_size_reject},
     {"region_range_tail", "region", EXP_VALUE, 1, 0, case_region_range_tail},
+    {"region_handle_stale", "region", EXP_VALUE, 1, 0,
+     case_region_handle_stale},
+    {"region_handle_cross_space", "region", EXP_VALUE, 1, 0,
+     case_region_handle_cross_space},
+    {"region_handle_double_remove", "region", EXP_VALUE, 1, 0,
+     case_region_handle_double_remove},
     /* stack */
     {"stack_lease_identity", "stack", EXP_VALUE, 1, 0,
      case_stack_lease_identity},
     {"stack_absent_trap", "stack", EXP_TRAP, 0, 1006, case_stack_absent_trap},
     {"stack_exhaust_watermark", "stack", EXP_TRAP, 0, 1007,
      case_stack_exhaust_watermark},
-    {"stack_count_overflow", "stack", EXP_TRAP, 0, 0, case_stack_count_overflow},
+    {"stack_count_overflow", "stack", EXP_TRAP, 0, 1035,
+     case_stack_count_overflow},
     {"stack_zero_count", "stack", EXP_TRAP, 0, 2024, case_stack_zero_count},
     /* host */
     {"host_past_region", "host", EXP_TRAP, 0, 0, case_host_past_region},

@@ -33,7 +33,7 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
   tcb->state = LAINVM_READY;
   tcb->image = image;
   tcb->vspace = space;
-  tcb->stack_region = LAINVM_SPACE_NO_REGION;
+  tcb->stack = lainvm_space_no_handle();
   tcb->slice_result = LAINVM_SLICE_RUNNABLE;
 
   tcb->frames = (LainVmFrame *)calloc(frame_cap, sizeof(LainVmFrame));
@@ -48,29 +48,19 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
   if (stack_bytes > 0) {
     /* 清零是提供内存这一方的责任：不零就没有确定性。 */
     void *stack = calloc(1, (size_t)stack_bytes);
-    int32_t index;
     if (!stack) {
       lainvm_tcb_free(tcb);
       return NULL;
     }
-    index = lainvm_space_add_region(space, (uintptr_t)stack, stack_bytes,
-                                    LAINVM_MEM_READ | LAINVM_MEM_WRITE, id);
-    if (index == LAINVM_SPACE_NO_REGION) {
+    tcb->stack = lainvm_space_add(space, (uintptr_t)stack, stack_bytes,
+                                  LAINVM_MEM_READ | LAINVM_MEM_WRITE, id);
+    if (lainvm_space_handle_none(tcb->stack)) {
       free(stack);
       lainvm_tcb_free(tcb);
       return NULL;
     }
-    tcb->stack_region = index;
-    /* 区段表是定长的，插入后下标可能变；按 owner 找回自己的那段。 */
-    {
-      uint32_t i;
-      for (i = 0; i < space->region_count; i++) {
-        if (space->regions[i].owner == id && space->regions[i].base == (uintptr_t)stack) {
-          tcb->stack_region = (int32_t)i;
-          break;
-        }
-      }
-    }
+    /* 这里原来有一段「插入之后按 owner 找回自己那段」的补偿。句柄化之后不需要：
+     * 注册或撤销**别的**区段不会改变这个句柄指向谁。 */
   }
 
   return tcb;
@@ -78,11 +68,14 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
 
 void lainvm_tcb_free(LainVmTcb *tcb) {
   if (!tcb) return;
-  if (tcb->vspace && tcb->stack_region != LAINVM_SPACE_NO_REGION) {
-    /* 栈的字节由本 TCB 分配，先取回地址再让区段消失。 */
-    uintptr_t base = tcb->vspace->regions[tcb->stack_region].base;
-    lainvm_space_release_owner(tcb->vspace, tcb->id);
-    free((void *)base);
+  if (tcb->vspace && !lainvm_space_handle_none(tcb->stack)) {
+    /* 栈的字节由本 TCB 分配：按**句柄**取回地址，再精确撤销那一段。
+     * 这里原来是「按缓存的区段下标去取地址」——下标被别的插入挪走之后，
+     * 取回来的是别人的地址，free 直接堆损坏（0xC0000374，实测 R03）。 */
+    const LainVmRegion *region = lainvm_space_slot(tcb->vspace, tcb->stack);
+    uintptr_t base = region ? region->base : 0;
+    lainvm_space_remove(tcb->vspace, tcb->stack);
+    if (base != 0) free((void *)base);
   }
   free(tcb->frames);
   free(tcb->slots);
