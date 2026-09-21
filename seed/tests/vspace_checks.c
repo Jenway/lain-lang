@@ -859,6 +859,61 @@ static int case_stack_two_tcbs_one_space(void) {
   return 0;
 }
 
+/* seL4 的 TCB_SetSpace：换地址空间。栈句柄带着旧空间的身份，所以在新的空间里
+ * 自动失效 —— `#alloca` 稳定拒 1006（不是悄悄用错内存）；换回来，租约还在。 */
+static int case_space_switch(void) {
+  Rig rig;
+  LainVmSpace other;
+  L1Diagnostic diag;
+  uint64_t first, back;
+  int32_t code_switch = 0;
+  int kind_switch, kind_back;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+  /* 1) 原来的空间里跑一次：应当成功 */
+  (void)rig_run(&rig, "use_alloca");
+  if (g_obs.kind != 0) {
+    rig_free(&rig);
+    obs_facts("原空间里就没跑通（kind=%d）", g_obs.kind);
+    return 0;
+  }
+  first = g_obs.value;
+  /* 2) 换到一个空的空间：栈租约失效，#alloca 必须稳定拒 */
+  lainvm_space_init(&other);
+  diag.code = 0;
+  if (lainvm_tcb_set_space(rig.tcb, &other, &diag) != 0) {
+    rig_free(&rig);
+    obs_facts("set_space 失败：code=%d %s", diag.code, diag.message);
+    return 0;
+  }
+  (void)rig_run(&rig, "use_alloca");
+  kind_switch = g_obs.kind;
+  if (kind_switch == 1) code_switch = g_obs.trap_code;
+  /* 3) 换回原空间：那份租约仍然有效，应当又跑通 */
+  diag.code = 0;
+  if (lainvm_tcb_set_space(rig.tcb, &rig.space, &diag) != 0) {
+    rig_free(&rig);
+    obs_facts("换回原空间失败：code=%d %s", diag.code, diag.message);
+    return 0;
+  }
+  (void)rig_run(&rig, "use_alloca");
+  kind_back = g_obs.kind;
+  back = (kind_back == 0) ? g_obs.value : 0;
+  rig_free(&rig);
+  if (kind_switch != 1 || code_switch != 1006) {
+    obs_facts("换到空空间后 #alloca 没被拒：kind=%d code=%d（期望 trap 1006）",
+              kind_switch, (int)code_switch);
+    return 0;
+  }
+  if (kind_back != 0 || back != first) {
+    obs_facts("换回原空间后没恢复：kind=%d 值=%llu（期望 %llu）", kind_back,
+              (unsigned long long)back, (unsigned long long)first);
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
 /* --- host 组 ---------------------------------------------------------------- */
 
 /* R04：从合法区段的末尾读，长度超出一字节 —— 能力该不该拦？ */
@@ -1078,6 +1133,7 @@ static const Case k_cases[] = {
     /* lifetime */
     {"lifetime_escape", "lifetime", EXP_TRAP, 0, 0, case_lifetime_escape},
     {"lifetime_reuse", "lifetime", EXP_VALUE, 0, 0, case_lifetime_reuse},
+    {"space_switch", "lifetime", EXP_VALUE, 1, 0, case_space_switch},
     /* lea */
     {"lea_construct_only", "lea", EXP_BLOCKED, 0, 0, case_lea_construct_only},
     {"lea_wraparound", "lea", EXP_BLOCKED, 0, 0, case_lea_wraparound},
