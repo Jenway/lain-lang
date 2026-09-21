@@ -687,6 +687,70 @@ static EvalResult case_block_backend_rejects(void) {
   return fail_result(d.code ? d.code : -1, "后端拒绝码");
 }
 
+/* 折叠之后的产物必须能进后端——这条正是"折叠必须在后端**之前**"的组合验收：
+ * 同一份模块不折叠时后端拒 9225（见 block_backend_rejects）。 */
+static EvalResult case_folded_backend_ok(void) {
+  static const uint32_t ints[4] = {8, 16, 32, 64};
+  static const uint32_t floats[2] = {32, 64};
+  L1Builder *b = lainir_builder_new();
+  L1Builder *out = lainir_builder_new();
+  LainFold *fold = lainfold_new(NULL, 64, 4096, 1000000);
+  L1Diagnostic d;
+  const L1Module *m;
+  const L1Module *after;
+  LainTarget target;
+  LainBackendSink sink;
+  LainBackend *backend;
+  EvalResult r;
+
+  d.code = 0;
+  m = lainir_parse(b, k_block_fold, &d);
+  if (!m || lainir_verify(m, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠前就该通过验证");
+    goto done;
+  }
+  after = lainfold_module(fold, out, m, &d);
+  if (!after) {
+    r = fail_result(d.code ? d.code : -1, "折叠失败");
+    goto done;
+  }
+  if (lainir_verify(after, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠后的产物没通过验证");
+    goto done;
+  }
+  target.name = "c";
+  target.address_bits = 64;
+  target.int_widths = ints;
+  target.int_width_count = 4;
+  target.float_formats = floats;
+  target.float_format_count = 2;
+  target.max_alignment = 16;
+  target.unaligned_ok = true;
+  target.little_endian = true;
+  target.capability = LAINBC_CAP_SYMBOL;
+  sink.write = sink_write;
+  sink.symbol = sink_symbol;
+  sink.user = NULL;
+  d.code = 0;
+  backend = lainbackend_new(&target, &sink, &d);
+  if (!backend) {
+    r = fail_result(d.code ? d.code : -1, "后端建不起来");
+    goto done;
+  }
+  if (lainbackend_emit(backend, after) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠后的产物被后端拒了");
+    lainbackend_free(backend);
+    goto done;
+  }
+  lainbackend_free(backend);
+  r = fail_result(0, "折叠后的产物能进后端");
+done:
+  lainfold_free(fold);
+  lainir_builder_free(out);
+  lainir_builder_free(b);
+  return r;
+}
+
 /* --- 用例表 --------------------------------------------------------------- */
 
 typedef EvalResult (*EvalCaseFn)(void);
@@ -712,6 +776,7 @@ static const EvalCase k_cases[] = {
     {"block_addr_result", case_block_addr_result, 2030, NULL},
     {"block_engine_rejects", case_block_engine_rejects, 1045, NULL},
     {"block_backend_rejects", case_block_backend_rejects, 9225, NULL},
+    {"folded_backend_ok", case_folded_backend_ok, 0, NULL},
     {"unknown_opcode", case_unknown_opcode, 3002, NULL},
     {"eval_typo", case_eval_typo, 3002, NULL},
 };

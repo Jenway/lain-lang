@@ -23,6 +23,7 @@
 #include "lainir/verify.h"
 #include "lainbackend/emit.h"
 #include "lainbackend/target.h"
+#include "lainfold/fold.h"
 #include "lainmeta/host.h"
 #include "lainvm/engine.h"
 #include "lainvm/space.h"
@@ -311,10 +312,76 @@ static void report_scratch_bump(LainMetaHost *host) {
          scratch_size ? 100.0 * (double)peak / (double)scratch_size : 0.0);
 }
 
-/* 解析 + 验证 + 装载 + admit，返回可执行的 TCB。 */
+/* --- 折叠阶段：`#eval` 必须在这里跑掉并消失 ------------------------------- */
+
+/* 区域里有没有 `#eval`（调用形态与块都算）。没有就不必起折叠：折叠自己会起一次
+ * 编译期执行环境（装载 + 栈租约 + TCB），那是给真有 `#eval` 的模块付的钱。 */
+static bool region_has_eval(const L1Region *region) {
+  uint32_t i;
+  if (!region) return false;
+  for (i = 0; i < region->inst_count; i++) {
+    const L1Inst *inst = &region->insts[i];
+    if (inst->is_eval || inst->kind == INST_EVAL) return true;
+    if (region_has_eval(inst->body)) return true;
+    if (region_has_eval(inst->else_body)) return true;
+    if (inst->kind == INST_SWITCH) {
+      uint32_t k;
+      for (k = 0; k < inst->case_count; k++)
+        if (region_has_eval(inst->cases[k].body)) return true;
+      if (region_has_eval(inst->default_case)) return true;
+    }
+  }
+  return false;
+}
+
+static bool module_has_eval(const L1Module *module) {
+  uint32_t i;
+  for (i = 0; i < module->subroutine_count; i++) {
+    const L1Subroutine *sub = &module->subroutines[i];
+    if ((sub->flags & SUBROUTINE_EXTERN) || !sub->body) continue;
+    if (region_has_eval(sub->body)) return true;
+  }
+  return false;
+}
+
+/* 折叠 + **重新验证**：折叠产物仍须是合法 LAINIR，才交给执行或后端。
+ * 没有 `#eval` 时原样返回（也不起执行环境）。
+ * 预算目前是固定值（递归 64 / 栈 4096 / fuel 1000000），策略化的部分见
+ * docs/implementation/eval-landing-plan.md 的 S6；宿主能力用同一份 caps。 */
+static const L1Module *fold_evals(const L1Module *module, L1Builder *builder,
+                                  LainVmCaps *caps, L1Diagnostic *diag,
+                                  const char *what) {
+  LainFold *fold;
+  const L1Module *folded;
+  char buffer[192];
+
+  if (!module_has_eval(module)) return module;
+  fold = lainfold_new(caps, 64, 4096, 1000000);
+  if (!fold) {
+    report_fail(what, "cannot admit the fold stage");
+    return NULL;
+  }
+  folded = lainfold_module(fold, builder, module, diag);
+  if (!folded) {
+    snprintf(buffer, sizeof(buffer), "fold: %d %s", diag->code, diag->message);
+    report_fail(what, buffer);
+    lainfold_free(fold);
+    return NULL;
+  }
+  lainfold_free(fold);
+  if (lainir_verify(folded, diag) != 0) {
+    snprintf(buffer, sizeof(buffer), "folded verify: %d %s", diag->code,
+             diag->message);
+    report_fail(what, buffer);
+    return NULL;
+  }
+  return folded;
+}
+
+/* 解析 + 验证 + 折叠 + 装载 + admit，返回可执行的 TCB。 */
 static LainVmTcb *prepare(L1Builder *builder, const char *text,
                           LainVmSpace *space, LainVmImage **image_out,
-                          const char *what) {
+                          LainVmCaps *caps, const char *what) {
   L1Diagnostic diag;
   const L1Module *module;
   LainVmImage *image;
@@ -335,6 +402,9 @@ static LainVmTcb *prepare(L1Builder *builder, const char *text,
     report_fail(what, buffer);
     return NULL;
   }
+  /* `#eval` 在执行之前跑掉并消失；折叠产物的重新验证在 fold_evals 里面。 */
+  module = fold_evals(module, builder, caps, &diag, what);
+  if (!module) return NULL;
   image = lainvm_image_load(module, space, &diag);
   if (!image) {
     char buffer[192];
@@ -500,7 +570,14 @@ int main(int argc, char **argv) {
       goto cleanup;
     }
   }
-  meta_tcb = prepare(meta_builder, bootstrap, &meta_space, &meta_image, "meta");
+  /* 能力表在 prepare 之前建好：折叠阶段（`#eval`）也要用同一份宿主能力。 */
+  caps = lainvm_caps_new();
+  if (!caps || lainmeta_host_register(host, caps) != 0) {
+    report_fail("caps", "cannot register the host services");
+    goto cleanup;
+  }
+
+  meta_tcb = prepare(meta_builder, bootstrap, &meta_space, &meta_image, caps, "meta");
   if (!meta_tcb) goto cleanup;
 
   /* 宿主服务也要授权：能力只拿得到裸地址，所以"这个地址能不能读"由宿主这一侧判，
@@ -508,11 +585,6 @@ int main(int argc, char **argv) {
    * （LAINMETA_ERR_DENIED），而不是照裸地址读。 */
   lainmeta_host_attach_space(host, &meta_space);
 
-  caps = lainvm_caps_new();
-  if (!caps || lainmeta_host_register(host, caps) != 0) {
-    report_fail("caps", "cannot register the host services");
-    goto cleanup;
-  }
   diag.code = 0;
   if (lainvm_tcb_set_caps(meta_tcb, caps, &diag) != 0) {
     report_fail("caps", "cannot resolve the host services");
@@ -647,6 +719,9 @@ int main(int argc, char **argv) {
       report_fail("produced verify", buffer);
       goto cleanup;
     }
+    /* `#eval` 必须在后端**之前**消失：后端见到残留就是 9225。 */
+    prod_module = fold_evals(prod_module, out_builder, caps, &diag, "produced");
+    if (!prod_module) goto cleanup;
     target.name = "c";
     target.address_bits = 64;
     target.int_widths = ints;
@@ -677,7 +752,7 @@ int main(int argc, char **argv) {
   }
 
   lainvm_space_init(&out_space);
-  out_tcb = prepare(out_builder, produced, &out_space, &out_image, "produced");
+  out_tcb = prepare(out_builder, produced, &out_space, &out_image, caps, "produced");
   if (!out_tcb) goto cleanup;
 
   {
