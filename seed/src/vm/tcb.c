@@ -25,6 +25,10 @@ static int accept_lease(const LainVmSpace *space, LainVmStackLease lease) {
       (LAINVM_MEM_READ | LAINVM_MEM_WRITE)) return 3; /* 缺读或写 */
   if (region->accessible != 0) return 4;              /* 窗口必须从 0 开始 */
   if (region->capacity == 0) return 5;                /* 没有容量 */
+  /* 一份**栈**租约只借给一条执行流：两条执行流共用一块栈、各自推进水位，
+   * 会互相踩。`borrow_count` 仍是个计数（将来只读的共享映射可以用 N>1），
+   * 但栈这一路今天只认独借。 */
+  if (region->borrow_count != 0) return 7;
   if (!lainvm_space_borrow(lease.space, lease.region)) return 6;
   return 0;
 }

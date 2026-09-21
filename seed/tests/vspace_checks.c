@@ -1333,6 +1333,326 @@ static int case_activation_loop_growth_trap(void) {
 
 /* 6) 同址重新授权后旧裸地址与新地址不可区分：`lifetime_reuse`（见 lifetime 组）。 */
 
+/* --- 租约：借出、归还、独借、跨空间 --------------------------------------- */
+
+/* 借出状态：tcb_new 成功之后 borrow_count == 1，窗口还是 0（还没 alloca）。 */
+static int case_tcb_borrows_stack(void) {
+  Rig rig;
+  const LainVmRegion *r;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+  r = lainvm_space_slot(&rig.space, rig.lease.region);
+  if (!r || r->borrow_count != 1 || r->accessible != 0) {
+    rig_free(&rig);
+    obs_facts("借出状态不对：borrow_count=%u accessible=%llu（期望 1 / 0）",
+              r ? (unsigned)r->borrow_count : 999u,
+              r ? (unsigned long long)r->accessible : 0);
+    return 0;
+  }
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 销毁 TCB **不**释放栈：区段还在、借用归零、窗口归零（释放归供给方）。 */
+static int case_tcb_free_does_not_free_stack(void) {
+  Rig rig;
+  LainVmRegionHandle region;
+  const LainVmRegion *r;
+  uintptr_t base;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+  region = rig.lease.region;
+  r = lainvm_space_slot(&rig.space, region);
+  base = r ? r->base : 0;
+  lainvm_tcb_free(rig.tcb);
+  rig.tcb = NULL;
+  r = lainvm_space_slot(&rig.space, region);
+  if (!r || r->base != base || r->borrow_count != 0 || r->accessible != 0) {
+    rig_free(&rig);
+    obs_facts("销毁 TCB 之后区段状态不对：在=%d base=%llu borrow=%u acc=%llu",
+              r ? 1 : 0, r ? (unsigned long long)r->base : 0,
+              r ? (unsigned)r->borrow_count : 999u,
+              r ? (unsigned long long)r->accessible : 0);
+    return 0;
+  }
+  rig_free(&rig); /* 供给方随后释放（rig_free 里做） */
+  obs_value(1);
+  return 0;
+}
+
+/* 供给方只能在 TCB 销毁之后释放：有活借用时 free 必须拒。 */
+static int case_provider_free_after_tcb(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+  if (lainvm_space_free(&rig.space, rig.lease.region)) {
+    rig_free(&rig);
+    obs_facts("还有活借用时供给方释放成功了");
+    return 0;
+  }
+  lainvm_tcb_free(rig.tcb);
+  rig.tcb = NULL;
+  if (!lainvm_space_free(&rig.space, rig.lease.region)) {
+    rig_free(&rig);
+    obs_facts("销毁 TCB 之后供给方仍释放不了");
+    return 0;
+  }
+  rig.lease = lainvm_stack_no_lease(); /* 已经释放，rig_free 不要再碰 */
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 校验失败**不**留下借用，区段一点不变：跨空间 / 窗口非零 / 缺写权限。 */
+static int case_tcb_create_reject_leaves_no_borrow(void) {
+  Rig rig;
+  LainVmSpace other;
+  LainVmStackLease lease;
+  const LainVmRegion *r;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+
+  /* 1) 句柄不属于给定的 VSpace */
+  lainvm_space_init(&other);
+  lease = lainvm_stack_no_lease();
+  lease.space = &other;
+  lease.region = lainvm_space_alloc_stack(&other, 4096, 9, NULL);
+  if (lainvm_space_handle_none(lease.region)) {
+    rig_free(&rig);
+    obs_facts("在另一个空间里备栈失败");
+    return 0;
+  }
+  if (lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, lease, NULL) != NULL) {
+    (void)lainvm_space_free(&other, lease.region);
+    rig_free(&rig);
+    obs_facts("跨空间的租约被接受了");
+    return 0;
+  }
+  r = lainvm_space_slot(&other, lease.region);
+  if (!r || r->borrow_count != 0) {
+    (void)lainvm_space_free(&other, lease.region);
+    rig_free(&rig);
+    obs_facts("被拒之后借用计数变了：%u（期望 0）",
+              r ? (unsigned)r->borrow_count : 999u);
+    return 0;
+  }
+  (void)lainvm_space_free(&other, lease.region);
+
+  /* 2) 窗口不是 0（供给方必须交一块"还没开窗"的存储） */
+  lease = lainvm_stack_no_lease();
+  lease.space = &rig.space;
+  lease.region = lainvm_space_alloc_stack(&rig.space, 4096, 9, NULL);
+  if (lainvm_space_handle_none(lease.region) ||
+      !lainvm_space_set_accessible(&rig.space, lease.region, 16)) {
+    rig_free(&rig);
+    obs_facts("备栈或开窗失败");
+    return 0;
+  }
+  if (lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, lease, NULL) != NULL) {
+    (void)lainvm_space_free(&rig.space, lease.region);
+    rig_free(&rig);
+    obs_facts("窗口非 0 的租约被接受了");
+    return 0;
+  }
+  r = lainvm_space_slot(&rig.space, lease.region);
+  if (!r || r->borrow_count != 0 || r->accessible != 16) {
+    (void)lainvm_space_free(&rig.space, lease.region);
+    rig_free(&rig);
+    obs_facts("被拒之后区段变了：borrow=%u accessible=%llu",
+              r ? (unsigned)r->borrow_count : 999u,
+              r ? (unsigned long long)r->accessible : 0);
+    return 0;
+  }
+  (void)lainvm_space_free(&rig.space, lease.region);
+
+  /* 3) 缺写权限 */
+  lease = lainvm_stack_no_lease();
+  lease.space = &rig.space;
+  lease.region = lainvm_space_alloc(&rig.space, 4096, 16, 0, LAINVM_MEM_READ, 9,
+                                    NULL);
+  if (lainvm_space_handle_none(lease.region)) {
+    rig_free(&rig);
+    obs_facts("备只读区段失败");
+    return 0;
+  }
+  if (lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, lease, NULL) != NULL) {
+    (void)lainvm_space_free(&rig.space, lease.region);
+    rig_free(&rig);
+    obs_facts("只读的租约被接受了");
+    return 0;
+  }
+  r = lainvm_space_slot(&rig.space, lease.region);
+  if (!r || r->borrow_count != 0) {
+    (void)lainvm_space_free(&rig.space, lease.region);
+    rig_free(&rig);
+    obs_facts("被拒之后借用计数变了：%u（期望 0）",
+              r ? (unsigned)r->borrow_count : 999u);
+    return 0;
+  }
+  (void)lainvm_space_free(&rig.space, lease.region);
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 同一份栈租约只借给一条执行流：第二条必须拒（共享同一栈默认不安全）。 */
+static int case_two_tcbs_same_lease_reject(void) {
+  Rig rig;
+  LainVmTcb *t2;
+  const LainVmRegion *r;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+  t2 = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, rig.lease, NULL);
+  if (t2) {
+    lainvm_tcb_free(t2);
+    rig_free(&rig);
+    obs_facts("同一份租约被借给了第二个 TCB");
+    return 0;
+  }
+  r = lainvm_space_slot(&rig.space, rig.lease.region);
+  if (!r || r->borrow_count != 1) {
+    rig_free(&rig);
+    obs_facts("被拒之后借用计数变了：%u（期望 1）",
+              r ? (unsigned)r->borrow_count : 999u);
+    return 0;
+  }
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 换执行空间**不**搬租约：租约仍在原空间、借用不变，`#alloca` 因空间不同拒 1006；
+ * 换回来又能跑。 */
+static int case_switch_space_does_not_move_lease(void) {
+  Rig rig;
+  LainVmSpace other;
+  L1Diagnostic diag;
+  LainVmStackLease before;
+  const LainVmRegion *r;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+  before = rig.lease;
+  lainvm_space_init(&other);
+  diag.code = 0;
+  if (lainvm_tcb_set_space(rig.tcb, &other, &diag) != 0) {
+    rig_free(&rig);
+    obs_facts("set_space 失败：code=%d %s", diag.code, diag.message);
+    return 0;
+  }
+  if (rig.tcb->stack_lease.space != before.space ||
+      rig.tcb->stack_lease.region.slot != before.region.slot ||
+      rig.tcb->vspace != &other) {
+    rig_free(&rig);
+    obs_facts("换空间动到了租约（或没换 vspace）");
+    return 0;
+  }
+  r = lainvm_space_slot(before.space, before.region);
+  if (!r || r->borrow_count != 1) {
+    rig_free(&rig);
+    obs_facts("租约所在空间的借用计数变了：%u（期望 1）",
+              r ? (unsigned)r->borrow_count : 999u);
+    return 0;
+  }
+  memset(&g_obs, 0, sizeof(g_obs));
+  (void)rig_run(&rig, "use_alloca");
+  if (g_obs.kind != 1 || g_obs.trap_code != 1006) {
+    rig_free(&rig);
+    obs_facts("换空间之后 #alloca 没有拒 1006（kind=%d code=%d）", g_obs.kind,
+              (int)g_obs.trap_code);
+    return 0;
+  }
+  diag.code = 0;
+  if (lainvm_tcb_set_space(rig.tcb, before.space, &diag) != 0) {
+    rig_free(&rig);
+    obs_facts("换回原空间失败：code=%d %s", diag.code, diag.message);
+    return 0;
+  }
+  memset(&g_obs, 0, sizeof(g_obs));
+  (void)rig_run(&rig, "use_alloca");
+  if (g_obs.kind != 0 || g_obs.value != 7) {
+    rig_free(&rig);
+    obs_facts("换回原空间之后跑不通了（kind=%d value=%llu）", g_obs.kind,
+              (unsigned long long)g_obs.value);
+    return 0;
+  }
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 两个 8 字节 alloca 的程序：用来量"恰好用满"与"多一字节"。 */
+static const char *k_prog_two_allocas =
+    "#proc two_allocas() -> #bits<64> {\n"
+    "  %a = #alloca[#bits<64>](1)\n"
+    "  #store[#bits<64>](7, %a)\n"
+    "  %b = #alloca[#bits<64>](1)\n"
+    "  #store[#bits<64>](9, %b)\n"
+    "  %v = #load[#bits<64>](%b)\n"
+    "  #return %v\n"
+    "}\n";
+
+/* 恰好用满：容量 8、一次 8 字节 alloca -> 成功（store/load 都对）。
+ * 注意水位在**根过程结束时归零**（activation 结束的契约），所以这里看的是
+ * 区段容量与窗口，而不是跑完之后的 stack_used。 */
+static int case_alloca_exact_capacity(void) {
+  Rig rig;
+  const LainVmRegion *r;
+
+  if (rig_load(&rig, k_prog_alloca, 8) != 0) return 0;
+  (void)rig_run(&rig, "use_alloca");
+  if (g_obs.kind != 0 || g_obs.value != 7) {
+    rig_free(&rig);
+    obs_facts("恰好用满却失败了：kind=%d value=%llu", g_obs.kind,
+              (unsigned long long)g_obs.value);
+    return 0;
+  }
+  r = lainvm_space_slot(&rig.space, rig.lease.region);
+  if (!r || r->capacity != 8 || r->accessible != 0) {
+    rig_free(&rig);
+    obs_facts("区段状态不对：capacity=%llu accessible=%llu（期望 8 / 0）",
+              r ? (unsigned long long)r->capacity : 0,
+              r ? (unsigned long long)r->accessible : 0);
+    return 0;
+  }
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 多一字节：第二次 alloca 拒 1007，**水位保持 8**（失败不改变状态）；
+ * 区段容量不变，窗口按 Trap 的契约收回 0。 */
+static int case_alloca_one_byte_over_unchanged(void) {
+  Rig rig;
+  const LainVmRegion *r;
+
+  if (rig_load(&rig, k_prog_two_allocas, 8) != 0) return 0;
+  (void)rig_run(&rig, "two_allocas");
+  if (g_obs.kind != 1 || g_obs.trap_code != 1007) {
+    rig_free(&rig);
+    obs_facts("期望第二次 alloca 拒 1007，实际 kind=%d code=%d", g_obs.kind,
+              (int)g_obs.trap_code);
+    return 0;
+  }
+  if (rig.tcb->stack_used != 8) {
+    rig_free(&rig);
+    obs_facts("被拒之后水位变成 %llu（期望保持 8）",
+              (unsigned long long)rig.tcb->stack_used);
+    return 0;
+  }
+  r = lainvm_space_slot(&rig.space, rig.lease.region);
+  if (!r || r->capacity != 8 || r->accessible != 0) {
+    rig_free(&rig);
+    obs_facts("区段状态不对：capacity=%llu accessible=%llu（期望 8 / 0）",
+              r ? (unsigned long long)r->capacity : 0,
+              r ? (unsigned long long)r->accessible : 0);
+    return 0;
+  }
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
 /* --- region 组 -------------------------------------------------------------- */
 
 /* 合法范围里的读：返回那个字节（42）。 */
@@ -3867,6 +4187,22 @@ static const Case k_cases[] = {
     {"host_source_index_bounds", "host", EXP_VALUE, 1, 0,
      case_host_source_index_bounds},
     /* lifetime */
+    /* 租约：借出 / 归还 / 独借 / 跨空间 / 恰好用满 */
+    {"tcb_borrows_stack", "lease", EXP_VALUE, 1, 0, case_tcb_borrows_stack},
+    {"tcb_free_does_not_free_stack", "lease", EXP_VALUE, 1, 0,
+     case_tcb_free_does_not_free_stack},
+    {"provider_free_after_tcb", "lease", EXP_VALUE, 1, 0,
+     case_provider_free_after_tcb},
+    {"tcb_create_reject_leaves_no_borrow", "lease", EXP_VALUE, 1, 0,
+     case_tcb_create_reject_leaves_no_borrow},
+    {"two_tcbs_same_lease_reject", "lease", EXP_VALUE, 1, 0,
+     case_two_tcbs_same_lease_reject},
+    {"switch_space_does_not_move_lease", "lease", EXP_VALUE, 1, 0,
+     case_switch_space_does_not_move_lease},
+    {"alloca_exact_capacity", "lease", EXP_VALUE, 1, 0,
+     case_alloca_exact_capacity},
+    {"alloca_one_byte_over_unchanged", "lease", EXP_VALUE, 1, 0,
+     case_alloca_one_byte_over_unchanged},
     /* owned storage（VSpace 申请、清零、登记、释放；按原账户归还） */
     {"owned_alloc_zeroed", "lease", EXP_VALUE, 1, 0, case_owned_alloc_zeroed},
     {"owned_alloc_quota_exact", "lease", EXP_VALUE, 1, 0,
