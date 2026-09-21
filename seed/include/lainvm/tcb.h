@@ -21,6 +21,7 @@
 #include "lainir/core.h"
 #include "lainir/value.h"
 #include "lainvm/caps.h"
+#include "lainvm/memcap.h"
 #include "lainvm/space.h"
 
 typedef struct LainVmTcb LainVmTcb;
@@ -92,6 +93,7 @@ typedef struct {
   const char *label;
   bool is_call_frame;
   uint64_t stack_mark;
+  uint64_t activation; /* 这一帧属于哪次 activation：#call 压的帧带一个新的 */
 } LainVmFrame;
 
 struct LainVmTcb {
@@ -122,6 +124,13 @@ struct LainVmTcb {
    * 指到别人身上。 */
   LainVmRegionHandle stack; /* no_handle 表示没有栈 */
   uint64_t stack_used;      /* alloca 水位 */
+
+  /* 内存能力：对象表 + 能力表（**每个执行上下文一张**，定长、引擎里不分配）。
+   * activation 是当前这次调用的标签：这一层发的对象与能力都挂在它名下，调用结束
+   * （返回 / Trap / 销毁 TCB）时按它撤销 + 释放。0 表示没有活跃的调用。 */
+  LainVmMemTable memcap;
+  uint64_t activation;
+  uint64_t activation_seq; /* 只增；给每次调用发新标签 */
 
   /* 上下文：恢复一次激活所需的全部 */
   LainVmFrame *frames;
@@ -158,10 +167,13 @@ struct LainVmTcb {
  *   slot_cap  = frame_cap * image->max_slots
  * id 现在只是**诊断字段**（区段表里写着"这段是谁的"）；回收按句柄精确撤销，
  * 不按 owner 扫表。
- * stack_bytes 为 0 表示不要栈（程序里没有 #alloca）。 */
+ * stack_bytes 为 0 表示不要栈（程序里没有 #alloca）。
+ * generation_base 是内存能力表里代数的起点：调用方保证它**大于同一块宿主内存上
+ * 以前发过的所有代数**（在同一块内存上重建 TCB 时，旧引用才不会复活）。
+ * 传 1 对"刚 calloc 出来的 TCB"就够；有内存复用时由调用方给更大的基数。 */
 LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
                           uint64_t owner, uint32_t max_call_depth,
-                          uint64_t stack_bytes);
+                          uint64_t stack_bytes, uint64_t generation_base);
 void lainvm_tcb_free(LainVmTcb *tcb);
 
 /* 把模块里每个 extern 子过程按 link_name 解析到能力空间。

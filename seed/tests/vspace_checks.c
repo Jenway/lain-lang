@@ -160,7 +160,7 @@ static int rig_load(Rig *rig, const char *text, uint64_t stack_bytes) {
     obs_facts("load: code=%d %s", diag.code, diag.message);
     return -3;
   }
-  rig->tcb = lainvm_tcb_new(rig->image, &rig->space, 1, 1, 64, stack_bytes);
+  rig->tcb = lainvm_tcb_new(rig->image, &rig->space, 1, 1, 64, stack_bytes, 1);
   if (!rig->tcb) {
     if (diag.code != 0) rig->fail_code = diag.code;
     obs_facts("admit 失败（stack_bytes=%llu）", (unsigned long long)stack_bytes);
@@ -204,14 +204,48 @@ static int rig_run(Rig *rig, const char *entry) {
 
 /* --- LAINIR 测试程序（内联；都是本用例专用的小程序） ---------------------- */
 
-/* 一个从来没登记过的地址上读一个字节。期望：拒绝（当前 load 码 1004）。 */
+/* 一个从来没登记过的地址上读一个字节：走**裸地址**通路（data 符号 + lea 偏移），
+ * 所以拒的是 VSpace 那一步（1004）。期望：拒绝。 */
 static const char *k_prog_outside_region =
     "data bytes ro { 42 }\n"
     "#proc outside() -> #bits<64> {\n"
+    "  %base = #data_addr bytes\n"
+    "  %p = #lea(%base, 0, 1, 1000000)\n"
+    "  %b = #load[#bits<8>](%p)\n"
+    "  %w = #zext[#bits<64>](%b)\n"
+    "  #return %w\n"
+    "}\n";
+
+/* `#int2ptr` 只造**受检引用**：整数给的是身份位（代数(32) | 槽号(32)），4096 不是
+ * 有效的槽号 → 拒 9207。它不再是"把整数当裸地址用"。 */
+static const char *k_prog_int2ptr_ref =
+    "#proc from_int() -> #bits<64> {\n"
     "  %p = #int2ptr[#addr](4096)\n"
     "  %b = #load[#bits<8>](%p)\n"
     "  %w = #zext[#bits<64>](%b)\n"
     "  #return %w\n"
+    "}\n";
+
+/* 受检通路的正例：同一帧里 alloca → store → load 必须真的读到写进去的值；
+ * 顺带证明 `#addr` 槽两种味道都装得下（RAW 读到 42、REF 读到 9，和 = 51）。 */
+static const char *k_prog_two_flavors =
+    "data bytes ro { 42 }\n"
+    "data slot rw { 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 }\n"
+    "#proc two_flavors() -> #bits<64> {\n"
+    "  %slotp = #data_addr slot\n"
+    "  %raw = #data_addr bytes\n"
+    "  #store[#addr](%raw, %slotp)\n"
+    "  %back = #load[#addr](%slotp)\n"
+    "  %b = #load[#bits<8>](%back)\n"
+    "  %w = #zext[#bits<64>](%b)\n"
+    "  %a = #alloca[#bits<8>](1)\n"
+    "  #store[#bits<8>](9, %a)\n"
+    "  #store[#addr](%a, %slotp)\n"
+    "  %back2 = #load[#addr](%slotp)\n"
+    "  %v = #load[#bits<8>](%back2)\n"
+    "  %w2 = #zext[#bits<64>](%v)\n"
+    "  %sum = #add[#bits<64>](%w, %w2)\n"
+    "  #return %sum\n"
     "}\n";
 
 /* 没有栈区段（stack_bytes = 0）却用 #alloca。期望：拒绝（当前 1006）。 */
@@ -356,7 +390,7 @@ static int case_region_valid_read(void) {
   return 0;
 }
 
-/* 从未登记过的地址读：期望拒绝（1004）。 */
+/* 从未登记过的地址读：期望拒绝（1004，走的是裸地址 + VSpace 那一步）。 */
 static int case_load_outside_region(void) {
   Rig rig;
   int rc;
@@ -365,6 +399,36 @@ static int case_load_outside_region(void) {
   rc = rig_run(&rig, "outside");
   rig_free(&rig);
   (void)rc;
+  return 0;
+}
+
+/* 同一帧里的受检引用通路（正例）：写进去的必须读得回来。 */
+static int case_cap_alloca_ref_works(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+  (void)rig_run(&rig, "use_alloca");
+  rig_free(&rig);
+  return 0;
+}
+
+/* `#addr` 槽装两种味道：RAW 与 REF 各自 16 字节自描述记录，读回来味道不变。 */
+static int case_cap_addr_slot_two_flavors(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_two_flavors, 4096) != 0) return 0;
+  (void)rig_run(&rig, "two_flavors");
+  rig_free(&rig);
+  return 0;
+}
+
+/* `#int2ptr` 造的是引用，不是裸地址：假槽号必须被拒（9207）。 */
+static int case_cap_int2ptr_is_reference(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_int2ptr_ref, 1024) != 0) return 0;
+  (void)rig_run(&rig, "from_int");
+  rig_free(&rig);
   return 0;
 }
 
@@ -849,7 +913,7 @@ static int case_stack_two_tcbs_one_space(void) {
   t1 = rig.tcb; /* 台架已经建了一个 */
   h1 = t1->stack;
   base1 = base_of(&rig.space, h1);
-  t2 = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, 4096);
+  t2 = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, 4096, 2);
   if (!t2) {
     rig_free(&rig);
     obs_facts("同一个地址空间里建第二个 TCB 失败");
@@ -2142,6 +2206,13 @@ static const Case k_cases[] = {
     /* §4.1 第二个原型（旁表跟踪地址）的探针：PASS = 缺口按预期复现 */
     {"cap_protoB_stale_address_probe", "capability", EXP_VALUE, 1, 0,
      case_cap_protoB_stale_address_probe},
+    /* 第 5 步接线的正例与语义案：受检引用进了真实的 load/store 通路 */
+    {"cap_alloca_ref_works", "capability", EXP_VALUE, 7, 0,
+     case_cap_alloca_ref_works},
+    {"cap_addr_slot_two_flavors", "capability", EXP_VALUE, 51, 0,
+     case_cap_addr_slot_two_flavors},
+    {"cap_int2ptr_is_reference", "capability", EXP_TRAP, 0, 9207,
+     case_cap_int2ptr_is_reference},
 };
 
 static const size_t k_case_count = sizeof(k_cases) / sizeof(k_cases[0]);

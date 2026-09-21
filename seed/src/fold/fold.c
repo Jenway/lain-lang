@@ -183,6 +183,10 @@ static bool run_eval(LainFold *f, const L1Inst *inst,
     *width_out = 64;
     return true;
   }
+  if (value.kind == L1_VALUE_REF)
+    return fold_fail(f, 9309,
+                     "fold: a checked memory reference cannot become a "
+                     "compile-time constant");
   *bits_out = value.kind == L1_VALUE_ADDR ? (uint64_t)(uintptr_t)value.as.addr
                                           : value.as.bits;
   *width_out = value.bit_width ? value.bit_width : 64;
@@ -348,7 +352,7 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
     return NULL;
   }
   fold->tcb = lainvm_tcb_new(fold->image, &fold->space, 1, 1,
-                             fold->max_call_depth, fold->stack_bytes);
+                             fold->max_call_depth, fold->stack_bytes, 1);
   if (!fold->tcb) {
     fold_fail(fold, 9314, "fold: cannot admit a compile-time activation");
     return NULL;

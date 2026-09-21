@@ -67,7 +67,7 @@ int main(void) {
     printf("load failed: code=%d %s\n", diag.code, diag.message);
     return 1;
   }
-  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, 4096);
+  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, 4096, 1);
   if (!tcb) {
     printf("admit failed\n");
     return 1;

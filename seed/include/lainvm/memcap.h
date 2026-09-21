@@ -132,6 +132,15 @@ int32_t lainvm_memcap_grant(LainVmMemTable *table, LainVmMemHandle object,
 int32_t lainvm_memcap_revoke_owner(LainVmMemTable *table, uint64_t owner,
                                    uint32_t *revoked);
 
+/* 一个执行上下文结束：**先撤销**它名下的全部能力，**再释放**它名下的存储
+ * （committed 归还）。两个动作都要做——只撤销不释放是泄漏，只释放不撤销是悬空授权。 */
+void lainvm_memcap_end_owner(LainVmMemTable *table, uint64_t owner,
+                             uint32_t *revoked, uint32_t *released);
+
+/* TCB 销毁：把表里还活着的都结束掉（栈内存随 TCB 一起没，这里只把账结清）。 */
+void lainvm_memcap_end_all(LainVmMemTable *table, uint32_t *revoked,
+                           uint32_t *released);
+
 /* 受检解析：通过 → 0，`*out_base` 是这次访问的宿主地址；否则非 0 且 `*code` 是拒绝码。
  * 检查顺序就是文档 §3 的五条。`length` 是这次访问的字节数。 */
 int lainvm_memcap_resolve(const LainVmMemTable *table, const LainVmSpace *space,
