@@ -117,9 +117,11 @@ struct LainVmTcb {
 
   /* alloca 栈。区段登记在 vspace 里，owner 是这个 TCB；
    * 字节在 admit 时按 stack_bytes 一次给够（引擎里不许分配），
-   * 满了就是 trap，不是扩容。 */
-  int32_t stack_region; /* LAINVM_SPACE_NO_REGION 表示没有栈 */
-  uint64_t stack_used;  /* alloca 水位 */
+   * 满了就是 trap，不是扩容。
+   * 引用是**句柄**（身份），不是表下标（位置）：注册或撤销别的区段不会让它
+   * 指到别人身上。 */
+  LainVmRegionHandle stack; /* no_handle 表示没有栈 */
+  uint64_t stack_used;      /* alloca 水位 */
 
   /* 上下文：恢复一次激活所需的全部 */
   LainVmFrame *frames;
