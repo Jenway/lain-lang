@@ -183,8 +183,9 @@ int main(void) {
     lainir_builder_free(b);
     return 1;
   }
-  printf("tcb: frame_cap=%u slot_cap=%u stack_region=%d\n", tcb->frame_cap,
-         tcb->slot_cap, tcb->stack_region);
+  printf("tcb: frame_cap=%u slot_cap=%u stack_slot=%d\n", tcb->frame_cap,
+         tcb->slot_cap,
+         lainvm_space_handle_none(tcb->stack) ? -1 : (int)tcb->stack.slot);
   printf("---\n");
 
   expect_bits(tcb, "answer", NULL, 0, 42, "answer");
