@@ -344,7 +344,7 @@ static LainVmTcb *prepare(L1Builder *builder, const char *text,
   }
   /* 递归深度是 admit 参数，不是硬上限：Meta 的十进制输出是递归的，
    * 二十来层足够，给 64 留余量。 */
-  tcb = lainvm_tcb_new(image, space, 1, 1, 64, 4096, NULL);
+  tcb = lainvm_tcb_new(image, space, 1, 1, 64, lainvm_stack_no_lease(), NULL);
   if (!tcb) {
     report_fail(what, "admit failed");
     lainvm_image_free(image);

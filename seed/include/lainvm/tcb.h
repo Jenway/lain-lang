@@ -116,25 +116,16 @@ struct LainVmTcb {
   const LainVmCapEntry **resolved;
   uint32_t resolved_count;
 
-  /* alloca 栈的**租约**。字节在 admit 时按 stack_bytes 一次给够（引擎里不许分配），
-   * 满了就是 trap，不是扩容。
+  /* 栈：**只借，不拥有**。
    *
-   * 租约记的是「在哪个空间、从哪开始、多少字节」——**不是**一段登记好的区段。
-   * 整块登记会带来一个错误的授权：返回之后旧地址照样在授权范围内，于是必须靠
-   * 地址身份才拦得住；而 `#addr` 是无类型裸地址，**没有身份**。所以授权只跟着
-   * 活窗口走，见下面 stack_window。 */
-  LainVmSpace *stack_space; /* 租约属于哪个空间；NULL = 没有栈 */
-  uintptr_t stack_base;     /* 租约起始地址 */
-  uint64_t stack_size;      /* 租约字节数；0 = 没有栈 */
-  uint64_t stack_used;      /* alloca 水位 */
-
-  /* 栈的**活窗口**：被 VSpace 授权的恰好是 [stack_base, stack_base + stack_used)。
-   * 分配活着时地址能用；水位回退（返回 / 跳出循环 / Trap）窗口跟着缩小，旧地址
-   * 就落到「没有授权」（load 1004 / store 1005）。同一数值地址后来被重新授权时，
-   * 旧裸 `#addr` 与新裸 `#addr` **不可区分** —— 这正是裸地址该有的语义：域外引用
-   * 由 Meta 的 `ref(T)` 生命周期规则挡住，不靠 VM 里的地址身份。 */
-  LainVmRegionHandle stack_window; /* no_handle = 活窗口为空（水位 0） */
-  uint64_t stack_window_size;      /* 活窗口字节数，用来判断是否要重排 */
+   * 字节由供给方用 `lainvm_space_alloc_stack` 申请并登记；TCB 拿到的是一条租约
+   * （空间 + 稳定句柄），校验后 borrow_count++。
+   *   - TCB **不** calloc、**不** free、**不**撤销区段、**不**动 quota；
+   *   - 执行期间 TCB 只决定窗口：`stack_used` 是水位，窗口 = 该区段的可访问前缀；
+   *   - Trap 时窗口归零；销毁时窗口收回 0 并结束借用，区段留给供给方释放。
+   * base / capacity / 权限一律从 VSpace 的记录读，不在 TCB 里留副本。 */
+  LainVmStackLease stack_lease;
+  uint64_t stack_used; /* alloca 水位（procedure activation 的生命周期，见下） */
 
   /* 这次执行的**分配账户**（规范 §8.2 的 allocation quota）。NULL = 不限额。
    * 账户跟着**执行**走，不跟着地址空间走：嵌套调用共享同一个账户，
@@ -178,12 +169,15 @@ struct LainVmTcb {
  *   slot_cap  = frame_cap * image->max_slots
  * id 现在只是**诊断字段**（区段表里写着"这段是谁的"）；回收按句柄精确撤销，
  * 不按 owner 扫表。
- * stack_bytes 为 0 表示不要栈（程序里没有 #alloca）。
- * quota 是这次执行的分配账户（NULL = 不限额）。栈按整块容量在这里**预扣一次**；
- * 预扣失败（余额不足）返回 NULL，且账目**一点都没动**。 */
+ * lease 是供给方给的**栈租约**（`lainvm_stack_no_lease()` = 程序没有 `#alloca`）。
+ * 有租约时先校验（句柄属于 `space`、区段有效、含 READ|WRITE、当前 accessible == 0、
+ * capacity > 0），通过后 `borrow_count++`。**TCB 不申请、不清零、不释放栈字节，
+ * 也不扣配额** —— 额度在供给方 `lainvm_space_alloc_stack` 时就扣过了。
+ * 创建中途失败会把已取得的借用还回去，但**不**释放供给方的区段。
+ * quota 是这次执行的分配账户（NULL = 不限额）；TCB 只持有这个引用，不扣栈容量。 */
 LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
                           uint64_t owner, uint32_t max_call_depth,
-                          uint64_t stack_bytes, LainVmQuota *quota);
+                          LainVmStackLease lease, LainVmQuota *quota);
 void lainvm_tcb_free(LainVmTcb *tcb);
 
 /* 把模块里每个 extern 子过程按 link_name 解析到能力空间。

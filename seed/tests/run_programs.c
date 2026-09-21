@@ -176,7 +176,7 @@ int main(void) {
   printf("bounds: max_region_depth=%u max_slots=%u\n", image->max_region_depth,
          image->max_slots);
 
-  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, 4096, NULL);
+  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, lainvm_stack_no_lease(), NULL);
   if (!tcb) {
     printf("admit failed\n");
     lainvm_image_free(image);
@@ -185,7 +185,7 @@ int main(void) {
   }
   printf("tcb: frame_cap=%u slot_cap=%u stack_pages=%d\n", tcb->frame_cap,
          tcb->slot_cap,
-         tcb->stack_base == 0 ? -1 : (int)(tcb->stack_size / 4096));
+         lainvm_stack_lease_none(tcb->stack_lease) ? -1 : (int)tcb->stack_lease.region.slot);
   printf("---\n");
 
   expect_bits(tcb, "answer", NULL, 0, 42, "answer");

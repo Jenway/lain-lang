@@ -98,7 +98,7 @@ static int run2(const L1Module *module, const char *entry, uint64_t a0,
   lainvm_space_init(&space);
   image = lainvm_image_load(module, &space, &diag);
   if (!image) return 1;
-  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, 4096, NULL);
+  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, lainvm_stack_no_lease(), NULL);
   if (!tcb) {
     lainvm_image_free(image);
     return 1;

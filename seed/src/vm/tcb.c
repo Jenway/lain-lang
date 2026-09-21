@@ -1,7 +1,8 @@
 /* lainvm/tcb.h 的实现：admit。
  *
- * 引擎里不许分配，所以所有上界都在这里算好并一次分配：
- * 帧栈、值槽竞技场、alloca 用的栈区段。
+ * 引擎里不许分配，所以所有上界都在这里算好并一次分配：帧栈、值槽竞技场。
+ * **栈不在这里分配**：字节由供给方用 `lainvm_space_alloc_stack` 申请，
+ * TCB 只接收一条租约并借用（见 tcb.h）。
  */
 #include "lainvm/tcb.h"
 
@@ -13,89 +14,80 @@
 
 static void start_fail(L1Diagnostic *diag, int code, const char *message);
 
+/* 校验供给方给的租约。失败返回非 0；成功时已经 borrow_count++。 */
+static int accept_lease(const LainVmSpace *space, LainVmStackLease lease) {
+  const LainVmRegion *region;
+  if (lainvm_stack_lease_none(lease)) return 0; /* 没有栈的程序：合法 */
+  if (lease.space != space) return 1; /* 句柄必须属于给定的 VSpace */
+  region = lainvm_space_slot(lease.space, lease.region);
+  if (!region) return 2;                              /* 区段无效 */
+  if ((region->rights & (LAINVM_MEM_READ | LAINVM_MEM_WRITE)) !=
+      (LAINVM_MEM_READ | LAINVM_MEM_WRITE)) return 3; /* 缺读或写 */
+  if (region->accessible != 0) return 4;              /* 窗口必须从 0 开始 */
+  if (region->capacity == 0) return 5;                /* 没有容量 */
+  if (!lainvm_space_borrow(lease.space, lease.region)) return 6;
+  return 0;
+}
+
 LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
                           uint64_t owner, uint32_t max_call_depth,
-                          uint64_t stack_bytes, LainVmQuota *quota) {
+                          LainVmStackLease lease, LainVmQuota *quota) {
   LainVmTcb *tcb;
   uint32_t frame_cap;
   uint32_t slot_cap;
   uint32_t depth;
+  bool borrowed;
 
   if (!image || !space || max_call_depth == 0) return NULL;
   depth = image->max_region_depth ? image->max_region_depth : 1;
   frame_cap = max_call_depth * (depth + 1);
   slot_cap = frame_cap * (image->max_slots ? image->max_slots : 1) + 1;
 
+  if (accept_lease(space, lease) != 0) return NULL;
+  borrowed = !lainvm_stack_lease_none(lease);
+
   tcb = (LainVmTcb *)calloc(1, sizeof(LainVmTcb));
-  if (!tcb) return NULL;
+  if (!tcb) {
+    if (borrowed) (void)lainvm_space_end_borrow(lease.space, lease.region);
+    return NULL;
+  }
   tcb->id = id;
   tcb->owner = owner;
   tcb->state = LAINVM_READY;
   tcb->image = image;
   tcb->vspace = space;
-  tcb->stack_space = NULL;
-  tcb->stack_base = 0;
-  tcb->stack_size = 0;
+  tcb->stack_lease = lease;
   tcb->stack_used = 0;
-  tcb->stack_window = lainvm_space_no_handle();
-  tcb->stack_window_size = 0;
   tcb->quota = quota;
   tcb->slice_result = LAINVM_SLICE_RUNNABLE;
 
   tcb->frames = (LainVmFrame *)calloc(frame_cap, sizeof(LainVmFrame));
   tcb->slots = (L1Value *)calloc(slot_cap, sizeof(L1Value));
   if (!tcb->frames || !tcb->slots) {
+    /* 创建中途失败：把自己取得的借用还回去，但**不**释放供给方的区段。 */
+    if (borrowed) (void)lainvm_space_end_borrow(lease.space, lease.region);
+    tcb->stack_lease = lainvm_stack_no_lease();
     lainvm_tcb_free(tcb);
     return NULL;
   }
   tcb->frame_cap = frame_cap;
   tcb->slot_cap = slot_cap;
 
-  if (stack_bytes > 0) {
-    /* 先预扣**整块容量**（规范：栈整块预留时只在预留那一刻扣一次），再分配。
-     * 预扣失败就什么都不留；预扣成功而分配失败必须**回滚**，否则"分配失败"
-     * 会留下抹不掉的扣账。 */
-    if (lainvm_quota_charge(quota, stack_bytes) != 0) {
-      lainvm_tcb_free(tcb);
-      return NULL;
-    }
-    /* 清零是提供内存这一方的责任：不零就没有确定性。 */
-    void *stack = calloc(1, (size_t)stack_bytes);
-    if (!stack) {
-      (void)lainvm_quota_release(quota, stack_bytes);
-      lainvm_tcb_free(tcb);
-      return NULL;
-    }
-    /* 只记租约，**不登记区段**：授权跟着活窗口走（见 tcb.h）。整块登记会让返回后
-     * 的旧地址仍然可访问，那就只能靠地址身份去拦 —— 而 `#addr` 没有身份。 */
-    tcb->stack_space = space;
-    tcb->stack_base = (uintptr_t)stack;
-    tcb->stack_size = stack_bytes;
-  }
-
   return tcb;
 }
 
 void lainvm_tcb_free(LainVmTcb *tcb) {
   if (!tcb) return;
-  /* 先撤**活窗口**。空间从**句柄自己身上**取，不能用 `tcb->vspace`：句柄带着它
-   * 所在空间的身份，而 `tcb->vspace` 可能已经被 set_space 换成别的空间了。实测
-   * （用例 cap_tcb_destroy_after_switch）：换空间后销毁 TCB，拿当前空间去撤销
-   * 一段都撤不掉 —— 窗口留在原地、栈内存再也没人 free，静默泄漏。
-   *
-   * 这里原来还有一处「按缓存的区段下标去取地址」——下标被别的插入挪走之后取回来
-   * 的是别人的地址，free 直接堆损坏（0xC0000374，实测 R03）。 */
-  if (!lainvm_space_handle_none(tcb->stack_window)) {
-    LainVmSpace *window_space = (LainVmSpace *)(uintptr_t)tcb->stack_window.space;
-    lainvm_space_unmap_external(window_space, tcb->stack_window);
-    tcb->stack_window = lainvm_space_no_handle();
-    tcb->stack_window_size = 0;
-  }
-  /* 字节由本 TCB 分配，也由本 TCB 还（这一版供给方就是本 TCB）。
-   * **真的还回去了**才归还额度：水位回退不算归还。 */
-  if (tcb->stack_base != 0) {
-    free((void *)tcb->stack_base);
-    (void)lainvm_quota_release(tcb->quota, tcb->stack_size);
+  /* **只结束借用**：窗口收回 0，然后 borrow_count--。
+   * 不撤销区段、不释放字节、不归还额度 —— 那三件事归供给方（`lainvm_space_free`）。
+   * 空间从**租约自己**身上取，不能用 `tcb->vspace`：`lainvm_tcb_set_space` 可以把
+   * 当前执行空间换成别的，而租约仍在原空间里（拿当前空间去找，一段都找不到，
+   * 借用计数永远归不了零，供给方也就永远释放不了那块存储）。 */
+  if (!lainvm_stack_lease_none(tcb->stack_lease)) {
+    (void)lainvm_space_set_accessible(tcb->stack_lease.space,
+                                      tcb->stack_lease.region, 0);
+    (void)lainvm_space_end_borrow(tcb->stack_lease.space, tcb->stack_lease.region);
+    tcb->stack_lease = lainvm_stack_no_lease();
   }
   free(tcb->frames);
   free(tcb->slots);
@@ -192,14 +184,12 @@ int lainvm_tcb_start(LainVmTcb *tcb, const char *entry, const L1Value *args,
   memset(tcb->frames, 0, sizeof(LainVmFrame) * tcb->frame_cap);
   memset(tcb->slots, 0, sizeof(L1Value) * tcb->slot_cap);
   tcb->stack_used = 0;
-  /* 重启时活窗口必须归零：上一次激活留下的授权要是跟着新激活一起活着，
+  /* 新 activation 从**空窗口**开始：上一次留下的授权要是跟着新激活一起活着，
    * 授权范围就比水位大，旧地址还能访问。 */
-  if (!lainvm_space_handle_none(tcb->stack_window)) {
-    lainvm_space_unmap_external((LainVmSpace *)(uintptr_t)tcb->stack_window.space,
-                        tcb->stack_window);
-    tcb->stack_window = lainvm_space_no_handle();
+  if (!lainvm_stack_lease_none(tcb->stack_lease)) {
+    (void)lainvm_space_set_accessible(tcb->stack_lease.space,
+                                      tcb->stack_lease.region, 0);
   }
-  tcb->stack_window_size = 0;
   tcb->has_result = false;
   memset(&tcb->result, 0, sizeof(tcb->result));
   memset(&tcb->trap, 0, sizeof(tcb->trap));

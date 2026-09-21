@@ -345,6 +345,7 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
                                 const L1Module *module, L1Diagnostic *diag) {
   L1Subroutine *subs;
   const L1Module *out;
+  LainVmStackLease lease = lainvm_stack_no_lease();
   uint32_t i;
 
   if (!fold || !builder || !module) return NULL;
@@ -364,14 +365,30 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
     fold_fail(fold, 9313, "fold: cannot load the module for compile-time runs");
     return NULL;
   }
+  fold->tcb = NULL;
+  /* 供给方 = 这个 fold：栈由它向 VSpace 申请，TCB 只借；执行完由它释放。 */
+  if (fold->stack_bytes > 0) {
+    lease.space = &fold->space;
+    lease.region = lainvm_space_alloc_stack(&fold->space, fold->stack_bytes, 1,
+                                            &fold->quota);
+    if (lainvm_space_handle_none(lease.region)) {
+      fold_fail(fold, 9318, "fold: cannot admit a stack for the compile-time run");
+      return NULL;
+    }
+  }
   fold->tcb = lainvm_tcb_new(fold->image, &fold->space, 1, 1,
-                             fold->max_call_depth, fold->stack_bytes,
-                             &fold->quota);
+                             fold->max_call_depth, lease, &fold->quota);
   if (!fold->tcb) {
+    if (!lainvm_stack_lease_none(lease))
+      (void)lainvm_space_free(&fold->space, lease.region);
     fold_fail(fold, 9314, "fold: cannot admit a compile-time activation");
     return NULL;
   }
   if (fold->caps && lainvm_tcb_set_caps(fold->tcb, fold->caps, diag) != 0) {
+    lainvm_tcb_free(fold->tcb);
+    fold->tcb = NULL;
+    if (!lainvm_stack_lease_none(lease))
+      (void)lainvm_space_free(&fold->space, lease.region);
     fold_fail(fold, 9315, "fold: cannot resolve capabilities");
     return NULL;
   }
@@ -397,6 +414,9 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
   free(subs);
 
   lainvm_tcb_free(fold->tcb);
+  /* TCB 已经结束借用（borrow_count 归零），现在才真正释放并归还额度。 */
+  if (!lainvm_stack_lease_none(lease))
+    (void)lainvm_space_free(&fold->space, lease.region);
   lainvm_image_free(fold->image);
   fold->tcb = NULL;
   fold->image = NULL;

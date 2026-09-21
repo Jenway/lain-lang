@@ -153,7 +153,7 @@ int main(void) {
          image->region_count, image->inst_count, image->operand_count,
          image->result_count);
 
-  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, 4096, NULL);
+  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, lainvm_stack_no_lease(), NULL);
   if (!tcb) {
     report_fail("admit", "failed");
     return 1;

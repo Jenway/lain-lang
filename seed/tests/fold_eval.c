@@ -41,7 +41,7 @@ static int run_bits(const L1Module *module, const char *entry, uint64_t arg,
     printf("     load failed: %d %s\n", diag.code, diag.message);
     return 1;
   }
-  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, 4096, NULL);
+  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, lainvm_stack_no_lease(), NULL);
   if (!tcb) {
     lainvm_image_free(image);
     return 1;

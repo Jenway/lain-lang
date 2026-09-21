@@ -163,6 +163,26 @@ bool lainvm_space_borrow(LainVmSpace *space, LainVmRegionHandle handle);
 /* 结束一次借用。计数为 0 时再结束 -> false 且不变（重复归还要看得见）。 */
 bool lainvm_space_end_borrow(LainVmSpace *space, LainVmRegionHandle handle);
 
+/* --- 栈租约 -----------------------------------------------------------------
+ *
+ * 一条执行流**借来**的栈：只有**空间与句柄**。base / capacity / 权限都从 VSpace 的
+ * 稳定记录读，不在 TCB 里复制一套可能失真的副本（以前复制的 base/size 在换空间、
+ * 换窗口之后就再也对不上了）。
+ *
+ * 生命周期（供给方 = 谁调用 space_alloc_stack）：
+ *   1. 供给方 `lainvm_space_alloc_stack` 拿到句柄（初始 accessible = 0）；
+ *   2. 创建 TCB 时把租约传进去，TCB 校验后 borrow_count++；
+ *   3. 执行期间 TCB 用 `set_accessible` 决定窗口（水位）；Trap 时窗口归零；
+ *   4. 销毁 TCB：窗口收回 0、借用结束，**不**撤销、**不**释放、**不**归还额度；
+ *   5. 供给方随后 `lainvm_space_free` 才真正释放并归还额度。 */
+typedef struct {
+  LainVmSpace *space;        /* 租约所属空间（不是"当前执行空间"） */
+  LainVmRegionHandle region; /* 稳定句柄；no_handle = 没有栈 */
+} LainVmStackLease;
+
+LainVmStackLease lainvm_stack_no_lease(void);
+bool lainvm_stack_lease_none(LainVmStackLease lease);
+
 /* 更新同一区段的**可访问前缀**——句柄全程稳定，窗口变化**不再** remove/add。
  *
  * 这是栈窗口唯一的更新入口（水位涨了放大、水位退了缩小、Trap 归零）。
