@@ -68,13 +68,20 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
 
 void lainvm_tcb_free(LainVmTcb *tcb) {
   if (!tcb) return;
-  if (tcb->vspace && !lainvm_space_handle_none(tcb->stack)) {
+  if (!lainvm_space_handle_none(tcb->stack)) {
     /* 栈的字节由本 TCB 分配：按**句柄**取回地址，再精确撤销那一段。
+     *
+     * 空间也按**句柄里记的那个**取，不能用 `tcb->vspace`：句柄带着租约所在空间
+     * 的身份，而 `tcb->vspace` 可能已经被 set_space 换成别的空间了。实测（用例
+     * cap_tcb_destroy_after_switch）：换空间后销毁 TCB，按 `tcb->vspace` 去撤销
+     * 一段都撤不掉 —— 栈区段留在原地、栈内存再也没人 free，静默泄漏。
+     *
      * 这里原来是「按缓存的区段下标去取地址」——下标被别的插入挪走之后，
      * 取回来的是别人的地址，free 直接堆损坏（0xC0000374，实测 R03）。 */
-    const LainVmRegion *region = lainvm_space_slot(tcb->vspace, tcb->stack);
+    LainVmSpace *lease_space = (LainVmSpace *)(uintptr_t)tcb->stack.space;
+    const LainVmRegion *region = lainvm_space_slot(lease_space, tcb->stack);
     uintptr_t base = region ? region->base : 0;
-    lainvm_space_remove(tcb->vspace, tcb->stack);
+    lainvm_space_remove(lease_space, tcb->stack);
     if (base != 0) free((void *)base);
   }
   free(tcb->frames);
