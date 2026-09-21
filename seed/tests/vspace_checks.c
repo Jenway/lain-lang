@@ -425,6 +425,312 @@ static const char *k_prog_lea_wrap_read =
     "  #return %w\n"
     "}\n";
 
+/* --- activation 组（alloca 属于 procedure activation） ----------------------
+ *
+ * 契约（作者 2026-09-21 定）：`#alloca` 属于当前 procedure activation。
+ * 进入 `#if` / `#loop` / `#switch` 等结构化区域**不**创建新的 alloca 生命周期；
+ * 只有 procedure return、Trap、取消或 TCB 销毁才结束该 activation 的局部存储。
+ *
+ * 审计（修正前）：engine.c 的 3 处区域退出都在回退水位并收回窗口 ——
+ *   leave_region（if / switch / loop 的区域帧退出）、op_break、op_continue。
+ * 那等于把结构化区域退出当成了 alloca 生命周期结束。下面三条就是最小复现。 */
+
+/* 1) `if` 里 alloca，离开 `if` 之后同一过程内访问：契约要求成功。 */
+static const char *k_prog_if_survives =
+    "#proc if_survives() -> #bits<64> {\n"
+    "  %c = #eq[#bits<64>](1, 1)\n"
+    "  %p = #if %c -> (#addr) {\n"
+    "    %s = #alloca[#bits<8>](1)\n"
+    "    #store[#bits<8>](42, %s)\n"
+    "    #yield %s\n"
+    "  } else {\n"
+    "    %z = #int2ptr[#addr](0)\n"
+    "    #yield %z\n"
+    "  }\n"
+    "  %v = #load[#bits<8>](%p)\n"
+    "  %w = #zext[#bits<64>](%v)\n"
+    "  #return %w\n"
+    "}\n";
+
+/* 2) loop 体内 alloca，经 `#continue` 之后用**上一轮**的地址读：契约要求成功
+ * （不能因为区域控制流回退水位而产生悬空授权）。
+ * 每轮 alloca 8 字节、水位不回收 —— 见 activation_loop_growth 记录的增长结果。 */
+static const char *k_prog_loop_continue =
+    "#proc loop_continue() -> #bits<64> {\n"
+    "  %r = #loop it(%i: #bits<64> = 0, %prev: #bits<64> = 0, %acc: #bits<64> = 0)"
+    " -> (#bits<64>) {\n"
+    "    %done = #uge[#bits<64>](%i, 2)\n"
+    "    #if %done {\n"
+    "      #break it(%acc)\n"
+    "    }\n"
+    "    %s = #alloca[#bits<64>](1)\n"
+    "    %n = #add[#bits<64>](%i, 11)\n"
+    "    #store[#bits<64>](%n, %s)\n"
+    "    %first = #eq[#bits<64>](%i, 0)\n"
+    "    %acc2 = #if %first -> (#bits<64>) {\n"
+    "      #yield %acc\n"
+    "    } else {\n"
+    "      %p = #int2ptr[#addr](%prev)\n"
+    "      %v = #load[#bits<64>](%p)\n"
+    "      #yield %v\n"
+    "    }\n"
+    "    %w = #ptr2int[#bits<64>](%s)\n"
+    "    %i2 = #add[#bits<64>](%i, 1)\n"
+    "    #continue it(%i2, %w, %acc2)\n"
+    "  }\n"
+    "  #return %r\n"
+    "}\n";
+
+/* 3) 被调过程 alloca，把地址当**返回值**交给调用方，调用方访问：契约要求拒 1004。 */
+static const char *k_prog_callee_return =
+    "data leaked rw { 0 0 0 0 0 0 0 0 }\n"
+    "#proc give_addr() -> #bits<64> {\n"
+    "  %s = #alloca[#bits<64>](1)\n"
+    "  #store[#bits<64>](7, %s)\n"
+    "  %w = #ptr2int[#bits<64>](%s)\n"
+    "  #return %w\n"
+    "}\n"
+    "#proc use_returned() -> #bits<64> {\n"
+    "  %w = #call give_addr()\n"
+    "  %p = #int2ptr[#addr](%w)\n"
+    "  %v = #load[#bits<64>](%p)\n"
+    "  #return %v\n"
+    "}\n";
+
+/* 4) 根过程结束后访问：两次 activation 共用同一个 TCB 与模块数据。 */
+static const char *k_prog_root_escape =
+    "data leaked rw { 0 0 0 0 0 0 0 0 }\n"
+    "#proc root_give() -> #bits<64> {\n"
+    "  %s = #alloca[#bits<64>](1)\n"
+    "  #store[#bits<64>](7, %s)\n"
+    "  %d = #data_addr leaked\n"
+    "  %w = #ptr2int[#bits<64>](%s)\n"
+    "  #store[#bits<64>](%w, %d)\n"
+    "  #return 1\n"
+    "}\n"
+    "#proc root_use() -> #bits<64> {\n"
+    "  %d = #data_addr leaked\n"
+    "  %w = #load[#bits<64>](%d)\n"
+    "  %p = #int2ptr[#addr](%w)\n"
+    "  %v = #load[#bits<64>](%p)\n"
+    "  #return %v\n"
+    "}\n";
+
+/* 1) `if` 里 alloca，离开 `if` 后同一过程内访问：成功，读到 42。 */
+static int case_activation_if_survives(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_if_survives, 4096) != 0) return 0;
+  (void)rig_run(&rig, "if_survives");
+  rig_free(&rig);
+  return 0;
+}
+
+/* 2) loop 体内 alloca，经 `#continue` 后用上一轮地址读：成功，读到 11。 */
+static int case_activation_loop_continue(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_loop_continue, 4096) != 0) return 0;
+  (void)rig_run(&rig, "loop_continue");
+  rig_free(&rig);
+  return 0;
+}
+
+/* 3) 被调过程返回后访问它的 alloca：拒 1004。 */
+static int case_activation_callee_return(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_callee_return, 4096) != 0) return 0;
+  (void)rig_run(&rig, "use_returned");
+  rig_free(&rig);
+  return 0;
+}
+
+/* 4) 根过程结束（第一次 activation 完成）后，第二次 activation 访问旧地址：拒 1004。 */
+static int case_activation_root_done(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_root_escape, 4096) != 0) return 0;
+  (void)rig_run(&rig, "root_give");
+  if (g_obs.kind != 0 || g_obs.value != 1) {
+    rig_free(&rig);
+    obs_facts("第一次 activation 没跑通：kind=%d value=%llu", g_obs.kind,
+              (unsigned long long)g_obs.value);
+    return 0;
+  }
+  (void)rig_run(&rig, "root_use"); /* 同 TCB、同模块数据、新的 activation */
+  rig_free(&rig);
+  return 0;
+}
+
+/* 5) Trap 之后活窗口必须归零 —— 等 VSpace 的 accessible 接口落地后补（见租约组）。 */
+
+/* --- lease 组（容量 vs 可访问窗口；栈租约的用例也在这里） --------------------
+ *
+ * 数据模型：capacity 是存储字节数（占用/重叠看它），accessible 是当前可访问**前缀**
+ * （访问判定看它）。窗口更新走 `lainvm_space_set_accessible`，句柄全程稳定。 */
+
+/* 窗口可以放大：收回去的地址在放大之后又能访问。 */
+static int case_accessible_grow(void) {
+  LainVmSpace space;
+  uint8_t buf[64];
+  LainVmRegionHandle h;
+
+  memset(buf, 7, sizeof(buf));
+  lainvm_space_init(&space);
+  h = lainvm_space_add(&space, (uintptr_t)buf, 64, LAINVM_MEM_READ, 9);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("登记 64 字节失败");
+    return 0;
+  }
+  if (!lainvm_space_set_accessible(&space, h, 16)) {
+    obs_facts("把窗口收到 16 失败");
+    return 0;
+  }
+  if (lainvm_space_check(&space, (uintptr_t)buf + 32, 1, LAINVM_MEM_READ)) {
+    obs_facts("窗口=16 时 +32 仍然可访问");
+    return 0;
+  }
+  if (!lainvm_space_set_accessible(&space, h, 64)) {
+    obs_facts("把窗口放大回 64 失败");
+    return 0;
+  }
+  if (!lainvm_space_check(&space, (uintptr_t)buf + 32, 1, LAINVM_MEM_READ)) {
+    obs_facts("窗口放大到 64 之后 +32 仍不可访问");
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 缩小之后被收回的那一段**立刻**访问不了；窗口内的还能访问；
+ * capacity 与区段数都不变（窗口变化不是撤销+登记）。 */
+static int case_accessible_shrink_rejects_tail(void) {
+  LainVmSpace space;
+  uint8_t buf[64];
+  LainVmRegionHandle h;
+  const LainVmRegion *r;
+  uint32_t before;
+
+  memset(buf, 7, sizeof(buf));
+  lainvm_space_init(&space);
+  h = lainvm_space_add(&space, (uintptr_t)buf, 64, LAINVM_MEM_READ, 9);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("登记 64 字节失败");
+    return 0;
+  }
+  before = space.live_count;
+  if (!lainvm_space_set_accessible(&space, h, 8)) {
+    obs_facts("把窗口收到 8 失败");
+    return 0;
+  }
+  r = lainvm_space_slot(&space, h);
+  if (!r || r->accessible != 8 || r->capacity != 64) {
+    obs_facts("窗口=8 之后记录不对：capacity=%llu accessible=%llu",
+              r ? (unsigned long long)r->capacity : 0,
+              r ? (unsigned long long)r->accessible : 0);
+    return 0;
+  }
+  if (!lainvm_space_check(&space, (uintptr_t)buf + 4, 4, LAINVM_MEM_READ)) {
+    obs_facts("窗口内的 4 字节读被拒了");
+    return 0;
+  }
+  if (lainvm_space_check(&space, (uintptr_t)buf + 8, 1, LAINVM_MEM_READ)) {
+    obs_facts("窗口外的 +8 仍可访问");
+    return 0;
+  }
+  if (lainvm_space_check(&space, (uintptr_t)buf + 4, 8, LAINVM_MEM_READ)) {
+    obs_facts("跨出窗口的区间（+4..+12）仍可访问");
+    return 0;
+  }
+  if (space.live_count != before) {
+    obs_facts("窗口变化改动了区段数：%u -> %u", (unsigned)before,
+              (unsigned)space.live_count);
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 窗口不许超过容量：拒绝且 accessible 一点不变。 */
+static int case_accessible_over_capacity_reject(void) {
+  LainVmSpace space;
+  uint8_t buf[64];
+  LainVmRegionHandle h;
+  const LainVmRegion *r;
+
+  memset(buf, 7, sizeof(buf));
+  lainvm_space_init(&space);
+  h = lainvm_space_add(&space, (uintptr_t)buf, 64, LAINVM_MEM_READ, 9);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("登记 64 字节失败");
+    return 0;
+  }
+  if (!lainvm_space_set_accessible(&space, h, 32)) {
+    obs_facts("把窗口收到 32 失败");
+    return 0;
+  }
+  if (lainvm_space_set_accessible(&space, h, 65)) {
+    obs_facts("accessible=65 超过了 capacity=64 却被接受");
+    return 0;
+  }
+  r = lainvm_space_slot(&space, h);
+  if (!r || r->accessible != 32) {
+    obs_facts("被拒之后 accessible 变了：%llu（期望 32）",
+              r ? (unsigned long long)r->accessible : 0);
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 坏句柄（无效 / 已撤销 / 跨空间）都要稳定拒绝，而且原区段不变。 */
+static int case_accessible_failure_unchanged(void) {
+  LainVmSpace space;
+  LainVmSpace other;
+  uint8_t buf[64];
+  LainVmRegionHandle h;
+  const LainVmRegion *r;
+
+  memset(buf, 7, sizeof(buf));
+  lainvm_space_init(&space);
+  lainvm_space_init(&other);
+  h = lainvm_space_add(&space, (uintptr_t)buf, 64, LAINVM_MEM_READ, 9);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("登记 64 字节失败");
+    return 0;
+  }
+  if (!lainvm_space_set_accessible(&space, h, 16)) {
+    obs_facts("把窗口收到 16 失败");
+    return 0;
+  }
+  if (lainvm_space_set_accessible(&other, h, 32)) {
+    obs_facts("跨空间句柄被接受了");
+    return 0;
+  }
+  if (lainvm_space_set_accessible(&space, lainvm_space_no_handle(), 32)) {
+    obs_facts("无句柄被接受了");
+    return 0;
+  }
+  r = lainvm_space_slot(&space, h);
+  if (!r || r->accessible != 16 || r->capacity != 64) {
+    obs_facts("失败调用改动了区段：capacity=%llu accessible=%llu",
+              r ? (unsigned long long)r->capacity : 0,
+              r ? (unsigned long long)r->accessible : 0);
+    return 0;
+  }
+  if (!lainvm_space_remove(&space, h)) {
+    obs_facts("撤销失败");
+    return 0;
+  }
+  if (lainvm_space_set_accessible(&space, h, 8)) {
+    obs_facts("已撤销的句柄还能改窗口");
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
 /* --- region 组 -------------------------------------------------------------- */
 
 /* 合法范围里的读：返回那个字节（42）。 */
@@ -2810,6 +3116,23 @@ static const Case k_cases[] = {
     {"host_source_index_bounds", "host", EXP_VALUE, 1, 0,
      case_host_source_index_bounds},
     /* lifetime */
+    /* lease：capacity 与可访问窗口是两件事（窗口更新不 remove/add） */
+    {"accessible_grow", "lease", EXP_VALUE, 1, 0, case_accessible_grow},
+    {"accessible_shrink_rejects_tail", "lease", EXP_VALUE, 1, 0,
+     case_accessible_shrink_rejects_tail},
+    {"accessible_over_capacity_reject", "lease", EXP_VALUE, 1, 0,
+     case_accessible_over_capacity_reject},
+    {"accessible_failure_unchanged", "lease", EXP_VALUE, 1, 0,
+     case_accessible_failure_unchanged},
+    /* activation：alloca 属于 procedure activation（结构化区域退出不结束它） */
+    {"activation_if_survives", "activation", EXP_VALUE, 42, 0,
+     case_activation_if_survives},
+    {"activation_loop_continue", "activation", EXP_VALUE, 11, 0,
+     case_activation_loop_continue},
+    {"activation_callee_return", "activation", EXP_TRAP, 0, 1004,
+     case_activation_callee_return},
+    {"activation_root_done", "activation", EXP_TRAP, 0, 1004,
+     case_activation_root_done},
     {"lifetime_escape", "lifetime", EXP_TRAP, 0, 1004, case_lifetime_escape},
     {"lifetime_reuse", "lifetime", EXP_VALUE, 9, 0, case_lifetime_reuse},
     {"space_switch", "lifetime", EXP_VALUE, 1, 0, case_space_switch},
