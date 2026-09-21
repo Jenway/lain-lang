@@ -104,11 +104,13 @@ static uint8_t *new_buffer(size_t bytes) {
   return p;
 }
 
-/* 只关心"登记成没成"的用例用这个：0 = 成功，-1 = 失败。 */
+/* 只关心"登记成没成"的用例用这个：0 = 成功，-1 = 失败。
+ * 测试用的缓冲都是**外部借入**（测试自己 malloc），所以走 external mapping：
+ * 整段立刻可访问，撤销时不 free、不归还 quota。 */
 static int add(LainVmSpace *space, uintptr_t base, uint64_t size,
                uint32_t rights, uint64_t owner) {
-  return lainvm_space_handle_none(
-             lainvm_space_add(space, base, size, rights, owner))
+  return lainvm_space_handle_none(lainvm_space_map_external(
+             space, base, size, size, rights, owner))
              ? -1
              : 0;
 }
@@ -117,7 +119,7 @@ static int add(LainVmSpace *space, uintptr_t base, uint64_t size,
 static LainVmRegionHandle add_handle(LainVmSpace *space, uintptr_t base,
                                      uint64_t size, uint32_t rights,
                                      uint64_t owner) {
-  return lainvm_space_add(space, base, size, rights, owner);
+  return lainvm_space_map_external(space, base, size, size, rights, owner);
 }
 
 /* 句柄现在指向哪个 base；无效 / 已撤销 → 0。 */
@@ -571,57 +573,63 @@ static int case_activation_root_done(void) {
  * （访问判定看它）。窗口更新走 `lainvm_space_set_accessible`，句柄全程稳定。 */
 
 /* 窗口可以放大：收回去的地址在放大之后又能访问。 */
-static int case_accessible_grow(void) {
+static int case_owned_accessible_grow(void) {
   LainVmSpace space;
-  uint8_t buf[64];
   LainVmRegionHandle h;
+  uintptr_t b; /* owned 存储的 base 由 VSpace 给，不是本地的那个数组 */
 
-  memset(buf, 7, sizeof(buf));
   lainvm_space_init(&space);
-  h = lainvm_space_add(&space, (uintptr_t)buf, 64, LAINVM_MEM_READ, 9);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, NULL);
   if (lainvm_space_handle_none(h)) {
-    obs_facts("登记 64 字节失败");
+    obs_facts("owned 登记 64 字节失败");
     return 0;
   }
+  b = lainvm_space_slot(&space, h)->base;
   if (!lainvm_space_set_accessible(&space, h, 16)) {
     obs_facts("把窗口收到 16 失败");
+    lainvm_space_free(&space, h);
     return 0;
   }
-  if (lainvm_space_check(&space, (uintptr_t)buf + 32, 1, LAINVM_MEM_READ)) {
+  if (lainvm_space_check(&space, b + 32, 1, LAINVM_MEM_READ)) {
     obs_facts("窗口=16 时 +32 仍然可访问");
+    lainvm_space_free(&space, h);
     return 0;
   }
   if (!lainvm_space_set_accessible(&space, h, 64)) {
     obs_facts("把窗口放大回 64 失败");
+    lainvm_space_free(&space, h);
     return 0;
   }
-  if (!lainvm_space_check(&space, (uintptr_t)buf + 32, 1, LAINVM_MEM_READ)) {
+  if (!lainvm_space_check(&space, b + 32, 1, LAINVM_MEM_READ)) {
     obs_facts("窗口放大到 64 之后 +32 仍不可访问");
+    lainvm_space_free(&space, h);
     return 0;
   }
+  lainvm_space_free(&space, h);
   obs_value(1);
   return 0;
 }
 
 /* 缩小之后被收回的那一段**立刻**访问不了；窗口内的还能访问；
  * capacity 与区段数都不变（窗口变化不是撤销+登记）。 */
-static int case_accessible_shrink_rejects_tail(void) {
+static int case_owned_accessible_shrink_rejects_tail(void) {
   LainVmSpace space;
-  uint8_t buf[64];
   LainVmRegionHandle h;
   const LainVmRegion *r;
+  uintptr_t b;
   uint32_t before;
 
-  memset(buf, 7, sizeof(buf));
   lainvm_space_init(&space);
-  h = lainvm_space_add(&space, (uintptr_t)buf, 64, LAINVM_MEM_READ, 9);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, NULL);
   if (lainvm_space_handle_none(h)) {
-    obs_facts("登记 64 字节失败");
+    obs_facts("owned 登记 64 字节失败");
     return 0;
   }
+  b = lainvm_space_slot(&space, h)->base;
   before = space.live_count;
   if (!lainvm_space_set_accessible(&space, h, 8)) {
     obs_facts("把窗口收到 8 失败");
+    lainvm_space_free(&space, h);
     return 0;
   }
   r = lainvm_space_slot(&space, h);
@@ -629,31 +637,37 @@ static int case_accessible_shrink_rejects_tail(void) {
     obs_facts("窗口=8 之后记录不对：capacity=%llu accessible=%llu",
               r ? (unsigned long long)r->capacity : 0,
               r ? (unsigned long long)r->accessible : 0);
+    lainvm_space_free(&space, h);
     return 0;
   }
-  if (!lainvm_space_check(&space, (uintptr_t)buf + 4, 4, LAINVM_MEM_READ)) {
+  if (!lainvm_space_check(&space, b + 4, 4, LAINVM_MEM_READ)) {
     obs_facts("窗口内的 4 字节读被拒了");
+    lainvm_space_free(&space, h);
     return 0;
   }
-  if (lainvm_space_check(&space, (uintptr_t)buf + 8, 1, LAINVM_MEM_READ)) {
+  if (lainvm_space_check(&space, b + 8, 1, LAINVM_MEM_READ)) {
     obs_facts("窗口外的 +8 仍可访问");
+    lainvm_space_free(&space, h);
     return 0;
   }
-  if (lainvm_space_check(&space, (uintptr_t)buf + 4, 8, LAINVM_MEM_READ)) {
+  if (lainvm_space_check(&space, b + 4, 8, LAINVM_MEM_READ)) {
     obs_facts("跨出窗口的区间（+4..+12）仍可访问");
+    lainvm_space_free(&space, h);
     return 0;
   }
   if (space.live_count != before) {
     obs_facts("窗口变化改动了区段数：%u -> %u", (unsigned)before,
               (unsigned)space.live_count);
+    lainvm_space_free(&space, h);
     return 0;
   }
+  lainvm_space_free(&space, h);
   obs_value(1);
   return 0;
 }
 
 /* 窗口不许超过容量：拒绝且 accessible 一点不变。 */
-static int case_accessible_over_capacity_reject(void) {
+static int case_owned_accessible_over_capacity_reject(void) {
   LainVmSpace space;
   uint8_t buf[64];
   LainVmRegionHandle h;
@@ -661,7 +675,7 @@ static int case_accessible_over_capacity_reject(void) {
 
   memset(buf, 7, sizeof(buf));
   lainvm_space_init(&space);
-  h = lainvm_space_add(&space, (uintptr_t)buf, 64, LAINVM_MEM_READ, 9);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, NULL);
   if (lainvm_space_handle_none(h)) {
     obs_facts("登记 64 字节失败");
     return 0;
@@ -680,12 +694,13 @@ static int case_accessible_over_capacity_reject(void) {
               r ? (unsigned long long)r->accessible : 0);
     return 0;
   }
+  lainvm_space_free(&space, h);
   obs_value(1);
   return 0;
 }
 
 /* 坏句柄（无效 / 已撤销 / 跨空间）都要稳定拒绝，而且原区段不变。 */
-static int case_accessible_failure_unchanged(void) {
+static int case_owned_accessible_failure_unchanged(void) {
   LainVmSpace space;
   LainVmSpace other;
   uint8_t buf[64];
@@ -695,7 +710,7 @@ static int case_accessible_failure_unchanged(void) {
   memset(buf, 7, sizeof(buf));
   lainvm_space_init(&space);
   lainvm_space_init(&other);
-  h = lainvm_space_add(&space, (uintptr_t)buf, 64, LAINVM_MEM_READ, 9);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, NULL);
   if (lainvm_space_handle_none(h)) {
     obs_facts("登记 64 字节失败");
     return 0;
@@ -719,12 +734,418 @@ static int case_accessible_failure_unchanged(void) {
               r ? (unsigned long long)r->accessible : 0);
     return 0;
   }
-  if (!lainvm_space_remove(&space, h)) {
+  if (!lainvm_space_free(&space, h)) {
     obs_facts("撤销失败");
     return 0;
   }
   if (lainvm_space_set_accessible(&space, h, 8)) {
     obs_facts("已撤销的句柄还能改窗口");
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* --- owned storage：VSpace 申请、清零、登记、释放，并按**原账户**归还 -------- */
+
+/* 新拿到的存储必须是**清零**的（不零就没有确定性，固定点比较会废）。 */
+static int case_owned_alloc_zeroed(void) {
+  LainVmSpace space;
+  LainVmRegionHandle h;
+  const LainVmRegion *r;
+  uint64_t i;
+
+  lainvm_space_init(&space);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, NULL);
+  r = lainvm_space_slot(&space, h);
+  if (!r) {
+    obs_facts("owned 分配失败");
+    return 0;
+  }
+  for (i = 0; i < r->capacity; i++) {
+    if (((const uint8_t *)r->base)[i] != 0) {
+      obs_facts("分配出来的第 %llu 字节不是 0（capacity=%llu）",
+                (unsigned long long)i, (unsigned long long)r->capacity);
+      lainvm_space_free(&space, h);
+      return 0;
+    }
+  }
+  if (!lainvm_space_free(&space, h)) {
+    obs_facts("释放失败");
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 恰好用完：limit == capacity 成功，used == capacity。 */
+static int case_owned_alloc_quota_exact(void) {
+  LainVmSpace space;
+  LainVmQuota q;
+  LainVmRegionHandle h;
+
+  lainvm_space_init(&space);
+  lainvm_quota_init(&q, 64);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, &q);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("limit 刚好等于 capacity 却分配失败");
+    return 0;
+  }
+  if (q.used != 64 || q.charges != 1) {
+    obs_facts("恰好用完账目不对：used=%llu charges=%llu（期望 64 / 1）",
+              (unsigned long long)q.used, (unsigned long long)q.charges);
+    lainvm_space_free(&space, h);
+    return 0;
+  }
+  lainvm_space_free(&space, h);
+  obs_value(1);
+  return 0;
+}
+
+/* 多一字节：拒绝、used 不变、**没有**登记任何区段、quota 记账为 rejected。 */
+static int case_owned_alloc_quota_reject_unchanged(void) {
+  LainVmSpace space;
+  LainVmQuota q;
+  LainVmRegionHandle h;
+  uint32_t before;
+
+  lainvm_space_init(&space);
+  lainvm_quota_init(&q, 64);
+  before = space.live_count;
+  h = lainvm_space_alloc(&space, 65, 16, 65, LAINVM_MEM_READ, 9, &q);
+  if (!lainvm_space_handle_none(h)) {
+    obs_facts("余额不够却分配成功了");
+    return 0;
+  }
+  if (q.used != 0 || q.rejected != 1) {
+    obs_facts("被拒之后账目动了：used=%llu rejected=%llu（期望 0 / 1）",
+              (unsigned long long)q.used, (unsigned long long)q.rejected);
+    return 0;
+  }
+  if (space.live_count != before) {
+    obs_facts("被拒之后区段数变了：%u -> %u", (unsigned)before,
+              (unsigned)space.live_count);
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 预扣成功而底层分配失败：账目必须回滚（用 2^60 字节让 calloc 必然失败）。 */
+static int case_owned_alloc_failure_rolls_back_quota(void) {
+  LainVmSpace space;
+  LainVmQuota q;
+  LainVmRegionHandle h;
+  uint32_t before;
+
+  lainvm_space_init(&space);
+  lainvm_quota_init(&q, 0); /* 不限额：预扣一定成功，失败必须发生在分配那一步 */
+  before = space.live_count;
+  h = lainvm_space_alloc(&space, 1ull << 60, 16, 0, LAINVM_MEM_READ, 9, &q);
+  if (!lainvm_space_handle_none(h)) {
+    obs_facts("2^60 字节居然分配成功了 —— 这条打不到回滚路径");
+    return 0;
+  }
+  if (q.used != 0 || q.charges != 1 || q.releases != 1) {
+    obs_facts("分配失败留下扣账：used=%llu charges=%llu releases=%llu"
+              "（期望 0 / 1 / 1）",
+              (unsigned long long)q.used, (unsigned long long)q.charges,
+              (unsigned long long)q.releases);
+    return 0;
+  }
+  if (space.live_count != before) {
+    obs_facts("失败的分配登记了区段：%u -> %u", (unsigned)before,
+              (unsigned)space.live_count);
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 释放：归还额度、区段消失。 */
+static int case_owned_free_returns_quota(void) {
+  LainVmSpace space;
+  LainVmQuota q;
+  LainVmRegionHandle h;
+
+  lainvm_space_init(&space);
+  lainvm_quota_init(&q, 64);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, &q);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("分配失败");
+    return 0;
+  }
+  if (!lainvm_space_free(&space, h)) {
+    obs_facts("释放失败");
+    return 0;
+  }
+  if (q.used != 0 || q.releases != 1) {
+    obs_facts("释放之后账目不对：used=%llu releases=%llu（期望 0 / 1）",
+              (unsigned long long)q.used, (unsigned long long)q.releases);
+    return 0;
+  }
+  if (lainvm_space_slot(&space, h) != NULL) {
+    obs_facts("释放之后句柄还指着区段");
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 重复释放：第二次拒绝，表与账都不变。 */
+static int case_owned_double_free_reject(void) {
+  LainVmSpace space;
+  LainVmQuota q;
+  LainVmRegionHandle h;
+
+  lainvm_space_init(&space);
+  lainvm_quota_init(&q, 64);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, &q);
+  if (lainvm_space_handle_none(h) || !lainvm_space_free(&space, h)) {
+    obs_facts("第一次分配/释放就失败了");
+    return 0;
+  }
+  if (lainvm_space_free(&space, h)) {
+    obs_facts("重复释放被接受了");
+    return 0;
+  }
+  if (q.used != 0 || q.releases != 1) {
+    obs_facts("重复释放改动了账目：used=%llu releases=%llu（期望 0 / 1）",
+              (unsigned long long)q.used, (unsigned long long)q.releases);
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 跨空间句柄：在别的空间里释放必须拒绝，原区段还在、账不动。 */
+static int case_owned_cross_space_reject(void) {
+  LainVmSpace space;
+  LainVmSpace other;
+  LainVmQuota q;
+  LainVmRegionHandle h;
+
+  lainvm_space_init(&space);
+  lainvm_space_init(&other);
+  lainvm_quota_init(&q, 64);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, &q);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("分配失败");
+    return 0;
+  }
+  if (lainvm_space_free(&other, h)) {
+    obs_facts("跨空间释放被接受了");
+    return 0;
+  }
+  if (!lainvm_space_slot(&space, h)) {
+    obs_facts("跨空间的失败调用动到了原区段");
+    return 0;
+  }
+  if (q.used != 64) {
+    obs_facts("跨空间的失败调用动了账：used=%llu（期望 64）",
+              (unsigned long long)q.used);
+    return 0;
+  }
+  lainvm_space_free(&space, h);
+  obs_value(1);
+  return 0;
+}
+
+/* 还有活借用时不许释放：区域、借用计数、账目都不动。 */
+static int case_owned_free_while_borrowed_reject(void) {
+  LainVmSpace space;
+  LainVmQuota q;
+  LainVmRegionHandle h;
+  const LainVmRegion *r;
+
+  lainvm_space_init(&space);
+  lainvm_quota_init(&q, 64);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, &q);
+  if (lainvm_space_handle_none(h) || !lainvm_space_borrow(&space, h)) {
+    obs_facts("分配或借用失败");
+    return 0;
+  }
+  if (lainvm_space_free(&space, h)) {
+    obs_facts("有活借用时释放被接受了");
+    return 0;
+  }
+  r = lainvm_space_slot(&space, h);
+  if (!r || r->borrow_count != 1) {
+    obs_facts("被拒之后借用计数变了：%u（期望 1）",
+              r ? (unsigned)r->borrow_count : 999u);
+    return 0;
+  }
+  if (q.used != 64) {
+    obs_facts("被拒之后账目变了：used=%llu（期望 64）",
+              (unsigned long long)q.used);
+    return 0;
+  }
+  if (!lainvm_space_end_borrow(&space, h) || !lainvm_space_free(&space, h)) {
+    obs_facts("结束借用之后仍然释放不了");
+    return 0;
+  }
+  if (q.used != 0) {
+    obs_facts("释放之后账目没归零：used=%llu", (unsigned long long)q.used);
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* --- external mapping：只授权与撤销，不 free、不重复扣账 -------------------- */
+
+/* 借入的存储按登记时的窗口可读；没给 WRITE 就写不了。 */
+static int case_external_map_access(void) {
+  LainVmSpace space;
+  uint8_t buf[64];
+  LainVmRegionHandle h;
+
+  memset(buf, 42, sizeof(buf));
+  lainvm_space_init(&space);
+  h = lainvm_space_map_external(&space, (uintptr_t)buf, 64, 64,
+                                LAINVM_MEM_READ, 9);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("external 登记失败");
+    return 0;
+  }
+  if (!lainvm_space_check(&space, (uintptr_t)buf, 64, LAINVM_MEM_READ)) {
+    obs_facts("借入区间内的读被拒了");
+    return 0;
+  }
+  if (lainvm_space_check(&space, (uintptr_t)buf, 1, LAINVM_MEM_WRITE)) {
+    obs_facts("只给了 READ 却能写");
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 撤销映射之后立刻不能访问（但字节还在）。 */
+static int case_external_unmap_rejects_access(void) {
+  LainVmSpace space;
+  uint8_t buf[64];
+  LainVmRegionHandle h;
+
+  memset(buf, 42, sizeof(buf));
+  lainvm_space_init(&space);
+  h = lainvm_space_map_external(&space, (uintptr_t)buf, 64, 64,
+                                LAINVM_MEM_READ, 9);
+  if (lainvm_space_handle_none(h) || !lainvm_space_unmap_external(&space, h)) {
+    obs_facts("登记或撤销失败");
+    return 0;
+  }
+  if (lainvm_space_check(&space, (uintptr_t)buf, 1, LAINVM_MEM_READ)) {
+    obs_facts("撤销之后还能访问");
+    return 0;
+  }
+  if (buf[0] != 42) {
+    obs_facts("撤销之后字节被改动了：%u", (unsigned)buf[0]);
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 撤销映射**不释放**底层存储：字节原样，仍归调用方所有（由它自己 free）。 */
+static int case_external_unmap_does_not_free_backing(void) {
+  LainVmSpace space;
+  uint8_t *buf;
+  LainVmRegionHandle h;
+  uint32_t i;
+  int same = 1;
+
+  buf = new_buffer(64);
+  if (!buf) {
+    obs_facts("malloc 失败");
+    return 0;
+  }
+  memset(buf, 0x5A, 64);
+  lainvm_space_init(&space);
+  h = lainvm_space_map_external(&space, (uintptr_t)buf, 64, 64,
+                                LAINVM_MEM_READ, 9);
+  if (lainvm_space_handle_none(h) || !lainvm_space_unmap_external(&space, h)) {
+    free(buf);
+    obs_facts("登记或撤销失败");
+    return 0;
+  }
+  for (i = 0; i < 64; i++) {
+    if (buf[i] != 0x5A) same = 0;
+  }
+  if (!same) {
+    obs_facts("撤销映射改动了借入的字节（那是调用方的存储）");
+    free(buf);
+    return 0;
+  }
+  free(buf); /* 释放归借出方：VSpace 不管 */
+  obs_value(1);
+  return 0;
+}
+
+/* 借入的存储**不扣账**（它不归 VSpace 申请），登记与撤销都不动 quota。 */
+static int case_external_mapping_does_not_double_charge(void) {
+  LainVmSpace space;
+  LainVmQuota q;
+  uint8_t buf[64];
+  LainVmRegionHandle h;
+  const LainVmRegion *r;
+
+  memset(buf, 7, sizeof(buf));
+  lainvm_space_init(&space);
+  lainvm_quota_init(&q, 64);
+  h = lainvm_space_map_external(&space, (uintptr_t)buf, 64, 64,
+                                LAINVM_MEM_READ, 9);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("external 登记失败");
+    return 0;
+  }
+  r = lainvm_space_slot(&space, h);
+  if (!r || r->charged != 0 || r->quota != NULL ||
+      r->backing_kind != LAINVM_BACKING_EXTERNAL) {
+    obs_facts("借入区段带了账目：charged=%llu kind=%u",
+              r ? (unsigned long long)r->charged : 0,
+              r ? (unsigned)r->backing_kind : 999u);
+    return 0;
+  }
+  if (q.used != 0) {
+    obs_facts("借入登记扣了账：used=%llu（期望 0）",
+              (unsigned long long)q.used);
+    return 0;
+  }
+  if (!lainvm_space_unmap_external(&space, h) || q.used != 0) {
+    obs_facts("撤销借入改动了账目：used=%llu",
+              (unsigned long long)q.used);
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 跨空间：借入映射也不能在别的空间里撤销。 */
+static int case_external_cross_space_reject(void) {
+  LainVmSpace space;
+  LainVmSpace other;
+  uint8_t buf[64];
+  LainVmRegionHandle h;
+
+  memset(buf, 7, sizeof(buf));
+  lainvm_space_init(&space);
+  lainvm_space_init(&other);
+  h = lainvm_space_map_external(&space, (uintptr_t)buf, 64, 64,
+                                LAINVM_MEM_READ, 9);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("external 登记失败");
+    return 0;
+  }
+  if (lainvm_space_unmap_external(&other, h)) {
+    obs_facts("跨空间撤销映射被接受了");
+    return 0;
+  }
+  if (!lainvm_space_slot(&space, h)) {
+    obs_facts("跨空间的失败调用动到了原映射");
+    return 0;
+  }
+  if (!lainvm_space_check(&space, (uintptr_t)buf, 1, LAINVM_MEM_READ)) {
+    obs_facts("失败调用之后原映射不能访问了");
     return 0;
   }
   obs_value(1);
@@ -857,7 +1278,7 @@ static int case_region_remove_identity(void) {
   }
   base_b = base_of(&space, ref_b);
   base_c = base_of(&space, ref_c);
-  if (!lainvm_space_remove(&space, ref_a)) {
+  if (!lainvm_space_unmap_external(&space, ref_a)) {
     free(buf);
     obs_facts("按句柄撤销第一段失败");
     return 0;
@@ -899,7 +1320,7 @@ static int case_region_remove_precise(void) {
     return 0;
   }
   before = space.live_count;
-  (void)lainvm_space_remove(&space, tcb_seg);
+  (void)lainvm_space_unmap_external(&space, tcb_seg);
   after = space.live_count;
   if (after != before - 1 || lainvm_space_slot(&space, loader_a) == NULL ||
       lainvm_space_slot(&space, loader_b) == NULL ||
@@ -1071,7 +1492,7 @@ static int case_region_handle_stale(void) {
   lainvm_space_init(&space);
   old_handle = add_handle(&space, (uintptr_t)buf, 1024, LAINVM_MEM_READ, 1);
   if (lainvm_space_handle_none(old_handle) ||
-      !lainvm_space_remove(&space, old_handle)) {
+      !lainvm_space_unmap_external(&space, old_handle)) {
     free(buf);
     obs_facts("登记/撤销第一段失败");
     return 0;
@@ -1117,7 +1538,7 @@ static int case_region_handle_cross_space(void) {
     return 0;
   }
   live_b = b.live_count;
-  if (lainvm_space_slot(&b, in_a) != NULL || lainvm_space_remove(&b, in_a) ||
+  if (lainvm_space_slot(&b, in_a) != NULL || lainvm_space_unmap_external(&b, in_a) ||
       b.live_count != live_b) {
     free(buf);
     obs_facts("另一个空间接受了别人的句柄（活段 %u -> %u）", (unsigned)live_b,
@@ -1142,13 +1563,13 @@ static int case_region_handle_double_remove(void) {
   }
   lainvm_space_init(&space);
   handle = add_handle(&space, (uintptr_t)buf, 1024, LAINVM_MEM_READ, 1);
-  if (lainvm_space_handle_none(handle) || !lainvm_space_remove(&space, handle)) {
+  if (lainvm_space_handle_none(handle) || !lainvm_space_unmap_external(&space, handle)) {
     free(buf);
     obs_facts("登记 / 第一次撤销失败");
     return 0;
   }
   live = space.live_count;
-  if (lainvm_space_remove(&space, handle)) {
+  if (lainvm_space_unmap_external(&space, handle)) {
     free(buf);
     obs_facts("第二次撤销被当成成功");
     return 0;
@@ -3116,14 +3537,40 @@ static const Case k_cases[] = {
     {"host_source_index_bounds", "host", EXP_VALUE, 1, 0,
      case_host_source_index_bounds},
     /* lifetime */
+    /* owned storage（VSpace 申请、清零、登记、释放；按原账户归还） */
+    {"owned_alloc_zeroed", "lease", EXP_VALUE, 1, 0, case_owned_alloc_zeroed},
+    {"owned_alloc_quota_exact", "lease", EXP_VALUE, 1, 0,
+     case_owned_alloc_quota_exact},
+    {"owned_alloc_quota_reject_unchanged", "lease", EXP_VALUE, 1, 0,
+     case_owned_alloc_quota_reject_unchanged},
+    {"owned_alloc_failure_rolls_back_quota", "lease", EXP_VALUE, 1, 0,
+     case_owned_alloc_failure_rolls_back_quota},
+    {"owned_free_returns_quota", "lease", EXP_VALUE, 1, 0,
+     case_owned_free_returns_quota},
+    {"owned_double_free_reject", "lease", EXP_VALUE, 1, 0,
+     case_owned_double_free_reject},
+    {"owned_cross_space_reject", "lease", EXP_VALUE, 1, 0,
+     case_owned_cross_space_reject},
+    {"owned_free_while_borrowed_reject", "lease", EXP_VALUE, 1, 0,
+     case_owned_free_while_borrowed_reject},
+    /* external mapping（只授权与撤销：不 free、不扣账） */
+    {"external_map_access", "lease", EXP_VALUE, 1, 0, case_external_map_access},
+    {"external_unmap_rejects_access", "lease", EXP_VALUE, 1, 0,
+     case_external_unmap_rejects_access},
+    {"external_unmap_does_not_free_backing", "lease", EXP_VALUE, 1, 0,
+     case_external_unmap_does_not_free_backing},
+    {"external_mapping_does_not_double_charge", "lease", EXP_VALUE, 1, 0,
+     case_external_mapping_does_not_double_charge},
+    {"external_cross_space_reject", "lease", EXP_VALUE, 1, 0,
+     case_external_cross_space_reject},
     /* lease：capacity 与可访问窗口是两件事（窗口更新不 remove/add） */
-    {"accessible_grow", "lease", EXP_VALUE, 1, 0, case_accessible_grow},
-    {"accessible_shrink_rejects_tail", "lease", EXP_VALUE, 1, 0,
-     case_accessible_shrink_rejects_tail},
-    {"accessible_over_capacity_reject", "lease", EXP_VALUE, 1, 0,
-     case_accessible_over_capacity_reject},
-    {"accessible_failure_unchanged", "lease", EXP_VALUE, 1, 0,
-     case_accessible_failure_unchanged},
+    {"owned_accessible_grow", "lease", EXP_VALUE, 1, 0, case_owned_accessible_grow},
+    {"owned_accessible_shrink_rejects_tail", "lease", EXP_VALUE, 1, 0,
+     case_owned_accessible_shrink_rejects_tail},
+    {"owned_accessible_over_capacity_reject", "lease", EXP_VALUE, 1, 0,
+     case_owned_accessible_over_capacity_reject},
+    {"owned_accessible_failure_unchanged", "lease", EXP_VALUE, 1, 0,
+     case_owned_accessible_failure_unchanged},
     /* activation：alloca 属于 procedure activation（结构化区域退出不结束它） */
     {"activation_if_survives", "activation", EXP_VALUE, 42, 0,
      case_activation_if_survives},

@@ -182,13 +182,14 @@ static int32_t stack_window_sync(LainVmTcb *tcb) {
   if (space == NULL) return 0;
   if (used == old_size && (used != 0) == had) return 0; /* 已经对齐 */
   if (had) {
-    lainvm_space_remove((LainVmSpace *)(uintptr_t)old.space, old);
+    lainvm_space_unmap_external((LainVmSpace *)(uintptr_t)old.space, old);
     tcb->stack_window = lainvm_space_no_handle();
     tcb->stack_window_size = 0;
   }
   if (used == 0) return 0; /* 水位归零：什么都不授权 */
-  fresh = lainvm_space_add(space, tcb->stack_base, used,
-                           LAINVM_MEM_READ | LAINVM_MEM_WRITE, tcb->id);
+  fresh = lainvm_space_map_external(space, tcb->stack_base, used, used,
+                                    LAINVM_MEM_READ | LAINVM_MEM_WRITE,
+                                    tcb->id);
   if (!lainvm_space_handle_none(fresh)) {
     tcb->stack_window = fresh;
     tcb->stack_window_size = used;
@@ -196,8 +197,9 @@ static int32_t stack_window_sync(LainVmTcb *tcb) {
   }
   if (!had) return 1036;
   /* 加不上：把旧窗口装回去，尽量保持「授权范围 = 上次成功时的水位」。 */
-  fresh = lainvm_space_add(space, tcb->stack_base, old_size,
-                           LAINVM_MEM_READ | LAINVM_MEM_WRITE, tcb->id);
+  fresh = lainvm_space_map_external(space, tcb->stack_base, old_size, old_size,
+                                    LAINVM_MEM_READ | LAINVM_MEM_WRITE,
+                                    tcb->id);
   if (!lainvm_space_handle_none(fresh)) {
     tcb->stack_window = fresh;
     tcb->stack_window_size = old_size;

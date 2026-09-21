@@ -476,11 +476,12 @@ int main(int argc, char **argv) {
       const char *path = lainmeta_host_source_path(host, index);
       size_t path_length = strlen(path) + 1u; /* 连 NUL 一起授权 */
       if (!text ||
-          lainvm_space_handle_none(lainvm_space_add(
-              &meta_space, (uintptr_t)text, text_length, LAINVM_MEM_READ, 0)) ||
-          lainvm_space_handle_none(lainvm_space_add(
+          lainvm_space_handle_none(lainvm_space_map_external(
+              &meta_space, (uintptr_t)text, text_length, text_length,
+              LAINVM_MEM_READ, 0)) ||
+          lainvm_space_handle_none(lainvm_space_map_external(
               &meta_space, (uintptr_t)path, (uint32_t)path_length,
-              LAINVM_MEM_READ, 0))) {
+              (uint32_t)path_length, LAINVM_MEM_READ, 0))) {
         report_fail("source grant", "the address space rejected a source");
         goto cleanup;
       }
@@ -492,9 +493,9 @@ int main(int argc, char **argv) {
     uint32_t scratch_size = 0;
     void *scratch = lainmeta_host_scratch(host, &scratch_size);
     if (!scratch ||
-        lainvm_space_handle_none(
-            lainvm_space_add(&meta_space, (uintptr_t)scratch, scratch_size,
-                             LAINVM_MEM_READ | LAINVM_MEM_WRITE, 0))) {
+        lainvm_space_handle_none(lainvm_space_map_external(
+            &meta_space, (uintptr_t)scratch, scratch_size, scratch_size,
+            LAINVM_MEM_READ | LAINVM_MEM_WRITE, 0))) {
       report_fail("scratch grant", "the address space rejected the scratch");
       goto cleanup;
     }
