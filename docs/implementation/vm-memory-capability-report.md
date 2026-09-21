@@ -268,3 +268,58 @@ sizeof: table=4120  object=32  cap=48  handle=8  ref=16
 ```
 
 **行为没有变宽**：失败仍是那 4 条（R04/R05 宿主边界、R06/R07 地址模型），未定仍是那 4 条。
+
+---
+
+## §11 第 5 步接线（受检引用进真实通路）实测
+
+设计见 `docs/implementation/vm-memory-capability-wiring-design.md`。分两片落地：`6b4c19a`
+（值层 + `#alloca`/`#lea`/load/store/`#ptr2int`/`#int2ptr` + activation 生命周期）、`8971755`
+（宿主边界先检后写）。
+
+**接上了什么**
+
+- `L1Value` 新增 `L1_VALUE_REF`（载荷 16 B）→ `L1Value` **24 B**（作者已批的"大卡"代价）。
+  `L1Value.as.ref` 与 `LainVmMemRef` 同布局（`_Static_assert` 钉住）。
+- ADDR 两种味道：**RAW**（宿主能力结果 / `#data_addr` / TCB 栈基址，只过 VSpace）与 **REF**
+  （`#alloca`、base 是 REF 的 `#lea`、`#int2ptr`、`#load[#addr]` 读到的记录，过能力模型五步）。
+  `#ptr2int` 对 REF 只给身份位、`#int2ptr` 只造 REF ⇒ **程序内部洗不出 RAW**。
+- `type_size(TY_ADDR) = 16`：`#addr` 落内存是 16 字节自描述记录（字 0 = 0 → RAW、字 1 是裸指针；
+  否则字 0 = 代数(32)|槽号(32)、字 1 = 偏移）。两种味道都过得去，不会静默截断。
+- `#alloca` 一次发放一笔对象 + 一条覆盖它的能力（owner = 本次 activation），返回 REF。
+- 过程结束（正常返回 / `leave_region` / Trap / 销毁 TCB）四条路径都 `revoke_owner` + 释放对象：
+  **撤销访问权与释放存储是两个动作，都做**。
+- 宿主边界：宿主服务由驱动 `lainmeta_host_attach_space` 显式授权；`lain_meta_emit_write` 在任何
+  副作用之前判"有没有授权"与"区间在不在该空间授权的区段里"，拒时输出一个字节都不动
+  （新码 `LAINMETA_ERR_DENIED = 5`）。
+- `fold` 遇到 REF 直接 **9309**，不把引用静默变成编译期常量。
+
+**实测**
+
+```text
+python scripts/build.py                                BUILD OK
+python scripts/check_vspace.py                         50 条：通过 46，失败 0，未定 4
+   --group capability                                  21 条：通过 21
+   --group host                                         4 条：通过 3，未定 1
+python scripts/check_meta.py                           19/19
+负对照（host_in_region_ok 值改 99 / host_past_region 码改 9999）  都 exit=1
+worktree @ 6b4c19a 与 @ 0d6b82c 前后语料快照            64/64 逐字节一致（两次）
+```
+
+**交接 §5 点名的那几条，现在的结果**
+
+| 项 | 交付 A 时 | 现在 |
+| --- | --- | --- |
+| R04 宿主按裸地址读区段外 | 复现（status=0，输出长度 2） | **拒 5**，正对照区内 4 字节仍成功 |
+| R05 换一个没授权的宿主对象 | 复现（写进诱饵输出，长度 4） | **拒 5**，诱饵输出仍是 0 |
+| R06 引用逃逸后仍可读 | 复现（读到陈旧值 7） | **拒 9207** |
+| R07 同址复用后旧引用仍可进 | 复现（读到 7） | **拒 9207** |
+| 失败 / 未定 | 4 / 4（46 条） | **0 / 4（50 条）** |
+
+**没做的（明确记着）**
+
+- **C 后端是"未受检后端"**：同帧内用法两边一致（`alloca_store` 用例），缺口只有**逃逸**这一处
+  —— 解释器拒、C 后端没有对应检查。改它属于多后端 ABI，需要作者确认（设计 §4）。
+- 4 条 BLOCKED 不变：`host_source_index_bounds`（未实施）、`lea_construct_only` / `lea_wraparound`
+  （等 D3）、`budget_unimplemented`（等 D5）。
+- 槽号 + 代数仍可猜（需要 CSpace 索引）；单线程假设；`lea` 的宽度语义（D3）未定。
