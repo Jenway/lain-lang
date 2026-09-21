@@ -263,6 +263,17 @@ bool lainvm_space_end_borrow(LainVmSpace *space, LainVmRegionHandle handle) {
   return true;
 }
 
+LainVmStackLease lainvm_stack_no_lease(void) {
+  LainVmStackLease lease;
+  lease.space = NULL;
+  lease.region = lainvm_space_no_handle();
+  return lease;
+}
+
+bool lainvm_stack_lease_none(LainVmStackLease lease) {
+  return lease.space == NULL || lainvm_space_handle_none(lease.region);
+}
+
 bool lainvm_space_set_accessible(LainVmSpace *space, LainVmRegionHandle handle,
                                  uint64_t accessible) {
   LainVmRegion *region = slot_mut(space, handle);
