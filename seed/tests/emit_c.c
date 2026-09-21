@@ -460,7 +460,7 @@ int main(void) {
     }
   }
 
-  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, 4096);
+  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, 4096, NULL);
   if (!tcb) {
     printf("admit failed\n");
     return 1;

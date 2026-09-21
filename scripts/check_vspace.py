@@ -31,7 +31,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXE = ROOT / "build" / ("vspace_checks.exe" if os.name == "nt" else "vspace_checks")
-GROUPS = ("region", "stack", "host", "lifetime", "budget", "lea", "addr",
+GROUPS = ("region", "stack", "host", "lifetime", "quota", "lea", "addr",
           "checked-ref")
 DEFAULT_TIMEOUT = 60.0
 

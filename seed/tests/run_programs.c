@@ -176,7 +176,7 @@ int main(void) {
   printf("bounds: max_region_depth=%u max_slots=%u\n", image->max_region_depth,
          image->max_slots);
 
-  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, 4096);
+  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, 4096, NULL);
   if (!tcb) {
     printf("admit failed\n");
     lainvm_image_free(image);

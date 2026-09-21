@@ -22,6 +22,10 @@ struct LainFold {
   uint32_t max_call_depth;
   uint64_t stack_bytes;
   uint64_t fuel;
+  /* 这次编译期执行的**分配账户**：一次最外层执行一个账户，嵌套调用共享它。
+   * limit = 0 = 不限额（默认，行为跟从前一样）。栈按整块容量在 admit 时预扣，
+   * 归还发生在 TCB 销毁时。 */
+  LainVmQuota quota;
 
   /* 一次 lainfold_module 期间的状态 */
   L1Builder *builder;
@@ -56,7 +60,20 @@ LainFold *lainfold_new(LainVmCaps *caps, uint32_t max_call_depth,
   fold->max_call_depth = max_call_depth ? max_call_depth : 64;
   fold->stack_bytes = stack_bytes;
   fold->fuel = fuel ? fuel : 1000000;
+  lainvm_quota_init(&fold->quota, 0); /* 默认不限额 */
   return fold;
+}
+
+/* 设这次编译期执行的分配预算（字节）。0 = 不限额。要在第一次
+ * lainfold_module 之前调用：账户是**执行**级的，不随模块重置。 */
+void lainfold_set_quota_limit(LainFold *fold, uint64_t limit_bytes) {
+  if (fold) lainvm_quota_init(&fold->quota, limit_bytes);
+}
+
+/* 账户只读快照，给驱动与验收用。 */
+void lainfold_quota(const LainFold *fold, LainVmQuota *out) {
+  if (!fold || !out) return;
+  *out = fold->quota;
 }
 
 void lainfold_free(LainFold *fold) { free(fold); }
@@ -348,7 +365,8 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
     return NULL;
   }
   fold->tcb = lainvm_tcb_new(fold->image, &fold->space, 1, 1,
-                             fold->max_call_depth, fold->stack_bytes);
+                             fold->max_call_depth, fold->stack_bytes,
+                             &fold->quota);
   if (!fold->tcb) {
     fold_fail(fold, 9314, "fold: cannot admit a compile-time activation");
     return NULL;

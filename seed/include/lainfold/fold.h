@@ -24,6 +24,7 @@
 #include "lainir/build.h"
 #include "lainir/core.h"
 #include "lainvm/caps.h"
+#include "lainvm/quota.h"
 
 typedef struct LainFold LainFold;
 
@@ -32,6 +33,16 @@ typedef struct LainFold LainFold;
 LainFold *lainfold_new(LainVmCaps *caps, uint32_t max_call_depth,
                        uint64_t stack_bytes, uint64_t fuel);
 void lainfold_free(LainFold *fold);
+
+/* 设这次**编译期执行**的分配预算（字节；0 = 不限额，也是默认）。
+ * 账户是执行级的：一次最外层执行一个，嵌套调用共享它，不同模块之间不重置。
+ * 扣费点是真正承诺底层存储的地方（栈按整块容量在 admit 时扣一次；宿主暂存区与
+ * 输出扩容由 lainmeta_host_attach_quota 挂上同一个账户）。
+ * 要在第一次 lainfold_module 之前调用。 */
+void lainfold_set_quota_limit(LainFold *fold, uint64_t limit_bytes);
+
+/* 读账目快照（只读，给驱动与验收用）。 */
+void lainfold_quota(const LainFold *fold, LainVmQuota *out);
 
 /* 把整个模块里的 #eval 调用跑出来，结果替成字面量，产出新模块。
  * 输入模块不变。失败返回 NULL，诊断写进 diag。 */

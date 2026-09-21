@@ -160,7 +160,7 @@ static int rig_load(Rig *rig, const char *text, uint64_t stack_bytes) {
     obs_facts("load: code=%d %s", diag.code, diag.message);
     return -3;
   }
-  rig->tcb = lainvm_tcb_new(rig->image, &rig->space, 1, 1, 64, stack_bytes);
+  rig->tcb = lainvm_tcb_new(rig->image, &rig->space, 1, 1, 64, stack_bytes, NULL);
   if (!rig->tcb) {
     if (diag.code != 0) rig->fail_code = diag.code;
     obs_facts("admit 失败（stack_bytes=%llu）", (unsigned long long)stack_bytes);
@@ -353,22 +353,75 @@ static const char *k_prog_reuse_guard =
     "  #return %v\n"
     "}\n";
 
-/* 只构造区段外地址、不访问。 */
+/* `#lea` 是**地址位模式算术**（D3 已定：构造不查、访问查，按地址宽度取模）。
+ * 下面几个程序都从同一个 data 符号出发，把**构造出来的相对偏移**返回 —— 这样
+ * "构造成功了"就变成一个可断言的数值，而不是靠"没崩"推断。 */
 static const char *k_prog_lea_far =
+    "data bytes ro { 42 }\n"
     "#proc lea_far() -> #bits<64> {\n"
-    "  %p = #int2ptr[#addr](4096)\n"
-    "  %q = #lea(%p, 0, 1, 1000000)\n"
+    "  %b = #data_addr bytes\n"
+    "  %q = #lea(%b, 0, 1, 1000000)\n"
     "  %w = #ptr2int[#bits<64>](%q)\n"
-    "  %z = #sub[#bits<64>](%w, %w)\n"
-    "  #return %z\n"
+    "  %bw = #ptr2int[#bits<64>](%b)\n"
+    "  %d = #sub[#bits<64>](%w, %bw)\n"
+    "  #return %d\n"
     "}\n";
 
-/* 乘法/加法回绕：idx * scale 溢出。 */
-static const char *k_prog_lea_wrap =
-    "#proc lea_wrap() -> #bits<64> {\n"
-    "  %p = #int2ptr[#addr](4096)\n"
-    "  %q = #lea(%p, 0xFFFFFFFFFFFFFFFF, 8, 0)\n"
+/* 同一个构造，但接着**访问**：区段外地址上的 load 必须被 VSpace 拒（1004）。 */
+static const char *k_prog_lea_far_access =
+    "data bytes ro { 42 }\n"
+    "#proc lea_far_access() -> #bits<64> {\n"
+    "  %b = #data_addr bytes\n"
+    "  %q = #lea(%b, 0, 1, 1000000)\n"
+    "  %v = #load[#bits<8>](%q)\n"
+    "  %w = #zext[#bits<64>](%v)\n"
+    "  #return %w\n"
+    "}\n";
+
+/* 尾后地址（one-past-end）：构造得出，偏移正好 1。 */
+static const char *k_prog_lea_one_past =
+    "data bytes ro { 42 }\n"
+    "#proc lea_one_past() -> #bits<64> {\n"
+    "  %b = #data_addr bytes\n"
+    "  %q = #lea(%b, 0, 1, 1)\n"
     "  %w = #ptr2int[#bits<64>](%q)\n"
+    "  %bw = #ptr2int[#bits<64>](%b)\n"
+    "  %d = #sub[#bits<64>](%w, %bw)\n"
+    "  #return %d\n"
+    "}\n";
+
+/* 尾后地址上的访问：一样要被拒（1004）。 */
+static const char *k_prog_lea_one_past_access =
+    "data bytes ro { 42 }\n"
+    "#proc lea_one_past_access() -> #bits<64> {\n"
+    "  %b = #data_addr bytes\n"
+    "  %q = #lea(%b, 0, 1, 1)\n"
+    "  %v = #load[#bits<8>](%q)\n"
+    "  %w = #zext[#bits<64>](%v)\n"
+    "  #return %w\n"
+    "}\n";
+
+/* 回绕是**定义好的**：idx = 2^63、scale = 2 → idx * scale = 2^64 ≡ 0（按地址宽度
+ * 取模），所以构造出来的地址正好等于 base。不取模的话这个和根本表示不出来。 */
+static const char *k_prog_lea_wrap =
+    "data bytes ro { 42 }\n"
+    "#proc lea_wrap() -> #bits<64> {\n"
+    "  %b = #data_addr bytes\n"
+    "  %q = #lea(%b, 0x8000000000000000, 2, 0)\n"
+    "  %w = #ptr2int[#bits<64>](%q)\n"
+    "  %bw = #ptr2int[#bits<64>](%b)\n"
+    "  %d = #sub[#bits<64>](%w, %bw)\n"
+    "  #return %d\n"
+    "}\n";
+
+/* 回绕落到**已授权**地址上之后照样正常访问（读到 42）：取模是算术，不是漏洞。 */
+static const char *k_prog_lea_wrap_read =
+    "data bytes ro { 42 }\n"
+    "#proc lea_wrap_read() -> #bits<64> {\n"
+    "  %b = #data_addr bytes\n"
+    "  %q = #lea(%b, 0x8000000000000000, 2, 0)\n"
+    "  %v = #load[#bits<8>](%q)\n"
+    "  %w = #zext[#bits<64>](%v)\n"
     "  #return %w\n"
     "}\n";
 
@@ -916,7 +969,7 @@ static int case_stack_two_tcbs_one_space(void) {
   if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
   t1 = rig.tcb; /* 台架已经建了一个 */
   base1 = t1->stack_base;
-  t2 = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, 4096);
+  t2 = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, 4096, NULL);
   if (!t2) {
     rig_free(&rig);
     obs_facts("同一个地址空间里建第二个 TCB 失败");
@@ -1219,6 +1272,91 @@ done:
   return 0;
 }
 
+/* §五：源码**索引越界**必须在解引用之前稳定拒绝，而且不产生任何副作用
+ * （能力返回的格子一个字节都不能被写）。三个会返回源码地址/长度/路径的能力
+ * 都要覆盖 —— 只修一个入口等于没修。索引越界不是"读到别人的内存"，
+ * 而是"这份源码不存在"：拒绝码是 LAINMETA_ERR_NO_SOURCE。 */
+static int case_host_source_index_bounds(void) {
+  static const char *names[3] = {"lain_meta_source_data",
+                                 "lain_meta_source_length",
+                                 "lain_meta_source_path_data"};
+  LainMetaHost *host = NULL;
+  LainVmCaps *caps = NULL;
+  const LainVmCapEntry *entry;
+  LainVmHostFn fn;
+  const char *path;
+  const char *text;
+  uint32_t len = 12345;
+  uint64_t args[2];
+  uint64_t result;
+  uint64_t sentinel = 0xA5A5A5A5A5A5A5A5ull;
+  uint32_t status;
+  uint32_t i;
+  int ok = 1;
+
+  host = lainmeta_host_new();
+  caps = lainvm_caps_new();
+  if (!host || !caps || lainmeta_host_register(host, caps) != 0) {
+    obs_facts("host / 能力表建立失败");
+    goto done;
+  }
+  /* 一份源码：索引 0 合法，索引 1 越界。 */
+  if (lainmeta_host_add_source(host, "std/prelude.lain", "let x = 1;\n", 11) !=
+      0) {
+    obs_facts("登记源码失败");
+    goto done;
+  }
+  args[0] = (uint64_t)(uintptr_t)host;
+
+  for (i = 0; i < 3 && ok; i++) {
+    entry = lainvm_caps_find(caps, names[i]);
+    if (!entry) {
+      obs_facts("能力表里没有 %s", names[i]);
+      ok = 0;
+      break;
+    }
+    fn = lainvm_cap_fn(entry);
+    /* 越界：非零状态，且**结果格子保持哨兵值**（没有被解引用、没有被写）。 */
+    result = sentinel;
+    args[1] = 1;
+    status = fn(args, 2, &result);
+    if (status == 0 || result != sentinel) {
+      obs_facts("%s 对越界索引 index=1 没有稳定拒绝：status=%u result=%llu"
+                "（期望非零状态且结果格子不变）",
+                names[i], (unsigned)status, (unsigned long long)result);
+      ok = 0;
+      break;
+    }
+    /* 正对照：索引 0 必须成功 —— 否则上面的"拒绝"可能只是这个能力坏了。 */
+    result = 0;
+    args[1] = 0;
+    status = fn(args, 2, &result);
+    if (status != 0 || result == 0) {
+      obs_facts("%s 对合法索引 index=0 也失败了：status=%u result=%llu",
+                names[i], (unsigned)status, (unsigned long long)result);
+      ok = 0;
+      break;
+    }
+  }
+  /* 内部 API 同样是入口：越界返回空串，长度写 0（不是留着调用方原来的值）。 */
+  if (ok) {
+    path = lainmeta_host_source_path(host, 1);
+    text = lainmeta_host_source_text(host, 1, &len);
+    if (path == NULL || path[0] != '\0' || text == NULL || text[0] != '\0' ||
+        len != 0) {
+      obs_facts("内部入口越界：path=\"%s\" text=\"%s\" len=%u（期望空串与 0）",
+                path ? path : "(null)", text ? text : "(null)", (unsigned)len);
+      ok = 0;
+    }
+  }
+  if (ok) obs_value(1);
+
+done:
+  if (caps) lainvm_caps_free(caps);
+  if (host) lainmeta_host_free(host);
+  return 0;
+}
+
 /* --- lifetime 组 ------------------------------------------------------------ */
 
 /* R06：alloca 地址经由模块级数据逃逸，调用方在返回后读它。期望拒绝。 */
@@ -1273,41 +1411,412 @@ static int case_lifetime_reuse(void) {
 
 /* --- lea 组 ---------------------------------------------------------------- */
 
-/* 只构造区外地址、不访问：D3 未定，只记录。 */
+/* D3：`#lea` **构造不查** —— 区段外偏移照样构造得出来，返回的偏移正好是 1000000。 */
 static int case_lea_construct_only(void) {
   Rig rig;
 
   if (rig_load(&rig, k_prog_lea_far, 1024) != 0) return 0;
   (void)rig_run(&rig, "lea_far");
-  if (g_obs.kind == 0) {
-    obs_facts("构造区段外地址（+1000000）没有被拒，过程返回 %llu —— 是否允许要 D3 定",
-              (unsigned long long)g_obs.value);
-  }
   rig_free(&rig);
   return 0;
 }
 
-/* idx * scale 回绕：D3 未定，只记录。 */
+/* 配对：区段外地址**构造成功**（偏移 1000000），随后**访问稳定拒绝**（1004）。
+ * 两半都要成立才算过 —— 只有"构造成功"或只有"访问被拒"都不够。 */
+static int case_lea_construct_then_access(void) {
+  Rig rig;
+  uint64_t offset;
+
+  if (rig_load(&rig, k_prog_lea_far, 1024) != 0) return 0;
+  (void)rig_run(&rig, "lea_far");
+  offset = g_obs.value;
+  if (g_obs.kind != 0 || offset != 1000000) {
+    rig_free(&rig);
+    obs_facts("构造那一步没成功：kind=%d offset=%llu（期望 value:1000000）",
+              g_obs.kind, (unsigned long long)offset);
+    return 0;
+  }
+  rig_free(&rig);
+
+  if (rig_load(&rig, k_prog_lea_far_access, 1024) != 0) return 0;
+  (void)rig_run(&rig, "lea_far_access");
+  rig_free(&rig);
+  if (g_obs.kind == 1 && g_obs.trap_code == 1004) {
+    obs_value(1000000); /* 两半都成立 */
+  } else if (g_obs.kind == 0) {
+    obs_facts("区段外地址上的 load 竟然读到了 %llu（期望拒 1004）",
+              (unsigned long long)g_obs.value);
+  } else {
+    obs_facts("区段外地址上的 load 拒了，但码是 %d（期望 1004）",
+              (int)g_obs.trap_code);
+  }
+  return 0;
+}
+
+/* 尾后地址：构造得出（偏移 1）。 */
+static int case_lea_one_past_end(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_lea_one_past, 1024) != 0) return 0;
+  (void)rig_run(&rig, "lea_one_past");
+  rig_free(&rig);
+  return 0;
+}
+
+/* 尾后地址上的访问：拒 1004（"允许构造"不等于"允许访问"）。 */
+static int case_lea_one_past_access(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_lea_one_past_access, 1024) != 0) return 0;
+  (void)rig_run(&rig, "lea_one_past_access");
+  rig_free(&rig);
+  return 0;
+}
+
+/* 回绕按地址宽度取模：idx=2^63、scale=2 → 结果正好回到 base，偏移 0。 */
 static int case_lea_wraparound(void) {
   Rig rig;
 
   if (rig_load(&rig, k_prog_lea_wrap, 1024) != 0) return 0;
   (void)rig_run(&rig, "lea_wrap");
-  if (g_obs.kind == 0) {
-    obs_facts("#lea(idx=0xFFFFFFFFFFFFFFFF, scale=8) 回绕成 %llu，没有被拒 —— 要 D3 定",
-              (unsigned long long)g_obs.value);
-  }
   rig_free(&rig);
   return 0;
 }
 
-/* --- budget 组 -------------------------------------------------------------- */
+/* 回绕落到已授权地址上：访问正常通过并读到 42。 */
+static int case_lea_wrap_lands_authorized(void) {
+  Rig rig;
 
-/* 配额：规范 §4/:105、§6/:162、§8.2/:212-214 要求；实现里没有任何账。 */
-static int case_budget_unimplemented(void) {
-  obs_facts("规范要求 TCB 有 allocation quota 的预算与消耗（04-lain-vm.md:105/:162/"
-            ":212-214），实现里 grep quota|budget 在 seed/src/vm/** 与 "
-            "seed/include/lainvm/** 零命中；单位与扣费点等 D5 定");
+  if (rig_load(&rig, k_prog_lea_wrap_read, 1024) != 0) return 0;
+  (void)rig_run(&rig, "lea_wrap_read");
+  rig_free(&rig);
+  return 0;
+}
+
+/* --- quota 组（D5：分配配额，规范 §4/:105、§6/:162、§8.2/:212-214） ----------
+ *
+ * 单位是**字节**，记的是**实际承诺**的底层存储。扣费点是真正拿到存储的地方：
+ * TCB 的栈租约（整块一次）与宿主暂存区/输出扩容。归还只发生在真的释放时。
+ * 下面八条就是交接里点名要验的八件事。 */
+
+/* 按指定 fuel 反复切片跑到结束（只为验"账目与切片无关"）。 */
+static int rig_run_sliced(Rig *rig, const char *entry, uint64_t fuel) {
+  L1Diagnostic diag;
+  LainVmSliceResult slice;
+
+  diag.code = 0;
+  if (lainvm_tcb_start(rig->tcb, entry, NULL, 0, &diag) != 0) return -1;
+  do {
+    slice = lainvm_engine_run(rig->tcb, fuel);
+  } while (slice == LAINVM_SLICE_RUNNABLE);
+  return slice == LAINVM_SLICE_DONE ? 0 : 1;
+}
+
+/* 1) 恰好用完成功。 */
+static int case_quota_exact_fit(void) {
+  LainVmQuota q;
+
+  lainvm_quota_init(&q, 4096);
+  if (lainvm_quota_charge(&q, 4096) != 0) {
+    obs_facts("恰好用完却没有成功");
+    return 0;
+  }
+  if (q.used != 4096 || lainvm_quota_remaining(&q) != 0) {
+    obs_facts("恰好用完：used=%llu remaining=%llu（期望 4096 / 0）",
+              (unsigned long long)q.used,
+              (unsigned long long)lainvm_quota_remaining(&q));
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 2) 多一字节失败，而且**账目不动**（预扣是原子的）。 */
+static int case_quota_one_byte_over(void) {
+  LainVmQuota q;
+  int code;
+
+  lainvm_quota_init(&q, 4096);
+  if (lainvm_quota_charge(&q, 4096) != 0) {
+    obs_facts("恰好用完却没有成功");
+    return 0;
+  }
+  code = lainvm_quota_charge(&q, 1);
+  if (code != LAINVM_QUOTA_TRAP) {
+    obs_facts("多一字节没有被拒：返回 %d（期望 %d）", code,
+              (int)LAINVM_QUOTA_TRAP);
+    return 0;
+  }
+  if (q.used != 4096 || q.rejected != 1) {
+    obs_facts("被拒之后账目动了：used=%llu rejected=%llu（期望 4096 / 1）",
+              (unsigned long long)q.used, (unsigned long long)q.rejected);
+    return 0;
+  }
+  obs_value(1);
+  return 0;
+}
+
+/* 3)+6)+7) 同一个账户在 TCB 生命周期里的完整账目：admit 扣整块、跑动（含
+ * `#alloca` 与返回时的水位回退）不改账、**真的销毁**之后才归还。 */
+static int case_quota_tcb_lifecycle(void) {
+  Rig rig;
+  LainVmQuota q;
+  LainVmTcb *tcb;
+
+  if (rig_load(&rig, k_prog_alloca, 0) != 0) return 0;
+  lainvm_quota_init(&q, 4096);
+  tcb = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, 4096, &q);
+  if (!tcb) {
+    rig_free(&rig);
+    obs_facts("限额刚好够却 admit 失败");
+    return 0;
+  }
+  lainvm_tcb_free(rig.tcb);
+  rig.tcb = tcb; /* 用挂了账户的那个跑 */
+  (void)rig_run(&rig, "use_alloca");
+  if (g_obs.kind != 0 || g_obs.value != 7) {
+    rig_free(&rig);
+    obs_facts("挂了账户的 TCB 没跑通（kind=%d value=%llu）", g_obs.kind,
+              (unsigned long long)g_obs.value);
+    return 0;
+  }
+  if (q.used != 4096 || q.charges != 1 || q.releases != 0) {
+    rig_free(&rig);
+    obs_facts("跑完账目不对：used=%llu charges=%llu releases=%llu"
+              "（期望 4096 / 1 / 0）",
+              (unsigned long long)q.used, (unsigned long long)q.charges,
+              (unsigned long long)q.releases);
+    return 0;
+  }
+  lainvm_tcb_free(rig.tcb);
+  rig.tcb = NULL;
+  if (q.used != 0 || q.releases != 1) {
+    rig_free(&rig);
+    obs_facts("销毁之后没有按规则归还：used=%llu releases=%llu（期望 0 / 1）",
+              (unsigned long long)q.used, (unsigned long long)q.releases);
+    return 0;
+  }
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 4)+3) 两个子执行共用一个账户：后一个只能看到余额，谁都不能各拿一份完整额度；
+ * 被拒的 admit 不留扣账；先销毁的那个把额度还回来。 */
+static int case_quota_children_share(void) {
+  Rig rig;
+  LainVmQuota q;
+  LainVmTcb *a;
+  LainVmTcb *b;
+
+  if (rig_load(&rig, k_prog_alloca, 0) != 0) return 0;
+  lainvm_quota_init(&q, 6144);
+  a = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, 4096, &q);
+  if (!a) {
+    rig_free(&rig);
+    obs_facts("第一个子执行 admit 失败");
+    return 0;
+  }
+  if (q.used != 4096) {
+    lainvm_tcb_free(a);
+    rig_free(&rig);
+    obs_facts("第一个子执行之后账目是 %llu（期望 4096）",
+              (unsigned long long)q.used);
+    return 0;
+  }
+  b = lainvm_tcb_new(rig.image, &rig.space, 3, 3, 64, 4096, &q);
+  if (b != NULL) {
+    lainvm_tcb_free(b);
+    lainvm_tcb_free(a);
+    rig_free(&rig);
+    obs_facts("第二个子执行拿到了完整额度（used=%llu，只该剩 2048）",
+              (unsigned long long)q.used);
+    return 0;
+  }
+  if (q.used != 4096) {
+    lainvm_tcb_free(a);
+    rig_free(&rig);
+    obs_facts("被拒的 admit 留下了扣账：used=%llu（期望 4096）",
+              (unsigned long long)q.used);
+    return 0;
+  }
+  b = lainvm_tcb_new(rig.image, &rig.space, 3, 3, 64, 2048, &q); /* 只剩 2048 */
+  if (!b) {
+    lainvm_tcb_free(a);
+    rig_free(&rig);
+    obs_facts("余额够（2048）却 admit 失败");
+    return 0;
+  }
+  if (q.used != 6144) {
+    lainvm_tcb_free(b);
+    lainvm_tcb_free(a);
+    rig_free(&rig);
+    obs_facts("两个子执行之后账目是 %llu（期望 6144）",
+              (unsigned long long)q.used);
+    return 0;
+  }
+  lainvm_tcb_free(a);
+  if (q.used != 2048) {
+    lainvm_tcb_free(b);
+    rig_free(&rig);
+    obs_facts("销毁一个子执行之后账目是 %llu（期望 2048）",
+              (unsigned long long)q.used);
+    return 0;
+  }
+  lainvm_tcb_free(b);
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 5) 分配失败不残留扣账：预扣成功但底层分配失败时必须回滚。
+ * 用 2^60 字节的栈让 calloc 在**任何**平台上都失败（不依赖 overcommit 行为）。 */
+static int case_quota_failed_alloc_no_residue(void) {
+  Rig rig;
+  LainVmQuota q;
+  LainVmTcb *tcb;
+
+  if (rig_load(&rig, k_prog_alloca, 0) != 0) return 0;
+  lainvm_quota_init(&q, 0); /* 不限额：预扣一定成功，失败必须发生在分配那一步 */
+  tcb = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, 1ull << 60, &q);
+  if (tcb) {
+    lainvm_tcb_free(tcb);
+    rig_free(&rig);
+    obs_facts("2^60 字节的栈居然分配成功了 —— 这条用例打不到回滚路径");
+    return 0;
+  }
+  if (q.used != 0 || q.charges != 1 || q.releases != 1) {
+    rig_free(&rig);
+    obs_facts("分配失败留下了扣账：used=%llu charges=%llu releases=%llu"
+              "（期望 0 / 1 / 1）",
+              (unsigned long long)q.used, (unsigned long long)q.charges,
+              (unsigned long long)q.releases);
+    return 0;
+  }
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 8) 不同切片的 fuel 不改变总配额判断：同一份程序，一个每步一片、一个一次跑完。 */
+static int case_quota_fuel_independent(void) {
+  Rig a;
+  Rig b;
+  LainVmQuota qa;
+  LainVmQuota qb;
+  LainVmTcb *ta;
+  LainVmTcb *tb;
+
+  if (rig_load(&a, k_prog_alloca, 0) != 0) return 0;
+  if (rig_load(&b, k_prog_alloca, 0) != 0) {
+    rig_free(&a);
+    return 0;
+  }
+  lainvm_quota_init(&qa, 8192);
+  lainvm_quota_init(&qb, 8192);
+  ta = lainvm_tcb_new(a.image, &a.space, 2, 2, 64, 4096, &qa);
+  tb = lainvm_tcb_new(b.image, &b.space, 2, 2, 64, 4096, &qb);
+  if (!ta || !tb) {
+    if (ta) lainvm_tcb_free(ta);
+    if (tb) lainvm_tcb_free(tb);
+    rig_free(&a);
+    rig_free(&b);
+    obs_facts("挂了账户的 TCB 建不起来");
+    return 0;
+  }
+  lainvm_tcb_free(a.tcb);
+  a.tcb = ta;
+  lainvm_tcb_free(b.tcb);
+  b.tcb = tb;
+  (void)rig_run_sliced(&a, "use_alloca", 1);        /* 每步一片 */
+  (void)rig_run_sliced(&b, "use_alloca", 1000000);  /* 一次跑完 */
+  if (qa.used != qb.used || qa.charges != qb.charges || qa.peak != qb.peak ||
+      qa.used != 4096) {
+    rig_free(&a);
+    rig_free(&b);
+    obs_facts("不同 fuel 下账目不同：used %llu/%llu charges %llu/%llu peak "
+              "%llu/%llu（期望一样，且 used=4096）",
+              (unsigned long long)qa.used, (unsigned long long)qb.used,
+              (unsigned long long)qa.charges, (unsigned long long)qb.charges,
+              (unsigned long long)qa.peak, (unsigned long long)qb.peak);
+    return 0;
+  }
+  rig_free(&a);
+  rig_free(&b);
+  obs_value(1);
+  return 0;
+}
+
+/* 4b) 宿主暂存区也要过账户：余额不够就**不拿内存**、账目不动、状态码是 1044；
+ * 释放宿主时按已计账字节归还。 */
+static int case_quota_host_scratch_charged(void) {
+  LainMetaHost *host = NULL;
+  LainMetaHost *small = NULL;
+  LainVmQuota q;
+  LainVmQuota tiny;
+  uint32_t size;
+  void *p;
+
+  host = lainmeta_host_new();
+  small = lainmeta_host_new();
+  if (!host || !small) {
+    obs_facts("host 建不起来");
+    goto done;
+  }
+  if (lainmeta_host_add_source(host, "std/prelude.lain", "let x = 1;\n", 11) !=
+          0 ||
+      lainmeta_host_add_source(small, "std/prelude.lain", "let x = 1;\n", 11) !=
+          0) {
+    obs_facts("登记源码失败");
+    goto done;
+  }
+  /* 不限额：先看它到底扣不扣账。 */
+  lainvm_quota_init(&q, 0);
+  lainmeta_host_attach_quota(host, &q);
+  size = 0;
+  p = lainmeta_host_scratch(host, &size);
+  if (!p || size == 0) {
+    obs_facts("暂存区拿不到");
+    goto done;
+  }
+  if (q.used != size || q.charges != 1) {
+    obs_facts("暂存区没有按实际承诺扣账：used=%llu size=%u charges=%llu",
+              (unsigned long long)q.used, (unsigned)size,
+              (unsigned long long)q.charges);
+    goto done;
+  }
+  /* 限额远小于暂存区：必须拿不到、账目不动、状态是配额 trap。 */
+  lainvm_quota_init(&tiny, 1024);
+  lainmeta_host_attach_quota(small, &tiny);
+  size = 12345;
+  p = lainmeta_host_scratch(small, &size);
+  if (p != NULL || tiny.used != 0 || size != 0) {
+    obs_facts("限额不够时暂存区没有稳定拒绝：ptr=%p used=%llu size=%u",
+              p, (unsigned long long)tiny.used, (unsigned)size);
+    goto done;
+  }
+  if (lainmeta_host_status(small) != (uint32_t)LAINVM_QUOTA_TRAP) {
+    obs_facts("暂存区被拒的状态是 %u（期望 %d）",
+              (unsigned)lainmeta_host_status(small), (int)LAINVM_QUOTA_TRAP);
+    goto done;
+  }
+  if (lainmeta_host_output_length(host) != 0) {
+    obs_facts("还没写就有输出了（长度 %u）",
+              (unsigned)lainmeta_host_output_length(host));
+    goto done;
+  }
+  lainmeta_host_free(host);
+  host = NULL;
+  if (q.used != 0) {
+    obs_facts("释放宿主之后没有归还：used=%llu（期望 0）",
+              (unsigned long long)q.used);
+    goto done;
+  }
+  obs_value(1);
+
+done:
+  if (small) lainmeta_host_free(small);
+  if (host) lainmeta_host_free(host);
   return 0;
 }
 
@@ -2298,17 +2807,37 @@ static const Case k_cases[] = {
     {"host_past_region", "host", EXP_TRAP, 0, 0, case_host_past_region},
     {"host_wrong_identity", "host", EXP_TRAP, 0, 0, case_host_wrong_identity},
     {"host_in_region_ok", "host", EXP_VALUE, 1, 0, case_host_in_region_ok},
-    {"host_source_index_bounds", "host", EXP_BLOCKED, 0, 0, NULL},
+    {"host_source_index_bounds", "host", EXP_VALUE, 1, 0,
+     case_host_source_index_bounds},
     /* lifetime */
     {"lifetime_escape", "lifetime", EXP_TRAP, 0, 1004, case_lifetime_escape},
     {"lifetime_reuse", "lifetime", EXP_VALUE, 9, 0, case_lifetime_reuse},
     {"space_switch", "lifetime", EXP_VALUE, 1, 0, case_space_switch},
-    /* lea */
-    {"lea_construct_only", "lea", EXP_BLOCKED, 0, 0, case_lea_construct_only},
-    {"lea_wraparound", "lea", EXP_BLOCKED, 0, 0, case_lea_wraparound},
+    /* lea（D3 已定：构造不查、访问查、按地址宽度取模） */
+    {"lea_construct_only", "lea", EXP_VALUE, 1000000, 0, case_lea_construct_only},
+    {"lea_construct_then_access", "lea", EXP_VALUE, 1000000, 0,
+     case_lea_construct_then_access},
+    {"lea_one_past_end", "lea", EXP_VALUE, 1, 0, case_lea_one_past_end},
+    {"lea_one_past_access", "lea", EXP_TRAP, 0, 1004,
+     case_lea_one_past_access},
+    {"lea_wraparound", "lea", EXP_VALUE, 0, 0, case_lea_wraparound},
+    {"lea_wrap_lands_authorized", "lea", EXP_VALUE, 42, 0,
+     case_lea_wrap_lands_authorized},
     /* budget */
-    {"budget_unimplemented", "budget", EXP_BLOCKED, 0, 0,
-     case_budget_unimplemented},
+    /* quota（D5：单位字节、扣在真正承诺存储处、归还只在真正释放时） */
+    {"quota_exact_fit", "quota", EXP_VALUE, 1, 0, case_quota_exact_fit},
+    {"quota_one_byte_over", "quota", EXP_VALUE, 1, 0,
+     case_quota_one_byte_over},
+    {"quota_tcb_lifecycle", "quota", EXP_VALUE, 1, 0,
+     case_quota_tcb_lifecycle},
+    {"quota_children_share", "quota", EXP_VALUE, 1, 0,
+     case_quota_children_share},
+    {"quota_failed_alloc_no_residue", "quota", EXP_VALUE, 1, 0,
+     case_quota_failed_alloc_no_residue},
+    {"quota_fuel_independent", "quota", EXP_VALUE, 1, 0,
+     case_quota_fuel_independent},
+    {"quota_host_scratch_charged", "quota", EXP_VALUE, 1, 0,
+     case_quota_host_scratch_charged},
 
     /* capability（最小内存能力模型；模型层，不是 VM 的 load/store 通路）
      * ↑ 组名已改为 checked-ref：它是 Meta `ref(T)` 的候选 lowering，

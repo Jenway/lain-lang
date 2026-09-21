@@ -21,6 +21,7 @@
 #include "lainir/core.h"
 #include "lainir/value.h"
 #include "lainvm/caps.h"
+#include "lainvm/quota.h"
 #include "lainvm/space.h"
 
 typedef struct LainVmTcb LainVmTcb;
@@ -135,6 +136,13 @@ struct LainVmTcb {
   LainVmRegionHandle stack_window; /* no_handle = 活窗口为空（水位 0） */
   uint64_t stack_window_size;      /* 活窗口字节数，用来判断是否要重排 */
 
+  /* 这次执行的**分配账户**（规范 §8.2 的 allocation quota）。NULL = 不限额。
+   * 账户跟着**执行**走，不跟着地址空间走：嵌套调用共享同一个账户，
+   * `lainvm_tcb_set_space` 既不创建新账户、也不恢复额度。
+   * 栈按**整块容量**在这里预扣一次，销毁时归还；`#alloca` 的子分配与水位回退
+   * 都不动账（授权窗口的登记/撤销也不扣 —— 那是同一块已扣过账的存储）。 */
+  LainVmQuota *quota;
+
   /* 上下文：恢复一次激活所需的全部 */
   LainVmFrame *frames;
   uint32_t frame_count;
@@ -170,10 +178,12 @@ struct LainVmTcb {
  *   slot_cap  = frame_cap * image->max_slots
  * id 现在只是**诊断字段**（区段表里写着"这段是谁的"）；回收按句柄精确撤销，
  * 不按 owner 扫表。
- * stack_bytes 为 0 表示不要栈（程序里没有 #alloca）。 */
+ * stack_bytes 为 0 表示不要栈（程序里没有 #alloca）。
+ * quota 是这次执行的分配账户（NULL = 不限额）。栈按整块容量在这里**预扣一次**；
+ * 预扣失败（余额不足）返回 NULL，且账目**一点都没动**。 */
 LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
                           uint64_t owner, uint32_t max_call_depth,
-                          uint64_t stack_bytes);
+                          uint64_t stack_bytes, LainVmQuota *quota);
 void lainvm_tcb_free(LainVmTcb *tcb);
 
 /* 把模块里每个 extern 子过程按 link_name 解析到能力空间。
