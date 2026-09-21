@@ -9,29 +9,36 @@
 
 #include <string.h>
 
-void lainvm_memcap_init(LainVmMemTable *table, uint64_t serial) {
+void lainvm_memcap_init(LainVmMemTable *table, uint64_t generation_base) {
+  uint32_t i;
+
   memset(table, 0, sizeof(*table));
-  /* serial == 0 是 no_handle 的哨兵，调用方必须给 ≥ 1 的表身份。 */
-  table->serial = serial;
+  /* 代数的起点。调用方保证 `generation_base` 大于**同一块宿主内存上以前发过的
+   * 所有代数** —— 这样同址重建的上下文发出来的代数一定更高，旧引用（槽号对得上、
+   * 代数对不上）照样被拒，而句柄里不必再带表身份（8B 而不是 16B）。
+   * 每个槽从基数起步、用一次 +1，所以句柄里的代数永远 ≥ 1（0 留给 no_handle）。 */
+  for (i = 0; i < LAINVM_MEMCAP_MAX_OBJECTS; i++)
+    table->objects[i].generation = (uint32_t)generation_base;
+  for (i = 0; i < LAINVM_MEMCAP_MAX_CAPS; i++)
+    table->caps[i].cap_generation = (uint32_t)generation_base;
 }
 
 LainVmMemHandle lainvm_memcap_no_handle(void) {
   LainVmMemHandle handle;
-  handle.table = 0;
   handle.slot = 0;
-  handle.generation = 0;
+  handle.generation = 0; /* 0 = 没有句柄（保留值） */
   return handle;
 }
 
 bool lainvm_memcap_handle_none(LainVmMemHandle handle) {
-  return handle.table == 0;
+  return handle.generation == 0;
 }
 
 /* 对象句柄还指着那笔存储吗？ */
 static const LainVmMemObject *object_of(const LainVmMemTable *table,
                                         LainVmMemHandle handle) {
   const LainVmMemObject *object;
-  if (table == NULL || handle.table != table->serial) return NULL;
+  if (table == NULL) return NULL;
   if (handle.slot >= LAINVM_MEMCAP_MAX_OBJECTS) return NULL;
   object = &table->objects[handle.slot];
   if (!object->live) return NULL;
@@ -60,8 +67,8 @@ LainVmMemHandle lainvm_memcap_object_add(LainVmMemTable *table, uintptr_t base,
   uint32_t pick, i;
 
   handle = lainvm_memcap_no_handle();
-  if (table == NULL || table->serial == 0) return handle; /* 9201：表没有身份 */
-  if (size == 0) return handle;                           /* 9201 */
+  if (table == NULL) return handle;
+  if (size == 0) return handle; /* 9201 */
   if (size - 1 > (uint64_t)UINTPTR_MAX - (uint64_t)base)
     return handle; /* 9201：base + size 不可表示 */
 
@@ -81,7 +88,6 @@ LainVmMemHandle lainvm_memcap_object_add(LainVmMemTable *table, uintptr_t base,
   table->objects_live += 1;
   table->committed += size;
 
-  handle.table = table->serial;
   handle.slot = pick;
   handle.generation = object->generation;
   return handle;
@@ -140,7 +146,6 @@ int32_t lainvm_memcap_grant(LainVmMemTable *table, LainVmMemHandle object,
   table->caps_live += 1;
 
   if (out != NULL) {
-    out->table = table->serial;
     out->slot = pick;
     out->generation = cap->cap_generation;
   }
@@ -166,7 +171,8 @@ int32_t lainvm_memcap_revoke_owner(LainVmMemTable *table, uint64_t owner,
   return 0;
 }
 
-/* 文档 §3「访问」五条，按顺序。返回 0 或稳定拒绝码。 */
+/* 文档 §3「访问」五条，按顺序。返回 0 或稳定拒绝码。
+ * 句柄不带表身份之后，同址重建的上下文靠**代数基数**检出（9208）—— 9205 已废弃。 */
 static int32_t resolve_code(const LainVmMemTable *table,
                             const LainVmSpace *space, LainVmMemRef ref,
                             uint32_t need, uint64_t length, uint64_t context,
@@ -176,9 +182,8 @@ static int32_t resolve_code(const LainVmMemTable *table,
   uint64_t absolute;
   uintptr_t address;
 
-  if (table == NULL) return 9205;
-  /* 1) 引用由允许的途径取得：表身份与所属上下文都对得上。 */
-  if (ref.cap.table != table->serial) return 9205;
+  if (table == NULL) return 9207;
+  /* 1) 引用由允许的途径取得：所属上下文对得上。 */
   if (ref.cap.slot >= LAINVM_MEMCAP_MAX_CAPS) return 9207;
   cap = &table->caps[ref.cap.slot];
   if (!cap->live) return 9207;
@@ -223,7 +228,8 @@ int lainvm_memcap_read(const LainVmMemTable *table, const LainVmSpace *space,
                                 context, &base);
   if (code != NULL) *code = result;
   if (result != 0) return (int)result;
-  if (out != NULL && length != 0) memcpy(out, (const void *)base, (size_t)length);
+  if (out != NULL && length != 0)
+    memcpy(out, (const void *)base, (size_t)length);
   return 0;
 }
 
@@ -254,16 +260,13 @@ int lainvm_memcap_host_write(const LainVmMemTable *table,
 }
 
 uint64_t lainvm_memcap_ref_to_int(LainVmMemRef ref) {
-  return ((ref.cap.table & 0xFFFFFFFFu) << 32) |
-         (((uint64_t)ref.cap.generation & 0xFFFFFFu) << 8) |
-         ((uint64_t)ref.cap.slot & 0xFFu);
+  return ((uint64_t)ref.cap.generation << 32) | (uint64_t)ref.cap.slot;
 }
 
 LainVmMemRef lainvm_memcap_int_to_ref(uint64_t bits, uint64_t offset) {
   LainVmMemRef ref;
-  ref.cap.table = (bits >> 32) & 0xFFFFFFFFu;
-  ref.cap.generation = (uint32_t)((bits >> 8) & 0xFFFFFFu);
-  ref.cap.slot = (uint32_t)(bits & 0xFFu);
+  ref.cap.generation = (uint32_t)(bits >> 32);
+  ref.cap.slot = (uint32_t)(bits & 0xFFFFFFFFu);
   ref.offset = offset;
   return ref;
 }

@@ -15,21 +15,34 @@
  * 这一层管「这个引用指的是不是那个对象、范围与权限还在不在」。切换空间不会给
  * 旧引用自动补发权限。
  *
- * 引用形状：`{ 能力句柄, 对象内偏移 }`。对象身份、范围、权限、代数**都在表里**，
- * 不在引用里 —— 所以改引用的位不能扩大范围或提权，最多把它改坏（改坏就被拒）。
+ * --- 引用的形状与宽度（作者 2026-09-21 定：**大卡**）--------------------------
+ *
+ *   受检引用 = 能力句柄 {槽号, 代数}（8 B） + 对象内偏移（8 B） = **16 B**
+ *
+ * 对象身份、范围、权限、代数**都在表里**，不在引用里 —— 所以改引用的位不能扩大
+ * 范围或提权，最多把它改坏（改坏就被拒）。
+ *
+ * **表身份不放在句柄里**，改用「代数基数」：`lainvm_memcap_init` 要一个
+ * `generation_base`，调用方保证它**大于同一块宿主内存上以前发过的所有代数**。
+ * 于是同址重建的上下文发出来的代数一定更高，旧引用（槽号对得上、代数对不上）
+ * 照样被拒。好处是句柄从 16 B 降到 8 B，受检引用 16 B 而不是 24 B。
+ * 代价：调用方要把这个单调基数传下来（仍然是"能力注入、没有全局可变状态"）。
  *
  * 引用里可复制的字段**本身不是不可伪造的凭据**。本模型的伪造防护靠两条：
- *   1. 表身份 serial：别的表、旧上下文的表、伪造的表号 → 拒。
+ *   1. 代数：改代数、拿别的上下文的引用（代数不同）→ 拒。
  *   2. 能力记录里的所属上下文 owner：拿到别人的引用（位一模一样）也用不了 → 拒。
  * 残留缺口（写在运行报告里，不假装解决）：槽号与代数是可猜的；真正的系统要把
  * 能力记录放进程序寻址不到的表（CSpace），程序只拿得到其中的索引。
  *
  * 诊断码（本层稳定码，全树此前未占用）：
  *   9200 对象表满            9201 对象登记参数非法        9202 能力表满
- *   9203 授权范围越出对象     9204 授权权限为空            9205 引用的表身份不符
- *   9206 当前上下文无权使用   9207 能力已撤销 / 槽无效      9208 引用代数不符（同址复用）
+ *   9203 授权范围越出对象     9204 授权权限为空            9205 **已废弃**
+ *   9206 当前上下文无权使用   9207 能力已撤销 / 槽无效      9208 引用代数不符
  *   9209 权限不足            9210 越出授权范围             9211 对象已不存活（存储已释放）
  *   9212 当前 VSpace 未授权   9213 撤销 / 释放的句柄无效（含 owner=0、重复释放）
+ *
+ * 9205 原义是「引用的表身份不符」。句柄不带表身份之后这个情形不存在了：同址重建
+ * 由代数基数检出（9208）。号码**保留不重用**，免得以后接上真实通路时旧日志对不上。
  *
  * 最小模型**不含**：能力派生树、通用委派、跨进程序列化、并发（检查与实际访问之间
  * 不得发生撤销或释放，这个前提由调用方保证）。
@@ -48,7 +61,7 @@
 #define LAINVM_MEMCAP_MAX_CAPS 64
 
 /* 代数上限。到顶就不再重用那个槽 —— 宁可少一个槽，也不让旧引用复活。 */
-#define LAINVM_MEMCAP_MAX_GENERATION 0xFFFFFFu
+#define LAINVM_MEMCAP_MAX_GENERATION 0xFFFFFFFFu
 
 /* 一笔存储对象（一次分配一个生命周期）。 */
 typedef struct {
@@ -72,7 +85,6 @@ typedef struct {
 } LainVmMemCap;
 
 typedef struct {
-  uint64_t serial; /* 表身份。同一块内存重建的表 serial 不同 → 旧引用不复活 */
   uint64_t committed; /* 已承诺、尚未释放的存储字节（共享预算账户的消耗） */
   uint64_t released;  /* 已释放归还的字节 */
   LainVmMemObject objects[LAINVM_MEMCAP_MAX_OBJECTS];
@@ -81,21 +93,21 @@ typedef struct {
   uint32_t caps_live;
 } LainVmMemTable;
 
-/* 句柄引用的是身份，不是位置（同 space.h 的道理）。 */
+/* 句柄引用的是身份，不是位置（同 space.h 的道理）。8 B：这就是"大卡"的宽度。 */
 typedef struct {
-  uint64_t table; /* 表身份 = LainVmMemTable.serial */
   uint32_t slot;
-  uint32_t generation;
+  uint32_t generation; /* 0 = 没有句柄（保留值），所以句柄里代数永远 ≥ 1 */
 } LainVmMemHandle;
 
-/* 受检引用：能力 + 对象内偏移。 */
+/* 受检引用：能力 + 对象内偏移。**16 B** —— 值表示变更按这个宽度设计。 */
 typedef struct {
   LainVmMemHandle cap;
   uint64_t offset;
 } LainVmMemRef;
 
-/* 表初始化（销毁一个上下文并原地重建，也要重新 init 一个**新的 serial**）。 */
-void lainvm_memcap_init(LainVmMemTable *table, uint64_t serial);
+/* 表初始化。`generation_base` 必须大于同一块内存上以前发过的所有代数：
+ * 销毁一个上下文并原地重建时，新基数更大，旧引用才不会复活。 */
+void lainvm_memcap_init(LainVmMemTable *table, uint64_t generation_base);
 
 LainVmMemHandle lainvm_memcap_no_handle(void);
 bool lainvm_memcap_handle_none(LainVmMemHandle handle);
@@ -142,8 +154,8 @@ int lainvm_memcap_host_write(const LainVmMemTable *table,
                              uint64_t *side_effects, int32_t *code);
 
 /* 整数转换（§4.2）：把引用压成一个整数，再解回来。
- * 位布局：serial(32) | 代数(24) | 槽号(8)，**不含偏移**（偏移由来往双方各自提供）。
- * 撤销后旧整数解回来代数不符 → 拒；旧上下文 / 伪造整数的表身份不符 → 拒。 */
+ * 位布局：代数(32) | 槽号(32)，**不含偏移**（偏移由来往双方各自提供）。
+ * 撤销后旧整数解回来代数不符 → 拒；伪造整数的槽号/代数对不上 → 拒。 */
 uint64_t lainvm_memcap_ref_to_int(LainVmMemRef ref);
 LainVmMemRef lainvm_memcap_int_to_ref(uint64_t bits, uint64_t offset);
 
