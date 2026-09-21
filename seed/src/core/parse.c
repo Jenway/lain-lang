@@ -510,7 +510,8 @@ static void set_results(const L1Inst *built, const char **names, uint32_t count)
 }
 
 static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind,
-                                      const char **names, uint32_t name_count) {
+                                      const char **names, uint32_t name_count,
+                                      bool is_eval) {
   L1Operand ops[L1P_MAX_PARAMS];
   uint32_t count = 0;
   const L1Type *ty = NULL;
@@ -610,6 +611,7 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
   }
   if (!inst) return fail(p, 3002, "cannot build the instruction");
   set_results(inst, names, name_count);
+  if (is_eval) inst->is_eval = true;
   if (is_volatile) inst->is_volatile = true;
   inst->order = order;
   inst->line = p->line;
@@ -624,6 +626,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
   uint32_t name_count = 0;
   char opname[64];
   L1InstKind kind;
+  bool is_eval = false;
   uint32_t n = 0;
 
   if (terminated) *terminated = false;
@@ -647,8 +650,14 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
   }
   opname[n] = '\0';
   if (!n) return fail(p, 3002, "expected an opcode after `#`");
-  if (!lainir_opcode_kind(opname, n, &kind))
-    return fail(p, 3002, "unknown opcode `#%s`", opname);
+  if (!lainir_opcode_kind(opname, n, &kind)) {
+    /* `#eval callee(args)`：与 `#call` 同一个指令种类，区别只在编译期标记。
+     * 拼写由 opname.c 权威给出，打印器用同一份；不做前缀匹配。 */
+    if (strcmp(opname, LAINIR_OPCODE_EVAL) != 0)
+      return fail(p, 3002, "unknown opcode `#%s`", opname);
+    kind = INST_CALL;
+    is_eval = true;
+  }
 
   /* 向量算子的车道后缀（vadd.i32x4）还没实现——引擎和后端也都没有。 */
   if (cur(p) == '.')
@@ -831,7 +840,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
   }
 
   default:
-    return parse_operands_and_finish(p, into, kind, names, name_count);
+    return parse_operands_and_finish(p, into, kind, names, name_count, is_eval);
   }
 }
 

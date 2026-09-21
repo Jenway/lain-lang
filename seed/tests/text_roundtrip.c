@@ -292,6 +292,96 @@ int main(void) {
     g_out = NULL;
   }
 
+  /* 7. `#eval` 的文本形式：与 `#call` 同一个指令种类，只是拼写与标记不同。
+   *    编译期执行本身由 fold 负责（fold_eval.c 覆盖），这里只管文本两端。 */
+  {
+    static const char k_eval[] =
+        "#proc one(%a: #bits<64>) -> #bits<64> {\n"
+        "  #return %a\n"
+        "}\n"
+        "\n"
+        "#proc uses_eval() -> #bits<64> {\n"
+        "  %v = #eval one(1)\n"
+        "  #return %v\n"
+        "}\n";
+    static const char k_eval_dynamic[] =
+        "#proc one(%a: #bits<64>) -> #bits<64> {\n"
+        "  #return %a\n"
+        "}\n"
+        "\n"
+        "#proc bad(%d: #bits<64>) -> #bits<64> {\n"
+        "  %v = #eval one(%d)\n"
+        "  #return %v\n"
+        "}\n";
+    L1Builder *b7 = lainir_builder_new();
+    L1Diagnostic d7;
+    const L1Module *me;
+
+    d7.code = 0;
+    me = lainir_parse(b7, k_eval, &d7);
+    check(me != NULL, "`#eval one(1)` 解析成功");
+    if (!me) {
+      printf("     diag: %d:%u %s\n", d7.code, d7.line, d7.message);
+      return 1;
+    }
+    check(lainir_verify(me, &d7) == 0, "`#eval` 模块通过验证");
+    if (d7.code) printf("     diag: %d %s\n", d7.code, d7.message);
+    {
+      char *c7 = lainir_print_to_string(me);
+      check(c7 != NULL && strstr(c7, "%v = #eval one(1)") != NULL,
+            "规范文本是 `#eval one(1)`（不打印成行尾标记）");
+      if (c7) {
+        L1Builder *b8 = lainir_builder_new();
+        L1Diagnostic d8;
+        const L1Module *m8;
+        d8.code = 0;
+        m8 = lainir_parse(b8, c7, &d8);
+        check(m8 != NULL, "`#eval` 的规范文本能再解析");
+        if (m8) {
+          char *c8 = lainir_print_to_string(m8);
+          check(c8 != NULL && strcmp(c8, c7) == 0,
+                "`#eval` 固定点：print(parse(print(m))) == print(m)");
+          free(c8);
+        } else {
+          printf("     diag: %d:%u %s\n", d8.code, d8.line, d8.message);
+        }
+        lainir_builder_free(b8);
+        free(c7);
+      }
+    }
+    /* 实参必须是编译期已知的值：带名字的操作数被验证器拒（2012）。 */
+    {
+      L1Builder *b9 = lainir_builder_new();
+      L1Diagnostic d9;
+      const L1Module *mb;
+      d9.code = 0;
+      mb = lainir_parse(b9, k_eval_dynamic, &d9);
+      check(mb != NULL, "带变量的 `#eval` 也能解析（拒绝发生在验证阶段）");
+      if (mb) {
+        int v9 = lainir_verify(mb, &d9);
+        check(v9 != 0 && d9.code == 2012,
+              "`#eval` 的动态实参被拒，码是 2012");
+        if (d9.code != 2012)
+          printf("     diag: %d %s\n", d9.code, d9.message);
+      }
+      lainir_builder_free(b9);
+    }
+    /* 拼写是精确匹配：近似拼写仍然是未知算子。 */
+    {
+      L1Builder *b10 = lainir_builder_new();
+      L1Diagnostic d10;
+      d10.code = 0;
+      check(lainir_parse(b10,
+                         "#proc f() -> #bits<64> {\n  %v = #evall f(1)\n"
+                         "  #return %v\n}\n",
+                         &d10) == NULL &&
+                d10.code == 3002,
+            "`#evall` 仍拒 3002（不做前缀匹配）");
+      lainir_builder_free(b10);
+    }
+    lainir_builder_free(b7);
+  }
+
   free(canonical);
   lainir_builder_free(b);
   printf("%s\n", failures == 0 ? "ALL PASS" : "FAILURES");

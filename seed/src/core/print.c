@@ -278,7 +278,12 @@ static void print_inst(Printer *p, const L1Region *region, const L1Inst *inst) {
   }
 
   default:
-    print_opcode(p, inst);
+    /* `#eval callee(args)` 与 `#call callee(args)` 是同一种指令的两种拼写：
+     * 带编译期标记的直接调用打印成 `#eval`，其余种类仍用行尾标记。 */
+    if (inst->kind == INST_CALL && inst->is_eval)
+      outf(p, "#%s", LAINIR_OPCODE_EVAL);
+    else
+      print_opcode(p, inst);
     print_type_arg(p, inst);
     if (inst->kind == INST_DATA_ADDR || inst->kind == INST_PROC_ADDR)
       outf(p, " %s", inst->symbol ? inst->symbol : "?");
@@ -289,7 +294,7 @@ static void print_inst(Printer *p, const L1Region *region, const L1Inst *inst) {
     } else {
       print_operand_list(p, inst, 0);
     }
-    if (inst->is_eval) out(p, " #eval");
+    if (inst->is_eval && inst->kind != INST_CALL) out(p, " #eval");
     out(p, "\n");
     return;
   }
