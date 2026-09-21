@@ -1150,13 +1150,15 @@ typedef struct {
   LainVmMemHandle object;
 } CapRig;
 
+/* `generation_base`：句柄里不带表身份，在同一个宿主位置重建上下文时靠**更大的
+ * 代数基数**让旧引用失效（作者定的"大卡"：引用 16 B = 句柄 8 B + 偏移 8 B）。 */
 static int cap_rig_open(CapRig *rig, uint64_t size, uint32_t space_rights,
-                        uint64_t serial) {
+                        uint64_t generation_base) {
   memset(rig, 0, sizeof(*rig));
   rig->size = size;
   rig->storage = new_buffer((size_t)size);
   if (rig->storage == NULL) return -1;
-  lainvm_memcap_init(&rig->table, serial);
+  lainvm_memcap_init(&rig->table, generation_base);
   lainvm_space_init(&rig->space);
   rig->object = lainvm_memcap_object_add(&rig->table, (uintptr_t)rig->storage,
                                          size, CAP_CTX);
@@ -1496,15 +1498,17 @@ static int case_cap_memory_roundtrip(void) {
   return 0;
 }
 
-/* §5 cap_forged_reference + §2：改代数 / 范围 / 表身份、拿别人的能力、伪造整数，
- * 都不能扩大授权。主断言：拿**别的上下文**的能力记录来用 → 9206。 */
+/* §5 cap_forged_reference + §2：改代数 / 范围 / 槽号、拿别的上下文的能力、伪造整数，
+ * 都不能扩大授权。**句柄不带表身份**（作者定的大卡），所以"假表号"这一路没了：
+ * 同址重建改由代数基数检出（见 cap_context_reuse）。主断言：拿**别的上下文**的
+ * 能力记录来用 → 9206。 */
 static int case_cap_forged_reference(void) {
   CapRig rig;
   CapRig other;
   LainVmMemHandle mine, theirs, foreign;
-  LainVmMemRef widened, bumped, forged_table, forged_int;
+  LainVmMemRef widened, bumped, forged_slot, forged_int;
   int32_t code = 0, foreign_code = 0, widen_code = 0, gen_code = 0;
-  int32_t serial_code = 0, int_code = 0, cross_code = 0;
+  int32_t slot_code = 0, int_code = 0, cross_code = 0;
   uint64_t before, other_before, got = 0;
 
   if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
@@ -1522,10 +1526,12 @@ static int case_cap_forged_reference(void) {
   bumped = cap_ref(mine, 0);
   bumped.cap.generation += 1;
   (void)cap_read64(&rig, bumped, CAP_CTX, &got, &gen_code);
-  forged_table = cap_ref(mine, 0);
-  forged_table.cap.table = 0xDEADBEEFu;
-  (void)cap_read64(&rig, forged_table, CAP_CTX, &got, &serial_code);
-  forged_int = lainvm_memcap_int_to_ref(0xDEADBEEFCAFEBABEull, 0);
+  /* 句柄不带表身份了，所以伪造的对象是**槽号**（越界 → 9207）。 */
+  forged_slot = cap_ref(mine, 0);
+  forged_slot.cap.slot = 0xFFFFFFFFu;
+  (void)cap_read64(&rig, forged_slot, CAP_CTX, &got, &slot_code);
+  /* 伪造整数：位布局是 代数(32) | 槽号(32)。槽号是真的、代数不是 → 9208。 */
+  forged_int = lainvm_memcap_int_to_ref((uint64_t)0xDEADBEEFull << 32, 0);
   (void)cap_read64(&rig, forged_int, CAP_CTX, &got, &int_code);
 
   /* 另一张表（另一个上下文的空间）里的活能力，也不能拿来用 */
@@ -1539,15 +1545,15 @@ static int case_cap_forged_reference(void) {
   other_before = cap_host_u64(&other, 0);
   (void)cap_read64(&rig, cap_ref(foreign, 0), CAP_CTX, &got, &cross_code);
   if (foreign_code == 9206 && widen_code == 9210 && gen_code == 9208 &&
-      serial_code == 9205 && int_code == 9205 && cross_code == 9205 &&
+      slot_code == 9207 && int_code == 9208 && cross_code == 9208 &&
       cap_host_u64(&rig, 0) == before &&
       cap_host_u64(&other, 0) == other_before) {
     obs_trap(0, 9206);
   } else {
-    obs_facts("别人的能力=%d 越界=%d 改代数=%d 假表号=%d 假整数=%d 跨表=%d"
-              "（期望 9206/9210/9208/9205/9205/9205）",
+    obs_facts("别人的能力=%d 越界=%d 改代数=%d 假槽号=%d 假整数=%d 跨上下文=%d"
+              "（期望 9206/9210/9208/9207/9208/9208）",
               (int)foreign_code, (int)widen_code, (int)gen_code,
-              (int)serial_code, (int)int_code, (int)cross_code);
+              (int)slot_code, (int)int_code, (int)cross_code);
   }
   cap_rig_close(&other);
   cap_rig_close(&rig);
@@ -1576,8 +1582,7 @@ static int case_cap_int_roundtrip(void) {
   if (code == 0 && cap_write64(&rig, ref, CAP_CTX, want, &code) == 0 &&
       cap_read64(&rig, back, CAP_CTX, &got, &code) == 0 && got == want &&
       bits == again && back.cap.slot == ref.cap.slot &&
-      back.cap.generation == ref.cap.generation &&
-      back.cap.table == ref.cap.table) {
+      back.cap.generation == ref.cap.generation) {
     obs_value(1);
   } else {
     obs_facts("code=%d 读回=%llu 位=%llx/%llx 句柄%s", (int)code,
@@ -1628,14 +1633,14 @@ static int case_cap_int_after_revoke(void) {
   return 0;
 }
 
-/* §5 cap_context_reuse：销毁并在同一宿主位置重建对象表 / 空间 → 旧上下文的引用
- * 不能在新上下文里复活。 */
+/* §5 cap_context_reuse：销毁并在同一宿主位置重建对象表 / 空间（代数基数更大）→
+ * 旧上下文的引用不能在新上下文里复活，**槽位被重新占用之后也不行**。 */
 static int case_cap_context_reuse(void) {
   CapRig rig;
   LainVmMemHandle cap, fresh;
   LainVmMemRef ref, back;
   uint64_t bits, got = 0;
-  int32_t code = 0, ref_code = 0, int_code = 0, fresh_code = 0;
+  int32_t code = 0, stale_code = 0, ref_code = 0, int_code = 0, fresh_code = 0;
 
   if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
     obs_facts("台架起不来");
@@ -1645,24 +1650,26 @@ static int case_cap_context_reuse(void) {
                   &code);
   ref = cap_ref(cap, 0);
   bits = lainvm_memcap_ref_to_int(ref);
-  /* 同一块内存、新的表身份：旧上下文的一切都不再有效 */
-  lainvm_memcap_init(&rig.table, 2);
-  (void)cap_read64(&rig, ref, CAP_CTX, &got, &ref_code);
-  back = lainvm_memcap_int_to_ref(bits, 0);
-  (void)cap_read64(&rig, back, CAP_CTX, &got, &int_code);
-  /* 新表自己必须能用（否则"拒绝"可能只是因为表坏了） */
+  /* 同一块内存、更高的代数基数：旧上下文的一切都不再有效 */
+  lainvm_memcap_init(&rig.table, 1000);
+  (void)cap_read64(&rig, ref, CAP_CTX, &got, &stale_code);
+  /* 新表自己必须能用（否则"拒绝"可能只是因为表坏了）；槽位在这里被重新占用 */
   rig.object = lainvm_memcap_object_add(&rig.table, (uintptr_t)rig.storage, 64,
                                         CAP_CTX);
   fresh = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
                     &fresh_code);
   if (fresh_code == 0)
     fresh_code = cap_write64(&rig, cap_ref(fresh, 0), CAP_CTX, 0x0BAD, &code);
-  if (ref_code == 9205 && int_code == 9205 && fresh_code == 0 &&
-      cap_host_u64(&rig, 0) == 0x0BAD) {
-    obs_trap(0, 9205);
+  back = lainvm_memcap_int_to_ref(bits, 0);
+  (void)cap_read64(&rig, back, CAP_CTX, &got, &int_code);
+  (void)cap_read64(&rig, ref, CAP_CTX, &got, &ref_code);
+  if (stale_code == 9207 && ref_code == 9208 && int_code == 9208 &&
+      fresh_code == 0 && cap_host_u64(&rig, 0) == 0x0BAD) {
+    obs_trap(0, 9208);
   } else {
-    obs_facts("旧引用=%d 旧整数=%d 新表可用性=%d（期望 9205/9205/0）",
-              (int)ref_code, (int)int_code, (int)fresh_code);
+    obs_facts("重建后槽未占用=%d（期望 9207）槽复用后旧引用=%d 旧整数=%d "
+              "新表可用性=%d（期望 9208/9208/0）",
+              (int)stale_code, (int)ref_code, (int)int_code, (int)fresh_code);
   }
   cap_rig_close(&rig);
   return 0;
@@ -2119,7 +2126,7 @@ static const Case k_cases[] = {
      case_cap_int_roundtrip},
     {"cap_int_after_revoke", "capability", EXP_TRAP, 0, 9208,
      case_cap_int_after_revoke},
-    {"cap_context_reuse", "capability", EXP_TRAP, 0, 9205,
+    {"cap_context_reuse", "capability", EXP_TRAP, 0, 9208,
      case_cap_context_reuse},
     {"cap_child_borrow", "capability", EXP_VALUE, 1, 0, case_cap_child_borrow},
     {"cap_space_switch", "capability", EXP_TRAP, 0, 9212,
