@@ -137,6 +137,47 @@ static const char k_block_nested[] =
     "  #return %v\n"
     "}\n";
 
+/* S3b 正例：块读一个**已经折叠过的常量**——按值捕获，块外那个值换成字面量进块体。
+ * 顺序是"先折调用、再 lowering 块"，所以 `%k` 在块被 lowering 时已经已知。 */
+static const char k_block_capture_folded[] =
+    "#proc one(%a: #bits<64>) -> #bits<64> {\n"
+    "  #return %a\n"
+    "}\n"
+    "\n"
+    "#proc main() -> #bits<64> {\n"
+    "  %k = #eval one(7)\n"
+    "  %v = #eval -> (#bits<64>) {\n"
+    "    #return %k\n"
+    "  }\n"
+    "  #return %v\n"
+    "}\n";
+
+/* S3b 正例：块自己绑了一个和外围同名（且外围已折叠）的名字——块内优先，
+ * 外面的值不许串进来。所以这里必须得 3（块内 1+2），不是 7。 */
+static const char k_block_capture_shadow[] =
+    "#proc one(%a: #bits<64>) -> #bits<64> {\n"
+    "  #return %a\n"
+    "}\n"
+    "\n"
+    "#proc main() -> #bits<64> {\n"
+    "  %k = #eval one(7)\n"
+    "  %v = #eval -> (#bits<64>) {\n"
+    "    %k = #add[#bits<64>](1, 2)\n"
+    "    #return %k\n"
+    "  }\n"
+    "  #return %v\n"
+    "}\n";
+
+/* S3b 反例：块读一个运行期才知道的值（过程参数 `%x`）。块必须在 backend 之前消失，
+ * 读不到运行期的值 → 拒 9323（不是静默拿一个不存在的 frame）。 */
+static const char k_block_capture_unknown[] =
+    "#proc main(%x: #bits<64>) -> #bits<64> {\n"
+    "  %v = #eval -> (#bits<64>) {\n"
+    "    #return %x\n"
+    "  }\n"
+    "  #return %v\n"
+    "}\n";
+
 /* --- 助手 ----------------------------------------------------------------- */
 
 /* 解析 + 验证；通过时给出规范文本（调用方 free），失败时返回拒绝码。 */
@@ -408,6 +449,101 @@ static EvalResult case_block_nested(void) {
   return r;
 }
 
+/* 折叠类用例的共用实现：折叠 → 验折掉次数、产物无 #eval、产物重新验证、产物执行值。
+ * 只验"折掉了"不算数：静默错值正是这么活的。 */
+static EvalResult fold_and_run(const char *src, uint32_t folded_want,
+                               uint64_t value_want) {
+  L1Builder *b = lainir_builder_new();
+  L1Builder *out = lainir_builder_new();
+  LainFold *fold = lainfold_new(NULL, 64, 4096, 1000000);
+  L1Diagnostic d;
+  const L1Module *m;
+  const L1Module *after;
+  char *text = NULL;
+  uint64_t value = 0;
+  int code;
+  EvalResult r;
+
+  d.code = 0;
+  m = lainir_parse(b, src, &d);
+  if (!m || lainir_verify(m, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠前就该通过验证");
+    goto done;
+  }
+  after = lainfold_module(fold, out, m, &d);
+  if (!after) {
+    r = fail_result(d.code ? d.code : -1, "折叠失败");
+    goto done;
+  }
+  if (lainfold_folded_count(fold) != folded_want) {
+    r = fail_result(-1, "折掉的次数不对");
+    goto done;
+  }
+  if (lainir_verify(after, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠后的产物没通过验证");
+    goto done;
+  }
+  text = lainir_print_to_string(after);
+  if (!text) {
+    r = fail_result(-1, "产物打印失败");
+    goto done;
+  }
+  if (strstr(text, "#eval")) {
+    r = fail_result(-1, "产物里还有 #eval");
+    goto done;
+  }
+  code = run_module_result(after, "main", &value);
+  if (code != 0 || value != value_want) {
+    r = fail_result(code, "产物执行出来的值不对");
+    goto done;
+  }
+  r = pass_result(text);
+  text = NULL;
+done:
+  free(text);
+  lainfold_free(fold);
+  lainir_builder_free(out);
+  lainir_builder_free(b);
+  return r;
+}
+
+/* 折叠该被拒的用例：解析 + 验证必须过，折叠必须失败。 */
+static EvalResult fold_rejects(const char *src) {
+  L1Builder *b = lainir_builder_new();
+  L1Builder *out = lainir_builder_new();
+  LainFold *fold = lainfold_new(NULL, 64, 4096, 1000000);
+  L1Diagnostic d;
+  const L1Module *m;
+  const L1Module *after;
+  EvalResult r;
+
+  d.code = 0;
+  m = lainir_parse(b, src, &d);
+  if (!m || lainir_verify(m, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠前就该通过验证");
+  } else {
+    after = lainfold_module(fold, out, m, &d);
+    r = after ? fail_result(-1, "本该被拒，却折叠成功了")
+              : fail_result(d.code ? d.code : -1, "折叠拒绝码");
+  }
+  lainfold_free(fold);
+  lainir_builder_free(out);
+  lainir_builder_free(b);
+  return r;
+}
+
+static EvalResult case_block_captures_folded(void) {
+  return fold_and_run(k_block_capture_folded, 2, 7);
+}
+
+static EvalResult case_block_capture_shadow(void) {
+  return fold_and_run(k_block_capture_shadow, 2, 3);
+}
+
+static EvalResult case_block_captures_unknown(void) {
+  return fold_rejects(k_block_capture_unknown);
+}
+
 /* 只解析 + 验证，期待被拒的用例共用一个实现。 */
 static EvalResult verify_rejects(const char *src) {
   char *canon = NULL;
@@ -568,6 +704,9 @@ static const EvalCase k_cases[] = {
     {"block_folds", case_block_folds, 0, "#zext[#bits<64>](7)"},
     {"block_alloca_over", case_block_alloca_over, 1007, NULL},
     {"block_nested", case_block_nested, 9320, NULL},
+    {"block_captures_folded", case_block_captures_folded, 0, "#return 7"},
+    {"block_capture_shadow", case_block_capture_shadow, 0, "#return 3"},
+    {"block_captures_unknown", case_block_captures_unknown, 9323, NULL},
     {"block_no_return", case_block_no_return, 2006, NULL},
     {"block_bad_return", case_block_bad_return, 2019, NULL},
     {"block_addr_result", case_block_addr_result, 2030, NULL},
