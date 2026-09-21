@@ -1004,7 +1004,12 @@ static int case_space_switch(void) {
 
 /* --- host 组 ---------------------------------------------------------------- */
 
-/* R04：从合法区段的末尾读，长度超出一字节 —— 能力该不该拦？ */
+/* R04：从合法区段的末尾读，长度超出一字节 —— 能力该不该拦？
+ *
+ * 交付 B 之后这里必须**先授权再测**：宿主服务要先 attach 到地址空间、目标区段
+ * 要登记进去，否则"拒"的理由只是没授权，测不到范围检查。所以：
+ *   正对照 区内 4 字节 → 必须写进输出（否则下面那条拒可能只是全都在拒）；
+ *   负对照 末尾起 2 字节 → 必须拒，而且**输出一个字节都不能动**（先检后写）。 */
 static int case_host_past_region(void) {
   LainMetaHost *host = NULL;
   LainVmCaps *caps = NULL;
@@ -1016,6 +1021,8 @@ static int case_host_past_region(void) {
   uint64_t result = 0;
   uint32_t status;
   uint32_t out_len;
+  uint32_t ok_status;
+  uint32_t ok_len;
 
   buf = new_buffer(4096);
   if (!buf) {
@@ -1040,18 +1047,28 @@ static int case_host_past_region(void) {
     obs_facts("登记 16 字节区段失败");
     goto done;
   }
+  lainmeta_host_attach_space(host, &space);
   args[0] = (uint64_t)(uintptr_t)host;
+  args[1] = (uint64_t)(uintptr_t)buf; /* 区内 4 字节：正对照 */
+  args[2] = 4;
+  ok_status = fn(args, 3, &result);
+  ok_len = lainmeta_host_output_length(host);
   args[1] = (uint64_t)(uintptr_t)(buf + 15); /* 区段末尾的最后一个字节 */
   args[2] = 2;                               /* 读 2 字节：超出一字节 */
   status = fn(args, 3, &result);
   out_len = lainmeta_host_output_length(host);
-  if (status == 0 && out_len == 2) {
+  if (ok_status != 0 || ok_len != 4) {
+    obs_facts("正对照失败：授权区内的 4 字节被拒（status=%u，输出长度=%u）",
+              (unsigned)ok_status, (unsigned)ok_len);
+  } else if (status != 0) {
+    if (out_len != 4) {
+      obs_facts("拒是拒了，但输出被动过：长度=%u（期望仍是 4）", (unsigned)out_len);
+    } else {
+      obs_trap(0, (int32_t)status);
+    }
+  } else {
     obs_facts("R04 复现：宿主按裸地址读了区段外的字节（status=0，输出长度=%u）",
               (unsigned)out_len);
-  } else if (status != 0) {
-    obs_trap(0, (int32_t)status);
-  } else {
-    obs_facts("status=0 但输出长度=%u（预期 2 才是复现）", (unsigned)out_len);
   }
 
 done:
@@ -1061,18 +1078,25 @@ done:
   return 0;
 }
 
-/* R05：把 host 参数换成另一个同样可读写的 host 对象 —— 该不该拒？ */
+/* R05：把 host 参数换成另一个同样可读写的 host 对象 —— 该不该拒？
+ *
+ * 身份 = **这份宿主服务被授权到哪个地址空间**（驱动 attach）。所以这一条里
+ * 只给真 host 授权、诱饵不给：
+ *   正对照 真 host + 区内地址 → 必须过；
+ *   负对照 诱饵 + 同一个地址   → 必须拒，且诱饵的输出一个字节都不能动。 */
 static int case_host_wrong_identity(void) {
   LainMetaHost *real = NULL;
   LainMetaHost *decoy = NULL;
   LainVmCaps *caps = NULL;
   const LainVmCapEntry *entry;
   LainVmHostFn fn;
+  LainVmSpace space;
   uint8_t *buf;
   uint64_t args[3];
   uint64_t result = 0;
   uint32_t status;
   uint32_t decoy_out;
+  uint32_t real_out;
 
   buf = new_buffer(256);
   if (!buf) {
@@ -1092,18 +1116,32 @@ static int case_host_wrong_identity(void) {
     goto done;
   }
   fn = lainvm_cap_fn(entry);
-  args[0] = (uint64_t)(uintptr_t)decoy; /* ← 不是注册时绑定的那个 host */
+  lainvm_space_init(&space);
+  if (add(&space, (uintptr_t)buf, 256, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 7) < 0) {
+    obs_facts("登记 256 字节区段失败");
+    goto done;
+  }
+  lainmeta_host_attach_space(real, &space); /* 只给真 host 授权 */
+  args[0] = (uint64_t)(uintptr_t)real;      /* 正对照：真 host 应当能写 */
   args[1] = (uint64_t)(uintptr_t)buf;
   args[2] = 4;
   status = fn(args, 3, &result);
+  real_out = lainmeta_host_output_length(real);
+  args[0] = (uint64_t)(uintptr_t)decoy; /* ← 没被授权的那个 host 对象 */
+  status = fn(args, 3, &result);
   decoy_out = lainmeta_host_output_length(decoy);
-  if (status == 0 && decoy_out == 4) {
-    obs_facts("R05 复现：换了个 host 对象照样被接受，还写进了它的输出（长度=%u）",
-              (unsigned)decoy_out);
+  if (real_out != 4) {
+    obs_facts("正对照失败：真 host 在区内写 4 字节却得到输出长度=%u",
+              (unsigned)real_out);
   } else if (status != 0) {
-    obs_trap(0, (int32_t)status);
+    if (decoy_out != 0) {
+      obs_facts("拒是拒了，但诱饵的输出被动过：长度=%u（期望 0）",
+                (unsigned)decoy_out);
+    } else {
+      obs_trap(0, (int32_t)status);
+    }
   } else {
-    obs_facts("status=0 但 decoy 输出长度=%u（预期 4 才是复现）",
+    obs_facts("R05 复现：换了个没授权的 host 对象照样被接受（输出长度=%u）",
               (unsigned)decoy_out);
   }
 
@@ -1111,6 +1149,64 @@ done:
   if (caps) lainvm_caps_free(caps);
   if (real) lainmeta_host_free(real);
   if (decoy) lainmeta_host_free(decoy);
+  free(buf);
+  return 0;
+}
+
+/* 宿主边界的**正例**：授权区内读一段，必须成功、字节数对得上、内容对得上。 */
+static int case_host_in_region_ok(void) {
+  LainMetaHost *host = NULL;
+  LainVmCaps *caps = NULL;
+  const LainVmCapEntry *entry;
+  LainVmHostFn fn;
+  LainVmSpace space;
+  uint8_t *buf = NULL;
+  uint64_t args[3];
+  uint64_t result = 0;
+  uint32_t status;
+  uint32_t out_len;
+
+  buf = new_buffer(64);
+  if (!buf) {
+    obs_facts("malloc 失败");
+    return 0;
+  }
+  memcpy(buf, "lain", 4);
+  host = lainmeta_host_new();
+  caps = lainvm_caps_new();
+  if (!host || !caps || lainmeta_host_register(host, caps) != 0) {
+    obs_facts("host / 能力表建立失败");
+    goto done;
+  }
+  entry = lainvm_caps_find(caps, "lain_meta_emit_write");
+  if (!entry) {
+    obs_facts("能力表里没有 lain_meta_emit_write");
+    goto done;
+  }
+  fn = lainvm_cap_fn(entry);
+  lainvm_space_init(&space);
+  if (add(&space, (uintptr_t)buf, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 7) < 0) {
+    obs_facts("登记 64 字节区段失败");
+    goto done;
+  }
+  lainmeta_host_attach_space(host, &space);
+  args[0] = (uint64_t)(uintptr_t)host;
+  args[1] = (uint64_t)(uintptr_t)buf;
+  args[2] = 4;
+  status = fn(args, 3, &result);
+  out_len = lainmeta_host_output_length(host);
+  if (status != 0) {
+    obs_facts("授权区内的读被拒了：status=%u", (unsigned)status);
+  } else if (out_len != 4 || memcmp(lainmeta_host_output(host), "lain", 4) != 0) {
+    obs_facts("读进来了但字节不对：长度=%u 内容=%.4s", (unsigned)out_len,
+              lainmeta_host_output(host));
+  } else {
+    obs_value(1);
+  }
+
+done:
+  if (caps) lainvm_caps_free(caps);
+  if (host) lainmeta_host_free(host);
   free(buf);
   return 0;
 }
@@ -2162,6 +2258,7 @@ static const Case k_cases[] = {
     /* host */
     {"host_past_region", "host", EXP_TRAP, 0, 0, case_host_past_region},
     {"host_wrong_identity", "host", EXP_TRAP, 0, 0, case_host_wrong_identity},
+    {"host_in_region_ok", "host", EXP_VALUE, 1, 0, case_host_in_region_ok},
     {"host_source_index_bounds", "host", EXP_BLOCKED, 0, 0, NULL},
     /* lifetime */
     {"lifetime_escape", "lifetime", EXP_TRAP, 0, 0, case_lifetime_escape},

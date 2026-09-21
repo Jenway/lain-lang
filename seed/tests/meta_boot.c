@@ -502,6 +502,11 @@ int main(int argc, char **argv) {
   meta_tcb = prepare(meta_builder, bootstrap, &meta_space, &meta_image, "meta");
   if (!meta_tcb) goto cleanup;
 
+  /* 宿主服务也要授权：能力只拿得到裸地址，所以"这个地址能不能读"由宿主这一侧判，
+   * 而它要判就得知道是哪个地址空间。没 attach 的宿主对象在 emit_write 上会拒
+   * （LAINMETA_ERR_DENIED），而不是照裸地址读。 */
+  lainmeta_host_attach_space(host, &meta_space);
+
   caps = lainvm_caps_new();
   if (!caps || lainmeta_host_register(host, caps) != 0) {
     report_fail("caps", "cannot register the host services");
