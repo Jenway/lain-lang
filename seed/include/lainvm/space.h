@@ -59,11 +59,23 @@ typedef enum {
   LAINVM_MEM_CALL = 1u << 2,
 } LainVmMemRights;
 
-/* 一个槽。`owner` 只留给诊断（"这段是谁的"），**撤销不再按它扫表**：
+/* 一个槽。
+ *
+ * **容量与可访问窗口是两件事**（2026-09-21）：
+ *   capacity    这块存储有多少字节。**占用与重叠**判断用 [base, base + capacity)。
+ *   accessible  当前允许访问的**前缀**长度。**访问判定**用 [base, base + accessible)。
+ *
+ * 为什么分开：栈是**一次**申请 4096 字节（计入 quota、清零、登记一次），
+ * 而可访问的前缀随 `#alloca` 增长、随过程返回收缩。以前这两件事挤在一个 `size`
+ * 里，于是"收窗口"只能 remove + add（句柄不稳定、还要靠重叠检查挡路）——
+ * 那不是数据模型，那是绕路。
+ *
+ * `owner` 只留给诊断（"这段是谁的"），**撤销不再按它扫表**：
  * 撤销要么给精确句柄，要么给调用方自己记下来的句柄集合。 */
 typedef struct {
   uintptr_t base;
-  uint64_t size;
+  uint64_t capacity;   /* 存储字节数；占用与重叠看它 */
+  uint64_t accessible; /* 当前可访问前缀；访问判定看它（<= capacity） */
   uint32_t rights;
   uint64_t owner; /* 0 = 模块 / 装载器的；否则是拥有它的 TCB id */
   uint32_t generation;
@@ -82,12 +94,23 @@ void lainvm_space_init(LainVmSpace *space);
 LainVmRegionHandle lainvm_space_no_handle(void);
 bool lainvm_space_handle_none(LainVmRegionHandle handle);
 
-/* 登记一段别人给的内存，返回句柄。
+/* 登记一段别人给的内存，返回句柄。登记之后 capacity == accessible == size
+ * （整段立刻可访问）；要"先登记、窗口从小长到大的"，登记后用
+ * `lainvm_space_set_accessible` 把窗口收回去。
  * 拒绝：size == 0、base + size 不可表示、与已有区段重叠、没有空槽。
  * 失败返回 no_handle，且**表不变**。 */
 LainVmRegionHandle lainvm_space_add(LainVmSpace *space, uintptr_t base,
                                     uint64_t size, uint32_t rights,
                                     uint64_t owner);
+
+/* 更新同一区段的**可访问前缀**——句柄全程稳定，窗口变化**不再** remove/add。
+ *
+ * 这是栈窗口唯一的更新入口（水位涨了放大、水位退了缩小、Trap 归零）。
+ * 拒绝：句柄无效 / 已撤销 / 代数不符 / 跨空间、accessible > capacity、
+ * base + accessible 不可表示。**失败时区段一点不变**（含 accessible）。
+ * 缩小之后，被收回的那一段**立刻**访问不了（check 只看 accessible）。 */
+bool lainvm_space_set_accessible(LainVmSpace *space, LainVmRegionHandle handle,
+                                 uint64_t accessible);
 
 /* 按句柄取槽。无效、已撤销、代数不符、跨空间 → NULL。 */
 const LainVmRegion *lainvm_space_slot(const LainVmSpace *space,
@@ -103,6 +126,7 @@ const LainVmRegion *lainvm_space_find(const LainVmSpace *space,
                                       uintptr_t addr);
 
 /* 从 addr 起的 size 个字节，能不能按 need 访问。
+ * 判定用**可访问窗口** [base, base + accessible)，不是 capacity。
  * 上界用减法判，避免 addr + size 溢出。 */
 bool lainvm_space_check(const LainVmSpace *space, uintptr_t addr, uint64_t size,
                         uint32_t need);

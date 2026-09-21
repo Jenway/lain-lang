@@ -42,7 +42,7 @@ const LainVmRegion *lainvm_space_slot(const LainVmSpace *space,
 }
 
 static bool overlaps(const LainVmRegion *region, uintptr_t base, uint64_t size) {
-  uintptr_t end = region->base + (uintptr_t)region->size;
+  uintptr_t end = region->base + (uintptr_t)region->capacity;
   uintptr_t want_end = base + (uintptr_t)size;
   return base < end && region->base < want_end;
 }
@@ -91,7 +91,8 @@ LainVmRegionHandle lainvm_space_add(LainVmSpace *space, uintptr_t base,
   if (slot == LAINVM_SPACE_NO_SLOT) return handle;
 
   space->slots[slot].base = base;
-  space->slots[slot].size = size;
+  space->slots[slot].capacity = size;
+  space->slots[slot].accessible = size; /* 登记之后整段立刻可访问 */
   space->slots[slot].rights = rights;
   space->slots[slot].owner = owner;
   space->slots[slot].generation += 1; /* 从 1 开始：全零句柄永远不会撞上活槽 */
@@ -103,6 +104,22 @@ LainVmRegionHandle lainvm_space_add(LainVmSpace *space, uintptr_t base,
   handle.slot = slot;
   handle.generation = space->slots[slot].generation;
   return handle;
+}
+
+/* 句柄 → 可写槽。`lainvm_space_slot` 返回的是 const 视图（查表语义），
+ * 这里要改的就是它指的那个槽，所以去掉 const —— 换的不是类型，是访问方式。 */
+static LainVmRegion *slot_mut(LainVmSpace *space, LainVmRegionHandle handle) {
+  return (LainVmRegion *)lainvm_space_slot(space, handle);
+}
+
+bool lainvm_space_set_accessible(LainVmSpace *space, LainVmRegionHandle handle,
+                                 uint64_t accessible) {
+  LainVmRegion *region = slot_mut(space, handle);
+  if (!region) return false;
+  if (accessible > region->capacity) return false; /* 窗口不许超过存储 */
+  if (region->base + (uintptr_t)accessible < region->base) return false;
+  region->accessible = accessible; /* 失败路径都在上面返回了：区段一点没动 */
+  return true;
 }
 
 bool lainvm_space_remove(LainVmSpace *space, LainVmRegionHandle handle) {
@@ -126,7 +143,7 @@ const LainVmRegion *lainvm_space_find(const LainVmSpace *space,
     const LainVmRegion *region = &space->slots[space->by_base[mid]];
     if (addr < region->base) {
       hi = mid;
-    } else if (addr - region->base >= region->size) {
+    } else if (addr - region->base >= region->capacity) {
       lo = mid + 1;
     } else {
       return region;
@@ -140,8 +157,12 @@ bool lainvm_space_check(const LainVmSpace *space, uintptr_t addr, uint64_t size,
   const LainVmRegion *region = lainvm_space_find(space, addr);
   if (!region) return false;
   if ((region->rights & need) != need) return false;
-  /* 上界用减法判，避免 addr + size 溢出。 */
-  if ((uint64_t)(region->base + (uintptr_t)region->size - addr) < size)
+  /* `find` 是按 **capacity** 找到这段存储的，所以 addr 可能落在存储里、却在
+   * 可访问窗口之外 —— 必须先判一次窗口边界。少了这一句，下面的减法会下溢成
+   * 一个巨大的"剩余量"，于是超出窗口的访问被**静默放行**（实测抓到）。 */
+  if (addr - region->base >= region->accessible) return false;
+  /* 上界用**可访问窗口**判（不是 capacity）：被收回的窗口立刻访问不了。 */
+  if ((uint64_t)(region->base + (uintptr_t)region->accessible - addr) < size)
     return false;
   return true;
 }
