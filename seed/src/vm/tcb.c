@@ -112,6 +112,28 @@ int lainvm_tcb_set_caps(LainVmTcb *tcb, LainVmCaps *caps, L1Diagnostic *diag) {
   return 0;
 }
 
+/* 换地址空间（seL4 的 TCB_SetSpace 那件事）。
+ *
+ * 只换引用，不搬内存：TCB 从此按**新**空间的区段表判权限。它手里的栈句柄带着
+ * 旧空间的身份，所以在新的空间里自动失效——`#alloca` 会稳定地拒（1006），
+ * 而不是悄悄用错内存。要让它在新的空间里继续跑，得由供给方在新空间里登记
+ * 一段栈、再给它一份新租约。原来那块内存怎么处理归供给方，不归 TCB。
+ *
+ * 运行中的 TCB 不许换（先 suspend），免得"换到一半还在跑"。 */
+int lainvm_tcb_set_space(LainVmTcb *tcb, LainVmSpace *space,
+                         L1Diagnostic *diag) {
+  if (!tcb || !space) {
+    start_fail(diag, 9120, "tcb: no tcb or no address space");
+    return 1;
+  }
+  if (tcb->state == LAINVM_RUNNING) {
+    start_fail(diag, 9121, "tcb: cannot switch address space while running");
+    return 1;
+  }
+  tcb->vspace = space;
+  return 0;
+}
+
 static void start_fail(L1Diagnostic *diag, int code, const char *message) {
   if (!diag) return;
   diag->code = code;
