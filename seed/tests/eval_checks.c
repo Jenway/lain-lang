@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "lainbackend/emit.h"
+#include "lainfold/fold.h"
 #include "lainir/build.h"
 #include "lainir/infer.h"
 #include "lainir/parse.h"
@@ -96,6 +97,43 @@ static const char k_eval_call[] =
     "\n"
     "#proc main() -> #bits<64> {\n"
     "  %v = #eval one(1)\n"
+    "  #return %v\n"
+    "}\n";
+
+/* S3：块真的被跑出来、结果替进用处、块自身从产物里消失。块里做一次加法，
+ * 折叠后 main 只剩「常量 + #zext」，执行它必须还是 7。 */
+static const char k_block_fold[] =
+    "#proc main() -> #bits<64> {\n"
+    "  %v = #eval -> (#bits<8>) {\n"
+    "    %a = #add[#bits<8>](3, 4)\n"
+    "    #return %a\n"
+    "  }\n"
+    "  %w = #zext[#bits<64>](%v)\n"
+    "  #return %w\n"
+    "}\n";
+
+/* 反例：块里的 #alloca 超过折叠给它的栈租约容量（租约 64 字节、块要 800）。
+ * 元素类型写 `#bits<64>`：今天 count 是按**元素类型的宽度**读的，写 `#bits<8>`
+ * 时 count 会被截到 8 位（256 → 0 → 夹到 1），那是另一个已登记的问题（计划 §4 D7）。 */
+static const char k_block_alloca_over[] =
+    "#proc main() -> #bits<64> {\n"
+    "  %v = #eval -> (#bits<64>) {\n"
+    "    %p = #alloca[#bits<64>](100)\n"
+    "    #return 0\n"
+    "  }\n"
+    "  #return %v\n"
+    "}\n";
+
+/* 反例：块里再嵌一个块。执行外块时引擎会撞见内块（trap 1045），所以折叠直接拒，
+ * 不留一个跑不了的块。 */
+static const char k_block_nested[] =
+    "#proc main() -> #bits<64> {\n"
+    "  %v = #eval -> (#bits<64>) {\n"
+    "    %w = #eval -> (#bits<64>) {\n"
+    "      #return 1\n"
+    "    }\n"
+    "    #return %w\n"
+    "  }\n"
     "  #return %v\n"
     "}\n";
 
@@ -221,6 +259,153 @@ static EvalResult case_eval_call_ok(void) {
     return fail_result(-1, "固定点不成立");
   }
   return pass_result(canon);
+}
+
+/* 跑一个模块的入口，拿回结果值。0 = 成功，非 0 = 拒绝/失败码。
+ * 不给栈租约：这些语料不碰 #alloca（碰了就是 1006，那也是有信息的结果）。 */
+static int run_module_result(const L1Module *m, const char *entry, uint64_t *out) {
+  LainVmSpace space;
+  LainVmImage *image;
+  LainVmTcb *tcb;
+  L1Diagnostic d;
+  int rc = -1;
+  uint64_t value = 0;
+
+  d.code = 0;
+  lainvm_space_init(&space);
+  image = lainvm_image_load(m, &space, &d);
+  if (!image) return d.code ? d.code : -1;
+  tcb = lainvm_tcb_new(image, &space, 1, 1, 64, lainvm_stack_no_lease(), NULL);
+  if (tcb) {
+    if (lainvm_tcb_start(tcb, entry, NULL, 0, &d) == 0 &&
+        lainvm_engine_run(tcb, 1000000) == LAINVM_SLICE_DONE) {
+      if (!tcb->has_result) {
+        rc = -1;
+      } else {
+        value = tcb->result.kind == L1_VALUE_ADDR
+                    ? (uint64_t)(uintptr_t)tcb->result.as.addr
+                    : tcb->result.as.bits;
+        rc = 0;
+      }
+    } else {
+      rc = tcb->trap.status > 0 ? (int)tcb->trap.status : -1;
+    }
+    lainvm_tcb_free(tcb);
+  }
+  lainvm_image_free(image);
+  if (rc == 0 && out) *out = value;
+  return rc;
+}
+
+/* S3 正例：块被跑出来、结果替进用处、块自身从产物里消失，而且**产物执行出来的
+ * 值仍然对**（只验「折掉了」不够——静默错值正是这么活的）。 */
+static EvalResult case_block_folds(void) {
+  L1Builder *b = lainir_builder_new();
+  L1Builder *out = lainir_builder_new();
+  LainFold *fold = lainfold_new(NULL, 64, 4096, 1000000);
+  L1Diagnostic d;
+  const L1Module *m;
+  const L1Module *after;
+  char *text = NULL;
+  uint64_t value = 0;
+  int code;
+  EvalResult r;
+
+  d.code = 0;
+  m = lainir_parse(b, k_block_fold, &d);
+  if (!m || lainir_verify(m, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠前就该通过验证");
+    goto done;
+  }
+  after = lainfold_module(fold, out, m, &d);
+  if (!after) {
+    r = fail_result(d.code ? d.code : -1, "折叠失败");
+    goto done;
+  }
+  if (lainfold_folded_count(fold) != 1) {
+    r = fail_result(-1, "折掉的次数不是 1");
+    goto done;
+  }
+  if (lainir_verify(after, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠后的产物没通过验证");
+    goto done;
+  }
+  text = lainir_print_to_string(after);
+  if (!text) {
+    r = fail_result(-1, "产物打印失败");
+    goto done;
+  }
+  if (strstr(text, "#eval")) {
+    r = fail_result(-1, "产物里还有 #eval");
+    goto done;
+  }
+  code = run_module_result(after, "main", &value);
+  if (code != 0 || value != 7) {
+    r = fail_result(code, "折叠后 main() 的值不是 7");
+    goto done;
+  }
+  r = pass_result(text);
+  text = NULL;
+done:
+  free(text);
+  lainfold_free(fold);
+  lainir_builder_free(out);
+  lainir_builder_free(b);
+  return r;
+}
+
+/* S3 反例：块要的栈超过租约容量 → 引擎 trap 1007，折叠把它原样报成诊断码。 */
+static EvalResult case_block_alloca_over(void) {
+  L1Builder *b = lainir_builder_new();
+  L1Builder *out = lainir_builder_new();
+  LainFold *fold = lainfold_new(NULL, 64, 64, 1000000);
+  L1Diagnostic d;
+  const L1Module *m;
+  const L1Module *after;
+  EvalResult r;
+
+  d.code = 0;
+  m = lainir_parse(b, k_block_alloca_over, &d);
+  if (!m || lainir_verify(m, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠前就该通过验证");
+  } else {
+    after = lainfold_module(fold, out, m, &d);
+    if (after)
+      r = fail_result(-1, "超出栈容量的块本该被拒");
+    else
+      r = fail_result(d.code, "块里的 #alloca 超出栈容量");
+  }
+  lainfold_free(fold);
+  lainir_builder_free(out);
+  lainir_builder_free(b);
+  return r;
+}
+
+/* S3 反例：块嵌块。 */
+static EvalResult case_block_nested(void) {
+  L1Builder *b = lainir_builder_new();
+  L1Builder *out = lainir_builder_new();
+  LainFold *fold = lainfold_new(NULL, 64, 4096, 1000000);
+  L1Diagnostic d;
+  const L1Module *m;
+  const L1Module *after;
+  EvalResult r;
+
+  d.code = 0;
+  m = lainir_parse(b, k_block_nested, &d);
+  if (!m || lainir_verify(m, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠前就该通过验证");
+  } else {
+    after = lainfold_module(fold, out, m, &d);
+    if (after)
+      r = fail_result(-1, "块嵌块本该被拒");
+    else
+      r = fail_result(d.code, "块里再嵌一个块");
+  }
+  lainfold_free(fold);
+  lainir_builder_free(out);
+  lainir_builder_free(b);
+  return r;
 }
 
 /* 只解析 + 验证，期待被拒的用例共用一个实现。 */
@@ -380,6 +565,9 @@ typedef struct {
 static const EvalCase k_cases[] = {
     {"block_ok", case_block_ok, 0, "#eval -> (#bits<8>) {"},
     {"eval_call_ok", case_eval_call_ok, 0, "%v = #eval one(1)"},
+    {"block_folds", case_block_folds, 0, "#zext[#bits<64>](7)"},
+    {"block_alloca_over", case_block_alloca_over, 1007, NULL},
+    {"block_nested", case_block_nested, 9320, NULL},
     {"block_no_return", case_block_no_return, 2006, NULL},
     {"block_bad_return", case_block_bad_return, 2019, NULL},
     {"block_addr_result", case_block_addr_result, 2030, NULL},

@@ -10,12 +10,23 @@
 
 #define FOLD_MAX_VALUES 256u
 #define FOLD_MAX_ARGS 8u
+/* 一个模块里能被 lowering 成临时根过程的 `#eval` 块数上限。这是**折叠阶段**的
+ * 容量，不是语言限制（「每模块块数」那条语言级预算见计划 S6）。 */
+#define FOLD_MAX_BLOCKS 64u
 
 typedef struct {
   const char *name;
   uint64_t bits;
   uint32_t width;
 } FoldedValue;
+
+/* 一个 `#eval` 块 lowering 出来的临时根过程。名字是 malloc 的：image 持有指向
+ * 这些子过程的指针，所以它们必须活到 image 释放为止。 */
+typedef struct {
+  const L1Inst *block;
+  const L1Subroutine *sub;
+  char *name;
+} FoldedBlock;
 
 struct LainFold {
   LainVmCaps *caps;
@@ -38,6 +49,14 @@ struct LainFold {
   uint32_t value_count;
   uint32_t folded;
   bool failed;
+
+  /* `#eval` 块 lowering 的结果（见 lower_blocks）。run_module 是**装载 image 用的**
+   * 那一份模块：它比输出多那几个临时根过程。输出永远是原模块的子过程集合。 */
+  FoldedBlock blocks[FOLD_MAX_BLOCKS];
+  uint32_t block_count;
+  const L1Module *run_module;
+  L1Subroutine *run_subs;
+  uint32_t run_sub_count;
 };
 
 static bool fold_fail(LainFold *f, int code, const char *message) {
@@ -206,6 +225,217 @@ static bool run_eval(LainFold *f, const L1Inst *inst,
   return true;
 }
 
+/* --- `#eval` 块 lowering --------------------------------------------------- */
+
+/* 遍历整个模块，把 `#eval` 块收集起来。块里再嵌一个块今天执行不了（引擎见到
+ * INST_EVAL 就是 trap 1045），所以那一种直接拒，而不是留下一个跑不了的块。 */
+static bool collect_blocks(LainFold *f, const L1Region *region,
+                           bool inside_block) {
+  uint32_t i;
+  if (!region) return true;
+  for (i = 0; i < region->inst_count; i++) {
+    const L1Inst *inst = &region->insts[i];
+    if (inst->kind == INST_EVAL) {
+      if (inside_block)
+        return fold_fail(f, 9320,
+                         "fold: an #eval block nested in another #eval block is "
+                         "not supported yet");
+      if (f->block_count >= FOLD_MAX_BLOCKS)
+        return fold_fail(f, 9319, "fold: too many #eval blocks in one module");
+      if (!collect_blocks(f, inst->body, true)) return false;
+      f->blocks[f->block_count].block = inst;
+      f->blocks[f->block_count].sub = NULL;
+      f->blocks[f->block_count].name = NULL;
+      f->block_count++;
+      continue;
+    }
+    if (!collect_blocks(f, inst->body, inside_block)) return false;
+    if (inst->kind == INST_SWITCH) {
+      uint32_t k;
+      for (k = 0; k < inst->case_count; k++)
+        if (!collect_blocks(f, inst->cases[k].body, inside_block)) return false;
+      if (!collect_blocks(f, inst->default_case, inside_block)) return false;
+      continue;
+    }
+    if (!collect_blocks(f, inst->else_body, inside_block)) return false;
+  }
+  return true;
+}
+
+static bool collect_module_blocks(LainFold *f, const L1Module *module) {
+  uint32_t i;
+  for (i = 0; i < module->subroutine_count; i++) {
+    const L1Subroutine *sub = &module->subroutines[i];
+    if ((sub->flags & SUBROUTINE_EXTERN) || !sub->body) continue;
+    if (!collect_blocks(f, sub->body, false)) return false;
+  }
+  return true;
+}
+
+static void release_blocks(LainFold *f) {
+  uint32_t i;
+  for (i = 0; i < f->block_count; i++) {
+    free(f->blocks[i].name);
+    f->blocks[i].name = NULL;
+    f->blocks[i].sub = NULL;
+    f->blocks[i].block = NULL;
+  }
+  free(f->run_subs);
+  f->run_subs = NULL;
+  f->run_sub_count = 0;
+  f->block_count = 0;
+  f->run_module = NULL;
+}
+
+/* 把每个块 lowering 成临时根过程，并造一份**含这些过程**的模块给 image 用。
+ * 装载之后 image 按名字找入口，所以合成必须在装载之前完成。
+ *
+ * 「自由变量 → params、按值传入」今天还没有来源：块区域今天解析出来就是零参数
+ * （`parse.c` 的 `#eval` 分支传的是 `parse_block(p, NULL, 0, ...)`）。真出现带参数
+ * 的块时**拒绝**而不是猜一个值——静默错值比拒绝严重得多。 */
+static bool lower_blocks(LainFold *f, const L1Module *module) {
+  uint32_t i;
+  char buffer[64];
+
+  f->run_module = module;
+  if (f->block_count == 0) return true;
+
+  for (i = 0; i < f->block_count; i++) {
+    const L1Region *body = f->blocks[i].block->body;
+    const L1Subroutine *sub;
+    if (!body) return fold_fail(f, 9319, "fold: an #eval block has no body");
+    if (body->param_count != 0)
+      return fold_fail(f, 9321,
+                       "fold: an #eval block that captures outer values is not "
+                       "supported yet");
+    snprintf(buffer, sizeof(buffer), "__eval_block_%u", i);
+    f->blocks[i].name = (char *)malloc(strlen(buffer) + 1);
+    if (!f->blocks[i].name) return fold_fail(f, 9316, "fold: out of memory");
+    memcpy(f->blocks[i].name, buffer, strlen(buffer) + 1);
+    sub = lainir_subroutine(f->builder, f->blocks[i].name, NULL, 0,
+                            body->results, body->result_count, body);
+    if (!sub)
+      return fold_fail(f, 9319,
+                       "fold: cannot lower an #eval block into a temporary "
+                       "procedure");
+    f->blocks[i].sub = sub;
+  }
+
+  f->run_sub_count = module->subroutine_count + f->block_count;
+  f->run_subs = (L1Subroutine *)malloc(sizeof(*f->run_subs) * f->run_sub_count);
+  if (!f->run_subs) return fold_fail(f, 9316, "fold: out of memory");
+  for (i = 0; i < module->subroutine_count; i++)
+    f->run_subs[i] = module->subroutines[i];
+  for (i = 0; i < f->block_count; i++)
+    f->run_subs[module->subroutine_count + i] = *f->blocks[i].sub;
+
+  f->run_module = lainir_module(f->builder, module->name, module->data,
+                                module->data_count, f->run_subs, f->run_sub_count);
+  if (!f->run_module)
+    return fold_fail(f, 9319,
+                     "fold: cannot build the module that carries the #eval "
+                     "blocks");
+  return true;
+}
+
+static const L1Subroutine *block_sub(const LainFold *f, const L1Inst *inst) {
+  uint32_t i;
+  for (i = 0; i < f->block_count; i++)
+    if (f->blocks[i].block == inst) return f->blocks[i].sub;
+  return NULL;
+}
+
+/* 跑一个 `#eval` 块，返回它算出来的值。
+ *
+ * 它在**自己的账户与自己的 TCB** 里执行（D4 = 每次 eval 一份账户，D5 = 独立空间）：
+ * 块花掉的额度算不到别人头上，块也拿不到调用者的地址空间——它只有 fold 这个空间，
+ * 而那里面只有映像与 fold 自己的栈。 */
+static bool run_eval_block(LainFold *f, const L1Inst *inst, uint64_t *bits_out,
+                           uint32_t *width_out) {
+  const L1Subroutine *sub = block_sub(f, inst);
+  LainVmQuota quota;
+  LainVmStackLease lease = lainvm_stack_no_lease();
+  LainVmTcb *tcb;
+  LainVmSliceResult result;
+  L1Value value;
+  bool has_result;
+  int trap_code;
+  char message[128];
+
+  if (!sub || !sub->name)
+    return fold_fail(f, 9322, "fold: an #eval block was not lowered");
+
+  if (inst->body && inst->body->result_count > 0 && inst->body->results[0] &&
+      inst->body->results[0]->kind == TY_ADDR)
+    return fold_fail(f, 9308,
+                     "fold: a compile-time result that is an address must be "
+                     "materialized by the host, not by the IR");
+
+  lainvm_quota_init(&quota, f->quota.limit);
+  if (f->stack_bytes > 0) {
+    lease.space = &f->space;
+    lease.region = lainvm_space_alloc_stack(&f->space, f->stack_bytes, 1, &quota);
+    if (lainvm_space_handle_none(lease.region))
+      return fold_fail(f, 9318,
+                       "fold: cannot admit a stack for the compile-time run");
+  }
+  tcb = lainvm_tcb_new(f->image, &f->space, 1, 1, f->max_call_depth, lease,
+                       &quota);
+  if (!tcb) {
+    if (!lainvm_stack_lease_none(lease))
+      (void)lainvm_space_free(&f->space, lease.region);
+    return fold_fail(f, 9314, "fold: cannot admit a compile-time activation");
+  }
+  if (f->caps && lainvm_tcb_set_caps(tcb, f->caps, f->diag) != 0) {
+    lainvm_tcb_free(tcb);
+    if (!lainvm_stack_lease_none(lease))
+      (void)lainvm_space_free(&f->space, lease.region);
+    return fold_fail(f, 9315, "fold: cannot resolve capabilities");
+  }
+
+  memset(&value, 0, sizeof(value));
+  if (lainvm_tcb_start(tcb, sub->name, NULL, 0, f->diag) != 0) {
+    const char *why = f->diag && f->diag->message[0]
+                          ? f->diag->message
+                          : "fold: cannot start the compile-time block";
+    lainvm_tcb_free(tcb);
+    if (!lainvm_stack_lease_none(lease))
+      (void)lainvm_space_free(&f->space, lease.region);
+    return fold_fail(f, 9305, why);
+  }
+  result = lainvm_engine_run(tcb, f->fuel);
+  /* 结果与 trap 都先取出来：TCB 下面就要销毁了。 */
+  has_result = tcb->has_result;
+  value = tcb->result;
+  trap_code = (int)tcb->trap.status;
+  lainvm_tcb_free(tcb);
+  if (!lainvm_stack_lease_none(lease))
+    (void)lainvm_space_free(&f->space, lease.region);
+
+  if (result != LAINVM_SLICE_DONE) {
+    /* Trap 是块自己的失败，把引擎那枚稳定码原样报上来（1007 容量不够、
+     * 1044 配额不够…），不压成一个笼统的号：诊断要能指到那一次执行。 */
+    if (result == LAINVM_SLICE_TRAPPED && trap_code > 0) {
+      snprintf(message, sizeof(message),
+               "fold: the compile-time block trapped (%d)", trap_code);
+      return fold_fail(f, trap_code, message);
+    }
+    return fold_fail(f, 9306, "fold: the compile-time block did not finish");
+  }
+  if (!has_result && inst->result_count > 0)
+    return fold_fail(f, 9307, "fold: the compile-time block produced no value");
+
+  if (inst->result_count == 0) {
+    *bits_out = 0;
+    *width_out = 64;
+    return true;
+  }
+  *bits_out = value.kind == L1_VALUE_ADDR ? (uint64_t)(uintptr_t)value.as.addr
+                                          : value.as.bits;
+  *width_out = value.bit_width ? value.bit_width : 64;
+  return true;
+}
+
 /* --- 区域重写 ------------------------------------------------------------- */
 
 static const L1Region *rewrite_region(LainFold *f, const L1Region *region) {
@@ -290,6 +520,21 @@ static const L1Region *rewrite_region(LainFold *f, const L1Region *region) {
       continue;
     }
 
+    /* `#eval` 块：在独立 TCB 里跑出结果，然后把块本身折掉（块体不再重写——
+     * 它已经执行过了，而且引擎根本不认它）。 */
+    if (inst->kind == INST_EVAL) {
+      uint64_t bits = 0;
+      uint32_t width = 64;
+      if (!run_eval_block(f, inst, &bits, &width)) {
+        free((void *)ops);
+        break;
+      }
+      if (inst->result_count > 0) remember(f, inst->results[0], bits, width);
+      f->folded++;
+      free((void *)ops);
+      continue;
+    }
+
     body = inst->body ? rewrite_region(f, inst->body) : inst->body;
     else_body = inst->else_body ? rewrite_region(f, inst->else_body) : NULL;
     if (f->failed) {
@@ -341,6 +586,22 @@ static const L1Region *rewrite_region(LainFold *f, const L1Region *region) {
 
 /* --- 模块 ----------------------------------------------------------------- */
 
+/* 失败退出时把这一次调用拿到的执行资源全部放掉：TCB、栈租约、映像、临时过程。
+ * TCB 先销毁（它结束借用），租约才真的归还。 */
+static void abandon_run(LainFold *f, LainVmStackLease lease) {
+  if (f->tcb) {
+    lainvm_tcb_free(f->tcb);
+    f->tcb = NULL;
+  }
+  if (!lainvm_stack_lease_none(lease))
+    (void)lainvm_space_free(&f->space, lease.region);
+  if (f->image) {
+    lainvm_image_free(f->image);
+    f->image = NULL;
+  }
+  release_blocks(f);
+}
+
 const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
                                 const L1Module *module, L1Diagnostic *diag) {
   L1Subroutine *subs;
@@ -354,15 +615,24 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
   fold->diag = diag;
   fold->failed = false;
   fold->value_count = 0;
+  release_blocks(fold); /* 上一次调用留下的（正常路径已经放掉了） */
   if (diag) {
     diag->code = 0;
     diag->message[0] = '\0';
   }
 
+  /* `#eval` 块必须先 lowering 再装载：image 按名字找入口，合成的临时根过程
+   * 必须在 image 里。没有块时 run_module 就是输入模块本身。 */
+  if (!collect_module_blocks(fold, module) || !lower_blocks(fold, module)) {
+    release_blocks(fold);
+    return NULL;
+  }
+
   lainvm_space_init(&fold->space);
-  fold->image = lainvm_image_load(module, &fold->space, diag);
+  fold->image = lainvm_image_load(fold->run_module, &fold->space, diag);
   if (!fold->image) {
     fold_fail(fold, 9313, "fold: cannot load the module for compile-time runs");
+    release_blocks(fold);
     return NULL;
   }
   fold->tcb = NULL;
@@ -373,6 +643,7 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
                                             &fold->quota);
     if (lainvm_space_handle_none(lease.region)) {
       fold_fail(fold, 9318, "fold: cannot admit a stack for the compile-time run");
+      abandon_run(fold, lease);
       return NULL;
     }
   }
@@ -382,6 +653,7 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
     if (!lainvm_stack_lease_none(lease))
       (void)lainvm_space_free(&fold->space, lease.region);
     fold_fail(fold, 9314, "fold: cannot admit a compile-time activation");
+    abandon_run(fold, lease);
     return NULL;
   }
   if (fold->caps && lainvm_tcb_set_caps(fold->tcb, fold->caps, diag) != 0) {
@@ -390,6 +662,7 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
     if (!lainvm_stack_lease_none(lease))
       (void)lainvm_space_free(&fold->space, lease.region);
     fold_fail(fold, 9315, "fold: cannot resolve capabilities");
+    abandon_run(fold, lease);
     return NULL;
   }
 
@@ -397,6 +670,7 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
                                 (module->subroutine_count ? module->subroutine_count : 1));
   if (!subs) {
     fold_fail(fold, 9316, "fold: out of memory");
+    abandon_run(fold, lease);
     return NULL;
   }
   for (i = 0; i < module->subroutine_count; i++) {
@@ -405,6 +679,7 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
     subs[i].body = rewrite_region(fold, subs[i].body);
     if (fold->failed) {
       free(subs);
+      abandon_run(fold, lease);
       return NULL;
     }
   }
@@ -420,6 +695,7 @@ const L1Module *lainfold_module(LainFold *fold, L1Builder *builder,
   lainvm_image_free(fold->image);
   fold->tcb = NULL;
   fold->image = NULL;
+  release_blocks(fold);
   if (!out) {
     fold_fail(fold, 9317, "fold: cannot build the folded module");
     return NULL;
