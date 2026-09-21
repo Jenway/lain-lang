@@ -1238,7 +1238,7 @@ static bool check_no_eval(LainBackend *be) {
       for (pos = 0; pos < region->inst_count; pos++) {
         const L1Inst *inst = &region->insts[pos];
         uint32_t k;
-        if (inst->is_eval) {
+        if (inst->is_eval || inst->kind == INST_EVAL) {
           fail(be, 9225, "cbackend: #eval must be folded away before codegen");
           return false;
         }

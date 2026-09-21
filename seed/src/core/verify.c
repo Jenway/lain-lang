@@ -29,6 +29,9 @@ typedef struct {
   LainIrTypes types;
   L1Diagnostic *diag;
   const L1Subroutine *sub;
+  /* 非空表示「正在验一个 `#eval` 块的体」：那里的 #return 按**块**声明的结果
+   * 定型，而不是按外层过程的签名。块可以嵌套，所以进出要保存/恢复。 */
+  const L1Region *return_region;
   Binding *bindings;
   uint32_t binding_count;
   uint32_t binding_cap;
@@ -121,6 +124,11 @@ static uint32_t literal_width(Verifier *v, const L1Region *region,
                ? lainir_type_width(region->results[index])
                : 0;
   case INST_RETURN:
+    /* 在 `#eval` 块里，#return 交的是块的结果。 */
+    if (v->return_region)
+      return v->return_region->result_count > 0
+                 ? lainir_type_width(v->return_region->results[0])
+                 : 0;
     return v->sub->result_count > 0
                ? lainir_type_width(v->sub->results[0])
                : 0;
@@ -565,6 +573,46 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
                   "#call_indirect needs a target");
     return true;
 
+  case INST_EVAL: {
+    uint32_t i;
+    uint32_t saved;
+    const L1Region *outer_return;
+    const Binding *inner = names;
+    if (inst->operand_count != 0)
+      return fail(v, L1V_BAD_CONDITION, inst->line, inst->column,
+                  "#eval block takes no operands");
+    if (!inst->body)
+      return fail(v, L1V_MISSING_TYPE, inst->line, inst->column,
+                  "#eval block without a body");
+    if (inst->body->result_count == 0)
+      return fail(v, L1V_BAD_RESULT_COUNT, inst->line, inst->column,
+                  "#eval block must declare a result type");
+    if (!check_result_count(v, inst, inst->body->result_count)) return false;
+    /* 块的结果类型不许含地址：编译期地址不得进入产物（块里可以随便用）。 */
+    for (i = 0; i < inst->body->result_count; i++) {
+      const L1Type *rt = inst->body->results[i];
+      if (rt && rt->kind == TY_ADDR)
+        return fail(v, L1V_ADDR_IN_EVAL_RESULT, inst->line, inst->column,
+                    "#eval block result %u must not be #addr", i);
+    }
+    if (!yields_values(v, inst->body, inst->body->result_count, NULL))
+      return fail(v, L1V_MISSING_YIELD, inst->line, inst->column,
+                  "#eval block must return a value on every path");
+    saved = v->binding_count;
+    for (i = 0; i < inst->body->param_count; i++)
+      inner = push_binding(v, inner, inst->body->params[i].param.name,
+                           inst->body->params[i].param.ty);
+    outer_return = v->return_region;
+    v->return_region = inst->body;
+    if (!verify_region(v, inst->body, inner, loops, saved)) {
+      v->return_region = outer_return;
+      return false;
+    }
+    v->return_region = outer_return;
+    v->binding_count = saved;
+    return true;
+  }
+
   case INST_IF: {
     const L1Type *cond;
     if (inst->operand_count != 1)
@@ -747,19 +795,28 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
     break;
   }
 
-  case INST_RETURN:
+  case INST_RETURN: {
+    /* 块里的 #return 按块声明的结果定型；过程里的按过程签名。 */
+    uint32_t want = v->return_region ? v->return_region->result_count
+                                     : v->sub->result_count;
+    const L1Type *want_ty =
+        v->return_region
+            ? (v->return_region->result_count > 0 ? v->return_region->results[0]
+                                                  : NULL)
+            : (v->sub->result_count > 0 ? v->sub->results[0] : NULL);
     if (!check_result_count(v, inst, 0)) return false;
-    if (inst->operand_count != v->sub->result_count)
+    if (inst->operand_count != want)
       return fail(v, L1V_BAD_RETURN, inst->line, inst->column,
-                  "#return delivers %u value(s), the signature declares %u",
-                  inst->operand_count, v->sub->result_count);
+                  "#return delivers %u value(s), the declaration has %u",
+                  inst->operand_count, want);
     if (inst->operand_count == 1) {
       const L1Type *ty = operand_ty(v, names, region, inst, 0, loops);
-      if (ty && !same_type(ty, v->sub->results[0]))
+      if (ty && want_ty && !same_type(ty, want_ty))
         return fail(v, L1V_BAD_RETURN, inst->line, inst->column,
                     "#return value does not match the declared result");
     }
     break;
+  }
 
   default:
     /* 上面没覆盖到的、产出值的算子。 */

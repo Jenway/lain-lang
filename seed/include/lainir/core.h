@@ -136,6 +136,14 @@ typedef enum {
   INST_IF, INST_LOOP, INST_SWITCH,
   /* 终结子 */
   INST_YIELD, INST_BREAK, INST_CONTINUE, INST_RETURN,
+
+  /* 编译期执行块（文档 §10）：由 folding 阶段算掉，**引擎与后端都不该见到它**。
+   * 它拥有自己的区域，区域的 results[] 声明块的类型；验证器把块当作返回该
+   * 类型的匿名过程，块里的 #return 按块的声明定型。
+   * 与 `#call` 上的 is_eval 标记是两回事：那个是调用级常量折叠。
+   * **加在最后**：引擎的分派表是按 kind 下标索引的，插在中间会平移全部下标。 */
+  INST_EVAL,
+
   /* 计数用；不是一条指令 */
   INST_COUNT,
 } L1InstKind;

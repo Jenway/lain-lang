@@ -3,11 +3,12 @@
 
     python scripts/build.py
 
-产物：build/meta_boot.exe（Meta 驱动）、build/vspace_checks.exe（VM 边界用例驱动）
+产物：build/meta_boot.exe（Meta 驱动）、build/vspace_checks.exe（VM 边界用例驱动）、
+build/eval_checks.exe（`#eval` 用例驱动）
 
-只有「编译 + 冒烟」这一件事。没有参数、没有开关 —— 验收在 `check_meta.py`（Meta 用例）
-和 `check_vspace.py`（VSpace 边界用例）里，跟这一步分开：那两个脚本要用这里的产物，
-这里不依赖它们，也不替它们跑。
+只有「编译 + 冒烟」这一件事。没有参数、没有开关 —— 验收在 `check_meta.py`（Meta 用例）、
+`check_vspace.py`（VSpace 边界用例）和 `check_eval.py`（`#eval` 用例）里，跟这一步分开：
+那三个脚本要用这里的产物，这里不依赖它们，也不替它们跑。
 
 退出码：0 通过 / 1 失败 / 2 缺前置（没有 C 编译器或缺文件）。
 """
@@ -22,6 +23,7 @@ BUILD = ROOT / "build"
 
 META_DRIVER = "seed/tests/meta_boot.c"
 VSPACE_DRIVER = "seed/tests/vspace_checks.c"
+EVAL_DRIVER = "seed/tests/eval_checks.c"
 MANIFEST = "bootstrap/SOURCE_ORDER"                      # Meta 的源清单
 PRELUDE = "std/prelude.lain=bootstrap/lain/std/prelude.lain"
 SMOKE = ("seed/tests/meta_for.lain", "main", "10")       # for 循环：sum(5) = 10
@@ -76,7 +78,7 @@ def main():
         return 2
 
     srcs = sources()
-    needed = [META_DRIVER, VSPACE_DRIVER, SMOKE[0], MANIFEST,
+    needed = [META_DRIVER, VSPACE_DRIVER, EVAL_DRIVER, SMOKE[0], MANIFEST,
               PRELUDE.split("=")[1], *srcs]
     missing = [p for p in needed if not (ROOT / p).is_file()]
     if missing:
@@ -95,6 +97,8 @@ def main():
     if not compile_driver(cc, env, META_DRIVER, meta_out, srcs):
         return 1
     if not compile_driver(cc, env, VSPACE_DRIVER, exe("vspace_checks"), srcs):
+        return 1
+    if not compile_driver(cc, env, EVAL_DRIVER, exe("eval_checks"), srcs):
         return 1
 
     # 参数是：<源码> <入口> <期望值> <断言文本> <模式> [逻辑路径=文件]
