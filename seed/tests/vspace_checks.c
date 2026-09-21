@@ -810,6 +810,55 @@ static int case_stack_zero_count(void) {
   return 0;
 }
 
+/* 两个 TCB 共用一个 VSpace（= 同一地址空间里的两条执行流 / 两个线程）：
+ * 各自的栈必须互不影响，先销毁哪一个都不能碰到另一个。
+ * 这是"栈跟着 TCB 的身份走、不跟着空间里的位置走"的最小可测情形——
+ * 也是迁徙线程那条性质（栈属于线程，不属于它此刻跑在哪里）在 VSpace 上的投影。 */
+static int case_stack_two_tcbs_one_space(void) {
+  Rig rig;
+  LainVmTcb *t1, *t2;
+  LainVmRegionHandle h1, h2;
+  uintptr_t base1, base2;
+  int ok = 1;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+  t1 = rig.tcb; /* 台架已经建了一个 */
+  h1 = t1->stack;
+  base1 = base_of(&rig.space, h1);
+  t2 = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, 4096);
+  if (!t2) {
+    rig_free(&rig);
+    obs_facts("同一个地址空间里建第二个 TCB 失败");
+    return 0;
+  }
+  h2 = t2->stack;
+  base2 = base_of(&rig.space, h2);
+  if (lainvm_space_handle_none(h1) || lainvm_space_handle_none(h2) ||
+      base1 == 0 || base2 == 0 || base1 == base2) {
+    ok = 0;
+    obs_facts("两个 TCB 的栈不独立：base1=%llu base2=%llu",
+              (unsigned long long)base1, (unsigned long long)base2);
+  }
+  if (ok) {
+    /* 先销毁第二个：第一个的栈句柄必须纹丝不动，第二个的区段必须消失。 */
+    lainvm_tcb_free(t2);
+    if (base_of(&rig.space, h1) != base1) {
+      ok = 0;
+      obs_facts("销毁 TCB2 之后 TCB1 的栈句柄指到 base=%llu（原来 %llu）",
+                (unsigned long long)base_of(&rig.space, h1),
+                (unsigned long long)base1);
+    } else if (base_of(&rig.space, h2) != 0) {
+      ok = 0;
+      obs_facts("销毁 TCB2 之后它的栈区段还在（base=%llu）",
+                (unsigned long long)base_of(&rig.space, h2));
+    }
+  }
+  rig_free(&rig); /* 剩下的 TCB1 */
+  if (!ok) return 0;
+  obs_value(1);
+  return 0;
+}
+
 /* --- host 组 ---------------------------------------------------------------- */
 
 /* R04：从合法区段的末尾读，长度超出一字节 —— 能力该不该拦？ */
@@ -1020,6 +1069,8 @@ static const Case k_cases[] = {
     {"stack_count_overflow", "stack", EXP_TRAP, 0, 1035,
      case_stack_count_overflow},
     {"stack_zero_count", "stack", EXP_TRAP, 0, 2024, case_stack_zero_count},
+    {"stack_two_tcbs_one_space", "stack", EXP_VALUE, 1, 0,
+     case_stack_two_tcbs_one_space},
     /* host */
     {"host_past_region", "host", EXP_TRAP, 0, 0, case_host_past_region},
     {"host_wrong_identity", "host", EXP_TRAP, 0, 0, case_host_wrong_identity},
