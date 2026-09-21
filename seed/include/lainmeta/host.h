@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include "lainvm/caps.h"
+#include "lainvm/space.h"
 
 typedef struct LainMetaHost LainMetaHost;
 
@@ -29,6 +30,7 @@ enum {
   LAINMETA_ERR_OOM = 2,         /* 宿主自己分配失败 */
   LAINMETA_ERR_NO_INTEGER = 3,  /* 源里找不到整数字面量（v0 的语言） */
   LAINMETA_ERR_UNSUPPORTED = 4, /* 这个形状 v0 还不认 */
+  LAINMETA_ERR_DENIED = 5,      /* 宿主边界：没授权，或要读的区间不在授权范围内 */
 };
 
 LainMetaHost *lainmeta_host_new(void);
@@ -72,5 +74,15 @@ void lainmeta_host_clear_status(LainMetaHost *host);
 /* 把底座服务登记进能力表。返回 0 = 成功。
  * 登记的名字见 host.c 顶部的表。 */
 int lainmeta_host_register(LainMetaHost *host, LainVmCaps *caps);
+
+/* 把这份宿主服务**授权**到某个地址空间（驱动在 admit 之前调用）。
+ *
+ * 宿主能力只拿得到裸地址（宿主 ABI 没有类型），所以"这个地址能不能读"必须由
+ * 宿主这一侧自己判：没授权的宿主对象不许解引用调用方给的地址。这和源码文本、
+ * 暂存区要驱动显式授权是同一件事——能力表里没有 user_data，所以要带的东西
+ * 只能挂在**宿主对象自己**身上，而且必须是显式输入。
+ *
+ * 传 NULL 表示撤销授权。 */
+void lainmeta_host_attach_space(LainMetaHost *host, LainVmSpace *space);
 
 #endif /* LAINMETA_HOST_H */

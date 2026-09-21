@@ -26,6 +26,9 @@ struct LainMetaHost {
   /* Meta 的可写暂存：表格建在这里。驱动负责把这块范围登记进 VSpace。 */
   unsigned char *scratch;
   uint32_t scratch_size;
+  /* 这份宿主服务被授权到哪个地址空间（驱动 attach；NULL = 没授权）。
+   * 能力表里没有 user_data，所以授权随**宿主对象**走，且由驱动显式给。 */
+  LainVmSpace *space;
 };
 
 /* --- 能力名 ---------------------------------------------------------------
@@ -43,6 +46,27 @@ struct LainMetaHost {
  * ------------------------------------------------------------------------- */
 
 #define HOST_OF(args) ((LainMetaHost *)(uintptr_t)(args)[0])
+
+void lainmeta_host_attach_space(LainMetaHost *host, LainVmSpace *space) {
+  if (!host) return;
+  host->space = space;
+}
+
+/* 宿主边界。这份服务能不能读调用方给的 [addr, addr+length)？
+ *
+ * 两件事缺一不可：
+ *   1) **授权**：驱动得先把地址空间 attach 到这份宿主服务上（没 attach = 身份不明）；
+ *   2) **范围**：整段必须落在那个空间授权的区段里。
+ * 之前这里是 fail open —— 按裸地址直接 memcpy，于是"从区段末尾多读一字节"
+ * （R04）和"换一个没授权的宿主对象"（R05）都能过。先检后写：拒的时候输出缓冲
+ * 一个字节都不动。 */
+static bool host_range_readable(const LainMetaHost *host, uintptr_t addr,
+                                uint64_t length) {
+  if (!host->space) return false;
+  if (length == 0) return true; /* 不碰内存 */
+  if (length > (uint64_t)UINTPTR_MAX - (uint64_t)addr) return false;
+  return lainvm_space_check(host->space, addr, length, LAINVM_MEM_READ);
+}
 
 static int reserve_output(LainMetaHost *host, uint32_t extra) {
   uint32_t need = host->out_length + extra + 1u;
@@ -252,6 +276,9 @@ static uint32_t cap_emit_write(const uint64_t *args, uint32_t count,
   bytes = (const char *)(uintptr_t)args[1];
   length = args[2];
   if (!bytes && length > 0) return LAINMETA_ERR_UNSUPPORTED;
+  /* 边界检查在**任何副作用之前**：拒的时候 out_length 与输出缓冲都不动。 */
+  if (!host_range_readable(host, (uintptr_t)bytes, length))
+    return LAINMETA_ERR_DENIED;
   if (reserve_output(host, (uint32_t)length)) return LAINMETA_ERR_OOM;
   if (length) memcpy(host->out + host->out_length, bytes, (size_t)length);
   host->out_length += (uint32_t)length;
