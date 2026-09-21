@@ -26,7 +26,14 @@
 // 层次：外层是 root 环境（逻辑路径 `std::prelude` 那份源码），内层是被降级的
 // 那份源码。被 import 的模块取用时再压一层，用完退掉（mark / release）。
 //
-// 暂存区分段（宿主给 64 KiB）：
+// 暂存区分段。**这一段是布局的单一来源**：以前它是按「grep `scratch, N` 看哪些
+// 数字出现过」选的偏移，于是两块缓冲区叠在同一段内存上也没人发现。现在每一格
+// 都写明归谁。
+//
+// 宿主给的总额：64 KiB 保底 + 每输入字节 128 字节（`host.c` 的
+// `decide_scratch_size`）。
+//
+//   --- 固定格子（+0..+519）---
 //   +0    和类型最大载荷大小       +8    和类型最大对齐
 //   +16   命中标量所在源码下标      +24   op 物理名位置
 //   +32   op 物理名长度            +40   那份源码长度
@@ -39,12 +46,30 @@
 //   +120  语法树的节点数
 //   +128  每份源码的树根数组起点（偏移）
 //   +136  语法树的节点容量
-//   +160  逻辑路径 / mangle 缓冲区，352 字节（+160..+511）
+//   +144  **两段用**：解析期是 parse.l1 的递归出参，降级期是临时值计数器
+//   +152  **两段用**：解析期是 parse.l1 的第二个递归出参，降级期没有使用者
+//   +160  保留（对齐，8 字节）
+//   +168  表达式结果：引用 / 范围起点 / 范围终点 / 终点节点（4 格，meta.l1）
+//   +200  实参表，每条 24 字节（引用 / 范围起点 / 范围终点），上限 12 条 → +487
+//   +488  保留（对齐，8 字节）
+//   +496  实参个数
+//   +504  当前函数的参数组节点（一格，不建表，见 funcs.l1）
 //   +512  注册表条目数
-//   +520  注册表条目区，每条 64 字节
+//
+//   --- 动态区（+520 起，容量按模块算）---
+//        注册表条目区，每条 64 字节
 //        作用域表条目区，每条 56 字节，起点 = 520 + 64 × 注册表容量
 //        树根数组，每条 8 字节（每份源码一个）
-//        语法树节点区，每条 40 字节
+//        语法树节点区，每条 48 字节
+//        逻辑路径 / mangle 缓冲区，352 字节（**紧接树节点区**，见 meta_path_buffer）
+//
+// +168..+504 那一整段是降级表达式和实参用的。路径 / mangle 缓冲区**曾经**压在
+// 它上面（旧表把它写成 `+160，352 字节`，正好盖住 +168..+511）——当时能用只是因为
+// 没有一条路径同时走到两边，是巧合不是设计。现在它挪到动态区尾部，两者不再共用。
+//
+// 节点步长 48 出现在四处：parse.l1 的两个访问器、这份文件的容量检查、
+// `meta_path_buffer`。**改要一起改**——容量检查那处曾经漏过一次（还是 40，比真实
+// 占用小 17%，"装不下报 17" 于是判不出来），别再漏。
 //
 // **查找只认两份源码：当前这份，和 root 环境那份。**
 //
@@ -91,8 +116,15 @@
   %tree_base = #add[#bits<64>](%roots_base, %roots_bytes)
   %nodes0 = #mul[#bits<64>](%total, 2)
   %nodes = #add[#bits<64>](%nodes0, 8)
-  %tree_bytes = #mul[#bits<64>](%nodes, 40)
-  %need = #add[#bits<64>](%tree_base, %tree_bytes)
+  // 节点步长 48，和 parse.l1 的访问器一致。**这里曾经是 40** —— 那是节点还是 5 个
+  // 字时的步长，于是容量检查比真实占用小 17%：树快到上限时「装不下报 17」判不出来，
+  // 会写进后面那段内存。
+  %tree_bytes = #mul[#bits<64>](%nodes, 48)
+  // 动态区尾部还留着路径 / mangle 缓冲区（352 字节），它在同一块暂存区里，所以
+  // 「装得下」必须把它算上，否则树会写进它。
+  %path_bytes = #call meta_cell_get(#data_addr meta_path_cap)
+  %need0 = #add[#bits<64>](%tree_base, %tree_bytes)
+  %need = #add[#bits<64>](%need0, %path_bytes)
   %fits = #ule[#bits<64>](%need, %size)
   %r = #if %fits -> (#bits<32>) {
     %s1 = #call meta_cell_put(#lea(%scratch, 56, 1, 0), %total)
@@ -100,6 +132,13 @@
     %s3 = #call meta_cell_put(#lea(%scratch, 72, 1, 0), %sc_base)
     %s4 = #call meta_cell_put(#lea(%scratch, 80, 1, 0), %scap)
     %s5 = #call meta_cell_put(#lea(%scratch, 88, 1, 0), 0)
+    // 分配器的区段 = 固定认领之后剩下的全部。`%need` 正好是认领的末尾（它已经
+    // 把树、注册表、作用域表和路径缓冲区都算进去了），所以它就是初始水位。
+    %bw = #call meta_cell_put(#lea(%scratch, 200, 1, 0), %need)
+    %bp = #call meta_cell_put(#lea(%scratch, 208, 1, 0), %need)
+    // 「当前实参块」和实参个数也要有个确定的初值（第一次调用前没人写过它们）
+    %bq = #call meta_cell_put(#lea(%scratch, 216, 1, 0), 0)
+    %bc = #call meta_cell_put(#lea(%scratch, 496, 1, 0), 0)
     %t1 = #call meta_cell_put(#lea(%scratch, 112, 1, 0), %tree_base)
     %t2 = #call meta_cell_put(#lea(%scratch, 120, 1, 0), 0)
     %t3 = #call meta_cell_put(#lea(%scratch, 128, 1, 0), %roots_base)
@@ -150,6 +189,95 @@
     #yield 17
   }
   #return %r
+}
+
+// 路径 / mangle 缓冲区在哪 —— **动态区尾部，紧接语法树节点区**。
+//
+// 为什么不放在固定格子里：它要装得下最长的逻辑路径（容量见 `meta_path_cap`，
+// 352 字节），而固定格子 +168..+504 已经被降级表达式和实参机械占满。硬塞进去
+// 就是两块内存互相覆盖 —— 旧表正是这么写的（把 +160..+511 整段给了它），这一版
+// 才拆开。公式只此一处，使用者调这个 proc。
+#proc meta_path_buffer(%host: #addr) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %tree = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
+  %nodes = #call meta_cell_get(#lea(%scratch, 136, 1, 0))
+  %bytes = #mul[#bits<64>](%nodes, 48)
+  %at = #add[#bits<64>](%tree, %bytes)
+  #return %at
+}
+
+// --- 暂存区分配器（碰撞式）--------------------------------------------------
+//
+// 为什么要有它：那些**逐表达式、会嵌套**的临时块，用手挑的固定偏移做不到。实参表
+// 就是活证据 —— 外层的实参降级到一半，里面又碰到一次调用，内层把同一段内存写一遍：
+//
+//   func add3(a: i32, b: i32, c: i32) -> i32 { return a + b; }
+//   let main: i32 = add3(g(1), g(2), g(3));
+//   →
+//   %r3 = #call g(1)   %r4 = #call g(2)   %r5 = #call g(3)
+//   #return #call add3(3, %r4, %r5)      ← 第一个实参成了内层 g(3) 的实参
+//
+// 验证器不报，值是错的。所以临时块改成**向分配器要**。
+//
+// 只需要碰撞式：这里从不 free、没有碎片。水位往上推，mark/release 成对回退。
+//
+//   +200  水位（下一个可用偏移）
+//   +208  历史最高水位（只增 —— "够不够"看这一个数，不用再估）
+//
+// 区段 = 启动时那几笔固定认领之后剩下的全部（认领顺序就是布局，见文件头的表）。
+//
+// 水位顶出区段上界时下一次 `#store` 会被 VSpace 拒 —— 这是跟 VM 的唯一接口
+// （计划 §4 第 5 条读法二下）。分配器要**抢在撞墙之前**自己报 17，所以每次
+// 分配都先比一次上界。
+
+#proc meta_bump_word(%host: #addr, %off: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %v = #call meta_cell_get(#lea(%scratch, %off, 1, 0))
+  #return %v
+}
+
+#proc meta_bump_mark(%host: #addr) -> #bits<64> {
+  %w = #call meta_bump_word(%host, 200)
+  #return %w
+}
+
+// 历史最高水位。够不够读它，不要读水位（水位会随 release 退回去）。
+#proc meta_bump_peak(%host: #addr) -> #bits<64> {
+  %v = #call meta_bump_word(%host, 208)
+  #return %v
+}
+
+// 要 `%bytes` 字节，8 字节对齐，返回偏移；装不下报 17 并返回「无」。
+#proc meta_bump_alloc(%host: #addr, %bytes: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %size = #call lain_meta_scratch_size(%host)
+  %at = #call meta_bump_mark(%host)
+  %pad0 = #add[#bits<64>](%bytes, 7)
+  %need = #and[#bits<64>](%pad0, 0xFFFFFFFFFFFFFFF8)
+  %end = #add[#bits<64>](%at, %need)
+  %ok = #ule[#bits<64>](%end, %size)
+  %r = #if %ok -> (#bits<64>) {
+    %s1 = #call meta_cell_put(#lea(%scratch, 200, 1, 0), %end)
+    %peak = #call meta_bump_peak(%host)
+    %higher = #ugt[#bits<64>](%end, %peak)
+    %s2 = #if %higher -> (#bits<32>) {
+      %s3 = #call meta_cell_put(#lea(%scratch, 208, 1, 0), %end)
+      #yield 0
+    } else {
+      #yield 0
+    }
+    #yield %at
+  } else {
+    %f = #call lain_meta_fail(%host, 17)
+    #yield 0xFFFFFFFFFFFFFFFF
+  }
+  #return %r
+}
+
+#proc meta_bump_release(%host: #addr, %mark: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data(%host)
+  %s = #call meta_cell_put(#lea(%scratch, 200, 1, 0), %mark)
+  #return 0
 }
 
 // 这个模块扫过了吗？没有就扫一层。压模块作用域时用（配合 meta_scope_enter）。

@@ -32,7 +32,13 @@
 //     （每个绑定都得来自一条指令），而给一个字面量造绑定需要知道 repr 和 op 表。
 //   - **同一个函数体里不能重复绑定同一个名字**（LAINIR 是单赋值的）。所以
 //     `let x = a; ... let x = b;` 会被拒（22），而不是悄悄用后一个。
-//   - **只有 `返回值` 或 `返回 值 算子 值`**，没有嵌套表达式（`a + b + c` 要拆成两条）。
+//   - **语句的种类**：`let NAME : TYPE = <值>;`、`return <值>;`、`if <条件> { … }`
+//     （可选 `else`）、`let NAME : TYPE = for …`。值可以是字面量、参数/局部名、
+//     调用 `f(…)`、以及它们的算子链与括号嵌套（表达式在 `meta_emit_expr` 里
+//     按**节点**递归，不再按字节推进）。
+//   - **还没做的**：字段访问和构造当值用（`p.left`、`Rec { … }` —— 报 4）；
+//     模块成员当操作数或实参（`M.answer + 1`、`f(M.answer)` —— 报 4）。顶层那条
+//     `let x: T = M.member;` 是通的（走 modules.l1 的命名空间路径）。
 //   - 函数体里的标识符**只按参数表解析**，不走作用域表——参数遮蔽不了外面的同名
 //     绑定，而且函数体里本来也没有「外面」。遮蔽要等块级作用域。
 //   - 不是参数的标识符会原样发成 `%名字`，被验证器拒（未定义的值）——响的，不是
@@ -218,21 +224,41 @@
 // 还有一个 LAINIR 的限制在这里起作用：调用的实参只能是操作数或**嵌套的 `#call`**，
 // 不能是任意表达式。所以 `f(1 + 2)` 必须先把 `1 + 2` 算进一个临时值再当实参。
 //
-// 缓冲区（暂存区，`+512` 的类型注册表之前都空着）：
+// **块是向分配器要的，不是固定偏移** —— 这是它必须这样做的原因：实参的降级会递归
+// （`f(g(1))` 里 `g` 的实参也是降级出来的），内层会把外层那段内存写一遍。实测
+// `add3(g(1), g(2), g(3))` 发成 `#call add3(3, %r4, %r5)`：第一个实参成了内层的
+// 实参，**验证器不报**，算出来 6（该 9）。
 //
-//   +192           `meta_emit_expr` 写的终点节点（临时用）
-//   +496           实参个数
-//   +200 + i*24    引用（临时值下标，或「无」= 用源码那段）/ 范围起点 / 范围终点
+// 块布局（水位回退要的东西块自己记着，所以调用方不用传 mark）：
 //
-// 上限 12 个（12×24 = 288，从 +200 到 +488，再往后就撞注册表了）—— 超了报 4，
-// 不越界写。
+//   +0             进来时的水位（`meta_args_write` 用它 release）
+//   +8             上一个「当前实参块」偏移（嵌套调用回来时还原）
+//   +16            上一个实参个数
+//   +24 + i*24     引用（临时值下标，或「无」= 用源码那段）/ 范围起点 / 范围终点
+//
+// 上限 12 个（24 + 12×24 = 312 字节）—— 超了报 4。整个块要不到就是 17。
 #proc meta_args_prepare(%host: #addr, %base: #addr, %len: #bits<64>,
                         %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
                         %t_hi: #bits<64>, %args: #bits<64>) -> #bits<32> {
   %first = #call meta_node_child(%host, %args)
   %sc0 = #call lain_meta_scratch_data(%host)
+  %oldb = #call meta_cell_get(#lea(%sc0, 216, 1, 0))
+  %oldc = #call meta_cell_get(#lea(%sc0, 496, 1, 0))
+  %mark = #call meta_bump_mark(%host)
+  %blk0 = #call meta_bump_alloc(%host, 312)
+  %noblk = #eq[#bits<64>](%blk0, 0xFFFFFFFFFFFFFFFF)
+  #if %noblk {
+    // 分配器已经报过 17
+    #return 17
+  }
+  // 这一层的存档：水位、外层的块、外层数到第几个实参
+  %qa = #lea(%sc0, %blk0, 1, 0)
+  %h1 = #call meta_cell_put(%qa, %mark)
+  %h2 = #call meta_cell_put(#lea(%qa, 8, 1, 0), %oldb)
+  %h3 = #call meta_cell_put(#lea(%qa, 16, 1, 0), %oldc)
+  %cur = #call meta_cell_put(#lea(%sc0, 216, 1, 0), %blk0)
   %z0 = #call meta_cell_put(#lea(%sc0, 496, 1, 0), 0)
-  // 第一趟：每个实参降级成一条表达式，存进缓冲区
+  // 第一趟：每个实参降级成一条表达式，存进**这一层**的块
   %st = #loop a(%c: #bits<64> = %first) -> (#bits<32>) {
     %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
     #if %done {
@@ -263,8 +289,11 @@
     %lo = #call meta_cell_get(#lea(%sc, 176, 1, 0))
     %hi = #call meta_cell_get(#lea(%sc, 184, 1, 0))
     %endn = #call meta_cell_get(#lea(%sc, 192, 1, 0))
+    // 块偏移从格子里现读：循环体只带循环变量，外层局部值不进这一层的作用域
+    %blk = #call meta_cell_get(#lea(%sc, 216, 1, 0))
     %off = #mul[#bits<64>](%n, 24)
-    %slot = #add[#bits<64>](200, %off)
+    %d0 = #add[#bits<64>](%off, 24)
+    %slot = #add[#bits<64>](%blk, %d0)
     %q = #lea(%sc, %slot, 1, 0)
     %s1 = #call meta_cell_put(%q, %ref)
     %s2 = #call meta_cell_put(#lea(%q, 8, 1, 0), %lo)
@@ -289,20 +318,34 @@
     #continue a(%nx)
   }
   %sfail = #ne[#bits<32>](%st, 0)
-  #if %sfail {
-    #return %st
+  %res = #if %sfail -> (#bits<32>) {
+    // 这一层失败：外层的块和计数还回去、水位退回，再把状态报上去。
+    // （成功时**不还** —— 块还要给 `meta_args_write` 读。）
+    %scf = #call lain_meta_scratch_data(%host)
+    %u1 = #call meta_cell_put(#lea(%scf, 216, 1, 0), %oldb)
+    %u2 = #call meta_cell_put(#lea(%scf, 496, 1, 0), %oldc)
+    %u3 = #call meta_bump_release(%host, %mark)
+    #yield %st
+  } else {
+    #yield 0
   }
-  #return 0
+  #return %res
 }
 
-// 第二趟：把缓冲区里的实参写出来，`<a>, <b>, …`（不带括号）。
+// 第二趟：把**这一层**块里的实参写出来，`<a>, <b>, …`（不带括号），读完把块还给分配器。
 //
 // **必须在调用方写完前缀之后调** —— 前缀（`  %r<n> = #call f(` 或 `  #return #call f(`）
 // 得在实参前面，而 `meta_args_prepare` 已经把实参里的子表达式指令发完了。所以顺序是
-// 调用方：`prepare` → 写前缀 → `write` → 写 `)`。
+// 调用方：`prepare` → 写前缀 → `write` → 写 `)`。块的归还也在这里：`prepare` 只管要，
+// `write` 是最后一个读它的人。
 #proc meta_args_write(%host: #addr, %base: #addr, %len: #bits<64>) -> #bits<32> {
   %sc2 = #call lain_meta_scratch_data(%host)
+  %blk0 = #call meta_cell_get(#lea(%sc2, 216, 1, 0))
   %cnt = #call meta_cell_get(#lea(%sc2, 496, 1, 0))
+  %ba = #lea(%sc2, %blk0, 1, 0)
+  %mark = #call meta_cell_get(%ba)
+  %oldb = #call meta_cell_get(#lea(%ba, 8, 1, 0))
+  %oldc = #call meta_cell_get(#lea(%ba, 16, 1, 0))
   %w = #loop b(%i: #bits<64> = 0) -> (#bits<32>) {
     %fin = #uge[#bits<64>](%i, %cnt)
     #if %fin {
@@ -313,8 +356,10 @@
       %sep = #data_addr meta_o4
       %w1 = #call lain_meta_emit_write(%host, %sep, 2)
     }
+    %blk = #call meta_cell_get(#lea(%sc2, 216, 1, 0))
     %off2 = #mul[#bits<64>](%i, 24)
-    %slot2 = #add[#bits<64>](200, %off2)
+    %d2 = #add[#bits<64>](%off2, 24)
+    %slot2 = #add[#bits<64>](%blk, %d2)
     %q2 = #lea(%sc2, %slot2, 1, 0)
     %r2 = #call meta_cell_get(%q2)
     %l2 = #call meta_cell_get(#lea(%q2, 8, 1, 0))
@@ -323,6 +368,11 @@
     %i2 = #add[#bits<64>](%i, 1)
     #continue b(%i2)
   }
+  // 这一层用完就还：水位退回、外层的块和计数还原。成功失败都要还，否则嵌套越深
+  // 水位越高（泄漏），最后撞上区段上界。
+  %u1 = #call meta_cell_put(#lea(%sc2, 216, 1, 0), %oldb)
+  %u2 = #call meta_cell_put(#lea(%sc2, 496, 1, 0), %oldc)
+  %u3 = #call meta_bump_release(%host, %mark)
   #return %w
 }
 
@@ -357,6 +407,51 @@
   %w6 = #call lain_meta_emit_write(%host, %rp, 1)
   %nl = #data_addr meta_st_nl
   %w7 = #call lain_meta_emit_write(%host, %nl, 1)
+  #return 0
+}
+
+// `  %NAME = #call <callee>(<实参>…)\n`
+//
+// 函数体里的 `let x: T = g(1);`。和 `meta_emit_ret_call` 是同一套两趟顺序
+// （`meta_args_prepare` → 写前缀 → `meta_args_write`），只是前缀从
+// `  #return #call ` 换成 `  %NAME = #call `——那一段是本仓库最脏的坑之一，
+// 顺序反过来子表达式的指令就会落进 `#call f(` 中间。
+#proc meta_emit_binding_call(%host: #addr, %base: #addr, %len: #bits<64>,
+                             %kind: #bits<64>, %width: #bits<64>,
+                             %name_lo: #bits<64>, %name_hi: #bits<64>,
+                             %t_lo: #bits<64>, %t_hi: #bits<64>,
+                             %callee_lo: #bits<64>, %callee_hi: #bits<64>,
+                             %args: #bits<64>) -> #bits<32> {
+  %ast = #call meta_args_prepare(%host, %base, %len, %kind, %width, %t_lo,
+                                 %t_hi, %args)
+  %abad = #ne[#bits<32>](%ast, 0)
+  #if %abad {
+    #return %ast
+  }
+  // `  %` + 名字 + ` = ` + `#call ` + 被调者 + `(` —— 然后才是实参
+  %p = #data_addr meta_st_pct
+  %w1 = #call lain_meta_emit_write(%host, %p, 3)
+  %n_at = #lea(%base, %name_lo, 1, 0)
+  %n_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %w2 = #call lain_meta_emit_write(%host, %n_at, %n_len)
+  %eq = #data_addr meta_st_eqop
+  %w3 = #call lain_meta_emit_write(%host, %eq, 3)
+  %hc = #data_addr meta_hash_call
+  %w4 = #call lain_meta_emit_write(%host, %hc, 6)
+  %c_at = #lea(%base, %callee_lo, 1, 0)
+  %c_len = #sub[#bits<64>](%callee_hi, %callee_lo)
+  %w5 = #call lain_meta_emit_write(%host, %c_at, %c_len)
+  %lp = #data_addr meta_fn_lparen
+  %w6 = #call lain_meta_emit_write(%host, %lp, 1)
+  %wst = #call meta_args_write(%host, %base, %len)
+  %wbad = #ne[#bits<32>](%wst, 0)
+  #if %wbad {
+    #return %wst
+  }
+  %rp = #data_addr meta_rparen
+  %w7 = #call lain_meta_emit_write(%host, %rp, 1)
+  %nl = #data_addr meta_st_nl
+  %w8 = #call lain_meta_emit_write(%host, %nl, 1)
   #return 0
 }
 
@@ -701,9 +796,9 @@
     %f_bin = #eq[#bits<64>](%form, 4)
     %f_field = #eq[#bits<64>](%form, 6)
     %f_ctor = #eq[#bits<64>](%form, 10)
-    // 「调用/字段/构造」这三种形状在函数体里的降级还没做。单个的和带算子的都报 4：
-    // 带算子的如果掉到常量路径会发成 `#return %f`，被验证器以「未定义的值」拒 ——
-    // 拒是拒了，但理由是假的。
+    // 「字段 / 构造」这两种形状在函数体里的降级还没做（调用**已经有**了：`return
+    // g(x);` 和 `let y: T = g(x);` 两条都发）。带算子的如果掉到常量路径会发成
+    // `#return %f`，被验证器以「未定义的值」拒 —— 拒是拒了，但理由是假的。
     %f_c56 = #or[#bits<1>](%f_call0, %f_field)
     %compound = #or[#bits<1>](%f_c56, %f_ctor)
     %notsingle = #eq[#bits<1>](%single, 0)
@@ -711,12 +806,20 @@
     %f_other0 = #or[#bits<1>](%f_field, %f_ctor)
     %f_other = #or[#bits<1>](%f_other0, %unhandled)
     %s = #if %f_call -> (#bits<32>) {
-      // 值是一次调用。函数体里只有 `return <call>;` 有发射器；`let x = g(1);`
-      // 还没有，报 4 而不是发一段错的。
+      // 值是一次调用。两条语句各有自己的写法：
+      //   return g(x);        -> `  #return #call g(x)\n`
+      //   let y: T = g(x);    -> `  %y = #call g(x)\n`
+      // 两者共用实参那两趟（prepare → 写前缀 → write），只差前缀。
       %notret = #eq[#bits<1>](%is_ret, 0)
       %s_call = #if %notret -> (#bits<32>) {
-        %f1 = #call lain_meta_fail(%host, 4)
-        #yield 4
+        %d_lo = #call meta_node_start(%host, %v)
+        %d_ln = #call meta_node_len(%host, %v)
+        %d_hi = #add[#bits<64>](%d_lo, %d_ln)
+        %dgrp = #call meta_node_next(%host, %v)
+        %bc = #call meta_emit_binding_call(%host, %base, %len, %kind, %width,
+                                           %name_lo, %name_hi, %t_lo, %t_hi,
+                                           %d_lo, %d_hi, %dgrp)
+        #yield %bc
       } else {
         %c_lo = #call meta_node_start(%host, %v)
         %c_ln = #call meta_node_len(%host, %v)

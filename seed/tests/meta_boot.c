@@ -169,6 +169,9 @@ static char *load_bootstrap(const char *order_path, uint32_t *length_out) {
 #define META_TREE_BASE_OFF 112u
 #define META_TREE_COUNT_OFF 120u
 #define META_TREE_ROOTS_OFF 128u
+/* 暂存区碰撞式分配器的两个格子（布局见 bootstrap/std/scope.l1 文件头）。 */
+#define META_BUMP_WATER_OFF 200u
+#define META_BUMP_PEAK_OFF 208u
 #define META_NODE_BYTES 48u
 #define META_NODE_WORDS (META_NODE_BYTES / 8u)
 #define META_NIL 0xFFFFFFFFFFFFFFFFull
@@ -290,6 +293,22 @@ static void report_type_registry(LainMetaHost *host, int verbose) {
            (unsigned long long)w[4], (unsigned long long)w[5],
            (unsigned long long)w[6], (unsigned long long)w[7]);
   }
+}
+
+/* 暂存区分配器的水位 / 历史峰值。
+ *
+ * **「够不够」读 peak，不要读 water** —— release 会把水位退回去，所以水位只反映
+ * "此刻用了多少"；peak 只增，是这一趟真正要过的最大值。 */
+static void report_scratch_bump(LainMetaHost *host) {
+  uint32_t scratch_size = 0;
+  void *scratch = lainmeta_host_scratch(host, &scratch_size);
+  uint64_t water = 0, peak = 0;
+  if (!scratch || scratch_size < META_BUMP_PEAK_OFF + 8u) return;
+  memcpy(&water, (const unsigned char *)scratch + META_BUMP_WATER_OFF, 8);
+  memcpy(&peak, (const unsigned char *)scratch + META_BUMP_PEAK_OFF, 8);
+  printf("scratch:   %u bytes, bump peak %llu (%.1f%%)\n", scratch_size,
+         (unsigned long long)peak,
+         scratch_size ? 100.0 * (double)peak / (double)scratch_size : 0.0);
 }
 
 /* 解析 + 验证 + 装载 + admit，返回可执行的 TCB。 */
@@ -526,6 +545,7 @@ int main(int argc, char **argv) {
            lainmeta_host_status(host));
     /* 编译期状态先打：跑挂了的时候，最想看的正是「它把源码读成了什么样」。 */
     report_type_registry(host, mode && strcmp(mode, "types") == 0);
+    report_scratch_bump(host);
     if (mode && strcmp(mode, "tree") == 0) report_tree(host);
     if (meta_tcb->result.as.bits != 0) {
       char buffer[192];
