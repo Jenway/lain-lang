@@ -532,6 +532,47 @@
   #return %r
 }
 
+// 一个**裸字面量**装得进这个宽度吗？装不进报 **23**（`let main: i8 = 300;` 曾经
+// 静默截断成 44，`let main: bool = 2;` 截断成 0 —— 都是本仓库禁止的失败方式）。
+//
+// 只对 `bits<N>`（repr kind 0）查，而且宽度按**无符号**算：标量的 repr 不带符号，
+// `i32` 和 `u32` 都是 `bits<32>`，符号属性住在 op 表里（`sdiv` vs `udiv`）。
+// 名字、`0x10` 那种非纯数字、以及算出来的临时值都不在这里管 —— 各有各的检查。
+#proc meta_literal_fits(%host: #addr, %base: #addr, %len: #bits<64>,
+                         %ref: #bits<64>, %lo: #bits<64>, %hi: #bits<64>,
+                         %kind: #bits<64>, %width: #bits<64>) -> #bits<32> {
+  %is_src = #eq[#bits<64>](%ref, 0xFFFFFFFFFFFFFFFF)
+  %st = #if %is_src -> (#bits<32>) {
+    %digits = #call meta_all_digits(%base, %lo, %hi, %len)
+    %s = #if %digits -> (#bits<32>) {
+      %isbits = #eq[#bits<64>](%kind, 0)
+      %narrow = #ult[#bits<64>](%width, 64)
+      %checked = #and[#bits<1>](%isbits, %narrow)
+      %c = #if %checked -> (#bits<32>) {
+        %v = #call bs_read_uint(%base, %lo, %len)
+        %limit = #shl[#bits<64>](1, %width)
+        %toobig = #uge[#bits<64>](%v, %limit)
+        %f = #if %toobig -> (#bits<32>) {
+          %x = #call lain_meta_fail(%host, 23)
+          #yield 23
+        } else {
+          #yield 0
+        }
+        #yield %f
+      } else {
+        #yield 0
+      }
+      #yield %c
+    } else {
+      #yield 0
+    }
+    #yield %s
+  } else {
+    #yield 0
+  }
+  #return %st
+}
+
 // 从 at 起跳过空白之后是不是 `;`？
 #proc meta_at_semi(%base: #addr, %at: #bits<64>, %len: #bits<64>) -> #bits<1> {
   %p = #call bs_skip_space(%base, %at, %len)
@@ -581,6 +622,14 @@
     #if %lhs_bad {
       %ft2 = #call lain_meta_fail(%host, 4)
       #return 4
+    }
+    // 常量装不装得进声明的类型？`let main: i8 = 300;` 曾经静默截断成 44 ——
+    // 这条路的出参只有源码区间，没有"引用"，所以按「源码那段」查。
+    %lfit = #call meta_literal_fits(%host, %base, %len, 0xFFFFFFFFFFFFFFFF,
+                                    %lhs_lo, %lhs_hi, %kind, %width)
+    %lbad = #ne[#bits<32>](%lfit, 0)
+    #if %lbad {
+      #return %lfit
     }
     %s = #call meta_emit_let(%host, %base, %len, %name_lo, %name_hi, %kind,
                              %width, %lhs_lo)
@@ -717,6 +766,14 @@
   %z1 = #call lain_meta_emit_write(%host, %ret, 10)
   %rlo = #call meta_cell_get(#lea(%scratch, 176, 1, 0))
   %rhi = #call meta_cell_get(#lea(%scratch, 184, 1, 0))
+  // 整个值就是一个字面量时，看它装不装得进这个类型（`let main: i8 = 300;` 曾经
+  // 静默截断成 44）。
+  %cfit = #call meta_literal_fits(%host, %base, %len, %ref, %rlo, %rhi,
+                                  %kind, %width)
+  %cbad = #ne[#bits<32>](%cfit, 0)
+  #if %cbad {
+    #return %cfit
+  }
   %z2 = #call meta_emit_ref2(%host, %base, %len, %ref, %rlo, %rhi)
   %close = #data_addr meta_o6
   %z3 = #call lain_meta_emit_write(%host, %close, 2)
@@ -1027,14 +1084,76 @@
     } else {
       #yield %width
     }
+    // 两个操作数都是**裸字面量**时，先按上下文的类型查；上下文那个类型**查不到**这个
+    // 算子（`bool` 的 op 表是空的），才退回**字面量自己的类型** —— 参考经典 C：十进制
+    // 常量取「装得下它的第一个类型」，这里是 i32，装不下才 i64；`i8`/`u8`/`bool` 不进
+    // 候选（C 也不会把字面量定成 char/short）。
+    //
+    // **只在这一种情况下退回**：有名字操作数时（`x < 2`，`x` 是 u32）退回 i32 会把
+    // `ult` 发成 `slt` —— 那是静默给错值。
+    %l_lit0 = #eq[#bits<64>](%acc, 0xFFFFFFFFFFFFFFFF)
+    %l_dig = #call meta_all_digits(%base, %alo, %ahi, %len)
+    %l_lit = #and[#bits<1>](%l_lit0, %l_dig)
+    %r_lit0 = #eq[#bits<64>](%rref, 0xFFFFFFFFFFFFFFFF)
+    %r_dig = #call meta_all_digits(%base, %rn_lo2, %rn_hi2, %len)
+    %r_lit = #and[#bits<1>](%r_lit0, %r_dig)
+    %both_lit = #and[#bits<1>](%l_lit, %r_lit)
     // 现在才查物理算子。从这往后到这条指令发完，**不能再有任何递归调用** ——
     // 否则 `+24`/`+32` 里的名字会被换掉。
     %sym = #lea(%base, %bat, 1, 0)
-    %phys = #call meta_op_resolve(%host, %base, %len, %tlo2, %thi2, %sym, 1)
-    %miss = #eq[#bits<64>](%phys, 0xFFFFFFFFFFFFFFFF)
+    %ctx_phys = #call meta_op_resolve(%host, %base, %len, %tlo2, %thi2, %sym, 1)
+    %ctx_miss = #eq[#bits<64>](%ctx_phys, 0xFFFFFFFFFFFFFFFF)
+    %try_default = #and[#bits<1>](%both_lit, %ctx_miss)
+    %def_phys = #if %try_default -> (#bits<64>) {
+      %p0 = #call meta_op_resolve_default(%host, %base, %len, %sym, %alo, %ahi,
+                                          %rn_lo2, %rn_hi2)
+      #yield %p0
+    } else {
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    %def_miss = #eq[#bits<64>](%def_phys, 0xFFFFFFFFFFFFFFFF)
+    %phys = #if %try_default -> (#bits<64>) {
+      #yield %def_phys
+    } else {
+      #yield %ctx_phys
+    }
+    %miss = #if %try_default -> (#bits<1>) {
+      #yield %def_miss
+    } else {
+      #yield %ctx_miss
+    }
     #if %miss {
       %f3 = #call lain_meta_fail(%host, 6)
       #break e(6)
+    }
+    // 用了字面量自己的类型，**指令的类型实参也得跟着换** —— 默认类型都是 `bits<N>`
+    // （kind 恒为 0），宽度由 `meta_op_resolve_default` 写在暂存区 `+488`。不换的话
+    // `let b: bool = 1 < 2;` 会按绑定的 1 位发 `#slt[#bits<1>](1, 2)`：`2` 被截成 0，
+    // 比较结果变成假 —— 验证通过、值是错的。
+    %kind3 = #if %try_default -> (#bits<64>) {
+      #yield 0
+    } else {
+      #yield %kind2
+    }
+    %width3 = #if %try_default -> (#bits<64>) {
+      %wcell = #call meta_cell_get(#lea(%sc3, 488, 1, 0))
+      #yield %wcell
+    } else {
+      #yield %width2
+    }
+    // 裸字面量当操作数：装不装得进这条指令的宽度（`let main: i8 = 1 + 300;` 曾经
+    // 静默截断成 44）。量的是 `%kind3/%width3` —— 那才是这条指令真正的类型实参。
+    %lfit = #call meta_literal_fits(%host, %base, %len, %acc, %alo, %ahi,
+                                    %kind3, %width3)
+    %lbadfit = #ne[#bits<32>](%lfit, 0)
+    #if %lbadfit {
+      #break e(%lfit)
+    }
+    %rfit = #call meta_literal_fits(%host, %base, %len, %rref, %rn_lo2, %rn_hi2,
+                                    %kind3, %width3)
+    %rbadfit = #ne[#bits<32>](%rfit, 0)
+    #if %rbadfit {
+      #break e(%rfit)
     }
     // 这条是不是整条链的最后一条？看右操作数后面那个节点还是不是算子。
     // **必须在 `meta_op_resolve` 之后做**：这几个都是只读树的叶子调用，不碰 `+24`/`+32`。
@@ -1065,7 +1184,7 @@
     }
     %eqop = #data_addr meta_st_eqop
     %x3 = #call lain_meta_emit_write(%host, %eqop, 3)
-    %x4 = #call meta_emit_op_mid(%host, %kind2, %width2)
+    %x4 = #call meta_emit_op_mid(%host, %kind3, %width3)
     %x5 = #call meta_emit_ref2(%host, %base, %len, %acc, %alo, %ahi)
     %comma = #data_addr meta_o4
     %x6 = #call lain_meta_emit_write(%host, %comma, 2)
