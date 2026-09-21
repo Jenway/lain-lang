@@ -1,3 +1,8 @@
+> **2026-09-21 作者校正（重要）**：本文 §11、以及 §5/§7 里"同址复用后旧裸地址必须被拒"
+> 的要求，**已被作者否掉并回退**（提交 `f9f03a8`）。`#addr` 是**无类型裸物理地址**，
+> 不携带对象身份或代数；模型部分（§1–§10）保留，定位改为 **checked-ref 模型 =
+> Meta `ref(T)` 的候选 lowering**，不是 `#addr` 的规范。现行语义、R06/R07 复现与
+> D3/D5/宿主索引/换空间销毁的专项结果见 **§12**。
 # 最小内存能力模型：运行报告
 
 日期：2026-09-21。对应交接：`docs/implementation/vm-memory-capability.md`（§6 的推进顺序 1–4）。
@@ -78,7 +83,7 @@ python scripts/check_docs.py                                       docs: 35 file
 | `cap_protoB_stale_address_probe` | 值 1 | 值 1 | 见 §4.1：**PASS = 缺口按预期复现**，不是"原型 B 正确" |
 
 `lifetime_reuse` 的断言按 §5 改了：不再要求两次的物理地址不同，改成"同址复用时旧引用不能
-访问"。它现在实测输出 `同址复用后旧引用仍读到 7（按契约必须被拒）` —— 说明真实通路上
+访问"。它现在实测输出 `同址复用后旧引用仍读到 7（**该契约已被作者否掉**：它只适用于 Meta 的 ref(T)，不适用于裸 #addr，见 §12）` —— 说明真实通路上
 **还没有**能力层，与模型层的结果是两件事。
 
 ## 4 §4 接口实验的结论
@@ -167,7 +172,7 @@ host 越界索引、原子/读改写与向量算子（仍 `LAINVM_OP_STUB`）、
 FAIL host_past_region   R04：宿主按裸地址读区段外（status=0，输出长度=2）
 FAIL host_wrong_identity R05：换诱饵 host 照样受理（长度=4）
 FAIL lifetime_escape    R06：逃逸出去的地址仍读到陈旧值 7
-FAIL lifetime_reuse     R07：同址复用后旧引用仍读到 7（按契约必须被拒）
+FAIL lifetime_reuse     R07：同址复用后旧引用仍读到 7（**该契约已被作者否掉**：它只适用于 Meta 的 ref(T)，不适用于裸 #addr，见 §12）
 ```
 
 前两条属 D4（宿主边界），后两条属 D2（地址模型）。**现在模型层已经给出答案**，
@@ -323,3 +328,111 @@ worktree @ 6b4c19a 与 @ 0d6b82c 前后语料快照            64/64 逐字节�
 - 4 条 BLOCKED 不变：`host_source_index_bounds`（未实施）、`lea_construct_only` / `lea_wraparound`
   （等 D3）、`budget_unimplemented`（等 D5）。
 - 槽号 + 代数仍可猜（需要 CSpace 索引）；单线程假设；`lea` 的宽度语义（D3）未定。
+
+---
+
+## §12 作者校正与回退（2026-09-21）：`#addr` 是无类型裸地址
+
+### §12.1 被否掉的是什么
+
+§11 的接线给**每一个 `#addr`** 附加了身份：新增 `L1_VALUE_REF` 值种类、`#addr` 落内存变成
+16 字节自描述记录、`#alloca` 发"对象 + 能力"并返回受检引用、`#int2ptr` 造句柄、
+load/store 过能力模型（9200-9213）、`fold` 对引用直接报 9309、TCB 内嵌 `LainVmMemTable`。
+按作者校正，这是**方向错误**：`#addr` 只表示地址数值。
+
+作者确认的边界：`#addr` 无类型（不带对象身份、generation、pointee type、`ref(T)` 语义）；
+`ref(T)` / borrow / 对象身份 / 对象级时间安全属于 Lain/Meta 层 —— 需要动态检查时由 **Meta**
+把 `ref(T)` 降成 handle + generation + offset 等物理值；VSpace 管物理内存（区域、分配、
+回收、映射、READ/WRITE/CALL），CSpace 管宿主服务；`#ptr2int` / `#int2ptr` 只做位模式转换，
+`#int2ptr` 不授予访问权。
+
+### §12.2 回退与替代实现
+
+| 项 | §11 接线（已撤） | 现在 |
+| --- | --- | --- |
+| `#addr` 载荷 | `L1_VALUE_REF`，16 B | 单个裸地址，`sizeof(void*)`（`L1Value` 回到 16 B） |
+| `#alloca` | 存储对象 + 能力，返回受检引用 | 水位 + **活窗口**授权，返回裸地址 |
+| load / store | 过能力模型（9200-9213） | 只查当前 VSpace（1004 / 1005） |
+| `#int2ptr` | 造假句柄 | 位模式转换（访问照样查 VSpace） |
+| 过程结束 | memcap `end_owner` 撤销 + 释放 | VSpace 活窗口收回（旧地址拒 1004） |
+| `fold` | 引用 → 9309 | 没有引用，这条路径不存在 |
+| R07 | 要求"同址复用后旧地址被拒" | **改成验证不可区分**（见 §12.5） |
+
+机制：栈按**租约**预留（`stack_space` / `stack_base` / `stack_size` 三个字段，**不**把整块
+登记成区段 —— 整块登记会让返回后的旧地址仍在授权范围内），授权跟着**活窗口**
+`[base, base + stack_used)` 走：`#alloca` 重排窗口，水位回退（返回 / `#break` / `#continue`）
+时收回，Trap 后由销毁回收；登记或撤销失败拒 **1036**。因此 **R06 拒 1004**；同址后来被
+重新分配并授权时**旧的数值地址照样能访问**。域外引用由 Meta 的 `ref(T)` 生命周期规则挡住，
+不靠 VM 里的身份。
+
+### §12.3 模型的新定位
+
+`seed/src/vm/memcap.h/.c` 与那组用例保留，组名从 `capability` 改成 **`checked-ref`**：
+它是 Meta `ref(T)` 的**候选 lowering**（对象表 + 能力表 + 代数，18 条用例直接调库验契约）。
+它**不是** `#addr` 的规范 —— 把它接进 `#addr` 通路正是本次被否掉的方向。
+
+### §12.4 实测（全部重新跑过）
+
+```text
+python scripts/build.py          BUILD OK
+python scripts/check_vspace.py   60 条：通过 60，失败 0，未定 0
+   --group lifetime 3/3   --group addr 3/3    --group lea 6/6
+   --group quota 7/7      --group host 4/4    --group checked-ref 18/18
+python scripts/check_meta.py     19/19
+负对照 4 条（lea_construct_only / lifetime_reuse / quota_exact_fit /
+  host_source_index_bounds 故意改错期望）全部 exit=1
+语料快照：现在 vs 0d6b82c（接线前）64/64 逐字节一致；vs bd89f40（接线后）同样 64/64
+```
+
+最后一条同时说明：这套 64 条语料**一条都没覆盖**受检引用通路 —— 接线期间没有一条用例
+变红，静默错值正是这样活下来的。
+
+### §12.5 R06 / R07 的最小复现与实际结果
+
+R06（`data leaked` 逃逸，`lifetime_escape`）：`give()` 里 `#alloca` 并把地址经
+`#ptr2int` 存进模块级数据，`use_after_return()` 用 `#int2ptr` 取回后 `#load`。
+实际：**拒 1004**（期望码已写死 1004，不再是"任意非零"）。
+
+R07（同址重授权，`lifetime_reuse`）：`give(%v, %probe)` 分配 + 写值 + 用 `probe` 读；
+第一次调用记下地址，第二次调用把**第一次的数值地址**当 `probe` 传进去，并在本次分配
+活着时读它。实际：**9** —— 旧地址读到的是**新分配**写的值，新旧裸地址不可区分。
+（同一条用例先跑一遍"两次调用确实拿到同一地址"的前置检查，避免"碰巧没复用"变成绿点。）
+
+### §12.6 C 后端（选甲）
+
+两者的 `#addr` **值语义一致**：单字、`uintptr_t` 算术、位模式转换
+（`cbackend.c`：`TY_ADDR` 宽度 64、load/store 按 `uintptr_t`、`#lea` 用 `uintptr_t` 加乘）。
+差异只在**检查**：解释器查 VSpace 与配额；生成的 C **没有**运行时边界层
+（`cbackend.c` 对 `lainvm_space_*` / `lainvm_quota_*` / `LAINVM_MEM_*` 的引用为 0），
+`#alloca` 发射成静态存储槽而不是运行时栈分配。支持范围按此记录 —— 不要把两者说成
+"地址值语义不同"。给生成程序加边界层属于多后端 ABI，需作者确认后再做。
+
+### §12.7 D3 / D5 / 宿主索引 / 换空间销毁（本轮专项）
+
+- **D3 `#lea`**：构造不查、访问查、按地址宽度取模。`op_lea` 改成无符号 64 位算术
+  （回绕是定义好的结果；原先的 `uintptr_t` 指针运算在 C 里是 UB，不能用来实现"允许构造
+  区段外地址"）。lea 组 6 条：`+1000000` 构造成功（值 1000000）、配对访问拒 1004、
+  尾后 `+1` 构造成功、尾后访问拒 1004、`idx=2^63 / scale=2` 取模回绕到 base（值 0）、
+  回绕落到已授权地址读到 42。
+- **D5 配额**：新增 `seed/include/lainvm/quota.h` + `seed/src/vm/quota.c`；拒码 **1044**
+  （engine 段 1001-1043 已占，1044 经全树检索为空号，登记在 `docs/spec/vm.md`）。
+  账户跟**执行**走：TCB 与宿主各挂一个指针，换 VSpace 不新建也不恢复；扣费点是真正承诺
+  存储的地方（栈整块容量、宿主暂存区、输出扩容），归还在真的释放时；`#alloca` 子分配与
+  水位回退不动账。quota 组 7 条覆盖：恰好用完成功 / 多一字节拒且账目不动 /
+  TCB 生命周期（admit 扣 4096、跑完仍 4096 且 releases=0、销毁后 0）/
+  两个子执行共用一个账户（第二个 4096 被拒且不留扣账、2048 成功、销毁一个后余额正确）/
+  `2^60` 字节栈预扣成功而分配失败 → 账目回滚 / `fuel=1` 与 `fuel=1000000` 账目一致 /
+  宿主暂存区按承诺扣账、限额不够不拿内存且状态 1044、释放后归还。
+- **宿主源码索引越界**：三条返回源码地址/长度/路径的能力本来就"解引用前拒绝、结果格子
+  不写"，缺的是**验收**（用例表里那条是 NULL 占位）。补上的用例对三条各测越界
+  （拒 + 结果格子保持哨兵）与正对照，并覆盖内部入口 `lainmeta_host_source_path` /
+  `lainmeta_host_source_text`（越界返回空串、长度写 0）。
+- **换 VSpace 后直接销毁**：用例改成"先 `#alloca`、再在域外地址上 Trap（此时活窗口还在）
+  → 换空间 → 直接销毁"，验证窗口在**它自己的空间**里被撤销、换到的空间一个字节都不碰。
+
+### §12.8 仍然开着的
+
+- checked-ref 模型的槽号 + 代数仍可枚举猜测（需要 CSpace 索引）；能力派生树与通用委派；
+  单线程假设；
+- 生成 C 的运行时边界层（多后端 ABI，需作者确认）；
+- D1 的"供给方"半程：这一版供给方仍是 TCB 自己（`calloc` + 自己 `free`）。

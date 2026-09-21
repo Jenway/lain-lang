@@ -1,3 +1,9 @@
+> **状态：已回退（2026-09-21 作者校正）。** 本文件描述的"把受检引用接进 `#addr` 通路"
+> **不是**现行方向：`#addr` 是无类型裸物理地址，不携带对象身份或代数。接线已在提交
+> `f9f03a8` 回退；下文保留作设计记录，其中的 REF/16 字节记录/`end_owner` 等做法**已不在
+> 代码里**。模型本身（`memcap.h/.c` + `checked-ref` 组）保留，定位改为 **Meta `ref(T)`
+> 的候选 lowering**。现行语义与验收见
+> [运行报告 §12](./vm-memory-capability-report.md) 与 [VM 契约](../spec/vm.md)。
 # 第 5 步接线设计：受检引用进入真实执行通路
 
 依据 `docs/implementation/vm-memory-capability.md`（第 5 步）。作者已裁定：引用宽度 = **大卡**
