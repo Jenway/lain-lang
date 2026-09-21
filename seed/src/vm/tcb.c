@@ -15,7 +15,7 @@ static void start_fail(L1Diagnostic *diag, int code, const char *message);
 
 LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
                           uint64_t owner, uint32_t max_call_depth,
-                          uint64_t stack_bytes) {
+                          uint64_t stack_bytes, LainVmQuota *quota) {
   LainVmTcb *tcb;
   uint32_t frame_cap;
   uint32_t slot_cap;
@@ -39,6 +39,7 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
   tcb->stack_used = 0;
   tcb->stack_window = lainvm_space_no_handle();
   tcb->stack_window_size = 0;
+  tcb->quota = quota;
   tcb->slice_result = LAINVM_SLICE_RUNNABLE;
 
   tcb->frames = (LainVmFrame *)calloc(frame_cap, sizeof(LainVmFrame));
@@ -51,9 +52,17 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
   tcb->slot_cap = slot_cap;
 
   if (stack_bytes > 0) {
+    /* 先预扣**整块容量**（规范：栈整块预留时只在预留那一刻扣一次），再分配。
+     * 预扣失败就什么都不留；预扣成功而分配失败必须**回滚**，否则"分配失败"
+     * 会留下抹不掉的扣账。 */
+    if (lainvm_quota_charge(quota, stack_bytes) != 0) {
+      lainvm_tcb_free(tcb);
+      return NULL;
+    }
     /* 清零是提供内存这一方的责任：不零就没有确定性。 */
     void *stack = calloc(1, (size_t)stack_bytes);
     if (!stack) {
+      (void)lainvm_quota_release(quota, stack_bytes);
       lainvm_tcb_free(tcb);
       return NULL;
     }
@@ -82,8 +91,12 @@ void lainvm_tcb_free(LainVmTcb *tcb) {
     tcb->stack_window = lainvm_space_no_handle();
     tcb->stack_window_size = 0;
   }
-  /* 字节由本 TCB 分配，也由本 TCB 还（这一版供给方就是本 TCB）。 */
-  if (tcb->stack_base != 0) free((void *)tcb->stack_base);
+  /* 字节由本 TCB 分配，也由本 TCB 还（这一版供给方就是本 TCB）。
+   * **真的还回去了**才归还额度：水位回退不算归还。 */
+  if (tcb->stack_base != 0) {
+    free((void *)tcb->stack_base);
+    (void)lainvm_quota_release(tcb->quota, tcb->stack_size);
+  }
   free(tcb->frames);
   free(tcb->slots);
   free(tcb->resolved);

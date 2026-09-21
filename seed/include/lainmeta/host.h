@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include "lainvm/caps.h"
+#include "lainvm/quota.h"
 #include "lainvm/space.h"
 
 typedef struct LainMetaHost LainMetaHost;
@@ -74,6 +75,13 @@ void lainmeta_host_clear_status(LainMetaHost *host);
 /* 把底座服务登记进能力表。返回 0 = 成功。
  * 登记的名字见 host.c 顶部的表。 */
 int lainmeta_host_register(LainMetaHost *host, LainVmCaps *caps);
+
+/* 挂上这次执行的**分配账户**（NULL = 不限额）。
+ *
+ * 暂存区与输出缓冲的扩容都是"实际承诺一块底层存储"，所以要先过账户：余额不够时
+ * 暂存区返回 NULL、输出扩容保持原样，状态码记 LAINVM_QUOTA_TRAP（1044）；
+ * 释放宿主时按已计账字节归还。必须在拿暂存区之前调用（暂存区是按需分配的）。 */
+void lainmeta_host_attach_quota(LainMetaHost *host, LainVmQuota *quota);
 
 /* 把这份宿主服务**授权**到某个地址空间（驱动在 admit 之前调用）。
  *
