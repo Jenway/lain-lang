@@ -384,3 +384,66 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
   }
   #return %r
 }
+
+// 字面量自己的类型（参考经典 C 的字面量规则）：十进制常量取「装得下它的第一个
+// 类型」—— 这里是 i32，装不下才 i64。`i8`/`u8`/`bool` **不进候选**：C 也不会把
+// 字面量定成 char/short。
+//
+// 为什么不能用现成那条路：类型名 `i32` 不写在任何源码里，它是数据模板；而
+// `meta_op_resolve` 收的类型名是「源码里的偏移」。所以先用 `meta_scope_find`
+// 查它 —— 那个收的是**地址**，数据模板能用 —— 拿到「哪份源码 + 名字的位置」，
+// 再用**那份源码**的 base/len 去调 `meta_op_resolve`。算子符号 `%sym` 是绝对
+// 地址，不受 base 换掉的影响。
+//
+// 只有**两个操作数都是裸字面量**时才走这条路（调用方判的）：有名字操作数时退回
+// i32 会把 u32 的 `<` 发成 `slt`，那是静默给错值。
+#proc meta_op_resolve_named_source(%host: #addr, %entry: #bits<64>,
+                                    %sym: #addr) -> #bits<64> {
+  %sidx = #call meta_scope_word(%host, %entry, 0)
+  %noff = #call meta_scope_word(%host, %entry, 8)
+  %nlen = #call meta_scope_word(%host, %entry, 16)
+  %sbase = #call lain_meta_source_data(%host, %sidx)
+  %slen = #call lain_meta_source_length(%host, %sidx)
+  %thi = #add[#bits<64>](%noff, %nlen)
+  %r = #call meta_op_resolve(%host, %sbase, %slen, %noff, %thi, %sym, 1)
+  #return %r
+}
+
+#proc meta_op_resolve_default(%host: #addr, %base: #addr, %len: #bits<64>,
+                              %sym: #addr, %l_lo: #bits<64>, %l_hi: #bits<64>,
+                              %r_lo: #bits<64>, %r_hi: #bits<64>) -> #bits<64> {
+  %lv = #call bs_read_uint(%base, %l_lo, %len)
+  %rv = #call bs_read_uint(%base, %r_lo, %len)
+  %l_big = #ugt[#bits<64>](%lv, 0x7FFFFFFF)
+  %r_big = #ugt[#bits<64>](%rv, 0x7FFFFFFF)
+  %big = #or[#bits<1>](%l_big, %r_big)
+  %r = #if %big -> (#bits<64>) {
+    %a64 = #data_addr meta_sym_i64
+    %e64 = #call meta_scope_find(%host, %a64, 3)
+    %m64 = #eq[#bits<64>](%e64, 0xFFFFFFFFFFFFFFFF)
+    %x64 = #if %m64 -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      // 选中的宽度告诉调用方（它要拿这个换指令的类型实参）
+      %sc64 = #call lain_meta_scratch_data(%host)
+      %w64 = #call meta_cell_put(#lea(%sc64, 488, 1, 0), 64)
+      %q64 = #call meta_op_resolve_named_source(%host, %e64, %sym)
+      #yield %q64
+    }
+    #yield %x64
+  } else {
+    %a32 = #data_addr meta_sym_i32
+    %e32 = #call meta_scope_find(%host, %a32, 3)
+    %m32 = #eq[#bits<64>](%e32, 0xFFFFFFFFFFFFFFFF)
+    %x32 = #if %m32 -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %sc32 = #call lain_meta_scratch_data(%host)
+      %w32 = #call meta_cell_put(#lea(%sc32, 488, 1, 0), 32)
+      %q32 = #call meta_op_resolve_named_source(%host, %e32, %sym)
+      #yield %q32
+    }
+    #yield %x32
+  }
+  #return %r
+}

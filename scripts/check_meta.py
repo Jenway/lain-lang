@@ -69,15 +69,37 @@ CASES = [
     # 比较结果是 1 位，装不进 i32 —— 这一条在「字面量默认 i32」做完之后**仍须拒**
     dict(name="reject_cmp_as_i32", kind="reject",
          src="let a: i32 = 1 < 2;\nlet main: i32 = 1;", entry="main"),
+    # --- 字面量自己的类型（参考经典 C）+ 装不下就拒 ---
+    # `1`、`2` 自己就是 i32，不需要上下文；结果 1 位，绑 bool 正好。
+    dict(name="cmp_both_literals", kind="ok",
+         src="let b: bool = 1 < 2;\nlet main: i32 = 1;", entry="main", want=1,
+         text=["#slt[#bits<32>](1, 2)"]),
+    # 同一个东西，但直接问**值**：`1 < 2` 得是真（1）。发成 `#slt[#bits<1>](1, 2)`
+    # 的话 `2` 被截成 0、结果是假 —— 曾经就是这样，验证器不报。
+    # 这个文件在 `meta_conformance/` 里名字还叫 `reject_*`：那是历史（以前确实拒）。
+    dict(name="cmp_literal_value", kind="ok",
+         src="seed/tests/meta_conformance/reject_cmp_as_value.lain",
+         entry="b", want=1),
+    dict(name="literal_i8_max", kind="ok", src="let main: i8 = 255;",
+         entry="main", want=255),
+    dict(name="literal_i64", kind="ok", src="let main: i64 = 5;",
+         entry="main", want=5),
+    # 越界必须拒（曾经静默截断：300 -> 44、2 -> 0）。三条走的是三个不同的发射点：
+    # 顶层常量、函数体的 return、算子的操作数。前两条报 23（字面量装不进声明的类型）；
+    # 第三条报验证器的 **2019** —— i8 的 op 表是空的，于是按字面量自己的类型 i32 算，
+    # 32 位的结果对不上 bits<8> 的返回类型。理由更准，所以按 2019 钉。
+    dict(name="reject_literal_i8", kind="reject", code=23,
+         src="let main: i8 = 300;", entry="main"),
+    dict(name="reject_literal_bool2", kind="reject", code=23,
+         src="let main: bool = 2;", entry="main"),
+    dict(name="reject_literal_in_chain", kind="reject", code=2019,
+         src="let main: i8 = 1 + 300;", entry="main"),
+    dict(name="reject_literal_return", kind="reject", code=23,
+         src="func f() -> i8 { return 300; }\nlet main: i32 = 1;", entry="main"),
 ]
 
-# 还没做的东西，只报现状、不算通过失败（做完就该从这里挪进 CASES）。
-PENDING = [
-    dict(name="cmp_both_literals", src="let b: bool = 1 < 2;\nlet main: i32 = 1;",
-         entry="main", want=1, note="要等「字面量默认 i32」落地"),
-    dict(name="literal_out_of_range", src="let main: i8 = 300;",
-         entry="main", want=44, note="现在**静默截断**成 44；该拒，还没做"),
-]
+# 还没做的东西，只报现状、不算通过失败（做完就该挪进 CASES）。现在空着。
+PENDING: list[dict] = []
 
 
 def module_args() -> list[str]:
