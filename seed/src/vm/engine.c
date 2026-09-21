@@ -86,6 +86,13 @@ static LainVmSliceResult trap_now(LainVmTcb *tcb, LainVmTrapKind kind,
   tcb->trap.line = inst ? inst->line : 0;
   tcb->trap.column = inst ? inst->column : 0;
   tcb->trap.active = true;
+  /* 这次 activation 到此结束：**清掉全部活窗口**（契约：procedure return / Trap /
+   * 取消 / TCB 销毁都结束该 activation 的局部存储）。区段本身留给供给方释放，
+   * 这里只把可访问前缀收回 0。 */
+  if (!lainvm_stack_lease_none(tcb->stack_lease)) {
+    (void)lainvm_space_set_accessible(tcb->stack_lease.space,
+                                      tcb->stack_lease.region, 0);
+  }
   tcb->state = LAINVM_DEAD;
   tcb->slice_result = LAINVM_SLICE_TRAPPED;
   return LAINVM_SLICE_TRAPPED;
@@ -159,60 +166,42 @@ static LainVmSliceResult push_region(LainVmTcb *tcb, uint32_t region_id,
   return LAINVM_SLICE_RUNNABLE;
 }
 
-/* 让栈的**活窗口**覆盖到当前水位：被 VSpace 授权的恰好是
- * [stack_base, stack_base + stack_used)。
+/* 把栈的**活窗口**对齐到水位：窗口就是租约区段的可访问前缀
+ * [base, base + stack_used)。
  *
- * 为什么不是「整块租约登记一次」：整块登记之后，返回后的旧地址照样落在授权范围内，
- * 那就只能靠地址身份才拦得住 —— 而 `#addr` 是无类型裸地址，**没有身份**。窗口跟着
- * 水位走，旧地址自然落到「没有授权」（load 1004 / store 1005）；同一数值地址后来被
- * 重新授权时，旧裸地址与新裸地址不可区分 —— 这正是裸地址的语义，域外引用归 Meta 的
- * `ref(T)` 生命周期规则挡。
- *
- * 区段表不许重叠，所以只能「先撤旧的、再加新的」。新窗口加不上（表满 / 上界不可
- * 表示）就把旧窗口装回去并返回 1036：宁可拒掉这次分配，也不留下一个授权范围与
- * 水位不一致的窗口。返回 0 = 已对齐。 */
+ * 只改 `accessible` —— 句柄全程稳定，不再 remove/add（那是旧数据模型绕路的地方，
+ * 还要靠"不许重叠"挡着）。
+ * 为什么窗口跟着水位走：整块登记会让返回后的旧地址仍然可访问，那就只能靠地址
+ * 身份去拦 —— 而 `#addr` 是无类型裸地址，**没有身份**。窗口跟着水位走，旧地址自然
+ * 落到「没有授权」（load 1004 / store 1005）；同一数值地址后来被重新授权时，旧裸
+ * 地址与新裸地址不可区分 —— 这正是裸地址的语义，域外引用归 Meta 的 `ref(T)` 挡。
+ * 返回 0 = 已对齐；1036 = 句柄失效或上界不可表示（调用方回滚水位并 Trap）。 */
 static int32_t stack_window_sync(LainVmTcb *tcb) {
-  LainVmSpace *space = tcb->stack_space;
-  uint64_t used = tcb->stack_used;
-  LainVmRegionHandle old = tcb->stack_window;
-  uint64_t old_size = tcb->stack_window_size;
-  bool had = !lainvm_space_handle_none(old);
-  LainVmRegionHandle fresh;
-
-  if (space == NULL) return 0;
-  if (used == old_size && (used != 0) == had) return 0; /* 已经对齐 */
-  if (had) {
-    lainvm_space_remove((LainVmSpace *)(uintptr_t)old.space, old);
-    tcb->stack_window = lainvm_space_no_handle();
-    tcb->stack_window_size = 0;
-  }
-  if (used == 0) return 0; /* 水位归零：什么都不授权 */
-  fresh = lainvm_space_add(space, tcb->stack_base, used,
-                           LAINVM_MEM_READ | LAINVM_MEM_WRITE, tcb->id);
-  if (!lainvm_space_handle_none(fresh)) {
-    tcb->stack_window = fresh;
-    tcb->stack_window_size = used;
-    return 0;
-  }
-  if (!had) return 1036;
-  /* 加不上：把旧窗口装回去，尽量保持「授权范围 = 上次成功时的水位」。 */
-  fresh = lainvm_space_add(space, tcb->stack_base, old_size,
-                           LAINVM_MEM_READ | LAINVM_MEM_WRITE, tcb->id);
-  if (!lainvm_space_handle_none(fresh)) {
-    tcb->stack_window = fresh;
-    tcb->stack_window_size = old_size;
-  }
-  return 1036;
+  if (lainvm_stack_lease_none(tcb->stack_lease)) return 0;
+  if (!lainvm_space_set_accessible(tcb->stack_lease.space,
+                                   tcb->stack_lease.region, tcb->stack_used))
+    return 1036;
+  return 0;
 }
 
-/* 离开当前区域：值写进创造这一帧那条指令的结果槽，回退栈水位，
- * 推进父位置（父位置一直停在创造这一帧的那条指令上）。 */
+/* 离开当前区域：值写进创造这一帧那条指令的结果槽，推进父位置
+ * （父位置一直停在创造这一帧的那条指令上）。
+ *
+ * **`#if` / `#switch` / `#loop` 的区域退出不结束 alloca 的生命周期**：
+ * `#alloca` 属于当前 **procedure activation**，只有过程返回、Trap、取消或 TCB 销毁
+ * 才结束它。所以这里**不**回退水位、**不**缩窗口 —— 曾经在这里回退，导致
+ * 「`if` 里 alloca、出了 `if` 就访问不了」（实测拒 1004）。
+ * 唯一要清窗口的地方是**根区域结束**（整个 activation 结束）。 */
 static LainVmSliceResult leave_region(LainVmTcb *tcb, const L1Value *values,
                                       uint32_t count) {
   LainVmFrame *frame = top(tcb);
   LainVmFrame *parent;
   uint32_t i;
   if (tcb->frame_count < 2) {
+    /* 根区域结束 = 这次 activation 结束：水位归零、窗口清空。 */
+    tcb->stack_used = 0;
+    if (stack_window_sync(tcb) != 0)
+      return trap_now(tcb, LAINVM_TRAP_STATE, 1036, NULL);
     tcb->has_result = false;
     tcb->state = LAINVM_DEAD;
     tcb->slice_result = LAINVM_SLICE_DONE;
@@ -226,10 +215,6 @@ static LainVmSliceResult leave_region(LainVmTcb *tcb, const L1Value *values,
       return trap_now(tcb, LAINVM_TRAP_STATE, 1013, NULL);
     tcb->slots[parent->slot_base + slot] = values[i];
   }
-  tcb->stack_used = frame->stack_mark;
-  /* 水位回退 = 这一段分配死了：活窗口跟着缩，旧地址从此没有授权。 */
-  if (stack_window_sync(tcb) != 0)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, NULL);
   tcb->frame_count--;
   parent->position++;
   return LAINVM_SLICE_RUNNABLE;
@@ -542,12 +527,16 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
   uint64_t align = 16;
   uint64_t used;
   uint64_t prev_used = tcb->stack_used;
+  const LainVmRegion *lease;
 
-  /* 没有栈，或者租约不在当前空间里（换过 VSpace）：稳定拒 1006。 */
-  if (tcb->stack_size == 0 || tcb->stack_base == 0)
+  /* 没有栈，或者租约不在当前空间里（换过 VSpace）：稳定拒 1006。
+   * base / capacity 一律现读 VSpace 的记录，TCB 里没有副本可以对不上。 */
+  if (lainvm_stack_lease_none(tcb->stack_lease))
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
-  if (tcb->stack_space != tcb->vspace)
+  if (tcb->stack_lease.space != tcb->vspace)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
+  lease = lainvm_space_slot(tcb->stack_lease.space, tcb->stack_lease.region);
+  if (!lease) return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
   /* 尺寸算术**先查回绕**，再判容量。`8 × 2^61` 曾经回绕成 0 字节，于是
    * 得到一个"合法"的分配（实测 R08）。失败不改变水位。 */
   if (element != 0 && count > 0xFFFFFFFFFFFFFFFFull / element)
@@ -558,7 +547,7 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
   used = (tcb->stack_used + (align - 1)) & ~(align - 1);
   if (total > 0xFFFFFFFFFFFFFFFFull - used)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
-  if (used + total > tcb->stack_size)
+  if (used + total > lease->capacity)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1007, inst);
   tcb->stack_used = used + total;
   /* 授权跟着水位走：先把活窗口覆盖到新水位，再交地址。窗口同步不了就拒，
@@ -568,8 +557,7 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1036, inst);
   }
   /* 交出去的是**裸地址**：单字、无类型、没有对象身份与代数。 */
-  lainvm_result_write(tcb, inst, 0,
-                      value_addr(tcb->stack_base + (uintptr_t)used));
+  lainvm_result_write(tcb, inst, 0, value_addr(lease->base + (uintptr_t)used));
   return LAINVM_SLICE_RUNNABLE;
 }
 
@@ -867,9 +855,8 @@ static LainVmSliceResult op_break(LainVmTcb *tcb, const L1Inst *inst) {
       return trap_now(tcb, LAINVM_TRAP_STATE, 1029, inst);
     tcb->slots[parent->slot_base + slot] = values[i];
   }
-  tcb->stack_used = loop->stack_mark;
-  if (stack_window_sync(tcb) != 0)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
+  /* `#break` 离开的是**区域**，不是过程：不回收这次 activation 的 alloca。
+   * （回收在这里会让循环体里分配、循环外使用的地址突然失效 —— 实测过。） */
   tcb->frame_count = (uint32_t)index;
   parent->position++;
   return LAINVM_SLICE_RUNNABLE;
@@ -895,9 +882,8 @@ static LainVmSliceResult op_continue(LainVmTcb *tcb, const L1Inst *inst) {
   for (i = 0; i < inst->operand_count; i++)
     tcb->slots[loop->slot_base + i] = values[i];
   tcb->frame_count = (uint32_t)index + 1;
-  tcb->stack_used = loop->stack_mark;
-  if (stack_window_sync(tcb) != 0)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
+  /* `#continue` 也不回收：下一轮如果又 `#alloca`，水位从当前值继续往上走 ——
+   * 循环里反复分配就是**按迭代线性增长**，撞到容量才拒 1007（不每轮回收）。 */
   loop->position = 0;
   return LAINVM_SLICE_RUNNABLE;
 }
