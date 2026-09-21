@@ -38,6 +38,7 @@
 #include "lainvm/caps.h"
 #include "lainvm/engine.h"
 #include "lainvm/image.h"
+#include "lainvm/memcap.h"
 #include "lainvm/space.h"
 #include "lainvm/tcb.h"
 
@@ -289,6 +290,29 @@ static const char *k_prog_reuse =
     "  %same = #eq[#bits<64>](%w1, %w2)\n"
     "  %out = #zext[#bits<64>](%same)\n"
     "  #return %out\n"
+    "}\n";
+
+/* R07 的新断言（交接 §5）：同址复用时**旧引用不能访问**。先记下第一次调用发的
+ * 地址，再调一次（栈水位从 0 重来，地址必然复用），然后拿旧地址去读 —— 必须被拒。
+ * 旧断言是"两次地址必须不同"，那要求物理地址永不复用，已被 §1 否掉。 */
+static const char *k_prog_reuse_guard =
+    "data leaked rw { 0 0 0 0 0 0 0 0 }\n"
+    "#proc give() -> #bits<64> {\n"
+    "  %s = #alloca[#bits<64>](1)\n"
+    "  #store[#bits<64>](7, %s)\n"
+    "  %d = #data_addr leaked\n"
+    "  %w = #ptr2int[#bits<64>](%s)\n"
+    "  #store[#bits<64>](%w, %d)\n"
+    "  #return 1\n"
+    "}\n"
+    "#proc reuse_guard() -> #bits<64> {\n"
+    "  %z1 = #call give()\n"
+    "  %d = #data_addr leaked\n"
+    "  %old = #load[#bits<64>](%d)\n"
+    "  %z2 = #call give()\n"
+    "  %p = #int2ptr[#addr](%old)\n"
+    "  %v = #load[#bits<64>](%p)\n"
+    "  #return %v\n"
     "}\n";
 
 /* 只构造区段外地址、不访问。 */
@@ -1039,12 +1063,30 @@ static int case_lifetime_escape(void) {
   return 0;
 }
 
-/* R07：同一地址会不会被发两次？返回 1 = 会（旧引用不可区分）。 */
+/* R07 的新断言：同址复用时旧引用不能访问。
+ *
+ * 原断言是「两次调用不能拿到同一地址」，按交接 §5 改掉：物理地址复用**不是**错误，
+ * 旧引用还能用才是错误。所以这一条先确认确实同址复用（否则测试没打到目标就报 FAIL，
+ * 不许因为"碰巧没复用"变成绿点），再要求旧引用被拒。 */
 static int case_lifetime_reuse(void) {
   Rig rig;
+  int reused;
 
   if (rig_load(&rig, k_prog_reuse, 4096) != 0) return 0;
   (void)rig_run(&rig, "reuse");
+  reused = (g_obs.kind == 0 && g_obs.value == 1);
+  rig_free(&rig);
+
+  if (rig_load(&rig, k_prog_reuse_guard, 4096) != 0) return 0;
+  (void)rig_run(&rig, "reuse_guard");
+  if (g_obs.kind == 1) {
+    obs_trap(g_obs.trap_kind, g_obs.trap_code); /* 旧引用被拒：符合契约 */
+  } else if (!reused) {
+    obs_facts("两次调用没有拿到同一地址，这一条没打到目标");
+  } else {
+    obs_facts("同址复用后旧引用仍读到 %llu（按契约必须被拒）",
+              (unsigned long long)g_obs.value);
+  }
   rig_free(&rig);
   return 0;
 }
@@ -1086,6 +1128,926 @@ static int case_budget_unimplemented(void) {
   obs_facts("规范要求 TCB 有 allocation quota 的预算与消耗（04-lain-vm.md:105/:162/"
             ":212-214），实现里 grep quota|budget 在 seed/src/vm/** 与 "
             "seed/include/lainvm/** 零命中；单位与扣费点等 D5 定");
+  return 0;
+}
+
+/* --- capability 组：最小内存能力模型 ----------------------------------------
+ *
+ * 这一组测的是**模型层**（seed/src/vm/memcap.c）的契约，**不是** VM 的 load/store
+ * 通路。通路接线是交接 §6.5 的第 5 步，报告里「模型通过」与「实际 VM 通路通过」
+ * 必须分开说，不能合并宣称完成。
+ *
+ * 台架里的"供给方"就是本文件：底层存储是一块真实 malloc 的缓冲，模型只登记、不分配。
+ */
+#define CAP_CTX 7u   /* 主 / 父上下文标签 */
+#define CAP_CHILD 8u /* 子调用、别的上下文标签 */
+
+typedef struct {
+  LainVmMemTable table;
+  LainVmSpace space;
+  uint8_t *storage;
+  uint64_t size;
+  LainVmMemHandle object;
+} CapRig;
+
+static int cap_rig_open(CapRig *rig, uint64_t size, uint32_t space_rights,
+                        uint64_t serial) {
+  memset(rig, 0, sizeof(*rig));
+  rig->size = size;
+  rig->storage = new_buffer((size_t)size);
+  if (rig->storage == NULL) return -1;
+  lainvm_memcap_init(&rig->table, serial);
+  lainvm_space_init(&rig->space);
+  rig->object = lainvm_memcap_object_add(&rig->table, (uintptr_t)rig->storage,
+                                         size, CAP_CTX);
+  if (lainvm_memcap_handle_none(rig->object)) return -1;
+  if (add(&rig->space, (uintptr_t)rig->storage, size, space_rights,
+          CAP_CTX) != 0)
+    return -1;
+  return 0;
+}
+
+static void cap_rig_close(CapRig *rig) {
+  free(rig->storage);
+  rig->storage = NULL;
+}
+
+static LainVmMemHandle cap_grant(CapRig *rig, uint64_t offset, uint64_t length,
+                                 uint32_t rights, uint64_t owner,
+                                 int32_t *code) {
+  LainVmMemHandle handle = lainvm_memcap_no_handle();
+  int32_t result = lainvm_memcap_grant(&rig->table, rig->object, offset,
+                                       length, rights, owner, &handle);
+  if (code != NULL) *code = result;
+  return handle;
+}
+
+static LainVmMemRef cap_ref(LainVmMemHandle cap, uint64_t offset) {
+  LainVmMemRef ref;
+  ref.cap = cap;
+  ref.offset = offset;
+  return ref;
+}
+
+static int32_t cap_read64(CapRig *rig, LainVmMemRef ref, uint64_t owner,
+                          uint64_t *value, int32_t *code) {
+  uint64_t got = 0;
+  int32_t result = (int32_t)lainvm_memcap_read(
+      &rig->table, &rig->space, ref, owner, sizeof(got), &got, code);
+  if (value != NULL) *value = got;
+  return result;
+}
+
+static int32_t cap_write64(CapRig *rig, LainVmMemRef ref, uint64_t owner,
+                           uint64_t value, int32_t *code) {
+  return (int32_t)lainvm_memcap_write(&rig->table, &rig->space, ref, owner,
+                                      sizeof(value), &value, code);
+}
+
+/* 直接看宿主缓冲里有什么（证明"确实写下去了"或"确实没被改"）。 */
+static uint64_t cap_host_u64(const CapRig *rig, uint64_t offset) {
+  uint64_t seen = 0;
+  if (offset + sizeof(seen) > rig->size) return 0;
+  memcpy(&seen, rig->storage + offset, sizeof(seen));
+  return seen;
+}
+
+/* 拒绝类用例的公共收尾：主码对得上、不变量也成立才算 PASS。 */
+static void cap_verdict(int ok, int32_t code, const char *what) {
+  if (ok) {
+    obs_trap(0, code);
+  } else {
+    obs_facts("%s（实际码=%d）", what, (int)code);
+  }
+}
+
+/* §5 cap_live_rw：活对象 + 正确权限 + 范围内访问 → 读写结果正确。 */
+static int case_cap_live_rw(void) {
+  CapRig rig;
+  LainVmMemHandle cap;
+  LainVmMemRef ref;
+  int32_t code = 0;
+  uint64_t got = 0;
+  const uint64_t want = 0x1122334455667788ull;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  ref = cap_ref(cap, 8);
+  if (code == 0 && cap_write64(&rig, ref, CAP_CTX, want, &code) == 0 &&
+      cap_read64(&rig, ref, CAP_CTX, &got, &code) == 0 && got == want &&
+      cap_host_u64(&rig, 8) == want) {
+    obs_value(1);
+  } else {
+    obs_facts("code=%d 读回=%llu 宿主=%llu（期望 %llu）", (int)code,
+              (unsigned long long)got,
+              (unsigned long long)cap_host_u64(&rig, 8),
+              (unsigned long long)want);
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_bounds：越界一字节 / 越过授权子范围 / 偏移不可表示 → 稳定拒 9210，
+ * 且目标内存一个字节都没改。 */
+static int case_cap_bounds(void) {
+  CapRig rig;
+  LainVmMemHandle full, sub;
+  int32_t c1 = 0, c2 = 0, c3 = 0, grant_code = 0;
+  uint64_t before;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  full = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                   &grant_code);
+  sub = cap_grant(&rig, 4, 8, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &grant_code);
+  before = cap_host_u64(&rig, 56);
+  (void)cap_write64(&rig, cap_ref(full, 57), CAP_CTX, 1, &c1); /* 57+8 > 64 */
+  (void)cap_write64(&rig, cap_ref(sub, 7), CAP_CTX, 1, &c2);   /* 7+8 > 8 */
+  (void)cap_write64(&rig, cap_ref(full, UINT64_MAX), CAP_CTX, 1, &c3);
+  cap_verdict(c1 == 9210 && c2 == 9210 && c3 == 9210 &&
+                  cap_host_u64(&rig, 56) == before,
+              9210, "越界没有被完全拦住");
+  if (!(c1 == 9210 && c2 == 9210 && c3 == 9210))
+    obs_facts("码=%d/%d/%d（期望都是 9210），越界写后目标%s", (int)c1, (int)c2,
+              (int)c3,
+              cap_host_u64(&rig, 56) == before ? "未变" : "被改了");
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_rights：只读能力执行写入 → 稳定拒 9209，原值不变，读仍然可以。 */
+static int case_cap_rights(void) {
+  CapRig rig;
+  LainVmMemHandle cap;
+  int32_t write_code = 0, read_code = 0, grant_code = 0;
+  uint64_t before, got = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  before = cap_host_u64(&rig, 0);
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ, CAP_CTX, &grant_code);
+  if (grant_code != 0) {
+    obs_facts("只读授权失败 code=%d", (int)grant_code);
+    cap_rig_close(&rig);
+    return 0;
+  }
+  (void)cap_write64(&rig, cap_ref(cap, 0), CAP_CTX, 0, &write_code);
+  (void)cap_read64(&rig, cap_ref(cap, 0), CAP_CTX, &got, &read_code);
+  if (write_code == 9209 && cap_host_u64(&rig, 0) == before &&
+      read_code == 0 && got == before) {
+    obs_trap(0, 9209);
+  } else {
+    obs_facts("写码=%d（期望 9209）读码=%d 原值%s 读回=%llu", (int)write_code,
+              (int)read_code,
+              cap_host_u64(&rig, 0) == before ? "未变" : "被改了",
+              (unsigned long long)got);
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_revoke：保存引用后撤销 → 读、写都拒 9207。 */
+static int case_cap_revoke(void) {
+  CapRig rig;
+  LainVmMemHandle cap;
+  LainVmMemRef ref;
+  uint32_t revoked = 0;
+  int32_t code = 0, read_code = 0, write_code = 0;
+  uint64_t got = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  ref = cap_ref(cap, 0);
+  if (cap_write64(&rig, ref, CAP_CTX, 0x1234, &code) != 0 ||
+      lainvm_memcap_revoke_owner(&rig.table, CAP_CTX, &revoked) != 0 ||
+      revoked != 1) {
+    obs_facts("撤销前就写不了（code=%d）或撤销计数=%u", (int)code,
+              (unsigned)revoked);
+    cap_rig_close(&rig);
+    return 0;
+  }
+  (void)cap_read64(&rig, ref, CAP_CTX, &got, &read_code);
+  (void)cap_write64(&rig, ref, CAP_CTX, 0x9999, &write_code);
+  if (read_code == 9207 && write_code == 9207 &&
+      cap_host_u64(&rig, 0) == 0x1234) {
+    obs_trap(0, 9207);
+  } else {
+    obs_facts("读码=%d 写码=%d（期望都是 9207）内存=%llu", (int)read_code,
+              (int)write_code, (unsigned long long)cap_host_u64(&rig, 0));
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_same_address_reuse：撤销后**在同址**创建新对象 → 新引用成功，旧引用失败。
+ * 同址是主动安排的：供给方把同一块存储再给一次，不靠分配器碰巧。 */
+static int case_cap_same_address_reuse(void) {
+  CapRig rig;
+  LainVmMemHandle cap, fresh;
+  LainVmMemRef old_ref, new_ref;
+  uint32_t revoked = 0;
+  int32_t code = 0, old_code = 0;
+  uint64_t got = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  old_ref = cap_ref(cap, 0);
+  if (cap_write64(&rig, old_ref, CAP_CTX, 0x1111, &code) != 0 ||
+      lainvm_memcap_revoke_owner(&rig.table, CAP_CTX, &revoked) != 0 ||
+      lainvm_memcap_object_release(&rig.table, rig.object) != 0) {
+    obs_facts("前置失败 code=%d", (int)code);
+    cap_rig_close(&rig);
+    return 0;
+  }
+  rig.object = lainvm_memcap_object_add(&rig.table, (uintptr_t)rig.storage, 64,
+                                        CAP_CTX);
+  fresh = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                    &code);
+  new_ref = cap_ref(fresh, 0);
+  (void)cap_read64(&rig, old_ref, CAP_CTX, &got, &old_code);
+  if (code == 0 && cap_write64(&rig, new_ref, CAP_CTX, 0x2222, &code) == 0 &&
+      cap_read64(&rig, new_ref, CAP_CTX, &got, &code) == 0 && got == 0x2222 &&
+      old_code == 9208 && cap_host_u64(&rig, 0) == 0x2222) {
+    obs_value(1);
+  } else {
+    obs_facts("旧引用码=%d（期望 9208）新引用码=%d 读回=%llu 内存=%llu",
+              (int)old_code, (int)code, (unsigned long long)got,
+              (unsigned long long)cap_host_u64(&rig, 0));
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_copy_revoke：复制引用（直接赋值 / 经内存往返）后撤销 → 所有副本都失效。 */
+static int case_cap_copy_revoke(void) {
+  CapRig rig;
+  LainVmMemHandle cap;
+  LainVmMemRef ref, copy, via_memory;
+  uint8_t bytes[sizeof(LainVmMemRef)];
+  uint32_t revoked = 0;
+  int32_t code = 0, c1 = 0, c2 = 0, c3 = 0;
+  uint64_t got = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  ref = cap_ref(cap, 0);
+  copy = ref;
+  memcpy(bytes, &ref, sizeof(ref));
+  memcpy(&via_memory, bytes, sizeof(via_memory));
+  if (cap_write64(&rig, ref, CAP_CTX, 5, &code) != 0 ||
+      lainvm_memcap_revoke_owner(&rig.table, CAP_CTX, &revoked) != 0 ||
+      revoked != 1) {
+    obs_facts("前置失败（写码=%d 撤销计数=%u）", (int)code, (unsigned)revoked);
+    cap_rig_close(&rig);
+    return 0;
+  }
+  (void)cap_read64(&rig, ref, CAP_CTX, &got, &c1);
+  (void)cap_read64(&rig, copy, CAP_CTX, &got, &c2);
+  (void)cap_read64(&rig, via_memory, CAP_CTX, &got, &c3);
+  if (c1 == 9207 && c2 == 9207 && c3 == 9207) {
+    obs_trap(0, 9207);
+  } else {
+    obs_facts("三个副本的码=%d/%d/%d（期望都是 9207）", (int)c1, (int)c2,
+              (int)c3);
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_memory_roundtrip + §4.3：受检引用写进内存再取回。
+ * 存活时可用；部分覆盖只能**变坏**（不能扩大授权）；撤销 + 同址复用后不能访问新对象。 */
+static int case_cap_memory_roundtrip(void) {
+  CapRig rig;
+  LainVmMemHandle cap, fresh;
+  LainVmMemRef ref, back, damaged;
+  uint8_t bytes[sizeof(LainVmMemRef)];
+  uint32_t revoked = 0;
+  int32_t code = 0, live_code = 0, damage_code = 0, after_code = 0;
+  uint64_t live_value = 0, damage_value = 0, after_value = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  ref = cap_ref(cap, 16);
+  if (cap_write64(&rig, ref, CAP_CTX, 0xABCD, &code) != 0) {
+    obs_facts("前置写失败 code=%d", (int)code);
+    cap_rig_close(&rig);
+    return 0;
+  }
+  /* 受检引用经普通字节复制往返（"写进内存再取回"） */
+  memcpy(bytes, &ref, sizeof(ref));
+  memcpy(&back, bytes, sizeof(back));
+  (void)cap_read64(&rig, back, CAP_CTX, &live_value, &live_code);
+  /* 部分覆盖：改掉偏移字段的最低字节 → 只能变坏 */
+  bytes[0] = (uint8_t)(bytes[0] ^ 0xFFu);
+  memcpy(&damaged, bytes, sizeof(damaged));
+  (void)cap_read64(&rig, damaged, CAP_CTX, &damage_value, &damage_code);
+  bytes[0] = (uint8_t)(bytes[0] ^ 0xFFu);
+  /* 撤销 + 同址复用，再拿内存里取回的老引用去访问 */
+  if (lainvm_memcap_revoke_owner(&rig.table, CAP_CTX, &revoked) != 0 ||
+      lainvm_memcap_object_release(&rig.table, rig.object) != 0) {
+    obs_facts("撤销 / 释放失败");
+    cap_rig_close(&rig);
+    return 0;
+  }
+  rig.object = lainvm_memcap_object_add(&rig.table, (uintptr_t)rig.storage, 64,
+                                        CAP_CTX);
+  fresh = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                    &code);
+  (void)cap_write64(&rig, cap_ref(fresh, 16), CAP_CTX, 0x7777, &code);
+  memcpy(&back, bytes, sizeof(back)); /* 老引用：来自内存，代数已过期 */
+  (void)cap_read64(&rig, back, CAP_CTX, &after_value, &after_code);
+  if (live_code == 0 && live_value == 0xABCD && damage_code != 0 &&
+      after_code == 9208 && after_value == 0 &&
+      cap_host_u64(&rig, 16) == 0x7777) {
+    obs_value(1);
+  } else {
+    obs_facts("存活码=%d 值=%llu 覆盖码=%d（值=%llu）复用后码=%d 值=%llu 内存=%llu",
+              (int)live_code, (unsigned long long)live_value, (int)damage_code,
+              (unsigned long long)damage_value, (int)after_code,
+              (unsigned long long)after_value,
+              (unsigned long long)cap_host_u64(&rig, 16));
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_forged_reference + §2：改代数 / 范围 / 表身份、拿别人的能力、伪造整数，
+ * 都不能扩大授权。主断言：拿**别的上下文**的能力记录来用 → 9206。 */
+static int case_cap_forged_reference(void) {
+  CapRig rig;
+  CapRig other;
+  LainVmMemHandle mine, theirs, foreign;
+  LainVmMemRef widened, bumped, forged_table, forged_int;
+  int32_t code = 0, foreign_code = 0, widen_code = 0, gen_code = 0;
+  int32_t serial_code = 0, int_code = 0, cross_code = 0;
+  uint64_t before, other_before, got = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  mine = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                   &code);
+  theirs = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE,
+                     CAP_CHILD, &code);
+  before = cap_host_u64(&rig, 0);
+  (void)cap_read64(&rig, cap_ref(theirs, 0), CAP_CTX, &got, &foreign_code);
+  widened = cap_ref(mine, 65);
+  (void)cap_read64(&rig, widened, CAP_CTX, &got, &widen_code);
+  bumped = cap_ref(mine, 0);
+  bumped.cap.generation += 1;
+  (void)cap_read64(&rig, bumped, CAP_CTX, &got, &gen_code);
+  forged_table = cap_ref(mine, 0);
+  forged_table.cap.table = 0xDEADBEEFu;
+  (void)cap_read64(&rig, forged_table, CAP_CTX, &got, &serial_code);
+  forged_int = lainvm_memcap_int_to_ref(0xDEADBEEFCAFEBABEull, 0);
+  (void)cap_read64(&rig, forged_int, CAP_CTX, &got, &int_code);
+
+  /* 另一张表（另一个上下文的空间）里的活能力，也不能拿来用 */
+  if (cap_rig_open(&other, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 2) != 0) {
+    obs_facts("第二台架起不来");
+    cap_rig_close(&rig);
+    return 0;
+  }
+  foreign = cap_grant(&other, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE,
+                      CAP_CTX, &code);
+  other_before = cap_host_u64(&other, 0);
+  (void)cap_read64(&rig, cap_ref(foreign, 0), CAP_CTX, &got, &cross_code);
+  if (foreign_code == 9206 && widen_code == 9210 && gen_code == 9208 &&
+      serial_code == 9205 && int_code == 9205 && cross_code == 9205 &&
+      cap_host_u64(&rig, 0) == before &&
+      cap_host_u64(&other, 0) == other_before) {
+    obs_trap(0, 9206);
+  } else {
+    obs_facts("别人的能力=%d 越界=%d 改代数=%d 假表号=%d 假整数=%d 跨表=%d"
+              "（期望 9206/9210/9208/9205/9205/9205）",
+              (int)foreign_code, (int)widen_code, (int)gen_code,
+              (int)serial_code, (int)int_code, (int)cross_code);
+  }
+  cap_rig_close(&other);
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_int_roundtrip + §4.2：对象存活时，引用转整数再转回来 → 有确定结果。 */
+static int case_cap_int_roundtrip(void) {
+  CapRig rig;
+  LainVmMemHandle cap;
+  LainVmMemRef ref, back;
+  uint64_t bits, again, got = 0;
+  const uint64_t want = 0x0123456789ABCDEFull;
+  int32_t code = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  ref = cap_ref(cap, 24);
+  bits = lainvm_memcap_ref_to_int(ref);
+  again = lainvm_memcap_ref_to_int(ref);
+  back = lainvm_memcap_int_to_ref(bits, 24);
+  if (code == 0 && cap_write64(&rig, ref, CAP_CTX, want, &code) == 0 &&
+      cap_read64(&rig, back, CAP_CTX, &got, &code) == 0 && got == want &&
+      bits == again && back.cap.slot == ref.cap.slot &&
+      back.cap.generation == ref.cap.generation &&
+      back.cap.table == ref.cap.table) {
+    obs_value(1);
+  } else {
+    obs_facts("code=%d 读回=%llu 位=%llx/%llx 句柄%s", (int)code,
+              (unsigned long long)got, (unsigned long long)bits,
+              (unsigned long long)again,
+              back.cap.slot == ref.cap.slot ? "一致" : "不一致");
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_int_after_revoke + §4.2：保留整数，撤销并复用对象后再转换 → 不能恢复权限。 */
+static int case_cap_int_after_revoke(void) {
+  CapRig rig;
+  LainVmMemHandle cap, fresh;
+  LainVmMemRef back;
+  uint64_t bits, got = 0;
+  uint32_t revoked = 0;
+  int32_t code = 0, after_code = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  bits = lainvm_memcap_ref_to_int(cap_ref(cap, 0));
+  if (lainvm_memcap_revoke_owner(&rig.table, CAP_CTX, &revoked) != 0 ||
+      lainvm_memcap_object_release(&rig.table, rig.object) != 0) {
+    obs_facts("撤销 / 释放失败");
+    cap_rig_close(&rig);
+    return 0;
+  }
+  rig.object = lainvm_memcap_object_add(&rig.table, (uintptr_t)rig.storage, 64,
+                                        CAP_CTX);
+  fresh = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                    &code);
+  (void)cap_write64(&rig, cap_ref(fresh, 0), CAP_CTX, 0x31, &code);
+  back = lainvm_memcap_int_to_ref(bits, 0);
+  (void)cap_read64(&rig, back, CAP_CTX, &got, &after_code);
+  if (after_code == 9208 && cap_host_u64(&rig, 0) == 0x31) {
+    obs_trap(0, 9208);
+  } else {
+    obs_facts("整数复原后的码=%d（期望 9208）读到 %llu", (int)after_code,
+              (unsigned long long)got);
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_context_reuse：销毁并在同一宿主位置重建对象表 / 空间 → 旧上下文的引用
+ * 不能在新上下文里复活。 */
+static int case_cap_context_reuse(void) {
+  CapRig rig;
+  LainVmMemHandle cap, fresh;
+  LainVmMemRef ref, back;
+  uint64_t bits, got = 0;
+  int32_t code = 0, ref_code = 0, int_code = 0, fresh_code = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  ref = cap_ref(cap, 0);
+  bits = lainvm_memcap_ref_to_int(ref);
+  /* 同一块内存、新的表身份：旧上下文的一切都不再有效 */
+  lainvm_memcap_init(&rig.table, 2);
+  (void)cap_read64(&rig, ref, CAP_CTX, &got, &ref_code);
+  back = lainvm_memcap_int_to_ref(bits, 0);
+  (void)cap_read64(&rig, back, CAP_CTX, &got, &int_code);
+  /* 新表自己必须能用（否则"拒绝"可能只是因为表坏了） */
+  rig.object = lainvm_memcap_object_add(&rig.table, (uintptr_t)rig.storage, 64,
+                                        CAP_CTX);
+  fresh = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                    &fresh_code);
+  if (fresh_code == 0)
+    fresh_code = cap_write64(&rig, cap_ref(fresh, 0), CAP_CTX, 0x0BAD, &code);
+  if (ref_code == 9205 && int_code == 9205 && fresh_code == 0 &&
+      cap_host_u64(&rig, 0) == 0x0BAD) {
+    obs_trap(0, 9205);
+  } else {
+    obs_facts("旧引用=%d 旧整数=%d 新表可用性=%d（期望 9205/9205/0）",
+              (int)ref_code, (int)int_code, (int)fresh_code);
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_child_borrow + §3：把父对象授权给同步子调用 → 子期间可用，父对象仍有效；
+ * 子调用结束（按上下文撤销）不得撤销父对象的能力。 */
+static int case_cap_child_borrow(void) {
+  CapRig rig;
+  LainVmMemHandle parent, child;
+  uint32_t revoked = 0;
+  int32_t code = 0, child_code = 0, parent_read = 0, parent_read2 = 0;
+  int32_t parent_write = 0;
+  uint64_t committed_before, child_value = 0, got = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  parent = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                     &code);
+  child = cap_grant(&rig, 0, 16, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CHILD,
+                    &code);
+  committed_before = rig.table.committed;
+  if (cap_write64(&rig, cap_ref(child, 0), CAP_CHILD, 0x55, &code) != 0) {
+    obs_facts("子调用期间就写不了 code=%d", (int)code);
+    cap_rig_close(&rig);
+    return 0;
+  }
+  if (lainvm_memcap_revoke_owner(&rig.table, CAP_CHILD, &revoked) != 0 ||
+      revoked != 1) {
+    obs_facts("子上下文撤销失败（计数=%u）", (unsigned)revoked);
+    cap_rig_close(&rig);
+    return 0;
+  }
+  (void)cap_read64(&rig, cap_ref(child, 0), CAP_CHILD, &got, &child_code);
+  (void)cap_read64(&rig, cap_ref(parent, 0), CAP_CTX, &child_value,
+                   &parent_read);
+  (void)cap_write64(&rig, cap_ref(parent, 0), CAP_CTX, 0x66, &parent_write);
+  (void)cap_read64(&rig, cap_ref(parent, 0), CAP_CTX, &got, &parent_read2);
+  if (child_code == 9207 && parent_read == 0 && child_value == 0x55 &&
+      parent_write == 0 && parent_read2 == 0 && got == 0x66 &&
+      rig.table.committed == committed_before) {
+    obs_value(1);
+  } else {
+    obs_facts("子码=%d 父读=%d（值=%llu）父写=%d 父再读=%d（值=%llu）账=%llu"
+              "（期望 9207/0/0x55/0/0/0x66/%llu）",
+              (int)child_code, (int)parent_read,
+              (unsigned long long)child_value, (int)parent_write,
+              (int)parent_read2, (unsigned long long)got,
+              (unsigned long long)rig.table.committed,
+              (unsigned long long)committed_before);
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_space_switch：能力有效，但对应的存储在新空间里没被授权 → 拒 9212；
+ * 换空间不会给旧引用自动补权限。 */
+static int case_cap_space_switch(void) {
+  CapRig rig;
+  LainVmSpace other;
+  LainVmMemHandle cap;
+  int32_t code = 0, other_code = 0, home_code = 0;
+  uint64_t got = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  lainvm_space_init(&other);
+  (void)lainvm_memcap_read(&rig.table, &other, cap_ref(cap, 0), CAP_CTX,
+                           sizeof(got), &got, &other_code);
+  (void)lainvm_memcap_read(&rig.table, &rig.space, cap_ref(cap, 0), CAP_CTX,
+                           sizeof(got), &got, &home_code);
+  if (other_code == 9212 && home_code == 0) {
+    obs_trap(0, 9212);
+  } else {
+    obs_facts("新空间码=%d 原空间码=%d（期望 9212/0）", (int)other_code,
+              (int)home_code);
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_host_access + §7：统一受检宿主适配器 —— **先解析、再产生副作用**。
+ * 失效引用与越界引用都必须在回调产生任何副作用之前被拒。 */
+static int case_cap_host_access(void) {
+  CapRig rig;
+  LainVmMemHandle cap, live;
+  LainVmMemRef ref;
+  uint64_t side = 0, before;
+  const uint64_t payload = 0xA5A5A5A5A5A5A5A5ull;
+  uint32_t revoked = 0;
+  int32_t code = 0, revoked_code = 0, oob_code = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  live = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CHILD,
+                   &code);
+  ref = cap_ref(cap, 0);
+  before = cap_host_u64(&rig, 0);
+  if (lainvm_memcap_revoke_owner(&rig.table, CAP_CTX, &revoked) != 0) {
+    obs_facts("撤销失败");
+    cap_rig_close(&rig);
+    return 0;
+  }
+  (void)lainvm_memcap_host_write(&rig.table, &rig.space, ref, CAP_CTX,
+                                 sizeof(payload), &payload, &side,
+                                 &revoked_code);
+  (void)lainvm_memcap_host_write(&rig.table, &rig.space, cap_ref(live, 60),
+                                 CAP_CHILD, sizeof(payload), &payload, &side,
+                                 &oob_code);
+  if (revoked_code == 9207 && oob_code == 9210 && side == 0 &&
+      cap_host_u64(&rig, 0) == before) {
+    obs_trap(0, 9207);
+  } else {
+    obs_facts("失效码=%d 越界码=%d 副作用=%llu（期望 9207/9210/0）",
+              (int)revoked_code, (int)oob_code, (unsigned long long)side);
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §5 cap_failure_cleanup：创建中途失败 → 不留活对象、不留活能力、不错误扣账。 */
+static int case_cap_failure_cleanup(void) {
+  CapRig rig;
+  LainVmMemHandle handle, cap;
+  uint64_t committed0, committed1;
+  uint32_t objects0, i;
+  int32_t code = 0, size0_bad = 0, wrap_bad = 0, range_code = 0;
+  int32_t rights_code = 0, full_code = 0;
+  uint64_t got = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  committed0 = rig.table.committed;
+  objects0 = rig.table.objects_live;
+  /* (1) size == 0 */
+  handle = lainvm_memcap_object_add(&rig.table, (uintptr_t)rig.storage, 0,
+                                    CAP_CTX);
+  if (!lainvm_memcap_handle_none(handle)) size0_bad = 1;
+  /* (2) base + size 不可表示 */
+  handle = lainvm_memcap_object_add(&rig.table, UINTPTR_MAX - 3u, 8, CAP_CTX);
+  if (!lainvm_memcap_handle_none(handle)) wrap_bad = 1;
+  /* (3) 授权范围越出对象 */
+  range_code = lainvm_memcap_grant(&rig.table, rig.object, 60, 8,
+                                   LAINVM_MEM_READ, CAP_CTX, &handle);
+  /* (4) 权限为空 */
+  rights_code = lainvm_memcap_grant(&rig.table, rig.object, 0, 64, 0, CAP_CTX,
+                                    &handle);
+  /* (5) 能力表满：灌满之后再要一条 */
+  for (i = 0; i < LAINVM_MEMCAP_MAX_CAPS; i++) {
+    int32_t made = lainvm_memcap_grant(&rig.table, rig.object, 0, 64,
+                                       LAINVM_MEM_READ, CAP_CTX, &handle);
+    if (made != 0) break;
+  }
+  full_code = lainvm_memcap_grant(&rig.table, rig.object, 0, 64,
+                                  LAINVM_MEM_READ, CAP_CTX, &handle);
+  committed1 = rig.table.committed;
+  /* (6) 合法路径仍然可用：清掉旧上下文的能力，重新发一条并读写 */
+  if (lainvm_memcap_revoke_owner(&rig.table, CAP_CTX, NULL) != 0) code = -1;
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  if (code == 0)
+    code = cap_write64(&rig, cap_ref(cap, 0), CAP_CTX, 0x7E, &code);
+  if (code == 0) code = cap_read64(&rig, cap_ref(cap, 0), CAP_CTX, &got, &code);
+  if (committed0 == 64 && committed1 == committed0 &&
+      rig.table.objects_live == objects0 && size0_bad == 0 && wrap_bad == 0 &&
+      range_code == 9203 && rights_code == 9204 && full_code == 9202 &&
+      code == 0 && got == 0x7E) {
+    obs_value(1);
+  } else {
+    obs_facts("账 %llu→%llu 对象 %u→%u 空大小坏=%d 回绕坏=%d 越界=%d "
+              "无权限=%d 满=%d 可用码=%d 读=%llu",
+              (unsigned long long)committed0, (unsigned long long)committed1,
+              (unsigned)objects0, (unsigned)rig.table.objects_live,
+              (int)size0_bad, (int)wrap_bad, (int)range_code, (int)rights_code,
+              (int)full_code, (int)code, (unsigned long long)got);
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §7：撤销访问权和释放存储是**两个动作** —— 撤销后额度不能归还；存储释放后
+ * 手里还留着的能力必须被判「对象已不存活」（9211）。 */
+static int case_cap_quota_two_actions(void) {
+  CapRig rig;
+  LainVmMemHandle survivor, doomed;
+  uint64_t after_revoke, after_release;
+  uint32_t revoked = 0;
+  int32_t code = 0, gone_code = 0, doomed_code = 0;
+  uint64_t got = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  survivor = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE,
+                       CAP_CTX, &code);
+  doomed = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE,
+                     CAP_CHILD, &code);
+  if (lainvm_memcap_revoke_owner(&rig.table, CAP_CHILD, &revoked) != 0) {
+    obs_facts("撤销失败");
+    cap_rig_close(&rig);
+    return 0;
+  }
+  after_revoke = rig.table.committed;
+  (void)cap_read64(&rig, cap_ref(doomed, 0), CAP_CHILD, &got, &doomed_code);
+  if (lainvm_memcap_object_release(&rig.table, rig.object) != 0) {
+    obs_facts("释放失败");
+    cap_rig_close(&rig);
+    return 0;
+  }
+  after_release = rig.table.committed;
+  (void)cap_read64(&rig, cap_ref(survivor, 0), CAP_CTX, &got, &gone_code);
+  if (after_revoke == 64 && after_release == 0 && rig.table.released == 64 &&
+      doomed_code == 9207 && gone_code == 9211) {
+    obs_value(1);
+  } else {
+    obs_facts("撤销后账=%llu（期望 64）被撤销的能力码=%d（期望 9207）释放后账="
+              "%llu（期望 0）已归还=%llu 存储没了的能力码=%d（期望 9211）",
+              (unsigned long long)after_revoke, (int)doomed_code,
+              (unsigned long long)after_release,
+              (unsigned long long)rig.table.released, (int)gone_code);
+  }
+  cap_rig_close(&rig);
+  return 0;
+}
+
+/* §7：切换 VSpace 之后**直接销毁 TCB** 的释放路径。
+ * 契约：TCB 借的那段栈属于**租约所在的空间**，销毁时要在那个空间里精确撤销并释放；
+ * 换到的那个空间一个字节都不能碰。（只测「切出再切回」是打不到这里的。） */
+static int case_cap_tcb_destroy_after_switch(void) {
+  Rig rig;
+  LainVmSpace other;
+  L1Diagnostic diag;
+  uint32_t before, after, other_live;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+  (void)rig_run(&rig, "use_alloca");
+  if (g_obs.kind != 0) {
+    rig_free(&rig);
+    obs_facts("原空间里就没跑通（kind=%d）", g_obs.kind);
+    return 0;
+  }
+  lainvm_space_init(&other);
+  diag.code = 0;
+  if (lainvm_tcb_set_space(rig.tcb, &other, &diag) != 0) {
+    rig_free(&rig);
+    obs_facts("set_space 失败：code=%d %s", diag.code, diag.message);
+    return 0;
+  }
+  before = rig.space.live_count;
+  lainvm_tcb_free(rig.tcb);
+  rig.tcb = NULL; /* 已经销毁，rig_free 不要再碰 */
+  after = rig.space.live_count;
+  other_live = other.live_count;
+  rig_free(&rig);
+  if (before >= 1 && after == before - 1 && other_live == 0) {
+    obs_value(1);
+  } else {
+    obs_facts("销毁后租约所在空间的区段 %u→%u（期望少 1 段：栈要在自己的空间里"
+              "撤销并释放），换到的空间 %u 段",
+              (unsigned)before, (unsigned)after, (unsigned)other_live);
+  }
+  return 0;
+}
+
+/* §4.1 的第二个原型（探针）：**保留地址值**，另用 VM 元数据跟踪它对应哪条能力。
+ *
+ * 最小跟踪就是一张 {地址 -> 能力句柄} 的旁表。它必须回答的是「参数传递、返回、
+ * 复制、写入内存再读出」时关联怎么保住。§4.1 已经写明：只跟踪临时值槽，或者按
+ * 数值地址重新查询"现在的能力"，都**不能满足同址复用验收** —— 这一条把那个
+ * "不能"量出来：
+ *
+ *   撤销 + 同址复用之后，地址这个**数字**没变。逃逸出去的旧地址再回来，旁表按
+ *   地址查到的是**新对象**的能力，于是旧引用自动拿到新对象的权限（fail open）。
+ *   旁表没有别的键可用 —— 两条地址相同的引用在 B 里根本无法区分。
+ *
+ * 这一条 PASS = 缺口按预期复现（B 这条路走不通），**不是**"B 正确"。 */
+#define PROTO_B_SLOTS 8
+
+typedef struct {
+  uintptr_t address;
+  LainVmMemHandle cap;
+  uint64_t offset;
+} ProtoBSlot;
+
+typedef struct {
+  ProtoBSlot slots[PROTO_B_SLOTS];
+  uint32_t count;
+} ProtoB;
+
+/* 旁表按**地址**唯一：新登记覆盖旧的 —— 这正是"按数值地址查询**现在**的能力"。
+ * 只有地址这一个键，两条地址相同的引用在 B 里无法区分，所以覆盖是唯一说得通的做法。 */
+static void proto_b_track(ProtoB *probe, uintptr_t address,
+                          LainVmMemHandle cap, uint64_t offset) {
+  uint32_t i;
+  for (i = 0; i < probe->count; i++) {
+    if (probe->slots[i].address != address) continue;
+    probe->slots[i].cap = cap;
+    probe->slots[i].offset = offset;
+    return;
+  }
+  if (probe->count >= PROTO_B_SLOTS) return;
+  probe->slots[probe->count].address = address;
+  probe->slots[probe->count].cap = cap;
+  probe->slots[probe->count].offset = offset;
+  probe->count += 1;
+}
+
+static int proto_b_find(const ProtoB *probe, uintptr_t address,
+                        LainVmMemRef *out) {
+  uint32_t i;
+  for (i = 0; i < probe->count; i++) {
+    if (probe->slots[i].address != address) continue;
+    out->cap = probe->slots[i].cap;
+    out->offset = probe->slots[i].offset;
+    return 0;
+  }
+  return -1;
+}
+
+static int case_cap_protoB_stale_address_probe(void) {
+  CapRig rig;
+  ProtoB probe;
+  LainVmMemHandle cap, fresh;
+  LainVmMemRef via_probe;
+  uintptr_t address, revived = 0;
+  uint8_t escaped[sizeof(uintptr_t)];
+  uint64_t got = 0;
+  uint32_t revoked = 0;
+  int32_t code = 0, live_code = 0, stale_code = 0;
+
+  if (cap_rig_open(&rig, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, 1) != 0) {
+    obs_facts("台架起不来");
+    return 0;
+  }
+  memset(&probe, 0, sizeof(probe));
+  cap = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                  &code);
+  address = (uintptr_t)rig.storage;
+  proto_b_track(&probe, address, cap, 0);
+  /* (1) 直路：按地址查旁表 → 能用（B 在简单路径上没问题） */
+  if (proto_b_find(&probe, address, &via_probe) != 0) {
+    obs_facts("旁表连自己的地址都查不到");
+    cap_rig_close(&rig);
+    return 0;
+  }
+  (void)cap_read64(&rig, via_probe, CAP_CTX, &got, &live_code);
+  /* 旧地址经内存往返逃逸出去（普通字节复制） */
+  memcpy(escaped, &address, sizeof(address));
+  memcpy(&revived, escaped, sizeof(revived));
+  /* (2) 撤销 + 同址复用：地址这个数字没变 */
+  if (lainvm_memcap_revoke_owner(&rig.table, CAP_CTX, &revoked) != 0 ||
+      lainvm_memcap_object_release(&rig.table, rig.object) != 0) {
+    obs_facts("撤销 / 释放失败");
+    cap_rig_close(&rig);
+    return 0;
+  }
+  rig.object = lainvm_memcap_object_add(&rig.table, (uintptr_t)rig.storage, 64,
+                                        CAP_CTX);
+  fresh = cap_grant(&rig, 0, 64, LAINVM_MEM_READ | LAINVM_MEM_WRITE, CAP_CTX,
+                    &code);
+  proto_b_track(&probe, address, fresh, 0);
+  (void)cap_write64(&rig, cap_ref(fresh, 0), CAP_CTX, 0x4242, &code);
+  got = 0;
+  if (proto_b_find(&probe, revived, &via_probe) == 0)
+    (void)cap_read64(&rig, via_probe, CAP_CTX, &got, &stale_code);
+  if (live_code == 0 && stale_code == 0 && got == 0x4242) {
+    obs_value(1); /* 缺口复现：逃逸的旧地址拿到了新对象的权限 */
+  } else {
+    obs_facts("探针没复现缺口：直路码=%d 陈旧地址码=%d 读到=%llu", (int)live_code,
+              (int)stale_code, (unsigned long long)got);
+  }
+  cap_rig_close(&rig);
   return 0;
 }
 
@@ -1132,7 +2094,7 @@ static const Case k_cases[] = {
     {"host_source_index_bounds", "host", EXP_BLOCKED, 0, 0, NULL},
     /* lifetime */
     {"lifetime_escape", "lifetime", EXP_TRAP, 0, 0, case_lifetime_escape},
-    {"lifetime_reuse", "lifetime", EXP_VALUE, 0, 0, case_lifetime_reuse},
+    {"lifetime_reuse", "lifetime", EXP_TRAP, 0, 0, case_lifetime_reuse},
     {"space_switch", "lifetime", EXP_VALUE, 1, 0, case_space_switch},
     /* lea */
     {"lea_construct_only", "lea", EXP_BLOCKED, 0, 0, case_lea_construct_only},
@@ -1140,6 +2102,39 @@ static const Case k_cases[] = {
     /* budget */
     {"budget_unimplemented", "budget", EXP_BLOCKED, 0, 0,
      case_budget_unimplemented},
+
+    /* capability（最小内存能力模型；模型层，不是 VM 的 load/store 通路） */
+    {"cap_live_rw", "capability", EXP_VALUE, 1, 0, case_cap_live_rw},
+    {"cap_bounds", "capability", EXP_TRAP, 0, 9210, case_cap_bounds},
+    {"cap_rights", "capability", EXP_TRAP, 0, 9209, case_cap_rights},
+    {"cap_revoke", "capability", EXP_TRAP, 0, 9207, case_cap_revoke},
+    {"cap_same_address_reuse", "capability", EXP_VALUE, 1, 0,
+     case_cap_same_address_reuse},
+    {"cap_copy_revoke", "capability", EXP_TRAP, 0, 9207, case_cap_copy_revoke},
+    {"cap_memory_roundtrip", "capability", EXP_VALUE, 1, 0,
+     case_cap_memory_roundtrip},
+    {"cap_forged_reference", "capability", EXP_TRAP, 0, 9206,
+     case_cap_forged_reference},
+    {"cap_int_roundtrip", "capability", EXP_VALUE, 1, 0,
+     case_cap_int_roundtrip},
+    {"cap_int_after_revoke", "capability", EXP_TRAP, 0, 9208,
+     case_cap_int_after_revoke},
+    {"cap_context_reuse", "capability", EXP_TRAP, 0, 9205,
+     case_cap_context_reuse},
+    {"cap_child_borrow", "capability", EXP_VALUE, 1, 0, case_cap_child_borrow},
+    {"cap_space_switch", "capability", EXP_TRAP, 0, 9212,
+     case_cap_space_switch},
+    {"cap_host_access", "capability", EXP_TRAP, 0, 9207, case_cap_host_access},
+    {"cap_failure_cleanup", "capability", EXP_VALUE, 1, 0,
+     case_cap_failure_cleanup},
+    /* §7 要求同时可推进的两件 */
+    {"cap_quota_two_actions", "capability", EXP_VALUE, 1, 0,
+     case_cap_quota_two_actions},
+    {"cap_tcb_destroy_after_switch", "capability", EXP_VALUE, 1, 0,
+     case_cap_tcb_destroy_after_switch},
+    /* §4.1 第二个原型（旁表跟踪地址）的探针：PASS = 缺口按预期复现 */
+    {"cap_protoB_stale_address_probe", "capability", EXP_VALUE, 1, 0,
+     case_cap_protoB_stale_address_probe},
 };
 
 static const size_t k_case_count = sizeof(k_cases) / sizeof(k_cases[0]);
