@@ -1423,6 +1423,12 @@ static int case_tcb_create_reject_leaves_no_borrow(void) {
     obs_facts("在另一个空间里备栈失败");
     return 0;
   }
+  if (lainvm_lease_check(&rig.space, lease) != LAINVM_LEASE_NOT_IN_SPACE) {
+    (void)lainvm_space_free(&other, lease.region);
+    rig_free(&rig);
+    obs_facts("接口层状态不是 NOT_IN_SPACE（跨空间租约）");
+    return 0;
+  }
   if (lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, lease, NULL) != NULL) {
     (void)lainvm_space_free(&other, lease.region);
     rig_free(&rig);
@@ -1447,6 +1453,12 @@ static int case_tcb_create_reject_leaves_no_borrow(void) {
       !lainvm_space_set_accessible(&rig.space, lease.region, 16)) {
     rig_free(&rig);
     obs_facts("备栈或开窗失败");
+    return 0;
+  }
+  if (lainvm_lease_check(&rig.space, lease) != LAINVM_LEASE_WINDOW_NOT_ZERO) {
+    (void)lainvm_space_free(&rig.space, lease.region);
+    rig_free(&rig);
+    obs_facts("接口层状态不是 WINDOW_NOT_ZERO（窗口非 0 的租约）");
     return 0;
   }
   if (lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, lease, NULL) != NULL) {
@@ -1474,6 +1486,12 @@ static int case_tcb_create_reject_leaves_no_borrow(void) {
   if (lainvm_space_handle_none(lease.region)) {
     rig_free(&rig);
     obs_facts("备只读区段失败");
+    return 0;
+  }
+  if (lainvm_lease_check(&rig.space, lease) != LAINVM_LEASE_NEEDS_READ_WRITE) {
+    (void)lainvm_space_free(&rig.space, lease.region);
+    rig_free(&rig);
+    obs_facts("接口层状态不是 NEEDS_READ_WRITE（只读租约）");
     return 0;
   }
   if (lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, lease, NULL) != NULL) {
@@ -1650,6 +1668,41 @@ static int case_alloca_one_byte_over_unchanged(void) {
   }
   rig_free(&rig);
   obs_value(1);
+  return 0;
+}
+
+/* 借出计数作为**可观测的值**报出来：负对照（把它改错）才有意义。 */
+static int case_lease_borrow_count(void) {
+  Rig rig;
+  const LainVmRegion *r;
+
+  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
+  r = lainvm_space_slot(&rig.space, rig.lease.region);
+  if (!r) {
+    rig_free(&rig);
+    obs_facts("租约不见了");
+    return 0;
+  }
+  obs_value((uint64_t)r->borrow_count);
+  rig_free(&rig);
+  return 0;
+}
+
+/* 配额已用量作为**可观测的值**报出来（一份 64 字节的 owned 存储）。 */
+static int case_quota_used_reported(void) {
+  LainVmSpace space;
+  LainVmQuota q;
+  LainVmRegionHandle h;
+
+  lainvm_space_init(&space);
+  lainvm_quota_init(&q, 128);
+  h = lainvm_space_alloc(&space, 64, 16, 64, LAINVM_MEM_READ, 9, &q);
+  if (lainvm_space_handle_none(h)) {
+    obs_facts("分配失败");
+    return 0;
+  }
+  obs_value(q.used);
+  (void)lainvm_space_free(&space, h);
   return 0;
 }
 
@@ -4203,6 +4256,10 @@ static const Case k_cases[] = {
      case_alloca_exact_capacity},
     {"alloca_one_byte_over_unchanged", "lease", EXP_VALUE, 1, 0,
      case_alloca_one_byte_over_unchanged},
+    /* 可观测的借出计数与配额已用量（负对照用） */
+    {"lease_borrow_count", "lease", EXP_VALUE, 1, 0, case_lease_borrow_count},
+    {"quota_used_reported", "quota", EXP_VALUE, 64, 0,
+     case_quota_used_reported},
     /* owned storage（VSpace 申请、清零、登记、释放；按原账户归还） */
     {"owned_alloc_zeroed", "lease", EXP_VALUE, 1, 0, case_owned_alloc_zeroed},
     {"owned_alloc_quota_exact", "lease", EXP_VALUE, 1, 0,

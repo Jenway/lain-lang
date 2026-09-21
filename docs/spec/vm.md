@@ -112,3 +112,68 @@ TCB 引用 VSpace，多个 TCB 可以共享一个地址空间。TCB 对 LAINIR �
 - 因此**不要**把两者描述成"解释器安全 / C 后端不安全"这种地址语义之别；准确的说法是
   "C 后端是**没有运行时边界层**的发射目标，其产物不实施 VSpace 与配额检查"。
   给生成程序加运行时边界层或改成运行期栈分配属于多后端 ABI 议题，需作者确认后再做。
+
+## TCB 与 VSpace 的最终分工（2026-09-21 定；实测见 [专项报告](../implementation/vm-tcb-vspace-split-report.md)）
+
+| 层 | 管什么 | 明确不管 |
+| --- | --- | --- |
+| **VSpace** | 存储的申请与释放；区域登记；当前可访问范围；READ / WRITE / CALL 权限；稳定区域句柄 | 执行状态、栈水位、谁在跑 |
+| **TCB** | frame / slot / 指令位置；stack waterline 与各 frame 的回退点；当前执行用的 VSpace、CSpace 与 quota **引用**；Trap 与执行结果 | **不申请、不释放、不拥有栈字节**；不直接扣栈容量 |
+
+### 区域记录：容量 ≠ 可访问窗口
+
+```text
+base          底层存储地址
+capacity      存储字节数       —— 占用与重叠判断用 [base, base + capacity)
+accessible    当前可访问前缀   —— 访问判定用    [base, base + accessible)
+rights        READ / WRITE / CALL
+owner         诊断用
+backing_kind  OWNED（VSpace 申请/释放/计账）或 EXTERNAL（外部借入）
+borrow_count  当前活租约数
+quota/charged OWNED 存储的扣费来源与实际扣掉的字节数（释放时按它归还）
+generation/alive  句柄身份
+```
+
+窗口变化只改 `accessible`（`lainvm_space_set_accessible`）：**句柄全程稳定**，不再
+remove/add；缩小之后被收回的那一段**立刻**访问不了；失败时区段一点不变。
+
+### 两类存储的接口（三件事分开，不再用一个模糊的 remove）
+
+| 接口 | 做什么 | 不做什么 |
+| --- | --- | --- |
+| `lainvm_space_alloc(space, capacity, alignment, initial_accessible, rights, owner, quota)` | quota 原子预扣 → 分配 → 清零 → 登记 → 记下扣费来源与原始指针；任一步失败全部回滚 | —— |
+| `lainvm_space_free(space, handle)` | 精确撤销 + 释放底层存储 + 按**原账户**归还 charged；`borrow_count != 0`、重复释放、跨空间、非 OWNED 一律拒 | 不撤销 external 映射 |
+| `lainvm_space_map_external(space, base, capacity, accessible, rights, owner)` | 登记别人给的字节 | 不 `free(base)`、不扣账 |
+| `lainvm_space_unmap_external(space, handle)` | 只撤销映射 | 不 free、不归还 quota |
+| `lainvm_space_borrow` / `end_borrow` | 记"有几个活持有人"；借用期间不许释放 | 不改容量/窗口/权限，不动 quota |
+
+### 栈租约
+
+`LainVmStackLease {space, region}` —— 只有空间与**稳定句柄**；base / capacity / 权限
+一律现读 VSpace 记录，TCB 里不留副本。协议：
+
+1. 供给方 `lainvm_space_alloc_stack(space, bytes, owner, quota)`（初始 `accessible = 0`）；
+2. `lainvm_tcb_new(..., lease, quota)` 校验后 `borrow_count++`；
+3. 执行期间 TCB 用 `set_accessible` 决定窗口（水位）；
+4. `lainvm_tcb_free`：窗口收回 0 → 结束借用；**不**撤销、**不** free、**不**归还额度；
+5. 供给方随后 `lainvm_space_free` 才真正释放并归还额度；
+6. 有活借用时 `space_free` 稳定拒绝；创建中途失败会还回已取得的借用，但不释放供给方的区段；
+7. 一份**栈**租约只借给一条执行流（否则拒 `LAINVM_LEASE_ALREADY_BORROWED`）。
+
+`lainvm_tcb_set_space` 只换当前执行空间：租约仍属原空间，`#alloca` 因空间不同拒
+**1006**，销毁时仍去原空间结束借用。本轮不实现运行中迁移栈。
+
+**接口层失败与运行期 Trap 分开**：租约校验返回 `LainVmLeaseStatus`（0..7：OK /
+NOT_IN_SPACE / BAD_HANDLE / NEEDS_READ_WRITE / WINDOW_NOT_ZERO / ZERO_CAPACITY /
+ALREADY_BORROWED / BORROW_FAILED），**不占** engine 的 1xxx 号段。
+
+### alloca 的生命周期属于 procedure activation
+
+`#alloca` 属于当前 procedure activation：进入/离开 `#if` / `#loop` / `#switch`
+**不**创建、也**不**结束它的生命周期；只有 **procedure return、Trap、取消、TCB 销毁**
+才结束。根过程结束时水位归零、窗口清空。
+
+循环里反复 `#alloca` 的实测增长（**不**每轮回收）：`#alloca[#bits<64>](1)` 要 8 字节
+数据，水位按 **16 字节对齐**推进，所以每轮推进 16 字节，第 n 轮结束水位 = 16n − 8；
+容量 4096 时 256 轮之后水位 4088，第 257 轮拒 **1007**。配额在**供给方 alloc 那一刻**
+按整块容量扣一次，与循环多少轮无关（水位涨落不改账）。

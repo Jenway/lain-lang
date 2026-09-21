@@ -75,6 +75,24 @@ typedef struct {
   bool active;
 } LainVmTrap;
 
+/* 租约校验的**接口层**状态（不是运行期 Trap，也不占用 engine 的 1xxx 号段）。
+ * 供给方与驱动靠它分辨"为什么 TCB 不肯收这份租约"。 */
+typedef enum {
+  LAINVM_LEASE_OK = 0,
+  LAINVM_LEASE_NOT_IN_SPACE = 1,    /* 句柄不属于给定的 VSpace */
+  LAINVM_LEASE_BAD_HANDLE = 2,      /* 区段无效 / 已撤销 / 代数不符 */
+  LAINVM_LEASE_NEEDS_READ_WRITE = 3,/* 权限里缺 READ 或 WRITE */
+  LAINVM_LEASE_WINDOW_NOT_ZERO = 4, /* 交来时窗口不是 0（该由 TCB 自己开窗） */
+  LAINVM_LEASE_ZERO_CAPACITY = 5,   /* 容量为 0 */
+  LAINVM_LEASE_ALREADY_BORROWED = 6,/* 已借给别的执行流（栈租约是独借） */
+  LAINVM_LEASE_BORROW_FAILED = 7,   /* 借用计数加不上（到顶） */
+} LainVmLeaseStatus;
+
+/* 只校验，不产生任何副作用（不借用、不改区段）。`lainvm_tcb_new` 用它，
+ * 驱动与验收也用它 —— 失败原因因此是可分辨的、可断言的。 */
+LainVmLeaseStatus lainvm_lease_check(const LainVmSpace *space,
+                                     LainVmStackLease lease);
+
 /* 一层区域激活。
  *
  * 进 #if / #loop / #switch 都压一帧；#call 压的帧带 is_call_frame。

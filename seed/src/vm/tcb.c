@@ -14,22 +14,32 @@
 
 static void start_fail(L1Diagnostic *diag, int code, const char *message);
 
-/* 校验供给方给的租约。失败返回非 0；成功时已经 borrow_count++。 */
-static int accept_lease(const LainVmSpace *space, LainVmStackLease lease) {
+/* 校验供给方给的租约。失败返回非 0；**没副作用**（不借用、不改区段）。 */
+LainVmLeaseStatus lainvm_lease_check(const LainVmSpace *space,
+                                     LainVmStackLease lease) {
   const LainVmRegion *region;
-  if (lainvm_stack_lease_none(lease)) return 0; /* 没有栈的程序：合法 */
-  if (lease.space != space) return 1; /* 句柄必须属于给定的 VSpace */
+  if (lainvm_stack_lease_none(lease)) return LAINVM_LEASE_OK; /* 没有栈：合法 */
+  if (lease.space != space) return LAINVM_LEASE_NOT_IN_SPACE;
   region = lainvm_space_slot(lease.space, lease.region);
-  if (!region) return 2;                              /* 区段无效 */
+  if (!region) return LAINVM_LEASE_BAD_HANDLE;
   if ((region->rights & (LAINVM_MEM_READ | LAINVM_MEM_WRITE)) !=
-      (LAINVM_MEM_READ | LAINVM_MEM_WRITE)) return 3; /* 缺读或写 */
-  if (region->accessible != 0) return 4;              /* 窗口必须从 0 开始 */
-  if (region->capacity == 0) return 5;                /* 没有容量 */
-  /* 一份**栈**租约只借给一条执行流：两条执行流共用一块栈、各自推进水位，
-   * 会互相踩。`borrow_count` 仍是个计数（将来只读的共享映射可以用 N>1），
-   * 但栈这一路今天只认独借。 */
-  if (region->borrow_count != 0) return 7;
-  if (!lainvm_space_borrow(lease.space, lease.region)) return 6;
+      (LAINVM_MEM_READ | LAINVM_MEM_WRITE))
+    return LAINVM_LEASE_NEEDS_READ_WRITE;
+  if (region->accessible != 0) return LAINVM_LEASE_WINDOW_NOT_ZERO;
+  if (region->capacity == 0) return LAINVM_LEASE_ZERO_CAPACITY;
+  /* 一份**栈**租约只借给一条执行流：两条执行流共用一块栈、各自推进水位，会互相
+   * 踩。`borrow_count` 仍是个计数（将来只读的共享映射可以用 N>1），今天栈只认独借。 */
+  if (region->borrow_count != 0) return LAINVM_LEASE_ALREADY_BORROWED;
+  return LAINVM_LEASE_OK;
+}
+
+/* 校验并真的借走。失败返回非 0；成功时 borrow_count++。 */
+static int accept_lease(const LainVmSpace *space, LainVmStackLease lease) {
+  LainVmLeaseStatus status = lainvm_lease_check(space, lease);
+  if (status != LAINVM_LEASE_OK) return (int)status;
+  if (lainvm_stack_lease_none(lease)) return 0;
+  if (!lainvm_space_borrow(lease.space, lease.region))
+    return (int)LAINVM_LEASE_BORROW_FAILED;
   return 0;
 }
 
