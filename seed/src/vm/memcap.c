@@ -171,6 +171,64 @@ int32_t lainvm_memcap_revoke_owner(LainVmMemTable *table, uint64_t owner,
   return 0;
 }
 
+void lainvm_memcap_end_owner(LainVmMemTable *table, uint64_t owner,
+                             uint32_t *revoked, uint32_t *released) {
+  uint32_t i, rv = 0, rl = 0;
+
+  if (table == NULL) {
+    if (revoked != NULL) *revoked = 0;
+    if (released != NULL) *released = 0;
+    return;
+  }
+  if (owner != 0) {
+    for (i = 0; i < LAINVM_MEMCAP_MAX_CAPS; i++) {
+      if (!table->caps[i].live || table->caps[i].owner != owner) continue;
+      table->caps[i].live = false;
+      table->caps_live -= 1;
+      rv += 1;
+    }
+    for (i = 0; i < LAINVM_MEMCAP_MAX_OBJECTS; i++) {
+      LainVmMemObject *object = &table->objects[i];
+      if (!object->live || object->owner != owner) continue;
+      table->committed -= object->size;
+      table->released += object->size;
+      object->live = false;
+      table->objects_live -= 1;
+      rl += 1;
+    }
+  }
+  if (revoked != NULL) *revoked = rv;
+  if (released != NULL) *released = rl;
+}
+
+void lainvm_memcap_end_all(LainVmMemTable *table, uint32_t *revoked,
+                           uint32_t *released) {
+  uint32_t i, rv = 0, rl = 0;
+
+  if (table == NULL) {
+    if (revoked != NULL) *revoked = 0;
+    if (released != NULL) *released = 0;
+    return;
+  }
+  for (i = 0; i < LAINVM_MEMCAP_MAX_CAPS; i++) {
+    if (!table->caps[i].live) continue;
+    table->caps[i].live = false;
+    table->caps_live -= 1;
+    rv += 1;
+  }
+  for (i = 0; i < LAINVM_MEMCAP_MAX_OBJECTS; i++) {
+    LainVmMemObject *object = &table->objects[i];
+    if (!object->live) continue;
+    table->committed -= object->size;
+    table->released += object->size;
+    object->live = false;
+    table->objects_live -= 1;
+    rl += 1;
+  }
+  if (revoked != NULL) *revoked = rv;
+  if (released != NULL) *released = rl;
+}
+
 /* 文档 §3「访问」五条，按顺序。返回 0 或稳定拒绝码。
  * 句柄不带表身份之后，同址重建的上下文靠**代数基数**检出（9208）—— 9205 已废弃。 */
 static int32_t resolve_code(const LainVmMemTable *table,

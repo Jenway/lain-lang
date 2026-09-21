@@ -15,7 +15,7 @@ static void start_fail(L1Diagnostic *diag, int code, const char *message);
 
 LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
                           uint64_t owner, uint32_t max_call_depth,
-                          uint64_t stack_bytes) {
+                          uint64_t stack_bytes, uint64_t generation_base) {
   LainVmTcb *tcb;
   uint32_t frame_cap;
   uint32_t slot_cap;
@@ -35,6 +35,10 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
   tcb->vspace = space;
   tcb->stack = lainvm_space_no_handle();
   tcb->slice_result = LAINVM_SLICE_RUNNABLE;
+  /* 代数的起点由调用方给：见 tcb.h 里 generation_base 的契约。 */
+  lainvm_memcap_init(&tcb->memcap, generation_base);
+  tcb->activation = 0;
+  tcb->activation_seq = 0;
 
   tcb->frames = (LainVmFrame *)calloc(frame_cap, sizeof(LainVmFrame));
   tcb->slots = (L1Value *)calloc(slot_cap, sizeof(L1Value));
@@ -68,6 +72,9 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
 
 void lainvm_tcb_free(LainVmTcb *tcb) {
   if (!tcb) return;
+  /* 先结内存能力的账：撤销这个上下文名下的全部能力、释放它名下的全部对象
+   * （栈内存下一步随 TCB 一起 free）。没有这一步，账面上会留着悬空授权与泄漏。 */
+  lainvm_memcap_end_all(&tcb->memcap, NULL, NULL);
   if (!lainvm_space_handle_none(tcb->stack)) {
     /* 栈的字节由本 TCB 分配：按**句柄**取回地址，再精确撤销那一段。
      *
@@ -182,6 +189,10 @@ int lainvm_tcb_start(LainVmTcb *tcb, const char *entry, const L1Value *args,
   tcb->has_result = false;
   memset(&tcb->result, 0, sizeof(tcb->result));
   memset(&tcb->trap, 0, sizeof(tcb->trap));
+  /* 重开一次激活：上一轮若留下对象（例如 Trap 之后又 start），在这里结清。
+   * 然后发一个新的 activation 标签——标签只增，旧引用不会因为重用而对上新的。 */
+  lainvm_memcap_end_all(&tcb->memcap, NULL, NULL);
+  tcb->activation = ++tcb->activation_seq;
 
   frame = &tcb->frames[0];
   frame->region = body;
@@ -192,6 +203,7 @@ int lainvm_tcb_start(LainVmTcb *tcb, const char *entry, const L1Value *args,
   frame->label = NULL;
   frame->is_call_frame = true;
   frame->stack_mark = 0;
+  frame->activation = tcb->activation;
   tcb->frame_count = 1;
 
   for (i = 0; i < arg_count; i++) tcb->slots[i] = args[i];
