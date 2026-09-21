@@ -21,7 +21,6 @@
 #include "lainir/core.h"
 #include "lainir/value.h"
 #include "lainvm/caps.h"
-#include "lainvm/memcap.h"
 #include "lainvm/space.h"
 
 typedef struct LainVmTcb LainVmTcb;
@@ -93,7 +92,6 @@ typedef struct {
   const char *label;
   bool is_call_frame;
   uint64_t stack_mark;
-  uint64_t activation; /* 这一帧属于哪次 activation：#call 压的帧带一个新的 */
 } LainVmFrame;
 
 struct LainVmTcb {
@@ -117,20 +115,25 @@ struct LainVmTcb {
   const LainVmCapEntry **resolved;
   uint32_t resolved_count;
 
-  /* alloca 栈。区段登记在 vspace 里，owner 是这个 TCB；
-   * 字节在 admit 时按 stack_bytes 一次给够（引擎里不许分配），
+  /* alloca 栈的**租约**。字节在 admit 时按 stack_bytes 一次给够（引擎里不许分配），
    * 满了就是 trap，不是扩容。
-   * 引用是**句柄**（身份），不是表下标（位置）：注册或撤销别的区段不会让它
-   * 指到别人身上。 */
-  LainVmRegionHandle stack; /* no_handle 表示没有栈 */
+   *
+   * 租约记的是「在哪个空间、从哪开始、多少字节」——**不是**一段登记好的区段。
+   * 整块登记会带来一个错误的授权：返回之后旧地址照样在授权范围内，于是必须靠
+   * 地址身份才拦得住；而 `#addr` 是无类型裸地址，**没有身份**。所以授权只跟着
+   * 活窗口走，见下面 stack_window。 */
+  LainVmSpace *stack_space; /* 租约属于哪个空间；NULL = 没有栈 */
+  uintptr_t stack_base;     /* 租约起始地址 */
+  uint64_t stack_size;      /* 租约字节数；0 = 没有栈 */
   uint64_t stack_used;      /* alloca 水位 */
 
-  /* 内存能力：对象表 + 能力表（**每个执行上下文一张**，定长、引擎里不分配）。
-   * activation 是当前这次调用的标签：这一层发的对象与能力都挂在它名下，调用结束
-   * （返回 / Trap / 销毁 TCB）时按它撤销 + 释放。0 表示没有活跃的调用。 */
-  LainVmMemTable memcap;
-  uint64_t activation;
-  uint64_t activation_seq; /* 只增；给每次调用发新标签 */
+  /* 栈的**活窗口**：被 VSpace 授权的恰好是 [stack_base, stack_base + stack_used)。
+   * 分配活着时地址能用；水位回退（返回 / 跳出循环 / Trap）窗口跟着缩小，旧地址
+   * 就落到「没有授权」（load 1004 / store 1005）。同一数值地址后来被重新授权时，
+   * 旧裸 `#addr` 与新裸 `#addr` **不可区分** —— 这正是裸地址该有的语义：域外引用
+   * 由 Meta 的 `ref(T)` 生命周期规则挡住，不靠 VM 里的地址身份。 */
+  LainVmRegionHandle stack_window; /* no_handle = 活窗口为空（水位 0） */
+  uint64_t stack_window_size;      /* 活窗口字节数，用来判断是否要重排 */
 
   /* 上下文：恢复一次激活所需的全部 */
   LainVmFrame *frames;
@@ -167,13 +170,10 @@ struct LainVmTcb {
  *   slot_cap  = frame_cap * image->max_slots
  * id 现在只是**诊断字段**（区段表里写着"这段是谁的"）；回收按句柄精确撤销，
  * 不按 owner 扫表。
- * stack_bytes 为 0 表示不要栈（程序里没有 #alloca）。
- * generation_base 是内存能力表里代数的起点：调用方保证它**大于同一块宿主内存上
- * 以前发过的所有代数**（在同一块内存上重建 TCB 时，旧引用才不会复活）。
- * 传 1 对"刚 calloc 出来的 TCB"就够；有内存复用时由调用方给更大的基数。 */
+ * stack_bytes 为 0 表示不要栈（程序里没有 #alloca）。 */
 LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
                           uint64_t owner, uint32_t max_call_depth,
-                          uint64_t stack_bytes, uint64_t generation_base);
+                          uint64_t stack_bytes);
 void lainvm_tcb_free(LainVmTcb *tcb);
 
 /* 把模块里每个 extern 子过程按 link_name 解析到能力空间。
@@ -182,7 +182,7 @@ void lainvm_tcb_free(LainVmTcb *tcb);
 int lainvm_tcb_set_caps(LainVmTcb *tcb, LainVmCaps *caps, L1Diagnostic *diag);
 
 /* 换地址空间（seL4 的 TCB_SetSpace）。
- * 只换引用，不搬内存；栈租约带旧空间的身份，换过去就失效（`#alloca` 拒 1006），
+ * 只换引用，不搬内存；栈租约记着自己属于哪个空间，换过去就失效（`#alloca` 拒 1006），
  * 要接着跑得由供给方在新空间里重新给一份租约。
  * 运行中的 TCB 不许换。成功返回 0；失败返回非 0 并把原因写进 diag（可为 NULL）。 */
 int lainvm_tcb_set_space(LainVmTcb *tcb, LainVmSpace *space, L1Diagnostic *diag);

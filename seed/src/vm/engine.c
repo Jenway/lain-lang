@@ -41,20 +41,14 @@ static int64_t as_signed(uint64_t bits, uint32_t width) {
   return (int64_t)sign_fill(bits, width);
 }
 
-/* 裸地址读法。**受检引用不要走这里**：调用点必须先自己处理 REF（lea / load / store /
- * ptr2int / switch 都各自处理了）。真漏了一处，这里给 0 而不是把句柄当地址用——
- * 错得看得见，比静默算错好。 */
 static uintptr_t as_addr(L1Value value) {
-  if (value.kind == L1_VALUE_ADDR) return (uintptr_t)value.as.addr;
-  if (value.kind == L1_VALUE_REF) return 0;
-  return (uintptr_t)value.as.bits;
+  return value.kind == L1_VALUE_ADDR ? (uintptr_t)value.as.addr
+                                     : (uintptr_t)value.as.bits;
 }
 
 static uint64_t type_size(const L1Type *ty) {
   if (!ty) return 1;
-  /* `#addr` 落内存 = 16 字节自描述记录（见 addr_words_encode）：受检引用要过得去，
-   * 而模型里代数 0 是保留值，所以不需要额外的 tag 字。 */
-  if (ty->kind == TY_ADDR) return sizeof(LainVmMemRef);
+  if (ty->kind == TY_ADDR) return sizeof(void *);
   return ty->width >= 8 ? ty->width / 8u : 1u;
 }
 
@@ -82,71 +76,6 @@ static L1Value value_addr(uintptr_t addr) {
   return value;
 }
 
-/* --- 受检引用 ------------------------------------------------------------- */
-
-static LainVmSliceResult trap_now(LainVmTcb *tcb, LainVmTrapKind kind,
-                                  int32_t status, const L1Inst *inst);
-
-/* 载荷与 `L1Value.as.ref` 必须同布局：一边改一边没改，就会出现"看起来能跑"的静默错值。 */
-_Static_assert(sizeof(((L1Value *)0)->as.ref) == sizeof(LainVmMemRef),
-               "L1Value.as.ref 必须与 LainVmMemRef 同布局");
-
-static L1Value value_ref(LainVmMemRef ref) {
-  L1Value value;
-  memset(&value, 0, sizeof(value));
-  value.kind = L1_VALUE_REF;
-  value.as.ref.slot = ref.cap.slot;
-  value.as.ref.generation = ref.cap.generation;
-  value.as.ref.offset = ref.offset;
-  return value;
-}
-
-static LainVmMemRef as_ref(const L1Value *value) {
-  LainVmMemRef ref;
-  ref.cap.slot = value->as.ref.slot;
-  ref.cap.generation = value->as.ref.generation;
-  ref.offset = value->as.ref.offset;
-  return ref;
-}
-
-/* 这次访问属于哪个执行上下文：能力记录按它判"是不是我的"。 */
-static uint64_t value_owner(const LainVmTcb *tcb) { return tcb->activation; }
-
-/* `#addr` 落内存 = 16 字节自描述记录。字 0 = 0 表示裸地址（字 1 是指针），
- * 否则字 0 = 代数(32) | 槽号(32)、字 1 = 对象内偏移。两种味道都能过内存。 */
-static void addr_words_encode(const L1Value *value, uint64_t words[2]) {
-  if (value->kind == L1_VALUE_REF) {
-    words[0] = ((uint64_t)value->as.ref.generation << 32) |
-               (uint64_t)value->as.ref.slot;
-    words[1] = value->as.ref.offset;
-  } else {
-    words[0] = 0;
-    words[1] = (uint64_t)(uintptr_t)value->as.addr;
-  }
-}
-
-static L1Value addr_words_decode(const uint64_t words[2]) {
-  LainVmMemRef ref;
-  if (words[0] == 0) return value_addr((uintptr_t)words[1]);
-  ref.cap.generation = (uint32_t)(words[0] >> 32);
-  ref.cap.slot = (uint32_t)(words[0] & 0xFFFFFFFFu);
-  ref.offset = words[1];
-  return value_ref(ref);
-}
-
-/* 引用访问的统一入口：过完能力模型五步（第五步仍是 VSpace）。失败抛模型的原码。 */
-static LainVmSliceResult resolve_ref(LainVmTcb *tcb, const L1Inst *inst,
-                                     const L1Value *pointer, uint32_t need,
-                                     uint64_t length, uintptr_t *out_base) {
-  int32_t code = 0;
-  uintptr_t base = 0;
-  int rc = lainvm_memcap_resolve(&tcb->memcap, tcb->vspace, as_ref(pointer), need,
-                                 length, value_owner(tcb), &base, &code);
-  if (rc != 0) return trap_now(tcb, LAINVM_TRAP_CAPABILITY, code, inst);
-  *out_base = base;
-  return LAINVM_SLICE_RUNNABLE;
-}
-
 static LainVmSliceResult trap_now(LainVmTcb *tcb, LainVmTrapKind kind,
                                   int32_t status, const L1Inst *inst) {
   const LainVmFrame *frame = ctop(tcb);
@@ -157,10 +86,6 @@ static LainVmSliceResult trap_now(LainVmTcb *tcb, LainVmTrapKind kind,
   tcb->trap.line = inst ? inst->line : 0;
   tcb->trap.column = inst ? inst->column : 0;
   tcb->trap.active = true;
-  /* 走到这条路径，这次 activation 就结束了：撤销它名下的能力、释放它名下的存储。
-   * 两个动作都做——只撤销是泄漏，只释放是悬空授权。 */
-  lainvm_memcap_end_owner(&tcb->memcap, tcb->activation, NULL, NULL);
-  tcb->activation = 0;
   tcb->state = LAINVM_DEAD;
   tcb->slice_result = LAINVM_SLICE_TRAPPED;
   return LAINVM_SLICE_TRAPPED;
@@ -227,15 +152,57 @@ static LainVmSliceResult push_region(LainVmTcb *tcb, uint32_t region_id,
   frame->label = label;
   frame->is_call_frame = is_call;
   frame->stack_mark = tcb->stack_used;
-  /* `#call` 压的帧**开始一次新的 activation**：这次调用里 `#alloca` 拿到的对象与
-   * 能力都挂在它名下，返回时按它撤销 + 释放。 */
-  if (is_call) tcb->activation = ++tcb->activation_seq;
-  frame->activation = tcb->activation;
   if (frame->slot_base + frame->slot_count > tcb->slot_cap)
     return trap_now(tcb, LAINVM_TRAP_STATE, 1012, NULL);
   memset(&tcb->slots[frame->slot_base], 0, sizeof(L1Value) * frame->slot_count);
   tcb->frame_count++;
   return LAINVM_SLICE_RUNNABLE;
+}
+
+/* 让栈的**活窗口**覆盖到当前水位：被 VSpace 授权的恰好是
+ * [stack_base, stack_base + stack_used)。
+ *
+ * 为什么不是「整块租约登记一次」：整块登记之后，返回后的旧地址照样落在授权范围内，
+ * 那就只能靠地址身份才拦得住 —— 而 `#addr` 是无类型裸地址，**没有身份**。窗口跟着
+ * 水位走，旧地址自然落到「没有授权」（load 1004 / store 1005）；同一数值地址后来被
+ * 重新授权时，旧裸地址与新裸地址不可区分 —— 这正是裸地址的语义，域外引用归 Meta 的
+ * `ref(T)` 生命周期规则挡。
+ *
+ * 区段表不许重叠，所以只能「先撤旧的、再加新的」。新窗口加不上（表满 / 上界不可
+ * 表示）就把旧窗口装回去并返回 1036：宁可拒掉这次分配，也不留下一个授权范围与
+ * 水位不一致的窗口。返回 0 = 已对齐。 */
+static int32_t stack_window_sync(LainVmTcb *tcb) {
+  LainVmSpace *space = tcb->stack_space;
+  uint64_t used = tcb->stack_used;
+  LainVmRegionHandle old = tcb->stack_window;
+  uint64_t old_size = tcb->stack_window_size;
+  bool had = !lainvm_space_handle_none(old);
+  LainVmRegionHandle fresh;
+
+  if (space == NULL) return 0;
+  if (used == old_size && (used != 0) == had) return 0; /* 已经对齐 */
+  if (had) {
+    lainvm_space_remove((LainVmSpace *)(uintptr_t)old.space, old);
+    tcb->stack_window = lainvm_space_no_handle();
+    tcb->stack_window_size = 0;
+  }
+  if (used == 0) return 0; /* 水位归零：什么都不授权 */
+  fresh = lainvm_space_add(space, tcb->stack_base, used,
+                           LAINVM_MEM_READ | LAINVM_MEM_WRITE, tcb->id);
+  if (!lainvm_space_handle_none(fresh)) {
+    tcb->stack_window = fresh;
+    tcb->stack_window_size = used;
+    return 0;
+  }
+  if (!had) return 1036;
+  /* 加不上：把旧窗口装回去，尽量保持「授权范围 = 上次成功时的水位」。 */
+  fresh = lainvm_space_add(space, tcb->stack_base, old_size,
+                           LAINVM_MEM_READ | LAINVM_MEM_WRITE, tcb->id);
+  if (!lainvm_space_handle_none(fresh)) {
+    tcb->stack_window = fresh;
+    tcb->stack_window_size = old_size;
+  }
+  return 1036;
 }
 
 /* 离开当前区域：值写进创造这一帧那条指令的结果槽，回退栈水位，
@@ -260,12 +227,10 @@ static LainVmSliceResult leave_region(LainVmTcb *tcb, const L1Value *values,
     tcb->slots[parent->slot_base + slot] = values[i];
   }
   tcb->stack_used = frame->stack_mark;
+  /* 水位回退 = 这一段分配死了：活窗口跟着缩，旧地址从此没有授权。 */
+  if (stack_window_sync(tcb) != 0)
+    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, NULL);
   tcb->frame_count--;
-  if (frame->is_call_frame) {
-    /* 这条路径也可能离开一个调用帧：一样要结束它的 activation。 */
-    lainvm_memcap_end_owner(&tcb->memcap, frame->activation, NULL, NULL);
-    tcb->activation = parent->activation;
-  }
   parent->position++;
   return LAINVM_SLICE_RUNNABLE;
 }
@@ -512,109 +477,58 @@ static LainVmSliceResult op_float_conv(LainVmTcb *tcb, const L1Inst *inst) {
 
 /* --- 地址与内存 ----------------------------------------------------------- */
 
+/* `#lea` 是**地址位模式算术**（D3 已定：构造不查、访问查）。按地址宽度取模，允许
+ * 构造区段外地址与尾后地址，也不授予任何权限。全部用无符号 64 位算：回绕是**定义
+ * 好的**结果，而 C 语言里越界指针算术是 UB —— 所以这里绝不走指针类型。越界与权限
+ * 一律留到访问期（load / store / call_indirect / 宿主内存访问）判。 */
 static LainVmSliceResult op_lea(LainVmTcb *tcb, const L1Inst *inst) {
-  L1Value base_value = lainvm_operand_read(tcb, inst, 0);
-  uintptr_t idx = (uintptr_t)lainvm_operand_read(tcb, inst, 1).as.bits;
+  uint64_t base = (uint64_t)as_addr(lainvm_operand_read(tcb, inst, 0));
+  uint64_t idx = lainvm_operand_read(tcb, inst, 1).as.bits;
   uint64_t scale = lainvm_operand_read(tcb, inst, 2).as.bits;
   uint64_t offset = lainvm_operand_read(tcb, inst, 3).as.bits;
-  if (base_value.kind == L1_VALUE_REF) {
-    /* 引用进、引用出：**同一个能力**、更大的偏移。构造期不查（模型 §4.4：
-     * lea 只产"同一能力 + 更大偏移"），越界由访问期判。 */
-    LainVmMemRef ref = as_ref(&base_value);
-    ref.offset += (uint64_t)idx * scale + offset;
-    lainvm_result_write(tcb, inst, 0, value_ref(ref));
-    return LAINVM_SLICE_RUNNABLE;
-  }
-  {
-    uintptr_t base = as_addr(base_value);
-    lainvm_result_write(
-        tcb, inst, 0,
-        value_addr(base + idx * (uintptr_t)scale + (uintptr_t)offset));
-  }
+  lainvm_result_write(tcb, inst, 0,
+                      value_addr((uintptr_t)(base + idx * scale + offset)));
   return LAINVM_SLICE_RUNNABLE;
 }
 
 static LainVmSliceResult op_int2ptr(LainVmTcb *tcb, const L1Inst *inst) {
-  /* 整数只能造出**受检引用**（位布局 = 代数(32) | 槽号(32)）。
-   * 裸地址不能由整数凭空产生 —— 那正是"程序内部洗不出 RAW"的边界。 */
-  LainVmMemRef ref;
-  uint64_t bits = lainvm_operand_read(tcb, inst, 0).as.bits;
-  ref.cap.generation = (uint32_t)(bits >> 32);
-  ref.cap.slot = (uint32_t)(bits & 0xFFFFFFFFu);
-  ref.offset = 0;
-  lainvm_result_write(tcb, inst, 0, value_ref(ref));
+  lainvm_result_write(tcb, inst, 0,
+                      value_addr((uintptr_t)lainvm_operand_read(tcb, inst, 0).as.bits));
   return LAINVM_SLICE_RUNNABLE;
 }
 
 static LainVmSliceResult op_ptr2int(LainVmTcb *tcb, const L1Inst *inst) {
   uint32_t width = inst->ty ? inst->ty->width : 64u;
-  L1Value source = lainvm_operand_read(tcb, inst, 0);
-  uint64_t bits;
-  if (source.kind == L1_VALUE_REF) {
-    /* 只搬身份位（代数 | 槽号），**不带偏移**：偏移由来往双方各自提供。 */
-    bits = ((uint64_t)source.as.ref.generation << 32) |
-           (uint64_t)source.as.ref.slot;
-  } else {
-    /* 裸地址照旧（bootstrap 的 Meta 依赖它比较缓冲位置）。 */
-    bits = (uint64_t)as_addr(source);
-  }
-  lainvm_result_write(tcb, inst, 0, value_bits(bits, width));
+  lainvm_result_write(tcb, inst, 0,
+                      value_bits((uint64_t)as_addr(lainvm_operand_read(tcb, inst, 0)),
+                                 width));
   return LAINVM_SLICE_RUNNABLE;
 }
 
 static LainVmSliceResult op_load(LainVmTcb *tcb, const L1Inst *inst) {
-  L1Value pointer = lainvm_operand_read(tcb, inst, 0);
+  uintptr_t addr = as_addr(lainvm_operand_read(tcb, inst, 0));
   uint64_t size = type_size(inst->ty);
-  uintptr_t addr;
-  if (pointer.kind == L1_VALUE_REF) {
-    LainVmSliceResult refused =
-        resolve_ref(tcb, inst, &pointer, LAINVM_MEM_READ, size, &addr);
-    if (refused != LAINVM_SLICE_RUNNABLE) return refused;
-  } else {
-    addr = as_addr(pointer);
-    if (!lainvm_space_check(tcb->vspace, addr, size, LAINVM_MEM_READ))
-      return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1004, inst);
-  }
-  if (inst->ty && inst->ty->kind == TY_ADDR) {
-    uint64_t words[2] = {0, 0};
-    memcpy(words, (const void *)addr, sizeof(words));
-    lainvm_result_write(tcb, inst, 0, addr_words_decode(words));
-    return LAINVM_SLICE_RUNNABLE;
-  }
-  {
-    uint64_t raw = 0;
-    memcpy(&raw, (const void *)addr, (size_t)size);
+  uint64_t raw = 0;
+  if (!lainvm_space_check(tcb->vspace, addr, size, LAINVM_MEM_READ))
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1004, inst);
+  memcpy(&raw, (const void *)addr, (size_t)size);
+  if (inst->ty && inst->ty->kind == TY_ADDR)
+    lainvm_result_write(tcb, inst, 0, value_addr((uintptr_t)raw));
+  else
     lainvm_result_write(tcb, inst, 0,
                         value_bits(raw, inst->ty ? inst->ty->width : 64u));
-  }
   return LAINVM_SLICE_RUNNABLE;
 }
 
 static LainVmSliceResult op_store(LainVmTcb *tcb, const L1Inst *inst) {
   L1Value value = lainvm_operand_read(tcb, inst, 0);
-  L1Value pointer = lainvm_operand_read(tcb, inst, 1);
+  uintptr_t addr = as_addr(lainvm_operand_read(tcb, inst, 1));
   uint64_t size = type_size(inst->ty);
-  uintptr_t addr;
-  if (pointer.kind == L1_VALUE_REF) {
-    LainVmSliceResult refused =
-        resolve_ref(tcb, inst, &pointer, LAINVM_MEM_WRITE, size, &addr);
-    if (refused != LAINVM_SLICE_RUNNABLE) return refused;
-  } else {
-    addr = as_addr(pointer);
-    if (!lainvm_space_check(tcb->vspace, addr, size, LAINVM_MEM_WRITE))
-      return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1005, inst);
-  }
-  if (inst->ty && inst->ty->kind == TY_ADDR) {
-    uint64_t words[2];
-    addr_words_encode(&value, words);
-    memcpy((void *)addr, words, sizeof(words));
-    return LAINVM_SLICE_RUNNABLE;
-  }
-  {
-    uint64_t raw = value.kind == L1_VALUE_ADDR ? (uint64_t)(uintptr_t)value.as.addr
-                                              : value.as.bits;
-    memcpy((void *)addr, &raw, (size_t)size);
-  }
+  uint64_t raw = value.kind == L1_VALUE_ADDR ? (uint64_t)(uintptr_t)value.as.addr
+                                            : value.as.bits;
+  if (!lainvm_space_check(tcb->vspace, addr, size, LAINVM_MEM_WRITE))
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1005, inst);
+  memcpy((void *)addr, &raw, (size_t)size);
   return LAINVM_SLICE_RUNNABLE;
 }
 
@@ -627,12 +541,13 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
   uint64_t total;
   uint64_t align = 16;
   uint64_t used;
-  const LainVmRegion *stack;
+  uint64_t prev_used = tcb->stack_used;
 
-  if (lainvm_space_handle_none(tcb->stack))
+  /* 没有栈，或者租约不在当前空间里（换过 VSpace）：稳定拒 1006。 */
+  if (tcb->stack_size == 0 || tcb->stack_base == 0)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
-  stack = lainvm_space_slot(tcb->vspace, tcb->stack);
-  if (!stack) return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
+  if (tcb->stack_space != tcb->vspace)
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
   /* 尺寸算术**先查回绕**，再判容量。`8 × 2^61` 曾经回绕成 0 字节，于是
    * 得到一个"合法"的分配（实测 R08）。失败不改变水位。 */
   if (element != 0 && count > 0xFFFFFFFFFFFFFFFFull / element)
@@ -643,28 +558,18 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
   used = (tcb->stack_used + (align - 1)) & ~(align - 1);
   if (total > 0xFFFFFFFFFFFFFFFFull - used)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
-  if (used + total > stack->size)
+  if (used + total > tcb->stack_size)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1007, inst);
   tcb->stack_used = used + total;
-  /* 一次 `#alloca` = 一笔存储对象 + 一条覆盖它的能力，owner 都是这次 activation。
-   * 返回**受检引用**而不是裸地址：以后每次 load/store 都要过能力模型。
-   * 对象表满 / 授权被拒 → 抛模型的原码（9200/9203/9202）。 */
-  {
-    LainVmMemHandle object = lainvm_memcap_object_add(
-        &tcb->memcap, stack->base + (uintptr_t)used, total, value_owner(tcb));
-    LainVmMemHandle grant = lainvm_memcap_no_handle();
-    LainVmMemRef ref;
-    int32_t code;
-    if (lainvm_memcap_handle_none(object))
-      return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 9200, inst);
-    code = lainvm_memcap_grant(&tcb->memcap, object, 0, total,
-                               LAINVM_MEM_READ | LAINVM_MEM_WRITE,
-                               value_owner(tcb), &grant);
-    if (code != 0) return trap_now(tcb, LAINVM_TRAP_CAPABILITY, code, inst);
-    ref.cap = grant;
-    ref.offset = 0;
-    lainvm_result_write(tcb, inst, 0, value_ref(ref));
+  /* 授权跟着水位走：先把活窗口覆盖到新水位，再交地址。窗口同步不了就拒，
+   * 并且把水位回退成失败前的样子（失败不改变状态）。 */
+  if (stack_window_sync(tcb) != 0) {
+    tcb->stack_used = prev_used;
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1036, inst);
   }
+  /* 交出去的是**裸地址**：单字、无类型、没有对象身份与代数。 */
+  lainvm_result_write(tcb, inst, 0,
+                      value_addr(tcb->stack_base + (uintptr_t)used));
   return LAINVM_SLICE_RUNNABLE;
 }
 
@@ -708,23 +613,9 @@ static LainVmSliceResult invoke_host(LainVmTcb *tcb, const L1Inst *inst,
   fn = lainvm_cap_fn(entry);
   if (!fn) return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1112, inst);
 
-  for (i = 0; i < arg_count; i++) {
-    if (args[i].kind == L1_VALUE_REF) {
-      /* 宿主只拿裸地址。引用在边界上先解析（要求读权限），解析不了就拒——
-       * 不是把句柄当指针递出去。 */
-      int32_t code = 0;
-      uintptr_t base = 0;
-      int rc = lainvm_memcap_resolve(&tcb->memcap, tcb->vspace, as_ref(&args[i]),
-                                     LAINVM_MEM_READ, 0, value_owner(tcb), &base,
-                                     &code);
-      if (rc != 0) return trap_now(tcb, LAINVM_TRAP_CAPABILITY, code, inst);
-      raw[i] = (uint64_t)base;
-    } else {
-      raw[i] = args[i].kind == L1_VALUE_ADDR
-                   ? (uint64_t)(uintptr_t)args[i].as.addr
-                   : args[i].as.bits;
-    }
-  }
+  for (i = 0; i < arg_count; i++)
+    raw[i] = args[i].kind == L1_VALUE_ADDR ? (uint64_t)(uintptr_t)args[i].as.addr
+                                           : args[i].as.bits;
 
   status = fn(raw, arg_count, result_out ? &result : NULL);
   if (status != 0)
@@ -873,15 +764,9 @@ static LainVmSliceResult op_switch(LainVmTcb *tcb, const L1Inst *inst) {
   LainVmImageInstMeta meta =
       lainvm_image_inst_meta(tcb->image, frame->region, frame->position);
   L1Value selector = lainvm_operand_read(tcb, inst, 0);
-  uint64_t raw;
-  if (selector.kind == L1_VALUE_REF)
-    /* 受检引用当选择子：用身份位（代数 | 槽号），与 `#ptr2int` 一致。 */
-    raw = ((uint64_t)selector.as.ref.generation << 32) |
-          (uint64_t)selector.as.ref.slot;
-  else
-    raw = selector.kind == L1_VALUE_ADDR
-              ? (uint64_t)(uintptr_t)selector.as.addr
-              : selector.as.bits;
+  uint64_t raw = selector.kind == L1_VALUE_ADDR
+                     ? (uint64_t)(uintptr_t)selector.as.addr
+                     : selector.as.bits;
   uint32_t width = selector.bit_width ? selector.bit_width : 64u;
   uint64_t mask;
   uint32_t target = meta.default_region;
@@ -983,6 +868,8 @@ static LainVmSliceResult op_break(LainVmTcb *tcb, const L1Inst *inst) {
     tcb->slots[parent->slot_base + slot] = values[i];
   }
   tcb->stack_used = loop->stack_mark;
+  if (stack_window_sync(tcb) != 0)
+    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
   tcb->frame_count = (uint32_t)index;
   parent->position++;
   return LAINVM_SLICE_RUNNABLE;
@@ -1009,6 +896,8 @@ static LainVmSliceResult op_continue(LainVmTcb *tcb, const L1Inst *inst) {
     tcb->slots[loop->slot_base + i] = values[i];
   tcb->frame_count = (uint32_t)index + 1;
   tcb->stack_used = loop->stack_mark;
+  if (stack_window_sync(tcb) != 0)
+    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
   loop->position = 0;
   return LAINVM_SLICE_RUNNABLE;
 }
@@ -1033,8 +922,6 @@ static LainVmSliceResult op_return(LainVmTcb *tcb, const L1Inst *inst) {
   /* 弹到最近的调用帧（区域帧都夹在调用帧之上）。 */
   while (tcb->frame_count > 0 && !top(tcb)->is_call_frame) tcb->frame_count--;
   if (tcb->frame_count == 0) {
-    lainvm_memcap_end_owner(&tcb->memcap, tcb->activation, NULL, NULL);
-    tcb->activation = 0;
     tcb->has_result = false;
     tcb->state = LAINVM_DEAD;
     tcb->slice_result = LAINVM_SLICE_DONE;
@@ -1042,13 +929,9 @@ static LainVmSliceResult op_return(LainVmTcb *tcb, const L1Inst *inst) {
   }
   callee = top(tcb);
   tcb->stack_used = callee->stack_mark;
+  if (stack_window_sync(tcb) != 0)
+    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
   tcb->frame_count--;
-  /* 被调用者这次 activation 结束：撤销它的能力、释放它的对象。上面已经把栈水位
-   * 回退成调用者进入时的值，所以对象释放与水位回退是同一个时点。
-   * 返回给调用者的值已经取出来了；若那是个引用，它指向的存储此刻已经归还，
-   * 调用者再用会被判"对象已不存活"——正是要的行为。 */
-  lainvm_memcap_end_owner(&tcb->memcap, callee->activation, NULL, NULL);
-  tcb->activation = tcb->frame_count > 0 ? top(tcb)->activation : 0;
   if (tcb->frame_count == 0) {
     tcb->result = value;
     tcb->has_result = inst->operand_count > 0;
