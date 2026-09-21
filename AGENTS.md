@@ -16,14 +16,14 @@ Lain 是一个原生语言实验（版本见 `VERSION`，当前 `0.1.0-alpha.1`�
 | `bootstrap/` | 16 | **手写 LAINIR 的初代 Meta**（`.l1`）+ 临时标准库。**当前主战场** |
 | `archive/` | 136 | **归档**。只读参考，不进构建闭包 |
 | `docs/` | 11 | 设计文档 + 当前计划 |
-| `scripts/` | 1 | 只有 `build.py` |
+| `scripts/` | 2 | `build.py`（构建 + 冒烟）+ `check_meta.py`（验收） |
 | `build/` | — | 所有生成物（**永不提交**，见 `.gitignore`） |
 
 根文件：`VERSION`、`README.md`、`LICENSE`、`.gitignore`、`.gitattributes`、`AGENTS.md`、`build.py`。
 
 `archive/` **是归档**：只读参考，不进构建闭包，不要在上面加东西。
 
-**不存在的东西**（照着旧文档干活会撞墙）：`src/`、`std/`、`seed/build.zig`、`docs/roadmaps/`、`docs/history/`，以及任何 `check_*.py` / `build_seed.py` / `run_lainir_self_host.py` / `build_lain_compiler.py`。旧的校验脚本**不在版本库里**，历史被重写过，也恢复不出来。
+**不存在的东西**（照着旧文档干活会撞墙）：`src/`、`std/`、`seed/build.zig`、`docs/roadmaps/`、`docs/history/`，以及旧的校验脚本（`build_seed.py`、`check_lainc_*`、`check_lainir_*`、`run_lainir_self_host.py`、`build_lain_compiler.py`……）。那批脚本**不在版本库里**，历史被重写过也恢复不出来；现在 `scripts/` 里只有 `build.py` 和 2026-09-21 新加的 `check_meta.py`。
 
 ---
 
@@ -73,7 +73,11 @@ python build/oldwt/scripts/build.py
 git worktree remove --force build/oldwt
 ```
 
-**没有提交在版本库里的回归脚本**，要用就现写（`build/` 不进版本库）。注意这条验收的边界：「全语料一致」只证明**没破坏已有行为**，**不证明新行为对**——60 个用例里没有一条覆盖到的路径，静默 bug 就是这么活下来的。新能力必须另配正例。
+这条验收现在有入口了：**`python scripts/check_meta.py`** —— 用例表（真实期望值 + 拒绝码 +
+产物文本断言）＋ `snapshot OUT` / `compare A B`（全语料 stdout + 退出码快照与逐条对比）。
+但边界还在：「全语料一致」只证明**没破坏已有行为**，**不证明新行为对**——原来那 60 条里没有一条
+覆盖到的路径，静默 bug 就是这么活下来的（新加的四条语料就是补这个洞）。**新能力必须进用例表**，
+`PENDING` 那一节是给还没做的东西留的位置（只报现状，不算失败）。
 
 **CI 不可信**：`.github/workflows/lain-bootstrap.yml` 仍指向 5 个已删除的脚本（`build_seed.py`、`check_lainvm_boundary.py`、`check_eval_tcb.py`、`check_lainir_physical_safety.py`、`run_lainir_self_host.py`），**当前不反映这棵树**（`origin/master` 上就已经没有 `scripts/` 目录）。别把它当门禁。
 

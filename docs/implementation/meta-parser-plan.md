@@ -571,6 +571,12 @@ prelude 的节点偏移最大到 944 而那块缓冲只有 26 字节，印出来
 PATH）。树本身是对的，是 `tree` 打印读错了缓冲。**节点步长（`META_NODE_BYTES`，现 48）
 改的时候它要跟着改**，否则 `tree` 会安静地错位。
 
+**这套现在有脚本了**：`python scripts/check_meta.py` —— 用例表（真实期望值 + 拒绝码 + 产物
+文本断言）＋ `snapshot OUT` / `compare A B`（全语料 stdout + 退出码的快照与逐条对比）。
+下面那段 worktree 手工法是 `snapshot`/`compare` 那半的来由。2026-09-21 补的四条语料是
+`seed/tests/meta_{body_chain,nested_args,cmp_param,let_call}.lain` —— 各自钉住一个刚修掉或
+刚做出来的行为。
+
 **"行为没变" 要比全部现有用例，不是挑几条。** 改动前后各编一份二进制逐条对比产出的
 LAINIR 和退出码 —— 这比"某几条算出来的值相等"强，因为没跑起来的用例也一起比了：
 
@@ -704,7 +710,9 @@ add3(g(1), g(2), g(3))                     ->  9 ✓（本条 + §7 第 1 条一
 ```
 
 回归：60 个用例 **60/60 逐字节一致**。这同时说明**没有一个现有用例碰过函数体的算子链**
-—— 那个静默错值就是这么活下来的，所以 §7 第 3 条之后要补几条 fixtures。
+—— 那个静默错值就是这么活下来的。**已补四条语料**把它钉住：
+`seed/tests/meta_{body_chain,nested_args,cmp_param,let_call}.lain`，加进
+`python scripts/check_meta.py` 的用例表（见 §6）。
 
 ### 3. 接上"字面量默认 i32"（§4 第 3 条已定）
 
