@@ -184,14 +184,24 @@ static int32_t stack_window_sync(LainVmTcb *tcb) {
   return 0;
 }
 
-/* 离开当前区域：值写进创造这一帧那条指令的结果槽，回退栈水位，
- * 推进父位置（父位置一直停在创造这一帧的那条指令上）。 */
+/* 离开当前区域：值写进创造这一帧那条指令的结果槽，推进父位置
+ * （父位置一直停在创造这一帧的那条指令上）。
+ *
+ * **`#if` / `#switch` / `#loop` 的区域退出不结束 alloca 的生命周期**：
+ * `#alloca` 属于当前 **procedure activation**，只有过程返回、Trap、取消或 TCB 销毁
+ * 才结束它。所以这里**不**回退水位、**不**缩窗口 —— 曾经在这里回退，导致
+ * 「`if` 里 alloca、出了 `if` 就访问不了」（实测拒 1004）。
+ * 唯一要清窗口的地方是**根区域结束**（整个 activation 结束）。 */
 static LainVmSliceResult leave_region(LainVmTcb *tcb, const L1Value *values,
                                       uint32_t count) {
   LainVmFrame *frame = top(tcb);
   LainVmFrame *parent;
   uint32_t i;
   if (tcb->frame_count < 2) {
+    /* 根区域结束 = 这次 activation 结束：水位归零、窗口清空。 */
+    tcb->stack_used = 0;
+    if (stack_window_sync(tcb) != 0)
+      return trap_now(tcb, LAINVM_TRAP_STATE, 1036, NULL);
     tcb->has_result = false;
     tcb->state = LAINVM_DEAD;
     tcb->slice_result = LAINVM_SLICE_DONE;
@@ -205,10 +215,6 @@ static LainVmSliceResult leave_region(LainVmTcb *tcb, const L1Value *values,
       return trap_now(tcb, LAINVM_TRAP_STATE, 1013, NULL);
     tcb->slots[parent->slot_base + slot] = values[i];
   }
-  tcb->stack_used = frame->stack_mark;
-  /* 水位回退 = 这一段分配死了：活窗口跟着缩，旧地址从此没有授权。 */
-  if (stack_window_sync(tcb) != 0)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, NULL);
   tcb->frame_count--;
   parent->position++;
   return LAINVM_SLICE_RUNNABLE;
@@ -849,9 +855,8 @@ static LainVmSliceResult op_break(LainVmTcb *tcb, const L1Inst *inst) {
       return trap_now(tcb, LAINVM_TRAP_STATE, 1029, inst);
     tcb->slots[parent->slot_base + slot] = values[i];
   }
-  tcb->stack_used = loop->stack_mark;
-  if (stack_window_sync(tcb) != 0)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
+  /* `#break` 离开的是**区域**，不是过程：不回收这次 activation 的 alloca。
+   * （回收在这里会让循环体里分配、循环外使用的地址突然失效 —— 实测过。） */
   tcb->frame_count = (uint32_t)index;
   parent->position++;
   return LAINVM_SLICE_RUNNABLE;
@@ -877,9 +882,8 @@ static LainVmSliceResult op_continue(LainVmTcb *tcb, const L1Inst *inst) {
   for (i = 0; i < inst->operand_count; i++)
     tcb->slots[loop->slot_base + i] = values[i];
   tcb->frame_count = (uint32_t)index + 1;
-  tcb->stack_used = loop->stack_mark;
-  if (stack_window_sync(tcb) != 0)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
+  /* `#continue` 也不回收：下一轮如果又 `#alloca`，水位从当前值继续往上走 ——
+   * 循环里反复分配就是**按迭代线性增长**，撞到容量才拒 1007（不每轮回收）。 */
   loop->position = 0;
   return LAINVM_SLICE_RUNNABLE;
 }

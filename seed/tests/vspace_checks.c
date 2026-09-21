@@ -1173,6 +1173,166 @@ static int case_external_cross_space_reject(void) {
   return 0;
 }
 
+/* 先 `#alloca`，再踩一个没有授权的地址（1004）：Trap 时**窗口是活的**。
+ * 契约：Trap 清掉全部活窗口，但区段与借用都还在（区段归供给方）。 */
+static const char *k_prog_alloc_then_trap =
+    "#proc alloc_then_trap() -> #bits<64> {\n"
+    "  %a = #alloca[#bits<8>](4)\n"
+    "  #store[#bits<8>](7, %a)\n"
+    "  %p = #int2ptr[#addr](4096)\n"
+    "  %b = #load[#bits<8>](%p)\n"
+    "  %w = #zext[#bits<64>](%b)\n"
+    "  #return %w\n"
+    "}\n";
+
+/* 5) Trap 之后活窗口必须归零，而区段与借用还在（区段归供给方）。 */
+static int case_activation_trap_clears_window(void) {
+  Rig rig;
+  const LainVmRegion *lease;
+
+  if (rig_load(&rig, k_prog_alloc_then_trap, 4096) != 0) return 0;
+  (void)rig_run(&rig, "alloc_then_trap");
+  if (g_obs.kind != 1 || g_obs.trap_code != 1004) {
+    rig_free(&rig);
+    obs_facts("期望先在域外地址上被拒 1004，实际 kind=%d code=%d", g_obs.kind,
+              (int)g_obs.trap_code);
+    return 0;
+  }
+  lease = lainvm_space_slot(&rig.space, rig.lease.region);
+  if (!lease) {
+    rig_free(&rig);
+    obs_facts("Trap 之后租约区段不见了（区段归供给方，不该消失）");
+    return 0;
+  }
+  if (lease->accessible != 0) {
+    rig_free(&rig);
+    obs_facts("Trap 之后 accessible=%llu（期望 0）",
+              (unsigned long long)lease->accessible);
+    return 0;
+  }
+  if (lease->borrow_count != 1) {
+    rig_free(&rig);
+    obs_facts("Trap 之后 borrow_count=%u（期望 1：借用还没结束）",
+              (unsigned)lease->borrow_count);
+    return 0;
+  }
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 循环里反复 `#alloca`：按 **activation 生命周期线性增长**，不每轮回收。
+ *
+ * 具体增长量（实测）：`#alloca[#bits<64>](1)` 每次要 8 字节数据，而水位按 **16 字节
+ * 对齐**推进，所以每轮实际推进 16 字节：第 n 轮结束时水位 = 16n − 8。
+ * 容量 4096 时：256 轮之后水位 4088，第 257 轮拒 1007。
+ * 配额行为：栈在**供给方 alloc 的那一刻**按整块容量扣一次（见 quota/lease 组），
+ * 与这里循环了多少轮无关 —— 水位涨落不改账。 */
+static const char *k_prog_loop_growth =
+    "#proc loop_growth(%n: #bits<64>) -> #bits<64> {\n"
+    "  %r = #loop it(%i: #bits<64> = 0, %acc: #bits<64> = 0) -> (#bits<64>) {\n"
+    "    %done = #uge[#bits<64>](%i, %n)\n"
+    "    #if %done {\n"
+    "      #break it(%acc)\n"
+    "    }\n"
+    "    %s = #alloca[#bits<64>](1)\n"
+    "    #store[#bits<64>](%i, %s)\n"
+    "    %i2 = #add[#bits<64>](%i, 1)\n"
+    "    #continue it(%i2, %i2)\n"
+    "  }\n"
+    "  #return %r\n"
+    "}\n";
+
+/* 250 轮：水位 16×250 − 8 = 3992 <= 4096，跑得完，返回 250。 */
+static int case_activation_loop_growth_ok(void) {
+  Rig rig;
+
+  if (rig_load(&rig, k_prog_loop_growth, 4096) != 0) return 0;
+  {
+    L1Value arg;
+    memset(&arg, 0, sizeof(arg));
+    arg.kind = L1_VALUE_BITS;
+    arg.bit_width = 64;
+    arg.as.bits = 250;
+    if (lainvm_tcb_start(rig.tcb, "loop_growth", &arg, 1, NULL) != 0) {
+      rig_free(&rig);
+      obs_facts("start 失败");
+      return 0;
+    }
+  }
+  {
+    LainVmSliceResult slice;
+    do {
+      slice = lainvm_engine_run(rig.tcb, 1000000);
+    } while (slice == LAINVM_SLICE_RUNNABLE);
+    if (slice != LAINVM_SLICE_DONE || !rig.tcb->has_result) {
+      rig_free(&rig);
+      obs_facts("500 轮就失败了：slice=%d trap=%d", (int)slice,
+                (int)rig.tcb->trap.status);
+      return 0;
+    }
+    obs_value(rig.tcb->result.as.bits);
+  }
+  rig_free(&rig);
+  return 0;
+}
+
+/* 1000 轮：撞容量，拒 1007。失败那一刻的水位应当正好是 4088
+ * （256 轮 × 16 字节 − 8），活窗口归零 —— 这就是"按迭代线性增长、不每轮回收"
+ * 的可测证据。 */
+static int case_activation_loop_growth_trap(void) {
+  Rig rig;
+  const LainVmRegion *lease;
+
+  if (rig_load(&rig, k_prog_loop_growth, 4096) != 0) return 0;
+  {
+    L1Value arg;
+    memset(&arg, 0, sizeof(arg));
+    arg.kind = L1_VALUE_BITS;
+    arg.bit_width = 64;
+    arg.as.bits = 1000;
+    if (lainvm_tcb_start(rig.tcb, "loop_growth", &arg, 1, NULL) != 0) {
+      rig_free(&rig);
+      obs_facts("start 失败");
+      return 0;
+    }
+  }
+  {
+    LainVmSliceResult slice;
+    do {
+      slice = lainvm_engine_run(rig.tcb, 1000000);
+    } while (slice == LAINVM_SLICE_RUNNABLE);
+    if (slice != LAINVM_SLICE_TRAPPED) {
+      rig_free(&rig);
+      obs_facts("期望撞容量被拒，实际 slice=%d", (int)slice);
+      return 0;
+    }
+    if (rig.tcb->trap.status != 1007) {
+      rig_free(&rig);
+      obs_facts("期望在容量处拒 1007，实际码 %d", (int)rig.tcb->trap.status);
+      return 0;
+    }
+  }
+  if (rig.tcb->stack_used != 4088) {
+    rig_free(&rig);
+    obs_facts("失败那一刻水位是 %llu（期望 4088 = 256 轮 × 16 − 8）",
+              (unsigned long long)rig.tcb->stack_used);
+    return 0;
+  }
+  lease = lainvm_space_slot(&rig.space, rig.lease.region);
+  if (!lease || lease->accessible != 0) {
+    rig_free(&rig);
+    obs_facts("Trap 之后窗口没归零：accessible=%llu",
+              lease ? (unsigned long long)lease->accessible : 0);
+    return 0;
+  }
+  rig_free(&rig);
+  obs_value(1);
+  return 0;
+}
+
+/* 6) 同址重新授权后旧裸地址与新地址不可区分：`lifetime_reuse`（见 lifetime 组）。 */
+
 /* --- region 组 -------------------------------------------------------------- */
 
 /* 合法范围里的读：返回那个字节（42）。 */
@@ -3474,16 +3634,8 @@ static int case_cap_quota_two_actions(void) {
  * 换到的那个空间一个字节都不能碰。（只测「切出再切回」是打不到这里的。）
  *
  * 所以这里先造出一个**Trap 时仍然活着**的窗口：`#alloca` 之后去踩一个没有授权的
- * 地址（1004）。Trap 不缩小水位，窗口就留在租约空间里 —— 然后换空间、直接销毁。 */
-static const char *k_prog_alloc_then_trap =
-    "#proc alloc_then_trap() -> #bits<64> {\n"
-    "  %a = #alloca[#bits<8>](4)\n"
-    "  #store[#bits<8>](7, %a)\n"
-    "  %p = #int2ptr[#addr](4096)\n"
-    "  %b = #load[#bits<8>](%p)\n"
-    "  %w = #zext[#bits<64>](%b)\n"
-    "  #return %w\n"
-    "}\n";
+ * 地址（1004）。Trap 会把窗口收回 0，但区段与借用都还在 —— 然后换空间、直接销毁。
+ * （程序 `k_prog_alloc_then_trap` 与 `activation` 组共用，定义在那一节。） */
 
 static int case_cap_tcb_destroy_after_switch(void) {
   Rig rig;
@@ -3758,6 +3910,12 @@ static const Case k_cases[] = {
      case_activation_callee_return},
     {"activation_root_done", "activation", EXP_TRAP, 0, 1004,
      case_activation_root_done},
+    {"activation_trap_clears_window", "activation", EXP_VALUE, 1, 0,
+     case_activation_trap_clears_window},
+    {"activation_loop_growth_ok", "activation", EXP_VALUE, 250, 0,
+     case_activation_loop_growth_ok},
+    {"activation_loop_growth_trap", "activation", EXP_VALUE, 1, 0,
+     case_activation_loop_growth_trap},
     {"lifetime_escape", "lifetime", EXP_TRAP, 0, 1004, case_lifetime_escape},
     {"lifetime_reuse", "lifetime", EXP_VALUE, 9, 0, case_lifetime_reuse},
     {"space_switch", "lifetime", EXP_VALUE, 1, 0, case_space_switch},
