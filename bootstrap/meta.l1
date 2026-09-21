@@ -705,7 +705,7 @@
   // 「无」= 结果就是源码里那段，此时 +176/+184 是它的范围）。
   %first_node = #call meta_node_at(%host, %base, %first_lo)
   %est = #call meta_emit_expr(%host, %base, %len, %kind, %width, %t_lo, %t_hi,
-                              %first_node, 1)
+                              %first_node, 1, 0, 0, 0)
   %ebad = #ne[#bits<32>](%est, 0)
   #if %ebad {
     #return %est
@@ -758,7 +758,7 @@
   %st = #if %is_group -> (#bits<32>) {
     %kid = #call meta_node_child(%host, %node)
     %st1 = #call meta_emit_expr(%host, %base, %len, %kind, %width, %t_lo,
-                                %t_hi, %kid, 0)
+                                %t_hi, %kid, 0, 0, 0, 0)
     #yield %st1
   } else {
     %st2 = #if %is_call -> (#bits<32>) {
@@ -857,13 +857,22 @@
 // 指令之后就是临时值。
 //
 // 物理算子名由 `meta_op_resolve` 从**类型的 op 表**里查，这里没有一行写着「如果是 i32」。
+// `%close`（闭合模式）决定这一条表达式的收尾由谁写：
+//   0 = 只把结果写进 sheet（`+168`/`+176`/`+184`），调用方自己收 —— 顶层值那条路
+//   1 = 绑定：最后一条指令**直接写成 `  %NAME = …`**（`%n_lo/%n_hi` 是名字的范围）；
+//       没有算子时补一条 `  %NAME = #add[repr](<结果>, 0)`
+//   2 = 返回：末尾写 `  #return <结果>`
+//
+// 1 和 2 是给函数体那条路用的：以前 `meta_lower_stmt` 另有一份只发**一个**算子的
+// 老路径，`return a + b + c;` 会静默丢掉 `+ c`（实测 `%r2 = #add(%a, %b)`）。
 #proc meta_emit_expr(%host: #addr, %base: #addr, %len: #bits<64>,
                      %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
                      %t_hi: #bits<64>, %first: #bits<64>,
-                     %need_semi: #bits<1>) -> #bits<32> {
+                     %need_semi: #bits<1>, %close: #bits<64>,
+                     %n_lo: #bits<64>, %n_hi: #bits<64>) -> #bits<32> {
   %st = #loop e(%c: #bits<64> = %first, %have: #bits<1> = 0,
                 %acc: #bits<64> = 0xFFFFFFFFFFFFFFFF, %alo: #bits<64> = 0,
-                %ahi: #bits<64> = 0) -> (#bits<32>) {
+                %ahi: #bits<64> = 0, %bound: #bits<1> = 0) -> (#bits<32>) {
     %phase1 = #eq[#bits<1>](%have, 0)
     #if %phase1 {
       // 阶段一：%c 是一个操作数，它成为累积值
@@ -888,7 +897,7 @@
       %alo1 = #call meta_cell_get(#lea(%sc, 176, 1, 0))
       %ahi1 = #call meta_cell_get(#lea(%sc, 184, 1, 0))
       %nx = #call meta_after_operand(%host, %c)
-      #continue e(%nx, 1, %ref, %alo1, %ahi1)
+      #continue e(%nx, 1, %ref, %alo1, %ahi1, 0)
     }
     // 阶段二：%c 是算子、或者是表达式的终点
     %bat = #call meta_node_start(%host, %c)
@@ -911,6 +920,14 @@
       %s3 = #call meta_cell_put(#lea(%sc2, 184, 1, 0), %ahi)
       // 终点节点也带出去：调用方（实参那个循环）要靠它找下一个实参从哪开始。
       %s4 = #call meta_cell_put(#lea(%sc2, 192, 1, 0), %c)
+      // 闭合模式在这一条语句的末尾收尾（模式 0 什么都不做，调用方自己收）。
+      %cl = #call meta_emit_close(%host, %base, %len, %close, %bound, %acc,
+                                  %alo, %ahi, %kind, %width, %t_lo, %t_hi,
+                                  %n_lo, %n_hi)
+      %clbad = #ne[#bits<32>](%cl, 0)
+      #if %clbad {
+        #break e(%cl)
+      }
       #break e(0)
     }
     %isop = #call bs_is_operator(%bb)
@@ -1019,11 +1036,33 @@
       %f3 = #call lain_meta_fail(%host, 6)
       #break e(6)
     }
-    // `  %r<n> = #<物理>[<repr>](<左>, <右>)\n`
-    %tn = #call meta_next_temp(%host)
-    %ind = #data_addr meta_st_ind
-    %x1 = #call lain_meta_emit_write(%host, %ind, 2)
-    %x2 = #call meta_emit_temp_name(%host, %tn)
+    // 这条是不是整条链的最后一条？看右操作数后面那个节点还是不是算子。
+    // **必须在 `meta_op_resolve` 之后做**：这几个都是只读树的叶子调用，不碰 `+24`/`+32`。
+    %nx2 = #call meta_after_operand(%host, %rn)
+    %a_at = #call meta_node_start(%host, %nx2)
+    %a_b = #call bs_byte_at(%base, %a_at, %len)
+    %a_op = #call bs_is_operator(%a_b)
+    %last = #eq[#bits<1>](%a_op, 0)
+    %is_bind = #eq[#bits<64>](%close, 1)
+    %named = #and[#bits<1>](%is_bind, %last)
+    // `  %r<n> = ` 还是 `  %NAME = `。绑定模式的最后一条**直接写名字** —— 这样
+    // `let y: i32 = 1 + 2;` 出来的还是一条指令（与老路径逐字节一样），而不是
+    // "先 `%r1 = #add(1, 2)` 再复制进 `%y`"。
+    %tn = #if %named -> (#bits<64>) {
+      %pct = #data_addr meta_st_pct
+      %y1 = #call lain_meta_emit_write(%host, %pct, 3)
+      %n_at = #lea(%base, %n_lo, 1, 0)
+      %n_len = #sub[#bits<64>](%n_hi, %n_lo)
+      %y2 = #call lain_meta_emit_write(%host, %n_at, %n_len)
+      // 名字就是这条指令的结果，没有临时值 —— 也**不占**临时值编号
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %ind = #data_addr meta_st_ind
+      %y3 = #call lain_meta_emit_write(%host, %ind, 2)
+      %n2 = #call meta_next_temp(%host)
+      %y4 = #call meta_emit_temp_name(%host, %n2)
+      #yield %n2
+    }
     %eqop = #data_addr meta_st_eqop
     %x3 = #call lain_meta_emit_write(%host, %eqop, 3)
     %x4 = #call meta_emit_op_mid(%host, %kind2, %width2)
@@ -1035,8 +1074,13 @@
     %x8 = #call lain_meta_emit_write(%host, %rp, 1)
     %nl = #data_addr meta_st_nl
     %x9 = #call lain_meta_emit_write(%host, %nl, 1)
-    %nx2 = #call meta_after_operand(%host, %rn)
-    #continue e(%nx2, 1, %tn, 0, 0)
+    // 绑定模式且这一条已经是最后一条：语句的收尾就是它，循环出去时别再补一条
+    %bound2 = #if %named -> (#bits<1>) {
+      #yield 1
+    } else {
+      #yield 0
+    }
+    #continue e(%nx2, 1, %tn, 0, 0, %bound2)
   }
   #return %st
 }
