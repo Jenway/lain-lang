@@ -159,6 +159,52 @@ static LainVmSliceResult push_region(LainVmTcb *tcb, uint32_t region_id,
   return LAINVM_SLICE_RUNNABLE;
 }
 
+/* 让栈的**活窗口**覆盖到当前水位：被 VSpace 授权的恰好是
+ * [stack_base, stack_base + stack_used)。
+ *
+ * 为什么不是「整块租约登记一次」：整块登记之后，返回后的旧地址照样落在授权范围内，
+ * 那就只能靠地址身份才拦得住 —— 而 `#addr` 是无类型裸地址，**没有身份**。窗口跟着
+ * 水位走，旧地址自然落到「没有授权」（load 1004 / store 1005）；同一数值地址后来被
+ * 重新授权时，旧裸地址与新裸地址不可区分 —— 这正是裸地址的语义，域外引用归 Meta 的
+ * `ref(T)` 生命周期规则挡。
+ *
+ * 区段表不许重叠，所以只能「先撤旧的、再加新的」。新窗口加不上（表满 / 上界不可
+ * 表示）就把旧窗口装回去并返回 1036：宁可拒掉这次分配，也不留下一个授权范围与
+ * 水位不一致的窗口。返回 0 = 已对齐。 */
+static int32_t stack_window_sync(LainVmTcb *tcb) {
+  LainVmSpace *space = tcb->stack_space;
+  uint64_t used = tcb->stack_used;
+  LainVmRegionHandle old = tcb->stack_window;
+  uint64_t old_size = tcb->stack_window_size;
+  bool had = !lainvm_space_handle_none(old);
+  LainVmRegionHandle fresh;
+
+  if (space == NULL) return 0;
+  if (used == old_size && (used != 0) == had) return 0; /* 已经对齐 */
+  if (had) {
+    lainvm_space_remove((LainVmSpace *)(uintptr_t)old.space, old);
+    tcb->stack_window = lainvm_space_no_handle();
+    tcb->stack_window_size = 0;
+  }
+  if (used == 0) return 0; /* 水位归零：什么都不授权 */
+  fresh = lainvm_space_add(space, tcb->stack_base, used,
+                           LAINVM_MEM_READ | LAINVM_MEM_WRITE, tcb->id);
+  if (!lainvm_space_handle_none(fresh)) {
+    tcb->stack_window = fresh;
+    tcb->stack_window_size = used;
+    return 0;
+  }
+  if (!had) return 1036;
+  /* 加不上：把旧窗口装回去，尽量保持「授权范围 = 上次成功时的水位」。 */
+  fresh = lainvm_space_add(space, tcb->stack_base, old_size,
+                           LAINVM_MEM_READ | LAINVM_MEM_WRITE, tcb->id);
+  if (!lainvm_space_handle_none(fresh)) {
+    tcb->stack_window = fresh;
+    tcb->stack_window_size = old_size;
+  }
+  return 1036;
+}
+
 /* 离开当前区域：值写进创造这一帧那条指令的结果槽，回退栈水位，
  * 推进父位置（父位置一直停在创造这一帧的那条指令上）。 */
 static LainVmSliceResult leave_region(LainVmTcb *tcb, const L1Value *values,
@@ -181,6 +227,9 @@ static LainVmSliceResult leave_region(LainVmTcb *tcb, const L1Value *values,
     tcb->slots[parent->slot_base + slot] = values[i];
   }
   tcb->stack_used = frame->stack_mark;
+  /* 水位回退 = 这一段分配死了：活窗口跟着缩，旧地址从此没有授权。 */
+  if (stack_window_sync(tcb) != 0)
+    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, NULL);
   tcb->frame_count--;
   parent->position++;
   return LAINVM_SLICE_RUNNABLE;
@@ -428,13 +477,17 @@ static LainVmSliceResult op_float_conv(LainVmTcb *tcb, const L1Inst *inst) {
 
 /* --- 地址与内存 ----------------------------------------------------------- */
 
+/* `#lea` 是**地址位模式算术**（D3 已定：构造不查、访问查）。按地址宽度取模，允许
+ * 构造区段外地址与尾后地址，也不授予任何权限。全部用无符号 64 位算：回绕是**定义
+ * 好的**结果，而 C 语言里越界指针算术是 UB —— 所以这里绝不走指针类型。越界与权限
+ * 一律留到访问期（load / store / call_indirect / 宿主内存访问）判。 */
 static LainVmSliceResult op_lea(LainVmTcb *tcb, const L1Inst *inst) {
-  uintptr_t base = as_addr(lainvm_operand_read(tcb, inst, 0));
-  uintptr_t idx = (uintptr_t)lainvm_operand_read(tcb, inst, 1).as.bits;
+  uint64_t base = (uint64_t)as_addr(lainvm_operand_read(tcb, inst, 0));
+  uint64_t idx = lainvm_operand_read(tcb, inst, 1).as.bits;
   uint64_t scale = lainvm_operand_read(tcb, inst, 2).as.bits;
   uint64_t offset = lainvm_operand_read(tcb, inst, 3).as.bits;
   lainvm_result_write(tcb, inst, 0,
-                      value_addr(base + idx * (uintptr_t)scale + (uintptr_t)offset));
+                      value_addr((uintptr_t)(base + idx * scale + offset)));
   return LAINVM_SLICE_RUNNABLE;
 }
 
@@ -488,12 +541,13 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
   uint64_t total;
   uint64_t align = 16;
   uint64_t used;
-  const LainVmRegion *stack;
+  uint64_t prev_used = tcb->stack_used;
 
-  if (lainvm_space_handle_none(tcb->stack))
+  /* 没有栈，或者租约不在当前空间里（换过 VSpace）：稳定拒 1006。 */
+  if (tcb->stack_size == 0 || tcb->stack_base == 0)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
-  stack = lainvm_space_slot(tcb->vspace, tcb->stack);
-  if (!stack) return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
+  if (tcb->stack_space != tcb->vspace)
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
   /* 尺寸算术**先查回绕**，再判容量。`8 × 2^61` 曾经回绕成 0 字节，于是
    * 得到一个"合法"的分配（实测 R08）。失败不改变水位。 */
   if (element != 0 && count > 0xFFFFFFFFFFFFFFFFull / element)
@@ -504,11 +558,18 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
   used = (tcb->stack_used + (align - 1)) & ~(align - 1);
   if (total > 0xFFFFFFFFFFFFFFFFull - used)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
-  if (used + total > stack->size)
+  if (used + total > tcb->stack_size)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1007, inst);
   tcb->stack_used = used + total;
+  /* 授权跟着水位走：先把活窗口覆盖到新水位，再交地址。窗口同步不了就拒，
+   * 并且把水位回退成失败前的样子（失败不改变状态）。 */
+  if (stack_window_sync(tcb) != 0) {
+    tcb->stack_used = prev_used;
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1036, inst);
+  }
+  /* 交出去的是**裸地址**：单字、无类型、没有对象身份与代数。 */
   lainvm_result_write(tcb, inst, 0,
-                      value_addr(stack->base + (uintptr_t)used));
+                      value_addr(tcb->stack_base + (uintptr_t)used));
   return LAINVM_SLICE_RUNNABLE;
 }
 
@@ -807,6 +868,8 @@ static LainVmSliceResult op_break(LainVmTcb *tcb, const L1Inst *inst) {
     tcb->slots[parent->slot_base + slot] = values[i];
   }
   tcb->stack_used = loop->stack_mark;
+  if (stack_window_sync(tcb) != 0)
+    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
   tcb->frame_count = (uint32_t)index;
   parent->position++;
   return LAINVM_SLICE_RUNNABLE;
@@ -833,6 +896,8 @@ static LainVmSliceResult op_continue(LainVmTcb *tcb, const L1Inst *inst) {
     tcb->slots[loop->slot_base + i] = values[i];
   tcb->frame_count = (uint32_t)index + 1;
   tcb->stack_used = loop->stack_mark;
+  if (stack_window_sync(tcb) != 0)
+    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
   loop->position = 0;
   return LAINVM_SLICE_RUNNABLE;
 }
@@ -864,6 +929,8 @@ static LainVmSliceResult op_return(LainVmTcb *tcb, const L1Inst *inst) {
   }
   callee = top(tcb);
   tcb->stack_used = callee->stack_mark;
+  if (stack_window_sync(tcb) != 0)
+    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
   tcb->frame_count--;
   if (tcb->frame_count == 0) {
     tcb->result = value;

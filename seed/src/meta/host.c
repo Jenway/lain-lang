@@ -26,6 +26,13 @@ struct LainMetaHost {
   /* Meta 的可写暂存：表格建在这里。驱动负责把这块范围登记进 VSpace。 */
   unsigned char *scratch;
   uint32_t scratch_size;
+  /* 这份宿主服务被授权到哪个地址空间（驱动 attach；NULL = 没授权）。
+   * 能力表里没有 user_data，所以授权随**宿主对象**走，且由驱动显式给。 */
+  LainVmSpace *space;
+  /* 这次执行的分配账户（驱动 attach；NULL = 不限额）。暂存区与输出扩容都要
+   * 先过账户：宿主也是"实际承诺一块底层存储"的一方。 */
+  LainVmQuota *quota;
+  uint64_t charged; /* 已经计入账户的字节数（暂存区 + 输出缓冲容量） */
 };
 
 /* --- 能力名 ---------------------------------------------------------------
@@ -44,21 +51,56 @@ struct LainMetaHost {
 
 #define HOST_OF(args) ((LainMetaHost *)(uintptr_t)(args)[0])
 
+void lainmeta_host_attach_space(LainMetaHost *host, LainVmSpace *space) {
+  if (!host) return;
+  host->space = space;
+}
+
+/* 宿主边界。这份服务能不能读调用方给的 [addr, addr+length)？
+ *
+ * 两件事缺一不可：
+ *   1) **授权**：驱动得先把地址空间 attach 到这份宿主服务上（没 attach = 身份不明）；
+ *   2) **范围**：整段必须落在那个空间授权的区段里。
+ * 之前这里是 fail open —— 按裸地址直接 memcpy，于是"从区段末尾多读一字节"
+ * （R04）和"换一个没授权的宿主对象"（R05）都能过。先检后写：拒的时候输出缓冲
+ * 一个字节都不动。 */
+static bool host_range_readable(const LainMetaHost *host, uintptr_t addr,
+                                uint64_t length) {
+  if (!host->space) return false;
+  if (length == 0) return true; /* 不碰内存 */
+  if (length > (uint64_t)UINTPTR_MAX - (uint64_t)addr) return false;
+  return lainvm_space_check(host->space, addr, length, LAINVM_MEM_READ);
+}
+
 static int reserve_output(LainMetaHost *host, uint32_t extra) {
   uint32_t need = host->out_length + extra + 1u;
   uint32_t next;
+  uint32_t grow;
   char *grown;
   if (need <= host->out_cap) return 0;
   next = host->out_cap ? host->out_cap : 256u;
   while (next < need) next *= 2u;
+  /* 扩容要**先过分配账户**：账户不够就保持原样（旧缓冲、旧容量），
+   * 让调用方看到失败，而不是先要了内存再报错。 */
+  grow = next - host->out_cap;
+  if (lainvm_quota_charge(host->quota, grow) != 0) {
+    host->status = (uint32_t)LAINVM_QUOTA_TRAP;
+    return 1;
+  }
   grown = (char *)realloc(host->out, next);
   if (!grown) {
+    (void)lainvm_quota_release(host->quota, grow); /* 预扣之后失败必须回滚 */
     host->status = LAINMETA_ERR_OOM;
     return 1;
   }
+  host->charged += grow;
   host->out = grown;
   host->out_cap = next;
   return 0;
+}
+
+void lainmeta_host_attach_quota(LainMetaHost *host, LainVmQuota *quota) {
+  if (host) host->quota = quota;
 }
 
 LainMetaHost *lainmeta_host_new(void) {
@@ -94,13 +136,21 @@ static uint32_t decide_scratch_size(const LainMetaHost *host) {
 void *lainmeta_host_scratch(LainMetaHost *host, uint32_t *size_out) {
   if (!host) return NULL;
   if (!host->scratch) {
-    host->scratch_size = decide_scratch_size(host);
-    host->scratch = (unsigned char *)calloc(1, host->scratch_size);
-    if (!host->scratch) {
-      host->scratch_size = 0;
+    uint32_t want = decide_scratch_size(host);
+    /* 暂存区是这次执行**实际承诺**的存储：一样要先过账户。 */
+    if (lainvm_quota_charge(host->quota, want) != 0) {
+      host->status = (uint32_t)LAINVM_QUOTA_TRAP;
       if (size_out) *size_out = 0;
       return NULL;
     }
+    host->scratch = (unsigned char *)calloc(1, want);
+    if (!host->scratch) {
+      (void)lainvm_quota_release(host->quota, want);
+      if (size_out) *size_out = 0;
+      return NULL;
+    }
+    host->scratch_size = want;
+    host->charged += want;
   }
   if (size_out) *size_out = host->scratch_size;
   return host->scratch;
@@ -113,6 +163,9 @@ void lainmeta_host_free(LainMetaHost *host) {
   free(host->sources);
   free(host->out);
   free(host->scratch);
+  /* 存储真的还回去了，才归还额度。 */
+  (void)lainvm_quota_release(host->quota, host->charged);
+  host->charged = 0;
   free(host);
 }
 
@@ -252,6 +305,9 @@ static uint32_t cap_emit_write(const uint64_t *args, uint32_t count,
   bytes = (const char *)(uintptr_t)args[1];
   length = args[2];
   if (!bytes && length > 0) return LAINMETA_ERR_UNSUPPORTED;
+  /* 边界检查在**任何副作用之前**：拒的时候 out_length 与输出缓冲都不动。 */
+  if (!host_range_readable(host, (uintptr_t)bytes, length))
+    return LAINMETA_ERR_DENIED;
   if (reserve_output(host, (uint32_t)length)) return LAINMETA_ERR_OOM;
   if (length) memcpy(host->out + host->out_length, bytes, (size_t)length);
   host->out_length += (uint32_t)length;
