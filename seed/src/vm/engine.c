@@ -480,16 +480,30 @@ static LainVmSliceResult op_store(LainVmTcb *tcb, const L1Inst *inst) {
 }
 
 static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
+  /* `count ? count : 1`：验证器已经要求 count > 0（码 2024 `#alloca count must
+   * be positive`），所以这条分支在正常路径上够不着——留着只是不让引擎依赖
+   * "上游一定拦住了"。 */
   uint64_t count = lainvm_operand_read(tcb, inst, 0).as.bits;
-  uint64_t total = type_size(inst->ty) * (count ? count : 1);
+  uint64_t element = type_size(inst->ty);
+  uint64_t total;
   uint64_t align = 16;
   uint64_t used;
   const LainVmRegion *stack;
 
-  if (tcb->stack_region == LAINVM_SPACE_NO_REGION)
+  if (lainvm_space_handle_none(tcb->stack))
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
-  stack = &tcb->vspace->regions[tcb->stack_region];
+  stack = lainvm_space_slot(tcb->vspace, tcb->stack);
+  if (!stack) return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
+  /* 尺寸算术**先查回绕**，再判容量。`8 × 2^61` 曾经回绕成 0 字节，于是
+   * 得到一个"合法"的分配（实测 R08）。失败不改变水位。 */
+  if (element != 0 && count > 0xFFFFFFFFFFFFFFFFull / element)
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
+  total = element * (count ? count : 1);
+  if (tcb->stack_used > 0xFFFFFFFFFFFFFFFFull - (align - 1))
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
   used = (tcb->stack_used + (align - 1)) & ~(align - 1);
+  if (total > 0xFFFFFFFFFFFFFFFFull - used)
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
   if (used + total > stack->size)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1007, inst);
   tcb->stack_used = used + total;

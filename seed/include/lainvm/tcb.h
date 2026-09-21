@@ -117,9 +117,11 @@ struct LainVmTcb {
 
   /* alloca 栈。区段登记在 vspace 里，owner 是这个 TCB；
    * 字节在 admit 时按 stack_bytes 一次给够（引擎里不许分配），
-   * 满了就是 trap，不是扩容。 */
-  int32_t stack_region; /* LAINVM_SPACE_NO_REGION 表示没有栈 */
-  uint64_t stack_used;  /* alloca 水位 */
+   * 满了就是 trap，不是扩容。
+   * 引用是**句柄**（身份），不是表下标（位置）：注册或撤销别的区段不会让它
+   * 指到别人身上。 */
+  LainVmRegionHandle stack; /* no_handle 表示没有栈 */
+  uint64_t stack_used;      /* alloca 水位 */
 
   /* 上下文：恢复一次激活所需的全部 */
   LainVmFrame *frames;
@@ -154,7 +156,8 @@ struct LainVmTcb {
  * 引擎里不许分配，所以帧栈和值槽在这里一次给够：
  *   frame_cap = max_call_depth * (image->max_region_depth + 1)
  *   slot_cap  = frame_cap * image->max_slots
- * id 同时是栈区段的 owner，lainvm_tcb_free 时按 owner 回收。
+ * id 现在只是**诊断字段**（区段表里写着"这段是谁的"）；回收按句柄精确撤销，
+ * 不按 owner 扫表。
  * stack_bytes 为 0 表示不要栈（程序里没有 #alloca）。 */
 LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
                           uint64_t owner, uint32_t max_call_depth,
@@ -165,6 +168,12 @@ void lainvm_tcb_free(LainVmTcb *tcb);
  * 解析不到的记 NULL，等真去调它时再拒绝——一个模块可以带着用不到的外部依赖。
  * 必须活得比 TCB 长（TCB 之后不再碰这张表）。 */
 int lainvm_tcb_set_caps(LainVmTcb *tcb, LainVmCaps *caps, L1Diagnostic *diag);
+
+/* 换地址空间（seL4 的 TCB_SetSpace）。
+ * 只换引用，不搬内存；栈租约带旧空间的身份，换过去就失效（`#alloca` 拒 1006），
+ * 要接着跑得由供给方在新空间里重新给一份租约。
+ * 运行中的 TCB 不许换。成功返回 0；失败返回非 0 并把原因写进 diag（可为 NULL）。 */
+int lainvm_tcb_set_space(LainVmTcb *tcb, LainVmSpace *space, L1Diagnostic *diag);
 
 /* 压入根帧、把 args 绑到入口过程的参数槽、置 RUNNING。
  * 成功返回 0；失败返回非 0 并把原因写进 diag（可为 NULL）。 */

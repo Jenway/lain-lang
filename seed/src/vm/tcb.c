@@ -33,7 +33,7 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
   tcb->state = LAINVM_READY;
   tcb->image = image;
   tcb->vspace = space;
-  tcb->stack_region = LAINVM_SPACE_NO_REGION;
+  tcb->stack = lainvm_space_no_handle();
   tcb->slice_result = LAINVM_SLICE_RUNNABLE;
 
   tcb->frames = (LainVmFrame *)calloc(frame_cap, sizeof(LainVmFrame));
@@ -48,29 +48,19 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
   if (stack_bytes > 0) {
     /* 清零是提供内存这一方的责任：不零就没有确定性。 */
     void *stack = calloc(1, (size_t)stack_bytes);
-    int32_t index;
     if (!stack) {
       lainvm_tcb_free(tcb);
       return NULL;
     }
-    index = lainvm_space_add_region(space, (uintptr_t)stack, stack_bytes,
-                                    LAINVM_MEM_READ | LAINVM_MEM_WRITE, id);
-    if (index == LAINVM_SPACE_NO_REGION) {
+    tcb->stack = lainvm_space_add(space, (uintptr_t)stack, stack_bytes,
+                                  LAINVM_MEM_READ | LAINVM_MEM_WRITE, id);
+    if (lainvm_space_handle_none(tcb->stack)) {
       free(stack);
       lainvm_tcb_free(tcb);
       return NULL;
     }
-    tcb->stack_region = index;
-    /* 区段表是定长的，插入后下标可能变；按 owner 找回自己的那段。 */
-    {
-      uint32_t i;
-      for (i = 0; i < space->region_count; i++) {
-        if (space->regions[i].owner == id && space->regions[i].base == (uintptr_t)stack) {
-          tcb->stack_region = (int32_t)i;
-          break;
-        }
-      }
-    }
+    /* 这里原来有一段「插入之后按 owner 找回自己那段」的补偿。句柄化之后不需要：
+     * 注册或撤销**别的**区段不会改变这个句柄指向谁。 */
   }
 
   return tcb;
@@ -78,11 +68,21 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
 
 void lainvm_tcb_free(LainVmTcb *tcb) {
   if (!tcb) return;
-  if (tcb->vspace && tcb->stack_region != LAINVM_SPACE_NO_REGION) {
-    /* 栈的字节由本 TCB 分配，先取回地址再让区段消失。 */
-    uintptr_t base = tcb->vspace->regions[tcb->stack_region].base;
-    lainvm_space_release_owner(tcb->vspace, tcb->id);
-    free((void *)base);
+  if (!lainvm_space_handle_none(tcb->stack)) {
+    /* 栈的字节由本 TCB 分配：按**句柄**取回地址，再精确撤销那一段。
+     *
+     * 空间也按**句柄里记的那个**取，不能用 `tcb->vspace`：句柄带着租约所在空间
+     * 的身份，而 `tcb->vspace` 可能已经被 set_space 换成别的空间了。实测（用例
+     * cap_tcb_destroy_after_switch）：换空间后销毁 TCB，按 `tcb->vspace` 去撤销
+     * 一段都撤不掉 —— 栈区段留在原地、栈内存再也没人 free，静默泄漏。
+     *
+     * 这里原来是「按缓存的区段下标去取地址」——下标被别的插入挪走之后，
+     * 取回来的是别人的地址，free 直接堆损坏（0xC0000374，实测 R03）。 */
+    LainVmSpace *lease_space = (LainVmSpace *)(uintptr_t)tcb->stack.space;
+    const LainVmRegion *region = lainvm_space_slot(lease_space, tcb->stack);
+    uintptr_t base = region ? region->base : 0;
+    lainvm_space_remove(lease_space, tcb->stack);
+    if (base != 0) free((void *)base);
   }
   free(tcb->frames);
   free(tcb->slots);
@@ -116,6 +116,28 @@ int lainvm_tcb_set_caps(LainVmTcb *tcb, LainVmCaps *caps, L1Diagnostic *diag) {
     key = sub->link_name ? sub->link_name : sub->name;
     tcb->resolved[i] = lainvm_caps_find(caps, key); /* 查不到就是 NULL */
   }
+  return 0;
+}
+
+/* 换地址空间（seL4 的 TCB_SetSpace 那件事）。
+ *
+ * 只换引用，不搬内存：TCB 从此按**新**空间的区段表判权限。它手里的栈句柄带着
+ * 旧空间的身份，所以在新的空间里自动失效——`#alloca` 会稳定地拒（1006），
+ * 而不是悄悄用错内存。要让它在新的空间里继续跑，得由供给方在新空间里登记
+ * 一段栈、再给它一份新租约。原来那块内存怎么处理归供给方，不归 TCB。
+ *
+ * 运行中的 TCB 不许换（先 suspend），免得"换到一半还在跑"。 */
+int lainvm_tcb_set_space(LainVmTcb *tcb, LainVmSpace *space,
+                         L1Diagnostic *diag) {
+  if (!tcb || !space) {
+    start_fail(diag, 9120, "tcb: no tcb or no address space");
+    return 1;
+  }
+  if (tcb->state == LAINVM_RUNNING) {
+    start_fail(diag, 9121, "tcb: cannot switch address space while running");
+    return 1;
+  }
+  tcb->vspace = space;
   return 0;
 }
 
