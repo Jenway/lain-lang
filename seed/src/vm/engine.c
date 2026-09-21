@@ -944,6 +944,12 @@ static LainVmSliceResult op_unimplemented(LainVmTcb *tcb, const L1Inst *inst) {
   return trap_now(tcb, LAINVM_TRAP_STATE, 1099, inst);
 }
 
+/* `#eval` 块是编译期的东西：folding 阶段必须把它算掉。执行时走到这里说明
+ * 管线漏了一步——报稳定码，不静默执行（登记见 docs/spec/vm.md）。 */
+static LainVmSliceResult op_eval_block(LainVmTcb *tcb, const L1Inst *inst) {
+  return trap_now(tcb, LAINVM_TRAP_STATE, 1045, inst);
+}
+
 /* --- 分派表 --------------------------------------------------------------- */
 
 static const LainVmOp k_ops[INST_COUNT] = {
@@ -1013,6 +1019,8 @@ static const LainVmOp k_ops[INST_COUNT] = {
     [INST_BREAK] = op_break,
     [INST_CONTINUE] = op_continue,
     [INST_RETURN] = op_return,
+    /* 编译期执行块。它不该被执行到：给一个稳定拒绝，而不是留 NULL。 */
+    [INST_EVAL] = op_eval_block,
 };
 
 const LainVmOp *lainvm_op_table(void) { return k_ops; }

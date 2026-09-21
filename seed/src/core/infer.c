@@ -71,7 +71,8 @@ const L1Type *lainir_inst_result_type(const LainIrTypes *types,
   if (!types || !inst || index >= inst->result_count) return NULL;
   if (is_compare(inst->kind)) return &types->bits1;
   if (is_address_result(inst->kind)) return &types->addr;
-  if (inst->kind == INST_IF || inst->kind == INST_LOOP) {
+  if (inst->kind == INST_IF || inst->kind == INST_LOOP ||
+      inst->kind == INST_EVAL) {
     if (inst->body && index < inst->body->result_count)
       return inst->body->results[index];
     return NULL;

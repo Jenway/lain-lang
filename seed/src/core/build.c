@@ -221,6 +221,15 @@ const L1Inst *lainir_inst_loop(L1Builder *builder, const char *result,
   return finish_inst(builder, inst, NULL, 0);
 }
 
+const L1Inst *lainir_inst_eval(L1Builder *builder, const char *result,
+                               const L1Region *body) {
+  L1Inst *inst = (L1Inst *)new_inst(builder, INST_EVAL, result,
+                                    result ? 1u : 0u);
+  if (!inst) return NULL;
+  inst->body = body;
+  return finish_inst(builder, inst, NULL, 0);
+}
+
 const L1Inst *lainir_inst_switch(L1Builder *builder, const char *result,
                                  L1Operand selector, const L1Type *ty,
                                  const L1SwitchCase *cases, uint32_t case_count,

@@ -179,6 +179,19 @@ static void print_inst(Printer *p, const L1Region *region, const L1Inst *inst) {
   print_result_prefix(p, inst);
 
   switch (inst->kind) {
+  case INST_EVAL:
+    /* 编译期块：`#eval -> (#bits<64>) { ... }`。带标记的调用是 INST_CALL +
+     * is_eval，走下面的 default 分支（打印成 `#eval callee(args)`）。 */
+    print_opcode(p, inst);
+    print_region_results(p, inst->body);
+    out(p, " {\n");
+    p->indent++;
+    print_region(p, inst->body);
+    p->indent--;
+    ind(p);
+    out(p, "}\n");
+    return;
+
   case INST_IF:
     print_opcode(p, inst);
     if (inst->operand_count > 0) {
