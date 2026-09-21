@@ -171,7 +171,7 @@ struct LainVmTcb {
  * 不按 owner 扫表。
  * lease 是供给方给的**栈租约**（`lainvm_stack_no_lease()` = 程序没有 `#alloca`）。
  * 有租约时先校验（句柄属于 `space`、区段有效、含 READ|WRITE、当前 accessible == 0、
- * capacity > 0），通过后 `borrow_count++`。**TCB 不申请、不清零、不释放栈字节，
+ * capacity > 0、**还没被别的执行流借走**），通过后 `borrow_count++`。**TCB 不申请、不清零、不释放栈字节，
  * 也不扣配额** —— 额度在供给方 `lainvm_space_alloc_stack` 时就扣过了。
  * 创建中途失败会把已取得的借用还回去，但**不**释放供给方的区段。
  * quota 是这次执行的分配账户（NULL = 不限额）；TCB 只持有这个引用，不扣栈容量。 */
