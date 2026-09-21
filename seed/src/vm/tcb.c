@@ -15,7 +15,7 @@ static void start_fail(L1Diagnostic *diag, int code, const char *message);
 
 LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
                           uint64_t owner, uint32_t max_call_depth,
-                          uint64_t stack_bytes, uint64_t generation_base) {
+                          uint64_t stack_bytes) {
   LainVmTcb *tcb;
   uint32_t frame_cap;
   uint32_t slot_cap;
@@ -33,12 +33,13 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
   tcb->state = LAINVM_READY;
   tcb->image = image;
   tcb->vspace = space;
-  tcb->stack = lainvm_space_no_handle();
+  tcb->stack_space = NULL;
+  tcb->stack_base = 0;
+  tcb->stack_size = 0;
+  tcb->stack_used = 0;
+  tcb->stack_window = lainvm_space_no_handle();
+  tcb->stack_window_size = 0;
   tcb->slice_result = LAINVM_SLICE_RUNNABLE;
-  /* 代数的起点由调用方给：见 tcb.h 里 generation_base 的契约。 */
-  lainvm_memcap_init(&tcb->memcap, generation_base);
-  tcb->activation = 0;
-  tcb->activation_seq = 0;
 
   tcb->frames = (LainVmFrame *)calloc(frame_cap, sizeof(LainVmFrame));
   tcb->slots = (L1Value *)calloc(slot_cap, sizeof(L1Value));
@@ -56,15 +57,11 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
       lainvm_tcb_free(tcb);
       return NULL;
     }
-    tcb->stack = lainvm_space_add(space, (uintptr_t)stack, stack_bytes,
-                                  LAINVM_MEM_READ | LAINVM_MEM_WRITE, id);
-    if (lainvm_space_handle_none(tcb->stack)) {
-      free(stack);
-      lainvm_tcb_free(tcb);
-      return NULL;
-    }
-    /* 这里原来有一段「插入之后按 owner 找回自己那段」的补偿。句柄化之后不需要：
-     * 注册或撤销**别的**区段不会改变这个句柄指向谁。 */
+    /* 只记租约，**不登记区段**：授权跟着活窗口走（见 tcb.h）。整块登记会让返回后
+     * 的旧地址仍然可访问，那就只能靠地址身份去拦 —— 而 `#addr` 没有身份。 */
+    tcb->stack_space = space;
+    tcb->stack_base = (uintptr_t)stack;
+    tcb->stack_size = stack_bytes;
   }
 
   return tcb;
@@ -72,25 +69,21 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
 
 void lainvm_tcb_free(LainVmTcb *tcb) {
   if (!tcb) return;
-  /* 先结内存能力的账：撤销这个上下文名下的全部能力、释放它名下的全部对象
-   * （栈内存下一步随 TCB 一起 free）。没有这一步，账面上会留着悬空授权与泄漏。 */
-  lainvm_memcap_end_all(&tcb->memcap, NULL, NULL);
-  if (!lainvm_space_handle_none(tcb->stack)) {
-    /* 栈的字节由本 TCB 分配：按**句柄**取回地址，再精确撤销那一段。
-     *
-     * 空间也按**句柄里记的那个**取，不能用 `tcb->vspace`：句柄带着租约所在空间
-     * 的身份，而 `tcb->vspace` 可能已经被 set_space 换成别的空间了。实测（用例
-     * cap_tcb_destroy_after_switch）：换空间后销毁 TCB，按 `tcb->vspace` 去撤销
-     * 一段都撤不掉 —— 栈区段留在原地、栈内存再也没人 free，静默泄漏。
-     *
-     * 这里原来是「按缓存的区段下标去取地址」——下标被别的插入挪走之后，
-     * 取回来的是别人的地址，free 直接堆损坏（0xC0000374，实测 R03）。 */
-    LainVmSpace *lease_space = (LainVmSpace *)(uintptr_t)tcb->stack.space;
-    const LainVmRegion *region = lainvm_space_slot(lease_space, tcb->stack);
-    uintptr_t base = region ? region->base : 0;
-    lainvm_space_remove(lease_space, tcb->stack);
-    if (base != 0) free((void *)base);
+  /* 先撤**活窗口**。空间从**句柄自己身上**取，不能用 `tcb->vspace`：句柄带着它
+   * 所在空间的身份，而 `tcb->vspace` 可能已经被 set_space 换成别的空间了。实测
+   * （用例 cap_tcb_destroy_after_switch）：换空间后销毁 TCB，拿当前空间去撤销
+   * 一段都撤不掉 —— 窗口留在原地、栈内存再也没人 free，静默泄漏。
+   *
+   * 这里原来还有一处「按缓存的区段下标去取地址」——下标被别的插入挪走之后取回来
+   * 的是别人的地址，free 直接堆损坏（0xC0000374，实测 R03）。 */
+  if (!lainvm_space_handle_none(tcb->stack_window)) {
+    LainVmSpace *window_space = (LainVmSpace *)(uintptr_t)tcb->stack_window.space;
+    lainvm_space_remove(window_space, tcb->stack_window);
+    tcb->stack_window = lainvm_space_no_handle();
+    tcb->stack_window_size = 0;
   }
+  /* 字节由本 TCB 分配，也由本 TCB 还（这一版供给方就是本 TCB）。 */
+  if (tcb->stack_base != 0) free((void *)tcb->stack_base);
   free(tcb->frames);
   free(tcb->slots);
   free(tcb->resolved);
@@ -186,13 +179,17 @@ int lainvm_tcb_start(LainVmTcb *tcb, const char *entry, const L1Value *args,
   memset(tcb->frames, 0, sizeof(LainVmFrame) * tcb->frame_cap);
   memset(tcb->slots, 0, sizeof(L1Value) * tcb->slot_cap);
   tcb->stack_used = 0;
+  /* 重启时活窗口必须归零：上一次激活留下的授权要是跟着新激活一起活着，
+   * 授权范围就比水位大，旧地址还能访问。 */
+  if (!lainvm_space_handle_none(tcb->stack_window)) {
+    lainvm_space_remove((LainVmSpace *)(uintptr_t)tcb->stack_window.space,
+                        tcb->stack_window);
+    tcb->stack_window = lainvm_space_no_handle();
+  }
+  tcb->stack_window_size = 0;
   tcb->has_result = false;
   memset(&tcb->result, 0, sizeof(tcb->result));
   memset(&tcb->trap, 0, sizeof(tcb->trap));
-  /* 重开一次激活：上一轮若留下对象（例如 Trap 之后又 start），在这里结清。
-   * 然后发一个新的 activation 标签——标签只增，旧引用不会因为重用而对上新的。 */
-  lainvm_memcap_end_all(&tcb->memcap, NULL, NULL);
-  tcb->activation = ++tcb->activation_seq;
 
   frame = &tcb->frames[0];
   frame->region = body;
@@ -203,7 +200,6 @@ int lainvm_tcb_start(LainVmTcb *tcb, const char *entry, const L1Value *args,
   frame->label = NULL;
   frame->is_call_frame = true;
   frame->stack_mark = 0;
-  frame->activation = tcb->activation;
   tcb->frame_count = 1;
 
   for (i = 0; i < arg_count; i++) tcb->slots[i] = args[i];

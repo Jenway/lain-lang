@@ -160,7 +160,7 @@ static int rig_load(Rig *rig, const char *text, uint64_t stack_bytes) {
     obs_facts("load: code=%d %s", diag.code, diag.message);
     return -3;
   }
-  rig->tcb = lainvm_tcb_new(rig->image, &rig->space, 1, 1, 64, stack_bytes, 1);
+  rig->tcb = lainvm_tcb_new(rig->image, &rig->space, 1, 1, 64, stack_bytes);
   if (!rig->tcb) {
     if (diag.code != 0) rig->fail_code = diag.code;
     obs_facts("admit 失败（stack_bytes=%llu）", (unsigned long long)stack_bytes);
@@ -204,8 +204,8 @@ static int rig_run(Rig *rig, const char *entry) {
 
 /* --- LAINIR 测试程序（内联；都是本用例专用的小程序） ---------------------- */
 
-/* 一个从来没登记过的地址上读一个字节：走**裸地址**通路（data 符号 + lea 偏移），
- * 所以拒的是 VSpace 那一步（1004）。期望：拒绝。 */
+/* 一个从来没登记过的地址上读一个字节：走 `#lea` 构造（data 符号 + 偏移）。
+ * D3 已定：**构造不查、访问查** —— 所以构造成功，随后 load 必须被 VSpace 拒。 */
 static const char *k_prog_outside_region =
     "data bytes ro { 42 }\n"
     "#proc outside() -> #bits<64> {\n"
@@ -216,9 +216,10 @@ static const char *k_prog_outside_region =
     "  #return %w\n"
     "}\n";
 
-/* `#int2ptr` 只造**受检引用**：整数给的是身份位（代数(32) | 槽号(32)），4096 不是
- * 有效的槽号 → 拒 9207。它不再是"把整数当裸地址用"。 */
-static const char *k_prog_int2ptr_ref =
+/* `#int2ptr` 只做**位模式转换**：整数 4096 变成一个数值为 4096 的裸地址，
+ * 不授予任何访问权。所以 load 会在 VSpace 那一步被拒（1004）——
+ * 不是"假句柄/假代数"被拒（`#addr` 里没有身份可查）。 */
+static const char *k_prog_int2ptr_bare =
     "#proc from_int() -> #bits<64> {\n"
     "  %p = #int2ptr[#addr](4096)\n"
     "  %b = #load[#bits<8>](%p)\n"
@@ -226,9 +227,9 @@ static const char *k_prog_int2ptr_ref =
     "  #return %w\n"
     "}\n";
 
-/* 受检通路的正例：同一帧里 alloca → store → load 必须真的读到写进去的值；
- * 顺带证明 `#addr` 槽两种味道都装得下（RAW 读到 42、REF 读到 9，和 = 51）。 */
-static const char *k_prog_two_flavors =
+/* `#addr` 槽是**单字裸地址**：存进去什么数值，读回来就是什么数值（没有 tag 字、
+ * 没有代数）。data 地址读回 42，alloca 地址读回 9，和 = 51。 */
+static const char *k_prog_addr_slot_roundtrip =
     "data bytes ro { 42 }\n"
     "data slot rw { 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 }\n"
     "#proc two_flavors() -> #bits<64> {\n"
@@ -326,26 +327,29 @@ static const char *k_prog_reuse =
     "  #return %out\n"
     "}\n";
 
-/* R07 的新断言（交接 §5）：同址复用时**旧引用不能访问**。先记下第一次调用发的
- * 地址，再调一次（栈水位从 0 重来，地址必然复用），然后拿旧地址去读 —— 必须被拒。
- * 旧断言是"两次地址必须不同"，那要求物理地址永不复用，已被 §1 否掉。 */
+/* R07（作者校正后的断言）：**裸地址不可区分**。
+ *
+ * `give` 分配一块栈、写进自己的值，把地址记到模块级数据里；同时用参数 `probe`
+ * ——一个**上一次**留下的数值地址——去读。第二次调用时 `probe` 正是第一次那段地址：
+ * VSpace 已经把它重新授权给本次分配，于是读回来的必须是本次写的 9。
+ * （第一次调用传的 probe 是 leaked 自己的地址，它有授权，读到的值没人用。） */
 static const char *k_prog_reuse_guard =
     "data leaked rw { 0 0 0 0 0 0 0 0 }\n"
-    "#proc give() -> #bits<64> {\n"
+    "#proc give(%v: #bits<64>, %probe: #addr) -> #bits<64> {\n"
     "  %s = #alloca[#bits<64>](1)\n"
-    "  #store[#bits<64>](7, %s)\n"
+    "  #store[#bits<64>](%v, %s)\n"
     "  %d = #data_addr leaked\n"
     "  %w = #ptr2int[#bits<64>](%s)\n"
     "  #store[#bits<64>](%w, %d)\n"
-    "  #return 1\n"
+    "  %x = #load[#bits<64>](%probe)\n"
+    "  #return %x\n"
     "}\n"
-    "#proc reuse_guard() -> #bits<64> {\n"
-    "  %z1 = #call give()\n"
+    "#proc reuse_same_address() -> #bits<64> {\n"
     "  %d = #data_addr leaked\n"
+    "  %z1 = #call give(7, %d)\n"
     "  %old = #load[#bits<64>](%d)\n"
-    "  %z2 = #call give()\n"
     "  %p = #int2ptr[#addr](%old)\n"
-    "  %v = #load[#bits<64>](%p)\n"
+    "  %v = #call give(9, %p)\n"
     "  #return %v\n"
     "}\n";
 
@@ -402,8 +406,8 @@ static int case_load_outside_region(void) {
   return 0;
 }
 
-/* 同一帧里的受检引用通路（正例）：写进去的必须读得回来。 */
-static int case_cap_alloca_ref_works(void) {
+/* 同一帧里的裸地址通路（正例）：alloca → store → load 必须真的读到写进去的值。 */
+static int case_alloca_rw_works(void) {
   Rig rig;
 
   if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
@@ -412,21 +416,21 @@ static int case_cap_alloca_ref_works(void) {
   return 0;
 }
 
-/* `#addr` 槽装两种味道：RAW 与 REF 各自 16 字节自描述记录，读回来味道不变。 */
-static int case_cap_addr_slot_two_flavors(void) {
+/* `#addr` 槽是单字裸地址：往返之后数值不变（没有 tag 字在中间）。 */
+static int case_addr_slot_roundtrip(void) {
   Rig rig;
 
-  if (rig_load(&rig, k_prog_two_flavors, 4096) != 0) return 0;
+  if (rig_load(&rig, k_prog_addr_slot_roundtrip, 4096) != 0) return 0;
   (void)rig_run(&rig, "two_flavors");
   rig_free(&rig);
   return 0;
 }
 
-/* `#int2ptr` 造的是引用，不是裸地址：假槽号必须被拒（9207）。 */
-static int case_cap_int2ptr_is_reference(void) {
+/* `#int2ptr` 不授予访问权：整数变的裸地址照样要过当前 VSpace（拒 1004）。 */
+static int case_int2ptr_no_grant(void) {
   Rig rig;
 
-  if (rig_load(&rig, k_prog_int2ptr_ref, 1024) != 0) return 0;
+  if (rig_load(&rig, k_prog_int2ptr_bare, 1024) != 0) return 0;
   (void)rig_run(&rig, "from_int");
   rig_free(&rig);
   return 0;
@@ -803,26 +807,26 @@ static int case_region_handle_double_remove(void) {
 
 /* --- stack 组 --------------------------------------------------------------- */
 
-/* R03：TCB 的栈引用是**句柄**——在它下面插入别的区段之后，它还指得到自己的栈吗？
- * 而且销毁时 free 的还是不是自己那块？ */
+/* R03：TCB 的栈**租约**记的是自己的 base/size，不是区段表里的位置——在它下面插入
+ * 别的区段之后，租约还指得到自己那块吗？销毁时 free 的还是不是自己那块？
+ * （这里曾经必须"先撤销这次插入再销毁"：那时销毁按缓存的表下标取地址去 free，
+ *   下标一挪就 free 到别人的地址，直接把进程打成堆损坏 0xC0000374。） */
 static int case_stack_lease_identity(void) {
   Rig rig;
-  LainVmRegionHandle ref;
-  uintptr_t stack_base, seen;
+  uintptr_t stack_base;
   int rc;
 
   if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
-  ref = rig.tcb->stack;
-  if (lainvm_space_handle_none(ref)) {
+  stack_base = rig.tcb->stack_base;
+  if (stack_base == 0 || rig.tcb->stack_size != 4096) {
     rig_free(&rig);
-    obs_facts("TCB 没有栈区段（stack_bytes=4096 却拿到 no_handle）");
+    obs_facts("TCB 没有栈租约（stack_bytes=4096 却拿到 base=%llu size=%llu）",
+              (unsigned long long)stack_base,
+              (unsigned long long)rig.tcb->stack_size);
     return 0;
   }
-  stack_base = base_of(&rig.space, ref);
   /* 在这块栈的**正下方**登记一段合成区段：base 更低 → 内部索引会把它排到前面。
-     只登记、不解引用，所以不碰任何未映射内存。
-     （这里曾经必须"先撤销这次插入再销毁"：那时销毁按缓存的表下标取地址去 free，
-      下标一挪就 free 到别人的地址，直接把进程打成堆损坏 0xC0000374。） */
+     只登记、不解引用，所以不碰任何未映射内存。 */
   rc = add(&rig.space, stack_base - 4096, 4096, LAINVM_MEM_READ, 99);
   if (rc < 0) {
     rig_free(&rig);
@@ -830,13 +834,14 @@ static int case_stack_lease_identity(void) {
               (unsigned long long)stack_base);
     return 0;
   }
-  seen = base_of(&rig.space, ref);
-  rig_free(&rig); /* 句柄化之后这里应当是安全的：撤销精确，free 的是自己那块 */
-  if (seen != stack_base) {
-    obs_facts("R03 复现：栈句柄在插入别人之后指到 base=%llu（自己是 %llu）",
-              (unsigned long long)seen, (unsigned long long)stack_base);
+  if (rig.tcb->stack_base != stack_base || rig.tcb->stack_size != 4096) {
+    rig_free(&rig);
+    obs_facts("R03 复现：插入别人之后栈租约指到 base=%llu（自己是 %llu）",
+              (unsigned long long)rig.tcb->stack_base,
+              (unsigned long long)stack_base);
     return 0;
   }
+  rig_free(&rig); /* 撤销精确：free 的是自己那块，不在区段表里找位置 */
   obs_value(1);
   return 0;
 }
@@ -899,46 +904,49 @@ static int case_stack_zero_count(void) {
 }
 
 /* 两个 TCB 共用一个 VSpace（= 同一地址空间里的两条执行流 / 两个线程）：
- * 各自的栈必须互不影响，先销毁哪一个都不能碰到另一个。
+ * 各自的栈租约必须互不影响，先销毁哪一个都不能碰到另一个。
  * 这是"栈跟着 TCB 的身份走、不跟着空间里的位置走"的最小可测情形——
  * 也是迁徙线程那条性质（栈属于线程，不属于它此刻跑在哪里）在 VSpace 上的投影。 */
 static int case_stack_two_tcbs_one_space(void) {
   Rig rig;
   LainVmTcb *t1, *t2;
-  LainVmRegionHandle h1, h2;
   uintptr_t base1, base2;
   int ok = 1;
 
   if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
   t1 = rig.tcb; /* 台架已经建了一个 */
-  h1 = t1->stack;
-  base1 = base_of(&rig.space, h1);
-  t2 = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, 4096, 2);
+  base1 = t1->stack_base;
+  t2 = lainvm_tcb_new(rig.image, &rig.space, 2, 2, 64, 4096);
   if (!t2) {
     rig_free(&rig);
     obs_facts("同一个地址空间里建第二个 TCB 失败");
     return 0;
   }
-  h2 = t2->stack;
-  base2 = base_of(&rig.space, h2);
-  if (lainvm_space_handle_none(h1) || lainvm_space_handle_none(h2) ||
-      base1 == 0 || base2 == 0 || base1 == base2) {
+  base2 = t2->stack_base;
+  if (base1 == 0 || base2 == 0 || base1 == base2) {
     ok = 0;
     obs_facts("两个 TCB 的栈不独立：base1=%llu base2=%llu",
               (unsigned long long)base1, (unsigned long long)base2);
   }
   if (ok) {
-    /* 先销毁第二个：第一个的栈句柄必须纹丝不动，第二个的区段必须消失。 */
+    /* 先销毁第二个：第一个的租约必须纹丝不动，而且它接着还能正常 alloca。 */
     lainvm_tcb_free(t2);
-    if (base_of(&rig.space, h1) != base1) {
+    if (t1->stack_base != base1 || t1->stack_size != 4096) {
       ok = 0;
-      obs_facts("销毁 TCB2 之后 TCB1 的栈句柄指到 base=%llu（原来 %llu）",
-                (unsigned long long)base_of(&rig.space, h1),
-                (unsigned long long)base1);
-    } else if (base_of(&rig.space, h2) != 0) {
+      obs_facts("销毁 TCB2 之后 TCB1 的租约变成 base=%llu size=%llu",
+                (unsigned long long)t1->stack_base,
+                (unsigned long long)t1->stack_size);
+    }
+  }
+  if (ok) {
+    memset(&g_obs, 0, sizeof(g_obs));
+    (void)rig_run(&rig, "use_alloca");
+    if (g_obs.kind != 0 || g_obs.value != 7) {
       ok = 0;
-      obs_facts("销毁 TCB2 之后它的栈区段还在（base=%llu）",
-                (unsigned long long)base_of(&rig.space, h2));
+      if (g_obs.kind == 1)
+        obs_facts("销毁 TCB2 之后 TCB1 的 alloca 被拒（码 %d）", g_obs.trap_code);
+      else
+        obs_facts("销毁 TCB2 之后 TCB1 的结果/状态不对（kind=%d）", g_obs.kind);
     }
   }
   rig_free(&rig); /* 剩下的 TCB1 */
@@ -1223,31 +1231,43 @@ static int case_lifetime_escape(void) {
   return 0;
 }
 
-/* R07 的新断言：同址复用时旧引用不能访问。
+/* R07：**裸地址不可区分**（作者 2026-09-21 校正）。
  *
- * 原断言是「两次调用不能拿到同一地址」，按交接 §5 改掉：物理地址复用**不是**错误，
- * 旧引用还能用才是错误。所以这一条先确认确实同址复用（否则测试没打到目标就报 FAIL，
- * 不许因为"碰巧没复用"变成绿点），再要求旧引用被拒。 */
+ * 「同址复用后旧地址必须被拒」**不是** `#addr` 的契约：`#addr` 是无类型物理地址，
+ * 没有对象身份与代数；那条要求只适用于高层 `ref(T)` 的物理表示（见 checked-ref 组）。
+ * 所以要验证的是两件事：
+ *   1. 第一次调用分配的那段地址，在返回后**不再被授权**（活窗口随水位收回）——
+ *      这就是 R06 拒绝的原因；
+ *   2. 第二次调用在同一数值地址上重新分配并授权之后，**旧的数值地址照样能访问到
+ *      新分配写进去的值**：新旧裸地址不可区分。
+ * 域外引用不靠 VM 里的身份挡，靠 Meta 的 `ref(T)` 生命周期规则挡。 */
 static int case_lifetime_reuse(void) {
   Rig rig;
   int reused;
 
+  /* 先确认这个台架里确实发生同址复用，否则"读到新值"可能只是巧合。 */
   if (rig_load(&rig, k_prog_reuse, 4096) != 0) return 0;
   (void)rig_run(&rig, "reuse");
   reused = (g_obs.kind == 0 && g_obs.value == 1);
   rig_free(&rig);
 
+  if (!reused) {
+    obs_facts("两次调用没有拿到同一地址，这一条打不到目标");
+    return 0;
+  }
   if (rig_load(&rig, k_prog_reuse_guard, 4096) != 0) return 0;
-  (void)rig_run(&rig, "reuse_guard");
-  if (g_obs.kind == 1) {
-    obs_trap(g_obs.trap_kind, g_obs.trap_code); /* 旧引用被拒：符合契约 */
-  } else if (!reused) {
-    obs_facts("两次调用没有拿到同一地址，这一条没打到目标");
+  (void)rig_run(&rig, "reuse_same_address");
+  rig_free(&rig);
+  if (g_obs.kind == 0 && g_obs.value == 9) {
+    obs_value(9); /* 旧裸地址读到的正是**新分配**写的 9：不可区分 */
+  } else if (g_obs.kind == 1) {
+    obs_facts("同址重新授权后旧裸地址仍被拒（code=%d）—— 那是把身份塞进 `#addr`，"
+              "不是裸地址的契约",
+              (int)g_obs.trap_code);
   } else {
-    obs_facts("同址复用后旧引用仍读到 %llu（按契约必须被拒）",
+    obs_facts("同址重新授权后旧裸地址读到 %llu（期望 9 = 新分配写进去的值）",
               (unsigned long long)g_obs.value);
   }
-  rig_free(&rig);
   return 0;
 }
 
@@ -2069,19 +2089,38 @@ static int case_cap_quota_two_actions(void) {
 }
 
 /* §7：切换 VSpace 之后**直接销毁 TCB** 的释放路径。
- * 契约：TCB 借的那段栈属于**租约所在的空间**，销毁时要在那个空间里精确撤销并释放；
- * 换到的那个空间一个字节都不能碰。（只测「切出再切回」是打不到这里的。） */
+ * 契约：活窗口属于**租约所在的空间**，销毁时要在那个空间里精确撤销并释放；
+ * 换到的那个空间一个字节都不能碰。（只测「切出再切回」是打不到这里的。）
+ *
+ * 所以这里先造出一个**Trap 时仍然活着**的窗口：`#alloca` 之后去踩一个没有授权的
+ * 地址（1004）。Trap 不缩小水位，窗口就留在租约空间里 —— 然后换空间、直接销毁。 */
+static const char *k_prog_alloc_then_trap =
+    "#proc alloc_then_trap() -> #bits<64> {\n"
+    "  %a = #alloca[#bits<8>](4)\n"
+    "  #store[#bits<8>](7, %a)\n"
+    "  %p = #int2ptr[#addr](4096)\n"
+    "  %b = #load[#bits<8>](%p)\n"
+    "  %w = #zext[#bits<64>](%b)\n"
+    "  #return %w\n"
+    "}\n";
+
 static int case_cap_tcb_destroy_after_switch(void) {
   Rig rig;
   LainVmSpace other;
   L1Diagnostic diag;
   uint32_t before, after, other_live;
 
-  if (rig_load(&rig, k_prog_alloca, 4096) != 0) return 0;
-  (void)rig_run(&rig, "use_alloca");
-  if (g_obs.kind != 0) {
+  if (rig_load(&rig, k_prog_alloc_then_trap, 4096) != 0) return 0;
+  (void)rig_run(&rig, "alloc_then_trap");
+  if (g_obs.kind != 1 || g_obs.trap_code != 1004) {
     rig_free(&rig);
-    obs_facts("原空间里就没跑通（kind=%d）", g_obs.kind);
+    obs_facts("期望「先 alloca 再在域外地址上被拒 1004」，实际 kind=%d code=%d",
+              g_obs.kind, (int)g_obs.trap_code);
+    return 0;
+  }
+  if (lainvm_space_handle_none(rig.tcb->stack_window)) {
+    rig_free(&rig);
+    obs_facts("Trap 之后活窗口没了 —— 这条用例打不到「销毁时窗口还在」的路径");
     return 0;
   }
   lainvm_space_init(&other);
@@ -2100,8 +2139,8 @@ static int case_cap_tcb_destroy_after_switch(void) {
   if (before >= 1 && after == before - 1 && other_live == 0) {
     obs_value(1);
   } else {
-    obs_facts("销毁后租约所在空间的区段 %u→%u（期望少 1 段：栈要在自己的空间里"
-              "撤销并释放），换到的空间 %u 段",
+    obs_facts("销毁后租约所在空间的区段 %u→%u（期望少 1 段：活窗口要在它自己的"
+              "空间里撤销），换到的空间 %u 段",
               (unsigned)before, (unsigned)after, (unsigned)other_live);
   }
   return 0;
@@ -2261,8 +2300,8 @@ static const Case k_cases[] = {
     {"host_in_region_ok", "host", EXP_VALUE, 1, 0, case_host_in_region_ok},
     {"host_source_index_bounds", "host", EXP_BLOCKED, 0, 0, NULL},
     /* lifetime */
-    {"lifetime_escape", "lifetime", EXP_TRAP, 0, 0, case_lifetime_escape},
-    {"lifetime_reuse", "lifetime", EXP_TRAP, 0, 0, case_lifetime_reuse},
+    {"lifetime_escape", "lifetime", EXP_TRAP, 0, 1004, case_lifetime_escape},
+    {"lifetime_reuse", "lifetime", EXP_VALUE, 9, 0, case_lifetime_reuse},
     {"space_switch", "lifetime", EXP_VALUE, 1, 0, case_space_switch},
     /* lea */
     {"lea_construct_only", "lea", EXP_BLOCKED, 0, 0, case_lea_construct_only},
@@ -2271,45 +2310,44 @@ static const Case k_cases[] = {
     {"budget_unimplemented", "budget", EXP_BLOCKED, 0, 0,
      case_budget_unimplemented},
 
-    /* capability（最小内存能力模型；模型层，不是 VM 的 load/store 通路） */
-    {"cap_live_rw", "capability", EXP_VALUE, 1, 0, case_cap_live_rw},
-    {"cap_bounds", "capability", EXP_TRAP, 0, 9210, case_cap_bounds},
-    {"cap_rights", "capability", EXP_TRAP, 0, 9209, case_cap_rights},
-    {"cap_revoke", "capability", EXP_TRAP, 0, 9207, case_cap_revoke},
-    {"cap_same_address_reuse", "capability", EXP_VALUE, 1, 0,
+    /* capability（最小内存能力模型；模型层，不是 VM 的 load/store 通路）
+     * ↑ 组名已改为 checked-ref：它是 Meta `ref(T)` 的候选 lowering，
+     *   **不是** `#addr` 的规范（见 §五 与 docs/spec/vm.md）。 */
+    {"cap_live_rw", "checked-ref", EXP_VALUE, 1, 0, case_cap_live_rw},
+    {"cap_bounds", "checked-ref", EXP_TRAP, 0, 9210, case_cap_bounds},
+    {"cap_rights", "checked-ref", EXP_TRAP, 0, 9209, case_cap_rights},
+    {"cap_revoke", "checked-ref", EXP_TRAP, 0, 9207, case_cap_revoke},
+    {"cap_same_address_reuse", "checked-ref", EXP_VALUE, 1, 0,
      case_cap_same_address_reuse},
-    {"cap_copy_revoke", "capability", EXP_TRAP, 0, 9207, case_cap_copy_revoke},
-    {"cap_memory_roundtrip", "capability", EXP_VALUE, 1, 0,
+    {"cap_copy_revoke", "checked-ref", EXP_TRAP, 0, 9207, case_cap_copy_revoke},
+    {"cap_memory_roundtrip", "checked-ref", EXP_VALUE, 1, 0,
      case_cap_memory_roundtrip},
-    {"cap_forged_reference", "capability", EXP_TRAP, 0, 9206,
+    {"cap_forged_reference", "checked-ref", EXP_TRAP, 0, 9206,
      case_cap_forged_reference},
-    {"cap_int_roundtrip", "capability", EXP_VALUE, 1, 0,
+    {"cap_int_roundtrip", "checked-ref", EXP_VALUE, 1, 0,
      case_cap_int_roundtrip},
-    {"cap_int_after_revoke", "capability", EXP_TRAP, 0, 9208,
+    {"cap_int_after_revoke", "checked-ref", EXP_TRAP, 0, 9208,
      case_cap_int_after_revoke},
-    {"cap_context_reuse", "capability", EXP_TRAP, 0, 9208,
+    {"cap_context_reuse", "checked-ref", EXP_TRAP, 0, 9208,
      case_cap_context_reuse},
-    {"cap_child_borrow", "capability", EXP_VALUE, 1, 0, case_cap_child_borrow},
-    {"cap_space_switch", "capability", EXP_TRAP, 0, 9212,
+    {"cap_child_borrow", "checked-ref", EXP_VALUE, 1, 0, case_cap_child_borrow},
+    {"cap_space_switch", "checked-ref", EXP_TRAP, 0, 9212,
      case_cap_space_switch},
-    {"cap_host_access", "capability", EXP_TRAP, 0, 9207, case_cap_host_access},
-    {"cap_failure_cleanup", "capability", EXP_VALUE, 1, 0,
+    {"cap_host_access", "checked-ref", EXP_TRAP, 0, 9207, case_cap_host_access},
+    {"cap_failure_cleanup", "checked-ref", EXP_VALUE, 1, 0,
      case_cap_failure_cleanup},
     /* §7 要求同时可推进的两件 */
-    {"cap_quota_two_actions", "capability", EXP_VALUE, 1, 0,
+    {"cap_quota_two_actions", "checked-ref", EXP_VALUE, 1, 0,
      case_cap_quota_two_actions},
-    {"cap_tcb_destroy_after_switch", "capability", EXP_VALUE, 1, 0,
+    {"cap_tcb_destroy_after_switch", "checked-ref", EXP_VALUE, 1, 0,
      case_cap_tcb_destroy_after_switch},
     /* §4.1 第二个原型（旁表跟踪地址）的探针：PASS = 缺口按预期复现 */
-    {"cap_protoB_stale_address_probe", "capability", EXP_VALUE, 1, 0,
+    {"cap_protoB_stale_address_probe", "checked-ref", EXP_VALUE, 1, 0,
      case_cap_protoB_stale_address_probe},
-    /* 第 5 步接线的正例与语义案：受检引用进了真实的 load/store 通路 */
-    {"cap_alloca_ref_works", "capability", EXP_VALUE, 7, 0,
-     case_cap_alloca_ref_works},
-    {"cap_addr_slot_two_flavors", "capability", EXP_VALUE, 51, 0,
-     case_cap_addr_slot_two_flavors},
-    {"cap_int2ptr_is_reference", "capability", EXP_TRAP, 0, 9207,
-     case_cap_int2ptr_is_reference},
+    /* `#addr` 的语义案：单字裸地址、int2ptr 不授予权限、alloca 出来的当场能用 */
+    {"addr_slot_roundtrip", "addr", EXP_VALUE, 51, 0, case_addr_slot_roundtrip},
+    {"alloca_rw_works", "addr", EXP_VALUE, 7, 0, case_alloca_rw_works},
+    {"int2ptr_no_grant", "addr", EXP_TRAP, 0, 1004, case_int2ptr_no_grant},
 };
 
 static const size_t k_case_count = sizeof(k_cases) / sizeof(k_cases[0]);
