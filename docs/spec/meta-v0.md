@@ -19,6 +19,20 @@ let main: i32 = add3(3, 4, 5);
 表达式可以包含括号和嵌套调用。具体已覆盖的形式与限制见 [Meta 进度](../implementation/meta-parser-plan.md)。
 不要把单个语料成功推广为所有组合都支持。
 
+`eval` 前缀标记**编译期求值**的调用：Meta 把它发成 LAINIR 的 `#eval g(1)`，由折叠阶段在后端与
+执行之前算成常量（实参必须是编译期已知的，否则验证器拒绝码 2012）。v0 的拼写是 `eval`，
+**不是 `#eval`** —— `#` 到行尾是注释。目前只支持绑定位置，返回位置 `return eval g(1);` 报 4。
+
+```lain
+func g(x: i32) -> i32 {
+  return x + 1;
+}
+func f() -> i32 {
+  let y: i32 = eval g(1);
+  return y;
+}
+```
+
 ```lain
 struct Pair { left: i32 right: i32 }
 let p = Pair { left: 3, right: 4 };

@@ -134,13 +134,34 @@
 - **验收**：源文件 → LAINIR 文本里出现 `#eval`；实参非常量的拒例（2012）。
 - **风险**：Meta 是手写 LAINIR，暂存区布局以 `bootstrap/std/scope.l1` 文件头为准；新增格子要同步容量检查。
 
+- **状态：已完成（只做绑定位置）。** 实测（2026-09-21）：
+  - `bootstrap/std/lex.l1` 加词数据 `meta_kw_eval`（`"eval"`，4 字节，与 `meta_kw_func` 同一段）；
+    `bootstrap/std/emit.l1` 加 `meta_hash_eval`（`"#eval "`，与 `"#call "` **等长** 6 字节）。
+  - `bootstrap/std/funcs.l1`：`meta_emit_binding_call` 多一个 `%is_eval: #bits<1>`，前缀用一次
+    `#if` 在 `#call ` / `#eval ` 之间选（发射器其余部分一个字没动，两趟顺序没碰）；
+    `meta_lower_stmt` 在形状分派**之前**判标记——`%v` 是内容为 `eval` 的词、且下一个兄弟是
+    种类 5（一次调用）→ 拿那个兄弟当被调者、它的下一个兄弟当实参表，传 `%is_eval = 1`。
+  - **没有新增暂存区格子**（只多两份数据串），所以 `scope.l1` 文件头的布局与容量检查不用动。
+  - 产物（`build/meta_boot.exe seed/tests/meta_eval_call.lain main 2 '' canonical
+    std/prelude.lain=bootstrap/lain/std/prelude.lain`）里是 `%y = #eval g(1)`；
+    默认模式折叠后 `main() = 2` → `ALL PASS`。
+  - 反例一（实参是参数）：`%y = #eval g(%a)` → 验证器
+    `2012 line 5 #eval argument 0 is not compile-time known`。
+  - 反例二（返回位置 `return eval g(1);`）：Meta 干净报 **4**。
+  - 只支持绑定位置是**有意的**：顶层 `let main: i32 = eval g(1);` 走的是「合成过程 +
+    `#return #call …`」那条路，`#eval` 会被当成内联操作数发出去，而折叠阶段认的是**指令**——
+    要支持得先改 `meta_emit_call` 的收尾形状（先落临时值再 `#return`）。留作后续。
+  - 验收：`check_meta` **22/22**（新增 `eval_call`、`reject_eval_unknown_arg`、
+    `reject_eval_return_pos`）、`check_vspace` 94/94、`eval_checks` 16/16、语料快照 vs S5 提交
+    **64/65 逐字节一致**（唯一差异是新增的 `seed/tests/meta_eval_call.lain`）、`check_docs` 0 errors。
+
 ### S5 主线接线
 
 - **改**：驱动在 lowering 之后调用折叠，再产出后端输入；折叠后**重新验证**一遍（折叠产物仍须通过验证器）。
 - **验收**：端到端正例（源 → 折叠 → 后端/执行结果正确）+ 反例（未折叠残留被拒）。
 - **风险**：折叠引入的新阶段要有明确入口，不能在驱动里散着调。
 
-- **状态：接线已完成（端到端正例要等 S4）。** 入口是 `seed/tests/meta_boot.c` 的 `fold_evals`
+- **状态：接线已完成（端到端正例见 S4）。** 入口是 `seed/tests/meta_boot.c` 的 `fold_evals`
   （在解析 + 验证之后、装载/后端之前）：
   - **执行路径**与 **`-c`（出 C）路径**都走它；`canonical` 模式**不折**——它打印的是 Meta 的
     产物，不是后端输入。

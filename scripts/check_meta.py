@@ -46,6 +46,34 @@ CASES = [
          entry="main", want=9),
     dict(name="let_call", kind="ok", src="seed/tests/meta_let_call.lain",
          entry="main", want=2),
+    # 编译期求值的调用：v0 的标记是 `eval` 前缀（**不是** `#eval`，`#` 是注释）。
+    # 产物里必须出现 `#eval g(1)`，而且折叠阶段要把它算成常量（跑出来 2）。
+    dict(name="eval_call", kind="ok", src="seed/tests/meta_eval_call.lain",
+         entry="main", want=2, text=["#eval g(1)"]),
+    # `eval` 的实参必须是**编译期已知**的：传参数 → 验证器 2012
+    dict(name="reject_eval_unknown_arg", kind="reject", code=2012,
+         src="func g(x: i32) -> i32 { return x; }\n"
+             "func f(a: i32) -> i32 { let y: i32 = eval g(a); return y; }\n"
+             "let main: i32 = f(1);",
+         entry="main"),
+    # 名字叫 `eval` 的普通函数不能被标记吃掉：括号调用还是普通调用
+    dict(name="eval_as_function_name", kind="ok",
+         src="func eval(x: i32) -> i32 { return x + 1; }\n"
+             "func f() -> i32 { let y: i32 = eval(1); return y; }\n"
+             "let main: i32 = f();",
+         entry="main", want=2, text=["#call eval(1)"]),
+    # `eval g(1)` 混在更长的表达式里本期不支持：必须干净拒，不能静默算错
+    dict(name="reject_eval_mixed", kind="reject", code=4,
+         src="func g(x: i32) -> i32 { return x + 1; }\n"
+             "func f() -> i32 { let y: i32 = 1 + eval g(1); return y; }\n"
+             "let main: i32 = f();",
+         entry="main"),
+    # 返回位置（`return eval g(1);`）本期没做：干净地报 4，不发半截文本
+    dict(name="reject_eval_return_pos", kind="reject", code=4,
+         src="func g(x: i32) -> i32 { return x + 1; }\n"
+             "func f() -> i32 { return eval g(1); }\n"
+             "let main: i32 = f();",
+         entry="main"),
     dict(name="cmp_param", kind="ok", src="seed/tests/meta_cmp_param.lain",
          entry="main", want=1,
          text=["#slt[#bits<32>](%x, 2)", "#ult[#bits<32>](%x, 2)"]),

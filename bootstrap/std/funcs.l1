@@ -328,6 +328,9 @@
 
 // `  %NAME = #call <callee>(<实参>…)\n`
 //
+// `%is_eval` = 1 时前缀写 `#eval ` 而不是 `#call `：函数体里的
+// `let x: T = eval g(1);` 是**编译期求值**的调用（v0 拼写是 `eval` 前缀，不带 `#`）。
+//
 // 函数体里的 `let x: T = g(1);`。和 `meta_emit_ret_call` 是同一套两趟顺序
 // （`meta_args_prepare` → 写前缀 → `meta_args_write`），只是前缀从
 // `  #return #call ` 换成 `  %NAME = #call `——那一段是本仓库最脏的坑之一，
@@ -337,7 +340,7 @@
                              %name_lo: #bits<64>, %name_hi: #bits<64>,
                              %t_lo: #bits<64>, %t_hi: #bits<64>,
                              %callee_lo: #bits<64>, %callee_hi: #bits<64>,
-                             %args: #bits<64>) -> #bits<32> {
+                             %args: #bits<64>, %is_eval: #bits<1>) -> #bits<32> {
   %ast = #call meta_args_prepare(%host, %base, %len, %kind, %width, %t_lo,
                                  %t_hi, %args)
   %abad = #ne[#bits<32>](%ast, 0)
@@ -352,7 +355,14 @@
   %w2 = #call lain_meta_emit_write(%host, %n_at, %n_len)
   %eq = #data_addr meta_st_eqop
   %w3 = #call lain_meta_emit_write(%host, %eq, 3)
-  %hc = #data_addr meta_hash_call
+  // 前缀只有这一处不同：`#call `（普通调用）对 `#eval `（编译期求值）。
+  %hc = #if %is_eval -> (#addr) {
+    %he = #data_addr meta_hash_eval
+    #yield %he
+  } else {
+    %hc0 = #data_addr meta_hash_call
+    #yield %hc0
+  }
   %w4 = #call lain_meta_emit_write(%host, %hc, 6)
   %c_at = #lea(%base, %callee_lo, 1, 0)
   %c_len = #sub[#bits<64>](%callee_hi, %callee_lo)
@@ -779,6 +789,36 @@
     // `return g(x);` 上会挂：`g` 的下一个节点是那个组，于是组被当成算子，拿 `(`
     // 去查类型的 op 表 —— 报 6「没这个算子」，跟真实原因毫无关系。
     %form = #call meta_node_kind(%host, %v)
+    // `let y: T = eval g(…);` —— **编译期求值**的调用。v0 的标记是 `eval` 前缀，
+    // 不带 `#`（`#` 到行尾是注释，见 `std/lex.l1` 的 `bs_skip_space`）。
+    // 形状：`%v` 是一个内容为 `eval` 的词，它的下一个兄弟是「一次调用」（种类 5）。
+    // 节点访问器对 NONE 是安全的，所以这里可以无条件地先问再取。
+    %ev_kw = #data_addr meta_kw_eval
+    %ev_word = #call meta_node_is_word(%host, %v, %base, %ev_kw, 4)
+    %ev_next = #call meta_node_next(%host, %v)
+    %ev_nkind = #call meta_node_kind(%host, %ev_next)
+    %ev_ncall = #eq[#bits<64>](%ev_nkind, 5)
+    %ev_mark = #and[#bits<1>](%ev_word, %ev_ncall)
+    #if %ev_mark {
+      // 目前只支持**绑定位置**。返回位置（`return eval g(…);`）要先把结果落一个
+      // 临时值，收尾写法不同，没做就干净地报 4，不发半截文本。
+      %ev_bind = #eq[#bits<1>](%is_ret, 0)
+      %ev_st = #if %ev_bind -> (#bits<32>) {
+        %ev_lo = #call meta_node_start(%host, %ev_next)
+        %ev_ln = #call meta_node_len(%host, %ev_next)
+        %ev_hi = #add[#bits<64>](%ev_lo, %ev_ln)
+        %ev_grp = #call meta_node_next(%host, %ev_next)
+        %ev_emit = #call meta_emit_binding_call(%host, %base, %len, %kind,
+                                                %width, %name_lo, %name_hi,
+                                                %t_lo, %t_hi, %ev_lo, %ev_hi,
+                                                %ev_grp, 1)
+        #yield %ev_emit
+      } else {
+        %ev_f = #call lain_meta_fail(%host, 4)
+        #yield 4
+      }
+      #return %ev_st
+    }
     // 形状 5 说的是「这里开始一次调用」，不是「整个值就是这次调用」。`return f(0) + 1;`
     // 里 `f` 的形状也是 5 —— 那样后面那个 `+ 1` 会被悄悄丢掉（真出过）。所以先问
     // 整段值里有没有算子。
@@ -807,7 +847,7 @@
         %dgrp = #call meta_node_next(%host, %v)
         %bc = #call meta_emit_binding_call(%host, %base, %len, %kind, %width,
                                            %name_lo, %name_hi, %t_lo, %t_hi,
-                                           %d_lo, %d_hi, %dgrp)
+                                           %d_lo, %d_hi, %dgrp, 0)
         #yield %bc
       } else {
         %c_lo = #call meta_node_start(%host, %v)
