@@ -128,7 +128,9 @@
 
 ### S4 Meta 产出
 
-- **改**：`bootstrap/` 的 v0 源语言接受 `#eval`（拼写见 D6），Meta lowering 生成块并置标记。
+- **改**：`bootstrap/` 的 v0 源语言接受 **`eval g(1)`**（表达式前缀，拼写与理由见 D6），
+  Meta lowering 把它发成 LAINIR 的 `#eval g(1)`（**不是** `#call`）；块形式（`#eval -> (T) { ... }`）由
+  Meta 生成留给后续，本期只做调用形态——它已经能折叠、能执行、能过后端（S2/S3/S5）。
 - **验收**：源文件 → LAINIR 文本里出现 `#eval`；实参非常量的拒例（2012）。
 - **风险**：Meta 是手写 LAINIR，暂存区布局以 `bootstrap/std/scope.l1` 文件头为准；新增格子要同步容量检查。
 
@@ -176,8 +178,22 @@
   **我建议乙**（一次编译期执行一个账户，超支的诊断能指到那一次）；「每模块块数」的上限建议由**验证器**数（静态量），折叠阶段只消费它。
 - **D5 eval TCB 的空间来源。** 甲：独立临时空间（fold 今天就是这么跑调用形式的）。乙：要求调用方显式授权捕获地址所在的空间。
   **我建议甲 + 乙并存**：执行用独立空间（满足「不自带、不隐式继承」），捕获地址要能用就必须走显式授权（满足「还需显式授权相应的内存能力」）。两条不冲突。
-- **D6 v0 源语言的拼写。** 甲：`#eval f(1)` 作为表达式。乙：单独的声明形式（如 `eval NAME = f(1);`）。
-  **我建议甲**（与 LAINIR 侧同名，Meta 只需认前缀，不新增声明语法）。
+- **D6 v0 源语言的拼写。已定：`eval g(1)` 作为表达式前缀**（2026-09-21 作者裁定，见下）。
+  - 原甲 `#eval f(1)` **在 v0 源码里写不出来**：`#` 到行尾是注释。
+    证据：`bootstrap/std/lex.l1:73-101` 的 `bs_skip_space` —— 字节 ≤ 32 是空白（:85-89），
+    字节 **35 = `#`** 就调 `bs_skip_line` 跳到行尾（:90-94）。这段注释本身也写明注释是必须的
+    （没有它，注释里出现的 `scalar` 字样会被当成声明扫进来）。
+  - 最小复现（探针不进版本库）：把
+    `func g(x: i32) -> i32 { return x + 1; }` /
+    `func f() -> i32 { let y: i32 = #eval g(1); return y; }` /
+    `let main: i32 = f();` 存成 `build/probe_eval.lain`，跑
+    `$env:LAIN_META_MANIFEST='bootstrap/SOURCE_ORDER'` +
+    `build/meta_boot.exe build/probe_eval.lain main 2 '' canonical std/prelude.lain=bootstrap/lain/std/prelude.lain`
+    → 实测 `meta: 122058 steps, host status 4`、exit 1：Meta 在 `let y: i32 = ` 处停住，
+    后半行（含 `return y;`）被当注释吃掉。LAINIR 侧不受影响——它有自己的 parser，`#eval` 照用。
+  - 因此拼法定为 **`let y: i32 = eval g(1);`**：与 LAINIR 的 `#eval g(1)` 同形状、只去掉 `#`，
+    能嵌在表达式里（`1 + eval g(1)`）。备选是 `eval y: i32 = g(1);`（带名字的语句形式，
+    不能嵌在表达式里）——未采用。
 - **D7 `#alloca` 的 count 按元素类型宽度读（S3 实测发现，需要裁定，尚未实施）。**
   - 最小复现：`%p = #alloca[#bits<8>](256)`，接着 `#store[#bits<64>](42, %p)` → 拒 **1005**；实测这一次
     `#alloca` 只把水位推了 **1 字节**（`tcb->stack_used == 1`）。机制在 `seed/src/vm/engine.c:120-130`：
