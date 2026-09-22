@@ -37,6 +37,8 @@ struct LainFold {
    * limit = 0 = 不限额（默认，行为跟从前一样）。栈按整块容量在 admit 时预扣，
    * 归还发生在 TCB 销毁时。 */
   LainVmQuota quota;
+  /* 每模块 `#eval` 块数量的上限：0 = 不限（设计原话）。数组容量是硬底。 */
+  uint32_t block_limit;
 
   /* 一次 lainfold_module 期间的状态 */
   L1Builder *builder;
@@ -83,6 +85,7 @@ LainFold *lainfold_new(LainVmCaps *caps, uint32_t max_call_depth,
   fold->stack_bytes = stack_bytes;
   fold->fuel = fuel ? fuel : 1000000;
   lainvm_quota_init(&fold->quota, 0); /* 默认不限额 */
+  fold->block_limit = 0;              /* 默认不限块数 */
   return fold;
 }
 
@@ -90,6 +93,11 @@ LainFold *lainfold_new(LainVmCaps *caps, uint32_t max_call_depth,
  * lainfold_module 之前调用：账户是**执行**级的，不随模块重置。 */
 void lainfold_set_quota_limit(LainFold *fold, uint64_t limit_bytes) {
   if (fold) lainvm_quota_init(&fold->quota, limit_bytes);
+}
+
+/* 每模块块数上限。0 = 不限，但数组只有 FOLD_MAX_BLOCKS 格。 */
+void lainfold_set_block_limit(LainFold *fold, uint32_t limit) {
+  if (fold) fold->block_limit = limit;
 }
 
 /* 账户只读快照，给驱动与验收用。 */
@@ -218,6 +226,7 @@ static bool run_eval(LainFold *f, const L1Inst *inst,
   L1Value args[FOLD_MAX_ARGS];
   L1Value value;
   LainVmSliceResult result;
+  char message[256];
   uint32_t i;
 
   if (!inst->symbol) return fold_fail(f, 9301, "fold: #eval without a callee");
@@ -254,8 +263,18 @@ static bool run_eval(LainFold *f, const L1Inst *inst,
                            ? f->diag->message
                            : "fold: cannot start the compile-time call");
     result = lainvm_engine_run(f->tcb, f->fuel);
-    if (result != LAINVM_SLICE_DONE)
+    if (result != LAINVM_SLICE_DONE) {
+      /* Trap 是这次编译期调用自己的失败：把引擎那枚稳定码原样报上来，与块形态
+       * （run_eval_block）一致，不压成笼统的 9306 —— 诊断要能指到那一次执行。
+       * 9306 只留给「跑完了但不是 DONE、也不是 trap」的情形（今天就是预算耗尽）。 */
+      int trap_code = (int)f->tcb->trap.status;
+      if (result == LAINVM_SLICE_TRAPPED && trap_code > 0) {
+        snprintf(message, sizeof(message),
+                 "fold: the compile-time call trapped (%d)", trap_code);
+        return fold_fail(f, trap_code, message);
+      }
       return fold_fail(f, 9306, "fold: compile-time call did not finish");
+    }
     if (!f->tcb->has_result && inst->result_count > 0)
       return fold_fail(f, 9307, "fold: compile-time call produced no value");
     value = f->tcb->result;
@@ -282,6 +301,13 @@ static const L1Region *rewrite_region(LainFold *f, const L1Region *region,
 
 /* 遍历整个模块，把 `#eval` 块收集起来。块里再嵌一个块今天执行不了（引擎见到
  * INST_EVAL 就是 trap 1045），所以那一种直接拒，而不是留下一个跑不了的块。 */
+/* 有效块数上限：0 = 不限（设计原话），但数组只有 FOLD_MAX_BLOCKS 格。 */
+static uint32_t block_limit_of(const LainFold *f) {
+  if (f->block_limit == 0 || f->block_limit > FOLD_MAX_BLOCKS)
+    return FOLD_MAX_BLOCKS;
+  return f->block_limit;
+}
+
 static bool collect_blocks(LainFold *f, const L1Region *region,
                            bool inside_block) {
   uint32_t i;
@@ -293,7 +319,7 @@ static bool collect_blocks(LainFold *f, const L1Region *region,
         return fold_fail(f, 9320,
                          "fold: an #eval block nested in another #eval block is "
                          "not supported yet");
-      if (f->block_count >= FOLD_MAX_BLOCKS)
+      if (f->block_count >= block_limit_of(f))
         return fold_fail(f, 9319, "fold: too many #eval blocks in one module");
       if (!collect_blocks(f, inst->body, true)) return false;
       f->blocks[f->block_count].block = inst;

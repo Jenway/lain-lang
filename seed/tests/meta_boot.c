@@ -344,10 +344,22 @@ static bool module_has_eval(const L1Module *module) {
   return false;
 }
 
+/* 折叠阶段的预算与上限从环境读（S6：策略由驱动给，不写死在库里）。
+ * 名字与缺省：LAIN_FOLD_DEPTH=64 / LAIN_FOLD_STACK=4096 / LAIN_FOLD_FUEL=1000000 /
+ * LAIN_FOLD_QUOTA=0（不限额）/ LAIN_FOLD_BLOCKS=0（不限块数）。
+ * 值不是十进制数时退回缺省——不静默当成 0（那等于把预算悄悄设成最小）。 */
+static uint64_t fold_env(const char *name, uint64_t fallback) {
+  const char *text = getenv(name);
+  char *end = NULL;
+  unsigned long long parsed;
+  if (!text || !text[0]) return fallback;
+  parsed = strtoull(text, &end, 10);
+  if (end == text || *end != '\0') return fallback;
+  return (uint64_t)parsed;
+}
+
 /* 折叠 + **重新验证**：折叠产物仍须是合法 LAINIR，才交给执行或后端。
- * 没有 `#eval` 时原样返回（也不起执行环境）。
- * 预算目前是固定值（递归 64 / 栈 4096 / fuel 1000000），策略化的部分见
- * docs/implementation/eval-landing-plan.md 的 S6；宿主能力用同一份 caps。 */
+ * 没有 `#eval` 时原样返回（也不起执行环境）。宿主能力用同一份 caps。 */
 static const L1Module *fold_evals(const L1Module *module, L1Builder *builder,
                                   LainVmCaps *caps, L1Diagnostic *diag,
                                   const char *what) {
@@ -356,7 +368,13 @@ static const L1Module *fold_evals(const L1Module *module, L1Builder *builder,
   char buffer[192];
 
   if (!module_has_eval(module)) return module;
-  fold = lainfold_new(caps, 64, 4096, 1000000);
+  fold = lainfold_new(caps, (uint32_t)fold_env("LAIN_FOLD_DEPTH", 64),
+                      fold_env("LAIN_FOLD_STACK", 4096),
+                      fold_env("LAIN_FOLD_FUEL", 1000000));
+  if (fold) {
+    lainfold_set_quota_limit(fold, fold_env("LAIN_FOLD_QUOTA", 0));
+    lainfold_set_block_limit(fold, (uint32_t)fold_env("LAIN_FOLD_BLOCKS", 0));
+  }
   if (!fold) {
     report_fail(what, "cannot admit the fold stage");
     return NULL;

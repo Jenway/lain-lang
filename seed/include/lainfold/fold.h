@@ -46,6 +46,11 @@ void lainfold_free(LainFold *fold);
  * 要在第一次 lainfold_module 之前调用。 */
 void lainfold_set_quota_limit(LainFold *fold, uint64_t limit_bytes);
 
+/* 每模块 `#eval` **块**数量的上限（设计：0 = 不限，也是默认）。
+ * 数组容量 `FOLD_MAX_BLOCKS` 是硬底：上限高于容量时按容量算，超了报 9319。
+ * 要在第一次 lainfold_module 之前调用。 */
+void lainfold_set_block_limit(LainFold *fold, uint32_t limit);
+
 /* 读账目快照（只读，给驱动与验收用）。 */
 void lainfold_quota(const LainFold *fold, LainVmQuota *out);
 

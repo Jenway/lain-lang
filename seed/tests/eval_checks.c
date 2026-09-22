@@ -112,6 +112,32 @@ static const char k_block_fold[] =
     "  #return %w\n"
     "}\n";
 
+/* S6 反例：调用形态的 `#eval` 里发生 trap（`#alloca` 要 800 字节、折叠只给 64 字节
+ * 的栈租约）——折叠把引擎那枚稳定码原样报成诊断码，与块形态一致，不压成 9306。 */
+static const char k_eval_call_traps[] =
+    "#proc big(%x: #bits<64>) -> #bits<64> {\n"
+    "  %p = #alloca[#bits<64>](100)\n"
+    "  #return %x\n"
+    "}\n"
+    "\n"
+    "#proc main() -> #bits<64> {\n"
+    "  %v = #eval big(1)\n"
+    "  #return %v\n"
+    "}\n";
+
+/* S6：两个块，用来看「块数上限」的两面（0 = 不限，1 = 第二个块报 9319）。 */
+static const char k_two_blocks[] =
+    "#proc main() -> #bits<64> {\n"
+    "  %a = #eval -> (#bits<64>) {\n"
+    "    #return 1\n"
+    "  }\n"
+    "  %b = #eval -> (#bits<64>) {\n"
+    "    #return 2\n"
+    "  }\n"
+    "  %s = #add[#bits<64>](%a, %b)\n"
+    "  #return %s\n"
+    "}\n";
+
 /* 反例：块里的 #alloca 超过折叠给它的栈租约容量（租约 64 字节、块要 800）。
  * 元素类型写 `#bits<64>`：今天 count 是按**元素类型的宽度**读的，写 `#bits<8>`
  * 时 count 会被截到 8 位（256 → 0 → 夹到 1），那是另一个已登记的问题（计划 §4 D7）。 */
@@ -753,6 +779,101 @@ done:
 
 /* --- 用例表 --------------------------------------------------------------- */
 
+/* S6 反例：调用形态的 #eval 里 trap（栈不够）→ 诊断码是引擎那枚 1007，不是 9306。 */
+static EvalResult case_eval_call_traps(void) {
+  L1Builder *b = lainir_builder_new();
+  L1Builder *out = lainir_builder_new();
+  LainFold *fold = lainfold_new(NULL, 64, 64, 1000000);
+  L1Diagnostic d;
+  const L1Module *m;
+  const L1Module *after;
+  EvalResult r;
+
+  d.code = 0;
+  m = lainir_parse(b, k_eval_call_traps, &d);
+  if (!m || lainir_verify(m, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠前就该通过验证");
+  } else {
+    after = lainfold_module(fold, out, m, &d);
+    if (after)
+      r = fail_result(-1, "调用里 trap 的那一次 eval 本该被拒");
+    else
+      r = fail_result(d.code, "调用形态 trap 的诊断码");
+  }
+  lainfold_free(fold);
+  lainir_builder_free(out);
+  lainir_builder_free(b);
+  return r;
+}
+
+/* S6 正例：块数上限 0 = 不限——两个块都折掉，产物跑出来还是 3。 */
+static EvalResult case_block_limit_off(void) {
+  L1Builder *b = lainir_builder_new();
+  L1Builder *out = lainir_builder_new();
+  LainFold *fold = lainfold_new(NULL, 64, 4096, 1000000);
+  L1Diagnostic d;
+  const L1Module *m;
+  const L1Module *after;
+  uint64_t value = 0;
+  int code;
+  EvalResult r;
+
+  d.code = 0;
+  m = lainir_parse(b, k_two_blocks, &d);
+  if (!m || lainir_verify(m, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠前就该通过验证");
+    goto done;
+  }
+  after = lainfold_module(fold, out, m, &d);
+  if (!after) {
+    r = fail_result(d.code ? d.code : -1, "上限 0（不限）不该拒");
+    goto done;
+  }
+  if (lainfold_folded_count(fold) != 2) {
+    r = fail_result(-1, "折掉的次数不是 2");
+    goto done;
+  }
+  code = run_module_result(after, "main", &value);
+  if (code != 0 || value != 3) {
+    r = fail_result(code, "折叠后 main() 的值不是 3");
+    goto done;
+  }
+  r = pass_result(NULL);
+done:
+  lainfold_free(fold);
+  lainir_builder_free(out);
+  lainir_builder_free(b);
+  return r;
+}
+
+/* S6 反例：块数上限设 1 → 第二个块报 9319。 */
+static EvalResult case_block_limit_reached(void) {
+  L1Builder *b = lainir_builder_new();
+  L1Builder *out = lainir_builder_new();
+  LainFold *fold = lainfold_new(NULL, 64, 4096, 1000000);
+  L1Diagnostic d;
+  const L1Module *m;
+  const L1Module *after;
+  EvalResult r;
+
+  lainfold_set_block_limit(fold, 1);
+  d.code = 0;
+  m = lainir_parse(b, k_two_blocks, &d);
+  if (!m || lainir_verify(m, &d) != 0) {
+    r = fail_result(d.code ? d.code : -1, "折叠前就该通过验证");
+  } else {
+    after = lainfold_module(fold, out, m, &d);
+    if (after)
+      r = fail_result(-1, "超过块数上限本该被拒");
+    else
+      r = fail_result(d.code, "块数上限的诊断码");
+  }
+  lainfold_free(fold);
+  lainir_builder_free(out);
+  lainir_builder_free(b);
+  return r;
+}
+
 typedef EvalResult (*EvalCaseFn)(void);
 
 typedef struct {
@@ -777,6 +898,9 @@ static const EvalCase k_cases[] = {
     {"block_engine_rejects", case_block_engine_rejects, 1045, NULL},
     {"block_backend_rejects", case_block_backend_rejects, 9225, NULL},
     {"folded_backend_ok", case_folded_backend_ok, 0, NULL},
+    {"eval_call_traps", case_eval_call_traps, 1007, NULL},
+    {"block_limit_off", case_block_limit_off, 0, NULL},
+    {"block_limit_reached", case_block_limit_reached, 9319, NULL},
     {"unknown_opcode", case_unknown_opcode, 3002, NULL},
     {"eval_typo", case_eval_typo, 3002, NULL},
 };

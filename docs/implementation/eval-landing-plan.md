@@ -169,7 +169,9 @@
     所以语料零代价、零新失败面。
   - 折叠产物**重新验证**一遍再往下走；失败写 `fold:` / `folded verify:` 前缀的诊断。
   - 宿主能力用同一份 `caps`（`caps` 的创建因此挪到 `prepare(meta)` 之前）。
-  - 预算暂时固定（递归 64 / 栈 4096 / fuel 1000000），策略化留在 S6。
+  - 预算从环境读（S6 已完成）：`LAIN_FOLD_DEPTH`=64 / `LAIN_FOLD_STACK`=4096 /
+    `LAIN_FOLD_FUEL`=1000000 / `LAIN_FOLD_QUOTA`=0（不限额）/ `LAIN_FOLD_BLOCKS`=0（不限块数）；
+    值不是十进制数就退回缺省（不静默当 0，那等于把预算悄悄设成最小）。
 - **已验**：`check_meta` 19/19、`check_vspace` 94/94、`eval_checks` **16/16**、
   64 条语料快照 vs S3b 提交 `64/64 逐字节一致`（无 `#eval` 时折叠阶段原样返回）。
   新增 IR 级组合用例 `folded_backend_ok`：折叠后的产物能进 C 后端，而**同一份模块不折叠时**
@@ -178,8 +180,20 @@
 
 ### S6 预算与策略
 
-- 每模块 eval 块数量：加计数与上限（0 = 不限，按设计原话）。
-- quota 归属与 eval TCB 的空间来源按 D4/D5 的裁定接线。
+- **状态：已完成。**
+- 每模块 eval 块数量：`lainfold_set_block_limit(fold, limit)`，**0 = 不限**（设计原话，也是默认）；
+  数组容量 `FOLD_MAX_BLOCKS`（64）是硬底——上限高于容量时按容量算，超了报 **9319**。
+- 预算不再写死在库里：`seed/tests/meta_boot.c` 的 `fold_evals` 从环境读
+  `LAIN_FOLD_DEPTH` / `LAIN_FOLD_STACK` / `LAIN_FOLD_FUEL` / `LAIN_FOLD_QUOTA` / `LAIN_FOLD_BLOCKS`，
+  缺省 64 / 4096 / 1000000 / 0（不限额）/ 0（不限块数）。
+- **调用形态的 trap 码与块形态统一**：`run_eval` 里引擎 trap 时把引擎那枚稳定码**原样**报成诊断码
+  （与 `run_eval_block` 一致）；**9306** 只留给「跑完了但不是 DONE、也不是 trap」的情形（今天就是 fuel 耗尽）。
+- **已验（2026-09-21）**：`eval_checks` **19/19**（新增 `eval_call_traps` 拒 1007、`block_limit_off` 通过、
+  `block_limit_reached` 拒 9319；负对照 `--expect-verify 9306` 与 `--expect-verify 9318` 都 exit=1）；
+  `check_meta` 24/24、`check_vspace` 94/94、语料快照 vs S4 提交 `65/65 逐字节一致`、
+  `text_roundtrip` 28 项 ALL PASS、`check_docs` 0 errors。驱动层实测：
+  缺省 → `main() = 2` ALL PASS exit=0；`LAIN_FOLD_FUEL=1` → `fold: 9306` exit=1；
+  `LAIN_FOLD_QUOTA=1` → `fold: 9318` exit=1。
 
 ## 3 待作者裁定
 
