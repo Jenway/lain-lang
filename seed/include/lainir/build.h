@@ -59,6 +59,11 @@ const L1Inst *lainir_inst_if(L1Builder *builder, const char *result,
 const L1Inst *lainir_inst_loop(L1Builder *builder, const char *result,
                                const char *label, const L1Region *body);
 
+/* 编译期执行块。区域自己声明结果类型；块里必须每条路径都 #return，
+ * 而且结果类型不许含 #addr（编译期地址不进产物）。 */
+const L1Inst *lainir_inst_eval(L1Builder *builder, const char *result,
+                               const L1Region *body);
+
 /* #switch：一个选择子 + 常量到区域的映射 + **必须显式**的 default。
  * ty 是选择子的类型实参——引擎和后端都靠它把常量掩到选择子的宽度上，
  * 所以它是必须的，不是可选的。cases 数组会拷进 arena。
