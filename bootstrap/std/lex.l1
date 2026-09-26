@@ -33,7 +33,7 @@
   #return %r
 }
 
-// 跳到本行末尾之后（`#` 到换行为止是注释）。到头返回 len。
+// 跳到本行末尾之后。`//` 与过渡期的 `#` 共用此过程。
 #proc bs_skip_line(%base: #addr, %from: #bits<64>, %len: #bits<64>) -> #bits<64> {
   %end = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
     %more = #ult[#bits<64>](%i, %len)
@@ -49,6 +49,35 @@
       #continue scan(%i2)
     } else {
       #break scan(%i)
+    }
+  }
+  #return %end
+}
+
+// 从 `/*` 后一个字节开始寻找 `*/`。未闭合返回 len+1，交给建树入口拒绝。
+#proc bs_skip_block(%base: #addr, %from: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %end = #loop scan(%i: #bits<64> = %from) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %b = #call bs_byte_at(%base, %i, %len)
+      %is_star = #eq[#bits<8>](%b, 42)
+      #if %is_star {
+        %j = #add[#bits<64>](%i, 1)
+        %fits = #ult[#bits<64>](%j, %len)
+        #if %fits {
+          %next = #call bs_byte_at(%base, %j, %len)
+          %is_slash = #eq[#bits<8>](%next, 47)
+          #if %is_slash {
+            %past = #add[#bits<64>](%j, 1)
+            #break scan(%past)
+          }
+        }
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue scan(%i2)
+    } else {
+      %bad = #add[#bits<64>](%len, 1)
+      #break scan(%bad)
     }
   }
   #return %end
@@ -70,11 +99,11 @@ data meta_kw_for ro { 102 111 114 }                    // "for"  3
 data meta_kw_in ro { 105 110 }                         // "in"   2
 data meta_kw_acc ro { 97 99 99 }                       // "acc"  3
 // `eval g(1)`：**编译期求值的调用标记**，是调用前面的一个词。v0 源码里不能写成
-// `#eval` —— `#` 到行尾是注释（见本文件 `bs_skip_space`）。
+// `#eval` —— 源语言的编译期调用标记是独立的 `eval` 词。
 data meta_kw_eval ro { 101 118 97 108 }                // "eval" 4
 
-// 跳过空白（空格、换行、制表、回车：字节 <= 32）**和注释**（`#` 到本行末尾），
-// 返回第一个有效字节的下标；走到头就返回 len。
+// 跳过空白与 `//`、`/* ... */` 注释。
+// 返回第一个有效字节的下标；走到头返回 len，块注释未闭合返回 len+1。
 //
 // 注释是必须的，不是装饰：没有它，一份源码里出现的 `scalar` 字样（比如注释里
 // 提到的）会**被当成声明扫进来**。prelude 自己的注释就撞过这个——两条名字长度
@@ -90,10 +119,21 @@ data meta_kw_eval ro { 101 118 97 108 }                // "eval" 4
         %n = #add[#bits<64>](%i, 1)
         #continue scan(%n)
       }
-      %is_hash = #eq[#bits<8>](%b, 35)
-      #if %is_hash {
-        %n2 = #call bs_skip_line(%base, %i, %len)
-        #continue scan(%n2)
+      %is_slash = #eq[#bits<8>](%b, 47)
+      #if %is_slash {
+        %j = #add[#bits<64>](%i, 1)
+        %next = #call bs_byte_at(%base, %j, %len)
+        %line = #eq[#bits<8>](%next, 47)
+        #if %line {
+          %n3 = #call bs_skip_line(%base, %j, %len)
+          #continue scan(%n3)
+        }
+        %block = #eq[#bits<8>](%next, 42)
+        #if %block {
+          %from = #add[#bits<64>](%j, 1)
+          %n4 = #call bs_skip_block(%base, %from, %len)
+          #continue scan(%n4)
+        }
       }
       #break scan(%i)
     } else {

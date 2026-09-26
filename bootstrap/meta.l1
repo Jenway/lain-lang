@@ -46,6 +46,8 @@
   } else {
     #yield %setup
   }
+  %peak = #call meta_bump_peak(%host)
+  %reported = #call lain_meta_scratch_report(%host, %peak)
   #return %status
 }
 
@@ -167,12 +169,20 @@
       %body = #add[#bits<64>](%brace, 1)
       %size = #call meta_struct_fields(%host, %base, %len, %name_lo, %name_hi,
                                        %body, 0, 1)
-      %w = #call meta_emit_size(%host, %base, %name_lo, %name_hi, %size)
-      %ok = #eq[#bits<64>](%size, 0xFFFFFFFFFFFFFFFF)
-      %s = #if %ok -> (#bits<32>) {
-        %f2 = #call lain_meta_fail(%host, 7)
-        #yield 7
+      %failed = #eq[#bits<64>](%size, 0xFFFFFFFFFFFFFFFF)
+      %s = #if %failed -> (#bits<32>) {
+        %reset = #call lain_meta_emit_reset(%host)
+        %eval_code = #call lain_meta_eval_status(%host)
+        %has_eval_code = #ugt[#bits<64>](%eval_code, 0)
+        %code = #if %has_eval_code -> (#bits<32>) {
+          %low = #trunc[#bits<32>](%eval_code)
+          #yield %low
+        } else {
+          #yield 7
+        }
+        #yield %code
       } else {
+        %w = #call meta_emit_size(%host, %base, %name_lo, %name_hi, %size)
         #yield 0
       }
       #yield %s
@@ -200,7 +210,7 @@
     %byte = #call bs_byte_at(%base, %here, %len)
     %is_close = #eq[#bits<8>](%byte, 125)
     #if %is_close {
-      %rounded = #call bs_align_up(%off, %al)
+      %rounded = #call meta_eval_align_up(%host, %off, %al, %base, %here)
       #break fields(%rounded)
     }
     // 字段名 : 类型名
@@ -214,7 +224,7 @@
     %bad_type = #eq[#bits<64>](%tid, 0)
     #if %bad_type {
       %f3 = #call lain_meta_fail(%host, 5)
-      #return 5
+      #return 0xFFFFFFFFFFFFFFFF
     }
     %tinfo = #call meta_tid_repr(%host, %tid)
     %kind = #and[#bits<64>](%tinfo, 255)
@@ -907,7 +917,7 @@
 //
 // 结果放在暂存区：`+168` = 临时值下标，或「无」表示"结果就是源码里那段"（此时
 // `+176`/`+184` 是它的范围）。**出参而不是返回值**，因为返回值要用来带状态码；这也是
-// `meta_parse_seq` 用 `+144` 的老路子，调用方紧接着读。
+// 这条表达式沿用的出参约定：调用方在返回后紧接着读取。
 //
 // 左结合：每读到一个算子，就把它左边累积的值和右边操作数发成一条指令。累积值一开始
 // 可以是源码片段（`1 + 2` 的第一条就是 `#add(1, 2)`，不是先物化 `1`），发了第一条

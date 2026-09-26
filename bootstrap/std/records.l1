@@ -85,7 +85,7 @@
     %byte = #call bs_byte_at(%src, %here, %len)
     %is_close = #eq[#bits<8>](%byte, 125)
     #if %is_close {
-      %rounded = #call bs_align_up(%off, %al)
+      %rounded = #call meta_eval_align_up(%host, %off, %al, %src, %here)
       #break fields(%rounded)
     }
     %name_hi = #call bs_skip_ident(%src, %here, %len)
@@ -162,7 +162,13 @@
     #yield 0
   } else {
     %info = #call meta_walk_fields(%host, %src, %len, %body, 0, 0, 0, 1)
-    %size = #and[#bits<64>](%info, 0xFFFFFFFFFF)
+    %failed = #eq[#bits<64>](%info, 0xFFFFFFFFFFFFFFFF)
+    %size = #if %failed -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %low = #and[#bits<64>](%info, 0xFFFFFFFFFF)
+      #yield %low
+    }
     #yield %size
   }
   #return %r
@@ -258,6 +264,19 @@
                            %type_body: #bits<64>,
                            %at: #bits<64>) -> #bits<32> {
   %size = #call meta_layout_size(%host, %base, %len, %type_body)
+  %failed = #eq[#bits<64>](%size, 0xFFFFFFFFFFFFFFFF)
+  #if %failed {
+    %reset = #call lain_meta_emit_reset(%host)
+    %eval_code = #call lain_meta_eval_status(%host)
+    %has_eval_code = #ugt[#bits<64>](%eval_code, 0)
+    %code = #if %has_eval_code -> (#bits<32>) {
+      %low = #trunc[#bits<32>](%eval_code)
+      #yield %low
+    } else {
+      #yield 7
+    }
+    #return %code
+  }
   %bind_at = #lea(%base, %bind_lo, 1, 0)
   %bind_len = #sub[#bits<64>](%bind_hi, %bind_lo)
 

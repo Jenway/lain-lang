@@ -1,0 +1,94 @@
+// 物理布局计算的单点 Eval 请求。源语言的字段规则留在 Meta；此处只提交已确定的
+// 两个物理整数，让 LAINIR 的 #eval 和 LAINVM 算一次最终对齐。
+//
+// 固定文本等价于：
+//   #proc layout_align(%v: #bits<64>, %a: #bits<64>) -> #bits<64> {
+//     %back = #sub[#bits<64>](%a, 1)
+//     %sum = #add[#bits<64>](%v, %back)
+//     %q = #udiv[#bits<64>](%sum, %a)
+//     %result = #mul[#bits<64>](%q, %a)
+//     #return %result
+//   }
+//   #proc layout_query() -> #bits<64> {
+//     %v = #eval layout_align(<v>, <a>)
+//     #return %v
+//   }
+data meta_eval_align_prefix ro { 35 112 114 111 99 32 108 97 121 111 117 116 95 97 108 105 103 110 40 37 118 58 32 35 98 105 116 115 60 54 52 62 44 32 37 97 58 32 35 98 105 116 115 60 54 52 62 41 32 45 62 32 35 98 105 116 115 60 54 52 62 32 123 10 32 32 37 98 97 99 107 32 61 32 35 115 117 98 91 35 98 105 116 115 60 54 52 62 93 40 37 97 44 32 49 41 10 32 32 37 115 117 109 32 61 32 35 97 100 100 91 35 98 105 116 115 60 54 52 62 93 40 37 118 44 32 37 98 97 99 107 41 10 32 32 37 113 32 61 32 35 117 100 105 118 91 35 98 105 116 115 60 54 52 62 93 40 37 115 117 109 44 32 37 97 41 10 32 32 37 114 101 115 117 108 116 32 61 32 35 109 117 108 91 35 98 105 116 115 60 54 52 62 93 40 37 113 44 32 37 97 41 10 32 32 35 114 101 116 117 114 110 32 37 114 101 115 117 108 116 10 125 10 35 112 114 111 99 32 108 97 121 111 117 116 95 113 117 101 114 121 40 41 32 45 62 32 35 98 105 116 115 60 54 52 62 32 123 10 32 32 37 118 32 61 32 35 101 118 97 108 32 108 97 121 111 117 116 95 97 108 105 103 110 40 }
+data meta_eval_align_comma ro { 44 32 }
+data meta_eval_align_tail ro { 41 10 32 32 35 114 101 116 117 114 110 32 37 118 10 125 10 }
+data meta_eval_align_entry ro { 108 97 121 111 117 116 95 113 117 101 114 121 }
+
+// 十进制物理参数写到临时请求文本里，不触碰最终产物缓冲。
+#proc meta_eval_buf_uint(%buf: #addr, %at: #bits<64>, %v: #bits<64>) -> #bits<64> {
+  %many = #uge[#bits<64>](%v, 10)
+  %head = #if %many -> (#bits<64>) {
+    %q = #udiv[#bits<64>](%v, 10)
+    %next = #call meta_eval_buf_uint(%buf, %at, %q)
+    #yield %next
+  } else {
+    #yield %at
+  }
+  %d = #urem[#bits<64>](%v, 10)
+  %byte = #trunc[#bits<8>](#add[#bits<64>](%d, 48))
+  %write = #call meta_buf_put(%buf, %head, %byte)
+  %end = #add[#bits<64>](%head, 1)
+  #return %end
+}
+
+// 失败返回 UINT64_MAX，宿主状态保留 Eval 的具体拒码。调用方必须在发射产物前
+// 检查失败。临时文本占 512 字节；固定文本 304 字节，加两个 64 位十进制数仍有余量。
+#proc meta_eval_align_up(%host: #addr, %v: #bits<64>, %a: #bits<64>,
+                         %source_base: #addr, %position: #bits<64>) -> #bits<64> {
+  %zero = #eq[#bits<64>](%a, 0)
+  #if %zero {
+    #return %v
+  }
+  %mark = #call meta_bump_mark(%host)
+  %off = #call meta_bump_alloc(%host, 512)
+  %no_space = #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF)
+  #if %no_space {
+    #return 0xFFFFFFFFFFFFFFFF
+  }
+  %scratch = #call lain_meta_scratch_data(%host)
+  %buf = #lea(%scratch, %off, 1, 0)
+  %prefix = #data_addr meta_eval_align_prefix
+  %at0 = #call meta_buf_puts(%buf, 0, %prefix, 285)
+  %at1 = #call meta_eval_buf_uint(%buf, %at0, %v)
+  %comma = #data_addr meta_eval_align_comma
+  %at2 = #call meta_buf_puts(%buf, %at1, %comma, 2)
+  %at3 = #call meta_eval_buf_uint(%buf, %at2, %a)
+  %tail = #data_addr meta_eval_align_tail
+  %length = #call meta_buf_puts(%buf, %at3, %tail, 17)
+  %entry = #data_addr meta_eval_align_entry
+  %bits = #call lain_meta_eval_request(%host, %buf, %length, %entry, 12)
+  %status = #call lain_meta_eval_status(%host)
+  %kind = #call lain_meta_eval_kind(%host)
+  %width = #call lain_meta_eval_width(%host)
+  %status_ok = #eq[#bits<64>](%status, 0)
+  %kind_ok = #eq[#bits<64>](%kind, 0)
+  %width_ok = #eq[#bits<64>](%width, 64)
+  %type_ok = #and[#bits<1>](%kind_ok, %width_ok)
+  %valid = #and[#bits<1>](%status_ok, %type_ok)
+  %result = #if %valid -> (#bits<64>) {
+    #yield %bits
+  } else {
+    %code = #if %status_ok -> (#bits<32>) {
+      #yield 7
+    } else {
+      %low = #trunc[#bits<32>](%status)
+      #yield %low
+    }
+    // 布局结束处是这次物理对齐计算的来源；请求行列由 Eval 单独保留。
+    %source = #call meta_source_of(%host, %source_base)
+    %known = #ne[#bits<64>](%source, 0xFFFFFFFFFFFFFFFF)
+    #if %known {
+      %wide_code = #zext[#bits<64>](%code)
+      %failed_at = #call lain_meta_fail_at(%host, %wide_code, %source, %position)
+    } else {
+      %failed = #call lain_meta_fail(%host, %code)
+    }
+    #yield 0xFFFFFFFFFFFFFFFF
+  }
+  %release = #call meta_bump_release(%host, %mark)
+  #return %result
+}
