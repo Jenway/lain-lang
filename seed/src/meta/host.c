@@ -1,9 +1,9 @@
 /* lainmeta/host.h 的实现。
  *
- * 每个宿主函数都是 LainVmHostFn：拿原始 64 位值，返回 0 = 成功。
- * args[0] 永远是 host 自己的地址——Meta 从 initialize 收到它，之后每次调用
- * 都原样传回来。没有全局，也没有 user_data。
- */
+ * 每个宿主函数都是 LainVmHostFn：第一个参数是能力槽上绑定的 context
+ * （这里的 `LainMetaHost *`），随后是**净化后的业务参数**，返回 0 = 成功。
+ * context 由可信的注册路径在 `lainmeta_host_register` 时绑到每一项上，
+ * Meta 的业务参数里没有它，也无法指定或伪造宿主。 */
 #include "lainmeta/host.h"
 #include "lainmeta/tree.h"
 
@@ -53,7 +53,7 @@ struct LainMetaHost {
 };
 
 /* --- 能力名 ---------------------------------------------------------------
- *   名字                          参数                      结果
+ *   名字                          业务参数                  结果
  *   lain_meta_source_count        ()                        count
  *   lain_meta_source_data         (index)                   文本地址
  *   lain_meta_source_length       (index)                   字节数
@@ -63,16 +63,12 @@ struct LainMetaHost {
  *   lain_meta_emit_data           ()                        文本地址
  *   lain_meta_emit_length         ()                        字节数
  *   lain_meta_fail                (code)                    0
- *   lain_meta_eval_request        (text, len, entry, len)  结果位模式
+ *   lain_meta_eval_request        (text, len, entry, len)   结果位模式
  *   lain_meta_eval_status         ()                        诊断码
  *   lain_meta_eval_kind           ()                        物理类型类别
  *   lain_meta_eval_width          ()                        位宽
- * 每个的第一个参数都是 host 地址。
+ * 宿主指针**不在**业务参数里：它是能力槽上的 context，由 VM 注入。
  * ------------------------------------------------------------------------- */
-
-/* 先验证首参数存在；这里只保护参数缺失，不能证明非零地址的宿主身份。 */
-#define HOST_OF(args) ((args) && count > 0 \
-    ? (LainMetaHost *)(uintptr_t)(args)[0] : NULL)
 
 static void host_set_status(LainMetaHost *host, uint32_t code) {
   host->status = code;
@@ -320,20 +316,27 @@ void lainmeta_host_clear_status(LainMetaHost *host) {
 
 /* --- 能力实现 ------------------------------------------------------------- */
 
-static uint32_t cap_source_count(const uint64_t *args, uint32_t count,
-                                 uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
-  if (!host || count < 1) return LAINMETA_ERR_OOM;
+/* 业务参数数目按各能力真实签名**严格**检查：多了少了都拒。
+ * count>0 时 args 必须非 NULL 才能访问；零业务参数接受 args=NULL/count=0。
+ * 空 context 在任何宿主解引用之前直接拒 5，不更新任何宿主状态。 */
+
+static uint32_t cap_source_count(void *context, const uint64_t *args,
+                                 uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
   if (out) *out = host->source_count;
   return 0;
 }
 
-static uint32_t cap_source_data(const uint64_t *args, uint32_t count,
-                                uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
+static uint32_t cap_source_data(void *context, const uint64_t *args,
+                                uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   uint64_t index;
-  if (!host || count < 2) return LAINMETA_ERR_OOM;
-  index = args[1];
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
+  index = args[0];
   if (index >= host->source_count) {
     host_set_status(host, LAINMETA_ERR_NO_SOURCE);
     return LAINMETA_ERR_NO_SOURCE;
@@ -342,12 +345,13 @@ static uint32_t cap_source_data(const uint64_t *args, uint32_t count,
   return 0;
 }
 
-static uint32_t cap_source_length(const uint64_t *args, uint32_t count,
-                                  uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
+static uint32_t cap_source_length(void *context, const uint64_t *args,
+                                  uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   uint64_t index;
-  if (!host || count < 2) return LAINMETA_ERR_OOM;
-  index = args[1];
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
+  index = args[0];
   if (index >= host->source_count) {
     host_set_status(host, LAINMETA_ERR_NO_SOURCE);
     return LAINMETA_ERR_NO_SOURCE;
@@ -356,12 +360,13 @@ static uint32_t cap_source_length(const uint64_t *args, uint32_t count,
   return 0;
 }
 
-static uint32_t cap_source_path_data(const uint64_t *args, uint32_t count,
-                                     uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
+static uint32_t cap_source_path_data(void *context, const uint64_t *args,
+                                     uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   uint64_t index;
-  if (!host || count < 2) return LAINMETA_ERR_OOM;
-  index = args[1];
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
+  index = args[0];
   if (index >= host->source_count) {
     host_set_status(host, LAINMETA_ERR_NO_SOURCE);
     return LAINMETA_ERR_NO_SOURCE;
@@ -370,24 +375,27 @@ static uint32_t cap_source_path_data(const uint64_t *args, uint32_t count,
   return 0;
 }
 
-static uint32_t cap_emit_reset(const uint64_t *args, uint32_t count,
-                               uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
-  if (!host || count < 1) return LAINMETA_ERR_OOM;
+static uint32_t cap_emit_reset(void *context, const uint64_t *args,
+                               uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
   host->out_length = 0;
   if (host->out) host->out[0] = '\0';
   if (out) *out = 0;
   return 0;
 }
 
-static uint32_t cap_emit_write(const uint64_t *args, uint32_t count,
-                               uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
+static uint32_t cap_emit_write(void *context, const uint64_t *args,
+                               uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   const char *bytes;
   uint64_t length;
-  if (!host || count < 3) return LAINMETA_ERR_OOM;
-  bytes = (const char *)(uintptr_t)args[1];
-  length = args[2];
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 2 || !args) return LAINMETA_ERR_DENIED;
+  bytes = (const char *)(uintptr_t)args[0];
+  length = args[1];
   if (length > UINT32_MAX - 1u - host->out_length) {
     host_set_status(host, LAINMETA_ERR_DENIED);
     return LAINMETA_ERR_DENIED;
@@ -404,38 +412,44 @@ static uint32_t cap_emit_write(const uint64_t *args, uint32_t count,
   return 0;
 }
 
-static uint32_t cap_emit_data(const uint64_t *args, uint32_t count,
-                              uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
-  if (!host || count < 1) return LAINMETA_ERR_OOM;
+static uint32_t cap_emit_data(void *context, const uint64_t *args,
+                              uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
   if (out) *out = (uint64_t)(uintptr_t)(host->out ? host->out : "");
   return 0;
 }
 
-static uint32_t cap_emit_length(const uint64_t *args, uint32_t count,
-                                uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
-  if (!host || count < 1) return LAINMETA_ERR_OOM;
+static uint32_t cap_emit_length(void *context, const uint64_t *args,
+                                uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
   if (out) *out = host->out_length;
   return 0;
 }
 
-static uint32_t cap_fail(const uint64_t *args, uint32_t count, uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
-  if (!host || count < 2) return 1;
-  host_set_status(host, (uint32_t)args[1]);
+static uint32_t cap_fail(void *context, const uint64_t *args, uint32_t count,
+                         uint64_t *out) {
+  LainMetaHost *host = context;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
+  host_set_status(host, (uint32_t)args[0]);
   if (out) *out = 0;
   return 0;
 }
 
 /* 未知位置使用全一值，合法的文件零和偏移零仍可表示。 */
-static uint32_t cap_diagnostic_field(const uint64_t *args, uint32_t count,
-                                      uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_diagnostic_field(void *context, const uint64_t *args,
+                                     uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   uint64_t value;
-  if (!args || count < 2 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
-  switch (args[1]) {
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
+  switch (args[0]) {
     case 1: value = host->status; break;
     case 2: value = host->status ? host->diagnostic_source : UINT64_MAX; break;
     case 3: value = host->status ? host->diagnostic_offset : UINT64_MAX; break;
@@ -445,45 +459,49 @@ static uint32_t cap_diagnostic_field(const uint64_t *args, uint32_t count,
   return 0;
 }
 
-static uint32_t cap_fail_at(const uint64_t *args, uint32_t count, uint64_t *out) {
-  LainMetaHost *host;
-  if (!args || count < 4 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
+static uint32_t cap_fail_at(void *context, const uint64_t *args, uint32_t count,
+                            uint64_t *out) {
+  LainMetaHost *host = context;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 3 || !args) return LAINMETA_ERR_DENIED;
   if (out) *out = 0;
-  if (!args[1] || args[1] > UINT32_MAX || args[2] >= host->source_count ||
-      args[3] > host->sources[args[2]].length) {
+  if (!args[0] || args[0] > UINT32_MAX || args[1] >= host->source_count ||
+      args[2] > host->sources[args[1]].length) {
     host_set_status(host, LAINMETA_ERR_DENIED);
     return 0;
   }
-  host_set_status(host, (uint32_t)args[1]);
-  host->diagnostic_source = args[2];
-  host->diagnostic_offset = args[3];
+  host_set_status(host, (uint32_t)args[0]);
+  host->diagnostic_source = args[1];
+  host->diagnostic_offset = args[2];
   if (out) *out = 1;
   return 0;
 }
 
-static uint32_t cap_status(const uint64_t *args, uint32_t count, uint64_t *out) {
-  if (!args || count < 1 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  if (out) *out = HOST_OF(args)->status;
+static uint32_t cap_status(void *context, const uint64_t *args, uint32_t count,
+                           uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
+  if (out) *out = host->status;
   return 0;
 }
 
 /* 描述符是公开的八个 64 位字。先验证、预扣并扩容，最后才提交新条目。 */
-static uint32_t cap_type_publish(const uint64_t *args, uint32_t count,
-                                 uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_type_publish(void *context, const uint64_t *args,
+                                 uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   LainMetaTypeInfo info, *grown;
   uint32_t i, next;
   uint64_t bytes;
   if (out) *out = 0;
-  if (count < 2 || !args) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
   if (!host) return LAINMETA_ERR_DENIED;
-  if (!host_range_readable(host, (uintptr_t)args[1], sizeof(info))) {
+  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
+  if (!host_range_readable(host, (uintptr_t)args[0], sizeof(info))) {
     host_set_status(host, LAINMETA_ERR_DENIED);
     return 0;
   }
-  memcpy(&info, (const void *)(uintptr_t)args[1], sizeof(info));
+  memcpy(&info, (const void *)(uintptr_t)args[0], sizeof(info));
   if (!info.id) {
     host_set_status(host, LAINMETA_ERR_TYPE_PUBLISH);
     return 0;
@@ -527,62 +545,65 @@ int lainmeta_host_scratch_peak(const LainMetaHost *host, uint64_t *out) {
   return 1;
 }
 
-static uint32_t cap_scratch_report(const uint64_t *args, uint32_t count,
-                                   uint64_t *out) {
-  LainMetaHost *host;
-  if (!args || count < 2 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
+static uint32_t cap_scratch_report(void *context, const uint64_t *args,
+                                   uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
   if (out) *out = 0;
   /* 峰值是暂存区内的最高使用位置；同一宿主的报告只能增长。 */
-  if (args[1] > host->scratch_size ||
-      (host->scratch_peak_ready && args[1] < host->scratch_peak)) {
+  if (args[0] > host->scratch_size ||
+      (host->scratch_peak_ready && args[0] < host->scratch_peak)) {
     host_set_status(host, LAINMETA_ERR_RESOURCE_PUBLISH);
     return 0;
   }
-  host->scratch_peak = args[1];
+  host->scratch_peak = args[0];
   host->scratch_peak_ready = true;
   if (out) *out = 1;
   return 0;
 }
 
-static uint32_t cap_scratch_data(const uint64_t *args, uint32_t count,
-                                 uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
-  if (!host || count < 1) return LAINMETA_ERR_OOM;
+static uint32_t cap_scratch_data(void *context, const uint64_t *args,
+                                 uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
   if (out) *out = (uint64_t)(uintptr_t)host->scratch;
   return 0;
 }
 
-static uint32_t cap_scratch_size(const uint64_t *args, uint32_t count,
-                                 uint64_t *out) {
-  LainMetaHost *host = HOST_OF(args);
-  if (!host || count < 1) return LAINMETA_ERR_OOM;
+static uint32_t cap_scratch_size(void *context, const uint64_t *args,
+                                 uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
   if (out) *out = host->scratch_size;
   return 0;
 }
 
 /* 先核对 Meta 地址空间的两段输入，再拷入本次请求私有文本。
  * Eval 在独立 VSpace 中运行，只拿驱动显式给的能力与预算。 */
-static uint32_t cap_eval_request(const uint64_t *args, uint32_t count,
-                                 uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_eval_request(void *context, const uint64_t *args,
+                                 uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   const char *text, *entry;
   char *text_copy = NULL, *entry_copy = NULL;
   LainEvalValue value;
   L1Diagnostic diag;
   uint64_t text_len, entry_len;
-  if (count < 5) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
   if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 4 || !args) return LAINMETA_ERR_DENIED;
   host->eval_requests++;
   host->eval_ready = false;
   host->eval_status = LAINMETA_ERR_DENIED;
   memset(&host->eval_diagnostic, 0, sizeof(host->eval_diagnostic));
   if (out) *out = 0;
-  text = (const char *)(uintptr_t)args[1];
-  text_len = args[2];
-  entry = (const char *)(uintptr_t)args[3];
-  entry_len = args[4];
+  text = (const char *)(uintptr_t)args[0];
+  text_len = args[1];
+  entry = (const char *)(uintptr_t)args[2];
+  entry_len = args[3];
   if (!text || !entry || !text_len || !entry_len ||
       text_len > 1024u * 1024u || entry_len > 255u ||
       !host_range_readable(host, (uintptr_t)text, text_len) ||
@@ -619,28 +640,34 @@ cleanup_eval:
   return 0;
 }
 
-static uint32_t cap_eval_status(const uint64_t *args, uint32_t count,
-                                uint64_t *out) {
-  if (count < 1 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  if (out) *out = HOST_OF(args)->eval_status;
+static uint32_t cap_eval_status(void *context, const uint64_t *args,
+                                uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
+  if (out) *out = host->eval_status;
   return 0;
 }
 
-static uint32_t cap_eval_kind(const uint64_t *args, uint32_t count,
-                              uint64_t *out) {
-  if (count < 1 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  if (out) *out = HOST_OF(args)->eval_ready ? HOST_OF(args)->eval_result.kind : 0;
+static uint32_t cap_eval_kind(void *context, const uint64_t *args,
+                              uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
+  if (out) *out = host->eval_ready ? host->eval_result.kind : 0;
   return 0;
 }
 
 /* 行列属于本次生成的 LAINIR 请求，不代表 Lain 源文件位置。 */
-static uint32_t cap_eval_diagnostic_field(const uint64_t *args, uint32_t count,
-                                          uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_eval_diagnostic_field(void *context, const uint64_t *args,
+                                          uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   uint64_t value;
-  if (!args || count < 2 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
-  switch (args[1]) {
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
+  switch (args[0]) {
     case 1: value = host->eval_status; break;
     case 2: value = host->eval_diagnostic.line; break;
     case 3: value = host->eval_diagnostic.column; break;
@@ -650,10 +677,13 @@ static uint32_t cap_eval_diagnostic_field(const uint64_t *args, uint32_t count,
   return 0;
 }
 
-static uint32_t cap_eval_width(const uint64_t *args, uint32_t count,
-                               uint64_t *out) {
-  if (count < 1 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  if (out) *out = HOST_OF(args)->eval_ready ? HOST_OF(args)->eval_result.width : 0;
+static uint32_t cap_eval_width(void *context, const uint64_t *args,
+                               uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
+  if (out) *out = host->eval_ready ? host->eval_result.width : 0;
   return 0;
 }
 
@@ -743,42 +773,42 @@ static void tree_edit_failed(LainMetaHost *host, uint64_t rejected_before,
   tree_diagnostic_origin(host, tree, origin);
 }
 
-static uint32_t cap_tree_root(const uint64_t *args, uint32_t count,
-                              uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_tree_root(void *context, const uint64_t *args,
+                              uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   LainMetaTree *tree;
-  if (count < 2 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
   if (out) *out = 0;
-  if (args[1] > UINT32_MAX) {
+  if (args[0] > UINT32_MAX) {
     host_set_status(host, LAINMETA_ERR_NO_SOURCE);
     return 0;
   }
-  tree = tree_source(host, (uint32_t)args[1]);
-  if (tree && out) *out = tree_encode((uint32_t)args[1], lainmeta_tree_root(tree));
+  tree = tree_source(host, (uint32_t)args[0]);
+  if (tree && out) *out = tree_encode((uint32_t)args[0], lainmeta_tree_root(tree));
   return 0;
 }
 
 /* 字段编号固定为公开接口：1 kind, 2 start, 3 length, 4 source,
  * 5 origin, 6 delimiter, 7 child_count。 */
-static uint32_t cap_tree_field(const uint64_t *args, uint32_t count,
-                               uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_tree_field(void *context, const uint64_t *args,
+                               uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   LainMetaTree *tree;
   LainMetaTreeNode node;
   uint64_t local;
-  if (count < 3 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 2 || !args) return LAINMETA_ERR_DENIED;
   if (out) *out = 0;
-  tree = tree_decode(host, args[1], &local);
+  tree = tree_decode(host, args[0], &local);
   if (!tree || !lainmeta_tree_node(tree, local, &node)) return 0;
   if (!out) return 0;
-  switch (args[2]) {
+  switch (args[1]) {
     case 1: *out = node.kind; break;
     case 2: *out = node.start; break;
     case 3: *out = node.length; break;
     case 4: *out = node.source_index; break;
-    case 5: *out = node.origin ? tree_encode((uint32_t)(args[1] >> 32) - 1u,
+    case 5: *out = node.origin ? tree_encode((uint32_t)(args[0] >> 32) - 1u,
                                                node.origin) : 0; break;
     case 6: *out = node.delimiter; break;
     case 7: *out = node.child_count; break;
@@ -787,123 +817,123 @@ static uint32_t cap_tree_field(const uint64_t *args, uint32_t count,
   return 0;
 }
 
-static uint32_t cap_tree_child(const uint64_t *args, uint32_t count,
-                               uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_tree_child(void *context, const uint64_t *args,
+                               uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   LainMetaTree *tree;
   uint64_t local, child;
-  if (count < 3 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 2 || !args) return LAINMETA_ERR_DENIED;
   if (out) *out = 0;
-  tree = tree_decode(host, args[1], &local);
-  if (!tree || args[2] > UINT32_MAX) return 0;
-  child = lainmeta_tree_child(tree, local, (uint32_t)args[2]);
+  tree = tree_decode(host, args[0], &local);
+  if (!tree || args[1] > UINT32_MAX) return 0;
+  child = lainmeta_tree_child(tree, local, (uint32_t)args[1]);
   if (!child) host_set_status(host, LAINMETA_ERR_TREE_HANDLE);
-  else if (out) *out = tree_encode((uint32_t)(args[1] >> 32) - 1u, child);
+  else if (out) *out = tree_encode((uint32_t)(args[0] >> 32) - 1u, child);
   return 0;
 }
 
-static uint32_t cap_tree_text_byte(const uint64_t *args, uint32_t count,
-                                   uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_tree_text_byte(void *context, const uint64_t *args,
+                                   uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   LainMetaTree *tree;
   const char *text;
   uint64_t local;
   uint32_t length;
-  if (count < 3 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 2 || !args) return LAINMETA_ERR_DENIED;
   if (out) *out = 0;
-  tree = tree_decode(host, args[1], &local);
+  tree = tree_decode(host, args[0], &local);
   if (!tree) return 0;
   text = lainmeta_tree_text(tree, local, &length);
-  if (!text || args[2] >= length) {
+  if (!text || args[1] >= length) {
     host_set_status(host, LAINMETA_ERR_TREE_HANDLE);
     return 0;
   }
-  if (out) *out = (unsigned char)text[args[2]];
+  if (out) *out = (unsigned char)text[args[1]];
   return 0;
 }
 
-static uint32_t cap_tree_make_token(const uint64_t *args, uint32_t count,
-                                    uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_tree_make_token(void *context, const uint64_t *args,
+                                    uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   LainMetaTree *tree;
   uint64_t origin = 0, local, rejected_before;
-  if (count < 5 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 4 || !args) return LAINMETA_ERR_DENIED;
   if (out) *out = 0;
-  if (args[1] > UINT32_MAX || args[3] > UINT32_MAX ||
-      !host_range_readable(host, (uintptr_t)args[2], args[3])) {
+  if (args[0] > UINT32_MAX || args[2] > UINT32_MAX ||
+      !host_range_readable(host, (uintptr_t)args[1], args[2])) {
     host_set_status(host, LAINMETA_ERR_DENIED);
     return 0;
   }
-  tree = tree_source(host, (uint32_t)args[1]);
+  tree = tree_source(host, (uint32_t)args[0]);
   if (!tree) return 0;
-  if (args[4]) {
-    if ((args[4] >> 32) != args[1] + 1u ||
-        tree_decode(host, args[4], &origin) != tree) {
+  if (args[3]) {
+    if ((args[3] >> 32) != args[0] + 1u ||
+        tree_decode(host, args[3], &origin) != tree) {
       host_set_status(host, LAINMETA_ERR_TREE_EDIT);
       return 0;
     }
   }
   rejected_before = tree_quota_rejected(host);
-  local = lainmeta_tree_make_token(tree, (const char *)(uintptr_t)args[2],
-                                    (uint32_t)args[3], origin);
+  local = lainmeta_tree_make_token(tree, (const char *)(uintptr_t)args[1],
+                                    (uint32_t)args[2], origin);
   if (!local) tree_edit_failed(host, rejected_before, tree, origin);
-  else if (out) *out = tree_encode((uint32_t)args[1], local);
+  else if (out) *out = tree_encode((uint32_t)args[0], local);
   return 0;
 }
 
-static uint32_t cap_tree_replace(const uint64_t *args, uint32_t count,
-                                 uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_tree_replace(void *context, const uint64_t *args,
+                                 uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   LainMetaTree *tree;
   uint64_t group, replacement, local, rejected_before;
-  if (count < 4 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 3 || !args) return LAINMETA_ERR_DENIED;
   if (out) *out = 0;
-  tree = tree_decode(host, args[1], &group);
+  tree = tree_decode(host, args[0], &group);
   if (!tree) return 0;
-  if (args[2] > UINT32_MAX ||
-      (args[1] >> 32) != (args[3] >> 32) ||
-      tree_decode(host, args[3], &replacement) != tree) {
+  if (args[1] > UINT32_MAX ||
+      (args[0] >> 32) != (args[2] >> 32) ||
+      tree_decode(host, args[2], &replacement) != tree) {
     host_set_status(host, LAINMETA_ERR_TREE_EDIT);
     tree_diagnostic_origin(host, tree, group);
     return 0;
   }
   rejected_before = tree_quota_rejected(host);
-  local = lainmeta_tree_replace_child(tree, group, (uint32_t)args[2], replacement);
+  local = lainmeta_tree_replace_child(tree, group, (uint32_t)args[1], replacement);
   if (!local) tree_edit_failed(host, rejected_before, tree, group);
-  else if (out) *out = tree_encode((uint32_t)(args[1] >> 32) - 1u, local);
+  else if (out) *out = tree_encode((uint32_t)(args[0] >> 32) - 1u, local);
   return 0;
 }
 
-static uint32_t cap_tree_make_group(const uint64_t *args, uint32_t count,
-                                    uint64_t *out) {
-  LainMetaHost *host;
+static uint32_t cap_tree_make_group(void *context, const uint64_t *args,
+                                    uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
   LainMetaTree *tree;
   const uint64_t *encoded;
   uint64_t *children = NULL, origin = 0, local, child_bytes, rejected_before;
   uint32_t i, child_count;
-  if (count < 6 || !HOST_OF(args)) return LAINMETA_ERR_DENIED;
-  host = HOST_OF(args);
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 5 || !args) return LAINMETA_ERR_DENIED;
   if (out) *out = 0;
-  if (args[1] > UINT32_MAX || args[2] > 255 || args[4] > 65536 ||
-      !host_range_readable(host, (uintptr_t)args[3], args[4] * 8u)) {
+  if (args[0] > UINT32_MAX || args[1] > 255 || args[3] > 65536 ||
+      !host_range_readable(host, (uintptr_t)args[2], args[3] * 8u)) {
     host_set_status(host, LAINMETA_ERR_DENIED);
     return 0;
   }
-  tree = tree_source(host, (uint32_t)args[1]);
+  tree = tree_source(host, (uint32_t)args[0]);
   if (!tree) return 0;
-  if (args[5] &&
-      ((args[5] >> 32) != args[1] + 1u ||
-       tree_decode(host, args[5], &origin) != tree)) {
+  if (args[4] &&
+      ((args[4] >> 32) != args[0] + 1u ||
+       tree_decode(host, args[4], &origin) != tree)) {
     host_set_status(host, LAINMETA_ERR_TREE_EDIT);
     return 0;
   }
-  child_count = (uint32_t)args[4];
+  child_count = (uint32_t)args[3];
   child_bytes = (uint64_t)sizeof(*children) * child_count;
-  encoded = (const uint64_t *)(uintptr_t)args[3];
+  encoded = (const uint64_t *)(uintptr_t)args[2];
   if (child_count) {
     if (lainvm_quota_charge(host->quota, child_bytes) != 0) {
       host_set_status(host, (uint32_t)LAINVM_QUOTA_TRAP);
@@ -921,7 +951,7 @@ static uint32_t cap_tree_make_group(const uint64_t *args, uint32_t count,
   for (i = 0; i < child_count; i++) {
     uint64_t handle;
     memcpy(&handle, (const unsigned char *)encoded + (size_t)i * 8u, 8u);
-    if ((handle >> 32) != args[1] + 1u ||
+    if ((handle >> 32) != args[0] + 1u ||
         tree_decode(host, handle, &children[i]) != tree) {
       host_set_status(host, LAINMETA_ERR_TREE_EDIT);
       tree_diagnostic_origin(host, tree, origin);
@@ -931,12 +961,12 @@ static uint32_t cap_tree_make_group(const uint64_t *args, uint32_t count,
     }
   }
   rejected_before = tree_quota_rejected(host);
-  local = lainmeta_tree_make_group(tree, (unsigned char)args[2], children,
+  local = lainmeta_tree_make_group(tree, (unsigned char)args[1], children,
                                     child_count, origin);
   free(children);
   if (child_count) (void)lainvm_quota_release(host->quota, child_bytes);
   if (!local) tree_edit_failed(host, rejected_before, tree, origin);
-  else if (out) *out = tree_encode((uint32_t)args[1], local);
+  else if (out) *out = tree_encode((uint32_t)args[0], local);
   return 0;
 }
 
@@ -976,12 +1006,15 @@ static const MetaCapability k_capabilities[] = {
     {"lain_meta_tree_replace_child", cap_tree_replace},
 };
 
+/* 登记底座服务：每一项都绑定这份 host 作为 context。
+ * host 为 NULL 是参数错误（这层服务不接受无宿主绑定）；表已冻结或重名时
+ * lainvm_caps_add 会失败，调用方不能使用半注册的任务。 */
 int lainmeta_host_register(LainMetaHost *host, LainVmCaps *caps) {
   size_t i;
   if (!host || !caps) return 1;
   for (i = 0; i < sizeof(k_capabilities) / sizeof(k_capabilities[0]); i++) {
     if (lainvm_caps_add(caps, k_capabilities[i].name, LAINVM_CAP_FUNCTION,
-                        k_capabilities[i].fn) != 0)
+                        k_capabilities[i].fn, host) != 0)
       return 2;
   }
   return 0;

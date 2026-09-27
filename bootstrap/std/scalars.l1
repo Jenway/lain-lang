@@ -218,21 +218,21 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
 // **走作用域表**：条目的 `aux` 就是 repr 那个节点的下标，读一下就有。以前这里要
 // 调 `meta_find_scalar` 把源码扫一遍。带点的名字（`T.i32`）会把那个模块的作用域
 // 压进来查——和取模块成员走的是同一条路。
-#proc meta_select_scalar(%host: #addr, %base: #addr, %len: #bits<64>,
+#proc meta_select_scalar(%base: #addr, %len: #bits<64>,
                          %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data(%host)
+  %scratch = #call lain_meta_scratch_data()
   %dot = #call meta_find_dot(%base, %t_lo, %t_hi)
   %is_qualified = #ne[#bits<64>](%dot, 0xFFFFFFFFFFFFFFFF)
   %r = #if %is_qualified -> (#bits<64>) {
     // `T.i32`：T 必须是本条源码里的 import 绑定
-    %lp = #call meta_find_import_binding(%host, %base, %len, %t_lo, %dot)
+    %lp = #call meta_find_import_binding(%base, %len, %t_lo, %dot)
     %nons = #eq[#bits<64>](%lp, 0)
     %v = #if %nons -> (#bits<64>) {
       #yield 0xFFFFFFFFFFFFFFFF
     } else {
       %n = #call meta_logical_len(%base, %lp, %len)
       %path = #lea(%base, %lp, 1, 0)
-      %idx = #call meta_source_find(%host, %path, %n)
+      %idx = #call meta_source_find(%path, %n)
       %miss = #eq[#bits<64>](%idx, 0xFFFFFFFFFFFFFFFF)
       %w = #if %miss -> (#bits<64>) {
         #yield 0xFFFFFFFFFFFFFFFF
@@ -242,20 +242,20 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
         %member = #lea(%base, %m_lo, 1, 0)
         %member_len = #sub[#bits<64>](%m_hi, %m_lo)
         // 压入那个模块的作用域，查完再还原
-        %old = #call meta_scope_enter(%host, %idx)
-        %ens = #call meta_scope_ensure_scanned(%host, %idx)
-        %e = #call meta_scope_find(%host, %member, %member_len)
-        %restore = #call meta_scope_set_current(%host, %old)
+        %old = #call meta_scope_enter(%idx)
+        %ens = #call meta_scope_ensure_scanned(%idx)
+        %e = #call meta_scope_find(%member, %member_len)
+        %restore = #call meta_scope_set_current(%old)
         %gone = #eq[#bits<64>](%e, 0xFFFFFFFFFFFFFFFF)
         %w2 = #if %gone -> (#bits<64>) {
           #yield 0xFFFFFFFFFFFFFFFF
         } else {
-          %kind = #call meta_scope_kind(%host, %e)
+          %kind = #call meta_scope_kind(%e)
           %is_type = #eq[#bits<64>](%kind, 2)
           %t = #if %is_type -> (#bits<64>) {
-            %repr_node = #call meta_scope_aux(%host, %e)
-            %pos = #call meta_node_start(%host, %repr_node)
-            %m_len = #call lain_meta_source_length(%host, %idx)
+            %repr_node = #call meta_scope_aux(%e)
+            %pos = #call meta_node_start(%repr_node)
+            %m_len = #call lain_meta_source_length(%idx)
             %s1 = #call meta_cell_put(#lea(%scratch, 16, 1, 0), %idx)
             %s2 = #call meta_cell_put(#lea(%scratch, 40, 1, 0), %m_len)
             %s3 = #call meta_cell_put(#lea(%scratch, 48, 1, 0), %pos)
@@ -274,18 +274,18 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
     // 不带点：在**当前作用域链**里查（root 环境是最外层）
     %name = #lea(%base, %t_lo, 1, 0)
     %name_len = #sub[#bits<64>](%t_hi, %t_lo)
-    %e2 = #call meta_scope_find(%host, %name, %name_len)
+    %e2 = #call meta_scope_find(%name, %name_len)
     %gone2 = #eq[#bits<64>](%e2, 0xFFFFFFFFFFFFFFFF)
     %w3 = #if %gone2 -> (#bits<64>) {
       #yield 0xFFFFFFFFFFFFFFFF
     } else {
-      %kind2 = #call meta_scope_kind(%host, %e2)
+      %kind2 = #call meta_scope_kind(%e2)
       %is_type2 = #eq[#bits<64>](%kind2, 2)
       %t2 = #if %is_type2 -> (#bits<64>) {
-        %src = #call meta_scope_word(%host, %e2, 0)
-        %repr_node2 = #call meta_scope_aux(%host, %e2)
-        %pos2 = #call meta_node_start(%host, %repr_node2)
-        %m_len2 = #call lain_meta_source_length(%host, %src)
+        %src = #call meta_scope_word(%e2, 0)
+        %repr_node2 = #call meta_scope_aux(%e2)
+        %pos2 = #call meta_node_start(%repr_node2)
+        %m_len2 = #call lain_meta_source_length(%src)
         %s4 = #call meta_cell_put(#lea(%scratch, 16, 1, 0), %src)
         %s5 = #call meta_cell_put(#lea(%scratch, 40, 1, 0), %m_len2)
         %s6 = #call meta_cell_put(#lea(%scratch, 48, 1, 0), %pos2)
@@ -309,20 +309,20 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
 // 身份不是 repr。`i32` 和 `u32` 的 repr 都是 bits/32，但它们是两个类型——让它们
 // 不同的是 owner，也就是「哪一条 scalar 声明」。同一条声明查两次，注册表里有
 // interning，回的是同一个 id。
-#proc meta_type_resolve(%host: #addr, %base: #addr, %len: #bits<64>,
+#proc meta_type_resolve(%base: #addr, %len: #bits<64>,
                         %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<64> {
   %dot = #call meta_find_dot(%base, %t_lo, %t_hi)
   %is_qualified = #ne[#bits<64>](%dot, 0xFFFFFFFFFFFFFFFF)
   %r = #if %is_qualified -> (#bits<64>) {
-    %pos = #call meta_select_scalar(%host, %base, %len, %t_lo, %t_hi)
+    %pos = #call meta_select_scalar(%base, %len, %t_lo, %t_hi)
     %miss = #eq[#bits<64>](%pos, 0xFFFFFFFFFFFFFFFF)
     %q = #if %miss -> (#bits<64>) {
       #yield 0
     } else {
-      %scratch = #call lain_meta_scratch_data(%host)
+      %scratch = #call lain_meta_scratch_data()
       %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
       %m_len = #call meta_cell_get(#lea(%scratch, 40, 1, 0))
-      %m_base = #call lain_meta_source_data(%host, %idx)
+      %m_base = #call lain_meta_source_data(%idx)
       %repr = #call meta_repr_at(%m_base, %pos, %m_len)
       %bad = #eq[#bits<64>](%repr, 0xFFFFFFFFFFFFFFFF)
       %w = #if %bad -> (#bits<64>) {
@@ -334,7 +334,7 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
         %high = #shl[#bits<64>](%one_idx, 32)
         %one_pos = #add[#bits<64>](%pos, 1)
         %owner = #or[#bits<64>](%high, %one_pos)
-        %id = #call meta_intern(%host, 1, %owner, 0, %rk, %rw)
+        %id = #call meta_intern(1, %owner, 0, %rk, %rw)
         #yield %id
       }
       #yield %w
@@ -343,7 +343,7 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
   } else {
     %name = #lea(%base, %t_lo, 1, 0)
     %name_len = #sub[#bits<64>](%t_hi, %t_lo)
-    %id = #call meta_scope_type_id(%host, %base, %len, %name, %name_len)
+    %id = #call meta_scope_type_id(%base, %len, %name, %name_len)
     %gone = #eq[#bits<64>](%id, 0xFFFFFFFFFFFFFFFF)
     %v = #if %gone -> (#bits<64>) {
       #yield 0
@@ -357,18 +357,18 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
 
 // 类型名 + 算子符号 → 物理算子名。物理名的**源码下标/位置/长度**写进暂存区
 // +16 / +24 / +32。返回 0 = 成功，NOT_FOUND = 这个名字或这个符号没有。
-#proc meta_op_resolve(%host: #addr, %base: #addr, %len: #bits<64>,
+#proc meta_op_resolve(%base: #addr, %len: #bits<64>,
                        %t_lo: #bits<64>, %t_hi: #bits<64>, %sym: #addr,
                        %sym_len: #bits<64>) -> #bits<64> {
-  %pos = #call meta_select_scalar(%host, %base, %len, %t_lo, %t_hi)
+  %pos = #call meta_select_scalar(%base, %len, %t_lo, %t_hi)
   %miss = #eq[#bits<64>](%pos, 0xFFFFFFFFFFFFFFFF)
   %r = #if %miss -> (#bits<64>) {
     #yield 0xFFFFFFFFFFFFFFFF
   } else {
-    %scratch = #call lain_meta_scratch_data(%host)
+    %scratch = #call lain_meta_scratch_data()
     %idx = #call meta_cell_get(#lea(%scratch, 16, 1, 0))
     %m_len = #call meta_cell_get(#lea(%scratch, 40, 1, 0))
-    %m_base = #call lain_meta_source_data(%host, %idx)
+    %m_base = #call lain_meta_source_data(%idx)
     %phys = #call meta_scalar_op(%m_base, %pos, %m_len, %sym, %sym_len)
     %gone = #eq[#bits<64>](%phys, 0xFFFFFFFFFFFFFFFF)
     %w = #if %gone -> (#bits<64>) {
@@ -397,19 +397,19 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
 //
 // 只有**两个操作数都是裸字面量**时才走这条路（调用方判的）：有名字操作数时退回
 // i32 会把 u32 的 `<` 发成 `slt`，那是静默给错值。
-#proc meta_op_resolve_named_source(%host: #addr, %entry: #bits<64>,
+#proc meta_op_resolve_named_source(%entry: #bits<64>,
                                     %sym: #addr) -> #bits<64> {
-  %sidx = #call meta_scope_word(%host, %entry, 0)
-  %noff = #call meta_scope_word(%host, %entry, 8)
-  %nlen = #call meta_scope_word(%host, %entry, 16)
-  %sbase = #call lain_meta_source_data(%host, %sidx)
-  %slen = #call lain_meta_source_length(%host, %sidx)
+  %sidx = #call meta_scope_word(%entry, 0)
+  %noff = #call meta_scope_word(%entry, 8)
+  %nlen = #call meta_scope_word(%entry, 16)
+  %sbase = #call lain_meta_source_data(%sidx)
+  %slen = #call lain_meta_source_length(%sidx)
   %thi = #add[#bits<64>](%noff, %nlen)
-  %r = #call meta_op_resolve(%host, %sbase, %slen, %noff, %thi, %sym, 1)
+  %r = #call meta_op_resolve(%sbase, %slen, %noff, %thi, %sym, 1)
   #return %r
 }
 
-#proc meta_op_resolve_default(%host: #addr, %base: #addr, %len: #bits<64>,
+#proc meta_op_resolve_default(%base: #addr, %len: #bits<64>,
                               %sym: #addr, %l_lo: #bits<64>, %l_hi: #bits<64>,
                               %r_lo: #bits<64>, %r_hi: #bits<64>) -> #bits<64> {
   %lv = #call bs_read_uint(%base, %l_lo, %len)
@@ -419,28 +419,28 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
   %big = #or[#bits<1>](%l_big, %r_big)
   %r = #if %big -> (#bits<64>) {
     %a64 = #data_addr meta_sym_i64
-    %e64 = #call meta_scope_find(%host, %a64, 3)
+    %e64 = #call meta_scope_find(%a64, 3)
     %m64 = #eq[#bits<64>](%e64, 0xFFFFFFFFFFFFFFFF)
     %x64 = #if %m64 -> (#bits<64>) {
       #yield 0xFFFFFFFFFFFFFFFF
     } else {
       // 选中的宽度告诉调用方（它要拿这个换指令的类型实参）
-      %sc64 = #call lain_meta_scratch_data(%host)
+      %sc64 = #call lain_meta_scratch_data()
       %w64 = #call meta_cell_put(#lea(%sc64, 488, 1, 0), 64)
-      %q64 = #call meta_op_resolve_named_source(%host, %e64, %sym)
+      %q64 = #call meta_op_resolve_named_source(%e64, %sym)
       #yield %q64
     }
     #yield %x64
   } else {
     %a32 = #data_addr meta_sym_i32
-    %e32 = #call meta_scope_find(%host, %a32, 3)
+    %e32 = #call meta_scope_find(%a32, 3)
     %m32 = #eq[#bits<64>](%e32, 0xFFFFFFFFFFFFFFFF)
     %x32 = #if %m32 -> (#bits<64>) {
       #yield 0xFFFFFFFFFFFFFFFF
     } else {
-      %sc32 = #call lain_meta_scratch_data(%host)
+      %sc32 = #call lain_meta_scratch_data()
       %w32 = #call meta_cell_put(#lea(%sc32, 488, 1, 0), 32)
-      %q32 = #call meta_op_resolve_named_source(%host, %e32, %sym)
+      %q32 = #call meta_op_resolve_named_source(%e32, %sym)
       #yield %q32
     }
     #yield %x32

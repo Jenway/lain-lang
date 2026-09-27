@@ -415,7 +415,10 @@ static const char *extern_symbol(const L1Subroutine *sub) {
 }
 
 /* 每个 extern 子过程一条声明，并把符号报给 sink。
- * ABI 与 lainvm/caps.h 的 LainVmHostFn 逐字相同——宿主只写一个函数。 */
+ * 最终 C 产物的外部 ABI **只有业务参数**：这个签名与解释器里的
+ * LainVmHostFn 职责分离——VM 那侧多一个可信的 context（能力槽绑定，
+ * VM 注入），编译产物按 SYMBOL 直接链接同名 C 函数，不带 context 参数，
+ * 也不为它建立运行环境。两边共用的仍然只是「能力名 = 外部符号名」这个键。 */
 static void emit_externs(LainBackend *be) {
   uint32_t i;
   for (i = 0; i < be->module->subroutine_count; i++) {

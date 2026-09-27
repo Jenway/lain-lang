@@ -62,10 +62,10 @@
 }
 
 // 给一个词节点算形状，写回它的种类格。
-#proc meta_recognize_word(%host: #addr, %base: #addr, %len: #bits<64>,
+#proc meta_recognize_word(%base: #addr, %len: #bits<64>,
                           %i: #bits<64>) -> #bits<32> {
-  %at = #call meta_node_start(%host, %i)
-  %n = #call meta_node_len(%host, %i)
+  %at = #call meta_node_start(%i)
+  %n = #call meta_node_len(%i)
   %hi = #add[#bits<64>](%at, %n)
 
   // 自己是不是「一条声明」的开头。构造器 `std::func` 之类也是拿 `let` 声明的，
@@ -94,11 +94,11 @@
   %self_digit = #call bs_is_digit(%self_b)
 
   // 下一个兄弟决定「这里开始的是什么」。兄弟是「无」时下面每个判断都给假。
-  %nx = #call meta_node_next(%host, %i)
-  %nx_kind = #call meta_node_kind(%host, %nx)
+  %nx = #call meta_node_next(%i)
+  %nx_kind = #call meta_node_kind(%nx)
   %nx_is_group = #eq[#bits<64>](%nx_kind, 2)
-  %nx_at = #call meta_node_start(%host, %nx)
-  %nx_n = #call meta_node_len(%host, %nx)
+  %nx_at = #call meta_node_start(%nx)
+  %nx_n = #call meta_node_len(%nx)
   %nx_is_op = #call meta_rec_is_op(%base, %nx_at, %nx_n, %len)
   %nx_is_dot = #call meta_rec_is_dot(%base, %nx_at, %nx_n, %len)
   // 组节点从它自己的开括号起（机制树给出源码位置），所以看那一格
@@ -154,29 +154,29 @@
     }
     #yield %f2
   }
-  %s = #call meta_node_set_kind(%host, %i, %form)
+  %s = #call meta_node_set_kind(%i, %form)
   #return 0
 }
 
 // 走一条兄弟链，组要说进孩子里。组自己不改种类（它本来就是 2 = 组）。
-#proc meta_recognize_all(%host: #addr, %base: #addr, %len: #bits<64>,
+#proc meta_recognize_all(%base: #addr, %len: #bits<64>,
                          %first: #bits<64>) -> #bits<32> {
   %st = #loop s(%c: #bits<64> = %first) -> (#bits<32>) {
     %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
     #if %done {
       #break s(0)
     }
-    %k = #call meta_node_kind(%host, %c)
+    %k = #call meta_node_kind(%c)
     %is_group = #eq[#bits<64>](%k, 2)
     %w = #if %is_group -> (#bits<32>) {
-      %kid = #call meta_node_child(%host, %c)
-      %r = #call meta_recognize_all(%host, %base, %len, %kid)
+      %kid = #call meta_node_child(%c)
+      %r = #call meta_recognize_all(%base, %len, %kid)
       #yield %r
     } else {
-      %r2 = #call meta_recognize_word(%host, %base, %len, %c)
+      %r2 = #call meta_recognize_word(%base, %len, %c)
       #yield %r2
     }
-    %nx = #call meta_node_next(%host, %c)
+    %nx = #call meta_node_next(%c)
     #continue s(%nx)
   }
   #return %st
@@ -184,16 +184,16 @@
 
 // 一份源码识别一遍。`meta_parse_source` 建完树就调它，所以读到树的时候形状一定
 // 已经写好了 —— 这个不变式由一个调用点保证，不靠调用方记得。
-#proc meta_recognize_source(%host: #addr, %source: #bits<64>) -> #bits<32> {
-  %base = #call lain_meta_source_data(%host, %source)
-  %len = #call lain_meta_source_length(%host, %source)
-  %root = #call meta_root_of(%host, %source)
+#proc meta_recognize_source(%source: #bits<64>) -> #bits<32> {
+  %base = #call lain_meta_source_data(%source)
+  %len = #call lain_meta_source_length(%source)
+  %root = #call meta_root_of(%source)
   %none = #eq[#bits<64>](%root, 0xFFFFFFFFFFFFFFFF)
   %st = #if %none -> (#bits<32>) {
     #yield 0
   } else {
-    %kid = #call meta_node_child(%host, %root)
-    %r = #call meta_recognize_all(%host, %base, %len, %kid)
+    %kid = #call meta_node_child(%root)
+    %r = #call meta_recognize_all(%base, %len, %kid)
     #yield %r
   }
   #return %st
@@ -204,44 +204,44 @@
 // **组也算**：组的 `start` 就是它那个开括号的位置，而那个位置上没有叶子，所以不会
 // 和叶子的匹配打架。`(1 + 2) + 3` 的值的第一个节点就是那个组 —— 只认叶子的话查不到它，
 // 形状就成了「无」，整段被当成常量走错路。
-#proc meta_node_at(%host: #addr, %base: #addr, %at: #bits<64>) -> #bits<64> {
-  %root = #call meta_root_of_source(%host, %base)
+#proc meta_node_at(%base: #addr, %at: #bits<64>) -> #bits<64> {
+  %root = #call meta_root_of_source(%base)
   %missing = #eq[#bits<64>](%root, 0xFFFFFFFFFFFFFFFF)
   %r = #if %missing -> (#bits<64>) {
     #yield 0xFFFFFFFFFFFFFFFF
   } else {
-    %kid = #call meta_node_child(%host, %root)
-    %f = #call meta_node_find_at(%host, %kid, %at)
+    %kid = #call meta_node_child(%root)
+    %f = #call meta_node_find_at(%kid, %at)
     #yield %f
   }
   #return %r
 }
 
 // 一份源码里每个 token 的起点各不相同，所以兄弟链里第一个起点相符的就是它。
-#proc meta_node_find_at(%host: #addr, %first: #bits<64>,
+#proc meta_node_find_at(%first: #bits<64>,
                         %at: #bits<64>) -> #bits<64> {
   %found = #loop s(%c: #bits<64> = %first) -> (#bits<64>) {
     %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
     #if %done {
       #break s(0xFFFFFFFFFFFFFFFF)
     }
-    %st = #call meta_node_start(%host, %c)
+    %st = #call meta_node_start(%c)
     %same = #eq[#bits<64>](%st, %at)
     #if %same {
       #break s(%c)
     }
-    %k = #call meta_node_kind(%host, %c)
+    %k = #call meta_node_kind(%c)
     %is_group = #eq[#bits<64>](%k, 2)
     %sub = #if %is_group -> (#bits<64>) {
-      %kid = #call meta_node_child(%host, %c)
-      %r = #call meta_node_find_at(%host, %kid, %at)
+      %kid = #call meta_node_child(%c)
+      %r = #call meta_node_find_at(%kid, %at)
       #yield %r
     } else {
       #yield 0xFFFFFFFFFFFFFFFF
     }
     %miss = #eq[#bits<64>](%sub, 0xFFFFFFFFFFFFFFFF)
     #if %miss {
-      %nx = #call meta_node_next(%host, %c)
+      %nx = #call meta_node_next(%c)
       #continue s(%nx)
     }
     #break s(%sub)
@@ -253,9 +253,9 @@
 //
 // 这是给**还按字节偏移工作**的降级点用的桥：它们手里只有位置，靠这个把位置换成
 // 预先算好的形状，而不是再去看字节。等降级改成按节点下标走，这座桥就不需要了。
-#proc meta_form_at(%host: #addr, %base: #addr, %at: #bits<64>) -> #bits<64> {
-  %i = #call meta_node_at(%host, %base, %at)
-  %v = #call meta_node_kind(%host, %i)
+#proc meta_form_at(%base: #addr, %at: #bits<64>) -> #bits<64> {
+  %i = #call meta_node_at(%base, %at)
+  %v = #call meta_node_kind(%i)
   #return %v
 }
 
@@ -268,26 +268,26 @@
 // 算出来 2 而不是 4。所以走那三条之前先问这个，有算子就报错，不发。
 //
 // `;` 是单个词、字节 59。组里面的 `;` 不是兄弟，所以走不到。
-#proc meta_value_has_op(%host: #addr, %base: #addr, %len: #bits<64>,
+#proc meta_value_has_op(%base: #addr, %len: #bits<64>,
                          %at: #bits<64>) -> #bits<1> {
-  %first = #call meta_node_at(%host, %base, %at)
+  %first = #call meta_node_at(%base, %at)
   %r = #loop s(%c: #bits<64> = %first) -> (#bits<1>) {
     %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
     #if %done {
       #break s(0)
     }
-    %k = #call meta_node_kind(%host, %c)
+    %k = #call meta_node_kind(%c)
     %is_op = #eq[#bits<64>](%k, 9)
     #if %is_op {
       #break s(1)
     }
-    %st = #call meta_node_start(%host, %c)
+    %st = #call meta_node_start(%c)
     %b = #call bs_byte_at(%base, %st, %len)
     %is_semi = #eq[#bits<8>](%b, 59)
     #if %is_semi {
       #break s(0)
     }
-    %nx = #call meta_node_next(%host, %c)
+    %nx = #call meta_node_next(%c)
     #continue s(%nx)
   }
   #return %r

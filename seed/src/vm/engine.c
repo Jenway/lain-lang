@@ -590,6 +590,7 @@ static LainVmSliceResult invoke_host(LainVmTcb *tcb, const L1Inst *inst,
   uint32_t i;
   const LainVmCapEntry *entry;
   LainVmHostFn fn;
+  void *context;
   const L1Type *rt;
 
   if (arg_count != sub->param_count)
@@ -604,12 +605,15 @@ static LainVmSliceResult invoke_host(LainVmTcb *tcb, const L1Inst *inst,
     return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1111, inst);
   fn = lainvm_cap_fn(entry);
   if (!fn) return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1112, inst);
+  /* context 来自能力槽上的**可信绑定**：不进入 raw、不从 sub 的业务参数读取、
+   * 也不进入 VM 槽位或返回值。callback 的 arg_count 就是净化后的业务参数数目。 */
+  context = lainvm_cap_context(entry);
 
   for (i = 0; i < arg_count; i++)
     raw[i] = args[i].kind == L1_VALUE_ADDR ? (uint64_t)(uintptr_t)args[i].as.addr
                                            : args[i].as.bits;
 
-  status = fn(raw, arg_count, result_out ? &result : NULL);
+  status = fn(context, raw, arg_count, result_out ? &result : NULL);
   if (status != 0)
     return trap_now(tcb, LAINVM_TRAP_CAPABILITY, (int32_t)status, inst);
 

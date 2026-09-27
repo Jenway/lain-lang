@@ -3,10 +3,9 @@
  * 这是「compiler core 提供什么」的最小落地：源码读入 + 产物写出 + 失败上报。
  * 它不含任何语言知识——不知道 `let`、`func`、`i32` 是什么，那些全部归 Meta。
  *
- * **没有全局状态。** host 对象的地址作为一个 `#addr` 显式传进 Meta
- * （`lain_std_initialize(context)`），再原样作为每个能力调用的第一个参数
- * 传回来。理由和能力表里那句一样：宿主 ABI 不带 user_data，因为编译产物
- * 没法读它；让指针变成显式输入，而不是让产物去某个全局里捞。
+ * **没有全局状态。** host 对象**不再作为 #addr 传进 Meta**：可信的 C 注册路径
+ * （`lainmeta_host_register`）把它绑到每个能力槽的 context 上，LAINVM 在宿主调用时
+ * 注入回调的第一个参数。Meta 只看得到净化后的业务参数，无法指定或伪造宿主。
  *
  * 能力名是 link_name，同时是链接符号名。所以它们必须是**合法 C 标识符**
  * （SYMBOL 策略下后端要按这个名字发外部符号）。这就是这里用下划线而不是
@@ -101,8 +100,9 @@ int lainmeta_host_type_at(const LainMetaHost *host, uint32_t index,
 uint32_t lainmeta_host_status(const LainMetaHost *host);
 void lainmeta_host_clear_status(LainMetaHost *host);
 
-/* 把底座服务登记进能力表。返回 0 = 成功。
- * 登记的名字见 host.c 顶部的表。 */
+/* 把底座服务登记进能力表，并把 host 绑为每一项的 context。返回 0 = 成功。
+ * 登记的名字见 host.c 顶部的表。表必须尚未冻结；冻结表或重名会失败，
+ * 此时调用方不能使用半注册的任务。 */
 int lainmeta_host_register(LainMetaHost *host, LainVmCaps *caps);
 
 /* 挂上这次执行的**分配账户**（NULL = 不限额）。
@@ -116,8 +116,8 @@ void lainmeta_host_attach_quota(LainMetaHost *host, LainVmQuota *quota);
  *
  * 宿主能力只拿得到裸地址（宿主 ABI 没有类型），所以"这个地址能不能读"必须由
  * 宿主这一侧自己判：没授权的宿主对象不许解引用调用方给的地址。这和源码文本、
- * 暂存区要驱动显式授权是同一件事——能力表里没有 user_data，所以要带的东西
- * 只能挂在**宿主对象自己**身上，而且必须是显式输入。
+ * 暂存区要驱动显式授权是同一件事——**context 绑定解决的是"由哪个宿主兑现能力"，
+ * 不替代业务缓冲权限**。授权挂在宿主对象自己身上，由驱动显式给。
  *
  * 传 NULL 表示撤销授权。 */
 void lainmeta_host_attach_space(LainMetaHost *host, LainVmSpace *space);

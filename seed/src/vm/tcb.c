@@ -109,32 +109,53 @@ void lainvm_tcb_free(LainVmTcb *tcb) {
   free(tcb);
 }
 
+/* 装配能力：把模块里每个 extern 子过程按 link_name 解析到能力空间。
+ *
+ * 规则（见 docs/vm.md「能力装配与冻结」）：
+ *   1. 非 NULL 表**必须已冻结**；这里不替调用方偷偷 freeze。
+ *   2. 已有活动帧（运行中、暂停中或 Trap 后未结束的激活）时禁止更换绑定。
+ *      「已完成激活、下一次启动之前」才允许重新装配。
+ *   3. NULL 表表示无能力：清掉解析项，之后外部调用仍拒 1110。纯计算 TCB
+ *      不要求能力表。
+ *   4. 解析在**临时数组**里做完，再一次性替换旧数组/表引用。任何拒绝或 OOM
+ *      都保留旧绑定。
+ *   5. 未找到的外部符号保留 NULL 槽，维持「调用时拒绝」的既有规则。 */
 int lainvm_tcb_set_caps(LainVmTcb *tcb, LainVmCaps *caps, L1Diagnostic *diag) {
   uint32_t i;
+  const LainVmCapEntry **resolved = NULL;
+  uint32_t resolved_count = 0;
   if (!tcb || !tcb->image) {
     start_fail(diag, 9110, "tcb: no image");
     return 1;
   }
-  free(tcb->resolved);
-  tcb->resolved = NULL;
-  tcb->resolved_count = 0;
-  tcb->caps = caps;
-
-  if (tcb->image->sub_count == 0) return 0;
-  tcb->resolved = (const LainVmCapEntry **)calloc(
-      tcb->image->sub_count, sizeof(*tcb->resolved));
-  if (!tcb->resolved) {
-    start_fail(diag, 9111, "tcb: cannot resolve capabilities");
+  if (tcb->frame_count > 0) {
+    start_fail(diag, 9113, "tcb: cannot rebind capabilities with an active activation");
     return 1;
   }
-  tcb->resolved_count = tcb->image->sub_count;
-  for (i = 0; i < tcb->image->sub_count; i++) {
-    const L1Subroutine *sub = tcb->image->subs[i].sub;
-    const char *key;
-    if (!(sub->flags & SUBROUTINE_EXTERN)) continue;
-    key = sub->link_name ? sub->link_name : sub->name;
-    tcb->resolved[i] = lainvm_caps_find(caps, key); /* 查不到就是 NULL */
+  if (caps && !lainvm_caps_is_frozen(caps)) {
+    start_fail(diag, 9112, "tcb: the capability table is not frozen");
+    return 1;
   }
+  if (caps && tcb->image->sub_count > 0) {
+    resolved = (const LainVmCapEntry **)calloc(
+        tcb->image->sub_count, sizeof(*resolved));
+    if (!resolved) {
+      start_fail(diag, 9111, "tcb: cannot resolve capabilities");
+      return 1; /* 旧绑定保持不动 */
+    }
+    resolved_count = tcb->image->sub_count;
+    for (i = 0; i < tcb->image->sub_count; i++) {
+      const L1Subroutine *sub = tcb->image->subs[i].sub;
+      const char *key;
+      if (!(sub->flags & SUBROUTINE_EXTERN)) continue;
+      key = sub->link_name ? sub->link_name : sub->name;
+      resolved[i] = lainvm_caps_find(caps, key); /* 查不到就是 NULL */
+    }
+  }
+  free(tcb->resolved);
+  tcb->resolved = resolved;
+  tcb->resolved_count = resolved_count;
+  tcb->caps = caps;
   return 0;
 }
 

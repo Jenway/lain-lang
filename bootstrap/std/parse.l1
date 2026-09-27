@@ -37,13 +37,13 @@
 // 越界的下标（NONE）直接回 NONE，不去算地址：源码写残了的时候，`next`/`child`
 // 会一路把 NONE 传回来，要是照样乘 48 就是读到暂存区外面去了。
 // 这一条让所有节点访问器对 NONE 都是安全的——形状检查才敢「先问再取」。
-#proc meta_tree_field(%host: #addr, %index: #bits<64>,
+#proc meta_tree_field(%index: #bits<64>,
                        %word: #bits<64>) -> #bits<64> {
   %none = #eq[#bits<64>](%index, 0xFFFFFFFFFFFFFFFF)
   %v = #if %none -> (#bits<64>) {
     #yield 0xFFFFFFFFFFFFFFFF
   } else {
-    %scratch = #call lain_meta_scratch_data(%host)
+    %scratch = #call lain_meta_scratch_data()
     %base = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
     %p = #lea(%scratch, %base, 1, 0)
     %off = #mul[#bits<64>](%index, 48)
@@ -56,9 +56,9 @@
   #return %v
 }
 
-#proc meta_tree_set(%host: #addr, %index: #bits<64>, %word: #bits<64>,
+#proc meta_tree_set(%index: #bits<64>, %word: #bits<64>,
                      %v: #bits<64>) -> #bits<32> {
-  %scratch = #call lain_meta_scratch_data(%host)
+  %scratch = #call lain_meta_scratch_data()
   %base = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
   %p = #lea(%scratch, %base, 1, 0)
   %off = #mul[#bits<64>](%index, 48)
@@ -69,38 +69,38 @@
   #return 0
 }
 
-#proc meta_tree_count(%host: #addr) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data(%host)
+#proc meta_tree_count() -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data()
   %v = #call meta_cell_get(#lea(%scratch, 120, 1, 0))
   #return %v
 }
 
-#proc meta_tree_root(%host: #addr) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data(%host)
+#proc meta_tree_root() -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data()
   %v = #call meta_cell_get(#lea(%scratch, 128, 1, 0))
   #return %v
 }
 
 // 追加一格，返回它的下标。装不下报 17——**不截断**：截断会读出一棵残缺的树，
 // 而「树里没有」和「源码里没有」就分不开了。
-#proc meta_tree_add(%host: #addr, %kind: #bits<64>, %start: #bits<64>,
+#proc meta_tree_add(%kind: #bits<64>, %start: #bits<64>,
                      %length: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data(%host)
+  %scratch = #call lain_meta_scratch_data()
   %count = #call meta_cell_get(#lea(%scratch, 120, 1, 0))
   %cap = #call meta_cell_get(#lea(%scratch, 136, 1, 0))
   %full = #uge[#bits<64>](%count, %cap)
   %idx = #if %full -> (#bits<64>) {
-    %f = #call lain_meta_fail(%host, 17)
+    %f = #call lain_meta_fail(17)
     #yield 0xFFFFFFFFFFFFFFFF
   } else {
-    %s0 = #call meta_tree_set(%host, %count, 0, %kind)
-    %s1 = #call meta_tree_set(%host, %count, 1, %start)
-    %s2 = #call meta_tree_set(%host, %count, 2, %length)
-    %s3 = #call meta_tree_set(%host, %count, 3, 0xFFFFFFFFFFFFFFFF)
-    %s4 = #call meta_tree_set(%host, %count, 4, 0xFFFFFFFFFFFFFFFF)
+    %s0 = #call meta_tree_set(%count, 0, %kind)
+    %s1 = #call meta_tree_set(%count, 1, %start)
+    %s2 = #call meta_tree_set(%count, 2, %length)
+    %s3 = #call meta_tree_set(%count, 3, 0xFFFFFFFFFFFFFFFF)
+    %s4 = #call meta_tree_set(%count, 4, 0xFFFFFFFFFFFFFFFF)
     // 类型格：一律先清零。「没类型」和「类型是 0 号」必须分得开，所以 0 号类型
     // 不能是任何真实类型（注册表从 1 开始数）。
-    %s6 = #call meta_tree_set(%host, %count, 5, 0)
+    %s6 = #call meta_tree_set(%count, 5, 0)
     %new = #add[#bits<64>](%count, 1)
     %s5 = #call meta_cell_put(#lea(%scratch, 120, 1, 0), %new)
     #yield %count
@@ -110,54 +110,54 @@
 
 // 节点的字段（0 = 种类，1 = 起点，2 = 长度，3 = 第一个孩子，4 = 下一个兄弟，
 // 5 = 类型）。名字写短一点，调用点才看得清。
-#proc meta_node_kind(%host: #addr, %i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%host, %i, 0)
+#proc meta_node_kind(%i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%i, 0)
   #return %v
 }
 
-#proc meta_node_start(%host: #addr, %i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%host, %i, 1)
+#proc meta_node_start(%i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%i, 1)
   #return %v
 }
 
-#proc meta_node_len(%host: #addr, %i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%host, %i, 2)
+#proc meta_node_len(%i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%i, 2)
   #return %v
 }
 
-#proc meta_node_child(%host: #addr, %i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%host, %i, 3)
+#proc meta_node_child(%i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%i, 3)
   #return %v
 }
 
-#proc meta_node_next(%host: #addr, %i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%host, %i, 4)
+#proc meta_node_next(%i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%i, 4)
   #return %v
 }
 
 // 类型格。0 = 还没类型（建树时一律清零）。0 号类型不是任何真实类型，所以
 // 「没类型」和「类型是 0 号」不会混。
-#proc meta_node_type_id(%host: #addr, %i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%host, %i, 5)
+#proc meta_node_type_id(%i: #bits<64>) -> #bits<64> {
+  %v = #call meta_tree_field(%i, 5)
   #return %v
 }
 
-#proc meta_node_set_type_id(%host: #addr, %i: #bits<64>,
+#proc meta_node_set_type_id(%i: #bits<64>,
                             %v: #bits<64>) -> #bits<32> {
-  %s = #call meta_tree_set(%host, %i, 5, %v)
+  %s = #call meta_tree_set(%i, 5, %v)
   #return 0
 }
 
 // 识别 pass 写回种类用这个（词/组 → 声明/二元/调用/字段…）。
-#proc meta_node_set_kind(%host: #addr, %i: #bits<64>,
+#proc meta_node_set_kind(%i: #bits<64>,
                          %v: #bits<64>) -> #bits<32> {
-  %s = #call meta_tree_set(%host, %i, 0, %v)
+  %s = #call meta_tree_set(%i, 0, %v)
   #return 0
 }
 
 // 这份源码的根节点。每份源码各有一棵树，根下标按源码下标存。
-#proc meta_root_of(%host: #addr, %source: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data(%host)
+#proc meta_root_of(%source: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data()
   %base = #call meta_cell_get(#lea(%scratch, 128, 1, 0))
   %p = #lea(%scratch, %base, 1, 0)
   %off = #mul[#bits<64>](%source, 8)
@@ -169,9 +169,9 @@
 // 这个节点是不是「字面量 kw」，也就是一个词，内容正好是那串字节？
 // **这就是「按形状认，不按字节搜」的落点**：不再问「源码里哪儿有 struct 这三个
 // 字母」，而是问「这个节点是不是一个内容为 struct 的词」。
-#proc meta_node_is_word(%host: #addr, %i: #bits<64>, %base: #addr,
+#proc meta_node_is_word(%i: #bits<64>, %base: #addr,
                          %kw: #addr, %kw_len: #bits<64>) -> #bits<1> {
-  %kind = #call meta_node_kind(%host, %i)
+  %kind = #call meta_node_kind(%i)
   // 「是词」= 不是组、也不是「无」。**不能写 `kind == 1`**：识别 pass 会把词的种类
   // 从 1 改成 3..10（声明/二元/调用/字段/…），写死 1 的话识别之后一个关键字都认不
   // 出来。组永远是 2，所以「不是组」这个判据在整个识别前后都成立。
@@ -181,10 +181,10 @@
   %not_none = #eq[#bits<1>](%is_none, 0)
   %is_word = #and[#bits<1>](%not_group, %not_none)
   %r = #if %is_word -> (#bits<1>) {
-    %n = #call meta_node_len(%host, %i)
+    %n = #call meta_node_len(%i)
     %same_len = #eq[#bits<64>](%n, %kw_len)
     %e = #if %same_len -> (#bits<1>) {
-      %st = #call meta_node_start(%host, %i)
+      %st = #call meta_node_start(%i)
       %p = #lea(%base, %st, 1, 0)
       %eqb = #call meta_bytes_equal(%p, %kw, %kw_len)
       #yield %eqb
@@ -200,13 +200,13 @@
 
 // 这个地址属于哪份源码？——查找函数靠它知道该走哪棵树，不用让调用方一层层把
 // 源码下标传下来。地址之间不能直接比，所以先转成整数。
-#proc meta_source_of(%host: #addr, %base: #addr) -> #bits<64> {
-  %count = #call lain_meta_source_count(%host)
+#proc meta_source_of(%base: #addr) -> #bits<64> {
+  %count = #call lain_meta_source_count()
   %want = #ptr2int[#bits<64>](%base)
   %found = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
     %more = #ult[#bits<64>](%i, %count)
     #if %more {
-      %p = #call lain_meta_source_data(%host, %i)
+      %p = #call lain_meta_source_data(%i)
       %have = #ptr2int[#bits<64>](%p)
       %same = #eq[#bits<64>](%have, %want)
       #if %same {
@@ -231,13 +231,13 @@
 // 留在 parse.l1 的只有「把源码读成树」和「节点怎么读」——找名字不是这一层的事。
 
 // 一份源码的树根。
-#proc meta_root_of_source(%host: #addr, %base: #addr) -> #bits<64> {
-  %src = #call meta_source_of(%host, %base)
+#proc meta_root_of_source(%base: #addr) -> #bits<64> {
+  %src = #call meta_source_of(%base)
   %missing = #eq[#bits<64>](%src, 0xFFFFFFFFFFFFFFFF)
   %r = #if %missing -> (#bits<64>) {
     #yield 0xFFFFFFFFFFFFFFFF
   } else {
-    %root = #call meta_root_of(%host, %src)
+    %root = #call meta_root_of(%src)
     #yield %root
   }
   #return %r
@@ -247,25 +247,25 @@
 //
 // 建完树紧接着跑一遍**识别 pass**（`std/recognize.l1`，语言相关的那一层）。这样
 // 「读到树的时候形状已经写好」是个不变式，由一个调用点保证，不靠调用方记得。
-#proc meta_copy_public_node(%host: #addr, %handle: #bits<64>) -> #bits<64> {
-  %kind = #call lain_meta_tree_field(%host, %handle, 1)
-  %start = #call lain_meta_tree_field(%host, %handle, 2)
-  %length = #call lain_meta_tree_field(%host, %handle, 3)
+#proc meta_copy_public_node(%handle: #bits<64>) -> #bits<64> {
+  %kind = #call lain_meta_tree_field(%handle, 1)
+  %start = #call lain_meta_tree_field(%handle, 2)
+  %length = #call lain_meta_tree_field(%handle, 3)
   %token = #eq[#bits<64>](%kind, 1)
   %index = #if %token -> (#bits<64>) {
-    %leaf = #call meta_tree_add(%host, 1, %start, %length)
+    %leaf = #call meta_tree_add(1, %start, %length)
     #yield %leaf
   } else {
     %group = #eq[#bits<64>](%kind, 2)
     %node = #if %group -> (#bits<64>) {
-      %count = #call lain_meta_tree_field(%host, %handle, 7)
+      %count = #call lain_meta_tree_field(%handle, 7)
       %first = #loop children(%i: #bits<64> = 0,
                               %first: #bits<64> = 0xFFFFFFFFFFFFFFFF,
                               %last: #bits<64> = 0xFFFFFFFFFFFFFFFF) -> (#bits<64>) {
         %more = #ult[#bits<64>](%i, %count)
         #if %more {
-          %child_handle = #call lain_meta_tree_child(%host, %handle, %i)
-          %child = #call meta_copy_public_node(%host, %child_handle)
+          %child_handle = #call lain_meta_tree_child(%handle, %i)
+          %child = #call meta_copy_public_node(%child_handle)
           %bad = #eq[#bits<64>](%child, 0xFFFFFFFFFFFFFFFF)
           #if %bad {
             #break children(0xFFFFFFFFFFFFFFFF)
@@ -274,7 +274,7 @@
           %new_first = #if %empty -> (#bits<64>) {
             #yield %child
           } else {
-            %link = #call meta_tree_set(%host, %last, 4, %child)
+            %link = #call meta_tree_set(%last, 4, %child)
             #yield %first
           }
           %next = #add[#bits<64>](%i, 1)
@@ -289,10 +289,10 @@
       %result = #if %bad_children -> (#bits<64>) {
         #yield 0xFFFFFFFFFFFFFFFF
       } else {
-        %g = #call meta_tree_add(%host, 2, %start, %length)
+        %g = #call meta_tree_add(2, %start, %length)
         %valid = #ne[#bits<64>](%g, 0xFFFFFFFFFFFFFFFF)
         #if %valid {
-          %set = #call meta_tree_set(%host, %g, 3, %first)
+          %set = #call meta_tree_set(%g, 3, %first)
         }
         #yield %g
       }
@@ -306,8 +306,8 @@
 }
 
 // 机制树的语法拒绝映射到 Meta v0 的旧码 3；资源与句柄错误保留宿主码。
-#proc meta_public_tree_error(%host: #addr) -> #bits<32> {
-  %status = #call lain_meta_status(%host)
+#proc meta_public_tree_error() -> #bits<32> {
+  %status = #call lain_meta_status()
   %parse = #eq[#bits<64>](%status, 34)
   %zero = #eq[#bits<64>](%status, 0)
   %old = #or[#bits<1>](%parse, %zero)
@@ -320,18 +320,18 @@
   #return %code
 }
 
-#proc meta_parse_source(%host: #addr, %source: #bits<64>) -> #bits<32> {
-  %public_root = #call lain_meta_tree_root(%host, %source)
+#proc meta_parse_source(%source: #bits<64>) -> #bits<32> {
+  %public_root = #call lain_meta_tree_root(%source)
   %missing = #eq[#bits<64>](%public_root, 0)
   #if %missing {
-    %code = #call meta_public_tree_error(%host)
+    %code = #call meta_public_tree_error()
     #return %code
   }
-  %scratch = #call lain_meta_scratch_data(%host)
-  %root = #call meta_copy_public_node(%host, %public_root)
+  %scratch = #call lain_meta_scratch_data()
+  %root = #call meta_copy_public_node(%public_root)
   %invalid = #eq[#bits<64>](%root, 0xFFFFFFFFFFFFFFFF)
   #if %invalid {
-    %code2 = #call meta_public_tree_error(%host)
+    %code2 = #call meta_public_tree_error()
     #return %code2
   }
   %rb = #call meta_cell_get(#lea(%scratch, 128, 1, 0))
@@ -339,6 +339,6 @@
   %off = #mul[#bits<64>](%source, 8)
   %slot = #lea(%rp, %off, 1, 0)
   %s = #call meta_cell_put(%slot, %root)
-  %rec = #call meta_recognize_source(%host, %source)
+  %rec = #call meta_recognize_source(%source)
   #return 0
 }
