@@ -20,11 +20,17 @@
 // 而不是「认」。
 
 // 一条声明自己的正文从哪开始：`struct X { ... }` 里 `{` 后面一个字符。
-// **O(1)**：节点下标 → 名字节点 → 花括号组 → 起点。不搜。
-#proc meta_decl_body(%node: #bits<64>) -> #bits<64> {
-  %name_node = #call meta_node_next(%node)
-  %grp = #call meta_node_next(%name_node)
-  %gone = #eq[#bits<64>](%grp, 0xFFFFFFFFFFFFFFFF)
+// **O(1)**：名字节点 → 花括号组 → 起点。不搜。
+//
+// 作用域表里存的是**声明节点**（`meta_scope_payload`），不是出现位置，所以这里用
+// 「位置 -> 同一个父组里的下一项」把后继两步取出来：声明词的位置由 `meta_node_start`
+// 给出，名字与花括号组分别是它的下一个、再下一个孩子。全程不碰「节点自带的后继」。
+#proc meta_decl_body(%base: #addr, %node: #bits<64>) -> #bits<64> {
+  %node_at = #call meta_node_start(%node)
+  %name_node = #call meta_next_at(%base, %node_at)
+  %name_at = #call meta_node_start(%name_node)
+  %grp = #call meta_next_at(%base, %name_at)
+  %gone = #eq[#bits<64>](%grp, 0)
   %r = #if %gone -> (#bits<64>) {
     #yield 0xFFFFFFFFFFFFFFFF
   } else {
@@ -60,7 +66,7 @@
     %ok = #eq[#bits<64>](%kind, %expect)
     %v = #if %ok -> (#bits<64>) {
       %node = #call meta_scope_payload(%i)
-      %body = #call meta_decl_body(%node)
+      %body = #call meta_decl_body(%base, %node)
       #yield %body
     } else {
       #yield 0xFFFFFFFFFFFFFFFF

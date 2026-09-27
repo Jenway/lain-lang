@@ -15,7 +15,58 @@ typedef struct {
   const char *text;
   uint32_t length;
   LainMetaTree *tree;
+  /* 段号在登记时定，规则见 segment_pair_for：主源码 1/2，额外源码成对 4/5、
+   * 6/7、……。按**注册顺序**发号，不按宿主地址排序；编号不回收、不复用。 */
+  uint16_t source_segment;
+  uint16_t tree_segment;
 } LainMetaSource;
+
+/* 一份源码最多能拿到的下标：段号是 16 位，额外源码第 i 份的 AstIn 段号是
+ * `2*i + 3`，所以 `i <= 32766` 时最大段号正好 65535。超过就在登记时拒。 */
+#define LAIN_META_SOURCE_MAX 32766u
+
+/* 段号分配（规范 §1.2）：主源码 Source=1、AstIn=2；**3 是 AstOut 的保留编号**，
+ * 第一期没有消费者也不许被源码占用；额外源码按注册顺序成对发 4/5、6/7、……
+ * 失败源码同样占住它的段号对，不回收给后面的源码。
+ *
+ * 先算后验：段号必须落在 1..65535，两号必须不同，谁也不能等于 AstOut 的 3。
+ * 这里判不出来就返回 false，登记失败——绝不做 16 位截断。 */
+static bool segment_pair_for(uint32_t index, uint16_t *source_out,
+                             uint16_t *tree_out) {
+  uint32_t source, tree;
+  if (index == 0) {
+    source = LAIN_AST_SOURCE;
+    tree = LAIN_AST_IN;
+  } else {
+    source = 2u * index + 2u;
+    tree = 2u * index + 3u;
+  }
+  if (source == 0 || source > UINT16_MAX) return false;
+  if (tree == 0 || tree > UINT16_MAX) return false;
+  if (source == tree) return false;
+  if (source == LAIN_AST_OUT || tree == LAIN_AST_OUT) return false;
+  *source_out = (uint16_t)source;
+  *tree_out = (uint16_t)tree;
+  return true;
+}
+
+/* 段表：引用里的段号在这里解。第一期只有 Source 与 AstIn 两种段
+ *（AstOut 的编号 3 保留，没有消费者）。表按 (kind, source) **推导**出段号再散列，
+ * 不按插入顺序 —— 相同注册顺序必须得到相同编号。 */
+typedef enum {
+  LAIN_SEGMENT_NONE = 0,
+  LAIN_SEGMENT_SOURCE = 1,
+  LAIN_SEGMENT_AST = 2,
+} LainSegmentKind;
+
+typedef struct {
+  uint16_t id;
+  uint16_t kind;
+  uint32_t source;
+  bool live;
+} LainMetaSegment;
+
+#define LAIN_META_SEGMENT_CAP 256u
 
 _Static_assert(sizeof(LainMetaTypeInfo) == 64,
                "Meta 类型摘要必须占八个 64 位字");
@@ -50,7 +101,40 @@ struct LainMetaHost {
   L1Diagnostic eval_diagnostic;
   bool eval_ready;
   uint32_t eval_requests;
+  /* 段表。第一期的段只有 Source 与 AstIn；`live` 由驱动撤销映射时清掉
+   * （`lainmeta_host_revoke_tree`），撤销后引用解析一律拒 9401。 */
+  LainMetaSegment segments[LAIN_META_SEGMENT_CAP];
+  uint32_t segment_count;
+  uint64_t segment_bytes; /* 段表在暂存区里占的字节数（计账用） */
+  uint64_t roots_bytes;   /* 每份源码一个 root 槽 */
+  /* 诊断用：最近一次解析失败的节点引用与拒码。放在暂存区固定格子之外的宿主
+   * 结构里，由 meta_boot 在 trap 后读出来打印。 */
+  uint64_t trace_bad_ref;
+  uint32_t trace_bad_code;
+  uint32_t trace_bad_count;
+  uint32_t trace_deny_site;
+  uint32_t trace_status5_site;
+  uint64_t trace_s5_a, trace_s5_b;
+  uint64_t emit_ring_addr[LAINMETA_EMIT_RING];
+  uint64_t emit_ring_size[LAINMETA_EMIT_RING];
+  uint32_t emit_ring_count;
+  uint64_t trace_slots[LAINMETA_TRACE_SLOTS];
+  uint64_t trace_deny_a, trace_deny_b;
 };
+
+/* --- 暂存区头部的段/根表 ---------------------------------------------------
+ * Meta 只拿得到暂存区地址；段号与根引用必须**不需要额外能力调用**就能读到，
+ * 否则每次解析引用都要多一次宿主往返。这块元数据不是映射格式的一部分：
+ * 它不是任何段，也不参与 LAINAST 布局。
+ *
+ *   +0   magic / abi_version / segment_count / source_count   （32 字节）
+ *   +32  段表 32 字节一项：id、kind、source、root、size       （segment_count 项）
+ *   ...  每份源码 8 字节：该份源码 AstIn 的根引用            （source_count 项）
+ */
+#define LAIN_META_SCRATCH_MAGIC UINT32_C(0x5341544C) /* 小端字节 L T A S */
+#define LAIN_META_SCRATCH_HEADER 32u
+#define LAIN_META_SEGMENT_ENTRY 32u
+#define LAIN_META_SCRATCH_ABI 1u
 
 /* --- 能力名 ---------------------------------------------------------------
  *   名字                          业务参数                  结果
@@ -71,6 +155,12 @@ struct LainMetaHost {
  * ------------------------------------------------------------------------- */
 
 static void host_set_status(LainMetaHost *host, uint32_t code) {
+  if (code == LAINMETA_ERR_DENIED) host->trace_deny_site++;
+  if (code == 5u) {
+    host->trace_status5_site++;
+    host->trace_s5_a = host->trace_bad_count;
+    host->trace_s5_b = (uint64_t)(uintptr_t)__builtin_return_address(0);
+  }
   host->status = code;
   host->diagnostic_source = UINT64_MAX;
   host->diagnostic_offset = UINT64_MAX;
@@ -193,8 +283,126 @@ static uint32_t decide_scratch_size(const LainMetaHost *host) {
   for (i = 0; i < host->source_count; i++)
     total += host->sources[i].length;
   size = 65536u + total * 128u;
+  /* 段/根表占头部：每份源码两条段记录加一个 root 槽。 */
+  size += LAIN_META_SCRATCH_HEADER +
+          (uint64_t)host->source_count * 2u * LAIN_META_SEGMENT_ENTRY +
+          (uint64_t)host->source_count * 8u;
   if (size > 0x40000000u) size = 0x40000000u; /* 上限 1 GiB，别拿坏输入去要内存 */
   return (uint32_t)size;
+}
+
+/* 段表登记：id 从 (kind, source) 推出来，重复登记是幂等的。 */
+static bool segment_open(LainMetaHost *host, uint16_t id, uint16_t kind,
+                         uint32_t source) {
+  uint32_t i;
+  if (!id || id > UINT16_MAX) return false;
+  for (i = 0; i < host->segment_count; i++) {
+    if (host->segments[i].id == id) {
+      host->segments[i].live = true;
+      return true;
+    }
+  }
+  if (host->segment_count >= LAIN_META_SEGMENT_CAP) return false;
+  host->segments[host->segment_count].id = id;
+  host->segments[host->segment_count].kind = kind;
+  host->segments[host->segment_count].source = source;
+  host->segments[host->segment_count].live = true;
+  host->segment_count++;
+  return true;
+}
+
+static const LainMetaSegment *segment_find(LainMetaHost *host, uint16_t id) {
+  uint32_t i;
+  if (!id) return NULL;
+  for (i = 0; i < host->segment_count; i++)
+    if (host->segments[i].id == id) return &host->segments[i];
+  return NULL;
+}
+
+uint16_t lainmeta_host_source_segment(const LainMetaHost *host,
+                                      uint32_t source) {
+  if (!host || source >= host->source_count) return 0;
+  return host->sources[source].source_segment;
+}
+
+uint16_t lainmeta_host_tree_segment(const LainMetaHost *host, uint32_t source) {
+  if (!host || source >= host->source_count) return 0;
+  return host->sources[source].tree_segment;
+}
+
+/* 撤销一个 AstIn 段：驱动 unmap 之后调用，撤销后引用解析一律拒 9401。
+ * 树本身仍然活着（宿主还要用它诊断），只是不再接受引用。 */
+void lainmeta_host_revoke_tree(LainMetaHost *host, uint32_t source) {
+  uint16_t id;
+  uint32_t i;
+  if (!host || source >= host->source_count) return;
+  id = host->sources[source].tree_segment;
+  for (i = 0; i < host->segment_count; i++)
+    if (host->segments[i].id == id) host->segments[i].live = false;
+}
+
+/* 把段/根表写进暂存区头部。Meta 读根引用与段号不需要额外能力调用。 */
+/* 段表 / 根槽表放在**高位**，不能紧接 32 字节头部。
+ *
+ * 原因：Meta 的固定格按 docs/ast-v1.md 的布局表分布在 +56/+64/+72/+80/+88/+96/+104
+ * 与 +112/+120/+128/+144 —— 全部落在 32..160 之间。宿主若把段表写在
+ * `base + 32 + i*32`（4 段时占 32..160），就会和 Meta 的固定格**互相覆盖**：
+ * 实测段表项里读到的是 Meta 的容量值（`raw32[2]=0x87 raw32[5]=0x1508`），
+ * 而 Meta 读到的根引用也是垃圾。两边各写各的数，谁都不对。
+ *
+ * 放到 4096 之后，Meta 的固定格布局完全不用动（规范里那份布局表继续成立），
+ * 宿主也只多占 4KB 头部区。两套布局从此不重叠。 */
+#define LAIN_META_TABLE_AT 4096u
+
+static void publish_scratch_header(LainMetaHost *host) {
+  unsigned char *base = host->scratch;
+  uint32_t table_at = LAIN_META_TABLE_AT;
+  uint32_t roots_at;
+  uint32_t i;
+  if (!base) return;
+  {
+    uint64_t need = (uint64_t)table_at +
+                    (uint64_t)host->segment_count * LAIN_META_SEGMENT_ENTRY +
+                    (uint64_t)host->source_count * 8u;
+    if (need > host->scratch_size) return; /* 头部放不下就不写，绝不越界 */
+    memset(base, 0, (size_t)need);
+  }
+  memcpy(base + 0, &(uint32_t){LAIN_META_SCRATCH_MAGIC}, 4u);
+  memcpy(base + 4, &(uint32_t){LAIN_META_SCRATCH_ABI}, 4u);
+  memcpy(base + 8, &host->segment_count, 4u);
+  memcpy(base + 12, &host->source_count, 4u);
+  roots_at = table_at + host->segment_count * LAIN_META_SEGMENT_ENTRY;
+  for (i = 0; i < host->segment_count; i++) {
+    unsigned char *entry = base + table_at + i * LAIN_META_SEGMENT_ENTRY;
+    uint32_t source = host->segments[i].source;
+    uint64_t value = 0;
+    uint64_t size = 0;
+    if (host->segments[i].kind == LAIN_SEGMENT_AST &&
+        source < host->source_count) {
+      LainAstArenaView view;
+      if (lainmeta_host_arena(host, source, &view)) value = view.root;
+      size = host->sources[source].tree
+                 ? (uint64_t)host->sources[source].length
+                 : 0;
+      if (host->sources[source].tree) {
+        LainAstArenaView arena;
+        if (lainmeta_host_arena(host, source, &arena)) size = arena.used;
+      }
+    } else if (source < host->source_count) {
+      size = host->sources[source].length;
+    }
+    memcpy(entry + 0, &host->segments[i].id, 2u);
+    memcpy(entry + 2, &host->segments[i].kind, 2u);
+    memcpy(entry + 4, &source, 4u);
+    memcpy(entry + 8, &value, 8u);
+    memcpy(entry + 16, &size, 8u);
+  }
+  for (i = 0; i < host->source_count; i++) {
+    LainAstArenaView view;
+    uint64_t root = 0;
+    if (lainmeta_host_arena(host, i, &view)) root = view.root;
+    memcpy(base + roots_at + (uint64_t)i * 8u, &root, 8u);
+  }
 }
 
 void *lainmeta_host_scratch(LainMetaHost *host, uint32_t *size_out) {
@@ -215,6 +423,14 @@ void *lainmeta_host_scratch(LainMetaHost *host, uint32_t *size_out) {
     }
     host->scratch_size = want;
     host->charged += want;
+    /* 段表**不**在这里建：它在 add_source 时就登记好了（引用解析必须先于
+     * 暂存区可用，否则宿主在装配阶段就无法用段号解引用）。这里只是把已经定型的
+     * 段/根表写进暂存区头部，方便 Meta 直接读。 */
+    host->segment_bytes =
+        LAIN_META_SCRATCH_HEADER +
+        (uint64_t)host->segment_count * LAIN_META_SEGMENT_ENTRY;
+    host->roots_bytes = (uint64_t)host->source_count * 8u;
+    publish_scratch_header(host);
   }
   if (size_out) *size_out = host->scratch_size;
   return host->scratch;
@@ -223,6 +439,7 @@ void *lainmeta_host_scratch(LainMetaHost *host, uint32_t *size_out) {
 void lainmeta_host_free(LainMetaHost *host) {
   uint32_t i;
   if (!host) return;
+  /* 退出顺序由驱动保证：先销毁引用这些段的 TCB、再撤销映射，最后才销毁宿主。 */
   for (i = 0; i < host->source_count; i++) {
     lainmeta_tree_free(host->sources[i].tree);
     free((void *)host->sources[i].path);
@@ -241,7 +458,10 @@ int lainmeta_host_add_source(LainMetaHost *host, const char *path,
                              const char *text, uint32_t length) {
   LainMetaSource *grown;
   char *copy;
+  uint32_t index;
+  uint32_t error_offset = 0;
   if (!host || !text) return 1;
+  if (host->source_count > LAIN_META_SOURCE_MAX) return 2; /* 段号 16 位，见上 */
   if (host->source_count >= host->source_cap) {
     uint32_t next = host->source_cap ? host->source_cap * 2u : 8u;
     grown = (LainMetaSource *)realloc(host->sources,
@@ -256,11 +476,105 @@ int lainmeta_host_add_source(LainMetaHost *host, const char *path,
     strcpy(copy, path);
   else
     copy[0] = '\0';
-  host->sources[host->source_count].path = copy;
-  host->sources[host->source_count].text = text;
-  host->sources[host->source_count].length = length;
-  host->sources[host->source_count].tree = NULL;
+  index = host->source_count;
+  memset(&host->sources[index], 0, sizeof(host->sources[index]));
+  host->sources[index].path = copy;
+  host->sources[index].text = text;
+  host->sources[index].length = length;
+  /* 段号先按规则算出来并验范围，再写进源码项。失败一律不截断、不降级。 */
+  if (!segment_pair_for(index, &host->sources[index].source_segment,
+                        &host->sources[index].tree_segment)) {
+    host_set_status(host, LAIN_AST_ERR_SEGMENT);
+    free(copy);
+    memset(&host->sources[index], 0, sizeof(host->sources[index]));
+    return 3;
+  }
+  /* **登记即建树**：第一期不许靠 Meta 首次访问触发的懒解析——驱动必须在装配
+   * TCB 之前就把全部 AstIn 建好、映射完。失败不发布半成品。
+   *
+   * 失败**类别**由 reader 明确报回来，不再拿账户的累计 `rejected` 去猜：先有过一次
+   * 历史配额拒绝、这一次只是语法错的话，猜法会把语法错说成 1044。 */
+  {
+    LainMetaTreeStatus why = LAINMETA_TREE_OK;
+    host->sources[index].tree = lainmeta_tree_parse_classified(
+        index, text, length, &error_offset, host->quota, &why);
+    if (!host->sources[index].tree) {
+      switch (why) {
+      case LAINMETA_TREE_ERR_QUOTA:
+        /* 配额耗尽是真的没内存：不登记，让驱动停下。 */
+        host_set_status(host, (uint32_t)LAINVM_QUOTA_TRAP);
+        host->diagnostic_source = UINT64_MAX;
+        host->diagnostic_offset = UINT64_MAX;
+        free(copy);
+        memset(&host->sources[index], 0, sizeof(host->sources[index]));
+        return 3;
+      case LAINMETA_TREE_ERR_ALLOC:
+        host_set_status(host, LAINMETA_ERR_OOM);
+        host->diagnostic_source = UINT64_MAX;
+        host->diagnostic_offset = UINT64_MAX;
+        free(copy);
+        memset(&host->sources[index], 0, sizeof(host->sources[index]));
+        return 3;
+      case LAINMETA_TREE_ERR_INTERNAL:
+        /* 两遍扫描对不上/自检没过：**不是**输入的问题，也不冒充语法错。 */
+        host_set_status(host, LAINMETA_ERR_TREE_HANDLE);
+        host->diagnostic_source = index;
+        host->diagnostic_offset = error_offset;
+        free(copy);
+        memset(&host->sources[index], 0, sizeof(host->sources[index]));
+        return 3;
+      default:
+        break;
+      }
+      /* reader 拒了这份源码（未闭合的块注释、括号不配对……）：**源码段照常登记**
+       * （长度与字节仍然可读，错误位置就是诊断里的那个偏移），AstIn 段登记但**不活**、
+       * Arena 一个字节都不发布。Meta 从段表里读到 `size = 0`，于是干净地拒这份源码
+       * （状态 3）——旧实现是懒解析在 Meta 第一次访问时才炸，外部看到的正是「Meta
+       * 返回 3 + 诊断 byte N code 34」，这里把同一组观测保留下来，只是改在登记时定案。
+       * 段号按注册顺序分配，所以**失败的源码也必须占住它的段号对**，否则后面每份
+       * 源码的段号都会错位。 */
+      host_set_status(host, LAINMETA_ERR_TREE_PARSE);
+      host->diagnostic_source = index;
+      host->diagnostic_offset = error_offset;
+    }
+  }
+  if (host->sources[index].tree &&
+      !lainmeta_tree_set_segment(host->sources[index].tree,
+                                 host->sources[index].tree_segment,
+                                 host->sources[index].source_segment)) {
+    lainmeta_tree_free(host->sources[index].tree);
+    host->sources[index].tree = NULL;
+    free(copy);
+    memset(&host->sources[index], 0, sizeof(host->sources[index]));
+    return 3;
+  }
+  /* 段在这个时刻就**活着**：报文里的引用解析（解析节点地址、字节跨度、孩子引用）
+   * 从登记完那一刻起就该能用段号工作，不依赖暂存区是否已经分配。 */
+  if (!segment_open(host, host->sources[index].source_segment,
+                    LAIN_SEGMENT_SOURCE, index) ||
+      !segment_open(host, host->sources[index].tree_segment, LAIN_SEGMENT_AST,
+                    index)) {
+    if (host->sources[index].tree) lainmeta_tree_free(host->sources[index].tree);
+    host->sources[index].tree = NULL;
+    free(copy);
+    memset(&host->sources[index], 0, sizeof(host->sources[index]));
+    host_set_status(host, LAINMETA_ERR_OOM);
+    return 3;
+  }
+  if (!host->sources[index].tree) {
+    /* reader 拒了这份源码：AstIn 段登记但**不活**（引用一律拒 9401），段表里它的
+     * `size` 是 0 —— Meta 据此干净地拒这份源码。源码段仍然活着，长度与字节可读。 */
+    lainmeta_host_revoke_tree(host, index);
+  }
   host->source_count++;
+  /* 暂存区已经存在时（罕见：先拿暂存区再补源码），头部要跟着刷新。 */
+  if (host->scratch) {
+    host->segment_bytes =
+        LAIN_META_SCRATCH_HEADER +
+        (uint64_t)host->segment_count * LAIN_META_SEGMENT_ENTRY;
+    host->roots_bytes = (uint64_t)host->source_count * 8u;
+    publish_scratch_header(host);
+  }
   return 0;
 }
 
@@ -396,6 +710,13 @@ static uint32_t cap_emit_write(void *context, const uint64_t *args,
   if (count != 2 || !args) return LAINMETA_ERR_DENIED;
   bytes = (const char *)(uintptr_t)args[0];
   length = args[1];
+  /* 环形缓冲：记下本次的 (addr, size)，覆盖的是最旧的那条，不是同一条。 */
+  {
+    uint32_t slot = host->emit_ring_count % LAINMETA_EMIT_RING;
+    host->emit_ring_addr[slot] = args[0];
+    host->emit_ring_size[slot] = args[1];
+    host->emit_ring_count++;
+  }
   if (length > UINT32_MAX - 1u - host->out_length) {
     host_set_status(host, LAINMETA_ERR_DENIED);
     return LAINMETA_ERR_DENIED;
@@ -687,286 +1008,402 @@ static uint32_t cap_eval_width(void *context, const uint64_t *args,
   return 0;
 }
 
-/* 宿主句柄的高 32 位是源文件编号 + 1，低 32 位是该树内部句柄。
- * 所有访问先核对归属，不把句柄当指针解引用。 */
-static uint64_t tree_encode(uint32_t source, uint64_t local) {
-  return ((uint64_t)source + 1u) << 32 | local;
+/* --- AstIn 引用解析 -------------------------------------------------------
+ * 段身份在**这里**校验，解读引用绝不越段：先在本段内用减法验证区间，通过之后
+ * 才交给 VSpace。固定的四个拒码（9401/9402/9403/9404）就是这一层的返回。
+ */
+
+/* 本段的 Arena 视图（只有 AstIn 段有）。段不存在、已撤销或不是 AstIn 都失败，
+ * 由调用方记 9401。 */
+static bool segment_view(LainMetaHost *host, uint16_t id,
+                         LainAstArenaView *out) {
+  const LainMetaSegment *segment = segment_find(host, id);
+  if (!segment || !segment->live || segment->kind != LAIN_SEGMENT_AST)
+    return false;
+  return lainmeta_host_arena(host, segment->source, out);
 }
 
-static LainMetaTree *tree_source(LainMetaHost *host, uint32_t source) {
-  uint32_t offset = 0;
-  uint64_t rejected_before;
-  LainMetaSource *item;
+/* 纯结构校验：只信任调用方已经验过可读性的那块字节。 */
+static bool header_ok_trusted(const unsigned char *base, uint64_t window,
+                              uint16_t segment_id, LainAstArenaHeader *out);
+
+/* 解引用之前**必须先过这一道**（规范 §2.3）。
+ *
+ * 规则说得很硬：AST 读取能力要求已绑定合法 VSpace，未绑定就安全拒绝；**每次**
+ * 解引用之前验证对应读取范围具有 READ 权限，不能先读 Header/Node 再检查。
+ *
+ *   * 未绑定 VSpace（`host->space == NULL`）→ 拒（旧实现写成 `host->space && ...`，
+ *     于是「没授权」被当成「不用查」，解析照样成功 —— 审计复现过）；
+ *   * 零长度不解引用，放行（调用方本来就不许 load）；
+ *   * 其余一律 `lainvm_space_check(..., READ)`，失败记 DENIED(5)。
+ */
+static bool host_read_ok(LainMetaHost *host, uintptr_t address,
+                         uint64_t length) {
+  if (!host->space) {
+    host_set_status(host, LAINMETA_ERR_DENIED);
+    return false;
+  }
+  if (!length) return true;
+  if (!lainvm_space_check(host->space, address, length, LAINVM_MEM_READ)) {
+    host_set_status(host, LAINMETA_ERR_DENIED);
+    return false;
+  }
+  return true;
+}
+
+/* Header 自洽性。**不信任**任何自报字段：窗口长度用驱动登记的那一个。
+ *
+ * 这一层负责**先验权限再读**：Header 的 64 字节必须在本段已授权的 READ 范围内，
+ * 否则连 `memcpy` 都不做。 */
+static bool header_read(LainMetaHost *host, const unsigned char *base,
+                        uint64_t window, uint16_t segment_id,
+                        LainAstArenaHeader *out) {
+  if (!base || window < LAIN_AST_HEADER_SIZE) return false;
+  if (!host_read_ok(host, (uintptr_t)base, LAIN_AST_HEADER_SIZE)) return false;
+  return header_ok_trusted(base, window, segment_id, out);
+}
+
+/* 纯结构校验：只信任调用方已经验过可读性的那块字节。 */
+static bool header_ok_trusted(const unsigned char *base, uint64_t window,
+                              uint16_t segment_id, LainAstArenaHeader *out) {
+  LainAstArenaHeader header;
+  if (!base || window < LAIN_AST_HEADER_SIZE) return false;
+  memcpy(&header, base, sizeof(header));
+  if (header.magic != LAIN_AST_MAGIC) return false;
+  if (header.abi_version != (uint16_t)LAIN_AST_ABI_VERSION) return false;
+  if (header.node_stride != (uint16_t)LAIN_AST_NODE_STRIDE) return false;
+  if (header.segment_id != segment_id) return false;
+  if (header.flags != 0) return false;
+  if (header.nodes_offset < LAIN_AST_HEADER_SIZE) return false;
+  if (header.nodes_offset % 8u != 0u) return false;
+  if (header.capacity_bytes > window) return false;
+  if (header.used_bytes > header.capacity_bytes) return false;
+  if (header.node_count > header.node_capacity) return false;
+  if (header.node_capacity > (header.capacity_bytes - LAIN_AST_HEADER_SIZE) /
+                                 (uint64_t)LAIN_AST_NODE_STRIDE)
+    return false;
+  if (header.nodes_offset > header.capacity_bytes) return false;
+  if (header.node_capacity >
+      (header.capacity_bytes - header.nodes_offset) /
+          (uint64_t)LAIN_AST_NODE_STRIDE)
+    return false;
+  /* 预留节点区必须整个落在已分配最高水位之内：已发布的节点槽不能是「还没分配」
+   * 的字节。used_bytes 含全部预留槽，所以这里能直接比。 */
+  if (header.nodes_offset +
+          header.node_capacity * (uint64_t)LAIN_AST_NODE_STRIDE >
+      header.used_bytes)
+    return false;
+  *out = header;
+  return true;
+}
+
+bool lainmeta_host_arena(const LainMetaHost *host, uint32_t source,
+                         LainAstArenaView *out) {
+  if (!host || !out || source >= host->source_count) return false;
+  return lainmeta_tree_arena(host->sources[source].tree, out);
+}
+
+const LainMetaTree *lainmeta_host_tree(LainMetaHost *host, uint32_t source) {
   if (!host || source >= host->source_count) {
     if (host) host_set_status(host, LAINMETA_ERR_NO_SOURCE);
     return NULL;
   }
-  item = &host->sources[source];
-  if (!item->tree) {
-    rejected_before = host->quota ? host->quota->rejected : 0;
-    item->tree = lainmeta_tree_parse_with_quota(
-        source, item->text, item->length, &offset, host->quota);
-    if (!item->tree) {
-      host_set_status(host, host->quota && host->quota->rejected > rejected_before
-                         ? (uint32_t)LAINVM_QUOTA_TRAP
-                         : LAINMETA_ERR_TREE_PARSE);
-      if (host->status == LAINMETA_ERR_TREE_PARSE) {
-        host->diagnostic_source = source;
-        host->diagnostic_offset = offset;
+  return host->sources[source].tree;
+}
+
+/* 读节点：引用必须是**本段**已发布的节点槽。
+ *
+ * 顺序是**先验权限、再解引用**（规范 §2.3）：Header 读之前查 Header 区间，节点
+ * memcpy 之前查这 56 字节。任何一步没授权就拒 5，不做「先读后查」。 */
+static bool node_read(LainMetaHost *host, LainAstRef ref, LainAstArenaView *view,
+                      LainAstArenaHeader *header, LainAstNode *out,
+                      uint64_t *offset_out) {
+  uint16_t id = lain_ast_segment(ref);
+  uint64_t off = lain_ast_offset(ref);
+  uint64_t delta;
+  const unsigned char *base;
+  if (!ref) {
+    host_set_status(host, LAIN_AST_ERR_SEGMENT);
+    return false;
+  }
+  if (!segment_view(host, id, view)) {
+    host_set_status(host, LAIN_AST_ERR_SEGMENT);
+    return false;
+  }
+  base = (const unsigned char *)view->data;
+  /* 未绑定 VSpace、或 Header 那 64 字节不在授权 READ 范围内 → 拒，连字段都不看。 */
+  if (!header_read(host, base, view->capacity, id, header)) {
+    if (host->status == LAINMETA_ERR_DENIED) return false;
+    host_set_status(host, LAIN_AST_ERR_HEADER);
+    return false;
+  }
+  if (off < header->nodes_offset) {
+    host_set_status(host, LAIN_AST_ERR_SLOT);
+    return false;
+  }
+  delta = off - header->nodes_offset;
+  if (delta % LAIN_AST_NODE_STRIDE != 0) {
+    host_set_status(host, LAIN_AST_ERR_SLOT);
+    return false;
+  }
+  if (delta / LAIN_AST_NODE_STRIDE >= header->node_count) {
+    host_set_status(host, LAIN_AST_ERR_SLOT); /* 未发布的槽 */
+    return false;
+  }
+  if (off > view->used || (uint64_t)LAIN_AST_NODE_STRIDE > view->used - off) {
+    host_set_status(host, LAIN_AST_ERR_RANGE);
+    return false;
+  }
+  /* **先验权限，再 memcpy**：这 56 字节必须在授权 READ 范围内。 */
+  if (!host_read_ok(host, (uintptr_t)base + (uintptr_t)off,
+                    LAIN_AST_NODE_STRIDE))
+    return false;
+  memcpy(out, base + off, sizeof(*out));
+  if (offset_out) *offset_out = off;
+  return true;
+}
+
+bool lainmeta_host_ast_node_addr(LainMetaHost *host, LainAstRef ref,
+                                 uintptr_t *address_out) {
+  LainAstArenaView view;
+  LainAstArenaHeader header;
+  LainAstNode node;
+  const unsigned char *base;
+  uintptr_t address;
+  if (!host) return false;
+  if (!node_read(host, ref, &view, &header, &node, NULL)) {
+    host->trace_bad_ref = ref;
+    host->trace_bad_code = host->status;
+    host->trace_bad_count++;
+    return false;
+  }
+  if (node.kind != LAIN_AST_TOKEN && node.kind != LAIN_AST_GROUP) {
+    host_set_status(host, LAIN_AST_ERR_HEADER);
+    return false;
+  }
+  base = (const unsigned char *)view.data;
+  /* 先减后加：区间已经在 node_read 里按本段验证过，这里只做指针加法。**权限检查
+   * 已经在 node_read 里做过（未绑定 VSpace 直接拒），这里不重复也不放宽** ——
+   * 旧写法是 `host->space && ...`，于是没授权反而放行。 */
+  address = (uintptr_t)base + (uintptr_t)lain_ast_offset(ref);
+  if (address_out) *address_out = address;
+  return true;
+}
+
+bool lainmeta_host_ast_span_addr(LainMetaHost *host, LainAstRef ref,
+                                 uint64_t length, uintptr_t *address_out) {
+  uint16_t id;
+  uint64_t off;
+  if (!host) return false;
+  if (!ref) {
+    /* 约定：零长度 + NONE 返回零地址，调用者不得 load。 */
+    if (length != 0) {
+      host_set_status(host, LAIN_AST_ERR_SEGMENT);
+      return false;
+    }
+    if (address_out) *address_out = 0;
+    return true;
+  }
+  id = lain_ast_segment(ref);
+  off = lain_ast_offset(ref);
+  {
+    const LainMetaSegment *segment = segment_find(host, id);
+    if (!segment || !segment->live) {
+      host_set_status(host, LAIN_AST_ERR_SEGMENT);
+      return false;
+    }
+    if (segment->kind == LAIN_SEGMENT_SOURCE) {
+      uint32_t source = segment->source;
+      uintptr_t address;
+      if (source >= host->source_count) {
+        host_set_status(host, LAIN_AST_ERR_SEGMENT);
+        return false;
       }
+      if (off > host->sources[source].length ||
+          length > (uint64_t)host->sources[source].length - off) {
+        host_set_status(host, LAIN_AST_ERR_RANGE);
+        return false;
+      }
+      address = (uintptr_t)host->sources[source].text + (uintptr_t)off;
+      /* Source 段的地址由宿主自己算出来；**可读性必须在这里验**（未绑定 VSpace
+       * 一律拒）——这一路径正是把 Meta 的字节引用解析成宿主地址的地方，放行等于
+       * 把「没授权」当成「不用查」。零长度不解引用，只要求空间已绑定。 */
+      if (!host->space) {
+        host_set_status(host, LAINMETA_ERR_DENIED);
+        return false;
+      }
+      if (!host_read_ok(host, address, length)) return false;
+      if (address_out) *address_out = address;
+      return true;
+    }
+    if (segment->kind == LAIN_SEGMENT_AST) {
+      LainAstArenaView view;
+      LainAstArenaHeader header;
+      uintptr_t address;
+      const unsigned char *base;
+      if (!segment_view(host, id, &view)) {
+        host_set_status(host, LAIN_AST_ERR_SEGMENT);
+        return false;
+      }
+      base = (const unsigned char *)view.data;
+      /* Header 的 64 字节：先验权限再读（未绑定 VSpace 直接拒）。 */
+      if (!header_read(host, base, view.capacity, id, &header)) {
+        if (host->status == LAINMETA_ERR_DENIED) return false;
+        host_set_status(host, LAIN_AST_ERR_HEADER);
+        return false;
+      }
+      /* 可寻址范围是**已发布**字节：不能靠 Header 自报去读未写的容量。 */
+      if (off > view.used || length > view.used - off) {
+        host_set_status(host, LAIN_AST_ERR_RANGE);
+        return false;
+      }
+      address = (uintptr_t)base + (uintptr_t)off;
+      if (!host_read_ok(host, address, length)) return false;
+      if (address_out) *address_out = address;
+      return true;
     }
   }
-  return item->tree;
+  host_set_status(host, LAIN_AST_ERR_SEGMENT);
+  return false;
 }
 
-const LainMetaTree *lainmeta_host_tree(LainMetaHost *host, uint32_t source) {
-  return tree_source(host, source);
-}
-
-static LainMetaTree *tree_decode(LainMetaHost *host, uint64_t handle,
-                                 uint64_t *local_out) {
-  uint64_t source = handle >> 32;
-  LainMetaTree *tree;
-  LainMetaTreeNode node;
-  if (!source || source - 1u >= host->source_count || !(uint32_t)handle) {
-    host_set_status(host, LAINMETA_ERR_TREE_HANDLE);
-    return NULL;
+bool lainmeta_host_ast_child_ref(LainMetaHost *host, LainAstRef ref,
+                                 uint64_t index, LainAstRef *out) {
+  LainAstArenaView view;
+  LainAstArenaHeader header;
+  LainAstNode node;
+  uint64_t offset = 0;
+  uint64_t at;
+  const unsigned char *base;
+  if (!host) return false;
+  if (!node_read(host, ref, &view, &header, &node, &offset)) return false;
+  if (node.kind != LAIN_AST_GROUP) {
+    host_set_status(host, LAIN_AST_ERR_SLOT); /* 词没有孩子 */
+    return false;
   }
-  tree = tree_source(host, (uint32_t)(source - 1u));
-  if (!tree) return NULL;
-  if (!lainmeta_tree_node(tree, (uint32_t)handle, &node)) {
-    host_set_status(host, LAINMETA_ERR_TREE_HANDLE);
-    return NULL;
+  if (index >= node.child_count) {
+    host_set_status(host, LAIN_AST_ERR_RANGE);
+    return false;
   }
-  if (local_out) *local_out = (uint32_t)handle;
-  return tree;
-}
-
-static uint64_t tree_quota_rejected(const LainMetaHost *host) {
-  return host->quota ? host->quota->rejected : 0;
-}
-
-/* 来源链只指向更早创建的节点；生成节点的 start 不代表原始源码位置。 */
-static void tree_diagnostic_origin(LainMetaHost *host, LainMetaTree *tree,
-                                    uint64_t local) {
-  LainMetaTreeNode node;
-  while (local && lainmeta_tree_node(tree, local, &node)) {
-    if (node.origin) {
-      if (node.origin >= local) return;
-      local = node.origin;
-      continue;
-    }
-    if (node.source_index < host->source_count &&
-        node.start <= host->sources[node.source_index].length) {
-      host->diagnostic_source = node.source_index;
-      host->diagnostic_offset = node.start;
-    }
-    return;
+  if (!node.children_offset || node.children_offset % 8u ||
+      node.children_offset < header.nodes_offset +
+          header.node_capacity * LAIN_AST_NODE_STRIDE ||
+      node.children_offset > view.used ||
+      (uint64_t)node.child_count * 8u > view.used - node.children_offset) {
+    host_set_status(host, LAIN_AST_ERR_RANGE);
+    return false;
   }
+  if ((uint64_t)node.child_count > UINT64_MAX / 8u) {
+    host_set_status(host, LAIN_AST_ERR_RANGE);
+    return false;
+  }
+  if (index > (UINT64_MAX - node.children_offset) / 8u) {
+    host_set_status(host, LAIN_AST_ERR_RANGE);
+    return false;
+  }
+  at = node.children_offset + index * 8u;
+  if (at > view.used || 8u > view.used - at) {
+    host_set_status(host, LAIN_AST_ERR_RANGE);
+    return false;
+  }
+  base = (const unsigned char *)view.data;
+  /* 孩子列表那一项：**先验权限再 memcpy**（撤销映射后这里必须拒，不能照读）。 */
+  if (!host_read_ok(host, (uintptr_t)base + (uintptr_t)at, 8u)) return false;
+  memcpy(out, base + at, 8u);
+  {
+    /* 孩子引用必须落在同一个 Arena 的已发布节点槽上，并且那个目标节点也要在
+     * 授权 READ 范围内（node_read 自己会验）。 */
+    LainAstArenaHeader child_header;
+    LainAstNode child;
+    if (!node_read(host, *out, &view, &child_header, &child, NULL)) return false;
+  }
+  return true;
 }
-
-static void tree_edit_failed(LainMetaHost *host, uint64_t rejected_before,
-                             LainMetaTree *tree, uint64_t origin) {
-  host_set_status(host, tree_quota_rejected(host) > rejected_before
-                     ? (uint32_t)LAINVM_QUOTA_TRAP
-                     : LAINMETA_ERR_TREE_EDIT);
-  tree_diagnostic_origin(host, tree, origin);
-}
-
-static uint32_t cap_tree_root(void *context, const uint64_t *args,
-                              uint32_t count, uint64_t *out) {
+/* 四个 AstIn 原语。业务参数严格检查：多了少了都拒。
+ * 它们一律通过 host 的属性函数解析引用：meta 从不自己解码引用、也不做指针算术。 */
+static uint32_t cap_ast_root(void *context, const uint64_t *args, uint32_t count,
+                             uint64_t *out) {
   LainMetaHost *host = context;
-  LainMetaTree *tree;
+  LainAstArenaView view;
   if (!host) return LAINMETA_ERR_DENIED;
   if (count != 1 || !args) return LAINMETA_ERR_DENIED;
-  if (out) *out = 0;
-  if (args[0] > UINT32_MAX) {
-    host_set_status(host, LAINMETA_ERR_NO_SOURCE);
-    return 0;
-  }
-  tree = tree_source(host, (uint32_t)args[0]);
-  if (tree && out) *out = tree_encode((uint32_t)args[0], lainmeta_tree_root(tree));
-  return 0;
-}
-
-/* 字段编号固定为公开接口：1 kind, 2 start, 3 length, 4 source,
- * 5 origin, 6 delimiter, 7 child_count。 */
-static uint32_t cap_tree_field(void *context, const uint64_t *args,
-                               uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  LainMetaTree *tree;
-  LainMetaTreeNode node;
-  uint64_t local;
-  if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 2 || !args) return LAINMETA_ERR_DENIED;
-  if (out) *out = 0;
-  tree = tree_decode(host, args[0], &local);
-  if (!tree || !lainmeta_tree_node(tree, local, &node)) return 0;
-  if (!out) return 0;
-  switch (args[1]) {
-    case 1: *out = node.kind; break;
-    case 2: *out = node.start; break;
-    case 3: *out = node.length; break;
-    case 4: *out = node.source_index; break;
-    case 5: *out = node.origin ? tree_encode((uint32_t)(args[0] >> 32) - 1u,
-                                               node.origin) : 0; break;
-    case 6: *out = node.delimiter; break;
-    case 7: *out = node.child_count; break;
-    default: host_set_status(host, LAINMETA_ERR_TREE_HANDLE); break;
-  }
-  return 0;
-}
-
-static uint32_t cap_tree_child(void *context, const uint64_t *args,
-                               uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  LainMetaTree *tree;
-  uint64_t local, child;
-  if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 2 || !args) return LAINMETA_ERR_DENIED;
-  if (out) *out = 0;
-  tree = tree_decode(host, args[0], &local);
-  if (!tree || args[1] > UINT32_MAX) return 0;
-  child = lainmeta_tree_child(tree, local, (uint32_t)args[1]);
-  if (!child) host_set_status(host, LAINMETA_ERR_TREE_HANDLE);
-  else if (out) *out = tree_encode((uint32_t)(args[0] >> 32) - 1u, child);
-  return 0;
-}
-
-static uint32_t cap_tree_text_byte(void *context, const uint64_t *args,
-                                   uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  LainMetaTree *tree;
-  const char *text;
-  uint64_t local;
-  uint32_t length;
-  if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 2 || !args) return LAINMETA_ERR_DENIED;
-  if (out) *out = 0;
-  tree = tree_decode(host, args[0], &local);
-  if (!tree) return 0;
-  text = lainmeta_tree_text(tree, local, &length);
-  if (!text || args[1] >= length) {
-    host_set_status(host, LAINMETA_ERR_TREE_HANDLE);
-    return 0;
-  }
-  if (out) *out = (unsigned char)text[args[1]];
-  return 0;
-}
-
-static uint32_t cap_tree_make_token(void *context, const uint64_t *args,
-                                    uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  LainMetaTree *tree;
-  uint64_t origin = 0, local, rejected_before;
-  if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 4 || !args) return LAINMETA_ERR_DENIED;
-  if (out) *out = 0;
-  if (args[0] > UINT32_MAX || args[2] > UINT32_MAX ||
-      !host_range_readable(host, (uintptr_t)args[1], args[2])) {
+  /* AST 读取能力都要求已绑定合法 VSpace（规范 §2.3）：没授权就没有「读 AST」这回事。 */
+  if (!host->space) {
     host_set_status(host, LAINMETA_ERR_DENIED);
-    return 0;
+    if (out) *out = LAIN_AST_REF_NONE;
+    return LAINMETA_ERR_DENIED;
   }
-  tree = tree_source(host, (uint32_t)args[0]);
-  if (!tree) return 0;
-  if (args[3]) {
-    if ((args[3] >> 32) != args[0] + 1u ||
-        tree_decode(host, args[3], &origin) != tree) {
-      host_set_status(host, LAINMETA_ERR_TREE_EDIT);
-      return 0;
+  if (args[0] >= host->source_count) {
+    host_set_status(host, LAIN_AST_ERR_SEGMENT);
+    if (out) *out = LAIN_AST_REF_NONE;
+    return host->status;
+  }
+  if (!lainmeta_host_arena(host, (uint32_t)args[0], &view)) {
+    host_set_status(host, LAIN_AST_ERR_SEGMENT);
+    if (out) *out = LAIN_AST_REF_NONE;
+    return host->status;
+  }
+  {
+    uintptr_t address;
+    if (!lainmeta_host_ast_node_addr(host, view.root, &address)) {
+      if (out) *out = LAIN_AST_REF_NONE;
+      return host->status;
     }
   }
-  rejected_before = tree_quota_rejected(host);
-  local = lainmeta_tree_make_token(tree, (const char *)(uintptr_t)args[1],
-                                    (uint32_t)args[2], origin);
-  if (!local) tree_edit_failed(host, rejected_before, tree, origin);
-  else if (out) *out = tree_encode((uint32_t)args[0], local);
+  if (out) *out = view.root;
   return 0;
 }
 
-static uint32_t cap_tree_replace(void *context, const uint64_t *args,
-                                 uint32_t count, uint64_t *out) {
+static uint32_t cap_ast_node_addr(void *context, const uint64_t *args,
+                                  uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
-  LainMetaTree *tree;
-  uint64_t group, replacement, local, rejected_before;
+  uintptr_t address = 0;
   if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 3 || !args) return LAINMETA_ERR_DENIED;
-  if (out) *out = 0;
-  tree = tree_decode(host, args[0], &group);
-  if (!tree) return 0;
-  if (args[1] > UINT32_MAX ||
-      (args[0] >> 32) != (args[2] >> 32) ||
-      tree_decode(host, args[2], &replacement) != tree) {
-    host_set_status(host, LAINMETA_ERR_TREE_EDIT);
-    tree_diagnostic_origin(host, tree, group);
-    return 0;
+  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
+  if (!lainmeta_host_ast_node_addr(host, (LainAstRef)args[0], &address)) {
+    if (out) *out = 0;
+    return host->status;
   }
-  rejected_before = tree_quota_rejected(host);
-  local = lainmeta_tree_replace_child(tree, group, (uint32_t)args[1], replacement);
-  if (!local) tree_edit_failed(host, rejected_before, tree, group);
-  else if (out) *out = tree_encode((uint32_t)(args[0] >> 32) - 1u, local);
+  if (out) *out = (uint64_t)address;
   return 0;
 }
 
-static uint32_t cap_tree_make_group(void *context, const uint64_t *args,
-                                    uint32_t count, uint64_t *out) {
+static uint32_t cap_ast_span_addr(void *context, const uint64_t *args,
+                                  uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
-  LainMetaTree *tree;
-  const uint64_t *encoded;
-  uint64_t *children = NULL, origin = 0, local, child_bytes, rejected_before;
-  uint32_t i, child_count;
+  uintptr_t address = 0;
   if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 5 || !args) return LAINMETA_ERR_DENIED;
+  if (count != 2 || !args) return LAINMETA_ERR_DENIED;
+  if (!lainmeta_host_ast_span_addr(host, (LainAstRef)args[0], args[1],
+                                   &address)) {
+    if (out) *out = 0;
+    return host->status;
+  }
+  if (out) *out = (uint64_t)address;
+  return 0;
+}
+
+static uint32_t cap_trace(void *context, const uint64_t *args, uint32_t count,
+                          uint64_t *out) {
+  LainMetaHost *host = context;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 2 || !args) return LAINMETA_ERR_DENIED;
+  if (args[0] < LAINMETA_TRACE_SLOTS) host->trace_slots[args[0]] = args[1];
   if (out) *out = 0;
-  if (args[0] > UINT32_MAX || args[1] > 255 || args[3] > 65536 ||
-      !host_range_readable(host, (uintptr_t)args[2], args[3] * 8u)) {
-    host_set_status(host, LAINMETA_ERR_DENIED);
-    return 0;
+  return 0;
+}
+
+static uint32_t cap_ast_child_ref(void *context, const uint64_t *args,
+                                  uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  LainAstRef child = LAIN_AST_REF_NONE;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 2 || !args) return LAINMETA_ERR_DENIED;
+  if (!lainmeta_host_ast_child_ref(host, (LainAstRef)args[0], args[1], &child)) {
+    if (out) *out = LAIN_AST_REF_NONE;
+    return host->status;
   }
-  tree = tree_source(host, (uint32_t)args[0]);
-  if (!tree) return 0;
-  if (args[4] &&
-      ((args[4] >> 32) != args[0] + 1u ||
-       tree_decode(host, args[4], &origin) != tree)) {
-    host_set_status(host, LAINMETA_ERR_TREE_EDIT);
-    return 0;
-  }
-  child_count = (uint32_t)args[3];
-  child_bytes = (uint64_t)sizeof(*children) * child_count;
-  encoded = (const uint64_t *)(uintptr_t)args[2];
-  if (child_count) {
-    if (lainvm_quota_charge(host->quota, child_bytes) != 0) {
-      host_set_status(host, (uint32_t)LAINVM_QUOTA_TRAP);
-      tree_diagnostic_origin(host, tree, origin);
-      return 0;
-    }
-    children = (uint64_t *)malloc((size_t)child_bytes);
-    if (!children) {
-      (void)lainvm_quota_release(host->quota, child_bytes);
-      host_set_status(host, LAINMETA_ERR_OOM);
-      tree_diagnostic_origin(host, tree, origin);
-      return 0;
-    }
-  }
-  for (i = 0; i < child_count; i++) {
-    uint64_t handle;
-    memcpy(&handle, (const unsigned char *)encoded + (size_t)i * 8u, 8u);
-    if ((handle >> 32) != args[0] + 1u ||
-        tree_decode(host, handle, &children[i]) != tree) {
-      host_set_status(host, LAINMETA_ERR_TREE_EDIT);
-      tree_diagnostic_origin(host, tree, origin);
-      free(children);
-      (void)lainvm_quota_release(host->quota, child_bytes);
-      return 0;
-    }
-  }
-  rejected_before = tree_quota_rejected(host);
-  local = lainmeta_tree_make_group(tree, (unsigned char)args[1], children,
-                                    child_count, origin);
-  free(children);
-  if (child_count) (void)lainvm_quota_release(host->quota, child_bytes);
-  if (!local) tree_edit_failed(host, rejected_before, tree, origin);
-  else if (out) *out = tree_encode((uint32_t)args[0], local);
+  if (out) *out = child;
   return 0;
 }
 
@@ -997,14 +1434,13 @@ static const MetaCapability k_capabilities[] = {
     {"lain_meta_eval_diagnostic_field", cap_eval_diagnostic_field},
     {"lain_meta_eval_kind", cap_eval_kind},
     {"lain_meta_eval_width", cap_eval_width},
-    {"lain_meta_tree_root", cap_tree_root},
-    {"lain_meta_tree_field", cap_tree_field},
-    {"lain_meta_tree_child", cap_tree_child},
-    {"lain_meta_tree_text_byte", cap_tree_text_byte},
-    {"lain_meta_tree_make_token", cap_tree_make_token},
-    {"lain_meta_tree_make_group", cap_tree_make_group},
-    {"lain_meta_tree_replace_child", cap_tree_replace},
+    {"lain_meta_ast_root", cap_ast_root},
+    {"lain_meta_ast_node_addr", cap_ast_node_addr},
+    {"lain_meta_ast_span_addr", cap_ast_span_addr},
+    {"lain_meta_ast_child_ref", cap_ast_child_ref},
+    {"lain_meta_trace", cap_trace},
 };
+
 
 /* 登记底座服务：每一项都绑定这份 host 作为 context。
  * host 为 NULL 是参数错误（这层服务不接受无宿主绑定）；表已冻结或重名时
@@ -1018,4 +1454,41 @@ int lainmeta_host_register(LainMetaHost *host, LainVmCaps *caps) {
       return 2;
   }
   return 0;
+}
+
+/* 诊断：最近一次节点引用解析失败。 */
+void lainmeta_host_trace_bad(const LainMetaHost *host, uint64_t *ref_out,
+                             uint32_t *code_out, uint32_t *count_out) {
+  if (ref_out) *ref_out = host ? host->trace_bad_ref : 0;
+  if (code_out) *code_out = host ? host->trace_bad_code : 0;
+  if (count_out) *count_out = host ? host->trace_bad_count : 0;
+  (void)lainmeta_host_diagnostic;
+}
+
+uint32_t lainmeta_host_deny_count(const LainMetaHost *host) {
+  return host ? host->trace_deny_site : 0;
+}
+
+uint64_t lainmeta_host_trace_slot(const LainMetaHost *host, uint32_t slot) {
+  if (!host || slot >= LAINMETA_TRACE_SLOTS) return 0;
+  return host->trace_slots[slot];
+}
+
+uint32_t lainmeta_host_emit_ring(const LainMetaHost *host, uint32_t index,
+                                 uint64_t *addr_out, uint64_t *size_out) {
+  uint32_t slot;
+  if (!host || index >= LAINMETA_EMIT_RING) return 0;
+  slot = (host->emit_ring_count + index) % LAINMETA_EMIT_RING;
+  if (addr_out) *addr_out = host->emit_ring_addr[slot];
+  if (size_out) *size_out = host->emit_ring_size[slot];
+  return host->emit_ring_count;
+}
+
+uint32_t lainmeta_host_status5_count(const LainMetaHost *host) {
+  return host ? host->trace_status5_site : 0;
+}
+
+void lainmeta_host_status5_site(const LainMetaHost *host, uint64_t *a, uint64_t *b) {
+  if (a) *a = host ? host->trace_s5_a : 0;
+  if (b) *b = host ? host->trace_s5_b : 0;
 }

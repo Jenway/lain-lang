@@ -124,12 +124,23 @@ data meta_reg_entry_size ro { 64 0 0 0 0 0 0 0 }
 
 #proc meta_tid_word(%id: #bits<64>,
                      %off: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data()
-  %i = #sub[#bits<64>](%id, 1)
-  %e = #call meta_reg_entry(%scratch, %i)
-  %p = #lea(%e, %off, 1, 0)
-  %v = #call meta_cell_get(%p)
-  #return %v
+  // **`%id == 0` 必须先挡掉**：注册表 id 从 1 起，`%id - 1` 在 id=0 时
+  // 下溢成 `0xFFFFFFFFFFFFFFFF`，`meta_reg_entry` 再乘 64 就得到 2^49 量级的
+  // 偏移 —— 正是实测到的「越界量级 0x1ffffffff」。那会让 `#load` 被判 1004。
+  // 语义：id 0 = 「没有类型」（`meta_type_resolve` 失败时回 0），
+  // 所以查它的字段应当回 0/NONE 而不是去读一块不存在的内存。
+  %zero = #eq[#bits<64>](%id, 0)
+  %r = #if %zero -> (#bits<64>) {
+    #yield 0
+  } else {
+    %scratch = #call lain_meta_scratch_data()
+    %i = #sub[#bits<64>](%id, 1)
+    %e = #call meta_reg_entry(%scratch, %i)
+    %p = #lea(%e, %off, 1, 0)
+    %v = #call meta_cell_get(%p)
+    #yield %v
+  }
+  #return %r
 }
 
 // kind：v0 只有 1（内建标量），和正式设计的 builtins 对齐

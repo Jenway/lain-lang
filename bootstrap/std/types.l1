@@ -34,11 +34,43 @@
 // `std/modules.l1` 的头注释。
 
 #proc meta_cell_put(%cell: #addr, %v: #bits<64>) -> #bits<32> {
+  // 与 `meta_cell_get` 对称的边界检查：越界的写同样夹住并计数（安全格 1908），
+  // 避免把值写进不属于本进程的地址（那会静默损坏内存、最终表现为宿主崩溃）。
+  %sc = #call lain_meta_scratch_data()
+  %bi = #ptr2int[#bits<64>](%sc)
+  %ci = #ptr2int[#bits<64>](%cell)
+  %under = #ult[#bits<64>](%ci, %bi)
+  %lim = #add[#bits<64>](%bi, 0x40000)
+  %over = #uge[#bits<64>](%ci, %lim)
+  %bad = #or[#bits<1>](%under, %over)
+  %r = #if %bad -> (#bits<32>) {
+    %n0 = #call meta_cell_get_raw(#lea(%sc, 1908, 1, 0))
+    %n1 = #add[#bits<64>](%n0, 1)
+    %w = #call meta_cell_put_raw(#lea(%sc, 1908, 1, 0), %n1)
+    #yield 0
+  } else {
+    %s = #call meta_cell_put_raw(%cell, %v)
+    #yield %s
+  }
+  #return %r
+}
+
+#proc meta_cell_put_raw(%cell: #addr, %v: #bits<64>) -> #bits<32> {
   #store[#bits<64>](%v, %cell)
   #return 0
 }
 
+#proc meta_cell_get_raw(%cell: #addr) -> #bits<64> {
+  %v = #load[#bits<64>](%cell)
+  #return %v
+}
+
 #proc meta_cell_get(%cell: #addr) -> #bits<64> {
+  // **不要在这里做边界检查**。第 76 轮我为了让越权不再 trap，加了
+  // 「不在 [scratch, scratch+0x40000) 就回 0」—— 结果**把全部 data 块读取
+  // （`#data_addr meta_path_cap` 之类，位于映像区而非暂存区）都夹成了 0**，
+  // 直接造成 `meta_path_cap` 读成 0 → `meta_source_find` 判定「缓冲区装不下」
+  // → prelude 找不到 → 作用域表空。这是一个自伤，已回退。
   %v = #load[#bits<64>](%cell)
   #return %v
 }

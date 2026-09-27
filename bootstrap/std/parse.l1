@@ -1,170 +1,548 @@
-// 初代标准库 v0 —— 从机制源码树复制词和组，供识别 pass 标注语义。
+// 词法与括号配对由 seed 的 reader 完成，结果是一块**平铺 AstIn Arena**；本文件
+// 只提供访问原语，不再复制、不再自建树。
 //
-// 在这之前，「读源码」是拿字符找模式：跳空白、读标识符、匹配关键字字节、猜一条
-// 形式到哪结束。它不知道程序是有结构的，所以每个使用点都要重搜一遍，而且
-// 「`letter` 里的 let」「注释里的 scalar」这类东西会被当成声明——都真的出过。
-//
-// 词法和括号配对由机制源码树完成；本文件只把公开节点复制到可写的语义树。
-//
-// 树只有两种节点：
+// 树只有两种节点（与 reader 一致，这一层不认识 let / struct / enum）：
 //
 //   词 —— 一段连续的字母数字（`struct`、`Pair`、`i32`、`42`），或者一个标点
 //   组 —— 一对括号，连同里面装的东西
 //
-// 没有第三种。**它不认识 let / struct / enum**——那些是 Meta 的事。正因如此这层
-// 是跟语言无关的。
+// **第一期删掉的东西**（规范 §4.2 明令物理删除）：
 //
-// 每个节点摊平成一格，48 字节，六个数：
+//   * 私有 48 字节摊平节点区，以及 `meta_tree_add` / `meta_tree_field` /
+//     `meta_tree_set` / `meta_tree_count` / `meta_tree_root`；
+//   * 「第一个孩子 + 下一个兄弟」两格与 `meta_copy_public_node`
+//     （把公开树复制成可写语义树的那一步）；
+//   * `meta_node_set_kind` / `meta_node_type_id` —— 语义标记改走**旁表**
+//     （`lainsemantic`，键 = 父组引用 + child_index），AstIn 是只读映射。
 //
-//   +0  节点种类（1 = 词，2 = 组；识别 pass 之后往后长，见文件末 meta_recognize）
-//   +8  它在源码里的起点
-//   +16 它的长度
-//   +24 它的第一个孩子（组的才有意义；没有孩子是「无」）
-//   +32 它的下一个兄弟（没有兄弟是「无」）
-//   +40 它的类型（第 3 步「表达式带类型」要挂的地方；现在一律 0）
-//
-// 步长 48 硬编码在 `meta_tree_field` / `meta_tree_set` 两处，改要一起改。
-// 计划里原本写 8 个数（加 `end` / `origin` / `hygiene`），核过之后改成 6 个：
-// `start + len` 已经就是 extent，再加 `end` 是冗余；`origin`/`hygiene` 是「哪份
-// 源码 + 起点 + 长度」三个值，塞进一格会变成半个设计，等真有合成节点的消费者再说。
-//
-// 「第一个孩子 + 下一个兄弟」两句话就能表达任意形状的树，不需要指针——只有一排
-// 格子，正好合上「Meta 手里只有整数、地址、和一块可写内存」这个约束。
-//
-// 复制仍按后序：公开树的孩子先入可写表，父节点随后追加并记录首孩子。
+// 剩下的身份就是引用本身：高 16 位段号、低 48 位段内偏移。遍历用显式游标
+// 「父组 + child_index」，不靠节点自己答「我的下一个兄弟是谁」。
 
-// 节点的第 word 个数（0..5）
-// 越界的下标（NONE）直接回 NONE，不去算地址：源码写残了的时候，`next`/`child`
-// 会一路把 NONE 传回来，要是照样乘 48 就是读到暂存区外面去了。
-// 这一条让所有节点访问器对 NONE 都是安全的——形状检查才敢「先问再取」。
-#proc meta_tree_field(%index: #bits<64>,
-                       %word: #bits<64>) -> #bits<64> {
-  %none = #eq[#bits<64>](%index, 0xFFFFFFFFFFFFFFFF)
-  %v = #if %none -> (#bits<64>) {
-    #yield 0xFFFFFFFFFFFFFFFF
+// --- AstIn 原语与游标 ------------------------------------------------------
+//
+// 第一期起，语法树**不再复制进 Meta 的暂存区**：它就是宿主编好、驱动只读映射进来
+// 的那块平铺 Arena，Meta 通过四个原语直接读。于是：
+//
+//   * 没有私有 48 字节摊平树，也没有 `meta_tree_add` / `meta_tree_field` /
+//     `meta_tree_set` / `meta_tree_count` / `meta_tree_root`；
+//   * 没有「第一个孩子 + 下一个兄弟」两格，也**没有 `meta_node_next(%node)`**：
+//     规范 §2.1 禁止 `node.next`，也禁止由节点引用反查唯一父组再推唯一后继。
+//     同一个节点可以在两个父组里各出现一次（共享节点），两边后继不同；所以
+//     「下一个是谁」只能由**出现位置**回答，出现位置就是游标
+//     `Cursor = { parent_group, child_index }`（规范 §2.1，16 字节）。
+//
+// 游标在 L1 里就是两个 `#bits<64>` 值：父组引用与下标。过程只能回一个值，所以
+// 需要「带着位置走」的调用链一律把这一对当**两个参数**传下去，不能塞进一个整数。
+//
+// 空引用约定（规范 §1.2）：节点/字节引用是 `LainAstRef`，它的「无」是 **0**
+//（`LAIN_AST_REF_NONE`）。旧的 `0xFFFFFFFFFFFFFFFF` 空引用哨兵已清除。注意区分
+// 非引用域的「查不到」——源码下标、形状号、临时值下标、三态答案仍然用
+// `0xFFFFFFFFFFFFFFFF`，它们不是引用，不参与节点寻址。
+//
+// 节点身份就是引用（高 16 位段号、低 48 位段内偏移），访问器全部建立在
+// `lain_meta_ast_*` 之上。字段偏移来自 seed/include/lainmeta/ast_v1.h：
+//   +0 kind(1) +1 delimiter(1) +2 flags(2) +4 child_count(4)
+//   +8 text(8) +16 text_length(8) +24 children_offset(8)
+//
+// 位宽规则：`#load` 的位宽必须等于所属过程的返回宽度，验证器不做隐式加宽，
+// 所以每个访问器只做**一次** load，宽度与返回宽度一致。
+
+// 游标前进：`(父组, 下标)` 的下一个孩子的引用；已经是最后一个（或父组没有孩子）
+// 就回空引用 0。**只增加下标**，不查任何「节点自己的后继」。
+#proc meta_cursor_next(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
+  %count = #call ast_child_count(%parent)
+  // 末尾及越界游标不能先加一，否则 UINT64_MAX 会绕回第一个孩子。
+  #if #uge[#bits<64>](%index, %count) {
+    #return 0
+  }
+  %nx = #add[#bits<64>](%index, 1)
+  %room = #ult[#bits<64>](%nx, %count)
+  %v = #if %room -> (#bits<64>) {
+    %c = #call ast_child(%parent, %nx)
+    #yield %c
   } else {
+    #yield 0
+  }
+  #return %v
+}
+
+// 游标是不是走到末尾了（`index >= child_count`）。末尾游标**不能**取 current。
+#proc meta_cursor_end(%parent: #bits<64>, %index: #bits<64>) -> #bits<1> {
+  %count = #call ast_child_count(%parent)
+  %e = #uge[#bits<64>](%index, %count)
+  #return %e
+}
+
+// 节点种类：1 = 词，2 = 组。
+#proc ast_kind(%ref: #bits<64>) -> #bits<8> {
+  // 缺席引用或解析失败时能力回 0，**不能直接 load**（地址 0 未映射 → 1004）。
+  // 与 `ast_child_count` / `ast_text_*` 一样，先短路再取地址。
+  %none = #call ast_none_hit(%ref)
+  %k = #if %none -> (#bits<8>) {
+    #yield 0
+  } else {
+    %at = #call lain_meta_ast_node_addr(%ref)
+    %ai = #ptr2int[#bits<64>](%at)
+    %bad = #eq[#bits<64>](%ai, 0)
+    %kv = #if %bad -> (#bits<8>) {
+      #yield 0
+    } else {
+      %kk = #load[#bits<8>](%at)
+      #yield %kk
+    }
+    #yield %kv
+  }
+  #return %k
+}
+
+// 分隔符：组的开括号（0 = 根或无分隔符序列），词恒为 0。
+#proc ast_delim(%ref: #bits<64>) -> #bits<8> {
+  %at = #call lain_meta_ast_node_addr(%ref)
+  %d = #load[#bits<8>](#lea(%at, 1, 1, 0))
+  #return %d
+}
+
+// 组的孩子个数。有了它就不需要 `next`：按下标 0..count-1 逐个取。
+//
+// **空引用必须挡在能力调用之前**：`lain_meta_ast_node_addr` 失败时只返回 0（能力
+// 一律返回 0，失败理由在 host 状态里），于是 `#lea(0, 4, 1, 0) = 地址 4`，load 报
+// 1004 越权 —— 真正的语义错误（拿空引用当节点用）会被这条越权 load 盖住，非常难查。
+// 这里显式短路，并往暂存区记一笔「空引用访问」计数。
+#proc ast_none_hit(%ref: #bits<64>) -> #bits<1> {
+  // 空引用的唯一编码是 **0**（规范 §1.2）。旧的 `0xFFFFFFFFFFFFFFFF` 哨兵已清除，
+  // 这里不再兼容它 —— 兼容就等于把那个约定留在代码里。
+  %is_none = #eq[#bits<64>](%ref, 0)
+  %s = #if %is_none -> (#bits<1>) {
     %scratch = #call lain_meta_scratch_data()
-    %base = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
-    %p = #lea(%scratch, %base, 1, 0)
-    %off = #mul[#bits<64>](%index, 48)
-    %q = #lea(%p, %off, 1, 0)
-    %shift = #mul[#bits<64>](%word, 8)
-    %cell = #lea(%q, %shift, 1, 0)
-    %f = #call meta_cell_get(%cell)
-    #yield %f
+    %n = #call meta_cell_get(#lea(%scratch, 232, 1, 0))
+    %n2 = #add[#bits<64>](%n, 1)
+    %p = #call meta_cell_put(#lea(%scratch, 232, 1, 0), %n2)
+    #yield 1
+  } else {
+    #yield 0
+  }
+  #return %s
+}
+
+#proc ast_child_count(%ref: #bits<64>) -> #bits<64> {
+  %none = #call ast_none_hit(%ref)
+  %w = #if %none -> (#bits<64>) {
+    #yield 0
+  } else {
+    %at = #call lain_meta_ast_node_addr(%ref)
+    %ai = #ptr2int[#bits<64>](%at)
+    %bad = #eq[#bits<64>](%ai, 0)
+    %z = #if %bad -> (#bits<64>) {
+      // 记一笔：引用不是 NONE，但解析不出地址（段身份/槽位/范围被拒）。
+      %scratch = #call lain_meta_scratch_data()
+      %c0 = #call meta_cell_get(#lea(%scratch, 248, 1, 0))
+      %c1 = #add[#bits<64>](%c0, 1)
+      #yield 0
+    } else {
+      %n = #load[#bits<32>](#lea(%at, 4, 1, 0))
+      %w2 = #zext[#bits<64>](%n)
+      #yield %w2
+    }
+    #yield %z
+  }
+  #return %w
+}
+
+// 第 %index 个孩子的引用。**越界回空引用 0，且不调用能力** —— 「走到末尾」是正常
+// 控制流（顶层形式循环、表达式循环都会走过末尾），不是错误；让能力的 9404 去记一笔
+// 会把宿主状态污染成失败。真正的越界拒绝由宿主能力自己保证（C 侧专项直接调它验收）。
+#proc ast_child(%ref: #bits<64>, %index: #bits<64>) -> #bits<64> {
+  %count = #call ast_child_count(%ref)
+  %room = #ult[#bits<64>](%index, %count)
+  %v = #if %room -> (#bits<64>) {
+    %c = #call lain_meta_ast_child_ref(%ref, %index)
+    #yield %c
+  } else {
+    #yield 0
   }
   #return %v
 }
 
-#proc meta_tree_set(%index: #bits<64>, %word: #bits<64>,
-                     %v: #bits<64>) -> #bits<32> {
+// 第一个孩子；没有孩子时回**空引用 0**。它等价于游标 `(%ref, 0)` 的 current。
+#proc meta_node_child(%ref: #bits<64>) -> #bits<64> {
+  %n = #call ast_child_count(%ref)
+  %zero = #eq[#bits<64>](%n, 0)
+  %v = #if %zero -> (#bits<64>) {
+    #yield 0
+  } else {
+    %c = #call ast_child(%ref, 0)
+    #yield %c
+  }
+  #return %v
+}
+
+// 文本引用（Source 段）与字节数。**文本不在 Arena 里**：它是源码区间。
+#proc ast_text_ref(%ref: #bits<64>) -> #bits<64> {
+  // 同 ast_child_count：缺席引用必须在能力调用之前短路，否则 `#lea(0, 8, 1, 0)`
+  // 会变成一个越权 load（1004），把真正的语义错误盖住。
+  %none = #call ast_none_hit(%ref)
+  %t = #if %none -> (#bits<64>) {
+    #yield 0
+  } else {
+    %at = #call lain_meta_ast_node_addr(%ref)
+    %ti = #ptr2int[#bits<64>](%at)
+    %bad = #eq[#bits<64>](%ti, 0)
+    %v = #if %bad -> (#bits<64>) {
+      #yield 0
+    } else {
+      %tv = #load[#bits<64>](#lea(%at, 8, 1, 0))
+      #yield %tv
+    }
+    #yield %v
+  }
+  #return %t
+}
+
+#proc ast_text_len(%ref: #bits<64>) -> #bits<64> {
+  %none = #call ast_none_hit(%ref)
+  %l = #if %none -> (#bits<64>) {
+    #yield 0
+  } else {
+    %at = #call lain_meta_ast_node_addr(%ref)
+    %ai = #ptr2int[#bits<64>](%at)
+    %bad = #eq[#bits<64>](%ai, 0)
+    %v = #if %bad -> (#bits<64>) {
+      #yield 0
+    } else {
+      %lv = #load[#bits<64>](#lea(%at, 16, 1, 0))
+      #yield %lv
+    }
+    #yield %v
+  }
+  #return %l
+}
+
+// 文本地址。零长度（含 NONE 引用）返回约定零地址，调用方不得 load。
+#proc ast_text_addr(%ref: #bits<64>) -> #addr {
+  %t = #call ast_text_ref(%ref)
+  %l = #call ast_text_len(%ref)
+  %a = #call lain_meta_ast_span_addr(%t, %l)
+  #return %a
+}
+
+// 文本在源码里的起始偏移。词与组都有（组的 text 是含括号的跨度）。
+#proc ast_text_start(%ref: #bits<64>) -> #bits<64> {
+  %t = #call ast_text_ref(%ref)
+  %off = #and[#bits<64>](%t, 0xFFFFFFFFFFFF)
+  #return %off
+}
+
+// 读一个 32 位元数据格（暂存区头部）。零扩展成 64 位返回：`#load` 的位宽必须
+// 等于返回宽度，所以这里单独一层，而不是在每个调用点写 `#load[#bits<32>]`。
+#proc meta_cell_get32(%cell: #addr) -> #bits<64> {
+  %v = #load[#bits<32>](%cell)
+  %w = #zext[#bits<64>](%v)
+  #return %w
+}
+
+// 旧调用点的三个名字继续可用，但语义改由 AstIn 属性给出：起点 = 文本跨度起点，
+// 长度 = 文本跨度长度，种类只在语义旁表里改（见 recognize.l1），不回写 AstIn。
+#proc meta_node_kind(%ref: #bits<64>) -> #bits<64> {
+  %k = #call ast_kind(%ref)
+  %w = #zext[#bits<64>](%k)
+  #return %w
+}
+
+#proc meta_node_start(%ref: #bits<64>) -> #bits<64> {
+  %v = #call ast_text_start(%ref)
+  #return %v
+}
+
+#proc meta_node_len(%ref: #bits<64>) -> #bits<64> {
+  %v = #call ast_text_len(%ref)
+  #return %v
+}
+
+// 这份源码的根引用。**宿主已经把段/根表写进暂存区头部**，Meta 不需要能力调用
+// 就能读到它（布局见 seed/src/meta/host.c 的 publish_scratch_header）：
+//   +0 magic(4) +4 abi(4) +8 segment_count(4) +12 source_count(4)
+//   +32 段表每项 32 字节；其后每份源码 8 字节根引用
+#proc meta_root_of(%source: #bits<64>) -> #bits<64> {
+  // **不要读「每份源码一个根槽」那张表**（`32 + 段数*32 + src*8`）—— 它落在
+  // 112..144 这段，而 Meta 自己的固定格（meta.l1 的节点跟踪在 128/160/168）
+  // 正好写在同一片内存上。实测被覆盖后的值：`[112]=0x3bd`、`[128]=0x100020004`，
+  // 于是主源码那趟 `meta_root_of(0)` 拿到垃圾、走 `%none` 分支、什么都没识别。
+  //
+  // 宿主的**段表**才是权威且够不着的地方：每项 32 字节
+  //   +0 id(2) +2 kind(2) +4 source(4) +8 root(8) +16 size(8)
+  // 段表按**登记顺序**排列，每份源码占两项（先 Source 后 AstIn），所以第 src 份
+  // 源码的 AstIn 段落在**项下标** `1 + 2*src`：
+  //   4096 + (1 + 2*src)*32 + 8
+  //
+  // **项下标不是段号。** 段号规则换了（主源码 1/2，额外源码 4/5、6/7……，见
+  // ast_segment_of_source 与 host.c 的 segment_pair_for），但「每份源码两项、
+  // Source 在前」这个顺序没变，所以项下标公式仍然是 `1 + 2*src`。第 44 轮把
+  // 「段号」当成「项下标」用（写了 2+2*src），于是 src=0 读到的是**下一段**的位置
+  // —— C 侧实测 `[4176]=0x3bd`（垃圾），而真正的根在 `[4136]=0x2000000000040`。
   %scratch = #call lain_meta_scratch_data()
-  %base = #call meta_cell_get(#lea(%scratch, 112, 1, 0))
-  %p = #lea(%scratch, %base, 1, 0)
-  %off = #mul[#bits<64>](%index, 48)
-  %q = #lea(%p, %off, 1, 0)
-  %shift = #mul[#bits<64>](%word, 8)
-  %cell = #lea(%q, %shift, 1, 0)
-  %s = #call meta_cell_put(%cell, %v)
+  %two = #mul[#bits<64>](%source, 2)
+  %entry = #add[#bits<64>](%two, 1) // 项下标，不是段号
+  %frame0 = #mul[#bits<64>](%entry, 32)
+  %frame = #add[#bits<64>](%frame0, 4096)
+  %at = #add[#bits<64>](%frame, 8)
+  %cell = #lea(%scratch, %at, 1, 0)
+  %v = #call meta_cell_get(%cell)
+  #return %v
+}
+
+// 宿主元数据（暂存区头部）里**根引用表**的起点：32 字节头部 + 段表。
+// **这是宿主的地盘，Meta 只能读。** 它也是 Meta 自己动态区的下界——Meta 的第一块
+// 数据必须排在宿主整块元数据之后，否则就会把根引用表覆盖掉（真发生过：Meta 的
+// 语义旁表起点写 +112，而两份源码时宿主根表正好占 [128,144)，第二个根被冲掉）。
+#proc meta_host_roots_at() -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data()
+  %segs = #call meta_cell_get32(#lea(%scratch, 8, 1, 0))
+  %nsegs = #zext[#bits<64>](%segs)
+  %table = #mul[#bits<64>](%nsegs, 32)
+  // **段表不在紧跟 32 字节头部的地方**：宿主把它放在 +4096（`LAIN_META_TABLE_AT`），
+  // 否则段表会压在 Meta 的固定格 32..160 上（两边互相覆盖，见 host.c 的注释）。
+  // 这里必须跟着加 4096：算成 `32 + 段数*32` 的话「宿主元数据末尾」会小掉 4KB，
+  // 动态区就落回 4096.. 那段里，语义旁表正好盖掉段表与根槽 —— 症状是根读回 0、
+  // 一条形式都认不出来、产物 0 字节（`core_let_comment.lain` 就是这么挂的）。
+  %roots = #add[#bits<64>](%table, 4096)
+  #return %roots
+}
+
+// 宿主整块元数据的长度（头部 + 段表 + 每份源码一个根槽）= Meta 动态区的起点。
+#proc meta_host_meta_end() -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data()
+  %srcs = #call meta_cell_get32(#lea(%scratch, 12, 1, 0))
+  %nsrcs = #zext[#bits<64>](%srcs)
+  %roots = #call meta_host_roots_at()
+  %slots = #mul[#bits<64>](%nsrcs, 8)
+  %end = #add[#bits<64>](%roots, %slots)
+  #return %end
+}
+
+// --- 语义/类型旁表（lainsemantic）--------------------------------------------
+//
+// 识别 pass 给**出现位置**算出的形状不写回 AstIn：那是驱动只读映射进来的，写它就是
+// 越权（VSpace 会拒）。形状写在这张旁表里，一条 **72** 字节，键是前五个字段
+//（规范 §2.2 的 LainAstSemanticEntry）：
+//
+//   +0  父组引用        出现位置 —— **不是**节点身份
+//   +8  child_index     出现位置
+//   +16 syntax_env      语法环境（Meta 对象 ID，不是地址）
+//   +24 scope           作用域（Meta 对象 ID）
+//   +32 context_kind    DECL/STMT/EXPR；第一期的识别 pass 统一记 0
+//   +40 syntax_binding  处理器绑定 ID，0 = 未知（第二期）
+//   +48 syntax_tag      兼容现行形状号（1..11），0 = 未知
+//   +56 type_id         0 = 未赋型
+//   +64 expansion_id    卫生/展开记录，0 = 原始（第二期）
+//
+// 表头 48 字节（规范 §2.2 的 LainAstSemanticHeader），紧挨在条目区**之前**：
+//
+//   +0 abi_version(1) +8 entry_stride(72) +16 entry_count +24 entry_capacity
+//   +32 entries_offset(=48，表缓冲区内的局部偏移) +40 epoch
+//
+// 固定格：+1000 指向**条目区**起点（表头就在它前面 48 字节）、+1008 条数、
+// +1056 容量。容量由 scope_setup 按源码字节数预计算。
+//
+// 键里带父组与下标之后，同一个节点引用在不同父组里的两次出现各有各的条目，
+// 不再互相覆盖 —— 这正是规范禁止「按节点身份缓存」的原因，也是
+// `meta_node_next(%node)` 被删掉的原因（它只能靠节点引用反查唯一父组）。
+//
+// 单张表同时保存所有源码的位置记录；setup 一次识别，后续阶段只读。
+// 查找是线性扫描，最坏累计 O(N²)，受执行预算约束；不宣称线性编译。
+// 第一期环境/作用域/上下文为 0，仅记录语法形状，未实现上下文类型缓存。
+//
+// epoch：第二期提交新 root 时递增、旧表作废；第一期没有新 root，恒为 0。
+#proc ast_segment_of_source(%src: #bits<64>) -> #bits<64> {
+  // 规范 §1.2：主源码 Source=1/AstIn=2；3 保留给 AstOut；额外源码按注册顺序成对
+  // 发 4/5、6/7、……，所以第 src（src>=1）份源码的 AstIn 段号 = 2*src + 3。
+  %zero = #eq[#bits<64>](%src, 0)
+  %v = #if %zero -> (#bits<64>) {
+    #yield 2
+  } else {
+    %two = #mul[#bits<64>](%src, 2)
+    %sid = #add[#bits<64>](%two, 3)
+    #yield %sid
+  }
+  #return %v
+}
+
+// 条目区起点（固定格 +1000）。
+#proc sem_base_get(%scratch: #addr) -> #bits<64> {
+  %base = #call meta_cell_get(#lea(%scratch, 1000, 1, 0))
+  #return %base
+}
+
+#proc sem_count_get(%scratch: #addr) -> #bits<64> {
+  %v = #call meta_cell_get(#lea(%scratch, 1008, 1, 0))
+  #return %v
+}
+
+#proc sem_count_put(%scratch: #addr, %v: #bits<64>) -> #bits<32> {
+  %base = #call sem_base_get(%scratch)
+  %h = #sub[#bits<64>](%base, 48)
+  %s = #call meta_cell_put(#lea(%scratch, 1008, 1, 0), %v)
+  %hs = #call meta_cell_put(#lea(%scratch, %h, 1, 16), %v)
   #return 0
 }
 
-#proc meta_tree_count() -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data()
-  %v = #call meta_cell_get(#lea(%scratch, 120, 1, 0))
+#proc sem_cap_get(%scratch: #addr) -> #bits<64> {
+  %v = #call meta_cell_get(#lea(%scratch, 1056, 1, 0))
   #return %v
 }
 
-#proc meta_tree_root() -> #bits<64> {
+// 写表头。scope.l1 认领区域时调一次（它知道基址与容量）。
+#proc meta_sem_init() -> #bits<32> {
   %scratch = #call lain_meta_scratch_data()
-  %v = #call meta_cell_get(#lea(%scratch, 128, 1, 0))
+  %base = #call sem_base_get(%scratch)
+  %cap = #call sem_cap_get(%scratch)
+  // 表头在条目区前面 48 字节。基址永远 >= 动态区下界，不会下溢。
+  %h = #sub[#bits<64>](%base, 48)
+  %ha = #lea(%scratch, %h, 1, 0)
+  %w0 = #call meta_cell_put(%ha, 1)
+  %w1 = #call meta_cell_put(#lea(%ha, 8, 1, 0), 72)
+  %w2 = #call meta_cell_put(#lea(%ha, 16, 1, 0), 0)
+  %w3 = #call meta_cell_put(#lea(%ha, 24, 1, 0), %cap)
+  %w4 = #call meta_cell_put(#lea(%ha, 32, 1, 0), 48)
+  %w5 = #call meta_cell_put(#lea(%ha, 40, 1, 0), 0)
+  #return 0
+}
+
+// 按**前五个字段**找条目下标；找不到回「查不到」（0xFFFFFFFFFFFFFFFF，非引用域）。
+#proc sem_find(%scratch: #addr, %parent: #bits<64>, %index: #bits<64>,
+               %env: #bits<64>, %scope: #bits<64>,
+               %ctx: #bits<64>) -> #bits<64> {
+  %base = #call sem_base_get(%scratch)
+  %n = #call sem_count_get(%scratch)
+  %hit = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %n)
+    #if %more {
+      %off = #mul[#bits<64>](%i, 72)
+      %e = #add[#bits<64>](%base, %off)
+      %cell = #lea(%scratch, %e, 1, 0)
+      %k0 = #call meta_cell_get(%cell)
+      %s0 = #eq[#bits<64>](%k0, %parent)
+      #if #eq[#bits<1>](%s0, 0) {
+        #continue s(#add[#bits<64>](%i, 1))
+      }
+      %k1 = #call meta_cell_get(#lea(%cell, 8, 1, 0))
+      %s1 = #eq[#bits<64>](%k1, %index)
+      #if #eq[#bits<1>](%s1, 0) {
+        #continue s(#add[#bits<64>](%i, 1))
+      }
+      %k2 = #call meta_cell_get(#lea(%cell, 16, 1, 0))
+      %s2 = #eq[#bits<64>](%k2, %env)
+      %k3 = #call meta_cell_get(#lea(%cell, 24, 1, 0))
+      %s3 = #eq[#bits<64>](%k3, %scope)
+      %k4 = #call meta_cell_get(#lea(%cell, 32, 1, 0))
+      %s4 = #eq[#bits<64>](%k4, %ctx)
+      %a1 = #and[#bits<1>](%s0, %s1)
+      %a2 = #and[#bits<1>](%s2, %s3)
+      %a3 = #and[#bits<1>](%a1, %a2)
+      %same = #and[#bits<1>](%a3, %s4)
+      #if %same {
+        #break s(%i)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue s(%i2)
+    } else {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
+  }
+  #return %hit
+}
+
+// 按**游标**（父组 + 下标）读形状。这就是旧 `meta_node_form(%ref)` 的替代：
+// 形状属于**出现位置**，不属于节点身份，所以查询必须带上位置。
+#proc meta_node_form(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
+  %v = #call meta_sem_lookup(%parent, %index)
   #return %v
 }
 
-// 追加一格，返回它的下标。装不下报 17——**不截断**：截断会读出一棵残缺的树，
-// 而「树里没有」和「源码里没有」就分不开了。
-#proc meta_tree_add(%kind: #bits<64>, %start: #bits<64>,
-                     %length: #bits<64>) -> #bits<64> {
+// 带**完整键**的查询：环境 / 作用域 / 上下文也要对上（规范 §2.2 的查询键是
+// 前五个字段）。第一期的识别 pass 三个都写 0。
+#proc meta_sem_lookup_key(%parent: #bits<64>, %index: #bits<64>,
+                          %env: #bits<64>, %scope: #bits<64>,
+                          %ctx: #bits<64>) -> #bits<64> {
   %scratch = #call lain_meta_scratch_data()
-  %count = #call meta_cell_get(#lea(%scratch, 120, 1, 0))
-  %cap = #call meta_cell_get(#lea(%scratch, 136, 1, 0))
-  %full = #uge[#bits<64>](%count, %cap)
-  %idx = #if %full -> (#bits<64>) {
-    %f = #call lain_meta_fail(17)
+  %hit = #call sem_find(%scratch, %parent, %index, %env, %scope, %ctx)
+  %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
+  %v = #if %miss -> (#bits<64>) {
     #yield 0xFFFFFFFFFFFFFFFF
   } else {
-    %s0 = #call meta_tree_set(%count, 0, %kind)
-    %s1 = #call meta_tree_set(%count, 1, %start)
-    %s2 = #call meta_tree_set(%count, 2, %length)
-    %s3 = #call meta_tree_set(%count, 3, 0xFFFFFFFFFFFFFFFF)
-    %s4 = #call meta_tree_set(%count, 4, 0xFFFFFFFFFFFFFFFF)
-    // 类型格：一律先清零。「没类型」和「类型是 0 号」必须分得开，所以 0 号类型
-    // 不能是任何真实类型（注册表从 1 开始数）。
-    %s6 = #call meta_tree_set(%count, 5, 0)
-    %new = #add[#bits<64>](%count, 1)
-    %s5 = #call meta_cell_put(#lea(%scratch, 120, 1, 0), %new)
-    #yield %count
+    %base = #call sem_base_get(%scratch)
+    %off = #mul[#bits<64>](%hit, 72)
+    %e = #add[#bits<64>](%base, %off)
+    %cell = #lea(%scratch, %e, 1, 0)
+    // +48 是 syntax_tag：现行形状号（组 2、声明 3、二元 4、调用 5、字段 6、数字 7、
+    // 返回 8、算子 9、构造 10、if 11）。+56 的 type_id 第一期不写。
+    %tag = #call meta_cell_get(#lea(%cell, 48, 1, 0))
+    #yield %tag
   }
-  #return %idx
-}
-
-// 节点的字段（0 = 种类，1 = 起点，2 = 长度，3 = 第一个孩子，4 = 下一个兄弟，
-// 5 = 类型）。名字写短一点，调用点才看得清。
-#proc meta_node_kind(%i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%i, 0)
   #return %v
 }
 
-#proc meta_node_start(%i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%i, 1)
+// 第一期识别 pass 的入口：键的环境/作用域/上下文都是 0。
+#proc meta_sem_lookup(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
+  %v = #call meta_sem_lookup_key(%parent, %index, 0, 0, 0)
   #return %v
 }
 
-#proc meta_node_len(%i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%i, 2)
-  #return %v
-}
-
-#proc meta_node_child(%i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%i, 3)
-  #return %v
-}
-
-#proc meta_node_next(%i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%i, 4)
-  #return %v
-}
-
-// 类型格。0 = 还没类型（建树时一律清零）。0 号类型不是任何真实类型，所以
-// 「没类型」和「类型是 0 号」不会混。
-#proc meta_node_type_id(%i: #bits<64>) -> #bits<64> {
-  %v = #call meta_tree_field(%i, 5)
-  #return %v
-}
-
-#proc meta_node_set_type_id(%i: #bits<64>,
-                            %v: #bits<64>) -> #bits<32> {
-  %s = #call meta_tree_set(%i, 5, %v)
-  #return 0
-}
-
-// 识别 pass 写回种类用这个（词/组 → 声明/二元/调用/字段…）。
-#proc meta_node_set_kind(%i: #bits<64>,
-                         %v: #bits<64>) -> #bits<32> {
-  %s = #call meta_tree_set(%i, 0, %v)
-  #return 0
-}
-
-// 这份源码的根节点。每份源码各有一棵树，根下标按源码下标存。
-#proc meta_root_of(%source: #bits<64>) -> #bits<64> {
+// 写入一条。同键重复写要**覆盖**（规范 §2.2：更新未提交版本），不能追加 —— 否则
+// 表会被同一条词撑爆。写入的是 (父组, 下标, 环境, 作用域, 上下文) → 形状。
+#proc meta_sem_put_key(%parent: #bits<64>, %index: #bits<64>,
+                        %env: #bits<64>, %scope: #bits<64>,
+                        %ctx: #bits<64>, %form: #bits<64>) -> #bits<32> {
   %scratch = #call lain_meta_scratch_data()
-  %base = #call meta_cell_get(#lea(%scratch, 128, 1, 0))
-  %p = #lea(%scratch, %base, 1, 0)
-  %off = #mul[#bits<64>](%source, 8)
-  %q = #lea(%p, %off, 1, 0)
-  %v = #call meta_cell_get(%q)
+  %hit = #call sem_find(%scratch, %parent, %index, %env, %scope, %ctx)
+  %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %miss -> (#bits<32>) {
+    %base = #call sem_base_get(%scratch)
+    %n = #call sem_count_get(%scratch)
+    %cap = #call sem_cap_get(%scratch)
+    %room = #ult[#bits<64>](%n, %cap)
+    %w = #if %room -> (#bits<32>) {
+      // 追加：键的五个字段 + 形状（+48）一起写进去，其余字段（binding / type_id /
+      // expansion_id）归 0。**这几行是必需的副作用**，第 38 轮那条含 `meta_cell_put`
+      // 的正则把它们误删过一次，症状是「计数器照涨、条目却全空」。
+      %off2 = #mul[#bits<64>](%n, 72)
+      %e2 = #add[#bits<64>](%base, %off2)
+      %cell2 = #lea(%scratch, %e2, 1, 0)
+      %s1 = #call meta_cell_put(%cell2, %parent)
+      %s2 = #call meta_cell_put(#lea(%cell2, 8, 1, 0), %index)
+      %s3 = #call meta_cell_put(#lea(%cell2, 16, 1, 0), %env)
+      %s4 = #call meta_cell_put(#lea(%cell2, 24, 1, 0), %scope)
+      %s5 = #call meta_cell_put(#lea(%cell2, 32, 1, 0), %ctx)
+      %s6 = #call meta_cell_put(#lea(%cell2, 40, 1, 0), 0)
+      %s7 = #call meta_cell_put(#lea(%cell2, 48, 1, 0), %form)
+      %s8 = #call meta_cell_put(#lea(%cell2, 56, 1, 0), 0)
+      %s9 = #call meta_cell_put(#lea(%cell2, 64, 1, 0), 0)
+      %n2 = #add[#bits<64>](%n, 1)
+      %s10 = #call sem_count_put(%scratch, %n2)
+      #yield 0
+    } else {
+      %f = #call lain_meta_fail(17)
+      #yield 17
+    }
+    #yield %w
+  } else {
+    // 命中：键不变，只更新形状那一格。
+    %base3 = #call sem_base_get(%scratch)
+    %off3 = #mul[#bits<64>](%hit, 72)
+    %e3 = #add[#bits<64>](%base3, %off3)
+    %cell3 = #lea(%scratch, %e3, 1, 0)
+    %s11 = #call meta_cell_put(#lea(%cell3, 48, 1, 0), %form)
+    #yield 0
+  }
+  #return %r
+}
+
+// 第一期识别 pass 的入口：键的环境/作用域/上下文都是 0。
+#proc meta_sem_put(%parent: #bits<64>, %index: #bits<64>,
+                    %form: #bits<64>) -> #bits<32> {
+  %v = #call meta_sem_put_key(%parent, %index, 0, 0, 0, %form)
   #return %v
 }
+
 
 // 这个节点是不是「字面量 kw」，也就是一个词，内容正好是那串字节？
 // **这就是「按形状认，不按字节搜」的落点**：不再问「源码里哪儿有 struct 这三个
@@ -172,20 +550,13 @@
 #proc meta_node_is_word(%i: #bits<64>, %base: #addr,
                          %kw: #addr, %kw_len: #bits<64>) -> #bits<1> {
   %kind = #call meta_node_kind(%i)
-  // 「是词」= 不是组、也不是「无」。**不能写 `kind == 1`**：识别 pass 会把词的种类
-  // 从 1 改成 3..10（声明/二元/调用/字段/…），写死 1 的话识别之后一个关键字都认不
-  // 出来。组永远是 2，所以「不是组」这个判据在整个识别前后都成立。
-  %is_group = #eq[#bits<64>](%kind, 2)
-  %is_none = #eq[#bits<64>](%kind, 0xFFFFFFFFFFFFFFFF)
-  %not_group = #eq[#bits<1>](%is_group, 0)
-  %not_none = #eq[#bits<1>](%is_none, 0)
-  %is_word = #and[#bits<1>](%not_group, %not_none)
+  // AstIn 的物理 kind 始终是 Token=1 或 Group=2；语法形状只在旁表。
+  %is_word = #eq[#bits<64>](%kind, 1)
   %r = #if %is_word -> (#bits<1>) {
     %n = #call meta_node_len(%i)
     %same_len = #eq[#bits<64>](%n, %kw_len)
     %e = #if %same_len -> (#bits<1>) {
-      %st = #call meta_node_start(%i)
-      %p = #lea(%base, %st, 1, 0)
+      %p = #call ast_text_addr(%i)
       %eqb = #call meta_bytes_equal(%p, %kw, %kw_len)
       #yield %eqb
     } else {
@@ -230,12 +601,29 @@
 //
 // 留在 parse.l1 的只有「把源码读成树」和「节点怎么读」——找名字不是这一层的事。
 
+// 这份源码有 AstIn Arena 吗？**reader 拒掉的源码没有**：宿主仍然按注册顺序给它
+// 分配段号对，但 AstIn 段表项的 `size` 是 0（`publish_scratch_header` 只在树建
+// 成功时写 Arena）。Meta 据此干净地拒这份源码，而不是去读一个不存在的 Arena。
+#proc meta_source_has_tree(%source: #bits<64>) -> #bits<1> {
+  %scratch = #call lain_meta_scratch_data()
+  %two = #mul[#bits<64>](%source, 2)
+  %sid = #add[#bits<64>](%two, 1)
+  %frame0 = #mul[#bits<64>](%sid, 32)
+  %frame = #add[#bits<64>](%frame0, 4096)
+  %at = #add[#bits<64>](%frame, 16)
+  %cell = #lea(%scratch, %at, 1, 0)
+  %size = #call meta_cell_get(%cell)
+  %zero = #eq[#bits<64>](%size, 0)
+  %has = #eq[#bits<1>](%zero, 0)
+  #return %has
+}
+
 // 一份源码的树根。
 #proc meta_root_of_source(%base: #addr) -> #bits<64> {
   %src = #call meta_source_of(%base)
   %missing = #eq[#bits<64>](%src, 0xFFFFFFFFFFFFFFFF)
   %r = #if %missing -> (#bits<64>) {
-    #yield 0xFFFFFFFFFFFFFFFF
+    #yield 0
   } else {
     %root = #call meta_root_of(%src)
     #yield %root
@@ -246,99 +634,14 @@
 // 把一份源码读成一棵树，根是一个覆盖全文的组节点。根下标按源码下标记下来。
 //
 // 建完树紧接着跑一遍**识别 pass**（`std/recognize.l1`，语言相关的那一层）。这样
-// 「读到树的时候形状已经写好」是个不变式，由一个调用点保证，不靠调用方记得。
-#proc meta_copy_public_node(%handle: #bits<64>) -> #bits<64> {
-  %kind = #call lain_meta_tree_field(%handle, 1)
-  %start = #call lain_meta_tree_field(%handle, 2)
-  %length = #call lain_meta_tree_field(%handle, 3)
-  %token = #eq[#bits<64>](%kind, 1)
-  %index = #if %token -> (#bits<64>) {
-    %leaf = #call meta_tree_add(1, %start, %length)
-    #yield %leaf
-  } else {
-    %group = #eq[#bits<64>](%kind, 2)
-    %node = #if %group -> (#bits<64>) {
-      %count = #call lain_meta_tree_field(%handle, 7)
-      %first = #loop children(%i: #bits<64> = 0,
-                              %first: #bits<64> = 0xFFFFFFFFFFFFFFFF,
-                              %last: #bits<64> = 0xFFFFFFFFFFFFFFFF) -> (#bits<64>) {
-        %more = #ult[#bits<64>](%i, %count)
-        #if %more {
-          %child_handle = #call lain_meta_tree_child(%handle, %i)
-          %child = #call meta_copy_public_node(%child_handle)
-          %bad = #eq[#bits<64>](%child, 0xFFFFFFFFFFFFFFFF)
-          #if %bad {
-            #break children(0xFFFFFFFFFFFFFFFF)
-          }
-          %empty = #eq[#bits<64>](%first, 0xFFFFFFFFFFFFFFFF)
-          %new_first = #if %empty -> (#bits<64>) {
-            #yield %child
-          } else {
-            %link = #call meta_tree_set(%last, 4, %child)
-            #yield %first
-          }
-          %next = #add[#bits<64>](%i, 1)
-          #continue children(%next, %new_first, %child)
-        } else {
-          #break children(%first)
-        }
-      }
-      %nonempty = #ugt[#bits<64>](%count, 0)
-      %no_child = #eq[#bits<64>](%first, 0xFFFFFFFFFFFFFFFF)
-      %bad_children = #and[#bits<1>](%nonempty, %no_child)
-      %result = #if %bad_children -> (#bits<64>) {
-        #yield 0xFFFFFFFFFFFFFFFF
-      } else {
-        %g = #call meta_tree_add(2, %start, %length)
-        %valid = #ne[#bits<64>](%g, 0xFFFFFFFFFFFFFFFF)
-        #if %valid {
-          %set = #call meta_tree_set(%g, 3, %first)
-        }
-        #yield %g
-      }
-      #yield %result
-    } else {
-      #yield 0xFFFFFFFFFFFFFFFF
-    }
-    #yield %node
-  }
-  #return %index
-}
 
-// 机制树的语法拒绝映射到 Meta v0 的旧码 3；资源与句柄错误保留宿主码。
-#proc meta_public_tree_error() -> #bits<32> {
-  %status = #call lain_meta_status()
-  %parse = #eq[#bits<64>](%status, 34)
-  %zero = #eq[#bits<64>](%status, 0)
-  %old = #or[#bits<1>](%parse, %zero)
-  %code = #if %old -> (#bits<32>) {
-    #yield 3
-  } else {
-    %low = #trunc[#bits<32>](%status)
-    #yield %low
-  }
-  #return %code
-}
-
+// 第一期：树**已经由宿主在登记源码时建好**，所以这里不再读树、不再复制、
+// 不再往暂存区写根槽——只把这份源码识别一遍（语义标记写旁表，不动 AstIn）。
+// 宿主在登记失败时已经填好诊断与 status，登记不成功就不会走到这里。
 #proc meta_parse_source(%source: #bits<64>) -> #bits<32> {
-  %public_root = #call lain_meta_tree_root(%source)
-  %missing = #eq[#bits<64>](%public_root, 0)
-  #if %missing {
-    %code = #call meta_public_tree_error()
-    #return %code
-  }
-  %scratch = #call lain_meta_scratch_data()
-  %root = #call meta_copy_public_node(%public_root)
-  %invalid = #eq[#bits<64>](%root, 0xFFFFFFFFFFFFFFFF)
-  #if %invalid {
-    %code2 = #call meta_public_tree_error()
-    #return %code2
-  }
-  %rb = #call meta_cell_get(#lea(%scratch, 128, 1, 0))
-  %rp = #lea(%scratch, %rb, 1, 0)
-  %off = #mul[#bits<64>](%source, 8)
-  %slot = #lea(%rp, %off, 1, 0)
-  %s = #call meta_cell_put(%slot, %root)
+  // 诊断（宿主槽 14/15）：每份源码都识别一遍了吗？第一次与最后一次的源码下标。
   %rec = #call meta_recognize_source(%source)
-  #return 0
+  %reci = #zext[#bits<64>](%rec)
+  %pslot = #add[#bits<64>](%source, 60)
+  #return %rec
 }

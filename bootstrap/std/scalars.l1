@@ -311,10 +311,23 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
 // interning，回的是同一个 id。
 #proc meta_type_resolve(%base: #addr, %len: #bits<64>,
                         %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<64> {
+  // 诊断：进入次数与最近一次窗口（放在带点判定之前，无条件写）。
+  %sce = #call lain_meta_scratch_data()
+  %e0 = #call meta_cell_get(#lea(%sce, 392, 1, 0))
+  %e1 = #add[#bits<64>](%e0, 1)
+  %e2 = #call meta_cell_put(#lea(%sce, 392, 1, 0), %e1)
+  %e3 = #call meta_cell_put(#lea(%sce, 400, 1, 0), %t_lo)
+  %e4 = #call meta_cell_put(#lea(%sce, 408, 1, 0), %t_hi)
   %dot = #call meta_find_dot(%base, %t_lo, %t_hi)
   %is_qualified = #ne[#bits<64>](%dot, 0xFFFFFFFFFFFFFFFF)
   %r = #if %is_qualified -> (#bits<64>) {
+    // 诊断：记录「走了带点分支」以及类型窗口与分隔符位置。
+    %scq = #call lain_meta_scratch_data()
+    %q0 = #call meta_cell_put(#lea(%scq, 344, 1, 0), %dot)
+    %q1 = #call meta_cell_put(#lea(%scq, 352, 1, 0), %t_lo)
+    %q2 = #call meta_cell_put(#lea(%scq, 360, 1, 0), %t_hi)
     %pos = #call meta_select_scalar(%base, %len, %t_lo, %t_hi)
+    %q3 = #call meta_cell_put(#lea(%scq, 368, 1, 0), %pos)
     %miss = #eq[#bits<64>](%pos, 0xFFFFFFFFFFFFFFFF)
     %q = #if %miss -> (#bits<64>) {
       #yield 0
@@ -325,6 +338,8 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
       %m_base = #call lain_meta_source_data(%idx)
       %repr = #call meta_repr_at(%m_base, %pos, %m_len)
       %bad = #eq[#bits<64>](%repr, 0xFFFFFFFFFFFFFFFF)
+      %q4 = #call meta_cell_put(#lea(%scq, 376, 1, 0), %repr)
+      %q5 = #call meta_cell_put(#lea(%scq, 384, 1, 0), %idx)
       %w = #if %bad -> (#bits<64>) {
         #yield 0
       } else {
@@ -346,6 +361,12 @@ data meta_logical_prelude ro { 115 116 100 58 58 112 114 101 108 117 100 101 } /
     %id = #call meta_scope_type_id(%base, %len, %name, %name_len)
     %gone = #eq[#bits<64>](%id, 0xFFFFFFFFFFFFFFFF)
     %v = #if %gone -> (#bits<64>) {
+      // 诊断：记下失败的名字窗口与作用域表条数，供驱动在收尾时读出。
+      %sc = #call lain_meta_scratch_data()
+      %c0 = #call meta_cell_put(#lea(%sc, 264, 1, 0), %t_lo)
+      %c1 = #call meta_cell_put(#lea(%sc, 272, 1, 0), %t_hi)
+      %cnt = #call meta_scope_count()
+      %c2 = #call meta_cell_put(#lea(%sc, 280, 1, 0), %cnt)
       #yield 0
     } else {
       #yield %id

@@ -61,9 +61,14 @@
   #return %r
 }
 
-// 给一个词节点算形状，写回它的种类格。
-#proc meta_recognize_word(%base: #addr, %len: #bits<64>,
-                          %i: #bits<64>) -> #bits<32> {
+// 给一个词节点算形状，写进**语义旁表**（不再往 AstIn 的种类格写）。
+//
+// 参数是一个游标：(父组引用, child_index)。形状里要用到「下一个兄弟」，而规范禁止
+// `node.next` —— 下一个兄弟由父组 + index+1 给出，所以游标是唯一能让这段逻辑成立
+// 的输入形状。
+#proc meta_recognize_word(%base: #addr, %len: #bits<64>, %parent: #bits<64>,
+                          %index: #bits<64>) -> #bits<32> {
+  %i = #call ast_child(%parent, %index)
   %at = #call meta_node_start(%i)
   %n = #call meta_node_len(%i)
   %hi = #add[#bits<64>](%at, %n)
@@ -93,15 +98,38 @@
   %self_b = #call bs_byte_at(%base, %at, %len)
   %self_digit = #call bs_is_digit(%self_b)
 
-  // 下一个兄弟决定「这里开始的是什么」。兄弟是「无」时下面每个判断都给假。
-  %nx = #call meta_node_next(%i)
-  %nx_kind = #call meta_node_kind(%nx)
+  // 下一个兄弟决定「这里开始的是什么」。它是**父组的下一个孩子**；没有下一个
+  // （越过末尾）时下面每条判断都给假——旧代码靠「无」节点的种类达到同样效果，
+  // 现在靠显式范围判断，不再伪造一个空节点。
+  %count = #call ast_child_count(%parent)
+  %nx_i = #add[#bits<64>](%index, 1)
+  %has_nx = #ult[#bits<64>](%nx_i, %count)
+  %nx_kind = #if %has_nx -> (#bits<64>) {
+    %nx0 = #call ast_child(%parent, %nx_i)
+    %k0 = #call ast_kind(%nx0)
+    %w0 = #zext[#bits<64>](%k0)
+    #yield %w0
+  } else {
+    #yield 0xFFFFFFFFFFFFFFFF
+  }
+  %nx_at = #if %has_nx -> (#bits<64>) {
+    %nx1 = #call ast_child(%parent, %nx_i)
+    %s1 = #call ast_text_start(%nx1)
+    #yield %s1
+  } else {
+    #yield 0
+  }
+  %nx_n = #if %has_nx -> (#bits<64>) {
+    %nx2 = #call ast_child(%parent, %nx_i)
+    %s2 = #call ast_text_len(%nx2)
+    #yield %s2
+  } else {
+    #yield 0
+  }
   %nx_is_group = #eq[#bits<64>](%nx_kind, 2)
-  %nx_at = #call meta_node_start(%nx)
-  %nx_n = #call meta_node_len(%nx)
   %nx_is_op = #call meta_rec_is_op(%base, %nx_at, %nx_n, %len)
   %nx_is_dot = #call meta_rec_is_dot(%base, %nx_at, %nx_n, %len)
-  // 组节点从它自己的开括号起（机制树给出源码位置），所以看那一格
+  // 组节点从它自己的开括号起（reader 给出的源码位置），所以看那一格
   // 就知道是 `(` 还是 `{`。这两个形状完全不同：调用 vs 构造。
   %nx_b = #call bs_byte_at(%base, %nx_at, %len)
   %nx_paren = #eq[#bits<8>](%nx_b, 40)
@@ -154,112 +182,240 @@
     }
     #yield %f2
   }
-  %s = #call meta_node_set_kind(%i, %form)
-  #return 0
+  %s = #call meta_sem_put(%parent, %index, %form)
+  #return %s
 }
 
-// 走一条兄弟链，组要说进孩子里。组自己不改种类（它本来就是 2 = 组）。
+// 走一个组的全部孩子：组先递归进去，词算形状。
+// **没有兄弟链**：位置由 (父组, 下标) 给出，所以组的孩子和它的后继都不需要节点
+// 自己携带。形状写进语义旁表。
 #proc meta_recognize_all(%base: #addr, %len: #bits<64>,
-                         %first: #bits<64>) -> #bits<32> {
-  %st = #loop s(%c: #bits<64> = %first) -> (#bits<32>) {
-    %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
-    #if %done {
+                         %group: #bits<64>) -> #bits<32> {
+  %count = #call ast_child_count(%group)
+  %st = #loop s(%i: #bits<64> = 0) -> (#bits<32>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %c = #call ast_child(%group, %i)
+      %k = #call ast_kind(%c)
+      %is_group = #eq[#bits<8>](%k, 2)
+      // **每个出现位置都要进旁表**，不只是词：组的位置也要有形状条目（编号 2 =
+      // Group，与 reader 的种类编号一致），`meta_node_form(父组, 下标)` 才答得出来。
+      // 键是 (父组, 下标) —— 出现位置，不是节点引用；同一个组节点出现在两个父组里
+      // 会有两条互不覆盖的条目。
+      %r = #if %is_group -> (#bits<32>) {
+        %rec = #call meta_sem_put(%group, %i, 2)
+        #if #ne[#bits<32>](%rec, 0) {
+          #return %rec
+        }
+        %sub = #call meta_recognize_all(%base, %len, %c)
+        #yield %sub
+      } else {
+        %w = #call meta_recognize_word(%base, %len, %group, %i)
+        #yield %w
+      }
+      #if #ne[#bits<32>](%r, 0) {
+        #break s(%r)
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue s(%i2)
+    } else {
       #break s(0)
     }
-    %k = #call meta_node_kind(%c)
-    %is_group = #eq[#bits<64>](%k, 2)
-    %w = #if %is_group -> (#bits<32>) {
-      %kid = #call meta_node_child(%c)
-      %r = #call meta_recognize_all(%base, %len, %kid)
-      #yield %r
-    } else {
-      %r2 = #call meta_recognize_word(%base, %len, %c)
-      #yield %r2
-    }
-    %nx = #call meta_node_next(%c)
-    #continue s(%nx)
   }
   #return %st
 }
 
-// 一份源码识别一遍。`meta_parse_source` 建完树就调它，所以读到树的时候形状一定
-// 已经写好了 —— 这个不变式由一个调用点保证，不靠调用方记得。
+// 一份源码识别一遍。旁表是**单张**的，键是 (父组, 下标)：重复识别同一份源码是幂等的
+//（同键覆盖），不同源码的条目也能共存（父组引用里带段号，天然不冲突）。
 #proc meta_recognize_source(%source: #bits<64>) -> #bits<32> {
+  %seg = #call ast_segment_of_source(%source)
+  %scratch = #call lain_meta_scratch_data()
+  %segw = #call meta_cell_put(#lea(%scratch, 1524, 1, 0), %seg)
+  %secw = #call meta_cell_put(#lea(%scratch, 1532, 1, 0), 0)
   %base = #call lain_meta_source_data(%source)
   %len = #call lain_meta_source_length(%source)
   %root = #call meta_root_of(%source)
-  %none = #eq[#bits<64>](%root, 0xFFFFFFFFFFFFFFFF)
+  // root 缺席 = 这份源码被 reader 拒了（AstIn 段不活、Arena 一个字节都没发布）。
+  %none = #eq[#bits<64>](%root, 0)
   %st = #if %none -> (#bits<32>) {
     #yield 0
   } else {
-    %kid = #call meta_node_child(%root)
-    %r = #call meta_recognize_all(%base, %len, %kid)
+    // **不要清表**：单张旁表 + 「谁在用就重新识别谁」的组合下，清表会把上一层已经
+    // 建好的条目（例如 prelude 的 scalar 声明）**全部抹掉**。实测：setup 扫 prelude
+    // 后表里有 8 条，但降级前重新识别主源码时清表，最终只剩主源码的 2 条。
+    // **根不进旁表**：它的形状属于「顶层形式序列」这个位置，而根自己不是任何父组的
+    // 孩子 —— 没有游标指向它，也就没有键可写。旧实现记 (root, 0) 是为了让
+    // `meta_node_next(root)` 回 NONE，那条路已经不存在了；真写了反而会与
+    // 「root 的第 0 个孩子」这条条目**撞键**（同一个 (root, 0)）。
+    %r = #call meta_recognize_all(%base, %len, %root)
     #yield %r
   }
   #return %st
 }
 
-// 找从 %at 起头的那个节点，回它的**下标**（找不到回「无」）。
+// 在 %group 的子树里找 text 起点等于 %at 的那个**出现位置**。
 //
-// **组也算**：组的 `start` 就是它那个开括号的位置，而那个位置上没有叶子，所以不会
+// 命中：把它的**父组**写进暂存区固定格 +2400，返回它在那个父组里的下标。
+// 未命中：返回「查不到」（0xFFFFFFFFFFFFFFFF，非引用域），格子不动。
+//
+// **组也算**：组的 text 起点就是它那个开括号的位置，而那个位置上没有叶子，所以不会
 // 和叶子的匹配打架。`(1 + 2) + 3` 的值的第一个节点就是那个组 —— 只认叶子的话查不到它，
 // 形状就成了「无」，整段被当成常量走错路。
-#proc meta_node_at(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %root = #call meta_root_of_source(%base)
-  %missing = #eq[#bits<64>](%root, 0xFFFFFFFFFFFFFFFF)
-  %r = #if %missing -> (#bits<64>) {
-    #yield 0xFFFFFFFFFFFFFFFF
-  } else {
-    %kid = #call meta_node_child(%root)
-    %f = #call meta_node_find_at(%kid, %at)
-    #yield %f
+//
+// 遍历只走「当前正在看的组的孩子」，不许跨组：位置由父组与下标给出，返回的也是这两样。
+#proc meta_cursor_at(%group: #bits<64>, %at: #bits<64>) -> #bits<64> {
+  %count = #call ast_child_count(%group)
+  %r = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %c = #call ast_child(%group, %i)
+      %st = #call ast_text_start(%c)
+      %same = #eq[#bits<64>](%st, %at)
+      #if %same {
+        // 命中：把父组记下来（递归向上传播的是下标，父组走格子带出来）。
+        %sc = #call lain_meta_scratch_data()
+        %pw = #call meta_cell_put(#lea(%sc, 2400, 1, 0), %group)
+        #break s(%i)
+      }
+      %k = #call ast_kind(%c)
+      %is_group = #eq[#bits<8>](%k, 2)
+      %sub = #if %is_group -> (#bits<64>) {
+        %inner = #call meta_cursor_at(%c, %at)
+        #yield %inner
+      } else {
+        #yield 0xFFFFFFFFFFFFFFFF
+      }
+      %miss = #eq[#bits<64>](%sub, 0xFFFFFFFFFFFFFFFF)
+      #if %miss {
+        %i2 = #add[#bits<64>](%i, 1)
+        #continue s(%i2)
+      }
+      #break s(%sub)
+    } else {
+      #break s(0xFFFFFFFFFFFFFFFF)
+    }
   }
   #return %r
 }
 
-// 一份源码里每个 token 的起点各不相同，所以兄弟链里第一个起点相符的就是它。
-#proc meta_node_find_at(%first: #bits<64>,
-                        %at: #bits<64>) -> #bits<64> {
-  %found = #loop s(%c: #bits<64> = %first) -> (#bits<64>) {
-    %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
-    #if %done {
-      #break s(0xFFFFFFFFFFFFFFFF)
-    }
-    %st = #call meta_node_start(%c)
-    %same = #eq[#bits<64>](%st, %at)
-    #if %same {
-      #break s(%c)
-    }
-    %k = #call meta_node_kind(%c)
-    %is_group = #eq[#bits<64>](%k, 2)
-    %sub = #if %is_group -> (#bits<64>) {
-      %kid = #call meta_node_child(%c)
-      %r = #call meta_node_find_at(%kid, %at)
-      #yield %r
-    } else {
-      #yield 0xFFFFFFFFFFFFFFFF
-    }
-    %miss = #eq[#bits<64>](%sub, 0xFFFFFFFFFFFFFFFF)
-    #if %miss {
-      %nx = #call meta_node_next(%c)
-      #continue s(%nx)
-    }
-    #break s(%sub)
-  }
-  #return %found
+// 暂存区里「上一次 `meta_cursor_at` 命中的父组」那一格。它只在 `meta_cursor_at`
+// 返回非「查不到」之后有效，并且必须**紧接着**用掉。
+#proc meta_cursor_parent() -> #bits<64> {
+  %sc = #call lain_meta_scratch_data()
+  %p = #call meta_cell_get(#lea(%sc, 2400, 1, 0))
+  #return %p
 }
 
-// 从 %at 起头的那个叶子的形状。找不到回「无」。
-//
-// 这是给**还按字节偏移工作**的降级点用的桥：它们手里只有位置，靠这个把位置换成
-// 预先算好的形状，而不是再去看字节。等降级改成按节点下标走，这座桥就不需要了。
+// 从 %at 起头的那个节点的**引用**（找不到回空引用 0）。它由命中位置的父组与下标
+// 算出来 —— 「位置 -> 节点」是合法方向（搜索），被禁止的是「节点 -> 唯一父组」。
+#proc meta_node_at(%base: #addr, %at: #bits<64>) -> #bits<64> {
+  %root = #call meta_root_of_source(%base)
+  %missing = #eq[#bits<64>](%root, 0)
+  %r = #if %missing -> (#bits<64>) {
+    #yield 0
+  } else {
+    %i = #call meta_cursor_at(%root, %at)
+    %none = #eq[#bits<64>](%i, 0xFFFFFFFFFFFFFFFF)
+    %v = #if %none -> (#bits<64>) {
+      #yield 0
+    } else {
+      %parent = #call meta_cursor_parent()
+      %c = #call ast_child(%parent, %i)
+      #yield %c
+    }
+    #yield %v
+  }
+  #return %r
+}
+
+// 从 %at 起头的那个节点的形状（读语义旁表，键是命中位置的父组与下标）。
+// 找不到回「查不到」。
 #proc meta_form_at(%base: #addr, %at: #bits<64>) -> #bits<64> {
-  %i = #call meta_node_at(%base, %at)
-  %v = #call meta_node_kind(%i)
+  %root = #call meta_root_of_source(%base)
+  %missing = #eq[#bits<64>](%root, 0)
+  %v = #if %missing -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %i = #call meta_cursor_at(%root, %at)
+    %none = #eq[#bits<64>](%i, 0xFFFFFFFFFFFFFFFF)
+    %w = #if %none -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %parent = #call meta_cursor_parent()
+      %f = #call meta_sem_lookup(%parent, %i)
+      #yield %f
+    }
+    #yield %w
+  }
   #return %v
 }
 
-// 从 %at 起头的那**整个值**里有没有算子符号（形状 9）？走到 `;` 为止。
+// 位置 -> 出现位置（父组走暂存区 +2400 格子，返回下标）；找不到回「查不到」。
+// 调用方必须在**紧接着**的语句里用掉那一格（`meta_cursor_parent`）。
+#proc meta_cursor_of_at(%base: #addr, %at: #bits<64>) -> #bits<64> {
+  %root = #call meta_root_of_source(%base)
+  %missing = #eq[#bits<64>](%root, 0)
+  %v = #if %missing -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %i = #call meta_cursor_at(%root, %at)
+    #yield %i
+  }
+  #return %v
+}
+
+// 位置 -> **同一个父组里的下一个孩子**（空引用 0 = 到头）。
+//
+// 这是「位置 -> 位置」的查询：先按字节起点定位那个出现位置（父组 + 下标），再取
+// 父组的下一项。全程**不碰节点引用**，也不假设某个引用唯一确定父组或后继 ——
+// 那些正是规范 §2.1 禁止的东西。给「手里只有字节位置、没有游标」的调用点用
+//（顶层值那条路按位置走）；已经有游标的循环必须直接推进游标，不要绕这一圈。
+#proc meta_next_at(%base: #addr, %at: #bits<64>) -> #bits<64> {
+  %i = #call meta_cursor_of_at(%base, %at)
+  %none = #eq[#bits<64>](%i, 0xFFFFFFFFFFFFFFFF)
+  %v = #if %none -> (#bits<64>) {
+    #yield 0
+  } else {
+    %parent = #call meta_cursor_parent()
+    %c = #call meta_cursor_next(%parent, %i)
+    #yield %c
+  }
+  #return %v
+}
+
+// 一个组里从下标 %i 开始的**兄弟序列**里有没有算子形状（9）？走到 `;` 为止。
+//
+// 遍历的是**当前组的兄弟序列**，不是「节点自己的下一个兄弟」——这就是
+// 「(当前组, 起始下标)」这对游标存在的理由：同一段连续的兄弟，从中间起步问
+// 「后面有没有算子」，答案取决于起点；节点引用本身答不了这个问题。
+#proc meta_seq_has_op(%base: #addr, %len: #bits<64>, %group: #bits<64>,
+                      %i: #bits<64>) -> #bits<1> {
+  %count = #call ast_child_count(%group)
+  %r = #loop s(%j: #bits<64> = %i) -> (#bits<1>) {
+    %more = #ult[#bits<64>](%j, %count)
+    #if %more {
+      %c = #call ast_child(%group, %j)
+      %k = #call meta_sem_lookup(%group, %j)
+      %is_op = #eq[#bits<64>](%k, 9)
+      #if %is_op {
+        #break s(1)
+      }
+      %st = #call ast_text_start(%c)
+      %b = #call bs_byte_at(%base, %st, %len)
+      %is_semi = #eq[#bits<8>](%b, 59)
+      #if %is_semi {
+        #break s(0)
+      }
+      %j2 = #add[#bits<64>](%j, 1)
+      #continue s(%j2)
+    } else {
+      #break s(0)
+    }
+  }
+  #return %r
+}
+
+// 从 %at 起头的那个节点所在的兄弟序列里有没有算子形状（9）？走到 `;` 为止。
 //
 // 为什么必须有这个：形状 5/6/10 说的是「这里开始一次调用 / 字段访问 / 构造」，
 // **不是**「整个值就是它」。`f(1) + 2` 里 `f` 的形状也是 5，但值是一条链。调用 /
@@ -270,25 +426,64 @@
 // `;` 是单个词、字节 59。组里面的 `;` 不是兄弟，所以走不到。
 #proc meta_value_has_op(%base: #addr, %len: #bits<64>,
                          %at: #bits<64>) -> #bits<1> {
-  %first = #call meta_node_at(%base, %at)
-  %r = #loop s(%c: #bits<64> = %first) -> (#bits<1>) {
-    %done = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
-    #if %done {
-      #break s(0)
+  %root = #call meta_root_of_source(%base)
+  %missing = #eq[#bits<64>](%root, 0)
+  %r = #if %missing -> (#bits<1>) {
+    // 连根都没找到：**按「可能有算子」处理**。宁可走慢一点的表达式发射器，
+    // 也不要因为查不到就选「值就是一次调用」那条捷径 —— 它会静默丢掉后面的算子。
+    #yield 1
+  } else {
+    %f = #call meta_seq_has_op_at(%root, %base, %len, %at)
+    %unknown = #eq[#bits<64>](%f, 0xFFFFFFFFFFFFFFFF)
+    %v = #if %unknown -> (#bits<1>) {
+      #yield 1
+    } else {
+      %zero = #eq[#bits<64>](%f, 0)
+      %has = #eq[#bits<1>](%zero, 0)
+      #yield %has
     }
-    %k = #call meta_node_kind(%c)
-    %is_op = #eq[#bits<64>](%k, 9)
-    #if %is_op {
-      #break s(1)
+    #yield %v
+  }
+  #return %r
+}
+
+// 找到 %at 那个节点所在的组与下标，再问那个序列。%group 是当前正在看的组。
+//
+// 返回值是**三态**：1 = 有算子，0 = 找到了、序列里没有算子，0xFFFFFFFFFFFFFFFF =
+// 这棵子树里没有 %at 那个节点。三态是必需的：递归找节点时「没找到」和「找到但没
+// 算子」必须分得开 —— 都回 0 的话，只要目标在**嵌套的组**里（函数体就是一层
+// 花括号组），外层循环就会把递归答案丢掉、一路扫到组尾回 0。实测后果：
+// `func f() -> i32 { return g(1) + 2; }` 发成 `#return #call g(1)`，
+// `+ 2` 被静默丢掉，验证器不报，算出来是 1 而不是 3。
+#proc meta_seq_has_op_at(%group: #bits<64>, %base: #addr, %len: #bits<64>,
+                          %at: #bits<64>) -> #bits<64> {
+  %count = #call ast_child_count(%group)
+  %r = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %c = #call ast_child(%group, %i)
+      %st = #call ast_text_start(%c)
+      %same = #eq[#bits<64>](%st, %at)
+      #if %same {
+        %h = #call meta_seq_has_op(%base, %len, %group, %i)
+        %hw = #zext[#bits<64>](%h)
+        #break s(%hw)
+      }
+      %k = #call ast_kind(%c)
+      %is_group = #eq[#bits<8>](%k, 2)
+      #if %is_group {
+        %inner = #call meta_seq_has_op_at(%c, %base, %len, %at)
+        %none = #eq[#bits<64>](%inner, 0xFFFFFFFFFFFFFFFF)
+        %found = #eq[#bits<1>](%none, 0)
+        #if %found {
+          #break s(%inner)
+        }
+      }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue s(%i2)
+    } else {
+      #break s(0xFFFFFFFFFFFFFFFF)
     }
-    %st = #call meta_node_start(%c)
-    %b = #call bs_byte_at(%base, %st, %len)
-    %is_semi = #eq[#bits<8>](%b, 59)
-    #if %is_semi {
-      #break s(0)
-    }
-    %nx = #call meta_node_next(%c)
-    #continue s(%nx)
   }
   #return %r
 }

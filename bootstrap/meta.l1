@@ -13,7 +13,9 @@
 // elaborate 与 lower 合成一条直线——等形状长出来再拆。
 
 #proc lain_std_abi_version() -> #bits<64> {
-  #return 2
+  // 第一期把节点形状从私有树搬进 LAINAST v1 旁表、宿主侧建平铺 AstIn、新增
+  // `lain_meta_ast_*` 读原语，公共 ABI 因此从 2 提到 3（v2 实现不再可配）。
+  #return 3
 }
 
 #proc lain_std_initialize() -> #bits<32> {
@@ -23,6 +25,17 @@
 // 产出：把 source 那份源码 lowering 成 LAINIR 文本，写进宿主的输出缓冲。
 // 返回 0 = 成功。
 #proc lain_std_lower(%source: #bits<64>) -> #bits<32> {
+  // reader 在**登记时**就拒了这份源码（未闭合的块注释、括号不配对……）：宿主只登记了
+  // 源码段，没有 AstIn Arena。干净地拒 —— 回 3、一个字节产物都不发；失败位置由宿主的
+  // 诊断通道给出（`diagnostic: <路径> byte N code 34`）。旧实现是懒解析在第一次访问时
+  // 才炸，外部看到的也是「回 3 + 那条诊断」，这里保持同一组观测。
+  %has_tree = #call meta_source_has_tree(%source)
+  %no_tree = #eq[#bits<1>](%has_tree, 0)
+  #if %no_tree {
+    %ft = #call lain_meta_fail(3)
+    #return 3
+  }
+  // 诊断（宿主槽 30）：入口标记。用来确认 trace 通道本身是否工作。
   %reset = #call lain_meta_emit_reset()
   // 作用域表要先建：外层是 root 环境，内层是这份源码。名字按表查，
   // 不再回源码搜字节。
@@ -36,7 +49,7 @@
     %scan = #call meta_scope_scan(%base, %len, %source, %mark)
     %b2 = #eq[#bits<32>](%scan, 0)
     %s = #if %b2 -> (#bits<32>) {
-      // 语法树在 meta_scope_setup 里已经把每份源码都读好了。
+      // setup 已识别所有源码；旁表按出现位置共存，不重复扫描。
       %r = #call meta_lower_source(%source)
       #yield %r
     } else {
@@ -57,14 +70,17 @@
   %len = #call lain_meta_source_length(%source)
   %base = #call lain_meta_source_data(%source)
   %root = #call meta_root_of(%source)
-  %first = #call meta_node_child(%root)
+  %count = #call ast_child_count(%root)
   %skw = #data_addr meta_kw_scalar
   %kw = #data_addr meta_kw_struct
   %ekw = #data_addr meta_kw_enum
   %lkw = #data_addr meta_kw_let
-  %status = #loop forms(%node: #bits<64> = %first) -> (#bits<32>) {
-    %more = #ne[#bits<64>](%node, 0xFFFFFFFFFFFFFFFF)
+  // **顶层形式的遍历是一个游标**：`(root, i)`，i 从 0 走到 child_count。走到头
+  // 就结束 —— 不再有「节点自己的下一个兄弟」这种东西（规范 §2.1）。
+  %status = #loop forms(%i: #bits<64> = 0) -> (#bits<32>) {
+    %more = #ult[#bits<64>](%i, %count)
     #if %more {
+      %node = #call ast_child(%root, %i)
       %here = #call meta_node_start(%node)
       %is_struct = #call meta_node_is_word(%node, %base, %kw, 6)
       %is_enum = #call meta_node_is_word(%node, %base, %ekw, 4)
@@ -77,14 +93,15 @@
       %h3 = #or[#bits<1>](%h1, %h2)
       %any = #or[#bits<1>](%h3, %is_func)
       %s = #if %any -> (#bits<32>) {
-        %d = #call meta_lower_form(%base, %len, %here, %node, %is_struct,
-                                    %is_enum, %is_scalar, %is_let, %is_func)
+        %d = #call meta_lower_form(%base, %len, %here, %root, %i, %node,
+                                    %is_struct, %is_enum, %is_scalar, %is_let,
+                                    %is_func)
         #yield %d
       } else {
         // **顶层树的孩子是词，不是形式**——一条形式跨好几个孩子（`struct`
         // `Pair` `{...}`）。所以跳过一条形式内部那些非关键字的词是正常的；
         // 但**整份文件的第一个孩子必须是能被认出的形式**，否则就是坏输入。
-        %is_first = #eq[#bits<64>](%node, %first)
+        %is_first = #eq[#bits<64>](%i, 0)
         %x = #if %is_first -> (#bits<32>) {
           %f = #call lain_meta_fail(4)
           #yield 4
@@ -97,8 +114,8 @@
       #if %bad {
         #break forms(%s)
       }
-      %next = #call meta_node_next(%node)
-      #continue forms(%next)
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue forms(%i2)
     } else {
       #break forms(0)
     }
@@ -106,11 +123,15 @@
   #return %status
 }
 
-// 一条顶层形式：关键字已经认出来了，按它分派。
+// 一条顶层形式：关键字已经认出来了，按它分派。`(parent, index)` 是这条形式在
+// 顶层序列里的**出现位置** —— 下游任何需要「往后走几个孩子」的地方都靠它。
 #proc meta_lower_form(%base: #addr, %len: #bits<64>,
-                       %here: #bits<64>, %node: #bits<64>, %is_struct: #bits<1>,
+                       %here: #bits<64>, %parent: #bits<64>,
+                       %index: #bits<64>, %node: #bits<64>,
+                       %is_struct: #bits<1>,
                        %is_enum: #bits<1>, %is_scalar: #bits<1>,
                        %is_let: #bits<1>, %is_func: #bits<1>) -> #bits<32> {
+  // 诊断（宿主槽 13/14）：形式分派入口的次数与节点引用。
   %s = #if %is_struct -> (#bits<32>) {
     %r1 = #call meta_lower_struct(%base, %len, %here)
     #yield %r1
@@ -120,7 +141,7 @@
       #yield %r4
     } else {
       %r3 = #if %is_func -> (#bits<32>) {
-        %r7 = #call meta_lower_func(%base, %len, %node)
+        %r7 = #call meta_lower_func(%base, %len, %parent, %index, %node)
         #yield %r7
       } else {
         %r5 = #if %is_scalar -> (#bits<32>) {
@@ -678,9 +699,9 @@
   %w4 = #call meta_emit_repr(%kind, %width)
   %open = #data_addr meta_fn_open
   %w5 = #call lain_meta_emit_write(%open, 3)
-  // 头写完了，现在降级实参
-  %cnode = #call meta_node_at(%base, %callee_lo)
-  %grp = #call meta_node_next(%cnode)
+  // 头写完了，现在降级实参。被调用者的下一个孩子就是实参那个组 —— 「位置 -> 同一个
+  // 父组里的下一项」，不是靠节点引用找兄弟。
+  %grp = #call meta_next_at(%base, %callee_lo)
   %ast = #call meta_args_prepare(%base, %len, %kind, %width, %t_lo,
                                  %t_hi, %grp)
   %abad = #ne[#bits<32>](%ast, 0)
@@ -762,9 +783,11 @@
 
   // 整段值交给表达式发射器。它自己走到 `;` 为止，结果写在 +168（临时值下标，或
   // 「无」= 结果就是源码里那段，此时 +176/+184 是它的范围）。
-  %first_node = #call meta_node_at(%base, %first_lo)
+  // 值的第一个操作数在这里的**出现位置**是 `(父组, 下标)`；表达式发射器要的正是它。
+  %idx = #call meta_cursor_of_at(%base, %first_lo)
+  %parent = #call meta_cursor_parent()
   %est = #call meta_emit_expr(%base, %len, %kind, %width, %t_lo, %t_hi,
-                              %first_node, 1, 0, 0, 0)
+                              %parent, %idx, 1, 0, 0, 0)
   %ebad = #ne[#bits<32>](%est, 0)
   #if %ebad {
     #return %est
@@ -815,23 +838,28 @@
 //   - 一次调用 `f(…)`         → 发 `  %r<n> = #call f(…)\n`
 //
 // 括号里以**兄弟链走完**收尾（`%need_semi` = 0），不是 `;`。
+//
+// 参数是**游标**（父组 + 下标），不是节点引用：形状、括号里的第一个操作数、
+// 「被调用者后面那个实参组」全都要靠出现位置。`meta_after_operand` 也吃同样的游标。
 #proc meta_operand_emit(%base: #addr, %len: #bits<64>,
                         %kind: #bits<64>, %width: #bits<64>,
                         %t_lo: #bits<64>, %t_hi: #bits<64>,
-                        %node: #bits<64>) -> #bits<32> {
-  %form = #call meta_node_kind(%node)
+                        %parent: #bits<64>, %index: #bits<64>) -> #bits<32> {
+  %node = #call ast_child(%parent, %index)
+  %form = #call meta_node_form(%parent, %index)
   %is_group = #eq[#bits<64>](%form, 2)
   %is_call = #eq[#bits<64>](%form, 5)
   %st = #if %is_group -> (#bits<32>) {
-    %kid = #call meta_node_child(%node)
+    // 括号组：里面那条表达式从**这个组**的第 0 个孩子开始（游标 = (组, 0)）。
     %st1 = #call meta_emit_expr(%base, %len, %kind, %width, %t_lo,
-                                %t_hi, %kid, 0, 0, 0, 0)
+                                %t_hi, %node, 0, 0, 0, 0, 0)
     #yield %st1
   } else {
     %st2 = #if %is_call -> (#bits<32>) {
       %c_lo = #call meta_node_start(%node)
       %c_hi = #add[#bits<64>](%c_lo, #call meta_node_len(%node))
-      %grp = #call meta_node_next(%node)
+      // 被调用者的下一个兄弟就是实参组：游标前进一格。
+      %grp = #call meta_cursor_next(%parent, %index)
       %st3 = #call meta_emit_call_temp(%base, %len, %kind, %width,
                                        %t_lo, %t_hi, %c_lo, %c_hi, %grp)
       #yield %st3
@@ -895,14 +923,17 @@
   #return 0
 }
 
-// 一个操作数节点之后接着是哪个节点。**调用占两个节点**（被调用者 + 实参那个组），
-// 所以要跳两个 —— 不跳的话 `f(1) + 2` 会把实参组当成算子，报一个跟真实原因无关的 4。
-#proc meta_after_operand(%node: #bits<64>) -> #bits<64> {
-  %k = #call meta_node_kind(%node)
+// 一个操作数**之后**接着是哪个下标。**调用占两个节点**（被调用者 + 实参那个组），
+// 所以要跳两格 —— 不跳的话 `f(1) + 2` 会把实参组当成算子，报一个跟真实原因无关的 4。
+//
+// 吃的是游标（父组 + 下标），回的是**下一个下标**（游标只会增加下标，规范 §2.1）；
+// 形状问的是「这个位置」的形状，不涉及节点引用。
+#proc meta_after_operand(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
+  %k = #call meta_node_form(%parent, %index)
   %is_call = #eq[#bits<64>](%k, 5)
-  %nx = #call meta_node_next(%node)
+  %nx = #add[#bits<64>](%index, 1)
   %r = #if %is_call -> (#bits<64>) {
-    %g = #call meta_node_next(%nx)
+    %g = #add[#bits<64>](%nx, 1)
     #yield %g
   } else {
     #yield %nx
@@ -932,20 +963,25 @@
 //
 // 1 和 2 是给函数体那条路用的：以前 `meta_lower_stmt` 另有一份只发**一个**算子的
 // 老路径，`return a + b + c;` 会静默丢掉 `+ c`（实测 `%r2 = #add(%a, %b)`）。
+// 参数是**游标**（`%parent` + 起始下标 `%index`），不是第一个操作数的节点引用：
+// 这条链每一步都要前进一格，而「下一格」只有父组答得出来（规范 §2.1）。
 #proc meta_emit_expr(%base: #addr, %len: #bits<64>,
                      %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
-                     %t_hi: #bits<64>, %first: #bits<64>,
+                     %t_hi: #bits<64>, %parent: #bits<64>, %index: #bits<64>,
                      %need_semi: #bits<1>, %close: #bits<64>,
                      %n_lo: #bits<64>, %n_hi: #bits<64>) -> #bits<32> {
-  %st = #loop e(%c: #bits<64> = %first, %have: #bits<1> = 0,
+  %st = #loop e(%i: #bits<64> = %index, %have: #bits<1> = 0,
                 %acc: #bits<64> = 0xFFFFFFFFFFFFFFFF, %alo: #bits<64> = 0,
                 %ahi: #bits<64> = 0, %bound: #bits<1> = 0) -> (#bits<32>) {
+    // 当前位置的孩子。游标越过末尾时 `ast_child` 回空引用 0 —— 与旧代码里那个
+    // 「无节点」等价，但不再需要伪造一个节点：**末尾是范围，不是节点**。
+    %c = #call ast_child(%parent, %i)
     %phase1 = #eq[#bits<1>](%have, 0)
     #if %phase1 {
       // 阶段一：%c 是一个操作数，它成为累积值
       %at = #call meta_node_start(%c)
       %b = #call bs_byte_at(%base, %at, %len)
-      %isnone = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+      %isnone = #eq[#bits<64>](%c, 0)
       %issemi = #eq[#bits<8>](%b, 59)
       %empty = #or[#bits<1>](%isnone, %issemi)
       #if %empty {
@@ -954,7 +990,7 @@
         #break e(3)
       }
       %ost = #call meta_operand_emit(%base, %len, %kind, %width, %t_lo,
-                                     %t_hi, %c)
+                                     %t_hi, %parent, %i)
       %obad = #ne[#bits<32>](%ost, 0)
       #if %obad {
         #break e(%ost)
@@ -963,13 +999,13 @@
       %ref = #call meta_cell_get(#lea(%sc, 168, 1, 0))
       %alo1 = #call meta_cell_get(#lea(%sc, 176, 1, 0))
       %ahi1 = #call meta_cell_get(#lea(%sc, 184, 1, 0))
-      %nx = #call meta_after_operand(%c)
+      %nx = #call meta_after_operand(%parent, %i)
       #continue e(%nx, 1, %ref, %alo1, %ahi1, 0)
     }
     // 阶段二：%c 是算子、或者是表达式的终点
     %bat = #call meta_node_start(%c)
     %bb = #call bs_byte_at(%base, %bat, %len)
-    %isnone2 = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+    %isnone2 = #eq[#bits<64>](%c, 0)
     %issemi2 = #eq[#bits<8>](%bb, 59)
     %iscomma2 = #eq[#bits<8>](%bb, 44)
     %any1 = #or[#bits<1>](%isnone2, %issemi2)
@@ -985,8 +1021,9 @@
       %s1 = #call meta_cell_put(#lea(%sc2, 168, 1, 0), %acc)
       %s2 = #call meta_cell_put(#lea(%sc2, 176, 1, 0), %alo)
       %s3 = #call meta_cell_put(#lea(%sc2, 184, 1, 0), %ahi)
-      // 终点节点也带出去：调用方（实参那个循环）要靠它找下一个实参从哪开始。
-      %s4 = #call meta_cell_put(#lea(%sc2, 192, 1, 0), %c)
+      // 终点**下标**也带出去：调用方（实参那个循环）要靠它找下一个实参从哪开始。
+      // 带下标而不是节点引用 —— 位置是游标的一半，引用不是。
+      %s4 = #call meta_cell_put(#lea(%sc2, 192, 1, 0), %i)
       // 闭合模式在这一条语句的末尾收尾（模式 0 什么都不做，调用方自己收）。
       %cl = #call meta_emit_close(%base, %len, %close, %bound, %acc,
                                   %alo, %ahi, %kind, %width, %t_lo, %t_hi,
@@ -1004,11 +1041,12 @@
       %f1 = #call lain_meta_fail(4)
       #break e(4)
     }
-    // 右操作数
-    %rn = #call meta_node_next(%c)
+    // 右操作数：游标前进一格。到头时 `ast_child` 回空引用 0。
+    %rni = #add[#bits<64>](%i, 1)
+    %rn = #call ast_child(%parent, %rni)
     %rn_at = #call meta_node_start(%rn)
     %rn_b = #call bs_byte_at(%base, %rn_at, %len)
-    %rn_none = #eq[#bits<64>](%rn, 0xFFFFFFFFFFFFFFFF)
+    %rn_none = #eq[#bits<64>](%rn, 0)
     %rn_semi = #eq[#bits<8>](%rn_b, 59)
     %rn_end = #or[#bits<1>](%rn_none, %rn_semi)
     #if %rn_end {
@@ -1022,7 +1060,7 @@
     // 真出过：`let main: i32 = 12 / (2 + 1);` 发成 `%r2 = #add[#bits<32>](12, %r1)`
     // （该是 `#sdiv`），验证通过，算出来 15 而不是 4。
     %rst = #call meta_operand_emit(%base, %len, %kind, %width, %t_lo,
-                                   %t_hi, %rn)
+                                   %t_hi, %parent, %rni)
     %rbad = #ne[#bits<32>](%rst, 0)
     #if %rbad {
       #break e(%rst)
@@ -1165,10 +1203,11 @@
     #if %rbadfit {
       #break e(%rfit)
     }
-    // 这条是不是整条链的最后一条？看右操作数后面那个节点还是不是算子。
+    // 这条是不是整条链的最后一条？看右操作数后面那个位置还是不是算子。
     // **必须在 `meta_op_resolve` 之后做**：这几个都是只读树的叶子调用，不碰 `+24`/`+32`。
-    %nx2 = #call meta_after_operand(%rn)
-    %a_at = #call meta_node_start(%nx2)
+    %nx2 = #call meta_after_operand(%parent, %rni)
+    %nx2c = #call ast_child(%parent, %nx2)
+    %a_at = #call meta_node_start(%nx2c)
     %a_b = #call bs_byte_at(%base, %a_at, %len)
     %a_op = #call bs_is_operator(%a_b)
     %last = #eq[#bits<1>](%a_op, 0)
