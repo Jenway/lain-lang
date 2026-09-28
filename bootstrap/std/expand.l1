@@ -1,0 +1,333 @@
+// 第二期 Expand 调度器。语法绑定在 Meta 内分派，Host 只提供语言无关的 AstOut。
+// 当前只注册 statement 上下文的 my_if；声明与表达式处理器留给后续阶段。
+
+// 初始语法环境：handler_id=1 表示 meta_expand_my_if。
+#proc meta_syntax_handler(%parent: #bits<64>, %cursor: #bits<64>,
+                          %context: #bits<64>) -> #bits<64> {
+  %stmt = #eq[#bits<64>](%context, 2)
+  %node = #call ast_child(%parent, %cursor)
+  %base = #call lain_meta_source_data(0)
+  %kw = #data_addr meta_kw_my_if
+  %name = #call meta_node_is_word(%node, %base, %kw, 5)
+  %hit = #and[#bits<1>](%stmt, %name)
+  %id = #if %hit -> (#bits<64>) { #yield 1 } else { #yield 0 }
+  #return %id
+}
+
+#proc meta_expand_store_ref(%buffer: #addr, %index: #bits<64>,
+                            %ref: #bits<64>) -> #bits<32> {
+  %off = #mul[#bits<64>](%index, 8)
+  %s = #call meta_cell_put(#lea(%buffer, %off, 1, 0), %ref)
+  #return 0
+}
+
+// 调用统一 ABI 的处理器；request/result 是本次调用独占的帧。
+#proc meta_expand_invoke(%handler: #bits<64>, %parent: #bits<64>,
+                         %cursor: #bits<64>, %result: #addr) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data()
+  %off = #call meta_bump_alloc(56)
+  %bad = #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF)
+  #if %bad { #return 17 }
+  %request = #lea(%scratch, %off, 1, 0)
+  %q0 = #call meta_cell_put(%request, 1)
+  %q1 = #call meta_cell_put(#lea(%request, 8, 1, 0), %parent)
+  %q2 = #call meta_cell_put(#lea(%request, 16, 1, 0), %cursor)
+  %q3 = #call meta_cell_put(#lea(%request, 24, 1, 0), 1)
+  %q4 = #call meta_cell_put(#lea(%request, 32, 1, 0), 0)
+  %q5 = #call meta_cell_put(#lea(%request, 40, 1, 0), 2)
+  %q6 = #call meta_cell_put(#lea(%request, 48, 1, 0), 1)
+  %known = #eq[#bits<64>](%handler, 1)
+  %st = #if %known -> (#bits<32>) {
+    %r = #call meta_expand_my_if(%request, %result)
+    #yield %r
+  } else {
+    %f = #call lain_meta_fail(9412)
+    #yield 9412
+  }
+  #return %st
+}
+
+// 展开一个语句块。返回新 Group 引用；0 表示失败，诊断已写入 Host。
+#proc meta_expand_stmt_group_inner(%group: #bits<64>) -> #bits<64> {
+  %count = #call ast_child_count(%group)
+  %mark = #call meta_bump_mark()
+  %bytes = #mul[#bits<64>](%count, 8)
+  %off = #call meta_bump_alloc(%bytes)
+  %alloc_bad = #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF)
+  #if %alloc_bad { #return 0 }
+  %scratch = #call lain_meta_scratch_data()
+  %buffer = #lea(%scratch, %off, 1, 0)
+  %packed = #loop walk(%i: #bits<64> = 0, %outn: #bits<64> = 0,
+                       %changed: #bits<1> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %visit = #call lain_meta_ast_charge(1, 1)
+      #if #ne[#bits<32>](%visit, 0) { #break walk(0) }
+      %handler = #call meta_syntax_handler(%group, %i, 2)
+      %has_handler = #ne[#bits<64>](%handler, 0)
+      #if %has_handler {
+        %called = #call lain_meta_ast_charge(2, 1)
+        #if #ne[#bits<32>](%called, 0) { #break walk(0) }
+        %call_mark = #call meta_bump_mark()
+        %res_off = #call meta_bump_alloc(48)
+        %res_bad = #eq[#bits<64>](%res_off, 0xFFFFFFFFFFFFFFFF)
+        #if %res_bad { #break walk(0) }
+        %result = #lea(%scratch, %res_off, 1, 0)
+        %ist = #call meta_expand_invoke(%handler, %group, %i, %result)
+        #if #ne[#bits<32>](%ist, 0) {
+          %rel0 = #call meta_bump_release(%call_mark)
+          #break walk(0)
+        }
+        %status = #call meta_cell_get(%result)
+        %replace = #eq[#bits<64>](%status, 1)
+        #if #eq[#bits<1>](%replace, 0) {
+          %diag = #call meta_cell_get(#lea(%result, 32, 1, 0))
+          %code = #if #eq[#bits<64>](%status, 2) -> (#bits<64>) {
+            #yield 9411
+          } else {
+            #yield %diag
+          }
+          %code32 = #trunc[#bits<32>](%code)
+          %f0 = #call lain_meta_fail(%code32)
+          %rel1 = #call meta_bump_release(%call_mark)
+          #break walk(0)
+        }
+        %consumed = #call meta_cell_get(#lea(%result, 8, 1, 0))
+        %slice = #call meta_cell_get(#lea(%result, 16, 1, 0))
+        %rn = #call meta_cell_get(#lea(%result, 24, 1, 0))
+        %room = #sub[#bits<64>](%count, %i)
+        %c0 = #ugt[#bits<64>](%consumed, 0)
+        %c1 = #ule[#bits<64>](%consumed, %room)
+        %c2 = #eq[#bits<64>](%rn, %consumed)
+        %v0 = #and[#bits<1>](%c0, %c1)
+        %valid = #and[#bits<1>](%v0, %c2)
+        #if #eq[#bits<1>](%valid, 0) {
+          %f1 = #call lain_meta_fail(9408)
+          %rel2 = #call meta_bump_release(%call_mark)
+          #break walk(0)
+        }
+        %replaced = #call lain_meta_ast_charge(3, %rn)
+        #if #ne[#bits<32>](%replaced, 0) {
+          %relb = #call meta_bump_release(%call_mark)
+          #break walk(0)
+        }
+        %src = #call lain_meta_ast_span_addr(%slice,
+                    #mul[#bits<64>](%rn, 8))
+        %copied = #loop repl(%j: #bits<64> = 0) -> (#bits<64>) {
+          %rm = #ult[#bits<64>](%j, %rn)
+          #if %rm {
+            %jo = #mul[#bits<64>](%j, 8)
+            %raw = #call meta_cell_get(#lea(%src, %jo, 1, 0))
+            // my_if 的第 2/4 个替换项是语句块；它们递归进入同一调度器。
+            %is2 = #eq[#bits<64>](%j, 2)
+            %is4 = #eq[#bits<64>](%j, 4)
+            %branch = #or[#bits<1>](%is2, %is4)
+            %value = #if %branch -> (#bits<64>) {
+              %expanded = #call meta_expand_stmt_group(%raw)
+              #yield %expanded
+            } else {
+              #yield %raw
+            }
+            #if #eq[#bits<64>](%value, 0) { #break repl(0) }
+            %put = #call meta_expand_store_ref(%buffer,
+                          #add[#bits<64>](%outn, %j), %value)
+            %j2 = #add[#bits<64>](%j, 1)
+            #continue repl(%j2)
+          } else { #break repl(1) }
+        }
+        %rel3 = #call meta_bump_release(%call_mark)
+        #if #eq[#bits<64>](%copied, 0) { #break walk(0) }
+        %i2 = #add[#bits<64>](%i, %consumed)
+        %o2 = #add[#bits<64>](%outn, %rn)
+        #continue walk(%i2, %o2, 1)
+      }
+
+      // 既有 if 不是宏，但它的分支仍是 statement context；递归处理其中的 my_if。
+      %node = #call ast_child(%group, %i)
+      %base = #call lain_meta_source_data(0)
+      %ikw = #data_addr meta_kw_if
+      %is_if = #call meta_node_is_word(%node, %base, %ikw, 2)
+      %fit = #add[#bits<64>](%i, 3)
+      %if_room = #ule[#bits<64>](%fit, %count)
+      %if_shape = #and[#bits<1>](%is_if, %if_room)
+      #if %if_shape {
+        %cond = #call ast_child(%group, #add[#bits<64>](%i, 1))
+        %body = #call ast_child(%group, #add[#bits<64>](%i, 2))
+        %bd = #call ast_delim(%body)
+        %body_ok = #eq[#bits<8>](%bd, 123)
+        #if %body_ok {
+          %new_body = #call meta_expand_stmt_group(%body)
+          #if #eq[#bits<64>](%new_body, 0) { #break walk(0) }
+          %p0 = #call meta_expand_store_ref(%buffer, %outn, %node)
+          %p1 = #call meta_expand_store_ref(%buffer, #add[#bits<64>](%outn, 1), %cond)
+          %p2 = #call meta_expand_store_ref(%buffer, #add[#bits<64>](%outn, 2), %new_body)
+          %after_i = #add[#bits<64>](%i, 3)
+          %has_after = #ult[#bits<64>](%after_i, %count)
+          %else_hit = #if %has_after -> (#bits<1>) {
+            %after = #call ast_child(%group, %after_i)
+            %ekw = #data_addr meta_kw_else
+            %eh = #call meta_node_is_word(%after, %base, %ekw, 4)
+            #yield %eh
+          } else { #yield 0 }
+          #if %else_hit {
+            %else_room = #ule[#bits<64>](#add[#bits<64>](%i, 5), %count)
+            #if %else_room {
+              %else_word = #call ast_child(%group, %after_i)
+              %else_body = #call ast_child(%group, #add[#bits<64>](%i, 4))
+              %ed = #call ast_delim(%else_body)
+              #if #eq[#bits<8>](%ed, 123) {
+                %new_else = #call meta_expand_stmt_group(%else_body)
+                #if #eq[#bits<64>](%new_else, 0) { #break walk(0) }
+                %p3 = #call meta_expand_store_ref(%buffer, #add[#bits<64>](%outn, 3), %else_word)
+                %p4 = #call meta_expand_store_ref(%buffer, #add[#bits<64>](%outn, 4), %new_else)
+                %ci5 = #add[#bits<64>](%i, 5)
+                %co5 = #add[#bits<64>](%outn, 5)
+                %changed5 = #or[#bits<1>](%changed,
+                    #ne[#bits<64>](%new_else, %else_body))
+                %changed6 = #or[#bits<1>](%changed5,
+                    #ne[#bits<64>](%new_body, %body))
+                #continue walk(%ci5, %co5, %changed6)
+              }
+            }
+          }
+          %ci3 = #add[#bits<64>](%i, 3)
+          %co3 = #add[#bits<64>](%outn, 3)
+          %changed3 = #or[#bits<1>](%changed,
+              #ne[#bits<64>](%new_body, %body))
+          #continue walk(%ci3, %co3, %changed3)
+        }
+      }
+      %put0 = #call meta_expand_store_ref(%buffer, %outn, %node)
+      #continue walk(#add[#bits<64>](%i, 1),
+                     #add[#bits<64>](%outn, 1), %changed)
+    } else {
+      // 把 changed 编进最高位，低 63 位保留输出数量。
+      %flag = #if %changed -> (#bits<64>) { #yield 0x8000000000000000 }
+              else { #yield 0 }
+      #break walk(#or[#bits<64>](%flag, %outn))
+    }
+  }
+  %failed = #eq[#bits<64>](%packed, 0)
+  // 空组的 packed=0 是合法未修改；它直接复用输入。
+  %empty = #eq[#bits<64>](%count, 0)
+  %real_fail = #and[#bits<1>](%failed, #eq[#bits<1>](%empty, 0))
+  #if %real_fail {
+    %relf = #call meta_bump_release(%mark)
+    #return 0
+  }
+  %changed_bit = #ne[#bits<64>](#and[#bits<64>](%packed, 0x8000000000000000), 0)
+  %outn2 = #and[#bits<64>](%packed, 0x7FFFFFFFFFFFFFFF)
+  %answer = #if %changed_bit -> (#bits<64>) {
+    %slice2 = #call lain_meta_ast_append_refs(%buffer, %outn2)
+    %new_group = #if #eq[#bits<64>](%slice2, 0) -> (#bits<64>) {
+      #yield 0
+    } else {
+      %delimiter = #call ast_delim(%group)
+      %delimiter64 = #zext[#bits<64>](%delimiter)
+      %made = #call lain_meta_ast_append_group(%delimiter64, %slice2, %outn2, %group)
+      #yield %made
+    }
+    #yield %new_group
+  } else { #yield %group }
+  %rel = #call meta_bump_release(%mark)
+  #return %answer
+}
+
+// 递归深度由 Host 可信计数；失败与回滚都不恢复已经消耗的访问/调用预算。
+#proc meta_expand_stmt_group(%group: #bits<64>) -> #bits<64> {
+  %entered = #call lain_meta_ast_charge(4, 1)
+  #if #ne[#bits<32>](%entered, 0) { #return 0 }
+  %answer = #call meta_expand_stmt_group_inner(%group)
+  %left = #call lain_meta_ast_charge(5, 1)
+  #if #ne[#bits<32>](%left, 0) { #return 0 }
+  #return %answer
+}
+
+// 顶层只把函数体标成 statement context；其它 Group 不盲目递归。
+#proc meta_expand_root(%root: #bits<64>) -> #bits<64> {
+  %count = #call ast_child_count(%root)
+  %mark = #call meta_bump_mark()
+  %off = #call meta_bump_alloc(#mul[#bits<64>](%count, 8))
+  #if #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF) { #return 0 }
+  %scratch = #call lain_meta_scratch_data()
+  %buffer = #lea(%scratch, %off, 1, 0)
+  %base = #call lain_meta_source_data(0)
+  %fkw = #data_addr meta_kw_func
+  %packed = #loop top(%i: #bits<64> = 0, %changed: #bits<1> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %visit = #call lain_meta_ast_charge(1, 1)
+      #if #ne[#bits<32>](%visit, 0) { #break top(0) }
+      %node = #call ast_child(%root, %i)
+      // 函数体位于 `func` 后第 5 格。只在走到 body 自身时替换这个位置，
+      // 不能在 func 位置把关键字替换成 body。
+      %has_prev = #uge[#bits<64>](%i, 5)
+      %candidate = #if %has_prev -> (#bits<1>) {
+        %func_i = #sub[#bits<64>](%i, 5)
+        %func_node = #call ast_child(%root, %func_i)
+        %hit = #call meta_node_is_word(%func_node, %base, %fkw, 4)
+        #yield %hit
+      } else { #yield 0 }
+      %value = #if %candidate -> (#bits<64>) {
+        %d = #call ast_delim(%node)
+        %brace = #eq[#bits<8>](%d, 123)
+        %v = #if %brace -> (#bits<64>) {
+          %expanded = #call meta_expand_stmt_group(%node)
+          #yield %expanded
+        } else { #yield %node }
+        #yield %v
+      } else { #yield %node }
+      #if #eq[#bits<64>](%value, 0) { #break top(0) }
+      %put = #call meta_expand_store_ref(%buffer, %i, %value)
+      %ch = #or[#bits<1>](%changed, #ne[#bits<64>](%value, %node))
+      #continue top(#add[#bits<64>](%i, 1), %ch)
+    } else {
+      %flag = #if %changed -> (#bits<64>) { #yield 0x8000000000000000 }
+              else { #yield 0 }
+      #break top(#or[#bits<64>](%flag, %count))
+    }
+  }
+  %failed = #eq[#bits<64>](%packed, 0)
+  #if %failed {
+    %rf = #call meta_bump_release(%mark)
+    #return 0
+  }
+  %changed = #ne[#bits<64>](#and[#bits<64>](%packed, 0x8000000000000000), 0)
+  %answer = #if %changed -> (#bits<64>) {
+    %slice = #call lain_meta_ast_append_refs(%buffer, %count)
+    %new_root = #if #eq[#bits<64>](%slice, 0) -> (#bits<64>) {
+      #yield 0
+    } else {
+      %made = #call lain_meta_ast_append_group(0, %slice, %count, %root)
+      #yield %made
+    }
+    #yield %new_root
+  } else { #yield %root }
+  %r = #call meta_bump_release(%mark)
+  #return %answer
+}
+
+#proc meta_expand_source(%source: #bits<64>) -> #bits<32> {
+  %tx = #call lain_meta_ast_tx_begin()
+  %old_root = #call meta_root_of(%source)
+  %new_root = #call meta_expand_root(%old_root)
+  %bad = #eq[#bits<64>](%new_root, 0)
+  #if %bad {
+    %rb = #call lain_meta_ast_tx_rollback(%tx)
+    %status = #call lain_meta_status()
+    %zero = #eq[#bits<64>](%status, 0)
+    %code = #if %zero -> (#bits<64>) { #yield 9408 } else { #yield %status }
+    %code32 = #trunc[#bits<32>](%code)
+    %f = #call lain_meta_fail(%code32)
+    #return %code32
+  }
+  %same = #eq[#bits<64>](%new_root, %old_root)
+  %st = #if %same -> (#bits<32>) {
+    %rb2 = #call lain_meta_ast_tx_rollback(%tx)
+    #yield 0
+  } else {
+    %commit = #call lain_meta_ast_commit(%source, %old_root, %new_root, %tx)
+    #yield %commit
+  }
+  #return %st
+}

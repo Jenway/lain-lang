@@ -990,14 +990,43 @@
       %bkind = #call meta_node_kind(%block)
       %isgroup = #eq[#bits<64>](%bkind, 2)
       %inner = #if %isgroup -> (#bits<32>) {
+        // Expand 产出的 my_if 保留 `(cond)` Group。条件先走统一表达式入口，
+        // 结果写入 +168/+176/+184；旧 `if flag` 仍写成同一组结果格。
+        %cd = #call ast_delim(%cond)
+        %paren = #eq[#bits<8>](%cd, 40)
+        %cst = #if %paren -> (#bits<32>) {
+          %ctid = #call meta_type_resolve(%base, %len, %r_t_lo, %r_t_hi)
+          %cmissing = #eq[#bits<64>](%ctid, 0)
+          %ce = #if %cmissing -> (#bits<32>) {
+            %cf = #call lain_meta_fail(5)
+            #yield 5
+          } else {
+            %cinfo = #call meta_tid_repr(%ctid)
+            %ckind = #and[#bits<64>](%cinfo, 255)
+            %cwidth = #and[#bits<64>](#lshr[#bits<64>](%cinfo, 8), 255)
+            %ces = #call meta_emit_expr(%base, %len, %ckind, %cwidth,
+                                       %r_t_lo, %r_t_hi, %cond, 0, 0, 0, 0, 0)
+            #yield %ces
+          }
+          #yield %ce
+        } else {
+          %csc = #call lain_meta_scratch_data()
+          %cr = #call meta_cell_put(#lea(%csc, 168, 1, 0), 0xFFFFFFFFFFFFFFFF)
+          %cl0 = #call meta_node_start(%cond)
+          %ch0 = #add[#bits<64>](%cl0, #call meta_node_len(%cond))
+          %cw0 = #call meta_cell_put(#lea(%csc, 176, 1, 0), %cl0)
+          %cw1 = #call meta_cell_put(#lea(%csc, 184, 1, 0), %ch0)
+          #yield 0
+        }
+        %cbad = #ne[#bits<32>](%cst, 0)
+        #if %cbad { #return %cst }
         %kw = #data_addr meta_st_if
         %w1 = #call lain_meta_emit_write(%kw, 6)
-        %cl = #call meta_node_start(%cond)
-        %ch = #add[#bits<64>](%cl, #call meta_node_len(%cond))
-    %ds8 = #call lain_meta_scratch_data()
-    %dt8 = #call meta_cell_put(#lea(%ds8, 2288, 1, 0), 8)
-    %dh8 = #call meta_cell_put(#lea(%ds8, 2240, 1, 0), %ch)
-    %w2 = #call meta_emit_operand(%base, %cl, %ch, %len)
+        %csc2 = #call lain_meta_scratch_data()
+        %cref = #call meta_cell_get(#lea(%csc2, 168, 1, 0))
+        %cl = #call meta_cell_get(#lea(%csc2, 176, 1, 0))
+        %ch = #call meta_cell_get(#lea(%csc2, 184, 1, 0))
+        %w2 = #call meta_emit_ref2(%base, %len, %cref, %cl, %ch)
         %ob = #data_addr meta_fn_open
         %w3 = #call lain_meta_emit_write(%ob, 3)
         %bst = #call meta_lower_body(%base, %len, %block, %r_t_lo,

@@ -1,0 +1,141 @@
+// `my_if` 的独立语法处理器。它只匹配兄弟序列并返回替换切片；
+// 不直接发射 LAINIR，也不修改 AstIn。请求/结果布局见 lainmeta/expand.h。
+
+data meta_kw_my_if ro { 109 121 95 105 102 }
+data meta_kw_generated_if ro { 105 102 }
+
+#proc meta_expand_result_clear(%result: #addr) -> #bits<32> {
+  %s0 = #call meta_cell_put(%result, 3) // 默认 ERROR，完整写好后再改状态
+  %s1 = #call meta_cell_put(#lea(%result, 8, 1, 0), 0)
+  %s2 = #call meta_cell_put(#lea(%result, 16, 1, 0), 0)
+  %s3 = #call meta_cell_put(#lea(%result, 24, 1, 0), 0)
+  %s4 = #call meta_cell_put(#lea(%result, 32, 1, 0), 9408)
+  %s5 = #call meta_cell_put(#lea(%result, 40, 1, 0), 0)
+  #return 0
+}
+
+#proc meta_expand_result_error(%result: #addr,
+                               %diagnostic: #bits<64>) -> #bits<32> {
+  %s0 = #call meta_cell_put(%result, 3)
+  %s1 = #call meta_cell_put(#lea(%result, 8, 1, 0), 0)
+  %s2 = #call meta_cell_put(#lea(%result, 16, 1, 0), 0)
+  %s3 = #call meta_cell_put(#lea(%result, 24, 1, 0), 0)
+  %s4 = #call meta_cell_put(#lea(%result, 32, 1, 0), %diagnostic)
+  %s5 = #call meta_cell_put(#lea(%result, 40, 1, 0), 0)
+  #return 0
+}
+
+// ABI：执行成功返回 0；匹配结果写入 result。这里只接受 STMT context=2。
+#proc meta_expand_my_if(%request: #addr, %result: #addr) -> #bits<32> {
+  %clear = #call meta_expand_result_clear(%result)
+  %abi = #call meta_cell_get(%request)
+  %parent = #call meta_cell_get(#lea(%request, 8, 1, 0))
+  %cursor = #call meta_cell_get(#lea(%request, 16, 1, 0))
+  %context = #call meta_cell_get(#lea(%request, 40, 1, 0))
+  %abi_ok = #eq[#bits<64>](%abi, 1)
+  %ctx_ok = #eq[#bits<64>](%context, 2)
+  %head = #call ast_child(%parent, %cursor)
+  %dummy = #call lain_meta_source_data(0)
+  %kw = #data_addr meta_kw_my_if
+  %name_ok = #call meta_node_is_word(%head, %dummy, %kw, 5)
+  %a0 = #and[#bits<1>](%abi_ok, %ctx_ok)
+  %matched = #and[#bits<1>](%a0, %name_ok)
+  %not_matched = #eq[#bits<1>](%matched, 0)
+  #if %not_matched {
+    // 处理器只会由绑定分派命中；不匹配仍按协议返回 NO_MATCH。
+    %z0 = #call meta_cell_put(%result, 0)
+    %z1 = #call meta_cell_put(#lea(%result, 32, 1, 0), 0)
+    #return 0
+  }
+
+  %count = #call ast_child_count(%parent)
+  %need = #add[#bits<64>](%cursor, 3)
+  %enough = #ule[#bits<64>](%need, %count)
+  #if #eq[#bits<1>](%enough, 0) {
+    %e0 = #call meta_expand_result_error(%result, 9409)
+    #return 0
+  }
+  %cond = #call ast_child(%parent, #add[#bits<64>](%cursor, 1))
+  %body = #call ast_child(%parent, #add[#bits<64>](%cursor, 2))
+  %cd = #call ast_delim(%cond)
+  %bd = #call ast_delim(%body)
+  %cond_ok = #eq[#bits<8>](%cd, 40)
+  %body_ok = #eq[#bits<8>](%bd, 123)
+  %shape = #and[#bits<1>](%cond_ok, %body_ok)
+  #if #eq[#bits<1>](%shape, 0) {
+    %e1 = #call meta_expand_result_error(%result, 9409)
+    #return 0
+  }
+
+  %after_i = #add[#bits<64>](%cursor, 3)
+  %has_after = #ult[#bits<64>](%after_i, %count)
+  %has_else = #if %has_after -> (#bits<1>) {
+    %after = #call ast_child(%parent, %after_i)
+    %ekw = #data_addr meta_kw_else
+    %hit = #call meta_node_is_word(%after, %dummy, %ekw, 4)
+    #yield %hit
+  } else {
+    #yield 0
+  }
+  %consumed = #if %has_else -> (#bits<64>) {
+    %else_end = #add[#bits<64>](%cursor, 5)
+    %else_room = #ule[#bits<64>](%else_end, %count)
+    #if #eq[#bits<1>](%else_room, 0) {
+      %e2 = #call meta_expand_result_error(%result, 9409)
+      #return 0
+    }
+    %else_body = #call ast_child(%parent, #add[#bits<64>](%cursor, 4))
+    %ed = #call ast_delim(%else_body)
+    %else_ok = #eq[#bits<8>](%ed, 123)
+    #if #eq[#bits<1>](%else_ok, 0) {
+      %e3 = #call meta_expand_result_error(%result, 9409)
+      #return 0
+    }
+    #yield 5
+  } else {
+    #yield 3
+  }
+
+  %mark = #call meta_bump_mark()
+  %bytes = #mul[#bits<64>](%consumed, 8)
+  %off = #call meta_bump_alloc(%bytes)
+  %bad_alloc = #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF)
+  #if %bad_alloc {
+    %e4 = #call meta_expand_result_error(%result, 9410)
+    #return 0
+  }
+  %scratch = #call lain_meta_scratch_data()
+  %refs = #lea(%scratch, %off, 1, 0)
+  %if_text = #data_addr meta_kw_generated_if
+  %if_node = #call lain_meta_ast_append_token(%if_text, 2, %head)
+  #if #eq[#bits<64>](%if_node, 0) {
+    %release0 = #call meta_bump_release(%mark)
+    %status0 = #call lain_meta_status()
+    %code0 = #trunc[#bits<32>](%status0)
+    #return %code0
+  }
+  %r0 = #call meta_cell_put(%refs, %if_node)
+  %r1 = #call meta_cell_put(#lea(%refs, 8, 1, 0), %cond)
+  %r2 = #call meta_cell_put(#lea(%refs, 16, 1, 0), %body)
+  #if %has_else {
+    %else_word = #call ast_child(%parent, #add[#bits<64>](%cursor, 3))
+    %else_body2 = #call ast_child(%parent, #add[#bits<64>](%cursor, 4))
+    %r3 = #call meta_cell_put(#lea(%refs, 24, 1, 0), %else_word)
+    %r4 = #call meta_cell_put(#lea(%refs, 32, 1, 0), %else_body2)
+  }
+  %slice = #call lain_meta_ast_append_refs(%refs, %consumed)
+  #if #eq[#bits<64>](%slice, 0) {
+    %release1 = #call meta_bump_release(%mark)
+    %status1 = #call lain_meta_status()
+    %code1 = #trunc[#bits<32>](%status1)
+    #return %code1
+  }
+  %release = #call meta_bump_release(%mark)
+  %s0 = #call meta_cell_put(%result, 1)
+  %s1 = #call meta_cell_put(#lea(%result, 8, 1, 0), %consumed)
+  %s2 = #call meta_cell_put(#lea(%result, 16, 1, 0), %slice)
+  %s3 = #call meta_cell_put(#lea(%result, 24, 1, 0), %consumed)
+  %s4 = #call meta_cell_put(#lea(%result, 32, 1, 0), 0)
+  %s5 = #call meta_cell_put(#lea(%result, 40, 1, 0), 0)
+  #return 0
+}
