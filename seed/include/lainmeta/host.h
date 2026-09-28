@@ -61,7 +61,7 @@ void lainmeta_host_free(LainMetaHost *host);
 
 /* 第二期物理服务：在 TCB 启动前一次配置，Arena 及可信副本均计入配额。
  * 驱动将 view.data 按完整 capacity 映射 RW；used 仍是宿主权威水位。
- * 必须在 register 之前配置；不配置时不登记八项写树/预算能力，
+ * 必须在 register 之前配置；不配置时不登记写树、预算及展开旁表能力，
  * 第一期开出的只读能力集合保持不变。 */
 uint32_t lainmeta_host_enable_ast_out(LainMetaHost *, const LainExpandLimits *);
 bool lainmeta_host_ast_out(const LainMetaHost *, LainAstArenaView *);

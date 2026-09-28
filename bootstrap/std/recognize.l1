@@ -179,11 +179,14 @@
   } else {
     #yield %stmt_binding
   }
-  // 段号 3 是任务 AstOut。当前第二期只使用 expansion_id=1；这里先把生成来源
-  // 真正落入旁表。每次展开的唯一卫生 ID 仍留给后续批次。
+  // Host 的事务旁车按 AstOut 节点槽保存处理器调用 ID。AstIn 不需要这项输出能力，
+  // 第一阶段只读消费者因此仍能运行。
   %segment = #lshr[#bits<64>](%i, 48)
-  %generated = #eq[#bits<64>](%segment, 3)
-  %expansion = #if %generated -> (#bits<64>) { #yield 1 } else { #yield 0 }
+  %is_out = #eq[#bits<64>](%segment, 3)
+  %expansion = #if %is_out -> (#bits<64>) {
+    %eid = #call lain_meta_ast_expansion_id(%i)
+    #yield %eid
+  } else { #yield 0 }
   %s = #call meta_sem_put_annotated(%parent, %index, %form, %binding, %expansion)
   #return %s
 }
@@ -206,8 +209,11 @@
       // 会有两条互不覆盖的条目。
       %r = #if %is_group -> (#bits<32>) {
         %segment = #lshr[#bits<64>](%c, 48)
-        %generated = #eq[#bits<64>](%segment, 3)
-        %expansion = #if %generated -> (#bits<64>) { #yield 1 } else { #yield 0 }
+        %is_out = #eq[#bits<64>](%segment, 3)
+        %expansion = #if %is_out -> (#bits<64>) {
+          %eid = #call lain_meta_ast_expansion_id(%c)
+          #yield %eid
+        } else { #yield 0 }
         %rec = #call meta_sem_put_annotated(%group, %i, 2, 0, %expansion)
         #if #ne[#bits<32>](%rec, 0) {
           #return %rec

@@ -13,6 +13,7 @@ struct LainAstOutput {
   LainAstArenaHeader header;
   Transaction *transactions;
   Slice *slices;
+  uint64_t *expansion_ids;
   uint64_t depth, next_id, slice_count, visits, handler_calls;
   uint64_t replacement_refs, expansion_depth, charged;
   LainExpandLimits limits;
@@ -86,6 +87,9 @@ LainAstOutput *lain_ast_output_new(const LainExpandLimits *l, LainVmQuota *q,
   if (l->ast_out_capacity / 8 > (UINT64_MAX - storage) / sizeof(Slice))
     return NULL;
   storage += l->ast_out_capacity / 8 * sizeof(Slice);
+  if (l->ast_out_node_capacity > (UINT64_MAX - storage) / sizeof(uint64_t))
+    return NULL;
+  storage += l->ast_out_node_capacity * sizeof(uint64_t);
   if (sizeof(*o) > UINT64_MAX - storage) return NULL;
   storage += sizeof(*o);
   *error = (uint32_t)lainvm_quota_charge(q, storage);
@@ -96,10 +100,12 @@ LainAstOutput *lain_ast_output_new(const LainExpandLimits *l, LainVmQuota *q,
     o->trusted = calloc(1, (size_t)l->ast_out_capacity);
     o->transactions = calloc((size_t)l->max_depth, sizeof(Transaction));
     o->slices = calloc((size_t)(l->ast_out_capacity / 8), sizeof(Slice));
+    o->expansion_ids = calloc((size_t)l->ast_out_node_capacity, sizeof(uint64_t));
   }
-  if (!o || !o->data || !o->trusted || !o->transactions || !o->slices) {
+  if (!o || !o->data || !o->trusted || !o->transactions || !o->slices ||
+      !o->expansion_ids) {
     if (o) { free(o->data); free(o->trusted); free(o->transactions);
-             free(o->slices); free(o); }
+             free(o->slices); free(o->expansion_ids); free(o); }
     (void)lainvm_quota_release(q, storage);
     *error = 2;
     return NULL;
@@ -115,6 +121,7 @@ LainAstOutput *lain_ast_output_new(const LainExpandLimits *l, LainVmQuota *q,
 void lain_ast_output_free(LainAstOutput *o) {
   if (!o) return;
   free(o->data); free(o->trusted); free(o->transactions); free(o->slices);
+  free(o->expansion_ids);
   (void)lainvm_quota_release(o->quota, o->charged);
   free(o);
 }
@@ -159,6 +166,8 @@ uint32_t lain_ast_output_rollback(LainAstOutput *o, uint64_t id) {
   at = 64 + t.count * 56; len = (o->header.node_count - t.count) * 56;
   memset(o->data + at, 0, (size_t)len);
   memset(o->trusted + at, 0, (size_t)len);
+  memset(o->expansion_ids + t.count, 0,
+         (size_t)(o->header.node_count - t.count) * sizeof(uint64_t));
   len = o->header.used_bytes - t.tail;
   memset(o->data + t.tail, 0, (size_t)len);
   memset(o->trusted + t.tail, 0, (size_t)len);
@@ -197,14 +206,18 @@ static void write_bytes(LainAstOutput *o, uint64_t at, const void *p, uint64_t n
   memcpy(o->trusted + at, p, (size_t)n);
   memcpy(o->data + at, o->trusted + at, (size_t)n);
 }
-static void write_node(LainAstOutput *o, const LainAstNode *n, LainAstRef *ref) {
-  uint64_t at = 64 + o->header.node_count++ * 56;
+static void write_node(LainAstOutput *o, const LainAstNode *n,
+                       uint64_t expansion_id, LainAstRef *ref) {
+  uint64_t index = o->header.node_count++;
+  uint64_t at = 64 + index * 56;
   write_bytes(o, at, n, sizeof(*n));
+  o->expansion_ids[index] = expansion_id;
   *ref = lain_ast_ref(3, at);
   publish(o);
 }
 uint32_t lain_ast_output_token(LainAstOutput *o, const void *text, uint64_t len,
-                              LainAstRef origin, LainAstRef *out) {
+                              LainAstRef origin, uint64_t expansion_id,
+                              LainAstRef *out) {
   uint64_t at;
   LainAstNode n;
   uint32_t rc;
@@ -217,7 +230,7 @@ uint32_t lain_ast_output_token(LainAstOutput *o, const void *text, uint64_t len,
   n.text_length = len;
   write_bytes(o, at, text, len);
   o->header.used_bytes = at + len;
-  write_node(o, &n, out);
+  write_node(o, &n, expansion_id, out);
   return 0;
 }
 uint32_t lain_ast_output_refs(LainAstOutput *o, const LainAstRef *refs,
@@ -247,7 +260,8 @@ uint32_t lain_ast_output_refs(LainAstOutput *o, const LainAstRef *refs,
 }
 uint32_t lain_ast_output_group(LainAstOutput *o, uint64_t delimiter,
                               LainAstRef slice, uint64_t count,
-                              LainAstRef origin, LainAstRef *out) {
+                              LainAstRef origin, uint64_t expansion_id,
+                              LainAstRef *out) {
   uint64_t at, i;
   LainAstNode n;
   uint32_t rc;
@@ -271,7 +285,27 @@ uint32_t lain_ast_output_group(LainAstOutput *o, uint64_t delimiter,
   n.kind = LAIN_AST_GROUP; n.delimiter = (uint8_t)delimiter;
   n.child_count = (uint32_t)count;
   n.children_offset = count ? lain_ast_offset(slice) : 0;
-  write_node(o, &n, out);
+  write_node(o, &n, expansion_id, out);
+  return 0;
+}
+
+uint32_t lain_ast_output_expansion(LainAstOutput *o, LainAstRef ref,
+                                   uint64_t *out) {
+  uint64_t off, index;
+  uint32_t rc;
+  if (!out) return LAIN_AST_ERR_PROTOCOL;
+  *out = 0;
+  if (!o || lain_ast_segment(ref) != LAIN_AST_OUT)
+    return LAIN_AST_ERR_SEGMENT;
+  off = lain_ast_offset(ref);
+  if (off < LAIN_AST_HEADER_SIZE ||
+      (off - LAIN_AST_HEADER_SIZE) % LAIN_AST_NODE_STRIDE != 0)
+    return LAIN_AST_ERR_SLOT;
+  index = (off - LAIN_AST_HEADER_SIZE) / LAIN_AST_NODE_STRIDE;
+  if (index >= o->header.node_count) return LAIN_AST_ERR_SLOT;
+  rc = lain_ast_output_check(o, off, LAIN_AST_NODE_STRIDE);
+  if (rc) return rc;
+  *out = o->expansion_ids[index];
   return 0;
 }
 uint32_t lain_ast_output_commit(LainAstOutput *o, uint64_t id, LainAstRef root) {
