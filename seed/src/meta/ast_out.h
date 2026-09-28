@@ -16,10 +16,11 @@ uint32_t lain_ast_output_begin(LainAstOutput *, uint64_t *);
 uint32_t lain_ast_output_release(LainAstOutput *, uint64_t);
 uint32_t lain_ast_output_rollback(LainAstOutput *, uint64_t);
 uint32_t lain_ast_output_token(LainAstOutput *, const void *, uint64_t,
-                              LainAstRef, LainAstRef *);
+                              LainAstRef, uint64_t, LainAstRef *);
 uint32_t lain_ast_output_refs(LainAstOutput *, const LainAstRef *, uint64_t,
                              LainAstRef *);
 uint32_t lain_ast_output_group(LainAstOutput *, uint64_t, LainAstRef, uint64_t,
-                              LainAstRef, LainAstRef *);
+                              LainAstRef, uint64_t, LainAstRef *);
 uint32_t lain_ast_output_commit(LainAstOutput *, uint64_t, LainAstRef);
+uint32_t lain_ast_output_expansion(LainAstOutput *, LainAstRef, uint64_t *);
 #endif

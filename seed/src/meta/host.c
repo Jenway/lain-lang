@@ -1540,11 +1540,11 @@ static uint32_t cap_ast_append_token(void *context, const uint64_t *args,
                                     uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
   LainAstRef ref = 0;
-  uint32_t rc = output_entry(host, args, count, 3, out);
+  uint32_t rc = output_entry(host, args, count, 4, out);
   if (!rc && !host_range_readable(host, (uintptr_t)args[0], args[1]))
     rc = LAINMETA_ERR_DENIED;
   if (!rc) rc = lain_ast_output_token(host->ast_out, (const void *)(uintptr_t)args[0],
-                                    args[1], args[2], &ref);
+                                    args[1], args[2], args[3], &ref);
   return output_ref_result(host, rc, ref, out);
 }
 static uint32_t cap_ast_append_refs(void *context, const uint64_t *args,
@@ -1563,10 +1563,28 @@ static uint32_t cap_ast_append_group(void *context, const uint64_t *args,
                                     uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
   LainAstRef ref = 0;
-  uint32_t rc = output_entry(host, args, count, 4, out);
+  uint32_t rc = output_entry(host, args, count, 5, out);
   if (!rc) rc = lain_ast_output_group(host->ast_out, args[0], args[1],
-                                    args[2], args[3], &ref);
+                                    args[2], args[3], args[4], &ref);
   return output_ref_result(host, rc, ref, out);
+}
+static uint32_t cap_ast_expansion_id(void *context, const uint64_t *args,
+                                    uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  uint64_t value = 0;
+  uint32_t rc = output_entry(host, args, count, 1, out);
+  if (!rc) {
+    if (lain_ast_segment(args[0]) == LAIN_AST_OUT)
+      rc = lain_ast_output_expansion(host->ast_out, args[0], &value);
+    else {
+      LainAstNode node;
+      LainAstArenaView view;
+      LainAstArenaHeader header;
+      if (!node_read(host, args[0], &view, &header, &node, NULL))
+        rc = host->status;
+    }
+  }
+  return output_result(host, rc, value, out);
 }
 static uint32_t cap_ast_commit(void *context, const uint64_t *args,
                               uint32_t count, uint64_t *out) {
@@ -1631,6 +1649,7 @@ static const MetaCapability k_output_capabilities[] = {
     {"lain_meta_ast_append_token", cap_ast_append_token},
     {"lain_meta_ast_append_refs", cap_ast_append_refs},
     {"lain_meta_ast_append_group", cap_ast_append_group},
+    {"lain_meta_ast_expansion_id", cap_ast_expansion_id},
     {"lain_meta_ast_commit", cap_ast_commit},
 };
 
