@@ -118,6 +118,45 @@ data meta_syntax_state rw { 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 }
   #return %handler
 }
 
+// recognize 同时需要 handler 与 binding。一次扫描返回高 32 位 binding_id、低 32 位
+// handler，避免为每个词重复做 Token 文本比较。
+#proc meta_syntax_match_at_scope(%node: #bits<64>, %env: #bits<64>,
+                                 %scope: #bits<64>,
+                                 %context: #bits<64>) -> #bits<64> {
+  %count = #call meta_syntax_state_get(8)
+  %match = #loop find(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %e = #call meta_syntax_entry(%i)
+      %id = #call meta_cell_get(%e)
+      %ee = #call meta_cell_get(#lea(%e, 8, 1, 0))
+      %name_ref = #call meta_cell_get(#lea(%e, 16, 1, 0))
+      %name_len = #call meta_cell_get(#lea(%e, 24, 1, 0))
+      %ec = #call meta_cell_get(#lea(%e, 32, 1, 0))
+      %eh = #call meta_cell_get(#lea(%e, 40, 1, 0))
+      %es = #call meta_cell_get(#lea(%e, 48, 1, 0))
+      %env_ok = #eq[#bits<64>](%ee, %env)
+      %ctx_ok = #eq[#bits<64>](%ec, %context)
+      %scope_ok = #eq[#bits<64>](%es, %scope)
+      %m0 = #and[#bits<1>](%env_ok, %ctx_ok)
+      %eligible = #and[#bits<1>](%m0, %scope_ok)
+      %hit = #if %eligible -> (#bits<1>) {
+        %name = #call ast_text_addr(%name_ref)
+        %dummy = #call lain_meta_source_data(0)
+        %same = #call meta_node_is_word(%node, %dummy, %name, %name_len)
+        #yield %same
+      } else { #yield 0 }
+      #if %hit {
+        %id_hi = #shl[#bits<64>](%id, 32)
+        %packed = #or[#bits<64>](%id_hi, %eh)
+        #break find(%packed)
+      }
+      #continue find(#add[#bits<64>](%i, 1))
+    } else { #break find(0) }
+  }
+  #return %match
+}
+
 // 同一名字/上下文/作用域只登记一次。第一次遇到的 Token 成为名字实体；其生命周期
 // 由 AstIn 或已经提交的 AstOut 保证，表中只保存引用。
 #proc meta_syntax_ensure(%node: #bits<64>, %context: #bits<64>,
@@ -189,6 +228,18 @@ data meta_syntax_state rw { 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 }
                                 #eq[#bits<64>](%local, 0))
   %answer = #if %need_global -> (#bits<64>) {
     %global = #call meta_syntax_lookup_at_scope(%node, %env, 0, %context)
+    #yield %global
+  } else { #yield %local }
+  #return %answer
+}
+
+#proc meta_syntax_match(%node: #bits<64>, %env: #bits<64>,
+                        %scope: #bits<64>, %context: #bits<64>) -> #bits<64> {
+  %local = #call meta_syntax_match_at_scope(%node, %env, %scope, %context)
+  %need_global = #and[#bits<1>](#ne[#bits<64>](%scope, 0),
+                                #eq[#bits<64>](%local, 0))
+  %answer = #if %need_global -> (#bits<64>) {
+    %global = #call meta_syntax_match_at_scope(%node, %env, 0, %context)
     #yield %global
   } else { #yield %local }
   #return %answer

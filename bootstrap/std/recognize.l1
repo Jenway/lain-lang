@@ -74,8 +74,10 @@
   %hi = #add[#bits<64>](%at, %n)
 
   // 语言关键字由语法环境拥有；recognize 只把处理器类别映射到旧旁表 form。
-  %decl_handler = #call meta_syntax_lookup(%i, 1, 0, 1)
-  %stmt_handler = #call meta_syntax_lookup(%i, 1, 0, 2)
+  %decl_match = #call meta_syntax_match(%i, 1, 0, 1)
+  %stmt_match = #call meta_syntax_match(%i, 1, 0, 2)
+  %decl_handler = #and[#bits<64>](%decl_match, 0xFFFFFFFF)
+  %stmt_handler = #and[#bits<64>](%stmt_match, 0xFFFFFFFF)
   %is_decl = #and[#bits<1>](#uge[#bits<64>](%decl_handler, 2),
                             #ule[#bits<64>](%decl_handler, 7))
   %is_ret = #eq[#bits<64>](%stmt_handler, 8)
@@ -169,7 +171,20 @@
     }
     #yield %f2
   }
-  %s = #call meta_sem_put(%parent, %index, %form)
+  // 声明上下文优先；若不是声明，再记录 statement 绑定。普通标识符和表达式词为 0。
+  %decl_binding = #lshr[#bits<64>](%decl_match, 32)
+  %stmt_binding = #lshr[#bits<64>](%stmt_match, 32)
+  %binding = #if #ne[#bits<64>](%decl_handler, 0) -> (#bits<64>) {
+    #yield %decl_binding
+  } else {
+    #yield %stmt_binding
+  }
+  // 段号 3 是任务 AstOut。当前第二期只使用 expansion_id=1；这里先把生成来源
+  // 真正落入旁表。每次展开的唯一卫生 ID 仍留给后续批次。
+  %segment = #lshr[#bits<64>](%i, 48)
+  %generated = #eq[#bits<64>](%segment, 3)
+  %expansion = #if %generated -> (#bits<64>) { #yield 1 } else { #yield 0 }
+  %s = #call meta_sem_put_annotated(%parent, %index, %form, %binding, %expansion)
   #return %s
 }
 
@@ -190,7 +205,10 @@
       // 键是 (父组, 下标) —— 出现位置，不是节点引用；同一个组节点出现在两个父组里
       // 会有两条互不覆盖的条目。
       %r = #if %is_group -> (#bits<32>) {
-        %rec = #call meta_sem_put(%group, %i, 2)
+        %segment = #lshr[#bits<64>](%c, 48)
+        %generated = #eq[#bits<64>](%segment, 3)
+        %expansion = #if %generated -> (#bits<64>) { #yield 1 } else { #yield 0 }
+        %rec = #call meta_sem_put_annotated(%group, %i, 2, 0, %expansion)
         #if #ne[#bits<32>](%rec, 0) {
           #return %rec
         }

@@ -489,9 +489,11 @@
 
 // 写入一条。同键重复写要**覆盖**（规范 §2.2：更新未提交版本），不能追加 —— 否则
 // 表会被同一条词撑爆。写入的是 (父组, 下标, 环境, 作用域, 上下文) → 形状。
-#proc meta_sem_put_key(%parent: #bits<64>, %index: #bits<64>,
-                        %env: #bits<64>, %scope: #bits<64>,
-                        %ctx: #bits<64>, %form: #bits<64>) -> #bits<32> {
+#proc meta_sem_put_full_key(%parent: #bits<64>, %index: #bits<64>,
+                            %env: #bits<64>, %scope: #bits<64>,
+                            %ctx: #bits<64>, %form: #bits<64>,
+                            %binding: #bits<64>,
+                            %expansion: #bits<64>) -> #bits<32> {
   %scratch = #call lain_meta_scratch_data()
   %hit = #call sem_find(%scratch, %parent, %index, %env, %scope, %ctx)
   %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
@@ -501,8 +503,8 @@
     %cap = #call sem_cap_get(%scratch)
     %room = #ult[#bits<64>](%n, %cap)
     %w = #if %room -> (#bits<32>) {
-      // 追加：键的五个字段 + 形状（+48）一起写进去，其余字段（binding / type_id /
-      // expansion_id）归 0。**这几行是必需的副作用**，第 38 轮那条含 `meta_cell_put`
+      // 追加：键、binding、形状和 expansion 一次写完；type_id 暂为 0。
+      // **这几行是必需的副作用**，第 38 轮那条含 `meta_cell_put`
       // 的正则把它们误删过一次，症状是「计数器照涨、条目却全空」。
       %off2 = #mul[#bits<64>](%n, 72)
       %e2 = #add[#bits<64>](%base, %off2)
@@ -512,10 +514,10 @@
       %s3 = #call meta_cell_put(#lea(%cell2, 16, 1, 0), %env)
       %s4 = #call meta_cell_put(#lea(%cell2, 24, 1, 0), %scope)
       %s5 = #call meta_cell_put(#lea(%cell2, 32, 1, 0), %ctx)
-      %s6 = #call meta_cell_put(#lea(%cell2, 40, 1, 0), 0)
+      %s6 = #call meta_cell_put(#lea(%cell2, 40, 1, 0), %binding)
       %s7 = #call meta_cell_put(#lea(%cell2, 48, 1, 0), %form)
       %s8 = #call meta_cell_put(#lea(%cell2, 56, 1, 0), 0)
-      %s9 = #call meta_cell_put(#lea(%cell2, 64, 1, 0), 0)
+      %s9 = #call meta_cell_put(#lea(%cell2, 64, 1, 0), %expansion)
       %n2 = #add[#bits<64>](%n, 1)
       %s10 = #call sem_count_put(%scratch, %n2)
       #yield 0
@@ -525,21 +527,86 @@
     }
     #yield %w
   } else {
-    // 命中：键不变，只更新形状那一格。
+    // 命中：键不变，同行更新形状、binding 与 expansion。
     %base3 = #call sem_base_get(%scratch)
     %off3 = #mul[#bits<64>](%hit, 72)
     %e3 = #add[#bits<64>](%base3, %off3)
     %cell3 = #lea(%scratch, %e3, 1, 0)
+    %s10b = #call meta_cell_put(#lea(%cell3, 40, 1, 0), %binding)
     %s11 = #call meta_cell_put(#lea(%cell3, 48, 1, 0), %form)
+    %s12 = #call meta_cell_put(#lea(%cell3, 64, 1, 0), %expansion)
     #yield 0
   }
   #return %r
+}
+
+#proc meta_sem_put_key(%parent: #bits<64>, %index: #bits<64>,
+                       %env: #bits<64>, %scope: #bits<64>,
+                       %ctx: #bits<64>, %form: #bits<64>) -> #bits<32> {
+  %v = #call meta_sem_put_full_key(%parent, %index, %env, %scope, %ctx, %form, 0, 0)
+  #return %v
 }
 
 // 第一期识别 pass 的入口：键的环境/作用域/上下文都是 0。
 #proc meta_sem_put(%parent: #bits<64>, %index: #bits<64>,
                     %form: #bits<64>) -> #bits<32> {
   %v = #call meta_sem_put_key(%parent, %index, 0, 0, 0, %form)
+  #return %v
+}
+
+#proc meta_sem_put_annotated(%parent: #bits<64>, %index: #bits<64>,
+                             %form: #bits<64>, %binding: #bits<64>,
+                             %expansion: #bits<64>) -> #bits<32> {
+  %v = #call meta_sem_put_full_key(%parent, %index, 0, 0, 0, %form,
+                                   %binding, %expansion)
+  #return %v
+}
+
+// 给已经存在的语义条目补上语法所有权和展开来源。两者都属于出现位置，不能写回
+// 只读 AstIn，也不能挂在可能被多个父组复用的节点身份上。
+#proc meta_sem_annotate(%parent: #bits<64>, %index: #bits<64>,
+                        %binding: #bits<64>,
+                        %expansion: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data()
+  %hit = #call sem_find(%scratch, %parent, %index, 0, 0, 0)
+  %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
+  #if %miss { #return 4 }
+  %base = #call sem_base_get(%scratch)
+  %off = #mul[#bits<64>](%hit, 72)
+  %entry = #add[#bits<64>](%base, %off)
+  %cell = #lea(%scratch, %entry, 1, 0)
+  %w0 = #call meta_cell_put(#lea(%cell, 40, 1, 0), %binding)
+  %w1 = #call meta_cell_put(#lea(%cell, 64, 1, 0), %expansion)
+  #return 0
+}
+
+#proc meta_sem_binding(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data()
+  %hit = #call sem_find(%scratch, %parent, %index, 0, 0, 0)
+  %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
+  %v = #if %miss -> (#bits<64>) { #yield 0 } else {
+    %base = #call sem_base_get(%scratch)
+    %off = #mul[#bits<64>](%hit, 72)
+    %entry = #add[#bits<64>](%base, %off)
+    %cell = #lea(%scratch, %entry, 1, 0)
+    %value = #call meta_cell_get(#lea(%cell, 40, 1, 0))
+    #yield %value
+  }
+  #return %v
+}
+
+#proc meta_sem_expansion(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data()
+  %hit = #call sem_find(%scratch, %parent, %index, 0, 0, 0)
+  %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
+  %v = #if %miss -> (#bits<64>) { #yield 0 } else {
+    %base = #call sem_base_get(%scratch)
+    %off = #mul[#bits<64>](%hit, 72)
+    %entry = #add[#bits<64>](%base, %off)
+    %cell = #lea(%scratch, %entry, 1, 0)
+    %value = #call meta_cell_get(#lea(%cell, 64, 1, 0))
+    #yield %value
+  }
   #return %v
 }
 
