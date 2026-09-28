@@ -6,6 +6,7 @@
  * Meta 的业务参数里没有它，也无法指定或伪造宿主。 */
 #include "lainmeta/host.h"
 #include "lainmeta/tree.h"
+#include "ast_out.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,7 @@ typedef struct {
    * 6/7、……。按**注册顺序**发号，不按宿主地址排序；编号不回收、不复用。 */
   uint16_t source_segment;
   uint16_t tree_segment;
+  LainAstRef current_root;
 } LainMetaSource;
 
 /* 一份源码最多能拿到的下标：段号是 16 位，额外源码第 i 份的 AstIn 段号是
@@ -72,6 +74,7 @@ _Static_assert(sizeof(LainMetaTypeInfo) == 64,
                "Meta 类型摘要必须占八个 64 位字");
 
 struct LainMetaHost {
+  LainAstOutput *ast_out;
   LainMetaSource *sources;
   uint32_t source_count;
   uint32_t source_cap;
@@ -381,6 +384,8 @@ static void publish_scratch_header(LainMetaHost *host) {
         source < host->source_count) {
       LainAstArenaView view;
       if (lainmeta_host_arena(host, source, &view)) value = view.root;
+      if (host->sources[source].current_root)
+        value = host->sources[source].current_root;
       size = host->sources[source].tree
                  ? (uint64_t)host->sources[source].length
                  : 0;
@@ -401,6 +406,7 @@ static void publish_scratch_header(LainMetaHost *host) {
     LainAstArenaView view;
     uint64_t root = 0;
     if (lainmeta_host_arena(host, i, &view)) root = view.root;
+    if (host->sources[i].current_root) root = host->sources[i].current_root;
     memcpy(base + roots_at + (uint64_t)i * 8u, &root, 8u);
   }
 }
@@ -439,6 +445,7 @@ void *lainmeta_host_scratch(LainMetaHost *host, uint32_t *size_out) {
 void lainmeta_host_free(LainMetaHost *host) {
   uint32_t i;
   if (!host) return;
+  lain_ast_output_free(host->ast_out);
   /* 退出顺序由驱动保证：先销毁引用这些段的 TCB、再撤销映射，最后才销毁宿主。 */
   for (i = 0; i < host->source_count; i++) {
     lainmeta_tree_free(host->sources[i].tree);
@@ -1017,6 +1024,7 @@ static uint32_t cap_eval_width(void *context, const uint64_t *args,
  * 由调用方记 9401。 */
 static bool segment_view(LainMetaHost *host, uint16_t id,
                          LainAstArenaView *out) {
+  if (id == LAIN_AST_OUT) return lain_ast_output_view(host->ast_out, out);
   const LainMetaSegment *segment = segment_find(host, id);
   if (!segment || !segment->live || segment->kind != LAIN_SEGMENT_AST)
     return false;
@@ -1060,6 +1068,10 @@ static bool header_read(LainMetaHost *host, const unsigned char *base,
                         LainAstArenaHeader *out) {
   if (!base || window < LAIN_AST_HEADER_SIZE) return false;
   if (!host_read_ok(host, (uintptr_t)base, LAIN_AST_HEADER_SIZE)) return false;
+  if (segment_id == LAIN_AST_OUT) {
+    uint32_t rc = lain_ast_output_check(host->ast_out, 0, 64);
+    if (rc) { host_set_status(host, rc); return false; }
+  }
   return header_ok_trusted(base, window, segment_id, out);
 }
 
@@ -1133,7 +1145,7 @@ static bool node_read(LainMetaHost *host, LainAstRef ref, LainAstArenaView *view
   base = (const unsigned char *)view->data;
   /* 未绑定 VSpace、或 Header 那 64 字节不在授权 READ 范围内 → 拒，连字段都不看。 */
   if (!header_read(host, base, view->capacity, id, header)) {
-    if (host->status == LAINMETA_ERR_DENIED) return false;
+    if (host->status == LAINMETA_ERR_DENIED || id == LAIN_AST_OUT) return false;
     host_set_status(host, LAIN_AST_ERR_HEADER);
     return false;
   }
@@ -1158,6 +1170,10 @@ static bool node_read(LainMetaHost *host, LainAstRef ref, LainAstArenaView *view
   if (!host_read_ok(host, (uintptr_t)base + (uintptr_t)off,
                     LAIN_AST_NODE_STRIDE))
     return false;
+  if (id == LAIN_AST_OUT) {
+    uint32_t rc = lain_ast_output_check(host->ast_out, off, 56);
+    if (rc) { host_set_status(host, rc); return false; }
+  }
   memcpy(out, base + off, sizeof(*out));
   if (offset_out) *offset_out = off;
   return true;
@@ -1206,6 +1222,22 @@ bool lainmeta_host_ast_span_addr(LainMetaHost *host, LainAstRef ref,
   }
   id = lain_ast_segment(ref);
   off = lain_ast_offset(ref);
+  if (id == LAIN_AST_OUT) {
+    LainAstArenaView v;
+    uint32_t rc;
+    if (!lain_ast_output_view(host->ast_out, &v)) {
+      host_set_status(host, LAIN_AST_ERR_SEGMENT); return false;
+    }
+    if (off > v.used || length > v.used - off) {
+      host_set_status(host, LAIN_AST_ERR_RANGE); return false;
+    }
+    if (!host_read_ok(host, (uintptr_t)v.data + (uintptr_t)off, length))
+      return false;
+    rc = lain_ast_output_check(host->ast_out, off, length);
+    if (rc) { host_set_status(host, rc); return false; }
+    if (address_out) *address_out = (uintptr_t)v.data + (uintptr_t)off;
+    return true;
+  }
   {
     const LainMetaSegment *segment = segment_find(host, id);
     if (!segment || !segment->live) {
@@ -1309,6 +1341,10 @@ bool lainmeta_host_ast_child_ref(LainMetaHost *host, LainAstRef ref,
   base = (const unsigned char *)view.data;
   /* 孩子列表那一项：**先验权限再 memcpy**（撤销映射后这里必须拒，不能照读）。 */
   if (!host_read_ok(host, (uintptr_t)base + (uintptr_t)at, 8u)) return false;
+  if (view.segment_id == LAIN_AST_OUT) {
+    uint32_t rc = lain_ast_output_check(host->ast_out, at, 8);
+    if (rc) { host_set_status(host, rc); return false; }
+  }
   memcpy(out, base + at, 8u);
   {
     /* 孩子引用必须落在同一个 Arena 的已发布节点槽上，并且那个目标节点也要在
@@ -1343,6 +1379,8 @@ static uint32_t cap_ast_root(void *context, const uint64_t *args, uint32_t count
     if (out) *out = LAIN_AST_REF_NONE;
     return host->status;
   }
+  if (host->sources[args[0]].current_root)
+    view.root = host->sources[args[0]].current_root;
   {
     uintptr_t address;
     if (!lainmeta_host_ast_node_addr(host, view.root, &address)) {
@@ -1412,6 +1450,149 @@ typedef struct {
   LainVmHostFn fn;
 } MetaCapability;
 
+/* AstOut 的所有引用仍由同一 Host/CSpace 解析，构造层没有第二套上下文表。 */
+static uint32_t output_resolve(void *context, LainAstRef ref, LainAstNode *n) {
+  LainMetaHost *host = context;
+  uintptr_t at;
+  if (!lainmeta_host_ast_node_addr(host, ref, &at)) return host->status;
+  memcpy(n, (const void *)at, sizeof(*n));
+  return 0;
+}
+uint32_t lainmeta_host_enable_ast_out(LainMetaHost *host,
+                                     const LainExpandLimits *limits) {
+  uint32_t rc;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (host->ast_out || host->space) return LAIN_AST_ERR_TRANSACTION;
+  host->ast_out = lain_ast_output_new(limits, host->quota, host,
+                                    output_resolve, &rc);
+  if (rc) host_set_status(host, rc);
+  return rc;
+}
+bool lainmeta_host_ast_out(const LainMetaHost *host, LainAstArenaView *out) {
+  return host && lain_ast_output_view(host->ast_out, out);
+}
+static uint32_t output_entry(LainMetaHost *host, const uint64_t *args,
+                             uint32_t count, uint32_t wanted, uint64_t *out) {
+  LainAstArenaView view;
+  if (out) *out = 0;
+  if (!host || count != wanted || (wanted && !args)) return LAINMETA_ERR_DENIED;
+  if (!lain_ast_output_view(host->ast_out, &view)) return LAIN_AST_ERR_SEGMENT;
+  if (!host->space || !lainvm_space_check(host->space, (uintptr_t)view.data,
+        view.capacity, LAINVM_MEM_READ | LAINVM_MEM_WRITE))
+    return LAINMETA_ERR_DENIED;
+  return 0;
+}
+static uint32_t output_result(LainMetaHost *host, uint32_t rc,
+                              uint64_t value, uint64_t *out) {
+  if (rc && host) host_set_status(host, rc);
+  if (out) *out = rc ? 0 : value;
+  return rc;
+}
+static bool output_recoverable(uint32_t rc) {
+  return rc == LAIN_AST_ERR_CAPACITY || rc == LAIN_AST_ERR_BUDGET;
+}
+/* 容量与预算耗尽是事务内的正常拒绝：回调本身成功，让 Meta 有机会 rollback。
+ * 句柄/引用型能力以 0 表示失败；状态型能力把拒码作为返回值。其它协议错误仍 trap。 */
+static uint32_t output_ref_result(LainMetaHost *host, uint32_t rc,
+                                  uint64_t value, uint64_t *out) {
+  if (!output_recoverable(rc)) return output_result(host, rc, value, out);
+  host_set_status(host, rc);
+  if (out) *out = 0;
+  return 0;
+}
+static uint32_t output_status_result(LainMetaHost *host, uint32_t rc,
+                                     uint64_t *out) {
+  if (!output_recoverable(rc)) return output_result(host, rc, 0, out);
+  host_set_status(host, rc);
+  if (out) *out = rc;
+  return 0;
+}
+static uint32_t cap_ast_tx_begin(void *context, const uint64_t *args,
+                                uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  uint64_t id = 0;
+  uint32_t rc = output_entry(host, args, count, 0, out);
+  if (!rc) rc = lain_ast_output_begin(host->ast_out, &id);
+  return output_ref_result(host, rc, id, out);
+}
+static uint32_t cap_ast_charge(void *context, const uint64_t *args,
+                              uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  uint32_t rc = output_entry(host, args, count, 2, out);
+  if (!rc) rc = lain_ast_output_charge(host->ast_out, args[0], args[1]);
+  return output_status_result(host, rc, out);
+}
+static uint32_t cap_ast_tx_release(void *context, const uint64_t *args,
+                                  uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  uint32_t rc = output_entry(host, args, count, 1, out);
+  if (!rc) rc = lain_ast_output_release(host->ast_out, args[0]);
+  return output_status_result(host, rc, out);
+}
+static uint32_t cap_ast_tx_rollback(void *context, const uint64_t *args,
+                                   uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  uint32_t rc = output_entry(host, args, count, 1, out);
+  if (!rc) rc = lain_ast_output_rollback(host->ast_out, args[0]);
+  return output_status_result(host, rc, out);
+}
+static uint32_t cap_ast_append_token(void *context, const uint64_t *args,
+                                    uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  LainAstRef ref = 0;
+  uint32_t rc = output_entry(host, args, count, 3, out);
+  if (!rc && !host_range_readable(host, (uintptr_t)args[0], args[1]))
+    rc = LAINMETA_ERR_DENIED;
+  if (!rc) rc = lain_ast_output_token(host->ast_out, (const void *)(uintptr_t)args[0],
+                                    args[1], args[2], &ref);
+  return output_ref_result(host, rc, ref, out);
+}
+static uint32_t cap_ast_append_refs(void *context, const uint64_t *args,
+                                   uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  LainAstRef ref = 0;
+  uint32_t rc = output_entry(host, args, count, 2, out);
+  if (!rc && args[1] > UINT64_MAX / 8) rc = LAIN_AST_ERR_RANGE;
+  if (!rc && !host_range_readable(host, (uintptr_t)args[0], args[1] * 8))
+    rc = LAINMETA_ERR_DENIED;
+  if (!rc) rc = lain_ast_output_refs(host->ast_out,
+           (const LainAstRef *)(uintptr_t)args[0], args[1], &ref);
+  return output_ref_result(host, rc, ref, out);
+}
+static uint32_t cap_ast_append_group(void *context, const uint64_t *args,
+                                    uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  LainAstRef ref = 0;
+  uint32_t rc = output_entry(host, args, count, 4, out);
+  if (!rc) rc = lain_ast_output_group(host->ast_out, args[0], args[1],
+                                    args[2], args[3], &ref);
+  return output_ref_result(host, rc, ref, out);
+}
+static uint32_t cap_ast_commit(void *context, const uint64_t *args,
+                              uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  LainAstArenaView before;
+  uint32_t rc = output_entry(host, args, count, 4, out);
+  if (!rc && (args[0] >= host->source_count ||
+      !lainmeta_host_arena(host, (uint32_t)args[0], &before)))
+    rc = LAIN_AST_ERR_SEGMENT;
+  if (!rc) {
+    LainAstRef old = host->sources[args[0]].current_root;
+    if (!old) old = before.root;
+    if (old != args[1]) rc = LAIN_AST_ERR_TRANSACTION;
+  }
+  if (!rc) rc = lain_ast_output_commit(host->ast_out, args[3], args[2]);
+  if (!rc) {
+    uint64_t offset = 4096 + (args[0] * 2 + 1) * 32 + 8;
+    host->sources[args[0]].current_root = args[2];
+    /* 只更新 root 镜像，不重写 Meta 的控制格或语义旁表。 */
+    if (host->scratch && offset <= host->scratch_size &&
+        8 <= host->scratch_size - offset)
+      memcpy(host->scratch + offset, &args[2], 8);
+  }
+  return output_status_result(host, rc, out);
+}
+
 static const MetaCapability k_capabilities[] = {
     {"lain_meta_source_count", cap_source_count},
     {"lain_meta_source_data", cap_source_data},
@@ -1441,6 +1622,18 @@ static const MetaCapability k_capabilities[] = {
     {"lain_meta_trace", cap_trace},
 };
 
+/* 输出能力只授予显式配置 AstOut 的任务，第一期只读消费者不获得写树能力。 */
+static const MetaCapability k_output_capabilities[] = {
+    {"lain_meta_ast_charge", cap_ast_charge},
+    {"lain_meta_ast_tx_begin", cap_ast_tx_begin},
+    {"lain_meta_ast_tx_release", cap_ast_tx_release},
+    {"lain_meta_ast_tx_rollback", cap_ast_tx_rollback},
+    {"lain_meta_ast_append_token", cap_ast_append_token},
+    {"lain_meta_ast_append_refs", cap_ast_append_refs},
+    {"lain_meta_ast_append_group", cap_ast_append_group},
+    {"lain_meta_ast_commit", cap_ast_commit},
+};
+
 
 /* 登记底座服务：每一项都绑定这份 host 作为 context。
  * host 为 NULL 是参数错误（这层服务不接受无宿主绑定）；表已冻结或重名时
@@ -1452,6 +1645,13 @@ int lainmeta_host_register(LainMetaHost *host, LainVmCaps *caps) {
     if (lainvm_caps_add(caps, k_capabilities[i].name, LAINVM_CAP_FUNCTION,
                         k_capabilities[i].fn, host) != 0)
       return 2;
+  }
+  if (host->ast_out) {
+    for (i = 0; i < sizeof(k_output_capabilities) / sizeof(k_output_capabilities[0]); i++) {
+      if (lainvm_caps_add(caps, k_output_capabilities[i].name, LAINVM_CAP_FUNCTION,
+                         k_output_capabilities[i].fn, host) != 0)
+        return 2;
+    }
   }
   return 0;
 }
