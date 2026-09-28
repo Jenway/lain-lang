@@ -3,6 +3,7 @@
 // declare/expand-children/lower，表达式处理器与库动态登记留给第三期后续批次。
 
 data meta_expand_defer_state rw { 0 0 0 0 0 0 0 0 }
+data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
 
 #proc meta_expand_defer_put(%dependency: #bits<64>) -> #bits<32> {
   %p = #data_addr meta_expand_defer_state
@@ -14,6 +15,28 @@ data meta_expand_defer_state rw { 0 0 0 0 0 0 0 0 }
   %p = #data_addr meta_expand_defer_state
   %v = #call meta_cell_get(%p)
   #return %v
+}
+
+// expansion_id 是一次处理器调用的稳定身份。每次完整展开尝试从 1 开始；事务重试
+// 会得到相同的编号序列，回滚不会把旧尝试的身份泄漏到下一次尝试。
+#proc meta_expand_id_reset() -> #bits<32> {
+  %p = #data_addr meta_expand_id_state
+  %w = #call meta_cell_put_raw(%p, 1)
+  #return 0
+}
+
+#proc meta_expand_next_id() -> #bits<64> {
+  %p = #data_addr meta_expand_id_state
+  %id = #call meta_cell_get(%p)
+  %valid = #and[#bits<1>](#ne[#bits<64>](%id, 0),
+                           #ne[#bits<64>](%id, 0xFFFFFFFFFFFFFFFF))
+  #if #eq[#bits<1>](%valid, 0) {
+    %f = #call lain_meta_fail(9410)
+    #return 0
+  }
+  %next = #add[#bits<64>](%id, 1)
+  %w = #call meta_cell_put_raw(%p, %next)
+  #return %id
 }
 
 // 查当前语法环境；名字、上下文和作用域均由 Meta 注册表决定。
@@ -46,7 +69,9 @@ data meta_expand_defer_state rw { 0 0 0 0 0 0 0 0 }
   %q3 = #call meta_cell_put(#lea(%request, 24, 1, 0), 1)
   %q4 = #call meta_cell_put(#lea(%request, 32, 1, 0), 0)
   %q5 = #call meta_cell_put(#lea(%request, 40, 1, 0), 2)
-  %q6 = #call meta_cell_put(#lea(%request, 48, 1, 0), 1)
+  %expansion_id = #call meta_expand_next_id()
+  #if #eq[#bits<64>](%expansion_id, 0) { #return 9410 }
+  %q6 = #call meta_cell_put(#lea(%request, 48, 1, 0), %expansion_id)
   %my_if = #eq[#bits<64>](%handler, 1)
   %st = #if %my_if -> (#bits<32>) {
     %r = #call meta_expand_my_if(%request, %result)
@@ -306,6 +331,7 @@ data meta_expand_defer_state rw { 0 0 0 0 0 0 0 0 }
 
 #proc meta_expand_source(%source: #bits<64>) -> #bits<32> {
   %clear_defer = #call meta_expand_defer_put(0)
+  %clear_ids = #call meta_expand_id_reset()
   %tx = #call lain_meta_ast_tx_begin()
   %old_root = #call meta_root_of(%source)
   %new_root = #call meta_expand_root(%old_root)
