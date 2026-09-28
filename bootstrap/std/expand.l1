@@ -2,6 +2,20 @@
 // 当前 statement 上下文的 my_if / my_block 提供替换入口；声明处理器提供
 // declare/expand-children/lower，表达式处理器与库动态登记留给第三期后续批次。
 
+data meta_expand_defer_state rw { 0 0 0 0 0 0 0 0 }
+
+#proc meta_expand_defer_put(%dependency: #bits<64>) -> #bits<32> {
+  %p = #data_addr meta_expand_defer_state
+  %w = #call meta_cell_put_raw(%p, %dependency)
+  #return 0
+}
+
+#proc meta_expand_defer_get() -> #bits<64> {
+  %p = #data_addr meta_expand_defer_state
+  %v = #call meta_cell_get(%p)
+  #return %v
+}
+
 // 查当前语法环境；名字、上下文和作用域均由 Meta 注册表决定。
 #proc meta_syntax_handler(%parent: #bits<64>, %cursor: #bits<64>,
                           %env: #bits<64>, %scope: #bits<64>,
@@ -43,8 +57,15 @@
       %r2 = #call meta_expand_my_block(%request, %result)
       #yield %r2
     } else {
-      %f = #call lain_meta_fail(9412)
-      #yield 9412
+      %my_require = #eq[#bits<64>](%handler, 12)
+      %rq = #if %my_require -> (#bits<32>) {
+        %r3 = #call meta_expand_my_require(%request, %result)
+        #yield %r3
+      } else {
+        %f = #call lain_meta_fail(9412)
+        #yield 9412
+      }
+      #yield %rq
     }
     #yield %b
   }
@@ -86,7 +107,8 @@
       // 只有带 Expand 入口的处理器进入替换 ABI；核心 if 只提供孩子上下文。
       %h1 = #eq[#bits<64>](%handler, 1)
       %h11 = #eq[#bits<64>](%handler, 11)
-      %has_handler = #or[#bits<1>](%h1, %h11)
+      %h12 = #eq[#bits<64>](%handler, 12)
+      %has_handler = #or[#bits<1>](#or[#bits<1>](%h1, %h11), %h12)
       #if %has_handler {
         %called = #call lain_meta_ast_charge(2, 1)
         #if #ne[#bits<32>](%called, 0) { #break walk(0) }
@@ -104,13 +126,21 @@
         %replace = #eq[#bits<64>](%status, 1)
         #if #eq[#bits<1>](%replace, 0) {
           %diag = #call meta_cell_get(#lea(%result, 32, 1, 0))
-          %code = #if #eq[#bits<64>](%status, 2) -> (#bits<64>) {
-            #yield 9411
+          %dependency = #call meta_cell_get(#lea(%result, 40, 1, 0))
+          %is_defer = #eq[#bits<64>](%status, 2)
+          #if %is_defer {
+            // DEFER 只能携带非零依赖；当前事务先回滚，由外层声明协调器决定重试。
+            %valid_defer = #and[#bits<1>](#ne[#bits<64>](%dependency, 0),
+                              #eq[#bits<64>](%diag, 0))
+            #if #eq[#bits<1>](%valid_defer, 0) {
+              %fd = #call lain_meta_fail(9408)
+            } else {
+              %saved = #call meta_expand_defer_put(%dependency)
+            }
           } else {
-            #yield %diag
+            %code32 = #trunc[#bits<32>](%diag)
+            %f0 = #call lain_meta_fail(%code32)
           }
-          %code32 = #trunc[#bits<32>](%code)
-          %f0 = #call lain_meta_fail(%code32)
           %rel1 = #call meta_bump_release(%call_mark)
           #break walk(0)
         }
@@ -275,12 +305,16 @@
 }
 
 #proc meta_expand_source(%source: #bits<64>) -> #bits<32> {
+  %clear_defer = #call meta_expand_defer_put(0)
   %tx = #call lain_meta_ast_tx_begin()
   %old_root = #call meta_root_of(%source)
   %new_root = #call meta_expand_root(%old_root)
   %bad = #eq[#bits<64>](%new_root, 0)
   #if %bad {
     %rb = #call lain_meta_ast_tx_rollback(%tx)
+    %dependency = #call meta_expand_defer_get()
+    %deferred = #ne[#bits<64>](%dependency, 0)
+    #if %deferred { #return 9411 }
     %status = #call lain_meta_status()
     %zero = #eq[#bits<64>](%status, 0)
     %code = #if %zero -> (#bits<64>) { #yield 9408 } else { #yield %status }

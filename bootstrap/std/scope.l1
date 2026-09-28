@@ -272,6 +272,33 @@
   #return %r
 }
 
+// Expand 的声明协调步：只登记身份/声明位置，不运行函数体或 Lowering。
+// 第一次 DEFER 后调用；返回 0 表示扫描完成，调用方以 scope_count 是否增长判断进展。
+#proc meta_declare_available(%source: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data()
+  %kw = #data_addr meta_logical_prelude
+  %prelude = #call meta_source_find(%kw, 12)
+  %present = #ne[#bits<64>](%prelude, 0xFFFFFFFFFFFFFFFF)
+  %root_status = #if %present -> (#bits<32>) {
+    %set_root = #call meta_cell_put(#lea(%scratch, 96, 1, 0), %prelude)
+    %p_len = #call lain_meta_source_length(%prelude)
+    %p_base = #call lain_meta_source_data(%prelude)
+    %scan_root = #call meta_scope_scan(%p_base, %p_len, %prelude, 0)
+    #yield %scan_root
+  } else {
+    %clear_root = #call meta_cell_put(#lea(%scratch, 96, 1, 0),
+                                      0xFFFFFFFFFFFFFFFF)
+    #yield 0
+  }
+  #if #ne[#bits<32>](%root_status, 0) { #return %root_status }
+  %mark = #call meta_scope_count()
+  %current = #call meta_scope_set_current(%source)
+  %len = #call lain_meta_source_length(%source)
+  %base = #call lain_meta_source_data(%source)
+  %scan = #call meta_scope_scan(%base, %len, %source, %mark)
+  #return %scan
+}
+
 // 路径 / mangle 缓冲区在哪 —— **动态区里紧接作用域表**，语义旁表在它后面。
 //
 // 为什么不放在固定格子里：它要装得下最长的逻辑路径（容量见 `meta_path_cap`，

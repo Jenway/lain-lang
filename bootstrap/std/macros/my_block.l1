@@ -12,37 +12,9 @@ data meta_kw_my_block ro { 109 121 95 98 108 111 99 107 }
   #return %s
 }
 
-#proc meta_expand_my_block(%request: #addr, %result: #addr) -> #bits<32> {
-  %clear = #call meta_expand_result_clear(%result)
-  %abi = #call meta_cell_get(%request)
-  %parent = #call meta_cell_get(#lea(%request, 8, 1, 0))
-  %cursor = #call meta_cell_get(#lea(%request, 16, 1, 0))
-  %context = #call meta_cell_get(#lea(%request, 40, 1, 0))
-  %head = #call ast_child(%parent, %cursor)
-  %dummy = #call lain_meta_source_data(0)
-  %kw = #data_addr meta_kw_my_block
-  %name_ok = #call meta_node_is_word(%head, %dummy, %kw, 8)
-  %a0 = #and[#bits<1>](#eq[#bits<64>](%abi, 1),
-                        #eq[#bits<64>](%context, 2))
-  %matched = #and[#bits<1>](%a0, %name_ok)
-  #if #eq[#bits<1>](%matched, 0) {
-    %z0 = #call meta_cell_put(%result, 0)
-    %z1 = #call meta_cell_put(#lea(%result, 32, 1, 0), 0)
-    #return 0
-  }
-  %parent_count = #call ast_child_count(%parent)
-  %end = #add[#bits<64>](%cursor, 2)
-  #if #ugt[#bits<64>](%end, %parent_count) {
-    %e0 = #call meta_expand_result_error(%result, 9409)
-    #return 0
-  }
-  %body = #call ast_child(%parent, #add[#bits<64>](%cursor, 1))
-  %delimiter = #call ast_delim(%body)
-  #if #ne[#bits<8>](%delimiter, 123) {
-    %e1 = #call meta_expand_result_error(%result, 9409)
-    #return 0
-  }
-  // 先递归展开块内语句，再把最终孩子列表作为替换切片发布。
+// 把一个 statement Group 展开后发布为替换切片。my_block 与依赖宏共用这条路径。
+#proc meta_expand_splice_group(%body: #bits<64>, %consumed: #bits<64>,
+                               %result: #addr) -> #bits<32> {
   %expanded = #call meta_expand_stmt_group(%body)
   #if #eq[#bits<64>](%expanded, 0) {
     %status0 = #call lain_meta_status()
@@ -51,9 +23,7 @@ data meta_kw_my_block ro { 109 121 95 98 108 111 99 107 }
   }
   %count = #call ast_child_count(%expanded)
   %empty = #eq[#bits<64>](%count, 0)
-  %slice = #if %empty -> (#bits<64>) {
-    #yield 0
-  } else {
+  %slice = #if %empty -> (#bits<64>) { #yield 0 } else {
     %mark = #call meta_bump_mark()
     %bytes = #mul[#bits<64>](%count, 8)
     %off = #call meta_bump_alloc(%bytes)
@@ -85,12 +55,46 @@ data meta_kw_my_block ro { 109 121 95 98 108 111 99 107 }
     #return %code1
   }
   %s0 = #call meta_cell_put(%result, 1)
-  %s1 = #call meta_cell_put(#lea(%result, 8, 1, 0), 2)
+  %s1 = #call meta_cell_put(#lea(%result, 8, 1, 0), %consumed)
   %s2 = #call meta_cell_put(#lea(%result, 16, 1, 0), %slice)
   %s3 = #call meta_cell_put(#lea(%result, 24, 1, 0), %count)
   %s4 = #call meta_cell_put(#lea(%result, 32, 1, 0), 0)
   %s5 = #call meta_cell_put(#lea(%result, 40, 1, 0), 0)
   #return 0
+}
+
+#proc meta_expand_my_block(%request: #addr, %result: #addr) -> #bits<32> {
+  %clear = #call meta_expand_result_clear(%result)
+  %abi = #call meta_cell_get(%request)
+  %parent = #call meta_cell_get(#lea(%request, 8, 1, 0))
+  %cursor = #call meta_cell_get(#lea(%request, 16, 1, 0))
+  %context = #call meta_cell_get(#lea(%request, 40, 1, 0))
+  %head = #call ast_child(%parent, %cursor)
+  %dummy = #call lain_meta_source_data(0)
+  %kw = #data_addr meta_kw_my_block
+  %name_ok = #call meta_node_is_word(%head, %dummy, %kw, 8)
+  %a0 = #and[#bits<1>](#eq[#bits<64>](%abi, 1),
+                        #eq[#bits<64>](%context, 2))
+  %matched = #and[#bits<1>](%a0, %name_ok)
+  #if #eq[#bits<1>](%matched, 0) {
+    %z0 = #call meta_cell_put(%result, 0)
+    %z1 = #call meta_cell_put(#lea(%result, 32, 1, 0), 0)
+    #return 0
+  }
+  %parent_count = #call ast_child_count(%parent)
+  %end = #add[#bits<64>](%cursor, 2)
+  #if #ugt[#bits<64>](%end, %parent_count) {
+    %e0 = #call meta_expand_result_error(%result, 9409)
+    #return 0
+  }
+  %body = #call ast_child(%parent, #add[#bits<64>](%cursor, 1))
+  %delimiter = #call ast_delim(%body)
+  #if #ne[#bits<8>](%delimiter, 123) {
+    %e1 = #call meta_expand_result_error(%result, 9409)
+    #return 0
+  }
+  %spliced = #call meta_expand_splice_group(%body, 2, %result)
+  #return %spliced
 }
 
 // 块内部已经由处理器递归展开；这里只把替换引用复制进父输出序列。

@@ -44,11 +44,36 @@
   #if %pre_bad {
     #return %pre_setup
   }
-  %expanded = #call meta_expand_source(%source)
+  %expanded0 = #call meta_expand_source(%source)
+  %deferred0 = #eq[#bits<32>](%expanded0, 9411)
+  %expanded = #if %deferred0 -> (#bits<32>) {
+    // 一轮声明登记推进依赖版本，然后从原 Root 和新事务完整重试。
+    %before = #call meta_scope_count()
+    %declared = #call meta_declare_available(%source)
+    %decl_bad = #ne[#bits<32>](%declared, 0)
+    %retry = #if %decl_bad -> (#bits<32>) {
+      #yield %declared
+    } else {
+      %after = #call meta_scope_count()
+      %progress = #ugt[#bits<64>](%after, %before)
+      %attempt = #if %progress -> (#bits<32>) {
+        %second = #call meta_expand_source(%source)
+        %still = #eq[#bits<32>](%second, 9411)
+        %resolved = #if %still -> (#bits<32>) {
+          %fdep = #call lain_meta_fail(9411)
+          #yield 9411
+        } else { #yield %second }
+        #yield %resolved
+      } else {
+        %fnone = #call lain_meta_fail(9411)
+        #yield 9411
+      }
+      #yield %attempt
+    }
+    #yield %retry
+  } else { #yield %expanded0 }
   %expand_bad = #ne[#bits<32>](%expanded, 0)
-  #if %expand_bad {
-    #return %expanded
-  }
+  #if %expand_bad { #return %expanded }
   // 作用域表要先建：外层是 root 环境，内层是这份源码。名字按表查，
   // 不再回源码搜字节。
   %setup = #call meta_scope_setup(1)

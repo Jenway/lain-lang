@@ -1,0 +1,64 @@
+// `my_require NAME { ... }`：NAME 已登记时拼入块内容；尚未登记时返回 DEFER，
+// dependency 使用 NAME Token 引用。它验证声明登记能够唤醒挂起的宏任务。
+data meta_kw_my_require ro { 109 121 95 114 101 113 117 105 114 101 }
+
+#proc meta_register_my_require(%node: #bits<64>) -> #bits<32> {
+  %dummy = #call lain_meta_source_data(0)
+  %hit = #call meta_node_is_word(%node, %dummy, #data_addr meta_kw_my_require, 10)
+  %s = #if %hit -> (#bits<32>) {
+    %r = #call meta_syntax_ensure(%node, 2, 12)
+    #yield %r
+  } else { #yield 0 }
+  #return %s
+}
+
+#proc meta_expand_my_require(%request: #addr, %result: #addr) -> #bits<32> {
+  %clear = #call meta_expand_result_clear(%result)
+  %abi = #call meta_cell_get(%request)
+  %parent = #call meta_cell_get(#lea(%request, 8, 1, 0))
+  %cursor = #call meta_cell_get(#lea(%request, 16, 1, 0))
+  %context = #call meta_cell_get(#lea(%request, 40, 1, 0))
+  %head = #call ast_child(%parent, %cursor)
+  %dummy = #call lain_meta_source_data(0)
+  %name_ok = #call meta_node_is_word(%head, %dummy,
+                                     #data_addr meta_kw_my_require, 10)
+  %a0 = #and[#bits<1>](#eq[#bits<64>](%abi, 1),
+                        #eq[#bits<64>](%context, 2))
+  %matched = #and[#bits<1>](%a0, %name_ok)
+  #if #eq[#bits<1>](%matched, 0) {
+    %z0 = #call meta_cell_put(%result, 0)
+    %z1 = #call meta_cell_put(#lea(%result, 32, 1, 0), 0)
+    #return 0
+  }
+  %count = #call ast_child_count(%parent)
+  %end = #add[#bits<64>](%cursor, 3)
+  #if #ugt[#bits<64>](%end, %count) {
+    %e0 = #call meta_expand_result_error(%result, 9409)
+    #return 0
+  }
+  %name = #call ast_child(%parent, #add[#bits<64>](%cursor, 1))
+  %body = #call ast_child(%parent, #add[#bits<64>](%cursor, 2))
+  %nk = #call ast_kind(%name)
+  %bd = #call ast_delim(%body)
+  %shape = #and[#bits<1>](#eq[#bits<8>](%nk, 1),
+                           #eq[#bits<8>](%bd, 123))
+  #if #eq[#bits<1>](%shape, 0) {
+    %e1 = #call meta_expand_result_error(%result, 9409)
+    #return 0
+  }
+  %name_addr = #call ast_text_addr(%name)
+  %name_len = #call ast_text_len(%name)
+  %binding = #call meta_scope_find(%name_addr, %name_len)
+  %missing = #eq[#bits<64>](%binding, 0xFFFFFFFFFFFFFFFF)
+  #if %missing {
+    %d0 = #call meta_cell_put(%result, 2)
+    %d1 = #call meta_cell_put(#lea(%result, 8, 1, 0), 0)
+    %d2 = #call meta_cell_put(#lea(%result, 16, 1, 0), 0)
+    %d3 = #call meta_cell_put(#lea(%result, 24, 1, 0), 0)
+    %d4 = #call meta_cell_put(#lea(%result, 32, 1, 0), 0)
+    %d5 = #call meta_cell_put(#lea(%result, 40, 1, 0), %name)
+    #return 0
+  }
+  %spliced = #call meta_expand_splice_group(%body, 3, %result)
+  #return %spliced
+}
