@@ -1,0 +1,61 @@
+// if 语句处理器的孩子上下文适配器。
+// 返回值低 63 位是本次消费/写入的兄弟数；最高位表示孩子发生变化。
+// 形状不完整时消费 1，让后续 recognize/lower 按既有诊断路径处理；递归失败返回 0。
+#proc meta_expand_children_if(%group: #bits<64>, %cursor: #bits<64>,
+                              %count: #bits<64>, %buffer: #addr,
+                              %outn: #bits<64>) -> #bits<64> {
+  %fit = #add[#bits<64>](%cursor, 3)
+  %room = #ule[#bits<64>](%fit, %count)
+  %node = #call ast_child(%group, %cursor)
+  #if #eq[#bits<1>](%room, 0) {
+    %fallback0 = #call meta_expand_store_ref(%buffer, %outn, %node)
+    #return 1
+  }
+  %cond = #call ast_child(%group, #add[#bits<64>](%cursor, 1))
+  %body = #call ast_child(%group, #add[#bits<64>](%cursor, 2))
+  %bd = #call ast_delim(%body)
+  #if #ne[#bits<8>](%bd, 123) {
+    %fallback1 = #call meta_expand_store_ref(%buffer, %outn, %node)
+    #return 1
+  }
+  %new_body = #call meta_expand_stmt_group(%body)
+  #if #eq[#bits<64>](%new_body, 0) { #return 0 }
+  %p0 = #call meta_expand_store_ref(%buffer, %outn, %node)
+  %p1 = #call meta_expand_store_ref(%buffer, #add[#bits<64>](%outn, 1), %cond)
+  %p2 = #call meta_expand_store_ref(%buffer, #add[#bits<64>](%outn, 2), %new_body)
+
+  %after_i = #add[#bits<64>](%cursor, 3)
+  %has_after = #ult[#bits<64>](%after_i, %count)
+  %else_hit = #if %has_after -> (#bits<1>) {
+    %after = #call ast_child(%group, %after_i)
+    %base = #call lain_meta_source_data(0)
+    %ekw = #data_addr meta_kw_else
+    %eh = #call meta_node_is_word(%after, %base, %ekw, 4)
+    #yield %eh
+  } else { #yield 0 }
+  #if %else_hit {
+    %else_end = #add[#bits<64>](%cursor, 5)
+    %else_room = #ule[#bits<64>](%else_end, %count)
+    #if %else_room {
+      %else_word = #call ast_child(%group, %after_i)
+      %else_body = #call ast_child(%group, #add[#bits<64>](%cursor, 4))
+      %ed = #call ast_delim(%else_body)
+      #if #eq[#bits<8>](%ed, 123) {
+        %new_else = #call meta_expand_stmt_group(%else_body)
+        #if #eq[#bits<64>](%new_else, 0) { #return 0 }
+        %p3 = #call meta_expand_store_ref(%buffer, #add[#bits<64>](%outn, 3), %else_word)
+        %p4 = #call meta_expand_store_ref(%buffer, #add[#bits<64>](%outn, 4), %new_else)
+        %c0 = #ne[#bits<64>](%new_body, %body)
+        %c1 = #ne[#bits<64>](%new_else, %else_body)
+        %changed = #or[#bits<1>](%c0, %c1)
+        %flag = #if %changed -> (#bits<64>) { #yield 0x8000000000000000 }
+                else { #yield 0 }
+        #return #or[#bits<64>](%flag, 5)
+      }
+    }
+  }
+  %changed3 = #ne[#bits<64>](%new_body, %body)
+  %flag3 = #if %changed3 -> (#bits<64>) { #yield 0x8000000000000000 }
+           else { #yield 0 }
+  #return #or[#bits<64>](%flag3, 3)
+}

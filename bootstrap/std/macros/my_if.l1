@@ -139,3 +139,31 @@ data meta_kw_generated_if ro { 105 102 }
   %s5 = #call meta_cell_put(#lea(%result, 40, 1, 0), 0)
   #return 0
 }
+
+// my_if 替换片段的孩子上下文也由处理器拥有：第 2、4 个相对孩子是 statement
+// Group。通用调度器只负责请求“把这段替换复制到输出”，不认识分支位置。
+#proc meta_expand_replacement_my_if(%slice: #bits<64>, %count: #bits<64>,
+                                    %buffer: #addr,
+                                    %outn: #bits<64>) -> #bits<64> {
+  %bytes = #mul[#bits<64>](%count, 8)
+  %src = #call lain_meta_ast_span_addr(%slice, %bytes)
+  %copied = #loop repl(%j: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%j, %count)
+    #if %more {
+      %jo = #mul[#bits<64>](%j, 8)
+      %raw = #call meta_cell_get(#lea(%src, %jo, 1, 0))
+      %is2 = #eq[#bits<64>](%j, 2)
+      %is4 = #eq[#bits<64>](%j, 4)
+      %branch = #or[#bits<1>](%is2, %is4)
+      %value = #if %branch -> (#bits<64>) {
+        %expanded = #call meta_expand_stmt_group(%raw)
+        #yield %expanded
+      } else { #yield %raw }
+      #if #eq[#bits<64>](%value, 0) { #break repl(0) }
+      %put = #call meta_expand_store_ref(%buffer,
+                    #add[#bits<64>](%outn, %j), %value)
+      #continue repl(#add[#bits<64>](%j, 1))
+    } else { #break repl(1) }
+  }
+  #return %copied
+}

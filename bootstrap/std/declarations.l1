@@ -1,6 +1,64 @@
 // 声明处理器分派。语法注册表决定关键字属于哪个处理器；作用域登记与
 // Lowering 只接收 handler ID，不再各自重做一套关键字分类。
 
+// 宏处理器拥有替换片段内部的上下文规则。返回 1 = 已写入，0 = 失败。
+#proc meta_expand_replacement_invoke(%handler: #bits<64>,
+                                     %slice: #bits<64>,
+                                     %count: #bits<64>,
+                                     %buffer: #addr,
+                                     %outn: #bits<64>) -> #bits<64> {
+  %is_my_if = #eq[#bits<64>](%handler, 1)
+  %r = #if %is_my_if -> (#bits<64>) {
+    %v = #call meta_expand_replacement_my_if(%slice, %count, %buffer, %outn)
+    #yield %v
+  } else {
+    %is_block = #eq[#bits<64>](%handler, 11)
+    %b = #if %is_block -> (#bits<64>) {
+      %v2 = #call meta_expand_replacement_my_block(%slice, %count,
+                                                    %buffer, %outn)
+      #yield %v2
+    } else {
+      %f = #call lain_meta_fail(9412)
+      #yield 0
+    }
+    #yield %b
+  }
+  #return %r
+}
+
+// statement 处理器决定哪些孩子继续按 statement 上下文展开。
+// 无孩子适配器的处理器消费当前节点 1 项；0 表示递归失败。
+#proc meta_expand_stmt_children_invoke(%handler: #bits<64>,
+                                       %parent: #bits<64>,
+                                       %cursor: #bits<64>,
+                                       %count: #bits<64>,
+                                       %buffer: #addr,
+                                       %outn: #bits<64>) -> #bits<64> {
+  %is_if = #eq[#bits<64>](%handler, 3)
+  %r = #if %is_if -> (#bits<64>) {
+    %v = #call meta_expand_children_if(%parent, %cursor, %count,
+                                       %buffer, %outn)
+    #yield %v
+  } else { #yield 1 }
+  #return %r
+}
+
+// declaration 处理器决定顶层声明内部的展开上下文。
+#proc meta_expand_decl_children_invoke(%handler: #bits<64>,
+                                       %parent: #bits<64>,
+                                       %cursor: #bits<64>,
+                                       %count: #bits<64>,
+                                       %buffer: #addr,
+                                       %outn: #bits<64>) -> #bits<64> {
+  %is_func = #eq[#bits<64>](%handler, 2)
+  %r = #if %is_func -> (#bits<64>) {
+    %v = #call meta_expand_children_func(%parent, %cursor, %count,
+                                         %buffer, %outn)
+    #yield %v
+  } else { #yield 1 }
+  #return %r
+}
+
 #proc meta_declare_invoke(%handler: #bits<64>, %base: #addr,
                           %len: #bits<64>, %source: #bits<64>,
                           %level_start: #bits<64>, %parent: #bits<64>,

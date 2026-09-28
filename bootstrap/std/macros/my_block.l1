@@ -1,0 +1,107 @@
+// `my_block { ... }` 把花括号组的孩子拼入当前 statement 序列。
+// 它是通用 N→M 替换的基准处理器：输入固定消费 2 项，输出数量由块内孩子数决定。
+data meta_kw_my_block ro { 109 121 95 98 108 111 99 107 }
+
+#proc meta_expand_my_block(%request: #addr, %result: #addr) -> #bits<32> {
+  %clear = #call meta_expand_result_clear(%result)
+  %abi = #call meta_cell_get(%request)
+  %parent = #call meta_cell_get(#lea(%request, 8, 1, 0))
+  %cursor = #call meta_cell_get(#lea(%request, 16, 1, 0))
+  %context = #call meta_cell_get(#lea(%request, 40, 1, 0))
+  %head = #call ast_child(%parent, %cursor)
+  %dummy = #call lain_meta_source_data(0)
+  %kw = #data_addr meta_kw_my_block
+  %name_ok = #call meta_node_is_word(%head, %dummy, %kw, 8)
+  %a0 = #and[#bits<1>](#eq[#bits<64>](%abi, 1),
+                        #eq[#bits<64>](%context, 2))
+  %matched = #and[#bits<1>](%a0, %name_ok)
+  #if #eq[#bits<1>](%matched, 0) {
+    %z0 = #call meta_cell_put(%result, 0)
+    %z1 = #call meta_cell_put(#lea(%result, 32, 1, 0), 0)
+    #return 0
+  }
+  %parent_count = #call ast_child_count(%parent)
+  %end = #add[#bits<64>](%cursor, 2)
+  #if #ugt[#bits<64>](%end, %parent_count) {
+    %e0 = #call meta_expand_result_error(%result, 9409)
+    #return 0
+  }
+  %body = #call ast_child(%parent, #add[#bits<64>](%cursor, 1))
+  %delimiter = #call ast_delim(%body)
+  #if #ne[#bits<8>](%delimiter, 123) {
+    %e1 = #call meta_expand_result_error(%result, 9409)
+    #return 0
+  }
+  // 先递归展开块内语句，再把最终孩子列表作为替换切片发布。
+  %expanded = #call meta_expand_stmt_group(%body)
+  #if #eq[#bits<64>](%expanded, 0) {
+    %status0 = #call lain_meta_status()
+    %code0 = #trunc[#bits<32>](%status0)
+    #return %code0
+  }
+  %count = #call ast_child_count(%expanded)
+  %empty = #eq[#bits<64>](%count, 0)
+  %slice = #if %empty -> (#bits<64>) {
+    #yield 0
+  } else {
+    %mark = #call meta_bump_mark()
+    %bytes = #mul[#bits<64>](%count, 8)
+    %off = #call meta_bump_alloc(%bytes)
+    #if #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF) {
+      %e2 = #call meta_expand_result_error(%result, 17)
+      #return 0
+    }
+    %scratch = #call lain_meta_scratch_data()
+    %refs = #lea(%scratch, %off, 1, 0)
+    %filled = #loop children(%i: #bits<64> = 0) -> (#bits<64>) {
+      %more = #ult[#bits<64>](%i, %count)
+      #if %more {
+        %child = #call ast_child(%expanded, %i)
+        %child_off = #mul[#bits<64>](%i, 8)
+        %child_at = #lea(%refs, %child_off, 1, 0)
+        %put = #call meta_cell_put(%child_at, %child)
+        #continue children(#add[#bits<64>](%i, 1))
+      } else { #break children(1) }
+    }
+    %made = #call lain_meta_ast_append_refs(%refs, %count)
+    %release = #call meta_bump_release(%mark)
+    #yield %made
+  }
+  %slice_bad = #and[#bits<1>](#eq[#bits<1>](%empty, 0),
+                              #eq[#bits<64>](%slice, 0))
+  #if %slice_bad {
+    %status1 = #call lain_meta_status()
+    %code1 = #trunc[#bits<32>](%status1)
+    #return %code1
+  }
+  %s0 = #call meta_cell_put(%result, 1)
+  %s1 = #call meta_cell_put(#lea(%result, 8, 1, 0), 2)
+  %s2 = #call meta_cell_put(#lea(%result, 16, 1, 0), %slice)
+  %s3 = #call meta_cell_put(#lea(%result, 24, 1, 0), %count)
+  %s4 = #call meta_cell_put(#lea(%result, 32, 1, 0), 0)
+  %s5 = #call meta_cell_put(#lea(%result, 40, 1, 0), 0)
+  #return 0
+}
+
+// 块内部已经由处理器递归展开；这里只把替换引用复制进父输出序列。
+#proc meta_expand_replacement_my_block(%slice: #bits<64>,
+                                       %count: #bits<64>,
+                                       %buffer: #addr,
+                                       %outn: #bits<64>) -> #bits<64> {
+  %empty = #eq[#bits<64>](%count, 0)
+  #if %empty { #return 1 }
+  %bytes = #mul[#bits<64>](%count, 8)
+  %src = #call lain_meta_ast_span_addr(%slice, %bytes)
+  %copied = #loop repl(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %off = #mul[#bits<64>](%i, 8)
+      %at = #lea(%src, %off, 1, 0)
+      %raw = #call meta_cell_get(%at)
+      %put = #call meta_expand_store_ref(%buffer,
+                    #add[#bits<64>](%outn, %i), %raw)
+      #continue repl(#add[#bits<64>](%i, 1))
+    } else { #break repl(1) }
+  }
+  #return %copied
+}

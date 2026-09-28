@@ -12,3 +12,44 @@
   %s = #call meta_lower_func(%base, %len, %parent, %index, %node)
   #return %s
 }
+
+// func 声明的孩子上下文适配器。表面布局由本处理器拥有：第 5 个相对孩子是
+// statement Group。返回约定与 if 适配器相同。
+#proc meta_expand_children_func(%root: #bits<64>, %cursor: #bits<64>,
+                                %count: #bits<64>, %buffer: #addr,
+                                %outn: #bits<64>) -> #bits<64> {
+  %end = #add[#bits<64>](%cursor, 6)
+  %room = #ule[#bits<64>](%end, %count)
+  #if #eq[#bits<1>](%room, 0) {
+    %node0 = #call ast_child(%root, %cursor)
+    %fallback0 = #call meta_expand_store_ref(%buffer, %outn, %node0)
+    #return 1
+  }
+  %body_i = #add[#bits<64>](%cursor, 5)
+  %body = #call ast_child(%root, %body_i)
+  %delimiter = #call ast_delim(%body)
+  #if #ne[#bits<8>](%delimiter, 123) {
+    %node1 = #call ast_child(%root, %cursor)
+    %fallback1 = #call meta_expand_store_ref(%buffer, %outn, %node1)
+    #return 1
+  }
+  %new_body = #call meta_expand_stmt_group(%body)
+  #if #eq[#bits<64>](%new_body, 0) { #return 0 }
+  %copied = #loop form(%j: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%j, 6)
+    #if %more {
+      %at = #add[#bits<64>](%cursor, %j)
+      %old = #call ast_child(%root, %at)
+      %body_slot = #eq[#bits<64>](%j, 5)
+      %value = #if %body_slot -> (#bits<64>) { #yield %new_body }
+               else { #yield %old }
+      %put = #call meta_expand_store_ref(%buffer,
+                   #add[#bits<64>](%outn, %j), %value)
+      #continue form(#add[#bits<64>](%j, 1))
+    } else { #break form(1) }
+  }
+  %changed = #ne[#bits<64>](%new_body, %body)
+  %flag = #if %changed -> (#bits<64>) { #yield 0x8000000000000000 }
+          else { #yield 0 }
+  #return #or[#bits<64>](%flag, 6)
+}
