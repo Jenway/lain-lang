@@ -1,16 +1,13 @@
-// 第二期 Expand 调度器。语法绑定在 Meta 内分派，Host 只提供语言无关的 AstOut。
-// 当前只注册 statement 上下文的 my_if；声明与表达式处理器留给后续阶段。
+// Expand 调度器。语法绑定在 Meta 内分派，Host 只提供语言无关的 AstOut。
+// 当前只有 statement 上下文的 my_if 提供替换入口；声明处理器提供 declare/lower，
+// 表达式处理器与库动态登记仍留给第三期后续批次。
 
-// 初始语法环境：handler_id=1 表示 meta_expand_my_if。
+// 查当前语法环境；名字、上下文和作用域均由 Meta 注册表决定。
 #proc meta_syntax_handler(%parent: #bits<64>, %cursor: #bits<64>,
+                          %env: #bits<64>, %scope: #bits<64>,
                           %context: #bits<64>) -> #bits<64> {
-  %stmt = #eq[#bits<64>](%context, 2)
   %node = #call ast_child(%parent, %cursor)
-  %base = #call lain_meta_source_data(0)
-  %kw = #data_addr meta_kw_my_if
-  %name = #call meta_node_is_word(%node, %base, %kw, 5)
-  %hit = #and[#bits<1>](%stmt, %name)
-  %id = #if %hit -> (#bits<64>) { #yield 1 } else { #yield 0 }
+  %id = #call meta_syntax_lookup(%node, %env, %scope, %context)
   #return %id
 }
 
@@ -63,8 +60,9 @@
     #if %more {
       %visit = #call lain_meta_ast_charge(1, 1)
       #if #ne[#bits<32>](%visit, 0) { #break walk(0) }
-      %handler = #call meta_syntax_handler(%group, %i, 2)
-      %has_handler = #ne[#bits<64>](%handler, 0)
+      %handler = #call meta_syntax_handler(%group, %i, 1, 0, 2)
+      // 只有带 Expand 入口的处理器进入替换 ABI；核心 if 只提供孩子上下文。
+      %has_handler = #eq[#bits<64>](%handler, 1)
       #if %has_handler {
         %called = #call lain_meta_ast_charge(2, 1)
         #if #ne[#bits<32>](%called, 0) { #break walk(0) }
@@ -145,8 +143,8 @@
       // 既有 if 不是宏，但它的分支仍是 statement context；递归处理其中的 my_if。
       %node = #call ast_child(%group, %i)
       %base = #call lain_meta_source_data(0)
-      %ikw = #data_addr meta_kw_if
-      %is_if = #call meta_node_is_word(%node, %base, %ikw, 2)
+      %core_handler = #call meta_syntax_lookup(%node, 1, 0, 2)
+      %is_if = #eq[#bits<64>](%core_handler, 3)
       %fit = #add[#bits<64>](%i, 3)
       %if_room = #ule[#bits<64>](%fit, %count)
       %if_shape = #and[#bits<1>](%is_if, %if_room)
@@ -251,36 +249,45 @@
   #if #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF) { #return 0 }
   %scratch = #call lain_meta_scratch_data()
   %buffer = #lea(%scratch, %off, 1, 0)
-  %base = #call lain_meta_source_data(0)
-  %fkw = #data_addr meta_kw_func
   %packed = #loop top(%i: #bits<64> = 0, %changed: #bits<1> = 0) -> (#bits<64>) {
     %more = #ult[#bits<64>](%i, %count)
     #if %more {
       %visit = #call lain_meta_ast_charge(1, 1)
       #if #ne[#bits<32>](%visit, 0) { #break top(0) }
       %node = #call ast_child(%root, %i)
-      // 函数体位于 `func` 后第 5 格。只在走到 body 自身时替换这个位置，
-      // 不能在 func 位置把关键字替换成 body。
-      %has_prev = #uge[#bits<64>](%i, 5)
-      %candidate = #if %has_prev -> (#bits<1>) {
-        %func_i = #sub[#bits<64>](%i, 5)
-        %func_node = #call ast_child(%root, %func_i)
-        %hit = #call meta_node_is_word(%func_node, %base, %fkw, 4)
-        #yield %hit
-      } else { #yield 0 }
-      %value = #if %candidate -> (#bits<64>) {
-        %d = #call ast_delim(%node)
-        %brace = #eq[#bits<8>](%d, 123)
-        %v = #if %brace -> (#bits<64>) {
-          %expanded = #call meta_expand_stmt_group(%node)
-          #yield %expanded
-        } else { #yield %node }
-        #yield %v
-      } else { #yield %node }
-      #if #eq[#bits<64>](%value, 0) { #break top(0) }
-      %put = #call meta_expand_store_ref(%buffer, %i, %value)
-      %ch = #or[#bits<1>](%changed, #ne[#bits<64>](%value, %node))
-      #continue top(#add[#bits<64>](%i, 1), %ch)
+      %handler = #call meta_syntax_lookup(%node, 1, 0, 1)
+      %is_func = #eq[#bits<64>](%handler, 2)
+      %func_end = #add[#bits<64>](%i, 6)
+      %func_room = #ule[#bits<64>](%func_end, %count)
+      %func_shape = #and[#bits<1>](%is_func, %func_room)
+      #if %func_shape {
+        // func 处理器拥有自己的表面布局：相对下标 5 是 STMT 函数体。
+        %body_i = #add[#bits<64>](%i, 5)
+        %body = #call ast_child(%root, %body_i)
+        %delimiter = #call ast_delim(%body)
+        %brace = #eq[#bits<8>](%delimiter, 123)
+        #if %brace {
+          %new_body = #call meta_expand_stmt_group(%body)
+          #if #eq[#bits<64>](%new_body, 0) { #break top(0) }
+          %copied = #loop form(%j: #bits<64> = 0) -> (#bits<64>) {
+            %more_form = #ult[#bits<64>](%j, 6)
+            #if %more_form {
+              %at = #add[#bits<64>](%i, %j)
+              %old = #call ast_child(%root, %at)
+              %body_slot = #eq[#bits<64>](%j, 5)
+              %value = #if %body_slot -> (#bits<64>) {
+                #yield %new_body
+              } else { #yield %old }
+              %putf = #call meta_expand_store_ref(%buffer, %at, %value)
+              #continue form(#add[#bits<64>](%j, 1))
+            } else { #break form(1) }
+          }
+          %chf = #or[#bits<1>](%changed, #ne[#bits<64>](%new_body, %body))
+          #continue top(%func_end, %chf)
+        }
+      }
+      %put = #call meta_expand_store_ref(%buffer, %i, %node)
+      #continue top(#add[#bits<64>](%i, 1), %changed)
     } else {
       %flag = #if %changed -> (#bits<64>) { #yield 0x8000000000000000 }
               else { #yield 0 }

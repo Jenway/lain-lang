@@ -6,8 +6,8 @@
 // 底座也不认识任何 Lain 概念。
 //
 // v0 认的顶层形式：`let` / `struct` / `enum` / `func` / `scalar`（只在模块里有效）
-// / `import(...)`。分派按**形状**走（`meta_lower_form` 问的是「这个节点是不是内容
-// 为 struct 的词」），不按字节搜关键字。语言面的清单见 README「v0 的语言」。
+// / `import(...)`。关键字经 Meta 语法注册表取得 handler，再由各声明处理器登记与
+// Lowering；底座不参与语言分派。语言面的清单见 README「v0 的语言」。
 //
 // 三个入口对应三个标准阶段。v0 里 expand 是恒等（还没有宏），
 // elaborate 与 lower 合成一条直线——等形状长出来再拆。
@@ -83,10 +83,6 @@
   %base = #call lain_meta_source_data(%source)
   %root = #call meta_root_of(%source)
   %count = #call ast_child_count(%root)
-  %skw = #data_addr meta_kw_scalar
-  %kw = #data_addr meta_kw_struct
-  %ekw = #data_addr meta_kw_enum
-  %lkw = #data_addr meta_kw_let
   // **顶层形式的遍历是一个游标**：`(root, i)`，i 从 0 走到 child_count。走到头
   // 就结束 —— 不再有「节点自己的下一个兄弟」这种东西（规范 §2.1）。
   %status = #loop forms(%i: #bits<64> = 0) -> (#bits<32>) {
@@ -94,20 +90,11 @@
     #if %more {
       %node = #call ast_child(%root, %i)
       %here = #call meta_node_start(%node)
-      %is_struct = #call meta_node_is_word(%node, %base, %kw, 6)
-      %is_enum = #call meta_node_is_word(%node, %base, %ekw, 4)
-      %is_scalar = #call meta_node_is_word(%node, %base, %skw, 6)
-      %is_let = #call meta_node_is_word(%node, %base, %lkw, 3)
-      %fkw = #data_addr meta_kw_func
-      %is_func = #call meta_node_is_word(%node, %base, %fkw, 4)
-      %h1 = #or[#bits<1>](%is_struct, %is_enum)
-      %h2 = #or[#bits<1>](%is_scalar, %is_let)
-      %h3 = #or[#bits<1>](%h1, %h2)
-      %any = #or[#bits<1>](%h3, %is_func)
+      %handler = #call meta_syntax_lookup(%node, 1, 0, 1)
+      %any = #ne[#bits<64>](%handler, 0)
       %s = #if %any -> (#bits<32>) {
-        %d = #call meta_lower_form(%base, %len, %here, %root, %i, %node,
-                                    %is_struct, %is_enum, %is_scalar, %is_let,
-                                    %is_func)
+        %d = #call meta_lower_decl_invoke(%handler, %base, %len, %here,
+                                           %root, %i, %node)
         #yield %d
       } else {
         // **顶层树的孩子是词，不是形式**——一条形式跨好几个孩子（`struct`
@@ -133,51 +120,6 @@
     }
   }
   #return %status
-}
-
-// 一条顶层形式：关键字已经认出来了，按它分派。`(parent, index)` 是这条形式在
-// 顶层序列里的**出现位置** —— 下游任何需要「往后走几个孩子」的地方都靠它。
-#proc meta_lower_form(%base: #addr, %len: #bits<64>,
-                       %here: #bits<64>, %parent: #bits<64>,
-                       %index: #bits<64>, %node: #bits<64>,
-                       %is_struct: #bits<1>,
-                       %is_enum: #bits<1>, %is_scalar: #bits<1>,
-                       %is_let: #bits<1>, %is_func: #bits<1>) -> #bits<32> {
-  // 诊断（宿主槽 13/14）：形式分派入口的次数与节点引用。
-  %s = #if %is_struct -> (#bits<32>) {
-    %r1 = #call meta_lower_struct(%base, %len, %here)
-    #yield %r1
-  } else {
-    %r2 = #if %is_enum -> (#bits<32>) {
-      %r4 = #call meta_lower_enum(%base, %len, %here)
-      #yield %r4
-    } else {
-      %r3 = #if %is_func -> (#bits<32>) {
-        %r7 = #call meta_lower_func(%base, %len, %parent, %index, %node)
-        #yield %r7
-      } else {
-        %r5 = #if %is_scalar -> (#bits<32>) {
-          // 标量声明只在**模块**里有效（prelude / 被 import 的源码）。
-          // 被降级的那份源码自己写 `scalar` 会静默变成不可见，所以直接拒。
-          %f2 = #call lain_meta_fail(14)
-          #yield 14
-        } else {
-          %r6 = #if %is_let -> (#bits<32>) {
-            %r8 = #call meta_lower_let(%base, %len, %here)
-            #yield %r8
-          } else {
-            %f = #call lain_meta_fail(4)
-            #yield 4
-          }
-          #yield %r6
-        }
-        #yield %r5
-      }
-      #yield %r3
-    }
-    #yield %r2
-  }
-  #return %s
 }
 
 // --- 积类型 ---------------------------------------------------------------

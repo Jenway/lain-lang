@@ -188,6 +188,10 @@
     %c4 = #call meta_cell_put(#lea(%scratch, 1088, 1, 0), %nodes0_sem)
     %c5 = #call meta_cell_put(#lea(%scratch, 1096, 1, 0), %nodes0_sem)
     %semi = #call meta_sem_init()
+    // 语法环境与本次 scratch 布局同寿命。scan=0 给 Expand 使用；提交新 Root 后
+    // scan=1 会重新建表，供声明登记、recognize 与 lowering 查询。
+    %syntax = #call meta_syntax_init()
+    #if #ne[#bits<32>](%syntax, 0) { #return %syntax }
     // **每份源码都读成树**：不只是被降级的那份。模块和 root 环境的名字查找
     // 以后也要在树上做，所以它们的树现在就得在。
     // 诊断（安全格 2048=源数量、2056=ps 循环迭代次数）
@@ -822,25 +826,13 @@
   %en1 = #add[#bits<64>](%en0, 1)
   %es1 = #call meta_cell_put(#lea(%esc, 1992, 1, 0), %en1)
   %first_i = #add[#bits<64>](0, 0)
-  %skw = #data_addr meta_kw_scalar
-  %kw = #data_addr meta_kw_struct
-  %ekw = #data_addr meta_kw_enum
-  %lkw = #data_addr meta_kw_let
   %st = #loop forms(%i: #bits<64> = 0) -> (#bits<32>) {
     %more = #ult[#bits<64>](%i, %count)
     #if %more {
       %node = #call ast_child(%root, %i)
       %here = #call meta_node_start(%node)
-      %is_scalar = #call meta_node_is_word(%node, %base, %skw, 6)
-      %is_struct = #call meta_node_is_word(%node, %base, %kw, 6)
-      %is_enum = #call meta_node_is_word(%node, %base, %ekw, 4)
-      %is_let = #call meta_node_is_word(%node, %base, %lkw, 3)
-      %fkw = #data_addr meta_kw_func
-      %is_func = #call meta_node_is_word(%node, %base, %fkw, 4)
-      %h1 = #or[#bits<1>](%is_scalar, %is_struct)
-      %h2 = #or[#bits<1>](%is_enum, %is_let)
-      %h3 = #or[#bits<1>](%h1, %h2)
-      %any = #or[#bits<1>](%h3, %is_func)
+      %handler = #call meta_syntax_lookup(%node, 1, %level_start, 1)
+      %any = #ne[#bits<64>](%handler, 0)
       %s = #if %any -> (#bits<32>) {
         // 诊断（安全区 1960=source、1968=命中的下标、1976=进入 add_form 的次数）
         %qsc = #call lain_meta_scratch_data()
@@ -849,9 +841,8 @@
         %qn0 = #call meta_cell_get_raw(#lea(%qsc, 1976, 1, 0))
         %qn1 = #add[#bits<64>](%qn0, 1)
         %qs2 = #call meta_cell_put(#lea(%qsc, 1976, 1, 0), %qn1)
-        %d = #call meta_scope_add_form(%base, %len, %source,
-                                       %level_start, %root, %i, %is_scalar,
-                                       %is_struct, %is_enum, %is_let, %is_func)
+        %d = #call meta_declare_invoke(%handler, %base, %len, %source,
+                                       %level_start, %root, %i)
         #yield %d
       } else {
         // 顶层树的孩子是词，不是形式——见 meta_lower_source 同处的说明。
@@ -883,7 +874,8 @@
   #return %st
 }
 
-// 把一条顶层形式的名字记进表。关键字已经认出来了，**节点下标也传进来**。
+// 把一条顶层形式的名字记进表。关键字已经由 declarations.l1 的处理器分派，
+// **节点下标也传进来**。
 //
 // `payload` / `aux` 存的是**已经解析好的东西**，不是「等用到再回源码找」的位置：
 //
@@ -896,50 +888,6 @@
 //
 // 「节点下标」这一列是这张表被叫成符号表的原因：它指着声明本身。用的时候是
 // O(1) 地读那个节点，不是拿名字回源码里搜一遍。
-#proc meta_scope_add_form(%base: #addr, %len: #bits<64>,
-                           %source: #bits<64>, %level_start: #bits<64>,
-                           %parent: #bits<64>, %index: #bits<64>,
-                           %is_scalar: #bits<1>,
-                           %is_struct: #bits<1>, %is_enum: #bits<1>,
-                           %is_let: #bits<1>, %is_func: #bits<1>) -> #bits<32> {
-  %s = #if %is_scalar -> (#bits<32>) {
-    %r1 = #call meta_scope_add_scalar(%base, %len, %source,
-                                      %level_start, %parent, %index)
-    #yield %r1
-  } else {
-    %r2 = #if %is_struct -> (#bits<32>) {
-      %x1 = #call meta_scope_add_decl(%base, %len, %source,
-                                      %level_start, %parent, %index, 4)
-      #yield %x1
-    } else {
-      %r3 = #if %is_enum -> (#bits<32>) {
-        %x2 = #call meta_scope_add_decl(%base, %len, %source,
-                                        %level_start, %parent, %index, 5)
-        #yield %x2
-      } else {
-        %r7 = #if %is_func -> (#bits<32>) {
-          %x4 = #call meta_scope_add_decl(%base, %len, %source,
-                                          %level_start, %parent, %index, 6)
-          #yield %x4
-        } else {
-          %r4 = #if %is_let -> (#bits<32>) {
-            %x3 = #call meta_scope_add_let(%base, %len, %source,
-                                           %level_start, %parent, %index)
-            #yield %x3
-          } else {
-            #yield 0
-          }
-          #yield %r4
-        }
-        #yield %r7
-      }
-      #yield %r3
-    }
-    #yield %r2
-  }
-  #return %s
-}
-
 // --- 查类型 ---------------------------------------------------------------
 
 // 名字 → 类型 id。查表；标量条目第一次查到时才去 intern，结果缓存回条目里。

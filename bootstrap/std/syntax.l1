@@ -1,0 +1,170 @@
+// Meta 语法环境。表项与处理器 ID 都属于 Meta；CSpace 只提供内存和 AstOut 能力。
+//
+// SyntaxBinding 每项 56 字节：
+//   binding_id / syntax_env / name_addr / name_len / context / handler / scope
+// name_addr 指向 Meta 映像的只读 data，不是宿主地址，也不跨 CSpace 边界。
+// 第三期先登记内置环境；后续库声明沿用同一张表追加。
+
+data meta_syntax_state rw { 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 }
+
+#proc meta_syntax_state_put(%off: #bits<64>, %value: #bits<64>) -> #bits<32> {
+  %state = #data_addr meta_syntax_state
+  %w = #call meta_cell_put_raw(#lea(%state, %off, 1, 0), %value)
+  #return 0
+}
+
+#proc meta_syntax_state_get(%off: #bits<64>) -> #bits<64> {
+  %state = #data_addr meta_syntax_state
+  %v = #call meta_cell_get(#lea(%state, %off, 1, 0))
+  #return %v
+}
+
+#proc meta_syntax_entry(%index: #bits<64>) -> #addr {
+  %base_i = #call meta_syntax_state_get(0)
+  %base = #int2ptr[#addr](%base_i)
+  %off = #mul[#bits<64>](%index, 56)
+  %entry = #lea(%base, %off, 1, 0)
+  #return %entry
+}
+
+#proc meta_syntax_add(%env: #bits<64>, %name: #addr, %name_len: #bits<64>,
+                      %context: #bits<64>, %handler: #bits<64>,
+                      %scope: #bits<64>) -> #bits<32> {
+  %count = #call meta_syntax_state_get(8)
+  %capacity = #call meta_syntax_state_get(16)
+  %full = #uge[#bits<64>](%count, %capacity)
+  #if %full {
+    %f0 = #call lain_meta_fail(17)
+    #return 17
+  }
+  // 冲突按真实四元组判：环境、上下文、作用域、名字。注册顺序不决定覆盖。
+  %conflict = #loop find(%i: #bits<64> = 0) -> (#bits<1>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %e = #call meta_syntax_entry(%i)
+      %ee = #call meta_cell_get(#lea(%e, 8, 1, 0))
+      %en_i = #call meta_cell_get(#lea(%e, 16, 1, 0))
+      %el = #call meta_cell_get(#lea(%e, 24, 1, 0))
+      %ec = #call meta_cell_get(#lea(%e, 32, 1, 0))
+      %es = #call meta_cell_get(#lea(%e, 48, 1, 0))
+      %a0 = #and[#bits<1>](#eq[#bits<64>](%ee, %env),
+                           #eq[#bits<64>](%ec, %context))
+      %a1 = #and[#bits<1>](%a0, #eq[#bits<64>](%es, %scope))
+      %a2 = #and[#bits<1>](%a1, #eq[#bits<64>](%el, %name_len))
+      %same = #if %a2 -> (#bits<1>) {
+        %en = #int2ptr[#addr](%en_i)
+        %eqb = #call meta_bytes_equal(%en, %name, %name_len)
+        #yield %eqb
+      } else { #yield 0 }
+      #if %same { #break find(1) }
+      #continue find(#add[#bits<64>](%i, 1))
+    } else { #break find(0) }
+  }
+  #if %conflict {
+    %f1 = #call lain_meta_fail(9412)
+    #return 9412
+  }
+  %entry = #call meta_syntax_entry(%count)
+  %binding = #add[#bits<64>](%count, 1)
+  %name_i = #ptr2int[#bits<64>](%name)
+  %w0 = #call meta_cell_put(%entry, %binding)
+  %w1 = #call meta_cell_put(#lea(%entry, 8, 1, 0), %env)
+  %w2 = #call meta_cell_put(#lea(%entry, 16, 1, 0), %name_i)
+  %w3 = #call meta_cell_put(#lea(%entry, 24, 1, 0), %name_len)
+  %w4 = #call meta_cell_put(#lea(%entry, 32, 1, 0), %context)
+  %w5 = #call meta_cell_put(#lea(%entry, 40, 1, 0), %handler)
+  %w6 = #call meta_cell_put(#lea(%entry, 48, 1, 0), %scope)
+  %next = #add[#bits<64>](%count, 1)
+  %wc = #call meta_syntax_state_put(8, %next)
+  #return 0
+}
+
+#proc meta_syntax_lookup_at_scope(%node: #bits<64>, %env: #bits<64>,
+                                  %scope: #bits<64>,
+                                  %context: #bits<64>) -> #bits<64> {
+  %count = #call meta_syntax_state_get(8)
+  %handler = #loop find(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %e = #call meta_syntax_entry(%i)
+      %ee = #call meta_cell_get(#lea(%e, 8, 1, 0))
+      %name_i = #call meta_cell_get(#lea(%e, 16, 1, 0))
+      %name_len = #call meta_cell_get(#lea(%e, 24, 1, 0))
+      %ec = #call meta_cell_get(#lea(%e, 32, 1, 0))
+      %eh = #call meta_cell_get(#lea(%e, 40, 1, 0))
+      %es = #call meta_cell_get(#lea(%e, 48, 1, 0))
+      %env_ok = #eq[#bits<64>](%ee, %env)
+      %ctx_ok = #eq[#bits<64>](%ec, %context)
+      %scope_ok = #eq[#bits<64>](%es, %scope)
+      %m0 = #and[#bits<1>](%env_ok, %ctx_ok)
+      %eligible = #and[#bits<1>](%m0, %scope_ok)
+      %hit = #if %eligible -> (#bits<1>) {
+        %name = #int2ptr[#addr](%name_i)
+        %same = #call meta_node_is_word(%node, %name, %name, %name_len)
+        #yield %same
+      } else { #yield 0 }
+      #if %hit { #break find(%eh) }
+      #continue find(#add[#bits<64>](%i, 1))
+    } else { #break find(0) }
+  }
+  #return %handler
+}
+
+// 同名局部绑定优先于预编译环境；第一次扫描只传 scope=0，因此只见内置项。
+// 分两次查避免“内置项登记得早，所以永远遮住局部项”的顺序依赖。
+#proc meta_syntax_lookup(%node: #bits<64>, %env: #bits<64>,
+                         %scope: #bits<64>, %context: #bits<64>) -> #bits<64> {
+  %local = #call meta_syntax_lookup_at_scope(%node, %env, %scope, %context)
+  %need_global = #and[#bits<1>](#ne[#bits<64>](%scope, 0),
+                                #eq[#bits<64>](%local, 0))
+  %answer = #if %need_global -> (#bits<64>) {
+    %global = #call meta_syntax_lookup_at_scope(%node, %env, 0, %context)
+    #yield %global
+  } else { #yield %local }
+  #return %answer
+}
+
+// handler: 1=my_if，2=func，3=if，4=struct，5=enum，6=scalar，
+// 7=顶层 let，8=return，9=局部 let，10=for。
+#proc meta_syntax_init() -> #bits<32> {
+  %capacity = #add[#bits<64>](10, 0)
+  %bytes = #mul[#bits<64>](%capacity, 56)
+  %off = #call meta_bump_alloc(%bytes)
+  %bad = #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF)
+  #if %bad { #return 17 }
+  %scratch = #call lain_meta_scratch_data()
+  %base = #lea(%scratch, %off, 1, 0)
+  %base_i = #ptr2int[#bits<64>](%base)
+  %s0 = #call meta_syntax_state_put(0, %base_i)
+  %s1 = #call meta_syntax_state_put(8, 0)
+  %s2 = #call meta_syntax_state_put(16, %capacity)
+  %my = #data_addr meta_kw_my_if
+  %fn = #data_addr meta_kw_func
+  %iff = #data_addr meta_kw_if
+  %st = #data_addr meta_kw_struct
+  %en = #data_addr meta_kw_enum
+  %sc = #data_addr meta_kw_scalar
+  %let = #data_addr meta_kw_let
+  %ret = #data_addr meta_kw_return
+  %for = #data_addr meta_kw_for
+  %a0 = #call meta_syntax_add(1, %my, 5, 2, 1, 0)
+  #if #ne[#bits<32>](%a0, 0) { #return %a0 }
+  %a1 = #call meta_syntax_add(1, %fn, 4, 1, 2, 0)
+  #if #ne[#bits<32>](%a1, 0) { #return %a1 }
+  %a2 = #call meta_syntax_add(1, %iff, 2, 2, 3, 0)
+  #if #ne[#bits<32>](%a2, 0) { #return %a2 }
+  %a3 = #call meta_syntax_add(1, %st, 6, 1, 4, 0)
+  #if #ne[#bits<32>](%a3, 0) { #return %a3 }
+  %a4 = #call meta_syntax_add(1, %en, 4, 1, 5, 0)
+  #if #ne[#bits<32>](%a4, 0) { #return %a4 }
+  %a5 = #call meta_syntax_add(1, %sc, 6, 1, 6, 0)
+  #if #ne[#bits<32>](%a5, 0) { #return %a5 }
+  %a6 = #call meta_syntax_add(1, %let, 3, 1, 7, 0)
+  #if #ne[#bits<32>](%a6, 0) { #return %a6 }
+  %a7 = #call meta_syntax_add(1, %ret, 6, 2, 8, 0)
+  #if #ne[#bits<32>](%a7, 0) { #return %a7 }
+  %a8 = #call meta_syntax_add(1, %let, 3, 2, 9, 0)
+  #if #ne[#bits<32>](%a8, 0) { #return %a8 }
+  %a9 = #call meta_syntax_add(1, %for, 3, 2, 10, 0)
+  #return %a9
+}
