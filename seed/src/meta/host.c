@@ -98,12 +98,12 @@ struct LainMetaHost {
    * 先过账户：宿主也是"实际承诺一块底层存储"的一方。 */
   LainVmQuota *quota;
   uint64_t charged; /* 已经计入账户的字节数（暂存区 + 输出缓冲容量） */
-  LainEvalLimits eval_limits;
-  LainEvalValue eval_result;
-  uint32_t eval_status;
-  L1Diagnostic eval_diagnostic;
-  bool eval_ready;
-  uint32_t eval_requests;
+  LainApplyLimits apply_limits;
+  LainApplyValue apply_result;
+  uint32_t apply_status;
+  L1Diagnostic apply_diagnostic;
+  bool apply_ready;
+  uint32_t apply_requests;
   /* 段表。第一期的段只有 Source 与 AstIn；`live` 由驱动撤销映射时清掉
    * （`lainmeta_host_revoke_tree`），撤销后引用解析一律拒 9401。 */
   LainMetaSegment segments[LAIN_META_SEGMENT_CAP];
@@ -150,10 +150,10 @@ struct LainMetaHost {
  *   lain_meta_emit_data           ()                        文本地址
  *   lain_meta_emit_length         ()                        字节数
  *   lain_meta_fail                (code)                    0
- *   lain_meta_eval_request        (text, len, entry, len)   结果位模式
- *   lain_meta_eval_status         ()                        诊断码
- *   lain_meta_eval_kind           ()                        物理类型类别
- *   lain_meta_eval_width          ()                        位宽
+ *   lain_meta_apply_request        (text, len, entry, len)   结果位模式
+ *   lain_meta_apply_status         ()                        诊断码
+ *   lain_meta_apply_kind           ()                        物理类型类别
+ *   lain_meta_apply_width          ()                        位宽
  * 宿主指针**不在**业务参数里：它是能力槽上的 context，由 VM 注入。
  * ------------------------------------------------------------------------- */
 
@@ -183,19 +183,19 @@ void lainmeta_host_attach_space(LainMetaHost *host, LainVmSpace *space) {
   host->space = space;
 }
 
-void lainmeta_host_set_eval_limits(LainMetaHost *host,
-                                   const LainEvalLimits *limits) {
-  if (host && limits) host->eval_limits = *limits;
+void lainmeta_host_set_apply_limits(LainMetaHost *host,
+                                    const LainApplyLimits *limits) {
+  if (host && limits) host->apply_limits = *limits;
 }
 
-uint32_t lainmeta_host_eval_requests(const LainMetaHost *host) {
-  return host ? host->eval_requests : 0;
+uint32_t lainmeta_host_apply_requests(const LainMetaHost *host) {
+  return host ? host->apply_requests : 0;
 }
 
-int lainmeta_host_eval_diagnostic(const LainMetaHost *host, L1Diagnostic *out) {
-  if (!host || !out || !host->eval_requests || !host->eval_status) return 0;
-  *out = host->eval_diagnostic;
-  out->code = (int)host->eval_status;
+int lainmeta_host_apply_diagnostic(const LainMetaHost *host, L1Diagnostic *out) {
+  if (!host || !out || !host->apply_requests || !host->apply_status) return 0;
+  *out = host->apply_diagnostic;
+  out->code = (int)host->apply_status;
   return 1;
 }
 
@@ -260,9 +260,9 @@ void lainmeta_host_attach_quota(LainMetaHost *host, LainVmQuota *quota) {
 LainMetaHost *lainmeta_host_new(void) {
   LainMetaHost *host = (LainMetaHost *)calloc(1, sizeof(LainMetaHost));
   if (!host) return NULL;
-  host->eval_limits.max_call_depth = 64;
-  host->eval_limits.stack_bytes = 4096;
-  host->eval_limits.fuel = 1000000;
+  host->apply_limits.max_call_depth = 64;
+  host->apply_limits.stack_bytes = 4096;
+  host->apply_limits.fuel = 1000000;
   /* 工作区**按需分配**：大小要等源码都登记完才知道（见下）。 */
   host->scratch = NULL;
   host->scratch_size = 0;
@@ -911,22 +911,35 @@ static uint32_t cap_scratch_size(void *context, const uint64_t *args,
   return 0;
 }
 
-/* 先核对 Meta 地址空间的两段输入，再拷入本次请求私有文本。
- * Eval 在独立 VSpace 中运行，只拿驱动显式给的能力与预算。 */
-static uint32_t cap_eval_request(void *context, const uint64_t *args,
+/* apply 请求并入 Expand 统一预算（步骤 4）：先扣 1 次 handler_call，再按
+ * ceil(请求文本字节数 / 8) 扣 visit。两笔都成功才启动执行；任一不够就是
+ * 9410 的可恢复拒绝（与 cap_ast_charge 同侧），调用方不启动 VM。
+ * 未启用 AstOut 时没有统一账户，按规则明确拒绝，不静默放行。 */
+static uint32_t apply_budget_charge(LainMetaHost *host, uint64_t text_len) {
+  uint32_t rc;
+  if (!host->ast_out) return 9347;
+  rc = lain_ast_output_charge(host->ast_out, 2, 1);
+  if (rc) return LAIN_AST_ERR_BUDGET;
+  rc = lain_ast_output_charge(host->ast_out, 1, text_len / 8 + (text_len % 8 != 0));
+  return rc ? LAIN_AST_ERR_BUDGET : 0;
+}
+
+/* 先核对 Meta 地址空间的两段输入，再扣统一预算，最后拷入本次请求私有文本。
+ * apply 在独立 VSpace 中运行，只拿驱动显式给的能力与预算。 */
+static uint32_t cap_apply_request(void *context, const uint64_t *args,
                                  uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
   const char *text, *entry;
   char *text_copy = NULL, *entry_copy = NULL;
-  LainEvalValue value;
+  LainApplyResult result;
   L1Diagnostic diag;
   uint64_t text_len, entry_len;
+  uint32_t rc;
   if (!host) return LAINMETA_ERR_DENIED;
   if (count != 4 || !args) return LAINMETA_ERR_DENIED;
-  host->eval_requests++;
-  host->eval_ready = false;
-  host->eval_status = LAINMETA_ERR_DENIED;
-  memset(&host->eval_diagnostic, 0, sizeof(host->eval_diagnostic));
+  host->apply_ready = false;
+  host->apply_status = LAINMETA_ERR_DENIED;
+  memset(&host->apply_diagnostic, 0, sizeof(host->apply_diagnostic));
   if (out) *out = 0;
   text = (const char *)(uintptr_t)args[0];
   text_len = args[1];
@@ -939,79 +952,96 @@ static uint32_t cap_eval_request(void *context, const uint64_t *args,
     return 0;
   if (memchr(text, 0, (size_t)text_len) ||
       memchr(entry, 0, (size_t)entry_len)) {
-    host->eval_status = 9330;
+    host->apply_status = 9330;
     return 0;
   }
+  /* 预算扣账在**参数与地址检查之后、启动执行之前**，也早于计数：
+   * 被预算拒绝的请求没有发给 apply 服务，按 apply_requests 的含义不计入。 */
+  rc = apply_budget_charge(host, text_len);
+  if (rc) {
+    host->apply_status = rc; /* 9410 = 预算可恢复拒绝；9347 = 没有统一预算 */
+    return 0;
+  }
+  host->apply_requests++;
   text_copy = (char *)malloc((size_t)text_len + 1u);
   entry_copy = (char *)malloc((size_t)entry_len + 1u);
   if (!text_copy || !entry_copy) {
-    host->eval_status = LAINMETA_ERR_OOM;
-    goto cleanup_eval;
+    host->apply_status = LAINMETA_ERR_OOM;
+    goto cleanup_apply;
   }
   memcpy(text_copy, text, (size_t)text_len);
   text_copy[text_len] = '\0';
   memcpy(entry_copy, entry, (size_t)entry_len);
   entry_copy[entry_len] = '\0';
   memset(&diag, 0, sizeof(diag));
-  if (!laineval_text(text_copy, entry_copy, &host->eval_limits, &value, &diag)) {
-    host->eval_status = diag.code ? (uint32_t)diag.code : 9330;
-    host->eval_diagnostic = diag;
-    goto cleanup_eval;
+  memset(&result, 0, sizeof(result));
+  /* 入口是模块里的普通 #proc，零实参。结果只接受标量：kind/width 的核对契约
+   * 不变（Meta 通过 lain_meta_apply_kind/width 读），字节块在本层还不存在。 */
+  if (!lainapply_proc(text_copy, entry_copy, NULL, 0, &host->apply_limits, &result,
+                      &diag)) {
+    host->apply_status = diag.code ? (uint32_t)diag.code : 9330;
+    host->apply_diagnostic = diag;
+    goto cleanup_apply;
   }
-  host->eval_result = value;
-  host->eval_ready = true;
-  host->eval_status = 0;
-  if (out) *out = value.bits;
-cleanup_eval:
+  if (result.kind != LAINAPPLY_RESULT_SCALAR) {
+    host->apply_status = 9330;
+    memset(&host->apply_diagnostic, 0, sizeof(host->apply_diagnostic));
+    goto cleanup_apply;
+  }
+  host->apply_result = result.scalar;
+  host->apply_ready = true;
+  host->apply_status = 0;
+  if (out) *out = result.scalar.bits;
+cleanup_apply:
   free(entry_copy);
   free(text_copy);
   return 0;
 }
 
-static uint32_t cap_eval_status(void *context, const uint64_t *args,
+static uint32_t cap_apply_status(void *context, const uint64_t *args,
                                 uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
   (void)args;
   if (!host) return LAINMETA_ERR_DENIED;
   if (count != 0) return LAINMETA_ERR_DENIED;
-  if (out) *out = host->eval_status;
+  if (out) *out = host->apply_status;
   return 0;
 }
 
-static uint32_t cap_eval_kind(void *context, const uint64_t *args,
+static uint32_t cap_apply_kind(void *context, const uint64_t *args,
                               uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
   (void)args;
   if (!host) return LAINMETA_ERR_DENIED;
   if (count != 0) return LAINMETA_ERR_DENIED;
-  if (out) *out = host->eval_ready ? host->eval_result.kind : 0;
+  if (out) *out = host->apply_ready ? host->apply_result.kind : 0;
   return 0;
 }
 
 /* 行列属于本次生成的 LAINIR 请求，不代表 Lain 源文件位置。 */
-static uint32_t cap_eval_diagnostic_field(void *context, const uint64_t *args,
+static uint32_t cap_apply_diagnostic_field(void *context, const uint64_t *args,
                                           uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
   uint64_t value;
   if (!host) return LAINMETA_ERR_DENIED;
   if (count != 1 || !args) return LAINMETA_ERR_DENIED;
   switch (args[0]) {
-    case 1: value = host->eval_status; break;
-    case 2: value = host->eval_diagnostic.line; break;
-    case 3: value = host->eval_diagnostic.column; break;
+    case 1: value = host->apply_status; break;
+    case 2: value = host->apply_diagnostic.line; break;
+    case 3: value = host->apply_diagnostic.column; break;
     default: return LAINMETA_ERR_DENIED;
   }
   if (out) *out = value;
   return 0;
 }
 
-static uint32_t cap_eval_width(void *context, const uint64_t *args,
+static uint32_t cap_apply_width(void *context, const uint64_t *args,
                                uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
   (void)args;
   if (!host) return LAINMETA_ERR_DENIED;
   if (count != 0) return LAINMETA_ERR_DENIED;
-  if (out) *out = host->eval_ready ? host->eval_result.width : 0;
+  if (out) *out = host->apply_ready ? host->apply_result.width : 0;
   return 0;
 }
 
@@ -1471,6 +1501,15 @@ uint32_t lainmeta_host_enable_ast_out(LainMetaHost *host,
 bool lainmeta_host_ast_out(const LainMetaHost *host, LainAstArenaView *out) {
   return host && lain_ast_output_view(host->ast_out, out);
 }
+/* 只读计数：apply 请求已并入 Expand 统一预算，驱动要能核对实际扣账。
+ * 未启用 AstOut 时没有账户，一律返回 0。 */
+uint64_t lainmeta_host_ast_handler_calls(const LainMetaHost *host) {
+  return host && host->ast_out
+             ? lain_ast_output_handler_calls(host->ast_out) : 0;
+}
+uint64_t lainmeta_host_ast_visits(const LainMetaHost *host) {
+  return host && host->ast_out ? lain_ast_output_visits(host->ast_out) : 0;
+}
 static uint32_t output_entry(LainMetaHost *host, const uint64_t *args,
                              uint32_t count, uint32_t wanted, uint64_t *out) {
   LainAstArenaView view;
@@ -1628,11 +1667,11 @@ static const MetaCapability k_capabilities[] = {
     {"lain_meta_scratch_data", cap_scratch_data},
     {"lain_meta_scratch_size", cap_scratch_size},
     {"lain_meta_scratch_report", cap_scratch_report},
-    {"lain_meta_eval_request", cap_eval_request},
-    {"lain_meta_eval_status", cap_eval_status},
-    {"lain_meta_eval_diagnostic_field", cap_eval_diagnostic_field},
-    {"lain_meta_eval_kind", cap_eval_kind},
-    {"lain_meta_eval_width", cap_eval_width},
+    {"lain_meta_apply_request", cap_apply_request},
+    {"lain_meta_apply_status", cap_apply_status},
+    {"lain_meta_apply_diagnostic_field", cap_apply_diagnostic_field},
+    {"lain_meta_apply_kind", cap_apply_kind},
+    {"lain_meta_apply_width", cap_apply_width},
     {"lain_meta_ast_root", cap_ast_root},
     {"lain_meta_ast_node_addr", cap_ast_node_addr},
     {"lain_meta_ast_span_addr", cap_ast_span_addr},

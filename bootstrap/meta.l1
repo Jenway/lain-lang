@@ -9,13 +9,15 @@
 // / `import(...)`。关键字经 Meta 语法注册表取得 handler，再由各声明处理器登记与
 // Lowering；底座不参与语言分派。语言面的清单见 README「v0 的语言」。
 //
-// 三个入口对应三个标准阶段。v0 里 expand 是恒等（还没有宏），
-// elaborate 与 lower 合成一条直线——等形状长出来再拆。
+// ABI 提供版本、初始化与 lower；lower 内部先协调展开与声明登记，再识别和生成。
 
 #proc lain_std_abi_version() -> #bits<64> {
   // 第一期把节点形状从私有树搬进 LAINAST v1 旁表、宿主侧建平铺 AstIn、新增
   // `lain_meta_ast_*` 读原语，公共 ABI 因此从 2 提到 3（v2 实现不再可配）。
-  #return 3
+  // 命名迁移批把 seed 的 Eval 服务改称 apply：五个宿主能力名由原来的
+  // eval 拼写改为 `lain_meta_apply_*`，接口本身不改，公共 ABI 因此从 3 提到 4
+  // （v3 实现不再可配）。
+  #return 4
 }
 
 #proc lain_std_initialize() -> #bits<32> {
@@ -44,34 +46,7 @@
   #if %pre_bad {
     #return %pre_setup
   }
-  %expanded0 = #call meta_expand_source(%source)
-  %deferred0 = #eq[#bits<32>](%expanded0, 9411)
-  %expanded = #if %deferred0 -> (#bits<32>) {
-    // 一轮声明登记推进依赖版本，然后从原 Root 和新事务完整重试。
-    %before = #call meta_scope_count()
-    %declared = #call meta_declare_available(%source)
-    %decl_bad = #ne[#bits<32>](%declared, 0)
-    %retry = #if %decl_bad -> (#bits<32>) {
-      #yield %declared
-    } else {
-      %after = #call meta_scope_count()
-      %progress = #ugt[#bits<64>](%after, %before)
-      %attempt = #if %progress -> (#bits<32>) {
-        %second = #call meta_expand_source(%source)
-        %still = #eq[#bits<32>](%second, 9411)
-        %resolved = #if %still -> (#bits<32>) {
-          %fdep = #call lain_meta_fail(9411)
-          #yield 9411
-        } else { #yield %second }
-        #yield %resolved
-      } else {
-        %fnone = #call lain_meta_fail(9411)
-        #yield 9411
-      }
-      #yield %attempt
-    }
-    #yield %retry
-  } else { #yield %expanded0 }
+  %expanded = #call meta_expand_declared_source(%source)
   %expand_bad = #ne[#bits<32>](%expanded, 0)
   #if %expand_bad { #return %expanded }
   // 作用域表要先建：外层是 root 环境，内层是这份源码。名字按表查，
@@ -172,7 +147,7 @@
       %failed = #eq[#bits<64>](%size, 0xFFFFFFFFFFFFFFFF)
       %s = #if %failed -> (#bits<32>) {
         %reset = #call lain_meta_emit_reset()
-        %eval_code = #call lain_meta_eval_status()
+        %eval_code = #call lain_meta_apply_status()
         %has_eval_code = #ugt[#bits<64>](%eval_code, 0)
         %code = #if %has_eval_code -> (#bits<32>) {
           %low = #trunc[#bits<32>](%eval_code)

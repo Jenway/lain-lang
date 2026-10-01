@@ -1,4 +1,4 @@
-// `my_block { ... }` 把花括号组的孩子拼入当前 statement 序列。
+// `my_block { ... }` 把花括号组的孩子拼入当前 DECL 或 STMT 序列。
 // 它是通用 N→M 替换的基准处理器：输入固定消费 2 项，输出数量由块内孩子数决定。
 data meta_kw_my_block ro { 109 121 95 98 108 111 99 107 }
 
@@ -7,16 +7,32 @@ data meta_kw_my_block ro { 109 121 95 98 108 111 99 107 }
   %hit = #call meta_node_is_word(%node, %dummy, #data_addr meta_kw_my_block, 8)
   %s = #if %hit -> (#bits<32>) {
     %r = #call meta_syntax_ensure(%node, 2, 11)
-    #yield %r
+    #if #ne[#bits<32>](%r, 0) { #return %r }
+    %decl = #call meta_syntax_ensure(%node, 1, 11)
+    #yield %decl
   } else { #yield 0 }
   #return %s
 }
 
 // 把一个 statement Group 展开后发布为替换切片。my_block 与依赖宏共用这条路径。
 #proc meta_expand_splice_group(%body: #bits<64>, %consumed: #bits<64>,
-                               %result: #addr) -> #bits<32> {
-  %expanded = #call meta_expand_stmt_group(%body)
+                               %context: #bits<64>, %result: #addr) -> #bits<32> {
+  %expanded = #if #eq[#bits<64>](%context, 1) -> (#bits<64>) {
+    %entered = #call lain_meta_ast_charge(4, 1)
+    #if #ne[#bits<32>](%entered, 0) { #return %entered }
+    %root = #call meta_expand_root(%body)
+    %left = #call lain_meta_ast_charge(5, 1)
+    #yield %root
+  } else {
+    %stmt = #call meta_expand_stmt_group(%body)
+    #yield %stmt
+  }
   #if #eq[#bits<64>](%expanded, 0) {
+    %dependency = #call meta_expand_defer_get()
+    #if #ne[#bits<64>](%dependency, 0) {
+      %defer = #call meta_expand_result_defer(%result, %dependency)
+      #return 0
+    }
     %status0 = #call lain_meta_status()
     %code0 = #trunc[#bits<32>](%status0)
     #return %code0
@@ -74,8 +90,9 @@ data meta_kw_my_block ro { 109 121 95 98 108 111 99 107 }
   %dummy = #call lain_meta_source_data(0)
   %kw = #data_addr meta_kw_my_block
   %name_ok = #call meta_node_is_word(%head, %dummy, %kw, 8)
-  %a0 = #and[#bits<1>](#eq[#bits<64>](%abi, 1),
-                        #eq[#bits<64>](%context, 2))
+  %ctx_ok = #or[#bits<1>](#eq[#bits<64>](%context, 1),
+                           #eq[#bits<64>](%context, 2))
+  %a0 = #and[#bits<1>](#eq[#bits<64>](%abi, 1), %ctx_ok)
   %matched = #and[#bits<1>](%a0, %name_ok)
   #if #eq[#bits<1>](%matched, 0) {
     %z0 = #call meta_cell_put(%result, 0)
@@ -98,7 +115,7 @@ data meta_kw_my_block ro { 109 121 95 98 108 111 99 107 }
     %e1 = #call meta_expand_result_error(%result, 9409)
     #return 0
   }
-  %spliced = #call meta_expand_splice_group(%body, 2, %result)
+  %spliced = #call meta_expand_splice_group(%body, 2, %context, %result)
   #return %spliced
 }
 

@@ -61,21 +61,51 @@
   #return %r
 }
 
+// 找当前 Group 的语法拥有者。中央层只枚举此前的兄弟并传相对下标；具体哪一个
+// 孩子进入什么上下文，由命中的处理器回答。
+#proc meta_recognize_group_context(%parent: #bits<64>, %index: #bits<64>,
+                                   %ambient: #bits<64>) -> #bits<64> {
+  %context = #loop owners(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %index)
+    #if %more {
+      %head = #call ast_child(%parent, %i)
+      %handler = #call meta_syntax_lookup(%head, 1, 0, %ambient)
+      %relative = #sub[#bits<64>](%index, %i)
+      %candidate = #if #ne[#bits<64>](%handler, 0) -> (#bits<64>) {
+        %owned = #call meta_recognize_child_context_invoke(%handler, %relative)
+        #yield %owned
+      } else { #yield 0 }
+      #if #ne[#bits<64>](%candidate, 0) { #break owners(%candidate) }
+      #continue owners(#add[#bits<64>](%i, 1))
+    } else { #break owners(0) }
+  }
+  #return %context
+}
+
 // 给一个词节点算形状，写进**语义旁表**（不再往 AstIn 的种类格写）。
 //
 // 参数是一个游标：(父组引用, child_index)。形状里要用到「下一个兄弟」，而规范禁止
 // `node.next` —— 下一个兄弟由父组 + index+1 给出，所以游标是唯一能让这段逻辑成立
 // 的输入形状。
 #proc meta_recognize_word(%base: #addr, %len: #bits<64>, %parent: #bits<64>,
-                          %index: #bits<64>) -> #bits<32> {
+                          %index: #bits<64>,
+                          %ambient: #bits<64>) -> #bits<32> {
   %i = #call ast_child(%parent, %index)
   %at = #call meta_node_start(%i)
   %n = #call meta_node_len(%i)
   %hi = #add[#bits<64>](%at, %n)
 
   // 语言关键字由语法环境拥有；recognize 只把处理器类别映射到旧旁表 form。
-  %decl_match = #call meta_syntax_match(%i, 1, 0, 1)
-  %stmt_match = #call meta_syntax_match(%i, 1, 0, 2)
+  %decl_context = #eq[#bits<64>](%ambient, 1)
+  %stmt_context = #eq[#bits<64>](%ambient, 2)
+  %decl_match = #if %decl_context -> (#bits<64>) {
+    %m = #call meta_syntax_match(%i, 1, 0, 1)
+    #yield %m
+  } else { #yield 0 }
+  %stmt_match = #if %stmt_context -> (#bits<64>) {
+    %m = #call meta_syntax_match(%i, 1, 0, 2)
+    #yield %m
+  } else { #yield 0 }
   %decl_handler = #and[#bits<64>](%decl_match, 0xFFFFFFFF)
   %stmt_handler = #and[#bits<64>](%stmt_match, 0xFFFFFFFF)
   %is_decl = #and[#bits<1>](#uge[#bits<64>](%decl_handler, 2),
@@ -179,6 +209,14 @@
   } else {
     #yield %stmt_binding
   }
+  %context = #if #ne[#bits<64>](%decl_handler, 0) -> (#bits<64>) {
+    #yield 1
+  } else {
+    %stmt_context = #if #ne[#bits<64>](%stmt_handler, 0) -> (#bits<64>) {
+      #yield 2
+    } else { #yield 0 }
+    #yield %stmt_context
+  }
   // Host 的事务旁车按 AstOut 节点槽保存处理器调用 ID。AstIn 不需要这项输出能力，
   // 第一阶段只读消费者因此仍能运行。
   %segment = #lshr[#bits<64>](%i, 48)
@@ -187,7 +225,8 @@
     %eid = #call lain_meta_ast_expansion_id(%i)
     #yield %eid
   } else { #yield 0 }
-  %s = #call meta_sem_put_annotated(%parent, %index, %form, %binding, %expansion)
+  %s = #call meta_sem_put_annotated(%parent, %index, %context, %form,
+                                     %binding, %expansion)
   #return %s
 }
 
@@ -195,7 +234,8 @@
 // **没有兄弟链**：位置由 (父组, 下标) 给出，所以组的孩子和它的后继都不需要节点
 // 自己携带。形状写进语义旁表。
 #proc meta_recognize_all(%base: #addr, %len: #bits<64>,
-                         %group: #bits<64>) -> #bits<32> {
+                         %group: #bits<64>,
+                         %ambient: #bits<64>) -> #bits<32> {
   %count = #call ast_child_count(%group)
   %st = #loop s(%i: #bits<64> = 0) -> (#bits<32>) {
     %more = #ult[#bits<64>](%i, %count)
@@ -214,14 +254,15 @@
           %eid = #call lain_meta_ast_expansion_id(%c)
           #yield %eid
         } else { #yield 0 }
-        %rec = #call meta_sem_put_annotated(%group, %i, 2, 0, %expansion)
+        %rec = #call meta_sem_put_annotated(%group, %i, 0, 2, 0, %expansion)
         #if #ne[#bits<32>](%rec, 0) {
           #return %rec
         }
-        %sub = #call meta_recognize_all(%base, %len, %c)
+        %sub_context = #call meta_recognize_group_context(%group, %i, %ambient)
+        %sub = #call meta_recognize_all(%base, %len, %c, %sub_context)
         #yield %sub
       } else {
-        %w = #call meta_recognize_word(%base, %len, %group, %i)
+        %w = #call meta_recognize_word(%base, %len, %group, %i, %ambient)
         #yield %w
       }
       #if #ne[#bits<32>](%r, 0) {
@@ -258,7 +299,7 @@
     // 孩子 —— 没有游标指向它，也就没有键可写。旧实现记 (root, 0) 是为了让
     // `meta_node_next(root)` 回 NONE，那条路已经不存在了；真写了反而会与
     // 「root 的第 0 个孩子」这条条目**撞键**（同一个 (root, 0)）。
-    %r = #call meta_recognize_all(%base, %len, %root)
+    %r = #call meta_recognize_all(%base, %len, %root, 1)
     #yield %r
   }
   #return %st

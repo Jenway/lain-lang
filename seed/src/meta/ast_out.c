@@ -31,8 +31,14 @@ static uint32_t charge(LainAstOutput *o, uint64_t n) {
   o->visits += n;
   return 0;
 }
-uint32_t lain_ast_output_charge(LainAstOutput *o, uint64_t kind, uint64_t n) {
-  uint64_t *used;
+/* 只读计数（供宿主与专项验收核对统一预算的实际扣账）。 */
+uint64_t lain_ast_output_handler_calls(const LainAstOutput *o) {
+  return o ? o->handler_calls : 0;
+}
+uint64_t lain_ast_output_visits(const LainAstOutput *o) {
+  return o ? o->visits : 0;
+}
+uint32_t lain_ast_output_charge(LainAstOutput *o, uint64_t kind, uint64_t n) {  uint64_t *used;
   uint64_t limit;
   if (!o || !n) return LAIN_AST_ERR_PROTOCOL;
   if (kind == 1) return charge(o, n);

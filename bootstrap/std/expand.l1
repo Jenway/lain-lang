@@ -3,6 +3,8 @@
 // declare/expand-children/lower，表达式处理器与库动态登记留给第三期后续批次。
 
 data meta_expand_defer_state rw { 0 0 0 0 0 0 0 0 }
+data meta_expand_decl_phase rw { 0 0 0 0 0 0 0 0 }
+data meta_expand_decl_state rw { 0 0 0 0 0 0 0 0 }
 data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
 
 #proc meta_expand_defer_put(%dependency: #bits<64>) -> #bits<32> {
@@ -15,6 +17,69 @@ data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
   %p = #data_addr meta_expand_defer_state
   %v = #call meta_cell_get(%p)
   #return %v
+}
+
+// 当前声明依赖协议使用 Token 引用；查询沿用声明解析的当前源码/root 可见性。
+// 返回作用域条目下标；未就绪返回 NOT_FOUND。无关声明增长不能唤醒这个依赖。
+#proc meta_expand_dependency_binding(%dependency: #bits<64>) -> #bits<64> {
+  #if #eq[#bits<64>](%dependency, 0) { #return 0xFFFFFFFFFFFFFFFF }
+  %kind = #call ast_kind(%dependency)
+  #if #ne[#bits<8>](%kind, 1) { #return 0xFFFFFFFFFFFFFFFF }
+  %name = #call ast_text_addr(%dependency)
+  %length = #call ast_text_len(%dependency)
+  %binding = #call meta_scope_find(%name, %length)
+  #return %binding
+}
+
+// 声明协调的当前单轮入口。先回滚挂起事务，再登记声明，只重试已就绪的依赖。
+// 这里尚未发布宏生成声明或建立多任务等待队列，不以全表条数代替依赖状态。
+// 协调整个声明/重试阶段的语义水位。失败不留下本轮新增声明及可见链。
+#proc meta_expand_declared_source(%source: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data()
+  %scope_mark = #call meta_scope_count()
+  %old_env = #call meta_cell_get(#lea(%scratch, 96, 1, 0))
+  %old_current = #call meta_cell_get(#lea(%scratch, 104, 1, 0))
+  %syntax_mark = #call meta_syntax_state_get(8)
+  %status = #call meta_expand_declared_source_inner(%source)
+  #if #ne[#bits<32>](%status, 0) {
+    %tail = #call meta_scope_count()
+    %clear = #loop entries(%i: #bits<64> = %scope_mark) -> (#bits<32>) {
+      #if #ult[#bits<64>](%i, %tail) {
+        %entry = #call meta_scope_entry(%i)
+        %zeroed = #loop words(%j: #bits<64> = 0) -> (#bits<32>) {
+          #if #ult[#bits<64>](%j, 56) {
+            %w = #call meta_cell_put(#lea(%entry, %j, 1, 0), 0)
+            #continue words(#add[#bits<64>](%j, 8))
+          } else { #break words(0) }
+        }
+        #continue entries(#add[#bits<64>](%i, 1))
+      } else { #break entries(0) }
+    }
+    %scopes = #call meta_scope_release(%scope_mark)
+    %env = #call meta_cell_put(#lea(%scratch, 96, 1, 0), %old_env)
+    %current = #call meta_cell_put(#lea(%scratch, 104, 1, 0), %old_current)
+    %syntax = #call meta_syntax_state_put(8, %syntax_mark)
+  }
+  #return %status
+}
+
+#proc meta_expand_declared_source_inner(%source: #bits<64>) -> #bits<32> {
+  %first = #call meta_expand_source(%source)
+  #if #ne[#bits<32>](%first, 9411) { #return %first }
+  %dependency = #call meta_expand_defer_get()
+  %declared = #call meta_declare_available(%source)
+  #if #ne[#bits<32>](%declared, 0) { #return %declared }
+  %binding = #call meta_expand_dependency_binding(%dependency)
+  #if #eq[#bits<64>](%binding, 0xFFFFFFFFFFFFFFFF) {
+    %missing = #call lain_meta_fail(9411)
+    #return 9411
+  }
+  %second = #call meta_expand_source(%source)
+  #if #eq[#bits<32>](%second, 9411) {
+    %stalled = #call lain_meta_fail(9411)
+    #return 9411
+  }
+  #return %second
 }
 
 // expansion_id 是一次处理器调用的稳定身份。每次完整展开尝试从 1 开始；事务重试
@@ -57,7 +122,8 @@ data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
 
 // 调用统一 ABI 的处理器；request/result 是本次调用独占的帧。
 #proc meta_expand_invoke(%handler: #bits<64>, %parent: #bits<64>,
-                         %cursor: #bits<64>, %result: #addr) -> #bits<32> {
+                         %cursor: #bits<64>, %context: #bits<64>,
+                         %result: #addr) -> #bits<32> {
   %scratch = #call lain_meta_scratch_data()
   %off = #call meta_bump_alloc(56)
   %bad = #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF)
@@ -68,7 +134,7 @@ data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
   %q2 = #call meta_cell_put(#lea(%request, 16, 1, 0), %cursor)
   %q3 = #call meta_cell_put(#lea(%request, 24, 1, 0), 1)
   %q4 = #call meta_cell_put(#lea(%request, 32, 1, 0), 0)
-  %q5 = #call meta_cell_put(#lea(%request, 40, 1, 0), 2)
+  %q5 = #call meta_cell_put(#lea(%request, 40, 1, 0), %context)
   %expansion_id = #call meta_expand_next_id()
   #if #eq[#bits<64>](%expansion_id, 0) { #return 9410 }
   %q6 = #call meta_cell_put(#lea(%request, 48, 1, 0), %expansion_id)
@@ -97,8 +163,8 @@ data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
   #return %st
 }
 
-// 展开一个语句块。返回新 Group 引用；0 表示失败，诊断已写入 Host。
-#proc meta_expand_stmt_group_inner(%group: #bits<64>) -> #bits<64> {
+// 按显式 DECL/STMT 上下文展开兄弟序列。返回新 Group 引用；0 表示失败或挂起。
+#proc meta_expand_group_inner(%group: #bits<64>, %context: #bits<64>) -> #bits<64> {
   %count = #call ast_child_count(%group)
   #if #eq[#bits<64>](%count, 0) { #return %group }
   %mark = #call meta_bump_mark()
@@ -128,13 +194,16 @@ data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
     #if %more {
       %visit = #call lain_meta_ast_charge(1, 1)
       #if #ne[#bits<32>](%visit, 0) { #break walk(0) }
-      %handler = #call meta_syntax_handler(%group, %i, 1, 0, 2)
+      %handler = #call meta_syntax_handler(%group, %i, 1, 0, %context)
       // 只有带 Expand 入口的处理器进入替换 ABI；核心 if 只提供孩子上下文。
       %h1 = #eq[#bits<64>](%handler, 1)
       %h11 = #eq[#bits<64>](%handler, 11)
       %h12 = #eq[#bits<64>](%handler, 12)
       %has_handler = #or[#bits<1>](#or[#bits<1>](%h1, %h11), %h12)
       #if %has_handler {
+        #if #eq[#bits<64>](%context, 1) {
+          %decl_change = #call meta_cell_put_raw(#data_addr meta_expand_decl_state, 1)
+        }
         %called = #call lain_meta_ast_charge(2, 1)
         #if #ne[#bits<32>](%called, 0) { #break walk(0) }
         %call_mark = #call meta_bump_mark()
@@ -142,7 +211,7 @@ data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
         %res_bad = #eq[#bits<64>](%res_off, 0xFFFFFFFFFFFFFFFF)
         #if %res_bad { #break walk(0) }
         %result = #lea(%scratch, %res_off, 1, 0)
-        %ist = #call meta_expand_invoke(%handler, %group, %i, %result)
+        %ist = #call meta_expand_invoke(%handler, %group, %i, %context, %result)
         #if #ne[#bits<32>](%ist, 0) {
           %rel0 = #call meta_bump_release(%call_mark)
           #break walk(0)
@@ -212,17 +281,24 @@ data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
         #continue walk(%i2, %o2, 1)
       }
 
-      // 核心语法自己的孩子上下文由对应处理器决定；调度器只消费返回的数量。
+      // 处理器拥有孩子上下文；声明和语句共用替换循环，只按上下文选适配入口。
       %node = #call ast_child(%group, %i)
-      %core_handler = #call meta_syntax_lookup(%node, 1, 0, 2)
-      %is_if = #eq[#bits<64>](%core_handler, 3)
-      #if %is_if {
-        %adapted = #call meta_expand_stmt_children_invoke(%core_handler,
-                      %group, %i, %count, %buffer, %outn)
-        #if #eq[#bits<64>](%adapted, 0) { #break walk(0) }
-        %child_changed = #ne[#bits<64>](
-            #and[#bits<64>](%adapted, 0x8000000000000000), 0)
-        %taken = #and[#bits<64>](%adapted, 0x7FFFFFFFFFFFFFFF)
+      %core_handler = #call meta_syntax_lookup(%node, 1, 0, %context)
+      %is_decl = #eq[#bits<64>](%context, 1)
+      %adapted = #if %is_decl -> (#bits<64>) {
+        %d = #call meta_expand_decl_children_invoke(%core_handler,
+                    %group, %i, %count, %buffer, %outn)
+        #yield %d
+      } else {
+        %t = #call meta_expand_stmt_children_invoke(%core_handler,
+                    %group, %i, %count, %buffer, %outn)
+        #yield %t
+      }
+      #if #eq[#bits<64>](%adapted, 0) { #break walk(0) }
+      %child_changed = #ne[#bits<64>](
+          #and[#bits<64>](%adapted, 0x8000000000000000), 0)
+      %taken = #and[#bits<64>](%adapted, 0x7FFFFFFFFFFFFFFF)
+      #if #ugt[#bits<64>](%taken, 1) {
         %next_i = #add[#bits<64>](%i, %taken)
         %next_o = #add[#bits<64>](%outn, %taken)
         %next_changed = #or[#bits<1>](%changed, %child_changed)
@@ -249,8 +325,12 @@ data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
   %changed_bit = #ne[#bits<64>](#and[#bits<64>](%packed, 0x8000000000000000), 0)
   %outn2 = #and[#bits<64>](%packed, 0x7FFFFFFFFFFFFFFF)
   %answer = #if %changed_bit -> (#bits<64>) {
-    %slice2 = #call lain_meta_ast_append_refs(%buffer, %outn2)
-    %new_group = #if #eq[#bits<64>](%slice2, 0) -> (#bits<64>) {
+    %slice2 = #if #eq[#bits<64>](%outn2, 0) -> (#bits<64>) { #yield 0 }
+              else { %sl = #call lain_meta_ast_append_refs(%buffer, %outn2)
+                     #yield %sl }
+    %bad_slice = #and[#bits<1>](#ne[#bits<64>](%outn2, 0),
+                                 #eq[#bits<64>](%slice2, 0))
+    %new_group = #if %bad_slice -> (#bits<64>) {
       #yield 0
     } else {
       %delimiter = #call ast_delim(%group)
@@ -268,76 +348,40 @@ data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
 #proc meta_expand_stmt_group(%group: #bits<64>) -> #bits<64> {
   %entered = #call lain_meta_ast_charge(4, 1)
   #if #ne[#bits<32>](%entered, 0) { #return 0 }
-  %answer = #call meta_expand_stmt_group_inner(%group)
+  %answer = #call meta_expand_group_inner(%group, 2)
   %left = #call lain_meta_ast_charge(5, 1)
   #if #ne[#bits<32>](%left, 0) { #return 0 }
   #return %answer
 }
 
-// 顶层只把函数体标成 statement context；其它 Group 不盲目递归。
+// DECL 序列也使用相同的 N→M 替换循环；函数体上下文仍由 func 处理器决定。
 #proc meta_expand_root(%root: #bits<64>) -> #bits<64> {
-  %count = #call ast_child_count(%root)
-  %mark = #call meta_bump_mark()
-  %off = #call meta_bump_alloc(#mul[#bits<64>](%count, 8))
-  #if #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF) { #return 0 }
-  %scratch = #call lain_meta_scratch_data()
-  %buffer = #lea(%scratch, %off, 1, 0)
-  %packed = #loop top(%i: #bits<64> = 0, %changed: #bits<1> = 0) -> (#bits<64>) {
-    %more = #ult[#bits<64>](%i, %count)
-    #if %more {
-      %visit = #call lain_meta_ast_charge(1, 1)
-      #if #ne[#bits<32>](%visit, 0) { #break top(0) }
-      %node = #call ast_child(%root, %i)
-      %handler = #call meta_syntax_lookup(%node, 1, 0, 1)
-      %is_func = #eq[#bits<64>](%handler, 2)
-      #if %is_func {
-        %adapted = #call meta_expand_decl_children_invoke(%handler, %root,
-                      %i, %count, %buffer, %i)
-        #if #eq[#bits<64>](%adapted, 0) { #break top(0) }
-        %child_changed = #ne[#bits<64>](
-            #and[#bits<64>](%adapted, 0x8000000000000000), 0)
-        %taken = #and[#bits<64>](%adapted, 0x7FFFFFFFFFFFFFFF)
-        %next_i = #add[#bits<64>](%i, %taken)
-        %next_changed = #or[#bits<1>](%changed, %child_changed)
-        #continue top(%next_i, %next_changed)
-      }
-      %put = #call meta_expand_store_ref(%buffer, %i, %node)
-      #continue top(#add[#bits<64>](%i, 1), %changed)
-    } else {
-      %flag = #if %changed -> (#bits<64>) { #yield 0x8000000000000000 }
-              else { #yield 0 }
-      #break top(#or[#bits<64>](%flag, %count))
-    }
-  }
-  %failed = #eq[#bits<64>](%packed, 0)
-  #if %failed {
-    %rf = #call meta_bump_release(%mark)
-    #return 0
-  }
-  %changed = #ne[#bits<64>](#and[#bits<64>](%packed, 0x8000000000000000), 0)
-  %answer = #if %changed -> (#bits<64>) {
-    %slice = #call lain_meta_ast_append_refs(%buffer, %count)
-    %new_root = #if #eq[#bits<64>](%slice, 0) -> (#bits<64>) {
-      #yield 0
-    } else {
-      %made = #call lain_meta_ast_append_group(0, %slice, %count, %root, 0)
-      #yield %made
-    }
-    #yield %new_root
-  } else { #yield %root }
-  %r = #call meta_bump_release(%mark)
+  %answer = #call meta_expand_group_inner(%root, 1)
   #return %answer
 }
 
 #proc meta_expand_source(%source: #bits<64>) -> #bits<32> {
   %clear_defer = #call meta_expand_defer_put(0)
+  %clear_decl = #call meta_cell_put_raw(#data_addr meta_expand_decl_state, 0)
+  %decl_phase = #call meta_cell_put_raw(#data_addr meta_expand_decl_phase, 1)
+  %syntax_mark = #call meta_syntax_state_get(8)
   %clear_ids = #call meta_expand_id_reset()
   %tx = #call lain_meta_ast_tx_begin()
   %old_root = #call meta_root_of(%source)
-  %new_root = #call meta_expand_root(%old_root)
+  %decl_root = #call meta_expand_root(%old_root)
+  %decl_changed = #call meta_cell_get(#data_addr meta_expand_decl_state)
+  %new_root = #if #eq[#bits<64>](%decl_changed, 0) -> (#bits<64>) {
+    %body_phase = #call meta_cell_put_raw(#data_addr meta_expand_decl_phase, 0)
+    %body_root = #if #ne[#bits<64>](%decl_root, 0) -> (#bits<64>) {
+      %b = #call meta_expand_root(%decl_root)
+      #yield %b
+    } else { #yield 0 }
+    #yield %body_root
+  } else { #yield %decl_root }
   %bad = #eq[#bits<64>](%new_root, 0)
   #if %bad {
     %rb = #call lain_meta_ast_tx_rollback(%tx)
+    %restore_syntax = #call meta_syntax_state_put(8, %syntax_mark)
     %dependency = #call meta_expand_defer_get()
     %deferred = #ne[#bits<64>](%dependency, 0)
     #if %deferred { #return 9411 }
@@ -353,7 +397,15 @@ data meta_expand_id_state rw { 0 0 0 0 0 0 0 0 }
     %rb2 = #call lain_meta_ast_tx_rollback(%tx)
     #yield 0
   } else {
-    %commit = #call lain_meta_ast_commit(%source, %old_root, %new_root, %tx)
+    %decl_changed = #call meta_cell_get(#data_addr meta_expand_decl_state)
+    %commit = #if #ne[#bits<64>](%decl_changed, 0) -> (#bits<32>) {
+      %validated = #call meta_commit_decl_candidate(%source, %old_root, %new_root,
+                                                    %tx, %syntax_mark)
+      #yield %validated
+    } else {
+      %plain = #call lain_meta_ast_commit(%source, %old_root, %new_root, %tx)
+      #yield %plain
+    }
     #yield %commit
   }
   #return %st

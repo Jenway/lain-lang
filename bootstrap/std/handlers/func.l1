@@ -22,6 +22,13 @@
   #return %s
 }
 
+// recognize 的孩子上下文也由 func 拥有：只有相对下标 5 的函数体是 STMT。
+#proc meta_recognize_child_context_func(%relative: #bits<64>) -> #bits<64> {
+  %body = #eq[#bits<64>](%relative, 5)
+  %context = #if %body -> (#bits<64>) { #yield 2 } else { #yield 0 }
+  #return %context
+}
+
 // func 声明的孩子上下文适配器。表面布局由本处理器拥有：第 5 个相对孩子是
 // statement Group。返回约定与 if 适配器相同。
 #proc meta_expand_children_func(%root: #bits<64>, %cursor: #bits<64>,
@@ -42,7 +49,14 @@
     %fallback1 = #call meta_expand_store_ref(%buffer, %outn, %node1)
     #return 1
   }
-  %new_body = #call meta_expand_stmt_group(%body)
+  // 声明阶段只保留函数体引用；全部声明登记之后才展开函数体。
+  %phase = #call meta_cell_get(#data_addr meta_expand_decl_phase)
+  %new_body = #if #ne[#bits<64>](%phase, 0) -> (#bits<64>) {
+    #yield %body
+  } else {
+    %expanded = #call meta_expand_stmt_group(%body)
+    #yield %expanded
+  }
   #if #eq[#bits<64>](%new_body, 0) { #return 0 }
   %copied = #loop form(%j: #bits<64> = 0) -> (#bits<64>) {
     %more = #ult[#bits<64>](%j, 6)

@@ -273,7 +273,7 @@
 }
 
 // Expand 的声明协调步：只登记身份/声明位置，不运行函数体或 Lowering。
-// 第一次 DEFER 后调用；返回 0 表示扫描完成，调用方以 scope_count 是否增长判断进展。
+// 第一次 DEFER 后调用；返回 0 表示扫描完成，协调器随后查询具体依赖是否可见。
 #proc meta_declare_available(%source: #bits<64>) -> #bits<32> {
   %scratch = #call lain_meta_scratch_data()
   %kw = #data_addr meta_logical_prelude
@@ -834,8 +834,15 @@
 #proc meta_scope_scan(%base: #addr, %len: #bits<64>,
                       %source: #bits<64>,
                       %level_start: #bits<64>) -> #bits<32> {
-  // setup 已识别所有源码，此处只消费对应出现位置的形状记录。
   %root = #call meta_root_of(%source)
+  %s = #call meta_scope_scan_root(%base, %len, %source, %level_start, %root)
+  #return %s
+}
+
+// 候选根尚未发布时也可登记声明；调用方负责联合提交或恢复作用域表。
+#proc meta_scope_scan_root(%base: #addr, %len: #bits<64>,
+                           %source: #bits<64>, %level_start: #bits<64>,
+                           %root: #bits<64>) -> #bits<32> {
   %count = #call ast_child_count(%root)
   // 诊断（安全区 1540+src*32）：扫描入口的根与孩子数。
   %ss0 = #call lain_meta_scratch_data()
@@ -859,7 +866,10 @@
       %node = #call ast_child(%root, %i)
       %here = #call meta_node_start(%node)
       %handler = #call meta_syntax_lookup(%node, 1, %level_start, 1)
-      %any = #ne[#bits<64>](%handler, 0)
+      // 未展开的声明宏尚无声明身份；先登记其它已知声明，等待协调器重试。
+      %is_macro = #eq[#bits<64>](%handler, 11)
+      %any = #and[#bits<1>](#ne[#bits<64>](%handler, 0),
+                             #eq[#bits<1>](%is_macro, 0))
       %s = #if %any -> (#bits<32>) {
         // 诊断（安全区 1960=source、1968=命中的下标、1976=进入 add_form 的次数）
         %qsc = #call lain_meta_scratch_data()
@@ -873,7 +883,8 @@
         #yield %d
       } else {
         // 顶层树的孩子是词，不是形式——见 meta_lower_source 同处的说明。
-        %is_first = #eq[#bits<64>](%i, %first_i)
+        %is_first = #and[#bits<1>](#eq[#bits<64>](%i, %first_i),
+                                    #eq[#bits<64>](%handler, 0))
         %x = #if %is_first -> (#bits<32>) {
           %f = #call lain_meta_fail(4)
           #yield 4
@@ -975,4 +986,104 @@
     #yield %w
   }
   #return %r
+}
+
+// AstOut 与候选声明索引联合发布。备份旧条目及两个可见链控制格；登记失败或
+// 根提交失败时，先恢复引用表，再回滚物理节点，防止撤销引用留在作用域/语法表。
+#proc meta_commit_decl_candidate(%source: #bits<64>, %old_root: #bits<64>,
+                                  %new_root: #bits<64>, %tx: #bits<64>,
+                                  %syntax_mark: #bits<64>) -> #bits<32> {
+  %mark = #call meta_bump_mark()
+  %count = #call meta_scope_count()
+  %bytes = #mul[#bits<64>](%count, 56)
+  %off = #call meta_bump_alloc(%bytes)
+  #if #eq[#bits<64>](%off, 0xFFFFFFFFFFFFFFFF) {
+    %rb0 = #call lain_meta_ast_tx_rollback(%tx)
+    %s0 = #call meta_syntax_state_put(8, %syntax_mark)
+    #return 17
+  }
+  %scratch = #call lain_meta_scratch_data()
+  %backup = #lea(%scratch, %off, 1, 0)
+  %base_off = #call meta_cell_get(#lea(%scratch, 72, 1, 0))
+  %table = #lea(%scratch, %base_off, 1, 0)
+  %old_env = #call meta_cell_get(#lea(%scratch, 96, 1, 0))
+  %old_current = #call meta_cell_get(#lea(%scratch, 104, 1, 0))
+  %copied = #loop save(%i: #bits<64> = 0) -> (#bits<32>) {
+    #if #ult[#bits<64>](%i, %bytes) {
+      %v = #call meta_cell_get(#lea(%table, %i, 1, 0))
+      %w = #call meta_cell_put(#lea(%backup, %i, 1, 0), %v)
+      #continue save(#add[#bits<64>](%i, 8))
+    } else { #break save(0) }
+  }
+  %clear = #call meta_scope_release(0)
+  %kw = #data_addr meta_logical_prelude
+  %prelude = #call meta_source_find(%kw, 12)
+  %set_env = #call meta_cell_put(#lea(%scratch, 96, 1, 0), %prelude)
+  %pre = #if #ne[#bits<64>](%prelude, 0xFFFFFFFFFFFFFFFF) -> (#bits<32>) {
+    %pb = #call lain_meta_source_data(%prelude)
+    %pl = #call lain_meta_source_length(%prelude)
+    %ps = #call meta_scope_scan(%pb, %pl, %prelude, 0)
+    #yield %ps
+  } else { #yield 0 }
+  %candidate = #if #eq[#bits<32>](%pre, 0) -> (#bits<32>) {
+    %level = #call meta_scope_count()
+    %set_current = #call meta_scope_set_current(%source)
+    %base = #call lain_meta_source_data(%source)
+    %len = #call lain_meta_source_length(%source)
+    %scan = #call meta_scope_scan_root(%base, %len, %source, %level, %new_root)
+    #yield %scan
+  } else { #yield %pre }
+  %status = #if #eq[#bits<32>](%candidate, 0) -> (#bits<32>) {
+    // 候选声明已登记，函数体可引用同批宏生成的声明。最终根仍在同一个事务内。
+    %body_phase = #call meta_cell_put_raw(#data_addr meta_expand_decl_phase, 0)
+    %final_root = #call meta_expand_root(%new_root)
+    %done = #if #ne[#bits<64>](%final_root, 0) -> (#bits<32>) {
+      %commit = #call lain_meta_ast_commit(%source, %old_root, %final_root, %tx)
+      #yield %commit
+    } else {
+      %dependency = #call meta_expand_defer_get()
+      %code = #if #ne[#bits<64>](%dependency, 0) -> (#bits<32>) {
+        #yield 9411
+      } else {
+        %host = #call lain_meta_status()
+        %error = #trunc[#bits<32>](%host)
+        #yield %error
+      }
+      #yield %code
+    }
+    #yield %done
+  } else { #yield %candidate }
+  #if #ne[#bits<32>](%status, 0) {
+    %restored = #loop restore(%i: #bits<64> = 0) -> (#bits<32>) {
+      #if #ult[#bits<64>](%i, %bytes) {
+        %v = #call meta_cell_get(#lea(%backup, %i, 1, 0))
+        %w = #call meta_cell_put(#lea(%table, %i, 1, 0), %v)
+        #continue restore(#add[#bits<64>](%i, 8))
+      } else { #break restore(0) }
+    }
+    %tail = #call meta_scope_count()
+    %cleared = #loop clear_tail(%i: #bits<64> = %count) -> (#bits<32>) {
+      #if #ult[#bits<64>](%i, %tail) {
+        %entry = #call meta_scope_entry(%i)
+        %zeroed = #loop zero(%j: #bits<64> = 0) -> (#bits<32>) {
+          #if #ult[#bits<64>](%j, 56) {
+            %w = #call meta_cell_put(#lea(%entry, %j, 1, 0), 0)
+            #continue zero(#add[#bits<64>](%j, 8))
+          } else { #break zero(0) }
+        }
+        #continue clear_tail(#add[#bits<64>](%i, 1))
+      } else { #break clear_tail(0) }
+    }
+    %old_count = #call meta_scope_release(%count)
+    %env = #call meta_cell_put(#lea(%scratch, 96, 1, 0), %old_env)
+    %current = #call meta_cell_put(#lea(%scratch, 104, 1, 0), %old_current)
+    %syntax = #call meta_syntax_state_put(8, %syntax_mark)
+    %rb = #call lain_meta_ast_tx_rollback(%tx)
+    %deferred = #call meta_expand_defer_get()
+    #if #eq[#bits<64>](%deferred, 0) {
+      %fail = #call lain_meta_fail(%status)
+    }
+  }
+  %release = #call meta_bump_release(%mark)
+  #return %status
 }

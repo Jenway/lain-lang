@@ -451,6 +451,29 @@
   #return %hit
 }
 
+// 通用 lowering 只需要“这个出现位置”的当前语义，不应伪造 context=0。
+// 精确阶段查询仍使用 sem_find 的完整五字段键。
+#proc sem_find_position(%scratch: #addr, %parent: #bits<64>,
+                        %index: #bits<64>) -> #bits<64> {
+  %base = #call sem_base_get(%scratch)
+  %n = #call sem_count_get(%scratch)
+  %hit = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %n)
+    #if %more {
+      %off = #mul[#bits<64>](%i, 72)
+      %e = #add[#bits<64>](%base, %off)
+      %cell = #lea(%scratch, %e, 1, 0)
+      %k0 = #call meta_cell_get(%cell)
+      %k1 = #call meta_cell_get(#lea(%cell, 8, 1, 0))
+      %same = #and[#bits<1>](#eq[#bits<64>](%k0, %parent),
+                              #eq[#bits<64>](%k1, %index))
+      #if %same { #break s(%i) }
+      #continue s(#add[#bits<64>](%i, 1))
+    } else { #break s(0xFFFFFFFFFFFFFFFF) }
+  }
+  #return %hit
+}
+
 // 按**游标**（父组 + 下标）读形状。这就是旧 `meta_node_form(%ref)` 的替代：
 // 形状属于**出现位置**，不属于节点身份，所以查询必须带上位置。
 #proc meta_node_form(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
@@ -481,9 +504,19 @@
   #return %v
 }
 
-// 第一期识别 pass 的入口：键的环境/作用域/上下文都是 0。
+// 按出现位置读取当前语义；context 是记录内容的一部分，不由旧消费者猜测。
 #proc meta_sem_lookup(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
-  %v = #call meta_sem_lookup_key(%parent, %index, 0, 0, 0)
+  %scratch = #call lain_meta_scratch_data()
+  %hit = #call sem_find_position(%scratch, %parent, %index)
+  %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
+  %v = #if %miss -> (#bits<64>) { #yield 0xFFFFFFFFFFFFFFFF } else {
+    %base = #call sem_base_get(%scratch)
+    %off = #mul[#bits<64>](%hit, 72)
+    %entry = #add[#bits<64>](%base, %off)
+    %cell = #lea(%scratch, %entry, 1, 0)
+    %tag = #call meta_cell_get(#lea(%cell, 48, 1, 0))
+    #yield %tag
+  }
   #return %v
 }
 
@@ -555,9 +588,10 @@
 }
 
 #proc meta_sem_put_annotated(%parent: #bits<64>, %index: #bits<64>,
-                             %form: #bits<64>, %binding: #bits<64>,
+                             %context: #bits<64>, %form: #bits<64>,
+                             %binding: #bits<64>,
                              %expansion: #bits<64>) -> #bits<32> {
-  %v = #call meta_sem_put_full_key(%parent, %index, 0, 0, 0, %form,
+  %v = #call meta_sem_put_full_key(%parent, %index, 0, 0, %context, %form,
                                    %binding, %expansion)
   #return %v
 }
@@ -582,7 +616,7 @@
 
 #proc meta_sem_binding(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
   %scratch = #call lain_meta_scratch_data()
-  %hit = #call sem_find(%scratch, %parent, %index, 0, 0, 0)
+  %hit = #call sem_find_position(%scratch, %parent, %index)
   %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
   %v = #if %miss -> (#bits<64>) { #yield 0 } else {
     %base = #call sem_base_get(%scratch)
@@ -597,7 +631,7 @@
 
 #proc meta_sem_expansion(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
   %scratch = #call lain_meta_scratch_data()
-  %hit = #call sem_find(%scratch, %parent, %index, 0, 0, 0)
+  %hit = #call sem_find_position(%scratch, %parent, %index)
   %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
   %v = #if %miss -> (#bits<64>) { #yield 0 } else {
     %base = #call sem_base_get(%scratch)

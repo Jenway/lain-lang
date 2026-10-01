@@ -22,7 +22,7 @@
 #include "lainvm/caps.h"
 #include "lainvm/quota.h"
 #include "lainvm/space.h"
-#include "laineval/eval.h"
+#include "lainapply/apply.h"
 
 typedef struct LainMetaHost LainMetaHost;
 typedef struct LainMetaTree LainMetaTree;
@@ -65,6 +65,11 @@ void lainmeta_host_free(LainMetaHost *host);
  * 第一期开出的只读能力集合保持不变。 */
 uint32_t lainmeta_host_enable_ast_out(LainMetaHost *, const LainExpandLimits *);
 bool lainmeta_host_ast_out(const LainMetaHost *, LainAstArenaView *);
+/* 只读计数：apply 请求并入 Expand 统一预算后，一次成功的 apply 记为
+ * 1 次 handler_call 加 ceil(模块文本字节数/8) 次 visit（超限拒 9410）。
+ * 驱动用它核对实际扣账；未启用 AstOut 时返回 0。 */
+uint64_t lainmeta_host_ast_handler_calls(const LainMetaHost *);
+uint64_t lainmeta_host_ast_visits(const LainMetaHost *);
 
 /* 放一份源码。文本按**引用**持有：调用方保证它在 Meta 跑完之前有效。 */
 int lainmeta_host_add_source(LainMetaHost *host, const char *path,
@@ -188,14 +193,14 @@ void lainmeta_host_attach_quota(LainMetaHost *host, LainVmQuota *quota);
  * 传 NULL 表示撤销授权。 */
 void lainmeta_host_attach_space(LainMetaHost *host, LainVmSpace *space);
 
-/* Meta 的 Eval 请求使用独立的执行环境；默认只允许纯计算。
+/* Meta 的 apply 请求使用独立的执行环境；默认只允许纯计算。
  * 驱动可显式设置预算与授予的能力，设置须在运行 Meta 前完成。 */
-void lainmeta_host_set_eval_limits(LainMetaHost *host,
-                                   const LainEvalLimits *limits);
+void lainmeta_host_set_apply_limits(LainMetaHost *host,
+                                    const LainApplyLimits *limits);
 
-/* 当前编译请求发给 Eval 服务的次数，供驱动与专项验收核对实际调用路径。 */
-uint32_t lainmeta_host_eval_requests(const LainMetaHost *host);
-/* 最近失败的 Eval 请求诊断；行列属于请求文本。无失败时不修改输出。 */
-int lainmeta_host_eval_diagnostic(const LainMetaHost *host, L1Diagnostic *out);
+/* 当前编译请求发给 apply 服务的次数，供驱动与专项验收核对实际调用路径。 */
+uint32_t lainmeta_host_apply_requests(const LainMetaHost *host);
+/* 最近失败的 apply 请求诊断；行列属于请求文本。无失败时不修改输出。 */
+int lainmeta_host_apply_diagnostic(const LainMetaHost *host, L1Diagnostic *out);
 
 #endif /* LAINMETA_HOST_H */
