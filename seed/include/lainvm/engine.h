@@ -13,9 +13,6 @@
  *   不管阻塞  返回 BLOCKED，由 scheduler 处置
  *   不吞 trap 写进 tcb->trap 后返回 TRAPPED
  *
- * 它不认识 #eval。阶段标注在 folding 阶段就被消掉了：folding 发现一条
- * eval 调用，是它去驱动 VM 跑被调方再替换成常量，VM 运行期永远看不到它。
- *
  * 前置条件：tcb->state == LAINVM_RUNNING。不满足时不动任何东西，
  * 原样返回当前的 slice_result。
  */
@@ -64,8 +61,6 @@ LainVmSliceResult lainvm_engine_run(LainVmTcb *tcb, uint64_t fuel);
 
 /* 直接调一次宿主能力，不经 IR 的调用指令。
  *
- * 编译期执行需要它：#eval 打到外部符号上时没有体区域可以跑，
- * 起不了 activation，只能直接把这一项能力调掉。
  * 结果按被调方声明的返回类型还原（#addr 就是地址，其余是位串）。 */
 LainVmSliceResult lainvm_vm_call_host(LainVmTcb *tcb, uint32_t sub_index,
                                       const L1Value *args, uint32_t arg_count,

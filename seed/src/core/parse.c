@@ -515,8 +515,7 @@ static void set_results(const L1Inst *built, const char **names, uint32_t count)
 }
 
 static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind,
-                                      const char **names, uint32_t name_count,
-                                      bool is_eval) {
+                                      const char **names, uint32_t name_count) {
   L1Operand ops[L1P_MAX_PARAMS];
   uint32_t count = 0;
   const L1Type *ty = NULL;
@@ -616,7 +615,6 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
   }
   if (!inst) return fail(p, 3002, "cannot build the instruction");
   set_results(inst, names, name_count);
-  if (is_eval) inst->is_eval = true;
   if (is_volatile) inst->is_volatile = true;
   inst->order = order;
   inst->line = p->line;
@@ -662,29 +660,6 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     return fail(p, 3010, "vector lane suffixes are not supported yet");
 
   switch (kind) {
-  case INST_EVAL: {
-    const L1Type *results[L1P_MAX_RESULTS];
-    uint32_t result_count = 0;
-    const L1Region *body;
-    L1Inst *inst;
-    skip(p);
-    /* `#eval` 有两种形态：后面是标识符就是带编译期标记的调用
-     * （`#eval f(1)`，与 `#call` 同一条路径），是 `->` / `{` 就是编译期块
-     * （`#eval -> (#bits<64>) { ... }`）。两者打印出来也是这两个形状。 */
-    if (cur(p) != '-' && cur(p) != '{')
-      return parse_operands_and_finish(p, into, INST_CALL, names, name_count,
-                                       true);
-    if (!parse_region_results(p, results, L1P_MAX_RESULTS, &result_count))
-      return false;
-    body = parse_block(p, NULL, 0, results, result_count);
-    if (!body) return false;
-    inst = (L1Inst *)lainir_inst_eval(p->builder,
-                                      name_count ? names[0] : NULL, body);
-    if (!inst) return fail(p, 3002, "cannot build #eval");
-    set_results(inst, names, name_count);
-    return list_push(p, into, inst);
-  }
-
   case INST_IF: {
     L1Operand cond;
     const L1Type *results[L1P_MAX_RESULTS];
@@ -861,7 +836,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
   }
 
   default:
-    return parse_operands_and_finish(p, into, kind, names, name_count, false);
+    return parse_operands_and_finish(p, into, kind, names, name_count);
   }
 }
 

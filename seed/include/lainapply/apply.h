@@ -2,7 +2,7 @@
 #ifndef LAINAPPLY_APPLY_H
 #define LAINAPPLY_APPLY_H
 
-/* 通用 apply（步骤 3）：入口是模块内的普通 `#proc`，实参是常量值数组。
+/* 通用 apply：入口是模块内的普通 `#proc`，实参是常量值数组。
  * 拒码段 9340–9349；设计与契约见 docs/compile-time.md。 */
 
 #include <stdbool.h>
@@ -14,7 +14,7 @@
 
 typedef struct {
   /* NULL = 不授予宿主能力。非 NULL 时**调用方必须已经冻结**这张表；
-   * apply/fold 只借用、不修改也不冻结它，表的生命周期由调用方负责。 */
+   * apply 只借用、不修改也不冻结它，表的生命周期由调用方负责。 */
   LainVmCaps *caps;
   uint32_t max_call_depth;
   uint64_t stack_bytes;
@@ -71,21 +71,6 @@ typedef struct {
 
 /* 输入模块须已验证。操作数是此调用的编译期常量；结果不能是地址。
  * 每次调用建立独立空间和预算。失败写稳定诊断码，不交付部分结果。 */
-bool lainapply_call(const L1Module *module, const L1Inst *inst,
-                    const L1Operand *operands, const LainApplyLimits *limits,
-                    LainApplyValue *out, L1Diagnostic *diag);
-/* 可选执行账目快照，在执行资源释放后写入；提前拒绝时为零账目。 */
-bool lainapply_call_report(const L1Module *module, const L1Inst *inst,
-                           const L1Operand *operands, const LainApplyLimits *limits,
-                           LainApplyValue *out, L1Diagnostic *diag,
-                           LainVmQuota *quota_out);
-
-/* 完整 LAINIR 文本中的 entry 是查询包装过程：其体仅有一条带结果的
- * #eval 调用，接着 #return 该结果。entry 名字指定唯一求值位置。 */
-bool lainapply_text(const char *text, const char *entry,
-                    const LainApplyLimits *limits, LainApplyValue *out,
-                    L1Diagnostic *diag);
-
 /* 通用 apply：在独立 VSpace 里执行模块中名为 entry 的普通 `#proc`。
  *
  * 实参按值传，数量与类型必须与过程签名逐项一致，不允许 `#addr` 实参。

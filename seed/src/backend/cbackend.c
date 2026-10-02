@@ -52,9 +52,6 @@ struct LainBackend {
   uint8_t *widths;
   uint32_t slot_cap;
   uint32_t next_slot;
-  /* #eval 检查用的工作表；容量取区域总数这个安全上界。 */
-  const L1Region **worklist;
-  uint32_t worklist_cap;
   uint32_t label_seq;
   uint32_t indent;
   bool failed;
@@ -186,10 +183,7 @@ static bool size_backend(LainBackend *be, const L1Module *module) {
   be->regions = (RegionBase *)calloc(max_regions ? max_regions : 1u,
                                      sizeof(RegionBase));
   be->widths = (uint8_t *)calloc(max_slots ? max_slots : 1u, 1u);
-  be->worklist = (const L1Region **)calloc(max_regions ? max_regions : 1u,
-                                           sizeof(const L1Region *));
-  be->worklist_cap = max_regions;
-  if (!be->regions || !be->widths || !be->worklist) {
+  if (!be->regions || !be->widths) {
     fail(be, 9227, "cbackend: cannot allocate the layout tables");
     return false;
   }
@@ -1206,56 +1200,7 @@ void lainbackend_free(LainBackend *backend) {
   if (!backend) return;
   free(backend->regions);
   free(backend->widths);
-  free(backend->worklist);
   free(backend);
-}
-
-/* 往工作表里压一个区域；容量是区域总数上界，压不下就是计数错了。 */
-static bool push_work(LainBackend *be, uint32_t *depth,
-                      const L1Region *region) {
-  if (!region) return true;
-  if (*depth >= be->worklist_cap) {
-    fail(be, 9226, "cbackend: region layout does not match the module");
-    return false;
-  }
-  be->worklist[(*depth)++] = region;
-  return true;
-}
-
-/* #eval 必须已经被折叠消掉。
- *
- * 工作表容量取区域总数（区域是树，每个区域最多压一次），所以不存在
- * 「压不下就跳过」这条静默路径——这里曾经是 stack[128] + 越界就静默丢弃，
- * 于是深嵌套里的 #eval 会被漏检。 */
-static bool check_no_eval(LainBackend *be) {
-  uint32_t i;
-  for (i = 0; i < be->module->subroutine_count; i++) {
-    uint32_t depth = 0;
-    if ((be->module->subroutines[i].flags & SUBROUTINE_EXTERN) ||
-        !be->module->subroutines[i].body)
-      continue;
-    if (!push_work(be, &depth, be->module->subroutines[i].body)) return false;
-    while (depth > 0) {
-      const L1Region *region = be->worklist[--depth];
-      uint32_t pos;
-      for (pos = 0; pos < region->inst_count; pos++) {
-        const L1Inst *inst = &region->insts[pos];
-        uint32_t k;
-        if (inst->is_eval || inst->kind == INST_EVAL) {
-          fail(be, 9225, "cbackend: #eval must be folded away before codegen");
-          return false;
-        }
-        if (!push_work(be, &depth, inst->body)) return false;
-        if (!push_work(be, &depth, inst->else_body)) return false;
-        if (!push_work(be, &depth, inst->default_case)) return false;
-        /* 分支体也要查：不然深埋在 case 里的 #eval 会被漏掉。 */
-        for (k = 0; k < inst->case_count; k++) {
-          if (!push_work(be, &depth, inst->cases[k].body)) return false;
-        }
-      }
-    }
-  }
-  return true;
 }
 
 int lainbackend_emit(LainBackend *be, const L1Module *module) {
@@ -1267,12 +1212,9 @@ int lainbackend_emit(LainBackend *be, const L1Module *module) {
   /* 先按模块量尺寸：槽数和区域数都由模块自己决定。 */
   free(be->regions);
   free(be->widths);
-  free(be->worklist);
   be->regions = NULL;
   be->widths = NULL;
-  be->worklist = NULL;
   if (!size_backend(be, module)) return 1;
-  if (!check_no_eval(be)) return 1;
 
   emit_prologue(be);
   emit_data(be);

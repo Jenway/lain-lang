@@ -14,8 +14,7 @@
 //   kind 1 = 模块引用（import 绑定）  payload = 被 import 的源码下标，aux = 逻辑路径位置
 //   kind 2 = 标量类型                 payload = 类型 id（注册表里的身份；0 = 还没查过）
 //   kind 3 = 值绑定                   payload = 初始化式的位置
-//   kind 4 = 积类型（struct）         payload = 声明位置
-//   kind 5 = 和类型（enum）           payload = 声明位置
+//   kind 4/5/6 = struct/enum/func     payload = 节点，aux = 父组引用，emitted = 组内下标
 //
 // 查找规则：**从表尾往前找**，也就是「最内层优先，再往外」。表按范围逐层追加，
 // 所以「倒着找、第一个命中」天然就是词法作用域的语义。
@@ -47,17 +46,21 @@
 //   +128  每份源码的树根数组起点（偏移）
 //   +136  语法树的节点容量
 //   +144  降级期的临时值计数器
-//   +152  保留
+//   +152  当前 lowering 声明索引（无当前声明 = UINT64_MAX）
 //   +160  保留（对齐，8 字节）
 //   +168  表达式结果：引用 / 范围起点 / 范围终点 / 终点节点（4 格，meta.l1）
-//   +200  实参表，每条 24 字节（引用 / 范围起点 / 范围终点），上限 12 条 → +487
-//   +488  字面量默认类型的宽度（`meta_op_resolve_default` 写，见 scalars.l1）
-//   +496  实参个数
-//   +504  当前函数的参数组节点（一格，不建表，见 funcs.l1）
+//   +200  bump 分配器当前水位        +208  历史最高水位
+//   +216  当前实参块偏移（块本身在动态分配区，每条 24 字节）
+//   +224..+255 parse 计数/诊断格        +256..+415 scalar 解析辅助格
+//   +416  依赖边表偏移  +424 边/闭包容量  +432 边数
+//   +440  闭包表偏移    +448 闭包条数
+//   +488  字面量默认类型宽度（scalars.l1）
+//   +496  当前实参块条目数             +504  当前函数参数组节点（调用层保存/恢复）
 //   +512  注册表条目数
 //
 //   --- 动态区（容量按输入预计算）---
-//        注册表每条 64 字节；作用域表每条 56 字节。
+//        注册表每条 64 字节；作用域表每条 56 字节；依赖区每单位容量 24 字节
+//        （一条 from/to 边 16 字节 + 一个闭包节点 8 字节）。
 //        作用域区下界至少 2560；路径区、语义表在宿主段/根元数据末尾之后。
 //        路径缓冲区 352 字节；语义表头 48 字节，条目 72 字节。
 //        语义容量 = 全任务源码字节总数 + 8，一次认领，满额拒 17。
@@ -116,6 +119,12 @@
     #yield %reg_end
   }
   %sc_bytes = #mul[#bits<64>](%scap, 56)
+  // 最坏每个源码字节都开启一条调用引用；每条边 16 字节，宁可预留后按需占用，
+  // 也不在降低期间扩容或返回无效依赖表地址。
+  %dep_cap = #add[#bits<64>](%total, 8)
+  %dep_bytes = #mul[#bits<64>](%dep_cap, 24)
+  %dep_base = #add[#bits<64>](%sc_base, %sc_bytes)
+  %dep_end = #add[#bits<64>](%dep_base, %dep_bytes)
   // **第一期起暂存区里没有语法树了**：树是宿主在登记源码时建好、驱动只读映射进来的
   // 平铺 AstIn Arena，不占 Meta 一格。跟着一起删掉的还有：节点预留区、每份源码一个
   // 根槽（根引用由宿主写进暂存区头部的段/根表，见 parse.l1 的 meta_root_of）、以及
@@ -128,7 +137,7 @@
   // 原写法是 `%sc_base + 0`，于是路径缓冲区与语义旁表都紧贴作用域表起点，
   // 三层互相覆盖 —— 实测 `sem_base == sc_base == 5384`，旁表 44 条
   // (1408 字节) 正好盖掉作用域表的前 25 个条目槽，`sc_cnt` 因此长期为 0/2。
-  %path_at = #add[#bits<64>](%sc_base, %sc_bytes)
+  %path_at = #add[#bits<64>](%dep_end, 0)
   %ctl_end = #add[#bits<64>](1096, 64)
   %lower = #if #ult[#bits<64>](%path_at, %host_end) -> (#bits<64>) {
     #yield %host_end
@@ -158,9 +167,17 @@
     %s3 = #call meta_cell_put(#lea(%scratch, 72, 1, 0), %sc_base)
     %s4 = #call meta_cell_put(#lea(%scratch, 80, 1, 0), %scap)
     %s5 = #call meta_cell_put(#lea(%scratch, 88, 1, 0), 0)
+    %s6 = #call meta_cell_put(#lea(%scratch, 152, 1, 0), 0xFFFFFFFFFFFFFFFF)
+    %d0 = #call meta_cell_put(#lea(%scratch, 416, 1, 0), %dep_base)
+    %d1 = #call meta_cell_put(#lea(%scratch, 424, 1, 0), %dep_cap)
+    %d2 = #call meta_cell_put(#lea(%scratch, 432, 1, 0), 0)
+    %closure_base_off = #mul[#bits<64>](%dep_cap, 16)
+    %closure_base = #add[#bits<64>](%dep_base, %closure_base_off)
+    %d3 = #call meta_cell_put(#lea(%scratch, 440, 1, 0), %closure_base)
+    %d4 = #call meta_cell_put(#lea(%scratch, 448, 1, 0), 0)
     // 分配器的区段 = 固定认领之后剩下的全部。`%need` 正好是认领的末尾（它已经
     // 把树、注册表、作用域表和路径缓冲区都算进去了），所以它就是初始水位。
-    // **不写它的话第一次 `meta_bump_alloc` 会从 0 开始**：实参块与 `#eval` 的
+    // **不写它的话第一次 `meta_bump_alloc` 会从 0 开始**：实参块与 apply 的
     // 请求文本会盖掉宿主的段/根表头与固定格（实测 +208 变成产物文本的 8 个字节，
     // 于是 `lain_meta_scratch_report` 报 38 = 资源发布越界）。
     %bw = #call meta_cell_put(#lea(%scratch, 200, 1, 0), %need)
@@ -168,6 +185,7 @@
     // 「当前实参块」和实参个数也要有个确定的初值（第一次调用前没人写过它们）
     %bq = #call meta_cell_put(#lea(%scratch, 216, 1, 0), 0)
     %bc = #call meta_cell_put(#lea(%scratch, 496, 1, 0), 0)
+    %fp = #call meta_cell_put(#lea(%scratch, 504, 1, 0), 0)
     // +1000 语义旁表**条目区**起点（表头就在它前面 48 字节）、+1008 条数、
     // +1056 容量（源码字节数 + 8）。表头由 `meta_sem_init` 按规范 §2.2 写全 —— 它必须在这
     // 两格都写好之后调。
@@ -310,7 +328,10 @@
   %sc_base = #call meta_cell_get(#lea(%scratch, 72, 1, 0))
   %scap = #call meta_cell_get(#lea(%scratch, 80, 1, 0))
   %sc_bytes = #mul[#bits<64>](%scap, 56)
-  %at = #add[#bits<64>](%sc_base, %sc_bytes)
+  %dep_cap = #call meta_cell_get(#lea(%scratch, 424, 1, 0))
+  %dep_bytes = #mul[#bits<64>](%dep_cap, 24)
+  %at0 = #add[#bits<64>](%sc_base, %sc_bytes)
+  %at = #add[#bits<64>](%at0, %dep_bytes)
   #return %at
 }
 
@@ -360,10 +381,18 @@
   %scratch = #call lain_meta_scratch_data()
   %size = #call lain_meta_scratch_size()
   %at = #call meta_bump_mark()
+  // 对齐前先防 `bytes + 7` 回绕；回绕后再与 scratch 上界比较会误认成小块。
+  %alignable = #ule[#bits<64>](%bytes, 0xFFFFFFFFFFFFFFF8)
+  #if #eq[#bits<1>](%alignable, 0) {
+    %fail = #call lain_meta_fail(17)
+    #return 0xFFFFFFFFFFFFFFFF
+  }
   %pad0 = #add[#bits<64>](%bytes, 7)
   %need = #and[#bits<64>](%pad0, 0xFFFFFFFFFFFFFFF8)
   %end = #add[#bits<64>](%at, %need)
-  %ok = #ule[#bits<64>](%end, %size)
+  %not_wrapped = #uge[#bits<64>](%end, %at)
+  %within = #ule[#bits<64>](%end, %size)
+  %ok = #and[#bits<1>](%not_wrapped, %within)
   %r = #if %ok -> (#bits<64>) {
     %s1 = #call meta_cell_put(#lea(%scratch, 200, 1, 0), %end)
     %peak = #call meta_bump_peak()
@@ -462,6 +491,314 @@
 #proc meta_scope_emitted(%index: #bits<64>) -> #bits<64> {
   %v = #call meta_scope_word(%index, 48)
   #return %v
+}
+
+// 声明引用由最终树中的 (source, parent group, child index) 定位。payload 缓存节点，
+// 每次消费前与出现位置复核，避免展开替换后继续使用失效或错位的缓存引用。
+#proc meta_scope_decl_node(%index: #bits<64>) -> #bits<64> {
+  %kind = #call meta_scope_kind(%index)
+  %is_struct = #eq[#bits<64>](%kind, 4)
+  %is_enum = #eq[#bits<64>](%kind, 5)
+  %is_func = #eq[#bits<64>](%kind, 6)
+  %decl2 = #or[#bits<1>](%is_enum, %is_func)
+  %decl_kind = #or[#bits<1>](%is_struct, %decl2)
+  %valid = #if %decl_kind -> (#bits<1>) {
+    %parent = #call meta_scope_aux(%index)
+    %child_index = #call meta_scope_emitted(%index)
+    %actual = #call ast_child(%parent, %child_index)
+    %cached = #call meta_scope_payload(%index)
+    %present = #ne[#bits<64>](%actual, 0)
+    %same = #eq[#bits<64>](%actual, %cached)
+    #yield #and[#bits<1>](%present, %same)
+  } else { #yield 0 }
+  %node = #if %valid -> (#bits<64>) {
+    %cached = #call meta_scope_payload(%index)
+    #yield %cached
+  } else {
+    %fail = #call lain_meta_fail(9414)
+    #yield 0
+  }
+  #return %node
+}
+
+// 普通调用必须绑定到已登记的过程声明；返回其出现位置对应的节点。
+#proc meta_scope_require_func(%name: #addr,
+                              %name_len: #bits<64>) -> #bits<64> {
+  %index = #call meta_scope_find(%name, %name_len)
+  %found = #ne[#bits<64>](%index, 0xFFFFFFFFFFFFFFFF)
+  %kind = #if %found -> (#bits<64>) {
+    %k = #call meta_scope_kind(%index)
+    #yield %k
+  } else { #yield 0 }
+  %is_func = #eq[#bits<64>](%kind, 6)
+  %is_size_name = #call meta_scope_generated_size_name(%name, %name_len)
+  %not_found = #eq[#bits<64>](%index, 0xFFFFFFFFFFFFFFFF)
+  %synthetic_candidate = #and[#bits<1>](%is_size_name, %not_found)
+  %synthetic = #if %synthetic_candidate -> (#bits<64>) {
+    %prefix_len = #sub[#bits<64>](%name_len, 6)
+    %type_index = #call meta_scope_find(%name, %prefix_len)
+    %type_found = #ne[#bits<64>](%type_index, 0xFFFFFFFFFFFFFFFF)
+    %type_kind = #if %type_found -> (#bits<64>) {
+      %k = #call meta_scope_kind(%type_index)
+      #yield %k
+    } else { #yield 0 }
+    %is_struct = #eq[#bits<64>](%type_kind, 4)
+    %type_node = #if %is_struct -> (#bits<64>) {
+      %n = #call meta_scope_decl_node(%type_index)
+      #yield %n
+    } else { #yield 0 }
+    %has_type = #ne[#bits<64>](%type_node, 0)
+    %result = #if %has_type -> (#bits<64>) { #yield 1 } else { #yield 0 }
+    #yield %result
+  } else { #yield 0 }
+  %node = #if %is_func -> (#bits<64>) {
+    %decl = #call meta_scope_decl_node(%index)
+    %present = #ne[#bits<64>](%decl, 0)
+    %edge = #if %present -> (#bits<32>) {
+      %e = #call meta_scope_dependency_add(%index)
+      #yield %e
+    } else { #yield 9414 }
+    %edge_ok = #eq[#bits<32>](%edge, 0)
+    %result = #if %edge_ok -> (#bits<64>) { #yield %decl } else { #yield 0 }
+    #yield %result
+  } else {
+    #yield %synthetic
+  }
+  %valid = #ne[#bits<64>](%node, 0)
+  %r = #if %valid -> (#bits<64>) {
+    #yield %node
+  } else {
+    %fail = #call lain_meta_fail(9415)
+    #yield 0
+  }
+  #return %r
+}
+
+// 依赖边记录声明表身份，不记录拼写；扫描去重保持首次遇见顺序。
+#proc meta_scope_dependency_add(%target: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data()
+  %from = #call meta_cell_get(#lea(%scratch, 152, 1, 0))
+  %inactive = #eq[#bits<64>](%from, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %inactive -> (#bits<32>) {
+    #yield 0
+  } else {
+    %base = #call meta_cell_get(#lea(%scratch, 416, 1, 0))
+    %count = #call meta_cell_get(#lea(%scratch, 432, 1, 0))
+    %cap = #call meta_cell_get(#lea(%scratch, 424, 1, 0))
+    %seen = #loop find(%i: #bits<64> = 0) -> (#bits<1>) {
+      %more = #ult[#bits<64>](%i, %count)
+      #if %more {
+        %slot_off = #mul[#bits<64>](%i, 16)
+        %at = #add[#bits<64>](%base, %slot_off)
+        %old_from = #call meta_cell_get(#lea(%scratch, %at, 1, 0))
+        %to_at = #add[#bits<64>](%at, 8)
+        %old_to = #call meta_cell_get(#lea(%scratch, %to_at, 1, 0))
+        %same_from = #eq[#bits<64>](%old_from, %from)
+        %same_to = #eq[#bits<64>](%old_to, %target)
+        %same = #and[#bits<1>](%same_from, %same_to)
+        #if %same {
+          #break find(1)
+        }
+        %next = #add[#bits<64>](%i, 1)
+        #continue find(%next)
+      } else {
+        #break find(0)
+      }
+    }
+    %full = #uge[#bits<64>](%count, %cap)
+    %status = #if %seen -> (#bits<32>) {
+      #yield 0
+    } else {
+      %added = #if %full -> (#bits<32>) {
+        %fail = #call lain_meta_fail(9416)
+        #yield 9416
+      } else {
+        %slot_off = #mul[#bits<64>](%count, 16)
+        %at = #add[#bits<64>](%base, %slot_off)
+        %a = #call meta_cell_put(#lea(%scratch, %at, 1, 0), %from)
+        %to_at = #add[#bits<64>](%at, 8)
+        %b = #call meta_cell_put(#lea(%scratch, %to_at, 1, 0), %target)
+        %new_count = #add[#bits<64>](%count, 1)
+        %c = #call meta_cell_put(#lea(%scratch, 432, 1, 0), %new_count)
+        #yield 0
+      }
+      #yield %added
+    }
+    #yield %status
+  }
+  #return %r
+}
+
+#proc meta_scope_dependency_count() -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data()
+  %count = #call meta_cell_get(#lea(%scratch, 432, 1, 0))
+  #return %count
+}
+
+// 声明索引是否已在本次闭包队列中。
+#proc meta_scope_closure_contains(%target: #bits<64>) -> #bits<1> {
+  %scratch = #call lain_meta_scratch_data()
+  %base = #call meta_cell_get(#lea(%scratch, 440, 1, 0))
+  %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
+  %found = #loop find(%i: #bits<64> = 0) -> (#bits<1>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %off = #mul[#bits<64>](%i, 8)
+      %at = #add[#bits<64>](%base, %off)
+      %item = #call meta_cell_get(#lea(%scratch, %at, 1, 0))
+      %same = #eq[#bits<64>](%item, %target)
+      #if %same { #break find(1) }
+      %next = #add[#bits<64>](%i, 1)
+      #continue find(%next)
+    } else { #break find(0) }
+  }
+  #return %found
+}
+
+#proc meta_scope_closure_append(%target: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data()
+  %base = #call meta_cell_get(#lea(%scratch, 440, 1, 0))
+  %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
+  %cap = #call meta_cell_get(#lea(%scratch, 424, 1, 0))
+  %full = #uge[#bits<64>](%count, %cap)
+  %r = #if %full -> (#bits<32>) {
+    %fail = #call lain_meta_fail(9416)
+    #yield 9416
+  } else {
+    %off = #mul[#bits<64>](%count, 8)
+    %at = #add[#bits<64>](%base, %off)
+    %put = #call meta_cell_put(#lea(%scratch, %at, 1, 0), %target)
+    %next = #add[#bits<64>](%count, 1)
+    %save = #call meta_cell_put(#lea(%scratch, 448, 1, 0), %next)
+    #yield 0
+  }
+  #return %r
+}
+
+// 对声明调用图做确定顺序的广度优先闭包。将处理中节点先放进闭包，
+// 因此自递归和互递归都终止；它们是过程引用环，不判作 eval 请求循环。
+#proc meta_scope_dependency_closure(%root: #bits<64>) -> #bits<64> {
+  %root_node = #call meta_scope_decl_node(%root)
+  %valid_root = #ne[#bits<64>](%root_node, 0)
+  #if #eq[#bits<1>](%valid_root, 0) { #return 0 }
+  %scratch = #call lain_meta_scratch_data()
+  %clear = #call meta_cell_put(#lea(%scratch, 448, 1, 0), 0)
+  %first = #call meta_scope_closure_append(%root)
+  %walk = #loop bfs(%cursor: #bits<64> = 0) -> (#bits<32>) {
+    %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
+    %more = #ult[#bits<64>](%cursor, %count)
+    #if %more {
+      %closure_base = #call meta_cell_get(#lea(%scratch, 440, 1, 0))
+      %node_off = #mul[#bits<64>](%cursor, 8)
+      %node_at = #add[#bits<64>](%closure_base, %node_off)
+      %current = #call meta_cell_get(#lea(%scratch, %node_at, 1, 0))
+      %current_node = #call meta_scope_decl_node(%current)
+      %stale = #eq[#bits<64>](%current_node, 0)
+      #if %stale {
+        %fail = #call lain_meta_fail(9414)
+        #break bfs(9414)
+      }
+      %edge_base = #call meta_cell_get(#lea(%scratch, 416, 1, 0))
+      %edge_count = #call meta_cell_get(#lea(%scratch, 432, 1, 0))
+      %edge_status = #loop edges(%edge: #bits<64> = 0) -> (#bits<32>) {
+        %has_edge = #ult[#bits<64>](%edge, %edge_count)
+        #if %has_edge {
+          %edge_off = #mul[#bits<64>](%edge, 16)
+          %from_at = #add[#bits<64>](%edge_base, %edge_off)
+          %from = #call meta_cell_get(#lea(%scratch, %from_at, 1, 0))
+          %same_from = #eq[#bits<64>](%from, %current)
+          %status = #if %same_from -> (#bits<32>) {
+            %to_at = #add[#bits<64>](%from_at, 8)
+            %to = #call meta_cell_get(#lea(%scratch, %to_at, 1, 0))
+            %seen = #call meta_scope_closure_contains(%to)
+            %status_add = #if %seen -> (#bits<32>) {
+              #yield 0
+            } else {
+              %to_node = #call meta_scope_decl_node(%to)
+              %bad_to = #eq[#bits<64>](%to_node, 0)
+              %added = #if %bad_to -> (#bits<32>) {
+                #yield 9414
+              } else {
+                %a = #call meta_scope_closure_append(%to)
+                #yield %a
+              }
+              #yield %added
+            }
+            #yield %status_add
+          } else { #yield 0 }
+          %failed = #ne[#bits<32>](%status, 0)
+          #if %failed { #break edges(%status) }
+          %next_edge = #add[#bits<64>](%edge, 1)
+          #continue edges(%next_edge)
+        } else { #break edges(0) }
+      }
+      %edge_failed = #ne[#bits<32>](%edge_status, 0)
+      #if %edge_failed {
+        %err = #if #eq[#bits<32>](%edge_status, 9414) -> (#bits<32>) {
+          %fail = #call lain_meta_fail(9414)
+          #yield 9414
+        } else { #yield %edge_status }
+        #break bfs(%err)
+      }
+      %next_cursor = #add[#bits<64>](%cursor, 1)
+      #continue bfs(%next_cursor)
+    } else { #break bfs(0) }
+  }
+  %failed = #ne[#bits<32>](%walk, 0)
+  %r = #if %failed -> (#bits<64>) {
+    #yield 0
+  } else {
+    %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
+    #yield %count
+  }
+  #return %r
+}
+
+#proc meta_scope_dependency_closure_count() -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data()
+  %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
+  #return %count
+}
+
+#proc meta_scope_dependency_closure_at(%index: #bits<64>) -> #bits<64> {
+  %scratch = #call lain_meta_scratch_data()
+  %base = #call meta_cell_get(#lea(%scratch, 440, 1, 0))
+  %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
+  %inside = #ult[#bits<64>](%index, %count)
+  %r = #if %inside -> (#bits<64>) {
+    %off = #mul[#bits<64>](%index, 8)
+    %at = #add[#bits<64>](%base, %off)
+    %node = #call meta_cell_get(#lea(%scratch, %at, 1, 0))
+    #yield %node
+  } else { #yield 0xFFFFFFFFFFFFFFFF }
+  #return %r
+}
+
+// struct 声明生成 `<Type>__size()` 过程；按类型身份识别这类派生入口。
+#proc meta_scope_generated_size_name(%name: #addr,
+                                    %name_len: #bits<64>) -> #bits<1> {
+  %enough = #uge[#bits<64>](%name_len, 6)
+  %r = #if %enough -> (#bits<1>) {
+    %at = #sub[#bits<64>](%name_len, 6)
+    %b0 = #call bs_is_byte(%name, %at, 95)
+    %at1 = #add[#bits<64>](%at, 1)
+    %b1 = #call bs_is_byte(%name, %at1, 95)
+    %at2 = #add[#bits<64>](%at, 2)
+    %b2 = #call bs_is_byte(%name, %at2, 115)
+    %at3 = #add[#bits<64>](%at, 3)
+    %b3 = #call bs_is_byte(%name, %at3, 105)
+    %at4 = #add[#bits<64>](%at, 4)
+    %b4 = #call bs_is_byte(%name, %at4, 122)
+    %at5 = #add[#bits<64>](%at, 5)
+    %b5 = #call bs_is_byte(%name, %at5, 101)
+    %p0 = #and[#bits<1>](%b0, %b1)
+    %p1 = #and[#bits<1>](%b2, %b3)
+    %p2 = #and[#bits<1>](%b4, %b5)
+    %p3 = #and[#bits<1>](%p0, %p1)
+    %all = #and[#bits<1>](%p3, %p2)
+    #yield %all
+  } else { #yield 0 }
+  #return %r
 }
 
 #proc meta_scope_set_emitted(%index: #bits<64>,
@@ -697,7 +1034,13 @@
   %n_lo = #call meta_node_start(%name_node)
   %n_len = #call meta_node_len(%name_node)
   %st = #call meta_scope_add(%level_start, %source, %n_lo, %n_len,
-                             %kind, %node, 0)
+                             %kind, %node, %parent)
+  %added = #eq[#bits<32>](%st, 0)
+  #if %added {
+    %count = #call meta_scope_count()
+    %last = #sub[#bits<64>](%count, 1)
+    %stored = #call meta_scope_set_emitted(%last, %index)
+  }
   #return %st
 }
 
@@ -918,9 +1261,7 @@
 // `payload` / `aux` 存的是**已经解析好的东西**，不是「等用到再回源码找」的位置：
 //
 //   kind 2 标量   payload = 类型 id（0 = 还没 intern）  aux = repr 的**节点下标**
-//   kind 4 积类型 payload = 声明的**节点下标**          aux = 0
-//   kind 5 和类型 payload = 声明的**节点下标**          aux = 0
-//   kind 6 函数   payload = 声明的**节点下标**          aux = 0
+//   kind 4/5/6 声明 payload = 声明节点，aux = 父组引用，emitted = 父组内下标
 //   kind 1 模块引用 payload = 被 import 的源码下标       aux = 逻辑路径的位置
 //   kind 3 值绑定 payload = 初始化式的**节点下标**       aux = 0
 //

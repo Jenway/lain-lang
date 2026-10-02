@@ -326,6 +326,10 @@
                           %t_lo: #bits<64>, %t_hi: #bits<64>,
                           %callee_lo: #bits<64>, %callee_hi: #bits<64>,
                           %args: #bits<64>) -> #bits<32> {
+  %callee_name = #lea(%base, %callee_lo, 1, 0)
+  %callee_len = #sub[#bits<64>](%callee_hi, %callee_lo)
+  %decl = #call meta_scope_require_func(%callee_name, %callee_len)
+  #if #eq[#bits<64>](%decl, 0) { #return 9415 }
   %ast = #call meta_args_prepare(%base, %len, %kind, %width, %t_lo,
                                  %t_hi, %args)
   %abad = #ne[#bits<32>](%ast, 0)
@@ -335,7 +339,7 @@
   %kw = #data_addr meta_st_retcall
   %w1 = #call lain_meta_emit_write(%kw, 16)
   %c_at = #lea(%base, %callee_lo, 1, 0)
-  %c_len = #sub[#bits<64>](%callee_hi, %callee_lo)
+  %c_len = #add[#bits<64>](%callee_len, 0)
   %w2 = #call lain_meta_emit_write(%c_at, %c_len)
   %lp = #data_addr meta_fn_lparen
   %w3 = #call lain_meta_emit_write(%lp, 1)
@@ -353,26 +357,24 @@
 
 // `  %NAME = #call <callee>(<实参>…)\n`
 //
-// `%is_eval` = 1 时前缀写 `#eval ` 而不是 `#call `：函数体里的
-// `let x: T = eval g(1);` 是**编译期求值**的调用（v0 拼写是 `eval` 前缀，不带 `#`）。
-//
-// 函数体里的 `let x: T = g(1);`。和 `meta_emit_ret_call` 是同一套两趟顺序
-// （`meta_args_prepare` → 写前缀 → `meta_args_write`），只是前缀从
-// `  #return #call ` 换成 `  %NAME = #call `——那一段是本仓库最脏的坑之一，
-// 顺序反过来子表达式的指令就会落进 `#call f(` 中间。
+// 函数体里的绑定调用与 `meta_emit_ret_call` 共用实参的两趟顺序；先准备实参，
+// 再写调用前缀，最后写实参，避免子表达式指令落进 `#call f(` 中间。
 #proc meta_emit_binding_call(%base: #addr, %len: #bits<64>,
                              %kind: #bits<64>, %width: #bits<64>,
                              %name_lo: #bits<64>, %name_hi: #bits<64>,
                              %t_lo: #bits<64>, %t_hi: #bits<64>,
                              %callee_lo: #bits<64>, %callee_hi: #bits<64>,
-                             %args: #bits<64>, %is_eval: #bits<1>) -> #bits<32> {
+                             %args: #bits<64>) -> #bits<32> {
+  %callee_name = #lea(%base, %callee_lo, 1, 0)
+  %callee_len = #sub[#bits<64>](%callee_hi, %callee_lo)
+  %decl = #call meta_scope_require_func(%callee_name, %callee_len)
+  #if #eq[#bits<64>](%decl, 0) { #return 9415 }
   %ast = #call meta_args_prepare(%base, %len, %kind, %width, %t_lo,
                                  %t_hi, %args)
   %abad = #ne[#bits<32>](%ast, 0)
   #if %abad {
     #return %ast
   }
-  // `  %` + 名字 + ` = ` + `#call ` + 被调者 + `(` —— 然后才是实参
   %p = #data_addr meta_st_pct
   %w1 = #call lain_meta_emit_write(%p, 3)
   %n_at = #lea(%base, %name_lo, 1, 0)
@@ -380,17 +382,10 @@
   %w2 = #call lain_meta_emit_write(%n_at, %n_len)
   %eq = #data_addr meta_st_eqop
   %w3 = #call lain_meta_emit_write(%eq, 3)
-  // 前缀只有这一处不同：`#call `（普通调用）对 `#eval `（编译期求值）。
-  %hc = #if %is_eval -> (#addr) {
-    %he = #data_addr meta_hash_eval
-    #yield %he
-  } else {
-    %hc0 = #data_addr meta_hash_call
-    #yield %hc0
-  }
+  %hc = #data_addr meta_hash_call
   %w4 = #call lain_meta_emit_write(%hc, 6)
   %c_at = #lea(%base, %callee_lo, 1, 0)
-  %c_len = #sub[#bits<64>](%callee_hi, %callee_lo)
+  %c_len = #add[#bits<64>](%callee_len, 0)
   %w5 = #call lain_meta_emit_write(%c_at, %c_len)
   %lp = #data_addr meta_fn_lparen
   %w6 = #call lain_meta_emit_write(%lp, 1)
@@ -856,37 +851,6 @@
     // `;`」猜。猜法在 `return g(x);` 上会挂：`g` 的下一个节点是那个组，于是组被当成
     // 算子，拿 `(` 去查类型的 op 表 —— 报 6「没这个算子」，跟真实原因毫无关系。
     %form = #call meta_node_form(%parent, %vi)
-    // `let y: T = eval g(…);` —— **编译期求值**的调用。v0 的标记是 `eval` 前缀，
-    // 不带 `#`（`#` 到行尾是注释，见 `std/lex.l1` 的 `bs_skip_space`）。
-    // 形状：值的那个位置是一个内容为 `eval` 的词，它的**下一个位置**是「一次调用」
-    //（形状 5）。游标前进一格去问，问不到就是 0（不是调用）。
-    %ev_kw = #data_addr meta_kw_eval
-    %ev_word = #call meta_node_is_word(%v, %base, %ev_kw, 4)
-    %ev_ni = #add[#bits<64>](%vi, 1)
-    %ev_nkind = #call meta_node_form(%parent, %ev_ni)
-    %ev_ncall = #eq[#bits<64>](%ev_nkind, 5)
-    %ev_mark = #and[#bits<1>](%ev_word, %ev_ncall)
-    #if %ev_mark {
-      // 目前只支持**绑定位置**。返回位置（`return eval g(…);`）要先把结果落一个
-      // 临时值，收尾写法不同，没做就干净地报 4，不发半截文本。
-      %ev_bind = #eq[#bits<1>](%is_ret, 0)
-      %ev_st = #if %ev_bind -> (#bits<32>) {
-        %ev_next = #call ast_child(%parent, %ev_ni)
-        %ev_lo = #call meta_node_start(%ev_next)
-        %ev_ln = #call meta_node_len(%ev_next)
-        %ev_hi = #add[#bits<64>](%ev_lo, %ev_ln)
-        %ev_grp = #call meta_cursor_next(%parent, %ev_ni)
-        %ev_emit = #call meta_emit_binding_call(%base, %len, %kind,
-                                                %width, %name_lo, %name_hi,
-                                                %t_lo, %t_hi, %ev_lo, %ev_hi,
-                                                %ev_grp, 1)
-        #yield %ev_emit
-      } else {
-        %ev_f = #call lain_meta_fail(4)
-        #yield 4
-      }
-      #return %ev_st
-    }
     // 形状 5 说的是「这里开始一次调用」，不是「整个值就是这次调用」。`return f(0) + 1;`
     // 里 `f` 的形状也是 5 —— 那样后面那个 `+ 1` 会被悄悄丢掉（真出过）。所以先问
     // 整段值里有没有算子。
@@ -916,7 +880,7 @@
         %d_hi = #add[#bits<64>](%d_lo, %d_ln)
         %bc = #call meta_emit_binding_call(%base, %len, %kind, %width,
                                            %name_lo, %name_hi, %t_lo, %t_hi,
-                                           %d_lo, %d_hi, %grp, 0)
+                                           %d_lo, %d_hi, %grp)
         #yield %bc
       } else {
         %c_lo = #call meta_node_start(%v)
@@ -1295,12 +1259,50 @@
 #proc meta_lower_func(%base: #addr, %len: #bits<64>,
                       %parent: #bits<64>, %index: #bits<64>,
                       %node: #bits<64>) -> #bits<32> {
+  // 参数组属于当前 lowering 调用层。旧值留在本过程的 LAINIR 调用帧中；内层返回后
+  // 统一恢复共享格。mark 只负责回收内层遗漏的动态临时区，不为保存旧值额外占 scratch。
+  %mark = #call meta_bump_mark()
+  %scratch = #call lain_meta_scratch_data()
+  %parent_params = #call meta_cell_get(#lea(%scratch, 504, 1, 0))
+  %parent_decl = #call meta_cell_get(#lea(%scratch, 152, 1, 0))
+  %name_node = #call meta_scope_name_of(%parent, %index)
+  %name_lo = #call meta_node_start(%name_node)
+  %name_len = #call meta_node_len(%name_node)
+  %name = #lea(%base, %name_lo, 1, 0)
+  %decl_index = #call meta_scope_find(%name, %name_len)
+  %found = #ne[#bits<64>](%decl_index, 0xFFFFFFFFFFFFFFFF)
+  %decl_kind = #if %found -> (#bits<64>) {
+    %k = #call meta_scope_kind(%decl_index)
+    #yield %k
+  } else { #yield 0 }
+  %is_func = #eq[#bits<64>](%decl_kind, 6)
+  %identity_ok = #and[#bits<1>](%found, %is_func)
+  #if #eq[#bits<1>](%identity_ok, 0) {
+    %fail = #call lain_meta_fail(9414)
+    %restore0 = #call meta_cell_put(#lea(%scratch, 504, 1, 0),
+                                    %parent_params)
+    %restore1 = #call meta_bump_release(%mark)
+    #return 9414
+  }
+  %decl_set = #call meta_cell_put(#lea(%scratch, 152, 1, 0), %decl_index)
+  %lowered = #call meta_lower_func_inner(%base, %len, %parent, %index,
+                                         %node)
+  %restore = #call meta_cell_put(#lea(%scratch, 504, 1, 0),
+                                 %parent_params)
+  %restore_decl = #call meta_cell_put(#lea(%scratch, 152, 1, 0),
+                                      %parent_decl)
+  %released = #call meta_bump_release(%mark)
+  #return %lowered
+}
+
+#proc meta_lower_func_inner(%base: #addr, %len: #bits<64>,
+                            %parent: #bits<64>, %index: #bits<64>,
+                            %node: #bits<64>) -> #bits<32> {
   %ni = #add[#bits<64>](%index, 1)
   %name_node = #call meta_cursor_next(%parent, %index)
   %pi = #add[#bits<64>](%index, 2)
   %params = #call meta_cursor_next(%parent, %ni)
-  // 当前函数的参数组节点记到暂存区 `+504`。**只用一个格子，不建表** —— 函数不能嵌套
-  // 定义，所以「当前是哪个函数」一个值就够；要查某个名字的类型时现走参数组。
+  // 当前函数的参数组节点记到暂存区 `+504`；外层包装负责保存并恢复调用层状态。
   // 为什么需要它：算子的操作数宽度该看**操作数自己**的类型，不是看绑定/返回的类型。
   // `func f(x: i32) -> bool { return x < 2; }` 里 `<` 的两个操作数是 i32，而 bool 的
   // op 表是空的 —— 拿绑定的类型去查表查不到 `<`。
@@ -1404,10 +1406,6 @@
 
     // 语句序列
     %bst = #call meta_lower_body(%base, %len, %body, %r_lo, %r_hi)
-    // 出了这个函数就把「当前参数表」抹掉。不清的话顶层降级时 `+504` 还留着**上一个**
-    // 函数的参数 —— 顶层出现同名时会被误当成参数，按错的类型/宽度发指令。
-    %sclr = #call lain_meta_scratch_data()
-    %scl = #call meta_cell_put(#lea(%sclr, 504, 1, 0), 0)
     %bfail = #ne[#bits<32>](%bst, 0)
     #if %bfail {
       #return %bst

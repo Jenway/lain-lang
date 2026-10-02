@@ -63,15 +63,24 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
   #return %r
 }
 
-#proc meta_buf_put(%buf: #addr, %at: #bits<64>, %b: #bits<8>) -> #bits<32> {
+#proc meta_buf_put(%buf: #addr, %capacity: #bits<64>,
+                   %at: #bits<64>, %b: #bits<8>) -> #bits<32> {
+  %fits = #ult[#bits<64>](%at, %capacity)
+  #if #eq[#bits<1>](%fits, 0) { #return 17 }
   %p = #lea(%buf, %at, 1, 0)
   #store[#bits<8>](%b, %p)
   #return 0
 }
 
 // 往缓冲区写 n 个字节，返回写完后的下标。
-#proc meta_buf_puts(%buf: #addr, %at: #bits<64>, %src: #addr,
+#proc meta_buf_puts(%buf: #addr, %capacity: #bits<64>,
+                    %at: #bits<64>, %src: #addr,
                     %n: #bits<64>) -> #bits<64> {
+  %at_ok = #ule[#bits<64>](%at, %capacity)
+  %remaining = #sub[#bits<64>](%capacity, %at)
+  %length_ok = #ule[#bits<64>](%n, %remaining)
+  %fits = #and[#bits<1>](%at_ok, %length_ok)
+  #if #eq[#bits<1>](%fits, 0) { #return 0xFFFFFFFFFFFFFFFF }
   %end = #loop put(%k: #bits<64> = 0, %j: #bits<64> = %at) -> (#bits<64>) {
     %more = #ult[#bits<64>](%k, %n)
     #if %more {
@@ -125,7 +134,15 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
 
 // 把逻辑路径规范化成注册路径的形状，写进 buf（NUL 结尾）。调用方保证 buf 够大。
 #proc meta_build_path(%logical: #addr, %len: #bits<64>,
-                      %buf: #addr) -> #bits<32> {
+                      %buf: #addr, %capacity: #bits<64>) -> #bits<32> {
+  %has = #call meta_ends_with_lain(%logical, %len)
+  %suffix = #if %has -> (#bits<64>) { #yield 0 } else { #yield 5 }
+  %need0 = #add[#bits<64>](%len, %suffix)
+  %need = #add[#bits<64>](%need0, 1)
+  %nowrap = #uge[#bits<64>](%need, %len)
+  %fits = #ule[#bits<64>](%need, %capacity)
+  %valid = #and[#bits<1>](%nowrap, %fits)
+  #if #eq[#bits<1>](%valid, 0) { #return 17 }
   // `::` 变 `/`（吃掉第二个冒号）；单个 `:` 原样留着，它匹配不上就是匹配不上。
   %j = #loop put(%i: #bits<64> = 0, %j: #bits<64> = 0) -> (#bits<64>) {
     %more = #ult[#bits<64>](%i, %len)
@@ -158,15 +175,15 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
       #break put(%j)
     }
   }
-  %has = #call meta_ends_with_lain(%logical, %len)
   %end = #if %has -> (#bits<64>) {
     #yield %j
   } else {
     %suf = #data_addr meta_suffix_lain
-    %e = #call meta_buf_puts(%buf, %j, %suf, 5)
+    %e = #call meta_buf_puts(%buf, %capacity, %j, %suf, 5)
     #yield %e
   }
-  %zero = #call meta_buf_put(%buf, %end, 0)
+  %zero = #call meta_buf_put(%buf, %capacity, %end, 0)
+  #if #ne[#bits<32>](%zero, 0) { #return %zero }
   #return 0
 }
 
@@ -201,7 +218,7 @@ data meta_suffix_lain ro { 46 108 97 105 110 }          // ".lain"   5
   %r = #if %fits -> (#bits<64>) {
     %pat = #call meta_path_buffer()
     %buf = #lea(%scratch, %pat, 1, 0)
-    %b = #call meta_build_path(%logical, %logical_len, %buf)
+    %b = #call meta_build_path(%logical, %logical_len, %buf, %cap)
     %count = #call lain_meta_source_count()
     %idx = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
       %more = #ult[#bits<64>](%i, %count)

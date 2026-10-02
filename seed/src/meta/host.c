@@ -150,7 +150,7 @@ struct LainMetaHost {
  *   lain_meta_emit_data           ()                        文本地址
  *   lain_meta_emit_length         ()                        字节数
  *   lain_meta_fail                (code)                    0
- *   lain_meta_apply_request        (text, len, entry, len)   结果位模式
+ *   lain_meta_apply_request        (text, len, entry, len, args, count) 结果位模式
  *   lain_meta_apply_status         ()                        诊断码
  *   lain_meta_apply_kind           ()                        物理类型类别
  *   lain_meta_apply_width          ()                        位宽
@@ -912,7 +912,7 @@ static uint32_t cap_scratch_size(void *context, const uint64_t *args,
 }
 
 /* apply 请求并入 Expand 统一预算（步骤 4）：先扣 1 次 handler_call，再按
- * ceil(请求文本字节数 / 8) 扣 visit。两笔都成功才启动执行；任一不够就是
+ * ceil((请求文本 + 标量实参记录)字节数 / 8) 扣 visit。两笔都成功才启动执行；任一不够就是
  * 9410 的可恢复拒绝（与 cap_ast_charge 同侧），调用方不启动 VM。
  * 未启用 AstOut 时没有统一账户，按规则明确拒绝，不静默放行。 */
 static uint32_t apply_budget_charge(LainMetaHost *host, uint64_t text_len) {
@@ -924,19 +924,20 @@ static uint32_t apply_budget_charge(LainMetaHost *host, uint64_t text_len) {
   return rc ? LAIN_AST_ERR_BUDGET : 0;
 }
 
-/* 先核对 Meta 地址空间的两段输入，再扣统一预算，最后拷入本次请求私有文本。
+/* 先核对 Meta 地址空间的输入，再扣统一预算，最后拷入本次请求私有文本与参数。
  * apply 在独立 VSpace 中运行，只拿驱动显式给的能力与预算。 */
 static uint32_t cap_apply_request(void *context, const uint64_t *args,
                                  uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
   const char *text, *entry;
   char *text_copy = NULL, *entry_copy = NULL;
+  LainApplyValue apply_args[8];
   LainApplyResult result;
   L1Diagnostic diag;
-  uint64_t text_len, entry_len;
+  uint64_t text_len, entry_len, arg_addr, arg_count, arg_bytes;
   uint32_t rc;
   if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 4 || !args) return LAINMETA_ERR_DENIED;
+  if (count != 6 || !args) return LAINMETA_ERR_DENIED;
   host->apply_ready = false;
   host->apply_status = LAINMETA_ERR_DENIED;
   memset(&host->apply_diagnostic, 0, sizeof(host->apply_diagnostic));
@@ -945,11 +946,22 @@ static uint32_t cap_apply_request(void *context, const uint64_t *args,
   text_len = args[1];
   entry = (const char *)(uintptr_t)args[2];
   entry_len = args[3];
+  arg_addr = args[4];
+  arg_count = args[5];
+  if (arg_count > 8) {
+    host->apply_status = 9341;
+    return 0;
+  }
+  arg_bytes = arg_count * 24;
   if (!text || !entry || !text_len || !entry_len ||
       text_len > 1024u * 1024u || entry_len > 255u ||
       !host_range_readable(host, (uintptr_t)text, text_len) ||
-      !host_range_readable(host, (uintptr_t)entry, entry_len))
+      !host_range_readable(host, (uintptr_t)entry, entry_len) ||
+      (arg_bytes && (!arg_addr ||
+       !host_range_readable(host, (uintptr_t)arg_addr, arg_bytes)))) {
+    host->apply_status = 9330;
     return 0;
+  }
   if (memchr(text, 0, (size_t)text_len) ||
       memchr(entry, 0, (size_t)entry_len)) {
     host->apply_status = 9330;
@@ -957,7 +969,7 @@ static uint32_t cap_apply_request(void *context, const uint64_t *args,
   }
   /* 预算扣账在**参数与地址检查之后、启动执行之前**，也早于计数：
    * 被预算拒绝的请求没有发给 apply 服务，按 apply_requests 的含义不计入。 */
-  rc = apply_budget_charge(host, text_len);
+  rc = apply_budget_charge(host, text_len + arg_bytes);
   if (rc) {
     host->apply_status = rc; /* 9410 = 预算可恢复拒绝；9347 = 没有统一预算 */
     return 0;
@@ -973,11 +985,25 @@ static uint32_t cap_apply_request(void *context, const uint64_t *args,
   text_copy[text_len] = '\0';
   memcpy(entry_copy, entry, (size_t)entry_len);
   entry_copy[entry_len] = '\0';
+  for (uint32_t i = 0; i < (uint32_t)arg_count; i++) {
+    uint64_t wire[3];
+    memcpy(wire, (const void *)(uintptr_t)(arg_addr + (uint64_t)i * 24),
+           sizeof(wire));
+    if (wire[0] > TY_ADDR || wire[1] > UINT32_MAX) {
+      host->apply_status = 9342;
+      goto cleanup_apply;
+    }
+    apply_args[i].kind = (L1TypeKind)wire[0];
+    apply_args[i].width = (uint32_t)wire[1];
+    apply_args[i].bits = wire[2];
+  }
   memset(&diag, 0, sizeof(diag));
   memset(&result, 0, sizeof(result));
-  /* 入口是模块里的普通 #proc，零实参。结果只接受标量：kind/width 的核对契约
-   * 不变（Meta 通过 lain_meta_apply_kind/width 读），字节块在本层还不存在。 */
-  if (!lainapply_proc(text_copy, entry_copy, NULL, 0, &host->apply_limits, &result,
+  /* 参数记录是 3 个 64 位单元：kind、width、bits；拷入宿主数组后再交给通用 apply。
+   * 入口是模块里的普通 #proc。结果只接受标量，字节块在本层还不存在。 */
+  if (!lainapply_proc(text_copy, entry_copy,
+                      arg_count ? apply_args : NULL, (uint32_t)arg_count,
+                      &host->apply_limits, &result,
                       &diag)) {
     host->apply_status = diag.code ? (uint32_t)diag.code : 9330;
     host->apply_diagnostic = diag;

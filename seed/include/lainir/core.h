@@ -92,7 +92,6 @@ typedef struct {
  *   向量算子                                        结果 = 类型实参（#vec）
  *   cmpxchg                                         结果 = (类型实参, #bits<1>)
  *   call                                            结果 = 被调过程的结果
- *   eval                                            同 call，但编译期已知
  * ------------------------------------------------------------------------- */
 typedef enum {
   /* 整数算术 */
@@ -136,13 +135,6 @@ typedef enum {
   INST_IF, INST_LOOP, INST_SWITCH,
   /* 终结子 */
   INST_YIELD, INST_BREAK, INST_CONTINUE, INST_RETURN,
-
-  /* 编译期执行块（文档 §10）：由 folding 阶段算掉，**引擎与后端都不该见到它**。
-   * 它拥有自己的区域，区域的 results[] 声明块的类型；验证器把块当作返回该
-   * 类型的匿名过程，块里的 #return 按块的声明定型。
-   * 与 `#call` 上的 is_eval 标记是两回事：那个是调用级常量折叠。
-   * **加在最后**：引擎的分派表是按 kind 下标索引的，插在中间会平移全部下标。 */
-  INST_EVAL,
 
   /* 计数用；不是一条指令 */
   INST_COUNT,
@@ -231,10 +223,6 @@ typedef struct L1Inst {
   /* 被调 / 被引用的符号：INST_CALL、INST_DATA_ADDR。
    * INST_CALL_INDIRECT 不用它，函数指针是 operands[0]。 */
   const char *symbol;
-
-  /* 阶段标注（文档 §10）：#eval 只标注在调用上，不是操作码。
-   * 存在区间：Meta 发出 -> folding 消掉；backend 永远看不到。 */
-  bool is_eval;
 
   /* 结构指令 */
   const char *label;        /* INST_LOOP / INST_BREAK / INST_CONTINUE 的目标名 */

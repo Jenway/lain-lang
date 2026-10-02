@@ -4,7 +4,6 @@
 #include <string.h>
 
 /* 见 opname.h：这不是第二个指令种类，只是带编译期标记的调用的拼写。 */
-const char *const LAINIR_OPCODE_EVAL = "eval";
 
 typedef struct {
   const char *name;
@@ -94,9 +93,6 @@ static const OpEntry k_ops[] = {
     {"proc_addr", INST_PROC_ADDR},
     {"call", INST_CALL},
     {"call_indirect", INST_CALL_INDIRECT},
-    /* 编译期执行块。带标记的**调用**用同一个拼写（`#eval f(1)`），
-     * 由解析器看 `#eval` 后面是标识符还是 `->`/`{` 分流。 */
-    {"eval", INST_EVAL},
     {"if", INST_IF},
     {"loop", INST_LOOP},
     {"switch", INST_SWITCH},

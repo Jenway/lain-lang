@@ -3,7 +3,7 @@
  * VM 和后端都假定输入已验证；这一步就是那个假定的兑现处。
  * 规则来自 seed/docs/LAINIR.md §11。诊断码 0 = 成功，非 0 = 稳定码。
  *
- * 位置：verify -> fold -> backend。这里查 IR 自己的规矩（名字、区域、终结子、
+ * 位置：verify -> engine or backend。这里查 IR 自己的规矩（名字、区域、终结子、
  * 元数、类型类别、宽度可搬运），不查语义（那是引擎执行时的事）。
  *
  * 一条刻意的保守：规则「产出值的区域每条路径都要交值」只做到**结构判定**
@@ -33,7 +33,6 @@ enum {
   L1V_BAD_CONDITION = 2009,
   L1V_DUPLICATE_CASE = 2010,
   L1V_BAD_CALL_ARITY = 2011,
-  L1V_EVAL_ARG_NOT_CONST = 2012,
   L1V_BAD_MEMORY_WIDTH = 2013,
   L1V_ALLOCA_NOT_CONST = 2014,
   L1V_UNKNOWN_CALLEE = 2015,
@@ -56,9 +55,6 @@ enum {
   /* 验证器自己的资源耗尽（绑定表扩容失败）。它说的不是「模块非法」，
    * 而是「这次验证没做完」——不要和后一类混。 */
   L1V_OUT_OF_MEMORY = 2028,
-  /* `#eval` 块的结果类型里含 `#addr`。编译期地址不得进入产物：块里可以随便用
-   * 地址，算完不许把地址带出来（静态可判，不靠运行期兜）。 */
-  L1V_ADDR_IN_EVAL_RESULT = 2030,
 };
 
 #endif /* LAINIR_VERIFY_H */
