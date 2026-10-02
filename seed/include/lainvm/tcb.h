@@ -128,7 +128,8 @@ struct LainVmTcb {
 
   /* 能力：这次激活允许调用哪些外部符号。
    * resolved 按子过程下标索引，是 admit 时解析好的结果——运行期只做数组索引，
-   * 不碰字符串。没有调用 lainvm_tcb_set_caps 时是 NULL，于是任何宿主调用都被拒绝：
+   * 不碰字符串。每项自带可信 context，宿主调用时由 VM 注入，不从业务参数读。
+   * 没有调用 lainvm_tcb_set_caps 时是 NULL，于是任何宿主调用都被拒绝：
    * 「没注入能力 = 不能碰宿主」是默认。 */
   LainVmCaps *caps;
   const LainVmCapEntry **resolved;
@@ -200,7 +201,12 @@ void lainvm_tcb_free(LainVmTcb *tcb);
 
 /* 把模块里每个 extern 子过程按 link_name 解析到能力空间。
  * 解析不到的记 NULL，等真去调它时再拒绝——一个模块可以带着用不到的外部依赖。
- * 必须活得比 TCB 长（TCB 之后不再碰这张表）。 */
+ *
+ * 非 NULL 表**必须已冻结**（9112），否则稳定拒绝；这里不替调用方 freeze。
+ * 已有活动帧（运行中、暂停中或 Trap 后未结束的激活）时拒绝重绑（9113）。
+ * NULL 表表示无能力：清掉解析项，外部调用仍拒 1110。纯计算 TCB 不要求表。
+ * 解析在临时数组里完成，任何拒绝或 OOM 都保留旧绑定。
+ * 表必须活得比 TCB 长，绑定的 context（宿主）同样如此；表不拥有 context。 */
 int lainvm_tcb_set_caps(LainVmTcb *tcb, LainVmCaps *caps, L1Diagnostic *diag);
 
 /* 换地址空间（seL4 的 TCB_SetSpace）。

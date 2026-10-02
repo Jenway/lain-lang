@@ -278,7 +278,6 @@ static void print_inst(Printer *p, const L1Region *region, const L1Inst *inst) {
   }
 
   default:
-    print_opcode(p, inst);
     print_type_arg(p, inst);
     if (inst->kind == INST_DATA_ADDR || inst->kind == INST_PROC_ADDR)
       outf(p, " %s", inst->symbol ? inst->symbol : "?");

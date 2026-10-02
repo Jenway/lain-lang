@@ -311,14 +311,18 @@ static bool parse_operand(Parser *p, L1Operand *out, InstList *into,
   }
   if ((cur(p) >= '0' && cur(p) <= '9') ||
       (cur(p) == '-' && at(p, 1) >= '0' && at(p, 1) <= '9')) {
+    uint32_t literal_start = p->pos;
     bool negative = match(p, '-');
     uint64_t bits = 0;
     if (!integer(p, &bits)) return false;
     if (cur(p) == '.') {
       /* 浮点字面量：按指令的类型实参决定格式 */
       char buffer[64];
-      uint32_t n = 0;
+      uint32_t n = p->pos - literal_start;
       uint32_t width = ty ? ty->width : 64;
+      if (n + 1 >= sizeof(buffer))
+        return fail(p, 3004, "floating-point literal is too long");
+      memcpy(buffer, p->src + literal_start, n);
       while (n + 1 < sizeof(buffer) &&
              ((cur(p) >= '0' && cur(p) <= '9') || cur(p) == '.' ||
               cur(p) == 'e' || cur(p) == 'E' || cur(p) == '+' ||
@@ -340,6 +344,7 @@ static bool parse_operand(Parser *p, L1Operand *out, InstList *into,
         out->kind = OPERAND_FLOAT;
         out->bits = raw;
       }
+      return true;
     } else {
       out->kind = OPERAND_INT;
       out->bits = bits;

@@ -3,6 +3,8 @@
 
 #include <string.h>
 
+/* 见 opname.h：这不是第二个指令种类，只是带编译期标记的调用的拼写。 */
+
 typedef struct {
   const char *name;
   L1InstKind kind;

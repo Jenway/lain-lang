@@ -737,19 +737,23 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
     break;
   }
 
-  case INST_RETURN:
+  case INST_RETURN: {
+    uint32_t want = v->sub->result_count;
+    const L1Type *want_ty =
+        v->sub->result_count > 0 ? v->sub->results[0] : NULL;
     if (!check_result_count(v, inst, 0)) return false;
-    if (inst->operand_count != v->sub->result_count)
+    if (inst->operand_count != want)
       return fail(v, L1V_BAD_RETURN, inst->line, inst->column,
-                  "#return delivers %u value(s), the signature declares %u",
-                  inst->operand_count, v->sub->result_count);
+                  "#return delivers %u value(s), the declaration has %u",
+                  inst->operand_count, want);
     if (inst->operand_count == 1) {
       const L1Type *ty = operand_ty(v, names, region, inst, 0, loops);
-      if (ty && !same_type(ty, v->sub->results[0]))
+      if (ty && want_ty && !same_type(ty, want_ty))
         return fail(v, L1V_BAD_RETURN, inst->line, inst->column,
                     "#return value does not match the declared result");
     }
     break;
+  }
 
   default:
     /* 上面没覆盖到的、产出值的算子。 */

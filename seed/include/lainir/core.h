@@ -92,7 +92,6 @@ typedef struct {
  *   向量算子                                        结果 = 类型实参（#vec）
  *   cmpxchg                                         结果 = (类型实参, #bits<1>)
  *   call                                            结果 = 被调过程的结果
- *   eval                                            同 call，但编译期已知
  * ------------------------------------------------------------------------- */
 typedef enum {
   /* 整数算术 */
@@ -136,6 +135,7 @@ typedef enum {
   INST_IF, INST_LOOP, INST_SWITCH,
   /* 终结子 */
   INST_YIELD, INST_BREAK, INST_CONTINUE, INST_RETURN,
+
   /* 计数用；不是一条指令 */
   INST_COUNT,
 } L1InstKind;

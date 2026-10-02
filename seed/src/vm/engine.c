@@ -518,10 +518,14 @@ static LainVmSliceResult op_store(LainVmTcb *tcb, const L1Inst *inst) {
 }
 
 static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
-  /* `count ? count : 1`：验证器已经要求 count > 0（码 2024 `#alloca count must
-   * be positive`），所以这条分支在正常路径上够不着——留着只是不让引擎依赖
-   * "上游一定拦住了"。 */
-  uint64_t count = lainvm_operand_read(tcb, inst, 0).as.bits;
+  /* count 是**独立的无符号常量**（元素个数），与元素类型无关：元素类型只决定每个
+   * 元素占多少字节。这里直接读操作数里那个常量，**不走** `lainvm_operand_read`——
+   * 那条路按指令的类型实参（也就是元素类型）宽度读字面量，会把
+   * `#alloca[#bits<8>](256)` 的 256 截成 0（实测曾静默只分配 1 字节）。
+   * C 后端布局一直就是这么算的（`cbackend.c` 里 `#alloca` 的槽大小），两边现在一致。
+   * 0 由验证器拒（码 **2024**）；引擎不再把 0 夹成 1 —— 那是静默错值的来源，
+   * 而 `element × 0 == 0` 本身就是正确答案。 */
+  uint64_t count = inst->operands[0].bits;
   uint64_t element = type_size(inst->ty);
   uint64_t total;
   uint64_t align = 16;
@@ -541,7 +545,7 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
    * 得到一个"合法"的分配（实测 R08）。失败不改变水位。 */
   if (element != 0 && count > 0xFFFFFFFFFFFFFFFFull / element)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
-  total = element * (count ? count : 1);
+  total = element * count;
   if (tcb->stack_used > 0xFFFFFFFFFFFFFFFFull - (align - 1))
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
   used = (tcb->stack_used + (align - 1)) & ~(align - 1);
@@ -586,6 +590,7 @@ static LainVmSliceResult invoke_host(LainVmTcb *tcb, const L1Inst *inst,
   uint32_t i;
   const LainVmCapEntry *entry;
   LainVmHostFn fn;
+  void *context;
   const L1Type *rt;
 
   if (arg_count != sub->param_count)
@@ -600,12 +605,15 @@ static LainVmSliceResult invoke_host(LainVmTcb *tcb, const L1Inst *inst,
     return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1111, inst);
   fn = lainvm_cap_fn(entry);
   if (!fn) return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1112, inst);
+  /* context 来自能力槽上的**可信绑定**：不进入 raw、不从 sub 的业务参数读取、
+   * 也不进入 VM 槽位或返回值。callback 的 arg_count 就是净化后的业务参数数目。 */
+  context = lainvm_cap_context(entry);
 
   for (i = 0; i < arg_count; i++)
     raw[i] = args[i].kind == L1_VALUE_ADDR ? (uint64_t)(uintptr_t)args[i].as.addr
                                            : args[i].as.bits;
 
-  status = fn(raw, arg_count, result_out ? &result : NULL);
+  status = fn(context, raw, arg_count, result_out ? &result : NULL);
   if (status != 0)
     return trap_now(tcb, LAINVM_TRAP_CAPABILITY, (int32_t)status, inst);
 

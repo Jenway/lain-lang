@@ -13,4 +13,5 @@ const char *lainir_opcode_name(L1InstKind kind);
 /* 按拼写找算子。len 是名字长度（不做 NUL 假设）。 */
 bool lainir_opcode_kind(const char *name, uint32_t len, L1InstKind *kind_out);
 
+
 #endif /* LAINIR_OPNAME_H */
