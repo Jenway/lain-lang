@@ -41,7 +41,9 @@ static const L1Subroutine *apply_find_sub(const L1Module *module,
 static bool apply_run(const L1Module *module, const char *entry,
                       const L1Value *args, uint32_t arg_count,
                       const LainApplyLimits *limits, L1Value *value_out,
-                      LainVmQuota *quota_out, L1Diagnostic *diag) {
+                      LainVmQuota *quota_out, uint64_t *fuel_used_out,
+                      LainApplyBytes *bytes_out, uint64_t byte_length,
+                      L1Diagnostic *diag) {
   LainVmSpace space;
   LainVmImage *image = NULL;
   LainVmTcb *tcb = NULL;
@@ -55,6 +57,8 @@ static bool apply_run(const L1Module *module, const char *entry,
   char message[256] = "";
   bool ok = false;
 
+  if (fuel_used_out) *fuel_used_out = 0;
+
   if (quota_out) lainvm_quota_init(quota_out, limits ? limits->quota_bytes : 0);
 
   if (!module || !entry) return fail(diag, 9302, "apply: the entry does not exist");
@@ -64,7 +68,8 @@ static bool apply_run(const L1Module *module, const char *entry,
   if (callee->result_count > 1 ||
       (callee->result_count == 1 && !callee->results[0]))
     return fail(diag, 9307, "apply: entry has an unsupported result");
-  if (callee->result_count == 1 && callee->results[0]->kind == TY_ADDR)
+  if (callee->result_count == 1 && callee->results[0]->kind == TY_ADDR &&
+      !bytes_out)
     return fail(diag, 9308,
                 "apply: an address result must be materialized by the host");
   if (callee->result_count == 1 && callee->results[0]->kind == TY_FLOATS &&
@@ -133,10 +138,35 @@ static bool apply_run(const L1Module *module, const char *entry,
     }
     value = tcb->result;
   }
+  if (bytes_out) {
+    if (value.kind != L1_VALUE_ADDR ||
+        !lainvm_space_check(&space, (uintptr_t)value.as.addr, byte_length,
+                            LAINVM_MEM_READ)) {
+      code = 9344;
+      snprintf(message, sizeof(message),
+               "apply: byte result is not a readable range in its VSpace");
+      goto cleanup;
+    }
+    if (lainvm_quota_charge(&quota, byte_length) != 0) {
+      code = LAINVM_QUOTA_TRAP;
+      snprintf(message, sizeof(message),
+               "apply: byte result exceeds the allocation quota");
+      goto cleanup;
+    }
+    if (!lainapply_bytes_alloc(byte_length, bytes_out, diag)) {
+      (void)lainvm_quota_release(&quota, byte_length);
+      code = diag && diag->code ? diag->code : 9345;
+      snprintf(message, sizeof(message), "apply: cannot allocate byte result");
+      goto cleanup;
+    }
+    memcpy(bytes_out->data, value.as.addr, (size_t)byte_length);
+  }
   if (value_out) *value_out = value;
   ok = true;
 
 cleanup:
+  if (!ok && bytes_out) lainapply_bytes_free(bytes_out);
+  if (fuel_used_out && tcb) *fuel_used_out = tcb->steps;
   if (tcb) lainvm_tcb_free(tcb);
   if (!lainvm_stack_lease_none(lease)) (void)lainvm_space_free(&space, lease.region);
   if (image) lainvm_image_free(image);
@@ -193,10 +223,11 @@ bool lainapply_bytes_check(const LainApplyBytes *bytes, L1Diagnostic *diag) {
 
 /* --- 通用 apply：执行模块里的普通 #proc ------------------------------------- */
 
-bool lainapply_proc(const char *module_text, const char *entry,
-                    const LainApplyValue *args, uint32_t arg_count,
-                    const LainApplyLimits *limits, LainApplyResult *out,
-                    L1Diagnostic *diag) {
+static bool apply_proc_common(const char *module_text, const char *entry,
+                              const LainApplyValue *args, uint32_t arg_count,
+                              uint64_t byte_length,
+                              const LainApplyLimits *limits,
+                              LainApplyResult *out, L1Diagnostic *diag) {
   L1Builder *builder;
   const L1Module *module;
   const L1Subroutine *callee;
@@ -205,6 +236,7 @@ bool lainapply_proc(const char *module_text, const char *entry,
   const L1Type *result_ty = NULL;
   uint32_t i;
   bool ok;
+  bool want_bytes = byte_length != 0;
 
   if (out) memset(out, 0, sizeof(*out));
   if (diag) {
@@ -254,16 +286,25 @@ bool lainapply_proc(const char *module_text, const char *entry,
     lainir_builder_free(builder);
     return fail(diag, 9344, "apply: the entry declares more than one result");
   }
+  if (want_bytes &&
+      (callee->result_count != 1 || !callee->results[0] ||
+       callee->results[0]->kind != TY_ADDR)) {
+    lainir_builder_free(builder);
+    return fail(diag, 9344, "apply: byte export requires one address result");
+  }
   if (callee->result_count == 1) {
     result_ty = callee->results[0];
-    if (!result_ty || result_ty->kind == TY_ADDR) {
+    if (!result_ty || (result_ty->kind == TY_ADDR && !want_bytes) ||
+        (result_ty->kind != TY_ADDR && want_bytes)) {
       lainir_builder_free(builder);
-      return fail(diag, 9344, "apply: an address result must be materialized by the host");
+      return fail(diag, 9344, "apply: result kind does not match the export API");
     }
   }
 
   memset(&value, 0, sizeof(value));
-  ok = apply_run(module, entry, values, arg_count, limits, &value, NULL, diag);
+  ok = apply_run(module, entry, values, arg_count, limits, &value, NULL,
+                 &out->fuel_used, want_bytes ? &out->bytes : NULL,
+                 byte_length, diag);
   if (!ok) {
     lainir_builder_free(builder);
     /* 位置属于生成的模块文本；今天给不出行号，留 0 = 未知 */
@@ -273,12 +314,37 @@ bool lainapply_proc(const char *module_text, const char *entry,
     }
     return false;
   }
-  out->kind = LAINAPPLY_RESULT_SCALAR;
-  out->scalar.kind = result_ty ? result_ty->kind : TY_BITS;
-  out->scalar.width = result_ty ? result_ty->width : 64;
-  out->scalar.bits = callee->result_count ? value.as.bits : 0;
-  if (result_ty && result_ty->kind == TY_FLOATS && result_ty->width < 64)
-    out->scalar.bits &= ((uint64_t)1 << result_ty->width) - 1u;
+  if (want_bytes) {
+    out->kind = LAINAPPLY_RESULT_BYTES;
+  } else {
+    out->kind = LAINAPPLY_RESULT_SCALAR;
+    out->scalar.kind = result_ty ? result_ty->kind : TY_BITS;
+    out->scalar.width = result_ty ? result_ty->width : 64;
+    out->scalar.bits = callee->result_count ? value.as.bits : 0;
+    if (result_ty && result_ty->kind == TY_FLOATS && result_ty->width < 64)
+      out->scalar.bits &= ((uint64_t)1 << result_ty->width) - 1u;
+  }
   lainir_builder_free(builder);
   return true;
+}
+
+bool lainapply_proc(const char *module_text, const char *entry,
+                    const LainApplyValue *args, uint32_t arg_count,
+                    const LainApplyLimits *limits, LainApplyResult *out,
+                    L1Diagnostic *diag) {
+  return apply_proc_common(module_text, entry, args, arg_count, 0,
+                           limits, out, diag);
+}
+
+bool lainapply_proc_bytes(const char *module_text, const char *entry,
+                          const LainApplyValue *args, uint32_t arg_count,
+                          uint64_t byte_length,
+                          const LainApplyLimits *limits, LainApplyResult *out,
+                          L1Diagnostic *diag) {
+  if (byte_length == 0 || byte_length > LAINAPPLY_BYTES_MAX) {
+    if (out) memset(out, 0, sizeof(*out));
+    return fail(diag, 9345, "apply: byte result length is out of range");
+  }
+  return apply_proc_common(module_text, entry, args, arg_count, byte_length,
+                           limits, out, diag);
 }

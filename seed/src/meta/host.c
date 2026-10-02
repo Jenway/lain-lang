@@ -81,6 +81,12 @@ struct LainMetaHost {
   char *out;
   uint32_t out_length;
   uint32_t out_cap;
+  struct {
+    char *out;
+    uint32_t out_length;
+    uint32_t out_cap;
+  } emit_scopes[64];
+  uint32_t emit_scope_count;
   uint32_t status;
   uint64_t diagnostic_source, diagnostic_offset;
   LainMetaTypeInfo *types;
@@ -99,7 +105,10 @@ struct LainMetaHost {
   LainVmQuota *quota;
   uint64_t charged; /* 已经计入账户的字节数（暂存区 + 输出缓冲容量） */
   LainApplyLimits apply_limits;
+  uint64_t apply_fuel_remaining;
+  uint32_t apply_active_depth;
   LainApplyValue apply_result;
+  LainApplyBytes apply_result_bytes;
   uint32_t apply_status;
   L1Diagnostic apply_diagnostic;
   bool apply_ready;
@@ -146,6 +155,8 @@ struct LainMetaHost {
  *   lain_meta_source_length       (index)                   字节数
  *   lain_meta_source_path_data    (index)                   路径地址
  *   lain_meta_emit_reset          ()                        0
+ *   lain_meta_emit_scope_begin    ()                        0
+ *   lain_meta_emit_scope_end      ()                        0
  *   lain_meta_emit_write          (addr, length)            0
  *   lain_meta_emit_data           ()                        文本地址
  *   lain_meta_emit_length         ()                        字节数
@@ -185,7 +196,10 @@ void lainmeta_host_attach_space(LainMetaHost *host, LainVmSpace *space) {
 
 void lainmeta_host_set_apply_limits(LainMetaHost *host,
                                     const LainApplyLimits *limits) {
-  if (host && limits) host->apply_limits = *limits;
+  if (host && limits) {
+    host->apply_limits = *limits;
+    host->apply_fuel_remaining = limits->fuel ? limits->fuel : 1000000u;
+  }
 }
 
 uint32_t lainmeta_host_apply_requests(const LainMetaHost *host) {
@@ -263,6 +277,7 @@ LainMetaHost *lainmeta_host_new(void) {
   host->apply_limits.max_call_depth = 64;
   host->apply_limits.stack_bytes = 4096;
   host->apply_limits.fuel = 1000000;
+  host->apply_fuel_remaining = host->apply_limits.fuel;
   /* 工作区**按需分配**：大小要等源码都登记完才知道（见下）。 */
   host->scratch = NULL;
   host->scratch_size = 0;
@@ -453,6 +468,9 @@ void lainmeta_host_free(LainMetaHost *host) {
   }
   free(host->sources);
   free(host->out);
+  lainapply_bytes_free(&host->apply_result_bytes);
+  for (i = 0; i < host->emit_scope_count; i++)
+    free(host->emit_scopes[i].out);
   free(host->types);
   free(host->scratch);
   /* 存储真的还回去了，才归还额度。 */
@@ -708,6 +726,49 @@ static uint32_t cap_emit_reset(void *context, const uint64_t *args,
   return 0;
 }
 
+/* 输出作用域把当前缓冲所有权移入栈帧；作用域内 emitter 原样工作，结束时
+ * 释放内层缓冲并恢复父缓冲。apply 在作用域内同步消费 emit_data/length，
+ * 因而不必把生成模块复制到第二块宿主内存。 */
+static uint32_t cap_emit_scope_begin(void *context, const uint64_t *args,
+                                     uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  uint32_t depth;
+  (void)args;
+  if (!host || count != 0 || host->emit_scope_count >= 64u)
+    return LAINMETA_ERR_DENIED;
+  depth = host->emit_scope_count++;
+  host->emit_scopes[depth].out = host->out;
+  host->emit_scopes[depth].out_length = host->out_length;
+  host->emit_scopes[depth].out_cap = host->out_cap;
+  host->out = NULL;
+  host->out_length = 0;
+  host->out_cap = 0;
+  if (out) *out = 0;
+  return LAINMETA_OK;
+}
+
+static uint32_t cap_emit_scope_end(void *context, const uint64_t *args,
+                                   uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  uint32_t depth, inner_cap;
+  (void)args;
+  if (!host || count != 0 || host->emit_scope_count == 0)
+    return LAINMETA_ERR_DENIED;
+  depth = --host->emit_scope_count;
+  inner_cap = host->out_cap;
+  free(host->out);
+  (void)lainvm_quota_release(host->quota, inner_cap);
+  host->charged -= inner_cap;
+  host->out = host->emit_scopes[depth].out;
+  host->out_length = host->emit_scopes[depth].out_length;
+  host->out_cap = host->emit_scopes[depth].out_cap;
+  host->emit_scopes[depth].out = NULL;
+  host->emit_scopes[depth].out_length = 0;
+  host->emit_scopes[depth].out_cap = 0;
+  if (out) *out = 0;
+  return LAINMETA_OK;
+}
+
 static uint32_t cap_emit_write(void *context, const uint64_t *args,
                                uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
@@ -912,7 +973,7 @@ static uint32_t cap_scratch_size(void *context, const uint64_t *args,
 }
 
 /* apply 请求并入 Expand 统一预算（步骤 4）：先扣 1 次 handler_call，再按
- * ceil((请求文本 + 标量实参记录)字节数 / 8) 扣 visit。两笔都成功才启动执行；任一不够就是
+ * ceil((请求文本 + 标量实参记录 + 字节结果长度) / 8) 扣 visit。两笔都成功才启动执行；任一不够就是
  * 9410 的可恢复拒绝（与 cap_ast_charge 同侧），调用方不启动 VM。
  * 未启用 AstOut 时没有统一账户，按规则明确拒绝，不静默放行。 */
 static uint32_t apply_budget_charge(LainMetaHost *host, uint64_t text_len) {
@@ -924,38 +985,44 @@ static uint32_t apply_budget_charge(LainMetaHost *host, uint64_t text_len) {
   return rc ? LAIN_AST_ERR_BUDGET : 0;
 }
 
-/* 先核对 Meta 地址空间的输入，再扣统一预算，最后拷入本次请求私有文本与参数。
- * apply 在独立 VSpace 中运行，只拿驱动显式给的能力与预算。 */
-static uint32_t cap_apply_request(void *context, const uint64_t *args,
-                                 uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  const char *text, *entry;
+/* 先核对请求输入，再扣统一预算，最后拷入本次请求私有文本与参数。
+ * `text_owned` 只允许宿主 emitter 自己持有的活动输出缓冲通过输入检查。 */
+static uint32_t apply_request_core(LainMetaHost *host, const char *text,
+                                   uint64_t text_len, const char *entry,
+                                   uint64_t entry_len, uint64_t arg_addr,
+                                   uint64_t arg_count, uint64_t *out,
+                                   bool text_owned, bool want_bytes,
+                                   uint64_t result_byte_length) {
   char *text_copy = NULL, *entry_copy = NULL;
   LainApplyValue apply_args[8];
   LainApplyResult result;
   L1Diagnostic diag;
-  uint64_t text_len, entry_len, arg_addr, arg_count, arg_bytes;
+  uint64_t arg_bytes;
+  uint64_t request_fuel = 0;
   uint32_t rc;
+  LainApplyLimits request_limits;
   if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 6 || !args) return LAINMETA_ERR_DENIED;
+  lainapply_bytes_free(&host->apply_result_bytes);
+  memset(&result, 0, sizeof(result));
+  memset(&diag, 0, sizeof(diag));
+  memset(&host->apply_result, 0, sizeof(host->apply_result));
   host->apply_ready = false;
   host->apply_status = LAINMETA_ERR_DENIED;
   memset(&host->apply_diagnostic, 0, sizeof(host->apply_diagnostic));
   if (out) *out = 0;
-  text = (const char *)(uintptr_t)args[0];
-  text_len = args[1];
-  entry = (const char *)(uintptr_t)args[2];
-  entry_len = args[3];
-  arg_addr = args[4];
-  arg_count = args[5];
   if (arg_count > 8) {
     host->apply_status = 9341;
+    return 0;
+  }
+  if (want_bytes && (result_byte_length == 0 ||
+                     result_byte_length > LAINAPPLY_BYTES_MAX)) {
+    host->apply_status = 9345;
     return 0;
   }
   arg_bytes = arg_count * 24;
   if (!text || !entry || !text_len || !entry_len ||
       text_len > 1024u * 1024u || entry_len > 255u ||
-      !host_range_readable(host, (uintptr_t)text, text_len) ||
+      (!text_owned && !host_range_readable(host, (uintptr_t)text, text_len)) ||
       !host_range_readable(host, (uintptr_t)entry, entry_len) ||
       (arg_bytes && (!arg_addr ||
        !host_range_readable(host, (uintptr_t)arg_addr, arg_bytes)))) {
@@ -969,12 +1036,20 @@ static uint32_t cap_apply_request(void *context, const uint64_t *args,
   }
   /* 预算扣账在**参数与地址检查之后、启动执行之前**，也早于计数：
    * 被预算拒绝的请求没有发给 apply 服务，按 apply_requests 的含义不计入。 */
-  rc = apply_budget_charge(host, text_len + arg_bytes);
+  if (result_byte_length > UINT64_MAX - text_len - arg_bytes) {
+    host->apply_status = 9345;
+    return 0;
+  }
+  rc = apply_budget_charge(host, text_len + arg_bytes + result_byte_length);
   if (rc) {
     host->apply_status = rc; /* 9410 = 预算可恢复拒绝；9347 = 没有统一预算 */
     return 0;
   }
   host->apply_requests++;
+  if (host->apply_fuel_remaining == 0) {
+    host->apply_status = 9306;
+    goto cleanup_apply;
+  }
   text_copy = (char *)malloc((size_t)text_len + 1u);
   entry_copy = (char *)malloc((size_t)entry_len + 1u);
   if (!text_copy || !entry_copy) {
@@ -999,29 +1074,110 @@ static uint32_t cap_apply_request(void *context, const uint64_t *args,
   }
   memset(&diag, 0, sizeof(diag));
   memset(&result, 0, sizeof(result));
-  /* 参数记录是 3 个 64 位单元：kind、width、bits；拷入宿主数组后再交给通用 apply。
-   * 入口是模块里的普通 #proc。结果只接受标量，字节块在本层还不存在。 */
-  if (!lainapply_proc(text_copy, entry_copy,
+  /* 参数记录是 3 个 64 位单元：kind、width、bits；拷入宿主数组后再交给通用 apply。 */
+  if (host->apply_active_depth >= 64u) {
+    host->apply_status = 9306;
+    goto cleanup_apply;
+  }
+  request_fuel = host->apply_fuel_remaining;
+  /* 具有外部能力的过程可能重入 apply。先从宿主的总余额中划出当前
+   * TCB 的最多一半；内层只能再划分剩余部分，所有活动 TCB 的额度总和
+   * 因而不超过原额度。无能力的 apply 不可能重入，可以使用全部余额。 */
+  if (host->apply_limits.caps && request_fuel > 1u)
+    request_fuel /= 2u;
+  host->apply_fuel_remaining -= request_fuel;
+  request_limits = host->apply_limits;
+  request_limits.fuel = request_fuel;
+  host->apply_active_depth++;
+  if (want_bytes)
+    rc = (uint32_t)lainapply_proc_bytes(text_copy, entry_copy,
                       arg_count ? apply_args : NULL, (uint32_t)arg_count,
-                      &host->apply_limits, &result,
-                      &diag)) {
+                      result_byte_length, &request_limits, &result, &diag);
+  else
+    rc = (uint32_t)lainapply_proc(text_copy, entry_copy,
+                      arg_count ? apply_args : NULL, (uint32_t)arg_count,
+                      &request_limits, &result, &diag);
+  host->apply_active_depth--;
+  if (result.fuel_used < request_fuel)
+    host->apply_fuel_remaining += request_fuel - result.fuel_used;
+  if (!rc) {
+    /* 内层 capability 可能刚写过共享结果槽；失败的外层请求必须使之失效。 */
+    lainapply_bytes_free(&host->apply_result_bytes);
+    memset(&host->apply_result, 0, sizeof(host->apply_result));
+    host->apply_ready = false;
     host->apply_status = diag.code ? (uint32_t)diag.code : 9330;
     host->apply_diagnostic = diag;
     goto cleanup_apply;
   }
+  if (result.kind == LAINAPPLY_RESULT_BYTES) {
+    memset(&host->apply_result, 0, sizeof(host->apply_result));
+    host->apply_result_bytes = result.bytes;
+    result.bytes.data = NULL;
+    result.bytes.length = 0;
+    host->apply_ready = true;
+    host->apply_status = 0;
+    if (out) *out = result_byte_length;
+    goto cleanup_apply;
+  }
   if (result.kind != LAINAPPLY_RESULT_SCALAR) {
+    lainapply_bytes_free(&host->apply_result_bytes);
+    memset(&host->apply_result, 0, sizeof(host->apply_result));
+    host->apply_ready = false;
     host->apply_status = 9330;
     memset(&host->apply_diagnostic, 0, sizeof(host->apply_diagnostic));
     goto cleanup_apply;
   }
+  lainapply_bytes_free(&host->apply_result_bytes);
   host->apply_result = result.scalar;
   host->apply_ready = true;
   host->apply_status = 0;
   if (out) *out = result.scalar.bits;
 cleanup_apply:
+  lainapply_bytes_free(&result.bytes);
   free(entry_copy);
   free(text_copy);
   return 0;
+}
+
+/* 外部请求的文本、入口和 wire 都必须在 Meta 地址空间显式授权。 */
+static uint32_t cap_apply_request(void *context, const uint64_t *args,
+                                  uint32_t count, uint64_t *out) {
+  if (count != 6 || !args) return LAINMETA_ERR_DENIED;
+  return apply_request_core(
+      (LainMetaHost *)context, (const char *)(uintptr_t)args[0], args[1],
+      (const char *)(uintptr_t)args[2], args[3], args[4], args[5], out,
+      false, false, 0);
+}
+
+static uint32_t cap_apply_bytes_request(void *context, const uint64_t *args,
+                                       uint32_t count, uint64_t *out) {
+  if (count != 7 || !args) return LAINMETA_ERR_DENIED;
+  return apply_request_core((LainMetaHost *)context,
+      (const char *)(uintptr_t)args[0], args[1],
+      (const char *)(uintptr_t)args[2], args[3], args[4], args[5], out,
+      false, true, args[6]);
+}
+
+/* 对当前 emitter 作用域中的文本 apply。过程名与参数 wire 仍须来自授权的
+ * Meta 内存；生成文本的宿主所有权不会暴露成 Meta 可伪造的地址。 */
+static uint32_t cap_apply_emitted_request(void *context, const uint64_t *args,
+                                          uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  if (!host || count != 4 || !args) return LAINMETA_ERR_DENIED;
+  return apply_request_core(host, host->out, host->out_length,
+                            (const char *)(uintptr_t)args[0], args[1],
+                            args[2], args[3], out, true, false, 0);
+}
+
+static uint32_t cap_apply_emitted_bytes_request(void *context,
+                                               const uint64_t *args,
+                                               uint32_t count,
+                                               uint64_t *out) {
+  LainMetaHost *host = context;
+  if (!host || count != 5 || !args) return LAINMETA_ERR_DENIED;
+  return apply_request_core(host, host->out, host->out_length,
+                            (const char *)(uintptr_t)args[0], args[1],
+                            args[2], args[3], out, true, true, args[4]);
 }
 
 static uint32_t cap_apply_status(void *context, const uint64_t *args,
@@ -1068,6 +1224,41 @@ static uint32_t cap_apply_width(void *context, const uint64_t *args,
   if (!host) return LAINMETA_ERR_DENIED;
   if (count != 0) return LAINMETA_ERR_DENIED;
   if (out) *out = host->apply_ready ? host->apply_result.width : 0;
+  return 0;
+}
+
+static uint32_t cap_apply_bytes_length(void *context, const uint64_t *args,
+                                       uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
+  if (out) *out = host->apply_ready ? host->apply_result_bytes.length : 0;
+  return 0;
+}
+
+static uint32_t cap_apply_bytes_copy(void *context, const uint64_t *args,
+                                    uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  uint64_t offset, length, destination;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 3 || !args) return LAINMETA_ERR_DENIED;
+  offset = args[0];
+  destination = args[1];
+  length = args[2];
+  if (!host->apply_ready || !host->apply_result_bytes.data ||
+      offset > host->apply_result_bytes.length ||
+      length > host->apply_result_bytes.length - offset || !host->space ||
+      length > (uint64_t)UINTPTR_MAX - (uintptr_t)destination ||
+      !lainvm_space_check(host->space, (uintptr_t)destination, length,
+                          LAINVM_MEM_WRITE)) {
+    if (out) *out = 9344;
+    return 0;
+  }
+  if (length)
+    memcpy((void *)(uintptr_t)destination,
+           host->apply_result_bytes.data + (size_t)offset, (size_t)length);
+  if (out) *out = 0;
   return 0;
 }
 
@@ -1682,6 +1873,8 @@ static const MetaCapability k_capabilities[] = {
     {"lain_meta_source_length", cap_source_length},
     {"lain_meta_source_path_data", cap_source_path_data},
     {"lain_meta_emit_reset", cap_emit_reset},
+    {"lain_meta_emit_scope_begin", cap_emit_scope_begin},
+    {"lain_meta_emit_scope_end", cap_emit_scope_end},
     {"lain_meta_emit_write", cap_emit_write},
     {"lain_meta_emit_data", cap_emit_data},
     {"lain_meta_emit_length", cap_emit_length},
@@ -1694,10 +1887,15 @@ static const MetaCapability k_capabilities[] = {
     {"lain_meta_scratch_size", cap_scratch_size},
     {"lain_meta_scratch_report", cap_scratch_report},
     {"lain_meta_apply_request", cap_apply_request},
+    {"lain_meta_apply_bytes_request", cap_apply_bytes_request},
+    {"lain_meta_apply_emitted_request", cap_apply_emitted_request},
+    {"lain_meta_apply_emitted_bytes_request", cap_apply_emitted_bytes_request},
     {"lain_meta_apply_status", cap_apply_status},
     {"lain_meta_apply_diagnostic_field", cap_apply_diagnostic_field},
     {"lain_meta_apply_kind", cap_apply_kind},
     {"lain_meta_apply_width", cap_apply_width},
+    {"lain_meta_apply_bytes_length", cap_apply_bytes_length},
+    {"lain_meta_apply_bytes_copy", cap_apply_bytes_copy},
     {"lain_meta_ast_root", cap_ast_root},
     {"lain_meta_ast_node_addr", cap_ast_node_addr},
     {"lain_meta_ast_span_addr", cap_ast_span_addr},

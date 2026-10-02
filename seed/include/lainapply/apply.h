@@ -34,8 +34,8 @@ typedef struct {
  * 由 apply 分配、调用方用 lainapply_bytes_free 释放；不带地址，按值拷出。
  * 空块用 data == NULL、length == 0 表示。
  *
- * **第一版只提供类型与分配/释放/校验**：从 VM 内存导出字节块的路径尚未实现，
- * 因此 lainapply_proc 今天只会交付 LAINAPPLY_RESULT_SCALAR（见 docs/compile-time.md）。
+ * `lainapply_proc_bytes` 可把 VM 内一段经 VSpace 校验的固定长度范围在执行空间销毁前
+ * 复制出来；普通 `lainapply_proc` 仍只交付标量。Meta 宿主 ABI 尚未接入此结果通道。
  * ------------------------------------------------------------------------- */
 #define LAINAPPLY_BYTES_MAX ((uint64_t)1024u * 1024u) /* 1 MiB */
 
@@ -60,13 +60,14 @@ void lainapply_bytes_set_len(LainApplyBytes *bytes, uint64_t length);
 typedef enum {
   LAINAPPLY_RESULT_NONE = 0,   /* 失败或未交付 */
   LAINAPPLY_RESULT_SCALAR = 1, /* 标量：kind/width/bits */
-  LAINAPPLY_RESULT_BYTES = 2,  /* 字节块：第一版未实现（9345 之外无路径） */
+  LAINAPPLY_RESULT_BYTES = 2,  /* 字节块：由 lainapply_proc_bytes 交付 */
 } LainApplyResultKind;
 
 typedef struct {
   LainApplyResultKind kind;
   LainApplyValue scalar; /* LAINAPPLY_RESULT_SCALAR */
   LainApplyBytes bytes;  /* LAINAPPLY_RESULT_BYTES */
+  uint64_t fuel_used;    /* 执行阶段已消耗的 VM 步数；失败结果也保留此计数 */
 } LainApplyResult;
 
 /* 输入模块须已验证。操作数是此调用的编译期常量；结果不能是地址。
@@ -74,16 +75,26 @@ typedef struct {
 /* 通用 apply：在独立 VSpace 里执行模块中名为 entry 的普通 `#proc`。
  *
  * 实参按值传，数量与类型必须与过程签名逐项一致，不允许 `#addr` 实参。
- * 结果必须是标量且不含地址；字节块路径第一版未实现。
+ * 结果必须是标量且不含地址；字节结果须显式使用 lainapply_proc_bytes。
  *
  * 拒码：9340 入口不存在、9341 实参个数不符、9342 实参类型不符、
  *       9343 实参含 #addr、9344 结果含 #addr；执行期沿用折叠段的 93xx。
- * 任何失败都不交付部分结果：out 先被清零，失败后仍是空的。
+ * 任何失败都不交付部分值：out 的 kind/scalar/bytes 先清零并保持为空；
+ * fuel_used 是计量侧带信息，执行阶段失败时仍报告已经消耗的 VM 步数。
  * limits 为 NULL 时按「不给能力、不限配额、默认栈与调用深度」处理。
  * 错误位置属于生成的模块文本；今天只给码与文本，行列留 0（未知）。 */
 bool lainapply_proc(const char *module_text, const char *entry,
                     const LainApplyValue *args, uint32_t arg_count,
                     const LainApplyLimits *limits, LainApplyResult *out,
                     L1Diagnostic *diag);
+
+/* 显式导出固定长度的按值字节结果。入口必须返回 #addr；地址须指向本次
+ * apply 独立 VSpace 中可读的完整范围。宿主在销毁该空间前复制字节，地址本身
+ * 不会逃逸。byte_length 为 1..LAINAPPLY_BYTES_MAX，否则拒 9345。 */
+bool lainapply_proc_bytes(const char *module_text, const char *entry,
+                          const LainApplyValue *args, uint32_t arg_count,
+                          uint64_t byte_length,
+                          const LainApplyLimits *limits, LainApplyResult *out,
+                          L1Diagnostic *diag);
 
 #endif
