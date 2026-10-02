@@ -1,0 +1,556 @@
+// Meta 编译期值 wire v1：Meta 验证帧头、字段边界、名称字符和引用身份范围。
+// proc_ref 的 procedure_id 与 signature_id 都是当前会话作用域表中的 1-based 条目号；
+// 两者必须相等，且条目必须是 func。它们绑定同一声明身份，不代表参数列表的结构类型。
+// 帧头 16 字节："LMV1"、version:u16、tag:u16、payload_len:u32、flags:u32；均小端。
+// tag 1=scalar(16 字节)，2=field_list(至少 4 字节)，
+// 3=type_ref(16 字节)，4=proc_ref(24 字节)。
+
+#proc meta_wire_read_le(%data: #addr, %offset: #bits<64>,
+                        %width: #bits<64>) -> #bits<64> {
+  %value = #loop read(%i: #bits<64> = 0, %acc: #bits<64> = 0)
+      -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %width)
+    #if %more {
+      %at = #lea(%data, %offset, 1, %i)
+      %byte = #load[#bits<8>](%at)
+      %wide = #zext[#bits<64>](%byte)
+      %shift = #mul[#bits<64>](%i, 8)
+      %part = #shl[#bits<64>](%wide, %shift)
+      %next = #or[#bits<64>](%acc, %part)
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue read(%i2, %next)
+    } else {
+      #break read(%acc)
+    }
+  }
+  #return %value
+}
+
+#proc meta_wire_name_equal(%data: #addr, %a: #bits<64>, %b: #bits<64>,
+                           %length: #bits<64>) -> #bits<1> {
+  %same = #loop cmp(%i: #bits<64> = 0) -> (#bits<1>) {
+    %more = #ult[#bits<64>](%i, %length)
+    #if %more {
+      %ap = #lea(%data, %a, 1, %i)
+      %bp = #lea(%data, %b, 1, %i)
+      %av = #load[#bits<8>](%ap)
+      %bv = #load[#bits<8>](%bp)
+      %equal = #eq[#bits<8>](%av, %bv)
+      #if %equal {
+        %next = #add[#bits<64>](%i, 1)
+        #continue cmp(%next)
+      } else {
+        #break cmp(0)
+      }
+    } else {
+      #break cmp(1)
+    }
+  }
+  #return %same
+}
+
+#proc meta_wire_name_check(%data: #addr, %offset: #bits<64>,
+                          %length: #bits<64>) -> #bits<64> {
+  %status = #loop chars(%i: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %length)
+    #if %more {
+      %p = #lea(%data, %offset, 1, %i)
+      %byte = #load[#bits<8>](%p)
+      %first = #eq[#bits<64>](%i, 0)
+      %is_lower = #and[#bits<1>](
+          #uge[#bits<8>](%byte, 97), #ule[#bits<8>](%byte, 122))
+      %is_upper = #and[#bits<1>](
+          #uge[#bits<8>](%byte, 65), #ule[#bits<8>](%byte, 90))
+      %is_underscore = #eq[#bits<8>](%byte, 95)
+      %start_alpha = #or[#bits<1>](%is_lower, %is_upper)
+      %start_valid = #or[#bits<1>](%start_alpha, %is_underscore)
+      %tail_valid = #call bs_is_ident(%byte)
+      %valid = #if %first -> (#bits<1>) {
+        #yield %start_valid
+      } else {
+        #yield %tail_valid
+      }
+      #if #eq[#bits<1>](%valid, 0) { #break chars(9436) }
+      %next = #add[#bits<64>](%i, 1)
+      #continue chars(%next)
+    } else {
+      #break chars(0)
+    }
+  }
+  #return %status
+}
+
+// 成功返回根节点 tag（1..4）；失败返回固定 wire 拒码 9430..9439。
+#proc meta_wire_validate_field_list(%data: #addr, %total: #bits<64>,
+                                   %payload_length: #bits<64>) -> #bits<64> {
+  %expected_total = #add[#bits<64>](%payload_length, 16)
+  %total_ok = #eq[#bits<64>](%expected_total, %total)
+  #if #eq[#bits<1>](%total_ok, 0) { #return 9435 }
+  %count = #call meta_wire_read_le(%data, 16, 4)
+  %walk = #loop fields(%i: #bits<64> = 0,
+                       %cursor: #bits<64> = 20) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %count)
+    #if %more {
+      %cursor_bad = #ugt[#bits<64>](%cursor, %total)
+      #if %cursor_bad { #break fields(9435) }
+      %remaining = #sub[#bits<64>](%total, %cursor)
+      %header_short = #ult[#bits<64>](%remaining, 8)
+      #if %header_short { #break fields(9435) }
+      %name_length = #call meta_wire_read_le(%data, %cursor, 2)
+      %flags_offset = #add[#bits<64>](%cursor, 2)
+      %flags = #call meta_wire_read_le(%data, %flags_offset, 2)
+      %node_length_offset = #add[#bits<64>](%cursor, 4)
+      %node_length = #call meta_wire_read_le(%data, %node_length_offset, 4)
+      %empty_name = #eq[#bits<64>](%name_length, 0)
+      %bad_flags = #ne[#bits<64>](%flags, 0)
+      %node_short = #ult[#bits<64>](%node_length, 16)
+      %bad_item0 = #or[#bits<1>](%empty_name, %bad_flags)
+      %bad_item = #or[#bits<1>](%bad_item0, %node_short)
+      #if %bad_item { #break fields(9435) }
+      %name_start = #add[#bits<64>](%cursor, 8)
+      %node_start = #add[#bits<64>](%name_start, %name_length)
+      %node_end = #add[#bits<64>](%node_start, %node_length)
+      %node_past_end = #ugt[#bits<64>](%node_end, %total)
+      #if %node_past_end { #break fields(9435) }
+      %name_status = #call meta_wire_name_check(
+          %data, %name_start, %name_length)
+      %name_ok = #eq[#bits<64>](%name_status, 0)
+      #if #eq[#bits<1>](%name_ok, 0) { #break fields(%name_status) }
+      %duplicate_status = #loop previous(
+          %j: #bits<64> = 0, %scan: #bits<64> = 20) -> (#bits<64>) {
+        %has_previous = #ult[#bits<64>](%j, %i)
+        #if %has_previous {
+          %previous_name_length = #call meta_wire_read_le(%data, %scan, 2)
+          %previous_node_length_at = #add[#bits<64>](%scan, 4)
+          %previous_node_length = #call meta_wire_read_le(
+              %data, %previous_node_length_at, 4)
+          %previous_name_start = #add[#bits<64>](%scan, 8)
+          %previous_node_start = #add[#bits<64>](
+              %previous_name_start, %previous_name_length)
+          %previous_end = #add[#bits<64>](
+              %previous_node_start, %previous_node_length)
+          %same_length = #eq[#bits<64>](
+              %previous_name_length, %name_length)
+          %same_name = #if %same_length -> (#bits<1>) {
+            %equal = #call meta_wire_name_equal(
+                %data, %previous_name_start, %name_start, %name_length)
+            #yield %equal
+          } else {
+            #yield 0
+          }
+          #if %same_name { #break previous(9437) }
+          %j2 = #add[#bits<64>](%j, 1)
+          #continue previous(%j2, %previous_end)
+        } else {
+          #break previous(0)
+        }
+      }
+      %no_duplicate = #eq[#bits<64>](%duplicate_status, 0)
+      #if #eq[#bits<1>](%no_duplicate, 0) {
+        #break fields(%duplicate_status)
+      }
+      %node = #lea(%data, %node_start, 1, 0)
+      %node_tag = #call meta_wire_validate(%node, %node_length)
+      %is_ref = #eq[#bits<64>](%node_tag, 3)
+      #if #eq[#bits<1>](%is_ref, 0) { #break fields(9435) }
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue fields(%i2, %node_end)
+    } else {
+      %exact_end = #eq[#bits<64>](%cursor, %total)
+      %status = #if %exact_end -> (#bits<64>) {
+        #yield 0
+      } else {
+        #yield 9435
+      }
+      #break fields(%status)
+    }
+  }
+  #return %walk
+}
+
+#proc meta_wire_validate(%data: #addr, %length: #bits<64>) -> #bits<64> {
+  %too_large = #ugt[#bits<64>](%length, 1048576)
+  #if %too_large { #return 9433 }
+  %short = #ult[#bits<64>](%length, 16)
+  #if %short { #return 9433 }
+  %magic = #call meta_wire_read_le(%data, 0, 4)
+  %magic_ok = #eq[#bits<64>](%magic, 0x31564D4C)
+  #if #eq[#bits<1>](%magic_ok, 0) { #return 9430 }
+  %version = #call meta_wire_read_le(%data, 4, 2)
+  %version_ok = #eq[#bits<64>](%version, 1)
+  #if #eq[#bits<1>](%version_ok, 0) { #return 9431 }
+  %tag = #call meta_wire_read_le(%data, 6, 2)
+  %tag_low = #uge[#bits<64>](%tag, 1)
+  %tag_high = #ule[#bits<64>](%tag, 4)
+  %tag_ok = #and[#bits<1>](%tag_low, %tag_high)
+  #if #eq[#bits<1>](%tag_ok, 0) { #return 9432 }
+  %payload_length = #call meta_wire_read_le(%data, 8, 4)
+  %total_length = #add[#bits<64>](%payload_length, 16)
+  %length_ok = #eq[#bits<64>](%total_length, %length)
+  #if #eq[#bits<1>](%length_ok, 0) { #return 9433 }
+  %flags = #call meta_wire_read_le(%data, 12, 4)
+  %flags_ok = #eq[#bits<64>](%flags, 0)
+  #if #eq[#bits<1>](%flags_ok, 0) { #return 9434 }
+  %scalar = #eq[#bits<64>](%tag, 1)
+  #if %scalar {
+    %shape = #eq[#bits<64>](%payload_length, 16)
+    #if #eq[#bits<1>](%shape, 0) { #return 9435 }
+    %scalar_flags = #call meta_wire_read_le(%data, 20, 4)
+    %scalar_flags_ok = #eq[#bits<64>](%scalar_flags, 0)
+    #if #eq[#bits<1>](%scalar_flags_ok, 0) { #return 9434 }
+  }
+  %type_ref = #eq[#bits<64>](%tag, 3)
+  #if %type_ref {
+    %shape2 = #eq[#bits<64>](%payload_length, 16)
+    #if #eq[#bits<1>](%shape2, 0) { #return 9435 }
+    %session = #call meta_wire_read_le(%data, 16, 8)
+    %type_id = #call meta_wire_read_le(%data, 24, 8)
+    %expected_session = #call lain_meta_session_id()
+    %session_ok = #eq[#bits<64>](%session, %expected_session)
+    #if #eq[#bits<1>](%session_ok, 0) { #return 9438 }
+    %scratch = #call lain_meta_scratch_data()
+    %type_count = #call meta_cell_get(#lea(%scratch, 512, 1, 0))
+    %type_nonzero = #uge[#bits<64>](%type_id, 1)
+    %type_in_range = #ule[#bits<64>](%type_id, %type_count)
+    %type_valid = #and[#bits<1>](%type_nonzero, %type_in_range)
+    #if #eq[#bits<1>](%type_valid, 0) { #return 9439 }
+  }
+  %proc_ref = #eq[#bits<64>](%tag, 4)
+  #if %proc_ref {
+    %shape3 = #eq[#bits<64>](%payload_length, 24)
+    #if #eq[#bits<1>](%shape3, 0) { #return 9435 }
+    %proc_session = #call meta_wire_read_le(%data, 16, 8)
+    %expected_proc_session = #call lain_meta_session_id()
+    %proc_session_ok = #eq[#bits<64>](%proc_session,
+                                      %expected_proc_session)
+    #if #eq[#bits<1>](%proc_session_ok, 0) { #return 9438 }
+    %procedure_id = #call meta_wire_read_le(%data, 24, 8)
+    %signature_id = #call meta_wire_read_le(%data, 32, 8)
+    %procedure_nonzero = #uge[#bits<64>](%procedure_id, 1)
+    %signature_nonzero = #uge[#bits<64>](%signature_id, 1)
+    %proc_count = #call meta_scope_count()
+    %procedure_in_range = #ule[#bits<64>](%procedure_id, %proc_count)
+    %procedure_index = #sub[#bits<64>](%procedure_id, 1)
+    %procedure_candidate = #and[#bits<1>](%procedure_nonzero,
+                                           %procedure_in_range)
+    %procedure_kind = #if %procedure_candidate -> (#bits<64>) {
+      %kind = #call meta_scope_kind(%procedure_index)
+      #yield %kind
+    } else { #yield 0 }
+    %procedure_is_func = #eq[#bits<64>](%procedure_kind, 6)
+    %procedure_valid = #and[#bits<1>](%procedure_candidate,
+                                       %procedure_is_func)
+    %signature_matches = #eq[#bits<64>](%signature_id, %procedure_id)
+    %procedure_and_signature0 = #and[#bits<1>](%procedure_valid,
+                                                %signature_nonzero)
+    %procedure_and_signature = #and[#bits<1>](%procedure_and_signature0,
+                                               %signature_matches)
+    #if #eq[#bits<1>](%procedure_and_signature, 0) { #return 9439 }
+  }
+  %field_list = #eq[#bits<64>](%tag, 2)
+  #if %field_list {
+    %shape4 = #uge[#bits<64>](%payload_length, 4)
+    #if #eq[#bits<1>](%shape4, 0) { #return 9435 }
+    %field_status = #call meta_wire_validate_field_list(
+        %data, %length, %payload_length)
+    %fields_ok = #eq[#bits<64>](%field_status, 0)
+    #if #eq[#bits<1>](%fields_ok, 0) { #return %field_status }
+  }
+  #return %tag
+}
+
+// 按协议的小端序写一个整数；wire 不依赖宿主或 VM 的本机字节序。
+#proc meta_wire_write_le(%data: #addr, %offset: #bits<64>,
+                         %width: #bits<64>, %value: #bits<64>) -> #bits<32> {
+  %status = #loop write(%i: #bits<64> = 0) -> (#bits<32>) {
+    %more = #ult[#bits<64>](%i, %width)
+    #if %more {
+      %shift = #mul[#bits<64>](%i, 8)
+      %shifted = #lshr[#bits<64>](%value, %shift)
+      %byte64 = #and[#bits<64>](%shifted, 255)
+      %byte = #trunc[#bits<8>](%byte64)
+      %at = #lea(%data, %offset, 1, %i)
+      #store[#bits<8>](%byte, %at)
+      %next = #add[#bits<64>](%i, 1)
+      #continue write(%next)
+    } else {
+      #break write(0)
+    }
+  }
+  #return %status
+}
+
+// 在当前可见环境中按名字取得过程值。out 必须是 Meta 已授权可写的 40 字节。
+// 过程值只含会话内声明身份，不授予执行该过程的宿主能力。
+#proc meta_proc_ref_from_name(%name: #addr, %name_length: #bits<64>,
+                              %out: #addr, %capacity: #bits<64>) -> #bits<32> {
+  %capacity_ok = #uge[#bits<64>](%capacity, 40)
+  #if #eq[#bits<1>](%capacity_ok, 0) { #return 9435 }
+  %index = #call meta_scope_find(%name, %name_length)
+  %found = #ne[#bits<64>](%index, 0xFFFFFFFFFFFFFFFF)
+  #if #eq[#bits<1>](%found, 0) {
+    %fail = #call lain_meta_fail(9415)
+    #return 9415
+  }
+  %kind = #call meta_scope_kind(%index)
+  %is_func = #eq[#bits<64>](%kind, 6)
+  #if #eq[#bits<1>](%is_func, 0) {
+    %fail2 = #call lain_meta_fail(9439)
+    #return 9439
+  }
+  %node = #call meta_scope_decl_node(%index)
+  %node_valid = #ne[#bits<64>](%node, 0)
+  #if #eq[#bits<1>](%node_valid, 0) { #return 9414 }
+  %proc_id = #add[#bits<64>](%index, 1)
+  %session = #call lain_meta_session_id()
+  %w0 = #call meta_wire_write_le(%out, 0, 4, 0x31564D4C)
+  %w1 = #call meta_wire_write_le(%out, 4, 2, 1)
+  %w2 = #call meta_wire_write_le(%out, 6, 2, 4)
+  %w3 = #call meta_wire_write_le(%out, 8, 4, 24)
+  %w4 = #call meta_wire_write_le(%out, 12, 4, 0)
+  %w5 = #call meta_wire_write_le(%out, 16, 8, %session)
+  %w6 = #call meta_wire_write_le(%out, 24, 8, %proc_id)
+  %w7 = #call meta_wire_write_le(%out, 32, 8, %proc_id)
+  #return 0
+}
+
+// 从当前可见 scalar/struct/enum 类型绑定编码 type_ref。
+#proc meta_type_ref_from_name(%name: #addr, %name_length: #bits<64>,
+                              %out: #addr, %capacity: #bits<64>) -> #bits<32> {
+  %capacity_ok = #uge[#bits<64>](%capacity, 32)
+  #if #eq[#bits<1>](%capacity_ok, 0) { #return 9435 }
+  %scratch = #call lain_meta_scratch_data()
+  %index = #call meta_scope_find(%name, %name_length)
+  %missing = #eq[#bits<64>](%index, 0xFFFFFFFFFFFFFFFF)
+  #if %missing {
+    %fail = #call lain_meta_fail(5)
+    #return 5
+  }
+  %kind = #call meta_scope_kind(%index)
+  %is_scalar_type = #eq[#bits<64>](%kind, 2)
+  %is_struct_type = #eq[#bits<64>](%kind, 4)
+  %is_enum_type = #eq[#bits<64>](%kind, 5)
+  %is_type0 = #or[#bits<1>](%is_scalar_type, %is_struct_type)
+  %is_type = #or[#bits<1>](%is_type0, %is_enum_type)
+  #if #eq[#bits<1>](%is_type, 1) {
+    // 从命中的类型条目取真实来源；名字可能来自 root/prelude，而非当前源码。
+    %source = #call meta_scope_word(%index, 0)
+    %source_len = #call lain_meta_source_length(%source)
+    %base = #call lain_meta_source_data(%source)
+    // meta_scope_type_id 按声明种类 intern scalar、名义 struct 或 enum。
+    %id0 = #call meta_scope_type_id(%base, %source_len, %name,
+                                    %name_length)
+    %not_found = #or[#bits<1>](
+        #eq[#bits<64>](%id0, 0),
+        #eq[#bits<64>](%id0, 0xFFFFFFFFFFFFFFFF))
+    #if %not_found {
+      %fail2 = #call lain_meta_fail(5)
+      #return 5
+    }
+    %session = #call lain_meta_session_id()
+    %w0 = #call meta_wire_write_le(%out, 0, 4, 0x31564D4C)
+    %w1 = #call meta_wire_write_le(%out, 4, 2, 1)
+    %w2 = #call meta_wire_write_le(%out, 6, 2, 3)
+    %w3 = #call meta_wire_write_le(%out, 8, 4, 16)
+    %w4 = #call meta_wire_write_le(%out, 12, 4, 0)
+    %w5 = #call meta_wire_write_le(%out, 16, 8, %session)
+    %w6 = #call meta_wire_write_le(%out, 24, 8, %id0)
+    #return 0
+  }
+  %fail3 = #call lain_meta_fail(5)
+  #return 5
+}
+
+// 校验并取出 type_ref 的当前会话类型 ID；错误码原样返回。
+#proc meta_type_ref_id(%wire: #addr, %wire_length: #bits<64>) -> #bits<64> {
+  %tag = #call meta_wire_validate(%wire, %wire_length)
+  %is_type_ref = #eq[#bits<64>](%tag, 3)
+  #if #eq[#bits<1>](%is_type_ref, 0) {
+    %is_wire_error = #ugt[#bits<64>](%tag, 4)
+    %code = #if %is_wire_error -> (#bits<64>) {
+      #yield %tag
+    } else {
+      #yield 9439
+    }
+    %code32 = #trunc[#bits<32>](%code)
+    %failed = #call lain_meta_fail(%code32)
+    #return %code
+  }
+  %id = #call meta_wire_read_le(%wire, 24, 8)
+  #return %id
+}
+
+// 把已验证的 field_list 消费成名义 record 类型值。
+// 字段表存入注册表的参数区引用；字段名、类型 ID 和偏移都由 Meta 计算。
+#proc meta_record_type_from_field_list(%wire: #addr,
+                                       %wire_length: #bits<64>,
+                                       %out: #addr,
+                                       %capacity: #bits<64>) -> #bits<32> {
+  #if #ult[#bits<64>](%capacity, 32) { #return 9435 }
+  %tag = #call meta_wire_validate(%wire, %wire_length)
+  #if #ne[#bits<64>](%tag, 2) {
+    %bad = #if #ugt[#bits<64>](%tag, 4) -> (#bits<32>) {
+      %code = #trunc[#bits<32>](%tag)
+      #yield %code
+    } else { #yield 9435 }
+    %fail = #call lain_meta_fail(%bad)
+    #return %bad
+  }
+  %count = #call meta_wire_read_le(%wire, 16, 4)
+  %total = #call meta_wire_read_le(%wire, 8, 4)
+  %payload_end = #add[#bits<64>](%total, 16)
+  %measure = #loop measure(%i: #bits<64> = 0,
+                           %cursor: #bits<64> = 20,
+                           %offset: #bits<64> = 0,
+                           %max_align: #bits<64> = 1,
+                           %name_bytes: #bits<64> = 0) -> (#bits<64>) {
+    #if #ult[#bits<64>](%i, %count) {
+      %name_len = #call meta_wire_read_le(%wire, %cursor, 2)
+      %node_len_at = #add[#bits<64>](%cursor, 4)
+      %node_len = #call meta_wire_read_le(%wire, %node_len_at, 4)
+      %name_start = #add[#bits<64>](%cursor, 8)
+      %node_start = #add[#bits<64>](%name_start, %name_len)
+      %node = #lea(%wire, %node_start, 1, 0)
+      %type_id = #call meta_type_ref_id(%node, %node_len)
+      %size = #call meta_tid_size(%type_id)
+      %align = #call meta_tid_align(%type_id)
+      %aligned = #call meta_layout_field_align_up_checked(%offset, %align)
+      %next_offset = #call meta_layout_add_checked(%aligned, %size)
+      %bad_layout0 = #eq[#bits<64>](%type_id, 0xFFFFFFFFFFFFFFFF)
+      %bad_layout1 = #eq[#bits<64>](%aligned, 0xFFFFFFFFFFFFFFFF)
+      %bad_layout2 = #eq[#bits<64>](%next_offset, 0xFFFFFFFFFFFFFFFF)
+      %bad01 = #or[#bits<1>](%bad_layout0, %bad_layout1)
+      %bad_layout = #or[#bits<1>](%bad01, %bad_layout2)
+      #if %bad_layout { #break measure(0xFFFFFFFFFFFFFFFF) }
+      %new_align = #if #ugt[#bits<64>](%align, %max_align) -> (#bits<64>) {
+        #yield %align
+      } else { #yield %max_align }
+      %next_cursor = #add[#bits<64>](%node_start, %node_len)
+      %new_name_bytes = #add[#bits<64>](%name_bytes, %name_len)
+      %i2 = #add[#bits<64>](%i, 1)
+      #continue measure(%i2, %next_cursor, %next_offset,
+                        %new_align, %new_name_bytes)
+    } else {
+      %end = #call meta_layout_field_align_up_checked(%offset, %max_align)
+      %scratch = #call lain_meta_scratch_data()
+      %save_align = #call meta_cell_put(#lea(%scratch, 480, 1, 0), %max_align)
+      #break measure(%end)
+    }
+  }
+  %layout_size = #and[#bits<64>](%measure, 0xFFFFFFFFFFFFFFFF)
+  %layout_bad = #eq[#bits<64>](%layout_size, 0xFFFFFFFFFFFFFFFF)
+  #if %layout_bad {
+    %fail_layout = #call lain_meta_fail(5)
+    #return 5
+  }
+  // 按 count*32 分配固定字段记录，再紧接着存所有字段名副本。
+  %entry_bytes = #mul[#bits<64>](%count, 32)
+  %names = #loop names(%i: #bits<64> = 0,
+                       %cursor: #bits<64> = 20,
+                       %sum: #bits<64> = 0) -> (#bits<64>) {
+    #if #ult[#bits<64>](%i, %count) {
+      %name_len = #call meta_wire_read_le(%wire, %cursor, 2)
+      %node_len = #call meta_wire_read_le(%wire, #add[#bits<64>](%cursor, 4), 4)
+      %name_start = #add[#bits<64>](%cursor, 8)
+      %node_start = #add[#bits<64>](%name_start, %name_len)
+      %field_end_cursor = #add[#bits<64>](%node_start, %node_len)
+      %cursor_next = #add[#bits<64>](%field_end_cursor, 0)
+      %sum_next = #add[#bits<64>](%sum, %name_len)
+      #continue names(#add[#bits<64>](%i, 1), %cursor_next, %sum_next)
+    } else { #break names(%sum) }
+  }
+  // %names 是字段名总长。
+  %names_total = #add[#bits<64>](%names, 0)
+  %allocation = #add[#bits<64>](%entry_bytes, %names_total)
+  %mark = #call meta_bump_mark()
+  %storage = #call meta_bump_alloc(%allocation)
+  #if #eq[#bits<64>](%storage, 0xFFFFFFFFFFFFFFFF) { #return 17 }
+  %scratch = #call lain_meta_scratch_data()
+  %storage_addr = #lea(%scratch, %storage, 1, 0)
+  %names_offset = #add[#bits<64>](%storage, %entry_bytes)
+  %fill = #loop fill(%i: #bits<64> = 0,
+                     %cursor: #bits<64> = 20,
+                     %offset: #bits<64> = 0,
+                     %name_cursor: #bits<64> = %names_offset) -> (#bits<64>) {
+    #if #ult[#bits<64>](%i, %count) {
+      %field_name_len = #call meta_wire_read_le(%wire, %cursor, 2)
+      %field_node_len = #call meta_wire_read_le(%wire, #add[#bits<64>](%cursor, 4), 4)
+      %field_name_start = #add[#bits<64>](%cursor, 8)
+      %field_node_start = #add[#bits<64>](%field_name_start, %field_name_len)
+      %field_node = #lea(%wire, %field_node_start, 1, 0)
+      %field_type_id = #call meta_type_ref_id(%field_node, %field_node_len)
+      %field_align = #call meta_tid_align(%field_type_id)
+      %field_size = #call meta_tid_size(%field_type_id)
+      %field_offset = #call meta_layout_field_align_up_checked(%offset, %field_align)
+      %field_entry_at = #add[#bits<64>](%storage, #mul[#bits<64>](%i, 32))
+      %field_entry_addr = #lea(%scratch, %field_entry_at, 1, 0)
+      %n0 = #call meta_cell_put(%field_entry_addr, %name_cursor)
+      %n1 = #call meta_cell_put(#lea(%field_entry_addr, 8, 1, 0), %field_name_len)
+      %n2 = #call meta_cell_put(#lea(%field_entry_addr, 16, 1, 0), %field_type_id)
+      %n3 = #call meta_cell_put(#lea(%field_entry_addr, 24, 1, 0), %field_offset)
+      %copy = #loop copy_name(%j: #bits<64> = 0) -> (#bits<32>) {
+        #if #ult[#bits<64>](%j, %field_name_len) {
+          %src = #lea(%wire, %field_name_start, 1, %j)
+          %dst = #lea(%scratch, %name_cursor, 1, %j)
+          %byte = #load[#bits<8>](%src)
+          #store[#bits<8>](%byte, %dst)
+          #continue copy_name(#add[#bits<64>](%j, 1))
+        } else { #break copy_name(0) }
+      }
+      %next_offset = #call meta_layout_add_checked(%field_offset, %field_size)
+      %next_cursor = #add[#bits<64>](%field_node_start, %field_node_len)
+      %next_name_cursor = #add[#bits<64>](%name_cursor, %field_name_len)
+      #continue fill(#add[#bits<64>](%i, 1), %next_cursor,
+                     %next_offset, %next_name_cursor)
+    } else { #break fill(0) }
+  }
+  %serial = #call meta_cell_get(#lea(%scratch, 472, 1, 0))
+  %owner = #add[#bits<64>](%serial, 1)
+  %owner_wrap = #eq[#bits<64>](%owner, 0)
+  #if %owner_wrap {
+    %release_wrap = #call meta_bump_release(%mark)
+    %fail_wrap = #call lain_meta_fail(15)
+    #return 15
+  }
+  %max_align = #call meta_cell_get(#lea(%scratch, 480, 1, 0))
+  %id = #call meta_intern(3, %owner, 0, %layout_size, %max_align)
+  #if #eq[#bits<64>](%id, 0) {
+    %release_fail = #call meta_bump_release(%mark)
+    #return 15
+  }
+  %row = #call meta_reg_entry(%scratch, #sub[#bits<64>](%id, 1))
+  %put_entries = #call meta_cell_put(#lea(%row, 48, 1, 0), %storage)
+  %put_count = #call meta_cell_put(#lea(%row, 56, 1, 0), %count)
+  %put_serial = #call meta_cell_put(#lea(%scratch, 472, 1, 0), %owner)
+  %session = #call lain_meta_session_id()
+  %w0 = #call meta_wire_write_le(%out, 0, 4, 0x31564D4C)
+  %w1 = #call meta_wire_write_le(%out, 4, 2, 1)
+  %w2 = #call meta_wire_write_le(%out, 6, 2, 3)
+  %w3 = #call meta_wire_write_le(%out, 8, 4, 16)
+  %w4 = #call meta_wire_write_le(%out, 12, 4, 0)
+  %w5 = #call meta_wire_write_le(%out, 16, 8, %session)
+  %w6 = #call meta_wire_write_le(%out, 24, 8, %id)
+  #return 0
+}
+
+#proc meta_field_name_equal(%id: #bits<64>, %index: #bits<64>,
+                            %name: #addr, %name_length: #bits<64>) -> #bits<1> {
+  %count = #call meta_tid_field_count(%id)
+  %valid = #ult[#bits<64>](%index, %count)
+  %same = #if %valid -> (#bits<1>) {
+    %scratch = #call lain_meta_scratch_data()
+    %table = #call meta_tid_word(%id, 48)
+    %entry_off = #add[#bits<64>](%table,
+                                  #mul[#bits<64>](%index, 32))
+    %entry = #lea(%scratch, %entry_off, 1, 0)
+    %stored_off = #call meta_cell_get(%entry)
+    %stored_len = #call meta_cell_get(#lea(%entry, 8, 1, 0))
+    %len_ok = #eq[#bits<64>](%stored_len, %name_length)
+    %equal = #if %len_ok -> (#bits<1>) {
+      %stored = #lea(%scratch, %stored_off, 1, 0)
+      #yield #call meta_bytes_equal(%stored, %name, %name_length)
+    } else { #yield 0 }
+    #yield %equal
+  } else { #yield 0 }
+  #return %same
+}

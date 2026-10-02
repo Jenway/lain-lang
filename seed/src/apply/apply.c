@@ -43,12 +43,17 @@ static bool apply_run(const L1Module *module, const char *entry,
                       const LainApplyLimits *limits, L1Value *value_out,
                       LainVmQuota *quota_out, uint64_t *fuel_used_out,
                       LainApplyBytes *bytes_out, uint64_t byte_length,
-                      L1Diagnostic *diag) {
+                      const LainApplyBytes *byte_arg,
+                      uint32_t byte_arg_index, L1Diagnostic *diag) {
   LainVmSpace space;
   LainVmImage *image = NULL;
   LainVmTcb *tcb = NULL;
   LainVmStackLease lease = lainvm_stack_no_lease();
+  LainVmRegionHandle byte_region = lainvm_space_no_handle();
   LainVmQuota quota;
+  L1Value call_args[8];
+  uint8_t *byte_copy = NULL;
+  bool byte_charged = false;
   const L1Subroutine *callee = NULL;
   L1Value value;
   LainVmSliceResult result;
@@ -84,6 +89,29 @@ static bool apply_run(const L1Module *module, const char *entry,
     snprintf(message, sizeof(message), "apply: cannot load the module");
     goto cleanup;
   }
+  if (byte_arg) {
+    if (lainvm_quota_charge(&quota, byte_arg->length) != 0) {
+      code = LAINVM_QUOTA_TRAP;
+      snprintf(message, sizeof(message), "apply: byte argument exceeds the allocation quota");
+      goto cleanup;
+    }
+    byte_charged = true;
+    byte_copy = (uint8_t *)malloc((size_t)byte_arg->length);
+    if (!byte_copy) {
+      code = 2028;
+      snprintf(message, sizeof(message), "apply: cannot copy the byte argument");
+      goto cleanup;
+    }
+    memcpy(byte_copy, byte_arg->data, (size_t)byte_arg->length);
+    byte_region = lainvm_space_map_external(
+        &space, (uintptr_t)byte_copy, byte_arg->length, byte_arg->length,
+        LAINVM_MEM_READ, 0);
+    if (lainvm_space_handle_none(byte_region)) {
+      code = 9348;
+      snprintf(message, sizeof(message), "apply: cannot map the byte argument");
+      goto cleanup;
+    }
+  }
   if (limits && limits->stack_bytes) {
     lease.space = &space;
     lease.region = lainvm_space_alloc_stack(&space, limits->stack_bytes, 1, &quota);
@@ -109,8 +137,18 @@ static bool apply_run(const L1Module *module, const char *entry,
     goto cleanup;
   }
   memset(&value, 0, sizeof(value));
+  if (arg_count > 8) {
+    code = 9303;
+    snprintf(message, sizeof(message), "apply: too many arguments");
+    goto cleanup;
+  }
+  if (arg_count) memcpy(call_args, args, arg_count * sizeof(*args));
+  if (byte_arg) {
+    call_args[byte_arg_index] = (L1Value){
+        L1_VALUE_ADDR, 0, {.addr = (void *)byte_copy}};
+  }
   if (callee->flags & SUBROUTINE_EXTERN) {
-    result = lainvm_vm_call_host(tcb, index, args, arg_count,
+    result = lainvm_vm_call_host(tcb, index, call_args, arg_count,
                                  callee->result_count ? &value : NULL);
     if (result != LAINVM_SLICE_RUNNABLE) {
       code = result == LAINVM_SLICE_TRAPPED && tcb->trap.status > 0
@@ -119,7 +157,7 @@ static bool apply_run(const L1Module *module, const char *entry,
       goto cleanup;
     }
   } else {
-    if (lainvm_tcb_start(tcb, entry, args, arg_count, diag) != 0) {
+    if (lainvm_tcb_start(tcb, entry, call_args, arg_count, diag) != 0) {
       code = 9305;
       snprintf(message, sizeof(message), "apply: cannot start the entry");
       goto cleanup;
@@ -169,6 +207,10 @@ cleanup:
   if (fuel_used_out && tcb) *fuel_used_out = tcb->steps;
   if (tcb) lainvm_tcb_free(tcb);
   if (!lainvm_stack_lease_none(lease)) (void)lainvm_space_free(&space, lease.region);
+  if (!lainvm_space_handle_none(byte_region))
+    (void)lainvm_space_unmap_external(&space, byte_region);
+  free(byte_copy);
+  if (byte_charged) (void)lainvm_quota_release(&quota, byte_arg->length);
   if (image) lainvm_image_free(image);
   if (quota_out) *quota_out = quota;
   if (!ok) return fail(diag, code, message);
@@ -226,6 +268,8 @@ bool lainapply_bytes_check(const LainApplyBytes *bytes, L1Diagnostic *diag) {
 static bool apply_proc_common(const char *module_text, const char *entry,
                               const LainApplyValue *args, uint32_t arg_count,
                               uint64_t byte_length,
+                              uint32_t byte_arg_index,
+                              const LainApplyBytes *byte_arg,
                               const LainApplyLimits *limits,
                               LainApplyResult *out, L1Diagnostic *diag) {
   L1Builder *builder;
@@ -249,6 +293,9 @@ static bool apply_proc_common(const char *module_text, const char *entry,
     return fail(diag, 9340, "apply: entry does not exist");
   if (arg_count > 8 || (arg_count && !args))
     return fail(diag, 9341, "apply: argument count does not match the entry");
+  if (byte_arg && !lainapply_bytes_check(byte_arg, diag)) return false;
+  if (byte_arg && byte_arg_index >= arg_count)
+    return fail(diag, 9341, "apply: byte argument index is out of range");
 
   builder = lainir_builder_new();
   if (!builder) return fail(diag, 2028, "apply: out of memory");
@@ -267,6 +314,15 @@ static bool apply_proc_common(const char *module_text, const char *entry,
     return fail(diag, 9341, "apply: argument count does not match the entry");
   }
   for (i = 0; i < arg_count; i++) {
+    if (byte_arg && i == byte_arg_index) {
+      if (args[i].kind != TY_ADDR || !callee->params[i].ty ||
+          callee->params[i].ty->kind != TY_ADDR) {
+        lainir_builder_free(builder);
+        return fail(diag, 9342, "apply: byte argument requires an #addr parameter");
+      }
+      values[i] = (L1Value){L1_VALUE_ADDR, 0, {.addr = NULL}};
+      continue;
+    }
     /* 实参自己带地址的，先按 9343 报，而不是笼统的类型不符 */
     if (args[i].kind == TY_ADDR) {
       lainir_builder_free(builder);
@@ -304,7 +360,7 @@ static bool apply_proc_common(const char *module_text, const char *entry,
   memset(&value, 0, sizeof(value));
   ok = apply_run(module, entry, values, arg_count, limits, &value, NULL,
                  &out->fuel_used, want_bytes ? &out->bytes : NULL,
-                 byte_length, diag);
+                 byte_length, byte_arg, byte_arg_index, diag);
   if (!ok) {
     lainir_builder_free(builder);
     /* 位置属于生成的模块文本；今天给不出行号，留 0 = 未知 */
@@ -333,6 +389,7 @@ bool lainapply_proc(const char *module_text, const char *entry,
                     const LainApplyLimits *limits, LainApplyResult *out,
                     L1Diagnostic *diag) {
   return apply_proc_common(module_text, entry, args, arg_count, 0,
+                           UINT32_MAX, NULL,
                            limits, out, diag);
 }
 
@@ -346,5 +403,20 @@ bool lainapply_proc_bytes(const char *module_text, const char *entry,
     return fail(diag, 9345, "apply: byte result length is out of range");
   }
   return apply_proc_common(module_text, entry, args, arg_count, byte_length,
+                           UINT32_MAX, NULL,
                            limits, out, diag);
+}
+
+bool lainapply_proc_with_bytes_arg(
+    const char *module_text, const char *entry, const LainApplyValue *args,
+    uint32_t arg_count, uint32_t byte_arg_index,
+    const LainApplyBytes *byte_arg, const LainApplyLimits *limits,
+    LainApplyResult *out, L1Diagnostic *diag) {
+  if (out) memset(out, 0, sizeof(*out));
+  if (!byte_arg)
+    return fail(diag, 9346, "apply: byte argument is missing");
+  if (!lainapply_bytes_check(byte_arg, diag))
+    return false;
+  return apply_proc_common(module_text, entry, args, arg_count, 0,
+                           byte_arg_index, byte_arg, limits, out, diag);
 }

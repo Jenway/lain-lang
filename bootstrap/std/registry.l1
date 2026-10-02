@@ -182,15 +182,67 @@ data meta_reg_entry_size ro { 64 0 0 0 0 0 0 0 }
 
 // 大小与对齐走 repr —— 布局是物理形状推出来的，不是身份的一部分。
 #proc meta_tid_size(%id: #bits<64>) -> #bits<64> {
-  %rk = #call meta_tid_repr_kind(%id)
-  %rw = #call meta_tid_repr_width(%id)
-  %v = #call bs_repr_size(%rk, %rw)
+  %kind = #call meta_tid_kind(%id)
+  %aggregate2 = #eq[#bits<64>](%kind, 2)
+  %aggregate3 = #eq[#bits<64>](%kind, 3)
+  %aggregate = #or[#bits<1>](%aggregate2, %aggregate3)
+  %v = #if %aggregate -> (#bits<64>) {
+    #yield #call meta_tid_word(%id, 16)
+  } else {
+    %rk = #call meta_tid_repr_kind(%id)
+    %rw = #call meta_tid_repr_width(%id)
+    #yield #call bs_repr_size(%rk, %rw)
+  }
   #return %v
 }
 
 #proc meta_tid_align(%id: #bits<64>) -> #bits<64> {
-  %rk = #call meta_tid_repr_kind(%id)
-  %rw = #call meta_tid_repr_width(%id)
-  %v = #call bs_repr_align(%rk, %rw)
+  %kind = #call meta_tid_kind(%id)
+  %aggregate2 = #eq[#bits<64>](%kind, 2)
+  %aggregate3 = #eq[#bits<64>](%kind, 3)
+  %aggregate = #or[#bits<1>](%aggregate2, %aggregate3)
+  %v = #if %aggregate -> (#bits<64>) {
+    #yield #call meta_tid_word(%id, 24)
+  } else {
+    %rk = #call meta_tid_repr_kind(%id)
+    %rw = #call meta_tid_repr_width(%id)
+    #yield #call bs_repr_align(%rk, %rw)
+  }
+  #return %v
+}
+
+// record factory 记录的字段表位于 bump 区，registry 的 +48/+56 保存偏移与计数。
+#proc meta_tid_field_count(%id: #bits<64>) -> #bits<64> {
+  %kind = #call meta_tid_kind(%id)
+  %is_factory = #eq[#bits<64>](%kind, 3)
+  %count = #if %is_factory -> (#bits<64>) {
+    #yield #call meta_tid_word(%id, 56)
+  } else { #yield 0 }
+  #return %count
+}
+
+#proc meta_tid_field_word(%id: #bits<64>, %index: #bits<64>,
+                          %word_offset: #bits<64>) -> #bits<64> {
+  %count = #call meta_tid_field_count(%id)
+  %valid = #ult[#bits<64>](%index, %count)
+  %value = #if %valid -> (#bits<64>) {
+    %scratch = #call lain_meta_scratch_data()
+    %start = #call meta_tid_word(%id, 48)
+    %entry_offset = #mul[#bits<64>](%index, 32)
+    %field_offset = #add[#bits<64>](%start, %entry_offset)
+    %at = #add[#bits<64>](%field_offset, %word_offset)
+    %p = #lea(%scratch, %at, 1, 0)
+    #yield #call meta_cell_get(%p)
+  } else { #yield 0xFFFFFFFFFFFFFFFF }
+  #return %value
+}
+
+#proc meta_tid_field_type(%id: #bits<64>, %index: #bits<64>) -> #bits<64> {
+  %v = #call meta_tid_field_word(%id, %index, 16)
+  #return %v
+}
+
+#proc meta_tid_field_offset(%id: #bits<64>, %index: #bits<64>) -> #bits<64> {
+  %v = #call meta_tid_field_word(%id, %index, 24)
   #return %v
 }

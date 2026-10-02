@@ -169,6 +169,68 @@
   #return %total
 }
 
+// 和类型的名义类型 ID。布局复用已验证的变体扫描与最大载荷规则。
+#proc meta_sum_type_id(%index: #bits<64>) -> #bits<64> {
+  %src = #call meta_scope_word(%index, 0)
+  %len = #call lain_meta_source_length(%src)
+  %base = #call lain_meta_source_data(%src)
+  %node = #call meta_scope_decl_node(%index)
+  %pos = #call meta_node_start(%node)
+  %src1 = #add[#bits<64>](%src, 1)
+  %high = #shl[#bits<64>](%src1, 32)
+  %owner = #or[#bits<64>](%high, #add[#bits<64>](%pos, 1))
+  %scratch = #call lain_meta_scratch_data()
+  %registered = #call meta_reg_lookup(%scratch, 2, %owner, 0)
+  #if #ne[#bits<64>](%registered, 0) { #return %registered }
+  %top = #call meta_cell_get(#lea(%scratch, 456, 1, 0))
+  %cycle = #loop active_sum(%link: #bits<64> = %top) -> (#bits<1>) {
+    #if #eq[#bits<64>](%link, 0) { #break active_sum(0) }
+    %entry = #lea(%scratch, %link, 1, 0)
+    %active_owner = #call meta_cell_get(%entry)
+    #if #eq[#bits<64>](%active_owner, %owner) { #break active_sum(1) }
+    %previous = #call meta_cell_get(#lea(%entry, 8, 1, 0))
+    #continue active_sum(%previous)
+  }
+  #if #ne[#bits<1>](%cycle, 0) {
+    %set_cycle = #call meta_cell_put(#lea(%scratch, 464, 1, 0), 1)
+    %fail = #call lain_meta_fail(5)
+    #return 0
+  }
+  %mark = #call meta_bump_mark()
+  %frame = #call meta_bump_alloc(16)
+  #if #eq[#bits<64>](%frame, 0xFFFFFFFFFFFFFFFF) { #return 0 }
+  %frame_addr = #lea(%scratch, %frame, 1, 0)
+  %save_owner = #call meta_cell_put(%frame_addr, %owner)
+  %save_previous = #call meta_cell_put(#lea(%frame_addr, 8, 1, 0), %top)
+  %push = #call meta_cell_put(#lea(%scratch, 456, 1, 0), %frame)
+  %body = #call meta_decl_body(%base, %node)
+  %walk = #call meta_enum_walk(%base, %len, %body, 0, 0, %frame_addr)
+  %walk_status = #call lain_meta_status()
+  %walk_failed = #ne[#bits<64>](%walk_status, 0)
+  %max_size = #call meta_scratch_max_size(%frame_addr)
+  %max_align = #call meta_scratch_max_align(%frame_addr)
+  %payload_off = #call meta_layout_field_align_up_checked(1, %max_align)
+  %payload_end = #call meta_layout_add_checked(%payload_off, %max_size)
+  %total = #call meta_layout_field_align_up_checked(%payload_end, %max_align)
+  %invalid = #or[#bits<1>](
+      #eq[#bits<64>](%payload_off, 0xFFFFFFFFFFFFFFFF),
+      #eq[#bits<64>](%payload_end, 0xFFFFFFFFFFFFFFFF))
+  %invalid1 = #or[#bits<1>](%invalid,
+      #eq[#bits<64>](%total, 0xFFFFFFFFFFFFFFFF))
+  %invalid2 = #or[#bits<1>](%invalid1, %walk_failed)
+  %id = #if %invalid2 -> (#bits<64>) {
+    %recursive = #call meta_cell_get(#lea(%scratch, 464, 1, 0))
+    #if #eq[#bits<64>](%recursive, 0) { %fail2 = #call lain_meta_fail(5) }
+    #yield 0
+  } else {
+    %new_id = #call meta_intern(2, %owner, 0, %total, %max_align)
+    #yield %new_id
+  }
+  %restore = #call meta_cell_put(#lea(%scratch, 456, 1, 0), %top)
+  %release = #call meta_bump_release(%mark)
+  #return %id
+}
+
 // --- 构造与投影 -----------------------------------------------------------
 //
 // `let c = Shape.Circle { 7 }` 和积类型的构造同形：一块静态存储 + 一条 tag 存
@@ -429,12 +491,20 @@
   } else {
     // 第一遍只为把最大载荷大小/对齐算进 scratch（第二个参数给 0 表示不找变体）
     %pass1 = #call meta_enum_walk(%base, %len, %body, 0, 0, %scratch)
-    %poff = #call meta_enum_payload_off(%scratch)
-    %size = #call meta_enum_size(%scratch)
-    %s1 = #call meta_emit_enum_variants(%base, %len, %name_lo, %name_hi,
-                                        %body, %poff)
-    %s2 = #call meta_emit_size(%base, %name_lo, %name_hi, %size)
-    #yield %s1
+    %enum_error = #call lain_meta_status()
+    %valid = #eq[#bits<64>](%enum_error, 0)
+    %lowered = #if %valid -> (#bits<32>) {
+      %poff = #call meta_enum_payload_off(%scratch)
+      %size = #call meta_enum_size(%scratch)
+      %s1 = #call meta_emit_enum_variants(%base, %len, %name_lo, %name_hi,
+                                          %body, %poff)
+      %s2 = #call meta_emit_size(%base, %name_lo, %name_hi, %size)
+      #yield %s1
+    } else {
+      %code = #trunc[#bits<32>](%enum_error)
+      #yield %code
+    }
+    #yield %lowered
   }
   #return %status
 }

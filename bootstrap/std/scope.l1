@@ -175,6 +175,11 @@
     %closure_base = #add[#bits<64>](%dep_base, %closure_base_off)
     %d3 = #call meta_cell_put(#lea(%scratch, 440, 1, 0), %closure_base)
     %d4 = #call meta_cell_put(#lea(%scratch, 448, 1, 0), 0)
+    // struct 布局递归链顶；节点本身放在 bump 动态区。
+    %d5 = #call meta_cell_put(#lea(%scratch, 456, 1, 0), 0)
+    %d6 = #call meta_cell_put(#lea(%scratch, 464, 1, 0), 0)
+    // wire field_list 临时 record 的单次会话名义 owner 序号。
+    %d7 = #call meta_cell_put(#lea(%scratch, 472, 1, 0), 0)
     // 分配器的区段 = 固定认领之后剩下的全部。`%need` 正好是认领的末尾（它已经
     // 把树、注册表、作用域表和路径缓冲区都算进去了），所以它就是初始水位。
     // **不写它的话第一次 `meta_bump_alloc` 会从 0 开始**：实参块与 apply 的
@@ -1298,8 +1303,10 @@
     %kind = #call meta_scope_kind(%i)
     // 诊断：命中了，记条目下标与 kind。
     %sc1 = #call lain_meta_scratch_data()
-    %is_type = #eq[#bits<64>](%kind, 2)
-    %w = #if %is_type -> (#bits<64>) {
+    %is_scalar_type = #eq[#bits<64>](%kind, 2)
+    %is_struct_type = #eq[#bits<64>](%kind, 4)
+    %is_sum_type = #eq[#bits<64>](%kind, 5)
+    %w = #if %is_scalar_type -> (#bits<64>) {
       %cached = #call meta_scope_payload(%i)
       %have = #ne[#bits<64>](%cached, 0)
       %v = #if %have -> (#bits<64>) {
@@ -1333,8 +1340,18 @@
       }
       #yield %v
     } else {
-      // 名字在表里，但不是类型
-      #yield 0xFFFFFFFFFFFFFFFF
+      %other_id = #if %is_struct_type -> (#bits<64>) {
+        #yield #call meta_record_type_id(%i)
+      } else {
+        %sum_id = #if %is_sum_type -> (#bits<64>) {
+          #yield #call meta_sum_type_id(%i)
+        } else {
+          // 名字在表里，但不是类型
+          #yield 0xFFFFFFFFFFFFFFFF
+        }
+        #yield %sum_id
+      }
+      #yield %other_id
     }
     #yield %w
   }

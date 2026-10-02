@@ -9,6 +9,7 @@
 #include "ast_out.h"
 
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 
 typedef struct {
@@ -22,6 +23,22 @@ typedef struct {
   uint16_t tree_segment;
   LainAstRef current_root;
 } LainMetaSource;
+
+/* 只分配进程内编译会话编号；不会把宿主地址当成身份，也不提供权限。 */
+static atomic_uint_fast64_t g_meta_session_next = ATOMIC_VAR_INIT(1);
+
+/* 到达编号上限后永久失败，不能回绕并重新发出已用过的会话身份。 */
+static uint64_t allocate_session_id(void) {
+  uint_fast64_t next = atomic_load_explicit(&g_meta_session_next,
+                                            memory_order_relaxed);
+  while (next != 0 && next != UINT64_MAX) {
+    if (atomic_compare_exchange_weak_explicit(
+            &g_meta_session_next, &next, next + 1,
+            memory_order_relaxed, memory_order_relaxed))
+      return (uint64_t)next;
+  }
+  return 0;
+}
 
 /* 一份源码最多能拿到的下标：段号是 16 位，额外源码第 i 份的 AstIn 段号是
  * `2*i + 3`，所以 `i <= 32766` 时最大段号正好 65535。超过就在登记时拒。 */
@@ -74,6 +91,7 @@ _Static_assert(sizeof(LainMetaTypeInfo) == 64,
                "Meta 类型摘要必须占八个 64 位字");
 
 struct LainMetaHost {
+  uint64_t session_id;
   LainAstOutput *ast_out;
   LainMetaSource *sources;
   uint32_t source_count;
@@ -274,6 +292,11 @@ void lainmeta_host_attach_quota(LainMetaHost *host, LainVmQuota *quota) {
 LainMetaHost *lainmeta_host_new(void) {
   LainMetaHost *host = (LainMetaHost *)calloc(1, sizeof(LainMetaHost));
   if (!host) return NULL;
+  host->session_id = allocate_session_id();
+  if (!host->session_id) {
+    free(host);
+    return NULL;
+  }
   host->apply_limits.max_call_depth = 64;
   host->apply_limits.stack_bytes = 4096;
   host->apply_limits.fuel = 1000000;
@@ -669,6 +692,16 @@ static uint32_t cap_source_count(void *context, const uint64_t *args,
   return 0;
 }
 
+static uint32_t cap_session_id(void *context, const uint64_t *args,
+                              uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  (void)args;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 0) return LAINMETA_ERR_DENIED;
+  if (out) *out = host->session_id;
+  return 0;
+}
+
 static uint32_t cap_source_data(void *context, const uint64_t *args,
                                 uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
@@ -992,12 +1025,16 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
                                    uint64_t entry_len, uint64_t arg_addr,
                                    uint64_t arg_count, uint64_t *out,
                                    bool text_owned, bool want_bytes,
-                                   uint64_t result_byte_length) {
+                                   uint64_t result_byte_length,
+                                   bool want_byte_arg, uint64_t byte_arg_addr,
+                                   uint64_t byte_arg_length,
+                                   uint64_t byte_arg_index) {
   char *text_copy = NULL, *entry_copy = NULL;
   LainApplyValue apply_args[8];
   LainApplyResult result;
   L1Diagnostic diag;
   uint64_t arg_bytes;
+  LainApplyBytes byte_arg = {0};
   uint64_t request_fuel = 0;
   uint32_t rc;
   LainApplyLimits request_limits;
@@ -1019,13 +1056,26 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
     host->apply_status = 9345;
     return 0;
   }
+  if (want_byte_arg && (byte_arg_length == 0 ||
+                        byte_arg_length > LAINAPPLY_BYTES_MAX)) {
+    host->apply_status = 9345;
+    return 0;
+  }
+  if (want_byte_arg && (byte_arg_index >= arg_count ||
+                        byte_arg_index > UINT32_MAX)) {
+    host->apply_status = 9341;
+    return 0;
+  }
   arg_bytes = arg_count * 24;
   if (!text || !entry || !text_len || !entry_len ||
       text_len > 1024u * 1024u || entry_len > 255u ||
       (!text_owned && !host_range_readable(host, (uintptr_t)text, text_len)) ||
       !host_range_readable(host, (uintptr_t)entry, entry_len) ||
       (arg_bytes && (!arg_addr ||
-       !host_range_readable(host, (uintptr_t)arg_addr, arg_bytes)))) {
+       !host_range_readable(host, (uintptr_t)arg_addr, arg_bytes))) ||
+      (want_byte_arg && (!byte_arg_addr ||
+       !host_range_readable(host, (uintptr_t)byte_arg_addr,
+                            byte_arg_length)))) {
     host->apply_status = 9330;
     return 0;
   }
@@ -1036,11 +1086,15 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
   }
   /* 预算扣账在**参数与地址检查之后、启动执行之前**，也早于计数：
    * 被预算拒绝的请求没有发给 apply 服务，按 apply_requests 的含义不计入。 */
-  if (result_byte_length > UINT64_MAX - text_len - arg_bytes) {
+  if (arg_bytes > UINT64_MAX - text_len ||
+      (want_byte_arg && byte_arg_length > UINT64_MAX - text_len - arg_bytes) ||
+      result_byte_length > UINT64_MAX - text_len - arg_bytes -
+                           (want_byte_arg ? byte_arg_length : 0)) {
     host->apply_status = 9345;
     return 0;
   }
-  rc = apply_budget_charge(host, text_len + arg_bytes + result_byte_length);
+  rc = apply_budget_charge(host, text_len + arg_bytes +
+      (want_byte_arg ? byte_arg_length : 0) + result_byte_length);
   if (rc) {
     host->apply_status = rc; /* 9410 = 预算可恢复拒绝；9347 = 没有统一预算 */
     return 0;
@@ -1089,7 +1143,14 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
   request_limits = host->apply_limits;
   request_limits.fuel = request_fuel;
   host->apply_active_depth++;
-  if (want_bytes)
+  if (want_byte_arg) {
+    byte_arg.data = (uint8_t *)(uintptr_t)byte_arg_addr;
+    byte_arg.length = byte_arg_length;
+    rc = (uint32_t)lainapply_proc_with_bytes_arg(
+        text_copy, entry_copy, arg_count ? apply_args : NULL,
+        (uint32_t)arg_count, (uint32_t)byte_arg_index, &byte_arg,
+        &request_limits, &result, &diag);
+  } else if (want_bytes)
     rc = (uint32_t)lainapply_proc_bytes(text_copy, entry_copy,
                       arg_count ? apply_args : NULL, (uint32_t)arg_count,
                       result_byte_length, &request_limits, &result, &diag);
@@ -1146,7 +1207,7 @@ static uint32_t cap_apply_request(void *context, const uint64_t *args,
   return apply_request_core(
       (LainMetaHost *)context, (const char *)(uintptr_t)args[0], args[1],
       (const char *)(uintptr_t)args[2], args[3], args[4], args[5], out,
-      false, false, 0);
+      false, false, 0, false, 0, 0, 0);
 }
 
 static uint32_t cap_apply_bytes_request(void *context, const uint64_t *args,
@@ -1155,7 +1216,17 @@ static uint32_t cap_apply_bytes_request(void *context, const uint64_t *args,
   return apply_request_core((LainMetaHost *)context,
       (const char *)(uintptr_t)args[0], args[1],
       (const char *)(uintptr_t)args[2], args[3], args[4], args[5], out,
-      false, true, args[6]);
+      false, true, args[6], false, 0, 0, 0);
+}
+
+static uint32_t cap_apply_bytes_arg_request(void *context,
+                                           const uint64_t *args,
+                                           uint32_t count, uint64_t *out) {
+  if (count != 9 || !args) return LAINMETA_ERR_DENIED;
+  return apply_request_core((LainMetaHost *)context,
+      (const char *)(uintptr_t)args[0], args[1],
+      (const char *)(uintptr_t)args[2], args[3], args[4], args[5], out,
+      false, false, 0, true, args[6], args[7], args[8]);
 }
 
 /* 对当前 emitter 作用域中的文本 apply。过程名与参数 wire 仍须来自授权的
@@ -1166,7 +1237,8 @@ static uint32_t cap_apply_emitted_request(void *context, const uint64_t *args,
   if (!host || count != 4 || !args) return LAINMETA_ERR_DENIED;
   return apply_request_core(host, host->out, host->out_length,
                             (const char *)(uintptr_t)args[0], args[1],
-                            args[2], args[3], out, true, false, 0);
+                            args[2], args[3], out, true, false, 0,
+                            false, 0, 0, 0);
 }
 
 static uint32_t cap_apply_emitted_bytes_request(void *context,
@@ -1177,7 +1249,17 @@ static uint32_t cap_apply_emitted_bytes_request(void *context,
   if (!host || count != 5 || !args) return LAINMETA_ERR_DENIED;
   return apply_request_core(host, host->out, host->out_length,
                             (const char *)(uintptr_t)args[0], args[1],
-                            args[2], args[3], out, true, true, args[4]);
+                            args[2], args[3], out, true, true, args[4],
+                            false, 0, 0, 0);
+}
+
+static uint32_t cap_apply_emitted_bytes_arg_request(
+    void *context, const uint64_t *args, uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  if (!host || count != 7 || !args) return LAINMETA_ERR_DENIED;
+  return apply_request_core(host, host->out, host->out_length,
+      (const char *)(uintptr_t)args[0], args[1], args[2], args[3], out,
+      true, false, 0, true, args[4], args[5], args[6]);
 }
 
 static uint32_t cap_apply_status(void *context, const uint64_t *args,
@@ -1868,6 +1950,7 @@ static uint32_t cap_ast_commit(void *context, const uint64_t *args,
 }
 
 static const MetaCapability k_capabilities[] = {
+    {"lain_meta_session_id", cap_session_id},
     {"lain_meta_source_count", cap_source_count},
     {"lain_meta_source_data", cap_source_data},
     {"lain_meta_source_length", cap_source_length},
@@ -1888,8 +1971,10 @@ static const MetaCapability k_capabilities[] = {
     {"lain_meta_scratch_report", cap_scratch_report},
     {"lain_meta_apply_request", cap_apply_request},
     {"lain_meta_apply_bytes_request", cap_apply_bytes_request},
+    {"lain_meta_apply_bytes_arg_request", cap_apply_bytes_arg_request},
     {"lain_meta_apply_emitted_request", cap_apply_emitted_request},
     {"lain_meta_apply_emitted_bytes_request", cap_apply_emitted_bytes_request},
+    {"lain_meta_apply_emitted_bytes_arg_request", cap_apply_emitted_bytes_arg_request},
     {"lain_meta_apply_status", cap_apply_status},
     {"lain_meta_apply_diagnostic_field", cap_apply_diagnostic_field},
     {"lain_meta_apply_kind", cap_apply_kind},

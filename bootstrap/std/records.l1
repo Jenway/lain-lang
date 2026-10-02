@@ -83,6 +83,48 @@
 //   命中 f_lo/f_hi  → 返回 packed（最高位 1）
 //   走到 `}`        → 返回按最大对齐取整后的总大小（最高位 0）
 // f_lo == f_hi 表示「不匹配任何字段」，那就只算大小。
+#proc meta_layout_align_up_checked(%value: #bits<64>, %align: #bits<64>,
+                                    %src: #addr, %position: #bits<64>) -> #bits<64> {
+  %zero = #eq[#bits<64>](%align, 0)
+  #if %zero {
+    %bad = #call lain_meta_fail(5)
+    #return 0xFFFFFFFFFFFFFFFF
+  }
+  %padding = #sub[#bits<64>](%align, 1)
+  %limit = #sub[#bits<64>](0xFFFFFFFFFFFFFFFF, %padding)
+  %overflow = #ugt[#bits<64>](%value, %limit)
+  #if %overflow { #return 0xFFFFFFFFFFFFFFFF }
+  %aligned = #call meta_eval_align_up(%value, %align, %src, %position)
+  #return %aligned
+}
+
+#proc meta_layout_field_align_up_checked(%value: #bits<64>,
+                                          %align: #bits<64>) -> #bits<64> {
+  %zero = #eq[#bits<64>](%align, 0)
+  #if %zero {
+    %bad = #call lain_meta_fail(5)
+    #return 0xFFFFFFFFFFFFFFFF
+  }
+  %padding = #sub[#bits<64>](%align, 1)
+  %limit = #sub[#bits<64>](0xFFFFFFFFFFFFFFFF, %padding)
+  %overflow = #ugt[#bits<64>](%value, %limit)
+  #if %overflow { #return 0xFFFFFFFFFFFFFFFF }
+  %aligned = #call bs_align_up(%value, %align)
+  #return %aligned
+}
+
+// 受检查的偏移累加；调用方在收到 sentinel 后设置具体语义拒码。
+#proc meta_layout_add_checked(%left: #bits<64>, %right: #bits<64>) -> #bits<64> {
+  %room = #sub[#bits<64>](0xFFFFFFFFFFFFFFFF, %left)
+  %overflow = #ugt[#bits<64>](%right, %room)
+  %result = #if %overflow -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    #yield #add[#bits<64>](%left, %right)
+  }
+  #return %result
+}
+
 #proc meta_walk_fields(%src: #addr, %len: #bits<64>,
                        %at: #bits<64>,
                        %f_lo: #bits<64>, %f_hi: #bits<64>,
@@ -93,7 +135,16 @@
     %byte = #call bs_byte_at(%src, %here, %len)
     %is_close = #eq[#bits<8>](%byte, 125)
     #if %is_close {
-      %rounded = #call meta_eval_align_up(%off, %al, %src, %here)
+      %rounded = #call meta_layout_align_up_checked(%off, %al, %src, %here)
+      %round_failed = #eq[#bits<64>](%rounded, 0xFFFFFFFFFFFFFFFF)
+      #if %round_failed {
+        %scratch = #call lain_meta_scratch_data()
+        %recursive = #call meta_cell_get(#lea(%scratch, 464, 1, 0))
+        #if #eq[#bits<64>](%recursive, 0) {
+          %fail = #call lain_meta_fail(5)
+        }
+        #break fields(0xFFFFFFFFFFFFFFFF)
+      }
       #break fields(%rounded)
     }
     %name_hi = #call bs_skip_ident(%src, %here, %len)
@@ -107,15 +158,27 @@
     // 状态，所以报给宿主状态通道（驱动必须看它），返回 0 让上面也走不通。
     %bad_type = #eq[#bits<64>](%tid, 0)
     #if %bad_type {
-      %f = #call lain_meta_fail(5)
-      #break fields(0)
+      %scratch = #call lain_meta_scratch_data()
+      %recursive = #call meta_cell_get(#lea(%scratch, 464, 1, 0))
+      #if #eq[#bits<64>](%recursive, 0) {
+        %f = #call lain_meta_fail(5)
+      }
+      #break fields(0xFFFFFFFFFFFFFFFF)
     }
     %tinfo = #call meta_tid_repr(%tid)
     %kind = #and[#bits<64>](%tinfo, 255)
     %width = #and[#bits<64>](#lshr[#bits<64>](%tinfo, 8), 255)
     %fsize = #call meta_tid_size(%tid)
     %falign = #call meta_tid_align(%tid)
-    %aligned = #call bs_align_up(%off, %falign)
+    %aligned = #call meta_layout_field_align_up_checked(%off, %falign)
+    #if #eq[#bits<64>](%aligned, 0xFFFFFFFFFFFFFFFF) {
+      %scratch = #call lain_meta_scratch_data()
+      %recursive = #call meta_cell_get(#lea(%scratch, 464, 1, 0))
+      #if #eq[#bits<64>](%recursive, 0) {
+        %fail = #call lain_meta_fail(5)
+      }
+      #break fields(0xFFFFFFFFFFFFFFFF)
+    }
     %want = #sub[#bits<64>](%f_hi, %f_lo)
     %have = #sub[#bits<64>](%name_hi, %here)
     %len_ok = #eq[#bits<64>](%want, %have)
@@ -135,7 +198,11 @@
       %set = #or[#bits<64>](%pk2, 0x8000000000000000)
       #break fields(%set)
     }
-    %next_off = #add[#bits<64>](%aligned, %fsize)
+    %next_off = #call meta_layout_add_checked(%aligned, %fsize)
+    #if #eq[#bits<64>](%next_off, 0xFFFFFFFFFFFFFFFF) {
+      %fail = #call lain_meta_fail(5)
+      #break fields(0xFFFFFFFFFFFFFFFF)
+    }
     %bigger = #ugt[#bits<64>](%falign, %al)
     %new_al = #if %bigger -> (#bits<64>) {
       #yield %falign
@@ -170,7 +237,9 @@
     #yield 0
   } else {
     %info = #call meta_walk_fields(%src, %len, %body, 0, 0, 0, 1)
-    %failed = #eq[#bits<64>](%info, 0xFFFFFFFFFFFFFFFF)
+    %failed_sentinel = #eq[#bits<64>](%info, 0xFFFFFFFFFFFFFFFF)
+    %failed_zero = #eq[#bits<64>](%info, 0)
+    %failed = #or[#bits<1>](%failed_sentinel, %failed_zero)
     %size = #if %failed -> (#bits<64>) {
       #yield 0xFFFFFFFFFFFFFFFF
     } else {
@@ -180,6 +249,90 @@
     #yield %size
   }
   #return %r
+}
+
+// struct 的最大字段对齐。
+#proc meta_layout_align(%src: #addr, %len: #bits<64>,
+                        %body: #bits<64>) -> #bits<64> {
+  %r = #loop aligns(%at: #bits<64> = %body, %max: #bits<64> = 1)
+       -> (#bits<64>) {
+    %here = #call bs_skip_space(%src, %at, %len)
+    %byte = #call bs_byte_at(%src, %here, %len)
+    #if #eq[#bits<8>](%byte, 125) { #break aligns(%max) }
+    %name_hi = #call bs_skip_ident(%src, %here, %len)
+    %colon = #call bs_skip_space(%src, %name_hi, %len)
+    %t_lo = #call bs_skip_space(%src, #add[#bits<64>](%colon, 1), %len)
+    %t_hi = #call bs_skip_qualified(%src, %t_lo, %len)
+    %tid = #call meta_type_resolve(%src, %len, %t_lo, %t_hi)
+    #if #eq[#bits<64>](%tid, 0) {
+      %scratch = #call lain_meta_scratch_data()
+      %recursive = #call meta_cell_get(#lea(%scratch, 464, 1, 0))
+      #if #eq[#bits<64>](%recursive, 0) {
+        %fail = #call lain_meta_fail(5)
+      }
+      #break aligns(0)
+    }
+    %align = #call meta_tid_align(%tid)
+    %next_max = #if #ugt[#bits<64>](%align, %max) -> (#bits<64>) {
+      #yield %align
+    } else { #yield %max }
+    #continue aligns(%t_hi, %next_max)
+  }
+  #return %r
+}
+
+// struct 的名义类型 ID 独立存于注册表；作用域 payload 仍保留声明节点。
+#proc meta_record_type_id(%index: #bits<64>) -> #bits<64> {
+  %src = #call meta_scope_word(%index, 0)
+  %len = #call lain_meta_source_length(%src)
+  %base = #call lain_meta_source_data(%src)
+  %node = #call meta_scope_decl_node(%index)
+  %pos = #call meta_node_start(%node)
+  %src1 = #add[#bits<64>](%src, 1)
+  %high = #shl[#bits<64>](%src1, 32)
+  %owner = #or[#bits<64>](%high, #add[#bits<64>](%pos, 1))
+  %scratch = #call lain_meta_scratch_data()
+  %registered = #call meta_reg_lookup(%scratch, 2, %owner, 0)
+  #if #ne[#bits<64>](%registered, 0) { #return %registered }
+  %top = #call meta_cell_get(#lea(%scratch, 456, 1, 0))
+  %cycle = #loop active(%link: #bits<64> = %top) -> (#bits<1>) {
+    #if #eq[#bits<64>](%link, 0) { #break active(0) }
+    %entry = #lea(%scratch, %link, 1, 0)
+    %active_owner = #call meta_cell_get(%entry)
+    #if #eq[#bits<64>](%active_owner, %owner) { #break active(1) }
+    %previous = #call meta_cell_get(#lea(%entry, 8, 1, 0))
+    #continue active(%previous)
+  }
+  #if #ne[#bits<1>](%cycle, 0) {
+    // 5 是当前类型解析/布局的稳定语义拒码；旁格让外层字段扫描不覆盖它。
+    %set_cycle = #call meta_cell_put(#lea(%scratch, 464, 1, 0), 1)
+    %recursive = #call lain_meta_fail(5)
+    #return 0
+  }
+  %mark = #call meta_bump_mark()
+  %frame = #call meta_bump_alloc(16)
+  #if #eq[#bits<64>](%frame, 0xFFFFFFFFFFFFFFFF) { #return 0 }
+  %frame_addr = #lea(%scratch, %frame, 1, 0)
+  %save_owner = #call meta_cell_put(%frame_addr, %owner)
+  %save_previous = #call meta_cell_put(#lea(%frame_addr, 8, 1, 0), %top)
+  %push = #call meta_cell_put(#lea(%scratch, 456, 1, 0), %frame)
+  %body = #call meta_decl_body(%base, %node)
+  %size = #call meta_layout_size(%base, %len, %body)
+  %failed = #eq[#bits<64>](%size, 0xFFFFFFFFFFFFFFFF)
+  %id = #if %failed -> (#bits<64>) {
+    #yield 0
+  } else {
+    %align = #call meta_layout_align(%base, %len, %body)
+    %valid = #ugt[#bits<64>](%align, 0)
+    %result = #if %valid -> (#bits<64>) {
+      %new_id = #call meta_intern(2, %owner, 0, %size, %align)
+      #yield %new_id
+    } else { #yield 0 }
+    #yield %result
+  }
+  %restore_top = #call meta_cell_put(#lea(%scratch, 456, 1, 0), %top)
+  %release = #call meta_bump_release(%mark)
+  #return %id
 }
 
 // --- 发射 -----------------------------------------------------------------

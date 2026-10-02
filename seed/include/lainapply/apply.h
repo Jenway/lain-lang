@@ -97,4 +97,15 @@ bool lainapply_proc_bytes(const char *module_text, const char *entry,
                           const LainApplyLimits *limits, LainApplyResult *out,
                           L1Diagnostic *diag);
 
+/* 将一份调用方持有的字节块作为只读 #addr 实参映射到本次 apply 的独立 VSpace。
+ * args[byte_arg_index] 必须标记 TY_ADDR；其余实参仍按标量逐项检查。字节块在
+ * 执行前复制，计入 apply 配额，执行结束撤销映射并释放副本。长度超限拒 9345，
+ * 空块或坏字节块拒 9346，指向非 #addr 形参拒 9342，额外 #addr 参数仍拒 9343，
+ * 映射资源不足拒 9348；配额不足沿用 1044。 */
+bool lainapply_proc_with_bytes_arg(
+    const char *module_text, const char *entry, const LainApplyValue *args,
+    uint32_t arg_count, uint32_t byte_arg_index,
+    const LainApplyBytes *byte_arg, const LainApplyLimits *limits,
+    LainApplyResult *out, L1Diagnostic *diag);
+
 #endif
