@@ -278,6 +278,9 @@ static void print_inst(Printer *p, const L1Region *region, const L1Inst *inst) {
   }
 
   default:
+    /* 算子名先打，否则类型实参会顶在指令位置：`[#bits<32>](40, 2)` 解析不了。
+     * print.h 要求 `print(parse(text)) == text`，少了这一句定点就不成立。 */
+    print_opcode(p, inst);
     print_type_arg(p, inst);
     if (inst->kind == INST_DATA_ADDR || inst->kind == INST_PROC_ADDR)
       outf(p, " %s", inst->symbol ? inst->symbol : "?");

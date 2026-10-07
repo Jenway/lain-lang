@@ -20,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve()
 BUILD = ROOT / "build"
 
 META_DRIVER = "seed/tests/meta_boot.c"          # 通篇 AstIn + Meta ABI 9
