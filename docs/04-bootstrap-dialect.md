@@ -1,7 +1,7 @@
 # bootstrap 方言
 
-自举的 stage0 是手写 LAINIR 文本（bootstrap/ 下 29 个 .l1/.lain，共 11055 行，按
-bootstrap/SOURCE_ORDER 拼成一个 471884 字节的编译单元）。要让 Lain 编译器能编译自己，
+自举的 stage0 是手写 LAINIR 文本（bootstrap/ 下按 bootstrap/SOURCE_ORDER 拼成 27 个文件、
+10692 行的编译单元；驱动报 unit files=27 bytes=456914）。要让 Lain 编译器能编译自己，
 先得有一份**用 Lain 写的 Meta**；写它需要一门表面语言。
 
 这份文档定的是这门方言的特性集合、语法，以及每条语法降成什么 LAINIR。它不是 lainlang
@@ -87,7 +87,7 @@ let main: i32 = add(3, 4);
 
 let NAME: TYPE = <表达式>;
 return <值>;
-if <条件> { … }            // 可带 else
+if <条件> { … }            // 可带 else；条件只吃单 token 或 (表达式)，分支必须以 return 收尾
 let total: u32 = for i in 0..n acc = 0 { acc = acc + i; };
 ```
 
@@ -99,6 +99,7 @@ let total: u32 = for i in 0..n acc = 0 { acc = acc + i; };
   不需要「源码名 → LAINIR 名」的映射表。v0 限制：不能嵌套循环；下界与上界是值（字面量、
   参数或已声明的局部）而不是任意表达式；循环体只有一条 `acc = 值 算子 值;`。
 - 注释是必须支持的：声明发现按词走，不认注释的话注释里的词会被当成形式。
+- 这一节写的是**设计**，实际可用的形状与失败码（实测口径）在《计划》一节。
 
 ### 目标新增
 
@@ -176,23 +177,147 @@ func cstr_len(p: addr) -> u64 {
 }
 ```
 
-## 档位
+## 计划（实测口径）
 
-**M0（自举必需）**：定宽整数（标量集由 Meta 库的表定义）/ `func` + `return` / 调用 / 带值 `if` /
-`loop` 与循环参数、`break`、`continue` / 比较 / 整数算术与 `trunc`、`zext` / `addr` 类型与
-`load`、`store`、`lea` / 字节串字面量 / `extern` 与 `link_name`。
+分档只看两样东西：**手写 Meta 的真实 IR 用量**、**驱动实测的失败码**。用量取自 bootstrap/
+下全部 .l1/.lain；失败码取自 `build/lain-meta.exe` 对最小样例的 host_status。既没有用量、
+又测不通的，进「推迟」。
 
-**推迟**：`struct`、`enum`、`switch`、`alloca`、`proc_addr`、间接调用。这些在 IR、验证器、
-引擎里都已实现，缺的只是表面语法与降级；推迟的代价是「用 Lain 写别的程序不够用」，
-不是「自举做不下去」。（手写 Meta 里 `#struct` 与 `#enum` 的命中数是 0：它把数据摊平进
-arena 与字节偏移。）
+### 一、已能用（实测 host_status=0）
+
+| 特性 | 表面写法 | 实测口径 |
+|---|---|---|
+| 函数、参数类型、调用 | `func f(a: i32) -> i32 { … }`、`f(2)` | 多语句体、递归都通 |
+| 绑定与返回 | `let n: i32 = …;`、`return n;` | `let` 必须写标注（否则 21） |
+| 条件 | `if b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件只吃单 token 或 `(表达式)`；分支必须以 `return` 收尾，所以 `if` 是语句不是值（裸条件 `if a < b` 报 4） |
+| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };` | 仅 i32/u32（u64 报 5） |
+| 算子 | i32 → `+ / <`（add/sdiv/slt）；u32 → `+ / <`（add/udiv/ult） | 只有这 6 个绑定，见 A |
+| 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
+| 宏 | `my_if`、`my_block`、`my_require` | 编译期展开，过同一道信任门 |
+
+实测被拒（列出来是因为它们看着都该能用）：`-`、`*`、`%` 报 6（`/` 能用，这几个没有绑定）；
+`>`、`==`、`!=`、`<=`、`>=`、`and`、`or`、`<<`、`>>` 报 4；`as`、负数字面量、十六进制、
+字节串字面量报 4；带值 `if` 报 4。
+
+### 二、半成品：`struct` / `enum` 的值层
+
+它们**不是**档位问题 —— handler 4/5 早已注册，声明会发出布局（`<T>__<f>_offset`、
+`<T>__size`、变体的 tag 与载荷偏移），顶层 `let p = Pair { a: 1 b: 2 };` 也会发出
+`data p_storage rw { … }` 与 `#proc p() -> #addr`。缺的是**值层**：字段访问与变体投影当值用
+还没降级（bootstrap/std/funcs.l1:895-898 干净地报 4），struct/enum 名字也还不能写进参数类型
+或带标注的 `let`。函数体里的构造还差一份 storage —— 顶层那份是静态 `data`，函数体内要么
+给每个构造点一份静态 storage，要么先有 `#alloca`。
+
+### 三、待做（按阻塞顺序）
+
+**A. 算子表** —— 不是语法，是 bootstrap/std/scalars.l1 里那段 `data` 字节表。
+- i32/u32 补 `-`、`*`、`%`、比较全集 `== != > <= >=`、位运算 `and or shl lshr`。
+- **u64 / usize 今天零个算子**：`#bits` 3607 次、`#add` 661 次 —— Meta 的长度与偏移全是
+  u64，这是最刺眼的一条。`bool` 的逻辑算子同理。
+- IR 侧零改动：`#sub #mul #udiv #urem #eq #ne #ult #uge #and #or #shl #lshr` 都已实现。
+
+**B. 宽度推导与转换** —— 「算子产生自己的结果类型」。它同时是 `if x < 2` 能不加括号、
+`let` 能省标注的前置（funcs.l1:934 注释里记的就是这条）。连同 `as`（`#zext` 16 / `#trunc` 23）、
+负数字面量与十六进制。
+
+**C. 内存与地址** —— Meta 的实际工作方式。
+- `addr` 类型（已有）＋ `load` / `store` / `lea`、`p + i`（`#lea` 610 是最大宗内存操作，
+  `#load` 42、`#store` 16）。
+- 字节串字面量 → `#data`（`#data_addr` 232）。
+- 宿主授予**整块窗口**的能力（`region_grant`）；逐字节回调不可行。
+
+**D. 控制流补齐**
+- 带值 `if`（`#if` 779 + `#yield` 719）。
+- `loop` 带标签 + 循环参数 + `break` / `continue` 带实参（`#loop` 97 / `#break` 185 /
+  `#continue` 104）；今天只有 `for … acc` 一种形状。
+
+**E. 声明与链接**
+- `extern NAME(a: T) -> U = link_name;`（45 个能力 1:1；手写 Meta 的 `#extern` 正好 45 次）。
+- struct / enum 名字可写进参数类型与标注；函数体内构造的 storage（见二）。
+
+**F. 层 0：`lainir_*` 发射库** —— 见上文《层 0：发射层》。它是「用 Lain 写 Meta」真正缺的
+那一层，也是 bootstrap/std/wire.l1 那套手写拼串的正式化。
+
+用量证据（bootstrap 全部 .l1/.lain）：`#bits` 3607、`#call` 2407、`#if` 779、`#yield` 719、
+`#add` 661、`#lea` 610、`#return` 565、`#eq` 534、`#proc` 396、`#data_addr` 232、
+`#break` 185、`#and` 142、`#ne` 140、`#continue` 104、`#ult` 102、`#loop` 97、`#sub` 74、
+`#or` 65、`#mul` 55。
+
+### 四、推迟与排除
+
+**推迟**：`switch`、`alloca`、`proc_addr`、间接调用。它们在 IR、验证器、引擎里都已实现，
+缺的只是表面语法与降级；层 0 是它们的兜底，所以推迟的代价是「用 Lain 写别的程序不够用」，
+不是「自举做不下去」。（手写 Meta 把数据摊平进 arena 与字节偏移，`#struct`/`#enum` 的命中数
+是 0 —— 这只说明**写编译器本身**不需要复合值，不说明语言该不该有。）
 
 **排除**：任何 `#` 形态、`ptr2int`/`int2ptr`、浮点、向量、原子、并发、泛型、闭包、
 用户可见的 eval/apply、字符串类型、`?{}` 宏输入。
 
 **非语言前提**：先有一小层用 Lain 写的 stdlib；宿主提供「授予一整块窗口」的能力
 （`region_grant`）、`emit_uint`、`scratch_alloc`。逐字节回调不可行 —— 词法器与解析器是
-逐字节跑的，11055 行 Meta 跑出 359053 步。
+逐字节跑的。
+
+### 五、删除与瘦身（实测口径）
+
+动手做「待做」之前，先看能拿掉什么。口径是静态调用图：根 = 三个 ABI 入口
+（`lain_std_lower` / `lain_std_abi_version` / `lain_std_initialize`）加全部 45 个能力的
+`#extern`；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
+静态图看不见的间接引用。
+
+今天的规模：27 个文件 / 380 个 `#proc` / 116 个 `data` 块；注释 1663 行。
+
+**死 proc：45 个、约 1300 行（约 12%）。**
+
+| 文件 | 个数 | 行数 | 是什么 |
+|---|---|---|---|
+| bootstrap/std/wire.l1 | 16 | 735 | 类型、值、过程引用的 wire 编解码与校验，env 值绑定 |
+| bootstrap/std/eval.l1 | 5 | 191 | bytes 实参请求、emitted 请求、声明闭包与过程引用求值 |
+| bootstrap/std/scope.l1 | 9 | 199 | 依赖闭包一套、`meta_scope_set_payload`、`ast_index_of` |
+| bootstrap/std/parse.l1 | 7 | 93 | `meta_sem_put` / `meta_sem_annotate` / `meta_sem_binding` / `meta_sem_expansion` 一系 |
+| bootstrap/std/registry.l1 | 6 | 46 | `meta_tid_owner` / `meta_tid_namespace` / `meta_tid_field_*` |
+| bootstrap/std/modules.l1 | 2 | 34 | `meta_cstr_len`、`meta_slice_equals` |
+
+最大的单条：`meta_record_type_from_field_list`@bootstrap/std/wire.l1:571（166 行）、
+`meta_wire_validate`@bootstrap/std/wire.l1:171（119）、
+`meta_eval_apply_decl_closure`@bootstrap/std/eval.l1:76（112）、
+`meta_wire_validate_field_list`@bootstrap/std/wire.l1:84（87）、
+`meta_scope_dependency_closure`@bootstrap/std/scope.l1:664（77）。
+
+**别删**：bootstrap/std/funcs.l1 的 `meta_lower_stmt` / `meta_lower_if` / `meta_lower_for` /
+`meta_lower_body` 是活的（`meta_lower_decl_func` → `meta_lower_body`）。
+
+bootstrap/std/wire.l1 那一层只被死代码调用，但它是《层 0》的现存对应物（本文 :36、:239、
+:278 三处如此描述），所以删它要同时改本文 —— 它是「第二步的存货」，不是垃圾。
+bootstrap/std/eval.l1 的 bytes 与 emitted 请求同理：功能没接线，不是写错了。
+
+**未被引用的 `data` 块 10 个**：`meta_kw_arrow`@bootstrap/std/lex.l1:93、
+`meta_o1`@bootstrap/std/emit.l1:81、`meta_o5`@bootstrap/std/emit.l1:85、
+`meta_s2`@bootstrap/std/emit.l1:207、`meta_s3a`@bootstrap/std/emit.l1:208、
+`meta_s3b`@bootstrap/std/emit.l1:209、`meta_s4a`@bootstrap/std/emit.l1:210、
+`meta_s4b`@bootstrap/std/emit.l1:211、`meta_reg_entry_off`@bootstrap/std/registry.l1:30、
+`meta_reg_entry_size`@bootstrap/std/registry.l1:32。
+
+**从未被调用的能力包装 7 个**（bootstrap/std/emit.l1 的 `#extern` 加 seed/src/meta/host.c
+的登记，删要两侧一起，能力表 45 → 38）：`lain_meta_emit_data`@bootstrap/std/emit.l1:19、
+`lain_meta_emit_length`@bootstrap/std/emit.l1:20、
+`lain_meta_apply_emitted_bytes_request`@bootstrap/std/emit.l1:35、
+`lain_meta_ast_root`@bootstrap/std/emit.l1:48、`lain_meta_ast_tx_release`@bootstrap/std/emit.l1:55、
+`lain_meta_diagnostic_field`@bootstrap/std/emit.l1:284、
+`lain_meta_apply_diagnostic_field`@bootstrap/std/emit.l1:285。
+
+**其他杠杆**：注释 1663 行，最重的几个是 bootstrap/std/emit.l1 82/287（29%）、
+bootstrap/std/parse.l1 189/749（25%）、bootstrap/std/types.l1 22/102（22%）、
+bootstrap/std/recognize.l1 115/539（21%）、bootstrap/meta.l1 258/1221（21%）；
+bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
+
+**顺序**：先删未被引用的 `data` 块与未被调用的能力（无风险）；wire 那一层删还是留由设计定，
+留就加一句「当前不可达」的注释。
+
+### 六、结论
+
+今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（带标注）/ `if`（括号）/ `for` /
+三个算子。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
+**A + C + D + E**，其中 A 最快见效、C 最不可替代。
 
 ## 待补规则
 
@@ -206,7 +331,7 @@ arena 与字节偏移。）
 - 标量已经是表：bootstrap/std/scalars.l1 里一段 `data` 字节（名字、kind、宽度、算符对），
   handler 6 与 bootstrap/std/handlers/scalar.l1 已删除，bootstrap/lain/std/prelude.lain
   也随之删除（语言里不再有标量声明，也就没有「先 import 一份 prelude」这一步）。
-- 端到端验收改用 bootstrap/lain/examples/arith.lain：`host_status=0`、`output bytes=74`，
-  产物是 `%r1 = #add[#bits<32>](1, 2)`（见 docs/development.md 的驱动一节）。
 - 层 0 尚不存在；今天的对应物是 bootstrap/std/wire.l1 的手写拼串。
 - 表面语言里没有内存操作：Meta 今天只能靠手写 LAINIR 或宿主交出的窗口读写字节。
+- 端到端验收源是 bootstrap/lain/examples/arith.lain：`host_status=0`、`output bytes=74`，
+  产物是 `%r1 = #add[#bits<32>](1, 2)`（见 docs/development.md 的驱动一节）。
