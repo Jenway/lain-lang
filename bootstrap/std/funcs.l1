@@ -132,6 +132,22 @@
   #return 0
 }
 
+// 发射 `#<名字>[<repr>](`，名字是 **#data 的地址**。与 `meta_emit_op_mid` 的区别：
+// 那条从暂存区 +24/+32 读标量表内偏移，只给 op 表查出来的算子用；这条给不查表的
+// 形态用（`as` 的 zext/trunc/复制）。
+#proc meta_emit_op_lit(%name: #addr, %name_len: #bits<64>,
+                       %kind: #bits<64>, %width: #bits<64>) -> #bits<32> {
+  %h = #data_addr meta_hash
+  %w1 = #call lain_meta_emit_write(%h, 1)
+  %w2 = #call lain_meta_emit_write(%name, %name_len)
+  %lb = #data_addr meta_o2
+  %w3 = #call lain_meta_emit_write(%lb, 1)
+  %w4 = #call meta_emit_repr(%kind, %width)
+  %rl = #data_addr meta_o3
+  %w5 = #call lain_meta_emit_write(%rl, 2)
+  #return 0
+}
+
 // 发一个临时值名字 `%r<n>`。
 #proc meta_emit_temp_name(%n: #bits<64>) -> #bits<32> {
   %pct = #data_addr meta_fn_pct
@@ -1331,9 +1347,46 @@
                              %parent: #bits<64>, %vi: #bits<64>,
                              %r_t_lo: #bits<64>,
                              %r_t_hi: #bits<64>) -> #bits<64> {
+  // `值 as T`：绑定声明的类型就是转换后的 T，与值本身的类型无关。
+  %asx = #call meta_after_operand(%parent, %vi)
+  %asc = #call ast_child(%parent, %asx)
+  %asc_pos = #ne[#bits<64>](%asc, 0)
+  %r_as = #if %asc_pos -> (#bits<64>) {
+    %asc_kind = #call meta_node_kind(%asc)
+    %asc_tok = #eq[#bits<64>](%asc_kind, 1)
+    %asc_n = #call meta_node_len(%asc)
+    %asc_two = #eq[#bits<64>](%asc_n, 2)
+    %asc_at = #call meta_node_start(%asc)
+    %asc_p = #lea(%base, %asc_at, 1, 0)
+    %asc_same = #call meta_bytes_equal(%asc_p, #data_addr meta_kw_as, 2)
+    %asc_a = #and[#bits<1>](%asc_tok, %asc_two)
+    %asc_yes = #and[#bits<1>](%asc_a, %asc_same)
+    %asc_w = #if %asc_yes -> (#bits<64>) {
+      %ati = #add[#bits<64>](%asx, 1)
+      %atn = #call ast_child(%parent, %ati)
+      %atn_none = #eq[#bits<64>](%atn, 0)
+      %asc_v = #if %atn_none -> (#bits<64>) {
+        #yield 0xFFFFFFFFFFFFFFFF
+      } else {
+        %alo = #call meta_node_start(%atn)
+        %ahi = #add[#bits<64>](%alo, #call meta_node_len(%atn))
+        %asc_sc = #call lain_meta_scratch_data()
+        %asc_put = #call meta_cell_put(#lea(%asc_sc, 0, 1, 0), %ahi)
+        #yield %alo
+      }
+      #yield %asc_v
+    } else {
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    #yield %asc_w
+  } else {
+    #yield 0xFFFFFFFFFFFFFFFF
+  }
+  %no_as = #eq[#bits<64>](%r_as, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %no_as -> (#bits<64>) {
   %form = #call meta_node_form(%parent, %vi)
   %is_group = #eq[#bits<64>](%form, 2)
-  %r = #if %is_group -> (#bits<64>) {
+  %r2 = #if %is_group -> (#bits<64>) {
     // 括号：值在组里面，游标进组、下标归零。
     %gv = #call ast_child(%parent, %vi)
     %gi = #call meta_value_type_window(%base, %len, %gv, 0, %r_t_lo,
@@ -1364,6 +1417,10 @@
       #yield %c
     }
     #yield %f
+  }
+  #yield %r2
+  } else {
+    #yield %r_as
   }
   #return %r
 }

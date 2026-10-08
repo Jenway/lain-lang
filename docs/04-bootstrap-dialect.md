@@ -197,8 +197,9 @@ func cstr_len(p: addr) -> u64 {
 | 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
 | 宏 | `my_if`、`my_block`、`my_require` | 编译期展开，过同一道信任门 |
+| 转换 | `x as T`（定宽整数之间） | 变宽发 `#zext`、变窄发 `#trunc`、等宽补一条加零复制；目标类型是**类型名**不是值；源宽度取操作数自己的类型（参数名），取不到才用上下文宽度。样例 `bootstrap/lain/examples/convert.lain` |
 
-实测被拒（列出来是因为它们看着都该能用）：`as`、负数字面量、十六进制、字节串字面量报 4；
+实测被拒（列出来是因为它们看着都该能用）：负数字面量、十六进制、字节串字面量报 4；
 带值 `if` 报 4。（`-`、`*`、`%` 曾报 6，比较全集与 `and`、`or`、`<<`、`>>` 曾报 4，
 已在 A 里补上绑定；裸条件 `if a < b` 曾报 4、无标注 `let y = …` 曾报 21，已在 B 的第一半修好。）
 
@@ -228,8 +229,9 @@ func cstr_len(p: addr) -> u64 {
 **B. 宽度推导与转换** —— 「算子产生自己的结果类型」。`if x < 2` 不加括号、`let` 省标注这
 一半**已完成**：条件是任意表达式（块 = 表达式停下来的那一格），无标注绑定的类型由值推
 （`bootstrap/std/funcs.l1` 的 `meta_value_type_window` / `meta_decl_ret_window`，样例
-`bootstrap/lain/examples/flow.lain`）。剩下 `as`（`#zext` 16 / `#trunc` 23）、负数字面量与
-十六进制。
+`bootstrap/lain/examples/flow.lain`）。`as` 也**已完成**：变宽 `#zext`、变窄 `#trunc`、
+等宽加零复制（`meta_emit_op_lit` 按 #data 地址发名字，样例 `convert.lain`）。剩下负数字面量
+与十六进制。
 
 **C. 内存与地址** —— Meta 的实际工作方式。
 - `addr` 类型（已有）＋ `load` / `store` / `lea`、`p + i`（`#lea` 610 是最大宗内存操作，
@@ -336,6 +338,9 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
 - 期望类型的传递路径（见上）。
 - `addr` 上的 `==` 给不给（层 0 有 `lainir_eq`）。
 - `loop` 的 `continue` 可否省略实参。
+- `as` 的目标类型**不回填**给后面的算子或下一次转换：链式 `x as i64 as i32` 的第二次
+  只能按**上下文宽度**判方向（绑定的标注宽度），所以它可能发成加零复制而不是 `#trunc`；
+  值仍然对（指令自己按宽度截/扩），但产物不是最直白的那条。
 
 ## 与现状的差距
 

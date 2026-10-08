@@ -1022,6 +1022,130 @@
       %f1 = #call lain_meta_fail(4)
       #break e(4)
     }
+    // `x as T`：右边是**类型名**，不是值。目标类型决定发哪条指令 —— 变宽 `#zext`、
+    // 变窄 `#trunc`、等宽补一条加零复制（等宽上 zext/trunc 都不是合法变换）。
+    // 转换后的类型**不回填**给后面的算子：循环携带的是绑定/返回的上下文类型，
+    // 所以 `x as i64 + y` 里那个 `+` 仍按操作数自己的类型查表。
+    %bn2 = #eq[#bits<64>](%bn, 2)
+    %asw = #call meta_bytes_equal(#lea(%base, %bat, 1, 0),
+                                  #data_addr meta_kw_as, 2)
+    %is_as = #and[#bits<1>](%bn2, %asw)
+    #if %is_as {
+      %rti = #add[#bits<64>](%i, 1)
+      %rtn = #call ast_child(%parent, %rti)
+      %rtn_none = #eq[#bits<64>](%rtn, 0)
+      #if %rtn_none {
+        // `as` 后面没有类型名
+        %fa1 = #call lain_meta_fail(4)
+        #break e(4)
+      }
+      %rtn_at = #call meta_node_start(%rtn)
+      %rtn_b = #call bs_byte_at(%base, %rtn_at, %len)
+      %rtn_semi = #eq[#bits<8>](%rtn_b, 59)
+      #if %rtn_semi {
+        %fa1b = #call lain_meta_fail(4)
+        #break e(4)
+      }
+      %rtn_hi = #add[#bits<64>](%rtn_at, #call meta_node_len(%rtn))
+      %atid = #call meta_type_resolve(%base, %len, %rtn_at, %rtn_hi)
+      %atid_none = #eq[#bits<64>](%atid, 0)
+      #if %atid_none {
+        // 类型名不认识：与别处一样报「没有这个名字」
+        %fa2 = #call lain_meta_fail(5)
+        #break e(5)
+      }
+      %atk = #call meta_tid_repr_kind(%atid)
+      %a_bits = #eq[#bits<64>](%atk, 0)
+      #if %a_bits {
+        %atw = #call meta_tid_repr_width(%atid)
+        // 源宽度优先取操作数**自己**的类型（参数名），取不到（字面量、临时值）才用
+        // 传进来的上下文宽度。
+        // 操作数是**源码里的值**（`%acc` = 无）时它自己有名字，可以查类型；是临时值
+        // 时没有类型来源，只能用上下文宽度。
+        %acc_srcf = #eq[#bits<64>](%acc, 0xFFFFFFFFFFFFFFFF)
+        %srcw = #if %acc_srcf -> (#bits<64>) {
+          %alt_sc = #call lain_meta_scratch_data()
+          %aln = #call meta_node_at(%base, %alo)
+          %alt = #call meta_word_type_name(%base, %len, %aln)
+          %alt_miss = #eq[#bits<64>](%alt, 0)
+          %sw = #if %alt_miss -> (#bits<64>) {
+            #yield %width
+          } else {
+            %alt_hi = #call meta_cell_get(#lea(%alt_sc, 0, 1, 0))
+            %asid = #call meta_type_resolve(%base, %len, %alt, %alt_hi)
+            %asw2 = #call meta_tid_repr_width(%asid)
+            #yield %asw2
+          }
+          #yield %sw
+        } else {
+          #yield %width
+        }
+        %widen = #ult[#bits<64>](%srcw, %atw)
+        %narrow = #ugt[#bits<64>](%srcw, %atw)
+        // 出参名前缀与通用算子那条路同一个判断：绑定模式的最后一条直接写 %NAME。
+        %anx = #call meta_after_operand(%parent, %rti)
+        %anxc = #call ast_child(%parent, %anx)
+        %aa_at = #call meta_node_start(%anxc)
+        %aa_b = #call bs_byte_at(%base, %aa_at, %len)
+        %aa_nl = #call meta_node_len(%anxc)
+        %aa_op = #call bs_is_operator(%base, %aa_at, %len, %aa_nl)
+        %alast = #eq[#bits<1>](%aa_op, 0)
+        %a_is_bind = #eq[#bits<64>](%close, 1)
+        %a_named = #and[#bits<1>](%a_is_bind, %alast)
+        %atn = #if %a_named -> (#bits<64>) {
+          %apct = #data_addr meta_st_pct
+          %ay1 = #call lain_meta_emit_write(%apct, 3)
+          %an_at = #lea(%base, %n_lo, 1, 0)
+          %an_len = #sub[#bits<64>](%n_hi, %n_lo)
+          %ay2 = #call lain_meta_emit_write(%an_at, %an_len)
+          #yield 0xFFFFFFFFFFFFFFFF
+        } else {
+          %aind = #data_addr meta_st_ind
+          %ay3 = #call lain_meta_emit_write(%aind, 2)
+          %an2 = #call meta_next_temp()
+          %ay4 = #call meta_emit_temp_name(%an2)
+          #yield %an2
+        }
+        %aeqop = #data_addr meta_st_eqop
+        %ay5 = #call lain_meta_emit_write(%aeqop, 3)
+        %ay6 = #if %widen -> (#bits<32>) {
+          %azn = #data_addr meta_sym_zext
+          %az1 = #call meta_emit_op_lit(%azn, 4, %atk, %atw)
+          %az2 = #call meta_emit_ref2(%base, %len, %acc, %alo, %ahi)
+          #yield %az2
+        } else {
+          %ay7 = #if %narrow -> (#bits<32>) {
+            %atrd = #data_addr meta_sym_trunc
+            %ay8 = #call meta_emit_op_lit(%atrd, 5, %atk, %atw)
+            %ay9 = #call meta_emit_ref2(%base, %len, %acc, %alo, %ahi)
+            #yield %ay9
+          } else {
+            // 等宽：加零就是复制
+            %aadd = #data_addr meta_sym_add
+            %ay10 = #call meta_emit_op_lit(%aadd, 3, %atk, %atw)
+            %ay11 = #call meta_emit_ref2(%base, %len, %acc, %alo, %ahi)
+            %acm = #data_addr meta_o4
+            %ay12 = #call lain_meta_emit_write(%acm, 2)
+            %azr = #data_addr meta_sym_zero
+            %ay13 = #call lain_meta_emit_write(%azr, 1)
+            #yield 0
+          }
+          #yield %ay7
+        }
+        %ay14 = #call lain_meta_emit_write(#data_addr meta_rparen, 1)
+        %ay15 = #call lain_meta_emit_write(#data_addr meta_st_nl, 1)
+        %abound = #if %a_named -> (#bits<1>) {
+          #yield 1
+        } else {
+          #yield 0
+        }
+        #continue e(%anx, 1, %atn, 0, 0, %abound)
+      } else {
+        // `as` 现在只做定宽整数之间的转换
+        %fa3 = #call lain_meta_fail(5)
+        #break e(5)
+      }
+    }
     // 右操作数：游标前进一格。到头时 `ast_child` 回空引用 0。
     %rni = #add[#bits<64>](%i, 1)
     %rn = #call ast_child(%parent, %rni)
