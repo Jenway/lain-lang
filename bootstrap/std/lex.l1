@@ -95,6 +95,9 @@ data meta_kw_if ro { 105 102 }                         // "if"   2
 data meta_kw_else ro { 101 108 115 101 }               // "else" 4
 // for 循环的形状词：`for I in LO .. HI acc = INIT { ... }`。`acc` 这个名字是
 // 语言定的，所以它也是一份关键字数据，而不是「用户在源码里起的名字」。
+data meta_kw_and ro { 97 110 100 }                     // "and"  3
+// `or` 同时也是 `for` 的子串，但这里比的是整个 token，不是子串。
+data meta_kw_or ro { 111 114 }                         // "or"   2
 data meta_kw_for ro { 102 111 114 }                    // "for"  3
 data meta_kw_in ro { 105 110 }                         // "in"   2
 data meta_kw_acc ro { 97 99 99 }                       // "acc"  3
@@ -227,10 +230,18 @@ data meta_kw_acc ro { 97 99 99 }                       // "acc"  3
   #return %b
 }
 
-// 二元运算符？+ - * / % < > ，还有双字节的 == != <= >= << >>。
+// 这个 token 是二元算子吗？
 //
-// 长度也要看：`=` 单独出现是绑定的分隔符（不是算子），只有 `==` 才是；`!` 同理。
-#proc bs_is_operator(%b: #bits<8>, %n: #bits<64>) -> #bits<1> {
+//   单字节  + - * / % < >
+//   双字节  == != <= >= << >> 与签名里的 ->
+//   词      and or
+//
+// 长度必须一起看：`=` 单独出现是绑定的分隔符（不是算子），只有 `==` 才是；`!`、`or`
+// 同理 —— 词算子也比整词，`an` 不是 `and`。
+#proc bs_is_operator(%base: #addr, %at: #bits<64>, %len: #bits<64>,
+                     %n: #bits<64>) -> #bits<1> {
+  %b = #call bs_byte_at(%base, %at, %len)
+  %n1 = #eq[#bits<64>](%n, 1)
   %plus = #eq[#bits<8>](%b, 43)
   %minus = #eq[#bits<8>](%b, 45)
   %star = #eq[#bits<8>](%b, 42)
@@ -242,20 +253,32 @@ data meta_kw_acc ro { 97 99 99 }                       // "acc"  3
   // 认哪些符号是词法；发哪条物理算子是类型的 op 表的事，两件事分开。
   %lt = #eq[#bits<8>](%b, 60)
   %gt = #eq[#bits<8>](%b, 62)
-  // `=` 与 `!` 只在双字节形态下算算子。
-  %eqb = #eq[#bits<8>](%b, 61)
-  %eqn2 = #eq[#bits<64>](%n, 2)
-  %eqsym = #and[#bits<1>](%eqb, %eqn2)
-  %bangb = #eq[#bits<8>](%b, 33)
-  %bangsym = #and[#bits<1>](%bangb, %eqn2)
   %t1 = #or[#bits<1>](%plus, %minus)
   %t2 = #or[#bits<1>](%star, %slash)
   %t3 = #or[#bits<1>](%t1, %t2)
   %t4 = #or[#bits<1>](%t3, %percent)
   %t5 = #or[#bits<1>](%t4, %lt)
-  %t6 = #or[#bits<1>](%t5, %gt)
-  %t7 = #or[#bits<1>](%t6, %eqsym)
-  %r = #or[#bits<1>](%t7, %bangsym)
+  %punct1 = #or[#bits<1>](%t5, %gt)
+  %r1 = #and[#bits<1>](%n1, %punct1)
+  // 双字节：首字节落在 `= ! < >` 里就是 == != <= >= << >>；`->` 的首字节是 `-`。
+  %n2 = #eq[#bits<64>](%n, 2)
+  %eqb = #eq[#bits<8>](%b, 61)
+  %bangb = #eq[#bits<8>](%b, 33)
+  %p2a = #or[#bits<1>](%eqb, %bangb)
+  %p2b = #or[#bits<1>](%lt, %gt)
+  %p2c = #or[#bits<1>](%p2a, %p2b)
+  %p2d = #or[#bits<1>](%p2c, %minus)
+  %r2 = #and[#bits<1>](%n2, %p2d)
+  // 词算子。比整词：先比长度，再比字节。
+  %p = #lea(%base, %at, 1, 0)
+  %n3 = #eq[#bits<64>](%n, 3)
+  %andword = #call meta_bytes_equal(%p, #data_addr meta_kw_and, 3)
+  %orword = #call meta_bytes_equal(%p, #data_addr meta_kw_or, 2)
+  %r3 = #and[#bits<1>](%n3, %andword)
+  %r4 = #and[#bits<1>](%n2, %orword)
+  %q1 = #or[#bits<1>](%r1, %r2)
+  %q2 = #or[#bits<1>](%q1, %r3)
+  %r = #or[#bits<1>](%q2, %r4)
   #return %r
 }
 

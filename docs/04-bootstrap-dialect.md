@@ -191,12 +191,12 @@ func cstr_len(p: addr) -> u64 {
 | 绑定与返回 | `let n: i32 = …;`、`return n;` | `let` 必须写标注（否则 21） |
 | 条件 | `if b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件只吃单 token 或 `(表达式)`；分支必须以 `return` 收尾，所以 `if` 是语句不是值（裸条件 `if a < b` 报 4） |
 | 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };` | 仅 i32/u32（u64 报 5） |
-| 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | 比较全集已通；位运算还没绑定，见 A |
+| 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | 算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）已通；u64/usize/bool 还没绑定，见 A |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
 | 宏 | `my_if`、`my_block`、`my_require` | 编译期展开，过同一道信任门 |
 
-实测被拒（列出来是因为它们看着都该能用）：`and`、`or`、`<<`、`>>` 报 4；`as`、负数字面量、
-十六进制、字节串字面量报 4；带值 `if` 报 4。（`-`、`*`、`%` 曾报 6，比较全集曾报 4，
+实测被拒（列出来是因为它们看着都该能用）：`as`、负数字面量、十六进制、字节串字面量报 4；
+带值 `if` 报 4。（`-`、`*`、`%` 曾报 6，比较全集与 `and`、`or`、`<<`、`>>` 曾报 4，
 已在 A 里补上绑定。）
 
 ### 二、半成品：`struct` / `enum` 的值层
@@ -211,7 +211,8 @@ func cstr_len(p: addr) -> u64 {
 ### 三、待做（按阻塞顺序）
 
 **A. 算子表** —— 不是语法，是 bootstrap/std/scalars.l1 里那段 `data` 字节表。
-- i32/u32 补 `-`、`*`、`%`、比较全集 `== != > <= >=`、位运算 `and or shl lshr`。
+- i32/u32 的算术、比较、位运算已绑定（`bootstrap/lain/examples/ops.lain`、`bits.lain`）；
+  剩下的是 u64/usize 与 bool。词算子 `and`/`or` 由词法层整词识别（`an` 仍是 4）。
 - **u64 / usize 今天零个算子**：`#bits` 3607 次、`#add` 661 次 —— Meta 的长度与偏移全是
   u64，这是最刺眼的一条。`bool` 的逻辑算子同理。
 - IR 侧零改动：`#sub #mul #udiv #urem #eq #ne #ult #uge #and #or #shl #lshr` 都已实现。
