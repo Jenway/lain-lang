@@ -789,6 +789,72 @@
   #return %st
 }
 
+// `- <数字>` 是**一个**操作数（负数字面量），但它占**两个**节点：负号一个、数字一个。
+// 只看源码字节，不问语义旁表 —— 负号是 `-`，后面紧跟着的必须是一段纯十进制数字
+// （`-0x10` 不算，那是十进制以外的记法，还没有支持）。
+#proc meta_is_neg_literal(%base: #addr, %len: #bits<64>,
+                           %parent: #bits<64>, %index: #bits<64>) -> #bits<1> {
+  %n = #call ast_child(%parent, %index)
+  %at = #call meta_node_start(%n)
+  %b = #call bs_byte_at(%base, %at, %len)
+  %dash = #eq[#bits<8>](%b, 45)
+  %r = #if %dash -> (#bits<1>) {
+    %nx = #add[#bits<64>](%index, 1)
+    %nn = #call ast_child(%parent, %nx)
+    %nnone = #eq[#bits<64>](%nn, 0)
+    %d = #if %nnone -> (#bits<1>) {
+      #yield 0
+    } else {
+      %lo = #call meta_node_start(%nn)
+      %hi = #add[#bits<64>](%lo, #call meta_node_len(%nn))
+      %dg = #call meta_all_digits(%base, %lo, %hi, %len)
+      #yield %dg
+    }
+    #yield %d
+  } else {
+    #yield 0
+  }
+  #return %r
+}
+
+// 负数字面量降级成 `  %r<n> = #sub[repr](0, <数字>)\n`，结果写进 `+168`。
+//
+// **LAINIR 的字面量是无符号十进制文本**，没有负号这种东西：直接把 `-5` 抄进产物会
+// 得到一条读不出意义的指令。所以按语言的语义发一条减法（`0 - 5`），宽度取上下文
+// 类型 —— 也就是说符号属性由类型定，不由字面量定。
+#proc meta_emit_neg_temp(%base: #addr, %len: #bits<64>,
+                          %kind: #bits<64>, %width: #bits<64>,
+                          %parent: #bits<64>, %index: #bits<64>) -> #bits<32> {
+  %ni = #add[#bits<64>](%index, 1)
+  %nn = #call ast_child(%parent, %ni)
+  %nlo = #call meta_node_start(%nn)
+  %nhi = #add[#bits<64>](%nlo, #call meta_node_len(%nn))
+  %ind = #data_addr meta_st_ind
+  %w1 = #call lain_meta_emit_write(%ind, 2)
+  %tn = #call meta_next_temp()
+  %w2 = #call meta_emit_temp_name(%tn)
+  %eqop = #data_addr meta_st_eqop
+  %w3 = #call lain_meta_emit_write(%eqop, 3)
+  %sub = #data_addr meta_sym_sub
+  %w4 = #call meta_emit_op_lit(%sub, 3, %kind, %width)
+  %zero = #call meta_emit_uint(0)
+  %sep = #data_addr meta_o4
+  %w5 = #call lain_meta_emit_write(%sep, 2)
+  %n_at = #lea(%base, %nlo, 1, 0)
+  %n_len = #sub[#bits<64>](%nhi, %nlo)
+  %w6 = #call lain_meta_emit_write(%n_at, %n_len)
+  %rp = #data_addr meta_rparen
+  %w7 = #call lain_meta_emit_write(%rp, 1)
+  %nl = #data_addr meta_st_nl
+  %w8 = #call lain_meta_emit_write(%nl, 1)
+  %sc = #call lain_meta_scratch_data()
+  %s1 = #call meta_cell_put(#lea(%sc, 168, 1, 0), %tn)
+  // 范围也写出去：外层拿到的是「一个操作数」的范围（数字那段），不是负号那段。
+  %s2 = #call meta_cell_put(#lea(%sc, 176, 1, 0), %nlo)
+  %s3 = #call meta_cell_put(#lea(%sc, 184, 1, 0), %nhi)
+  #return 0
+}
+
 // 把一个操作数节点变成「可以引用的东西」，结果写进暂存区 `+168`：临时值下标，或者
 // 「无」表示"直接用源码那段"。回状态码。
 //
@@ -805,6 +871,11 @@
                         %kind: #bits<64>, %width: #bits<64>,
                         %t_lo: #bits<64>, %t_hi: #bits<64>,
                         %parent: #bits<64>, %index: #bits<64>) -> #bits<32> {
+  %neg = #call meta_is_neg_literal(%base, %len, %parent, %index)
+  #if %neg {
+    #return #call meta_emit_neg_temp(%base, %len, %kind, %width,
+                                     %parent, %index)
+  }
   %node = #call ast_child(%parent, %index)
   %form = #call meta_node_form(%parent, %index)
   %is_group = #eq[#bits<64>](%form, 2)
@@ -893,11 +964,15 @@
 //
 // 吃的是游标（父组 + 下标），回的是**下一个下标**（游标只会增加下标，规范 §2.1）；
 // 形状问的是「这个位置」的形状，不涉及节点引用。
-#proc meta_after_operand(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
+#proc meta_after_operand(%base: #addr, %len: #bits<64>,
+                         %parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
   %k = #call meta_node_form(%parent, %index)
   %is_call = #eq[#bits<64>](%k, 5)
+  // 负数字面量也占两格（负号 + 数字）—— 不跳的话 `-5` 后面那一格会被当成算子。
+  %is_neg = #call meta_is_neg_literal(%base, %len, %parent, %index)
+  %skip2 = #or[#bits<1>](%is_call, %is_neg)
   %nx = #add[#bits<64>](%index, 1)
-  %r = #if %is_call -> (#bits<64>) {
+  %r = #if %skip2 -> (#bits<64>) {
     %g = #add[#bits<64>](%nx, 1)
     #yield %g
   } else {
@@ -964,7 +1039,7 @@
       %ref = #call meta_cell_get(#lea(%sc, 168, 1, 0))
       %alo1 = #call meta_cell_get(#lea(%sc, 176, 1, 0))
       %ahi1 = #call meta_cell_get(#lea(%sc, 184, 1, 0))
-      %nx = #call meta_after_operand(%parent, %i)
+      %nx = #call meta_after_operand(%base, %len, %parent, %i)
       #continue e(%nx, 1, %ref, %alo1, %ahi1, 0)
     }
     // 阶段二：%c 是算子、或者是表达式的终点
@@ -1083,7 +1158,7 @@
         %widen = #ult[#bits<64>](%srcw, %atw)
         %narrow = #ugt[#bits<64>](%srcw, %atw)
         // 出参名前缀与通用算子那条路同一个判断：绑定模式的最后一条直接写 %NAME。
-        %anx = #call meta_after_operand(%parent, %rti)
+        %anx = #call meta_after_operand(%base, %len, %parent, %rti)
         %anxc = #call ast_child(%parent, %anx)
         %aa_at = #call meta_node_start(%anxc)
         %aa_b = #call bs_byte_at(%base, %aa_at, %len)
@@ -1310,7 +1385,7 @@
     }
     // 这条是不是整条链的最后一条？看右操作数后面那个位置还是不是算子。
     // **必须在 `meta_op_resolve` 之后做**：这几个都是只读树的叶子调用，不碰 `+24`/`+32`。
-    %nx2 = #call meta_after_operand(%parent, %rni)
+    %nx2 = #call meta_after_operand(%base, %len, %parent, %rni)
     %nx2c = #call ast_child(%parent, %nx2)
     %a_at = #call meta_node_start(%nx2c)
     %a_b = #call bs_byte_at(%base, %a_at, %len)
