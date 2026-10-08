@@ -44,7 +44,7 @@ static uint64_t allocate_session_id(void) {
  * `2*i + 3`，所以 `i <= 32766` 时最大段号正好 65535。超过就在登记时拒。 */
 #define LAIN_META_SOURCE_MAX 32766u
 
-/* 段号分配（规范 §1.2）：主源码 Source=1、AstIn=2；**3 是 AstOut 的保留编号**，
+/* 段号分配：主源码 Source=1、AstIn=2；**3 是 AstOut 的保留编号**，
  * 第一期没有消费者也不许被源码占用；额外源码按注册顺序成对发 4/5、6/7、……
  * 失败源码同样占住它的段号对，不回收给后面的源码。
  *
@@ -1359,7 +1359,7 @@ static bool segment_view(LainMetaHost *host, uint16_t id,
 static bool header_ok_trusted(const unsigned char *base, uint64_t window,
                               uint16_t segment_id, LainAstArenaHeader *out);
 
-/* 解引用之前**必须先过这一道**（规范 §2.3）。
+/* 解引用之前**必须先过这一道**。
  *
  * 规则说得很硬：AST 读取能力要求已绑定合法 VSpace，未绑定就安全拒绝；**每次**
  * 解引用之前验证对应读取范围具有 READ 权限，不能先读 Header/Node 再检查。
@@ -1449,7 +1449,7 @@ const LainMetaTree *lainmeta_host_tree(LainMetaHost *host, uint32_t source) {
 
 /* 读节点：引用必须是**本段**已发布的节点槽。
  *
- * 顺序是**先验权限、再解引用**（规范 §2.3）：Header 读之前查 Header 区间，节点
+ * 顺序是**先验权限、再解引用**：Header 读之前查 Header 区间，节点
  * memcpy 之前查这 56 字节。任何一步没授权就拒 5，不做「先读后查」。 */
 static bool node_read(LainMetaHost *host, LainAstRef ref, LainAstArenaView *view,
                       LainAstArenaHeader *header, LainAstNode *out,
@@ -1687,7 +1687,7 @@ static uint32_t cap_ast_root(void *context, const uint64_t *args, uint32_t count
   LainAstArenaView view;
   if (!host) return LAINMETA_ERR_DENIED;
   if (count != 1 || !args) return LAINMETA_ERR_DENIED;
-  /* AST 读取能力都要求已绑定合法 VSpace（规范 §2.3）：没授权就没有「读 AST」这回事。 */
+  /* AST 读取能力都要求已绑定合法 VSpace：没授权就没有「读 AST」这回事。 */
   if (!host->space) {
     host_set_status(host, LAINMETA_ERR_DENIED);
     if (out) *out = LAIN_AST_REF_NONE;

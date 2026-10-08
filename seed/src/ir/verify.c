@@ -107,7 +107,7 @@ static const LoopScope *find_loop(const LoopScope *loops, const char *label) {
   return NULL;
 }
 
-/* --- 字面量的宽度从哪来（文档 §4.1） -------------------------------------
+/* --- 字面量的宽度从哪来 -------------------------------------
  * 字面量**不带类型**，只要求有人声明它的宽度；类别由算子决定。
  * 返回 0 表示没有任何声明给出宽度 —— 那才是错误。 */
 
@@ -311,7 +311,7 @@ static bool check_operand_class(Verifier *v, const Binding *names,
 
 /* 物理类型的宽度上限：一个值就是机器的一个字。
  * 位串和浮点超过 64 位需要多字表示——VM 的 L1Value 装不下，后端也没合法化，
- * 所以规范里先不允许。伪装的「能编译」比拒绝更糟。 */
+ * 所以先不允许。伪装的「能编译」比拒绝更糟。 */
 #define L1V_MAX_VALUE_WIDTH 64u
 
 static bool check_type_width(Verifier *v, const L1Type *ty, uint32_t line,

@@ -1,7 +1,6 @@
 /* 后端的目标描述。
  *
- * 后端和 engine 最大的差别之一：engine 跑在哪个机器上，是**编译 engine 的
- * 那个 C 编译器**决定的；后端的目标必须先告诉它。
+ * 后端的目标必须先告诉它，不能像 engine 那样由编译 engine 的 C 编译器决定。
  * 目标不是通用的：一个后端 = 一个目标。
  */
 #ifndef LAINBACKEND_TARGET_H

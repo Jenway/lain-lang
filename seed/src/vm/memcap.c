@@ -229,7 +229,7 @@ void lainvm_memcap_end_all(LainVmMemTable *table, uint32_t *revoked,
   if (released != NULL) *released = rl;
 }
 
-/* 文档 §3「访问」五条，按顺序。返回 0 或稳定拒绝码。
+/* 五条检查按顺序做。返回 0 或稳定拒绝码。
  * 句柄不带表身份之后，同址重建的上下文靠**代数基数**检出（9208）—— 9205 已废弃。 */
 static int32_t resolve_code(const LainVmMemTable *table,
                             const LainVmSpace *space, LainVmMemRef ref,
