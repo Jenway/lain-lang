@@ -34,7 +34,7 @@ apply(LAINIR 过程, 实参, 能力与限额) → 执行结果
 
 ## apply 契约
 
-C 接口见 `seed/include/lainmeta/apply.h`。执行期约束如下：
+C 接口见 `seed/include/lain/meta/apply.h`。执行期约束如下：
 
 | 项 | 规则 |
 | --- | --- |

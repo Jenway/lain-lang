@@ -12,7 +12,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "lainir/core.h"
+#include "lain/ir/core.h"
 
 typedef struct L1Builder L1Builder;
 

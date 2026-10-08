@@ -1,5 +1,5 @@
-/* lainir/infer.h 的实现。 */
-#include "lainir/infer.h"
+/* lain/ir/infer.h 的实现。 */
+#include "lain/ir/infer.h"
 
 #include <string.h>
 

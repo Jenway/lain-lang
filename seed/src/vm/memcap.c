@@ -1,11 +1,11 @@
-/* 最小内存能力模型。契约与诊断码见 lainvm/memcap.h 的文件头。
+/* 最小内存能力模型。契约与诊断码见 lain/vm/memcap.h 的文件头。
  *
  * 纪律（同 space.c）：
  *   - 失败时表**不变**（先把参数验完，再改表）。
  *   - 槽的位置永不改变；代数用尽就不再用那个槽，宁可少一个槽。
  *   - 撤销访问权和释放存储是两个动作：`committed` 只在释放时归还。
  */
-#include "lainvm/memcap.h"
+#include "lain/vm/memcap.h"
 
 #include <string.h>
 

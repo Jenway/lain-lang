@@ -14,7 +14,7 @@
 #ifndef LAINIR_VERIFY_H
 #define LAINIR_VERIFY_H
 
-#include "lainir/core.h"
+#include "lain/ir/core.h"
 
 /* 验证整个模块。成功返回 0；失败返回非 0 并把原因写进 diag（可为 NULL）。 */
 int lainir_verify(const L1Module *module, L1Diagnostic *diag);

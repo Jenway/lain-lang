@@ -10,7 +10,7 @@
 
 #include <stdint.h>
 
-#include "lainir/core.h"
+#include "lain/ir/core.h"
 
 typedef struct {
   void (*write)(void *user, const char *bytes, uint32_t size);

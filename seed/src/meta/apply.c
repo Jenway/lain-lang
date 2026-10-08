@@ -1,15 +1,15 @@
-/* lainmeta/apply.h 的实现。 */
-#include "lainmeta/apply.h"
+/* lain/meta/apply.h 的实现。 */
+#include "lain/meta/apply.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
-#include "lainir/build.h"
-#include "lainir/parse.h"
-#include "lainir/verify.h"
-#include "lainvm/engine.h"
-#include "lainvm/image.h"
+#include "lain/ir/build.h"
+#include "lain/ir/parse.h"
+#include "lain/ir/verify.h"
+#include "lain/vm/engine.h"
+#include "lain/vm/image.h"
 
 static bool fail(L1Diagnostic *diag, int code, const char *message) {
   if (diag) {

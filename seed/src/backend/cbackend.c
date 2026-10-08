@@ -11,14 +11,14 @@
  * emit.h 里那条待定项（检查由谁消去）尚未解决的表现，所以差分测试只喂
  * 「在定义域内」的程序。
  */
-#include "lainbackend/emit.h"
+#include "lain/backend/emit.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "lainir/infer.h"
+#include "lain/ir/infer.h"
 
 typedef struct {
   const L1Region *region;
@@ -204,7 +204,7 @@ static const L1Subroutine *find_sub(const L1Module *module, const char *name) {
 }
 
 /* 一条指令产出的值有多宽。
- * 规则本身在 lainir/infer.c 里，只写一遍——验证器和后端必须用同一份。 */
+ * 规则本身在 lain/ir/infer.c 里，只写一遍——验证器和后端必须用同一份。 */
 static uint32_t inst_result_width(LainBackend *be, const L1Inst *inst) {
   const L1Type *ty = lainir_inst_result_type(&be->types, inst, 0);
   return ty ? width_of_type(ty) : 64;

@@ -1,7 +1,7 @@
 /* Expand v1 的调用帧协议与任务预算；不携带语言关键字或宿主地址。 */
 #ifndef LAINMETA_EXPAND_H
 #define LAINMETA_EXPAND_H
-#include "lainmeta/ast_v1.h"
+#include "lain/meta/ast_v1.h"
 
 typedef struct {
   uint64_t abi_version;

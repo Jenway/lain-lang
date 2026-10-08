@@ -1,12 +1,12 @@
-/* lainir/print.h 的实现。 */
-#include "lainir/print.h"
+/* lain/ir/print.h 的实现。 */
+#include "lain/ir/print.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "lainir/opname.h"
+#include "lain/ir/opname.h"
 
 typedef struct {
   const L1TextSink *sink;

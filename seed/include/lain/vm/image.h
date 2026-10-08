@@ -16,8 +16,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lainir/core.h"
-#include "lainvm/space.h"
+#include "lain/ir/core.h"
+#include "lain/vm/space.h"
 
 typedef struct LainVmImage LainVmImage;
 

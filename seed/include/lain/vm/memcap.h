@@ -53,7 +53,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lainvm/space.h"
+#include "lain/vm/space.h"
 
 /* 定长，不做动态分配。对象数比 VSpace 区段数增长得快，所以是**另一张表**：
  * 一次调用里每次 alloca 都是一个对象，而栈整段只是一个区段。 */

@@ -1,8 +1,8 @@
 /* AstOut 的可信存储实现接口，仅由宿主使用。 */
 #ifndef LAINMETA_AST_OUT_INTERNAL_H
 #define LAINMETA_AST_OUT_INTERNAL_H
-#include "lainmeta/expand.h"
-#include "lainvm/quota.h"
+#include "lain/meta/expand.h"
+#include "lain/vm/quota.h"
 #include <stdbool.h>
 typedef struct LainAstOutput LainAstOutput;
 typedef uint32_t (*LainAstResolve)(void *, LainAstRef, LainAstNode *);

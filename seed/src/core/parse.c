@@ -1,12 +1,12 @@
-/* lainir/parse.h 的实现。递归下降，一次扫过去。 */
-#include "lainir/parse.h"
+/* lain/ir/parse.h 的实现。递归下降，一次扫过去。 */
+#include "lain/ir/parse.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "lainir/opname.h"
+#include "lain/ir/opname.h"
 
 #define L1P_MAX_RESULTS 4u
 /* 和 core.h 的 L1_MAX_OPERANDS 同一个数：解析器、验证器、引擎不能各说各话。 */

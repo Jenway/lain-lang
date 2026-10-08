@@ -33,28 +33,28 @@ target_sources(lain_seed
     FILE_SET HEADERS
       BASE_DIRS seed/include
       FILES
-        seed/include/lainmeta/apply.h
-        seed/include/lainbackend/emit.h
-        seed/include/lainbackend/target.h
-        seed/include/lainir/build.h
-        seed/include/lainir/core.h
-        seed/include/lainir/infer.h
-        seed/include/lainir/opname.h
-        seed/include/lainir/parse.h
-        seed/include/lainir/print.h
-        seed/include/lainir/value.h
-        seed/include/lainir/verify.h
-        seed/include/lainmeta/ast_v1.h
-        seed/include/lainmeta/expand.h
-        seed/include/lainmeta/host.h
-        seed/include/lainmeta/tree.h
-        seed/include/lainvm/caps.h
-        seed/include/lainvm/engine.h
-        seed/include/lainvm/image.h
-        seed/include/lainvm/memcap.h
-        seed/include/lainvm/quota.h
-        seed/include/lainvm/space.h
-        seed/include/lainvm/tcb.h
+        seed/include/lain/meta/apply.h
+        seed/include/lain/backend/emit.h
+        seed/include/lain/backend/target.h
+        seed/include/lain/ir/build.h
+        seed/include/lain/ir/core.h
+        seed/include/lain/ir/infer.h
+        seed/include/lain/ir/opname.h
+        seed/include/lain/ir/parse.h
+        seed/include/lain/ir/print.h
+        seed/include/lain/ir/value.h
+        seed/include/lain/ir/verify.h
+        seed/include/lain/meta/ast_v1.h
+        seed/include/lain/meta/expand.h
+        seed/include/lain/meta/host.h
+        seed/include/lain/meta/tree.h
+        seed/include/lain/vm/caps.h
+        seed/include/lain/vm/engine.h
+        seed/include/lain/vm/image.h
+        seed/include/lain/vm/memcap.h
+        seed/include/lain/vm/quota.h
+        seed/include/lain/vm/space.h
+        seed/include/lain/vm/tcb.h
 )
 
 target_compile_features(lain_seed PUBLIC c_std_11)

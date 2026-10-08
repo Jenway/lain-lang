@@ -1,11 +1,11 @@
-/* lainmeta/host.h 的实现。
+/* lain/meta/host.h 的实现。
  *
  * 每个宿主函数都是 LainVmHostFn：第一个参数是能力槽上绑定的 context
  * （这里的 `LainMetaHost *`），随后是**净化后的业务参数**，返回 0 = 成功。
  * context 由可信的注册路径在 `lainmeta_host_register` 时绑到每一项上，
  * Meta 的业务参数里没有它，也无法指定或伪造宿主。 */
-#include "lainmeta/host.h"
-#include "lainmeta/tree.h"
+#include "lain/meta/host.h"
+#include "lain/meta/tree.h"
 #include "ast_out.h"
 
 #include <stdlib.h>

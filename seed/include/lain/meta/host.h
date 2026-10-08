@@ -17,12 +17,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lainmeta/ast_v1.h"
-#include "lainmeta/expand.h"
-#include "lainvm/caps.h"
-#include "lainvm/quota.h"
-#include "lainvm/space.h"
-#include "lainmeta/apply.h"
+#include "lain/meta/ast_v1.h"
+#include "lain/meta/expand.h"
+#include "lain/vm/caps.h"
+#include "lain/vm/quota.h"
+#include "lain/vm/space.h"
+#include "lain/meta/apply.h"
 
 typedef struct LainMetaHost LainMetaHost;
 typedef struct LainMetaTree LainMetaTree;

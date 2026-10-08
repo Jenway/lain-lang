@@ -8,9 +8,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lainir/core.h"
-#include "lainvm/caps.h"
-#include "lainvm/quota.h"
+#include "lain/ir/core.h"
+#include "lain/vm/caps.h"
+#include "lain/vm/quota.h"
 
 typedef struct {
   /* NULL = 不授予宿主能力。非 NULL 时**调用方必须已经冻结**这张表；

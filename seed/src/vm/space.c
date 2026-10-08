@@ -1,4 +1,4 @@
-/* lainvm/space.h 的实现。
+/* lain/vm/space.h 的实现。
  *
  * 三条不变量，改这个文件时先读这几句：
  *   1. `slots` 里的位置**永不改变**（句柄的身份靠它 + 代数）。所有重排只发生在
@@ -10,7 +10,7 @@
  *      归还 quota（free）。每个接口只做自己名字里写的那几件，不再有一个模糊的
  *      `remove` 同时承担三个含义。
  */
-#include "lainvm/space.h"
+#include "lain/vm/space.h"
 
 #include <stdlib.h>
 #include <string.h>

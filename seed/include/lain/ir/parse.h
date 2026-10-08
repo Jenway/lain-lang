@@ -14,8 +14,8 @@
 #ifndef LAINIR_PARSE_H
 #define LAINIR_PARSE_H
 
-#include "lainir/build.h"
-#include "lainir/core.h"
+#include "lain/ir/build.h"
+#include "lain/ir/core.h"
 
 /* 解析失败返回 NULL，诊断写进 diag（可为 NULL）。 */
 const L1Module *lainir_parse(L1Builder *builder, const char *text,

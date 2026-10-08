@@ -1,16 +1,16 @@
-/* lainvm/tcb.h 的实现：admit。
+/* lain/vm/tcb.h 的实现：admit。
  *
  * 引擎里不许分配，所以所有上界都在这里算好并一次分配：帧栈、值槽竞技场。
  * **栈不在这里分配**：字节由供给方用 `lainvm_space_alloc_stack` 申请，
  * TCB 只接收一条租约并借用（见 tcb.h）。
  */
-#include "lainvm/tcb.h"
+#include "lain/vm/tcb.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "lainvm/image.h"
+#include "lain/vm/image.h"
 
 static void start_fail(L1Diagnostic *diag, int code, const char *message);
 

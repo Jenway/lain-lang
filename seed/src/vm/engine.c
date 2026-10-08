@@ -7,13 +7,13 @@
  * frame->position 就是当前这条指令。分派之后，如果算子没换帧也没动
  * 位置，CU 才推进一格。这样操作数读取和结果写回都不用额外的上下文。
  */
-#include "lainvm/engine.h"
+#include "lain/vm/engine.h"
 
 #include <limits.h>
 #include <math.h>
 #include <string.h>
 
-#include "lainvm/image.h"
+#include "lain/vm/image.h"
 
 #define LAINVM_MAX_OPERANDS L1_MAX_OPERANDS
 
@@ -1025,7 +1025,7 @@ static const LainVmOp k_ops[INST_COUNT] = {
 
 const LainVmOp *lainvm_op_table(void) { return k_ops; }
 
-/* lainvm/engine.h 里逐条声明的算子入口；这里都指向共用的实现。 */
+/* lain/vm/engine.h 里逐条声明的算子入口；这里都指向共用的实现。 */
 #define LAINVM_OP_ALIAS(name)                                   \
   LainVmSliceResult lainvm_op_##name(LainVmTcb *tcb,            \
                                      const L1Inst *inst) {      \
