@@ -523,51 +523,28 @@
   #return 0
 }
 
-// 从当前可见 scalar/struct/enum 类型绑定编码 type_ref。
+// 从当前可见的 struct/enum 或内建标量类型绑定编码 type_ref。
 #proc meta_type_ref_from_name(%name: #addr, %name_length: #bits<64>,
                               %out: #addr, %capacity: #bits<64>) -> #bits<32> {
   %capacity_ok = #uge[#bits<64>](%capacity, 32)
   #if #eq[#bits<1>](%capacity_ok, 0) { #return 9435 }
-  %scratch = #call lain_meta_scratch_data()
-  %index = #call meta_scope_find(%name, %name_length)
-  %missing = #eq[#bits<64>](%index, 0xFFFFFFFFFFFFFFFF)
-  #if %missing {
+  %id0 = #call meta_type_id_of_name(%name, %name_length)
+  %not_found = #or[#bits<1>](
+      #eq[#bits<64>](%id0, 0),
+      #eq[#bits<64>](%id0, 0xFFFFFFFFFFFFFFFF))
+  #if %not_found {
     %fail = #call lain_meta_fail(5)
     #return 5
   }
-  %kind = #call meta_scope_kind(%index)
-  %is_scalar_type = #eq[#bits<64>](%kind, 2)
-  %is_struct_type = #eq[#bits<64>](%kind, 4)
-  %is_enum_type = #eq[#bits<64>](%kind, 5)
-  %is_type0 = #or[#bits<1>](%is_scalar_type, %is_struct_type)
-  %is_type = #or[#bits<1>](%is_type0, %is_enum_type)
-  #if #eq[#bits<1>](%is_type, 1) {
-    // 从命中的类型条目取真实来源；名字可能来自 root/prelude，而非当前源码。
-    %source = #call meta_scope_word(%index, 0)
-    %source_len = #call lain_meta_source_length(%source)
-    %base = #call lain_meta_source_data(%source)
-    // meta_scope_type_id 按声明种类 intern scalar、名义 struct 或 enum。
-    %id0 = #call meta_scope_type_id(%base, %source_len, %name,
-                                    %name_length)
-    %not_found = #or[#bits<1>](
-        #eq[#bits<64>](%id0, 0),
-        #eq[#bits<64>](%id0, 0xFFFFFFFFFFFFFFFF))
-    #if %not_found {
-      %fail2 = #call lain_meta_fail(5)
-      #return 5
-    }
-    %session = #call lain_meta_session_id()
+  %session = #call lain_meta_session_id()
     %w0 = #call meta_wire_write_le(%out, 0, 4, 0x31564D4C)
     %w1 = #call meta_wire_write_le(%out, 4, 2, 1)
     %w2 = #call meta_wire_write_le(%out, 6, 2, 3)
     %w3 = #call meta_wire_write_le(%out, 8, 4, 16)
     %w4 = #call meta_wire_write_le(%out, 12, 4, 0)
     %w5 = #call meta_wire_write_le(%out, 16, 8, %session)
-    %w6 = #call meta_wire_write_le(%out, 24, 8, %id0)
-    #return 0
-  }
-  %fail3 = #call lain_meta_fail(5)
-  #return 5
+  %w6 = #call meta_wire_write_le(%out, 24, 8, %id0)
+  #return 0
 }
 
 // 校验并取出 type_ref 的当前会话类型 ID；错误码原样返回。

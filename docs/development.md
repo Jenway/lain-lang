@@ -29,7 +29,7 @@ cmake --build build/cmake
 逻辑路径就是 import 解析注册表里的名字：
 
 ```powershell
-build/lain-meta.exe --unit bootstrap/SOURCE_ORDER std/prelude.lain bootstrap/lain/std/prelude.lain
+build/lain-meta.exe --out build/arith.out std/examples/arith.lain bootstrap/lain/examples/arith.lain
 ```
 
 | 选项 | 默认 | 说明 |

@@ -94,20 +94,19 @@ let total: u32 = for i in 0..n acc = 0 { acc = acc + i; };
 - 赋值 `NAME = 值;` **只在 for 体内合法**：循环体唯一能赋值的合法目标是语言定的 `acc`。
 - 顶层形式：`let` / `struct` / `enum` / `func` / `import(…)`。关键字经 Meta 语法
   注册表取 handler：1=my_if 2=func 3=if 4=struct 5=enum 7=顶层 let 8=return
-  9=局部 let 10=for 11=my_block。
-  **6=scalar 要取消**（见《目标新增》）；号位退休不复用。
+  9=局部 let 10=for 11=my_block。**6（原 scalar 声明）已取消，号位退休不复用。**
 - `for` 是一条**表达式**，值就是累加变量的最终值；`#loop` 的变量直接就是 `i` 与 `acc`，
   不需要「源码名 → LAINIR 名」的映射表。v0 限制：不能嵌套循环；下界与上界是值（字面量、
   参数或已声明的局部）而不是任意表达式；循环体只有一条 `acc = 值 算子 值;`。
-- 注释是必须支持的（注释里的 `scalar` 字样曾被当成声明扫进来）。
+- 注释是必须支持的：声明发现按词走，不认注释的话注释里的词会被当成形式。
 
 ### 目标新增
 
-- **没有 scalar 声明语法。** 标量集、repr（`bits/N`、`f/N`、`vec/N`、`addr`）与算符绑定
-  （`"/"` → `sdiv` 一类）是 **Meta 库的表数据**：今天在 bootstrap/std/scalars.l1，将来是
-  用 Lain 写的库模块。名字怎么进源码作用域由 `import` 管 —— 不带点的 `i32` 落在内建环境，
-  带点的 `T.i32` 落在本源码 import 的那个模块。用户自定义标量走同一条路：编译期调用库的
-  注册接口，不是新语法。
+- **没有 scalar 声明语法。** 标量集、repr（kind + 宽度）与算符绑定（`"/"` → `sdiv` 一类）
+  是 **Meta 库的表数据**：今天就是 bootstrap/std/scalars.l1 里的一段 `data` 字节表，
+  将来是用 Lain 写的库模块。表之外没有第二份出处：`i32` 这类名字由名字解析直接命中内建表，
+  不进作用域表；带点的 `T.i32` 没有解析（标量是内建名字，模块不导出标量），一律按
+  「没有这个名字」报 5。用户自定义标量走编译期调用库的注册接口，不是新语法。
 - 带标签的循环（替代 `for` 的通用形态）：
 
 ```text
@@ -204,10 +203,10 @@ arena 与字节偏移。）
 
 ## 与现状的差距
 
-- bootstrap/lain/std/prelude.lain 今天还是 `scalar i32 = bits<32> { … }`。这条声明语法取消，
-  标量表落回 bootstrap/std/scalars.l1；`meta_repr_at` 的 `<N>` 解析随之作废。
-- scalar 的降级还是占位：bootstrap/std/handlers/scalar.l1:18-21 直接
-  `#call lain_meta_fail(14)`。prelude 第一行就是 scalar 声明，所以驱动今天跑到
-  `steps=359053 host_status=14` 就停在这里（见 docs/development.md 的驱动一节）。
+- 标量已经是表：bootstrap/std/scalars.l1 里一段 `data` 字节（名字、kind、宽度、算符对），
+  handler 6 与 bootstrap/std/handlers/scalar.l1 已删除，bootstrap/lain/std/prelude.lain
+  也随之删除（语言里不再有标量声明，也就没有「先 import 一份 prelude」这一步）。
+- 端到端验收改用 bootstrap/lain/examples/arith.lain：`host_status=0`、`output bytes=74`，
+  产物是 `%r1 = #add[#bits<32>](1, 2)`（见 docs/development.md 的驱动一节）。
 - 层 0 尚不存在；今天的对应物是 bootstrap/std/wire.l1 的手写拼串。
 - 表面语言里没有内存操作：Meta 今天只能靠手写 LAINIR 或宿主交出的窗口读写字节。
