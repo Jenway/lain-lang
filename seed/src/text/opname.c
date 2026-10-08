@@ -104,6 +104,9 @@ static const OpEntry k_ops[] = {
 
 #define OP_COUNT (sizeof(k_ops) / sizeof(k_ops[0]))
 
+_Static_assert(OP_COUNT == (size_t)INST_COUNT,
+               "opcode name table must cover every L1InstKind");
+
 const char *lainir_opcode_name(L1InstKind kind) {
   size_t i;
   for (i = 0; i < OP_COUNT; i++) {

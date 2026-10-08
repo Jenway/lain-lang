@@ -146,9 +146,9 @@ static LainVmSliceResult push_region(LainVmTcb *tcb, uint32_t region_id,
   const LainVmImageRegion *rec = lainvm_image_region(tcb->image, region_id);
   LainVmFrame *parent;
   LainVmFrame *frame;
-  if (!rec) return trap_now(tcb, LAINVM_TRAP_STATE, 1010, NULL);
+  if (!rec) return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_FRAME_NO_REGION, NULL);
   if (tcb->frame_count >= tcb->frame_cap)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1011, NULL);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_FRAME_OVERFLOW, NULL);
   parent = top(tcb);
   frame = &tcb->frames[tcb->frame_count];
   frame->region = region_id;
@@ -160,7 +160,7 @@ static LainVmSliceResult push_region(LainVmTcb *tcb, uint32_t region_id,
   frame->is_call_frame = is_call;
   frame->stack_mark = tcb->stack_used;
   if (frame->slot_base + frame->slot_count > tcb->slot_cap)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1012, NULL);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_SLOT_OVERFLOW, NULL);
   memset(&tcb->slots[frame->slot_base], 0, sizeof(L1Value) * frame->slot_count);
   tcb->frame_count++;
   return LAINVM_SLICE_RUNNABLE;
@@ -180,7 +180,7 @@ static int32_t stack_window_sync(LainVmTcb *tcb) {
   if (lainvm_stack_lease_none(tcb->stack_lease)) return 0;
   if (!lainvm_space_set_accessible(tcb->stack_lease.space,
                                    tcb->stack_lease.region, tcb->stack_used))
-    return 1036;
+    return LAINVM_TRAP_STACK_WINDOW;
   return 0;
 }
 
@@ -201,7 +201,7 @@ static LainVmSliceResult leave_region(LainVmTcb *tcb, const L1Value *values,
     /* 根区域结束 = 这次 activation 结束：水位归零、窗口清空。 */
     tcb->stack_used = 0;
     if (stack_window_sync(tcb) != 0)
-      return trap_now(tcb, LAINVM_TRAP_STATE, 1036, NULL);
+      return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_STACK_WINDOW, NULL);
     tcb->has_result = false;
     tcb->state = LAINVM_DEAD;
     tcb->slice_result = LAINVM_SLICE_DONE;
@@ -212,7 +212,7 @@ static LainVmSliceResult leave_region(LainVmTcb *tcb, const L1Value *values,
     uint32_t slot = lainvm_image_result_slot(tcb->image, parent->region,
                                              frame->parent_position, i);
     if (slot == LAINVM_IMAGE_NO_INDEX)
-      return trap_now(tcb, LAINVM_TRAP_STATE, 1013, NULL);
+      return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_LOCAL_NO_SLOT, NULL);
     tcb->slots[parent->slot_base + slot] = values[i];
   }
   tcb->frame_count--;
@@ -259,7 +259,7 @@ static LainVmSliceResult op_int_bin(LainVmTcb *tcb, const L1Inst *inst) {
   case INST_SHL:
   case INST_LSHR:
   case INST_ASHR:
-    if (b >= width) return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1002, inst);
+    if (b >= width) return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_SHIFT_TOO_WIDE, inst);
     if (inst->kind == INST_SHL)
       r = a << b;
     else if (inst->kind == INST_LSHR)
@@ -269,21 +269,21 @@ static LainVmSliceResult op_int_bin(LainVmTcb *tcb, const L1Inst *inst) {
     break;
   case INST_UDIV:
   case INST_UREM:
-    if (b == 0) return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1001, inst);
+    if (b == 0) return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_DIVIDE_BY_ZERO, inst);
     r = inst->kind == INST_UDIV ? a / b : a % b;
     break;
   case INST_SDIV:
   case INST_SREM: {
     int64_t x = as_signed(a, width);
     int64_t y = as_signed(b, width);
-    if (y == 0) return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1001, inst);
+    if (y == 0) return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_DIVIDE_BY_ZERO, inst);
     if (y == -1 && x == INT64_MIN)
-      return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1003, inst);
+      return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_INT_OVERFLOW, inst);
     r = (uint64_t)(inst->kind == INST_SDIV ? x / y : x % y);
     break;
   }
   default:
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1014, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BAD_BITS_OP, inst);
   }
   lainvm_result_write(tcb, inst, 0, value_bits(r, width));
   return LAINVM_SLICE_RUNNABLE;
@@ -308,7 +308,7 @@ static LainVmSliceResult op_int_cmp(LainVmTcb *tcb, const L1Inst *inst) {
   case INST_ULE: r = a <= b; break;
   case INST_UGT: r = a > b; break;
   case INST_UGE: r = a >= b; break;
-  default: return trap_now(tcb, LAINVM_TRAP_STATE, 1015, inst);
+  default: return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BAD_COMPARE_OP, inst);
   }
   lainvm_result_write(tcb, inst, 0, value_bits(r ? 1u : 0u, 1));
   return LAINVM_SLICE_RUNNABLE;
@@ -325,7 +325,7 @@ static LainVmSliceResult op_int_conv(LainVmTcb *tcb, const L1Inst *inst) {
   case INST_SEXT: r = sign_fill(src.as.bits, source); break;
   case INST_TRUNC:
   case INST_BITCAST: r = src.as.bits; break;
-  default: return trap_now(tcb, LAINVM_TRAP_STATE, 1016, inst);
+  default: return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BAD_CONVERT_OP, inst);
   }
   lainvm_result_write(tcb, inst, 0, value_bits(r, target));
   return LAINVM_SLICE_RUNNABLE;
@@ -369,7 +369,7 @@ static LainVmSliceResult op_float_bin(LainVmTcb *tcb, const L1Inst *inst) {
     case INST_FSUB: r = x - y; break;
     case INST_FMUL: r = x * y; break;
     case INST_FDIV: r = x / y; break;
-    default: return trap_now(tcb, LAINVM_TRAP_STATE, 1017, inst);
+    default: return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BAD_FLOAT_OP, inst);
     }
     lainvm_result_write(tcb, inst, 0, value_bits(f32_bits(r), 32));
     return LAINVM_SLICE_RUNNABLE;
@@ -383,12 +383,12 @@ static LainVmSliceResult op_float_bin(LainVmTcb *tcb, const L1Inst *inst) {
     case INST_FSUB: r = x - y; break;
     case INST_FMUL: r = x * y; break;
     case INST_FDIV: r = x / y; break;
-    default: return trap_now(tcb, LAINVM_TRAP_STATE, 1017, inst);
+    default: return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BAD_FLOAT_OP, inst);
     }
     lainvm_result_write(tcb, inst, 0, value_bits(f64_bits(r), 64));
     return LAINVM_SLICE_RUNNABLE;
   }
-  return trap_now(tcb, LAINVM_TRAP_STATE, 1018, inst);
+  return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BAD_FLOAT_WIDTH, inst);
 }
 
 static LainVmSliceResult op_float_cmp(LainVmTcb *tcb, const L1Inst *inst) {
@@ -416,7 +416,7 @@ static LainVmSliceResult op_float_cmp(LainVmTcb *tcb, const L1Inst *inst) {
   case INST_FULE: rel = x <= y; want_unordered = true; break;
   case INST_FUGT: rel = x > y; want_unordered = true; break;
   case INST_FUGE: rel = x >= y; want_unordered = true; break;
-  default: return trap_now(tcb, LAINVM_TRAP_STATE, 1019, inst);
+  default: return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BAD_FLOAT_COMPARE, inst);
   }
   if (want_unordered) rel = rel || unordered;
   else rel = rel && !unordered;
@@ -454,7 +454,7 @@ static LainVmSliceResult op_float_conv(LainVmTcb *tcb, const L1Inst *inst) {
                        : value_bits(f64_bits(x), 64);
     break;
   default:
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1020, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BAD_FLOAT_CONVERT, inst);
   }
   lainvm_result_write(tcb, inst, 0, out);
   return LAINVM_SLICE_RUNNABLE;
@@ -495,7 +495,7 @@ static LainVmSliceResult op_load(LainVmTcb *tcb, const L1Inst *inst) {
   uint64_t size = type_size(inst->ty);
   uint64_t raw = 0;
   if (!lainvm_space_check(tcb->vspace, addr, size, LAINVM_MEM_READ))
-    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1004, inst);
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_LOAD_FAULT, inst);
   memcpy(&raw, (const void *)addr, (size_t)size);
   if (inst->ty && inst->ty->kind == TY_ADDR)
     lainvm_result_write(tcb, inst, 0, value_addr((uintptr_t)raw));
@@ -512,7 +512,7 @@ static LainVmSliceResult op_store(LainVmTcb *tcb, const L1Inst *inst) {
   uint64_t raw = value.kind == L1_VALUE_ADDR ? (uint64_t)(uintptr_t)value.as.addr
                                             : value.as.bits;
   if (!lainvm_space_check(tcb->vspace, addr, size, LAINVM_MEM_WRITE))
-    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1005, inst);
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_STORE_FAULT, inst);
   memcpy((void *)addr, &raw, (size_t)size);
   return LAINVM_SLICE_RUNNABLE;
 }
@@ -536,29 +536,29 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
   /* 没有栈，或者租约不在当前空间里（换过 VSpace）：稳定拒 1006。
    * base / capacity 一律现读 VSpace 的记录，TCB 里没有副本可以对不上。 */
   if (lainvm_stack_lease_none(tcb->stack_lease))
-    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_STACK_UNAVAILABLE, inst);
   if (tcb->stack_lease.space != tcb->vspace)
-    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_STACK_UNAVAILABLE, inst);
   lease = lainvm_space_slot(tcb->stack_lease.space, tcb->stack_lease.region);
-  if (!lease) return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1006, inst);
+  if (!lease) return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_STACK_UNAVAILABLE, inst);
   /* 尺寸算术**先查回绕**，再判容量。`8 × 2^61` 曾经回绕成 0 字节，于是
    * 得到一个"合法"的分配（实测 R08）。失败不改变水位。 */
   if (element != 0 && count > 0xFFFFFFFFFFFFFFFFull / element)
-    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_ALLOCA_OVERFLOW, inst);
   total = element * count;
   if (tcb->stack_used > 0xFFFFFFFFFFFFFFFFull - (align - 1))
-    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_ALLOCA_OVERFLOW, inst);
   used = (tcb->stack_used + (align - 1)) & ~(align - 1);
   if (total > 0xFFFFFFFFFFFFFFFFull - used)
-    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1035, inst);
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_ALLOCA_OVERFLOW, inst);
   if (used + total > lease->capacity)
-    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1007, inst);
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_STACK_EXHAUSTED, inst);
   tcb->stack_used = used + total;
   /* 授权跟着水位走：先把活窗口覆盖到新水位，再交地址。窗口同步不了就拒，
    * 并且把水位回退成失败前的样子（失败不改变状态）。 */
   if (stack_window_sync(tcb) != 0) {
     tcb->stack_used = prev_used;
-    return trap_now(tcb, LAINVM_TRAP_EXECUTION, 1036, inst);
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_STACK_WINDOW, inst);
   }
   /* 交出去的是**裸地址**：单字、无类型、没有对象身份与代数。 */
   lainvm_result_write(tcb, inst, 0, value_addr(lease->base + (uintptr_t)used));
@@ -571,7 +571,7 @@ static LainVmSliceResult op_data_addr(LainVmTcb *tcb, const L1Inst *inst) {
       lainvm_image_inst_meta(tcb->image, frame->region, frame->position);
   uintptr_t addr = lainvm_image_symbol_addr(tcb->image, meta.symbol_index);
   if (meta.symbol_index == LAINVM_IMAGE_NO_INDEX || addr == 0)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1021, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_SYMBOL_ADDRESS, inst);
   lainvm_result_write(tcb, inst, 0, value_addr(addr));
   return LAINVM_SLICE_RUNNABLE;
 }
@@ -594,17 +594,17 @@ static LainVmSliceResult invoke_host(LainVmTcb *tcb, const L1Inst *inst,
   const L1Type *rt;
 
   if (arg_count != sub->param_count)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1102, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_CALL_ARITY, inst);
   if (arg_count > LAINVM_MAX_OPERANDS)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1103, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_CALL_OPERANDS, inst);
   if (!tcb->resolved || sub_index >= tcb->resolved_count ||
       !tcb->resolved[sub_index])
-    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1110, inst);
+    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, LAINVM_TRAP_CAP_UNRESOLVED, inst);
   entry = tcb->resolved[sub_index];
   if (lainvm_cap_kind(entry) != LAINVM_CAP_FUNCTION)
-    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1111, inst);
+    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, LAINVM_TRAP_CAP_NOT_FUNCTION, inst);
   fn = lainvm_cap_fn(entry);
-  if (!fn) return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1112, inst);
+  if (!fn) return trap_now(tcb, LAINVM_TRAP_CAPABILITY, LAINVM_TRAP_CAP_NO_FN, inst);
   /* context 来自能力槽上的**可信绑定**：不进入 raw、不从 sub 的业务参数读取、
    * 也不进入 VM 槽位或返回值。callback 的 arg_count 就是净化后的业务参数数目。 */
   context = lainvm_cap_context(entry);
@@ -637,7 +637,7 @@ LainVmSliceResult lainvm_vm_call_host(LainVmTcb *tcb, uint32_t sub_index,
                                       L1Value *result_out) {
   const LainVmImageSub *sub;
   if (!tcb || sub_index >= tcb->image->sub_count)
-    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1100, NULL);
+    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, LAINVM_TRAP_CALL_NO_SUB, NULL);
   sub = &tcb->image->subs[sub_index];
   return invoke_host(tcb, NULL, sub_index, sub->sub, args, arg_count,
                      result_out);
@@ -653,7 +653,7 @@ static LainVmSliceResult enter_extern(LainVmTcb *tcb, const L1Inst *inst,
   LainVmSliceResult r;
   uint32_t i;
   if (arg_count > LAINVM_MAX_OPERANDS)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1103, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_CALL_OPERANDS, inst);
   for (i = 0; i < arg_count; i++) {
     const L1Type *ty = sub->params ? sub->params[i].ty : NULL;
     args[i] = read_typed(tcb, inst, arg_base + i, ty);
@@ -679,16 +679,16 @@ static LainVmSliceResult enter_sub(LainVmTcb *tcb, const L1Inst *inst,
   uint32_t i;
 
   if (sub_index >= tcb->image->sub_count)
-    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1100, inst);
+    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, LAINVM_TRAP_CALL_NO_SUB, inst);
   sub = &tcb->image->subs[sub_index];
   if (sub->sub->flags & SUBROUTINE_EXTERN)
     return enter_extern(tcb, inst, sub_index, sub->sub, arg_base, arg_count);
   if (sub->body_region == LAINVM_IMAGE_NO_REGION)
-    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1101, inst);
+    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, LAINVM_TRAP_CALL_NO_BODY, inst);
   if (arg_count != sub->sub->param_count)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1102, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_CALL_ARITY, inst);
   if (arg_count > LAINVM_MAX_OPERANDS)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1103, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_CALL_OPERANDS, inst);
 
   for (i = 0; i < arg_count; i++) {
     const L1Type *ty = sub->sub->params ? sub->sub->params[i].ty : NULL;
@@ -718,13 +718,13 @@ static LainVmSliceResult op_call_indirect(LainVmTcb *tcb, const L1Inst *inst) {
   uint32_t sub_index;
 
   if (inst->operand_count < 1)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1104, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_INDIRECT_NO_TARGET, inst);
   target = as_addr(lainvm_operand_read(tcb, inst, 0));
   if (!lainvm_space_check(tcb->vspace, target, sizeof(void *), LAINVM_MEM_CALL))
-    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1105, inst);
+    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, LAINVM_TRAP_INDIRECT_NO_CALL, inst);
   sub_index = lainvm_image_sub_at(tcb->image, target);
   if (sub_index == LAINVM_IMAGE_NO_INDEX)
-    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, 1106, inst);
+    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, LAINVM_TRAP_INDIRECT_NO_SUB, inst);
   return enter_sub(tcb, inst, sub_index, 1, inst->operand_count - 1,
                    frame->position);
 }
@@ -737,9 +737,9 @@ static LainVmSliceResult op_proc_addr(LainVmTcb *tcb, const L1Inst *inst) {
   uintptr_t addr;
   if (meta.sub_index == LAINVM_IMAGE_NO_INDEX ||
       meta.sub_index >= tcb->image->sub_count)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1040, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_PROC_NO_SUB, inst);
   addr = lainvm_image_sub_addr(tcb->image, meta.sub_index);
-  if (addr == 0) return trap_now(tcb, LAINVM_TRAP_STATE, 1041, inst);
+  if (addr == 0) return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_PROC_NO_ADDR, inst);
   lainvm_result_write(tcb, inst, 0, value_addr(addr));
   return LAINVM_SLICE_RUNNABLE;
 }
@@ -776,7 +776,7 @@ static LainVmSliceResult op_switch(LainVmTcb *tcb, const L1Inst *inst) {
 
   if (inst->case_count > 0) {
     if (meta.case_base == LAINVM_IMAGE_NO_INDEX)
-      return trap_now(tcb, LAINVM_TRAP_STATE, 1042, inst);
+      return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_SWITCH_NO_CASES, inst);
     for (i = 0; i < inst->case_count; i++) {
       if ((inst->cases[i].value & mask) == (raw & mask)) {
         target = tcb->image->case_regions[meta.case_base + i];
@@ -786,7 +786,7 @@ static LainVmSliceResult op_switch(LainVmTcb *tcb, const L1Inst *inst) {
   }
   /* 验证器要求 default 一定在，所以这里只可能是没验证过的模块。 */
   if (target == LAINVM_IMAGE_NO_REGION)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1043, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_SWITCH_NO_DEFAULT, inst);
   return push_region(tcb, target, frame->position, NULL, false);
 }
 
@@ -800,9 +800,9 @@ static LainVmSliceResult op_loop(LainVmTcb *tcb, const L1Inst *inst) {
   uint32_t i;
   LainVmSliceResult r;
 
-  if (!rec) return trap_now(tcb, LAINVM_TRAP_STATE, 1022, inst);
+  if (!rec) return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_LOOP_NO_REGION, inst);
   if (rec->region->param_count > LAINVM_MAX_OPERANDS)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1023, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_LOOP_PARAMS, inst);
 
   /* 初值在父帧求值，字面量按参数声明的类型定宽。 */
   for (i = 0; i < rec->region->param_count; i++) {
@@ -829,9 +829,9 @@ static LainVmSliceResult op_yield(LainVmTcb *tcb, const L1Inst *inst) {
   uint32_t i;
 
   if (inst->operand_count > LAINVM_MAX_OPERANDS)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1024, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_YIELD_OPERANDS, inst);
   if (inst->operand_count != rec->region->result_count)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1025, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_YIELD_RESULTS, inst);
   for (i = 0; i < inst->operand_count; i++)
     values[i] = read_typed(tcb, inst, i, rec->region->results[i]);
   return leave_region(tcb, values, inst->operand_count);
@@ -845,13 +845,13 @@ static LainVmSliceResult op_break(LainVmTcb *tcb, const L1Inst *inst) {
   const LainVmImageRegion *rec;
   uint32_t i;
 
-  if (index <= 0) return trap_now(tcb, LAINVM_TRAP_STATE, 1026, inst);
+  if (index <= 0) return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BREAK_NO_LOOP, inst);
   if (inst->operand_count > LAINVM_MAX_OPERANDS)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1027, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BREAK_OPERANDS, inst);
   loop = &tcb->frames[index];
   rec = lainvm_image_region(tcb->image, loop->region);
   if (inst->operand_count != rec->region->result_count)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1028, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BREAK_RESULTS, inst);
   for (i = 0; i < inst->operand_count; i++)
     values[i] = read_typed(tcb, inst, i, rec->region->results[i]);
 
@@ -860,7 +860,7 @@ static LainVmSliceResult op_break(LainVmTcb *tcb, const L1Inst *inst) {
     uint32_t slot = lainvm_image_result_slot(tcb->image, parent->region,
                                              loop->parent_position, i);
     if (slot == LAINVM_IMAGE_NO_INDEX)
-      return trap_now(tcb, LAINVM_TRAP_STATE, 1029, inst);
+      return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BREAK_NO_SLOT, inst);
     tcb->slots[parent->slot_base + slot] = values[i];
   }
   /* `#break` 离开的是**区域**，不是过程：不回收这次 activation 的 alloca。
@@ -877,13 +877,13 @@ static LainVmSliceResult op_continue(LainVmTcb *tcb, const L1Inst *inst) {
   const LainVmImageRegion *rec;
   uint32_t i;
 
-  if (index < 0) return trap_now(tcb, LAINVM_TRAP_STATE, 1030, inst);
+  if (index < 0) return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_CONTINUE_NO_LOOP, inst);
   loop = &tcb->frames[index];
   rec = lainvm_image_region(tcb->image, loop->region);
   if (inst->operand_count != rec->region->param_count)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1031, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_CONTINUE_PARAMS, inst);
   if (inst->operand_count > LAINVM_MAX_OPERANDS)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1032, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_CONTINUE_OPERANDS, inst);
   for (i = 0; i < inst->operand_count; i++)
     values[i] = read_typed(tcb, inst, i, rec->region->params[i].param.ty);
 
@@ -924,7 +924,7 @@ static LainVmSliceResult op_return(LainVmTcb *tcb, const L1Inst *inst) {
   callee = top(tcb);
   tcb->stack_used = callee->stack_mark;
   if (stack_window_sync(tcb) != 0)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1036, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_STACK_WINDOW, inst);
   tcb->frame_count--;
   if (tcb->frame_count == 0) {
     tcb->result = value;
@@ -939,7 +939,7 @@ static LainVmSliceResult op_return(LainVmTcb *tcb, const L1Inst *inst) {
       uint32_t slot = lainvm_image_result_slot(tcb->image, caller->region,
                                                caller->position, 0);
       if (slot == LAINVM_IMAGE_NO_INDEX)
-        return trap_now(tcb, LAINVM_TRAP_STATE, 1033, inst);
+        return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_RETURN_NO_SLOT, inst);
       tcb->slots[caller->slot_base + slot] = value;
     }
     caller->position++;
@@ -949,7 +949,7 @@ static LainVmSliceResult op_return(LainVmTcb *tcb, const L1Inst *inst) {
 }
 
 static LainVmSliceResult op_unimplemented(LainVmTcb *tcb, const L1Inst *inst) {
-  return trap_now(tcb, LAINVM_TRAP_STATE, 1099, inst);
+  return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_UNIMPLEMENTED, inst);
 }
 
 /* --- 分派表 --------------------------------------------------------------- */
@@ -1151,18 +1151,18 @@ LainVmSliceResult lainvm_engine_step(LainVmTcb *tcb) {
 
   frame = top(tcb);
   rec = lainvm_image_region(tcb->image, frame->region);
-  if (!rec) return trap_now(tcb, LAINVM_TRAP_STATE, 1008, NULL);
+  if (!rec) return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_STEP_NO_REGION, NULL);
 
   /* 区域末尾落下 = 顺序离开这个区域；产出值的区域落下是错的。 */
   if (frame->position >= rec->inst_count) {
     if (rec->region->result_count > 0)
-      return trap_now(tcb, LAINVM_TRAP_STATE, 1009, NULL);
+      return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_REGION_NO_RESULT, NULL);
     return leave_region(tcb, NULL, 0);
   }
 
   inst = &rec->region->insts[frame->position];
   if ((uint32_t)inst->kind >= (uint32_t)INST_COUNT)
-    return trap_now(tcb, LAINVM_TRAP_STATE, 1034, inst);
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_UNKNOWN_INST, inst);
 
   saved_count = tcb->frame_count;
   saved_region = frame->region;

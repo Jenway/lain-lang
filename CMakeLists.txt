@@ -25,7 +25,6 @@ target_sources(lain_seed
     seed/src/vm/caps.c
     seed/src/vm/engine.c
     seed/src/vm/image.c
-    seed/src/vm/memcap.c
     seed/src/vm/quota.c
     seed/src/vm/space.c
     seed/src/vm/tcb.c
@@ -51,7 +50,9 @@ target_sources(lain_seed
         seed/include/lain/vm/caps.h
         seed/include/lain/vm/engine.h
         seed/include/lain/vm/image.h
-        seed/include/lain/vm/memcap.h
+        seed/include/lain/ir/codes.h
+        seed/include/lain/vm/endpoint.h
+        seed/include/lain/vm/trap.h
         seed/include/lain/vm/quota.h
         seed/include/lain/vm/space.h
         seed/include/lain/vm/tcb.h

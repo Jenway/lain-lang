@@ -27,11 +27,11 @@ int lainvm_quota_charge(LainVmQuota *quota, uint64_t bytes) {
   next = quota->used + bytes;
   if (next < quota->used) { /* 加法溢出：宁可拒，也不把账绕回去 */
     quota->rejected += 1;
-    return LAINVM_QUOTA_TRAP;
+    return LAINVM_TRAP_QUOTA;
   }
   if (!fits(quota, bytes)) {
     quota->rejected += 1;
-    return LAINVM_QUOTA_TRAP; /* 账目没动 */
+    return LAINVM_TRAP_QUOTA; /* 账目没动 */
   }
   quota->used = next;
   if (quota->used > quota->peak) quota->peak = quota->used;

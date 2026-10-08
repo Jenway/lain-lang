@@ -125,22 +125,22 @@ int lainvm_tcb_set_caps(LainVmTcb *tcb, LainVmCaps *caps, L1Diagnostic *diag) {
   const LainVmCapEntry **resolved = NULL;
   uint32_t resolved_count = 0;
   if (!tcb || !tcb->image) {
-    start_fail(diag, 9110, "tcb: no image");
+    start_fail(diag, LAINVM_TCB_ERR_NO_IMAGE, "tcb: no image");
     return 1;
   }
   if (tcb->frame_count > 0) {
-    start_fail(diag, 9113, "tcb: cannot rebind capabilities with an active activation");
+    start_fail(diag, LAINVM_TCB_ERR_ACTIVE, "tcb: cannot rebind capabilities with an active activation");
     return 1;
   }
   if (caps && !lainvm_caps_is_frozen(caps)) {
-    start_fail(diag, 9112, "tcb: the capability table is not frozen");
+    start_fail(diag, LAINVM_TCB_ERR_CAPS_NOT_FROZEN, "tcb: the capability table is not frozen");
     return 1;
   }
   if (caps && tcb->image->sub_count > 0) {
     resolved = (const LainVmCapEntry **)calloc(
         tcb->image->sub_count, sizeof(*resolved));
     if (!resolved) {
-      start_fail(diag, 9111, "tcb: cannot resolve capabilities");
+      start_fail(diag, LAINVM_TCB_ERR_RESOLVE_FAILED, "tcb: cannot resolve capabilities");
       return 1; /* 旧绑定保持不动 */
     }
     resolved_count = tcb->image->sub_count;
@@ -170,11 +170,11 @@ int lainvm_tcb_set_caps(LainVmTcb *tcb, LainVmCaps *caps, L1Diagnostic *diag) {
 int lainvm_tcb_set_space(LainVmTcb *tcb, LainVmSpace *space,
                          L1Diagnostic *diag) {
   if (!tcb || !space) {
-    start_fail(diag, 9120, "tcb: no tcb or no address space");
+    start_fail(diag, LAINVM_TCB_ERR_NO_SPACE, "tcb: no tcb or no address space");
     return 1;
   }
   if (tcb->state == LAINVM_RUNNING) {
-    start_fail(diag, 9121, "tcb: cannot switch address space while running");
+    start_fail(diag, LAINVM_TCB_ERR_RUNNING, "tcb: cannot switch address space while running");
     return 1;
   }
   tcb->vspace = space;
@@ -198,21 +198,21 @@ int lainvm_tcb_start(LainVmTcb *tcb, const char *entry, const L1Value *args,
   uint32_t i;
 
   if (!tcb || !entry) {
-    start_fail(diag, 9101, "tcb: no entry");
+    start_fail(diag, LAINVM_TCB_ERR_NO_ENTRY, "tcb: no entry");
     return 1;
   }
   sub = lainvm_image_entry(tcb->image, entry, &body);
   if (!sub || body == LAINVM_IMAGE_NO_REGION) {
-    start_fail(diag, 9102, "tcb: entry not found");
+    start_fail(diag, LAINVM_TCB_ERR_ENTRY_NOT_FOUND, "tcb: entry not found");
     return 1;
   }
   if (arg_count != sub->param_count) {
-    start_fail(diag, 9103, "tcb: argument count does not match the entry");
+    start_fail(diag, LAINVM_TCB_ERR_ARG_COUNT, "tcb: argument count does not match the entry");
     return 1;
   }
   rec = lainvm_image_region(tcb->image, body);
   if (!rec || rec->slot_count > tcb->slot_cap) {
-    start_fail(diag, 9104, "tcb: entry does not fit the admitted bounds");
+    start_fail(diag, LAINVM_TCB_ERR_ENTRY_TOO_LARGE, "tcb: entry does not fit the admitted bounds");
     return 1;
   }
 
