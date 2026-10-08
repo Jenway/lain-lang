@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "lain/ir/codes.h"
 #include "lain/ir/core.h"
 #include "lain/vm/space.h"
 
@@ -21,6 +22,30 @@ typedef struct LainVmImage LainVmImage;
 
 #define LAINVM_IMAGE_NO_REGION 0xFFFFFFFFu
 #define LAINVM_IMAGE_NO_INDEX 0xFFFFFFFFu
+
+/* 装载拒绝码（L1Diagnostic）。9001-9006 是表计数与模块自述对不上，
+ * 90xx 段见 lain/ir/codes.h。 */
+enum {
+  LAINVM_IMAGE_ERR_INST_COUNT = 9001,
+  LAINVM_IMAGE_ERR_OPERAND_COUNT = 9002,
+  LAINVM_IMAGE_ERR_RESULT_COUNT = 9003,
+  LAINVM_IMAGE_ERR_REGION_COUNT = 9004,
+  LAINVM_IMAGE_ERR_CASE_COUNT = 9005,
+  LAINVM_IMAGE_ERR_UNDEFINED_VALUE = 9006,
+  LAINVM_IMAGE_ERR_SYMBOL_COUNT = 9009,
+  LAINVM_IMAGE_ERR_RO_ALLOC = 9010,  /* 只读段底座分配失败 */
+  LAINVM_IMAGE_ERR_RO_MAP = 9011,    /* VSpace 拒绝只读段 */
+  LAINVM_IMAGE_ERR_RW_ALLOC = 9012,
+  LAINVM_IMAGE_ERR_RW_MAP = 9013,
+  LAINVM_IMAGE_ERR_LOOP_INIT = 9015, /* 循环初值引用不到 */
+  LAINVM_IMAGE_ERR_CODE_ALLOC = 9016,
+  LAINVM_IMAGE_ERR_CODE_MAP = 9017,
+  LAINVM_IMAGE_ERR_TABLE_ALLOC = 9018,
+};
+
+_Static_assert(LAINVM_IMAGE_ERR_INST_COUNT > LAINIR_CODES_IMAGE_BASE &&
+                   LAINVM_IMAGE_ERR_TABLE_ALLOC < LAINIR_CODES_IMAGE_LIMIT,
+               "image codes must stay inside the image segment");
 
 /* 一个操作数在装载后是什么。
  *

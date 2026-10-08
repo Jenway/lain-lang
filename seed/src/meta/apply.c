@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "lain/ir/build.h"
+#include "lain/ir/value.h"
 #include "lain/text/parse.h"
 #include "lain/ir/verify.h"
 #include "lain/vm/engine.h"
@@ -91,7 +92,7 @@ static bool apply_run(const L1Module *module, const char *entry,
   }
   if (byte_arg) {
     if (lainvm_quota_charge(&quota, byte_arg->length) != 0) {
-      code = LAINVM_QUOTA_TRAP;
+      code = LAINVM_TRAP_QUOTA;
       snprintf(message, sizeof(message), "apply: byte argument exceeds the allocation quota");
       goto cleanup;
     }
@@ -186,7 +187,7 @@ static bool apply_run(const L1Module *module, const char *entry,
       goto cleanup;
     }
     if (lainvm_quota_charge(&quota, byte_length) != 0) {
-      code = LAINVM_QUOTA_TRAP;
+      code = LAINVM_TRAP_QUOTA;
       snprintf(message, sizeof(message),
                "apply: byte result exceeds the allocation quota");
       goto cleanup;

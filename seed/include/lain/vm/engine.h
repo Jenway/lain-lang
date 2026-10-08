@@ -23,6 +23,7 @@
 #include <stdint.h>
 
 #include "lain/ir/core.h"
+#include "lain/ir/value.h"
 #include "lain/vm/image.h"
 #include "lain/vm/tcb.h"
 

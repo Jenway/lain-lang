@@ -18,15 +18,17 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "lain/ir/codes.h"
 #include "lain/ir/core.h"
 #include "lain/ir/value.h"
 #include "lain/vm/caps.h"
+#include "lain/vm/endpoint.h"
 #include "lain/vm/quota.h"
 #include "lain/vm/space.h"
+#include "lain/vm/trap.h"
 
 typedef struct LainVmTcb LainVmTcb;
 typedef struct LainVmImage LainVmImage;
-typedef struct LainVmEndpoint LainVmEndpoint;
 
 typedef enum {
   LAINVM_READY = 0,
@@ -47,33 +49,6 @@ enum {
   LAINVM_SUSPEND_YIELD = 1,
   LAINVM_SUSPEND_ENDPOINT = 2,
 };
-
-/* 会合结果 */
-enum {
-  LAINVM_ENDPOINT_SEND = 1,
-  LAINVM_ENDPOINT_RECEIVE = 2,
-  LAINVM_ENDPOINT_CANCELLED = 3,
-};
-
-/* VM 拒绝执行的原因。
- * 域外行为（除数为 0、移位量 >= 宽度、越权地址、预算耗尽）都在这里报出去，
- * 不是 UB，也不需要 IR 里有对应构造。 */
-typedef enum {
-  LAINVM_TRAP_NONE = 0,
-  LAINVM_TRAP_EXECUTION = 1,
-  LAINVM_TRAP_CAPABILITY = 2,
-  LAINVM_TRAP_STATE = 3,
-} LainVmTrapKind;
-
-typedef struct {
-  LainVmTrapKind kind;
-  int32_t status;
-  uint32_t region;   /* 在哪一层区域 */
-  uint32_t position; /* 该区域内第几条指令 */
-  uint32_t line;
-  uint32_t column;
-  bool active;
-} LainVmTrap;
 
 /* 租约校验的**接口层**状态（不是运行期 Trap，也不占用 engine 的 1xxx 号段）。
  * 供给方与驱动靠它分辨"为什么 TCB 不肯收这份租约"。 */
@@ -181,6 +156,24 @@ struct LainVmTcb {
   LainVmTrap trap;
   LainVmEndpoint *fault_handler;
 };
+
+/* admit、重绑与换空间的拒绝码（L1Diagnostic）。 */
+enum {
+  LAINVM_TCB_ERR_NO_ENTRY = 9101,
+  LAINVM_TCB_ERR_ENTRY_NOT_FOUND = 9102,
+  LAINVM_TCB_ERR_ARG_COUNT = 9103,
+  LAINVM_TCB_ERR_ENTRY_TOO_LARGE = 9104, /* 入口不落在 admit 算出的上界里 */
+  LAINVM_TCB_ERR_NO_IMAGE = 9110,
+  LAINVM_TCB_ERR_RESOLVE_FAILED = 9111,
+  LAINVM_TCB_ERR_CAPS_NOT_FROZEN = 9112,
+  LAINVM_TCB_ERR_ACTIVE = 9113, /* 还有活动帧，不能重绑 */
+  LAINVM_TCB_ERR_NO_SPACE = 9120,
+  LAINVM_TCB_ERR_RUNNING = 9121, /* 运行中不许换地址空间 */
+};
+
+_Static_assert(LAINVM_TCB_ERR_NO_ENTRY > LAINIR_CODES_TCB_BASE &&
+                   LAINVM_TCB_ERR_RUNNING < LAINIR_CODES_TCB_LIMIT,
+               "tcb codes must stay inside the tcb segment");
 
 /* --- admit -----------------------------------------------------------------
  * 引擎里不许分配，所以帧栈和值槽在这里一次给够：

@@ -19,6 +19,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "lain/vm/trap.h"
+
 /* 账目。limit = 0 表示**不限额**（不是"一个字节都不许"—— 免得把「没设」和
  * 「设成 0」混成同一件事）。 */
 typedef struct {
@@ -31,12 +33,11 @@ typedef struct {
   uint64_t underflow; /* 归还量超过已承诺量的次数；账目不一致，正常路径必须为 0 */
 } LainVmQuota;
 
-/* allocation quota 用尽。号码接在 engine 的 1001-1043 段之后。 */
-enum { LAINVM_QUOTA_TRAP = 1044 };
+/* 配额用尽报 Trap：LAINVM_TRAP_QUOTA，见 lain/vm/trap.h。 */
 
 void lainvm_quota_init(LainVmQuota *quota, uint64_t limit_bytes);
 
-/* 预扣 bytes 字节。成功返回 0；余额不足或加法溢出返回 LAINVM_QUOTA_TRAP，
+/* 预扣 bytes 字节。成功返回 0；余额不足或加法溢出返回 LAINVM_TRAP_QUOTA，
  * 并且**不改变账目**（要么整笔扣掉，要么一分不扣）。 */
 int lainvm_quota_charge(LainVmQuota *quota, uint64_t bytes);
 

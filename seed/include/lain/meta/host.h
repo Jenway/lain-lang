@@ -177,7 +177,7 @@ int lainmeta_host_register(LainMetaHost *host, LainVmCaps *caps);
 /* 挂上这次执行的**分配账户**（NULL = 不限额）。
  *
  * 暂存区与输出缓冲的扩容都是"实际承诺一块底层存储"，所以要先过账户：余额不够时
- * 暂存区返回 NULL、输出扩容保持原样，状态码记 LAINVM_QUOTA_TRAP（1044）；
+ * 暂存区返回 NULL、输出扩容保持原样，状态码记 LAINVM_TRAP_QUOTA（1044）；
  * 释放宿主时按已计账字节归还。必须在拿暂存区或通用源码树之前调用。 */
 void lainmeta_host_attach_quota(LainMetaHost *host, LainVmQuota *quota);
 

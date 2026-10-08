@@ -270,7 +270,7 @@ static int reserve_output(LainMetaHost *host, uint32_t extra) {
    * 让调用方看到失败，而不是先要了内存再报错。 */
   grow = next - host->out_cap;
   if (lainvm_quota_charge(host->quota, grow) != 0) {
-    host_set_status(host, (uint32_t)LAINVM_QUOTA_TRAP);
+    host_set_status(host, (uint32_t)LAINVM_TRAP_QUOTA);
     return 1;
   }
   grown = (char *)realloc(host->out, next);
@@ -450,7 +450,7 @@ void *lainmeta_host_scratch(LainMetaHost *host, uint32_t *size_out) {
     uint32_t want = decide_scratch_size(host);
     /* 暂存区是这次执行**实际承诺**的存储：一样要先过账户。 */
     if (lainvm_quota_charge(host->quota, want) != 0) {
-      host_set_status(host, (uint32_t)LAINVM_QUOTA_TRAP);
+      host_set_status(host, (uint32_t)LAINVM_TRAP_QUOTA);
       if (size_out) *size_out = 0;
       return NULL;
     }
@@ -545,7 +545,7 @@ int lainmeta_host_add_source(LainMetaHost *host, const char *path,
       switch (why) {
       case LAINMETA_TREE_ERR_QUOTA:
         /* 配额耗尽是真的没内存：不登记，让驱动停下。 */
-        host_set_status(host, (uint32_t)LAINVM_QUOTA_TRAP);
+        host_set_status(host, (uint32_t)LAINVM_TRAP_QUOTA);
         host->diagnostic_source = UINT64_MAX;
         host->diagnostic_offset = UINT64_MAX;
         free(copy);
@@ -938,7 +938,7 @@ static uint32_t cap_type_publish(void *context, const uint64_t *args,
     bytes = (uint64_t)(next - host->type_cap) * sizeof(info);
     if ((uint64_t)next * sizeof(info) > SIZE_MAX ||
         lainvm_quota_charge(host->quota, bytes) != 0) {
-      host_set_status(host, (uint32_t)LAINVM_QUOTA_TRAP);
+      host_set_status(host, (uint32_t)LAINVM_TRAP_QUOTA);
       return 0;
     }
     grown = (LainMetaTypeInfo *)realloc(host->types, (size_t)next * sizeof(info));

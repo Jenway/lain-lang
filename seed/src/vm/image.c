@@ -86,7 +86,7 @@ static bool resolve_name(const Loader *L, uint32_t region_id, const char *name,
  * 所以给它们单独的码，别和「模块非法」混在一起。 */
 static bool reserve_insts(Loader *L, uint32_t count) {
   if (L->image->inst_count + count > L->image->inst_cap) {
-    load_fail(L, 9001, "image: instruction count does not match the module");
+    load_fail(L, LAINVM_IMAGE_ERR_INST_COUNT, "image: instruction count does not match the module");
     return false;
   }
   return true;
@@ -94,7 +94,7 @@ static bool reserve_insts(Loader *L, uint32_t count) {
 
 static bool push_operand(Loader *L, LainVmOperandRef ref, uint32_t *out) {
   if (L->image->operand_count >= L->image->operand_cap) {
-    load_fail(L, 9002, "image: operand count does not match the module");
+    load_fail(L, LAINVM_IMAGE_ERR_OPERAND_COUNT, "image: operand count does not match the module");
     return false;
   }
   *out = L->image->operand_count;
@@ -104,7 +104,7 @@ static bool push_operand(Loader *L, LainVmOperandRef ref, uint32_t *out) {
 
 static bool push_result(Loader *L, uint32_t slot, uint32_t *out) {
   if (L->image->result_count >= L->image->result_cap) {
-    load_fail(L, 9003, "image: result count does not match the module");
+    load_fail(L, LAINVM_IMAGE_ERR_RESULT_COUNT, "image: result count does not match the module");
     return false;
   }
   *out = L->image->result_count;
@@ -120,7 +120,7 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
   uint32_t pos;
 
   if (L->image->region_count >= L->image->region_cap) {
-    load_fail(L, 9004, "image: region count does not match the module");
+    load_fail(L, LAINVM_IMAGE_ERR_REGION_COUNT, "image: region count does not match the module");
     return LAINVM_IMAGE_NO_REGION;
   }
   id = L->image->region_count++;
@@ -153,7 +153,7 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
       ref.slot = 0;
       if (!ref.is_literal &&
           !resolve_name(L, parent, init->name, &ref.frame_distance, &ref.slot)) {
-        load_fail(L, 9015, "image: undefined loop initial value");
+        load_fail(L, LAINVM_IMAGE_ERR_LOOP_INIT, "image: undefined loop initial value");
         return LAINVM_IMAGE_NO_REGION;
       }
       if (!push_operand(L, ref, &pushed)) return LAINVM_IMAGE_NO_REGION;
@@ -199,7 +199,7 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
           add_region(L, inst->default_case, id, depth + 1, NULL, 0);
     if (inst->case_count > 0) {
       if (L->image->case_count + inst->case_count > L->image->case_cap) {
-        load_fail(L, 9005, "image: case count does not match the module");
+        load_fail(L, LAINVM_IMAGE_ERR_CASE_COUNT, "image: case count does not match the module");
         return LAINVM_IMAGE_NO_REGION;
       }
       meta->case_base = L->image->case_count;
@@ -223,7 +223,7 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
           ref.frame_distance = 0;
           if (!op->name ||
               !resolve_name(L, id, op->name, &ref.frame_distance, &ref.slot)) {
-            load_fail(L, 9006, "image: undefined value");
+            load_fail(L, LAINVM_IMAGE_ERR_UNDEFINED_VALUE, "image: undefined value");
             return LAINVM_IMAGE_NO_REGION;
           }
         } else {
@@ -259,7 +259,7 @@ static uint32_t add_symbol(Loader *L, const char *symbol, uintptr_t addr,
                            uint32_t size, uint32_t rights) {
   uint32_t index;
   if (L->image->symbol_count >= L->image->symbol_cap) {
-    load_fail(L, 9009, "image: symbol count does not match the module");
+    load_fail(L, LAINVM_IMAGE_ERR_SYMBOL_COUNT, "image: symbol count does not match the module");
     return LAINVM_IMAGE_NO_INDEX;
   }
   index = L->image->symbol_count++;
@@ -309,26 +309,26 @@ static bool map_data(Loader *L, const L1Module *module) {
   if (ro_size > 0) {
     L->image->ro_arena = (uint8_t *)calloc(1, (size_t)ro_size);
     if (!L->image->ro_arena) {
-      load_fail(L, 9010, "image: cannot map read-only data");
+      load_fail(L, LAINVM_IMAGE_ERR_RO_ALLOC, "image: cannot map read-only data");
       return false;
     }
     if (lainvm_space_handle_none(lainvm_space_map_external(
             L->image->space, (uintptr_t)L->image->ro_arena, ro_size, ro_size,
             LAINVM_MEM_READ, 0))) {
-      load_fail(L, 9011, "image: address space rejected read-only data");
+      load_fail(L, LAINVM_IMAGE_ERR_RO_MAP, "image: address space rejected read-only data");
       return false;
     }
   }
   if (rw_size > 0) {
     L->image->rw_arena = (uint8_t *)calloc(1, (size_t)rw_size);
     if (!L->image->rw_arena) {
-      load_fail(L, 9012, "image: cannot map writable data");
+      load_fail(L, LAINVM_IMAGE_ERR_RW_ALLOC, "image: cannot map writable data");
       return false;
     }
     if (lainvm_space_handle_none(lainvm_space_map_external(
             L->image->space, (uintptr_t)L->image->rw_arena, rw_size, rw_size,
             LAINVM_MEM_READ | LAINVM_MEM_WRITE, 0))) {
-      load_fail(L, 9013, "image: address space rejected writable data");
+      load_fail(L, LAINVM_IMAGE_ERR_RW_MAP, "image: address space rejected writable data");
       return false;
     }
   }
@@ -446,25 +446,25 @@ static bool size_image(Loader *L, const L1Module *module) {
   image->sub_cap = module->subroutine_count;
 
   image->regions = (LainVmImageRegion *)alloc_table(
-      t.regions, sizeof(LainVmImageRegion), L, 9018);
+      t.regions, sizeof(LainVmImageRegion), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
   if (t.regions && !image->regions) return false;
   image->insts =
       (LainVmImageInstMeta *)alloc_table(t.insts, sizeof(LainVmImageInstMeta), L,
-                                         9018);
+                                         LAINVM_IMAGE_ERR_TABLE_ALLOC);
   if (t.insts && !image->insts) return false;
   image->operands = (LainVmOperandRef *)alloc_table(
-      t.operands, sizeof(LainVmOperandRef), L, 9018);
+      t.operands, sizeof(LainVmOperandRef), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
   if (t.operands && !image->operands) return false;
-  image->results = (uint32_t *)alloc_table(t.results, sizeof(uint32_t), L, 9018);
+  image->results = (uint32_t *)alloc_table(t.results, sizeof(uint32_t), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
   if (t.results && !image->results) return false;
   image->case_regions =
-      (uint32_t *)alloc_table(t.cases, sizeof(uint32_t), L, 9018);
+      (uint32_t *)alloc_table(t.cases, sizeof(uint32_t), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
   if (t.cases && !image->case_regions) return false;
   image->symbols = (LainVmImageSymbol *)alloc_table(
-      image->symbol_cap, sizeof(LainVmImageSymbol), L, 9018);
+      image->symbol_cap, sizeof(LainVmImageSymbol), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
   if (image->symbol_cap && !image->symbols) return false;
   image->subs = (LainVmImageSub *)alloc_table(image->sub_cap,
-                                              sizeof(LainVmImageSub), L, 9018);
+                                              sizeof(LainVmImageSub), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
   if (image->sub_cap && !image->subs) return false;
   return true;
 }
@@ -504,14 +504,14 @@ LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
     size_t bytes = sizeof(LainVmCodeEntry) * (size_t)module->subroutine_count;
     image->code_arena = (LainVmCodeEntry *)calloc(1, bytes);
     if (!image->code_arena) {
-      load_fail(&loader, 9016, "image: cannot map code");
+      load_fail(&loader, LAINVM_IMAGE_ERR_CODE_ALLOC, "image: cannot map code");
       lainvm_image_free(image);
       return NULL;
     }
     if (lainvm_space_handle_none(lainvm_space_map_external(
             image->space, (uintptr_t)image->code_arena, (uint64_t)bytes,
             (uint64_t)bytes, LAINVM_MEM_READ | LAINVM_MEM_CALL, 0))) {
-      load_fail(&loader, 9017, "image: address space rejected code");
+      load_fail(&loader, LAINVM_IMAGE_ERR_CODE_MAP, "image: address space rejected code");
       lainvm_image_free(image);
       return NULL;
     }

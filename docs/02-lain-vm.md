@@ -19,6 +19,17 @@ Lain-VM 采用能力微内核架构，将物理执行环境解耦为相互正交
 
 TCB 引用 VSpace，多个 TCB 可共享同一地址空间。TCB 对 LAINIR 保持不透明，不作为程序可读写的控制结构。
 
+上表之外还有两个**机制与产物**：
+
+| 机制 | 产物 | 明确不管 |
+| :--- | :--- | :--- |
+| **Image** | 装载后的模块：名字换成槽、符号已解析、数据地址烤进映像；只读 / 读写 / 代码三段。 | canonical 文本与名字解析（那是 artifact 的事）。 |
+| **Engine** | 取指 -> 查表 -> 执行一步（CU + ALU）。无状态：可变状态都在 TCB 里。 | 分配、调度、预算、阻塞处置。 |
+
+代码侧一一对应：Trap 的码表在 lain/vm/trap.h，端点在 lain/vm/endpoint.h，
+地址空间在 lain/vm/space.h，TCB 在 lain/vm/tcb.h，映像在 lain/vm/image.h，
+引擎在 lain/vm/engine.h。
+
 ---
 
 ## 物理内存模型（VSpace）
