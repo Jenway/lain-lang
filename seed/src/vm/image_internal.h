@@ -1,4 +1,6 @@
-/* 映像的内部结构：引擎与 TCB 用的那份执行形态。不属于公开面。
+/* 映像的内部结构：引擎与 TCB 用的那份执行形态。不属于公开面——公开面只有
+ * lainvm_image_size / lainvm_image_admit / lainvm_image_load / lainvm_image_free，
+ * 见 lain/vm/engine.h。
  *
  * 编译器交付的是 L1Module（artifact）：名字是字符串、符号未解析、布局未定。
  * 映像 = 名字全换成槽、符号已解析、数据地址已烤进去的那份形态。
@@ -91,6 +93,11 @@ struct LainVmImage {
   uint8_t *ro_arena;
   uint8_t *rw_arena;
   LainVmCodeEntry *code_arena;
+
+  /* 底座是不是自己分配的：调用方给的（placement）不归映像释放。 */
+  bool owns_ro;
+  bool owns_rw;
+  bool owns_code;
 
   /* 装载时按模块计数分配，之后不变。*_cap 是分配时的容量，只用于
    * 检出装载器自己的计数错误——它不是上限，超了就是 bug 不是拒绝。 */

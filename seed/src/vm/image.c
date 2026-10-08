@@ -13,15 +13,23 @@
 typedef struct {
   LainVmImage *image;
   L1Diagnostic *diag;
+  int code; /* 第一个失败码。diag 可以是 NULL，码不能丢 */
   bool failed;
 } Loader;
 
+/* 前向声明：map_data 与 size_image 用到的两个纯查表函数定义在后面。 */
+static void data_sizes(const L1Module *module, uint64_t *ro_out, uint64_t *rw_out);
+static void measure_image(const L1Module *module, LainVmImageSizes *out);
+
 static void load_fail(Loader *L, int code, const char *message) {
-  if (!L->failed && L->diag) {
-    L->diag->code = code;
-    L->diag->line = 0;
-    L->diag->column = 0;
-    snprintf(L->diag->message, sizeof(L->diag->message), "%s", message);
+  if (!L->failed) {
+    L->code = code;
+    if (L->diag) {
+      L->diag->code = code;
+      L->diag->line = 0;
+      L->diag->column = 0;
+      snprintf(L->diag->message, sizeof(L->diag->message), "%s", message);
+    }
   }
   L->failed = true;
 }
@@ -292,25 +300,28 @@ static uint32_t find_sub(const LainVmImage *image, const char *name) {
   return LAINVM_IMAGE_NO_INDEX;
 }
 
-/* 把模块数据映射进地址空间：只读一段、可写一段。 */
-static bool map_data(Loader *L, const L1Module *module) {
+/* 把模块数据映射进地址空间：只读一段、可写一段。
+ * 调用方给了底座就用调用方的（映像不拥有、不释放），没给就自己分配。 */
+static bool map_data(Loader *L, const L1Module *module,
+                     const LainVmImagePlacement *placement) {
   uint64_t ro_size = 0;
   uint64_t rw_size = 0;
   uint32_t i;
   uint64_t ro_at = 0;
   uint64_t rw_at = 0;
 
-  for (i = 0; i < module->data_count; i++) {
-    if (module->data[i].is_writable)
-      rw_size += module->data[i].size;
-    else
-      ro_size += module->data[i].size;
-  }
+  data_sizes(module, &ro_size, &rw_size);
   if (ro_size > 0) {
-    L->image->ro_arena = (uint8_t *)calloc(1, (size_t)ro_size);
-    if (!L->image->ro_arena) {
-      load_fail(L, LAINVM_IMAGE_ERR_RO_ALLOC, "image: cannot map read-only data");
-      return false;
+    if (placement && placement->ro_arena) {
+      L->image->ro_arena = placement->ro_arena;
+      L->image->owns_ro = false;
+    } else {
+      L->image->ro_arena = (uint8_t *)calloc(1, (size_t)ro_size);
+      if (!L->image->ro_arena) {
+        load_fail(L, LAINVM_IMAGE_ERR_RO_ALLOC, "image: cannot map read-only data");
+        return false;
+      }
+      L->image->owns_ro = true;
     }
     if (lainvm_space_handle_none(lainvm_space_map_external(
             L->image->space, (uintptr_t)L->image->ro_arena, ro_size, ro_size,
@@ -320,10 +331,16 @@ static bool map_data(Loader *L, const L1Module *module) {
     }
   }
   if (rw_size > 0) {
-    L->image->rw_arena = (uint8_t *)calloc(1, (size_t)rw_size);
-    if (!L->image->rw_arena) {
-      load_fail(L, LAINVM_IMAGE_ERR_RW_ALLOC, "image: cannot map writable data");
-      return false;
+    if (placement && placement->rw_arena) {
+      L->image->rw_arena = placement->rw_arena;
+      L->image->owns_rw = false;
+    } else {
+      L->image->rw_arena = (uint8_t *)calloc(1, (size_t)rw_size);
+      if (!L->image->rw_arena) {
+        load_fail(L, LAINVM_IMAGE_ERR_RW_ALLOC, "image: cannot map writable data");
+        return false;
+      }
+      L->image->owns_rw = true;
     }
     if (lainvm_space_handle_none(lainvm_space_map_external(
             L->image->space, (uintptr_t)L->image->rw_arena, rw_size, rw_size,
@@ -416,6 +433,93 @@ static void count_region(const L1Region *region, ImageTotals *t) {
   }
 }
 
+/* 数据段的字节数：只读一段、可写一段（.rodata / .data）。 */
+static void data_sizes(const L1Module *module, uint64_t *ro_out,
+                       uint64_t *rw_out) {
+  uint64_t ro_size = 0;
+  uint64_t rw_size = 0;
+  uint32_t i;
+  for (i = 0; i < module->data_count; i++) {
+    if (module->data[i].is_writable)
+      rw_size += module->data[i].size;
+    else
+      ro_size += module->data[i].size;
+  }
+  *ro_out = ro_size;
+  *rw_out = rw_size;
+}
+
+/* 装载要的上界：最深的词法嵌套、单个区域最多的槽数。与 add_region 的记账同源
+ * （根区域带子过程签名参数，嵌套区域不带），给 admit 算帧与槽的上限。 */
+static void measure_region(const L1Region *region, uint32_t depth,
+                           uint32_t extra_count, uint32_t *max_depth,
+                           uint32_t *max_slots) {
+  uint32_t slots;
+  uint32_t pos;
+  uint32_t i;
+  if (!region) return;
+  if (depth > *max_depth) *max_depth = depth;
+  slots = extra_count + region->param_count;
+  for (pos = 0; pos < region->inst_count; pos++)
+    slots += region->insts[pos].result_count;
+  if (slots > *max_slots) *max_slots = slots;
+  for (pos = 0; pos < region->inst_count; pos++) {
+    const L1Inst *inst = &region->insts[pos];
+    if (inst->kind == INST_LOOP) {
+      measure_region(inst->body, depth + 1, 0, max_depth, max_slots);
+    } else {
+      measure_region(inst->body, depth + 1, 0, max_depth, max_slots);
+      measure_region(inst->else_body, depth + 1, 0, max_depth, max_slots);
+    }
+    measure_region(inst->default_case, depth + 1, 0, max_depth, max_slots);
+    for (i = 0; i < inst->case_count; i++)
+      measure_region(inst->cases[i].body, depth + 1, 0, max_depth, max_slots);
+  }
+}
+
+/* 装载一个模块要多少地方。不分配、不映射、不碰地址空间。 */
+static void measure_image(const L1Module *module, LainVmImageSizes *out) {
+  ImageTotals t;
+  uint32_t depth = 0;
+  uint32_t slots = 0;
+  uint32_t i;
+  memset(&t, 0, sizeof(t));
+  for (i = 0; i < module->subroutine_count; i++) {
+    const L1Subroutine *sub = &module->subroutines[i];
+    if ((sub->flags & SUBROUTINE_EXTERN) || !sub->body) continue;
+    count_region(sub->body, &t);
+    measure_region(sub->body, 1, sub->param_count, &depth, &slots);
+  }
+  memset(out, 0, sizeof(*out));
+  out->region_count = t.regions;
+  out->inst_count = t.insts;
+  out->operand_count = t.operands;
+  out->result_count = t.results;
+  out->case_count = t.cases;
+  out->symbol_count = module->data_count;
+  out->sub_count = module->subroutine_count;
+  data_sizes(module, &out->ro_bytes, &out->rw_bytes);
+  out->code_bytes = sizeof(LainVmCodeEntry) * (uint64_t)module->subroutine_count;
+  out->max_region_depth = depth;
+  out->max_slots = slots;
+}
+
+int lainvm_image_size(const L1Module *module, LainVmImageSizes *out) {
+  if (!module || !out) return LAINVM_IMAGE_ERR_ARG;
+  measure_image(module, out);
+  return 0;
+}
+
+/* 调用方给的底座够不够。只查它真会用到的那几块；NULL 的由映像自己分配。 */
+static bool placement_fits(const LainVmImagePlacement *placement,
+                           const LainVmImageSizes *sizes) {
+  if (placement->ro_arena && placement->ro_bytes < sizes->ro_bytes) return false;
+  if (placement->rw_arena && placement->rw_bytes < sizes->rw_bytes) return false;
+  if (placement->code_arena && placement->code_bytes < sizes->code_bytes)
+    return false;
+  return true;
+}
+
 /* 按 count 分配一块表；count 为 0 时返回 NULL 且不算失败。 */
 static void *alloc_table(uint32_t count, size_t elem_size, Loader *L,
                          int code) {
@@ -426,40 +530,36 @@ static void *alloc_table(uint32_t count, size_t elem_size, Loader *L,
   return table;
 }
 
+/* 按模块自己的计数一次分配各张表：装载完就不再变。计数与公开的
+ * lainvm_image_size 同源（measure_image），所以这里没有第二套算法。 */
 static bool size_image(Loader *L, const L1Module *module) {
-  ImageTotals t;
+  LainVmImageSizes sizes;
   LainVmImage *image = L->image;
-  uint32_t i;
 
-  memset(&t, 0, sizeof(t));
-  for (i = 0; i < module->subroutine_count; i++) {
-    const L1Subroutine *sub = &module->subroutines[i];
-    if (!(sub->flags & SUBROUTINE_EXTERN) && sub->body) count_region(sub->body, &t);
-  }
-
-  image->region_cap = t.regions;
-  image->inst_cap = t.insts;
-  image->operand_cap = t.operands;
-  image->result_cap = t.results;
-  image->case_cap = t.cases;
-  image->symbol_cap = module->data_count;
-  image->sub_cap = module->subroutine_count;
+  measure_image(module, &sizes);
+  image->region_cap = sizes.region_count;
+  image->inst_cap = sizes.inst_count;
+  image->operand_cap = sizes.operand_count;
+  image->result_cap = sizes.result_count;
+  image->case_cap = sizes.case_count;
+  image->symbol_cap = sizes.symbol_count;
+  image->sub_cap = sizes.sub_count;
 
   image->regions = (LainVmImageRegion *)alloc_table(
-      t.regions, sizeof(LainVmImageRegion), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
-  if (t.regions && !image->regions) return false;
+      sizes.region_count, sizeof(LainVmImageRegion), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
+  if (sizes.region_count && !image->regions) return false;
   image->insts =
-      (LainVmImageInstMeta *)alloc_table(t.insts, sizeof(LainVmImageInstMeta), L,
+      (LainVmImageInstMeta *)alloc_table(sizes.inst_count, sizeof(LainVmImageInstMeta), L,
                                          LAINVM_IMAGE_ERR_TABLE_ALLOC);
-  if (t.insts && !image->insts) return false;
+  if (sizes.inst_count && !image->insts) return false;
   image->operands = (LainVmOperandRef *)alloc_table(
-      t.operands, sizeof(LainVmOperandRef), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
-  if (t.operands && !image->operands) return false;
-  image->results = (uint32_t *)alloc_table(t.results, sizeof(uint32_t), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
-  if (t.results && !image->results) return false;
+      sizes.operand_count, sizeof(LainVmOperandRef), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
+  if (sizes.operand_count && !image->operands) return false;
+  image->results = (uint32_t *)alloc_table(sizes.result_count, sizeof(uint32_t), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
+  if (sizes.result_count && !image->results) return false;
   image->case_regions =
-      (uint32_t *)alloc_table(t.cases, sizeof(uint32_t), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
-  if (t.cases && !image->case_regions) return false;
+      (uint32_t *)alloc_table(sizes.case_count, sizeof(uint32_t), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
+  if (sizes.case_count && !image->case_regions) return false;
   image->symbols = (LainVmImageSymbol *)alloc_table(
       image->symbol_cap, sizeof(LainVmImageSymbol), L, LAINVM_IMAGE_ERR_TABLE_ALLOC);
   if (image->symbol_cap && !image->symbols) return false;
@@ -469,54 +569,69 @@ static bool size_image(Loader *L, const L1Module *module) {
   return true;
 }
 
-LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
-                               L1Diagnostic *diag) {
+/* 失败路径：码已经在 loader 里（diag 为 NULL 时也不丢），收回映像并报出去。 */
+static int admit_fail(Loader *L, LainVmImage *image, LainVmImage **out) {
+  int code = L->code ? L->code : LAINVM_IMAGE_ERR_TABLE_ALLOC;
+  lainvm_image_free(image);
+  *out = NULL;
+  return code;
+}
+
+int lainvm_image_admit(const L1Module *module, LainVmSpace *space,
+                       const LainVmImagePlacement *placement,
+                       LainVmImage **out, L1Diagnostic *diag) {
+  LainVmImageSizes sizes;
   LainVmImage *image;
   Loader loader;
   uint32_t i;
 
-  if (!module || !space) return NULL;
+  if (!module || !space || !out) return LAINVM_IMAGE_ERR_ARG;
+  *out = NULL;
+  measure_image(module, &sizes);
+  if (placement && !placement_fits(placement, &sizes))
+    return LAINVM_IMAGE_ERR_PLACEMENT;
+
   image = (LainVmImage *)calloc(1, sizeof(LainVmImage));
-  if (!image) return NULL;
+  if (!image) return LAINVM_IMAGE_ERR_TABLE_ALLOC;
   image->module = module;
   image->space = space;
 
   loader.image = image;
   loader.diag = diag;
+  loader.code = 0;
   loader.failed = false;
   if (diag) {
     diag->code = 0;
     diag->message[0] = '\0';
   }
 
-  if (!size_image(&loader, module)) {
-    lainvm_image_free(image);
-    return NULL;
-  }
-
-  if (!map_data(&loader, module)) {
-    lainvm_image_free(image);
-    return NULL;
-  }
+  if (!size_image(&loader, module)) return admit_fail(&loader, image, out);
+  if (!map_data(&loader, module, placement))
+    return admit_fail(&loader, image, out);
 
   /* 代码段：每条子过程一条记录。权限是 READ|CALL——可执行，不可写。 */
   if (module->subroutine_count > 0) {
     size_t bytes = sizeof(LainVmCodeEntry) * (size_t)module->subroutine_count;
-    image->code_arena = (LainVmCodeEntry *)calloc(1, bytes);
-    if (!image->code_arena) {
-      load_fail(&loader, LAINVM_IMAGE_ERR_CODE_ALLOC, "image: cannot map code");
-      lainvm_image_free(image);
-      return NULL;
+    if (placement && placement->code_arena) {
+      image->code_arena = (LainVmCodeEntry *)placement->code_arena;
+      image->owns_code = false;
+    } else {
+      image->code_arena = (LainVmCodeEntry *)calloc(1, bytes);
+      if (!image->code_arena) {
+        load_fail(&loader, LAINVM_IMAGE_ERR_CODE_ALLOC, "image: cannot map code");
+        return admit_fail(&loader, image, out);
+      }
+      image->owns_code = true;
     }
     if (lainvm_space_handle_none(lainvm_space_map_external(
             image->space, (uintptr_t)image->code_arena, (uint64_t)bytes,
             (uint64_t)bytes, LAINVM_MEM_READ | LAINVM_MEM_CALL, 0))) {
       load_fail(&loader, LAINVM_IMAGE_ERR_CODE_MAP, "image: address space rejected code");
-      lainvm_image_free(image);
-      return NULL;
+      return admit_fail(&loader, image, out);
     }
     for (i = 0; i < module->subroutine_count; i++) {
       image->code_arena[i].sub_index = i;
+      image->code_arena[i].reserved = 0; /* 调用方给的底座不是清零过的 */
       image->subs[i].entry_addr = (uintptr_t)&image->code_arena[i];
     }
   }
@@ -529,10 +644,7 @@ LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
     if (!(sub->flags & SUBROUTINE_EXTERN) && sub->body)
       body = add_region(&loader, sub->body, LAINVM_IMAGE_NO_REGION, 1,
                         sub->params, sub->param_count);
-    if (loader.failed) {
-      lainvm_image_free(image);
-      return NULL;
-    }
+    if (loader.failed) return admit_fail(&loader, image, out);
     for (r = first; r < image->region_count; r++) image->regions[r].sub_index = i;
     image->subs[i].sub = sub;
     image->subs[i].body_region = body;
@@ -540,14 +652,23 @@ LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
   }
 
   resolve_symbols(image);
+  *out = image;
+  return 0;
+}
+
+/* 便捷包装：底座全由映像自己分配。 */
+LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
+                               L1Diagnostic *diag) {
+  LainVmImage *image = NULL;
+  if (lainvm_image_admit(module, space, NULL, &image, diag) != 0) return NULL;
   return image;
 }
 
 void lainvm_image_free(LainVmImage *image) {
   if (!image) return;
-  free(image->ro_arena);
-  free(image->rw_arena);
-  free(image->code_arena);
+  if (image->owns_ro) free(image->ro_arena);
+  if (image->owns_rw) free(image->rw_arena);
+  if (image->owns_code) free(image->code_arena);
   free(image->regions);
   free(image->insts);
   free(image->operands);
