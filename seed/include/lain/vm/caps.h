@@ -20,11 +20,11 @@
  * VM 调用时把它注回回调的第一个参数。它不进入 `args`、不占程序槽位、
  * 也不能由 LAINIR 侧指定或读取——所以 Meta 无法用业务参数选择或伪造宿主。
  *
- * **注册—冻结模型。** 表在创建后是可写的；`lainvm_caps_freeze` 之后禁止
- * 新增、扩容和修改绑定，`lainvm_caps_add` 返回专门的冻结错误。冻结保证
- * 表本身稳定（项地址不再因 realloc 失效），**不**管理 context 的生命周期：
- * 绑定的宿主必须活到所有引用该表的 TCB 销毁之后，由可信注册者负责。
- * 能力表不拥有 context，`lainvm_caps_free` 不销毁它。
+ * **注册—冻结模型。** 表在初始化后是可写的；`lainvm_caps_freeze` 之后禁止
+ * 新增和修改绑定，`lainvm_caps_add` 返回专门的冻结错误。冻结是纯策略：本层
+ * 从不重分配存储，项地址从初始化起就不再变。冻结**不**管理 context 的
+ * 生命周期：绑定的宿主必须活到所有引用该表的 TCB 销毁之后，由可信注册者
+ * 负责。能力表不拥有 context。
  *
  * 没有预算：步数、内存、递归上限是**预算**，归 admit 参数与调度上下文。
  */
@@ -53,28 +53,47 @@ typedef enum {
 typedef enum {
   LAINVM_CAPS_OK = 0,
   LAINVM_CAPS_ERR_ARG = 1,       /* 表、符号名等参数不合法 */
-  LAINVM_CAPS_ERR_OOM = 2,       /* 登记名复制或扩容分配失败 */
+  LAINVM_CAPS_ERR_FULL = 2,      /* 表已满；容量由初始化时给的存储决定 */
   LAINVM_CAPS_ERR_DUPLICATE = 3, /* 同名重复登记 */
   LAINVM_CAPS_ERR_NO_FN = 4,     /* FUNCTION 项缺函数 */
   LAINVM_CAPS_ERR_FROZEN = 5,    /* 表已冻结，禁止新增或修改绑定 */
+  LAINVM_CAPS_ERR_NAME = 6,      /* 名字为空或超出 LAINVM_CAPS_NAME_MAX */
 } LainVmCapsStatus;
 
-typedef struct LainVmCaps LainVmCaps;
-typedef struct LainVmCapEntry LainVmCapEntry;
+/* 名字缓冲长度（含终止符）。名字被复制进项自带的缓冲：超长拒绝，不截断。 */
+#define LAINVM_CAPS_NAME_MAX 64
 
-LainVmCaps *lainvm_caps_new(void);
-void lainvm_caps_free(LainVmCaps *caps);
+typedef struct LainVmCapEntry {
+  char link_name[LAINVM_CAPS_NAME_MAX];
+  LainVmCapKind kind;
+  LainVmHostFn fn;
+  void *context;
+} LainVmCapEntry;
+
+/* 表和它那一排项都由调用方提供：本层一次动态分配都不做，容量由嵌入者选，
+ * 所以没有 LAINVM_CAPS_MAX 这种上限——登记满了就是拒绝。 */
+typedef struct LainVmCaps {
+  LainVmCapEntry *entries; /* 调用方的存储；表不拥有、不释放 */
+  uint32_t count;
+  uint32_t capacity;
+  bool frozen;
+} LainVmCaps;
+
+/* 初始化。entries 至少要装下 capacity 项，并且活得比表长；重复初始化会丢弃
+ * 原有内容（这里没有任何东西需要释放）。 */
+void lainvm_caps_init(LainVmCaps *caps, LainVmCapEntry *entries,
+                      uint32_t capacity);
 
 /* 按外部符号名登记，并把可信 context 绑到这一项上。
- * 名字会被复制并由表持有（冻结后不受调用方改字符串影响）。
- * 同名重复登记返回 LAINVM_CAPS_ERR_DUPLICATE；已冻结返回
- * LAINVM_CAPS_ERR_FROZEN，且表的内容一个字节都不动。
+ * 名字被复制进表自带的缓冲（冻结后不受调用方改字符串影响）。
+ * 同名重复登记返回 LAINVM_CAPS_ERR_DUPLICATE，表满返回 LAINVM_CAPS_ERR_FULL；
+ * 已冻结返回 LAINVM_CAPS_ERR_FROZEN，且表的内容一个字节都不动。
  * context 可以是 NULL（通用无状态服务）；`lainmeta_host_register` 不接受。 */
 int lainvm_caps_add(LainVmCaps *caps, const char *link_name, LainVmCapKind kind,
                     LainVmHostFn fn, void *context);
 
 /* 冻结：成功后不可解冻；再次 freeze 幂等成功；NULL 表失败（非 0）。
- * 冻结后 TCB 保存的项指针不会再因 entries realloc 失效。 */
+ * 冻结之后表的内容、容量与项地址都不再变——TCB 保存的项指针因此长期有效。 */
 int lainvm_caps_freeze(LainVmCaps *caps);
 bool lainvm_caps_is_frozen(const LainVmCaps *caps);
 

@@ -31,7 +31,7 @@
  * 名字全换成槽、符号已解析、数据地址已烤进映射好的段。它绑定一个 VSpace；
  * 换空间后那些地址不再属于新空间，访问被 1004/1005 稳定拒绝（要接着跑就得重新装载）。
  * 它**不拥有**模块：区域、子过程、符号名仍指回 L1Module，模块必须活得比它久。
- * 结构本身是引擎私有的（seed/src/vm/image_internal.h），这里只暴露装载与释放。 */
+ * 结构本身是引擎私有的（seed/src/vm/image_internal.h），这里只暴露尺寸、装载与释放。 */
 typedef struct LainVmImage LainVmImage;
 
 /* 装载拒绝码（L1Diagnostic）。9001-9006 是表计数与模块自述对不上。
@@ -52,14 +52,53 @@ enum {
   LAINVM_IMAGE_ERR_CODE_ALLOC = 9016,
   LAINVM_IMAGE_ERR_CODE_MAP = 9017,
   LAINVM_IMAGE_ERR_TABLE_ALLOC = 9018,
+  LAINVM_IMAGE_ERR_PLACEMENT = 9019, /* 调用方给的底座不够或不可用 */
+  LAINVM_IMAGE_ERR_ARG = 9020,       /* 入参为 NULL */
 };
 
 _Static_assert(LAINVM_IMAGE_ERR_INST_COUNT > LAINIR_CODES_IMAGE_BASE &&
-                   LAINVM_IMAGE_ERR_TABLE_ALLOC < LAINIR_CODES_IMAGE_LIMIT,
+                   LAINVM_IMAGE_ERR_ARG < LAINIR_CODES_IMAGE_LIMIT,
                "image codes must stay inside the image segment");
 
-/* 装载。失败返回 NULL，诊断写进 diag（可为 NULL）。
- * 装载器负责把模块数据映射进 space 并登记区段。 */
+/* 装载一个模块要多少地方：表计数、三段字节数、admit 要的两个上界。
+ * 纯函数：不分配、不映射、不碰地址空间。成功返回 0。 */
+typedef struct {
+  uint32_t region_count;
+  uint32_t inst_count;
+  uint32_t operand_count;
+  uint32_t result_count;
+  uint32_t case_count;
+  uint32_t symbol_count;
+  uint32_t sub_count;
+  uint64_t ro_bytes; /* 只读数据段 */
+  uint64_t rw_bytes; /* 可写数据段 */
+  uint64_t code_bytes;
+  uint32_t max_region_depth;
+  uint32_t max_slots;
+} LainVmImageSizes;
+
+int lainvm_image_size(const L1Module *module, LainVmImageSizes *out);
+
+/* 调用方给的数据/代码段底座。某一项为 NULL 时那一块由映像自己分配。
+ * 给的缓冲要不小于 lainvm_image_size 报出的字节数，对齐按 malloc 的保证；
+ * 小了直接拒绝，不会越界写。调用方给的缓冲由调用方释放。 */
+typedef struct {
+  uint8_t *ro_arena;
+  uint64_t ro_bytes;
+  uint8_t *rw_arena;
+  uint64_t rw_bytes;
+  void *code_arena;
+  uint64_t code_bytes;
+} LainVmImagePlacement;
+
+/* 装载：名字换成槽、符号解析、数据地址烤进去，并把模块数据映射进 space 登记区段。
+ * placement 让调用方决定布局（NULL = 全部自己分配；lainvm_image_load 就是这一路）。
+ * 成功返回 0 并把映像写进 out；失败返回非 0（与写进 diag 的码相同），*out 为 NULL。 */
+int lainvm_image_admit(const L1Module *module, LainVmSpace *space,
+                       const LainVmImagePlacement *placement,
+                       LainVmImage **out, L1Diagnostic *diag);
+
+/* 便捷包装：底座全由映像分配。失败返回 NULL，诊断写进 diag（可为 NULL）。 */
 LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
                                L1Diagnostic *diag);
 void lainvm_image_free(LainVmImage *image);
