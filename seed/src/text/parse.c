@@ -133,7 +133,7 @@ static bool match(Parser *p, char c) {
 
 static bool expect(Parser *p, char c, const char *what) {
   if (match(p, c)) return true;
-  return fail(p, 3001, "expected `%c` %s, got `%c`", c, what,
+  return fail(p, LAINPARSE_ERR_SYNTAX, "expected `%c` %s, got `%c`", c, what,
               cur(p) ? cur(p) : ' ');
 }
 
@@ -141,7 +141,7 @@ static bool ident(Parser *p, char *out, uint32_t cap) {
   uint32_t n = 0;
   char c = cur(p);
   if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'))
-    return fail(p, 3001, "expected an identifier");
+    return fail(p, LAINPARSE_ERR_SYNTAX, "expected an identifier");
   while (n + 1 < cap) {
     c = cur(p);
     if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -159,7 +159,7 @@ static bool symbol_name(Parser *p, char *out, uint32_t cap) {
   uint32_t n = 0;
   char c = cur(p);
   if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'))
-    return fail(p, 3001, "expected a symbol name");
+    return fail(p, LAINPARSE_ERR_SYNTAX, "expected a symbol name");
   while (n + 1 < cap) {
     c = cur(p);
     if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -173,7 +173,7 @@ static bool symbol_name(Parser *p, char *out, uint32_t cap) {
 }
 
 static bool value_name(Parser *p, char *out, uint32_t cap) {
-  if (!match(p, '%')) return fail(p, 3001, "expected a value (`%%name`)");
+  if (!match(p, '%')) return fail(p, LAINPARSE_ERR_SYNTAX, "expected a value (`%%name`)");
   return ident(p, out, cap);
 }
 
@@ -198,7 +198,7 @@ static bool integer(Parser *p, uint64_t *out) {
       advance(p);
       digits++;
     }
-    if (!digits) return fail(p, 3004, "malformed hex literal");
+    if (!digits) return fail(p, LAINPARSE_ERR_LITERAL, "malformed hex literal");
     *out = value;
     return true;
   }
@@ -207,7 +207,7 @@ static bool integer(Parser *p, uint64_t *out) {
     advance(p);
     digits++;
   }
-  if (!digits) return fail(p, 3004, "expected an integer literal");
+  if (!digits) return fail(p, LAINPARSE_ERR_LITERAL, "expected an integer literal");
   *out = value;
   return true;
 }
@@ -231,7 +231,7 @@ static bool list_push(Parser *p, InstList *list, const L1Inst *inst) {
     uint32_t cap = list->cap ? list->cap * 2 : 8;
     const L1Inst **grown =
         (const L1Inst **)realloc((void *)list->items, sizeof(*grown) * cap);
-    if (!grown) return fail(p, 3002, "out of memory");
+    if (!grown) return fail(p, LAINPARSE_ERR_BUILD, "out of memory");
     list->items = grown;
     list->cap = cap;
   }
@@ -242,7 +242,7 @@ static bool list_push(Parser *p, InstList *list, const L1Inst *inst) {
 /* --- 类型 ----------------------------------------------------------------- */
 
 static bool parse_type(Parser *p, const L1Type **out) {
-  if (!match(p, '#')) return fail(p, 3003, "expected a type");
+  if (!match(p, '#')) return fail(p, LAINPARSE_ERR_TYPE, "expected a type");
   if (at_word(p, "addr")) {
     p->pos += 4;
     p->column += 4;
@@ -265,7 +265,7 @@ static bool parse_type(Parser *p, const L1Type **out) {
       p->pos += 3;
       p->column += 3;
     } else {
-      return fail(p, 3003, "unknown physical type");
+      return fail(p, LAINPARSE_ERR_TYPE, "unknown physical type");
     }
     if (!expect(p, '<', "after the type name")) return false;
     if (!integer(p, &width)) return false;
@@ -297,14 +297,14 @@ static bool parse_operand(Parser *p, L1Operand *out, InstList *into,
     uint32_t before;
     const L1Inst *hoisted;
     if (!into)
-      return fail(p, 3005, "a nested instruction is not allowed here");
+      return fail(p, LAINPARSE_ERR_NESTED, "a nested instruction is not allowed here");
     before = into->count;
     if (!parse_instruction_into(p, into, NULL, true)) return false;
     if (into->count != before + 1)
-      return fail(p, 3005, "a nested instruction must be a single instruction");
+      return fail(p, LAINPARSE_ERR_NESTED, "a nested instruction must be a single instruction");
     hoisted = into->items[into->count - 1];
     if (hoisted->result_count != 1)
-      return fail(p, 3005, "a nested instruction must produce exactly one value");
+      return fail(p, LAINPARSE_ERR_NESTED, "a nested instruction must produce exactly one value");
     out->kind = OPERAND_VALUE;
     out->name = hoisted->results[0];
     return true;
@@ -321,7 +321,7 @@ static bool parse_operand(Parser *p, L1Operand *out, InstList *into,
       uint32_t n = p->pos - literal_start;
       uint32_t width = ty ? ty->width : 64;
       if (n + 1 >= sizeof(buffer))
-        return fail(p, 3004, "floating-point literal is too long");
+        return fail(p, LAINPARSE_ERR_LITERAL, "floating-point literal is too long");
       memcpy(buffer, p->src + literal_start, n);
       while (n + 1 < sizeof(buffer) &&
              ((cur(p) >= '0' && cur(p) <= '9') || cur(p) == '.' ||
@@ -352,7 +352,7 @@ static bool parse_operand(Parser *p, L1Operand *out, InstList *into,
     if (negative) out->bits = (uint64_t)(-(int64_t)out->bits);
     return true;
   }
-  return fail(p, 3001, "expected an operand");
+  return fail(p, LAINPARSE_ERR_SYNTAX, "expected an operand");
 }
 
 /* 整数形式的操作数也要能当「地址宽度的量」用（scale / offset）。 */
@@ -367,7 +367,7 @@ static bool parse_operand_list_into(Parser *p, InstList *into, L1Operand *out,
     return true;
   }
   for (;;) {
-    if (n >= cap) return fail(p, 3006, "too many operands");
+    if (n >= cap) return fail(p, LAINPARSE_ERR_OPERANDS, "too many operands");
     skip(p);
     if (!parse_operand(p, &out[n], into, ty)) return false;
     n++;
@@ -395,7 +395,7 @@ static bool parse_region_results(Parser *p, const L1Type **out, uint32_t cap,
   skip(p);
   if (match(p, ')')) return true;
   for (;;) {
-    if (n >= cap) return fail(p, 3007, "too many region results");
+    if (n >= cap) return fail(p, LAINPARSE_ERR_REGION_RESULTS, "too many region results");
     if (!parse_type(p, &out[n])) return false;
     n++;
     skip(p);
@@ -424,7 +424,7 @@ static const L1Region *parse_block(Parser *p, const L1RegionParam *params,
     if (p->failed) break;
     if (match(p, '}')) break;
     if (!cur(p)) {
-      fail(p, 3001, "unexpected end of input inside a region");
+      fail(p, LAINPARSE_ERR_SYNTAX, "unexpected end of input inside a region");
       break;
     }
     if (!parse_instruction_into(p, &list, &terminated, false)) break;
@@ -450,7 +450,7 @@ static bool parse_result_prefix(Parser *p, char storage[][128],
   if (cur(p) != '%') return true;
   for (;;) {
     char name[128];
-    if (n >= cap) return fail(p, 3008, "too many results");
+    if (n >= cap) return fail(p, LAINPARSE_ERR_RESULTS, "too many results");
     if (!value_name(p, name, sizeof(name))) return false;
     snprintf(storage[n], 128, "%s", name);
     names[n] = lainir_builder_string(p->builder, name);
@@ -479,7 +479,7 @@ static bool parse_loop_params(Parser *p, L1RegionParam *out, uint32_t cap,
     const L1Type *ty = NULL;
     L1Operand init;
     char name[128];
-    if (n >= cap) return fail(p, 3009, "too many loop parameters");
+    if (n >= cap) return fail(p, LAINPARSE_ERR_LOOP_PARAMS, "too many loop parameters");
     if (!value_name(p, name, sizeof(name))) return false;
     skip(p);
     if (!expect(p, ':', "after the parameter name")) return false;
@@ -570,7 +570,7 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
           p->column += 7;
           order = ORDER_RELAXED;
         } else {
-          return fail(p, 3001, "unknown instruction attribute");
+          return fail(p, LAINPARSE_ERR_SYNTAX, "unknown instruction attribute");
         }
         skip(p);
       }
@@ -613,7 +613,7 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
                                  name_count ? names[0] : NULL, ty, ops, count);
     break;
   }
-  if (!inst) return fail(p, 3002, "cannot build the instruction");
+  if (!inst) return fail(p, LAINPARSE_ERR_BUILD, "cannot build the instruction");
   set_results(inst, names, name_count);
   if (is_volatile) inst->is_volatile = true;
   inst->order = order;
@@ -643,7 +643,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     name_count = 1;
   }
   skip(p);
-  if (!match(p, '#')) return fail(p, 3001, "expected an instruction");
+  if (!match(p, '#')) return fail(p, LAINPARSE_ERR_SYNTAX, "expected an instruction");
   while (n + 1 < sizeof(opname)) {
     char c = cur(p);
     if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) break;
@@ -651,13 +651,13 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     advance(p);
   }
   opname[n] = '\0';
-  if (!n) return fail(p, 3002, "expected an opcode after `#`");
+  if (!n) return fail(p, LAINPARSE_ERR_BUILD, "expected an opcode after `#`");
   if (!lainir_opcode_kind(opname, n, &kind))
-    return fail(p, 3002, "unknown opcode `#%s`", opname);
+    return fail(p, LAINPARSE_ERR_BUILD, "unknown opcode `#%s`", opname);
 
   /* 向量算子的车道后缀（vadd.i32x4）还没实现——引擎和后端也都没有。 */
   if (cur(p) == '.')
-    return fail(p, 3010, "vector lane suffixes are not supported yet");
+    return fail(p, LAINPARSE_ERR_VECTOR_LANES, "vector lane suffixes are not supported yet");
 
   switch (kind) {
   case INST_IF: {
@@ -684,7 +684,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     inst = (L1Inst *)lainir_inst_if(p->builder,
                                     name_count ? names[0] : NULL, cond, then_body,
                                     else_body);
-    if (!inst) return fail(p, 3002, "cannot build #if");
+    if (!inst) return fail(p, LAINPARSE_ERR_BUILD, "cannot build #if");
     set_results(inst, names, name_count);
     return list_push(p, into, inst);
   }
@@ -709,7 +709,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
                                       name_count ? names[0] : NULL,
                                       lainir_builder_string(p->builder, label),
                                       body);
-    if (!inst) return fail(p, 3002, "cannot build #loop");
+    if (!inst) return fail(p, LAINPARSE_ERR_BUILD, "cannot build #loop");
     set_results(inst, names, name_count);
     return list_push(p, into, inst);
   }
@@ -730,7 +730,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     /* 选择子的类型实参是**必须**的：引擎和后端都要靠它把常量掩到
      * 选择子的宽度上，否则宽出来的常量在两边会有不同的匹配行为。 */
     if (!match(p, '['))
-      return fail(p, 3001, "#switch needs the selector type in []");
+      return fail(p, LAINPARSE_ERR_SYNTAX, "#switch needs the selector type in []");
     if (!parse_type(p, &selector_ty)) return false;
     skip(p);
     if (!expect(p, ']', "to end the selector type")) return false;
@@ -753,7 +753,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
         if (!integer(p, &value)) return false;
         if (!grow_table(p->builder, (void **)&cases, &case_cap, case_count,
                         sizeof(L1SwitchCase))) {
-          return fail(p, 3015, "out of memory for #switch cases");
+          return fail(p, LAINPARSE_ERR_CASES_ALLOC, "out of memory for #switch cases");
         }
         body = parse_block(p, NULL, 0, results, result_count);
         if (!body) return false;
@@ -766,18 +766,18 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
         p->pos += 7;
         p->column += 7;
         if (default_case)
-          return fail(p, 3016, "a #switch takes one default");
+          return fail(p, LAINPARSE_ERR_SWITCH_DEFAULT, "a #switch takes one default");
         default_case = parse_block(p, NULL, 0, results, result_count);
         if (!default_case) return false;
         continue;
       }
-      return fail(p, 3001, "expected `case`, `default` or `}`");
+      return fail(p, LAINPARSE_ERR_SYNTAX, "expected `case`, `default` or `}`");
     }
     inst = (L1Inst *)lainir_inst_switch(p->builder,
                                         name_count ? names[0] : NULL, selector,
                                         selector_ty, cases, case_count,
                                         default_case);
-    if (!inst) return fail(p, 3002, "cannot build #switch");
+    if (!inst) return fail(p, LAINPARSE_ERR_BUILD, "cannot build #switch");
     set_results(inst, names, name_count);
     return list_push(p, into, inst);
   }
@@ -798,7 +798,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     inst = (L1Inst *)lainir_inst_jump(p->builder, kind,
                                       lainir_builder_string(p->builder, label),
                                       ops, count);
-    if (!inst) return fail(p, 3002, "cannot build the jump");
+    if (!inst) return fail(p, LAINPARSE_ERR_BUILD, "cannot build the jump");
     if (terminated) *terminated = true;
     return list_push(p, into, inst);
   }
@@ -814,7 +814,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     while (cur(p) && cur(p) != '\n' && cur(p) != '}') {
       if (count >= L1P_MAX_PARAMS) {
         p->inline_only = saved;
-        return fail(p, 3006, "too many operands");
+        return fail(p, LAINPARSE_ERR_OPERANDS, "too many operands");
       }
       if (!parse_operand(p, &ops[count], into, NULL)) {
         p->inline_only = saved;
@@ -830,7 +830,7 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     }
     p->inline_only = saved;
     inst = (L1Inst *)lainir_inst(p->builder, kind, NULL, NULL, ops, count);
-    if (!inst) return fail(p, 3002, "cannot build the terminator");
+    if (!inst) return fail(p, LAINPARSE_ERR_BUILD, "cannot build the terminator");
     if (terminated) *terminated = true;
     return list_push(p, into, inst);
   }
@@ -861,7 +861,7 @@ static bool parse_proc(Parser *p, L1Subroutine *out) {
       char pname[128];
       const L1Type *ty = NULL;
       if (param_count >= L1P_MAX_PARAMS)
-        return fail(p, 3011, "too many parameters");
+        return fail(p, LAINPARSE_ERR_PARAMS, "too many parameters");
       if (!value_name(p, pname, sizeof(pname))) return false;
       skip(p);
       if (!expect(p, ':', "after the parameter name")) return false;
@@ -893,7 +893,7 @@ static bool parse_proc(Parser *p, L1Subroutine *out) {
       result_count = 1;
     }
     for (i = 0; i < result_count; i++) {
-      if (!results[i]) return fail(p, 3003, "bad result type");
+      if (!results[i]) return fail(p, LAINPARSE_ERR_TYPE, "bad result type");
     }
   }
 
@@ -909,7 +909,7 @@ static bool parse_proc(Parser *p, L1Subroutine *out) {
     }
     word[n] = '\0';
     if (strcmp(word, "extern") != 0)
-      return fail(p, 3002, "expected `#extern` or a body");
+      return fail(p, LAINPARSE_ERR_BUILD, "expected `#extern` or a body");
     is_extern = true;
     skip(p);
     if (match(p, '"')) {
@@ -960,7 +960,7 @@ static bool parse_data(Parser *p, L1Data *out) {
     p->pos += 2;
     p->column += 2;
   } else {
-    return fail(p, 3001, "expected `ro` or `rw`");
+    return fail(p, LAINPARSE_ERR_SYNTAX, "expected `ro` or `rw`");
   }
   skip(p);
   if (!expect(p, '{', "to start the data bytes")) return false;
@@ -970,7 +970,7 @@ static bool parse_data(Parser *p, L1Data *out) {
     if (match(p, '}')) break;
     if (!integer(p, &byte)) return false;
     if (!grow_table(p->builder, (void **)&bytes, &byte_cap, size, 1u)) {
-      return fail(p, 3012, "out of memory for the data object");
+      return fail(p, LAINPARSE_ERR_DATA_ALLOC, "out of memory for the data object");
     }
     bytes[size++] = (uint8_t)byte;
   }
@@ -1015,7 +1015,7 @@ const L1Module *lainir_parse(L1Builder *builder, const char *text,
       skip(&p);
       if (!grow_table(builder, (void **)&data, &data_cap, data_count,
                       sizeof(L1Data))) {
-        fail(&p, 3013, "out of memory for data objects");
+        fail(&p, LAINPARSE_ERR_DATA_OBJECTS_ALLOC, "out of memory for data objects");
         return NULL;
       }
       if (!parse_data(&p, &data[data_count])) return NULL;
@@ -1028,14 +1028,14 @@ const L1Module *lainir_parse(L1Builder *builder, const char *text,
       skip(&p);
       if (!grow_table(builder, (void **)&subs, &sub_cap, sub_count,
                       sizeof(L1Subroutine))) {
-        fail(&p, 3014, "out of memory for subroutines");
+        fail(&p, LAINPARSE_ERR_SUBROUTINES_ALLOC, "out of memory for subroutines");
         return NULL;
       }
       if (!parse_proc(&p, &subs[sub_count])) return NULL;
       sub_count++;
       continue;
     }
-    fail(&p, 3001, "expected `#proc` or `data`");
+    fail(&p, LAINPARSE_ERR_SYNTAX, "expected `#proc` or `data`");
     return NULL;
   }
 

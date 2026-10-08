@@ -13,6 +13,7 @@
 #ifndef LAINIR_VERIFY_H
 #define LAINIR_VERIFY_H
 
+#include "lain/ir/codes.h"
 #include "lain/ir/core.h"
 
 /* 验证整个模块。成功返回 0；失败返回非 0 并把原因写进 diag（可为 NULL）。 */
@@ -54,5 +55,9 @@ enum {
    * 而是「这次验证没做完」——不要和后一类混。 */
   L1V_OUT_OF_MEMORY = 2028,
 };
+
+_Static_assert(L1V_DUPLICATE_BINDING > LAINIR_CODES_VERIFY_BASE &&
+                   L1V_SWITCH_NO_DEFAULT < LAINIR_CODES_VERIFY_LIMIT,
+               "verify codes must stay inside the verify segment");
 
 #endif /* LAINIR_VERIFY_H */

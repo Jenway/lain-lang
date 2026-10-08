@@ -125,7 +125,7 @@ static const L1Region *region_parent(const LainBackend *be,
 static void set_width(LainBackend *be, uint32_t slot, uint32_t width) {
   if (slot >= be->slot_cap) {
     /* 容量是按模块数出来的，越界就是数漏了——不能静默按 64 位算。 */
-    fail(be, 9226, "cbackend: slot layout does not match the module");
+    fail(be, LAINBACKEND_ERR_SLOT_LAYOUT, "cbackend: slot layout does not match the module");
     return;
   }
   be->widths[slot] = (uint8_t)(width ? width : 64);
@@ -184,7 +184,7 @@ static bool size_backend(LainBackend *be, const L1Module *module) {
                                      sizeof(RegionBase));
   be->widths = (uint8_t *)calloc(max_slots ? max_slots : 1u, 1u);
   if (!be->regions || !be->widths) {
-    fail(be, 9227, "cbackend: cannot allocate the layout tables");
+    fail(be, LAINBACKEND_ERR_LINKAGE, "cbackend: cannot allocate the layout tables");
     return false;
   }
   be->region_count = 0;
@@ -221,7 +221,7 @@ static void assign_regions(LainBackend *be, const L1Region *region,
              "cbackend: region layout does not match the module "
              "(%u regions, capacity %u)",
              be->region_count, be->region_cap);
-    fail(be, 9226, buffer);
+    fail(be, LAINBACKEND_ERR_SLOT_LAYOUT, buffer);
     return;
   }
   be->regions[be->region_count].region = region;
@@ -320,7 +320,7 @@ static void operand_expr(LainBackend *be, const L1Region *region,
   if (op->kind == OPERAND_VALUE) {
     uint32_t slot = 0;
     if (!resolve_slot(be, region, op->name, &slot)) {
-      fail(be, 9202, "cbackend: undefined value");
+      fail(be, LAINBACKEND_ERR_UNDEFINED_VALUE, "cbackend: undefined value");
       snprintf(out, cap, "0");
       return;
     }
@@ -421,7 +421,7 @@ static void emit_externs(LainBackend *be) {
     if (!(sub->flags & SUBROUTINE_EXTERN)) continue;
     symbol = extern_symbol(sub);
     if (!is_c_identifier(symbol)) {
-      fail(be, 9226,
+      fail(be, LAINBACKEND_ERR_SLOT_LAYOUT,
            "cbackend: external symbol name is not a C identifier "
            "(the capability key and the link symbol must be one name)");
       return;
@@ -536,7 +536,7 @@ static void emit_int_arith(LainBackend *be, const L1Region *region,
     }
     return;
   default:
-    fail(be, 9203, "cbackend: unknown integer operator");
+    fail(be, LAINBACKEND_ERR_INT_OP, "cbackend: unknown integer operator");
     return;
   }
   if (signed_op)
@@ -565,7 +565,7 @@ static void emit_compare(LainBackend *be, const L1Region *region,
   case INST_UGT: op = ">"; break;
   case INST_UGE: op = ">="; break;
   default:
-    fail(be, 9204, "cbackend: unknown comparison");
+    fail(be, LAINBACKEND_ERR_COMPARE, "cbackend: unknown comparison");
     return;
   }
   if (sign)
@@ -588,7 +588,7 @@ static void emit_float_binary(LainBackend *be, const L1Region *region,
   case INST_FMUL: op = "*"; break;
   case INST_FDIV: op = "/"; break;
   default:
-    fail(be, 9205, "cbackend: unknown float operator");
+    fail(be, LAINBACKEND_ERR_FLOAT_OP, "cbackend: unknown float operator");
     return;
   }
   if (width == 32)
@@ -598,7 +598,7 @@ static void emit_float_binary(LainBackend *be, const L1Region *region,
     emitf(be, "%s = l1_f64_bits(l1_f64_of(%s) %s l1_f64_of(%s));\n", dest, a, op,
           b);
   else
-    fail(be, 9206, "cbackend: unsupported float format");
+    fail(be, LAINBACKEND_ERR_FLOAT_FORMAT, "cbackend: unsupported float format");
 }
 
 static void emit_float_compare(LainBackend *be, const L1Region *region,
@@ -624,7 +624,7 @@ static void emit_float_compare(LainBackend *be, const L1Region *region,
   case INST_FUGT: op = ">"; unordered_wanted = true; break;
   case INST_FUGE: op = ">="; unordered_wanted = true; break;
   default:
-    fail(be, 9207, "cbackend: unknown float comparison");
+    fail(be, LAINBACKEND_ERR_FLOAT_COMPARE, "cbackend: unknown float comparison");
     return;
   }
   if (unordered_wanted)
@@ -647,7 +647,7 @@ static void emit_loop(LainBackend *be, const L1Inst *inst, const L1Region *regio
   uint32_t i;
 
   if (!inst->label) {
-    fail(be, 9208, "cbackend: loop without a label");
+    fail(be, LAINBACKEND_ERR_LOOP_LABEL, "cbackend: loop without a label");
     return;
   }
   ctx.label = inst->label;
@@ -666,7 +666,7 @@ static void emit_loop(LainBackend *be, const L1Inst *inst, const L1Region *regio
     if (body->params[i].init.kind == OPERAND_VALUE) {
       uint32_t slot = 0;
       if (!resolve_slot(be, region, body->params[i].init.name, &slot)) {
-        fail(be, 9209, "cbackend: undefined loop initial value");
+        fail(be, LAINBACKEND_ERR_LOOP_INIT, "cbackend: undefined loop initial value");
         return;
       }
       snprintf(value, sizeof(value), "r[%u]", slot);
@@ -707,7 +707,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
   case INST_SHL: case INST_LSHR: case INST_ASHR:
   case INST_SDIV: case INST_UDIV: case INST_SREM: case INST_UREM:
     if (width > 64) {
-      fail(be, 9210, "cbackend: integer width above 64 needs legalization");
+      fail(be, LAINBACKEND_ERR_WIDE_INT, "cbackend: integer width above 64 needs legalization");
       return;
     }
     emit_int_arith(be, region, inst, width, dest);
@@ -789,7 +789,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
     uint32_t bytes = is_addr ? 8u : (width >= 8 ? width / 8u : 1u);
     operand_expr(be, region, inst, 0, a, sizeof(a));
     if (bytes > 8) {
-      fail(be, 9211, "cbackend: load wider than 8 bytes needs legalization");
+      fail(be, LAINBACKEND_ERR_WIDE_LOAD, "cbackend: load wider than 8 bytes needs legalization");
       return;
     }
     emitf(be, "%s = (l1v)(*(const %s *)(uintptr_t)(%s)) & l1_mask(%u);\n", dest,
@@ -803,7 +803,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
     operand_expr(be, region, inst, 0, value, sizeof(value));
     operand_expr(be, region, inst, 1, a, sizeof(a));
     if (bytes > 8) {
-      fail(be, 9212, "cbackend: store wider than 8 bytes needs legalization");
+      fail(be, LAINBACKEND_ERR_WIDE_STORE, "cbackend: store wider than 8 bytes needs legalization");
       return;
     }
     emitf(be, "*(%s *)(uintptr_t)(%s) = (%s)(%s & l1_mask(%u));\n",
@@ -836,7 +836,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
       }
     }
     if (!symbol) {
-      fail(be, 9214, "cbackend: unknown data symbol");
+      fail(be, LAINBACKEND_ERR_DATA_SYMBOL, "cbackend: unknown data symbol");
       return;
     }
     mangle(name, sizeof(name), symbol, "l1_data_");
@@ -847,7 +847,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
     char name[128];
     const L1Subroutine *callee = find_sub(be->module, inst->symbol);
     if (!callee) {
-      fail(be, 9215, "cbackend: unknown subroutine in #proc_addr");
+      fail(be, LAINBACKEND_ERR_PROC_ADDR, "cbackend: unknown subroutine in #proc_addr");
       return;
     }
     mangle(name, sizeof(name), callee->name, "sub_");
@@ -860,7 +860,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
     char name[128];
     uint32_t k;
     if (!callee) {
-      fail(be, 9216, "cbackend: unknown callee");
+      fail(be, LAINBACKEND_ERR_CALLEE, "cbackend: unknown callee");
       return;
     }
     if (callee->flags & SUBROUTINE_EXTERN) {
@@ -868,7 +868,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
       uint32_t result_width =
           callee->result_count > 0 ? width_of_type(callee->results[0]) : 0;
       if (!is_c_identifier(symbol)) {
-        fail(be, 9227, "cbackend: external symbol name is not a C identifier");
+        fail(be, LAINBACKEND_ERR_LINKAGE, "cbackend: external symbol name is not a C identifier");
         return;
       }
       emit_text(be, "{\n");
@@ -988,7 +988,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
 
   case INST_YIELD:
     if (!parent) {
-      fail(be, 9219, "cbackend: #yield outside a region");
+      fail(be, LAINBACKEND_ERR_YIELD_OUTSIDE, "cbackend: #yield outside a region");
       return;
     }
     for (i = 0; i < inst->operand_count; i++) {
@@ -1002,7 +1002,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
   case INST_BREAK: {
     const LoopCtx *ctx = find_loop(loops, inst->label);
     if (!ctx) {
-      fail(be, 9220, "cbackend: #break without a target loop");
+      fail(be, LAINBACKEND_ERR_BREAK_OUTSIDE, "cbackend: #break without a target loop");
       return;
     }
     for (i = 0; i < inst->operand_count; i++) {
@@ -1020,7 +1020,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
   case INST_CONTINUE: {
     const LoopCtx *ctx = find_loop(loops, inst->label);
     if (!ctx) {
-      fail(be, 9221, "cbackend: #continue without a target loop");
+      fail(be, LAINBACKEND_ERR_CONTINUE_OUTSIDE, "cbackend: #continue without a target loop");
       return;
     }
     for (i = 0; i < inst->operand_count; i++) {
@@ -1049,7 +1049,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
   }
 
   default:
-    fail(be, 9222, "cbackend: this operator is not implemented by the C backend");
+    fail(be, LAINBACKEND_ERR_UNIMPLEMENTED, "cbackend: this operator is not implemented by the C backend");
     return;
   }
 }
@@ -1074,7 +1074,7 @@ static void emit_subroutine(LainBackend *be, const L1Subroutine *sub) {
 
   if (sub->flags & SUBROUTINE_EXTERN) return;
   if (sub->body && sub->body->result_count > 0) {
-    fail(be, 9223, "cbackend: procedure body must not declare region results");
+    fail(be, LAINBACKEND_ERR_BODY_RESULTS, "cbackend: procedure body must not declare region results");
     return;
   }
 
@@ -1116,7 +1116,7 @@ static void emit_subroutine(LainBackend *be, const L1Subroutine *sub) {
         if (inst->kind != INST_ALLOCA) continue;
         if (!inst->has_ty || !inst->ty ||
             inst->operands[0].kind == OPERAND_VALUE) {
-          fail(be, 9224, "cbackend: #alloca needs a constant count");
+          fail(be, LAINBACKEND_ERR_ALLOCA_COUNT, "cbackend: #alloca needs a constant count");
           return;
         }
         elem = inst->ty->width >= 8 ? inst->ty->width / 8u : 1u;
