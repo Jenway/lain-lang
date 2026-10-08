@@ -8,7 +8,6 @@
 #include "lain/ir/codes.h"
 #include "lain/ir/core.h"
 #include "lain/vm/caps.h"
-#include "lain/vm/quota.h"
 
 /* 拒绝码；段边界见 lain/ir/codes.h。
  * 9340 起是对 Meta 可见的公开拒码，bootstrap/std 下的 .l1 按号码读它们；

@@ -10,6 +10,7 @@
 #include "lain/text/parse.h"
 #include "lain/ir/verify.h"
 #include "lain/vm/engine.h"
+#include "lain/vm/tcb.h"
 
 static bool fail(L1Diagnostic *diag, int code, const char *message) {
   if (diag) {
