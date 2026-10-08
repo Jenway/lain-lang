@@ -1,4 +1,4 @@
-/* 指令名 <-> 算子。解析器、打印器（以及将来的文档生成）共用一份。 */
+/* 指令名 <-> 算子。解析器与打印器共用一份。 */
 #ifndef LAINIR_OPNAME_H
 #define LAINIR_OPNAME_H
 
