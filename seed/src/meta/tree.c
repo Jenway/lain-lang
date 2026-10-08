@@ -1,4 +1,4 @@
-/* lainmeta/tree.h 的实现：两遍扫描生成平铺 AstIn Arena。
+/* lain/meta/tree.h 的实现：两遍扫描生成平铺 AstIn Arena。
  *
  * 与旧实现的区别只有一个，但是根本性的：节点不再各自 malloc、孩子不再各自一块，
  * 而是**一整块** `64 + 56*N + 8*E` 字节。第一遍数出 N 和 E 并检查语法，第二遍
@@ -22,7 +22,7 @@
  *      的槽位号，自己绝不再取号。
  *   3. 非根组的槽位是 1..G，词的槽位紧随其后 G+1..G+L。
  */
-#include "lainmeta/tree.h"
+#include "lain/meta/tree.h"
 
 #include <stdlib.h>
 #include <string.h>

@@ -9,7 +9,7 @@
 #ifndef LAINIR_INFER_H
 #define LAINIR_INFER_H
 
-#include "lainir/core.h"
+#include "lain/ir/core.h"
 
 typedef struct {
   const L1Module *module;

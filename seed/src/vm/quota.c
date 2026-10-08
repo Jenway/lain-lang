@@ -1,9 +1,9 @@
-/* 分配配额。契约、扣费点与归还规则见 lainvm/quota.h 的文件头。
+/* 分配配额。契约、扣费点与归还规则见 lain/vm/quota.h 的文件头。
  *
  * 纪律：预扣是**原子**的（要么整笔扣掉，要么一分不扣）——失败之后账目必须与
  * 调用前一模一样，否则"分配失败"会留下抹不掉的扣账。
  */
-#include "lainvm/quota.h"
+#include "lain/vm/quota.h"
 
 #include <string.h>
 

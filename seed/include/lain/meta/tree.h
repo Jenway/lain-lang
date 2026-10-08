@@ -4,7 +4,7 @@
  * 注释与括号配对、源码位置、Arena 存储、结构验证。它**不认识** let / func /
  * struct / my_if 的含义——那些全在 Meta 那边。
  *
- * 布局与引用编码的唯一来源是 `lainmeta/ast_v1.h`。这里不给句柄、不给 C 指针：
+ * 布局与引用编码的唯一来源是 `lain/meta/ast_v1.h`。这里不给句柄、不给 C 指针：
  * 引用是「段号 + 段内偏移」的整数，节点在映射格式里。
  *
  * 手工测试与驱动都必须用 `lainmeta_tree_arena` 拿视图，禁止再抄一份布局。
@@ -15,8 +15,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lainmeta/ast_v1.h"
-#include "lainvm/quota.h"
+#include "lain/meta/ast_v1.h"
+#include "lain/vm/quota.h"
 
 typedef struct LainMetaTree LainMetaTree;
 

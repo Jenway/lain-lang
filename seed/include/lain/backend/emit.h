@@ -22,8 +22,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lainir/core.h"
-#include "lainbackend/target.h"
+#include "lain/ir/core.h"
+#include "lain/backend/target.h"
 
 /* 输出口。后端只往这里写，不管外面是文件、缓冲区还是二进制流。 */
 typedef struct {

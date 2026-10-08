@@ -22,12 +22,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lainir/core.h"
-#include "lainvm/image.h"
-#include "lainvm/tcb.h"
+#include "lain/ir/core.h"
+#include "lain/vm/image.h"
+#include "lain/vm/tcb.h"
 
 /* 引擎从映像要四样东西：区域描述、指令、操作数引用、结果槽。
- * 它们的接口在 lainvm/image.h。 */
+ * 它们的接口在 lain/vm/image.h。 */
 
 /* ---------------------------------------------------------------------------
  * 引擎内部助手

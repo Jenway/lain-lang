@@ -1,9 +1,9 @@
-/* lainir/build.h 的实现。
+/* lain/ir/build.h 的实现。
  *
  * 一个 arena：对象一个个从块里切出来，块挂在链表上，free 时整条链回收。
  * 切出来的东西不移动，所以调用方拿到的指针一直有效。
  */
-#include "lainir/build.h"
+#include "lain/ir/build.h"
 
 #include <stdlib.h>
 #include <string.h>

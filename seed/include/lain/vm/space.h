@@ -38,7 +38,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lainvm/quota.h"
+#include "lain/vm/quota.h"
 
 /* 定长：内核结构不做动态分配。2 个模块段 + 各 TCB 的栈 + 宿主注入，
  * 64 足够；满了就是拒绝，不是扩容。 */

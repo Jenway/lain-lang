@@ -1,12 +1,12 @@
 /* LAINIR 验证器。规则见 seed/docs/LAINIR.md §11。 */
-#include "lainir/verify.h"
+#include "lain/ir/verify.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "lainir/infer.h"
+#include "lain/ir/infer.h"
 
 /* 绑定表的**起始**容量，不是上限：按需翻倍。一个过程的活跃绑定数只该由
  * 这个过程自己决定。 */

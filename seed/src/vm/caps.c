@@ -1,8 +1,8 @@
-/* lainvm/caps.h 的实现。
+/* lain/vm/caps.h 的实现。
  *
  * 只在装载 / admit 时查（要 strcmp）；运行期走 TCB 里那份解析好的数组。
  * 登记名会被复制一份由表持有；context 只是引用，表不拥有、不释放。 */
-#include "lainvm/caps.h"
+#include "lain/vm/caps.h"
 
 #include <stdlib.h>
 #include <string.h>

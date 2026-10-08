@@ -18,11 +18,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lainir/core.h"
-#include "lainir/value.h"
-#include "lainvm/caps.h"
-#include "lainvm/quota.h"
-#include "lainvm/space.h"
+#include "lain/ir/core.h"
+#include "lain/ir/value.h"
+#include "lain/vm/caps.h"
+#include "lain/vm/quota.h"
+#include "lain/vm/space.h"
 
 typedef struct LainVmTcb LainVmTcb;
 typedef struct LainVmImage LainVmImage;

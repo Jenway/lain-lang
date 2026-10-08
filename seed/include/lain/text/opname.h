@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lainir/core.h"
+#include "lain/ir/core.h"
 
 /* 算子的文本拼写；未知返回 NULL。 */
 const char *lainir_opcode_name(L1InstKind kind);
