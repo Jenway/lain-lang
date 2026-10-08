@@ -257,7 +257,63 @@ func cstr_len(p: addr) -> u64 {
 （`region_grant`）、`emit_uint`、`scratch_alloc`。逐字节回调不可行 —— 词法器与解析器是
 逐字节跑的。
 
-### 五、结论
+### 五、删除与瘦身（实测口径）
+
+动手做「待做」之前，先看能拿掉什么。口径是静态调用图：根 = 三个 ABI 入口
+（`lain_std_lower` / `lain_std_abi_version` / `lain_std_initialize`）加全部 45 个能力的
+`#extern`；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
+静态图看不见的间接引用。
+
+今天的规模：27 个文件 / 380 个 `#proc` / 116 个 `data` 块；注释 1663 行。
+
+**死 proc：45 个、约 1300 行（约 12%）。**
+
+| 文件 | 个数 | 行数 | 是什么 |
+|---|---|---|---|
+| bootstrap/std/wire.l1 | 16 | 735 | 类型、值、过程引用的 wire 编解码与校验，env 值绑定 |
+| bootstrap/std/eval.l1 | 5 | 191 | bytes 实参请求、emitted 请求、声明闭包与过程引用求值 |
+| bootstrap/std/scope.l1 | 9 | 199 | 依赖闭包一套、`meta_scope_set_payload`、`ast_index_of` |
+| bootstrap/std/parse.l1 | 7 | 93 | `meta_sem_put` / `meta_sem_annotate` / `meta_sem_binding` / `meta_sem_expansion` 一系 |
+| bootstrap/std/registry.l1 | 6 | 46 | `meta_tid_owner` / `meta_tid_namespace` / `meta_tid_field_*` |
+| bootstrap/std/modules.l1 | 2 | 34 | `meta_cstr_len`、`meta_slice_equals` |
+
+最大的单条：`meta_record_type_from_field_list`@bootstrap/std/wire.l1:571（166 行）、
+`meta_wire_validate`@bootstrap/std/wire.l1:171（119）、
+`meta_eval_apply_decl_closure`@bootstrap/std/eval.l1:76（112）、
+`meta_wire_validate_field_list`@bootstrap/std/wire.l1:84（87）、
+`meta_scope_dependency_closure`@bootstrap/std/scope.l1:664（77）。
+
+**别删**：bootstrap/std/funcs.l1 的 `meta_lower_stmt` / `meta_lower_if` / `meta_lower_for` /
+`meta_lower_body` 是活的（`meta_lower_decl_func` → `meta_lower_body`）。
+
+bootstrap/std/wire.l1 那一层只被死代码调用，但它是《层 0》的现存对应物（本文 :36、:239、
+:278 三处如此描述），所以删它要同时改本文 —— 它是「第二步的存货」，不是垃圾。
+bootstrap/std/eval.l1 的 bytes 与 emitted 请求同理：功能没接线，不是写错了。
+
+**未被引用的 `data` 块 10 个**：`meta_kw_arrow`@bootstrap/std/lex.l1:93、
+`meta_o1`@bootstrap/std/emit.l1:81、`meta_o5`@bootstrap/std/emit.l1:85、
+`meta_s2`@bootstrap/std/emit.l1:207、`meta_s3a`@bootstrap/std/emit.l1:208、
+`meta_s3b`@bootstrap/std/emit.l1:209、`meta_s4a`@bootstrap/std/emit.l1:210、
+`meta_s4b`@bootstrap/std/emit.l1:211、`meta_reg_entry_off`@bootstrap/std/registry.l1:30、
+`meta_reg_entry_size`@bootstrap/std/registry.l1:32。
+
+**从未被调用的能力包装 7 个**（bootstrap/std/emit.l1 的 `#extern` 加 seed/src/meta/host.c
+的登记，删要两侧一起，能力表 45 → 38）：`lain_meta_emit_data`@bootstrap/std/emit.l1:19、
+`lain_meta_emit_length`@bootstrap/std/emit.l1:20、
+`lain_meta_apply_emitted_bytes_request`@bootstrap/std/emit.l1:35、
+`lain_meta_ast_root`@bootstrap/std/emit.l1:48、`lain_meta_ast_tx_release`@bootstrap/std/emit.l1:55、
+`lain_meta_diagnostic_field`@bootstrap/std/emit.l1:284、
+`lain_meta_apply_diagnostic_field`@bootstrap/std/emit.l1:285。
+
+**其他杠杆**：注释 1663 行，最重的几个是 bootstrap/std/emit.l1 82/287（29%）、
+bootstrap/std/parse.l1 189/749（25%）、bootstrap/std/types.l1 22/102（22%）、
+bootstrap/std/recognize.l1 115/539（21%）、bootstrap/meta.l1 258/1221（21%）；
+bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
+
+**顺序**：先删未被引用的 `data` 块与未被调用的能力（无风险）；wire 那一层删还是留由设计定，
+留就加一句「当前不可达」的注释。
+
+### 六、结论
 
 今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（带标注）/ `if`（括号）/ `for` /
 三个算子。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
