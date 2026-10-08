@@ -37,7 +37,7 @@ typedef struct {
 
 void lainvm_quota_init(LainVmQuota *quota, uint64_t limit_bytes);
 
-/* 预扣 bytes 字节。成功返回 0；余额不足或加法溢出返回 LAINVM_QUOTA_TRAP，
+/* 预扣 bytes 字节。成功返回 0；余额不足或加法溢出返回 LAINVM_TRAP_QUOTA，
  * 并且**不改变账目**（要么整笔扣掉，要么一分不扣）。 */
 int lainvm_quota_charge(LainVmQuota *quota, uint64_t bytes);
 
