@@ -970,6 +970,8 @@
     // 阶段二：%c 是算子、或者是表达式的终点
     %bat = #call meta_node_start(%c)
     %bb = #call bs_byte_at(%base, %bat, %len)
+    // 算子符号的长度也要带下去：`==` 是双字节，查表按长度比。
+    %bn = #call meta_node_len(%c)
     %isnone2 = #eq[#bits<64>](%c, 0)
     %issemi2 = #eq[#bits<8>](%bb, 59)
     %iscomma2 = #eq[#bits<8>](%bb, 44)
@@ -999,7 +1001,7 @@
       }
       #break e(0)
     }
-    %isop = #call bs_is_operator(%bb)
+    %isop = #call bs_is_operator(%bb, %bn)
     %notop = #eq[#bits<1>](%isop, 0)
     #if %notop {
       // 既不是算子也不是终点：`1 + 2 3` 之类
@@ -1114,12 +1116,12 @@
     // 现在才查物理算子。从这往后到这条指令发完，**不能再有任何递归调用** ——
     // 否则 `+24`/`+32` 里的名字会被换掉。
     %sym = #lea(%base, %bat, 1, 0)
-    %ctx_phys = #call meta_op_resolve(%base, %len, %tlo2, %thi2, %sym, 1)
+    %ctx_phys = #call meta_op_resolve(%base, %len, %tlo2, %thi2, %sym, %bn)
     %ctx_miss = #eq[#bits<64>](%ctx_phys, 0xFFFFFFFFFFFFFFFF)
     %try_default = #and[#bits<1>](%both_lit, %ctx_miss)
     %def_phys = #if %try_default -> (#bits<64>) {
-      %p0 = #call meta_op_resolve_default(%base, %len, %sym, %alo, %ahi,
-                                          %rn_lo2, %rn_hi2)
+      %p0 = #call meta_op_resolve_default(%base, %len, %sym, %bn,
+                                          %alo, %ahi, %rn_lo2, %rn_hi2)
       #yield %p0
     } else {
       #yield 0xFFFFFFFFFFFFFFFF
@@ -1174,7 +1176,8 @@
     %nx2c = #call ast_child(%parent, %nx2)
     %a_at = #call meta_node_start(%nx2c)
     %a_b = #call bs_byte_at(%base, %a_at, %len)
-    %a_op = #call bs_is_operator(%a_b)
+    %a_nl = #call meta_node_len(%nx2c)
+    %a_op = #call bs_is_operator(%a_b, %a_nl)
     %last = #eq[#bits<1>](%a_op, 0)
     %is_bind = #eq[#bits<64>](%close, 1)
     %named = #and[#bits<1>](%is_bind, %last)
