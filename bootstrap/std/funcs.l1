@@ -50,8 +50,18 @@
   %b = #call bs_byte_at(%base, %lo, %len)
   %is_num = #call bs_is_digit(%b)
   %st = #if %is_num -> (#bits<32>) {
-    %v = #call bs_read_uint(%base, %lo, %len)
-    %w = #call meta_emit_uint(%v)
+    // 数字开头不等于读得出值：`0x` 后面没有十六进制数字、`0x10` 这种**整段**都得是
+    // 合法字面量。不查的话 `bs_read_uint` 只读出前缀能读的那部分，剩下的悄悄丢掉
+    // —— 静默给错值是本仓库禁止的失败方式。
+    %oknum = #call meta_is_int_literal(%base, %lo, %hi, %len)
+    %w = #if %oknum -> (#bits<32>) {
+      %v = #call bs_read_uint(%base, %lo, %len)
+      %w0 = #call meta_emit_uint(%v)
+      #yield %w0
+    } else {
+      %badlit = #call lain_meta_fail(4)
+      #yield 4
+    }
     #yield %w
   } else {
     // 诊断（安全格 2104/2112/2120）：先量出 %lo/%hi/%len 的真实值。

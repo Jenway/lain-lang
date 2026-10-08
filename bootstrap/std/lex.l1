@@ -17,6 +17,20 @@
   #return %r
 }
 
+// 十六进制数字（0-9 a-f A-F）？
+#proc bs_is_hex_digit(%b: #bits<8>) -> #bits<1> {
+  %d = #call bs_is_digit(%b)
+  %llo = #uge[#bits<8>](%b, 97)
+  %lhi = #ule[#bits<8>](%b, 102)
+  %lower = #and[#bits<1>](%llo, %lhi)
+  %ulo = #uge[#bits<8>](%b, 65)
+  %uhi = #ule[#bits<8>](%b, 70)
+  %upper = #and[#bits<1>](%ulo, %uhi)
+  %t = #or[#bits<1>](%lower, %upper)
+  %r = #or[#bits<1>](%t, %d)
+  #return %r
+}
+
 // 标识符字符（字母、数字、下划线）？
 #proc bs_is_ident(%b: #bits<8>) -> #bits<1> {
   %digit = #call bs_is_digit(%b)
@@ -163,8 +177,77 @@ data meta_kw_acc ro { 97 99 99 }                       // "acc"  3
   #return %end
 }
 
-// 从 start 起读一个十进制无符号整数；遇到第一个非数字就停。
+// 从 start 起读十六进制数字（`0x` 后面那段）；遇到第一个非十六进制字符就停。
+#proc bs_read_hex(%base: #addr, %start: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %value = #loop scan(%i: #bits<64> = %start, %v: #bits<64> = 0) -> (#bits<64>) {
+    %more = #ult[#bits<64>](%i, %len)
+    #if %more {
+      %p = #lea(%base, %i, 1, 0)
+      %b = #load[#bits<8>](%p)
+      %is_h = #call bs_is_hex_digit(%b)
+      #if %is_h {
+        %val = #call bs_digit_value(%b)
+        %v16 = #mul[#bits<64>](%v, 16)
+        %v2 = #add[#bits<64>](%v16, %val)
+        %n = #add[#bits<64>](%i, 1)
+        #continue scan(%n, %v2)
+      } else {
+        #break scan(%v)
+      }
+    } else {
+      #break scan(%v)
+    }
+  }
+  #return %value
+}
+
+// 一个字符的数值：`0`-`9` → 0-9，`a`-`f`/`A`-`F` → 10-15，别的 → 「无」。
+#proc bs_digit_value(%b: #bits<8>) -> #bits<64> {
+  %d = #call bs_is_digit(%b)
+  %r = #if %d -> (#bits<64>) {
+    %w = #zext[#bits<64>](%b)
+    %v = #sub[#bits<64>](%w, 48)
+    #yield %v
+  } else {
+    %h = #call bs_is_hex_digit(%b)
+    %r2 = #if %h -> (#bits<64>) {
+      %is_lo = #uge[#bits<8>](%b, 97)
+      %base = #if %is_lo -> (#bits<64>) { #yield 87 } else { #yield 55 }
+      %w2 = #zext[#bits<64>](%b)
+      %v2 = #sub[#bits<64>](%w2, %base)
+      #yield %v2
+    } else {
+      #yield 0xFFFFFFFFFFFFFFFF
+    }
+    #yield %r2
+  }
+  #return %r
+}
+
+// 从 start 起读一个整数：`0x`/`0X` 开头按十六进制，否则十进制；遇到第一个不属于
+// 该进制的字符就停。
 #proc bs_read_uint(%base: #addr, %start: #bits<64>, %len: #bits<64>) -> #bits<64> {
+  %b0 = #call bs_byte_at(%base, %start, %len)
+  %is_zero = #eq[#bits<8>](%b0, 48)
+  %n1 = #add[#bits<64>](%start, 1)
+  %b1 = #call bs_byte_at(%base, %n1, %len)
+  %lx = #eq[#bits<8>](%b1, 120)
+  %ux = #eq[#bits<8>](%b1, 88)
+  %x = #or[#bits<1>](%lx, %ux)
+  %hex = #and[#bits<1>](%is_zero, %x)
+  %r = #if %hex -> (#bits<64>) {
+    %s2 = #add[#bits<64>](%start, 2)
+    %hv = #call bs_read_hex(%base, %s2, %len)
+    #yield %hv
+  } else {
+    %dv = #call bs_read_dec(%base, %start, %len)
+    #yield %dv
+  }
+  #return %r
+}
+
+// 从 start 起读一个十进制无符号整数；遇到第一个非数字就停。
+#proc bs_read_dec(%base: #addr, %start: #bits<64>, %len: #bits<64>) -> #bits<64> {
   %value = #loop scan(%i: #bits<64> = %start, %v: #bits<64> = 0) -> (#bits<64>) {
     %more = #ult[#bits<64>](%i, %len)
     #if %more {

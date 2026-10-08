@@ -499,22 +499,42 @@
   #return %status
 }
 
-// 这段字节**全是**十进制数字吗？`0x10` 不是：`bs_read_uint` 在 `x` 停下，
-// 只读出 `0`，剩下的悄悄丢掉。
-#proc meta_all_digits(%base: #addr, %lo: #bits<64>, %hi: #bits<64>,
-                       %len: #bits<64>) -> #bits<1> {
-  %r = #loop s(%i: #bits<64> = %lo) -> (#bits<1>) {
+// 这段字节是一个**完整**的整数字面量吗？十进制全数字，或 `0x`/`0X` 后跟至少一位十六
+// 进制数字。**整段必须用完**：`0x10` 曾经被 `bs_read_uint` 读成 `0` 而把 `x10` 悄悄丢掉。
+#proc meta_is_int_literal(%base: #addr, %lo: #bits<64>, %hi: #bits<64>,
+                           %len: #bits<64>) -> #bits<1> {
+  %b0 = #call bs_byte_at(%base, %lo, %len)
+  %is_zero = #eq[#bits<8>](%b0, 48)
+  %n1 = #add[#bits<64>](%lo, 1)
+  %b1 = #call bs_byte_at(%base, %n1, %len)
+  %lx = #eq[#bits<8>](%b1, 120)
+  %ux = #eq[#bits<8>](%b1, 88)
+  %x = #or[#bits<1>](%lx, %ux)
+  %hex = #and[#bits<1>](%is_zero, %x)
+  %first = #if %hex -> (#bits<64>) {
+    %s2 = #add[#bits<64>](%lo, 2)
+    #yield %s2
+  } else {
+    #yield %lo
+  }
+  %r = #loop s(%i: #bits<64> = %first, %any: #bits<1> = 0) -> (#bits<1>) {
     %more = #ult[#bits<64>](%i, %hi)
     #if %more {
       %b = #call bs_byte_at(%base, %i, %len)
-      %ok = #call bs_is_digit(%b)
+      %ok = #if %hex -> (#bits<1>) {
+        %h = #call bs_is_hex_digit(%b)
+        #yield %h
+      } else {
+        %d = #call bs_is_digit(%b)
+        #yield %d
+      }
       #if %ok {
         %n = #add[#bits<64>](%i, 1)
-        #continue s(%n)
+        #continue s(%n, 1)
       }
       #break s(0)
     } else {
-      #break s(1)
+      #break s(%any)
     }
   }
   #return %r
@@ -531,7 +551,7 @@
                          %kind: #bits<64>, %width: #bits<64>) -> #bits<32> {
   %is_src = #eq[#bits<64>](%ref, 0xFFFFFFFFFFFFFFFF)
   %st = #if %is_src -> (#bits<32>) {
-    %digits = #call meta_all_digits(%base, %lo, %hi, %len)
+    %digits = #call meta_is_int_literal(%base, %lo, %hi, %len)
     %s = #if %digits -> (#bits<32>) {
       %isbits = #eq[#bits<64>](%kind, 0)
       %narrow = #ult[#bits<64>](%width, 64)
@@ -579,8 +599,7 @@
 //   - 是算子 → 交给 `meta_emit_chain`，它自己把整条链吃到 `;` 为止；
 //   - 不是算子 → 这段话到这里就该完了，于是要求它后面**紧跟 `;`**。
 //
-// 这些尾巴检查都是给"静默给错值"堵口：`0x10` 会被 `bs_read_uint` 读成 `0`
-// 而把 `x10` 丢掉；`1 + 2 + 3` 曾被只发成 `#add(1,2)` 而把 `+ 3` 丢掉——
+// 这些尾巴检查都是给"静默给错值"堵口：`1 + 2 + 3` 曾被只发成 `#add(1,2)` 而把 `+ 3` 丢掉——
 // 后者算出一个**错的但是合法的**结果。缺少检查，写错的东西会被当成对的算出
 // 来。这正是文档里禁止的失败方式：失败要响，不能静默给错值。
 #proc meta_emit_numeric(%base: #addr, %len: #bits<64>,
@@ -603,7 +622,7 @@
                                %width, %t_lo, %t_hi, %lhs_lo, %lhs_hi)
     #yield %s
   } else {
-    %lhs_digits = #call meta_all_digits(%base, %lhs_lo, %lhs_hi, %len)
+    %lhs_digits = #call meta_is_int_literal(%base, %lhs_lo, %lhs_hi, %len)
     %lhs_semi = #call meta_at_semi(%base, %lhs_hi, %len)
     %lhs_ok = #and[#bits<1>](%lhs_digits, %lhs_semi)
     %lhs_bad = #eq[#bits<1>](%lhs_ok, 0)
@@ -807,7 +826,7 @@
     } else {
       %lo = #call meta_node_start(%nn)
       %hi = #add[#bits<64>](%lo, #call meta_node_len(%nn))
-      %dg = #call meta_all_digits(%base, %lo, %hi, %len)
+      %dg = #call meta_is_int_literal(%base, %lo, %hi, %len)
       #yield %dg
     }
     #yield %d
@@ -1320,10 +1339,10 @@
     // **只在这一种情况下退回**：有名字操作数时（`x < 2`，`x` 是 u32）退回 i32 会把
     // `ult` 发成 `slt` —— 那是静默给错值。
     %l_lit0 = #eq[#bits<64>](%acc, 0xFFFFFFFFFFFFFFFF)
-    %l_dig = #call meta_all_digits(%base, %alo, %ahi, %len)
+    %l_dig = #call meta_is_int_literal(%base, %alo, %ahi, %len)
     %l_lit = #and[#bits<1>](%l_lit0, %l_dig)
     %r_lit0 = #eq[#bits<64>](%rref, 0xFFFFFFFFFFFFFFFF)
-    %r_dig = #call meta_all_digits(%base, %rn_lo2, %rn_hi2, %len)
+    %r_dig = #call meta_is_int_literal(%base, %rn_lo2, %rn_hi2, %len)
     %r_lit = #and[#bits<1>](%r_lit0, %r_dig)
     %both_lit = #and[#bits<1>](%l_lit, %r_lit)
     // 现在才查物理算子。从这往后到这条指令发完，**不能再有任何递归调用** ——

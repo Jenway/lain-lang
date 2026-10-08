@@ -198,12 +198,14 @@ func cstr_len(p: addr) -> u64 {
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
 | 宏 | `my_if`、`my_block`、`my_require` | 编译期展开，过同一道信任门 |
 | 转换 | `x as T`（定宽整数之间） | 变宽发 `#zext`、变窄发 `#trunc`、等宽补一条加零复制；目标类型是**类型名**不是值；源宽度取操作数自己的类型（参数名），取不到才用上下文宽度。样例 `bootstrap/lain/examples/convert.lain` |
-| 负数字面量 | `-5`（负号紧跟十进制数字） | LAINIR 的字面量是无符号十进制文本，没有负号，所以降级成 `#sub[repr](0, 5)`：宽度与符号都取上下文类型。只认字面量，一元负号作用于变量仍报 4。样例 `bootstrap/lain/examples/neg.lain` |
+| 十六进制字面量 | `0x10`、`0Xff` | 读成数值后按**十进制**规范化写进产物（`0xff00` → `65280`）；整段必须是合法数字：`0x` 后面没有数字报 4；超过绑定宽度仍报 23。样例 `bootstrap/lain/examples/hex.lain` |
+| 负数字面量 | `-5`（负号紧跟数字） | LAINIR 的字面量是无符号十进制文本，没有负号，所以降级成 `#sub[repr](0, 5)`：宽度与符号都取上下文类型。只认字面量，一元负号作用于变量仍报 4。样例 `bootstrap/lain/examples/neg.lain` |
 
-实测被拒（列出来是因为它们看着都该能用）：十六进制、字节串字面量报 4；带值 `if` 报 4。
+实测被拒（列出来是因为它们看着都该能用）：字节串字面量报 4；带值 `if` 报 4。
 （`-`、`*`、`%` 曾报 6，比较全集与 `and`、`or`、`<<`、`>>` 曾报 4，已在 A 里补上绑定；
 裸条件 `if a < b` 曾报 4、无标注 `let y = …` 曾报 21，已在 B 的第一半修好；`as` 与负数字面量
-曾报 4，已在 B 的后半修好。）
+曾报 4，已在 B 的后半修好；十六进制 `0x10` 曾被 `bs_read_uint` 静默读成 `0`（更糟：`host_status=0` 而产物是错的），
+已在同一次修好。）
 
 ### 二、半成品：`struct` / `enum` 的值层
 
@@ -233,7 +235,8 @@ func cstr_len(p: addr) -> u64 {
 （`bootstrap/std/funcs.l1` 的 `meta_value_type_window` / `meta_decl_ret_window`，样例
 `bootstrap/lain/examples/flow.lain`）。`as` 也**已完成**：变宽 `#zext`、变窄 `#trunc`、
 等宽加零复制（`meta_emit_op_lit` 按 #data 地址发名字，样例 `convert.lain`）。负数字面量也
-**已完成**：`-5` 发成 `#sub[repr](0, 5)`（样例 `neg.lain`）。剩下十六进制。
+**已完成**：`-5` 发成 `#sub[repr](0, 5)`（样例 `neg.lain`）。十六进制也**已完成**：`0x`/`0X` 前缀由 `bs_read_uint` 按十六进制读，
+整段必须是合法字面量（`0x` 报 4），宽度检查同样生效（样例 `hex.lain`）。**B 至此没有剩余项**。
 
 **C. 内存与地址** —— Meta 的实际工作方式。
 - `addr` 类型（已有）＋ `load` / `store` / `lea`、`p + i`（`#lea` 610 是最大宗内存操作，
