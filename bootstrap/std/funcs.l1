@@ -935,8 +935,10 @@
                      %parent: #bits<64>, %index: #bits<64>,
                      %c: #bits<64>, %r_t_lo: #bits<64>,
                      %r_t_hi: #bits<64>) -> #bits<32> {
-  // `if <条件> <块> [else <块>]`：条件 = 下标+1、块 = 下标+2、else 词 = 下标+3、
-  // 假分支块 = 下标+4。全部由父组与下标推出来，没有一步查「节点自己的后继」。
+  // `if <条件> <块> [else <块>]`：条件从下标+1 开始，**吃到块那个组为止** ——
+  // 条件可以是多 token 的表达式（`if a < b {`），块就是表达式降级停下来的那一格
+  // （终点下标在暂存区 `+192`，见 `meta_emit_expr`）。不是由「下标+2」推出来的：
+  // 那是「条件恰好一格」时的巧合。
   %ci = #add[#bits<64>](%index, 1)
   %cond = #call meta_cursor_next(%parent, %index)
   %nocond = #eq[#bits<64>](%cond, 0)
@@ -944,94 +946,89 @@
     %f0 = #call lain_meta_fail(4)
     #yield 4
   } else {
-    %bi = #add[#bits<64>](%index, 2)
-    %block = #call meta_cursor_next(%parent, %ci)
-    %noblock = #eq[#bits<64>](%block, 0)
-    %s = #if %noblock -> (#bits<32>) {
-      %f1 = #call lain_meta_fail(4)
+    // 条件的上下文类型取本函数的返回类型：`if 1 < 2 {` 这种两个裸字面量的条件要靠
+    // 它查算子表（上下文查不到，才会退回字面量自己的类型）。
+    %ctid = #call meta_type_resolve(%base, %len, %r_t_lo, %r_t_hi)
+    %cmissing = #eq[#bits<64>](%ctid, 0)
+    %ce = #if %cmissing -> (#bits<32>) {
+      %cf = #call lain_meta_fail(5)
+      #yield 5
+    } else {
+      %cinfo = #call meta_tid_repr(%ctid)
+      %ckind = #and[#bits<64>](%cinfo, 255)
+      %cwidth = #and[#bits<64>](#lshr[#bits<64>](%cinfo, 8), 255)
+      %ces = #call meta_emit_expr(%base, %len, %ckind, %cwidth,
+                                  %r_t_lo, %r_t_hi, %parent, %ci, 0, 0, 0, 0)
+      #yield %ces
+    }
+    %cbad = #ne[#bits<32>](%ce, 0)
+    #if %cbad { #return %ce }
+    %csc2 = #call lain_meta_scratch_data()
+    %bi = #call meta_cell_get(#lea(%csc2, 192, 1, 0))
+    %block = #call ast_child(%parent, %bi)
+    %bkind = #call meta_node_kind(%block)
+    %isgroup = #eq[#bits<64>](%bkind, 2)
+    %notgroup = #eq[#bits<1>](%isgroup, 0)
+    %s = #if %notgroup -> (#bits<32>) {
+      // 条件后面不是块
+      %f2 = #call lain_meta_fail(4)
       #yield 4
     } else {
-      %bkind = #call meta_node_kind(%block)
-      %isgroup = #eq[#bits<64>](%bkind, 2)
-      %inner = #if %isgroup -> (#bits<32>) {
-        // Expand 产出的 my_if 保留 `(cond)` Group。条件先走统一表达式入口，
-        // 结果写入 +168/+176/+184；旧 `if flag` 仍写成同一组结果格。
-        %cd = #call ast_delim(%cond)
-        %paren = #eq[#bits<8>](%cd, 40)
-        %cst = #if %paren -> (#bits<32>) {
-          %ctid = #call meta_type_resolve(%base, %len, %r_t_lo, %r_t_hi)
-          %cmissing = #eq[#bits<64>](%ctid, 0)
-          %ce = #if %cmissing -> (#bits<32>) {
-            %cf = #call lain_meta_fail(5)
-            #yield 5
-          } else {
-            %cinfo = #call meta_tid_repr(%ctid)
-            %ckind = #and[#bits<64>](%cinfo, 255)
-            %cwidth = #and[#bits<64>](#lshr[#bits<64>](%cinfo, 8), 255)
-            %ces = #call meta_emit_expr(%base, %len, %ckind, %cwidth,
-                                       %r_t_lo, %r_t_hi, %cond, 0, 0, 0, 0, 0)
-            #yield %ces
-          }
-          #yield %ce
-        } else {
-          %csc = #call lain_meta_scratch_data()
-          %cr = #call meta_cell_put(#lea(%csc, 168, 1, 0), 0xFFFFFFFFFFFFFFFF)
-          %cl0 = #call meta_node_start(%cond)
-          %ch0 = #add[#bits<64>](%cl0, #call meta_node_len(%cond))
-          %cw0 = #call meta_cell_put(#lea(%csc, 176, 1, 0), %cl0)
-          %cw1 = #call meta_cell_put(#lea(%csc, 184, 1, 0), %ch0)
-          #yield 0
-        }
-        %cbad = #ne[#bits<32>](%cst, 0)
-        #if %cbad { #return %cst }
-        %kw = #data_addr meta_st_if
-        %w1 = #call lain_meta_emit_write(%kw, 6)
-        %csc2 = #call lain_meta_scratch_data()
-        %cref = #call meta_cell_get(#lea(%csc2, 168, 1, 0))
-        %cl = #call meta_cell_get(#lea(%csc2, 176, 1, 0))
-        %ch = #call meta_cell_get(#lea(%csc2, 184, 1, 0))
-        %w2 = #call meta_emit_ref2(%base, %len, %cref, %cl, %ch)
-        %ob = #data_addr meta_fn_open
-        %w3 = #call lain_meta_emit_write(%ob, 3)
-        %bst = #call meta_lower_body(%base, %len, %block, %r_t_lo,
-                                     %r_t_hi)
-        %bfail = #ne[#bits<32>](%bst, 0)
-        #if %bfail {
-          #return %bst
-        }
-        // `else` 可选。它自己带收掉 `if` 块的那个 `}`，所以有它就先写 `  } else {`，
-        // 没有就直接写 `  }\n`；两种情况都在最后收一次尾。else 词在块的下一个位置。
-        %ei = #add[#bits<64>](%index, 3)
-        %af = #call meta_cursor_next(%parent, %bi)
-        %ekw = #data_addr meta_kw_else
-        %is_else = #call meta_node_is_word(%af, %base, %ekw, 4)
-        #if %is_else {
-          %egrp = #call meta_cursor_next(%parent, %ei)
-          %ek = #call meta_node_kind(%egrp)
-          %eisgrp = #eq[#bits<64>](%ek, 2)
-          %enotgrp = #eq[#bits<1>](%eisgrp, 0)
-          #if %enotgrp {
-            // `else` 后面不是块
-            %f3 = #call lain_meta_fail(4)
-            #return 4
-          }
-          %ew = #data_addr meta_st_else
-          %w5 = #call lain_meta_emit_write(%ew, 11)
-          %bst2 = #call meta_lower_body(%base, %len, %egrp, %r_t_lo,
-                                        %r_t_hi)
-          %bf2 = #ne[#bits<32>](%bst2, 0)
-          #if %bf2 {
-            #return %bst2
-          }
-        }
-        %cl2 = #data_addr meta_st_lend
-        %w4 = #call lain_meta_emit_write(%cl2, 4)
-        #yield 0
-      } else {
-        %f2 = #call lain_meta_fail(4)
-        #yield 4
+      // 先发 `#if <条件> {`，再降级块。条件的值引用已经在 168/176/184 那一格。
+      %kw = #data_addr meta_st_if
+      %w1 = #call lain_meta_emit_write(%kw, 6)
+      %cref = #call meta_cell_get(#lea(%csc2, 168, 1, 0))
+      %cl = #call meta_cell_get(#lea(%csc2, 176, 1, 0))
+      %ch = #call meta_cell_get(#lea(%csc2, 184, 1, 0))
+      %w2 = #call meta_emit_ref2(%base, %len, %cref, %cl, %ch)
+      %ob = #data_addr meta_fn_open
+      %w3 = #call lain_meta_emit_write(%ob, 3)
+      %bst = #call meta_lower_body(%base, %len, %block, %r_t_lo, %r_t_hi)
+      %bfail = #ne[#bits<32>](%bst, 0)
+      #if %bfail {
+        #return %bst
       }
-      #yield %inner
+      // `else` 可选。它自己带收掉 `if` 块的那个 `}`，所以有它就先写 `  } else {`，
+      // 没有就直接写 `  }` 加换行；两种情况都在最后收一次尾。else 词就在块组的下一格。
+      %ei = #add[#bits<64>](%bi, 1)
+      %af = #call meta_cursor_next(%parent, %bi)
+      %ekw = #data_addr meta_kw_else
+      %is_else = #call meta_node_is_word(%af, %base, %ekw, 4)
+      #if %is_else {
+        %egrp = #call meta_cursor_next(%parent, %ei)
+        %ek = #call meta_node_kind(%egrp)
+        %eisgrp = #eq[#bits<64>](%ek, 2)
+        %enotgrp = #eq[#bits<1>](%eisgrp, 0)
+        #if %enotgrp {
+          // `else` 后面不是块
+          %f3 = #call lain_meta_fail(4)
+          #return 4
+        }
+        %ew = #data_addr meta_st_else
+        %w5 = #call lain_meta_emit_write(%ew, 11)
+        %bst2 = #call meta_lower_body(%base, %len, %egrp, %r_t_lo, %r_t_hi)
+        %bf2 = #ne[#bits<32>](%bst2, 0)
+        #if %bf2 {
+          #return %bst2
+        }
+      }
+      %cl2 = #data_addr meta_st_lend
+      %w4 = #call lain_meta_emit_write(%cl2, 4)
+      // 调用方（`meta_lower_body`）要从这里接着数下一条语句。条件多 token 时块的
+      // 位置不是常数，所以由本过程把「整条 if 之后的下标」与「有没有 else」写进
+      // 暂存区。**必须写在最后**：块里的嵌套 if 也会写这两格，写完就没有别的调用了。
+      %rsc = #call lain_meta_scratch_data()
+      %resume = #if %is_else -> (#bits<64>) {
+        %r2 = #add[#bits<64>](%ei, 2)
+        #yield %r2
+      } else {
+        %r1b = #add[#bits<64>](%bi, 1)
+        #yield %r1b
+      }
+      %pr = #call meta_cell_put(#lea(%rsc, 2408, 1, 0), %resume)
+      %ie64 = #zext[#bits<64>](%is_else)
+      %pe = #call meta_cell_put(#lea(%rsc, 2416, 1, 0), %ie64)
+      #yield 0
     }
     #yield %s
   }
@@ -1063,19 +1060,15 @@
         #if %ibad {
           #break stmts(%ist)
         }
-        // `if` 吃掉：if 词、条件、块，共三格。
-        %n1i = #add[#bits<64>](%si, 3)
-        %n1 = #call ast_child(%body, %n1i)
-        // 有 `else` 就再跳过一个块。**`else` 后面那个块不是一条新语句** —— 不跳的
-        // 话它会被当成语句去 `meta_find_semi`，报一个跟真实原因无关的 21。
-        %ekw2 = #data_addr meta_kw_else
-        %has_else = #call meta_node_is_word(%n1, %base, %ekw2, 4)
-        %next0 = #if %has_else -> (#bits<64>) {
-          %nx = #add[#bits<64>](%n1i, 2)
-          #yield %nx
-        } else {
-          #yield %n1i
-        }
+        // 下一条语句从哪继续：条件是多 token 时块的位置不是常数，所以由
+        // `meta_lower_if` 把「整条 if 之后的下标」和「有没有 else」写在暂存区
+        // 2408/2416（它在返回前最后才写，块里的嵌套 if 覆盖不掉）。跳错的话
+        // `else` 后面那个块会被当成一条新语句去 `meta_find_semi`，报一个跟真实原因
+        // 无关的 21。
+        %isc = #call lain_meta_scratch_data()
+        %next0 = #call meta_cell_get(#lea(%isc, 2408, 1, 0))
+        %eflag = #call meta_cell_get(#lea(%isc, 2416, 1, 0))
+        %has_else = #ne[#bits<64>](%eflag, 0)
         // 有 `else` 说明两支都以 `return` 收尾（`meta_lower_body` 逼的），所以这条
         // 语句一定终结 —— `saw_ret` 跟着置 1。没有 `else` 就保持原样。
         #continue stmts(%next0, %has_else)
@@ -1132,9 +1125,44 @@
             }
             #yield %b
           } else {
-            // 本地变量必须写类型标注
-            %f1 = #call lain_meta_fail(21)
-            #yield 21
+            // 没有类型标注：`let y = <值>;`。值在 si+3（`let`、名字、`=`、值）。
+            // 类型窗口从**值**求（见 `meta_value_type_window`）：调用取被调方声明的
+            // 返回类型、参数名取参数表、括号往里一层；都不是就退回本函数的返回类型
+            // 当上下文 —— 本地变量本来就没有类型来源（`meta_word_type_name` 只认参数）。
+            %eq_i2 = #add[#bits<64>](%si, 2)
+            %eq_n2 = #call ast_child(%body, %eq_i2)
+            %eqkw = #data_addr meta_kw_eq
+            %is_eq2 = #call meta_node_is_word(%eq_n2, %base, %eqkw, 1)
+            %y = #if %is_eq2 -> (#bits<32>) {
+              %vi2 = #add[#bits<64>](%si, 3)
+              %v2 = #call ast_child(%body, %vi2)
+              %for_h2 = #call meta_syntax_lookup(%v2, 1, 0, 2)
+              %is_for2 = #eq[#bits<64>](%for_h2, 10)
+              %no_for2 = #eq[#bits<1>](%is_for2, 0)
+              %z = #if %no_for2 -> (#bits<32>) {
+                %vt_lo = #call meta_value_type_window(%base, %len, %body, %vi2,
+                                                      %r_t_lo, %r_t_hi)
+                %tsc = #call lain_meta_scratch_data()
+                %vt_hi = #call meta_cell_get(#lea(%tsc, 0, 1, 0))
+                %n2_lo = #call meta_node_start(%name_node)
+                %n2_hi = #add[#bits<64>](%n2_lo,
+                                          #call meta_node_len(%name_node))
+                %st2 = #call meta_lower_stmt(%base, %len, %body, %si, %vi2,
+                                             %semi, 0, %n2_lo, %n2_hi, %vt_lo,
+                                             %vt_hi)
+                #yield %st2
+              } else {
+                // `let y = for ...`：循环要知道累加器的类型才发得出 `#loop` 的结果宽度
+                %f1b = #call lain_meta_fail(21)
+                #yield 21
+              }
+              #yield %z
+            } else {
+              // 形状不像 `let 名字 = …`
+              %f1c = #call lain_meta_fail(21)
+              #yield 21
+            }
+            #yield %y
           }
           #yield %x
         } else {
@@ -1256,6 +1284,90 @@
 //
 // `%parent/%index` 是 `func` 这个词在顶层序列里的出现位置：名、参数组、`->`、返回
 // 类型、体，全是「父组 + 下标 + n」。`%node` 仍然传进来（上游已经取到手，省一次）。
+// 过程声明的**返回类型**窗口：起点是返回值，终点写进暂存区 `+0`（与
+// `meta_word_type_name` 同一个约定 —— 调用方求完窗口要**紧接着**读 `+0`）。
+// 找不到回「无」。
+//
+// 声明在作用域里的出现位置是（父组 `aux`、下标 `emitted`）；返回类型就在那个
+// `func` 词的后面第 4 格 —— 与 `meta_lower_func_inner` 读的是同一个形状。按名字查表
+// **不加**依赖边：调用那条路（`meta_scope_require_func`）已经加过了。
+#proc meta_decl_ret_window(%name: #addr, %name_len: #bits<64>) -> #bits<64> {
+  %index = #call meta_scope_find(%name, %name_len)
+  %found = #ne[#bits<64>](%index, 0xFFFFFFFFFFFFFFFF)
+  %kind = #if %found -> (#bits<64>) {
+    %k = #call meta_scope_kind(%index)
+    #yield %k
+  } else { #yield 0 }
+  %is_func = #eq[#bits<64>](%kind, 6)
+  %r = #if %is_func -> (#bits<64>) {
+    %parent = #call meta_scope_aux(%index)
+    %at = #call meta_scope_emitted(%index)
+    %ri = #add[#bits<64>](%at, 3)
+    %ret_node = #call meta_cursor_next(%parent, %ri)
+    %none = #eq[#bits<64>](%ret_node, 0)
+    %w = #if %none -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %lo = #call meta_node_start(%ret_node)
+      %hi = #add[#bits<64>](%lo, #call meta_node_len(%ret_node))
+      %sc = #call lain_meta_scratch_data()
+      %put = #call meta_cell_put(#lea(%sc, 0, 1, 0), %hi)
+      #yield %lo
+    }
+    #yield %w
+  } else {
+    #yield 0xFFFFFFFFFFFFFFFF
+  }
+  #return %r
+}
+
+// 没有类型标注的绑定（`let y = <值>;`）：类型名窗口从**值**求出来。
+//   调用 `f(...)`  -> 被调方声明的返回类型（`meta_decl_ret_window`）
+//   参数名          -> 参数表里那个名字的类型（`meta_word_type_name`）
+//   括号            -> 往里一层
+//   其余（字面量 / 本地变量）-> 本函数的返回类型，只当**上下文**用：两个裸字面量的
+//                    算子由 `meta_emit_expr` 自己退回「装得下的第一个类型」
+#proc meta_value_type_window(%base: #addr, %len: #bits<64>,
+                             %parent: #bits<64>, %vi: #bits<64>,
+                             %r_t_lo: #bits<64>,
+                             %r_t_hi: #bits<64>) -> #bits<64> {
+  %form = #call meta_node_form(%parent, %vi)
+  %is_group = #eq[#bits<64>](%form, 2)
+  %r = #if %is_group -> (#bits<64>) {
+    // 括号：值在组里面，游标进组、下标归零。
+    %gv = #call ast_child(%parent, %vi)
+    %gi = #call meta_value_type_window(%base, %len, %gv, 0, %r_t_lo,
+                                       %r_t_hi)
+    #yield %gi
+  } else {
+    %is_call = #eq[#bits<64>](%form, 5)
+    %c = #if %is_call -> (#bits<64>) {
+      %v = #call ast_child(%parent, %vi)
+      %c_lo = #call meta_node_start(%v)
+      %c_hi = #add[#bits<64>](%c_lo, #call meta_node_len(%v))
+      %name = #lea(%base, %c_lo, 1, 0)
+      %n_len = #sub[#bits<64>](%c_hi, %c_lo)
+      %cwin = #call meta_decl_ret_window(%name, %n_len)
+      #yield %cwin
+    } else {
+      %v2 = #call ast_child(%parent, %vi)
+      %twin = #call meta_word_type_name(%base, %len, %v2)
+      #yield %twin
+    }
+    %miss = #eq[#bits<64>](%c, 0xFFFFFFFFFFFFFFFF)
+    %f = #if %miss -> (#bits<64>) {
+      // 求不出来：退回本函数的返回类型，交给表达式发射器自己去定宽度。
+      %sc = #call lain_meta_scratch_data()
+      %put = #call meta_cell_put(#lea(%sc, 0, 1, 0), %r_t_hi)
+      #yield %r_t_lo
+    } else {
+      #yield %c
+    }
+    #yield %f
+  }
+  #return %r
+}
+
 #proc meta_lower_func(%base: #addr, %len: #bits<64>,
                       %parent: #bits<64>, %index: #bits<64>,
                       %node: #bits<64>) -> #bits<32> {

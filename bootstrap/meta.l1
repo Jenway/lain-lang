@@ -981,7 +981,21 @@
     %endok = #if %need_semi -> (#bits<1>) {
       #yield %issemi2
     } else {
-      #yield %anyend
+      // 块组 `{` 也是终点：`if a < b { … }` 的条件从下标+1 一路吃到块，块是**下一个
+      // 兄弟**（不是操作数）。算子位置上出现一个花括号组只可能是这个意思 ——
+      // 操作数位置上的组在阶段一就被吃掉了。
+      //
+      // 只在**别的终点都不成立**时才去看这个节点：走到了兄弟链末尾时 `%c` 是空
+      // 引用，对它取分隔符会撞上「空引用不是节点」那条拒码。
+      %ends = #if %anyend -> (#bits<1>) {
+        #yield 1
+      } else {
+        %iskind2 = #eq[#bits<64>](#call meta_node_kind(%c), 2)
+        %isbrace = #eq[#bits<8>](#call ast_delim(%c), 123)
+        %isblock = #and[#bits<1>](%iskind2, %isbrace)
+        #yield %isblock
+      }
+      #yield %ends
     }
     #if %endok {
       %sc2 = #call lain_meta_scratch_data()
