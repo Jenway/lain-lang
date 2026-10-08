@@ -16,6 +16,10 @@ bootstrap/SOURCE_ORDER 拼成一个 471884 字节的编译单元）。要让 Lai
 - **但低层操作必须可达。** 禁的是**透传**，不是低层：`load<u64>(p)` 是语言规定了类型、宽度、
   对齐、失败码，**然后**由降级决定它变成 `#load[#bits<64>](%p)`；`#load[#bits<64>](%p, 0)`
   是语言什么都没说。资格线是「这条低层算子，语言有没有替它说话」。
+- **不新增声明语法去描述 IR。** 语言的**知识**（有哪些标量、多宽、算符接到哪个 LAINIR 算子）
+  住在 Meta 库的表里，不住在源码里。语法只用来写**有体**的东西（`func` / `struct` / `enum` /
+  `let` / `import`）；没有体的声明只是换个地方抄库表。用户要自定义，走编译期调用库的注册
+  接口，而不是新语法。
 - **唯一的信任门是** `lainir_parse` + `lainir_verify`。源码里没有 `#` 不是安全边界 ——
   用户宏用同一套发射能力可以生成任意 LAINIR 文本（bootstrap/std/macros/ 今天就在这么干）。
 
@@ -88,9 +92,10 @@ let total: u32 = for i in 0..n acc = 0 { acc = acc + i; };
 ```
 
 - 赋值 `NAME = 值;` **只在 for 体内合法**：循环体唯一能赋值的合法目标是语言定的 `acc`。
-- 顶层形式：`let` / `struct` / `enum` / `func` / `scalar` / `import(…)`。关键字经 Meta 语法
-  注册表取 handler：1=my_if 2=func 3=if 4=struct 5=enum 6=scalar 7=顶层 let 8=return
+- 顶层形式：`let` / `struct` / `enum` / `func` / `import(…)`。关键字经 Meta 语法
+  注册表取 handler：1=my_if 2=func 3=if 4=struct 5=enum 7=顶层 let 8=return
   9=局部 let 10=for 11=my_block。
+  **6=scalar 要取消**（见《目标新增》）；号位退休不复用。
 - `for` 是一条**表达式**，值就是累加变量的最终值；`#loop` 的变量直接就是 `i` 与 `acc`，
   不需要「源码名 → LAINIR 名」的映射表。v0 限制：不能嵌套循环；下界与上界是值（字面量、
   参数或已声明的局部）而不是任意表达式；循环体只有一条 `acc = 值 算子 值;`。
@@ -98,14 +103,11 @@ let total: u32 = for i in 0..n acc = 0 { acc = acc + i; };
 
 ### 目标新增
 
-- `scalar` 声明去掉尖括号，算子表用括号与逗号：
-
-```text
-scalar i32 = bits(32) { "/" = sdiv, "+" = add, "<" = slt };
-scalar addr = raw {};
-```
-
-  算符字符串到 LAINIR 算子名的绑定表住在 Meta 侧；`addr` 的 repr 不能与类型同名，改用 `raw`。
+- **没有 scalar 声明语法。** 标量集、repr（`bits/N`、`f/N`、`vec/N`、`addr`）与算符绑定
+  （`"/"` → `sdiv` 一类）是 **Meta 库的表数据**：今天在 bootstrap/std/scalars.l1，将来是
+  用 Lain 写的库模块。名字怎么进源码作用域由 `import` 管 —— 不带点的 `i32` 落在内建环境，
+  带点的 `T.i32` 落在本源码 import 的那个模块。用户自定义标量走同一条路：编译期调用库的
+  注册接口，不是新语法。
 - 带标签的循环（替代 `for` 的通用形态）：
 
 ```text
@@ -177,7 +179,7 @@ func cstr_len(p: addr) -> u64 {
 
 ## 档位
 
-**M0（自举必需）**：定宽整数与 `scalar` 声明 / `func` + `return` / 调用 / 带值 `if` /
+**M0（自举必需）**：定宽整数（标量集由 Meta 库的表定义）/ `func` + `return` / 调用 / 带值 `if` /
 `loop` 与循环参数、`break`、`continue` / 比较 / 整数算术与 `trunc`、`zext` / `addr` 类型与
 `load`、`store`、`lea` / 字节串字面量 / `extern` 与 `link_name`。
 
@@ -195,7 +197,6 @@ arena 与字节偏移。）
 
 ## 待补规则
 
-- `bits(32)` 要改 bootstrap/std/scalars.l1 的 `meta_repr_at`（它今天读 `<N>`）。
 - `vref` 要成为不透明标量（像 `addr`：不可算术、不可 `as`）。
 - 期望类型的传递路径（见上）。
 - `addr` 上的 `==` 给不给（层 0 有 `lainir_eq`）。
@@ -203,7 +204,8 @@ arena 与字节偏移。）
 
 ## 与现状的差距
 
-- `meta_repr_at` 仍读 `<N>`；bootstrap/lain/std/prelude.lain 仍写 `bits<32> { … }`。
+- bootstrap/lain/std/prelude.lain 今天还是 `scalar i32 = bits<32> { … }`。这条声明语法取消，
+  标量表落回 bootstrap/std/scalars.l1；`meta_repr_at` 的 `<N>` 解析随之作废。
 - scalar 的降级还是占位：bootstrap/std/handlers/scalar.l1:18-21 直接
   `#call lain_meta_fail(14)`。prelude 第一行就是 scalar 声明，所以驱动今天跑到
   `steps=359053 host_status=14` 就停在这里（见 docs/development.md 的驱动一节）。
