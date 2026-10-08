@@ -1006,7 +1006,7 @@ static uint32_t cap_scratch_size(void *context, const uint64_t *args,
  * 未启用 AstOut 时没有统一账户，按规则明确拒绝，不静默放行。 */
 static uint32_t apply_budget_charge(LainMetaHost *host, uint64_t text_len) {
   uint32_t rc;
-  if (!host->ast_out) return 9347;
+  if (!host->ast_out) return LAINMETA_APPLY_ERR_NO_BUDGET;
   rc = lain_ast_output_charge(host->ast_out, 2, 1);
   if (rc) return LAIN_AST_ERR_BUDGET;
   rc = lain_ast_output_charge(host->ast_out, 1, text_len / 8 + (text_len % 8 != 0));
@@ -1043,22 +1043,22 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
   memset(&host->apply_diagnostic, 0, sizeof(host->apply_diagnostic));
   if (out) *out = 0;
   if (arg_count > 8) {
-    host->apply_status = 9341;
+    host->apply_status = LAINMETA_APPLY_ERR_ARG_COUNT;
     return 0;
   }
   if (want_bytes && (result_byte_length == 0 ||
                      result_byte_length > LAINMETA_APPLY_BYTES_MAX)) {
-    host->apply_status = 9345;
+    host->apply_status = LAINMETA_APPLY_ERR_BYTES_LENGTH;
     return 0;
   }
   if (want_byte_arg && (byte_arg_length == 0 ||
                         byte_arg_length > LAINMETA_APPLY_BYTES_MAX)) {
-    host->apply_status = 9345;
+    host->apply_status = LAINMETA_APPLY_ERR_BYTES_LENGTH;
     return 0;
   }
   if (want_byte_arg && (byte_arg_index >= arg_count ||
                         byte_arg_index > UINT32_MAX)) {
-    host->apply_status = 9341;
+    host->apply_status = LAINMETA_APPLY_ERR_ARG_COUNT;
     return 0;
   }
   arg_bytes = arg_count * 24;
@@ -1071,12 +1071,12 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
       (want_byte_arg && (!byte_arg_addr ||
        !host_range_readable(host, (uintptr_t)byte_arg_addr,
                             byte_arg_length)))) {
-    host->apply_status = 9330;
+    host->apply_status = LAINMETA_APPLY_ERR_HOST_REQUEST;
     return 0;
   }
   if (memchr(text, 0, (size_t)text_len) ||
       memchr(entry, 0, (size_t)entry_len)) {
-    host->apply_status = 9330;
+    host->apply_status = LAINMETA_APPLY_ERR_HOST_REQUEST;
     return 0;
   }
   /* 预算扣账在**参数与地址检查之后、启动执行之前**，也早于计数：
@@ -1085,18 +1085,18 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
       (want_byte_arg && byte_arg_length > UINT64_MAX - text_len - arg_bytes) ||
       result_byte_length > UINT64_MAX - text_len - arg_bytes -
                            (want_byte_arg ? byte_arg_length : 0)) {
-    host->apply_status = 9345;
+    host->apply_status = LAINMETA_APPLY_ERR_BYTES_LENGTH;
     return 0;
   }
   rc = apply_budget_charge(host, text_len + arg_bytes +
       (want_byte_arg ? byte_arg_length : 0) + result_byte_length);
   if (rc) {
-    host->apply_status = rc; /* 9410 = 预算可恢复拒绝；9347 = 没有统一预算 */
+    host->apply_status = rc; /* 9410 = 预算可恢复拒绝；LAINMETA_APPLY_ERR_NO_BUDGET = 没有统一预算 */
     return 0;
   }
   host->apply_requests++;
   if (host->apply_fuel_remaining == 0) {
-    host->apply_status = 9306;
+    host->apply_status = LAINMETA_APPLY_ERR_RUN;
     goto cleanup_apply;
   }
   text_copy = (char *)malloc((size_t)text_len + 1u);
@@ -1114,7 +1114,7 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
     memcpy(wire, (const void *)(uintptr_t)(arg_addr + (uint64_t)i * 24),
            sizeof(wire));
     if (wire[0] > TY_ADDR || wire[1] > UINT32_MAX) {
-      host->apply_status = 9342;
+      host->apply_status = LAINMETA_APPLY_ERR_ARG_TYPE;
       goto cleanup_apply;
     }
     apply_args[i].kind = (L1TypeKind)wire[0];
@@ -1125,7 +1125,7 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
   memset(&result, 0, sizeof(result));
   /* 参数记录是 3 个 64 位单元：kind、width、bits；拷入宿主数组后再交给通用 apply。 */
   if (host->apply_active_depth >= 64u) {
-    host->apply_status = 9306;
+    host->apply_status = LAINMETA_APPLY_ERR_RUN;
     goto cleanup_apply;
   }
   request_fuel = host->apply_fuel_remaining;
@@ -1161,7 +1161,7 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
     lainmeta_apply_bytes_free(&host->apply_result_bytes);
     memset(&host->apply_result, 0, sizeof(host->apply_result));
     host->apply_ready = false;
-    host->apply_status = diag.code ? (uint32_t)diag.code : 9330;
+    host->apply_status = diag.code ? (uint32_t)diag.code : LAINMETA_APPLY_ERR_HOST_REQUEST;
     host->apply_diagnostic = diag;
     goto cleanup_apply;
   }
@@ -1179,7 +1179,7 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
     lainmeta_apply_bytes_free(&host->apply_result_bytes);
     memset(&host->apply_result, 0, sizeof(host->apply_result));
     host->apply_ready = false;
-    host->apply_status = 9330;
+    host->apply_status = LAINMETA_APPLY_ERR_HOST_REQUEST;
     memset(&host->apply_diagnostic, 0, sizeof(host->apply_diagnostic));
     goto cleanup_apply;
   }
@@ -1329,7 +1329,7 @@ static uint32_t cap_apply_bytes_copy(void *context, const uint64_t *args,
       length > (uint64_t)UINTPTR_MAX - (uintptr_t)destination ||
       !lainvm_space_check(host->space, (uintptr_t)destination, length,
                           LAINVM_MEM_WRITE)) {
-    if (out) *out = 9344;
+    if (out) *out = LAINMETA_APPLY_ERR_RESULT_ADDR;
     return 0;
   }
   if (length)

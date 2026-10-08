@@ -5,9 +5,41 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "lain/ir/codes.h"
 #include "lain/ir/core.h"
 #include "lain/vm/caps.h"
 #include "lain/vm/quota.h"
+
+/* 拒绝码；段边界见 lain/ir/codes.h。
+ * 9340 起是对 Meta 可见的公开拒码，bootstrap/std 下的 .l1 按号码读它们；
+ * 9302 起是执行前与执行期的原因码，宿主原样转给 Meta。 */
+enum {
+  LAINMETA_APPLY_ERR_ENTRY_NOT_FOUND = 9302,
+  LAINMETA_APPLY_ERR_ARG_LIMIT = 9303,   /* 实参比形参多 */
+  LAINMETA_APPLY_ERR_START = 9305,       /* 宿主调用被拒，或入口起不来 */
+  LAINMETA_APPLY_ERR_RUN = 9306,         /* 运行没跑到底 */
+  LAINMETA_APPLY_ERR_NO_RESULT = 9307,   /* 结果类型不支持，或根本没产出值 */
+  LAINMETA_APPLY_ERR_ADDR_RESULT = 9308, /* 地址结果必须由宿主物化 */
+  LAINMETA_APPLY_ERR_IMAGE_LOAD = 9313,
+  LAINMETA_APPLY_ERR_ACTIVATION = 9314,
+  LAINMETA_APPLY_ERR_CAPS = 9315,
+  LAINMETA_APPLY_ERR_STACK = 9318,
+  LAINMETA_APPLY_ERR_HOST_REQUEST = 9330, /* 宿主侧的请求本身坏掉 */
+  LAINMETA_APPLY_ERR_FLOAT_FORMAT = 9333,
+  LAINMETA_APPLY_ERR_NO_ENTRY = 9340,
+  LAINMETA_APPLY_ERR_ARG_COUNT = 9341,
+  LAINMETA_APPLY_ERR_ARG_TYPE = 9342,
+  LAINMETA_APPLY_ERR_ARG_ADDR = 9343,
+  LAINMETA_APPLY_ERR_RESULT_ADDR = 9344,
+  LAINMETA_APPLY_ERR_BYTES_LENGTH = 9345,
+  LAINMETA_APPLY_ERR_BYTES_VALUE = 9346,
+  LAINMETA_APPLY_ERR_NO_BUDGET = 9347, /* AstOut 未启用，没有统一账户 */
+  LAINMETA_APPLY_ERR_MAP = 9348,
+};
+
+_Static_assert(LAINMETA_APPLY_ERR_ENTRY_NOT_FOUND > LAINIR_CODES_APPLY_BASE &&
+                   LAINMETA_APPLY_ERR_MAP < LAINIR_CODES_APPLY_LIMIT,
+               "apply codes must stay inside the apply segment");
 
 typedef struct {
   /* NULL = 不授予宿主能力。非 NULL 时**调用方必须已经冻结**这张表；

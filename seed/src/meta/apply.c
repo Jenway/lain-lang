@@ -66,26 +66,26 @@ static bool apply_run(const L1Module *module, const char *entry,
 
   if (quota_out) lainvm_quota_init(quota_out, limits ? limits->quota_bytes : 0);
 
-  if (!module || !entry) return fail(diag, 9302, "apply: the entry does not exist");
-  if (arg_count > 8) return fail(diag, 9303, "apply: too many arguments");
+  if (!module || !entry) return fail(diag, LAINMETA_APPLY_ERR_ENTRY_NOT_FOUND, "apply: the entry does not exist");
+  if (arg_count > 8) return fail(diag, LAINMETA_APPLY_ERR_ARG_LIMIT, "apply: too many arguments");
   callee = apply_find_sub(module, entry, &index);
-  if (!callee) return fail(diag, 9302, "apply: the entry does not exist");
+  if (!callee) return fail(diag, LAINMETA_APPLY_ERR_ENTRY_NOT_FOUND, "apply: the entry does not exist");
   if (callee->result_count > 1 ||
       (callee->result_count == 1 && !callee->results[0]))
-    return fail(diag, 9307, "apply: entry has an unsupported result");
+    return fail(diag, LAINMETA_APPLY_ERR_NO_RESULT, "apply: entry has an unsupported result");
   if (callee->result_count == 1 && callee->results[0]->kind == TY_ADDR &&
       !bytes_out)
-    return fail(diag, 9308,
+    return fail(diag, LAINMETA_APPLY_ERR_ADDR_RESULT,
                 "apply: an address result must be materialized by the host");
   if (callee->result_count == 1 && callee->results[0]->kind == TY_FLOATS &&
       callee->results[0]->width != 32 && callee->results[0]->width != 64)
-    return fail(diag, 9333, "apply: unsupported floating-point format");
+    return fail(diag, LAINMETA_APPLY_ERR_FLOAT_FORMAT, "apply: unsupported floating-point format");
 
   lainvm_space_init(&space);
   lainvm_quota_init(&quota, limits ? limits->quota_bytes : 0);
   image = lainvm_image_load(module, &space, diag);
   if (!image) {
-    code = 9313;
+    code = LAINMETA_APPLY_ERR_IMAGE_LOAD;
     snprintf(message, sizeof(message), "apply: cannot load the module");
     goto cleanup;
   }
@@ -107,7 +107,7 @@ static bool apply_run(const L1Module *module, const char *entry,
         &space, (uintptr_t)byte_copy, byte_arg->length, byte_arg->length,
         LAINVM_MEM_READ, 0);
     if (lainvm_space_handle_none(byte_region)) {
-      code = 9348;
+      code = LAINMETA_APPLY_ERR_MAP;
       snprintf(message, sizeof(message), "apply: cannot map the byte argument");
       goto cleanup;
     }
@@ -116,7 +116,7 @@ static bool apply_run(const L1Module *module, const char *entry,
     lease.space = &space;
     lease.region = lainvm_space_alloc_stack(&space, limits->stack_bytes, 1, &quota);
     if (lainvm_space_handle_none(lease.region)) {
-      code = 9318;
+      code = LAINMETA_APPLY_ERR_STACK;
       snprintf(message, sizeof(message), "apply: cannot admit a stack");
       goto cleanup;
     }
@@ -125,20 +125,20 @@ static bool apply_run(const L1Module *module, const char *entry,
                        (limits && limits->max_call_depth) ? limits->max_call_depth : 64,
                        lease, &quota);
   if (!tcb) {
-    code = 9314;
+    code = LAINMETA_APPLY_ERR_ACTIVATION;
     snprintf(message, sizeof(message), "apply: cannot admit an activation");
     goto cleanup;
   }
   if (limits && limits->caps && lainvm_tcb_set_caps(tcb, limits->caps, diag) != 0) {
     /* 借来的表必须由调用方先冻结；这里不替它 freeze，也不改它。 */
-    code = 9315;
+    code = LAINMETA_APPLY_ERR_CAPS;
     snprintf(message, sizeof(message),
              "apply: cannot resolve capabilities (the table must be frozen)");
     goto cleanup;
   }
   memset(&value, 0, sizeof(value));
   if (arg_count > 8) {
-    code = 9303;
+    code = LAINMETA_APPLY_ERR_ARG_LIMIT;
     snprintf(message, sizeof(message), "apply: too many arguments");
     goto cleanup;
   }
@@ -151,7 +151,7 @@ static bool apply_run(const L1Module *module, const char *entry,
     result = lainvm_vm_call_host(tcb, index, call_args, arg_count,
                                  callee->result_count ? &value : NULL);
     if (result != LAINVM_SLICE_RUNNABLE) {
-      code = 9305;
+      code = LAINMETA_APPLY_ERR_START;
       if (result == LAINVM_SLICE_TRAPPED) {
         int trap_status = (int)lainvm_tcb_trap(tcb)->status;
         if (trap_status > 0) code = trap_status;
@@ -161,13 +161,13 @@ static bool apply_run(const L1Module *module, const char *entry,
     }
   } else {
     if (lainvm_tcb_start(tcb, entry, call_args, arg_count, diag) != 0) {
-      code = 9305;
+      code = LAINMETA_APPLY_ERR_START;
       snprintf(message, sizeof(message), "apply: cannot start the entry");
       goto cleanup;
     }
     result = lainvm_engine_run(tcb, (limits && limits->fuel) ? limits->fuel : 1000000);
     if (result != LAINVM_SLICE_DONE) {
-      code = 9306;
+      code = LAINMETA_APPLY_ERR_RUN;
       if (result == LAINVM_SLICE_TRAPPED) {
         int trap_status = (int)lainvm_tcb_trap(tcb)->status;
         if (trap_status > 0) code = trap_status;
@@ -176,7 +176,7 @@ static bool apply_run(const L1Module *module, const char *entry,
       goto cleanup;
     }
     if (!lainvm_tcb_has_result(tcb) && callee->result_count > 0) {
-      code = 9307;
+      code = LAINMETA_APPLY_ERR_NO_RESULT;
       snprintf(message, sizeof(message), "apply: the entry produced no value");
       goto cleanup;
     }
@@ -186,7 +186,7 @@ static bool apply_run(const L1Module *module, const char *entry,
     if (value.kind != L1_VALUE_ADDR ||
         !lainvm_space_check(&space, (uintptr_t)value.as.addr, byte_length,
                             LAINVM_MEM_READ)) {
-      code = 9344;
+      code = LAINMETA_APPLY_ERR_RESULT_ADDR;
       snprintf(message, sizeof(message),
                "apply: byte result is not a readable range in its VSpace");
       goto cleanup;
@@ -199,7 +199,7 @@ static bool apply_run(const L1Module *module, const char *entry,
     }
     if (!lainmeta_apply_bytes_alloc(byte_length, bytes_out, diag)) {
       (void)lainvm_quota_release(&quota, byte_length);
-      code = diag && diag->code ? diag->code : 9345;
+      code = diag && diag->code ? diag->code : LAINMETA_APPLY_ERR_BYTES_LENGTH;
       snprintf(message, sizeof(message), "apply: cannot allocate byte result");
       goto cleanup;
     }
@@ -228,7 +228,7 @@ cleanup:
 static bool apply_param_accepts(const L1Type *ty, const LainMetaApplyValue *arg) {
   if (!ty || !arg) return false;
   if (ty->kind != (L1TypeKind)arg->kind) return false;
-  if (ty->kind == TY_ADDR) return false; /* #addr 形参一律拒 9343 */
+  if (ty->kind == TY_ADDR) return false; /* #addr 形参一律拒 LAINMETA_APPLY_ERR_ARG_ADDR */
   if (arg->width == 0 || arg->width > 64) return false;
   return ty->width == arg->width;
 }
@@ -241,11 +241,11 @@ void lainmeta_apply_bytes_set_len(LainMetaApplyBytes *bytes, uint64_t length) {
 
 bool lainmeta_apply_bytes_alloc(uint64_t length, LainMetaApplyBytes *out,
                            L1Diagnostic *diag) {
-  if (!out) return fail(diag, 9345, "apply: byte block has no destination");
+  if (!out) return fail(diag, LAINMETA_APPLY_ERR_BYTES_LENGTH, "apply: byte block has no destination");
   out->data = NULL;
   out->length = 0;
   if (length == 0 || length > LAINMETA_APPLY_BYTES_MAX)
-    return fail(diag, 9345, "apply: byte block length is out of range");
+    return fail(diag, LAINMETA_APPLY_ERR_BYTES_LENGTH, "apply: byte block length is out of range");
   out->data = (uint8_t *)malloc((size_t)length);
   if (!out->data) return fail(diag, 2028, "apply: out of memory");
   memset(out->data, 0, (size_t)length);
@@ -261,11 +261,11 @@ void lainmeta_apply_bytes_free(LainMetaApplyBytes *bytes) {
 }
 
 bool lainmeta_apply_bytes_check(const LainMetaApplyBytes *bytes, L1Diagnostic *diag) {
-  if (!bytes) return fail(diag, 9346, "apply: byte block is missing");
+  if (!bytes) return fail(diag, LAINMETA_APPLY_ERR_BYTES_VALUE, "apply: byte block is missing");
   if (bytes->length > LAINMETA_APPLY_BYTES_MAX)
-    return fail(diag, 9345, "apply: byte block length is out of range");
+    return fail(diag, LAINMETA_APPLY_ERR_BYTES_LENGTH, "apply: byte block length is out of range");
   if (bytes->length == 0 || !bytes->data)
-    return fail(diag, 9346, "apply: byte block is empty or has no storage");
+    return fail(diag, LAINMETA_APPLY_ERR_BYTES_VALUE, "apply: byte block is empty or has no storage");
   return true;
 }
 
@@ -296,12 +296,12 @@ static bool apply_proc_common(const char *module_text, const char *entry,
     diag->message[0] = '\0';
   }
   if (!module_text || !entry || !out)
-    return fail(diag, 9340, "apply: entry does not exist");
+    return fail(diag, LAINMETA_APPLY_ERR_NO_ENTRY, "apply: entry does not exist");
   if (arg_count > 8 || (arg_count && !args))
-    return fail(diag, 9341, "apply: argument count does not match the entry");
+    return fail(diag, LAINMETA_APPLY_ERR_ARG_COUNT, "apply: argument count does not match the entry");
   if (byte_arg && !lainmeta_apply_bytes_check(byte_arg, diag)) return false;
   if (byte_arg && byte_arg_index >= arg_count)
-    return fail(diag, 9341, "apply: byte argument index is out of range");
+    return fail(diag, LAINMETA_APPLY_ERR_ARG_COUNT, "apply: byte argument index is out of range");
 
   builder = lainir_builder_new();
   if (!builder) return fail(diag, 2028, "apply: out of memory");
@@ -313,53 +313,53 @@ static bool apply_proc_common(const char *module_text, const char *entry,
   callee = apply_find_sub(module, entry, NULL);
   if (!callee) {
     lainir_builder_free(builder);
-    return fail(diag, 9340, "apply: entry does not exist");
+    return fail(diag, LAINMETA_APPLY_ERR_NO_ENTRY, "apply: entry does not exist");
   }
   if (callee->param_count != arg_count) {
     lainir_builder_free(builder);
-    return fail(diag, 9341, "apply: argument count does not match the entry");
+    return fail(diag, LAINMETA_APPLY_ERR_ARG_COUNT, "apply: argument count does not match the entry");
   }
   for (i = 0; i < arg_count; i++) {
     if (byte_arg && i == byte_arg_index) {
       if (args[i].kind != TY_ADDR || !callee->params[i].ty ||
           callee->params[i].ty->kind != TY_ADDR) {
         lainir_builder_free(builder);
-        return fail(diag, 9342, "apply: byte argument requires an #addr parameter");
+        return fail(diag, LAINMETA_APPLY_ERR_ARG_TYPE, "apply: byte argument requires an #addr parameter");
       }
       values[i] = (L1Value){L1_VALUE_ADDR, 0, {.addr = NULL}};
       continue;
     }
-    /* 实参自己带地址的，先按 9343 报，而不是笼统的类型不符 */
+    /* 实参自己带地址的，先按 LAINMETA_APPLY_ERR_ARG_ADDR 报，而不是笼统的类型不符 */
     if (args[i].kind == TY_ADDR) {
       lainir_builder_free(builder);
-      return fail(diag, 9343, "apply: an argument is an address");
+      return fail(diag, LAINMETA_APPLY_ERR_ARG_ADDR, "apply: an argument is an address");
     }
     if (callee->params[i].ty && callee->params[i].ty->kind == TY_ADDR) {
       lainir_builder_free(builder);
-      return fail(diag, 9343, "apply: the entry declares an address parameter");
+      return fail(diag, LAINMETA_APPLY_ERR_ARG_ADDR, "apply: the entry declares an address parameter");
     }
     if (!apply_param_accepts(callee->params[i].ty, &args[i])) {
       lainir_builder_free(builder);
-      return fail(diag, 9342, "apply: argument type does not match the entry");
+      return fail(diag, LAINMETA_APPLY_ERR_ARG_TYPE, "apply: argument type does not match the entry");
     }
     values[i] = (L1Value){L1_VALUE_BITS, args[i].width, {.bits = args[i].bits}};
   }
   if (callee->result_count > 1) {
     lainir_builder_free(builder);
-    return fail(diag, 9344, "apply: the entry declares more than one result");
+    return fail(diag, LAINMETA_APPLY_ERR_RESULT_ADDR, "apply: the entry declares more than one result");
   }
   if (want_bytes &&
       (callee->result_count != 1 || !callee->results[0] ||
        callee->results[0]->kind != TY_ADDR)) {
     lainir_builder_free(builder);
-    return fail(diag, 9344, "apply: byte export requires one address result");
+    return fail(diag, LAINMETA_APPLY_ERR_RESULT_ADDR, "apply: byte export requires one address result");
   }
   if (callee->result_count == 1) {
     result_ty = callee->results[0];
     if (!result_ty || (result_ty->kind == TY_ADDR && !want_bytes) ||
         (result_ty->kind != TY_ADDR && want_bytes)) {
       lainir_builder_free(builder);
-      return fail(diag, 9344, "apply: result kind does not match the export API");
+      return fail(diag, LAINMETA_APPLY_ERR_RESULT_ADDR, "apply: result kind does not match the export API");
     }
   }
 
@@ -406,7 +406,7 @@ bool lainmeta_apply_proc_bytes(const char *module_text, const char *entry,
                           L1Diagnostic *diag) {
   if (byte_length == 0 || byte_length > LAINMETA_APPLY_BYTES_MAX) {
     if (out) memset(out, 0, sizeof(*out));
-    return fail(diag, 9345, "apply: byte result length is out of range");
+    return fail(diag, LAINMETA_APPLY_ERR_BYTES_LENGTH, "apply: byte result length is out of range");
   }
   return apply_proc_common(module_text, entry, args, arg_count, byte_length,
                            UINT32_MAX, NULL,
@@ -420,7 +420,7 @@ bool lainmeta_apply_proc_with_bytes_arg(
     LainMetaApplyResult *out, L1Diagnostic *diag) {
   if (out) memset(out, 0, sizeof(*out));
   if (!byte_arg)
-    return fail(diag, 9346, "apply: byte argument is missing");
+    return fail(diag, LAINMETA_APPLY_ERR_BYTES_VALUE, "apply: byte argument is missing");
   if (!lainmeta_apply_bytes_check(byte_arg, diag))
     return false;
   return apply_proc_common(module_text, entry, args, arg_count, 0,

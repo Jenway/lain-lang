@@ -9,7 +9,7 @@ Lain 的失败报告分两套机制，共用同一片四位十进制号码空间
 两条规则：
 
 - **一段只属于一个模块**：新码落在自己段里。
-- **退休的号码不复用**：例如 2025、9205 已废弃，留着空洞也不补。
+- **退休的号码不复用**：例如 2025 已废弃，留着空洞也不补。
 
 ## 号段表
 
@@ -17,15 +17,16 @@ Lain 的失败报告分两套机制，共用同一片四位十进制号码空间
 | :--- | :--- | :--- |
 | 1000-1199 | Trap（vm/engine 发射，vm/quota 借 1044） | lain/vm/trap.h |
 | 2000-2999 | LAINIR 验证 | lain/ir/verify.h |
-| 3000-3999 | canonical 文本解析 | 尚无正式码表（散在 text/parse.c） |
+| 3000-3999 | canonical 文本解析 | lain/text/parse.h |
 | 9000-9099 | 映像装载 | lain/vm/engine.h |
 | 9100-9199 | TCB admit 与重绑 | lain/vm/tcb.h |
-| 9200-9299 | 后端 | 尚无正式码表（散在 backend/cbackend.c） |
+| 9200-9299 | 后端 | lain/backend/emit.h |
 | 9300-9399 | 编译期 apply 与其宿主 | lain/meta/apply.h |
 | 9400-9499 | AstOut 与 Meta 库共享 | lain/meta/ast_v1.h、bootstrap/std/*.l1 |
 
 段边界的登记表在 seed/include/lain/ir/codes.h（每个段一对 BASE/LIMIT 常量）；
-模块自己再用 _Static_assert 把自己的码钉在段内(trap.h、engine.h、tcb.h 已这么做)。
+每个有正式码表的模块都用 _Static_assert 把自己的码钉在段内：
+trap.h、engine.h、tcb.h、verify.h、parse.h、emit.h、apply.h、ast_v1.h。
 
 ## 两套机制不混用
 
