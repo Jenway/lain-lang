@@ -11,9 +11,9 @@
  *   不调度    那是 scheduler 的
  *   不给预算  燃料由调用者给
  *   不管阻塞  返回 BLOCKED，由 scheduler 处置
- *   不吞 trap 写进 tcb->trap 后返回 TRAPPED
+ *   不吞 trap  写进 TCB 后返回 TRAPPED
  *
- * 前置条件：tcb->state == LAINVM_RUNNING。不满足时不动任何东西，
+ * 前置条件：TCB 处于 LAINVM_RUNNING。不满足时不动任何东西，
  * 原样返回当前的 slice_result。
  */
 #ifndef LAINVM_ENGINE_H
@@ -24,11 +24,49 @@
 
 #include "lain/ir/core.h"
 #include "lain/ir/value.h"
-#include "lain/vm/image.h"
 #include "lain/vm/tcb.h"
 
+/* 引擎的输入：装载后的模块。
+ *
+ * 名字全换成槽、符号已解析、数据地址已烤进映射好的段。它绑定一个 VSpace；
+ * 换空间后那些地址不再属于新空间，访问被 1004/1005 稳定拒绝（要接着跑就得重新装载）。
+ * 它**不拥有**模块：区域、子过程、符号名仍指回 L1Module，模块必须活得比它久。
+ * 结构本身是引擎私有的（seed/src/vm/image_internal.h），这里只暴露装载与释放。 */
+typedef struct LainVmImage LainVmImage;
+
+/* 装载拒绝码（L1Diagnostic）。9001-9006 是表计数与模块自述对不上。
+ * 入参虽要求已验证，装载器仍自己复核计数——纵深防御，不是重复职责。 */
+enum {
+  LAINVM_IMAGE_ERR_INST_COUNT = 9001,
+  LAINVM_IMAGE_ERR_OPERAND_COUNT = 9002,
+  LAINVM_IMAGE_ERR_RESULT_COUNT = 9003,
+  LAINVM_IMAGE_ERR_REGION_COUNT = 9004,
+  LAINVM_IMAGE_ERR_CASE_COUNT = 9005,
+  LAINVM_IMAGE_ERR_UNDEFINED_VALUE = 9006,
+  LAINVM_IMAGE_ERR_SYMBOL_COUNT = 9009,
+  LAINVM_IMAGE_ERR_RO_ALLOC = 9010,  /* 只读段底座分配失败 */
+  LAINVM_IMAGE_ERR_RO_MAP = 9011,    /* VSpace 拒绝只读段 */
+  LAINVM_IMAGE_ERR_RW_ALLOC = 9012,
+  LAINVM_IMAGE_ERR_RW_MAP = 9013,
+  LAINVM_IMAGE_ERR_LOOP_INIT = 9015, /* 循环初值引用不到 */
+  LAINVM_IMAGE_ERR_CODE_ALLOC = 9016,
+  LAINVM_IMAGE_ERR_CODE_MAP = 9017,
+  LAINVM_IMAGE_ERR_TABLE_ALLOC = 9018,
+};
+
+_Static_assert(LAINVM_IMAGE_ERR_INST_COUNT > LAINIR_CODES_IMAGE_BASE &&
+                   LAINVM_IMAGE_ERR_TABLE_ALLOC < LAINIR_CODES_IMAGE_LIMIT,
+               "image codes must stay inside the image segment");
+
+/* 装载。失败返回 NULL，诊断写进 diag（可为 NULL）。
+ * 装载器负责把模块数据映射进 space 并登记区段。 */
+LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
+                               L1Diagnostic *diag);
+void lainvm_image_free(LainVmImage *image);
+
+
 /* 引擎从映像要四样东西：区域描述、指令、操作数引用、结果槽。
- * 它们的接口在 lain/vm/image.h。 */
+ * 那是引擎私有的结构（seed/src/vm/image_internal.h）。 */
 
 /* ---------------------------------------------------------------------------
  * 引擎内部助手

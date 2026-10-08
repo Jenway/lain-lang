@@ -4,12 +4,12 @@
  *   - Trap：VM 拒绝执行，码写进 LainVmTrap.status，调用方看 LainVmSliceResult；
  *   - 拒绝码：函数返回 L1Diagnostic，失败时把码写进 diag。
  * 号码只属于一个模块：新码落在自己的段里，退休的号码不复用。段内边界由各模块
- * 自己的头文件断言（见 lain/vm/trap.h、lain/vm/image.h、lain/vm/tcb.h）。
+ * 自己的头文件断言（见 lain/vm/trap.h、lain/vm/engine.h、lain/vm/tcb.h）。
  *
  *   1xxx  Trap（vm/engine 发，vm/quota 借 1044）      lain/vm/trap.h
  *   2xxx  验证码（ir/verify）                        lain/ir/verify.h
  *   3xxx  文本解析拒绝码（text/parse）                尚无正式码表
- *   90xx  映像装载拒绝码（vm/image）                  lain/vm/image.h
+ *   90xx  映像装载拒绝码（vm/image）                  lain/vm/engine.h
  *   91xx  TCB 拒绝码（vm/tcb）                       lain/vm/tcb.h
  *   92xx  后端拒绝码（backend/cbackend）             尚无正式码表
  *   93xx  apply 拒绝码（meta/apply 与其宿主）         lain/meta/apply.h

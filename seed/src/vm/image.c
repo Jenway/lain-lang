@@ -4,7 +4,7 @@
  * 区域 id 是按前序分配的，所以父区域一定排在子区域前面——名字解析沿着
  * parent 链往外走时用得着这一点。
  */
-#include "lain/vm/image.h"
+#include "image_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>

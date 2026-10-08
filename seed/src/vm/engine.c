@@ -13,7 +13,8 @@
 #include <math.h>
 #include <string.h>
 
-#include "lain/vm/image.h"
+#include "image_internal.h"
+#include "tcb_internal.h"
 
 #define LAINVM_MAX_OPERANDS L1_MAX_OPERANDS
 

@@ -1,51 +1,26 @@
-/* LAINVM 映像：装载后的模块。
+/* 映像的内部结构：引擎与 TCB 用的那份执行形态。不属于公开面。
  *
  * 编译器交付的是 L1Module（artifact）：名字是字符串、符号未解析、布局未定。
  * 映像 = 名字全换成槽、符号已解析、数据地址已烤进去的那份形态。
  * artifact 要保持 canonical，所以预备数据不许塞进它——这就是分开的理由。
  *
- * 映像绑定地址空间（数据地址是烤进去的），换 VSpace 就要重新装载。
- *
  * 表在装载时按模块自己的计数一次分配，装载完就不再变：定长上限只来自模块本身。
+ *
+ * 它**不拥有**模块：LainVmImageRegion.region、LainVmImageSub.sub、
+ * LainVmImageSymbol.symbol 都指回那份 L1Module，调用方必须让模块活得比映像久。
  */
-#ifndef LAINVM_IMAGE_H
-#define LAINVM_IMAGE_H
+#ifndef LAINVM_IMAGE_INTERNAL_H
+#define LAINVM_IMAGE_INTERNAL_H
 
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lain/ir/codes.h"
 #include "lain/ir/core.h"
+#include "lain/vm/engine.h"
 #include "lain/vm/space.h"
-
-typedef struct LainVmImage LainVmImage;
 
 #define LAINVM_IMAGE_NO_REGION 0xFFFFFFFFu
 #define LAINVM_IMAGE_NO_INDEX 0xFFFFFFFFu
-
-/* 装载拒绝码（L1Diagnostic）。9001-9006 是表计数与模块自述对不上，
- * 90xx 段见 lain/ir/codes.h。 */
-enum {
-  LAINVM_IMAGE_ERR_INST_COUNT = 9001,
-  LAINVM_IMAGE_ERR_OPERAND_COUNT = 9002,
-  LAINVM_IMAGE_ERR_RESULT_COUNT = 9003,
-  LAINVM_IMAGE_ERR_REGION_COUNT = 9004,
-  LAINVM_IMAGE_ERR_CASE_COUNT = 9005,
-  LAINVM_IMAGE_ERR_UNDEFINED_VALUE = 9006,
-  LAINVM_IMAGE_ERR_SYMBOL_COUNT = 9009,
-  LAINVM_IMAGE_ERR_RO_ALLOC = 9010,  /* 只读段底座分配失败 */
-  LAINVM_IMAGE_ERR_RO_MAP = 9011,    /* VSpace 拒绝只读段 */
-  LAINVM_IMAGE_ERR_RW_ALLOC = 9012,
-  LAINVM_IMAGE_ERR_RW_MAP = 9013,
-  LAINVM_IMAGE_ERR_LOOP_INIT = 9015, /* 循环初值引用不到 */
-  LAINVM_IMAGE_ERR_CODE_ALLOC = 9016,
-  LAINVM_IMAGE_ERR_CODE_MAP = 9017,
-  LAINVM_IMAGE_ERR_TABLE_ALLOC = 9018,
-};
-
-_Static_assert(LAINVM_IMAGE_ERR_INST_COUNT > LAINIR_CODES_IMAGE_BASE &&
-                   LAINVM_IMAGE_ERR_TABLE_ALLOC < LAINIR_CODES_IMAGE_LIMIT,
-               "image codes must stay inside the image segment");
 
 /* 一个操作数在装载后是什么。
  *
@@ -100,8 +75,8 @@ typedef struct {
 } LainVmImageSub;
 
 /* 代码段里每条子过程一条记录。
- * 「地址指向什么」由实现定义——这里是一条运行时记录；将来真做 AOT 就是代码段里
- * 的第一条指令。 */
+ * 「地址指向什么」由实现定义——这里是一条运行时记录；将来真做 AOT 就是代码段里的
+ * 第一条指令。 */
 typedef struct {
   uint32_t sub_index;
   uint32_t reserved;
@@ -109,7 +84,7 @@ typedef struct {
 
 struct LainVmImage {
   const L1Module *module;
-  LainVmSpace *space;
+  LainVmSpace *space; /* 装载时登记区段的那个空间，卸载按它撤销 */
 
   /* 模块数据排成两段连续内存：只读段和可写段（.rodata / .data）；
    * 代码排成一段（.text），权限是 READ|CALL，不带 WRITE。 */
@@ -146,12 +121,6 @@ struct LainVmImage {
   uint32_t max_slots;
 };
 
-/* 装载。失败返回 NULL，诊断写进 diag（可为 NULL）。
- * 装载器负责把模块数据映射进 space 并登记区段。 */
-LainVmImage *lainvm_image_load(const L1Module *module, LainVmSpace *space,
-                               L1Diagnostic *diag);
-void lainvm_image_free(LainVmImage *image);
-
 const LainVmImageRegion *lainvm_image_region(const LainVmImage *image,
                                              uint32_t region_id);
 const L1Inst *lainvm_image_inst(const LainVmImage *image, uint32_t region_id,
@@ -186,4 +155,4 @@ uintptr_t lainvm_image_sub_addr(const LainVmImage *image, uint32_t sub_index);
  * 越界、没对齐、超出子过程数都算不合法。 */
 uint32_t lainvm_image_sub_at(const LainVmImage *image, uintptr_t addr);
 
-#endif /* LAINVM_IMAGE_H */
+#endif /* LAINVM_IMAGE_INTERNAL_H */

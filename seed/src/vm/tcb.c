@@ -10,7 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "lain/vm/image.h"
+#include "image_internal.h"
+#include "tcb_internal.h"
 
 static void start_fail(L1Diagnostic *diag, int code, const char *message);
 
@@ -247,4 +248,28 @@ int lainvm_tcb_start(LainVmTcb *tcb, const char *entry, const L1Value *args,
   tcb->steps = 0;
   tcb->fuel = 0;
   return 0;
+}
+
+/* --- 读回执行状态 --------------------------------------------------------- */
+
+LainVmState lainvm_tcb_state(const LainVmTcb *tcb) {
+  return tcb ? tcb->state : LAINVM_DEAD;
+}
+
+bool lainvm_tcb_has_result(const LainVmTcb *tcb) {
+  return tcb ? tcb->has_result : false;
+}
+
+L1Value lainvm_tcb_result(const LainVmTcb *tcb) {
+  L1Value none = {0};
+  return tcb ? tcb->result : none;
+}
+
+const LainVmTrap *lainvm_tcb_trap(const LainVmTcb *tcb) {
+  static const LainVmTrap no_trap = {0};
+  return tcb ? &tcb->trap : &no_trap;
+}
+
+uint64_t lainvm_tcb_steps(const LainVmTcb *tcb) {
+  return tcb ? tcb->steps : 0;
 }

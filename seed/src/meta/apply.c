@@ -10,7 +10,6 @@
 #include "lain/text/parse.h"
 #include "lain/ir/verify.h"
 #include "lain/vm/engine.h"
-#include "lain/vm/image.h"
 
 static bool fail(L1Diagnostic *diag, int code, const char *message) {
   if (diag) {
@@ -152,8 +151,11 @@ static bool apply_run(const L1Module *module, const char *entry,
     result = lainvm_vm_call_host(tcb, index, call_args, arg_count,
                                  callee->result_count ? &value : NULL);
     if (result != LAINVM_SLICE_RUNNABLE) {
-      code = result == LAINVM_SLICE_TRAPPED && tcb->trap.status > 0
-                 ? tcb->trap.status : 9305;
+      code = 9305;
+      if (result == LAINVM_SLICE_TRAPPED) {
+        int trap_status = (int)lainvm_tcb_trap(tcb)->status;
+        if (trap_status > 0) code = trap_status;
+      }
       snprintf(message, sizeof(message), "apply: the host call was refused");
       goto cleanup;
     }
@@ -165,17 +167,20 @@ static bool apply_run(const L1Module *module, const char *entry,
     }
     result = lainvm_engine_run(tcb, (limits && limits->fuel) ? limits->fuel : 1000000);
     if (result != LAINVM_SLICE_DONE) {
-      code = result == LAINVM_SLICE_TRAPPED && tcb->trap.status > 0
-                 ? tcb->trap.status : 9306;
+      code = 9306;
+      if (result == LAINVM_SLICE_TRAPPED) {
+        int trap_status = (int)lainvm_tcb_trap(tcb)->status;
+        if (trap_status > 0) code = trap_status;
+      }
       snprintf(message, sizeof(message), "apply: the entry trapped (%d)", code);
       goto cleanup;
     }
-    if (!tcb->has_result && callee->result_count > 0) {
+    if (!lainvm_tcb_has_result(tcb) && callee->result_count > 0) {
       code = 9307;
       snprintf(message, sizeof(message), "apply: the entry produced no value");
       goto cleanup;
     }
-    value = tcb->result;
+    value = lainvm_tcb_result(tcb);
   }
   if (bytes_out) {
     if (value.kind != L1_VALUE_ADDR ||
@@ -205,7 +210,7 @@ static bool apply_run(const L1Module *module, const char *entry,
 
 cleanup:
   if (!ok && bytes_out) lainmeta_apply_bytes_free(bytes_out);
-  if (fuel_used_out && tcb) *fuel_used_out = tcb->steps;
+  if (fuel_used_out && tcb) *fuel_used_out = lainvm_tcb_steps(tcb);
   if (tcb) lainvm_tcb_free(tcb);
   if (!lainvm_stack_lease_none(lease)) (void)lainvm_space_free(&space, lease.region);
   if (!lainvm_space_handle_none(byte_region))

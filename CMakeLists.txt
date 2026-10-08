@@ -49,8 +49,7 @@ target_sources(lain_seed
         seed/include/lain/meta/tree.h
         seed/include/lain/vm/caps.h
         seed/include/lain/vm/engine.h
-        seed/include/lain/vm/image.h
-        seed/include/lain/ir/codes.h
+              seed/include/lain/ir/codes.h
         seed/include/lain/vm/endpoint.h
         seed/include/lain/vm/trap.h
         seed/include/lain/vm/quota.h
