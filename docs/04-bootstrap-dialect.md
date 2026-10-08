@@ -89,6 +89,7 @@ let NAME: TYPE = <表达式>;
 let NAME = <表达式>;      // 标注可省：类型由值推（调用取被调方返回类型）
 return <值>;
 if <条件> { … }            // 可带 else；条件是任意表达式（括号可省），分支必须以 return 收尾
+let NAME: TYPE = if <条件> { <值> } else { <值> };   // 带值 if：两个分支各 yield 一个值
 let total: u32 = for i in 0..n acc = 0 { acc = acc + i; };
 ```
 
@@ -193,6 +194,7 @@ func cstr_len(p: addr) -> u64 {
 | 函数、参数类型、调用 | `func f(a: i32) -> i32 { … }`、`f(2)` | 多语句体、递归都通 |
 | 绑定与返回 | `let n: i32 = …;`、`let y = inc(n);`、`return n;` | 标注可省：类型由值推（调用取被调方返回类型、参数名取参数表） |
 | 条件 | `if a < b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件是任意表达式：裸条件与括号条件走同一个入口，块就是表达式停下来的那一格；分支必须以 `return` 收尾，所以 `if` 是语句不是值 |
+| 带值 if | `let x: i32 = if c { a } else { b };` | 降级为 `%x = #if %c -> (#bits<32>) { … #yield %a } else { … #yield %b }`：条件是任意表达式、类型取绑定的标注（缺标注由值推）；**只在绑定位置**可用（`return if …` 报 4），**必须带 else**（缺 else 报 4），两个分支都必须以一个值收尾。样例 `bootstrap/lain/examples/choose.lain` |
 | 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };` | 仅 i32/u32（u64 报 5） |
 | 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
@@ -201,11 +203,11 @@ func cstr_len(p: addr) -> u64 {
 | 十六进制字面量 | `0x10`、`0Xff` | 读成数值后按**十进制**规范化写进产物（`0xff00` → `65280`）；整段必须是合法数字：`0x` 后面没有数字报 4；超过绑定宽度仍报 23。样例 `bootstrap/lain/examples/hex.lain` |
 | 负数字面量 | `-5`（负号紧跟数字） | LAINIR 的字面量是无符号十进制文本，没有负号，所以降级成 `#sub[repr](0, 5)`：宽度与符号都取上下文类型。只认字面量，一元负号作用于变量仍报 4。样例 `bootstrap/lain/examples/neg.lain` |
 
-实测被拒（列出来是因为它们看着都该能用）：字节串字面量报 4；带值 `if` 报 4。
+实测被拒（列出来是因为它们看着都该能用）：字节串字面量报 4。
 （`-`、`*`、`%` 曾报 6，比较全集与 `and`、`or`、`<<`、`>>` 曾报 4，已在 A 里补上绑定；
 裸条件 `if a < b` 曾报 4、无标注 `let y = …` 曾报 21，已在 B 的第一半修好；`as` 与负数字面量
 曾报 4，已在 B 的后半修好；十六进制 `0x10` 曾被 `bs_read_uint` 静默读成 `0`（更糟：`host_status=0` 而产物是错的），
-已在同一次修好。）
+已在同一次修好；带值 `if` 曾报 4，已在 D 的第一半修好。）
 
 ### 二、半成品：`struct` / `enum` 的值层
 
@@ -245,7 +247,10 @@ func cstr_len(p: addr) -> u64 {
 - 宿主授予**整块窗口**的能力（`region_grant`）；逐字节回调不可行。
 
 **D. 控制流补齐**
-- 带值 `if`（`#if` 779 + `#yield` 719）。
+- 带值 `if`（`#if` 779 + `#yield` 719）：**前半完成** —— 绑定位置的带值 if 已可用
+  （`meta_lower_if_value`，样例 `bootstrap/lain/examples/choose.lain`，产物过 `lainir_parse` +
+  `lainir_verify`）；尚缺：作为操作数或返回值出现（`return if …`、`1 + if …`），以及缺 `else` 时
+  的默认分支语义。
 - `loop` 带标签 + 循环参数 + `break` / `continue` 带实参（`#loop` 97 / `#break` 185 /
   `#continue` 104）；今天只有 `for … acc` 一种形状。
 
@@ -333,7 +338,7 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
 
 ### 六、结论
 
-今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ `for` /
+今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（仅绑定位置）/ `for` /
 算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
 **A + C + D + E**，其中 A 最快见效、C 最不可替代。
 
@@ -342,6 +347,9 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
 - `vref` 要成为不透明标量（像 `addr`：不可算术、不可 `as`）。
 - 期望类型的传递路径（见上）。
 - `addr` 上的 `==` 给不给（层 0 有 `lainir_eq`）。
+- 带值 `if` 只在**绑定位置**可用：`let x: T = if …` 走 `meta_lower_if_value`，`return if …`
+  与 `1 + if …` 都报 4（它们要求值-if 也能当操作数/返回值）。缺 `else` 也报 4 ——
+  区域的 `results` 要求每个出口都 `#yield`，没有隐式默认值。
 - `loop` 的 `continue` 可否省略实参。
 - 一元负号只认**字面量**（`-5`）：它占两个节点（负号 + 数字），操作数游标要跳两格；
   作用于变量（`-x`）报 4 —— 那需要一条真正的取负规则，不是记法。

@@ -873,6 +873,18 @@
     %info = #call meta_tid_repr(%tid)
     %kind = #and[#bits<64>](%info, 255)
     %width = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
+    // 带值 if：`let x: T = if c { a } else { b };`（值的**第一个** token 是 `if` 那个词）。
+    // 只在绑定位置接住 —— `return if …` 还没有写法，干净地报 4。
+    %vif = #call meta_node_is_word(%v, %base, #data_addr meta_kw_if, 2)
+    %notret_v = #eq[#bits<1>](%is_ret, 0)
+    %vif_ok = #and[#bits<1>](%vif, %notret_v)
+    %vif_named = #ne[#bits<64>](%name_hi, %name_lo)
+    %do_vif = #and[#bits<1>](%vif_ok, %vif_named)
+    #if %do_vif {
+      %vif_st = #call meta_lower_if_value(%base, %len, %parent, %vi,
+                                           %name_lo, %name_hi, %t_lo, %t_hi)
+      #return %vif_st
+    }
     // 形状读识别 pass 算好的那一格（键 = 这个出现位置），不再用「下一个节点是不是
     // `;`」猜。猜法在 `return g(x);` 上会挂：`g` 的下一个节点是那个组，于是组被当成
     // 算子，拿 `(` 去查类型的 op 表 —— 报 6「没这个算子」，跟真实原因毫无关系。
@@ -1059,6 +1071,142 @@
     #yield %s
   }
   #return %st
+}
+
+#proc meta_lower_if_value(%base: #addr, %len: #bits<64>,
+                          %parent: #bits<64>, %index: #bits<64>,
+                          %name_lo: #bits<64>, %name_hi: #bits<64>,
+                          %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<32> {
+  // 带值 if：`let x: T = if c { a } else { b };`。
+  //
+  // 形状与语句 if 一样（`if <条件> <块> [else <块>]`），差别只在这条 `#if` **有结果**：
+  // 两个区域各自 `#yield` 一个值，绑定名直接写在这条 `#if` 上。
+  //
+  // 条件与两个区域都按**同一个上下文类型**降级（绑定的标注）。区域里的表达式自己
+  // 会发指令，那些指令必须落在区域**里面** —— 所以顺序只能是
+  // 条件 → `#if … {` 那一行 → 区域里的表达式 → `#yield`：先降级区域再写前缀的话，
+  // 区域里的指令会插到这一行前面，出来是坏的。
+  %ci = #add[#bits<64>](%index, 1)
+  %ctid = #call meta_type_resolve(%base, %len, %t_lo, %t_hi)
+  %cmiss = #eq[#bits<64>](%ctid, 0)
+  %s = #if %cmiss -> (#bits<32>) {
+    %f0 = #call lain_meta_fail(5)
+    #yield 5
+  } else {
+    %cinfo = #call meta_tid_repr(%ctid)
+    %ckind = #and[#bits<64>](%cinfo, 255)
+    %cwidth = #and[#bits<64>](#lshr[#bits<64>](%cinfo, 8), 255)
+    %ces = #call meta_emit_expr(%base, %len, %ckind, %cwidth, %t_lo, %t_hi,
+                                %parent, %ci, 0, 0, 0, 0)
+    %cbad = #ne[#bits<32>](%ces, 0)
+    %z = #if %cbad -> (#bits<32>) {
+      #yield %ces
+    } else {
+      %sc = #call lain_meta_scratch_data()
+      %bi = #call meta_cell_get(#lea(%sc, 192, 1, 0))
+      %blk = #call ast_child(%parent, %bi)
+      %bk = #call meta_node_kind(%blk)
+      %bk2 = #eq[#bits<64>](%bk, 2)
+      %noblk = #eq[#bits<1>](%bk2, 0)
+      %y = #if %noblk -> (#bits<32>) {
+        // 条件后面不是块
+        %f1 = #call lain_meta_fail(4)
+        #yield 4
+      } else {
+        %ind = #data_addr meta_st_ind
+        %pct = #data_addr meta_st_pct
+        %eqop = #data_addr meta_st_eqop
+        %hif = #data_addr meta_hash_if
+        %alp = #data_addr meta_st_arrow_lp
+        %lh = #data_addr meta_st_lhead
+        %yld = #data_addr meta_st_yield
+        %nl = #data_addr meta_st_nl
+        %ew = #data_addr meta_st_else
+        %lend = #data_addr meta_st_lend
+        %ekw = #data_addr meta_kw_else
+        // `  %NAME = #if ` + 条件 + ` -> (` + 类型 + `) {\n`
+        %w1 = #call lain_meta_emit_write(%ind, 2)
+        %w2 = #call lain_meta_emit_write(%pct, 3)
+        %n_at = #lea(%base, %name_lo, 1, 0)
+        %n_len = #sub[#bits<64>](%name_hi, %name_lo)
+        %w3 = #call lain_meta_emit_write(%n_at, %n_len)
+        %w4 = #call lain_meta_emit_write(%eqop, 3)
+        %w5 = #call lain_meta_emit_write(%hif, 4)
+        %cref = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+        %clo = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+        %chi = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+        %w6 = #call meta_emit_ref2(%base, %len, %cref, %clo, %chi)
+        %w7 = #call lain_meta_emit_write(%alp, 5)
+        %w8 = #call meta_emit_repr(%ckind, %cwidth)
+        %w9 = #call lain_meta_emit_write(%lh, 4)
+        // 真分支：表达式降级在区域里面，结果 `#yield` 出来。
+        %tst = #call meta_emit_expr(%base, %len, %ckind, %cwidth, %t_lo,
+                                    %t_hi, %blk, 0, 0, 0, 0, 0)
+        %tbad = #ne[#bits<32>](%tst, 0)
+        %z1 = #if %tbad -> (#bits<32>) {
+          #yield %tst
+        } else {
+          %w10 = #call lain_meta_emit_write(%yld, 11)
+          %c1 = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+          %l1 = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+          %h1 = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+          %w11 = #call meta_emit_ref2(%base, %len, %c1, %l1, %h1)
+          %w12 = #call lain_meta_emit_write(%nl, 1)
+          // `else` 可选，但**带值** if 的两个区域都必须有值（LAINIR 的区域要 yield），
+          // 所以这里必须有 else，否则干净地报 4。else 词就在块组的下一格。
+          %ei = #add[#bits<64>](%bi, 1)
+          %af = #call meta_cursor_next(%parent, %bi)
+          %is_else = #call meta_node_is_word(%af, %base, %ekw, 4)
+          %z3 = #if %is_else -> (#bits<32>) {
+            %egrp = #call meta_cursor_next(%parent, %ei)
+            %ek = #call meta_node_kind(%egrp)
+            %ek2 = #eq[#bits<64>](%ek, 2)
+            %enotgrp = #eq[#bits<1>](%ek2, 0)
+            %z4 = #if %enotgrp -> (#bits<32>) {
+              // `else` 后面不是块
+              %f2 = #call lain_meta_fail(4)
+              #yield 4
+            } else {
+              %w13 = #call lain_meta_emit_write(%ew, 11)
+              %est = #call meta_emit_expr(%base, %len, %ckind, %cwidth,
+                                          %t_lo, %t_hi, %egrp, 0, 0, 0,
+                                          0, 0)
+              %ebad = #ne[#bits<32>](%est, 0)
+              %z5 = #if %ebad -> (#bits<32>) {
+                #yield %est
+              } else {
+                %w14 = #call lain_meta_emit_write(%yld, 11)
+                %c2 = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+                %l2 = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+                %h2 = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+                %w15 = #call meta_emit_ref2(%base, %len, %c2, %l2, %h2)
+                %w16 = #call lain_meta_emit_write(%nl, 1)
+                #yield 0
+              }
+              #yield %z5
+            }
+            #yield %z4
+          } else {
+            // 带值 if 缺 `else`
+            %f3 = #call lain_meta_fail(4)
+            #yield 4
+          }
+          %z3bad = #ne[#bits<32>](%z3, 0)
+          %z6 = #if %z3bad -> (#bits<32>) {
+            #yield %z3
+          } else {
+            %w17 = #call lain_meta_emit_write(%lend, 4)
+            #yield 0
+          }
+          #yield %z6
+        }
+        #yield %z1
+      }
+      #yield %y
+    }
+    #yield %z
+  }
+  #return %s
 }
 
 // 函数体：`{` 语句* `}`。最后一条必须是 `return`。
