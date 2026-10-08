@@ -69,3 +69,20 @@ if(PROJECT_IS_TOP_LEVEL)
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   )
 endif()
+
+option(LAIN_BUILD_DRIVER "Build the Meta driver tool" ON)
+
+if(LAIN_BUILD_DRIVER AND PROJECT_IS_TOP_LEVEL)
+  add_executable(lain_meta_driver tools/meta_driver.c)
+  target_link_libraries(lain_meta_driver PRIVATE lain_seed)
+  target_compile_features(lain_meta_driver PRIVATE c_std_11)
+  set_target_properties(lain_meta_driver PROPERTIES
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF
+    OUTPUT_NAME "lain-meta"
+  )
+  if(WIN32)
+    # 驱动用 fopen 一类 POSIX 名，MSVC 的 ucrt 只给弃用警告。
+    target_compile_definitions(lain_meta_driver PRIVATE _CRT_SECURE_NO_WARNINGS)
+  endif()
+endif()
