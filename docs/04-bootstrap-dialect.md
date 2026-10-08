@@ -191,7 +191,7 @@ func cstr_len(p: addr) -> u64 {
 | 绑定与返回 | `let n: i32 = …;`、`return n;` | `let` 必须写标注（否则 21） |
 | 条件 | `if b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件只吃单 token 或 `(表达式)`；分支必须以 `return` 收尾，所以 `if` 是语句不是值（裸条件 `if a < b` 报 4） |
 | 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };` | 仅 i32/u32（u64 报 5） |
-| 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | 算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）已通；u64/usize/bool 还没绑定，见 A |
+| 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
 | 宏 | `my_if`、`my_block`、`my_require` | 编译期展开，过同一道信任门 |
 
@@ -211,10 +211,15 @@ func cstr_len(p: addr) -> u64 {
 ### 三、待做（按阻塞顺序）
 
 **A. 算子表** —— 不是语法，是 bootstrap/std/scalars.l1 里那段 `data` 字节表。
-- i32/u32 的算术、比较、位运算已绑定（`bootstrap/lain/examples/ops.lain`、`bits.lain`）；
-  剩下的是 u64/usize 与 bool。词算子 `and`/`or` 由词法层整词识别（`an` 仍是 4）。
-- **u64 / usize 今天零个算子**：`#bits` 3607 次、`#add` 661 次 —— Meta 的长度与偏移全是
-  u64，这是最刺眼的一条。`bool` 的逻辑算子同理。
+- 表里有 9 个标量名：`i32 u32 u64 i64 i8 u8 bool usize addr`。除 `i8`/`u8`（它们的用途是
+  load/store 的宽度，不是算术）外，其余都绑定了算子（`bootstrap/lain/examples/ops.lain`、
+  `bits.lain`、`widths.lain`）：
+  - 32 位：`+ - * / % == != > <= >= < and or << >>`（i32 走 sdiv/srem/slt/sgt/sle/sge，
+    u32 走 udiv/urem/ult/ugt/ule/uge）；
+  - 64 位：同上一整列（`u64`/`usize` 走无符号那组，`i64` 走有符号那组）——`#bits` 3607 次、
+    `#add` 661 次里的大宗就是它们；
+  - `bool`：`== != and or`。
+- 词算子 `and`/`or` 由词法层整词识别（`an` 仍是 4）；`<<`/`>>` 走双字节标点。
 - IR 侧零改动：`#sub #mul #udiv #urem #eq #ne #ult #uge #and #or #shl #lshr` 都已实现。
 
 **B. 宽度推导与转换** —— 「算子产生自己的结果类型」。它同时是 `if x < 2` 能不加括号、
@@ -317,7 +322,7 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
 ### 六、结论
 
 今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（带标注）/ `if`（括号）/ `for` /
-三个算子。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
+算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
 **A + C + D + E**，其中 A 最快见效、C 最不可替代。
 
 ## 待补规则
