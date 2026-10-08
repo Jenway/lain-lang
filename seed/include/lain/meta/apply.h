@@ -2,9 +2,6 @@
 #ifndef LAINMETA_APPLY_H
 #define LAINMETA_APPLY_H
 
-/* 通用 apply：入口是模块内的普通 `#proc`，实参是常量值数组。
- * 拒码段 9340–9349；设计与契约见 docs/03-lain-meta.md。 */
-
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -70,9 +67,8 @@ typedef struct {
   uint64_t fuel_used;    /* 执行阶段已消耗的 VM 步数；失败结果也保留此计数 */
 } LainMetaApplyResult;
 
-/* 输入模块须已验证。操作数是此调用的编译期常量；结果不能是地址。
- * 每次调用建立独立空间和预算。失败写稳定诊断码，不交付部分结果。 */
 /* 通用 apply：在独立 VSpace 里执行模块中名为 entry 的普通 `#proc`。
+ * 输入模块须已验证；实参是编译期常量；每次调用建立独立空间和预算。
  *
  * 实参按值传，数量与类型必须与过程签名逐项一致，不允许 `#addr` 实参。
  * 结果必须是标量且不含地址；字节结果须显式使用 lainmeta_apply_proc_bytes。
@@ -82,7 +78,7 @@ typedef struct {
  * 任何失败都不交付部分值：out 的 kind/scalar/bytes 先清零并保持为空；
  * fuel_used 是计量侧带信息，执行阶段失败时仍报告已经消耗的 VM 步数。
  * limits 为 NULL 时按「不给能力、不限配额、默认栈与调用深度」处理。
- * 错误位置属于生成的模块文本；今天只给码与文本，行列留 0（未知）。 */
+ * 错误位置属于生成的模块文本；目前只给码与文本，行列留 0。 */
 bool lainmeta_apply_proc(const char *module_text, const char *entry,
                     const LainMetaApplyValue *args, uint32_t arg_count,
                     const LainMetaApplyLimits *limits, LainMetaApplyResult *out,

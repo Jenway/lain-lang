@@ -44,7 +44,7 @@ static uint64_t allocate_session_id(void) {
  * `2*i + 3`，所以 `i <= 32766` 时最大段号正好 65535。超过就在登记时拒。 */
 #define LAIN_META_SOURCE_MAX 32766u
 
-/* 段号分配（规范 §1.2）：主源码 Source=1、AstIn=2；**3 是 AstOut 的保留编号**，
+/* 段号分配：主源码 Source=1、AstIn=2；**3 是 AstOut 的保留编号**，
  * 第一期没有消费者也不许被源码占用；额外源码按注册顺序成对发 4/5、6/7、……
  * 失败源码同样占住它的段号对，不回收给后面的源码。
  *
@@ -383,16 +383,11 @@ void lainmeta_host_revoke_tree(LainMetaHost *host, uint32_t source) {
 }
 
 /* 把段/根表写进暂存区头部。Meta 读根引用与段号不需要额外能力调用。 */
-/* 段表 / 根槽表放在**高位**，不能紧接 32 字节头部。
+/* 段表 / 根槽表放在高位，不能紧接 32 字节头部。
  *
- * 原因：Meta 的固定格按 docs/ast-v1.md 的布局表分布在 +56/+64/+72/+80/+88/+96/+104
- * 与 +112/+120/+128/+144 —— 全部落在 32..160 之间。宿主若把段表写在
- * `base + 32 + i*32`（4 段时占 32..160），就会和 Meta 的固定格**互相覆盖**：
- * 实测段表项里读到的是 Meta 的容量值（`raw32[2]=0x87 raw32[5]=0x1508`），
- * 而 Meta 读到的根引用也是垃圾。两边各写各的数，谁都不对。
- *
- * 放到 4096 之后，Meta 的固定格布局完全不用动（规范里那份布局表继续成立），
- * 宿主也只多占 4KB 头部区。两套布局从此不重叠。 */
+ * Meta 的固定格分布在 +56..+144，全部落在 32..160 之间。宿主若把段表写在
+ * `base + 32 + i*32`，就会和这些固定格互相覆盖：两边各写各的数，谁都不对。
+ * 放到 4096 之后两套布局不重叠，Meta 的固定格布局也不用动。 */
 #define LAIN_META_TABLE_AT 4096u
 
 static void publish_scratch_header(LainMetaHost *host) {
@@ -1364,7 +1359,7 @@ static bool segment_view(LainMetaHost *host, uint16_t id,
 static bool header_ok_trusted(const unsigned char *base, uint64_t window,
                               uint16_t segment_id, LainAstArenaHeader *out);
 
-/* 解引用之前**必须先过这一道**（规范 §2.3）。
+/* 解引用之前**必须先过这一道**。
  *
  * 规则说得很硬：AST 读取能力要求已绑定合法 VSpace，未绑定就安全拒绝；**每次**
  * 解引用之前验证对应读取范围具有 READ 权限，不能先读 Header/Node 再检查。
@@ -1454,7 +1449,7 @@ const LainMetaTree *lainmeta_host_tree(LainMetaHost *host, uint32_t source) {
 
 /* 读节点：引用必须是**本段**已发布的节点槽。
  *
- * 顺序是**先验权限、再解引用**（规范 §2.3）：Header 读之前查 Header 区间，节点
+ * 顺序是**先验权限、再解引用**：Header 读之前查 Header 区间，节点
  * memcpy 之前查这 56 字节。任何一步没授权就拒 5，不做「先读后查」。 */
 static bool node_read(LainMetaHost *host, LainAstRef ref, LainAstArenaView *view,
                       LainAstArenaHeader *header, LainAstNode *out,
@@ -1692,7 +1687,7 @@ static uint32_t cap_ast_root(void *context, const uint64_t *args, uint32_t count
   LainAstArenaView view;
   if (!host) return LAINMETA_ERR_DENIED;
   if (count != 1 || !args) return LAINMETA_ERR_DENIED;
-  /* AST 读取能力都要求已绑定合法 VSpace（规范 §2.3）：没授权就没有「读 AST」这回事。 */
+  /* AST 读取能力都要求已绑定合法 VSpace：没授权就没有「读 AST」这回事。 */
   if (!host->space) {
     host_set_status(host, LAINMETA_ERR_DENIED);
     if (out) *out = LAIN_AST_REF_NONE;

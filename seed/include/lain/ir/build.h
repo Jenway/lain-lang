@@ -20,9 +20,7 @@ L1Builder *lainir_builder_new(void);
 void lainir_builder_free(L1Builder *builder);
 
 /* 从 arena 切一块裸内存，调用方自己管布局。切出来的东西不移动。
- *
- * 用途：**任何随模块增长的数组都不该有定长上限**。解析器的过程表和数据表
- * 用它按需扩容——上限只该来自模块本身。 */
+ * 解析器的过程表和数据表用它按需扩容，上限只来自模块本身。 */
 void *lainir_builder_alloc(L1Builder *builder, size_t size);
 
 /* 把一段文本拷进 builder 的 arena。模块引用传进去的字符串，所以解析器
@@ -62,10 +60,10 @@ const L1Inst *lainir_inst_loop(L1Builder *builder, const char *result,
 /* 编译期执行块。区域自己声明结果类型；块里必须每条路径都 #return，
  * 而且结果类型不许含 #addr（编译期地址不进产物）。 */
 
-/* #switch：一个选择子 + 常量到区域的映射 + **必须显式**的 default。
+/* #switch：一个选择子 + 常量到区域的映射 + 必须显式的 default。
  * ty 是选择子的类型实参——引擎和后端都靠它把常量掩到选择子的宽度上，
  * 所以它是必须的，不是可选的。cases 数组会拷进 arena。
- * default_case 为 NULL 是允许构造的，但验证器会拒绝（语义必须显式）。 */
+ * default_case 传 NULL 是允许构造的，但验证器会拒绝。 */
 const L1Inst *lainir_inst_switch(L1Builder *builder, const char *result,
                                  L1Operand selector, const L1Type *ty,
                                  const L1SwitchCase *cases, uint32_t case_count,
@@ -87,13 +85,12 @@ const L1Inst *lainir_inst_mem(L1Builder *builder, L1InstKind kind,
 const L1Inst *lainir_inst_symbol(L1Builder *builder, L1InstKind kind,
                                  const char *result, const char *symbol);
 
-/* 复制一条指令：换操作数和子区域，其余字段照抄（类型、内存序、符号、
- * 源位置、switch 的 cases）。body / else_body 传 NULL 表示沿用原来的
- * ——「去掉一个子区域」不是合法变换，所以不需要区分。
+/* 复制一条指令：换操作数和子区域，其余字段照抄（类型、内存序、符号、源位置、
+ * switch 的 cases）。body / else_body 传 NULL 表示沿用原来的——「去掉一个
+ * 子区域」不是合法变换，所以不需要区分。
  *
- * 寿命规则（整个 builder 都适用）：建出来的对象**引用**传进去的字符串和
- * 类型指针，不做深拷贝。所以改写出来的模块引用输入模块的名字——
- * **输入必须活得比输出长**。 */
+ * 寿命规则（整个 builder 都适用）：建出来的对象引用传进去的字符串和类型指针，
+ * 不做深拷贝，所以输入必须活得比输出长。 */
 const L1Inst *lainir_inst_rewrite(L1Builder *builder, const L1Inst *inst,
                                   const L1Operand *operands,
                                   uint32_t operand_count, const L1Region *body,

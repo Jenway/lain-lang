@@ -3,13 +3,12 @@
  * 这是「compiler core 提供什么」的最小落地：源码读入 + 产物写出 + 失败上报。
  * 它不含任何语言知识——不知道 `let`、`func`、`i32` 是什么，那些全部归 Meta。
  *
- * 除原子分配进程内会话编号外，不保存全局编译状态。host 对象**不再作为 #addr 传进 Meta**：可信的 C 注册路径
+ * 除原子分配进程内会话编号外，不保存全局编译状态。host 对象不作为 #addr 传进 Meta：可信的 C 注册路径
  * （`lainmeta_host_register`）把它绑到每个能力槽的 context 上，LAINVM 在宿主调用时
  * 注入回调的第一个参数。Meta 只看得到净化后的业务参数，无法指定或伪造宿主。
  *
- * 能力名是 link_name，同时是链接符号名。所以它们必须是**合法 C 标识符**
- * （SYMBOL 策略下后端要按这个名字发外部符号）。这就是这里用下划线而不是
- * 旧 seed 那些 `bootstrap.source-count` 短横线名字的原因。
+ * 能力名是 link_name，同时是链接符号名，所以必须是合法 C 标识符——SYMBOL 策略下
+ * 后端要按这个名字发外部符号。
  */
 #ifndef LAINMETA_HOST_H
 #define LAINMETA_HOST_H
@@ -91,7 +90,7 @@ bool lainmeta_host_arena(const LainMetaHost *host, uint32_t source,
  * 宿主自己仍持有树用于诊断。退出顺序：TCB 销毁 → 撤销区域 → 撤销段 → 释放宿主。 */
 void lainmeta_host_revoke_tree(LainMetaHost *host, uint32_t source);
 
-/* 段的分配（规范 §1.2）：主源码 Source=1、AstIn=2；3 是 AstOut 的保留编号，
+/* 段的分配：主源码 Source=1、AstIn=2；3 是 AstOut 的保留编号，
  * 第一期没有消费者也不许被源码占用；额外源码按**注册顺序**成对发 4/5、6/7、……
  * 编号在任务存活期不回收、不复用，失败源码也占住它的段号对。 */
 uint16_t lainmeta_host_source_segment(const LainMetaHost *host,
@@ -114,9 +113,8 @@ bool lainmeta_host_ast_span_addr(LainMetaHost *host, LainAstRef ref,
 bool lainmeta_host_ast_child_ref(LainMetaHost *host, LainAstRef ref,
                                  uint64_t index, LainAstRef *out);
 
-/* Meta 侧诊断通道：`%slot` 0..15，`%value` 原样存下。**故意不落暂存区** ——
- * Meta 的暂存区格子会被分配器与实参表覆盖，把诊断写在那里会读到全 0，
- * 得出「这段代码没跑」这种错误结论（实测踩过两次）。这里写的是宿主结构里的字段，
+/* Meta 侧诊断通道：`%slot` 0..15，`%value` 原样存下。故意不落暂存区——那里的格子
+ * 会被分配器与实参表覆盖，诊断写进去会读到全 0；这里写宿主结构里的字段，
  * 分配器碰不到，驱动在跑失败后读出来即可。 */
 #define LAINMETA_TRACE_SLOTS 64
 /* 诊断：最近一次节点引用解析失败的引用与拒码，以及失败次数。 */

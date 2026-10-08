@@ -1,6 +1,6 @@
-/* 编译期执行的**分配配额**（规范 04-lain-vm.md §4/:105、§6/:162、§8.2/:212-214）。
+/* 编译期执行的分配配额。
  *
- * 单位是**字节**，记的是**实际承诺**的底层存储：谁真的拿到一块底层内存，谁就扣账。
+ * 单位是字节，记的是实际承诺的底层存储：谁真的拿到一块底层内存，谁就扣账。
  *
  *   - 账户由**一次最外层编译期执行**创建；嵌套调用共享同一个账户（同一个 TCB）；
  *   - 扣费点：VSpace 承诺一块底层存储时（这一版是 TCB 的栈租约），以及宿主暂存区
@@ -31,8 +31,7 @@ typedef struct {
   uint64_t underflow; /* 归还量超过已承诺量的次数；账目不一致，正常路径必须为 0 */
 } LainVmQuota;
 
-/* allocation quota 用尽。engine 段 1001-1043 已被占用，1044 空着（全树检索过），
- * 权威登记在 docs/spec/vm.md。 */
+/* allocation quota 用尽。号码接在 engine 的 1001-1043 段之后。 */
 enum { LAINVM_QUOTA_TRAP = 1044 };
 
 void lainvm_quota_init(LainVmQuota *quota, uint64_t limit_bytes);

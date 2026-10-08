@@ -1,8 +1,8 @@
 /* 语言无关的源码平铺 Arena（LAINAST v1 的第 1 段：AstIn）。
  *
- * reader 只做**机制**的事：现行词法约定（词、字符串、`::`/`->`/`..` 双字节标点）、
- * 注释与括号配对、源码位置、Arena 存储、结构验证。它**不认识** let / func /
- * struct / my_if 的含义——那些全在 Meta 那边。
+ * reader 只做机制的事：词法约定（词、字符串、`::`/`->`/`..` 双字节标点）、注释与
+ * 括号配对、源码位置、Arena 存储、结构验证。let / func / struct / my_if 的含义不在
+ * 这里，全归 Meta。
  *
  * 布局与引用编码的唯一来源是 `lain/meta/ast_v1.h`。这里不给句柄、不给 C 指针：
  * 引用是「段号 + 段内偏移」的整数，节点在映射格式里。
@@ -20,9 +20,8 @@
 
 typedef struct LainMetaTree LainMetaTree;
 
-/* 解析失败**类别**。reader 内部本来就知道自己是哪一种失败，必须原样报给宿主：
- * 宿主曾经拿**累计**的 `quota->rejected` 去猜，于是「先有过一次历史配额拒绝、这次
- * 只是语法错」会被误判成配额错（1044 而不是 34）。
+/* 解析失败类别。reader 内部本来就知道自己是哪一种失败，必须原样报给宿主：
+ * 拿累计的 `quota->rejected` 去猜，会把「这次只是语法错」误判成配额错。
  *
  *   SYNTAX  词法/括号/注释边界不配对：源码可读，位置是第一个说不通的地方
  *   QUOTA   账户余额不够：这一次的分配被账户拒了
@@ -72,8 +71,7 @@ bool lainmeta_tree_arena(const LainMetaTree *tree, LainAstArenaView *out);
 /* 登记这份 Arena 的绑定段号（驱动在映射前调用），并同时记下**文本所在段的段号**。
  *
  * 两者必须分开：Arena 自己的段号（Header.segment_id、root 引用、孩子列表里的每一项）
- * 和令牌文本的段号（`text`）不是同一段——文本字节在 **Source 段**，不在 AstIn 段。
- * 旧接口只收一个段号，会把文本引用也搬到 AstIn 段去，那是错的。
+ * 和令牌文本的段号（`text`）不是同一段——文本字节在 Source 段，不在 AstIn 段。
  * 两个段号都必须是有效段号（非 0）。 */
 bool lainmeta_tree_set_segment(LainMetaTree *tree, uint16_t segment_id,
                                uint16_t text_segment);
