@@ -111,7 +111,9 @@ let q: addr = lea(p, i);  // 地址算术：降成 #lea(%p, %i, 1, 0)
 - `load` / `store` / `lea` 是**内建**（不是用户函数，名字不查作用域表）：
   `load(p)` 只出现在能提供期望类型的位置（`let b: u8 = …`、`return …`），宽度由那里定；
   `store(p, v)` 的宽度取 `v` 的类型；`lea(p, i)` 发 `#lea(%p, %i, 1, 0)`。没有期望类型
-  （无标注 `let b = load(p);`、`load(p);` 单独成句）报 4，不猜；`p + i` 还没接（见《计划》C）。
+  （无标注 `let b = load(p);`、`load(p);` 单独成句）报 4，不猜。地址加整数是语言自己的一条规则：
+  `p + i` 降成 `#lea(基址, 下标, 1, 0)`（只认 `+`，且左边必须是地址；`i + p` 报 4）；
+  `p + i * K` 还没接（没有优先级，见《计划》C）。
 - 顶层形式：`let` / `struct` / `enum` / `func` / `import(…)`。关键字经 Meta 语法
   注册表取 handler：1=my_if 2=func 3=if 4=struct 5=enum 7=顶层 let 8=return
   9=局部 let 10=for 11=my_block 13=loop（12 是宏 `my_require`）。**6（原 scalar 声明）
@@ -250,11 +252,11 @@ func cstr_len(p: addr) -> u64 {
 | 宏 | `my_if`、`my_block`、`my_require` | 编译期展开，过同一道信任门 |
 | 转换 | `x as T`（定宽整数之间） | 变宽发 `#zext`、变窄发 `#trunc`、等宽补一条加零复制；目标类型是**类型名**不是值；源宽度取操作数自己的类型（参数名），取不到才用上下文宽度。样例 `bootstrap/lain/examples/convert.lain` |
 | 十六进制字面量 | `0x10`、`0Xff` | 读成数值后按**十进制**规范化写进产物（`0xff00` → `65280`）；整段必须是合法数字：`0x` 后面没有数字报 4；超过绑定宽度仍报 23。样例 `bootstrap/lain/examples/hex.lain` |
-| 内存 | `let b: u8 = load(p);`、`return load(p);`、`store(p, v);`、`let q: addr = lea(p, i);` | 三个内建名字：`load` 的宽度由期望类型定（`#load[#bits<8>](%p, 0)`），`store` 的宽度取值的类型（`#store[#bits<8>](%v, %p)`），`lea` 发 `#lea(%p, %i, 1, 0)`。没有期望类型报 4（`let b = load(p);`、`load(p);`）；`p + i` 报 6（addr 没有算子绑定，见 C）。样例 `bootstrap/lain/examples/memory.lain` |
+| 内存 | `let b: u8 = load(p);`、`return load(p);`、`store(p, v);`、`let q: addr = lea(p, i);`、`load(p + i)` | 三个内建名字：`load` 的宽度由期望类型定（`#load[#bits<8>](%p, 0)`），`store` 的宽度取值的类型（`#store[#bits<8>](%v, %p)`），`lea` 发 `#lea(%p, %i, 1, 0)`。地址加整数（`p + i`、`p + 1`）降成 `#lea(基址, 下标, 1, 0)`。没有期望类型报 4（`let b = load(p);`、`load(p);`）；`i + p` 报 4、`p + i * K` 报 6。样例 `bootstrap/lain/examples/memory.lain` |
 | 负数字面量 | `-5`（负号紧跟数字） | LAINIR 的字面量是无符号十进制文本，没有负号，所以降级成 `#sub[repr](0, 5)`：宽度与符号都取上下文类型。只认字面量，一元负号作用于变量仍报 4。样例 `bootstrap/lain/examples/neg.lain` |
 
-实测被拒（列出来是因为它们看着都该能用）：字节串字面量报 4；`p + i` 报 6
-（addr 的算子表是空的，地址算术属 C 的剩余项）。
+实测被拒（列出来是因为它们看着都该能用）：字节串字面量报 4；`i + p` 报 4（只认左边的地址）；
+`p + i * K` 报 6（降级是左到右折叠，没有乘法优先级 —— 要支持得先有表达式树）。
 （`-`、`*`、`%` 曾报 6，比较全集与 `and`、`or`、`<<`、`>>` 曾报 4，已在 A 里补上绑定；
 裸条件 `if a < b` 曾报 4、无标注 `let y = …` 曾报 21，已在 B 的第一半修好；`as` 与负数字面量
 曾报 4，已在 B 的后半修好；十六进制 `0x10` 曾被 `bs_read_uint` 静默读成 `0`（更糟：`host_status=0` 而产物是错的），
@@ -296,7 +298,10 @@ func cstr_len(p: addr) -> u64 {
 - `addr` 类型（已有）＋ `load` / `store` / `lea`：**前半完成** —— 三个内建名字可用
   （`meta_emit_load_temp` / `meta_lower_store` / `meta_emit_lea_temp`，宽度由期望类型定；
   样例 `bootstrap/lain/examples/memory.lain`，产物过 `lainir_parse` + `lainir_verify`）。
-  剩下 `p + i` / `p + i * K`（`#lea` 610 是最大宗内存操作，`#load` 42、`#store` 16）。
+- `p + i`、`p + 1`：**已完成** —— 表达式路径按「符号是 `+` 且左操作数的类型是 addr」发
+  `#lea(基址, 下标, 1, 0)`（`is_lea` 分支）。剩下 `p + i * K` 的 scale（降级是左到右折叠，
+  没有优先级，要支持得先有表达式树）；`i + p` 报 4（只认左边的地址，否则会发出 `#add`
+  拿地址当整数）。
 - 字节串字面量 → `#data`（`#data_addr` 232）。
 - 宿主授予**整块窗口**的能力（`region_grant`）；逐字节回调不可行。
 
@@ -397,7 +402,7 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
 ### 六、结论
 
 今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（仅绑定位置）/ `for` / `loop`（标签 + 参数 + 多语句体 + 带实参的 `break`/`continue`）/
-`load`/`store`/`lea`（宽度由期望类型定）/
+`load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 
 算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
 **A + C + D + E**，其中 A 最快见效、C 最不可替代。
 
@@ -408,7 +413,10 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
   单独成句都报 4，不猜（曾经拿本函数的返回类型顶上，发出过宽度错的 `#load`）。
 - 收尾的「加零复制」不再走源码的算子表：地址用 `#lea(x, 0, 1, 0)`、其余定宽整数用
   `#add[repr](x, 0)`。`u8`/`i8`/`addr` 没有算子绑定，走算子表查 `+` 会报 6。
-- `p + i` 未接：addr 的算子表是空的，报 6（见 C）。
+- `p + i` 只认 `+` 且**左操作数**是地址：`i + p` 报 4（换过去是 `#lea(1, %p, 1, 0)`，
+  而按左边的整数类型发 `#add` 会拿地址当整数 —— 验证器 2005）。
+- `p + i * K` 的 scale 还是 1：降级是左到右折叠，`p + i * K` 会先算成 `(p + i) * K`，
+  在 addr 上报 6。要支持得先有表达式树。
 - 期望类型的传递路径（见上）。
 - `addr` 上的 `==` 给不给（层 0 有 `lainir_eq`）。
 - 带值 `if` 只在**绑定位置**可用：`let x: T = if …` 走 `meta_lower_if_value`，`return if …`

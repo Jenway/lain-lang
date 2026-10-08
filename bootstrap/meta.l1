@@ -1355,6 +1355,42 @@
     %r_dig = #call meta_is_int_literal(%base, %rn_lo2, %rn_hi2, %len)
     %r_lit = #and[#bits<1>](%r_lit0, %r_dig)
     %both_lit = #and[#bits<1>](%l_lit, %r_lit)
+    // `p + i`（地址 + 整数）：地址不是算子表里的类型，`+` 在这里就是
+    // `#lea(基址, 下标, 1, 0)`。只认 `+` 一个符号，且操作数的类型得是 addr。
+    %sp_b = #call bs_byte_at(%base, %bat, %len)
+    %is_plus = #eq[#bits<8>](%sp_b, 43)
+    // **只认左边的地址**：`1 + p` 不是地址算术（换过去是 `#lea(1, %p, 1, 0)`）。
+    %a_tid = #if %l_hit -> (#bits<64>) {
+      %a_t2 = #call meta_type_resolve(%base, %len, %l_tlo, %l_thi)
+      #yield %a_t2
+    } else {
+      #yield 0
+    }
+    %a_info = #call meta_tid_repr(%a_tid)
+    %a_kind = #and[#bits<64>](%a_info, 255)
+    %a_is_addr = #eq[#bits<64>](%a_kind, 3)
+    %is_lea = #and[#bits<1>](%is_plus, %a_is_addr)
+    // 右边是地址、左边不是：`i + p` 不是地址算术，也不能按左边的整数类型发
+    // `#add`（地址不是整数）。报 4。
+    %rwt_lo = #call meta_word_type_name(%base, %len, %rn)
+    %rwt_hi = #call meta_cell_get(#lea(%scp, 0, 1, 0))
+    %rwt_miss = #eq[#bits<64>](%rwt_lo, 0xFFFFFFFFFFFFFFFF)
+    %rwtid = #if %rwt_miss -> (#bits<64>) {
+      #yield 0
+    } else {
+      %rwt2 = #call meta_type_resolve(%base, %len, %rwt_lo, %rwt_hi)
+      #yield %rwt2
+    }
+    %rwinfo = #call meta_tid_repr(%rwtid)
+    %rkind = #and[#bits<64>](%rwinfo, 255)
+    %r_is_addr = #eq[#bits<64>](%rkind, 3)
+    %nonl = #eq[#bits<1>](%a_is_addr, 0)
+    %rev_ok = #and[#bits<1>](%r_is_addr, %nonl)
+    %rev_bad = #and[#bits<1>](%is_plus, %rev_ok)
+    #if %rev_bad {
+      %f3c = #call lain_meta_fail(4)
+      #break e(4)
+    }
     // 现在才查物理算子。从这往后到这条指令发完，**不能再有任何递归调用** ——
     // 否则 `+24`/`+32` 里的名字会被换掉。
     %sym = #lea(%base, %bat, 1, 0)
@@ -1379,7 +1415,8 @@
     } else {
       #yield %ctx_miss
     }
-    #if %miss {
+    %missreal = #and[#bits<1>](%miss, #eq[#bits<1>](%is_lea, 0))
+    #if %missreal {
       %f3 = #call lain_meta_fail(6)
       #break e(6)
     }
@@ -1443,15 +1480,31 @@
     }
     %eqop = #data_addr meta_st_eqop
     %x3 = #call lain_meta_emit_write(%eqop, 3)
-    %x4 = #call meta_emit_op_mid(%kind3, %width3)
-    %x5 = #call meta_emit_ref2(%base, %len, %acc, %alo, %ahi)
     %comma = #data_addr meta_o4
-    %x6 = #call lain_meta_emit_write(%comma, 2)
-    %x7 = #call meta_emit_ref2(%base, %len, %rref, %rn_lo2, %rn_hi2)
     %rp = #data_addr meta_rparen
-    %x8 = #call lain_meta_emit_write(%rp, 1)
     %nl = #data_addr meta_st_nl
-    %x9 = #call lain_meta_emit_write(%nl, 1)
+    // 地址加整数发 `#lea(基址, 下标, 1, 0)`：没有类型实参，结果类型由验证器跟着
+    // 那个地址操作数对。
+    #if %is_lea {
+      %hlea2 = #data_addr meta_hash_lea
+      %q1 = #call lain_meta_emit_write(%hlea2, 5)
+      %q2 = #call meta_emit_ref2(%base, %len, %acc, %alo, %ahi)
+      %q3 = #call lain_meta_emit_write(%comma, 2)
+      %q4 = #call meta_emit_ref2(%base, %len, %rref, %rn_lo2, %rn_hi2)
+      %q5 = #call lain_meta_emit_write(%comma, 2)
+      %q6 = #call meta_emit_uint(1)
+      %q7 = #call lain_meta_emit_write(%comma, 2)
+      %q8 = #call meta_emit_uint(0)
+      %q9 = #call lain_meta_emit_write(%rp, 1)
+      %q10 = #call lain_meta_emit_write(%nl, 1)
+    } else {
+      %x4 = #call meta_emit_op_mid(%kind3, %width3)
+      %x5 = #call meta_emit_ref2(%base, %len, %acc, %alo, %ahi)
+      %x6 = #call lain_meta_emit_write(%comma, 2)
+      %x7 = #call meta_emit_ref2(%base, %len, %rref, %rn_lo2, %rn_hi2)
+      %x8 = #call lain_meta_emit_write(%rp, 1)
+      %x9 = #call lain_meta_emit_write(%nl, 1)
+    }
     // 绑定模式且这一条已经是最后一条：语句的收尾就是它，循环出去时别再补一条
     %bound2 = #if %named -> (#bits<1>) {
       #yield 1
