@@ -170,7 +170,11 @@ static uint32_t token_end(const char *text, uint32_t length, uint32_t at) {
     }
   } else if (next < length && ((c == ':' && text[next] == ':') ||
                                (c == '-' && text[next] == '>') ||
-                               (c == '.' && text[next] == '.'))) {
+                               (c == '.' && text[next] == '.') ||
+                               (c == '=' && text[next] == '=') ||
+                               (c == '!' && text[next] == '=') ||
+                               (c == '<' && (text[next] == '=' || text[next] == '<')) ||
+                               (c == '>' && (text[next] == '=' || text[next] == '>')))) {
     next++;
   }
   return next;
