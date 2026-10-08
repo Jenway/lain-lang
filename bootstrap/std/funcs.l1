@@ -1235,6 +1235,179 @@
 //
 // 参数块向 bump 分配器要（调用实参块同法），所以嵌套循环不会互相踩；块头（+56/+64）
 // 与暂存区 2432/2440/2448 记下标签名与循环编号 —— 带名字的 `break` / `continue` 由 d3 接。
+// `break LABEL(值);` / `continue LABEL(实参…);` —— 循环体内的显式跳转。
+// 当前循环的参数块偏移放在暂存区 2456（`meta_lower_loop` 在降级循环体之前写入，
+// 降级完恢复），块里给出标签、参数个数与每个参数的声明类型窗口。
+#proc meta_lower_loop_jump(%base: #addr, %len: #bits<64>,
+                           %parent: #bits<64>, %index: #bits<64>) -> #bits<32> {
+  %sc = #call lain_meta_scratch_data()
+  %boff = #call meta_cell_get(#lea(%sc, 2456, 1, 0))
+  %noloop = #eq[#bits<64>](%boff, 0)
+  #if %noloop {
+    %f0 = #call lain_meta_fail(4)
+    #return 4
+  }
+  %b = #lea(%sc, %boff, 1, 0)
+  // `break` 还是 `continue`
+  %kw = #call ast_child(%parent, %index)
+  %isbrk = #call meta_node_is_word(%kw, %base, #data_addr meta_kw_break, 5)
+  %iscont = #call meta_node_is_word(%kw, %base, #data_addr meta_kw_continue, 8)
+  %known = #or[#bits<1>](%isbrk, %iscont)
+  %unknown = #eq[#bits<1>](%known, 0)
+  #if %unknown {
+    %f1 = #call lain_meta_fail(4)
+    #return 4
+  }
+  // 标签必须与当前循环同名：嵌套循环里用它指认跳哪一层
+  %la = #call ast_child(%parent, #add[#bits<64>](%index, 1))
+  %lk = #call meta_node_kind(%la)
+  %lab_n = #call meta_node_len(%la)
+  %llo = #call meta_cell_get(#lea(%b, 56, 1, 0))
+  %lhi = #call meta_cell_get(#lea(%b, 64, 1, 0))
+  %llen = #sub[#bits<64>](%lhi, %llo)
+  %l_ok = #eq[#bits<64>](%lk, 1)
+  %l_same = #eq[#bits<64>](%lab_n, %llen)
+  %l0 = #and[#bits<1>](%l_ok, %l_same)
+  %lst = #call meta_node_start(%la)
+  %lcmp = #if %l0 -> (#bits<1>) {
+    %eqb = #call meta_bytes_equal(#lea(%base, %lst, 1, 0),
+                                   #lea(%base, %llo, 1, 0), %llen)
+    #yield %eqb
+  } else {
+    #yield 0
+  }
+  %lbad = #eq[#bits<1>](%lcmp, 0)
+  #if %lbad {
+    %f2 = #call lain_meta_fail(4)
+    #return 4
+  }
+  // `(实参…)`：`break` 只带循环的值，`continue` 要给每个参数一个值
+  %ag = #call ast_child(%parent, #add[#bits<64>](%index, 2))
+  %agk = #call meta_node_kind(%ag)
+  %nparam = #call meta_cell_get(#lea(%b, 8, 1, 0))
+  %wanted = #if %isbrk -> (#bits<64>) {
+    #yield 1
+  } else {
+    #yield %nparam
+  }
+  // 实参个数不靠孩子数猜：一个实参可以是多 token 的表达式，个数由 `#continue` 的参数
+  // 个数（或 `#break` 的 1）定，每个实参在逗号处收尾。
+  %ag_ok = #eq[#bits<64>](%agk, 2)
+  %head_bad = #eq[#bits<1>](%ag_ok, 0)
+  #if %head_bad {
+    %f3 = #call lain_meta_fail(4)
+    #return 4
+  }
+  %lp_n = #call meta_cell_get(#lea(%b, 16, 1, 0))
+  // `break` 直接发终止指令，循环体随后的收尾不再发；`continue` 只把实参记成
+  // 「下一轮的值」，由循环体收尾那条 `#continue` 发出去 —— 区域里终止指令必须是
+  // 最后一条，而值型循环又必须有一个 `#break`（验证器 2006）。终止标志写在
+  // 暂存区 2464：1 表示区域已经被 `break` 终结。
+  %tflag = #if %isbrk -> (#bits<64>) {
+    #yield 1
+  } else {
+    #yield 0
+  }
+  %tset = #call meta_cell_put(#lea(%sc, 2464, 1, 0), %tflag)
+  // 实参类型：`break` 就是循环的值（块头 +24/+32 与 +72/+80），
+  // `continue` 按参数顺序取该参数的声明类型（参数项 +16/+24 与 +64/+72）。
+  %akd = #call meta_cell_get(#lea(%b, 24, 1, 0))
+  %awd = #call meta_cell_get(#lea(%b, 32, 1, 0))
+  %at_lo = #call meta_cell_get(#lea(%b, 72, 1, 0))
+  %at_hi = #call meta_cell_get(#lea(%b, 80, 1, 0))
+  %gas = #loop g(%k: #bits<64> = 0, %pe: #bits<64> = 0) -> (#bits<32>) {
+    %more = #ult[#bits<64>](%k, %wanted)
+    #if %more {
+      %is0 = #eq[#bits<64>](%k, 0)
+      // 实参之间是逗号：下一个实参从上一个的终点之后一格开始
+      %cpos = #if %is0 -> (#bits<64>) {
+        #yield 0
+      } else {
+        #yield #add[#bits<64>](%pe, 1)
+      }
+      %cst = #if %is0 -> (#bits<1>) {
+        #yield 1
+      } else {
+        %cm = #call ast_child(%ag, %pe)
+        %cm_at = #call meta_node_start(%cm)
+        %cm_b = #call bs_byte_at(%base, %cm_at, %len)
+        %cm_is = #eq[#bits<8>](%cm_b, 44)
+        #yield %cm_is
+      }
+      %c_bad = #eq[#bits<1>](%cst, 0)
+      #if %c_bad {
+        %f4 = #call lain_meta_fail(4)
+        #break g(%f4)
+      }
+      %kslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 96))
+      %kq = #lea(%b, %kslot, 1, 0)
+      %ekd = #call meta_cell_get(#lea(%kq, 16, 1, 0))
+      %ewd = #call meta_cell_get(#lea(%kq, 24, 1, 0))
+      %et_lo = #call meta_cell_get(#lea(%kq, 64, 1, 0))
+      %et_hi = #call meta_cell_get(#lea(%kq, 72, 1, 0))
+      %use_kd = #if %isbrk -> (#bits<64>) { #yield %akd } else { #yield %ekd }
+      %use_wd = #if %isbrk -> (#bits<64>) { #yield %awd } else { #yield %ewd }
+      %use_lo = #if %isbrk -> (#bits<64>) { #yield %at_lo } else { #yield %et_lo }
+      %use_hi = #if %isbrk -> (#bits<64>) { #yield %at_hi } else { #yield %et_hi }
+      %est = #call meta_emit_expr(%base, %len, %use_kd, %use_wd,
+                                  %use_lo, %use_hi, %ag, %cpos, 0, 0, 0, 0)
+      %ebad = #ne[#bits<32>](%est, 0)
+      #if %ebad {
+        #break g(%est)
+      }
+      %aref = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+      %alo = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+      %ahi = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+      %aend = #call meta_cell_get(#lea(%sc, 192, 1, 0))
+      %send = #call meta_cell_put(#lea(%sc, 2504, 1, 0), %aend)
+      %out = #if %isbrk -> (#bits<32>) {
+        // break 只有一个实参，先存起来，等所有实参都降级完再发指令 ——
+        // 实参里的临时指令必须发在 `#break` 之前。
+        %q1 = #call meta_cell_put(#lea(%sc, 2480, 1, 0), %aref)
+        %q2 = #call meta_cell_put(#lea(%sc, 2488, 1, 0), %alo)
+        %q3 = #call meta_cell_put(#lea(%sc, 2496, 1, 0), %ahi)
+        #yield 0
+      } else {
+        %st1 = #call meta_cell_put(#lea(%kq, 32, 1, 0), %aref)
+        %st2 = #call meta_cell_put(#lea(%kq, 80, 1, 0), %alo)
+        %st3 = #call meta_cell_put(#lea(%kq, 88, 1, 0), %ahi)
+        #yield 0
+      }
+      #continue g(#add[#bits<64>](%k, 1), %aend)
+    } else {
+      #break g(0)
+    }
+  }
+  %gbad = #ne[#bits<32>](%gas, 0)
+  #if %gbad {
+    #return %gas
+  }
+  // 多写的实参：最后一个实参的终点应该正好是实参组的尽头。
+  %acount = #call ast_child_count(%ag)
+  %lastend = #call meta_cell_get(#lea(%sc, 2504, 1, 0))
+  %tail_ok = #eq[#bits<64>](%lastend, %acount)
+  %tail_bad = #eq[#bits<1>](%tail_ok, 0)
+  #if %tail_bad {
+    %f5 = #call lain_meta_fail(4)
+    #return 4
+  }
+  // `break`：实参已经算好，现在才发终止指令（临时指令都在它之前）。
+  %bkey = #if %isbrk -> (#bits<32>) {
+    %w1 = #call lain_meta_emit_write(#data_addr meta_st_ind4brk, 12)
+    %w1a = #call meta_emit_uint(%lp_n)
+    %w1b = #call lain_meta_emit_write(#data_addr meta_fn_lparen, 1)
+    %bkr = #call meta_cell_get(#lea(%sc, 2480, 1, 0))
+    %bkl = #call meta_cell_get(#lea(%sc, 2488, 1, 0))
+    %bkh = #call meta_cell_get(#lea(%sc, 2496, 1, 0))
+    %w1c = #call meta_emit_ref2(%base, %len, %bkr, %bkl, %bkh)
+    %w1d = #call lain_meta_emit_write(#data_addr meta_st_rp, 2)
+    #yield %w1
+  } else {
+    #yield 0
+  }
+  #return 0
+}
+
 #proc meta_lower_loop(%base: #addr, %len: #bits<64>,
                       %parent: #bits<64>, %index: #bits<64>,
                       %n_lo: #bits<64>, %n_hi: #bits<64>) -> #bits<32> {
@@ -1268,9 +1441,10 @@
   }
   // 块布局：+0 水位，+8 参数个数，+16 循环编号，+24 acc 的 kind（哨兵 = 还没找到），
   // +32 acc 的宽度，+40/+48 acc 的名字窗口，+56/+64 标签窗口，+72/+80 acc 的类型窗口，
-  // +88 + k*64 参数 k：名字起/止、kind、宽度、当前值、初值引用/起/止。
+  // +88 + k*96 参数 k：名字起/止、kind、宽度、当前值、初值引用/起/止、类型窗口、
+  // 显式 `continue` 实参的窗口（起 +80、止 +88，止为 0 表示没有）。
   %mark = #call meta_bump_mark()
-  %bytes = #add[#bits<64>](88, #mul[#bits<64>](%nparam, 64))
+  %bytes = #add[#bits<64>](88, #mul[#bits<64>](%nparam, 96))
   %blk = #call meta_bump_alloc(%bytes)
   %noblk = #eq[#bits<64>](%blk, 0xFFFFFFFFFFFFFFFF)
   #if %noblk {
@@ -1325,13 +1499,18 @@
       %wd = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
       %n_at = #call meta_node_start(%nm)
       %n_hi2 = #add[#bits<64>](%n_at, #call meta_node_len(%nm))
-      %pslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 64))
+      %pslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 96))
       %q = #lea(%b, %pslot, 1, 0)
       %p0 = #call meta_cell_put(%q, %n_at)
       %p1 = #call meta_cell_put(#lea(%q, 8, 1, 0), %n_hi2)
       %p2 = #call meta_cell_put(#lea(%q, 16, 1, 0), %kd)
       %p3 = #call meta_cell_put(#lea(%q, 24, 1, 0), %wd)
       %p4 = #call meta_cell_put(#lea(%q, 32, 1, 0), 0xFFFFFFFFFFFFFFFF)
+      // 声明的类型窗口：`continue` 的实参按它降级（上下文类型）
+      %p5 = #call meta_cell_put(#lea(%q, 64, 1, 0), %t_lo)
+      %p6 = #call meta_cell_put(#lea(%q, 72, 1, 0), %t_hi)
+      %p7 = #call meta_cell_put(#lea(%q, 80, 1, 0), 0)
+      %p8 = #call meta_cell_put(#lea(%q, 88, 1, 0), 0)
       // `acc`：循环的值。名字长度先对，再逐字节比。
       %nlen = #sub[#bits<64>](%n_hi2, %n_at)
       %len3 = #eq[#bits<64>](%nlen, 3)
@@ -1378,7 +1557,7 @@
       %ty = #call ast_child(%pgrp, #add[#bits<64>](%bi6, 2))
       %t_lo = #call meta_node_start(%ty)
       %t_hi = #add[#bits<64>](%t_lo, #call meta_node_len(%ty))
-      %pslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 64))
+      %pslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 96))
       %q = #lea(%b, %pslot, 1, 0)
       %kd = #call meta_cell_get(#lea(%q, 16, 1, 0))
       %wd = #call meta_cell_get(#lea(%q, 24, 1, 0))
@@ -1424,7 +1603,7 @@
         %cs = #data_addr meta_o4
         %wc = #call lain_meta_emit_write(%cs, 2)
       }
-      %pslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 64))
+      %pslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 96))
       %q = #lea(%b, %pslot, 1, 0)
       %n_at = #call meta_cell_get(%q)
       %n_hi2 = #call meta_cell_get(#lea(%q, 8, 1, 0))
@@ -1485,12 +1664,39 @@
   %ob = #data_addr meta_fn_open
   %c4 = #call lain_meta_emit_write(%ob, 3)
 
-  // 循环体：一串 `参数 = 表达式;`。只动参数，别的目标一律报 4。
+  // 循环体里的 `break`/`continue` 靠暂存区 2456 找当前循环（嵌套时取最近一层）。
+  %reg_cell = #lea(%sc, 2456, 1, 0)
+  %reg_prev = #call meta_cell_get(%reg_cell)
+  %reg_set = #call meta_cell_put(%reg_cell, %blk)
+  // 循环体里出现过终止指令（`break`/`continue`）之后，剩余语句与收尾的
+  // `#continue`/`#break` 都不再发 —— 区域里终止指令必须是最后一条。
+  %term_cell = #lea(%sc, 2464, 1, 0)
+  %term0 = #call meta_cell_put(%term_cell, 0)
+
+  // 循环体：一串 `参数 = 表达式;` 与 `break`/`continue`。只动参数，别的目标一律报 4。
   %bcount = #call ast_child_count(%body)
   %sts = #loop s(%si: #bits<64> = 0) -> (#bits<32>) {
     %more = #ult[#bits<64>](%si, %bcount)
     #if %more {
       %nm = #call ast_child(%body, %si)
+      // 显式跳转：`break LABEL(值);` / `continue LABEL(实参…);`
+      %isbrk2 = #call meta_node_is_word(%nm, %base, #data_addr meta_kw_break, 5)
+      %iscont2 = #call meta_node_is_word(%nm, %base, #data_addr meta_kw_continue, 8)
+      %isjump = #or[#bits<1>](%isbrk2, %iscont2)
+      #if %isjump {
+        %ji = #call meta_find_semi_index(%base, %body, %si)
+        %jnos = #eq[#bits<64>](%ji, 0xFFFFFFFFFFFFFFFF)
+        #if %jnos {
+          %fbj = #call lain_meta_fail(4)
+          #break s(%fbj)
+        }
+        %jr = #call meta_lower_loop_jump(%base, %len, %body, %si)
+        %jrbad = #ne[#bits<32>](%jr, 0)
+        #if %jrbad {
+          #break s(%jr)
+        }
+        #break s(0)
+      }
       %eqn = #call ast_child(%body, #add[#bits<64>](%si, 1))
       %nk = #call meta_node_kind(%nm)
       %n_ok = #eq[#bits<64>](%nk, 1)
@@ -1507,7 +1713,7 @@
       %kidx = #loop f(%k: #bits<64> = 0) -> (#bits<64>) {
         %km = #ult[#bits<64>](%k, %nparam)
         %r = #if %km -> (#bits<64>) {
-          %kslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 64))
+          %kslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 96))
           %kq = #lea(%b, %kslot, 1, 0)
           %pn_lo = #call meta_cell_get(%kq)
           %pn_hi = #call meta_cell_get(#lea(%kq, 8, 1, 0))
@@ -1536,7 +1742,7 @@
         %fn0 = #call lain_meta_fail(4)
         #break s(%fn0)
       }
-      %kslot = #add[#bits<64>](88, #mul[#bits<64>](%kidx, 64))
+      %kslot = #add[#bits<64>](88, #mul[#bits<64>](%kidx, 96))
       %kq = #lea(%b, %kslot, 1, 0)
       %kd = #call meta_cell_get(#lea(%kq, 16, 1, 0))
       %wd = #call meta_cell_get(#lea(%kq, 24, 1, 0))
@@ -1559,6 +1765,8 @@
       #break s(0)
     }
   }
+  %reg_back = #call meta_cell_put(%reg_cell, %reg_prev)
+  %term = #call meta_cell_get(%term_cell)
   %sbad2 = #ne[#bits<32>](%sts, 0)
   #if %sbad2 {
     %rel5 = #call meta_bump_release(%mark)
@@ -1567,51 +1775,72 @@
 
   // `    #continue L<n>(<参数值…>)`：参数按声明顺序；一轮里没被赋值的参数把**自己的
   // 当前值**传下去（它的名字就是 `#loop` 绑的那个）。
-  %cont = #data_addr meta_st_ind4cont
-  %v1 = #call lain_meta_emit_write(%cont, 15)
-  %v2 = #call meta_emit_uint(%lp_n)
-  %lp2 = #data_addr meta_fn_lparen
-  %v3 = #call lain_meta_emit_write(%lp2, 1)
-  %vals = #loop v(%k: #bits<64> = 0) -> (#bits<32>) {
-    %more = #ult[#bits<64>](%k, %nparam)
-    #if %more {
-      #if #ne[#bits<64>](%k, 0) {
-        %cs = #data_addr meta_o4
-        %wc = #call lain_meta_emit_write(%cs, 2)
-      }
-      %pslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 64))
-      %q = #lea(%b, %pslot, 1, 0)
-      %cur = #call meta_cell_get(#lea(%q, 32, 1, 0))
-      %isnone = #eq[#bits<64>](%cur, 0xFFFFFFFFFFFFFFFF)
-      %wv = #if %isnone -> (#bits<32>) {
-        %pn_lo = #call meta_cell_get(%q)
-        %pn_hi = #call meta_cell_get(#lea(%q, 8, 1, 0))
-        %wp = #call meta_emit_operand(%base, %pn_lo, %pn_hi, %len)
-        #yield %wp
+  %termbad = #ne[#bits<64>](%term, 0)
+  %epi = #if %termbad -> (#bits<32>) {
+    #yield 0
+  } else {
+    %cont = #data_addr meta_st_ind4cont
+    %v1 = #call lain_meta_emit_write(%cont, 15)
+    %v2 = #call meta_emit_uint(%lp_n)
+    %lp2 = #data_addr meta_fn_lparen
+    %v3 = #call lain_meta_emit_write(%lp2, 1)
+    %vals = #loop v(%k: #bits<64> = 0) -> (#bits<32>) {
+      %more = #ult[#bits<64>](%k, %nparam)
+      #if %more {
+        #if #ne[#bits<64>](%k, 0) {
+          %cs = #data_addr meta_o4
+          %wc = #call lain_meta_emit_write(%cs, 2)
+        }
+        %pslot = #add[#bits<64>](88, #mul[#bits<64>](%k, 96))
+        %q = #lea(%b, %pslot, 1, 0)
+        %cur = #call meta_cell_get(#lea(%q, 32, 1, 0))
+        %isnone = #eq[#bits<64>](%cur, 0xFFFFFFFFFFFFFFFF)
+        %wv = #if %isnone -> (#bits<32>) {
+          // 显式 `continue L(…)` 写过这个参数就用它的实参窗口，否则发参数自己的名字
+          %ex_hi = #call meta_cell_get(#lea(%q, 88, 1, 0))
+          %has_ex = #ne[#bits<64>](%ex_hi, 0)
+          %we = #if %has_ex -> (#bits<32>) {
+            %ex_lo = #call meta_cell_get(#lea(%q, 80, 1, 0))
+            %wx = #call meta_emit_operand(%base, %ex_lo, %ex_hi, %len)
+            #yield %wx
+          } else {
+            %pn_lo = #call meta_cell_get(%q)
+            %pn_hi = #call meta_cell_get(#lea(%q, 8, 1, 0))
+            %wp = #call meta_emit_operand(%base, %pn_lo, %pn_hi, %len)
+            #yield %wp
+          }
+          #yield %we
+        } else {
+          %wt = #call meta_emit_temp_name(%cur)
+          #yield %wt
+        }
+        #continue v(#add[#bits<64>](%k, 1))
       } else {
-        %wt = #call meta_emit_temp_name(%cur)
-        #yield %wt
+        #break v(0)
       }
-      #continue v(#add[#bits<64>](%k, 1))
-    } else {
-      #break v(0)
     }
+    %rp = #data_addr meta_st_rp
+    %v4 = #call lain_meta_emit_write(%rp, 2)
+    #yield 0
   }
-  %rp = #data_addr meta_st_rp
-  %v4 = #call lain_meta_emit_write(%rp, 2)
   // `    }`：条件为假时从 `#if` 之后落下，`#break` 带走 `acc`
   %cl = #data_addr meta_st_ind4cl
   %v5 = #call lain_meta_emit_write(%cl, 6)
-  %brk = #data_addr meta_st_ind4brk
-  %v6 = #call lain_meta_emit_write(%brk, 12)
-  %v7 = #call meta_emit_uint(%lp_n)
-  %lp3 = #data_addr meta_fn_lparen
-  %v8 = #call lain_meta_emit_write(%lp3, 1)
-  %a_lo = #call meta_cell_get(#lea(%b, 40, 1, 0))
-  %a_hi = #call meta_cell_get(#lea(%b, 48, 1, 0))
-  %v9 = #call meta_emit_operand(%base, %a_lo, %a_hi, %len)
-  %rp2 = #data_addr meta_st_rp
-  %v10 = #call lain_meta_emit_write(%rp2, 2)
+  %brk2 = #if %termbad -> (#bits<32>) {
+    #yield 0
+  } else {
+    %brk = #data_addr meta_st_ind4brk
+    %v6 = #call lain_meta_emit_write(%brk, 12)
+    %v7 = #call meta_emit_uint(%lp_n)
+    %lp3 = #data_addr meta_fn_lparen
+    %v8 = #call lain_meta_emit_write(%lp3, 1)
+    %a_lo = #call meta_cell_get(#lea(%b, 40, 1, 0))
+    %a_hi = #call meta_cell_get(#lea(%b, 48, 1, 0))
+    %v9 = #call meta_emit_operand(%base, %a_lo, %a_hi, %len)
+    %rp2 = #data_addr meta_st_rp
+    %v10 = #call lain_meta_emit_write(%rp2, 2)
+    #yield 0
+  }
   %le = #data_addr meta_st_lend
   %v11 = #call lain_meta_emit_write(%le, 4)
   %rel6 = #call meta_bump_release(%mark)

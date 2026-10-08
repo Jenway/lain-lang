@@ -92,6 +92,8 @@ if <条件> { … }            // 可带 else；条件是任意表达式（括�
 let NAME: TYPE = if <条件> { <值> } else { <值> };   // 带值 if：两个分支各 yield 一个值
 let total: u32 = for i in 0..n acc = 0 { acc = acc + i; };
 let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };
+break LABEL(<值>);        // 早退：把值交给循环，就是值型循环的出口
+continue LABEL(<实参…>);  // 早退：进入下一轮，实参按参数顺序给
 ```
 
 - 赋值 `NAME = 值;` **只在循环体内合法**：能赋值的合法目标是循环自己声明的参数
@@ -99,6 +101,10 @@ let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i
 - `loop` 是 `for` 的通用形态：标签、任意个参数（各带类型与初值）、任意条件、多语句体。
   条件与 `if` 走同一个表达式入口，体里每格是 `参数 = 值;`，循环回边按声明顺序带走参数；
   参数里没有 `acc` 就没有值可取，报 4。
+- 体里还可以写 `break LABEL(<值>);` 与 `continue LABEL(<实参…>);`，两者都结束这一轮
+  之后的语句（区域里终止指令必须是最后一条）。`break` 直接把值交给循环；`continue`
+  按参数顺序换掉下一轮的参数，循环的 `#break` 出口仍然照发 —— 值型循环的区域里必须有
+  一个 `#break`（验证器 2006），所以落尾的 `continue` 也走收尾那条 `#continue`。
 - 顶层形式：`let` / `struct` / `enum` / `func` / `import(…)`。关键字经 Meta 语法
   注册表取 handler：1=my_if 2=func 3=if 4=struct 5=enum 7=顶层 let 8=return
   9=局部 let 10=for 11=my_block 13=loop（12 是宏 `my_require`）。**6（原 scalar 声明）
@@ -116,13 +122,15 @@ let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i
   将来是用 Lain 写的库模块。表之外没有第二份出处：`i32` 这类名字由名字解析直接命中内建表，
   不进作用域表；带点的 `T.i32` 没有解析（标量是内建名字，模块不导出标量），一律按
   「没有这个名字」报 5。用户自定义标量走编译期调用库的注册接口，不是新语法。
-- `loop` 的**早退形态**。`loop` 本身已可用（`while` 形态，见《一、已能用》），今天缺的
-  是「体中间跳出」：出口只有 `while` 条件为假那一个。要补的是把 `break` / `continue` 写成
-  带实参的语句：
+- `loop` 的**早退形态**：**已可用** —— `break LABEL(<值>);` 与 `continue LABEL(<实参…>);`
+  由 `meta_lower_loop_jump` 降级，样例 `bootstrap/lain/examples/jumps.lain`（产物含
+  `#break L<n>(…)` 与 `#continue L<n>(…)`，过 `lainir_parse` + `lainir_verify`）。
+  尚缺**有条件**的早退：循环体今天还不接受 `if`，所以跳出只能是无条件的（体里第一件事
+  就是跳出）；补法见 D 的剩项。
 
 ```text
 let n: u64 = loop scan(i: u64 = 0, acc: u64 = 0) while i < len {
-  if b == 0 { break scan(acc); }
+  break scan(acc);
   continue scan(i + 1, acc + 1);
 };
 ```
@@ -229,7 +237,7 @@ func cstr_len(p: addr) -> u64 {
 | 绑定与返回 | `let n: i32 = …;`、`let y = inc(n);`、`return n;` | 标注可省：类型由值推（调用取被调方返回类型、参数名取参数表） |
 | 条件 | `if a < b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件是任意表达式：裸条件与括号条件走同一个入口，块就是表达式停下来的那一格；分支必须以 `return` 收尾，所以 `if` 是语句不是值 |
 | 带值 if | `let x: i32 = if c { a } else { b };` | 降级为 `%x = #if %c -> (#bits<32>) { … #yield %a } else { … #yield %b }`：条件是任意表达式、类型取绑定的标注（缺标注由值推）；**只在绑定位置**可用（`return if …` 报 4），**必须带 else**（缺 else 报 4），两个分支都必须以一个值收尾。样例 `bootstrap/lain/examples/choose.lain` |
-| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 仅 i32/u32（u64 报 5）、体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）。样例 `bootstrap/lain/examples/loop.lain` |
+| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 仅 i32/u32（u64 报 5）、体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain` |
 | 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
 | 宏 | `my_if`、`my_block`、`my_require` | 编译期展开，过同一道信任门 |
@@ -285,10 +293,12 @@ func cstr_len(p: addr) -> u64 {
   （`meta_lower_if_value`，样例 `bootstrap/lain/examples/choose.lain`，产物过 `lainir_parse` +
   `lainir_verify`）；尚缺：作为操作数或返回值出现（`return if …`、`1 + if …`），以及缺 `else` 时
   的默认分支语义。
-- `loop` 带标签 + 循环参数（`#loop` 97 / `#break` 185 / `#continue` 104）：**前半完成** ——
-  标签、任意个参数、任意条件、多语句体都已可用（`meta_lower_loop`，样例
-  `bootstrap/lain/examples/loop.lain`，产物过 `lainir_parse` + `lainir_verify`）；尚缺：把
-  `break` / `continue` 写成带实参的语句，也就是体中间的早退。
+- `loop` 带标签 + 循环参数（`#loop` 97 / `#break` 185 / `#continue` 104）：**完成** ——
+  标签、任意个参数、任意条件、多语句体（`meta_lower_loop`）与带实参的
+  `break` / `continue`（`meta_lower_loop_jump`）都已可用，样例
+  `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain`，产物都过
+  `lainir_parse` + `lainir_verify`。D 剩下的只有带值 `if` 的后半（当操作数/返回值、缺
+  `else` 的默认分支）与**循环体里的 `if`**：有条件早退要先让循环体接受嵌套语句。
 
 **E. 声明与链接**
 - `extern NAME(a: T) -> U = link_name;`（45 个能力 1:1；手写 Meta 的 `#extern` 正好 45 次）。
@@ -374,7 +384,7 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
 
 ### 六、结论
 
-今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（仅绑定位置）/ `for` / `loop`（标签 + 参数 + 多语句体）/
+今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（仅绑定位置）/ `for` / `loop`（标签 + 参数 + 多语句体 + 带实参的 `break`/`continue`）/
 算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
 **A + C + D + E**，其中 A 最快见效、C 最不可替代。
 
@@ -389,7 +399,13 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
 - `loop` 的参数里**必须有一个叫 `acc`**，它提供循环结果的类型；没有报 4。
 - `loop` 的标签是必需的（今天只记下来备用）：缺标签报 4。
 - `loop` 的循环体只能给**自己的参数**赋值，别的目标报 4；体是多语句的（`for` 只有一条）。
-- `loop` 还没有早退：出口只有「条件为假」一个，`break` / `continue` 不带实参。
+- `loop` 的早退：`break LABEL(<值>);` 用循环结果类型当上下文，`continue LABEL(<实参…>);`
+  用各参数的声明类型当上下文；两者都必须带标签，标签名不符报 4，实参个数不符报 4
+  （`break` 恰好 1 个、`continue` 恰好等于参数个数），循环外写报 4，循环体里 `break` 之后
+  的语句不再降级。值型循环的区域里必须留下一个 `#break`：只写落尾的 `continue` 也照样由
+  收尾补上它，但如果循环根本不可能产出值，产物过不了自己的验证器（2006）。
+- 循环体还不接受 `if`：跳出只能是无条件的。有条件的早退要等循环体支持嵌套语句，
+  那是 D 的剩项（`if b == 0 { break scan(acc); }` 今天报 4）。
 - 一元负号只认**字面量**（`-5`）：它占两个节点（负号 + 数字），操作数游标要跳两格；
   作用于变量（`-x`）报 4 —— 那需要一条真正的取负规则，不是记法。
 - 负数字面量不做「装得下」检查（`meta_literal_fits` 只看源码里的裸数字）：`let b: u32 = -1;`
