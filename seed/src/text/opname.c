@@ -1,5 +1,5 @@
-/* lain/ir/opname.h 的实现。表就是规范：拼写改了这里，解析和打印一起改。 */
-#include "lain/ir/opname.h"
+/* lain/text/opname.h 的实现。表就是规范：拼写改了这里，解析和打印一起改。 */
+#include "lain/text/opname.h"
 
 #include <string.h>
 

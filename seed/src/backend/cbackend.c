@@ -204,7 +204,7 @@ static const L1Subroutine *find_sub(const L1Module *module, const char *name) {
 }
 
 /* 一条指令产出的值有多宽。
- * 规则本身在 lain/ir/infer.c 里，只写一遍——验证器和后端必须用同一份。 */
+ * 规则本身在 seed/src/ir/infer.c 里，只写一遍——验证器和后端必须用同一份。 */
 static uint32_t inst_result_width(LainBackend *be, const L1Inst *inst) {
   const L1Type *ty = lainir_inst_result_type(&be->types, inst, 0);
   return ty ? width_of_type(ty) : 64;

@@ -6,7 +6,7 @@
 #include <string.h>
 
 #include "lain/ir/build.h"
-#include "lain/ir/parse.h"
+#include "lain/text/parse.h"
 #include "lain/ir/verify.h"
 #include "lain/vm/engine.h"
 #include "lain/vm/image.h"

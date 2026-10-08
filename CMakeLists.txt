@@ -13,12 +13,12 @@ target_sources(lain_seed
   PRIVATE
     seed/src/meta/apply.c
     seed/src/backend/cbackend.c
-    seed/src/core/build.c
-    seed/src/core/infer.c
-    seed/src/core/opname.c
-    seed/src/core/parse.c
-    seed/src/core/print.c
-    seed/src/core/verify.c
+    seed/src/ir/build.c
+    seed/src/ir/infer.c
+    seed/src/text/opname.c
+    seed/src/text/parse.c
+    seed/src/text/print.c
+    seed/src/ir/verify.c
     seed/src/meta/ast_out.c
     seed/src/meta/host.c
     seed/src/meta/tree.c
@@ -39,9 +39,9 @@ target_sources(lain_seed
         seed/include/lain/ir/build.h
         seed/include/lain/ir/core.h
         seed/include/lain/ir/infer.h
-        seed/include/lain/ir/opname.h
-        seed/include/lain/ir/parse.h
-        seed/include/lain/ir/print.h
+        seed/include/lain/text/opname.h
+        seed/include/lain/text/parse.h
+        seed/include/lain/text/print.h
         seed/include/lain/ir/value.h
         seed/include/lain/ir/verify.h
         seed/include/lain/meta/ast_v1.h
