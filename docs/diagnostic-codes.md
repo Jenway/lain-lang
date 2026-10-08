@@ -18,14 +18,14 @@ Lain 的失败报告分两套机制，共用同一片四位十进制号码空间
 | 1000-1199 | Trap（vm/engine 发射，vm/quota 借 1044） | lain/vm/trap.h |
 | 2000-2999 | LAINIR 验证 | lain/ir/verify.h |
 | 3000-3999 | canonical 文本解析 | 尚无正式码表（散在 text/parse.c） |
-| 9000-9099 | 映像装载 | lain/vm/image.h |
+| 9000-9099 | 映像装载 | lain/vm/engine.h |
 | 9100-9199 | TCB admit 与重绑 | lain/vm/tcb.h |
 | 9200-9299 | 后端 | 尚无正式码表（散在 backend/cbackend.c） |
 | 9300-9399 | 编译期 apply 与其宿主 | lain/meta/apply.h |
 | 9400-9499 | AstOut 与 Meta 库共享 | lain/meta/ast_v1.h、bootstrap/std/*.l1 |
 
 段边界的登记表在 seed/include/lain/ir/codes.h（每个段一对 BASE/LIMIT 常量）；
-模块自己再用 _Static_assert 把自己的码钉在段内（trap.h、image.h、tcb.h 已这么做）。
+模块自己再用 _Static_assert 把自己的码钉在段内(trap.h、engine.h、tcb.h 已这么做)。
 
 ## 两套机制不混用
 

@@ -27,8 +27,8 @@ TCB 引用 VSpace，多个 TCB 可共享同一地址空间。TCB 对 LAINIR 保�
 | **Engine** | 取指 -> 查表 -> 执行一步（CU + ALU）。无状态：可变状态都在 TCB 里。 | 分配、调度、预算、阻塞处置。 |
 
 代码侧一一对应：Trap 的码表在 lain/vm/trap.h，端点在 lain/vm/endpoint.h，
-地址空间在 lain/vm/space.h，TCB 在 lain/vm/tcb.h，映像在 lain/vm/image.h，
-引擎在 lain/vm/engine.h。
+地址空间在 lain/vm/space.h，TCB 在 lain/vm/tcb.h，
+映像与引擎都在 lain/vm/engine.h（映像的结构是引擎私有的）。
 
 ---
 
