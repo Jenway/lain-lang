@@ -1,4 +1,4 @@
-/* LAINIR 验证器。规则见 seed/docs/LAINIR.md §11。 */
+/* LAINIR 验证器。 */
 #include "lain/ir/verify.h"
 
 #include <stdarg.h>
