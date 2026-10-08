@@ -146,7 +146,7 @@ struct LainVmTcb {
   LainVmStackLease stack_lease;
   uint64_t stack_used; /* alloca 水位（procedure activation 的生命周期，见下） */
 
-  /* 这次执行的**分配账户**（规范 §8.2 的 allocation quota）。NULL = 不限额。
+  /* 这次执行的分配账户。NULL = 不限额。
    * 账户跟着**执行**走，不跟着地址空间走：嵌套调用共享同一个账户，
    * `lainvm_tcb_set_space` 既不创建新账户、也不恢复额度。
    * 栈按**整块容量**在这里预扣一次，销毁时归还；`#alloca` 的子分配与水位回退
@@ -186,8 +186,7 @@ struct LainVmTcb {
  * 引擎里不许分配，所以帧栈和值槽在这里一次给够：
  *   frame_cap = max_call_depth * (image->max_region_depth + 1)
  *   slot_cap  = frame_cap * image->max_slots
- * id 现在只是**诊断字段**（区段表里写着"这段是谁的"）；回收按句柄精确撤销，
- * 不按 owner 扫表。
+ * id 只是诊断字段（区段表里写着"这段是谁的"）；回收按句柄精确撤销，不按 owner 扫表。
  * lease 是供给方给的**栈租约**（`lainvm_stack_no_lease()` = 程序没有 `#alloca`）。
  * 有租约时先校验（句柄属于 `space`、区段有效、含 READ|WRITE、当前 accessible == 0、
  * capacity > 0、**还没被别的执行流借走**），通过后 `borrow_count++`。**TCB 不申请、不清零、不释放栈字节，
