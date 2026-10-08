@@ -122,11 +122,11 @@ struct LainMetaHost {
    * 先过账户：宿主也是"实际承诺一块底层存储"的一方。 */
   LainVmQuota *quota;
   uint64_t charged; /* 已经计入账户的字节数（暂存区 + 输出缓冲容量） */
-  LainApplyLimits apply_limits;
+  LainMetaApplyLimits apply_limits;
   uint64_t apply_fuel_remaining;
   uint32_t apply_active_depth;
-  LainApplyValue apply_result;
-  LainApplyBytes apply_result_bytes;
+  LainMetaApplyValue apply_result;
+  LainMetaApplyBytes apply_result_bytes;
   uint32_t apply_status;
   L1Diagnostic apply_diagnostic;
   bool apply_ready;
@@ -213,7 +213,7 @@ void lainmeta_host_attach_space(LainMetaHost *host, LainVmSpace *space) {
 }
 
 void lainmeta_host_set_apply_limits(LainMetaHost *host,
-                                    const LainApplyLimits *limits) {
+                                    const LainMetaApplyLimits *limits) {
   if (host && limits) {
     host->apply_limits = *limits;
     host->apply_fuel_remaining = limits->fuel ? limits->fuel : 1000000u;
@@ -491,7 +491,7 @@ void lainmeta_host_free(LainMetaHost *host) {
   }
   free(host->sources);
   free(host->out);
-  lainapply_bytes_free(&host->apply_result_bytes);
+  lainmeta_apply_bytes_free(&host->apply_result_bytes);
   for (i = 0; i < host->emit_scope_count; i++)
     free(host->emit_scopes[i].out);
   free(host->types);
@@ -1030,16 +1030,16 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
                                    uint64_t byte_arg_length,
                                    uint64_t byte_arg_index) {
   char *text_copy = NULL, *entry_copy = NULL;
-  LainApplyValue apply_args[8];
-  LainApplyResult result;
+  LainMetaApplyValue apply_args[8];
+  LainMetaApplyResult result;
   L1Diagnostic diag;
   uint64_t arg_bytes;
-  LainApplyBytes byte_arg = {0};
+  LainMetaApplyBytes byte_arg = {0};
   uint64_t request_fuel = 0;
   uint32_t rc;
-  LainApplyLimits request_limits;
+  LainMetaApplyLimits request_limits;
   if (!host) return LAINMETA_ERR_DENIED;
-  lainapply_bytes_free(&host->apply_result_bytes);
+  lainmeta_apply_bytes_free(&host->apply_result_bytes);
   memset(&result, 0, sizeof(result));
   memset(&diag, 0, sizeof(diag));
   memset(&host->apply_result, 0, sizeof(host->apply_result));
@@ -1052,12 +1052,12 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
     return 0;
   }
   if (want_bytes && (result_byte_length == 0 ||
-                     result_byte_length > LAINAPPLY_BYTES_MAX)) {
+                     result_byte_length > LAINMETA_APPLY_BYTES_MAX)) {
     host->apply_status = 9345;
     return 0;
   }
   if (want_byte_arg && (byte_arg_length == 0 ||
-                        byte_arg_length > LAINAPPLY_BYTES_MAX)) {
+                        byte_arg_length > LAINMETA_APPLY_BYTES_MAX)) {
     host->apply_status = 9345;
     return 0;
   }
@@ -1146,16 +1146,16 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
   if (want_byte_arg) {
     byte_arg.data = (uint8_t *)(uintptr_t)byte_arg_addr;
     byte_arg.length = byte_arg_length;
-    rc = (uint32_t)lainapply_proc_with_bytes_arg(
+    rc = (uint32_t)lainmeta_apply_proc_with_bytes_arg(
         text_copy, entry_copy, arg_count ? apply_args : NULL,
         (uint32_t)arg_count, (uint32_t)byte_arg_index, &byte_arg,
         &request_limits, &result, &diag);
   } else if (want_bytes)
-    rc = (uint32_t)lainapply_proc_bytes(text_copy, entry_copy,
+    rc = (uint32_t)lainmeta_apply_proc_bytes(text_copy, entry_copy,
                       arg_count ? apply_args : NULL, (uint32_t)arg_count,
                       result_byte_length, &request_limits, &result, &diag);
   else
-    rc = (uint32_t)lainapply_proc(text_copy, entry_copy,
+    rc = (uint32_t)lainmeta_apply_proc(text_copy, entry_copy,
                       arg_count ? apply_args : NULL, (uint32_t)arg_count,
                       &request_limits, &result, &diag);
   host->apply_active_depth--;
@@ -1163,14 +1163,14 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
     host->apply_fuel_remaining += request_fuel - result.fuel_used;
   if (!rc) {
     /* 内层 capability 可能刚写过共享结果槽；失败的外层请求必须使之失效。 */
-    lainapply_bytes_free(&host->apply_result_bytes);
+    lainmeta_apply_bytes_free(&host->apply_result_bytes);
     memset(&host->apply_result, 0, sizeof(host->apply_result));
     host->apply_ready = false;
     host->apply_status = diag.code ? (uint32_t)diag.code : 9330;
     host->apply_diagnostic = diag;
     goto cleanup_apply;
   }
-  if (result.kind == LAINAPPLY_RESULT_BYTES) {
+  if (result.kind == LAINMETA_APPLY_RESULT_BYTES) {
     memset(&host->apply_result, 0, sizeof(host->apply_result));
     host->apply_result_bytes = result.bytes;
     result.bytes.data = NULL;
@@ -1180,21 +1180,21 @@ static uint32_t apply_request_core(LainMetaHost *host, const char *text,
     if (out) *out = result_byte_length;
     goto cleanup_apply;
   }
-  if (result.kind != LAINAPPLY_RESULT_SCALAR) {
-    lainapply_bytes_free(&host->apply_result_bytes);
+  if (result.kind != LAINMETA_APPLY_RESULT_SCALAR) {
+    lainmeta_apply_bytes_free(&host->apply_result_bytes);
     memset(&host->apply_result, 0, sizeof(host->apply_result));
     host->apply_ready = false;
     host->apply_status = 9330;
     memset(&host->apply_diagnostic, 0, sizeof(host->apply_diagnostic));
     goto cleanup_apply;
   }
-  lainapply_bytes_free(&host->apply_result_bytes);
+  lainmeta_apply_bytes_free(&host->apply_result_bytes);
   host->apply_result = result.scalar;
   host->apply_ready = true;
   host->apply_status = 0;
   if (out) *out = result.scalar.bits;
 cleanup_apply:
-  lainapply_bytes_free(&result.bytes);
+  lainmeta_apply_bytes_free(&result.bytes);
   free(entry_copy);
   free(text_copy);
   return 0;

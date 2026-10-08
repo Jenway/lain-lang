@@ -11,7 +11,7 @@ add_library(lain::seed ALIAS lain_seed)
 
 target_sources(lain_seed
   PRIVATE
-    seed/src/apply/apply.c
+    seed/src/meta/apply.c
     seed/src/backend/cbackend.c
     seed/src/core/build.c
     seed/src/core/infer.c
@@ -33,7 +33,7 @@ target_sources(lain_seed
     FILE_SET HEADERS
       BASE_DIRS seed/include
       FILES
-        seed/include/lainapply/apply.h
+        seed/include/lainmeta/apply.h
         seed/include/lainbackend/emit.h
         seed/include/lainbackend/target.h
         seed/include/lainir/build.h

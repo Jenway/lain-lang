@@ -1,5 +1,5 @@
-/* lainapply/apply.h 的实现。 */
-#include "lainapply/apply.h"
+/* lainmeta/apply.h 的实现。 */
+#include "lainmeta/apply.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -36,14 +36,14 @@ static const L1Subroutine *apply_find_sub(const L1Module *module,
 }
 
 /* 一次编译期执行的公共实现：独立 VSpace + 栈租约 + TCB + 借来的能力表。
- * lainapply_proc 走这里；执行完的账目写进 quota_out。
+ * lainmeta_apply_proc 走这里；执行完的账目写进 quota_out。
  * 失败不写 value_out，诊断统一在 value_out 之外由调用方补。 */
 static bool apply_run(const L1Module *module, const char *entry,
                       const L1Value *args, uint32_t arg_count,
-                      const LainApplyLimits *limits, L1Value *value_out,
+                      const LainMetaApplyLimits *limits, L1Value *value_out,
                       LainVmQuota *quota_out, uint64_t *fuel_used_out,
-                      LainApplyBytes *bytes_out, uint64_t byte_length,
-                      const LainApplyBytes *byte_arg,
+                      LainMetaApplyBytes *bytes_out, uint64_t byte_length,
+                      const LainMetaApplyBytes *byte_arg,
                       uint32_t byte_arg_index, L1Diagnostic *diag) {
   LainVmSpace space;
   LainVmImage *image = NULL;
@@ -191,7 +191,7 @@ static bool apply_run(const L1Module *module, const char *entry,
                "apply: byte result exceeds the allocation quota");
       goto cleanup;
     }
-    if (!lainapply_bytes_alloc(byte_length, bytes_out, diag)) {
+    if (!lainmeta_apply_bytes_alloc(byte_length, bytes_out, diag)) {
       (void)lainvm_quota_release(&quota, byte_length);
       code = diag && diag->code ? diag->code : 9345;
       snprintf(message, sizeof(message), "apply: cannot allocate byte result");
@@ -203,7 +203,7 @@ static bool apply_run(const L1Module *module, const char *entry,
   ok = true;
 
 cleanup:
-  if (!ok && bytes_out) lainapply_bytes_free(bytes_out);
+  if (!ok && bytes_out) lainmeta_apply_bytes_free(bytes_out);
   if (fuel_used_out && tcb) *fuel_used_out = tcb->steps;
   if (tcb) lainvm_tcb_free(tcb);
   if (!lainvm_stack_lease_none(lease)) (void)lainvm_space_free(&space, lease.region);
@@ -219,7 +219,7 @@ cleanup:
 
 /* 过程签名里的一项类型是否接受这个常量实参。
  * 判据只用物理类型：类别与位宽都要对上；#addr 类型的形参不接受任何实参。 */
-static bool apply_param_accepts(const L1Type *ty, const LainApplyValue *arg) {
+static bool apply_param_accepts(const L1Type *ty, const LainMetaApplyValue *arg) {
   if (!ty || !arg) return false;
   if (ty->kind != (L1TypeKind)arg->kind) return false;
   if (ty->kind == TY_ADDR) return false; /* #addr 形参一律拒 9343 */
@@ -229,16 +229,16 @@ static bool apply_param_accepts(const L1Type *ty, const LainApplyValue *arg) {
 
 /* --- 字节块：类型、分配/释放与校验（第一版） -------------------------------- */
 
-void lainapply_bytes_set_len(LainApplyBytes *bytes, uint64_t length) {
+void lainmeta_apply_bytes_set_len(LainMetaApplyBytes *bytes, uint64_t length) {
   if (bytes) bytes->length = length;
 }
 
-bool lainapply_bytes_alloc(uint64_t length, LainApplyBytes *out,
+bool lainmeta_apply_bytes_alloc(uint64_t length, LainMetaApplyBytes *out,
                            L1Diagnostic *diag) {
   if (!out) return fail(diag, 9345, "apply: byte block has no destination");
   out->data = NULL;
   out->length = 0;
-  if (length == 0 || length > LAINAPPLY_BYTES_MAX)
+  if (length == 0 || length > LAINMETA_APPLY_BYTES_MAX)
     return fail(diag, 9345, "apply: byte block length is out of range");
   out->data = (uint8_t *)malloc((size_t)length);
   if (!out->data) return fail(diag, 2028, "apply: out of memory");
@@ -247,16 +247,16 @@ bool lainapply_bytes_alloc(uint64_t length, LainApplyBytes *out,
   return true;
 }
 
-void lainapply_bytes_free(LainApplyBytes *bytes) {
+void lainmeta_apply_bytes_free(LainMetaApplyBytes *bytes) {
   if (!bytes) return;
   free(bytes->data);
   bytes->data = NULL;
   bytes->length = 0;
 }
 
-bool lainapply_bytes_check(const LainApplyBytes *bytes, L1Diagnostic *diag) {
+bool lainmeta_apply_bytes_check(const LainMetaApplyBytes *bytes, L1Diagnostic *diag) {
   if (!bytes) return fail(diag, 9346, "apply: byte block is missing");
-  if (bytes->length > LAINAPPLY_BYTES_MAX)
+  if (bytes->length > LAINMETA_APPLY_BYTES_MAX)
     return fail(diag, 9345, "apply: byte block length is out of range");
   if (bytes->length == 0 || !bytes->data)
     return fail(diag, 9346, "apply: byte block is empty or has no storage");
@@ -266,12 +266,12 @@ bool lainapply_bytes_check(const LainApplyBytes *bytes, L1Diagnostic *diag) {
 /* --- 通用 apply：执行模块里的普通 #proc ------------------------------------- */
 
 static bool apply_proc_common(const char *module_text, const char *entry,
-                              const LainApplyValue *args, uint32_t arg_count,
+                              const LainMetaApplyValue *args, uint32_t arg_count,
                               uint64_t byte_length,
                               uint32_t byte_arg_index,
-                              const LainApplyBytes *byte_arg,
-                              const LainApplyLimits *limits,
-                              LainApplyResult *out, L1Diagnostic *diag) {
+                              const LainMetaApplyBytes *byte_arg,
+                              const LainMetaApplyLimits *limits,
+                              LainMetaApplyResult *out, L1Diagnostic *diag) {
   L1Builder *builder;
   const L1Module *module;
   const L1Subroutine *callee;
@@ -293,7 +293,7 @@ static bool apply_proc_common(const char *module_text, const char *entry,
     return fail(diag, 9340, "apply: entry does not exist");
   if (arg_count > 8 || (arg_count && !args))
     return fail(diag, 9341, "apply: argument count does not match the entry");
-  if (byte_arg && !lainapply_bytes_check(byte_arg, diag)) return false;
+  if (byte_arg && !lainmeta_apply_bytes_check(byte_arg, diag)) return false;
   if (byte_arg && byte_arg_index >= arg_count)
     return fail(diag, 9341, "apply: byte argument index is out of range");
 
@@ -371,9 +371,9 @@ static bool apply_proc_common(const char *module_text, const char *entry,
     return false;
   }
   if (want_bytes) {
-    out->kind = LAINAPPLY_RESULT_BYTES;
+    out->kind = LAINMETA_APPLY_RESULT_BYTES;
   } else {
-    out->kind = LAINAPPLY_RESULT_SCALAR;
+    out->kind = LAINMETA_APPLY_RESULT_SCALAR;
     out->scalar.kind = result_ty ? result_ty->kind : TY_BITS;
     out->scalar.width = result_ty ? result_ty->width : 64;
     out->scalar.bits = callee->result_count ? value.as.bits : 0;
@@ -384,21 +384,21 @@ static bool apply_proc_common(const char *module_text, const char *entry,
   return true;
 }
 
-bool lainapply_proc(const char *module_text, const char *entry,
-                    const LainApplyValue *args, uint32_t arg_count,
-                    const LainApplyLimits *limits, LainApplyResult *out,
+bool lainmeta_apply_proc(const char *module_text, const char *entry,
+                    const LainMetaApplyValue *args, uint32_t arg_count,
+                    const LainMetaApplyLimits *limits, LainMetaApplyResult *out,
                     L1Diagnostic *diag) {
   return apply_proc_common(module_text, entry, args, arg_count, 0,
                            UINT32_MAX, NULL,
                            limits, out, diag);
 }
 
-bool lainapply_proc_bytes(const char *module_text, const char *entry,
-                          const LainApplyValue *args, uint32_t arg_count,
+bool lainmeta_apply_proc_bytes(const char *module_text, const char *entry,
+                          const LainMetaApplyValue *args, uint32_t arg_count,
                           uint64_t byte_length,
-                          const LainApplyLimits *limits, LainApplyResult *out,
+                          const LainMetaApplyLimits *limits, LainMetaApplyResult *out,
                           L1Diagnostic *diag) {
-  if (byte_length == 0 || byte_length > LAINAPPLY_BYTES_MAX) {
+  if (byte_length == 0 || byte_length > LAINMETA_APPLY_BYTES_MAX) {
     if (out) memset(out, 0, sizeof(*out));
     return fail(diag, 9345, "apply: byte result length is out of range");
   }
@@ -407,15 +407,15 @@ bool lainapply_proc_bytes(const char *module_text, const char *entry,
                            limits, out, diag);
 }
 
-bool lainapply_proc_with_bytes_arg(
-    const char *module_text, const char *entry, const LainApplyValue *args,
+bool lainmeta_apply_proc_with_bytes_arg(
+    const char *module_text, const char *entry, const LainMetaApplyValue *args,
     uint32_t arg_count, uint32_t byte_arg_index,
-    const LainApplyBytes *byte_arg, const LainApplyLimits *limits,
-    LainApplyResult *out, L1Diagnostic *diag) {
+    const LainMetaApplyBytes *byte_arg, const LainMetaApplyLimits *limits,
+    LainMetaApplyResult *out, L1Diagnostic *diag) {
   if (out) memset(out, 0, sizeof(*out));
   if (!byte_arg)
     return fail(diag, 9346, "apply: byte argument is missing");
-  if (!lainapply_bytes_check(byte_arg, diag))
+  if (!lainmeta_apply_bytes_check(byte_arg, diag))
     return false;
   return apply_proc_common(module_text, entry, args, arg_count, 0,
                            byte_arg_index, byte_arg, limits, out, diag);

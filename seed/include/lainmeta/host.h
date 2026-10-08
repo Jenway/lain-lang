@@ -22,7 +22,7 @@
 #include "lainvm/caps.h"
 #include "lainvm/quota.h"
 #include "lainvm/space.h"
-#include "lainapply/apply.h"
+#include "lainmeta/apply.h"
 
 typedef struct LainMetaHost LainMetaHost;
 typedef struct LainMetaTree LainMetaTree;
@@ -196,7 +196,7 @@ void lainmeta_host_attach_space(LainMetaHost *host, LainVmSpace *space);
 /* Meta 的 apply 请求使用独立的执行环境；默认只允许纯计算。
  * 驱动可显式设置预算与授予的能力，设置须在运行 Meta 前完成。 */
 void lainmeta_host_set_apply_limits(LainMetaHost *host,
-                                    const LainApplyLimits *limits);
+                                    const LainMetaApplyLimits *limits);
 
 /* 当前编译请求发给 apply 服务的次数，供驱动与专项验收核对实际调用路径。 */
 uint32_t lainmeta_host_apply_requests(const LainMetaHost *host);
