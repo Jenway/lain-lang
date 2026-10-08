@@ -471,32 +471,44 @@
         #if %bfbad {
           #return %bfc
         }
-        %plus = #data_addr meta_sym_plus
-        %phys = #call meta_op_resolve(%base, %len, %t_lo, %t_hi, %plus, 1)
-        %miss = #eq[#bits<64>](%phys, 0xFFFFFFFFFFFFFFFF)
-        %m = #if %miss -> (#bits<32>) {
-          %f = #call lain_meta_fail(6)
-          #yield 6
+        // 复制是编译器自己发的，不走源码的算子表：地址用 #lea(x, 0, 1, 0)，
+        // 其余定宽整数用 #add[repr](x, 0)。u8/i8/addr 没有算子绑定，
+        // 走算子表查 `+` 会报 6。
+        %p = #data_addr meta_st_pct
+        %y1 = #call lain_meta_emit_write(%p, 3)
+        %n_at = #lea(%base, %n_lo, 1, 0)
+        %n_len = #sub[#bits<64>](%n_hi, %n_lo)
+        %y2 = #call lain_meta_emit_write(%n_at, %n_len)
+        %eqop = #data_addr meta_st_eqop
+        %y3 = #call lain_meta_emit_write(%eqop, 3)
+        %oc = #data_addr meta_o4
+        %rp2 = #data_addr meta_rparen
+        %nl2 = #data_addr meta_st_nl
+        %is_addr = #eq[#bits<64>](%kind, 3)
+        %cpy = #if %is_addr -> (#bits<32>) {
+          %hlea = #data_addr meta_hash_lea
+          %z1 = #call lain_meta_emit_write(%hlea, 5)
+          %z2 = #call meta_emit_ref2(%base, %len, %acc, %alo, %ahi)
+          %z3 = #call lain_meta_emit_write(%oc, 2)
+          %z4 = #call meta_emit_uint(0)
+          %z5 = #call lain_meta_emit_write(%oc, 2)
+          %z6 = #call meta_emit_uint(1)
+          %z7 = #call lain_meta_emit_write(%oc, 2)
+          %z8 = #call meta_emit_uint(0)
+          %z9 = #call lain_meta_emit_write(%rp2, 1)
+          %z10 = #call lain_meta_emit_write(%nl2, 1)
+          #yield 0
         } else {
-          %p = #data_addr meta_st_pct
-          %y1 = #call lain_meta_emit_write(%p, 3)
-          %n_at = #lea(%base, %n_lo, 1, 0)
-          %n_len = #sub[#bits<64>](%n_hi, %n_lo)
-          %y2 = #call lain_meta_emit_write(%n_at, %n_len)
-          %eqop = #data_addr meta_st_eqop
-          %y3 = #call lain_meta_emit_write(%eqop, 3)
-          %y4 = #call meta_emit_op_mid(%kind, %width)
-          %y5 = #call meta_emit_ref2(%base, %len, %acc, %alo, %ahi)
-          %sep = #data_addr meta_o4
-          %y6 = #call lain_meta_emit_write(%sep, 2)
-          %zero = #call meta_emit_uint(0)
-          %rp = #data_addr meta_rparen
-          %y7 = #call lain_meta_emit_write(%rp, 1)
-          %nl2 = #data_addr meta_st_nl
-          %y8 = #call lain_meta_emit_write(%nl2, 1)
+          %addn = #data_addr meta_sym_add
+          %w1 = #call meta_emit_op_lit(%addn, 3, %kind, %width)
+          %w2 = #call meta_emit_ref2(%base, %len, %acc, %alo, %ahi)
+          %w3 = #call lain_meta_emit_write(%oc, 2)
+          %w4 = #call meta_emit_uint(0)
+          %w5 = #call lain_meta_emit_write(%rp2, 1)
+          %w6 = #call lain_meta_emit_write(%nl2, 1)
           #yield 0
         }
-        #yield %m
+        #yield %cpy
       }
       #yield %done
     }
@@ -896,7 +908,13 @@
     %hasop = #call meta_value_has_op(%base, %len, %v_st)
     %single = #eq[#bits<1>](%hasop, 0)
     %f_call0 = #eq[#bits<64>](%form, 5)
-    %f_call = #and[#bits<1>](%f_call0, %single)
+    // 内建的 load / lea 也是「名字 + 实参组」的调用形状，但它们不是声明调用：
+    // 拦下来交给表达式那条路（meta_operand_emit 会先认它们）。
+    %v_hi0 = #add[#bits<64>](%v_st, #call meta_node_len(%v))
+    %prim0 = #call meta_is_builtin_name(%base, %v_st, %v_hi0)
+    %notprim0 = #eq[#bits<1>](%prim0, 0)
+    %callable = #and[#bits<1>](%f_call0, %single)
+    %f_call = #and[#bits<1>](%callable, %notprim0)
     %f_field = #eq[#bits<64>](%form, 6)
     %f_ctor = #eq[#bits<64>](%form, 10)
     // 「字段 / 构造」当值用：函数体里的降级还没做，**干净地**报 4 —— 不要让它们掉进
@@ -1408,6 +1426,237 @@
   #return 0
 }
 
+// 内建的内存操作（lea / load）在**表达式**位置。它们不是用户函数，也不进作用域，
+// 但形态和调用一样（名字后面跟实参组），所以挂在调用那条路上先认它们。
+// 回 1 表示不是内建，调用方接着走用户函数那条路。
+// 被调用者的名字是不是内建内存操作（load / lea）。是的话不让它走「声明调用」那条
+// 路：那一路要先把名字登记进作用域，而内建没有声明。
+#proc meta_is_builtin_name(%base: #addr, %c_lo: #bits<64>,
+                           %c_hi: #bits<64>) -> #bits<1> {
+  %name = #lea(%base, %c_lo, 1, 0)
+  %a = #call meta_bytes_equal(%name, #data_addr meta_kw_load, 4)
+  %b = #call meta_bytes_equal(%name, #data_addr meta_kw_lea, 3)
+  %r = #or[#bits<1>](%a, %b)
+  #return %r
+}
+
+#proc meta_emit_builtin_temp(%base: #addr, %len: #bits<64>,
+                             %kind: #bits<64>, %width: #bits<64>,
+                             %c_lo: #bits<64>, %c_hi: #bits<64>,
+                             %args: #bits<64>) -> #bits<32> {
+  %name = #lea(%base, %c_lo, 1, 0)
+  %is_load = #call meta_bytes_equal(%name, #data_addr meta_kw_load, 4)
+  %is_lea = #call meta_bytes_equal(%name, #data_addr meta_kw_lea, 3)
+  %st = #if %is_load -> (#bits<32>) {
+    %r1 = #call meta_emit_load_temp(%base, %len, %kind, %width, %args)
+    #yield %r1
+  } else {
+    %inner = #if %is_lea -> (#bits<32>) {
+      %r2 = #call meta_emit_lea_temp(%base, %len, %args)
+      #yield %r2
+    } else {
+      #yield 1
+    }
+    #yield %inner
+  }
+  #return %st
+}
+
+// load(p) -> 先发 `  %r<n> = #load[<期望类型>](`，再发地址。
+//
+// 宽度**只由期望类型定**（let b: u8 = load(p) 里的 u8）：`#load[#bits<8>]` 是
+// 类型实参，地址是操作数。偏移给字面 0（引擎没读第二个操作数，现在也只支持
+// 一个实参，多写报 4）。
+#proc meta_emit_load_temp(%base: #addr, %len: #bits<64>,
+                          %kind: #bits<64>, %width: #bits<64>,
+                          %args: #bits<64>) -> #bits<32> {
+  %sc = #call lain_meta_scratch_data()
+  %acount = #call ast_child_count(%args)
+  %est = #call meta_emit_expr(%base, %len, 3, 64, 0, 0, %args, 0, 0, 0, 0, 0)
+  %ebad = #ne[#bits<32>](%est, 0)
+  #if %ebad {
+    #return %est
+  }
+  %endi = #call meta_cell_get(#lea(%sc, 192, 1, 0))
+  %done = #uge[#bits<64>](%endi, %acount)
+  %tail = #eq[#bits<1>](%done, 0)
+  #if %tail {
+    #return 4
+  }
+  %aref = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+  %alo = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+  %ahi = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+  %ind = #data_addr meta_st_ind
+  %w1 = #call lain_meta_emit_write(%ind, 2)
+  %tn = #call meta_next_temp()
+  %w2 = #call meta_emit_temp_name(%tn)
+  %eqop = #data_addr meta_st_eqop
+  %w3 = #call lain_meta_emit_write(%eqop, 3)
+  %hl = #data_addr meta_hash_load
+  %w4 = #call lain_meta_emit_write(%hl, 6)
+  %w5 = #call meta_emit_repr(%kind, %width)
+  %lblp = #data_addr meta_lbrack_lparen
+  %w6 = #call lain_meta_emit_write(%lblp, 2)
+  %w7 = #call meta_emit_ref2(%base, %len, %aref, %alo, %ahi)
+  %sep = #data_addr meta_o4
+  %w8 = #call lain_meta_emit_write(%sep, 2)
+  %w9 = #call meta_emit_uint(0)
+  %rp = #data_addr meta_rparen
+  %w10 = #call lain_meta_emit_write(%rp, 1)
+  %nl = #data_addr meta_st_nl
+  %w11 = #call lain_meta_emit_write(%nl, 1)
+  %s1 = #call meta_cell_put(#lea(%sc, 168, 1, 0), %tn)
+  #return 0
+}
+
+// lea(p, i) -> 先发 `  %r<n> = #lea(`，再发两个操作数（缩放 1、偏移 0 = 地址加下标）。
+//
+// #lea 没有类型实参：结果就是 addr，基址必须是 addr（校验器管这一点）。
+#proc meta_emit_lea_temp(%base: #addr, %len: #bits<64>,
+                         %args: #bits<64>) -> #bits<32> {
+  %sc = #call lain_meta_scratch_data()
+  %acount = #call ast_child_count(%args)
+  %a1 = #call meta_emit_expr(%base, %len, 3, 64, 0, 0, %args, 0, 0, 0, 0, 0)
+  %b1 = #ne[#bits<32>](%a1, 0)
+  #if %b1 {
+    #return %a1
+  }
+  %e1 = #call meta_cell_get(#lea(%sc, 192, 1, 0))
+  %r1 = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+  %l1 = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+  %h1 = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+  // 第一个操作数先存起来：降级第二个实参时 +168/+176/+184 会被覆盖
+  %s1 = #call meta_cell_put(#lea(%sc, 2512, 1, 0), %r1)
+  %s2 = #call meta_cell_put(#lea(%sc, 2520, 1, 0), %l1)
+  %s3 = #call meta_cell_put(#lea(%sc, 2528, 1, 0), %h1)
+  %cc = #call ast_child(%args, %e1)
+  %cat = #call meta_node_start(%cc)
+  %cb = #call bs_byte_at(%base, %cat, %len)
+  %iscomma = #eq[#bits<8>](%cb, 44)
+  #if #eq[#bits<1>](%iscomma, 0) {
+    #return 4
+  }
+  %start2 = #add[#bits<64>](%e1, 1)
+  %a2 = #call meta_emit_expr(%base, %len, 0, 64, 0, 0, %args, %start2,
+                             0, 0, 0, 0)
+  %b2 = #ne[#bits<32>](%a2, 0)
+  #if %b2 {
+    #return %a2
+  }
+  %e2 = #call meta_cell_get(#lea(%sc, 192, 1, 0))
+  %done = #uge[#bits<64>](%e2, %acount)
+  %tail = #eq[#bits<1>](%done, 0)
+  #if %tail {
+    #return 4
+  }
+  %r2 = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+  %l2 = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+  %h2 = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+  %ind = #data_addr meta_st_ind
+  %w1 = #call lain_meta_emit_write(%ind, 2)
+  %tn = #call meta_next_temp()
+  %w2 = #call meta_emit_temp_name(%tn)
+  %eqop = #data_addr meta_st_eqop
+  %w3 = #call lain_meta_emit_write(%eqop, 3)
+  %hl = #data_addr meta_hash_lea
+  %w4 = #call lain_meta_emit_write(%hl, 5)
+  %o1 = #call meta_cell_get(#lea(%sc, 2512, 1, 0))
+  %o1l = #call meta_cell_get(#lea(%sc, 2520, 1, 0))
+  %o1h = #call meta_cell_get(#lea(%sc, 2528, 1, 0))
+  %w5 = #call meta_emit_ref2(%base, %len, %o1, %o1l, %o1h)
+  %sep = #data_addr meta_o4
+  %w6 = #call lain_meta_emit_write(%sep, 2)
+  %w7 = #call meta_emit_ref2(%base, %len, %r2, %l2, %h2)
+  %w8 = #call lain_meta_emit_write(%sep, 2)
+  %w9 = #call meta_emit_uint(1)
+  %w10 = #call lain_meta_emit_write(%sep, 2)
+  %w11 = #call meta_emit_uint(0)
+  %rp = #data_addr meta_rparen
+  %w12 = #call lain_meta_emit_write(%rp, 1)
+  %nl = #data_addr meta_st_nl
+  %w13 = #call lain_meta_emit_write(%nl, 1)
+  %s4 = #call meta_cell_put(#lea(%sc, 168, 1, 0), %tn)
+  #return 0
+}
+
+// store(p, v); -> `  #store[<v 的类型>](<v>, <p>)`
+//
+// 它是**语句**（#store 没有结果），所以不走表达式那条路，由 meta_lower_body 在
+// `;` 之后接。操作数顺序是「值、目的地址」—— 与 load 的「地址、偏移」相反。
+#proc meta_lower_store(%base: #addr, %len: #bits<64>, %parent: #bits<64>,
+                       %index: #bits<64>, %r_t_lo: #bits<64>,
+                       %r_t_hi: #bits<64>) -> #bits<32> {
+  %sc = #call lain_meta_scratch_data()
+  %grp = #call meta_cursor_next(%parent, %index)
+  %acount = #call ast_child_count(%grp)
+  %a1 = #call meta_emit_expr(%base, %len, 3, 64, 0, 0, %grp, 0, 0, 0, 0, 0)
+  %b1 = #ne[#bits<32>](%a1, 0)
+  #if %b1 {
+    #return %a1
+  }
+  %e1 = #call meta_cell_get(#lea(%sc, 192, 1, 0))
+  %r1 = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+  %l1 = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+  %h1 = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+  %s1 = #call meta_cell_put(#lea(%sc, 2512, 1, 0), %r1)
+  %s2 = #call meta_cell_put(#lea(%sc, 2520, 1, 0), %l1)
+  %s3 = #call meta_cell_put(#lea(%sc, 2528, 1, 0), %h1)
+  %cc = #call ast_child(%grp, %e1)
+  %cat = #call meta_node_start(%cc)
+  %cb = #call bs_byte_at(%base, %cat, %len)
+  %iscomma = #eq[#bits<8>](%cb, 44)
+  #if #eq[#bits<1>](%iscomma, 0) {
+    #return 4
+  }
+  %start2 = #add[#bits<64>](%e1, 1)
+  // 宽度取自**值自己的类型**：这是 store 与 load 唯一不同的地方
+  %vt_lo = #call meta_value_type_window(%base, %len, %grp, %start2,
+                                        %r_t_lo, %r_t_hi)
+  %vt_hi = #call meta_cell_get(#lea(%sc, 0, 1, 0))
+  %tid = #call meta_type_resolve(%base, %len, %vt_lo, %vt_hi)
+  %nokind = #eq[#bits<64>](%tid, 0)
+  #if %nokind {
+    #return 5
+  }
+  %vkind = #call meta_tid_repr_kind(%tid)
+  %vwidth = #call meta_tid_repr_width(%tid)
+  %a2 = #call meta_emit_expr(%base, %len, %vkind, %vwidth, %vt_lo, %vt_hi,
+                             %grp, %start2, 0, 0, 0, 0)
+  %b2 = #ne[#bits<32>](%a2, 0)
+  #if %b2 {
+    #return %a2
+  }
+  %e2 = #call meta_cell_get(#lea(%sc, 192, 1, 0))
+  %done = #uge[#bits<64>](%e2, %acount)
+  %tail = #eq[#bits<1>](%done, 0)
+  #if %tail {
+    #return 4
+  }
+  %vref = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+  %vlo = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+  %vhi = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+  %ind = #data_addr meta_st_ind
+  %w1 = #call lain_meta_emit_write(%ind, 2)
+  %hs = #data_addr meta_hash_store
+  %w2 = #call lain_meta_emit_write(%hs, 7)
+  %w3 = #call meta_emit_repr(%vkind, %vwidth)
+  %lblp = #data_addr meta_lbrack_lparen
+  %w4 = #call lain_meta_emit_write(%lblp, 2)
+  %w5 = #call meta_emit_ref2(%base, %len, %vref, %vlo, %vhi)
+  %sep = #data_addr meta_o4
+  %w6 = #call lain_meta_emit_write(%sep, 2)
+  %o1 = #call meta_cell_get(#lea(%sc, 2512, 1, 0))
+  %o1l = #call meta_cell_get(#lea(%sc, 2520, 1, 0))
+  %o1h = #call meta_cell_get(#lea(%sc, 2528, 1, 0))
+  %w7 = #call meta_emit_ref2(%base, %len, %o1, %o1l, %o1h)
+  %rp = #data_addr meta_rparen
+  %w8 = #call lain_meta_emit_write(%rp, 1)
+  %nl = #data_addr meta_st_nl
+  %w9 = #call lain_meta_emit_write(%nl, 1)
+  #return 0
+}
+
+
 #proc meta_lower_loop(%base: #addr, %len: #bits<64>,
                       %parent: #bits<64>, %index: #bits<64>,
                       %n_lo: #bits<64>, %n_hi: #bits<64>) -> #bits<32> {
@@ -1889,6 +2138,18 @@
       }
       // `;` 在哪个下标：语句从 %si 起，`;` 是这条语句的最后一格。
       %semi = #call ast_child(%body, %semi_i)
+      // 内存写是**语句**（#store 没有结果），所以在这里接，不走表达式那条路。
+      %is_store = #call meta_node_is_word(%c, %base, #data_addr meta_kw_store, 5)
+      #if %is_store {
+        %sst = #call meta_lower_store(%base, %len, %body, %si, %r_t_lo,
+                                      %r_t_hi)
+        %sbad3 = #ne[#bits<32>](%sst, 0)
+        #if %sbad3 {
+          #break stmts(%sst)
+        }
+        %snext = #add[#bits<64>](%semi_i, 1)
+        #continue stmts(%snext, 0)
+      }
       %handler = #call meta_syntax_lookup(%c, 1, 0, 2)
       %is_ret = #eq[#bits<64>](%handler, 8)
       %is_let = #eq[#bits<64>](%handler, 9)
@@ -1967,13 +2228,25 @@
                                                 %n2_lo, %n2_hi)
                   #yield %lr2
                 } else {
-                  %vt_lo = #call meta_value_type_window(%base, %len, %body, %vi2,
-                                                        %r_t_lo, %r_t_hi)
-                  %tsc = #call lain_meta_scratch_data()
-                  %vt_hi = #call meta_cell_get(#lea(%tsc, 0, 1, 0))
-                  %st2 = #call meta_lower_stmt(%base, %len, %body, %si, %vi2,
-                                               %semi, 0, %n2_lo, %n2_hi, %vt_lo,
-                                               %vt_hi)
+                  // `let b = load(p);`：内建返回值的宽度只能来自期望类型，值本身
+                  // 推不出来 —— 拒，不猜（曾经拿本函数的返回类型顶上）。
+                  %v2_at = #call meta_node_start(%v2)
+                  %v2_hi = #add[#bits<64>](%v2_at,
+                                            #call meta_node_len(%v2))
+                  %v2_prim = #call meta_is_builtin_name(%base, %v2_at, %v2_hi)
+                  %st2 = #if %v2_prim -> (#bits<32>) {
+                    %f1d = #call lain_meta_fail(4)
+                    #yield 4
+                  } else {
+                    %vt_lo = #call meta_value_type_window(%base, %len, %body, %vi2,
+                                                          %r_t_lo, %r_t_hi)
+                    %tsc = #call lain_meta_scratch_data()
+                    %vt_hi = #call meta_cell_get(#lea(%tsc, 0, 1, 0))
+                    %st3 = #call meta_lower_stmt(%base, %len, %body, %si, %vi2,
+                                                 %semi, 0, %n2_lo, %n2_hi, %vt_lo,
+                                                 %vt_hi)
+                    #yield %st3
+                  }
                   #yield %st2
                 }
                 #yield %z2
