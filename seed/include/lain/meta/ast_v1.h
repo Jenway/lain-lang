@@ -1,14 +1,12 @@
 /* LAINAST v1：平铺 Arena 的共享布局、引用编码与固定拒码。
  *
- * 这是**唯一**的布局来源：seed 的 reader（(src/meta/tree.c）、宿主（src/meta/host.c）
- * 与验收程序都必须 include 它，禁止各自再写一份结构定义。规范见
- * docs/spec-ast-and-macro-expansion.md 第 1 节。
+ * 这是唯一的布局来源：seed 的 reader（src/meta/tree.c）、宿主（src/meta/host.c）
+ * 与验收程序都必须 include 它，禁止各自再写一份结构定义。
  *
- * 三条不可动摇的约束：
- *   1. Header 与节点是**映射格式**，不是 C 对象的解引用目标：异字节序主机要逐字段
+ *   1. Header 与节点是映射格式，不是 C 对象的解引用目标：异字节序主机要逐字段
  *      编解码，禁止 packed 解引用。这里的结构体只是布局描述 + 静态断言。
  *   2. 引用高 16 位是段号、低 48 位是段内字节偏移。段号 0 禁用；引用 0 是 NONE。
- *      编码前检查字段范围，**禁止截断大偏移**。
+ *      编码前检查字段范围，禁止截断大偏移。
  *   3. 段身份在 AST 能力边界校验：任何跨段读取都要在所属段内先减后加地验证区间，
  *      再交给 VSpace 检查。引用只在所属编译任务存活期内有效，没有跨任务代际字段。
  */
@@ -115,7 +113,7 @@ _Static_assert(offsetof(LainAstArenaHeader, node_capacity) == 48,
                "node_capacity 偏移");
 _Static_assert(offsetof(LainAstArenaHeader, root) == 56, "root 偏移");
 
-/* --- 固定拒码（docs/spec-ast-and-macro-expansion.md 3.7） ------------------ */
+/* --- 固定拒码 ------------------------------------------------------------ */
 
 enum {
   LAIN_AST_ERR_SEGMENT = 9401,  /* 未知/无效段号或任务绑定 */
