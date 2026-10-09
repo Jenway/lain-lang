@@ -569,7 +569,8 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
 `build/datascan.ps1`）。
 
 **已删：48 个 `#proc`（1299 行）加 1 个整文件。** 删前 29 个文件 / 14522 行 / 582 个 `#proc` 定义
-（= 验证器报的 subroutine 数）/ 214 个 `data` 块；删后 28 / 13223 / 534 / 214。
+（= 验证器报的 subroutine 数）/ 214 个 `data` 块；删后 28 / 13223 / 534 / 207（`data` 少了 7 个，
+见下面那条）。
 
 | 文件 | 删前 proc | 删后 proc | 删前行 | 删后行 | 是什么 |
 |---|---|---|---|---|---|
@@ -595,12 +596,12 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
 **别删**：bootstrap/std/funcs.l1 的 `meta_lower_stmt` / `meta_lower_if` / `meta_lower_for` /
 `meta_lower_body` 是活的（`meta_lower_decl_func` → `meta_lower_body`）。
 
-**未被引用的 `data` 块 7 个**（F5 之后重测：旧表里的 `meta_o1` / `meta_o5` / `meta_s2` /
-`meta_s3a` / `meta_s3b` / `meta_s4a` / `meta_s4b` 在那次迁移里已经删掉）：
-`lainir_data_rw_mode`@bootstrap/std/lainir.l1:1136、`lainir_indent2`@bootstrap/std/lainir.l1:918、
-`lainir_rparen_brace`@bootstrap/std/lainir.l1:565、`meta_kw_arrow`@bootstrap/std/lex.l1:107、
-`meta_reg_entry_off`@bootstrap/std/registry.l1:30、`meta_reg_entry_size`@bootstrap/std/registry.l1:32、
-`meta_st_ind4cont`@bootstrap/std/emit.l1:181。
+**未被引用的 `data` 块 7 个：已删。**（F5 之后重测；旧表里的 `meta_o1` / `meta_o5` / `meta_s2` /
+`meta_s3a` / `meta_s3b` / `meta_s4a` / `meta_s4b` 在那次迁移里已经删掉。）删的是 `lainir_data_rw_mode`、
+`lainir_indent2`、`lainir_rparen_brace`（层 0 迁移后没人再引用的文本块）、`meta_kw_arrow`（`->` 的识别
+改走字节比较）、`meta_reg_entry_off` / `meta_reg_entry_size`（注册表布局按表头算）、
+`meta_st_ind4cont`（D 的循环体 `if` 落地后由 `lainir_continue_head_write` 取代）。口径可重跑：
+`build/datascan.ps1` 现在的输出是「未引用 = 0」。删后 `data` 214 → 207，`subroutine` 数不变。
 
 **从未被调用的能力包装 7 个**（bootstrap/std/emit.l1 的 `#extern` 加 seed/src/meta/host.c
 的登记，删要两侧一起，能力表 46 → 39）：`lain_meta_emit_data`@bootstrap/std/emit.l1:19、
