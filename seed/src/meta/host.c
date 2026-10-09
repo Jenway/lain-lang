@@ -174,8 +174,6 @@ struct LainMetaHost {
  *   lain_meta_source_length       (index)                   字节数
  *   lain_meta_source_path_data    (index)                   路径地址
  *   lain_meta_emit_reset          ()                        0
- *   lain_meta_emit_scope_begin    ()                        0
- *   lain_meta_emit_scope_end      ()                        0
  *   lain_meta_emit_write          (addr, length)            0
  *   lain_meta_emit_data           ()                        文本地址
  *   lain_meta_emit_length         ()                        字节数
@@ -688,15 +686,6 @@ static uint32_t cap_source_count(void *context, const uint64_t *args,
   return 0;
 }
 
-static uint32_t cap_session_id(void *context, const uint64_t *args,
-                              uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  (void)args;
-  if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 0) return LAINMETA_ERR_DENIED;
-  if (out) *out = host->session_id;
-  return 0;
-}
 
 static uint32_t cap_source_data(void *context, const uint64_t *args,
                                 uint32_t count, uint64_t *out) {
@@ -755,48 +744,7 @@ static uint32_t cap_emit_reset(void *context, const uint64_t *args,
   return 0;
 }
 
-/* 输出作用域把当前缓冲所有权移入栈帧；作用域内 emitter 原样工作，结束时
- * 释放内层缓冲并恢复父缓冲。apply 在作用域内同步消费 emit_data/length，
- * 因而不必把生成模块复制到第二块宿主内存。 */
-static uint32_t cap_emit_scope_begin(void *context, const uint64_t *args,
-                                     uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  uint32_t depth;
-  (void)args;
-  if (!host || count != 0 || host->emit_scope_count >= 64u)
-    return LAINMETA_ERR_DENIED;
-  depth = host->emit_scope_count++;
-  host->emit_scopes[depth].out = host->out;
-  host->emit_scopes[depth].out_length = host->out_length;
-  host->emit_scopes[depth].out_cap = host->out_cap;
-  host->out = NULL;
-  host->out_length = 0;
-  host->out_cap = 0;
-  if (out) *out = 0;
-  return LAINMETA_OK;
-}
 
-static uint32_t cap_emit_scope_end(void *context, const uint64_t *args,
-                                   uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  uint32_t depth, inner_cap;
-  (void)args;
-  if (!host || count != 0 || host->emit_scope_count == 0)
-    return LAINMETA_ERR_DENIED;
-  depth = --host->emit_scope_count;
-  inner_cap = host->out_cap;
-  free(host->out);
-  (void)lainvm_quota_release(host->quota, inner_cap);
-  host->charged -= inner_cap;
-  host->out = host->emit_scopes[depth].out;
-  host->out_length = host->emit_scopes[depth].out_length;
-  host->out_cap = host->emit_scopes[depth].out_cap;
-  host->emit_scopes[depth].out = NULL;
-  host->emit_scopes[depth].out_length = 0;
-  host->emit_scopes[depth].out_cap = 0;
-  if (out) *out = 0;
-  return LAINMETA_OK;
-}
 
 static uint32_t cap_emit_write(void *context, const uint64_t *args,
                                uint32_t count, uint64_t *out) {
@@ -860,22 +808,6 @@ static uint32_t cap_fail(void *context, const uint64_t *args, uint32_t count,
   return 0;
 }
 
-/* 未知位置使用全一值，合法的文件零和偏移零仍可表示。 */
-static uint32_t cap_diagnostic_field(void *context, const uint64_t *args,
-                                     uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  uint64_t value;
-  if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
-  switch (args[0]) {
-    case 1: value = host->status; break;
-    case 2: value = host->status ? host->diagnostic_source : UINT64_MAX; break;
-    case 3: value = host->status ? host->diagnostic_offset : UINT64_MAX; break;
-    default: return LAINMETA_ERR_DENIED;
-  }
-  if (out) *out = value;
-  return 0;
-}
 
 static uint32_t cap_fail_at(void *context, const uint64_t *args, uint32_t count,
                             uint64_t *out) {
@@ -1279,24 +1211,7 @@ static uint32_t cap_apply_request(void *context, const uint64_t *args,
       false, false, 0, false, 0, 0, 0);
 }
 
-static uint32_t cap_apply_bytes_request(void *context, const uint64_t *args,
-                                       uint32_t count, uint64_t *out) {
-  if (count != 7 || !args) return LAINMETA_ERR_DENIED;
-  return apply_request_core((LainMetaHost *)context,
-      (const char *)(uintptr_t)args[0], args[1],
-      (const char *)(uintptr_t)args[2], args[3], args[4], args[5], out,
-      false, true, args[6], false, 0, 0, 0);
-}
 
-static uint32_t cap_apply_bytes_arg_request(void *context,
-                                           const uint64_t *args,
-                                           uint32_t count, uint64_t *out) {
-  if (count != 9 || !args) return LAINMETA_ERR_DENIED;
-  return apply_request_core((LainMetaHost *)context,
-      (const char *)(uintptr_t)args[0], args[1],
-      (const char *)(uintptr_t)args[2], args[3], args[4], args[5], out,
-      false, false, 0, true, args[6], args[7], args[8]);
-}
 
 /* 对当前 emitter 作用域中的文本 apply。过程名与参数 wire 仍须来自授权的
  * Meta 内存；生成文本的宿主所有权不会暴露成 Meta 可伪造的地址。 */
@@ -1310,26 +1225,7 @@ static uint32_t cap_apply_emitted_request(void *context, const uint64_t *args,
                             false, 0, 0, 0);
 }
 
-static uint32_t cap_apply_emitted_bytes_request(void *context,
-                                               const uint64_t *args,
-                                               uint32_t count,
-                                               uint64_t *out) {
-  LainMetaHost *host = context;
-  if (!host || count != 5 || !args) return LAINMETA_ERR_DENIED;
-  return apply_request_core(host, host->out, host->out_length,
-                            (const char *)(uintptr_t)args[0], args[1],
-                            args[2], args[3], out, true, true, args[4],
-                            false, 0, 0, 0);
-}
 
-static uint32_t cap_apply_emitted_bytes_arg_request(
-    void *context, const uint64_t *args, uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  if (!host || count != 7 || !args) return LAINMETA_ERR_DENIED;
-  return apply_request_core(host, host->out, host->out_length,
-      (const char *)(uintptr_t)args[0], args[1], args[2], args[3], out,
-      true, false, 0, true, args[4], args[5], args[6]);
-}
 
 static uint32_t cap_apply_status(void *context, const uint64_t *args,
                                 uint32_t count, uint64_t *out) {
@@ -1351,22 +1247,6 @@ static uint32_t cap_apply_kind(void *context, const uint64_t *args,
   return 0;
 }
 
-/* 行列属于本次生成的 LAINIR 请求，不代表 Lain 源文件位置。 */
-static uint32_t cap_apply_diagnostic_field(void *context, const uint64_t *args,
-                                          uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  uint64_t value;
-  if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
-  switch (args[0]) {
-    case 1: value = host->apply_status; break;
-    case 2: value = host->apply_diagnostic.line; break;
-    case 3: value = host->apply_diagnostic.column; break;
-    default: return LAINMETA_ERR_DENIED;
-  }
-  if (out) *out = value;
-  return 0;
-}
 
 static uint32_t cap_apply_width(void *context, const uint64_t *args,
                                uint32_t count, uint64_t *out) {
@@ -1378,40 +1258,7 @@ static uint32_t cap_apply_width(void *context, const uint64_t *args,
   return 0;
 }
 
-static uint32_t cap_apply_bytes_length(void *context, const uint64_t *args,
-                                       uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  (void)args;
-  if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 0) return LAINMETA_ERR_DENIED;
-  if (out) *out = host->apply_ready ? host->apply_result_bytes.length : 0;
-  return 0;
-}
 
-static uint32_t cap_apply_bytes_copy(void *context, const uint64_t *args,
-                                    uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  uint64_t offset, length, destination;
-  if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 3 || !args) return LAINMETA_ERR_DENIED;
-  offset = args[0];
-  destination = args[1];
-  length = args[2];
-  if (!host->apply_ready || !host->apply_result_bytes.data ||
-      offset > host->apply_result_bytes.length ||
-      length > host->apply_result_bytes.length - offset || !host->space ||
-      length > (uint64_t)UINTPTR_MAX - (uintptr_t)destination ||
-      !lainvm_space_check(host->space, (uintptr_t)destination, length,
-                          LAINVM_MEM_WRITE)) {
-    if (out) *out = LAINMETA_APPLY_ERR_RESULT_ADDR;
-    return 0;
-  }
-  if (length)
-    memcpy((void *)(uintptr_t)destination,
-           host->apply_result_bytes.data + (size_t)offset, (size_t)length);
-  if (out) *out = 0;
-  return 0;
-}
 
 /* --- AstIn 引用解析 -------------------------------------------------------
  * 段身份在**这里**校验，解读引用绝不越段：先在本段内用减法验证区间，通过之后
@@ -1753,42 +1600,9 @@ bool lainmeta_host_ast_child_ref(LainMetaHost *host, LainAstRef ref,
   }
   return true;
 }
-/* 四个 AstIn 原语。业务参数严格检查：多了少了都拒。
- * 它们一律通过 host 的属性函数解析引用：meta 从不自己解码引用、也不做指针算术。 */
-static uint32_t cap_ast_root(void *context, const uint64_t *args, uint32_t count,
-                             uint64_t *out) {
-  LainMetaHost *host = context;
-  LainAstArenaView view;
-  if (!host) return LAINMETA_ERR_DENIED;
-  if (count != 1 || !args) return LAINMETA_ERR_DENIED;
-  /* AST 读取能力都要求已绑定合法 VSpace：没授权就没有「读 AST」这回事。 */
-  if (!host->space) {
-    host_set_status(host, LAINMETA_ERR_DENIED);
-    if (out) *out = LAIN_AST_REF_NONE;
-    return LAINMETA_ERR_DENIED;
-  }
-  if (args[0] >= host->source_count) {
-    host_set_status(host, LAIN_AST_ERR_SEGMENT);
-    if (out) *out = LAIN_AST_REF_NONE;
-    return host->status;
-  }
-  if (!lainmeta_host_arena(host, (uint32_t)args[0], &view)) {
-    host_set_status(host, LAIN_AST_ERR_SEGMENT);
-    if (out) *out = LAIN_AST_REF_NONE;
-    return host->status;
-  }
-  if (host->sources[args[0]].current_root)
-    view.root = host->sources[args[0]].current_root;
-  {
-    uintptr_t address;
-    if (!lainmeta_host_ast_node_addr(host, view.root, &address)) {
-      if (out) *out = LAIN_AST_REF_NONE;
-      return host->status;
-    }
-  }
-  if (out) *out = view.root;
-  return 0;
-}
+/* 三个 AstIn 原语（根引用由宿主在登记源码时写进暂存区头部的根表，不再作为能力暴露）。
+ * 业务参数严格检查：多了少了都拒。它们一律通过 host 的属性函数解析引用：meta 从不自己
+ * 解码引用、也不做指针算术。 */
 
 static uint32_t cap_ast_node_addr(void *context, const uint64_t *args,
                                   uint32_t count, uint64_t *out) {
@@ -1929,13 +1743,6 @@ static uint32_t cap_ast_charge(void *context, const uint64_t *args,
   if (!rc) rc = lain_ast_output_charge(host->ast_out, args[0], args[1]);
   return output_status_result(host, rc, out);
 }
-static uint32_t cap_ast_tx_release(void *context, const uint64_t *args,
-                                  uint32_t count, uint64_t *out) {
-  LainMetaHost *host = context;
-  uint32_t rc = output_entry(host, args, count, 1, out);
-  if (!rc) rc = lain_ast_output_release(host->ast_out, args[0]);
-  return output_status_result(host, rc, out);
-}
 static uint32_t cap_ast_tx_rollback(void *context, const uint64_t *args,
                                    uint32_t count, uint64_t *out) {
   LainMetaHost *host = context;
@@ -2019,20 +1826,16 @@ static uint32_t cap_ast_commit(void *context, const uint64_t *args,
 }
 
 static const MetaCapability k_capabilities[] = {
-    {"lain_meta_session_id", cap_session_id},
     {"lain_meta_source_count", cap_source_count},
     {"lain_meta_source_data", cap_source_data},
     {"lain_meta_source_length", cap_source_length},
     {"lain_meta_source_path_data", cap_source_path_data},
     {"lain_meta_emit_reset", cap_emit_reset},
-    {"lain_meta_emit_scope_begin", cap_emit_scope_begin},
-    {"lain_meta_emit_scope_end", cap_emit_scope_end},
     {"lain_meta_emit_write", cap_emit_write},
     {"lain_meta_emit_data", cap_emit_data},
     {"lain_meta_emit_length", cap_emit_length},
     {"lain_meta_fail", cap_fail},
     {"lain_meta_status", cap_status},
-    {"lain_meta_diagnostic_field", cap_diagnostic_field},
     {"lain_meta_fail_at", cap_fail_at},
     {"lain_meta_type_publish", cap_type_publish},
     {"lain_meta_scratch_data", cap_scratch_data},
@@ -2040,18 +1843,10 @@ static const MetaCapability k_capabilities[] = {
     {"lain_meta_scratch_report", cap_scratch_report},
     {"lain_meta_region_grant", cap_region_grant},
     {"lain_meta_apply_request", cap_apply_request},
-    {"lain_meta_apply_bytes_request", cap_apply_bytes_request},
-    {"lain_meta_apply_bytes_arg_request", cap_apply_bytes_arg_request},
     {"lain_meta_apply_emitted_request", cap_apply_emitted_request},
-    {"lain_meta_apply_emitted_bytes_request", cap_apply_emitted_bytes_request},
-    {"lain_meta_apply_emitted_bytes_arg_request", cap_apply_emitted_bytes_arg_request},
     {"lain_meta_apply_status", cap_apply_status},
-    {"lain_meta_apply_diagnostic_field", cap_apply_diagnostic_field},
     {"lain_meta_apply_kind", cap_apply_kind},
     {"lain_meta_apply_width", cap_apply_width},
-    {"lain_meta_apply_bytes_length", cap_apply_bytes_length},
-    {"lain_meta_apply_bytes_copy", cap_apply_bytes_copy},
-    {"lain_meta_ast_root", cap_ast_root},
     {"lain_meta_ast_node_addr", cap_ast_node_addr},
     {"lain_meta_ast_span_addr", cap_ast_span_addr},
     {"lain_meta_ast_child_ref", cap_ast_child_ref},
@@ -2062,7 +1857,6 @@ static const MetaCapability k_capabilities[] = {
 static const MetaCapability k_output_capabilities[] = {
     {"lain_meta_ast_charge", cap_ast_charge},
     {"lain_meta_ast_tx_begin", cap_ast_tx_begin},
-    {"lain_meta_ast_tx_release", cap_ast_tx_release},
     {"lain_meta_ast_tx_rollback", cap_ast_tx_rollback},
     {"lain_meta_ast_append_token", cap_ast_append_token},
     {"lain_meta_ast_append_refs", cap_ast_append_refs},

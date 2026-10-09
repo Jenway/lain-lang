@@ -520,7 +520,7 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
   `meta_declare_extern` / `meta_lower_decl_extern`，头由抽出来的 `meta_emit_proc_header` 发），
   声明身份与 `func` 一样是 6，调用点与返回类型推导完全共用一条路（样例
   `bootstrap/lain/examples/extern.lain`：4 条 extern + 3 个函数，产物过 `lainir_parse` +
-  `lainir_verify`）。手写 Meta 的 46 个 `#extern` 里取 14 条最复杂的签名实测逐字符等价
+  `lainir_verify`）。手写 Meta 当时那份 46 条 `#extern`（五的瘦身之后剩 32 条）里取 14 条最复杂的签名实测逐字符等价
   （build/probes/cap12.lain，matched=14 of 14）。**注意**：一次 lowering 请求的源码规模有既存上限 ——
   今天实测约 40 条合成 extern（或 13 条 9 参长签名）就开始报 4，多个源会**累积**，
   与 extern / func 无关，见《待补规则》。
@@ -562,7 +562,8 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
 ### 五、删除与瘦身（实测口径）
 
 口径是静态调用图：根 = 三个 ABI 入口（`lain_std_lower` / `lain_std_abi_version` /
-`lain_std_initialize`）加全部 46 个能力的 `#extern`，再加层 0 的探针入口（`f1_probe` …
+`lain_std_initialize`）加当时声明的全部 46 条能力 `#extern`（清掉从未被调用的那批之后是
+32 条，见下），再加层 0 的探针入口（`f1_probe` …
 `f4_probe`、`f6_probe` —— F 的验收要求公开面每个算子都有样例，那一层的公开 API 不能按「单元里
 没人调用」判死）；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
 静态图看不见的间接引用。这条口径的可重跑实现是 `build/deadscan.ps1`（`data` 块那条是
@@ -603,13 +604,17 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
 `meta_st_ind4cont`（D 的循环体 `if` 落地后由 `lainir_continue_head_write` 取代）。口径可重跑：
 `build/datascan.ps1` 现在的输出是「未引用 = 0」。删后 `data` 214 → 207，`subroutine` 数不变。
 
-**从未被调用的能力包装 7 个**（bootstrap/std/emit.l1 的 `#extern` 加 seed/src/meta/host.c
-的登记，删要两侧一起，能力表 46 → 39）：`lain_meta_emit_data`@bootstrap/std/emit.l1:19、
-`lain_meta_emit_length`@bootstrap/std/emit.l1:20、
-`lain_meta_apply_emitted_bytes_request`@bootstrap/std/emit.l1:35、
-`lain_meta_ast_root`@bootstrap/std/emit.l1:48、`lain_meta_ast_tx_release`@bootstrap/std/emit.l1:55、
-`lain_meta_diagnostic_field`@bootstrap/std/emit.l1:284、
-`lain_meta_apply_diagnostic_field`@bootstrap/std/emit.l1:285。
+**从未被调用的能力包装 13 个：已删。**（文档原来写 7 个，那是 s1 之前测的；eval 与 wire 的死代码删掉
+之后，bytes 请求一族、会话身份、emitter 作用域、`ast_root` / `ast_tx_release` 也失去了唯一的调用点，
+可删的从 7 涨到 13。）删的是 `lain_meta_session_id`、`lain_meta_emit_scope_begin`、
+`lain_meta_emit_scope_end`、`lain_meta_apply_bytes_request`、`lain_meta_apply_bytes_arg_request`、
+`lain_meta_apply_bytes_length`、`lain_meta_apply_bytes_copy`、`lain_meta_apply_emitted_bytes_request`、
+`lain_meta_apply_emitted_bytes_arg_request`、`lain_meta_ast_root`、`lain_meta_ast_tx_release`、
+`lain_meta_diagnostic_field`、`lain_meta_apply_diagnostic_field`：bootstrap 侧的 `#extern` 声明与
+`seed/src/meta/host.c` 的登记（`k_capabilities` / `k_output_capabilities`）两侧一起删，对应的 `cap_*`
+函数与只描述它们的注释一并去掉，能力表 **46 → 33**（驱动摘要 `caps count=33`）。`lain_meta_emit_data` /
+`lain_meta_emit_length` **不删**：`lainir_text()` / `lainir_length()` 在用（层 0 探针 `lainir_f1.l1` 会调）。
+口径可重跑：`build/capscan.ps1`（声明面 = 单元 + 探针文件，调用面 = 同一批文件里的 `#call`）。
 
 **其他杠杆**：注释 1904 行，最重的几个是 bootstrap/std/emit.l1 84/302（28%）、
 bootstrap/std/parse.l1 192/764（25%）、bootstrap/std/types.l1 22/101（22%）、
