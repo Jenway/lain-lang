@@ -1,7 +1,7 @@
 # bootstrap 方言
 
 自举的 stage0 是手写 LAINIR 文本（bootstrap/ 下按 bootstrap/SOURCE_ORDER 拼成 28 个文件、
-12809 行的编译单元；驱动报 unit files=28 bytes=552938）。要让 Lain 编译器能编译自己，
+13203 行的编译单元；驱动报 unit files=28 bytes=582254）。要让 Lain 编译器能编译自己，
 先得有一份**用 Lain 写的 Meta**；写它需要一门表面语言。
 
 这份文档定的是这门方言的特性集合、语法，以及每条语法降成什么 LAINIR。它不是 lainlang
@@ -166,16 +166,16 @@ F5 的等价性口径是**逐字节相等**：`build/f5_capture.ps1` 把 16 个�
 
 其余 14 个样例仍逐字节相同。
 
-`bootstrap/std/lainir.l1` 共 148 个 `lainir_*` 过程。按全仓库（`bootstrap/` 下的 `.l1` 与
-`.lain`）的名字引用统计，只有 8 个不被 `lainir.l1` 之外的代码引用（`lainir_address_line`、
-`lainir_binary`、`lainir_line_start`、`lainir_loop`、`lainir_memory_unary`、`lainir_next_temp`、
-`lainir_spaces`、`lainir_unary`），它们是库内部共用的片段。
+`bootstrap/std/lainir.l1` 共 149 个 `lainir_*` 过程。按全仓库（`bootstrap/` 下的 `.l1` 与
+`.lain`）的名字引用统计，只有 6 个不被 `lainir.l1` 之外的代码引用（`lainir_address_line`、
+`lainir_binary`、`lainir_line_start`、`lainir_next_temp`、`lainir_spaces`、`lainir_unary`），
+它们是库内部共用的片段。
 
 F6 把这条「等价」放在独立调用方上验收：`bootstrap/lain/examples/lainir_f6.l1` 的 `f6_probe`
 用层 0 的 API 重发处理管线在 `bootstrap/lain/examples/locals.lain` 上产出的整份单元
 （`Pair__a_offset` / `Pair__b_offset` / `Pair__size` 三个过程、`mk` / `mk2` / `two` 三个构造
 过程、`data origin_storage rw` 与 `origin` 过程）。驱动报 `host_status=0`、`trap none`、
-`output bytes=1061`，产物过 `build\check_unit.exe` 的 parse+verify，且与管线产物
+`output bytes=1251`，产物过 `build\check_unit.exe` 的 parse+verify，且与管线产物
 `build/after/locals.out` 的 SHA-256 相同。16 个既有样例的产物（`build/after/<名字>.out`）
 逐个过 `build\check_unit.exe`。`build/reg.ps1` 把这两条都断言下来：样例循环要求
 `host_status=0`、`trap none` 且产物 parse+verify 通过，F6 段另外要求 `f6_probe` 的产物与
@@ -569,9 +569,9 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
 静态图看不见的间接引用。这条口径的可重跑实现是 `build/deadscan.ps1`（`data` 块那条是
 `build/datascan.ps1`）。
 
-**已删：48 个 `#proc`（1299 行）加 1 个整文件。** 删前 29 个文件 / 14522 行 / 582 个 `#proc` 定义
-（= 验证器报的 subroutine 数）/ 214 个 `data` 块；删后 28 / 13223 / 534 / 207（`data` 少了 7 个，
-见下面那条）。
+**这一节删掉：48 个 `#proc`（1299 行）加 1 个整文件，再加 13 条外部过程声明（13 行）与 7 个 `data`
+块。** 删前 29 个文件 / 14522 行 / 582 个 `#proc` 定义（= 验证器报的 subroutine 数）/ 214 个 `data`
+块；删后 28 / 13203 / 521 / 207。
 
 | 文件 | 删前 proc | 删后 proc | 删前行 | 删后行 | 是什么 |
 |---|---|---|---|---|---|
@@ -579,10 +579,10 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
 | bootstrap/std/eval.l1 | 8 | 3 | 266 | 81 | bytes 实参请求、emitted 请求、声明闭包与过程引用求值 |
 | bootstrap/std/scope.l1 | 45 | 36 | 1288 | 1108 | 依赖闭包一套、`meta_scope_set_payload`、`ast_index_of`、`meta_scope_ensure_scanned` |
 | bootstrap/std/parse.l1 | 42 | 35 | 718 | 633 | `meta_sem_*` 一系、`meta_cursor_end` |
-| bootstrap/std/registry.l1 | 16 | 10 | 244 | 204 | `meta_tid_owner` / `meta_tid_namespace` / `meta_tid_field_*` |
+| bootstrap/std/registry.l1 | 16 | 10 | 244 | 202 | `meta_tid_owner` / `meta_tid_namespace` / `meta_tid_field_*` |
 | bootstrap/std/modules.l1 | 18 | 16 | 605 | 575 | `meta_cstr_len`、`meta_slice_equals` |
-| bootstrap/std/lainir.l1 | 151 | 149 | 1509 | 1475 | `lainir_memory_unary`、`lainir_loop`（层 0 里没人调的片段） |
-| bootstrap/std/emit.l1 | 47 | 46 | 172 | 168 | `meta_emit_byte`（F5 迁移后没人再调） |
+| bootstrap/std/lainir.l1 | 151 | 149 | 1509 | 1472 | `lainir_memory_unary`、`lainir_loop`（层 0 里没人调的片段） |
+| bootstrap/std/emit.l1 | 47 | 33 | 172 | 154 | `meta_emit_byte`（F5 迁移后没人再调）与 13 条外部过程声明 |
 
 删掉的单条里最大的是 `meta_record_type_from_field_list`（166 行）、`meta_wire_validate`（119）、
 `meta_eval_apply_decl_closure`（112）、`meta_wire_validate_field_list`（87）、
@@ -616,9 +616,9 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
 `lain_meta_emit_length` **不删**：`lainir_text()` / `lainir_length()` 在用（层 0 探针 `lainir_f1.l1` 会调）。
 口径可重跑：`build/capscan.ps1`（声明面 = 单元 + 探针文件，调用面 = 同一批文件里的 `#call`）。
 
-**其他杠杆**：注释 1904 行，最重的几个是 bootstrap/std/emit.l1 84/302（28%）、
-bootstrap/std/parse.l1 192/764（25%）、bootstrap/std/types.l1 22/101（22%）、
-bootstrap/std/recognize.l1 115/537（21%）、bootstrap/meta.l1 298/1532（19%）；
+**其他杠杆**：注释比例高的几个是 bootstrap/std/emit.l1 85/154（55%）、
+bootstrap/std/parse.l1 184/633（29%）、bootstrap/std/types.l1 22/92（24%）、
+bootstrap/std/recognize.l1 115/518（22%）、bootstrap/meta.l1 323/1623（20%）；
 bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 
 **顺序**：先删未被引用的 `data` 块与未被调用的能力（无风险）；wire 那一层随 F 的落地整文件删掉了
@@ -630,8 +630,9 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 `load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 顶层字节串（→ `#data` + 取址过程）/
 函数体与顶层的聚合构造（→ 栈上 `#alloca` + 每字段 `#store`，或顶层 `data`）/
 宿主整块窗口授予（`region_grant`，暂存区的基址与容量从记录读回）/ `extern` 声明（`= link_name`，调用与 `func` 同路）/
-算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）/ 聚合类型名（struct、enum）进参数类型与标注。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
-**值层的其余部分（字段访问当值、变体投影当值、函数体内的变体构造、字段值为表达式、逃逸语义）与五（删除与瘦身）**；A、B、C、D、E、F 已完成。
+算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）/ 聚合类型名（struct、enum）进参数类型与标注 /
+聚合值当值用（字段访问、变体投影、函数体内构造、字段值是表达式；跨帧返回栈上地址报 11）。
+够做「一小段 Lain 端到端」，还不够写编译器。A、B、C、D、E、F、值层与五都已完成。
 
 ## 待补规则
 
@@ -766,7 +767,7 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 - 标量已经是表：bootstrap/std/scalars.l1 里一段 `data` 字节（名字、kind、宽度、算符对），
   handler 6 与 bootstrap/std/handlers/scalar.l1 已删除，bootstrap/lain/std/prelude.lain
   也随之删除（语言里不再有标量声明，也就没有「先 import 一份 prelude」这一步）。
-- 层 0 已完成：bootstrap/std/lainir.l1 的 148 个 lainir_* 写出器承担处理管线的全部字面
+- 层 0 已完成：bootstrap/std/lainir.l1 的 149 个 lainir_* 写出器承担处理管线的全部字面
   文本发射，独立调用方（bootstrap/lain/examples/lainir_f6.l1）重发的单元与管线在
   bootstrap/lain/examples/locals.lain 上的产物逐字节相同。wire 编解码那一层（原来的
   bootstrap/std/wire.l1）已随五的瘦身删掉：它只被死代码调用。
