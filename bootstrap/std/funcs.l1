@@ -889,6 +889,12 @@
     // 初始化列表是值的**下一个节点**（那个花括号组），与调用那条路同源。
     %f_ctor_only = #and[#bits<1>](%f_ctor, %single)
     #if %f_ctor_only {
+      // 返回**刚构造的**聚合：`#alloca` 的水位在帧弹出时回退，那个地址出了帧就失效，
+      // 所以这是错的输入。
+      #if %is_ret {
+        %esc0 = #call lain_meta_fail(11)
+        #return 11
+      }
       %ctor_lo = #call meta_node_start(%v)
       %ctor_ln = #call meta_node_len(%v)
       %ctor_hi = #add[#bits<64>](%ctor_lo, %ctor_ln)
@@ -906,6 +912,11 @@
     %d_ctor2 = #and[#bits<1>](%d_brace2, %d_enum2)
     %f_sumctor = #and[#bits<1>](%d_ctor2, %single)
     #if %f_sumctor {
+      // 同上：返回刚构造的变体同样是把帧地址带出去
+      #if %is_ret {
+        %esc1 = #call lain_meta_fail(11)
+        #return 11
+      }
       %sc_after = #call bs_skip_space(%base, %v_hi0, %len)
       %sc_vlo = #call bs_skip_space(%base, #add[#bits<64>](%sc_after, 1), %len)
       %sc_vhi = #call bs_skip_ident(%base, %sc_vlo, %len)
@@ -917,6 +928,36 @@
                                                     %sc_vlo, %sc_vhi, %parent,
                                                     %sc_gi, %is_ret)
       #return %sc_st
+    }
+    // 返回聚合时，地址必须是**调用方给的**（参数）或**被调用方算出来的**（调用结果）。
+    // 其余名字（局部绑定、循环参数）都可能是帧内构造出来的地址 —— 保守拒。
+    %agg4 = #call meta_scope_body(%base, %t_lo, %t_hi, 4)
+    %agg5 = #call meta_scope_body(%base, %t_lo, %t_hi, 5)
+    %agg4m = #eq[#bits<64>](%agg4, 0xFFFFFFFFFFFFFFFF)
+    %agg5m = #eq[#bits<64>](%agg5, 0xFFFFFFFFFFFFFFFF)
+    %agg_no = #and[#bits<1>](%agg4m, %agg5m)
+    %agg = #eq[#bits<1>](%agg_no, 0)
+    %agg_ret = #and[#bits<1>](%agg, %is_ret)
+    // 「普通名字」的判据用**排除法**：形状不是调用（5）、字段（6）、构造（10）、组（2），
+    // 而且这个节点是一个词。别给「普通 token」硬编一个形状号 —— 那个号不属于这里。
+    %v_kind0 = #call meta_node_kind(%v)
+    %v_word0 = #eq[#bits<64>](%v_kind0, 1)
+    %not_call = #ne[#bits<64>](%form, 5)
+    %not_field = #ne[#bits<64>](%form, 6)
+    %not_ctor = #ne[#bits<64>](%form, 10)
+    %not_group = #ne[#bits<64>](%form, 2)
+    %p1 = #and[#bits<1>](%not_call, %not_field)
+    %p2 = #and[#bits<1>](%not_ctor, %not_group)
+    %plain_shape = #and[#bits<1>](%p1, %p2)
+    %plain_name = #and[#bits<1>](%plain_shape, %v_word0)
+    %check_name = #and[#bits<1>](%agg_ret, %plain_name)
+    #if %check_name {
+      %ntw = #call meta_word_type_name(%base, %len, %v)
+      %notparam = #eq[#bits<64>](%ntw, 0xFFFFFFFFFFFFFFFF)
+      #if %notparam {
+        %esc2 = #call lain_meta_fail(11)
+        #return 11
+      }
     }
     // 调用本身单独接住（两者的实参写法不同）。其余形状——包括字段访问（形状 6）
     // ——一律交给表达式发射器：`p.x` 由操作数发射器里的 `meta_emit_field_temp`
