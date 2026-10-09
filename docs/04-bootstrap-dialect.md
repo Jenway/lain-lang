@@ -77,7 +77,16 @@ F1 已实现并端到端验收：`bootstrap/std/lainir.l1` 提供 `lainir_reset(
 的过程；`lainir_return` 接受非负十进制立即数。样例
 `bootstrap/lain/examples/lainir_f1.l1` 生成 `#proc probe() -> #bits<32> {`、
 `#return 0` 和独立闭合行，产物经 `build\check_unit.exe` 解析与验证通过；驱动
-报告 `host_status=0`、`trap none`。Canonical 等价性将在 F5 按解析后的结构比较。
+报告 `host_status=0`、`trap none`。
+
+F2 已实现整数算术、位运算、比较和转换的发射包装：`lainir_add` 至 `lainir_urem`、
+`lainir_and` 至 `lainir_ashr`、`lainir_eq` 至 `lainir_uge`，以及 `lainir_zext`、
+`lainir_sext`、`lainir_trunc`、`lainir_bitcast`、`lainir_ptr2int`、`lainir_int2ptr`。
+`bootstrap/lain/examples/lainir_f2.l1` 覆盖 23 个二元指令和 6 个转换；生成产物
+包含对应指令并通过 `build\check_unit.exe` 的 parse+verify。比较指令携带操作数宽度，
+其结果类型由 verifier 推导为 `#bits<1>`；`#int2ptr` 发射 `#addr` 结果类型。
+16 个既有样例与 F1、F2 探针均报告 `host_status=0`、`trap none`，F1 与 F2 产物
+均通过 `PARSE+VERIFY OK`。Canonical 等价性将在 F5 按解析后的结构比较。
 
 层 0 是「推迟的表面语法」的兜底：`switch`、`alloca`、`proc_addr`、间接调用没有表面语法，
 仍可用 `lainir_*` 发射。推迟只说明用户代码不好写，不说明编译器做不到。
