@@ -340,6 +340,49 @@
 //
 // 顺序：先 `meta_args_prepare`（发实参里的子表达式指令），再写这一行的前缀和实参。
 // 反过来写的话子表达式指令会插进 `#call f(` 后面。
+// 把暂存好的实参列表渲染进缓冲区（逗号加空格分隔），返回写入长度，同时把这一层
+// 的块还掉。前缀由调用方写，所以渲染与发射分成两步。
+#proc meta_args_render(%base: #addr, %len: #bits<64>,
+                        %out: #addr) -> #bits<64> {
+  %sc2 = #call lain_meta_scratch_data()
+  %blk0 = #call meta_cell_get(#lea(%sc2, 216, 1, 0))
+  %cnt = #call meta_cell_get(#lea(%sc2, 496, 1, 0))
+  %ba = #lea(%sc2, %blk0, 1, 0)
+  %mark = #call meta_cell_get(%ba)
+  %oldb = #call meta_cell_get(#lea(%ba, 8, 1, 0))
+  %oldc = #call meta_cell_get(#lea(%ba, 16, 1, 0))
+  %w = #loop b(%i: #bits<64> = 0, %at: #bits<64> = 0) -> (#bits<64>) {
+    %fin = #uge[#bits<64>](%i, %cnt)
+    #if %fin {
+      #break b(%at)
+    }
+    %notfirst = #ne[#bits<64>](%i, 0)
+    %at2 = #if %notfirst -> (#bits<64>) {
+      %sm = #data_addr lainir_comma
+      %wa = #call lainir_buf_bytes(%out, %at, %sm, 2)
+      #yield %wa
+    } else {
+      #yield %at
+    }
+    %blk = #call meta_cell_get(#lea(%sc2, 216, 1, 0))
+    %off2 = #mul[#bits<64>](%i, 24)
+    %d2 = #add[#bits<64>](%off2, 24)
+    %slot2 = #add[#bits<64>](%blk, %d2)
+    %q2 = #lea(%sc2, %slot2, 1, 0)
+    %r2 = #call meta_cell_get(%q2)
+    %l2 = #call meta_cell_get(#lea(%q2, 8, 1, 0))
+    %h2 = #call meta_cell_get(#lea(%q2, 16, 1, 0))
+    %at3 = #lea(%out, %at2, 1, 0)
+    %n2 = #call meta_render_ref2(%base, %len, %r2, %l2, %h2, %at3)
+    %at4 = #add[#bits<64>](%at2, %n2)
+    %i2 = #add[#bits<64>](%i, 1)
+    #continue b(%i2, %at4)
+  }
+  %u1 = #call meta_cell_put(#lea(%sc2, 216, 1, 0), %oldb)
+  %u2 = #call meta_cell_put(#lea(%sc2, 496, 1, 0), %oldc)
+  %u3 = #call meta_bump_release(%mark)
+  #return %w
+}
 #proc meta_emit_ret_call(%base: #addr, %len: #bits<64>,
                           %kind: #bits<64>, %width: #bits<64>,
                           %t_lo: #bits<64>, %t_hi: #bits<64>,
@@ -355,22 +398,11 @@
   #if %abad {
     #return %ast
   }
-  %kw = #data_addr meta_st_retcall
-  %w1 = #call lain_meta_emit_write(%kw, 16)
+  %buf = #data_addr lainir_text_buffer
+  %alen = #call meta_args_render(%base, %len, %buf)
   %c_at = #lea(%base, %callee_lo, 1, 0)
   %c_len = #add[#bits<64>](%callee_len, 0)
-  %w2 = #call lain_meta_emit_write(%c_at, %c_len)
-  %lp = #data_addr meta_fn_lparen
-  %w3 = #call lain_meta_emit_write(%lp, 1)
-  %wst = #call meta_args_write(%base, %len)
-  %wbad = #ne[#bits<32>](%wst, 0)
-  #if %wbad {
-    #return %wst
-  }
-  %rp = #data_addr meta_rparen
-  %w6 = #call lain_meta_emit_write(%rp, 1)
-  %nl = #data_addr meta_st_nl
-  %w7 = #call lain_meta_emit_write(%nl, 1)
+  %w = #call lainir_ret_call(%c_at, %c_len, %buf, %alen)
   #return 0
 }
 
@@ -394,29 +426,16 @@
   #if %abad {
     #return %ast
   }
-  %p = #data_addr meta_st_pct
-  %w1 = #call lain_meta_emit_write(%p, 3)
+  %buf = #data_addr lainir_text_buffer
+  %alen = #call meta_args_render(%base, %len, %buf)
+  %nbuf = #lea(%buf, 128, 1, 0)
+  %pct = #call lainir_buf_byte(%nbuf, 0, 37)
   %n_at = #lea(%base, %name_lo, 1, 0)
   %n_len = #sub[#bits<64>](%name_hi, %name_lo)
-  %w2 = #call lain_meta_emit_write(%n_at, %n_len)
-  %eq = #data_addr meta_st_eqop
-  %w3 = #call lain_meta_emit_write(%eq, 3)
-  %hc = #data_addr meta_hash_call
-  %w4 = #call lain_meta_emit_write(%hc, 6)
+  %nlen2 = #call lainir_buf_bytes(%nbuf, %pct, %n_at, %n_len)
   %c_at = #lea(%base, %callee_lo, 1, 0)
   %c_len = #add[#bits<64>](%callee_len, 0)
-  %w5 = #call lain_meta_emit_write(%c_at, %c_len)
-  %lp = #data_addr meta_fn_lparen
-  %w6 = #call lain_meta_emit_write(%lp, 1)
-  %wst = #call meta_args_write(%base, %len)
-  %wbad = #ne[#bits<32>](%wst, 0)
-  #if %wbad {
-    #return %wst
-  }
-  %rp = #data_addr meta_rparen
-  %w7 = #call lain_meta_emit_write(%rp, 1)
-  %nl = #data_addr meta_st_nl
-  %w8 = #call lain_meta_emit_write(%nl, 1)
+  %w = #call lainir_call_named(%nbuf, %nlen2, %c_at, %c_len, %buf, %alen)
   #return 0
 }
 
