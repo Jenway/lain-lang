@@ -407,6 +407,8 @@ int main(int argc, char **argv) {
     if (lainmeta_host_scratch_peak(host, &peak)) {
       printf("scratch peak=%llu\n", (unsigned long long)peak);
     }
+    printf("region grants=%llu\n",
+           (unsigned long long)lainmeta_host_region_grants(host));
     lainmeta_host_trace_bad(host, &ref, &bad_code, &count);
     printf("apply requests=%u deny=%u status5=%u trace_bad=%llu/%u/%u\n",
            lainmeta_host_apply_requests(host), lainmeta_host_deny_count(host),

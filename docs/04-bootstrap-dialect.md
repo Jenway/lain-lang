@@ -1,7 +1,7 @@
 # bootstrap 方言
 
-自举的 stage0 是手写 LAINIR 文本（bootstrap/ 下按 bootstrap/SOURCE_ORDER 拼成 27 个文件、
-10692 行的编译单元；驱动报 unit files=27 bytes=456914）。要让 Lain 编译器能编译自己，
+自举的 stage0 是手写 LAINIR 文本（bootstrap/ 下按 bootstrap/SOURCE_ORDER 拼成 28 个文件、
+12541 行的编译单元；驱动报 unit files=28 bytes=540885）。要让 Lain 编译器能编译自己，
 先得有一份**用 Lain 写的 Meta**；写它需要一门表面语言。
 
 这份文档定的是这门方言的特性集合、语法，以及每条语法降成什么 LAINIR。它不是 lainlang
@@ -312,7 +312,14 @@ func cstr_len(p: addr) -> u64 {
 - 字节串字面量 → `#data`（`#data_addr` 232）：**完成** —— 顶层 `let NAME: addr = "…";`
   发出静态块与取址过程（`meta_lower_static_bytes`，样例 `bootstrap/lain/examples/bytes.lain`，
   产物过 `lainir_parse` + `lainir_verify`）。函数体内的字节串报 4（`data` 只能落顶层）。
-- 宿主授予**整块窗口**的能力（`region_grant`）；逐字节回调不可行。
+- 宿主授予**整块窗口**的能力（`region_grant`）：**完成** ——
+  `lain_meta_region_grant(kind, index, dest)` 把 {地址, 容量, 权利} 三个 64 位字写进调用方给的
+  24 字节位置（`bootstrap/std/regions.l1`；记录落在这个模块自己的 rw 数据块里，不占暂存区的
+  固定格 —— 那些格是各遍的诊断/暂存区）。暂存区的基址与容量都从记录读回
+  （`meta_region_scratch_base` / `meta_region_scratch_capacity`，分配器改用它），一次授予之后
+  仍是普通 `#load`/`#store` —— 没有逐字节回调。今天只用 kind 3（暂存区）；0/1/2
+  （Source / AstIn / AstOut）已定义、未使用。驱动摘要里的 `region grants=` 就是授予次数
+  （每个样例 2 次：建表与重建各一次）。
 
 **D. 控制流补齐**
 - 带值 `if`（`#if` 779 + `#yield` 719）：**前半完成** —— 绑定位置的带值 if 已可用
@@ -327,7 +334,7 @@ func cstr_len(p: addr) -> u64 {
   `else` 的默认分支）与**循环体里的 `if`**：有条件早退要先让循环体接受嵌套语句。
 
 **E. 声明与链接**
-- `extern NAME(a: T) -> U = link_name;`（45 个能力 1:1；手写 Meta 的 `#extern` 正好 45 次）。
+- `extern NAME(a: T) -> U = link_name;`（46 个能力 1:1；手写 Meta 的 `#extern` 正好 46 次）。
 - struct / enum 名字可写进参数类型与标注；函数体内构造的 storage（见二）。
 
 **F. 层 0：`lainir_*` 发射库** —— 见上文《层 0：发射层》。它是「用 Lain 写 Meta」真正缺的
@@ -355,28 +362,28 @@ func cstr_len(p: addr) -> u64 {
 ### 五、删除与瘦身（实测口径）
 
 动手做「待做」之前，先看能拿掉什么。口径是静态调用图：根 = 三个 ABI 入口
-（`lain_std_lower` / `lain_std_abi_version` / `lain_std_initialize`）加全部 45 个能力的
+（`lain_std_lower` / `lain_std_abi_version` / `lain_std_initialize`）加全部 46 个能力的
 `#extern`；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
 静态图看不见的间接引用。
 
-今天的规模：27 个文件 / 380 个 `#proc` / 116 个 `data` 块；注释 1663 行。
+今天的规模：28 个文件 / 419 个 `#proc` / 143 个 `data` 块；注释 1892 行。
 
-**死 proc：45 个、约 1300 行（约 12%）。**
+**死 proc：46 个、1306 行（约 10%）。**
 
 | 文件 | 个数 | 行数 | 是什么 |
 |---|---|---|---|
-| bootstrap/std/wire.l1 | 16 | 735 | 类型、值、过程引用的 wire 编解码与校验，env 值绑定 |
-| bootstrap/std/eval.l1 | 5 | 191 | bytes 实参请求、emitted 请求、声明闭包与过程引用求值 |
-| bootstrap/std/scope.l1 | 9 | 199 | 依赖闭包一套、`meta_scope_set_payload`、`ast_index_of` |
+| bootstrap/std/wire.l1 | 16 | 750 | 类型、值、过程引用的 wire 编解码与校验，env 值绑定 |
+| bootstrap/std/eval.l1 | 6 | 195 | bytes 实参请求、emitted 请求、声明闭包与过程引用求值 |
+| bootstrap/std/scope.l1 | 9 | 189 | 依赖闭包一套、`meta_scope_set_payload`、`ast_index_of` |
 | bootstrap/std/parse.l1 | 7 | 93 | `meta_sem_put` / `meta_sem_annotate` / `meta_sem_binding` / `meta_sem_expansion` 一系 |
-| bootstrap/std/registry.l1 | 6 | 46 | `meta_tid_owner` / `meta_tid_namespace` / `meta_tid_field_*` |
+| bootstrap/std/registry.l1 | 6 | 45 | `meta_tid_owner` / `meta_tid_namespace` / `meta_tid_field_*` |
 | bootstrap/std/modules.l1 | 2 | 34 | `meta_cstr_len`、`meta_slice_equals` |
 
 最大的单条：`meta_record_type_from_field_list`@bootstrap/std/wire.l1:571（166 行）、
 `meta_wire_validate`@bootstrap/std/wire.l1:171（119）、
 `meta_eval_apply_decl_closure`@bootstrap/std/eval.l1:76（112）、
 `meta_wire_validate_field_list`@bootstrap/std/wire.l1:84（87）、
-`meta_scope_dependency_closure`@bootstrap/std/scope.l1:664（77）。
+`meta_scope_dependency_closure`@bootstrap/std/scope.l1:674（77）。
 
 **别删**：bootstrap/std/funcs.l1 的 `meta_lower_stmt` / `meta_lower_if` / `meta_lower_for` /
 `meta_lower_body` 是活的（`meta_lower_decl_func` → `meta_lower_body`）。
@@ -385,25 +392,25 @@ bootstrap/std/wire.l1 那一层只被死代码调用，但它是《层 0》的�
 :278 三处如此描述），所以删它要同时改本文 —— 它是「第二步的存货」，不是垃圾。
 bootstrap/std/eval.l1 的 bytes 与 emitted 请求同理：功能没接线，不是写错了。
 
-**未被引用的 `data` 块 10 个**：`meta_kw_arrow`@bootstrap/std/lex.l1:93、
+**未被引用的 `data` 块 10 个**：`meta_kw_arrow`@bootstrap/std/lex.l1:107、
 `meta_o1`@bootstrap/std/emit.l1:81、`meta_o5`@bootstrap/std/emit.l1:85、
-`meta_s2`@bootstrap/std/emit.l1:207、`meta_s3a`@bootstrap/std/emit.l1:208、
-`meta_s3b`@bootstrap/std/emit.l1:209、`meta_s4a`@bootstrap/std/emit.l1:210、
-`meta_s4b`@bootstrap/std/emit.l1:211、`meta_reg_entry_off`@bootstrap/std/registry.l1:30、
+`meta_s2`@bootstrap/std/emit.l1:223、`meta_s3a`@bootstrap/std/emit.l1:224、
+`meta_s3b`@bootstrap/std/emit.l1:225、`meta_s4a`@bootstrap/std/emit.l1:226、
+`meta_s4b`@bootstrap/std/emit.l1:227、`meta_reg_entry_off`@bootstrap/std/registry.l1:30、
 `meta_reg_entry_size`@bootstrap/std/registry.l1:32。
 
 **从未被调用的能力包装 7 个**（bootstrap/std/emit.l1 的 `#extern` 加 seed/src/meta/host.c
-的登记，删要两侧一起，能力表 45 → 38）：`lain_meta_emit_data`@bootstrap/std/emit.l1:19、
+的登记，删要两侧一起，能力表 46 → 39）：`lain_meta_emit_data`@bootstrap/std/emit.l1:19、
 `lain_meta_emit_length`@bootstrap/std/emit.l1:20、
 `lain_meta_apply_emitted_bytes_request`@bootstrap/std/emit.l1:35、
 `lain_meta_ast_root`@bootstrap/std/emit.l1:48、`lain_meta_ast_tx_release`@bootstrap/std/emit.l1:55、
 `lain_meta_diagnostic_field`@bootstrap/std/emit.l1:284、
 `lain_meta_apply_diagnostic_field`@bootstrap/std/emit.l1:285。
 
-**其他杠杆**：注释 1663 行，最重的几个是 bootstrap/std/emit.l1 82/287（29%）、
-bootstrap/std/parse.l1 189/749（25%）、bootstrap/std/types.l1 22/102（22%）、
-bootstrap/std/recognize.l1 115/539（21%）、bootstrap/meta.l1 258/1221（21%）；
-bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
+**其他杠杆**：注释 1892 行，最重的几个是 bootstrap/std/emit.l1 84/302（28%）、
+bootstrap/std/parse.l1 192/764（25%）、bootstrap/std/types.l1 22/101（22%）、
+bootstrap/std/recognize.l1 115/537（21%）、bootstrap/meta.l1 298/1532（19%）；
+bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 
 **顺序**：先删未被引用的 `data` 块与未被调用的能力（无风险）；wire 那一层删还是留由设计定，
 留就加一句「当前不可达」的注释。
@@ -411,9 +418,10 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
 ### 六、结论
 
 今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（仅绑定位置）/ `for` / `loop`（标签 + 参数 + 多语句体 + 带实参的 `break`/`continue`）/
-`load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 顶层字节串（→ `#data` + 取址过程）/ 
+`load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 顶层字节串（→ `#data` + 取址过程）/
+宿主整块窗口授予（`region_grant`，暂存区的基址与容量从记录读回）/
 算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
-**A + C + D + E**，其中 A 最快见效、C 最不可替代。
+**D 的剩项（带值 `if` 当操作数/返回值、循环体里的 `if`）+ E + F**；A、B、C 已完成。
 
 ## 待补规则
 
@@ -452,6 +460,10 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
 - `as` 的目标类型**不回填**给后面的算子或下一次转换：链式 `x as i64 as i32` 的第二次
   只能按**上下文宽度**判方向（绑定的标注宽度），所以它可能发成加零复制而不是 `#trunc`；
   值仍然对（指令自己按宽度截/扩），但产物不是最直白的那条。
+- `region_grant` 的记录落在**本模块的 rw 数据块**里（`data meta_region_scratch_record rw { … }`）：
+  它不能放暂存区的固定格 —— 那些格被各遍当诊断/暂存区用（例如 `meta_scope_scan_root` 写
+  1540 + src*32）。授予以**宿主状态**为准（能力返回 0，失败写在宿主状态里），所以 `scope_setup`
+  授完先读一次 `lain_meta_status`。
 
 ## 与现状的差距
 
@@ -460,6 +472,7 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
   也随之删除（语言里不再有标量声明，也就没有「先 import 一份 prelude」这一步）。
 - 层 0 尚不存在；今天的对应物是 bootstrap/std/wire.l1 的手写拼串。
 - 表面语言里的内存操作今天有 `load` / `store` / `lea` / `p + i` 与顶层字节串（→ `#data`）；
-  还差宿主授予整块窗口的能力（`region_grant`），Meta 今天仍靠手写 LAINIR 或宿主交出的窗口读写字节。
+  宿主授予整块窗口的能力（`region_grant`）已接线，但只在 Meta 自己的 bootstrap 代码里用
+  （bootstrap/std/regions.l1），表面语言还没有对应写法。
 - 端到端验收源是 bootstrap/lain/examples/arith.lain：`host_status=0`、`output bytes=74`，
   产物是 `%r1 = #add[#bits<32>](1, 2)`（见 docs/development.md 的驱动一节）。

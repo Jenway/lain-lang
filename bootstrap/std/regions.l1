@@ -1,0 +1,32 @@
+// 窗口授予：宿主把**整块**窗口的 {地址, 容量, 权利} 写进调用方给的 24 字节位置。
+// 记录里的地址仍是普通内存地址，访问它用的是 #load/#store —— 授予的是窗口本身，
+// 不是逐字节的调用。目标位置必须已授权可写：宿主先验权限再写记录。
+#proc lain_meta_region_grant(%kind: #bits<64>, %index: #bits<64>, %dest: #addr) -> #bits<32> #extern "lain_meta_region_grant"
+
+// kind：0 = Source 段（只读，index = 源码序号）、1 = AstIn（只读，index = 源码序号）、
+// 2 = AstOut（读写）、3 = 暂存区（读写，index 忽略）。
+// 记录是三个 64 位字：地址、容量、权利；权利位与 LAINVM_MEM_* 相同。
+// 记录落在本模块自己的 rw 数据块里 —— 不占暂存区的任何固定格（那些格是各遍的
+// 诊断/暂存区，比如 scope.l1 的 meta_scope_scan_root 用 1540+src*32）。
+data meta_region_scratch_record rw {
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+}
+
+#proc meta_region_scratch_window() -> #bits<32> {
+  %dest = #data_addr meta_region_scratch_record
+  %st = #call lain_meta_region_grant(3, 0, %dest)
+  #return %st
+}
+
+// 分配器要的基址与容量都来自上面那条记录。基址按 #addr 读回（记录里存的就是地址）。
+#proc meta_region_scratch_base() -> #addr {
+  %rec = #data_addr meta_region_scratch_record
+  %base = #load[#addr](%rec, 0)
+  #return %base
+}
+
+#proc meta_region_scratch_capacity() -> #bits<64> {
+  %rec = #data_addr meta_region_scratch_record
+  %v = #call meta_cell_get(#lea(%rec, 8, 1, 0))
+  #return %v
+}

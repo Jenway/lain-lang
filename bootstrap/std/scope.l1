@@ -94,6 +94,16 @@
     }
   }
   %scratch = #call lain_meta_scratch_data()
+  // 暂存区窗口在这里**整块**授予：记录写进固定格 2472/2480/2488。记录本身只能写在
+  // 旧能力给的地址上（授予之前得先有个落点）；从这行之后，基址与容量都来自记录。
+  %grant = #call meta_region_scratch_window()
+  // 授予以宿主状态为准：能力自己返回 0，失败写在宿主状态里。
+  %gst = #call lain_meta_status()
+  %gnonzero = #ne[#bits<64>](%gst, 0)
+  #if %gnonzero {
+    %gpublish = #call lain_meta_fail(#trunc[#bits<32>](%gst))
+    #return #trunc[#bits<32>](%gst)
+  }
   %size = #call lain_meta_scratch_size()
 
   %t16 = #udiv[#bits<64>](%total, 16)
@@ -332,7 +342,7 @@
 // 分配都先比一次上界。
 
 #proc meta_bump_word(%off: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data()
+  %scratch = #call meta_region_scratch_base()
   %v = #call meta_cell_get(#lea(%scratch, %off, 1, 0))
   #return %v
 }
@@ -350,8 +360,8 @@
 
 // 要 `%bytes` 字节，8 字节对齐，返回偏移；装不下报 17 并返回「无」。
 #proc meta_bump_alloc(%bytes: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data()
-  %size = #call lain_meta_scratch_size()
+  %scratch = #call meta_region_scratch_base()
+  %size = #call meta_region_scratch_capacity()
   %at = #call meta_bump_mark()
   // 对齐前先防 `bytes + 7` 回绕；回绕后再与 scratch 上界比较会误认成小块。
   %alignable = #ule[#bits<64>](%bytes, 0xFFFFFFFFFFFFFFF8)
@@ -384,7 +394,7 @@
 }
 
 #proc meta_bump_release(%mark: #bits<64>) -> #bits<32> {
-  %scratch = #call lain_meta_scratch_data()
+  %scratch = #call meta_region_scratch_base()
   %s = #call meta_cell_put(#lea(%scratch, 200, 1, 0), %mark)
   #return 0
 }
