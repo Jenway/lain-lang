@@ -160,6 +160,20 @@ F5 的等价性口径是**逐字节相等**：`build/f5_capture.ps1` 把 16 个�
 在值层目前仍以 `code=4` 被拒（探针 `build/probes/vproj.lain`、`build/probes/fldval.lain`），
 样例跑不到那几处的写出器；它们的字节与所取代的模板相同。
 
+`bootstrap/std/lainir.l1` 共 148 个 `lainir_*` 过程。按全仓库（`bootstrap/` 下的 `.l1` 与
+`.lain`）的名字引用统计，只有 8 个不被 `lainir.l1` 之外的代码引用（`lainir_address_line`、
+`lainir_binary`、`lainir_line_start`、`lainir_loop`、`lainir_memory_unary`、`lainir_next_temp`、
+`lainir_spaces`、`lainir_unary`），它们是库内部共用的片段。
+
+F6 把这条「等价」放在独立调用方上验收：`bootstrap/lain/examples/lainir_f6.l1` 的 `f6_probe`
+用层 0 的 API 重发处理管线在 `bootstrap/lain/examples/locals.lain` 上产出的整份单元
+（`Pair__a_offset` / `Pair__b_offset` / `Pair__size` 三个过程、`mk` / `mk2` / `two` 三个构造
+过程、`data origin_storage rw` 与 `origin` 过程）。驱动报 `host_status=0`、`trap none`、
+`output bytes=1061`，产物过 `build\check_unit.exe` 的 parse+verify，且与管线产物
+`build/after/locals.out` 的 SHA-256 相同。16 个既有样例的产物（`build/after/<名字>.out`）
+逐个过 `build\check_unit.exe`。`build/reg.ps1` 把这两条都断言下来：样例循环要求
+`host_status=0`、`trap none` 且产物 parse+verify 通过，F6 段另外要求 `f6_probe` 的产物与
+`build/after/locals.out` 逐字节相同。
 
 层 0 是「推迟的表面语法」的兜底：`switch`、`alloca`、`proc_addr`、间接调用没有表面语法，
 仍可用 `lainir_*` 发射。推迟只说明用户代码不好写，不说明编译器做不到。
@@ -479,7 +493,8 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
   入口在 `bootstrap/std/funcs.l1` 的 `meta_lower_stmt`（构造单独成句的早退分支）。样例
   `bootstrap/lain/examples/locals.lain`。
 
-**F. 层 0：`lainir_*` 发射库**：**完成** —— `bootstrap/std/lainir.l1` 按名单提供五组写出器：整数/位/比较/转换、内存与地址、调用、控制流与单元骨架、固定文本片段（`bootstrap/SOURCE_ORDER` 在 `std/sums.l1` 后、`meta.l1` 前登记）。探针 `bootstrap/lain/examples/lainir_f1.l1` 到 `lainir_f4.l1`（清单 `bootstrap/lainir_f1_unit.txt`）分别覆盖骨架、F2 的 23 个二元算子与 6 个转换、F3 的内存/地址/调用、F4 的控制流与单元形态，四条产物都过 `build/check_unit.exe` 的 parse+verify，驱动报 `host_status=0`、`trap none`。处理管线的字面文本发射已全部改走层 0，`bootstrap/std/emit.l1` 的 `data` 模板从 88 个减到 30 个，16 个样例产物逐字节不变（`diffcount=0`）——逐条写出器名单、删除口径与证据见上文《层 0：发射层》。
+**F. 层 0：`lainir_*` 发射库**：**完成** —— `bootstrap/std/lainir.l1` 按名单提供五组写出器：整数/位/比较/转换、内存与地址、调用、控制流与单元骨架、固定文本片段（`bootstrap/SOURCE_ORDER` 在 `std/sums.l1` 后、`meta.l1` 前登记）。探针 `bootstrap/lain/examples/lainir_f1.l1` 到 `lainir_f4.l1`（清单 `bootstrap/lainir_f1_unit.txt`）分别覆盖骨架、F2 的 23 个二元算子与 6 个转换、F3 的内存/地址/调用、F4 的控制流与单元形态，F6 的 `lainir_f6.l1` 用层 0 重发 `locals.lain` 的整份单元；
+五条产物都过 `build/check_unit.exe` 的 parse+verify，驱动报 `host_status=0`、`trap none`。处理管线的字面文本发射已全部改走层 0，`bootstrap/std/emit.l1` 的 `data` 模板从 88 个减到 30 个，16 个样例产物逐字节不变（`diffcount=0`）——逐条写出器名单、删除口径与证据见上文《层 0：发射层》。
 
 用量证据（口径：bootstrap/SOURCE_ORDER 的 28 个文件，不数注释与示例）：`#bits` 4114、
 `#call` 2994、`#if` 925、`#yield` 860、`#lea` 790、`#eq` 630、`#return` 628、`#add` 471、
@@ -649,7 +664,10 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 - 标量已经是表：bootstrap/std/scalars.l1 里一段 `data` 字节（名字、kind、宽度、算符对），
   handler 6 与 bootstrap/std/handlers/scalar.l1 已删除，bootstrap/lain/std/prelude.lain
   也随之删除（语言里不再有标量声明，也就没有「先 import 一份 prelude」这一步）。
-- 层 0 尚不存在；今天的对应物是 bootstrap/std/wire.l1 的手写拼串。
+- 层 0 已完成：bootstrap/std/lainir.l1 的 148 个 lainir_* 写出器承担处理管线的全部字面
+  文本发射，独立调用方（bootstrap/lain/examples/lainir_f6.l1）重发的单元与管线在
+  bootstrap/lain/examples/locals.lain 上的产物逐字节相同。bootstrap/std/wire.l1 是 Meta 值的
+  二进制 wire 编解码与校验，不发射 IR 文本。
 - 表面语言里的内存操作今天有 `load` / `store` / `lea` / `p + i` 与顶层字节串（→ `#data`）；
   宿主授予整块窗口的能力（`region_grant`）已接线，但只在 Meta 自己的 bootstrap 代码里用
   （bootstrap/std/regions.l1），表面语言还没有对应写法。
