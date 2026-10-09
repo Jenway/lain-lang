@@ -1,7 +1,7 @@
 # bootstrap 方言
 
 自举的 stage0 是手写 LAINIR 文本（bootstrap/ 下按 bootstrap/SOURCE_ORDER 拼成 28 个文件、
-12639 行的编译单元；驱动报 unit files=28 bytes=545466）。要让 Lain 编译器能编译自己，
+12809 行的编译单元；驱动报 unit files=28 bytes=552938）。要让 Lain 编译器能编译自己，
 先得有一份**用 Lain 写的 Meta**；写它需要一门表面语言。
 
 这份文档定的是这门方言的特性集合、语法，以及每条语法降成什么 LAINIR。它不是 lainlang
@@ -294,9 +294,23 @@ func cstr_len(p: addr) -> u64 {
 （`engine.c:926`），所以区域退出后地址失效，同 C 返回局部地址。今天**不检查**这种逃逸：
 `return p;` 照样发出，返回的是已失效的栈地址。
 
-值层剩下的是：字段访问当值、变体投影当值（bootstrap/std/funcs.l1:895-898 仍干净地报 4）、
-函数体内的变体构造（变体仍只走顶层静态块）、字段值只能是「一个字面量」或「一个名字」
-（`a: p + 1` 只取 `p`）、以及上面那条逃逸语义。顶层构造里写变量名会发出解析不到的
+值层剩下的是（每条都实测过，拒绝码一律 4，源在 build/probes/ 下）：
+
+| 写法 | 实测 | 探针 |
+|---|---|---|
+| `return p.x;` | 4 | `fieldval.lain` |
+| `let y: i32 = p.x;` | 4 | `fieldbind.lain` |
+| `return p.x + 1;` | 4 | `fieldexpr.lain` |
+| `let v: i32 = Shape.Circle(s);`（投影） | 4 | `proj.lain` |
+| 函数体内 `let s: Shape = Shape.Circle { k };` | 4 | `varctorlocal.lain` |
+| 顶层 `let c = Shape.Circle { 7 };`（对照，已能用） | 0 | `sumtoplevel.lain` |
+
+字段访问与投影走同一条现成的形态判断：形状读给出 form 6（字段访问）时，
+`bootstrap/std/funcs.l1:918` 把它记下来、`:938` 直接 `lain_meta_fail(4)`（函数的早退分支只接
+form 5 的调用与 form 10 的构造），所以 `p.x` 无论出现在返回、绑定还是更大的表达式里都是 4。
+还没有的是：投影（要读判別字段再选载荷，不能只看形状）、函数体内的变体构造（变体仍只走
+顶层静态块）、字段值只能是「一个字面量」或「一个名字」（`a: p + 1` 只取 `p`）、以及上面
+那条逃逸语义。顶层构造里写变量名会发出解析不到的
 `%NAME`（顶层绑定是过程 `#call NAME()`，不是值）—— 由装载器拒。这些都不影响自举：手写
 Meta 里 `#struct`/`#enum` 的命中数是 0。
 
@@ -404,7 +418,8 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
 `#extern`；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
 静态图看不见的间接引用。
 
-今天的规模：28 个文件 / 12639 行 / 407 个 `#proc` 定义（= 验证器的 subroutine 数）/ 144 个 `data` 块；注释 1904 行。
+今天的规模（`build/verify_probe.exe` + 按 `SOURCE_ORDER` 逐文件统计）：28 个文件 / 12809 行 /
+411 个 `#proc` 定义（= 验证器的 subroutine 数）/ 148 个 `data` 块；注释 1936 行。
 
 **死 proc：46 个、1306 行（约 10%）。**
 
