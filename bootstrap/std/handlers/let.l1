@@ -20,3 +20,70 @@
   %s = #call meta_lower_let(%base, %len, %here)
   #return %s
 }
+
+// let NAME: addr = "…";：静态字节块的顶层绑定。
+//   data NAME_storage ro { <字节…> 0 }
+//   #proc NAME() -> #addr { %base = #data_addr NAME_storage; #return %base }
+// 字节按源码原样搬（reader 认转义对，但不解码），末尾补一个 0 当结束符。
+#proc meta_lower_static_bytes(%base: #addr, %len: #bits<64>,
+                              %name_lo: #bits<64>, %name_hi: #bits<64>,
+                              %at: #bits<64>) -> #bits<32> {
+  %name_at = #lea(%base, %name_lo, 1, 0)
+  %name_len = #sub[#bits<64>](%name_hi, %name_lo)
+  %d1 = #data_addr meta_c1
+  %w1 = #call lain_meta_emit_write(%d1, 5)
+  %w2 = #call lain_meta_emit_write(%name_at, %name_len)
+  %d2 = #data_addr meta_c13
+  %w3 = #call lain_meta_emit_write(%d2, 14)
+  %first = #add[#bits<64>](%at, 1)
+  %scan = #loop b(%i: #bits<64> = %first) -> (#bits<32>) {
+    %inside = #ult[#bits<64>](%i, %len)
+    #if #eq[#bits<1>](%inside, 0) {
+      %f0 = #call lain_meta_fail(4)
+      #break b(4)
+    }
+    %c = #call bs_byte_at(%base, %i, %len)
+    %is_q = #eq[#bits<8>](%c, 34)
+    #if %is_q {
+      %d3 = #data_addr meta_c3
+      %w4 = #call lain_meta_emit_write(%d3, 2)
+      #break b(0)
+    }
+    %cv = #zext[#bits<64>](%c)
+    %w5 = #call meta_emit_uint(%cv)
+    %d4 = #data_addr meta_sp
+    %w6 = #call lain_meta_emit_write(%d4, 1)
+    %is_esc = #eq[#bits<8>](%c, 92)
+    %nxt = #if %is_esc -> (#bits<64>) {
+      %one = #add[#bits<64>](%i, 1)
+      %c2 = #call bs_byte_at(%base, %one, %len)
+      %c2v = #zext[#bits<64>](%c2)
+      %w7 = #call meta_emit_uint(%c2v)
+      %w8 = #call lain_meta_emit_write(%d4, 1)
+      %two = #add[#bits<64>](%i, 2)
+      #yield %two
+    } else {
+      %one2 = #add[#bits<64>](%i, 1)
+      #yield %one2
+    }
+    #continue b(%nxt)
+  }
+  %bad = #ne[#bits<32>](%scan, 0)
+  #if %bad {
+    #return %scan
+  }
+  %d5 = #data_addr meta_c4
+  %w9 = #call lain_meta_emit_write(%d5, 8)
+  %w10 = #call lain_meta_emit_write(%name_at, %name_len)
+  %d6 = #data_addr meta_c5
+  %w11 = #call lain_meta_emit_write(%d6, 14)
+  %d7 = #data_addr meta_c6
+  %w12 = #call lain_meta_emit_write(%d7, 21)
+  %w13 = #call lain_meta_emit_write(%name_at, %name_len)
+  %d8 = #data_addr meta_c7
+  %w14 = #call lain_meta_emit_write(%d8, 9)
+  %d9 = #data_addr meta_c12
+  %w15 = #call lain_meta_emit_write(%d9, 18)
+  #return 0
+}
+

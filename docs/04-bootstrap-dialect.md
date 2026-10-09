@@ -97,6 +97,7 @@ continue LABEL(<实参…>);  // 早退：进入下一轮，实参按参数顺�
 let b: u8 = load(p);      // 读内存：宽度由期望类型定（也可写 return load(p);）
 store(p, v);              // 写内存：宽度取自 v 的类型
 let q: addr = lea(p, i);  // 地址算术：降成 #lea(%p, %i, 1, 0)
+let s: addr = "hi";      // 静态字节块（只允许顶层 let）：产物是 data s_storage ro { 104 105 0 } + #proc s() -> #addr
 ```
 
 - 赋值 `NAME = 值;` **只在循环体内合法**：能赋值的合法目标是循环自己声明的参数
@@ -114,6 +115,10 @@ let q: addr = lea(p, i);  // 地址算术：降成 #lea(%p, %i, 1, 0)
   （无标注 `let b = load(p);`、`load(p);` 单独成句）报 4，不猜。地址加整数是语言自己的一条规则：
   `p + i` 降成 `#lea(基址, 下标, 1, 0)`（只认 `+`，且左边必须是地址；`i + p` 报 4）；
   `p + i * K` 还没接（没有优先级，见《计划》C）。
+- 字节串字面量（`"…"`）**只允许出现在顶层** `let NAME: addr = "…";`：发的是一份静态字节块
+  `data NAME_storage ro { <字节…> 0 }` 加一个取址过程 `#proc NAME() -> #addr`（同一个名字，
+  `%base = #data_addr NAME_storage`）。字节按源码原样搬（reader 认转义对但不解码），末尾补一个 0。
+  别处（函数体内、作为实参）报 4：`data` 只能落顶层，而发射是流式的。
 - 顶层形式：`let` / `struct` / `enum` / `func` / `import(…)`。关键字经 Meta 语法
   注册表取 handler：1=my_if 2=func 3=if 4=struct 5=enum 7=顶层 let 8=return
   9=局部 let 10=for 11=my_block 13=loop（12 是宏 `my_require`）。**6（原 scalar 声明）
@@ -253,14 +258,16 @@ func cstr_len(p: addr) -> u64 {
 | 转换 | `x as T`（定宽整数之间） | 变宽发 `#zext`、变窄发 `#trunc`、等宽补一条加零复制；目标类型是**类型名**不是值；源宽度取操作数自己的类型（参数名），取不到才用上下文宽度。样例 `bootstrap/lain/examples/convert.lain` |
 | 十六进制字面量 | `0x10`、`0Xff` | 读成数值后按**十进制**规范化写进产物（`0xff00` → `65280`）；整段必须是合法数字：`0x` 后面没有数字报 4；超过绑定宽度仍报 23。样例 `bootstrap/lain/examples/hex.lain` |
 | 内存 | `let b: u8 = load(p);`、`return load(p);`、`store(p, v);`、`let q: addr = lea(p, i);`、`load(p + i)` | 三个内建名字：`load` 的宽度由期望类型定（`#load[#bits<8>](%p, 0)`），`store` 的宽度取值的类型（`#store[#bits<8>](%v, %p)`），`lea` 发 `#lea(%p, %i, 1, 0)`。地址加整数（`p + i`、`p + 1`）降成 `#lea(基址, 下标, 1, 0)`。没有期望类型报 4（`let b = load(p);`、`load(p);`）；`i + p` 报 4、`p + i * K` 报 6。样例 `bootstrap/lain/examples/memory.lain` |
+| 字节串字面量 | `let s: addr = "hi";`（只允许顶层） | 发 `data s_storage ro { 104 105 0 }` 与 `#proc s() -> #addr { %base = #data_addr s_storage; #return %base }`；字节原样搬、末尾补 0。样例 `bootstrap/lain/examples/bytes.lain`。函数体内写字节串报 4 |
 | 负数字面量 | `-5`（负号紧跟数字） | LAINIR 的字面量是无符号十进制文本，没有负号，所以降级成 `#sub[repr](0, 5)`：宽度与符号都取上下文类型。只认字面量，一元负号作用于变量仍报 4。样例 `bootstrap/lain/examples/neg.lain` |
 
-实测被拒（列出来是因为它们看着都该能用）：字节串字面量报 4；`i + p` 报 4（只认左边的地址）；
+实测被拒（列出来是因为它们看着都该能用）：`i + p` 报 4（只认左边的地址）；
 `p + i * K` 报 6（降级是左到右折叠，没有乘法优先级 —— 要支持得先有表达式树）。
 （`-`、`*`、`%` 曾报 6，比较全集与 `and`、`or`、`<<`、`>>` 曾报 4，已在 A 里补上绑定；
 裸条件 `if a < b` 曾报 4、无标注 `let y = …` 曾报 21，已在 B 的第一半修好；`as` 与负数字面量
 曾报 4，已在 B 的后半修好；十六进制 `0x10` 曾被 `bs_read_uint` 静默读成 `0`（更糟：`host_status=0` 而产物是错的），
-已在同一次修好；带值 `if` 曾报 4，已在 D 的第一半修好；`load`/`store`/`lea` 曾报 6
+已在同一次修好；带值 `if` 曾报 4，已在 D 的第一半修好；字节串字面量曾报 4，已在 C 的第二半修好
+（只支持顶层绑定）；`load`/`store`/`lea` 曾报 6
 （收尾的加零复制走源码算子表，`u8` 没有绑定），已在 C 的第一半修好。）
 
 ### 二、半成品：`struct` / `enum` 的值层
@@ -302,7 +309,9 @@ func cstr_len(p: addr) -> u64 {
   `#lea(基址, 下标, 1, 0)`（`is_lea` 分支）。剩下 `p + i * K` 的 scale（降级是左到右折叠，
   没有优先级，要支持得先有表达式树）；`i + p` 报 4（只认左边的地址，否则会发出 `#add`
   拿地址当整数）。
-- 字节串字面量 → `#data`（`#data_addr` 232）。
+- 字节串字面量 → `#data`（`#data_addr` 232）：**完成** —— 顶层 `let NAME: addr = "…";`
+  发出静态块与取址过程（`meta_lower_static_bytes`，样例 `bootstrap/lain/examples/bytes.lain`，
+  产物过 `lainir_parse` + `lainir_verify`）。函数体内的字节串报 4（`data` 只能落顶层）。
 - 宿主授予**整块窗口**的能力（`region_grant`）；逐字节回调不可行。
 
 **D. 控制流补齐**
@@ -402,7 +411,7 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
 ### 六、结论
 
 今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（仅绑定位置）/ `for` / `loop`（标签 + 参数 + 多语句体 + 带实参的 `break`/`continue`）/
-`load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 
+`load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 顶层字节串（→ `#data` + 取址过程）/ 
 算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
 **A + C + D + E**，其中 A 最快见效、C 最不可替代。
 
@@ -417,6 +426,10 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
   而按左边的整数类型发 `#add` 会拿地址当整数 —— 验证器 2005）。
 - `p + i * K` 的 scale 还是 1：降级是左到右折叠，`p + i * K` 会先算成 `(p + i) * K`，
   在 addr 上报 6。要支持得先有表达式树。
+- 字节串字面量只在**顶层** `let NAME: addr = "…";` 能用：产物是 `data NAME_storage ro { … }`
+  加取址过程 `NAME()`。函数体里没有地方放 `data`，所以写在那里报 4；把整块的地址拿进函数
+  要等 F（层 0 的带外顶层区）。底层用 `#data_addr` 引用静态块的值，**不能**在表达式里按裸名字
+  引用（那会发成 `%NAME`）—— 顶层 let 绑定按值引用还是既存缺口。
 - 期望类型的传递路径（见上）。
 - `addr` 上的 `==` 给不给（层 0 有 `lainir_eq`）。
 - 带值 `if` 只在**绑定位置**可用：`let x: T = if …` 走 `meta_lower_if_value`，`return if …`
@@ -446,6 +459,7 @@ bootstrap/std/handlers/ 的 6 个文件共 249 行，可以并成一个。
   handler 6 与 bootstrap/std/handlers/scalar.l1 已删除，bootstrap/lain/std/prelude.lain
   也随之删除（语言里不再有标量声明，也就没有「先 import 一份 prelude」这一步）。
 - 层 0 尚不存在；今天的对应物是 bootstrap/std/wire.l1 的手写拼串。
-- 表面语言里没有内存操作：Meta 今天只能靠手写 LAINIR 或宿主交出的窗口读写字节。
+- 表面语言里的内存操作今天有 `load` / `store` / `lea` / `p + i` 与顶层字节串（→ `#data`）；
+  还差宿主授予整块窗口的能力（`region_grant`），Meta 今天仍靠手写 LAINIR 或宿主交出的窗口读写字节。
 - 端到端验收源是 bootstrap/lain/examples/arith.lain：`host_status=0`、`output bytes=74`，
   产物是 `%r1 = #add[#bits<32>](1, 2)`（见 docs/development.md 的驱动一节）。

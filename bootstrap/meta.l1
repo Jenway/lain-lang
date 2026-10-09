@@ -399,6 +399,13 @@
                       %kind: #bits<64>, %width: #bits<64>, %t_lo: #bits<64>,
                       %t_hi: #bits<64>, %lhs_lo: #bits<64>,
                       %lhs_hi: #bits<64>) -> #bits<32> {
+  // 字节串字面量：整段是一个静态字节块的顶层绑定（`data` 只能落顶层）。
+  %is_bytes = #call bs_is_byte(%base, %lhs_lo, 34)
+  #if %is_bytes {
+    %bytes_st = #call meta_lower_static_bytes(%base, %len, %name_lo,
+                                               %name_hi, %lhs_lo)
+    #return %bytes_st
+  }
   // 形状**不问字节，问识别 pass 算好的那一格**。这里曾经看值的头一个字节判数字、
   // 又看第一个标识符之后的字节判 `{` / `.` / `(` —— 同一套形状规则在好几处各写一
   // 遍，改一处漏两处。现在只读 form（取值见 `std/recognize.l1`）。
@@ -924,6 +931,14 @@
       }
       #yield %st3
     } else {
+      // 字节串字面量只在顶层 let 里能落成静态块（`data` 只能放顶层）；别处报 4,
+      // 不能把它当普通 token 发成 `%"…"`。
+      %str_at = #call meta_node_start(%node)
+      %is_str = #call bs_is_byte(%base, %str_at, 34)
+      #if %is_str {
+        %str_fail = #call lain_meta_fail(4)
+        #return %str_fail
+      }
       // 一个 token：直接用源码那段。**源码范围也要写进 +176/+184** —— 组的那个分支
       // 是递归留下的范围，调用方一律从这里读，就不会把 `(42)` 的范围当成整个括号。
       %sc = #call lain_meta_scratch_data()
