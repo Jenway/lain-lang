@@ -1,7 +1,7 @@
 # bootstrap 方言
 
 自举的 stage0 是手写 LAINIR 文本（bootstrap/ 下按 bootstrap/SOURCE_ORDER 拼成 28 个文件、
-12625 行的编译单元；驱动报 unit files=28 bytes=544762）。要让 Lain 编译器能编译自己，
+12639 行的编译单元；驱动报 unit files=28 bytes=545466）。要让 Lain 编译器能编译自己，
 先得有一份**用 Lain 写的 Meta**；写它需要一门表面语言。
 
 这份文档定的是这门方言的特性集合、语法，以及每条语法降成什么 LAINIR。它不是 lainlang
@@ -258,6 +258,7 @@ func cstr_len(p: addr) -> u64 {
 | 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 仅 i32/u32（u64 报 5）、体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain` |
 | 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
+| 聚合类型名 | `struct Point { x: i32 y: i32 }`、`enum Shape { Circle(i32) Empty }`、`func f(p: Point) -> i32`、`let q: Shape = s;` | 名字可进参数类型与带标注的 `let`：聚合值在 IR 里是 `#addr`，所以参数类型发 `#addr`、标注绑定发一次地址复制（`#lea(%p, 0, 1, 0)`）；声明体里字段/变体**空格分隔，不能写逗号**（写了会当成字段名，报 5）。样例 `bootstrap/lain/examples/types.lain` |
 | 宏 | `my_if`、`my_block`、`my_require` | 编译期展开，过同一道信任门 |
 | 转换 | `x as T`（定宽整数之间） | 变宽发 `#zext`、变窄发 `#trunc`、等宽补一条加零复制；目标类型是**类型名**不是值；源宽度取操作数自己的类型（参数名），取不到才用上下文宽度。样例 `bootstrap/lain/examples/convert.lain` |
 | 十六进制字面量 | `0x10`、`0Xff` | 读成数值后按**十进制**规范化写进产物（`0xff00` → `65280`）；整段必须是合法数字：`0x` 后面没有数字报 4；超过绑定宽度仍报 23。样例 `bootstrap/lain/examples/hex.lain` |
@@ -279,10 +280,10 @@ func cstr_len(p: addr) -> u64 {
 
 它们**不是**档位问题 —— handler 4/5 早已注册，声明会发出布局（`<T>__<f>_offset`、
 `<T>__size`、变体的 tag 与载荷偏移），顶层 `let p = Pair { a: 1 b: 2 };` 也会发出
-`data p_storage rw { … }` 与 `#proc p() -> #addr`。缺的是**值层**：字段访问与变体投影当值用
-还没降级（bootstrap/std/funcs.l1:895-898 干净地报 4），struct/enum 名字也还不能写进参数类型
-或带标注的 `let`。函数体里的构造还差一份 storage —— 顶层那份是静态 `data`，函数体内要么
-给每个构造点一份静态 storage，要么先有 `#alloca`。
+`data p_storage rw { … }` 与 `#proc p() -> #addr`。**名字已经能用**：struct / enum 的名字可以写进参数类型与带标注的 `let`（见《一、已能用》的
+「聚合类型名」行）；缺的仍然是**值层**：字段访问与变体投影当值用还没降级
+（bootstrap/std/funcs.l1:895-898 干净地报 4）。函数体里的构造还差一份 storage ——
+顶层那份是静态 `data`，函数体内要么给每个构造点一份静态 storage，要么先有 `#alloca`。
 
 ### 三、待做（按阻塞顺序）
 
@@ -347,7 +348,12 @@ func cstr_len(p: addr) -> u64 {
   （build/probes/cap12.lain，matched=14 of 14）。**注意**：单个编译单元里声明数量有既存
   上限 —— 20 条左右开始不稳（22 条 extern 报 4、22 条 func 报 9401，非单调可重复），
   与 extern 无关，见《待补规则》。
-- struct / enum 名字可写进参数类型与标注；函数体内构造的 storage（见二）。
+- struct / enum 名字可写进参数类型与标注：**完成** —— 聚合类型在 IR 里就是 `#addr`
+  （构造发 `#proc NAME() -> #addr`），所以 `p: Point` 的参数类型发成 `#addr`、
+  `let q: Point = p;` 是一次地址复制（`#lea(%p, 0, 1, 0)`）；实现是
+  `bootstrap/std/registry.l1` 的 `meta_tid_repr` 对 kind 2/3 直接报 addr
+  （聚合记录里 size/align 占了 kind/width 那两个字）。样例 `bootstrap/lain/examples/types.lain`。
+- 函数体内构造的 storage（见二）。
 
 **F. 层 0：`lainir_*` 发射库** —— 见上文《层 0：发射层》。它是「用 Lain 写 Meta」真正缺的
 那一层，也是 bootstrap/std/wire.l1 那套手写拼串的正式化。
@@ -432,7 +438,7 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（仅绑定位置）/ `for` / `loop`（标签 + 参数 + 多语句体 + 带实参的 `break`/`continue`）/
 `load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 顶层字节串（→ `#data` + 取址过程）/
 宿主整块窗口授予（`region_grant`，暂存区的基址与容量从记录读回）/ `extern` 声明（`= link_name`，调用与 `func` 同路）/
-算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
+算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）/ 聚合类型名（struct、enum）进参数类型与标注。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
 **D 的剩项（带值 `if` 当操作数/返回值、循环体里的 `if`）+ E + F**；A、B、C 已完成。
 
 ## 待补规则
@@ -478,6 +484,17 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   授完先读一次 `lain_meta_status`。
 - `extern` 只做声明：链接名原样搬进 `#extern "…"`，**不等于**宿主登记了对应能力 ——
   能力表是驱动调 `lainmeta_host_register` 建的，两者对不上要到调用时才炸。
+- 聚合类型名（struct / enum）进参数类型与标注：聚合值在 IR 里报 `#addr`（构造发
+  `#proc NAME() -> #addr`），所以 `p: Point` 的参数类型是 `#addr`，`let q: Point = p;`
+  是一次地址复制（`#lea(%p, 0, 1, 0)`）。翻译点在 `meta_tid_repr`：聚合记录里
+  word16/word24 是 size/align，本来会被当成 kind/width 解包出 `#bits<4>` 这种假类型。
+- 声明体里字段/变体**空格分隔**（`x: i32` 然后换行 `y: i32`）：写成逗号分隔
+  （`x: i32, y: i32`）会让字段走查把逗号当字段名起步，`meta_type_resolve` 拿不到类型报 5。
+- 类型不符的绑定**不做检查**：`func bad(p: Point) -> i32 { let k: i32 = p; return k; }`
+  会发出 `%k = #add[#bits<32>](%p, 0)`（`host_status=0`），但产物过不了 `lainir_verify`
+  （2005 BAD_OPERAND_TYPE）。也就是说错误由**下游信任门**拒收、不会变成错误代码，
+  但报错位置在产物而不是源码。原因：`meta_emit_close` 的复制只按上下文 kind 选 `#lea`/`#add`，
+  不看被复制的值自己的类型（只有参数名能查到类型）。
 - 单个编译单元的声明数量有既存上限（不是 extern 引入）：一个文件里 20 条左右开始不稳 ——
   22 条 extern 报 4（诊断无位置）、22 条 func 报 9401（TREE_HANDLE），且结果非单调
   （21 条过、22 条挂、25 条又过）但可重复。定位线索：Meta 的声明/展开阶段（AstIn/AstOut arena、

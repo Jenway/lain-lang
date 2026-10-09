@@ -159,13 +159,27 @@ data meta_reg_entry_size ro { 64 0 0 0 0 0 0 0 }
   #return %v
 }
 
-// repr 打包成 (kind 低 8 位, width 8..15 位)，和别处一致。
+// 一个类型的 id → 值的物理形状，打包成 (kind 低 8 位, width 8..15 位)。
+//
+// **聚合类型（struct / enum）在这里报 addr**：聚合值在 LAINIR 里就是它在地址空间里的
+// 位置（构造发 `#proc NAME() -> #addr`），字段访问自己按偏移 load。所以 `p: Point`
+// 的参数类型是 `#addr`，`let q: Point = p` 是一次地址复制。它们的记录里 word16/word24
+// 存的是布局要的 size/align，不是 kind/width —— 那就是这一层必须替它们翻译的原因。
 #proc meta_tid_repr(%id: #bits<64>) -> #bits<64> {
-  %rk = #call meta_tid_word(%id, 16)
-  %rw = #call meta_tid_word(%id, 24)
-  %shifted = #shl[#bits<64>](%rw, 8)
-  %p = #or[#bits<64>](%rk, %shifted)
-  #return %p
+  %kind = #call meta_tid_kind(%id)
+  %rec = #eq[#bits<64>](%kind, 2)
+  %factory = #eq[#bits<64>](%kind, 3)
+  %aggregate = #or[#bits<1>](%rec, %factory)
+  %r = #if %aggregate -> (#bits<64>) {
+    #yield 3
+  } else {
+    %rk = #call meta_tid_word(%id, 16)
+    %rw = #call meta_tid_word(%id, 24)
+    %shifted = #shl[#bits<64>](%rw, 8)
+    %p = #or[#bits<64>](%rk, %shifted)
+    #yield %p
+  }
+  #return %r
 }
 
 #proc meta_tid_repr_kind(%id: #bits<64>) -> #bits<64> {
