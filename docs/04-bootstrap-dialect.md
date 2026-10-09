@@ -121,15 +121,30 @@ F5 的等价性口径是**逐字节相等**：`build/f5_capture.ps1` 把 16 个�
   `lainir_buf_bytes` / `lainir_text_lea_field` 这套缓冲区渲染，`bootstrap/std/records.l1`
   的 `meta_emit_store` / `meta_emit_store_name` 字段写入走它。
 
-指令文本本身也逐步改由层 0 写：`lainir_op_prefix` / `lainir_op_prefix_phys` /
-`lainir_temp_name_emit`（指令前缀与临时值名）、`lainir_load_at` / `lainir_lea_at`
-（load 与 lea，临时值编号由管线保留）、`lainir_binary_phys_at`（循环体的二元运算与步进）、
-`lainir_binary_named_at`（循环条件的比较，条件名形如 `%c<n>`）、`lainir_return_ref`
-（返回值文本）、`lainir_zero_text`（`data` 初值里的零项）、`lainir_byte` /
-`lainir_emit_uint` / `lainir_repr` / `lainir_spaces` / `lainir_buf_bytes` /
-`lainir_buf_uint` / `lainir_buf_temp` / `lainir_text_lea_field`（词素与缓冲区渲染）。
-`bootstrap/meta.l1` 的 `meta_render_ref2` 负责把「临时值引用或源码操作数」渲染进缓冲区，
-再交给层 0 的指令发射器。
+指令文本本身也逐步改由层 0 写：
+
+- 词素与缓冲区渲染：`lainir_repr` / `lainir_byte` / `lainir_emit_uint` / `lainir_spaces` /
+  `lainir_buf_bytes` / `lainir_buf_uint` / `lainir_buf_temp` / `lainir_buf_repr` /
+  `lainir_text_lea_field`；
+- 指令前缀与具名结果：`lainir_op_prefix` / `lainir_op_prefix_phys` /
+  `lainir_temp_name_emit` / `lainir_load_at` / `lainir_load_named` / `lainir_lea_at` /
+  `lainir_lea_named` / `lainir_alloca_at` / `lainir_binary_phys_at` /
+  `lainir_binary_named_at` / `lainir_call_named` / `lainir_ret_call` / `lainir_return_ref` /
+  `lainir_return_uint`；
+- 单元与过程骨架：`lainir_proc_head_full` / `lainir_open_body` / `lainir_close_body` /
+  `lainir_data_head` / `lainir_data_ro_head` / `lainir_data_rw_head` /
+  `lainir_base_assign_write` / `lainir_storage_suffix_write` / `lainir_return_base_close` /
+  `lainir_zero_text`；
+- `bootstrap/meta.l1` 的 `meta_render_ref2` 负责把「临时值引用或源码操作数」渲染进
+  缓冲区，再交给层 0 的指令发射器。
+
+已迁移的形态：字段 store（`records.l1`）、load 与 lea（`records.l1` / `funcs.l1`）、
+循环体的二元运算与步进、循环条件的比较、直接调用与 return 调用、过程头与参数表、
+模块包装（`modules.l1`）、静态字节块（`handlers/let.l1`）、记录与枚举的静态存储、
+构造过程与字段访问过程、枚举变体过程。
+
+还没搬的：`funcs.l1` 的语句级片段（`#if`/`#continue`/`#break` 那一组带四格缩进的
+模板）、`meta.l1` 顶层的值/语句发射，以及 `sums.l1` 变体投影过程里的条件分支。
 
 这时 16 个样例产物仍然逐字节不变（`diffcount=0`；`build/f5_compare.ps1` 另有一条去掉
 行首空白的规范化比对，`normalized diffcount=0`）。`bootstrap/std/wire.l1` 本身是 Meta 值的
