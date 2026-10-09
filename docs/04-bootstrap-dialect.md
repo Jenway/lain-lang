@@ -156,11 +156,14 @@ F5 的等价性口径是**逐字节相等**：`build/f5_capture.ps1` 把 16 个�
 同样为 0），16 个样例全部 `host_status=0`、`trap none`，四个层 0 探针产物照旧
 `PARSE+VERIFY OK`。
 
-今天 `build/f5_compare.ps1` 对 `jumps` 报一条 DIFF：循环体的顺序可见性修好后（见下文的 D 一节），`first` 的产物把 `#break L1(%acc)` 换成 `#break L1(%r3)`（`%r3` 就是刚写下的 `acc + i`），`early` 的实参同理 —— 有意的语义修正，其余 15 个样例仍逐字节相同。
+今天 `build/f5_compare.ps1` 对两个样例报 DIFF，两条都是有意的语义改动：
 
-变体投影（`bootstrap/std/sums.l1` 的 `meta_lower_sum_project`）与 struct 字段取值（`p.x`）
-在值层目前仍以 `code=4` 被拒（探针 `build/probes/vproj.lain`、`build/probes/fldval.lain`），
-样例跑不到那几处的写出器；它们的字节与所取代的模板相同。
+- `jumps`：循环体的顺序可见性修好后（见下文的 D 一节），`first` 的产物把 `#break L1(%acc)`
+  换成 `#break L1(%r3)`（`%r3` 就是刚写下的 `acc + i`），`early` 的实参同理。
+- `locals`：栈上地址不再当返回值（见下文《二、半成品》的逃逸一条），样例改成「构造后交给
+  同帧内的 `pair_a`」并多了一个读字段的过程，产物因此整体重写。
+
+其余 14 个样例仍逐字节相同。
 
 `bootstrap/std/lainir.l1` 共 148 个 `lainir_*` 过程。按全仓库（`bootstrap/` 下的 `.l1` 与
 `.lain`）的名字引用统计，只有 8 个不被 `lainir.l1` 之外的代码引用（`lainir_address_line`、
@@ -398,8 +401,10 @@ func cstr_len(p: addr) -> u64 {
 要先有带外顶层区（F 的一部分）、且递归会共享同一份存储（重入互相踩）；栈版本的代价是**值
 逃不出帧** —— `#alloca` 从栈租约里 bump（`engine.c` 的 `op_alloca`：元素大小 × 常量 count，
 16 对齐，越界报 `LAINVM_TRAP_STACK_EXHAUSTED`），帧弹出时水位退回 `stack_mark`
-（`engine.c:926`），所以区域退出后地址失效，同 C 返回局部地址。今天**不检查**这种逃逸：
-`return p;` 照样发出，返回的是已失效的栈地址。
+（`engine.c:926`），所以区域退出后地址失效，同 C 返回局部地址。返回值今天**拒绝**这种逃逸：
+结果类型是聚合时，返回的地址必须是**参数**（调用方给的）或**调用结果**（被调用方算出来的），
+刚构造的地址与局部绑定一律报 11（探针 `build/probes/escape.lain` / `escape2.lain` /
+`escape3.lain`）。
 
 **字段访问当值已经能用**：`p.x` 在返回、绑定、更大的表达式（`p.x + p.y`、`1 + p.x`）与
 调用实参位置都降级成 `%r<n1> = #lea(%p, 0, 0, <字段偏移>)` 加
@@ -531,7 +536,7 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
   `bootstrap/lain/examples/locals.lain`。
 
 **F. 层 0：`lainir_*` 发射库**：**完成** —— `bootstrap/std/lainir.l1` 按名单提供五组写出器：整数/位/比较/转换、内存与地址、调用、控制流与单元骨架、固定文本片段（`bootstrap/SOURCE_ORDER` 在 `std/sums.l1` 后、`meta.l1` 前登记）。探针 `bootstrap/lain/examples/lainir_f1.l1` 到 `lainir_f4.l1`（清单 `bootstrap/lainir_f1_unit.txt`）分别覆盖骨架、F2 的 23 个二元算子与 6 个转换、F3 的内存/地址/调用、F4 的控制流与单元形态，F6 的 `lainir_f6.l1` 用层 0 重发 `locals.lain` 的整份单元；
-五条产物都过 `build/check_unit.exe` 的 parse+verify，驱动报 `host_status=0`、`trap none`。处理管线的字面文本发射已全部改走层 0，`bootstrap/std/emit.l1` 的 `data` 模板从 88 个减到 30 个，16 个样例产物在迁移当时逐字节不变（`diffcount=0`；此后 D 的循环体顺序可见性修好，`jumps` 有两行按新语义变化）——
+五条产物都过 `build/check_unit.exe` 的 parse+verify，驱动报 `host_status=0`、`trap none`。处理管线的字面文本发射已全部改走层 0，`bootstrap/std/emit.l1` 的 `data` 模板从 88 个减到 30 个，16 个样例产物在迁移当时逐字节不变（`diffcount=0`；此后 D 的循环体顺序可见性修好，`jumps` 有两行按新语义变化；值层的逃逸规则定下来后 `locals` 按新规则重写）——
 逐条写出器名单、删除口径与证据见上文《层 0：发射层》。
 
 用量证据（口径：bootstrap/SOURCE_ORDER 的 28 个文件，不数注释与示例）：`#bits` 4114、
@@ -713,7 +718,16 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   `%NAME`，由装载器拒。
 - 栈上构造的值**逃不出帧**：`#alloca` 从栈租约 bump（16 对齐，越界报
   `LAINVM_TRAP_STACK_EXHAUSTED`），帧弹出时水位退回 `stack_mark`（seed/src/vm/engine.c:926），
-  区域退出后地址失效。`return T { … }` 与把参数地址返回都**照样发出**，今天不做逃逸检查。
+  区域退出后地址失效。**返回值有定论：拒绝**——结果类型是聚合（struct / enum）时，返回的地址
+  必须是**调用方给的**（参数）或**被调用方算出来的**（调用结果）；`return T { … }`、
+  `return Shape.Circle { … }` 这类「刚构造的地址」，以及把局部绑定返回（`let p = T { … };
+  return p;`）一律报 **11**。判据在 `bootstrap/std/funcs.l1` 的语句降级里：结果类型经
+  `meta_scope_body` 的 4/5 两档认出聚合，返回值是「普通名字」（排除调用、字段、构造、组）且
+  不是参数时报 11；构造当返回值的那两条路（形状 10 与和类型的形状 6）各自直接拒。
+  探针：`build/probes/escape.lain` / `escape2.lain` / `escape3.lain` / `varctorlocal.lain` /
+  `ctorret.lain` 都是 11；对照组 `escapeok.lain`（返回参数）与 `ctorlocal.lain`（构造后在本帧内
+  投影取值）都是 0。`bootstrap/lain/examples/types.lain` 的 `idp(p: Point) -> Point { return p; }`
+  走的就是允许的那条路，产物不变。
 - 顶层构造里写变量名会发出解析不到的 `%NAME`（顶层绑定是过程 `#call NAME()`，不是值）——
   由装载器拒。函数体内的变体构造与积类型同形（见上面那条）。
 - 类型不符的绑定**不做检查**：`func bad(p: Point) -> i32 { let k: i32 = p; return k; }`
