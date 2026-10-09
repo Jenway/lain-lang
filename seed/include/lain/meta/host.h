@@ -156,6 +156,8 @@ const char *lainmeta_host_source_text(const LainMetaHost *host, uint32_t index,
 void *lainmeta_host_scratch(LainMetaHost *host, uint32_t *size_out);
 /* Meta 主动报告的暂存区最高使用位置；未报告时返回 0，不修改输出。 */
 int lainmeta_host_scratch_peak(const LainMetaHost *host, uint64_t *out);
+/* 已授予的整块窗口次数（驱动核对实际调用路径）。 */
+uint64_t lainmeta_host_region_grants(const LainMetaHost *host);
 
 /* Meta 写出来的 canonical LAINIR 文本。 */
 const char *lainmeta_host_output(const LainMetaHost *host);

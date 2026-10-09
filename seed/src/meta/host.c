@@ -122,6 +122,7 @@ struct LainMetaHost {
    * 先过账户：宿主也是"实际承诺一块底层存储"的一方。 */
   LainVmQuota *quota;
   uint64_t charged; /* 已经计入账户的字节数（暂存区 + 输出缓冲容量） */
+  uint64_t region_grants; /* 已授予的整块窗口次数（驱动核对实际调用路径） */
   LainMetaApplyLimits apply_limits;
   uint64_t apply_fuel_remaining;
   uint32_t apply_active_depth;
@@ -956,6 +957,10 @@ static uint32_t cap_type_publish(void *context, const uint64_t *args,
   return 0;
 }
 
+uint64_t lainmeta_host_region_grants(const LainMetaHost *host) {
+  return host ? host->region_grants : 0;
+}
+
 int lainmeta_host_scratch_peak(const LainMetaHost *host, uint64_t *out) {
   if (!host || !out || !host->scratch_peak_ready) return 0;
   *out = host->scratch_peak;
@@ -997,6 +1002,75 @@ static uint32_t cap_scratch_size(void *context, const uint64_t *args,
   if (!host) return LAINMETA_ERR_DENIED;
   if (count != 0) return LAINMETA_ERR_DENIED;
   if (out) *out = host->scratch_size;
+  return 0;
+}
+
+/* 窗口授予：把**整块**窗口的 {地址, 容量, 权利} 写进调用方给的 24 字节位置。
+ * 授予的是窗口本身——调用方拿到记录后仍用普通 load/store 访问，没有逐字节回调。
+ * 目标位置必须在已授权地址空间里可读可写：先验权限再写记录，拒的时候目标不动。 */
+static uint32_t cap_region_grant(void *context, const uint64_t *args,
+                                 uint32_t count, uint64_t *out) {
+  LainMetaHost *host = context;
+  uint64_t record[3];
+  uint64_t dest;
+  if (!host) return LAINMETA_ERR_DENIED;
+  if (count != 3 || !args) return LAINMETA_ERR_DENIED;
+  dest = args[2];
+  if (out) *out = 0;
+  if (!dest || !host->space ||
+      !lainvm_space_check(host->space, (uintptr_t)dest, sizeof(record),
+                          LAINVM_MEM_READ | LAINVM_MEM_WRITE)) {
+    host_set_status(host, LAINMETA_ERR_DENIED);
+    return 0;
+  }
+  switch (args[0]) {
+    case 0: /* Source 段：只读；容量是宿主权威长度 */
+      if (args[1] >= host->source_count) {
+        host_set_status(host, LAINMETA_ERR_NO_SOURCE);
+        return 0;
+      }
+      record[0] = (uint64_t)(uintptr_t)host->sources[args[1]].text;
+      record[1] = host->sources[args[1]].length;
+      record[2] = LAINVM_MEM_READ;
+      break;
+    case 1: { /* AstIn Arena：只读 */
+      LainAstArenaView view;
+      if (args[1] >= host->source_count ||
+          !lainmeta_host_arena(host, (uint32_t)args[1], &view)) {
+        host_set_status(host, LAINMETA_ERR_NO_SOURCE);
+        return 0;
+      }
+      record[0] = (uint64_t)(uintptr_t)view.data;
+      record[1] = view.capacity;
+      record[2] = LAINVM_MEM_READ;
+      break;
+    }
+    case 2: { /* AstOut Arena：读写；没启用就没有这块窗口 */
+      LainAstArenaView view;
+      if (!lainmeta_host_ast_out(host, &view)) {
+        host_set_status(host, LAINMETA_ERR_UNSUPPORTED);
+        return 0;
+      }
+      record[0] = (uint64_t)(uintptr_t)view.data;
+      record[1] = view.capacity;
+      record[2] = LAINVM_MEM_READ | LAINVM_MEM_WRITE;
+      break;
+    }
+    case 3: /* 暂存区：读写 */
+      if (!host->scratch) {
+        host_set_status(host, LAINMETA_ERR_DENIED);
+        return 0;
+      }
+      record[0] = (uint64_t)(uintptr_t)host->scratch;
+      record[1] = host->scratch_size;
+      record[2] = LAINVM_MEM_READ | LAINVM_MEM_WRITE;
+      break;
+    default:
+      host_set_status(host, LAINMETA_ERR_DENIED);
+      return 0;
+  }
+  memcpy((void *)(uintptr_t)dest, record, sizeof(record));
+  host->region_grants++;
   return 0;
 }
 
@@ -1964,6 +2038,7 @@ static const MetaCapability k_capabilities[] = {
     {"lain_meta_scratch_data", cap_scratch_data},
     {"lain_meta_scratch_size", cap_scratch_size},
     {"lain_meta_scratch_report", cap_scratch_report},
+    {"lain_meta_region_grant", cap_region_grant},
     {"lain_meta_apply_request", cap_apply_request},
     {"lain_meta_apply_bytes_request", cap_apply_bytes_request},
     {"lain_meta_apply_bytes_arg_request", cap_apply_bytes_arg_request},
