@@ -71,6 +71,43 @@
 - 产物 `lainir_reset()`、`lainir_text()` —— 取回 canonical 文本，交给
   `lainir_parse` + `lainir_verify`
 
+F1 已实现并端到端验收：`bootstrap/std/lainir.l1` 提供 `lainir_reset()`、
+`lainir_text()`、`lainir_length()`、`lainir_proc_begin(name, name_length)`、
+`lainir_return(value)`、`lainir_proc_end()`。当前过程骨架发射无参、返回 `#bits<32>`
+的过程；`lainir_return` 接受非负十进制立即数。样例
+`bootstrap/lain/examples/lainir_f1.l1` 生成 `#proc probe() -> #bits<32> {`、
+`#return 0` 和独立闭合行，产物经 `build\check_unit.exe` 解析与验证通过；驱动
+报告 `host_status=0`、`trap none`。
+
+F2 已实现整数算术、位运算、比较和转换的发射包装：`lainir_add` 至 `lainir_urem`、
+`lainir_and` 至 `lainir_ashr`、`lainir_eq` 至 `lainir_uge`，以及 `lainir_zext`、
+`lainir_sext`、`lainir_trunc`、`lainir_bitcast`、`lainir_ptr2int`、`lainir_int2ptr`。
+`bootstrap/lain/examples/lainir_f2.l1` 覆盖 23 个二元指令和 6 个转换；生成产物
+包含对应指令并通过 `build\check_unit.exe` 的 parse+verify。比较指令携带操作数宽度，
+其结果类型由 verifier 推导为 `#bits<1>`；`#int2ptr` 发射 `#addr` 结果类型。
+16 个既有样例与 F1、F2 探针均报告 `host_status=0`、`trap none`，F1 与 F2 产物
+均通过 `PARSE+VERIFY OK`。Canonical 等价性将在 F5 按解析后的结构比较。
+
+F3 已实现内存、地址与调用的发射包装：`lainir_load(width, address)`、
+`lainir_store(width, value, address)`、`lainir_lea(base, index, scale, disp)`、
+`lainir_alloca(width, count)`、`lainir_data_addr(symbol)`、`lainir_proc_addr(symbol)`、
+`lainir_call(callee, args)`、`lainir_call_indirect(target, args)`，以及 `lainir_data(name, values)`。
+`bootstrap/lain/examples/lainir_f3.l1` 生成 `data f3_probe_data ro { 0 }` 和包含
+`#load`、`#store`、`#lea`、`#alloca`、`#data_addr`、`#proc_addr`、`#call`、`#call_indirect`
+的过程；`#call_indirect` 不携带结果类型（verifier 无法从操作数推导），因此按语句发射。
+产物经 `build\check_unit.exe` 的 parse+verify 通过，驱动报告 `host_status=0`、`trap none`；
+16 个既有样例与 F1、F2、F3 探针全部通过回归。
+
+F4 已实现控制与单元的发射包装：`lainir_if` / `lainir_if_value`（带 `-> (T)`）、
+`lainir_else`、`lainir_end`、`lainir_loop` / `lainir_loop_value`、`lainir_yield`、
+`lainir_break`、`lainir_continue`、`lainir_switch`、`lainir_case`、`lainir_default`，
+以及 `lainir_extern(name, link, params)`。`bootstrap/lain/examples/lainir_f4.l1` 生成
+`data f4_data ro { 0 }`、`#proc f4_ext(%x: #bits<32>) #extern "f4_ext"` 和一个含
+带值与不带值 `#if`/`else`、`#loop`、`#yield`、`#break`、`#continue`、`#switch` 的
+`case`/`default`、`#return`、`#proc` 的过程。层 0 的缩进目前按固定两格写，嵌套层级
+不缩进；F5 的等价性口径按解析后的结构比较，与空白无关。产物经 `build\check_unit.exe`
+的 parse+verify 通过，驱动报告 `host_status=0`、`trap none`，16 个既有样例与 F1-F4 全绿。
+
 层 0 是「推迟的表面语法」的兜底：`switch`、`alloca`、`proc_addr`、间接调用没有表面语法，
 仍可用 `lainir_*` 发射。推迟只说明用户代码不好写，不说明编译器做不到。
 
