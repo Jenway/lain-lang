@@ -356,9 +356,9 @@ func cstr_len(p: addr) -> u64 {
   声明身份与 `func` 一样是 6，调用点与返回类型推导完全共用一条路（样例
   `bootstrap/lain/examples/extern.lain`：4 条 extern + 3 个函数，产物过 `lainir_parse` +
   `lainir_verify`）。手写 Meta 的 46 个 `#extern` 里取 14 条最复杂的签名实测逐字符等价
-  （build/probes/cap12.lain，matched=14 of 14）。**注意**：单个编译单元里声明数量有既存
-  上限 —— 20 条左右开始不稳（22 条 extern 报 4、22 条 func 报 9401，非单调可重复），
-  与 extern 无关，见《待补规则》。
+  （build/probes/cap12.lain，matched=14 of 14）。**注意**：一次 lowering 请求的源码规模有既存上限 ——
+  今天实测约 40 条合成 extern（或 13 条 9 参长签名）就开始报 4，多个源会**累积**，
+  与 extern / func 无关，见《待补规则》。
 - struct / enum 名字可写进参数类型与标注：**完成** —— 聚合类型在 IR 里就是 `#addr`
   （构造发 `#proc NAME() -> #addr`），所以 `p: Point` 的参数类型发成 `#addr`、
   `let q: Point = p;` 是一次地址复制（`#lea(%p, 0, 1, 0)`）；实现是
@@ -506,10 +506,13 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   （2005 BAD_OPERAND_TYPE）。也就是说错误由**下游信任门**拒收、不会变成错误代码，
   但报错位置在产物而不是源码。原因：`meta_emit_close` 的复制只按上下文 kind 选 `#lea`/`#add`，
   不看被复制的值自己的类型（只有参数名能查到类型）。
-- 单个编译单元的声明数量有既存上限（不是 extern 引入）：一个文件里 20 条左右开始不稳 ——
-  22 条 extern 报 4（诊断无位置）、22 条 func 报 9401（TREE_HANDLE），且结果非单调
-  （21 条过、22 条挂、25 条又过）但可重复。定位线索：Meta 的声明/展开阶段（AstIn/AstOut arena、
-  scratch 或 visited 预算），超出本轮范围。多文件同一次驱动也一样（8 个源码合计 45 条 extern 报 4）。
+- 一次 lowering 请求能吃的源码规模有既存上限（不是 extern 引入）：今天实测 —— 单个源里
+  39 条合成 extern（2369 B）过、40 条（2430 B）报 4（诊断无位置）；12 条 9 参长签名（2270 B）
+  过、13 条（2460 B）报 4；**多个源会累积**（4 个源各 10 条、合计 2480 B 也报 4；8 个源各 5 条
+  同样）。两种形状的条数差很多但边界一致，所以按**声明展开的节点规模**算，约 550–650 个节点；
+  具体机制（AstIn/AstOut arena、scratch 或 visited 预算）未定位，超出本轮范围。旧记录
+  「一个文件里 20 条左右、22 条 extern 报 4、22 条 func 报 9401」是在 C 组改动之前测的，
+  现在 45 条 func 也过，已不成立。
 
 ## 与现状的差距
 
