@@ -921,12 +921,39 @@
       // 一个 token：直接用源码那段。**源码范围也要写进 +176/+184** —— 组的那个分支
       // 是递归留下的范围，调用方一律从这里读，就不会把 `(42)` 的范围当成整个括号。
       %sc = #call lain_meta_scratch_data()
-      %s = #call meta_cell_put(#lea(%sc, 168, 1, 0), 0xFFFFFFFFFFFFFFFF)
       %lo0 = #call meta_node_start(%node)
       %hi0 = #add[#bits<64>](%lo0, #call meta_node_len(%node))
-      %s4 = #call meta_cell_put(#lea(%sc, 176, 1, 0), %lo0)
-      %s5 = #call meta_cell_put(#lea(%sc, 184, 1, 0), %hi0)
-      #yield 0
+      // 循环参数：这一轮里被赋过值就发那个临时值（参数名本身是进入本轮时的值）。有了
+      // 这条，i = i + 1; acc = acc + i; 的第二条语句读到的是刚写下的 i，不是循环头的 i。
+      %knl = #sub[#bits<64>](%hi0, %lo0)
+      %kix = #call meta_loop_param_index(%base, %lo0, %knl)
+      %isparam = #ne[#bits<64>](%kix, 0xFFFFFFFFFFFFFFFF)
+      %s = #if %isparam -> (#bits<32>) {
+        %pboff = #call meta_cell_get(#lea(%sc, 2456, 1, 0))
+        %pb = #lea(%sc, %pboff, 1, 0)
+        %kpslot = #add[#bits<64>](88, #mul[#bits<64>](%kix, 96))
+        %kpq = #lea(%pb, %kpslot, 1, 0)
+        %kcur = #call meta_cell_get(#lea(%kpq, 32, 1, 0))
+        %khas = #ne[#bits<64>](%kcur, 0xFFFFFFFFFFFFFFFF)
+        %sp = #if %khas -> (#bits<32>) {
+          %pa = #call meta_cell_put(#lea(%sc, 168, 1, 0), %kcur)
+          %pb2 = #call meta_cell_put(#lea(%sc, 176, 1, 0), 0)
+          %pc2 = #call meta_cell_put(#lea(%sc, 184, 1, 0), 0)
+          #yield 0
+        } else {
+          %pd = #call meta_cell_put(#lea(%sc, 168, 1, 0), 0xFFFFFFFFFFFFFFFF)
+          %pe = #call meta_cell_put(#lea(%sc, 176, 1, 0), %lo0)
+          %pf = #call meta_cell_put(#lea(%sc, 184, 1, 0), %hi0)
+          #yield 0
+        }
+        #yield %sp
+      } else {
+        %s4 = #call meta_cell_put(#lea(%sc, 168, 1, 0), 0xFFFFFFFFFFFFFFFF)
+        %s5 = #call meta_cell_put(#lea(%sc, 176, 1, 0), %lo0)
+        %s6 = #call meta_cell_put(#lea(%sc, 184, 1, 0), %hi0)
+        #yield 0
+      }
+      #yield %s
     }
     #yield %st2
   }
