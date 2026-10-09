@@ -98,6 +98,16 @@ F3 已实现内存、地址与调用的发射包装：`lainir_load(width, addres
 产物经 `build\check_unit.exe` 的 parse+verify 通过，驱动报告 `host_status=0`、`trap none`；
 16 个既有样例与 F1、F2、F3 探针全部通过回归。
 
+F4 已实现控制与单元的发射包装：`lainir_if` / `lainir_if_value`（带 `-> (T)`）、
+`lainir_else`、`lainir_end`、`lainir_loop` / `lainir_loop_value`、`lainir_yield`、
+`lainir_break`、`lainir_continue`、`lainir_switch`、`lainir_case`、`lainir_default`，
+以及 `lainir_extern(name, link, params)`。`bootstrap/lain/examples/lainir_f4.l1` 生成
+`data f4_data ro { 0 }`、`#proc f4_ext(%x: #bits<32>) #extern "f4_ext"` 和一个含
+带值与不带值 `#if`/`else`、`#loop`、`#yield`、`#break`、`#continue`、`#switch` 的
+`case`/`default`、`#return`、`#proc` 的过程。层 0 的缩进目前按固定两格写，嵌套层级
+不缩进；F5 的等价性口径按解析后的结构比较，与空白无关。产物经 `build\check_unit.exe`
+的 parse+verify 通过，驱动报告 `host_status=0`、`trap none`，16 个既有样例与 F1-F4 全绿。
+
 层 0 是「推迟的表面语法」的兜底：`switch`、`alloca`、`proc_addr`、间接调用没有表面语法，
 仍可用 `lainir_*` 发射。推迟只说明用户代码不好写，不说明编译器做不到。
 
