@@ -33,7 +33,7 @@
   不是命名习惯 —— Meta 两者都要。
 - **vref** 是发射出的值引用（产物里的 `%name`），不是机器值。它是不透明标量：只由
   `lainir_*` 产生、只被 `lainir_*` 消费，不能算术、不能 `as`。
-- 层 0 的正式化对象就是今天 bootstrap/std/wire.l1（780 行）加 `meta_emit_ref2` 那套手写拼串。
+- 层 0 的实现是 `bootstrap/std/lainir.l1`：`lainir_reset()` 清空产物积存，`lainir_text()` 与 `lainir_length()` 取回文本，其余每个 LAINIR 形态一组 `lainir_*` 过程。处理管线今天发的每一条指令文本都经过它。`bootstrap/std/wire.l1` 是 Meta 值的二进制 wire 编解码与校验，不发 IR 文本。
 - 阶段纪律：任何 Lain 代码都能调用层 0（用户宏也能发射任意 IR）；闸门始终是
   `lainir_parse` + `lainir_verify`。发射能力只登记进编译期那张表。
 
@@ -110,47 +110,56 @@ F4 已实现控制与单元的发射包装：`lainir_if` / `lainir_if_value`（�
 
 F5 的等价性口径是**逐字节相等**：`build/f5_capture.ps1` 把 16 个既有样例逐个跑成
 `build/before/<名字>.out` 与 `build/after/<名字>.out`，两份按 SHA-256 比对，全部相同才算
-等价；改动的每一步都跑这条比对。已经改由层 0 提供的部分：
+等价；`build/f5_compare.ps1` 另有一条去掉行首空白的规范化比对。改动的每一步都跑这条比对。
 
-- 临时值编号：`lainir_next_temp` 直接用处理管线那条计数器（暂存区 +144），两套编号不会
-  各数各的；
-- 拼串词素：类型实参 `lainir_repr`、单字节 `lainir_byte`、十进制 `lainir_emit_uint`；
-  `bootstrap/std/emit.l1` 的 `meta_emit_repr` / `meta_emit_byte` / `meta_emit_uint` 现在
-  只是转发；
-- 指令文本：`lainir_store`（带 repr 实参）配 `lainir_buf_uint` / `lainir_buf_temp` /
-  `lainir_buf_bytes` / `lainir_text_lea_field` 这套缓冲区渲染，`bootstrap/std/records.l1`
-  的 `meta_emit_store` / `meta_emit_store_name` 字段写入走它。
-
-指令文本本身也逐步改由层 0 写：
+处理管线的字面文本发射全部由层 0 承担之后，处理管线里只剩宿主原语的调用
+（`lain_meta_emit_write` 本身、`lain_meta_emit_reset`、`lain_meta_emit_scope_begin`）与几个
+转发过程（`bootstrap/std/emit.l1` 的 `meta_emit_repr` / `meta_emit_byte` / `meta_emit_uint`，
+`funcs.l1` 的 `meta_emit_temp_name` / `meta_emit_op_mid` / `meta_emit_op_lit`）。层 0 提供的
+写出器按用途分四类：
 
 - 词素与缓冲区渲染：`lainir_repr` / `lainir_byte` / `lainir_emit_uint` / `lainir_spaces` /
   `lainir_buf_bytes` / `lainir_buf_uint` / `lainir_buf_temp` / `lainir_buf_repr` /
   `lainir_text_lea_field`；
-- 指令前缀与具名结果：`lainir_op_prefix` / `lainir_op_prefix_phys` /
-  `lainir_temp_name_emit` / `lainir_load_at` / `lainir_load_named` / `lainir_lea_at` /
-  `lainir_lea_named` / `lainir_alloca_at` / `lainir_binary_phys_at` /
-  `lainir_binary_named_at` / `lainir_call_named` / `lainir_ret_call` / `lainir_return_ref` /
+- 指令前缀与具名结果：`lainir_op_prefix` / `lainir_op_prefix_phys` / `lainir_temp_name_emit` /
+  `lainir_load_at` / `lainir_load_named` / `lainir_lea_at` / `lainir_lea_named` /
+  `lainir_alloca_at` / `lainir_binary_phys_at` / `lainir_binary_named_at` /
+  `lainir_binary_op_at` / `lainir_call_named` / `lainir_ret_call` / `lainir_return_ref` /
   `lainir_return_uint`；
-- 单元与过程骨架：`lainir_proc_head_full` / `lainir_open_body` / `lainir_close_body` /
-  `lainir_data_head` / `lainir_data_ro_head` / `lainir_data_rw_head` /
-  `lainir_base_assign_write` / `lainir_storage_suffix_write` / `lainir_return_base_close` /
-  `lainir_zero_text`；
-- `bootstrap/meta.l1` 的 `meta_render_ref2` 负责把「临时值引用或源码操作数」渲染进
-  缓冲区，再交给层 0 的指令发射器。
+- 单元与过程骨架：`lainir_proc_head_full` / `lainir_proc_head_open` / `lainir_open_body` /
+  `lainir_close_body` / `lainir_close_brace_write` / `lainir_data_head` / `lainir_data_ro_head` /
+  `lainir_data_rw_head` / `lainir_addr_body_write` / `lainir_base_assign_write` /
+  `lainir_storage_suffix_write` / `lainir_return_base_close` / `lainir_zero_text`；
+- 固定文本片段各自的写出器：`lainir_indent_write` / `lainir_st_pct_write` / `lainir_pct_write` /
+  `lainir_result_sep_write` / `lainir_newline_write` / `lainir_rparen_nl_write` /
+  `lainir_close_paren_write` / `lainir_open_paren_write` / `lainir_comma_write` /
+  `lainir_colon_write` / `lainir_lea_head_write` / `lainir_call_word_write` /
+  `lainir_proc_word_write` / `lainir_empty_params_write` / `lainir_zero_write` /
+  `lainir_store_head_write` / `lainir_extern_marker_write` / `lainir_quote_nl_write` /
+  `lainir_if_head_write` / `lainir_if_head2_write` / `lainir_else_write` /
+  `lainir_close_line_write` / `lainir_close4_write` / `lainir_break_head_write` /
+  `lainir_continue_head_write` / `lainir_result_head_write` / `lainir_loop_head_write` /
+  `lainir_loop_body_open_write` / `lainir_arrow_lp_write` / `lainir_bracket_paren_write` /
+  `lainir_rparen_nl_close_write` / `lainir_body_return_write` / `lainir_ret_call_head_write` /
+  `lainir_bind_head_write` / `lainir_vproj_load_write` / `lainir_vproj_if_write` /
+  `lainir_vproj_lea_write` / `lainir_vproj_value_write` / `lainir_vproj_tail_write`。
 
-已迁移的形态：字段 store（`records.l1`）、load 与 lea（`records.l1` / `funcs.l1`）、
-循环体的二元运算与步进、循环条件的比较、直接调用与 return 调用、过程头与参数表、
-模块包装（`modules.l1`）、静态字节块（`handlers/let.l1`）、记录与枚举的静态存储、
-构造过程与字段访问过程、枚举变体过程。
+改由层 0 发射的形态：字段 store、load、lea、循环体的二元运算与步进、循环条件的比较、直接
+调用与 return 调用、过程头与参数表（含 `#extern` 的链接名）、模块包装、静态字节块、记录与
+枚举的静态存储、构造过程、字段访问过程、枚举变体过程、值 if 的头尾与 `#yield`、`#break`
+与 `#continue` 的循环体、`as` 转换、地址加整数、负数字面量。
 
-还没搬的：`funcs.l1` 与 `meta.l1` 里剩下的语句级片段（零复制绑定之外的
-`#if`/`#continue`/`#break` 收尾、顶层 sheet 发射，约 120 处），以及 `sums.l1` 变体投影
-过程里的条件分支（`meta_e1` 到 `meta_e5` 那一段）。
+`bootstrap/std/emit.l1` 的 `data` 模板随之从 88 个减到 30 个。删掉的 58 个里，39 个能对上
+字节相同的层 0 块（其中若干由两三个写出器拼出同样的字节），19 个在删除前就已经没有任何
+调用点，是更早几轮重写的遗留。删除前按词边界扫描全仓库（`.l1` 与 `.lain`）的
+`#data_addr <名字>` 确认无引用。删除后的产物与删除前逐字节相同（`diffcount=0`，规范化比对
+同样为 0），16 个样例全部 `host_status=0`、`trap none`，四个层 0 探针产物照旧
+`PARSE+VERIFY OK`。
 
-这时 16 个样例产物仍然逐字节不变（`diffcount=0`；`build/f5_compare.ps1` 另有一条去掉
-行首空白的规范化比对，`normalized diffcount=0`）。`bootstrap/std/wire.l1` 本身是 Meta 值的
-二进制 wire 编解码与校验（帧头、字段边界、引用身份），不发 IR 文本；处理管线的 IR 文本
-发射在 `bootstrap/std/emit.l1` 与 `funcs.l1` / `records.l1` / `sums.l1` / `modules.l1` 里。
+变体投影（`bootstrap/std/sums.l1` 的 `meta_lower_sum_project`）与 struct 字段取值（`p.x`）
+在值层目前仍以 `code=4` 被拒（探针 `build/probes/vproj.lain`、`build/probes/fldval.lain`），
+样例跑不到那几处的写出器；它们的字节与所取代的模板相同。
+
 
 层 0 是「推迟的表面语法」的兜底：`switch`、`alloca`、`proc_addr`、间接调用没有表面语法，
 仍可用 `lainir_*` 发射。推迟只说明用户代码不好写，不说明编译器做不到。
@@ -470,8 +479,7 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
   入口在 `bootstrap/std/funcs.l1` 的 `meta_lower_stmt`（构造单独成句的早退分支）。样例
   `bootstrap/lain/examples/locals.lain`。
 
-**F. 层 0：`lainir_*` 发射库** —— 见上文《层 0：发射层》。它是「用 Lain 写 Meta」真正缺的
-那一层，也是 bootstrap/std/wire.l1 那套手写拼串的正式化。
+**F. 层 0：`lainir_*` 发射库**：**完成** —— `bootstrap/std/lainir.l1` 按名单提供五组写出器：整数/位/比较/转换、内存与地址、调用、控制流与单元骨架、固定文本片段（`bootstrap/SOURCE_ORDER` 在 `std/sums.l1` 后、`meta.l1` 前登记）。探针 `bootstrap/lain/examples/lainir_f1.l1` 到 `lainir_f4.l1`（清单 `bootstrap/lainir_f1_unit.txt`）分别覆盖骨架、F2 的 23 个二元算子与 6 个转换、F3 的内存/地址/调用、F4 的控制流与单元形态，四条产物都过 `build/check_unit.exe` 的 parse+verify，驱动报 `host_status=0`、`trap none`。处理管线的字面文本发射已全部改走层 0，`bootstrap/std/emit.l1` 的 `data` 模板从 88 个减到 30 个，16 个样例产物逐字节不变（`diffcount=0`）——逐条写出器名单、删除口径与证据见上文《层 0：发射层》。
 
 用量证据（口径：bootstrap/SOURCE_ORDER 的 28 个文件，不数注释与示例）：`#bits` 4114、
 `#call` 2994、`#if` 925、`#yield` 860、`#lea` 790、`#eq` 630、`#return` 628、`#add` 471、
