@@ -353,50 +353,38 @@
   #return %st
 }
 
-// 一条 store 的**头**：`  #store[` + repr + `](`
-#proc meta_emit_store_head(%kind: #bits<64>, %width: #bits<64>) -> #bits<32> {
-  %o = #data_addr meta_c8
-  %a = #call lain_meta_emit_write(%o, 9)
-  %b = #call meta_emit_repr(%kind, %width)
-  %p = #data_addr meta_c9
-  %c = #call lain_meta_emit_write(%p, 2)
-  #return 0
-}
-
-// 一条 store 的**尾**：`, #lea(<基址>, 0, 0, <off>))\n`
+// 字段地址文本：`#lea(<基址引用>, 0, 0, <off>)`，写进 `%buf` 的 32 偏移处。
 //
 // `%base_n` 是「基址引用哪个值」：`0xFFFFFFFFFFFFFFFF` 用顶层的**字面名字** `%base`
 // （顶层构造过程里那个固定名字），其余是临时值编号 —— 函数体内的构造，基址来自
 // `#alloca` 的结果 `%r<n>`。**不能**让两处都叫 `%base`：装载器的 `region_lookup`
 // 按名字返回**第一个**匹配，同一个过程里重名会静默指向前一个。
-#proc meta_emit_store_tail(%off: #bits<64>, %base_n: #bits<64>) -> #bits<32> {
+#proc meta_emit_field_addr(%buf: #addr, %off: #bits<64>, %base_n: #bits<64>) -> #bits<64> {
+  %abase = #lea(%buf, 32, 1, 0)
   %named = #ne[#bits<64>](%base_n, 0xFFFFFFFFFFFFFFFF)
-  %ref = #if %named -> (#bits<32>) {
-    %l = #data_addr meta_c15
-    %e1 = #call lain_meta_emit_write(%l, 7)
-    %e2 = #call meta_emit_temp_name(%base_n)
-    %t2 = #data_addr meta_c16
-    %e3 = #call lain_meta_emit_write(%t2, 8)
-    #yield 0
+  %blen = #if %named -> (#bits<64>) {
+    %l = #call lainir_buf_temp(%abase, 0, %base_n)
+    #yield %l
   } else {
-    %t = #data_addr meta_c10
-    %e = #call lain_meta_emit_write(%t, 20)
-    #yield 0
+    %b = #data_addr lainir_base_name
+    %l2 = #call lainir_buf_bytes(%abase, 0, %b, 5)
+    #yield %l2
   }
-  %f = #call meta_emit_uint(%off)
-  %n = #data_addr meta_c11
-  %g = #call lain_meta_emit_write(%n, 3)
-  #return 0
+  %lbuf = #lea(%buf, 64, 1, 0)
+  %alen = #call lainir_text_lea_field(%lbuf, 0, %abase, %blen, %off)
+  #return %alen
 }
 
 // 写一条 `  #store[repr](value, #lea(%base, 0, 0, off))`，值是**一个数**（`a: 1`）。
 #proc meta_emit_store(%kind: #bits<64>, %width: #bits<64>,
                       %value: #bits<64>, %off: #bits<64>,
                       %base_n: #bits<64>) -> #bits<32> {
-  %h = #call meta_emit_store_head(%kind, %width)
-  %d = #call meta_emit_uint(%value)
-  %t = #call meta_emit_store_tail(%off, %base_n)
-  #return 0
+  %buf = #data_addr lainir_text_buffer
+  %vlen = #call lainir_buf_uint(%buf, 0, %value)
+  %alen = #call meta_emit_field_addr(%buf, %off, %base_n)
+  %lbuf = #lea(%buf, 64, 1, 0)
+  %w = #call lainir_store(%kind, %width, %buf, %vlen, %lbuf, %alen)
+  #return %w
 }
 
 // 写一条 `  #store[repr](%NAME, #lea(%base, 0, 0, off))`，值是**一个变量的名字**
@@ -405,12 +393,13 @@
 #proc meta_emit_store_name(%kind: #bits<64>, %width: #bits<64>,
                            %at: #addr, %len: #bits<64>,
                            %off: #bits<64>, %base_n: #bits<64>) -> #bits<32> {
-  %h = #call meta_emit_store_head(%kind, %width)
-  %pct = #data_addr meta_fn_pct
-  %n1 = #call lain_meta_emit_write(%pct, 1)
-  %n2 = #call lain_meta_emit_write(%at, %len)
-  %t = #call meta_emit_store_tail(%off, %base_n)
-  #return 0
+  %buf = #data_addr lainir_text_buffer
+  %head = #call lainir_buf_byte(%buf, 0, 37)
+  %vlen = #call lainir_buf_bytes(%buf, %head, %at, %len)
+  %alen = #call meta_emit_field_addr(%buf, %off, %base_n)
+  %lbuf = #lea(%buf, 64, 1, 0)
+  %w = #call lainir_store(%kind, %width, %buf, %vlen, %lbuf, %alen)
+  #return %w
 }
 
 // 初始化列表 `{ f: v f: v }`：每个字段一条 store。

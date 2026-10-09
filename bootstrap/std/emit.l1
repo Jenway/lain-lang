@@ -237,72 +237,24 @@ data meta_s4b ro { 93 40 37 112 41 10 32 32 32 32 35 121 105 101 108 100 32 37 1
 // 一个字节的暂存：能力只接受 (地址, 长度)，所以单字节要有个落脚点。
 data meta_scratch rw { 0 }
 
-// 类型实参的词素。kind 决定用哪一组。
-data meta_t_bits ro { 35 98 105 116 115 60 }
-data meta_t_f ro { 35 102 60 }
-data meta_t_vec ro { 35 118 101 99 60 }
-data meta_t_addr ro { 35 97 100 100 114 }
-data meta_t_gt ro { 62 }
-
 // 把 repr 写成 LAINIR 的类型实参：0 -> #bits<N>，1 -> #f<N>，
 // 2 -> #vec<N>，3 -> #addr（#addr 没有宽度可言）。
+// 类型实参、单字节与十进制整数的词素都由层 0 负责（`lainir_repr` /
+// `lainir_byte` / `lainir_emit_uint`），这里只是管线侧的旧名字。
 #proc meta_emit_repr(%kind: #bits<64>,
                      %width: #bits<64>) -> #bits<32> {
-  #if #eq[#bits<64>](%kind, 3) {
-    %p = #data_addr meta_t_addr
-    %w = #call lain_meta_emit_write(%p, 5)
-    #return %w
-  }
-  #if #eq[#bits<64>](%kind, 1) {
-    %p = #data_addr meta_t_f
-    %a = #call lain_meta_emit_write(%p, 3)
-    %b = #call meta_emit_uint(%width)
-    %g = #data_addr meta_t_gt
-    %c = #call lain_meta_emit_write(%g, 1)
-    #return %c
-  }
-  #if #eq[#bits<64>](%kind, 2) {
-    %p = #data_addr meta_t_vec
-    %a = #call lain_meta_emit_write(%p, 5)
-    %b = #call meta_emit_uint(%width)
-    %g = #data_addr meta_t_gt
-    %c = #call lain_meta_emit_write(%g, 1)
-    #return %c
-  }
-  %bits = #data_addr meta_t_bits
-  %w1 = #call lain_meta_emit_write(%bits, 6)
-  %w2 = #call meta_emit_uint(%width)
-  %gt = #data_addr meta_t_gt
-  %w3 = #call lain_meta_emit_write(%gt, 1)
-  #return %w3
+  %w = #call lainir_repr(%kind, %width)
+  #return %w
 }
 
-// 写一个字节出去。
 #proc meta_emit_byte(%b: #bits<8>) -> #bits<32> {
-  %p = #data_addr meta_scratch
-  #store[#bits<8>](%b, %p)
-  %r = #call lain_meta_emit_write(%p, 1)
+  %r = #call lainir_byte(%b)
   #return %r
 }
 
-// 写一个十进制无符号整数。高位先出，所以先递归再落位。
 #proc meta_emit_uint(%v: #bits<64>) -> #bits<32> {
-  %big = #uge[#bits<64>](%v, 10)
-  %status = #if %big -> (#bits<32>) {
-    %q = #udiv[#bits<64>](%v, 10)
-    %skip = #call meta_emit_uint(%q)
-    %rem = #urem[#bits<64>](%v, 10)
-    %ch = #add[#bits<64>](%rem, 48)
-    %b = #trunc[#bits<8>](%ch)
-    %w = #call meta_emit_byte(%b)
-    #yield %w
-  } else {
-    %ch = #add[#bits<64>](%v, 48)
-    %b = #trunc[#bits<8>](%ch)
-    %w = #call meta_emit_byte(%b)
-    #yield %w
-  }
-  #return %status
+  %s = #call lainir_emit_uint(%v)
+  #return %s
 }
 
 #proc lain_meta_diagnostic_field(%field: #bits<64>) -> #bits<64> #extern "lain_meta_diagnostic_field"

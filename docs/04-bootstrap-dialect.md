@@ -108,6 +108,23 @@ F4 已实现控制与单元的发射包装：`lainir_if` / `lainir_if_value`（�
 不缩进；F5 的等价性口径按解析后的结构比较，与空白无关。产物经 `build\check_unit.exe`
 的 parse+verify 通过，驱动报告 `host_status=0`、`trap none`，16 个既有样例与 F1-F4 全绿。
 
+F5 的等价性口径是**逐字节相等**：`build/f5_capture.ps1` 把 16 个既有样例逐个跑成
+`build/before/<名字>.out` 与 `build/after/<名字>.out`，两份按 SHA-256 比对，全部相同才算
+等价；改动的每一步都跑这条比对。已经改由层 0 提供的部分：
+
+- 临时值编号：`lainir_next_temp` 直接用处理管线那条计数器（暂存区 +144），两套编号不会
+  各数各的；
+- 拼串词素：类型实参 `lainir_repr`、单字节 `lainir_byte`、十进制 `lainir_emit_uint`；
+  `bootstrap/std/emit.l1` 的 `meta_emit_repr` / `meta_emit_byte` / `meta_emit_uint` 现在
+  只是转发；
+- 指令文本：`lainir_store`（带 repr 实参）配 `lainir_buf_uint` / `lainir_buf_temp` /
+  `lainir_buf_bytes` / `lainir_text_lea_field` 这套缓冲区渲染，`bootstrap/std/records.l1`
+  的 `meta_emit_store` / `meta_emit_store_name` 字段写入走它。
+
+这时 16 个样例产物逐字节不变（`diffcount=0`）。`bootstrap/std/wire.l1` 本身是 Meta 值的
+二进制 wire 编解码与校验（帧头、字段边界、引用身份），不发 IR 文本；处理管线的 IR 文本
+发射在 `bootstrap/std/emit.l1` 与 `funcs.l1` / `records.l1` / `sums.l1` / `modules.l1` 里。
+
 层 0 是「推迟的表面语法」的兜底：`switch`、`alloca`、`proc_addr`、间接调用没有表面语法，
 仍可用 `lainir_*` 发射。推迟只说明用户代码不好写，不说明编译器做不到。
 
