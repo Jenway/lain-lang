@@ -44,23 +44,25 @@
 //   - 不是参数的标识符会原样发成 `%名字`，被验证器拒（未定义的值）——响的，不是
 //     静默给错值。
 
-// 发射一个运算数：是十进制数字就发数字，否则发 `%名字`。
-#proc meta_emit_operand(%base: #addr, %lo: #bits<64>,
-                         %hi: #bits<64>, %len: #bits<64>) -> #bits<32> {
+// 把一个运算数渲染进缓冲区：是十进制数字就写数字，否则写 `%名字`。返回写入长度，
+// 非法字面量返回全一值。
+#proc meta_render_operand(%base: #addr, %lo: #bits<64>,
+                          %hi: #bits<64>, %len: #bits<64>,
+                          %out: #addr) -> #bits<64> {
   %b = #call bs_byte_at(%base, %lo, %len)
   %is_num = #call bs_is_digit(%b)
-  %st = #if %is_num -> (#bits<32>) {
+  %st = #if %is_num -> (#bits<64>) {
     // 数字开头不等于读得出值：`0x` 后面没有十六进制数字、`0x10` 这种**整段**都得是
     // 合法字面量。不查的话 `bs_read_uint` 只读出前缀能读的那部分，剩下的悄悄丢掉
     // —— 静默给错值是本仓库禁止的失败方式。
     %oknum = #call meta_is_int_literal(%base, %lo, %hi, %len)
-    %w = #if %oknum -> (#bits<32>) {
+    %w = #if %oknum -> (#bits<64>) {
       %v = #call bs_read_uint(%base, %lo, %len)
-      %w0 = #call meta_emit_uint(%v)
-      #yield %w0
+      %n = #call lainir_buf_uint(%out, 0, %v)
+      #yield %n
     } else {
       %badlit = #call lain_meta_fail(4)
-      #yield 4
+      #yield 0xFFFFFFFFFFFFFFFF
     }
     #yield %w
   } else {
@@ -79,13 +81,27 @@
     %ebw = #zext[#bits<64>](%eb)
     %ew3 = #call meta_cell_put(#lea(%esc, 2144, 1, 0), %ebw)
     %ew4 = #call meta_cell_put(#lea(%esc, 2152, 1, 0), 1)
-    %pct = #data_addr meta_fn_pct
-    %w1 = #call lain_meta_emit_write(%pct, 1)
+    %pct = #call lainir_buf_byte(%out, 0, 37)
     %at = #lea(%base, %lo, 1, 0)
     %n = #sub[#bits<64>](%hi, %lo)
     %ew5 = #call meta_cell_put(#lea(%esc, 2160, 1, 0), %n)
-    %w2 = #call lain_meta_emit_write(%at, %n)
+    %w2 = #call lainir_buf_bytes(%out, %pct, %at, %n)
     #yield %w2
+  }
+  #return %st
+}
+
+// 发射一个运算数：是十进制数字就发数字，否则发 `%名字`。
+#proc meta_emit_operand(%base: #addr, %lo: #bits<64>,
+                         %hi: #bits<64>, %len: #bits<64>) -> #bits<32> {
+  %out = #data_addr lainir_text_buffer
+  %n = #call meta_render_operand(%base, %lo, %hi, %len, %out)
+  %bad = #eq[#bits<64>](%n, 0xFFFFFFFFFFFFFFFF)
+  %st = #if %bad -> (#bits<32>) {
+    #yield 4
+  } else {
+    %w = #call lainir_write(%out, %n)
+    #yield %w
   }
   #return %st
 }
@@ -126,20 +142,8 @@
 // 表内偏移与长度）。
 #proc meta_emit_op_mid(%kind: #bits<64>,
                        %width: #bits<64>) -> #bits<32> {
-  %h = #data_addr meta_hash
-  %w1 = #call lain_meta_emit_write(%h, 1)
-  %scratch = #call lain_meta_scratch_data()
-  %pos = #call meta_cell_get(#lea(%scratch, 24, 1, 0))
-  %plen = #call meta_cell_get(#lea(%scratch, 32, 1, 0))
-  %table = #data_addr meta_scalar_table
-  %phys = #lea(%table, %pos, 1, 0)
-  %w2 = #call lain_meta_emit_write(%phys, %plen)
-  %lb = #data_addr meta_o2
-  %w3 = #call lain_meta_emit_write(%lb, 1)
-  %w4 = #call meta_emit_repr(%kind, %width)
-  %rl = #data_addr meta_o3
-  %w5 = #call lain_meta_emit_write(%rl, 2)
-  #return 0
+  %w = #call lainir_op_prefix_phys(%kind, %width)
+  #return %w
 }
 
 // 发射 `#<名字>[<repr>](`，名字是 **#data 的地址**。与 `meta_emit_op_mid` 的区别：
@@ -147,25 +151,14 @@
 // 形态用（`as` 的 zext/trunc/复制）。
 #proc meta_emit_op_lit(%name: #addr, %name_len: #bits<64>,
                        %kind: #bits<64>, %width: #bits<64>) -> #bits<32> {
-  %h = #data_addr meta_hash
-  %w1 = #call lain_meta_emit_write(%h, 1)
-  %w2 = #call lain_meta_emit_write(%name, %name_len)
-  %lb = #data_addr meta_o2
-  %w3 = #call lain_meta_emit_write(%lb, 1)
-  %w4 = #call meta_emit_repr(%kind, %width)
-  %rl = #data_addr meta_o3
-  %w5 = #call lain_meta_emit_write(%rl, 2)
-  #return 0
+  %w = #call lainir_op_prefix(%name, %name_len, %kind, %width)
+  #return %w
 }
 
 // 发一个临时值名字 `%r<n>`。
 #proc meta_emit_temp_name(%n: #bits<64>) -> #bits<32> {
-  %pct = #data_addr meta_fn_pct
-  %w1 = #call lain_meta_emit_write(%pct, 1)
-  %r = #data_addr meta_char_r
-  %w2 = #call lain_meta_emit_write(%r, 1)
-  %w3 = #call meta_emit_uint(%n)
-  #return 0
+  %w = #call lainir_temp_name_emit(%n)
+  #return %w
 }
 
 // `meta_emit_binding_bin` / `meta_emit_binding_const` / `meta_emit_return` /
