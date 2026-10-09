@@ -440,8 +440,20 @@
     %s2 = #if %f_construct -> (#bits<32>) {
       // 构造：这个类型的正文从哪开始，**问符号表**，不回源码里找
       %tb = #call meta_scope_body(%base, %lhs_lo, %rec_hi, 4)
+      // 初始化列表那个组节点：值名在根里的下一个兄弟。`meta_cursor_at` 命中值名，
+      // 父组从 `meta_cursor_parent()` 取 —— 必须紧接着用。
+      %root0 = #call meta_root_of_source(%base)
+      %vix = #call meta_cursor_at(%root0, %lhs_lo)
+      %vmiss = #eq[#bits<64>](%vix, 0xFFFFFFFFFFFFFFFF)
+      #if %vmiss {
+        %vg = #call lain_meta_fail(4)
+        #return 4
+      }
+      %vparent = #call meta_cursor_parent()
+      %vnext = #add[#bits<64>](%vix, 1)
+      %cgrp = #call ast_child(%vparent, %vnext)
       %r1 = #call meta_lower_construct(%base, %len, %name_lo, %name_hi,
-                                       %tb, %after)
+                                       %tb, %cgrp)
       #yield %r1
     } else {
       %s3 = #if %f_field -> (#bits<32>) {
@@ -1212,10 +1224,29 @@
       %ends = #if %anyend -> (#bits<1>) {
         #yield 1
       } else {
-        %iskind2 = #eq[#bits<64>](#call meta_node_kind(%c), 2)
+        // 初始化列表里的**下一个字段名**（`a: 1 b: 2` 的 `b`）也是终点：一个槽后面紧跟
+        // `:` 就是字段名，值这条表达式到这里为止。别处表达式里出现「名字 :」本来就是
+        // 错的，所以这条不会把别处的合法表达式截断。
+        %fnext = #add[#bits<64>](%i, 1)
+        %fnode = #call ast_child(%parent, %fnext)
+        %fnone = #eq[#bits<64>](%fnode, 0)
+        %fn_at = #call meta_node_start(%fnode)
+        %fn_b = #call bs_byte_at(%base, %fn_at, %len)
+        %fn_len = #call meta_node_len(%fnode)
+        %fn_colon = #eq[#bits<8>](%fn_b, 58)
+        %fn_one = #eq[#bits<64>](%fn_len, 1)
+        %fn_field = #and[#bits<1>](%fn_colon, %fn_one)
+        %fn_none0 = #eq[#bits<1>](%fnone, 0)
+        %isfield = #and[#bits<1>](%fn_field, %fn_none0)
+        %ends2 = #if %isfield -> (#bits<1>) {
+          #yield 1
+        } else {
+          %iskind2 = #eq[#bits<64>](#call meta_node_kind(%c), 2)
         %isbrace = #eq[#bits<8>](#call ast_delim(%c), 123)
-        %isblock = #and[#bits<1>](%iskind2, %isbrace)
-        #yield %isblock
+          %isblock = #and[#bits<1>](%iskind2, %isbrace)
+          #yield %isblock
+        }
+        #yield %ends2
       }
       #yield %ends
     }

@@ -466,21 +466,6 @@
   #return %w
 }
 
-// 写一条 `  #store[repr](%NAME, #lea(%base, 0, 0, off))`，值是**一个变量的名字**
-// （`a: p`）。名字按源码原样发 `%NAME` —— 参数、局部绑定、临时值都是按这个名字
-// 发出去的。顶层绑定的名字**不**在这一路：那是过程（`#call NAME()`），不是值。
-#proc meta_emit_store_name(%kind: #bits<64>, %width: #bits<64>,
-                           %at: #addr, %len: #bits<64>,
-                           %off: #bits<64>, %base_n: #bits<64>) -> #bits<32> {
-  %buf = #data_addr lainir_text_buffer
-  %head = #call lainir_buf_byte(%buf, 0, 37)
-  %vlen = #call lainir_buf_bytes(%buf, %head, %at, %len)
-  %alen = #call meta_emit_field_addr(%buf, %off, %base_n)
-  %lbuf = #lea(%buf, 64, 1, 0)
-  %w = #call lainir_store(%kind, %width, %buf, %vlen, %lbuf, %alen)
-  #return %w
-}
-
 // 写一条 `  #store[repr](<值文本>, #lea(%base, 0, 0, off))`：值文本由调用方渲染好
 // （放在 `lainir_text_buffer` 的 0 起），地址那段与上面两条 store 同一个来源。
 #proc meta_emit_store_text(%kind: #bits<64>, %width: #bits<64>,
@@ -493,61 +478,77 @@
   #return %w
 }
 
-// 初始化列表 `{ f: v f: v }`：每个字段一条 store。
+// 初始化列表 `{ f: v f: v }`：每个字段一条 store，值是**一条表达式**（`a: p + 1`）。
+//
+// 走**游标**（花括号组 + 下标）：值到哪结束只有表达式那条路答得出来 —— 「下一个字段名」
+// （一个槽后面紧跟 `:`）由 `meta_emit_expr` 当终点，终止下标放在暂存区 `+192`。
 #proc meta_construct_fields(%base: #addr, %len: #bits<64>,
                             %body: #bits<64>,
-                            %at: #bits<64>,
+                            %group: #bits<64>,
                             %base_n: #bits<64>) -> #bits<32> {
-  %st = #loop fields(%at: #bits<64> = %at) -> (#bits<32>) {
-    %here = #call bs_skip_space(%base, %at, %len)
-    %byte = #call bs_byte_at(%base, %here, %len)
-    %is_close = #eq[#bits<8>](%byte, 125)
-    #if %is_close {
-      #break fields(0)
+  %gnone = #eq[#bits<64>](%group, 0)
+  %st = #if %gnone -> (#bits<32>) {
+    // 初始化列表不是组：形状坏了
+    %fg = #call lain_meta_fail(4)
+    #yield 4
+  } else {
+    %count = #call ast_child_count(%group)
+    %r = #loop fields(%i: #bits<64> = 0) -> (#bits<32>) {
+      %more = #ult[#bits<64>](%i, %count)
+      #if %more {
+        %fnode = #call ast_child(%group, %i)
+        %f_lo = #call meta_node_start(%fnode)
+        %f_hi = #add[#bits<64>](%f_lo, #call meta_node_len(%fnode))
+        // 逗号（`a: 1, b: 2` 的写法）夹在字段之间：跳掉
+        %fb = #call bs_byte_at(%base, %f_lo, %len)
+        %iscomma = #eq[#bits<8>](%fb, 44)
+        #if %iscomma {
+          #continue fields(#add[#bits<64>](%i, 1))
+        }
+        %info = #call meta_layout_field(%base, %len, %body, %f_lo, %f_hi)
+        // 走表不中就是错的：不能把「走到 } 得到的总大小」当成字段偏移用。
+        %found = #lshr[#bits<64>](%info, 63)
+        %missing = #eq[#bits<64>](%found, 0)
+        #if %missing {
+          %f = #call lain_meta_fail(8)
+          #break fields(8)
+        }
+        %off = #and[#bits<64>](%info, 0xFFFFFFFFFF)
+        %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 40), 15)
+        %width = #and[#bits<64>](#lshr[#bits<64>](%info, 44), 255)
+        // 名字、冒号各占一格，值是第三格起的那条表达式
+        %vi = #add[#bits<64>](%i, 2)
+        %vst = #call meta_emit_expr(%base, %len, %kind, %width, 0, 0, %group,
+                                    %vi, 0, 0, 0, 0)
+        %vbad = #ne[#bits<32>](%vst, 0)
+        #if %vbad {
+          #break fields(%vst)
+        }
+        %sc = #call lain_meta_scratch_data()
+        %vref = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+        %vlo = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+        %vhi = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+        %nx = #call meta_cell_get(#lea(%sc, 192, 1, 0))
+        %vbuf = #data_addr lainir_text_buffer
+        %vlen = #call meta_render_ref2(%base, %len, %vref, %vlo, %vhi, %vbuf)
+        %lenbad = #eq[#bits<64>](%vlen, 0xFFFFFFFFFFFFFFFF)
+        #if %lenbad {
+          %fl = #call lain_meta_fail(4)
+          #break fields(4)
+        }
+        %w = #call meta_emit_store_text(%kind, %width, %vbuf, %vlen, %off,
+                                        %base_n)
+        %wn = #ne[#bits<32>](%w, 0)
+        #if %wn {
+          #break fields(%w)
+        }
+        // 表达式停在下一格：那是下一个字段名、夹着的逗号、或者组的末尾
+        #continue fields(%nx)
+      } else {
+        #break fields(0)
+      }
     }
-    %f_hi = #call bs_skip_ident(%base, %here, %len)
-    %colon = #call bs_skip_space(%base, %f_hi, %len)
-    %one = #add[#bits<64>](%colon, 1)
-    %v_lo = #call bs_skip_space(%base, %one, %len)
-    %v_hi = #call bs_skip_ident(%base, %v_lo, %len)
-    %info = #call meta_layout_field(%base, %len, %body, %here, %f_hi)
-    // 走表不中就是错的：不能把「走到 } 得到的总大小」当成字段偏移用。
-    %found = #lshr[#bits<64>](%info, 63)
-    %missing = #eq[#bits<64>](%found, 0)
-    #if %missing {
-      %f = #call lain_meta_fail(8)
-      #break fields(8)
-    }
-    %off = #and[#bits<64>](%info, 0xFFFFFFFFFF)
-    %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 40), 15)
-    %width = #and[#bits<64>](#lshr[#bits<64>](%info, 44), 255)
-    // 值可以是一个数（`a: 1`）或**一个变量的名字**（`a: p`）。更复杂的初始化
-    // 表达式（`a: p + 1`）还不支持：ident 之后就停，后面的算子会被丢掉，所以这里
-    // 只认这两种。
-    %lead = #call bs_byte_at(%base, %v_lo, %len)
-    %is_digit = #and[#bits<1>](#ugt[#bits<8>](%lead, 47), #ult[#bits<8>](%lead, 58))
-    %e = #if %is_digit -> (#bits<32>) {
-      %value = #call bs_read_uint(%base, %v_lo, %len)
-      %en = #call meta_emit_store(%kind, %width, %value, %off, %base_n)
-      #yield %en
-    } else {
-      %n_at = #lea(%base, %v_lo, 1, 0)
-      %n_len = #sub[#bits<64>](%v_hi, %v_lo)
-      %et = #call meta_emit_store_name(%kind, %width, %n_at, %n_len, %off,
-                                       %base_n)
-      #yield %et
-    }
-    // 初始化列表里可能有逗号，跳掉
-    %gap = #call bs_skip_space(%base, %v_hi, %len)
-    %sep = #call bs_byte_at(%base, %gap, %len)
-    %is_comma = #eq[#bits<8>](%sep, 44)
-    %next_at = #if %is_comma -> (#bits<64>) {
-      %past = #add[#bits<64>](%gap, 1)
-      #yield %past
-    } else {
-      #yield %gap
-    }
-    #continue fields(%next_at)
+    #yield %r
   }
   #return %st
 }
@@ -557,11 +558,12 @@
 //   #proc NAME() -> #addr { %base = #data_addr NAME_storage; stores; #return %base }
 //
 // `type_body` 是那个类型声明的正文起点——**从符号表取**（`meta_scope_body`），
-// 不是每次回源码里找一遍。`at` 是初始化列表 `{` 的位置。
+// 不是每次回源码里找一遍。`group` 是初始化列表那个**组节点**——字段值是一条表达式，
+// 走的是游标（组 + 下标），所以调用方把组一起给进来。
 #proc meta_lower_construct(%base: #addr, %len: #bits<64>,
                            %bind_lo: #bits<64>, %bind_hi: #bits<64>,
                            %type_body: #bits<64>,
-                           %at: #bits<64>) -> #bits<32> {
+                           %group: #bits<64>) -> #bits<32> {
   %size = #call meta_layout_size(%base, %len, %type_body)
   %failed = #eq[#bits<64>](%size, 0xFFFFFFFFFFFFFFFF)
   #if %failed {
@@ -591,8 +593,7 @@
   %w9 = #call lainir_write(%bind_at, %bind_len)
   %w10 = #call lainir_storage_suffix_write()
 
-  %body = #add[#bits<64>](%at, 1)
-  %st = #call meta_construct_fields(%base, %len, %type_body, %body,
+  %st = #call meta_construct_fields(%base, %len, %type_body, %group,
                                   0xFFFFFFFFFFFFFFFF)
 
   %w11 = #call lainir_return_base_close()
@@ -612,11 +613,11 @@
 // `#alloca` 从栈租约的水位递增，帧退出时水位回退（`stack_mark`），所以这块地址
 // **不能带出函数** —— 同 C 返回局部地址。框对齐到 16 字节。
 //
-// `%type_lo`/`%type_hi` 是构造名（`Rec`）的位置，`%brace` 是那个花括号组的起点。
+// `%type_lo`/`%type_hi` 是构造名（`Rec`）的位置，`%group` 是那个花括号组节点。
 #proc meta_lower_construct_local(%base: #addr, %len: #bits<64>,
                                  %name_lo: #bits<64>, %name_hi: #bits<64>,
                                  %type_lo: #bits<64>, %type_hi: #bits<64>,
-                                 %brace: #bits<64>,
+                                 %group: #bits<64>,
                                  %is_ret: #bits<1>) -> #bits<32> {
   %body = #call meta_scope_body(%base, %type_lo, %type_hi, 4)
   %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
@@ -647,8 +648,7 @@
   }
   %n = #call meta_next_temp()
   %w7 = #call lainir_alloca_at(%n, 8, %size)
-  %body_at = #add[#bits<64>](%brace, 1)
-  %st = #call meta_construct_fields(%base, %len, %body, %body_at, %n)
+  %st = #call meta_construct_fields(%base, %len, %body, %group, %n)
   #if #ne[#bits<32>](%st, 0) {
     #return %st
   }

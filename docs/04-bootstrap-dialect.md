@@ -425,6 +425,11 @@ proc 的路（对照 `sumtoplevel.lain`）。
 `ctorempty.lain`（空变体），产物都过 `lainir_parse` + `lainir_verify`；顶层那条静态 storage 的路
 仍由 `sumtoplevel.lain` 对照。
 
+**字段值可以是表达式**：`Point { x: a + 1 y: b }` 的 `#store` 值是那条 `#add` 的结果
+（字段之间夹逗号也认），顶层静态构造同样吃字面量表达式与调用。样例
+`bootstrap/lain/examples/field_expr.lain`，探针 `fieldsum.lain` / `fieldsum2.lain` /
+`fieldsum3.lain` / `topexpr.lain`，产物都过 `lainir_parse` + `lainir_verify`。
+
 值层剩下的是（每条都实测过，拒绝码一律 4，源在 build/probes/ 下）：
 
 | 写法 | 实测 | 探针 |
@@ -432,8 +437,7 @@ proc 的路（对照 `sumtoplevel.lain`）。
 | 顶层 `let c = Shape.Circle { 7 };`（对照，已能用） | 0 | `sumtoplevel.lain` |
 | 局部绑定上的字段访问 `let p = Point { … }; return p.x;` | 4 | `fieldlocal.lain` |
 
-还没有的是：字段值只能是「一个字面量」或「一个名字」（`a: p + 1` 只取 `p`）、上面
-那条逃逸语义，以及`值名 → 类型`的表。那张表今天只有**函数参数**那一份
+还没有的是：上面那条逃逸语义，以及`值名 → 类型`的表。那张表今天只有**函数参数**那一份
 （`meta_word_type_name` 走参数组扫描），局部绑定与循环参数都没有，所以
 `let p = Point { … }; return p.x;` 干净地报 4。顶层构造里写变量名会发出解析不到的
 `%NAME`（顶层绑定是过程 `#call NAME()`，不是值）—— 由装载器拒。这些都不影响自举：手写
@@ -696,14 +700,22 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   所以参数、字面量、调用结果都能当载荷；空变体只发 tag 那条（`Shape.Empty { }`）。
 - 形状判据：积类型的构造是形状 10（名字后面直接跟花括号组），和类型的构造是形状 6（点号形态）
   且成员名后面跟 `{`；两条都由 `meta_dotted_delim` 的返回值分流（`(` 投影、`{` 构造、其余字段）。
-- 构造的字段值只认两种形态：字段值的首字节是数字 → 当字面量（`bs_read_uint`）；否则整段
-  当**一个变量的名字**（发 `%NAME`）。所以 `a: p + 1` 只取 `p`、丢掉 `+ 1`；变体构造的载荷
-  同理。要支持表达式得先有表达式树。
+- 构造的字段值是**一条表达式**（`Point { x: a + 1 y: b }`）：初始化列表走**游标**（花括号组 + 下标），
+  每个字段是「名字、冒号、值」三格起，值交给 `meta_emit_expr` 降级，结果文本写进 `#store` 的值位置
+  （`meta_construct_fields` + `meta_emit_store_text`）。值到哪结束由**下一个字段名**定：一个槽后面
+  紧跟 `:` 就是字段名，表达式在那里停 —— 这条终点判定只在「表达式里出现名字加冒号」时生效，别处
+  那样写本来就是错的；字段之间夹的逗号也认。变体构造的载荷（`{ k }`）同样按操作数降级。
+- 初始化列表是一个**组节点**：调用方把组节点一起给进来（`meta_cursor_at` 命中组里某个 token 时
+  的父组，或者 `meta_cursor_next` 拿到的下一个兄弟）—— 组节点的文本起点不是它的第一个孩子，
+  按 `{` 的字节位置反查会落到孩子上。
+- 顶层静态构造（`data NAME_storage` + `NAME() -> #addr`）吃同一套字段值规则：字面量表达式与调用
+  都在那个过程体里发。值里的**名字**仍是既存缺口：顶层绑定按值引用要发 `#call NAME()`，今天发成
+  `%NAME`，由装载器拒。
 - 栈上构造的值**逃不出帧**：`#alloca` 从栈租约 bump（16 对齐，越界报
   `LAINVM_TRAP_STACK_EXHAUSTED`），帧弹出时水位退回 `stack_mark`（seed/src/vm/engine.c:926），
   区域退出后地址失效。`return T { … }` 与把参数地址返回都**照样发出**，今天不做逃逸检查。
 - 顶层构造里写变量名会发出解析不到的 `%NAME`（顶层绑定是过程 `#call NAME()`，不是值）——
-  由装载器拒。变体（enum）构造仍只走顶层静态块，函数体内的变体构造还未降级。
+  由装载器拒。函数体内的变体构造与积类型同形（见上面那条）。
 - 类型不符的绑定**不做检查**：`func bad(p: Point) -> i32 { let k: i32 = p; return k; }`
   会发出 `%k = #add[#bits<32>](%p, 0)`（`host_status=0`），但产物过不了 `lainir_verify`
   （2005 BAD_OPERAND_TYPE）。也就是说错误由**下游信任门**拒收、不会变成错误代码，
