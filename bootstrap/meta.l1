@@ -998,6 +998,46 @@
   #return %r
 }
 
+// 一个操作数位置：是带值 if（`1 + if c { a } else { b }`）就整条降级成一条临时值，
+// 别的都走普通操作数路径。两条路都把「结果是谁」写进 `+168`/`+176`/`+184`，把
+// **下一格**写进 `+2368`：普通路径的下一格由形状决定，if 的下一格是「整条 if 之后」，
+// 只有 `meta_lower_if_value` 知道。调用方紧接着取走这两样。
+#proc meta_operand_step(%base: #addr, %len: #bits<64>, %kind: #bits<64>,
+                        %width: #bits<64>, %t_lo: #bits<64>, %t_hi: #bits<64>,
+                        %parent: #bits<64>, %index: #bits<64>) -> #bits<32> {
+  %c0 = #call ast_child(%parent, %index)
+  %is_if0 = #call meta_node_is_word(%c0, %base, #data_addr meta_kw_if, 2)
+  %sc0 = #call lain_meta_scratch_data()
+  %r0 = #if %is_if0 -> (#bits<32>) {
+    %tn0 = #call meta_next_temp()
+    %st0 = #call meta_lower_if_value(%base, %len, %parent, %index,
+                                     0, 0, %t_lo, %t_hi, 2, %tn0)
+    %bad0 = #ne[#bits<32>](%st0, 0)
+    %r1 = #if %bad0 -> (#bits<32>) {
+      #yield %st0
+    } else {
+      %p1 = #call meta_cell_put(#lea(%sc0, 168, 1, 0), %tn0)
+      %p2 = #call meta_cell_put(#lea(%sc0, 176, 1, 0), 0)
+      %p3 = #call meta_cell_put(#lea(%sc0, 184, 1, 0), 0)
+      #yield 0
+    }
+    #yield %r1
+  } else {
+    %st1 = #call meta_operand_emit(%base, %len, %kind, %width, %t_lo, %t_hi,
+                                   %parent, %index)
+    %bad1 = #ne[#bits<32>](%st1, 0)
+    %r2 = #if %bad1 -> (#bits<32>) {
+      #yield %st1
+    } else {
+      %nx1 = #call meta_after_operand(%base, %len, %parent, %index)
+      %p4 = #call meta_cell_put(#lea(%sc0, 2368, 1, 0), %nx1)
+      #yield 0
+    }
+    #yield %r2
+  }
+  #return %r0
+}
+
 // 一条表达式：`操作数 (算子 操作数)*`，左结合。`%first` 是第一个操作数节点。
 //
 // `%need_semi`：最外层要 1 —— 表达式必须**正好以 `;` 收尾**（少个 `;` 是错，不能当没
@@ -1046,7 +1086,7 @@
         %f0 = #call lain_meta_fail(3)
         #break e(3)
       }
-      %ost = #call meta_operand_emit(%base, %len, %kind, %width, %t_lo,
+      %ost = #call meta_operand_step(%base, %len, %kind, %width, %t_lo,
                                      %t_hi, %parent, %i)
       %obad = #ne[#bits<32>](%ost, 0)
       #if %obad {
@@ -1056,7 +1096,8 @@
       %ref = #call meta_cell_get(#lea(%sc, 168, 1, 0))
       %alo1 = #call meta_cell_get(#lea(%sc, 176, 1, 0))
       %ahi1 = #call meta_cell_get(#lea(%sc, 184, 1, 0))
-      %nx = #call meta_after_operand(%base, %len, %parent, %i)
+      %nx = #call meta_cell_get(#lea(%sc, 2368, 1, 0))
+      %nxclr = #call meta_cell_put(#lea(%sc, 2368, 1, 0), 0)
       #continue e(%nx, 1, %ref, %alo1, %ahi1, 0)
     }
     // 阶段二：%c 是算子、或者是表达式的终点
@@ -1251,13 +1292,17 @@
     // `meta_emit_op_mid` 稍后才读。先查算子再降级的话，名字会被递归那一次覆盖。
     // 真出过：`let main: i32 = 12 / (2 + 1);` 发成 `%r2 = #add[#bits<32>](12, %r1)`
     // （该是 `#sdiv`），验证通过，算出来 15 而不是 4。
-    %rst = #call meta_operand_emit(%base, %len, %kind, %width, %t_lo,
+    %rst = #call meta_operand_step(%base, %len, %kind, %width, %t_lo,
                                    %t_hi, %parent, %rni)
     %rbad = #ne[#bits<32>](%rst, 0)
     #if %rbad {
       #break e(%rst)
     }
     %sc3 = #call lain_meta_scratch_data()
+    // 右操作数之后接哪一格：这一格必须**紧接着**取走，后面那些类型查询虽然是叶子
+    // 调用，也不该指望它们不碰暂存区。
+    %rn_nx3 = #call meta_cell_get(#lea(%sc3, 2368, 1, 0))
+    %rn_nxclr = #call meta_cell_put(#lea(%sc3, 2368, 1, 0), 0)
     %rref = #call meta_cell_get(#lea(%sc3, 168, 1, 0))
     %rn_lo2 = #call meta_cell_get(#lea(%sc3, 176, 1, 0))
     %rn_hi2 = #call meta_cell_get(#lea(%sc3, 184, 1, 0))
@@ -1434,8 +1479,7 @@
     }
     // 这条是不是整条链的最后一条？看右操作数后面那个位置还是不是算子。
     // **必须在 `meta_op_resolve` 之后做**：这几个都是只读树的叶子调用，不碰 `+24`/`+32`。
-    %nx2 = #call meta_after_operand(%base, %len, %parent, %rni)
-    %nx2c = #call ast_child(%parent, %nx2)
+    %nx2c = #call ast_child(%parent, %rn_nx3)
     %a_at = #call meta_node_start(%nx2c)
     %a_b = #call bs_byte_at(%base, %a_at, %len)
     %a_nl = #call meta_node_len(%nx2c)
@@ -1487,7 +1531,7 @@
     } else {
       #yield 0
     }
-    #continue e(%nx2, 1, %tn, 0, 0, %bound2)
+    #continue e(%rn_nx3, 1, %tn, 0, 0, %bound2)
   }
   #return %st
 }

@@ -358,7 +358,7 @@ func cstr_len(p: addr) -> u64 {
 | 函数、参数类型、调用 | `func f(a: i32) -> i32 { … }`、`f(2)` | 多语句体、递归都通 |
 | 绑定与返回 | `let n: i32 = …;`、`let y = inc(n);`、`return n;` | 标注可省：类型由值推（调用取被调方返回类型、参数名取参数表） |
 | 条件 | `if a < b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件是任意表达式：裸条件与括号条件走同一个入口，块就是表达式停下来的那一格；分支必须以 `return` 收尾，所以 `if` 是语句不是值 |
-| 带值 if | `let x: i32 = if c { a } else { b };` | 降级为 `%x = #if %c -> (#bits<32>) { … #yield %a } else { … #yield %b }`：条件是任意表达式、类型取绑定的标注（缺标注由值推）；**只在绑定位置**可用（`return if …` 报 4），**必须带 else**（缺 else 报 4），两个分支都必须以一个值收尾。样例 `bootstrap/lain/examples/choose.lain` |
+| 带值 if | `let x: i32 = if c { a } else { b };`、`return if c { a } else { b };`、`return 1 + if c { a } else { b };` | 降级为 `%x = #if %c -> (#bits<32>) { … #yield %a } else { … #yield %b }`：条件是任意表达式、类型取绑定的标注（缺标注由值推）；绑定位置把结果绑在源码名字上，`return` 位置与表达式里的操作数位置（实参、括号内、与算子串联）把整条 `#if` 发成临时值再被外层引用；**必须带 else**（缺 else 报 4），两个分支都必须以一个值收尾。样例 `bootstrap/lain/examples/choose.lain`、`bootstrap/lain/examples/value_if.lain` |
 | 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 的边界与累加器宽度跟循环变量的类型走：i32/u32/u64/i64/usize 都能用（`u64` 曾报 5，A 的第四刀补齐 64 位算子后通了，实测 `#ult[#bits<64>]`），体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain` |
 | 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
@@ -461,16 +461,17 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
   （每个样例 2 次：建表与重建各一次）。
 
 **D. 控制流补齐**
-- 带值 `if`（`#if` 779 + `#yield` 719）：**前半完成** —— 绑定位置的带值 if 已可用
-  （`meta_lower_if_value`，样例 `bootstrap/lain/examples/choose.lain`，产物过 `lainir_parse` +
-  `lainir_verify`）；尚缺：作为操作数或返回值出现（`return if …`、`1 + if …`），以及缺 `else` 时
-  的默认分支语义。
+- 带值 `if`（`#if` 779 + `#yield` 719）：**完成**（缺 `else` 那一半除外）—— 绑定位置、`return`
+  位置与表达式里的操作数位置（实参、括号内、与算子串联）都已可用（`meta_lower_if_value` 的
+  `%name_mode`，操作数位置在表达式遍历的两处统一由 `meta_operand_step` 接住），样例
+  `bootstrap/lain/examples/choose.lain`、`bootstrap/lain/examples/value_if.lain`，产物都过
+  `lainir_parse` + `lainir_verify`；尚缺缺 `else` 时的默认分支语义。
 - `loop` 带标签 + 循环参数（`#loop` 97 / `#break` 185 / `#continue` 104）：**完成** ——
   标签、任意个参数、任意条件、多语句体（`meta_lower_loop`）与带实参的
   `break` / `continue`（`meta_lower_loop_jump`）都已可用，样例
   `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain`，产物都过
-  `lainir_parse` + `lainir_verify`。D 剩下的只有带值 `if` 的后半（当操作数/返回值、缺
-  `else` 的默认分支）与**循环体里的 `if`**：有条件早退要先让循环体接受嵌套语句。
+  `lainir_parse` + `lainir_verify`。D 剩下的只有带值 `if` 缺 `else` 的默认分支与**循环体里的
+  `if`**：有条件早退要先让循环体接受嵌套语句。
 
 **E. 声明与链接**
 - `extern NAME(a: T) -> U = link_name;`：**完成** —— 14 号 handler（`meta_register_extern` /

@@ -838,17 +838,32 @@
     %info = #call meta_tid_repr(%tid)
     %kind = #and[#bits<64>](%info, 255)
     %width = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
-    // 带值 if：`let x: T = if c { a } else { b };`（值的**第一个** token 是 `if` 那个词）。
-    // 只在绑定位置接住 —— `return if …` 还没有写法，干净地报 4。
+    // 带值 if：值的**第一个** token 是 `if` 那个词。两个位置都收：
+    //   `let x: T = if c { a } else { b };`  —— 结果绑在名字上（模式 0）
+    //   `return if c { a } else { b };`     —— 结果进临时值，再 `#return %r<n>`
     %vif = #call meta_node_is_word(%v, %base, #data_addr meta_kw_if, 2)
-    %notret_v = #eq[#bits<1>](%is_ret, 0)
-    %vif_ok = #and[#bits<1>](%vif, %notret_v)
+    // `let x = if …`（没有标注）在 `%no_type` 那一关就拒了，走不到这里。
     %vif_named = #ne[#bits<64>](%name_hi, %name_lo)
-    %do_vif = #and[#bits<1>](%vif_ok, %vif_named)
+    %do_vif = #and[#bits<1>](%vif, %vif_named)
     #if %do_vif {
       %vif_st = #call meta_lower_if_value(%base, %len, %parent, %vi,
-                                           %name_lo, %name_hi, %t_lo, %t_hi)
+                                           %name_lo, %name_hi, %t_lo, %t_hi,
+                                           0, 0)
       #return %vif_st
+    }
+    %vif_ret = #and[#bits<1>](%vif, %is_ret)
+    #if %vif_ret {
+      %vtn = #call meta_next_temp()
+      %vrst = #call meta_lower_if_value(%base, %len, %parent, %vi,
+                                        0, 0, %t_lo, %t_hi, 1, %vtn)
+      %vrstz = #ne[#bits<32>](%vrst, 0)
+      #if %vrstz {
+        #return %vrst
+      }
+      %vbuf = #data_addr lainir_text_buffer
+      %vrlen = #call lainir_buf_temp(%vbuf, 0, %vtn)
+      %vw = #call lainir_return_ref(%vbuf, %vrlen)
+      #return 0
     }
     // 形状读识别 pass 算好的那一格（键 = 这个出现位置），不再用「下一个节点是不是
     // `;`」猜。猜法在 `return g(x);` 上会挂：`g` 的下一个节点是那个组，于是组被当成
@@ -1061,8 +1076,15 @@
 #proc meta_lower_if_value(%base: #addr, %len: #bits<64>,
                           %parent: #bits<64>, %index: #bits<64>,
                           %name_lo: #bits<64>, %name_hi: #bits<64>,
-                          %t_lo: #bits<64>, %t_hi: #bits<64>) -> #bits<32> {
+                          %t_lo: #bits<64>, %t_hi: #bits<64>,
+                          %name_mode: #bits<64>,
+                          %temp_num: #bits<64>) -> #bits<32> {
   // 带值 if：`let x: T = if c { a } else { b };`。
+  //
+  // `%name_mode` 决定结果名怎么写：0 = 源码里的绑定名（`%name_lo`/`%name_hi`）；
+  // 1 = 临时值名 `%r<n>`（返回位置）；2 = 临时值名，并且把「整条 if 之后的下标」
+  // 写进暂存区 +2368（操作数位置，`1 + if c { a } else { b }`，`meta_operand_step`
+  // 紧接着取走）。
   //
   // 形状与语句 if 一样（`if <条件> <块> [else <块>]`），差别只在这条 `#if` **有结果**：
   // 两个区域各自 `#yield` 一个值，绑定名直接写在这条 `#if` 上。
@@ -1112,9 +1134,22 @@
         // `  %NAME = #if ` + 条件 + ` -> (` + 类型 + `) {\n`
         %w1 = #call lainir_indent_write()
         %w2 = #call lainir_st_pct_write()
-        %n_at = #lea(%base, %name_lo, 1, 0)
-        %n_len = #sub[#bits<64>](%name_hi, %name_lo)
-        %w3 = #call lainir_write(%n_at, %n_len)
+        %srcname = #eq[#bits<64>](%name_mode, 0)
+        %w3 = #if %srcname -> (#bits<32>) {
+          %n_at = #lea(%base, %name_lo, 1, 0)
+          %n_len = #sub[#bits<64>](%name_hi, %name_lo)
+          %w3a = #call lainir_write(%n_at, %n_len)
+          #yield %w3a
+        } else {
+          // 临时值名连百分号一起渲染，跳过首字节写（百分号已经由
+          // `lainir_st_pct_write` 发过）。
+          %ntxt = #call lainir_buf_temp(#data_addr lainir_text_buffer, 0,
+                                        %temp_num)
+          %np1 = #lea(#data_addr lainir_text_buffer, 1, 1, 0)
+          %nlen = #sub[#bits<64>](%ntxt, 1)
+          %w3b = #call lainir_write(%np1, %nlen)
+          #yield %w3b
+        }
         %w4 = #call lainir_assign_write()
         %w5 = #call lainir_if_head_write()
         %cref = #call meta_cell_get(#lea(%sc, 168, 1, 0))
@@ -1181,6 +1216,21 @@
             #yield %z3
           } else {
             %w17 = #call lainir_close_line_write()
+            %rz = #if %is_else -> (#bits<64>) {
+              %rza = #add[#bits<64>](%ei, 2)
+              #yield %rza
+            } else {
+              %rzb = #add[#bits<64>](%bi, 1)
+              #yield %rzb
+            }
+            // 操作数位置（模式 2）把「整条 if 之后」写进 +2368，表达式遍历接回。
+            %wantres = #eq[#bits<64>](%name_mode, 2)
+            %wres = #if %wantres -> (#bits<32>) {
+              %wresa = #call meta_cell_put(#lea(%sc, 2368, 1, 0), %rz)
+              #yield %wresa
+            } else {
+              #yield 0
+            }
             #yield 0
           }
           #yield %z6
