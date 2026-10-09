@@ -22,6 +22,54 @@
   #return %s
 }
 
+// extern NAME(a: T, ...) -> U = link; ：声明形状与 func 相同（第 4 个孩子是返回
+// 类型），只是没有函数体、末尾多一个 = link。它在作用域里的身份也是 6（函数声明），
+// 所以调用点、返回类型推导与参数表检查都与普通函数共用一条路。
+#proc meta_register_extern(%node: #bits<64>) -> #bits<32> {
+  %dummy = #call lain_meta_source_data(0)
+  %hit = #call meta_node_is_word(%node, %dummy, #data_addr meta_kw_extern, 6)
+  %s = #if %hit -> (#bits<32>) {
+    %r = #call meta_syntax_ensure(%node, 1, 14)
+    #yield %r
+  } else { #yield 0 }
+  #return %s
+}
+
+#proc meta_declare_extern(%base: #addr, %len: #bits<64>,
+                          %source: #bits<64>, %level: #bits<64>,
+                          %parent: #bits<64>, %index: #bits<64>) -> #bits<32> {
+  %s = #call meta_scope_add_decl(%base, %len, %source, %level,
+                                  %parent, %index, 6)
+  #return %s
+}
+
+#proc meta_lower_decl_extern(%base: #addr, %len: #bits<64>,
+                             %parent: #bits<64>, %index: #bits<64>,
+                             %node: #bits<64>) -> #bits<32> {
+  %ni = #add[#bits<64>](%index, 1)
+  %name_node = #call meta_cursor_next(%parent, %index)
+  %pi = #add[#bits<64>](%index, 2)
+  %params = #call meta_cursor_next(%parent, %ni)
+  %ai = #add[#bits<64>](%index, 3)
+  %ret_node = #call meta_cursor_next(%parent, %ai)
+  %ki = #add[#bits<64>](%index, 5)
+  %link = #call meta_cursor_next(%parent, %ki)
+  %l_lo = #call meta_node_start(%link)
+  %l_n = #call meta_node_len(%link)
+  %hdr = #call meta_emit_proc_header(%base, %len, %name_node, %params,
+                                     %ret_node)
+  %hbad = #ne[#bits<32>](%hdr, 0)
+  #if %hbad { #return %hdr }
+  %ex = #data_addr meta_st_extern
+  %w0 = #call lain_meta_emit_write(%ex, 10)
+  %l_at = #lea(%base, %l_lo, 1, 0)
+  %w1 = #call lain_meta_emit_write(%l_at, %l_n)
+  %dn = #data_addr meta_dquote_nl
+  %w2 = #call lain_meta_emit_write(%dn, 2)
+  #return 0
+}
+
+
 // recognize 的孩子上下文也由 func 拥有：只有相对下标 5 的函数体是 STMT。
 #proc meta_recognize_child_context_func(%relative: #bits<64>) -> #bits<64> {
   %body = #eq[#bits<64>](%relative, 5)

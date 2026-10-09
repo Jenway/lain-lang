@@ -1,7 +1,7 @@
 # bootstrap 方言
 
 自举的 stage0 是手写 LAINIR 文本（bootstrap/ 下按 bootstrap/SOURCE_ORDER 拼成 28 个文件、
-12541 行的编译单元；驱动报 unit files=28 bytes=540885）。要让 Lain 编译器能编译自己，
+12625 行的编译单元；驱动报 unit files=28 bytes=544762）。要让 Lain 编译器能编译自己，
 先得有一份**用 Lain 写的 Meta**；写它需要一门表面语言。
 
 这份文档定的是这门方言的特性集合、语法，以及每条语法降成什么 LAINIR。它不是 lainlang
@@ -97,7 +97,7 @@ continue LABEL(<实参…>);  // 早退：进入下一轮，实参按参数顺�
 let b: u8 = load(p);      // 读内存：宽度由期望类型定（也可写 return load(p);）
 store(p, v);              // 写内存：宽度取自 v 的类型
 let q: addr = lea(p, i);  // 地址算术：降成 #lea(%p, %i, 1, 0)
-let s: addr = "hi";      // 静态字节块（只允许顶层 let）：产物是 data s_storage ro { 104 105 0 } + #proc s() -> #addr
+let s: addr = "hi";      // 静态字节块（只允许顶层 let）：产物是 data s_storage ro { 104 105 0 } + #proc s() -> #addrextern NAME(a: T) -> U = link_name;   // 外部过程：只声明不定义，调用与 func 同路，产物是 #proc NAME(…) -> U #extern "link_name"
 ```
 
 - 赋值 `NAME = 值;` **只在循环体内合法**：能赋值的合法目标是循环自己声明的参数
@@ -119,9 +119,13 @@ let s: addr = "hi";      // 静态字节块（只允许顶层 let）：产物是
   `data NAME_storage ro { <字节…> 0 }` 加一个取址过程 `#proc NAME() -> #addr`（同一个名字，
   `%base = #data_addr NAME_storage`）。字节按源码原样搬（reader 认转义对但不解码），末尾补一个 0。
   别处（函数体内、作为实参）报 4：`data` 只能落顶层，而发射是流式的。
-- 顶层形式：`let` / `struct` / `enum` / `func` / `import(…)`。关键字经 Meta 语法
+- `extern` 是**声明**不是定义：形如 `extern NAME(a: T) -> U = link_name;`，链接名原样搬进
+  产物（`#proc NAME(%a: T) -> U #extern "link_name"`）。声明在作用域里的身份与 `func` 一样是 6，
+  所以调用点、返回类型推导、参数表检查共用同一条路；它不登记任何宿主能力（那头是驱动
+  `lainmeta_host_register` 的事）。样例 `bootstrap/lain/examples/extern.lain`。
+- 顶层形式：`let` / `struct` / `enum` / `func` / `extern` / `import(…)`。关键字经 Meta 语法
   注册表取 handler：1=my_if 2=func 3=if 4=struct 5=enum 7=顶层 let 8=return
-  9=局部 let 10=for 11=my_block 13=loop（12 是宏 `my_require`）。**6（原 scalar 声明）
+  9=局部 let 10=for 11=my_block 13=loop 14=extern（12 是宏 `my_require`）。**6（原 scalar 声明）
   已取消，号位退休不复用。**
 - `for` 是一条**表达式**，值就是累加变量的最终值；`#loop` 的变量直接就是 `i` 与 `acc`，
   不需要「源码名 → LAINIR 名」的映射表。v0 限制：不能嵌套循环；下界与上界是值（字面量、
@@ -259,6 +263,7 @@ func cstr_len(p: addr) -> u64 {
 | 十六进制字面量 | `0x10`、`0Xff` | 读成数值后按**十进制**规范化写进产物（`0xff00` → `65280`）；整段必须是合法数字：`0x` 后面没有数字报 4；超过绑定宽度仍报 23。样例 `bootstrap/lain/examples/hex.lain` |
 | 内存 | `let b: u8 = load(p);`、`return load(p);`、`store(p, v);`、`let q: addr = lea(p, i);`、`load(p + i)` | 三个内建名字：`load` 的宽度由期望类型定（`#load[#bits<8>](%p, 0)`），`store` 的宽度取值的类型（`#store[#bits<8>](%v, %p)`），`lea` 发 `#lea(%p, %i, 1, 0)`。地址加整数（`p + i`、`p + 1`）降成 `#lea(基址, 下标, 1, 0)`。没有期望类型报 4（`let b = load(p);`、`load(p);`）；`i + p` 报 4、`p + i * K` 报 6。样例 `bootstrap/lain/examples/memory.lain` |
 | 字节串字面量 | `let s: addr = "hi";`（只允许顶层） | 发 `data s_storage ro { 104 105 0 }` 与 `#proc s() -> #addr { %base = #data_addr s_storage; #return %base }`；字节原样搬、末尾补 0。样例 `bootstrap/lain/examples/bytes.lain`。函数体内写字节串报 4 |
+| 外部过程与链接 | `extern NAME(a: T) -> U = link_name;` | 只声明不定义：名字进作用域（身份与 `func` 一样）、调用走同一条表达式路径，产物是 `#proc NAME(%a: T) -> U #extern "link_name"`；链接名原样搬运，宿主那头登记与否由驱动决定。样例 `bootstrap/lain/examples/extern.lain` |
 | 负数字面量 | `-5`（负号紧跟数字） | LAINIR 的字面量是无符号十进制文本，没有负号，所以降级成 `#sub[repr](0, 5)`：宽度与符号都取上下文类型。只认字面量，一元负号作用于变量仍报 4。样例 `bootstrap/lain/examples/neg.lain` |
 
 实测被拒（列出来是因为它们看着都该能用）：`i + p` 报 4（只认左边的地址）；
@@ -334,7 +339,14 @@ func cstr_len(p: addr) -> u64 {
   `else` 的默认分支）与**循环体里的 `if`**：有条件早退要先让循环体接受嵌套语句。
 
 **E. 声明与链接**
-- `extern NAME(a: T) -> U = link_name;`（46 个能力 1:1；手写 Meta 的 `#extern` 正好 46 次）。
+- `extern NAME(a: T) -> U = link_name;`：**完成** —— 14 号 handler（`meta_register_extern` /
+  `meta_declare_extern` / `meta_lower_decl_extern`，头由抽出来的 `meta_emit_proc_header` 发），
+  声明身份与 `func` 一样是 6，调用点与返回类型推导完全共用一条路（样例
+  `bootstrap/lain/examples/extern.lain`：4 条 extern + 3 个函数，产物过 `lainir_parse` +
+  `lainir_verify`）。手写 Meta 的 46 个 `#extern` 里取 14 条最复杂的签名实测逐字符等价
+  （build/probes/cap12.lain，matched=14 of 14）。**注意**：单个编译单元里声明数量有既存
+  上限 —— 20 条左右开始不稳（22 条 extern 报 4、22 条 func 报 9401，非单调可重复），
+  与 extern 无关，见《待补规则》。
 - struct / enum 名字可写进参数类型与标注；函数体内构造的 storage（见二）。
 
 **F. 层 0：`lainir_*` 发射库** —— 见上文《层 0：发射层》。它是「用 Lain 写 Meta」真正缺的
@@ -366,7 +378,7 @@ func cstr_len(p: addr) -> u64 {
 `#extern`；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
 静态图看不见的间接引用。
 
-今天的规模：28 个文件 / 419 个 `#proc` / 143 个 `data` 块；注释 1892 行。
+今天的规模：28 个文件 / 407 个 `#proc` / 144 个 `data` 块；注释 1899 行。
 
 **死 proc：46 个、1306 行（约 10%）。**
 
@@ -394,9 +406,9 @@ bootstrap/std/eval.l1 的 bytes 与 emitted 请求同理：功能没接线，不
 
 **未被引用的 `data` 块 10 个**：`meta_kw_arrow`@bootstrap/std/lex.l1:107、
 `meta_o1`@bootstrap/std/emit.l1:81、`meta_o5`@bootstrap/std/emit.l1:85、
-`meta_s2`@bootstrap/std/emit.l1:223、`meta_s3a`@bootstrap/std/emit.l1:224、
-`meta_s3b`@bootstrap/std/emit.l1:225、`meta_s4a`@bootstrap/std/emit.l1:226、
-`meta_s4b`@bootstrap/std/emit.l1:227、`meta_reg_entry_off`@bootstrap/std/registry.l1:30、
+`meta_s2`@bootstrap/std/emit.l1:226、`meta_s3a`@bootstrap/std/emit.l1:227、
+`meta_s3b`@bootstrap/std/emit.l1:228、`meta_s4a`@bootstrap/std/emit.l1:229、
+`meta_s4b`@bootstrap/std/emit.l1:230、`meta_reg_entry_off`@bootstrap/std/registry.l1:30、
 `meta_reg_entry_size`@bootstrap/std/registry.l1:32。
 
 **从未被调用的能力包装 7 个**（bootstrap/std/emit.l1 的 `#extern` 加 seed/src/meta/host.c
@@ -407,7 +419,7 @@ bootstrap/std/eval.l1 的 bytes 与 emitted 请求同理：功能没接线，不
 `lain_meta_diagnostic_field`@bootstrap/std/emit.l1:284、
 `lain_meta_apply_diagnostic_field`@bootstrap/std/emit.l1:285。
 
-**其他杠杆**：注释 1892 行，最重的几个是 bootstrap/std/emit.l1 84/302（28%）、
+**其他杠杆**：注释 1899 行，最重的几个是 bootstrap/std/emit.l1 84/302（28%）、
 bootstrap/std/parse.l1 192/764（25%）、bootstrap/std/types.l1 22/101（22%）、
 bootstrap/std/recognize.l1 115/537（21%）、bootstrap/meta.l1 298/1532（19%）；
 bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
@@ -419,7 +431,7 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 
 今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（仅绑定位置）/ `for` / `loop`（标签 + 参数 + 多语句体 + 带实参的 `break`/`continue`）/
 `load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 顶层字节串（→ `#data` + 取址过程）/
-宿主整块窗口授予（`region_grant`，暂存区的基址与容量从记录读回）/
+宿主整块窗口授予（`region_grant`，暂存区的基址与容量从记录读回）/ `extern` 声明（`= link_name`，调用与 `func` 同路）/
 算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
 **D 的剩项（带值 `if` 当操作数/返回值、循环体里的 `if`）+ E + F**；A、B、C 已完成。
 
@@ -464,6 +476,12 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   它不能放暂存区的固定格 —— 那些格被各遍当诊断/暂存区用（例如 `meta_scope_scan_root` 写
   1540 + src*32）。授予以**宿主状态**为准（能力返回 0，失败写在宿主状态里），所以 `scope_setup`
   授完先读一次 `lain_meta_status`。
+- `extern` 只做声明：链接名原样搬进 `#extern "…"`，**不等于**宿主登记了对应能力 ——
+  能力表是驱动调 `lainmeta_host_register` 建的，两者对不上要到调用时才炸。
+- 单个编译单元的声明数量有既存上限（不是 extern 引入）：一个文件里 20 条左右开始不稳 ——
+  22 条 extern 报 4（诊断无位置）、22 条 func 报 9401（TREE_HANDLE），且结果非单调
+  （21 条过、22 条挂、25 条又过）但可重复。定位线索：Meta 的声明/展开阶段（AstIn/AstOut arena、
+  scratch 或 visited 预算），超出本轮范围。多文件同一次驱动也一样（8 个源码合计 45 条 extern 报 4）。
 
 ## 与现状的差距
 
