@@ -274,27 +274,31 @@ func cstr_len(p: addr) -> u64 {
 曾报 4，已在 B 的后半修好；十六进制 `0x10` 曾被 `bs_read_uint` 静默读成 `0`（更糟：`host_status=0` 而产物是错的），
 已在同一次修好；带值 `if` 曾报 4，已在 D 的第一半修好；字节串字面量曾报 4，已在 C 的第二半修好
 （只支持顶层绑定）；`load`/`store`/`lea` 曾报 6
-（收尾的加零复制走源码算子表，`u8` 没有绑定），已在 C 的第一半修好。）
+（收尾的加零复制走源码算子表，`u8` 没有绑定），已在 C 的第一半修好；函数体内的聚合构造
+曾报 4，已在 E 的第三刀修好 —— 降级到栈上 `#alloca`（见《二、半成品》）。）
 
 ### 二、半成品：`struct` / `enum` 的值层
 
 它们**不是**档位问题 —— handler 4/5 早已注册，声明会发出布局（`<T>__<f>_offset`、
-`<T>__size`、变体的 tag 与载荷偏移），顶层 `let p = Pair { a: 1 b: 2 };` 也会发出
+`<T>__size`、变体的 tag 与载荷偏移），顶层 `let p = Pair { a: 1 b: 2 };` 会发出
 `data p_storage rw { … }` 与 `#proc p() -> #addr`。**名字已经能用**：struct / enum 的名字可以写进参数类型与带标注的 `let`（见《一、已能用》的
-「聚合类型名」行）；缺的仍然是**值层**：字段访问与变体投影当值用还没降级
-（bootstrap/std/funcs.l1:895-898 干净地报 4）。函数体里的构造还差一份 storage ——
-顶层那份是静态 `data`，函数体内发不出顶层 `data`（发射是流式的），今天报 4。两条实现路线
-（尚未定案，见下）：
+「聚合类型名」行）。
 
-- **每个构造点一份静态 storage**：先要有「带外顶层区」——把 `data` 攒到旁路缓冲、最后拼回
-  模块顶层（这是 F 的一部分）。存储是全局的，构造出的值返回/跨函数传都安全；代价是递归
-  共享同一份存储（重入会互相踩）。
-- **`#alloca`**：IR、验证器、引擎、解析都已实现（`#alloca[ty](count)`，count 必须是常量，
-  元素类型只决定每元素字节数；从栈租约里 bump，返回**裸地址**）。帧退出时水位回退
-  （`tcb.c` 的 `stack_mark` → `engine.c:926`），所以区域退出后地址失效 —— 构造出的值
-  不能安全返回或跨函数传（同 C 返回局部地址）。把它从《四、推迟与排除》拉进 v0 即可用。
+**值层已定案：栈（`#alloca`）。** 函数体里的 `let q: T = T { … };` 与
+`return T { … };` 已经降级成
+`%r<n> = #alloca[#bits<8>](<size>)` + 每字段一条 `#store`（基址 `#lea(%r<n>, 0, 0, <off>)`），
+绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`。选栈而不是「每个构造点一份静态 storage」，是因为后者
+要先有带外顶层区（F 的一部分）、且递归会共享同一份存储（重入互相踩）；栈版本的代价是**值
+逃不出帧** —— `#alloca` 从栈租约里 bump（`engine.c` 的 `op_alloca`：元素大小 × 常量 count，
+16 对齐，越界报 `LAINVM_TRAP_STACK_EXHAUSTED`），帧弹出时水位退回 `stack_mark`
+（`engine.c:926`），所以区域退出后地址失效，同 C 返回局部地址。今天**不检查**这种逃逸：
+`return p;` 照样发出，返回的是已失效的栈地址。
 
-两条路都不影响自举：手写 Meta 里 `#struct`/`#enum` 的命中数是 0。
+值层剩下的是：字段访问当值、变体投影当值（bootstrap/std/funcs.l1:895-898 仍干净地报 4）、
+函数体内的变体构造（变体仍只走顶层静态块）、字段值只能是「一个字面量」或「一个名字」
+（`a: p + 1` 只取 `p`）、以及上面那条逃逸语义。顶层构造里写变量名会发出解析不到的
+`%NAME`（顶层绑定是过程 `#call NAME()`，不是值）—— 由装载器拒。这些都不影响自举：手写
+Meta 里 `#struct`/`#enum` 的命中数是 0。
 
 ### 三、待做（按阻塞顺序）
 
@@ -364,7 +368,12 @@ func cstr_len(p: addr) -> u64 {
   `let q: Point = p;` 是一次地址复制（`#lea(%p, 0, 1, 0)`）；实现是
   `bootstrap/std/registry.l1` 的 `meta_tid_repr` 对 kind 2/3 直接报 addr
   （聚合记录里 size/align 占了 kind/width 那两个字）。样例 `bootstrap/lain/examples/types.lain`。
-- 函数体内构造的 storage（见二）。
+- 函数体内构造的 storage（见二）：**完成** —— 值层定案为**栈上 `#alloca`**：每个构造点发
+  `%r<n> = #alloca[#bits<8>](<布局大小>)` 加每字段一条 `#store`，绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`、
+  `return T { … }` 直接 `#return %r<n>`。实现是 `bootstrap/std/records.l1` 的
+  `meta_lower_construct_local` 与拆开的 `meta_emit_store_head`/`_tail`/`_name`，
+  入口在 `bootstrap/std/funcs.l1` 的 `meta_lower_stmt`（构造单独成句的早退分支）。样例
+  `bootstrap/lain/examples/locals.lain`。
 
 **F. 层 0：`lainir_*` 发射库** —— 见上文《层 0：发射层》。它是「用 Lain 写 Meta」真正缺的
 那一层，也是 bootstrap/std/wire.l1 那套手写拼串的正式化。
@@ -448,6 +457,7 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 
 今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（仅绑定位置）/ `for` / `loop`（标签 + 参数 + 多语句体 + 带实参的 `break`/`continue`）/
 `load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 顶层字节串（→ `#data` + 取址过程）/
+函数体与顶层的聚合构造（→ 栈上 `#alloca` + 每字段 `#store`，或顶层 `data`）/
 宿主整块窗口授予（`region_grant`，暂存区的基址与容量从记录读回）/ `extern` 声明（`= link_name`，调用与 `func` 同路）/
 算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）/ 聚合类型名（struct、enum）进参数类型与标注。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
 **D 的剩项（带值 `if` 当操作数/返回值、循环体里的 `if`）+ E + F**；A、B、C 已完成。
@@ -501,6 +511,22 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   word16/word24 是 size/align，本来会被当成 kind/width 解包出 `#bits<4>` 这种假类型。
 - 声明体里字段/变体**空格分隔**（`x: i32` 然后换行 `y: i32`）：写成逗号分隔
   （`x: i32, y: i32`）会让字段走查把逗号当字段名起步，`meta_type_resolve` 拿不到类型报 5。
+- 函数体内的聚合构造降级到**栈**：每个构造点发 `%r<n> = #alloca[#bits<8>](<布局字节数>)`
+  （`#alloca` 的 count 是元素个数，元素类型是 `#bits<8>`，所以按字节；count 必须是常量，
+  布局大小为 0 报 5，验证器另对常量 0 报 2024），每字段一条
+  `#store[repr](<值>, #lea(%r<n>, 0, 0, <字段偏移>))`；绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`，
+  `return T { … }` 直接 `#return %r<n>`。
+- 同一 proc 里**每个构造点必须用自己的 `%r<n>`**：装载器 `region_lookup`（seed/src/vm/image.c）
+  按名字取**第一个**匹配定义，重名会静默指向前一个（不报错、只算错）。临时编号来自暂存区
+  +144 的计数器（`meta_next_temp`），所以顶层字面名 `%base` 与它们不冲突。
+- 构造的字段值只认两种形态：字段值的首字节是数字 → 当字面量（`bs_read_uint`）；否则整段
+  当**一个变量的名字**（发 `%NAME`）。所以 `a: p + 1` 只取 `p`、丢掉 `+ 1`；变体构造的载荷
+  同理。要支持表达式得先有表达式树。
+- 栈上构造的值**逃不出帧**：`#alloca` 从栈租约 bump（16 对齐，越界报
+  `LAINVM_TRAP_STACK_EXHAUSTED`），帧弹出时水位退回 `stack_mark`（seed/src/vm/engine.c:926），
+  区域退出后地址失效。`return T { … }` 与把参数地址返回都**照样发出**，今天不做逃逸检查。
+- 顶层构造里写变量名会发出解析不到的 `%NAME`（顶层绑定是过程 `#call NAME()`，不是值）——
+  由装载器拒。变体（enum）构造仍只走顶层静态块，函数体内的变体构造还未降级。
 - 类型不符的绑定**不做检查**：`func bad(p: Point) -> i32 { let k: i32 = p; return k; }`
   会发出 `%k = #add[#bits<32>](%p, 0)`（`host_status=0`），但产物过不了 `lainir_verify`
   （2005 BAD_OPERAND_TYPE）。也就是说错误由**下游信任门**拒收、不会变成错误代码，
