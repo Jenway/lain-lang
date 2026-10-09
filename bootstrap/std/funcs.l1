@@ -36,8 +36,7 @@
 //     （可选 `else`）、`let NAME : TYPE = for …`。值可以是字面量、参数/局部名、
 //     调用 `f(…)`、以及它们的算子链与括号嵌套（表达式在 `meta_emit_expr` 里
 //     按**节点**递归，不再按字节推进）。
-//   - **还没做的**：函数体内的**变体**构造（`Enum.Variant { … }` —— 报 4；积类型的
-//     构造已经能用，见 locals.lain）；模块成员当操作数或实参（`M.answer + 1`、
+//   - **还没做的**：模块成员当操作数或实参（`M.answer + 1`、
 //     `f(M.answer)` —— 报 4）。顶层那条 `let x: T = M.member;` 是通的（走 modules.l1
 //     的命名空间路径）。字段访问（`p.x`，`meta_emit_field_temp`）与变体投影
 //     （`Shape.Circle(s)`，`meta_emit_projection_temp`）已经能用。
@@ -899,6 +898,28 @@
                                                    %name_hi, %ctor_lo, %ctor_hi,
                                                    %ctor_at, %is_ret)
       #return %ctor_st
+    }
+    // 和类型的变体构造（`Shape.Circle { k }`）：形状是 6 加花括号组，积类型那条
+    // 形状 10 的路接不到它。栈上划框、tag 一条 store、载荷一条 store。
+    %d_delim2 = #call meta_dotted_delim(%base, %len, %parent, %vi)
+    %d_brace2 = #eq[#bits<8>](%d_delim2, 123)
+    %d_enum2 = #call meta_is_enum(%base, %len, %v_st, %v_hi0)
+    %d_ctor2 = #and[#bits<1>](%d_brace2, %d_enum2)
+    %f_sumctor = #and[#bits<1>](%d_ctor2, %single)
+    #if %f_sumctor {
+      %sc_after = #call bs_skip_space(%base, %v_hi0, %len)
+      %sc_vlo = #call bs_skip_space(%base, #add[#bits<64>](%sc_after, 1), %len)
+      %sc_vhi = #call bs_skip_ident(%base, %sc_vlo, %len)
+      // 花括号组在**下一个**下标（值、点号、成员名、组），操作数发射器吃的是下标
+      %sc_mi = #add[#bits<64>](%vi, 2)
+      %sc_grp = #call meta_cursor_next(%parent, %sc_mi)
+      %sc_gi = #add[#bits<64>](%vi, 3)
+      %sc_brace = #call meta_node_start(%sc_grp)
+      %sc_st = #call meta_lower_sum_construct_local(%base, %len, %name_lo,
+                                                    %name_hi, %v_st, %v_hi0,
+                                                    %sc_vlo, %sc_vhi, %parent,
+                                                    %sc_gi, %sc_brace, %is_ret)
+      #return %sc_st
     }
     // 调用本身单独接住（两者的实参写法不同）。其余形状——包括字段访问（形状 6）
     // ——一律交给表达式发射器：`p.x` 由操作数发射器里的 `meta_emit_field_temp`

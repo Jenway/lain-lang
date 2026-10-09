@@ -416,16 +416,23 @@ func cstr_len(p: addr) -> u64 {
 产物都过 `lainir_parse` + `lainir_verify`。顶层的投影仍走 `meta_lower_sum_project` 那条发整条
 proc 的路（对照 `sumtoplevel.lain`）。
 
+**函数体内的变体构造也已经能用**：`Shape.Circle { k }` 与积类型的构造同形 —— 栈上
+`#alloca`（元素 `#bits<8>`、个数是 enum 的布局字节数）、tag 一条 `#store`、有载荷时再来一条，
+绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`、返回直接 `#return %r<n>`。载荷按**操作数**降级，
+参数、字面量与调用结果都能当载荷；空变体只发 tag 那条。样例
+`bootstrap/lain/examples/variant_local.lain`，探针 `varctorlocal.lain`（绑定）/`ctorret.lain`（返回）/
+`ctortwo.lain`（两次构造）/`ctorlit.lain`（字面量载荷）/`ctorcall.lain`（调用载荷）/
+`ctorempty.lain`（空变体），产物都过 `lainir_parse` + `lainir_verify`；顶层那条静态 storage 的路
+仍由 `sumtoplevel.lain` 对照。
+
 值层剩下的是（每条都实测过，拒绝码一律 4，源在 build/probes/ 下）：
 
 | 写法 | 实测 | 探针 |
 |---|---|---|
-| 函数体内 `let s: Shape = Shape.Circle { k };` | 4 | `varctorlocal.lain` |
 | 顶层 `let c = Shape.Circle { 7 };`（对照，已能用） | 0 | `sumtoplevel.lain` |
 | 局部绑定上的字段访问 `let p = Point { … }; return p.x;` | 4 | `fieldlocal.lain` |
 
-还没有的是：函数体内的变体构造（变体仍只走
-顶层静态块）、字段值只能是「一个字面量」或「一个名字」（`a: p + 1` 只取 `p`）、上面
+还没有的是：字段值只能是「一个字面量」或「一个名字」（`a: p + 1` 只取 `p`）、上面
 那条逃逸语义，以及`值名 → 类型`的表。那张表今天只有**函数参数**那一份
 （`meta_word_type_name` 走参数组扫描），局部绑定与循环参数都没有，所以
 `let p = Point { … }; return p.x;` 干净地报 4。顶层构造里写变量名会发出解析不到的
@@ -680,6 +687,15 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   对形状 6 跳 3 或 4 格（`meta_dotted_has_arg`）。左边是**和类型名**且成员后面跟 `(` 才是投影，
   其余是积类型的字段访问。
 - 空变体（`Shape.Empty(s)`）没有载荷可投：报 10。
+- 函数体内的变体构造（`let s: Shape = Shape.Circle { k };`、`return Shape.Circle { k };`）与积
+  类型同形：栈上 `%r<n> = #alloca[#bits<8>](<enum 布局字节数>)`、tag 一条
+  `#store[#bits<8>](<tag>, #lea(%r<n>, 0, 0, 0))`、有载荷时再来一条
+  `#store[<载荷 repr>](<载荷>, #lea(%r<n>, 0, 0, <载荷偏移>))`，绑定接
+  `%NAME = #lea(%r<n>, 0, 1, 0)`、返回直接 `#return %r<n>`（`meta_lower_sum_construct_local`，
+  `bootstrap/std/sums.l1`）。载荷按**操作数**降级（`meta_operand_emit` + `meta_render_ref2`），
+  所以参数、字面量、调用结果都能当载荷；空变体只发 tag 那条（`Shape.Empty { }`）。
+- 形状判据：积类型的构造是形状 10（名字后面直接跟花括号组），和类型的构造是形状 6（点号形态）
+  且成员名后面跟 `{`；两条都由 `meta_dotted_delim` 的返回值分流（`(` 投影、`{` 构造、其余字段）。
 - 构造的字段值只认两种形态：字段值的首字节是数字 → 当字面量（`bs_read_uint`）；否则整段
   当**一个变量的名字**（发 `%NAME`）。所以 `a: p + 1` 只取 `p`、丢掉 `+ 1`；变体构造的载荷
   同理。要支持表达式得先有表达式树。

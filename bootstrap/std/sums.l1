@@ -315,6 +315,105 @@
   #return %status
 }
 
+// `let s: Shape = Shape.Circle { k };`（函数体里）：从**栈**上划一块（`#alloca`），
+// tag 一条 store、载荷一条 store，绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`。与顶层那条
+// `meta_lower_sum_construct`（静态 storage 加一条取址 proc）的区别就在这里。
+//
+// 载荷是**一条表达式**（`{ k }` 里那个 `k`），按操作数降级 —— 不按源码数字读，
+// 所以函数参数与局部值都能当载荷。
+#proc meta_lower_sum_construct_local(%base: #addr, %len: #bits<64>,
+                                     %name_lo: #bits<64>, %name_hi: #bits<64>,
+                                     %enum_lo: #bits<64>, %enum_hi: #bits<64>,
+                                     %var_lo: #bits<64>, %var_hi: #bits<64>,
+                                     %parent: #bits<64>, %group: #bits<64>,
+                                     %brace: #bits<64>,
+                                     %is_ret: #bits<1>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data()
+  %info = #call meta_sum_variant(%base, %len, %enum_lo, %enum_hi, %var_lo,
+                                 %var_hi, %scratch)
+  %bit = #lshr[#bits<64>](%info, 63)
+  %found = #eq[#bits<64>](%bit, 1)
+  %st = #if %found -> (#bits<32>) {
+    %tag = #and[#bits<64>](%info, 255)
+    %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 15)
+    %width = #and[#bits<64>](#lshr[#bits<64>](%info, 12), 255)
+    %psize = #and[#bits<64>](#lshr[#bits<64>](%info, 20), 0xFFFFFFFF)
+    %poff = #call meta_enum_payload_off(%scratch)
+    %total = #call meta_enum_size(%scratch)
+    %zero = #eq[#bits<64>](%total, 0)
+    %s = #if %zero -> (#bits<32>) {
+      // 没有可划的框：count 为 0 的 `#alloca` 被验证器拒（2024）
+      %fz = #call lain_meta_fail(5)
+      #yield 5
+    } else {
+      %n = #call meta_next_temp()
+      %a1 = #call lainir_alloca_at(%n, 8, %total)
+      // tag 固定在偏移 0：v0 的固定选择，不从声明读
+      %t1 = #call meta_emit_store(0, 8, %tag, 0, %n)
+      %has_payload = #ugt[#bits<64>](%psize, 0)
+      %t2 = #if %has_payload -> (#bits<32>) {
+        %ast = #call meta_operand_emit(%base, %len, %kind, %width, 0, 0,
+                                       %parent, %group)
+        %abad = #ne[#bits<32>](%ast, 0)
+        %pst = #if %abad -> (#bits<32>) {
+          #yield %ast
+        } else {
+          %sc2 = #call lain_meta_scratch_data()
+          %pref = #call meta_cell_get(#lea(%sc2, 168, 1, 0))
+          %plo = #call meta_cell_get(#lea(%sc2, 176, 1, 0))
+          %phi = #call meta_cell_get(#lea(%sc2, 184, 1, 0))
+          %vbuf = #data_addr lainir_text_buffer
+          %vlen = #call meta_render_ref2(%base, %len, %pref, %plo, %phi,
+                                         %vbuf)
+          %vbad = #eq[#bits<64>](%vlen, 0xFFFFFFFFFFFFFFFF)
+          %vst = #if %vbad -> (#bits<32>) {
+            #yield 4
+          } else {
+            %w = #call meta_emit_store_text(%kind, %width, %vbuf, %vlen,
+                                            %poff, %n)
+            #yield %w
+          }
+          #yield %vst
+        }
+        #yield %pst
+      } else {
+        #yield 0
+      }
+      %tail = #if %is_ret -> (#bits<32>) {
+        %rbuf = #data_addr lainir_text_buffer
+        %rlen = #call lainir_buf_temp(%rbuf, 0, %n)
+        %w10 = #call lainir_return_ref(%rbuf, %rlen)
+        #yield 0
+      } else {
+        %buf2 = #data_addr lainir_text_buffer
+        %tbuf = #lea(%buf2, 64, 1, 0)
+        %tlen2 = #call lainir_buf_temp(%tbuf, 0, %n)
+        %nbuf = #lea(%buf2, 128, 1, 0)
+        %npct = #call lainir_buf_byte(%nbuf, 0, 37)
+        %bind_at = #lea(%base, %name_lo, 1, 0)
+        %bind_len = #sub[#bits<64>](%name_hi, %name_lo)
+        %nlen = #call lainir_buf_bytes(%nbuf, %npct, %bind_at, %bind_len)
+        %zbuf = #lea(%buf2, 180, 1, 0)
+        %zlen = #call lainir_buf_uint(%zbuf, 0, 0)
+        %w17 = #call lainir_lea_named(%nbuf, %nlen, %tbuf, %tlen2, %zbuf,
+                                      %zlen, 1, 0)
+        #yield 0
+      }
+      %tb = #ne[#bits<32>](%t2, 0)
+      #if %tb {
+        #return %t2
+      }
+      #yield %tail
+    }
+    #yield %s
+  } else {
+    // 没有这个变体名
+    %fnf = #call lain_meta_fail(9)
+    #yield 9
+  }
+  #return %st
+}
+
 // `let NAME: T = Enum.Variant(值)`：读 tag、比、命中才读载荷。
 #proc meta_lower_sum_project(%base: #addr, %len: #bits<64>,
                             %bind_lo: #bits<64>, %bind_hi: #bits<64>,

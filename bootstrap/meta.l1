@@ -897,8 +897,9 @@
     %d_f_lo = #call bs_skip_space(%base, #add[#bits<64>](%d_after, 1), %len)
     %d_f_hi = #call bs_skip_ident(%base, %d_f_lo, %len)
     %d_enum = #call meta_is_enum(%base, %len, %d_lo, %d_hi)
-    %d_arg = #call meta_dotted_has_arg(%base, %len, %parent, %index)
-    %d_proj = #and[#bits<1>](%d_enum, %d_arg)
+    %d_delim = #call meta_dotted_delim(%base, %len, %parent, %index)
+    %d_paren = #eq[#bits<8>](%d_delim, 40)
+    %d_proj = #and[#bits<1>](%d_enum, %d_paren)
     %d_st = #if %d_proj -> (#bits<32>) {
       %d_v = #call meta_emit_projection_temp(%base, %len, %parent, %index,
                                              %d_lo, %d_hi, %d_f_lo, %d_f_hi)
@@ -1029,9 +1030,10 @@
   #return 0
 }
 
-// 点号形态里成员名后面跟 `(` 吗？`Shape.Circle(s)` 跟（实参组再占一格），`p.x` 不跟。
-#proc meta_dotted_has_arg(%base: #addr, %len: #bits<64>,
-                           %parent: #bits<64>, %index: #bits<64>) -> #bits<1> {
+// 点号形态里成员名后面紧跟的那个分隔符字节：`(` 是变体投影、`{` 是变体构造、0 表示
+// 成员名后面没有组（`p.x` 那样的字段访问）。
+#proc meta_dotted_delim(%base: #addr, %len: #bits<64>,
+                        %parent: #bits<64>, %index: #bits<64>) -> #bits<8> {
   %node = #call ast_child(%parent, %index)
   %lo = #call meta_node_start(%node)
   %hi = #add[#bits<64>](%lo, #call meta_node_len(%node))
@@ -1039,7 +1041,7 @@
   %f_lo = #call bs_skip_space(%base, #add[#bits<64>](%after, 1), %len)
   %f_hi = #call bs_skip_ident(%base, %f_lo, %len)
   %open = #call bs_skip_space(%base, %f_hi, %len)
-  %r = #call bs_is_byte(%base, %open, 40)
+  %r = #call bs_byte_at(%base, %open, %len)
   #return %r
 }
 
@@ -1066,7 +1068,11 @@
   // （`Shape.Circle(s)`）—— 少跳一格会把点号或实参组当成下一个语句。
   %is_field = #eq[#bits<64>](%k, 6)
   %r = #if %is_field -> (#bits<64>) {
-    %f_arg = #call meta_dotted_has_arg(%base, %len, %parent, %index)
+    %f_delim = #call meta_dotted_delim(%base, %len, %parent, %index)
+    // 只有组才算多占一格：字段访问后面那个字节是分号或换行，那不是组。
+    %f_paren = #eq[#bits<8>](%f_delim, 40)
+    %f_brace = #eq[#bits<8>](%f_delim, 123)
+    %f_arg = #or[#bits<1>](%f_paren, %f_brace)
     %f_n = #if %f_arg -> (#bits<64>) {
       %g4 = #add[#bits<64>](%nx, 3)
       #yield %g4
