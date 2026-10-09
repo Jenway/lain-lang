@@ -156,6 +156,8 @@ F5 的等价性口径是**逐字节相等**：`build/f5_capture.ps1` 把 16 个�
 同样为 0），16 个样例全部 `host_status=0`、`trap none`，四个层 0 探针产物照旧
 `PARSE+VERIFY OK`。
 
+今天 `build/f5_compare.ps1` 对 `jumps` 报一条 DIFF：循环体的顺序可见性修好后（见下文的 D 一节），`first` 的产物把 `#break L1(%acc)` 换成 `#break L1(%r3)`（`%r3` 就是刚写下的 `acc + i`），`early` 的实参同理 —— 有意的语义修正，其余 15 个样例仍逐字节相同。
+
 变体投影（`bootstrap/std/sums.l1` 的 `meta_lower_sum_project`）与 struct 字段取值（`p.x`）
 在值层目前仍以 `code=4` 被拒（探针 `build/probes/vproj.lain`、`build/probes/fldval.lain`），
 样例跑不到那几处的写出器；它们的字节与所取代的模板相同。
@@ -210,7 +212,8 @@ let s: addr = "hi";      // 静态字节块（只允许顶层 let）：产物是
   条件与 `if` 走同一个表达式入口，体里每格是 `参数 = 值;`，循环回边按声明顺序带走参数；
   参数里没有 `acc` 就没有值可取，报 4。
 - 体里还可以写 `break LABEL(<值>);` 与 `continue LABEL(<实参…>);`，两者都结束这一轮
-  之后的语句（区域里终止指令必须是最后一条）。`break` 直接把值交给循环；`continue`
+  之后的语句（区域里终止指令必须是最后一条）；体里也可以写 `if`，分支里的 `break` /
+  `continue` 同样结束这一轮，分支里给参数赋的值与另一分支的值在 `if` 之后合并。`break` 直接把值交给循环；`continue`
   按参数顺序换掉下一轮的参数，循环的 `#break` 出口仍然照发 —— 值型循环的区域里必须有
   一个 `#break`（验证器 2006），所以落尾的 `continue` 也走收尾那条 `#continue`。
 - `load` / `store` / `lea` 是**内建**（不是用户函数，名字不查作用域表）：
@@ -247,8 +250,8 @@ let s: addr = "hi";      // 静态字节块（只允许顶层 let）：产物是
 - `loop` 的**早退形态**：**已可用** —— `break LABEL(<值>);` 与 `continue LABEL(<实参…>);`
   由 `meta_lower_loop_jump` 降级，样例 `bootstrap/lain/examples/jumps.lain`（产物含
   `#break L<n>(…)` 与 `#continue L<n>(…)`，过 `lainir_parse` + `lainir_verify`）。
-  尚缺**有条件**的早退：循环体今天还不接受 `if`，所以跳出只能是无条件的（体里第一件事
-  就是跳出）；补法见 D 的剩项。
+  循环体里的 `if`（含有条件的早退）同样可用：分支里可以 `break` / `continue` / 给参数赋值，
+  值在分支之间合并（样例 `bootstrap/lain/examples/loop_if.lain`）。
 
 ```text
 let n: u64 = loop scan(i: u64 = 0, acc: u64 = 0) while i < len {
@@ -359,7 +362,7 @@ func cstr_len(p: addr) -> u64 {
 | 绑定与返回 | `let n: i32 = …;`、`let y = inc(n);`、`return n;` | 标注可省：类型由值推（调用取被调方返回类型、参数名取参数表） |
 | 条件 | `if a < b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件是任意表达式：裸条件与括号条件走同一个入口，块就是表达式停下来的那一格；分支必须以 `return` 收尾，所以 `if` 是语句不是值 |
 | 带值 if | `let x: i32 = if c { a } else { b };`、`return if c { a } else { b };`、`return 1 + if c { a } else { b };` | 降级为 `%x = #if %c -> (#bits<32>) { … #yield %a } else { … #yield %b }`：条件是任意表达式、类型取绑定的标注（缺标注由值推）；绑定位置把结果绑在源码名字上，`return` 位置与表达式里的操作数位置（实参、括号内、与算子串联）把整条 `#if` 发成临时值再被外层引用；省略 `else` 时假分支给结果类型的零值（bits 类 `#yield 0`、`addr` 先 `%r<n> = #int2ptr[#addr](0)`），`else` 后面不是块仍报 4（探针 `build/probes/ifnoelse_elseword.lain`）；两个分支都必须以一个值收尾。样例 `bootstrap/lain/examples/choose.lain`、`bootstrap/lain/examples/value_if.lain`、`bootstrap/lain/examples/if_default.lain` |
-| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 的边界与累加器宽度跟循环变量的类型走：i32/u32/u64/i64/usize 都能用（`u64` 曾报 5，A 的第四刀补齐 64 位算子后通了，实测 `#ult[#bits<64>]`），体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain` |
+| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 的边界与累加器宽度跟循环变量的类型走：i32/u32/u64/i64/usize 都能用（`u64` 曾报 5，A 的第四刀补齐 64 位算子后通了，实测 `#ult[#bits<64>]`），体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」），循环体里可写 `if`（分支里有条件早退、分支里给参数赋值，值在分支之间合并）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain`、`bootstrap/lain/examples/loop_if.lain` |
 | 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
 | 聚合类型名 | `struct Point { x: i32 y: i32 }`、`enum Shape { Circle(i32) Empty }`、`func f(p: Point) -> i32`、`let q: Shape = s;` | 名字可进参数类型与带标注的 `let`：聚合值在 IR 里是 `#addr`，所以参数类型发 `#addr`、标注绑定发一次地址复制（`#lea(%p, 0, 1, 0)`）；声明体里字段/变体**空格分隔，不能写逗号**（写了会当成字段名，报 5）。样例 `bootstrap/lain/examples/types.lain` |
@@ -472,8 +475,17 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
   标签、任意个参数、任意条件、多语句体（`meta_lower_loop`）与带实参的
   `break` / `continue`（`meta_lower_loop_jump`）都已可用，样例
   `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain`，产物都过
-  `lainir_parse` + `lainir_verify`。D 剩下的只有**循环体里的 `if`**：有条件早退要先让循环体
-  接受嵌套语句。
+  `lainir_parse` + `lainir_verify`。
+- 循环体里的 `if`：**完成** —— `meta_lower_loop_stmts` 按格派发，`if` 格交给
+  `meta_lower_loop_if`：条件用循环结果的类型当上下文降级，两支各自先把参数快照恢复回来再走
+  语句（支内先读到的是进入 `if` 之前的值），支尾按参数当前值发 `#yield`，`if` 之后每个参数的
+  当前值换成对应的结果临时值；支里以 `#break` / `#continue` 收尾时那一支不发 `#yield`
+  （`#continue` 就地发）。分支里的赋值对后续语句可见：标识符操作数经 `meta_operand_emit` 的
+  `meta_loop_param_index` 查表，命中循环参数且该参数本轮有当前值就发临时值名。样例
+  `bootstrap/lain/examples/loop_if.lain`（分支里的 `break`、`continue`、赋值与嵌套 `if`），
+  产物 host_status=0、trap none、过 `lainir_parse` + `lainir_verify`。为此 `seed/src/ir/verify.c`
+  的 `yields_values` 也接受 `#continue` 收尾的分支（原先只认 `#return` / `#break`，与同文件里
+  「终结子」的判定不一致）。
 
 **E. 声明与链接**
 - `extern NAME(a: T) -> U = link_name;`：**完成** —— 14 号 handler（`meta_register_extern` /
@@ -497,7 +509,8 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
   `bootstrap/lain/examples/locals.lain`。
 
 **F. 层 0：`lainir_*` 发射库**：**完成** —— `bootstrap/std/lainir.l1` 按名单提供五组写出器：整数/位/比较/转换、内存与地址、调用、控制流与单元骨架、固定文本片段（`bootstrap/SOURCE_ORDER` 在 `std/sums.l1` 后、`meta.l1` 前登记）。探针 `bootstrap/lain/examples/lainir_f1.l1` 到 `lainir_f4.l1`（清单 `bootstrap/lainir_f1_unit.txt`）分别覆盖骨架、F2 的 23 个二元算子与 6 个转换、F3 的内存/地址/调用、F4 的控制流与单元形态，F6 的 `lainir_f6.l1` 用层 0 重发 `locals.lain` 的整份单元；
-五条产物都过 `build/check_unit.exe` 的 parse+verify，驱动报 `host_status=0`、`trap none`。处理管线的字面文本发射已全部改走层 0，`bootstrap/std/emit.l1` 的 `data` 模板从 88 个减到 30 个，16 个样例产物逐字节不变（`diffcount=0`）——逐条写出器名单、删除口径与证据见上文《层 0：发射层》。
+五条产物都过 `build/check_unit.exe` 的 parse+verify，驱动报 `host_status=0`、`trap none`。处理管线的字面文本发射已全部改走层 0，`bootstrap/std/emit.l1` 的 `data` 模板从 88 个减到 30 个，16 个样例产物在迁移当时逐字节不变（`diffcount=0`；此后 D 的循环体顺序可见性修好，`jumps` 有两行按新语义变化）——
+逐条写出器名单、删除口径与证据见上文《层 0：发射层》。
 
 用量证据（口径：bootstrap/SOURCE_ORDER 的 28 个文件，不数注释与示例）：`#bits` 4114、
 `#call` 2994、`#if` 925、`#yield` 860、`#lea` 790、`#eq` 630、`#return` 628、`#add` 471、
@@ -577,12 +590,12 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 
 ### 六、结论
 
-今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（仅绑定位置）/ `for` / `loop`（标签 + 参数 + 多语句体 + 带实参的 `break`/`continue`）/
+今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（绑定、`return`、操作数三个位置，缺 `else` 有零值）/ `for` / `loop`（标签 + 参数 + 多语句体 + 带实参的 `break`/`continue` + 体里的 `if`）/
 `load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 顶层字节串（→ `#data` + 取址过程）/
 函数体与顶层的聚合构造（→ 栈上 `#alloca` + 每字段 `#store`，或顶层 `data`）/
 宿主整块窗口授予（`region_grant`，暂存区的基址与容量从记录读回）/ `extern` 声明（`= link_name`，调用与 `func` 同路）/
 算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）/ 聚合类型名（struct、enum）进参数类型与标注。够做「一小段 Lain 端到端」，不够写编译器。到「能用 Lain 重写 Meta」还差
-**D 的剩项（带值 `if` 当操作数/返回值、循环体里的 `if`）+ E + F**；A、B、C 已完成。
+**值层的其余部分（字段访问当值、变体投影当值、函数体内的变体构造、字段值为表达式、逃逸语义）与五（删除与瘦身）**；A、B、C、D、E、F 已完成。
 
 ## 待补规则
 
@@ -601,9 +614,6 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   引用（那会发成 `%NAME`）—— 顶层 let 绑定按值引用还是既存缺口。
 - 期望类型的传递路径（见上）。
 - `addr` 上的 `==` 给不给（层 0 有 `lainir_eq`）。
-- 带值 `if` 只在**绑定位置**可用：`let x: T = if …` 走 `meta_lower_if_value`，`return if …`
-  与 `1 + if …` 都报 4（它们要求值-if 也能当操作数/返回值）。缺 `else` 也报 4 ——
-  区域的 `results` 要求每个出口都 `#yield`，没有隐式默认值。
 - `loop` 的参数里**必须有一个叫 `acc`**，它提供循环结果的类型；没有报 4。
 - `loop` 的标签是必需的（今天只记下来备用）：缺标签报 4。
 - `loop` 的循环体只能给**自己的参数**赋值，别的目标报 4；体是多语句的（`for` 只有一条）。
@@ -612,8 +622,6 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   （`break` 恰好 1 个、`continue` 恰好等于参数个数），循环外写报 4，循环体里 `break` 之后
   的语句不再降级。值型循环的区域里必须留下一个 `#break`：只写落尾的 `continue` 也照样由
   收尾补上它，但如果循环根本不可能产出值，产物过不了自己的验证器（2006）。
-- 循环体还不接受 `if`：跳出只能是无条件的。有条件的早退要等循环体支持嵌套语句，
-  那是 D 的剩项（`if b == 0 { break scan(acc); }` 今天报 4）。
 - 一元负号只认**字面量**（`-5`）：它占两个节点（负号 + 数字），操作数游标要跳两格；
   作用于变量（`-x`）报 4 —— 那需要一条真正的取负规则，不是记法。
 - 负数字面量不做「装得下」检查（`meta_literal_fits` 只看源码里的裸数字）：`let b: u32 = -1;`
