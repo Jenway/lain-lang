@@ -88,6 +88,16 @@ F2 已实现整数算术、位运算、比较和转换的发射包装：`lainir_
 16 个既有样例与 F1、F2 探针均报告 `host_status=0`、`trap none`，F1 与 F2 产物
 均通过 `PARSE+VERIFY OK`。Canonical 等价性将在 F5 按解析后的结构比较。
 
+F3 已实现内存、地址与调用的发射包装：`lainir_load(width, address)`、
+`lainir_store(width, value, address)`、`lainir_lea(base, index, scale, disp)`、
+`lainir_alloca(width, count)`、`lainir_data_addr(symbol)`、`lainir_proc_addr(symbol)`、
+`lainir_call(callee, args)`、`lainir_call_indirect(target, args)`，以及 `lainir_data(name, values)`。
+`bootstrap/lain/examples/lainir_f3.l1` 生成 `data f3_probe_data ro { 0 }` 和包含
+`#load`、`#store`、`#lea`、`#alloca`、`#data_addr`、`#proc_addr`、`#call`、`#call_indirect`
+的过程；`#call_indirect` 不携带结果类型（verifier 无法从操作数推导），因此按语句发射。
+产物经 `build\check_unit.exe` 的 parse+verify 通过，驱动报告 `host_status=0`、`trap none`；
+16 个既有样例与 F1、F2、F3 探针全部通过回归。
+
 层 0 是「推迟的表面语法」的兜底：`switch`、`alloca`、`proc_addr`、间接调用没有表面语法，
 仍可用 `lainir_*` 发射。推迟只说明用户代码不好写，不说明编译器做不到。
 
