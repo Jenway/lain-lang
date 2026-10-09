@@ -71,6 +71,14 @@
 - 产物 `lainir_reset()`、`lainir_text()` —— 取回 canonical 文本，交给
   `lainir_parse` + `lainir_verify`
 
+F1 已实现并端到端验收：`bootstrap/std/lainir.l1` 提供 `lainir_reset()`、
+`lainir_text()`、`lainir_length()`、`lainir_proc_begin(name, name_length)`、
+`lainir_return(value)`、`lainir_proc_end()`。当前过程骨架发射无参、返回 `#bits<32>`
+的过程；`lainir_return` 接受非负十进制立即数。样例
+`bootstrap/lain/examples/lainir_f1.l1` 生成 `#proc probe() -> #bits<32> {`、
+`#return 0` 和独立闭合行，产物经 `build\check_unit.exe` 解析与验证通过；驱动
+报告 `host_status=0`、`trap none`。Canonical 等价性将在 F5 按解析后的结构比较。
+
 层 0 是「推迟的表面语法」的兜底：`switch`、`alloca`、`proc_addr`、间接调用没有表面语法，
 仍可用 `lainir_*` 发射。推迟只说明用户代码不好写，不说明编译器做不到。
 
