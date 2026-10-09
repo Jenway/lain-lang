@@ -408,16 +408,23 @@ func cstr_len(p: addr) -> u64 {
 两字段相加、实参位置、带标注与不带标注的绑定），探针 `fieldval.lain` / `fieldbind.lain` /
 `fieldexpr.lain` / `fldarg.lain` / `fldval.lain`，产物都过 `lainir_parse` + `lainir_verify`。
 
+**变体投影当值也已经能用**：`Enum.Variant(值)` 降级成「读判别字节、与 tag 比、带值 `#if` 里
+按载荷偏移取载荷」，不命中回 0（v0 不做 panic 路径）。值可以是参数、局部值或表达式，指令就写在
+当前函数体里；空变体没有载荷可投，报 10。样例 `bootstrap/lain/examples/projection.lain`，探针
+`proj.lain`（绑定位置）/ `projret.lain`（返回位置）/ `projexpr.lain`（更大的表达式）/
+`projnest.lain`（实参位置）/ `projtwo.lain`（同一函数里两次投影）/ `projempty.lain`（报 10），
+产物都过 `lainir_parse` + `lainir_verify`。顶层的投影仍走 `meta_lower_sum_project` 那条发整条
+proc 的路（对照 `sumtoplevel.lain`）。
+
 值层剩下的是（每条都实测过，拒绝码一律 4，源在 build/probes/ 下）：
 
 | 写法 | 实测 | 探针 |
 |---|---|---|
-| `let v: i32 = Shape.Circle(s);`（投影） | 4 | `proj.lain` |
 | 函数体内 `let s: Shape = Shape.Circle { k };` | 4 | `varctorlocal.lain` |
 | 顶层 `let c = Shape.Circle { 7 };`（对照，已能用） | 0 | `sumtoplevel.lain` |
 | 局部绑定上的字段访问 `let p = Point { … }; return p.x;` | 4 | `fieldlocal.lain` |
 
-还没有的是：投影（要读判別字段再选载荷，不能只看形状）、函数体内的变体构造（变体仍只走
+还没有的是：函数体内的变体构造（变体仍只走
 顶层静态块）、字段值只能是「一个字面量」或「一个名字」（`a: p + 1` 只取 `p`）、上面
 那条逃逸语义，以及`值名 → 类型`的表。那张表今天只有**函数参数**那一份
 （`meta_word_type_name` 走参数组扫描），局部绑定与循环参数都没有，所以
@@ -662,6 +669,17 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   `1 + p.x` 按 `p` 的类型查表会拿积类型去查 `+`，报一个跟真实原因无关的 4。
 - 无标注绑定 `let v = p.x;`：`meta_value_type_window` 对形状 6 回**字段**声明的类型名
   （`meta_field_type_window`），产物是 `%v = #add[repr](<字段值>, 0)`。
+- 变体投影当值（`Enum.Variant(值)`）：判别字段是**从基址读出来的一个字节**
+  （`%r<t> = #load[#bits<8>](<基址>, 0)`，拿地址本身去查位类型的算子表会被验证器按类型不符拒），
+  与变体 tag 比（`%r<m> = #eq[#bits<8>](%r<t>, <tag>)`）之后走带值 `#if`：命中发
+  `%r<p> = #lea(<基址>, 0, 1, <载荷偏移>)` 加 `%r<v> = #load[<repr>](%r<p>, 0)` 再 `#yield %r<v>`，
+  不命中 `#yield 0`（v0 把不命中折叠成 0，不做 panic 路径），结果就是那条 `#if` 的临时值
+  （`meta_emit_projection_temp`，`bootstrap/std/sums.l1`）。值与成员名之间的实参按**操作数**
+  降级，所以参数、局部值、表达式都行。
+- 点号形态占三格（值、点号、成员名），成员后面跟 `(` 时那个实参组再占一格：`meta_after_operand`
+  对形状 6 跳 3 或 4 格（`meta_dotted_has_arg`）。左边是**和类型名**且成员后面跟 `(` 才是投影，
+  其余是积类型的字段访问。
+- 空变体（`Shape.Empty(s)`）没有载荷可投：报 10。
 - 构造的字段值只认两种形态：字段值的首字节是数字 → 当字面量（`bs_read_uint`）；否则整段
   当**一个变量的名字**（发 `%NAME`）。所以 `a: p + 1` 只取 `p`、丢掉 `+ 1`；变体构造的载荷
   同理。要支持表达式得先有表达式树。

@@ -372,6 +372,118 @@
   #return %status
 }
 
+// `Enum.Variant(值)` 当值（函数体内的变体投影）：判别字段读出来与 tag 比，命中才读
+// 载荷，不命中回 0 —— v0 把不命中折叠成 0，不做 panic 路径。
+//
+// 与顶层那条路（`meta_lower_sum_project` 发一整条无名参数的 proc）的区别：这里的值来自
+// 参数或局部值，所以发的是**三条指令加一条带值 `#if`**，就写在当前函数体里。
+#proc meta_emit_projection_temp(%base: #addr, %len: #bits<64>,
+                                %parent: #bits<64>, %index: #bits<64>,
+                                %enum_lo: #bits<64>, %enum_hi: #bits<64>,
+                                %var_lo: #bits<64>,
+                                %var_hi: #bits<64>) -> #bits<32> {
+  %scratch = #call lain_meta_scratch_data()
+  %info = #call meta_sum_variant(%base, %len, %enum_lo, %enum_hi, %var_lo,
+                                 %var_hi, %scratch)
+  %bit = #lshr[#bits<64>](%info, 63)
+  %found = #eq[#bits<64>](%bit, 1)
+  %st = #if %found -> (#bits<32>) {
+    %tag = #and[#bits<64>](%info, 255)
+    %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 15)
+    %width = #and[#bits<64>](#lshr[#bits<64>](%info, 12), 255)
+    %psize = #and[#bits<64>](#lshr[#bits<64>](%info, 20), 0xFFFFFFFF)
+    %empty = #eq[#bits<64>](%psize, 0)
+    %s = #if %empty -> (#bits<32>) {
+      // 空变体没有载荷可投
+      %fe = #call lain_meta_fail(10)
+      #yield 10
+    } else {
+      %poff = #call meta_enum_payload_off(%scratch)
+      // 要投影的那个值就是实参组里的那条表达式（`Shape.Circle(s)` 的 `s`）
+      %ai = #add[#bits<64>](%index, 3)
+      %ast = #call meta_operand_emit(%base, %len, 3, 0, 0, 0, %parent, %ai)
+      #if #ne[#bits<32>](%ast, 0) {
+        #return %ast
+      }
+      %sc = #call lain_meta_scratch_data()
+      %aref = #call meta_cell_get(#lea(%sc, 168, 1, 0))
+      %alo = #call meta_cell_get(#lea(%sc, 176, 1, 0))
+      %ahi = #call meta_cell_get(#lea(%sc, 184, 1, 0))
+      // 缓冲区（`lainir_text_buffer`）：0 起是基址文本、64 起是 tag 的十进制文本、
+      // 96 起是载荷地址文本。
+      %buf = #data_addr lainir_text_buffer
+      %blen = #call meta_render_ref2(%base, %len, %aref, %alo, %ahi, %buf)
+      %bbad = #eq[#bits<64>](%blen, 0xFFFFFFFFFFFFFFFF)
+      #if %bbad {
+        #return 4
+      }
+      %tbuf = #lea(%buf, 64, 1, 0)
+      %tlen = #call lainir_buf_uint(%tbuf, 0, %tag)
+
+      //   %r<t> = #load[#bits<8>](<基址>, 0)
+      //   %r<m> = #eq[#bits<8>](%r<t>, <tag>)
+      //
+      // 判别字段是**从基址读出来的一个字节**，不是基址本身：地址不是位串，拿它去
+      // 查位类型的算子表会被验证器按类型不符拒（2005）。
+      %tn = #call meta_next_temp()
+      %l1 = #call lainir_load_at(%tn, 0, 8, %buf, %blen)
+      %tref = #lea(%buf, 32, 1, 0)
+      %tref_len = #call lainir_buf_temp(%tref, 0, %tn)
+      %mn = #call meta_next_temp()
+      %eqn = #data_addr lainir_eq_name
+      %l2 = #call lainir_binary_op_at(2, %mn, %eqn, 2, 0, 8, %tref, %tref_len,
+                                      %tbuf, %tlen)
+
+      //   %r<r> = #if %r<m> -> (<repr>) {
+      %rn = #call meta_next_temp()
+      %h1 = #call lainir_indent_write()
+      %h2 = #call lainir_temp_name_emit(%rn)
+      %h4 = #call lainir_result_sep_write()
+      %h5 = #call lainir_if_head_write()
+      %h6 = #call lainir_temp_name_emit(%mn)
+      %h7 = #call lainir_arrow_lp_write()
+      %h8 = #call lainir_repr(%kind, %width)
+      %h9 = #call lainir_close_paren_write()
+      %h10 = #call lainir_open_body()
+
+      //     %r<p> = #lea(<基址>, 0, 1, <载荷偏移>)
+      //     %r<v> = #load[<repr>](%r<p>, 0)
+      //     #yield %r<v>
+      %pn = #call meta_next_temp()
+      %zbuf = #data_addr lainir_zero
+      %l3 = #call lainir_lea_at_i(4, %pn, %buf, %blen, %zbuf, 1, 1, %poff)
+      %pbuf = #lea(%buf, 96, 1, 0)
+      %plen = #call lainir_buf_temp(%pbuf, 0, %pn)
+      %vn = #call meta_next_temp()
+      %l4 = #call lainir_load_at_i(4, %vn, %kind, %width, %pbuf, %plen)
+      %y1 = #call lainir_yield_write()
+      %y2 = #call lainir_temp_name_emit(%vn)
+      %y3 = #call lainir_newline_write()
+
+      //   } else {
+      //     #yield 0
+      //   }
+      %e1 = #call lainir_else_write()
+      %e2 = #call lainir_yield_write()
+      %e3 = #call lainir_zero_write()
+      %e4 = #call lainir_newline_write()
+      %e5 = #call lainir_close_line_write()
+
+      // 结果就是那条 `#if` 的临时值
+      %r1 = #call meta_cell_put(#lea(%sc, 168, 1, 0), %rn)
+      %r2 = #call meta_cell_put(#lea(%sc, 176, 1, 0), 0)
+      %r3 = #call meta_cell_put(#lea(%sc, 184, 1, 0), 0)
+      #yield 0
+    }
+    #yield %s
+  } else {
+    // 没有这个变体名
+    %fnf = #call lain_meta_fail(9)
+    #yield 9
+  }
+  #return %st
+}
+
 // `Enum.Variant { ... }` 还是 `Enum.Variant(v)`？`at` 是点号之后。
 #proc meta_lower_sum_access(%base: #addr, %len: #bits<64>,
                             %bind_lo: #bits<64>, %bind_hi: #bits<64>,

@@ -883,12 +883,31 @@
   }
   %node = #call ast_child(%parent, %index)
   %form = #call meta_node_form(%parent, %index)
-  // 字段访问（形状 6）在这里就分走：它要读值名的类型才能算字段偏移，发的是
-  // `#lea` 加 `#load` 两条指令，与「一个 token」那条路完全不同。留给 token 那条路
-  // 的话，只有 `p` 会被发出去、`.x` 被悄悄丢掉。
+  // 点号形态（形状 6）在这里分走：两条路都要读左边那个名字的类型，发的都是
+  // `#lea` 加 `#load`，与「一个 token」那条路完全不同。留给 token 那条路的话，
+  // 只有点号左边会被发出去、右边被悄悄丢掉。
+  //
+  // 左边是**和类型名**、右边那个成员后面跟 `(`：那是变体投影（`Shape.Circle(s)` 取载荷）；
+  // 其余情况是积类型的字段访问（`p.x`）。
   %is_field = #eq[#bits<64>](%form, 6)
   #if %is_field {
-    #return #call meta_emit_field_temp(%base, %len, %parent, %index)
+    %d_lo = #call meta_node_start(%node)
+    %d_hi = #add[#bits<64>](%d_lo, #call meta_node_len(%node))
+    %d_after = #call bs_skip_space(%base, %d_hi, %len)
+    %d_f_lo = #call bs_skip_space(%base, #add[#bits<64>](%d_after, 1), %len)
+    %d_f_hi = #call bs_skip_ident(%base, %d_f_lo, %len)
+    %d_enum = #call meta_is_enum(%base, %len, %d_lo, %d_hi)
+    %d_arg = #call meta_dotted_has_arg(%base, %len, %parent, %index)
+    %d_proj = #and[#bits<1>](%d_enum, %d_arg)
+    %d_st = #if %d_proj -> (#bits<32>) {
+      %d_v = #call meta_emit_projection_temp(%base, %len, %parent, %index,
+                                             %d_lo, %d_hi, %d_f_lo, %d_f_hi)
+      #yield %d_v
+    } else {
+      %d_f = #call meta_emit_field_temp(%base, %len, %parent, %index)
+      #yield %d_f
+    }
+    #return %d_st
   }
   %is_group = #eq[#bits<64>](%form, 2)
   %is_call = #eq[#bits<64>](%form, 5)
@@ -1010,6 +1029,20 @@
   #return 0
 }
 
+// 点号形态里成员名后面跟 `(` 吗？`Shape.Circle(s)` 跟（实参组再占一格），`p.x` 不跟。
+#proc meta_dotted_has_arg(%base: #addr, %len: #bits<64>,
+                           %parent: #bits<64>, %index: #bits<64>) -> #bits<1> {
+  %node = #call ast_child(%parent, %index)
+  %lo = #call meta_node_start(%node)
+  %hi = #add[#bits<64>](%lo, #call meta_node_len(%node))
+  %after = #call bs_skip_space(%base, %hi, %len)
+  %f_lo = #call bs_skip_space(%base, #add[#bits<64>](%after, 1), %len)
+  %f_hi = #call bs_skip_ident(%base, %f_lo, %len)
+  %open = #call bs_skip_space(%base, %f_hi, %len)
+  %r = #call bs_is_byte(%base, %open, 40)
+  #return %r
+}
+
 // 一个操作数**之后**接着是哪个下标。**调用占两个节点**（被调用者 + 实参那个组），
 // 所以要跳两格 —— 不跳的话 `f(1) + 2` 会把实参组当成算子，报一个跟真实原因无关的 4。
 //
@@ -1029,11 +1062,19 @@
   } else {
     #yield %nx
   }
-  // 字段访问占三格（值、点号、字段名）—— 只跳一格的话点号会被当成下一个语句。
+  // 点号形态至少占三格（值、点号、成员名）：成员后面跟 `(` 时那个实参组再占一格
+  // （`Shape.Circle(s)`）—— 少跳一格会把点号或实参组当成下一个语句。
   %is_field = #eq[#bits<64>](%k, 6)
   %r = #if %is_field -> (#bits<64>) {
-    %g3 = #add[#bits<64>](%nx, 2)
-    #yield %g3
+    %f_arg = #call meta_dotted_has_arg(%base, %len, %parent, %index)
+    %f_n = #if %f_arg -> (#bits<64>) {
+      %g4 = #add[#bits<64>](%nx, 3)
+      #yield %g4
+    } else {
+      %g3 = #add[#bits<64>](%nx, 2)
+      #yield %g3
+    }
+    #yield %f_n
   } else {
     #yield %nx2
   }
