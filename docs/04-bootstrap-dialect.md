@@ -255,7 +255,7 @@ func cstr_len(p: addr) -> u64 {
 | 绑定与返回 | `let n: i32 = …;`、`let y = inc(n);`、`return n;` | 标注可省：类型由值推（调用取被调方返回类型、参数名取参数表） |
 | 条件 | `if a < b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件是任意表达式：裸条件与括号条件走同一个入口，块就是表达式停下来的那一格；分支必须以 `return` 收尾，所以 `if` 是语句不是值 |
 | 带值 if | `let x: i32 = if c { a } else { b };` | 降级为 `%x = #if %c -> (#bits<32>) { … #yield %a } else { … #yield %b }`：条件是任意表达式、类型取绑定的标注（缺标注由值推）；**只在绑定位置**可用（`return if …` 报 4），**必须带 else**（缺 else 报 4），两个分支都必须以一个值收尾。样例 `bootstrap/lain/examples/choose.lain` |
-| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 仅 i32/u32（u64 报 5）、体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain` |
+| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 的边界与累加器宽度跟循环变量的类型走：i32/u32/u64/i64/usize 都能用（`u64` 曾报 5，A 的第四刀补齐 64 位算子后通了，实测 `#ult[#bits<64>]`），体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain` |
 | 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
 | 聚合类型名 | `struct Point { x: i32 y: i32 }`、`enum Shape { Circle(i32) Empty }`、`func f(p: Point) -> i32`、`let q: Shape = s;` | 名字可进参数类型与带标注的 `let`：聚合值在 IR 里是 `#addr`，所以参数类型发 `#addr`、标注绑定发一次地址复制（`#lea(%p, 0, 1, 0)`）；声明体里字段/变体**空格分隔，不能写逗号**（写了会当成字段名，报 5）。样例 `bootstrap/lain/examples/types.lain` |
@@ -304,8 +304,8 @@ func cstr_len(p: addr) -> u64 {
   `bits.lain`、`widths.lain`）：
   - 32 位：`+ - * / % == != > <= >= < and or << >>`（i32 走 sdiv/srem/slt/sgt/sle/sge，
     u32 走 udiv/urem/ult/ugt/ule/uge）；
-  - 64 位：同上一整列（`u64`/`usize` 走无符号那组，`i64` 走有符号那组）——`#bits` 3607 次、
-    `#add` 661 次里的大宗就是它们；
+  - 64 位：同上一整列（`u64`/`usize` 走无符号那组，`i64` 走有符号那组）——`#bits` 4114 次、
+    `#add` 471 次里的大宗就是它们；
   - `bool`：`== != and or`。
 - 词算子 `and`/`or` 由词法层整词识别（`an` 仍是 4）；`<<`/`>>` 走双字节标点。
 - IR 侧零改动：`#sub #mul #udiv #urem #eq #ne #ult #uge #and #or #shl #lshr` 都已实现。
@@ -369,10 +369,10 @@ func cstr_len(p: addr) -> u64 {
 **F. 层 0：`lainir_*` 发射库** —— 见上文《层 0：发射层》。它是「用 Lain 写 Meta」真正缺的
 那一层，也是 bootstrap/std/wire.l1 那套手写拼串的正式化。
 
-用量证据（bootstrap 全部 .l1/.lain）：`#bits` 3607、`#call` 2407、`#if` 779、`#yield` 719、
-`#add` 661、`#lea` 610、`#return` 565、`#eq` 534、`#proc` 396、`#data_addr` 232、
-`#break` 185、`#and` 142、`#ne` 140、`#continue` 104、`#ult` 102、`#loop` 97、`#sub` 74、
-`#or` 65、`#mul` 55。
+用量证据（口径：bootstrap/SOURCE_ORDER 的 28 个文件，不数注释与示例）：`#bits` 4114、
+`#call` 2994、`#if` 925、`#yield` 860、`#lea` 790、`#eq` 630、`#return` 628、`#add` 471、
+`#data_addr` 343、`#break` 220、`#and` 175、`#ne` 173、`#continue` 120、`#ult` 112、
+`#loop` 112、`#sub` 87、`#or` 84、`#mul` 67、`#proc` 407（定义数，= 验证器报的 subroutine 数）。
 
 ### 四、推迟与排除
 
@@ -395,7 +395,7 @@ func cstr_len(p: addr) -> u64 {
 `#extern`；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
 静态图看不见的间接引用。
 
-今天的规模：28 个文件 / 407 个 `#proc` / 144 个 `data` 块；注释 1899 行。
+今天的规模：28 个文件 / 12639 行 / 407 个 `#proc` 定义（= 验证器的 subroutine 数）/ 144 个 `data` 块；注释 1904 行。
 
 **死 proc：46 个、1306 行（约 10%）。**
 
@@ -436,7 +436,7 @@ bootstrap/std/eval.l1 的 bytes 与 emitted 请求同理：功能没接线，不
 `lain_meta_diagnostic_field`@bootstrap/std/emit.l1:284、
 `lain_meta_apply_diagnostic_field`@bootstrap/std/emit.l1:285。
 
-**其他杠杆**：注释 1899 行，最重的几个是 bootstrap/std/emit.l1 84/302（28%）、
+**其他杠杆**：注释 1904 行，最重的几个是 bootstrap/std/emit.l1 84/302（28%）、
 bootstrap/std/parse.l1 192/764（25%）、bootstrap/std/types.l1 22/101（22%）、
 bootstrap/std/recognize.l1 115/537（21%）、bootstrap/meta.l1 298/1532（19%）；
 bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。

@@ -29,7 +29,7 @@ cmake --build build/cmake
 逻辑路径就是 import 解析注册表里的名字：
 
 ```powershell
-build/lain-meta.exe --out build/arith.out std/examples/arith.lain bootstrap/lain/examples/arith.lain
+build/lain-meta.exe --out build/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain
 ```
 
 | 选项 | 默认 | 说明 |
@@ -48,5 +48,7 @@ build/lain-meta.exe --out build/arith.out std/examples/arith.lain bootstrap/lain
 | `-q` / `-v` | | 只印结论 / 印逐源细节 |
 
 退出码：0 跑到底或 `--expect-status` 满足；1 编译或执行失败；2 用法或 IO 错误。
-摘要行形如 `verify subroutines=N data=N`、`run slice=N rounds=N steps=N host_status=N`、
-`result kind=N width=N bits=N`，可直接被脚本断言。
+摘要行形如 `unit files=N bytes=N`、`verify subroutines=N data=N`、
+`run slice=N rounds=N steps=N host_status=N`、`result kind=N width=N bits=N`、
+`region grants=N`（宿主整块授予次数）、`output bytes=N`，可直接被脚本断言。
+`bootstrap/lain/examples/` 下的 15 个样例就是回归集：`region grants=2`、`host_status=0`。
