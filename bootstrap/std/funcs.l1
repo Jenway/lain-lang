@@ -2581,42 +2581,35 @@
     %kind = #and[#bits<64>](%info, 255)
     %width = #and[#bits<64>](#lshr[#bits<64>](%info, 8), 255)
 
-    // `#proc NAME(`
-    %p1 = #data_addr meta_p1
-    %w1 = #call lain_meta_emit_write(%p1, 6)
-    %n_lo = #call meta_node_start(%name_node)
-    %n_n = #call meta_node_len(%name_node)
-    %n_hi = #add[#bits<64>](%n_lo, %n_n)
-    %n_at = #lea(%base, %n_lo, 1, 0)
-    %w2 = #call lain_meta_emit_write(%n_at, %n_n)
-    %lp = #data_addr meta_fn_lparen
-    %w3 = #call lain_meta_emit_write(%lp, 1)
-
-    // 参数表：走参数组上的游标，认「名字 : 类型」这一种形状
+    // 参数表渲染进缓冲区；循环带回「1 + 长度」，0 表示参数类型解析失败
+    %buf = #data_addr lainir_text_buffer
     %colon = #data_addr meta_kw_colon
-    %pct = #data_addr meta_fn_pct
-    %col2 = #data_addr meta_fn_colon
-    %comma = #data_addr meta_o4
+    %colon2 = #data_addr lainir_colon_text
+    %comma = #data_addr lainir_comma
     %pcount = #call ast_child_count(%params)
     %pst = #loop ps(%pi2: #bits<64> = 0,
-                    %lead: #bits<1> = 0) -> (#bits<32>) {
+                    %lead: #bits<1> = 0,
+                    %pat: #bits<64> = 0) -> (#bits<64>) {
       %more = #ult[#bits<64>](%pi2, %pcount)
       #if %more {
         %c = #call ast_child(%params, %pi2)
         %cni = #add[#bits<64>](%pi2, 1)
         %nx = #call meta_cursor_next(%params, %pi2)
         %is_colon = #call meta_node_is_word(%nx, %base, %colon, 1)
-        #if %is_colon {
-          // 分隔符发在参数前面，所以第一个不发
-          #if %lead {
-            %wc = #call lain_meta_emit_write(%comma, 2)
-          }
-          %wp = #call lain_meta_emit_write(%pct, 1)
+        %both = #and[#bits<1>](%is_colon, %lead)
+        %pat2 = #if %both -> (#bits<64>) {
+          %wc = #call lainir_buf_bytes(%buf, %pat, %comma, 2)
+          #yield %wc
+        } else {
+          #yield %pat
+        }
+        %pat3 = #if %is_colon -> (#bits<64>) {
+          %wp = #call lainir_buf_byte(%buf, %pat2, 37)
           %a_lo = #call meta_node_start(%c)
           %a_n = #call meta_node_len(%c)
           %a_at = #lea(%base, %a_lo, 1, 0)
-          %wa = #call lain_meta_emit_write(%a_at, %a_n)
-          %wk = #call lain_meta_emit_write(%col2, 2)
+          %wa = #call lainir_buf_bytes(%buf, %wp, %a_at, %a_n)
+          %wk = #call lainir_buf_bytes(%buf, %wa, %colon2, 2)
           %tn = #call meta_cursor_next(%params, %cni)
           %t_lo = #call meta_node_start(%tn)
           %t_n = #call meta_node_len(%tn)
@@ -2625,27 +2618,31 @@
           %pbad = #eq[#bits<64>](%ptid, 0)
           #if %pbad {
             %f1 = #call lain_meta_fail(5)
-            #break ps(5)
+            #break ps(0)
           }
           %pinfo = #call meta_tid_repr(%ptid)
           %pk = #and[#bits<64>](%pinfo, 255)
           %pw = #and[#bits<64>](#lshr[#bits<64>](%pinfo, 8), 255)
-          %wr = #call meta_emit_repr(%pk, %pw)
+          %wr = #call lainir_buf_repr(%buf, %wk, %pk, %pw)
+          #yield %wr
+        } else {
+          #yield %pat2
         }
-        #continue ps(%cni, 1)
+        #continue ps(%cni, 1, %pat3)
       } else {
-        #break ps(0)
+        %done = #add[#bits<64>](1, %pat)
+        #break ps(%done)
       }
     }
-    %pfail = #ne[#bits<32>](%pst, 0)
+    %pfail = #eq[#bits<64>](%pst, 0)
     #if %pfail {
-      #return %pst
+      #return 5
     }
-
-    // `) -> ` + 返回类型的 repr
-    %rr = #data_addr meta_fn_rret
-    %w4 = #call lain_meta_emit_write(%rr, 5)
-    %w5 = #call meta_emit_repr(%kind, %width)
+    %plen = #sub[#bits<64>](%pst, 1)
+    %n_lo = #call meta_node_start(%name_node)
+    %n_n = #call meta_node_len(%name_node)
+    %n_at = #lea(%base, %n_lo, 1, 0)
+    %w5 = #call lainir_proc_head_full(%n_at, %n_n, %buf, %plen, %kind, %width)
     #yield 0
   }
   #return %status
