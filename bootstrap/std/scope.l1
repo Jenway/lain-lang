@@ -400,20 +400,6 @@
   #return 0
 }
 
-// 这个模块扫过了吗？没有就扫一层。压模块作用域时用（配合 meta_scope_enter）。
-#proc meta_scope_ensure_scanned(%idx: #bits<64>) -> #bits<32> {
-  %already = #call meta_scope_has_source(%idx)
-  %st = #if %already -> (#bits<32>) {
-    #yield 0
-  } else {
-    %base = #call lain_meta_source_data(%idx)
-    %len = #call lain_meta_source_length(%idx)
-    %mark = #call meta_scope_count()
-    %s = #call meta_scope_scan(%base, %len, %idx, %mark)
-    #yield %s
-  }
-  #return %st
-}
 
 #proc meta_scope_count() -> #bits<64> {
   %scratch = #call lain_meta_scratch_data()
@@ -463,13 +449,6 @@
   #return %v
 }
 
-#proc meta_scope_set_payload(%index: #bits<64>,
-                             %v: #bits<64>) -> #bits<32> {
-  %e = #call meta_scope_entry(%index)
-  %p = #lea(%e, 32, 1, 0)
-  %s = #call meta_cell_put(%p, %v)
-  #return 0
-}
 
 #proc meta_scope_emitted(%index: #bits<64>) -> #bits<64> {
   %v = #call meta_scope_word(%index, 48)
@@ -624,150 +603,11 @@
   #return %r
 }
 
-#proc meta_scope_dependency_count() -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data()
-  %count = #call meta_cell_get(#lea(%scratch, 432, 1, 0))
-  #return %count
-}
 
-// 声明索引是否已在本次闭包队列中。
-#proc meta_scope_closure_contains(%target: #bits<64>) -> #bits<1> {
-  %scratch = #call lain_meta_scratch_data()
-  %base = #call meta_cell_get(#lea(%scratch, 440, 1, 0))
-  %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
-  %found = #loop find(%i: #bits<64> = 0) -> (#bits<1>) {
-    %more = #ult[#bits<64>](%i, %count)
-    #if %more {
-      %off = #mul[#bits<64>](%i, 8)
-      %at = #add[#bits<64>](%base, %off)
-      %item = #call meta_cell_get(#lea(%scratch, %at, 1, 0))
-      %same = #eq[#bits<64>](%item, %target)
-      #if %same { #break find(1) }
-      %next = #add[#bits<64>](%i, 1)
-      #continue find(%next)
-    } else { #break find(0) }
-  }
-  #return %found
-}
 
-#proc meta_scope_closure_append(%target: #bits<64>) -> #bits<32> {
-  %scratch = #call lain_meta_scratch_data()
-  %base = #call meta_cell_get(#lea(%scratch, 440, 1, 0))
-  %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
-  %cap = #call meta_cell_get(#lea(%scratch, 424, 1, 0))
-  %full = #uge[#bits<64>](%count, %cap)
-  %r = #if %full -> (#bits<32>) {
-    %fail = #call lain_meta_fail(9416)
-    #yield 9416
-  } else {
-    %off = #mul[#bits<64>](%count, 8)
-    %at = #add[#bits<64>](%base, %off)
-    %put = #call meta_cell_put(#lea(%scratch, %at, 1, 0), %target)
-    %next = #add[#bits<64>](%count, 1)
-    %save = #call meta_cell_put(#lea(%scratch, 448, 1, 0), %next)
-    #yield 0
-  }
-  #return %r
-}
 
-// 对声明调用图做确定顺序的广度优先闭包。将处理中节点先放进闭包，
-// 因此自递归和互递归都终止；它们是过程引用环，不判作 eval 请求循环。
-#proc meta_scope_dependency_closure(%root: #bits<64>) -> #bits<64> {
-  %root_node = #call meta_scope_decl_node(%root)
-  %valid_root = #ne[#bits<64>](%root_node, 0)
-  #if #eq[#bits<1>](%valid_root, 0) { #return 0 }
-  %scratch = #call lain_meta_scratch_data()
-  %clear = #call meta_cell_put(#lea(%scratch, 448, 1, 0), 0)
-  %first = #call meta_scope_closure_append(%root)
-  %walk = #loop bfs(%cursor: #bits<64> = 0) -> (#bits<32>) {
-    %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
-    %more = #ult[#bits<64>](%cursor, %count)
-    #if %more {
-      %closure_base = #call meta_cell_get(#lea(%scratch, 440, 1, 0))
-      %node_off = #mul[#bits<64>](%cursor, 8)
-      %node_at = #add[#bits<64>](%closure_base, %node_off)
-      %current = #call meta_cell_get(#lea(%scratch, %node_at, 1, 0))
-      %current_node = #call meta_scope_decl_node(%current)
-      %stale = #eq[#bits<64>](%current_node, 0)
-      #if %stale {
-        %fail = #call lain_meta_fail(9414)
-        #break bfs(9414)
-      }
-      %edge_base = #call meta_cell_get(#lea(%scratch, 416, 1, 0))
-      %edge_count = #call meta_cell_get(#lea(%scratch, 432, 1, 0))
-      %edge_status = #loop edges(%edge: #bits<64> = 0) -> (#bits<32>) {
-        %has_edge = #ult[#bits<64>](%edge, %edge_count)
-        #if %has_edge {
-          %edge_off = #mul[#bits<64>](%edge, 16)
-          %from_at = #add[#bits<64>](%edge_base, %edge_off)
-          %from = #call meta_cell_get(#lea(%scratch, %from_at, 1, 0))
-          %same_from = #eq[#bits<64>](%from, %current)
-          %status = #if %same_from -> (#bits<32>) {
-            %to_at = #add[#bits<64>](%from_at, 8)
-            %to = #call meta_cell_get(#lea(%scratch, %to_at, 1, 0))
-            %seen = #call meta_scope_closure_contains(%to)
-            %status_add = #if %seen -> (#bits<32>) {
-              #yield 0
-            } else {
-              %to_node = #call meta_scope_decl_node(%to)
-              %bad_to = #eq[#bits<64>](%to_node, 0)
-              %added = #if %bad_to -> (#bits<32>) {
-                #yield 9414
-              } else {
-                %a = #call meta_scope_closure_append(%to)
-                #yield %a
-              }
-              #yield %added
-            }
-            #yield %status_add
-          } else { #yield 0 }
-          %failed = #ne[#bits<32>](%status, 0)
-          #if %failed { #break edges(%status) }
-          %next_edge = #add[#bits<64>](%edge, 1)
-          #continue edges(%next_edge)
-        } else { #break edges(0) }
-      }
-      %edge_failed = #ne[#bits<32>](%edge_status, 0)
-      #if %edge_failed {
-        %err = #if #eq[#bits<32>](%edge_status, 9414) -> (#bits<32>) {
-          %fail = #call lain_meta_fail(9414)
-          #yield 9414
-        } else { #yield %edge_status }
-        #break bfs(%err)
-      }
-      %next_cursor = #add[#bits<64>](%cursor, 1)
-      #continue bfs(%next_cursor)
-    } else { #break bfs(0) }
-  }
-  %failed = #ne[#bits<32>](%walk, 0)
-  %r = #if %failed -> (#bits<64>) {
-    #yield 0
-  } else {
-    %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
-    #yield %count
-  }
-  #return %r
-}
 
-#proc meta_scope_dependency_closure_count() -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data()
-  %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
-  #return %count
-}
 
-#proc meta_scope_dependency_closure_at(%index: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data()
-  %base = #call meta_cell_get(#lea(%scratch, 440, 1, 0))
-  %count = #call meta_cell_get(#lea(%scratch, 448, 1, 0))
-  %inside = #ult[#bits<64>](%index, %count)
-  %r = #if %inside -> (#bits<64>) {
-    %off = #mul[#bits<64>](%index, 8)
-    %at = #add[#bits<64>](%base, %off)
-    %node = #call meta_cell_get(#lea(%scratch, %at, 1, 0))
-    #yield %node
-  } else { #yield 0xFFFFFFFFFFFFFFFF }
-  #return %r
-}
 
 // struct 声明生成 `<Type>__size()` 过程；按类型身份识别这类派生入口。
 #proc meta_scope_generated_size_name(%name: #addr,
@@ -983,26 +823,6 @@
 
 // --- 预扫一份源码的顶层形式 -------------------------------------------------
 
-// 一个引用在它父组的哪个位置。**「下一个兄弟」必须由父组 + 下标给出**：规范禁止
-// `node.next`，节点自己不带兄弟信息了。
-#proc ast_index_of(%parent: #bits<64>, %node: #bits<64>) -> #bits<64> {
-  %count = #call ast_child_count(%parent)
-  %r = #loop s(%i: #bits<64> = 0) -> (#bits<64>) {
-    %more = #ult[#bits<64>](%i, %count)
-    #if %more {
-      %c = #call ast_child(%parent, %i)
-      %same = #eq[#bits<64>](%c, %node)
-      #if %same {
-        #break s(%i)
-      }
-      %i2 = #add[#bits<64>](%i, 1)
-      #continue s(%i2)
-    } else {
-      #break s(0xFFFFFFFFFFFFFFFF)
-    }
-  }
-  #return %r
-}
 
 // 名字节点跟在关键字后面；`名字后面那个节点` 是 `=`（标量）或 `{...}` 组（积/和）。
 // 记进表的是**节点引用**，不是字节位置。

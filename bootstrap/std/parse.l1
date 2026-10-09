@@ -66,12 +66,6 @@
   #return %v
 }
 
-// 游标是不是走到末尾了（`index >= child_count`）。末尾游标**不能**取 current。
-#proc meta_cursor_end(%parent: #bits<64>, %index: #bits<64>) -> #bits<1> {
-  %count = #call ast_child_count(%parent)
-  %e = #uge[#bits<64>](%index, %count)
-  #return %e
-}
 
 // 节点种类：1 = 词，2 = 组。
 #proc ast_kind(%ref: #bits<64>) -> #bits<8> {
@@ -497,28 +491,6 @@
   #return %v
 }
 
-// 带**完整键**的查询：环境 / 作用域 / 上下文也要对上（规范 §2.2 的查询键是
-// 前五个字段）。第一期的识别 pass 三个都写 0。
-#proc meta_sem_lookup_key(%parent: #bits<64>, %index: #bits<64>,
-                          %env: #bits<64>, %scope: #bits<64>,
-                          %ctx: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data()
-  %hit = #call sem_find(%scratch, %parent, %index, %env, %scope, %ctx)
-  %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
-  %v = #if %miss -> (#bits<64>) {
-    #yield 0xFFFFFFFFFFFFFFFF
-  } else {
-    %base = #call sem_base_get(%scratch)
-    %off = #mul[#bits<64>](%hit, 72)
-    %e = #add[#bits<64>](%base, %off)
-    %cell = #lea(%scratch, %e, 1, 0)
-    // +48 是 syntax_tag：现行形状号（组 2、声明 3、二元 4、调用 5、字段 6、数字 7、
-    // 返回 8、算子 9、构造 10、if 11）。+56 的 type_id 第一期不写。
-    %tag = #call meta_cell_get(#lea(%cell, 48, 1, 0))
-    #yield %tag
-  }
-  #return %v
-}
 
 // 按出现位置读取当前语义；context 是记录内容的一部分，不由旧消费者猜测。
 #proc meta_sem_lookup(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
@@ -589,19 +561,7 @@
   #return %r
 }
 
-#proc meta_sem_put_key(%parent: #bits<64>, %index: #bits<64>,
-                       %env: #bits<64>, %scope: #bits<64>,
-                       %ctx: #bits<64>, %form: #bits<64>) -> #bits<32> {
-  %v = #call meta_sem_put_full_key(%parent, %index, %env, %scope, %ctx, %form, 0, 0)
-  #return %v
-}
 
-// 第一期识别 pass 的入口：键的环境/作用域/上下文都是 0。
-#proc meta_sem_put(%parent: #bits<64>, %index: #bits<64>,
-                    %form: #bits<64>) -> #bits<32> {
-  %v = #call meta_sem_put_key(%parent, %index, 0, 0, 0, %form)
-  #return %v
-}
 
 #proc meta_sem_put_annotated(%parent: #bits<64>, %index: #bits<64>,
                              %context: #bits<64>, %form: #bits<64>,
@@ -612,53 +572,8 @@
   #return %v
 }
 
-// 给已经存在的语义条目补上语法所有权和展开来源。两者都属于出现位置，不能写回
-// 只读 AstIn，也不能挂在可能被多个父组复用的节点身份上。
-#proc meta_sem_annotate(%parent: #bits<64>, %index: #bits<64>,
-                        %binding: #bits<64>,
-                        %expansion: #bits<64>) -> #bits<32> {
-  %scratch = #call lain_meta_scratch_data()
-  %hit = #call sem_find(%scratch, %parent, %index, 0, 0, 0)
-  %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
-  #if %miss { #return 4 }
-  %base = #call sem_base_get(%scratch)
-  %off = #mul[#bits<64>](%hit, 72)
-  %entry = #add[#bits<64>](%base, %off)
-  %cell = #lea(%scratch, %entry, 1, 0)
-  %w0 = #call meta_cell_put(#lea(%cell, 40, 1, 0), %binding)
-  %w1 = #call meta_cell_put(#lea(%cell, 64, 1, 0), %expansion)
-  #return 0
-}
 
-#proc meta_sem_binding(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data()
-  %hit = #call sem_find_position(%scratch, %parent, %index)
-  %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
-  %v = #if %miss -> (#bits<64>) { #yield 0 } else {
-    %base = #call sem_base_get(%scratch)
-    %off = #mul[#bits<64>](%hit, 72)
-    %entry = #add[#bits<64>](%base, %off)
-    %cell = #lea(%scratch, %entry, 1, 0)
-    %value = #call meta_cell_get(#lea(%cell, 40, 1, 0))
-    #yield %value
-  }
-  #return %v
-}
 
-#proc meta_sem_expansion(%parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
-  %scratch = #call lain_meta_scratch_data()
-  %hit = #call sem_find_position(%scratch, %parent, %index)
-  %miss = #eq[#bits<64>](%hit, 0xFFFFFFFFFFFFFFFF)
-  %v = #if %miss -> (#bits<64>) { #yield 0 } else {
-    %base = #call sem_base_get(%scratch)
-    %off = #mul[#bits<64>](%hit, 72)
-    %entry = #add[#bits<64>](%base, %off)
-    %cell = #lea(%scratch, %entry, 1, 0)
-    %value = #call meta_cell_get(#lea(%cell, 64, 1, 0))
-    #yield %value
-  }
-  #return %v
-}
 
 
 // 这个节点是不是「字面量 kw」，也就是一个词，内容正好是那串字节？

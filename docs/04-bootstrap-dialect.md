@@ -33,7 +33,8 @@
   不是命名习惯 —— Meta 两者都要。
 - **vref** 是发射出的值引用（产物里的 `%name`），不是机器值。它是不透明标量：只由
   `lainir_*` 产生、只被 `lainir_*` 消费，不能算术、不能 `as`。
-- 层 0 的实现是 `bootstrap/std/lainir.l1`：`lainir_reset()` 清空产物积存，`lainir_text()` 与 `lainir_length()` 取回文本，其余每个 LAINIR 形态一组 `lainir_*` 过程。处理管线今天发的每一条指令文本都经过它。`bootstrap/std/wire.l1` 是 Meta 值的二进制 wire 编解码与校验，不发 IR 文本。
+- 层 0 的实现是 `bootstrap/std/lainir.l1`：`lainir_reset()` 清空产物积存，`lainir_text()` 与 `lainir_length()` 取回文本，其余每个 LAINIR 形态一组 `lainir_*` 过程。处理管线今天发的每一条指令文本都经过它。wire 编解码那一层（原来的 `bootstrap/std/wire.l1`）只被死代码调用，
+已随五的瘦身整文件删掉。
 - 阶段纪律：任何 Lain 代码都能调用层 0（用户宏也能发射任意 IR）；闸门始终是
   `lainir_parse` + `lainir_verify`。发射能力只登记进编译期那张表。
 
@@ -560,44 +561,46 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
 
 ### 五、删除与瘦身（实测口径）
 
-动手做「待做」之前，先看能拿掉什么。口径是静态调用图：根 = 三个 ABI 入口
-（`lain_std_lower` / `lain_std_abi_version` / `lain_std_initialize`）加全部 46 个能力的
-`#extern`；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
-静态图看不见的间接引用。
+口径是静态调用图：根 = 三个 ABI 入口（`lain_std_lower` / `lain_std_abi_version` /
+`lain_std_initialize`）加全部 46 个能力的 `#extern`，再加层 0 的探针入口（`f1_probe` …
+`f4_probe`、`f6_probe` —— F 的验收要求公开面每个算子都有样例，那一层的公开 API 不能按「单元里
+没人调用」判死）；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
+静态图看不见的间接引用。这条口径的可重跑实现是 `build/deadscan.ps1`（`data` 块那条是
+`build/datascan.ps1`）。
 
-今天的规模（`build/verify_probe.exe` + 按 `SOURCE_ORDER` 逐文件统计）：28 个文件 / 12809 行 /
-411 个 `#proc` 定义（= 验证器的 subroutine 数）/ 148 个 `data` 块；注释 1936 行。
+**已删：48 个 `#proc`（1299 行）加 1 个整文件。** 删前 29 个文件 / 14522 行 / 582 个 `#proc` 定义
+（= 验证器报的 subroutine 数）/ 214 个 `data` 块；删后 28 / 13223 / 534 / 214。
 
-**死 proc：46 个、1306 行（约 10%）。**
+| 文件 | 删前 proc | 删后 proc | 删前行 | 删后行 | 是什么 |
+|---|---|---|---|---|---|
+| bootstrap/std/wire.l1 | 16 | 0（整文件删） | 741 | 0 | 类型、值、过程引用的 wire 编解码与校验，env 值绑定 |
+| bootstrap/std/eval.l1 | 8 | 3 | 266 | 81 | bytes 实参请求、emitted 请求、声明闭包与过程引用求值 |
+| bootstrap/std/scope.l1 | 45 | 36 | 1288 | 1108 | 依赖闭包一套、`meta_scope_set_payload`、`ast_index_of`、`meta_scope_ensure_scanned` |
+| bootstrap/std/parse.l1 | 42 | 35 | 718 | 633 | `meta_sem_*` 一系、`meta_cursor_end` |
+| bootstrap/std/registry.l1 | 16 | 10 | 244 | 204 | `meta_tid_owner` / `meta_tid_namespace` / `meta_tid_field_*` |
+| bootstrap/std/modules.l1 | 18 | 16 | 605 | 575 | `meta_cstr_len`、`meta_slice_equals` |
+| bootstrap/std/lainir.l1 | 151 | 149 | 1509 | 1475 | `lainir_memory_unary`、`lainir_loop`（层 0 里没人调的片段） |
+| bootstrap/std/emit.l1 | 47 | 46 | 172 | 168 | `meta_emit_byte`（F5 迁移后没人再调） |
 
-| 文件 | 个数 | 行数 | 是什么 |
-|---|---|---|---|
-| bootstrap/std/wire.l1 | 16 | 750 | 类型、值、过程引用的 wire 编解码与校验，env 值绑定 |
-| bootstrap/std/eval.l1 | 6 | 195 | bytes 实参请求、emitted 请求、声明闭包与过程引用求值 |
-| bootstrap/std/scope.l1 | 9 | 189 | 依赖闭包一套、`meta_scope_set_payload`、`ast_index_of` |
-| bootstrap/std/parse.l1 | 7 | 93 | `meta_sem_put` / `meta_sem_annotate` / `meta_sem_binding` / `meta_sem_expansion` 一系 |
-| bootstrap/std/registry.l1 | 6 | 45 | `meta_tid_owner` / `meta_tid_namespace` / `meta_tid_field_*` |
-| bootstrap/std/modules.l1 | 2 | 34 | `meta_cstr_len`、`meta_slice_equals` |
+删掉的单条里最大的是 `meta_record_type_from_field_list`（166 行）、`meta_wire_validate`（119）、
+`meta_eval_apply_decl_closure`（112）、`meta_wire_validate_field_list`（87）、
+`meta_scope_dependency_closure`（77），都在上表前四行的文件里。
 
-最大的单条：`meta_record_type_from_field_list`@bootstrap/std/wire.l1:571（166 行）、
-`meta_wire_validate`@bootstrap/std/wire.l1:171（119）、
-`meta_eval_apply_decl_closure`@bootstrap/std/eval.l1:76（112）、
-`meta_wire_validate_field_list`@bootstrap/std/wire.l1:84（87）、
-`meta_scope_dependency_closure`@bootstrap/std/scope.l1:674（77）。
+`bootstrap/lain/examples/lainir_f5.l1`（F5 迁移过程中的单点探针，10 行）也一并删掉：它的覆盖被
+`lainir_f6.l1` 的整单元重发取代，而且它从来不是任何入口。
+
+删除后的产物与删除前逐字节相同（`build/f5_compare.ps1` 的差异仍是 `jumps` / `locals` 那两条有意
+的改动），23 个样例与 f1…f4、f6 探针全绿。
 
 **别删**：bootstrap/std/funcs.l1 的 `meta_lower_stmt` / `meta_lower_if` / `meta_lower_for` /
 `meta_lower_body` 是活的（`meta_lower_decl_func` → `meta_lower_body`）。
 
-bootstrap/std/wire.l1 那一层只被死代码调用，但它是《层 0》的现存对应物（本文 :36、:239、
-:278 三处如此描述），所以删它要同时改本文 —— 它是「第二步的存货」，不是垃圾。
-bootstrap/std/eval.l1 的 bytes 与 emitted 请求同理：功能没接线，不是写错了。
-
-**未被引用的 `data` 块 10 个**：`meta_kw_arrow`@bootstrap/std/lex.l1:107、
-`meta_o1`@bootstrap/std/emit.l1:81、`meta_o5`@bootstrap/std/emit.l1:85、
-`meta_s2`@bootstrap/std/emit.l1:226、`meta_s3a`@bootstrap/std/emit.l1:227、
-`meta_s3b`@bootstrap/std/emit.l1:228、`meta_s4a`@bootstrap/std/emit.l1:229、
-`meta_s4b`@bootstrap/std/emit.l1:230、`meta_reg_entry_off`@bootstrap/std/registry.l1:30、
-`meta_reg_entry_size`@bootstrap/std/registry.l1:32。
+**未被引用的 `data` 块 7 个**（F5 之后重测：旧表里的 `meta_o1` / `meta_o5` / `meta_s2` /
+`meta_s3a` / `meta_s3b` / `meta_s4a` / `meta_s4b` 在那次迁移里已经删掉）：
+`lainir_data_rw_mode`@bootstrap/std/lainir.l1:1136、`lainir_indent2`@bootstrap/std/lainir.l1:918、
+`lainir_rparen_brace`@bootstrap/std/lainir.l1:565、`meta_kw_arrow`@bootstrap/std/lex.l1:107、
+`meta_reg_entry_off`@bootstrap/std/registry.l1:30、`meta_reg_entry_size`@bootstrap/std/registry.l1:32、
+`meta_st_ind4cont`@bootstrap/std/emit.l1:181。
 
 **从未被调用的能力包装 7 个**（bootstrap/std/emit.l1 的 `#extern` 加 seed/src/meta/host.c
 的登记，删要两侧一起，能力表 46 → 39）：`lain_meta_emit_data`@bootstrap/std/emit.l1:19、
@@ -612,8 +615,8 @@ bootstrap/std/parse.l1 192/764（25%）、bootstrap/std/types.l1 22/101（22%）
 bootstrap/std/recognize.l1 115/537（21%）、bootstrap/meta.l1 298/1532（19%）；
 bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 
-**顺序**：先删未被引用的 `data` 块与未被调用的能力（无风险）；wire 那一层删还是留由设计定，
-留就加一句「当前不可达」的注释。
+**顺序**：先删未被引用的 `data` 块与未被调用的能力（无风险）；wire 那一层随 F 的落地整文件删掉了
+（层 0 由 `lainir.l1` 承担，那一层不可达）。
 
 ### 六、结论
 
@@ -759,8 +762,8 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   也随之删除（语言里不再有标量声明，也就没有「先 import 一份 prelude」这一步）。
 - 层 0 已完成：bootstrap/std/lainir.l1 的 148 个 lainir_* 写出器承担处理管线的全部字面
   文本发射，独立调用方（bootstrap/lain/examples/lainir_f6.l1）重发的单元与管线在
-  bootstrap/lain/examples/locals.lain 上的产物逐字节相同。bootstrap/std/wire.l1 是 Meta 值的
-  二进制 wire 编解码与校验，不发射 IR 文本。
+  bootstrap/lain/examples/locals.lain 上的产物逐字节相同。wire 编解码那一层（原来的
+  bootstrap/std/wire.l1）已随五的瘦身删掉：它只被死代码调用。
 - 表面语言里的内存操作今天有 `load` / `store` / `lea` / `p + i` 与顶层字节串（→ `#data`）；
   宿主授予整块窗口的能力（`region_grant`）已接线，但只在 Meta 自己的 bootstrap 代码里用
   （bootstrap/std/regions.l1），表面语言还没有对应写法。
