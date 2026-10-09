@@ -262,7 +262,9 @@ static bool yields_values(Verifier *v, const L1Region *region, uint32_t want,
   if (loop_label) return contains_break_for(region, loop_label, want);
   last = &region->insts[region->inst_count - 1];
   if (last->kind == INST_YIELD) return last->operand_count == want;
-  if (last->kind == INST_RETURN || last->kind == INST_BREAK) return true;
+  if (last->kind == INST_RETURN || last->kind == INST_BREAK ||
+      last->kind == INST_CONTINUE)
+    return true;
   if (last->kind == INST_IF && last->else_body)
     return yields_values(v, last->body, want, NULL) &&
            yields_values(v, last->else_body, want, NULL);
