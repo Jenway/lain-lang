@@ -255,7 +255,7 @@ func cstr_len(p: addr) -> u64 {
 | 绑定与返回 | `let n: i32 = …;`、`let y = inc(n);`、`return n;` | 标注可省：类型由值推（调用取被调方返回类型、参数名取参数表） |
 | 条件 | `if a < b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件是任意表达式：裸条件与括号条件走同一个入口，块就是表达式停下来的那一格；分支必须以 `return` 收尾，所以 `if` 是语句不是值 |
 | 带值 if | `let x: i32 = if c { a } else { b };` | 降级为 `%x = #if %c -> (#bits<32>) { … #yield %a } else { … #yield %b }`：条件是任意表达式、类型取绑定的标注（缺标注由值推）；**只在绑定位置**可用（`return if …` 报 4），**必须带 else**（缺 else 报 4），两个分支都必须以一个值收尾。样例 `bootstrap/lain/examples/choose.lain` |
-| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 仅 i32/u32（u64 报 5）、体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain` |
+| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 的边界与累加器宽度跟循环变量的类型走：i32/u32/u64/i64/usize 都能用（`u64` 曾报 5，A 的第四刀补齐 64 位算子后通了，实测 `#ult[#bits<64>]`），体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain` |
 | 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
 | 聚合类型名 | `struct Point { x: i32 y: i32 }`、`enum Shape { Circle(i32) Empty }`、`func f(p: Point) -> i32`、`let q: Shape = s;` | 名字可进参数类型与带标注的 `let`：聚合值在 IR 里是 `#addr`，所以参数类型发 `#addr`、标注绑定发一次地址复制（`#lea(%p, 0, 1, 0)`）；声明体里字段/变体**空格分隔，不能写逗号**（写了会当成字段名，报 5）。样例 `bootstrap/lain/examples/types.lain` |
@@ -283,7 +283,18 @@ func cstr_len(p: addr) -> u64 {
 `data p_storage rw { … }` 与 `#proc p() -> #addr`。**名字已经能用**：struct / enum 的名字可以写进参数类型与带标注的 `let`（见《一、已能用》的
 「聚合类型名」行）；缺的仍然是**值层**：字段访问与变体投影当值用还没降级
 （bootstrap/std/funcs.l1:895-898 干净地报 4）。函数体里的构造还差一份 storage ——
-顶层那份是静态 `data`，函数体内要么给每个构造点一份静态 storage，要么先有 `#alloca`。
+顶层那份是静态 `data`，函数体内发不出顶层 `data`（发射是流式的），今天报 4。两条实现路线
+（尚未定案，见下）：
+
+- **每个构造点一份静态 storage**：先要有「带外顶层区」——把 `data` 攒到旁路缓冲、最后拼回
+  模块顶层（这是 F 的一部分）。存储是全局的，构造出的值返回/跨函数传都安全；代价是递归
+  共享同一份存储（重入会互相踩）。
+- **`#alloca`**：IR、验证器、引擎、解析都已实现（`#alloca[ty](count)`，count 必须是常量，
+  元素类型只决定每元素字节数；从栈租约里 bump，返回**裸地址**）。帧退出时水位回退
+  （`tcb.c` 的 `stack_mark` → `engine.c:926`），所以区域退出后地址失效 —— 构造出的值
+  不能安全返回或跨函数传（同 C 返回局部地址）。把它从《四、推迟与排除》拉进 v0 即可用。
+
+两条路都不影响自举：手写 Meta 里 `#struct`/`#enum` 的命中数是 0。
 
 ### 三、待做（按阻塞顺序）
 
@@ -293,8 +304,8 @@ func cstr_len(p: addr) -> u64 {
   `bits.lain`、`widths.lain`）：
   - 32 位：`+ - * / % == != > <= >= < and or << >>`（i32 走 sdiv/srem/slt/sgt/sle/sge，
     u32 走 udiv/urem/ult/ugt/ule/uge）；
-  - 64 位：同上一整列（`u64`/`usize` 走无符号那组，`i64` 走有符号那组）——`#bits` 3607 次、
-    `#add` 661 次里的大宗就是它们；
+  - 64 位：同上一整列（`u64`/`usize` 走无符号那组，`i64` 走有符号那组）——`#bits` 4114 次、
+    `#add` 471 次里的大宗就是它们；
   - `bool`：`== != and or`。
 - 词算子 `and`/`or` 由词法层整词识别（`an` 仍是 4）；`<<`/`>>` 走双字节标点。
 - IR 侧零改动：`#sub #mul #udiv #urem #eq #ne #ult #uge #and #or #shl #lshr` 都已实现。
@@ -345,9 +356,9 @@ func cstr_len(p: addr) -> u64 {
   声明身份与 `func` 一样是 6，调用点与返回类型推导完全共用一条路（样例
   `bootstrap/lain/examples/extern.lain`：4 条 extern + 3 个函数，产物过 `lainir_parse` +
   `lainir_verify`）。手写 Meta 的 46 个 `#extern` 里取 14 条最复杂的签名实测逐字符等价
-  （build/probes/cap12.lain，matched=14 of 14）。**注意**：单个编译单元里声明数量有既存
-  上限 —— 20 条左右开始不稳（22 条 extern 报 4、22 条 func 报 9401，非单调可重复），
-  与 extern 无关，见《待补规则》。
+  （build/probes/cap12.lain，matched=14 of 14）。**注意**：一次 lowering 请求的源码规模有既存上限 ——
+  今天实测约 40 条合成 extern（或 13 条 9 参长签名）就开始报 4，多个源会**累积**，
+  与 extern / func 无关，见《待补规则》。
 - struct / enum 名字可写进参数类型与标注：**完成** —— 聚合类型在 IR 里就是 `#addr`
   （构造发 `#proc NAME() -> #addr`），所以 `p: Point` 的参数类型发成 `#addr`、
   `let q: Point = p;` 是一次地址复制（`#lea(%p, 0, 1, 0)`）；实现是
@@ -358,10 +369,10 @@ func cstr_len(p: addr) -> u64 {
 **F. 层 0：`lainir_*` 发射库** —— 见上文《层 0：发射层》。它是「用 Lain 写 Meta」真正缺的
 那一层，也是 bootstrap/std/wire.l1 那套手写拼串的正式化。
 
-用量证据（bootstrap 全部 .l1/.lain）：`#bits` 3607、`#call` 2407、`#if` 779、`#yield` 719、
-`#add` 661、`#lea` 610、`#return` 565、`#eq` 534、`#proc` 396、`#data_addr` 232、
-`#break` 185、`#and` 142、`#ne` 140、`#continue` 104、`#ult` 102、`#loop` 97、`#sub` 74、
-`#or` 65、`#mul` 55。
+用量证据（口径：bootstrap/SOURCE_ORDER 的 28 个文件，不数注释与示例）：`#bits` 4114、
+`#call` 2994、`#if` 925、`#yield` 860、`#lea` 790、`#eq` 630、`#return` 628、`#add` 471、
+`#data_addr` 343、`#break` 220、`#and` 175、`#ne` 173、`#continue` 120、`#ult` 112、
+`#loop` 112、`#sub` 87、`#or` 84、`#mul` 67、`#proc` 407（定义数，= 验证器报的 subroutine 数）。
 
 ### 四、推迟与排除
 
@@ -384,7 +395,7 @@ func cstr_len(p: addr) -> u64 {
 `#extern`；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
 静态图看不见的间接引用。
 
-今天的规模：28 个文件 / 407 个 `#proc` / 144 个 `data` 块；注释 1899 行。
+今天的规模：28 个文件 / 12639 行 / 407 个 `#proc` 定义（= 验证器的 subroutine 数）/ 144 个 `data` 块；注释 1904 行。
 
 **死 proc：46 个、1306 行（约 10%）。**
 
@@ -425,7 +436,7 @@ bootstrap/std/eval.l1 的 bytes 与 emitted 请求同理：功能没接线，不
 `lain_meta_diagnostic_field`@bootstrap/std/emit.l1:284、
 `lain_meta_apply_diagnostic_field`@bootstrap/std/emit.l1:285。
 
-**其他杠杆**：注释 1899 行，最重的几个是 bootstrap/std/emit.l1 84/302（28%）、
+**其他杠杆**：注释 1904 行，最重的几个是 bootstrap/std/emit.l1 84/302（28%）、
 bootstrap/std/parse.l1 192/764（25%）、bootstrap/std/types.l1 22/101（22%）、
 bootstrap/std/recognize.l1 115/537（21%）、bootstrap/meta.l1 298/1532（19%）；
 bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
@@ -495,10 +506,13 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   （2005 BAD_OPERAND_TYPE）。也就是说错误由**下游信任门**拒收、不会变成错误代码，
   但报错位置在产物而不是源码。原因：`meta_emit_close` 的复制只按上下文 kind 选 `#lea`/`#add`，
   不看被复制的值自己的类型（只有参数名能查到类型）。
-- 单个编译单元的声明数量有既存上限（不是 extern 引入）：一个文件里 20 条左右开始不稳 ——
-  22 条 extern 报 4（诊断无位置）、22 条 func 报 9401（TREE_HANDLE），且结果非单调
-  （21 条过、22 条挂、25 条又过）但可重复。定位线索：Meta 的声明/展开阶段（AstIn/AstOut arena、
-  scratch 或 visited 预算），超出本轮范围。多文件同一次驱动也一样（8 个源码合计 45 条 extern 报 4）。
+- 一次 lowering 请求能吃的源码规模有既存上限（不是 extern 引入）：今天实测 —— 单个源里
+  39 条合成 extern（2369 B）过、40 条（2430 B）报 4（诊断无位置）；12 条 9 参长签名（2270 B）
+  过、13 条（2460 B）报 4；**多个源会累积**（4 个源各 10 条、合计 2480 B 也报 4；8 个源各 5 条
+  同样）。两种形状的条数差很多但边界一致，所以按**声明展开的节点规模**算，约 550–650 个节点；
+  具体机制（AstIn/AstOut arena、scratch 或 visited 预算）未定位，超出本轮范围。旧记录
+  「一个文件里 20 条左右、22 条 extern 报 4、22 条 func 报 9401」是在 C 组改动之前测的，
+  现在 45 条 func 也过，已不成立。
 
 ## 与现状的差距
 
