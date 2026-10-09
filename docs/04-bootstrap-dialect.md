@@ -401,23 +401,27 @@ func cstr_len(p: addr) -> u64 {
 （`engine.c:926`），所以区域退出后地址失效，同 C 返回局部地址。今天**不检查**这种逃逸：
 `return p;` 照样发出，返回的是已失效的栈地址。
 
+**字段访问当值已经能用**：`p.x` 在返回、绑定、更大的表达式（`p.x + p.y`、`1 + p.x`）与
+调用实参位置都降级成 `%r<n1> = #lea(%p, 0, 0, <字段偏移>)` 加
+`%r<n2> = #load[<字段类型>](%r<n1>)`，操作数的**类型**取字段自己声明的那个（`meta_operand_type_window`），
+所以 `1 + p.x` 查的是 `i32` 的算子表。样例 `bootstrap/lain/examples/field_value.lain`（单个字段、
+两字段相加、实参位置、带标注与不带标注的绑定），探针 `fieldval.lain` / `fieldbind.lain` /
+`fieldexpr.lain` / `fldarg.lain` / `fldval.lain`，产物都过 `lainir_parse` + `lainir_verify`。
+
 值层剩下的是（每条都实测过，拒绝码一律 4，源在 build/probes/ 下）：
 
 | 写法 | 实测 | 探针 |
 |---|---|---|
-| `return p.x;` | 4 | `fieldval.lain` |
-| `let y: i32 = p.x;` | 4 | `fieldbind.lain` |
-| `return p.x + 1;` | 4 | `fieldexpr.lain` |
 | `let v: i32 = Shape.Circle(s);`（投影） | 4 | `proj.lain` |
 | 函数体内 `let s: Shape = Shape.Circle { k };` | 4 | `varctorlocal.lain` |
 | 顶层 `let c = Shape.Circle { 7 };`（对照，已能用） | 0 | `sumtoplevel.lain` |
+| 局部绑定上的字段访问 `let p = Point { … }; return p.x;` | 4 | `fieldlocal.lain` |
 
-字段访问与投影走同一条现成的形态判断：形状读给出 form 6（字段访问）时，
-`bootstrap/std/funcs.l1:918` 把它记下来、`:938` 直接 `lain_meta_fail(4)`（函数的早退分支只接
-form 5 的调用与 form 10 的构造），所以 `p.x` 无论出现在返回、绑定还是更大的表达式里都是 4。
 还没有的是：投影（要读判別字段再选载荷，不能只看形状）、函数体内的变体构造（变体仍只走
-顶层静态块）、字段值只能是「一个字面量」或「一个名字」（`a: p + 1` 只取 `p`）、以及上面
-那条逃逸语义。顶层构造里写变量名会发出解析不到的
+顶层静态块）、字段值只能是「一个字面量」或「一个名字」（`a: p + 1` 只取 `p`）、上面
+那条逃逸语义，以及`值名 → 类型`的表。那张表今天只有**函数参数**那一份
+（`meta_word_type_name` 走参数组扫描），局部绑定与循环参数都没有，所以
+`let p = Point { … }; return p.x;` 干净地报 4。顶层构造里写变量名会发出解析不到的
 `%NAME`（顶层绑定是过程 `#call NAME()`，不是值）—— 由装载器拒。这些都不影响自举：手写
 Meta 里 `#struct`/`#enum` 的命中数是 0。
 
@@ -649,6 +653,15 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 - 同一 proc 里**每个构造点必须用自己的 `%r<n>`**：装载器 `region_lookup`（seed/src/vm/image.c）
   按名字取**第一个**匹配定义，重名会静默指向前一个（不报错、只算错）。临时编号来自暂存区
   +144 的计数器（`meta_next_temp`），所以顶层字面名 `%base` 与它们不冲突。
+- 字段访问当值（`p.x`）：形状 6 由 `meta_operand_emit` 分给 `meta_emit_field_temp`（`bootstrap/std/records.l1`）
+  —— 值名的类型**只认函数参数**（`meta_word_type_name`），字段偏移由 `meta_layout_field` 从类型正文
+  算出（最高位为 0 报 8），发两条指令并把结果临时值下标写进暂存区 `+168`。`p.x` 占三格
+  （值、点号、字段名），所以 `meta_after_operand`（`bootstrap/meta.l1`）对形状 6 回「下标 + 3」——
+  只跳一格会把点号当成下一个语句。
+- 操作数**自己**的类型取字段声明的类型（`meta_operand_type_window`），不是值名（`p`）的类型：
+  `1 + p.x` 按 `p` 的类型查表会拿积类型去查 `+`，报一个跟真实原因无关的 4。
+- 无标注绑定 `let v = p.x;`：`meta_value_type_window` 对形状 6 回**字段**声明的类型名
+  （`meta_field_type_window`），产物是 `%v = #add[repr](<字段值>, 0)`。
 - 构造的字段值只认两种形态：字段值的首字节是数字 → 当字面量（`bs_read_uint`）；否则整段
   当**一个变量的名字**（发 `%NAME`）。所以 `a: p + 1` 只取 `p`、丢掉 `+ 1`；变体构造的载荷
   同理。要支持表达式得先有表达式树。
@@ -669,6 +682,15 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   具体机制（AstIn/AstOut arena、scratch 或 visited 预算）未定位，超出本轮范围。旧记录
   「一个文件里 20 条左右、22 条 extern 报 4、22 条 func 报 9401」是在 C 组改动之前测的，
   现在 45 条 func 也过，已不成立。
+- **同一族的另一种观测（更坏：它是静的）**：某些字节布局的源码会在**展开之后**留下一个
+  没有孩子的根，`lain_meta_status` 仍是 0、产物 0 字节，驱动只报 `host_status=0` ——
+  没有拒绝码，`build/check_unit.exe` 因此是这个缺陷唯一的哨兵（空产物过不了 parse）。
+  实测（与字段访问无关）：`bootstrap/lain/examples/types.lain` 前面加一条长注释、总长落在
+  约 714–744 字节时报这个形态（`output bytes=0`、`visits=79`，而相邻长度是 865 字节 /
+  `visits=215`）；同一份声明的注释换成短的（420 字节）就正常。展开遍在 `bootstrap/std/expand.l1`，
+  它按「孩子数量 + 剩余 scratch 的一半」给每个组分配临时缓冲，分配失败回 0 却不带码
+  （`meta_expand_group_inner` 里的 `#return 0`），这条链上还有两处同样的静默返回；
+  根因未定位。
 
 ## 与现状的差距
 

@@ -229,6 +229,86 @@
   #return %r
 }
 
+// 某个字段**声明的类型名**窗口：起点是那个类型名，终点写进暂存区 `+0`（与
+// `meta_word_type_name` 同一个约定），找不到回「无」。
+//
+// `meta_layout_field` 只回打包好的 (偏移, kind, width)，够发射「按偏移取字段」用；
+// 值名不带标注的绑定（`let v = p.x;`）要的是**类型名** —— 类型名才能交给
+// `meta_type_resolve` 走一遍完整解析（`T.i8` 这种限定名也认）。
+#proc meta_field_type_window(%src: #addr, %len: #bits<64>,
+                             %body: #bits<64>, %f_lo: #bits<64>,
+                             %f_hi: #bits<64>) -> #bits<64> {
+  %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
+  %r = #if %missing -> (#bits<64>) {
+    #yield 0xFFFFFFFFFFFFFFFF
+  } else {
+    %found = #loop fields(%at: #bits<64> = %body) -> (#bits<64>) {
+      %here = #call bs_skip_space(%src, %at, %len)
+      %byte = #call bs_byte_at(%src, %here, %len)
+      #if #eq[#bits<8>](%byte, 125) { #break fields(0xFFFFFFFFFFFFFFFF) }
+      %name_hi = #call bs_skip_ident(%src, %here, %len)
+      %colon = #call bs_skip_space(%src, %name_hi, %len)
+      %t_lo = #call bs_skip_space(%src, #add[#bits<64>](%colon, 1), %len)
+      %t_hi = #call bs_skip_qualified(%src, %t_lo, %len)
+      %want = #sub[#bits<64>](%f_hi, %f_lo)
+      %have = #sub[#bits<64>](%name_hi, %here)
+      %len_ok = #eq[#bits<64>](%want, %have)
+      %same = #if %len_ok -> (#bits<1>) {
+        %a = #lea(%src, %here, 1, 0)
+        %b = #lea(%src, %f_lo, 1, 0)
+        %eq = #call meta_bytes_equal(%a, %b, %want)
+        #yield %eq
+      } else {
+        #yield 0
+      }
+      #if %same {
+        %sc = #call lain_meta_scratch_data()
+        %put = #call meta_cell_put(#lea(%sc, 0, 1, 0), %t_hi)
+        #break fields(%t_lo)
+      }
+      #continue fields(%t_hi)
+    }
+    #yield %found
+  }
+  #return %r
+}
+
+// 一个操作数**自己**的类型名窗口（起点是类型名，终点写进暂存区 `+0`，找不到回
+// 「无」）。
+//
+// 操作数是字段访问（`p.x`）时，类型是**字段**的类型，用 `p` 的类型去查算子表
+// 会撞上「积类型上没有 `+`」这种跟真实原因无关的拒绝（`1 + p.x` 真出过）。
+#proc meta_operand_type_window(%base: #addr, %len: #bits<64>,
+                                %parent: #bits<64>, %index: #bits<64>) -> #bits<64> {
+  %form = #call meta_node_form(%parent, %index)
+  %is_field = #eq[#bits<64>](%form, 6)
+  %r = #if %is_field -> (#bits<64>) {
+    %node = #call ast_child(%parent, %index)
+    %v_lo = #call meta_node_start(%node)
+    %v_hi = #add[#bits<64>](%v_lo, #call meta_node_len(%node))
+    %after = #call bs_skip_space(%base, %v_hi, %len)
+    %f_lo = #call bs_skip_space(%base, #add[#bits<64>](%after, 1), %len)
+    %f_hi = #call bs_skip_ident(%base, %f_lo, %len)
+    %bt_lo = #call meta_word_type_name(%base, %len, %node)
+    %sc = #call lain_meta_scratch_data()
+    %bt_hi = #call meta_cell_get(#lea(%sc, 0, 1, 0))
+    %nobody = #eq[#bits<64>](%bt_lo, 0xFFFFFFFFFFFFFFFF)
+    %fw = #if %nobody -> (#bits<64>) {
+      #yield 0xFFFFFFFFFFFFFFFF
+    } else {
+      %tbody = #call meta_scope_body(%base, %bt_lo, %bt_hi, 4)
+      %fwin = #call meta_field_type_window(%base, %len, %tbody, %f_lo, %f_hi)
+      #yield %fwin
+    }
+    #yield %fw
+  } else {
+    %node2 = #call ast_child(%parent, %index)
+    %tw = #call meta_word_type_name(%base, %len, %node2)
+    #yield %tw
+  }
+  #return %r
+}
+
 // 记录的总大小。
 #proc meta_layout_size(%src: #addr, %len: #bits<64>,
                        %body: #bits<64>) -> #bits<64> {
@@ -621,4 +701,92 @@
   %r2 = #call lainir_return_ref(%v, 2)
   %c2 = #call lainir_close_body()
   #return 0
+}
+
+// `p.x` 当值用：`p` 是**一个值**（函数参数，类型从参数表来），字段偏移在编译期从
+// 类型正文算出来，然后发两条指令：`#lea` 取字段地址（基址是值本身、下标 0、缩放 1、
+// 位移是字段偏移），`#load` 按字段类型取出值。取值结果的临时值下标写进暂存区 +168
+// （+176/+184 清零）—— 与 `meta_operand_emit` 的约定一致：调用方从 168/176/184 这一
+// 组读「结果是谁」。
+#proc meta_lower_field_get(%base: #addr, %len: #bits<64>,
+                           %v_lo: #bits<64>, %v_hi: #bits<64>,
+                           %type_body: #bits<64>,
+                           %f_lo: #bits<64>, %f_hi: #bits<64>) -> #bits<32> {
+  %info = #call meta_layout_field(%base, %len, %type_body, %f_lo, %f_hi)
+  %found = #lshr[#bits<64>](%info, 63)
+  %missing = #eq[#bits<64>](%found, 0)
+  #if %missing {
+    // 走表不中：那是错的，不能拿「走到 } 得到的总大小」当字段偏移用。
+    %f = #call lain_meta_fail(8)
+    #return 8
+  }
+  %off = #and[#bits<64>](%info, 0xFFFFFFFFFF)
+  %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 40), 15)
+  %width = #and[#bits<64>](#lshr[#bits<64>](%info, 44), 255)
+
+  // 缓冲区（`lainir_text_buffer`，192 字节）分段：0 起是 lea 结果的临时值名、
+  // 32 起是值名（带 `%`）、64 起是 load 结果的临时值名、180 是 lea 的下标 `0`。
+  %buf = #data_addr lainir_text_buffer
+  %v_at = #lea(%base, %v_lo, 1, 0)
+  %v_n = #sub[#bits<64>](%v_hi, %v_lo)
+  %pfx = #call lainir_buf_byte(%buf, 32, 37)
+  %v_end = #call lainir_buf_bytes(%buf, %pfx, %v_at, %v_n)
+  %v_len = #sub[#bits<64>](%v_end, 32)
+  %v_txt = #lea(%buf, 32, 1, 0)
+  %zbuf = #lea(%buf, 180, 1, 0)
+  %zlen = #call lainir_buf_uint(%zbuf, 0, 0)
+
+  %n1 = #call meta_next_temp()
+  %l1 = #call lainir_buf_temp(%buf, 0, %n1)
+  %w1 = #call lainir_lea_named(%buf, %l1, %v_txt, %v_len, %zbuf, %zlen, 1, %off)
+
+  %n2 = #call meta_next_temp()
+  %tbuf = #lea(%buf, 64, 1, 0)
+  %l2 = #call lainir_buf_temp(%tbuf, 0, %n2)
+  %w2 = #call lainir_load_named(%tbuf, %l2, %kind, %width, %buf, %l1)
+
+  %sc = #call lain_meta_scratch_data()
+  %s1 = #call meta_cell_put(#lea(%sc, 168, 1, 0), %n2)
+  %s2 = #call meta_cell_put(#lea(%sc, 176, 1, 0), 0)
+  %s3 = #call meta_cell_put(#lea(%sc, 184, 1, 0), 0)
+  #return 0
+}
+
+// `p.x` 出现在操作数位置（返回、绑定、实参、更大的表达式里）。形状 6 说的是「这里
+// 开始一次字段访问」，形状判据已由识别 pass 算好，所以这里只解析两段字节区间：值名
+// （点号左边那个 token）与字段名（点号右边）。
+//
+// 值名的类型**只认函数参数**（`meta_word_type_name`）：局部绑定与循环参数今天没有
+// 「值名 → 类型」的表，干净地报 4。类型正文从符号表取，字段偏移在编译期算出。
+#proc meta_emit_field_temp(%base: #addr, %len: #bits<64>,
+                            %parent: #bits<64>, %index: #bits<64>) -> #bits<32> {
+  %node = #call ast_child(%parent, %index)
+  %v_lo = #call meta_node_start(%node)
+  %v_hi = #add[#bits<64>](%v_lo, #call meta_node_len(%node))
+  %after = #call bs_skip_space(%base, %v_hi, %len)
+  %dot = #add[#bits<64>](%after, 1)
+  %f_lo = #call bs_skip_space(%base, %dot, %len)
+  %f_hi = #call bs_skip_ident(%base, %f_lo, %len)
+
+  %t_lo = #call meta_word_type_name(%base, %len, %node)
+  %sc = #call lain_meta_scratch_data()
+  %t_hi = #call meta_cell_get(#lea(%sc, 0, 1, 0))
+  %unknown = #eq[#bits<64>](%t_lo, 0xFFFFFFFFFFFFFFFF)
+  %st = #if %unknown -> (#bits<32>) {
+    %f1 = #call lain_meta_fail(4)
+    #yield 4
+  } else {
+    %tb = #call meta_scope_body(%base, %t_lo, %t_hi, 4)
+    %nobody = #eq[#bits<64>](%tb, 0xFFFFFFFFFFFFFFFF)
+    %g = #if %nobody -> (#bits<32>) {
+      // 值名的声明类型不是积类型（和类型的变体投影是另一条路）
+      %f2 = #call lain_meta_fail(4)
+      #yield 4
+    } else {
+      %gz = #call meta_lower_field_get(%base, %len, %v_lo, %v_hi, %tb, %f_lo, %f_hi)
+      #yield %gz
+    }
+    #yield %g
+  }
+  #return %st
 }

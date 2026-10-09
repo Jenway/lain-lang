@@ -883,6 +883,13 @@
   }
   %node = #call ast_child(%parent, %index)
   %form = #call meta_node_form(%parent, %index)
+  // 字段访问（形状 6）在这里就分走：它要读值名的类型才能算字段偏移，发的是
+  // `#lea` 加 `#load` 两条指令，与「一个 token」那条路完全不同。留给 token 那条路
+  // 的话，只有 `p` 会被发出去、`.x` 被悄悄丢掉。
+  %is_field = #eq[#bits<64>](%form, 6)
+  #if %is_field {
+    #return #call meta_emit_field_temp(%base, %len, %parent, %index)
+  }
   %is_group = #eq[#bits<64>](%form, 2)
   %is_call = #eq[#bits<64>](%form, 5)
   %st = #if %is_group -> (#bits<32>) {
@@ -1016,11 +1023,19 @@
   %is_neg = #call meta_is_neg_literal(%base, %len, %parent, %index)
   %skip2 = #or[#bits<1>](%is_call, %is_neg)
   %nx = #add[#bits<64>](%index, 1)
-  %r = #if %skip2 -> (#bits<64>) {
-    %g = #add[#bits<64>](%nx, 1)
-    #yield %g
+  %nx2 = #if %skip2 -> (#bits<64>) {
+    %g2 = #add[#bits<64>](%nx, 1)
+    #yield %g2
   } else {
     #yield %nx
+  }
+  // 字段访问占三格（值、点号、字段名）—— 只跳一格的话点号会被当成下一个语句。
+  %is_field = #eq[#bits<64>](%k, 6)
+  %r = #if %is_field -> (#bits<64>) {
+    %g3 = #add[#bits<64>](%nx, 2)
+    #yield %g3
+  } else {
+    #yield %nx2
   }
   #return %r
 }
@@ -1348,7 +1363,7 @@
     %l_thi = #call meta_cell_get(#lea(%scp, 0, 1, 0))
     %l_miss = #eq[#bits<64>](%l_tlo, 0xFFFFFFFFFFFFFFFF)
     %r_tlo = #if %l_miss -> (#bits<64>) {
-      %rt = #call meta_word_type_name(%base, %len, %rn)
+      %rt = #call meta_operand_type_window(%base, %len, %parent, %rni)
       #yield %rt
     } else {
       #yield 0xFFFFFFFFFFFFFFFF
@@ -1427,7 +1442,7 @@
     %is_lea = #and[#bits<1>](%is_plus, %a_is_addr)
     // 右边是地址、左边不是：`i + p` 不是地址算术，也不能按左边的整数类型发
     // `#add`（地址不是整数）。报 4。
-    %rwt_lo = #call meta_word_type_name(%base, %len, %rn)
+    %rwt_lo = #call meta_operand_type_window(%base, %len, %parent, %rni)
     %rwt_hi = #call meta_cell_get(#lea(%scp, 0, 1, 0))
     %rwt_miss = #eq[#bits<64>](%rwt_lo, 0xFFFFFFFFFFFFFFFF)
     %rwtid = #if %rwt_miss -> (#bits<64>) {
