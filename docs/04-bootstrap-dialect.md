@@ -143,8 +143,9 @@ F5 的等价性口径是**逐字节相等**：`build/f5_capture.ps1` 把 16 个�
 模块包装（`modules.l1`）、静态字节块（`handlers/let.l1`）、记录与枚举的静态存储、
 构造过程与字段访问过程、枚举变体过程。
 
-还没搬的：`funcs.l1` 的语句级片段（`#if`/`#continue`/`#break` 那一组带四格缩进的
-模板）、`meta.l1` 顶层的值/语句发射，以及 `sums.l1` 变体投影过程里的条件分支。
+还没搬的：`funcs.l1` 与 `meta.l1` 里剩下的语句级片段（零复制绑定之外的
+`#if`/`#continue`/`#break` 收尾、顶层 sheet 发射，约 120 处），以及 `sums.l1` 变体投影
+过程里的条件分支（`meta_e1` 到 `meta_e5` 那一段）。
 
 这时 16 个样例产物仍然逐字节不变（`diffcount=0`；`build/f5_compare.ps1` 另有一条去掉
 行首空白的规范化比对，`normalized diffcount=0`）。`bootstrap/std/wire.l1` 本身是 Meta 值的
