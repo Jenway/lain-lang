@@ -353,27 +353,71 @@
   #return %st
 }
 
-// 写一条 `  #store[repr](value, #lea(%base, 0, 0, off))`
-#proc meta_emit_store(%kind: #bits<64>, %width: #bits<64>,
-                      %value: #bits<64>, %off: #bits<64>) -> #bits<32> {
+// 一条 store 的**头**：`  #store[` + repr + `](`
+#proc meta_emit_store_head(%kind: #bits<64>, %width: #bits<64>) -> #bits<32> {
   %o = #data_addr meta_c8
   %a = #call lain_meta_emit_write(%o, 9)
   %b = #call meta_emit_repr(%kind, %width)
   %p = #data_addr meta_c9
   %c = #call lain_meta_emit_write(%p, 2)
-  %d = #call meta_emit_uint(%value)
-  %t = #data_addr meta_c10
-  %e = #call lain_meta_emit_write(%t, 20)
+  #return 0
+}
+
+// 一条 store 的**尾**：`, #lea(<基址>, 0, 0, <off>))\n`
+//
+// `%base_n` 是「基址引用哪个值」：`0xFFFFFFFFFFFFFFFF` 用顶层的**字面名字** `%base`
+// （顶层构造过程里那个固定名字），其余是临时值编号 —— 函数体内的构造，基址来自
+// `#alloca` 的结果 `%r<n>`。**不能**让两处都叫 `%base`：装载器的 `region_lookup`
+// 按名字返回**第一个**匹配，同一个过程里重名会静默指向前一个。
+#proc meta_emit_store_tail(%off: #bits<64>, %base_n: #bits<64>) -> #bits<32> {
+  %named = #ne[#bits<64>](%base_n, 0xFFFFFFFFFFFFFFFF)
+  %ref = #if %named -> (#bits<32>) {
+    %l = #data_addr meta_c15
+    %e1 = #call lain_meta_emit_write(%l, 7)
+    %e2 = #call meta_emit_temp_name(%base_n)
+    %t2 = #data_addr meta_c16
+    %e3 = #call lain_meta_emit_write(%t2, 8)
+    #yield 0
+  } else {
+    %t = #data_addr meta_c10
+    %e = #call lain_meta_emit_write(%t, 20)
+    #yield 0
+  }
   %f = #call meta_emit_uint(%off)
   %n = #data_addr meta_c11
   %g = #call lain_meta_emit_write(%n, 3)
   #return 0
 }
 
+// 写一条 `  #store[repr](value, #lea(%base, 0, 0, off))`，值是**一个数**（`a: 1`）。
+#proc meta_emit_store(%kind: #bits<64>, %width: #bits<64>,
+                      %value: #bits<64>, %off: #bits<64>,
+                      %base_n: #bits<64>) -> #bits<32> {
+  %h = #call meta_emit_store_head(%kind, %width)
+  %d = #call meta_emit_uint(%value)
+  %t = #call meta_emit_store_tail(%off, %base_n)
+  #return 0
+}
+
+// 写一条 `  #store[repr](%NAME, #lea(%base, 0, 0, off))`，值是**一个变量的名字**
+// （`a: p`）。名字按源码原样发 `%NAME` —— 参数、局部绑定、临时值都是按这个名字
+// 发出去的。顶层绑定的名字**不**在这一路：那是过程（`#call NAME()`），不是值。
+#proc meta_emit_store_name(%kind: #bits<64>, %width: #bits<64>,
+                           %at: #addr, %len: #bits<64>,
+                           %off: #bits<64>, %base_n: #bits<64>) -> #bits<32> {
+  %h = #call meta_emit_store_head(%kind, %width)
+  %pct = #data_addr meta_fn_pct
+  %n1 = #call lain_meta_emit_write(%pct, 1)
+  %n2 = #call lain_meta_emit_write(%at, %len)
+  %t = #call meta_emit_store_tail(%off, %base_n)
+  #return 0
+}
+
 // 初始化列表 `{ f: v f: v }`：每个字段一条 store。
 #proc meta_construct_fields(%base: #addr, %len: #bits<64>,
                             %body: #bits<64>,
-                            %at: #bits<64>) -> #bits<32> {
+                            %at: #bits<64>,
+                            %base_n: #bits<64>) -> #bits<32> {
   %st = #loop fields(%at: #bits<64> = %at) -> (#bits<32>) {
     %here = #call bs_skip_space(%base, %at, %len)
     %byte = #call bs_byte_at(%base, %here, %len)
@@ -397,8 +441,22 @@
     %off = #and[#bits<64>](%info, 0xFFFFFFFFFF)
     %kind = #and[#bits<64>](#lshr[#bits<64>](%info, 40), 15)
     %width = #and[#bits<64>](#lshr[#bits<64>](%info, 44), 255)
-    %value = #call bs_read_uint(%base, %v_lo, %len)
-    %e = #call meta_emit_store(%kind, %width, %value, %off)
+    // 值可以是一个数（`a: 1`）或**一个变量的名字**（`a: p`）。更复杂的初始化
+    // 表达式（`a: p + 1`）还不支持：ident 之后就停，后面的算子会被丢掉，所以这里
+    // 只认这两种。
+    %lead = #call bs_byte_at(%base, %v_lo, %len)
+    %is_digit = #and[#bits<1>](#ugt[#bits<8>](%lead, 47), #ult[#bits<8>](%lead, 58))
+    %e = #if %is_digit -> (#bits<32>) {
+      %value = #call bs_read_uint(%base, %v_lo, %len)
+      %en = #call meta_emit_store(%kind, %width, %value, %off, %base_n)
+      #yield %en
+    } else {
+      %n_at = #lea(%base, %v_lo, 1, 0)
+      %n_len = #sub[#bits<64>](%v_hi, %v_lo)
+      %et = #call meta_emit_store_name(%kind, %width, %n_at, %n_len, %off,
+                                       %base_n)
+      #yield %et
+    }
     // 初始化列表里可能有逗号，跳掉
     %gap = #call bs_skip_space(%base, %v_hi, %len)
     %sep = #call bs_byte_at(%base, %gap, %len)
@@ -460,12 +518,104 @@
   %w10 = #call lain_meta_emit_write(%d6, 9)
 
   %body = #add[#bits<64>](%at, 1)
-  %st = #call meta_construct_fields(%base, %len, %type_body, %body)
+  %st = #call meta_construct_fields(%base, %len, %type_body, %body,
+                                  0xFFFFFFFFFFFFFFFF)
 
   %d7 = #data_addr meta_c12
   %w11 = #call lain_meta_emit_write(%d7, 18)
   #return %st
 }
+
+// `let p = Rec { ... }` / `return Rec { ... }` **在函数体里**。
+//
+// 顶层那份（`meta_lower_construct`）落一个静态 `data` 块；函数体里发不出顶层 `data`
+// （发射是流式的），所以从**栈**上划一块：
+//
+//   %r<n> = #alloca[#bits<8>](size)
+//   #store[...](value, #lea(%r<n>, 0, 0, off))
+//   ...
+//   %p = #lea(%r<n>, 0, 1, 0)        // 绑定；`return` 那一格换成 `#return %r<n>`
+//
+// `#alloca` 从栈租约的水位递增，帧退出时水位回退（`stack_mark`），所以这块地址
+// **不能带出函数** —— 同 C 返回局部地址。框对齐到 16 字节。
+//
+// `%type_lo`/`%type_hi` 是构造名（`Rec`）的位置，`%brace` 是那个花括号组的起点。
+#proc meta_lower_construct_local(%base: #addr, %len: #bits<64>,
+                                 %name_lo: #bits<64>, %name_hi: #bits<64>,
+                                 %type_lo: #bits<64>, %type_hi: #bits<64>,
+                                 %brace: #bits<64>,
+                                 %is_ret: #bits<1>) -> #bits<32> {
+  %body = #call meta_scope_body(%base, %type_lo, %type_hi, 4)
+  %missing = #eq[#bits<64>](%body, 0xFFFFFFFFFFFFFFFF)
+  #if %missing {
+    // 名字不是积类型（和类型变体在函数体里的构造还没做）
+    %nf = #call lain_meta_fail(4)
+    #return 4
+  }
+  %size = #call meta_layout_size(%base, %len, %body)
+  %bad = #eq[#bits<64>](%size, 0xFFFFFFFFFFFFFFFF)
+  #if %bad {
+    %reset = #call lain_meta_emit_reset()
+    %eval_code = #call lain_meta_apply_status()
+    %has_eval_code = #ugt[#bits<64>](%eval_code, 0)
+    %code = #if %has_eval_code -> (#bits<32>) {
+      %low = #trunc[#bits<32>](%eval_code)
+      #yield %low
+    } else {
+      #yield 7
+    }
+    #return %code
+  }
+  %empty = #eq[#bits<64>](%size, 0)
+  #if %empty {
+    // 空类型没有可划的框；count 为 0 的 `#alloca` 被验证器拒（2024）
+    %zero = #call lain_meta_fail(5)
+    #return 5
+  }
+  %n = #call meta_next_temp()
+  %ind = #data_addr meta_st_ind
+  %w1 = #call lain_meta_emit_write(%ind, 2)
+  %w2 = #call meta_emit_temp_name(%n)
+  %eq = #data_addr meta_c17
+  %w3 = #call lain_meta_emit_write(%eq, 11)
+  %w4 = #call meta_emit_repr(0, 8)
+  %lp = #data_addr meta_lbrack_lparen
+  %w5 = #call lain_meta_emit_write(%lp, 2)
+  %w6 = #call meta_emit_uint(%size)
+  %rp = #data_addr meta_st_rp
+  %w7 = #call lain_meta_emit_write(%rp, 2)
+  %body_at = #add[#bits<64>](%brace, 1)
+  %st = #call meta_construct_fields(%base, %len, %body, %body_at, %n)
+  #if #ne[#bits<32>](%st, 0) {
+    #return %st
+  }
+  %tail = #if %is_ret -> (#bits<32>) {
+    %rh = #data_addr meta_st_ret
+    %w8 = #call lain_meta_emit_write(%rh, 10)
+    %w9 = #call meta_emit_temp_name(%n)
+    %nl = #data_addr meta_st_nl
+    %w10 = #call lain_meta_emit_write(%nl, 1)
+    #yield 0
+  } else {
+    %ph = #data_addr meta_st_pct
+    %w11 = #call lain_meta_emit_write(%ph, 3)
+    %bind_at = #lea(%base, %name_lo, 1, 0)
+    %bind_len = #sub[#bits<64>](%name_hi, %name_lo)
+    %w12 = #call lain_meta_emit_write(%bind_at, %bind_len)
+    %eh = #data_addr meta_st_eqop
+    %w13 = #call lain_meta_emit_write(%eh, 3)
+    %lh = #data_addr meta_hash_lea
+    %w14 = #call lain_meta_emit_write(%lh, 5)
+    %w15 = #call meta_emit_temp_name(%n)
+    %dh = #data_addr meta_c18
+    %w16 = #call lain_meta_emit_write(%dh, 9)
+    %rp2 = #data_addr meta_st_rp
+    %w17 = #call lain_meta_emit_write(%rp2, 2)
+    #yield 0
+  }
+  #return %tail
+}
+
 
 // `let NAME = Rec.field(VAR)` —— v0 里记录名和值名都写出来，
 // 所以不需要值表。`p.left` 那种写法要一张「值名 → 类型名」的表，是下一步。
