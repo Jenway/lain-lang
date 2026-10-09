@@ -121,7 +121,18 @@ F5 的等价性口径是**逐字节相等**：`build/f5_capture.ps1` 把 16 个�
   `lainir_buf_bytes` / `lainir_text_lea_field` 这套缓冲区渲染，`bootstrap/std/records.l1`
   的 `meta_emit_store` / `meta_emit_store_name` 字段写入走它。
 
-这时 16 个样例产物逐字节不变（`diffcount=0`）。`bootstrap/std/wire.l1` 本身是 Meta 值的
+指令文本本身也逐步改由层 0 写：`lainir_op_prefix` / `lainir_op_prefix_phys` /
+`lainir_temp_name_emit`（指令前缀与临时值名）、`lainir_load_at` / `lainir_lea_at`
+（load 与 lea，临时值编号由管线保留）、`lainir_binary_phys_at`（循环体的二元运算与步进）、
+`lainir_binary_named_at`（循环条件的比较，条件名形如 `%c<n>`）、`lainir_return_ref`
+（返回值文本）、`lainir_zero_text`（`data` 初值里的零项）、`lainir_byte` /
+`lainir_emit_uint` / `lainir_repr` / `lainir_spaces` / `lainir_buf_bytes` /
+`lainir_buf_uint` / `lainir_buf_temp` / `lainir_text_lea_field`（词素与缓冲区渲染）。
+`bootstrap/meta.l1` 的 `meta_render_ref2` 负责把「临时值引用或源码操作数」渲染进缓冲区，
+再交给层 0 的指令发射器。
+
+这时 16 个样例产物仍然逐字节不变（`diffcount=0`；`build/f5_compare.ps1` 另有一条去掉
+行首空白的规范化比对，`normalized diffcount=0`）。`bootstrap/std/wire.l1` 本身是 Meta 值的
 二进制 wire 编解码与校验（帧头、字段边界、引用身份），不发 IR 文本；处理管线的 IR 文本
 发射在 `bootstrap/std/emit.l1` 与 `funcs.l1` / `records.l1` / `sums.l1` / `modules.l1` 里。
 
