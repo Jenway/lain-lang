@@ -358,6 +358,37 @@ func cstr_len(p: addr) -> u64 {
 下全部 .l1/.lain；失败码取自 `build/lain-meta.exe` 对最小样例的 host_status。既没有用量、
 又测不通的，进「推迟」。
 
+### 零、闸门：把 `std/registry.l1` 改写成表面 Lain（进行中）
+
+这一步的口径是：用表面 Lain 写出 `bootstrap/std/registry.l1` 那 10 个过程的等价体，
+由处理管线降低，产物与手写版本比。它同时是「表面语言够不够写 Meta」的实测入口 ——
+每补一项能力就重跑一次。
+
+已经能用这份改写写出来的：
+
+| 构造 | 实测 |
+|---|---|
+| 地址算术 | `let base: addr = scratch + 520;`、`let p: addr = base + off;`（局部绑定上的加法也通） |
+| 位与字面量 | `index << 6`、`%` `>>` `and` `or`（词形） |
+| 循环出值 | `loop s(i: u64 = 0) { … break s(id); … }`：没有 `acc`，值由 `break` 带出，结果类型取第一个参数 |
+| 循环体里的 `let` | `let e: addr = reg_entry(scratch, i);`、`let k: u64 = cell_get(e + 8);` |
+| 循环体里的嵌套 `if` | 三层 `if k == kind { if o == owner { if n == ns { … } } }` 单独用能通 |
+| 早期返回 | `if hit { return id; }` |
+
+还不够的（都是实测到的，探针在 `build/probes/`）：
+
+| 缺口 | 实测 | 探针 |
+|---|---|---|
+| 同一单元里已有的过程不能在表面源码里引用 | 只能重复声明成 `extern`（`extern cell_get(p: addr) -> u64 = meta_cell_get;`），否则报 9415；重名声明报 16 | `r4.lain` |
+| 声明一多就撞预算 | 7 个 `extern` + 19 个 `func`（约 150 行，覆盖 registry 全部过程）报 **17**、产物 0 字节 | `registry_full.lain` |
+| 预算撞上时给的是**无关的错误码** | 同一份源里 `reg_lookup` 的三层嵌套 `if` 与后面的 `intern` 放在一起，整份源报 **6**（算子查不到），而单看嵌套 `if` 或单看 `intern` 都通 | `reg_a.lain` 对 `r8.lain` |
+| 按位与、按位或、按位异或的 C 风格符号没有绑定 | 四个宽度都报 4（表里只有词形 `and` / `or`） | `z1.lain`…`z4.lain` |
+| `addr` 上 `!=` | 报 6 | `w4.lain` |
+| 静态数据（`data … ro/rw` 与 `#data_addr`） | 表面语言只有顶层字节串 `let NAME: addr = "…";`（`ro`、末尾补 0、不能表达 `u64` 词表） | — |
+
+所以顺序是：先修预算与错误码（§2）、再补模块引用（§3）与静态数据（§4），
+攒够之后再回来把 `registry.l1` 整份换掉。
+
 ### 一、已能用（实测 host_status=0）
 
 | 特性 | 表面写法 | 实测口径 |
@@ -366,7 +397,7 @@ func cstr_len(p: addr) -> u64 {
 | 绑定与返回 | `let n: i32 = …;`、`let y = inc(n);`、`return n;` | 标注可省：类型由值推（调用取被调方返回类型、参数名取参数表）。**局部变量的类型参与算子选择**：`let n: u64 = 1;` 之后 `n < 8` 查 u64 的算子表（发 `#ult[#bits<64>]`），不再退回绑定的上下文类型（bool 的 op 表是空的，会报 6）。登记与查询走函数体里那张局部变量表（`bootstrap/std/funcs.l1` 的 `meta_local_type_put` / `meta_local_type_name`，条数与条目区在暂存区 `+2128` / `+2136`），只有带标注的 `let` 进表。样例 `bootstrap/lain/examples/local_type.lain` |
 | 条件 | `if a < b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件是任意表达式：裸条件与括号条件走同一个入口，块就是表达式停下来的那一格；分支必须以 `return` 收尾，所以 `if` 是语句不是值 |
 | 带值 if | `let x: i32 = if c { a } else { b };`、`return if c { a } else { b };`、`return 1 + if c { a } else { b };` | 降级为 `%x = #if %c -> (#bits<32>) { … #yield %a } else { … #yield %b }`：条件是任意表达式、类型取绑定的标注（缺标注由值推）；绑定位置把结果绑在源码名字上，`return` 位置与表达式里的操作数位置（实参、括号内、与算子串联）把整条 `#if` 发成临时值再被外层引用；省略 `else` 时假分支给结果类型的零值（bits 类 `#yield 0`、`addr` 先 `%r<n> = #int2ptr[#addr](0)`），`else` 后面不是块仍报 4（探针 `build/probes/ifnoelse_elseword.lain`）；两个分支都必须以一个值收尾。样例 `bootstrap/lain/examples/choose.lain`、`bootstrap/lain/examples/value_if.lain`、`bootstrap/lain/examples/if_default.lain` |
-| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 的边界与累加器宽度跟循环变量的类型走：i32/u32/u64/i64/usize 都能用（`u64` 曾报 5，A 的第四刀补齐 64 位算子后通了，实测 `#ult[#bits<64>]`），体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」），循环体里可写 `if`（分支里有条件早退、分支里给参数赋值，值在分支之间合并）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain`、`bootstrap/lain/examples/loop_if.lain` |
+| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };`、`let r: u64 = loop s(i: u64 = 0) while i < n { if i == k { break s(i); } else { i = i + 1; } };` | **`acc` 参数可省**：没有它时循环的值由源码自己的 `break LABEL(值)` 带出来，结果类型取**第一个参数**的声明类型（Meta 的 84 处 `#loop` 都是这个形状），收尾不再合成 `#break`；**循环参数的类型参与算子选择**（`meta_loop_type_name` 查循环块里那个参数槽 +64/+72 声明的类型窗口），`i == 3` 发 `#eq[#bits<64>]`（此前会退化成 `#bits<0>`，验证器报 2027）。样例 `bootstrap/lain/examples/loop_value.lain` | `for` 的边界与累加器宽度跟循环变量的类型走：i32/u32/u64/i64/usize 都能用（`u64` 曾报 5，A 的第四刀补齐 64 位算子后通了，实测 `#ult[#bits<64>]`），体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」），循环体里可写 `if`（分支里有条件早退、分支里给参数赋值，值在分支之间合并）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain`、`bootstrap/lain/examples/loop_if.lain` |
 | 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
 | 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
 | 聚合类型名 | `struct Point { x: i32 y: i32 }`、`enum Shape { Circle(i32) Empty }`、`func f(p: Point) -> i32`、`let q: Shape = s;` | 名字可进参数类型与带标注的 `let`：聚合值在 IR 里是 `#addr`，所以参数类型发 `#addr`、标注绑定发一次地址复制（`#lea(%p, 0, 1, 0)`）；声明体里字段/变体**空格分隔，不能写逗号**（写了会当成字段名，报 5）。样例 `bootstrap/lain/examples/types.lain` |
