@@ -15,7 +15,7 @@
  *   --entry <名字>    Meta 入口（默认 lain_std_lower）
  *   --lower <n>       交给入口的源码下标（默认 0）
  *   --out <文件>      把产物写成文件；不给则打到 stdout
- *   --fuel <n>        引擎燃料上限（默认 40000000）
+ *   --fuel <n>        引擎燃料上限（默认按已登记源码规模推导）
  *   --slice <n>       每次 engine_run 的燃料片（默认 2000000）
  *   --stack <字节>    栈区大小（默认 4194304）
  *   --quota <字节>    宿主分配账户（默认 268435456；0 = 不限额）
@@ -119,7 +119,7 @@ int main(int argc, char **argv) {
   uint64_t max_output = 4096;
   uint32_t caps_capacity = 64;
   uint32_t max_call_depth = 64;
-  int quiet = 0, verbose = 0, expect_status = -1, i;
+  int quiet = 0, verbose = 0, expect_status = -1, fuel_given = 0, i;
   SourceFile sources[DRIVER_MAX_SOURCES];
   uint32_t source_count = 0;
 
@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
     if (!strcmp(a, "--entry")) { TAKE(a); entry = argv[i]; continue; }
     if (!strcmp(a, "--out")) { TAKE(a); out_path = argv[i]; continue; }
     if (!strcmp(a, "--lower")) { TAKE(a); lower_index = strtoull(argv[i], NULL, 0); continue; }
-    if (!strcmp(a, "--fuel")) { TAKE(a); fuel = strtoull(argv[i], NULL, 0); continue; }
+    if (!strcmp(a, "--fuel")) { TAKE(a); fuel = strtoull(argv[i], NULL, 0); fuel_given = 1; continue; }
     if (!strcmp(a, "--slice")) { TAKE(a); slice_fuel = strtoull(argv[i], NULL, 0); continue; }
     if (!strcmp(a, "--stack")) { TAKE(a); stack_bytes = strtoull(argv[i], NULL, 0); continue; }
     if (!strcmp(a, "--quota")) { TAKE(a); quota_bytes = strtoull(argv[i], NULL, 0); continue; }
@@ -191,6 +191,17 @@ int main(int argc, char **argv) {
   }
   if (source_count == 0) { usage(stderr); return 2; }
   if (lower_index >= source_count) { printf("--lower 越界\n"); return 2; }
+
+  /* 燃料按已登记源码规模推导。展开一份声明要整份重扫一遍，成本约与「声明数 ×
+     源码大小」同阶，所以预算随源码字节的平方增长：149 个 extern（约 6.5 KB）
+     实测约 6000 万步，下面的系数给了三倍以上余量。显式 --fuel 覆盖这个推导。 */
+  if (!fuel_given) {
+    uint64_t bytes = 0;
+    for (i = 0; i < (int)source_count; i++) bytes += sources[i].length;
+    fuel = (bytes > 30000u) ? 4000000000ull : 40000000ull + 4ull * bytes * bytes;
+    if (verbose) printf("fuel derived=%llu bytes=%llu\n",
+                        (unsigned long long)fuel, (unsigned long long)bytes);
+  }
 
   /* 1. 链接编译单元。 */
   {
@@ -452,8 +463,10 @@ int main(int argc, char **argv) {
     rc = 1;
   }
   if (slice == LAINVM_SLICE_RUNNABLE) {
-    printf("RUN INCOMPLETE 燃料耗尽\n");
-    rc = 1;
+    printf("RUN INCOMPLETE 燃料耗尽 fuel=%llu used=%llu steps=%llu\n",
+           (unsigned long long)fuel, (unsigned long long)fuel_used,
+           (unsigned long long)lainvm_tcb_steps(tcb));
+    rc = 3;
   }
   return rc;
 }

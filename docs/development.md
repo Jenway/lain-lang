@@ -38,7 +38,7 @@ build/lain-meta.exe --out build/arith.out examples/arith.lain bootstrap/lain/exa
 | `--entry <名>` | `lain_std_lower` | 入口过程 |
 | `--lower <n>` | 0 | 交给入口的 lowering 档位 |
 | `--out <文件>` | 无 | 产物文本落盘 |
-| `--fuel` | 40000000 | 执行指令上限 |
+| `--fuel` | 按已登记源码规模推导 | 执行指令上限；给出时以给出的为准 |
 | `--slice` | 2000000 | 每次引擎推进的片长 |
 | `--stack` | 4194304 | 栈租约字节数 |
 | `--quota` | 268435456 | 字节配额，0 表示不限额 |
@@ -47,8 +47,25 @@ build/lain-meta.exe --out build/arith.out examples/arith.lain bootstrap/lain/exa
 | `--max-output` | 4096 | 打印产物文本的字节上限 |
 | `-q` / `-v` | | 只印结论 / 印逐源细节 |
 
-退出码：0 跑到底或 `--expect-status` 满足；1 编译或执行失败；2 用法或 IO 错误。
+退出码：0 跑到底或 `--expect-status` 满足；1 编译或执行失败；2 用法或 IO 错误；3 燃料耗尽（打印 `RUN INCOMPLETE 燃料耗尽 fuel=… used=… steps=…`，此时 `host_status` 仍是 0、产物为空）。
 摘要行形如 `unit files=N bytes=N`、`verify subroutines=N data=N`、
 `run slice=N rounds=N steps=N host_status=N`、`result kind=N width=N bits=N`、
 `region grants=N`（宿主整块授予次数）、`output bytes=N`，可直接被脚本断言。
-`bootstrap/lain/examples/` 下的 15 个样例就是回归集：`region grants=2`、`host_status=0`。
+`bootstrap/lain/examples/` 下的样例就是回归集：`region grants=2`、`host_status=0`。
+
+## 验收
+
+改动 `bootstrap/` 之后按顺序跑这三条：
+
+```powershell
+powershell -File build/merge.ps1                 # SOURCE_ORDER 拼成 build/bootstrap_merged.l1
+build/check_unit.exe build/bootstrap_merged.l1   # 单元本身必须 PARSE+VERIFY OK
+powershell -File build/reg.ps1                   # 样例与层 0 探针回归（脚本被 Git 忽略）
+```
+
+`build/check_unit.exe` **不是 CMake 目标**（`CMakeLists.txt` 只建 `lain-meta` 驱动），改了 `seed/` 或 `bootstrap/` 之后要手工重建，否则校验结果来自旧二进制：
+
+```powershell
+cmake --build build
+clang -O0 -std=c17 -D_DEBUG -D_DLL -D_MT -g -I seed/include -o build/check_unit.exe build/check_unit.c build/lib/lain_seed.lib
+```
