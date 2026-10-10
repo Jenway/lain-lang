@@ -813,10 +813,15 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 - `p + i * K` 的 K 必须是**无符号十进制字面量**且后面不能再跟算子：`p + i * 4 + 8` 仍报 6
   （降级是左到右折叠）。要支持任意表达式得先有表达式树。
 - 静态数据只在**顶层** `let NAME: addr = "…";` 与 `let NAME: [T] = [ … ];` 能用：产物是
-  `data NAME_storage ro|rw { … }` 加取址过程 `NAME()`；索引 `NAME[i]` 与 `len(NAME)` 在函数体里可用。
-  函数体里没有地方放 `data`，所以写在那里报 4；把整块的地址拿进函数要等 F（层 0 的带外顶层区）。
-  底层用 `#data_addr` 引用静态块的值，**不能**在表达式里按裸名字引用（那会发成 `%NAME`）—— 顶层
-  let 绑定按值引用还是既存缺口。
+  裸 `data NAME ro|rw { … }`（不带 `_storage` 后缀、不发取址过程）；`?NAME` 在函数体里发
+  `#data_addr NAME`，与手写 LAINIR 的 `data NAME ro { … }` 逐字节一致。索引 `NAME[i]` 与
+  `len(NAME)` 在函数体里可用。函数体里没有地方放 `data`，所以写在那里报 4；把整块的地址
+  拿进函数要等 F（层 0 的带外顶层区）。底层用 `#data_addr` 引用静态块的值，**不能**在表达式
+  里按裸名字引用（那会发成 `%NAME`）—— 顶层 let 绑定按值引用还是既存缺口。
+- 逐字节闸门（registry 模块）：表面 `let NAME: ro [u8] = [ … ];` 现能发出与手写 LAINIR 逐字节
+  相同的 `data NAME ro { … }`，`?NAME` 也一致。但 `extern X(p: addr) -> u64 = link;` 的块名走
+  链接名（`#extern`），与手写同名声明块的逐字节差异属表面记法缺口（注释不入产物、`extern`
+  别名另发块），不改发射器，记在待补规则；索引、len、字节串不补末尾 0 均已逐字节对齐。
 - 期望类型的传递路径（见上）。
 - `addr` 上的 `==` 给不给（层 0 有 `lainir_eq`）。
 - 模块类型只能当不透明句柄传递：`func keep(p: M.Point) -> M.Point { return p; }` 通（聚合值在 IR
