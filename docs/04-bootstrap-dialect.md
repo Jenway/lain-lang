@@ -411,6 +411,7 @@ func cstr_len(p: addr) -> u64 {
 | 内存 | `let b: u8 = load(p);`、`return load(p);`、`store(p, v);`、`let q: addr = lea(p, i);`、`load(p + i)` | 三个内建名字：`load` 的宽度由期望类型定（`#load[#bits<8>](%p, 0)`），`store` 的宽度取值的类型（`#store[#bits<8>](%v, %p)`），`lea` 发 `#lea(%p, %i, 1, 0)`。地址加整数（`p + i`、`p + 1`）降成 `#lea(基址, 下标, 1, 0)`。没有期望类型报 4（`let b = load(p);`、`load(p);`）；`i + p` 报 4、`p + i * K` 报 6。样例 `bootstrap/lain/examples/memory.lain` |
 | 字节串字面量 | `let s: addr = "hi";`（只允许顶层） | 发 `data s_storage ro { 104 105 0 }` 与 `#proc s() -> #addr { %base = #data_addr s_storage; #return %base }`；字节原样搬、末尾补 0。样例 `bootstrap/lain/examples/bytes.lain`。函数体内写字节串报 4 |
 | 外部过程与链接 | `extern NAME(a: T) -> U = link_name;` | 只声明不定义：名字进作用域（身份与 `func` 一样）、调用走同一条表达式路径，产物是 `#proc NAME(%a: T) -> U #extern "link_name"`；链接名原样搬运，宿主那头登记与否由驱动决定。样例 `bootstrap/lain/examples/extern.lain` |
+| 模块 | `let M = import("examples::modules_lib");` 后写 `M.answer`、`M.answer + 1`、`f(M.answer)`、`func keep(p: M.Point) -> M.Point` | `import` 那条语句把模块的**值绑定**发成顶层过程（`#proc examples__modules_lib__answer() -> #bits<64> { #return 42 }`，按声明顺序、成员之间互相引用也解析）；函数体里的 `M.成员` 走 `meta_emit_ns_operand` 发 `%r<n> = #call <mangle>__<成员>()`，绑定位置、表达式位置、实参位置都通；类型位置的 `M.Point` 由 `meta_type_resolve` 按「限定名 → 被导入源码的类型表」解析（返回类型与参数类型的窗口用 `bs_skip_qualified` 扫到名字末尾，`M.Point` 这类多 token 名字不再被截断）。样例 `bootstrap/lain/examples/modules_main.lain` 与 `bootstrap/lain/examples/modules_lib.lain` |
 | 负数字面量 | `-5`（负号紧跟数字） | LAINIR 的字面量是无符号十进制文本，没有负号，所以降级成 `#sub[repr](0, 5)`：宽度与符号都取上下文类型。只认字面量，一元负号作用于变量仍报 4。样例 `bootstrap/lain/examples/neg.lain` |
 
 实测被拒（列出来是因为它们看着都该能用）：`i + p` 报 4（只认左边的地址）；
@@ -667,6 +668,7 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 函数体与顶层的聚合构造（→ 栈上 `#alloca` + 每字段 `#store`，或顶层 `data`）/
 宿主整块窗口授予（`region_grant`，暂存区的基址与容量从记录读回）/ `extern` 声明（`= link_name`，调用与 `func` 同路）/
 算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）/ 聚合类型名（struct、enum）进参数类型与标注 /
+模块成员在绑定、表达式、实参、类型四个位置（`import` 发出值绑定的顶层过程，函数体里的 `M.成员` 发调用临时值）/
 聚合值当值用（字段访问、变体投影、函数体内构造、字段值是表达式；跨帧返回栈上地址报 11）。
 够做「一小段 Lain 端到端」，还不够写编译器。A、B、C、D、E、F、值层与五都已完成。
 
@@ -687,8 +689,14 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   引用（那会发成 `%NAME`）—— 顶层 let 绑定按值引用还是既存缺口。
 - 期望类型的传递路径（见上）。
 - `addr` 上的 `==` 给不给（层 0 有 `lainir_eq`）。
-- `loop` 的参数里**必须有一个叫 `acc`**，它提供循环结果的类型；没有报 4。
-- `loop` 的标签是必需的（今天只记下来备用）：缺标签报 4。
+- 模块类型只能当不透明句柄传递：`func keep(p: M.Point) -> M.Point { return p; }` 通（聚合值在 IR
+  里是地址，模块里的字段布局在**模块的源码**里），但跨模块的字段访问 `p.x`（`p: M.Point`）报 4
+  —— 布局查询用同一个源码窗口读「声明的字段名」与「要找的字段名」，两个窗口不是同一份源码。
+  探针 `build/probes/mod_type.lain`。
+- 模块里的**函数成员**还调不了：`M.bump(x)` 报 4（模块导出只发值绑定，函数成员走的是另一条路）。
+  探针 `build/probes/mod_callit.lain`。
+- 模块成员名写错报 11，不是 13：导出过程在 `import` 那条语句处就发（过程只能落顶层），
+  那时成员查找失败先撞上「源码找不到」。探针 `build/probes/mod_missing.lain`。
 - `loop` 的循环体只能给**自己的参数**赋值，别的目标报 4；体是多语句的（`for` 只有一条）。
 - `loop` 的早退：`break LABEL(<值>);` 用循环结果类型当上下文，`continue LABEL(<实参…>);`
   用各参数的声明类型当上下文；两者都必须带标签，标签名不符报 4，实参个数不符报 4
