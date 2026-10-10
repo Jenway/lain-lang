@@ -390,9 +390,17 @@ func cstr_len(p: addr) -> u64 {
 
 | 缺口 | 实测 | 探针 |
 |---|---|---|
-| 按位与、按位或、按位异或的 C 风格符号没有绑定 | 四个宽度都报 4（表里只有词形 `and` / `or`） | `z1.lain`…`z4.lain` |
+| 按位与、按位或、按位异或的 C 风格符号没有绑定 | `a \| b` 报 4（表里只有词形 `and` / `or`）；词形 `or` 对 `u64` 能发 `#or`（`bool` 上是逻辑或） | `z1.lain`…`z4.lain`、`build/probes/bits_or.lain` |
+| `u8` 上做比较 | `let b: u8 = load(p); b == 123` 报 6 —— `u8` 的算子表是空的（它只作访存宽度）。先 `b as u32` 再比（变宽发 `#zext`） | `build/probes/u8_cmp.lain` |
 | `xor` 没有绑定 | `a xor b` 在 `u64` 与 `bool` 上都报 4（表里没有 `xor`，四个宽度都没有） | `q_xor.lain` / `q_xorval.lain` |
 | `addr` 上 `!=` | 报 6（`==` 也没有绑定：`addr` 的算子表是空的） | `w4.lain` |
+| 带值 `if` 的分支里写语句 | **已支持**（`68c4872`）：`meta_lower_branch_value` 按块里最后一个 `;` 切开「前缀语句 + 值表达式」，前缀逐条按语句降级（只认 `let` 与 `store`）。没有 `;` 时起点为 0，与改动前逐字节相同。探针 `build/probes/q_tailval.lain`（真分支带 `let`）、`q_tailval2.lain`（两支都是纯表达式）、`q_tailval3.lain`（真分支带 `store`、假分支带 `let`）。**前缀里还不能写 `if`** —— 那条路要 `meta_lower_if` 的接回下标，只有 `meta_lower_body` 有 | — |
+| 块的最后一条语句是 `if` | 报 20（「函数体结尾没有 return」）—— 分支里的 `return` 不算这一层的 `return`。实测：`if c { return 6; } return 1;` 通过，而把最后那条 `return` 去掉（`if` 成为块尾）就报 20。绕法是在块尾的 `if` 之后补一条 `return`（不可达但满足判定）。手写层到处是这种形状（`if … { #return … }` 收尾） | `build/probes/q_tailif.lain` / `q_tailif2.lain` |
+| `bool` 字面量 | 没有 `true` / `false`：写成 `break cmp(false)` 会让产物里出现未定义的值 `false`（校验器 2002）。写 `0` / `1` | `build/probes/types_surf.lain` 的第一版 |
+| 循环标签名 | 表面 `loop s(…)` 在产物里发成 `#loop L<n>(…)`（编号按单元里的出现次序），源码标签名不保留 —— 标签只用于源码内的 `break` / `continue` 配对。手写层写的是 `#loop cmp(…)`，所以这一行对不上 | 同上 |
+| 循环体里的嵌套 `if` | 报 23（或产物截断在 `%r2 = #if %more -> (#bits<64>) {` 之后）。`meta_lower_loop_if` 把整条 `if` 当循环值的一批**结果**（每个循环参数一个 `#yield`），所以一层还行；第二层那批 `#yield` 与新一批撞在一起就错位。最小复现 `build/probes/q_loopnestif.lain`（`loop { if { if { break } continue } else { break } }`，从 `host_status=0` 退化成 23） | — |
+| 循环结果的类型来自**外层绑定的标注** | `let same: bool = loop cmp(flag: bool = 0) { … }` 发 `#loop L1(%flag: #bits<1> = 0) -> (#bits<1>)`（结果类型跟绑定走，不是「第一个参数的类型」）；`let t: u64 = loop …` 同理发 `-> (#bits<64>)` | 同上 |
+| 跨源引用 | 同一编译单元里，**有的**跨源过程能直接调到、**有的**报 9415；规律未定位。实测：`meta_cell_get`、`meta_cell_put`、`meta_scope_add_decl`、`meta_lower_struct`、`meta_node_is_word` 直接调通；`meta_node_start`、`lain_meta_ast_node_addr`、`meta_syntax_ensure` 报 9415。**一律写 `extern NAME(…) -> T = <链接名>;` 别名可以绕开**，改写时按后者处理 | `build/probes/q_crosssrc.lain`、`build/probes/struct_surf.lain` |
 | `extern` 与手写层对不上 | `extern` 块名是链接名，写不出手写层那种「块名 = 声明名」的 `#extern`；同名的本单元过程与 `extern` 可以共存，但产物多出一个块 | 本节的 `procdiff` 统计 |
 | 静态块的**裸名字** | 表面语言只能通过 `?NAME` 拿到 `#data_addr NAME_storage`；手写层直接写 `#data_addr NAME`（块名不带后缀）。名字与注释也是产物的一部分，所以逐字节相同做不到 | 本节的 `procdiff` 统计 |
 
@@ -402,6 +410,82 @@ func cstr_len(p: addr) -> u64 {
 - 注册表条目区不再固定在 `520`：`meta_scope_setup` 把整条表链（注册表 → 作用域表 → 依赖表 → 路径 → 旁表 → bump）的起点抬到宿主元数据末尾（`meta_host_meta_end()`）之后。条目一多就压掉宿主写在 `+4096` 起的段表与根槽，症状是根读回 0、一条顶层形式都认不出来、产物 0 字节；压不压得上取决于源码长度，所以表现为「加两行注释就翻转」。
 - 语法表容量按源码规模推导（每 8 字节源码一项、保底 64 项），不再固定 64。
 - 驱动燃料默认按已登记源码规模推导；耗尽时打印 `RUN INCOMPLETE 燃料耗尽 fuel=… used=… steps=…` 并把退出码置 3。展开后根为空（`meta_lower_source` 的第一个孩子检查）与展开器的分配/打包失败都就地报码（4 / 17），不再产出零字节产物。
+
+## 闸门的结论
+
+十个过程都能从表面源发出来（`build/probes/registry_surf4.lain` 的 `procdiff` 报 `missing in gen (0)`，
+同一形状也用在 `std/types.l1`、`std/regions.l1`、`std/handlers/struct.l1` 上）。
+
+「产物与手写版本逐字节相同」这一条**达不到**，缺口都在语言记法层面，逐项实测：
+
+| 差异 | 表面语言能写成什么 | 手写层是什么 | 规模 |
+|---|---|---|---|
+| 静态块的名字与取址过程 | `let NAME: [T] = [ … ];` 发 `data NAME_storage` 加一个取址过程 `NAME()` | `data NAME`，没有取址过程，别处按裸名字引用 | 全单元 214 个 `data` 块 |
+| 静态块的**内容** | 可以逐字节一致：`std/scalars.l1` 那张 587 字节的算符表（`i32 … addr` 九条记录）用 `let meta_scalar_table: ro [u8] = [ … ];` 写出来，与手写表**数字逐个相同**（`build/probes/scalars_surf.lain`） | 同左 | 587 字节 |
+| 外部声明的块名 | `extern <能力名>(…) -> T = <能力名>;` 发的就是 `#proc <能力名>(…) #extern "<能力名>"` —— **与手写层同形**。别名取成别的名字才会多出块（那是改写时的命名选择，不是语言限制）：`std/regions.l1` 的表面版本把别名对齐之后 `missing in gen` 从 1 变 0 | 同左 | 32 个 `#extern` 过程 |
+| 循环标签 | `loop s(…)` 一律发 `#loop L<n>(…)`（按单元内出现次序编号） | `#loop cmp(…)`，保留源码里的名字 | 全单元每个 `loop` |
+| `#load` 的操作数 | 层 0 的写出器发 `#load[T](ptr, 0)`（两个操作数） | 23 处写一个操作数、9 处写两个 | 32 处 |
+| 注释与空行 | 表面源里的注释不进产物（发射器没有携带注释的通道） | 每个模块都有成段注释与空行 | 手写单元 15619 行 |
+
+前四项改发射器都能收敛，代价是把表面记法改成「与手写层同形」——那会让记法本身变得更差；
+第五项不是发射器的问题：注释只存在于源码文本里，而单元的产物是重新生成的文本，中间没有
+「把注释搬过去」这一步。所以闸门这一项的定位是**能力盘点**：它给出改写每个模块要带的别名、
+静态数据写法、循环与访存的记法差异，而不是一条逐字节的等式。
+
+结论：按模块改写要把下面这些一起带上 —— 每个跨源依赖一条 `extern` 别名声明、静态数据用
+`let NAME: [T]`（块名带 `_storage`）加 `?NAME` 取值、循环标签不要指望保留、产物靠
+`lainir_parse` + `lainir_verify` 与既有回归把住正确性。
+
+## 自举管线的缺口（实测）
+
+`build/merge.ps1` 只做两件事：按 `SOURCE_ORDER` 把文件拼成 `build/bootstrap_merged.l1`、跑
+`check_unit.exe`。它**没有编译步骤** —— 直接把手写 LAINIR 当最终单元用。
+
+所以「把某个模块改成表面 Lain」这一步在当前管线下不会改变合并单元：拼接进去的是表面源码
+（`func …` / `let …`），而 `check_unit.exe` 只认 LAINIR（`#proc` / `data`）。实测把
+`std/types.l1` 换成表面版本后合并单元在第 655 行报 3001 `expected `#proc` or `data``。
+
+换模块时要补的是「用**上一阶段的 Meta** 降低**这一阶段的表面源**」这一步，也就是：
+
+- 阶段 1（今天）：Meta 是手写的 LAINIR，直接当单元跑（`--unit bootstrap/SOURCE_ORDER`）。
+- 阶段 2（改写后）：单元仍是**阶段 1 的手写 Meta**，但要降低的是表面源 —— 驱动的位置参数传
+  表面模块文件，产物才是新的合并单元。实测这个方向可行：`build/probes/registry_surf4.lain`、
+  `types_surf.lain`、`regions_surf.lain`、`struct_surf.lain`、`enum_stmt_surf.lain`、
+  `ptr_sites_surf.lain` 都是这样跑出来的（各自 `host_status=0`、产物过 `check_unit`）。
+- 阶段 3（自举）：单元换成阶段 2 的产物，再降低同一批表面源，两份产物应相同。
+
+要验证「**全部** 28 个模块的表面源能产出等价单元」，需要先把 28 个模块的表面版本都写出来，
+再按阶段 2 的方式整体跑一遍。
+
+已经写出来的表面版本，按 `procdiff -Hand <手写模块> -Gen <产物>` 的实测（`missing in gen` =
+手写层有而产物里没有的块）：
+
+| 手写模块 | 行数 | 表面版本 | `missing in gen` | 差异数 |
+|---|---|---|---|---|
+| `std/registry.l1` | 216 | `build/probes/registry_surf4.lain` | 0 | 12 |
+| `std/types.l1` | 93 | `build/probes/types_surf.lain` | 0 | 5 |
+| `std/regions.l1` | 28 | `build/probes/regions_surf.lain` | 0 | 3 |
+| `std/declarations.l1` | 166 | `build/probes/declarations_surf.lain` | 0 | 6 |
+| `std/handlers/struct.l1` | 22 | `build/probes/struct_surf.lain` | 0 | 3 |
+| `std/handlers/enum.l1` + `statements.l1` | 50 | `build/probes/enum_stmt_surf.lain` | 0 | 3 |
+| `std/handlers/if.l1` | 77 | `build/probes/if_surf.lain` | 0 | 3 |
+| `std/lex.l1` | 406 | `build/probes/lex_surf.lain` | 0 | 44 块全出 |
+| `std/emit.l1` | 154 | `build/probes/emit_surf.lain` | 0（别名对齐后） | 产物过 `check_unit` |
+| `std/syntax.l1` | 278 | `build/probes/syntax_surf.lain` | 3（`meta_syntax_lookup`、`meta_syntax_match`、`meta_syntax_init`） | 前 8 个过程都能发出；最后三个没发出来，原因是**循环体里的 `if` 只支持一层**（`meta_lower_loop_if`），这个改写里出现了两层 |
+| Meta 里的 11 处 `#ptr2int`/`#int2ptr` | — | `build/probes/ptr_sites_surf.lain` | — | 8 条指令全出 |
+| `std/scalars.l1` 的算符表 | 587 字节 | `build/probes/scalars_surf.lain` | — | **数字逐个相同** |
+
+`std/handlers/func.l1`（118 行）的形状已经写出来（`build/probes/func_surf.lain`），但**还没跑通**：
+`missing in gen` 剩 3 块（`meta_declare_func`、`meta_lower_decl_func`、`meta_declare_extern` 三条
+转发没写），且产物过不了 `lainir_verify`。
+
+`procdiff` 报的 `diff` 全部是那四项记法差异（静态块名、`#extern` 块名、循环标签、`#load` 操作数）
+加上手写文件的注释与形参换行，没有语义差异。
+
+剩下的大模块：`scope.l1`（1174 行）、`parse.l1`（633）、`modules.l1`（718）、
+`recognize.l1`（533）、`expand.l1`（401）、`records.l1`（766）、`funcs.l1`（3479）、
+`sums.l1`（669）、`lainir.l1`（1479）、`meta.l1`（2354），以及 `lex.l1`、`emit.l1`、
+`syntax.l1`、`handlers/func.l1`、`handlers/let.l1`、三个宏文件。
 
 所以顺序是：先补模块引用（§3）与静态数据（§4），攒够之后再回来把 `registry.l1` 整份换掉。
 
