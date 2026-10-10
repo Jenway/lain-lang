@@ -363,7 +363,7 @@ func cstr_len(p: addr) -> u64 {
 | 特性 | 表面写法 | 实测口径 |
 |---|---|---|
 | 函数、参数类型、调用 | `func f(a: i32) -> i32 { … }`、`f(2)` | 多语句体、递归都通 |
-| 绑定与返回 | `let n: i32 = …;`、`let y = inc(n);`、`return n;` | 标注可省：类型由值推（调用取被调方返回类型、参数名取参数表） |
+| 绑定与返回 | `let n: i32 = …;`、`let y = inc(n);`、`return n;` | 标注可省：类型由值推（调用取被调方返回类型、参数名取参数表）。**局部变量的类型参与算子选择**：`let n: u64 = 1;` 之后 `n < 8` 查 u64 的算子表（发 `#ult[#bits<64>]`），不再退回绑定的上下文类型（bool 的 op 表是空的，会报 6）。登记与查询走函数体里那张局部变量表（`bootstrap/std/funcs.l1` 的 `meta_local_type_put` / `meta_local_type_name`，条数与条目区在暂存区 `+2128` / `+2136`），只有带标注的 `let` 进表。样例 `bootstrap/lain/examples/local_type.lain` |
 | 条件 | `if a < b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件是任意表达式：裸条件与括号条件走同一个入口，块就是表达式停下来的那一格；分支必须以 `return` 收尾，所以 `if` 是语句不是值 |
 | 带值 if | `let x: i32 = if c { a } else { b };`、`return if c { a } else { b };`、`return 1 + if c { a } else { b };` | 降级为 `%x = #if %c -> (#bits<32>) { … #yield %a } else { … #yield %b }`：条件是任意表达式、类型取绑定的标注（缺标注由值推）；绑定位置把结果绑在源码名字上，`return` 位置与表达式里的操作数位置（实参、括号内、与算子串联）把整条 `#if` 发成临时值再被外层引用；省略 `else` 时假分支给结果类型的零值（bits 类 `#yield 0`、`addr` 先 `%r<n> = #int2ptr[#addr](0)`），`else` 后面不是块仍报 4（探针 `build/probes/ifnoelse_elseword.lain`）；两个分支都必须以一个值收尾。样例 `bootstrap/lain/examples/choose.lain`、`bootstrap/lain/examples/value_if.lain`、`bootstrap/lain/examples/if_default.lain` |
 | 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };` | `for` 的边界与累加器宽度跟循环变量的类型走：i32/u32/u64/i64/usize 都能用（`u64` 曾报 5，A 的第四刀补齐 64 位算子后通了，实测 `#ult[#bits<64>]`），体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」），循环体里可写 `if`（分支里有条件早退、分支里给参数赋值，值在分支之间合并）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain`、`bootstrap/lain/examples/loop_if.lain` |
@@ -443,9 +443,10 @@ proc 的路（对照 `sumtoplevel.lain`）。
 | 顶层 `let c = Shape.Circle { 7 };`（对照，已能用） | 0 | `sumtoplevel.lain` |
 | 局部绑定上的字段访问 `let p = Point { … }; return p.x;` | 4 | `fieldlocal.lain` |
 
-还没有的是：上面那条逃逸语义，以及`值名 → 类型`的表。那张表今天只有**函数参数**那一份
-（`meta_word_type_name` 走参数组扫描），局部绑定与循环参数都没有，所以
-`let p = Point { … }; return p.x;` 干净地报 4。顶层构造里写变量名会发出解析不到的
+局部变量表只记「名字 → 类型名窗口」，不记值，所以字段访问当值的那条路仍只认函数参数（聚合值在 IR 里是 `#addr`，局部绑定的地址可能是帧内构造出来的）。
+
+还没有的是：`值名 → 类型`的表只覆盖**带标注的局部绑定**与函数参数两条来源，循环参数仍没有，
+所以 `let p = Point { … }; return p.x;` 干净地报 4（字段访问要的是类型正文，不是类型名）。顶层构造里写变量名会发出解析不到的
 `%NAME`（顶层绑定是过程 `#call NAME()`，不是值）—— 由装载器拒。这些都不影响自举：手写
 Meta 里 `#struct`/`#enum` 的命中数是 0。
 
@@ -687,7 +688,8 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   按名字取**第一个**匹配定义，重名会静默指向前一个（不报错、只算错）。临时编号来自暂存区
   +144 的计数器（`meta_next_temp`），所以顶层字面名 `%base` 与它们不冲突。
 - 字段访问当值（`p.x`）：形状 6 由 `meta_operand_emit` 分给 `meta_emit_field_temp`（`bootstrap/std/records.l1`）
-  —— 值名的类型**只认函数参数**（`meta_word_type_name`），字段偏移由 `meta_layout_field` 从类型正文
+  —— 值名的类型**只认函数参数**（`meta_word_type_name`，它在参数表查不到时会再问局部变量表，
+  但局部变量表只给类型名窗口，不给类型正文，所以字段访问这条路仍然只认参数），字段偏移由 `meta_layout_field` 从类型正文
   算出（最高位为 0 报 8），发两条指令并把结果临时值下标写进暂存区 `+168`。`p.x` 占三格
   （值、点号、字段名），所以 `meta_after_operand`（`bootstrap/meta.l1`）对形状 6 回「下标 + 3」——
   只跳一格会把点号当成下一个语句。
