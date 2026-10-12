@@ -596,6 +596,26 @@ private:
       }
       return thenTy != kInvalidType ? thenTy : expected;
     }
+    case ast::ExprKind::Loop: {
+      const auto *le = static_cast<const ast::LoopExpr *>(e);
+      // 无论是否带标注，都把体跑一遍（绑定参数、检查体语句、登记各表达式类型）
+      // —— 否则 Lower 在体里找不到操作数类型。返回的「结果类型」才用标注决定。
+      pushScope();
+      for (const ast::LoopParam &p : le->params) {
+        TypeId pt = ts_.resolve(p.type, diags_);
+        if (pt != kInvalidType) bind(p.name, pt);
+      }
+      if (le->cond) (void)typeOf(le->cond, kInvalidType); // 条件里的参数也要登记类型
+      walkBody(le->body);
+      popScope();
+      if (expected != kInvalidType) return expected;
+      // 无标注：结果类型取最后一个参数（累加器）的声明类型。
+      if (!le->params.empty()) {
+        TypeId t = ts_.resolve(le->params.back().type, diags_);
+        if (t != kInvalidType) return t;
+      }
+      return kInvalidType;
+    }
     case ast::ExprKind::Dotted:
     default:
       return kInvalidType;

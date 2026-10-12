@@ -61,6 +61,8 @@ enum class ExprKind {
   Construct,// Point { x: 1 y: 2 } / Shape.Circle { k }
   Table,    // [10, 20, 30]
   ValueIf,  // if c { a } else { b } 当值用
+  Loop,     // loop LABEL(params) while C { body } 当值用
+  For,      // for i in a..b acc = 0 { body } 当值用
 };
 
 struct Expr : Node {
@@ -150,6 +152,13 @@ struct TableExpr : Expr {
 
 struct Stmt;
 
+struct LoopParam {
+  Span span{};
+  std::string_view name{};
+  TypeSyntax type{};
+  Expr *init = nullptr; // 可空（acc 可省）
+};
+
 struct ValueIfExpr : Expr {
   ValueIfExpr(Span s, Expr *c, std::vector<Stmt *> t, std::vector<Stmt *> f)
       : Expr(ExprKind::ValueIf, s), cond(c), thenBody(std::move(t)), elseBody(std::move(f)) {}
@@ -157,6 +166,29 @@ struct ValueIfExpr : Expr {
   std::vector<Stmt *> thenBody{};
   std::vector<Stmt *> elseBody{}; // 可空表示省略 else
   bool hasElse = false;
+};
+
+struct LoopExpr : Expr {
+  LoopExpr(Span s) : Expr(ExprKind::Loop, s) {}
+  std::string_view label{};
+  bool hasLabel = false;
+  std::vector<LoopParam> params{};
+  Expr *cond = nullptr; // nullptr => 无条件（靠体里的 break 退出）
+  std::vector<Stmt *> body{};
+};
+
+struct ForExpr : Expr {
+  ForExpr(Span s) : Expr(ExprKind::For, s) {}
+  std::string_view var{};
+  TypeSyntax varType{};
+  bool hasVarType = false;
+  Expr *from = nullptr;
+  Expr *to = nullptr;
+  bool hasAcc = false;
+  std::string_view acc{};
+  TypeSyntax accType{};
+  Expr *accInit = nullptr;
+  std::vector<Stmt *> body{};
 };
 
 // ---------------- 语句 ----------------
@@ -200,13 +232,6 @@ struct IfStmt : Stmt {
   std::vector<Stmt *> thenBody{};
   std::vector<Stmt *> elseBody{};
   bool hasElse = false;
-};
-
-struct LoopParam {
-  Span span{};
-  std::string_view name{};
-  TypeSyntax type{};
-  Expr *init = nullptr; // 可空（acc 可省）
 };
 
 struct LoopStmt : Stmt {

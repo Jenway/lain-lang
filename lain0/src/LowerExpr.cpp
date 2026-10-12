@@ -3,6 +3,7 @@
 // 一条铁律：宽度只能来自 IR 自己（TypeStore::width / lainir_inst_result_type），
 // 不许传递什么「期望宽度」——stage 0 那一整类 bug 就是那么来的。
 
+#include <cstdio>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -109,6 +110,9 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
     }
     return lowerCall(c, expectedTy, out, value);
   }
+  case ast::ExprKind::Loop:
+    return lowerLoopExpr(static_cast<const ast::LoopExpr *>(e), expectedTy, out,
+                         value);
   default:
     fail(e->span, D::LowerUnsupported, "这个表达式形态还没实现降级");
     return false;
@@ -172,6 +176,88 @@ bool Lowerer::lowerCall(const ast::CallExpr *e, TypeId expectedTy,
                               static_cast<uint32_t>(args.size()));
   out.push_back(call);
   value = res ? lainir_ref(res) : L1Operand{};
+  return true;
+}
+
+bool Lowerer::lowerLoopExpr(const ast::LoopExpr *e, TypeId expectedTy,
+                           std::vector<const L1Inst *> &out, L1Operand &value) {
+  if (expectedTy == kInvalidType) {
+    fail(e->span, D::SemaWidthUnknown,
+         "loop 的值类型必须由期望类型给出（let x: T = loop …）");
+    return false;
+  }
+  const L1Type *resultTy = types_->lain(expectedTy);
+
+  std::vector<L1RegionParam> params;
+  std::vector<L1Operand> paramRefs;
+  params.reserve(e->params.size());
+  paramRefs.reserve(e->params.size());
+  for (const ast::LoopParam &p : e->params) {
+    TypeId ty = types_->resolve(p.type, *diags_);
+    if (ty == kInvalidType) return false;
+    L1Operand init{};
+    if (p.init) {
+      if (!lowerExpr(p.init, ty, out, init)) return false;
+    } else {
+      init = lainir_int(0);
+    }
+    const char *pname = intern(p.name);
+    params.push_back(lainir_param(pname, types_->lain(ty), init));
+    paramRefs.push_back(lainir_ref(pname));
+    bindings_[std::string(p.name)] = lainir_ref(pname);
+  }
+
+  std::vector<const L1Inst *> bodyInsts;
+
+  if (e->cond) {
+    L1Operand cond{};
+    if (!lowerExpr(e->cond, types_->builtin("bool"), bodyInsts, cond))
+      return false;
+
+    std::vector<const L1Inst *> inner;
+    bool term = false;
+    if (!lowerBody(e->body, inner, expectedTy, term)) return false;
+
+    std::vector<L1Operand> contArgs;
+    contArgs.reserve(params.size());
+    for (const auto &pr : params)
+      contArgs.push_back(bindings_[std::string(pr.param.name)]);
+
+    std::vector<const L1Inst *> thenInsts;
+    for (auto *i : inner) thenInsts.push_back(i);
+    thenInsts.push_back(lainir_inst_jump(builder_, INST_CONTINUE,
+                                         e->hasLabel ? intern(e->label) : nullptr,
+                                         contArgs.data(),
+                                         static_cast<uint32_t>(contArgs.size())));
+
+    const L1Region *thenRegion =
+        lainir_region(builder_, nullptr, 0, nullptr, 0, thenInsts.data(),
+                      static_cast<uint32_t>(thenInsts.size()));
+    bodyInsts.push_back(lainir_inst_if(builder_, nullptr, cond, thenRegion, nullptr));
+  } else {
+    bool term = false;
+    if (!lowerBody(e->body, bodyInsts, expectedTy, term)) return false;
+  }
+
+  // 值型循环末尾必须有一个 #break（结果取最后一个参数在循环入口的值）。
+  if (!params.empty()) {
+    L1Operand breakArg[1] = {paramRefs.back()};
+    bodyInsts.push_back(lainir_inst_jump(builder_, INST_BREAK,
+                                        e->hasLabel ? intern(e->label) : nullptr,
+                                        breakArg, 1));
+  }
+
+  const L1Type *const results[1] = {resultTy};
+  const L1Region *region = lainir_region(
+      builder_, params.empty() ? nullptr : params.data(),
+      static_cast<uint32_t>(params.size()), results, 1,
+      bodyInsts.empty() ? nullptr : bodyInsts.data(),
+      static_cast<uint32_t>(bodyInsts.size()));
+
+  const char *res = nextTemp();
+  out.push_back(lainir_inst_loop(builder_, res,
+                                 e->hasLabel ? intern(e->label) : nullptr, region));
+  value = lainir_ref(res);
   return true;
 }
 

@@ -38,7 +38,7 @@ struct KeywordEntry {
 
 // 关键字先于标识符匹配，所以表里不需要排序；条目少，线性扫描足够。
 constexpr KeywordEntry kKeywords[] = {
-    {"acc", Tok::KwAcc},         {"and", Tok::KwAnd},       {"as", Tok::KwAs},
+    {"and", Tok::KwAnd},       {"as", Tok::KwAs},
     {"break", Tok::KwBreak},     {"continue", Tok::KwContinue}, {"else", Tok::KwElse},
     {"enum", Tok::KwEnum},       {"extern", Tok::KwExtern}, {"false", Tok::KwFalse},
     {"for", Tok::KwFor},         {"func", Tok::KwFunc},     {"if", Tok::KwIf},
@@ -258,7 +258,7 @@ const char *tokName(Tok t) {
 
   case Tok::KwFunc: case Tok::KwLet: case Tok::KwReturn: case Tok::KwIf:
   case Tok::KwElse: case Tok::KwLoop: case Tok::KwFor: case Tok::KwWhile:
-  case Tok::KwIn: case Tok::KwAcc: case Tok::KwBreak: case Tok::KwContinue:
+  case Tok::KwIn: case Tok::KwBreak: case Tok::KwContinue:
   case Tok::KwStruct: case Tok::KwEnum: case Tok::KwImport: case Tok::KwExtern:
   case Tok::KwAs: case Tok::KwAnd: case Tok::KwOr: case Tok::KwTrue:
   case Tok::KwFalse: case Tok::KwRo:

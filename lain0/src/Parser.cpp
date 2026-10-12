@@ -109,7 +109,6 @@ bool isStatementKeyword(Tok kind) {
   case Tok::KwLet:
   case Tok::KwReturn:
   case Tok::KwIf:
-  case Tok::KwLoop:
   case Tok::KwFor:
   case Tok::KwBreak:
   case Tok::KwContinue:
@@ -753,9 +752,11 @@ private:
     std::string_view acc;
     ast::TypeSyntax accType;
     ast::Expr *accInit = nullptr;
-    if (match(Tok::KwAcc)) {
+    if (check(Tok::Ident) && current().text == "acc") {
+      const Token accTok = current();
+      advance();
       hasAcc = true;
-      acc = previous().text;
+      acc = accTok.text;
       if (match(Tok::Colon) && !parseType(accType)) {
         return nullptr;
       }
@@ -785,6 +786,52 @@ private:
     stmt->acc = acc;
     stmt->accType = accType;
     stmt->accInit = accInit;
+    stmt->body = std::move(body);
+    return stmt;
+  }
+
+  ast::Expr *parseLoopExpr() {
+    const Token start = advance();
+    Token label;
+    bool hasLabel = false;
+    if (check(Tok::Ident)) {
+      label = advance();
+      hasLabel = true;
+    }
+    if (!expect(Tok::LParen, "'('")) return nullptr;
+    std::vector<ast::LoopParam> params;
+    if (!match(Tok::RParen)) {
+      while (!atEnd()) {
+        Token name;
+        if (!takeIdent(name, "循环参数名") || !expect(Tok::Colon, "':'"))
+          return nullptr;
+        ast::TypeSyntax type;
+        if (!parseType(type)) return nullptr;
+        ast::Expr *init = nullptr;
+        if (match(Tok::Assign)) {
+          init = parseExpression();
+          if (init == nullptr) return nullptr;
+        }
+        const Span end = init != nullptr ? init->span : type.span;
+        params.push_back(
+            ast::LoopParam{joinSpans(name.span, end), name.text, type, init});
+        if (match(Tok::RParen)) break;
+        if (!expect(Tok::Comma, "','")) return nullptr;
+        if (match(Tok::RParen)) break;
+      }
+    }
+    ast::Expr *condition = nullptr;
+    if (match(Tok::KwWhile)) {
+      condition = parseExpression(1, false);
+      if (condition == nullptr) return nullptr;
+    }
+    std::vector<ast::Stmt *> body;
+    if (!parseBlock(body)) return nullptr;
+    auto *stmt = arena_.make<ast::LoopExpr>(joinSpans(start.span, previous().span));
+    stmt->label = hasLabel ? label.text : std::string_view{};
+    stmt->hasLabel = hasLabel;
+    stmt->params = std::move(params);
+    stmt->cond = condition;
     stmt->body = std::move(body);
     return stmt;
   }
@@ -925,6 +972,8 @@ private:
       return parseTableExpression();
     case Tok::KwIf:
       return parseValueIfExpression();
+    case Tok::KwLoop:
+      return parseLoopExpr();
     case Tok::KwImport:
       diags_.error(current().span, D::ParseReserved,
                    "import 只用于顶层模块绑定");

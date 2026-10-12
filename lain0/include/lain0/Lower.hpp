@@ -76,6 +76,8 @@ public:
                     L1Operand &value);
   bool lowerCast(const ast::CastExpr *e, std::vector<const L1Inst *> &out,
                  L1Operand &value);
+  bool lowerLoopExpr(const ast::LoopExpr *e, TypeId expectedTy,
+                    std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerAddressArithmetic(const ast::BinaryExpr *e, TypeId expectedTy,
                               std::vector<const L1Inst *> &out,
                               L1Operand &value);

@@ -59,7 +59,6 @@ enum class Tok : uint8_t {
   KwFor,
   KwWhile,
   KwIn,
-  KwAcc,
   KwBreak,
   KwContinue,
   KwStruct,
