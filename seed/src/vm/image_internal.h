@@ -158,6 +158,13 @@ uintptr_t lainvm_image_symbol_addr(const LainVmImage *image,
 /* 子过程的入口地址（#proc_addr 的结果）。 */
 uintptr_t lainvm_image_sub_addr(const LainVmImage *image, uint32_t sub_index);
 
+/* 按名字找子过程下标；要求它有体区域（手写或表面降级的单元内过程都算）。
+ * 找不到或没有体返回 LAINVM_IMAGE_NO_INDEX。extern 的 link_name 重定向用它：
+ * 表面源对同单元已定义过程发 extern 别名（link_name = 被调名），运行期据此
+ * 落回真实子过程，而不去查宿主能力表（那里只认宿主注册名）。 */
+uint32_t lainvm_image_sub_index_by_body(const LainVmImage *image,
+                                       const char *name);
+
 /* 把代码段里的一个地址换回子过程下标；不是合法入口就返回 NO_INDEX。
  * 越界、没对齐、超出子过程数都算不合法。 */
 uint32_t lainvm_image_sub_at(const LainVmImage *image, uintptr_t addr);

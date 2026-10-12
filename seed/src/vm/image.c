@@ -742,6 +742,19 @@ uintptr_t lainvm_image_sub_addr(const LainVmImage *image, uint32_t sub_index) {
   return image->subs[sub_index].entry_addr;
 }
 
+uint32_t lainvm_image_sub_index_by_body(const LainVmImage *image,
+                                       const char *name) {
+  uint32_t i;
+  if (!image || !name) return LAINVM_IMAGE_NO_INDEX;
+  for (i = 0; i < image->sub_count; i++) {
+    const L1Subroutine *sub = image->subs[i].sub;
+    if (sub && sub->name && strcmp(sub->name, name) == 0 &&
+        image->subs[i].body_region != LAINVM_IMAGE_NO_REGION)
+      return i;
+  }
+  return LAINVM_IMAGE_NO_INDEX;
+}
+
 uint32_t lainvm_image_sub_at(const LainVmImage *image, uintptr_t addr) {
   uintptr_t base;
   uintptr_t offset;

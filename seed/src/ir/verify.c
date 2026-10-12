@@ -872,6 +872,18 @@ static int verify_module(Verifier *v, const L1Module *module) {
     for (j = 0; j < i; j++) {
       if (module->subroutines[i].name && module->subroutines[j].name &&
           strcmp(module->subroutines[i].name, module->subroutines[j].name) == 0) {
+        /* 表面改写期：多个表面模块各自为同单元已定义过程/host 能力发 `extern`
+         * 别名，proc 名各自不同但 link_name 可能相同（都指向同一个宿主能力）。
+         * 这些 extern 在运行期经 enter_extern 的 link_name 重定向解析到同一目标，
+         * 重复声明无害。仅当二者都是 extern 且 link_name 相同才放行；
+         * 真正的「两个有体过程同名」仍按重复拒绝。 */
+        const L1Subroutine *a = &module->subroutines[i];
+        const L1Subroutine *b = &module->subroutines[j];
+        int both_extern = (a->flags & SUBROUTINE_EXTERN) &&
+                          (b->flags & SUBROUTINE_EXTERN);
+        int same_link = (a->link_name && b->link_name &&
+                        strcmp(a->link_name, b->link_name) == 0);
+        if (both_extern && same_link) continue;
         fail(v, L1V_DUPLICATE_SUBROUTINE, 0, 0, "duplicate subroutine `%s`",
              module->subroutines[i].name);
         return 1;

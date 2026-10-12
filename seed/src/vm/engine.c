@@ -645,6 +645,7 @@ LainVmSliceResult lainvm_vm_call_host(LainVmTcb *tcb, uint32_t sub_index,
 }
 
 /* 宿主调用指令：没有体区域，先按调用点的参数类型读操作数，再交给 invoke_host。 */
+static LainVmSliceResult enter_sub(LainVmTcb *tcb, const L1Inst *inst, uint32_t sub_index, uint32_t arg_base, uint32_t arg_count, uint32_t parent_position);
 static LainVmSliceResult enter_extern(LainVmTcb *tcb, const L1Inst *inst,
                                       uint32_t sub_index,
                                       const L1Subroutine *sub,
@@ -653,8 +654,15 @@ static LainVmSliceResult enter_extern(LainVmTcb *tcb, const L1Inst *inst,
   L1Value result;
   LainVmSliceResult r;
   uint32_t i;
+  uint32_t redirected;
   if (arg_count > LAINVM_MAX_OPERANDS)
     return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_CALL_OPERANDS, inst);
+  if (sub->link_name) {
+    redirected = lainvm_image_sub_index_by_body(tcb->image, sub->link_name);
+    if (redirected != LAINVM_IMAGE_NO_INDEX)
+      return enter_sub(tcb, inst, redirected, arg_base, arg_count,
+                       ctop(tcb)->position);
+  }
   for (i = 0; i < arg_count; i++) {
     const L1Type *ty = sub->params ? sub->params[i].ty : NULL;
     args[i] = read_typed(tcb, inst, arg_base + i, ty);
