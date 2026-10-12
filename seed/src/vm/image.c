@@ -381,12 +381,8 @@ static void resolve_symbols(LainVmImage *image) {
     for (pos = 0; pos < rec->inst_count; pos++) {
       const L1Inst *inst = &rec->region->insts[pos];
       LainVmImageInstMeta *meta = &image->insts[rec->meta_base + pos];
-      if (inst->kind == INST_DATA_ADDR)
-        meta->symbol_index = find_symbol(image, inst->symbol);
-      else if (inst->kind == INST_CALL || inst->kind == INST_PROC_ADDR)
+      if (inst->kind == INST_CALL)
         meta->sub_index = find_sub(image, inst->symbol);
-      else if (inst->kind == INST_CALL_INDIRECT)
-        meta->sub_index = LAINVM_IMAGE_NO_INDEX;
     }
   }
 }

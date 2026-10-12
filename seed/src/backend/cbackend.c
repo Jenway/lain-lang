@@ -743,8 +743,7 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
     return;
   }
   case INST_FPEXT: case INST_FPTRUNC: case INST_FPTOSI: case INST_FPTOUI:
-  case INST_SITOFP: case INST_UITOFP:
-  case INST_INT2PTR: case INST_PTR2INT: {
+  case INST_SITOFP: case INST_UITOFP: {
     char a[192];
     uint32_t source = operand_width(be, region, inst, 0);
     operand_expr(be, region, inst, 0, a, sizeof(a));
@@ -816,44 +815,6 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
           position);
     return;
 
-  case INST_DATA_ADDR: {
-    char name[128];
-    uint32_t k;
-    const char *symbol = NULL;
-    for (k = 0; k < be->module->data_count; k++) {
-      if (be->module->data[k].symbol == inst->symbol) {
-        symbol = be->module->data[k].symbol;
-        break;
-      }
-    }
-    if (!symbol) {
-      for (k = 0; k < be->module->data_count; k++) {
-        const char *candidate = be->module->data[k].symbol;
-        if (candidate && inst->symbol && strcmp(candidate, inst->symbol) == 0) {
-          symbol = candidate;
-          break;
-        }
-      }
-    }
-    if (!symbol) {
-      fail(be, LAINBACKEND_ERR_DATA_SYMBOL, "cbackend: unknown data symbol");
-      return;
-    }
-    mangle(name, sizeof(name), symbol, "l1_data_");
-    emitf(be, "%s = (l1v)(uintptr_t)%s;\n", dest, name);
-    return;
-  }
-  case INST_PROC_ADDR: {
-    char name[128];
-    const L1Subroutine *callee = find_sub(be->module, inst->symbol);
-    if (!callee) {
-      fail(be, LAINBACKEND_ERR_PROC_ADDR, "cbackend: unknown subroutine in #proc_addr");
-      return;
-    }
-    mangle(name, sizeof(name), callee->name, "sub_");
-    emitf(be, "%s = (l1v)(uintptr_t)&%s;\n", dest, name);
-    return;
-  }
 
   case INST_CALL: {
     const L1Subroutine *callee = find_sub(be->module, inst->symbol);
@@ -916,19 +877,6 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
       emitf(be, "%s%s", k ? ", " : "", a);
     }
     emit_text(be, ");\n");
-    return;
-  }
-  case INST_CALL_INDIRECT: {
-    char target[192];
-    operand_expr(be, region, inst, 0, target, sizeof(target));
-    if (dest[0]) emitf(be, "%s = ", dest);
-    emitf(be, "l1_indirect(%s, (const l1v[]){", target);
-    for (i = 1; i < inst->operand_count; i++) {
-      char a[192];
-      operand_masked(be, region, inst, i, 64, a, sizeof(a));
-      emitf(be, "%s%s", i > 1 ? ", " : "", a);
-    }
-    emitf(be, "}, %uu);\n", inst->operand_count > 0 ? inst->operand_count - 1u : 0u);
     return;
   }
 

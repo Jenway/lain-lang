@@ -56,7 +56,26 @@ bool Lowerer::lowerStmt(const ast::Stmt *s, std::vector<const L1Inst *> &out,
       return true;
     }
     L1Operand value{};
-    if (!lowerExpr(r->value, returnType, out, value)) return false;
+    const ast::Expr *val = r->value;
+    if (val->kind == ast::ExprKind::Call) {
+      const auto *ce = static_cast<const ast::CallExpr *>(val);
+      const ast::Expr *callee = ce->callee;
+      bool builtinCall =
+          callee && callee->kind == ast::ExprKind::Name &&
+          (static_cast<const ast::NameExpr *>(callee)->name == "load" ||
+           static_cast<const ast::NameExpr *>(callee)->name == "store" ||
+           static_cast<const ast::NameExpr *>(callee)->name == "lea" ||
+           static_cast<const ast::NameExpr *>(callee)->name == "ptr_of" ||
+           static_cast<const ast::NameExpr *>(callee)->name == "addr_of" ||
+           static_cast<const ast::NameExpr *>(callee)->name == "len");
+      if (!builtinCall &&
+          lowerCall(ce, returnType, out, value, /*tail=*/true)) {
+        out.push_back(lainir_inst_jump(builder_, INST_RETURN, nullptr, &value, 1));
+        terminated = true;
+        return true;
+      }
+    }
+    if (!lowerExpr(val, returnType, out, value)) return false;
     out.push_back(lainir_inst_jump(builder_, INST_RETURN, nullptr, &value, 1));
     terminated = true;
     return true;

@@ -77,6 +77,12 @@ const L1Inst *lainir_inst_call(L1Builder *builder, const char *result,
                                const char *symbol, const L1Operand *operands,
                                uint32_t operand_count);
 
+/* 同上，但标记为保证尾调用（#call[tail]）。调用点必须是过程最后动作，
+ * 否则验证器确定性拒绝。原 lainir_inst_call 等价 tail=false。 */
+const L1Inst *lainir_inst_call_ex(L1Builder *builder, const char *result,
+                                  const char *symbol, const L1Operand *operands,
+                                  uint32_t operand_count, bool tail);
+
 const L1Inst *lainir_inst_mem(L1Builder *builder, L1InstKind kind,
                               const char *result, const L1Type *ty,
                               L1MemOrder order, bool is_volatile,

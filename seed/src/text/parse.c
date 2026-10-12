@@ -527,19 +527,14 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
   skip(p);
   if (kind == INST_CALL) {
     char callee[128];
+    if (cur(p) == '@') skip(p);
     if (!ident(p, callee, sizeof(callee))) return false;
     symbol = lainir_builder_string(p->builder, callee);
-  } else if (kind == INST_DATA_ADDR || kind == INST_PROC_ADDR) {
-    char name[128];
-    if (!symbol_name(p, name, sizeof(name))) return false;
-    symbol = lainir_builder_string(p->builder, name);
-    ops[0] = lainir_int(0);
-    count = 0;
   }
 
   /* 其他算子：可选 [TYPE, attrs] 然后 (operands) */
   skip(p);
-  if (kind != INST_CALL && kind != INST_DATA_ADDR && kind != INST_PROC_ADDR) {
+  if (kind != INST_CALL) {
     if (match(p, '[')) {
       if (!parse_type(p, &ty)) return false;
       skip(p);
@@ -592,8 +587,6 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
     break;
   case INST_LOAD:
   case INST_ALLOCA:
-  case INST_INT2PTR:
-  case INST_PTR2INT:
     inst = (L1Inst *)lainir_inst_mem(p->builder, kind,
                                      name_count ? names[0] : NULL, ty, order,
                                      is_volatile, ops, count);
@@ -602,11 +595,6 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
     inst = (L1Inst *)lainir_inst_call(p->builder,
                                       name_count ? names[0] : NULL, symbol, ops,
                                       count);
-    break;
-  case INST_DATA_ADDR:
-  case INST_PROC_ADDR:
-    inst = (L1Inst *)lainir_inst_symbol(p->builder, kind,
-                                        name_count ? names[0] : NULL, symbol);
     break;
   default:
     inst = (L1Inst *)lainir_inst(p->builder, kind,

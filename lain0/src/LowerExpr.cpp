@@ -145,7 +145,8 @@ bool Lowerer::lowerBinary(const ast::BinaryExpr *e, TypeId expectedTy,
 }
 
 bool Lowerer::lowerCall(const ast::CallExpr *e, TypeId expectedTy,
-                        std::vector<const L1Inst *> &out, L1Operand &value) {
+                        std::vector<const L1Inst *> &out, L1Operand &value,
+                        bool tail) {
   if (!e->callee || e->callee->kind != ast::ExprKind::Name) {
     fail(e->span, D::LowerUnsupported, "只支持直接调用具名过程");
     return false;
@@ -162,9 +163,13 @@ bool Lowerer::lowerCall(const ast::CallExpr *e, TypeId expectedTy,
 
   const L1Type *retTy = expectedTy != kInvalidType ? types_->lain(expectedTy) : nullptr;
   const char *res = retTy ? nextTemp() : nullptr;
-  const L1Inst *call = lainir_inst_call(builder_, res, intern(n->name),
-                                        args.empty() ? nullptr : args.data(),
-                                        static_cast<uint32_t>(args.size()));
+  const L1Inst *call =
+      tail ? lainir_inst_call_ex(builder_, res, intern(n->name),
+                                 args.empty() ? nullptr : args.data(),
+                                 static_cast<uint32_t>(args.size()), true)
+           : lainir_inst_call(builder_, res, intern(n->name),
+                              args.empty() ? nullptr : args.data(),
+                              static_cast<uint32_t>(args.size()));
   out.push_back(call);
   value = res ? lainir_ref(res) : L1Operand{};
   return true;
@@ -230,7 +235,7 @@ bool Lowerer::lowerBuiltin(const ast::CallExpr *e, std::string_view name,
     if (!lowerExpr(e->args[0], types_->builtin("addr"), out, ptr)) return false;
     uint32_t width = expectedTy != kInvalidType ? types_->width(expectedTy) : 64;
     const char *res = nextTemp();
-    out.push_back(lainir_inst(builder_, INST_PTR2INT, res,
+    out.push_back(lainir_inst(builder_, INST_BITCAST, res,
                               lainir_type(builder_, TY_BITS, width), &ptr, 1));
     value = lainir_ref(res);
     return true;
@@ -243,7 +248,7 @@ bool Lowerer::lowerBuiltin(const ast::CallExpr *e, std::string_view name,
     L1Operand num{};
     if (!lowerExpr(e->args[0], types_->builtin("u64"), out, num)) return false;
     const char *res = nextTemp();
-    out.push_back(lainir_inst(builder_, INST_INT2PTR, res,
+    out.push_back(lainir_inst(builder_, INST_BITCAST, res,
                               lainir_type(builder_, TY_ADDR, 0), &num, 1));
     value = lainir_ref(res);
     return true;

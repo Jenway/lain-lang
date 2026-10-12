@@ -90,8 +90,6 @@ typedef enum {
   INST_ZEXT, INST_SEXT, INST_TRUNC, INST_BITCAST,
   /* 浮点转换 */
   INST_FPEXT, INST_FPTRUNC, INST_FPTOSI, INST_FPTOUI, INST_SITOFP, INST_UITOFP,
-  /* 地址转换 */
-  INST_INT2PTR, INST_PTR2INT,
   /* 向量；车道分解在算子名上，模型里用 (kind, lane_bits) 表示，见 L1Inst.lane_bits */
   INST_VADD, INST_VSUB, INST_VMUL, INST_VDIV, INST_VAND, INST_VOR, INST_VXOR,
   INST_VSHL, INST_VSHUFFLE, INST_VBROADCAST, INST_VEXTRACT, INST_VINSERT,
@@ -103,13 +101,8 @@ typedef enum {
   INST_LEA,
   /* 内存 */
   INST_LOAD, INST_STORE, INST_ALLOCA,
-  /* 引用 */
-  INST_DATA_ADDR,
-  /* 取子过程的地址。产出的是 #addr，和 #data_addr 同形：
-   * 地址没有类型，能不能调用由它所在区段的权限说话。 */
-  INST_PROC_ADDR,
-  /* 调用 */
-  INST_CALL, INST_CALL_INDIRECT,
+  /* 调用：符号或值目标统一；[tail] 表示保证尾调用 */
+  INST_CALL,
   /* 结构：每条拥有自己的区域 */
   INST_IF, INST_LOOP, INST_SWITCH,
   /* 终结子 */
@@ -195,9 +188,10 @@ typedef struct L1Inst {
   /* 内存操作 */
   L1MemOrder order;
   bool is_volatile;
+  bool is_tail;        /* #call[tail]：保证尾调用，复用当前栈帧 */
 
-  /* 被调 / 被引用的符号：INST_CALL、INST_DATA_ADDR。
-   * INST_CALL_INDIRECT 不用它，函数指针是 operands[0]。 */
+  /* 被调 / 被引用的符号：INST_CALL。值目标时 symbol 为空，
+   * 函数指针是 operands[0]。 */
   const char *symbol;
 
   /* 结构指令 */

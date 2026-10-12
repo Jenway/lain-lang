@@ -477,19 +477,7 @@ static LainVmSliceResult op_lea(LainVmTcb *tcb, const L1Inst *inst) {
   return LAINVM_SLICE_RUNNABLE;
 }
 
-static LainVmSliceResult op_int2ptr(LainVmTcb *tcb, const L1Inst *inst) {
-  lainvm_result_write(tcb, inst, 0,
-                      value_addr((uintptr_t)lainvm_operand_read(tcb, inst, 0).as.bits));
-  return LAINVM_SLICE_RUNNABLE;
-}
 
-static LainVmSliceResult op_ptr2int(LainVmTcb *tcb, const L1Inst *inst) {
-  uint32_t width = inst->ty ? inst->ty->width : 64u;
-  lainvm_result_write(tcb, inst, 0,
-                      value_bits((uint64_t)as_addr(lainvm_operand_read(tcb, inst, 0)),
-                                 width));
-  return LAINVM_SLICE_RUNNABLE;
-}
 
 static LainVmSliceResult op_load(LainVmTcb *tcb, const L1Inst *inst) {
   uintptr_t addr = as_addr(lainvm_operand_read(tcb, inst, 0));
@@ -566,16 +554,6 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
   return LAINVM_SLICE_RUNNABLE;
 }
 
-static LainVmSliceResult op_data_addr(LainVmTcb *tcb, const L1Inst *inst) {
-  const LainVmFrame *frame = ctop(tcb);
-  LainVmImageInstMeta meta =
-      lainvm_image_inst_meta(tcb->image, frame->region, frame->position);
-  uintptr_t addr = lainvm_image_symbol_addr(tcb->image, meta.symbol_index);
-  if (meta.symbol_index == LAINVM_IMAGE_NO_INDEX || addr == 0)
-    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_SYMBOL_ADDRESS, inst);
-  lainvm_result_write(tcb, inst, 0, value_addr(addr));
-  return LAINVM_SLICE_RUNNABLE;
-}
 
 /* --- 调用与结构 ----------------------------------------------------------- */
 
@@ -721,37 +699,8 @@ static LainVmSliceResult op_call(LainVmTcb *tcb, const L1Inst *inst) {
 
 /* 间接调用：操作数 0 是目标地址，其余是实参。
  * 地址没有类型——能不能调用由它所在区段的 CALL 权限说话（相当于执行位）。 */
-static LainVmSliceResult op_call_indirect(LainVmTcb *tcb, const L1Inst *inst) {
-  const LainVmFrame *frame = ctop(tcb);
-  uintptr_t target;
-  uint32_t sub_index;
-
-  if (inst->operand_count < 1)
-    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_INDIRECT_NO_TARGET, inst);
-  target = as_addr(lainvm_operand_read(tcb, inst, 0));
-  if (!lainvm_space_check(tcb->vspace, target, sizeof(void *), LAINVM_MEM_CALL))
-    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, LAINVM_TRAP_INDIRECT_NO_CALL, inst);
-  sub_index = lainvm_image_sub_at(tcb->image, target);
-  if (sub_index == LAINVM_IMAGE_NO_INDEX)
-    return trap_now(tcb, LAINVM_TRAP_CAPABILITY, LAINVM_TRAP_INDIRECT_NO_SUB, inst);
-  return enter_sub(tcb, inst, sub_index, 1, inst->operand_count - 1,
-                   frame->position);
-}
 
 /* 取子过程的地址。和 #data_addr 同形，产出的是普通 #addr。 */
-static LainVmSliceResult op_proc_addr(LainVmTcb *tcb, const L1Inst *inst) {
-  const LainVmFrame *frame = ctop(tcb);
-  LainVmImageInstMeta meta =
-      lainvm_image_inst_meta(tcb->image, frame->region, frame->position);
-  uintptr_t addr;
-  if (meta.sub_index == LAINVM_IMAGE_NO_INDEX ||
-      meta.sub_index >= tcb->image->sub_count)
-    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_PROC_NO_SUB, inst);
-  addr = lainvm_image_sub_addr(tcb->image, meta.sub_index);
-  if (addr == 0) return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_PROC_NO_ADDR, inst);
-  lainvm_result_write(tcb, inst, 0, value_addr(addr));
-  return LAINVM_SLICE_RUNNABLE;
-}
 
 static LainVmSliceResult op_if(LainVmTcb *tcb, const L1Inst *inst) {
   const LainVmFrame *frame = ctop(tcb);
@@ -1013,16 +962,11 @@ static const LainVmOp k_ops[INST_COUNT] = {
     [INST_FPTOUI] = op_float_conv,
     [INST_SITOFP] = op_float_conv,
     [INST_UITOFP] = op_float_conv,
-    [INST_INT2PTR] = op_int2ptr,
-    [INST_PTR2INT] = op_ptr2int,
     [INST_LEA] = op_lea,
     [INST_LOAD] = op_load,
     [INST_STORE] = op_store,
     [INST_ALLOCA] = op_alloca,
-    [INST_DATA_ADDR] = op_data_addr,
-    [INST_PROC_ADDR] = op_proc_addr,
     [INST_CALL] = op_call,
-    [INST_CALL_INDIRECT] = op_call_indirect,
     [INST_IF] = op_if,
     [INST_LOOP] = op_loop,
     [INST_SWITCH] = op_switch,
@@ -1096,16 +1040,11 @@ LainVmSliceResult lainvm_op_fptoui(LainVmTcb *t, const L1Inst *i) { return op_fl
 LainVmSliceResult lainvm_op_sitofp(LainVmTcb *t, const L1Inst *i) { return op_float_conv(t, i); }
 LainVmSliceResult lainvm_op_uitofp(LainVmTcb *t, const L1Inst *i) { return op_float_conv(t, i); }
 
-LainVmSliceResult lainvm_op_int2ptr(LainVmTcb *t, const L1Inst *i) { return op_int2ptr(t, i); }
-LainVmSliceResult lainvm_op_ptr2int(LainVmTcb *t, const L1Inst *i) { return op_ptr2int(t, i); }
 LainVmSliceResult lainvm_op_lea(LainVmTcb *t, const L1Inst *i) { return op_lea(t, i); }
 LainVmSliceResult lainvm_op_load(LainVmTcb *t, const L1Inst *i) { return op_load(t, i); }
 LainVmSliceResult lainvm_op_store(LainVmTcb *t, const L1Inst *i) { return op_store(t, i); }
 LainVmSliceResult lainvm_op_alloca(LainVmTcb *t, const L1Inst *i) { return op_alloca(t, i); }
-LainVmSliceResult lainvm_op_data_addr(LainVmTcb *t, const L1Inst *i) { return op_data_addr(t, i); }
-LainVmSliceResult lainvm_op_proc_addr(LainVmTcb *t, const L1Inst *i) { return op_proc_addr(t, i); }
 LainVmSliceResult lainvm_op_call(LainVmTcb *t, const L1Inst *i) { return op_call(t, i); }
-LainVmSliceResult lainvm_op_call_indirect(LainVmTcb *t, const L1Inst *i) { return op_call_indirect(t, i); }
 LainVmSliceResult lainvm_op_if(LainVmTcb *t, const L1Inst *i) { return op_if(t, i); }
 LainVmSliceResult lainvm_op_loop(LainVmTcb *t, const L1Inst *i) { return op_loop(t, i); }
 LainVmSliceResult lainvm_op_switch(LainVmTcb *t, const L1Inst *i) { return op_switch(t, i); }

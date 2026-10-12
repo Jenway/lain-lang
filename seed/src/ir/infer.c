@@ -57,9 +57,6 @@ static bool is_address_result(L1InstKind kind) {
   switch (kind) {
   case INST_LEA:
   case INST_ALLOCA:
-  case INST_DATA_ADDR:
-  case INST_PROC_ADDR:
-  case INST_INT2PTR:
     return true;
   default:
     return false;

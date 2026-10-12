@@ -126,12 +126,9 @@ static uint32_t literal_width(Verifier *v, const L1Region *region,
                : 0;
   case INST_LEA:
     return 64; /* scale / offset 是地址宽度的量 */
-  case INST_CALL:
-  case INST_CALL_INDIRECT: {
+  case INST_CALL: {
     const L1Subroutine *callee =
-        inst->kind == INST_CALL
-            ? lainir_find_subroutine(v->module, inst->symbol)
-            : NULL;
+        lainir_find_subroutine(v->module, inst->symbol);
     if (callee && index < callee->param_count)
       return lainir_type_width(callee->params[index].ty);
     return 0;
@@ -366,11 +363,6 @@ static bool check_arity(Verifier *v, const L1Inst *inst) {
                   callee->name, inst->operand_count, callee->param_count);
     return true;
   }
-  case INST_CALL_INDIRECT:
-    if (inst->operand_count < 1)
-      return fail(v, L1V_BAD_CALL_ARITY, inst->line, inst->column,
-                  "#call_indirect needs a target");
-    return true;
   case INST_LEA:
     if (inst->operand_count != 4)
       return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
@@ -436,7 +428,7 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
     if (!check_type_arg(v, inst)) return false;
     return true;
   }
-  if (is_int_conv(inst->kind)) {
+  if (is_int_conv(inst->kind) && inst->kind != INST_BITCAST) {
     if (!check_type_arg(v, inst)) return false;
     return check_operand_class(v, names, region, inst, loops, TY_BITS, false);
   }
@@ -449,13 +441,6 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
   }
 
   switch (inst->kind) {
-  case INST_INT2PTR:
-    if (!check_type_arg(v, inst)) return false;
-    return check_operand_class(v, names, region, inst, loops, TY_BITS, false);
-  case INST_PTR2INT:
-    if (!check_type_arg(v, inst)) return false;
-    return check_operand_class(v, names, region, inst, loops, TY_ADDR, false);
-
   case INST_LEA: {
     const L1Type *base;
     if (inst->operand_count != 4) {
@@ -470,6 +455,20 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
     return true;
   }
 
+  case INST_BITCAST: {
+    if (!check_type_arg(v, inst) || !check_result_count(v, inst, 1)) return false;
+    const L1Type *ot = operand_ty(v, names, region, inst, 0, loops);
+    if (ot && ot->kind != TY_BITS && ot->kind != TY_ADDR)
+      return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                  "#bitcast operand must be #bits or #addr");
+    if (inst->ty && inst->ty->kind != TY_BITS && inst->ty->kind != TY_ADDR)
+      return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                  "#bitcast result must be #bits or #addr");
+    if (ot && inst->ty && lainir_type_width(ot) != lainir_type_width(inst->ty))
+      return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                  "#bitcast must preserve width");
+    return true;
+  }
   case INST_LOAD: {
     const L1Type *addr_ty;
     if (!check_type_arg(v, inst) || !check_result_count(v, inst, 1)) return false;
@@ -514,21 +513,6 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
     return true;
   }
 
-  case INST_DATA_ADDR:
-    if (!check_result_count(v, inst, 1)) return false;
-    if (!lainir_find_data(v->module, inst->symbol))
-      return fail(v, L1V_UNKNOWN_SYMBOL, inst->line, inst->column,
-                  "#data_addr: unknown symbol `%s`",
-                  inst->symbol ? inst->symbol : "?");
-    return true;
-  case INST_PROC_ADDR:
-    if (!check_result_count(v, inst, 1)) return false;
-    if (!lainir_find_subroutine(v->module, inst->symbol))
-      return fail(v, L1V_UNKNOWN_PROC, inst->line, inst->column,
-                  "#proc_addr: unknown subroutine `%s`",
-                  inst->symbol ? inst->symbol : "?");
-    return true;
-
   case INST_CALL: {
     const L1Subroutine *callee =
         lainir_find_subroutine(v->module, inst->symbol);
@@ -549,13 +533,16 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
                     "#call to `%s`: argument %u has the wrong type",
                     callee->name, i);
     }
+    if (inst->is_tail) {
+      const L1Inst *next = (position + 1 < region->inst_count)
+                               ? &region->insts[position + 1]
+                               : NULL;
+      if (!next || next->kind != INST_RETURN)
+        return fail(v, L1V_BAD_TAIL, inst->line, inst->column,
+                    "#call[tail] must be immediately followed by #return");
+    }
     return true;
   }
-  case INST_CALL_INDIRECT:
-    if (inst->operand_count < 1)
-      return fail(v, L1V_BAD_CALL_ARITY, inst->line, inst->column,
-                  "#call_indirect needs a target");
-    return true;
 
   case INST_IF: {
     const L1Type *cond;

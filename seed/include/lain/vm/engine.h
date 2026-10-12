@@ -217,8 +217,6 @@ LainVmSliceResult lainvm_op_sitofp(LainVmTcb *tcb, const L1Inst *inst);
 LainVmSliceResult lainvm_op_uitofp(LainVmTcb *tcb, const L1Inst *inst);
 
 /* 地址转换。只重解释位，不给权限；有效性在访问时判定 */
-LainVmSliceResult lainvm_op_int2ptr(LainVmTcb *tcb, const L1Inst *inst);
-LainVmSliceResult lainvm_op_ptr2int(LainVmTcb *tcb, const L1Inst *inst);
 
 /* 向量。车道分解在 inst->lane_bits 和 inst->ty 里 */
 LainVmSliceResult lainvm_op_vadd(LainVmTcb *tcb, const L1Inst *inst);
@@ -251,14 +249,11 @@ LainVmSliceResult lainvm_op_store(LainVmTcb *tcb, const L1Inst *inst);
 LainVmSliceResult lainvm_op_alloca(LainVmTcb *tcb, const L1Inst *inst);
 
 /* 模块级数据对象的地址。装载时已烤成地址（映像绑定地址空间） */
-LainVmSliceResult lainvm_op_data_addr(LainVmTcb *tcb, const L1Inst *inst);
 
 /* 子过程的地址。产出普通 #addr；能不能被调用由区段的 CALL 权限说话 */
-LainVmSliceResult lainvm_op_proc_addr(LainVmTcb *tcb, const L1Inst *inst);
 
 /* 调用。压帧，绑定实参到被调方的参数槽 */
 LainVmSliceResult lainvm_op_call(LainVmTcb *tcb, const L1Inst *inst);
-LainVmSliceResult lainvm_op_call_indirect(LainVmTcb *tcb, const L1Inst *inst);
 
 /* 原子 */
 LainVmSliceResult lainvm_op_xchg(LainVmTcb *tcb, const L1Inst *inst);

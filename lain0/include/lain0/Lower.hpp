@@ -69,7 +69,8 @@ public:
   bool lowerBinary(const ast::BinaryExpr *e, TypeId expectedTy,
                    std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerCall(const ast::CallExpr *e, TypeId expectedTy,
-                 std::vector<const L1Inst *> &out, L1Operand &value);
+                 std::vector<const L1Inst *> &out, L1Operand &value,
+                 bool tail = false);
   bool lowerBuiltin(const ast::CallExpr *e, std::string_view name,
                     TypeId expectedTy, std::vector<const L1Inst *> &out,
                     L1Operand &value);

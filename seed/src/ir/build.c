@@ -262,6 +262,17 @@ const L1Inst *lainir_inst_call(L1Builder *builder, const char *result,
   return finish_inst(builder, inst, operands, operand_count);
 }
 
+const L1Inst *lainir_inst_call_ex(L1Builder *builder, const char *result,
+                                  const char *symbol, const L1Operand *operands,
+                                  uint32_t operand_count, bool tail) {
+  L1Inst *inst = (L1Inst *)new_inst(builder, INST_CALL, result,
+                                    result ? 1u : 0u);
+  if (!inst) return NULL;
+  inst->symbol = symbol;
+  inst->is_tail = tail;
+  return finish_inst(builder, inst, operands, operand_count);
+}
+
 const L1Inst *lainir_inst_mem(L1Builder *builder, L1InstKind kind,
                               const char *result, const L1Type *ty,
                               L1MemOrder order, bool is_volatile,

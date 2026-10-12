@@ -50,7 +50,7 @@ lain0 已经能够很好地替代 bootstrap，且已把它该承担的角色"耗
 - 注意：这是 **IR 层面的改动**，不是单纯 Lain 语言特性；按 D-001 新语言工作进 lain0，但本决策要先动 seed 与 docs/01，需与 lain0 的 call / 指针发射端同步排期。
 
 **Status**
-采纳（尚未实现；波及 seed 与 docs/01，且与 lain0 调用/指针降级强耦合，待排期）
+已完成（seed IR 层 opcode 已移除并统一为 `#call` + `#bitcast[#addr]`；lain0 发射端已切换；bootstrap 按 D-001 冻结、未迁移）
 
 ## D-003 — 保证尾调用：`#call[tail] @f(...)`
 
@@ -73,6 +73,6 @@ lain0 已经能够很好地替代 bootstrap，且已把它该承担的角色"耗
 - 注意：属 IR 层改动，与 D-002 强耦合，应一并排期。
 
 **Status**
-采纳（尚未实现；波及 seed 与 docs/01，与 D-002 耦合）
+已完成（seed 加 `is_tail` + `lainir_inst_call_ex`；lain0 在尾位置发 `#call[tail]`；verify 校验尾位置，非尾位拒绝）
 
 <!-- 决策在此逐条追加 -->

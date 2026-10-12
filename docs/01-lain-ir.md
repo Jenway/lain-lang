@@ -56,10 +56,10 @@ LAINIR 拒绝带有隐式解释的形式（如笼统的 `div`、`lt` 或字段�
 | **整数比较** | `eq ne slt sle sgt sge ult ule ugt uge` | 比较结果恒为 `#bits<1>`；严格区分有符号与无符号比较。 |
 | **浮点算术** | `fadd fsub fmul fdiv` | 遵循 IEEE 754 浮点语义。 |
 | **浮点比较** | 有序比较：`foeq fone folt fole fogt foge`<br>无序比较：`fueq fune fult fule fugt fuge` | 显式处理 NaN 参与比较时的行为。 |
-| **类型转换** | 整数扩展/截断：`zext sext trunc bitcast`<br>浮点转换：`fpext fptrunc fptosi fptoui sitofp uitofp` | 符号扩展（`sext`）与零扩展（`zext`）显式分离。 |
-| **地址转换** | `int2ptr ptr2int` | 仅在地址与位模式间执行数值转换，不授予权限。 |
-| **内存操作** | `lea load store alloca data_addr proc_addr` | 显式指定读写类型；构造地址与解引用严格分离。 |
-| **调用** | `call call_indirect` | 直接调用按签名校验；间接调用需执行环境核验 CALL 权限。 |
+| **类型转换** | 整数扩展/截断：`zext sext trunc bitcast`<br>浮点转换：`fpext fptrunc fptosi fptoui sitofp uitofp` | 符号扩展（`sext`）与零扩展（`zext`）显式分离；`bitcast` 亦用于 `#addr ↔ #bits<N>` 的地址↔整数 reinterpret（不授予权限）。 |
+| **地址转换** | （`int2ptr`/`ptr2int` 已移除）地址↔整数统一走 `bitcast[#addr]` / `bitcast[#bits<N>]`，不授予权限。 |
+| **内存操作** | `lea load store alloca` | 显式指定读写类型；构造地址（`lea`）与解引用（`load`/`store`）严格分离。 |
+| **调用** | `call`（符号形式 `#call @name(...)` 或值形式 `#call[(签名)] %f(...)`，可带 `[tail]` 保证尾调用） | 过程即地址，调用统一为 `#call`；`#call[tail]` 必须紧跟 `#return`（否则验证拒绝），后端复用栈帧、不得新建帧。 |
 | **控制流** | `if loop switch yield break continue return` | 结构化控制流，区域可产出结果。 |
 
 - **确定性拒绝**：除零、移位量超出位宽、有符号除法溢出等域外行为由 VM 协议确定性拒绝产生 Trap，IR 不提供静默的未定义行为（UB）或内置异常捕获。

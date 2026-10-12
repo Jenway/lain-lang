@@ -50,7 +50,11 @@ const L1Inst *emitMem(L1Builder *builder, L1InstKind kind, const char *result,
 
 const L1Inst *emitDataAddr(L1Builder *builder, const char *result,
                            const char *symbol, uint32_t line, uint32_t column) {
-  const L1Inst *inst = lainir_inst_symbol(builder, INST_DATA_ADDR, result, symbol);
+  // D-002：数据符号本身就是地址；用 #bitcast[#addr] 包住对符号的引用即得地址。
+  L1Operand sym = lainir_ref(symbol);
+  const L1Type *addrTy = lainir_type(builder, TY_ADDR, 0);
+  const L1Inst *inst =
+      lainir_inst(builder, INST_BITCAST, result, addrTy, &sym, 1);
   stamp(inst, line, column);
   return inst;
 }
