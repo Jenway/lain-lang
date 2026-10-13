@@ -67,6 +67,14 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
       value = it->second;
       return true;
     }
+    // 顶层静态绑定（表 / 字符串）：它是 data 块 + `#proc NAME() -> #addr`，
+    // 取值要调它的访问器过程，不能直接引用那个名字。
+    if (sema_->topLevelTypes.count(std::string(n->name)) != 0) {
+      const char *res = nextTemp();
+      out.push_back(lainir_inst_call(builder_, res, intern(n->name), nullptr, 0));
+      value = lainir_ref(res);
+      return true;
+    }
     value = lainir_ref(intern(n->name));
     return true;
   }
@@ -113,6 +121,9 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
   case ast::ExprKind::Loop:
     return lowerLoopExpr(static_cast<const ast::LoopExpr *>(e), expectedTy, out,
                          value);
+  case ast::ExprKind::Index:
+    return lowerIndexExpr(static_cast<const ast::IndexExpr *>(e), expectedTy,
+                          out, value);
   case ast::ExprKind::ValueIf:
     return lowerValueIfExpr(static_cast<const ast::ValueIfExpr *>(e), expectedTy,
                             out, value);
@@ -150,6 +161,38 @@ bool Lowerer::lowerBinary(const ast::BinaryExpr *e, TypeId expectedTy,
   const char *res = nextTemp();
   L1Operand ops[2] = {lhs, rhs};
   out.push_back(lainir_inst(builder_, choice.kind, res, choice.operandTy, ops, 2));
+  value = lainir_ref(res);
+  return true;
+}
+
+bool Lowerer::lowerIndexExpr(const ast::IndexExpr *e, TypeId expectedTy,
+                             std::vector<const L1Inst *> &out,
+                             L1Operand &value) {
+  // 表元素取址：#lea(%base, %index, 元素字节数, 0)
+  L1Operand base{};
+  if (!lowerExpr(e->base, types_->builtin("addr"), out, base)) return false;
+  L1Operand index{};
+  if (!lowerExpr(e->index, types_->builtin("u64"), out, index)) return false;
+
+  // 元素字节数：base 是顶层表时，从它的数组类型取元素宽度。
+  // 样例里 [u8] 与 [u64] 并存，scale 取错地址就全错。
+  uint64_t scale = 1;
+  if (e->base && e->base->kind == ast::ExprKind::Name) {
+    const auto *n = static_cast<const ast::NameExpr *>(e->base);
+    auto it = sema_->topLevelTypes.find(std::string(n->name));
+    if (it != sema_->topLevelTypes.end()) {
+      const TypeId elem = types_->elementOf(it->second);
+      if (elem != kInvalidType) {
+        const uint32_t w = types_->width(elem);
+        if (w >= 8) scale = w / 8u;
+      }
+    }
+  }
+
+  const L1Type *addrTy = types_->lain(types_->builtin("addr"));
+  L1Operand ops[4] = {base, index, lainir_int(scale), lainir_int(0)};
+  const char *res = nextTemp();
+  out.push_back(lainir_inst(builder_, INST_LEA, res, addrTy, ops, 4));
   value = lainir_ref(res);
   return true;
 }
@@ -547,9 +590,21 @@ bool Lowerer::lowerBuiltin(const ast::CallExpr *e, std::string_view name,
     return true;
   }
   if (name == "len") {
-    // len(t) 发元素个数；表的长度在 Sema 里没登记，Slice A 退回字面量 0 并报不支持。
-    fail(e->span, D::LowerUnsupported, "len 需要表的元素个数，暂未接线");
-    return false;
+    // len(t) 发元素个数：顶层表的长度编译期已知，由 Sema 登记在这里。
+    if (e->args.size() != 1 || e->args[0] == nullptr ||
+        e->args[0]->kind != ast::ExprKind::Name) {
+      fail(e->span, D::LowerUnsupported, "len 只作用于顶层的表/串名字");
+      return false;
+    }
+    const auto *n = static_cast<const ast::NameExpr *>(e->args[0]);
+    auto it = sema_->topLevelLength.find(std::string(n->name));
+    if (it == sema_->topLevelLength.end()) {
+      fail(e->span, D::LowerUnsupported,
+           std::string("len 取不到 ") + std::string(n->name) + " 的长度");
+      return false;
+    }
+    value = lainir_int(it->second);
+    return true;
   }
   fail(e->span, D::LowerUnsupported, "未知的内建名");
   return false;

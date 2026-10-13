@@ -69,6 +69,8 @@ public:
   TypeId addStruct(std::string_view name, AggregateLayout layout);
   TypeId addEnum(std::string_view name, AggregateLayout layout);
   // 数组类型可能被重复解析，登记是幂等的；resolve 是 const，所以这个也必须是。
+  // 数组的元素类型（取不到返回 kInvalidType）。
+  TypeId elementOf(TypeId id) const;
   TypeId addArrayOf(TypeId element, bool isRo) const;
   TypeId addModuleType(std::string_view moduleAlias);
 
@@ -128,6 +130,8 @@ struct SemaResult {
   std::unordered_map<std::string, TypeId> functionReturns{};
   // 顶层静态绑定的类型
   std::unordered_map<std::string, TypeId> topLevelTypes{};
+  // 顶层表/串的元素个数（len(NAME) 要用）：顶层静态绑定的长度编译期可知。
+  std::unordered_map<std::string, uint64_t> topLevelLength{};
   // import 出来的模块成员：`<alias>.<member>` -> ModuleMember
   std::unordered_map<std::string, ModuleMember> moduleMembers{};
 };

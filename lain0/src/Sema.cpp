@@ -104,6 +104,11 @@ TypeId TypeStore::addEnum(std::string_view name, AggregateLayout layout) {
   return id;
 }
 
+TypeId TypeStore::elementOf(TypeId id) const {
+  if (id == kInvalidType || id > entries_.size()) return kInvalidType;
+  return entries_[id - 1].element;
+}
+
 TypeId TypeStore::addArrayOf(TypeId element, bool isRo) const {
   uint64_t key = (static_cast<uint64_t>(element) << 1) | (isRo ? 1u : 0u);
   auto it = arrays_.find(key);
@@ -282,6 +287,14 @@ public:
         out_.topLevelTypes[std::string(s->name)] = t;
         // 产物是 `data NAME_storage …` + `#proc NAME() -> #addr`。
         bind(s->name, ts_.builtin("addr"));
+      }
+      // 长度：表按元素个数，字符串按字节数。
+      if (s->init && s->init->kind == ast::ExprKind::Table) {
+        out_.topLevelLength[std::string(s->name)] =
+            static_cast<const ast::TableExpr *>(s->init)->elements.size();
+      } else if (s->init && s->init->kind == ast::ExprKind::StrLit) {
+        out_.topLevelLength[std::string(s->name)] =
+            static_cast<const ast::StrLitExpr *>(s->init)->rawText.size();
       }
     }
     // 第二遍：走函数体，定出每个表达式与局部绑定的类型。
