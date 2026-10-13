@@ -271,19 +271,23 @@ public:
   void run(const ast::Module &mod) {
     // 第一遍：登记所有声明（布局与签名），因为使用可以出现在定义之前。
     for (const ast::Decl *d : mod.decls) declare(d);
+    // 顶层静态绑定既是数据块、也是一个「取值过程」的名字，在表达式里按 #addr
+    // 使用。必须在走函数体之前绑好，否则函数体里查不到这个名字。
+    for (const ast::Decl *d : mod.decls) {
+      if (d->kind != ast::DeclKind::StaticLet) continue;
+      const auto *s = static_cast<const ast::StaticLetDecl *>(d);
+      TypeId t = s->hasType ? ts_.resolve(s->type, diags_) : kInvalidType;
+      if (s->init && t == kInvalidType) t = typeOf(s->init, kInvalidType);
+      if (t != kInvalidType) {
+        out_.topLevelTypes[std::string(s->name)] = t;
+        // 产物是 `data NAME_storage …` + `#proc NAME() -> #addr`。
+        bind(s->name, ts_.builtin("addr"));
+      }
+    }
     // 第二遍：走函数体，定出每个表达式与局部绑定的类型。
     for (const ast::Decl *d : mod.decls) {
       if (d->kind != ast::DeclKind::Func) continue;
       walkFunc(static_cast<const ast::FuncDecl *>(d));
-    }
-    for (const ast::Decl *d : mod.decls) {
-      if (d->kind != ast::DeclKind::StaticLet) continue;
-      const auto *s = static_cast<const ast::StaticLetDecl *>(d);
-      TypeId t = s->hasType ? ts_.resolve(s->type, diags_)
-                            : kInvalidType;
-      if (s->init && t == kInvalidType) t = typeOf(s->init, kInvalidType);
-      if (t != kInvalidType)
-        out_.topLevelTypes[std::string(s->name)] = t;
     }
   }
 
