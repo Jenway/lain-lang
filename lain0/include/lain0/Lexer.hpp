@@ -18,6 +18,7 @@ enum class Tok : uint8_t {
   EndOfFile,
   Ident,
   IntLit,
+  StrLit,
 
   // 标点
   LParen,    // (

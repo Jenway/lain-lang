@@ -183,6 +183,35 @@ std::vector<Token> lex(uint32_t fileId, std::string_view src, DiagSink &diags) {
       continue;
     }
 
+    // 字符串字面量："…"。原文原样保留（含非 ASCII 字节），转义与字节化留给
+    // 后面的阶段；docs/04 的口径是「字节按源码原样搬」。
+    if (c == '"') {
+      const size_t begin = i;
+      ++i;
+      size_t end = i;
+      bool closed = false;
+      while (i < n) {
+        const char ch = src[i];
+        ++i;
+        if (ch == '"') {
+          closed = true;
+          end = i - 1; // 不含收尾引号
+          break;
+        }
+      }
+      if (!closed) {
+        diags.error(makeSpan(begin, i), D::LexInvalidChar,
+                    "字符串字面量没有收尾的引号");
+        continue;
+      }
+      Token t;
+      t.kind = Tok::StrLit;
+      t.span = makeSpan(begin, i);
+      t.text = src.substr(begin + 1, end - (begin + 1)); // 去掉两侧引号
+      out.push_back(t);
+      continue;
+    }
+
     bool matched = false;
     if (i + 1 < n) {
       const unsigned char d = static_cast<unsigned char>(src[i + 1]);
@@ -226,6 +255,7 @@ const char *tokName(Tok t) {
   case Tok::EndOfFile: return "end of file";
   case Tok::Ident: return "identifier";
   case Tok::IntLit: return "integer literal";
+  case Tok::StrLit: return "string literal";
 
   case Tok::LParen: return "(";
   case Tok::RParen: return ")";

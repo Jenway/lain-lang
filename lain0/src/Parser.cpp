@@ -967,6 +967,11 @@ private:
       return parseTableExpression();
     case Tok::KwIf:
       return parseValueIfExpression();
+    case Tok::StrLit: {
+      auto *s = arena_.make<ast::StrLitExpr>(current().span, current().text);
+      advance();
+      return s;
+    }
     case Tok::KwLoop:
       return parseLoopExpr();
     case Tok::KwFor:

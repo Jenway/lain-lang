@@ -827,6 +827,16 @@ static bool verify_subroutine(Verifier *v, const L1Subroutine *sub) {
     return fail(v, L1V_MISSING_TYPE, 0, 0, "subroutine without a body");
   }
 
+  /* 静态数据块的符号是模块级的 #addr 值：#bitcast[#addr] 直接引用它取址
+     （D-002 移除 #data_addr 之后，取址走的就是这条路）。 */
+  if (v->module) {
+    for (i = 0; i < v->module->data_count; i++) {
+      const L1Data *d = &v->module->data[i];
+      if (d->symbol)
+        names = push_binding(v, names, d->symbol, &v->types.addr);
+    }
+  }
+
   for (i = 0; i < sub->param_count; i++) {
     if (!sub->params[i].ty)
       return fail(v, L1V_MISSING_TYPE, 0, 0, "parameter without a type");
