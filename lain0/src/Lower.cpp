@@ -14,7 +14,8 @@ Lowerer::Lowerer(L1Builder *builder, const TypeStore &types,
                  const SemaResult &sema, const SourceMgr &src, DiagSink &diags,
                  const LowerOptions &opts)
     : builder_(builder), types_(&types), sema_(&sema), src_(&src),
-      diags_(&diags), opts_(opts) {}
+      diags_(&diags), opts_(opts),
+      srcPath_(opts.sourcePath ? opts.sourcePath : "") {}
 
 const L1Module *Lowerer::run(const ast::Module &mod) {
   data_.clear();

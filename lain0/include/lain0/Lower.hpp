@@ -23,6 +23,8 @@ namespace ln {
 
 struct LowerOptions {
   const char *moduleName = "lain";
+  // 主源文件完整路径：import 解析被导入模块的相对路径要用。
+  const char *sourcePath = nullptr;
   // 临时值名字的前缀。注意打印器会自己加 `%`，所以这里**不带** `%`，
   // 否则产物里会出现 `%%r1`。
   const char *tempPrefix = "r";
@@ -107,6 +109,7 @@ private:
   const TypeStore *types_ = nullptr;
   const SemaResult *sema_ = nullptr;
   const SourceMgr *src_ = nullptr;
+  std::string srcPath_{};  // 主源文件路径（import 解析用）
   DiagSink *diags_ = nullptr;
   LowerOptions opts_{};
   // 名字 -> 当前代表该值的操作数。局部 let、赋值、循环参数的重新绑定都走这里。

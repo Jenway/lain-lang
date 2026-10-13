@@ -8,15 +8,64 @@
 // 内建标量是固定的九种，所以它们的 L1Type 直接是静态对象，不需要 L1Builder。
 
 #include <cstddef>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "lain0/Ast.hpp"
 #include "lain0/Diag.hpp"
+#include "lain0/Lexer.hpp"
+#include "lain0/Parser.hpp"
 
 namespace ln {
 namespace {
+
+// 模块路径解析 + 加载（读文件、lex、parse）。arena 用 new 持有——lain0 是单发工具，
+// 跑完即退，不释放不算泄漏。
+static std::string directoryOf(const std::string &path) {
+  const size_t pos = path.find_last_of('/');
+  return pos == std::string::npos ? "." : path.substr(0, pos);
+}
+
+static std::string resolveModulePath(const std::string &dir,
+                                    const std::string &spec) {
+  // "examples::modules_lib" —— 取 :: 之后最后一段作模块名，逐层目录试开。
+  const size_t pos = spec.rfind("::");
+  const std::string base = pos == std::string::npos ? "" : spec.substr(0, pos);
+  const std::string mod = pos == std::string::npos ? spec : spec.substr(pos + 2);
+  const std::vector<std::string> cands = {
+      dir + "/" + mod + ".lain",
+      dir + "/" + base + "/" + mod + ".lain",
+  };
+  for (const auto &c : cands) {
+    std::ifstream f(c);
+    if (f) return c;
+  }
+  return cands.empty() ? spec : cands.front();
+}
+
+static std::string readFileText(const std::string &filePath, DiagSink &diags) {
+  std::ifstream f(filePath);
+  if (!f) {
+    diags.error(Span{}, D::IoOpenFailed, "打不开导入模块: " + filePath);
+    return "";
+  }
+  return std::string((std::istreambuf_iterator<char>(f)),
+                     std::istreambuf_iterator<char>());
+}
+// 注意：返回的 AST 里的 token 文本是 string_view，指向 text —— 调用方必须让
+// text 活过 analyze / lower，否则类型名会变成悬垂指针（表现为乱码）。
+static ast::Module *parseModuleText(const std::string &filePath,
+                                    const std::string &text, DiagSink &diags) {
+  ast::AstArena *arena = new ast::AstArena();
+  std::vector<Token> toks = lex(0, text, diags);
+  if (diags.hasErrors()) return nullptr;
+  ast::Module *m = parseModule(toks, *arena, diags);
+  if (diags.hasErrors()) return nullptr;
+  return m;
+}
 
 // 顺序固定，索引即内建编号。
 constexpr uint32_t kBuiltinCount = 9;
@@ -159,6 +208,14 @@ TypeId TypeStore::resolve(const ast::TypeSyntax &ts, DiagSink &diags) const {
     if (enumIt != byName_.end()) {
       const AggregateLayout *lay = layout(enumIt->second);
       if (lay != nullptr && !lay->variants.empty()) return enumIt->second;
+    }
+    // 模块成员类型：import 时把被导入模块的类型（struct/enum）注册进了同一套
+    // TypeStore，名字是它原本的名字（如 Point / Shape），所以限定名 M.Point
+    // 退回裸名 Point 找。仅当 qualifier 本身是个已知类型（模块别名）时才退。
+    auto qualIt = byName_.find(std::string(ts.qualifier));
+    if (qualIt != byName_.end()) {
+      auto bareIt = byName_.find(std::string(ts.name));
+      if (bareIt != byName_.end()) return bareIt->second;
     }
     diags.error(ts.span, D::SemaUnknownType, "未知的限定类型: " + key);
     return kInvalidType;
@@ -415,7 +472,35 @@ private:
       const auto *im = static_cast<const ast::ImportDecl *>(d);
       ts_.addModuleType(im->name);
       out_.moduleMembers[std::string(im->name)] = ModuleMember{
-          ModuleMember::Kind::Type, im->name, ts_.builtin(im->name), im->path};
+          ModuleMember::Kind::Type, im->name, ts_.builtin(im->name),
+          std::string(im->path)};
+
+      // 真正加载被导入的模块：用同一套 TypeStore 跑 analyze，
+      // 它的 struct/enum 类型就注册进主 ts_（resolve 的回退能找到）；
+      // 顶层 let 当成值成员登记，供 M.answer 解析用。
+      const std::string dir = directoryOf(out_.sourcePath);
+      const std::string filePath =
+          resolveModulePath(dir, std::string(im->path));
+      const std::string imodText = readFileText(filePath, diags_);
+      ast::Module *imod = parseModuleText(filePath, imodText, diags_);
+      if (imod != nullptr) {
+        SemaResult isema;
+        if (analyze(*imod, ts_, isema, diags_)) {
+          // 用 isema.topLevelTypes 的 key（std::string，由 SemaResult 持有，不会悬垂），
+          // 不要用 sl->name —— 那是指向被导入源文本的 string_view，import 分支结束后
+          // 那段文本就释放了，拷出来是乱码（表现就是 #call 的目标名是 @() 或乱码）。
+          for (const auto &kv : isema.topLevelTypes) {
+            ModuleMember mm{};
+            mm.kind = ModuleMember::Kind::Value;
+            mm.type = kv.second;
+            mm.mangled = kv.first;  // 静态 let 的访问器过程名就是它自己
+            out_.moduleMembers[std::string(im->name) + "." + kv.first] = mm;
+            // 导入模块内部互引（twice = answer）需要把裸名登记成「可调用顶层 let」，
+            // 这样 lowerExpr 的 Name 分支会发 #call @answer 而不是 %answer。
+            out_.topLevelTypes[kv.first] = kv.second;
+          }
+        }
+      }
       break;
     }
     case ast::DeclKind::StaticLet:
@@ -669,8 +754,16 @@ private:
       return varTy;
     }
     case ast::ExprKind::Dotted: {
-      // p.x / M.answer / Shape.Circle：成员类型从聚合布局里查。
+      // p.x / M.answer：成员类型从聚合布局或模块成员表里查。
       const auto *d = static_cast<const ast::DottedExpr *>(e);
+      // 模块成员值访问：M.answer —— object 是模块别名，不要当普通名字去 typeOf
+      // （会报「未绑定的名字: M」），直接查 moduleMembers。
+      if (d->object && d->object->kind == ast::ExprKind::Name) {
+        const auto *en = static_cast<const ast::NameExpr *>(d->object);
+        auto it = out_.moduleMembers.find(std::string(en->name) + "." +
+                                          std::string(d->member));
+        if (it != out_.moduleMembers.end()) return it->second.type;
+      }
       (void)typeOf(d->object, kInvalidType);
       const TypeId objTy = typeOf(d->object, kInvalidType);
       if (objTy == kInvalidType) return kInvalidType;

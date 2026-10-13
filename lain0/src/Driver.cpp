@@ -474,6 +474,7 @@ CompileResult compileFile(const std::string &path, const CompileOptions &opts,
   TypeStore types;
   types.initBuiltins();
   SemaResult sema;
+  sema.sourcePath = std::string(path);
   if (!analyze(*mod, types, sema, diags)) {
     return r;
   }
@@ -489,6 +490,7 @@ CompileResult compileFile(const std::string &path, const CompileOptions &opts,
 
   LowerOptions lopts{};
   lopts.moduleName = moduleName.c_str();
+  lopts.sourcePath = path.c_str();
   Lowerer lower(builder, types, sema, src, diags, lopts);
   const L1Module *ir = lower.run(*mod);
   if (ir == nullptr || diags.hasErrors()) {

@@ -386,6 +386,21 @@ bool Lowerer::lowerConstructExpr(const ast::ConstructExpr *e, TypeId expectedTy,
 bool Lowerer::lowerDottedExpr(const ast::DottedExpr *e, TypeId expectedTy,
                               std::vector<const L1Inst *> &out,
                               L1Operand &value) {
+  // 模块成员值访问：M.answer（object 是模块别名，按 <alias>.<member> 查 moduleMembers）。
+  // 降级成对被导入模块访问器过程的调用：#call @answer()。
+  if (e->object && e->object->kind == ast::ExprKind::Name) {
+    const auto *en = static_cast<const ast::NameExpr *>(e->object);
+    auto memIt = sema_->moduleMembers.find(std::string(en->name) + "." +
+                                           std::string(e->member));
+    if (memIt != sema_->moduleMembers.end() &&
+        memIt->second.kind == ModuleMember::Kind::Value) {
+      const char *res = nextTemp();
+      out.push_back(lainir_inst_call(builder_, res,
+                                     intern(memIt->second.mangled.c_str()), nullptr, 0));
+      value = lainir_ref(res);
+      return true;
+    }
+  }
   // 聚合按地址传（docs/04：「聚合是参数，地址由调用方给」），
   // 所以字段 = load(obj + 字段偏移)。
   const TypeId objTy = typeOfExpr(*sema_, e->object, kInvalidType);

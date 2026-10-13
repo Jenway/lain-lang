@@ -55,7 +55,8 @@ struct ModuleMember {
   enum class Kind { Value, Type, Func } kind = Kind::Value;
   std::string_view name{};
   TypeId type = kInvalidType;
-  std::string_view mangled{}; // 值绑定：`<mod>__<name>` 的过程名
+  std::string mangled{}; // 值绑定：`<mod>__<name>` 的过程名（owning，因为登记时
+                         // 来自临时 SemaResult 的 key，不能留 string_view 悬垂）
 };
 
 class TypeStore {
@@ -136,6 +137,8 @@ struct SemaResult {
   std::unordered_map<std::string, uint64_t> topLevelLength{};
   // import 出来的模块成员：`<alias>.<member>` -> ModuleMember
   std::unordered_map<std::string, ModuleMember> moduleMembers{};
+  // 主源文件完整路径：import 解析被导入模块的相对路径要用到。
+  std::string sourcePath{};
 };
 
 bool analyze(const ast::Module &mod, TypeStore &ts, SemaResult &out,
