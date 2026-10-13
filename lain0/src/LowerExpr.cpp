@@ -113,6 +113,9 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
   case ast::ExprKind::Loop:
     return lowerLoopExpr(static_cast<const ast::LoopExpr *>(e), expectedTy, out,
                          value);
+  case ast::ExprKind::ValueIf:
+    return lowerValueIfExpr(static_cast<const ast::ValueIfExpr *>(e), expectedTy,
+                            out, value);
   case ast::ExprKind::For:
     return lowerForExpr(static_cast<const ast::ForExpr *>(e), expectedTy, out,
                         value);
@@ -147,6 +150,70 @@ bool Lowerer::lowerBinary(const ast::BinaryExpr *e, TypeId expectedTy,
   const char *res = nextTemp();
   L1Operand ops[2] = {lhs, rhs};
   out.push_back(lainir_inst(builder_, choice.kind, res, choice.operandTy, ops, 2));
+  value = lainir_ref(res);
+  return true;
+}
+
+bool Lowerer::lowerValueIfExpr(const ast::ValueIfExpr *e, TypeId expectedTy,
+                               std::vector<const L1Inst *> &out,
+                               L1Operand &value) {
+  if (expectedTy == kInvalidType) {
+    fail(e->span, D::SemaWidthUnknown,
+         "带值 if 的类型必须由期望类型给出（let x: T = if …）");
+    return false;
+  }
+  const L1Type *resultTy = types_->lain(expectedTy);
+  const L1Type *const results[1] = {resultTy};
+
+  L1Operand cond{};
+  if (!lowerExpr(e->cond, types_->builtin("bool"), out, cond)) return false;
+
+  // 分支体：逐条降级；最后一条若是裸表达式，它的值就是这一支的结果，
+  // 用 #yield 带出（区域声明了 1 个结果，每条路径都必须 yield）。
+  auto lowerBranch = [&](const std::vector<ast::Stmt *> &body,
+                         std::vector<const L1Inst *> &insts) -> bool {
+    for (size_t i = 0; i < body.size(); ++i) {
+      ast::Stmt *s = body[i];
+      if (!s) continue;
+      const bool last = (i + 1 == body.size());
+      if (last && s->kind == ast::StmtKind::ExprStmt) {
+        const auto *es = static_cast<const ast::ExprStmt *>(s);
+        L1Operand v{};
+        if (!lowerExpr(es->expr, expectedTy, insts, v)) return false;
+        L1Operand y[1] = {v};
+        insts.push_back(lainir_inst_jump(builder_, INST_YIELD, nullptr, y, 1));
+        return true;
+      }
+      bool term = false;
+      if (!lowerStmt(s, insts, expectedTy, term)) return false;
+    }
+    // 分支里没有可用的值：补一个该类型的零值。
+    L1Operand z[1] = {lainir_int(0)};
+    insts.push_back(lainir_inst_jump(builder_, INST_YIELD, nullptr, z, 1));
+    return true;
+  };
+
+  std::vector<const L1Inst *> thenInsts;
+  std::vector<const L1Inst *> elseInsts;
+  if (!lowerBranch(e->thenBody, thenInsts)) return false;
+  if (e->hasElse) {
+    if (!lowerBranch(e->elseBody, elseInsts)) return false;
+  } else {
+    L1Operand z[1] = {lainir_int(0)};
+    elseInsts.push_back(lainir_inst_jump(builder_, INST_YIELD, nullptr, z, 1));
+  }
+
+  const L1Region *thenRegion = lainir_region(
+      builder_, nullptr, 0, results, 1,
+      thenInsts.empty() ? nullptr : thenInsts.data(),
+      static_cast<uint32_t>(thenInsts.size()));
+  const L1Region *elseRegion = lainir_region(
+      builder_, nullptr, 0, results, 1,
+      elseInsts.empty() ? nullptr : elseInsts.data(),
+      static_cast<uint32_t>(elseInsts.size()));
+
+  const char *res = nextTemp();
+  out.push_back(lainir_inst_if(builder_, res, cond, thenRegion, elseRegion));
   value = lainir_ref(res);
   return true;
 }

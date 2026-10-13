@@ -80,6 +80,8 @@ public:
                     std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerForExpr(const ast::ForExpr *e, TypeId expectedTy,
                     std::vector<const L1Inst *> &out, L1Operand &value);
+  bool lowerValueIfExpr(const ast::ValueIfExpr *e, TypeId expectedTy,
+                        std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerAddressArithmetic(const ast::BinaryExpr *e, TypeId expectedTy,
                               std::vector<const L1Inst *> &out,
                               L1Operand &value);
