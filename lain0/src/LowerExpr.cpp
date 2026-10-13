@@ -515,7 +515,14 @@ bool Lowerer::lowerCall(const ast::CallExpr *e, TypeId expectedTy,
     args.push_back(op);
   }
 
-  const L1Type *retTy = expectedTy != kInvalidType ? types_->lain(expectedTy) : nullptr;
+  // 聚合（struct/enum）按地址返回：lain() 对它返回 nullptr，这里必须退回
+  // #addr，否则 #call 就没有结果（验证器报 2020 defines 0 result(s)）。
+  // 与 signatureTypeOf 同一条规则。
+  const L1Type *retTy = nullptr;
+  if (expectedTy != kInvalidType) {
+    retTy = types_->lain(expectedTy);
+    if (retTy == nullptr) retTy = lainir_type(builder_, TY_ADDR, 0);
+  }
   const char *res = retTy ? nextTemp() : nullptr;
   const L1Inst *call =
       tail ? lainir_inst_call_ex(builder_, res, intern(n->name),
