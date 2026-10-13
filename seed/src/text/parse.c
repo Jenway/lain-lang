@@ -521,13 +521,33 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
   const L1Type *ty = NULL;
   L1MemOrder order = ORDER_RELAXED;
   bool is_volatile = false;
+  bool is_tail = false;
   const char *symbol = NULL;
   L1Inst *inst;
 
   skip(p);
   if (kind == INST_CALL) {
+    /* #call 的方括号里可能是 [tail]，也可能是值形式调用的签名 [(sig)]。 */
+    if (cur(p) == '[') {
+      p->pos++;
+      p->column++;
+      skip(p);
+      if (at_word(p, "tail")) {
+        p->pos += 4;
+        p->column += 4;
+        is_tail = true;
+        skip(p);
+      }
+      while (cur(p) && cur(p) != ']') {
+        p->pos++;
+        p->column++;
+      }
+      if (!expect(p, ']', "to end the call attribute")) return false;
+      skip(p);
+    }
     char callee[128];
-    if (cur(p) == '@') skip(p);
+    /* 注意：skip() 只吃空白/注释，不能用它来吃掉 '@' —— 必须用 advance()。 */
+    if (cur(p) == '@') advance(p);
     if (!ident(p, callee, sizeof(callee))) return false;
     symbol = lainir_builder_string(p->builder, callee);
   }
@@ -604,6 +624,7 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
   if (!inst) return fail(p, LAINPARSE_ERR_BUILD, "cannot build the instruction");
   set_results(inst, names, name_count);
   if (is_volatile) inst->is_volatile = true;
+  if (is_tail) inst->is_tail = true;
   inst->order = order;
   inst->line = p->line;
   inst->column = p->column;

@@ -570,6 +570,8 @@ bool roundTripCheck(std::string_view text, int &outCode, std::string &outMsg) {
       outMsg += ": ";
       outMsg += diag.message;
     }
+    outMsg += " @line " + std::to_string(diag.line) + " col " +
+              std::to_string(diag.column);
     lainir_builder_free(builder);
     return false;
   }

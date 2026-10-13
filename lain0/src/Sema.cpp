@@ -237,7 +237,8 @@ bool selectBinary(ast::BinOp op, TypeId operandTy, const TypeStore &ts,
   case ast::BinOp::Div: out.kind = signedOp ? INST_SDIV : INST_UDIV; break;
   case ast::BinOp::Rem: out.kind = signedOp ? INST_SREM : INST_UREM; break;
   case ast::BinOp::Shl: out.kind = INST_SHL; break;
-  case ast::BinOp::Shr: out.kind = INST_LSHR; break;
+  // 右移按操作数的符号性选：有符号走算术右移（符号扩展），无符号走逻辑右移。
+  case ast::BinOp::Shr: out.kind = signedOp ? INST_ASHR : INST_LSHR; break;
   case ast::BinOp::BitAnd: out.kind = INST_AND; break;
   case ast::BinOp::BitOr: out.kind = INST_OR; break;
   case ast::BinOp::BitXor: out.kind = INST_XOR; break;
