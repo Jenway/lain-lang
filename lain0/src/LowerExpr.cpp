@@ -121,6 +121,9 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
   case ast::ExprKind::Loop:
     return lowerLoopExpr(static_cast<const ast::LoopExpr *>(e), expectedTy, out,
                          value);
+  case ast::ExprKind::Construct:
+    return lowerConstructExpr(static_cast<const ast::ConstructExpr *>(e),
+                              expectedTy, out, value);
   case ast::ExprKind::Dotted:
     return lowerDottedExpr(static_cast<const ast::DottedExpr *>(e), expectedTy,
                            out, value);
@@ -165,6 +168,64 @@ bool Lowerer::lowerBinary(const ast::BinaryExpr *e, TypeId expectedTy,
   L1Operand ops[2] = {lhs, rhs};
   out.push_back(lainir_inst(builder_, choice.kind, res, choice.operandTy, ops, 2));
   value = lainir_ref(res);
+  return true;
+}
+
+bool Lowerer::lowerConstructExpr(const ast::ConstructExpr *e, TypeId expectedTy,
+                                 std::vector<const L1Inst *> &out,
+                                 L1Operand &value) {
+  TypeId structTy = expectedTy;
+  if (structTy == kInvalidType)
+    structTy = types_->resolve(e->target, *diags_);
+  if (structTy == kInvalidType) {
+    fail(e->span, D::LowerUnsupported, "构造的目标类型取不到");
+    return false;
+  }
+  const AggregateLayout *lay = types_->layout(structTy);
+  if (lay == nullptr) {
+    fail(e->span, D::LowerUnsupported, "构造的目标不是聚合");
+    return false;
+  }
+
+  // 函数体里的构造从栈上划一块：#alloca[#bits<8>](size)
+  // （docs/04 —— 构造出来的地址只在本帧内有效）
+  const L1Type *sizeTy = types_->lain(types_->builtin("u8"));
+  L1Operand count = lainir_int(lay->size);
+  const char *objName = nextTemp();
+  out.push_back(lainir_inst_mem(builder_, INST_ALLOCA, objName, sizeTy,
+                                ORDER_RELAXED, false, &count, 1));
+
+  const L1Type *addrTy = types_->lain(types_->builtin("addr"));
+  for (const ast::FieldInit &f : e->fields) {
+    uint32_t offset = 0;
+    TypeId fieldTy = kInvalidType;
+    for (const FieldLayout &fl : lay->fields) {
+      if (fl.name == f.name) {
+        offset = fl.offset;
+        fieldTy = fl.type;
+        break;
+      }
+    }
+    if (fieldTy == kInvalidType) {
+      fail(f.span, D::LowerUnsupported,
+           std::string("聚合没有成员 ") + std::string(f.name));
+      return false;
+    }
+    L1Operand leaOps[4] = {lainir_ref(objName), lainir_int(0), lainir_int(1),
+                           lainir_int(offset)};
+    const char *fieldAddr = nextTemp();
+    out.push_back(lainir_inst(builder_, INST_LEA, fieldAddr, addrTy, leaOps, 4));
+
+    L1Operand val{};
+    if (!lowerExpr(f.value, fieldTy, out, val)) return false;
+    // #store takes value, destination —— 值在前、地址在后（顺序反了验证器报 2005）
+    L1Operand storeOps[2] = {val, lainir_ref(fieldAddr)};
+    out.push_back(lainir_inst_mem(builder_, INST_STORE, nullptr,
+                                  types_->lain(fieldTy), ORDER_RELAXED, false,
+                                  storeOps, 2));
+  }
+
+  value = lainir_ref(objName);
   return true;
 }
 
