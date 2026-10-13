@@ -68,7 +68,19 @@ bool Lowerer::lowerStmt(const ast::Stmt *s, std::vector<const L1Inst *> &out,
            static_cast<const ast::NameExpr *>(callee)->name == "ptr_of" ||
            static_cast<const ast::NameExpr *>(callee)->name == "addr_of" ||
            static_cast<const ast::NameExpr *>(callee)->name == "len");
-      if (!builtinCall &&
+      // 投影 Shape.Circle(s) 长得像调用，但它不是过程调用 —— 不能走尾调用。
+      bool projectionCall = false;
+      if (callee != nullptr && callee->kind == ast::ExprKind::Dotted) {
+        const auto *d = static_cast<const ast::DottedExpr *>(callee);
+        if (d->object != nullptr && d->object->kind == ast::ExprKind::Name) {
+          const auto *en = static_cast<const ast::NameExpr *>(d->object);
+          const TypeId enumTy = types_->lookup(en->name);
+          const AggregateLayout *elay =
+              enumTy != kInvalidType ? types_->layout(enumTy) : nullptr;
+          projectionCall = elay != nullptr && !elay->variants.empty();
+        }
+      }
+      if (!builtinCall && !projectionCall &&
           lowerCall(ce, returnType, out, value, /*tail=*/true)) {
         out.push_back(lainir_inst_jump(builder_, INST_RETURN, nullptr, &value, 1));
         terminated = true;
