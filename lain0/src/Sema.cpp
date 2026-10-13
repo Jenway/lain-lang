@@ -104,6 +104,11 @@ TypeId TypeStore::addEnum(std::string_view name, AggregateLayout layout) {
   return id;
 }
 
+TypeId TypeStore::lookup(std::string_view name) const {
+  auto it = byName_.find(std::string(name));
+  return it == byName_.end() ? kInvalidType : it->second;
+}
+
 TypeId TypeStore::elementOf(TypeId id) const {
   if (id == kInvalidType || id > entries_.size()) return kInvalidType;
   return entries_[id - 1].element;
@@ -147,11 +152,16 @@ TypeId TypeStore::resolve(const ast::TypeSyntax &ts, DiagSink &diags) const {
     // 限定名（M.Point）目前只支持「已登记的模块成员类型」，其余报未知。
     std::string key = std::string(ts.qualifier) + "." + std::string(ts.name);
     auto it = byName_.find(key);
-    if (it == byName_.end()) {
-      diags.error(ts.span, D::SemaUnknownType, "未知的限定类型: " + key);
-      return kInvalidType;
+    if (it != byName_.end()) return it->second;
+    // `Shape.Circle` 这种「enum 名.变体名」：变体构造的目标类型就是那个 enum
+    // 本身（Circle 是 Shape 的一个变体，不是独立类型）。
+    auto enumIt = byName_.find(std::string(ts.qualifier));
+    if (enumIt != byName_.end()) {
+      const AggregateLayout *lay = layout(enumIt->second);
+      if (lay != nullptr && !lay->variants.empty()) return enumIt->second;
     }
-    return it->second;
+    diags.error(ts.span, D::SemaUnknownType, "未知的限定类型: " + key);
+    return kInvalidType;
   }
 
   std::string key(ts.name);

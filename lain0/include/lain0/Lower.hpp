@@ -88,6 +88,9 @@ public:
                        std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerConstructExpr(const ast::ConstructExpr *e, TypeId expectedTy,
                           std::vector<const L1Inst *> &out, L1Operand &value);
+  bool lowerProjection(const ast::CallExpr *e, std::string_view variantName,
+                       const AggregateLayout *lay, TypeId expectedTy,
+                       std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerAddressArithmetic(const ast::BinaryExpr *e, TypeId expectedTy,
                               std::vector<const L1Inst *> &out,
                               L1Operand &value);

@@ -69,6 +69,8 @@ public:
   TypeId addStruct(std::string_view name, AggregateLayout layout);
   TypeId addEnum(std::string_view name, AggregateLayout layout);
   // 数组类型可能被重复解析，登记是幂等的；resolve 是 const，所以这个也必须是。
+  // 按名字查已登记的类型（enum 名 / struct 名）；没有返回 kInvalidType。
+  TypeId lookup(std::string_view name) const;
   // 数组的元素类型（取不到返回 kInvalidType）。
   TypeId elementOf(TypeId id) const;
   TypeId addArrayOf(TypeId element, bool isRo) const;

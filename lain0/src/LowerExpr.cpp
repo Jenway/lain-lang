@@ -116,6 +116,19 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
         return lowerBuiltin(c, n->name, expectedTy, out, value);
       }
     }
+    // Shape.Circle(s) 这种「enum 变体投影」：callee 是限定名，不是过程。
+    // 判别 tag，命中才读载荷，不命中回 0。
+    if (c->callee && c->callee->kind == ast::ExprKind::Dotted) {
+      const auto *d = static_cast<const ast::DottedExpr *>(c->callee);
+      if (d->object && d->object->kind == ast::ExprKind::Name) {
+        const auto *en = static_cast<const ast::NameExpr *>(d->object);
+        const TypeId enumTy = types_->lookup(en->name);
+        const AggregateLayout *elay =
+            enumTy != kInvalidType ? types_->layout(enumTy) : nullptr;
+        if (elay != nullptr && !elay->variants.empty())
+          return lowerProjection(c, d->member, elay, expectedTy, out, value);
+      }
+    }
     return lowerCall(c, expectedTy, out, value);
   }
   case ast::ExprKind::Loop:
@@ -171,9 +184,150 @@ bool Lowerer::lowerBinary(const ast::BinaryExpr *e, TypeId expectedTy,
   return true;
 }
 
+bool Lowerer::lowerProjection(const ast::CallExpr *e,
+                              std::string_view variantName,
+                              const AggregateLayout *lay, TypeId expectedTy,
+                              std::vector<const L1Inst *> &out,
+                              L1Operand &value) {
+  const VariantLayout *vl = nullptr;
+  for (const VariantLayout &v : lay->variants) {
+    if (v.name == variantName) {
+      vl = &v;
+      break;
+    }
+  }
+  if (vl == nullptr) {
+    fail(e->span, D::LowerUnsupported,
+         std::string("enum 没有变体 ") + std::string(variantName));
+    return false;
+  }
+  if (e->args.size() != 1 || e->args[0] == nullptr) {
+    fail(e->span, D::LowerUnsupported, "投影需要一个实参（被判别的值）");
+    return false;
+  }
+
+  const TypeId payloadTy =
+      vl->payload != kInvalidType ? vl->payload : expectedTy;
+  if (payloadTy == kInvalidType) {
+    fail(e->span, D::SemaWidthUnknown, "投影的载荷类型取不到");
+    return false;
+  }
+  const L1Type *resTy = types_->lain(payloadTy);
+  const L1Type *const results[1] = {resTy};
+  const L1Type *addrTy = types_->lain(types_->builtin("addr"));
+  const L1Type *tagTy = types_->lain(types_->builtin("u8"));
+
+  // 被判别的对象：enum 按地址传
+  L1Operand obj{};
+  if (!lowerExpr(e->args[0], types_->builtin("addr"), out, obj)) return false;
+
+  // tag = #load[#bits<8>](%obj)（tag 在 offset 0）
+  L1Operand objOp = obj;
+  const char *tagName = nextTemp();
+  out.push_back(lainir_inst_mem(builder_, INST_LOAD, tagName, tagTy,
+                                ORDER_RELAXED, false, &objOp, 1));
+
+  // hit = tag == 变体的 tag（tag 是 #bits<8>，比较指令的 ty 取操作数宽度）
+  L1Operand cmpOps[2] = {lainir_ref(tagName), lainir_int(vl->tag)};
+  const char *hitName = nextTemp();
+  out.push_back(lainir_inst(builder_, INST_EQ, hitName, tagTy, cmpOps, 2));
+
+  // 命中：读载荷；不命中：0
+  std::vector<const L1Inst *> thenInsts;
+  if (vl->payload != kInvalidType) {
+    L1Operand leaOps[4] = {obj, lainir_int(0), lainir_int(1),
+                           lainir_int(vl->payloadOffset)};
+    const char *payloadAddr = nextTemp();
+    thenInsts.push_back(
+        lainir_inst(builder_, INST_LEA, payloadAddr, addrTy, leaOps, 4));
+    L1Operand ptr = lainir_ref(payloadAddr);
+    const char *pv = nextTemp();
+    thenInsts.push_back(lainir_inst_mem(builder_, INST_LOAD, pv, resTy,
+                                        ORDER_RELAXED, false, &ptr, 1));
+    L1Operand y[1] = {lainir_ref(pv)};
+    thenInsts.push_back(lainir_inst_jump(builder_, INST_YIELD, nullptr, y, 1));
+  } else {
+    L1Operand y[1] = {lainir_int(0)};
+    thenInsts.push_back(lainir_inst_jump(builder_, INST_YIELD, nullptr, y, 1));
+  }
+
+  std::vector<const L1Inst *> elseInsts;
+  L1Operand zero[1] = {lainir_int(0)};
+  elseInsts.push_back(lainir_inst_jump(builder_, INST_YIELD, nullptr, zero, 1));
+
+  const L1Region *thenRegion =
+      lainir_region(builder_, nullptr, 0, results, 1, thenInsts.data(),
+                    static_cast<uint32_t>(thenInsts.size()));
+  const L1Region *elseRegion =
+      lainir_region(builder_, nullptr, 0, results, 1, elseInsts.data(),
+                    static_cast<uint32_t>(elseInsts.size()));
+
+  const char *res = nextTemp();
+  out.push_back(lainir_inst_if(builder_, res, lainir_ref(hitName), thenRegion,
+                               elseRegion));
+  value = lainir_ref(res);
+  return true;
+}
+
 bool Lowerer::lowerConstructExpr(const ast::ConstructExpr *e, TypeId expectedTy,
                                  std::vector<const L1Inst *> &out,
                                  L1Operand &value) {
+  // --- 变体构造：Shape.Circle { 载荷 } ---
+  // 布局是「tag 在前（1 字节，offset 0），载荷在 payloadOffset」。
+  if (e->target.hasQualifier) {
+    const TypeId enumTy = types_->resolve(e->target, *diags_);
+    if (enumTy == kInvalidType) {
+      fail(e->span, D::LowerUnsupported, "变体构造的 enum 类型取不到");
+      return false;
+    }
+    const AggregateLayout *elay = types_->layout(enumTy);
+    if (elay == nullptr) {
+      fail(e->span, D::LowerUnsupported, "变体构造的目标不是 enum");
+      return false;
+    }
+    const VariantLayout *vl = nullptr;
+    for (const VariantLayout &v : elay->variants) {
+      if (v.name == e->target.name) {
+        vl = &v;
+        break;
+      }
+    }
+    if (vl == nullptr) {
+      fail(e->span, D::LowerUnsupported,
+           std::string("enum 没有变体 ") + std::string(e->target.name));
+      return false;
+    }
+
+    const L1Type *addrTy = types_->lain(types_->builtin("addr"));
+    const L1Type *tagTy = types_->lain(types_->builtin("u8"));
+    L1Operand count = lainir_int(elay->size);
+    const char *objName = nextTemp();
+    out.push_back(lainir_inst_mem(builder_, INST_ALLOCA, objName, tagTy,
+                                  ORDER_RELAXED, false, &count, 1));
+
+    // tag：store 到 offset 0（#store 是「值, 地址」）
+    L1Operand tagOps[2] = {lainir_int(vl->tag), lainir_ref(objName)};
+    out.push_back(lainir_inst_mem(builder_, INST_STORE, nullptr, tagTy,
+                                  ORDER_RELAXED, false, tagOps, 2));
+
+    if (vl->payload != kInvalidType && !e->fields.empty()) {
+      L1Operand leaOps[4] = {lainir_ref(objName), lainir_int(0), lainir_int(1),
+                             lainir_int(vl->payloadOffset)};
+      const char *payloadAddr = nextTemp();
+      out.push_back(
+          lainir_inst(builder_, INST_LEA, payloadAddr, addrTy, leaOps, 4));
+      L1Operand val{};
+      if (!lowerExpr(e->fields[0].value, vl->payload, out, val)) return false;
+      L1Operand storeOps[2] = {val, lainir_ref(payloadAddr)};
+      out.push_back(lainir_inst_mem(builder_, INST_STORE, nullptr,
+                                    types_->lain(vl->payload), ORDER_RELAXED,
+                                    false, storeOps, 2));
+    }
+
+    value = lainir_ref(objName);
+    return true;
+  }
+
   TypeId structTy = expectedTy;
   if (structTy == kInvalidType)
     structTy = types_->resolve(e->target, *diags_);
