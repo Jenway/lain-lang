@@ -294,8 +294,8 @@ bool selectBinary(ast::BinOp op, TypeId operandTy, const TypeStore &ts,
   if (!ts.isBits(operandTy)) return false; // addr / 聚合 / 数组没有算子
 
   const uint32_t width = ts.width(operandTy);
-  // i8 / u8 只作 load/store 宽度，不绑定任何算子。
-  if (width == 8) return false;
+  // i8 / u8 现在也支持算术/比较：直接落到与操作数同宽度的 #add/#eq/… 指令上
+  // （LAINIR 的算子只认物理宽度，8-bit 同宽运算和比较都是合法的）。
 
   const bool signedOp = ts.signedness(operandTy);
   const L1Type *operand = ts.lain(operandTy);

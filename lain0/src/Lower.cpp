@@ -21,6 +21,7 @@ const L1Module *Lowerer::run(const ast::Module &mod) {
   data_.clear();
   subs_.clear();
   tempCounter_ = 0;
+  strlitCounter_ = 0;
 
   for (const ast::Decl *d : mod.decls) {
     if (!lowerDecl(d)) return nullptr;

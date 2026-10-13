@@ -149,6 +149,36 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
   case ast::ExprKind::For:
     return lowerForExpr(static_cast<const ast::ForExpr *>(e), expectedTy, out,
                         value);
+  case ast::ExprKind::StrLit: {
+    const auto *sl = static_cast<const ast::StrLitExpr *>(e);
+    std::vector<uint8_t> bytes(sl->rawText.begin(), sl->rawText.end());
+    // 内联字符串字面量：在模块级发一个只读 data 块 + 取址过程，调用它拿 #addr。
+    // （顶层 `let x = "..."` 走 lowerStaticLet 的同款机制；这里是表达式位置的内联形态。）
+    const std::string storageName =
+        std::string("strlit_") + std::to_string(strlitCounter_++);
+    const char *symbol = intern(storageName);
+    const char *procName = intern(storageName);  // 取址过程名 = 存储名
+    const L1Data *block = lainir_data(
+        builder_, symbol, bytes.empty() ? nullptr : bytes.data(),
+        static_cast<uint32_t>(bytes.size()), false);
+    if (block == nullptr) {
+      fail(e->span, D::LowerUnsupported, "字符串常量块构造失败");
+      return false;
+    }
+    data_.push_back(*block);
+    const L1Subroutine *accessor =
+        buildAccessor(builder_, procName, symbol, intern("base"), {},
+                     lineOf(e->span), columnOf(e->span));
+    if (accessor == nullptr) {
+      fail(e->span, D::LowerUnsupported, "字符串取址过程构造失败");
+      return false;
+    }
+    subs_.push_back(*accessor);
+    const char *res = nextTemp();
+    out.push_back(lainir_inst_call(builder_, res, procName, nullptr, 0));
+    value = lainir_ref(res);
+    return true;
+  }
   default:
     fail(e->span, D::LowerUnsupported, "这个表达式形态还没实现降级");
     return false;

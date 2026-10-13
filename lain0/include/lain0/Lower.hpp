@@ -30,6 +30,17 @@ struct LowerOptions {
   const char *tempPrefix = "r";
 };
 
+// 顶层静态块 / 字符串字面量共用的取址机制：data 符号本身即地址，
+// 用 #bitcast[#addr] 包住符号引用即得 #addr；buildAccessor 再包一层
+// `#proc NAME() -> #addr { %base = #bitcast[#addr](%SYMBOL); #return %base }`。
+// 这两个是 LowerDecl.cpp 里的自由函数，LowerExpr 降级内联字符串时也要用，故在此声明。
+const L1Inst *emitDataAddr(L1Builder *builder, const char *result,
+                           const char *symbol, uint32_t line, uint32_t column);
+const L1Subroutine *buildAccessor(L1Builder *builder, const char *procName,
+                                 const char *symbol, const char *baseName,
+                                 const std::vector<const L1Inst *> &extra,
+                                 uint32_t line, uint32_t column);
+
 class Lowerer {
 public:
   Lowerer(L1Builder *builder, const TypeStore &types, const SemaResult &sema,
@@ -119,6 +130,7 @@ private:
   // 那个新值必须靠 #if 带结果合并出来——分支内定义的值在外层是看不见的。
   std::vector<std::pair<std::string, const L1Type *>> loopParams_{};
   uint32_t tempCounter_ = 0;
+  uint32_t strlitCounter_ = 0;  // 内联字符串字面量的唯一存储名计数器
   std::vector<L1Data> data_{};
   std::vector<L1Subroutine> subs_{};
 };

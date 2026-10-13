@@ -57,6 +57,8 @@ const L1Inst *emitMem(L1Builder *builder, L1InstKind kind, const char *result,
   return inst;
 }
 
+} // namespace（匿名辅助：bytesOf/stamp/emit/emitMem）
+
 const L1Inst *emitDataAddr(L1Builder *builder, const char *result,
                            const char *symbol, uint32_t line, uint32_t column) {
   // D-002：数据符号本身就是地址；用 #bitcast[#addr] 包住对符号的引用即得地址。
@@ -90,6 +92,8 @@ const L1Subroutine *buildAccessor(L1Builder *builder, const char *procName,
   const L1Type *results[1] = {addrTy};
   return lainir_subroutine(builder, procName, nullptr, 0, results, 1, body);
 }
+
+namespace {  // 恢复匿名：constInt / putLittleEndian 等内部辅助
 
 // 常量折叠：只认整数字面量、布尔字面量与「负号 + 字面量」。
 // 顶层静态块的字节必须在降级时就定下来，算不出来的字段改走过程里的 store。
