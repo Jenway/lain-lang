@@ -28,13 +28,17 @@ AST 节点、用循环遍历、用字符串处理源码——lain0 少一个特�
 
 ### 进度
 
-**20 / 31**
+**31 / 31** ✅ 全部通过（含 `--round-trip`）
+
+剩的 11 项（T1–T5）全部收掉：表索引、聚合字段访问与构造、enum 变体构造与投影、
+类型转换、指针 addr↔bits、模块加载（import 真正加载被导入模块）。
 
 已通过：
 ```
-arith bits bytes choose convert extern flow hex if_default jumps
-local_type loop loop_if loop_local loop_value memory neg ops
-value_if widths
+arith bits bytes cast choose convert extern field_expr field_value flow hex
+if_default jumps local_type locals loop loop_if loop_local loop_value memory
+modules_lib modules_main neg ops pointer projection table types value_if
+variant_local widths
 ```
 
 已覆盖的能力：标量运算与多宽度、字面量（十进制/0x/负号）、类型转换、
@@ -136,3 +140,22 @@ bash scripts/regress.sh --round-trip   # 两道都跑 ← 以这个为准
 - commit 前 `git status --short`：后台/并行 agent 曾改过文件，`git restore -- <file>`
 - LF→CRLF 警告是噪音，忽略
 - 遇网络导致 push 失败先重试（SSH 认证是好的，多是临时连接重置）
+
+## 语言扩展（feat 后续的增量，已落地）
+
+stage 1 的 31 样例全绿后，按用户要求补的语言特性（均过 `--round-trip` 回归）：
+
+1. **u8 / i8 比较与算术**：放开 `selectBinary` 的 `width==8` 闸门（Sema.cpp）。
+   样例 `u8math.lain`。
+2. **字符串字面量内联形态**：表达式位置的 `"..."` 在模块级发 `data` 块 + 取址过程，
+   调用它拿 `#addr`（复用 LowerDecl 的 `buildAccessor`/`emitDataAddr`，已从匿名命名空间
+   提到 `ln::` 以便跨编译单元复用）。样例 `strinline.lain`。
+3. **ref / mut ref / slice 类型体系**（用户「不要 ptr，要 ref/mut ref/slice/addr」）：
+   - `ref T` / `mut ref T` → LAINIR 即 `#addr`，附 pointee 类型；`load` 读、store 写 mut ref。
+   - `slice T` → `(addr base, u64 len)` 2 字段聚合。
+   - 内建 `ref_of` / `mut_ref_of`（值 bitcast 成 #addr）、`slice_of(base, n)`（栈上 16 字节结构）。
+   - 关键字 ref/mut/slice；TypeStore 加 Ref/Slice 两种 Entry::K。
+   - 样例 `refs.lain`。
+   - **未做（下一增量）**：slice 的 `.ptr`/`.len` 字段访问与 `s[i]` 索引（构造与返回已通）。
+
+回归：31 -> 34（arith…refs，含 --round-trip）。
