@@ -191,12 +191,55 @@ TypeId TypeStore::addModuleType(std::string_view moduleAlias) {
   return id;
 }
 
+TypeId TypeStore::addRef(TypeId pointee, bool isMutable) const {
+  // ref / mut ref 的 LAINIR 形态就是 #addr，与内建 addr 共用那条 L1Type。
+  Entry e{};
+  e.name = std::string(isMutable ? "mut ref " : "ref ") +
+           std::string(name(pointee));
+  TypeId addrId = builtin("addr");
+  e.lain = addrId != kInvalidType ? entries_[addrId - 1].lain : nullptr;
+  e.k = Entry::K::Ref;
+  e.element = pointee;
+  e.refMutable = isMutable;
+  entries_.push_back(e);
+  return static_cast<TypeId>(entries_.size());
+}
+
+TypeId TypeStore::addSlice(TypeId element) const {
+  // slice T -> (addr base, u64 len) 的 2 字段聚合。
+  Entry e{};
+  e.name = std::string("slice ") + std::string(name(element));
+  e.lain = nullptr;
+  e.k = Entry::K::Slice;
+  e.element = element;
+  AggregateLayout lay{};
+  FieldLayout base{"ptr", builtin("addr"), 0};
+  FieldLayout len{"len", builtin("u64"), 8};
+  lay.fields.push_back(base);
+  lay.fields.push_back(len);
+  lay.size = 16;
+  lay.align = 8;
+  e.layout = std::move(lay);
+  entries_.push_back(e);
+  return static_cast<TypeId>(entries_.size());
+}
+
 TypeId TypeStore::resolve(const ast::TypeSyntax &ts, DiagSink &diags) const {
   if (!ts.valid()) {
     diags.error(ts.span, D::SemaUnknownType, "类型标注缺失");
     return kInvalidType;
   }
 
+  if (ts.ptrKind != ast::TypeSyntax::PtrKind::None) {
+    if (ts.inner == nullptr) {
+      diags.error(ts.span, D::SemaUnknownType, "引用/切片类型缺少内层类型");
+      return kInvalidType;
+    }
+    TypeId inner = resolve(*ts.inner, diags);
+    if (inner == kInvalidType) return kInvalidType;
+    if (ts.ptrKind == ast::TypeSyntax::PtrKind::Slice) return addSlice(inner);
+    return addRef(inner, ts.ptrKind == ast::TypeSyntax::PtrKind::MutRef);
+  }
   if (ts.hasQualifier) {
     // 限定名（M.Point）目前只支持「已登记的模块成员类型」，其余报未知。
     std::string key = std::string(ts.qualifier) + "." + std::string(ts.name);
@@ -244,7 +287,8 @@ const L1Type *TypeStore::lain(TypeId id) const {
 bool TypeStore::isAggregate(TypeId id) const {
   if (id == kInvalidType || id > entries_.size()) return false;
   const Entry &e = entries_[id - 1];
-  return e.k == Entry::K::Struct || e.k == Entry::K::Enum;
+  return e.k == Entry::K::Struct || e.k == Entry::K::Enum ||
+         e.k == Entry::K::Slice;
 }
 
 bool TypeStore::isModuleMemberType(TypeId id) const {
@@ -254,7 +298,8 @@ bool TypeStore::isModuleMemberType(TypeId id) const {
 
 bool TypeStore::isAddr(TypeId id) const {
   if (id == kInvalidType || id > entries_.size()) return false;
-  return entries_[id - 1].k == Entry::K::Addr;
+  const Entry::K k = entries_[id - 1].k;
+  return k == Entry::K::Addr || k == Entry::K::Ref;
 }
 
 bool TypeStore::isBits(TypeId id) const {

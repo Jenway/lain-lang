@@ -25,6 +25,7 @@ struct Node {
 // 表面语言写在源码里的类型标注。降级前由 Sema 解析成 TypeId。
 // 覆盖：`i32`、`addr`、`Point`、`M.Point`、`[u64]`、`ro [u8]`。
 struct TypeSyntax {
+  enum class PtrKind { None, Ref, MutRef, Slice } ptrKind = PtrKind::None;
   Span span{};
   std::string_view name{};       // 最后一个标识符（`M.Point` 只存 `Point`）
   bool hasQualifier = false;     // 是否写了限定名
@@ -32,7 +33,8 @@ struct TypeSyntax {
   bool isArray = false;          // `[T]`
   bool isRo = false;             // `ro [T]`
   TypeSyntax *element = nullptr; // 数组元素类型；非数组时为 nullptr
-  bool valid() const { return !name.empty(); }
+  TypeSyntax *inner = nullptr;   // ref/mut ref/slice 的内层类型（pointee/element）
+  bool valid() const { return !name.empty() || ptrKind != PtrKind::None; }
 };
 
 // ---------------- 表达式 ----------------

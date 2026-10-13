@@ -228,6 +228,33 @@ private:
     const Span start = current().span;
     const bool isRo = match(Tok::KwRo);
 
+    // 引用 / 切片类型：ref T / mut ref T / slice T。
+    if (match(Tok::KwRef)) {
+      ast::TypeSyntax inner;
+      if (!parseType(inner)) return false;
+      type.span = joinSpans(start, previous().span);
+      type.ptrKind = ast::TypeSyntax::PtrKind::Ref;
+      type.inner = storeType(std::move(inner));
+      return true;
+    }
+    if (match(Tok::KwMut)) {
+      if (!expect(Tok::KwRef, "'ref'")) return false;
+      ast::TypeSyntax inner;
+      if (!parseType(inner)) return false;
+      type.span = joinSpans(start, previous().span);
+      type.ptrKind = ast::TypeSyntax::PtrKind::MutRef;
+      type.inner = storeType(std::move(inner));
+      return true;
+    }
+    if (match(Tok::KwSlice)) {
+      ast::TypeSyntax inner;
+      if (!parseType(inner)) return false;
+      type.span = joinSpans(start, previous().span);
+      type.ptrKind = ast::TypeSyntax::PtrKind::Slice;
+      type.inner = storeType(std::move(inner));
+      return true;
+    }
+
     if (match(Tok::LBracket)) {
       ast::TypeSyntax element;
       if (!parseType(element)) {

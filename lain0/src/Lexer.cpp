@@ -45,7 +45,8 @@ constexpr KeywordEntry kKeywords[] = {
     {"import", Tok::KwImport},   {"in", Tok::KwIn},         {"let", Tok::KwLet},
     {"loop", Tok::KwLoop},       {"or", Tok::KwOr},         {"return", Tok::KwReturn},
     {"ro", Tok::KwRo},           {"struct", Tok::KwStruct}, {"true", Tok::KwTrue},
-    {"while", Tok::KwWhile},
+    {"while", Tok::KwWhile},     {"ref", Tok::KwRef},      {"mut", Tok::KwMut},
+    {"slice", Tok::KwSlice},
 };
 
 struct Punct2Entry {

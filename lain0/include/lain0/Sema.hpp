@@ -76,6 +76,10 @@ public:
   TypeId elementOf(TypeId id) const;
   TypeId addArrayOf(TypeId element, bool isRo) const;
   TypeId addModuleType(std::string_view moduleAlias);
+  // 引用 / 切片类型。Ref 的 LAINIR 形态就是 #addr（附带 pointee 类型）；
+  // Slice 的 LAINIR 形态是 2 字段聚合 (addr base, u64 len)。
+  TypeId addRef(TypeId pointee, bool isMutable) const;
+  TypeId addSlice(TypeId element) const;
 
   // 解析源码里的类型标注。失败返回 kInvalidType 并写诊断。
   TypeId resolve(const ast::TypeSyntax &ts, DiagSink &diags) const;
@@ -95,10 +99,11 @@ private:
   struct Entry {
     std::string name{};
     const L1Type *lain = nullptr; // nullptr 表示非标量（聚合 / 模块 / 数组）
-    enum class K { Bits, Addr, Bool, Struct, Enum, Array, Module } k = K::Bits;
+    enum class K { Bits, Addr, Bool, Struct, Enum, Array, Module, Ref, Slice } k = K::Bits;
     bool signedInt = false;
     bool roArray = false;
     TypeId element = kInvalidType;
+    bool refMutable = false;  // Ref：是否可变引用（mut ref）
     AggregateLayout layout{};
   };
   // entries_ 用 deque：vector 扩容会搬移元素，而 name() 返回的是指进元素内部的

@@ -112,7 +112,9 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
     if (c->callee && c->callee->kind == ast::ExprKind::Name) {
       const auto *n = static_cast<const ast::NameExpr *>(c->callee);
       if (n->name == "load" || n->name == "store" || n->name == "lea" ||
-          n->name == "ptr_of" || n->name == "addr_of" || n->name == "len") {
+          n->name == "ptr_of" || n->name == "addr_of" || n->name == "len" ||
+          n->name == "ref_of" || n->name == "mut_ref_of" ||
+          n->name == "slice_of") {
         return lowerBuiltin(c, n->name, expectedTy, out, value);
       }
     }
@@ -901,6 +903,59 @@ bool Lowerer::lowerBuiltin(const ast::CallExpr *e, std::string_view name,
     out.push_back(lainir_inst(builder_, INST_BITCAST, res,
                               lainir_type(builder_, TY_ADDR, 0), &num, 1));
     value = lainir_ref(res);
+    return true;
+  }
+  if (name == "ref_of" || name == "mut_ref_of") {
+    if (e->args.size() != 1) {
+      fail(e->span, D::SemaTypeMismatch, "ref_of/mut_ref_of 需要一个实参");
+      return false;
+    }
+    L1Operand val{};
+    if (!lowerExpr(e->args[0], kInvalidType, out, val)) return false;
+    // ref / mut ref 的 LAINIR 形态就是 #addr：把值 bitcast 成地址。
+    const char *res = nextTemp();
+    out.push_back(lainir_inst(builder_, INST_BITCAST, res,
+                              lainir_type(builder_, TY_ADDR, 0), &val, 1));
+    value = lainir_ref(res);
+    return true;
+  }
+  if (name == "slice_of") {
+    if (e->args.size() != 2) {
+      fail(e->span, D::SemaTypeMismatch, "slice_of 需要两个实参 (base, len)");
+      return false;
+    }
+    L1Operand base{}, len{};
+    if (!lowerExpr(e->args[0], types_->builtin("addr"), out, base)) return false;
+    if (!lowerExpr(e->args[1], types_->builtin("u64"), out, len)) return false;
+    // 栈上划 16 字节：ptr@0（addr），len@8（u64）。
+    const L1Type *sizeTy = types_->lain(types_->builtin("u8"));
+    L1Operand count = lainir_int(16);
+    const char *slot = nextTemp();
+    out.push_back(lainir_inst_mem(builder_, INST_ALLOCA, slot, sizeTy,
+                                  ORDER_RELAXED, false, &count, 1));
+    const L1Type *addrTy = types_->lain(types_->builtin("addr"));
+    // store base @0
+    {
+      L1Operand leaOps[4] = {lainir_ref(slot), lainir_int(0), lainir_int(1),
+                             lainir_int(0)};
+      const char *fa = nextTemp();
+      out.push_back(lainir_inst(builder_, INST_LEA, fa, addrTy, leaOps, 4));
+      L1Operand so[2] = {base, lainir_ref(fa)};
+      out.push_back(lainir_inst_mem(builder_, INST_STORE, nullptr, addrTy,
+                                    ORDER_RELAXED, false, so, 2));
+    }
+    // store len @8
+    {
+      L1Operand leaOps[4] = {lainir_ref(slot), lainir_int(0), lainir_int(1),
+                             lainir_int(8)};
+      const char *fa = nextTemp();
+      out.push_back(lainir_inst(builder_, INST_LEA, fa, addrTy, leaOps, 4));
+      L1Operand so[2] = {len, lainir_ref(fa)};
+      out.push_back(lainir_inst_mem(builder_, INST_STORE, nullptr,
+                                    types_->lain(types_->builtin("u64")),
+                                    ORDER_RELAXED, false, so, 2));
+    }
+    value = lainir_ref(slot);
     return true;
   }
   if (name == "len") {

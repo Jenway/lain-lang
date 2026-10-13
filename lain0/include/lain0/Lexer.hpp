@@ -72,6 +72,9 @@ enum class Tok : uint8_t {
   KwTrue,
   KwFalse,
   KwRo,
+  KwRef,    // ref T：不可变引用（LAINIR 里就是 #addr，附 pointee 类型）
+  KwMut,    // mut ref T：可变引用
+  KwSlice,  // slice T：胖指针 (addr, len)
 };
 
 struct Token {
