@@ -464,7 +464,13 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
     if (inst->ty && inst->ty->kind != TY_BITS && inst->ty->kind != TY_ADDR)
       return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
                   "#bitcast result must be #bits or #addr");
-    if (ot && inst->ty && lainir_type_width(ot) != lainir_type_width(inst->ty))
+    // #addr 的宽度无意义（按指针宽度算），所以 addr↔bits 这一档不能要求等宽；
+    // 只有两边都是 #bits 时才检查位宽一致。
+    const bool involvesAddr =
+        (ot != NULL && ot->kind == TY_ADDR) ||
+        (inst->ty != NULL && inst->ty->kind == TY_ADDR);
+    if (!involvesAddr && ot && inst->ty &&
+        lainir_type_width(ot) != lainir_type_width(inst->ty))
       return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
                   "#bitcast must preserve width");
     return true;

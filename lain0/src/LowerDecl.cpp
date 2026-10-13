@@ -143,6 +143,10 @@ bool Lowerer::lowerDecl(const ast::Decl *d) {
 
   switch (d->kind) {
   case ast::DeclKind::Func: {
+    // 名字绑定是「每个过程一份」：不清空的话上一个函数的局部 let 会漏进来，
+    // 下一个函数里同名的参数就会引用到本过程根本不存在的临时值
+    // （验证器报 2002 undefined value）。
+    bindings_.clear();
     L1Subroutine *sub = nullptr;
     if (!lowerFunc(static_cast<const ast::FuncDecl *>(d), sub)) return false;
     if (sub != nullptr) subs_.push_back(*sub);

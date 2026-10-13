@@ -728,6 +728,17 @@ bool Lowerer::lowerCast(const ast::CastExpr *e, std::vector<const L1Inst *> &out
   L1Operand operand{};
   if (!lowerExpr(e->operand, src, out, operand)) return false;
 
+  // D-002：addr ↔ 整数统一走 #bitcast。不能按宽度判断——#addr 的宽度无意义
+  // （为 0），会被当成「变宽」而错发成 #zext。
+  const TypeId addrTy = types_->builtin("addr");
+  if (src == addrTy || target == addrTy) {
+    const char *res = nextTemp();
+    out.push_back(lainir_inst(builder_, INST_BITCAST, res,
+                              types_->lain(target), &operand, 1));
+    value = lainir_ref(res);
+    return true;
+  }
+
   const uint32_t toW = types_->width(target);
   const uint32_t fromW = types_->width(src);
 
