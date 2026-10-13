@@ -22,6 +22,8 @@ Span joinSpans(Span first, Span last) {
 }
 
 bool isQuoted(const Token &token) {
+  // StrLit 的 text 在词法阶段就已经去掉两侧引号了，所以不能按首尾引号判断。
+  if (token.kind == Tok::StrLit) return true;
   return token.text.size() >= 2 && token.text.front() == '"' &&
          token.text.back() == '"';
 }
@@ -515,7 +517,9 @@ private:
       auto *decl = arena_.make<ast::ImportDecl>(
           joinSpans(start.span, previous().span));
       decl->name = name.text;
-      decl->path = unquote(path.text);
+      // StrLit 已无引号可去；别的 token 形态才需要 unquote。
+      decl->path =
+          path.kind == Tok::StrLit ? path.text : unquote(path.text);
       return decl;
     }
 
