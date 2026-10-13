@@ -119,34 +119,112 @@ bool Lowerer::lowerStmt(const ast::Stmt *s, std::vector<const L1Inst *> &out,
   return true;
 }
 
+namespace {
+
+// 这段语句里有没有给 name 赋过值（嵌套 if 也要看）。
+bool assignsNameInStmt(const ast::Stmt *s, const std::string &name);
+
+bool assignsNameInBody(const std::vector<ast::Stmt *> &body,
+                       const std::string &name) {
+  for (const ast::Stmt *s : body)
+    if (assignsNameInStmt(s, name)) return true;
+  return false;
+}
+
+bool assignsNameInStmt(const ast::Stmt *s, const std::string &name) {
+  if (!s) return false;
+  if (s->kind == ast::StmtKind::Assign) {
+    const auto *a = static_cast<const ast::AssignStmt *>(s);
+    if (a->target && a->target->kind == ast::ExprKind::Name) {
+      const auto *n = static_cast<const ast::NameExpr *>(a->target);
+      return n->name == name;
+    }
+    return false;
+  }
+  if (s->kind == ast::StmtKind::If) {
+    const auto *i = static_cast<const ast::IfStmt *>(s);
+    if (assignsNameInBody(i->thenBody, name)) return true;
+    if (i->hasElse && assignsNameInBody(i->elseBody, name)) return true;
+  }
+  return false;
+}
+
+} // namespace
+
 bool Lowerer::lowerIfStmt(const ast::IfStmt *s,
                           std::vector<const L1Inst *> &out, TypeId returnType,
                           bool &terminated) {
   L1Operand cond{};
   if (!lowerExpr(s->cond, types_->builtin("bool"), out, cond)) return false;
 
-  // 语句形态的 if 不产出值：两支各自是一个不带 results 的区域。
-  // 分支里若有终结指令，那一支就不再补 #yield。
+  // 循环体里的语句 if：若某一支给循环参数赋了值，那个新值必须合并出来
+  // （分支内定义的值在外层看不见），办法是让 #if 带一个结果。
+  std::string mergeParam;
+  const L1Type *mergeTy = nullptr;
+  for (const auto &p : loopParams_) {
+    if (assignsNameInBody(s->thenBody, p.first) ||
+        (s->hasElse && assignsNameInBody(s->elseBody, p.first))) {
+      mergeParam = p.first;
+      mergeTy = p.second;
+      break; // #if 只有单个结果名，一次合并一个参数
+    }
+  }
+  // if 之前的绑定快照：else 必须从这个状态开始降级。
+  const auto bindingsAtEntry = bindings_;
+  const L1Operand entryVal = mergeTy ? bindings_[mergeParam] : L1Operand{};
+
+  // 语句形态的 if 不产出值：两支各自是一个不带 results 的区域（需要合并时除外）。
   std::vector<const L1Inst *> thenInsts;
   bool thenTerminated = false;
   if (!lowerBody(s->thenBody, thenInsts, returnType, thenTerminated)) return false;
+  // 必须在降级 else 之前捕获：之后 bindings_ 会被 else 分支覆盖。
+  const L1Operand thenVal = mergeTy ? bindings_[mergeParam] : L1Operand{};
 
   std::vector<const L1Inst *> elseInsts;
   bool elseTerminated = false;
+  // else 从「if 之前」的状态开始：否则会读到 then 分支里定义的临时值，
+  // 而那个值按区域可见性在 else 里根本不存在（验证器报 2002）。
+  if (mergeTy) bindings_ = bindingsAtEntry;
   if (s->hasElse && !lowerBody(s->elseBody, elseInsts, returnType, elseTerminated))
     return false;
+  const L1Operand elseVal =
+      mergeTy ? (s->hasElse ? bindings_[mergeParam] : entryVal) : L1Operand{};
+  if (mergeTy) bindings_ = bindingsAtEntry;
+
+  if (mergeTy) {
+    // 已终结的分支不必 yield：break/continue/return 在验证器眼里等同于这条路走完了。
+    if (!thenTerminated) {
+      L1Operand y[1] = {thenVal};
+      thenInsts.push_back(lainir_inst_jump(builder_, INST_YIELD, nullptr, y, 1));
+    }
+    if (!elseTerminated) {
+      L1Operand y[1] = {elseVal};
+      elseInsts.push_back(lainir_inst_jump(builder_, INST_YIELD, nullptr, y, 1));
+    }
+  }
+
+  const L1Type *const results[1] = {mergeTy};
+  const L1Type *const *resPtr = mergeTy ? results : nullptr;
+  const uint32_t resCount = mergeTy ? 1u : 0u;
 
   const L1Region *thenRegion = lainir_region(
-      builder_, nullptr, 0, nullptr, 0,
+      builder_, nullptr, 0, resPtr, resCount,
       thenInsts.empty() ? nullptr : thenInsts.data(),
       static_cast<uint32_t>(thenInsts.size()));
-  const L1Region *elseRegion = s->hasElse
-      ? lainir_region(builder_, nullptr, 0, nullptr, 0,
-                      elseInsts.empty() ? nullptr : elseInsts.data(),
-                      static_cast<uint32_t>(elseInsts.size()))
-      : nullptr;
+  const L1Region *elseRegion =
+      (s->hasElse || mergeTy)
+          ? lainir_region(builder_, nullptr, 0, resPtr, resCount,
+                          elseInsts.empty() ? nullptr : elseInsts.data(),
+                          static_cast<uint32_t>(elseInsts.size()))
+          : nullptr;
 
-  out.push_back(lainir_inst_if(builder_, nullptr, cond, thenRegion, elseRegion));
+  if (mergeTy) {
+    const char *res = nextTemp();
+    out.push_back(lainir_inst_if(builder_, res, cond, thenRegion, elseRegion));
+    bindings_[mergeParam] = lainir_ref(res); // 之后读到的就是合并值
+  } else {
+    out.push_back(lainir_inst_if(builder_, nullptr, cond, thenRegion, elseRegion));
+  }
 
   // 只有两支都终结，这个 if 之后才算不可达。
   terminated = thenTerminated && s->hasElse && elseTerminated;

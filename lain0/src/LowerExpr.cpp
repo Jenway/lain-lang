@@ -271,6 +271,12 @@ bool Lowerer::lowerForExpr(const ast::ForExpr *e, TypeId expectedTy,
     paramRefs.push_back(lainir_ref(aname));
     bindings_[std::string(e->acc)] = lainir_ref(aname);
   }
+  // 登记当前循环参数：循环体里的语句 if 靠它判断要不要做分支合并。
+  const std::vector<std::pair<std::string, const L1Type *>> savedLoopParams =
+      loopParams_;
+  loopParams_.clear();
+  for (const auto &pr : params)
+    loopParams_.emplace_back(pr.param.name, pr.param.ty);
 
   // #loop 必须带标签；for 语法没有标签，生成一个内部唯一名。
   const std::string labelText = "L" + std::string(nextTemp());
@@ -336,6 +342,7 @@ bool Lowerer::lowerForExpr(const ast::ForExpr *e, TypeId expectedTy,
 
   const char *res = nextTemp();
   out.push_back(lainir_inst_loop(builder_, res, label, region));
+  loopParams_ = savedLoopParams;
   value = lainir_ref(res);
   return true;
 }
@@ -398,6 +405,12 @@ bool Lowerer::lowerLoopExpr(const ast::LoopExpr *e, TypeId expectedTy,
     paramRefs.push_back(lainir_ref(pname));
     bindings_[std::string(p.name)] = lainir_ref(pname);
   }
+  // 登记当前循环参数：循环体里的语句 if 靠它判断要不要做分支合并。
+  const std::vector<std::pair<std::string, const L1Type *>> savedLoopParams =
+      loopParams_;
+  loopParams_.clear();
+  for (const auto &pr : params)
+    loopParams_.emplace_back(pr.param.name, pr.param.ty);
 
   std::vector<const L1Inst *> bodyInsts;
 
@@ -450,6 +463,7 @@ bool Lowerer::lowerLoopExpr(const ast::LoopExpr *e, TypeId expectedTy,
   const char *res = nextTemp();
   out.push_back(lainir_inst_loop(builder_, res,
                                  e->hasLabel ? intern(e->label) : nullptr, region));
+  loopParams_ = savedLoopParams;
   value = lainir_ref(res);
   return true;
 }

@@ -103,6 +103,9 @@ private:
   // 名字 -> 当前代表该值的操作数。局部 let、赋值、循环参数的重新绑定都走这里。
   // 这是 SSA 形状的记账：名字只是值的引用，重绑定等价于换一个引用。
   std::unordered_map<std::string, L1Operand> bindings_{};
+  // 当前正在降级的循环的参数（名 + 类型）。循环体里的语句 if 若给这些参数赋了值，
+  // 那个新值必须靠 #if 带结果合并出来——分支内定义的值在外层是看不见的。
+  std::vector<std::pair<std::string, const L1Type *>> loopParams_{};
   uint32_t tempCounter_ = 0;
   std::vector<L1Data> data_{};
   std::vector<L1Subroutine> subs_{};
