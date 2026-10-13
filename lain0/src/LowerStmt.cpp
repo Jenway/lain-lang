@@ -109,8 +109,12 @@ bool Lowerer::lowerStmt(const ast::Stmt *s, std::vector<const L1Inst *> &out,
     return lowerLoopStmt(static_cast<const ast::LoopStmt *>(s), out, returnType);
   case ast::StmtKind::For:
     return lowerForStmt(static_cast<const ast::ForStmt *>(s), out, returnType);
-  case ast::StmtKind::Jump:
-    return lowerJumpStmt(static_cast<const ast::JumpStmt *>(s), out);
+  case ast::StmtKind::Jump: {
+    // break/continue 是终止语句：它之后不能再发指令（否则验证器报 2003）。
+    const bool ok = lowerJumpStmt(static_cast<const ast::JumpStmt *>(s), out);
+    if (ok) terminated = true;
+    return ok;
+  }
   }
   return true;
 }

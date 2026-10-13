@@ -616,6 +616,30 @@ private:
       }
       return kInvalidType;
     }
+    case ast::ExprKind::For: {
+      const auto *fe = static_cast<const ast::ForExpr *>(e);
+      pushScope();
+      // 循环变量的类型：显式标注优先，否则从 from 推导。
+      TypeId varTy = kInvalidType;
+      if (fe->hasVarType) varTy = ts_.resolve(fe->varType, diags_);
+      if (varTy == kInvalidType && fe->from) varTy = typeOf(fe->from, kInvalidType);
+      if (varTy != kInvalidType) bind(fe->var, varTy);
+      // 累加器：显式标注优先，否则从初值推导。
+      TypeId accTy = kInvalidType;
+      if (fe->hasAcc) {
+        if (!fe->accType.name.empty()) accTy = ts_.resolve(fe->accType, diags_);
+        if (accTy == kInvalidType && fe->accInit)
+          accTy = typeOf(fe->accInit, kInvalidType);
+        if (accTy != kInvalidType) bind(fe->acc, accTy);
+      }
+      if (fe->to) (void)typeOf(fe->to, varTy);
+      walkBody(fe->body);
+      popScope();
+      if (expected != kInvalidType) return expected;
+      // 无标注：有 acc 取 acc 类型，否则取循环变量类型（值由 break 带出）。
+      if (accTy != kInvalidType) return accTy;
+      return varTy;
+    }
     case ast::ExprKind::Dotted:
     default:
       return kInvalidType;

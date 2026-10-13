@@ -113,6 +113,9 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
   case ast::ExprKind::Loop:
     return lowerLoopExpr(static_cast<const ast::LoopExpr *>(e), expectedTy, out,
                          value);
+  case ast::ExprKind::For:
+    return lowerForExpr(static_cast<const ast::ForExpr *>(e), expectedTy, out,
+                        value);
   default:
     fail(e->span, D::LowerUnsupported, "这个表达式形态还没实现降级");
     return false;
@@ -144,6 +147,128 @@ bool Lowerer::lowerBinary(const ast::BinaryExpr *e, TypeId expectedTy,
   const char *res = nextTemp();
   L1Operand ops[2] = {lhs, rhs};
   out.push_back(lainir_inst(builder_, choice.kind, res, choice.operandTy, ops, 2));
+  value = lainir_ref(res);
+  return true;
+}
+
+bool Lowerer::lowerForExpr(const ast::ForExpr *e, TypeId expectedTy,
+                           std::vector<const L1Inst *> &out, L1Operand &value) {
+  if (expectedTy == kInvalidType) {
+    fail(e->span, D::SemaWidthUnknown,
+         "for 的值类型必须由期望类型给出（let x: T = for …）");
+    return false;
+  }
+  const L1Type *resultTy = types_->lain(expectedTy);
+
+  // 循环变量的类型：显式标注优先，否则从 from 推导。
+  TypeId varTy = kInvalidType;
+  if (e->hasVarType) varTy = types_->resolve(e->varType, *diags_);
+  if (varTy == kInvalidType && e->from)
+    varTy = typeOfExpr(*sema_, e->from, kInvalidType);
+  if (varTy == kInvalidType) {
+    fail(e->span, D::SemaWidthUnknown, "for 的循环变量类型无法推导");
+    return false;
+  }
+  const L1Type *varL1 = types_->lain(varTy);
+
+  std::vector<L1RegionParam> params;
+  std::vector<L1Operand> paramRefs;
+
+  L1Operand fromInit{};
+  if (e->from) {
+    if (!lowerExpr(e->from, varTy, out, fromInit)) return false;
+  } else {
+    fromInit = lainir_int(0);
+  }
+  const char *iname = intern(e->var);
+  params.push_back(lainir_param(iname, varL1, fromInit));
+  paramRefs.push_back(lainir_ref(iname));
+  bindings_[std::string(e->var)] = lainir_ref(iname);
+
+  // 累加器（可省）：没有它时结果取循环变量，靠源码自己的 break 带出。
+  const char *aname = nullptr;
+  if (e->hasAcc) {
+    TypeId accTy = kInvalidType;
+    if (!e->accType.name.empty()) accTy = types_->resolve(e->accType, *diags_);
+    if (accTy == kInvalidType && e->accInit)
+      accTy = typeOfExpr(*sema_, e->accInit, kInvalidType);
+    if (accTy == kInvalidType) accTy = expectedTy;
+    L1Operand accInit{};
+    if (e->accInit) {
+      if (!lowerExpr(e->accInit, accTy, out, accInit)) return false;
+    } else {
+      accInit = lainir_int(0);
+    }
+    aname = intern(e->acc);
+    params.push_back(lainir_param(aname, types_->lain(accTy), accInit));
+    paramRefs.push_back(lainir_ref(aname));
+    bindings_[std::string(e->acc)] = lainir_ref(aname);
+  }
+
+  // #loop 必须带标签；for 语法没有标签，生成一个内部唯一名。
+  const std::string labelText = "L" + std::string(nextTemp());
+  const char *label = intern(labelText);
+
+  std::vector<const L1Inst *> bodyInsts;
+
+  // 上界在循环外求值；条件是 i < to。
+  L1Operand toOp{};
+  if (!lowerExpr(e->to, varTy, out, toOp)) return false;
+
+  OperatorChoice cmpChoice{};
+  if (!selectBinary(ast::BinOp::Lt, varTy, *types_, cmpChoice)) {
+    fail(e->span, D::LowerUnsupported, "for 的条件运算符不受支持");
+    return false;
+  }
+  L1Operand cmpOps[2] = {paramRefs[0], toOp};
+  const char *cname = nextTemp();
+  bodyInsts.push_back(lainir_inst(builder_, cmpChoice.kind, cname,
+                                  cmpChoice.operandTy, cmpOps, 2));
+  L1Operand cond = lainir_ref(cname);
+
+  std::vector<const L1Inst *> inner;
+  bool term = false;
+  if (!lowerBody(e->body, inner, expectedTy, term)) return false;
+
+  // 步进：i + 1
+  OperatorChoice incChoice{};
+  if (!selectBinary(ast::BinOp::Add, varTy, *types_, incChoice)) {
+    fail(e->span, D::LowerUnsupported, "for 的步进运算符不受支持");
+    return false;
+  }
+  L1Operand incOps[2] = {bindings_[std::string(e->var)], lainir_int(1)};
+  const char *stepName = nextTemp();
+  inner.push_back(lainir_inst(builder_, incChoice.kind, stepName,
+                              incChoice.operandTy, incOps, 2));
+
+  // 体已经以 break/continue 结束时不再合成 continue（终止指令后不能再有指令）。
+  if (!term) {
+    std::vector<L1Operand> contArgs;
+    contArgs.push_back(lainir_ref(stepName));
+    if (aname) contArgs.push_back(bindings_[std::string(e->acc)]);
+    inner.push_back(lainir_inst_jump(builder_, INST_CONTINUE, label,
+                                     contArgs.data(),
+                                     static_cast<uint32_t>(contArgs.size())));
+  }
+
+  const L1Region *thenRegion =
+      lainir_region(builder_, nullptr, 0, nullptr, 0,
+                    inner.empty() ? nullptr : inner.data(),
+                    static_cast<uint32_t>(inner.size()));
+  bodyInsts.push_back(lainir_inst_if(builder_, nullptr, cond, thenRegion, nullptr));
+
+  // 收尾：#break(结果参数)。必须用入口参数本身——body 更新后的临时值定义在
+  // then 区域内部，在循环体这一层是看不见的（loop 同理）。
+  L1Operand breakArg[1] = {paramRefs.back()};
+  bodyInsts.push_back(lainir_inst_jump(builder_, INST_BREAK, label, breakArg, 1));
+
+  const L1Type *const results[1] = {resultTy};
+  const L1Region *region = lainir_region(
+      builder_, params.data(), static_cast<uint32_t>(params.size()), results, 1,
+      bodyInsts.data(), static_cast<uint32_t>(bodyInsts.size()));
+
+  const char *res = nextTemp();
+  out.push_back(lainir_inst_loop(builder_, res, label, region));
   value = lainir_ref(res);
   return true;
 }
@@ -218,17 +343,18 @@ bool Lowerer::lowerLoopExpr(const ast::LoopExpr *e, TypeId expectedTy,
     bool term = false;
     if (!lowerBody(e->body, inner, expectedTy, term)) return false;
 
-    std::vector<L1Operand> contArgs;
-    contArgs.reserve(params.size());
-    for (const auto &pr : params)
-      contArgs.push_back(bindings_[std::string(pr.param.name)]);
-
     std::vector<const L1Inst *> thenInsts;
     for (auto *i : inner) thenInsts.push_back(i);
-    thenInsts.push_back(lainir_inst_jump(builder_, INST_CONTINUE,
-                                         e->hasLabel ? intern(e->label) : nullptr,
-                                         contArgs.data(),
-                                         static_cast<uint32_t>(contArgs.size())));
+    // 体已经以 break/continue 结束时不再合成 continue：终止指令之后不能再有指令。
+    if (!term) {
+      std::vector<L1Operand> contArgs;
+      contArgs.reserve(params.size());
+      for (const auto &pr : params)
+        contArgs.push_back(bindings_[std::string(pr.param.name)]);
+      thenInsts.push_back(lainir_inst_jump(
+          builder_, INST_CONTINUE, e->hasLabel ? intern(e->label) : nullptr,
+          contArgs.data(), static_cast<uint32_t>(contArgs.size())));
+    }
 
     const L1Region *thenRegion =
         lainir_region(builder_, nullptr, 0, nullptr, 0, thenInsts.data(),

@@ -109,7 +109,6 @@ bool isStatementKeyword(Tok kind) {
   case Tok::KwLet:
   case Tok::KwReturn:
   case Tok::KwIf:
-  case Tok::KwFor:
   case Tok::KwBreak:
   case Tok::KwContinue:
     return true;
@@ -560,8 +559,6 @@ private:
       return parseIfStatement();
     case Tok::KwLoop:
       return parseLoopStatement();
-    case Tok::KwFor:
-      return parseForStatement();
     case Tok::KwBreak:
       return parseJumpStatement(true);
     case Tok::KwContinue:
@@ -719,7 +716,7 @@ private:
     return stmt;
   }
 
-  ast::Stmt *parseForStatement() {
+  ast::Expr *parseForExpr() {
     const Token start = advance();
     Token variable;
     if (!takeIdent(variable, "循环变量名")) {
@@ -773,21 +770,19 @@ private:
     if (!parseBlock(body)) {
       return nullptr;
     }
-    match(Tok::Semi);
 
-    auto *stmt = arena_.make<ast::ForStmt>(
-        joinSpans(start.span, previous().span));
-    stmt->var = variable.text;
-    stmt->varType = variableType;
-    stmt->hasVarType = hasVariableType;
-    stmt->from = from;
-    stmt->to = to;
-    stmt->hasAcc = hasAcc;
-    stmt->acc = acc;
-    stmt->accType = accType;
-    stmt->accInit = accInit;
-    stmt->body = std::move(body);
-    return stmt;
+    auto *fe = arena_.make<ast::ForExpr>(joinSpans(start.span, previous().span));
+    fe->var = variable.text;
+    fe->varType = variableType;
+    fe->hasVarType = hasVariableType;
+    fe->from = from;
+    fe->to = to;
+    fe->hasAcc = hasAcc;
+    fe->acc = acc;
+    fe->accType = accType;
+    fe->accInit = accInit;
+    fe->body = std::move(body);
+    return fe;
   }
 
   ast::Expr *parseLoopExpr() {
@@ -974,6 +969,8 @@ private:
       return parseValueIfExpression();
     case Tok::KwLoop:
       return parseLoopExpr();
+    case Tok::KwFor:
+      return parseForExpr();
     case Tok::KwImport:
       diags_.error(current().span, D::ParseReserved,
                    "import 只用于顶层模块绑定");
