@@ -658,9 +658,20 @@ private:
       if (accTy != kInvalidType) return accTy;
       return varTy;
     }
-    case ast::ExprKind::Dotted:
-    default:
+    case ast::ExprKind::Dotted: {
+      // p.x / M.answer / Shape.Circle：成员类型从聚合布局里查。
+      const auto *d = static_cast<const ast::DottedExpr *>(e);
+      (void)typeOf(d->object, kInvalidType);
+      const TypeId objTy = typeOf(d->object, kInvalidType);
+      if (objTy == kInvalidType) return kInvalidType;
+      const AggregateLayout *lay = ts_.layout(objTy);
+      if (lay != nullptr) {
+        for (const FieldLayout &f : lay->fields) {
+          if (f.name == d->member) return f.type;
+        }
+      }
       return kInvalidType;
+    }
     }
   }
 };

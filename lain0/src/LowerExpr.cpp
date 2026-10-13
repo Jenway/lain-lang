@@ -121,6 +121,9 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
   case ast::ExprKind::Loop:
     return lowerLoopExpr(static_cast<const ast::LoopExpr *>(e), expectedTy, out,
                          value);
+  case ast::ExprKind::Dotted:
+    return lowerDottedExpr(static_cast<const ast::DottedExpr *>(e), expectedTy,
+                           out, value);
   case ast::ExprKind::Index:
     return lowerIndexExpr(static_cast<const ast::IndexExpr *>(e), expectedTy,
                           out, value);
@@ -161,6 +164,50 @@ bool Lowerer::lowerBinary(const ast::BinaryExpr *e, TypeId expectedTy,
   const char *res = nextTemp();
   L1Operand ops[2] = {lhs, rhs};
   out.push_back(lainir_inst(builder_, choice.kind, res, choice.operandTy, ops, 2));
+  value = lainir_ref(res);
+  return true;
+}
+
+bool Lowerer::lowerDottedExpr(const ast::DottedExpr *e, TypeId expectedTy,
+                              std::vector<const L1Inst *> &out,
+                              L1Operand &value) {
+  // 聚合按地址传（docs/04：「聚合是参数，地址由调用方给」），
+  // 所以字段 = load(obj + 字段偏移)。
+  const TypeId objTy = typeOfExpr(*sema_, e->object, kInvalidType);
+  const AggregateLayout *lay =
+      objTy != kInvalidType ? types_->layout(objTy) : nullptr;
+  if (lay == nullptr) {
+    fail(e->span, D::LowerUnsupported, "字段访问的对象不是聚合");
+    return false;
+  }
+  uint32_t offset = 0;
+  TypeId fieldTy = kInvalidType;
+  for (const FieldLayout &f : lay->fields) {
+    if (f.name == e->member) {
+      offset = f.offset;
+      fieldTy = f.type;
+      break;
+    }
+  }
+  if (fieldTy == kInvalidType) {
+    fail(e->span, D::LowerUnsupported,
+         std::string("聚合没有成员 ") + std::string(e->member));
+    return false;
+  }
+
+  L1Operand obj{};
+  if (!lowerExpr(e->object, types_->builtin("addr"), out, obj)) return false;
+
+  const L1Type *addrTy = types_->lain(types_->builtin("addr"));
+  L1Operand leaOps[4] = {obj, lainir_int(0), lainir_int(1), lainir_int(offset)};
+  const char *addrName = nextTemp();
+  out.push_back(lainir_inst(builder_, INST_LEA, addrName, addrTy, leaOps, 4));
+
+  L1Operand ptr = lainir_ref(addrName);
+  const char *res = nextTemp();
+  out.push_back(lainir_inst_mem(builder_, INST_LOAD, res,
+                                types_->lain(fieldTy), ORDER_RELAXED, false,
+                                &ptr, 1));
   value = lainir_ref(res);
   return true;
 }

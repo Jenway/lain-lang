@@ -84,6 +84,8 @@ public:
                         std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerIndexExpr(const ast::IndexExpr *e, TypeId expectedTy,
                       std::vector<const L1Inst *> &out, L1Operand &value);
+  bool lowerDottedExpr(const ast::DottedExpr *e, TypeId expectedTy,
+                       std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerAddressArithmetic(const ast::BinaryExpr *e, TypeId expectedTy,
                               std::vector<const L1Inst *> &out,
                               L1Operand &value);
