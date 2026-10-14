@@ -712,7 +712,11 @@ bool Lowerer::lowerCall(const ast::CallExpr *e, TypeId expectedTy,
   args.reserve(e->args.size());
   for (ast::Expr *a : e->args) {
     L1Operand op{};
-    if (!lowerExpr(a, kInvalidType, out, op)) return false;
+    // 实参自己的类型来自 Sema（调用检查时它与形参类型统一）。必须传下去：
+    // 用 kInvalidType 降级时，作为实参的嵌套调用拿不到期望类型，lowerCall 就
+    // 不为它分配结果临时量（res == nullptr），外层调用于是消费一个未定义操作数，
+    // 验证器报 2020 `instruction kind 76 (CALL) defines 0 result(s), expected 1`。
+    if (!lowerExpr(a, typeOfExpr(*sema_, a, kInvalidType), out, op)) return false;
     args.push_back(op);
   }
 
