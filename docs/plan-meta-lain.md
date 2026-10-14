@@ -338,19 +338,74 @@ python scripts/build_meta_unit.py      # 源码 -> 单份 LAINIR 单元 + 驱动
 `host_status=0`、`region grants=2`」的状态是过期的；Lain 写的 Meta 不是落后于归档，而是已经跑到
 它前面。
 
-### 仍失败的 5 个样例（手写时代遗留，未修）
+### 仍失败的 5 个样例：诊断结论（**不是翻译缺陷、也不是 VM 缺陷**）
 
-| 样例 | 状态 | 定位 |
+诊断方法：把样例里可疑的形状逐个抽成最小探针，看状态码落在哪一处。两个决定性对照：
+
+| 探针 | 内容 | 结果 |
 | :--- | :--- | :--- |
-| `symbol_addr` | 9415 | `meta_scope_require_func` 兜底：源码里 `extern consume(…) = consume;` 没进作用域表 |
-| `u8math` | 6 | `meta_op_resolve` 找不到 `meta_sym_lt_storage`（`<` 算子），同属默认 std 库缺失 |
-| `refs` | 5 | `LAINMETA_ERR_DENIED`（宿主边界） |
-| `strinline` | 4 | `LAINMETA_ERR_UNSUPPORTED` |
-| `modules_main` | 4 | 同上 |
+| `ext_plain.lain` | `extern consume(p: u64) -> u64 = consume;` + `return consume(7);` | **host_status=0** —— extern 声明与调用都好 |
+| `sym_only.lain` | 只写 `return symbol_addr("bytes_storage");` | **9415** —— 元凶是 `symbol_addr` 这个表面内建 |
+| `str_only.lain` | 函数体只有字符串字面量 `return "hi";` | **4**，且产出坏 IR：`#return %r0`（`%r0` 从未定义） |
 
-这些是**语言级**状态码（不是 VM 崩溃：报告里 `region grants=2`，宿主窗口授予正常），且
-`docs/04-bootstrap-dialect.md` 已把 9415 记为「跨源引用有的通、有的不通，规律未定位」的手写时代
-遗留缺陷。与阶段 3 修的 VM 缺陷正交，作为独立任务处理。
+（`ext_first` / `ext_last` 两个探针曾怀疑「extern 声明必须在调用点之前」，实测两者**都是 9415** —— 顺序无关，是 `symbol_addr`，extern 是误判。）
+
+于是 5 个样例的成因都是**同一类：Meta 的输入语言比 `lain0` 窄，这些形状它没实现**：
+
+| 样例 | 状态 | 未实现的形状 |
+| :--- | :--- | :--- |
+| `symbol_addr` | 9415 | 表面内建 `symbol_addr("…")` 被当成普通调用，作用域里查不到 → 兜底 9415 |
+| `u8math` | 6 | u8 的算子（`<` 等）在 Meta 的算子表里没有 → `meta_op_resolve` 找不到 `meta_sym_lt` |
+| `strinline` | 4 | 字符串字面量表达式（`4` = `LAINMETA_ERR_UNSUPPORTED`，即「这个形状 v0 还不认」） |
+| `refs` | 5 | `ref u64` 形参类型（`5` = `LAINMETA_ERR_DENIED`，宿主边界） |
+| `modules_main` | 4 | `import("…")` 与 `M.member` 成员访问 |
+
+**判据**：这些正是 `lain0` 自己的特性集（`bootstrap/lain/examples/` 是 lain0 的回归语料，`symbol_addr.lain` / `strinline.lain` 就是 lain0 的特性测试，其中 `symbol_addr.lain` 在归档里**根本不存在**——它是档案冻结之后才加进语料的）。手写 Meta 时代同样没有这些形状的支持（`docs/04-bootstrap-dialect.md` 把 9415 记为「规律未定位」、并把 4 解释为「v0 还不认」）。
+
+**结论**：修这 5 个 = 在 bootstrap Meta 里**实现 5 项语言特性**（内建 `symbol_addr`、u8 算子表项、字符串字面量、`ref` 形参类型、模块 import/成员访问）。这是新功能开发，不是修 bug；与阶段 3 修的 VM 缺陷、与 stage 2 的翻译都无关。当前不做，按「已知不支持」记录在此。
+
+## 阶段 4：把 Meta 的发射端迁到 D-002，再补齐 5 个输入形状
+
+用户要求解决那 5 个失败样例。开工前的侦察把优先级改了一次，先记结论。
+
+### 先要修的不是 5 个形状，而是 Meta 的产出压根不是合法 LAINIR
+
+`docs/decisions.md` 的 **D-002** 状态行原文：「seed IR 层 opcode 已移除并统一为 `#call` + `#bitcast[#addr]`；lain0 发射端已切换；**bootstrap 按 D-001 冻结、未迁移**」。
+
+阶段 2 的翻译只搬语义，没有迁移发射端——所以现在的 Meta 仍在发 D-002 已经删掉的四个算子：
+
+| 算子 | 仍在发射的位置 |
+| :--- | :--- |
+| `#data_addr` | 9 处（`lainir_data_addr`、`meta_emit_data_addr_line`、`meta_emit_symbol_addr_line`） |
+| `#proc_addr` | 3 处（`lainir_proc_addr` 一族） |
+| `#int2ptr` | 7 处（`addr_of` 内建） |
+| `#ptr2int` | 7 处（`ptr_of` 内建） |
+
+后果是实测的，不是推断：
+
+```
+./build/lain-meta.exe --out build/lain0/probe/table.meta.out examples/table.lain bootstrap/lain/examples/table.lain
+  → run slice=2 rounds=1 steps=1444516 host_status=0        # 样例按现在的判据「通过」
+  → 产物里有 `%r1 = #data_addr bytes`
+
+把这份产出当单元装回去（unit 清单指向它）：
+  → PARSE FAILED code=3002 line=5                           # line=5 正是那条 #data_addr
+```
+
+对照 lain0 对同一份源码的产出：`%base = #bitcast[#addr](%bytes_storage)`。
+
+**所以「34 个样例 29 通过」现在的准确含义是「Meta 跑完了」，不是「Meta 产出了合法 LAINIR」**：只要源码碰到静态数据（表、字节串、`as addr`），产物就装不回 VM。这条必须排在 5 个形状**之前**——否则新加的形状（`symbol_addr` 尤其）会顺着 `meta_emit_symbol_addr_line` 继续发 `#data_addr`，等于把旧拼写复制得更多。
+
+### 工作顺序（判据与现状）
+
+1. **发射端迁移到 D-002**：`#data_addr` / `#proc_addr` / `#int2ptr` / `#ptr2int` → `#bitcast[#addr](%X)` / `#bitcast[#bits<N>](%p)`，同时决定数据符号命名（Meta 现在发裸名 `bytes`，lain0 发 `bytes_storage`）。**判据（新）**：把 Meta 对每个样例的产出当单元装回去，必须 `PARSE` 通过并 `verify` 通过——这把编译器变成它自己的校验器。
+2. `symbol_addr("…")`：`lex.lain` 加关键字 + `meta_is_builtin_name` 加判断 + `meta_emit_builtin_temp` 加分支 + 新发射器（读字符串实参的名字字节，复用符号地址行）。
+3. 字符串字面量出现在**值位置**：`docs/04` 现行规范明确「函数体内写字节串报 4」，所以放开它要连规范一起改（含 `let NAME: addr = "…"` 之外的用法与发射形态）。
+4. u8 算子表项（`meta_op_resolve` 找不到 `meta_sym_lt`）。
+5. `ref` / `mut ref` 形参类型。
+6. 模块 `import("…")` 与 `M.成员` 访问。
+
+`docs/04-bootstrap-dialect.md` 是这套输入语言的规范：每落地一条，规范与样例判据都要同步更新，否则文档会继续宣称「报 4」而实现已经支持。
 
 ## 参考
 
