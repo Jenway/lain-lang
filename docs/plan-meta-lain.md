@@ -35,18 +35,23 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 **10 个 `#ptr2int`**、**1 个 `#int2ptr`**；`#ptr` 命中是注释误报。共有 **33 个**宿主 `#extern`
 链接符号。
 
-`#data_addr` 经常作为内嵌操作数出现。现有 Lain 没有静态数据符号地址的表面形式；
-`addr_of(integer)` 不能代替它。正在给 `lain0` 增加 `symbol_addr("symbol")`：参数必须是
-编译期字符串字面量，产生 `#bitcast[#addr](%symbol)`。Verifier 已确认模块级 `#data` 符号
-作为 `#addr` 绑定，因此该形式可直接对应旧 `#data_addr symbol`，并能用于调用参数等表达式位。
+`#data_addr` 经常作为内嵌操作数出现。已给 `lain0` 增加 `symbol_addr("symbol")`：字符串参数在编译期作为模块符号名，
+生成 `#bitcast[#addr](%symbol)`；模块级 `#data` 符号由 verifier 绑定成 `#addr`，所以该形式对应旧 `#data_addr symbol`。
+样例覆盖直接返回及作为 call 实参，已编译并通过 verify。
 
-另有旧 `#ptr2int/#int2ptr` 共 11 处（`std/types.l1`、`std/parse.l1`、`std/syntax.l1`）；
-转换需逐处核对，不能只以能编译作为等价证明。33 个宿主 extern 可用 Lain `extern` 声明，
-由 `meta_driver` 绑定。主体指令 `#if/#yield/#loop`、`#alloca/#load/#store/#lea` 及整数、
-比较、位运算均有 lain0 对应能力；顶层数据布局还需逐类型核对。
+旧地址/整数转换共 11 处；`addr as u64` / `u64 as addr` 已实编译为相应 `#bitcast`。`docs/04-bootstrap-dialect.md`
+记有对 11 处的 surface probe。33 个宿主 extern 有 Lain `extern` 语法，链接名在源文件中指定。
 
-下一步先调研 `lain0` 的 compiler API、模块输出及 `meta_driver` 装载路径。依需补 multi-source 编译或模块链接；
-不预设必须采用哪条方案。然后用 Lain 翻译 `SOURCE_ORDER` 中的文件，每片只做编译闸门；编译通过后删对应旧 `.l1`。
+**数据地址与 cast 前置能力已补齐**：`symbol_addr("symbol")` 可生成 `#bitcast[#addr](%symbol)`，样例编译过 verify；
+`addr as u64` / `u64 as addr` 发出 `#bitcast`，覆盖旧 11 处转换的表面形态。
+
+**仍需决定翻译片段的编译边界**：`std/lex.l1` 调用 `meta_bytes_equal`，其实现位于 `std/types.l1`；
+SOURCE_ORDER 顺序是 lex、emit、types。单独编译 lex 会缺 callee；加入同名 extern shim 再带上真实定义
+会因 duplicate subroutine 被 verifier 拒绝。方案是把相依片段合并后用 `lain0` 编译，或给编译器加多源模块
+输入能力。两者都没有实施；尚未翻译、也没有删除任何旧 `.l1`。
+
+`meta_driver` 的旧入口把 SOURCE_ORDER 中的 LAINIR 文本拼为一个模块再 parse/verify。当前不需要为了
+「逐片能编译」而先改它；等 Lain 源片和生成的 LAINIR 模块装配边界确定后，再做对应整合。
 ## 目录处置（关键：别弄丢 examples 闸门）
 
 1. `git mv bootstrap bootstrapl1`（整目录改名，Windows 上 `bootstrap` 与 `bootstrapl1`
