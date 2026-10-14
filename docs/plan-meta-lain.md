@@ -202,7 +202,14 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   优先级链逐条核对与旧片相同（3/8/11/9/5/13/12/10/6/4/7/1），且所有条件均提前算好、无副作用；
   内层遮蔽的 `%stmt_context` 改名 `stmt_ctx` 并提前求值；其余按平坦守卫改写（命中即 return/break）。
   未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 21 项 `std/modules.l1`（748 行、18 过程、2 个数据块）。
+- `std/modules.lain` 已翻译：18 个实现过程名与签名与旧片一致，39 个跨片依赖以 extern 声明，本文件内定义 2 个数据块
+  （`meta_kw_import` ro 6 字节、`meta_suffix_lain` ro 5 字节，字节与模式均与旧片一致）。6 个跨片数据符号在 fixture 中
+  按定义单元原字节 stub（`lainir_text_buffer`/`lainir_zero`/`meta_dsep`/`meta_path_cap`/`meta_reg_count_off`/`meta_scalar_table`）；
+  `lain0` 退出码 0、verify 通过。8 处调用序列差异经核对全部为 `load`/`store` 内建与守卫改写导致的字典序重排，
+  运行顺序不变；重点复核 `%step`（`%also` 仅在 `is_colon` 路径求值）、`pick_end`（`has` 为真时不写后缀）、
+  `pick_ready`（只有没扫过才调 `meta_scope_count`/`meta_scope_scan`）、`pick_body`、`%j3` 值 if（支内含 store，属允许形态）。
+  未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 22 项 `std/eval.l1`（89 行、3 过程、2 个数据块）。
 
 ## 已知风险
 
