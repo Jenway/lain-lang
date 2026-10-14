@@ -130,8 +130,10 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   `meta_bytes_equal` 依赖实现合并编译，结果 45 个过程、27 个 data，退出码 0。未运行 Meta。
 - 修复 `lain0` 值型 loop 的重复合成 break；重建成功，examples `--round-trip` **35/35**。
 - 翻译提交 `f3b2c1b`、删除 `bootstrapl1/std/lex.l1` 提交 `5fbe5d5`，均已推送至 `feat/meta`。
-- 当前下一片为 `std/emit.l1`；翻译正在进行，旧 `.l1` 在通过 compile gate 前保留。
-- 下一个后续单元是 `std/types.l1`。
+- `std/emit.lain` 已翻译：33 个过程名和签名、29 个静态数据符号/字节与旧片匹配。它依赖 `std/lainir.l1`
+  中的 `lainir_write`、`lainir_repr`、`lainir_emit_uint`；用临时同签名 Lain 定义组成 compile-only 输入后，
+  `lain0` 验证通过（65 个过程、29 个 data，退出码 0）。未运行 Meta；旧 `.l1` 将在翻译提交后单独删除。
+- 下一个单元 `std/types.l1`。
 
 ## 已知风险
 
