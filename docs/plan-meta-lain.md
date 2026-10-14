@@ -138,7 +138,10 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 - `std/regions.lain` 已翻译：3 个 Lain 实现过程、1 个 host extern；24 字节 scratch record 与旧数据一致。首次编译
   暴露 `symbol_addr` 需引用生成名 `_storage`，现已修正；与临时 `meta_cell_get` 定义合并编译后 verify 通过
   （6 个过程、1 个 data，退出码 0）。旧 `.l1` 保留至翻译提交后另行删除。
-- 下一片为 `SOURCE_ORDER` 第 5 项 `std/registry.l1`。
+- `std/registry.lain` 已翻译：10 个过程名及签名、3 个静态数据符号及字节均与旧片一致；7 个跨片 helper 以原始
+  名称声明为 extern，过程体也使用完整 helper 名称。`lain0 bootstrap/std/registry.lain` 退出码 0、verify 通过；
+  未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 6 项 `std/scope.l1`。
 
 ## 已知风险
 
