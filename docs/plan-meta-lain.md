@@ -141,13 +141,23 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 - `std/registry.lain` 已翻译：10 个过程名及签名、3 个静态数据符号及字节均与旧片一致；7 个跨片 helper 以原始
   名称声明为 extern，过程体也使用完整 helper 名称。`lain0 bootstrap/std/registry.lain` 退出码 0、verify 通过；
   未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 6 项 `std/scope.l1`。
+- `std/scope.lain` 已翻译：36 个过程名与签名、`meta_kw_colon_b` 数据字节（58）均与旧片一致；41 个跨片/宿主依赖
+  以 extern 声明。与最小数据依赖拼合后 `lain0` 退出码 0、verify 通过（83 个过程、6 个 data）。本轮新增三条表面
+  语法约束记录在《已知风险》。翻译提交为 `4d84724`，旧 `.l1` 已在 `5eec199` 单独删除。
+- 下一片为 `SOURCE_ORDER` 第 7 项 `std/parse.l1`。
 
 ## 已知风险
 
 - **规模**：18,236 行、29 个源文件，是长跑；每片一提交保持可审阅。
 - **Source loading/linking**：编译逐片进行；全量链接和 `meta_driver` 如何消费新模块尚未核实，执行中检查并按需补支持。
 - **布局一致性**：Meta 操作 LAINIR 数据结构；逐片能编译不代表布局语义一致，运行时正确性不在本轮验收范围。
+- **`symbol_addr` 只用生成名**：顶层 `let NAME: [T] = [...]` / `let NAME: addr = "…"` 在产物里落成 `NAME_storage`，
+  所以跨片引用静态数据必须写 `symbol_addr("NAME_storage")`；写 `symbol_addr("NAME")` 会得到 code 2002
+  undefined value。与旧 IR 的 `#data_addr NAME` 是同一条数据的两个拼写。
+- **bool 值型 `if` 的假分支不能写裸 `0`**：`let v: bool = if c { … } else { 0 };` 在 verify 阶段报 2005
+  （`#yield value 0 does not match the declared result`）；循环里的 `break label(0)` 没有这个问题。等价的
+  写法是把它改成守卫式早退（`if c == 0 { … return …; }`），`scope.lain` 的 `meta_scope_decl_node` 即此形。
+- **`ref` 是保留字**：参数名不能叫 `ref`（`extern ast_child(ref: u64, …)` 报「应为 参数名」），改名即可。
 
 ## 参考
 
