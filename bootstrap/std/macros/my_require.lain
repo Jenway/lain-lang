@@ -1,0 +1,81 @@
+// `my_require NAME { ... }`: splice the body when NAME is registered;
+// otherwise defer with the NAME token as the dependency.
+let meta_kw_my_require: ro [u8] = [109, 121, 95, 114, 101, 113, 117, 105, 114, 101];
+
+extern meta_node_is_word(node: u64, base: addr, word: addr, len: u64) -> bool = meta_node_is_word;
+extern meta_syntax_ensure(node: u64, context: u64, handler: u64) -> u32 = meta_syntax_ensure;
+extern meta_cell_get(p: addr) -> u64 = meta_cell_get;
+extern meta_cell_put(p: addr, v: u64) -> u32 = meta_cell_put;
+extern ast_child(node: u64, index: u64) -> u64 = ast_child;
+extern ast_child_count(node: u64) -> u64 = ast_child_count;
+extern ast_delim(node: u64) -> u8 = ast_delim;
+extern ast_kind(node: u64) -> u8 = ast_kind;
+extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
+extern meta_expand_splice_group(body: u64, consumed: u64, context: u64, result: addr) -> u32 = meta_expand_splice_group;
+extern meta_expand_result_clear(result: addr) -> u32 = meta_expand_result_clear;
+extern meta_expand_result_error(result: addr, diagnostic: u64) -> u32 = meta_expand_result_error;
+extern meta_expand_dependency_binding(dependency: u64) -> u64 = meta_expand_dependency_binding;
+
+func meta_register_my_require(node: u64) -> u32 {
+  let dummy: addr = lain_meta_source_data(0);
+  let hit: bool = meta_node_is_word(node, dummy, symbol_addr("meta_kw_my_require_storage"), 10);
+  if hit { return meta_syntax_ensure(node, 2, 12); }
+  return 0;
+}
+
+func meta_expand_my_require(request: addr, result: addr) -> u32 {
+  let clear: u32 = meta_expand_result_clear(result);
+  let abi: u64 = meta_cell_get(request);
+  let parent: u64 = meta_cell_get(request + 8);
+  let cursor: u64 = meta_cell_get(request + 16);
+  let context: u64 = meta_cell_get(request + 40);
+  let expansion_id: u64 = meta_cell_get(request + 48);
+  let head: u64 = ast_child(parent, cursor);
+  let dummy: addr = lain_meta_source_data(0);
+  let word: addr = symbol_addr("meta_kw_my_require_storage");
+  let name_ok: bool = meta_node_is_word(head, dummy, word, 10);
+  let abi_ok: bool = abi == 1;
+  let ctx_ok: bool = context == 2;
+  let matched: bool = abi_ok and ctx_ok and name_ok;
+  if matched == 0 {
+    let z0: u32 = meta_cell_put(result, 0);
+    let z1: u32 = meta_cell_put(result + 32, 0);
+    return 0;
+  }
+  if expansion_id == 0 {
+    let bad_id: u32 = meta_expand_result_error(result, 9408);
+    return 0;
+  }
+  let count: u64 = ast_child_count(parent);
+  let end: u64 = cursor + 3;
+  if end > count {
+    let e0: u32 = meta_expand_result_error(result, 9409);
+    return 0;
+  }
+  let name: u64 = ast_child(parent, cursor + 1);
+  let body: u64 = ast_child(parent, cursor + 2);
+  let kind: u8 = ast_kind(name);
+  let kind_wide: u32 = kind as u32;
+  let delimiter: u8 = ast_delim(body);
+  let delimiter_wide: u32 = delimiter as u32;
+  let name_is_word: bool = kind_wide == 1;
+  let body_is_group: bool = delimiter_wide == 123;
+  let shape: bool = name_is_word and body_is_group;
+  if shape == 0 {
+    let e1: u32 = meta_expand_result_error(result, 9409);
+    return 0;
+  }
+  let binding: u64 = meta_expand_dependency_binding(name);
+  let missing: bool = binding == 0xFFFFFFFFFFFFFFFF;
+  if missing {
+    let d0: u32 = meta_cell_put(result, 2);
+    let d1: u32 = meta_cell_put(result + 8, 0);
+    let d2: u32 = meta_cell_put(result + 16, 0);
+    let d3: u32 = meta_cell_put(result + 24, 0);
+    let d4: u32 = meta_cell_put(result + 32, 0);
+    let d5: u32 = meta_cell_put(result + 40, name);
+    return 0;
+  }
+  let spliced: u32 = meta_expand_splice_group(body, 3, context, result);
+  return spliced;
+}
