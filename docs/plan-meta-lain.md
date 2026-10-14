@@ -133,7 +133,9 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 - `std/emit.lain` 已翻译：33 个过程名和签名、29 个静态数据符号/字节与旧片匹配。它依赖 `std/lainir.l1`
   中的 `lainir_write`、`lainir_repr`、`lainir_emit_uint`；用临时同签名 Lain 定义组成 compile-only 输入后，
   `lain0` 验证通过（65 个过程、29 个 data，退出码 0）。未运行 Meta；旧 `.l1` 将在翻译提交后单独删除。
-- 下一个单元 `std/types.l1`。
+- `std/types.lain` 已翻译：7 个实现过程名和签名与旧片匹配，没有静态数据；含 3 个 extern 依赖声明时直接编译，
+  `lain0` 退出码 0、verify 通过。未运行 Meta；旧 `.l1` 后续单独删除。
+- 下一片为 `SOURCE_ORDER` 第 4 项 `std/regions.l1`；按清单顺序继续。
 
 ## 已知风险
 
