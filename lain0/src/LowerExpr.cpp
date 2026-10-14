@@ -773,6 +773,7 @@ bool Lowerer::lowerLoopExpr(const ast::LoopExpr *e, TypeId expectedTy,
 
   std::vector<const L1Inst *> bodyInsts;
 
+  bool bodyTerminated = false;
   if (e->cond) {
     L1Operand cond{};
     if (!lowerExpr(e->cond, types_->builtin("bool"), bodyInsts, cond))
@@ -781,6 +782,7 @@ bool Lowerer::lowerLoopExpr(const ast::LoopExpr *e, TypeId expectedTy,
     std::vector<const L1Inst *> inner;
     bool term = false;
     if (!lowerBody(e->body, inner, expectedTy, term)) return false;
+    bodyTerminated = term;
 
     std::vector<const L1Inst *> thenInsts;
     for (auto *i : inner) thenInsts.push_back(i);
@@ -800,12 +802,11 @@ bool Lowerer::lowerLoopExpr(const ast::LoopExpr *e, TypeId expectedTy,
                       static_cast<uint32_t>(thenInsts.size()));
     bodyInsts.push_back(lainir_inst_if(builder_, nullptr, cond, thenRegion, nullptr));
   } else {
-    bool term = false;
-    if (!lowerBody(e->body, bodyInsts, expectedTy, term)) return false;
+    if (!lowerBody(e->body, bodyInsts, expectedTy, bodyTerminated)) return false;
   }
 
   // 值型循环末尾必须有一个 #break（结果取最后一个参数在循环入口的值）。
-  if (!params.empty()) {
+  if (!params.empty() && (!bodyTerminated || e->cond != nullptr)) {
     L1Operand breakArg[1] = {paramRefs.back()};
     bodyInsts.push_back(lainir_inst_jump(builder_, INST_BREAK,
                                         e->hasLabel ? intern(e->label) : nullptr,

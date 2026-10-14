@@ -1,0 +1,239 @@
+let meta_kw_let: ro [u8] = [108, 101, 116];
+let meta_kw_eq: ro [u8] = [61];
+let meta_kw_colon: ro [u8] = [58];
+let meta_kw_func: ro [u8] = [102, 117, 110, 99];
+let meta_kw_return: ro [u8] = [114, 101, 116, 117, 114, 110];
+let meta_kw_semi: ro [u8] = [59];
+let meta_kw_if: ro [u8] = [105, 102];
+let meta_kw_else: ro [u8] = [101, 108, 115, 101];
+let meta_kw_and: ro [u8] = [97, 110, 100];
+let meta_kw_or: ro [u8] = [111, 114];
+let meta_kw_as: ro [u8] = [97, 115];
+let meta_kw_for: ro [u8] = [102, 111, 114];
+let meta_kw_in: ro [u8] = [105, 110];
+let meta_kw_loop: ro [u8] = [108, 111, 111, 112];
+let meta_kw_while: ro [u8] = [119, 104, 105, 108, 101];
+let meta_kw_break: ro [u8] = [98, 114, 101, 97, 107];
+let meta_kw_continue: ro [u8] = [99, 111, 110, 116, 105, 110, 117, 101];
+let meta_kw_acc: ro [u8] = [97, 99, 99];
+let meta_kw_load: ro [u8] = [108, 111, 97, 100];
+let meta_kw_store: ro [u8] = [115, 116, 111, 114, 101];
+let meta_kw_lea: ro [u8] = [108, 101, 97];
+let meta_kw_len: ro [u8] = [108, 101, 110];
+let meta_kw_ro: ro [u8] = [114, 111];
+let meta_kw_extern: ro [u8] = [101, 120, 116, 101, 114, 110];
+let meta_bare_sigil: ro [u8] = [63];
+let meta_kw_ptr_of: ro [u8] = [112, 116, 114, 95, 111, 102];
+let meta_kw_addr_of: ro [u8] = [97, 100, 100, 114, 95, 111, 102];
+
+func bs_is_digit(b: u8) -> bool {
+  let w: u32 = b as u32;
+  let lo: bool = w >= 48;
+  let hi: bool = w <= 57;
+  return lo and hi;
+}
+
+func bs_is_hex_digit(b: u8) -> bool {
+  let d: bool = bs_is_digit(b);
+  let w: u32 = b as u32;
+  let llo: bool = w >= 97;
+  let lhi: bool = w <= 102;
+  let lower: bool = llo and lhi;
+  let ulo: bool = w >= 65;
+  let uhi: bool = w <= 70;
+  let upper: bool = ulo and uhi;
+  return lower or upper or d;
+}
+
+func bs_is_ident(b: u8) -> bool {
+  let digit: bool = bs_is_digit(b);
+  let w: u32 = b as u32;
+  let lower: bool = w >= 97 and w <= 122;
+  let upper: bool = w >= 65 and w <= 90;
+  let us: bool = w == 95;
+  return lower or upper or us or digit;
+}
+
+func bs_skip_line(base: addr, from: u64, len: u64) -> u64 {
+  return loop scan(i: u64 = from) {
+    let more: bool = i < len;
+    if more {
+      let b: u8 = load(base + i);
+      let w: u32 = b as u32;
+      if w == 10 { break scan(i + 1); }
+      continue scan(i + 1);
+    } else { break scan(i); }
+  };
+}
+
+func bs_skip_block(base: addr, from: u64, len: u64) -> u64 {
+  return loop scan(i: u64 = from) {
+    let more: bool = i < len;
+    if more {
+      let b: u8 = bs_byte_at(base, i, len);
+      let w: u32 = b as u32;
+      if w == 42 {
+        let j: u64 = i + 1;
+        if j < len {
+          let next: u8 = bs_byte_at(base, j, len);
+          let nw: u32 = next as u32;
+          if nw == 47 { break scan(j + 1); }
+        }
+      }
+      continue scan(i + 1);
+    } else { break scan(len + 1); }
+  };
+}
+
+func bs_skip_space(base: addr, start: u64, len: u64) -> u64 {
+  return loop scan(i: u64 = start) {
+    let more: bool = i < len;
+    if more {
+      let b: u8 = load(base + i);
+      let w: u32 = b as u32;
+      if w <= 32 { continue scan(i + 1); }
+      if w == 47 {
+        let j: u64 = i + 1;
+        let next: u8 = bs_byte_at(base, j, len);
+        let nw: u32 = next as u32;
+        if nw == 47 {
+          let after_line: u64 = bs_skip_line(base, j, len);
+          continue scan(after_line);
+        }
+        if nw == 42 {
+          let after_block: u64 = bs_skip_block(base, j + 1, len);
+          continue scan(after_block);
+        }
+      }
+      break scan(i);
+    } else { break scan(i); }
+  };
+}
+
+func bs_skip_ident(base: addr, start: u64, len: u64) -> u64 {
+  return loop scan(i: u64 = start) {
+    if i < len {
+      let b: u8 = load(base + i);
+      if bs_is_ident(b) { continue scan(i + 1); }
+      break scan(i);
+    } else { break scan(i); }
+  };
+}
+
+func bs_read_hex(base: addr, start: u64, len: u64) -> u64 {
+  return loop scan(i: u64 = start, v: u64 = 0) {
+    if i < len {
+      let b: u8 = load(base + i);
+      if bs_is_hex_digit(b) {
+        let val: u64 = bs_digit_value(b);
+        continue scan(i + 1, v * 16 + val);
+      } else { break scan(v); }
+    } else { break scan(v); }
+  };
+}
+
+func bs_digit_value(b: u8) -> u64 {
+  let d: bool = bs_is_digit(b);
+  if d {
+    let w: u64 = b as u64;
+    return w - 48;
+  }
+  let h: bool = bs_is_hex_digit(b);
+  if h {
+    let w: u64 = b as u64;
+    let lo: bool = b as u32 >= 97;
+    let base: u64 = if lo { 87 } else { 55 };
+    return w - base;
+  }
+  return 0xFFFFFFFFFFFFFFFF;
+}
+
+func bs_read_uint(base: addr, start: u64, len: u64) -> u64 {
+  let b0: u8 = bs_byte_at(base, start, len);
+  let w0: u32 = b0 as u32;
+  let is_zero: bool = w0 == 48;
+  let b1: u8 = bs_byte_at(base, start + 1, len);
+  let w1: u32 = b1 as u32;
+  let lx: bool = w1 == 120;
+  let ux: bool = w1 == 88;
+  let hex: bool = is_zero and (lx or ux);
+  if hex { return bs_read_hex(base, start + 2, len); }
+  return bs_read_dec(base, start, len);
+}
+
+func bs_read_dec(base: addr, start: u64, len: u64) -> u64 {
+  return loop scan(i: u64 = start, v: u64 = 0) {
+    if i < len {
+      let b: u8 = load(base + i);
+      if bs_is_digit(b) {
+        let w: u64 = b as u64;
+        let d: u64 = w - 48;
+        continue scan(i + 1, v * 10 + d);
+      } else { break scan(v); }
+    } else { break scan(v); }
+  };
+}
+
+func bs_skip_qualified(base: addr, start: u64, len: u64) -> u64 {
+  return loop scan(at: u64 = start) {
+    let hi: u64 = bs_skip_ident(base, at, len);
+    let dot: u64 = bs_skip_space(base, hi, len);
+    if bs_is_byte(base, dot, 46) { continue scan(dot + 1); }
+    break scan(hi);
+  };
+}
+
+func bs_is_byte(base: addr, i: u64, c: u8) -> bool {
+  let b: u8 = load(base + i);
+  let bw: u32 = b as u32;
+  let cw: u32 = c as u32;
+  return bw == cw;
+}
+
+func bs_byte_at(base: addr, at: u64, len: u64) -> u8 {
+  if at < len { return load(base + at); }
+  return 0;
+}
+
+func bs_is_operator(base: addr, at: u64, len: u64, n: u64) -> bool {
+  let b8: u8 = bs_byte_at(base, at, len);
+  let b: u32 = b8 as u32;
+  let n1: bool = n == 1;
+  let plus: bool = b == 43;
+  let minus: bool = b == 45;
+  let star: bool = b == 42;
+  let slash: bool = b == 47;
+  let percent: bool = b == 37;
+  let lt: bool = b == 60;
+  let gt: bool = b == 62;
+  let punct1: bool = plus or minus or star or slash or percent or lt or gt;
+  let r1: bool = n1 and punct1;
+  let n2: bool = n == 2;
+  let eqb: bool = b == 61;
+  let bangb: bool = b == 33;
+  let punct2: bool = eqb or bangb or lt or gt or minus;
+  let r2: bool = n2 and punct2;
+  let p: addr = base + at;
+  let n3: bool = n == 3;
+  let andword: bool = meta_bytes_equal(p, symbol_addr("meta_kw_and_storage"), 3);
+  let orword: bool = meta_bytes_equal(p, symbol_addr("meta_kw_or_storage"), 2);
+  let asword: bool = meta_bytes_equal(p, symbol_addr("meta_kw_as_storage"), 2);
+  let r3: bool = n3 and andword;
+  let r4: bool = n2 and orword;
+  let r5: bool = n2 and asword;
+  return r1 or r2 or r3 or r4 or r5;
+}
+
+func bs_match_keyword(base: addr, at: u64, len: u64, kw: addr, kw_len: u64) -> bool {
+  let need: u64 = at + kw_len;
+  if need <= len { return meta_bytes_equal(base + at, kw, kw_len); }
+  return 0;
+}
+
+func bs_align_up(v: u64, a: u64) -> u64 {
+  if a == 0 { return v; }
+  let back: u64 = a - 1;
+  let sum: u64 = v + back;
+  let q: u64 = sum / a;
+  return q * a;
+}
