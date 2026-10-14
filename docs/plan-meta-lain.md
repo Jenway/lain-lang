@@ -45,10 +45,8 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 **数据地址与 cast 前置能力已补齐**：`symbol_addr("symbol")` 可生成 `#bitcast[#addr](%symbol)`，样例编译过 verify；
 `addr as u64` / `u64 as addr` 发出 `#bitcast`，覆盖旧 11 处转换的表面形态。
 
-**仍需决定翻译片段的编译边界**：`std/lex.l1` 调用 `meta_bytes_equal`，其实现位于 `std/types.l1`；
-SOURCE_ORDER 顺序是 lex、emit、types。单独编译 lex 会缺 callee；加入同名 extern shim 再带上真实定义
-会因 duplicate subroutine 被 verifier 拒绝。方案是把相依片段合并后用 `lain0` 编译，或给编译器加多源模块
-输入能力。两者都没有实施；尚未翻译、也没有删除任何旧 `.l1`。
+**翻译编译边界**：`std/lex.lain` 依赖后续 `std/types.lain` 的 `meta_bytes_equal`。本片用合并 Lain 源
+与依赖实现编译验证；今后遇到跨片调用，按最小依赖闭包组合编译，不添加与实际定义冲突的 extern shim。
 
 `meta_driver` 的旧入口把 SOURCE_ORDER 中的 LAINIR 文本拼为一个模块再 parse/verify。当前不需要为了
 「逐片能编译」而先改它；等 Lain 源片和生成的 LAINIR 模块装配边界确定后，再做对应整合。
@@ -127,14 +125,13 @@ SOURCE_ORDER 顺序是 lex、emit、types。单独编译 lex 会缺 callee；加
 
 - 目录重命名及 examples 保留：完成，提交 `d63b6c6`。
 - `symbol_addr` 与字符串 token 去引号修复：实现完成，示例编译通过；34 个既有样例 + 新样例共 **35/35**
-  `--round-trip` 通过。
-3. `std/lex.lain` 首轮翻译已建立，包含 27 个顶层静态表和 17 个过程；全部静态数据字节与归档相同，
-   过程名集合也匹配。独立编译时因缺少 `meta_bytes_equal` 而失败；将它与其依赖实现合并编译后，`lain0`
-   验证通过（45 个过程、27 个 data）。这满足本片的编译闸门，未运行 Meta。
-4. 修复 `lain0` 值型 loop 的重复合成 break：仅在无条件循环且循环体未终止时补 fallback break；带条件循环保留
-   条件为假时的 fallback break。重建成功，examples `--round-trip` 回归 **35/35**。
-5. 本次验证后，按用户规则在后续提交删除 `bootstrapl1/std/lex.l1`；其它归档文件仍保留。
-6. 下一个翻译单元 `std/emit.l1`。
+  `--round-trip` 通过，提交 `18a9fb1`（已推送）。
+- `std/lex.lain` 已按 compile-only gate 翻译并通过：27 个顶层静态表字节匹配、17 个过程名匹配；与
+  `meta_bytes_equal` 依赖实现合并编译，结果 45 个过程、27 个 data，退出码 0。未运行 Meta。
+- 修复 `lain0` 值型 loop 的重复合成 break；重建成功，examples `--round-trip` **35/35**。
+- 翻译提交 `f3b2c1b`、删除 `bootstrapl1/std/lex.l1` 提交 `5fbe5d5`，均已推送至 `feat/meta`。
+- 当前下一片为 `std/emit.l1`；翻译正在进行，旧 `.l1` 在通过 compile gate 前保留。
+- 下一个后续单元是 `std/types.l1`。
 
 ## 已知风险
 
