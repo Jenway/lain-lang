@@ -1,0 +1,415 @@
+extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
+extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
+extern lain_meta_source_count() -> u64 = lain_meta_source_count;
+extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
+extern lain_meta_ast_node_addr(reference: u64) -> addr = lain_meta_ast_node_addr;
+extern lain_meta_ast_span_addr(reference: u64, length: u64) -> addr = lain_meta_ast_span_addr;
+extern lain_meta_ast_child_ref(group: u64, index: u64) -> u64 = lain_meta_ast_child_ref;
+extern meta_cell_get(cell: addr) -> u64 = meta_cell_get;
+extern meta_cell_put(cell: addr, value: u64) -> u32 = meta_cell_put;
+extern meta_bytes_equal(a: addr, b: addr, length: u64) -> bool = meta_bytes_equal;
+extern meta_recognize_source(source: u64) -> u32 = meta_recognize_source;
+
+func meta_cursor_next(parent: u64, index: u64) -> u64 {
+  let count: u64 = ast_child_count(parent);
+  if index >= count { return 0; }
+  let next_index: u64 = index + 1;
+  let has_next: bool = next_index < count;
+  let result: u64 = if has_next { ast_child(parent, next_index) } else { 0 };
+  return result;
+}
+
+func ast_kind(ref_value: u64) -> u8 {
+  let none: bool = ast_none_hit(ref_value);
+  if none { return 0; }
+  let node_addr: addr = lain_meta_ast_node_addr(ref_value);
+  let addr_value: u64 = node_addr as u64;
+  let bad_addr: bool = addr_value == 0;
+  if bad_addr { return 0; }
+  let result: u8 = load(node_addr);
+  return result;
+}
+
+func ast_delim(ref_value: u64) -> u8 {
+  let none: bool = ast_none_hit(ref_value);
+  if none { return 0; }
+  let node_addr: addr = lain_meta_ast_node_addr(ref_value);
+  let addr_value: u64 = node_addr as u64;
+  let bad_addr: bool = addr_value == 0;
+  if bad_addr { return 0; }
+  let delim_addr: addr = node_addr + 1;
+  let result: u8 = load(delim_addr);
+  return result;
+}
+
+func ast_none_hit(ref_value: u64) -> bool {
+  let is_none: bool = ref_value == 0;
+  if is_none {
+    let scratch: addr = lain_meta_scratch_data();
+    let cell: addr = scratch + 232;
+    let count: u64 = meta_cell_get(cell);
+    let updated: u64 = count + 1;
+    let put_result: u32 = meta_cell_put(cell, updated);
+    return true;
+  }
+  return false;
+}
+
+func ast_child_count(ref_value: u64) -> u64 {
+  let none: bool = ast_none_hit(ref_value);
+  if none { return 0; }
+  let node_addr: addr = lain_meta_ast_node_addr(ref_value);
+  let addr_value: u64 = node_addr as u64;
+  let bad_addr: bool = addr_value == 0;
+  if bad_addr {
+    let scratch: addr = lain_meta_scratch_data();
+    let cell: addr = scratch + 248;
+    let old_count: u64 = meta_cell_get(cell);
+    let updated_count: u64 = old_count + 1;
+    return 0;
+  }
+  let count_addr: addr = node_addr + 4;
+  let narrow_count: u32 = load(count_addr);
+  let count: u64 = narrow_count as u64;
+  return count;
+}
+
+func ast_child(ref_value: u64, index: u64) -> u64 {
+  let count: u64 = ast_child_count(ref_value);
+  let in_range: bool = index < count;
+  let result: u64 = if in_range { lain_meta_ast_child_ref(ref_value, index) } else { 0 };
+  return result;
+}
+
+func meta_node_child(ref_value: u64) -> u64 {
+  let count: u64 = ast_child_count(ref_value);
+  let empty: bool = count == 0;
+  let result: u64 = if empty { 0 } else { ast_child(ref_value, 0) };
+  return result;
+}
+
+func ast_text_ref(ref_value: u64) -> u64 {
+  let none: bool = ast_none_hit(ref_value);
+  if none { return 0; }
+  let node_addr: addr = lain_meta_ast_node_addr(ref_value);
+  let addr_value: u64 = node_addr as u64;
+  let bad_addr: bool = addr_value == 0;
+  if bad_addr { return 0; }
+  let text_addr: addr = node_addr + 8;
+  let text_ref: u64 = load(text_addr);
+  return text_ref;
+}
+
+func ast_text_len(ref_value: u64) -> u64 {
+  let none: bool = ast_none_hit(ref_value);
+  if none { return 0; }
+  let node_addr: addr = lain_meta_ast_node_addr(ref_value);
+  let addr_value: u64 = node_addr as u64;
+  let bad_addr: bool = addr_value == 0;
+  if bad_addr { return 0; }
+  let length_addr: addr = node_addr + 16;
+  let result: u64 = load(length_addr);
+  return result;
+}
+
+func ast_text_addr(ref_value: u64) -> addr {
+  let text_ref: u64 = ast_text_ref(ref_value);
+  let text_len: u64 = ast_text_len(ref_value);
+  let result: addr = lain_meta_ast_span_addr(text_ref, text_len);
+  return result;
+}
+
+func ast_text_start(ref_value: u64) -> u64 {
+  let text_ref: u64 = ast_text_ref(ref_value);
+  let offset: u64 = text_ref & 0xFFFFFFFFFFFF;
+  return offset;
+}
+
+func meta_cell_get32(cell: addr) -> u64 {
+  let narrow: u32 = load(cell);
+  let result: u64 = narrow as u64;
+  return result;
+}
+
+func meta_node_kind(ref_value: u64) -> u64 {
+  let narrow: u8 = ast_kind(ref_value);
+  let result: u64 = narrow as u64;
+  return result;
+}
+
+func meta_node_start(ref_value: u64) -> u64 {
+  let result: u64 = ast_text_start(ref_value);
+  return result;
+}
+
+func meta_node_len(ref_value: u64) -> u64 {
+  let result: u64 = ast_text_len(ref_value);
+  return result;
+}
+
+func meta_root_of(source: u64) -> u64 {
+  let scratch: addr = lain_meta_scratch_data();
+  let doubled_source: u64 = source * 2;
+  let entry_index: u64 = doubled_source + 1;
+  let entry_bytes: u64 = entry_index * 32;
+  let frame: u64 = entry_bytes + 4096;
+  let root_offset: u64 = frame + 8;
+  let root_cell: addr = scratch + root_offset;
+  let result: u64 = meta_cell_get(root_cell);
+  return result;
+}
+
+func meta_host_roots_at() -> u64 {
+  let scratch: addr = lain_meta_scratch_data();
+  let segment_cell: addr = scratch + 8;
+  let segment_count: u64 = meta_cell_get32(segment_cell);
+  let table_bytes: u64 = segment_count * 32;
+  let result: u64 = table_bytes + 4096;
+  return result;
+}
+
+func meta_host_meta_end() -> u64 {
+  let scratch: addr = lain_meta_scratch_data();
+  let source_cell: addr = scratch + 12;
+  let source_count: u64 = meta_cell_get32(source_cell);
+  let roots_offset: u64 = meta_host_roots_at();
+  let roots_bytes: u64 = source_count * 8;
+  let result: u64 = roots_offset + roots_bytes;
+  return result;
+}
+
+func ast_segment_of_source(src: u64) -> u64 {
+  let is_primary: bool = src == 0;
+  let result: u64 = if is_primary { 2 } else { src * 2 + 3 };
+  return result;
+}
+
+func sem_base_get(scratch: addr) -> u64 {
+  let cell: addr = scratch + 1000;
+  let result: u64 = meta_cell_get(cell);
+  return result;
+}
+
+func sem_count_get(scratch: addr) -> u64 {
+  let cell: addr = scratch + 1008;
+  let result: u64 = meta_cell_get(cell);
+  return result;
+}
+
+func sem_count_put(scratch: addr, v: u64) -> u32 {
+  let base: u64 = sem_base_get(scratch);
+  let header_offset: u64 = base - 48;
+  let count_cell: addr = scratch + 1008;
+  let count_status: u32 = meta_cell_put(count_cell, v);
+  let header: addr = scratch + header_offset;
+  let header_count_cell: addr = header + 16;
+  let header_status: u32 = meta_cell_put(header_count_cell, v);
+  return 0;
+}
+
+func sem_cap_get(scratch: addr) -> u64 {
+  let cell: addr = scratch + 1056;
+  let result: u64 = meta_cell_get(cell);
+  return result;
+}
+
+func meta_sem_init() -> u32 {
+  let scratch: addr = lain_meta_scratch_data();
+  let base: u64 = sem_base_get(scratch);
+  let capacity: u64 = sem_cap_get(scratch);
+  let header_offset: u64 = base - 48;
+  let header: addr = scratch + header_offset;
+  let version_cell: addr = header;
+  let version_status: u32 = meta_cell_put(version_cell, 1);
+  let stride_cell: addr = header + 8;
+  let stride_status: u32 = meta_cell_put(stride_cell, 72);
+  let count_cell: addr = header + 16;
+  let count_status: u32 = meta_cell_put(count_cell, 0);
+  let capacity_cell: addr = header + 24;
+  let capacity_status: u32 = meta_cell_put(capacity_cell, capacity);
+  let entries_cell: addr = header + 32;
+  let entries_status: u32 = meta_cell_put(entries_cell, 48);
+  let epoch_cell: addr = header + 40;
+  let epoch_status: u32 = meta_cell_put(epoch_cell, 0);
+  return 0;
+}
+
+func sem_find(scratch: addr, parent: u64, index: u64, env: u64, scope: u64, ctx: u64) -> u64 {
+  let base: u64 = sem_base_get(scratch);
+  let count: u64 = sem_count_get(scratch);
+  let result: u64 = loop scan(i: u64 = 0) {
+    if i < count {
+      let entry_offset: u64 = base + i * 72;
+      let entry: addr = scratch + entry_offset;
+      let parent_value: u64 = meta_cell_get(entry);
+      let parent_matches: bool = parent_value == parent;
+      if parent_matches == 0 { continue scan(i + 1); }
+      let index_cell: addr = entry + 8;
+      let index_value: u64 = meta_cell_get(index_cell);
+      let index_matches: bool = index_value == index;
+      if index_matches == 0 { continue scan(i + 1); }
+      let env_cell: addr = entry + 16;
+      let env_value: u64 = meta_cell_get(env_cell);
+      let env_matches: bool = env_value == env;
+      let scope_cell: addr = entry + 24;
+      let scope_value: u64 = meta_cell_get(scope_cell);
+      let scope_matches: bool = scope_value == scope;
+      let context_cell: addr = entry + 32;
+      let context_value: u64 = meta_cell_get(context_cell);
+      let context_matches: bool = context_value == ctx;
+      let scope_and_env: bool = env_matches and scope_matches;
+      let key_prefix_matches: bool = parent_matches and index_matches;
+      let key_matches_a: bool = key_prefix_matches and scope_and_env;
+      let key_matches: bool = key_matches_a and context_matches;
+      if key_matches { break scan(i); }
+      continue scan(i + 1);
+    }
+    break scan(0xFFFFFFFFFFFFFFFF);
+  };
+  return result;
+}
+
+func sem_find_position(scratch: addr, parent: u64, index: u64) -> u64 {
+  let base: u64 = sem_base_get(scratch);
+  let count: u64 = sem_count_get(scratch);
+  let result: u64 = loop scan(i: u64 = 0) {
+    if i < count {
+      let entry_offset: u64 = base + i * 72;
+      let entry: addr = scratch + entry_offset;
+      let entry_parent: u64 = meta_cell_get(entry);
+      let index_cell: addr = entry + 8;
+      let entry_index: u64 = meta_cell_get(index_cell);
+      let same_parent: bool = entry_parent == parent;
+      let same_index: bool = entry_index == index;
+      let same_position: bool = same_parent and same_index;
+      if same_position { break scan(i); }
+      continue scan(i + 1);
+    }
+    break scan(0xFFFFFFFFFFFFFFFF);
+  };
+  return result;
+}
+
+func meta_node_form(parent: u64, index: u64) -> u64 {
+  let result: u64 = meta_sem_lookup(parent, index);
+  return result;
+}
+
+func meta_sem_lookup(parent: u64, index: u64) -> u64 {
+  let scratch: addr = lain_meta_scratch_data();
+  let hit: u64 = sem_find_position(scratch, parent, index);
+  let missing: bool = hit == 0xFFFFFFFFFFFFFFFF;
+  if missing { return 0xFFFFFFFFFFFFFFFF; }
+  let base: u64 = sem_base_get(scratch);
+  let entry_offset: u64 = base + hit * 72;
+  let entry: addr = scratch + entry_offset;
+  let tag_cell: addr = entry + 48;
+  let result: u64 = meta_cell_get(tag_cell);
+  return result;
+}
+
+func meta_sem_put_full_key(parent: u64, index: u64, env: u64, scope: u64, ctx: u64, form: u64, binding: u64, expansion: u64) -> u32 {
+  let scratch: addr = lain_meta_scratch_data();
+  let hit: u64 = sem_find(scratch, parent, index, env, scope, ctx);
+  let missing: bool = hit == 0xFFFFFFFFFFFFFFFF;
+  if missing {
+    let base: u64 = sem_base_get(scratch);
+    let count: u64 = sem_count_get(scratch);
+    let capacity: u64 = sem_cap_get(scratch);
+    let room: bool = count < capacity;
+    if room == 0 {
+      let fail_result: u32 = lain_meta_fail(17);
+      return 17;
+    }
+    let entry_offset: u64 = base + count * 72;
+    let entry: addr = scratch + entry_offset;
+    let parent_status: u32 = meta_cell_put(entry, parent);
+    let index_cell: addr = entry + 8;
+    let index_status: u32 = meta_cell_put(index_cell, index);
+    let env_cell: addr = entry + 16;
+    let env_status: u32 = meta_cell_put(env_cell, env);
+    let scope_cell: addr = entry + 24;
+    let scope_status: u32 = meta_cell_put(scope_cell, scope);
+    let context_cell: addr = entry + 32;
+    let context_status: u32 = meta_cell_put(context_cell, ctx);
+    let binding_cell: addr = entry + 40;
+    let binding_status: u32 = meta_cell_put(binding_cell, binding);
+    let form_cell: addr = entry + 48;
+    let form_status: u32 = meta_cell_put(form_cell, form);
+    let type_cell: addr = entry + 56;
+    let type_status: u32 = meta_cell_put(type_cell, 0);
+    let expansion_cell: addr = entry + 64;
+    let expansion_status: u32 = meta_cell_put(expansion_cell, expansion);
+    let updated_count: u64 = count + 1;
+    let count_status: u32 = sem_count_put(scratch, updated_count);
+    return 0;
+  }
+  let base_existing: u64 = sem_base_get(scratch);
+  let existing_offset: u64 = base_existing + hit * 72;
+  let existing_entry: addr = scratch + existing_offset;
+  let existing_binding_cell: addr = existing_entry + 40;
+  let existing_binding_status: u32 = meta_cell_put(existing_binding_cell, binding);
+  let existing_form_cell: addr = existing_entry + 48;
+  let existing_form_status: u32 = meta_cell_put(existing_form_cell, form);
+  let existing_expansion_cell: addr = existing_entry + 64;
+  let existing_expansion_status: u32 = meta_cell_put(existing_expansion_cell, expansion);
+  return 0;
+}
+
+func meta_sem_put_annotated(parent: u64, index: u64, context: u64, form: u64, binding: u64, expansion: u64) -> u32 {
+  let result: u32 = meta_sem_put_full_key(parent, index, 0, 0, context, form, binding, expansion);
+  return result;
+}
+
+func meta_node_is_word(i: u64, base: addr, kw: addr, kw_len: u64) -> bool {
+  let kind: u64 = meta_node_kind(i);
+  let is_word: bool = kind == 1;
+  if is_word == 0 { return false; }
+  let node_len: u64 = meta_node_len(i);
+  let same_len: bool = node_len == kw_len;
+  if same_len == 0 { return false; }
+  let text: addr = ast_text_addr(i);
+  let result: bool = meta_bytes_equal(text, kw, kw_len);
+  return result;
+}
+
+func meta_source_of(base: addr) -> u64 {
+  let count: u64 = lain_meta_source_count();
+  let wanted: u64 = base as u64;
+  let result: u64 = loop scan(i: u64 = 0) {
+    if i < count {
+      let source_addr: addr = lain_meta_source_data(i);
+      let source_value: u64 = source_addr as u64;
+      let same: bool = source_value == wanted;
+      if same { break scan(i); }
+      continue scan(i + 1);
+    }
+    break scan(0xFFFFFFFFFFFFFFFF);
+  };
+  return result;
+}
+
+func meta_source_has_tree(source: u64) -> bool {
+  let scratch: addr = lain_meta_scratch_data();
+  let doubled_source: u64 = source * 2;
+  let segment_index: u64 = doubled_source + 1;
+  let entry_offset: u64 = segment_index * 32;
+  let frame: u64 = entry_offset + 4096;
+  let size_offset: u64 = frame + 16;
+  let size_cell: addr = scratch + size_offset;
+  let size: u64 = meta_cell_get(size_cell);
+  let result: bool = size != 0;
+  return result;
+}
+
+func meta_root_of_source(base: addr) -> u64 {
+  let source: u64 = meta_source_of(base);
+  let missing: bool = source == 0xFFFFFFFFFFFFFFFF;
+  let result: u64 = if missing { 0 } else { meta_root_of(source) };
+  return result;
+}
+
+func meta_parse_source(source: u64) -> u32 {
+  let result: u32 = meta_recognize_source(source);
+  return result;
+}

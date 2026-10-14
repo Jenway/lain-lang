@@ -144,7 +144,11 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 - `std/scope.lain` 已翻译：36 个过程名与签名、`meta_kw_colon_b` 数据字节（58）均与旧片一致；41 个跨片/宿主依赖
   以 extern 声明。与最小数据依赖拼合后 `lain0` 退出码 0、verify 通过（83 个过程、6 个 data）。本轮新增三条表面
   语法约束记录在《已知风险》。翻译提交为 `4d84724`，旧 `.l1` 已在 `5eec199` 单独删除。
-- 下一片为 `SOURCE_ORDER` 第 7 项 `std/parse.l1`。
+- `std/parse.lain` 已翻译：35 个实现过程名和签名与归档旧片一致，无静态数据；依赖已在单文件输入中声明，无数据 stub。
+  `./build/lain0/lain0.exe build/lain0/parse-with-deps.lain` 退出码 0、verify 通过（46 个过程）。未运行 Meta。
+  旧 `.l1` 已在 `483aec4` 删除。
+
+- 下一片为 `SOURCE_ORDER` 第 8 项 `std/macros/my_if.l1`。
 
 ## 已知风险
 
