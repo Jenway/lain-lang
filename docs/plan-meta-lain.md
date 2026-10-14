@@ -220,7 +220,12 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   `lain0` 退出码 0、verify 通过。原值 if 喂 `#return`/`if` 的位置全部改成平坦守卫，条件与原顺序不变，唯取中分支才执行
   （如 `meta_scalar_op` 仍只在 `sl == sym_len` 时调 `meta_bytes_equal`）；`meta_type_resolve` 经一次修正后限定名/非限定名两支
   顺序与旧片一致；`%rw`/`ref` 类保留字参数改名并保留链接名。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 24 项 `std/records.l1`（804 行、22 过程，无数据块）。
+- `std/records.lain` 已翻译：22 个实现过程名与签名与旧片一致，62 个跨片依赖以 extern 声明，无静态数据、过程顺序与旧片相同；
+  fixture 需 stub 5 个来自 `lainir.l1` 的数据符号（`lainir_base_name`/`lainir_name_b`/`lainir_name_b2`/`lainir_name_v`/`lainir_text_buffer`）；
+  `lain0` 退出码 0、verify 通过，本仓自有工具 `compare_fragment.py` 与 `compare_call_order.py` 均退出码 0。`meta_record_type_id`
+  的 `%id` 值 if 之后还有无条件的 `restore_top`/`release`，若改平坦守卫会跳过清理，故用一次性选择循环 `pick_id` 保留原顺序；
+  `%same`/u8 比较/循环参数遮蔽改名等改写逐条核对。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 25 项 `std/funcs.l1`（3720 行、53 过程，剩余最大的一片）。
 
 ## 组装与收尾（终局）
 
