@@ -151,7 +151,10 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 - `std/macros/my_if.lain` 已翻译：6 个实现过程名与签名、2 个静态数据字节与旧片一致；18 个跨片/宿主依赖以 extern 声明。
   与临时 `meta_kw_else` 数据定义拼合后 `lain0` 退出码 0、verify 通过（27 个过程、3 个 data）。未运行 Meta。
   旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 9 项 `std/macros/my_block.l1`。
+- `std/macros/my_block.lain` 已翻译：4 个实现过程名与签名、`meta_kw_my_block` 数据字节（109 121 95 98 108 111 99 107）
+  与旧片一致；23 个跨片/宿主依赖以 extern 声明，`meta_expand_splice_group` 在文件内定义。`lain0` 退出码 0、
+  verify 通过（28 个过程、1 个 data），无需数据 stub。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 10 项 `std/macros/my_require.l1`。
 
 ## 已知风险
 
