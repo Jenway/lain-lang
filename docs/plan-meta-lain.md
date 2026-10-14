@@ -254,7 +254,14 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   过程体里的取址改为 `symbol_addr("NAME_text_storage")`；已确认没有其他单元引用旧数据符号，且四个过程发出的
   `lainir_write` 长度（6/14/6/18）与归档一致。`compare_fragment.py` 因此报 4 处 data 改名（预期内、唯一的有意偏差）。
   未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 28 项 `meta.l1`（2438 行、42 过程，最后一片）。
+- `meta.lain` 已翻译（**最后一片，28/28 完成**）：42 个实现过程名与签名与旧片一致，128 个跨单元依赖以 extern 声明，无静态数据。
+  切成 6 组并行翻译（part1 是单个 607 行的 `meta_emit_expr`，其余 7–9 个过程/组），主代理按归档过程顺序合并 42 个过程体。
+  fixture（clean unit + 17 个他单元数据 stub）退出码 0、187 过程；`compare_fragment.py` OK（42/42 签名）；
+  `compare_call_order.py` 39/42 ok，3 处差异逐条核对后全部良性：`meta_lower_struct`/`meta_lower_typed` 是平坦守卫
+  把 `lain_meta_fail` 提到条件之后（**调用多重集完全相同**，10/10、11/11），`meta_operand_is_addr` 是把归档
+  `%k` 值 if 的假支（类型解析路）提为提前返回——归档里该支文本上在后、执行上走同一路径，两支都以 `kind == 3` 返回。
+  未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- **28/28 片全部翻译完毕**，`bootstrapl1/SOURCE_ORDER` 对应单元已全部由 `bootstrap/` 下的 Lain 源替代。
 
 ## 组装与收尾（终局）
 
