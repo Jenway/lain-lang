@@ -955,7 +955,8 @@ private:
   ast::Expr *parsePrefix() {
     if (isQuoted(current())) {
       const Token token = advance();
-      return arena_.make<ast::StrLitExpr>(token.span, unquote(token.text));
+      return arena_.make<ast::StrLitExpr>(
+          token.span, token.kind == Tok::StrLit ? token.text : unquote(token.text));
     }
 
     switch (current().kind) {

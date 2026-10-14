@@ -70,7 +70,8 @@ bool Lowerer::lowerStmt(const ast::Stmt *s, std::vector<const L1Inst *> &out,
            static_cast<const ast::NameExpr *>(callee)->name == "len" ||
            static_cast<const ast::NameExpr *>(callee)->name == "ref_of" ||
            static_cast<const ast::NameExpr *>(callee)->name == "mut_ref_of" ||
-           static_cast<const ast::NameExpr *>(callee)->name == "slice_of");
+           static_cast<const ast::NameExpr *>(callee)->name == "slice_of" ||
+           static_cast<const ast::NameExpr *>(callee)->name == "symbol_addr");
       // 投影 Shape.Circle(s) 长得像调用，但它不是过程调用 —— 不能走尾调用。
       bool projectionCall = false;
       if (callee != nullptr && callee->kind == ast::ExprKind::Dotted) {

@@ -9,18 +9,44 @@
 
 - **终点**：`bootstrap/` 里是 Lain 写的 Meta（`.lain`），`lain0` 能把它编译成合法
   LAINIR；手写 LAINIR（`bootstrapl1/`）被逐步删光；`lain0` 不再依赖手写 IR 自举。
-- **本阶段不要求运行时正确**（用户明确：翻译时「不测试，只保证能编译」）；运行时验证
-  留给整份 Meta 在 LainVM 跑通时做。
+- **本阶段不要求运行时正确**（用户明确：翻译时「不测试，只保证能编译」）；逐片只要求 `lain0`
+  能编译。运行时验证不作为翻译闸门，也不在本计划本轮执行。
 - **约束**：`bootstrap` 曾冻结（D-001）。本次重命名 + 替代 = 主动结束冻结，需在档案里注记。
 
 ## 现状盘点（已核清，作为本计划的依据）
 
-- Meta 由 `bootstrap/meta.l1` + `bootstrap/std/*.l1`（含 `std/macros/`、`std/handlers/`
-  子目录）组成，共 **14,825 行**手写 LAINIR。
-- `bootstrap/SOURCE_ORDER` 列出 28 个 `.l1` 文件的拼装顺序——**天然就是「一个一个」的清单**。
-- 已确认 Meta 里**没有** `#call[tail]`（0 次）、**没有** 多结果过程（0 次）——两个已知阻塞点都不触发。
-- `bootstrap/lain/examples/`（31 个 Lain 文件）是 `lain0` 的编译回归测试，**不属于 Meta**。
+- Meta 由 `bootstrapl1/meta.l1` + `bootstrapl1/std/*.l1`（含子目录）组成，按 `SOURCE_ORDER`
+  有 **28 个清单文件 + meta.l1（共 29 个）**，合计 **18,236 行**。
+- `bootstrapl1/SOURCE_ORDER` 列出 28 个 `.l1` 文件的拼装顺序；`meta.l1` 由驱动额外加载。
+- 已确认 Meta 里**没有** `#call[tail]`、**没有**多结果过程。
+- `bootstrap/lain/examples/`（35 个 Lain 文件）是 `lain0` 的编译回归测试，**不属于 Meta**。
 
+### Step 0 完成（`feat/meta`）
+
+- 原 `bootstrap/` 已归档到 `bootstrapl1/`；新 `bootstrap/lain/examples/` 保留 34 个样例。
+- `bootstrapl1/FROZEN.md` 已注明 D-001 冻结结束、stage 2 改由 Lain 逐步替代。
+- `bash scripts/regress.sh` 实测 **34/34**。
+- 提交并推送：`d63b6c6`（分支 `feat/meta`）。
+
+### 表达力审计：发现前置缺口，正在补齐
+
+Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成，精确统计 **18,236 行**。
+对这些文件扫描真实代码行（忽略整行 `//` 注释）后，确认：**524 个有效 `#data_addr`**、
+**10 个 `#ptr2int`**、**1 个 `#int2ptr`**；`#ptr` 命中是注释误报。共有 **33 个**宿主 `#extern`
+链接符号。
+
+`#data_addr` 经常作为内嵌操作数出现。现有 Lain 没有静态数据符号地址的表面形式；
+`addr_of(integer)` 不能代替它。正在给 `lain0` 增加 `symbol_addr("symbol")`：参数必须是
+编译期字符串字面量，产生 `#bitcast[#addr](%symbol)`。Verifier 已确认模块级 `#data` 符号
+作为 `#addr` 绑定，因此该形式可直接对应旧 `#data_addr symbol`，并能用于调用参数等表达式位。
+
+另有旧 `#ptr2int/#int2ptr` 共 11 处（`std/types.l1`、`std/parse.l1`、`std/syntax.l1`）；
+转换需逐处核对，不能只以能编译作为等价证明。33 个宿主 extern 可用 Lain `extern` 声明，
+由 `meta_driver` 绑定。主体指令 `#if/#yield/#loop`、`#alloca/#load/#store/#lea` 及整数、
+比较、位运算均有 lain0 对应能力；顶层数据布局还需逐类型核对。
+
+下一步先调研 `lain0` 的 compiler API、模块输出及 `meta_driver` 装载路径。依需补 multi-source 编译或模块链接；
+不预设必须采用哪条方案。然后用 Lain 翻译 `SOURCE_ORDER` 中的文件，每片只做编译闸门；编译通过后删对应旧 `.l1`。
 ## 目录处置（关键：别弄丢 examples 闸门）
 
 1. `git mv bootstrap bootstrapl1`（整目录改名，Windows 上 `bootstrap` 与 `bootstrapl1`
@@ -28,9 +54,8 @@
 2. 新建 `bootstrap/`，并在其中**保留 `lain/examples/`**（从 `bootstrapl1/lain/examples`
    拷过来）——否则 `scripts/regress.sh`（glob `bootstrap/lain/examples/*.lain`）会空转，
    34/34 闸门消失。
-3. 把 `bootstrap/FROZEN.md`、`bootstrap/lainir_f1_unit.txt` 移入 `bootstrapl1/`，并在
-   `bootstrapl1/FROZEN.md` 末尾追加：*「stage 2 起，手写 LAINIR 由 Lain 版逐步替代；
-   D-001 冻结在此结束。」*
+- `bootstrapl1/FROZEN.md`、`bootstrapl1/lainir_f1_unit.txt` 位于归档目录；新 `bootstrap/` 只保留
+  `lain/examples/` 回归用例并逐步加入 Lain Meta 源文件。
 4. `regress.sh` 无需改路径（新 `bootstrap/lain/examples/` 仍存在）。
 
 > **决策点 A（默认：新 bootstrap 内保留 lain/examples）**：若你更想让 regress 指向
@@ -40,9 +65,9 @@
 
 ### 步骤 0 · 准备（一次性）
 - `git mv bootstrap bootstrapl1`。
-- 新建 `bootstrap/lain/examples/`，拷 31 个样例。
+- 新建 `bootstrap/lain/examples/`，拷 **34** 个样例。
 - `bootstrapl1/FROZEN.md` 追加结束冻结注记。
-- 确认 `bash scripts/regress.sh --round-trip` 仍以 34/34 通过（examples 没丢）。
+- 确认 `bash scripts/regress.sh` 仍以 **34/34** 通过（examples 没丢）。
 
 ### 步骤 1 · Lain 表达力审计（只读 grep，不动手）★ 建议先做
 把 Meta 用到的 LAINIR 指令、`extern` 原语名、`struct`/`enum` 布局形态全列出来，
@@ -58,76 +83,58 @@
 > **决策点 C（默认：先做审计）**：强烈建议先做；若你判断 `lain0` 已够直接开工，可跳过。
 
 ### 步骤 2 · 逐片翻译（主体）
-按 `SOURCE_ORDER` 的 28 个文件，**自底向上**逐个把 `.l1` 翻译成 `.lain`：
-- 文件镜像：`std/lex.l1` → `bootstrap/std/lex.lain`，`std/macros/my_if.l1` →
-  `bootstrap/std/macros/my_if.lain`，…，`meta.l1` → `bootstrap/meta.lain`。
-- 翻译即「把同一条 LAINIR 逻辑用 Lain 表面语法重写」：过程→`func`、聚合→`struct`/`enum`、
-  控制流→`if`/`loop`/`for`、`#store`/`#lea`/`#load`→`load`/`store`/`lea` 内建、
-  地址→`addr`/`ref`/`mut ref`、`#data` 表/串→顶层 `let`。
-- 每片一个小提交，便于审阅。
+按 `bootstrapl1/SOURCE_ORDER` 的顺序把 28 个清单文件逐个翻译；`meta.l1` 由驱动额外加载，是第 29 片。
+第一个翻译对象是 `std/lex.l1`。
+- 文件镜像：`std/lex.l1` → `bootstrap/std/lex.lain`，宏与 handler 保持子目录，最后
+  `bootstrapl1/meta.l1` → `bootstrap/meta.lain`。
+- 每片逐过程把同一 LAINIR 逻辑写成 Lain：过程→`func`、聚合→`struct`/`enum`、控制流→
+  `if`/`loop`/`for`、load/store/lea→对应内建、符号地址→`symbol_addr("name")`、静态数据→
+  顶层绑定。不要改变过程名、参数/结果和绑定到的宿主 extern 链接名。
+- 每片达到「lain0 编译成功」后，才删 `bootstrapl1/` 对应 `.l1`；每片一个提交。
 
-> 翻译顺序（= SOURCE_ORDER，28 片）：
-> ```
-> std/lex.lain          std/emit.lain         std/types.lain
-> std/regions.lain      std/registry.lain     std/scope.lain
-> std/parse.lain        std/macros/my_if.lain std/macros/my_block.lain
-> std/macros/my_require.lain  std/syntax.lain
-> std/handlers/struct.lain  std/handlers/enum.lain  std/handlers/func.lain
-> std/handlers/if.lain    std/handlers/let.lain   std/handlers/statements.lain
-> std/declarations.lain   std/expand.lain       std/recognize.lain
-> std/modules.lain        std/eval.lain         std/scalars.lain
-> std/records.lain        std/funcs.lain        std/sums.lain
-> std/lainir.lain         meta.lain
-> ```
-
-### 步骤 3 · 每片闸门（默认两道）
-- **硬闸门**：该 `.lain` 过 `lain0` 编译（`verify` 无 `error:`，本就是 `lain0` 的判据）。
-- **推荐软闸门**：把 Lain 版过 `lain0` 生成的 LAINIR 与原 `.l1` 做**对照 diff**
-  （脚本或人工）。两者不会逐字节相同（Lain→LAINIR 的形态差异），但过程名、指令、类型应一致；
-  能挡掉绝大多数翻译错。**不依赖 VM、不跑执行**。
-
-> **决策点 B（默认：编译过 + LAINIR 对照）**：若你坚持纯「编译过」，去掉软闸门即可。
+### 步骤 3 · 每片闸门（只编译）
+- 对每片用 `lain0` 编译，要求编译器实际退出成功且诊断中没有 `error:`。
+- **不运行 Meta、不做运行时测试、不要求 LAINIR diff**；Meta 的行为验证不在本轮闸门内。
+- 编译失败时修到通过，或记录具体 blocker 后暂停后续翻译；不能删未通过的旧 `.l1`。
 
 ### 步骤 4 · 提交与删旧
-- 每片：提交新的 `.lain`（分支见决策点 E）。
-- 该片过闸门后，**删 `bootstrapl1/` 里对应的那个 `.l1`**（git 历史仍保留，可回退）。
-- `bootstrapl1/` 整体留到**整份 Meta 在 LainVM 跑通**后再一次性删掉（决策点 D）。
+- 每片：提交新的 `.lain`，然后在紧随的提交中删除 `bootstrapl1/` 对应的旧 `.l1`。
+- 每片应完整满足编译闸门后再删除原件；git 历史保留旧内容。
+- 每片翻译成功并编译后立即删掉对应的旧 `.l1`；只有元文件和测试夹具保留到你要求清理。
 
-> **决策点 D（默认：整份跑通后删）**：边翻边删也可，但保留档案到整跑能降低最后联调风险。
+### 步骤 5 · 本轮停止点
+29 片 Lain 文件全部按序完成且能编译后，更新本计划标记「Lain Meta 全量编译完成」。本轮按你的要求
+**不启动 LainVM、不做运行时验证**。完整 Meta 的装载/VM 入口另列后续计划，不把运行成功作为本轮完成条件。
 
-### 步骤 5 · 收尾联调
-- 全部 28 片翻译完 + 提交完，用 `SOURCE_ORDER`（改为 `.lain`）把 Lain Meta 拼成一份、
-  过 `lain0` 编译成整份 LAINIR。
-- 在 LainVM 里加载并**冒烟运行**，与 `bootstrapl1` 的已知正确行为对照（差异测试）。
-- 跑通后：删 `bootstrapl1/` 目录，单发一个清理提交；更新本计划文档标注完成。
+### 删除规则修订
+
+用户要求每翻完一片就删对应旧 IR。每片的新 `.lain` 编译成功并提交后，删掉 `bootstrapl1/` 中
+对应的 `.l1`（单独后续提交）。
+- `bootstrapl1/` 的非翻译元文件和 tests 位置到最终清理由用户另行指示。
 
 ## 验收闸门
 
-- **每片**：`lain0` 编译该 `.lain` 无 `error:`（硬闸门）；推荐过 LAINIR 对照（软闸门）。
-- **全程**：`bash scripts/regress.sh --round-trip` 保持 34/34（examples 不被破坏）。
-- **终点**：翻译后的 Lain Meta 整份编译成 LAINIR 并在 LainVM 跑通，行为等价于 `bootstrapl1`。
+- 每片 `.lain` 用 `lain0` 编译成功；不执行 Meta、不做运行时验证。
+- **编译器源码改动**（如 `symbol_addr`）走 `lain0` 项目的 examples + round-trip 回归；这不是 Meta 运行时测试。
+- 本轮终点：29 个 Meta 源文件逐片翻译且均能编译；不要求 Meta 在 LainVM 跑通。
 
-## 决策点汇总（默认已标，等你拍板）
+## 执行状态
 
-| 决策 | 默认 | 备选 |
-|---|---|---|
-| A. examples 安置 | 新 `bootstrap/lain/examples` 保留 | regress 指向 `bootstrapl1/lain/examples` |
-| B. 每片闸门 | 编译过 + LAINIR 对照 | 仅编译过 |
-| C. 先做表达力审计 | 是（只读） | 跳过直接开工 |
-| D. 删旧 `.l1` 时机 | 整份跑通后删 | 边翻边删 |
-| E. 分支 | 新建 `feat/meta`（从 `feat/lain0` HEAD 起） | 继续在 `feat/lain0` |
+- 目录重命名及 examples 保留：完成，提交 `d63b6c6`。
+- `symbol_addr` 与字符串 token 去引号修复：实现完成，示例编译通过；34 个既有样例 + 新样例共 **35/35**
+  `--round-trip` 通过。
+- 尚未翻译任何 Meta 文件。
+- 当前分支：`feat/meta`（从 `feat/lain0` 起）。
 
 ## 已知风险
 
-- **规模**：14,825 行、28 片，是长跑；每片一提交保持可审阅。
-- **布局一致性**：Meta 是操作 LAINIR 数据结构的运行时，Lain 降级出的 struct/enum 布局必须
-  与手写 IR 一致，否则运行时读错字段——「只编译不测试」最易漏，故步骤 1 审计 + 步骤 3 对照最关键。
-- **运行时验证缺失**：翻译期只保编译；真正的语义正确要等步骤 5 在 LainVM 联调，可能一次性暴露多处，
-  届时对照 `bootstrapl1` 与 git 历史逐片回查。
+- **规模**：18,236 行、29 个源文件，是长跑；每片一提交保持可审阅。
+- **Source loading/linking**：编译逐片进行；全量链接和 `meta_driver` 如何消费新模块尚未核实，执行中检查并按需补支持。
+- **布局一致性**：Meta 操作 LAINIR 数据结构；逐片能编译不代表布局语义一致，运行时正确性不在本轮验收范围。
 
 ## 参考
 
-- `docs/plan-lain0.md`（stage 1 完成）
-- `docs/04-bootstrap-dialect.md`（Lain 各构造的降级形态 spec）
-- `bootstrap/SOURCE_ORDER`（翻译顺序，本计划的权威片清单）
-- `bootstrapl1/`（手写 LAINIR 档案，步骤 5 前不得删）
+- `docs/plan-lain0.md`（stage 1 / `lain0` 功能进度）
+- `docs/04-bootstrap-dialect.md`（旧 bootstrap 方言说明）
+- `bootstrapl1/SOURCE_ORDER`（旧文件拼装顺序）
+- `bootstrapl1/`（手写 LAINIR 档案）

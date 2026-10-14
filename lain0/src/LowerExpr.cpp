@@ -114,7 +114,7 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
       if (n->name == "load" || n->name == "store" || n->name == "lea" ||
           n->name == "ptr_of" || n->name == "addr_of" || n->name == "len" ||
           n->name == "ref_of" || n->name == "mut_ref_of" ||
-          n->name == "slice_of") {
+          n->name == "slice_of" || n->name == "symbol_addr") {
         return lowerBuiltin(c, n->name, expectedTy, out, value);
       }
     }
@@ -902,6 +902,21 @@ bool Lowerer::lowerBuiltin(const ast::CallExpr *e, std::string_view name,
     const char *res = nextTemp();
     out.push_back(lainir_inst(builder_, INST_BITCAST, res,
                               lainir_type(builder_, TY_ADDR, 0), &num, 1));
+    value = lainir_ref(res);
+    return true;
+  }
+  if (name == "symbol_addr") {
+    if (e->args.size() != 1 || e->args[0] == nullptr ||
+        e->args[0]->kind != ast::ExprKind::StrLit) {
+      fail(e->span, D::SemaTypeMismatch,
+           "symbol_addr 需要一个字符串字面量符号名");
+      return false;
+    }
+    const auto *symbol = static_cast<const ast::StrLitExpr *>(e->args[0]);
+    const char *res = nextTemp();
+    L1Operand sym = lainir_ref(intern(symbol->rawText));
+    out.push_back(lainir_inst(builder_, INST_BITCAST, res,
+                              lainir_type(builder_, TY_ADDR, 0), &sym, 1));
     value = lainir_ref(res);
     return true;
   }
