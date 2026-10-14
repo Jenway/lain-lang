@@ -242,7 +242,19 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   另三处是归档的 `#load`/`#store` 在表面语言里写作 `load`/`store` 内建（被脚本计为调用），其余 delta 为 `symbol_addr`/`lea`
   这类指令的表面写法差异。`meta_sum_type_id` 的 `%id` 后有无条件 `restore_top`/`release`，故用 `pick_id` 选择循环保留清理；
   `meta_lower_sum_construct_local` 的 `%t2` 用 `pick_t2`。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 27 项 `std/lainir.l1`（152 过程 + 140 个数据块；已预先切成 8 组并把数据段转换+逐块验真）。
+- `std/lainir.lain` 已翻译（**最后一片大件**）：152 个实现过程名与签名与旧片一致，9 个跨单元依赖以 extern 声明，
+  本文件内定义 140 个静态数据块（138 ro + 2 rw，1086 字节）。切成 8 组并行翻译（各 18–20 个过程），共享头由主代理写，
+  再用统一脚本按归档过程顺序合并 152 个过程体（提取时对注释做空白化再配平花括号，避免注释里的 `}` 截断函数）。
+  fixture（clean unit + `meta_scalar_table` 数据 stub）退出码 0；`compare_call_order.py` 149/152 ok，3 处差异全是
+  `#load`/`#store` 在表面语言里写作 `load`/`store` 内建。
+- **四处数据块与同名过程冲突（必须解决的迁移差异）**：表面语言里顶层 `let NAME: [u8]` 会额外发布同名取址过程
+  `#proc NAME() -> #addr`（`LowerDecl.cpp` 的 `buildAccessor`），而归档的 `lainir_data_ro_head`/`lainir_data_rw_head`/
+  `lainir_data_rw_bare_head`/`lainir_return_base_close` 四个名字同时用作数据块与过程。过程名是对外契约
+  （`records.lain`/`let.lain`/`sums.lain` 都调用它们），故**只改数据绑定名为 `NAME_text`**，过程名不动，并把这四个
+  过程体里的取址改为 `symbol_addr("NAME_text_storage")`；已确认没有其他单元引用旧数据符号，且四个过程发出的
+  `lainir_write` 长度（6/14/6/18）与归档一致。`compare_fragment.py` 因此报 4 处 data 改名（预期内、唯一的有意偏差）。
+  未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 28 项 `meta.l1`（2438 行、42 过程，最后一片）。
 
 ## 组装与收尾（终局）
 
