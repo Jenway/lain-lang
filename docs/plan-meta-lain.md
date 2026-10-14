@@ -225,7 +225,17 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   `lain0` 退出码 0、verify 通过，本仓自有工具 `compare_fragment.py` 与 `compare_call_order.py` 均退出码 0。`meta_record_type_id`
   的 `%id` 值 if 之后还有无条件的 `restore_top`/`release`，若改平坦守卫会跳过清理，故用一次性选择循环 `pick_id` 保留原顺序；
   `%same`/u8 比较/循环参数遮蔽改名等改写逐条核对。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 25 项 `std/funcs.l1`（3720 行、53 过程，剩余最大的一片）。
+- `std/funcs.lain` 已翻译（**最大一片**）：53 个实现过程名与签名与旧片一致，104 个跨片依赖以 extern 声明，无静态数据。
+  因单片过大（3720 行），按 `scripts/split_unit.py` 切成 5 组并行翻译（各组 ~730 行 / 9–11 过程），共享头
+  （104 条跨片 extern + 39 条数据 stub + 53 条同单元兄弟声明）由主代理写一次，再用 `scripts/merge_parts.py` 合并。
+  各组均以 `lain0` 退出码 0 通过，合并后 fixture（clean unit + 39 个数据 stub）退出码 0，`compare_fragment.py` 与
+  `compare_call_order.py` 由主代理亲自运行核对；5 处调用序列差异逐条审阅：三处失败码多重集完全相同（如 `meta_lower_body`
+  为 {20:1,21:3,4:2}），另两处是互斥分支上的额外文本站点或与旧 IR 执行顺序一致的提升，均等价。
+  未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 顺带修复 lain0 编译器缺陷：作为实参的嵌套调用拿不到结果临时量（`lowerCall` 用 `kInvalidType` 降级实参），
+  `return inner(inner(y));` 报 verify 2020；改为传入实参在 Sema 里定下的类型。提交 `e151078`，
+  `bash scripts/regress.sh --round-trip` PASS=35 FAIL=0。
+- 下一片为 `SOURCE_ORDER` 第 26 项 `std/sums.l1`（701 行、18 过程）。
 
 ## 组装与收尾（终局）
 
