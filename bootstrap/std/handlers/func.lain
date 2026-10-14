@@ -1,0 +1,114 @@
+// func 声明处理器。
+extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
+extern meta_node_is_word(node: u64, base: addr, word: addr, len: u64) -> bool = meta_node_is_word;
+extern meta_node_start(node: u64) -> u64 = meta_node_start;
+extern meta_node_len(node: u64) -> u64 = meta_node_len;
+extern meta_cursor_next(parent: u64, index: u64) -> u64 = meta_cursor_next;
+extern ast_child(node: u64, index: u64) -> u64 = ast_child;
+extern ast_delim(node: u64) -> u8 = ast_delim;
+extern meta_cell_get(p: addr) -> u64 = meta_cell_get;
+extern meta_syntax_ensure(node: u64, context: u64, handler: u64) -> u32 = meta_syntax_ensure;
+extern meta_scope_add_decl(base: addr, len: u64, source: u64, level_start: u64, parent: u64, index: u64, kind: u64) -> u32 = meta_scope_add_decl;
+extern meta_emit_proc_header(base: addr, len: u64, name_node: u64, params: u64, ret_node: u64) -> u32 = meta_emit_proc_header;
+extern meta_lower_func(base: addr, len: u64, parent: u64, index: u64, node: u64) -> u32 = meta_lower_func;
+extern meta_expand_stmt_group(group: u64) -> u64 = meta_expand_stmt_group;
+extern meta_expand_store_ref(buffer: addr, index: u64, value: u64) -> u32 = meta_expand_store_ref;
+extern lainir_write(text: addr, length: u64) -> u32 = lainir_write;
+extern lainir_extern_marker_write() -> u32 = lainir_extern_marker_write;
+extern lainir_quote_nl_write() -> u32 = lainir_quote_nl_write;
+
+func meta_register_func(node: u64) -> u32 {
+  let dummy: addr = lain_meta_source_data(0);
+  let hit: bool = meta_node_is_word(node, dummy, symbol_addr("meta_kw_func_storage"), 4);
+  if hit { return meta_syntax_ensure(node, 1, 2); }
+  return 0;
+}
+
+func meta_declare_func(base: addr, len: u64, source: u64, level: u64, parent: u64, index: u64) -> u32 {
+  let s: u32 = meta_scope_add_decl(base, len, source, level, parent, index, 6);
+  return s;
+}
+
+func meta_lower_decl_func(base: addr, len: u64, parent: u64, index: u64, node: u64) -> u32 {
+  let s: u32 = meta_lower_func(base, len, parent, index, node);
+  return s;
+}
+
+// extern 的声明形状与 func 相同，只是末尾带链接名。
+func meta_register_extern(node: u64) -> u32 {
+  let dummy: addr = lain_meta_source_data(0);
+  let hit: bool = meta_node_is_word(node, dummy, symbol_addr("meta_kw_extern_storage"), 6);
+  if hit { return meta_syntax_ensure(node, 1, 14); }
+  return 0;
+}
+
+func meta_declare_extern(base: addr, len: u64, source: u64, level: u64, parent: u64, index: u64) -> u32 {
+  let s: u32 = meta_scope_add_decl(base, len, source, level, parent, index, 6);
+  return s;
+}
+
+func meta_lower_decl_extern(base: addr, len: u64, parent: u64, index: u64, node: u64) -> u32 {
+  let ni: u64 = index + 1;
+  let name_node: u64 = meta_cursor_next(parent, index);
+  let pi: u64 = index + 2;
+  let params: u64 = meta_cursor_next(parent, ni);
+  let ai: u64 = index + 3;
+  let ret_node: u64 = meta_cursor_next(parent, ai);
+  let ki: u64 = index + 5;
+  let link: u64 = meta_cursor_next(parent, ki);
+  let l_lo: u64 = meta_node_start(link);
+  let l_n: u64 = meta_node_len(link);
+  let hdr: u32 = meta_emit_proc_header(base, len, name_node, params, ret_node);
+  if hdr != 0 { return hdr; }
+  let w0: u32 = lainir_extern_marker_write();
+  let l_at: addr = base + l_lo;
+  let w1: u32 = lainir_write(l_at, l_n);
+  let w2: u32 = lainir_quote_nl_write();
+  return 0;
+}
+
+func meta_recognize_child_context_func(relative: u64) -> u64 {
+  let body: bool = relative == 5;
+  let context: u64 = if body { 2 } else { 0 };
+  return context;
+}
+
+// 函数声明的第 5 个相对孩子是 statement Group。
+func meta_expand_children_func(root: u64, cursor: u64, count: u64, buffer: addr, outn: u64) -> u64 {
+  let end: u64 = cursor + 6;
+  let room: bool = end <= count;
+  if room == 0 {
+    let node0: u64 = ast_child(root, cursor);
+    let fallback0: u32 = meta_expand_store_ref(buffer, outn, node0);
+    return 1;
+  }
+  let body_i: u64 = cursor + 5;
+  let body: u64 = ast_child(root, body_i);
+  let delimiter: u8 = ast_delim(body);
+  let delimiter_wide: u32 = delimiter as u32;
+  if delimiter_wide != 123 {
+    let node1: u64 = ast_child(root, cursor);
+    let fallback1: u32 = meta_expand_store_ref(buffer, outn, node1);
+    return 1;
+  }
+  let phase: u64 = meta_cell_get(symbol_addr("meta_expand_decl_phase_storage"));
+  let new_body: u64 = if phase != 0 { body } else { meta_expand_stmt_group(body) };
+  if new_body == 0 { return 0; }
+  let copied: u64 = loop form(j: u64 = 0) {
+    let more: bool = j < 6;
+    if more {
+      let at: u64 = cursor + j;
+      let old: u64 = ast_child(root, at);
+      let body_slot: bool = j == 5;
+      let value: u64 = if body_slot { new_body } else { old };
+      let put: u32 = meta_expand_store_ref(buffer, outn + j, value);
+      continue form(j + 1);
+    } else {
+      break form(1);
+    }
+  };
+  let changed: bool = new_body != body;
+  let flag: u64 = if changed { 0x8000000000000000 } else { 0 };
+  // flag 只可能是 0 或 bit 63；与低位常数 6 不重叠，因此加法等价于旧 IR 的 or。
+  return flag + 6;
+}

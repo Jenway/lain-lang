@@ -167,7 +167,12 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 - `std/handlers/enum.lain` 已翻译：3 个实现过程名与签名与旧片一致，无静态数据；5 个跨片/宿主依赖以 extern 声明
   （`meta_kw_enum` 在 emit.lain 定义）。与临时 `meta_kw_enum` 数据定义拼合后 `lain0` 退出码 0、verify 通过。
   未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 14 项 `std/handlers/func.l1`。
+- `std/handlers/func.lain` 已翻译：8 个实现过程名与签名与旧片一致，无静态数据；17 个跨片/宿主依赖以 extern 声明。
+  compile fixture 中临时定义 `meta_kw_func`、`meta_kw_extern`、`meta_expand_decl_phase` 三个数据符号；
+  `./build/lain0/lain0.exe build/lain0/func-with-deps.lain` 退出码 0、verify 通过（28 个过程、3 个 data）。
+  `meta_expand_children_func` 的变更标记为 bit 63，与低位常数 6 不重叠，故 `flag + 6` 等价于旧 IR 的 bitwise OR。
+  未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 15 项 `std/handlers/if.l1`。
 
 ## 已知风险
 
