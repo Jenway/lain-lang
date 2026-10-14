@@ -3,15 +3,18 @@
 > 本文件是 **可执行的任务序列**。stage 1（`lain0` 编译器 + 31 样例全绿）已完成，
 > 见 `docs/plan-lain0.md`。本计划是 stage 2：**把 `bootstrap/` 里手写的 LAINIR Meta
 > 用 Lain 重新写一遍，由 `lain0` 编译成 LAINIR，最终在 LainVM 里跑起来**，逐步替代
-> 冻结的手写 IR。每翻完一片就删掉对应的旧 `.l1`，全程以 `bootstrapl1/` 当档案、git 留历史。
+> 冻结的手写 IR。
+>
+> **状态：stage 2 已完成（28/28 单元），stage 3 已在 LainVM 上跑通。** 手写 IR 档案
+> `bootstrapl1/` 已整体删除——那些文本用 D-002 已移除的 `#data_addr`，现在连解析都过不了，
+> 留着只会误导；要看它请走 git 历史（最后一个完整版本见 `5fbe5d5~1`）。
 
 ## 北极星
 
-- **终点**：`bootstrap/` 里是 Lain 写的 Meta（`.lain`），`lain0` 能把它编译成合法
-  LAINIR；手写 LAINIR（`bootstrapl1/`）被逐步删光；`lain0` 不再依赖手写 IR 自举。
-- **本阶段不要求运行时正确**（用户明确：翻译时「不测试，只保证能编译」）；逐片只要求 `lain0`
-  能编译。运行时验证不作为翻译闸门，也不在本计划本轮执行。
-- **约束**：`bootstrap` 曾冻结（D-001）。本次重命名 + 替代 = 主动结束冻结，需在档案里注记。
+- **终点**：`bootstrap/` 里是 Lain 写的 Meta（`.lain`），`lain0` 把它编译成合法 LAINIR，
+  并在 LainVM 上跑起来产出 canonical LAINIR；手写 LAINIR 已删光，`lain0` 不再依赖手写 IR 自举。
+- **翻译阶段（stage 2）不要求运行时正确**（用户明确：翻译时「不测试，只保证能编译」），逐片只要求
+  `lain0` 能编译。**运行时验证在 stage 3 做**，见文末。
 
 ## 现状盘点（已核清，作为本计划的依据）
 
@@ -304,9 +307,54 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   写法是把它改成守卫式早退（`if c == 0 { … return …; }`），`scope.lain` 的 `meta_scope_decl_node` 即此形。
 - **`ref` 是保留字**：参数名不能叫 `ref`（`extern ast_child(ref: u64, …)` 报「应为 参数名」），改名即可。
 
+## 阶段 3：在 LainVM 上跑起来（已完成）
+
+把 Lain 写的 Meta 编出的 LAINIR 装进 LainVM，喂它一份源码，产出 canonical LAINIR：
+
+```bash
+python scripts/build_meta_unit.py      # 源码 -> 单份 LAINIR 单元 + 驱动要的清单
+./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
+    examples/arith.lain bootstrap/lain/examples/arith.lain
+```
+
+`examples/arith.lain` 实测：`verify subroutines=869 data=215`、`image ok`、
+`run slice=2 rounds=1 steps=46407 host_status=0`、`region grants=2`、`output bytes=74`，
+产物与手写 Meta 的基线 `build/arith.out` **逐字节相同**。样例全量 34 个中 **29 通过**。
+
+为此修的三处 VM 缺陷（提交 `ee10f71`，都在 `seed/` 侧）：
+
+1. **D-002 的 VM 侧从未实现**：`verify.c` 把静态数据块的符号定为模块级 `#addr` 绑定，取址就是
+   `#bitcast[#addr](%SYMBOL)`；但装载器 `resolve_name` 只认区域参数与指令结果，于是这类操作数一律
+   被判 `9006 LAINVM_IMAGE_ERR_UNDEFINED_VALUE`。零件都在、只是没接线：`find_symbol` 是死代码、
+   `LainVmImageInstMeta.symbol_index` 只被初始化过、trap 1021 无人使用。已接上：操作数引用加
+   `is_symbol`/`symbol_index`，装载器按名解析失败后回落符号表，引擎在 `read_ref` 里取符号地址。
+2. **宽度 0 会把地址抹掉**：`#addr` 不带宽度，`width_mask(0)` 让地址变 0，表现为
+   `cap_region_grant` 报 `dest=0` 被拒（用「算出的值」与「符号表里的地址」并排打印定位）。
+3. **`inst->ty->width` 有 7 处同坑**：引擎自己有 `type_width()`（把 `#addr` 当 64 位）却没在这些
+   地方用；已统一改走它，顺带修好 addr 参与算术/转换时的同类静默清零。
+
+**另一条重要结论**：手写 Meta 档案现在**跑不动了**——用同一台驱动跑旧单元报
+`PARSE FAILED code=3002`（文本里还留着 D-002 已移除的 `#data_addr`）。所以文档里「旧 Meta 给出
+`host_status=0`、`region grants=2`」的状态是过期的；Lain 写的 Meta 不是落后于归档，而是已经跑到
+它前面。
+
+### 仍失败的 5 个样例（手写时代遗留，未修）
+
+| 样例 | 状态 | 定位 |
+| :--- | :--- | :--- |
+| `symbol_addr` | 9415 | `meta_scope_require_func` 兜底：源码里 `extern consume(…) = consume;` 没进作用域表 |
+| `u8math` | 6 | `meta_op_resolve` 找不到 `meta_sym_lt_storage`（`<` 算子），同属默认 std 库缺失 |
+| `refs` | 5 | `LAINMETA_ERR_DENIED`（宿主边界） |
+| `strinline` | 4 | `LAINMETA_ERR_UNSUPPORTED` |
+| `modules_main` | 4 | 同上 |
+
+这些是**语言级**状态码（不是 VM 崩溃：报告里 `region grants=2`，宿主窗口授予正常），且
+`docs/04-bootstrap-dialect.md` 已把 9415 记为「跨源引用有的通、有的不通，规律未定位」的手写时代
+遗留缺陷。与阶段 3 修的 VM 缺陷正交，作为独立任务处理。
+
 ## 参考
 
 - `docs/plan-lain0.md`（stage 1 / `lain0` 功能进度）
-- `docs/04-bootstrap-dialect.md`（旧 bootstrap 方言说明）
-- `bootstrapl1/SOURCE_ORDER`（旧文件拼装顺序）
-- `bootstrapl1/`（手写 LAINIR 档案）
+- `docs/04-bootstrap-dialect.md`（旧 bootstrap 方言说明；其中引用的 `lainir_f*.l1` 探针已随档案删除，见 git 历史）
+- `bootstrap/SOURCE_ORDER`（Lain 源码拼装顺序；驱动要的 `--unit` 清单由 `scripts/build_meta_unit.py` 生成）
+- 手写 LAINIR 档案 `bootstrapl1/` 已删除，最后一个完整版本见 git `5fbe5d5~1`

@@ -5,7 +5,7 @@
 | 路径 | 用途 |
 | --- | --- |
 | `seed/` | C 实现的 LAINIR parser、验证器、装载器、VM、后端和宿主能力 |
-| `bootstrap/` | LAINIR Meta 库（stage0：手写 LAINIR 文本） |
+| `bootstrap/` | Lain 源码写的 Meta 库（28 个单元 + `SOURCE_ORDER` 链接顺序）；编译出的 LAINIR 就是 Meta 本体 |
 | `tools/` | 驱动与验收工具，只装配、推进、记账，不含语言知识 |
 | `docs/` | 设计、规范与进度|
 | `build/` | 二进制、临时输入、快照和日志，不提交 |
@@ -25,12 +25,19 @@ cmake --build build/cmake
 
 ### 驱动：lain-meta
 
-把 LAINIR Meta 库装进一台 TCB 并推进它。位置参数成对给出「逻辑路径 源文件」，
-逻辑路径就是 import 解析注册表里的名字：
+把 LAINIR Meta 库装进一台 TCB 并推进它。先由 `scripts/build_meta_unit.py` 把
+`bootstrap/` 的 Lain 源码拼成一份、用 lain0 编成 LAINIR，再把一份源码交给它。
+位置参数成对给出「逻辑路径 源文件」，逻辑路径就是 import 解析注册表里的名字：
 
-```powershell
-build/lain-meta.exe --out build/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain
+```bash
+python scripts/build_meta_unit.py     # 产物：build/lain0/bootstrap.{lain,l1} 与 bootstrap_unit.txt
+build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
+    --out build/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain
 ```
+
+`--unit` 要显式给：驱动的默认值是 `bootstrap/SOURCE_ORDER`，而本仓库里那个文件是
+**Lain 源码**的链接顺序表，不是 LAINIR 单元清单（清单由上面的脚本生成，里面写
+`../build/...` 是因为驱动会把每行当 `bootstrap/<行>` 打开）。
 
 | 选项 | 默认 | 说明 |
 | :--- | :--- | :--- |
@@ -55,17 +62,24 @@ build/lain-meta.exe --out build/arith.out examples/arith.lain bootstrap/lain/exa
 
 ## 验收
 
-改动 `bootstrap/` 之后按顺序跑这三条：
+改动 `bootstrap/` 或 `seed/` 之后：
 
-```powershell
-powershell -File build/merge.ps1                 # SOURCE_ORDER 拼成 build/bootstrap_merged.l1
-build/check_unit.exe build/bootstrap_merged.l1   # 单元本身必须 PARSE+VERIFY OK
-powershell -File build/reg.ps1                   # 样例与层 0 探针回归（脚本被 Git 忽略）
+```bash
+cmake --build build               # 重建 seed 库与 lain-meta（改了 seed/ 必须重建，否则跑的是旧二进制）
+bash scripts/regress.sh           # lain0 全量回归：examples 下每个 .lain 都要编译通过
+python scripts/build_meta_unit.py # 源码 -> 单份 LAINIR 单元 + 驱动要的清单
 ```
 
-`build/check_unit.exe` **不是 CMake 目标**（`CMakeLists.txt` 只建 `lain-meta` 驱动），改了 `seed/` 或 `bootstrap/` 之后要手工重建，否则校验结果来自旧二进制：
+跑样例（`bootstrap/lain/examples/` 就是回归集）：
 
-```powershell
-cmake --build build
-clang -O0 -std=c17 -D_DEBUG -D_DLL -D_MT -g -I seed/include -o build/check_unit.exe build/check_unit.c build/lib/lain_seed.lib
+```bash
+build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
+    examples/arith.lain bootstrap/lain/examples/arith.lain
 ```
+
+期望 `host_status=0`、`region grants=2`；`output bytes=` 是 Meta 写出的 canonical LAINIR 长度。
+摘要行形如 `unit files=N bytes=N`、`verify subroutines=N data=N`、`run slice=N rounds=N steps=N
+host_status=N`、`region grants=N`、`output bytes=N`，可直接被脚本断言。
+
+当前 34 个样例中 29 个通过；其余 5 个（`symbol_addr` / `u8math` / `refs` / `strinline` /
+`modules_main`）报的是 Meta 的语言级状态码，出处与定位见 `docs/plan-meta-lain.md` 的「阶段 3」。

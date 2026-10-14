@@ -72,6 +72,11 @@
 - 产物 `lainir_reset()`、`lainir_text()` —— 取回 canonical 文本，交给
   `lainir_parse` + `lainir_verify`
 
+> 注：本节引用的层 0 探针单元（`bootstrap/lain/examples/lainir_f*.l1`、清单
+> `bootstrap/lainir_f1_unit.txt`）属于已归档的手写 LAINIR，已随 `bootstrapl1/` 一起在 stage 2
+> 结束时删除；要看原文请走 git 历史（最后一个完整版本见 `5fbe5d5~1`）。它们的覆盖面现在由
+> `bootstrap/std/lainir.lain` + `bootstrap/lain/examples/` 的样例回归承担。
+
 F1 已实现并端到端验收：`bootstrap/std/lainir.l1` 提供 `lainir_reset()`、
 `lainir_text()`、`lainir_length()`、`lainir_proc_begin(name, name_length)`、
 `lainir_return(value)`、`lainir_proc_end()`。当前过程骨架发射无参、返回 `#bits<32>`
