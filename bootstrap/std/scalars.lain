@@ -1,0 +1,413 @@
+// 初代标准库 v0 —— 标量表、类型名解析、算子解析。
+// 由 bootstrapl1/std/scalars.l1 翻译成 Lain 表面语法。
+//
+// 标量**是表，不是声明**：这份静态字节就是「语言里有那些标量」的唯一出处。
+// 源码里没有、也不需要一个 `scalar` 声明语法；`i32` 这类名字是内建名字，
+// 由本文件的名字解析直接命中。
+//
+// 每条记录的布局（表以「名字长度为 0」的一条记录结束）：
+//
+//   +0        名字长度        +1..        名字
+//   +nl+1     类型构造子 0 bits / 1 f / 2 vec / 3 addr
+//   +nl+2     宽度（addr 为 0）
+//   +nl+3     算子条数
+//   之后每条：符号长度、符号、物理名长度、物理名
+//
+// 宽度那一格与 LAINIR 的类型实参同义。符号 → 物理名是「语言的算子名」到
+// 「机器算子名」的唯一一层翻译，`meta_op_resolve` 查的就是它。
+//
+// 翻译说明（表面语言的值 if 支里不能再写语句 if / 值 if）：
+//   * 本单元自己的 1 个静态块，旧 IR 写作 `data meta_scalar_table ro { … }`；表面
+//     语言里 ro 块写成 `let meta_scalar_table: ro [u8] = [...]`，取址用
+//     symbol_addr("meta_scalar_table_storage")：编译器发布的数据符号带 `_storage`
+//     后缀，绑定名本身不是符号（见 bootstrap/std/modules.lain 的 meta_source_find 与
+//     bootstrap/std/emit.lain 的 meta_dsep）。字节数组与旧 IR 逐字节相同（587 字节）。
+//     别的单元（如 bootstrap/std/modules.lain）也按这个符号名取址本表。
+//   * 旧 IR 的 `#data_addr meta_sym_i32` / `#data_addr meta_sym_i64` 取的是**别的
+//     单元**（bootstrap/std/emit.lain）的静态块，本单元只取址、不定义它们。
+//   * 结果喂给 #return 的归档值 if 一律改写成平坦守卫：同一批条件按原顺序求值，
+//     命中即 return 同一个值，其余语句留在函数体后续。逐条对应：meta_scalar_find 的
+//     %hit、meta_scalar_op 的 %same、meta_scalar_resolve_op 的 %r、
+//     meta_scalar_type_id 的 %r、meta_type_id_of_name 的 %r、meta_type_resolve 的
+//     %r / %q / %qq / %qqq / %qv / %v、meta_op_resolve 的 %r / %w、
+//     meta_op_resolve_default 的 %r / %x64 / %x32。只有原来会走到的分支才会被求值，
+//     所以求值顺序与副作用与旧 IR 一致（例如 meta_scalar_op 只有在 sl == sym_len
+//     成立时才会去认表地址、比字节）。
+//   * meta_type_resolve 的 %ready 值 if 是 u32、假支里带 let（mark / scan）：表面语言
+//     的值 if 支里允许 let / store，只是不能再套 if，所以照值 if 原样写。
+//   * 归档里三处 `#or`：`#or(kind, #shl(width, 8))`、`#or(#shl(phys_at, 16), pl)`、
+//     `#or(0x4000000000000000, %rec)`。都照旧写 `or` —— 两侧位域不相交（kind/width
+//     各自先 and 255 只占低 8 位；phys_at 与 pl 分别占高 48 位和低 16 位；%rec 是
+//     <587 的表内偏移，与 bit62 的 owner 标志不相交），所以 or 与加法等价。
+//   * 旧 IR 里 %b / %s1 / %s2 / %e2 / %e3 / %e4 / %w64 / %w32 等不被读的值只取调用
+//     副作用，照旧保留为 let 绑定（死局部保留，不做清理）。
+//   * 本单元这批依赖里没有 ref / slice 这类保留字参数名，extern 与归档调用点同名。
+//     唯一的改名是归档局部 %rw 在 meta_scalar_type_id 里写成 rw_v，避免与数据段
+//     模式关键字 `rw` 相混；语义相同。
+
+let meta_scalar_table: ro [u8] = [3, 105, 51, 50, 0, 32, 15, 1, 47, 4, 115, 100, 105, 118, 1, 43, 3, 97, 100, 100, 1, 60, 3, 115, 108, 116, 1, 45, 3, 115, 117, 98, 1, 42, 3, 109, 117, 108, 1, 37, 4, 115, 114, 101, 109, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 1, 62, 3, 115, 103, 116, 2, 60, 61, 3, 115, 108, 101, 2, 62, 61, 3, 115, 103, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 2, 60, 60, 3, 115, 104, 108, 2, 62, 62, 4, 108, 115, 104, 114, 3, 117, 51, 50, 0, 32, 15, 1, 47, 4, 117, 100, 105, 118, 1, 43, 3, 97, 100, 100, 1, 60, 3, 117, 108, 116, 1, 45, 3, 115, 117, 98, 1, 42, 3, 109, 117, 108, 1, 37, 4, 117, 114, 101, 109, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 1, 62, 3, 117, 103, 116, 2, 60, 61, 3, 117, 108, 101, 2, 62, 61, 3, 117, 103, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 2, 60, 60, 3, 115, 104, 108, 2, 62, 62, 4, 108, 115, 104, 114, 3, 117, 54, 52, 0, 64, 15, 1, 43, 3, 97, 100, 100, 1, 45, 3, 115, 117, 98, 1, 42, 3, 109, 117, 108, 1, 47, 4, 117, 100, 105, 118, 1, 37, 4, 117, 114, 101, 109, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 1, 62, 3, 117, 103, 116, 1, 60, 3, 117, 108, 116, 2, 60, 61, 3, 117, 108, 101, 2, 62, 61, 3, 117, 103, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 2, 60, 60, 3, 115, 104, 108, 2, 62, 62, 4, 108, 115, 104, 114, 3, 105, 54, 52, 0, 64, 15, 1, 43, 3, 97, 100, 100, 1, 45, 3, 115, 117, 98, 1, 42, 3, 109, 117, 108, 1, 47, 4, 115, 100, 105, 118, 1, 37, 4, 115, 114, 101, 109, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 1, 62, 3, 115, 103, 116, 1, 60, 3, 115, 108, 116, 2, 60, 61, 3, 115, 108, 101, 2, 62, 61, 3, 115, 103, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 2, 60, 60, 3, 115, 104, 108, 2, 62, 62, 4, 108, 115, 104, 114, 2, 105, 56, 0, 8, 0, 2, 117, 56, 0, 8, 0, 4, 98, 111, 111, 108, 0, 1, 4, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 5, 117, 115, 105, 122, 101, 0, 64, 15, 1, 43, 3, 97, 100, 100, 1, 45, 3, 115, 117, 98, 1, 42, 3, 109, 117, 108, 1, 47, 4, 117, 100, 105, 118, 1, 37, 4, 117, 114, 101, 109, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 1, 62, 3, 117, 103, 116, 1, 60, 3, 117, 108, 116, 2, 60, 61, 3, 117, 108, 101, 2, 62, 61, 3, 117, 103, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 2, 60, 60, 3, 115, 104, 108, 2, 62, 62, 4, 108, 115, 104, 114, 4, 97, 100, 100, 114, 3, 0, 0, 0];   // 587 字节，标量表
+
+// 跨单元 / Host 依赖的规范签名（由 meta_sig_index.py 从 bootstrapl1/std/scalars.l1 的
+// 调用点与各定义单元核对得到，链接名原样保留）。旧 IR 的宽度 #bits<N> 已归一为表面
+// 语言的标量类型；meta_intern 的末参在归档里叫 %rw，为避免与保留字相混按脚本给的名字
+// 写成 rw_v（链接名不变）。
+extern bs_byte_at(base: addr, at: u64, len: u64) -> u8 = bs_byte_at;
+extern bs_is_byte(base: addr, i: u64, c: u8) -> bool = bs_is_byte;
+extern bs_read_uint(base: addr, start: u64, len: u64) -> u64 = bs_read_uint;
+extern bs_skip_ident(base: addr, start: u64, len: u64) -> u64 = bs_skip_ident;
+extern bs_skip_space(base: addr, start: u64, len: u64) -> u64 = bs_skip_space;
+extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
+extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
+extern lain_meta_source_length(source: u64) -> u64 = lain_meta_source_length;
+extern meta_bytes_equal(a: addr, b: addr, n: u64) -> bool = meta_bytes_equal;
+extern meta_cell_get(p: addr) -> u64 = meta_cell_get;
+extern meta_cell_put(p: addr, v: u64) -> u32 = meta_cell_put;
+extern meta_find_import_binding(base: addr, len: u64, ns_lo: u64, ns_hi: u64) -> u64 = meta_find_import_binding;
+extern meta_intern(kind: u64, owner: u64, ns: u64, rk: u64, rw_v: u64) -> u64 = meta_intern;
+extern meta_logical_len(base: addr, from: u64, len: u64) -> u64 = meta_logical_len;
+extern meta_scope_count() -> u64 = meta_scope_count;
+extern meta_scope_enter(source: u64) -> u64 = meta_scope_enter;
+extern meta_scope_has_source(source: u64) -> bool = meta_scope_has_source;
+extern meta_scope_scan(base: addr, len: u64, source: u64, level_start: u64) -> u32 = meta_scope_scan;
+extern meta_scope_set_current(source: u64) -> u32 = meta_scope_set_current;
+extern meta_scope_type_id(name_addr: addr, name_len: u64) -> u64 = meta_scope_type_id;
+extern meta_source_find(logical: addr, logical_len: u64) -> u64 = meta_source_find;
+
+// --- 表访问 ---------------------------------------------------------------
+
+// 表里第 off 个字节，零扩展成机器字。表的长度不另存一份：走表的过程自己会在
+// 「名字长度为 0」的记录上停，所以这里给一个大上界即可。
+func meta_scalar_load8(off: u64) -> u64 {
+  let table: addr = symbol_addr("meta_scalar_table_storage");
+  let b: u8 = bs_byte_at(table, off, 0xFFFFFFFFFFFFFFFF);
+  let v: u64 = b as u64;
+  return v;
+}
+
+// 记录的名字长度。0 表示表尾。
+func meta_scalar_name_len(rec: u64) -> u64 {
+  let n: u64 = meta_scalar_load8(rec);
+  return n;
+}
+
+// 记录的名字（指向只读表里的字节，不是拷贝）。
+func meta_scalar_name(rec: u64) -> addr {
+  let table: addr = symbol_addr("meta_scalar_table_storage");
+  let at: u64 = rec + 1;
+  let p: addr = table + at;
+  return p;
+}
+
+// 记录的 repr，打包成 (kind | width << 8)。
+func meta_scalar_repr(rec: u64) -> u64 {
+  let nl: u64 = meta_scalar_name_len(rec);
+  let kind_at: u64 = rec + (nl + 1);
+  let kind: u64 = meta_scalar_load8(kind_at);
+  let width_at: u64 = kind_at + 1;
+  let width: u64 = meta_scalar_load8(width_at);
+  // kind 与 width 都只占低 8 位，位域不相交，or 与加法等价（照旧 IR 写 or）。
+  let packed: u64 = kind or (width << 8);
+  return packed;
+}
+
+// 下一条记录的偏移：跳过名字、三格头部和整张算子表。
+func meta_scalar_next(rec: u64) -> u64 {
+  let nl: u64 = meta_scalar_name_len(rec);
+  let after_name: u64 = (rec + 1) + nl;
+  let count_at: u64 = after_name + 2;
+  let count: u64 = meta_scalar_load8(count_at);
+  let ops: u64 = after_name + 3;
+  let end: u64 = loop o(k: u64 = ops, n: u64 = 0) {
+    let more: bool = n < count;
+    if more {
+      let sl: u64 = meta_scalar_load8(k);
+      let after_sym: u64 = k + (sl + 1);
+      let pl: u64 = meta_scalar_load8(after_sym);
+      let k2: u64 = after_sym + (pl + 1);
+      let n2: u64 = n + 1;
+      continue o(k2, n2);
+    } else {
+      break o(k);
+    }
+  };
+  return end;
+}
+
+// 按名字找记录；找不到 NOT_FOUND。
+// 归档的 %hit 值 if（真支算名字并比字节，假支 yield 0）结果喂给语句 if，这里按平坦
+// 守卫写：只算 `nl == name_len` 成立时的 %p / %eq，成立才 break，顺序与副作用不变。
+func meta_scalar_find(name: addr, name_len: u64) -> u64 {
+  let rec: u64 = loop s(cur: u64 = 0) {
+    let nl: u64 = meta_scalar_name_len(cur);
+    let end: bool = nl == 0;
+    if end {
+      break s(0xFFFFFFFFFFFFFFFF);
+    }
+    let same_len: bool = nl == name_len;
+    if same_len {
+      let p: addr = meta_scalar_name(cur);
+      let eq: bool = meta_bytes_equal(p, name, name_len);
+      if eq {
+        break s(cur);
+      }
+    }
+    let next: u64 = meta_scalar_next(cur);
+    continue s(next);
+  };
+  return rec;
+}
+
+// 在记录的算子表里查符号 sym，回打包的 (物理名偏移 << 16) | 长度。
+// 查不到 NOT_FOUND。偏移是**表内**的偏移。
+// 归档的 %same 值 if 结果喂给语句 if：同样改成平坦守卫（只有 sl == sym_len 才认表
+// 地址并比字节）。
+func meta_scalar_op(rec: u64, sym: addr, sym_len: u64) -> u64 {
+  let nl: u64 = meta_scalar_name_len(rec);
+  let after_name: u64 = (rec + 1) + nl;
+  let count_at: u64 = after_name + 2;
+  let count: u64 = meta_scalar_load8(count_at);
+  let ops: u64 = after_name + 3;
+  let found: u64 = loop s(k: u64 = ops, n: u64 = 0) {
+    let more: bool = n < count;
+    if more {
+      let sl: u64 = meta_scalar_load8(k);
+      let sym_at: u64 = k + 1;
+      let after_sym: u64 = sym_at + sl;
+      let pl: u64 = meta_scalar_load8(after_sym);
+      let phys_at: u64 = after_sym + 1;
+      let same_len: bool = sl == sym_len;
+      if same_len {
+        let table: addr = symbol_addr("meta_scalar_table_storage");
+        let p: addr = table + sym_at;
+        let eq: bool = meta_bytes_equal(p, sym, sym_len);
+        if eq {
+          // phys_at 是高 48 位、pl 是低 16 位，位域不相交，or 与加法等价。
+          let packed: u64 = (phys_at << 16) or pl;
+          break s(packed);
+        }
+      }
+      let next: u64 = phys_at + pl;
+      let n2: u64 = n + 1;
+      continue s(next, n2);
+    } else {
+      break s(0xFFFFFFFFFFFFFFFF);
+    }
+  };
+  return found;
+}
+
+// 记录 + 符号 → 物理名。物理名的**表内偏移/长度**写进暂存区 +24 / +32。
+// 返回 0 = 成功，NOT_FOUND = 这条记录没有这个符号。
+// 归档的 %r 值 if 结果直接喂给 #return，改成守卫：packed 是 NOT_FOUND 就原样返回。
+func meta_scalar_resolve_op(rec: u64, sym: addr, sym_len: u64) -> u64 {
+  let packed: u64 = meta_scalar_op(rec, sym, sym_len);
+  let gone: bool = packed == 0xFFFFFFFFFFFFFFFF;
+  if gone {
+    return 0xFFFFFFFFFFFFFFFF;
+  }
+  let off: u64 = (packed >> 16) and 0xFFFF;
+  let len: u64 = packed and 0xFFFF;
+  let scratch: addr = lain_meta_scratch_data();
+  let s1: u32 = meta_cell_put(scratch + 24, off);
+  let s2: u32 = meta_cell_put(scratch + 32, len);
+  return 0;
+}
+
+// --- 类型名解析 ------------------------------------------------------------
+
+// 在 [lo, hi) 里找 `.`，返回它的下标；找不到 NOT_FOUND。
+//
+// 只用来判定「这个名字是不是带点的」：带点的类型名没有解析（标量是内建名字，
+// 不存在模块导出的标量），一律按「没有这个名字」处理。
+func meta_find_dot(base: addr, lo: u64, hi: u64) -> u64 {
+  let found: u64 = loop scan(i: u64 = lo) {
+    let more: bool = i < hi;
+    if more {
+      let is: bool = bs_is_byte(base, i, 46);
+      if is {
+        break scan(i);
+      }
+      let i2: u64 = i + 1;
+      continue scan(i2);
+    } else {
+      break scan(0xFFFFFFFFFFFFFFFF);
+    }
+  };
+  return found;
+}
+
+// 名字 → 内建标量的类型 id（注册表身份）；不是内建标量返回 0。
+//
+// 身份不是 repr：`i32` 与 `u32` 的 repr 都是 bits/32，让它们不同的是 owner。
+// 这里 owner = 0x4000000000000000 | 记录偏移 —— 高位那一段把内建标量与「源码里
+// 声明的类型」（owner = ((源码下标 + 1) << 32) | (位置 + 1)）分开。
+// 归档局部 %rw 在此改名 rw_v（避免与保留字相混），语义相同。
+func meta_scalar_type_id(name: addr, name_len: u64) -> u64 {
+  let rec: u64 = meta_scalar_find(name, name_len);
+  let miss: bool = rec == 0xFFFFFFFFFFFFFFFF;
+  if miss {
+    return 0;
+  }
+  let repr: u64 = meta_scalar_repr(rec);
+  let rk: u64 = repr and 255;
+  let rw_v: u64 = (repr >> 8) and 255;
+  // %rec 是 <587 的表内偏移，与 bit62 的 owner 标志位域不相交，or 与加法等价。
+  let owner: u64 = 0x4000000000000000 or rec;
+  let id: u64 = meta_intern(1, owner, 0, rk, rw_v);
+  return id;
+}
+
+// 名字 → 类型 id。源码里声明的类型（struct/enum）先查；都不中再查内建标量表。
+// 归档的 %r 值 if 结果喂给 #return，改成守卫。
+func meta_type_id_of_name(name: addr, name_len: u64) -> u64 {
+  let declared: u64 = meta_scope_type_id(name, name_len);
+  let have: bool = declared != 0xFFFFFFFFFFFFFFFF;
+  if have {
+    return declared;
+  }
+  let builtin: u64 = meta_scalar_type_id(name, name_len);
+  return builtin;
+}
+
+// 类型名 → 类型 id（供表达式降级）；没有这个名字返回 0。
+//
+// 带点的名字是**跨模块类型**：`M.Point` 的左半是 import 绑定，右半在那个模块
+// 自己的表里查。标量是内建名字、不存在「模块导出的标量」，所以左半不是 import 绑定
+// （或模块里没有这个名字）一律按「没有这个名字」处理（调用方报 5）。
+//
+// 归档是五层嵌套值 if、结果一律喂给 #return：这里全部改成平坦守卫，条件按原顺序
+// 依次求值，命中即 return 同一个值；%ready 值 if 照原样写（假支里的 let 是允许的）。
+func meta_type_resolve(base: addr, len: u64, t_lo: u64, t_hi: u64) -> u64 {
+  // 诊断：进入次数与最近一次窗口。
+  let sce: addr = lain_meta_scratch_data();
+  let e0: u64 = meta_cell_get(sce + 392);
+  let e1: u64 = e0 + 1;
+  let e2: u32 = meta_cell_put(sce + 392, e1);
+  let e3: u32 = meta_cell_put(sce + 400, t_lo);
+  let e4: u32 = meta_cell_put(sce + 408, t_hi);
+  let dot: u64 = meta_find_dot(base, t_lo, t_hi);
+  let qualified: bool = dot != 0xFFFFFFFFFFFFFFFF;
+  if qualified {
+    // `M.Point`：左半是 import 绑定，右半在那个模块的表里查。压入模块那一层、
+    // 必要时扫一次，查完把当前源码换回去。归档真支的值 if（%q/%qq/%qqq/%qv）结果
+    // 一律喂给 #return，全部改成守卫：条件按原顺序求值，命中即 return 同一个值。
+    // 真支的每条路径都 return，所以下面的「非限定名」段只在 qualified 为假时执行
+    // —— 与旧 IR 的 if / else 两支互斥一致，调用顺序也逐条对应。
+    let m_lo: u64 = bs_skip_space(base, dot + 1, len);
+    let m_hi: u64 = bs_skip_ident(base, m_lo, len);
+    let lp: u64 = meta_find_import_binding(base, len, t_lo, dot);
+    let nons: bool = lp == 0;
+    if nons {
+      return 0;
+    }
+    let n: u64 = meta_logical_len(base, lp, len);
+    let path: addr = base + lp;
+    let idx: u64 = meta_source_find(path, n);
+    let miss: bool = idx == 0xFFFFFFFFFFFFFFFF;
+    if miss {
+      return 0;
+    }
+    let m_base: addr = lain_meta_source_data(idx);
+    let m_len: u64 = lain_meta_source_length(idx);
+    let old_src: u64 = meta_scope_enter(idx);
+    let already: bool = meta_scope_has_source(idx);
+    // 归档的 %ready 值 if：已扫过就 0，否则取 mark 再扫（u32 结果，两支同宽）。
+    let ready: u32 = if already {
+      0
+    } else {
+      let mark: u64 = meta_scope_count();
+      let scan: u32 = meta_scope_scan(m_base, m_len, idx, mark);
+      scan
+    };
+    let bad: bool = ready != 0;
+    if bad {
+      let rest0: u32 = meta_scope_set_current(old_src);
+      return 0;
+    }
+    let mname: addr = base + m_lo;
+    let mnlen: u64 = m_hi - m_lo;
+    let tid: u64 = meta_scope_type_id(mname, mnlen);
+    let rest: u32 = meta_scope_set_current(old_src);
+    let tak: bool = tid != 0xFFFFFFFFFFFFFFFF;
+    if tak {
+      return tid;
+    }
+    return 0;
+  }
+  // 非限定名（旧 IR 的 else 支）：源码里声明的类型先查、内建标量表后查，
+  // 都没有就是「没有这个名字」。%v 值 if 同样改守卫。
+  let name: addr = base + t_lo;
+  let name_len: u64 = t_hi - t_lo;
+  let id: u64 = meta_type_id_of_name(name, name_len);
+  let gone: bool = id == 0;
+  if gone {
+    // 诊断：记下失败的名字窗口与作用域表条数，供驱动在收尾时读出。
+    let sc: addr = lain_meta_scratch_data();
+    let c0: u32 = meta_cell_put(sc + 264, t_lo);
+    let c1: u32 = meta_cell_put(sc + 272, t_hi);
+    let cnt: u64 = meta_scope_count();
+    let c2: u32 = meta_cell_put(sc + 280, cnt);
+    return 0;
+  }
+  return id;
+}
+
+// 类型名 + 算子符号 → 物理算子名。物理名的**表内偏移/长度**写进暂存区
+// +24 / +32（+16 不再使用）。返回 0 = 成功，NOT_FOUND = 名字或符号没有。
+// 归档的 %r / %w 值 if 结果都喂给 #return，改成守卫。
+func meta_op_resolve(base: addr, len: u64, t_lo: u64, t_hi: u64, sym: addr, sym_len: u64) -> u64 {
+  let dot: u64 = meta_find_dot(base, t_lo, t_hi);
+  let qualified: bool = dot != 0xFFFFFFFFFFFFFFFF;
+  if qualified {
+    return 0xFFFFFFFFFFFFFFFF;
+  }
+  let name: addr = base + t_lo;
+  let name_len: u64 = t_hi - t_lo;
+  let rec: u64 = meta_scalar_find(name, name_len);
+  let miss: bool = rec == 0xFFFFFFFFFFFFFFFF;
+  if miss {
+    return 0xFFFFFFFFFFFFFFFF;
+  }
+  let res: u64 = meta_scalar_resolve_op(rec, sym, sym_len);
+  return res;
+}
+
+// 字面量自己的类型（参考经典 C 的字面量规则）：十进制常量取「装得下它的第一个
+// 类型」—— 这里是 i32，装不下才 i64。`i8`/`u8`/`bool` **不进候选**。
+//
+// 只有**两个操作数都是裸字面量**时才走这条路（调用方判的）：有名字操作数时退回
+// i32 会把 u32 的 `<` 发成 `slt`，那是静默给错值。
+//
+// 选中的宽度写进暂存区 +488（调用方要拿它换指令的类型实参）。
+// 归档的 %r / %x64 / %x32 值 if 都喂给 #return，改成守卫。
+// meta_sym_i32 / meta_sym_i64 是**别的单元**（bootstrap/std/emit.lain）的静态块，
+// 本单元只取址：编译夹具给临时定义，字节 [105, 51, 50] / [105, 54, 52]。
+func meta_op_resolve_default(base: addr, len: u64, sym: addr, sym_len: u64, l_lo: u64, l_hi: u64, r_lo: u64, r_hi: u64) -> u64 {
+  let lv: u64 = bs_read_uint(base, l_lo, len);
+  let rv: u64 = bs_read_uint(base, r_lo, len);
+  let l_big: bool = lv > 0x7FFFFFFF;
+  let r_big: bool = rv > 0x7FFFFFFF;
+  let big: bool = l_big or r_big;
+  if big {
+    let a64: addr = symbol_addr("meta_sym_i64_storage");
+    let rec64: u64 = meta_scalar_find(a64, 3);
+    let m64: bool = rec64 == 0xFFFFFFFFFFFFFFFF;
+    if m64 {
+      return 0xFFFFFFFFFFFFFFFF;
+    }
+    let sc64: addr = lain_meta_scratch_data();
+    let w64: u32 = meta_cell_put(sc64 + 488, 64);
+    let q64: u64 = meta_scalar_resolve_op(rec64, sym, sym_len);
+    return q64;
+  }
+  let a32: addr = symbol_addr("meta_sym_i32_storage");
+  let rec32: u64 = meta_scalar_find(a32, 3);
+  let m32: bool = rec32 == 0xFFFFFFFFFFFFFFFF;
+  if m32 {
+    return 0xFFFFFFFFFFFFFFFF;
+  }
+  let sc32: addr = lain_meta_scratch_data();
+  let w32: u32 = meta_cell_put(sc32 + 488, 32);
+  let q32: u64 = meta_scalar_resolve_op(rec32, sym, sym_len);
+  return q32;
+}

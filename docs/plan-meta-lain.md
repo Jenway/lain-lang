@@ -209,7 +209,35 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   运行顺序不变；重点复核 `%step`（`%also` 仅在 `is_colon` 路径求值）、`pick_end`（`has` 为真时不写后缀）、
   `pick_ready`（只有没扫过才调 `meta_scope_count`/`meta_scope_scan`）、`pick_body`、`%j3` 值 if（支内含 store，属允许形态）。
   未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 22 项 `std/eval.l1`（89 行、3 过程、2 个数据块）。
+- `std/eval.lain` 已翻译：3 个过程名与签名与旧片一致（其中 `lain_meta_apply_emitted_request` 在旧片中是无体的
+  `#proc … #extern "…"` 宿主声明，落成一条 `extern`，链接名原样）；本文件内定义 2 个 ro 数据块
+  （`meta_eval_align_module` 223 字节、`meta_eval_align_entry` 12 字节），无需跨单元数据 stub，`lain0` 退出码 0、verify 通过。
+  `%result` 值 if（假支内含值 if 与语句 if）改写为一次性选择循环 `pick_result`：`valid` 为真只取 `%bits`，
+  为假时按 `%code → %source → %known → 诊断` 原顺序执行后 yield `0xFFFFFFFFFFFFFFFF`，`meta_bump_release(mark)`
+  仍在循环之后无条件执行；外层 `%release` 因遮蔽改名 `release_final`。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- `std/scalars.lain` 已翻译：14 个实现过程名与签名与旧片一致，21 个跨片依赖以 extern 声明；本文件内定义 `meta_scalar_table`
+  （ro，587 字节，sha256 `ae736489…`，与旧片逐字节相同）。fixture 只需 stub `meta_sym_i32`/`meta_sym_i64` 两个跨单元数据符号；
+  `lain0` 退出码 0、verify 通过。原值 if 喂 `#return`/`if` 的位置全部改成平坦守卫，条件与原顺序不变，唯取中分支才执行
+  （如 `meta_scalar_op` 仍只在 `sl == sym_len` 时调 `meta_bytes_equal`）；`meta_type_resolve` 经一次修正后限定名/非限定名两支
+  顺序与旧片一致；`%rw`/`ref` 类保留字参数改名并保留链接名。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 24 项 `std/records.l1`（804 行、22 过程，无数据块）。
+
+## 组装与收尾（终局）
+
+逐片 compile-only 闸门必须为跨片被调过程写 `extern` 声明（lain0 CLI 只接受单个输入文件）；而旧手写单元只声明**宿主**函数
+（`#extern` 仅出现在 `lainir.l1` / `funcs.l1`），跨片调用靠 SOURCE_ORDER 拼接后在同一模块内解析。所以把已翻译单元
+原样拼起来会撞 `verify code 2022 duplicate subroutine`：某片定义了另一片声明为 extern 的过程。
+
+组装算法（脚本 `scripts/assemble_bootstrap.py`，收在 lain0-compiler 技能里）：
+
+1. 按 `SOURCE_ORDER` 收集已存在的 `bootstrap/<unit>.lain`；
+2. 汇总所有 `func` / `let` 顶层定义名；
+3. 丢掉名字落在定义集合里的 `extern` 行，其余 `extern`（宿主函数）保留；
+4. 写出单文件，并列出仍未解析的被调过程及其归属归档单元。
+
+2026-10-14 演练结果：23 片参与组装、306 个顶层定义、259 条内部 extern 被丢弃、60 条宿主 extern 保留；
+拼装后唯一的未解析被调过程是 `lainir_repr`（属尚未翻译的 `std/lainir.l1`）。这说明逐片 extern 是闸门脚手架，
+不是最终程序的一部分；也说明组装一致性可以在剩下五片翻译完之前持续复查。
 
 ## 已知风险
 
