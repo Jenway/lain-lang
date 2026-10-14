@@ -181,7 +181,11 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   （`%nxt`/`%v`/`%acc2`/`%one`）改写成守卫 + `continue`/`break`，逐条对照语义等价（值 if 结果直接喂给同一个
   continue/break，提升的表达式均为纯计算）；`meta_literal_fits` 的 `ref` 参数因保留字改名 `ref_v`，链接名不变。
   未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 17 项 `std/handlers/statements.l1`。
+- `std/handlers/statements.lain` 已翻译：3 个实现过程名与签名与旧片一致，无静态数据；3 个跨片依赖以 extern 声明；
+  `meta_syntax_ensure` 的 context/handler 号 (2,8)/(2,10)/(2,13) 与旧片一致。与临时 `meta_kw_return`/`meta_kw_for`/
+  `meta_kw_loop` 数据定义拼合后 `lain0` 退出码 0、verify 通过。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- handler 目录至此全部迁完（struct、enum、func、if、let、statements）。
+- 下一片为 `SOURCE_ORDER` 第 18 项 `std/declarations.l1`。
 
 ## 已知风险
 
