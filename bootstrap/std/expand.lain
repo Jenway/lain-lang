@@ -1,0 +1,440 @@
+// Expand 调度器 —— 由 bootstrapl1/std/expand.l1 翻译成 Lain 表面语法。
+// 语法绑定在 Meta 内分派，Host 只提供语言无关的 AstOut。
+// 当前 statement 上下文的 my_if / my_block 提供替换入口；声明处理器提供
+// declare/expand-children/lower，表达式处理器与库动态登记留给第三期后续批次。
+//
+// 旧 IR 里「值 if 支里再套值 if」的地方（meta_expand_invoke 的处理器选择、
+// meta_expand_group_inner 的 %answer、meta_expand_source 的 %new_root / %st）
+// 按既有写法（bootstrap/std/declarations.lain、bootstrap/std/scope.lain 的 pick 循环）
+// 改写成平坦守卫或一次性选择循环，语义逐条对应，详见各处注释。
+
+// 本单元自己的 4 个静态块，旧 IR 写作 data … rw。表面语言里 rw 块写成裸 [u8] 绑定，
+// 取址用 symbol_addr("NAME_storage")：编译器发布的数据符号带 _storage 后缀，
+// 绑定名本身不是符号（见 bootstrap/std/syntax.lain 的 meta_syntax_state 与
+// bootstrap/std/handlers/func.lain 的 meta_expand_decl_phase 取址）。
+let meta_expand_defer_state: [u8] = [0, 0, 0, 0, 0, 0, 0, 0];
+let meta_expand_decl_phase: [u8] = [0, 0, 0, 0, 0, 0, 0, 0];
+let meta_expand_decl_state: [u8] = [0, 0, 0, 0, 0, 0, 0, 0];
+let meta_expand_id_state: [u8] = [0, 0, 0, 0, 0, 0, 0, 0];
+
+extern ast_child(node: u64, index: u64) -> u64 = ast_child;
+extern ast_child_count(node: u64) -> u64 = ast_child_count;
+extern ast_delim(node: u64) -> u8 = ast_delim;
+extern ast_kind(node: u64) -> u8 = ast_kind;
+extern ast_text_addr(node: u64) -> addr = ast_text_addr;
+extern ast_text_len(node: u64) -> u64 = ast_text_len;
+extern lain_meta_ast_append_group(delimiter: u64, slice_ref: u64, count: u64, origin: u64, expansion_id: u64) -> u64 = lain_meta_ast_append_group;
+extern lain_meta_ast_append_refs(refs: addr, count: u64) -> u64 = lain_meta_ast_append_refs;
+extern lain_meta_ast_charge(kind: u64, amount: u64) -> u32 = lain_meta_ast_charge;
+extern lain_meta_ast_commit(source: u64, expected_root: u64, new_root: u64, tx: u64) -> u32 = lain_meta_ast_commit;
+extern lain_meta_ast_tx_begin() -> u64 = lain_meta_ast_tx_begin;
+extern lain_meta_ast_tx_rollback(tx: u64) -> u32 = lain_meta_ast_tx_rollback;
+extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
+extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
+extern lain_meta_scratch_size() -> u64 = lain_meta_scratch_size;
+extern lain_meta_status() -> u64 = lain_meta_status;
+extern meta_bump_alloc(bytes: u64) -> u64 = meta_bump_alloc;
+extern meta_bump_mark() -> u64 = meta_bump_mark;
+extern meta_bump_release(mark: u64) -> u32 = meta_bump_release;
+extern meta_cell_get(p: addr) -> u64 = meta_cell_get;
+extern meta_cell_put(p: addr, v: u64) -> u32 = meta_cell_put;
+extern meta_cell_put_raw(p: addr, v: u64) -> u32 = meta_cell_put_raw;
+extern meta_commit_decl_candidate(source: u64, old_root: u64, new_root: u64, tx: u64, syntax_mark: u64) -> u32 = meta_commit_decl_candidate;
+extern meta_declare_available(source: u64) -> u32 = meta_declare_available;
+extern meta_expand_decl_children_invoke(handler: u64, parent: u64, cursor: u64, count: u64, buffer: addr, outn: u64) -> u64 = meta_expand_decl_children_invoke;
+extern meta_expand_my_block(request: addr, result: addr) -> u32 = meta_expand_my_block;
+extern meta_expand_my_if(request: addr, result: addr) -> u32 = meta_expand_my_if;
+extern meta_expand_my_require(request: addr, result: addr) -> u32 = meta_expand_my_require;
+extern meta_expand_replacement_invoke(handler: u64, slice_v: u64, count: u64, buffer: addr, outn: u64) -> u64 = meta_expand_replacement_invoke;
+extern meta_expand_stmt_children_invoke(handler: u64, parent: u64, cursor: u64, count: u64, buffer: addr, outn: u64) -> u64 = meta_expand_stmt_children_invoke;
+extern meta_root_of(source: u64) -> u64 = meta_root_of;
+extern meta_scope_count() -> u64 = meta_scope_count;
+extern meta_scope_entry(index: u64) -> addr = meta_scope_entry;
+extern meta_scope_find(name_addr: addr, name_len: u64) -> u64 = meta_scope_find;
+extern meta_scope_release(mark: u64) -> u32 = meta_scope_release;
+extern meta_syntax_lookup(node: u64, env: u64, scope: u64, context: u64) -> u64 = meta_syntax_lookup;
+extern meta_syntax_state_get(off: u64) -> u64 = meta_syntax_state_get;
+extern meta_syntax_state_put(off: u64, value: u64) -> u32 = meta_syntax_state_put;
+
+func meta_expand_defer_put(dependency: u64) -> u32 {
+  let p: addr = symbol_addr("meta_expand_defer_state_storage");
+  let w: u32 = meta_cell_put_raw(p, dependency);
+  return 0;
+}
+
+func meta_expand_defer_get() -> u64 {
+  let p: addr = symbol_addr("meta_expand_defer_state_storage");
+  let v: u64 = meta_cell_get(p);
+  return v;
+}
+
+// 当前声明依赖协议使用 Token 引用；查询沿用声明解析的当前源码/root 可见性。
+// 返回作用域条目下标；未就绪返回 NOT_FOUND。无关声明增长不能唤醒这个依赖。
+func meta_expand_dependency_binding(dependency: u64) -> u64 {
+  if dependency == 0 { return 0xFFFFFFFFFFFFFFFF; }
+  let kind: u8 = ast_kind(dependency);
+  let kind_w: u32 = kind as u32;
+  if kind_w != 1 { return 0xFFFFFFFFFFFFFFFF; }
+  let name: addr = ast_text_addr(dependency);
+  let length: u64 = ast_text_len(dependency);
+  let binding: u64 = meta_scope_find(name, length);
+  return binding;
+}
+
+// 声明协调的当前单轮入口。先回滚挂起事务，再登记声明，只重试已就绪的依赖。
+// 这里尚未发布宏生成声明或建立多任务等待队列，不以全表条数代替依赖状态。
+// 协调整个声明/重试阶段的语义水位。失败不留下本轮新增声明及可见链。
+func meta_expand_declared_source(source: u64) -> u32 {
+  let scratch: addr = lain_meta_scratch_data();
+  let scope_mark: u64 = meta_scope_count();
+  let old_env: u64 = meta_cell_get(scratch + 96);
+  let old_current: u64 = meta_cell_get(scratch + 104);
+  let syntax_mark: u64 = meta_syntax_state_get(8);
+  let status: u32 = meta_expand_declared_source_inner(source);
+  if status != 0 {
+    let tail: u64 = meta_scope_count();
+    let clear: u32 = loop entries(i: u64 = scope_mark) {
+      let more: bool = i < tail;
+      if more {
+        let entry: addr = meta_scope_entry(i);
+        let zeroed: u32 = loop words(j: u64 = 0) {
+          let jmore: bool = j < 56;
+          if jmore {
+            let w: u32 = meta_cell_put(entry + j, 0);
+            continue words(j + 8);
+          } else {
+            break words(0);
+          }
+        };
+        continue entries(i + 1);
+      } else {
+        break entries(0);
+      }
+    };
+    let scopes: u32 = meta_scope_release(scope_mark);
+    let env: u32 = meta_cell_put(scratch + 96, old_env);
+    let current: u32 = meta_cell_put(scratch + 104, old_current);
+    let syntax: u32 = meta_syntax_state_put(8, syntax_mark);
+  }
+  return status;
+}
+
+func meta_expand_declared_source_inner(source: u64) -> u32 {
+  let first: u32 = meta_expand_source(source);
+  if first != 9411 { return first; }
+  let dependency: u64 = meta_expand_defer_get();
+  let declared: u32 = meta_declare_available(source);
+  if declared != 0 { return declared; }
+  let binding: u64 = meta_expand_dependency_binding(dependency);
+  if binding == 0xFFFFFFFFFFFFFFFF {
+    let missing: u32 = lain_meta_fail(9411);
+    return 9411;
+  }
+  let second: u32 = meta_expand_source(source);
+  if second == 9411 {
+    let stalled: u32 = lain_meta_fail(9411);
+    return 9411;
+  }
+  return second;
+}
+
+// expansion_id 是一次处理器调用的稳定身份。每次完整展开尝试从 1 开始；事务重试
+// 会得到相同的编号序列，回滚不会把旧尝试的身份泄漏到下一次尝试。
+func meta_expand_id_reset() -> u32 {
+  let p: addr = symbol_addr("meta_expand_id_state_storage");
+  let w: u32 = meta_cell_put_raw(p, 1);
+  return 0;
+}
+
+func meta_expand_next_id() -> u64 {
+  let p: addr = symbol_addr("meta_expand_id_state_storage");
+  let id: u64 = meta_cell_get(p);
+  let valid: bool = (id != 0) and (id != 0xFFFFFFFFFFFFFFFF);
+  if valid == 0 {
+    let f: u32 = lain_meta_fail(9410);
+    return 0;
+  }
+  let next: u64 = id + 1;
+  let w: u32 = meta_cell_put_raw(p, next);
+  return id;
+}
+
+// 查当前语法环境；名字、上下文和作用域均由 Meta 注册表决定。
+func meta_syntax_handler(parent: u64, cursor: u64, env: u64, scope: u64, context: u64) -> u64 {
+  let node: u64 = ast_child(parent, cursor);
+  let id: u64 = meta_syntax_lookup(node, env, scope, context);
+  return id;
+}
+
+// 旧 IR 的第三个参数名是 %ref；`ref` 是表面语言的保留字，做不了参数名，
+// 这里改名 ref_v（本单元自己定义的参数，没有链接名要保）。
+func meta_expand_store_ref(buffer: addr, index: u64, ref_v: u64) -> u32 {
+  let off: u64 = index * 8;
+  let s: u32 = meta_cell_put(buffer + off, ref_v);
+  return 0;
+}
+
+// 调用统一 ABI 的处理器；request/result 是本次调用独占的帧。
+// 旧 IR 用三层嵌套值 if 选处理器；改成平坦守卫（命中即 return），
+// 兜底仍是原来的 lain_meta_fail(9412) + 9412。
+func meta_expand_invoke(handler: u64, parent: u64, cursor: u64, context: u64, result: addr) -> u32 {
+  let scratch: addr = lain_meta_scratch_data();
+  let off: u64 = meta_bump_alloc(56);
+  let bad: bool = off == 0xFFFFFFFFFFFFFFFF;
+  if bad { return 17; }
+  let request: addr = scratch + off;
+  let q0: u32 = meta_cell_put(request, 1);
+  let q1: u32 = meta_cell_put(request + 8, parent);
+  let q2: u32 = meta_cell_put(request + 16, cursor);
+  let q3: u32 = meta_cell_put(request + 24, 1);
+  let q4: u32 = meta_cell_put(request + 32, 0);
+  let q5: u32 = meta_cell_put(request + 40, context);
+  let expansion_id: u64 = meta_expand_next_id();
+  if expansion_id == 0 { return 9410; }
+  let q6: u32 = meta_cell_put(request + 48, expansion_id);
+  let my_if: bool = handler == 1;
+  if my_if { return meta_expand_my_if(request, result); }
+  let my_block: bool = handler == 11;
+  if my_block { return meta_expand_my_block(request, result); }
+  let my_require: bool = handler == 12;
+  if my_require { return meta_expand_my_require(request, result); }
+  let f: u32 = lain_meta_fail(9412);
+  return 9412;
+}
+
+// 按显式 DECL/STMT 上下文展开兄弟序列。返回新 Group 引用；0 表示失败或挂起。
+func meta_expand_group_inner(group: u64, context: u64) -> u64 {
+  let count: u64 = ast_child_count(group);
+  if count == 0 { return group; }
+  let mark: u64 = meta_bump_mark();
+  // 输出可以比输入长。临时表使用当前剩余 scratch 的一半，另一半留给递归孩子；
+  // 用尽时明确拒 17，不在原输入数组上插入或隐式扩容。
+  let scratch_size: u64 = lain_meta_scratch_size();
+  let remaining: u64 = scratch_size - mark;
+  let input_bytes: u64 = count * 8;
+  let fits_input: bool = input_bytes <= remaining;
+  if fits_input == 0 {
+    let fbuf: u32 = lain_meta_fail(17);
+    return 0;
+  }
+  let spare: u64 = remaining - input_bytes;
+  let growth_bytes: u64 = spare / 2;
+  let growth_refs: u64 = growth_bytes / 8;
+  let capacity: u64 = count + growth_refs;
+  let bytes: u64 = capacity * 8;
+  let off: u64 = meta_bump_alloc(bytes);
+  let alloc_bad: bool = off == 0xFFFFFFFFFFFFFFFF;
+  if alloc_bad {
+    let ab_f: u32 = lain_meta_fail(17);
+    return 0;
+  }
+  let scratch: addr = lain_meta_scratch_data();
+  let buffer: addr = scratch + off;
+  let packed: u64 = loop walk(i: u64 = 0, outn: u64 = 0, changed: bool = 0) {
+    let more: bool = i < count;
+    if more {
+      let visit: u32 = lain_meta_ast_charge(1, 1);
+      if visit != 0 { break walk(0); }
+      let handler: u64 = meta_syntax_handler(group, i, 1, 0, context);
+      // 只有带 Expand 入口的处理器进入替换 ABI；核心 if 只提供孩子上下文。
+      let h1: bool = handler == 1;
+      let h11: bool = handler == 11;
+      let h12: bool = handler == 12;
+      let has_handler: bool = h1 or h11 or h12;
+      if has_handler {
+        if context == 1 {
+          let decl_change: u32 = meta_cell_put_raw(symbol_addr("meta_expand_decl_state_storage"), 1);
+        }
+        let called: u32 = lain_meta_ast_charge(2, 1);
+        if called != 0 { break walk(0); }
+        let call_mark: u64 = meta_bump_mark();
+        let res_off: u64 = meta_bump_alloc(48);
+        let res_bad: bool = res_off == 0xFFFFFFFFFFFFFFFF;
+        if res_bad { break walk(0); }
+        let result: addr = scratch + res_off;
+        let ist: u32 = meta_expand_invoke(handler, group, i, context, result);
+        if ist != 0 {
+          let rel0: u32 = meta_bump_release(call_mark);
+          break walk(0);
+        }
+        let status: u64 = meta_cell_get(result);
+        let replace: bool = status == 1;
+        if replace == 0 {
+          let diag: u64 = meta_cell_get(result + 32);
+          let dependency: u64 = meta_cell_get(result + 40);
+          let is_defer: bool = status == 2;
+          if is_defer {
+            // DEFER 只能携带非零依赖；当前事务先回滚，由外层声明协调器决定重试。
+            let valid_defer: bool = (dependency != 0) and (diag == 0);
+            if valid_defer == 0 {
+              let fd: u32 = lain_meta_fail(9408);
+            } else {
+              let saved: u32 = meta_expand_defer_put(dependency);
+            }
+          } else {
+            let code32: u32 = diag as u32;
+            let f0: u32 = lain_meta_fail(code32);
+          }
+          let rel1: u32 = meta_bump_release(call_mark);
+          break walk(0);
+        }
+        let consumed: u64 = meta_cell_get(result + 8);
+        // 旧 IR 这个局部叫 %slice；`slice` 是表面语言的保留字，改名 slice_v。
+        let slice_v: u64 = meta_cell_get(result + 16);
+        let rn: u64 = meta_cell_get(result + 24);
+        let diag0: u64 = meta_cell_get(result + 32);
+        let dep0: u64 = meta_cell_get(result + 40);
+        let room: u64 = count - i;
+        let c0: bool = consumed > 0;
+        let c1: bool = consumed <= room;
+        let out_end: u64 = outn + rn;
+        let c2: bool = out_end <= capacity;
+        let rn_zero: bool = rn == 0;
+        let slice_zero: bool = slice_v == 0;
+        let c3: bool = rn_zero == slice_zero;
+        let c4: bool = (diag0 == 0) and (dep0 == 0);
+        let v0: bool = c0 and c1;
+        let v1: bool = c2 and c3;
+        let valid: bool = v0 and v1 and c4;
+        if valid == 0 {
+          let f1: u32 = lain_meta_fail(9408);
+          let rel2: u32 = meta_bump_release(call_mark);
+          break walk(0);
+        }
+        // 空替换不扣引用预算；Host 的 charge 要求正数，协议允许 count=0。
+        let rn_empty: bool = rn == 0;
+        let replaced: u32 = if rn_empty { 0 } else { lain_meta_ast_charge(3, rn) };
+        if replaced != 0 {
+          let relb: u32 = meta_bump_release(call_mark);
+          break walk(0);
+        }
+        let copied: u64 = meta_expand_replacement_invoke(handler, slice_v, rn, buffer, outn);
+        let rel3: u32 = meta_bump_release(call_mark);
+        if copied == 0 { break walk(0); }
+        let i2: u64 = i + consumed;
+        let o2: u64 = outn + rn;
+        continue walk(i2, o2, 1);
+      }
+      // 处理器拥有孩子上下文；声明和语句共用替换循环，只按上下文选适配入口。
+      let node: u64 = ast_child(group, i);
+      let core_handler: u64 = meta_syntax_lookup(node, 1, 0, context);
+      let is_decl: bool = context == 1;
+      let adapted: u64 = if is_decl {
+        meta_expand_decl_children_invoke(core_handler, group, i, count, buffer, outn)
+      } else {
+        meta_expand_stmt_children_invoke(core_handler, group, i, count, buffer, outn)
+      };
+      if adapted == 0 { break walk(0); }
+      let child_changed: bool = (adapted and 0x8000000000000000) != 0;
+      let taken: u64 = adapted and 0x7FFFFFFFFFFFFFFF;
+      if taken > 1 {
+        let next_i: u64 = i + taken;
+        let next_o: u64 = outn + taken;
+        let next_changed: bool = changed or child_changed;
+        continue walk(next_i, next_o, next_changed);
+      }
+      let put0: u32 = meta_expand_store_ref(buffer, outn, node);
+      continue walk(i + 1, outn + 1, changed);
+    } else {
+      // 把 changed 编进最高位，低 63 位保留输出数量。
+      let flag: u64 = if changed { 0x8000000000000000 } else { 0 };
+      break walk(flag or outn);
+    }
+  };
+  let failed: bool = packed == 0;
+  // 空组的 packed=0 是合法未修改；它直接复用输入。
+  let empty: bool = count == 0;
+  let real_fail: bool = failed and (empty == 0);
+  if real_fail {
+    let relf: u32 = meta_bump_release(mark);
+    let rf_f: u32 = lain_meta_fail(17);
+    return 0;
+  }
+  let changed_bit: bool = (packed and 0x8000000000000000) != 0;
+  let outn2: u64 = packed and 0x7FFFFFFFFFFFFFFF;
+  // 旧 IR 的 %answer 值 if 支里还嵌着 %slice2 值 if；表面语言的值 if 支里不再写 if，
+  // 这里改写成一次性选择循环：未改过就 break 原 group，改过才按原顺序算 slice2/new_group。
+  let answer: u64 = loop pick(t: u64 = 0) {
+    if changed_bit == 0 { break pick(group); }
+    let slice2: u64 = if outn2 == 0 { 0 } else { lain_meta_ast_append_refs(buffer, outn2) };
+    let bad_slice: bool = (outn2 != 0) and (slice2 == 0);
+    let new_group: u64 = if bad_slice {
+      0
+    } else {
+      let delimiter: u8 = ast_delim(group);
+      let delimiter64: u64 = delimiter as u64;
+      lain_meta_ast_append_group(delimiter64, slice2, outn2, group, 0)
+    };
+    break pick(new_group);
+  };
+  let rel: u32 = meta_bump_release(mark);
+  return answer;
+}
+
+// 递归深度由 Host 可信计数；失败与回滚都不恢复已经消耗的访问/调用预算。
+func meta_expand_stmt_group(group: u64) -> u64 {
+  let entered: u32 = lain_meta_ast_charge(4, 1);
+  if entered != 0 { return 0; }
+  let answer: u64 = meta_expand_group_inner(group, 2);
+  let left: u32 = lain_meta_ast_charge(5, 1);
+  if left != 0 { return 0; }
+  return answer;
+}
+
+// DECL 序列也使用相同的 N→M 替换循环；函数体上下文仍由 func 处理器决定。
+func meta_expand_root(root: u64) -> u64 {
+  let answer: u64 = meta_expand_group_inner(root, 1);
+  return answer;
+}
+
+func meta_expand_source(source: u64) -> u32 {
+  let clear_defer: u32 = meta_expand_defer_put(0);
+  let clear_decl: u32 = meta_cell_put_raw(symbol_addr("meta_expand_decl_state_storage"), 0);
+  let decl_phase: u32 = meta_cell_put_raw(symbol_addr("meta_expand_decl_phase_storage"), 1);
+  let syntax_mark: u64 = meta_syntax_state_get(8);
+  let clear_ids: u32 = meta_expand_id_reset();
+  let tx: u64 = lain_meta_ast_tx_begin();
+  let old_root: u64 = meta_root_of(source);
+  let decl_root: u64 = meta_expand_root(old_root);
+  let decl_changed: u64 = meta_cell_get(symbol_addr("meta_expand_decl_state_storage"));
+  // 旧 IR 的 %new_root 值 if 支里嵌着 %body_root 值 if（外层只取内层结果）；
+  // 表面语言的值 if 支里不再写 if，这里用一次性选择循环保持同样的求值顺序：
+  // 只有 decl_changed == 0 才清 decl_phase 并展开函数体，否则直接用 decl_root。
+  let new_root: u64 = loop pick_root(t: u64 = 0) {
+    if decl_changed != 0 { break pick_root(decl_root); }
+    let body_phase: u32 = meta_cell_put_raw(symbol_addr("meta_expand_decl_phase_storage"), 0);
+    let body_root: u64 = if decl_root != 0 { meta_expand_root(decl_root) } else { 0 };
+    break pick_root(body_root);
+  };
+  let bad: bool = new_root == 0;
+  if bad {
+    let rb: u32 = lain_meta_ast_tx_rollback(tx);
+    let restore_syntax: u32 = meta_syntax_state_put(8, syntax_mark);
+    let dependency: u64 = meta_expand_defer_get();
+    let deferred: bool = dependency != 0;
+    if deferred { return 9411; }
+    let status: u64 = lain_meta_status();
+    let zero: bool = status == 0;
+    let code: u64 = if zero { 9408 } else { status };
+    let code32: u32 = code as u32;
+    let f: u32 = lain_meta_fail(code32);
+    return code32;
+  }
+  let same: bool = new_root == old_root;
+  // 同上：旧 IR 的 %st 值 if 支里嵌着 %commit 值 if，改成一次性选择循环。
+  // 旧 IR 在内层重用了名字 %decl_changed（遮蔽外层），这里改名 decl_changed2。
+  let st: u32 = loop pick_st(t: u32 = 0) {
+    if same {
+      let rb2: u32 = lain_meta_ast_tx_rollback(tx);
+      break pick_st(0);
+    }
+    let decl_changed2: u64 = meta_cell_get(symbol_addr("meta_expand_decl_state_storage"));
+    let commit: u32 = if decl_changed2 != 0 {
+      meta_commit_decl_candidate(source, old_root, new_root, tx, syntax_mark)
+    } else {
+      lain_meta_ast_commit(source, old_root, new_root, tx)
+    };
+    break pick_st(commit);
+  };
+  return st;
+}

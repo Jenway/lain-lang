@@ -190,7 +190,14 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   declare/lower）的 handler 常量与首个命中顺序逐条对照一致，兜底 `lain_meta_fail(9412)` 与 9412 返回值保持。
   嵌套值 if 分派链改写成平坦守卫（命中即 return，既有写法）。`%slice` 因保留字改名 `slice_v`。
   未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 19 项 `std/expand.l1`（417 行、14 过程、4 个数据块，是目前最大的一片）。
+- `std/expand.lain` 已翻译：14 个实现过程名与签名与旧片一致，38 个跨片依赖以 extern 声明，本文件内定义 4 个数据块
+  （`meta_expand_defer_state`/`meta_expand_decl_phase`/`meta_expand_decl_state`/`meta_expand_id_state`，各 8 个 0 字节，rw）。
+  无需数据 stub，`lain0` 退出码 0、verify 通过。三处嵌套值 if（`%answer`、`%new_root`、`%st`）改写为一次性选择循环，
+  逐条核对：`pick` 在 `changed_bit == 0` 时不调用 `append_refs`（无副作用）且 `bump_release` 仍无条件执行；
+  `pick_root` 仅在 `decl_changed == 0` 时清 `decl_phase`；`%st` 的遮蔽重读改名 `decl_changed2`。
+  全文件调用序列对比：7 处差异全部是新增的 `symbol_addr` 与循环标签，真实调用顺序、标志常量（3×`0x8000…`、2×`0x7FFF…`）
+  与失败码集合 {17,9408,9410,9411,9412} 一致。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 20 项 `std/recognize.l1`（552 行、15 过程，无数据块）。
 
 ## 已知风险
 
