@@ -185,7 +185,12 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   `meta_syntax_ensure` 的 context/handler 号 (2,8)/(2,10)/(2,13) 与旧片一致。与临时 `meta_kw_return`/`meta_kw_for`/
   `meta_kw_loop` 数据定义拼合后 `lain0` 退出码 0、verify 通过。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
 - handler 目录至此全部迁完（struct、enum、func、if、let、statements）。
-- 下一片为 `SOURCE_ORDER` 第 18 项 `std/declarations.l1`。
+- `std/declarations.lain` 已翻译：6 个实现过程名与签名与旧片一致，无静态数据；17 个跨片依赖以 extern 声明。
+  无需数据 stub，`lain0` 退出码 0、verify 通过。五个分派链（recognize/replacement/stmt_children/decl_children/
+  declare/lower）的 handler 常量与首个命中顺序逐条对照一致，兜底 `lain_meta_fail(9412)` 与 9412 返回值保持。
+  嵌套值 if 分派链改写成平坦守卫（命中即 return，既有写法）。`%slice` 因保留字改名 `slice_v`。
+  未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 19 项 `std/expand.l1`（417 行、14 过程、4 个数据块，是目前最大的一片）。
 
 ## 已知风险
 
