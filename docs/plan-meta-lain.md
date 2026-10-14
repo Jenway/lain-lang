@@ -235,7 +235,14 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 - 顺带修复 lain0 编译器缺陷：作为实参的嵌套调用拿不到结果临时量（`lowerCall` 用 `kInvalidType` 降级实参），
   `return inner(inner(y));` 报 verify 2020；改为传入实参在 Sema 里定下的类型。提交 `e151078`，
   `bash scripts/regress.sh --round-trip` PASS=35 FAIL=0。
-- 下一片为 `SOURCE_ORDER` 第 26 项 `std/sums.l1`（701 行、18 过程）。
+- `std/sums.lain` 已翻译：18 个实现过程名与签名与旧片一致，84 个跨片依赖以 extern 声明，无静态数据；fixture 需 stub 6 个
+  来自 `lainir.l1`/`emit.lain` 的数据符号（`lainir_eq_name`/`lainir_text_buffer`/`lainir_zero`/`meta_dsep`/`meta_eoff`/`meta_etag`）；
+  `lain0` 退出码 0、verify 通过，`compare_fragment.py` OK。`compare_call_order.py` 报 7 处待审，逐条核对后全部为良性：
+  四处是平坦守卫导致的 `lain_meta_fail` 文本位置前移（**失败码多重集完全相同**，如 ['10','9']、['5','9']），
+  另三处是归档的 `#load`/`#store` 在表面语言里写作 `load`/`store` 内建（被脚本计为调用），其余 delta 为 `symbol_addr`/`lea`
+  这类指令的表面写法差异。`meta_sum_type_id` 的 `%id` 后有无条件 `restore_top`/`release`，故用 `pick_id` 选择循环保留清理；
+  `meta_lower_sum_construct_local` 的 `%t2` 用 `pick_t2`。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 27 项 `std/lainir.l1`（152 过程 + 140 个数据块；已预先切成 8 组并把数据段转换+逐块验真）。
 
 ## 组装与收尾（终局）
 
