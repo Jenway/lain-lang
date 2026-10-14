@@ -265,6 +265,17 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 
 ## 组装与收尾（终局）
 
+- **28/28 全部完成，整份 bootstrap 已可编译**：`scripts/assemble_bootstrap.py` 把 28 个单元拼成单文件
+  `build/lain0/assemble.lain`（550578 字节；733 个顶层定义、丢弃 649 条内部 extern、保留 33 条宿主 extern），
+  `./build/lain0/lain0.exe build/lain0/assemble.lain` **退出码 0**，发出 **869 个过程 / 215 个数据块**。
+  未运行 Meta（本轮验收始终是 compile-only）。
+- 迁移过程中修掉的两个 lain0 缺陷（同一类根因，均为「实参降级时丢掉了期望类型」）：
+  1. 作为**调用实参**的嵌套调用不分配结果临时量（`lowerCall`）——`return inner(inner(y));` 报 verify 2020，提交 `e151078`；
+  2. 作为 **`break`/`continue` 实参**的嵌套调用同样如此（`lowerJumpStmt`）——多路子代理在 `meta.l1` 翻译中被迫把
+     `break pick(meta_tid_repr_kind(s_tid))` 拆成两个 `let` 才过闸。两处都改为传入该表达式在 Sema 里定下的类型
+     （`sema_->exprTypes`）。均以 `bash scripts/regress.sh --round-trip` 作回归闸门。
+- 若日后新增单元或改动 SOURCE_ORDER，重跑上面两条命令即可复核。
+
 逐片 compile-only 闸门必须为跨片被调过程写 `extern` 声明（lain0 CLI 只接受单个输入文件）；而旧手写单元只声明**宿主**函数
 （`#extern` 仅出现在 `lainir.l1` / `funcs.l1`），跨片调用靠 SOURCE_ORDER 拼接后在同一模块内解析。所以把已翻译单元
 原样拼起来会撞 `verify code 2022 duplicate subroutine`：某片定义了另一片声明为 extern 的过程。
