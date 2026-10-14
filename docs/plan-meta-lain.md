@@ -176,7 +176,12 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   （`meta_kw_if`/`meta_kw_else` 均单点定义在 lex.lain）。与临时两关键字数据定义拼合后 `lain0` 退出码 0、verify 通过。
   旧 IR 的 `%else_hit` 值型 if（has_after 为 0 时不再求值）改写为等价守卫嵌套；高位变更标记同样用加法代替 OR。
   未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 16 项 `std/handlers/let.l1`。
+- `std/handlers/let.lain` 已翻译：8 个实现过程名与签名与旧片一致，无静态数据；30 个跨片依赖以 extern 声明。
+  与临时 `meta_kw_let`/`meta_kw_ro` 数据定义拼合后 `lain0` 退出码 0、verify 通过。旧 IR 的四处「支里套值 if」
+  （`%nxt`/`%v`/`%acc2`/`%one`）改写成守卫 + `continue`/`break`，逐条对照语义等价（值 if 结果直接喂给同一个
+  continue/break，提升的表达式均为纯计算）；`meta_literal_fits` 的 `ref` 参数因保留字改名 `ref_v`，链接名不变。
+  未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 17 项 `std/handlers/statements.l1`。
 
 ## 已知风险
 
