@@ -172,7 +172,11 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   `./build/lain0/lain0.exe build/lain0/func-with-deps.lain` 退出码 0、verify 通过（28 个过程、3 个 data）。
   `meta_expand_children_func` 的变更标记为 bit 63，与低位常数 6 不重叠，故 `flag + 6` 等价于旧 IR 的 bitwise OR。
   未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 15 项 `std/handlers/if.l1`。
+- `std/handlers/if.lain` 已翻译：3 个实现过程名与签名与旧片一致，无静态数据；7 个跨片依赖以 extern 声明
+  （`meta_kw_if`/`meta_kw_else` 均单点定义在 lex.lain）。与临时两关键字数据定义拼合后 `lain0` 退出码 0、verify 通过。
+  旧 IR 的 `%else_hit` 值型 if（has_after 为 0 时不再求值）改写为等价守卫嵌套；高位变更标记同样用加法代替 OR。
+  未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 16 项 `std/handlers/let.l1`。
 
 ## 已知风险
 
