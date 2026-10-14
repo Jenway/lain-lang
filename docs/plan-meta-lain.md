@@ -161,7 +161,10 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   以 extern 声明，三个 `meta_register_my_*` 在此为 extern。`lain0` 退出码 0、verify 通过（42 个过程、1 个 data），
   无需数据 stub。旧 `#lshr`/`#ptr2int`/`#int2ptr` 分别落成 `>>`、`as u64`、`as addr`。未运行 Meta。
   旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 12 项 `std/handlers/struct.l1`。
+- `std/handlers/struct.lain` 已翻译：3 个实现过程名与签名与旧片一致，无静态数据；5 个跨片/宿主依赖以 extern 声明
+  （`meta_scope_add_decl` 在 scope.lain 定义，`meta_kw_struct` 在 emit.lain 定义）。与临时 `meta_kw_struct` 数据定义
+  拼合后 `lain0` 退出码 0、verify 通过（9 个过程、1 个 data）。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 13 项 `std/handlers/enum.l1`。
 
 ## 已知风险
 
