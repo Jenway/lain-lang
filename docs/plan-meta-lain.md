@@ -407,6 +407,24 @@ python scripts/build_meta_unit.py      # 源码 -> 单份 LAINIR 单元 + 驱动
 
 `docs/04-bootstrap-dialect.md` 是这套输入语言的规范：每落地一条，规范与样例判据都要同步更新，否则文档会继续宣称「报 4」而实现已经支持。
 
+### 新判据下的真实进度（`#data_addr` 迁移已落地）
+
+`#data_addr` → `#bitcast[#addr](%NAME)` 已改完（`lainir_data_addr` / `lainir_proc_addr` 两个写出器查实**零调用者**，是死代码，未动）。用「把 Meta 产出当单元装回去」这条新判据跑全样例：
+
+```
+Meta 跑完(host_status=0): 29/34      ← 旧判据
+产出装得回去(新判据):     19/34      ← 真实进度
+```
+
+10 个差距分成两类（错误码见 `seed/include/lain/text/parse.h`：3001 记法层、3002 未知算子）：
+
+| 类别 | 样例 | 证据 |
+| :--- | :--- | :--- |
+| 仍在发已删算子（3002） | `pointer` line 2、`field_expr` 38、`if_default` 22、`locals` 42 | `pointer.lain` 产物第 2 行是 `%r1 = #ptr2int[#bits<64>](%p)`；应为 `#bitcast[#bits<64>](%p)`。同类还有 `#int2ptr`（`addr_of`）与 `#proc_addr` |
+| 记法差异（3001） | `loop` 6、`loop_if` 6、`loop_value` 6、`loop_local` 13、`jumps` 6 | 循环区域体内部。头部形状与 lain0 的 `%r4 = #loop outer(...)` 只差标签名与缩进，所以差异在区域内（待按字节 diff 两个产出定位） |
+
+**下一步**：① 迁完剩下三个算子（`#ptr2int` / `#int2ptr` / `#proc_addr`，共 17 处）；② 修循环区域体的记法（3001 那 5 个）；③ 才轮到 6 项清单里的 5 个输入形状。判据始终是上面那条新判据——**产出装得回去**，而不是 Meta 有没有跑完。
+
 ## 参考
 
 - `docs/plan-lain0.md`（stage 1 / `lain0` 功能进度）
