@@ -416,7 +416,14 @@ bool Lowerer::lowerJumpStmt(const ast::JumpStmt *s,
   args.reserve(s->args.size());
   for (ast::Expr *a : s->args) {
     L1Operand op{};
-    if (!lowerExpr(a, kInvalidType, out, op)) return false;
+    // break/continue 的实参同样要带上它在 Sema 里定下的类型：用 kInvalidType 时，
+    // 作为实参的嵌套调用拿不到期望类型，lowerCall 就不为它分配结果临时量，
+    // 验证器报 2020 `instruction kind 76 (CALL) defines 0 result(s), expected 1`。
+    TypeId argTy = kInvalidType;
+    auto typeIt = sema_->exprTypes.find(a);
+    if (typeIt != sema_->exprTypes.end() && typeIt->second != kInvalidType)
+      argTy = typeIt->second;
+    if (!lowerExpr(a, argTy, out, op)) return false;
     args.push_back(op);
   }
   if (s->isBreak && args.size() != 1) {
