@@ -148,7 +148,10 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   `./build/lain0/lain0.exe build/lain0/parse-with-deps.lain` 退出码 0、verify 通过（46 个过程）。未运行 Meta。
   旧 `.l1` 已在 `483aec4` 删除。
 
-- 下一片为 `SOURCE_ORDER` 第 8 项 `std/macros/my_if.l1`。
+- `std/macros/my_if.lain` 已翻译：6 个实现过程名与签名、2 个静态数据字节与旧片一致；18 个跨片/宿主依赖以 extern 声明。
+  与临时 `meta_kw_else` 数据定义拼合后 `lain0` 退出码 0、verify 通过（27 个过程、3 个 data）。未运行 Meta。
+  旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 9 项 `std/macros/my_block.l1`。
 
 ## 已知风险
 
