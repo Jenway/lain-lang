@@ -6,12 +6,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# seed 的根目录（C 实现的 IR / VM / 文本层）
-set(LAIN0_SEED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../seed" CACHE PATH "seed root")
-# 预构建的 seed 静态库。seed 是独立的 C 工程，见 docs/development.md：
-#   cmake -S . -B build/cmake -G Ninja -DCMAKE_C_COMPILER=clang
-#   cmake --build build/cmake        # -> build/lib/lain_seed.lib
-set(LAIN0_SEED_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../build/lib/lain_seed.lib"
+# kernel 的根目录（C 实现的 IR / VM / 文本层），它就在同级的 kernel/ 下
+set(LAIN0_SEED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../kernel" CACHE PATH "seed kernel root")
+# seed 预构建的静态库。seed 是独立工程，见 docs/development.md：
+#   cmake -S seed -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+#   cmake --build build            # -> build/lib/lain_seed.lib
+set(LAIN0_SEED_LIB "${CMAKE_BINARY_DIR}/lib/lain_seed.lib"
     CACHE FILEPATH "prebuilt lain_seed static library")
 
 add_library(lain0_core STATIC
@@ -41,13 +41,24 @@ endif()
 
 target_link_libraries(lain0_core PUBLIC "${LAIN0_SEED_LIB}")
 
+# 按文件路径链接不产生构建顺序约束，被 seed 聚合时必须显式排在 kernel 之后。
+if(TARGET lain_seed)
+  add_dependencies(lain0_core lain_seed)
+endif()
+
+# 被 seed 聚合时可执行文件固定落 build/lain0/，脚本按这个路径断言。
+set(LAIN0_RUNTIME_DIR "${CMAKE_BINARY_DIR}/lain0")
+
 # CLI
 add_executable(lain0 tools/main.cpp)
 target_link_libraries(lain0 PRIVATE lain0_core)
+set_target_properties(lain0 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${LAIN0_RUNTIME_DIR}")
 
 # 契约自洽 + seed 链接路径的两个哨兵。任何时候都应当能编译并跑通。
 add_executable(headers_check tools/headers_check.cpp)
 target_link_libraries(headers_check PRIVATE lain0_core)
+set_target_properties(headers_check PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${LAIN0_RUNTIME_DIR}")
 
 add_executable(probe_seed tools/probe_seed.cpp)
 target_link_libraries(probe_seed PRIVATE lain0_core)
+set_target_properties(probe_seed PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${LAIN0_RUNTIME_DIR}")

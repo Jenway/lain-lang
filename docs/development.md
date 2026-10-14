@@ -4,7 +4,9 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| `seed/` | C 实现的 LAINIR parser、验证器、装载器、VM、后端和宿主能力 |
+| `seed/` | seed 顶层工程；先 `add_subdirectory(kernel)` 编出 `lain_seed`，再 `add_subdirectory(lain0)` 编 C++ 前端 |
+| `seed/kernel/` | C 实现的 LAINIR parser、验证器、装载器、VM、后端和宿主能力（`lain_seed` 静态库） |
+| `seed/lain0/` | C++ 写的 Lain 编译器前端，链接 `seed/kernel` 产出的 `lain_seed` |
 | `bootstrap/` | Lain 源码写的 Meta 库（28 个单元 + `SOURCE_ORDER` 链接顺序）；编译出的 LAINIR 就是 Meta 本体 |
 | `tools/` | 驱动与验收工具，只装配、推进、记账，不含语言知识 |
 | `docs/` | 设计、规范与进度|
@@ -17,11 +19,16 @@
 ### CMake：seed 库
 
 ```powershell
-cmake -S . -B build/cmake -G Ninja -DCMAKE_C_COMPILER=clang
-cmake --build build/cmake
+cmake -S seed -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build
 ```
 
-产物是 `lain_seed`（静态库）与 `lain-meta`（驱动）。
+`seed/CMakeLists.txt` 先 `add_subdirectory(kernel)`（C，产出 `build/lib/lain_seed`），
+再 `add_subdirectory(lain0)`（C++，链接该库）。这个顺序不许调换：`lain0` 只消费
+`kernel` 的产物。
+
+产物是 `build/lib/lain_seed`（静态库）、`build/lain-meta`（驱动）、
+`build/lain0/lain0`（lain0 的 CLI）。
 
 ### 驱动：lain-meta
 
