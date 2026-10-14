@@ -197,7 +197,12 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
   `pick_root` 仅在 `decl_changed == 0` 时清 `decl_phase`；`%st` 的遮蔽重读改名 `decl_changed2`。
   全文件调用序列对比：7 处差异全部是新增的 `symbol_addr` 与循环标签，真实调用顺序、标志常量（3×`0x8000…`、2×`0x7FFF…`）
   与失败码集合 {17,9408,9410,9411,9412} 一致。未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
-- 下一片为 `SOURCE_ORDER` 第 20 项 `std/recognize.l1`（552 行、15 过程，无数据块）。
+- `std/recognize.lain` 已翻译：15 个实现过程名与签名与旧片一致，25 个跨片依赖以 extern 声明，无静态数据，无需 stub，
+  `lain0` 退出码 0、verify 通过。`meta_recognize_word` 的 12 层嵌套值 if 改写为一次性选择循环 `pick_form`，
+  优先级链逐条核对与旧片相同（3/8/11/9/5/13/12/10/6/4/7/1），且所有条件均提前算好、无副作用；
+  内层遮蔽的 `%stmt_context` 改名 `stmt_ctx` 并提前求值；其余按平坦守卫改写（命中即 return/break）。
+  未运行 Meta。旧 `.l1` 将在翻译提交后单独删除。
+- 下一片为 `SOURCE_ORDER` 第 21 项 `std/modules.l1`（748 行、18 过程、2 个数据块）。
 
 ## 已知风险
 
