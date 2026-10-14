@@ -89,6 +89,8 @@ static bool resolve_name(const Loader *L, uint32_t region_id, const char *name,
 
 /* --- 区域树 ---------------------------------------------------------------- */
 
+static uint32_t find_symbol(const LainVmImage *image, const char *symbol);
+
 /* 下面几个 push 的容量检查是**防御性的**：容量由 count_region() 预先数出来，
  * 超了说明计数器和装载器对不上——那是装载器的 bug，不是模块被拒。
  * 所以给它们单独的码，别和「模块非法」混在一起。 */
@@ -157,12 +159,20 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
       LainVmOperandRef ref;
       uint32_t pushed = 0;
       ref.is_literal = init->kind != OPERAND_VALUE;
+      ref.is_symbol = false;
+      ref.symbol_index = LAINVM_IMAGE_NO_INDEX;
       ref.frame_distance = 0;
       ref.slot = 0;
       if (!ref.is_literal &&
           !resolve_name(L, parent, init->name, &ref.frame_distance, &ref.slot)) {
-        load_fail(L, LAINVM_IMAGE_ERR_LOOP_INIT, "image: undefined loop initial value");
-        return LAINVM_IMAGE_NO_REGION;
+        uint32_t sym = find_symbol(L->image, init->name);
+        if (sym != LAINVM_IMAGE_NO_INDEX) {
+          ref.is_symbol = true;
+          ref.symbol_index = sym;
+        } else {
+          load_fail(L, LAINVM_IMAGE_ERR_LOOP_INIT, "image: undefined loop initial value");
+          return LAINVM_IMAGE_NO_REGION;
+        }
       }
       if (!push_operand(L, ref, &pushed)) return LAINVM_IMAGE_NO_REGION;
     }
@@ -226,11 +236,26 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
         LainVmOperandRef ref;
         uint32_t pushed = 0;
         if (op->kind == OPERAND_VALUE) {
+          bool resolved;
           ref.is_literal = false;
+          ref.is_symbol = false;
+          ref.symbol_index = LAINVM_IMAGE_NO_INDEX;
           ref.slot = 0;
           ref.frame_distance = 0;
-          if (!op->name ||
-              !resolve_name(L, id, op->name, &ref.frame_distance, &ref.slot)) {
+          resolved = op->name &&
+                     resolve_name(L, id, op->name, &ref.frame_distance, &ref.slot);
+          /* D-002 移除了 #data_addr：取静态数据块的地址就是引用它的符号名
+             （见 ir/verify.c，数据块的符号是模块级 #addr 绑定），所以装载器也要认。
+             先按值解析，失败再按数据符号解析；两边都不中才是真的未定义。 */
+          if (!resolved && op->name) {
+            uint32_t sym = find_symbol(L->image, op->name);
+            if (sym != LAINVM_IMAGE_NO_INDEX) {
+              ref.is_symbol = true;
+              ref.symbol_index = sym;
+              resolved = true;
+            }
+          }
+          if (!resolved) {
             load_fail(L, LAINVM_IMAGE_ERR_UNDEFINED_VALUE, "image: undefined value");
             return LAINVM_IMAGE_NO_REGION;
           }

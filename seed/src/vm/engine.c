@@ -107,8 +107,18 @@ static L1Value read_ref(const LainVmTcb *tcb, LainVmOperandRef ref,
   memset(&value, 0, sizeof(value));
   if (ref.is_literal) {
     value.kind = L1_VALUE_BITS;
-    value.bit_width = ty ? ty->width : 64u;
+    value.bit_width = type_width(ty);
     value.as.bits = literal_bits & width_mask(value.bit_width);
+    return value;
+  }
+  if (ref.is_symbol) {
+    /* 静态数据块的地址：装载时符号表已经定好地址，这里只是取值。
+       #addr 不带宽度，宽度一律走 type_width，否则 width_mask(0) 会把地址抹成 0。 */
+    uint32_t width = type_width(ty);
+    value.kind = L1_VALUE_BITS;
+    value.bit_width = width;
+    value.as.bits = (uint64_t)lainvm_image_symbol_addr(tcb->image, ref.symbol_index) &
+                    width_mask(width);
     return value;
   }
   {
@@ -127,7 +137,7 @@ L1Value lainvm_operand_read(const LainVmTcb *tcb, const L1Inst *inst,
     const L1Operand *op = &inst->operands[index];
     return read_ref(tcb, ref, op->bits, inst->has_ty ? inst->ty : NULL);
   }
-  return read_ref(tcb, ref, 0, NULL);
+  return read_ref(tcb, ref, 0, inst->has_ty ? inst->ty : NULL);
 }
 
 void lainvm_result_write(LainVmTcb *tcb, const L1Inst *inst, uint32_t index,
@@ -245,7 +255,7 @@ static L1Value read_typed(LainVmTcb *tcb, const L1Inst *inst, uint32_t index,
 /* --- ALU：整数 ------------------------------------------------------------ */
 
 static LainVmSliceResult op_int_bin(LainVmTcb *tcb, const L1Inst *inst) {
-  uint32_t width = inst->ty ? inst->ty->width : 64u;
+  uint32_t width = type_width(inst->ty);
   uint64_t a = lainvm_operand_read(tcb, inst, 0).as.bits;
   uint64_t b = lainvm_operand_read(tcb, inst, 1).as.bits;
   uint64_t r = 0;
@@ -291,7 +301,7 @@ static LainVmSliceResult op_int_bin(LainVmTcb *tcb, const L1Inst *inst) {
 }
 
 static LainVmSliceResult op_int_cmp(LainVmTcb *tcb, const L1Inst *inst) {
-  uint32_t width = inst->ty ? inst->ty->width : 64u;
+  uint32_t width = type_width(inst->ty);
   uint64_t a = lainvm_operand_read(tcb, inst, 0).as.bits & width_mask(width);
   uint64_t b = lainvm_operand_read(tcb, inst, 1).as.bits & width_mask(width);
   int64_t sa = as_signed(a, width);
@@ -317,7 +327,7 @@ static LainVmSliceResult op_int_cmp(LainVmTcb *tcb, const L1Inst *inst) {
 
 static LainVmSliceResult op_int_conv(LainVmTcb *tcb, const L1Inst *inst) {
   L1Value src = lainvm_operand_read(tcb, inst, 0);
-  uint32_t target = inst->ty ? inst->ty->width : 64u;
+  uint32_t target = type_width(inst->ty);
   uint32_t source = src.bit_width ? src.bit_width : target;
   uint64_t r;
 
@@ -357,7 +367,7 @@ static uint64_t f32_bits(float f) {
 }
 
 static LainVmSliceResult op_float_bin(LainVmTcb *tcb, const L1Inst *inst) {
-  uint32_t width = inst->ty ? inst->ty->width : 64u;
+  uint32_t width = type_width(inst->ty);
   uint64_t a = lainvm_operand_read(tcb, inst, 0).as.bits;
   uint64_t b = lainvm_operand_read(tcb, inst, 1).as.bits;
 
@@ -393,7 +403,7 @@ static LainVmSliceResult op_float_bin(LainVmTcb *tcb, const L1Inst *inst) {
 }
 
 static LainVmSliceResult op_float_cmp(LainVmTcb *tcb, const L1Inst *inst) {
-  uint32_t width = inst->ty ? inst->ty->width : 64u;
+  uint32_t width = type_width(inst->ty);
   double x = width == 32
                  ? (double)f32_of(lainvm_operand_read(tcb, inst, 0).as.bits)
                  : f64_of(lainvm_operand_read(tcb, inst, 0).as.bits);
@@ -427,7 +437,7 @@ static LainVmSliceResult op_float_cmp(LainVmTcb *tcb, const L1Inst *inst) {
 
 static LainVmSliceResult op_float_conv(LainVmTcb *tcb, const L1Inst *inst) {
   L1Value src = lainvm_operand_read(tcb, inst, 0);
-  uint32_t target = inst->ty ? inst->ty->width : 64u;
+  uint32_t target = type_width(inst->ty);
   uint32_t source = src.bit_width ? src.bit_width : 64u;
   double x = source == 32 ? (double)f32_of(src.as.bits) : f64_of(src.as.bits);
   L1Value out;
@@ -490,7 +500,7 @@ static LainVmSliceResult op_load(LainVmTcb *tcb, const L1Inst *inst) {
     lainvm_result_write(tcb, inst, 0, value_addr((uintptr_t)raw));
   else
     lainvm_result_write(tcb, inst, 0,
-                        value_bits(raw, inst->ty ? inst->ty->width : 64u));
+                        value_bits(raw, type_width(inst->ty)));
   return LAINVM_SLICE_RUNNABLE;
 }
 

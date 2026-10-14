@@ -32,8 +32,10 @@
  * 结果不需要距离——结果总是定义在当前帧。 */
 typedef struct {
   bool is_literal;         /* 真：字面量，不进槽，值在 L1Inst.operands 里 */
+  bool is_symbol;          /* 真：静态数据块的地址；值是符号装载后的地址 */
   uint32_t frame_distance; /* 0 = 当前帧，1 = 外面一层 */
   uint32_t slot;           /* 相对该帧 slot_base 的下标；字面量时为 0 */
+  uint32_t symbol_index;   /* is_symbol 为真时的数据符号下标 */
 } LainVmOperandRef;
 
 typedef struct {
