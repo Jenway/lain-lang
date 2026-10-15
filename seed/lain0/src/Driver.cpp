@@ -439,33 +439,32 @@ CompileResult compileFile(const std::string &path, const CompileOptions &opts,
                           SourceMgr &src, DiagSink &diags) {
   CompileResult r{};
 
-  std::string openErr;
-  const uint32_t file = src.loadFile(path, openErr);
-  if (file == 0) {
-    diags.error(Span{}, D::IoOpenFailed, std::move(openErr));
+  // 模块加载与两轮分析都归 Program（docs/plan-modules.md §3）：源根 = 入口
+  // 文件所在目录，整个 import 依赖图一次加载完，同键只解析一次。
+  Program prog;
+  if (!prog.load(path, src, diags)) {
     return r;
   }
-  r.fileId = file;
-  const std::string_view text = src.text(file);
+  const ModuleUnit *entry = prog.root();
+  if (entry == nullptr || entry->ast == nullptr) {
+    return r;
+  }
+  r.fileId = entry->fileId;
+  const std::string_view text = entry->text;
 
-  std::vector<Token> toks = lex(file, text, diags);
   if (opts.dumpTokens) {
-    dumpTokens(toks, src, std::cout);
+    dumpTokens(entry->toks, src, std::cout);
   }
   if (diags.hasErrors()) {
     return r;
   }
-
-  ast::AstArena arena;
-  ast::Module *mod = parseModule(toks, arena, diags);
-  if (mod == nullptr) {
-    return r;
-  }
-  // 模块名由驱动给：parser 只决定形状，不认文件名。
-  const std::string moduleName = moduleNameOf(path, opts);
-  mod->name = std::string_view(moduleName);
+  // 模块名由模块键决定：parser 只决定形状，不认文件名。
+  const std::string moduleName = entry->ctx.key.empty()
+                                     ? moduleNameOf(path, opts)
+                                     : entry->ctx.key;
+  entry->ast->name = std::string_view(moduleName);
   if (opts.dumpAst) {
-    dumpAst(*mod, std::cout);
+    dumpAst(*entry->ast, std::cout);
   }
   if (diags.hasErrors()) {
     return r;
@@ -473,9 +472,7 @@ CompileResult compileFile(const std::string &path, const CompileOptions &opts,
 
   TypeStore types;
   types.initBuiltins();
-  SemaResult sema;
-  sema.sourcePath = std::string(path);
-  if (!analyze(*mod, types, sema, diags)) {
+  if (!prog.analyze(types, diags)) {
     return r;
   }
   if (diags.hasErrors()) {
@@ -490,9 +487,9 @@ CompileResult compileFile(const std::string &path, const CompileOptions &opts,
 
   LowerOptions lopts{};
   lopts.moduleName = moduleName.c_str();
-  lopts.sourcePath = path.c_str();
-  Lowerer lower(builder, types, sema, src, diags, lopts);
-  const L1Module *ir = lower.run(*mod);
+  lopts.program = &prog;
+  Lowerer lower(builder, types, src, diags, lopts);
+  const L1Module *ir = lower.run(prog);
   if (ir == nullptr || diags.hasErrors()) {
     lainir_builder_free(builder);
     return r;
@@ -509,7 +506,7 @@ CompileResult compileFile(const std::string &path, const CompileOptions &opts,
   r.verifyMessage = std::string(vdiag.message);
   if (vrc != 0) {
     Span sp{};
-    sp.file = file;
+    sp.file = r.fileId;
     sp.begin = offsetOfLineCol(text, vdiag.line, vdiag.column);
     sp.end = sp.begin;
     diags.error(sp, D::VerifyFailed, verifyMessage(vdiag));

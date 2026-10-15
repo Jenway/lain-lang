@@ -176,7 +176,8 @@ bool Lowerer::lowerDecl(const ast::Decl *d) {
   case ast::DeclKind::Enum:
     return lowerEnum(static_cast<const ast::EnumDecl *>(d));
   case ast::DeclKind::Import:
-    return lowerImport(static_cast<const ast::ImportDecl *>(d), subs_);
+    // 加载与解析由 Program 完成；被导入模块的声明会按模块顺序自己降级一遍。
+    return true;
   case ast::DeclKind::StaticLet:
     return lowerStaticLet(static_cast<const ast::StaticLetDecl *>(d), data_, subs_);
   }
@@ -191,7 +192,7 @@ bool Lowerer::lowerFunc(const ast::FuncDecl *f, L1Subroutine *&outSub) {
   std::vector<L1Param> params{};
   params.reserve(f->params.size());
   for (const ast::ParamDecl &p : f->params) {
-    const TypeId pt = types_->resolve(p.type, *diags_);
+    const TypeId pt = resolveTy(p.type);
     if (pt == kInvalidType) return false;
     params.push_back(lainir_proc_param(intern(p.name),
                                        signatureTypeOf(builder_, *types_, pt)));
@@ -199,7 +200,7 @@ bool Lowerer::lowerFunc(const ast::FuncDecl *f, L1Subroutine *&outSub) {
 
   TypeId retTy = kInvalidType;
   if (f->hasRet) {
-    retTy = types_->resolve(f->ret, *diags_);
+    retTy = resolveTy(f->ret);
     if (retTy == kInvalidType) return false;
   }
 
@@ -237,7 +238,7 @@ bool Lowerer::lowerFunc(const ast::FuncDecl *f, L1Subroutine *&outSub) {
   }
 
   const L1Subroutine *sub =
-      lainir_subroutine(builder_, intern(f->name),
+      lainir_subroutine(builder_, symbolFor(f->name),
                         params.empty() ? nullptr : params.data(),
                         static_cast<uint32_t>(params.size()), results,
                         resultCount, body);
@@ -256,7 +257,7 @@ bool Lowerer::lowerExtern(const ast::ExternDecl *e, L1Subroutine *&outSub) {
   std::vector<L1Param> params{};
   params.reserve(e->params.size());
   for (const ast::ParamDecl &p : e->params) {
-    const TypeId pt = types_->resolve(p.type, *diags_);
+    const TypeId pt = resolveTy(p.type);
     if (pt == kInvalidType) return false;
     params.push_back(lainir_proc_param(intern(p.name),
                                        signatureTypeOf(builder_, *types_, pt)));
@@ -264,7 +265,7 @@ bool Lowerer::lowerExtern(const ast::ExternDecl *e, L1Subroutine *&outSub) {
 
   TypeId retTy = kInvalidType;
   if (e->hasRet) {
-    retTy = types_->resolve(e->ret, *diags_);
+    retTy = resolveTy(e->ret);
     if (retTy == kInvalidType) return false;
   }
 
@@ -300,70 +301,8 @@ bool Lowerer::lowerEnum(const ast::EnumDecl *e) {
   return true;
 }
 
-// 模块路径解析 + 加载（读文件、lex、parse）。与 Sema.cpp 里的版本同源，单发工具不释放 arena。
-// 注意：parseModuleText 返回的 AST 里 token 文本是 string_view，指向传入的 text，
-// 调用方必须让 text 活过 lower，否则类型名变悬垂指针（乱码）。
-static std::string readFileText(const std::string &filePath, DiagSink &diags) {
-  std::ifstream f(filePath);
-  if (!f) {
-    diags.error(Span{}, D::IoOpenFailed, "打不开导入模块: " + filePath);
-    return "";
-  }
-  return std::string((std::istreambuf_iterator<char>(f)),
-                     std::istreambuf_iterator<char>());
-}
-static ast::Module *parseModuleText(const std::string &filePath,
-                                    const std::string &text, DiagSink &diags) {
-  ast::AstArena *arena = new ast::AstArena();
-  std::vector<Token> toks = lex(0, text, diags);
-  if (diags.hasErrors()) return nullptr;
-  ast::Module *m = parseModule(toks, *arena, diags);
-  if (diags.hasErrors()) return nullptr;
-  return m;
-}
-
-static std::string directoryOf(const std::string &path) {
-  const size_t pos = path.find_last_of('/');
-  return pos == std::string::npos ? "." : path.substr(0, pos);
-}
-static std::string resolveModulePath(const std::string &dir,
-                                    const std::string &spec) {
-  const size_t pos = spec.rfind("::");
-  const std::string base = pos == std::string::npos ? "" : spec.substr(0, pos);
-  const std::string mod = pos == std::string::npos ? spec : spec.substr(pos + 2);
-  const std::vector<std::string> cands = {
-      dir + "/" + mod + ".lain",
-      dir + "/" + base + "/" + mod + ".lain",
-  };
-  for (const auto &c : cands) {
-    std::ifstream f(c);
-    if (f) return c;
-  }
-  return cands.empty() ? spec : cands.front();
-}
-
-bool Lowerer::lowerImport(const ast::ImportDecl *d,
-                          std::vector<L1Subroutine> &subsOut) {
-  (void)subsOut;
-  // 真正加载被导入的模块，把它的导出声明（顶层 let -> 访问器过程、struct/enum
-  // -> 类型声明）降级进当前模块的 IR，于是 M.answer 发的 #call @answer 才有目标。
-  // 被导入模块的类型（Point/Shape）在 Sema 的 import 分支里已经登记进同一套
-  // TypeStore，这里不复用 analyze —— 直接 lower 声明即可。
-  // 读进来的源文本要活在 lower 期间（token 文本是 string_view，指向它）。
-  const std::string dir = directoryOf(srcPath_);
-  const std::string filePath = resolveModulePath(dir, std::string(d->path));
-  const std::string imodText = readFileText(filePath, *diags_);
-  ast::Module *imod = parseModuleText(filePath, imodText, *diags_);
-  if (imod == nullptr) return false;
-  for (const ast::Decl *decl : imod->decls) {
-    if (decl->kind == ast::DeclKind::StaticLet ||
-        decl->kind == ast::DeclKind::Struct ||
-        decl->kind == ast::DeclKind::Enum) {
-      if (!lowerDecl(decl)) return false;
-    }
-  }
-  return true;
-}
+// 模块路径解析与加载是 Program 的事（docs/plan-modules.md §3.1）：同键只加载
+// 一次、只解析一次。降级这里只按 Program 的模块顺序把声明装进 builder。
 
 bool Lowerer::lowerStaticLet(const ast::StaticLetDecl *d,
                              std::vector<L1Data> &dataOut,
@@ -379,9 +318,10 @@ bool Lowerer::lowerStaticLet(const ast::StaticLetDecl *d,
     return false;
   }
 
-  const std::string storageName = std::string(d->name) + "_storage";
+  // §3.2：数据符号 `<键>__<名字>_storage`，取址过程 `<键>__<名字>`。
+  const std::string storageName = qualify(d->name) + "_storage";
   const char *symbol = intern(storageName);
-  const char *procName = intern(d->name);
+  const char *procName = symbolFor(d->name);
 
   // 三种静态块共用的收尾：发 data 块 + 取址过程。
   auto publish = [&](std::vector<uint8_t> &bytes, bool writable,
@@ -417,7 +357,7 @@ bool Lowerer::lowerStaticLet(const ast::StaticLetDecl *d,
     const auto *table = static_cast<const ast::TableExpr *>(init);
     TypeId elemTy = kInvalidType;
     if (d->hasType && d->type.isArray && d->type.element != nullptr) {
-      elemTy = types_->resolve(*d->type.element, *diags_);
+      elemTy = resolveTy(*d->type.element);
     }
     if (elemTy == kInvalidType) {
       elemTy = types_->builtin("u64"); // 缺标注按 u64（docs/04 的口径）
@@ -455,8 +395,7 @@ bool Lowerer::lowerStaticLet(const ast::StaticLetDecl *d,
   // --- 顶层聚合构造：一块静态 storage + 一个取址过程 ---
   if (init->kind == ast::ExprKind::Construct) {
     const auto *ctor = static_cast<const ast::ConstructExpr *>(init);
-    TypeId ty = d->hasType ? types_->resolve(d->type, *diags_)
-                           : types_->resolve(ctor->target, *diags_);
+    TypeId ty = d->hasType ? resolveTy(d->type) : resolveTy(ctor->target);
     if (ty == kInvalidType) return false;
     const AggregateLayout *layout = types_->layout(ty);
     if (layout == nullptr || layout->size == 0) {
@@ -551,9 +490,9 @@ bool Lowerer::lowerStaticLet(const ast::StaticLetDecl *d,
   }
 
   // --- 其余顶层绑定：发一个取值过程（\`let main: i32 = add(3, 4);\` 这一类）---
-  TypeId ty = d->hasType ? types_->resolve(d->type, *diags_) : kInvalidType;
+  TypeId ty = d->hasType ? resolveTy(d->type) : kInvalidType;
   if (ty == kInvalidType) {
-    auto it = sema_->topLevelTypes.find(std::string(d->name));
+    auto it = sema_->topLevelTypes.find(qualify(d->name));
     if (it != sema_->topLevelTypes.end()) ty = it->second;
   }
   if (ty == kInvalidType) {

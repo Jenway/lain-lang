@@ -7,6 +7,10 @@
 //   * 一切 IR 只能经 Seed.hpp 的构造 API 产生，不许拼含 `#` 的文本；
 //   * Lowerer 跑完之后，Driver **必须**先 lainir_verify，通过了才打印；
 // 每条 IR 都要写 line/column（L1Inst 自带这两个字段），诊断才有位置。
+//
+// 模块命名空间（docs/plan-modules.md §3）：run 按 Program 的模块顺序依次降级，
+// 共用一个 L1Builder。每进一个模块换一次 ModuleContext 与 SemaResult，发出的
+// 符号名一律是 `<模块键>__<名字>`（宿主 extern 例外，保持平坦）。
 
 #include <string>
 #include <string_view>
@@ -23,8 +27,8 @@ namespace ln {
 
 struct LowerOptions {
   const char *moduleName = "lain";
-  // 主源文件完整路径：import 解析被导入模块的相对路径要用。
-  const char *sourcePath = nullptr;
+  // 模块集合：run 按它的模块顺序降级，import 的加载已经在 Program 里做完了。
+  const Program *program = nullptr;
   // 临时值名字的前缀。注意打印器会自己加 `%`，所以这里**不带** `%`，
   // 否则产物里会出现 `%%r1`。
   const char *tempPrefix = "r";
@@ -43,11 +47,13 @@ const L1Subroutine *buildAccessor(L1Builder *builder, const char *procName,
 
 class Lowerer {
 public:
-  Lowerer(L1Builder *builder, const TypeStore &types, const SemaResult &sema,
-          const SourceMgr &src, DiagSink &diags, const LowerOptions &opts);
+  Lowerer(L1Builder *builder, const TypeStore &types, const SourceMgr &src,
+          DiagSink &diags, const LowerOptions &opts);
 
+  // 按 Program 的模块顺序把全部模块降级进同一个 L1Builder，
+  // 末尾建一个 lainir_module（模块名取根模块键）。
   // 返回 nullptr 表示失败（diags 已填）。
-  const L1Module *run(const ast::Module &mod);
+  const L1Module *run(const Program &prog);
 
   // --- 以下供内部分工使用，三个 .cpp 各实现一组 ---
 
@@ -59,7 +65,6 @@ public:
   bool lowerEnum(const ast::EnumDecl *e);
   bool lowerStaticLet(const ast::StaticLetDecl *d, std::vector<L1Data> &dataOut,
                       std::vector<L1Subroutine> &subsOut);
-  bool lowerImport(const ast::ImportDecl *d, std::vector<L1Subroutine> &subsOut);
 
   // LowerStmt.cpp：语句与控制流
   bool lowerBody(const std::vector<ast::Stmt *> &body,
@@ -90,7 +95,7 @@ public:
   bool lowerCast(const ast::CastExpr *e, std::vector<const L1Inst *> &out,
                  L1Operand &value);
   bool lowerLoopExpr(const ast::LoopExpr *e, TypeId expectedTy,
-                    std::vector<const L1Inst *> &out, L1Operand &value);
+                     std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerForExpr(const ast::ForExpr *e, TypeId expectedTy,
                     std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerValueIfExpr(const ast::ValueIfExpr *e, TypeId expectedTy,
@@ -105,24 +110,34 @@ public:
                        const AggregateLayout *lay, TypeId expectedTy,
                        std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerAddressArithmetic(const ast::BinaryExpr *e, TypeId expectedTy,
-                              std::vector<const L1Inst *> &out,
-                              L1Operand &value);
+                              std::vector<const L1Inst *> &out, L1Operand &value);
 
 private:
   // 临时值编号器：编号来自 Lowerer 自己的计数器，不复用 bootstrap 的 scratch +144。
   const char *nextTemp();
-  const char *intern(std::string_view s);
+  const char *intern(std::string_view s) const;
   uint32_t lineOf(Span s) const;
   uint32_t columnOf(Span s) const;
   void fail(Span s, D code, std::string msg);
 
+  // --- 模块上下文（run 的模块循环每进一个模块换一次）---
+  // 源码里的裸名字 -> 当前模块的限定键。
+  std::string qualify(std::string_view name) const { return ctx_.qualify(name); }
+  // 源码里的顶层名字 -> 发出的符号名（func 与静态 let 带前缀，宿主 extern 平坦）。
+  const char *symbolFor(std::string_view srcName) const;
+  // 类型标注按当前模块上下文解析。
+  TypeId resolveTy(const ast::TypeSyntax &ts) const;
+  // 按当前模块上下文查类型名（enum/struct）。
+  TypeId lookupTy(std::string_view name) const;
+
   L1Builder *builder_ = nullptr;
   const TypeStore *types_ = nullptr;
-  const SemaResult *sema_ = nullptr;
   const SourceMgr *src_ = nullptr;
-  std::string srcPath_{};  // 主源文件路径（import 解析用）
   DiagSink *diags_ = nullptr;
   LowerOptions opts_{};
+  // 当前正在降级的模块。run 每进一个模块就换一次。
+  const SemaResult *sema_ = nullptr;
+  ModuleContext ctx_{};
   // 名字 -> 当前代表该值的操作数。局部 let、赋值、循环参数的重新绑定都走这里。
   // 这是 SSA 形状的记账：名字只是值的引用，重绑定等价于换一个引用。
   std::unordered_map<std::string, L1Operand> bindings_{};

@@ -6,8 +6,14 @@
 // 以及给定操作数类型时该发哪一条 LAINIR 指令。
 //
 // 内建标量是固定的九种，所以它们的 L1Type 直接是静态对象，不需要 L1Builder。
+//
+// 模块命名空间（docs/plan-modules.md §3）：Program 先把整个 import 依赖图加载完
+// （同键只加载一次），再分轮分析 —— 先给所有模块的 struct/enum 建**名字条目**，
+// 再算布局（字段类型可以指向另一个模块的聚合），然后登记顶层声明与 import 成员表，
+// 最后走函数体。类型表与符号表的键一律是 `<模块键>__<名字>`。
 
 #include <cstddef>
+#include <deque>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -22,15 +28,56 @@
 namespace ln {
 namespace {
 
-// 模块路径解析 + 加载（读文件、lex、parse）。arena 用 new 持有——lain0 是单发工具，
-// 跑完即退，不释放不算泄漏。
-static std::string directoryOf(const std::string &path) {
+// ---------------- 路径与模块键 ----------------
+// §3.1：源根是入口文件（或清单）所在目录；模块键是「规范化后的文件路径相对源根、
+// 去掉 .lain、把 / 换成 _」。规范化只做词法处理（. / .. / //），跑出源根报错。
+
+std::string normalizePath(const std::string &in) {
+  std::string p;
+  p.reserve(in.size());
+  for (char c : in) {
+    p.push_back(c == '\\' ? '/' : c);
+  }
+  const bool absolute = !p.empty() && p[0] == '/';
+
+  std::vector<std::string> parts{};
+  std::string cur{};
+  auto flush = [&]() {
+    if (cur.empty() || cur == ".") {
+      cur.clear();
+      return;
+    }
+    if (cur == "..") {
+      // 只有上一段也是普通目录时才真正弹掉；否则保留（它会在 keyOf 里被判越界）。
+      if (!parts.empty() && parts.back() != "..") parts.pop_back();
+      else parts.push_back("..");
+    } else {
+      parts.push_back(cur);
+    }
+    cur.clear();
+  };
+  for (char c : p) {
+    if (c == '/') flush();
+    else cur.push_back(c);
+  }
+  flush();
+
+  std::string out;
+  for (size_t i = 0; i < parts.size(); ++i) {
+    if (i != 0) out += '/';
+    out += parts[i];
+  }
+  if (absolute) return "/" + out;
+  return out.empty() ? std::string(".") : out;
+}
+
+std::string directoryOf(const std::string &path) {
   const size_t pos = path.find_last_of('/');
   return pos == std::string::npos ? "." : path.substr(0, pos);
 }
 
-static std::string resolveModulePath(const std::string &dir,
-                                    const std::string &spec) {
+std::string resolveModulePath(const std::string &dir,
+                              const std::string &spec) {
   // "examples::modules_lib" —— 取 :: 之后最后一段作模块名，逐层目录试开。
   const size_t pos = spec.rfind("::");
   const std::string base = pos == std::string::npos ? "" : spec.substr(0, pos);
@@ -46,25 +93,14 @@ static std::string resolveModulePath(const std::string &dir,
   return cands.empty() ? spec : cands.front();
 }
 
-static std::string readFileText(const std::string &filePath, DiagSink &diags) {
-  std::ifstream f(filePath);
+std::string readFileText(const std::string &filePath, DiagSink &diags, Span sp) {
+  std::ifstream f(filePath, std::ios::binary);
   if (!f) {
-    diags.error(Span{}, D::IoOpenFailed, "打不开导入模块: " + filePath);
+    diags.error(sp, D::IoOpenFailed, "打不开源文件: " + filePath);
     return "";
   }
   return std::string((std::istreambuf_iterator<char>(f)),
                      std::istreambuf_iterator<char>());
-}
-// 注意：返回的 AST 里的 token 文本是 string_view，指向 text —— 调用方必须让
-// text 活过 analyze / lower，否则类型名会变成悬垂指针（表现为乱码）。
-static ast::Module *parseModuleText(const std::string &filePath,
-                                    const std::string &text, DiagSink &diags) {
-  ast::AstArena *arena = new ast::AstArena();
-  std::vector<Token> toks = lex(0, text, diags);
-  if (diags.hasErrors()) return nullptr;
-  ast::Module *m = parseModule(toks, *arena, diags);
-  if (diags.hasErrors()) return nullptr;
-  return m;
 }
 
 // 顺序固定，索引即内建编号。
@@ -79,10 +115,10 @@ struct BuiltinDef {
 };
 
 const BuiltinDef kBuiltinDefs[kBuiltinCount] = {
-    {"i32", TY_BITS, 32, true, false},   {"u32", TY_BITS, 32, false, false},
-    {"i64", TY_BITS, 64, true, false},   {"u64", TY_BITS, 64, false, false},
-    {"usize", TY_BITS, 64, false, false},{"i8", TY_BITS, 8, true, false},
-    {"u8", TY_BITS, 8, false, false},    {"bool", TY_BITS, 1, false, true},
+    {"i32", TY_BITS, 32, true, false},    {"u32", TY_BITS, 32, false, false},
+    {"i64", TY_BITS, 64, true, false},    {"u64", TY_BITS, 64, false, false},
+    {"usize", TY_BITS, 64, false, false}, {"i8", TY_BITS, 8, true, false},
+    {"u8", TY_BITS, 8, false, false},     {"bool", TY_BITS, 1, false, true},
     {"addr", TY_ADDR, 0, false, false},
 };
 
@@ -101,6 +137,99 @@ uint32_t alignOf(uint32_t width) {
 uint32_t roundUp(uint32_t value, uint32_t align) {
   if (align == 0) return value;
   return (value + align - 1) / align * align;
+}
+
+// ---------------- 聚合布局（第二轮） ----------------
+// §3.5：字段类型指向尚未算布局的聚合时递归计算，递归回到自身 →
+// 「按值包含自身的聚合」。
+
+bool layoutOf(TypeStore &ts, TypeId id, LayoutSites &sites,
+              std::vector<TypeId> &stack, DiagSink &diags);
+
+bool computeStructLayout(TypeStore &ts, const ast::StructDecl *s,
+                         const ModuleContext &ctx,
+                         LayoutSites &sites,
+                         std::vector<TypeId> &stack, DiagSink &diags) {
+  AggregateLayout layout{};
+  uint32_t offset = 0;
+  uint32_t maxAlign = 1;
+  for (const ast::FieldDecl &f : s->fields) {
+    TypeId ft = ts.resolve(f.type, ctx, diags);
+    if (ft == kInvalidType) continue;
+    if (ts.isAggregate(ft) && !ts.hasLayout(ft)) {
+      if (!layoutOf(ts, ft, sites, stack, diags)) return false;
+    }
+    uint32_t fw = ts.width(ft);
+    uint32_t align = ts.isAggregate(ft) ? 8 : alignOf(fw);
+    if (align > maxAlign) maxAlign = align;
+    offset = roundUp(offset, align);
+    layout.fields.push_back(FieldLayout{f.name, ft, offset});
+    offset += (fw + 7) / 8;
+  }
+  layout.size = roundUp(offset, maxAlign);
+  layout.align = maxAlign;
+  ts.fillStructLayout(ts.lookup(ctx.qualify(s->name)), std::move(layout));
+  return true;
+}
+
+bool computeEnumLayout(TypeStore &ts, const ast::EnumDecl *e,
+                       const ModuleContext &ctx, LayoutSites &sites,
+                       std::vector<TypeId> &stack, DiagSink &diags) {
+  AggregateLayout layout{};
+  uint32_t maxAlign = 1;
+  const uint32_t tagSize = 1;
+  uint32_t offset = tagSize;
+  uint64_t tag = 0;
+  for (const ast::VariantDecl &v : e->variants) {
+    VariantLayout vl{};
+    vl.name = v.name;
+    vl.tag = tag++;
+    vl.payload = kInvalidType;
+    vl.payloadOffset = 0;
+    if (!v.payload.empty()) {
+      TypeId pt = ts.resolve(v.payload[0], ctx, diags);
+      vl.payload = pt;
+      if (ts.isAggregate(pt) && !ts.hasLayout(pt)) {
+        if (!layoutOf(ts, pt, sites, stack, diags)) return false;
+      }
+      uint32_t pw = pt == kInvalidType ? 0 : ts.width(pt);
+      uint32_t align = ts.isAggregate(pt) ? 8 : alignOf(pw);
+      if (align > maxAlign) maxAlign = align;
+      offset = roundUp(offset, align);
+      vl.payloadOffset = offset;
+      offset += (pw + 7) / 8;
+    }
+    layout.variants.push_back(vl);
+  }
+  layout.size = roundUp(offset, maxAlign);
+  layout.align = maxAlign;
+  ts.fillEnumLayout(ts.lookup(ctx.qualify(e->name)), std::move(layout));
+  return true;
+}
+
+bool layoutOf(TypeStore &ts, TypeId id, LayoutSites &sites,
+              std::vector<TypeId> &stack, DiagSink &diags) {
+  auto it = sites.find(id);
+  if (it == sites.end()) return true; // 内建 / 数组 / 引用：没有站点
+  for (TypeId open : stack) {
+    if (open == id) {
+      diags.error(it->second.decl->span, D::SemaUnknownType,
+                  "按值包含自身的聚合: " + std::string(ts.name(id)));
+      return false;
+    }
+  }
+  if (ts.hasLayout(id)) return true;
+  stack.push_back(id);
+  const bool ok =
+      it->second.isEnum
+          ? computeEnumLayout(
+                ts, static_cast<const ast::EnumDecl *>(it->second.decl),
+                *it->second.ctx, sites, stack, diags)
+          : computeStructLayout(
+                ts, static_cast<const ast::StructDecl *>(it->second.decl),
+                *it->second.ctx, sites, stack, diags);
+  stack.pop_back();
+  return ok;
 }
 
 } // namespace
@@ -129,28 +258,53 @@ TypeId TypeStore::builtin(std::string_view name) const {
   return it == byName_.end() ? kInvalidType : it->second;
 }
 
-TypeId TypeStore::addStruct(std::string_view name, AggregateLayout layout) {
+TypeId TypeStore::declareStruct(std::string_view name) {
+  auto it = byName_.find(std::string(name));
+  if (it != byName_.end()) return it->second; // 同名重复声明沿用原条目
   Entry e{};
   e.name = std::string(name);
   e.lain = nullptr;
   e.k = Entry::K::Struct;
-  e.layout = std::move(layout);
+  e.laidOut = false;
   entries_.push_back(e);
   TypeId id = static_cast<TypeId>(entries_.size());
   byName_[e.name] = id;
   return id;
 }
 
-TypeId TypeStore::addEnum(std::string_view name, AggregateLayout layout) {
+TypeId TypeStore::declareEnum(std::string_view name) {
+  auto it = byName_.find(std::string(name));
+  if (it != byName_.end()) return it->second;
   Entry e{};
   e.name = std::string(name);
   e.lain = nullptr;
   e.k = Entry::K::Enum;
-  e.layout = std::move(layout);
+  e.laidOut = false;
   entries_.push_back(e);
   TypeId id = static_cast<TypeId>(entries_.size());
   byName_[e.name] = id;
   return id;
+}
+
+void TypeStore::fillStructLayout(TypeId id, AggregateLayout layout) {
+  if (id == kInvalidType || id > entries_.size()) return;
+  Entry &e = entries_[id - 1];
+  e.k = Entry::K::Struct;
+  e.layout = std::move(layout);
+  e.laidOut = true;
+}
+
+void TypeStore::fillEnumLayout(TypeId id, AggregateLayout layout) {
+  if (id == kInvalidType || id > entries_.size()) return;
+  Entry &e = entries_[id - 1];
+  e.k = Entry::K::Enum;
+  e.layout = std::move(layout);
+  e.laidOut = true;
+}
+
+bool TypeStore::hasLayout(TypeId id) const {
+  if (id == kInvalidType || id > entries_.size()) return true;
+  return entries_[id - 1].laidOut;
 }
 
 TypeId TypeStore::lookup(std::string_view name) const {
@@ -181,6 +335,8 @@ TypeId TypeStore::addArrayOf(TypeId element, bool isRo) const {
 }
 
 TypeId TypeStore::addModuleType(std::string_view moduleAlias) {
+  auto it = byName_.find(std::string(moduleAlias));
+  if (it != byName_.end()) return it->second;
   Entry e{};
   e.name = std::string(moduleAlias);
   e.lain = nullptr;
@@ -224,7 +380,8 @@ TypeId TypeStore::addSlice(TypeId element) const {
   return static_cast<TypeId>(entries_.size());
 }
 
-TypeId TypeStore::resolve(const ast::TypeSyntax &ts, DiagSink &diags) const {
+TypeId TypeStore::resolve(const ast::TypeSyntax &ts, const ModuleContext &ctx,
+                          DiagSink &diags) const {
   if (!ts.valid()) {
     diags.error(ts.span, D::SemaUnknownType, "类型标注缺失");
     return kInvalidType;
@@ -235,43 +392,48 @@ TypeId TypeStore::resolve(const ast::TypeSyntax &ts, DiagSink &diags) const {
       diags.error(ts.span, D::SemaUnknownType, "引用/切片类型缺少内层类型");
       return kInvalidType;
     }
-    TypeId inner = resolve(*ts.inner, diags);
+    TypeId inner = resolve(*ts.inner, ctx, diags);
     if (inner == kInvalidType) return kInvalidType;
     if (ts.ptrKind == ast::TypeSyntax::PtrKind::Slice) return addSlice(inner);
     return addRef(inner, ts.ptrKind == ast::TypeSyntax::PtrKind::MutRef);
   }
   if (ts.hasQualifier) {
-    // 限定名（M.Point）目前只支持「已登记的模块成员类型」，其余报未知。
-    std::string key = std::string(ts.qualifier) + "." + std::string(ts.name);
-    auto it = byName_.find(key);
-    if (it != byName_.end()) return it->second;
+    // 限定名（M.Point）：别名表里查到键就查被导入模块的限定名；
+    // 别名不在表里才退回「限定符本身是类型名」（Shape.Circle 形态）。
+    auto aliasIt = ctx.aliases.find(std::string(ts.qualifier));
+    if (aliasIt != ctx.aliases.end()) {
+      const std::string key = aliasIt->second + "__" + std::string(ts.name);
+      auto it = byName_.find(key);
+      if (it != byName_.end()) return it->second;
+      diags.error(ts.span, D::SemaUnknownType,
+                  "未知的限定类型: " + std::string(ts.qualifier) + "." +
+                      std::string(ts.name));
+      return kInvalidType;
+    }
     // `Shape.Circle` 这种「enum 名.变体名」：变体构造的目标类型就是那个 enum
     // 本身（Circle 是 Shape 的一个变体，不是独立类型）。
-    auto enumIt = byName_.find(std::string(ts.qualifier));
+    auto enumIt = byName_.find(ctx.qualify(ts.qualifier));
     if (enumIt != byName_.end()) {
       const AggregateLayout *lay = layout(enumIt->second);
       if (lay != nullptr && !lay->variants.empty()) return enumIt->second;
     }
-    // 模块成员类型：import 时把被导入模块的类型（struct/enum）注册进了同一套
-    // TypeStore，名字是它原本的名字（如 Point / Shape），所以限定名 M.Point
-    // 退回裸名 Point 找。仅当 qualifier 本身是个已知类型（模块别名）时才退。
-    auto qualIt = byName_.find(std::string(ts.qualifier));
-    if (qualIt != byName_.end()) {
-      auto bareIt = byName_.find(std::string(ts.name));
-      if (bareIt != byName_.end()) return bareIt->second;
-    }
-    diags.error(ts.span, D::SemaUnknownType, "未知的限定类型: " + key);
+    diags.error(ts.span, D::SemaUnknownType,
+                "未知的限定类型: " + std::string(ts.qualifier) + "." +
+                    std::string(ts.name));
     return kInvalidType;
   }
 
   std::string key(ts.name);
   if (ts.isArray) {
-    TypeId elem = resolve(*ts.element, diags);
+    TypeId elem = resolve(*ts.element, ctx, diags);
     if (elem == kInvalidType) return kInvalidType;
     return addArrayOf(elem, ts.isRo);
   }
 
-  auto it = byName_.find(key);
+  // 裸名先按当前模块限定查，再退回内建标量表（内建名不限定、模块不导出标量）。
+  auto it = byName_.find(ctx.qualify(ts.name));
+  if (it != byName_.end()) return it->second;
+  it = byName_.find(key);
   if (it == byName_.end()) {
     diags.error(ts.span, D::SemaUnknownType, "未知的类型名: " + key);
     return kInvalidType;
@@ -380,48 +542,119 @@ bool selectBinary(ast::BinOp op, TypeId operandTy, const TypeStore &ts,
 
 namespace {
 
+// 一个模块的语义结论。绑定模块身份（ctx），分三个阶段跑：
+//   registerTopLevel -> registerImports -> walkBodies
 class Walker {
 public:
-  Walker(TypeStore &ts, SemaResult &out, DiagSink &diags)
-      : ts_(ts), out_(out), diags_(diags) {}
+  Walker(TypeStore &ts, SemaResult &out, DiagSink &diags, const Program &prog,
+         const ModuleUnit &unit)
+      : ts_(ts), out_(out), diags_(diags), prog_(prog), unit_(unit),
+        ctx_(unit.ctx) {}
 
-  void run(const ast::Module &mod) {
-    // 第一遍：登记所有声明（布局与签名），因为使用可以出现在定义之前。
-    for (const ast::Decl *d : mod.decls) declare(d);
-    // 顶层静态绑定既是数据块、也是一个「取值过程」的名字，在表达式里按 #addr
-    // 使用。必须在走函数体之前绑好，否则函数体里查不到这个名字。
-    for (const ast::Decl *d : mod.decls) {
-      if (d->kind != ast::DeclKind::StaticLet) continue;
-      const auto *s = static_cast<const ast::StaticLetDecl *>(d);
-      TypeId t = s->hasType ? ts_.resolve(s->type, diags_) : kInvalidType;
-      if (s->init && t == kInvalidType) t = typeOf(s->init, kInvalidType);
-      if (t != kInvalidType) {
-        out_.topLevelTypes[std::string(s->name)] = t;
-        // 产物是 `data NAME_storage …` + `#proc NAME() -> #addr`。
-        bind(s->name, ts_.builtin("addr"));
+  // 顶层 func / extern / 静态 let：登记返回类型、类型、长度与发出的符号名。
+  // struct/enum 的名字条目已由 Program 的第一轮建好，这里不碰。
+  void registerTopLevel() {
+    for (const ast::Decl *d : unit_.ast->decls) {
+      switch (d->kind) {
+      case ast::DeclKind::Func:
+      case ast::DeclKind::Extern: {
+        std::string_view fname{};
+        TypeId ret = kInvalidType;
+        bool hasRet = false;
+        if (d->kind == ast::DeclKind::Func) {
+          const auto *f = static_cast<const ast::FuncDecl *>(d);
+          fname = f->name;
+          hasRet = f->hasRet;
+          if (hasRet) ret = ts_.resolve(f->ret, ctx_, diags_);
+          // func 走模块前缀。
+          out_.topLevelSymbols[ctx_.qualify(fname)] = ctx_.qualify(fname);
+        } else {
+          const auto *x = static_cast<const ast::ExternDecl *>(d);
+          fname = x->name;
+          hasRet = x->hasRet;
+          if (hasRet) ret = ts_.resolve(x->ret, ctx_, diags_);
+          // 宿主 extern 保持平坦：宿主按 link_name 找它，同名 extern 跨模块
+          // 重复是验证器明确放行的（双方都是 extern 且 link_name 相等）。
+          out_.topLevelSymbols[ctx_.qualify(fname)] = std::string(fname);
+        }
+        if (hasRet && ret != kInvalidType)
+          out_.functionReturns[ctx_.qualify(fname)] = ret;
+        break;
       }
-      // 长度：表按元素个数，字符串按字节数。
-      if (s->init && s->init->kind == ast::ExprKind::Table) {
-        out_.topLevelLength[std::string(s->name)] =
-            static_cast<const ast::TableExpr *>(s->init)->elements.size();
-      } else if (s->init && s->init->kind == ast::ExprKind::StrLit) {
-        out_.topLevelLength[std::string(s->name)] =
-            static_cast<const ast::StrLitExpr *>(s->init)->rawText.size();
+      case ast::DeclKind::StaticLet: {
+        const auto *s = static_cast<const ast::StaticLetDecl *>(d);
+        TypeId t =
+            s->hasType ? ts_.resolve(s->type, ctx_, diags_) : kInvalidType;
+        if (s->init && t == kInvalidType) t = typeOf(s->init, kInvalidType);
+        const std::string q = ctx_.qualify(s->name);
+        if (t != kInvalidType) {
+          out_.topLevelTypes[q] = t;
+          // 产物是 `data <键>__<名字>_storage` + `#proc <鍵>__<名字>() -> #addr`。
+          out_.topLevelSymbols[q] = q;
+          bind(s->name, ts_.builtin("addr"));
+        }
+        // 长度：表按元素个数，字符串按字节数。
+        if (s->init && s->init->kind == ast::ExprKind::Table) {
+          out_.topLevelLength[q] =
+              static_cast<const ast::TableExpr *>(s->init)->elements.size();
+          out_.topLevelData.insert(q);
+        } else if (s->init && s->init->kind == ast::ExprKind::StrLit) {
+          out_.topLevelLength[q] =
+              static_cast<const ast::StrLitExpr *>(s->init)->rawText.size();
+          out_.topLevelData.insert(q);
+        } else if (s->init && s->init->kind == ast::ExprKind::Construct) {
+          out_.topLevelData.insert(q);
+        }
+        break;
+      }
+      case ast::DeclKind::Struct:
+      case ast::DeclKind::Enum:
+      case ast::DeclKind::Import:
+        break; // 前两者在第一/二轮；import 在 registerImports
       }
     }
-    // 第二遍：走函数体，定出每个表达式与局部绑定的类型。
-    for (const ast::Decl *d : mod.decls) {
+  }
+
+  // import 成员表：只引用被导入模块自己的顶层声明，所以一轮就能填满。
+  void registerImports() {
+    for (const ast::Decl *d : unit_.ast->decls) {
+      if (d->kind != ast::DeclKind::Import) continue;
+      const auto *im = static_cast<const ast::ImportDecl *>(d);
+      const std::string alias(im->name);
+      ts_.addModuleType(ctx_.qualify(alias));
+      out_.moduleMembers[alias] = ModuleMember{
+          ModuleMember::Kind::Type, im->name, ts_.builtin(ctx_.qualify(alias)),
+          std::string(im->path)};
+
+      const ModuleUnit *dep = depUnitOf(alias);
+      if (dep == nullptr) continue;
+      // 模块键里不含 `__`（§3.1 保证），所以切分没有歧义。
+      const std::string prefix = dep->key + "__";
+      for (const auto &kv : dep->sema.topLevelTypes) {
+        if (kv.first.rfind(prefix, 0) != 0) continue;
+        const std::string member = kv.first.substr(prefix.size());
+        ModuleMember mm{};
+        mm.kind = ModuleMember::Kind::Value;
+        mm.type = kv.second;
+        mm.mangled = kv.first; // 静态 let 的访问器过程名就是它自己
+        out_.moduleMembers[alias + "." + member] = mm;
+      }
+    }
+  }
+
+  void walkBodies() {
+    for (const ast::Decl *d : unit_.ast->decls) {
       if (d->kind != ast::DeclKind::Func) continue;
       walkFunc(static_cast<const ast::FuncDecl *>(d));
     }
   }
 
 private:
-  TypeStore &ts_;
-  SemaResult &out_;
-  DiagSink &diags_;
-  std::vector<std::unordered_map<std::string, TypeId>> scopes_;
-  TypeId funcRet_ = kInvalidType;
+  const ModuleUnit *depUnitOf(const std::string &alias) const {
+    auto it = ctx_.aliases.find(alias);
+    if (it == ctx_.aliases.end()) return nullptr;
+    return prog_.find(it->second);
+  }
 
   void pushScope() { scopes_.emplace_back(); }
   void popScope() { scopes_.pop_back(); }
@@ -439,128 +672,14 @@ private:
     return kInvalidType;
   }
 
-  void declare(const ast::Decl *d) {
-    switch (d->kind) {
-    case ast::DeclKind::Struct: {
-      const auto *s = static_cast<const ast::StructDecl *>(d);
-      AggregateLayout layout{};
-      uint32_t offset = 0;
-      uint32_t maxAlign = 1;
-      for (const ast::FieldDecl &f : s->fields) {
-        TypeId ft = ts_.resolve(f.type, diags_);
-        if (ft == kInvalidType) continue;
-        uint32_t fw = ts_.width(ft);
-        uint32_t align = ts_.isAggregate(ft) ? 8 : alignOf(fw);
-        if (align > maxAlign) maxAlign = align;
-        offset = roundUp(offset, align);
-        layout.fields.push_back(FieldLayout{f.name, ft, offset});
-        offset += (fw + 7) / 8;
-      }
-      layout.size = roundUp(offset, maxAlign);
-      layout.align = maxAlign;
-      ts_.addStruct(s->name, std::move(layout));
-      break;
-    }
-    case ast::DeclKind::Enum: {
-      const auto *e = static_cast<const ast::EnumDecl *>(d);
-      AggregateLayout layout{};
-      uint32_t maxAlign = 1;
-      const uint32_t tagSize = 1;
-      uint32_t offset = tagSize;
-      uint64_t tag = 0;
-      for (const ast::VariantDecl &v : e->variants) {
-        VariantLayout vl{};
-        vl.name = v.name;
-        vl.tag = tag++;
-        vl.payload = kInvalidType;
-        vl.payloadOffset = 0;
-        if (!v.payload.empty()) {
-          TypeId pt = ts_.resolve(v.payload[0], diags_);
-          vl.payload = pt;
-          uint32_t pw = pt == kInvalidType ? 0 : ts_.width(pt);
-          uint32_t align = ts_.isAggregate(pt) ? 8 : alignOf(pw);
-          if (align > maxAlign) maxAlign = align;
-          offset = roundUp(offset, align);
-          vl.payloadOffset = offset;
-          offset += (pw + 7) / 8;
-        }
-        layout.variants.push_back(vl);
-      }
-      layout.size = roundUp(offset, maxAlign);
-      layout.align = maxAlign;
-      ts_.addEnum(e->name, std::move(layout));
-      break;
-    }
-    case ast::DeclKind::Func:
-    case ast::DeclKind::Extern: {
-      const ast::FuncDecl *f = nullptr;
-      const ast::ExternDecl *x = nullptr;
-      std::string_view fname;
-      TypeId ret = kInvalidType;
-      bool hasRet = false;
-      if (d->kind == ast::DeclKind::Func) {
-        f = static_cast<const ast::FuncDecl *>(d);
-        fname = f->name;
-        hasRet = f->hasRet;
-        if (hasRet) ret = ts_.resolve(f->ret, diags_);
-      } else {
-        x = static_cast<const ast::ExternDecl *>(d);
-        fname = x->name;
-        hasRet = x->hasRet;
-        if (hasRet) ret = ts_.resolve(x->ret, diags_);
-      }
-      if (hasRet && ret != kInvalidType)
-        out_.functionReturns[std::string(fname)] = ret;
-      break;
-    }
-    case ast::DeclKind::Import: {
-      const auto *im = static_cast<const ast::ImportDecl *>(d);
-      ts_.addModuleType(im->name);
-      out_.moduleMembers[std::string(im->name)] = ModuleMember{
-          ModuleMember::Kind::Type, im->name, ts_.builtin(im->name),
-          std::string(im->path)};
-
-      // 真正加载被导入的模块：用同一套 TypeStore 跑 analyze，
-      // 它的 struct/enum 类型就注册进主 ts_（resolve 的回退能找到）；
-      // 顶层 let 当成值成员登记，供 M.answer 解析用。
-      const std::string dir = directoryOf(out_.sourcePath);
-      const std::string filePath =
-          resolveModulePath(dir, std::string(im->path));
-      const std::string imodText = readFileText(filePath, diags_);
-      ast::Module *imod = parseModuleText(filePath, imodText, diags_);
-      if (imod != nullptr) {
-        SemaResult isema;
-        if (analyze(*imod, ts_, isema, diags_)) {
-          // 用 isema.topLevelTypes 的 key（std::string，由 SemaResult 持有，不会悬垂），
-          // 不要用 sl->name —— 那是指向被导入源文本的 string_view，import 分支结束后
-          // 那段文本就释放了，拷出来是乱码（表现就是 #call 的目标名是 @() 或乱码）。
-          for (const auto &kv : isema.topLevelTypes) {
-            ModuleMember mm{};
-            mm.kind = ModuleMember::Kind::Value;
-            mm.type = kv.second;
-            mm.mangled = kv.first;  // 静态 let 的访问器过程名就是它自己
-            out_.moduleMembers[std::string(im->name) + "." + kv.first] = mm;
-            // 导入模块内部互引（twice = answer）需要把裸名登记成「可调用顶层 let」，
-            // 这样 lowerExpr 的 Name 分支会发 #call @answer 而不是 %answer。
-            out_.topLevelTypes[kv.first] = kv.second;
-          }
-        }
-      }
-      break;
-    }
-    case ast::DeclKind::StaticLet:
-      break;
-    }
-  }
-
   void walkFunc(const ast::FuncDecl *f) {
     funcRet_ = kInvalidType;
-    auto it = out_.functionReturns.find(std::string(f->name));
+    auto it = out_.functionReturns.find(ctx_.qualify(f->name));
     if (it != out_.functionReturns.end()) funcRet_ = it->second;
 
     pushScope();
     for (const ast::ParamDecl &p : f->params) {
-      TypeId pt = ts_.resolve(p.type, diags_);
+      TypeId pt = ts_.resolve(p.type, ctx_, diags_);
       if (pt != kInvalidType) bind(p.name, pt);
     }
     walkBody(f->body);
@@ -576,7 +695,8 @@ private:
     switch (s->kind) {
     case ast::StmtKind::Let: {
       const auto *l = static_cast<const ast::LetStmt *>(s);
-      TypeId declared = l->hasType ? ts_.resolve(l->type, diags_) : kInvalidType;
+      TypeId declared = l->hasType ? ts_.resolve(l->type, ctx_, diags_)
+                                   : kInvalidType;
       TypeId initTy = l->init ? typeOf(l->init, declared) : kInvalidType;
       TypeId finalTy = declared != kInvalidType ? declared : initTy;
       if (finalTy == kInvalidType) {
@@ -614,7 +734,7 @@ private:
       const auto *l = static_cast<const ast::LoopStmt *>(s);
       pushScope();
       for (const ast::LoopParam &p : l->params) {
-        TypeId pt = ts_.resolve(p.type, diags_);
+        TypeId pt = ts_.resolve(p.type, ctx_, diags_);
         if (pt != kInvalidType) bind(p.name, pt);
       }
       if (l->cond) (void)typeOf(l->cond, kInvalidType);
@@ -625,11 +745,11 @@ private:
     case ast::StmtKind::For: {
       const auto *f = static_cast<const ast::ForStmt *>(s);
       pushScope();
-      TypeId vt = f->hasVarType ? ts_.resolve(f->varType, diags_)
+      TypeId vt = f->hasVarType ? ts_.resolve(f->varType, ctx_, diags_)
                                 : ts_.builtin("i32");
       bind(f->var, vt);
       if (f->hasAcc) {
-        TypeId at = ts_.resolve(f->accType, diags_);
+        TypeId at = ts_.resolve(f->accType, ctx_, diags_);
         if (at == kInvalidType) at = vt;
         bind(f->acc, at);
       }
@@ -677,7 +797,7 @@ private:
       for (ast::Expr *a : c->args) (void)typeOf(a, kInvalidType);
       if (c->callee && c->callee->kind == ast::ExprKind::Name) {
         const auto *n = static_cast<const ast::NameExpr *>(c->callee);
-        auto it = out_.functionReturns.find(std::string(n->name));
+        auto it = out_.functionReturns.find(ctx_.qualify(n->name));
         if (it != out_.functionReturns.end()) return it->second;
       }
       return kInvalidType;
@@ -685,12 +805,12 @@ private:
     case ast::ExprKind::Cast: {
       const auto *c = static_cast<const ast::CastExpr *>(e);
       (void)typeOf(c->operand, kInvalidType);
-      return ts_.resolve(c->target, diags_);
+      return ts_.resolve(c->target, ctx_, diags_);
     }
     case ast::ExprKind::Construct: {
       const auto *c = static_cast<const ast::ConstructExpr *>(e);
       for (const ast::FieldInit &f : c->fields) (void)typeOf(f.value, kInvalidType);
-      return ts_.resolve(c->target, diags_);
+      return ts_.resolve(c->target, ctx_, diags_);
     }
     case ast::ExprKind::Table: {
       const auto *t = static_cast<const ast::TableExpr *>(e);
@@ -760,7 +880,7 @@ private:
       // —— 否则 Lower 在体里找不到操作数类型。返回的「结果类型」才用标注决定。
       pushScope();
       for (const ast::LoopParam &p : le->params) {
-        TypeId pt = ts_.resolve(p.type, diags_);
+        TypeId pt = ts_.resolve(p.type, ctx_, diags_);
         if (pt != kInvalidType) bind(p.name, pt);
       }
       if (le->cond) (void)typeOf(le->cond, kInvalidType); // 条件里的参数也要登记类型
@@ -769,7 +889,7 @@ private:
       if (expected != kInvalidType) return expected;
       // 无标注：结果类型取最后一个参数（累加器）的声明类型。
       if (!le->params.empty()) {
-        TypeId t = ts_.resolve(le->params.back().type, diags_);
+        TypeId t = ts_.resolve(le->params.back().type, ctx_, diags_);
         if (t != kInvalidType) return t;
       }
       return kInvalidType;
@@ -779,13 +899,13 @@ private:
       pushScope();
       // 循环变量的类型：显式标注优先，否则从 from 推导。
       TypeId varTy = kInvalidType;
-      if (fe->hasVarType) varTy = ts_.resolve(fe->varType, diags_);
+      if (fe->hasVarType) varTy = ts_.resolve(fe->varType, ctx_, diags_);
       if (varTy == kInvalidType && fe->from) varTy = typeOf(fe->from, kInvalidType);
       if (varTy != kInvalidType) bind(fe->var, varTy);
       // 累加器：显式标注优先，否则从初值推导。
       TypeId accTy = kInvalidType;
       if (fe->hasAcc) {
-        if (!fe->accType.name.empty()) accTy = ts_.resolve(fe->accType, diags_);
+        if (!fe->accType.name.empty()) accTy = ts_.resolve(fe->accType, ctx_, diags_);
         if (accTy == kInvalidType && fe->accInit)
           accTy = typeOf(fe->accInit, kInvalidType);
         if (accTy != kInvalidType) bind(fe->acc, accTy);
@@ -821,17 +941,177 @@ private:
       return kInvalidType;
     }
     }
+    return kInvalidType;
   }
+
+  TypeStore &ts_;
+  SemaResult &out_;
+  DiagSink &diags_;
+  const Program &prog_;
+  const ModuleUnit &unit_;
+  ModuleContext ctx_{};
+  std::vector<std::unordered_map<std::string, TypeId>> scopes_{};
+  TypeId funcRet_ = kInvalidType;
 };
 
 } // namespace
 
-bool analyze(const ast::Module &mod, TypeStore &ts, SemaResult &out,
-             DiagSink &diags) {
+// ---------------- Program ----------------
+
+ModuleUnit *Program::addUnit(const std::string &path, SourceMgr &src,
+                             DiagSink &diags) {
+  const std::string norm = normalizePath(path);
+  std::string key;
+  if (!keyOf(norm, key, Span{}, diags)) return nullptr;
+  auto known = index_.find(key);
+  if (known != index_.end()) return &units_[known->second]; // 同键只加载一次
+
+  // 文本由 ModuleUnit 自己持一份：token 与 AST 里的 string_view 都指向它。
+  // SourceMgr 另存一份副本供诊断定位（它的 files_ 会扩容搬移）。
+  const std::string text = readFileText(norm, diags, Span{});
+  if (diags.hasErrors()) return nullptr;
+
+  units_.emplace_back();
+  ModuleUnit &u = units_.back();
+  u.key = key;
+  u.path = norm;
+  u.dir = directoryOf(norm);
+  u.text = text;
+  u.fileId = src.addBuffer(norm, std::string(u.text));
+  u.toks = lex(u.fileId, u.text, diags);
+  if (diags.hasErrors()) return nullptr;
+  u.arena = std::make_unique<ast::AstArena>();
+  u.ast = parseModule(u.toks, *u.arena, diags);
+  if (u.ast == nullptr || diags.hasErrors()) return nullptr;
+  u.ctx.key = key;
+  u.ctx.sourceRoot = sourceRoot_;
+  u.sema.sourcePath = norm;
+  index_[key] = units_.size() - 1;
+  return &u;
+}
+
+bool Program::keyOf(const std::string &normPath, std::string &key, Span sp,
+                    DiagSink &diags) const {
+  std::string rel;
+  if (sourceRoot_.empty() || sourceRoot_ == ".") {
+    rel = normPath;
+  } else {
+    const std::string prefix = sourceRoot_ + "/";
+    if (normPath.rfind(prefix, 0) != 0) {
+      diags.error(sp, D::SemaBadImport, "导入路径超出源根: " + normPath);
+      return false;
+    }
+    rel = normPath.substr(prefix.size());
+  }
+  if (rel.rfind("../", 0) == 0 || rel == "..") {
+    diags.error(sp, D::SemaBadImport, "导入路径超出源根: " + normPath);
+    return false;
+  }
+  const std::string ext = ".lain";
+  if (rel.size() > ext.size() &&
+      rel.compare(rel.size() - ext.size(), ext.size(), ext) == 0) {
+    rel.resize(rel.size() - ext.size());
+  }
+  for (char &c : rel) {
+    if (c == '/') c = '_';
+  }
+  if (rel.empty()) {
+    diags.error(sp, D::SemaBadImport, "模块键为空: " + normPath);
+    return false;
+  }
+  if (rel.find("__") != std::string::npos) {
+    diags.error(sp, D::SemaBadImport, "模块键不能含连续下划线: " + rel);
+    return false;
+  }
+  key = rel;
+  return true;
+}
+
+bool Program::load(const std::string &entryPath, SourceMgr &src,
+                   DiagSink &diags) {
+  const std::string norm = normalizePath(entryPath);
+  sourceRoot_ = directoryOf(norm);
+  root_ = addUnit(norm, src, diags);
+  if (root_ == nullptr) return false;
+
+  // 宽度优先把整个 import 依赖图加载完；已加载的模块键直接复用。
+  for (size_t i = 0; i < units_.size(); ++i) {
+    ModuleUnit &u = units_[i];
+    for (const ast::Decl *d : u.ast->decls) {
+      if (d->kind != ast::DeclKind::Import) continue;
+      const auto *im = static_cast<const ast::ImportDecl *>(d);
+      const std::string spec =
+          resolveModulePath(u.dir, std::string(im->path));
+      const std::string depNorm = normalizePath(spec);
+      std::string key;
+      if (!keyOf(depNorm, key, im->span, diags)) return false;
+      u.ctx.aliases[std::string(im->name)] = key;
+      u.importOrder.push_back(key);
+      if (addUnit(depNorm, src, diags) == nullptr) return false;
+    }
+  }
+  return true;
+}
+
+bool Program::analyze(TypeStore &ts, DiagSink &diags) {
   ts.initBuiltins();
-  Walker w(ts, out, diags);
-  w.run(mod);
+
+  // 第一轮：所有模块的 struct/enum 只建名字条目（字段类型可能指向别的模块）。
+  LayoutSites sites{};
+  for (ModuleUnit &u : units_) {
+    for (const ast::Decl *d : u.ast->decls) {
+      if (d->kind == ast::DeclKind::Struct) {
+        const auto *s = static_cast<const ast::StructDecl *>(d);
+        const TypeId id = ts.declareStruct(u.ctx.qualify(s->name));
+        sites[id] = LayoutSite{d, &u.ctx, false};
+      } else if (d->kind == ast::DeclKind::Enum) {
+        const auto *e = static_cast<const ast::EnumDecl *>(d);
+        const TypeId id = ts.declareEnum(u.ctx.qualify(e->name));
+        sites[id] = LayoutSite{d, &u.ctx, true};
+      }
+    }
+  }
+
+  // 第二轮：算布局（字段类型可跨模块，也可前向引用）。
+  for (ModuleUnit &u : units_) {
+    for (const ast::Decl *d : u.ast->decls) {
+      if (d->kind != ast::DeclKind::Struct && d->kind != ast::DeclKind::Enum)
+        continue;
+      const TypeId id = ts.lookup(u.ctx.qualify(d->name));
+      if (id == kInvalidType) continue;
+      std::vector<TypeId> stack{};
+      if (!layoutOf(ts, id, sites, stack, diags)) return false;
+    }
+  }
+  if (diags.hasErrors()) return false;
+
+  // 第三轮：先登记每个模块自己的顶层声明，再建 import 成员表 ——
+  // 成员表只引用被导入模块的顶层声明，所以一轮就够（互相 import 也不会发散）。
+  // Walker 每个模块只建一个：registerTopLevel 绑定的顶层名字必须活到第四轮
+  // 走函数体的时候，中途重建 Walker 会把这些绑定丢掉。
+  std::deque<Walker> walkers{};
+  for (ModuleUnit &u : units_) {
+    walkers.emplace_back(ts, u.sema, diags, *this, u);
+  }
+  for (Walker &w : walkers) {
+    w.registerTopLevel();
+  }
+  if (diags.hasErrors()) return false;
+  for (Walker &w : walkers) {
+    w.registerImports();
+  }
+  if (diags.hasErrors()) return false;
+
+  // 第四轮：走函数体。
+  for (Walker &w : walkers) {
+    w.walkBodies();
+  }
   return !diags.hasErrors();
+}
+
+const ModuleUnit *Program::find(const std::string &key) const {
+  auto it = index_.find(key);
+  return it == index_.end() ? nullptr : &units_[it->second];
 }
 
 } // namespace ln

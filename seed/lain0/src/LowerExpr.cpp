@@ -67,11 +67,11 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
       value = it->second;
       return true;
     }
-    // 顶层静态绑定（表 / 字符串）：它是 data 块 + `#proc NAME() -> #addr`，
+    // 顶层静态绑定（表 / 字符串）：它是 data 块 + `#proc <键>__NAME() -> #addr`，
     // 取值要调它的访问器过程，不能直接引用那个名字。
-    if (sema_->topLevelTypes.count(std::string(n->name)) != 0) {
+    if (sema_->topLevelTypes.count(qualify(n->name)) != 0) {
       const char *res = nextTemp();
-      out.push_back(lainir_inst_call(builder_, res, intern(n->name), nullptr, 0));
+      out.push_back(lainir_inst_call(builder_, res, symbolFor(n->name), nullptr, 0));
       value = lainir_ref(res);
       return true;
     }
@@ -124,7 +124,7 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
       const auto *d = static_cast<const ast::DottedExpr *>(c->callee);
       if (d->object && d->object->kind == ast::ExprKind::Name) {
         const auto *en = static_cast<const ast::NameExpr *>(d->object);
-        const TypeId enumTy = types_->lookup(en->name);
+        const TypeId enumTy = lookupTy(en->name);
         const AggregateLayout *elay =
             enumTy != kInvalidType ? types_->layout(enumTy) : nullptr;
         if (elay != nullptr && !elay->variants.empty())
@@ -307,7 +307,7 @@ bool Lowerer::lowerConstructExpr(const ast::ConstructExpr *e, TypeId expectedTy,
   // --- 变体构造：Shape.Circle { 载荷 } ---
   // 布局是「tag 在前（1 字节，offset 0），载荷在 payloadOffset」。
   if (e->target.hasQualifier) {
-    const TypeId enumTy = types_->resolve(e->target, *diags_);
+    const TypeId enumTy = resolveTy(e->target);
     if (enumTy == kInvalidType) {
       fail(e->span, D::LowerUnsupported, "变体构造的 enum 类型取不到");
       return false;
@@ -362,7 +362,7 @@ bool Lowerer::lowerConstructExpr(const ast::ConstructExpr *e, TypeId expectedTy,
 
   TypeId structTy = expectedTy;
   if (structTy == kInvalidType)
-    structTy = types_->resolve(e->target, *diags_);
+    structTy = resolveTy(e->target);
   if (structTy == kInvalidType) {
     fail(e->span, D::LowerUnsupported, "构造的目标类型取不到");
     return false;
@@ -488,7 +488,7 @@ bool Lowerer::lowerIndexExpr(const ast::IndexExpr *e, TypeId expectedTy,
   uint64_t scale = 1;
   if (e->base && e->base->kind == ast::ExprKind::Name) {
     const auto *n = static_cast<const ast::NameExpr *>(e->base);
-    auto it = sema_->topLevelTypes.find(std::string(n->name));
+    auto it = sema_->topLevelTypes.find(qualify(n->name));
     if (it != sema_->topLevelTypes.end()) {
       const TypeId elem = types_->elementOf(it->second);
       if (elem != kInvalidType) {
@@ -581,7 +581,7 @@ bool Lowerer::lowerForExpr(const ast::ForExpr *e, TypeId expectedTy,
 
   // 循环变量的类型：显式标注优先，否则从 from 推导。
   TypeId varTy = kInvalidType;
-  if (e->hasVarType) varTy = types_->resolve(e->varType, *diags_);
+  if (e->hasVarType) varTy = resolveTy(e->varType);
   if (varTy == kInvalidType && e->from)
     varTy = typeOfExpr(*sema_, e->from, kInvalidType);
   if (varTy == kInvalidType) {
@@ -608,7 +608,7 @@ bool Lowerer::lowerForExpr(const ast::ForExpr *e, TypeId expectedTy,
   const char *aname = nullptr;
   if (e->hasAcc) {
     TypeId accTy = kInvalidType;
-    if (!e->accType.name.empty()) accTy = types_->resolve(e->accType, *diags_);
+    if (!e->accType.name.empty()) accTy = resolveTy(e->accType);
     if (accTy == kInvalidType && e->accInit)
       accTy = typeOfExpr(*sema_, e->accInit, kInvalidType);
     if (accTy == kInvalidType) accTy = expectedTy;
@@ -729,11 +729,12 @@ bool Lowerer::lowerCall(const ast::CallExpr *e, TypeId expectedTy,
     if (retTy == nullptr) retTy = lainir_type(builder_, TY_ADDR, 0);
   }
   const char *res = retTy ? nextTemp() : nullptr;
+  const char *callee = symbolFor(n->name);
   const L1Inst *call =
-      tail ? lainir_inst_call_ex(builder_, res, intern(n->name),
+      tail ? lainir_inst_call_ex(builder_, res, callee,
                                  args.empty() ? nullptr : args.data(),
                                  static_cast<uint32_t>(args.size()), true)
-           : lainir_inst_call(builder_, res, intern(n->name),
+           : lainir_inst_call(builder_, res, callee,
                               args.empty() ? nullptr : args.data(),
                               static_cast<uint32_t>(args.size()));
   out.push_back(call);
@@ -755,7 +756,7 @@ bool Lowerer::lowerLoopExpr(const ast::LoopExpr *e, TypeId expectedTy,
   params.reserve(e->params.size());
   paramRefs.reserve(e->params.size());
   for (const ast::LoopParam &p : e->params) {
-    TypeId ty = types_->resolve(p.type, *diags_);
+    TypeId ty = resolveTy(p.type);
     if (ty == kInvalidType) return false;
     L1Operand init{};
     if (p.init) {
@@ -918,8 +919,23 @@ bool Lowerer::lowerBuiltin(const ast::CallExpr *e, std::string_view name,
       return false;
     }
     const auto *symbol = static_cast<const ast::StrLitExpr *>(e->args[0]);
+    // §3.6：只在本模块内解析。源码写 `NAME_storage`，核对 NAME 是本模块的
+    // 顶层数据名，发出 `<键>__NAME_storage`；跨模块请走 `M.名字`。
+    std::string_view base{symbol->rawText};
+    const std::string_view suffix = "_storage";
+    if (base.size() > suffix.size() &&
+        base.compare(base.size() - suffix.size(), suffix.size(), suffix) == 0) {
+      base.remove_suffix(suffix.size());
+    }
+    const std::string q = qualify(base);
+    if (sema_ == nullptr || sema_->topLevelData.count(q) == 0) {
+      fail(e->span, D::SemaUnknownName,
+           std::string("symbol_addr 只能取本模块的静态数据，跨模块请用 M.") +
+               std::string(base));
+      return false;
+    }
     const char *res = nextTemp();
-    L1Operand sym = lainir_ref(intern(symbol->rawText));
+    L1Operand sym = lainir_ref(intern(q + "_storage"));
     out.push_back(lainir_inst(builder_, INST_BITCAST, res,
                               lainir_type(builder_, TY_ADDR, 0), &sym, 1));
     value = lainir_ref(res);
@@ -986,7 +1002,7 @@ bool Lowerer::lowerBuiltin(const ast::CallExpr *e, std::string_view name,
       return false;
     }
     const auto *n = static_cast<const ast::NameExpr *>(e->args[0]);
-    auto it = sema_->topLevelLength.find(std::string(n->name));
+    auto it = sema_->topLevelLength.find(qualify(n->name));
     if (it == sema_->topLevelLength.end()) {
       fail(e->span, D::LowerUnsupported,
            std::string("len 取不到 ") + std::string(n->name) + " 的长度");
@@ -1001,7 +1017,7 @@ bool Lowerer::lowerBuiltin(const ast::CallExpr *e, std::string_view name,
 
 bool Lowerer::lowerCast(const ast::CastExpr *e, std::vector<const L1Inst *> &out,
                         L1Operand &value) {
-  TypeId target = types_->resolve(e->target, *diags_);
+  TypeId target = resolveTy(e->target);
   if (target == kInvalidType) return false;
   TypeId src = typeOfExpr(*sema_, e->operand, kInvalidType);
   if (src == kInvalidType) src = target;

@@ -33,7 +33,7 @@ bool Lowerer::lowerStmt(const ast::Stmt *s, std::vector<const L1Inst *> &out,
   switch (s->kind) {
   case ast::StmtKind::Let: {
     const auto *l = static_cast<const ast::LetStmt *>(s);
-    TypeId declared = l->hasType ? types_->resolve(l->type, *diags_) : kInvalidType;
+    TypeId declared = l->hasType ? resolveTy(l->type) : kInvalidType;
     TypeId ty = declared;
     if (ty == kInvalidType) {
       auto it = sema_->exprTypes.find(l->init);
@@ -78,7 +78,7 @@ bool Lowerer::lowerStmt(const ast::Stmt *s, std::vector<const L1Inst *> &out,
         const auto *d = static_cast<const ast::DottedExpr *>(callee);
         if (d->object != nullptr && d->object->kind == ast::ExprKind::Name) {
           const auto *en = static_cast<const ast::NameExpr *>(d->object);
-          const TypeId enumTy = types_->lookup(en->name);
+          const TypeId enumTy = lookupTy(en->name);
           const AggregateLayout *elay =
               enumTy != kInvalidType ? types_->layout(enumTy) : nullptr;
           projectionCall = elay != nullptr && !elay->variants.empty();
@@ -256,7 +256,7 @@ bool Lowerer::lowerLoopStmt(const ast::LoopStmt *s,
   params.reserve(s->params.size());
 
   for (const ast::LoopParam &p : s->params) {
-    TypeId ty = types_->resolve(p.type, *diags_);
+    TypeId ty = resolveTy(p.type);
     if (ty == kInvalidType) return false;
     L1Operand init{};
     std::vector<const L1Inst *> initOut;
@@ -325,10 +325,10 @@ bool Lowerer::lowerForStmt(const ast::ForStmt *s,
                            std::vector<const L1Inst *> &out, TypeId returnType) {
   // for i in from..to acc = init { … }
   // 降级成等价的 loop：区域参数是 (i, acc)，条件取反后 break，末尾 continue。
-  TypeId varTy = s->hasVarType ? types_->resolve(s->varType, *diags_)
+  TypeId varTy = s->hasVarType ? resolveTy(s->varType)
                                : types_->builtin("i32");
   if (varTy == kInvalidType) return false;
-  TypeId accTy = s->hasAcc ? types_->resolve(s->accType, *diags_) : varTy;
+  TypeId accTy = s->hasAcc ? resolveTy(s->accType) : varTy;
 
   std::vector<L1RegionParam> params;
   L1Operand fromInit{};
