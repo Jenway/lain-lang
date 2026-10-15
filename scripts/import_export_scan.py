@@ -48,13 +48,17 @@ REACTION = {
 
 
 def units():
-    """SOURCE_ORDER 里的 28 个单元（相对 bootstrap/ 的 .lain 路径）。"""
+    """SOURCE_ORDER 里的 28 个单元（相对 bootstrap/ 的 .lain 路径）。
+
+    清单格式见 docs/plan-modules.md §3.3：每行 `<相对路径> [<根名> …]`，
+    路径省略 `.lain` 后缀、`#` 起注释 —— 这里只看每行的第一段。
+    """
     out = []
     for raw in ORDER.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
             continue
-        out.append((BOOT / line).with_suffix(".lain"))
+        out.append(BOOT / (line.split()[0] + ".lain"))
     return out
 
 
