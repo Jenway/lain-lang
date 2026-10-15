@@ -1,7 +1,7 @@
 # 计划：用 Lain 重写 Meta，逐步替代手写 LAINIR bootstrap（stage 2）
 
-> 本文件是 **可执行的任务序列**。stage 1（`lain0` 编译器 + 31 样例全绿）已完成，
-> 见 `docs/plan-lain0.md`。本计划是 stage 2：**把 `bootstrap/` 里手写的 LAINIR Meta
+> 本文件是 **可执行的任务序列**。stage 1（`lain0` 编译器，样例已到 38 个全绿）已完成。
+> 本计划是 stage 2：**把 `bootstrap/` 里手写的 LAINIR Meta
 > 用 Lain 重新写一遍，由 `lain0` 编译成 LAINIR，最终在 LainVM 里跑起来**，逐步替代
 > 冻结的手写 IR。
 >
@@ -425,9 +425,57 @@ Meta 跑完(host_status=0): 29/34      ← 旧判据
 
 **下一步**：① 查循环体发射为何截断（5 个样例同一成因）；② 迁完 `#proc_addr`（死代码，可顺手删）；③ 才轮到 6 项清单里的 5 个输入形状。判据始终是上面那条新判据——**产出装得回去**，而不是 Meta 有没有跑完。
 
+## 待办：第 4 步之后的模块缺口（实测）
+
+第 4 步（`docs/plan-modules.md`）把 `bootstrap/` 的跨单元引用改写成 `M.名字`，由 **lain0** 的模块
+命名空间承接；**Meta 自己**降级 `import` 的那条路（拿 Meta 编译带 `import` 的表面源码）没跟着改，
+缺口在这里记账：
+
+1. **跨模块函数成员调用**：`meta_emit_ns_operand` 要求成员 `kind == 3`（值绑定），函数成员不是 →
+   `host_status=4`，产物截断在 `#proc total() -> #bits<64> {`。实测：`modules_twin` →
+   `host_status=4` / `output bytes=29`；`modules_lib` → `host_status=4` / 45 字节。
+2. **跨模块数据成员取值**：取用路径发 `#call <mangle>__NAME()`，而导出路径从没发过这个 `#proc`
+   → 产物是**悬空调用**，装回去报 `VERIFY FAILED code=2015`。`modules_main` 今天跑出 `host_status=13` / 171 字节
+   —— 失败码随成员形态变，成因是同一处。
+3. **mangle 分歧（规格级，待统一）**：Meta 把 import 说明符里的分隔符 `::` 折成**两个**下划线
+   （`std::lex` → `std__lex__<成员>`，见 `bootstrap/std/modules.lain` 的 `meta_build_mangle`），
+   lain0 把源根相对路径的 `/` 折成**一个**（`std/lex` → `std_lex__<成员>`）。两边要互链必须先统一。
+4. **`--unit` 一次只报一个诊断**：`Program::analyze` 每个相之后即返回，整份清单编译只输出第一个
+   诊断 —— 不能用「诊断数下降」当闸门，第 4 步用的是「零诊断」加 `scripts/import_export_scan.py
+   --audit` 的逐单元计数。
+
+修 1–3 的落点：`bootstrap/std/{modules,scope}.lain`、`std/handlers/let.lain`，且要重跑「产出装得回去」这条判据。红色样例
+`modules_lib` / `modules_main` / `modules_twin` 就是这三条的可视化。
+
+### 附：Meta 导出路径的边界矩阵（实测）
+
+每个模块只放一条静态 let、探针只声明 `import` 不取成员，输出里出现的就是导出路径为那条绑定
+发出的东西：
+
+| 初值形态 | 模块源码 | 实测 status | 导出产物 |
+| --- | --- | --- | --- |
+| 数字 | `let a: u64 = 1;` | 0 | `#proc …__a() -> #bits<64> { #return 1 }` |
+| 同模块标识符 | `let a: u64 = 1; let b: u64 = a;` | 0 | `…__a` 的字面量 + `#proc …__b() { #return #call …__a() }` |
+| 定长表 `[u8]` / `[u64]` / `ro [u8]` | `let t: [u8] = [1, 2, 3];` 等 | 0 | **不发**（只有探针自己的过程） |
+| `symbol_addr` 调用 | `let a: addr = symbol_addr("t_storage");` | **13** | 空 |
+| 普通函数调用 | `func g…; let a: u64 = g(1);` | **4** | 空 |
+| 运算符（头是字面量） | `let a: u64 = 0 - 1;` | 0 | **静默错值**：`#return 0` |
+| 负数字面量 / 字符串 / 转换式 | `let a: u64 = -1;`、`let s: ro [u8] = "abc";`、`… as u64` | **13** | 空 |
+| 顶层聚合构造 | `struct P { x: i32 } let p: P = P { x: 1 };` | **4** | 空 |
+
+两张必须记住的边界：触发 13 的不是「调用式」这一类，而是**头节点解析不到作用域条目**
+（内建名 `symbol_addr`、未知名、`-1`、`"…"` 都算）；头节点是**函数名**或**类型名**时报 4。
+头是数字但初值是表达式时（`0 - 1`）**不报错，静默发头那个字面量**——改写时不要引入这种初值。
+
+补齐 1–3 的三条路曾评估过：**A** 只走 lain0、把 Meta 的 import 实现当独立工作项（代价 0，
+样例继续红）；**B** 在 Meta 侧补齐（导出路径发数据块 + 访问器、接受函数成员、统一 mangle），
+落点同上，是独立增量；**C** 把 216 条字节表改写成受支持形态 —— **不可行**，等于重写数据表示。
+
+
 ## 参考
 
-- `docs/plan-lain0.md`（stage 1 / `lain0` 功能进度）
 - `docs/04-bootstrap-dialect.md`（旧 bootstrap 方言说明；其中引用的 `lainir_f*.l1` 探针已随档案删除，见 git 历史）
-- `bootstrap/SOURCE_ORDER`（Lain 源码拼装顺序；驱动要的 `--unit` 清单由 `scripts/build_meta_unit.py` 生成）
+- `bootstrap/SOURCE_ORDER`（**模块清单**：每行 `<相对路径> [<根名> …]`，路径省略 `.lain`，
+  顺序即降级顺序；`lain0 --unit bootstrap/SOURCE_ORDER` 一次编出整份 Meta，驱动要的 LAINIR
+  单元清单由 `scripts/build_meta_unit.py` 生成）
 - 手写 LAINIR 档案 `bootstrapl1/` 已删除，最后一个完整版本见 git `5fbe5d5~1`

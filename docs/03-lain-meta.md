@@ -60,3 +60,27 @@ Meta 运行于受限沙箱中，通过 CSpace 调用宿主服务：
 - **机制层 Reader 零语义**：底层只识别基础词法单元（Token）与括号组（Group），不包含关键字、类型或语句结构的预设。
 - **RawAst 存储**：语法树由宿主线性写入只读 Arena，通过 VSpace 映射给 Meta。
 - **语法绑定**：语法结构的合法性与解释方式由 Meta 内部的绑定表驱动。改变 Meta 的绑定逻辑，同一段语法树即可解释为不同的语言语义。
+
+## 模块、清单与构建（实现口径）
+
+Meta 本体今天就是 `bootstrap/` 下 **28 个 Lain 源码模块**（`meta.lain` 排在清单末位）：
+
+- `bootstrap/SOURCE_ORDER` 是**模块清单**：每行 `<相对路径> [<根名> …]`，路径相对清单所在目录、
+  省略 `.lain`，`#` 起注释。清单顺序即降级顺序，它是产物确定性的来源 —— 同一份清单必须给出
+  逐字节相同的模块。
+- `lain0 --unit bootstrap/SOURCE_ORDER -o build/lain0/bootstrap.l1` 一次编出整份 Meta 的 LAINIR。
+  `scripts/build_meta_unit.py` 只做这层调用，并写出驱动要的单元清单 `build/lain0/bootstrap_unit.txt`。
+- 每个模块的顶层声明发 `<键>__<名字>`（模块键 = 相对源根的路径去 `.lain`、`/` 换 `_`）；
+  清单里标为**根名**的声明保持平坦 —— 宿主按平坦字符串查找入口，所以 `meta.lain` 的三个
+  `lain_std_abi_version` / `lain_std_initialize` / `lain_std_lower` 是根名。
+- 跑起来：
+
+```bash
+python scripts/build_meta_unit.py
+./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
+    examples/arith.lain bootstrap/lain/examples/arith.lain
+```
+
+  实测 `verify subroutines=870 data=216`、`image ok`、`host_status=0`、`region grants=2`、
+  `output bytes=74`，产物与基线 `build/arith.out` 逐字节相同。设计与取舍见 `docs/plan-modules.md`
+  （决策 D-004），成员位置表与拒绝码见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》。

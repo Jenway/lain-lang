@@ -119,7 +119,7 @@ lain0 --unit <清单> [-o out.l1] [--round-trip]
 | `scripts/build_meta_unit.py` | 缩成调用 `lain0 --unit` 的包装 |
 | `scripts/namespace_audit.py` | 删除（审计已完成，脚本属于一次性统计） |
 | `docs/04-bootstrap-dialect.md` | 模块一节的成员位置表、mangle 例子、跨模块函数成员与字段访问的「待补规则」改写为新行为 |
-| `docs/03-lain-meta.md`、`docs/lain0.md`、`docs/development.md`、`docs/plan-lain0.md`、`docs/decisions.md` | 命令行、清单格式、状态数字更新；追加决策 D-004 |
+| `docs/03-lain-meta.md`、`docs/lain0.md`、`docs/development.md`、`docs/decisions.md` | 命令行、清单格式、状态数字更新；追加决策 D-004 |
 
 ## 五、bootstrap 改写的工作量
 

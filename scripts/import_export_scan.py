@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """第 4 步前置统计：bootstrap 单元里「Meta 的 import 导出不支持初值形态」的顶层静态 let。
 
-规则不是从源码文本猜的，是**实测**出来的（见 docs/step4-import-exposure.md
-的边界矩阵：模块只放一条 let、探针只声明 import 不取成员）。
+规则不是从源码文本猜的，是**实测**出来的（模块只放一条 let、探针只声明 import 不取成员；
+完整边界矩阵见 docs/plan-meta-lain.md 待办节的附表）。
 
 Meta 的导出路径 = bootstrap/std/modules.lain 的 meta_lower_import ->
 meta_emit_module_exports -> meta_emit_module_binding。后者只看初值**头节点**：

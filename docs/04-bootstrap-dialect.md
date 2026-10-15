@@ -1,7 +1,9 @@
 # bootstrap 方言
 
-自举的 stage0 是手写 LAINIR 文本（bootstrap/ 下按 bootstrap/SOURCE_ORDER 拼成 28 个文件、
-13203 行的编译单元；驱动报 unit files=28 bytes=582254）。要让 Lain 编译器能编译自己，
+自举的 stage0 曾是手写 LAINIR 文本（`bootstrap/` 下按 `bootstrap/SOURCE_ORDER` 拼成 28 个文件、
+13203 行的编译单元；驱动报 unit files=28 bytes=582254）。**那份手写 IR 已整体删除**，现在
+`bootstrap/` 下是 28 个 Lain 源码模块，由 `lain0 --unit bootstrap/SOURCE_ORDER` 一次编成整份
+Meta（见 `docs/plan-meta-lain.md` 与 `docs/plan-modules.md`）。要让 Lain 编译器能编译自己，
 先得有一份**用 Lain 写的 Meta**；写它需要一门表面语言。
 
 这份文档定的是这门方言的特性集合、语法，以及每条语法降成什么 LAINIR。它不是 lainlang
@@ -443,6 +445,11 @@ func cstr_len(p: addr) -> u64 {
 
 ## 自举管线的缺口（实测）
 
+> **状态注记（第 4 步之后）**：本节记的是改写**之前**的管线实测（手写 `.l1` + `merge.ps1` 拼装）。
+> 现在 `bootstrap/` 下 28 个模块都是 Lain 源码、`bootstrap/SOURCE_ORDER` 是模块清单，
+> `lain0 --unit bootstrap/SOURCE_ORDER` 一次编出整份 Meta（见《模块：成员位置与符号命名》）；
+> 下面的阶段 1/2/3 与 `build/probes/*_surf.lain` 保留为当时的判据记录。
+
 `build/merge.ps1` 只做两件事：按 `SOURCE_ORDER` 把文件拼成 `build/bootstrap_merged.l1`、跑
 `check_unit.exe`。它**没有编译步骤** —— 直接把手写 LAINIR 当最终单元用。
 
@@ -514,7 +521,7 @@ func cstr_len(p: addr) -> u64 {
 | 字节串字面量 | `let s: addr = "hi";`（只允许顶层） | 发 `data s_storage ro { 104 105 }` 与 `#proc s() -> #addr { %base = #data_addr s_storage; #return %base }`；字节原样搬、**不补末尾 0**（要结束符写 `let s: ro [u8] = [ … , 0 ];`）。样例 `bootstrap/lain/examples/bytes.lain`。函数体内写字节串报 4 |
 | 定长同质表 | `let t: [u64] = [10, 20, 30];`、`let marks: ro [u8] = [7, 8];`（只允许顶层） | 发 `data t_storage rw { 10 0 0 0 0 0 0 0 20 … }`（每元素按小端拆字节）与取址过程 `t()`；`ro [T]` 出 `ro` 块，缺标注按 `u64`。索引 `t[i]` 发 `%r<n> = #data_addr t_storage` 加 `#lea(%r<n>, i, 元素字节数, 0)`（字面量下标越界报 4），`len(t)` 发元素个数。样例 `bootstrap/lain/examples/table.lain` |
 | 外部过程与链接 | `extern NAME(a: T) -> U = link_name;` | 只声明不定义：名字进作用域（身份与 `func` 一样）、调用走同一条表达式路径，产物是 `#proc NAME(%a: T) -> U #extern "link_name"`；链接名原样搬运，宿主那头登记与否由驱动决定。样例 `bootstrap/lain/examples/extern.lain` |
-| 模块 | `let M = import("examples::modules_lib");` 后写 `M.answer`、`M.answer + 1`、`f(M.answer)`、`func keep(p: M.Point) -> M.Point` | `import` 那条语句把模块的**值绑定**发成顶层过程（`#proc examples__modules_lib__answer() -> #bits<64> { #return 42 }`，按声明顺序、成员之间互相引用也解析）；函数体里的 `M.成员` 走 `meta_emit_ns_operand` 发 `%r<n> = #call <mangle>__<成员>()`，绑定位置、表达式位置、实参位置都通；类型位置的 `M.Point` 由 `meta_type_resolve` 按「限定名 → 被导入源码的类型表」解析（返回类型与参数类型的窗口用 `bs_skip_qualified` 扫到名字末尾，`M.Point` 这类多 token 名字不再被截断）。样例 `bootstrap/lain/examples/modules_main.lain` 与 `bootstrap/lain/examples/modules_lib.lain` |
+| 模块 | `let M = import("examples::modules_lib");` 后写 `M.answer`、`M.answer + 1`、`f(M.answer)`、`M.bump(M.twice)`、`M.table[i]`、`store(M.table[i], v)`、`func keep(p: M.Point) -> M.Point`、`func px(p: M.Point) -> i32 { return p.x; }` | 模块键 = 被导入文件相对**源根**的路径去 `.lain`、`/` 换 `_`（`examples/modules_lib.lain` → `examples_modules_lib`），顶层声明一律发 `<键>__<名字>`：值成员 `#proc modules_lib__answer() -> #bits<64> { #return 42 }`、函数成员 `#proc modules_lib__bump(%v: #bits<64>) -> #bits<64>`、静态数据 `data modules_lib__table_storage rw { 10 20 30 }` 加访问器 `#proc modules_lib__table() -> #addr`。跨模块调用 `M.bump(x)` 发 `#call @modules_lib__bump(%x)`（尾位置是 `#call[tail]`），跨模块字段访问 `p.x` 发 `#lea(%p, 0, 0, <字段偏移>)` + `#load`。位置与命名细则见下面《模块：成员位置与符号命名》。样例 `bootstrap/lain/examples/modules_main.lain`、`modules_lib.lain`、`modules_twin.lain`（两个模块各有一个同名 `dup`，分别发 `modules_twin_a__dup` 与 `modules_twin_b__dup`） |
 | 负数字面量 | `-5`（负号紧跟数字） | LAINIR 的字面量是无符号十进制文本，没有负号，所以降级成 `#sub[repr](0, 5)`：宽度与符号都取上下文类型。只认字面量，一元负号作用于变量仍报 4。样例 `bootstrap/lain/examples/neg.lain` |
 
 实测被拒（列出来是因为它们看着都该能用）：`i + p` 报 4（只认左边的地址）；
@@ -527,6 +534,38 @@ func cstr_len(p: addr) -> u64 {
 （只支持顶层绑定）；`load`/`store`/`lea` 曾报 6
 （收尾的加零复制走源码算子表，`u8` 没有绑定），已在 C 的第一半修好；函数体内的聚合构造
 曾报 4，已在 E 的第三刀修好 —— 降级到栈上 `#alloca`（见《二、半成品》）。）
+
+### 模块：成员位置与符号命名
+
+模块键 = 被导入文件相对**源根**的路径去掉 `.lain`、把 `/` 换成 `_`（`bootstrap/std/lex.lain` →
+`std_lex`，`bootstrap/lain/examples/modules_lib.lain` → `modules_lib`）。源根在
+`lain0 --unit <清单>` 时是清单文件所在目录，在 `lain0 <file.lain>` 时是入口文件所在目录。
+每个模块的顶层声明一律发 `<键>__<名字>`；清单里标为**根名**的少数声明保持平坦
+（`bootstrap/SOURCE_ORDER` 只把 `meta` 的三个入口 `lain_std_abi_version` /
+`lain_std_initialize` / `lain_std_lower` 标成根名），宿主 `extern` 的 `link_name` 也照旧平坦。
+
+| 位置 | 写法 | 发出的东西 |
+| --- | --- | --- |
+| 绑定 / 表达式 / 实参 | `M.answer`、`M.answer + 1`、`f(M.answer)` | `%r<n> = #call @<键>__answer()`（访问器调用） |
+| 调用 | `M.bump(M.twice)` | `%r<n> = #call @<键>__bump(%r<m>)`；尾位置发 `#call[tail]` |
+| 类型 | `func keep(p: M.Point) -> M.Point` | 类型表键 `<键>__Point`；聚合按地址传，参数发 `#addr` |
+| 字段访问 | `func px(p: M.Point) -> i32 { return p.x; }` | `%r<n> = #lea(%p, 0, 0, <字段偏移>)` + `%r<n2> = #load[#bits<32>](%r<n>)` |
+| 跨模块静态数据 | `M.table`、`M.table[i]`、`M.base + i`、`store(M.table[i], v)` | 访问器给基址，索引与地址算术按既有规则 |
+| 本模块静态数据取址 | `symbol_addr("table_storage")` | `%r<n> = #bitcast[#addr](%<键>__table_storage)`；写**别的模块**的数据名报 301 |
+
+成员名与形态的判据（探针 `build/probes/mod/`，实测）：
+
+| 写法 | 实测 |
+| --- | --- |
+| `M.bump` 当值用（不调用） | 400「模块函数成员不能当值使用，请写成调用 M.bump(…)」 |
+| 成员名写错 `M.nope`、模块不导出标量 `M.i32`、`M.Shape.Circle` | 301「未绑定的名字: M」 |
+| `symbol_addr("answer_storage")`（`answer` 是别的模块的数据） | 301「symbol_addr 只能取本模块的静态数据，跨模块请用 M.answer」 |
+| 导入路径跑出源根 / 模块键含 `__` | 312「导入路径超出源根: …」/「模块键不能含连续下划线: …」 |
+
+同名不冲突是模块前缀的直接效果：`modules_twin` 的两个模块各有一个 `dup`，产物里同时有
+`modules_twin_a__dup` 与 `modules_twin_b__dup`（改动之前这一编译必报 verify 的
+`duplicate subroutine` 2022）。确定性：`lain0 --unit bootstrap/SOURCE_ORDER` 连跑两次的产物
+SHA-256 相同（`c4a1ffb3…`），零诊断。
 
 ### 二、半成品：`struct` / `enum` 的值层
 
@@ -801,7 +840,8 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
 函数体与顶层的聚合构造（→ 栈上 `#alloca` + 每字段 `#store`，或顶层 `data`）/
 宿主整块窗口授予（`region_grant`，暂存区的基址与容量从记录读回）/ `extern` 声明（`= link_name`，调用与 `func` 同路）/
 算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）/ 聚合类型名（struct、enum）进参数类型与标注 /
-模块成员在绑定、表达式、实参、类型四个位置（`import` 发出值绑定的顶层过程，函数体里的 `M.成员` 发调用临时值）/
+模块成员在绑定、表达式、实参、类型、调用与字段访问六个位置（`M.名字` 按模块键发 `<键>__<名字>`；
+跨模块静态数据走访问器，`symbol_addr` 只管本模块的静态数据）/
 聚合值当值用（字段访问、变体投影、函数体内构造、字段值是表达式；跨帧返回栈上地址报 11）。
 够做「一小段 Lain 端到端」，还不够写编译器。A、B、C、D、E、F、值层与五都已完成。
 
@@ -829,14 +869,14 @@ bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
   别名另发块），不改发射器，记在待补规则；索引、len、字节串不补末尾 0 均已逐字节对齐。
 - 期望类型的传递路径（见上）。
 - `addr` 上的 `==` 给不给（层 0 有 `lainir_eq`）。
-- 模块类型只能当不透明句柄传递：`func keep(p: M.Point) -> M.Point { return p; }` 通（聚合值在 IR
-  里是地址，模块里的字段布局在**模块的源码**里），但跨模块的字段访问 `p.x`（`p: M.Point`）报 4
-  —— 布局查询用同一个源码窗口读「声明的字段名」与「要找的字段名」，两个窗口不是同一份源码。
-  探针 `build/probes/mod_type.lain`。
-- 模块里的**函数成员**还调不了：`M.bump(x)` 报 4（模块导出只发值绑定，函数成员走的是另一条路）。
-  探针 `build/probes/mod_callit.lain`。
-- 模块成员名写错报 11，不是 13：导出过程在 `import` 那条语句处就发（过程只能落顶层），
-  那时成员查找失败先撞上「源码找不到」。探针 `build/probes/mod_missing.lain`。
+- 模块：跨模块一律写 `M.名字` —— `M.f(x)` 是调用、`M.NAME` 是访问器调用、`M.table[i]` 给元素地址、
+  `p.x`（`p: M.Point`）按被导入模块里的布局读字段（见《模块：成员位置与符号命名》）。
+  `symbol_addr` 退回「本模块静态数据取址」这一种用途；两个模块的同名声明靠模块键分开。
+- 模块**不导出标量**：`M.i32` 报 301（标量是内建名字，不进模块成员表）。`M.bump` 当值用（不调用）
+  报 400「模块函数成员不能当值使用，请写成调用 M.bump(…)」；成员名写错报 301「未绑定的名字: M」
+  —— 别名不是值名，成员表查不到就退回普通名字解析。
+- Meta **自己**降级 `import` 的那条路（拿 Meta 编译带 `import` 的表面源码）另有缺口，与本节描述的
+  lain0 行为不是一回事：缺口清单与实测数字记在 `docs/plan-meta-lain.md` 的待办里。
 - `loop` 的循环体只能给**自己的参数**赋值，别的目标报 4；体是多语句的（`for` 只有一条）。
 - `loop` 的早退：`break LABEL(<值>);` 用循环结果类型当上下文，`continue LABEL(<实参…>);`
   用各参数的声明类型当上下文；两者都必须带标签，标签名不符报 4，实参个数不符报 4

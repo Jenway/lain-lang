@@ -75,4 +75,18 @@ lain0 已经能够很好地替代 bootstrap，且已把它该承担的角色"耗
 **Status**
 已完成（seed 加 `is_tail` + `lainir_inst_call_ex`；lain0 在尾位置发 `#call[tail]`；verify 校验尾位置，非尾位拒绝）
 
+## D-004 — 模块命名空间与根名清单
+
+**What**
+模块命名空间与根名清单。每个模块的顶层声明发出 `<模块键>__<名字>`，模块键由源根相对路径去掉 `.lain` 后把 `/` 换成 `_` 得到；清单里标为根名的少数声明保持平坦，供宿主按名字查找；跨模块访问一律写 `M.名字`，`symbol_addr` 只管本模块的静态数据。
+
+**Why**
+内核按平坦字符串解析名字，模块前缀是让两个模块的同名声明共存的最小手段；清单承载顺序与根名，使整份模块的产物只由清单决定，满足「同一份 SOURCE_ORDER 必须给出逐字节相同的模块」。
+
+**How**
+`Program` 一次加载整个依赖图并两轮分析，`Lowerer` 按清单顺序把全部模块降级进同一个 `L1Builder`；`scripts/build_meta_unit.py` 只负责调用 CLI 并生成驱动要的 unit 列表。
+
+**Status**
+采纳（第 1–4 步已落地并验证：`lain0 --unit bootstrap/SOURCE_ORDER` 零诊断、连跑两次产物 SHA-256 相同；回归 38/38；Meta 管线 `host_status=0` / `region grants=2` / `output bytes=74`，与 `build/arith.out` 逐字节相同。规范面见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》）
+
 <!-- 决策在此逐条追加 -->
