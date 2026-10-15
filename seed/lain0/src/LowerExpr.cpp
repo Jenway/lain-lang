@@ -419,18 +419,28 @@ bool Lowerer::lowerDottedExpr(const ast::DottedExpr *e, TypeId expectedTy,
                               std::vector<const L1Inst *> &out,
                               L1Operand &value) {
   // 模块成员值访问：M.answer（object 是模块别名，按 <alias>.<member> 查 moduleMembers）。
-  // 降级成对被导入模块访问器过程的调用：#call @answer()。
+  // 降级成对被导入模块访问器过程的调用：#call @<键>__answer()。
   if (e->object && e->object->kind == ast::ExprKind::Name) {
     const auto *en = static_cast<const ast::NameExpr *>(e->object);
     auto memIt = sema_->moduleMembers.find(std::string(en->name) + "." +
                                            std::string(e->member));
-    if (memIt != sema_->moduleMembers.end() &&
-        memIt->second.kind == ModuleMember::Kind::Value) {
-      const char *res = nextTemp();
-      out.push_back(lainir_inst_call(builder_, res,
-                                     intern(memIt->second.mangled.c_str()), nullptr, 0));
-      value = lainir_ref(res);
-      return true;
+    if (memIt != sema_->moduleMembers.end()) {
+      // §3.6：只有静态数据成员能当值用。函数成员必须写成调用 `M.f(x)`，
+      // 类型成员只出现在标注位置 —— 两种都不是「取一个值」，明确拒掉。
+      if (memIt->second.kind == ModuleMember::Kind::Value) {
+        const char *res = nextTemp();
+        out.push_back(lainir_inst_call(builder_, res,
+                                       intern(memIt->second.mangled), nullptr, 0));
+        value = lainir_ref(res);
+        return true;
+      }
+      fail(e->span, D::LowerUnsupported,
+           memIt->second.kind == ModuleMember::Kind::Func
+               ? std::string("模块函数成员不能当值使用，请写成调用 ") +
+                     std::string(en->name) + "." + std::string(e->member) + "(…)"
+               : std::string("模块类型成员不能当值使用: ") +
+                     std::string(en->name) + "." + std::string(e->member));
+      return false;
     }
   }
   // 聚合按地址传（docs/04：「聚合是参数，地址由调用方给」），
@@ -702,11 +712,34 @@ bool Lowerer::lowerForExpr(const ast::ForExpr *e, TypeId expectedTy,
 bool Lowerer::lowerCall(const ast::CallExpr *e, TypeId expectedTy,
                         std::vector<const L1Inst *> &out, L1Operand &value,
                         bool tail) {
-  if (!e->callee || e->callee->kind != ast::ExprKind::Name) {
+  // 被调者两种形态 (§3.6)：本模块的具名过程 `f(...)`，或被导入模块的导出函数
+  // `M.f(...)`。后者在成员表里查真正的符号名（`<被导入模块键>__f`）。
+  const char *callee = nullptr;
+  if (e->callee && e->callee->kind == ast::ExprKind::Name) {
+    const auto *n = static_cast<const ast::NameExpr *>(e->callee);
+    callee = symbolFor(n->name);
+  } else if (e->callee && e->callee->kind == ast::ExprKind::Dotted) {
+    const auto *d = static_cast<const ast::DottedExpr *>(e->callee);
+    if (d->object == nullptr || d->object->kind != ast::ExprKind::Name) {
+      fail(e->span, D::LowerUnsupported,
+           "只支持直接调用具名过程或模块的导出函数 M.f");
+      return false;
+    }
+    const auto *en = static_cast<const ast::NameExpr *>(d->object);
+    auto it = sema_->moduleMembers.find(std::string(en->name) + "." +
+                                        std::string(d->member));
+    if (it == sema_->moduleMembers.end() ||
+        it->second.kind != ModuleMember::Kind::Func) {
+      fail(e->span, D::LowerUnsupported,
+           std::string("模块成员 ") + std::string(en->name) + "." +
+               std::string(d->member) + " 不是可调用的函数");
+      return false;
+    }
+    callee = intern(it->second.mangled);
+  } else {
     fail(e->span, D::LowerUnsupported, "只支持直接调用具名过程");
     return false;
   }
-  const auto *n = static_cast<const ast::NameExpr *>(e->callee);
 
   std::vector<L1Operand> args;
   args.reserve(e->args.size());
@@ -729,7 +762,6 @@ bool Lowerer::lowerCall(const ast::CallExpr *e, TypeId expectedTy,
     if (retTy == nullptr) retTy = lainir_type(builder_, TY_ADDR, 0);
   }
   const char *res = retTy ? nextTemp() : nullptr;
-  const char *callee = symbolFor(n->name);
   const L1Inst *call =
       tail ? lainir_inst_call_ex(builder_, res, callee,
                                  args.empty() ? nullptr : args.data(),

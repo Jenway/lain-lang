@@ -616,6 +616,7 @@ public:
   }
 
   // import 成员表：只引用被导入模块自己的顶层声明，所以一轮就能填满。
+  // 成员分三种：值绑定（静态 let）、函数（func）、类型（struct/enum）。
   void registerImports() {
     for (const ast::Decl *d : unit_.ast->decls) {
       if (d->kind != ast::DeclKind::Import) continue;
@@ -628,16 +629,49 @@ public:
 
       const ModuleUnit *dep = depUnitOf(alias);
       if (dep == nullptr) continue;
-      // 模块键里不含 `__`（§3.1 保证），所以切分没有歧义。
-      const std::string prefix = dep->key + "__";
-      for (const auto &kv : dep->sema.topLevelTypes) {
-        if (kv.first.rfind(prefix, 0) != 0) continue;
-        const std::string member = kv.first.substr(prefix.size());
-        ModuleMember mm{};
-        mm.kind = ModuleMember::Kind::Value;
-        mm.type = kv.second;
-        mm.mangled = kv.first; // 静态 let 的访问器过程名就是它自己
-        out_.moduleMembers[alias + "." + member] = mm;
+      // 成员表按被导入模块自己的顶层声明建，与它的源码顺序一致。
+      for (const ast::Decl *dd : dep->ast->decls) {
+        switch (dd->kind) {
+        case ast::DeclKind::StaticLet: {
+          const auto *s = static_cast<const ast::StaticLetDecl *>(dd);
+          const std::string q = dep->ctx.qualify(s->name);
+          auto t = dep->sema.topLevelTypes.find(q);
+          if (t == dep->sema.topLevelTypes.end()) break;
+          ModuleMember mm{};
+          mm.kind = ModuleMember::Kind::Value;
+          mm.type = t->second;
+          // 静态 let 的访问器过程名就是它发出的符号名。
+          auto sym = dep->sema.topLevelSymbols.find(q);
+          mm.mangled = sym == dep->sema.topLevelSymbols.end() ? q : sym->second;
+          out_.moduleMembers[alias + "." + std::string(s->name)] = mm;
+          break;
+        }
+        case ast::DeclKind::Func: {
+          const auto *f = static_cast<const ast::FuncDecl *>(dd);
+          const std::string q = dep->ctx.qualify(f->name);
+          ModuleMember mm{};
+          mm.kind = ModuleMember::Kind::Func;
+          // 返回类型：无标注的 func 没有返回类型，kInvalidType 表示「调用不产值」。
+          auto r = dep->sema.functionReturns.find(q);
+          mm.type = r == dep->sema.functionReturns.end() ? kInvalidType : r->second;
+          auto sym = dep->sema.topLevelSymbols.find(q);
+          mm.mangled = sym == dep->sema.topLevelSymbols.end() ? q : sym->second;
+          out_.moduleMembers[alias + "." + std::string(f->name)] = mm;
+          break;
+        }
+        case ast::DeclKind::Struct:
+        case ast::DeclKind::Enum: {
+          // 类型成员：`M.Point` 的类型标注走 TypeStore::resolve 的限定分支，
+          // 这里只登记，供「M.Type 当值用」之类的非法形态给出明确诊断。
+          ModuleMember mm{};
+          mm.kind = ModuleMember::Kind::Type;
+          mm.type = ts_.lookup(dep->ctx.qualify(dd->name));
+          out_.moduleMembers[alias + "." + std::string(dd->name)] = mm;
+          break;
+        }
+        default:
+          break;
+        }
       }
     }
   }
@@ -799,6 +833,19 @@ private:
         const auto *n = static_cast<const ast::NameExpr *>(c->callee);
         auto it = out_.functionReturns.find(ctx_.qualify(n->name));
         if (it != out_.functionReturns.end()) return it->second;
+      }
+      // M.f(x)：被调者是模块成员函数，返回类型就是成员表里那个函数的返回类型。
+      if (c->callee && c->callee->kind == ast::ExprKind::Dotted) {
+        const auto *d = static_cast<const ast::DottedExpr *>(c->callee);
+        if (d->object && d->object->kind == ast::ExprKind::Name) {
+          const auto *en = static_cast<const ast::NameExpr *>(d->object);
+          auto it = out_.moduleMembers.find(std::string(en->name) + "." +
+                                            std::string(d->member));
+          if (it != out_.moduleMembers.end() &&
+              it->second.kind == ModuleMember::Kind::Func) {
+            return it->second.type; // 无返回标注时为 kInvalidType
+          }
+        }
       }
       return kInvalidType;
     }
@@ -1027,13 +1074,7 @@ bool Program::keyOf(const std::string &normPath, std::string &key, Span sp,
   return true;
 }
 
-bool Program::load(const std::string &entryPath, SourceMgr &src,
-                   DiagSink &diags) {
-  const std::string norm = normalizePath(entryPath);
-  sourceRoot_ = directoryOf(norm);
-  root_ = addUnit(norm, src, diags);
-  if (root_ == nullptr) return false;
-
+bool Program::loadImports(SourceMgr &src, DiagSink &diags) {
   // 宽度优先把整个 import 依赖图加载完；已加载的模块键直接复用。
   for (size_t i = 0; i < units_.size(); ++i) {
     ModuleUnit &u = units_[i];
@@ -1051,6 +1092,98 @@ bool Program::load(const std::string &entryPath, SourceMgr &src,
     }
   }
   return true;
+}
+
+bool Program::load(const std::string &entryPath, SourceMgr &src,
+                   DiagSink &diags) {
+  const std::string norm = normalizePath(entryPath);
+  sourceRoot_ = directoryOf(norm);
+  root_ = addUnit(norm, src, diags);
+  if (root_ == nullptr) return false;
+  return loadImports(src, diags);
+}
+
+// §3.3/§3.7：清单每行 `<相对路径> [<根名> …]`，路径相对清单所在目录、省略
+// `.lain`，`#` 开头为注释。源根 = 清单所在目录。根名登记进对应模块的
+// ModuleContext，于是那些顶层声明发出平坦名字（§3.2）。
+bool Program::loadUnit(const std::string &manifestPath, SourceMgr &src,
+                       DiagSink &diags) {
+  std::ifstream f(manifestPath, std::ios::binary);
+  if (!f) {
+    diags.error(Span{}, D::IoOpenFailed, "打不开清单: " + manifestPath);
+    return false;
+  }
+  const std::string norm = normalizePath(manifestPath);
+  sourceRoot_ = directoryOf(norm);
+
+  std::string line;
+  bool first = true;
+  while (std::getline(f, line)) {
+    // 去 \r（CRLF）与行内注释：`#` 之后整段丢掉。
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    const size_t hash = line.find('#');
+    if (hash != std::string::npos) line = line.substr(0, hash);
+    // 按空白切：第一段是相对路径，其余是根名。
+    std::vector<std::string> fields{};
+    std::string cur{};
+    auto flush = [&]() {
+      if (!cur.empty()) {
+        fields.push_back(cur);
+        cur.clear();
+      }
+    };
+    for (char c : line) {
+      if (c == ' ' || c == '\t') {
+        flush();
+      } else {
+        cur.push_back(c);
+      }
+    }
+    flush();
+    if (fields.empty()) continue;
+
+    std::string rel = fields[0];
+    const std::string ext = ".lain";
+    if (rel.size() <= ext.size() ||
+        rel.compare(rel.size() - ext.size(), ext.size(), ext) != 0) {
+      rel += ext;
+    }
+    const std::string path =
+        sourceRoot_.empty() || sourceRoot_ == "." ? rel
+                                                  : sourceRoot_ + "/" + rel;
+    ModuleUnit *u = addUnit(normalizePath(path), src, diags);
+    if (u == nullptr) return false;
+    for (size_t i = 1; i < fields.size(); ++i) {
+      u->ctx.rootNames.insert(fields[i]);
+    }
+    manifestOrder_.push_back(u->key);
+    if (first) {
+      root_ = u;
+      first = false;
+    }
+  }
+  if (root_ == nullptr) {
+    diags.error(Span{}, D::IoOpenFailed, "清单里没有模块: " + manifestPath);
+    return false;
+  }
+  return loadImports(src, diags);
+}
+
+std::vector<const ModuleUnit *> Program::lowerOrder() const {
+  // 清单顺序在前（产物确定性的来源），依赖图里新出现的模块按发现顺序接在后面。
+  std::vector<const ModuleUnit *> out{};
+  out.reserve(units_.size());
+  std::unordered_set<std::string> seen{};
+  for (const std::string &k : manifestOrder_) {
+    auto it = index_.find(k);
+    if (it == index_.end()) continue;
+    if (!seen.insert(k).second) continue;
+    out.push_back(&units_[it->second]);
+  }
+  for (const ModuleUnit &u : units_) {
+    if (seen.insert(u.key).second) out.push_back(&u);
+  }
+  return out;
 }
 
 bool Program::analyze(TypeStore &ts, DiagSink &diags) {

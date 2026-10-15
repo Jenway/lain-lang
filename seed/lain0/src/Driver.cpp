@@ -537,6 +537,105 @@ CompileResult compileFile(const std::string &path, const CompileOptions &opts,
   return r;
 }
 
+// §3.7：按清单编一份模块。清单每行 `<相对路径> [<根名> …]`，路径相对清单所在
+// 目录、省略 `.lain`；源根就是清单所在目录。其余行为与 compileFile 一致 ——
+// verify 不过不产出文本、空产物算失败，一个闸门都不少。
+CompileResult compileUnit(const std::string &manifestPath,
+                          const CompileOptions &opts, SourceMgr &src,
+                          DiagSink &diags) {
+  CompileResult r{};
+
+  Program prog;
+  if (!prog.loadUnit(manifestPath, src, diags)) {
+    return r;
+  }
+  const ModuleUnit *entry = prog.root();
+  if (entry == nullptr || entry->ast == nullptr) {
+    return r;
+  }
+  r.fileId = entry->fileId;
+
+  if (opts.dumpTokens) {
+    dumpTokens(entry->toks, src, std::cout);
+  }
+  if (diags.hasErrors()) {
+    return r;
+  }
+  // 模块名取根模块键（§3.4）。print.c 不打印模块名，但 IR 里不能是空串。
+  const std::string moduleName =
+      entry->ctx.key.empty() ? moduleNameOf(manifestPath, opts)
+                             : entry->ctx.key;
+  if (opts.dumpAst) {
+    dumpAst(*entry->ast, std::cout);
+  }
+  if (diags.hasErrors()) {
+    return r;
+  }
+
+  TypeStore types;
+  types.initBuiltins();
+  if (!prog.analyze(types, diags)) {
+    return r;
+  }
+  if (diags.hasErrors()) {
+    return r;
+  }
+
+  L1Builder *builder = lainir_builder_new();
+  if (builder == nullptr) {
+    diags.error(Span{}, D::LowerUnsupported, std::string("LAINIR builder 创建失败"));
+    return r;
+  }
+
+  LowerOptions lopts{};
+  lopts.moduleName = moduleName.c_str();
+  lopts.program = &prog;
+  Lowerer lower(builder, types, src, diags, lopts);
+  const L1Module *ir = lower.run(prog);
+  if (ir == nullptr || diags.hasErrors()) {
+    lainir_builder_free(builder);
+    return r;
+  }
+
+  L1Diagnostic vdiag{};
+  vdiag.code = 0;
+  vdiag.line = 0;
+  vdiag.column = 0;
+  vdiag.message[0] = '\0';
+  const int vrc = lainir_verify(ir, &vdiag);
+  r.verifyCode = vdiag.code;
+  r.verifyMessage = std::string(vdiag.message);
+  if (vrc != 0) {
+    Span sp{};
+    sp.file = r.fileId;
+    sp.begin = offsetOfLineCol(entry->text, vdiag.line, vdiag.column);
+    sp.end = sp.begin;
+    diags.error(sp, D::VerifyFailed, verifyMessage(vdiag));
+    lainir_builder_free(builder);
+    return r;
+  }
+
+  char *printed = lainir_print_to_string(ir);
+  lainir_builder_free(builder);
+  if (printed == nullptr) {
+    diags.error(Span{}, D::PrintFailed, std::string("LAINIR 文本打印失败"));
+    return r;
+  }
+  r.lainir.assign(printed);
+  std::free(printed);
+  if (r.lainir.empty()) {
+    diags.error(Span{}, D::PrintFailed, std::string("LAINIR 文本为空"));
+    return r;
+  }
+  if (diags.hasErrors()) {
+    r.lainir.clear();
+    return r;
+  }
+
+  r.ok = true;
+  return r;
+}
+
 bool roundTripCheck(std::string_view text, int &outCode, std::string &outMsg) {
   outCode = 0;
   outMsg.clear();

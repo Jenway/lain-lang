@@ -61,15 +61,27 @@ struct AggregateLayout {
 // 当前模块的上下文：模块键、源根、别名表（`别名 -> 模块键`）。
 // 类型键与符号名的限定全靠它 —— 裸名限定成 `<键>__<名字>`，
 // 限定名 `M.Point` 先经别名表换成被导入模块的键再查。
+//
+// 根名（§3.2）：清单里显式标为根名的顶层声明例外，发出的名字保持平坦。
+// 宿主按名字找它们（Meta 驱动默认入口 `lain_std_lower` 就是这样一个名字），
+// 所以 qualify 对根名原样返回 —— 顶层符号、数据符号、类型键于是全部平坦，
+// 且因为全部经这一个函数，不存在漏改的旁路。
 struct ModuleContext {
   std::string key{};        // 模块键，如 `std_lex` / `arith`
   std::string sourceRoot{}; // 源根目录（入口文件或清单所在目录）
   // import 的别名 -> 被导入模块的键。
   std::unordered_map<std::string, std::string> aliases{};
+  // 清单里标为根名的顶层声明（源码里的裸名字）。
+  std::unordered_set<std::string> rootNames{};
 
   std::string qualify(std::string_view name) const {
     if (key.empty()) return std::string(name);
+    if (rootNames.count(std::string(name)) != 0) return std::string(name);
     return key + "__" + std::string(name);
+  }
+
+  bool isRootName(std::string_view name) const {
+    return rootNames.count(std::string(name)) != 0;
   }
 };
 
@@ -221,6 +233,12 @@ public:
   // 文本由 ModuleUnit 自己持一份（AST 的 string_view 指向它）。
   bool load(const std::string &entryPath, SourceMgr &src, DiagSink &diags);
 
+  // 入口：模块清单（§3.3/§3.7）。每行 `<相对路径> [<根名> …]`，路径相对清单
+  // 所在目录、省略 `.lain`，`#` 开头为注释。源根 = 清单所在目录。
+  // 根名写进对应模块的 ModuleContext，它们的顶层声明于是发出平坦名字。
+  bool loadUnit(const std::string &manifestPath, SourceMgr &src,
+                DiagSink &diags);
+
   // 两轮分析。ts 由调用方给（全部模块共用一套类型表）。
   bool analyze(TypeStore &ts, DiagSink &diags);
 
@@ -229,6 +247,10 @@ public:
   const std::deque<ModuleUnit> &units() const { return units_; }
   const std::string &sourceRoot() const { return sourceRoot_; }
 
+  // 降级顺序（§3.4）：先清单里的模块（按清单顺序），再依赖图里新出现的模块
+  // （按发现顺序）。单文件入口时就是发现顺序，与旧行为一致。
+  std::vector<const ModuleUnit *> lowerOrder() const;
+
 private:
   using LayoutSites = std::unordered_map<TypeId, LayoutSite>;
 
@@ -236,11 +258,12 @@ private:
   // 规范化后的文件路径 -> 模块键。跑出源根或键里含 `__` 都报 SemaBadImport。
   bool keyOf(const std::string &normPath, std::string &key, Span sp,
              DiagSink &diags) const;
-  // 被导入模块先分析（成员表只引用被导入模块的顶层声明）；环上的模块排最后。
-  std::vector<size_t> dependencyOrder() const;
+  // 已加载的模块之后，把 import 依赖图按宽度优先补完。
+  bool loadImports(SourceMgr &src, DiagSink &diags);
 
   std::deque<ModuleUnit> units_{};
   std::unordered_map<std::string, size_t> index_{}; // 模块键 -> units_ 下标
+  std::vector<std::string> manifestOrder_{};        // 清单给出的模块键顺序
   ModuleUnit *root_ = nullptr;
   std::string sourceRoot_{};
 };

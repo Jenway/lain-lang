@@ -87,9 +87,17 @@ def main():
     if not LAIN0.exists():
         print("找不到 %s（先构建 lain0）" % LAIN0)
         return 2
+    # 宿主按平坦名字找 Meta 的三个入口（驱动默认 --entry 就是 lain_std_lower），
+    # 所以它们在清单里标成根名：发出平坦名字，不带上 `<模块键>__` 前缀
+    # （docs/plan-modules.md §3.2）。
+    manifest = OUT_DIR / "bootstrap_manifest.txt"
+    manifest.write_text(
+        "bootstrap lain_std_abi_version lain_std_initialize lain_std_lower\n",
+        encoding="utf-8")
     ir_path = OUT_DIR / "bootstrap.l1"
     with ir_path.open("wb") as fh:
-        rc = subprocess.run([str(LAIN0), str(merged_path)], stdout=fh).returncode
+        rc = subprocess.run(
+            [str(LAIN0), "--unit", str(manifest)], stdout=fh).returncode
     if rc != 0:
         print("lain0 编译失败 rc=%d" % rc)
         return 1

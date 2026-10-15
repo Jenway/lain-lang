@@ -27,13 +27,15 @@ const L1Module *Lowerer::run(const Program &prog) {
   tempCounter_ = 0;
   strlitCounter_ = 0;
 
-  for (const ModuleUnit &u : prog.units()) {
+  // §3.4：清单顺序在前（产物确定性的来源），依赖图里新出现的模块接在后面。
+  for (const ModuleUnit *u : prog.lowerOrder()) {
+    if (u == nullptr || u->ast == nullptr) return nullptr;
     // 换模块上下文：类型键、符号名、成员表全部跟着换。
-    ctx_ = u.ctx;
-    sema_ = &u.sema;
+    ctx_ = u->ctx;
+    sema_ = &u->sema;
     bindings_.clear();
     loopParams_.clear();
-    for (const ast::Decl *d : u.ast->decls) {
+    for (const ast::Decl *d : u->ast->decls) {
       // import 的加载与解析是 Program 的事，降级这里不再重复。
       if (d->kind == ast::DeclKind::Import) continue;
       if (!lowerDecl(d)) return nullptr;

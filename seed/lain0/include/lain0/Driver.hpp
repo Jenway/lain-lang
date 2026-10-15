@@ -41,6 +41,13 @@ struct CompileResult {
 CompileResult compileFile(const std::string &path, const CompileOptions &opts,
                           SourceMgr &src, DiagSink &diags);
 
+// §3.7：按模块清单编一份模块（`lain0 --unit <清单>`）。与 compileFile 共用同一条
+// 闸门链：verify 不过不产出文本、空产物算失败。清单打不开时返回 ok=false，
+// 诊断里带 `打不开清单 <路径>`。
+CompileResult compileUnit(const std::string &manifestPath,
+                          const CompileOptions &opts, SourceMgr &src,
+                          DiagSink &diags);
+
 // 单个 DRC：把已经打出来的 canonical 文本喂回 lainir_parse，
 // 固定点要求成立（print(parse(text)) == text）。
 // 这是 lain0 的自校验，用来确认 print/parse 双向一致。
