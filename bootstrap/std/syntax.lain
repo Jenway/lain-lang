@@ -1,44 +1,34 @@
 // Syntax environment table. Entries retain AST token references.
+// 模块：语法环境表（标识符 -> handler 分派）。跨单元引用一律写 `别名.名字`。
+let std_handlers_enum = import("handlers/enum");
+let std_handlers_func = import("handlers/func");
+let std_handlers_if = import("handlers/if");
+let std_handlers_let = import("handlers/let");
+let std_handlers_statements = import("handlers/statements");
+let std_handlers_struct = import("handlers/struct");
+let std_macros_my_block = import("macros/my_block");
+let std_macros_my_if = import("macros/my_if");
+let std_macros_my_require = import("macros/my_require");
+let std_parse = import("parse");
+let std_scope = import("scope");
+let std_types = import("types");
+
 let meta_syntax_state: [u8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
-extern ast_child(node: u64, index: u64) -> u64 = ast_child;
-extern ast_child_count(node: u64) -> u64 = ast_child_count;
-extern ast_kind(node: u64) -> u8 = ast_kind;
-extern ast_text_addr(node: u64) -> addr = ast_text_addr;
-extern ast_text_len(node: u64) -> u64 = ast_text_len;
-extern meta_node_is_word(node: u64, base: addr, word: addr, len: u64) -> bool = meta_node_is_word;
-extern meta_root_of(source: u64) -> u64 = meta_root_of;
-extern meta_cell_get(p: addr) -> u64 = meta_cell_get;
-extern meta_cell_put(p: addr, v: u64) -> u32 = meta_cell_put;
-extern meta_cell_put_raw(p: addr, v: u64) -> u32 = meta_cell_put_raw;
-extern meta_bytes_equal(a: addr, b: addr, n: u64) -> bool = meta_bytes_equal;
-extern meta_bump_alloc(bytes: u64) -> u64 = meta_bump_alloc;
 extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
 extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
 extern lain_meta_source_count() -> u64 = lain_meta_source_count;
 extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
 extern lain_meta_source_length(source: u64) -> u64 = lain_meta_source_length;
-extern meta_register_my_if(node: u64) -> u32 = meta_register_my_if;
-extern meta_register_my_block(node: u64) -> u32 = meta_register_my_block;
-extern meta_register_my_require(node: u64) -> u32 = meta_register_my_require;
-extern meta_register_func(node: u64) -> u32 = meta_register_func;
-extern meta_register_if(node: u64) -> u32 = meta_register_if;
-extern meta_register_struct(node: u64) -> u32 = meta_register_struct;
-extern meta_register_enum(node: u64) -> u32 = meta_register_enum;
-extern meta_register_let(node: u64) -> u32 = meta_register_let;
-extern meta_register_return(node: u64) -> u32 = meta_register_return;
-extern meta_register_for(node: u64) -> u32 = meta_register_for;
-extern meta_register_loop(node: u64) -> u32 = meta_register_loop;
-extern meta_register_extern(node: u64) -> u32 = meta_register_extern;
 
 func meta_syntax_state_put(off: u64, value: u64) -> u32 {
   let state: addr = symbol_addr("meta_syntax_state_storage");
-  let status: u32 = meta_cell_put_raw(state + off, value);
+  let status: u32 = std_types.meta_cell_put_raw(state + off, value);
   return 0;
 }
 func meta_syntax_state_get(off: u64) -> u64 {
   let state: addr = symbol_addr("meta_syntax_state_storage");
-  return meta_cell_get(state + off);
+  return std_types.meta_cell_get(state + off);
 }
 func meta_syntax_entry(index: u64) -> addr {
   let base_i: u64 = meta_syntax_state_get(0);
@@ -47,26 +37,26 @@ func meta_syntax_entry(index: u64) -> addr {
 }
 
 func meta_syntax_add(env: u64, name_ref: u64, context: u64, handler: u64, scope: u64) -> u32 {
-  let name_kind: u8 = ast_kind(name_ref);
+  let name_kind: u8 = std_parse.ast_kind(name_ref);
   let kind_w: u32 = name_kind as u32;
   if kind_w != 1 { let fail: u32 = lain_meta_fail(9408); return 9408; }
-  let name_len: u64 = ast_text_len(name_ref);
-  let name: addr = ast_text_addr(name_ref);
+  let name_len: u64 = std_parse.ast_text_len(name_ref);
+  let name: addr = std_parse.ast_text_addr(name_ref);
   let count: u64 = meta_syntax_state_get(8);
   let capacity: u64 = meta_syntax_state_get(16);
   if count >= capacity { let fail: u32 = lain_meta_fail(17); return 17; }
   let conflict: bool = loop find(i: u64 = 0) {
     if i < count {
       let e: addr = meta_syntax_entry(i);
-      let ee: u64 = meta_cell_get(e + 8);
-      let en_ref: u64 = meta_cell_get(e + 16);
-      let el: u64 = meta_cell_get(e + 24);
-      let ec: u64 = meta_cell_get(e + 32);
-      let es: u64 = meta_cell_get(e + 48);
+      let ee: u64 = std_types.meta_cell_get(e + 8);
+      let en_ref: u64 = std_types.meta_cell_get(e + 16);
+      let el: u64 = std_types.meta_cell_get(e + 24);
+      let ec: u64 = std_types.meta_cell_get(e + 32);
+      let es: u64 = std_types.meta_cell_get(e + 48);
       let eligible: bool = ee == env and ec == context and es == scope and el == name_len;
       if eligible {
-        let en: addr = ast_text_addr(en_ref);
-        if meta_bytes_equal(en, name, name_len) { break find(1); }
+        let en: addr = std_parse.ast_text_addr(en_ref);
+        if std_types.meta_bytes_equal(en, name, name_len) { break find(1); }
       }
       continue find(i + 1);
     } else { break find(0); }
@@ -74,13 +64,13 @@ func meta_syntax_add(env: u64, name_ref: u64, context: u64, handler: u64, scope:
   if conflict { let fail: u32 = lain_meta_fail(9412); return 9412; }
   let entry: addr = meta_syntax_entry(count);
   let binding: u64 = count + 1;
-  let w0: u32 = meta_cell_put(entry, binding);
-  let w1: u32 = meta_cell_put(entry + 8, env);
-  let w2: u32 = meta_cell_put(entry + 16, name_ref);
-  let w3: u32 = meta_cell_put(entry + 24, name_len);
-  let w4: u32 = meta_cell_put(entry + 32, context);
-  let w5: u32 = meta_cell_put(entry + 40, handler);
-  let w6: u32 = meta_cell_put(entry + 48, scope);
+  let w0: u32 = std_types.meta_cell_put(entry, binding);
+  let w1: u32 = std_types.meta_cell_put(entry + 8, env);
+  let w2: u32 = std_types.meta_cell_put(entry + 16, name_ref);
+  let w3: u32 = std_types.meta_cell_put(entry + 24, name_len);
+  let w4: u32 = std_types.meta_cell_put(entry + 32, context);
+  let w5: u32 = std_types.meta_cell_put(entry + 40, handler);
+  let w6: u32 = std_types.meta_cell_put(entry + 48, scope);
   let wc: u32 = meta_syntax_state_put(8, count + 1);
   return 0;
 }
@@ -90,16 +80,16 @@ func meta_syntax_lookup_at_scope(node: u64, env: u64, scope: u64, context: u64) 
   let handler: u64 = loop find(i: u64 = 0) {
     if i < count {
       let e: addr = meta_syntax_entry(i);
-      let ee: u64 = meta_cell_get(e + 8);
-      let name_ref: u64 = meta_cell_get(e + 16);
-      let name_len: u64 = meta_cell_get(e + 24);
-      let ec: u64 = meta_cell_get(e + 32);
-      let eh: u64 = meta_cell_get(e + 40);
-      let es: u64 = meta_cell_get(e + 48);
+      let ee: u64 = std_types.meta_cell_get(e + 8);
+      let name_ref: u64 = std_types.meta_cell_get(e + 16);
+      let name_len: u64 = std_types.meta_cell_get(e + 24);
+      let ec: u64 = std_types.meta_cell_get(e + 32);
+      let eh: u64 = std_types.meta_cell_get(e + 40);
+      let es: u64 = std_types.meta_cell_get(e + 48);
       if ee == env and ec == context and es == scope {
-        let name: addr = ast_text_addr(name_ref);
+        let name: addr = std_parse.ast_text_addr(name_ref);
         let dummy: addr = lain_meta_source_data(0);
-        if meta_node_is_word(node, dummy, name, name_len) { break find(eh); }
+        if std_parse.meta_node_is_word(node, dummy, name, name_len) { break find(eh); }
       }
       continue find(i + 1);
     } else { break find(0); }
@@ -112,17 +102,17 @@ func meta_syntax_match_at_scope(node: u64, env: u64, scope: u64, context: u64) -
   let matched: u64 = loop find(i: u64 = 0) {
     if i < count {
       let e: addr = meta_syntax_entry(i);
-      let id: u64 = meta_cell_get(e);
-      let ee: u64 = meta_cell_get(e + 8);
-      let name_ref: u64 = meta_cell_get(e + 16);
-      let name_len: u64 = meta_cell_get(e + 24);
-      let ec: u64 = meta_cell_get(e + 32);
-      let eh: u64 = meta_cell_get(e + 40);
-      let es: u64 = meta_cell_get(e + 48);
+      let id: u64 = std_types.meta_cell_get(e);
+      let ee: u64 = std_types.meta_cell_get(e + 8);
+      let name_ref: u64 = std_types.meta_cell_get(e + 16);
+      let name_len: u64 = std_types.meta_cell_get(e + 24);
+      let ec: u64 = std_types.meta_cell_get(e + 32);
+      let eh: u64 = std_types.meta_cell_get(e + 40);
+      let es: u64 = std_types.meta_cell_get(e + 48);
       if ee == env and ec == context and es == scope {
-        let name: addr = ast_text_addr(name_ref);
+        let name: addr = std_parse.ast_text_addr(name_ref);
         let dummy: addr = lain_meta_source_data(0);
-        if meta_node_is_word(node, dummy, name, name_len) { let id_hi: u64 = id << 32; let packed: u64 = id_hi or eh; break find(packed); }
+        if std_parse.meta_node_is_word(node, dummy, name, name_len) { let id_hi: u64 = id << 32; let packed: u64 = id_hi or eh; break find(packed); }
       }
       continue find(i + 1);
     } else { break find(0); }
@@ -137,26 +127,26 @@ func meta_syntax_ensure(node: u64, context: u64, handler: u64) -> u32 {
 }
 
 func meta_syntax_register_builtin(node: u64) -> u32 {
-  let r0: u32 = meta_register_my_if(node); if r0 != 0 { return r0; }
-  let r1: u32 = meta_register_my_block(node); if r1 != 0 { return r1; }
-  let r1b: u32 = meta_register_my_require(node); if r1b != 0 { return r1b; }
-  let r2: u32 = meta_register_func(node); if r2 != 0 { return r2; }
-  let r3: u32 = meta_register_if(node); if r3 != 0 { return r3; }
-  let r4: u32 = meta_register_struct(node); if r4 != 0 { return r4; }
-  let r5: u32 = meta_register_enum(node); if r5 != 0 { return r5; }
-  let r7: u32 = meta_register_let(node); if r7 != 0 { return r7; }
-  let r8: u32 = meta_register_return(node); if r8 != 0 { return r8; }
-  let r9: u32 = meta_register_for(node); if r9 != 0 { return r9; }
-  let r10: u32 = meta_register_loop(node); if r10 != 0 { return r10; }
-  return meta_register_extern(node);
+  let r0: u32 = std_macros_my_if.meta_register_my_if(node); if r0 != 0 { return r0; }
+  let r1: u32 = std_macros_my_block.meta_register_my_block(node); if r1 != 0 { return r1; }
+  let r1b: u32 = std_macros_my_require.meta_register_my_require(node); if r1b != 0 { return r1b; }
+  let r2: u32 = std_handlers_func.meta_register_func(node); if r2 != 0 { return r2; }
+  let r3: u32 = std_handlers_if.meta_register_if(node); if r3 != 0 { return r3; }
+  let r4: u32 = std_handlers_struct.meta_register_struct(node); if r4 != 0 { return r4; }
+  let r5: u32 = std_handlers_enum.meta_register_enum(node); if r5 != 0 { return r5; }
+  let r7: u32 = std_handlers_let.meta_register_let(node); if r7 != 0 { return r7; }
+  let r8: u32 = std_handlers_statements.meta_register_return(node); if r8 != 0 { return r8; }
+  let r9: u32 = std_handlers_statements.meta_register_for(node); if r9 != 0 { return r9; }
+  let r10: u32 = std_handlers_statements.meta_register_loop(node); if r10 != 0 { return r10; }
+  return std_handlers_func.meta_register_extern(node);
 }
 
 func meta_syntax_scan_group(group: u64) -> u32 {
-  let count: u64 = ast_child_count(group);
+  let count: u64 = std_parse.ast_child_count(group);
   let status: u32 = loop children(i: u64 = 0) {
     if i < count {
-      let node: u64 = ast_child(group, i);
-      let kind: u8 = ast_kind(node);
+      let node: u64 = std_parse.ast_child(group, i);
+      let kind: u8 = std_parse.ast_kind(node);
       let kw: u32 = kind as u32;
       let result: u32 = if kw == 2 { meta_syntax_scan_group(node) } else { meta_syntax_register_builtin(node) };
       if result != 0 { break children(result); }
@@ -186,7 +176,7 @@ func meta_syntax_init() -> u32 {
     } else { break size(acc); }
   };
   let bytes: u64 = capacity * 56;
-  let off: u64 = meta_bump_alloc(bytes);
+  let off: u64 = std_scope.meta_bump_alloc(bytes);
   if off == 0xFFFFFFFFFFFFFFFF { return 17; }
   let scratch: addr = lain_meta_scratch_data();
   let base: addr = scratch + off;
@@ -196,7 +186,7 @@ func meta_syntax_init() -> u32 {
   let s2: u32 = meta_syntax_state_put(16, capacity);
   let scanned: u32 = loop source(i: u64 = 0) {
     if i < sources {
-      let root: u64 = meta_root_of(i);
+      let root: u64 = std_parse.meta_root_of(i);
       if root != 0 {
         let result: u32 = meta_syntax_scan_group(root);
         if result != 0 { break source(result); }

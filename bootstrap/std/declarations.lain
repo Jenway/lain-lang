@@ -6,42 +6,35 @@
 // 结果直接喂给 #return。表面语言的值 if 支里不能再套 if，所以这里逐条改写成
 // 平坦守卫（命中即 return），语义逐条对应：第一个命中的 handler 走对应分支，
 // 全部不命中走原来的兜底分支。这在 bootstrap/std/handlers/let.lain 里是既有写法。
+// 模块：顶层声明分派（关键字 -> handler）。跨单元引用一律写 `别名.名字`。
+let std_handlers_enum = import("handlers/enum");
+let std_handlers_func = import("handlers/func");
+let std_handlers_if = import("handlers/if");
+let std_handlers_let = import("handlers/let");
+let std_handlers_struct = import("handlers/struct");
+let std_macros_my_block = import("macros/my_block");
+let std_macros_my_if = import("macros/my_if");
+
 extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
-extern meta_declare_enum(base: addr, len: u64, source: u64, level: u64, parent: u64, index: u64) -> u32 = meta_declare_enum;
-extern meta_declare_extern(base: addr, len: u64, source: u64, level: u64, parent: u64, index: u64) -> u32 = meta_declare_extern;
-extern meta_declare_func(base: addr, len: u64, source: u64, level: u64, parent: u64, index: u64) -> u32 = meta_declare_func;
-extern meta_declare_let(base: addr, len: u64, source: u64, level: u64, parent: u64, index: u64) -> u32 = meta_declare_let;
-extern meta_declare_struct(base: addr, len: u64, source: u64, level: u64, parent: u64, index: u64) -> u32 = meta_declare_struct;
-extern meta_expand_children_func(root: u64, cursor: u64, count: u64, buffer: addr, outn: u64) -> u64 = meta_expand_children_func;
-extern meta_expand_children_if(group: u64, cursor: u64, count: u64, buffer: addr, outn: u64) -> u64 = meta_expand_children_if;
 // 旧 IR 的参数名是 %slice；`slice` 是表面语言的保留字，这里改名 slice_v（链接名不变，本就是本单元定义的参数）。
-extern meta_expand_replacement_my_block(slice_ref: u64, count: u64, buffer: addr, outn: u64) -> u64 = meta_expand_replacement_my_block;
-extern meta_expand_replacement_my_if(slice_ref: u64, count: u64, buffer: addr, outn: u64) -> u64 = meta_expand_replacement_my_if;
-extern meta_lower_decl_enum(base: addr, len: u64, here: u64) -> u32 = meta_lower_decl_enum;
-extern meta_lower_decl_extern(base: addr, len: u64, parent: u64, index: u64, node: u64) -> u32 = meta_lower_decl_extern;
-extern meta_lower_decl_func(base: addr, len: u64, parent: u64, index: u64, node: u64) -> u32 = meta_lower_decl_func;
-extern meta_lower_decl_let(base: addr, len: u64, here: u64) -> u32 = meta_lower_decl_let;
-extern meta_lower_decl_struct(base: addr, len: u64, here: u64) -> u32 = meta_lower_decl_struct;
-extern meta_recognize_child_context_func(relative: u64) -> u64 = meta_recognize_child_context_func;
-extern meta_recognize_child_context_if(relative: u64) -> u64 = meta_recognize_child_context_if;
 
 // 处理器拥有其孩子的 recognize 上下文。0 表示普通表达式/物理组。
 func meta_recognize_child_context_invoke(handler: u64, relative: u64) -> u64 {
   let is_func: bool = handler == 2;
-  if is_func { return meta_recognize_child_context_func(relative); }
+  if is_func { return std_handlers_func.meta_recognize_child_context_func(relative); }
   let is_if: bool = handler == 3;
-  if is_if { return meta_recognize_child_context_if(relative); }
+  if is_if { return std_handlers_if.meta_recognize_child_context_if(relative); }
   return 0;
 }
 
 // 宏处理器拥有替换片段内部的上下文规则。返回 1 = 已写入，0 = 失败。
 func meta_expand_replacement_invoke(handler: u64, slice_v: u64, count: u64, buffer: addr, outn: u64) -> u64 {
   let is_my_if: bool = handler == 1;
-  if is_my_if { return meta_expand_replacement_my_if(slice_v, count, buffer, outn); }
+  if is_my_if { return std_macros_my_if.meta_expand_replacement_my_if(slice_v, count, buffer, outn); }
   let is_block: bool = handler == 11;
   let is_require: bool = handler == 12;
   let blockish: bool = is_block or is_require;
-  if blockish { return meta_expand_replacement_my_block(slice_v, count, buffer, outn); }
+  if blockish { return std_macros_my_block.meta_expand_replacement_my_block(slice_v, count, buffer, outn); }
   let f: u32 = lain_meta_fail(9412);
   return 0;
 }
@@ -50,29 +43,29 @@ func meta_expand_replacement_invoke(handler: u64, slice_v: u64, count: u64, buff
 // 无孩子适配器的处理器消费当前节点 1 项；0 表示递归失败。
 func meta_expand_stmt_children_invoke(handler: u64, parent: u64, cursor: u64, count: u64, buffer: addr, outn: u64) -> u64 {
   let is_if: bool = handler == 3;
-  if is_if { return meta_expand_children_if(parent, cursor, count, buffer, outn); }
+  if is_if { return std_handlers_if.meta_expand_children_if(parent, cursor, count, buffer, outn); }
   return 1;
 }
 
 // declaration 处理器决定顶层声明内部的展开上下文。
 func meta_expand_decl_children_invoke(handler: u64, parent: u64, cursor: u64, count: u64, buffer: addr, outn: u64) -> u64 {
   let is_func: bool = handler == 2;
-  if is_func { return meta_expand_children_func(parent, cursor, count, buffer, outn); }
+  if is_func { return std_handlers_func.meta_expand_children_func(parent, cursor, count, buffer, outn); }
   return 1;
 }
 
 // 顶层声明的登记分派：struct 4 / enum 5 / func 2 / let 7 / extern 14，其余 9412。
 func meta_declare_invoke(handler: u64, base: addr, len: u64, source: u64, level_start: u64, parent: u64, index: u64) -> u32 {
   let is_struct: bool = handler == 4;
-  if is_struct { return meta_declare_struct(base, len, source, level_start, parent, index); }
+  if is_struct { return std_handlers_struct.meta_declare_struct(base, len, source, level_start, parent, index); }
   let is_enum: bool = handler == 5;
-  if is_enum { return meta_declare_enum(base, len, source, level_start, parent, index); }
+  if is_enum { return std_handlers_enum.meta_declare_enum(base, len, source, level_start, parent, index); }
   let is_func: bool = handler == 2;
-  if is_func { return meta_declare_func(base, len, source, level_start, parent, index); }
+  if is_func { return std_handlers_func.meta_declare_func(base, len, source, level_start, parent, index); }
   let is_let: bool = handler == 7;
-  if is_let { return meta_declare_let(base, len, source, level_start, parent, index); }
+  if is_let { return std_handlers_let.meta_declare_let(base, len, source, level_start, parent, index); }
   let is_extern: bool = handler == 14;
-  if is_extern { return meta_declare_extern(base, len, source, level_start, parent, index); }
+  if is_extern { return std_handlers_func.meta_declare_extern(base, len, source, level_start, parent, index); }
   let f: u32 = lain_meta_fail(9412);
   return 9412;
 }
@@ -81,15 +74,15 @@ func meta_declare_invoke(handler: u64, base: addr, len: u64, source: u64, level_
 // func/extern 还要 parent、index、node。兜底同样是 9412。
 func meta_lower_decl_invoke(handler: u64, base: addr, len: u64, here: u64, parent: u64, index: u64, node: u64) -> u32 {
   let is_struct: bool = handler == 4;
-  if is_struct { return meta_lower_decl_struct(base, len, here); }
+  if is_struct { return std_handlers_struct.meta_lower_decl_struct(base, len, here); }
   let is_enum: bool = handler == 5;
-  if is_enum { return meta_lower_decl_enum(base, len, here); }
+  if is_enum { return std_handlers_enum.meta_lower_decl_enum(base, len, here); }
   let is_func: bool = handler == 2;
-  if is_func { return meta_lower_decl_func(base, len, parent, index, node); }
+  if is_func { return std_handlers_func.meta_lower_decl_func(base, len, parent, index, node); }
   let is_let: bool = handler == 7;
-  if is_let { return meta_lower_decl_let(base, len, here); }
+  if is_let { return std_handlers_let.meta_lower_decl_let(base, len, here); }
   let is_extern: bool = handler == 14;
-  if is_extern { return meta_lower_decl_extern(base, len, parent, index, node); }
+  if is_extern { return std_handlers_func.meta_lower_decl_extern(base, len, parent, index, node); }
   let f: u32 = lain_meta_fail(9412);
   return 9412;
 }

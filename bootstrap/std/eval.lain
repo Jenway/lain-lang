@@ -25,6 +25,12 @@
 //     表面语言里对应一条 extern 声明，链接名原样保留。
 //   * 本单元没有 #data_addr 取跨单元数据符号，所以不需要任何跨单元数据桩。
 
+// 模块：struct 对齐请求的物理 LAINIR 求值。跨单元引用一律写 `别名.名字`。
+let std_modules = import("modules");
+let std_parse = import("parse");
+let std_scope = import("scope");
+let std_types = import("types");
+
 let meta_eval_align_module: ro [u8] = [35, 112, 114, 111, 99, 32, 108, 97, 121, 111, 117, 116, 95, 97, 108, 105, 103, 110, 40, 37, 118, 58, 32, 35, 98, 105, 116, 115, 60, 54, 52, 62, 44, 32, 37, 97, 58, 32, 35, 98, 105, 116, 115, 60, 54, 52, 62, 41, 32, 45, 62, 32, 35, 98, 105, 116, 115, 60, 54, 52, 62, 32, 123, 10, 32, 32, 37, 98, 97, 99, 107, 32, 61, 32, 35, 115, 117, 98, 91, 35, 98, 105, 116, 115, 60, 54, 52, 62, 93, 40, 37, 97, 44, 32, 49, 41, 10, 32, 32, 37, 115, 117, 109, 32, 61, 32, 35, 97, 100, 100, 91, 35, 98, 105, 116, 115, 60, 54, 52, 62, 93, 40, 37, 118, 44, 32, 37, 98, 97, 99, 107, 41, 10, 32, 32, 37, 113, 32, 61, 32, 35, 117, 100, 105, 118, 91, 35, 98, 105, 116, 115, 60, 54, 52, 62, 93, 40, 37, 115, 117, 109, 44, 32, 37, 97, 41, 10, 32, 32, 37, 114, 101, 115, 117, 108, 116, 32, 61, 32, 35, 109, 117, 108, 91, 35, 98, 105, 116, 115, 60, 54, 52, 62, 93, 40, 37, 113, 44, 32, 37, 97, 41, 10, 32, 32, 35, 114, 101, 116, 117, 114, 110, 32, 37, 114, 101, 115, 117, 108, 116, 10, 125, 10];   // 223 字节，宿主侧 layout_align 模块文本
 let meta_eval_align_entry: ro [u8] = [108, 97, 121, 111, 117, 116, 95, 97, 108, 105, 103, 110];   // "layout_align" 12
 
@@ -41,12 +47,6 @@ extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
 // 旧 IR 的 `#proc lain_meta_apply_emitted_request(…) #extern "lain_meta_apply_emitted_request"`
 // 没有体，表面语言里就是这条 extern 声明（同名链接名，参数名与定义单元一致）。
 extern lain_meta_apply_emitted_request(entry: addr, entry_len: u64, args: addr, arg_count: u64) -> u64 = lain_meta_apply_emitted_request;
-extern meta_buf_puts(buf: addr, capacity: u64, at: u64, src: addr, n: u64) -> u64 = meta_buf_puts;
-extern meta_bump_alloc(bytes: u64) -> u64 = meta_bump_alloc;
-extern meta_bump_mark() -> u64 = meta_bump_mark;
-extern meta_bump_release(mark: u64) -> u32 = meta_bump_release;
-extern meta_cell_put(p: addr, v: u64) -> u32 = meta_cell_put;
-extern meta_source_of(base: addr) -> u64 = meta_source_of;
 
 // 通用标量请求门面：模块文本、入口和标量 wire 都是调用方提供的数据。
 // 显式能力与预算目前由驱动配置在宿主上下文中；此门面不替调用者伪造过程值或权限。
@@ -62,8 +62,8 @@ func meta_eval_align_up(v: u64, a: u64, source_base: addr, position: u64) -> u64
   if zero {
     return v;
   }
-  let mark: u64 = meta_bump_mark();
-  let off: u64 = meta_bump_alloc(304);
+  let mark: u64 = std_scope.meta_bump_mark();
+  let off: u64 = std_scope.meta_bump_alloc(304);
   let no_space: bool = off == 0xFFFFFFFFFFFFFFFF;
   if no_space {
     return 0xFFFFFFFFFFFFFFFF;
@@ -71,20 +71,20 @@ func meta_eval_align_up(v: u64, a: u64, source_base: addr, position: u64) -> u64
   let scratch: addr = lain_meta_scratch_data();
   let buf: addr = scratch + off;
   let prefix: addr = symbol_addr("meta_eval_align_module_storage");
-  let length: u64 = meta_buf_puts(buf, 256, 0, prefix, 223);
+  let length: u64 = std_modules.meta_buf_puts(buf, 256, 0, prefix, 223);
   let build_failed: bool = length == 0xFFFFFFFFFFFFFFFF;
   if build_failed {
-    let release: u32 = meta_bump_release(mark);
+    let release: u32 = std_scope.meta_bump_release(mark);
     let failed: u32 = lain_meta_fail(17);
     return 0xFFFFFFFFFFFFFFFF;
   }
   let wire: addr = buf + 256;
-  let w0: u32 = meta_cell_put(wire, 0);
-  let w1: u32 = meta_cell_put(wire + 8, 64);
-  let w2: u32 = meta_cell_put(wire + 16, v);
-  let w3: u32 = meta_cell_put(wire + 24, 0);
-  let w4: u32 = meta_cell_put(wire + 32, 64);
-  let w5: u32 = meta_cell_put(wire + 40, a);
+  let w0: u32 = std_types.meta_cell_put(wire, 0);
+  let w1: u32 = std_types.meta_cell_put(wire + 8, 64);
+  let w2: u32 = std_types.meta_cell_put(wire + 16, v);
+  let w3: u32 = std_types.meta_cell_put(wire + 24, 0);
+  let w4: u32 = std_types.meta_cell_put(wire + 32, 64);
+  let w5: u32 = std_types.meta_cell_put(wire + 40, a);
   let entry: addr = symbol_addr("meta_eval_align_entry_storage");
   let bits: u64 = meta_apply_scalar_request(buf, length, entry, 12, wire, 2);
   let status: u64 = lain_meta_apply_status();
@@ -109,7 +109,7 @@ func meta_eval_align_up(v: u64, a: u64, source_base: addr, position: u64) -> u64
       low
     };
     // 布局结束处是这次物理对齐计算的来源；请求行列由 Eval 单独保留。
-    let source: u64 = meta_source_of(source_base);
+    let source: u64 = std_parse.meta_source_of(source_base);
     let known: bool = source != 0xFFFFFFFFFFFFFFFF;
     if known {
       let wide_code: u64 = code as u64;
@@ -119,6 +119,6 @@ func meta_eval_align_up(v: u64, a: u64, source_base: addr, position: u64) -> u64
     }
     break pick_result(0xFFFFFFFFFFFFFFFF);
   };
-  let release_final: u32 = meta_bump_release(mark);
+  let release_final: u32 = std_scope.meta_bump_release(mark);
   return result;
 }

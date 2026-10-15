@@ -46,42 +46,28 @@
 //   * u8 与整数常量比较一律先 `as u32`（旧 IR 是 #eq[#bits<8>]）。
 //   * 本单元没有静态数据块，也没有跨单元数据符号，所以不取 symbol_addr。
 
+// 模块：形状识别 pass。跨单元引用一律写 `别名.名字`。
+let std_declarations = import("declarations");
+let std_lex = import("lex");
+let std_parse = import("parse");
+let std_syntax = import("syntax");
+let std_types = import("types");
+
 // 跨单元 / Host 依赖的规范签名（由 bootstrapl1/std/recognize.l1 的调用点与各定义单元
 // 核对得到）。旧 IR 的宽度 #bits<N> 已归一为表面语言的标量类型；参数名 ref / slice 是
 // 表面语言保留字，遇到时改名（链接名不变）——本单元这批依赖里没有这两个名字，
 // ast_text_start 的第一个参数在定义单元里本来就叫 ref_value。
-extern ast_child(node: u64, index: u64) -> u64 = ast_child;
-extern ast_child_count(node: u64) -> u64 = ast_child_count;
-extern ast_kind(node: u64) -> u8 = ast_kind;
-extern ast_segment_of_source(src: u64) -> u64 = ast_segment_of_source;
-extern ast_text_len(node: u64) -> u64 = ast_text_len;
-extern ast_text_start(ref_value: u64) -> u64 = ast_text_start;
-extern bs_byte_at(base: addr, at: u64, len: u64) -> u8 = bs_byte_at;
-extern bs_is_digit(b: u8) -> bool = bs_is_digit;
-extern bs_is_operator(base: addr, at: u64, len: u64, n: u64) -> bool = bs_is_operator;
 extern lain_meta_ast_expansion_id(node: u64) -> u64 = lain_meta_ast_expansion_id;
 extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
 extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
 extern lain_meta_source_length(source: u64) -> u64 = lain_meta_source_length;
-extern meta_cell_get(p: addr) -> u64 = meta_cell_get;
-extern meta_cell_put(p: addr, v: u64) -> u32 = meta_cell_put;
-extern meta_cursor_next(parent: u64, index: u64) -> u64 = meta_cursor_next;
-extern meta_node_len(node: u64) -> u64 = meta_node_len;
-extern meta_node_start(node: u64) -> u64 = meta_node_start;
-extern meta_recognize_child_context_invoke(handler: u64, relative: u64) -> u64 = meta_recognize_child_context_invoke;
-extern meta_root_of(source: u64) -> u64 = meta_root_of;
-extern meta_root_of_source(base: addr) -> u64 = meta_root_of_source;
-extern meta_sem_lookup(parent: u64, index: u64) -> u64 = meta_sem_lookup;
-extern meta_sem_put_annotated(parent: u64, index: u64, context: u64, form: u64, binding: u64, expansion: u64) -> u32 = meta_sem_put_annotated;
-extern meta_syntax_lookup(node: u64, env: u64, scope: u64, context: u64) -> u64 = meta_syntax_lookup;
-extern meta_syntax_match(node: u64, env: u64, scope: u64, context: u64) -> u64 = meta_syntax_match;
 
 // 这个词是不是一个算子符号？最长的是 `and`（3 字节）。
 // 位置越界时 `bs_byte_at` 给 0，所以兄弟是「无」的时候在这里是安全的。
 func meta_rec_is_op(base: addr, at: u64, n: u64, len: u64) -> bool {
   let one: bool = n <= 3;
   if one == 0 { return 0; }
-  let o: bool = bs_is_operator(base, at, len, n);
+  let o: bool = std_lex.bs_is_operator(base, at, len, n);
   return o;
 }
 
@@ -89,7 +75,7 @@ func meta_rec_is_op(base: addr, at: u64, n: u64, len: u64) -> bool {
 func meta_rec_is_dot(base: addr, at: u64, n: u64, len: u64) -> bool {
   let one: bool = n == 1;
   if one == 0 { return 0; }
-  let b: u8 = bs_byte_at(base, at, len);
+  let b: u8 = std_lex.bs_byte_at(base, at, len);
   let bw: u32 = b as u32;
   let d: bool = bw == 46;
   return d;
@@ -101,11 +87,11 @@ func meta_recognize_group_context(parent: u64, index: u64, ambient: u64) -> u64 
   let context: u64 = loop owners(i: u64 = 0) {
     let more: bool = i < index;
     if more == 0 { break owners(0); }
-    let head: u64 = ast_child(parent, i);
-    let handler: u64 = meta_syntax_lookup(head, 1, 0, ambient);
+    let head: u64 = std_parse.ast_child(parent, i);
+    let handler: u64 = std_syntax.meta_syntax_lookup(head, 1, 0, ambient);
     let relative: u64 = index - i;
     let candidate: u64 = if handler != 0 {
-      meta_recognize_child_context_invoke(handler, relative)
+      std_declarations.meta_recognize_child_context_invoke(handler, relative)
     } else {
       0
     };
@@ -121,16 +107,16 @@ func meta_recognize_group_context(parent: u64, index: u64, ambient: u64) -> u64 
 // `node.next` —— 下一个兄弟由父组 + index+1 给出，所以游标是唯一能让这段逻辑成立
 // 的输入形状。
 func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient: u64) -> u32 {
-  let i: u64 = ast_child(parent, index);
-  let at: u64 = meta_node_start(i);
-  let n: u64 = meta_node_len(i);
+  let i: u64 = std_parse.ast_child(parent, index);
+  let at: u64 = std_parse.meta_node_start(i);
+  let n: u64 = std_parse.meta_node_len(i);
   let hi: u64 = at + n;
 
   // 语言关键字由语法环境拥有；recognize 只把处理器类别映射到旧旁表 form。
   let decl_context: bool = ambient == 1;
   let stmt_context: bool = ambient == 2;
-  let decl_match: u64 = if decl_context { meta_syntax_match(i, 1, 0, 1) } else { 0 };
-  let stmt_match: u64 = if stmt_context { meta_syntax_match(i, 1, 0, 2) } else { 0 };
+  let decl_match: u64 = if decl_context { std_syntax.meta_syntax_match(i, 1, 0, 1) } else { 0 };
+  let stmt_match: u64 = if stmt_context { std_syntax.meta_syntax_match(i, 1, 0, 2) } else { 0 };
   let decl_handler: u64 = decl_match and 0xFFFFFFFF;
   let stmt_handler: u64 = stmt_match and 0xFFFFFFFF;
   let decl_hi: bool = decl_handler >= 2;
@@ -140,31 +126,31 @@ func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient:
   let is_if: bool = stmt_handler == 3;
 
   let self_op: bool = meta_rec_is_op(base, at, n, len);
-  let self_b: u8 = bs_byte_at(base, at, len);
-  let self_digit: bool = bs_is_digit(self_b);
+  let self_b: u8 = std_lex.bs_byte_at(base, at, len);
+  let self_digit: bool = std_lex.bs_is_digit(self_b);
 
   // 下一个兄弟决定「这里开始的是什么」。它是**父组的下一个孩子**；没有下一个
   //（越过末尾）时下面每条判断都给假——旧代码靠「无」节点的种类达到同样效果，
   // 现在靠显式范围判断，不再伪造一个空节点。
-  let count: u64 = ast_child_count(parent);
+  let count: u64 = std_parse.ast_child_count(parent);
   let nx_i: u64 = index + 1;
   let has_nx: bool = nx_i < count;
   let nx_kind: u64 = if has_nx {
-    let nx0: u64 = ast_child(parent, nx_i);
-    let k0: u8 = ast_kind(nx0);
+    let nx0: u64 = std_parse.ast_child(parent, nx_i);
+    let k0: u8 = std_parse.ast_kind(nx0);
     k0 as u64
   } else {
     0xFFFFFFFFFFFFFFFF
   };
   let nx_at: u64 = if has_nx {
-    let nx1: u64 = ast_child(parent, nx_i);
-    ast_text_start(nx1)
+    let nx1: u64 = std_parse.ast_child(parent, nx_i);
+    std_parse.ast_text_start(nx1)
   } else {
     0
   };
   let nx_n: u64 = if has_nx {
-    let nx2: u64 = ast_child(parent, nx_i);
-    ast_text_len(nx2)
+    let nx2: u64 = std_parse.ast_child(parent, nx_i);
+    std_parse.ast_text_len(nx2)
   } else {
     0
   };
@@ -173,7 +159,7 @@ func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient:
   let nx_is_dot: bool = meta_rec_is_dot(base, nx_at, nx_n, len);
   // 组节点从它自己的开括号起（reader 给出的源码位置），所以看那一格
   // 就知道是 `(` 还是 `{`。这两个形状完全不同：调用 vs 构造。
-  let nx_b: u8 = bs_byte_at(base, nx_at, len);
+  let nx_b: u8 = std_lex.bs_byte_at(base, nx_at, len);
   let nx_bw: u32 = nx_b as u32;
   let nx_paren: bool = nx_bw == 40;
   let nx_brace: bool = nx_bw == 123;
@@ -182,7 +168,7 @@ func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient:
   let construct: bool = nx_is_group and nx_brace;
   let indexish: bool = nx_is_group and nx_lbrack;
   // 裸名字形态：`?NAME`。`?` 不是标识符字符，所以只看这个词自己的第一个字节。
-  let self_b0: u8 = bs_byte_at(base, at, len);
+  let self_b0: u8 = std_lex.bs_byte_at(base, at, len);
   let self_b0w: u32 = self_b0 as u32;
   let bareish: bool = self_b0w == 63;
 
@@ -216,7 +202,7 @@ func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient:
   let segment: u64 = i >> 48;
   let is_out: bool = segment == 3;
   let expansion: u64 = if is_out { lain_meta_ast_expansion_id(i) } else { 0 };
-  let s: u32 = meta_sem_put_annotated(parent, index, context, form, binding, expansion);
+  let s: u32 = std_parse.meta_sem_put_annotated(parent, index, context, form, binding, expansion);
   return s;
 }
 
@@ -227,12 +213,12 @@ func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient:
 // 旧 IR 的 %r 值 if 结果直接喂给 `#break s(%r)` / `#continue`，且命中分支里有
 // `#return %rec`，所以按平坦守卫改写：每个分支命中即 break / return，末尾 continue。
 func meta_recognize_all(base: addr, len: u64, group: u64, ambient: u64) -> u32 {
-  let count: u64 = ast_child_count(group);
+  let count: u64 = std_parse.ast_child_count(group);
   let st: u32 = loop s(i: u64 = 0) {
     let more: bool = i < count;
     if more == 0 { break s(0); }
-    let c: u64 = ast_child(group, i);
-    let k: u8 = ast_kind(c);
+    let c: u64 = std_parse.ast_child(group, i);
+    let k: u8 = std_parse.ast_kind(c);
     let kw: u32 = k as u32;
     let is_group: bool = kw == 2;
     // **每个出现位置都要进旁表**，不只是词：组的位置也要有形状条目（编号 2 =
@@ -243,7 +229,7 @@ func meta_recognize_all(base: addr, len: u64, group: u64, ambient: u64) -> u32 {
       let segment: u64 = c >> 48;
       let is_out: bool = segment == 3;
       let expansion: u64 = if is_out { lain_meta_ast_expansion_id(c) } else { 0 };
-      let rec: u32 = meta_sem_put_annotated(group, i, 0, 2, 0, expansion);
+      let rec: u32 = std_parse.meta_sem_put_annotated(group, i, 0, 2, 0, expansion);
       if rec != 0 { return rec; }
       let sub_context: u64 = meta_recognize_group_context(group, i, ambient);
       let sub: u32 = meta_recognize_all(base, len, c, sub_context);
@@ -260,13 +246,13 @@ func meta_recognize_all(base: addr, len: u64, group: u64, ambient: u64) -> u32 {
 // 一份源码识别一遍。旁表是**单张**的，键是 (父组, 下标)：重复识别同一份源码是幂等的
 //（同键覆盖），不同源码的条目也能共存（父组引用里带段号，天然不冲突）。
 func meta_recognize_source(source: u64) -> u32 {
-  let seg: u64 = ast_segment_of_source(source);
+  let seg: u64 = std_parse.ast_segment_of_source(source);
   let scratch: addr = lain_meta_scratch_data();
-  let segw: u32 = meta_cell_put(scratch + 1524, seg);
-  let secw: u32 = meta_cell_put(scratch + 1532, 0);
+  let segw: u32 = std_types.meta_cell_put(scratch + 1524, seg);
+  let secw: u32 = std_types.meta_cell_put(scratch + 1532, 0);
   let base: addr = lain_meta_source_data(source);
   let len: u64 = lain_meta_source_length(source);
-  let root: u64 = meta_root_of(source);
+  let root: u64 = std_parse.meta_root_of(source);
   // root 缺席 = 这份源码被 reader 拒了（AstIn 段不活、Arena 一个字节都没发布）。
   let none: bool = root == 0;
   let st: u32 = if none {
@@ -298,20 +284,20 @@ func meta_recognize_source(source: u64) -> u32 {
 // 旧 IR 的 %sub 值 if 结果喂给 continue / break，改成平坦守卫：命中即 break，
 // 递归没找到（或不是组）就落到末尾的 continue。
 func meta_cursor_at(group: u64, at: u64) -> u64 {
-  let count: u64 = ast_child_count(group);
+  let count: u64 = std_parse.ast_child_count(group);
   let r: u64 = loop s(i: u64 = 0) {
     let more: bool = i < count;
     if more == 0 { break s(0xFFFFFFFFFFFFFFFF); }
-    let c: u64 = ast_child(group, i);
-    let st: u64 = ast_text_start(c);
+    let c: u64 = std_parse.ast_child(group, i);
+    let st: u64 = std_parse.ast_text_start(c);
     let same: bool = st == at;
     if same {
       // 命中：把父组记下来（递归向上传播的是下标，父组走格子带出来）。
       let sc: addr = lain_meta_scratch_data();
-      let pw: u32 = meta_cell_put(sc + 2400, group);
+      let pw: u32 = std_types.meta_cell_put(sc + 2400, group);
       break s(i);
     }
-    let k: u8 = ast_kind(c);
+    let k: u8 = std_parse.ast_kind(c);
     let kw: u32 = k as u32;
     let is_group: bool = kw == 2;
     if is_group {
@@ -328,7 +314,7 @@ func meta_cursor_at(group: u64, at: u64) -> u64 {
 // 返回非「查不到」之后有效，并且必须**紧接着**用掉。
 func meta_cursor_parent() -> u64 {
   let sc: addr = lain_meta_scratch_data();
-  let p: u64 = meta_cell_get(sc + 2400);
+  let p: u64 = std_types.meta_cell_get(sc + 2400);
   return p;
 }
 
@@ -338,35 +324,35 @@ func meta_cursor_parent() -> u64 {
 // 旧 IR 是值 if 套值 if，结果直接喂给 #return，这里改写成平坦守卫（命中即 return）：
 // 先算 root，再算游标，最后才取父组那一格 —— 求值顺序与副作用次序都不变。
 func meta_node_at(base: addr, at: u64) -> u64 {
-  let root: u64 = meta_root_of_source(base);
+  let root: u64 = std_parse.meta_root_of_source(base);
   let missing: bool = root == 0;
   if missing { return 0; }
   let i: u64 = meta_cursor_at(root, at);
   let none: bool = i == 0xFFFFFFFFFFFFFFFF;
   if none { return 0; }
   let parent: u64 = meta_cursor_parent();
-  let c: u64 = ast_child(parent, i);
+  let c: u64 = std_parse.ast_child(parent, i);
   return c;
 }
 
 // 从 %at 起头的那个节点的形状（读语义旁表，键是命中位置的父组与下标）。
 // 找不到回「查不到」。
 func meta_form_at(base: addr, at: u64) -> u64 {
-  let root: u64 = meta_root_of_source(base);
+  let root: u64 = std_parse.meta_root_of_source(base);
   let missing: bool = root == 0;
   if missing { return 0xFFFFFFFFFFFFFFFF; }
   let i: u64 = meta_cursor_at(root, at);
   let none: bool = i == 0xFFFFFFFFFFFFFFFF;
   if none { return 0xFFFFFFFFFFFFFFFF; }
   let parent: u64 = meta_cursor_parent();
-  let f: u64 = meta_sem_lookup(parent, i);
+  let f: u64 = std_parse.meta_sem_lookup(parent, i);
   return f;
 }
 
 // 位置 -> 出现位置（父组走暂存区 +2400 格子，返回下标）；找不到回「查不到」。
 // 调用方必须在**紧接着**的语句里用掉那一格（`meta_cursor_parent`）。
 func meta_cursor_of_at(base: addr, at: u64) -> u64 {
-  let root: u64 = meta_root_of_source(base);
+  let root: u64 = std_parse.meta_root_of_source(base);
   let missing: bool = root == 0;
   if missing { return 0xFFFFFFFFFFFFFFFF; }
   let i: u64 = meta_cursor_at(root, at);
@@ -384,7 +370,7 @@ func meta_next_at(base: addr, at: u64) -> u64 {
   let none: bool = i == 0xFFFFFFFFFFFFFFFF;
   if none { return 0; }
   let parent: u64 = meta_cursor_parent();
-  let c: u64 = meta_cursor_next(parent, i);
+  let c: u64 = std_parse.meta_cursor_next(parent, i);
   return c;
 }
 
@@ -394,16 +380,16 @@ func meta_next_at(base: addr, at: u64) -> u64 {
 // 「(当前组, 起始下标)」这对游标存在的理由：同一段连续的兄弟，从中间起步问
 // 「后面有没有算子」，答案取决于起点；节点引用本身答不了这个问题。
 func meta_seq_has_op(base: addr, len: u64, group: u64, i: u64) -> bool {
-  let count: u64 = ast_child_count(group);
+  let count: u64 = std_parse.ast_child_count(group);
   let r: bool = loop s(j: u64 = i) {
     let more: bool = j < count;
     if more == 0 { break s(0); }
-    let c: u64 = ast_child(group, j);
-    let k: u64 = meta_sem_lookup(group, j);
+    let c: u64 = std_parse.ast_child(group, j);
+    let k: u64 = std_parse.meta_sem_lookup(group, j);
     let is_op: bool = k == 9;
     if is_op { break s(1); }
-    let st: u64 = ast_text_start(c);
-    let b: u8 = bs_byte_at(base, st, len);
+    let st: u64 = std_parse.ast_text_start(c);
+    let b: u8 = std_lex.bs_byte_at(base, st, len);
     let bw: u32 = b as u32;
     let is_semi: bool = bw == 59;
     if is_semi { break s(0); }
@@ -425,7 +411,7 @@ func meta_seq_has_op(base: addr, len: u64, group: u64, i: u64) -> bool {
 // 旧 IR 是值 if 套值 if，结果直接喂给 #return，这里改写成平坦守卫（命中即 return）：
 // 「根都没找到」和「查不到该节点」都按「可能有算子」处理（回 1）。
 func meta_value_has_op(base: addr, len: u64, at: u64) -> bool {
-  let root: u64 = meta_root_of_source(base);
+  let root: u64 = std_parse.meta_root_of_source(base);
   let missing: bool = root == 0;
   // 连根都没找到：**按「可能有算子」处理**。宁可走慢一点的表达式发射器，
   // 也不要因为查不到就选「值就是一次调用」那条捷径 —— 它会静默丢掉后面的算子。
@@ -447,19 +433,19 @@ func meta_value_has_op(base: addr, len: u64, at: u64) -> bool {
 // `func f() -> i32 { return g(1) + 2; }` 发成 `#return #call g(1)`，
 // `+ 2` 被静默丢掉，验证器不报，算出来是 1 而不是 3。
 func meta_seq_has_op_at(group: u64, base: addr, len: u64, at: u64) -> u64 {
-  let count: u64 = ast_child_count(group);
+  let count: u64 = std_parse.ast_child_count(group);
   let r: u64 = loop s(i: u64 = 0) {
     let more: bool = i < count;
     if more == 0 { break s(0xFFFFFFFFFFFFFFFF); }
-    let c: u64 = ast_child(group, i);
-    let st: u64 = ast_text_start(c);
+    let c: u64 = std_parse.ast_child(group, i);
+    let st: u64 = std_parse.ast_text_start(c);
     let same: bool = st == at;
     if same {
       let h: bool = meta_seq_has_op(base, len, group, i);
       let hw: u64 = h as u64;
       break s(hw);
     }
-    let k: u8 = ast_kind(c);
+    let k: u8 = std_parse.ast_kind(c);
     let kw: u32 = k as u32;
     let is_group: bool = kw == 2;
     if is_group {

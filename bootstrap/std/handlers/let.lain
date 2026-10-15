@@ -2,56 +2,39 @@
 // 三种落法：静态字节块（字符串字面量）、定长同质表、普通绑定。
 // 旧 IR 里「支里再套值 if」的地方改写成逐条守卫 + continue/break（表面语言的值 if
 // 支前缀只认 let / store，不能写 if），语义逐条对应。
+// 模块：let / ro 声明处理器。跨单元引用一律写 `别名.名字`。
+let meta = import("../../meta");
+let std_lainir = import("../lainir");
+let std_lex = import("../lex");
+let std_parse = import("../parse");
+let std_recognize = import("../recognize");
+let std_registry = import("../registry");
+let std_scalars = import("../scalars");
+let std_scope = import("../scope");
+let std_syntax = import("../syntax");
+
 extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
 extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
-extern meta_node_is_word(node: u64, base: addr, word: addr, len: u64) -> bool = meta_node_is_word;
-extern meta_syntax_ensure(node: u64, context: u64, handler: u64) -> u32 = meta_syntax_ensure;
-extern meta_scope_add_let(base: addr, len: u64, source: u64, level_start: u64, parent: u64, index: u64) -> u32 = meta_scope_add_let;
-extern meta_lower_let(base: addr, len: u64, let_at: u64) -> u32 = meta_lower_let;
-extern meta_node_child(node: u64) -> u64 = meta_node_child;
-extern meta_node_start(node: u64) -> u64 = meta_node_start;
-extern meta_node_len(node: u64) -> u64 = meta_node_len;
-extern meta_node_at(base: addr, at: u64) -> u64 = meta_node_at;
-extern meta_type_resolve(base: addr, len: u64, t_lo: u64, t_hi: u64) -> u64 = meta_type_resolve;
-extern meta_tid_repr(id: u64) -> u64 = meta_tid_repr;
-extern meta_is_int_literal(base: addr, lo: u64, hi: u64, len: u64) -> bool = meta_is_int_literal;
 // `ref` 是表面语言的保留字，做不了参数名，这里改名 ref_v（链接名不变）。
-extern meta_literal_fits(base: addr, len: u64, ref_v: u64, lo: u64, hi: u64, kind: u64, width: u64) -> u32 = meta_literal_fits;
-extern ast_child(node: u64, index: u64) -> u64 = ast_child;
-extern ast_child_count(node: u64) -> u64 = ast_child_count;
-extern ast_delim(node: u64) -> u8 = ast_delim;
-extern ast_kind(node: u64) -> u8 = ast_kind;
-extern bs_byte_at(base: addr, at: u64, len: u64) -> u8 = bs_byte_at;
-extern bs_is_byte(base: addr, i: u64, c: u8) -> bool = bs_is_byte;
-extern bs_match_keyword(base: addr, at: u64, len: u64, kw: addr, kw_len: u64) -> bool = bs_match_keyword;
-extern bs_read_uint(base: addr, start: u64, len: u64) -> u64 = bs_read_uint;
-extern bs_skip_space(base: addr, start: u64, len: u64) -> u64 = bs_skip_space;
-extern lainir_data_head() -> u32 = lainir_data_head;
-extern lainir_data_ro_head() -> u32 = lainir_data_ro_head;
-extern lainir_data_rw_bare_head() -> u32 = lainir_data_rw_bare_head;
-extern lainir_data_close() -> u32 = lainir_data_close;
-extern lainir_write(text: addr, length: u64) -> u32 = lainir_write;
-extern lainir_emit_uint(v: u64) -> u32 = lainir_emit_uint;
-extern lainir_space_write() -> u32 = lainir_space_write;
 
 // 顶层 let 声明处理器。
 func meta_register_let(node: u64) -> u32 {
   let dummy: addr = lain_meta_source_data(0);
-  let hit: bool = meta_node_is_word(node, dummy, symbol_addr("meta_kw_let_storage"), 3);
+  let hit: bool = std_parse.meta_node_is_word(node, dummy, std_lex.meta_kw_let, 3);
   if hit == 0 { return 0; }
-  let decl: u32 = meta_syntax_ensure(node, 1, 7);
+  let decl: u32 = std_syntax.meta_syntax_ensure(node, 1, 7);
   if decl != 0 { return decl; }
-  let stmt: u32 = meta_syntax_ensure(node, 2, 9);
+  let stmt: u32 = std_syntax.meta_syntax_ensure(node, 2, 9);
   return stmt;
 }
 
 func meta_declare_let(base: addr, len: u64, source: u64, level: u64, parent: u64, index: u64) -> u32 {
-  let s: u32 = meta_scope_add_let(base, len, source, level, parent, index);
+  let s: u32 = std_scope.meta_scope_add_let(base, len, source, level, parent, index);
   return s;
 }
 
 func meta_lower_decl_let(base: addr, len: u64, here: u64) -> u32 {
-  let s: u32 = meta_lower_let(base, len, here);
+  let s: u32 = meta.meta_lower_let(base, len, here);
   return s;
 }
 
@@ -63,9 +46,9 @@ func meta_lower_decl_let(base: addr, len: u64, here: u64) -> u32 {
 func meta_lower_static_bytes(base: addr, len: u64, name_lo: u64, name_hi: u64, at: u64) -> u32 {
   let name_at: addr = base + name_lo;
   let name_len: u64 = name_hi - name_lo;
-  let w1: u32 = lainir_data_head();
-  let w2: u32 = lainir_write(name_at, name_len);
-  let w3: u32 = lainir_data_ro_head();
+  let w1: u32 = std_lainir.lainir_data_head();
+  let w2: u32 = std_lainir.lainir_write(name_at, name_len);
+  let w3: u32 = std_lainir.lainir_data_ro_head();
   let first: u64 = at + 1;
   let scan: u32 = loop b(i: u64 = first) {
     let inside: bool = i < len;
@@ -73,21 +56,21 @@ func meta_lower_static_bytes(base: addr, len: u64, name_lo: u64, name_hi: u64, a
       let f0: u32 = lain_meta_fail(4);
       break b(4);
     }
-    let c: u8 = bs_byte_at(base, i, len);
+    let c: u8 = std_lex.bs_byte_at(base, i, len);
     let cw: u32 = c as u32;
     let is_q: bool = cw == 34;
     if is_q { break b(0); }
     let cv: u64 = c as u64;
-    let w5: u32 = lainir_emit_uint(cv);
-    let w6: u32 = lainir_space_write();
+    let w5: u32 = std_lainir.lainir_emit_uint(cv);
+    let w6: u32 = std_lainir.lainir_space_write();
     let is_esc: bool = cw == 92;
     // 旧 IR 的 %nxt 值 if：esc 前进 2（转义对整对原样搬），否则 1。
     if is_esc {
       let esc_at: u64 = i + 1;
-      let c2: u8 = bs_byte_at(base, esc_at, len);
+      let c2: u8 = std_lex.bs_byte_at(base, esc_at, len);
       let c2v: u64 = c2 as u64;
-      let w7: u32 = lainir_emit_uint(c2v);
-      let w8: u32 = lainir_space_write();
+      let w7: u32 = std_lainir.lainir_emit_uint(c2v);
+      let w8: u32 = std_lainir.lainir_space_write();
       continue b(i + 2);
     }
     continue b(i + 1);
@@ -96,7 +79,7 @@ func meta_lower_static_bytes(base: addr, len: u64, name_lo: u64, name_hi: u64, a
   if bad {
     return scan;
   }
-  let wc: u32 = lainir_data_close();
+  let wc: u32 = std_lainir.lainir_data_close();
   return 0;
 }
 
@@ -114,11 +97,11 @@ func meta_lower_static_bytes(base: addr, len: u64, name_lo: u64, name_hi: u64, a
 
 // 类型标注组 [T] 里那个 T 的类型 id；解析不出来回 0。
 func meta_table_elt_tid(base: addr, len: u64, ann: u64) -> u64 {
-  let tn: u64 = meta_node_child(ann);
-  let t_lo: u64 = meta_node_start(tn);
-  let t_len: u64 = meta_node_len(tn);
+  let tn: u64 = std_parse.meta_node_child(ann);
+  let t_lo: u64 = std_parse.meta_node_start(tn);
+  let t_len: u64 = std_parse.meta_node_len(tn);
   let t_hi: u64 = t_lo + t_len;
-  let tid: u64 = meta_type_resolve(base, len, t_lo, t_hi);
+  let tid: u64 = std_scalars.meta_type_resolve(base, len, t_lo, t_hi);
   return tid;
 }
 
@@ -129,18 +112,18 @@ func meta_table_elt_esz(base: addr, len: u64, parent: u64, from: u64, eq_i: u64)
   let esz: u64 = loop scan(j: u64 = from) {
     let more: bool = j < eq_i;
     if more == 0 { break scan(0); }
-    let c: u64 = ast_child(parent, j);
-    let k: u8 = ast_kind(c);
+    let c: u64 = std_parse.ast_child(parent, j);
+    let k: u8 = std_parse.ast_kind(c);
     let kw: u32 = k as u32;
     let is_g: bool = kw == 2;
     if is_g == 0 { continue scan(j + 1); }
-    let c_d: u8 = ast_delim(c);
+    let c_d: u8 = std_parse.ast_delim(c);
     let c_dw: u32 = c_d as u32;
     let is_b: bool = c_dw == 91;
     if is_b == 0 { continue scan(j + 1); }
     let tid: u64 = meta_table_elt_tid(base, len, c);
     if tid == 0 { continue scan(j + 1); }
-    let info: u64 = meta_tid_repr(tid);
+    let info: u64 = std_registry.meta_tid_repr(tid);
     let w: u64 = (info >> 8) and 255;
     let e: u64 = w >> 3;
     let hit: bool = e != 0;
@@ -152,13 +135,13 @@ func meta_table_elt_esz(base: addr, len: u64, parent: u64, from: u64, eq_i: u64)
 
 // 表字面量的元素个数：组的孩子里除逗号以外的都算一个元素。
 func meta_table_count(base: addr, len: u64, grp: u64) -> u64 {
-  let count: u64 = ast_child_count(grp);
+  let count: u64 = std_parse.ast_child_count(grp);
   let n: u64 = loop elts(i: u64 = 0, acc: u64 = 0) {
     let more: bool = i < count;
     if more {
-      let c: u64 = ast_child(grp, i);
-      let c_lo: u64 = meta_node_start(c);
-      let b: u8 = bs_byte_at(base, c_lo, len);
+      let c: u64 = std_parse.ast_child(grp, i);
+      let c_lo: u64 = std_parse.meta_node_start(c);
+      let b: u8 = std_lex.bs_byte_at(base, c_lo, len);
       let bw: u32 = b as u32;
       let is_comma: bool = bw == 44;
       // 旧 IR 的 %acc2 值 if：逗号不加，别的加一。
@@ -180,13 +163,13 @@ func meta_lower_table(base: addr, len: u64, name_lo: u64, name_hi: u64, colon_at
   let name_len: u64 = name_hi - name_lo;
   // 标注起点：`:` 之后跳过空白；`ro` 两个字节，再跳一次空白。
   let after: u64 = colon_at + 1;
-  let p0: u64 = bs_skip_space(base, after, len);
-  let is_ro: bool = bs_match_keyword(base, p0, len, symbol_addr("meta_kw_ro_storage"), 2);
+  let p0: u64 = std_lex.bs_skip_space(base, after, len);
+  let is_ro: bool = std_lex.bs_match_keyword(base, p0, len, std_lex.meta_kw_ro, 2);
   let ro_next: u64 = p0 + 2;
-  let ann_at: u64 = if is_ro { bs_skip_space(base, ro_next, len) } else { p0 };
-  let ann: u64 = meta_node_at(base, ann_at);
-  let a_lo: u64 = meta_node_start(ann);
-  let a_len: u64 = meta_node_len(ann);
+  let ann_at: u64 = if is_ro { std_lex.bs_skip_space(base, ro_next, len) } else { p0 };
+  let ann: u64 = std_recognize.meta_node_at(base, ann_at);
+  let a_lo: u64 = std_parse.meta_node_start(ann);
+  let a_len: u64 = std_parse.meta_node_len(ann);
   let a_hi: u64 = a_lo + a_len;
   let tid: u64 = meta_table_elt_tid(base, len, ann);
   let unknown: bool = tid == 0;
@@ -194,7 +177,7 @@ func meta_lower_table(base: addr, len: u64, name_lo: u64, name_hi: u64, colon_at
     let f0: u32 = lain_meta_fail(5);
     return 5;
   }
-  let info: u64 = meta_tid_repr(tid);
+  let info: u64 = std_registry.meta_tid_repr(tid);
   let kind: u64 = info and 255;
   let info_hi: u64 = info >> 8;
   let width: u64 = info_hi and 255;
@@ -205,54 +188,54 @@ func meta_lower_table(base: addr, len: u64, name_lo: u64, name_hi: u64, colon_at
   }
   let esz: u64 = width >> 3;
   // 值组：`=` 之后那个以 `[` 开头的组。
-  let eq_at: u64 = bs_skip_space(base, a_hi, len);
-  let is_eq: bool = bs_is_byte(base, eq_at, 61);
+  let eq_at: u64 = std_lex.bs_skip_space(base, a_hi, len);
+  let is_eq: bool = std_lex.bs_is_byte(base, eq_at, 61);
   if is_eq == 0 {
     let f2: u32 = lain_meta_fail(4);
     return 4;
   }
   let eq_next: u64 = eq_at + 1;
-  let v_lo: u64 = bs_skip_space(base, eq_next, len);
-  let v: u64 = meta_node_at(base, v_lo);
-  let v_delim: u8 = ast_delim(v);
+  let v_lo: u64 = std_lex.bs_skip_space(base, eq_next, len);
+  let v: u64 = std_recognize.meta_node_at(base, v_lo);
+  let v_delim: u8 = std_parse.ast_delim(v);
   let v_dw: u32 = v_delim as u32;
   let is_table: bool = v_dw == 91;
   if is_table == 0 {
     let f3: u32 = lain_meta_fail(4);
     return 4;
   }
-  let w1: u32 = lainir_data_head();
-  let w2: u32 = lainir_write(name_at, name_len);
-  let w3: u32 = if is_ro { lainir_data_ro_head() } else { lainir_data_rw_bare_head() };
-  let count: u64 = ast_child_count(v);
+  let w1: u32 = std_lainir.lainir_data_head();
+  let w2: u32 = std_lainir.lainir_write(name_at, name_len);
+  let w3: u32 = if is_ro { std_lainir.lainir_data_ro_head() } else { std_lainir.lainir_data_rw_bare_head() };
+  let count: u64 = std_parse.ast_child_count(v);
   let st: u32 = loop elts(i: u64 = 0) {
     let more: bool = i < count;
     if more == 0 { break elts(0); }
-    let c: u64 = ast_child(v, i);
-    let c_lo: u64 = meta_node_start(c);
-    let c_len: u64 = meta_node_len(c);
+    let c: u64 = std_parse.ast_child(v, i);
+    let c_lo: u64 = std_parse.meta_node_start(c);
+    let c_len: u64 = std_parse.meta_node_len(c);
     let c_hi: u64 = c_lo + c_len;
-    let b0: u8 = bs_byte_at(base, c_lo, len);
+    let b0: u8 = std_lex.bs_byte_at(base, c_lo, len);
     let b0w: u32 = b0 as u32;
     let is_comma: bool = b0w == 44;
     // 逗号不是元素；旧 IR 的 %one 值 if 在这里就是「跳过」。
     if is_comma { continue elts(i + 1); }
-    let lit: bool = meta_is_int_literal(base, c_lo, c_hi, len);
+    let lit: bool = meta.meta_is_int_literal(base, c_lo, c_hi, len);
     if lit == 0 {
       let f4: u32 = lain_meta_fail(4);
       break elts(4);
     }
-    let fits: u32 = meta_literal_fits(base, len, 0xFFFFFFFFFFFFFFFF, c_lo, c_hi, kind, width);
+    let fits: u32 = meta.meta_literal_fits(base, len, 0xFFFFFFFFFFFFFFFF, c_lo, c_hi, kind, width);
     if fits != 0 { break elts(fits); }
-    let val: u64 = bs_read_uint(base, c_lo, len);
+    let val: u64 = std_lex.bs_read_uint(base, c_lo, len);
     let bs: u32 = loop splits(j: u64 = 0) {
       let jmore: bool = j < esz;
       if jmore {
         let sh: u64 = j * 8;
         let sv: u64 = val >> sh;
         let byte: u64 = sv and 255;
-        let wm: u32 = lainir_emit_uint(byte);
-        let wn: u32 = lainir_space_write();
+        let wm: u32 = std_lainir.lainir_emit_uint(byte);
+        let wn: u32 = std_lainir.lainir_space_write();
         continue splits(j + 1);
       } else {
         break splits(0);
@@ -265,6 +248,6 @@ func meta_lower_table(base: addr, len: u64, name_lo: u64, name_hi: u64, colon_at
   if bad {
     return st;
   }
-  let wc: u32 = lainir_data_close();
+  let wc: u32 = std_lainir.lainir_data_close();
   return 0;
 }

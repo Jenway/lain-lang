@@ -45,33 +45,23 @@
 //     唯一的改名是归档局部 %rw 在 meta_scalar_type_id 里写成 rw_v，避免与数据段
 //     模式关键字 `rw` 相混；语义相同。
 
+// 模块：标量表、类型名解析、算子解析（初代标准库 v0）。跨单元引用一律写 `别名.名字`。
+let std_emit = import("emit");
+let std_lex = import("lex");
+let std_modules = import("modules");
+let std_registry = import("registry");
+let std_scope = import("scope");
+let std_types = import("types");
+
 let meta_scalar_table: ro [u8] = [3, 105, 51, 50, 0, 32, 15, 1, 47, 4, 115, 100, 105, 118, 1, 43, 3, 97, 100, 100, 1, 60, 3, 115, 108, 116, 1, 45, 3, 115, 117, 98, 1, 42, 3, 109, 117, 108, 1, 37, 4, 115, 114, 101, 109, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 1, 62, 3, 115, 103, 116, 2, 60, 61, 3, 115, 108, 101, 2, 62, 61, 3, 115, 103, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 2, 60, 60, 3, 115, 104, 108, 2, 62, 62, 4, 108, 115, 104, 114, 3, 117, 51, 50, 0, 32, 15, 1, 47, 4, 117, 100, 105, 118, 1, 43, 3, 97, 100, 100, 1, 60, 3, 117, 108, 116, 1, 45, 3, 115, 117, 98, 1, 42, 3, 109, 117, 108, 1, 37, 4, 117, 114, 101, 109, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 1, 62, 3, 117, 103, 116, 2, 60, 61, 3, 117, 108, 101, 2, 62, 61, 3, 117, 103, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 2, 60, 60, 3, 115, 104, 108, 2, 62, 62, 4, 108, 115, 104, 114, 3, 117, 54, 52, 0, 64, 15, 1, 43, 3, 97, 100, 100, 1, 45, 3, 115, 117, 98, 1, 42, 3, 109, 117, 108, 1, 47, 4, 117, 100, 105, 118, 1, 37, 4, 117, 114, 101, 109, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 1, 62, 3, 117, 103, 116, 1, 60, 3, 117, 108, 116, 2, 60, 61, 3, 117, 108, 101, 2, 62, 61, 3, 117, 103, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 2, 60, 60, 3, 115, 104, 108, 2, 62, 62, 4, 108, 115, 104, 114, 3, 105, 54, 52, 0, 64, 15, 1, 43, 3, 97, 100, 100, 1, 45, 3, 115, 117, 98, 1, 42, 3, 109, 117, 108, 1, 47, 4, 115, 100, 105, 118, 1, 37, 4, 115, 114, 101, 109, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 1, 62, 3, 115, 103, 116, 1, 60, 3, 115, 108, 116, 2, 60, 61, 3, 115, 108, 101, 2, 62, 61, 3, 115, 103, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 2, 60, 60, 3, 115, 104, 108, 2, 62, 62, 4, 108, 115, 104, 114, 2, 105, 56, 0, 8, 0, 2, 117, 56, 0, 8, 0, 4, 98, 111, 111, 108, 0, 1, 4, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 5, 117, 115, 105, 122, 101, 0, 64, 15, 1, 43, 3, 97, 100, 100, 1, 45, 3, 115, 117, 98, 1, 42, 3, 109, 117, 108, 1, 47, 4, 117, 100, 105, 118, 1, 37, 4, 117, 114, 101, 109, 2, 61, 61, 2, 101, 113, 2, 33, 61, 2, 110, 101, 1, 62, 3, 117, 103, 116, 1, 60, 3, 117, 108, 116, 2, 60, 61, 3, 117, 108, 101, 2, 62, 61, 3, 117, 103, 101, 3, 97, 110, 100, 3, 97, 110, 100, 2, 111, 114, 2, 111, 114, 2, 60, 60, 3, 115, 104, 108, 2, 62, 62, 4, 108, 115, 104, 114, 4, 97, 100, 100, 114, 3, 0, 0, 0];   // 587 字节，标量表
 
 // 跨单元 / Host 依赖的规范签名（由 meta_sig_index.py 从 bootstrapl1/std/scalars.l1 的
 // 调用点与各定义单元核对得到，链接名原样保留）。旧 IR 的宽度 #bits<N> 已归一为表面
 // 语言的标量类型；meta_intern 的末参在归档里叫 %rw，为避免与保留字相混按脚本给的名字
 // 写成 rw_v（链接名不变）。
-extern bs_byte_at(base: addr, at: u64, len: u64) -> u8 = bs_byte_at;
-extern bs_is_byte(base: addr, i: u64, c: u8) -> bool = bs_is_byte;
-extern bs_read_uint(base: addr, start: u64, len: u64) -> u64 = bs_read_uint;
-extern bs_skip_ident(base: addr, start: u64, len: u64) -> u64 = bs_skip_ident;
-extern bs_skip_space(base: addr, start: u64, len: u64) -> u64 = bs_skip_space;
 extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
 extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
 extern lain_meta_source_length(source: u64) -> u64 = lain_meta_source_length;
-extern meta_bytes_equal(a: addr, b: addr, n: u64) -> bool = meta_bytes_equal;
-extern meta_cell_get(p: addr) -> u64 = meta_cell_get;
-extern meta_cell_put(p: addr, v: u64) -> u32 = meta_cell_put;
-extern meta_find_import_binding(base: addr, len: u64, ns_lo: u64, ns_hi: u64) -> u64 = meta_find_import_binding;
-extern meta_intern(kind: u64, owner: u64, ns: u64, rk: u64, rw_v: u64) -> u64 = meta_intern;
-extern meta_logical_len(base: addr, from: u64, len: u64) -> u64 = meta_logical_len;
-extern meta_scope_count() -> u64 = meta_scope_count;
-extern meta_scope_enter(source: u64) -> u64 = meta_scope_enter;
-extern meta_scope_has_source(source: u64) -> bool = meta_scope_has_source;
-extern meta_scope_scan(base: addr, len: u64, source: u64, level_start: u64) -> u32 = meta_scope_scan;
-extern meta_scope_set_current(source: u64) -> u32 = meta_scope_set_current;
-extern meta_scope_type_id(name_addr: addr, name_len: u64) -> u64 = meta_scope_type_id;
-extern meta_source_find(logical: addr, logical_len: u64) -> u64 = meta_source_find;
 
 // --- 表访问 ---------------------------------------------------------------
 
@@ -79,7 +69,7 @@ extern meta_source_find(logical: addr, logical_len: u64) -> u64 = meta_source_fi
 // 「名字长度为 0」的记录上停，所以这里给一个大上界即可。
 func meta_scalar_load8(off: u64) -> u64 {
   let table: addr = symbol_addr("meta_scalar_table_storage");
-  let b: u8 = bs_byte_at(table, off, 0xFFFFFFFFFFFFFFFF);
+  let b: u8 = std_lex.bs_byte_at(table, off, 0xFFFFFFFFFFFFFFFF);
   let v: u64 = b as u64;
   return v;
 }
@@ -146,7 +136,7 @@ func meta_scalar_find(name: addr, name_len: u64) -> u64 {
     let same_len: bool = nl == name_len;
     if same_len {
       let p: addr = meta_scalar_name(cur);
-      let eq: bool = meta_bytes_equal(p, name, name_len);
+      let eq: bool = std_types.meta_bytes_equal(p, name, name_len);
       if eq {
         break s(cur);
       }
@@ -179,7 +169,7 @@ func meta_scalar_op(rec: u64, sym: addr, sym_len: u64) -> u64 {
       if same_len {
         let table: addr = symbol_addr("meta_scalar_table_storage");
         let p: addr = table + sym_at;
-        let eq: bool = meta_bytes_equal(p, sym, sym_len);
+        let eq: bool = std_types.meta_bytes_equal(p, sym, sym_len);
         if eq {
           // phys_at 是高 48 位、pl 是低 16 位，位域不相交，or 与加法等价。
           let packed: u64 = (phys_at << 16) or pl;
@@ -208,8 +198,8 @@ func meta_scalar_resolve_op(rec: u64, sym: addr, sym_len: u64) -> u64 {
   let off: u64 = (packed >> 16) and 0xFFFF;
   let len: u64 = packed and 0xFFFF;
   let scratch: addr = lain_meta_scratch_data();
-  let s1: u32 = meta_cell_put(scratch + 24, off);
-  let s2: u32 = meta_cell_put(scratch + 32, len);
+  let s1: u32 = std_types.meta_cell_put(scratch + 24, off);
+  let s2: u32 = std_types.meta_cell_put(scratch + 32, len);
   return 0;
 }
 
@@ -223,7 +213,7 @@ func meta_find_dot(base: addr, lo: u64, hi: u64) -> u64 {
   let found: u64 = loop scan(i: u64 = lo) {
     let more: bool = i < hi;
     if more {
-      let is: bool = bs_is_byte(base, i, 46);
+      let is: bool = std_lex.bs_is_byte(base, i, 46);
       if is {
         break scan(i);
       }
@@ -253,14 +243,14 @@ func meta_scalar_type_id(name: addr, name_len: u64) -> u64 {
   let rw_v: u64 = (repr >> 8) and 255;
   // %rec 是 <587 的表内偏移，与 bit62 的 owner 标志位域不相交，or 与加法等价。
   let owner: u64 = 0x4000000000000000 or rec;
-  let id: u64 = meta_intern(1, owner, 0, rk, rw_v);
+  let id: u64 = std_registry.meta_intern(1, owner, 0, rk, rw_v);
   return id;
 }
 
 // 名字 → 类型 id。源码里声明的类型（struct/enum）先查；都不中再查内建标量表。
 // 归档的 %r 值 if 结果喂给 #return，改成守卫。
 func meta_type_id_of_name(name: addr, name_len: u64) -> u64 {
-  let declared: u64 = meta_scope_type_id(name, name_len);
+  let declared: u64 = std_scope.meta_scope_type_id(name, name_len);
   let have: bool = declared != 0xFFFFFFFFFFFFFFFF;
   if have {
     return declared;
@@ -280,11 +270,11 @@ func meta_type_id_of_name(name: addr, name_len: u64) -> u64 {
 func meta_type_resolve(base: addr, len: u64, t_lo: u64, t_hi: u64) -> u64 {
   // 诊断：进入次数与最近一次窗口。
   let sce: addr = lain_meta_scratch_data();
-  let e0: u64 = meta_cell_get(sce + 392);
+  let e0: u64 = std_types.meta_cell_get(sce + 392);
   let e1: u64 = e0 + 1;
-  let e2: u32 = meta_cell_put(sce + 392, e1);
-  let e3: u32 = meta_cell_put(sce + 400, t_lo);
-  let e4: u32 = meta_cell_put(sce + 408, t_hi);
+  let e2: u32 = std_types.meta_cell_put(sce + 392, e1);
+  let e3: u32 = std_types.meta_cell_put(sce + 400, t_lo);
+  let e4: u32 = std_types.meta_cell_put(sce + 408, t_hi);
   let dot: u64 = meta_find_dot(base, t_lo, t_hi);
   let qualified: bool = dot != 0xFFFFFFFFFFFFFFFF;
   if qualified {
@@ -293,41 +283,41 @@ func meta_type_resolve(base: addr, len: u64, t_lo: u64, t_hi: u64) -> u64 {
     // 一律喂给 #return，全部改成守卫：条件按原顺序求值，命中即 return 同一个值。
     // 真支的每条路径都 return，所以下面的「非限定名」段只在 qualified 为假时执行
     // —— 与旧 IR 的 if / else 两支互斥一致，调用顺序也逐条对应。
-    let m_lo: u64 = bs_skip_space(base, dot + 1, len);
-    let m_hi: u64 = bs_skip_ident(base, m_lo, len);
-    let lp: u64 = meta_find_import_binding(base, len, t_lo, dot);
+    let m_lo: u64 = std_lex.bs_skip_space(base, dot + 1, len);
+    let m_hi: u64 = std_lex.bs_skip_ident(base, m_lo, len);
+    let lp: u64 = std_modules.meta_find_import_binding(base, len, t_lo, dot);
     let nons: bool = lp == 0;
     if nons {
       return 0;
     }
-    let n: u64 = meta_logical_len(base, lp, len);
+    let n: u64 = std_modules.meta_logical_len(base, lp, len);
     let path: addr = base + lp;
-    let idx: u64 = meta_source_find(path, n);
+    let idx: u64 = std_modules.meta_source_find(path, n);
     let miss: bool = idx == 0xFFFFFFFFFFFFFFFF;
     if miss {
       return 0;
     }
     let m_base: addr = lain_meta_source_data(idx);
     let m_len: u64 = lain_meta_source_length(idx);
-    let old_src: u64 = meta_scope_enter(idx);
-    let already: bool = meta_scope_has_source(idx);
+    let old_src: u64 = std_scope.meta_scope_enter(idx);
+    let already: bool = std_scope.meta_scope_has_source(idx);
     // 归档的 %ready 值 if：已扫过就 0，否则取 mark 再扫（u32 结果，两支同宽）。
     let ready: u32 = if already {
       0
     } else {
-      let mark: u64 = meta_scope_count();
-      let scan: u32 = meta_scope_scan(m_base, m_len, idx, mark);
+      let mark: u64 = std_scope.meta_scope_count();
+      let scan: u32 = std_scope.meta_scope_scan(m_base, m_len, idx, mark);
       scan
     };
     let bad: bool = ready != 0;
     if bad {
-      let rest0: u32 = meta_scope_set_current(old_src);
+      let rest0: u32 = std_scope.meta_scope_set_current(old_src);
       return 0;
     }
     let mname: addr = base + m_lo;
     let mnlen: u64 = m_hi - m_lo;
-    let tid: u64 = meta_scope_type_id(mname, mnlen);
-    let rest: u32 = meta_scope_set_current(old_src);
+    let tid: u64 = std_scope.meta_scope_type_id(mname, mnlen);
+    let rest: u32 = std_scope.meta_scope_set_current(old_src);
     let tak: bool = tid != 0xFFFFFFFFFFFFFFFF;
     if tak {
       return tid;
@@ -343,10 +333,10 @@ func meta_type_resolve(base: addr, len: u64, t_lo: u64, t_hi: u64) -> u64 {
   if gone {
     // 诊断：记下失败的名字窗口与作用域表条数，供驱动在收尾时读出。
     let sc: addr = lain_meta_scratch_data();
-    let c0: u32 = meta_cell_put(sc + 264, t_lo);
-    let c1: u32 = meta_cell_put(sc + 272, t_hi);
-    let cnt: u64 = meta_scope_count();
-    let c2: u32 = meta_cell_put(sc + 280, cnt);
+    let c0: u32 = std_types.meta_cell_put(sc + 264, t_lo);
+    let c1: u32 = std_types.meta_cell_put(sc + 272, t_hi);
+    let cnt: u64 = std_scope.meta_scope_count();
+    let c2: u32 = std_types.meta_cell_put(sc + 280, cnt);
     return 0;
   }
   return id;
@@ -383,31 +373,31 @@ func meta_op_resolve(base: addr, len: u64, t_lo: u64, t_hi: u64, sym: addr, sym_
 // meta_sym_i32 / meta_sym_i64 是**别的单元**（bootstrap/std/emit.lain）的静态块，
 // 本单元只取址：编译夹具给临时定义，字节 [105, 51, 50] / [105, 54, 52]。
 func meta_op_resolve_default(base: addr, len: u64, sym: addr, sym_len: u64, l_lo: u64, l_hi: u64, r_lo: u64, r_hi: u64) -> u64 {
-  let lv: u64 = bs_read_uint(base, l_lo, len);
-  let rv: u64 = bs_read_uint(base, r_lo, len);
+  let lv: u64 = std_lex.bs_read_uint(base, l_lo, len);
+  let rv: u64 = std_lex.bs_read_uint(base, r_lo, len);
   let l_big: bool = lv > 0x7FFFFFFF;
   let r_big: bool = rv > 0x7FFFFFFF;
   let big: bool = l_big or r_big;
   if big {
-    let a64: addr = symbol_addr("meta_sym_i64_storage");
+    let a64: addr = std_emit.meta_sym_i64;
     let rec64: u64 = meta_scalar_find(a64, 3);
     let m64: bool = rec64 == 0xFFFFFFFFFFFFFFFF;
     if m64 {
       return 0xFFFFFFFFFFFFFFFF;
     }
     let sc64: addr = lain_meta_scratch_data();
-    let w64: u32 = meta_cell_put(sc64 + 488, 64);
+    let w64: u32 = std_types.meta_cell_put(sc64 + 488, 64);
     let q64: u64 = meta_scalar_resolve_op(rec64, sym, sym_len);
     return q64;
   }
-  let a32: addr = symbol_addr("meta_sym_i32_storage");
+  let a32: addr = std_emit.meta_sym_i32;
   let rec32: u64 = meta_scalar_find(a32, 3);
   let m32: bool = rec32 == 0xFFFFFFFFFFFFFFFF;
   if m32 {
     return 0xFFFFFFFFFFFFFFFF;
   }
   let sc32: addr = lain_meta_scratch_data();
-  let w32: u32 = meta_cell_put(sc32 + 488, 32);
+  let w32: u32 = std_types.meta_cell_put(sc32 + 488, 32);
   let q32: u64 = meta_scalar_resolve_op(rec32, sym, sym_len);
   return q32;
 }
