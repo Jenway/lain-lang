@@ -25,6 +25,7 @@ meta_emit_module_exports -> meta_emit_module_binding。后者只看初值**头�
 import argparse
 import collections
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -152,10 +153,161 @@ def classify(init, local_kinds):
     return "other"
 
 
+# ---------------- 第 4 步闸门 4：改写审计 ----------------
+# 逐单元数「跨单元引用 / 影子 extern / 宿主 extern」，用来核对改写后的状态：
+#   * 裸跨单元调用、跨单元取址、影子 extern 都应为 0（已改单元）
+#   * 跨单元引用一律是 `别名.名字`（别名 = 被导入单元的模块键）
+#   * 宿主 extern（名字不是本仓任何顶层定义）逐单元与改造前相同
+# `--rev <rev>` 用 `git show <rev>:<路径>` 读源码，于是同一套口径可以量历史版本。
+
+EXTERN_RE = re.compile(r"^\s*extern\s+(\w+)", re.M)
+# 顶层**定义**（不含 extern）：影子 extern 与宿主 extern 的判据。
+OWNER_RE = re.compile(r"^(func|let|struct|enum)\s+([A-Za-z_]\w*)", re.M)
+IMPORT_RE = re.compile(r"^let\s+(\w+)\s*=\s*import\(\"([^\"]*)\"\)", re.M)
+BARE_CALL_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\(")
+MEMB_RE = re.compile(r"([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)")
+SYM_RE = re.compile(r'symbol_addr\("(\w+?)_storage"\)')
+
+UNIT_REL = {}
+
+
+def norm_path(p):
+    out = []
+    for part in p.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if out and out[-1] != "..":
+                out.pop()
+            else:
+                out.append("..")
+        else:
+            out.append(part)
+    return "/".join(out)
+
+
+def resolve_spec(unit_rel, spec):
+    """import("…") 的说明符 -> 被导入单元的相对路径（省略 .lain），与 lain0 同规则。"""
+    if "::" in spec:
+        base, mod = spec.rsplit("::", 1)
+    else:
+        base, mod = "", spec
+    d = unit_rel.rsplit("/", 1)[0] if "/" in unit_rel else ""
+    cands = [norm_path(d + "/" + mod), norm_path(d + "/" + base + "/" + mod)]
+    for c in cands:
+        if c in UNIT_REL:
+            return c
+    return cands[0]
+
+
+def load_text(rev, path):
+    if not rev:
+        return path.read_text(encoding="utf-8")
+    rel = path.relative_to(ROOT).as_posix()
+    out = subprocess.run(["git", "show", "%s:%s" % (rev, rel)], cwd=str(ROOT),
+                         capture_output=True)
+    if out.returncode != 0:
+        raise SystemExit("git show %s:%s 失败" % (rev, rel))
+    return out.stdout.decode("utf-8")
+
+
+def audit(rev):
+    us = units()
+    UNIT_REL.clear()
+    for p in us:
+        UNIT_REL[p.relative_to(BOOT).with_suffix("").as_posix()] = p
+    text = {rel: load_text(rev, p) for rel, p in UNIT_REL.items()}
+
+    owner, kind = {}, {}
+    for rel in text:
+        for m in OWNER_RE.finditer(text[rel]):
+            k, n = m.group(1), m.group(2)
+            if n in owner:
+                continue
+            owner[n] = rel
+            kind[n] = k
+
+    rows = []
+    for rel in text:
+        t = text[rel]
+        alias = {m.group(1): resolve_spec(rel, m.group(2))
+                 for m in IMPORT_RE.finditer(t)}
+        bare = memb_call = memb_data = 0
+        sym_x = sym_local = sym_unknown = 0
+        bad = []
+        for i, line in enumerate(t.splitlines(), 1):
+            s = line.strip()
+            if s.startswith("//") or s.startswith("extern "):
+                continue
+            for m in BARE_CALL_RE.finditer(line):
+                o = owner.get(m.group(1))
+                if o is not None and o != rel:
+                    bare += 1
+            for m in MEMB_RE.finditer(line):
+                q, nm = m.group(1), m.group(2)
+                o = alias.get(q)
+                if o is None:
+                    continue
+                if line[m.end():].lstrip().startswith("("):
+                    memb_call += 1
+                else:
+                    memb_data += 1
+                if owner.get(nm) != o:
+                    bad.append((i, q, nm))
+            for m in SYM_RE.finditer(line):
+                o = owner.get(m.group(1))
+                if o is None:
+                    sym_unknown += 1
+                elif o == rel:
+                    sym_local += 1
+                else:
+                    sym_x += 1
+        shadow = sorted(n for n in set(EXTERN_RE.findall(t))
+                        if owner.get(n) not in (None, rel))
+        host = sorted(n for n in set(EXTERN_RE.findall(t)) if n not in owner)
+        rows.append(dict(rel=rel, bare=bare, memb_call=memb_call,
+                         memb_data=memb_data, sym_x=sym_x, sym_local=sym_local,
+                         sym_unknown=sym_unknown, shadow=shadow, host=host,
+                         bad=bad, imports=len(alias)))
+
+    print("审计版本: %s" % (rev or "工作树"))
+    print("单元                            import 裸跨单元调用 M.成员调用 M.数据成员 "
+          "跨单元取址 影子extern 宿主extern 同单元取址")
+    for r in rows:
+        print("%-32s %6d %10d %9d %9d %9d %10d %10d %9d"
+              % (r["rel"], r["imports"], r["bare"], r["memb_call"],
+                 r["memb_data"], r["sym_x"], len(r["shadow"]), len(r["host"]),
+                 r["sym_local"]))
+    def tot(k):
+        return sum(len(r[k]) if isinstance(r[k], list) else r[k] for r in rows)
+    print("合计: import=%d 裸跨单元调用=%d M.成员调用=%d M.数据成员=%d "
+          "跨单元取址=%d 影子extern=%d 宿主extern=%d 同单元取址=%d"
+          % (tot("imports"), tot("bare"), tot("memb_call"), tot("memb_data"),
+             tot("sym_x"), tot("shadow"), tot("host"), tot("sym_local")))
+    dirty = [r["rel"] for r in rows if r["shadow"] or r["bare"] or r["sym_x"]]
+    print("已改单元 %d/%d；未改（还有影子 extern 或裸跨单元引用或跨单元取址）: %s"
+          % (len(rows) - len(dirty), len(rows), ", ".join(dirty) or "无"))
+    bads = [(r["rel"], b) for r in rows for b in r["bad"]]
+    if bads:
+        print("M.名字 指向了非被导入单元的声明 %d 处:" % len(bads))
+        for rel, b in bads[:20]:
+            print("  %s:%d  %s.%s" % (rel, b[0], b[1], b[2]))
+    else:
+        print("M.名字 全部指向被导入单元自己的顶层声明（0 处错配）")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tsv", action="store_true")
+    ap.add_argument("--audit", action="store_true",
+                    help="第 4 步闸门 4：逐单元量跨单元引用 / 影子 extern / 宿主 extern")
+    ap.add_argument("--rev", default="",
+                    help="用 git show <rev>:<路径> 读源码（默认读工作树）")
     args = ap.parse_args()
+
+    if args.audit:
+        return audit(args.rev)
 
     us = units()
     text = {p: p.read_text(encoding="utf-8") for p in us}

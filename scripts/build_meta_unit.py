@@ -65,16 +65,19 @@ def main():
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     ir_path = OUT_DIR / "bootstrap.l1"
+    roots = [(rel, names) for rel, names in units if names]
+    print("清单 %s: %d 个模块，根名 %s" % (
+        MANIFEST.relative_to(ROOT), len(units),
+        ", ".join("%s:%s" % (rel, " ".join(names)) for rel, names in roots)
+        or "无"))
     # 入口过程 lain_std_lower 等三个名字在清单里标成根名（发出平坦名字），
     # 所以清单直接交给 lain0，不再另生成一份根名清单（docs/plan-modules.md §3.2/§3.3）。
     rc = subprocess.run([str(LAIN0), "--unit", str(MANIFEST),
                          "-o", str(ir_path)]).returncode
     if rc != 0:
-        print("lain0 编译失败 rc=%d" % rc)
+        print("lain0 编译失败 rc=%d（整份清单要全部单元改完才能通过；"
+              "中间状态下的诊断见上面的 stderr）" % rc)
         return 1
-    roots = [(rel, names) for rel, names in units if names]
-    print("units=%d roots=%s" % (len(units), ", ".join(
-        "%s:%s" % (rel, " ".join(names)) for rel, names in roots) or "无"))
     print("LAINIR -> %s (%d bytes)"
           % (ir_path.relative_to(ROOT), ir_path.stat().st_size))
 
