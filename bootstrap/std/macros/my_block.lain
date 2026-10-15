@@ -1,39 +1,33 @@
 // `my_block { ... }` 把花括号组的孩子拼入当前 DECL 或 STMT 序列。
 // 它是通用 N→M 替换的基准处理器：输入固定消费 2 项，输出数量由块内孩子数决定。
+//
+// 模块：跨单元引用一律写 `别名.名字`（别名 = 被导入单元的模块键），
+// 指向本仓其它单元的影子 extern 已删除；宿主能力 extern 保留。
+// 本单元在 bootstrap/std/macros/ 下，所以路径要带 `../`。
+
+let std_expand = import("../expand");
+let std_macros_my_if = import("my_if");
+let std_parse = import("../parse");
+let std_scope = import("../scope");
+let std_syntax = import("../syntax");
+let std_types = import("../types");
 
 let meta_kw_my_block: ro [u8] = [109, 121, 95, 98, 108, 111, 99, 107];
 
-extern meta_node_is_word(node: u64, base: addr, word: addr, len: u64) -> bool = meta_node_is_word;
-extern meta_syntax_ensure(node: u64, context: u64, handler: u64) -> u32 = meta_syntax_ensure;
-extern meta_cell_get(p: addr) -> u64 = meta_cell_get;
-extern meta_cell_put(p: addr, v: u64) -> u32 = meta_cell_put;
-extern ast_child(node: u64, index: u64) -> u64 = ast_child;
-extern ast_child_count(node: u64) -> u64 = ast_child_count;
-extern ast_delim(node: u64) -> u8 = ast_delim;
 extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
 extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
 extern lain_meta_status() -> u64 = lain_meta_status;
-extern meta_bump_mark() -> u64 = meta_bump_mark;
-extern meta_bump_alloc(bytes: u64) -> u64 = meta_bump_alloc;
-extern meta_bump_release(mark: u64) -> u32 = meta_bump_release;
 extern lain_meta_ast_append_refs(refs: addr, count: u64) -> u64 = lain_meta_ast_append_refs;
 extern lain_meta_ast_span_addr(reference: u64, length: u64) -> addr = lain_meta_ast_span_addr;
 extern lain_meta_ast_charge(kind: u64, amount: u64) -> u32 = lain_meta_ast_charge;
-extern meta_expand_defer_get() -> u64 = meta_expand_defer_get;
-extern meta_expand_root(root: u64) -> u64 = meta_expand_root;
-extern meta_expand_stmt_group(group: u64) -> u64 = meta_expand_stmt_group;
-extern meta_expand_store_ref(buffer: addr, index: u64, value: u64) -> u32 = meta_expand_store_ref;
-extern meta_expand_result_clear(result: addr) -> u32 = meta_expand_result_clear;
-extern meta_expand_result_error(result: addr, diagnostic: u64) -> u32 = meta_expand_result_error;
-extern meta_expand_result_defer(result: addr, dependency: u64) -> u32 = meta_expand_result_defer;
 
 func meta_register_my_block(node: u64) -> u32 {
   let dummy: addr = lain_meta_source_data(0);
-  let hit: bool = meta_node_is_word(node, dummy, symbol_addr("meta_kw_my_block_storage"), 8);
+  let hit: bool = std_parse.meta_node_is_word(node, dummy, symbol_addr("meta_kw_my_block_storage"), 8);
   if hit {
-    let ensured2: u32 = meta_syntax_ensure(node, 2, 11);
+    let ensured2: u32 = std_syntax.meta_syntax_ensure(node, 2, 11);
     if ensured2 != 0 { return ensured2; }
-    return meta_syntax_ensure(node, 1, 11);
+    return std_syntax.meta_syntax_ensure(node, 1, 11);
   }
   return 0;
 }
@@ -43,24 +37,24 @@ func meta_expand_splice_group(body: u64, consumed: u64, context: u64, result: ad
   let root_context: bool = context == 1;
   let entered: u32 = if root_context { lain_meta_ast_charge(4, 1) } else { 0 };
   if root_context and (entered != 0) { return entered; }
-  let expanded: u64 = if root_context { meta_expand_root(body) } else { meta_expand_stmt_group(body) };
+  let expanded: u64 = if root_context { std_expand.meta_expand_root(body) } else { std_expand.meta_expand_stmt_group(body) };
   let left: u32 = if root_context { lain_meta_ast_charge(5, 1) } else { 0 };
   if expanded == 0 {
-    let dependency: u64 = meta_expand_defer_get();
+    let dependency: u64 = std_expand.meta_expand_defer_get();
     if dependency != 0 {
-      let defer_status: u32 = meta_expand_result_defer(result, dependency);
+      let defer_status: u32 = std_macros_my_if.meta_expand_result_defer(result, dependency);
       return 0;
     }
     return lain_meta_status() as u32;
   }
-  let count: u64 = ast_child_count(expanded);
+  let count: u64 = std_parse.ast_child_count(expanded);
   let empty: bool = count == 0;
   if empty == 0 {
-    let mark: u64 = meta_bump_mark();
+    let mark: u64 = std_scope.meta_bump_mark();
     let bytes: u64 = count * 8;
-    let off: u64 = meta_bump_alloc(bytes);
+    let off: u64 = std_scope.meta_bump_alloc(bytes);
     if off == 0xFFFFFFFFFFFFFFFF {
-      let error_status: u32 = meta_expand_result_error(result, 17);
+      let error_status: u32 = std_macros_my_if.meta_expand_result_error(result, 17);
       return 0;
     }
     let scratch: addr = lain_meta_scratch_data();
@@ -68,69 +62,69 @@ func meta_expand_splice_group(body: u64, consumed: u64, context: u64, result: ad
     let filled: u64 = loop children(i: u64 = 0) {
       let more: bool = i < count;
       if more {
-        let child: u64 = ast_child(expanded, i);
+        let child: u64 = std_parse.ast_child(expanded, i);
         let child_off: u64 = i * 8;
         let child_at: addr = refs + child_off;
-        let put: u32 = meta_cell_put(child_at, child);
+        let put: u32 = std_types.meta_cell_put(child_at, child);
         continue children(i + 1);
       } else {
         break children(1);
       }
     };
     let made: u64 = lain_meta_ast_append_refs(refs, count);
-    let release: u32 = meta_bump_release(mark);
+    let release: u32 = std_scope.meta_bump_release(mark);
     if made == 0 { return lain_meta_status() as u32; }
-    let s0: u32 = meta_cell_put(result, 1);
-    let s1: u32 = meta_cell_put(result + 8, consumed);
-    let s2: u32 = meta_cell_put(result + 16, made);
-    let s3: u32 = meta_cell_put(result + 24, count);
-    let s4: u32 = meta_cell_put(result + 32, 0);
-    let s5: u32 = meta_cell_put(result + 40, 0);
+    let s0: u32 = std_types.meta_cell_put(result, 1);
+    let s1: u32 = std_types.meta_cell_put(result + 8, consumed);
+    let s2: u32 = std_types.meta_cell_put(result + 16, made);
+    let s3: u32 = std_types.meta_cell_put(result + 24, count);
+    let s4: u32 = std_types.meta_cell_put(result + 32, 0);
+    let s5: u32 = std_types.meta_cell_put(result + 40, 0);
     return 0;
   }
-  let s0: u32 = meta_cell_put(result, 1);
-  let s1: u32 = meta_cell_put(result + 8, consumed);
-  let s2: u32 = meta_cell_put(result + 16, 0);
-  let s3: u32 = meta_cell_put(result + 24, 0);
-  let s4: u32 = meta_cell_put(result + 32, 0);
-  let s5: u32 = meta_cell_put(result + 40, 0);
+  let s0: u32 = std_types.meta_cell_put(result, 1);
+  let s1: u32 = std_types.meta_cell_put(result + 8, consumed);
+  let s2: u32 = std_types.meta_cell_put(result + 16, 0);
+  let s3: u32 = std_types.meta_cell_put(result + 24, 0);
+  let s4: u32 = std_types.meta_cell_put(result + 32, 0);
+  let s5: u32 = std_types.meta_cell_put(result + 40, 0);
   return 0;
 }
 
 func meta_expand_my_block(request: addr, result: addr) -> u32 {
-  let clear: u32 = meta_expand_result_clear(result);
-  let abi: u64 = meta_cell_get(request);
-  let parent: u64 = meta_cell_get(request + 8);
-  let cursor: u64 = meta_cell_get(request + 16);
-  let context: u64 = meta_cell_get(request + 40);
-  let expansion_id: u64 = meta_cell_get(request + 48);
-  let head: u64 = ast_child(parent, cursor);
+  let clear: u32 = std_macros_my_if.meta_expand_result_clear(result);
+  let abi: u64 = std_types.meta_cell_get(request);
+  let parent: u64 = std_types.meta_cell_get(request + 8);
+  let cursor: u64 = std_types.meta_cell_get(request + 16);
+  let context: u64 = std_types.meta_cell_get(request + 40);
+  let expansion_id: u64 = std_types.meta_cell_get(request + 48);
+  let head: u64 = std_parse.ast_child(parent, cursor);
   let dummy: addr = lain_meta_source_data(0);
   let kw: addr = symbol_addr("meta_kw_my_block_storage");
-  let name_ok: bool = meta_node_is_word(head, dummy, kw, 8);
+  let name_ok: bool = std_parse.meta_node_is_word(head, dummy, kw, 8);
   let ctx_ok: bool = (context == 1) or (context == 2);
   let abi_ok: bool = abi == 1;
   let matched: bool = abi_ok and ctx_ok and name_ok;
   if matched == 0 {
-    let z0: u32 = meta_cell_put(result, 0);
-    let z1: u32 = meta_cell_put(result + 32, 0);
+    let z0: u32 = std_types.meta_cell_put(result, 0);
+    let z1: u32 = std_types.meta_cell_put(result + 32, 0);
     return 0;
   }
   if expansion_id == 0 {
-    let bad_id: u32 = meta_expand_result_error(result, 9408);
+    let bad_id: u32 = std_macros_my_if.meta_expand_result_error(result, 9408);
     return 0;
   }
-  let parent_count: u64 = ast_child_count(parent);
+  let parent_count: u64 = std_parse.ast_child_count(parent);
   let end: u64 = cursor + 2;
   if end > parent_count {
-    let error_status: u32 = meta_expand_result_error(result, 9409);
+    let error_status: u32 = std_macros_my_if.meta_expand_result_error(result, 9409);
     return 0;
   }
-  let body: u64 = ast_child(parent, cursor + 1);
-  let delimiter: u8 = ast_delim(body);
+  let body: u64 = std_parse.ast_child(parent, cursor + 1);
+  let delimiter: u8 = std_parse.ast_delim(body);
   let delimiter_wide: u32 = delimiter as u32;
   if delimiter_wide != 123 {
-    let error_status: u32 = meta_expand_result_error(result, 9409);
+    let error_status: u32 = std_macros_my_if.meta_expand_result_error(result, 9409);
     return 0;
   }
   return meta_expand_splice_group(body, 2, context, result);
@@ -146,8 +140,8 @@ func meta_expand_replacement_my_block(slice_ref: u64, count: u64, buffer: addr, 
     if more {
       let off: u64 = i * 8;
       let at: addr = src + off;
-      let raw: u64 = meta_cell_get(at);
-      let put: u32 = meta_expand_store_ref(buffer, outn + i, raw);
+      let raw: u64 = std_types.meta_cell_get(at);
+      let put: u32 = std_expand.meta_expand_store_ref(buffer, outn + i, raw);
       continue repl(i + 1);
     } else {
       break repl(1);

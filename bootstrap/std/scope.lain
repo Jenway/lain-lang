@@ -1,5 +1,21 @@
 // 作用域表 —— 由 bootstrapl1/std/scope.l1 翻译成 Lain 表面语法。
 // 暂存区分段布局、容量公式与查找规则的说明见旧源文件头部注释。
+//
+// 模块：跨单元引用一律写 `别名.名字`（别名 = 被导入单元的模块键），
+// 指向本仓其它单元的影子 extern 已删除；宿主能力 extern 保留。
+
+let std_declarations = import("declarations");
+let std_expand = import("expand");
+let std_handlers_let = import("handlers/let");
+let std_lex = import("lex");
+let std_modules = import("modules");
+let std_parse = import("parse");
+let std_records = import("records");
+let std_regions = import("regions");
+let std_registry = import("registry");
+let std_sums = import("sums");
+let std_syntax = import("syntax");
+let std_types = import("types");
 
 extern lain_meta_source_count() -> u64 = lain_meta_source_count;
 extern lain_meta_source_length(source: u64) -> u64 = lain_meta_source_length;
@@ -11,37 +27,6 @@ extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
 extern lain_meta_trace(slot: u64, value: u64) -> u64 = lain_meta_trace;
 extern lain_meta_ast_commit(source: u64, old_root: u64, new_root: u64, tx: u64) -> u32 = lain_meta_ast_commit;
 extern lain_meta_ast_tx_rollback(tx: u64) -> u32 = lain_meta_ast_tx_rollback;
-extern meta_cell_get(p: addr) -> u64 = meta_cell_get;
-extern meta_cell_put(p: addr, v: u64) -> u32 = meta_cell_put;
-extern meta_cell_get_raw(p: addr) -> u64 = meta_cell_get_raw;
-extern meta_cell_put_raw(p: addr, v: u64) -> u32 = meta_cell_put_raw;
-extern meta_bytes_equal(a: addr, b: addr, n: u64) -> bool = meta_bytes_equal;
-extern bs_is_byte(base: addr, i: u64, c: u8) -> bool = bs_is_byte;
-extern bs_byte_at(base: addr, at: u64, len: u64) -> u8 = bs_byte_at;
-extern meta_region_scratch_base() -> addr = meta_region_scratch_base;
-extern meta_region_scratch_capacity() -> u64 = meta_region_scratch_capacity;
-extern meta_region_scratch_window() -> u32 = meta_region_scratch_window;
-extern meta_host_meta_end() -> u64 = meta_host_meta_end;
-extern meta_sem_init() -> u32 = meta_sem_init;
-extern meta_syntax_init() -> u32 = meta_syntax_init;
-extern meta_parse_source(source: u64) -> u32 = meta_parse_source;
-extern meta_syntax_lookup(node: u64, env: u64, scope: u64, context: u64) -> u64 = meta_syntax_lookup;
-extern meta_declare_invoke(handler: u64, base: addr, len: u64, source: u64, level_start: u64, parent: u64, index: u64) -> u32 = meta_declare_invoke;
-extern meta_root_of(source: u64) -> u64 = meta_root_of;
-extern ast_child(node: u64, index: u64) -> u64 = ast_child;
-extern ast_child_count(node: u64) -> u64 = ast_child_count;
-extern meta_node_start(node: u64) -> u64 = meta_node_start;
-extern meta_node_len(node: u64) -> u64 = meta_node_len;
-extern meta_node_child(node: u64) -> u64 = meta_node_child;
-extern meta_node_is_word(i: u64, base: addr, kw: addr, kw_len: u64) -> bool = meta_node_is_word;
-extern meta_source_find(logical: addr, logical_len: u64) -> u64 = meta_source_find;
-extern meta_table_count(base: addr, len: u64, grp: u64) -> u64 = meta_table_count;
-extern meta_table_elt_esz(base: addr, len: u64, parent: u64, from: u64, eq_i: u64) -> u64 = meta_table_elt_esz;
-extern meta_record_type_id(index: u64) -> u64 = meta_record_type_id;
-extern meta_sum_type_id(index: u64) -> u64 = meta_sum_type_id;
-extern meta_syntax_state_put(off: u64, value: u64) -> u32 = meta_syntax_state_put;
-extern meta_expand_root(root: u64) -> u64 = meta_expand_root;
-extern meta_expand_defer_get() -> u64 = meta_expand_defer_get;
 
 let meta_kw_colon_b: ro [u8] = [58];
 
@@ -60,7 +45,7 @@ func meta_scope_setup(scan: bool) -> u32 {
     }
   };
   let scratch: addr = lain_meta_scratch_data();
-  let grant: u32 = meta_region_scratch_window();
+  let grant: u32 = std_regions.meta_region_scratch_window();
   let gst: u64 = lain_meta_status();
   let gnonzero: bool = gst != 0;
   if gnonzero {
@@ -73,11 +58,11 @@ func meta_scope_setup(scan: bool) -> u32 {
   let t8: u64 = total / 8;
   let scap: u64 = t8 + 8;
   let nodes0_sem: u64 = total + 8;
-  let host_end0: u64 = meta_host_meta_end();
+  let host_end0: u64 = std_parse.meta_host_meta_end();
   let reg_base: u64 = if host_end0 < 520 { 520 } else { host_end0 };
   let reg_bytes: u64 = tcap * 64;
   let reg_end: u64 = reg_base + reg_bytes;
-  let rbw: u32 = meta_cell_put_raw(symbol_addr("meta_reg_base_state_storage"), reg_base);
+  let rbw: u32 = std_types.meta_cell_put_raw(std_registry.meta_reg_base_state, reg_base);
   let ctl_floor: u64 = 2504 + 56;
   let sc_base: u64 = if reg_end < ctl_floor { ctl_floor } else { reg_end };
   let sc_bytes: u64 = scap * 56;
@@ -85,13 +70,13 @@ func meta_scope_setup(scan: bool) -> u32 {
   let dep_bytes: u64 = dep_cap * 24;
   let dep_base: u64 = sc_base + sc_bytes;
   let dep_end: u64 = dep_base + dep_bytes;
-  let host_end: u64 = meta_host_meta_end();
+  let host_end: u64 = std_parse.meta_host_meta_end();
   let path_at: u64 = dep_end + 0;
   let ctl_end: u64 = 1096 + 64;
   let lower: u64 = if path_at < host_end { host_end } else { path_at };
   let path_at2: u64 = if lower < ctl_end { ctl_end } else { lower };
-  let path_bytes_ad: addr = symbol_addr("meta_path_cap_storage");
-  let path_bytes: u64 = meta_cell_get(path_bytes_ad);
+  let path_bytes_ad: addr = std_registry.meta_path_cap;
+  let path_bytes: u64 = std_types.meta_cell_get(path_bytes_ad);
   let path_end: u64 = path_at2 + path_bytes;
   let sem_base: u64 = path_end + 48;
   let sem_entries: u64 = nodes0_sem * 72;
@@ -109,56 +94,56 @@ func meta_scope_setup(scan: bool) -> u32 {
     let fk: u32 = f + (keepd as u32);
     return 17;
   }
-  let s1: u32 = meta_cell_put(scratch + 56, total);
-  let s2: u32 = meta_cell_put(scratch + 64, tcap);
-  let s3: u32 = meta_cell_put(scratch + 72, sc_base);
-  let s4: u32 = meta_cell_put(scratch + 80, scap);
-  let s5: u32 = meta_cell_put(scratch + 88, 0);
-  let s6: u32 = meta_cell_put(scratch + 152, 0xFFFFFFFFFFFFFFFF);
-  let d0: u32 = meta_cell_put(scratch + 416, dep_base);
-  let d1: u32 = meta_cell_put(scratch + 424, dep_cap);
-  let d2: u32 = meta_cell_put(scratch + 432, 0);
+  let s1: u32 = std_types.meta_cell_put(scratch + 56, total);
+  let s2: u32 = std_types.meta_cell_put(scratch + 64, tcap);
+  let s3: u32 = std_types.meta_cell_put(scratch + 72, sc_base);
+  let s4: u32 = std_types.meta_cell_put(scratch + 80, scap);
+  let s5: u32 = std_types.meta_cell_put(scratch + 88, 0);
+  let s6: u32 = std_types.meta_cell_put(scratch + 152, 0xFFFFFFFFFFFFFFFF);
+  let d0: u32 = std_types.meta_cell_put(scratch + 416, dep_base);
+  let d1: u32 = std_types.meta_cell_put(scratch + 424, dep_cap);
+  let d2: u32 = std_types.meta_cell_put(scratch + 432, 0);
   let closure_base_off: u64 = dep_cap * 16;
   let closure_base: u64 = dep_base + closure_base_off;
-  let d3: u32 = meta_cell_put(scratch + 440, closure_base);
-  let d4: u32 = meta_cell_put(scratch + 448, 0);
-  let d5: u32 = meta_cell_put(scratch + 456, 0);
-  let d6: u32 = meta_cell_put(scratch + 464, 0);
-  let d7: u32 = meta_cell_put(scratch + 472, 0);
-  let ve: u32 = meta_cell_put(scratch + 480, 0);
-  let bw: u32 = meta_cell_put(scratch + 200, need);
-  let bp: u32 = meta_cell_put(scratch + 208, need);
-  let bq: u32 = meta_cell_put(scratch + 216, 0);
-  let bc: u32 = meta_cell_put(scratch + 496, 0);
-  let fp: u32 = meta_cell_put(scratch + 504, 0);
-  let t4: u32 = meta_cell_put(scratch + 1000, sem_base);
-  let z0: u32 = meta_cell_put(scratch + 1008, 0);
-  let z1: u32 = meta_cell_put(scratch + 1016, 0);
-  let z2: u32 = meta_cell_put(scratch + 1024, 0);
-  let z3: u32 = meta_cell_put(scratch + 1032, 0);
-  let z4: u32 = meta_cell_put(scratch + 1040, 0);
-  let z5: u32 = meta_cell_put(scratch + 1048, 0);
-  let c0: u32 = meta_cell_put(scratch + 1056, nodes0_sem);
-  let c1: u32 = meta_cell_put(scratch + 1064, nodes0_sem);
-  let c2: u32 = meta_cell_put(scratch + 1072, nodes0_sem);
-  let c3: u32 = meta_cell_put(scratch + 1080, nodes0_sem);
-  let c4: u32 = meta_cell_put(scratch + 1088, nodes0_sem);
-  let c5: u32 = meta_cell_put(scratch + 1096, nodes0_sem);
-  let zl: u32 = meta_cell_put(scratch + 2128, 0);
-  let zb: u32 = meta_cell_put(scratch + 2136, 0);
-  let semi: u32 = meta_sem_init();
-  let syntax: u32 = meta_syntax_init();
+  let d3: u32 = std_types.meta_cell_put(scratch + 440, closure_base);
+  let d4: u32 = std_types.meta_cell_put(scratch + 448, 0);
+  let d5: u32 = std_types.meta_cell_put(scratch + 456, 0);
+  let d6: u32 = std_types.meta_cell_put(scratch + 464, 0);
+  let d7: u32 = std_types.meta_cell_put(scratch + 472, 0);
+  let ve: u32 = std_types.meta_cell_put(scratch + 480, 0);
+  let bw: u32 = std_types.meta_cell_put(scratch + 200, need);
+  let bp: u32 = std_types.meta_cell_put(scratch + 208, need);
+  let bq: u32 = std_types.meta_cell_put(scratch + 216, 0);
+  let bc: u32 = std_types.meta_cell_put(scratch + 496, 0);
+  let fp: u32 = std_types.meta_cell_put(scratch + 504, 0);
+  let t4: u32 = std_types.meta_cell_put(scratch + 1000, sem_base);
+  let z0: u32 = std_types.meta_cell_put(scratch + 1008, 0);
+  let z1: u32 = std_types.meta_cell_put(scratch + 1016, 0);
+  let z2: u32 = std_types.meta_cell_put(scratch + 1024, 0);
+  let z3: u32 = std_types.meta_cell_put(scratch + 1032, 0);
+  let z4: u32 = std_types.meta_cell_put(scratch + 1040, 0);
+  let z5: u32 = std_types.meta_cell_put(scratch + 1048, 0);
+  let c0: u32 = std_types.meta_cell_put(scratch + 1056, nodes0_sem);
+  let c1: u32 = std_types.meta_cell_put(scratch + 1064, nodes0_sem);
+  let c2: u32 = std_types.meta_cell_put(scratch + 1072, nodes0_sem);
+  let c3: u32 = std_types.meta_cell_put(scratch + 1080, nodes0_sem);
+  let c4: u32 = std_types.meta_cell_put(scratch + 1088, nodes0_sem);
+  let c5: u32 = std_types.meta_cell_put(scratch + 1096, nodes0_sem);
+  let zl: u32 = std_types.meta_cell_put(scratch + 2128, 0);
+  let zb: u32 = std_types.meta_cell_put(scratch + 2136, 0);
+  let semi: u32 = std_parse.meta_sem_init();
+  let syntax: u32 = std_syntax.meta_syntax_init();
   if syntax != 0 { return syntax; }
   let ksc: addr = lain_meta_scratch_data();
-  let ks0: u32 = meta_cell_put(ksc + 2048, count);
+  let ks0: u32 = std_types.meta_cell_put(ksc + 2048, count);
   if scan == 0 { return 0; }
   let parsed: u32 = loop ps(i: u64 = 0) {
-    let kt0: u64 = meta_cell_get_raw(ksc + 2056);
+    let kt0: u64 = std_types.meta_cell_get_raw(ksc + 2056);
     let kt1: u64 = kt0 + 1;
-    let kt2: u32 = meta_cell_put(ksc + 2056, kt1);
+    let kt2: u32 = std_types.meta_cell_put(ksc + 2056, kt1);
     let more: bool = i < count;
     if more {
-      let st: u32 = meta_parse_source(i);
+      let st: u32 = std_parse.meta_parse_source(i);
       let sti: u64 = st as u64;
       let bad: bool = st != 0;
       if bad { break ps(st); }
@@ -168,15 +153,15 @@ func meta_scope_setup(scan: bool) -> u32 {
     }
   };
   if parsed != 0 { return parsed; }
-  let z144: u32 = meta_cell_put(scratch + 144, 0);
-  let s6b: u32 = meta_cell_put(scratch + 96, 0xFFFFFFFFFFFFFFFF);
+  let z144: u32 = std_types.meta_cell_put(scratch + 144, 0);
+  let s6b: u32 = std_types.meta_cell_put(scratch + 96, 0xFFFFFFFFFFFFFFFF);
   return 0;
 }
 
 // Expand 的声明协调步：只登记身份/声明位置，不运行函数体或 Lowering。
 func meta_declare_available(source: u64) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
-  let clear_root: u32 = meta_cell_put(scratch + 96, 0xFFFFFFFFFFFFFFFF);
+  let clear_root: u32 = std_types.meta_cell_put(scratch + 96, 0xFFFFFFFFFFFFFFFF);
   let mark: u64 = meta_scope_count();
   let current: u32 = meta_scope_set_current(source);
   let len: u64 = lain_meta_source_length(source);
@@ -188,10 +173,10 @@ func meta_declare_available(source: u64) -> u32 {
 // 路径 / mangle 缓冲区：动态区里紧接作用域表与依赖区之后。
 func meta_path_buffer() -> u64 {
   let scratch: addr = lain_meta_scratch_data();
-  let sc_base: u64 = meta_cell_get(scratch + 72);
-  let scap: u64 = meta_cell_get(scratch + 80);
+  let sc_base: u64 = std_types.meta_cell_get(scratch + 72);
+  let scap: u64 = std_types.meta_cell_get(scratch + 80);
   let sc_bytes: u64 = scap * 56;
-  let dep_cap: u64 = meta_cell_get(scratch + 424);
+  let dep_cap: u64 = std_types.meta_cell_get(scratch + 424);
   let dep_bytes: u64 = dep_cap * 24;
   let at0: u64 = sc_base + sc_bytes;
   let at: u64 = at0 + dep_bytes;
@@ -201,8 +186,8 @@ func meta_path_buffer() -> u64 {
 // --- 暂存区分配器（碰撞式）--------------------------------------------------
 
 func meta_bump_word(off: u64) -> u64 {
-  let scratch: addr = meta_region_scratch_base();
-  let v: u64 = meta_cell_get(scratch + off);
+  let scratch: addr = std_regions.meta_region_scratch_base();
+  let v: u64 = std_types.meta_cell_get(scratch + off);
   return v;
 }
 
@@ -217,8 +202,8 @@ func meta_bump_peak() -> u64 {
 }
 
 func meta_bump_alloc(bytes: u64) -> u64 {
-  let scratch: addr = meta_region_scratch_base();
-  let size: u64 = meta_region_scratch_capacity();
+  let scratch: addr = std_regions.meta_region_scratch_base();
+  let size: u64 = std_regions.meta_region_scratch_capacity();
   let at: u64 = meta_bump_mark();
   let alignable: bool = bytes <= 0xFFFFFFFFFFFFFFF8;
   if alignable == 0 {
@@ -232,11 +217,11 @@ func meta_bump_alloc(bytes: u64) -> u64 {
   let within: bool = end <= size;
   let ok: bool = not_wrapped and within;
   if ok {
-    let putw: u32 = meta_cell_put(scratch + 200, end);
+    let putw: u32 = std_types.meta_cell_put(scratch + 200, end);
     let peak: u64 = meta_bump_peak();
     let higher: bool = end > peak;
     if higher {
-      let putp: u32 = meta_cell_put(scratch + 208, end);
+      let putp: u32 = std_types.meta_cell_put(scratch + 208, end);
     }
     return at;
   }
@@ -245,31 +230,31 @@ func meta_bump_alloc(bytes: u64) -> u64 {
 }
 
 func meta_bump_release(mark: u64) -> u32 {
-  let scratch: addr = meta_region_scratch_base();
-  let s: u32 = meta_cell_put(scratch + 200, mark);
+  let scratch: addr = std_regions.meta_region_scratch_base();
+  let s: u32 = std_types.meta_cell_put(scratch + 200, mark);
   return 0;
 }
 
 func meta_scope_count() -> u64 {
   let scratch: addr = lain_meta_scratch_data();
-  let v: u64 = meta_cell_get(scratch + 88);
+  let v: u64 = std_types.meta_cell_get(scratch + 88);
   return v;
 }
 
 func meta_scope_release(mark: u64) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
-  let s: u32 = meta_cell_put(scratch + 88, mark);
+  let s: u32 = std_types.meta_cell_put(scratch + 88, mark);
   return 0;
 }
 
 func meta_scope_entry(index: u64) -> addr {
   let scratch: addr = lain_meta_scratch_data();
-  let base: u64 = meta_cell_get(scratch + 72);
+  let base: u64 = std_types.meta_cell_get(scratch + 72);
   let p: addr = scratch + base;
   let off: u64 = index * 56;
-  let dbg_b: u32 = meta_cell_put(scratch + 1806, 1);
-  let dbg_i: u32 = meta_cell_put(scratch + 1814, index);
-  let dbg_o: u32 = meta_cell_put(scratch + 1822, off);
+  let dbg_b: u32 = std_types.meta_cell_put(scratch + 1806, 1);
+  let dbg_i: u32 = std_types.meta_cell_put(scratch + 1814, index);
+  let dbg_o: u32 = std_types.meta_cell_put(scratch + 1822, off);
   let q: addr = p + off;
   return q;
 }
@@ -277,7 +262,7 @@ func meta_scope_entry(index: u64) -> addr {
 func meta_scope_word(index: u64, off: u64) -> u64 {
   let e: addr = meta_scope_entry(index);
   let p: addr = e + off;
-  let v: u64 = meta_cell_get(p);
+  let v: u64 = std_types.meta_cell_get(p);
   return v;
 }
 
@@ -315,7 +300,7 @@ func meta_scope_decl_node(index: u64) -> u64 {
   }
   let parent: u64 = meta_scope_aux(index);
   let child_index: u64 = meta_scope_emitted(index);
-  let actual: u64 = ast_child(parent, child_index);
+  let actual: u64 = std_parse.ast_child(parent, child_index);
   let cached: u64 = meta_scope_payload(index);
   let present: bool = actual != 0;
   let same: bool = actual == cached;
@@ -371,20 +356,20 @@ func meta_scope_require_func(name: addr, name_len: u64) -> u64 {
 // 依赖边记录声明表身份，不记录拼写；扫描去重保持首次遇见顺序。
 func meta_scope_dependency_add(target: u64) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
-  let from: u64 = meta_cell_get(scratch + 152);
+  let from: u64 = std_types.meta_cell_get(scratch + 152);
   let inactive: bool = from == 0xFFFFFFFFFFFFFFFF;
   if inactive { return 0; }
-  let base: u64 = meta_cell_get(scratch + 416);
-  let count: u64 = meta_cell_get(scratch + 432);
-  let cap: u64 = meta_cell_get(scratch + 424);
+  let base: u64 = std_types.meta_cell_get(scratch + 416);
+  let count: u64 = std_types.meta_cell_get(scratch + 432);
+  let cap: u64 = std_types.meta_cell_get(scratch + 424);
   let seen: bool = loop find(i: u64 = 0) {
     let more: bool = i < count;
     if more {
       let slot_off: u64 = i * 16;
       let at: u64 = base + slot_off;
-      let old_from: u64 = meta_cell_get(scratch + at);
+      let old_from: u64 = std_types.meta_cell_get(scratch + at);
       let to_at: u64 = at + 8;
-      let old_to: u64 = meta_cell_get(scratch + to_at);
+      let old_to: u64 = std_types.meta_cell_get(scratch + to_at);
       let same_from: bool = old_from == from;
       let same_to: bool = old_to == target;
       let same: bool = same_from and same_to;
@@ -402,11 +387,11 @@ func meta_scope_dependency_add(target: u64) -> u32 {
   }
   let slot_off2: u64 = count * 16;
   let at2: u64 = base + slot_off2;
-  let a: u32 = meta_cell_put(scratch + at2, from);
+  let a: u32 = std_types.meta_cell_put(scratch + at2, from);
   let to_at2: u64 = at2 + 8;
-  let b: u32 = meta_cell_put(scratch + to_at2, target);
+  let b: u32 = std_types.meta_cell_put(scratch + to_at2, target);
   let new_count: u64 = count + 1;
-  let c: u32 = meta_cell_put(scratch + 432, new_count);
+  let c: u32 = std_types.meta_cell_put(scratch + 432, new_count);
   return 0;
 }
 
@@ -415,17 +400,17 @@ func meta_scope_generated_size_name(name: addr, name_len: u64) -> bool {
   let enough: bool = name_len >= 6;
   if enough == 0 { return 0; }
   let at: u64 = name_len - 6;
-  let b0: bool = bs_is_byte(name, at, 95);
+  let b0: bool = std_lex.bs_is_byte(name, at, 95);
   let at1: u64 = at + 1;
-  let b1: bool = bs_is_byte(name, at1, 95);
+  let b1: bool = std_lex.bs_is_byte(name, at1, 95);
   let at2: u64 = at + 2;
-  let b2: bool = bs_is_byte(name, at2, 115);
+  let b2: bool = std_lex.bs_is_byte(name, at2, 115);
   let at3: u64 = at + 3;
-  let b3: bool = bs_is_byte(name, at3, 105);
+  let b3: bool = std_lex.bs_is_byte(name, at3, 105);
   let at4: u64 = at + 4;
-  let b4: bool = bs_is_byte(name, at4, 122);
+  let b4: bool = std_lex.bs_is_byte(name, at4, 122);
   let at5: u64 = at + 5;
-  let b5: bool = bs_is_byte(name, at5, 101);
+  let b5: bool = std_lex.bs_is_byte(name, at5, 101);
   let p0: bool = b0 and b1;
   let p1: bool = b2 and b3;
   let p2: bool = b4 and b5;
@@ -437,7 +422,7 @@ func meta_scope_generated_size_name(name: addr, name_len: u64) -> bool {
 func meta_scope_set_emitted(index: u64, v: u64) -> u32 {
   let e: addr = meta_scope_entry(index);
   let p: addr = e + 48;
-  let s: u32 = meta_cell_put(p, v);
+  let s: u32 = std_types.meta_cell_put(p, v);
   return 0;
 }
 
@@ -452,7 +437,7 @@ func meta_scope_name_eq(index: u64, name_src: u64, name_off: u64, name_len: u64)
   let a: addr = base_a + off_a;
   let base_b: addr = lain_meta_source_data(name_src);
   let b: addr = base_b + name_off;
-  let eqb: bool = meta_bytes_equal(a, b, name_len);
+  let eqb: bool = std_types.meta_bytes_equal(a, b, name_len);
   return eqb;
 }
 
@@ -471,39 +456,39 @@ func meta_scope_add(level_start: u64, source: u64, name_off: u64, name_len: u64,
   };
   if dup {
     let dsc: addr = lain_meta_scratch_data();
-    let d0: u64 = meta_cell_get_raw(dsc + 1928);
+    let d0: u64 = std_types.meta_cell_get_raw(dsc + 1928);
     let d1: u64 = d0 + 1;
-    let d2: u32 = meta_cell_put(dsc + 1928, d1);
-    let d3: u32 = meta_cell_put(dsc + 1936, name_off);
+    let d2: u32 = std_types.meta_cell_put(dsc + 1928, d1);
+    let d3: u32 = std_types.meta_cell_put(dsc + 1936, name_off);
     let f0: u32 = lain_meta_fail(16);
     return 16;
   }
   let scratch: addr = lain_meta_scratch_data();
-  let cap: u64 = meta_cell_get(scratch + 80);
+  let cap: u64 = std_types.meta_cell_get(scratch + 80);
   let full: bool = count >= cap;
   if full {
     let f1: u32 = lain_meta_fail(17);
     return 17;
   }
   let e: addr = meta_scope_entry(count);
-  let s0: u32 = meta_cell_put(e, source);
-  let s1: u32 = meta_cell_put(e + 8, name_off);
-  let s2: u32 = meta_cell_put(e + 16, name_len);
-  let s3: u32 = meta_cell_put(e + 24, kind);
-  let s4: u32 = meta_cell_put(e + 32, payload);
-  let s5: u32 = meta_cell_put(e + 40, aux);
-  let s6: u32 = meta_cell_put(e + 48, 0);
+  let s0: u32 = std_types.meta_cell_put(e, source);
+  let s1: u32 = std_types.meta_cell_put(e + 8, name_off);
+  let s2: u32 = std_types.meta_cell_put(e + 16, name_len);
+  let s3: u32 = std_types.meta_cell_put(e + 24, kind);
+  let s4: u32 = std_types.meta_cell_put(e + 32, payload);
+  let s5: u32 = std_types.meta_cell_put(e + 40, aux);
+  let s6: u32 = std_types.meta_cell_put(e + 48, 0);
   let new: u64 = count + 1;
   let scratch2: addr = lain_meta_scratch_data();
-  let s7: u32 = meta_cell_put(scratch2 + 88, new);
+  let s7: u32 = std_types.meta_cell_put(scratch2 + 88, new);
   return 0;
 }
 
 // 按名字找，从表尾往前（最内层优先）。返回条目下标；没有返回 NOT_FOUND。
 func meta_scope_find(name_addr: addr, name_len: u64) -> u64 {
   let scratch: addr = lain_meta_scratch_data();
-  let root: u64 = meta_cell_get(scratch + 96);
-  let current: u64 = meta_cell_get(scratch + 104);
+  let root: u64 = std_types.meta_cell_get(scratch + 96);
+  let current: u64 = std_types.meta_cell_get(scratch + 104);
   let count: u64 = meta_scope_count();
   let found: u64 = loop s(i: u64 = count) {
     let more: bool = i > 0;
@@ -516,9 +501,9 @@ func meta_scope_find(name_addr: addr, name_len: u64) -> u64 {
       let off: u64 = meta_scope_word(k, 8);
       let p: addr = meta_scope_name_at(src, off);
       let have: u64 = meta_scope_word(k, 16);
-      let sf3: u64 = meta_cell_get(p);
+      let sf3: u64 = std_types.meta_cell_get(p);
       let same_len: bool = have == name_len;
-      let eqb: bool = meta_bytes_equal(p, name_addr, name_len);
+      let eqb: bool = std_types.meta_bytes_equal(p, name_addr, name_len);
       let hit: bool = visible and same_len and eqb;
       if hit { break s(k); }
       continue s(i - 1);
@@ -549,14 +534,14 @@ func meta_scope_has_source(source: u64) -> bool {
 // 进出一份源码的作用域。链是 [root, 当前]，所以只需要存一个「当前」。
 func meta_scope_enter(source: u64) -> u64 {
   let scratch: addr = lain_meta_scratch_data();
-  let old: u64 = meta_cell_get(scratch + 104);
-  let s1: u32 = meta_cell_put(scratch + 104, source);
+  let old: u64 = std_types.meta_cell_get(scratch + 104);
+  let s1: u32 = std_types.meta_cell_put(scratch + 104, source);
   return old;
 }
 
 func meta_scope_set_current(source: u64) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
-  let s1: u32 = meta_cell_put(scratch + 104, source);
+  let s1: u32 = std_types.meta_cell_put(scratch + 104, source);
   return 0;
 }
 
@@ -571,18 +556,18 @@ func meta_scope_name_at(source: u64, off: u64) -> addr {
 // 名字节点跟在关键字后面。
 func meta_scope_name_of(parent: u64, index: u64) -> u64 {
   let n_i: u64 = index + 1;
-  let count: u64 = ast_child_count(parent);
+  let count: u64 = std_parse.ast_child_count(parent);
   let has: bool = n_i < count;
   if has == 0 { return 0; }
-  return ast_child(parent, n_i);
+  return std_parse.ast_child(parent, n_i);
 }
 
 // `struct X { ... }` / `enum X { ... }`：payload 记声明自己的节点。
 func meta_scope_add_decl(base: addr, len: u64, source: u64, level_start: u64, parent: u64, index: u64, kind: u64) -> u32 {
-  let node: u64 = ast_child(parent, index);
+  let node: u64 = std_parse.ast_child(parent, index);
   let name_node: u64 = meta_scope_name_of(parent, index);
-  let n_lo: u64 = meta_node_start(name_node);
-  let n_len: u64 = meta_node_len(name_node);
+  let n_lo: u64 = std_parse.meta_node_start(name_node);
+  let n_len: u64 = std_parse.meta_node_len(name_node);
   let st: u32 = meta_scope_add(level_start, source, n_lo, n_len, kind, node, parent);
   let added: bool = st == 0;
   if added {
@@ -595,17 +580,17 @@ func meta_scope_add_decl(base: addr, len: u64, source: u64, level_start: u64, pa
 
 // `let NAME = <初始化式>`：payload 记初始化式那个节点。
 func meta_scope_add_let(base: addr, len: u64, source: u64, level_start: u64, parent: u64, index: u64) -> u32 {
-  let node: u64 = ast_child(parent, index);
+  let node: u64 = std_parse.ast_child(parent, index);
   let name_node: u64 = meta_scope_name_of(parent, index);
-  let n_lo: u64 = meta_node_start(name_node);
-  let n_len: u64 = meta_node_len(name_node);
-  let count: u64 = ast_child_count(parent);
+  let n_lo: u64 = std_parse.meta_node_start(name_node);
+  let n_len: u64 = std_parse.meta_node_len(name_node);
+  let count: u64 = std_parse.ast_child_count(parent);
   let tail_i: u64 = index + 2;
   let eq_i: u64 = loop findeq(j: u64 = tail_i) {
     let jmore: bool = j < count;
     if jmore {
-      let jk: u64 = ast_child(parent, j);
-      let jhit: bool = meta_node_is_word(jk, base, symbol_addr("meta_kw_eq_storage"), 1);
+      let jk: u64 = std_parse.ast_child(parent, j);
+      let jhit: bool = std_parse.meta_node_is_word(jk, base, std_lex.meta_kw_eq, 1);
       if jhit { break findeq(j); }
       continue findeq(j + 1);
     } else {
@@ -614,23 +599,23 @@ func meta_scope_add_let(base: addr, len: u64, source: u64, level_start: u64, par
   };
   let rhs_i: u64 = eq_i + 1;
   let rhs_room: bool = rhs_i < count;
-  let rhs: u64 = if rhs_room { ast_child(parent, rhs_i) } else { 0 };
+  let rhs: u64 = if rhs_room { std_parse.ast_child(parent, rhs_i) } else { 0 };
   let gone: bool = rhs == 0;
   if gone {
     let a: u32 = meta_scope_add(level_start, source, n_lo, n_len, 3, 0, 0);
     return a;
   }
-  let is_import: bool = meta_node_is_word(rhs, base, symbol_addr("meta_kw_import_storage"), 6);
+  let is_import: bool = std_parse.meta_node_is_word(rhs, base, std_modules.meta_kw_import, 6);
   if is_import {
     let grp_i: u64 = rhs_i + 1;
     let grp_room: bool = grp_i < count;
-    let grp: u64 = if grp_room { ast_child(parent, grp_i) } else { 0 };
-    let str: u64 = meta_node_child(grp);
-    let st_off: u64 = meta_node_start(str);
+    let grp: u64 = if grp_room { std_parse.ast_child(parent, grp_i) } else { 0 };
+    let str: u64 = std_parse.meta_node_child(grp);
+    let st_off: u64 = std_parse.meta_node_start(str);
     let lp: u64 = st_off + 1;
     let lp_len: u64 = meta_logical_len_of(str);
     let path: addr = base + lp;
-    let idx: u64 = meta_source_find(path, lp_len);
+    let idx: u64 = std_modules.meta_source_find(path, lp_len);
     let miss: bool = idx == 0xFFFFFFFFFFFFFFFF;
     if miss {
       let f: u32 = lain_meta_fail(11);
@@ -639,16 +624,16 @@ func meta_scope_add_let(base: addr, len: u64, source: u64, level_start: u64, par
     let b: u32 = meta_scope_add(level_start, source, n_lo, n_len, 1, idx, lp);
     return b;
   }
-  let rhs_lo: u64 = meta_node_start(rhs);
-  let tbl_b: u8 = bs_byte_at(base, rhs_lo, len);
+  let rhs_lo: u64 = std_parse.meta_node_start(rhs);
+  let tbl_b: u8 = std_lex.bs_byte_at(base, rhs_lo, len);
   let tbl_w: u32 = tbl_b as u32;
   let tbl_v: bool = tbl_w == 91;
   if tbl_v == 0 {
     let cp: u32 = meta_scope_add(level_start, source, n_lo, n_len, 3, rhs, 0);
     return cp;
   }
-  let tc: u64 = meta_table_count(base, len, rhs);
-  let tt: u64 = meta_table_elt_esz(base, len, parent, tail_i, eq_i);
+  let tc: u64 = std_handlers_let.meta_table_count(base, len, rhs);
+  let tt: u64 = std_handlers_let.meta_table_elt_esz(base, len, parent, tail_i, eq_i);
   let ta: u32 = meta_scope_add(level_start, source, n_lo, n_len, 3, rhs, tc);
   let tok: bool = ta == 0;
   if tok == 0 { return ta; }
@@ -660,41 +645,41 @@ func meta_scope_add_let(base: addr, len: u64, source: u64, level_start: u64, par
 
 // `"std::math"` 这个节点里，引号之间有多少字节。
 func meta_logical_len_of(str: u64) -> u64 {
-  let n: u64 = meta_node_len(str);
+  let n: u64 = std_parse.meta_node_len(str);
   let two: u64 = n - 2;
   return two;
 }
 
 // 预扫顶层形式，把绑定记进表。level_start 是本次那一层的起点。
 func meta_scope_scan(base: addr, len: u64, source: u64, level_start: u64) -> u32 {
-  let root: u64 = meta_root_of(source);
+  let root: u64 = std_parse.meta_root_of(source);
   let s: u32 = meta_scope_scan_root(base, len, source, level_start, root);
   return s;
 }
 
 // 候选根尚未发布时也可登记声明；调用方负责联合提交或恢复作用域表。
 func meta_scope_scan_root(base: addr, len: u64, source: u64, level_start: u64, root: u64) -> u32 {
-  let count: u64 = ast_child_count(root);
+  let count: u64 = std_parse.ast_child_count(root);
   let ss0: addr = lain_meta_scratch_data();
   let sso: u64 = source * 32;
   let ssa: u64 = sso + 1540;
-  let ssp0: u32 = meta_cell_put(ss0 + ssa, count);
+  let ssp0: u32 = std_types.meta_cell_put(ss0 + ssa, count);
   let ssb: u64 = sso + 1548;
-  let ssp1: u32 = meta_cell_put(ss0 + ssb, root);
+  let ssp1: u32 = std_types.meta_cell_put(ss0 + ssb, root);
   let ssc: u64 = sso + 1556;
-  let ssp2: u32 = meta_cell_put(ss0 + ssc, 1);
+  let ssp2: u32 = std_types.meta_cell_put(ss0 + ssc, 1);
   let esc: addr = lain_meta_scratch_data();
-  let es0: u32 = meta_cell_put(esc + 1984, source);
-  let en0: u64 = meta_cell_get_raw(esc + 1992);
+  let es0: u32 = std_types.meta_cell_put(esc + 1984, source);
+  let en0: u64 = std_types.meta_cell_get_raw(esc + 1992);
   let en1: u64 = en0 + 1;
-  let es1: u32 = meta_cell_put(esc + 1992, en1);
+  let es1: u32 = std_types.meta_cell_put(esc + 1992, en1);
   let first_i: u64 = 0 + 0;
   let st: u32 = loop forms(i: u64 = 0) {
     let more: bool = i < count;
     if more == 0 { break forms(0); }
-    let node: u64 = ast_child(root, i);
-    let here: u64 = meta_node_start(node);
-    let handler: u64 = meta_syntax_lookup(node, 1, level_start, 1);
+    let node: u64 = std_parse.ast_child(root, i);
+    let here: u64 = std_parse.meta_node_start(node);
+    let handler: u64 = std_syntax.meta_syntax_lookup(node, 1, level_start, 1);
     let is_macro: bool = handler == 11;
     let any: bool = (handler != 0) and (is_macro == 0);
     if any == 0 {
@@ -706,20 +691,20 @@ func meta_scope_scan_root(base: addr, len: u64, source: u64, level_start: u64, r
       continue forms(i + 1);
     }
     let qsc: addr = lain_meta_scratch_data();
-    let qs0: u32 = meta_cell_put(qsc + 1960, source);
-    let qs1: u32 = meta_cell_put(qsc + 1968, i);
-    let qn0: u64 = meta_cell_get_raw(qsc + 1976);
+    let qs0: u32 = std_types.meta_cell_put(qsc + 1960, source);
+    let qs1: u32 = std_types.meta_cell_put(qsc + 1968, i);
+    let qn0: u64 = std_types.meta_cell_get_raw(qsc + 1976);
     let qn1: u64 = qn0 + 1;
-    let qs2: u32 = meta_cell_put(qsc + 1976, qn1);
-    let d: u32 = meta_declare_invoke(handler, base, len, source, level_start, root, i);
+    let qs2: u32 = std_types.meta_cell_put(qsc + 1976, qn1);
+    let d: u32 = std_declarations.meta_declare_invoke(handler, base, len, source, level_start, root, i);
     if d != 0 { break forms(d); }
     continue forms(i + 1);
   };
   let sdc: addr = lain_meta_scratch_data();
   let sdt: u64 = st as u64;
-  let sda: u32 = meta_cell_put(sdc + 1944, sdt);
+  let sda: u32 = std_types.meta_cell_put(sdc + 1944, sdt);
   let sdb: u64 = meta_scope_count();
-  let sdd: u32 = meta_cell_put(sdc + 1952, sdb);
+  let sdd: u32 = std_types.meta_cell_put(sdc + 1952, sdb);
   return st;
 }
 
@@ -733,8 +718,8 @@ func meta_scope_type_id(name_addr: addr, name_len: u64) -> u64 {
   let kind: u64 = meta_scope_kind(i);
   let is_struct_type: bool = kind == 4;
   let is_sum_type: bool = kind == 5;
-  if is_struct_type { return meta_record_type_id(i); }
-  if is_sum_type { return meta_sum_type_id(i); }
+  if is_struct_type { return std_records.meta_record_type_id(i); }
+  if is_sum_type { return std_sums.meta_sum_type_id(i); }
   return 0xFFFFFFFFFFFFFFFF;
 }
 
@@ -746,35 +731,35 @@ func meta_commit_decl_candidate(source: u64, old_root: u64, new_root: u64, tx: u
   let off: u64 = meta_bump_alloc(bytes);
   if off == 0xFFFFFFFFFFFFFFFF {
     let rb0: u32 = lain_meta_ast_tx_rollback(tx);
-    let s0: u32 = meta_syntax_state_put(8, syntax_mark);
+    let s0: u32 = std_syntax.meta_syntax_state_put(8, syntax_mark);
     return 17;
   }
   let scratch: addr = lain_meta_scratch_data();
   let backup: addr = scratch + off;
-  let base_off: u64 = meta_cell_get(scratch + 72);
+  let base_off: u64 = std_types.meta_cell_get(scratch + 72);
   let table: addr = scratch + base_off;
-  let old_env: u64 = meta_cell_get(scratch + 96);
-  let old_current: u64 = meta_cell_get(scratch + 104);
+  let old_env: u64 = std_types.meta_cell_get(scratch + 96);
+  let old_current: u64 = std_types.meta_cell_get(scratch + 104);
   let copied: u32 = loop save(i: u64 = 0) {
     let smore: bool = i < bytes;
     if smore {
-      let sv: u64 = meta_cell_get(table + i);
-      let sw: u32 = meta_cell_put(backup + i, sv);
+      let sv: u64 = std_types.meta_cell_get(table + i);
+      let sw: u32 = std_types.meta_cell_put(backup + i, sv);
       continue save(i + 8);
     } else {
       break save(0);
     }
   };
   let clear: u32 = meta_scope_release(0);
-  let set_env: u32 = meta_cell_put(scratch + 96, 0xFFFFFFFFFFFFFFFF);
+  let set_env: u32 = std_types.meta_cell_put(scratch + 96, 0xFFFFFFFFFFFFFFFF);
   let level: u64 = meta_scope_count();
   let set_current: u32 = meta_scope_set_current(source);
   let base: addr = lain_meta_source_data(source);
   let len: u64 = lain_meta_source_length(source);
   let candidate: u32 = meta_scope_scan_root(base, len, source, level, new_root);
-  let body_phase: u32 = if candidate == 0 { meta_cell_put_raw(symbol_addr("meta_expand_decl_phase_storage"), 0) } else { 0 };
-  let final_root: u64 = if candidate == 0 { meta_expand_root(new_root) } else { 0 };
-  let dependency: u64 = if (candidate == 0) and (final_root == 0) { meta_expand_defer_get() } else { 0 };
+  let body_phase: u32 = if candidate == 0 { std_types.meta_cell_put_raw(std_expand.meta_expand_decl_phase, 0) } else { 0 };
+  let final_root: u64 = if candidate == 0 { std_expand.meta_expand_root(new_root) } else { 0 };
+  let dependency: u64 = if (candidate == 0) and (final_root == 0) { std_expand.meta_expand_defer_get() } else { 0 };
   let host: u64 = if (candidate == 0) and (final_root == 0) and (dependency == 0) { lain_meta_status() } else { 0 };
   let commit_v: u32 = if (candidate == 0) and (final_root != 0) { lain_meta_ast_commit(source, old_root, final_root, tx) } else { 0 };
   let status: u32 = loop pick(s: u32 = 0) {
@@ -787,8 +772,8 @@ func meta_commit_decl_candidate(source: u64, old_root: u64, new_root: u64, tx: u
     let restored: u32 = loop restore(i: u64 = 0) {
       let rmore: bool = i < bytes;
       if rmore {
-        let rv: u64 = meta_cell_get(backup + i);
-        let rw: u32 = meta_cell_put(table + i, rv);
+        let rv: u64 = std_types.meta_cell_get(backup + i);
+        let rw: u32 = std_types.meta_cell_put(table + i, rv);
         continue restore(i + 8);
       } else {
         break restore(0);
@@ -802,7 +787,7 @@ func meta_commit_decl_candidate(source: u64, old_root: u64, new_root: u64, tx: u
         let zeroed: u32 = loop zero(j: u64 = 0) {
           let jmore: bool = j < 56;
           if jmore {
-            let zw: u32 = meta_cell_put(entry + j, 0);
+            let zw: u32 = std_types.meta_cell_put(entry + j, 0);
             continue zero(j + 8);
           } else {
             break zero(0);
@@ -814,11 +799,11 @@ func meta_commit_decl_candidate(source: u64, old_root: u64, new_root: u64, tx: u
       }
     };
     let old_count: u32 = meta_scope_release(count);
-    let env: u32 = meta_cell_put(scratch + 96, old_env);
-    let current: u32 = meta_cell_put(scratch + 104, old_current);
-    let syntax: u32 = meta_syntax_state_put(8, syntax_mark);
+    let env: u32 = std_types.meta_cell_put(scratch + 96, old_env);
+    let current: u32 = std_types.meta_cell_put(scratch + 104, old_current);
+    let syntax: u32 = std_syntax.meta_syntax_state_put(8, syntax_mark);
     let rb: u32 = lain_meta_ast_tx_rollback(tx);
-    let deferred: u64 = meta_expand_defer_get();
+    let deferred: u64 = std_expand.meta_expand_defer_get();
     if deferred == 0 {
       let fail: u32 = lain_meta_fail(status);
     }

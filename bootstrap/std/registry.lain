@@ -1,17 +1,16 @@
-extern meta_cell_get(p: addr) -> u64 = meta_cell_get;
-extern meta_cell_put(p: addr, v: u64) -> u32 = meta_cell_put;
+// 模块：类型注册表（intern / 布局查询）。跨单元引用一律写 `别名.名字`。
+let std_types = import("types");
+
 extern lain_meta_type_publish(e: addr) -> u64 = lain_meta_type_publish;
 extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
 extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
-extern bs_repr_size(k: u64, w: u64) -> u64 = bs_repr_size;
-extern bs_repr_align(k: u64, w: u64) -> u64 = bs_repr_align;
 
 let meta_reg_count_off: ro [u8] = [0, 2, 0, 0, 0, 0, 0, 0];
 let meta_reg_base_state: [u8] = [0, 0, 0, 0, 0, 0, 0, 0];
 let meta_path_cap: ro [u8] = [96, 1, 0, 0, 0, 0, 0, 0];
 
 func meta_reg_entry(scratch: addr, index: u64) -> addr {
-  let b0: u64 = meta_cell_get(symbol_addr("meta_reg_base_state_storage"));
+  let b0: u64 = std_types.meta_cell_get(symbol_addr("meta_reg_base_state_storage"));
   let unset: bool = b0 == 0;
   let base_off: u64 = if unset { 520 } else { b0 };
   let base: addr = scratch + base_off;
@@ -21,20 +20,20 @@ func meta_reg_entry(scratch: addr, index: u64) -> addr {
 }
 
 func meta_reg_lookup(scratch: addr, kind: u64, owner: u64, ns: u64) -> u64 {
-  let count: u64 = meta_cell_get(scratch + 512);
+  let count: u64 = std_types.meta_cell_get(scratch + 512);
   let found: u64 = loop s(i: u64 = 0) {
     if i < count {
       let e: addr = meta_reg_entry(scratch, i);
-      let k: u64 = meta_cell_get(e + 8);
-      let o: u64 = meta_cell_get(e + 32);
-      let n: u64 = meta_cell_get(e + 40);
+      let k: u64 = std_types.meta_cell_get(e + 8);
+      let o: u64 = std_types.meta_cell_get(e + 32);
+      let n: u64 = std_types.meta_cell_get(e + 40);
       let k_ok: bool = k == kind;
       let o_ok: bool = o == owner;
       let n_ok: bool = n == ns;
       let t1: bool = k_ok and o_ok;
       let hit: bool = t1 and n_ok;
       if hit {
-        let id: u64 = meta_cell_get(e);
+        let id: u64 = std_types.meta_cell_get(e);
         break s(id);
       }
       continue s(i + 1);
@@ -52,8 +51,8 @@ func meta_intern(kind: u64, owner: u64, ns: u64, rk: u64, rw: u64) -> u64 {
   if hit {
     return id;
   }
-  let cap: u64 = meta_cell_get(scratch + 64);
-  let count: u64 = meta_cell_get(scratch + 512);
+  let cap: u64 = std_types.meta_cell_get(scratch + 64);
+  let count: u64 = std_types.meta_cell_get(scratch + 512);
   let full: bool = count >= cap;
   if full {
     let f: u32 = lain_meta_fail(15);
@@ -61,21 +60,21 @@ func meta_intern(kind: u64, owner: u64, ns: u64, rk: u64, rw: u64) -> u64 {
   }
   let e: addr = meta_reg_entry(scratch, count);
   let new_id: u64 = count + 1;
-  let s0: u32 = meta_cell_put(e, new_id);
-  let s1: u32 = meta_cell_put(e + 8, kind);
-  let s2: u32 = meta_cell_put(e + 16, rk);
-  let s3: u32 = meta_cell_put(e + 24, rw);
-  let s4: u32 = meta_cell_put(e + 32, owner);
-  let s5: u32 = meta_cell_put(e + 40, ns);
-  let s6: u32 = meta_cell_put(e + 48, 0);
-  let s7: u32 = meta_cell_put(e + 56, 0);
-  let s8: u32 = meta_cell_put(scratch + 512, new_id);
+  let s0: u32 = std_types.meta_cell_put(e, new_id);
+  let s1: u32 = std_types.meta_cell_put(e + 8, kind);
+  let s2: u32 = std_types.meta_cell_put(e + 16, rk);
+  let s3: u32 = std_types.meta_cell_put(e + 24, rw);
+  let s4: u32 = std_types.meta_cell_put(e + 32, owner);
+  let s5: u32 = std_types.meta_cell_put(e + 40, ns);
+  let s6: u32 = std_types.meta_cell_put(e + 48, 0);
+  let s7: u32 = std_types.meta_cell_put(e + 56, 0);
+  let s8: u32 = std_types.meta_cell_put(scratch + 512, new_id);
   let published: u64 = lain_meta_type_publish(e);
   let done: bool = published != 0;
   if done {
     return new_id;
   }
-  let rollback: u32 = meta_cell_put(scratch + 512, count);
+  let rollback: u32 = std_types.meta_cell_put(scratch + 512, count);
   return 0;
 }
 
@@ -88,7 +87,7 @@ func meta_tid_word(id: u64, off: u64) -> u64 {
   let i: u64 = id - 1;
   let e: addr = meta_reg_entry(scratch, i);
   let p: addr = e + off;
-  let v: u64 = meta_cell_get(p);
+  let v: u64 = std_types.meta_cell_get(p);
   return v;
 }
 
@@ -136,7 +135,7 @@ func meta_tid_size(id: u64) -> u64 {
   }
   let rk: u64 = meta_tid_repr_kind(id);
   let rw: u64 = meta_tid_repr_width(id);
-  let s: u64 = bs_repr_size(rk, rw);
+  let s: u64 = std_types.bs_repr_size(rk, rw);
   return s;
 }
 
@@ -151,6 +150,6 @@ func meta_tid_align(id: u64) -> u64 {
   }
   let rk: u64 = meta_tid_repr_kind(id);
   let rw: u64 = meta_tid_repr_width(id);
-  let a: u64 = bs_repr_align(rk, rw);
+  let a: u64 = std_types.bs_repr_align(rk, rw);
   return a;
 }
