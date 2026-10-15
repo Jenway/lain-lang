@@ -506,6 +506,22 @@ bool Lowerer::lowerIndexExpr(const ast::IndexExpr *e, TypeId expectedTy,
         if (w >= 8) scale = w / 8u;
       }
     }
+  } else if (e->base && e->base->kind == ast::ExprKind::Dotted) {
+    // 跨模块表 M.NAME[i]：元素宽度从成员表里的**声明类型**取 —— 成员的值类型
+    // 是访问器返回的 addr，看不出元素宽度（§3.6）。
+    const auto *d = static_cast<const ast::DottedExpr *>(e->base);
+    if (d->object && d->object->kind == ast::ExprKind::Name) {
+      const auto *en = static_cast<const ast::NameExpr *>(d->object);
+      auto it = sema_->moduleMembers.find(std::string(en->name) + "." +
+                                          std::string(d->member));
+      if (it != sema_->moduleMembers.end()) {
+        const TypeId elem = types_->elementOf(it->second.declType);
+        if (elem != kInvalidType) {
+          const uint32_t w = types_->width(elem);
+          if (w >= 8) scale = w / 8u;
+        }
+      }
+    }
   }
 
   const L1Type *addrTy = types_->lain(types_->builtin("addr"));

@@ -639,7 +639,14 @@ public:
           if (t == dep->sema.topLevelTypes.end()) break;
           ModuleMember mm{};
           mm.kind = ModuleMember::Kind::Value;
-          mm.type = t->second;
+          // §3.6：`M.NAME` 降级成对访问器过程的调用，所以成员的值类型必须是
+          // 访问器真正返回的类型。发数据块的那三种初值（表 / 字节串 / 顶层聚合
+          // 构造）走 buildAccessor，返回 #addr —— 声明成 addr 才能让
+          // `M.NAME + i` 与 `store(M.NAME + i, v)` 落到既有地址算术上；
+          // 其余初值发的是取值过程，返回声明类型（`let a: u64 = M.answer;`）。
+          mm.type = dep->sema.topLevelData.count(q) != 0 ? ts_.builtin("addr")
+                                                         : t->second;
+          mm.declType = t->second;
           // 静态 let 的访问器过程名就是它发出的符号名。
           auto sym = dep->sema.topLevelSymbols.find(q);
           mm.mangled = sym == dep->sema.topLevelSymbols.end() ? q : sym->second;

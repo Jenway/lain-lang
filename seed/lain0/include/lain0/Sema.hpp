@@ -90,9 +90,16 @@ struct ModuleContext {
 struct ModuleMember {
   enum class Kind { Value, Type, Func } kind = Kind::Value;
   std::string_view name{};
+  // 值成员的类型是**访问器真正返回的类型**（§3.6）：数据块（表 / 字节串 /
+  // 顶层聚合）的访问器返回 #addr，于是 `M.NAME + i`、`store(M.NAME + i, v)`
+  // 走既有地址算术；其余静态 let 的访问器是值过程，返回它的声明类型。
+  // 与同模块的 `bind(name, addr)` 对齐（那条路只覆盖数据块）。
   TypeId type = kInvalidType;
   std::string mangled{}; // 值绑定：`<mod>__<name>` 的过程名（owning，因为登记时
                          // 来自临时 SemaResult 的 key，不能留 string_view 悬垂）
+  // 静态 let 的**声明类型**：`M.NAME[i]` 的元素步长要从它取 —— type 已经是
+  // 访问器返回的 addr 时看不出元素宽度了。
+  TypeId declType = kInvalidType;
 };
 
 class TypeStore {
