@@ -14,18 +14,18 @@
 ## D-001 — 冻结 bootstrap，新语言工作转入 lain0
 
 **What**
-从今起冻结 `bootstrap/`：不在 bootstrap 里新增任何 surface Lain 特性。所有新的语言工作（语法、类型、降级、特性）一律进入 `lain0/`。
+冻结手写 LAINIR bootstrap，不再往里面追加 surface Lain 特性；新的语言特性（语法、类型、降级）一律进入 `seed/lain0/`。冻结期结束后，`bootstrap/` 由 Lain 源码重写为 Meta 库，手写 IR 档案已删除。
 
 **Why**
-lain0 已经能够很好地替代 bootstrap，且已把它该承担的角色"耗尽"（depleted）——继续在 bootstrap 上叠加特性只会让两份实现长期分叉、维护成本翻倍。
+lain0 已经能够很好地替代手写 bootstrap，且已把它该承担的角色用尽——继续在手写 IR 上叠加特性只会让两份实现长期分叉、维护成本翻倍。
 
 **How**
-- `bootstrap/` 目录：保留现有内容，只修 bug，不再扩建 surface 特性。
-- 新特性：一律在 `lain0/`（源码 `lain0/src/`、契约头 `lain0/include/lain0/`、计划 `lain0/TASKS.md`）实现，经 `feat/lain0` 推进。
-- 验收口径沿用 `bootstrap/lain/examples/*.lain` 作回归集，但新增用例应落到 lain0 自己的测试/样例体系。
+- 手写 IR 已从仓库删除；`bootstrap/` 现在是 Lain 写的 Meta 库，模块集合由入口 `bootstrap/meta.lain` 顺 import 求闭包得到。
+- 语言特性在 `seed/lain0/`（源码 `seed/lain0/src/`、契约头 `seed/lain0/include/lain0/`）。
+- 回归集是 `bootstrap/lain/examples/*.lain`。
 
 **Status**
-采纳
+已完成
 
 ## D-002 — 统一 call 与 addr：过程即地址，地址即位模式
 
@@ -46,11 +46,11 @@ lain0 已经能够很好地替代 bootstrap，且已把它该承担的角色"耗
 
 **How**
 - LAINIR 算子表（`docs/01-lain-ir.md`）：删除 `proc_addr` / `data_addr` / `int2ptr` / `ptr2int` 行；`call` 改为接受「符号（`@name`）」或「带括号签名标注的地址值」两种形式；`bitcast` 增加 `addr ↔ bits<N>` 用法。
-- 落点（IR 层变更，波及 seed）：`seed/include/lain/ir/codes.h`（算子枚举/opcode）、`build.h`（构造 API）、`text/print.h` + `text/parse.h`（文本往返），以及 lain0 的发射端（`LowerExpr.cpp` / `LowerDecl.cpp` 的 call / 指针降级）与 `bootstrap/lain/examples` 里用到这些算子的用例。
-- 注意：这是 **IR 层面的改动**，不是单纯 Lain 语言特性；按 D-001 新语言工作进 lain0，但本决策要先动 seed 与 docs/01，需与 lain0 的 call / 指针发射端同步排期。
+- 落点（IR 层变更，波及 seed）：`seed/kernel/include/lain/ir/codes.h`（算子枚举/opcode）、`seed/kernel/include/lain/ir/build.h`（构造 API）、`seed/kernel/include/lain/text/print.h` + `seed/kernel/include/lain/text/parse.h`（文本往返），以及 lain0 的发射端（`seed/lain0/src/LowerExpr.cpp` / `LowerDecl.cpp` 的 call / 指针降级）与 `bootstrap/lain/examples` 里用到这些算子的用例。
+- 注意：这是 **IR 层面的改动**；按 D-001 新语言工作进 lain0，但本决策要先动 seed 与 docs/01，需与 lain0 的 call / 指针发射端同步排期。
 
 **Status**
-已完成（seed IR 层 opcode 已移除并统一为 `#call` + `#bitcast[#addr]`；lain0 发射端已切换；bootstrap 按 D-001 冻结、未迁移）
+已完成（seed IR 层 opcode 已移除并统一为 `#call` + `#bitcast[#addr]`；lain0 发射端已切换）
 
 ## D-003 — 保证尾调用：`#call[tail] @f(...)`
 
@@ -61,14 +61,14 @@ lain0 已经能够很好地替代 bootstrap，且已把它该承担的角色"耗
 %r = #call[tail] @f(...)      // 符号形式；值形式同理：#call[tail][(sig)] %f(...)
 ```
 
-要求实现端**必须**按尾调用处理（复用当前栈帧、不产生新帧），而不是「尽力优化」。
+要求实现端**必须**按尾调用处理（复用当前 stack 帧、不产生新帧），不能把它当成「尽力优化」。
 
 **Why**
-尾递归 / 相互尾调用在 Lain 这种降级到扁平 LAINIR 的语言里很常见，需要一种 IR 级的契约让后端**必须**做尾调用优化。普通 `#call` 是否尾化是后端自由裁量的事，无法在 IR 层表达「这里必须尾调」；没有这个保证，深递归会栈溢出，且行为不可预测。
+尾递归 / 相互尾调用在 Lain 这种降级到扁平 LAINIR 的语言里很常见，需要一种 IR 级的契约让后端**必须**做尾调用优化。普通 `#call` 是否尾化是后端自由裁量的事，无法在 IR 层表达「这里必须尾调」；没有这个保证，深递归会让 stack 溢出，且行为不可预测。
 
 **How**
-- LAINIR 算子表（`docs/01-lain-ir.md`）：`call` 增加 `tail` 修饰形式，并写明语义约束——调用点必须是过程的最后一个动作（其后再无计算，仅接 `#return` 或自身即终结点），否则 `lainir_verify` 确定性拒绝；后端必须复用栈帧、禁止新建帧，无法保证时确定性拒绝，不得悄悄退化为普通调用。
-- 落点（IR 层，波及 seed）：`codes.h`（`call` 的 tail 标志 / opcode 变体）、`build.h`（`lainir_inst_call` 增加 tail 参数或独立构造）、`text/print.h` + `text/parse.h`（文本 `[tail]`）、`verify.c`（校验 tail 调用位置合法性）、解释器/编译后端 `engine`（实际复用帧）。
+- LAINIR 算子表（`docs/01-lain-ir.md`）：`call` 增加 `tail` 修饰形式，并写明语义约束——调用点必须是过程的最后一个动作（其后再无计算，仅接 `#return` 或自身即终结点），否则 `lainir_verify` 确定性拒绝；后端必须复用 stack 帧、禁止新建帧，无法保证时确定性拒绝，不得悄悄退化为普通调用。
+- 落点（IR 层，波及 seed）：`seed/kernel/include/lain/ir/codes.h`（`call` 的 tail 标志 / opcode 变体）、`seed/kernel/include/lain/ir/build.h`（`lainir_inst_call` 增加 tail 参数或独立构造）、`seed/kernel/include/lain/text/print.h` + `seed/kernel/include/lain/text/parse.h`（文本 `[tail]`）、`seed/kernel/src/ir/verify.c`（校验 tail 调用位置合法性）、解释器/编译后端 `engine`（实际复用帧）。
 - lain0：发射端在尾位置（return 前的 call、或作为表达式语句的尾调用）选用 `#call[tail]`；与 D-002 的 call 形式一致。
 - 注意：属 IR 层改动，与 D-002 强耦合，应一并排期。
 
@@ -78,15 +78,15 @@ lain0 已经能够很好地替代 bootstrap，且已把它该承担的角色"耗
 ## D-004 — 模块命名空间与导出名（`@root`）
 
 **What**
-模块命名空间。每个模块的顶层声明发出 `<模块键>__<名字>`，模块键由源根相对路径去掉 `.lain` 后把 `/` 换成 `_` 得到；发出**平坦名**的少数声明保持平坦，供宿主按名字查找（原来是「根名清单」承载，现已改由声明自己的 `@root` 标注承载）；跨模块访问一律写 `M.名字`，`symbol_addr` 只管本模块的静态数据。
+模块命名空间。每个模块的顶层声明发出 `<模块键>__<名字>`，模块键由源根相对路径去掉 `.lain` 后把 `/` 换成 `_` 得到；发出**平坦名**的少数声明保持平坦，供宿主按名字查找，由声明自己的 `@root` 标注决定；跨模块访问一律写 `M.名字`，`symbol_addr` 只管本模块的静态数据。
 
 **Why**
-内核按平坦字符串解析名字，模块前缀是让两个模块的同名声明共存的最小手段。「清单承载顺序与根名，使整份模块的产物只由清单决定」这一条**已被 `docs/proposal-modules-v2.md` 取代**：每模块各出各的，顺序不再需要承载；根名改为声明的 `@root` 标注；模块集合由入口 `bootstrap/meta.lain` 顺 import 求闭包。前缀方案与「跨模块一律 `M.名字`」两条不变。
+内核按平坦字符串解析名字，模块前缀是让两个模块的同名声明共存的最小手段。模块集合由入口 `bootstrap/meta.lain` 顺 import 求闭包，每模块各出各的，顺序不参与产物；根名由声明的 `@root` 标注决定。前缀方案与「跨模块一律 `M.名字`」两条不变。
 
 **How**
-`Program` 一次加载整个依赖图并两轮分析，`Lowerer` 把全部模块降级；`scripts/build_meta_unit.py` 只负责调用 CLI。（步 2 起：带 `@root` 的声明发平坦名；步 3 起：按入口 `--entry … --split` 每模块一份产出，驱动 `--units-dir` 按目录装载，`bootstrap/SOURCE_ORDER` 删除。）
+`Program` 一次加载整个依赖图并两轮分析，`Lowerer` 把全部模块降级；`scripts/build_meta_unit.py` 只负责调用 CLI。带 `@root` 的声明发平坦名；`lain0 --entry … --split` 每模块一份产出，驱动 `--units-dir` 按目录装载。
 
 **Status**
-采纳（第 1–4 步已落地并验证：`lain0 --entry bootstrap/meta.lain --split build/lain0/units/` 零诊断、连跑两次**整批指纹**一致（`ef2f198c12a36bd44ee040dcf1e06f928759c49697afdd9bc1144b28ebd4f977`）；回归 38/38；Meta 管线 `host_status=0` / `region grants=2` / `output bytes=74`，与 `build/arith.out` 逐字节相同。规范面见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》，取代项与后续步骤见 `docs/proposal-modules-v2.md`）
+采纳（已实现并验证：`lain0 --entry bootstrap/meta.lain --split build/lain0/units/` 零诊断、连跑两次**整批指纹**一致（`ef2f198c12a36bd44ee040dcf1e06f928759c49697afdd9bc1144b28ebd4f977`）；回归 38/38；Meta 管线 `host_status=0` / `region grants=2` / `output bytes=74`，与 `build/arith.out` 逐字节相同。规范面见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》，后续步骤见 `docs/proposal-modules-v2.md`）
 
 <!-- 决策在此逐条追加 -->

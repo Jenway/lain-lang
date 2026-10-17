@@ -47,8 +47,7 @@ build/lain-meta.exe --units-dir build/lain0/units/ \
 装载来源**二选一、必填**：`--unit <清单>`（每行一个 LAINIR 路径，驱动会给每行前缀
 `bootstrap/`）或 `--units-dir <目录>`（装载目录里所有 `.l1`，按文件名排序 = 模块键排序）。
 两者都不给 → 退出码 2 + 提示；都给 → 退出码 2 + `--unit 与 --units-dir 互斥`。
-**没有默认值** —— 旧的默认值 `bootstrap/SOURCE_ORDER` 是假的（那是 Lain 源码的模块
-清单，不是 LAINIR 单元清单），且那份清单已在步 3 删除（`docs/proposal-modules-v2.md` §六）。
+没有默认值，必须显式给出一个。
 
 | 选项 | 默认 | 说明 |
 | :--- | :--- | :--- |
@@ -59,7 +58,7 @@ build/lain-meta.exe --units-dir build/lain0/units/ \
 | `--out <文件>` | 无 | 产物文本落盘 |
 | `--fuel` | 按已登记源码规模推导 | 执行指令上限；给出时以给出的为准 |
 | `--slice` | 2000000 | 每次引擎推进的片长 |
-| `--stack` | 4194304 | 栈租约字节数 |
+| `--stack` | 4194304 | stack 租约字节数 |
 | `--quota` | 268435456 | 字节配额，0 表示不限额 |
 | `--caps` / `--depth` | 64 / 64 | 能力表项数与调用深度 |
 | `--expect-status <n>` | 无 | 要求最终 host_status 等于 n，否则退出 1 |
@@ -131,15 +130,12 @@ host_status=N`、`region grants=N`、`output bytes=N`，可直接被脚本断言
 `unit files=28 bytes=568387`、`verify subroutines=870 data=216`、`output bytes=74`，
 arith 产物与 `build/arith.out` 逐字节相同。
 
-当前 **38** 个样例（`bootstrap/lain/examples/*.lain`：35 个旧样例 + `modules_twin_a` /
-`modules_twin_b` / `modules_twin`）。两套口径的数字不同，别混：
+当前 **38** 个样例（`bootstrap/lain/examples/*.lain`：35 个基础样例 + `modules_twin_a` /
+`modules_twin_b` / `modules_twin`）。两套口径的数字不同：
 
 - **lain0 全量回归**：`bash scripts/regress.sh` 与 `--round-trip` 都是 **PASS=38 FAIL=0**。
-- **Meta 管线**（`lain-meta` 编译表面源码；判据是 `host_status=0` **且**产物过 `lainir_parse` +
-  `lainir_verify`）：**26 通过 / 12 失败** —— `jumps`、`loop`、`loop_if`、`loop_local`、
-  `loop_value`（产物被截断，装回去报 `PARSE FAILED 3001`）、`modules_lib`、`modules_main`、
-  `modules_twin`（Meta 的 import 降级缺口）、`refs`、`strinline`、`symbol_addr`、`u8math`。
-  旧的 5 个红样例（`symbol_addr` / `u8math` / `refs` / `strinline` / `modules_main`）仍然红，
-  诊断见 `docs/plan-meta-lain.md` 的「阶段 3」与「新判据下的真实进度」；只按「Meta 有没有跑完」
-  数则是 31/38。这些缺口与 `--unit` 一次只报一个诊断的实现局限记在 `docs/plan-meta-lain.md`
-  的待办里。
+- **Meta 管线**（`lain-meta` 编译表面源码；判据是 `host_status=0` 且无 trap）：38 个样例中
+  26 个通过。12 个失败：`jumps`、`loop`、`loop_if`、`loop_local`、`loop_value` 以 trap
+  status 1004 结束、产物被截断；`modules_lib`（host_status=4）、`modules_main`（11）、
+  `modules_twin`（11）、`refs`（5）、`strinline`（4）、`symbol_addr`（9415）、`u8math`（6）
+  返回非零 host_status。诊断记录在 `docs/selfhost-gap.md`。

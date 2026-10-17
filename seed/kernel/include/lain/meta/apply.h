@@ -10,7 +10,7 @@
 #include "lain/vm/caps.h"
 
 /* 拒绝码；段边界见 lain/ir/codes.h。
- * 9340 起是对 Meta 可见的公开拒码，bootstrap/std 下的 .l1 按号码读它们；
+ * 9340 起是对 Meta 可见的公开拒码，bootstrap/std 下的 .lain 按号码读它们；
  * 9302 起是执行前与执行期的原因码，宿主原样转给 Meta。 */
 enum {
   LAINMETA_APPLY_ERR_ENTRY_NOT_FOUND = 9302,

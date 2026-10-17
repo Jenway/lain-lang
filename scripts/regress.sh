@@ -9,7 +9,8 @@ while [ "$dir" != "/" ] && [ ! -d "$dir/bootstrap/lain/examples" ]; do dir="$(di
 cd "$dir" || exit 1
 
 EXE=./build/lain0/lain0.exe
-if [ ! -x "$EXE" ]; then echo "找不到 $EXE —— 先编译 lain0"; exit 1; fi
+[ -x "$EXE" ] || EXE=./build/lain0/lain0
+if [ ! -x "$EXE" ]; then echo "找不到 build/lain0/lain0 —— 先编译 lain0"; exit 1; fi
 
 FLAGS="${1:-}"
 pass=0; fail=0; ok=""; bad=""

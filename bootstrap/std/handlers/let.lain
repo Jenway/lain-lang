@@ -1,8 +1,6 @@
-// let 声明处理器 —— 由 bootstrapl1/std/handlers/let.l1 翻译成 Lain 表面语法。
-// 三种落法：静态字节块（字符串字面量）、定长同质表、普通绑定。
-// 旧 IR 里「支里再套值 if」的地方改写成逐条守卫 + continue/break（表面语言的值 if
-// 支前缀只认 let / store，不能写 if），语义逐条对应。
 // 模块：let / ro 声明处理器。跨单元引用一律写 `别名.名字`。
+//
+// 三种落法：静态字节块（字符串字面量）、定长同质表、普通绑定。
 let meta = import("../../meta");
 let std_lainir = import("../lainir");
 let std_lex = import("../lex");
@@ -13,14 +11,12 @@ let std_scalars = import("../scalars");
 let std_scope = import("../scope");
 let std_syntax = import("../syntax");
 
-extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
 extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
 // `ref` 是表面语言的保留字，做不了参数名，这里改名 ref_v（链接名不变）。
 
 // 顶层 let 声明处理器。
 func meta_register_let(node: u64) -> u32 {
-  let dummy: addr = lain_meta_source_data(0);
-  let hit: bool = std_parse.meta_node_is_word(node, dummy, std_lex.meta_kw_let, 3);
+  let hit: bool = std_parse.meta_node_is_word(node, std_lex.meta_kw_let, 3);
   if hit == 0 { return 0; }
   let decl: u32 = std_syntax.meta_syntax_ensure(node, 1, 7);
   if decl != 0 { return decl; }
@@ -67,7 +63,7 @@ func meta_lower_static_bytes(base: addr, len: u64, name_lo: u64, name_hi: u64, a
     let w5: u32 = std_lainir.lainir_emit_uint(cv);
     let w6: u32 = std_lainir.lainir_space_write();
     let is_esc: bool = cw == 92;
-    // 旧 IR 的 %nxt 值 if：esc 前进 2（转义对整对原样搬），否则 1。
+    // 转义对整对原样搬，跳过两个字节。
     if is_esc {
       let esc_at: u64 = i + 1;
       let c2: u8 = std_lex.bs_byte_at(base, esc_at, len);
@@ -96,7 +92,7 @@ func meta_lower_static_bytes(base: addr, len: u64, name_lo: u64, name_hi: u64, a
 //
 // 元素必须是整数字面量，装不下 T 报 23；T 只认标量表里有的标量（repr kind 0）。
 // 元素个数与每个元素的字节数记在作用域条目的 aux 与 emitted 上（见
-// std/scope.l1 的 meta_scope_add_let），索引与 len 查表即得。
+// std/scope.lain 的 meta_scope_add_let），索引与 len 查表即得。
 
 // 类型标注组 [T] 里那个 T 的类型 id；解析不出来回 0。
 func meta_table_elt_tid(base: addr, len: u64, ann: u64) -> u64 {
@@ -110,7 +106,6 @@ func meta_table_elt_tid(base: addr, len: u64, ann: u64) -> u64 {
 
 // 表标注 `[T]` / `ro [T]`（父组上从 from 扫到 eq_i）里 T 的每元素字节数；
 // 找不到、或 T 不是标量表里有的标量，回 0。
-// 旧 IR 把「命中就取值、否则下一个孩子」写成嵌套值 if；这里等价地写成守卫。
 func meta_table_elt_esz(base: addr, len: u64, parent: u64, from: u64, eq_i: u64) -> u64 {
   let esz: u64 = loop scan(j: u64 = from) {
     let more: bool = j < eq_i;
@@ -147,7 +142,7 @@ func meta_table_count(base: addr, len: u64, grp: u64) -> u64 {
       let b: u8 = std_lex.bs_byte_at(base, c_lo, len);
       let bw: u32 = b as u32;
       let is_comma: bool = bw == 44;
-      // 旧 IR 的 %acc2 值 if：逗号不加，别的加一。
+      // 逗号不计入元素个数。
       if is_comma {
         continue elts(i + 1, acc);
       }
@@ -224,7 +219,7 @@ func meta_lower_table(base: addr, len: u64, name_lo: u64, name_hi: u64, colon_at
     let b0: u8 = std_lex.bs_byte_at(base, c_lo, len);
     let b0w: u32 = b0 as u32;
     let is_comma: bool = b0w == 44;
-    // 逗号不是元素；旧 IR 的 %one 值 if 在这里就是「跳过」。
+    // 逗号不算元素，跳过。
     if is_comma { continue elts(i + 1); }
     let lit: bool = meta.meta_is_int_literal(base, c_lo, c_hi, len);
     if lit == 0 {

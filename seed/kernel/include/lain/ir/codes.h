@@ -14,9 +14,9 @@
  *   91xx  TCB 拒绝码（vm/tcb）                       lain/vm/tcb.h
  *   92xx  后端拒绝码（backend/cbackend）             lain/backend/emit.h
  *   93xx  apply 拒绝码（meta/apply 与其宿主）         lain/meta/apply.h
- *   94xx  AstOut 与 Meta 库共享码                    lain/meta/ast_v1.h、bootstrap/std 下的 .l1
+ *   94xx  AstOut 与 Meta 库共享码                    lain/meta/ast_v1.h、bootstrap/std 下的 .lain
  *
- * 93xx 与 94xx 同时被 C 侧和 Meta 侧（bootstrap/std 的 .l1）读取，是跨语言契约：
+ * 93xx 与 94xx 同时被 C 侧和 Meta 侧（bootstrap/std 的 .lain）读取，是跨语言契约：
  * 只能新增，不能改义，也不能挪号。
  */
 #ifndef LAINIR_CODES_H

@@ -44,7 +44,6 @@ func lain_std_lower(source: u64) -> u32 {
     let ft: u32 = lain_meta_fail(3);
     return 3;
   }
-  // 诊断（宿主槽 30）：入口标记。用来确认 trace 通道本身是否工作。
   let reset: u32 = lain_meta_emit_reset();
   // 先认领 scratch 的固定区与 bump 区。Expand 自身需要有界临时帧；它不消费
   // 这次预扫描产生的语义结果。提交新 Root 后立即重新 setup，从新树重建所有表。
@@ -59,7 +58,7 @@ func lain_std_lower(source: u64) -> u32 {
   // 作用域表要先建：外层是 root 环境，内层是这份源码。
   let setup: u32 = std_scope.meta_scope_setup(1);
   let ok: bool = setup == 0;
-  // 值 if 之后还有无条件执行的 peak / reported，所以用一次性选择循环而不是守卫。
+  // 值 if 之后还有无条件执行的 peak / reported，所以用一次性选择循环，不走守卫。
   let status: u32 = loop pick_status(t: u64 = 0) {
     if ok {
       let len: u64 = lain_meta_source_length(source);
@@ -133,8 +132,6 @@ func meta_lower_struct(base: addr, len: u64, kw_at: u64) -> u32 {
   let name_lo: u64 = std_lex.bs_skip_space(base, after, len);
   let name_hi: u64 = std_lex.bs_skip_ident(base, name_lo, len);
   let has_name: bool = name_lo < name_hi;
-  // 旧 IR 的 %status 值 if：支里还嵌着 %inner / %s / %code 三层值 if，结果直接
-  // 喂给 #return。改成平坦守卫：has_name 不成立就是旧 IR 的 else 支（fail(4) + 4）。
   if has_name == 0 {
     let f0: u32 = lain_meta_fail(4);
     return 4;
@@ -253,8 +250,6 @@ func meta_lower_let(base: addr, len: u64, let_at: u64) -> u32 {
 func meta_lower_binding(base: addr, len: u64, name_lo: u64, name_hi: u64) -> u32 {
   let at: u64 = std_lex.bs_skip_space(base, name_hi, len);
   let is_eq: bool = std_lex.bs_is_byte(base, at, 61);
-  // 旧 IR 的 %is_import 是 bool 值 if（真支算关键字匹配，假支裸 0），结果只喂给语句
-  // if：改成平坦守卫。is_eq 不成立时旧 IR 直接走 else 支，这里跳过整块。
   if is_eq {
     let one: u64 = at + 1;
     let kw_at: u64 = std_lex.bs_skip_space(base, one, len);
@@ -265,7 +260,6 @@ func meta_lower_binding(base: addr, len: u64, name_lo: u64, name_hi: u64) -> u32
       return s0;
     }
   }
-  // 旧 IR 的 %status 值 if（支里嵌着 %s1，%s1 支里再嵌 %s）结果喂给 #return。
   let is_colon: bool = std_lex.bs_is_byte(base, at, 58);
   if is_colon {
     let after: u64 = at + 1;
@@ -319,7 +313,6 @@ func meta_lower_typed(base: addr, len: u64, name_lo: u64, name_hi: u64, t_lo: u6
   };
   let eq_at: u64 = std_lex.bs_skip_space(base, resume, len);
   let is_eq: bool = std_lex.bs_is_byte(base, eq_at, 61);
-  // 旧 IR 的 %status 值 if（支里嵌着 %inner）结果直接喂给 #return：改成平坦守卫。
   if is_eq == 0 {
     let f1: u32 = lain_meta_fail(4);
     return 4;
@@ -355,7 +348,7 @@ func meta_emit_value(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64
     return bytes_st;
   }
   // 取表地址：`let X: addr = NAME;`（值只有一个名字 token，且 NAME 是当前作用域
-  // 里的表绑定）。不是表就走原来的路 —— 这里只看，不改别处的行为。
+  // 里的表绑定）。其余情况按普通表达式处理 —— 这里只看，不改别处的行为。
   let tab_esz: u64 = meta_scope_table_esz(base, len, lhs_lo, lhs_hi);
   let tab_is: bool = tab_esz != 0;
   if tab_is {
@@ -507,9 +500,8 @@ func meta_literal_fits(base: addr, len: u64, ref_v: u64, lo: u64, hi: u64, kind:
 
 func meta_at_semi(base: addr, at: u64, len: u64) -> bool {
   let p: u64 = std_lex.bs_skip_space(base, at, len);
-  // 用 `bs_byte_at`（越界给 0）而不是 `bs_is_byte`：源码没有以 `;` 收尾时
-  // `bs_skip_space` 会返回 `len`，而 `bs_is_byte` 在 `len` 处是**越界读**——
-  // 那会被 VM 以 trap 1004 拒掉。响是响了，但那是崩溃，不是诊断。
+  // 用 `bs_byte_at`（越界给 0）：源码没有以 `;` 收尾时 `bs_skip_space` 会返回
+  // `len`，而 `bs_is_byte` 在 `len` 处是**越界读**，会被 VM 以 trap 1004 拒掉。
   let b: u8 = std_lex.bs_byte_at(base, p, len);
   let b_w: u32 = b as u32;
   let r: bool = b_w == 59;
@@ -522,8 +514,7 @@ func meta_emit_numeric(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u
   let f_grp: bool = form == 2;
   let is_expr: bool = f_bin or f_grp;
   if is_expr {
-    // 整段交给表达式发射器。它自己走到 `;`，吃到不该有的东西就报错；调用方不再替它
-    // 检查尾巴。
+    // 整段交给表达式发射器。它自己走到 `;`，吃到不该有的东西就报错。
     let s: u32 = meta_emit_chain(base, len, name_lo, name_hi, kind, width, t_lo, t_hi, lhs_lo, lhs_hi);
     return s;
   }
@@ -535,8 +526,8 @@ func meta_emit_numeric(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u
     let ft2: u32 = lain_meta_fail(4);
     return 4;
   }
-  // 常量装不装得进声明的类型？`let main: i8 = 300;` 曾经静默截断成 44 ——
-  // 这条路的出参只有源码区间，没有「引用」，所以按「源码那段」查。
+  // 常量装不装得进声明的类型？这条路的出参只有源码区间，没有「引用」，
+  // 所以按「源码那段」查。
   let lfit: u32 = meta_literal_fits(base, len, 0xFFFFFFFFFFFFFFFF, lhs_lo, lhs_hi, kind, width);
   let lbad: bool = lfit != 0;
   if lbad {
@@ -556,7 +547,7 @@ func meta_emit_call(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64,
   let name_len: u64 = name_hi - name_lo;
   let w2: u32 = std_lainir.lainir_write(name_at, name_len);
   let w3: u32 = std_lainir.lainir_empty_params_write();
-  let w4: u32 = std_emit.meta_emit_repr(kind, width);
+  let w4: u32 = std_lainir.lainir_repr(kind, width);
   let w5: u32 = std_lainir.lainir_open_body();
   // 头写完了，现在降级实参。被调用者的下一个孩子就是实参那个组 —— 「位置 ->
   // 同一个父组里的下一项」，不是靠节点引用找兄弟。
@@ -589,10 +580,10 @@ func meta_emit_let(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64, 
   let name_len: u64 = name_hi - name_lo;
   let w2: u32 = std_lainir.lainir_write(name_at, name_len);
   let w3: u32 = std_lainir.lainir_empty_params_write();
-  let w4: u32 = std_emit.meta_emit_repr(kind, width);
+  let w4: u32 = std_lainir.lainir_repr(kind, width);
   let w5: u32 = std_lainir.lainir_body_return_write();
   let value: u64 = std_lex.bs_read_uint(base, num_lo, len);
-  let w6: u32 = std_emit.meta_emit_uint(value);
+  let w6: u32 = std_lainir.lainir_emit_uint(value);
   let w7: u32 = std_lainir.lainir_close_body();
   return 0;
 }
@@ -603,7 +594,7 @@ func meta_emit_chain(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64
   let name_len: u64 = name_hi - name_lo;
   let w2: u32 = std_lainir.lainir_write(name_at, name_len);
   let w3: u32 = std_lainir.lainir_empty_params_write();
-  let w4: u32 = std_emit.meta_emit_repr(kind, width);
+  let w4: u32 = std_lainir.lainir_repr(kind, width);
   let w5: u32 = std_lainir.lainir_open_body();
   let idx: u64 = std_recognize.meta_cursor_of_at(base, first_lo);
   let parent: u64 = std_recognize.meta_cursor_parent();
@@ -618,8 +609,7 @@ func meta_emit_chain(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64
   let z1: u32 = std_lainir.lainir_return_write();
   let rlo: u64 = std_types.meta_cell_get(scratch + 176);
   let rhi: u64 = std_types.meta_cell_get(scratch + 184);
-  // 整个值就是一个字面量时，看它装不装得进这个类型（`let main: i8 = 300;` 曾经
-  // 静默截断成 44）。
+  // 整个值就是一个字面量时，看它装不装得进这个类型。
   let cfit: u32 = meta_literal_fits(base, len, ref_v, rlo, rhi, kind, width);
   let cbad: bool = cfit != 0;
   if cbad {
@@ -913,8 +903,6 @@ func meta_after_operand(base: addr, len: u64, parent: u64, index: u64) -> u64 {
   } else {
     nx
   };
-  // 旧 IR 的 %r/%r2 值 if 链（每一层的 else 支里嵌着下一层）结果直接喂给 #return：
-  // 改成平坦守卫，次序与旧 IR 相同 —— 只有前一层不命中才算后一层的条件。
   // 点号形态至少占三格（值、点号、成员名）：成员后面跟 `(` 时那个实参组再占一格
   // （`Shape.Circle(s)`）—— 少跳一格会把点号或实参组当成下一个语句。
   let is_bare: bool = k == 13;
@@ -1023,7 +1011,7 @@ func meta_emit_data_addr_line(symbol: addr, symbol_len: u64) -> u64 {
   let p0: u64 = std_lainir.lainir_buf_bytes(buf, 0, std_lainir.lainir_indent, 2);
   let p1: u64 = std_lainir.lainir_buf_temp(buf, p0, tn);
   let p2: u64 = std_lainir.lainir_buf_bytes(buf, p1, std_lainir.lainir_assign, 4);
-  // D-002：数据符号本身就是地址，取址写成 `#bitcast[#addr](%NAME)`；旧拼写 `#data_addr` 已删。
+  // 数据符号本身就是地址，取址写成 `#bitcast[#addr](%NAME)`。
   let p3: u64 = std_lainir.lainir_buf_bytes(buf, p2, std_lainir.lainir_bitcast_addr_head, 16);
   // 块名就是裸名字。
   let p5: u64 = std_lainir.lainir_buf_bytes(buf, p3, symbol, symbol_len);
@@ -1173,7 +1161,7 @@ func meta_emit_len_temp(base: addr, len: u64, kind: u64, width: u64, args: u64) 
 
 func meta_operand_step(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t_hi: u64, parent: u64, index: u64) -> u32 {
   let c0: u64 = std_parse.ast_child(parent, index);
-  let is_if0: bool = std_parse.meta_node_is_word(c0, base, std_lex.meta_kw_if, 2);
+  let is_if0: bool = std_parse.meta_node_is_word(c0, std_lex.meta_kw_if, 2);
   let sc0: addr = lain_meta_scratch_data();
   if is_if0 {
     let tn0: u64 = std_funcs.meta_next_temp();
@@ -1203,8 +1191,7 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
   let st: u32 = loop e(i: u64 = index, have: bool = 0,
                        acc: u64 = 0xFFFFFFFFFFFFFFFF, alo: u64 = 0,
                        ahi: u64 = 0, bound: bool = 0) {
-    // 当前位置的孩子。游标越过末尾时 `ast_child` 回空引用 0 —— 与旧代码里那个
-    // 「无节点」等价，但不再需要伪造一个节点：**末尾是范围，不是节点**。
+    // 当前位置的孩子；游标越过末尾时 `ast_child` 回空引用 0，末尾按范围处理。
     let c: u64 = std_parse.ast_child(parent, i);
     let phase1: bool = have == 0;
     if phase1 {
@@ -1244,8 +1231,7 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
     let any1: bool = isnone2 or issemi2;
     // `,` 也是终点：实参位置上一条表达式到逗号为止（见 `meta_emit_args`）。
     let anyend: bool = any1 or iscomma2;
-    // 归档的 %endok 值 if 里套了三层值 if：改成一次性选择循环，只有走到的那一支求值，
-    // 顺序与副作用与旧 IR 一致。
+    // 只有走到的那一支求值；顺序与副作用保持不变。
     let endok: bool = loop pick_endok(t: bool = 0) {
       if need_semi { break pick_endok(issemi2); }
       if anyend { break pick_endok(1); }
@@ -1281,7 +1267,7 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
       let s2: u32 = std_types.meta_cell_put(sc2 + 176, alo);
       let s3: u32 = std_types.meta_cell_put(sc2 + 184, ahi);
       // 终点**下标**也带出去：调用方（实参那个循环）要靠它找下一个实参从哪开始。
-      // 带下标而不是节点引用 —— 位置是游标的一半，引用不是。
+      // 带的是下标，节点引用在这里不适用：位置是游标的一半。
       let s4: u32 = std_types.meta_cell_put(sc2 + 192, i);
       // 闭合模式在这一条语句的末尾收尾（模式 0 什么都不做，调用方自己收）。
       let cl: u32 = std_funcs.meta_emit_close(base, len, close, bound, acc,
@@ -1337,7 +1323,7 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
       // 验证器不查这个位置的操作数类别，产物能过、值是错的）。
       // 这里没有操作数的下标（累的临时值就是操作数本身），所以按「终点」传。
       let a_addr: bool = atk == 3;
-      let a_saddr: bool = meta_operand_is_addr(base, len, alo, ahi, acc);
+      let a_saddr: bool = meta_operand_is_addr(base, len, alo, ahi);
       let a_cast: bool = a_addr or a_saddr;
       if a_cast {
         let ap: u64 = meta_operand_cast(base, len, parent, i, rtn,
@@ -1419,7 +1405,7 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
         let abound: bool = a_named;
         continue e(anx, 1, atn, 0, 0, abound);
       } else {
-        // `as` 现在只做定宽整数之间的转换
+        // `as` 只做定宽整数之间的转换
         let fa3: u32 = lain_meta_fail(5);
         break e(5);
       }
@@ -1440,8 +1426,6 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
     // **顺序要紧**：右操作数先降级。它可能是括号，会递归，递归里又会
     // `meta_op_resolve` 一次；而 `meta_op_resolve` 把物理算子名放在 `+24`/`+32`，
     // `meta_emit_op_mid` 稍后才读。先查算子再降级的话，名字会被递归那一次覆盖。
-    // 真出过：`let main: i32 = 12 / (2 + 1);` 发成 `%r2 = #add[#bits<32>](12, %r1)`
-    // （该是 `#sdiv`），验证通过，算出来 15 而不是 4。
     let rst: u32 = meta_operand_step(base, len, kind, width, t_lo,
                                      t_hi, parent, rni);
     let rbad: bool = rst != 0;
@@ -1497,7 +1481,6 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
     let l_hit: bool = l_miss3 == 0;
     let r_hit: bool = r_miss == 0;
     let any_hit: bool = l_hit or r_hit;
-    // 归档的 %tlo2 值 if 假支里还套着值 if：改成一次性选择循环。
     let tlo2: u64 = loop pick_tlo2(t: u64 = 0) {
       if l_hit { break pick_tlo2(l_tlo3); }
       if r_hit { break pick_tlo2(r_tlo); }
@@ -1544,7 +1527,7 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
     // `#lea(基址, 下标, 1, 0)`。只认 `+` 一个符号，且操作数的类型得是 addr。
     let sp_b: u8 = std_lex.bs_byte_at(base, bat, len);
     let is_plus: bool = (sp_b as u32) == 43;
-    // **只认左边的地址**：`1 + p` 不是地址算术（换过去是 `#lea(1, %p, 1, 0)`）。
+    // **只认左边的地址**：`1 + p` 不算地址算术，`#lea` 的基址只能来自左操作数。
     let a_tid: u64 = if l_hit {
       let a_t2: u64 = std_scalars.meta_type_resolve(base, len, l_tlo, l_thi);
       a_t2
@@ -1558,7 +1541,6 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
     // `p + i * K`：地址算术把 scale 固定成 1，于是 `p + i * 4` 先算成 `(p + i) * 4`、
     // 在 addr 上报 6。这里就地看出来：右操作数后面紧跟 `* <裸字面量>`，且再往后不是算子。
     // 认出来就把那条乘法挪进 `#lea` 的 scale，游标跳过那两个节点。
-    // 归档的 %lea_k 值 if 里套了四层值 if：改成一次性选择循环，只有走到的那一支求值。
     let lea_k: u64 = loop pick_leak(t: u64 = 0) {
       if is_lea == 0 { break pick_leak(0xFFFFFFFFFFFFFFFF); }
       let m_n: u64 = std_parse.ast_child(parent, rn_nx3);
@@ -1656,8 +1638,8 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
     } else {
       width2
     };
-    // 裸字面量当操作数：装不装得进这条指令的宽度（`let main: i8 = 1 + 300;` 曾经
-    // 静默截断成 44）。量的是 `%kind3/%width3` —— 那才是这条指令真正的类型实参。
+    // 裸字面量当操作数：装不装得进这条指令的宽度。量的是 `%kind3/%width3` ——
+    // 那才是这条指令真正的类型实参。
     let lfit: u32 = meta_literal_fits(base, len, acc, alo, ahi,
                                        kind3, width3);
     let lbadfit: bool = lfit != 0;
@@ -1681,7 +1663,7 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
     let is_bind: bool = close == 1;
     let named: bool = is_bind and last;
     // `  %r<n> = ` 还是 `  %NAME = `。绑定模式的最后一条**直接写名字** —— 这样
-    // `let y: i32 = 1 + 2;` 出来的还是一条指令（与老路径逐字节一样），而不是
+    // `let y: i32 = 1 + 2;` 出来的还是一条指令（与直接发指令的形状一致），不会变成
     // "先 `%r1 = #add(1, 2)` 再复制进 `%y`"。
     let tn: u64 = loop pick_tn(t: u64 = 0) {
       if named {
@@ -1709,7 +1691,7 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
       let q6v: u64 = if lea_mult { lea_k } else { 1 };
       let q6: u32 = std_lainir.lainir_emit_uint(q6v);
       let q7: u32 = std_lainir.lainir_comma_write();
-      let q8: u32 = std_emit.meta_emit_uint(0);
+      let q8: u32 = std_lainir.lainir_emit_uint(0);
       let q9: u32 = std_lainir.lainir_close_paren_write();
       let q10: u32 = std_lainir.lainir_newline_write();
     } else {
@@ -1737,40 +1719,12 @@ func meta_emit_symbol_addr_line(symbol: addr, symbol_len: u64) -> u64 {
   let w2: u32 = std_lainir.lainir_emit_uint(tn);
   let assign: addr = std_lainir.lainir_assign;
   let w3: u32 = std_lainir.lainir_write(assign, 4);
-  // D-002：同上，`#data_addr` 已从算子表移除，这里发 `#bitcast[#addr](%NAME)`。
+  // 数据符号的取址发 `#bitcast[#addr](%NAME)`。
   let head: addr = std_lainir.lainir_bitcast_addr_head;
   let w4: u32 = std_lainir.lainir_write(head, 16);
   let w5: u32 = std_lainir.lainir_write(symbol, symbol_len);
   let w6: u32 = std_lainir.lainir_write(std_lainir.lainir_rparen_nl, 2);
   return tn;
-}
-
-func meta_operand_const(base: addr, len: u64, ref_v: u64, lo: u64, hi: u64) -> u64 {
-  let noref: bool = ref_v == 0xFFFFFFFFFFFFFFFF;
-  let dig: bool = meta_is_int_literal(base, lo, hi, len);
-  let hit: bool = noref and dig;
-  if hit {
-    let pv: u64 = std_lex.bs_read_uint(base, lo, len);
-    return pv;
-  }
-  return 0xFFFFFFFFFFFFFFFF;
-}
-
-func meta_emit_lea_line(temp: u64, base_txt: addr, base_len: u64, idx_txt: addr, idx_len: u64, scale: u64, disp: u64) -> u32 {
-  let w0: u32 = std_lainir.lainir_indent_write();
-  let w1: u32 = std_funcs.meta_emit_temp_name(temp);
-  let w2: u32 = std_lainir.lainir_result_sep_write();
-  let w3: u32 = std_lainir.lainir_lea_head_write();
-  let w4: u32 = std_lainir.lainir_write(base_txt, base_len);
-  let w5: u32 = std_lainir.lainir_comma_write();
-  let w6: u32 = std_lainir.lainir_write(idx_txt, idx_len);
-  let w7: u32 = std_lainir.lainir_comma_write();
-  let w8: u32 = std_emit.meta_emit_uint(scale);
-  let w9: u32 = std_lainir.lainir_comma_write();
-  let w10: u32 = std_emit.meta_emit_uint(disp);
-  let w11: u32 = std_lainir.lainir_close_paren_write();
-  let w12: u32 = std_lainir.lainir_newline_write();
-  return 0;
 }
 
 func meta_emit_cast_temp(target_kind: u64, target_width: u64, text: addr, text_len: u64) -> u32 {
@@ -1812,8 +1766,7 @@ func meta_value_name_window(base: addr, len: u64, lo: u64, hi: u64) -> u64 {
   return lo;
 }
 
-func meta_operand_is_addr(base: addr, len: u64, lo: u64, hi: u64, ref_v: u64) -> bool {
-  let unused: u64 = ref_v + 0;
+func meta_operand_is_addr(base: addr, len: u64, lo: u64, hi: u64) -> bool {
   let n0: u64 = meta_value_name_window(base, len, lo, hi);
   let nsc: addr = lain_meta_scratch_data();
   let hi0: u64 = std_types.meta_cell_get(nsc + 0);
@@ -1829,14 +1782,14 @@ func meta_operand_is_addr(base: addr, len: u64, lo: u64, hi: u64, ref_v: u64) ->
   let sc: addr = lain_meta_scratch_data();
   let s_hi: u64 = std_types.meta_cell_get(sc + 0);
   let s_miss: bool = s_lo2 == 0xFFFFFFFFFFFFFFFF;
-  // 类型名在：走类型解析那条路（原来 %k 值 if 的假支）。
+  // 类型名在：走类型解析那条路。
   if s_miss == 0 {
     let s_tid: u64 = std_scalars.meta_type_resolve(base, len, s_lo2, s_hi);
     let k2: u64 = std_registry.meta_tid_repr_kind(s_tid);
     let is_addr2: bool = k2 == 3;
     return is_addr2;
   }
-  // 类型名不在：查作用域表（原来 %k 值 if 的真支）。
+  // 类型名不在：查作用域表。
   let n_at: addr = base + n0;
   let n_len: u64 = hi0 - n0;
   let ei: u64 = std_scope.meta_scope_find(n_at, n_len);
@@ -1901,9 +1854,7 @@ func meta_operand_cast(base: addr, len: u64, parent: u64, op_index: u64, t_n: u6
   let sc: addr = lain_meta_scratch_data();
   let s_hi: u64 = std_types.meta_cell_get(sc + 0);
   let s_miss: bool = s_lo2 == 0xFFFFFFFFFFFFFFFF;
-  // %s_kind 的归档值 if 支里还有两层 if，结果喂给后面的计算（不是 return）：
-  // 一次性选择循环 pick_kind；两层内层 if 改成平坦守卫（条件按旧 IR 顺序求值，
-  // 只有原来会走到的分支才被求值）。
+  // 只有走到的那一支求值。
   let s_kind: u64 = loop pick_kind(t: u64 = 0) {
     if s_miss {
       let nm_at: addr = base + alo;
@@ -1956,7 +1907,7 @@ func meta_operand_cast(base: addr, len: u64, parent: u64, op_index: u64, t_n: u6
   let nm_len2: u64 = n_hi - n_lo;
   let ei2: u64 = std_scope.meta_scope_find(nm_at2, nm_len2);
   let ef2: bool = ei2 != 0xFFFFFFFFFFFFFFFF;
-  // 归档的 %st2 值 if（真支里有一个 let）结果喂给后面的值 if：一次性选择循环 pick_st2。
+  // 只有走到的那一支求值：一次性选择循环 pick_st2。
   let st2: bool = loop pick_st2(t: u64 = 0) {
     if ef2 {
       let ek2: u64 = std_scope.meta_scope_kind(ei2);

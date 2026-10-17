@@ -1,14 +1,7 @@
-// Expand 调度器 —— 由 bootstrapl1/std/expand.l1 翻译成 Lain 表面语法。
-// 语法绑定在 Meta 内分派，Host 只提供语言无关的 AstOut。
-// 当前 statement 上下文的 my_if / my_block 提供替换入口；声明处理器提供
-// declare/expand-children/lower，表达式处理器与库动态登记留给第三期后续批次。
-//
-// 旧 IR 里「值 if 支里再套值 if」的地方（meta_expand_invoke 的处理器选择、
-// meta_expand_group_inner 的 %answer、meta_expand_source 的 %new_root / %st）
-// 按既有写法（bootstrap/std/declarations.lain、bootstrap/std/scope.lain 的 pick 循环）
-// 改写成平坦守卫或一次性选择循环，语义逐条对应，详见各处注释。
-
 // 模块：宏展开调度器。跨单元引用一律写 `别名.名字`。
+//
+// 语法绑定在 Meta 内分派，Host 只提供语言无关的 AstOut。statement 上下文的
+// my_if / my_block 提供替换入口；声明处理器提供 declare/expand-children/lower。
 let std_declarations = import("declarations");
 let std_macros_my_block = import("macros/my_block");
 let std_macros_my_if = import("macros/my_if");
@@ -18,10 +11,8 @@ let std_scope = import("scope");
 let std_syntax = import("syntax");
 let std_types = import("types");
 
-// 本单元自己的 4 个静态块，旧 IR 写作 data … rw。表面语言里 rw 块写成裸 [u8] 绑定，
-// 取址用 symbol_addr("NAME_storage")：编译器发布的数据符号带 _storage 后缀，
-// 绑定名本身不是符号（见 bootstrap/std/syntax.lain 的 meta_syntax_state 与
-// bootstrap/std/handlers/func.lain 的 meta_expand_decl_phase 取址）。
+// 4 个静态块是展开状态。取址一律写 symbol_addr("NAME_storage")：编译器发布的
+// 数据符号带 `_storage` 后缀，绑定名本身不是符号。
 let meta_expand_defer_state: [u8] = [0, 0, 0, 0, 0, 0, 0, 0];
 let meta_expand_decl_phase: [u8] = [0, 0, 0, 0, 0, 0, 0, 0];
 let meta_expand_decl_state: [u8] = [0, 0, 0, 0, 0, 0, 0, 0];
@@ -148,8 +139,6 @@ func meta_syntax_handler(parent: u64, cursor: u64, env: u64, scope: u64, context
   return id;
 }
 
-// 旧 IR 的第三个参数名是 %ref；`ref` 是表面语言的保留字，做不了参数名，
-// 这里改名 ref_v（本单元自己定义的参数，没有链接名要保）。
 func meta_expand_store_ref(buffer: addr, index: u64, ref_v: u64) -> u32 {
   let off: u64 = index * 8;
   let s: u32 = std_types.meta_cell_put(buffer + off, ref_v);
@@ -157,8 +146,6 @@ func meta_expand_store_ref(buffer: addr, index: u64, ref_v: u64) -> u32 {
 }
 
 // 调用统一 ABI 的处理器；request/result 是本次调用独占的帧。
-// 旧 IR 用三层嵌套值 if 选处理器；改成平坦守卫（命中即 return），
-// 兜底仍是原来的 lain_meta_fail(9412) + 9412。
 func meta_expand_invoke(handler: u64, parent: u64, cursor: u64, context: u64, result: addr) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
   let off: u64 = std_scope.meta_bump_alloc(56);
@@ -261,7 +248,6 @@ func meta_expand_group_inner(group: u64, context: u64) -> u64 {
           break walk(0);
         }
         let consumed: u64 = std_types.meta_cell_get(result + 8);
-        // 旧 IR 这个局部叫 %slice；`slice` 是表面语言的保留字，改名 slice_v。
         let slice_v: u64 = std_types.meta_cell_get(result + 16);
         let rn: u64 = std_types.meta_cell_get(result + 24);
         let diag0: u64 = std_types.meta_cell_get(result + 32);
@@ -334,8 +320,7 @@ func meta_expand_group_inner(group: u64, context: u64) -> u64 {
   }
   let changed_bit: bool = (packed and 0x8000000000000000) != 0;
   let outn2: u64 = packed and 0x7FFFFFFFFFFFFFFF;
-  // 旧 IR 的 %answer 值 if 支里还嵌着 %slice2 值 if；表面语言的值 if 支里不再写 if，
-  // 这里改写成一次性选择循环：未改过就 break 原 group，改过才按原顺序算 slice2/new_group。
+  // 未改过就复用原 group；改过才建 slice2 与 new_group。
   let answer: u64 = loop pick(t: u64 = 0) {
     if changed_bit == 0 { break pick(group); }
     let slice2: u64 = if outn2 == 0 { 0 } else { lain_meta_ast_append_refs(buffer, outn2) };
@@ -379,8 +364,6 @@ func meta_expand_source(source: u64) -> u32 {
   let old_root: u64 = std_parse.meta_root_of(source);
   let decl_root: u64 = meta_expand_root(old_root);
   let decl_changed: u64 = std_types.meta_cell_get(symbol_addr("meta_expand_decl_state_storage"));
-  // 旧 IR 的 %new_root 值 if 支里嵌着 %body_root 值 if（外层只取内层结果）；
-  // 表面语言的值 if 支里不再写 if，这里用一次性选择循环保持同样的求值顺序：
   // 只有 decl_changed == 0 才清 decl_phase 并展开函数体，否则直接用 decl_root。
   let new_root: u64 = loop pick_root(t: u64 = 0) {
     if decl_changed != 0 { break pick_root(decl_root); }
@@ -403,8 +386,6 @@ func meta_expand_source(source: u64) -> u32 {
     return code32;
   }
   let same: bool = new_root == old_root;
-  // 同上：旧 IR 的 %st 值 if 支里嵌着 %commit 值 if，改成一次性选择循环。
-  // 旧 IR 在内层重用了名字 %decl_changed（遮蔽外层），这里改名 decl_changed2。
   let st: u32 = loop pick_st(t: u32 = 0) {
     if same {
       let rb2: u32 = lain_meta_ast_tx_rollback(tx);

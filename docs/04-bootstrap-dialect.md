@@ -1,193 +1,76 @@
 # bootstrap 方言
 
-自举的 stage0 曾是手写 LAINIR 文本（`bootstrap/` 下 28 个文件、13203 行的编译单元，按一份
-模块清单拼装；驱动报 unit files=28 bytes=582254）。**那份手写 IR 已整体删除**，现在
 `bootstrap/` 下是 28 个 Lain 源码模块，由 `lain0 --entry bootstrap/meta.lain --split
-build/lain0/units/` 编成**每个模块一份** LAINIR（装载走驱动的 `--units-dir`；那份清单在步 3
-已删除，见 `docs/proposal-modules-v2.md` §六）。要让 Lain 编译器能编译自己，
-先得有一份**用 Lain 写的 Meta**；写它需要一门表面语言。
-
-这份文档定的是这门方言的特性集合、语法，以及每条语法降成什么 LAINIR。它不是 lainlang
-的完整规范，只是自举所需的最小子集。判据写在前面，因为后面每一条取舍都由它决定。
+build/lain0/units/` 编成**每个模块一份** LAINIR，驱动用 `--units-dir` 装载。这份文档列出
+这门方言的语法、每条语法的降级形状，以及当前仍缺失的形态。LAINIR 的格式见
+`docs/01-lain-ir.md`，Meta 管线的现状见 `docs/selfhost-gap.md`。
 
 ## 判据
 
-- **语言语义不能等于 LAINIR 语义。** 源码里不出现 `#` 形态。否则 IR 改一个算子、
-  改一条区域的 results 规则，就是破坏性的**语言**变更；LAINIR 只是 Meta 与宿主之间的私有 ABI。
-- **验证器不能面对用户输入。** `infer`（宽度唯一来源）与 `verify`（VM 与后端假定的契约）
+- **语言语义独立于 LAINIR 语义。** 源码里不出现 `#` 形态。否则 IR 改一个算子、
+  改一条区域的 results 规则，就会变成破坏性的**语言**变更；LAINIR 只是 Meta 与宿主之间的
+  私有 ABI。
+- **验证器不面对用户输入。** `infer`（宽度唯一来源）与 `verify`（VM 与后端假定的契约）
   成立的代价是「源码只能经 handler 降级到达 IR」。用户能直接写 IR，语言契约就等于整个 IR。
-- **但低层操作必须可达。** 禁的是**透传**，不是低层：`load<u64>(p)` 是语言规定了类型、宽度、
-  对齐、失败码，**然后**由降级决定它变成 `#load[#bits<64>](%p)`；`#load[#bits<64>](%p, 0)`
+- **低层操作必须可达。** 禁的是**透传**：`load<u64>(p)` 由语言规定类型、宽度、地址约束与
+  失败码，**然后**由降级决定它变成 `#load[#bits<64>](%p)`；`#load[#bits<64>](%p, 0)`
   是语言什么都没说。资格线是「这条低层算子，语言有没有替它说话」。
-- **不新增声明语法去描述 IR。** 语言的**知识**（有哪些标量、多宽、算符接到哪个 LAINIR 算子）
-  住在 Meta 库的表里，不住在源码里。语法只用来写**有体**的东西（`func` / `struct` / `enum` /
+- **不新增声明语法去描述 IR。** 语言的知识（有哪些标量、多宽、算符接到哪个 LAINIR 算子）
+  住在 Meta 库的表里，不住在源码里。语法只用来写有体的东西（`func` / `struct` / `enum` /
   `let` / `import`）；没有体的声明只是换个地方抄库表。用户要自定义，走编译期调用库的注册
-  接口，而不是新语法。
-- **唯一的信任门是** `lainir_parse` + `lainir_verify`。源码里没有 `#` 不是安全边界 ——
-  用户宏用同一套发射能力可以生成任意 LAINIR 文本（bootstrap/std/macros/ 今天就在这么干）。
+  接口，不走新语法。
+- **唯一的信任门是** `lainir_parse` + `lainir_verify`。源码里没有 `#` 不构成安全边界 ——
+  用户宏用同一套发射能力可以生成任意 LAINIR 文本（`bootstrap/std/macros/` 就在这么做）。
 
 ## 层 0：发射层
 
-层 0 是一门**用 Lain 写的库**，每个 LAINIR 形态一个函数。它没有类型：宽度是**数字**
-（位数，不是字节），值是**句柄**。
+层 0 是一门**用 Lain 写的库**，每个 LAINIR 形态一个过程。它没有类型：宽度是**数字**
+（单位是位数），值是**句柄**。
 
-- 它面向「正在生成的产物」，不是「我自己」。`lainir_load(v, 8)` = 往产物里追加一条
-  `#load[#bits<8>]`；`load(p)`（层 1）= 读我自己地址空间里 `p` 处的字节。前缀是语义消歧，
-  不是命名习惯 —— Meta 两者都要。
-- **vref** 是发射出的值引用（产物里的 `%name`），不是机器值。它是不透明标量：只由
+- 它面向正在生成的产物：`lainir_load(v, 8)` 往产物里追加一条 `#load[#bits<8>]`；
+  `load(p)`（层 1）读当前地址空间里 `p` 处的字节。前缀用来区分两套语义，Meta 两者都要。
+- **vref** 是发射出的值引用（产物里的 `%name`），是机器值。它是不透明标量：只由
   `lainir_*` 产生、只被 `lainir_*` 消费，不能算术、不能 `as`。
-- 层 0 的实现是 `bootstrap/std/lainir.l1`：`lainir_reset()` 清空产物积存，`lainir_text()` 与 `lainir_length()` 取回文本，其余每个 LAINIR 形态一组 `lainir_*` 过程。处理管线今天发的每一条指令文本都经过它。wire 编解码那一层（原来的 `bootstrap/std/wire.l1`）只被死代码调用，
-已随五的瘦身整文件删掉。
-- 阶段纪律：任何 Lain 代码都能调用层 0（用户宏也能发射任意 IR）；闸门始终是
-  `lainir_parse` + `lainir_verify`。发射能力只登记进编译期那张表。
+- 实现是 `bootstrap/std/lainir.lain`，处理管线发出的每一条指令文本都经过它。清空产物
+  积存由宿主能力 `lain_meta_emit_reset` 承担（`bootstrap/meta.lain` 与
+  `bootstrap/std/records.lain` 直接声明）。
+- 任何 Lain 代码都能调用层 0（用户宏也能发射任意 IR）；闸门始终是
+  `lainir_parse` + `lainir_verify`。
 
 ### 名单
 
-命名规则：`lainir_` + `INST_` 后缀小写（`INST_ADD` → `lainir_add`）。下表中与 IR 有
-出入的形状才逐条写。
+层 0 不按算子逐个包装，而是提供行级写出过程，处理管线按指令形状组合它们。当前有
+91 个过程，按用途分四类：
 
-- 整数算术 `#add #sub #mul #sdiv #udiv #srem #urem` → `lainir_add(a, b, width)` …
-- 位运算 `#and #or #xor #shl #lshr #ashr` → `lainir_and(a, b, width)` …
-- 比较 `#eq #ne #slt #sle #sgt #sge #ult #ule #ugt #uge` → `lainir_eq(a, b, width)` …
-  （结果恒为 1 位）
-- 转换 `#zext #sext #trunc #bitcast` → `lainir_zext(v, width)` …；`#ptr2int` →
-  `lainir_ptr2int(v, width)`（结果编号由调用方给的版本是 `lainir_ptr2int_at(width, temp, v)`）；`#int2ptr` → `lainir_int2ptr(v, width)`（同形 `lainir_int2ptr_at(temp, v)`）；
-  `#fpext #fptrunc #fptosi #fptoui #sitofp #uitofp` → 同形
-- 浮点算术与比较 `#fadd … #fueq …` → 同形
-- 向量 `#vadd … #vcmpgt` → 同形
-- 原子 `#xchg #cmpxchg #rmw_add #rmw_sub #rmw_and #rmw_or #rmw_xor` → 同形
-- 内存
-  - `#lea` → `lainir_lea(base, index, scale, disp)`
-  - `#load` → `lainir_load(ptr, width)`
-  - `#store` → `lainir_store(ptr, value, width)`
-  - `#alloca` → `lainir_alloca(width, count)`
-- 地址 `#data_addr` → `lainir_data_addr(name)`；`#proc_addr` → `lainir_proc_addr(name)`
-- 调用 `#call` → `lainir_call(name, args…)`；`#call_indirect` → `lainir_call_indirect(target, args…)`
-- 控制
-  - `#if` → `lainir_if(cond, results) { … }` / `lainir_else() { … }`
-  - `#loop` → `lainir_loop(label, params, results) { … }`
-  - `#yield` → `lainir_yield(v)`；`#break` → `lainir_break(label, args…)`；
-    `#continue` → `lainir_continue(label, args…)`
-  - `#switch` → `lainir_switch(value, cases) { … }`；`#return` → `lainir_return(v)`
-- 单元 `#proc` → `lainir_proc_begin(name, params, results)` / `lainir_proc_end()`；
-  `#extern` → `lainir_extern(name, link_name, params, results)`；
-  `#data` → `lainir_data(name, bytes)`
-- 产物 `lainir_reset()`、`lainir_text()` —— 取回 canonical 文本，交给
-  `lainir_parse` + `lainir_verify`
-
-> 注：本节引用的层 0 探针单元（`bootstrap/lain/examples/lainir_f*.l1`、清单
-> `bootstrap/lainir_f1_unit.txt`）属于已归档的手写 LAINIR，已随 `bootstrapl1/` 一起在 stage 2
-> 结束时删除；要看原文请走 git 历史（最后一个完整版本见 `5fbe5d5~1`）。它们的覆盖面现在由
-> `bootstrap/std/lainir.lain` + `bootstrap/lain/examples/` 的样例回归承担。
-
-F1 已实现并端到端验收：`bootstrap/std/lainir.l1` 提供 `lainir_reset()`、
-`lainir_text()`、`lainir_length()`、`lainir_proc_begin(name, name_length)`、
-`lainir_return(value)`、`lainir_proc_end()`。当前过程骨架发射无参、返回 `#bits<32>`
-的过程；`lainir_return` 接受非负十进制立即数。样例
-`bootstrap/lain/examples/lainir_f1.l1` 生成 `#proc probe() -> #bits<32> {`、
-`#return 0` 和独立闭合行，产物经 `build\check_unit.exe` 解析与验证通过；驱动
-报告 `host_status=0`、`trap none`。
-
-F2 已实现整数算术、位运算、比较和转换的发射包装：`lainir_add` 至 `lainir_urem`、
-`lainir_and` 至 `lainir_ashr`、`lainir_eq` 至 `lainir_uge`，以及 `lainir_zext`、
-`lainir_sext`、`lainir_trunc`、`lainir_bitcast`、`lainir_ptr2int`、`lainir_int2ptr`。
-`bootstrap/lain/examples/lainir_f2.l1` 覆盖 23 个二元指令和 6 个转换；生成产物
-包含对应指令并通过 `build\check_unit.exe` 的 parse+verify。比较指令携带操作数宽度，
-其结果类型由 verifier 推导为 `#bits<1>`；`#int2ptr` 发射 `#addr` 结果类型。
-16 个既有样例与 F1、F2 探针均报告 `host_status=0`、`trap none`，F1 与 F2 产物
-均通过 `PARSE+VERIFY OK`。Canonical 等价性将在 F5 按解析后的结构比较。
-
-F3 已实现内存、地址与调用的发射包装：`lainir_load(width, address)`、
-`lainir_store(width, value, address)`、`lainir_lea(base, index, scale, disp)`、
-`lainir_alloca(width, count)`、`lainir_data_addr(symbol)`、`lainir_proc_addr(symbol)`、
-`lainir_call(callee, args)`、`lainir_call_indirect(target, args)`，以及 `lainir_data(name, values)`。
-`bootstrap/lain/examples/lainir_f3.l1` 生成 `data f3_probe_data ro { 0 }` 和包含
-`#load`、`#store`、`#lea`、`#alloca`、`#data_addr`、`#proc_addr`、`#call`、`#call_indirect`
-的过程；`#call_indirect` 不携带结果类型（verifier 无法从操作数推导），因此按语句发射。
-产物经 `build\check_unit.exe` 的 parse+verify 通过，驱动报告 `host_status=0`、`trap none`；
-16 个既有样例与 F1、F2、F3 探针全部通过回归。
-
-F4 已实现控制与单元的发射包装：`lainir_if` / `lainir_if_value`（带 `-> (T)`）、
-`lainir_else`、`lainir_end`、`lainir_loop` / `lainir_loop_value`、`lainir_yield`、
-`lainir_break`、`lainir_continue`、`lainir_switch`、`lainir_case`、`lainir_default`，
-以及 `lainir_extern(name, link, params)`。`bootstrap/lain/examples/lainir_f4.l1` 生成
-`data f4_data ro { 0 }`、`#proc f4_ext(%x: #bits<32>) #extern "f4_ext"` 和一个含
-带值与不带值 `#if`/`else`、`#loop`、`#yield`、`#break`、`#continue`、`#switch` 的
-`case`/`default`、`#return`、`#proc` 的过程。层 0 的缩进目前按固定两格写，嵌套层级
-不缩进；F5 的等价性口径按解析后的结构比较，与空白无关。产物经 `build\check_unit.exe`
-的 parse+verify 通过，驱动报告 `host_status=0`、`trap none`，16 个既有样例与 F1-F4 全绿。
-
-F5 的等价性口径是**逐字节相等**：`build/f5_capture.ps1` 把 16 个既有样例逐个跑成
-`build/before/<名字>.out` 与 `build/after/<名字>.out`，两份按 SHA-256 比对，全部相同才算
-等价；`build/f5_compare.ps1` 另有一条去掉行首空白的规范化比对。改动的每一步都跑这条比对。
-
-处理管线的字面文本发射全部由层 0 承担之后，处理管线里只剩宿主原语的调用
-（`lain_meta_emit_write` 本身、`lain_meta_emit_reset`、`lain_meta_emit_scope_begin`）与几个
-转发过程（`bootstrap/std/emit.l1` 的 `meta_emit_repr` / `meta_emit_byte` / `meta_emit_uint`，
-`funcs.l1` 的 `meta_emit_temp_name` / `meta_emit_op_mid` / `meta_emit_op_lit`）。层 0 提供的
-写出器按用途分四类：
-
-- 词素与缓冲区渲染：`lainir_repr` / `lainir_byte` / `lainir_emit_uint` / `lainir_spaces` /
-  `lainir_buf_bytes` / `lainir_buf_uint` / `lainir_buf_temp` / `lainir_buf_repr` /
-  `lainir_text_lea_field`；
-- 指令前缀与具名结果：`lainir_op_prefix` / `lainir_op_prefix_phys` / `lainir_temp_name_emit` /
-  `lainir_load_at` / `lainir_load_named` / `lainir_lea_at` / `lainir_lea_named` /
-  `lainir_alloca_at` / `lainir_binary_phys_at` / `lainir_binary_named_at` /
-  `lainir_binary_op_at` / `lainir_call_named` / `lainir_ret_call` / `lainir_return_ref` /
-  `lainir_return_uint`；
-- 单元与过程骨架：`lainir_proc_head_full` / `lainir_proc_head_open` / `lainir_open_body` /
-  `lainir_close_body` / `lainir_close_brace_write` / `lainir_data_head` / `lainir_data_ro_head` /
-  `lainir_data_rw_head` / `lainir_addr_body_write` / `lainir_base_assign_write` /
-  `lainir_storage_suffix_write` / `lainir_return_base_close` / `lainir_zero_text`；
-- 固定文本片段各自的写出器：`lainir_indent_write` / `lainir_st_pct_write` / `lainir_pct_write` /
-  `lainir_result_sep_write` / `lainir_newline_write` / `lainir_rparen_nl_write` /
-  `lainir_close_paren_write` / `lainir_open_paren_write` / `lainir_comma_write` /
-  `lainir_colon_write` / `lainir_lea_head_write` / `lainir_call_word_write` /
-  `lainir_proc_word_write` / `lainir_empty_params_write` / `lainir_zero_write` /
-  `lainir_store_head_write` / `lainir_extern_marker_write` / `lainir_quote_nl_write` /
-  `lainir_if_head_write` / `lainir_if_head2_write` / `lainir_else_write` /
-  `lainir_close_line_write` / `lainir_close4_write` / `lainir_break_head_write` /
-  `lainir_continue_head_write` / `lainir_result_head_write` / `lainir_loop_head_write` /
-  `lainir_loop_body_open_write` / `lainir_arrow_lp_write` / `lainir_bracket_paren_write` /
-  `lainir_rparen_nl_close_write` / `lainir_body_return_write` / `lainir_ret_call_head_write` /
-  `lainir_bind_head_write` / `lainir_vproj_load_write` / `lainir_vproj_if_write` /
-  `lainir_vproj_lea_write` / `lainir_vproj_value_write` / `lainir_vproj_tail_write`。
-
-改由层 0 发射的形态：字段 store、load、lea、循环体的二元运算与步进、循环条件的比较、直接
-调用与 return 调用、过程头与参数表（含 `#extern` 的链接名）、模块包装、静态字节块、记录与
-枚举的静态存储、构造过程、字段访问过程、枚举变体过程、值 if 的头尾与 `#yield`、`#break`
-与 `#continue` 的循环体、`as` 转换、地址加整数、负数字面量。
-
-`bootstrap/std/emit.l1` 的 `data` 模板随之从 88 个减到 30 个。删掉的 58 个里，39 个能对上
-字节相同的层 0 块（其中若干由两三个写出器拼出同样的字节），19 个在删除前就已经没有任何
-调用点，是更早几轮重写的遗留。删除前按词边界扫描全仓库（`.l1` 与 `.lain`）的
-`#data_addr <名字>` 确认无引用。删除后的产物与删除前逐字节相同（`diffcount=0`，规范化比对
-同样为 0），16 个样例全部 `host_status=0`、`trap none`，四个层 0 探针产物照旧
-`PARSE+VERIFY OK`。
-
-今天 `build/f5_compare.ps1` 对两个样例报 DIFF，两条都是有意的语义改动：
-
-- `jumps`：循环体的顺序可见性修好后（见下文的 D 一节），`first` 的产物把 `#break L1(%acc)`
-  换成 `#break L1(%r3)`（`%r3` 就是刚写下的 `acc + i`），`early` 的实参同理。
-- `locals`：栈上地址不再当返回值（见下文《二、半成品》的逃逸一条），样例改成「构造后交给
-  同帧内的 `pair_a`」并多了一个读字段的过程，产物因此整体重写。
-
-其余 14 个样例仍逐字节相同。
-
-`bootstrap/std/lainir.l1` 共 149 个 `lainir_*` 过程。按全仓库（`bootstrap/` 下的 `.l1` 与
-`.lain`）的名字引用统计，只有 6 个不被 `lainir.l1` 之外的代码引用（`lainir_address_line`、
-`lainir_binary`、`lainir_line_start`、`lainir_next_temp`、`lainir_spaces`、`lainir_unary`），
-它们是库内部共用的片段。
-
-F6 把这条「等价」放在独立调用方上验收：`bootstrap/lain/examples/lainir_f6.l1` 的 `f6_probe`
-用层 0 的 API 重发处理管线在 `bootstrap/lain/examples/locals.lain` 上产出的整份单元
-（`Pair__a_offset` / `Pair__b_offset` / `Pair__size` 三个过程、`mk` / `mk2` / `two` 三个构造
-过程、`data origin_storage rw` 与 `origin` 过程）。驱动报 `host_status=0`、`trap none`、
-`output bytes=1251`，产物过 `build\check_unit.exe` 的 parse+verify，且与管线产物
-`build/after/locals.out` 的 SHA-256 相同。16 个既有样例的产物（`build/after/<名字>.out`）
-逐个过 `build\check_unit.exe`。`build/reg.ps1` 把这两条都断言下来：样例循环要求
-`host_status=0`、`trap none` 且产物 parse+verify 通过，F6 段另外要求 `f6_probe` 的产物与
-`build/after/locals.out` 逐字节相同。
+- **底层写出**：`lainir_write`（唯一直接追加文本的过程）、`lainir_byte`、`lainir_emit_uint`、
+  `lainir_spaces`、`lainir_repr`、`lainir_buf_bytes`、`lainir_buf_byte`、`lainir_buf_uint`、
+  `lainir_buf_temp`、`lainir_buf_repr`、`lainir_text_lea_field`。
+- **指令与行前缀**：`lainir_op_prefix`、`lainir_op_prefix_phys`、`lainir_temp_name_emit`、
+  `lainir_load_at`、`lainir_load_at_i`、`lainir_load_named`、`lainir_store`、`lainir_lea_at`、
+  `lainir_lea_at_i`、`lainir_lea_named`、`lainir_alloca_at`、`lainir_binary_phys_at`、
+  `lainir_binary_named_at`、`lainir_binary_op_at`、`lainir_binary_op_named`、
+  `lainir_call_named`、`lainir_ret_call`、`lainir_return_ref`、`lainir_return_uint`、
+  `lainir_ptr2int_at`、`lainir_int2ptr_at`。D-002 之后地址与整数统一走 `#bitcast`，
+  `lainir_ptr2int_at` / `lainir_int2ptr_at` 内部发的就是 `#bitcast`。
+- **单元与过程骨架**：`lainir_proc_head_full`、`lainir_proc_head_open`、`lainir_open_body`、
+  `lainir_close_body`、`lainir_data_head`、`lainir_data_ro_head`、`lainir_data_rw_head`、
+  `lainir_data_rw_bare_head`、`lainir_data_close`、`lainir_addr_body_write`、
+  `lainir_base_assign_write`、`lainir_storage_suffix_write`、`lainir_return_base_close`、
+  `lainir_zero_text`。
+- **固定文本片段各自的写出器**：`lainir_indent_write`、`lainir_indent4_write`、
+  `lainir_st_pct_write`、`lainir_pct_write`、`lainir_result_sep_write`、`lainir_newline_write`、
+  `lainir_rparen_nl_write`、`lainir_rparen_nl_close_write`、`lainir_close_paren_write`、
+  `lainir_open_paren_write`、`lainir_comma_write`、`lainir_colon_write`、`lainir_lea_head_write`、
+  `lainir_call_word_write`、`lainir_proc_word_write`、`lainir_empty_params_write`、
+  `lainir_zero_write`、`lainir_store_head_write`、`lainir_extern_marker_write`、
+  `lainir_quote_nl_write`、`lainir_if_head_write`、`lainir_if_head2_write`、`lainir_else_write`、
+  `lainir_close_line_write`、`lainir_close4_write`、`lainir_break_head_write`、
+  `lainir_continue_head_write`、`lainir_result_head_write`、`lainir_loop_head_write`、
+  `lainir_loop_body_open_write`、`lainir_arrow_lp_write`、`lainir_bracket_paren_write`、
+  `lainir_body_return_write`、`lainir_ret_call_head_write`、`lainir_bind_head_write`、
+  `lainir_vproj_load_write`、`lainir_vproj_if_write`、`lainir_vproj_lea_write`、
+  `lainir_vproj_value_write`、`lainir_vproj_tail_write`、`lainir_assign_write`、
+  `lainir_space_write`、`lainir_close_brace_write`、`lainir_return_write`、`lainir_yield_write`。
 
 层 0 是「推迟的表面语法」的兜底：`switch`、`alloca`、`proc_addr`、间接调用没有表面语法，
 仍可用 `lainir_*` 发射。推迟只说明用户代码不好写，不说明编译器做不到。
@@ -197,7 +80,7 @@ F6 把这条「等价」放在独立调用方上验收：`bootstrap/lain/example
 层 1 由 handler 实现，handler 用层 0 写：`let b: u8 = load(p)` 在 handler 里就是一次
 `lainir_load(p, 8)`。
 
-### 已实现（v0 基线）
+### 语法
 
 ```text
 func add(a: i32, b: i32) -> i32 { return a + b; }
@@ -216,7 +99,8 @@ let b: u8 = load(p);      // 读内存：宽度由期望类型定（也可写 re
 store(p, v);              // 写内存：宽度取自 v 的类型
 let q: addr = lea(p, i);  // 地址算术：降成 #lea(%p, %i, 1, 0)
 let s: addr = "hi";      // 静态字节块（只允许顶层 let）：产物是 data s_storage ro { 104 105 } + #proc s() -> #addr
-let t: [u64] = [10, 20]; // 定长同质表（只允许顶层 let）：产物是 data t_storage rw { 10 0 0 0 0 0 0 0 20… } + #proc t() -> #addrextern NAME(a: T) -> U = link_name;   // 外部过程：只声明不定义，调用与 func 同路，产物是 #proc NAME(…) -> U #extern "link_name"
+let t: [u64] = [10, 20]; // 定长同质表（只允许顶层 let）：产物是 data t_storage rw { … } + #proc t() -> #addr
+extern NAME(a: T) -> U = link_name;   // 外部过程：只声明不定义，调用与 func 同路
 ```
 
 - 赋值 `NAME = 值;` **只在循环体内合法**：能赋值的合法目标是循环自己声明的参数
@@ -226,78 +110,60 @@ let t: [u64] = [10, 20]; // 定长同质表（只允许顶层 let）：产物是
   参数里没有 `acc` 就没有值可取，报 4。
 - 体里还可以写 `break LABEL(<值>);` 与 `continue LABEL(<实参…>);`，两者都结束这一轮
   之后的语句（区域里终止指令必须是最后一条）；体里也可以写 `if`，分支里的 `break` /
-  `continue` 同样结束这一轮，分支里给参数赋的值与另一分支的值在 `if` 之后合并。`break` 直接把值交给循环；`continue`
-  按参数顺序换掉下一轮的参数，循环的 `#break` 出口仍然照发 —— 值型循环的区域里必须有
-  一个 `#break`（验证器 2006），所以落尾的 `continue` 也走收尾那条 `#continue`。
-- `load` / `store` / `lea` 是**内建**（不是用户函数，名字不查作用域表）：
-  `load(p)` 只出现在能提供期望类型的位置（`let b: u8 = …`、`return …`），宽度由那里定；
-  `store(p, v)` 的宽度取 `v` 的类型；`lea(p, i)` 发 `#lea(%p, %i, 1, 0)`。没有期望类型
-  （无标注 `let b = load(p);`、`load(p);` 单独成句）报 4，不猜。地址加整数是语言自己的一条规则：
-  `p + i` 降成 `#lea(基址, 下标, 1, 0)`（只认 `+`，且左边必须是地址；`i + p` 报 4）；
-  `p + i * K` 的 `* K` 折进 `#lea` 的 scale（K 是无符号十进制字面量，后面不能再跟算子）。
-- 字节串字面量（`"…"`）**只允许出现在顶层** `let NAME: addr = "…";`：发的是一份静态字节块
-  `data NAME_storage ro { <字节…> }` 加一个取址过程 `#proc NAME() -> #addr`（同一个名字，
-  `%base = #data_addr NAME_storage`）。字节按源码原样搬（reader 认转义对但不解码），**不补末尾 0**
-  （要结束符就写 `let NAME: ro [u8] = [ … , 0 ];`）。别处（函数体内、作为实参）报 4：`data` 只能落顶层，
-  而发射是流式的。
-- 定长同质表（`[T]`）**只允许出现在顶层** `let NAME: [T] = [1, 2, 3];`：元素宽度取 `T`（缺标注按 `u64`），
-  元素必须是无符号整数字面量、装不下该宽度报 23；产物是 `data NAME_storage rw { <每元素按小端拆字节…> }`
-  加同样的取址过程，`ro [T]` 出 `ro` 块。任意值位置都能写 `NAME[下标]`（发取址加
-  `#lea(基址, 下标, 元素字节数, 0)`；字面量下标越界报 4），`len(NAME)` 发元素个数（字节串绑定发字节数）。
-  样例 `bootstrap/lain/examples/table.lain`。
-- `extern` 是**声明**不是定义：形如 `extern NAME(a: T) -> U = link_name;`，链接名原样搬进
-  产物（`#proc NAME(%a: T) -> U #extern "link_name"`）。声明在作用域里的身份与 `func` 一样是 6，
-  所以调用点、返回类型推导、参数表检查共用同一条路；它不登记任何宿主能力（那头是驱动
-  `lainmeta_host_register` 的事）。样例 `bootstrap/lain/examples/extern.lain`。
-- 顶层形式：`let` / `struct` / `enum` / `func` / `extern` / `import(…)`。关键字经 Meta 语法
-  注册表取 handler：1=my_if 2=func 3=if 4=struct 5=enum 7=顶层 let 8=return
-  9=局部 let 10=for 11=my_block 13=loop 14=extern（12 是宏 `my_require`）。**6（原 scalar 声明）
-  已取消，号位退休不复用。**
+  `continue` 同样结束这一轮，分支里给参数赋的值与另一分支的值在 `if` 之后合并。`break`
+  直接把值交给循环；`continue` 按参数顺序换掉下一轮的参数，循环的 `#break` 出口仍然照发
+  —— 值型循环的区域里必须有一个 `#break`（验证器 2006），所以落尾的 `continue` 也走收尾
+  那条 `#continue`。
+- `load` / `store` / `lea` 是**内建**（不查作用域表）：`load(p)` 只出现在能提供期望类型的
+  位置（`let b: u8 = …`、`return …`），宽度由那里定；`store(p, v)` 的宽度取 `v` 的类型；
+  `lea(p, i)` 发 `#lea(%p, %i, 1, 0)`。没有期望类型（无标注 `let b = load(p);`、
+  `load(p);` 单独成句）报 4，不猜。地址加整数是语言自己的一条规则：`p + i` 降成
+  `#lea(基址, 下标, 1, 0)`（只认 `+`，且左边必须是地址；`i + p` 报 4）；`p + i * K` 的
+  `* K` 折进 `#lea` 的 scale（K 是无符号十进制字面量，后面不能再跟算子）。
+- 字节串字面量（`"…"`）**只允许出现在顶层** `let NAME: addr = "…";`：发的是一份静态
+  字节块 `data NAME_storage ro { <字节…> }` 加一个取址过程 `#proc NAME() -> #addr`（同一个
+  名字，`%base = #data_addr NAME_storage`）。字节按源码原样搬（reader 认转义对但不解码），
+  **不补末尾 0**（要结束符就写 `let NAME: ro [u8] = [ … , 0 ];`）。别处（函数体内、作为
+  实参）报 4：`data` 只能落顶层，发射是流式的。
+- 定长同质表（`[T]`）**只允许出现在顶层** `let NAME: [T] = [1, 2, 3];`：元素宽度取 `T`
+  （缺标注按 `u64`），元素必须是无符号整数字面量，装不下该宽度报 23；产物是
+  `data NAME_storage rw { <每元素按小端拆字节…> }` 加同样的取址过程，`ro [T]` 出 `ro` 块。
+  任意值位置都能写 `NAME[下标]`（发取址加 `#lea(基址, 下标, 元素字节数, 0)`；字面量下标
+  越界报 4），`len(NAME)` 发元素个数（字节串绑定发字节数）。样例
+  `bootstrap/lain/examples/table.lain`。
+- `extern` 是**声明**：形如 `extern NAME(a: T) -> U = link_name;`，链接名原样搬进产物
+  （`#proc NAME(%a: T) -> U #extern "link_name"`）。声明在作用域里的身份与 `func` 一样
+  是 6，调用点、返回类型推导、参数表检查共用同一条路；它不登记任何宿主能力（登记是驱动
+  调 `lainmeta_host_register` 的事）。样例 `bootstrap/lain/examples/extern.lain`。
+- 顶层形式：`let` / `struct` / `enum` / `func` / `extern` / `import(…)`。关键字经 Meta
+  语法注册表取 handler：1=my_if 2=func 3=if 4=struct 5=enum 7=顶层 let 8=return
+  9=局部 let 10=for 11=my_block 13=loop 14=extern（12 是宏 `my_require`）。**6（原
+  scalar 声明）已取消，号位退休不复用。**
 - `for` 是一条**表达式**，值就是累加变量的最终值；`#loop` 的变量直接就是 `i` 与 `acc`，
   不需要「源码名 → LAINIR 名」的映射表。v0 限制：不能嵌套循环；下界与上界是值（字面量、
-  参数或已声明的局部）而不是任意表达式；循环体只有一条 `acc = 值 算子 值;`。
-- 注释是必须支持的：声明发现按词走，不认注释的话注释里的词会被当成形式。
-- 这一节写的是**设计**，实际可用的形状与失败码（实测口径）在《计划》一节。
+  参数或已声明的局部），不能写任意表达式；循环体只有一条 `acc = 值 算子 值;`。
+- 注释是必须支持的：声明发现按词走，注释里的词不能被当成形式。
 
-### 目标新增
+### 类型与宽度
 
-- **没有 scalar 声明语法。** 标量集、repr（kind + 宽度）与算符绑定（`"/"` → `sdiv` 一类）
-  是 **Meta 库的表数据**：今天就是 bootstrap/std/scalars.l1 里的一段 `data` 字节表，
-  将来是用 Lain 写的库模块。表之外没有第二份出处：`i32` 这类名字由名字解析直接命中内建表，
-  不进作用域表；带点的 `T.i32` 没有解析（标量是内建名字，模块不导出标量），一律按
-  「没有这个名字」报 5。用户自定义标量走编译期调用库的注册接口，不是新语法。
-- `loop` 的**早退形态**：**已可用** —— `break LABEL(<值>);` 与 `continue LABEL(<实参…>);`
-  由 `meta_lower_loop_jump` 降级，样例 `bootstrap/lain/examples/jumps.lain`（产物含
-  `#break L<n>(…)` 与 `#continue L<n>(…)`，过 `lainir_parse` + `lainir_verify`）。
-  循环体里的 `if`（含有条件的早退）同样可用：分支里可以 `break` / `continue` / 给参数赋值，
-  值在分支之间合并（样例 `bootstrap/lain/examples/loop_if.lain`）。
-
-```text
-let n: u64 = loop scan(i: u64 = 0, acc: u64 = 0) while i < len {
-  break scan(acc);
-  continue scan(i + 1, acc + 1);
-};
-```
-
-  `break`/`continue` 的实参按 `loop` 声明参数的顺序给。
-- `addr` 上的内存操作，宽度由类型定：`load<T>(p)`、`store<T>(p, v)`、`p + i`、`p + i * K`
-  （后两者降成 `#lea`，scale 分别是 1 与 K）。
-- 字节串字面量（降成模块里的 `#data`），给出静态字节块的地址值；定长同质表 `let NAME: [T] = [ … ];` 给出表的地址，索引 `NAME[i]` 给出元素地址、`len(NAME)` 给出元素个数。
-- `extern NAME(a: T) -> U = link_name;` —— 对应 `#extern`。
-- `as` —— 定宽转换（`zext`/`trunc`）。有符号加宽表达不出来，允许继续缺席。
-
-### 期望类型
-
-- 期望类型**唯一决定宽度**：`let b: u8 = load(p)` 是 8 位，`store(p, x)` 的宽度取自 `x` 的类型。
-- 没有期望类型、值也推不出来时（裸表达式位置）**报错，不许猜**；无标注绑定
+- 期望类型**唯一决定宽度**：`let b: u8 = load(p)` 是 8 位，`store(p, x)` 的宽度取自 `x`
+  的类型。
+- 没有期望类型、值也推不出来时（裸表达式位置）**报错，不猜**；无标注绑定
   `let y = <值>` 由值推：调用取被调方声明的返回类型、参数名取参数表、括号往里一层，
   都不是才退回本函数的返回类型当**上下文**（两个裸字面量的算子靠它查表）。
-- 代价：IR 刻意不存结果类型（`infer` 是宽度的唯一来源，单独一层），所以 `let`/`return`/`as`/
-  实参位置必须把期望类型交给 `load` 的 handler。这是要往 Meta 里加的一条贯通信息。
+- IR 刻意不存结果类型（`infer` 是宽度的唯一来源，单独一层），所以 `let` / `return` / `as` /
+  实参位置必须把期望类型交给 `load` 的 handler。
+- 标量集、repr（kind + 宽度）与算符绑定是 **Meta 库的表数据**：`bootstrap/std/scalars.lain`
+  里的一段 `data` 字节表。表之外没有第二份出处：`i32` 这类名字由名字解析直接命中内建表，
+  不进作用域表；带点的 `T.i32` 没有解析（标量是内建名字，模块不导出标量），按
+  「没有这个名字」报 5。用户自定义标量走编译期调用库的注册接口。
+- 聚合类型名（struct / enum）可以写进参数类型与带标注的 `let`：聚合值在 IR 里是 `#addr`，
+  所以参数类型发 `#addr`，标注绑定发一次地址复制（`#lea(%p, 0, 1, 0)`）。声明体里字段与
+  变体**空格分隔**，写逗号会让字段走查把逗号当成字段名，报 5。
 
 ## 对照例子
 
-`for`（v0 已有）的降级形状，取自 bootstrap/std/funcs.l1:501-509：
+`for` 的降级形状：`bootstrap/std/funcs.lain` 的循环降级。
 
 ```text
 %total = #loop L1(%i: #bits<32> = 0, %acc: #bits<32> = 0) -> (#bits<32>) {
@@ -311,7 +177,7 @@ let n: u64 = loop scan(i: u64 = 0, acc: u64 = 0) while i < len {
 }
 ```
 
-`loop`（已实现）的降级形状，取自样例 bootstrap/lain/examples/loop.lain 的产物：
+`loop` 的降级形状，取自样例 `bootstrap/lain/examples/loop.lain` 的产物：
 
 ```lain
 func countdown(n: i32) -> i32 {
@@ -338,9 +204,9 @@ func countdown(n: i32) -> i32 {
 初值发在 `#loop` 之前（LAINIR 的循环参数初值在父区域求值）；条件、体、回边与出口都在
 循环区域内，出口只有一个，就是 `#if` 之后落下的那条 `#break`。
 
-`loop` + `addr` 的降级形状，与 bootstrap/std/modules.l1:31-43 的 meta_cstr_len 同形：
+`loop` 加地址算术的降级形状：
 
-```text
+```lain
 func cstr_len(p: addr) -> u64 {
   let n: u64 = loop scan(i: u64 = 0) -> u64 {
     let b: u8 = load(p + i);
@@ -367,186 +233,15 @@ func cstr_len(p: addr) -> u64 {
 }
 ```
 
-## 计划（实测口径）
+## 模块：成员位置与符号命名
 
-分档只看两样东西：**手写 Meta 的真实 IR 用量**、**驱动实测的失败码**。用量取自 bootstrap/
-下全部 .l1/.lain；失败码取自 `build/lain-meta.exe` 对最小样例的 host_status。既没有用量、
-又测不通的，进「推迟」。
-
-### 零、闸门：把 `std/registry.l1` 改写成表面 Lain（进行中）
-
-这一步的口径是：用表面 Lain 写出 `bootstrap/std/registry.l1` 那 10 个过程的等价体，
-由处理管线降低，产物与手写版本比。它同时是「表面语言够不够写 Meta」的实测入口 ——
-每补一项能力就重跑一次。
-
-已经能用这份改写写出来的：
-
-| 构造 | 实测 |
-|---|---|
-| 地址算术 | `let base: addr = scratch + 520;`、`let p: addr = base + off;`（局部绑定上的加法也通） |
-| `p + i * K` | `base + off` 之外，`p + i * K` 的 `* K` 折进 `#lea` 的 scale |
-| 位与字面量 | `index << 6`、`%` `>>` `and` `or`（词形） |
-| 循环出值 | `loop s(i: u64 = 0) { … break s(id); … }`：没有 `acc`，值由 `break` 带出，结果类型取第一个参数 |
-| 循环体里的 `let` | `let e: addr = reg_entry(scratch, i);`、`let k: u64 = cell_get(e + 8);` |
-| 循环体里的嵌套 `if` | 三层 `if k == kind { if o == owner { if n == ns { … } } }` 单独用能通 |
-| 早期返回 | `if hit { return id; }` |
-| 同一单元里已有过程的互调 | **通** —— `func f(…)` 与后文 `f(x)` 直接引用即可（被调用者在前在后都通，不需要 `extern`） |
-| 静态数据的地址 | `?NAME` 发 `%r<n> = #data_addr NAME_storage`（`let NAME: [T] = [ … ];` 与 `let NAME: addr = "…";` 都行）；`NAME as u64` 做整数与地址互转 |
-| 指针转换 | `p as u64` / `w as addr` |
-
-还不够的（都是实测到的，探针在 `build/probes/`）：
-
-| 缺口 | 实测 | 探针 |
-|---|---|---|
-| 按位与、按位或、按位异或的 C 风格符号没有绑定 | `a \| b` 报 4（表里只有词形 `and` / `or`）；词形 `or` 对 `u64` 能发 `#or`（`bool` 上是逻辑或） | `z1.lain`…`z4.lain`、`build/probes/bits_or.lain` |
-| `u8` 上做比较 | `let b: u8 = load(p); b == 123` 报 6 —— `u8` 的算子表是空的（它只作访存宽度）。先 `b as u32` 再比（变宽发 `#zext`） | `build/probes/u8_cmp.lain` |
-| `xor` 没有绑定 | `a xor b` 在 `u64` 与 `bool` 上都报 4（表里没有 `xor`，四个宽度都没有） | `q_xor.lain` / `q_xorval.lain` |
-| `addr` 上 `!=` | 报 6（`==` 也没有绑定：`addr` 的算子表是空的） | `w4.lain` |
-| 带值 `if` 的分支里写语句 | **已支持**（`68c4872`）：`meta_lower_branch_value` 按块里最后一个 `;` 切开「前缀语句 + 值表达式」，前缀逐条按语句降级（只认 `let` 与 `store`）。没有 `;` 时起点为 0，与改动前逐字节相同。探针 `build/probes/q_tailval.lain`（真分支带 `let`）、`q_tailval2.lain`（两支都是纯表达式）、`q_tailval3.lain`（真分支带 `store`、假分支带 `let`）。**前缀里还不能写 `if`** —— 那条路要 `meta_lower_if` 的接回下标，只有 `meta_lower_body` 有 | — |
-| 块的最后一条语句是 `if` | 报 20（「函数体结尾没有 return」）—— 分支里的 `return` 不算这一层的 `return`。实测：`if c { return 6; } return 1;` 通过，而把最后那条 `return` 去掉（`if` 成为块尾）就报 20。绕法是在块尾的 `if` 之后补一条 `return`（不可达但满足判定）。手写层到处是这种形状（`if … { #return … }` 收尾） | `build/probes/q_tailif.lain` / `q_tailif2.lain` |
-| `bool` 字面量 | 没有 `true` / `false`：写成 `break cmp(false)` 会让产物里出现未定义的值 `false`（校验器 2002）。写 `0` / `1` | `build/probes/types_surf.lain` 的第一版 |
-| 循环标签名 | 表面 `loop s(…)` 在产物里发成 `#loop L<n>(…)`（编号按单元里的出现次序），源码标签名不保留 —— 标签只用于源码内的 `break` / `continue` 配对。手写层写的是 `#loop cmp(…)`，所以这一行对不上 | 同上 |
-| 循环体里的嵌套 `if` | 报 23（或产物截断在 `%r2 = #if %more -> (#bits<64>) {` 之后）。`meta_lower_loop_if` 把整条 `if` 当循环值的一批**结果**（每个循环参数一个 `#yield`），所以一层还行；第二层那批 `#yield` 与新一批撞在一起就错位。最小复现 `build/probes/q_loopnestif.lain`（`loop { if { if { break } continue } else { break } }`，从 `host_status=0` 退化成 23） | — |
-| 循环结果的类型来自**外层绑定的标注** | `let same: bool = loop cmp(flag: bool = 0) { … }` 发 `#loop L1(%flag: #bits<1> = 0) -> (#bits<1>)`（结果类型跟绑定走，不是「第一个参数的类型」）；`let t: u64 = loop …` 同理发 `-> (#bits<64>)` | 同上 |
-| 跨源引用 | 同一编译单元里，**有的**跨源过程能直接调到、**有的**报 9415；规律未定位。实测：`meta_cell_get`、`meta_cell_put`、`meta_scope_add_decl`、`meta_lower_struct`、`meta_node_is_word` 直接调通；`meta_node_start`、`lain_meta_ast_node_addr`、`meta_syntax_ensure` 报 9415。**一律写 `extern NAME(…) -> T = <链接名>;` 别名可以绕开**，改写时按后者处理 | `build/probes/q_crosssrc.lain`、`build/probes/struct_surf.lain` |
-| `extern` 与手写层对不上 | `extern` 块名是链接名，写不出手写层那种「块名 = 声明名」的 `#extern`；同名的本单元过程与 `extern` 可以共存，但产物多出一个块 | 本节的 `procdiff` 统计 |
-| 静态块的**裸名字** | 表面语言只能通过 `?NAME` 拿到 `#data_addr NAME_storage`；手写层直接写 `#data_addr NAME`（块名不带后缀）。名字与注释也是产物的一部分，所以逐字节相同做不到 | 本节的 `procdiff` 统计 |
-
-声明规模这一档已经修好（实测）：合成源 `build/probes/decl_N.lain`（N 个 `extern eI(p: addr) -> u64 = meta_cell_get;`）从 20 个到 **149 个全部 `host_status=0`**（149 个：30 轮、5956 万步、产物 8681 字节），7 个 `extern` + 19 个 `func` 的 `registry_full.lain`、以及「三层嵌套 `if` 与 `intern` 同处一份源」的 `reg_a.lain` 也都通过。修的是四处：
-
-- `meta_cell_put` 的写上界取宿主给的暂存区容量（`meta_region_scratch_capacity()`，容量 = 65536 + 已登记源码总字节 × 128），越界的写就地报 17。过去写死 `0x40000`，源码一长就有结构体越过 256 KiB，写入被**静默丢掉**（症状是一整片结构体读回零，出错位置离现场很远）。
-- 注册表条目区不再固定在 `520`：`meta_scope_setup` 把整条表链（注册表 → 作用域表 → 依赖表 → 路径 → 旁表 → bump）的起点抬到宿主元数据末尾（`meta_host_meta_end()`）之后。条目一多就压掉宿主写在 `+4096` 起的段表与根槽，症状是根读回 0、一条顶层形式都认不出来、产物 0 字节；压不压得上取决于源码长度，所以表现为「加两行注释就翻转」。
-- 语法表容量按源码规模推导（每 8 字节源码一项、保底 64 项），不再固定 64。
-- 驱动燃料默认按已登记源码规模推导；耗尽时打印 `RUN INCOMPLETE 燃料耗尽 fuel=… used=… steps=…` 并把退出码置 3。展开后根为空（`meta_lower_source` 的第一个孩子检查）与展开器的分配/打包失败都就地报码（4 / 17），不再产出零字节产物。
-
-## 闸门的结论
-
-十个过程都能从表面源发出来（`build/probes/registry_surf4.lain` 的 `procdiff` 报 `missing in gen (0)`，
-同一形状也用在 `std/types.l1`、`std/regions.l1`、`std/handlers/struct.l1` 上）。
-
-「产物与手写版本逐字节相同」这一条**达不到**，缺口都在语言记法层面，逐项实测：
-
-| 差异 | 表面语言能写成什么 | 手写层是什么 | 规模 |
-|---|---|---|---|
-| 静态块的名字与取址过程 | `let NAME: [T] = [ … ];` 发 `data NAME_storage` 加一个取址过程 `NAME()` | `data NAME`，没有取址过程，别处按裸名字引用 | 全单元 214 个 `data` 块 |
-| 静态块的**内容** | 可以逐字节一致：`std/scalars.l1` 那张 587 字节的算符表（`i32 … addr` 九条记录）用 `let meta_scalar_table: ro [u8] = [ … ];` 写出来，与手写表**数字逐个相同**（`build/probes/scalars_surf.lain`） | 同左 | 587 字节 |
-| 外部声明的块名 | `extern <能力名>(…) -> T = <能力名>;` 发的就是 `#proc <能力名>(…) #extern "<能力名>"` —— **与手写层同形**。别名取成别的名字才会多出块（那是改写时的命名选择，不是语言限制）：`std/regions.l1` 的表面版本把别名对齐之后 `missing in gen` 从 1 变 0 | 同左 | 32 个 `#extern` 过程 |
-| 循环标签 | `loop s(…)` 一律发 `#loop L<n>(…)`（按单元内出现次序编号） | `#loop cmp(…)`，保留源码里的名字 | 全单元每个 `loop` |
-| `#load` 的操作数 | 层 0 的写出器发 `#load[T](ptr, 0)`（两个操作数） | 23 处写一个操作数、9 处写两个 | 32 处 |
-| 注释与空行 | 表面源里的注释不进产物（发射器没有携带注释的通道） | 每个模块都有成段注释与空行 | 手写单元 15619 行 |
-
-前四项改发射器都能收敛，代价是把表面记法改成「与手写层同形」——那会让记法本身变得更差；
-第五项不是发射器的问题：注释只存在于源码文本里，而单元的产物是重新生成的文本，中间没有
-「把注释搬过去」这一步。所以闸门这一项的定位是**能力盘点**：它给出改写每个模块要带的别名、
-静态数据写法、循环与访存的记法差异，而不是一条逐字节的等式。
-
-结论：按模块改写要把下面这些一起带上 —— 每个跨源依赖一条 `extern` 别名声明、静态数据用
-`let NAME: [T]`（块名带 `_storage`）加 `?NAME` 取值、循环标签不要指望保留、产物靠
-`lainir_parse` + `lainir_verify` 与既有回归把住正确性。
-
-## 自举管线的缺口（实测）
-
-> **状态注记（第 4 步之后，步 3 更新）**：本节记的是改写**之前**的管线实测（手写 `.l1` + `merge.ps1` 拼装）。
-> 现在 `bootstrap/` 下 28 个模块都是 Lain 源码、**没有清单**：模块集合由入口
-> `bootstrap/meta.lain` 顺 import 求闭包，`lain0 --entry bootstrap/meta.lain --split
-> build/lain0/units/` 出每模块一份，装载用驱动 `--units-dir <目录>`
-> （见《模块：成员位置与符号命名》）；下面的阶段 1/2/3 与 `build/probes/*_surf.lain`
-> 保留为当时的判据记录。
-
-`build/merge.ps1` 只做两件事：按当时那份模块清单把文件拼成 `build/bootstrap_merged.l1`、跑
-`check_unit.exe`。它**没有编译步骤** —— 直接把手写 LAINIR 当最终单元用。
-
-所以「把某个模块改成表面 Lain」这一步在当前管线下不会改变合并单元：拼接进去的是表面源码
-（`func …` / `let …`），而 `check_unit.exe` 只认 LAINIR（`#proc` / `data`）。实测把
-`std/types.l1` 换成表面版本后合并单元在第 655 行报 3001 `expected `#proc` or `data``。
-
-换模块时要补的是「用**上一阶段的 Meta** 降低**这一阶段的表面源**」这一步，也就是：
-
-- 阶段 1（当时）：Meta 是手写的 LAINIR，直接当单元跑（`--unit <清单>`）。
-- 阶段 2（改写后）：单元仍是**阶段 1 的手写 Meta**，但要降低的是表面源 —— 驱动的位置参数传
-  表面模块文件，产物才是新的合并单元。实测这个方向可行：`build/probes/registry_surf4.lain`、
-  `types_surf.lain`、`regions_surf.lain`、`struct_surf.lain`、`enum_stmt_surf.lain`、
-  `ptr_sites_surf.lain` 都是这样跑出来的（各自 `host_status=0`、产物过 `check_unit`）。
-- 阶段 3（自举）：单元换成阶段 2 的产物，再降低同一批表面源，两份产物应相同。
-
-要验证「**全部** 28 个模块的表面源能产出等价单元」，需要先把 28 个模块的表面版本都写出来，
-再按阶段 2 的方式整体跑一遍。
-
-已经写出来的表面版本，按 `procdiff -Hand <手写模块> -Gen <产物>` 的实测（`missing in gen` =
-手写层有而产物里没有的块）：
-
-| 手写模块 | 行数 | 表面版本 | `missing in gen` | 差异数 |
-|---|---|---|---|---|
-| `std/registry.l1` | 216 | `build/probes/registry_surf4.lain` | 0 | 12 |
-| `std/types.l1` | 93 | `build/probes/types_surf.lain` | 0 | 5 |
-| `std/regions.l1` | 28 | `build/probes/regions_surf.lain` | 0 | 3 |
-| `std/declarations.l1` | 166 | `build/probes/declarations_surf.lain` | 0 | 6 |
-| `std/handlers/struct.l1` | 22 | `build/probes/struct_surf.lain` | 0 | 3 |
-| `std/handlers/enum.l1` + `statements.l1` | 50 | `build/probes/enum_stmt_surf.lain` | 0 | 3 |
-| `std/handlers/if.l1` | 77 | `build/probes/if_surf.lain` | 0 | 3 |
-| `std/lex.l1` | 406 | `build/probes/lex_surf.lain` | 0 | 44 块全出 |
-| `std/emit.l1` | 154 | `build/probes/emit_surf.lain` | 0（别名对齐后） | 产物过 `check_unit` |
-| `std/syntax.l1` | 278 | `build/probes/syntax_surf.lain` | 3（`meta_syntax_lookup`、`meta_syntax_match`、`meta_syntax_init`） | 前 8 个过程都能发出；最后三个没发出来，原因是**循环体里的 `if` 只支持一层**（`meta_lower_loop_if`），这个改写里出现了两层 |
-| Meta 里的 11 处 `#ptr2int`/`#int2ptr` | — | `build/probes/ptr_sites_surf.lain` | — | 8 条指令全出 |
-| `std/scalars.l1` 的算符表 | 587 字节 | `build/probes/scalars_surf.lain` | — | **数字逐个相同** |
-
-`std/handlers/func.l1`（118 行）的形状已经写出来（`build/probes/func_surf.lain`），但**还没跑通**：
-`missing in gen` 剩 3 块（`meta_declare_func`、`meta_lower_decl_func`、`meta_declare_extern` 三条
-转发没写），且产物过不了 `lainir_verify`。
-
-`procdiff` 报的 `diff` 全部是那四项记法差异（静态块名、`#extern` 块名、循环标签、`#load` 操作数）
-加上手写文件的注释与形参换行，没有语义差异。
-
-剩下的大模块：`scope.l1`（1174 行）、`parse.l1`（633）、`modules.l1`（718）、
-`recognize.l1`（533）、`expand.l1`（401）、`records.l1`（766）、`funcs.l1`（3479）、
-`sums.l1`（669）、`lainir.l1`（1479）、`meta.l1`（2354），以及 `lex.l1`、`emit.l1`、
-`syntax.l1`、`handlers/func.l1`、`handlers/let.l1`、三个宏文件。
-
-所以顺序是：先补模块引用（§3）与静态数据（§4），攒够之后再回来把 `registry.l1` 整份换掉。
-
-### 一、已能用（实测 host_status=0）
-
-| 特性 | 表面写法 | 实测口径 |
-|---|---|---|
-| 函数、参数类型、调用 | `func f(a: i32) -> i32 { … }`、`f(2)` | 多语句体、递归都通 |
-| 绑定与返回 | `let n: i32 = …;`、`let y = inc(n);`、`return n;` | 标注可省：类型由值推（调用取被调方返回类型、参数名取参数表）。**局部变量的类型参与算子选择**：`let n: u64 = 1;` 之后 `n < 8` 查 u64 的算子表（发 `#ult[#bits<64>]`），不再退回绑定的上下文类型（bool 的 op 表是空的，会报 6）。登记与查询走函数体里那张局部变量表（`bootstrap/std/funcs.l1` 的 `meta_local_type_put` / `meta_local_type_name`，条数与条目区在暂存区 `+2128` / `+2136`），只有带标注的 `let` 进表。样例 `bootstrap/lain/examples/local_type.lain` |
-| 条件 | `if a < b {…}`、`if (a < a) {…}`、`+ else`、`my_if((…))` | 条件是任意表达式：裸条件与括号条件走同一个入口，块就是表达式停下来的那一格；分支必须以 `return` 收尾，所以 `if` 是语句不是值 |
-| 带值 if | `let x: i32 = if c { a } else { b };`、`return if c { a } else { b };`、`return 1 + if c { a } else { b };` | 降级为 `%x = #if %c -> (#bits<32>) { … #yield %a } else { … #yield %b }`：条件是任意表达式、类型取绑定的标注（缺标注由值推）；绑定位置把结果绑在源码名字上，`return` 位置与表达式里的操作数位置（实参、括号内、与算子串联）把整条 `#if` 发成临时值再被外层引用；省略 `else` 时假分支给结果类型的零值（bits 类 `#yield 0`、`addr` 先 `%r<n> = #int2ptr[#addr](0)`），`else` 后面不是块仍报 4（探针 `build/probes/ifnoelse_elseword.lain`）；两个分支都必须以一个值收尾。样例 `bootstrap/lain/examples/choose.lain`、`bootstrap/lain/examples/value_if.lain`、`bootstrap/lain/examples/if_default.lain` |
-| 循环 | `let t: i32 = for i in 0..n acc = 0 { acc = acc + i; };`、`let t: i32 = loop outer(i: i32 = n, acc: i32 = 0) while i > 0 { acc = acc + i; i = i - 1; };`、`let r: u64 = loop s(i: u64 = 0) while i < n { if i == k { break s(i); } else { i = i + 1; } };` | **`acc` 参数可省**：没有它时循环的值由源码自己的 `break LABEL(值)` 带出来，结果类型取**第一个参数**的声明类型（Meta 的 84 处 `#loop` 都是这个形状），收尾不再合成 `#break`；**循环参数的类型参与算子选择**（`meta_loop_type_name` 查循环块里那个参数槽 +64/+72 声明的类型窗口），`i == 3` 发 `#eq[#bits<64>]`（此前会退化成 `#bits<0>`，验证器报 2027）。循环体里带标注的 `let inner: bool = i == 3;` —— 左操作数就是循环参数、而外层绑定期望类型更窄 —— 左操作数按普通名字查不到类型时，退回循环参数表取它的真实类型，不会再沿用 `bool` 的 1 位宽度去校验 `3`（此前报 23）。探针 `build/probes/nl_probe_i3.lain`。样例 `bootstrap/lain/examples/loop_value.lain` | `for` 的边界与累加器宽度跟循环变量的类型走：i32/u32/u64/i64/usize 都能用（`u64` 曾报 5，A 的第四刀补齐 64 位算子后通了，实测 `#ult[#bits<64>]`），体只有一条赋值；`loop` 是通用形态：标签 + 任意个参数（各带类型与初值）+ 任意条件 + 多语句体，结果类型取 `acc` 参数的类型（标注可省）；`break LABEL(值);` / `continue LABEL(实参…);` 可早退（落尾的 `continue` 等价于「换掉下一轮参数再绕一圈」），循环体里可写 `if`（分支里有条件早退、分支里给参数赋值，值在分支之间合并）。样例 `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain`、`bootstrap/lain/examples/loop_if.lain` |
-| 算子 | i32 → `+ - * / % < > <= >= == !=`（add/sub/mul/sdiv/srem + slt/sgt/sle/sge/eq/ne）；u32 → 同（`/`、`%`、`>`、`<=`、`>=` 走 udiv/urem/ugt/ule/uge） | i32/u32/u64/i64/usize/bool 的算术、比较与位运算（`and`/`or`/`<<`/`>>` → and/or/shl/lshr）都已绑定；只有 `i8`/`u8` 没有算子（它们只作 load/store 宽度） |
-| 声明 | `struct`、`enum`、`import(…)`、顶层 `let x = T {…};` | 会发出布局与静态存储 |
-| 聚合类型名 | `struct Point { x: i32 y: i32 }`、`enum Shape { Circle(i32) Empty }`、`func f(p: Point) -> i32`、`let q: Shape = s;` | 名字可进参数类型与带标注的 `let`：聚合值在 IR 里是 `#addr`，所以参数类型发 `#addr`、标注绑定发一次地址复制（`#lea(%p, 0, 1, 0)`）；声明体里字段/变体**空格分隔，不能写逗号**（写了会当成字段名，报 5）。样例 `bootstrap/lain/examples/types.lain` |
-| 宏 | `my_if`、`my_block`、`my_require` | 编译期展开，过同一道信任门 |
-| 转换 | `x as T`（定宽整数之间） | 变宽发 `#zext`、变窄发 `#trunc`、等宽补一条加零复制；目标类型是**类型名**不是值；源宽度取操作数自己的类型（参数名），取不到才用上下文宽度。样例 `bootstrap/lain/examples/convert.lain` |
-| 十六进制字面量 | `0x10`、`0Xff` | 读成数值后按**十进制**规范化写进产物（`0xff00` → `65280`）；整段必须是合法数字：`0x` 后面没有数字报 4；超过绑定宽度仍报 23。样例 `bootstrap/lain/examples/hex.lain` |
-| 指针与整数互转 | `let w: u64 = ptr_of(p);`、`let q: addr = addr_of(w);`、`let w: u64 = p as u64;`、`let q: addr = w as addr;` | 四个写法：两个内建 `ptr_of` 发 `#ptr2int[#bits<W>]`（宽度取期望类型）、`addr_of` 发 `#int2ptr[#addr]`；两个转换 `as u64` 与 `as addr` 发同两条指令（目标是别的宽度报 4）。实参的类型必须推得出且分别是地址、整数，缺实参、多实参与类型不对都报 4（`ptr_of(7)`、`addr_of(p)`、`p as addr`）。样例 `bootstrap/lain/examples/pointer.lain`、`cast.lain`，探针 `build/probes/ptr_of_int.lain`、`cast_same.lain` 等 |
-| 内存 | `let b: u8 = load(p);`、`return load(p);`、`store(p, v);`、`let q: addr = lea(p, i);`、`load(p + i)` | 三个内建名字：`load` 的宽度由期望类型定（`#load[#bits<8>](%p, 0)`），`store` 的宽度取值的类型（`#store[#bits<8>](%v, %p)`），`lea` 发 `#lea(%p, %i, 1, 0)`。地址加整数（`p + i`、`p + 1`）降成 `#lea(基址, 下标, 1, 0)`。没有期望类型报 4（`let b = load(p);`、`load(p);`）；`i + p` 报 4；`p + i * K` 发 `#lea(基址, 下标, K, 0)`（K 必须是无符号十进制字面量）。样例 `bootstrap/lain/examples/memory.lain`、`bootstrap/lain/examples/cast.lain` |
-| 字节串字面量 | `let s: addr = "hi";`（只允许顶层） | 发 `data s_storage ro { 104 105 }` 与 `#proc s() -> #addr { %base = #data_addr s_storage; #return %base }`；字节原样搬、**不补末尾 0**（要结束符写 `let s: ro [u8] = [ … , 0 ];`）。样例 `bootstrap/lain/examples/bytes.lain`。函数体内写字节串报 4 |
-| 定长同质表 | `let t: [u64] = [10, 20, 30];`、`let marks: ro [u8] = [7, 8];`（只允许顶层） | 发 `data t_storage rw { 10 0 0 0 0 0 0 0 20 … }`（每元素按小端拆字节）与取址过程 `t()`；`ro [T]` 出 `ro` 块，缺标注按 `u64`。索引 `t[i]` 发 `%r<n> = #data_addr t_storage` 加 `#lea(%r<n>, i, 元素字节数, 0)`（字面量下标越界报 4），`len(t)` 发元素个数。样例 `bootstrap/lain/examples/table.lain` |
-| 外部过程与链接 | `extern NAME(a: T) -> U = link_name;` | 只声明不定义：名字进作用域（身份与 `func` 一样）、调用走同一条表达式路径，产物是 `#proc NAME(%a: T) -> U #extern "link_name"`；链接名原样搬运，宿主那头登记与否由驱动决定。样例 `bootstrap/lain/examples/extern.lain` |
-| 模块 | `let M = import("examples::modules_lib");` 后写 `M.answer`、`M.answer + 1`、`f(M.answer)`、`M.bump(M.twice)`、`M.table[i]`、`store(M.table[i], v)`、`func keep(p: M.Point) -> M.Point`、`func px(p: M.Point) -> i32 { return p.x; }` | 模块键 = 被导入文件相对**源根**的路径去 `.lain`、`/` 换 `_`（`examples/modules_lib.lain` → `examples_modules_lib`），顶层声明一律发 `<键>__<名字>`：值成员 `#proc modules_lib__answer() -> #bits<64> { #return 42 }`、函数成员 `#proc modules_lib__bump(%v: #bits<64>) -> #bits<64>`、静态数据 `data modules_lib__table_storage rw { 10 20 30 }` 加访问器 `#proc modules_lib__table() -> #addr`。跨模块调用 `M.bump(x)` 发 `#call @modules_lib__bump(%x)`（尾位置是 `#call[tail]`），跨模块字段访问 `p.x` 发 `#lea(%p, 0, 0, <字段偏移>)` + `#load`。位置与命名细则见下面《模块：成员位置与符号命名》。样例 `bootstrap/lain/examples/modules_main.lain`、`modules_lib.lain`、`modules_twin.lain`（两个模块各有一个同名 `dup`，分别发 `modules_twin_a__dup` 与 `modules_twin_b__dup`） |
-| 负数字面量 | `-5`（负号紧跟数字） | LAINIR 的字面量是无符号十进制文本，没有负号，所以降级成 `#sub[repr](0, 5)`：宽度与符号都取上下文类型。只认字面量，一元负号作用于变量仍报 4。样例 `bootstrap/lain/examples/neg.lain` |
-
-实测被拒（列出来是因为它们看着都该能用）：`i + p` 报 4（只认左边的地址）；
-`p + i * K` 里的 K 不是字面量、或 `* K` 后面还跟着算子（`p + i * 4 + 8`）报 6
-（降级是左到右折叠，没有乘法优先级 —— 任意的组合要支持得先有表达式树）。
-（`-`、`*`、`%` 曾报 6，比较全集与 `and`、`or`、`<<`、`>>` 曾报 4，已在 A 里补上绑定；
-裸条件 `if a < b` 曾报 4、无标注 `let y = …` 曾报 21，已在 B 的第一半修好；`as` 与负数字面量
-曾报 4，已在 B 的后半修好；十六进制 `0x10` 曾被 `bs_read_uint` 静默读成 `0`（更糟：`host_status=0` 而产物是错的），
-已在同一次修好；带值 `if` 曾报 4，已在 D 的第一半修好；字节串字面量曾报 4，已在 C 的第二半修好
-（只支持顶层绑定）；`load`/`store`/`lea` 曾报 6
-（收尾的加零复制走源码算子表，`u8` 没有绑定），已在 C 的第一半修好；函数体内的聚合构造
-曾报 4，已在 E 的第三刀修好 —— 降级到栈上 `#alloca`（见《二、半成品》）。）
-
-### 模块：成员位置与符号命名
-
-模块键 = 被导入文件相对**源根**的路径去掉 `.lain`、把 `/` 换成 `_`（`bootstrap/std/lex.lain` →
-`std_lex`，`bootstrap/lain/examples/modules_lib.lain` → `modules_lib`）。源根在
-`lain0 --entry <file.lain>` 时是入口文件所在目录（`lain0 --unit <清单>` 时是清单文件所在目录）。
-每个模块的顶层声明一律发 `<键>__<名字>`；带 **`@root`** 标注的少数声明保持平坦
-（`bootstrap/meta.lain` 把三个入口 `lain_std_abi_version` / `lain_std_initialize` /
-`lain_std_lower` 各自标上 `@root`；模块集合由入口 `meta.lain` 顺 import 求闭包，装载走
-驱动的 `--units-dir <目录>`），宿主 `extern` 的 `link_name` 也照旧平坦。
+模块键 = 被解析到的文件相对**源根**的路径去掉 `.lain`、把 `/` 换成 `_`
+（`bootstrap/std/lex.lain` → `std_lex`，`bootstrap/lain/examples/modules_lib.lain` →
+`modules_lib`）。源根在 `lain0 --entry <入口>` 与 `--split` 下是入口文件所在目录，
+单文件入口时是入口文件所在目录。每个模块的顶层声明一律发 `<键>__<名字>`；
+带 `@root` 标注的少数声明保持平坦（`meta` 的三个入口
+`lain_std_abi_version` / `lain_std_initialize` / `lain_std_lower` 各自标着 `@root`），宿主
+`extern` 的 `link_name` 同样保持平坦。
 
 | 位置 | 写法 | 发出的东西 |
 | --- | --- | --- |
@@ -555,457 +250,87 @@ func cstr_len(p: addr) -> u64 {
 | 类型 | `func keep(p: M.Point) -> M.Point` | 类型表键 `<键>__Point`；聚合按地址传，参数发 `#addr` |
 | 字段访问 | `func px(p: M.Point) -> i32 { return p.x; }` | `%r<n> = #lea(%p, 0, 0, <字段偏移>)` + `%r<n2> = #load[#bits<32>](%r<n>)` |
 | 跨模块静态数据 | `M.table`、`M.table[i]`、`M.base + i`、`store(M.table[i], v)` | 访问器给基址，索引与地址算术按既有规则 |
-| 本模块静态数据取址 | `symbol_addr("table_storage")` | `%r<n> = #bitcast[#addr](%<键>__table_storage)`；写**别的模块**的数据名报 301 |
+| 本模块静态数据取址 | `symbol_addr("table_storage")` | `%r<n> = #bitcast[#addr](%<键>__table_storage)`；写别的模块的数据名报 301 |
 
-成员名与形态的判据（探针 `build/probes/mod/`，实测）：
+成员名与形态的约束：
 
-| 写法 | 实测 |
-| --- | --- |
-| `M.bump` 当值用（不调用） | 400「模块函数成员不能当值使用，请写成调用 M.bump(…)」 |
-| 成员名写错 `M.nope`、模块不导出标量 `M.i32`、`M.Shape.Circle` | 301「未绑定的名字: M」 |
-| `symbol_addr("answer_storage")`（`answer` 是别的模块的数据） | 301「symbol_addr 只能取本模块的静态数据，跨模块请用 M.answer」 |
-| 导入路径跑出源根 / 模块键含 `__` | 312「导入路径超出源根: …」/「模块键不能含连续下划线: …」 |
+- `M.bump` 当值用（不调用）报 400「模块函数成员不能当值使用，请写成调用 M.bump(…)」。
+- 成员名写错 `M.nope`、模块不导出标量 `M.i32`、`M.Shape.Circle` 报 301「未绑定的名字: M」。
+- `symbol_addr("answer_storage")`（`answer` 属于别的模块）报 301「symbol_addr 只能取本模块
+  的静态数据，跨模块请用 M.answer」。
+- 导入路径跑出源根、模块键含 `__` 分别报 312「导入路径超出源根: …」与「模块键不能含连续
+  下划线: …」。
+- 同名声明靠模块键分开：`modules_twin` 的两个模块各有一个 `dup`，产物里同时有
+  `modules_twin_a__dup` 与 `modules_twin_b__dup`。
 
-同名不冲突是模块前缀的直接效果：`modules_twin` 的两个模块各有一个 `dup`，产物里同时有
-`modules_twin_a__dup` 与 `modules_twin_b__dup`（改动之前这一编译必报 verify 的
-`duplicate subroutine` 2022）。确定性：`python scripts/build_meta_unit.py --check-twice`
-连跑两次，28 份逐份相同且**整批指纹**一致 —— 实测
-`ef2f198c12a36bd44ee040dcf1e06f928759c49697afdd9bc1144b28ebd4f977`，零诊断
-（拆成多份之后判据是「整批指纹跑两次一致」，不是「等于某个历史哈希」；见
-`docs/proposal-modules-v2.md` §7.2）。
+## 聚合值
 
-### 二、半成品：`struct` / `enum` 的值层
+`struct` / `enum` 的声明发出布局（`<T>__<f>_offset`、`<T>__size`、变体的 tag 与载荷偏移），
+顶层构造 `let p = Pair { a: 1 b: 2 };` 发出 `data p_storage rw { … }` 与
+`#proc p() -> #addr`。
 
-它们**不是**档位问题 —— handler 4/5 早已注册，声明会发出布局（`<T>__<f>_offset`、
-`<T>__size`、变体的 tag 与载荷偏移），顶层 `let p = Pair { a: 1 b: 2 };` 会发出
-`data p_storage rw { … }` 与 `#proc p() -> #addr`。**名字已经能用**：struct / enum 的名字可以写进参数类型与带标注的 `let`（见《一、已能用》的
-「聚合类型名」行）。
+- **函数体内的构造降级到 `#alloca`**：`let q: T = T { … };` 与 `return T { … };` 发
+  `%r<n> = #alloca[#bits<8>](<size>)` 加每字段一条 `#store`（基址
+  `#lea(%r<n>, 0, 0, <off>)`），绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`。`#alloca` 从 stack
+  租约取地址（元素大小 × 常量 count，起始地址按 16 字节边界取整，越界报
+  `LAINVM_TRAP_STACK_EXHAUSTED`），帧弹出时位置退回 `stack_mark`（`seed/src/vm/engine.c`），
+  所以区域退出后地址失效。
+- **返回聚合值有固定规则**：结果类型是聚合时，返回的地址必须是**参数**（调用方给的）或
+  **调用结果**（被调用方算出来的）；刚构造的地址与局部绑定一律报 11。样例
+  `bootstrap/lain/examples/types.lain` 的 `idp(p: Point) -> Point { return p; }` 走允许的
+  那条路。
+- **字段访问当值**：`p.x` 在返回、绑定、更大的表达式（`p.x + p.y`、`1 + p.x`）与调用实参
+  位置都降级成 `%r<n1> = #lea(%p, 0, 0, <字段偏移>)` 加
+  `%r<n2> = #load[<字段类型>](%r<n1>)`。操作数的类型取字段自己声明的那个，所以 `1 + p.x`
+  查的是 `i32` 的算子表。样例 `bootstrap/lain/examples/field_value.lain` 与
+  `bootstrap/lain/examples/field_expr.lain`。
+- **变体投影当值**：`Enum.Variant(值)` 降级成「读判别字节、与 tag 比、带值 `#if` 里按载荷
+  偏移取载荷」，不命中给 0（v0 不做 panic 路径）。值可以是参数、局部值或表达式。空变体
+  没有载荷可投，报 10。样例 `bootstrap/lain/examples/projection.lain`。
+- **函数体内的变体构造**与积类型同形：`#alloca`、tag 一条 `#store`、有载荷时再来一条，
+  绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`、返回直接 `#return %r<n>`。载荷按操作数降级，
+  参数、字面量与调用结果都能用；空变体只发 tag 那条。样例
+  `bootstrap/lain/examples/variant_local.lain`。
+- **字段值可以是表达式**：`Point { x: a + 1 y: b }` 的 `#store` 值是那条 `#add` 的结果
+  （字段之间夹逗号也认），顶层静态构造同样吃字面量表达式与调用。样例
+  `bootstrap/lain/examples/field_expr.lain`。
 
-**值层已定案：栈（`#alloca`）。** 函数体里的 `let q: T = T { … };` 与
-`return T { … };` 已经降级成
-`%r<n> = #alloca[#bits<8>](<size>)` + 每字段一条 `#store`（基址 `#lea(%r<n>, 0, 0, <off>)`），
-绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`。选栈而不是「每个构造点一份静态 storage」，是因为后者
-要先有带外顶层区（F 的一部分）、且递归会共享同一份存储（重入互相踩）；栈版本的代价是**值
-逃不出帧** —— `#alloca` 从栈租约里 bump（`engine.c` 的 `op_alloca`：元素大小 × 常量 count，
-16 对齐，越界报 `LAINVM_TRAP_STACK_EXHAUSTED`），帧弹出时水位退回 `stack_mark`
-（`engine.c:926`），所以区域退出后地址失效，同 C 返回局部地址。返回值今天**拒绝**这种逃逸：
-结果类型是聚合时，返回的地址必须是**参数**（调用方给的）或**调用结果**（被调用方算出来的），
-刚构造的地址与局部绑定一律报 11（探针 `build/probes/escape.lain` / `escape2.lain` /
-`escape3.lain`）。
+实现注记：
 
-**字段访问当值已经能用**：`p.x` 在返回、绑定、更大的表达式（`p.x + p.y`、`1 + p.x`）与
-调用实参位置都降级成 `%r<n1> = #lea(%p, 0, 0, <字段偏移>)` 加
-`%r<n2> = #load[<字段类型>](%r<n1>)`，操作数的**类型**取字段自己声明的那个（`meta_operand_type_window`），
-所以 `1 + p.x` 查的是 `i32` 的算子表。样例 `bootstrap/lain/examples/field_value.lain`（单个字段、
-两字段相加、实参位置、带标注与不带标注的绑定），探针 `fieldval.lain` / `fieldbind.lain` /
-`fieldexpr.lain` / `fldarg.lain` / `fldval.lain`，产物都过 `lainir_parse` + `lainir_verify`。
+- 同一过程里每个构造点必须用自己的 `%r<n>`：装载器 `region_lookup`
+  （`seed/src/vm/image.c`）按名字取第一个匹配定义，重名会静默指向前一个。临时编号来自
+  暂存区 `+144` 的计数器（`meta_next_temp`），顶层字面名 `%base` 与它们不冲突。
+- 点号形态占三格（值、点号、成员名），成员后面跟 `(` 时实参组再占一格；
+  `meta_after_operand` 对形状 6 跳 3 或 4 格。左边是和类型名且成员后面跟 `(` 才是投影，
+  其余是积类型的字段访问，分支由 `meta_dotted_delim` 的返回值决定。
+- 初始化列表是一个组节点：字段值到哪结束由下一个字段名决定（一个槽后面紧跟 `:` 就是
+  字段名），这条终点判定只在表达式里出现名字加冒号时生效。
+- 局部绑定上的字段访问仍报 4：局部变量表只记「名字 → 类型名窗口」，字段访问需要类型正文，
+  只有函数参数能提供。
 
-**变体投影当值也已经能用**：`Enum.Variant(值)` 降级成「读判别字节、与 tag 比、带值 `#if` 里
-按载荷偏移取载荷」，不命中回 0（v0 不做 panic 路径）。值可以是参数、局部值或表达式，指令就写在
-当前函数体里；空变体没有载荷可投，报 10。样例 `bootstrap/lain/examples/projection.lain`，探针
-`proj.lain`（绑定位置）/ `projret.lain`（返回位置）/ `projexpr.lain`（更大的表达式）/
-`projnest.lain`（实参位置）/ `projtwo.lain`（同一函数里两次投影）/ `projempty.lain`（报 10），
-产物都过 `lainir_parse` + `lainir_verify`。顶层的投影仍走 `meta_lower_sum_project` 那条发整条
-proc 的路（对照 `sumtoplevel.lain`）。
+## 仍然缺失
 
-**函数体内的变体构造也已经能用**：`Shape.Circle { k }` 与积类型的构造同形 —— 栈上
-`#alloca`（元素 `#bits<8>`、个数是 enum 的布局字节数）、tag 一条 `#store`、有载荷时再来一条，
-绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`、返回直接 `#return %r<n>`。载荷按**操作数**降级，
-参数、字面量与调用结果都能当载荷；空变体只发 tag 那条。样例
-`bootstrap/lain/examples/variant_local.lain`，探针 `varctorlocal.lain`（绑定）/`ctorret.lain`（返回）/
-`ctortwo.lain`（两次构造）/`ctorlit.lain`（字面量载荷）/`ctorcall.lain`（调用载荷）/
-`ctorempty.lain`（空变体），产物都过 `lainir_parse` + `lainir_verify`；顶层那条静态 storage 的路
-仍由 `sumtoplevel.lain` 对照。
+- `switch`、`alloca`、`proc_addr`、间接调用没有表面语法，层 0 是它们的兜底。
+- `i8` / `u8` 没有算子绑定（它们只作访存宽度）；`u8` 比较先写 `b as u32` 再比。
+- `addr` 上的 `==` / `!=` 没有绑定。
+- 没有 `true` / `false` 字面量，写成 `0` / `1`。
+- 顶层构造里写变量名会发出解析不到的 `%NAME`（顶层绑定是过程 `#call NAME()`，没有值可
+  用），由装载器拒绝。
+- 类型不符的绑定不做检查：`func bad(p: Point) -> i32 { let k: i32 = p; return k; }` 会发出
+  `%k = #add[#bits<32>](%p, 0)`，产物在 `lainir_verify` 处被拒（2005），报错位置在产物。
+- 一次 lowering 请求能处理的源码规模存在上限（实测约 550–650 个声明展开节点，多个源会
+  累积）；具体机制未定位。
+- `region_grant` 已接线，只在 Meta 自己的代码里使用（`bootstrap/std/regions.lain`），
+  表面语言还没有对应写法。
 
-**字段值可以是表达式**：`Point { x: a + 1 y: b }` 的 `#store` 值是那条 `#add` 的结果
-（字段之间夹逗号也认），顶层静态构造同样吃字面量表达式与调用。样例
-`bootstrap/lain/examples/field_expr.lain`，探针 `fieldsum.lain` / `fieldsum2.lain` /
-`fieldsum3.lain` / `topexpr.lain`，产物都过 `lainir_parse` + `lainir_verify`。
+## 端到端验收
 
-值层剩下的是（每条都实测过，拒绝码一律 4，源在 build/probes/ 下）：
-
-| 写法 | 实测 | 探针 |
-|---|---|---|
-| 顶层 `let c = Shape.Circle { 7 };`（对照，已能用） | 0 | `sumtoplevel.lain` |
-| 局部绑定上的字段访问 `let p = Point { … }; return p.x;` | 4 | `fieldlocal.lain` |
-
-局部变量表只记「名字 → 类型名窗口」，不记值，所以字段访问当值的那条路仍只认函数参数（聚合值在 IR 里是 `#addr`，局部绑定的地址可能是帧内构造出来的）。
-
-还没有的是：`值名 → 类型`的表只覆盖**带标注的局部绑定**与函数参数两条来源，循环参数仍没有，
-所以 `let p = Point { … }; return p.x;` 干净地报 4（字段访问要的是类型正文，不是类型名）。顶层构造里写变量名会发出解析不到的
-`%NAME`（顶层绑定是过程 `#call NAME()`，不是值）—— 由装载器拒。这些都不影响自举：手写
-Meta 里 `#struct`/`#enum` 的命中数是 0。
-
-### 三、待做（按阻塞顺序）
-
-**A. 算子表** —— 不是语法，是 bootstrap/std/scalars.l1 里那段 `data` 字节表。
-- 表里有 9 个标量名：`i32 u32 u64 i64 i8 u8 bool usize addr`。除 `i8`/`u8`（它们的用途是
-  load/store 的宽度，不是算术）外，其余都绑定了算子（`bootstrap/lain/examples/ops.lain`、
-  `bits.lain`、`widths.lain`）：
-  - 32 位：`+ - * / % == != > <= >= < and or << >>`（i32 走 sdiv/srem/slt/sgt/sle/sge，
-    u32 走 udiv/urem/ult/ugt/ule/uge）；
-  - 64 位：同上一整列（`u64`/`usize` 走无符号那组，`i64` 走有符号那组）——`#bits` 4114 次、
-    `#add` 471 次里的大宗就是它们；
-  - `bool`：`== != and or`。
-- 词算子 `and`/`or` 由词法层整词识别（`an` 仍是 4）；`<<`/`>>` 走双字节标点。
-- IR 侧零改动：`#sub #mul #udiv #urem #eq #ne #ult #uge #and #or #shl #lshr` 都已实现。
-
-**B. 宽度推导与转换** —— 「算子产生自己的结果类型」。`if x < 2` 不加括号、`let` 省标注这
-一半**已完成**：条件是任意表达式（块 = 表达式停下来的那一格），无标注绑定的类型由值推
-（`bootstrap/std/funcs.l1` 的 `meta_value_type_window` / `meta_decl_ret_window`，样例
-`bootstrap/lain/examples/flow.lain`）。`as` 也**已完成**：变宽 `#zext`、变窄 `#trunc`、
-等宽加零复制（`meta_emit_op_lit` 按 #data 地址发名字，样例 `convert.lain`）。负数字面量也
-**已完成**：`-5` 发成 `#sub[repr](0, 5)`（样例 `neg.lain`）。十六进制也**已完成**：`0x`/`0X` 前缀由 `bs_read_uint` 按十六进制读，
-整段必须是合法字面量（`0x` 报 4），宽度检查同样生效（样例 `hex.lain`）。**B 至此没有剩余项**。
-
-**C. 内存与地址** —— Meta 的实际工作方式。
-- `addr` 类型（已有）＋ `load` / `store` / `lea`：**前半完成** —— 三个内建名字可用
-  （`meta_emit_load_temp` / `meta_lower_store` / `meta_emit_lea_temp`，宽度由期望类型定；
-  样例 `bootstrap/lain/examples/memory.lain`，产物过 `lainir_parse` + `lainir_verify`）。
-- `p + i`、`p + 1`：**已完成** —— 表达式路径按「符号是 `+` 且左操作数的类型是 addr」发
-  `#lea(基址, 下标, 1, 0)`（`is_lea` 分支），并就地认出 `p + i * K` 把 K 当 scale（K 必须
-  是无符号十进制字面量，`* K` 后面不能再跟算子：降级是左到右折叠，任意的组合要支持得先
-  有表达式树）；`i + p` 报 4（只认左边的地址，否则会发出 `#add` 拿地址当整数）。
-- 字节串字面量 → `#data`（`#data_addr` 232）：**完成** —— 顶层 `let NAME: addr = "…";`
-  发出静态块与取址过程（`meta_lower_static_bytes`，样例 `bootstrap/lain/examples/bytes.lain`，
-  产物过 `lainir_parse` + `lainir_verify`）。字节原样搬、**不补末尾 0**；函数体内的字节串报 4
-  （`data` 只能落顶层）。
-- 定长同质表 → `#data` + `#data_addr` + `#lea`：**完成** —— 顶层 `let NAME: [T] = [ … ];`
-  （`ro [T]` 出 `ro` 块）发出静态块与取址过程（`meta_lower_table`），索引 `NAME[i]` 在任意值位置发
-  `#data_addr` 加 `#lea(基址, 下标, 元素字节数, 0)`（`meta_emit_index_temp`），`len(NAME)` 发元素个数
-  （`meta_emit_len_temp`）。样例 `bootstrap/lain/examples/table.lain`，产物过 `lainir_parse` + `lainir_verify`；
-  字面量下标越界、元素不是字面量、`len` 用在非绑定上都报 4（探针 `build/probes/table_oob.lain` /
-  `table_bad.lain` / `len_scalar.lain`）。
-- 宿主授予**整块窗口**的能力（`region_grant`）：**完成** ——
-  `lain_meta_region_grant(kind, index, dest)` 把 {地址, 容量, 权利} 三个 64 位字写进调用方给的
-  24 字节位置（`bootstrap/std/regions.l1`；记录落在这个模块自己的 rw 数据块里，不占暂存区的
-  固定格 —— 那些格是各遍的诊断/暂存区）。暂存区的基址与容量都从记录读回
-  （`meta_region_scratch_base` / `meta_region_scratch_capacity`，分配器改用它），一次授予之后
-  仍是普通 `#load`/`#store` —— 没有逐字节回调。今天只用 kind 3（暂存区）；0/1/2
-  （Source / AstIn / AstOut）已定义、未使用。驱动摘要里的 `region grants=` 就是授予次数
-  （每个样例 2 次：建表与重建各一次）。
-
-- 指针与整数互转 → `#ptr2int` / `#int2ptr`：**完成** —— 内建 `ptr_of(p: addr) -> u64` 与
-  `addr_of(w: u64) -> addr`（`meta_emit_ptr_of_temp` / `meta_emit_addr_of_temp`，实参类型不合法报 4），
-  指令由 `lainir_ptr2int_at` / `lainir_int2ptr_at` 发出。样例 `bootstrap/lain/examples/pointer.lain`
-  （纯转换、链式转换、`store(addr_of(ptr_of(p)), v)`），拒绝探针 `build/probes/ptr_of_int.lain`
-  / `ptr_of_zero.lain` / `ptr_of_two.lain` / `addr_of_ptr.lain` / `addr_of_bad.lain`；
-  `build/probes/ptr_sites.lain` 实测了 Meta 里那 11 处 `#ptr2int`/`#int2ptr` 的表面等价体
-  （`addr_of` / `ptr_of` / 整数比较 / `lea` 组合）产物与手写形状同族，过 `lainir_parse` + `lainir_verify`。
-
-- 零碎语法：**完成** —— 四项各自落地：
-  - 整数与地址互转的**转换写法** `p as u64` / `w as addr`（与两个内建同一条指令路；目标是别的
-    宽度、或源与目标不是「一边地址一边整数」都报 4，探针 `build/probes/cast_same.lain`、
-    `cast_width.lain`）；
-  - 静态数据绑定在函数体里按**裸名字**取值：发 `%r<n> = #data_addr NAME_storage`（此前发成
-    `%NAME`，装载器报 2002），`NAME as u64` 也能直接转（探针 `build/probes/q_tableref.lain`、
-    `q_tablecast.lain`）；
-  - `p + i * K` 的 scale（见上）；
-  - 无标注 `let b = load(p);` 仍报 4 —— 这一项**不改**：`#load` 的宽度只能来自期望类型，
-    猜宽度会静默给错值。`q_loadanno` 那一族的正例（带标注、`return` 位置、`as` 后面、
-    有参数类型的实参位置）全部实测通过。
-
-**D. 控制流补齐**
-- 带值 `if`（`#if` 779 + `#yield` 719）：**完成** —— 绑定位置、`return` 位置与表达式里的操作数
-  位置（实参、括号内、与算子串联）都已可用（`meta_lower_if_value` 的 `%name_mode`，操作数位置
-  在表达式遍历的两处统一由 `meta_operand_step` 接住）；省略 `else` 时假分支发结果类型的零值
-  （bits 类 `#yield 0`，`addr` 先 `%r<n> = #int2ptr[#addr](0)` 再 yield 那个临时值），`else`
-  后面不是块仍报 4（探针 `build/probes/ifnoelse_elseword.lain`）。样例
-  `bootstrap/lain/examples/choose.lain`、`bootstrap/lain/examples/value_if.lain`、
-  `bootstrap/lain/examples/if_default.lain`，产物都过 `lainir_parse` + `lainir_verify`。
-- `loop` 带标签 + 循环参数（`#loop` 97 / `#break` 185 / `#continue` 104）：**完成** ——
-  标签、任意个参数、任意条件、多语句体（`meta_lower_loop`）与带实参的
-  `break` / `continue`（`meta_lower_loop_jump`）都已可用，样例
-  `bootstrap/lain/examples/loop.lain`、`bootstrap/lain/examples/jumps.lain`，产物都过
-  `lainir_parse` + `lainir_verify`。
-- 循环体里的 `if`：**完成** —— `meta_lower_loop_stmts` 按格派发，`if` 格交给
-  `meta_lower_loop_if`：条件用循环结果的类型当上下文降级，两支各自先把参数快照恢复回来再走
-  语句（支内先读到的是进入 `if` 之前的值），支尾按参数当前值发 `#yield`，`if` 之后每个参数的
-  当前值换成对应的结果临时值；支里以 `#break` / `#continue` 收尾时那一支不发 `#yield`
-  （`#continue` 就地发）。分支里的赋值对后续语句可见：标识符操作数经 `meta_operand_emit` 的
-  `meta_loop_param_index` 查表，命中循环参数且该参数本轮有当前值就发临时值名。样例
-  `bootstrap/lain/examples/loop_if.lain`（分支里的 `break`、`continue`、赋值与嵌套 `if`），
-  产物 host_status=0、trap none、过 `lainir_parse` + `lainir_verify`。为此 `seed/src/ir/verify.c`
-  的 `yields_values` 也接受 `#continue` 收尾的分支（原先只认 `#return` / `#break`，与同文件里
-  「终结子」的判定不一致）。
-
-**E. 声明与链接**
-- `extern NAME(a: T) -> U = link_name;`：**完成** —— 14 号 handler（`meta_register_extern` /
-  `meta_declare_extern` / `meta_lower_decl_extern`，头由抽出来的 `meta_emit_proc_header` 发），
-  声明身份与 `func` 一样是 6，调用点与返回类型推导完全共用一条路（样例
-  `bootstrap/lain/examples/extern.lain`：4 条 extern + 3 个函数，产物过 `lainir_parse` +
-  `lainir_verify`）。手写 Meta 当时那份 46 条 `#extern`（五的瘦身之后剩 32 条）里取 14 条最复杂的签名实测逐字符等价
-  （build/probes/cap12.lain，matched=14 of 14）。**注意**：一次 lowering 请求的源码规模有既存上限 ——
-  今天实测约 40 条合成 extern（或 13 条 9 参长签名）就开始报 4，多个源会**累积**，
-  与 extern / func 无关，见《待补规则》。
-- struct / enum 名字可写进参数类型与标注：**完成** —— 聚合类型在 IR 里就是 `#addr`
-  （构造发 `#proc NAME() -> #addr`），所以 `p: Point` 的参数类型发成 `#addr`、
-  `let q: Point = p;` 是一次地址复制（`#lea(%p, 0, 1, 0)`）；实现是
-  `bootstrap/std/registry.l1` 的 `meta_tid_repr` 对 kind 2/3 直接报 addr
-  （聚合记录里 size/align 占了 kind/width 那两个字）。样例 `bootstrap/lain/examples/types.lain`。
-- 函数体内构造的 storage（见二）：**完成** —— 值层定案为**栈上 `#alloca`**：每个构造点发
-  `%r<n> = #alloca[#bits<8>](<布局大小>)` 加每字段一条 `#store`，绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`、
-  `return T { … }` 直接 `#return %r<n>`。实现是 `bootstrap/std/records.l1` 的
-  `meta_lower_construct_local` 与拆开的 `meta_emit_store_head`/`_tail`/`_name`，
-  入口在 `bootstrap/std/funcs.l1` 的 `meta_lower_stmt`（构造单独成句的早退分支）。样例
-  `bootstrap/lain/examples/locals.lain`。
-
-**F. 层 0：`lainir_*` 发射库**：**完成** —— `bootstrap/std/lainir.l1` 按名单提供五组写出器：整数/位/比较/转换、内存与地址、调用、控制流与单元骨架、固定文本片段（`std/sums.l1` 与 `meta.l1` 都 import 它；当时靠一份模块清单登记它排在 `std/sums.l1` 后、`meta.l1` 前，那份清单已在步 3 删除）。探针 `bootstrap/lain/examples/lainir_f1.l1` 到 `lainir_f4.l1`（清单 `bootstrap/lainir_f1_unit.txt`）分别覆盖骨架、F2 的 23 个二元算子与 6 个转换、F3 的内存/地址/调用、F4 的控制流与单元形态，F6 的 `lainir_f6.l1` 用层 0 重发 `locals.lain` 的整份单元；
-五条产物都过 `build/check_unit.exe` 的 parse+verify，驱动报 `host_status=0`、`trap none`。处理管线的字面文本发射已全部改走层 0，`bootstrap/std/emit.l1` 的 `data` 模板从 88 个减到 30 个，16 个样例产物在迁移当时逐字节不变（`diffcount=0`；此后 D 的循环体顺序可见性修好，`jumps` 有两行按新语义变化；值层的逃逸规则定下来后 `locals` 按新规则重写）——
-逐条写出器名单、删除口径与证据见上文《层 0：发射层》。
-
-用量证据（口径：`bootstrap/` 的 28 个模块文件 —— 由入口 `meta.lain` 的 import 闭包给出，不数注释与示例）：`#bits` 4114、
-`#call` 2994、`#if` 925、`#yield` 860、`#lea` 790、`#eq` 630、`#return` 628、`#add` 471、
-`#data_addr` 343、`#break` 220、`#and` 175、`#ne` 173、`#continue` 120、`#ult` 112、
-`#loop` 112、`#sub` 87、`#or` 84、`#mul` 67、`#proc` 407（定义数，= 验证器报的 subroutine 数）。
-
-### 四、推迟与排除
-
-**推迟**：`switch`、`alloca`、`proc_addr`、间接调用。它们在 IR、验证器、引擎里都已实现，
-缺的只是表面语法与降级；层 0 是它们的兜底，所以推迟的代价是「用 Lain 写别的程序不够用」，
-不是「自举做不下去」。（手写 Meta 把数据摊平进 arena 与字节偏移，`#struct`/`#enum` 的命中数
-是 0 —— 这只说明**写编译器本身**不需要复合值，不说明语言该不该有。）
-
-**排除**：任何 `#` 形态、`ptr2int`/`int2ptr`、浮点、向量、原子、并发、泛型、闭包、
-用户可见的 eval/apply、字符串类型、`?{}` 宏输入。
-
-**非语言前提**：先有一小层用 Lain 写的 stdlib；宿主提供「授予一整块窗口」的能力
-（`region_grant`）、`emit_uint`、`scratch_alloc`。逐字节回调不可行 —— 词法器与解析器是
-逐字节跑的。
-
-### 五、删除与瘦身（实测口径）
-
-口径是静态调用图：根 = 三个 ABI 入口（`lain_std_lower` / `lain_std_abi_version` /
-`lain_std_initialize`）加当时声明的全部 46 条能力 `#extern`（清掉从未被调用的那批之后是
-32 条，见下），再加层 0 的探针入口（`f1_probe` …
-`f4_probe`、`f6_probe` —— F 的验收要求公开面每个算子都有样例，那一层的公开 API 不能按「单元里
-没人调用」判死）；边 = `#call NAME`。全仓库 `#proc_addr` 与 `#call_indirect` 命中为 0，所以没有
-静态图看不见的间接引用。这条口径的可重跑实现是 `build/deadscan.ps1`（`data` 块那条是
-`build/datascan.ps1`）。
-
-**这一节删掉：48 个 `#proc`（1299 行）加 1 个整文件，再加 13 条外部过程声明（13 行）与 7 个 `data`
-块。** 删前 29 个文件 / 14522 行 / 582 个 `#proc` 定义（= 验证器报的 subroutine 数）/ 214 个 `data`
-块；删后 28 / 13203 / 521 / 207。
-
-| 文件 | 删前 proc | 删后 proc | 删前行 | 删后行 | 是什么 |
-|---|---|---|---|---|---|
-| bootstrap/std/wire.l1 | 16 | 0（整文件删） | 741 | 0 | 类型、值、过程引用的 wire 编解码与校验，env 值绑定 |
-| bootstrap/std/eval.l1 | 8 | 3 | 266 | 81 | bytes 实参请求、emitted 请求、声明闭包与过程引用求值 |
-| bootstrap/std/scope.l1 | 45 | 36 | 1288 | 1108 | 依赖闭包一套、`meta_scope_set_payload`、`ast_index_of`、`meta_scope_ensure_scanned` |
-| bootstrap/std/parse.l1 | 42 | 35 | 718 | 633 | `meta_sem_*` 一系、`meta_cursor_end` |
-| bootstrap/std/registry.l1 | 16 | 10 | 244 | 202 | `meta_tid_owner` / `meta_tid_namespace` / `meta_tid_field_*` |
-| bootstrap/std/modules.l1 | 18 | 16 | 605 | 575 | `meta_cstr_len`、`meta_slice_equals` |
-| bootstrap/std/lainir.l1 | 151 | 149 | 1509 | 1472 | `lainir_memory_unary`、`lainir_loop`（层 0 里没人调的片段） |
-| bootstrap/std/emit.l1 | 47 | 33 | 172 | 154 | `meta_emit_byte`（F5 迁移后没人再调）与 13 条外部过程声明 |
-
-删掉的单条里最大的是 `meta_record_type_from_field_list`（166 行）、`meta_wire_validate`（119）、
-`meta_eval_apply_decl_closure`（112）、`meta_wire_validate_field_list`（87）、
-`meta_scope_dependency_closure`（77），都在上表前四行的文件里。
-
-`bootstrap/lain/examples/lainir_f5.l1`（F5 迁移过程中的单点探针，10 行）也一并删掉：它的覆盖被
-`lainir_f6.l1` 的整单元重发取代，而且它从来不是任何入口。
-
-删除后的产物与删除前逐字节相同（`build/f5_compare.ps1` 的差异仍是 `jumps` / `locals` 那两条有意
-的改动），23 个样例与 f1…f4、f6 探针全绿。
-
-**别删**：bootstrap/std/funcs.l1 的 `meta_lower_stmt` / `meta_lower_if` / `meta_lower_for` /
-`meta_lower_body` 是活的（`meta_lower_decl_func` → `meta_lower_body`）。
-
-**未被引用的 `data` 块 7 个：已删。**（F5 之后重测；旧表里的 `meta_o1` / `meta_o5` / `meta_s2` /
-`meta_s3a` / `meta_s3b` / `meta_s4a` / `meta_s4b` 在那次迁移里已经删掉。）删的是 `lainir_data_rw_mode`、
-`lainir_indent2`、`lainir_rparen_brace`（层 0 迁移后没人再引用的文本块）、`meta_kw_arrow`（`->` 的识别
-改走字节比较）、`meta_reg_entry_off` / `meta_reg_entry_size`（注册表布局按表头算）、
-`meta_st_ind4cont`（D 的循环体 `if` 落地后由 `lainir_continue_head_write` 取代）。口径可重跑：
-`build/datascan.ps1` 现在的输出是「未引用 = 0」。删后 `data` 214 → 207，`subroutine` 数不变。
-
-**从未被调用的能力包装 13 个：已删。**（文档原来写 7 个，那是 s1 之前测的；eval 与 wire 的死代码删掉
-之后，bytes 请求一族、会话身份、emitter 作用域、`ast_root` / `ast_tx_release` 也失去了唯一的调用点，
-可删的从 7 涨到 13。）删的是 `lain_meta_session_id`、`lain_meta_emit_scope_begin`、
-`lain_meta_emit_scope_end`、`lain_meta_apply_bytes_request`、`lain_meta_apply_bytes_arg_request`、
-`lain_meta_apply_bytes_length`、`lain_meta_apply_bytes_copy`、`lain_meta_apply_emitted_bytes_request`、
-`lain_meta_apply_emitted_bytes_arg_request`、`lain_meta_ast_root`、`lain_meta_ast_tx_release`、
-`lain_meta_diagnostic_field`、`lain_meta_apply_diagnostic_field`：bootstrap 侧的 `#extern` 声明与
-`seed/src/meta/host.c` 的登记（`k_capabilities` / `k_output_capabilities`）两侧一起删，对应的 `cap_*`
-函数与只描述它们的注释一并去掉，能力表 **46 → 33**（驱动摘要 `caps count=33`）。`lain_meta_emit_data` /
-`lain_meta_emit_length` **不删**：`lainir_text()` / `lainir_length()` 在用（层 0 探针 `lainir_f1.l1` 会调）。
-口径可重跑：`build/capscan.ps1`（声明面 = 单元 + 探针文件，调用面 = 同一批文件里的 `#call`）。
-
-**其他杠杆**：注释比例高的几个是 bootstrap/std/emit.l1 85/154（55%）、
-bootstrap/std/parse.l1 184/633（29%）、bootstrap/std/types.l1 22/92（24%）、
-bootstrap/std/recognize.l1 115/518（22%）、bootstrap/meta.l1 323/1623（20%）；
-bootstrap/std/handlers/ 的 6 个文件共 320 行，可以并成一个。
-
-**顺序**：先删未被引用的 `data` 块与未被调用的能力（无风险）；wire 那一层随 F 的落地整文件删掉了
-（层 0 由 `lainir.l1` 承担，那一层不可达）。
-
-### 六、结论
-
-今天能跑通的最小闭环 = `func` / `return` / 调用 / `let`（标注可省）/ `if`（条件任意表达式）/ 带值 `if`（绑定、`return`、操作数三个位置，缺 `else` 有零值）/ `for` / `loop`（标签 + 参数 + 多语句体 + 带实参的 `break`/`continue` + 体里的 `if`）/
-`load`/`store`/`lea`（宽度由期望类型定）/ `p + i`（→ `#lea`）/ 顶层静态数据（字节串与定长同质表 → `#data` + 取址过程，索引 `t[i]`、`len(t)`）/
-指针与整数互转（`ptr_of`/`addr_of` 与 `p as u64`/`w as addr` → `#ptr2int`/`#int2ptr`）/
-`p + i * K`（`* K` 折进 `#lea` 的 scale）/ 函数体里按裸名字取静态数据的地址（`#data_addr NAME_storage`）/
-函数体与顶层的聚合构造（→ 栈上 `#alloca` + 每字段 `#store`，或顶层 `data`）/
-宿主整块窗口授予（`region_grant`，暂存区的基址与容量从记录读回）/ `extern` 声明（`= link_name`，调用与 `func` 同路）/
-算子表覆盖全部标量名（`i8`/`u8` 除外，见 A）/ 聚合类型名（struct、enum）进参数类型与标注 /
-模块成员在绑定、表达式、实参、类型、调用与字段访问六个位置（`M.名字` 按模块键发 `<键>__<名字>`；
-跨模块静态数据走访问器，`symbol_addr` 只管本模块的静态数据）/
-聚合值当值用（字段访问、变体投影、函数体内构造、字段值是表达式；跨帧返回栈上地址报 11）。
-够做「一小段 Lain 端到端」，还不够写编译器。A、B、C、D、E、F、值层与五都已完成。
-
-## 待补规则
-
-- `vref` 要成为不透明标量（像 `addr`：不可算术、不可 `as`）。
-- `load`/`store`/`lea` 的宽度只来自**期望类型**：无标注 `let b = load(p);` 与 `load(p);`
-  单独成句都报 4，不猜（曾经拿本函数的返回类型顶上，发出过宽度错的 `#load`）。
-- 收尾的「加零复制」不再走源码的算子表：地址用 `#lea(x, 0, 1, 0)`、其余定宽整数用
-  `#add[repr](x, 0)`。`u8`/`i8`/`addr` 没有算子绑定，走算子表查 `+` 会报 6。
-- `p + i` 只认 `+` 且**左操作数**是地址：`i + p` 报 4（换过去是 `#lea(1, %p, 1, 0)`，
-  而按左边的整数类型发 `#add` 会拿地址当整数 —— 验证器 2005）。`p + i * K` 是这条规则的
-  扩展：`* K` 被折进 `#lea` 的 scale，K 得是字面量。
-- `p + i * K` 的 K 必须是**无符号十进制字面量**且后面不能再跟算子：`p + i * 4 + 8` 仍报 6
-  （降级是左到右折叠）。要支持任意表达式得先有表达式树。
-- 静态数据只在**顶层** `let NAME: addr = "…";` 与 `let NAME: [T] = [ … ];` 能用：产物是
-  裸 `data NAME ro|rw { … }`（不带 `_storage` 后缀、不发取址过程）；`?NAME` 在函数体里发
-  `#data_addr NAME`，与手写 LAINIR 的 `data NAME ro { … }` 逐字节一致。索引 `NAME[i]` 与
-  `len(NAME)` 在函数体里可用。函数体里没有地方放 `data`，所以写在那里报 4；把整块的地址
-  拿进函数要等 F（层 0 的带外顶层区）。底层用 `#data_addr` 引用静态块的值，**不能**在表达式
-  里按裸名字引用（那会发成 `%NAME`）—— 顶层 let 绑定按值引用还是既存缺口。
-- 逐字节闸门（registry 模块）：表面 `let NAME: ro [u8] = [ … ];` 现能发出与手写 LAINIR 逐字节
-  相同的 `data NAME ro { … }`，`?NAME` 也一致。但 `extern X(p: addr) -> u64 = link;` 的块名走
-  链接名（`#extern`），与手写同名声明块的逐字节差异属表面记法缺口（注释不入产物、`extern`
-  别名另发块），不改发射器，记在待补规则；索引、len、字节串不补末尾 0 均已逐字节对齐。
-- 期望类型的传递路径（见上）。
-- `addr` 上的 `==` 给不给（层 0 有 `lainir_eq`）。
-- 模块：跨模块一律写 `M.名字` —— `M.f(x)` 是调用、`M.NAME` 是访问器调用、`M.table[i]` 给元素地址、
-  `p.x`（`p: M.Point`）按被导入模块里的布局读字段（见《模块：成员位置与符号命名》）。
-  `symbol_addr` 退回「本模块静态数据取址」这一种用途；两个模块的同名声明靠模块键分开。
-- 模块**不导出标量**：`M.i32` 报 301（标量是内建名字，不进模块成员表）。`M.bump` 当值用（不调用）
-  报 400「模块函数成员不能当值使用，请写成调用 M.bump(…)」；成员名写错报 301「未绑定的名字: M」
-  —— 别名不是值名，成员表查不到就退回普通名字解析。
-- Meta **自己**降级 `import` 的那条路（拿 Meta 编译带 `import` 的表面源码）另有缺口，与本节描述的
-  lain0 行为不是一回事：缺口清单与实测数字记在 `docs/plan-meta-lain.md` 的待办里。
-- `loop` 的循环体只能给**自己的参数**赋值，别的目标报 4；体是多语句的（`for` 只有一条）。
-- `loop` 的早退：`break LABEL(<值>);` 用循环结果类型当上下文，`continue LABEL(<实参…>);`
-  用各参数的声明类型当上下文；两者都必须带标签，标签名不符报 4，实参个数不符报 4
-  （`break` 恰好 1 个、`continue` 恰好等于参数个数），循环外写报 4，循环体里 `break` 之后
-  的语句不再降级。值型循环的区域里必须留下一个 `#break`：只写落尾的 `continue` 也照样由
-  收尾补上它，但如果循环根本不可能产出值，产物过不了自己的验证器（2006）。
-- 一元负号只认**字面量**（`-5`）：它占两个节点（负号 + 数字），操作数游标要跳两格；
-  作用于变量（`-x`）或调用（`-f(x)`）报 4 —— 那需要一条真正的取负规则，不是记法。
-  `- <空>`（`return -;`）报 3（操作数缺失）。
-- 负数字面量不做「装得下」检查（`meta_literal_fits` 只看源码里的裸数字）：`let b: u32 = -1;`
-  发成 `#sub[#bits<32>](0, 1)`，按宽度取模得全 1，与机器上的补码一致。
-- `as` 的目标类型**不回填**给后面的算子或下一次转换：链式 `x as i64 as i32` 的第二次
-  只能按**上下文宽度**判方向（绑定的标注宽度），所以它可能发成加零复制而不是 `#trunc`；
-  值仍然对（指令自己按宽度截/扩），但产物不是最直白的那条。
-- `region_grant` 的记录落在**本模块的 rw 数据块**里（`data meta_region_scratch_record rw { … }`）：
-  它不能放暂存区的固定格 —— 那些格被各遍当诊断/暂存区用（例如 `meta_scope_scan_root` 写
-  1540 + src*32）。授予以**宿主状态**为准（能力返回 0，失败写在宿主状态里），所以 `scope_setup`
-  授完先读一次 `lain_meta_status`。
-- `extern` 只做声明：链接名原样搬进 `#extern "…"`，**不等于**宿主登记了对应能力 ——
-  能力表是驱动调 `lainmeta_host_register` 建的，两者对不上要到调用时才炸。
-- 聚合类型名（struct / enum）进参数类型与标注：聚合值在 IR 里报 `#addr`（构造发
-  `#proc NAME() -> #addr`），所以 `p: Point` 的参数类型是 `#addr`，`let q: Point = p;`
-  是一次地址复制（`#lea(%p, 0, 1, 0)`）。翻译点在 `meta_tid_repr`：聚合记录里
-  word16/word24 是 size/align，本来会被当成 kind/width 解包出 `#bits<4>` 这种假类型。
-- 声明体里字段/变体**空格分隔**（`x: i32` 然后换行 `y: i32`）：写成逗号分隔
-  （`x: i32, y: i32`）会让字段走查把逗号当字段名起步，`meta_type_resolve` 拿不到类型报 5。
-- 函数体内的聚合构造降级到**栈**：每个构造点发 `%r<n> = #alloca[#bits<8>](<布局字节数>)`
-  （`#alloca` 的 count 是元素个数，元素类型是 `#bits<8>`，所以按字节；count 必须是常量，
-  布局大小为 0 报 5，验证器另对常量 0 报 2024），每字段一条
-  `#store[repr](<值>, #lea(%r<n>, 0, 0, <字段偏移>))`；绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`，
-  `return T { … }` 直接 `#return %r<n>`。
-- 同一 proc 里**每个构造点必须用自己的 `%r<n>`**：装载器 `region_lookup`（seed/src/vm/image.c）
-  按名字取**第一个**匹配定义，重名会静默指向前一个（不报错、只算错）。临时编号来自暂存区
-  +144 的计数器（`meta_next_temp`），所以顶层字面名 `%base` 与它们不冲突。
-- 字段访问当值（`p.x`）：形状 6 由 `meta_operand_emit` 分给 `meta_emit_field_temp`（`bootstrap/std/records.l1`）
-  —— 值名的类型**只认函数参数**（`meta_word_type_name`，它在参数表查不到时会再问局部变量表，
-  但局部变量表只给类型名窗口，不给类型正文，所以字段访问这条路仍然只认参数），字段偏移由 `meta_layout_field` 从类型正文
-  算出（最高位为 0 报 8），发两条指令并把结果临时值下标写进暂存区 `+168`。`p.x` 占三格
-  （值、点号、字段名），所以 `meta_after_operand`（`bootstrap/meta.l1`）对形状 6 回「下标 + 3」——
-  只跳一格会把点号当成下一个语句。
-- 操作数**自己**的类型取字段声明的类型（`meta_operand_type_window`），不是值名（`p`）的类型：
-  `1 + p.x` 按 `p` 的类型查表会拿积类型去查 `+`，报一个跟真实原因无关的 4。
-- 无标注绑定 `let v = p.x;`：`meta_value_type_window` 对形状 6 回**字段**声明的类型名
-  （`meta_field_type_window`），产物是 `%v = #add[repr](<字段值>, 0)`。
-- 变体投影当值（`Enum.Variant(值)`）：判别字段是**从基址读出来的一个字节**
-  （`%r<t> = #load[#bits<8>](<基址>, 0)`，拿地址本身去查位类型的算子表会被验证器按类型不符拒），
-  与变体 tag 比（`%r<m> = #eq[#bits<8>](%r<t>, <tag>)`）之后走带值 `#if`：命中发
-  `%r<p> = #lea(<基址>, 0, 1, <载荷偏移>)` 加 `%r<v> = #load[<repr>](%r<p>, 0)` 再 `#yield %r<v>`，
-  不命中 `#yield 0`（v0 把不命中折叠成 0，不做 panic 路径），结果就是那条 `#if` 的临时值
-  （`meta_emit_projection_temp`，`bootstrap/std/sums.l1`）。值与成员名之间的实参按**操作数**
-  降级，所以参数、局部值、表达式都行。
-- 点号形态占三格（值、点号、成员名），成员后面跟 `(` 时那个实参组再占一格：`meta_after_operand`
-  对形状 6 跳 3 或 4 格（`meta_dotted_has_arg`）。左边是**和类型名**且成员后面跟 `(` 才是投影，
-  其余是积类型的字段访问。
-- 空变体（`Shape.Empty(s)`）没有载荷可投：报 10。
-- 函数体内的变体构造（`let s: Shape = Shape.Circle { k };`、`return Shape.Circle { k };`）与积
-  类型同形：栈上 `%r<n> = #alloca[#bits<8>](<enum 布局字节数>)`、tag 一条
-  `#store[#bits<8>](<tag>, #lea(%r<n>, 0, 0, 0))`、有载荷时再来一条
-  `#store[<载荷 repr>](<载荷>, #lea(%r<n>, 0, 0, <载荷偏移>))`，绑定接
-  `%NAME = #lea(%r<n>, 0, 1, 0)`、返回直接 `#return %r<n>`（`meta_lower_sum_construct_local`，
-  `bootstrap/std/sums.l1`）。载荷按**操作数**降级（`meta_operand_emit` + `meta_render_ref2`），
-  所以参数、字面量、调用结果都能当载荷；空变体只发 tag 那条（`Shape.Empty { }`）。
-- 形状判据：积类型的构造是形状 10（名字后面直接跟花括号组），和类型的构造是形状 6（点号形态）
-  且成员名后面跟 `{`；两条都由 `meta_dotted_delim` 的返回值分流（`(` 投影、`{` 构造、其余字段）。
-- 构造的字段值是**一条表达式**（`Point { x: a + 1 y: b }`）：初始化列表走**游标**（花括号组 + 下标），
-  每个字段是「名字、冒号、值」三格起，值交给 `meta_emit_expr` 降级，结果文本写进 `#store` 的值位置
-  （`meta_construct_fields` + `meta_emit_store_text`）。值到哪结束由**下一个字段名**定：一个槽后面
-  紧跟 `:` 就是字段名，表达式在那里停 —— 这条终点判定只在「表达式里出现名字加冒号」时生效，别处
-  那样写本来就是错的；字段之间夹的逗号也认。变体构造的载荷（`{ k }`）同样按操作数降级。
-- 初始化列表是一个**组节点**：调用方把组节点一起给进来（`meta_cursor_at` 命中组里某个 token 时
-  的父组，或者 `meta_cursor_next` 拿到的下一个兄弟）—— 组节点的文本起点不是它的第一个孩子，
-  按 `{` 的字节位置反查会落到孩子上。
-- 顶层静态构造（`data NAME_storage` + `NAME() -> #addr`）吃同一套字段值规则：字面量表达式与调用
-  都在那个过程体里发。值里的**名字**仍是既存缺口：顶层绑定按值引用要发 `#call NAME()`，今天发成
-  `%NAME`，由装载器拒。
-- 栈上构造的值**逃不出帧**：`#alloca` 从栈租约 bump（16 对齐，越界报
-  `LAINVM_TRAP_STACK_EXHAUSTED`），帧弹出时水位退回 `stack_mark`（seed/src/vm/engine.c:926），
-  区域退出后地址失效。**返回值有定论：拒绝**——结果类型是聚合（struct / enum）时，返回的地址
-  必须是**调用方给的**（参数）或**被调用方算出来的**（调用结果）；`return T { … }`、
-  `return Shape.Circle { … }` 这类「刚构造的地址」，以及把局部绑定返回（`let p = T { … };
-  return p;`）一律报 **11**。判据在 `bootstrap/std/funcs.l1` 的语句降级里：结果类型经
-  `meta_scope_body` 的 4/5 两档认出聚合，返回值是「普通名字」（排除调用、字段、构造、组）且
-  不是参数时报 11；构造当返回值的那两条路（形状 10 与和类型的形状 6）各自直接拒。
-  探针：`build/probes/escape.lain` / `escape2.lain` / `escape3.lain` / `varctorlocal.lain` /
-  `ctorret.lain` 都是 11；对照组 `escapeok.lain`（返回参数）与 `ctorlocal.lain`（构造后在本帧内
-  投影取值）都是 0。`bootstrap/lain/examples/types.lain` 的 `idp(p: Point) -> Point { return p; }`
-  走的就是允许的那条路，产物不变。
-- 顶层构造里写变量名会发出解析不到的 `%NAME`（顶层绑定是过程 `#call NAME()`，不是值）——
-  由装载器拒。函数体内的变体构造与积类型同形（见上面那条）。
-- 类型不符的绑定**不做检查**：`func bad(p: Point) -> i32 { let k: i32 = p; return k; }`
-  会发出 `%k = #add[#bits<32>](%p, 0)`（`host_status=0`），但产物过不了 `lainir_verify`
-  （2005 BAD_OPERAND_TYPE）。也就是说错误由**下游信任门**拒收、不会变成错误代码，
-  但报错位置在产物而不是源码。原因：`meta_emit_close` 的复制只按上下文 kind 选 `#lea`/`#add`，
-  不看被复制的值自己的类型（只有参数名能查到类型）。
-- 一次 lowering 请求能吃的源码规模有既存上限（不是 extern 引入）：今天实测 —— 单个源里
-  39 条合成 extern（2369 B）过、40 条（2430 B）报 4（诊断无位置）；12 条 9 参长签名（2270 B）
-  过、13 条（2460 B）报 4；**多个源会累积**（4 个源各 10 条、合计 2480 B 也报 4；8 个源各 5 条
-  同样）。两种形状的条数差很多但边界一致，所以按**声明展开的节点规模**算，约 550–650 个节点；
-  具体机制（AstIn/AstOut arena、scratch 或 visited 预算）未定位，超出本轮范围。旧记录
-  「一个文件里 20 条左右、22 条 extern 报 4、22 条 func 报 9401」是在 C 组改动之前测的，
-  现在 45 条 func 也过，已不成立。
-- **同一族的另一种观测（更坏：它是静的）**：某些字节布局的源码会在**展开之后**留下一个
-  没有孩子的根，`lain_meta_status` 仍是 0、产物 0 字节，驱动只报 `host_status=0` ——
-  没有拒绝码，`build/check_unit.exe` 因此是这个缺陷唯一的哨兵（空产物过不了 parse）。
-  实测（与字段访问无关）：`bootstrap/lain/examples/types.lain` 前面加一条长注释、总长落在
-  约 714–744 字节时报这个形态（`output bytes=0`、`visits=79`，而相邻长度是 865 字节 /
-  `visits=215`）；同一份声明的注释换成短的（420 字节）就正常。展开遍在 `bootstrap/std/expand.l1`，
-  它按「孩子数量 + 剩余 scratch 的一半」给每个组分配临时缓冲，分配失败回 0 却不带码
-  （`meta_expand_group_inner` 里的 `#return 0`），这条链上还有两处同样的静默返回；
-  根因未定位。
-
-## 与现状的差距
-
-- 标量已经是表：bootstrap/std/scalars.l1 里一段 `data` 字节（名字、kind、宽度、算符对），
-  handler 6 与 bootstrap/std/handlers/scalar.l1 已删除，bootstrap/lain/std/prelude.lain
-  也随之删除（语言里不再有标量声明，也就没有「先 import 一份 prelude」这一步）。
-- 层 0 已完成：bootstrap/std/lainir.l1 的 149 个 lainir_* 写出器承担处理管线的全部字面
-  文本发射，独立调用方（bootstrap/lain/examples/lainir_f6.l1）重发的单元与管线在
-  bootstrap/lain/examples/locals.lain 上的产物逐字节相同。wire 编解码那一层（原来的
-  bootstrap/std/wire.l1）已随五的瘦身删掉：它只被死代码调用。
-- 表面语言里的内存操作今天有 `load` / `store` / `lea` / `p + i`、`ptr_of` / `addr_of`（→ `#ptr2int` / `#int2ptr`）与顶层静态数据（字节串与定长同质表 → `#data`，索引 `t[i]` 与 `len(t)`）；
-  宿主授予整块窗口的能力（`region_grant`）已接线，但只在 Meta 自己的 bootstrap 代码里用
-  （bootstrap/std/regions.l1），表面语言还没有对应写法。
-- 端到端验收源是 bootstrap/lain/examples/arith.lain：`host_status=0`、`output bytes=74`，
-  产物是 `%r1 = #add[#bits<32>](1, 2)`（见 docs/development.md 的驱动一节）。
+- `bash scripts/regress.sh` 与 `bash scripts/regress.sh --round-trip` 跑
+  `bootstrap/lain/examples/` 下的 38 个样例，全部通过。
+- 最小端到端样例 `bootstrap/lain/examples/arith.lain`：驱动报 `host_status=0`、
+  `output bytes=74`，产物是 `%r1 = #add[#bits<32>](1, 2)`。
+- Meta 管线（`build/lain-meta.exe --units-dir build/lain0/units/`）当前 38 个样例中
+  26 个通过。12 个失败：`jumps`、`loop`、`loop_if`、`loop_local`、`loop_value` 以 trap
+  status 1004 结束、产物被截断；`modules_lib`、`modules_main`、`modules_twin`、`refs`、
+  `strinline`、`symbol_addr`、`u8math` 返回非零 `host_status`。缺口记录在
+  `docs/selfhost-gap.md`。

@@ -57,9 +57,9 @@ LAINIR 拒绝带有隐式解释的形式（如笼统的 `div`、`lt` 或字段�
 | **浮点算术** | `fadd fsub fmul fdiv` | 遵循 IEEE 754 浮点语义。 |
 | **浮点比较** | 有序比较：`foeq fone folt fole fogt foge`<br>无序比较：`fueq fune fult fule fugt fuge` | 显式处理 NaN 参与比较时的行为。 |
 | **类型转换** | 整数扩展/截断：`zext sext trunc bitcast`<br>浮点转换：`fpext fptrunc fptosi fptoui sitofp uitofp` | 符号扩展（`sext`）与零扩展（`zext`）显式分离；`bitcast` 亦用于 `#addr ↔ #bits<N>` 的地址↔整数 reinterpret（不授予权限）。 |
-| **地址转换** | （`int2ptr`/`ptr2int` 已移除）地址↔整数统一走 `bitcast[#addr]` / `bitcast[#bits<N>]`，不授予权限。 |
+| **地址转换** | 地址↔整数统一走 `bitcast[#addr]` / `bitcast[#bits<N>]`，不授予权限。 |
 | **内存操作** | `lea load store alloca` | 显式指定读写类型；构造地址（`lea`）与解引用（`load`/`store`）严格分离。 |
-| **调用** | `call`（符号形式 `#call @name(...)` 或值形式 `#call[(签名)] %f(...)`，可带 `[tail]` 保证尾调用） | 过程即地址，调用统一为 `#call`；`#call[tail]` 必须紧跟 `#return`（否则验证拒绝），后端复用栈帧、不得新建帧。 |
+| **调用** | `call`（符号形式 `#call @name(...)` 或值形式 `#call[(签名)] %f(...)`，可带 `[tail]` 保证尾调用） | 过程即地址，调用统一为 `#call`；`#call[tail]` 必须紧跟 `#return`（否则验证拒绝），后端复用 stack 帧、不得新建帧。 |
 | **控制流** | `if loop switch yield break continue return` | 结构化控制流，区域可产出结果。 |
 
 - **确定性拒绝**：除零、移位量超出位宽、有符号除法溢出等域外行为由 VM 协议确定性拒绝产生 Trap，IR 不提供静默的未定义行为（UB）或内置异常捕获。
@@ -120,13 +120,13 @@ LAINIR 废除自由跳转指令（goto/br），所有控制流均以“区域产
 
 ## 内存与取址机制
 
-### 栈分配（#alloca）
-- `#alloca` 的计数为独立的无符号常量，取值范围为 `1..2^64-1`，**表示元素个数，而非字节数**；
+### stack 分配（#alloca）
+- `#alloca` 的计数为独立的无符号常量，取值范围为 `1..2^64-1`，**表示元素个数**（字节数按元素宽度换算）；
 - 元素类型仅决定每个元素的物理宽度，实际分配字节数恒为：
   $$\text{字节数} = \text{计数} \times \text{元素类型字节数}$$
   *例如：`#alloca[#bits<8>](256)` 分配 256 字节；`#alloca[#bits<64>](256)` 分配 2048 字节。*
-- 尺寸算术溢出或超出当前执行栈容量时立即拒绝分配；
-- 分配生命周期绑定当前过程激活（Procedure Activation），进入或退出分支/循环不释放栈空间。
+- 尺寸算术溢出或超出当前执行 stack 容量时立即拒绝分配；
+- 分配生命周期绑定当前过程激活（Procedure Activation），进入或退出分支/循环不释放 stack 空间。
 
 ### 访存与地址计算（load, store, lea）
 - **load / store**：显式指定访问类型。`store` 的操作数顺序固定为 `值, 目标地址`。

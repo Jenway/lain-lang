@@ -34,14 +34,14 @@ apply(LAINIR 过程, 实参, 能力与限额) → 执行结果
 
 ## apply 契约
 
-C 接口见 `seed/include/lain/meta/apply.h`。执行期约束如下：
+C 接口见 `seed/kernel/include/lain/meta/apply.h`。执行期约束如下：
 
 | 项 | 规则 |
 | --- | --- |
 | 模块 | 已验证的 LAINIR 文本，必须自包含所有依赖过程，不引入隐式宿主状态 |
 | 入口 | 模块内的普通 `#proc` |
 | 实参 | 标量通过固定槽位的 Wire 传输；字节数据通过显式只读映射传递 |
-| 限额 | 步数、栈、调用深度、配额与已冻结的能力表（`LainMetaApplyLimits`） |
+| 限额 | 步数、stack、调用深度、配额与已冻结的能力表（`LainMetaApplyLimits`） |
 | 结果 | 标量，或固定长度按值拷出的字节块 |
 | 拒绝 | 结果类型含 `#addr` 一律拒绝，严禁裸物理地址逃逸进 Meta |
 
@@ -68,13 +68,12 @@ Meta 本体今天就是 `bootstrap/` 下 **28 个 Lain 源码模块**，**没有
 - **模块集合由入口推导**：从 `bootstrap/meta.lain` 顺 `import("…")` 求闭包，得到 28 个模块
   （实测闭包 28/28、不可达 0）。没有可维护的清单，加一个模块不必改别处。
 - **产出是每个模块一份**：`lain0 --entry bootstrap/meta.lain --split build/lain0/units/`
-  出一个目录，文件名 = 模块键（`std_lex.l1`、`meta.l1` …）。顺序不影响任何一份的文本 ——
-  清单原本承载的「降级顺序」随之消失（`docs/proposal-modules-v2.md` §二）。
-  `scripts/build_meta_unit.py` 只做这层调用。
+  出一个目录，文件名 = 模块键（`std_lex.l1`、`meta.l1` …）。顺序不影响任何一份的文本
+  （`docs/proposal-modules-v2.md` §二）。`scripts/build_meta_unit.py` 只做这层调用。
 - 每个模块的顶层声明发 `<键>__<名字>`（模块键 = 相对源根的路径去 `.lain`、`/` 换 `_`）；
   宿主按平坦字符串查找入口，所以发出**平坦名**的少数声明由声明自己的 **`@root`** 标注决定
   （`meta.lain` 的三个入口 `lain_std_abi_version` / `lain_std_initialize` / `lain_std_lower`
-  各自带 `@root`）。清单上的「根名列」已随清单一起删除。
+  各自带 `@root`）。
 - **装载**：驱动 `--units-dir <目录>` 装载目录里所有 `.l1`，按文件名排序（= 模块键排序，确定）
   合并成一个镜像，合并后按名解析跨模块引用，`verify` 在合并之后做。`--unit <清单>`
   仍保留（每行一个 LAINIR 路径），但**没有默认值**：`--unit` / `--units-dir` 必须给一个。
@@ -89,5 +88,5 @@ python scripts/build_meta_unit.py --check-twice     # 28 份 + 整批指纹跑�
   实测 `verify subroutines=870 data=216`、`image ok`、`host_status=0`、`region grants=2`、
   `output bytes=74`，产物与基线 `build/arith.out` 逐字节相同；整批指纹
   `ef2f198c12a36bd44ee040dcf1e06f928759c49697afdd9bc1144b28ebd4f977`。设计与取舍见
-  `docs/proposal-modules-v2.md`（取代 `docs/plan-modules.md` 的决策 D-004），成员位置表与
+  `docs/proposal-modules-v2.md`（决策 D-004），成员位置表与
   拒绝码见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》。

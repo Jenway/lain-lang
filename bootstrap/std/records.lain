@@ -1,22 +1,20 @@
-// 初代标准库 v0 —— 积类型：构造与字段访问。
-// 由 bootstrapl1/std/records.l1 翻译成 Lain 表面语法。
+// 模块：积类型（构造与字段访问）。跨单元引用一律写 `别名.名字`。
 //
 // 降级 `p.a` 的时候，发 `#load[#bits<32>]` 要**编译期就知道**偏移和宽度。
-// 字段偏移是 struct 声明时算出来的，但目前只有那几个 offset/size **过程**
-// ——过程是运行时才叫得动的，编译期用不上。
+// 字段偏移是 struct 声明时算出来的，那几个 offset/size **过程**是运行时才叫得动的，
+// 编译期用不上。
 //
-// 所以这里要在编译期把布局再算一遍：从这个类型的正文起点开始，累加偏移直到
-// 命中字段名。**正文起点来自符号表**（`meta_scope_body`：条目里记的就是那条
-// 声明的节点），所以不用回源码里找声明。
-//
-// 以前这里是「按需回源码里再走一遍那条 struct 声明」，每个字段一次 O(n) 扫描；
-// 那句注释当时写着「真正的做法是一张编译期符号表，那是下一步」——现在它在
-// `std/scope.l1` 里了。
+// 所以这里在编译期把布局再算一遍：从这个类型的正文起点开始，累加偏移直到命中
+// 字段名。**正文起点来自符号表**（`meta_scope_body`：条目里记的就是那条声明的
+// 节点），不用回源码里找声明。
 //
 // 打包：`偏移` 在低 40 位、`kind` 在 40..43、`width` 在 44..51、命中在最高位。
 // 走到 `}` 时返回的是**总大小**（最高位 0）——同一个走法服务两种问题。
+//
+// 位域互不相交，所以拼包一律用 `or`。本单元没有自己的静态块；取址的
+// lainir_base_name / lainir_name_b / lainir_name_b2 / lainir_name_v /
+// lainir_text_buffer 都定义在 lainir 单元，取址写 symbol_addr("NAME_storage")。
 
-// 模块：积类型（构造与字段访问，初代标准库 v0）。跨单元引用一律写 `别名.名字`。
 let meta = import("../meta");
 let std_eval = import("eval");
 let std_funcs = import("funcs");
@@ -29,67 +27,7 @@ let std_scalars = import("scalars");
 let std_scope = import("scope");
 let std_types = import("types");
 
-// `meta_find_keyword`（从某个位置起逐字节找关键字）**已经删了**：按名字找声明
-// 现在走语法树（`meta_find_decl`）。它和 `bs_next_form` 是同一类东西——「搜」，
-// 而不是「认」。
-
-// 翻译说明（表面语言的值 if 支里不能再写语句 if / 值 if；bool 值 if 的 else 支
-// 不能是裸 0；u8 没有算子表；循环参数会遮蔽外层同名绑定）：
-//   * 本单元**没有自己的静态块**（归档 22 个过程、0 个 data），所以本体里没有
-//     `let NAME: ro [u8]`。通过 `#data_addr` 取址的 5 个符号都定义在**别的单元**
-//     （bootstrapl1/std/lainir.l1），取址一律写成 symbol_addr("NAME_storage")
-//     （编译器发布的数据符号带 _storage 后缀，绑定名本身不是符号，见
-//     bootstrap/std/scalars.lain 与 bootstrap/std/modules.lain）：
-//     lainir_base_name / lainir_name_b / lainir_name_b2 / lainir_name_v /
-//     lainir_text_buffer。字节数组在编译夹具里给临时定义（192 字节的
-//     lainir_text_buffer 全 0）。
-//   * 「值 if 结果直接喂给 #return」的地方逐条改写成平坦守卫（命中即 return），
-//     条件按旧 IR 的原顺序求值，只有原来会走到的分支才被求值：meta_decl_body 的
-//     %r/%v、meta_scope_body 的 %r/%v/%body、meta_layout_field 的 %r、
-//     meta_field_type_window 的 %r、meta_operand_type_window 的 %r/%fw、
-//     meta_layout_size 的 %r/%size、meta_construct_fields 的 %st、
-//     meta_lower_construct_local 的 %missing/%bad/%empty、
-//     meta_emit_field_temp 的 %st/%g。
-//   * meta_walk_fields / meta_field_type_window / meta_layout_align /
-//     meta_construct_fields 里的 u8 比较（#eq[#bits<8>]）按表面语言的规矩先
-//     `as u32` 再比常量。
-//   * meta_walk_fields / meta_field_type_window 的 %same 值 if 结果喂给语句 if，
-//     且 bool 值 if 的 else 支是裸 0（验证器 2005）：按既有写法改成平坦守卫 ——
-//     `len_ok` 成立才算 %a / %b / %same，命中即 break，顺序与副作用与旧 IR 一致。
-//   * meta_record_type_id 的 %id 值 if 结果喂给 #return，但#return 之前还有
-//     restore_top / release 两条语句**无条件执行**，所以不能改平坦守卫（会把
-//     释放跳掉）：按既有写法（见 bootstrap/std/eval.lain 的 pick_result 与
-//     bootstrap/std/modules.lain 的 pick_end / pick_body）改成一次性选择循环
-//     pick_id —— 先判 failed，再算 align / valid，最后 meta_intern，求值顺序与
-//     旧 IR 逐条相同，末尾 restore_top / release 仍在循环之后无条件执行。
-//   * meta_lower_construct 的 %code 与 meta_lower_construct_local 的 %tail 值 if
-//     两支都是纯表达式（支里只有 let），照旧写值 if（同 bootstrap/std/eval.lain 的
-//     %code 值 if）。
-//   * meta_walk_fields 的循环参数在归档里叫 %at / %off / %al，其中 %at 与函数参数
-//     %at 同名（归档里循环初始值取的就是外层 %at）；表面语言里循环参数会遮蔽外层
-//     同名绑定，所以循环参数改名 cur_at / cur_off / cur_al，初值仍取外层 %at /
-//     %off0 / %al0，语义不变。
-//   * 旧 IR 的 %w1…%w11 / %w17 / %c1 / %c2 / %r2 / %l1 / %l2 / %s1…%s3 / %h / %o /
-//     %put / %fg / %fl / %f / %nf / %zero / %bad / %reset / %save_* / %push /
-//     %restore_top 等不被读的值只取调用副作用，照旧保留为 let 绑定（死局部保留，
-//     不做清理）。
-//   * meta_emit_expr 的 need_semi 是 bool 参数，归档传 0，这里照旧传 0（与
-//     bootstrapl1/meta.l1 的调用点一致）。
-//   * 本单元这批依赖里没有 ref / slice 这两个保留字参数名。归档里 meta_node_* 的
-//     末参在规范签名里按脚本给的名字写成 ref_value，meta_render_ref2 的 %ref 写成
-//     ref_v，meta_intern 的 %rw 写成 rw_v —— 都只是形参改名，链接名原样保留。
-//   * 归档里几处 `#or` 原样保留为 `or`（不是改成加法）：
-//     `#or(#shl(src1, 32), pos + 1)`（src1 占高 32 位、pos + 1 占低 32 位，位域
-//     不相交）、`#or(aligned, kind << 40)` / `#or(pk1, width << 44)` /
-//     `#or(pk2, 0x8000000000000000)`（偏移 < 2^40、kind 占 40..43、width 占
-//     44..51、命中标志占 bit63，四段不相交）、以及
-//     `#or[#bits<1>](failed_sentinel, failed_zero)`（1 位值上的按位 or 与逻辑 or
-//     同义）。保留 or 与旧 IR 逐位相同。
-
-// 跨单元 / Host 依赖的规范签名（由 meta_sig_index.py 从 bootstrapl1/std/records.l1
-// 的调用点与各定义单元核对得到，链接名原样保留）。旧 IR 的宽度 #bits<N> 已归一为
-// 表面语言的标量类型。本单元没有任何归档 `#extern` 过程，也不重复声明本文件里定义的
-// 那 22 个过程 —— 下面每一条都在**别的**单元里定义。
+// 宿主能力。
 extern lain_meta_apply_status() -> u64 = lain_meta_apply_status;
 extern lain_meta_emit_reset() -> u32 = lain_meta_emit_reset;
 extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
@@ -103,8 +41,6 @@ extern lain_meta_source_length(source: u64) -> u64 = lain_meta_source_length;
 // 作用域表里存的是**声明节点**（`meta_scope_payload`），不是出现位置，所以这里用
 // 「位置 -> 同一个父组里的下一项」把后继两步取出来：声明词的位置由 `meta_node_start`
 // 给出，名字与花括号组分别是它的下一个、再下一个孩子。全程不碰「节点自带的后继」。
-//
-// 归档的 %r / %v 值 if 结果都喂给 #return，改成平坦守卫（%gone 先求值，命中即返回）。
 func meta_decl_body(base: addr, node: u64) -> u64 {
   let node_at: u64 = std_parse.meta_node_start(node);
   let name_node: u64 = std_recognize.meta_next_at(base, node_at);
@@ -125,12 +61,8 @@ func meta_decl_body(base: addr, node: u64) -> u64 {
 }
 
 // 按名字从**作用域表**里取出「这个类型的正文从哪开始」。找不到返回 NOT_FOUND。
-//
-// 这是符号表真正省下来的那件事：以前每访问一次字段就回源码里把声明搜一遍
-// （`meta_find_rec_body`），现在条目里存的就是声明节点，读一下就有。
+// 条目里存的就是声明节点，直接读。
 // expect 是期望的种类：4 = 积类型，5 = 和类型。
-//
-// 归档三层值 if（%r / %v / %body）结果都喂给 #return，改成平坦守卫，条件按原顺序求值。
 func meta_scope_body(base: addr, name_lo: u64, name_hi: u64, expect: u64) -> u64 {
   let name: addr = base + name_lo;
   let name_len: u64 = name_hi - name_lo;
@@ -155,7 +87,7 @@ func meta_scope_body(base: addr, name_lo: u64, name_hi: u64, expect: u64) -> u64
 
 // 走字段列表累加偏移。
 //   命中 f_lo/f_hi  → 返回 packed（最高位 1）
-//   走到 `}`        → 返回按最大对齐取整后的总大小（最高位 0）
+//   走到 `}`        → 返回按最大 align 值取整后的总大小（最高位 0）
 // f_lo == f_hi 表示「不匹配任何字段」，那就只算大小。
 func meta_layout_align_up_checked(value: u64, align: u64, src: addr, position: u64) -> u64 {
   let zero: bool = align == 0;
@@ -197,11 +129,8 @@ func meta_layout_add_checked(left: u64, right: u64) -> u64 {
   return result;
 }
 
-// 走字段列表：命中字段名回 packed，走到 `}` 回总大小。本函数的循环参数在归档里叫
-// %at / %off / %al（%at 与函数参数 %at 同名，循环初值取的就是外层 %at）；表面语言的
-// 循环参数会遮蔽外层同名绑定，所以改名 cur_at / cur_off / cur_al，初值仍取 %at /
-// %off0 / %al0。u8 比较先 as u32；%same 值 if 改成平坦守卫（bool 值 if 的 else 支
-// 是裸 0，验证器 2005）。
+// 走字段列表：命中字段名回 packed，走到 `}` 回总大小。
+// 循环参数改名 cur_at / cur_off / cur_al，避免遮蔽同名的函数参数与初值。
 func meta_walk_fields(src: addr, len: u64, at: u64, f_lo: u64, f_hi: u64, off0: u64, al0: u64) -> u64 {
   let r: u64 = loop fields(cur_at: u64 = at, cur_off: u64 = off0, cur_al: u64 = al0) {
     let here: u64 = std_lex.bs_skip_space(src, cur_at, len);
@@ -256,8 +185,6 @@ func meta_walk_fields(src: addr, len: u64, at: u64, f_lo: u64, f_hi: u64, off0: 
     let want: u64 = f_hi - f_lo;
     let have: u64 = name_hi - here;
     let len_ok: bool = want == have;
-    // 归档的 %same 值 if（真支比字节、假支裸 0）结果喂给语句 if，改成平坦守卫：
-    // 只有 len_ok 成立才算 %a / %b / %same，命中即发打包值。
     if len_ok {
       let a: addr = src + here;
       let b: addr = src + f_lo;
@@ -289,7 +216,6 @@ func meta_walk_fields(src: addr, len: u64, at: u64, f_lo: u64, f_hi: u64, off0: 
 
 // 某个字段的 (偏移, kind, width)。`body` 是那个 type 的正文起点（由
 // `meta_scope_body` 从符号表里取，不用搜）。找不到返回 0。
-// 归档的 %r 值 if 结果直接喂给 #return，改成守卫。
 func meta_layout_field(src: addr, len: u64, body: u64, f_lo: u64, f_hi: u64) -> u64 {
   let missing: bool = body == 0xFFFFFFFFFFFFFFFF;
   if missing {
@@ -305,9 +231,6 @@ func meta_layout_field(src: addr, len: u64, body: u64, f_lo: u64, f_hi: u64) -> 
 // `meta_layout_field` 只回打包好的 (偏移, kind, width)，够发射「按偏移取字段」用；
 // 值名不带标注的绑定（`let v = p.x;`）要的是**类型名** —— 类型名才能交给
 // `meta_type_resolve` 走一遍完整解析（`T.i8` 这种限定名也认）。
-//
-// 归档的 %r 值 if（假支里是一个 #loop）结果喂给 #return，改成守卫；循环里的 %same
-// 值 if 同样改成平坦守卫（见 meta_walk_fields）。
 func meta_field_type_window(src: addr, len: u64, body: u64, f_lo: u64, f_hi: u64) -> u64 {
   let missing: bool = body == 0xFFFFFFFFFFFFFFFF;
   if missing {
@@ -345,10 +268,6 @@ func meta_field_type_window(src: addr, len: u64, body: u64, f_lo: u64, f_hi: u64
 //
 // 操作数是字段访问（`p.x`）时，类型是**字段**的类型，用 `p` 的类型去查算子表
 // 会撞上「积类型上没有 `+`」这种跟真实原因无关的拒绝（`1 + p.x` 真出过）。
-//
-// 归档的 %r / %fw 值 if 结果都喂给 #return，两边都改成平坦守卫（真支的每条路径
-// 都 return，所以「非字段」那段只在 %is_field 为假时执行，与旧 IR 的 if / else
-// 两支互斥一致）。
 func meta_operand_type_window(base: addr, len: u64, parent: u64, index: u64) -> u64 {
   let form: u64 = std_parse.meta_node_form(parent, index);
   let is_field: bool = form == 6;
@@ -376,7 +295,6 @@ func meta_operand_type_window(base: addr, len: u64, parent: u64, index: u64) -> 
 }
 
 // 记录的总大小。
-// 归档三层值 if（%r / %size，以及 %failed 的 or）结果都喂给 #return，改成平坦守卫。
 func meta_layout_size(src: addr, len: u64, body: u64) -> u64 {
   let missing: bool = body == 0xFFFFFFFFFFFFFFFF;
   if missing {
@@ -385,7 +303,6 @@ func meta_layout_size(src: addr, len: u64, body: u64) -> u64 {
   let info: u64 = meta_walk_fields(src, len, body, 0, 0, 0, 1);
   let failed_sentinel: bool = info == 0xFFFFFFFFFFFFFFFF;
   let failed_zero: bool = info == 0;
-  // 1 位值上的按位 or 与逻辑 or 同义（照旧 IR 写 or）。
   let failed: bool = failed_sentinel or failed_zero;
   if failed {
     return 0xFFFFFFFFFFFFFFFF;
@@ -394,7 +311,7 @@ func meta_layout_size(src: addr, len: u64, body: u64) -> u64 {
   return low;
 }
 
-// struct 的最大字段对齐。
+// struct 的最大字段 align 值。
 func meta_layout_align(src: addr, len: u64, body: u64) -> u64 {
   let r: u64 = loop aligns(at: u64 = body, max: u64 = 1) {
     let here: u64 = std_lex.bs_skip_space(src, at, len);
@@ -426,8 +343,7 @@ func meta_layout_align(src: addr, len: u64, body: u64) -> u64 {
 }
 
 // struct 的名义类型 ID 独立存于注册表；作用域 payload 仍保留声明节点。
-// 归档的 %id 值 if 结果喂给 #return，但 #return 之前还有 restore_top / release
-// 两条无条件执行的语句，所以改成一次性选择循环 pick_id（见文件头说明）。
+// 末尾的 restore_top / release 在 pick_id 之后无条件执行。
 func meta_record_type_id(index: u64) -> u64 {
   let src: u64 = std_scope.meta_scope_word(index, 0);
   let len: u64 = lain_meta_source_length(src);
@@ -436,7 +352,7 @@ func meta_record_type_id(index: u64) -> u64 {
   let pos: u64 = std_parse.meta_node_start(node);
   let src1: u64 = src + 1;
   let high: u64 = src1 << 32;
-  // src1 占高 32 位、pos + 1 占低 32 位，位域不相交，or 与加法等价（照旧 IR 写 or）。
+  // src1 占高 32 位、pos + 1 占低 32 位，位域不相交，or 与加法等价。
   let owner: u64 = high or (pos + 1);
   let scratch: addr = lain_meta_scratch_data();
   let registered: u64 = std_registry.meta_reg_lookup(scratch, 2, owner, 0);
@@ -467,7 +383,6 @@ func meta_record_type_id(index: u64) -> u64 {
   let size: u64 = meta_layout_size(base, len, body);
   let failed: bool = size == 0xFFFFFFFFFFFFFFFF;
   // 一次性选择循环：failed → 0；否则先算 align / valid，valid 才 meta_intern。
-  // 旧 IR 的求值顺序逐条保留，末尾 restore_top / release 仍在循环之后执行。
   let id: u64 = loop pick_id(t: u64 = 0) {
     if failed { break pick_id(0); }
     let align: u64 = meta_layout_align(base, len, body);
@@ -546,9 +461,7 @@ func meta_emit_store_text(kind: u64, width: u64, value_text: addr, value_len: u6
 //
 // 走**游标**（花括号组 + 下标）：值到哪结束只有表达式那条路答得出来 —— 「下一个字段名」
 // （一个槽后面紧跟 `:`）由 `meta_emit_expr` 当终点，终止下标放在暂存区 `+192`。
-//
-// 归档的 %st 值 if（真支 fail(4) + 4，假支是一整个 #loop）结果喂给 #return，改成
-// 平坦守卫；u8 比较先 as u32。
+// u8 没有算子，比较先 as u32。
 func meta_construct_fields(base: addr, len: u64, body: u64, group: u64, base_n: u64) -> u32 {
   let gnone: bool = group == 0;
   if gnone {
@@ -628,7 +541,6 @@ func meta_lower_construct(base: addr, len: u64, bind_lo: u64, bind_hi: u64, type
     let reset: u32 = lain_meta_emit_reset();
     let eval_code: u64 = lain_meta_apply_status();
     let has_eval_code: bool = eval_code > 0;
-    // 归档的 %code 值 if：两支都是纯表达式（真支里只有一个 let），照旧写值 if。
     let code: u32 = if has_eval_code {
       let low: u32 = eval_code as u32;
       low
@@ -664,20 +576,17 @@ func meta_lower_construct(base: addr, len: u64, bind_lo: u64, bind_hi: u64, type
 // `let p = Rec { ... }` / `return Rec { ... }` **在函数体里**。
 //
 // 顶层那份（`meta_lower_construct`）落一个静态 `data` 块；函数体里发不出顶层 `data`
-// （发射是流式的），所以从**栈**上划一块：
+// （发射是流式的），所以从 **stack** 上划一块：
 //
 //   %r<n> = #alloca[#bits<8>](size)
 //   #store[...](value, #lea(%r<n>, 0, 0, off))
 //   ...
 //   %p = #lea(%r<n>, 0, 1, 0)        // 绑定；`return` 那一格换成 `#return %r<n>`
 //
-// `#alloca` 从栈租约的水位递增，帧退出时水位回退（`stack_mark`），所以这块地址
-// **不能带出函数** —— 同 C 返回局部地址。框对齐到 16 字节。
+// `#alloca` 从 stack 租约的水位递增，帧退出时水位回退（`stack_mark`），所以这块地址
+// **不能带出函数** —— 同 C 返回局部地址。起始地址按 16 字节边界取整。
 //
 // `%type_lo`/`%type_hi` 是构造名（`Rec`）的位置，`%group` 是那个花括号组节点。
-//
-// 归档的 %missing / %bad / %empty 值 if 都改成平坦守卫；%tail 值 if 两支都是纯
-// 表达式（支里只有 let），照旧写值 if。
 func meta_lower_construct_local(base: addr, len: u64, name_lo: u64, name_hi: u64, type_lo: u64, type_hi: u64, group: u64, is_ret: bool) -> u32 {
   let body: u64 = meta_scope_body(base, type_lo, type_hi, 4);
   let missing: bool = body == 0xFFFFFFFFFFFFFFFF;
@@ -823,8 +732,6 @@ func meta_lower_field_get(base: addr, len: u64, v_lo: u64, v_hi: u64, type_body:
 //
 // 值名的类型**只认函数参数**（`meta_word_type_name`）：局部绑定与循环参数今天没有
 // 「值名 → 类型」的表，干净地报 4。类型正文从符号表取，字段偏移在编译期算出。
-//
-// 归档嵌套值 if（%st / %g）结果都喂给 #return，改成平坦守卫。
 func meta_emit_field_temp(base: addr, len: u64, parent: u64, index: u64) -> u32 {
   let node: u64 = std_parse.ast_child(parent, index);
   let v_lo: u64 = std_parse.meta_node_start(node);

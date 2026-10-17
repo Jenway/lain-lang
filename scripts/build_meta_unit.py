@@ -1,32 +1,27 @@
-#!/usr/bin/env python3
-"""把 bootstrap/ 的 Meta 从入口编成「每模块一份 LAINIR」，这就是默认产出路径。
-
-    python scripts/build_meta_unit.py
-
-一层包装：只是调 `lain0 --entry bootstrap/meta.lain --split build/lain0/units/`。
-**不读任何清单、不生成任何清单**（`bootstrap/SOURCE_ORDER` 已在步 3 删除）；
-模块集合由入口顺 import 求闭包得到，装载顺序由文件名（= 模块键）排序决定
-（docs/proposal-modules-v2.md §二 / §7.1）。
-
-产物（build/ 被 Git 忽略）：
-
-    build/lain0/units/meta.l1
-    build/lain0/units/std_declarations.l1
-    …                                           共 28 份，文件名 = 模块键
-
-用法（仓库根目录）：
-
-    ./build/lain-meta.exe --units-dir build/lain0/units/ \\
-        --out build/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain
-
-验收判据（不是「等于某个历史哈希」）：
-
-  * 连跑两次，**整批指纹**一致 —— `--check-twice` 会实测这一条；
-  * 合并装载后 `verify subroutines=870 data=216`、`host_status=0`、`region grants=2`、
-    `output bytes=74`，arith 产物与 `build/arith.out` 逐字节相同。
-
-拆分的等价性（28 份 = 一整份）由 `scripts/split_equiv_check.py` 的「规范化逐份比对」证明。
-"""
+# 把 bootstrap/ 的 Meta 从入口编成「每模块一份 LAINIR」。
+#
+#     python scripts/build_meta_unit.py
+#
+# 一层包装：调 `lain0 --entry bootstrap/meta.lain --split build/lain0/units/`。
+# 不读清单、不生成清单；模块集合由入口顺 import 求闭包，装载顺序由文件名（= 模块键）
+# 排序决定（docs/proposal-modules-v2.md §二 / §7.1）。
+#
+# 产物（build/ 被 Git 忽略）：
+#
+#     build/lain0/units/meta.l1
+#     build/lain0/units/std_declarations.l1
+#     …                                           共 28 份，文件名 = 模块键
+#
+# 用法（仓库根目录）：
+#
+#     ./build/lain-meta.exe --units-dir build/lain0/units/ \
+#         --out build/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain
+#
+# 验收判据：
+#   * 连跑两次，整批指纹一致 —— `--check-twice` 实测这一条；
+#   * 合并装载后 `verify subroutines=870 data=216`、`host_status=0`、`region grants=2`、
+#     `output bytes=74`，arith 产物与 `build/arith.out` 逐字节相同。
+# 拆分的等价性（28 份 = 一整份）由 `scripts/split_equiv_check.py` 的「规范化逐份比对」证明。
 
 import argparse
 import shutil
@@ -41,6 +36,8 @@ ROOT = Path(__file__).resolve().parent.parent
 LAIN0 = ROOT / "build" / "lain0" / "lain0.exe"
 ENTRY = ROOT / "bootstrap" / "meta.lain"
 OUT_DIR = ROOT / "build" / "lain0" / "units"
+if not LAIN0.exists():
+    LAIN0 = ROOT / "build" / "lain0" / "lain0"
 
 
 def run_split(entry, out_dir):

@@ -1,32 +1,30 @@
-#!/usr/bin/env python3
-"""第 4 步前置统计：bootstrap 单元里「Meta 的 import 导出不支持初值形态」的顶层静态 let。
-
-规则不是从源码文本猜的，是**实测**出来的（模块只放一条 let、探针只声明 import 不取成员；
-完整边界矩阵见 docs/plan-meta-lain.md 待办节的附表）。
-
-Meta 的导出路径 = bootstrap/std/modules.lain 的 meta_lower_import ->
-meta_emit_module_exports -> meta_emit_module_binding。后者只看初值**头节点**：
-
-  头是数字字面量      -> 发一个字面量；头只是表达式一部分时其余被丢掉（静默错值）
-  头是标识符          -> 去当前模块的作用域表里查：
-                           查到 kind == 3（值绑定）  -> 递归发那条，再发 #call 转接
-                           查到别的 kind（func/类型）-> lain_meta_fail(4)
-                           查不到（内建名 / 未知名） -> lain_meta_fail(13)
-  头是 '['（定长表）  -> 作用域扫描时已预置 emitted != 0，导出路径**整条跳过**：
-                           不发任何过程（导入方拿 0；成员被引用时发悬空 #call）
-  其余（'-'、'"' 等） -> 当成查不到的标识符 -> 13
-
-而 meta_lower_import 在 import 声明处就会把被导入模块**全部**值绑定发一遍，
-与它们有没有被引用无关。
-
-用法： python scripts/import_export_scan.py [--tsv]
-       python scripts/import_export_scan.py --audit
-
-模块集合**不再来自任何清单**（`bootstrap/SOURCE_ORDER` 已在步 3 删除）：从入口
-`bootstrap/meta.lain` 顺 `import("…")` 求闭包，得到 28 个单元，与
-`lain0 --entry bootstrap/meta.lain --split build/lain0/units/` 的 28 份一一对应
-（lain0 的路径解析规则，见 Sema.cpp 的 resolveModulePath）。
-"""
+# 统计 bootstrap 单元里顶层静态 let 的初值形态，并审计模块卫生。
+#
+# Meta 的导出路径 = bootstrap/std/modules.lain 的 meta_lower_import ->
+# meta_emit_module_exports -> meta_emit_module_binding。后者只看初值**头节点**：
+#
+#   头是数字字面量      -> 发一个字面量；头只是表达式一部分时其余被丢掉（静默错值）
+#   头是标识符          -> 去当前模块的作用域表里查：
+#                           查到 kind == 3（值绑定）  -> 递归发那条，再发 #call 转接
+#                           查到别的 kind（func/类型）-> lain_meta_fail(4)
+#                           查不到（内建名 / 未知名） -> lain_meta_fail(13)
+#   头是 '['（定长表）  -> 作用域扫描时已预置 emitted != 0，导出路径整条跳过：
+#                           不发任何过程（导入方拿 0；成员被引用时发悬空 #call）
+#   其余（'-'、'"' 等） -> 当成查不到的标识符 -> 13
+#
+# meta_lower_import 在 import 声明处把被导入模块全部值绑定发一遍，与它们是否被引用无关。
+#
+# 用法： python scripts/import_export_scan.py [--tsv]
+#        python scripts/import_export_scan.py --audit
+#        python scripts/import_export_scan.py --audit --rev <rev>
+#
+# 模块集合来自入口 bootstrap/meta.lain 顺 import("…") 求的闭包，共 28 个单元，与
+# lain0 --entry bootstrap/meta.lain --split build/lain0/units/ 的 28 份一一对应
+# （lain0 的路径解析规则见 Sema.cpp 的 resolveModulePath）。
+#
+# 默认模式按初值头节点分类，给出导出路径对每类的结果（0 / 4 / 13）以及每条被谁
+# 跨单元引用；--audit 逐单元数跨单元引用、影子 extern、宿主 extern、同单元取址；
+# --rev <rev> 用 git show <rev>:<路径> 读源码。
 
 import argparse
 import collections
@@ -42,7 +40,7 @@ ENTRY_REL = "meta"          # 入口：bootstrap/meta.lain（相对 BOOT、省�
 DECL_RE = re.compile(r"^(let|func|extern|struct|enum)\s+([A-Za-z_]\w*)")
 IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 
-# 头形态 -> (实测 status, 说明)
+# 头形态 -> (status, 说明)
 REACTION = {
     "digit": (0, "发字面量"),
     "ident-let": (0, "递归发同模块值绑定 + #call 转接"),
@@ -449,7 +447,7 @@ def main():
     print()
 
     if args.tsv:
-        print("单元\t行号\t名字\t头形态\t实测status\t被谁跨单元引用")
+        print("单元\t行号\t名字\t头形态\tstatus\t被谁跨单元引用")
         for p, line, name, cat, init in sorted(rows, key=lambda r: (str(r[0]), r[1])):
             refs = sorted(u.relative_to(BOOT).as_posix() for u in use.get(name, ()))
             print("%s\t%d\t%s\t%s\t%d\t%s" % (
