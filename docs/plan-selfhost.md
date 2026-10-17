@@ -6,10 +6,11 @@
 ## 当前状态
 
 - **lain0 编 bootstrap**：28 个模块 → **每模块一份** LAINIR，零诊断；两次运行整批指纹相同
-  （`ef2f198c…`，`python scripts/build_meta_unit.py --check-twice`）。
-- **Meta 编样例**：38 个样例中 26 个通过。`jumps`、`loop`、`loop_if`、`loop_local`、
+  （`5298dc25…`，`python scripts/build_meta_unit.py --check-twice`）。
+- **Meta 编样例**：38 个样例中 21 个通过。`jumps`、`loop`、`loop_if`、`loop_local`、
   `loop_value` 以 trap status 1004 结束；`modules_lib`、`modules_main`、`modules_twin`、
-  `refs`、`strinline`、`symbol_addr`、`u8math` 返回非零 `host_status`。
+  `refs`、`strinline`、`symbol_addr`、`u8math` 返回非零 `host_status`；`cast`、`pointer`、
+  `field_expr`、`locals`、`table` 的产物过不了 `lainir_verify`。
 - **Meta 编 bootstrap 自己**：未通，基线 **0/28**。差集清单、每类缺口的触发条件、最小复现
   与推进顺序在 `docs/selfhost-gap.md`。
 
@@ -23,7 +24,7 @@
 | 路径 | 谁编译谁 | 状态 |
 | --- | --- | --- |
 | lain0（C++）编 bootstrap | 28 个 Lain 模块 → **每模块一份** LAINIR | **已通**：零诊断、两次跑整批指纹相同、在 VM 上 `host_status=0` |
-| Meta（Lain）编源码 | 样例 → LAINIR | 26/38 绿，12 红 |
+| Meta（Lain）编源码 | 样例 → LAINIR | 21/38 绿，17 红 |
 | **Meta 编 bootstrap 自己** | 28 个单元 → LAINIR | **未通**，基线 **0/28** |
 
 ## 剩余缺口

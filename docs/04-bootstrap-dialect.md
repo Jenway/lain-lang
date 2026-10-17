@@ -330,7 +330,8 @@ func cstr_len(p: addr) -> u64 {
 - 最小端到端样例 `bootstrap/lain/examples/arith.lain`：驱动报 `host_status=0`、
   `output bytes=74`，产物是 `%r1 = #add[#bits<32>](1, 2)`。
 - Meta 管线（`build/lain-meta.exe --units-dir build/lain0/units/`）当前 38 个样例中
-  26 个通过。12 个失败：`jumps`、`loop`、`loop_if`、`loop_local`、`loop_value` 以 trap
+  21 个通过。17 个失败：`jumps`、`loop`、`loop_if`、`loop_local`、`loop_value` 以 trap
   status 1004 结束、产物被截断；`modules_lib`、`modules_main`、`modules_twin`、`refs`、
-  `strinline`、`symbol_addr`、`u8math` 返回非零 `host_status`。缺口记录在
+  `strinline`、`symbol_addr`、`u8math` 返回非零 `host_status`；`cast`、`pointer`、
+  `field_expr`、`locals`、`table` 的产物过不了 `lainir_verify`。缺口记录在
   `docs/selfhost-gap.md`。

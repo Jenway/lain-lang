@@ -58,7 +58,7 @@ grep -cE '^(extern|#proc|data) .*std_types__meta_cell_get' build/lain0/units/std
 # 3) 整批合并装载 -> parse + verify 通过，行为与单份一致
 ./build/lain-meta.exe --units-dir build/lain0/units/ \
     examples/arith.lain bootstrap/lain/examples/arith.lain
-#   unit files=28 bytes=568387 / verify subroutines=870 data=216 / image ok / host_status=0
+#   unit files=28 bytes=513490 / verify subroutines=718 data=168 / image ok / host_status=0
 ```
 
 全批普查：单元里「本单元未声明、直接引用别的单元定义的名字」共 **2649** 处（`@<名字>` 形态），
@@ -95,7 +95,7 @@ func lain_std_lower(source: u64) -> u32 { ... }
 | **0** | 可行性实测：编一个**互相 import 的两模块**小例子，各出一份，两份一起装载 | 合并装载后 verify 过、行为与"编成一整份"一致；装载器接受未声明引用，编译器不发外部声明（第三节） |
 | **1** | 编译器加 `--split` 产出 | **规范化逐份比对**：把整份里属于模块 K 的那一段切出来，与 `units/K.l1` 逐一比；临时值编号（`%rN`→`%r#`）规范化后 **28/28 相同**，即拆分零行为变化。脚本：`python scripts/split_equiv_check.py --build`。（整份的 `%rN` 是全局编号、每份各自从 1 起；根名在整份里带 `meta__` 前缀、在单元里平坦，所以比较前先规范化这两处。） |
 | **2** | 加 `@root`，三个宿主入口改用标注，清单去掉根名列 | **产物逐字节不变**（证明只是搬家，行为没动） |
-| **3** | 驱动改为装载目录；bootstrap 与文档切到多份产出；删掉清单 | **实测通过**：`python scripts/build_meta_unit.py --check-twice` → 28 份、整批指纹 `ef2f198c…` 跑两次一致；`./build/lain-meta.exe --units-dir build/lain0/units/ --out build/lain0/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain` → `unit files=28 bytes=568387` / `verify subroutines=870 data=216` / `image ok` / `host_status=0` / `region grants=2` / `output bytes=74`，产物与 `build/arith.out` 逐字节相同；驱动 `--unit`/`--units-dir` 没有默认值（都不给 → 退出码 2 + 提示） |
+| **3** | 驱动改为装载目录；bootstrap 与文档切到多份产出；删掉清单 | **实测通过**：`python scripts/build_meta_unit.py --check-twice` → 28 份、整批指纹 `5298dc25…` 跑两次一致；`./build/lain-meta.exe --units-dir build/lain0/units/ --out build/lain0/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain` → `unit files=28 bytes=513490` / `verify subroutines=718 data=168` / `image ok` / `host_status=0` / `region grants=2` / `output bytes=74`，产物与 `build/arith.out` 逐字节相同；驱动 `--unit`/`--units-dir` 没有默认值（都不给 → 退出码 2 + 提示） |
 | **4** | 差分测试：同一棵树，lain0 与 Meta 各出各的，逐份比对。脚本 `python scripts/diff_two_compilers.py`（可选 `--only <模块键>`，`--strict` 让红行变退出码 1） | 输出「模块 × Meta 状态 × 是否一致」表，**红 = 两边还没对上**。Meta 只把 **4** 个模块（`std_lex` / `std_regions` / `std_registry` / `std_types`）喂进了驱动（其余 24 个的 import 闭包要 63 条登记 > 驱动上限 32 → `rc=2`），而这 4 个与 lain0 都不一致（逐字 0 / 规范化后相同 0）：`std_types` `status=0`+trap 1004、`std_regions` `9415`、`std_registry` `4`、`std_lex` `6`，产物全被截断。差异类别 = **符号前缀/mangle**（Meta 把单元**自己的**顶层名发成扁平名，lain0 发 `<模块键>__` 前缀名；数据符号还多一个 `_storage`）叠加**降级缺口**（截断）。随 `docs/plan-selfhost.md` 的进度逐行转绿 |
 | **5** | `symbol_addr` 取消（**另立项**） | 普查已做：329 处全部**同单元**（312 个 `ro` 表 + 17 个定长表）、0 处跨单元；**裸名当地址实测不通过**，要先定语言规则 |
 
@@ -130,7 +130,7 @@ fingerprint = SHA-256( 按模块键排序后逐行拼接 "<模块键>  <该份�
 `python scripts/build_meta_unit.py --check-twice` 一次跑两次并断言。实测：
 
 ```
-units=28 fingerprint=ef2f198c12a36bd44ee040dcf1e06f928759c49697afdd9bc1144b28ebd4f977
+units=28 fingerprint=5298dc251be03e050e668fcc92366ddfd920502c790b6ae1865772d2438463ed
 整批指纹跑两次一致: True
 ```
 

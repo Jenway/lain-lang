@@ -39,9 +39,10 @@ host_status=N`、`region grants=N`、`output bytes=N`，脚本直接断言这些
 
 - `arith.lain`：`host_status=0`、`region grants=2`、`output bytes=74`，产物是
   `%r1 = #add[#bits<32>](1, 2)`。
-- 全部 38 个样例中 26 个通过。`jumps`、`loop`、`loop_if`、`loop_local`、`loop_value`
+- 全部 38 个样例中 21 个通过。`jumps`、`loop`、`loop_if`、`loop_local`、`loop_value`
   执行以 VM trap status 1004（load fault）结束、产物被截断；`modules_lib`、`modules_main`、
-  `modules_twin`、`refs`、`strinline`、`symbol_addr`、`u8math` 返回非零 `host_status`。
+  `modules_twin`、`refs`、`strinline`、`symbol_addr`、`u8math` 返回非零 `host_status`；
+  `cast`、`pointer`、`field_expr`、`locals`、`table` 的产物过不了 `lainir_verify`。
 - 诊断记录、差集统计与推进顺序在 `docs/selfhost-gap.md`。
 
 ## 约束

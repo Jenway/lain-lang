@@ -25,7 +25,7 @@
    `std/registry` 走到 **4**（442 字节），`std/types` 走到 **0 + 1004 trap**，
    `std/regions` 走到 **9415**。
 3. **差集表共 53 行**（§4.1 导入层 7 行 + §4.2 跨模块成员 8 行 + §4.3 单模块构造 24 行 +
-   §4.4 循环族 14 行），另有单元级 4 行与红样例 12 行。分布：**能 24 行 / 半 4 行 /
+   §4.4 循环族 14 行），另有单元级 4 行与红样例 17 行。分布：**能 24 行 / 半 4 行 /
    不能 25 行**，「未知」0 行 —— 每一行都有 `build/probe/selfhost/run_all.tsv` 里的
    真实 status 与装回判定。
 4. **第一件该做的事（按杠杆）**：修**循环体 trap**（`let` 初值含算子、左操作数是名字
@@ -71,8 +71,8 @@
 ```
 
 `--units-dir build/lain0/units/` 装载的是 `scripts/build_meta_unit.py` 产出的
-**28 份 Meta**（每模块一份、合并装载：实测 `unit files=28 bytes=568387`、
-`verify subroutines=870 data=216`）。`check_unit.exe` 是 `build/check_unit.c` 编出来的临时工具（只调
+**28 份 Meta**（每模块一份、合并装载：实测 `unit files=28 bytes=513490`、
+`verify subroutines=718 data=168`）。`check_unit.exe` 是 `build/check_unit.c` 编出来的临时工具（只调
 `lainir_parse` + `lainir_verify`），源码不在版本库里，属本仓 `build/` 惯例。
 
 ### 1.3 调查脚本
@@ -395,9 +395,8 @@ run ... host_status=13   output bytes=0
 
 ### 4.6 红样例全量（`gate8.sh`，38 个 examples）
 
-38 个样例的全量实测：
-
-非零/异常行（其余 26 个 `host_status=0` 且 `trap none`）：
+38 个样例的全量实测。判据是 `host_status=0`、没有 trap、产物过 `lainir_parse` +
+`lainir_verify`；红样例共 17 个（其余 21 个通过）：
 
 | 样例 | rc | host_status | 产物 | trap | 说明 |
 | :--- | :-: | :--- | ---: | :--- | :--- |
@@ -413,6 +412,11 @@ run ... host_status=13   output bytes=0
 | `strinline` | 0 | 4 | 231 | none | 函数体字符串字面量（#33） |
 | `symbol_addr` | 0 | 9415 | 54 | none | `symbol_addr` 内建（#19） |
 | `u8math` | 0 | 6 | 52 | none | u8 算子（#27） |
+| `cast` | 0 | 0 | 898 | none | 产物 verify 失败 2005：`#add[#bits<32>]` 的操作数类型错（kind 42） |
+| `pointer` | 0 | 0 | 1006 | none | 同 2005（kind 42） |
+| `field_expr` | 0 | 0 | 1302 | none | 产物 verify 失败 2002：`field_expr__origin_storage` 未定义 |
+| `locals` | 0 | 0 | 1338 | none | 产物 verify 失败 2002：`locals__origin_storage` 未定义 |
+| `table` | 0 | 0 | 1114 | none | 产物 verify 失败 2002：`bytes` 未定义 |
 
 ---
 

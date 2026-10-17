@@ -92,7 +92,7 @@ python scripts/diff_two_compilers.py    # 步 4 差分：lain0 的各份单元 �
 空格），行间 `\n`、末尾再补一个 `\n`，对这个字节串取 SHA-256。当前实测值：
 
 ```
-units=28 fingerprint=ef2f198c12a36bd44ee040dcf1e06f928759c49697afdd9bc1144b28ebd4f977
+units=28 fingerprint=5298dc251be03e050e668fcc92366ddfd920502c790b6ae1865772d2438463ed
 ```
 
 拆分的等价性（28 份 = 一整份）由 `python scripts/split_equiv_check.py --build` 证明：
@@ -127,7 +127,7 @@ build/lain-meta.exe --units-dir build/lain0/units/ \
 期望 `host_status=0`、`region grants=2`；`output bytes=` 是 Meta 写出的 canonical LAINIR 长度。
 摘要行形如 `unit files=N bytes=N`、`verify subroutines=N data=N`、`run slice=N rounds=N steps=N
 host_status=N`、`region grants=N`、`output bytes=N`，可直接被脚本断言。整份 Meta 上实测
-`unit files=28 bytes=568387`、`verify subroutines=870 data=216`、`output bytes=74`，
+`unit files=28 bytes=513490`、`verify subroutines=718 data=168`、`output bytes=74`，
 arith 产物与 `build/arith.out` 逐字节相同。
 
 当前 **38** 个样例（`bootstrap/lain/examples/*.lain`：35 个基础样例 + `modules_twin_a` /
@@ -135,7 +135,8 @@ arith 产物与 `build/arith.out` 逐字节相同。
 
 - **lain0 全量回归**：`bash scripts/regress.sh` 与 `--round-trip` 都是 **PASS=38 FAIL=0**。
 - **Meta 管线**（`lain-meta` 编译表面源码；判据是 `host_status=0` 且无 trap）：38 个样例中
-  26 个通过。12 个失败：`jumps`、`loop`、`loop_if`、`loop_local`、`loop_value` 以 trap
+  21 个通过。17 个失败：`jumps`、`loop`、`loop_if`、`loop_local`、`loop_value` 以 trap
   status 1004 结束、产物被截断；`modules_lib`（host_status=4）、`modules_main`（11）、
   `modules_twin`（11）、`refs`（5）、`strinline`（4）、`symbol_addr`（9415）、`u8math`（6）
-  返回非零 host_status。诊断记录在 `docs/selfhost-gap.md`。
+  返回非零 host_status；`cast`、`pointer`、`field_expr`、`locals`、`table` 的产物过不了
+  `lainir_verify`。诊断记录在 `docs/selfhost-gap.md`。

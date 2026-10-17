@@ -87,6 +87,6 @@ lain0 已经能够很好地替代手写 bootstrap，且已把它该承担的角�
 `Program` 一次加载整个依赖图并两轮分析，`Lowerer` 把全部模块降级；`scripts/build_meta_unit.py` 只负责调用 CLI。带 `@root` 的声明发平坦名；`lain0 --entry … --split` 每模块一份产出，驱动 `--units-dir` 按目录装载。
 
 **Status**
-采纳（已实现并验证：`lain0 --entry bootstrap/meta.lain --split build/lain0/units/` 零诊断、连跑两次**整批指纹**一致（`ef2f198c12a36bd44ee040dcf1e06f928759c49697afdd9bc1144b28ebd4f977`）；回归 38/38；Meta 管线 `host_status=0` / `region grants=2` / `output bytes=74`，与 `build/arith.out` 逐字节相同。规范面见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》，后续步骤见 `docs/proposal-modules-v2.md`）
+采纳（已实现并验证：`lain0 --entry bootstrap/meta.lain --split build/lain0/units/` 零诊断、连跑两次**整批指纹**一致（`5298dc251be03e050e668fcc92366ddfd920502c790b6ae1865772d2438463ed`）；回归 38/38；Meta 管线 `host_status=0` / `region grants=2` / `output bytes=74`，与 `build/arith.out` 逐字节相同。规范面见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》，后续步骤见 `docs/proposal-modules-v2.md`）
 
 <!-- 决策在此逐条追加 -->
