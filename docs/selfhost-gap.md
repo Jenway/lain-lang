@@ -21,8 +21,8 @@
    「把 spec 规范化后与宿主登记的逻辑路径**逐字节相等**」，而 bootstrap 源码里的
    spec 是**相对导入方目录**写的（`import("types")` = `std/types.lain`）。
    用源根相对路径形态的登记名 → 4 个单元全 11；把登记名换成源码里
-   spec 的规范化形态 → `std/lex` 立刻走到 **6**（1803 字节产物），
-   `std/registry` 走到 **4**（442 字节），`std/types` 走到 **0 + 1004 trap**，
+   spec 的规范化形态 → `std/lex` 立刻走到 **6**（2259 字节产物），
+   `std/registry` 走到 **4**（522 字节），`std/types` 走到 **0 + 1004 trap**，
    `std/regions` 走到 **9415**。
 3. **差集表共 53 行**（§4.1 导入层 7 行 + §4.2 跨模块成员 8 行 + §4.3 单模块构造 24 行 +
    §4.4 循环族 14 行），另有单元级 4 行与红样例 17 行。分布：**能 24 行 / 半 4 行 /
@@ -194,11 +194,11 @@ run ... host_status=11   output bytes=0            # g1_lex_sorder / g10_lex_sor
 $ ./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "std/lex.lain" bootstrap/std/lex.lain "types.lain" bootstrap/std/types.lain \
     "regions.lain" bootstrap/std/regions.lain
-run ... host_status=6    output bytes=1803         # g1_lex_basename / g2_lex / g10_lex
+run ... host_status=6    output bytes=2259         # g1_lex_basename / g2_lex / g10_lex
 ```
 
 同一份 `std/lex.lain`、同一份 Meta，**只换登记字符串**就从「0 字节 + 11」变成
-「1803 字节 + 6」。所以 11 在这里来自**路径解析语义**，Meta 的表达能力足够。
+「2259 字节 + 6」。所以 11 在这里来自**路径解析语义**，Meta 的表达能力足够。
 
 补一条：登记名少写 `.lain`（`"types"`，源码里是 `"types.lain"`）时，Meta 补成
 `types.lain` 后照样不等，这次的结果是 1004 trap：
@@ -386,10 +386,10 @@ run ... host_status=13   output bytes=0
 
 | 单元 | 命令 | 实测 | 卡在哪 |
 | :--- | :--- | :--- | :--- |
-| `std/lex` | `"std/lex.lain" bootstrap/std/lex.lain "types.lain" bootstrap/std/types.lain "regions.lain" bootstrap/std/regions.lain` | `host_status=6`，**1803 字节**，装回 3001 | `std/lex.lain:54-55` 的链式比较（#35） |
-| `std/types` | `"types.lain" bootstrap/std/types.lain "regions.lain" bootstrap/std/regions.lain` | `status=0` + **trap 1004**，279 字节 | 第 1 个函数 `meta_bytes_equal` 的循环体 `let more: bool = i < n;`（#46） |
-| `std/regions` | `"regions.lain" bootstrap/std/regions.lain "types.lain" bootstrap/std/types.lain` | `host_status=9415`，263 字节 | `meta_region_scratch_window` 的 `symbol_addr("…_storage")`（#19） |
-| `std/registry` | `"std/registry.lain" … "types.lain" … "regions.lain" …` | `host_status=4`，442 字节 | 跨模块函数成员调用（#10） |
+| `std/lex` | `"std/lex.lain" bootstrap/std/lex.lain "types.lain" bootstrap/std/types.lain "regions.lain" bootstrap/std/regions.lain` | `host_status=6`，**2259 字节**，装回 3001 | `std/lex.lain:54-55` 的链式比较（#35） |
+| `std/types` | `"types.lain" bootstrap/std/types.lain "regions.lain" bootstrap/std/regions.lain` | `status=0` + **trap 1004**，286 字节 | 第 1 个函数 `meta_bytes_equal` 的循环体 `let more: bool = i < n;`（#46） |
+| `std/regions` | `"regions.lain" bootstrap/std/regions.lain "types.lain" bootstrap/std/types.lain` | `host_status=9415`，289 字节 | `meta_region_scratch_window` 的 `symbol_addr("…_storage")`（#19） |
+| `std/registry` | `"std/registry.lain" … "types.lain" … "regions.lain" …` | `host_status=4`，522 字节 | 跨模块函数成员调用（#10） |
 
 四个单元的产物**全都装不回去**（3001：截断在未闭合的区域里）。
 
@@ -400,18 +400,18 @@ run ... host_status=13   output bytes=0
 
 | 样例 | rc | host_status | 产物 | trap | 说明 |
 | :--- | :-: | :--- | ---: | :--- | :--- |
-| `jumps` | 1 | 0 | 165 | `kind=1 status=1004 line=790 col=37 region=115` | 循环族 trap（#53 同源） |
-| `loop` | 1 | 0 | 169 | 同上 | 同上 |
-| `loop_if` | 1 | 0 | 164 | 同上 | 同上 |
-| `loop_local` | 1 | 0 | 398 | 同上 | 同上 |
-| `loop_value` | 1 | 0 | 160 | 同上 | 同上 |
+| `jumps` | 1 | 0 | 172 | `kind=1 status=1004 line=13866 col=33 region=2009 position=3` | 循环族 trap（#53 同源） |
+| `loop` | 1 | 0 | 175 | 同上 | 同上 |
+| `loop_if` | 1 | 0 | 173 | 同上 | 同上 |
+| `loop_local` | 1 | 0 | 410 | 同上 | 同上 |
+| `loop_value` | 1 | 0 | 172 | 同上 | 同上 |
 | `modules_lib` | 0 | 4 | 45 | none | 跨模块函数成员（#10） |
 | `modules_main` | 0 | **11** | **0** | none | 只登记了样例自己，`import("examples::modules_lib")` 找不到 → 11 |
 | `modules_twin` | 0 | **11** | **0** | none | 同上 |
 | `refs` | 0 | 5 | 0 | none | `ref`/`mut ref`/`slice` 形参（bootstrap 不用） |
-| `strinline` | 0 | 4 | 231 | none | 函数体字符串字面量（#33） |
-| `symbol_addr` | 0 | 9415 | 54 | none | `symbol_addr` 内建（#19） |
-| `u8math` | 0 | 6 | 52 | none | u8 算子（#27） |
+| `strinline` | 0 | 4 | 286 | none | 函数体字符串字面量（#33） |
+| `symbol_addr` | 0 | 9415 | 88 | none | `symbol_addr` 内建（#19） |
+| `u8math` | 0 | 6 | 60 | none | u8 算子（#27） |
 | `cast` | 0 | 0 | 898 | none | 产物 verify 失败 2005：`#add[#bits<32>]` 的操作数类型错（kind 42） |
 | `pointer` | 0 | 0 | 1006 | none | 同 2005（kind 42） |
 | `field_expr` | 0 | 0 | 1302 | none | 产物 verify 失败 2002：`field_expr__origin_storage` 未定义 |
@@ -475,9 +475,9 @@ run ... host_status=13   output bytes=0
   `<键>__f`，Meta 侧最省事的是**不转发**：`M.f(x)` 直接发
   `#call <键>__f(<实参>)`（lain0 就是这么发的，见 `docs/plan-modules.md` §3.2）。
 - **为什么在它前面**：2482 处，28 个单元**每个**都有；`std/registry` 的第一个
-  卡点就是它（442 字节处报 4）。
+  卡点就是它（522 字节处报 4）。
 - **验收**：`g3_member_call` 与 `g10_registry` 两条命令：
-  前者 `status` 从 4 变 0 且装回 OK；后者从 442 字节的 4 往后走（下一步是 9415 或 6）。
+  前者 `status` 从 4 变 0 且装回 OK；后者从 522 字节的 4 往后走（下一步是 9415 或 6）。
 
 ### 第 3 步 · `symbol_addr("…_storage")` 内建（Meta 侧）
 
@@ -485,7 +485,7 @@ run ... host_status=13   output bytes=0
   22-27 行那批），`bootstrap/std/funcs.lain` 的 `meta_is_builtin_name`（1070-1077）
   加一条判断，`bootstrap/meta.lain` 的表达式发射器加分支：读字符串实参的字节当符号名，
   发 `#bitcast[#addr](%<键>__NAME_storage)`（复用 `meta_emit_symbol_addr_line`）。
-- **为什么在这里**：328 处、12 个单元；`std/regions` 的第一个卡点（9415，263 字节处）；
+- **为什么在这里**：328 处、12 个单元；`std/regions` 的第一个卡点（9415，289 字节处）；
   依赖第 1 步的键（符号名要带模块键）。
 - **验收**：`g4_symaddr_body`（`status` 9415 → 0）与 `g10_regions`
   （9415 → 下一个卡点）；`std/regions` 端到端应能到达
@@ -508,7 +508,7 @@ run ... host_status=13   output bytes=0
 - **验收**：`g8_op_in_loop_let`、`g7_body_if_break`、`g7_body_continue`、
   `g6_loop_bootstrap`、`g5_loop_assign_i` 五条从
   「trap 1004 + PARSE FAILED 3001」变 `status=0` + `PARSE+VERIFY OK`；
-  `g10_types` 从 279 字节的 trap 往后走（下一个卡点是 u8 算子，第 5 步）；
+  `g10_types` 从 286 字节的 trap 往后走（下一个卡点是 u8 算子，第 5 步）；
   examples 的 `loop`/`loop_if`/`loop_value`/`loop_local`/`jumps` 5 个从 rc=1 变 rc=0。
 
 ### 第 5 步 · u8 算子表项（Meta 侧，纯数据）
@@ -523,7 +523,7 @@ run ... host_status=13   output bytes=0
   （bootstrap 其余地方一律 `as u32`，98 处），但它是 `std/types` 的第一个
   语义卡点，而 `std/types` 是很多单元的直接依赖。
 - **验收**：`g4_u8cmp` / `g4_u8arith` 从 6 变 0 + 装回 OK；
-  `g10_types` 越过 279 字节继续（下一个卡点大概是 `ptr_of` 的 2005，第 7 步）。
+  `g10_types` 越过 286 字节继续（下一个卡点大概是 `ptr_of` 的 2005，第 7 步）。
 
 ### 第 6 步 · 链式比较（Meta 侧）
 
@@ -534,7 +534,7 @@ run ... host_status=13   output bytes=0
 - **为什么在这里**：只有 7 处（`std/lex:54-55`、`std/syntax:56/89/112/161/166`），
   但其中 2 处正好卡在 `std/lex`（`bs_is_ident`）—— 想要 `std/lex` 端到端就绕不过。
 - **验收**：`g9_chain_cmp_and` / `_return` / `_three` 从 6 变 0 + 装回 OK；
-  `g10_lex` 从 1803 字节的 6 往后走（下一个卡点是 `std_types.meta_bytes_equal`
+  `g10_lex` 从 2259 字节的 6 往后走（下一个卡点是 `std_types.meta_bytes_equal`
   的跨模块调用，第 2 步）。
 
 ### 第 7 步 · `ptr_of` 产物（Meta 侧）
@@ -612,7 +612,7 @@ bash build/probe/gate8.sh "$(pwd)" build/probe/selfhost/gate8_self.tsv
 # 单条：登记名换一下就不再是 11
 ./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "std/lex.lain" bootstrap/std/lex.lain \
-    "types.lain" bootstrap/std/types.lain "regions.lain" bootstrap/std/regions.lain   # 6 / 1803 字节
+    "types.lain" bootstrap/std/types.lain "regions.lain" bootstrap/std/regions.lain   # 6 / 2259 字节
 # 单条：循环体 trap
 ./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "p/o1.lain" build/probe/selfhost/src/p_o1.lain                    # trap 1004, 136 字节
