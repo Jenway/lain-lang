@@ -8,7 +8,6 @@
 | `seed/kernel/` | C 实现的 LAINIR parser、验证器、装载器、VM、后端和宿主能力（`lain_seed` 静态库） |
 | `seed/lain0/` | C++ 写的 Lain 编译器前端，链接 `seed/kernel` 产出的 `lain_seed` |
 | `bootstrap/` | Lain 源码写的 Meta 库（28 个模块 + `SOURCE_ORDER` **模块清单**：每行 `<相对路径> [<根名> …]`）；`lain0 --unit bootstrap/SOURCE_ORDER` 一次编出的 LAINIR 就是 Meta 本体 |
-| `tools/` | 驱动与验收工具，只装配、推进、记账，不含语言知识 |
 | `docs/` | 设计、规范与进度|
 | `build/` | 二进制、临时输入、快照和日志，不提交 |
 
@@ -39,13 +38,13 @@ cmake --build build
 ```bash
 python scripts/build_meta_unit.py     # 产物：build/lain0/bootstrap.l1 与 build/lain0/bootstrap_unit.txt
 build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
-    --out build/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain
+    --out build/arith.out arith.lain bootstrap/lain/examples/arith.lain
 ```
 
-`--unit` 要显式给：驱动的默认值是 `bootstrap/SOURCE_ORDER`，而本仓库里那个文件是
-**Lain 源码**的模块清单（每行 `<相对路径> [<根名> …]`，见 `docs/plan-modules.md` §3.3），
-不是 LAINIR 单元清单（单元清单由上面的脚本生成，里面写
-`../build/...` 是因为驱动会把每行当 `bootstrap/<行>` 打开）。
+`--unit` 要显式给，指向驱动要装入的 LAINIR 单元清单（由上面的脚本生成，里面写
+`../build/...` 是因为驱动会把每行当 `bootstrap/<行>` 打开）。驱动的默认值
+`bootstrap/SOURCE_ORDER` 是 **Lain 源码**的模块清单（每行 `<相对路径> [<根名> …]`，
+见 `docs/plan-modules.md` §3.3），不能直接当单元清单用。
 
 | 选项 | 默认 | 说明 |
 | :--- | :--- | :--- |
@@ -55,7 +54,7 @@ build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
 | `--out <文件>` | 无 | 产物文本落盘 |
 | `--fuel` | 按已登记源码规模推导 | 执行指令上限；给出时以给出的为准 |
 | `--slice` | 2000000 | 每次引擎推进的片长 |
-| `--stack` | 4194304 | 栈租约字节数 |
+| `--stack` | 4194304 | stack 租约字节数 |
 | `--quota` | 268435456 | 字节配额，0 表示不限额 |
 | `--caps` / `--depth` | 64 / 64 | 能力表项数与调用深度 |
 | `--expect-status <n>` | 无 | 要求最终 host_status 等于 n，否则退出 1 |
@@ -90,22 +89,17 @@ python scripts/import_export_scan.py --audit   # 模块卫生检查：裸跨单�
 
 ```bash
 build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
-    examples/arith.lain bootstrap/lain/examples/arith.lain
+    arith.lain bootstrap/lain/examples/arith.lain
 ```
 
 期望 `host_status=0`、`region grants=2`；`output bytes=` 是 Meta 写出的 canonical LAINIR 长度。
-摘要行形如 `unit files=N bytes=N`、`verify subroutines=N data=N`、`run slice=N rounds=N steps=N
-host_status=N`、`region grants=N`、`output bytes=N`，可直接被脚本断言。
 
-当前 **38** 个样例（`bootstrap/lain/examples/*.lain`：35 个旧样例 + `modules_twin_a` /
-`modules_twin_b` / `modules_twin`）。两套口径的数字不同，别混：
+当前 **38** 个样例（`bootstrap/lain/examples/*.lain`：35 个基础样例 + `modules_twin_a` /
+`modules_twin_b` / `modules_twin`）。两套口径的数字不同：
 
 - **lain0 全量回归**：`bash scripts/regress.sh` 与 `--round-trip` 都是 **PASS=38 FAIL=0**。
-- **Meta 管线**（`lain-meta` 编译表面源码；判据是 `host_status=0` **且**产物过 `lainir_parse` +
-  `lainir_verify`）：**26 通过 / 12 失败** —— `jumps`、`loop`、`loop_if`、`loop_local`、
-  `loop_value`（产物被截断，装回去报 `PARSE FAILED 3001`）、`modules_lib`、`modules_main`、
-  `modules_twin`（Meta 的 import 降级缺口）、`refs`、`strinline`、`symbol_addr`、`u8math`。
-  旧的 5 个红样例（`symbol_addr` / `u8math` / `refs` / `strinline` / `modules_main`）仍然红，
-  诊断见 `docs/plan-meta-lain.md` 的「阶段 3」与「新判据下的真实进度」；只按「Meta 有没有跑完」
-  数则是 31/38。这些缺口与 `--unit` 一次只报一个诊断的实现局限记在 `docs/plan-meta-lain.md`
-  的待办里。
+- **Meta 管线**（`lain-meta` 编译表面源码；判据是 `host_status=0` 且无 trap）：38 个样例中
+  26 个通过。12 个失败：`jumps`、`loop`、`loop_if`、`loop_local`、`loop_value` 以 trap
+  status 1004 结束、产物被截断；`modules_lib`（host_status=4）、`modules_main`（11）、
+  `modules_twin`（11）、`refs`（5）、`strinline`（4）、`symbol_addr`（9415）、`u8math`（6）
+  返回非零 host_status。诊断记录在 `docs/selfhost-gap.md`。

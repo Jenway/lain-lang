@@ -1,18 +1,20 @@
-// 初代标准库 v0 —— 和类型：tag、载荷、投影。
-// 由 bootstrapl1/std/sums.l1 翻译成 Lain 表面语法。
+// 模块：和类型（tag、载荷、投影）。跨单元引用一律写 `别名.名字`。
 //
 // 和积类型同源（都是 align_up 累加出来的布局），多出来的只有**判别字段**：
 //
 //   tag     `#bits<8>`，偏移 0
-//   载荷区  从 align_up(tag 大小, 最大对齐) 开始，所有变体共用
-//   总大小  align_up(载荷区起点 + 最大载荷, 最大对齐)
+//   载荷区  从 align_up(tag 大小, 最大align 值) 开始，所有变体共用
+//   总大小  align_up(载荷区起点 + 最大载荷, 最大align 值)
 //
 // v0 限制：每个变体最多一个载荷字段（`Circle(i32)`），且 tag 固定 `#bits<8>`。
 //
 // 正文起点**从符号表取**（`meta_scope_body`），不回源码里搜——条目里存的就是
 // 那条 enum 声明的节点。
-
-// 模块：和类型（tag、载荷、投影，初代标准库 v0）。跨单元引用一律写 `别名.名字`。
+//
+// 打包字段：tag 0..7、kind 8..11、width 12..19、size 20..51、align 52..55、
+// 命中位 63；各段不相交，拼装用 or。
+//
+// 本单元没有静态块；跨单元的数据符号用 symbol_addr("NAME_storage") 取址。
 let meta = import("../meta");
 let std_emit = import("emit");
 let std_funcs = import("funcs");
@@ -25,60 +27,7 @@ let std_scalars = import("scalars");
 let std_scope = import("scope");
 let std_types = import("types");
 
-// 翻译说明（表面语言的值 if 支里不能再写语句 if / 值 if；bool 值 if 的 else 支
-// 不能是裸 0；u8 没有算子表；循环参数会遮蔽外层同名绑定）：
-//   * 本单元**没有自己的静态块**（归档 18 个过程、0 个 data），所以本体里没有
-//     `let NAME: ro [u8]`。通过 `#data_addr` 取址的 6 个符号都定义在**别的单元**
-//     （lainir_eq_name / lainir_text_buffer / lainir_zero 在
-//     bootstrapl1/std/lainir.l1，meta_dsep / meta_eoff / meta_etag 在
-//     bootstrap/std/emit.lain），取址一律写成 symbol_addr("NAME_storage")
-//     （编译器发布的数据符号带 _storage 后缀，绑定名本身不是符号，见
-//     bootstrap/std/records.lain 与 bootstrap/std/modules.lain）。字节数组在编译
-//     夹具里给临时定义。
-//   * 「值 if 结果直接喂给 #return」的地方逐条改写成平坦守卫（命中即 return），
-//     条件按旧 IR 的原顺序求值，只有原来会走到的分支才被求值：meta_is_enum 的 %r、
-//     meta_sum_variant 的 %info、meta_lower_sum_construct 的 %status、它的 %s2 与
-//     meta_lower_sum_construct_local 的 %st / %s / %t2 / %pst / %vst、
-//     meta_lower_sum_project 的 %status/%s、meta_emit_projection_temp 的 %st/%s、
-//     meta_lower_sum_access 的 %status、meta_lower_enum 的 %status/%lowered。
-//   * meta_lower_sum_construct_local 的 %t2 值 if 结果先喂给 %tb 的比较、再可能
-//     喂给 #return：按既有写法（见 bootstrap/std/modules.lain 的 pick_end /
-//     pick_body 与 bootstrap/std/records.lain 的 pick_id）改成一次性选择循环
-//     pick_t2 —— has_payload 为假只取 0；为真才求 meta_operand_emit，命中错码即
-//     带出；再算缓冲区、meta_render_ref2，%vbad 即带出 4；否则 meta_emit_store_text。
-//     求值顺序与旧 IR 逐条相同，且 %tb 之后的语句（%tail、#return %tail）仍在循环
-//     之后无条件执行。
-//   * meta_enum_walk 的 %mine / %mine2 是 bool 值 if 且假支是裸 0（验证器 2005），
-//     结果又喂给下一个值 if 的条件（不是 return/break/continue），按既有写法改成
-//     一次性选择循环 pick_mine / pick_mine2：只有 len_ok 成立才算 %a / %b / %eq，
-//     顺序与副作用与旧 IR 一致。%new_hit / %nsz / %nal / %hit2 都是 u64 值 if、
-//     两支纯表达式，照旧写值 if。
-//   * meta_sum_type_id 的 %id 值 if 结果喂给 #return，但 #return 之前还有
-//     restore_top / release 两条语句**无条件执行**，所以不能改平坦守卫（会把释放
-//     跳掉）：照 bootstrap/std/records.lain 的 meta_record_type_id 改成一次性选择
-//     循环 pick_id，求值顺序与旧 IR 逐条相同。
-//   * meta_enum_walk / meta_emit_enum_variants / meta_lower_sum_access /
-//     meta_construct_fields 式的 u8 比较（#eq[#bits<8>]）按表面语言的规矩先
-//     `as u32` 再比常量（byte_w == 125 / pb_w == 40 / b_w == 123）。
-//   * 旧 IR 里几处 `#or` 原样保留为 `or`：meta_pack_variant 的
-//     `#or(#shl(tag…))` 链（tag 占 0..7、kind 8..11、width 12..19、size 20..51、
-//     align 52..55、命中位 63，各段不相交），meta_sum_type_id 的
-//     `#or(#shl(src1, 32), pos + 1)`（src1 占高 32 位、pos + 1 占低 32 位），以及
-//     `#or[#bits<1>](…)`（1 位值上的按位 or 与逻辑 or 同义）。
-//   * 归档里 `#trunc[#bits<32>](%enum_error)` 写成 `enum_error as u32`。
-//   * 旧 IR 的 %w1…%w17 / %a1…%a3 / %s1…%s3 / %e1…%e5 / %h1…%h10 / %l1…%l4 /
-//     %y1…%y3 / %o / %c / %h / %r / %d / %save_* / %push / %restore / %release /
-//     %set_cycle / %pass1 / %t1 / %a1 / %st0 / %f / %f0 / %f2 / %fe / %fz / %fnf /
-//     %fail / %fail2 等不被读的值只取调用副作用，照旧保留为 let 绑定（死局部保留，
-//     不做清理）。
-//   * 本单元这批依赖里没有 ref / slice 这两个保留字参数名（meta_render_ref2 的
-//     %ref 与 meta_intern 的 %rw 在规范签名里已由脚本改名 ref_v / rw_v，链接名原样
-//     保留），所以没有形参改名。
-
-// 跨单元 / Host 依赖的规范签名（由 meta_sig_index.py 从 bootstrapl1/std/sums.l1
-// 的调用点与各定义单元核对得到，链接名原样保留）。旧 IR 的宽度 #bits<N> 已归一为
-// 表面语言的标量类型。本单元没有任何归档 `#extern` 过程，也不重复声明本文件里定义
-// 的那 18 个过程 —— 下面每一条都在**别的**单元里定义。
+// 宿主能力。
 extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
 extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
 extern lain_meta_source_data(index: u64) -> addr = lain_meta_source_data;
@@ -87,8 +36,7 @@ extern lain_meta_status() -> u64 = lain_meta_status;
 
 // 这个类型名是不是 enum？用来区分积类型的字段访问和和类型的投影。
 //
-// 现在**只查作用域表**：条目里就写着这个名字是哪一种声明，不用去看它的正文。
-// 归档的 %r 值 if 结果直接喂给 #return，改成平坦守卫。
+// **只查作用域表**：条目里就写着这个名字是哪一种声明，不用去看它的正文。
 func meta_is_enum(src: addr, len: u64, name_lo: u64, name_hi: u64) -> bool {
   let name: addr = src + name_lo;
   let name_len: u64 = name_hi - name_lo;
@@ -102,7 +50,7 @@ func meta_is_enum(src: addr, len: u64, name_lo: u64, name_hi: u64) -> bool {
   return is;
 }
 
-// 走一遍变体，找 var_lo/var_hi 那一个，同时把最大载荷大小/对齐写进 scratch。
+// 走一遍变体，找 var_lo/var_hi 那一个，同时把最大载荷大小/align 值写进 scratch。
 //   返回 packed：tag 0..7、kind 8..11、width 12..19、size 20..51、align 52..55、
 //   命中 63。
 //   没命中返回 0。v0 假设变体列表良构（名字后面可选 `(类型)`）。
@@ -121,7 +69,7 @@ func meta_enum_walk(src: addr, len: u64, body: u64, var_lo: u64, var_hi: u64, sc
     let pb: u8 = std_lex.bs_byte_at(src, paren, len);
     let pb_w: u32 = pb as u32;
     let has_payload: bool = pb_w == 40;
-    // 有载荷就读类型名，算大小/对齐；没有的话下面直接用字面量。
+    // 有载荷就读类型名，算大小/align 值；没有的话下面直接用字面量。
     if has_payload {
       let one: u64 = paren + 1;
       let t_lo: u64 = std_lex.bs_skip_space(src, one, len);
@@ -145,9 +93,7 @@ func meta_enum_walk(src: addr, len: u64, body: u64, var_lo: u64, var_hi: u64, sc
       let want: u64 = var_hi - var_lo;
       let have: u64 = name_hi - here;
       let len_ok: bool = want == have;
-      // 归档的 %mine 值 if（真支比字节、假支裸 0）结果喂给下一个值 if 的条件：
-      // bool 值 if 的假支不能是裸 0（验证器 2005），改成一次性选择循环，只有
-      // len_ok 成立才求 %a / %b / %eq，顺序与副作用与旧 IR 一致。
+      // 只有 len_ok 成立才求 a / b / eq。
       let mine: bool = loop pick_mine(t: bool = 0) {
         if len_ok {
           let a: addr = src + here;
@@ -197,7 +143,7 @@ func meta_pack_variant(tag: u64, kind: u64, width: u64, size: u64, align: u64) -
   return e;
 }
 
-// 把最大载荷大小/对齐写进 scratch+0 / scratch+8。
+// 把最大载荷大小/align 值写进 scratch+0 / scratch+8。
 func meta_store_scratch(scratch: addr, maxsz: u64, maxal: u64) -> u32 {
   store(scratch, maxsz);
   let p: addr = scratch + 8;
@@ -216,14 +162,14 @@ func meta_scratch_max_align(scratch: addr) -> u64 {
   return v;
 }
 
-// 载荷区起点 = align_up(tag 大小=1, 最大对齐)
+// 载荷区起点 = align_up(tag 大小=1, 最大align 值)
 func meta_enum_payload_off(scratch: addr) -> u64 {
   let al: u64 = meta_scratch_max_align(scratch);
   let off: u64 = std_lex.bs_align_up(1, al);
   return off;
 }
 
-// 总大小 = align_up(载荷起点 + 最大载荷, 最大对齐)
+// 总大小 = align_up(载荷起点 + 最大载荷, 最大align 值)
 func meta_enum_size(scratch: addr) -> u64 {
   let al: u64 = meta_scratch_max_align(scratch);
   let off: u64 = meta_enum_payload_off(scratch);
@@ -234,8 +180,7 @@ func meta_enum_size(scratch: addr) -> u64 {
 }
 
 // 和类型的名义类型 ID。布局复用已验证的变体扫描与最大载荷规则。
-// 归档的 %id 值 if 结果喂给 #return，但 #return 之前还有 restore_top / release
-// 两条无条件执行的语句，所以改成一次性选择循环 pick_id（见文件头说明）。
+// restore_top / release 在返回之前无条件执行，所以用一次性选择循环 pick_id。
 func meta_sum_type_id(index: u64) -> u64 {
   let src: u64 = std_scope.meta_scope_word(index, 0);
   let len: u64 = lain_meta_source_length(src);
@@ -244,7 +189,7 @@ func meta_sum_type_id(index: u64) -> u64 {
   let pos: u64 = std_parse.meta_node_start(node);
   let src1: u64 = src + 1;
   let high: u64 = src1 << 32;
-  // src1 占高 32 位、pos + 1 占低 32 位，位域不相交，or 与加法等价（照旧 IR 写 or）。
+  // src1 占高 32 位、pos + 1 占低 32 位，位域不相交，or 与加法等价。
   let owner: u64 = high or (pos + 1);
   let scratch: addr = lain_meta_scratch_data();
   let registered: u64 = std_registry.meta_reg_lookup(scratch, 2, owner, 0);
@@ -279,12 +224,12 @@ func meta_sum_type_id(index: u64) -> u64 {
   let payload_off: u64 = std_records.meta_layout_field_align_up_checked(1, max_align);
   let payload_end: u64 = std_records.meta_layout_add_checked(payload_off, max_size);
   let total: u64 = std_records.meta_layout_field_align_up_checked(payload_end, max_align);
-  // 1 位值上的按位 or 与逻辑 or 同义（照旧 IR 写 or）。
+  // 1 位值上的按位 or 与逻辑 or 同义。
   let invalid: bool = (payload_off == 0xFFFFFFFFFFFFFFFF) or (payload_end == 0xFFFFFFFFFFFFFFFF);
   let invalid1: bool = invalid or (total == 0xFFFFFFFFFFFFFFFF);
   let invalid2: bool = invalid1 or walk_failed;
-  // 一次性选择循环：invalid2 为假才 meta_intern；为真先看递归标记再回 0。
-  // 旧 IR 的求值顺序逐条保留，末尾 restore / release 仍在循环之后执行。
+  // invalid2 为假才 meta_intern；为真先看递归标记再回 0。
+  // 末尾的 restore / release 在循环之后执行。
   let id: u64 = loop pick_id(t: u64 = 0) {
     if invalid2 {
       let recursive: u64 = std_types.meta_cell_get(scratch + 464);
@@ -311,7 +256,6 @@ func meta_sum_type_id(index: u64) -> u64 {
 // ——别的变体也有那块载荷区。v0 把不命中折叠成 0（全函数），不做 panic 路径。
 
 // 走一遍声明，拿到变体的 tag/载荷形状；返回 0 表示没有这个变体。
-// 归档的 %info 值 if 结果直接喂给 #return，改成平坦守卫。
 func meta_sum_variant(base: addr, len: u64, enum_lo: u64, enum_hi: u64, var_lo: u64, var_hi: u64, scratch: addr) -> u64 {
   // 正文起点**问符号表**（条目里存的是声明节点），不回源码里搜
   let body: u64 = std_records.meta_scope_body(base, enum_lo, enum_hi, 5);
@@ -324,7 +268,6 @@ func meta_sum_variant(base: addr, len: u64, enum_lo: u64, enum_hi: u64, var_lo: 
 }
 
 // `let NAME = Enum.Variant { 值 }`
-// 归档的 %status 与它真支里的 %s2 值 if 结果都喂给 #return，改成平坦守卫。
 func meta_lower_sum_construct(base: addr, len: u64, bind_lo: u64, bind_hi: u64, enum_lo: u64, enum_hi: u64, var_lo: u64, var_hi: u64, brace_at: u64) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
   let info: u64 = meta_sum_variant(base, len, enum_lo, enum_hi, var_lo, var_hi, scratch);
@@ -374,15 +317,12 @@ func meta_lower_sum_construct(base: addr, len: u64, bind_lo: u64, bind_hi: u64, 
   return s2;
 }
 
-// `let s: Shape = Shape.Circle { k };`（函数体里）：从**栈**上划一块（`#alloca`），
+// `let s: Shape = Shape.Circle { k };`（函数体里）：从 **stack** 上划一块（`#alloca`），
 // tag 一条 store、载荷一条 store，绑定接 `%NAME = #lea(%r<n>, 0, 1, 0)`。与顶层那条
 // `meta_lower_sum_construct`（静态 storage 加一条取址 proc）的区别就在这里。
 //
 // 载荷是**一条表达式**（`{ k }` 里那个 `k`），按操作数降级 —— 不按源码数字读，
 // 所以函数参数与局部值都能当载荷。
-//
-// 归档的 %st / %s 值 if 结果喂给 #return，改成平坦守卫；%t2 结果先喂给 %tb 的比较、
-// 再可能喂给 #return，改成一次性选择循环（见文件头说明）。
 func meta_lower_sum_construct_local(base: addr, len: u64, name_lo: u64, name_hi: u64, enum_lo: u64, enum_hi: u64, var_lo: u64, var_hi: u64, parent: u64, group: u64, is_ret: bool) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
   let info: u64 = meta_sum_variant(base, len, enum_lo, enum_hi, var_lo, var_hi, scratch);
@@ -457,7 +397,6 @@ func meta_lower_sum_construct_local(base: addr, len: u64, name_lo: u64, name_hi:
 }
 
 // `let NAME: T = Enum.Variant(值)`：读 tag、比、命中才读载荷。
-// 归档的 %status 与它真支里的 %s 值 if 结果都喂给 #return，改成平坦守卫。
 func meta_lower_sum_project(base: addr, len: u64, bind_lo: u64, bind_hi: u64, enum_lo: u64, enum_hi: u64, var_lo: u64, var_hi: u64, at: u64) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
   let info: u64 = meta_sum_variant(base, len, enum_lo, enum_hi, var_lo, var_hi, scratch);
@@ -489,18 +428,18 @@ func meta_lower_sum_project(base: addr, len: u64, bind_lo: u64, bind_hi: u64, en
   let w1: u32 = std_lainir.lainir_proc_word_write();
   let w2: u32 = std_lainir.lainir_write(bind_at, bind_len);
   let w3: u32 = std_lainir.lainir_empty_params_write();
-  let w4: u32 = std_emit.meta_emit_repr(kind, width);
+  let w4: u32 = std_lainir.lainir_repr(kind, width);
   let w5: u32 = std_lainir.lainir_bind_head_write();
   let w6: u32 = std_lainir.lainir_write(var_at, var_len);
 
   let w7: u32 = std_lainir.lainir_vproj_load_write();
-  let w8: u32 = std_emit.meta_emit_uint(tag);
+  let w8: u32 = std_lainir.lainir_emit_uint(tag);
   let w9: u32 = std_lainir.lainir_vproj_if_write();
-  let w10: u32 = std_emit.meta_emit_repr(kind, width);
+  let w10: u32 = std_lainir.lainir_repr(kind, width);
   let w11: u32 = std_lainir.lainir_vproj_lea_write();
-  let w12: u32 = std_emit.meta_emit_uint(poff);
+  let w12: u32 = std_lainir.lainir_emit_uint(poff);
   let w13: u32 = std_lainir.lainir_vproj_value_write();
-  let w14: u32 = std_emit.meta_emit_repr(kind, width);
+  let w14: u32 = std_lainir.lainir_repr(kind, width);
   let w15: u32 = std_lainir.lainir_vproj_tail_write();
   return 0;
 }
@@ -510,9 +449,6 @@ func meta_lower_sum_project(base: addr, len: u64, bind_lo: u64, bind_hi: u64, en
 //
 // 与顶层那条路（`meta_lower_sum_project` 发一整条无名参数的 proc）的区别：这里的值来自
 // 参数或局部值，所以发的是**三条指令加一条带值 `#if`**，就写在当前函数体里。
-//
-// 归档的 %st / %s 值 if 结果都喂给 #return，改成平坦守卫（真支里那条
-// `#if #ne(%ast, 0) { #return %ast }` 照旧写成守卫）。
 func meta_emit_projection_temp(base: addr, len: u64, parent: u64, index: u64, enum_lo: u64, enum_hi: u64, var_lo: u64, var_hi: u64) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
   let info: u64 = meta_sum_variant(base, len, enum_lo, enum_hi, var_lo, var_hi, scratch);
@@ -611,7 +547,7 @@ func meta_emit_projection_temp(base: addr, len: u64, parent: u64, index: u64, en
 }
 
 // `Enum.Variant { ... }` 还是 `Enum.Variant(v)`？`at` 是点号之后。
-// 归档的 %status 值 if 结果喂给 #return，改成平坦守卫；u8 比较先 as u32。
+// u8 没有算子表，比较先 as u32。
 func meta_lower_sum_access(base: addr, len: u64, bind_lo: u64, bind_hi: u64, enum_lo: u64, enum_hi: u64, at: u64) -> u32 {
   let var_lo: u64 = std_lex.bs_skip_space(base, at, len);
   let var_hi: u64 = std_lex.bs_skip_ident(base, var_lo, len);
@@ -649,7 +585,7 @@ func meta_emit_enum_case(base: addr, enum_lo: u64, enum_hi: u64, var_lo: u64, va
 }
 
 // 逐变体发 `<V>_tag`，有载荷的再发 `<V>_off`。
-// u8 比较先 as u32；%next 是 u64 值 if（两支纯表达式）照旧写值 if。
+// u8 比较先转成 u32。
 func meta_emit_enum_variants(base: addr, len: u64, enum_lo: u64, enum_hi: u64, body: u64, poff: u64) -> u32 {
   let tag_suf: addr = std_emit.meta_etag;
   let off_suf: addr = std_emit.meta_eoff;
@@ -685,7 +621,6 @@ func meta_emit_enum_variants(base: addr, len: u64, enum_lo: u64, enum_hi: u64, b
 }
 
 // `enum NAME { V1 V2(T) ... }` —— 发出每个变体的 tag、载荷偏移，和总大小。
-// 归档的 %status 与 %lowered 值 if 结果都喂给 #return，改成平坦守卫。
 func meta_lower_enum(base: addr, len: u64, kw_at: u64) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
   let after: u64 = kw_at + 4;
@@ -697,7 +632,7 @@ func meta_lower_enum(base: addr, len: u64, kw_at: u64) -> u32 {
     let f0: u32 = lain_meta_fail(4);
     return 4;
   }
-  // 第一遍只为把最大载荷大小/对齐算进 scratch（第二个参数给 0 表示不找变体）
+  // 第一遍只为把最大载荷大小/align 值算进 scratch（第二个参数给 0 表示不找变体）
   let pass1: u64 = meta_enum_walk(base, len, body, 0, 0, scratch);
   let enum_error: u64 = lain_meta_status();
   let valid: bool = enum_error == 0;

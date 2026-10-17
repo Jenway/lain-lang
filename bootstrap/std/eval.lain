@@ -1,31 +1,7 @@
-// struct 对齐请求的物理 LAINIR。值经实参 wire 传递，不拼进源文本。
-// 参数格式由宿主 ABI 定义为 kind/width/bits 三个 64 位单元。
-// 由 bootstrapl1/std/eval.l1 翻译成 Lain 表面语法。
+// 模块：struct 布局请求的物理 LAINIR 求值。跨单元引用一律写 `别名.名字`。
 //
-// 翻译说明（表面语言的值 if 支里不能再写语句 if / 值 if）：
-//   * 本单元自己的 2 个静态块，旧 IR 写作 data … ro；表面语言里 ro 块写成
-//     `let NAME: ro [u8] = [...]`，取址用 symbol_addr("NAME_storage")：编译器发布的
-//     数据符号带 _storage 后缀，绑定名本身不是符号（见 bootstrap/std/modules.lain 的
-//     meta_kw_import 与 bootstrap/std/emit.lain 的 meta_dsep）。字节数组与旧 IR 逐字节
-//     相同（223 / 12）。
-//   * meta_eval_align_up 的 %result 值 if：真支只 #yield %bits，假支里还嵌着 %code
-//     值 if 与一条语句 if（表面语言的值 if 支前缀只认 let / store，套不了 if）。旧 IR
-//     里这个结果喂给赋值再喂 #return，这里按既有写法（见 bootstrap/std/modules.lain 的
-//     pick_end / pick_body 与 bootstrap/std/expand.lain 的 pick / pick_root / pick_st）
-//     改成一次性选择循环 pick_result：valid 为真只取 %bits；为假才碰 %code、
-//     meta_source_of 与诊断发射，最后 yield 0xFFFFFFFFFFFFFFFF。求值顺序与副作用
-//     逐条不变。末尾那句 meta_bump_release(%mark) 仍在循环之后无条件执行（旧 IR 的
-//     %result 赋值之后那一句），所以两边的释放时机与原状一致。
-//   * 内层 %code 值 if 两支都是纯表达式且都是 u32（真支常量 7、假支 #trunc %status），
-//     直接写成值 if；旧 IR 在假支里的局部 %low 作为 let 原样保留。
-//   * 旧 IR 在本函数里两次用了局部名 %release（内层 if 支与外层各一次，作用域不同），
-//     这里把外层那次改名 release_final，避免遮蔽。
-//   * 旧 IR 的 %w0…%w5 值都不被读，只取 meta_cell_put 的副作用：保留为 let 绑定。
-//   * lain_meta_apply_emitted_request 在旧 IR 里是带 #extern 声明的过程（没有体），
-//     表面语言里对应一条 extern 声明，链接名原样保留。
-//   * 本单元没有 #data_addr 取跨单元数据符号，所以不需要任何跨单元数据桩。
-
-// 模块：struct 对齐请求的物理 LAINIR 求值。跨单元引用一律写 `别名.名字`。
+// 模块文本经实参 wire 传递，不拼进源文本；参数格式由宿主 ABI 定义为
+// kind/width/bits 三个 64 位单元。
 let std_modules = import("modules");
 let std_parse = import("parse");
 let std_scope = import("scope");
@@ -34,9 +10,7 @@ let std_types = import("types");
 let meta_eval_align_module: ro [u8] = [35, 112, 114, 111, 99, 32, 108, 97, 121, 111, 117, 116, 95, 97, 108, 105, 103, 110, 40, 37, 118, 58, 32, 35, 98, 105, 116, 115, 60, 54, 52, 62, 44, 32, 37, 97, 58, 32, 35, 98, 105, 116, 115, 60, 54, 52, 62, 41, 32, 45, 62, 32, 35, 98, 105, 116, 115, 60, 54, 52, 62, 32, 123, 10, 32, 32, 37, 98, 97, 99, 107, 32, 61, 32, 35, 115, 117, 98, 91, 35, 98, 105, 116, 115, 60, 54, 52, 62, 93, 40, 37, 97, 44, 32, 49, 41, 10, 32, 32, 37, 115, 117, 109, 32, 61, 32, 35, 97, 100, 100, 91, 35, 98, 105, 116, 115, 60, 54, 52, 62, 93, 40, 37, 118, 44, 32, 37, 98, 97, 99, 107, 41, 10, 32, 32, 37, 113, 32, 61, 32, 35, 117, 100, 105, 118, 91, 35, 98, 105, 116, 115, 60, 54, 52, 62, 93, 40, 37, 115, 117, 109, 44, 32, 37, 97, 41, 10, 32, 32, 37, 114, 101, 115, 117, 108, 116, 32, 61, 32, 35, 109, 117, 108, 91, 35, 98, 105, 116, 115, 60, 54, 52, 62, 93, 40, 37, 113, 44, 32, 37, 97, 41, 10, 32, 32, 35, 114, 101, 116, 117, 114, 110, 32, 37, 114, 101, 115, 117, 108, 116, 10, 125, 10];   // 223 字节，宿主侧 layout_align 模块文本
 let meta_eval_align_entry: ro [u8] = [108, 97, 121, 111, 117, 116, 95, 97, 108, 105, 103, 110];   // "layout_align" 12
 
-// 跨单元 / Host 依赖的规范签名（由 meta_sig_index.py 从 bootstrapl1/std/eval.l1 的调用点
-// 与各定义单元核对得到，链接名原样保留）。旧 IR 的宽度 #bits<N> 已归一为表面语言的标量
-// 类型；本单元这批依赖里没有 ref / slice 这两个保留字参数名。
+// 宿主能力。
 extern lain_meta_apply_kind() -> u64 = lain_meta_apply_kind;
 extern lain_meta_apply_request(text: addr, length: u64, entry: addr, entry_length: u64, args: addr, arg_count: u64) -> u64 = lain_meta_apply_request;
 extern lain_meta_apply_status() -> u64 = lain_meta_apply_status;
@@ -44,8 +18,6 @@ extern lain_meta_apply_width() -> u64 = lain_meta_apply_width;
 extern lain_meta_fail(code: u32) -> u32 = lain_meta_fail;
 extern lain_meta_fail_at(code: u64, source: u64, offset: u64) -> u64 = lain_meta_fail_at;
 extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
-// 旧 IR 的 `#proc lain_meta_apply_emitted_request(…) #extern "lain_meta_apply_emitted_request"`
-// 没有体，表面语言里就是这条 extern 声明（同名链接名，参数名与定义单元一致）。
 extern lain_meta_apply_emitted_request(entry: addr, entry_len: u64, args: addr, arg_count: u64) -> u64 = lain_meta_apply_emitted_request;
 
 // 通用标量请求门面：模块文本、入口和标量 wire 都是调用方提供的数据。
@@ -95,9 +67,7 @@ func meta_eval_align_up(v: u64, a: u64, source_base: addr, position: u64) -> u64
   let width_ok: bool = width == 64;
   let type_ok: bool = kind_ok and width_ok;
   let valid: bool = status_ok and type_ok;
-  // 旧 IR 的 %result 值 if（假支里再套 %code 值 if 和语句 if）改成一次性选择循环：
-  // valid 为假时旧 IR 的顺序是 先算 %code → 再算 %source / %known → 按 %known 记诊断
-  // → #yield 0xFFFFFFFFFFFFFFFF，这里逐条照搬。
+  // valid 为真只取 bits；为假才碰 code、来源查找与诊断发射。
   let result: u64 = loop pick_result(t: u64 = 0) {
     if valid {
       break pick_result(bits);
@@ -108,7 +78,7 @@ func meta_eval_align_up(v: u64, a: u64, source_base: addr, position: u64) -> u64
       let low: u32 = status as u32;
       low
     };
-    // 布局结束处是这次物理对齐计算的来源；请求行列由 Eval 单独保留。
+    // 布局结束处是这次物理布局计算的来源；请求行列由 Eval 单独保留。
     let source: u64 = std_parse.meta_source_of(source_base);
     let known: bool = source != 0xFFFFFFFFFFFFFFFF;
     if known {

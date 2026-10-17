@@ -1,17 +1,14 @@
-// if 语句处理器的孩子上下文适配器。
+// 模块：if/else 语句处理器的孩子上下文适配器。跨单元引用一律写 `别名.名字`。
+//
 // 返回值低 63 位是本次消费/写入的兄弟数；最高位表示孩子发生变化。
 // 形状不完整时消费 1，让后续 recognize/lower 按既有诊断路径处理；递归失败返回 0。
-// 模块：if/else 语句处理器的孩子上下文适配器。跨单元引用一律写 `别名.名字`。
 let std_expand = import("../expand");
 let std_lex = import("../lex");
 let std_parse = import("../parse");
 let std_syntax = import("../syntax");
 
-extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
-
 func meta_register_if(node: u64) -> u32 {
-  let dummy: addr = lain_meta_source_data(0);
-  let hit: bool = std_parse.meta_node_is_word(node, dummy, std_lex.meta_kw_if, 2);
+  let hit: bool = std_parse.meta_node_is_word(node, std_lex.meta_kw_if, 2);
   if hit { return std_syntax.meta_syntax_ensure(node, 2, 3); }
   return 0;
 }
@@ -49,14 +46,14 @@ func meta_expand_children_if(group: u64, cursor: u64, count: u64, buffer: addr, 
   let p1: u32 = std_expand.meta_expand_store_ref(buffer, outn + 1, cond);
   let p2: u32 = std_expand.meta_expand_store_ref(buffer, outn + 2, new_body);
 
-  // 旧 IR 的 %else_hit 只在 has_after 成立时求值，否则为 0；这里用同样的守卫形状。
+  // 只有 has_after 成立时才查 else 分支。
   let after_i: u64 = cursor + 3;
   let has_after: bool = after_i < count;
   if has_after {
     let after: u64 = std_parse.ast_child(group, after_i);
     let base: addr = lain_meta_source_data(0);
     let else_kw: addr = std_lex.meta_kw_else;
-    let else_hit: bool = std_parse.meta_node_is_word(after, base, else_kw, 4);
+    let else_hit: bool = std_parse.meta_node_is_word(after, else_kw, 4);
     if else_hit {
       let else_end: u64 = cursor + 5;
       let else_room: bool = else_end <= count;
@@ -75,7 +72,7 @@ func meta_expand_children_if(group: u64, cursor: u64, count: u64, buffer: addr, 
           let c1: bool = new_else != else_body;
           let changed: bool = c0 or c1;
           let flag: u64 = if changed { 0x8000000000000000 } else { 0 };
-          // flag 只可能是 0 或 bit 63，与低位数不重叠，因此加法等价于旧 IR 的 or。
+          // flag 只可能是 0 或 bit 63，与低位数不重叠，加法与按位或等价。
           return flag + 5;
         }
       }

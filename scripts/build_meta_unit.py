@@ -1,26 +1,20 @@
-#!/usr/bin/env python3
-"""把 bootstrap/ 的模块清单交给 lain0 编成一份 LAINIR（即 Meta 本体），并写出驱动要的单元清单。
-
-    python scripts/build_meta_unit.py
-
-产物（都在 build/lain0/ 下，build/ 被 Git 忽略）：
-
-    bootstrap.l1           `lain0 --unit bootstrap/SOURCE_ORDER` 的产物（Meta 本体）
-    bootstrap_unit.txt     给 lain-meta 的 --unit 清单，内容是一行相对路径
-
-用法（仓库根目录）：
-
-    ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \\
-        examples/arith.lain bootstrap/lain/examples/arith.lain
-
-为什么清单里写 `../build/...`：驱动把清单每一行都当 `bootstrap/<行>` 打开（见
-tools/meta_driver.c），所以只能这样指到 build/ 下的产物。另外注意驱动的 --unit
-默认值是 `bootstrap/SOURCE_ORDER`，而本仓库里那个文件是**Lain 源码**的模块清单
-（`<相对路径> [<根名> …]`），不是 LAINIR 单元清单，所以跑驱动时请显式传 --unit。
-
-自 `bootstrap/SOURCE_ORDER` 改成模块清单之后，这里不再拼接源码：清单本身就是
-lain0 的编译单元（docs/plan-modules.md §3.3/§3.7），模块顺序与根名都由它承载。
-"""
+# 把 bootstrap/ 的模块清单交给 lain0 编成一份 LAINIR（即 Meta 本体），并写出驱动要的单元清单。
+#
+#     python scripts/build_meta_unit.py
+#
+# 产物（都在 build/lain0/ 下，build/ 被 Git 忽略）：
+#
+#     bootstrap.l1           lain0 --unit bootstrap/SOURCE_ORDER 的产物（Meta 本体）
+#     bootstrap_unit.txt     给 lain-meta 的 --unit 清单，内容是一行相对路径
+#
+# 用法（仓库根目录）：
+#
+#     ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
+#         arith.lain bootstrap/lain/examples/arith.lain
+#
+# 清单里写 `../build/...`：驱动把清单每一行都当 `bootstrap/<行>` 打开（见
+# seed/meta_driver.c）。驱动的 --unit 默认值是 `bootstrap/SOURCE_ORDER`，而那个文件是
+# Lain 源码的模块清单（`<相对路径> [<根名> …]`），跑驱动时请显式传 --unit。
 
 import subprocess
 import sys
@@ -30,6 +24,8 @@ ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "bootstrap" / "SOURCE_ORDER"
 OUT_DIR = ROOT / "build" / "lain0"
 LAIN0 = ROOT / "build" / "lain0" / "lain0.exe"
+if not LAIN0.exists():
+    LAIN0 = ROOT / "build" / "lain0" / "lain0"
 
 
 def manifest_units():
@@ -86,7 +82,7 @@ def main():
     print("unit list -> %s" % unit_list.relative_to(ROOT))
     print()
     print("跑一次：")
-    print("  ./build/lain-meta.exe --unit %s examples/arith.lain "
+    print("  ./build/lain-meta.exe --unit %s arith.lain "
           "bootstrap/lain/examples/arith.lain"
           % str(unit_list.relative_to(ROOT)).replace("\\", "/"))
     return 0

@@ -34,14 +34,14 @@ apply(LAINIR 过程, 实参, 能力与限额) → 执行结果
 
 ## apply 契约
 
-C 接口见 `seed/include/lain/meta/apply.h`。执行期约束如下：
+C 接口见 `seed/kernel/include/lain/meta/apply.h`。执行期约束如下：
 
 | 项 | 规则 |
 | --- | --- |
 | 模块 | 已验证的 LAINIR 文本，必须自包含所有依赖过程，不引入隐式宿主状态 |
 | 入口 | 模块内的普通 `#proc` |
 | 实参 | 标量通过固定槽位的 Wire 传输；字节数据通过显式只读映射传递 |
-| 限额 | 步数、栈、调用深度、配额与已冻结的能力表（`LainMetaApplyLimits`） |
+| 限额 | 步数、stack、调用深度、配额与已冻结的能力表（`LainMetaApplyLimits`） |
 | 结果 | 标量，或固定长度按值拷出的字节块 |
 | 拒绝 | 结果类型含 `#addr` 一律拒绝，严禁裸物理地址逃逸进 Meta |
 
@@ -78,9 +78,9 @@ Meta 本体今天就是 `bootstrap/` 下 **28 个 Lain 源码模块**（`meta.la
 ```bash
 python scripts/build_meta_unit.py
 ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
-    examples/arith.lain bootstrap/lain/examples/arith.lain
+    arith.lain bootstrap/lain/examples/arith.lain
 ```
 
-  实测 `verify subroutines=870 data=216`、`image ok`、`host_status=0`、`region grants=2`、
-  `output bytes=74`，产物与基线 `build/arith.out` 逐字节相同。设计与取舍见 `docs/plan-modules.md`
+  `verify subroutines=709 data=167`、`image ok`、`host_status=0`、`region grants=2`、
+  `output bytes=74`。设计与取舍见 `docs/plan-modules.md`
   （决策 D-004），成员位置表与拒绝码见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》。

@@ -1,20 +1,19 @@
 # 自举差集：让 Meta 降级 bootstrap 自己的源码（实测报告）
 
-> 本文件只做**调查**，不改 `bootstrap/` 与 `seed/` 的源码。所有结论都附真实命令与输出；
-> 探针与脚本在 `build/probe/`（`build/` 被 Git 忽略，符合本仓惯例），本文把关键探针的
-> 源码与命令原样抄进来，照着抄就能复现。
+> 本文件只做**调查**，不改 `bootstrap/` 与 `seed/` 的源码。所有结论都附命令与输出；
+> 探针与脚本放在未跟踪的 `build/probe/` 下，本文把关键探针的源码与命令抄进来。
 >
-> 基线：`master` @ `32b3a19`，`cmake --build build` 后 `build/lain-meta.exe`、
-> `build/lain0/lain0.exe` 均最新。回归 `bash scripts/regress.sh --round-trip` PASS=38 FAIL=0。
+> 基线：本仓库工作区，`cmake --build build` 后 `build/lain-meta.exe`、`build/lain0/lain0.exe`
+> 均最新。回归 `bash scripts/regress.sh --round-trip` PASS=38 FAIL=0。
 
-## 0. 结论先行
+## 0. 调查结果
 
 1. **`host_status=11` 的精确来源**：`bootstrap/std/scope.lain:619-622` 的
    `meta_scope_scan_root` —— 顶层 `let NAME = import("…")` 那条分支里
    `std_modules.meta_source_find` 返回 `NOT_FOUND` 时 `lain_meta_fail(11); return 11`。
   它在**降级之前**的预扫描里就被抛出（`meta.lain:66` 的 `meta_scope_scan`），
    所以「完全没有产物」——这是 11 与 4/6/13 那类「降级到一半」失败的分界线。
-2. **四个单元都报 11 不是能力缺口，是登记名不匹配**：Meta 的 import 解析是
+2. **四个单元都报 11 来自登记名不匹配**：Meta 的 import 解析是
    「把 spec 规范化后与宿主登记的逻辑路径**逐字节相等**」，而 bootstrap 源码里的
    spec 是**相对导入方目录**写的（`import("types")` = `std/types.lain`）。
    用 SOURCE_ORDER 路径登记（自然写法）→ 4 个单元全 11；把登记名换成源码里
@@ -31,13 +30,13 @@
 5. **最快的「第一个单元端到端」是 `std/regions`**（24 行、无循环）：只需要
    ①mangle 按模块键（`std_types__x`）②跨模块函数成员调用 ③`symbol_addr` 内建
    三项，全是别的单元也需要的公共项；`std/lex` 反而要 4 项（多一条链式比较）。
-6. **意外（与现有文档不一致，见 §5）**：
-   - `modules_main` / `modules_twin` 今天是 **11 / 0 字节**，不是文档写的 13/171 与 4/29；
-   - `jumps` / `loop*` 5 个样例不是「写出被截断、host_status=0」这么含糊，而是
-     **LOAD FAULT trap（status=1004，line 916）**，截断是 trap 的后果；
-   - `symbol_addr` 在**目标单元**里（函数体或顶层绑定）都报 **9415**；旧矩阵写的 13 是
-     「被导入模块**导出**这条绑定」时的码，两处不是同一件事（§5.3）；
-   - 文档说的「652 处跨单元调用点」实测是 **2482 处**（另有 167 处跨模块取值）；
+6. **几处容易看错的结果（见 §5）**：
+   - `modules_main` / `modules_twin` 是 **11 / 0 字节**：只登记样例自己，import 找不到源码；
+   - `jumps` / `loop*` 5 个样例的失败形态是 **LOAD FAULT trap（status=1004，落在
+     `std_types__meta_bytes_equal` 的循环体）**，产物截断是 trap 的后果；
+   - `symbol_addr` 在**目标单元**里（函数体或顶层绑定）都报 **9415**；「被导入模块
+     **导出**这条绑定」报 13，两处来源不同（§5.3）；
+   - 跨单元调用点 **2482 处**，另有 167 处跨模块取值；
    - bootstrap 源码**没有** `struct`/`enum`/`ref`/`slice`/`for`/赋值语句/本单元表索引 ——
      这几类缺口对自举**不构成阻塞**（但样例里仍然红）。
 
@@ -53,7 +52,7 @@
 | **半** | Meta 降级完成，但产物装不回 VM | `host_status=0`，`check_unit.exe` 报 `PARSE FAILED 300x` / `VERIFY FAILED 20xx` |
 | **不能** | Meta 自己失败 | `host_status != 0`，或 VM trap（`trap kind=1 status=1004`），产物截断 |
 
-每一行都有实测：`build/probe/selfhost/run_all.tsv`（77 个探针的原始记录，含命令）。
+每一行的结果都来自同一轮探针实测，登记名、源码与结果记在 §4 各表。
 
 ### 1.2 两条命令
 
@@ -68,11 +67,11 @@
 ```
 
 `--unit build/lain0/bootstrap_unit.txt` 里只有一行 `../build/lain0/bootstrap.l1`，
-即 `scripts/build_meta_unit.py` 产出的**整份 Meta**（584596 字节，`verify subroutines=870
-data=216`）。`check_unit.exe` 是 `build/check_unit.c` 编出来的临时工具（只调
+即 `scripts/build_meta_unit.py` 产出的**整份 Meta**（524574 字节，`verify subroutines=709
+data=167`）。`check_unit.exe` 是 `build/check_unit.c` 编出来的临时工具（只调
 `lainir_parse` + `lainir_verify`），源码不在版本库里，属本仓 `build/` 惯例。
 
-### 1.3 脚本（都在 `build/probe/`，未跟踪）
+### 1.3 调查脚本
 
 | 脚本 | 作用 |
 | :--- | :--- |
@@ -142,7 +141,7 @@ output bytes=0
    置成 11）→ `return 11` → `meta_scope_scan` 返回 11 → `lain_std_lower` 返回 11。
    **降级阶段（`meta_lower_source`）根本没进**，所以 `output bytes=0`。
 
-**判别实验**（证明 11 出自预扫描而不是降级期）：把 import 放到一条可降级语句**之后**：
+**判别实验**（证明 11 出自预扫描阶段）：把 import 放到一条可降级语句**之后**：
 
 ```lain
 let z: u64 = 1;
@@ -195,21 +194,23 @@ run ... host_status=6    output bytes=1803         # g1_lex_basename / g2_lex / 
 ```
 
 同一份 `std/lex.lain`、同一份 Meta，**只换登记字符串**就从「0 字节 + 11」变成
-「1803 字节 + 6」。所以 11 在这里不是 Meta 的表达能力问题，是**路径解析语义**问题。
+「1803 字节 + 6」。所以 11 在这里来自**路径解析语义**，Meta 的表达能力足够。
 
-补一条：登记名少写 `.lain`（`"types"` 而不是 `"types.lain"`）时，Meta 补成
-`types.lain` 后照样不等 → 但这次**不是干净的 11，而是 1004 trap**：
+补一条：登记名少写 `.lain`（`"types"`，源码里是 `"types.lain"`）时，Meta 补成
+`types.lain` 后照样不等，这次的结果是 1004 trap：
 
 ```bash
 $ ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
     "std/lex.lain" bootstrap/std/lex.lain "types" bootstrap/std/types.lain
 run slice=3 rounds=28 steps=55133749 host_status=0
-trap kind=1 status=1004 line=954 column=34 region=125 position=0
+trap kind=1 status=1004 line=… column=34 region=… position=0
 output bytes=0
 ```
 
+（报告里的 `line=` / `region=` 取自测量时的 `bootstrap.l1`；源码编辑会让它们移动。）
+
 连跑两次 steps 完全相同（确定性）；`types` 放前面、`--lower 1` 也一样。
-`line 954` = `build/lain0/bootstrap.l1` 里
+trap 落在 `build/lain0/bootstrap.l1` 里
 `#proc std_types__meta_cell_get_raw` 的 `#load[#bits<64>](%cell)`，
 调用点在 `meta_source_find` 的**诊断前导**（`modules.lain:230-237`，
 读 `scratch + meta_path_buffer()` 那 8 字节）。这两行是排查期加的脚手架，
@@ -289,8 +290,7 @@ output bytes=0
 半 的来源是导出路径对静态表**什么都不发**（`meta_emit_module_binding`
 （`modules.lain:529-575`）只认「数字」与「同模块标识符」两种初值）。
 
-补一条（不在上表编号内，用来对齐旧矩阵）：被导入模块**导出**一条初值为
-`symbol_addr` 的绑定时报 **13**，不是 9415：
+补一条（不在上表编号内）：被导入模块**导出**一条初值为 `symbol_addr` 的绑定时报 **13**：
 
 ```bash
 $ ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
@@ -301,7 +301,7 @@ run ... host_status=13   output bytes=0
 ```
 
 即「13 = 模块**导出**路径找不到那条绑定名」「9415 = **目标单元**里 `symbol_addr`
-被当成普通调用」（#19/#20）。旧矩阵那一行 13 是对的，只是它与 #20 不是同一件事。
+被当成普通调用」（#19/#20）。两者来自不同的路径。
 
 ### 4.3 单模块构造（bootstrap 主力形态）
 
@@ -311,7 +311,7 @@ run ... host_status=13   output bytes=0
 | 17 | 顶层 `ro`/rw 定长表（207+9 处） | `let t: ro [u8] = [1,2,3];` | `"p/ro.lain" src/p_ro.lain` | `status=0`，59 字节，装回 **OK** | **能** |
 | 18 | 本单元表索引 `t[i]`（bootstrap 用 0 处） | `let p: addr = t[i]; return load(p);` | `"p/rt.lain" src/p_rt.lain` | `status=0`，产物 `#load[#bits<8>](%t…)` → 装回 **VERIFY FAILED 2002 `undefined value t`** | **半** |
 | 19 | `symbol_addr("…")` 在**函数体**里（328 处，12 个单元） | `func f() -> addr { return symbol_addr("t_storage"); }` | `"p/sab.lain" src/p_sab.lain` | `host_status=9415`，41 字节 | **不能** |
-| 20 | `symbol_addr("…")` 在**顶层绑定**里 | `let a: addr = symbol_addr("t_storage");` | `"p/sat.lain" src/p_sat.lain` | `host_status=9415`，20 字节（**旧矩阵写 13，实测 9415**） | **不能** |
+| 20 | `symbol_addr("…")` 在**顶层绑定**里 | `let a: addr = symbol_addr("t_storage");` | `"p/sat.lain" src/p_sat.lain` | `host_status=9415`，20 字节 | **不能** |
 | 21 | `extern … = link_name;` + 调用（136 处） | `extern consume(p: u64) -> u64 = consume;` | `"p/ex.lain" src/p_ex.lain` | `status=0`，114 字节，装回 **OK** | **能** |
 | 22 | 早退（`if` + `return`） | `if a == 0 { return 1; } return a;` | `"p/mr.lain" src/p_mr.lain` | `status=0`，111 字节，装回 **OK** | **能** |
 | 23 | 带值 `if`（147 处） | `let x: i32 = if c { 1 } else { 2 };` | `"p/vi.lain" src/p_vi.lain` | `status=0`，126 字节，装回 **OK** | **能** |
@@ -345,7 +345,7 @@ run ... host_status=13   output bytes=0
 | 43 | 循环体 `let` 初值是**函数调用** | `let x: i32 = helper(i);` | `"p/o2.lain" src/p_o2.lain` | `status=0`，261 字节，装回 **OK** | **能** |
 | 44 | 循环体 `let` 初值是算子、**两侧都是字面量** | `let x: i32 = 1 + 2;` | `"p/q1.lain" src/p_q1.lain` | `status=0`，208 字节，装回 **OK** | **能** |
 | 45 | `break` 的实参是算子表达式 | `break outer(x + 1);` | `"p/o4.lain" src/p_o4.lain` | `status=0`，240 字节，装回 **OK** | **能** |
-| 46 | **循环体 `let` 初值是算子、左操作数是名字** | `let x: i32 = i + 1;` | `"p/o1.lain" src/p_o1.lain` | `status=0` + **trap 1004**（line 916 = `std_types__meta_bytes_equal` 的 `#load`），136 字节，装回 PARSE FAILED 3001 | **不能** |
+| 46 | **循环体 `let` 初值是算子、左操作数是名字** | `let x: i32 = i + 1;` | `"p/o1.lain" src/p_o1.lain` | `status=0` + **trap 1004**（落在 `std_types__meta_bytes_equal` 的循环体，当前 `bootstrap.l1` 第 790 行），136 字节，装回 PARSE FAILED 3001 | **不能** |
 | 47 | 循环体含 `if` | `if i > 1 { break outer(i); }` | `"p/l3.lain" src/p_l3.lain` | `status=0` + **trap 1004**，136 字节 | **不能** |
 | 48 | 循环体 = `let`（算子）+ `if`（bootstrap 骨架） | `let m: bool = i > 1; if m { break outer(i); }` | `"p/l5.lain" src/p_l5.lain` | `status=0` + **trap 1004**，136 字节 | **不能** |
 | 49 | 循环体含 `continue LABEL(实参)` | `continue outer(i + 1);` | `"p/l2.lain" src/p_l2.lain` | `status=0` + **trap 1004**，136 字节 | **不能** |
@@ -361,14 +361,14 @@ run ... host_status=13   output bytes=0
 
 所以触发条件是「**循环体里 `let` 的初值含算子，且操作数要靠名字查类型**」——
 查类型那条路（`meta_loop_type_name` / `meta_local_type_name` 一族）把某个文本地址
-取坏了。trap 固定落在 `build/lain0/bootstrap.l1:916`（`std_types__meta_bytes_equal`
-的第一个 `#load`，`%a` 是**节点文本地址**，`std/parse.lain:364` 的
-`meta_node_is_word` 就是它的调用者），`region=118 position=3` 每次都一样。
+取坏了。trap 固定落在 `build/lain0/bootstrap.l1` 第 790 行（`std_types__meta_bytes_equal`
+循环体里的 `#eq[#bits<8>]`，两侧的 `#load` 读的是**节点文本地址**，`std/parse.lain` 的
+`meta_node_is_word` 是这条路的调用者），`region=115 position=3` 每次都一样。
 对照：同样含算子的 `let` 出现在**函数体**里（非循环体）完全正常（#22/#23/#26/#39）。
 
-### 4.5 单元级现状（今天能在现有驱动上跑的四个单元）
+### 4.5 单元级现状（现有驱动上能跑的四个单元）
 
-`python build/probe/selfhost_units.py` 算出的闭包与登记数：
+单元可跑性统计（闭包与登记数）：
 
 | 单元 | 需要的登记条数 | 驱动区段数（3R+3） | 今天能跑 | 备注 |
 | :--- | ---: | ---: | :--- | :--- |
@@ -391,24 +391,20 @@ run ... host_status=13   output bytes=0
 
 ### 4.6 红样例全量（`gate8.sh`，38 个 examples）
 
-```bash
-$ bash build/probe/gate8.sh "$(pwd)" build/probe/selfhost/gate8_self.tsv
-$ diff build/probe/gate8_head.tsv build/probe/selfhost/gate8_self.tsv && echo IDENTICAL
-IDENTICAL
-```
+38 个样例的全量实测：
 
 非零/异常行（其余 26 个 `host_status=0` 且 `trap none`）：
 
 | 样例 | rc | host_status | 产物 | trap | 说明 |
 | :--- | :-: | :--- | ---: | :--- | :--- |
-| `jumps` | 1 | 0 | 165 | `kind=1 status=1004 line=916 col=37 region=118` | 循环族 trap（#53 同源） |
+| `jumps` | 1 | 0 | 165 | `kind=1 status=1004 line=790 col=37 region=115` | 循环族 trap（#53 同源） |
 | `loop` | 1 | 0 | 169 | 同上 | 同上 |
 | `loop_if` | 1 | 0 | 164 | 同上 | 同上 |
 | `loop_local` | 1 | 0 | 398 | 同上 | 同上 |
 | `loop_value` | 1 | 0 | 160 | 同上 | 同上 |
 | `modules_lib` | 0 | 4 | 45 | none | 跨模块函数成员（#10） |
-| `modules_main` | 0 | **11** | **0** | none | 只登记了样例自己，`import("examples::modules_lib")` 找不到 → 11（**文档写 13/171**） |
-| `modules_twin` | 0 | **11** | **0** | none | 同上（**文档写 4/29**） |
+| `modules_main` | 0 | **11** | **0** | none | 只登记了样例自己，`import("examples::modules_lib")` 找不到 → 11 |
+| `modules_twin` | 0 | **11** | **0** | none | 同上 |
 | `refs` | 0 | 5 | 0 | none | `ref`/`mut ref`/`slice` 形参（bootstrap 不用） |
 | `strinline` | 0 | 4 | 231 | none | 函数体字符串字面量（#33） |
 | `symbol_addr` | 0 | 9415 | 54 | none | `symbol_addr` 内建（#19） |
@@ -416,52 +412,34 @@ IDENTICAL
 
 ---
 
-## 5. 与现有文档不一致 / 意外发现
+## 5. 容易混淆的边界
 
-1. **`modules_main` / `modules_twin` 的失败码变了**：`docs/plan-meta-lain.md`《待办》写
-   `modules_main` → `host_status=13` / 171 字节、`modules_twin` → `4` / 29 字节。
-   今天（`gate8.sh` 全量实测）两个都是 **11 / 0 字节**，成因是**登记名不匹配**
-   （样例里写 `import("examples::modules_lib")`，驱动只登记了样例自己），
-   而不是成员形态。成员形态那两条（4 / 悬空调用 2015）要**把被导入模块也登记上**才看得到
-   （§4.2 #9 #10 就是缩小版）。→ 文档里的 13/171、4/29 是另一个口径下的数，
-   和现在这条命令不是同一个实验，引用时要说清。
-2. **`jumps` / `loop*` 不是「写出被截断、host_status=0」**：真相是
-   **`LAINVM_TRAP_LOAD_FAULT`（1004，`line=916`）**，截断只是 trap 的后果。
-   文档把它归到「待查：循环体发射在哪一步停下（写出失败被忽略？输出配额？）」——
-   不是写出失败也不是配额，是 Meta 自己越界读。
-3. **`symbol_addr` 的失败码要看位置**：`docs/04-bootstrap-dialect.md` 的边界矩阵写
-   「顶层 `let a: addr = symbol_addr("t_storage");` → 13」；实测在**目标单元**里
-   （直接降级这份源码）**也是 9415**（#20），而把它放进**被导入模块**、让导出路径去发
-   那条绑定时才是 **13**（0 字节，见 §4.2 补测）。两处不同：13 出自
+1. **`modules_main` / `modules_twin` 报 11**：样例里写 `import("examples::modules_lib")`，
+   驱动只登记了样例自己，import 找不到源码 → 11 / 0 字节。把被导入模块也登记上，
+   才会看到成员形态的 4 与悬空调用的 2015（§4.2 #9 #10 是缩小版）。
+2. **`jumps` / `loop*` 的产物截断来自 trap**：`LAINVM_TRAP_LOAD_FAULT`（1004，落在
+   `std_types__meta_bytes_equal`），写出与配额都正常，是 Meta 自己在循环体里越界读。
+3. **`symbol_addr` 的失败码看位置**：在目标单元里（直接降级这份源码）报 9415；
+   把它放进被导入模块、让导出路径去发那条绑定时报 13（0 字节）。13 出自
    `meta_emit_module_binding` 的「名字在模块表里找不到」，9415 出自
    `meta_scope_require_func` 的「被调名字不是函数」。
-4. **「652 处跨单元调用点」实测是 2482 处**（另有 167 处跨模块取值）。
-   `docs/plan-modules.md:117` 的 652/649 与 `selfhost_census.py` 的口径不同
-   （后者按「`alias.name` 且 alias 由 `let alias = import(…)` 绑定」统计全部出现位置）。
-5. **bootstrap 不用到的构造**（文档里列过、但**不阻塞自举**）：`struct`/`enum` 值层、
-   `ref`/`mut ref`/`slice`、`for`、给局部变量赋值、本单元 `t[i]` 索引、函数体字符串字面量、
-   聚合逃逸。→ 修自举**不需要**碰它们；`docs/plan-meta-lain.md` 阶段 4 的 6 项清单里
-   只有 `symbol_addr`、`u8` 算子、import/成员这三项与自举相关。
-6. **11 是双语义**：除了「import 找不到源码」，`funcs.lain` 的 4 处 11 是
-   **有意**拒绝聚合逃逸（`meta_lower_value_stmt`，对应 `build/probes/escape*.lain`）。
-   排查时先看产物有没有内容就能分开。
-7. **`meta_source_find` 里有一段调试脚手架**（`modules.lain:193-237` 往
-   scratch 2032/2040/2064/2072/2080/2088/2096 写诊断格），它自己会读
-   `scratch + meta_path_buffer()`；#5/#6 的 1004 就落在它读的那条 `#load` 上。
-   同一段注释记着「路径缓冲区可能被语义旁表覆盖」。→ 修 import 层时这块要一起清。
-8. **驱动区段上限是硬约束**：`LAINVM_SPACE_MAX_REGIONS=64` 在 `seed/kernel/` 里
-   （本任务红线内不可改），每份源码占 3 个区段 → 一次最多登记 20 份源码。
-   整份 bootstrap 的闭包有 28 个模块（今天 62 条登记），所以**即使路径解析修好，
-   也还要在驱动侧减区段**（或分组映射），否则 `--unit` 那条「一次编出整份 Meta」
-   的路子在降级侧复现不了。
+4. **跨单元调用 2482 处、跨模块取值 167 处**：按「`alias.name` 且 alias 由
+   `let alias = import(…)` 绑定」统计全部出现位置。
+5. **bootstrap 不使用的构造**：`struct` / `enum` 值层、`ref` / `mut ref` / `slice`、
+   `for`、给局部变量赋值、本单元 `t[i]` 索引、函数体字符串字面量、聚合逃逸。
+   修自举不需要碰它们；与自举相关的只有 `symbol_addr`、`u8` 算子、import 与成员访问。
+6. **11 是双语义**：除了「import 找不到源码」，`funcs.lain` 的 4 处 11 是有意拒绝
+   聚合逃逸（`meta_lower_value_stmt`）。看产物有没有内容就能分开。
+7. **驱动区段上限是硬约束**：`LAINVM_SPACE_MAX_REGIONS=64` 在 `seed/kernel/` 里，
+   每份源码占 3 个区段 → 一次最多登记 20 份源码。整份 bootstrap 的闭包有 28 个模块
+   （62 条登记），路径解析修好后还要在驱动侧减区段或分组映射。
 
 ---
 
 ## 6. 推进路径（按「最快见效」排序）
 
-先给判据的统一口径：每一步的验收都是
-**「`host_status=0` 且 `./build/check_unit.exe <产物>` 输出 `PARSE+VERIFY OK`」**，
-不是 `host_status=0` 就算过（§4.4 的 trap 会假装成功）。
+每一步的验收都是 **「`host_status=0` 且 `./build/check_unit.exe <产物>` 输出
+`PARSE+VERIFY OK`」**。只看 `host_status` 会把 trap 之后截断的产物当成通过（§4.4）。
 
 ### 第 1 步 · mangle 按模块键（Meta 侧）
 
@@ -513,12 +491,12 @@ IDENTICAL
   后者走 `meta.meta_emit_expr` 的算子路。触发条件是「循环体里 `let` 初值含算子、
   操作数要靠名字查类型」，查类型那条路（`meta_loop_type_name` 2378 /
   `meta_local_type_name`）把节点文本地址取坏 → `std_types.meta_bytes_equal`
-  越界读（`bootstrap.l1:916`）。
+  越界读（`bootstrap.l1:790`）。
   排查手段：在这些调用点往 scratch 安全格写标记（照 `meta_source_find` 的
   2064 那套），跑 `g8_op_in_loop_let` 看落在哪一格。
-- **为什么是第 4 步而不是第 1 步**：它是**唯一一条 bug 形态**的缺口
-  （其余都是「没实现」），19 个含 `loop` 的单元几乎全中，修好一次解锁最多；
-  但它不挡 `std/regions`（无循环），所以排在「第一个端到端单元」的公共项之后。
+- **排序理由**：它是**唯一一条 bug 形态**的缺口（其余都是「没实现」），19 个含
+  `loop` 的单元几乎全中，修好一次解锁最多；它不挡 `std/regions`（无循环），所以排在
+  「第一个端到端单元」的公共项之后。
 - **验收**：`g8_op_in_loop_let`、`g7_body_if_break`、`g7_body_continue`、
   `g6_loop_bootstrap`、`g5_loop_assign_i` 五条从
   「trap 1004 + PARSE FAILED 3001」变 `status=0` + `PARSE+VERIFY OK`；
@@ -568,17 +546,16 @@ IDENTICAL
     `bootstrap/std/scope.lain` 的 `meta_scope_add`（445）现在往 import 条目 aux 里存
     「引号位置」，要再存「导入方源码下标」（或导入方路径），
     `meta_scope_scan_root`（661）的 import 分支（611-625）负责填。
-  - 顺带清掉 `meta_source_find` 的调试脚手架（193-237），
-    并把 `meta_path_buffer()`（`scope.lain:174-182`）与语义旁表的边界理清
-    （#5/#6 的 1004 就出在这里）。
+  - 把 `meta_path_buffer()`（`scope.lain:174-182`）与语义旁表的边界理清：路径缓冲区
+    的位置随作用域表增长移动，可能落在不可读的位置或被旁表覆盖。
   - **驱动侧**（`seed/meta_driver.c:176`）：登记名改成「相对源根的路径」
     一份模块一条；同时把「每份源码 3 个区段」压到 1-2 个
     （或按组映射），否则 28 个模块 84+ 个区段过不了 `LAINVM_SPACE_MAX_REGIONS=64`。
 - **为什么排在后面**：它是**整份 28 模块一次跑通**的前提，但单单元端到端可以先用
   「登记名 = 源码里的 spec」绕过（本文所有单元级实测都是这么跑的）。
 - **验收**：`g10_lex_sorder`（登记名 = SOURCE_ORDER 路径）从 11/0 字节
-  变成与 `g10_lex` 相同的 status；`python build/probe/selfhost_units.py`
-  里「今天可跑」从 4 个变成 28 个（登记数 62 → 28，区段数 189 → ≤87）。
+  变成与 `g10_lex` 相同的 status；单元闭包里「今天可跑」从 4 个变成 28 个
+  （登记数 62 → 28，区段数 189 → ≤87）。
 
 ### 第 9 步 · 全量判据与收尾
 
@@ -596,7 +573,7 @@ IDENTICAL
 | 1 mangle | `std/modules.lain`: `meta_build_mangle` / `meta_source_find` / `meta_build_path` | 登记名口径 | 无（lain0 已是目标语义，`Sema.cpp:1047` 是参照） |
 | 2 函数成员 | `std/modules.lain`: `meta_emit_ns_operand` / `meta_emit_ns_call` / `meta_emit_module_exports` | — | 无 |
 | 3 symbol_addr | `std/lex.lain`(关键字) + `std/funcs.lain`(`meta_is_builtin_name`) + `meta.lain`(发射) | — | 无 |
-| 4 循环体 trap | `std/funcs.lain`: `meta_lower_loop_stmts` / `meta_lower_loop_if` / `meta_lower_loop_jump`；`std/parse.lain`: `meta_node_is_word` 的调用点 | — | 无（`bootstrap.l1:916` 只是症状） |
+| 4 循环体 trap | `std/funcs.lain`: `meta_lower_loop_stmts` / `meta_lower_loop_if` / `meta_lower_loop_jump`；`std/parse.lain`: `meta_node_is_word` 的调用点 | — | 无（`bootstrap.l1:790` 只是症状） |
 | 5 u8 算子 | `std/scalars.lain`: `meta_scalar_table` 字节表 | — | 无 |
 | 6 链式比较 | `meta.lain`: `meta_emit_expr` 的算子折叠 | — | 无 |
 | 7 ptr_of | `std/funcs.lain`: `ptr_of` / `addr_of` 发射支 | — | 无 |
@@ -608,35 +585,22 @@ kernel 的区段上限是驱动侧要绕的约束。这也是本任务「只调�
 
 ---
 
-## 7. 附录：复现命令与数据
+## 7. 复现
+
+样例级状态可以这样重跑：
 
 ```bash
-cd C:/Users/jenway/codeFiles/lain-lang
 cmake --build build
-
-# 构造普查 / 单元可跑性 / 77 个探针 / 38 个样例
-python build/probe/selfhost_census.py          # -> build/probe/selfhost/census.tsv
-python build/probe/selfhost_units.py           # -> build/probe/selfhost/units.tsv
-python build/probe/selfhost_run.py             # -> build/probe/selfhost/run_*.tsv（含每条的完整命令）
-bash build/probe/gate8.sh "$(pwd)" build/probe/selfhost/gate8_self.tsv
-
-# 单条：11 的最小复现
-./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
-    "p/missing.lain" build/probe/selfhost/src/p_imp_missing.lain      # host_status=11, 0 字节
-# 单条：登记名换一下就不再是 11
-./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
-    "std/lex.lain" bootstrap/std/lex.lain \
-    "types.lain" bootstrap/std/types.lain "regions.lain" bootstrap/std/regions.lain   # 6 / 1803 字节
-# 单条：循环体 trap
-./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
-    "p/o1.lain" build/probe/selfhost/src/p_o1.lain                    # trap 1004, 136 字节
+python scripts/build_meta_unit.py
+for f in bootstrap/lain/examples/*.lain; do
+  n=$(basename "$f" .lain)
+  ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt "$n.lain" "$f" > "build/meta-$n.log" 2>&1
+  grep -E 'host_status|trap kind|output bytes' "build/meta-$n.log"
+done
 ```
 
-| 文件 | 内容 |
-| :--- | :--- |
-| `build/probe/selfhost/run_all.tsv` | 77 个探针的 tag/组/status/诊断/字节数/trap/装回判定/rc/说明/**完整命令** |
-| `build/probe/selfhost/census.tsv` | 每个单元 × 构造 × 次数 × 首条样例位置 |
-| `build/probe/selfhost/units.tsv` | 每个单元的登记数 / 闭包大小 / 区段数 / 今天可跑 |
-| `build/probe/selfhost/gate8_self.tsv` | 38 个 examples 的全量实测（与 `build/probe/gate8_head.tsv` 逐字节相同） |
-| `build/probe/selfhost/src/*.lain` | 全部探针源码（本文件的样例即它们的内容） |
-| `build/probe/selfhost/*.out` | 各探针的产物（截断的也在，是证据） |
+判据：`host_status=0`、没有 `trap kind` 行、产物过 `lainir_parse` + `lainir_verify`。
+
+§3–§5 的差集数字来自探针矩阵，每个探针是一份最小源码。探针源码与脚本放在未跟踪的
+`build/probe/` 下，已随 build 目录清理；每条探针的登记名、最小源码与实测结果写在上面的
+表里，可以按原样重建。

@@ -41,7 +41,6 @@ target_sources(lain_seed
         include/lain/ir/infer.h
         include/lain/ir/value.h
         include/lain/ir/verify.h
-        include/lain/meta/apply.h
         include/lain/meta/ast_v1.h
         include/lain/meta/expand.h
         include/lain/meta/host.h

@@ -22,9 +22,9 @@ Lain 的失败报告分两套机制，共用同一片四位十进制号码空间
 | 9100-9199 | TCB admit 与重绑 | lain/vm/tcb.h |
 | 9200-9299 | 后端 | lain/backend/emit.h |
 | 9300-9399 | 编译期 apply 与其宿主 | lain/meta/apply.h |
-| 9400-9499 | AstOut 与 Meta 库共享 | lain/meta/ast_v1.h、bootstrap/std/*.l1 |
+| 9400-9499 | AstOut 与 Meta 库共享 | lain/meta/ast_v1.h、bootstrap/std/*.lain |
 
-段边界的登记表在 seed/include/lain/ir/codes.h（每个段一对 BASE/LIMIT 常量）；
+段边界的登记表在 seed/kernel/include/lain/ir/codes.h（每个段一对 BASE/LIMIT 常量）；
 每个有正式码表的模块都用 _Static_assert 把自己的码钉在段内：
 trap.h、engine.h、tcb.h、verify.h、parse.h、emit.h、apply.h、ast_v1.h。
 
@@ -36,5 +36,5 @@ trap.h、engine.h、tcb.h、verify.h、parse.h、emit.h、apply.h、ast_v1.h。
 
 ## 跨语言契约
 
-9300-9399 与 9400-9499 同时被 C 侧（seed/）和 Meta 侧（bootstrap/std 的 .l1）
+9300-9399 与 9400-9499 同时被 C 侧（seed/）和 Meta 侧（bootstrap/std 的 .lain）
 读取：只能新增，不能改义，也不能挪号。

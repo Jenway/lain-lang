@@ -1,11 +1,7 @@
-// 识别 pass —— 走一遍树，把「这个节点开始了什么形状」写进节点的种类格。
-// 由 bootstrapl1/std/recognize.l1 翻译成 Lain 表面语法。
+// 模块：形状识别 pass。走一遍树，把「这个节点开始了什么形状」写进节点的种类格。
 //
-// 为什么要有这一层：在这之前，每个降级点各自按**位置的字节**重新认形状。
-// `meta_emit_value` 看值的头一个字节判数字/构造，又看第一个标识符之后的字节判
-// `{` / `.` / `(`；`meta_emit_numeric` 看值后面第一个非空白字节是不是算子。同一条
-// 形状规则因此在三处各写一遍，改一处漏两处 —— `1 + 2 + 3` 只发 `#add(1,2)` 就是
-// 这么漏的。
+// 为什么要有这一层：每个降级点各自按**位置的字节**重新认形状的话，同一条形状规则
+// 会在多处各写一遍，改一处漏两处 —— `1 + 2 + 3` 只发 `#add(1,2)` 就是这么漏的。
 //
 // 这一遍算完写进种类格，之后降级只读它。**判据只用形状**（自己/下一个兄弟的字节、
 // 兄弟是不是组），不看类型 —— 类型是第 3 步的事。所以 `bits<32> { … }` 里的 `>`
@@ -30,33 +26,15 @@
 // 「自己是算子」排在调用前面，是因为算子符号后面不可能跟一个组；反过来 `f(x)` 的
 // `f` 不是算子，所以两条不会争。
 //
-// 翻译说明（表面语言的值 if 支里不能再写语句 if / 值 if，且 bool 值 if 的 else 支
-// 不能是裸 0）：
-//   * 旧 IR 里「值 if 的结果直接喂给 #return」的地方（meta_node_at / meta_form_at /
-//     meta_cursor_of_at / meta_next_at / meta_value_has_op / meta_rec_is_op /
-//     meta_rec_is_dot）逐条改写成平坦守卫，命中即 return，语义逐条对应。
-//   * meta_recognize_all 的值 if 结果喂给 break/continue，同样改写成平坦守卫
-//     （命中即 break / 继续）。这两条写法在 bootstrap/std/handlers/let.lain 与
-//     bootstrap/std/declarations.lain 里是既有写法。
-//   * meta_recognize_word 的 %form 是十几层嵌套值 if 每层只 #yield 一个常量，且所有
-//     条件都在链之前就算好、没有副作用，这里按既有写法改写成一次性选择循环
-//     （见 bootstrap/std/expand.lain 的 pick / pick_root / pick_st），命中即 break。
-//   * 旧 IR 里 %context 的值 if 嵌套、内层局部重名 %stmt_context（遮蔽外层同名局部），
-//     这里把内层改名 stmt_ctx 并提前算好；条件都是无副作用的纯比较，等价。
-//   * u8 与整数常量比较一律先 `as u32`（旧 IR 是 #eq[#bits<8>]）。
-//   * 本单元没有静态数据块，也没有跨单元数据符号，所以不取 symbol_addr。
+// u8 没有算子，与整数常量比较一律先 `as u32`。跨单元引用一律写 `别名.名字`。
 
-// 模块：形状识别 pass。跨单元引用一律写 `别名.名字`。
 let std_declarations = import("declarations");
 let std_lex = import("lex");
 let std_parse = import("parse");
 let std_syntax = import("syntax");
 let std_types = import("types");
 
-// 跨单元 / Host 依赖的规范签名（由 bootstrapl1/std/recognize.l1 的调用点与各定义单元
-// 核对得到）。旧 IR 的宽度 #bits<N> 已归一为表面语言的标量类型；参数名 ref / slice 是
-// 表面语言保留字，遇到时改名（链接名不变）——本单元这批依赖里没有这两个名字，
-// ast_text_start 的第一个参数在定义单元里本来就叫 ref_value。
+// 宿主能力。
 extern lain_meta_ast_expansion_id(node: u64) -> u64 = lain_meta_ast_expansion_id;
 extern lain_meta_scratch_data() -> addr = lain_meta_scratch_data;
 extern lain_meta_source_data(source: u64) -> addr = lain_meta_source_data;
@@ -101,7 +79,7 @@ func meta_recognize_group_context(parent: u64, index: u64, ambient: u64) -> u64 
   return context;
 }
 
-// 给一个词节点算形状，写进**语义旁表**（不再往 AstIn 的种类格写）。
+// 给一个词节点算形状，写进**语义旁表**。
 //
 // 参数是一个游标：(父组引用, child_index)。形状里要用到「下一个兄弟」，而规范禁止
 // `node.next` —— 下一个兄弟由父组 + index+1 给出，所以游标是唯一能让这段逻辑成立
@@ -112,7 +90,7 @@ func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient:
   let n: u64 = std_parse.meta_node_len(i);
   let hi: u64 = at + n;
 
-  // 语言关键字由语法环境拥有；recognize 只把处理器类别映射到旧旁表 form。
+  // 语言关键字由语法环境拥有；recognize 只把处理器类别映射到旁表 form。
   let decl_context: bool = ambient == 1;
   let stmt_context: bool = ambient == 2;
   let decl_match: u64 = if decl_context { std_syntax.meta_syntax_match(i, 1, 0, 1) } else { 0 };
@@ -129,9 +107,8 @@ func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient:
   let self_b: u8 = std_lex.bs_byte_at(base, at, len);
   let self_digit: bool = std_lex.bs_is_digit(self_b);
 
-  // 下一个兄弟决定「这里开始的是什么」。它是**父组的下一个孩子**；没有下一个
-  //（越过末尾）时下面每条判断都给假——旧代码靠「无」节点的种类达到同样效果，
-  // 现在靠显式范围判断，不再伪造一个空节点。
+  // 下一个兄弟决定「这里开始的是什么」。它是**父组的下一个孩子**；越过末尾时
+  // 下面每条判断都给假。
   let count: u64 = std_parse.ast_child_count(parent);
   let nx_i: u64 = index + 1;
   let has_nx: bool = nx_i < count;
@@ -172,9 +149,7 @@ func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient:
   let self_b0w: u32 = self_b0 as u32;
   let bareish: bool = self_b0w == 63;
 
-  // 旧 IR 这里是十几层嵌套值 if，每层只 #yield 一个常量；所有条件都在上面算好、
-  // 没有副作用，所以按优先级改写成一次性选择循环（命中即 break），逐条对应：
-  // 3 / 8 / 11 / 9 / 5 / 13 / 12 / 10 / 6 / 4 / 7 / 1。
+  // 按优先级取第一个命中的形状（命中即 break）。
   let form: u64 = loop pick_form(t: u64 = 0) {
     if is_decl { break pick_form(3); }
     if is_ret { break pick_form(8); }
@@ -193,12 +168,9 @@ func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient:
   let decl_binding: u64 = decl_match >> 32;
   let stmt_binding: u64 = stmt_match >> 32;
   let binding: u64 = if decl_handler != 0 { decl_binding } else { stmt_binding };
-  // 旧 IR 内层值 if 的局部重名 %stmt_context（遮蔽第 96 行那个同名局部），这里改名
-  // stmt_ctx；两条条件都是纯比较，提前算等价。
   let stmt_ctx: u64 = if stmt_handler != 0 { 2 } else { 0 };
   let context: u64 = if decl_handler != 0 { 1 } else { stmt_ctx };
-  // Host 的事务旁车按 AstOut 节点槽保存处理器调用 ID。AstIn 不需要这项输出能力，
-  // 第一阶段只读消费者因此仍能运行。
+  // Host 的事务旁车按 AstOut 节点槽保存处理器调用 ID。AstIn 没有这项输出能力。
   let segment: u64 = i >> 48;
   let is_out: bool = segment == 3;
   let expansion: u64 = if is_out { lain_meta_ast_expansion_id(i) } else { 0 };
@@ -209,9 +181,6 @@ func meta_recognize_word(base: addr, len: u64, parent: u64, index: u64, ambient:
 // 走一个组的全部孩子：组先递归进去，词算形状。
 // **没有兄弟链**：位置由 (父组, 下标) 给出，所以组的孩子和它的后继都不需要节点
 // 自己携带。形状写进语义旁表。
-//
-// 旧 IR 的 %r 值 if 结果直接喂给 `#break s(%r)` / `#continue`，且命中分支里有
-// `#return %rec`，所以按平坦守卫改写：每个分支命中即 break / return，末尾 continue。
 func meta_recognize_all(base: addr, len: u64, group: u64, ambient: u64) -> u32 {
   let count: u64 = std_parse.ast_child_count(group);
   let st: u32 = loop s(i: u64 = 0) {
@@ -246,10 +215,6 @@ func meta_recognize_all(base: addr, len: u64, group: u64, ambient: u64) -> u32 {
 // 一份源码识别一遍。旁表是**单张**的，键是 (父组, 下标)：重复识别同一份源码是幂等的
 //（同键覆盖），不同源码的条目也能共存（父组引用里带段号，天然不冲突）。
 func meta_recognize_source(source: u64) -> u32 {
-  let seg: u64 = std_parse.ast_segment_of_source(source);
-  let scratch: addr = lain_meta_scratch_data();
-  let segw: u32 = std_types.meta_cell_put(scratch + 1524, seg);
-  let secw: u32 = std_types.meta_cell_put(scratch + 1532, 0);
   let base: addr = lain_meta_source_data(source);
   let len: u64 = lain_meta_source_length(source);
   let root: u64 = std_parse.meta_root_of(source);
@@ -259,12 +224,10 @@ func meta_recognize_source(source: u64) -> u32 {
     0
   } else {
     // **不要清表**：单张旁表 + 「谁在用就重新识别谁」的组合下，清表会把上一层已经
-    // 建好的条目**全部抹掉**。实测：setup 扫完上一层后表里有 8 条，但降级前重新
-    // 识别主源码时清表，最终只剩主源码的 2 条。
+    // 建好的条目**全部抹掉**。
     // **根不进旁表**：它的形状属于「顶层形式序列」这个位置，而根自己不是任何父组的
-    // 孩子 —— 没有游标指向它，也就没有键可写。旧实现记 (root, 0) 是为了让
-    // `meta_node_next(root)` 回 NONE，那条路已经不存在了；真写了反而会与
-    // 「root 的第 0 个孩子」这条条目**撞键**（同一个 (root, 0)）。
+    // 孩子 —— 没有游标指向它，也就没有键可写；写 (root, 0) 会与
+    // 「root 的第 0 个孩子」这条条目**撞键**。
     meta_recognize_all(base, len, root, 1)
   };
   return st;
@@ -280,9 +243,6 @@ func meta_recognize_source(source: u64) -> u32 {
 // 形状就成了「无」，整段被当成常量走错路。
 //
 // 遍历只走「当前正在看的组的孩子」，不许跨组：位置由父组与下标给出，返回的也是这两样。
-//
-// 旧 IR 的 %sub 值 if 结果喂给 continue / break，改成平坦守卫：命中即 break，
-// 递归没找到（或不是组）就落到末尾的 continue。
 func meta_cursor_at(group: u64, at: u64) -> u64 {
   let count: u64 = std_parse.ast_child_count(group);
   let r: u64 = loop s(i: u64 = 0) {
@@ -320,9 +280,6 @@ func meta_cursor_parent() -> u64 {
 
 // 从 %at 起头的那个节点的**引用**（找不到回空引用 0）。它由命中位置的父组与下标
 // 算出来 —— 「位置 -> 节点」是合法方向（搜索），被禁止的是「节点 -> 唯一父组」。
-//
-// 旧 IR 是值 if 套值 if，结果直接喂给 #return，这里改写成平坦守卫（命中即 return）：
-// 先算 root，再算游标，最后才取父组那一格 —— 求值顺序与副作用次序都不变。
 func meta_node_at(base: addr, at: u64) -> u64 {
   let root: u64 = std_parse.meta_root_of_source(base);
   let missing: bool = root == 0;
@@ -345,7 +302,7 @@ func meta_form_at(base: addr, at: u64) -> u64 {
   let none: bool = i == 0xFFFFFFFFFFFFFFFF;
   if none { return 0xFFFFFFFFFFFFFFFF; }
   let parent: u64 = meta_cursor_parent();
-  let f: u64 = std_parse.meta_sem_lookup(parent, i);
+  let f: u64 = std_parse.meta_node_form(parent, i);
   return f;
 }
 
@@ -385,7 +342,7 @@ func meta_seq_has_op(base: addr, len: u64, group: u64, i: u64) -> bool {
     let more: bool = j < count;
     if more == 0 { break s(0); }
     let c: u64 = std_parse.ast_child(group, j);
-    let k: u64 = std_parse.meta_sem_lookup(group, j);
+    let k: u64 = std_parse.meta_node_form(group, j);
     let is_op: bool = k == 9;
     if is_op { break s(1); }
     let st: u64 = std_parse.ast_text_start(c);
@@ -400,15 +357,13 @@ func meta_seq_has_op(base: addr, len: u64, group: u64, i: u64) -> bool {
 
 // 从 %at 起头的那个节点所在的兄弟序列里有没有算子形状（9）？走到 `;` 为止。
 //
-// 为什么必须有这个：形状 5/6/10 说的是「这里开始一次调用 / 字段访问 / 构造」，
-// **不是**「整个值就是它」。`f(1) + 2` 里 `f` 的形状也是 5，但值是一条链。调用 /
-// 字段 / 构造那三条发射器只发那个构造本身，后面剩下的会被**悄悄丢掉** ——
-// 真出过：`let main: i32 = f(1) + 2;` 发成 `#return #call f(1)`，验证通过，
-// 算出来 2 而不是 4。所以走那三条之前先问这个，有算子就报错，不发。
+// 形状 5/6/10 表示「这里开始一次调用 / 字段访问 / 构造」，而整个值可能只是它的
+// 一部分。`f(1) + 2` 里 `f` 的形状也是 5，但值是一条链；调用 / 字段 / 构造那三条
+// 发射器只发那个构造本身，后面剩下的会被**悄悄丢掉**。所以走那三条之前先问这个，
+// 有算子就报错，不发。
 //
 // `;` 是单个词、字节 59。组里面的 `;` 不是兄弟，所以走不到。
 //
-// 旧 IR 是值 if 套值 if，结果直接喂给 #return，这里改写成平坦守卫（命中即 return）：
 // 「根都没找到」和「查不到该节点」都按「可能有算子」处理（回 1）。
 func meta_value_has_op(base: addr, len: u64, at: u64) -> bool {
   let root: u64 = std_parse.meta_root_of_source(base);
@@ -429,9 +384,7 @@ func meta_value_has_op(base: addr, len: u64, at: u64) -> bool {
 // 返回值是**三态**：1 = 有算子，0 = 找到了、序列里没有算子，0xFFFFFFFFFFFFFFFF =
 // 这棵子树里没有 %at 那个节点。三态是必需的：递归找节点时「没找到」和「找到但没
 // 算子」必须分得开 —— 都回 0 的话，只要目标在**嵌套的组**里（函数体就是一层
-// 花括号组），外层循环就会把递归答案丢掉、一路扫到组尾回 0。实测后果：
-// `func f() -> i32 { return g(1) + 2; }` 发成 `#return #call g(1)`，
-// `+ 2` 被静默丢掉，验证器不报，算出来是 1 而不是 3。
+// 花括号组），外层循环就会把递归答案丢掉、一路扫到组尾回 0。
 func meta_seq_has_op_at(group: u64, base: addr, len: u64, at: u64) -> u64 {
   let count: u64 = std_parse.ast_child_count(group);
   let r: u64 = loop s(i: u64 = 0) {

@@ -28,7 +28,7 @@
  *
  * 退出码：0 = 跑到底（或 `--expect-status` 满足）；1 = 编译/执行失败；2 = 用法或 IO。
  *
- * 装配顺序是有约束的，见 seed/include/lain/meta/host.h：
+ * 装配顺序是有约束的，见 seed/kernel/include/lain/meta/host.h：
  *   配额 → enable_ast_out → add_source → register → attach_space → 映射 → admit。
  * 源码文本、逻辑路径、AstIn、AstOut、暂存区都以裸地址交给 Meta，驱动必须逐块显式
  * 授权；字符串的可读长度含结尾 NUL。
