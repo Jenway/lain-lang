@@ -74,6 +74,7 @@ constexpr Punct1Entry kPunct1[] = {
     {'-', Tok::Minus},    {'*', Tok::Star},     {'/', Tok::Slash},
     {'%', Tok::Percent},  {'<', Tok::Lt},       {'>', Tok::Gt},
     {'&', Tok::Amp},      {'|', Tok::Pipe},     {'^', Tok::Caret},
+    {'@', Tok::At},
 };
 
 const char *keywordSpelling(Tok kind) {
@@ -286,6 +287,7 @@ const char *tokName(Tok t) {
   case Tok::Amp: return "&";
   case Tok::Pipe: return "|";
   case Tok::Caret: return "^";
+  case Tok::At: return "@";
 
   case Tok::KwFunc: case Tok::KwLet: case Tok::KwReturn: case Tok::KwIf:
   case Tok::KwElse: case Tok::KwLoop: case Tok::KwFor: case Tok::KwWhile:

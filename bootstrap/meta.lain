@@ -1,4 +1,4 @@
-// 模块：Meta 本体。三个入口（lain_std_abi_version / lain_std_initialize / lain_std_lower）在清单里标成根名、发出平坦名字；其余跨单元引用一律写 `别名.名字`。
+// 模块：Meta 本体。三个入口（lain_std_abi_version / lain_std_initialize / lain_std_lower）用 `@root` 标注、发出平坦名字（宿主按平坦字符串进入）；其余跨单元引用一律写 `别名.名字`。
 let std_declarations = import("std/declarations");
 let std_emit = import("std/emit");
 let std_eval = import("std/eval");
@@ -26,14 +26,17 @@ extern lain_meta_scratch_report(peak: u64) -> u64 = lain_meta_scratch_report;
 extern lain_meta_source_data(index: u64) -> addr = lain_meta_source_data;
 extern lain_meta_source_length(index: u64) -> u64 = lain_meta_source_length;
 
+@root
 func lain_std_abi_version() -> u64 {
   return 9;
 }
 
+@root
 func lain_std_initialize() -> u32 {
   return 0;
 }
 
+@root
 func lain_std_lower(source: u64) -> u32 {
   let has_tree: bool = std_parse.meta_source_has_tree(source);
   let no_tree: bool = has_tree == 0;
@@ -563,10 +566,13 @@ func meta_emit_call(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64,
   if abad {
     return ast;
   }
-  // `  #return #call <callee>(`
+  // `  #return #call <callee>(`；被调名是本单元的 func 时发 `<键>__<名字>`，
+  // extern 保持平坦（见 std/scope.lain 的 meta_callee_symbol）。
   let w6: u32 = std_lainir.lainir_ret_call_head_write();
   let callee_at: addr = base + callee_lo;
-  let w7: u32 = std_lainir.lainir_write(callee_at, callee_len);
+  let cpbuf: addr = std_scope.meta_path_buf();
+  let csym: u64 = std_scope.meta_callee_symbol(cpbuf, callee_at, callee_len);
+  let w7: u32 = std_lainir.lainir_write(cpbuf, csym);
   let w8: u32 = std_lainir.lainir_open_paren_write();
   let wst: u32 = std_funcs.meta_args_write(base, len);
   let wbad: bool = wst != 0;
@@ -866,8 +872,9 @@ func meta_emit_call_temp(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
   let w3: u32 = std_lainir.lainir_result_sep_write();
   let w4: u32 = std_lainir.lainir_call_word_write();
   let c_at: addr = base + callee_lo;
-  let c_len: u64 = callee_hi - callee_lo;
-  let w5: u32 = std_lainir.lainir_write(c_at, c_len);
+  let cpbuf: addr = std_scope.meta_path_buf();
+  let c_len: u64 = std_scope.meta_callee_symbol(cpbuf, c_at, callee_hi - callee_lo);
+  let w5: u32 = std_lainir.lainir_write(cpbuf, c_len);
   let w6: u32 = std_lainir.lainir_open_paren_write();
   let wst: u32 = std_funcs.meta_args_write(base, len);
   let wbad: bool = wst != 0;

@@ -183,6 +183,83 @@ func meta_path_buffer() -> u64 {
   return at;
 }
 
+// --- 单元自己的顶层符号名（模块键前缀）-------------------------------------
+//
+// lain0 对**模块自己**的顶层 func 与顶层 let 都发 `<模块键>__<名字>`，数据符号是
+// `<键>__<名字>_storage`；模块键 = 该模块**解析到的路径**去 `.lain`、`/`→`_`（见
+// std/modules.lain 的 meta_build_mangle）。宿主 extern 例外：保持平坦名（宿主按
+// `link_name` 找它），所以调用点要能分辨「本单元的 func」与「extern」。
+//
+// 被降级的这份源码（当前单元）的索引就是作用域表的「当前源码」格。
+
+// 路径 / mangle 缓冲区的**地址**（scratch 基址 + 偏移）。渲染名字用它。
+func meta_path_buf() -> addr {
+  let scratch: addr = lain_meta_scratch_data();
+  let off: u64 = meta_path_buffer();
+  let p: addr = scratch + off;
+  return p;
+}
+
+// buf[at..] = src[0..n]，返回 at+n。
+func meta_buf_copy(out: addr, at: u64, src: addr, n: u64) -> u64 {
+  let end: u64 = loop cp(i: u64 = 0) {
+    let more: bool = i < n;
+    if more {
+      let b: u8 = load(src + i);
+      let head: addr = out + at;
+      let p: addr = head + i;
+      store(p, b);
+      continue cp(i + 1);
+    } else {
+      break cp(at + n);
+    }
+  };
+  return end;
+}
+
+// 这条声明是 `extern` 吗？（声明节点的第一个词就是 `extern`。）
+func meta_scope_is_extern(index: u64) -> bool {
+  let node: u64 = meta_scope_payload(index);
+  let src: u64 = meta_scope_word(index, 0);
+  let base: addr = lain_meta_source_data(src);
+  let kw: addr = std_lex.meta_kw_extern;
+  let hit: bool = std_parse.meta_node_is_word(node, base, kw, 6);
+  return hit;
+}
+
+// `<当前单元键>__<名字>` 渲染进 buf（名字字节 = 从 at 起 len 个），返回总长度。
+func meta_unit_symbol(buf: addr, at: addr, len: u64) -> u64 {
+  let scratch: addr = lain_meta_scratch_data();
+  let idx: u64 = std_types.meta_cell_get(scratch + 104);
+  let k: u64 = std_modules.meta_module_key(idx, buf);
+  let u1: u64 = k + 1;
+  let us: u8 = 95;
+  let p1: addr = buf + k;
+  store(p1, us);
+  let u2: u64 = u1 + 1;
+  let p2: addr = buf + u1;
+  store(p2, us);
+  let total: u64 = meta_buf_copy(buf, u2, at, len);
+  return total;
+}
+
+// 调用点的被调名渲染进 buf，返回长度：解析到**本单元的 func**（不是 extern）就发
+// `<键>__<名字>`；extern / 找不到 → 原样搬。extern 保持平坦是契约。
+func meta_callee_symbol(buf: addr, at: addr, len: u64) -> u64 {
+  let i: u64 = meta_scope_find(at, len);
+  let found: bool = i != 0xFFFFFFFFFFFFFFFF;
+  let ex: bool = if found { meta_scope_is_extern(i) } else { 1 };
+  let total: u64 = loop pick(t: u64 = 0) {
+    if ex {
+      let raw: u64 = meta_buf_copy(buf, 0, at, len);
+      break pick(raw);
+    }
+    let sym: u64 = meta_unit_symbol(buf, at, len);
+    break pick(sym);
+  };
+  return total;
+}
+
 // --- 暂存区分配器（碰撞式）--------------------------------------------------
 
 func meta_bump_word(off: u64) -> u64 {

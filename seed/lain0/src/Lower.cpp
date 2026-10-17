@@ -8,6 +8,11 @@
 // lainir_module（模块名取根模块键）。每进一个模块换一次 ModuleContext
 // 与 SemaResult —— 顶层 func / 静态 let 发出的名字是 `<模块键>__<名字>`，
 // 宿主 extern 保持平坦。
+//
+// 拆分产出（`--split`，docs/proposal-modules-v2.md §二）走 runModule：调用方
+// 为**每个模块**新建一个 Lowerer（配套一个新 L1Builder），runModule 只降级那一个
+// 模块并建出只含它的 lainir_module。于是每份单元的文本只由该模块自己的源码决定 ——
+// 与降级顺序、与别的模块都无关（临时值编号也随实例从 0 起）。
 
 #include "lain0/Lower.hpp"
 
@@ -29,18 +34,7 @@ const L1Module *Lowerer::run(const Program &prog) {
 
   // §3.4：清单顺序在前（产物确定性的来源），依赖图里新出现的模块接在后面。
   for (const ModuleUnit *u : prog.lowerOrder()) {
-    if (u == nullptr || u->ast == nullptr) return nullptr;
-    // 换模块上下文：类型键、符号名、成员表全部跟着换。
-    ctx_ = u->ctx;
-    sema_ = &u->sema;
-    bindings_.clear();
-    loopParams_.clear();
-    for (const ast::Decl *d : u->ast->decls) {
-      // import 的加载与解析是 Program 的事，降级这里不再重复。
-      if (d->kind == ast::DeclKind::Import) continue;
-      if (!lowerDecl(d)) return nullptr;
-    }
-    if (diags_->hasErrors()) return nullptr;
+    if (!lowerOne(u)) return nullptr;
   }
 
   const ModuleUnit *root = prog.root();
@@ -53,6 +47,37 @@ const L1Module *Lowerer::run(const Program &prog) {
                        static_cast<uint32_t>(data_.size()),
                        subs_.empty() ? nullptr : subs_.data(),
                        static_cast<uint32_t>(subs_.size()));
+}
+
+// 拆分产出（`--split`）：一个模块一份。每份单元由调用方新建 Lowerer（新 builder）
+// 与它配套，所以这里不清 data_/subs_，也不重置计数器 —— 每个实例只装一个模块，
+// 编号天然从 0 起。
+const L1Module *Lowerer::runModule(const ModuleUnit *u) {
+  if (u == nullptr || u->ast == nullptr) return nullptr;
+  if (!lowerOne(u)) return nullptr;
+  const std::string_view moduleName = !u->key.empty()
+                                          ? std::string_view{u->key}
+                                          : std::string_view{opts_.moduleName};
+  return lainir_module(builder_, intern(moduleName),
+                       data_.empty() ? nullptr : data_.data(),
+                       static_cast<uint32_t>(data_.size()),
+                       subs_.empty() ? nullptr : subs_.data(),
+                       static_cast<uint32_t>(subs_.size()));
+}
+
+// 一个模块：换模块上下文（类型键、符号名、成员表），清绑定表，逐条降级顶层声明。
+bool Lowerer::lowerOne(const ModuleUnit *u) {
+  if (u == nullptr || u->ast == nullptr) return false;
+  ctx_ = u->ctx;
+  sema_ = &u->sema;
+  bindings_.clear();
+  loopParams_.clear();
+  for (const ast::Decl *d : u->ast->decls) {
+    // import 的加载与解析是 Program 的事，降级这里不再重复。
+    if (d->kind == ast::DeclKind::Import) continue;
+    if (!lowerDecl(d)) return false;
+  }
+  return !diags_->hasErrors();
 }
 
 const char *Lowerer::symbolFor(std::string_view srcName) const {

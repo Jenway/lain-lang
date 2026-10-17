@@ -31,8 +31,9 @@ func meta_emit_ret_call(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, 
   let buf: addr = std_lainir.lainir_text_buffer;
   let alen: u64 = meta_args_render(base, len, buf);
   let c_at: addr = base + callee_lo;
-  let c_len: u64 = callee_len + 0;
-  let w: u32 = std_lainir.lainir_ret_call(c_at, c_len, buf, alen);
+  let pbuf: addr = std_scope.meta_path_buf();
+  let c_len: u64 = std_scope.meta_callee_symbol(pbuf, c_at, callee_len);
+  let w: u32 = std_lainir.lainir_ret_call(pbuf, c_len, buf, alen);
   return 0;
 }
 
@@ -1839,7 +1840,7 @@ func meta_lower_func_inner(base: addr, len: u64,
   // 限定名（M.Point）跨多个 token：函数体的返回类型窗口也要扫到名字末尾
   let r_hi: u64 = std_lex.bs_skip_qualified(base, r_lo, len);
   let hdr: u32 = meta_emit_proc_header(base, len, name_node, params,
-                                        ret_node);
+                                        ret_node, 1);
   let hbad: bool = hdr != 0;
   if hbad { return hdr; }
   let w6: u32 = std_lainir.lainir_open_body();
@@ -2448,8 +2449,9 @@ func meta_emit_binding_call(base: addr, len: u64, kind: u64, width: u64, name_lo
   let n_len: u64 = name_hi - name_lo;
   let nlen2: u64 = std_lainir.lainir_buf_bytes(nbuf, pct, n_at, n_len);
   let c_at: addr = base + callee_lo;
-  let c_len: u64 = callee_len + 0;
-  let w: u32 = std_lainir.lainir_call_named(nbuf, nlen2, c_at, c_len, buf, alen);
+  let pbuf: addr = std_scope.meta_path_buf();
+  let c_len: u64 = std_scope.meta_callee_symbol(pbuf, c_at, callee_len);
+  let w: u32 = std_lainir.lainir_call_named(nbuf, nlen2, pbuf, c_len, buf, alen);
   return 0;
 }
 
@@ -3014,7 +3016,7 @@ func meta_local_type_put(n_lo: u64, n_hi: u64, t_lo: u64, t_hi: u64) -> u32 {
   return 0;
 }
 
-func meta_emit_proc_header(base: addr, len: u64, name_node: u64, params: u64, ret_node: u64) -> u32 {
+func meta_emit_proc_header(base: addr, len: u64, name_node: u64, params: u64, ret_node: u64, prefixed: bool) -> u32 {
   let r_lo: u64 = std_parse.meta_node_start(ret_node);
   // 限定名（M.Point）跨多个 token，节点只覆盖第一段，所以按字节扫到名字末尾
   let r_hi: u64 = std_lex.bs_skip_qualified(base, r_lo, len);
@@ -3089,6 +3091,17 @@ func meta_emit_proc_header(base: addr, len: u64, name_node: u64, params: u64, re
   let n_lo: u64 = std_parse.meta_node_start(name_node);
   let n_n: u64 = std_parse.meta_node_len(name_node);
   let n_at: addr = base + n_lo;
-  let w5: u32 = std_lainir.lainir_proc_head_full(n_at, n_n, buf, plen, kind, width);
+  // 顶层 func 发 `<模块键>__<名字>`（prefixed = 1）；宿主 extern 保持平坦名
+  // （prefixed = 0 —— 它们按 `= link_name` 找，与模块键无关）。
+  let w5: u32 = loop pick_name(t: u32 = 0) {
+    if prefixed {
+      let pbuf: addr = std_scope.meta_path_buf();
+      let sym: u64 = std_scope.meta_unit_symbol(pbuf, n_at, n_n);
+      let w: u32 = std_lainir.lainir_proc_head_full(pbuf, sym, buf, plen, kind, width);
+      break pick_name(w);
+    }
+    let w2: u32 = std_lainir.lainir_proc_head_full(n_at, n_n, buf, plen, kind, width);
+    break pick_name(w2);
+  };
   return 0;
 }

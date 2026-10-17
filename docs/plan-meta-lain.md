@@ -312,10 +312,14 @@ Meta 由 `SOURCE_ORDER` 中 **28 个文件 + `meta.l1`（共 29 个）**构成�
 把 Lain 写的 Meta 编出的 LAINIR 装进 LainVM，喂它一份源码，产出 canonical LAINIR：
 
 ```bash
-python scripts/build_meta_unit.py      # 源码 -> 单份 LAINIR 单元 + 驱动要的清单
-./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
+python scripts/build_meta_unit.py      # 入口 -> 每模块一份 LAINIR（28 份，文件名 = 模块键）
+./build/lain-meta.exe --units-dir build/lain0/units/ \
     examples/arith.lain bootstrap/lain/examples/arith.lain
 ```
+
+（步 3 之前这两行写的是「单份 LAINIR 单元 + 驱动要的清单」与
+`--unit build/lain0/bootstrap_unit.txt`；那份清单与 `bootstrap/SOURCE_ORDER` 一起删除，
+现在的口径见 `docs/proposal-modules-v2.md` §六 步 3。）
 
 `examples/arith.lain` 实测：`verify subroutines=869 data=215`、`image ok`、
 `run slice=2 rounds=1 steps=46407 host_status=0`、`region grants=2`、`output bytes=74`，
@@ -484,7 +488,9 @@ Meta 跑完(host_status=0): 29/34      ← 旧判据
 ## 参考
 
 - `docs/04-bootstrap-dialect.md`（旧 bootstrap 方言说明；其中引用的 `lainir_f*.l1` 探针已随档案删除，见 git 历史）
-- `bootstrap/SOURCE_ORDER`（**模块清单**：每行 `<相对路径> [<根名> …]`，路径省略 `.lain`，
-  顺序即降级顺序；`lain0 --unit bootstrap/SOURCE_ORDER` 一次编出整份 Meta，驱动要的 LAINIR
-  单元清单由 `scripts/build_meta_unit.py` 生成）
+- **（步 3 起）模块集合与产出**：入口 `bootstrap/meta.lain` 顺 `import` 求闭包（实测 28 个模块），
+  `lain0 --entry bootstrap/meta.lain --split build/lain0/units/` 出**每模块一份** LAINIR
+  （文件名 = 模块键），驱动 `--units-dir build/lain0/units/` 按文件名排序装载。**没有任何清单**
+  （那份 `bootstrap/SOURCE_ORDER` 已在步 3 删除）；平坦根名由声明上的 `@root` 决定。
+  完整口径见 `docs/proposal-modules-v2.md` 与 `docs/development.md`。
 - 手写 LAINIR 档案 `bootstrapl1/` 已删除，最后一个完整版本见 git `5fbe5d5~1`

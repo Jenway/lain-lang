@@ -275,6 +275,11 @@ struct Decl : Node {
   DeclKind kind;
   Span span;
   std::string_view name{};
+  // `@root`（docs/proposal-modules-v2.md §四）：带标注的顶层声明发平坦名
+  // （不加 `<模块键>__` 前缀），宿主按平坦字符串进入。rootSpan 是 `@root`
+  // 本身的 span，防撞诊断报到标注那一行而不是整条声明。
+  bool isRoot = false;
+  Span rootSpan{};
 };
 
 struct ParamDecl {

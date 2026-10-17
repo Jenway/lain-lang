@@ -1039,6 +1039,11 @@ ModuleUnit *Program::addUnit(const std::string &path, SourceMgr &src,
   if (u.ast == nullptr || diags.hasErrors()) return nullptr;
   u.ctx.key = key;
   u.ctx.sourceRoot = sourceRoot_;
+  // §四：`@root` 标注的顶层声明发出平坦名。导出名是**声明自己的属性**，
+  // 所以这里从 AST 登记，不再从清单的根名列来。
+  for (const ast::Decl *d : u.ast->decls) {
+    if (d->isRoot && !d->name.empty()) u.ctx.rootNames.insert(std::string(d->name));
+  }
   u.sema.sourcePath = norm;
   index_[key] = units_.size() - 1;
   return &u;
@@ -1111,8 +1116,10 @@ bool Program::load(const std::string &entryPath, SourceMgr &src,
 }
 
 // §3.3/§3.7：清单每行 `<相对路径> [<根名> …]`，路径相对清单所在目录、省略
-// `.lain`，`#` 开头为注释。源根 = 清单所在目录。根名登记进对应模块的
-// ModuleContext，于是那些顶层声明发出平坦名字（§3.2）。
+// `.lain`，`#` 开头为注释。源根 = 清单所在目录。
+// **根名列不再用**（proposal-modules-v2 §四）：导出名改由源码里的 `@root` 标注
+// 决定，见 Program::addUnit。整形解析保留在这里，只是为了老清单不改也读得动
+// —— 行尾多写几个名字不再有任何效果。
 bool Program::loadUnit(const std::string &manifestPath, SourceMgr &src,
                        DiagSink &diags) {
   std::ifstream f(manifestPath, std::ios::binary);
@@ -1160,9 +1167,8 @@ bool Program::loadUnit(const std::string &manifestPath, SourceMgr &src,
                                                   : sourceRoot_ + "/" + rel;
     ModuleUnit *u = addUnit(normalizePath(path), src, diags);
     if (u == nullptr) return false;
-    for (size_t i = 1; i < fields.size(); ++i) {
-      u->ctx.rootNames.insert(fields[i]);
-    }
+    // 行尾的字段（过去的根名）在这里被有意丢弃：解析保留，语义不再用。
+    // 导出名从源码的 `@root` 标注来（addUnit 已登记）。
     manifestOrder_.push_back(u->key);
     if (first) {
       root_ = u;
@@ -1237,6 +1243,12 @@ bool Program::analyze(TypeStore &ts, DiagSink &diags) {
     w.registerTopLevel();
   }
   if (diags.hasErrors()) return false;
+
+  // §四 防撞：平坦导出名之间、平坦名与 `<键>__<名字>` 之间不许重名。
+  // 放在 registerTopLevel 之后 —— 那一步才把每个模块发出的符号名登记齐
+  // （含静态数据块的 `<名字>_storage`）。
+  if (!checkRootExports(diags)) return false;
+
   for (Walker &w : walkers) {
     w.registerImports();
   }
@@ -1247,6 +1259,95 @@ bool Program::analyze(TypeStore &ts, DiagSink &diags) {
     w.walkBodies();
   }
   return !diags.hasErrors();
+}
+
+// §四 防撞。三条不许发生的事，全部在编译期报出来（今天的静默版要跑到
+// `start FAILED code 9102` 才炸）：
+//   1. 两个模块各有一个同名 `@root`（平坦名撞车）；
+//   2. `@root` 平坦名与任何 `<键>__<名字>` 相同（名字空间混叠）；
+//   3. 数据型 `@root` 的 `<名字>_storage` 与别的符号同名。
+// 判据就是「合并成一个镜像之后，每个名字只有一处定义」，所以在**合并视角**上比：
+// 把每个声明发出的符号名收进同一张表，谁撞谁报。宿主 extern 例外 —— 它们本来就
+// 发平坦名，且同名 extern 跨模块重复是验证器明确放行的，所以只拿来当「已占用的
+// 平坦名」，不参与重复计数。
+bool Program::checkRootExports(DiagSink &diags) const {
+  // 一条 @root 声明发出的符号名 -> 出处。
+  struct Claim {
+    std::string moduleKey{};
+    std::string rootName{};
+    Span span{};
+  };
+  // 一条非根顶层声明发出的符号名 -> (模块键, 源码名字)。
+  struct Mangled {
+    std::string moduleKey{};
+    std::string srcName{};
+  };
+  std::unordered_map<std::string, Claim> claimed{};   // 平坦导出名（含 _storage）
+  std::unordered_map<std::string, Mangled> mangled{}; // <键>__<名字>（含 _storage）
+  std::unordered_set<std::string> externFlat{};       // 宿主 extern 的平坦名
+  bool bad = false;
+
+  auto claim = [&](const std::string &symbol, const Claim &c) {
+    auto ins = claimed.emplace(symbol, c);
+    if (ins.second) return;
+    const Claim &prev = ins.first->second;
+    std::string msg = "重复的 @root 平坦名 '" + c.rootName + "'（发出符号 '" +
+                      symbol + "'）";
+    if (prev.moduleKey == c.moduleKey) {
+      msg += "：模块 '" + c.moduleKey + "' 里出现了两次";
+    } else {
+      msg += "：模块 '" + prev.moduleKey + "' 与模块 '" + c.moduleKey +
+             "' 各导出一个；平坦导出名与数据符号名都必须全局唯一";
+    }
+    diags.error(c.span, D::SemaDuplicateDeclaration, std::move(msg));
+    bad = true;
+  };
+
+  for (const ModuleUnit &u : units_) {
+    if (u.ast == nullptr) continue;
+    for (const ast::Decl *d : u.ast->decls) {
+      if (d->kind == ast::DeclKind::Import) continue;
+      if (d->name.empty()) continue;
+      if (d->kind == ast::DeclKind::Extern) {
+        // 宿主 extern 保持平坦（link_name 决定它在宿主的落点）。
+        externFlat.insert(std::string(d->name));
+        continue;
+      }
+      const Span sp = d->rootSpan.valid() ? d->rootSpan : d->span;
+      if (d->isRoot) {
+        const std::string flat(d->name);
+        const Claim c{u.key, flat, sp};
+        claim(flat, c);
+        // 数据型导出还发 `<名字>_storage`（symbol_addr 认这些）。
+        if (u.sema.topLevelData.count(flat) != 0) claim(flat + "_storage", c);
+        continue;
+      }
+      const std::string q = u.ctx.qualify(d->name);
+      mangled.emplace(q, Mangled{u.key, std::string(d->name)});
+      if (u.sema.topLevelData.count(q) != 0) {
+        mangled.emplace(q + "_storage", Mangled{u.key, std::string(d->name)});
+      }
+    }
+  }
+
+  for (const auto &kv : claimed) {
+    auto m = mangled.find(kv.first);
+    if (m != mangled.end()) {
+      diags.error(kv.second.span, D::SemaDuplicateDeclaration,
+                  "'" + kv.first + "' 既是模块 '" + kv.second.moduleKey +
+                      "' 的 @root 平坦导出名，又与模块 '" + m->second.moduleKey +
+                      "' 的顶层声明 '" + m->second.srcName + "' 发出的 '" + kv.first +
+                      "' 同名；平坦导出名不得与任何 '<键>__<名字>' 相同");
+      bad = true;
+    }
+    if (externFlat.count(kv.first) != 0) {
+      diags.error(kv.second.span, D::SemaDuplicateDeclaration,
+                  "'" + kv.first + "' 是模块 '" + kv.second.moduleKey +
+                      "' 的 @root 平坦导出名，又与一条宿主 extern 同名");
+      bad = true;
+    }
+  }
+  return !bad;
 }
 
 const ModuleUnit *Program::find(const std::string &key) const {

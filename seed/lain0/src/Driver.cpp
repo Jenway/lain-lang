@@ -15,10 +15,13 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "lain0/Lexer.hpp"
@@ -433,6 +436,31 @@ std::string verifyMessage(const L1Diagnostic &d) {
   return m;
 }
 
+// 产物路径：去掉目录末尾的分隔符，再拼 `<模块键>.l1`。`--split build/x/` 与
+// `--split build/x` 必须给同一个路径。
+std::string joinUnitPath(const std::string &dir, std::string_view key) {
+  std::string out = dir;
+  while (!out.empty() && (out.back() == '/' || out.back() == '\\')) {
+    out.pop_back();
+  }
+  if (!out.empty()) out += "/";
+  out += std::string(key);
+  out += ".l1";
+  return out;
+}
+
+// 写一份产物。失败必须报出来并算失败 —— 静默丢掉产物等同于伪造成功
+// （与 CLI 的 emit 同一条纪律）。
+bool writeTextFile(const std::string &path, const std::string &text) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  if (!out) return false;
+  out.write(text.data(), static_cast<std::streamsize>(text.size()));
+  out.flush();
+  if (!out) return false;
+  out.close();
+  return !out.fail();
+}
+
 } // namespace
 
 CompileResult compileFile(const std::string &path, const CompileOptions &opts,
@@ -630,6 +658,214 @@ CompileResult compileUnit(const std::string &manifestPath,
   if (diags.hasErrors()) {
     r.lainir.clear();
     return r;
+  }
+
+  r.ok = true;
+  return r;
+}
+
+// §二：按入口求 import 闭包，逐模块各出一份 LAINIR（`--entry … --split <目录>`）。
+//
+// 分两段：先把每一份都降级 + 打印**留在内存里**，再把它们拼成一份过 parse + verify
+// 这道闸门，最后才写文件。于是「不过闸门就一份都不产出」是字节级的真事，而不是
+// 边写边判的近似。
+//
+// 为什么闸门在合并件上：实测一份单元自己过不了 verify —— 它调用的名字定义在别的
+// 单元里（`#call: unknown callee std_parse__meta_source_has_tree`，code 2015）。
+// 这也正是驱动装载时做的事（docs/plan-modules.md 的「合并后按名字解析、verify 在
+// 合并之后做」），所以这里用同一条路：拼文本 -> lainir_parse -> lainir_verify。
+//
+// 每份单元的文本只由该模块自己的源码决定：每模块一个 L1Builder（一个 Lowerer），
+// 临时值编号从 0 起 —— 顺序不影响任何一份文本（docs/proposal-modules-v2.md 的
+// 前提就是这条）。
+SplitResult compileSplit(const std::string &entryPath, const std::string &outDir,
+                         const CompileOptions &opts, SourceMgr &src,
+                         DiagSink &diags) {
+  SplitResult r{};
+
+  // 入口 -> 源根 -> 整个 import 依赖图（同键只加载一次）。
+  Program prog;
+  if (!prog.load(entryPath, src, diags)) {
+    return r;
+  }
+  const ModuleUnit *entry = prog.root();
+  if (entry == nullptr || entry->ast == nullptr) {
+    return r;
+  }
+
+  if (opts.dumpTokens) {
+    dumpTokens(entry->toks, src, std::cout);
+  }
+  if (diags.hasErrors()) {
+    return r;
+  }
+  if (opts.dumpAst) {
+    dumpAst(*entry->ast, std::cout);
+  }
+  if (diags.hasErrors()) {
+    return r;
+  }
+
+  TypeStore types;
+  types.initBuiltins();
+  if (!prog.analyze(types, diags)) {
+    return r;
+  }
+  if (diags.hasErrors()) {
+    return r;
+  }
+
+  // 产物目录：不存在就建。建不出来算 IO 失败 —— 不产出一份文本。
+  {
+    std::error_code ec;
+    std::filesystem::create_directories(outDir, ec);
+    if (!std::filesystem::is_directory(outDir, ec)) {
+      diags.error(Span{}, D::IoOpenFailed, "建不了产物目录: " + outDir);
+      return r;
+    }
+  }
+
+  // ---- 第一段：逐模块降级 + 打印，全留在内存里 ----
+  struct SplitUnit {
+    std::string key{};
+    std::string text{};
+  };
+  std::vector<SplitUnit> units{};
+  const std::vector<const ModuleUnit *> order = prog.lowerOrder();
+  units.reserve(order.size());
+  for (const ModuleUnit *u : order) {
+    if (u == nullptr || u->ast == nullptr) {
+      diags.error(Span{}, D::LowerUnsupported, "拆分产出遇到空模块");
+      return r;
+    }
+    // 这一份的 builder 只装这一个模块。
+    L1Builder *builder = lainir_builder_new();
+    if (builder == nullptr) {
+      diags.error(Span{}, D::LowerUnsupported, std::string("LAINIR builder 创建失败"));
+      return r;
+    }
+    LowerOptions lopts{};
+    const std::string key = u->key.empty() ? std::string("lain") : u->key;
+    lopts.moduleName = key.c_str();
+    lopts.program = &prog;
+    Lowerer lower(builder, types, src, diags, lopts);
+    const L1Module *ir = lower.runModule(u);
+    if (ir == nullptr || diags.hasErrors()) {
+      lainir_builder_free(builder);
+      return r;
+    }
+
+    char *printed = lainir_print_to_string(ir);
+    lainir_builder_free(builder);
+    if (printed == nullptr) {
+      diags.error(Span{}, D::PrintFailed, "LAINIR 文本打印失败: " + key);
+      return r;
+    }
+    SplitUnit unit{};
+    unit.key = key;
+    unit.text.assign(printed);
+    std::free(printed);
+    // 空产物 + 成功是明确禁止的状态。
+    if (unit.text.empty()) {
+      diags.error(Span{}, D::PrintFailed, "LAINIR 文本为空: " + key);
+      return r;
+    }
+    // 每份文本自己是一个合法的模块文本：定点自校验可以逐份做。
+    if (opts.roundTrip) {
+      int rtCode = 0;
+      std::string rtMsg{};
+      if (!roundTripCheck(unit.text, rtCode, rtMsg)) {
+        diags.error(Span{}, D::RoundTripFailed, key + ": " + rtMsg);
+        return r;
+      }
+    }
+    units.push_back(std::move(unit));
+  }
+
+  // ---- 第二段：合并件的闸门（与驱动装载时同一件事）----
+  // 拼法必须与驱动一致：每份后面补一个换行。
+  std::string merged{};
+  for (const SplitUnit &u : units) {
+    merged += u.text;
+    merged += '\n';
+  }
+  {
+    L1Builder *vb = lainir_builder_new();
+    if (vb == nullptr) {
+      diags.error(Span{}, D::LowerUnsupported, std::string("LAINIR builder 创建失败"));
+      return r;
+    }
+    L1Diagnostic vdiag{};
+    vdiag.code = 0;
+    vdiag.line = 0;
+    vdiag.column = 0;
+    vdiag.message[0] = '\0';
+    const L1Module *mergedModule = lainir_parse(vb, merged.c_str(), &vdiag);
+    if (mergedModule == nullptr) {
+      diags.error(Span{}, D::VerifyFailed,
+                  "合并件重新解析失败 (code " + std::to_string(vdiag.code) +
+                      ") @line " + std::to_string(vdiag.line));
+      lainir_builder_free(vb);
+      return r;
+    }
+    vdiag.code = 0;
+    vdiag.line = 0;
+    vdiag.column = 0;
+    vdiag.message[0] = '\0';
+    const int vrc = lainir_verify(mergedModule, &vdiag);
+    if (vrc != 0) {
+      r.verifyCode = vdiag.code;
+      r.verifyMessage = std::string(vdiag.message);
+      diags.error(Span{}, D::VerifyFailed,
+                  "合并件 " + verifyMessage(vdiag) + "（合并件第 " +
+                      std::to_string(vdiag.line) + " 行）");
+      lainir_builder_free(vb);
+      return r;
+    }
+    lainir_builder_free(vb);
+  }
+
+  // ---- 第三段：过闸门了才写文件 ----
+  for (const SplitUnit &u : units) {
+    const std::string path = joinUnitPath(outDir, u.key);
+    if (!writeTextFile(path, u.text)) {
+      diags.error(Span{}, D::IoWriteFailed, "写不了产物: " + path);
+      return r;
+    }
+    r.files.push_back(path);
+    r.fileCount++;
+  }
+
+  // 目录里的文件集合就是产物：上一次跑剩下的 `.l1` 会被驱动一起装载，所以
+  // 残留必须响一声（只警告，不改目录内容）。
+  {
+    std::error_code ec;
+    size_t stale = 0;
+    std::string sample{};
+    for (const std::filesystem::directory_entry &e :
+         std::filesystem::directory_iterator(outDir, ec)) {
+      if (!e.is_regular_file(ec)) continue;
+      const std::string name = e.path().filename().string();
+      if (name.size() <= 3 || name.compare(name.size() - 3, 3, ".l1") != 0) {
+        continue;
+      }
+      bool produced = false;
+      for (const std::string &f : r.files) {
+        if (joinUnitPath(outDir, name.substr(0, name.size() - 3)) == f) {
+          produced = true;
+          break;
+        }
+      }
+      if (!produced) {
+        stale++;
+        if (sample.empty()) sample = name;
+      }
+    }
+    if (stale != 0) {
+      std::cout << "lain0: 警告 " << outDir << " 里残留 " << stale
+                << " 份本次没产出的 .l1（第一份 " << sample
+                << "）；驱动按目录内容装载，陈旧单元会被一起合并\n";
+    }
   }
 
   r.ok = true;

@@ -1,7 +1,8 @@
 /* Meta 驱动：把 bootstrap 拼成的编译单元跑起来，lower 一份源码。
  *
- * 它只做「装配 + 推进 + 记账」，不含语言知识：编译单元来自 SOURCE_ORDER 清单，
- * 输入是 .lain 源码，产出是 Meta 写进宿主输出缓冲的 canonical LAINIR 文本。
+ * 它只做「装配 + 推进 + 记账」，不含语言知识：编译单元来自 `--unit` 清单或
+ * `--units-dir` 目录（二选一，必填），输入是 .lain 源码，产出是 Meta 写进宿主
+ * 输出缓冲的 canonical LAINIR 文本。
  *
  * 用法（在仓库根目录跑）：
  *
@@ -11,7 +12,12 @@
  * `std/prelude.lain` 之后与它逐字节比较），源文件是实际字节所在。
  *
  * 选项：
- *   --unit <文件>     编译单元清单，`#` 开头为注释（默认 bootstrap/SOURCE_ORDER）
+ *   --unit <文件>     编译单元清单，`#` 开头为注释（每行前缀 `bootstrap/`）。
+ *                     **必须**与 `--units-dir` 二选一；不给就退出码 2。
+ *   --units-dir <目录> 编译单元目录：装载目录里所有 `.l1`，按文件名排序后合并
+ *                     （= 模块键排序，确定）。与 `--unit` 互斥。目录里的名字
+ *                     就是产物路径，不加 `bootstrap/` 前缀。**必须**与 `--unit`
+ *                     二选一；不给就退出码 2。
  *   --entry <名字>    Meta 入口（默认 lain_std_lower）
  *   --lower <n>       交给入口的源码下标（默认 0）
  *   --out <文件>      把产物写成文件；不给则打到 stdout
@@ -36,6 +42,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32)
+#include <io.h> /* _findfirst / _findnext / _findclose */
+#else
+#include <dirent.h>
+#endif
 
 #include "lain/ir/build.h"
 #include "lain/ir/value.h"
@@ -86,10 +98,106 @@ static char *dup_cstr(const char *s) {
   return p;
 }
 
+/* 产物文件名一律 `<模块键>.l1`；目录形式的装载集合就由这个后缀决定。
+ * Windows 的文件系统大小写不敏感，所以 `.L1` 也认。 */
+static int has_l1_suffix(const char *name) {
+  size_t n = strlen(name);
+  if (n <= 3) return 0;
+  return name[n - 3] == '.' &&
+         (name[n - 2] == 'l' || name[n - 2] == 'L') &&
+         (name[n - 1] == '1');
+}
+
+static int cmp_names(const void *a, const void *b) {
+  return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static void free_names(char **names, unsigned count);
+
+/* `dir` 里所有 `.l1` 的文件名，按文件名排序（= 模块键排序，确定的装载顺序）。
+ * 返回 malloc 的字符串数组（调用方用 free_names 释放），读不到目录返回 NULL。 */
+static char **list_units(const char *dir, unsigned *out_count) {
+  char **names = NULL;
+  unsigned count = 0, cap = 0;
+  *out_count = 0;
+#if defined(_WIN32)
+  {
+    struct _finddata_t ent;
+    char pattern[1024];
+    intptr_t handle;
+    size_t n = strlen(dir);
+    /* `build/x/` 与 `build/x` 都要能用：只在缺分隔符时补一个。 */
+    if (n > 0 && (dir[n - 1] == '/' || dir[n - 1] == '\\')) {
+      snprintf(pattern, sizeof(pattern), "%s*.l1", dir);
+    } else {
+      snprintf(pattern, sizeof(pattern), "%s/*.l1", dir);
+    }
+    handle = _findfirst(pattern, &ent);
+    if (handle == -1) return NULL;
+    do {
+      if (ent.attrib & _A_SUBDIR) continue;
+      if (!has_l1_suffix(ent.name)) continue;
+      if (count == cap) {
+        unsigned next = cap ? cap * 2u : 32u;
+        char **grown = (char **)realloc(names, next * sizeof(char *));
+        if (!grown) { _findclose(handle); free_names(names, count); return NULL; }
+        names = grown;
+        cap = next;
+      }
+      names[count] = dup_cstr(ent.name);
+      if (!names[count]) { _findclose(handle); free_names(names, count); return NULL; }
+      count++;
+    } while (_findnext(handle, &ent) == 0);
+    _findclose(handle);
+  }
+#else
+  {
+    DIR *d = opendir(dir);
+    struct dirent *ent;
+    if (!d) return NULL;
+    while ((ent = readdir(d)) != NULL) {
+      if (!has_l1_suffix(ent->d_name)) continue;
+      if (count == cap) {
+        unsigned next = cap ? cap * 2u : 32u;
+        char **grown = (char **)realloc(names, next * sizeof(char *));
+        if (!grown) { closedir(d); free_names(names, count); return NULL; }
+        names = grown;
+        cap = next;
+      }
+      names[count] = dup_cstr(ent->d_name);
+      if (!names[count]) { closedir(d); free_names(names, count); return NULL; }
+      count++;
+    }
+    closedir(d);
+  }
+#endif
+  if (count > 1) qsort(names, count, sizeof(char *), cmp_names);
+  *out_count = count;
+  return names;
+}
+
+static void free_names(char **names, unsigned count) {
+  unsigned i;
+  if (!names) return;
+  for (i = 0; i < count; i++) free(names[i]);
+  free(names);
+}
+
+/* `dir` 与 `name` 用 `/` 拼一条路径；dir 已经以分隔符结尾就不再补。 */
+static void join_path(char *out, size_t cap, const char *dir, const char *name) {
+  size_t n = strlen(dir);
+  if (n > 0 && (dir[n - 1] == '/' || dir[n - 1] == '\\')) {
+    snprintf(out, cap, "%s%s", dir, name);
+  } else {
+    snprintf(out, cap, "%s/%s", dir, name);
+  }
+}
+
 static void usage(FILE *out) {
   fputs("用法: lain-meta [选项] <逻辑路径> <源文件> [...]\n"
-        "选项: --unit --entry --lower --out --fuel --slice --stack --quota\n"
-        "      --caps --depth --expect-status --max-output -q/--quiet -v/--verbose\n",
+        "选项: --unit --units-dir --entry --lower --out --fuel --slice --stack\n"
+        "      --quota --caps --depth --expect-status --max-output\n"
+        "      -q/--quiet -v/--verbose\n",
         out);
 }
 
@@ -108,7 +216,8 @@ static int map_region(LainVmSpace *space, const void *base, uint64_t bytes,
 }
 
 int main(int argc, char **argv) {
-  const char *unit_path = "bootstrap/SOURCE_ORDER";
+  const char *unit_path = NULL;   /* 无默认值：必须显式给 --unit 或 --units-dir */
+  const char *units_dir = NULL;
   const char *entry = "lain_std_lower";
   const char *out_path = NULL;
   uint64_t lower_index = 0;
@@ -119,7 +228,7 @@ int main(int argc, char **argv) {
   uint64_t max_output = 4096;
   uint32_t caps_capacity = 64;
   uint32_t max_call_depth = 64;
-  int quiet = 0, verbose = 0, expect_status = -1, fuel_given = 0, i;
+  int quiet = 0, verbose = 0, expect_status = -1, fuel_given = 0, unit_given = 0, i;
   SourceFile sources[DRIVER_MAX_SOURCES];
   uint32_t source_count = 0;
 
@@ -156,7 +265,8 @@ int main(int argc, char **argv) {
       if (i + 1 >= argc) { printf("%s 缺少实参\n", name); return 2; }         \
       i++;                                                                    \
     } while (0)
-    if (!strcmp(a, "--unit")) { TAKE(a); unit_path = argv[i]; continue; }
+    if (!strcmp(a, "--unit")) { TAKE(a); unit_path = argv[i]; unit_given = 1; continue; }
+    if (!strcmp(a, "--units-dir")) { TAKE(a); units_dir = argv[i]; continue; }
     if (!strcmp(a, "--entry")) { TAKE(a); entry = argv[i]; continue; }
     if (!strcmp(a, "--out")) { TAKE(a); out_path = argv[i]; continue; }
     if (!strcmp(a, "--lower")) { TAKE(a); lower_index = strtoull(argv[i], NULL, 0); continue; }
@@ -192,6 +302,18 @@ int main(int argc, char **argv) {
   if (source_count == 0) { usage(stderr); return 2; }
   if (lower_index >= source_count) { printf("--lower 越界\n"); return 2; }
 
+  /* 编译单元来源二选一，**必填**：旧默认值 `bootstrap/SOURCE_ORDER` 已随那份清单删除
+     （docs/proposal-modules-v2.md §六 步 3），留着假默认只会让缺参数看起来像编译失败。 */
+  if (unit_given && units_dir != NULL) {
+    printf("--unit 与 --units-dir 互斥，只能给一个\n");
+    return 2;
+  }
+  if (!unit_given && units_dir == NULL) {
+    printf("必须给 --unit <清单> 或 --units-dir <目录>，二选一（没有默认值）\n");
+    usage(stderr);
+    return 2;
+  }
+
   /* 燃料按已登记源码规模推导。展开一份声明要整份重扫一遍，成本约与「声明数 ×
      源码大小」同阶，所以预算随源码字节的平方增长：149 个 extern（约 6.5 KB）
      实测约 6000 万步，下面的系数给了三倍以上余量。显式 --fuel 覆盖这个推导。 */
@@ -203,33 +325,73 @@ int main(int argc, char **argv) {
                         (unsigned long long)fuel, (unsigned long long)bytes);
   }
 
-  /* 1. 链接编译单元。 */
+  /* 1. 链接编译单元。
+     两种来源（互斥与必填在前面已经检查过）：
+       --unit <清单>      每行一个路径，历史行为**原样保留**（每行前缀 `bootstrap/`）；
+       --units-dir <目录> 目录里所有 `.l1` 就是产物集合，按文件名排序（= 模块键
+                          排序，确定）。目录里的名字就是产物路径，不加任何前缀。 */
   {
-    FILE *order = fopen(unit_path, "rb");
+    FILE *order = NULL;
     char line[512];
     size_t used = 0;
     unsigned files = 0;
-    if (!order) { printf("读不到 %s\n", unit_path); return 2; }
-    unit_text = (char *)malloc(8u << 20);
-    if (!unit_text) { printf("分配编译单元缓冲失败\n"); return 2; }
-    while (fgets(line, sizeof(line), order)) {
-      char path[512];
-      size_t len = strlen(line), plen = 0;
-      char *part;
-      while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = 0;
-      if (len == 0 || line[0] == '#') continue;
-      snprintf(path, sizeof(path), "bootstrap/%s", line);
-      part = read_file(path, &plen);
-      if (!part) { printf("编译单元缺 %s\n", path); fclose(order); return 2; }
-      memcpy(unit_text + used, part, plen);
-      used += plen;
-      unit_text[used++] = '\n';
-      free(part);
-      files++;
+    char **names = NULL;
+    unsigned name_count = 0;
+    const size_t cap_bytes = 8u << 20;
+
+    if (units_dir == NULL) {
+      order = fopen(unit_path, "rb");
+      if (!order) { printf("读不到 %s\n", unit_path); return 2; }
+    } else {
+      names = list_units(units_dir, &name_count);
+      if (!names) { printf("读不到目录 %s\n", units_dir); return 2; }
+      if (name_count == 0) {
+        printf("目录里没有 .l1：%s\n", units_dir);
+        return 2;
+      }
     }
-    fclose(order);
+    unit_text = (char *)malloc(cap_bytes);
+    if (!unit_text) { printf("分配编译单元缓冲失败\n"); return 2; }
+
+    if (units_dir != NULL) {
+      unsigned k;
+      for (k = 0; k < name_count; k++) {
+        char path[1024];
+        size_t plen = 0;
+        char *part;
+        join_path(path, sizeof(path), units_dir, names[k]);
+        part = read_file(path, &plen);
+        if (!part) { printf("编译单元缺 %s\n", path); return 2; }
+        if (used + plen + 1 > cap_bytes) { printf("编译单元超过缓冲上限\n"); return 2; }
+        memcpy(unit_text + used, part, plen);
+        used += plen;
+        unit_text[used++] = '\n';
+        free(part);
+        files++;
+      }
+      printf("unit files=%u bytes=%lu dir=%s\n", files, (unsigned long)used, units_dir);
+    } else {
+      while (fgets(line, sizeof(line), order)) {
+        char path[512];
+        size_t len = strlen(line), plen = 0;
+        char *part;
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = 0;
+        if (len == 0 || line[0] == '#') continue;
+        snprintf(path, sizeof(path), "bootstrap/%s", line);
+        part = read_file(path, &plen);
+        if (!part) { printf("编译单元缺 %s\n", path); fclose(order); return 2; }
+        if (used + plen + 1 > cap_bytes) { printf("编译单元超过缓冲上限\n"); fclose(order); return 2; }
+        memcpy(unit_text + used, part, plen);
+        used += plen;
+        unit_text[used++] = '\n';
+        free(part);
+        files++;
+      }
+      printf("unit files=%u bytes=%lu\n", files, (unsigned long)used);
+    }
+    if (order) fclose(order);
+    free_names(names, name_count);
     unit_text[used] = 0;
-    printf("unit files=%u bytes=%lu\n", files, (unsigned long)used);
   }
 
   /* 2. parse + verify：编译单元本身必须过语言契约。 */

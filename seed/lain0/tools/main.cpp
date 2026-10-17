@@ -19,7 +19,8 @@ namespace {
 const char *kUsage =
     "用法: lain0 <file.lain> [-o out.l1] [--dump-tokens] [--dump-ast]\n"
     "      [--round-trip]\n"
-    "      lain0 --unit <清单> [-o out.l1] [--round-trip]\n";
+    "      lain0 --unit <清单> [-o out.l1] [--round-trip]\n"
+    "      lain0 --entry <file.lain> [--split <目录>] [-o out.l1] [--round-trip]\n";
 
 // 把文本送到文件或 stdout。写文件失败要报出来并失败退出 ——
 // 静默丢掉产物等同于伪造成功。
@@ -48,6 +49,8 @@ bool emit(const std::string &text, const std::string &outPath) {
 int main(int argc, char **argv) {
   std::string input{};
   std::string unitPath{};
+  std::string entryPath{};
+  std::string splitDir{};
   std::string outPath{};
   ln::CompileOptions opts{};
   bool roundTrip = false;
@@ -69,6 +72,18 @@ int main(int argc, char **argv) {
         return 2;
       }
       unitPath = argv[++i];
+    } else if (a == "--entry") {
+      if (i + 1 >= argc) {
+        std::cerr << "lain0: --entry 缺少参数\n" << kUsage;
+        return 2;
+      }
+      entryPath = argv[++i];
+    } else if (a == "--split") {
+      if (i + 1 >= argc) {
+        std::cerr << "lain0: --split 缺少参数\n" << kUsage;
+        return 2;
+      }
+      splitDir = argv[++i];
     } else if (a == "--dump-tokens") {
       opts.dumpTokens = true;
     } else if (a == "--dump-ast") {
@@ -92,19 +107,38 @@ int main(int argc, char **argv) {
     std::cout << kUsage;
     return 0;
   }
-  // §3.7：--unit 与位置参数互斥。两者都给或都不给都是用法错误（退出码 2）。
+  // §3.7：--unit 与位置参数互斥。§七（proposal-modules-v2）：--entry 与 --unit 互斥，
+  // 三者（位置参数 / --unit / --entry）只能给一个；都必须给一个。退出码 2 = 用法错误。
   const bool hasUnit = !unitPath.empty();
-  if (hasUnit != input.empty()) {
+  const bool hasEntry = !entryPath.empty();
+  if (hasUnit && hasEntry) {
+    std::cerr << "lain0: --unit 与 --entry 互斥，只能给一个\n" << kUsage;
+    return 2;
+  }
+  if (!input.empty() && (hasUnit || hasEntry)) {
     std::cerr << (hasUnit ? "lain0: --unit 与输入文件互斥，只能给一个\n"
-                          : "lain0: 缺少输入文件\n")
+                          : "lain0: --entry 与输入文件互斥，只能给一个\n")
               << kUsage;
+    return 2;
+  }
+  if (!splitDir.empty() && !hasEntry) {
+    std::cerr << "lain0: --split 只能与 --entry 同用\n" << kUsage;
+    return 2;
+  }
+  // 拆分产出的落点是目录（文件名 = 模块键），-o 没有意义：宁可报错也不静默忽略。
+  if (hasEntry && !splitDir.empty() && !outPath.empty()) {
+    std::cerr << "lain0: --split 与 -o 互斥，拆分产出写进目录\n" << kUsage;
+    return 2;
+  }
+  if (input.empty() && !hasUnit && !hasEntry) {
+    std::cerr << "lain0: 缺少输入文件\n" << kUsage;
     return 2;
   }
 
   ln::SourceMgr src;
   ln::DiagSink diags;
   // 清单打不开是用法/IO 错误（退出码 2），不走编译失败的 1。
-  const std::string &target = hasUnit ? unitPath : input;
+  const std::string &target = hasUnit ? unitPath : (hasEntry ? entryPath : input);
   if (hasUnit) {
     std::ifstream probe(unitPath, std::ios::binary);
     if (!probe) {
@@ -112,9 +146,33 @@ int main(int argc, char **argv) {
       return 2;
     }
   }
+
+  // §二（proposal-modules-v2）：--entry + --split，一个模块一份产物，无整份文本。
+  if (hasEntry && !splitDir.empty()) {
+    opts.roundTrip = roundTrip;
+    const ln::SplitResult sr = ln::compileSplit(entryPath, splitDir, opts, src, diags);
+    if (!sr.ok) {
+      diags.printAll(src, std::cerr);
+      if (sr.verifyCode != 0) {
+        std::cerr << "lain0: " << entryPath << ": verify 未通过 (code "
+                  << sr.verifyCode << ")";
+        if (!sr.verifyMessage.empty()) {
+          std::cerr << ": " << sr.verifyMessage;
+        }
+        std::cerr << "\n";
+      }
+      std::cerr << "lain0: 拆分产出失败：" << target << "（已写出 "
+                << sr.fileCount << " 份）\n";
+      return 1;
+    }
+    std::cout << "lain0: 拆分产出 " << sr.fileCount << " 份 -> " << splitDir << "\n";
+    return 0;
+  }
+
   const ln::CompileResult r = hasUnit
                                   ? ln::compileUnit(unitPath, opts, src, diags)
-                                  : ln::compileFile(input, opts, src, diags);
+                                  : ln::compileFile(hasEntry ? entryPath : input, opts,
+                                                    src, diags);
 
   // 失败路径：诊断一律打印，然后非 0 退出，绝不输出半份产物。
   if (!r.ok) {

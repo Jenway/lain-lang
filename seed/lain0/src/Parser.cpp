@@ -137,8 +137,17 @@ public:
     auto *module = arena_.make<ast::Module>();
     while (!atEnd()) {
       const size_t start = pos_;
+      // 声明属性（`@root`）写在顶层声明前，可写一行或多行。
+      bool isRoot = false;
+      Span rootSpan{};
+      if (!parseDeclAttributes(isRoot, rootSpan)) {
+        synchronizeDeclaration(start);
+        continue;
+      }
       ast::Decl *decl = parseDeclaration();
       if (decl != nullptr) {
+        decl->isRoot = isRoot;
+        decl->rootSpan = rootSpan;
         module->decls.push_back(decl);
         continue;
       }
@@ -332,6 +341,34 @@ private:
     }
     expected("')'");
     return false;
+  }
+
+  // 顶层声明前的属性行（docs/proposal-modules-v2.md §四）：`@root`，一行或多行。
+  // 只支持 `root` 一个属性；不认识的属性名**报错**，不当普通名字吞掉。
+  // 顶层之外（函数体、结构体体、表达式里）的 `@` 由 parsePrefix 报错。
+  // 返回 false 表示报错，调用方按恢复处理。
+  bool parseDeclAttributes(bool &isRoot, Span &rootSpan) {
+    while (check(Tok::At)) {
+      const Token at = advance();
+      if (!check(Tok::Ident)) {
+        diags_.error(at.span, D::ParseUnexpectedToken,
+                     "声明属性名应为标识符，实际为 " +
+                         std::string(tokName(current().kind)));
+        return false;
+      }
+      const Token name = advance();
+      if (name.text != "root") {
+        diags_.error(joinSpans(at.span, name.span), D::ParseUnexpectedToken,
+                     "不认识的声明属性 @" + std::string(name.text) +
+                         "（只支持 @root）");
+        return false;
+      }
+      if (!isRoot) {
+        isRoot = true;
+        rootSpan = joinSpans(at.span, name.span);
+      }
+    }
+    return true;
   }
 
   ast::Decl *parseDeclaration() {
@@ -1011,6 +1048,13 @@ private:
     case Tok::KwImport:
       diags_.error(current().span, D::ParseReserved,
                    "import 只用于顶层模块绑定");
+      return nullptr;
+    case Tok::At:
+      // `@root` 只允许出现在顶层声明前（parseModule 的顶层循环里消费）。
+      // 落到这里说明写在函数体 / 表达式等非顶层位置。
+      diags_.error(current().span, D::ParseUnexpectedToken,
+                   "声明属性 @root 只能写在顶层声明上");
+      advance();
       return nullptr;
     default:
       diags_.error(current().span, D::ParseNotAnExpression,

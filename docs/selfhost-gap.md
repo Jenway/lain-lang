@@ -6,6 +6,11 @@
 >
 > 基线：`master` @ `32b3a19`，`cmake --build build` 后 `build/lain-meta.exe`、
 > `build/lain0/lain0.exe` 均最新。回归 `bash scripts/regress.sh --round-trip` PASS=38 FAIL=0。
+>
+> **行号口径（步 3 起）**：本文多处引用 `build/lain0/bootstrap.l1:916` 这类位置 —— 那是当时
+> **一整份** Meta 文本的行号。步 3 起 Meta 是 `build/lain0/units/` 下的 28 份（文件名 = 模块键，
+> 装载时按文件名排序合并），例如 `std_types__meta_bytes_equal` 现在落在 `units/std_types.l1` 里；
+> 行号会随新的合并文本变化，**别按旧行号去找**。
 
 ## 0. 结论先行
 
@@ -17,7 +22,7 @@
 2. **四个单元都报 11 不是能力缺口，是登记名不匹配**：Meta 的 import 解析是
    「把 spec 规范化后与宿主登记的逻辑路径**逐字节相等**」，而 bootstrap 源码里的
    spec 是**相对导入方目录**写的（`import("types")` = `std/types.lain`）。
-   用 SOURCE_ORDER 路径登记（自然写法）→ 4 个单元全 11；把登记名换成源码里
+   用清单路径形态的登记名（当时的自然写法）→ 4 个单元全 11；把登记名换成源码里
    spec 的规范化形态 → `std/lex` 立刻走到 **6**（1803 字节产物），
    `std/registry` 走到 **4**（442 字节），`std/types` 走到 **0 + 1004 trap**，
    `std/regions` 走到 **9415**。
@@ -59,7 +64,7 @@
 
 ```bash
 # 让 Meta 降级一份源码（--lower 是「第几个位置参数是目标」，位置参数成对：登记逻辑路径 + 文件）
-./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
+./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "p/leaf.lain" build/probe/selfhost/src/p_leaf.lain
 
 # 「产出装得回去」闸门：把产物当 LAINIR 单元重新 parse + verify
@@ -67,9 +72,12 @@
 # -> PARSE+VERIFY OK ...
 ```
 
-`--unit build/lain0/bootstrap_unit.txt` 里只有一行 `../build/lain0/bootstrap.l1`，
-即 `scripts/build_meta_unit.py` 产出的**整份 Meta**（584596 字节，`verify subroutines=870
-data=216`）。`check_unit.exe` 是 `build/check_unit.c` 编出来的临时工具（只调
+`--units-dir build/lain0/units/` 装载的是 `scripts/build_meta_unit.py` 产出的
+**整份 Meta**（步 3 起是 28 份、每模块一份、合并装载：实测 `unit files=28 bytes=568387`、
+`verify subroutines=870 data=216`，与当时的单份 `bootstrap.l1` 同值）。步 3 之前这里写的是
+`--unit build/lain0/bootstrap_unit.txt`（一行 `../build/lain0/bootstrap.l1`）；那份单元清单
+与 `bootstrap/SOURCE_ORDER` 一起删除，本文的命令已按新口径改写，**当时的输出数字不变**
+（合并后的模块与单份语义相同）。`check_unit.exe` 是 `build/check_unit.c` 编出来的临时工具（只调
 `lainir_parse` + `lainir_verify`），源码不在版本库里，属本仓 `build/` 惯例。
 
 ### 1.3 脚本（都在 `build/probe/`，未跟踪）
@@ -110,7 +118,7 @@ let z: u64 = 1;
 ```
 
 ```bash
-$ ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
+$ ./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "p/missing.lain" build/probe/selfhost/src/p_imp_missing.lain
 sources count=1
 scratch bytes=...
@@ -150,7 +158,7 @@ let A = import("nope");
 ```
 
 ```bash
-$ ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
+$ ./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "p/miss2.lain" build/probe/selfhost/src/p_miss2.lain
 run slice=2 rounds=21 steps=... host_status=11
 output bytes=0            # ← z 的 #proc 一个字节都没发出来
@@ -181,14 +189,14 @@ Meta 的规范化规则（`meta_build_path` + `meta_source_find`）：
 **实测对照**（同一份源码，只换登记名）：
 
 ```bash
-# A. 登记名 = SOURCE_ORDER 路径（自然写法）
-$ ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
+# A. 登记名 = 清单路径形态（当时的自然写法）
+$ ./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "std/lex" bootstrap/std/lex.lain "std/types" bootstrap/std/types.lain \
     "std/regions" bootstrap/std/regions.lain
 run ... host_status=11   output bytes=0            # g1_lex_sorder / g10_lex_sorder
 
 # B. 登记名 = 源码里 spec 的规范化形态
-$ ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
+$ ./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "std/lex.lain" bootstrap/std/lex.lain "types.lain" bootstrap/std/types.lain \
     "regions.lain" bootstrap/std/regions.lain
 run ... host_status=6    output bytes=1803         # g1_lex_basename / g2_lex / g10_lex
@@ -201,7 +209,7 @@ run ... host_status=6    output bytes=1803         # g1_lex_basename / g2_lex / 
 `types.lain` 后照样不等 → 但这次**不是干净的 11，而是 1004 trap**：
 
 ```bash
-$ ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
+$ ./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "std/lex.lain" bootstrap/std/lex.lain "types" bootstrap/std/types.lain
 run slice=3 rounds=28 steps=55133749 host_status=0
 trap kind=1 status=1004 line=954 column=34 region=125 position=0
@@ -255,7 +263,7 @@ output bytes=0
 
 判据见 §1.1。所有行都来自 `build/probe/selfhost/run_all.tsv`（第一列就是下面每行的 # 对应的
 `tag`，可 grep 到该条的完整命令与原始输出）。
-命令模板：`./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 <登记名> <文件>`，
+命令模板：`./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 <登记名> <文件>`，
 下表的「命令」列只写 `--lower` 之后的参数（登记名 文件 对，`src/` = `build/probe/selfhost/src/`）。
 
 ### 4.1 导入层
@@ -264,7 +272,7 @@ output bytes=0
 | :- | :--- | :--- | :--- | :--- | :--- |
 | 1 | `import("裸名")` + 登记名 = 规范化 spec（90 处） | `let A = import("probe::a");` + 模块 `let av: u64 = 7;` | `"p/ok3.lain" src/p_ok3.lain "probe/a.lain" src/pkg_a2.lain` | `status=0`，89 字节，装回 **OK**（`#proc probe__a__av(){#return 7}`） | **能** |
 | 2 | 同上，但 spec 含 `/`（38 处子目录 import） | `let A = import("probe/pkg/a");` | `"p/ok.lain" src/p_imp_ok.lain "probe/pkg/a.lain" src/pkg_a.lain` | `status=0`，产物 `#proc probe/pkg/a__av()` → 装回 **PARSE FAILED 3001**（名字里有 `/`，不是合法标识符） | **半** |
-| 3 | 登记名 = SOURCE_ORDER 路径（自然写法） | `std/lex.lain` 的 `import("types")` | `"std/lex" bootstrap/std/lex.lain "std/types" bootstrap/std/types.lain "std/regions" bootstrap/std/regions.lain` | `host_status=11`，`diagnostic code=11`，**0 字节** | **不能** |
+| 3 | 登记名 = 清单路径形态（当时的自然写法） | `std/lex.lain` 的 `import("types")` | `"std/lex" bootstrap/std/lex.lain "std/types" bootstrap/std/types.lain "std/regions" bootstrap/std/regions.lain` | `host_status=11`，`diagnostic code=11`，**0 字节** | **不能** |
 | 4 | 被导入模块**自己**的 import 是相对名 | `probe/pkg/b.lain`: `let A = import("a");` 只登记 `probe/pkg/a.lain` | `"p/chain.lain" src/p_chain.lain "probe/pkg/b.lain" src/pkg_b.lain "probe/pkg/a.lain" src/pkg_a.lain` | `host_status=11`，0 字节 | **不能** |
 | 5 | 同上，但把同一个文件**再登记一个别名** `a.lain` | 同上 + `"a.lain" src/pkg_a.lain` | `"p/chain.lain" src/p_chain.lain "probe/pkg/b.lain" src/pkg_b.lain "probe/pkg/a.lain" src/pkg_a.lain "a.lain" src/pkg_a.lain` | `status=0` 但 **1004 trap（line 954）**，0 字节 | **不能** |
 | 6 | 登记名少 `.lain` | 同 #3，把 `std/types` 登记成 `types` | `"std/lex.lain" bootstrap/std/lex.lain "types" bootstrap/std/types.lain` | `status=0` + **1004 trap（line 954）**，0 字节（确定性，两次 steps 相同） | **不能** |
@@ -293,7 +301,7 @@ output bytes=0
 `symbol_addr` 的绑定时报 **13**，不是 9415：
 
 ```bash
-$ ./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
+$ ./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "p/msym.lain" build/probe/selfhost/src/p_msym.lain \
     "probe/m_sym.lain" build/probe/selfhost/src/m_sym.lain
 run ... host_status=13   output bytes=0
@@ -576,7 +584,7 @@ IDENTICAL
     （或按组映射），否则 28 个模块 84+ 个区段过不了 `LAINVM_SPACE_MAX_REGIONS=64`。
 - **为什么排在后面**：它是**整份 28 模块一次跑通**的前提，但单单元端到端可以先用
   「登记名 = 源码里的 spec」绕过（本文所有单元级实测都是这么跑的）。
-- **验收**：`g10_lex_sorder`（登记名 = SOURCE_ORDER 路径）从 11/0 字节
+- **验收**：`g10_lex_sorder`（登记名 = 清单路径形态）从 11/0 字节
   变成与 `g10_lex` 相同的 status；`python build/probe/selfhost_units.py`
   里「今天可跑」从 4 个变成 28 个（登记数 62 → 28，区段数 189 → ≤87）。
 
@@ -586,7 +594,7 @@ IDENTICAL
   `lain-meta --out` + `check_unit`，非零即红。当前基线是 **0/28**（四个能跑的单元
   全都装不回去）。
 - 目标顺序建议：`std/regions` → `std/types` → `std/lex` → `std/registry` →
-  其余按 `SOURCE_ORDER` 依赖顺序（`std/modules`、`std/scope` 在最后，
+  其余按 import 依赖顺序（`std/modules`、`std/scope` 在最后，
   它们自己就是 import 层的实现）。
 
 ### 归属汇总
@@ -621,14 +629,14 @@ python build/probe/selfhost_run.py             # -> build/probe/selfhost/run_*.t
 bash build/probe/gate8.sh "$(pwd)" build/probe/selfhost/gate8_self.tsv
 
 # 单条：11 的最小复现
-./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
+./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "p/missing.lain" build/probe/selfhost/src/p_imp_missing.lain      # host_status=11, 0 字节
 # 单条：登记名换一下就不再是 11
-./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
+./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "std/lex.lain" bootstrap/std/lex.lain \
     "types.lain" bootstrap/std/types.lain "regions.lain" bootstrap/std/regions.lain   # 6 / 1803 字节
 # 单条：循环体 trap
-./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --lower 0 \
+./build/lain-meta.exe --units-dir build/lain0/units/ --lower 0 \
     "p/o1.lain" build/probe/selfhost/src/p_o1.lain                    # trap 1004, 136 字节
 ```
 

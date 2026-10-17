@@ -49,6 +49,7 @@ enum class Tok : uint8_t {
   Amp,       // &
   Pipe,      // |
   Caret,     // ^
+  At,        // @（声明属性前缀，见 Parser 的顶层 `@root`）
 
   // 关键字
   KwFunc,

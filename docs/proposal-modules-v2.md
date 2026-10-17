@@ -45,15 +45,34 @@ lain0 --entry bootstrap/meta.lain --split build/lain0/units/
 知道接口（谁是函数、什么类型）。要做成"编 A 不需要看 B 的源码"，得另造一层接口文件
 （C 的头文件、OCaml 的 `.cmi`、Java 的 `.class` 那种）。**那是以后的选项，不在本提案内。**
 
-## 三、前提：一个必须先问清的行为
+## 三、前提（已实测）：装载器**接受**未在本单元声明的跨单元引用
 
 一个单元**调用 / 取址另一个单元定义的名字**时，装载与 verify 收不收"没在本单元声明过就引用"？
+**实测：收。** 于是拆分是**纯切片** —— 编译器**不需要**为每份单元补发任何外部名字声明
+（以前那 649 条影子声明是手写的，拆分后一条都不用生成）。这条已不是疑点。
 
-- **收** → 什么都不用加，拆分就是纯切片
-- **不收** → 编译器必须为每份单元**自动**发出它用到的外部名字声明（机械活：编译器本来就有这些
-  名字；以前那 649 条影子声明是**手写**的，此后由它生成）
+复现（仓库根目录，逐条实跑）：
 
-这条要用实验先测出来（第六节第 0 步），因为它决定拆分后每份文件里有没有额外内容。
+```bash
+# 1) 拆 28 份
+python scripts/build_meta_unit.py                 # -> build/lain0/units/（28 份，文件名 = 模块键）
+
+# 2) 找一处「本单元没声明就引用别的单元」的调用
+grep -n 'std_types__meta_cell_get' build/lain0/units/std_regions.l1
+#   -> 25:  %r7 = #call @std_types__meta_cell_get(%r6)
+grep -cE '^(extern|#proc|data) .*std_types__meta_cell_get' build/lain0/units/std_regions.l1
+#   -> 0（本单元里它没有任何声明）
+
+# 3) 整批合并装载 -> parse + verify 通过，行为与单份一致
+./build/lain-meta.exe --units-dir build/lain0/units/ \
+    examples/arith.lain bootstrap/lain/examples/arith.lain
+#   unit files=28 bytes=568387 / verify subroutines=870 data=216 / image ok / host_status=0
+```
+
+全批普查：单元里「本单元未声明、直接引用别的单元定义的名字」共 **2649** 处（`@<名字>` 形态），
+装载与 verify 全部接受。这反过来解释了 7.3 表里「它用到的**别的模块**的名字」一行**不发**任何东西：
+拆分之后每份单元只含**它自己**定义的过程与数据、以及它用到的**宿主**服务声明（平坦名
+`lain_meta_*`，跨单元重复是允许的）。
 
 ## 四、决定二：导出名写在声明上（`@root`）
 
@@ -81,29 +100,97 @@ func lain_std_lower(source: u64) -> u32 { ... }
 
 | 步 | 做什么 | 判据 |
 | --- | --- | --- |
-| **0** | 可行性实测：编一个**互相 import 的两模块**小例子，各出一份，两份一起装载 | 合并装载后 verify 过、行为与"编成一整份"一致；**同时把第三节那个待测行为问清** |
-| **1** | 编译器加 `--split` 产出（先不改 bootstrap 的用法） | **拼接等价**：把 28 份按模块键排序拼起来，与今天的 `bootstrap.l1` 逐字节比较——若装载不需要外部声明，应当完全相等，那就说明拆分零行为变化 |
+| **0** | 可行性实测：编一个**互相 import 的两模块**小例子，各出一份，两份一起装载 | 合并装载后 verify 过、行为与"编成一整份"一致；**第三节那个行为已实测问清：装载器接受未声明引用，编译器不发外部声明** |
+| **1** | 编译器加 `--split` 产出（先不改 bootstrap 的用法） | **规范化逐份比对**：把整份里属于模块 K 的那一段切出来，与 `units/K.l1` 逐一比；临时值编号（`%rN`→`%r#`）规范化后 **28/28 相同**，即拆分零行为变化。脚本：`python scripts/split_equiv_check.py --build`。（**整份逐字节**比较不成立、也不该成立：整份的 `%rN` 是全局编号，每份各自从 1 起；根名在整份里带 `meta__` 前缀、在单元里平坦。） |
 | **2** | 加 `@root`，三个宿主入口改用标注，清单去掉根名列 | **产物逐字节不变**（证明只是搬家，行为没动） |
-| **3** | 驱动改为装载目录；bootstrap 与文档切到多份产出；删掉清单 | 合并装载后 `verify subroutines/data` 与今天一致、arith 结果逐字节相同、**整批指纹**跑两次一致 |
-| **4** | 差分测试：同一棵树，lain0 与 Meta 各出各的，逐份比对 | 先覆盖能编的模块，随 `docs/plan-selfhost.md` 的进度扩到 28 |
+| **3** | 驱动改为装载目录；bootstrap 与文档切到多份产出；删掉清单 | **实测通过**：`python scripts/build_meta_unit.py --check-twice` → 28 份、整批指纹 `ef2f198c…` 跑两次一致；`./build/lain-meta.exe --units-dir build/lain0/units/ --out build/lain0/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain` → `unit files=28 bytes=568387` / `verify subroutines=870 data=216` / `image ok` / `host_status=0` / `region grants=2` / `output bytes=74`，产物与 `build/arith.out` 逐字节相同；`bootstrap/SOURCE_ORDER` 已删除，驱动 `--unit`/`--units-dir` 没有默认值（都不给 → 退出码 2 + 提示） |
+| **4** | 差分测试：同一棵树，lain0 与 Meta 各出各的，逐份比对。脚本 `python scripts/diff_two_compilers.py`（可选 `--only <模块键>`，`--strict` 让红行变退出码 1） | 输出「模块 × Meta 状态 × 是否一致」表，**红 = 两边还没对上**。步 4 起实测：Meta 只把 **4** 个模块（`std_lex` / `std_regions` / `std_registry` / `std_types`）喂进了驱动（其余 24 个的 import 闭包要 63 条登记 > 驱动上限 32 → `rc=2`），而这 4 个**没有一个**与 lain0 一致（逐字 0 / 规范化后相同 0）：`std_types` `status=0`+trap 1004、`std_regions` `9415`、`std_registry` `4`、`std_lex` `6`，产物全被截断。差异类别 = **符号前缀/mangle**（Meta 把单元**自己的**顶层名发成扁平名，lain0 发 `<模块键>__` 前缀名；数据符号还多一个 `_storage`）叠加**降级缺口**（截断）。随 `docs/plan-selfhost.md` 的九步进度逐行转绿 |
 | **5** | `symbol_addr` 取消（**另立项**） | 普查已做：329 处全部**同单元**（312 个 `ro` 表 + 17 个定长表）、0 处跨单元；但**裸名当地址实测不通过**，所以不是纯清理，要先定语言规则 |
 
 **验收方式必须跟着改**：今天所有闸门按"一整份的字节数与 SHA-256"写（`584596`、`c4a1ffb3…`，
 全仓库共 3 处记录）。拆成多份后用**整批指纹**：把 `"<模块键> <该份 SHA-256>"` 按模块键排序、
 逐行拼起来，再取一次 SHA-256。判据从"等于某个历史哈希"改成"跑两次、整批指纹一致"。
 
-## 七、风险与未定
+## 七、实施要点与落点
+
+### 7.1 命令行与产物
+
+```bash
+# 拆分产出（新）：从入口顺 import 求闭包，每模块一份
+lain0 --entry bootstrap/meta.lain --split build/lain0/units/
+#   产物名 = 模块键 + .l1：units/std_lex.l1 … units/meta.l1
+
+# 装载（驱动新开关）：装载目录里所有 .l1，按文件名排序后合并
+./build/lain-meta.exe --units-dir build/lain0/units/ --out … <样例>
+```
+
+- `--entry` 与 `--unit <清单>` 互斥，`--split <dir>` 只与 `--entry` 同用。
+- **不生成任何清单**：目录里的文件集合就是产物，装载顺序由文件名排序决定（确定）。
+- 旧 `--unit <清单>` 在过渡期保留兼容，最后删除。
+
+### 7.2 整批指纹（替代单一哈希）
+
+```
+fingerprint = SHA-256( 按模块键排序后逐行拼接 "<模块键>  <该份文件的 SHA-256>" )
+```
+
+判据：**同一二进制 + 同一棵树 → 同一 fingerprint**（跑两次一致）。替代的是单份记录
+`584596` 字节 / `c4a1ffb3…`，全仓库 3 处记录已一起换掉。实现是 `scripts/units_fingerprint.py`
+（`--list` 打每份的键与 SHA-256）；`python scripts/build_meta_unit.py --check-twice` 一次跑两次并断言。
+步 3 实测：
+
+```
+units=28 fingerprint=ef2f198c12a36bd44ee040dcf1e06f928759c49697afdd9bc1144b28ebd4f977
+整批指纹跑两次一致: True
+```
+
+### 7.3 每份单元里放什么
+
+| 内容 | 说明 |
+| --- | --- |
+| 它自己定义的过程与数据 | 名字仍带模块前缀（`std_lex__…`、`std_lex__…_storage`） |
+| 它用到的宿主服务声明 | 平坦名（`lain_meta_*`）；跨单元重复是允许的（verify 允许同名且 link_name 相等） |
+| 它用到的**别的模块**的名字 | **不发**（第三节已实测：装载器接受未在本单元声明的跨单元引用；全批 2649 处），拆分是纯切片 |
+| 平坦根名 | 只有 `@root` 标注的那几个，且只出现在定义它们的那一份里 |
+
+### 7.4 必须报错的情形
+
+| 情形 | 处理 |
+| --- | --- |
+| 同一个名字在多份单元里都被**定义** | 编译期发现（编译器知道全部定义）→ 报错；verify 也该有检查 |
+| 两个模块各有一个同名 `@root` | 编译期报错 |
+| `@root` 平坦名与某个 `<键>__<名字>` 相同 | 编译期报错 |
+| 模块键里出现 `__` | 报错（沿用现有规则，保证前缀切分无歧义） |
+
+### 7.5 落点（按迁移步）
+
+| 步 | 文件 | 函数 / 位置 | 做什么 |
+| --- | --- | --- | --- |
+| 1 | `seed/lain0/tools/main.cpp` | 选项解析 | 加 `--entry` / `--split <dir>`，与 `--unit` 互斥 |
+| 1 | `seed/lain0/include/lain0/Driver.hpp`、`src/Driver.cpp` | `compileUnit` 一族 | 新增「按入口求闭包 + 逐模块产出」的入口 |
+| 1 | `seed/lain0/src/Lower.cpp` | `run`（模块循环） | 现在整份共用一个 builder；改成**每模块一个 builder、各出一份文本** |
+| 1 | `seed/kernel/src/text/print.c` | 模块打印 | 不变（改成按模块调用一次） |
+| 1 | `seed/meta_driver.c` | `--unit` 装载段 | 加 `--units-dir`：装载目录内所有 `.l1`，按文件名排序 |
+| 2 | `seed/lain0/src/Lexer.cpp`、`include/lain0/Lexer.hpp` | `Tok` / 扫描 | 加 `@` 记号 |
+| 2 | `seed/lain0/src/Parser.cpp` | 顶层声明 | 读一行或多行 `@root`，挂到后面的声明上 |
+| 2 | `seed/lain0/src/Sema.cpp`、`Sema.hpp` | 顶层登记 | 记「根名」标志 + 7.4 的三条防撞检查 |
+| 2 | `seed/lain0/src/LowerDecl.cpp` | 过程名 / 数据符号 | 带标注的发改平坦名 |
+| 3 | `bootstrap/meta.lain` | 三个入口 | 加 `@root` |
+| 3 | `bootstrap/SOURCE_ORDER` | —— | **已删除**（模块集合改由入口 `bootstrap/meta.lain` 的 import 闭包给出；`@root` 承载平坦根名） |
+| 3 | `scripts/build_meta_unit.py` | 全部 | 改成调 `--entry … --split …`，不再读清单 |
+
+## 八、风险与未定
 
 | 项 | 说明 |
 | --- | --- |
-| **装载器行为**（第三节） | 决定要不要编译器生成外部声明。必须实测，不能假设 |
+| **装载器行为**（第三节） | **已实测：接受未在本单元声明的跨单元引用 → 编译器不发外部声明**（复现命令在第三节）。剩下的是 verify 对「多份产出里同名重复定义」的检查（见下一行） |
 | **重复定义** | 合并后每个名字必须**只有一处定义**；编译器要保证，verify 该有检查（今天没有多份产出的经验，这条要验） |
-| 记录要更新 | 3 处按单份记录的文档（`04-bootstrap-dialect.md`、`plan-selfhost.md`、`selfhost-gap.md`） |
+| 记录要更新 | 3 处按单份记录的文档（`04-bootstrap-dialect.md`、`plan-selfhost.md`、`selfhost-gap.md`）—— 步 3 已换成整批指纹 |
 | 小编译形式变化 | 编一个样例今天出 1 份，之后出"样例 + 它 import 的模块"多份，命令与脚本要跟着改 |
 | **接口文件（分开分析）** | 明确**不在本提案内**，另作一件事 |
 | Meta 侧 | 拆分产出与 `@root` 都要在 Meta 里同样实现；两边一致由第 4 步的差分测试守 |
 
-## 八、与既有决策的关系
+## 九、与既有决策的关系
 
 - **D-004** 的"清单承载顺序与根名"一条**被本提案取代**：顺序不再需要承载（每模块各出各的），
   根名改为声明标注。前缀方案与"跨模块一律 `别名.名字`"两条**不变**。

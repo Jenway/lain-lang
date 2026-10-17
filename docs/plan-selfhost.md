@@ -10,7 +10,7 @@
 
 | 路径 | 谁编译谁 | 状态 |
 | --- | --- | --- |
-| lain0（C++）编 bootstrap | 28 个 Lain 模块 → LAINIR 584596 字节 | **已通**：零诊断、两次跑哈希相同、在 VM 上 `host_status=0` |
+| lain0（C++）编 bootstrap | 28 个 Lain 模块 → **每模块一份** LAINIR（整批指纹 `ef2f198c…`） | **已通**：零诊断、两次跑整批指纹相同、在 VM 上 `host_status=0` |
 | Meta（Lain）编源码 | 样例 → LAINIR | 26/38 绿，12 红 |
 | **Meta 编 bootstrap 自己** | 28 个单元 → LAINIR | **未通**，基线 **0/28** |
 
@@ -29,7 +29,7 @@
 `meta_scope_scan_root` import 分支 —— `meta_source_find` 返回 NOT_FOUND 就 `lain_meta_fail(11)`，
 位置在**降级之前的预扫描**。它**不是**能力缺口：Meta 的 import 匹配是「spec 规范化后与登记名
 **逐字节相等**」，而 bootstrap 源码写的是相对导入方目录的 `import("types")`。同一份源码换登记名：
-`SOURCE_ORDER` 路径 → **11**；规范化 spec → **6**（1803 字节）；少 `.lain` → **0 + trap 1004**。
+清单路径形态的登记名（当时的 `SOURCE_ORDER` 路径写法，那份清单已在步 3 删除）→ **11**；规范化 spec → **6**（1803 字节）；少 `.lain` → **0 + trap 1004**。
 **这是测试口径问题**，单元级实测一律用「登记名 = 源码里的 spec」绕过（第 8 步才真正解决）。
 
 **一条很值钱的好消息**：bootstrap 源码**完全没有**用到 `struct` / `enum` / `ref` / `slice` /
@@ -50,7 +50,7 @@
 
 ```bash
 # 单次降级（登记名 = 源码里的 spec，单元级口径）
-./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt --out <新路径> --lower 0 \
+./build/lain-meta.exe --units-dir build/lain0/units/ --out <新路径> --lower 0 \
     std/regions.lain bootstrap/std/regions.lain types.lain bootstrap/std/types.lain
 # 判据：host_status=0 且
 ./build/check_unit.exe <新路径>      # 期望 PARSE+VERIFY OK
@@ -124,3 +124,20 @@ Meta 的 mangle 与 `symbol_addr` 一律产出 `<键>__<名字>`；每一步的�
 **How**：Meta 侧改 `std/modules.lain` 的 mangle 与 `meta_source_find`；lain0 侧不动。
 
 **Status**：待定（本计划提交后确认）。
+
+
+## 八、实测补充（来自差分测试 `scripts/diff_two_compilers.py`）
+
+- **驱动侧是当前覆盖率的天花板**：28 个模块里有 24 个的 import 闭包需要 **63 条登记**，驱动
+  `DRIVER_MAX_SOURCES=32` 直接拒绝（`rc=2 源码太多`）——**不是 Meta 的能力问题**。能进驱动的只有
+  4 个：`std/lex`、`std/regions`、`std/registry`、`std/types`。第 8 步的"登记与区段预算"因此是硬前提。
+- **第 1 步的范围要扩大**：Meta 现在连被降级单元**自己**的顶层定义都不加模块前缀——产物发
+  `meta_region_scratch_record`，而 lain0 发 `std_regions__meta_region_scratch_record`；数据符号还少
+  `_storage` 后缀（lain0 `…_record_storage`，Meta `…_record`）。对照实验：把被降级单元的逻辑路径换成
+  6 种写法（含 `std/regions`、`std__regions`、`std::regions`），Meta 产出一模一样、**全是扁平名**——
+  所以问题不在 import 站，而是**单元自己的定义压根没走 mangle**。第 1 步要同时覆盖两处。
+- **当前基线（就是这么差，不要美化）**：4 个能跑的模块全部非零——`std_lex`=6、`std_regions`=9415、
+  `std_registry`=4、`std_types`=0+VM trap；四份产物都被截断（`check_unit` 全报 `PARSE FAILED 3001`）。
+  逐字相同 0、规范化后相同 0。
+- 看表：`python scripts/diff_two_compilers.py`（**观测工具，rc 恒 0**；`--strict` 有红行才 rc 1）。
+  每修好一处，对应的行会变绿——这是自举进度的唯一客观仪表。

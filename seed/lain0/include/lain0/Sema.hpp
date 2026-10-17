@@ -62,16 +62,17 @@ struct AggregateLayout {
 // 类型键与符号名的限定全靠它 —— 裸名限定成 `<键>__<名字>`，
 // 限定名 `M.Point` 先经别名表换成被导入模块的键再查。
 //
-// 根名（§3.2）：清单里显式标为根名的顶层声明例外，发出的名字保持平坦。
-// 宿主按名字找它们（Meta 驱动默认入口 `lain_std_lower` 就是这样一个名字），
-// 所以 qualify 对根名原样返回 —— 顶层符号、数据符号、类型键于是全部平坦，
-// 且因为全部经这一个函数，不存在漏改的旁路。
+// 根名（§3.2 / proposal-modules-v2 §四）：源码里带 `@root` 标注的顶层声明例外，
+// 发出的名字保持平坦。宿主按名字找它们（Meta 驱动默认入口 `lain_std_lower` 就是
+// 这样一个名字），所以 qualify 对根名原样返回 —— 顶层符号、数据符号、类型键于是
+// 全部平坦，且因为全部经这一个函数，不存在漏改的旁路。
+// rootNames 由 Program::addUnit 从 AST 的 `@root` 标注登记（不再来自清单的根名列）。
 struct ModuleContext {
   std::string key{};        // 模块键，如 `std_lex` / `arith`
   std::string sourceRoot{}; // 源根目录（入口文件或清单所在目录）
   // import 的别名 -> 被导入模块的键。
   std::unordered_map<std::string, std::string> aliases{};
-  // 清单里标为根名的顶层声明（源码里的裸名字）。
+  // 源码里带 `@root` 标注的顶层声明的裸名字。
   std::unordered_set<std::string> rootNames{};
 
   std::string qualify(std::string_view name) const {
@@ -242,12 +243,16 @@ public:
 
   // 入口：模块清单（§3.3/§3.7）。每行 `<相对路径> [<根名> …]`，路径相对清单
   // 所在目录、省略 `.lain`，`#` 开头为注释。源根 = 清单所在目录。
-  // 根名写进对应模块的 ModuleContext，它们的顶层声明于是发出平坦名字。
+  // 行尾的名字**不再读**（proposal-modules-v2 §四）：导出名从源码的 `@root` 标注来。
   bool loadUnit(const std::string &manifestPath, SourceMgr &src,
                 DiagSink &diags);
 
   // 两轮分析。ts 由调用方给（全部模块共用一套类型表）。
   bool analyze(TypeStore &ts, DiagSink &diags);
+
+  // §四 防撞（全部模块加载完之后跑）：`@root` 平坦名之间，以及平坦名与任何
+  // `<键>__<名字>` 之间，都不许重名。编译期发现，不留给运行的 start FAILED 9102。
+  bool checkRootExports(DiagSink &diags) const;
 
   const ModuleUnit *root() const { return root_; }
   const ModuleUnit *find(const std::string &key) const;

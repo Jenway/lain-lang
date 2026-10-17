@@ -2,6 +2,14 @@
 
 本计划面向 HEAD `e717e9b`（分支 `master`）。全部改动落在 `seed/lain0/`、`bootstrap/`、`scripts/`、`docs/`；`seed/kernel/` 不改。
 
+> **后续变更（步 3，`docs/proposal-modules-v2.md` §六）：`bootstrap/SOURCE_ORDER` 已删除。**
+> 本文的「把 `SOURCE_ORDER` 就地扩成模块清单、用 `lain0 --unit <清单>` 一次编出整份」
+> 这套走法已被取代：模块集合改由**入口**（`bootstrap/meta.lain`）顺 `import` 求闭包，
+> 产出改成**每个模块一份**（`lain0 --entry bootstrap/meta.lain --split build/lain0/units/`），
+> 装载改走驱动的 `--units-dir <目录>`（按文件名排序合并），发出平坦名的少数声明由声明
+> 自己的 **`@root`** 标注决定。下面保留的是当时的走法、数字与验收记录，凡与上述冲突处
+> 一律以 `docs/proposal-modules-v2.md` 与 `docs/development.md` 为准。
+
 ## 一、现状
 
 lain0 已经能解析 `let M = import("…");`，但它只做三件事：把别名登记成一个类型、把被导入模块的 StaticLet 名字抄进导入方的 `topLevelTypes`、把被导入模块的 StaticLet/Struct/Enum 降级进导入方自己的 `data_` 与 `subs_`。于是：
@@ -20,7 +28,7 @@ bootstrap/ 因此继续用 28 份源码拼接 + 649 条跨单元 extern 影子�
 
 1. lain0 提供模块命名空间：每个模块的顶层声明（函数、静态数据、类型）都带上模块前缀，不同模块的同名声明互不冲突。
 2. 模块导出函数：`M.f(x)` 直接可用，`M.NAME`、`M.Type`、跨模块字段访问同时可用。
-3. `bootstrap/` 的 28 个单元各自写出 import 依赖，删掉 649 条跨单元 extern 影子声明，不再拼接源码；`lain0 --unit bootstrap/SOURCE_ORDER` 一次产出整份模块。
+3. `bootstrap/` 的 28 个单元各自写出 import 依赖，删掉 649 条跨单元 extern 影子声明，不再拼接源码；模块集合由入口顺 import 求闭包（当时用 `lain0 --unit bootstrap/SOURCE_ORDER` 一次产出整份模块；该清单已在步 3 删除，见文首注）。
 
 ## 三、设计
 
@@ -43,7 +51,12 @@ bootstrap/ 因此继续用 28 份源码拼接 + 649 条跨单元 extern 影子�
 
 清单里标为根名的声明例外，发出名字保持平坦（bootstrap 只有 `meta.lain` 的 `lain_std_abi_version`、`lain_std_initialize`、`lain_std_lower` 三个）。宿主 extern 的 `link_name` 依旧原样搬出、依旧跨单元重复、依旧平坦（`seed/kernel/src/ir/verify.c:890` 允许同名双方都是 extern 且 `link_name` 相等）。
 
-### 3.3 清单格式
+### 3.3 清单格式（**已废弃**，见文首注）
+
+> 这一节描述的 `bootstrap/SOURCE_ORDER` 模块清单**已在步 3 删除**。现在的口径是：
+> 模块集合从入口 `bootstrap/meta.lain` 顺 `import("…")` 求闭包；产出每模块一份
+> （`lain0 --entry bootstrap/meta.lain --split build/lain0/units/`）；平坦根名由声明上的
+> `@root` 决定。下面保留原记录。
 
 `bootstrap/SOURCE_ORDER` 就地扩成模块清单：每行 `<相对路径> [<根名> …]`，路径相对清单所在目录、省略 `.lain` 后缀；`#` 开头为注释。首部注释改写为「清单顺序即降级顺序，它是产物确定性的来源；同一份清单必须给出逐字节相同的模块」，并说明根名的含义。例：
 
@@ -97,6 +110,8 @@ lain0 --unit <清单> [-o out.l1] [--round-trip]
 
 `scripts/build_meta_unit.py` 缩成一层包装：调用 `lain0 --unit bootstrap/SOURCE_ORDER -o build/lain0/bootstrap.l1`，然后把 `../build/lain0/bootstrap.l1` 一行写进 `build/lain0/bootstrap_unit.txt`（`seed/meta_driver.c:220` 会在每行前拼 `bootstrap/`）。拼接源码与丢弃 extern 行的逻辑删除。
 
+> **步 3 之后**：`build_meta_unit.py` 改调 `lain0 --entry bootstrap/meta.lain --split build/lain0/units/`，产出 28 份（文件名 = 模块键），**不再读清单、也不再生成 `bootstrap_unit.txt`**；驱动改 walk 目录（`--units-dir`）。
+
 ### 3.8 内核不改
 
 `#call` 的名字解析、extern 的能力绑定、数据符号映射全部是按名字的字符串比较（`seed/kernel/src/vm/image.c:318`、`seed/kernel/src/vm/tcb.c:113`、`seed/kernel/src/meta/apply.c:26`），模块前缀足够区分符号。宿主能力的 `link_name` 保持平坦，`LAINVM_CAPS_NAME_MAX`（64）与 IR 名字长度都不受影响（最长的新名字 `std_macros_my_block__meta_expand_replacement_my_block`，53 字节）。
@@ -113,7 +128,7 @@ lain0 --unit <清单> [-o out.l1] [--round-trip]
 | `seed/lain0/src/LowerExpr.cpp` | `lowerCall` 接受模块成员被调者；`lowerDottedExpr` 用成员表里真正的符号名；`symbol_addr` 按本模块数据名表限定；`lowerProjection` 的枚举名限定 |
 | `seed/lain0/src/Driver.cpp`、`seed/lain0/include/lain0/Driver.hpp` | `compileFile` 走 Program；新增 `compileUnit(manifestPath, opts, …)`；诊断与 verify 门槛不变 |
 | `seed/lain0/tools/main.cpp` | `--unit` 选项与互斥检查 |
-| `bootstrap/SOURCE_ORDER` | 改成模块清单，28 行保留顺序，`meta` 行带三个根名，注释改写 |
+| `bootstrap/SOURCE_ORDER` | 当时改成模块清单（28 行保留顺序，`meta` 行带三个根名，注释改写）；**步 3 已删除整份文件**，根名改由 `bootstrap/meta.lain` 的 `@root` 承载，模块集合由入口求闭包 |
 | `bootstrap/std/**`、`bootstrap/meta.lain` | 加 import、删 649 条影子 extern、改写 652 个跨单元调用点与 167 处跨单元 `symbol_addr` |
 | `bootstrap/lain/examples/` | `modules_lib.lain`/`modules_main.lain` 扩展；新增 `modules_twin_a.lain`、`modules_twin_b.lain`、`modules_twin.lain` |
 | `scripts/build_meta_unit.py` | 缩成调用 `lain0 --unit` 的包装 |
@@ -144,8 +159,8 @@ lain0 --unit <清单> [-o out.l1] [--round-trip]
 3. 命名空间正确性：`modules_twin` 样例里两个模块各自声明同名的 `dup`，编译产物同时含 `modules_twin_a__dup` 与 `modules_twin_b__dup`，运行结果等于 `1 + 2`。改动之前这一编译必然报 verify 的 `duplicate subroutine`（2022）。
 4. 函数导出：`modules_main` 样例里的 `M.bump(M.twice)` 编译通过，产物含 `#call @modules_lib__bump`。
 5. 跨模块数据与字段：`M.table` 读到的地址可被 `store` 使用；`func px(p: M.Point) -> i32 { return p.x; }` 编译并通过 verify。
-6. 确定性：`lain0 --unit bootstrap/SOURCE_ORDER -o build/acp/unit_a.l1` 连续跑两次，两份产物 SHA-256 相同。
-7. bootstrap 规模与信号：`lain-meta --unit build/lain0/bootstrap_unit.txt --out build/x.out examples/arith.lain bootstrap/lain/examples/arith.lain` 输出 `verify subroutines=870 data=216`、`sources count=1`、`image ok`、`host_status=0`、`region grants=2`、`output bytes=74`，与改造前的数值逐项相同。
+6. 确定性：连续跑两次、产物相同（当时的口径是 `lain0 --unit bootstrap/SOURCE_ORDER -o build/acp/unit_a.l1`，两份 SHA-256 相同；**步 3 改口径**：跑两次比**整批指纹**，见 `docs/development.md`）。
+7. bootstrap 规模与信号：装载整份 Meta 后跑 arith，输出 `verify subroutines=870 data=216`、`sources count=1`、`image ok`、`host_status=0`、`region grants=2`、`output bytes=74`，与改造前的数值逐项相同。（当时的装载命令是 `lain-meta --unit build/lain0/bootstrap_unit.txt --out build/x.out …`；**步 3 起**改成 `lain-meta --units-dir build/lain0/units/ --out build/arith.out …`，数字逐项不变 —— 实测 `unit files=28 bytes=568387`。）
 8. 全样例对照：24 个绿色样例的 `host_status`、`region grants`、输出字节数、`.out` 的 MD5 与改造前逐项相同；11 个红色样例（jumps、loop、loop_if、loop_local、loop_value、modules_lib、modules_main、refs、strinline、symbol_addr、u8math）的退出码、`host_status`、trap、输出 MD5 与改造前逐项相同。红色样例的修复不在本计划范围内。
 9. `extern` 净化：`bootstrap/` 里不再有任何 extern 名字同时是别处的顶层定义名（脚本核对一次，数量为 0）。
 10. 文档闸门：`docs/04-bootstrap-dialect.md` 里不再有「模块里的函数成员还调不了」「跨模块的字段访问 p.x 报 4」这类描述；`docs/development.md` 的样例统计更新为 38 与新的通过数。
@@ -157,15 +172,15 @@ lain0 --unit <清单> [-o out.l1] [--round-trip]
 1. **Sema 与类型表限定**：`Program` + `ModuleContext`，类型键限定，单文件入口也走模块前缀。闸门：`cmake --build build` 通过；`bash scripts/regress.sh --round-trip` 仍是 35 全过；抽查 `arith.lain` 的产物里顶层名字带 `arith__` 前缀。
 2. **导出与命令行**：成员表填 `Kind::Func`，`M.f(x)`、`M.NAME`、`M.Type` 打通，`--unit` 与清单解析落地，根名保持平坦。闸门：闸门 3、4、5、6（新样例与确定性），`regress.sh` 全过。
 3. **样例扩充**：新增 `modules_twin_a/b`、`modules_twin`，扩展 `modules_lib`/`modules_main`。闸门：验收闸门 2。
-4. **bootstrap 改写**：按清单顺序逐个单元改（先 `std/lex`，最后 `meta.lain`），每改完一个单元用 `lain0 --unit` 编译整份清单确认不引入新诊断；全部改完后跑闸门 7、8、9。这一步之前 `--unit bootstrap/SOURCE_ORDER` 预期报错，属于中间状态。
+4. **bootstrap 改写**：按清单顺序逐个单元改（先 `std/lex`，最后 `meta.lain`），每改完一个单元用 `lain0 --unit` 编译整份清单确认不引入新诊断；全部改完后跑闸门 7、8、9。这一步之前 `--unit bootstrap/SOURCE_ORDER` 预期报错，属于中间状态。（这是当时的**过程记录**；那份清单后来在步 3 删除，现在按单元跑 `lain0 --entry bootstrap/meta.lain --split`。）
 5. **脚本与文档**：`build_meta_unit.py` 缩成包装，删除审计脚本，更新四份文档，追加 D-004。闸门：`python scripts/build_meta_unit.py`、`bash scripts/regress.sh`、闸门 7 一起复跑一遍。
 
 ## 八、决策 D-004（写入 docs/decisions.md）
 
 **What**：模块命名空间与根名清单。每个模块的顶层声明发出 `<模块键>__<名字>`，模块键由源根相对路径去掉 `.lain` 后把 `/` 换成 `_` 得到；清单里标为根名的少数声明保持平坦，供宿主按名字查找；跨模块访问一律写 `M.名字`，`symbol_addr` 只管本模块的静态数据。
 
-**Why**：内核按平坦字符串解析名字，模块前缀是让两个模块的同名声明共存的最小手段；清单承载顺序与根名，使整份模块的产物只由清单决定，满足「同一份 SOURCE_ORDER 必须给出逐字节相同的模块」。
+**Why**：内核按平坦字符串解析名字，模块前缀是让两个模块的同名声明共存的最小手段；「清单承载顺序与根名」在当时使整份模块的产物只由清单决定 —— **这一条已被 `docs/proposal-modules-v2.md` 取代**（每模块各出各的，顺序不再需要承载；根名改为声明的 `@root` 标注）。前缀方案与「跨模块一律 `M.名字`」两条不变。
 
-**How**：`Program` 一次加载整个依赖图并两轮分析，`Lowerer` 按清单顺序把全部模块降级进同一个 `L1Builder`；`scripts/build_meta_unit.py` 只负责调用 CLI 并生成驱动要的 unit 列表。
+**How**：`Program` 一次加载整个依赖图并两轮分析，`Lowerer` 把全部模块降级进同一个 `L1Builder`；`scripts/build_meta_unit.py` 只负责调用 CLI。（步 2 起：带 `@root` 的声明发平坦名；步 3 起：改按入口拆分产出、驱动按目录装载。）
 
 **Status**：采纳。

@@ -371,7 +371,8 @@ func meta_lower_import(base: addr, len: u64, eq_at: u64) -> u32 {
   let pat: u64 = std_scope.meta_path_buffer();
   let scratch: addr = lain_meta_scratch_data();
   let buf: addr = scratch + pat;
-  let mag_len: u64 = meta_build_mangle(path, n, buf);
+  // 键从**解析到的模块路径**算（不是 import 说明符）：见 meta_build_mangle。
+  let mag_len: u64 = meta_module_key(idx, buf);
   // 模块那一层压进链，扫一次（见 meta_scope_has_source 的注释），发完全部值
   // 绑定的过程，再把当前源码换回去。
   let old_src: u64 = std_scope.meta_scope_enter(idx);
@@ -399,16 +400,32 @@ func meta_lower_import(base: addr, len: u64, eq_at: u64) -> u32 {
 //
 // LAINIR 的名字是扁平的，所以命名空间成员要 **mangle 成扁平名**才落得到物理层：
 //
-//   std/math.lain 里的 answer   →   std__math__answer
+//   std/types.lain 里的 meta_bytes_equal   →   std_types__meta_bytes_equal
 //
-// 规则：去掉 `.lain`，`::`（也就是规范化之后的 `/` 的位置…不，是**逻辑路径里的
-// `::`**）变 `__`，再拼 `__` 和成员名。v0 里导入的绑定只支持 `let NAME = INT;`
-// 这一种形状，所以 repr 固定 `#bits<64>`——类型标注的导入是下一步。
+// 规则与 lain0 的 `Program::keyOf`（seed/lain0/src/Sema.cpp）**逐字一致**：
+// 模块键 = 模块**解析到的路径**（源根相对路径）去结尾 `.lain`、每个 `/` 换一个 `_`。
+// 再拼 `__` 和成员名。
+//
+// 键必须从**解析到的模块**算，不能从 import 说明符算 —— 说明符里的 `::`、相对段、
+// 省掉的 `.lain` 都是**解析之前**的东西，键只认扁平名。旧写法从说明符算、`::`→`__`、
+// `/` 原样保留，于是 spec `probe/pkg/a` 发出 `#proc probe/pkg/a__av()` —— 名字里有
+// `/`，不是合法标识符，`lainir_parse` 直接报 3001。
 
-// 逻辑路径 → mangle 前缀，写进 buf，返回长度。
-// 旧 IR 的 %body 值 if 结果喂给循环条件（无副作用），改成一次性选择循环。
-func meta_build_mangle(logical: addr, len: u64, buf: addr) -> u64 {
-  let has_suffix: bool = meta_ends_with_lain(logical, len);
+// NUL 结尾字符串的字节数（不含结尾 NUL）。登记的逻辑路径就是这种串。
+func meta_path_len(p: addr) -> u64 {
+  let n: u64 = loop scan(i: u64 = 0) {
+    let b: u8 = load(p + i);
+    let bw: u32 = b as u32;
+    let stop: bool = bw == 0;
+    if stop { break scan(i); }
+    continue scan(i + 1);
+  };
+  return n;
+}
+
+// 模块路径 → 模块键，写进 buf，返回长度。去结尾 `.lain`（长度够时）、`/`→`_`。
+func meta_build_mangle(path: addr, len: u64, buf: addr) -> u64 {
+  let has_suffix: bool = meta_ends_with_lain(path, len);
   let body: u64 = loop pick_body(t: u64 = 0) {
     if has_suffix == 0 { break pick_body(len); }
     let five: u64 = len - 5;
@@ -417,33 +434,26 @@ func meta_build_mangle(logical: addr, len: u64, buf: addr) -> u64 {
   let j: u64 = loop put(i: u64 = 0, j: u64 = 0) {
     let more: bool = i < body;
     if more {
-      let is_colon: bool = std_lex.bs_is_byte(logical, i, 58);
-      let raw: u8 = std_lex.bs_byte_at(logical, i, body);
-      let out: u8 = if is_colon { 95 } else { raw };
+      let is_slash: bool = std_lex.bs_is_byte(path, i, 47);
+      let raw: u8 = std_lex.bs_byte_at(path, i, body);
+      let out: u8 = if is_slash { 95 } else { raw };
       let p: addr = buf + j;
       store(p, out);
-      let j2: u64 = j + 1;
-      let i1: u64 = i + 1;
-      let also: bool = std_lex.bs_is_byte(logical, i1, 58);
-      let dbl: bool = is_colon and also;
-      // `::` 是两字节的分隔符，mangle 成两个下划线（`std::math` → `std__math`）。
-      // 只发一个的话 `std::a::b` 和 `std::a_b` 会撞成同一个扁平名。
-      let j3: u64 = if dbl {
-        let q: addr = buf + j2;
-        let under: u8 = 95;
-        store(q, under);
-        let j4: u64 = j2 + 1;
-        j4
-      } else {
-        j2
-      };
-      let step: u64 = if dbl { 2 } else { 1 };
-      continue put(i + step, j3);
+      continue put(i + 1, j + 1);
     } else {
       break put(j);
     }
   };
   return j;
+}
+
+// 源码 idx 的**模块键**（写进 buf，返回长度）：键从它解析到的路径算，见 meta_build_mangle。
+// import 站（`M.x`）与「单元自己的顶层名」两处都用它。
+func meta_module_key(idx: u64, buf: addr) -> u64 {
+  let path: addr = lain_meta_source_path_data(idx);
+  let len: u64 = meta_path_len(path);
+  let k: u64 = meta_build_mangle(path, len, buf);
+  return k;
 }
 
 // `meta_find_binding_in`（回模块源码里找一条 `let`，返回 `=` 的下标）**已经删了**：
@@ -604,7 +614,7 @@ func meta_lower_ns_value(base: addr, len: u64, bind_lo: u64, bind_hi: u64, ns_lo
   let scratch: addr = lain_meta_scratch_data();
   let pat: u64 = std_scope.meta_path_buffer();
   let buf: addr = scratch + pat;
-  let mag_len: u64 = meta_build_mangle(path, n, buf);
+  let mag_len: u64 = meta_module_key(idx, buf);
 
   // 切到模块那一层；**扫一次就留着**（见 meta_scope_has_source 的注释）。
   let old_src: u64 = std_scope.meta_scope_enter(idx);
@@ -656,7 +666,7 @@ func meta_emit_ns_operand(base: addr, len: u64, ns_lo: u64, ns_hi: u64, m_lo: u6
   let pat: u64 = std_scope.meta_path_buffer();
   let scratch: addr = lain_meta_scratch_data();
   let buf: addr = scratch + pat;
-  let mag_len: u64 = meta_build_mangle(path, n, buf);
+  let mag_len: u64 = meta_module_key(idx, buf);
   let old_src: u64 = std_scope.meta_scope_enter(idx);
   let mname: addr = base + m_lo;
   let mnlen: u64 = m_hi - m_lo;

@@ -20,6 +20,12 @@ meta_emit_module_exports -> meta_emit_module_binding。后者只看初值**头�
 与它们有没有被引用无关。
 
 用法： python scripts/import_export_scan.py [--tsv]
+       python scripts/import_export_scan.py --audit
+
+模块集合**不再来自任何清单**（`bootstrap/SOURCE_ORDER` 已在步 3 删除）：从入口
+`bootstrap/meta.lain` 顺 `import("…")` 求闭包，得到 28 个单元，与
+`lain0 --entry bootstrap/meta.lain --split build/lain0/units/` 的 28 份一一对应
+（lain0 的路径解析规则，见 Sema.cpp 的 resolveModulePath）。
 """
 
 import argparse
@@ -31,7 +37,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BOOT = ROOT / "bootstrap"
-ORDER = BOOT / "SOURCE_ORDER"
+ENTRY_REL = "meta"          # 入口：bootstrap/meta.lain（相对 BOOT、省略 .lain）
 
 DECL_RE = re.compile(r"^(let|func|extern|struct|enum)\s+([A-Za-z_]\w*)")
 IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
@@ -48,19 +54,81 @@ REACTION = {
 }
 
 
-def units():
-    """SOURCE_ORDER 里的 28 个单元（相对 bootstrap/ 的 .lain 路径）。
+IMPORT_LINE = re.compile(r'let\s+\w+\s*=\s*import\("([^"]*)"\)')
 
-    清单格式见 docs/plan-modules.md §3.3：每行 `<相对路径> [<根名> …]`，
-    路径省略 `.lain` 后缀、`#` 起注释 —— 这里只看每行的第一段。
-    """
+
+def _norm_parts(parts):
+    """`/` 分段的纯词法规范化（与 lain0 一致：丢掉 `.`、消掉 `a/../`）。"""
     out = []
-    for raw in ORDER.read_text(encoding="utf-8").splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line:
+    for part in parts:
+        if part in ("", "."):
             continue
-        out.append(BOOT / (line.split()[0] + ".lain"))
-    return out
+        if part == "..":
+            if out and out[-1] != "..":
+                out.pop()
+            else:
+                out.append("..")
+        else:
+            out.append(part)
+    return "/".join(out)
+
+
+def _import_specs(text):
+    """源码里的 import 说明符（顶层 `let NAME = import("…");`，跳过 `//` 注释）。"""
+    for raw in text.splitlines():
+        m = IMPORT_LINE.match(raw.split("//", 1)[0])
+        if m:
+            yield m.group(1)
+
+
+def _resolve_spec(importer_rel, spec):
+    """import("…") 的说明符 -> 被导入单元的相对路径（省略 .lain），lain0 的规则。"""
+    if "::" in spec:
+        base, mod = spec.rsplit("::", 1)
+    else:
+        base, mod = "", spec
+    d = importer_rel.rsplit("/", 1)[0] if "/" in importer_rel else ""
+    cands = [_norm_parts((d + "/" + mod).split("/"))]
+    if base:
+        cands.append(_norm_parts((d + "/" + base + "/" + mod).split("/")))
+    for c in cands:
+        if (BOOT / (c + ".lain")).exists():
+            return c
+    return None
+
+
+def closure_units():
+    """从入口 `bootstrap/meta.lain` 顺 import 求出的模块集合（相对 BOOT、省略 .lain）。
+
+    顺序 = 发现顺序（入口先，随后按 import 语句出现次序），与
+    `lain0 --entry bootstrap/meta.lain --split …` 的闭包一致，但**不是**文件的
+    模块键排序 —— 需要那个排序的地方（装载、指纹）自己按模块键排。
+    """
+    seen, order = set(), []
+
+    def visit(rel):
+        if rel in seen:
+            return
+        path = BOOT / (rel + ".lain")
+        if not path.exists():
+            return
+        seen.add(rel)
+        order.append(rel)
+        for spec in _import_specs(path.read_text(encoding="utf-8")):
+            target = _resolve_spec(rel, spec)
+            if target is not None:
+                visit(target)
+
+    visit(ENTRY_REL)
+    return order
+
+
+def units():
+    """28 个单元（相对 bootstrap/ 的 .lain 路径）。
+
+    集合来自入口的 import 闭包（见 closure_units），**不读任何清单**。
+    """
+    return [BOOT / (rel + ".lain") for rel in closure_units()]
 
 
 def split_decls(text):

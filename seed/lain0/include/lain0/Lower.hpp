@@ -55,6 +55,13 @@ public:
   // 返回 nullptr 表示失败（diags 已填）。
   const L1Module *run(const Program &prog);
 
+  // 拆分产出（`--split`）用的单模块入口：只降级 u 这一个模块，末尾建一个
+  // 只含**该模块**数据块与过程的 lainir_module（模块名取该模块键）。
+  // 调用方为每份单元新建一个 Lowerer（新 builder），所以 data_/subs_ 天然
+  // 只装一个模块；临时值编号也从 0 起 —— 每份单元的文本于是只由它自己的
+  // 源码决定，与降级顺序无关。
+  const L1Module *runModule(const ModuleUnit *u);
+
   // --- 以下供内部分工使用，三个 .cpp 各实现一组 ---
 
   // LowerDecl.cpp：顶层
@@ -113,6 +120,10 @@ public:
                               std::vector<const L1Inst *> &out, L1Operand &value);
 
 private:
+  // 把一个模块的顶层声明降级进当前 builder（run 与 runModule 共用）。
+  // 换模块上下文、清绑定表；import 的加载与解析是 Program 的事。
+  bool lowerOne(const ModuleUnit *u);
+
   // 临时值编号器：编号来自 Lowerer 自己的计数器，不复用 bootstrap 的 scratch +144。
   const char *nextTemp();
   const char *intern(std::string_view s) const;

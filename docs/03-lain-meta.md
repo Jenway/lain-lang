@@ -61,26 +61,33 @@ Meta 运行于受限沙箱中，通过 CSpace 调用宿主服务：
 - **RawAst 存储**：语法树由宿主线性写入只读 Arena，通过 VSpace 映射给 Meta。
 - **语法绑定**：语法结构的合法性与解释方式由 Meta 内部的绑定表驱动。改变 Meta 的绑定逻辑，同一段语法树即可解释为不同的语言语义。
 
-## 模块、清单与构建（实现口径）
+## 模块、产出与装载（实现口径）
 
-Meta 本体今天就是 `bootstrap/` 下 **28 个 Lain 源码模块**（`meta.lain` 排在清单末位）：
+Meta 本体今天就是 `bootstrap/` 下 **28 个 Lain 源码模块**，**没有清单**：
 
-- `bootstrap/SOURCE_ORDER` 是**模块清单**：每行 `<相对路径> [<根名> …]`，路径相对清单所在目录、
-  省略 `.lain`，`#` 起注释。清单顺序即降级顺序，它是产物确定性的来源 —— 同一份清单必须给出
-  逐字节相同的模块。
-- `lain0 --unit bootstrap/SOURCE_ORDER -o build/lain0/bootstrap.l1` 一次编出整份 Meta 的 LAINIR。
-  `scripts/build_meta_unit.py` 只做这层调用，并写出驱动要的单元清单 `build/lain0/bootstrap_unit.txt`。
+- **模块集合由入口推导**：从 `bootstrap/meta.lain` 顺 `import("…")` 求闭包，得到 28 个模块
+  （实测闭包 28/28、不可达 0）。没有可维护的清单，加一个模块不必改别处。
+- **产出是每个模块一份**：`lain0 --entry bootstrap/meta.lain --split build/lain0/units/`
+  出一个目录，文件名 = 模块键（`std_lex.l1`、`meta.l1` …）。顺序不影响任何一份的文本 ——
+  清单原本承载的「降级顺序」随之消失（`docs/proposal-modules-v2.md` §二）。
+  `scripts/build_meta_unit.py` 只做这层调用。
 - 每个模块的顶层声明发 `<键>__<名字>`（模块键 = 相对源根的路径去 `.lain`、`/` 换 `_`）；
-  清单里标为**根名**的声明保持平坦 —— 宿主按平坦字符串查找入口，所以 `meta.lain` 的三个
-  `lain_std_abi_version` / `lain_std_initialize` / `lain_std_lower` 是根名。
+  宿主按平坦字符串查找入口，所以发出**平坦名**的少数声明由声明自己的 **`@root`** 标注决定
+  （`meta.lain` 的三个入口 `lain_std_abi_version` / `lain_std_initialize` / `lain_std_lower`
+  各自带 `@root`）。清单上的「根名列」已随清单一起删除。
+- **装载**：驱动 `--units-dir <目录>` 装载目录里所有 `.l1`，按文件名排序（= 模块键排序，确定）
+  合并成一个镜像，合并后按名解析跨模块引用，`verify` 在合并之后做。`--unit <清单>`
+  仍保留（每行一个 LAINIR 路径），但**没有默认值**：`--unit` / `--units-dir` 必须给一个。
 - 跑起来：
 
 ```bash
-python scripts/build_meta_unit.py
-./build/lain-meta.exe --unit build/lain0/bootstrap_unit.txt \
+python scripts/build_meta_unit.py --check-twice     # 28 份 + 整批指纹跑两次一致
+./build/lain-meta.exe --units-dir build/lain0/units/ \
     examples/arith.lain bootstrap/lain/examples/arith.lain
 ```
 
   实测 `verify subroutines=870 data=216`、`image ok`、`host_status=0`、`region grants=2`、
-  `output bytes=74`，产物与基线 `build/arith.out` 逐字节相同。设计与取舍见 `docs/plan-modules.md`
-  （决策 D-004），成员位置表与拒绝码见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》。
+  `output bytes=74`，产物与基线 `build/arith.out` 逐字节相同；整批指纹
+  `ef2f198c12a36bd44ee040dcf1e06f928759c49697afdd9bc1144b28ebd4f977`。设计与取舍见
+  `docs/proposal-modules-v2.md`（取代 `docs/plan-modules.md` 的决策 D-004），成员位置表与
+  拒绝码见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》。

@@ -1,9 +1,10 @@
 # bootstrap 方言
 
-自举的 stage0 曾是手写 LAINIR 文本（`bootstrap/` 下按 `bootstrap/SOURCE_ORDER` 拼成 28 个文件、
-13203 行的编译单元；驱动报 unit files=28 bytes=582254）。**那份手写 IR 已整体删除**，现在
-`bootstrap/` 下是 28 个 Lain 源码模块，由 `lain0 --unit bootstrap/SOURCE_ORDER` 一次编成整份
-Meta（见 `docs/plan-meta-lain.md` 与 `docs/plan-modules.md`）。要让 Lain 编译器能编译自己，
+自举的 stage0 曾是手写 LAINIR 文本（`bootstrap/` 下 28 个文件、13203 行的编译单元，按一份
+模块清单拼装；驱动报 unit files=28 bytes=582254）。**那份手写 IR 已整体删除**，现在
+`bootstrap/` 下是 28 个 Lain 源码模块，由 `lain0 --entry bootstrap/meta.lain --split
+build/lain0/units/` 编成**每个模块一份** LAINIR（装载走驱动的 `--units-dir`；那份清单在步 3
+已删除，见 `docs/proposal-modules-v2.md` §六）。要让 Lain 编译器能编译自己，
 先得有一份**用 Lain 写的 Meta**；写它需要一门表面语言。
 
 这份文档定的是这门方言的特性集合、语法，以及每条语法降成什么 LAINIR。它不是 lainlang
@@ -445,12 +446,14 @@ func cstr_len(p: addr) -> u64 {
 
 ## 自举管线的缺口（实测）
 
-> **状态注记（第 4 步之后）**：本节记的是改写**之前**的管线实测（手写 `.l1` + `merge.ps1` 拼装）。
-> 现在 `bootstrap/` 下 28 个模块都是 Lain 源码、`bootstrap/SOURCE_ORDER` 是模块清单，
-> `lain0 --unit bootstrap/SOURCE_ORDER` 一次编出整份 Meta（见《模块：成员位置与符号命名》）；
-> 下面的阶段 1/2/3 与 `build/probes/*_surf.lain` 保留为当时的判据记录。
+> **状态注记（第 4 步之后，步 3 更新）**：本节记的是改写**之前**的管线实测（手写 `.l1` + `merge.ps1` 拼装）。
+> 现在 `bootstrap/` 下 28 个模块都是 Lain 源码、**没有清单**：模块集合由入口
+> `bootstrap/meta.lain` 顺 import 求闭包，`lain0 --entry bootstrap/meta.lain --split
+> build/lain0/units/` 出每模块一份，装载用驱动 `--units-dir <目录>`
+> （见《模块：成员位置与符号命名》）；下面的阶段 1/2/3 与 `build/probes/*_surf.lain`
+> 保留为当时的判据记录。
 
-`build/merge.ps1` 只做两件事：按 `SOURCE_ORDER` 把文件拼成 `build/bootstrap_merged.l1`、跑
+`build/merge.ps1` 只做两件事：按当时那份模块清单把文件拼成 `build/bootstrap_merged.l1`、跑
 `check_unit.exe`。它**没有编译步骤** —— 直接把手写 LAINIR 当最终单元用。
 
 所以「把某个模块改成表面 Lain」这一步在当前管线下不会改变合并单元：拼接进去的是表面源码
@@ -459,7 +462,7 @@ func cstr_len(p: addr) -> u64 {
 
 换模块时要补的是「用**上一阶段的 Meta** 降低**这一阶段的表面源**」这一步，也就是：
 
-- 阶段 1（今天）：Meta 是手写的 LAINIR，直接当单元跑（`--unit bootstrap/SOURCE_ORDER`）。
+- 阶段 1（当时）：Meta 是手写的 LAINIR，直接当单元跑（`--unit <清单>`）。
 - 阶段 2（改写后）：单元仍是**阶段 1 的手写 Meta**，但要降低的是表面源 —— 驱动的位置参数传
   表面模块文件，产物才是新的合并单元。实测这个方向可行：`build/probes/registry_surf4.lain`、
   `types_surf.lain`、`regions_surf.lain`、`struct_surf.lain`、`enum_stmt_surf.lain`、
@@ -539,10 +542,11 @@ func cstr_len(p: addr) -> u64 {
 
 模块键 = 被导入文件相对**源根**的路径去掉 `.lain`、把 `/` 换成 `_`（`bootstrap/std/lex.lain` →
 `std_lex`，`bootstrap/lain/examples/modules_lib.lain` → `modules_lib`）。源根在
-`lain0 --unit <清单>` 时是清单文件所在目录，在 `lain0 <file.lain>` 时是入口文件所在目录。
-每个模块的顶层声明一律发 `<键>__<名字>`；清单里标为**根名**的少数声明保持平坦
-（`bootstrap/SOURCE_ORDER` 只把 `meta` 的三个入口 `lain_std_abi_version` /
-`lain_std_initialize` / `lain_std_lower` 标成根名），宿主 `extern` 的 `link_name` 也照旧平坦。
+`lain0 --entry <file.lain>` 时是入口文件所在目录（`lain0 --unit <清单>` 时是清单文件所在目录）。
+每个模块的顶层声明一律发 `<键>__<名字>`；带 **`@root`** 标注的少数声明保持平坦
+（`bootstrap/meta.lain` 把三个入口 `lain_std_abi_version` / `lain_std_initialize` /
+`lain_std_lower` 各自标上 `@root`；模块集合由入口 `meta.lain` 顺 import 求闭包，装载走
+驱动的 `--units-dir <目录>`），宿主 `extern` 的 `link_name` 也照旧平坦。
 
 | 位置 | 写法 | 发出的东西 |
 | --- | --- | --- |
@@ -564,8 +568,11 @@ func cstr_len(p: addr) -> u64 {
 
 同名不冲突是模块前缀的直接效果：`modules_twin` 的两个模块各有一个 `dup`，产物里同时有
 `modules_twin_a__dup` 与 `modules_twin_b__dup`（改动之前这一编译必报 verify 的
-`duplicate subroutine` 2022）。确定性：`lain0 --unit bootstrap/SOURCE_ORDER` 连跑两次的产物
-SHA-256 相同（`c4a1ffb3…`），零诊断。
+`duplicate subroutine` 2022）。确定性：`python scripts/build_meta_unit.py --check-twice`
+连跑两次，28 份逐份相同且**整批指纹**一致 —— 实测
+`ef2f198c12a36bd44ee040dcf1e06f928759c49697afdd9bc1144b28ebd4f977`，零诊断
+（拆成多份之后判据是「整批指纹跑两次一致」，不是「等于某个历史哈希」；见
+`docs/proposal-modules-v2.md` §7.2）。
 
 ### 二、半成品：`struct` / `enum` 的值层
 
@@ -743,11 +750,11 @@ Meta 里 `#struct`/`#enum` 的命中数是 0。
   入口在 `bootstrap/std/funcs.l1` 的 `meta_lower_stmt`（构造单独成句的早退分支）。样例
   `bootstrap/lain/examples/locals.lain`。
 
-**F. 层 0：`lainir_*` 发射库**：**完成** —— `bootstrap/std/lainir.l1` 按名单提供五组写出器：整数/位/比较/转换、内存与地址、调用、控制流与单元骨架、固定文本片段（`bootstrap/SOURCE_ORDER` 在 `std/sums.l1` 后、`meta.l1` 前登记）。探针 `bootstrap/lain/examples/lainir_f1.l1` 到 `lainir_f4.l1`（清单 `bootstrap/lainir_f1_unit.txt`）分别覆盖骨架、F2 的 23 个二元算子与 6 个转换、F3 的内存/地址/调用、F4 的控制流与单元形态，F6 的 `lainir_f6.l1` 用层 0 重发 `locals.lain` 的整份单元；
+**F. 层 0：`lainir_*` 发射库**：**完成** —— `bootstrap/std/lainir.l1` 按名单提供五组写出器：整数/位/比较/转换、内存与地址、调用、控制流与单元骨架、固定文本片段（`std/sums.l1` 与 `meta.l1` 都 import 它；当时靠一份模块清单登记它排在 `std/sums.l1` 后、`meta.l1` 前，那份清单已在步 3 删除）。探针 `bootstrap/lain/examples/lainir_f1.l1` 到 `lainir_f4.l1`（清单 `bootstrap/lainir_f1_unit.txt`）分别覆盖骨架、F2 的 23 个二元算子与 6 个转换、F3 的内存/地址/调用、F4 的控制流与单元形态，F6 的 `lainir_f6.l1` 用层 0 重发 `locals.lain` 的整份单元；
 五条产物都过 `build/check_unit.exe` 的 parse+verify，驱动报 `host_status=0`、`trap none`。处理管线的字面文本发射已全部改走层 0，`bootstrap/std/emit.l1` 的 `data` 模板从 88 个减到 30 个，16 个样例产物在迁移当时逐字节不变（`diffcount=0`；此后 D 的循环体顺序可见性修好，`jumps` 有两行按新语义变化；值层的逃逸规则定下来后 `locals` 按新规则重写）——
 逐条写出器名单、删除口径与证据见上文《层 0：发射层》。
 
-用量证据（口径：bootstrap/SOURCE_ORDER 的 28 个文件，不数注释与示例）：`#bits` 4114、
+用量证据（口径：`bootstrap/` 的 28 个模块文件 —— 由入口 `meta.lain` 的 import 闭包给出，不数注释与示例）：`#bits` 4114、
 `#call` 2994、`#if` 925、`#yield` 860、`#lea` 790、`#eq` 630、`#return` 628、`#add` 471、
 `#data_addr` 343、`#break` 220、`#and` 175、`#ne` 173、`#continue` 120、`#ult` 112、
 `#loop` 112、`#sub` 87、`#or` 84、`#mul` 67、`#proc` 407（定义数，= 验证器报的 subroutine 数）。
