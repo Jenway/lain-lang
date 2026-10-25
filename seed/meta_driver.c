@@ -6,12 +6,15 @@
  *
  * 用法（在仓库根目录跑）：
  *
- *   lain-meta [选项] <逻辑路径> <源文件> [<逻辑路径> <源文件> ...]
+ *   lain-meta [选项] <登记名> <源文件> [<登记名> <源文件> ...]
+ *   lain-meta --root <目录> [选项] <源文件> [...]
  *
- * 逻辑路径是 import 解析用的注册表（`import("std::prelude")` 规范化成
- * `std/prelude.lain` 之后与它逐字节比较），源文件是实际字节所在。
+ * 登记名是 import 解析用的注册表（`import("std::prelude")` 规范化成
+ * `std/prelude.lain` 之后与它逐字节比较）。给了 `--root` 就不再逐条给登记名：
+ * 登记名由源文件相对该目录的词法路径算出（一个源文件一条）。
  *
  * 选项：
+ *   --root <目录>    登记名 = 源文件相对该目录的词法路径；此时位置参数只写源文件
  *   --unit <文件>     编译单元清单，`#` 开头为注释（每行前缀 `bootstrap/`）。
  *                     **必须**与 `--units-dir` 二选一；不给就退出码 2。
  *   --units-dir <目录> 编译单元目录：装载目录里所有 `.l1`，按文件名排序后合并
@@ -66,7 +69,8 @@
 #define DRIVER_MAX_SOURCES 32
 
 typedef struct {
-  char *path;  /* 逻辑路径，也是登记用的字符串 */
+  char *path;  /* 登记名（import 解析用） */
+  char *file;  /* 源文件路径（只用于读字节与诊断） */
   char *text;  /* 源码字节，活到运行结束 */
   uint32_t length;
 } SourceFile;
@@ -193,9 +197,78 @@ static void join_path(char *out, size_t cap, const char *dir, const char *name) 
   }
 }
 
+/* 词法规范化：反斜杠转斜杠、丢空段与 `.` 段、`..` 弹掉上一段、合并重复分隔符。
+ * 结果始终是非空字符串（空结果给 `.`）。失败返回 NULL。 */
+static char *normalize_path(const char *in) {
+  size_t n = strlen(in);
+  char *out = (char *)malloc(n + 2);
+  size_t o = 0, i = 0;
+  int absolute = (n > 0 && (in[0] == '/' || in[0] == '\\'));
+  if (!out) return NULL;
+  while (i < n) {
+    size_t start, len;
+    while (i < n && (in[i] == '/' || in[i] == '\\')) i++;
+    start = i;
+    while (i < n && in[i] != '/' && in[i] != '\\') i++;
+    len = i - start;
+    if (len == 0) break;
+    if (len == 1 && in[start] == '.') continue;
+    if (len == 2 && in[start] == '.' && in[start + 1] == '.') {
+      if (o > 0) {
+        while (o > 0 && out[o - 1] != '/') o--;
+        if (o > 0) o--;
+        continue;
+      }
+      if (absolute) continue;
+    }
+    if (o > 0) out[o++] = '/';
+    memcpy(out + o, in + start, len);
+    o += len;
+  }
+  if (o == 0) out[o++] = absolute ? '/' : '.';
+  out[o] = 0;
+  return out;
+}
+
+/* 绝对化：给出的路径可能是相对的（`bootstrap/lain/examples/x.lain`），也可能是
+ * 绝对的（`D:/codeFiles/...` 或 `/tmp/...`）。两端一律先绝对化，再比前缀。 */
+static char *resolve_path(const char *in) {
+  char *full;
+#if defined(_WIN32)
+  full = _fullpath(NULL, in, 0);
+#else
+  full = realpath(in, NULL);
+#endif
+  if (!full) return NULL;
+  {
+    char *norm = normalize_path(full);
+    free(full);
+    return norm;
+  }
+}
+
+/* `path` 相对 `root` 的词法路径（登记名）。不在 `root` 之下返回 NULL。 */
+static char *relative_under(const char *root, const char *path) {
+  char *r = resolve_path(root);
+  char *p = resolve_path(path);
+  char *rel = NULL;
+  size_t rl;
+  if (!r || !p) {
+    free(r);
+    free(p);
+    return NULL;
+  }
+  rl = strlen(r);
+  if (strncmp(p, r, rl) == 0 && p[rl] == '/') rel = dup_cstr(p + rl + 1);
+  free(r);
+  free(p);
+  return rel;
+}
+
 static void usage(FILE *out) {
-  fputs("用法: lain-meta [选项] <逻辑路径> <源文件> [...]\n"
-        "选项: --unit --units-dir --entry --lower --out --fuel --slice --stack\n"
+  fputs("用法: lain-meta [选项] <登记名> <源文件> [...]\n"
+        "      lain-meta --root <目录> [选项] <源文件> [...]\n"
+        "选项: --root --unit --units-dir --entry --lower --out --fuel --slice --stack\n"
         "      --quota --caps --depth --expect-status --max-output\n"
         "      -q/--quiet -v/--verbose\n",
         out);
@@ -216,6 +289,7 @@ static int map_region(LainVmSpace *space, const void *base, uint64_t bytes,
 }
 
 int main(int argc, char **argv) {
+  const char *root_dir = NULL;    /* 给了就由源文件路径算登记名 */
   const char *unit_path = NULL;   /* 无默认值：必须显式给 --unit 或 --units-dir */
   const char *units_dir = NULL;
   const char *entry = "lain_std_lower";
@@ -231,6 +305,9 @@ int main(int argc, char **argv) {
   int quiet = 0, verbose = 0, expect_status = -1, fuel_given = 0, unit_given = 0, i;
   SourceFile sources[DRIVER_MAX_SOURCES];
   uint32_t source_count = 0;
+  char *path_block = NULL;   /* 全部登记名拼成的连续缓冲：只授权一个区段 */
+  char *text_block = NULL;   /* 全部源码拼成的连续缓冲：只授权一个区段 */
+  uint32_t path_used = 0, text_used = 0;
 
   L1Builder *builder = NULL;
   const L1Module *module = NULL;
@@ -265,6 +342,7 @@ int main(int argc, char **argv) {
       if (i + 1 >= argc) { printf("%s 缺少实参\n", name); return 2; }         \
       i++;                                                                    \
     } while (0)
+    if (!strcmp(a, "--root")) { TAKE(a); root_dir = argv[i]; continue; }
     if (!strcmp(a, "--unit")) { TAKE(a); unit_path = argv[i]; unit_given = 1; continue; }
     if (!strcmp(a, "--units-dir")) { TAKE(a); units_dir = argv[i]; continue; }
     if (!strcmp(a, "--entry")) { TAKE(a); entry = argv[i]; continue; }
@@ -280,17 +358,37 @@ int main(int argc, char **argv) {
     if (!strcmp(a, "--expect-status")) { TAKE(a); expect_status = (int)strtol(argv[i], NULL, 0); continue; }
 #undef TAKE
     if (a[0] == '-' && a[1]) { printf("未知选项 %s\n", a); usage(stderr); return 2; }
-    /* 位置参数成对出现：逻辑路径、源文件。 */
+    /* 位置参数：不给 `--root` 时成对出现（登记名、源文件）；给了就是单个源文件。 */
+    if (root_dir != NULL) {
+      char *reg;
+      size_t n = 0;
+      char *text;
+      if (source_count >= DRIVER_MAX_SOURCES) { printf("源码太多\n"); return 2; }
+      reg = relative_under(root_dir, a);
+      if (!reg) { printf("%s 不在 %s 之下\n", a, root_dir); return 2; }
+      text = read_file(a, &n);
+      if (!text) { printf("读不到 %s\n", a); free(reg); return 2; }
+      if (n > 0xFFFFFFFFu) { printf("源文件过大 %s\n", a); free(reg); free(text); return 2; }
+      sources[source_count].path = reg;
+      sources[source_count].file = dup_cstr(a);
+      sources[source_count].text = text;
+      sources[source_count].length = (uint32_t)n;
+      if (verbose) printf("source[%u] path=%s file=%s bytes=%u\n", source_count,
+                          reg, a, sources[source_count].length);
+      source_count++;
+      continue;
+    }
     if (i + 1 >= argc) { printf("%s 缺少源文件\n", a); usage(stderr); return 2; }
     if (source_count >= DRIVER_MAX_SOURCES) { printf("源码太多\n"); return 2; }
     sources[source_count].path = dup_cstr(a);
+    sources[source_count].file = dup_cstr(argv[i + 1]);
     {
       size_t n = 0;
       sources[source_count].text = read_file(argv[i + 1], &n);
       if (n > 0xFFFFFFFFu) { printf("源文件过大 %s\n", argv[i + 1]); return 2; }
       sources[source_count].length = (uint32_t)n;
     }
-    if (!sources[source_count].text || !sources[source_count].path) {
+    if (!sources[source_count].text || !sources[source_count].path || !sources[source_count].file) {
       printf("读不到 %s\n", argv[i + 1]);
       return 2;
     }
@@ -410,6 +508,34 @@ int main(int argc, char **argv) {
   printf("verify subroutines=%u data=%u\n", module->subroutine_count,
          module->data_count);
 
+  /* 2.5 合并缓冲：登记名与源码各拼成一块连续缓冲。
+     宿主对登记名默认自留一份拷贝，那样每份源码的登记名都得单独授权；这里改用
+     借入登记的那条接口，登记名与源码各自只占一个区段。 */
+  {
+    size_t total_path = 0, total_text = 0;
+    uint32_t s;
+    for (s = 0; s < source_count; s++) {
+      total_path += strlen(sources[s].path) + 1;
+      total_text += (size_t)sources[s].length + 1;
+    }
+    path_block = (char *)malloc(total_path);
+    text_block = (char *)malloc(total_text);
+    if (!path_block || !text_block) { printf("分配合并缓冲失败\n"); return 2; }
+    for (s = 0; s < source_count; s++) {
+      size_t pl = strlen(sources[s].path) + 1;
+      size_t tl = (size_t)sources[s].length + 1;
+      memcpy(path_block + path_used, sources[s].path, pl);
+      free(sources[s].path);
+      sources[s].path = path_block + path_used;
+      path_used += (uint32_t)pl;
+      memcpy(text_block + text_used, sources[s].text, tl - 1);
+      text_block[text_used + tl - 1] = '\\0';
+      free(sources[s].text);
+      sources[s].text = text_block + text_used;
+      text_used += (uint32_t)tl;
+    }
+  }
+
   /* 3. 装配宿主。顺序见文件头注释。 */
   host = lainmeta_host_new();
   if (!host) { printf("host_new 失败\n"); return 1; }
@@ -435,8 +561,9 @@ int main(int argc, char **argv) {
   {
     uint32_t s;
     for (s = 0; s < source_count; s++) {
-      int add = lainmeta_host_add_source(host, sources[s].path, sources[s].text,
-                                         sources[s].length);
+      int add = lainmeta_host_add_source_borrowed(host, sources[s].path,
+                                                 sources[s].text,
+                                                 sources[s].length, true);
       if (add) { printf("add_source[%u] -> %d\n", s, add); return 1; }
     }
     printf("sources count=%u\n", source_count);
@@ -458,26 +585,22 @@ int main(int argc, char **argv) {
   lainmeta_host_attach_space(host, &space);
   lainmeta_host_set_apply_limits(host, &apply_limits);
 
-  /* 4. 逐块授权：Meta 只拿得到裸地址，能读什么由驱动说了算。 */
+  /* 4. 逐块授权：Meta 只拿得到裸地址，能读什么由驱动说了算。
+     登记名与源码各自已经拼成一块连续缓冲，所以这两类各只占一个区段；
+     AstIn 由宿主分配、地址分散，只能每份一块。区段数 = 份数 + 5（含 ast_out、
+     暂存区与栈）。 */
+  if (map_region(&space, text_block, text_used, text_used, LAINVM_MEM_READ,
+                 "sources text")) return 1;
+  if (map_region(&space, path_block, path_used, path_used, LAINVM_MEM_READ,
+                 "sources path")) return 1;
   {
     uint32_t s;
     for (s = 0; s < source_count; s++) {
-      const char *text;
-      uint32_t length = 0;
-      const char *logical;
       LainAstArenaView arena;
       char what[64];
-      if (verbose) printf("source[%u] segment=%u tree_segment=%u\n", s,
+      if (verbose) printf("source[%u] segment=%u tree_segment=%u path=%s\n", s,
                           lainmeta_host_source_segment(host, s),
-                          lainmeta_host_tree_segment(host, s));
-      text = lainmeta_host_source_text(host, s, &length);
-      snprintf(what, sizeof(what), "source[%u] text", s);
-      if (map_region(&space, text, (uint64_t)length + 1, (uint64_t)length + 1,
-                     LAINVM_MEM_READ, what)) return 1;
-      logical = lainmeta_host_source_path(host, s);
-      snprintf(what, sizeof(what), "source[%u] path", s);
-      if (map_region(&space, logical, strlen(logical) + 1, strlen(logical) + 1,
-                     LAINVM_MEM_READ, what)) return 1;
+                          lainmeta_host_tree_segment(host, s), sources[s].path);
       if (!lainmeta_host_arena(host, s, &arena)) {
         printf("source[%u] 没有 AstIn（登记即拒）\n", s);
         return 1;

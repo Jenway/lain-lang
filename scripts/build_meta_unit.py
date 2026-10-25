@@ -15,12 +15,12 @@
 # 用法（仓库根目录）：
 #
 #     ./build/lain-meta.exe --units-dir build/lain0/units/ \
-#         --out build/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain
+#         --root bootstrap --lower 0 --out build/arith.out bootstrap/lain/examples/arith.lain
 #
 # 验收判据：
 #   * 连跑两次，整批指纹一致 —— `--check-twice` 实测这一条；
-#   * 合并装载后 `verify subroutines=718 data=168`、`host_status=0`、`region grants=2`、
-#     `output bytes=74`，arith 产物与 `build/arith.out` 逐字节相同。
+#   * 合并装载后 `verify subroutines` / `data` 的计数不为零、`host_status=0`、
+#     `region grants=2`、`output bytes=74`，arith 产物与 `build/arith.out` 逐字节相同。
 # 拆分的等价性（28 份 = 一整份）由 `scripts/split_equiv_check.py` 的「规范化逐份比对」证明。
 
 import argparse

@@ -174,7 +174,7 @@ func meta_struct_fields(base: addr, len: u64, rec_lo: u64, rec_hi: u64, at: u64,
     let colon: u64 = std_lex.bs_skip_space(base, f_hi, len);
     let one: u64 = colon + 1;
     let t_lo: u64 = std_lex.bs_skip_space(base, one, len);
-    let t_hi: u64 = std_lex.bs_skip_qualified(base, t_lo, len);
+    let t_hi: u64 = std_lex.bs_skip_type_name(base, t_lo, len);
     // 查字段类型（root 环境或命名空间成员）——拿到的是类型 id
     let tid: u64 = std_scalars.meta_type_resolve(base, len, t_lo, t_hi);
     let bad_type: bool = tid == 0;
@@ -274,8 +274,8 @@ func meta_lower_binding(base: addr, len: u64, name_lo: u64, name_hi: u64) -> u32
       let ts: u32 = std_handlers_let.meta_lower_table(base, len, name_lo, name_hi, at);
       return ts;
     }
-    // 类型名可能是限定名（`W.w32`），所以不是 bs_skip_ident
-    let t_hi: u64 = std_lex.bs_skip_qualified(base, t_lo, len);
+    // 类型名可能是限定名（`W.w32`）或带空格的引用/切片写法，所以不是 bs_skip_ident
+    let t_hi: u64 = std_lex.bs_skip_type_name(base, t_lo, len);
     let s1: u32 = meta_lower_typed(base, len, name_lo, name_hi, t_lo, t_hi);
     return s1;
   }
@@ -340,6 +340,7 @@ func meta_lower_typed(base: addr, len: u64, name_lo: u64, name_hi: u64, t_lo: u6
   return s;
 }
 
+
 func meta_emit_value(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64, width: u64, t_lo: u64, t_hi: u64, lhs_lo: u64, lhs_hi: u64) -> u32 {
   // 字节串字面量：整段是一个静态字节块的顶层绑定（`data` 只能落顶层）。
   let is_bytes: bool = std_lex.bs_is_byte(base, lhs_lo, 34);
@@ -353,6 +354,36 @@ func meta_emit_value(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64
   let tab_is: bool = tab_esz != 0;
   if tab_is {
     return meta_emit_addr_binding(base, len, name_lo, name_hi);
+  }
+  // 顶层绑定取地址：`let X: addr = symbol_addr("NAME[_storage]")`。这个内建只在
+  // 表达式位置被识别，顶层的值不走表达式发射器，所以这里单独接一次。
+  let v_at: u64 = std_lex.bs_skip_space(base, lhs_lo, len);
+  let is_symaddr: bool = std_lex.bs_match_keyword(base, v_at, len, std_lex.meta_kw_symbol_addr, 11);
+  if is_symaddr {
+    let q0: u64 = std_lex.bs_skip_space(base, v_at + 11, len);
+    let arg_at: u64 = std_lex.bs_skip_space(base, q0 + 1, len);
+    let qb: u8 = std_lex.bs_byte_at(base, arg_at, len);
+    let qb_w: u32 = qb as u32;
+    let quoted: bool = qb_w == 34;
+    if quoted == 0 {
+      let fq: u32 = lain_meta_fail(4);
+      return 4;
+    }
+    let q_end: u64 = loop qscan(i: u64 = arg_at + 1) {
+      let more: bool = i < len;
+      if more {
+        let b: u8 = std_lex.bs_byte_at(base, i, len);
+        let bw: u32 = b as u32;
+        let shut: bool = bw == 34;
+        if shut {
+          break qscan(i);
+        }
+        continue qscan(i + 1);
+      }
+      break qscan(len);
+    };
+    let inner: u64 = q_end - arg_at - 1;
+    return std_funcs.meta_emit_symbol_binding(base, len, name_lo, name_hi, kind, width, arg_at + 1, inner);
   }
   // 「是一条表达式」有三条进路：形状 4（二元）、形状 2（组）、整段里有算子。
   // 最后这条必须单独判：形状 5/6/10 说的是「这里开始一次调用/字段访问/构造」，
@@ -424,6 +455,12 @@ func meta_emit_value(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64
     }
     let r6: u32 = std_records.meta_lower_field_access(base, len, name_lo, name_hi, tb2, dot);
     return r6;
+  }
+  // 顶层值绑定引用同模块的另一条绑定：`let B = A;` 发一条转发过程，与数字初值
+  // 和取址一样各占一条 `#proc`。
+  let bare_name: bool = single and rec_hi == lhs_hi;
+  if bare_name {
+    return std_funcs.meta_emit_ref_binding(base, len, name_lo, name_hi, kind, width, lhs_lo, rec_hi);
   }
   if f_call {
     let r4: u32 = meta_emit_call(base, len, name_lo, name_hi, kind, width, t_lo, t_hi, lhs_lo, rec_hi, after);
@@ -685,13 +722,14 @@ func meta_emit_neg_temp(base: addr, len: u64, kind: u64, width: u64, parent: u64
   return 0;
 }
 
-func meta_operand_emit(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t_hi: u64, parent: u64, index: u64) -> u32 {
+func meta_operand_emit(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t_hi: u64, parent: u64, index: u64, strlit_index: u64) -> u32 {
   let neg: bool = meta_is_neg_literal(base, len, parent, index);
   if neg {
     return meta_emit_neg_temp(base, len, kind, width, parent, index);
   }
   let node: u64 = std_parse.ast_child(parent, index);
   let form: u64 = std_parse.meta_node_form(parent, index);
+
   // 点号形态（形状 6）在这里分走：两条路都要读左边那个名字的类型，发的都是
   // `#lea` 加 `#load`，与「一个 token」那条路完全不同。留给 token 那条路的话，
   // 只有点号左边会被发出去、右边被悄悄丢掉。
@@ -705,6 +743,20 @@ func meta_operand_emit(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t
     let d_after: u64 = std_lex.bs_skip_space(base, d_hi, len);
     let d_f_lo: u64 = std_lex.bs_skip_space(base, d_after + 1, len);
     let d_f_hi: u64 = std_lex.bs_skip_ident(base, d_f_lo, len);
+    // 左边是 import 绑定、右边成员后面跟 `[`：跨模块静态表的取址再索引，
+    // `M.table[i]`。它由下面那个取址助手加一条 `#lea` 完成。
+    let ix_after: u64 = std_lex.bs_skip_space(base, d_hi, len);
+    let ix_f_lo: u64 = std_lex.bs_skip_space(base, ix_after + 1, len);
+    let ix_f_hi: u64 = std_lex.bs_skip_ident(base, ix_f_lo, len);
+    let ix_open: u64 = std_lex.bs_skip_space(base, ix_f_hi, len);
+    let ix_b: u8 = std_lex.bs_byte_at(base, ix_open, len);
+    let ix_bw: u32 = ix_b as u32;
+    let ix_is: bool = ix_bw == 91;
+    let d_ns0: u64 = std_modules.meta_find_import_binding(base, len, d_lo, d_hi);
+    let ix_ns: bool = ix_is and (d_ns0 != 0);
+    if ix_ns {
+      return meta_emit_ns_index_temp(base, len, kind, width, d_lo, d_hi, d_f_lo, d_f_hi, ix_open);
+    }
     let d_enum: bool = std_sums.meta_is_enum(base, len, d_lo, d_hi);
     let d_delim: u8 = meta_dotted_delim(base, len, parent, index);
     let d_delim_w: u32 = d_delim as u32;
@@ -715,7 +767,9 @@ func meta_operand_emit(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t
     let d_ns: u64 = std_modules.meta_find_import_binding(base, len, d_lo, d_hi);
     let d_isns: bool = d_ns != 0;
     if d_isns {
-      let d_n: u32 = std_modules.meta_emit_ns_operand(base, len, d_lo, d_hi, d_f_lo, d_f_hi);
+      // 成员名后面跟 `(` 就是跨模块调用：实参组在成员名之后那一格。
+      let d_args: u64 = std_parse.meta_cursor_next(parent, index + 2);
+      let d_n: u32 = std_modules.meta_emit_ns_operand(base, len, d_lo, d_hi, d_f_lo, d_f_hi, kind, width, t_lo, t_hi, d_paren, d_args);
       return d_n;
     }
     if d_proj {
@@ -758,20 +812,28 @@ func meta_operand_emit(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t
     }
     return prim;
   }
-  // 字节串字面量只在顶层 let 里能落成静态块（`data` 只能放顶层）；别处报 4,
-  // 不能把它当普通 token 发成 `%"…"`。
-  let str_at: u64 = std_parse.meta_node_start(node);
-  let is_str: bool = std_lex.bs_is_byte(base, str_at, 34);
+  // 字节串字面量：静态块与它的取址过程在**开过程之前**就已发出
+  // （`meta_pre_scan_strings`），这里只发调用。
+  let s_at0: u64 = std_parse.meta_node_start(node);
+  let is_str: bool = std_lex.bs_is_byte(base, s_at0, 34);
   if is_str {
-    let str_fail: u32 = lain_meta_fail(4);
-    return str_fail;
+    let s_buf: addr = std_scope.meta_path_buf();
+    let s_k0: u64 = std_funcs.meta_strlit_take();
+    let s_n: u64 = std_lainir.lainir_buf_bytes(s_buf, 0, std_lainir.lainir_strlit_prefix, 7);
+    let s_d: u64 = std_lainir.lainir_buf_uint(s_buf, s_n, s_k0);
+    let stn: u64 = meta_emit_anon_call_temp(s_buf, s_d);
+    let ssc2: addr = lain_meta_scratch_data();
+    let sq1: u32 = std_types.meta_cell_put(ssc2 + 168, stn);
+    let sq2: u32 = std_types.meta_cell_put(ssc2 + 176, 0);
+    let sq3: u32 = std_types.meta_cell_put(ssc2 + 184, 0);
+    let sq4: u32 = std_types.meta_cell_put(ssc2 + 2368, index + 1);
+    return 0;
   }
   // 静态数据绑定（表与字节串）：它们不在 IR 里当值用，值是 `#data_addr` 给出的地址。
   // 不拦的话会被当普通 token 发成 `%NAME`，装载器找不到那个值。
-  let s_lo0: u64 = std_parse.meta_node_start(node);
+  let s_lo0: u64 = s_at0;
   let s_len0: u64 = std_parse.meta_node_len(node);
-  let s_at0: addr = base + s_lo0;
-  let s_ix: u64 = std_scope.meta_scope_find(s_at0, s_len0);
+  let s_ix: u64 = std_scope.meta_scope_find(base + s_lo0, s_len0);
   let s_hit: bool = s_ix != 0xFFFFFFFFFFFFFFFF;
   let s_is: bool = loop pick_s(t: u64 = 0) {
     if s_hit {
@@ -792,12 +854,21 @@ func meta_operand_emit(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t
     break pick_s(0);
   };
   if s_is {
-    // 块名就是裸名字；符号文本拼一次，临时编号由它回。
-    let sy_lo: u64 = std_parse.meta_node_start(node);
-    let sy_len: u64 = std_parse.meta_node_len(node);
-    let sy_at: addr = base + sy_lo;
-    let sy_ok: u64 = std_lainir.lainir_buf_bytes(std_lainir.lainir_text_buffer, 0, sy_at, sy_len);
-    let sy_t: u64 = meta_emit_symbol_addr_line(std_lainir.lainir_text_buffer, sy_ok);
+    // 静态块的符号名是 `<键>__<名字>_storage`：拼一次，临时编号由它回。
+    // 名字属于哪个单元由作用域条目给，不按当前单元猜。
+    let sy_unit: u64 = std_scope.meta_scope_source(s_ix);
+    let sy_cur: u64 = std_scope.meta_scope_current();
+    let sy_own: bool = sy_unit == sy_cur;
+    let sy_base: addr = if sy_own { base } else { lain_meta_source_data(sy_unit) };
+    let sy_buf: addr = std_scope.meta_path_buf();
+    let sy_ok: u64 = if sy_own {
+      std_funcs.meta_symbol_storage_name(sy_base, s_lo0, s_len0, sy_buf)
+    } else {
+      let sy_k: u64 = std_modules.meta_module_key(sy_unit, sy_buf);
+      std_modules.meta_module_data_symbol(sy_buf, sy_k, sy_base + s_lo0, 0, s_len0, sy_buf + 256)
+    };
+    let sy_at: addr = if sy_own { sy_buf } else { sy_buf + 256 };
+      let sy_t: u64 = meta_emit_symbol_addr_line(sy_at, sy_ok);
     let ssc: addr = lain_meta_scratch_data();
     let ss1: u32 = std_types.meta_cell_put(ssc + 168, sy_t);
     // 范围写**名字**那一段（不是 0）：外层要靠它查这个操作数的类型
@@ -835,6 +906,17 @@ func meta_operand_emit(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t
     let pd: u32 = std_types.meta_cell_put(sc + 168, 0xFFFFFFFFFFFFFFFF);
     let pe: u32 = std_types.meta_cell_put(sc + 176, lo0);
     let pf: u32 = std_types.meta_cell_put(sc + 184, hi0);
+    return 0;
+  }
+  // 局部绑定：标量局部不建槽，名字就是那次绑定的临时量 —— 查表拿到编号就地渲染。
+  // 查不到（形参、循环头之外的名字）才回落到源码窗口。
+  // 范围仍写这个名字那一段：外层要靠它查这个操作数的类型（算子表、as 的方向）。
+  let lvt: u64 = std_funcs.meta_local_value_name(base, lo0, hi0);
+  let lhit: bool = lvt != 0xFFFFFFFFFFFFFFFF;
+  if lhit {
+    let qa: u32 = std_types.meta_cell_put(sc + 168, lvt);
+    let qb: u32 = std_types.meta_cell_put(sc + 176, lo0);
+    let qc: u32 = std_types.meta_cell_put(sc + 184, hi0);
     return 0;
   }
   let s4: u32 = std_types.meta_cell_put(sc + 168, 0xFFFFFFFFFFFFFFFF);
@@ -926,7 +1008,9 @@ func meta_after_operand(base: addr, len: u64, parent: u64, index: u64) -> u64 {
   let f_delim_w: u32 = f_delim as u32;
   let f_paren: bool = f_delim_w == 40;
   let f_brace: bool = f_delim_w == 123;
-  let f_arg: bool = f_paren or f_brace;
+  // `M.table[i]`: 成员后面那个 `[` 组同样占一格（见 ns 索引那条路）。
+  let f_lbrack: bool = f_delim_w == 91;
+  let f_arg: bool = f_paren or f_brace or f_lbrack;
   let f_n: u64 = if f_arg {
     let g4: u64 = nx + 3;
     g4
@@ -970,17 +1054,37 @@ func meta_emit_bare_temp(base: addr, len: u64, parent: u64, index: u64) -> u32 {
   };
   let sc: addr = lain_meta_scratch_data();
   if s_is {
-    // 块名就是裸名字：先把符号文本拼出来，再让它写地址行并回临时编号。
-    let s_buf: addr = std_lainir.lainir_text_buffer;
-    let s_b: u64 = std_lainir.lainir_buf_bytes(s_buf, 0, n_at, n_len);
-    let s_at: u64 = meta_emit_symbol_addr_line(s_buf, s_b);
+    // 静态块的符号名是 `<键>__<名字>_storage`，不是源码里那个裸名字：拼好之后
+    // 再让它写地址行并回临时编号。名字可能属于被导入的模块，归属由条目给。
+    let s_unit: u64 = std_scope.meta_scope_source(si);
+    let s_cur: u64 = std_scope.meta_scope_current();
+    let s_own: bool = s_unit == s_cur;
+    let s_src: addr = if s_own { base } else { lain_meta_source_data(s_unit) };
+    let s_buf: addr = std_scope.meta_path_buf();
+    let s_b: u64 = if s_own {
+      std_funcs.meta_symbol_storage_name(s_src, n_lo, n_len, s_buf)
+    } else {
+      let s_k: u64 = std_modules.meta_module_key(s_unit, s_buf);
+      std_modules.meta_module_data_symbol(s_buf, s_k, s_src + n_lo, 0, n_len, s_buf + 256)
+    };
+    let s_pos: addr = if s_own { s_buf } else { s_buf + 256 };
+    let s_at: u64 = meta_emit_symbol_addr_line(s_pos, s_b);
     // 结果就是那个 `%r<t>`：写进 168，外层直接渲染。
     let q1: u32 = std_types.meta_cell_put(sc + 168, s_at);
     let q2: u32 = std_types.meta_cell_put(sc + 176, n_lo);
     let q3: u32 = std_types.meta_cell_put(sc + 184, n_hi);
     return 0;
   }
-  // 普通参数名与局部绑定：**不发任何指令** —— 名字在产物里已经绑好了（参数名就是
+  // 局部绑定：标量局部不建槽，名字就是那次绑定的临时量，查表拿到编号直接渲染。
+  let vt: u64 = std_funcs.meta_local_value_name(base, n_lo, n_hi);
+  let v_hit: bool = vt != 0xFFFFFFFFFFFFFFFF;
+  if v_hit {
+    let q4: u32 = std_types.meta_cell_put(sc + 168, vt);
+    let q5: u32 = std_types.meta_cell_put(sc + 176, n_lo);
+    let q6: u32 = std_types.meta_cell_put(sc + 184, n_hi);
+    return 0;
+  }
+  // 普通参数名与循环参数：**不发任何指令** —— 名字在产物里已经绑好了（参数名就是
   // 源码名），外层按「源码窗口 + 无名」渲染出 `%名字` 就行。
   let p1: u32 = std_types.meta_cell_put(sc + 168, 0xFFFFFFFFFFFFFFFF);
   let p2: u32 = std_types.meta_cell_put(sc + 176, n_lo);
@@ -1033,6 +1137,66 @@ func meta_emit_addr_binding(base: addr, len: u64, name_lo: u64, name_hi: u64) ->
   return 0;
 }
 
+// `M.table[i]`：先取模块里那个静态块的地址（助手发一条取址并把临时号
+// 落在 3936），再把下标渲成文本，发一条 `#lea` 缩放到元素字节数。
+func meta_emit_ns_index_temp(base: addr, len: u64, kind: u64, width: u64,
+                            ns_lo: u64, ns_hi: u64, m_lo: u64, m_hi: u64,
+                            open: u64) -> u32 {
+  let sc0: addr = lain_meta_scratch_data();
+  let sa: u32 = std_modules.meta_emit_ns_static_addr(base, len, ns_lo, ns_hi, m_lo, m_hi);
+  let sabad: bool = sa != 0;
+  if sabad {
+    return sa;
+  }
+  let bt: u64 = std_types.meta_cell_get(sc0 + 3936);
+  let esz: u64 = std_types.meta_cell_get(sc0 + 3944);
+  let cnt: u64 = std_types.meta_cell_get(sc0 + 3952);
+  let grp: u64 = std_recognize.meta_node_at(base, open);
+  let gnone: bool = grp == 0;
+  if gnone {
+    let f0: u32 = lain_meta_fail(4);
+    return 4;
+  }
+  let ix_node: u64 = std_parse.meta_node_child(grp);
+  let ix_miss: bool = ix_node == 0;
+  if ix_miss {
+    let f1: u32 = lain_meta_fail(4);
+    return 4;
+  }
+  let ix_lo: u64 = std_parse.meta_node_start(ix_node);
+  let ix_hi: u64 = ix_lo + std_parse.meta_node_len(ix_node);
+  let ix_lit: bool = meta_is_int_literal(base, ix_lo, ix_hi, len);
+  if ix_lit {
+    let ix_val: u64 = std_lex.bs_read_uint(base, ix_lo, len);
+    let oob: bool = ix_val >= cnt;
+    if oob {
+      let f2: u32 = lain_meta_fail(4);
+      return 4;
+    }
+  }
+  let st: u32 = meta_emit_expr(base, len, 0, 64, 0, 0, grp, 0, 0, 0, 0, 0);
+  let sbad: bool = st != 0;
+  if sbad {
+    return st;
+  }
+  let sc: addr = lain_meta_scratch_data();
+  let aref: u64 = std_types.meta_cell_get(sc + 168);
+  let alo: u64 = std_types.meta_cell_get(sc + 176);
+  let ahi: u64 = std_types.meta_cell_get(sc + 184);
+  let buf: addr = std_lainir.lainir_text_buffer;
+  let b_at: u64 = std_lainir.lainir_buf_temp(buf, 64, bt);
+  let b_len: u64 = b_at - 64;
+  let i1: addr = buf + 96;
+  let i_len: u64 = meta_render_ref2(base, len, aref, alo, ahi, i1);
+  let lt: u64 = std_funcs.meta_next_temp();
+  let b1: addr = buf + 64;
+  let wr: u32 = std_lainir.lainir_lea_at(lt, b1, b_len, i1, i_len, esz, 0);
+  let p1: u32 = std_types.meta_cell_put(sc + 168, lt);
+  let p2: u32 = std_types.meta_cell_put(sc + 176, 0);
+  let p3: u32 = std_types.meta_cell_put(sc + 184, 0);
+  return 0;
+}
+
 func meta_emit_index_temp(base: addr, len: u64, parent: u64, index: u64) -> u32 {
   let node: u64 = std_parse.ast_child(parent, index);
   let n_lo: u64 = std_parse.meta_node_start(node);
@@ -1056,6 +1220,8 @@ func meta_emit_index_temp(base: addr, len: u64, parent: u64, index: u64) -> u32 
     let f2: u32 = lain_meta_fail(4);
     return 4;
   }
+  // 静态块所在的单元索引：字节串绑定在 emitted 上不记元素字节数，但同样有块。
+  let unit: u64 = std_scope.meta_scope_source(i);
   let cnt: u64 = std_scope.meta_scope_aux(i);
   // 下标：名字的下一个兄弟就是 `[` 组，组里第一个孩子才是指标。
   let ix_parent: u64 = std_parse.meta_cursor_next(parent, index);
@@ -1086,7 +1252,23 @@ func meta_emit_index_temp(base: addr, len: u64, parent: u64, index: u64) -> u32 
   let alo: u64 = std_types.meta_cell_get(sc + 176);
   let ahi: u64 = std_types.meta_cell_get(sc + 184);
   let buf: addr = std_lainir.lainir_text_buffer;
-  let bt: u64 = meta_emit_data_addr_line(n_at, n_len);
+  // 基址：名字属于本单元就是本单元的块；属于被导入的模块，就去那个模块里拼
+  // `<键>__<名字>_storage`。块名一律是带单元键的完整符号。
+  let cur: u64 = std_scope.meta_scope_current();
+  let own: bool = unit == cur;
+  let mb0: addr = if own { base } else { lain_meta_source_data(unit) };
+  let base_sym: u64 = if own {
+    let sb: addr = std_scope.meta_path_buf();
+    let sn: u64 = std_funcs.meta_symbol_storage_name(base, n_lo, n_len, sb);
+    meta_emit_symbol_addr_line(sb, sn)
+  } else {
+    let pbuf: addr = std_scope.meta_path_buf();
+    // 模块键写在前 128 字节，整段符号写在它后面，因为拼接会覆盖前一段。
+    let kl: u64 = std_modules.meta_module_key(unit, pbuf);
+    let sym: u64 = std_modules.meta_module_data_symbol(pbuf, kl, mb0 + n_lo, 0, n_len, pbuf + 256);
+    meta_emit_data_addr_line(pbuf + 256, sym)
+  };
+  let bt: u64 = base_sym;
   let b_at: u64 = std_lainir.lainir_buf_temp(buf, 64, bt);
   let b_len: u64 = b_at - 64;
   let i1: addr = buf + 96;
@@ -1159,7 +1341,7 @@ func meta_emit_len_temp(base: addr, len: u64, kind: u64, width: u64, args: u64) 
   return 0;
 }
 
-func meta_operand_step(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t_hi: u64, parent: u64, index: u64) -> u32 {
+func meta_operand_step(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t_hi: u64, parent: u64, index: u64, strlit_index: u64) -> u32 {
   let c0: u64 = std_parse.ast_child(parent, index);
   let is_if0: bool = std_parse.meta_node_is_word(c0, std_lex.meta_kw_if, 2);
   let sc0: addr = lain_meta_scratch_data();
@@ -1175,7 +1357,7 @@ func meta_operand_step(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t
     let p3: u32 = std_types.meta_cell_put(sc0 + 184, 0);
     return 0;
   }
-  let st1: u32 = meta_operand_emit(base, len, kind, width, t_lo, t_hi, parent, index);
+  let st1: u32 = meta_operand_emit(base, len, kind, width, t_lo, t_hi, parent, index, strlit_index);
   let bad1: bool = st1 != 0;
   if bad1 {
     return st1;
@@ -1188,6 +1370,19 @@ func meta_operand_step(base: addr, len: u64, kind: u64, width: u64, t_lo: u64, t
 func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
                     t_hi: u64, parent: u64, index: u64, need_semi: bool,
                     close: u64, n_lo: u64, n_hi: u64) -> u32 {
+  let st: u32 = meta_emit_expr_level(base, len, kind, width, t_lo, t_hi,
+                                     parent, index, 0, need_semi, close,
+                                     n_lo, n_hi, 0);
+  return st;
+}
+
+// 一层只吃优先级不低于 `min_prec` 的算子，右操作数递归取 `prec+1` 一层：
+// `a + b * 2` 里 `*` 先成值，`a < b and c < d` 里两个比较都比 `and` 先成值。
+// 结果（临时值、源码窗口、终点下标）仍走暂存区 +168/+176/+184/+192。
+func meta_emit_expr_level(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
+                          t_hi: u64, parent: u64, index: u64, min_prec: u64,
+                          need_semi: bool, close: u64, n_lo: u64, n_hi: u64,
+                          strlit_index: u64) -> u32 {
   let st: u32 = loop e(i: u64 = index, have: bool = 0,
                        acc: u64 = 0xFFFFFFFFFFFFFFFF, alo: u64 = 0,
                        ahi: u64 = 0, bound: bool = 0) {
@@ -1207,7 +1402,7 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
         break e(3);
       }
       let ost: u32 = meta_operand_step(base, len, kind, width, t_lo,
-                                       t_hi, parent, i);
+                                       t_hi, parent, i, strlit_index);
       let obad: bool = ost != 0;
       if obad {
         break e(ost);
@@ -1410,6 +1605,17 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
         break e(5);
       }
     }
+    // 优先级：这个算子比本层下限低，说明它属于外层表达式。左值交出去，游标停在算子上。
+    let prec: u64 = std_lex.bs_op_precedence(base, bat, len, bn);
+    let lower: bool = prec < min_prec;
+    if lower {
+      let sc4: addr = lain_meta_scratch_data();
+      let q4a: u32 = std_types.meta_cell_put(sc4 + 168, acc);
+      let q4b: u32 = std_types.meta_cell_put(sc4 + 176, alo);
+      let q4c: u32 = std_types.meta_cell_put(sc4 + 184, ahi);
+      let q4d: u32 = std_types.meta_cell_put(sc4 + 192, i);
+      break e(0);
+    }
     // 右操作数：游标前进一格。到头时 `ast_child` 回空引用 0。
     let rni: u64 = i + 1;
     let rn: u64 = std_parse.ast_child(parent, rni);
@@ -1426,26 +1632,38 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
     // **顺序要紧**：右操作数先降级。它可能是括号，会递归，递归里又会
     // `meta_op_resolve` 一次；而 `meta_op_resolve` 把物理算子名放在 `+24`/`+32`，
     // `meta_emit_op_mid` 稍后才读。先查算子再降级的话，名字会被递归那一次覆盖。
-    let rst: u32 = meta_operand_step(base, len, kind, width, t_lo,
-                                     t_hi, parent, rni);
+    let rec_min: u64 = prec + 1;
+    let rst: u32 = meta_emit_expr_level(base, len, kind, width, t_lo, t_hi,
+                                        parent, rni, rec_min, 0, 0, 0, 0, strlit_index);
     let rbad: bool = rst != 0;
     if rbad {
       break e(rst);
     }
     let sc3: addr = lain_meta_scratch_data();
-    // 右操作数之后接哪一格：这一格必须**紧接着**取走，后面那些类型查询虽然是叶子
-    // 调用，也不该指望它们不碰暂存区。
-    let rn_nx3: u64 = std_types.meta_cell_get(sc3 + 2368);
-    let rn_nxclr: u32 = std_types.meta_cell_put(sc3 + 2368, 0);
+    // 递归交回的终点下标必须**紧接着**取走，后面那些类型查询虽然是叶子调用，
+    // 也不该指望它们不碰暂存区。
+    let rn_nx3: u64 = std_types.meta_cell_get(sc3 + 192);
     let rref: u64 = std_types.meta_cell_get(sc3 + 168);
     let rn_lo2: u64 = std_types.meta_cell_get(sc3 + 176);
     let rn_hi2: u64 = std_types.meta_cell_get(sc3 + 184);
     // 操作数**自己**的类型优先：参数有类型。字面量没有类型，就退回传进来的
     // （绑定 / 返回的）类型 —— 这也是 plan §4 第 3 条那个没定的问题：`1 < 2` 的两个
     // 操作数是裸字面量，没人告诉编译器它们是 i32。
+    // 名字绑定出来的临时量（标量局部不建槽，名字就是那次绑定的临时量）在窗口里
+    // 仍然是那个名字，它的标注类型照样有效 —— 只有**算出来**的临时量必须放弃按
+    // 窗口查类型（窗口里那个名字只是复合表达式的第一个操作数）。
     let acc_tmp: bool = acc != 0xFFFFFFFFFFFFFFFF;
+    let acc_named: u64 = if acc_tmp {
+      let an0: u64 = std_funcs.meta_local_value_name(base, alo, ahi);
+      let an1: bool = an0 == acc;
+      let an2: u64 = if an1 { 1 } else { 0 };
+      an2
+    } else {
+      1
+    };
+    let acc_skip: bool = acc_tmp and (acc_named == 0);
     let l_tlo: u64 = loop pick_ltlo(t: u64 = 0) {
-      if acc_tmp { break pick_ltlo(0xFFFFFFFFFFFFFFFF); }
+      if acc_skip { break pick_ltlo(0xFFFFFFFFFFFFFFFF); }
       let ln: u64 = std_recognize.meta_node_at(base, alo);
       let lt: u64 = std_funcs.meta_word_type_name(base, len, ln);
       let lmiss0: bool = lt == 0xFFFFFFFFFFFFFFFF;
@@ -1470,11 +1688,14 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
     let l_tlo3: u64 = if l_loop_miss { l_tlo } else { l_loop_tlo };
     let l_thi3: u64 = if l_loop_miss { l_thi } else { l_loop_thi };
     let l_miss3: bool = l_tlo3 == 0xFFFFFFFFFFFFFFFF;
-    let r_tlo: u64 = if l_miss {
+    // 右操作数的类型只对**单个节点**有效：右半边是一段复合表达式时，那个节点只是它的
+    // 第一个操作数，类型与结果无关（`a < b and c < d` 的右边第一个节点是 `c`，它是 u32）。
+    let rn_single: bool = rn_nx3 == rni + 1;
+    let r_tlo: u64 = loop pick_rtlo(t: u64 = 0) {
+      if l_miss == 0 { break pick_rtlo(0xFFFFFFFFFFFFFFFF); }
+      if rn_single == 0 { break pick_rtlo(0xFFFFFFFFFFFFFFFF); }
       let rt: u64 = std_records.meta_operand_type_window(base, len, parent, rni);
-      rt
-    } else {
-      0xFFFFFFFFFFFFFFFF
+      break pick_rtlo(rt);
     };
     let r_thi: u64 = std_types.meta_cell_get(scp + 0);
     let r_miss: bool = r_tlo == 0xFFFFFFFFFFFFFFFF;
@@ -1529,7 +1750,7 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
     let is_plus: bool = (sp_b as u32) == 43;
     // **只认左边的地址**：`1 + p` 不算地址算术，`#lea` 的基址只能来自左操作数。
     let a_tid: u64 = if l_hit {
-      let a_t2: u64 = std_scalars.meta_type_resolve(base, len, l_tlo, l_thi);
+      let a_t2: u64 = std_scalars.meta_type_resolve(base, len, l_tlo3, l_thi3);
       a_t2
     } else {
       0
@@ -1710,6 +1931,20 @@ func meta_emit_expr(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
   return st;
 }
 
+// 调一个没有实参的过程：仅发 `  %r<n> = #call <符号>()`，回临时编号。
+func meta_emit_anon_call_temp(symbol: addr, symbol_len: u64) -> u64 {
+  let t0: u32 = std_lainir.lainir_indent_write();
+  let tn: u64 = std_funcs.meta_next_temp();
+  let t1: u32 = std_funcs.meta_emit_temp_name(tn);
+  let t2: u32 = std_lainir.lainir_result_sep_write();
+  let t3: u32 = std_lainir.lainir_call_word_write();
+  let t4: u32 = std_lainir.lainir_write(symbol, symbol_len);
+  let t5: u32 = std_lainir.lainir_open_paren_write();
+  let t6: u32 = std_lainir.lainir_close_paren_write();
+  let t7: u32 = std_lainir.lainir_newline_write();
+  return tn;
+}
+
 func meta_emit_symbol_addr_line(symbol: addr, symbol_len: u64) -> u64 {
   let indent: addr = std_lainir.lainir_indent;
   let w0: u32 = std_lainir.lainir_write(indent, 2);
@@ -1825,7 +2060,7 @@ func meta_operand_cast(base: addr, len: u64, parent: u64, op_index: u64, t_n: u6
     return 3;
   }
   let t_lo: u64 = std_parse.meta_node_start(t_n);
-  let t_hi: u64 = std_lex.bs_skip_qualified(base, t_lo, len);
+  let t_hi: u64 = std_lex.bs_skip_type_name(base, t_lo, len);
   // 操作数必须是**一个名字**（可以带 `?` 前缀）。静态数据的索引（`t[i]`）在上一层就
   // 物化成了临时值，源码窗口指不到一个名字 —— 那种不带转换。
   let n_lo: u64 = meta_value_name_window(base, len, alo, ahi);

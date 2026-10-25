@@ -35,8 +35,8 @@ func meta_lower_decl_let(base: addr, len: u64, here: u64) -> u32 {
 }
 
 // let NAME: addr = "…";：静态字节块的顶层绑定。字节串是 ro 的字节表简写。
-//   data NAME_storage ro { <字节…> }
-//   #proc NAME() -> #addr { %base = #data_addr NAME_storage; #return %base }
+//   data <键>__NAME_storage ro { <字节…> }
+//   #proc <键>__NAME() -> #addr { %base = #bitcast[#addr](%<键>__NAME_storage); #return %base }
 // 字节按源码原样搬（reader 认转义对，但不解码），不补末尾 0 —— 需要结束符的块
 // 用 let NAME: ro [u8] = [ … , 0 ]; 写成表。
 func meta_lower_static_bytes(base: addr, len: u64, name_lo: u64, name_hi: u64, at: u64) -> u32 {
@@ -46,7 +46,11 @@ func meta_lower_static_bytes(base: addr, len: u64, name_lo: u64, name_hi: u64, a
   // 数据符号名 = `<模块键>__<名字>_storage`（lain0 的形状），不是裸名字。
   let pbuf: addr = std_scope.meta_path_buf();
   let sym: u64 = std_scope.meta_unit_symbol(pbuf, name_at, name_len);
-  let w2: u32 = std_lainir.lainir_write(pbuf, sym);
+  // 名字再拼一份带 `_storage` 的，数据块用它；过程名用不带后缀的那个。
+  let sbuf: addr = pbuf + 256;
+  let s1: u64 = std_lainir.lainir_buf_bytes(sbuf, 0, pbuf, sym);
+  let s2: u64 = std_lainir.lainir_buf_bytes(sbuf, s1, std_lex.meta_bs_storage, 8);
+  let w2: u32 = std_lainir.lainir_write(sbuf, s2);
   let w3: u32 = std_lainir.lainir_data_ro_storage_head();
   let first: u64 = at + 1;
   let scan: u32 = loop b(i: u64 = first) {
@@ -79,6 +83,14 @@ func meta_lower_static_bytes(base: addr, len: u64, name_lo: u64, name_hi: u64, a
     return scan;
   }
   let wc: u32 = std_lainir.lainir_data_close();
+  // 取址过程：过程名**不带** `_storage`（与 lain0 一致），体内一条取址加返回。
+  let h1: u32 = std_lainir.lainir_proc_word_write();
+  let h2: u32 = std_lainir.lainir_write(pbuf, sym);
+  let h3: u32 = std_lainir.lainir_addr_body_write();
+  let h4: u32 = std_lainir.lainir_base_assign_write();
+  let h5: u32 = std_lainir.lainir_write(sbuf, s2);
+  let h6: u32 = std_lainir.lainir_write(std_lainir.lainir_rparen_nl, 2);
+  let h7: u32 = std_lainir.lainir_return_base_close();
   return 0;
 }
 
@@ -250,5 +262,17 @@ func meta_lower_table(base: addr, len: u64, name_lo: u64, name_hi: u64, colon_at
     return st;
   }
   let wc: u32 = std_lainir.lainir_data_close();
+  // 取址过程：过程名不带 `_storage`（与 lain0 一致），体内一条取址加返回。
+  let h1: u32 = std_lainir.lainir_proc_word_write();
+  let h2: u32 = std_lainir.lainir_write(pbuf, sym);
+  let h3: u32 = std_lainir.lainir_addr_body_write();
+  let h4: u32 = std_lainir.lainir_base_assign_write();
+  // 带 `_storage` 的那份符号名再拼一次，取址指向数据块。
+  let s1: u64 = std_lainir.lainir_buf_bytes(pbuf + 256, 0, pbuf, sym);
+  let s2: u64 = std_lainir.lainir_buf_bytes(pbuf + 256, s1, std_lex.meta_bs_storage, 8);
+  let sbuf: addr = pbuf + 256;
+  let h5: u32 = std_lainir.lainir_write(sbuf, s2);
+  let h6: u32 = std_lainir.lainir_write(std_lainir.lainir_rparen_nl, 2);
+  let h7: u32 = std_lainir.lainir_return_base_close();
   return 0;
 }

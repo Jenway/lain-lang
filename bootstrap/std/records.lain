@@ -20,6 +20,7 @@ let std_eval = import("eval");
 let std_funcs = import("funcs");
 let std_lainir = import("lainir");
 let std_lex = import("lex");
+let std_modules = import("modules");
 let std_parse = import("parse");
 let std_recognize = import("recognize");
 let std_registry = import("registry");
@@ -85,6 +86,97 @@ func meta_scope_body(base: addr, name_lo: u64, name_hi: u64, expect: u64) -> u64
   return 0xFFFFFFFFFFFFFFFF;
 }
 
+// 名字 → 类型正文起点，顺带把「这份类型的字段该读哪份源码」写进暂存区
+// +4000（源码基址）/ +4008（源码长度）。字段布局的两步输入（正文起点、源码基址）
+// 必须同源：名字带点（`M.Point`）时两者都来自被导入模块，否则都来自调用方。
+//
+// 取不到正文返回 NOT_FOUND，暂存区两格清零。
+func meta_type_body_and_src(base: addr, len: u64, name_lo: u64, name_hi: u64, expect: u64) -> u64 {
+  let sc: addr = lain_meta_scratch_data();
+  let dot: u64 = std_scalars.meta_find_dot(base, name_lo, name_hi);
+  let qualified: bool = dot != 0xFFFFFFFFFFFFFFFF;
+  if qualified {
+    let m_lo: u64 = std_lex.bs_skip_space(base, dot + 1, len);
+    let m_hi: u64 = std_lex.bs_skip_ident(base, m_lo, len);
+    let lp: u64 = std_modules.meta_find_import_binding(base, len, name_lo, dot);
+    let nons: bool = lp == 0;
+    if nons {
+      let e0: u32 = std_types.meta_cell_put(sc + 4000, 0);
+      let e1: u32 = std_types.meta_cell_put(sc + 4008, 0);
+      return 0xFFFFFFFFFFFFFFFF;
+    }
+    let n: u64 = std_modules.meta_logical_len(base, lp, len);
+    let path: addr = base + lp;
+    let idx: u64 = std_modules.meta_source_find(path, n);
+    let miss: bool = idx == 0xFFFFFFFFFFFFFFFF;
+    if miss {
+      let e2: u32 = std_types.meta_cell_put(sc + 4000, 0);
+      let e3: u32 = std_types.meta_cell_put(sc + 4008, 0);
+      return 0xFFFFFFFFFFFFFFFF;
+    }
+    let m_base: addr = lain_meta_source_data(idx);
+    let m_len: u64 = lain_meta_source_length(idx);
+    let old_src: u64 = std_scope.meta_scope_enter(idx);
+    let already: bool = std_scope.meta_scope_has_source(idx);
+    if already == 0 {
+      let mark: u64 = std_scope.meta_scope_count();
+      let scan: u32 = std_scope.meta_scope_scan(m_base, m_len, idx, mark);
+      if scan != 0 {
+        let r0: u32 = std_scope.meta_scope_set_current(old_src);
+        let e4: u32 = std_types.meta_cell_put(sc + 4000, 0);
+        let e5: u32 = std_types.meta_cell_put(sc + 4008, 0);
+        return 0xFFFFFFFFFFFFFFFF;
+      }
+    }
+    let mn_len: u64 = m_hi - m_lo;
+    let ni: u64 = std_scope.meta_scope_find(base + m_lo, mn_len);
+    let nfound: bool = ni != 0xFFFFFFFFFFFFFFFF;
+    let nkind: u64 = if nfound { std_scope.meta_scope_kind(ni) } else { 0 };
+    let nnode: u64 = if nfound { std_scope.meta_scope_decl_node(ni) } else { 0 };
+    let r1: u32 = std_scope.meta_scope_set_current(old_src);
+    let ok: bool = nfound and nkind == expect;
+    if ok == 0 {
+      let e6: u32 = std_types.meta_cell_put(sc + 4000, 0);
+      let e7: u32 = std_types.meta_cell_put(sc + 4008, 0);
+      return 0xFFFFFFFFFFFFFFFF;
+    }
+    let body: u64 = meta_decl_body(m_base, nnode);
+    let ok2: bool = body != 0xFFFFFFFFFFFFFFFF;
+    if ok2 == 0 {
+      let e8: u32 = std_types.meta_cell_put(sc + 4000, 0);
+      let e9: u32 = std_types.meta_cell_put(sc + 4008, 0);
+      return 0xFFFFFFFFFFFFFFFF;
+    }
+    let mb: u64 = m_base as u64;
+    let p0: u32 = std_types.meta_cell_put(sc + 4000, mb);
+    let p1: u32 = std_types.meta_cell_put(sc + 4008, m_len);
+    return body;
+  }
+  let body2: u64 = meta_scope_body(base, name_lo, name_hi, expect);
+  let have: bool = body2 != 0xFFFFFFFFFFFFFFFF;
+  if have == 0 {
+    let e10: u32 = std_types.meta_cell_put(sc + 4000, 0);
+    let e11: u32 = std_types.meta_cell_put(sc + 4008, 0);
+    return 0xFFFFFFFFFFFFFFFF;
+  }
+  let bb: u64 = base as u64;
+  let p2: u32 = std_types.meta_cell_put(sc + 4000, bb);
+  let p3: u32 = std_types.meta_cell_put(sc + 4008, len);
+  return body2;
+}
+
+// `meta_type_body_and_src` 写下的「布局源码」两格。
+func meta_body_src() -> addr {
+  let sc: addr = lain_meta_scratch_data();
+  let v: u64 = std_types.meta_cell_get(sc + 4000);
+  return v as addr;
+}
+
+func meta_body_len() -> u64 {
+  let sc: addr = lain_meta_scratch_data();
+  return std_types.meta_cell_get(sc + 4008);
+}
+
 // 走字段列表累加偏移。
 //   命中 f_lo/f_hi  → 返回 packed（最高位 1）
 //   走到 `}`        → 返回按最大 align 值取整后的总大小（最高位 0）
@@ -131,7 +223,11 @@ func meta_layout_add_checked(left: u64, right: u64) -> u64 {
 
 // 走字段列表：命中字段名回 packed，走到 `}` 回总大小。
 // 循环参数改名 cur_at / cur_off / cur_al，避免遮蔽同名的函数参数与初值。
-func meta_walk_fields(src: addr, len: u64, at: u64, f_lo: u64, f_hi: u64, off0: u64, al0: u64) -> u64 {
+//
+// `name_addr`/`name_len` 是**要匹配的字段名**，地址已经算好（名字可能在另一份
+// 源码里，所以这里收地址而不是偏移；按偏移取会读到布局源码之外）。
+// name_len == 0 表示不匹配任何字段，只累加大小。
+func meta_walk_fields(src: addr, len: u64, at: u64, name_addr: addr, name_len: u64, off0: u64, al0: u64) -> u64 {
   let r: u64 = loop fields(cur_at: u64 = at, cur_off: u64 = off0, cur_al: u64 = al0) {
     let here: u64 = std_lex.bs_skip_space(src, cur_at, len);
     let byte: u8 = std_lex.bs_byte_at(src, here, len);
@@ -182,13 +278,12 @@ func meta_walk_fields(src: addr, len: u64, at: u64, f_lo: u64, f_hi: u64, off0: 
       }
       break fields(0xFFFFFFFFFFFFFFFF);
     }
-    let want: u64 = f_hi - f_lo;
+    let want: u64 = name_len;
     let have: u64 = name_hi - here;
     let len_ok: bool = want == have;
     if len_ok {
       let a: addr = src + here;
-      let b: addr = src + f_lo;
-      let same: bool = std_types.meta_bytes_equal(a, b, want);
+      let same: bool = std_types.meta_bytes_equal(a, name_addr, want);
       if same {
         let k: u64 = kind << 40;
         let w: u64 = width << 44;
@@ -216,12 +311,13 @@ func meta_walk_fields(src: addr, len: u64, at: u64, f_lo: u64, f_hi: u64, off0: 
 
 // 某个字段的 (偏移, kind, width)。`body` 是那个 type 的正文起点（由
 // `meta_scope_body` 从符号表里取，不用搜）。找不到返回 0。
-func meta_layout_field(src: addr, len: u64, body: u64, f_lo: u64, f_hi: u64) -> u64 {
+// `name_addr`/`name_len` 是字段名（地址已算好，可来自另一份源码）。
+func meta_layout_field(src: addr, len: u64, body: u64, name_addr: addr, name_len: u64) -> u64 {
   let missing: bool = body == 0xFFFFFFFFFFFFFFFF;
   if missing {
     return 0;
   }
-  let info: u64 = meta_walk_fields(src, len, body, f_lo, f_hi, 0, 1);
+  let info: u64 = meta_walk_fields(src, len, body, name_addr, name_len, 0, 1);
   return info;
 }
 
@@ -285,8 +381,10 @@ func meta_operand_type_window(base: addr, len: u64, parent: u64, index: u64) -> 
     if nobody {
       return 0xFFFFFFFFFFFFFFFF;
     }
-    let tbody: u64 = meta_scope_body(base, bt_lo, bt_hi, 4);
-    let fwin: u64 = meta_field_type_window(base, len, tbody, f_lo, f_hi);
+    let tbody: u64 = meta_type_body_and_src(base, len, bt_lo, bt_hi, 4);
+    let fsrc: addr = meta_body_src();
+    let flen: u64 = meta_body_len();
+    let fwin: u64 = meta_field_type_window(fsrc, flen, tbody, f_lo, f_hi);
     return fwin;
   }
   let node2: u64 = std_parse.ast_child(parent, index);
@@ -300,7 +398,7 @@ func meta_layout_size(src: addr, len: u64, body: u64) -> u64 {
   if missing {
     return 0;
   }
-  let info: u64 = meta_walk_fields(src, len, body, 0, 0, 0, 1);
+  let info: u64 = meta_walk_fields(src, len, body, src, 0, 0, 1);
   let failed_sentinel: bool = info == 0xFFFFFFFFFFFFFFFF;
   let failed_zero: bool = info == 0;
   let failed: bool = failed_sentinel or failed_zero;
@@ -483,7 +581,7 @@ func meta_construct_fields(base: addr, len: u64, body: u64, group: u64, base_n: 
       if iscomma {
         continue fields(i + 1);
       }
-      let info: u64 = meta_layout_field(base, len, body, f_lo, f_hi);
+      let info: u64 = meta_layout_field(base, len, body, base + f_lo, f_hi - f_lo);
       // 走表不中就是错的：不能把「走到 } 得到的总大小」当成字段偏移用。
       let found: u64 = info >> 63;
       let missing: bool = found == 0;
@@ -627,17 +725,9 @@ func meta_lower_construct_local(base: addr, len: u64, name_lo: u64, name_hi: u64
     let w10: u32 = std_lainir.lainir_return_ref(buf, tlen);
     0
   } else {
-    let buf2: addr = std_lainir.lainir_text_buffer;
-    let tbuf: addr = buf2 + 64;
-    let tlen2: u64 = std_lainir.lainir_buf_temp(tbuf, 0, n);
-    let nbuf: addr = buf2 + 128;
-    let npct: u64 = std_lainir.lainir_buf_byte(nbuf, 0, 37);
-    let bind_at: addr = base + name_lo;
-    let bind_len: u64 = name_hi - name_lo;
-    let nlen: u64 = std_lainir.lainir_buf_bytes(nbuf, npct, bind_at, bind_len);
-    let zbuf: addr = buf2 + 180;
-    let zlen: u64 = std_lainir.lainir_buf_uint(zbuf, 0, 0);
-    let w17: u32 = std_lainir.lainir_lea_named(nbuf, nlen, tbuf, tlen2, zbuf, zlen, 1, 0);
+    // 框的地址就是这个名字的值：记进局部值表，裸名字按它渲染成 `%r<n>`。
+    // 不另发一条 `%NAME = #lea(…)` —— 源码名当绑定名会撞 2001（同名第二次绑定）。
+    let lp: u32 = std_funcs.meta_local_value_put(name_lo, name_hi, n);
     0
   };
   return tail;
@@ -653,7 +743,7 @@ func meta_lower_field_access(base: addr, len: u64, bind_lo: u64, bind_hi: u64, t
   let v_lo: u64 = std_lex.bs_skip_space(base, one, len);
   let v_hi: u64 = std_lex.bs_skip_ident(base, v_lo, len);
 
-  let info: u64 = meta_layout_field(base, len, type_body, f_lo, f_hi);
+  let info: u64 = meta_layout_field(base, len, type_body, base + f_lo, f_hi - f_lo);
   let off: u64 = info and 0xFFFFFFFFFF;
   let kind: u64 = (info >> 40) and 15;
   let width: u64 = (info >> 44) and 255;
@@ -685,8 +775,11 @@ func meta_lower_field_access(base: addr, len: u64, bind_lo: u64, bind_hi: u64, t
 // 位移是字段偏移），`#load` 按字段类型取出值。取值结果的临时值下标写进暂存区 +168
 // （+176/+184 清零）—— 与 `meta_operand_emit` 的约定一致：调用方从 168/176/184 这一
 // 组读「结果是谁」。
-func meta_lower_field_get(base: addr, len: u64, v_lo: u64, v_hi: u64, type_body: u64, f_lo: u64, f_hi: u64) -> u32 {
-  let info: u64 = meta_layout_field(base, len, type_body, f_lo, f_hi);
+//
+// `base` 是**值名所在的源码**（渲染 %名字用），`src`/`src_len` 是**字段布局所在的
+// 源码**。跨模块类型名（`M.Point`）时两者不是同一份。
+func meta_lower_field_get(base: addr, len: u64, v_lo: u64, v_hi: u64, src: addr, src_len: u64, type_body: u64, f_lo: u64, f_hi: u64) -> u32 {
+  let info: u64 = meta_layout_field(src, src_len, type_body, base + f_lo, f_hi - f_lo);
   let found: u64 = info >> 63;
   let missing: bool = found == 0;
   if missing {
@@ -749,13 +842,15 @@ func meta_emit_field_temp(base: addr, len: u64, parent: u64, index: u64) -> u32 
     let f1: u32 = lain_meta_fail(4);
     return 4;
   }
-  let tb: u64 = meta_scope_body(base, t_lo, t_hi, 4);
+  let tb: u64 = meta_type_body_and_src(base, len, t_lo, t_hi, 4);
   let nobody: bool = tb == 0xFFFFFFFFFFFFFFFF;
   if nobody {
     // 值名的声明类型不是积类型（和类型的变体投影是另一条路）
     let f2: u32 = lain_meta_fail(4);
     return 4;
   }
-  let gz: u32 = meta_lower_field_get(base, len, v_lo, v_hi, tb, f_lo, f_hi);
+  let fsrc: addr = meta_body_src();
+  let flen: u64 = meta_body_len();
+  let gz: u32 = meta_lower_field_get(base, len, v_lo, v_hi, fsrc, flen, tb, f_lo, f_hi);
   return gz;
 }

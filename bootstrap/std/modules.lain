@@ -1,11 +1,17 @@
 // 模块：源码注册表与 import。跨单元引用一律写 `别名.名字`。
 //
-// 解析规则：**逻辑路径全路径精确匹配，不做末段回退。**
+// 解析规则（与 lain0 的 resolveModulePath 同义）：说明符**相对导入方目录**解析，
+// 登记名是「源根相对路径」（`std/lex.lain`、`examples/arith.lain`）。
 //
-//   import("std::math")  →  注册路径 "std/math.lain"
+//   import("../meta")          →  <导入方目录>/../meta        →  meta.lain
+//   import("std::math")        →  <导入方目录>/math.lain
+//                                 <导入方目录>/std/math.lain
+//   import("examples::lib")    →  <导入方目录>/lib.lain
+//                                 <导入方目录>/examples/lib.lain
 //
-// `::` 对 `/`，末尾补 `.lain`（逻辑路径里自己写了 `.lain` 也接受）。逐字节比较
-// 整条路径，找不到就是错误（status 11）。
+// 候选按序取第一个命中：说明符原样规范化（旧口径，根相对）、导入方目录 + 末段、
+// 导入方目录 + 整段（`::` 对 `/`）。拼接后做词法规范化（丢 `.`、折叠 `..`、
+// 折叠重复 `/`），末尾补 `.lain`。全部不中就是错误（status 11）。
 //
 // 注册表里每份源码的路径由宿主给（`lain_meta_source_path_data`），是 NUL 结尾的
 // C 字符串——所以这里靠扫 0 取长度，不需要额外的长度能力。
@@ -106,31 +112,137 @@ func meta_ends_with_lain(logical: addr, len: u64) -> bool {
   return eq;
 }
 
-// 把逻辑路径规范化成注册路径的形状，写进 buf（NUL 结尾）。调用方保证 buf 够大。
-func meta_build_path(logical: addr, len: u64, buf: addr, capacity: u64) -> u32 {
-  let has: bool = meta_ends_with_lain(logical, len);
+// 虚拟拼接流「dir + 斜杠 + logical[from..len)」的第 k 个字节。dir_len == 0 表示没有
+// 前缀，这时第 k 个字节就是 logical[from + k]。
+func meta_rel_byte(dir: addr, dir_len: u64, logical: addr, from: u64, len: u64, k: u64) -> u8 {
+  let no_dir: bool = dir_len == 0;
+  if no_dir { return std_lex.bs_byte_at(logical, from + k, len); }
+  let in_dir: bool = k < dir_len;
+  if in_dir { return load(dir + k); }
+  let at_slash: bool = k == dir_len;
+  if at_slash { return 47; }
+  let off: u64 = k - dir_len - 1;
+  return std_lex.bs_byte_at(logical, from + off, len);
+}
+
+// 虚拟流第 k 个字节属于哪个真实字符串的哪个下标。dir_len == 0 时没有前缀，
+// 第 k 个字节就是 logical[from + k]；否则前 dir_len 个字节在 dir 里、第 dir_len 个
+// 是斜杠、之后的字节在 logical 里且要跳过那个斜杠。
+func meta_rel_addr(dir: addr, dir_len: u64, logical: addr, from: u64, k: u64) -> addr {
+  let no_dir: bool = dir_len == 0;
+  if no_dir {
+    let at: u64 = from + k;
+    return logical + at;
+  }
+  let in_dir: bool = k < dir_len;
+  if in_dir { return dir + k; }
+  let soff: u64 = k - dir_len - 1;
+  let spec_at: u64 = from + soff;
+  return logical + spec_at;
+}
+
+// dir_len == 0 时虚拟流的总长度；否则是 dir + 斜杠 + 说明符。
+func meta_rel_len(dir_len: u64, len: u64, from: u64) -> u64 {
+  let spec_len: u64 = len - from;
+  let no_dir: bool = dir_len == 0;
+  let total: u64 = if no_dir { spec_len } else { dir_len + 1 + spec_len };
+  return total;
+}
+
+// 说明符那一段（不含目录前缀）自己写了 .lain 吗？
+func meta_spec_has_lain(logical: addr, from: u64, len: u64) -> bool {
+  let spec_len: u64 = len - from;
+  let enough: bool = spec_len >= 5;
+  if enough == 0 { return 0; }
+  let at: u64 = from + (spec_len - 5);
+  let p: addr = logical + at;
+  let suf: addr = symbol_addr("meta_suffix_lain_storage");
+  return std_types.meta_bytes_equal(p, suf, 5);
+}
+
+// 把「dir + 斜杠 + logical[from..len)」规范化成注册路径写进 buf（NUL 结尾）。
+// 双冒号对斜杠；点段丢弃；双点段吃掉上一段（上一段也是双点就照留）；重复斜杠
+// 折叠；首字节是斜杠的保留一个前导斜杠。说明符自己没写 .lain 就补上。
+// dir_len == 0 表示没有前缀。越界返回 17，调用方保证 buf 够大。
+func meta_build_rel(dir: addr, dir_len: u64, logical: addr, from: u64, len: u64, buf: addr, capacity: u64) -> u32 {
+  let tlen: u64 = meta_rel_len(dir_len, len, from);
+  let has: bool = meta_spec_has_lain(logical, from, len);
   let suffix: u64 = if has { 0 } else { 5 };
-  let need: u64 = len + suffix + 1;
+  let need: u64 = tlen + suffix + 1;
   let fits: bool = need <= capacity;
   if fits == 0 { return 17; }
-  // `::` 变 `/`（吃掉第二个冒号）；单个 `:` 原样留着，它匹配不上就是匹配不上。
-  let j: u64 = loop put(i: u64 = 0, j: u64 = 0) {
-    let more: bool = i < len;
-    if more {
-      let is_colon: bool = std_lex.bs_is_byte(logical, i, 58);
-      let raw: u8 = std_lex.bs_byte_at(logical, i, len);
-      let out: u8 = if is_colon { 47 } else { raw };
-      let p: addr = buf + j;
-      store(p, out);
-      let j2: u64 = j + 1;
-      if is_colon == 0 { continue put(i + 1, j2); }
-      let i1: u64 = i + 1;
-      let also: bool = std_lex.bs_is_byte(logical, i1, 58);
-      if also { continue put(i + 2, j2); }
-      continue put(i + 1, j2);
-    } else {
-      break put(j);
+  let empty: bool = tlen == 0;
+  let first: u8 = if empty { 0 } else { meta_rel_byte(dir, dir_len, logical, from, len, 0) };
+  let fu: u32 = first as u32;
+  let abs: bool = fu == 47;
+  let head: u32 = if abs { meta_buf_put(buf, capacity, 0, 47) } else { 0 };
+  if head != 0 { return head; }
+  let j0: u64 = if abs { 1 } else { 0 };
+  let j: u64 = loop put(k: u64 = 0, j: u64 = j0) {
+    let past: bool = k >= tlen;
+    if past { break put(j); }
+    let raw: u8 = meta_rel_byte(dir, dir_len, logical, from, len, k);
+    let rawu: u32 = raw as u32;
+    let colon: bool = rawu == 58;
+    if colon {
+      let k1: u64 = k + 1;
+      let two: u8 = meta_rel_byte(dir, dir_len, logical, from, len, k1);
+      let twou: u32 = two as u32;
+      let also: bool = twou == 58;
+      let adv: u64 = if also { 2 } else { 1 };
+      continue put(k + adv, j);
     }
+    let slash: bool = rawu == 47;
+    if slash { continue put(k + 1, j); }
+    // 一段普通字节，直到下一个分隔符。
+    let seg_end: u64 = loop seg(e: u64 = k) {
+      let epast: bool = e >= tlen;
+      if epast { break seg(e); }
+      let eb: u8 = meta_rel_byte(dir, dir_len, logical, from, len, e);
+      let ebu: u32 = eb as u32;
+      let eslash: bool = ebu == 47;
+      let ecolon: bool = ebu == 58;
+      let esep: bool = eslash or ecolon;
+      if esep { break seg(e); }
+      continue seg(e + 1);
+    };
+    let seg_len: u64 = seg_end - k;
+    let one: bool = seg_len == 1;
+    if one {
+      let db: u8 = meta_rel_byte(dir, dir_len, logical, from, len, k);
+      let dbu: u32 = db as u32;
+      let dot: bool = dbu == 46;
+      if dot { continue put(seg_end, j); }
+    }
+    let two_long: bool = seg_len == 2;
+    if two_long {
+      let d0: u8 = meta_rel_byte(dir, dir_len, logical, from, len, k);
+      let d0u: u32 = d0 as u32;
+      let k1: u64 = k + 1;
+      let d1: u8 = meta_rel_byte(dir, dir_len, logical, from, len, k1);
+      let d1u: u32 = d1 as u32;
+      let dots: bool = (d0u == 46) and (d1u == 46);
+      if dots {
+        let back: u64 = loop pop(q: u64 = j) {
+          let stop: bool = q <= j0;
+          if stop { break pop(j0); }
+          let q1: u64 = q - 1;
+          let cb: u8 = load(buf + q1);
+          let cbu: u32 = cb as u32;
+          if cbu == 47 { break pop(q1); }
+          continue pop(q1);
+        };
+        continue put(seg_end, back);
+      }
+    }
+    let sep: u32 = if j > j0 { meta_buf_put(buf, capacity, j, 47) } else { 0 };
+    if sep != 0 { return sep; }
+    let j1: u64 = if j > j0 { j + 1 } else { j };
+    let src: addr = meta_rel_addr(dir, dir_len, logical, from, k);
+    let j2: u64 = meta_buf_puts(buf, capacity, j1, src, seg_len);
+    let failed: bool = j2 == 0xFFFFFFFFFFFFFFFF;
+    if failed { return 17; }
+    continue put(seg_end, j2);
   };
   let end: u64 = loop pick_end(t: u64 = 0) {
     if has { break pick_end(j); }
@@ -143,35 +255,115 @@ func meta_build_path(logical: addr, len: u64, buf: addr, capacity: u64) -> u32 {
   return 0;
 }
 
-// --- 查注册表 -------------------------------------------------------------
+// 没有目录前缀的规范化（说明符按源根相对解释）。
+func meta_build_path(logical: addr, len: u64, buf: addr, capacity: u64) -> u32 {
+  return meta_build_rel(buf, 0, logical, 0, len, buf, capacity);
+}
 
-// 逻辑路径 → 源码下标；找不到返回 NOT_FOUND。查不到就**不回退**。
-func meta_source_find(logical: addr, logical_len: u64) -> u64 {
-  let scratch: addr = lain_meta_scratch_data();
-  // 路径 / mangle 缓冲区：位置由 scope.lain 的 meta_path_buffer 给出（动态区尾部，
-  // 紧接语法树节点区），容量 352 字节。
-  let cap_ad: addr = std_registry.meta_path_cap;
-  let cap: u64 = std_types.meta_cell_get(cap_ad);
-  // `::` 只会变短，补 `.lain` 和 NUL 是最坏情况 +6
-  let need: u64 = logical_len + 6;
-  let fits: bool = need <= cap;
-  if fits == 0 { return 0xFFFFFFFFFFFFFFFF; }
-  let pat: u64 = std_scope.meta_path_buffer();
-  let buf: addr = scratch + pat;
-  let b: u32 = meta_build_path(logical, logical_len, buf, cap);
-  let count: u64 = lain_meta_source_count();
-  let idx: u64 = loop s(i: u64 = 0) {
+// NUL 结尾路径里最后一个斜杠的下标（没有就 0）。目录前缀是 path[0..dir_len)。
+func meta_dir_len(path: addr) -> u64 {
+  let r: u64 = loop scan(i: u64 = 0, n: u64 = 0) {
+    let b: u8 = load(path + i);
+    let bu: u32 = b as u32;
+    let done: bool = bu == 0;
+    if done { break scan(n); }
+    let is_slash: bool = bu == 47;
+    let n2: u64 = if is_slash { i } else { n };
+    continue scan(i + 1, n2);
+  };
+  return r;
+}
+
+// 说明符里最后一处双冒号的首字节下标；没有返回 NOT_FOUND。
+func meta_last_dsep(logical: addr, len: u64) -> u64 {
+  let r: u64 = loop scan(i: u64 = 0, last: u64 = 0xFFFFFFFFFFFFFFFF) {
+    let past: bool = i >= len;
+    if past { break scan(last); }
+    let c0: bool = std_lex.bs_is_byte(logical, i, 58);
+    let i1: u64 = i + 1;
+    let c1: bool = std_lex.bs_is_byte(logical, i1, 58);
+    let hit: bool = c0 and c1;
+    let last2: u64 = if hit { i } else { last };
+    continue scan(i + 1, last2);
+  };
+  return r;
+}
+
+// 注册表里等于 path 的源码下标；没有返回 NOT_FOUND。
+func meta_registered_match(path: addr, count: u64) -> u64 {
+  let r: u64 = loop s(i: u64 = 0) {
     let more: bool = i < count;
     if more {
       let p: addr = lain_meta_source_path_data(i);
-      let same: bool = meta_cstr_equal(p, buf);
+      let same: bool = meta_cstr_equal(p, path);
       if same { break s(i); }
       continue s(i + 1);
     } else {
       break s(0xFFFFFFFFFFFFFFFF);
     }
   };
-  return idx;
+  return r;
+}
+// --- 查注册表 -------------------------------------------------------------
+
+// 说明符 → 源码下标；找不到返回 NOT_FOUND。
+//
+// 候选按序取第一个命中，三条都在同一个私有缓冲里算：
+//   (a) 导入方目录 + 斜杠 + 整条说明符
+//   (b) 导入方目录 + 斜杠 + 说明符最后一处双冒号之后的末段
+//   (c) 说明符按源根相对解释
+// 导入方是 `meta_scope_current()` 那份源码的登记路径。缓冲从 bump 动态区要，用完
+// 立刻还：352 字节的 meta_path_buf 是别的发射器的临时名字区，不能借。
+func meta_source_find(logical: addr, logical_len: u64) -> u64 {
+  let scratch: addr = lain_meta_scratch_data();
+  let cap_ad: addr = std_registry.meta_path_cap;
+  let cap: u64 = std_types.meta_cell_get(cap_ad);
+  let need: u64 = logical_len + 6;
+  let fits: bool = need <= cap;
+  if fits == 0 { return 0xFFFFFFFFFFFFFFFF; }
+  let count: u64 = lain_meta_source_count();
+  let mark: u64 = std_scope.meta_bump_mark();
+  let off: u64 = std_scope.meta_bump_alloc(cap);
+  let no_space: bool = off == 0xFFFFFFFFFFFFFFFF;
+  if no_space { return 0xFFFFFFFFFFFFFFFF; }
+  let buf: addr = scratch + off;
+  let cur: u64 = std_scope.meta_scope_current();
+  let no_cur: bool = cur >= count;
+  // 候选的命中下标与「还要不要再试」都放进参数组格子；每个分支结束时只赋值、不提前返回，
+  // 最后统一释放缓冲。
+  let hit_a: u64 = loop pick_a(h: u64 = 0xFFFFFFFFFFFFFFFF) {
+    if no_cur { break pick_a(0xFFFFFFFFFFFFFFFF); }
+    let path: addr = lain_meta_source_path_data(cur);
+    let dlen: u64 = meta_dir_len(path);
+    let ba: u32 = meta_build_rel(path, dlen, logical, 0, logical_len, buf, cap);
+    let ha: u64 = meta_registered_match(buf, count);
+    break pick_a(ha);
+  };
+  let hit_b: u64 = loop pick_b(h: u64 = 0xFFFFFFFFFFFFFFFF) {
+    let found_a: bool = hit_a != 0xFFFFFFFFFFFFFFFF;
+    if found_a { break pick_b(hit_a); }
+    if no_cur { break pick_b(0xFFFFFFFFFFFFFFFF); }
+    let last: u64 = meta_last_dsep(logical, logical_len);
+    let no_sep: bool = last == 0xFFFFFFFFFFFFFFFF;
+    if no_sep { break pick_b(0xFFFFFFFFFFFFFFFF); }
+    let path: addr = lain_meta_source_path_data(cur);
+    let dlen: u64 = meta_dir_len(path);
+    let from: u64 = last + 2;
+    let bb: u32 = meta_build_rel(path, dlen, logical, from, logical_len, buf, cap);
+    let hb: u64 = meta_registered_match(buf, count);
+    let found_b: bool = hb != 0xFFFFFFFFFFFFFFFF;
+    let h2: u64 = if found_b { hb } else { 0xFFFFFFFFFFFFFFFF };
+    break pick_b(h2);
+  };
+  let hit_c: u64 = loop pick_c(h: u64 = 0xFFFFFFFFFFFFFFFF) {
+    let found_b: bool = hit_b != 0xFFFFFFFFFFFFFFFF;
+    if found_b { break pick_c(hit_b); }
+    let bc: u32 = meta_build_path(logical, logical_len, buf, cap);
+    let hc: u64 = meta_registered_match(buf, count);
+    break pick_c(hc);
+  };
+  let relc: u32 = std_scope.meta_bump_release(mark);
+  return hit_c;
 }
 
 // --- import 的语法与降级 ---------------------------------------------------
@@ -259,8 +451,11 @@ func meta_emit_module_exports(m_base: addr, m_len: u64, idx: u64, mag: addr, mag
   return r;
 }
 
-// `let NAME = import("逻辑路径");` —— 解析、登记，并把模块里全部值绑定的过程
-// 一次发出去（见 `meta_emit_module_exports`）。
+// `let NAME = import("逻辑路径");` —— 解析并登记。
+//
+// 被导入模块的绑定**属于它自己的单元**：lain0 --split 每个模块一份产物，跨模块
+// 引用按 `<键>__<成员>` 落到依赖单元里。这里再发一遍就会与依赖单元的同名过程
+// 撞车（校验报 2022 duplicate subroutine）。
 func meta_lower_import(base: addr, len: u64, eq_at: u64) -> u32 {
   let one: u64 = eq_at + 1;
   let kw_at: u64 = std_lex.bs_skip_space(base, one, len);
@@ -300,9 +495,8 @@ func meta_lower_import(base: addr, len: u64, eq_at: u64) -> u32 {
     let rest0: u32 = std_scope.meta_scope_set_current(old_src);
     return ready;
   }
-  let e: u32 = meta_emit_module_exports(m_base, m_len, idx, buf, mag_len);
   let rest: u32 = std_scope.meta_scope_set_current(old_src);
-  return e;
+  return rest;
 }
 
 // --- 命名空间成员：`M.x` ----------------------------------------------------
@@ -428,6 +622,121 @@ func meta_emit_module_call(m_base: addr, b_lo: u64, b_hi: u64, mag: addr, mag_le
   return 0;
 }
 
+// `<mangle>__<名字>` 过程名渲染进 buf，返回长度。
+func meta_module_proc_symbol(mag: addr, mag_len: u64, base: addr, b_lo: u64, b_hi: u64, buf: addr) -> u64 {
+  let dsep: addr = std_emit.meta_dsep;
+  let s1: u64 = std_lainir.lainir_buf_bytes(buf, 0, mag, mag_len);
+  let s2: u64 = std_lainir.lainir_buf_bytes(buf, s1, dsep, 2);
+  let n_at: addr = base + b_lo;
+  let s3: u64 = std_lainir.lainir_buf_bytes(buf, s2, n_at, b_hi - b_lo);
+  return s3;
+}
+
+// 导出模块里的静态表绑定：发数据块 `<键>__<名字>_storage` 加取址过程
+// `<键>__<名字>()`。数据块的元素字节数在作用域条目的 emitted 里（建表时写入）。
+func meta_emit_module_table(m_base: addr, m_len: u64, i: u64, n_off: u64, n_hi: u64, init: u64, mag: addr, mag_len: u64) -> u32 {
+  let scratch: addr = lain_meta_scratch_data();
+  let pat: u64 = std_scope.meta_path_buffer();
+  let pbuf: addr = scratch + pat;
+  let sbuf: addr = pbuf + 256;
+  let dsym: u64 = meta_module_data_symbol(mag, mag_len, m_base, n_off, n_hi - n_off, sbuf);
+  let psym: u64 = meta_module_proc_symbol(mag, mag_len, m_base, n_off, n_hi, pbuf);
+  // 标注里有没有 `ro`：在名字末尾与 `=` 之间扫一遍。
+  let is_ro: bool = loop ro_scan(k: u64 = n_hi) {
+    let more: bool = k < init;
+    if more {
+      let hit: bool = std_lex.bs_match_keyword(m_base, k, m_len, std_lex.meta_kw_ro, 2);
+      if hit { break ro_scan(1); }
+      continue ro_scan(k + 1);
+    } else {
+      break ro_scan(0);
+    }
+  };
+  let h0: u32 = std_lainir.lainir_data_head();
+  // 数据头自己会补 \`_storage\`，这里只写过程名那一段。
+  let h1: u32 = std_lainir.lainir_write(pbuf, psym);
+  let h2: u32 = if is_ro { std_lainir.lainir_data_ro_storage_head() } else { std_lainir.lainir_data_rw_head() };
+  let elt_node: u64 = std_scope.meta_scope_payload(i);
+  let cnt: u64 = std_parse.ast_child_count(elt_node);
+  let esz: u64 = std_scope.meta_scope_emitted(i);
+  let body: u32 = loop elems(k: u64 = 0) {
+    let more: bool = k < cnt;
+    if more {
+      let c: u64 = std_parse.ast_child(elt_node, k);
+      let c_lo: u64 = std_parse.meta_node_start(c);
+      let fb: u8 = std_lex.bs_byte_at(m_base, c_lo, m_len);
+      let is_comma: bool = fb == 44;
+      if is_comma {
+        continue elems(k + 1);
+      } else {
+        let val: u64 = std_lex.bs_read_uint(m_base, c_lo, m_len);
+        let bytes_st: u32 = loop emit_elt(j: u64 = 0) {
+          let jmore: bool = j < esz;
+          if jmore {
+            let shift: u64 = j * 8;
+            let shr: u64 = val >> shift;
+            let bv: u64 = shr and 255;
+            let w0: u32 = std_lainir.lainir_emit_uint(bv);
+            let w1: u32 = std_lainir.lainir_space_write();
+            continue emit_elt(j + 1);
+          } else {
+            break emit_elt(0);
+          }
+        };
+        continue elems(k + 1);
+      }
+    } else {
+      break elems(0);
+    }
+  };
+  let h3: u32 = std_lainir.lainir_data_close();
+  let p0: u32 = std_lainir.lainir_proc_head_full(pbuf, psym, pbuf, 0, 3, 0);
+  let p1: u32 = std_lainir.lainir_open_body();
+  let p2: u32 = std_lainir.lainir_base_assign_write();
+  let p3: u32 = std_lainir.lainir_write(sbuf, dsym);
+  let p4: u32 = std_lainir.lainir_write(std_lainir.lainir_rparen_nl, 2);
+  let p5: u32 = std_lainir.lainir_return_base_close();
+  return 0;
+}
+
+// 导出模块里的取址绑定：`let X: addr = symbol_addr("名字[_storage]")`。
+func meta_emit_module_symbol(m_base: addr, m_len: u64, n_off: u64, n_hi: u64, init: u64, mag: addr, mag_len: u64) -> u32 {
+  let q0: u64 = std_lex.bs_skip_space(m_base, init + 11, m_len);
+  let arg_at: u64 = std_lex.bs_skip_space(m_base, q0 + 1, m_len);
+  let inner: u64 = arg_at + 1;
+  let close: u64 = loop find_close(j: u64 = inner) {
+    let more: bool = j < m_len;
+    if more {
+      let b: u8 = std_lex.bs_byte_at(m_base, j, m_len);
+      let is_q: bool = b == 34;
+      if is_q { break find_close(j); }
+      continue find_close(j + 1);
+    } else {
+      break find_close(inner);
+    }
+  };
+  let raw: u64 = close - inner;
+  let room: bool = raw >= 8;
+  let suf_at_off: u64 = close - 8;
+  let suf_at: addr = m_base + suf_at_off;
+  let suffix: bool = if room { std_types.meta_bytes_equal(suf_at, std_lex.meta_bs_storage, 8) } else { 0 };
+  let use_len: u64 = if suffix { raw - 8 } else { raw };
+  let scratch: addr = lain_meta_scratch_data();
+  let pat: u64 = std_scope.meta_path_buffer();
+  let pbuf: addr = scratch + pat;
+  let sbuf: addr = pbuf + 256;
+  let dsym: u64 = meta_module_data_symbol(mag, mag_len, m_base, inner, use_len, sbuf);
+  let psym: u64 = meta_module_proc_symbol(mag, mag_len, m_base, n_off, n_hi, pbuf);
+  let h0: u32 = std_lainir.lainir_proc_head_full(pbuf, psym, pbuf, 0, 3, 0);
+  let h1: u32 = std_lainir.lainir_open_body();
+  let tn: u64 = meta_emit_data_addr_line(sbuf, dsym);
+  let h2: u32 = std_lainir.lainir_return_write();
+  let h3: u32 = std_lainir.lainir_temp_name_emit(tn);
+  let h4: u32 = std_lainir.lainir_newline_write();
+  let h5: u32 = std_lainir.lainir_close_body();
+  return 0;
+}
+
 // 发出模块里的一条值绑定，名字是 `<mangle>__<名字>`。
 //
 // 初始化式有两种形状（v0）：
@@ -445,17 +754,22 @@ func meta_emit_module_binding(m_base: addr, m_len: u64, name_addr: addr, name_le
   }
   let kind: u64 = std_scope.meta_scope_kind(i);
   let is_value: bool = kind == 3;
+  let is_func: bool = kind == 6;
+  if is_func {
+    // 函数成员的过程体就在模块自己的单元里，调用方直接发 #call，这里没有要发的东西。
+    return 0;
+  }
   if is_value == 0 {
-    // v0：模块里能取用的只有值绑定。取一个标量类型或别的，报 4。
+    // v0：模块里能取用的只有值绑定与函数。取一个标量类型或别的，报 4。
     let f1: u32 = lain_meta_fail(4);
     return 4;
   }
-  let done: u64 = std_scope.meta_scope_emitted(i);
+  let done: u64 = std_scope.meta_scope_exported(i);
   let skip: bool = done != 0;
   if skip {
     return 0;
   }
-  let mark: u32 = std_scope.meta_scope_set_emitted(i, 1);
+  let mark: u32 = std_scope.meta_scope_set_exported(i, 1);
   // 名字在模块源码里的位置：条目里存着
   let n_off: u64 = std_scope.meta_scope_word(i, 8);
   let n_len: u64 = std_scope.meta_scope_word(i, 16);
@@ -466,6 +780,17 @@ func meta_emit_module_binding(m_base: addr, m_len: u64, name_addr: addr, name_le
   let init_len: u64 = std_parse.meta_node_len(init_node);
   let init_hi: u64 = init + init_len;
   let first: u8 = std_lex.bs_byte_at(m_base, init, m_len);
+  let first32: u32 = first as u32;
+  let is_tbl: bool = first32 == 91;
+  if is_tbl {
+    let et: u32 = meta_emit_module_table(m_base, m_len, i, n_off, n_hi, init, mag, mag_len);
+    return et;
+  }
+  let is_symaddr: bool = std_lex.bs_match_keyword(m_base, init, m_len, std_lex.meta_kw_symbol_addr, 11);
+  if is_symaddr {
+    let es: u32 = meta_emit_module_symbol(m_base, m_len, n_off, n_hi, init, mag, mag_len);
+    return es;
+  }
   let is_num: bool = std_lex.bs_is_digit(first);
   if is_num {
     let value: u64 = std_lex.bs_read_uint(m_base, init, m_len);
@@ -531,7 +856,11 @@ func meta_lower_ns_value(base: addr, len: u64, bind_lo: u64, bind_hi: u64, ns_lo
   // 调用方那条：`#proc <bind>() -> <repr> { #return #call <mangle>__<member>() }`
   let e2: u32 = meta_emit_ns_call(base, bind_lo, bind_hi, kind, width, buf, mag_len, base, m_lo, m_hi);
   let rest: u32 = std_scope.meta_scope_set_current(old_src);
-  return e1;
+  let bad: bool = e1 != 0;
+  if bad {
+    return e1;
+  }
+  return e2;
 }
 
 // `M.answer` 当操作数用（`M.answer + 1`、`f(M.answer)`、`let x = M.answer + 2;`）：
@@ -539,7 +868,97 @@ func meta_lower_ns_value(base: addr, len: u64, bind_lo: u64, bind_hi: u64, ns_lo
 //
 // 成员的过程已经在 import 声明处发过（`meta_emit_module_exports`），所以这里只发
 // 调用；再确认一下成员确实在模块表里、是值绑定，缺失或不是值绑定分别报 13 / 4。
-func meta_emit_ns_operand(base: addr, len: u64, ns_lo: u64, ns_hi: u64, m_lo: u64, m_hi: u64) -> u32 {
+// 发 `  %r<n> = #bitcast[#addr](%<符号>)`，回临时编号。符号名在同一个文件里。
+func meta_emit_data_addr_line(symbol: addr, symbol_len: u64) -> u64 {
+  let indent: addr = std_lainir.lainir_indent;
+  let w0: u32 = std_lainir.lainir_write(indent, 2);
+  let tn: u64 = std_funcs.meta_next_temp();
+  let pct: addr = std_lainir.lainir_pct_r;
+  let w1: u32 = std_lainir.lainir_write(pct, 2);
+  let w2: u32 = std_lainir.lainir_emit_uint(tn);
+  let assign: addr = std_lainir.lainir_assign;
+  let w3: u32 = std_lainir.lainir_write(assign, 4);
+  let head: addr = std_lainir.lainir_bitcast_addr_head;
+  let w4: u32 = std_lainir.lainir_write(head, 16);
+  let w5: u32 = std_lainir.lainir_write(symbol, symbol_len);
+  let w6: u32 = std_lainir.lainir_write(std_lainir.lainir_rparen_nl, 2);
+  return tn;
+}
+
+// 模块 idx 里名字为 name 的静态数据块，符号 `<键>__<名字>_storage` 写进 buf，返回长度。
+func meta_module_data_symbol(mag: addr, mag_len: u64, base: addr, m_lo: u64, m_len: u64, buf: addr) -> u64 {
+  let dsep: addr = std_emit.meta_dsep;
+  let s1: u64 = std_lainir.lainir_buf_bytes(buf, 0, mag, mag_len);
+  let s2: u64 = std_lainir.lainir_buf_bytes(buf, s1, dsep, 2);
+  // 名字取模块**自己的**源码：调用方同一个名字在两边字节一样，但归属要写清楚。
+  let n_at: addr = base + m_lo;
+  let s3: u64 = std_lainir.lainir_buf_bytes(buf, s2, n_at, m_len);
+  let s4: u64 = std_lainir.lainir_buf_bytes(buf, s3, std_lex.meta_bs_storage, 8);
+  return s4;
+}
+
+// 跨模块静态表的取址：发一条 `%r<n> = #bitcast[#addr](%<键>__<成员>_storage)`，
+// 临时号与元素字节数、元素个数分别另存 3936 / 3944 / 3952。
+func meta_emit_ns_static_addr(base: addr, len: u64, ns_lo: u64, ns_hi: u64, m_lo: u64, m_hi: u64) -> u32 {
+  let lp: u64 = meta_find_import_binding(base, len, ns_lo, ns_hi);
+  let nons: bool = lp == 0;
+  if nons {
+    let f0: u32 = lain_meta_fail(12);
+    return 12;
+  }
+  let n: u64 = meta_logical_len(base, lp, len);
+  let path: addr = base + lp;
+  let idx: u64 = meta_source_find(path, n);
+  let miss: bool = idx == 0xFFFFFFFFFFFFFFFF;
+  if miss {
+    let f1: u32 = lain_meta_fail(11);
+    return 11;
+  }
+  let pat: u64 = std_scope.meta_path_buffer();
+  let scratch: addr = lain_meta_scratch_data();
+  let buf: addr = scratch + pat;
+  let mag_len: u64 = meta_module_key(idx, buf);
+  let old_src: u64 = std_scope.meta_scope_enter(idx);
+  let mname: addr = base + m_lo;
+  let mnlen: u64 = m_hi - m_lo;
+  let mi: u64 = std_scope.meta_scope_find(mname, mnlen);
+  let chk: u32 = loop ns_chk(t: u32 = 0) {
+    let found: bool = mi != 0xFFFFFFFFFFFFFFFF;
+    if found == 0 {
+      let fm: u32 = lain_meta_fail(13);
+      break ns_chk(13);
+    }
+    let mk: u64 = std_scope.meta_scope_kind(mi);
+    let isv: bool = mk == 3;
+    if isv == 0 {
+      let fk: u32 = lain_meta_fail(4);
+      break ns_chk(4);
+    }
+    let me: u64 = std_scope.meta_scope_emitted(mi);
+    let me0: bool = me == 0;
+    if me0 {
+      let fe: u32 = lain_meta_fail(4);
+      break ns_chk(4);
+    }
+    break ns_chk(0);
+  };
+  let rest: u32 = std_scope.meta_scope_set_current(old_src);
+  let bad: bool = chk != 0;
+  if bad {
+    return chk;
+  }
+  let esz: u64 = std_scope.meta_scope_emitted(mi);
+  let cnt: u64 = std_scope.meta_scope_aux(mi);
+  let tybuf: addr = scratch + 3936;
+  let tsym: u64 = meta_module_data_symbol(buf, mag_len, base, m_lo, mnlen, tybuf);
+  let ttn: u64 = meta_emit_data_addr_line(tybuf, tsym);
+  let q1: u32 = std_types.meta_cell_put(scratch + 3936, ttn);
+  let q2: u32 = std_types.meta_cell_put(scratch + 3944, esz);
+  let q3: u32 = std_types.meta_cell_put(scratch + 3952, cnt);
+  return 0;
+}
+
+func meta_emit_ns_operand(base: addr, len: u64, ns_lo: u64, ns_hi: u64, m_lo: u64, m_hi: u64, kind: u64, width: u64, t_lo: u64, t_hi: u64, has_args: bool, args: u64) -> u32 {
   let lp: u64 = meta_find_import_binding(base, len, ns_lo, ns_hi);
   let nons: bool = lp == 0;
   if nons {
@@ -571,6 +990,8 @@ func meta_emit_ns_operand(base: addr, len: u64, ns_lo: u64, ns_hi: u64, m_lo: u6
     let mk: u64 = std_scope.meta_scope_kind(mi);
     let isv: bool = mk == 3;
     if isv { break pick_chk(0); }
+    let isf: bool = mk == 6;
+    if isf { break pick_chk(0); }
     let fk: u32 = lain_meta_fail(4);
     break pick_chk(4);
   };
@@ -579,14 +1000,71 @@ func meta_emit_ns_operand(base: addr, len: u64, ns_lo: u64, ns_hi: u64, m_lo: u6
   if bad {
     return chk;
   }
+  // 静态数据成员（定长表、字节串）：它的值是该模块里的数据块地址，过程体在模块
+  // 自己的单元里（见 meta_emit_module_binding）。这里发一条取址。
+  let is_tab: u64 = loop pick_tab(t: u64 = 0) {
+    if found == 0 { break pick_tab(0); }
+    let tk: u64 = std_scope.meta_scope_kind(mi);
+    let t3: bool = tk == 3;
+    if t3 == 0 { break pick_tab(0); }
+    let te: u64 = std_scope.meta_scope_emitted(mi);
+    let teok: bool = te != 0;
+    let tp: u64 = std_scope.meta_scope_payload(mi);
+    let tp_lo: u64 = std_parse.meta_node_start(tp);
+    let tp_b: u8 = std_lex.bs_byte_at(base, tp_lo, len);
+    let tp_bw: u32 = tp_b as u32;
+    let tp_str: bool = tp_bw == 34;
+    break pick_tab(teok or tp_str);
+  };
+  let tab: bool = is_tab != 0;
+  if tab {
+    let tybuf: addr = std_scope.meta_path_buf();
+    let tsym: u64 = meta_module_data_symbol(buf, mag_len, base, m_lo, mnlen, tybuf);
+    let ttn: u64 = meta_emit_data_addr_line(tybuf, tsym);
+    let tsc: addr = lain_meta_scratch_data();
+    let q1: u32 = std_types.meta_cell_put(tsc + 168, ttn);
+    let q2: u32 = std_types.meta_cell_put(tsc + 176, 0);
+    let q3: u32 = std_types.meta_cell_put(tsc + 184, 0);
+    return 0;
+  }
+  // 实参先降级：那些指令必须发在这一行**前面**，而它们的降级会用到文字缓冲区，
+  // 所以被调名要在降级之后再渲染进去。
+  let ap: u32 = if has_args {
+    std_funcs.meta_args_prepare(base, len, kind, width, t_lo, t_hi, args)
+  } else { 0 };
+  let abad: bool = ap != 0;
+  if abad {
+    return ap;
+  }
+  // 实参降级会借走同一块 352 字节路径缓冲（symbol_addr 的实参要渲染当前单元的符号名，
+  // 也写在那里），所以被调方键必须在降级之后重新算一遍。否则前缀会被换成当前单元
+  // 自己的键，产物里出现「本单元键 + 别的模块的成员名」这种悬空调用。
+  let mag2_len: u64 = if has_args { meta_module_key(idx, buf) } else { mag_len };
   // 名字渲染进缓冲区：0 起是 `<mangle>__<成员>`，160 起是 `%r<n>`。
   let tb: addr = std_lainir.lainir_text_buffer;
   let dsep: addr = std_emit.meta_dsep;
-  let c1: u64 = std_lainir.lainir_buf_bytes(tb, 0, buf, mag_len);
+  let c1: u64 = std_lainir.lainir_buf_bytes(tb, 0, buf, mag2_len);
   let c2: u64 = std_lainir.lainir_buf_bytes(tb, c1, dsep, 2);
   let mat: addr = base + m_lo;
   let mn: u64 = m_hi - m_lo;
   let clen: u64 = std_lainir.lainir_buf_bytes(tb, c2, mat, mn);
+  if has_args {
+    let tn2: u64 = std_funcs.meta_next_temp();
+    let a1: u32 = std_lainir.lainir_indent_write();
+    let a2: u32 = std_lainir.lainir_temp_name_emit(tn2);
+    let a3: u32 = std_lainir.lainir_result_sep_write();
+    let a4: u32 = std_lainir.lainir_call_word_write();
+    let a5: u32 = std_lainir.lainir_write(tb, clen);
+    let a6: u32 = std_lainir.lainir_open_paren_write();
+    let a7: u32 = std_funcs.meta_args_write(base, len);
+    let a8: u32 = std_lainir.lainir_close_paren_write();
+    let a9: u32 = std_lainir.lainir_newline_write();
+    let sc2: addr = lain_meta_scratch_data();
+    let q1: u32 = std_types.meta_cell_put(sc2 + 168, tn2);
+    let q2: u32 = std_types.meta_cell_put(sc2 + 176, 0);
+    let q3: u32 = std_types.meta_cell_put(sc2 + 184, 0);
+    return 0;
+  }
   let tn: u64 = std_funcs.meta_next_temp();
   let nend: u64 = std_lainir.lainir_buf_temp(tb, 160, tn);
   let nlen: u64 = nend - 160;

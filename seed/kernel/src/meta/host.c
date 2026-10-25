@@ -14,6 +14,7 @@
 
 typedef struct {
   const char *path;
+  bool path_owned; /* path_owned 为假时 path 是调用方借给宿主的，free 不能碰 */
   const char *text;
   uint32_t length;
   LainMetaTree *tree;
@@ -481,7 +482,7 @@ void lainmeta_host_free(LainMetaHost *host) {
   /* 退出顺序由驱动保证：先销毁引用这些段的 TCB、再撤销映射，最后才销毁宿主。 */
   for (i = 0; i < host->source_count; i++) {
     lainmeta_tree_free(host->sources[i].tree);
-    free((void *)host->sources[i].path);
+    if (host->sources[i].path_owned) free((void *)host->sources[i].path);
   }
   free(host->sources);
   free(host->out);
@@ -498,6 +499,14 @@ void lainmeta_host_free(LainMetaHost *host) {
 
 int lainmeta_host_add_source(LainMetaHost *host, const char *path,
                              const char *text, uint32_t length) {
+  return lainmeta_host_add_source_borrowed(host, path, text, length, false);
+}
+
+/* borrowed != 0：path 的生命周期由调用方保证（驱动把全部登记名拼在一块缓冲里，
+ * 只授权一个区段）。borrowed == 0：宿主自己拷一份。 */
+int lainmeta_host_add_source_borrowed(LainMetaHost *host, const char *path,
+                                     const char *text, uint32_t length,
+                                     bool borrowed) {
   LainMetaSource *grown;
   char *copy;
   uint32_t index;
@@ -512,22 +521,27 @@ int lainmeta_host_add_source(LainMetaHost *host, const char *path,
     host->sources = grown;
     host->source_cap = next;
   }
-  copy = (char *)malloc(path ? strlen(path) + 1u : 1u);
-  if (!copy) return 2;
-  if (path)
-    strcpy(copy, path);
-  else
-    copy[0] = '\0';
+  if (borrowed && path) {
+    copy = (char *)path;
+  } else {
+    copy = (char *)malloc(path ? strlen(path) + 1u : 1u);
+    if (!copy) return 2;
+    if (path)
+      strcpy(copy, path);
+    else
+      copy[0] = '\0';
+  }
   index = host->source_count;
   memset(&host->sources[index], 0, sizeof(host->sources[index]));
   host->sources[index].path = copy;
+  host->sources[index].path_owned = !(borrowed && path);
   host->sources[index].text = text;
   host->sources[index].length = length;
   /* 段号先按规则算出来并验范围，再写进源码项。失败一律不截断、不降级。 */
   if (!segment_pair_for(index, &host->sources[index].source_segment,
                         &host->sources[index].tree_segment)) {
     host_set_status(host, LAIN_AST_ERR_SEGMENT);
-    free(copy);
+    if (host->sources[index].path_owned) free(copy);
     memset(&host->sources[index], 0, sizeof(host->sources[index]));
     return 3;
   }
@@ -547,14 +561,14 @@ int lainmeta_host_add_source(LainMetaHost *host, const char *path,
         host_set_status(host, (uint32_t)LAINVM_TRAP_QUOTA);
         host->diagnostic_source = UINT64_MAX;
         host->diagnostic_offset = UINT64_MAX;
-        free(copy);
+        if (host->sources[index].path_owned) free(copy);
         memset(&host->sources[index], 0, sizeof(host->sources[index]));
         return 3;
       case LAINMETA_TREE_ERR_ALLOC:
         host_set_status(host, LAINMETA_ERR_OOM);
         host->diagnostic_source = UINT64_MAX;
         host->diagnostic_offset = UINT64_MAX;
-        free(copy);
+        if (host->sources[index].path_owned) free(copy);
         memset(&host->sources[index], 0, sizeof(host->sources[index]));
         return 3;
       case LAINMETA_TREE_ERR_INTERNAL:
@@ -562,7 +576,7 @@ int lainmeta_host_add_source(LainMetaHost *host, const char *path,
         host_set_status(host, LAINMETA_ERR_TREE_HANDLE);
         host->diagnostic_source = index;
         host->diagnostic_offset = error_offset;
-        free(copy);
+        if (host->sources[index].path_owned) free(copy);
         memset(&host->sources[index], 0, sizeof(host->sources[index]));
         return 3;
       default:
@@ -586,7 +600,7 @@ int lainmeta_host_add_source(LainMetaHost *host, const char *path,
                                  host->sources[index].source_segment)) {
     lainmeta_tree_free(host->sources[index].tree);
     host->sources[index].tree = NULL;
-    free(copy);
+    if (host->sources[index].path_owned) free(copy);
     memset(&host->sources[index], 0, sizeof(host->sources[index]));
     return 3;
   }
@@ -598,7 +612,7 @@ int lainmeta_host_add_source(LainMetaHost *host, const char *path,
                     index)) {
     if (host->sources[index].tree) lainmeta_tree_free(host->sources[index].tree);
     host->sources[index].tree = NULL;
-    free(copy);
+    if (host->sources[index].path_owned) free(copy);
     memset(&host->sources[index], 0, sizeof(host->sources[index]));
     host_set_status(host, LAINMETA_ERR_OOM);
     return 3;

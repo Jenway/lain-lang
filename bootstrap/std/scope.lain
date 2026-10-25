@@ -60,9 +60,9 @@ func meta_scope_setup(scan: bool) -> u32 {
   let reg_bytes: u64 = tcap * 64;
   let reg_end: u64 = reg_base + reg_bytes;
   let rbw: u32 = std_types.meta_cell_put_raw(std_registry.meta_reg_base_state, reg_base);
-  let ctl_floor: u64 = 2504 + 56;
+  let ctl_floor: u64 = 2504 + 64;
   let sc_base: u64 = if reg_end < ctl_floor { ctl_floor } else { reg_end };
-  let sc_bytes: u64 = scap * 56;
+  let sc_bytes: u64 = scap * 64;
   let dep_cap: u64 = total + 8;
   let dep_bytes: u64 = dep_cap * 24;
   let dep_base: u64 = sc_base + sc_bytes;
@@ -136,7 +136,7 @@ func meta_path_buffer() -> u64 {
   let scratch: addr = lain_meta_scratch_data();
   let sc_base: u64 = std_types.meta_cell_get(scratch + 72);
   let scap: u64 = std_types.meta_cell_get(scratch + 80);
-  let sc_bytes: u64 = scap * 56;
+  let sc_bytes: u64 = scap * 64;
   let dep_cap: u64 = std_types.meta_cell_get(scratch + 424);
   let dep_bytes: u64 = dep_cap * 24;
   let at0: u64 = sc_base + sc_bytes;
@@ -287,7 +287,7 @@ func meta_scope_entry(index: u64) -> addr {
   let scratch: addr = lain_meta_scratch_data();
   let base: u64 = std_types.meta_cell_get(scratch + 72);
   let p: addr = scratch + base;
-  let off: u64 = index * 56;
+  let off: u64 = index * 64;
   let q: addr = p + off;
   return q;
 }
@@ -317,6 +317,20 @@ func meta_scope_aux(index: u64) -> u64 {
 func meta_scope_emitted(index: u64) -> u64 {
   let v: u64 = meta_scope_word(index, 48);
   return v;
+}
+
+// 导出标记：模块导出这条绑定时置 1，用来防重入。与 emitted 分开，后者对静态表
+// 存的是每元素字节数。
+func meta_scope_exported(index: u64) -> u64 {
+  let v: u64 = meta_scope_word(index, 56);
+  return v;
+}
+
+func meta_scope_set_exported(index: u64, v: u64) -> u32 {
+  let e: addr = meta_scope_entry(index);
+  let p: addr = e + 56;
+  let s: u32 = std_types.meta_cell_put(p, v);
+  return 0;
 }
 
 // 声明引用由最终树中的 (source, parent group, child index) 定位。
@@ -506,6 +520,7 @@ func meta_scope_add(level_start: u64, source: u64, name_off: u64, name_len: u64,
   let s4: u32 = std_types.meta_cell_put(e + 32, payload);
   let s5: u32 = std_types.meta_cell_put(e + 40, aux);
   let s6: u32 = std_types.meta_cell_put(e + 48, 0);
+  let s6b: u32 = std_types.meta_cell_put(e + 56, 0);
   let new: u64 = count + 1;
   let scratch2: addr = lain_meta_scratch_data();
   let s7: u32 = std_types.meta_cell_put(scratch2 + 88, new);
@@ -571,6 +586,19 @@ func meta_scope_set_current(source: u64) -> u32 {
   let scratch: addr = lain_meta_scratch_data();
   let s1: u32 = std_types.meta_cell_put(scratch + 104, source);
   return 0;
+}
+
+// 条目属于哪份源码（每个条目 +0 那一格）。
+func meta_scope_source(index: u64) -> u64 {
+  let v: u64 = meta_scope_word(index, 0);
+  return v;
+}
+
+// 当前正在降级的源码索引（暂存区 +104）。
+func meta_scope_current() -> u64 {
+  let scratch: addr = lain_meta_scratch_data();
+  let v: u64 = std_types.meta_cell_get(scratch + 104);
+  return v;
 }
 
 func meta_scope_name_at(source: u64, off: u64) -> addr {
@@ -729,7 +757,7 @@ func meta_scope_type_id(name_addr: addr, name_len: u64) -> u64 {
 func meta_commit_decl_candidate(source: u64, old_root: u64, new_root: u64, tx: u64, syntax_mark: u64) -> u32 {
   let mark: u64 = meta_bump_mark();
   let count: u64 = meta_scope_count();
-  let bytes: u64 = count * 56;
+  let bytes: u64 = count * 64;
   let off: u64 = meta_bump_alloc(bytes);
   if off == 0xFFFFFFFFFFFFFFFF {
     let rb0: u32 = lain_meta_ast_tx_rollback(tx);
@@ -787,7 +815,7 @@ func meta_commit_decl_candidate(source: u64, old_root: u64, new_root: u64, tx: u
       if cmore {
         let entry: addr = meta_scope_entry(i);
         let zeroed: u32 = loop zero(j: u64 = 0) {
-          let jmore: bool = j < 56;
+          let jmore: bool = j < 64;
           if jmore {
             let zw: u32 = std_types.meta_cell_put(entry + j, 0);
             continue zero(j + 8);

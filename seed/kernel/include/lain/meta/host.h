@@ -73,6 +73,11 @@ uint64_t lainmeta_host_ast_visits(const LainMetaHost *);
 /* 放一份源码。文本按**引用**持有：调用方保证它在 Meta 跑完之前有效。 */
 int lainmeta_host_add_source(LainMetaHost *host, const char *path,
                              const char *text, uint32_t length);
+/* 同上，但 borrowed != 0 时 path 不拷贝、直接借用调用方的字符串。
+ * 驱动把全部登记名拼进一块连续缓冲时用它，登记名只需要一个区段。 */
+int lainmeta_host_add_source_borrowed(LainMetaHost *host, const char *path,
+                                     const char *text, uint32_t length,
+                                     bool borrowed);
 
 uint32_t lainmeta_host_source_count(const LainMetaHost *host);
 /* 同一份机制源码树（平铺 AstIn Arena）供宿主诊断和 Meta 能力读取。

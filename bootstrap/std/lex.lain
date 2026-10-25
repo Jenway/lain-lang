@@ -27,6 +27,14 @@ let meta_kw_ro: ro [u8] = [114, 111];
 let meta_kw_extern: ro [u8] = [101, 120, 116, 101, 114, 110];
 let meta_kw_ptr_of: ro [u8] = [112, 116, 114, 95, 111, 102];
 let meta_kw_addr_of: ro [u8] = [97, 100, 100, 114, 95, 111, 102];
+let meta_kw_symbol_addr: ro [u8] = [115, 121, 109, 98, 111, 108, 95, 97, 100, 100, 114];
+let meta_kw_ref_of: ro [u8] = [114, 101, 102, 95, 111, 102];
+let meta_kw_ref: ro [u8] = [114, 101, 102];
+let meta_kw_mut: ro [u8] = [109, 117, 116];
+let meta_kw_slice: ro [u8] = [115, 108, 105, 99, 101];
+let meta_kw_addr: ro [u8] = [97, 100, 100, 114];
+let meta_kw_slice_of: ro [u8] = [115, 108, 105, 99, 101, 95, 111, 102];
+let meta_bs_storage: ro [u8] = [95, 115, 116, 111, 114, 97, 103, 101];  // "_storage" 8
 
 func bs_is_digit(b: u8) -> bool {
   let w: u32 = b as u32;
@@ -185,6 +193,37 @@ func bs_skip_qualified(base: addr, start: u64, len: u64) -> u64 {
   };
 }
 
+// 类型名窗口：先按限定名（`M.Point`）扫到名字末尾；不是限定名时再按
+// `mut ref T` / `slice T` 这类带空格的写法越过修饰词，窗口覆盖到整段。
+func bs_skip_type_name(base: addr, start: u64, len: u64) -> u64 {
+  let first: u64 = bs_skip_qualified(base, start, len);
+  let at: u64 = bs_skip_space(base, start, len);
+  let is_mut: bool = bs_match_keyword(base, at, len, meta_kw_mut, 3);
+  let is_ref: bool = bs_match_keyword(base, at, len, meta_kw_ref, 3);
+  let is_slice: bool = bs_match_keyword(base, at, len, meta_kw_slice, 5);
+  let lead: bool = is_mut or is_ref or is_slice;
+  if lead == 0 {
+    return first;
+  }
+  // 窗口要覆盖整段：循环只带一个参数（当前位置），刚刚扫过的那个词的终点留在
+  // 循环外面也读得到的位置（暂存 +8），退出时返回它。
+  let sc: addr = lain_meta_scratch_data();
+  let put: u32 = std_types.meta_cell_put(sc + 16, first);
+  let cur0: u64 = loop scan(cur: u64 = start) {
+    let here: u64 = bs_skip_space(base, cur, len);
+    let n1: u64 = bs_skip_qualified(base, here, len);
+    let keep: u32 = std_types.meta_cell_put(sc + 16, n1);
+    let n2: u64 = bs_skip_space(base, n1, len);
+    let more: bool = bs_is_byte(base, n2, 32);
+    if more {
+      continue scan(n2 + 1);
+    }
+    break scan(n1);
+  };
+  let last: u64 = std_types.meta_cell_get(sc + 16);
+  return last;
+}
+
 func bs_is_byte(base: addr, i: u64, c: u8) -> bool {
   let b: u8 = load(base + i);
   let bw: u32 = b as u32;
@@ -208,8 +247,13 @@ func bs_is_operator(base: addr, at: u64, len: u64, n: u64) -> bool {
   let percent: bool = b == 37;
   let lt: bool = b == 60;
   let gt: bool = b == 62;
+  let amp: bool = b == 38;
+  let pipe: bool = b == 124;
+  let caret: bool = b == 94;
   let punct1: bool = plus or minus or star or slash or percent or lt or gt;
-  let r1: bool = n1 and punct1;
+  let punctb: bool = amp or pipe or caret;
+  let any1: bool = punct1 or punctb;
+  let r1: bool = n1 and any1;
   let n2: bool = n == 2;
   let eqb: bool = b == 61;
   let bangb: bool = b == 33;
@@ -224,6 +268,55 @@ func bs_is_operator(base: addr, at: u64, len: u64, n: u64) -> bool {
   let r4: bool = n2 and orword;
   let r5: bool = n2 and asword;
   return r1 or r2 or r3 or r4 or r5;
+}
+
+// 每个算子的结合优先级，数值与 `seed/lain0/src/Lexer.cpp` 的 `binaryPrecedence` 一一对应：
+// 高的先成值。`as` 不参与（它是类型转换，由发射器单独处理），回 0 表示「不是算子」。
+func bs_op_precedence(base: addr, at: u64, len: u64, n: u64) -> u64 {
+  let b8: u8 = bs_byte_at(base, at, len);
+  let b: u32 = b8 as u32;
+  let p: addr = base + at;
+  let word_and: bool = n == 3;
+  let word_or: bool = n == 2;
+  let is_and: bool = word_and and std_types.meta_bytes_equal(p, meta_kw_and, 3);
+  let is_or: bool = word_or and std_types.meta_bytes_equal(p, meta_kw_or, 2);
+  if is_and { return 2; }
+  if is_or { return 1; }
+  let n1: bool = n == 1;
+  let n2: bool = n == 2;
+  // 单字节：`| ^ & < > + - * / %`
+  let one: u64 = loop pick_one(v: u64 = 0) {
+    if n1 == 0 { break pick_one(0); }
+    if b == 124 { break pick_one(3); }
+    if b == 94 { break pick_one(4); }
+    if b == 38 { break pick_one(5); }
+    if b == 60 { break pick_one(7); }
+    if b == 62 { break pick_one(7); }
+    if b == 43 { break pick_one(9); }
+    if b == 45 { break pick_one(9); }
+    if b == 42 { break pick_one(10); }
+    if b == 47 { break pick_one(10); }
+    if b == 37 { break pick_one(10); }
+    break pick_one(0);
+  };
+  if one != 0 { return one; }
+  if n2 == 0 { return 0; }
+  // 双字节：`==`、`!=` 是 6 级，`<=`、`>=` 是 7 级，`<<`、`>>` 是 8 级。
+  let b1: u8 = bs_byte_at(base, at + 1, len);
+  let c1: u32 = b1 as u32;
+  if b == 61 { return 6; }
+  if b == 33 { return 6; }
+  if b == 60 {
+    let shl: bool = c1 == 60;
+    if shl { return 8; }
+    return 7;
+  }
+  if b == 62 {
+    let shr: bool = c1 == 62;
+    if shr { return 8; }
+    return 7;
+  }
+  return 0;
 }
 
 func bs_match_keyword(base: addr, at: u64, len: u64, kw: addr, kw_len: u64) -> bool {
