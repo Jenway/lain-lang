@@ -58,7 +58,7 @@ grep -cE '^(extern|#proc|data) .*std_types__meta_cell_get' build/lain0/units/std
 # 3) 整批合并装载 -> parse + verify 通过，行为与单份一致
 ./build/lain-meta.exe --units-dir build/lain0/units/ \
     examples/arith.lain bootstrap/lain/examples/arith.lain
-#   unit files=28 bytes=513490 / verify subroutines=718 data=168 / image ok / host_status=0
+#   unit files=28 bytes=593524 / verify subroutines=774 data=177 / image ok / host_status=0
 ```
 
 全批普查：单元里「本单元未声明、直接引用别的单元定义的名字」共 **2649** 处（`@<名字>` 形态），
@@ -95,8 +95,8 @@ func lain_std_lower(source: u64) -> u32 { ... }
 | **0** | 可行性实测：编一个**互相 import 的两模块**小例子，各出一份，两份一起装载 | 合并装载后 verify 过、行为与"编成一整份"一致；装载器接受未声明引用，编译器不发外部声明（第三节） |
 | **1** | 编译器加 `--split` 产出 | **规范化逐份比对**：把整份里属于模块 K 的那一段切出来，与 `units/K.l1` 逐一比；临时值编号（`%rN`→`%r#`）规范化后 **28/28 相同**，即拆分零行为变化。脚本：`python scripts/split_equiv_check.py --build`。（整份的 `%rN` 是全局编号、每份各自从 1 起；根名在整份里带 `meta__` 前缀、在单元里平坦，所以比较前先规范化这两处。） |
 | **2** | 加 `@root`，三个宿主入口改用标注，清单去掉根名列 | **产物逐字节不变**（证明只是搬家，行为没动） |
-| **3** | 驱动改为装载目录；bootstrap 与文档切到多份产出；删掉清单 | **实测通过**：`python scripts/build_meta_unit.py --check-twice` → 28 份、整批指纹 `5298dc25…` 跑两次一致；`./build/lain-meta.exe --units-dir build/lain0/units/ --out build/lain0/arith.out examples/arith.lain bootstrap/lain/examples/arith.lain` → `unit files=28 bytes=513490` / `verify subroutines=718 data=168` / `image ok` / `host_status=0` / `region grants=2` / `output bytes=74`，产物与 `build/arith.out` 逐字节相同；驱动 `--unit`/`--units-dir` 没有默认值（都不给 → 退出码 2 + 提示） |
-| **4** | 差分测试：同一棵树，lain0 与 Meta 各出各的，逐份比对。脚本 `python scripts/diff_two_compilers.py`（可选 `--only <模块键>`，`--strict` 让红行变退出码 1） | 输出「模块 × Meta 状态 × 是否一致」表，**红 = 两边还没对上**。Meta 只把 **4** 个模块（`std_lex` / `std_regions` / `std_registry` / `std_types`）喂进了驱动（其余 24 个的 import 闭包要 63 条登记 > 驱动上限 32 → `rc=2`），而这 4 个与 lain0 都不一致（逐字 0 / 规范化后相同 0）：`std_types` `status=0`+trap 1004、`std_regions` `9415`、`std_registry` `4`、`std_lex` `6`，产物全被截断。差异类别 = **符号前缀/mangle**（Meta 把单元**自己的**顶层名发成扁平名，lain0 发 `<模块键>__` 前缀名；数据符号还多一个 `_storage`）叠加**降级缺口**（截断）。随 `docs/plan-selfhost.md` 的进度逐行转绿 |
+| **3** | 驱动改为装载目录；bootstrap 与文档切到多份产出；删掉清单 | **实测通过**：`python scripts/build_meta_unit.py --check-twice` → 28 份、整批指纹 `29ec2c2d…` 跑两次一致；`./build/lain-meta.exe --units-dir build/lain0/units/ --root bootstrap --lower 0 --out build/lain0/arith.out bootstrap/lain/examples/arith.lain` → `unit files=28 bytes=593524` / `verify subroutines=774 data=177` / `image ok` / `host_status=0` / `region grants=2` / `output bytes=74`，产物与 `build/arith.out` 逐字节相同；驱动 `--unit`/`--units-dir` 没有默认值（都不给 → 退出码 2 + 提示） |
+| **4** | 差分测试：同一棵树，lain0 与 Meta 各出各的，逐份比对。脚本 `python scripts/diff_two_compilers.py`（可选 `--only <模块键>`，`--strict` 让红行变退出码 1） | 输出「模块 × Meta 状态 × 是否一致」表，**红 = 两边还没对上**。这是观测工具，不是闸门：它按「规范化 spec 逐字节相等」登记，只能喂进闭包不超过驱动登记上限的模块。Meta 侧的降级进度由 `scripts/selfhost_gate.ps1`（`--root bootstrap` 登记闭包）度量，当前 3 个叶子单元通过，卡点与燃料上限见 `docs/plan-selfhost.md` |
 | **5** | `symbol_addr` 取消（**另立项**） | 普查已做：329 处全部**同单元**（312 个 `ro` 表 + 17 个定长表）、0 处跨单元；**裸名当地址实测不通过**，要先定语言规则 |
 
 **验收判据**：用**整批指纹**——把 `"<模块键> <该份 SHA-256>"` 按模块键排序、逐行拼起来，
@@ -127,10 +127,10 @@ fingerprint = SHA-256( 按模块键排序后逐行拼接 "<模块键>  <该份�
 
 判据：**同一二进制 + 同一棵树 → 同一 fingerprint**（跑两次一致）。实现是
 `scripts/units_fingerprint.py`（`--list` 打每份的键与 SHA-256）；
-`python scripts/build_meta_unit.py --check-twice` 一次跑两次并断言。实测：
+`python scripts/build_meta_unit.py --check-twice` 一次跑两次并断言。2026-10-25 实测：
 
 ```
-units=28 fingerprint=5298dc251be03e050e668fcc92366ddfd920502c790b6ae1865772d2438463ed
+units=28 fingerprint=29ec2c2db1218cb1152b0d9ffd0fb04ca29e8537d57f6fca135aa74aaca26aed
 整批指纹跑两次一致: True
 ```
 
@@ -174,7 +174,7 @@ units=28 fingerprint=5298dc251be03e050e668fcc92366ddfd920502c790b6ae1865772d2438
 | --- | --- |
 | **装载器行为**（第三节） | **已实测：接受未在本单元声明的跨单元引用 → 编译器不发外部声明**（复现命令在第三节）。剩下的是 verify 对「多份产出里同名重复定义」的检查（见下一行） |
 | **重复定义** | 合并后每个名字必须**只有一处定义**；编译器要保证，verify 该有检查 |
-| 记录用整批指纹 | `04-bootstrap-dialect.md`、`plan-selfhost.md`、`selfhost-gap.md` 里的记录都按整批指纹写 |
+| 记录用整批指纹 | `04-bootstrap-dialect.md`、`plan-selfhost.md` 里的记录都按整批指纹写 |
 | 小编译形式 | 编一个样例的产物是"样例 + 它 import 的模块"多份，命令与脚本按多份写 |
 | **接口文件（分开分析）** | 明确**不在本提案内**，另作一件事 |
 | Meta 侧 | 拆分产出与 `@root` 都要在 Meta 里同样实现；两边一致由第 4 步的差分测试守 |

@@ -3,7 +3,7 @@
 `bootstrap/` 下是 28 个 Lain 源码模块，由 `lain0 --entry bootstrap/meta.lain --split
 build/lain0/units/` 编成**每个模块一份** LAINIR，驱动用 `--units-dir` 装载。这份文档列出
 这门方言的语法、每条语法的降级形状，以及当前仍缺失的形态。LAINIR 的格式见
-`docs/01-lain-ir.md`，Meta 管线的现状见 `docs/selfhost-gap.md`。
+`docs/01-lain-ir.md`，Meta 管线的现状见 `docs/plan-selfhost.md`。
 
 ## 判据
 
@@ -311,15 +311,16 @@ func cstr_len(p: addr) -> u64 {
 ## 仍然缺失
 
 - `switch`、`alloca`、`proc_addr`、间接调用没有表面语法，层 0 是它们的兜底。
-- `i8` / `u8` 没有算子绑定（它们只作访存宽度）；`u8` 比较先写 `b as u32` 再比。
+- `i8` 只有 `and` / `or` / `xor` 三条算子绑定，其余场合只作访存宽度；`u8` 有与 `u32`
+  同名的整套算子（比较、算术、位运算、移位）。
 - `addr` 上的 `==` / `!=` 没有绑定。
 - 没有 `true` / `false` 字面量，写成 `0` / `1`。
 - 顶层构造里写变量名会发出解析不到的 `%NAME`（顶层绑定是过程 `#call NAME()`，没有值可
   用），由装载器拒绝。
 - 类型不符的绑定不做检查：`func bad(p: Point) -> i32 { let k: i32 = p; return k; }` 会发出
   `%k = #add[#bits<32>](%p, 0)`，产物在 `lainir_verify` 处被拒（2005），报错位置在产物。
-- 一次 lowering 请求能处理的源码规模存在上限（实测约 550–650 个声明展开节点，多个源会
-  累积）；具体机制未定位。
+- 一次 lowering 请求的源码规模受驱动燃料上限约束：全部 28 份源码（583217 字节）在推导出
+  的 4e9 步燃料内跑不完，产物为空。闭包规模与实测耗时见 `docs/plan-selfhost.md`。
 - `region_grant` 已接线，只在 Meta 自己的代码里使用（`bootstrap/std/regions.lain`），
   表面语言还没有对应写法。
 
@@ -329,9 +330,7 @@ func cstr_len(p: addr) -> u64 {
   `bootstrap/lain/examples/` 下的 38 个样例，全部通过。
 - 最小端到端样例 `bootstrap/lain/examples/arith.lain`：驱动报 `host_status=0`、
   `output bytes=74`，产物是 `%r1 = #add[#bits<32>](1, 2)`。
-- Meta 管线（`build/lain-meta.exe --units-dir build/lain0/units/`）当前 38 个样例中
-  21 个通过。17 个失败：`jumps`、`loop`、`loop_if`、`loop_local`、`loop_value` 以 trap
-  status 1004 结束、产物被截断；`modules_lib`、`modules_main`、`modules_twin`、`refs`、
-  `strinline`、`symbol_addr`、`u8math` 返回非零 `host_status`；`cast`、`pointer`、
-  `field_expr`、`locals`、`table` 的产物过不了 `lainir_verify`。缺口记录在
-  `docs/selfhost-gap.md`。
+- Meta 管线（`build/lain-meta.exe --units-dir build/lain0/units/`）38 个样例全部
+  `host_status=0` 且无 trap；产物单独过 `lainir_parse` + `lainir_verify` 的 35 个。
+  `bytes` 与 `modules_main` 各有缺口，`modules_twin` 与 `modules_twin_a` /
+  `modules_twin_b` 的产物合并后通过。缺口记录在 `docs/plan-selfhost.md`。

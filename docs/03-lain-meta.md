@@ -85,8 +85,9 @@ python scripts/build_meta_unit.py --check-twice     # 28 份 + 整批指纹跑�
     examples/arith.lain bootstrap/lain/examples/arith.lain
 ```
 
-  实测 `verify subroutines=718 data=168`、`image ok`、`host_status=0`、`region grants=2`、
-  `output bytes=74`，产物与基线 `build/arith.out` 逐字节相同；整批指纹
-  `5298dc251be03e050e668fcc92366ddfd920502c790b6ae1865772d2438463ed`。设计与取舍见
+  实测 `unit files=28 bytes=593524`、`verify subroutines=774 data=177`、`image ok`、
+  `host_status=0`、`region grants=2`、`output bytes=74`，产物与基线 `build/arith.out`
+  逐字节相同；整批指纹
+  `29ec2c2db1218cb1152b0d9ffd0fb04ca29e8537d57f6fca135aa74aaca26aed`。设计与取舍见
   `docs/proposal-modules-v2.md`（决策 D-004），成员位置表与
   拒绝码见 `docs/04-bootstrap-dialect.md` 的《模块：成员位置与符号命名》。

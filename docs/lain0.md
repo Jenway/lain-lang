@@ -49,38 +49,7 @@ seed/lain0/
 - 所有名字串用 `lainir_builder_string()` 驻留，不能直接传 stack 上的临时字符串。
 - 诊断码用 lain0 自己的号段，不许占用 `codes.h` 里已登记的 1xxx/2xxx/3xxx/9xxx。
 
-## 垂直切片优先（push 的准线）
-
-**Slice A（第一次 push 的准线）** —— 能端到端编译 `bootstrap/lain/examples/` 的
-`arith.lain`、`flow.lain`、`inc/bump/lit` 一类最小样例，产物过 `lainir_parse + lainir_verify`：
-
-- lexer / parser：func、param、return、let（标注可省）、if-语句、`+ - * / %`、`< > <= >= == !=`、整数字面量
-- sema：标量表（i32/u32/i64/u64/usize/bool），宽度推导走 `infer.h`
-- lower：表达式、调用、return、let、if
-- driver + CLI
-
-**Slice B（之后）** —— 补齐 `docs/04-bootstrap-dialect.md`《一、已能用》的全部行：
-带值 if、loop/for + 标签/参数/break/continue、struct/enum（声明体、字段访问、变体投影、
-函数体内构造降级到 `#alloca`）、`load/store/lea`、`ptr_of/addr_of`、`as`、负数字面量、
-十六进制、顶层静态数据（字节串 / 定长表 → `#data`）、`extern`、`import` 成员访问。
-
-## 任务拆分
-
-| ID | 拥有文件 | 内容 | 依赖 |
-|---|---|---|---|
-| T1 | 全部 header + CMake | 契约（已完成者 RM 本人） | — |
-| T2 | `src/Lexer.cpp` | 词法：标识符、整数、十六进制 `0x`、标点含 `<< >> ->`、注释；UTF-8 无关 | T1 |
-| T3 | `src/Parser.cpp` | Pratt 表达式 + 语句/声明解析 | T1 |
-| T4 | `src/Sema.cpp` | 作用域、类型表、struct/enum 布局、import 解析 | T1 |
-| T5 | `src/LowerExpr.cpp` | 表达式降级（含算子表、宽度、`p+i*K` → `#lea`、`as`、构造器） | T1,T4 接口 |
-| T6 | `src/LowerStmt.cpp` | 语句与控制流降级（if / loop / for / jump / return） | T1,T4 接口 |
-| T7 | `src/LowerDecl.cpp` | 顶层：func / extern / struct / enum / import / 静态数据 | T1,T4 接口 |
-| T8 | `src/Driver.cpp` + `tools/main.cpp` | 编排、verify、print、CLI | T1 |
-| T9 | `tests/` | 回归 runner + 样例比对 | T8 |
-
-T5/T6/T7 可以并行开发（接口由 T1 的 header 固定），集成在之后统一做。
-
-## 模块命名空间、`--unit` 与 `--entry`/`--split`（已实现）
+## 模块命名空间、`--unit` 与 `--entry`/`--split`
 
 ```text
 lain0 <file.lain> [-o out.l1] [--dump-tokens] [--dump-ast] [--round-trip]
