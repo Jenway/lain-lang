@@ -1,6 +1,3 @@
-# 仓库工作规则
+# To Agents
 
-- 语言规则放在 `bootstrap/`；只有物理指令或宿主能力缺失时才修改 `seed/`。
-- 构建使用 CMake，命令见 [开发约定](docs/development.md)；生成物放 `build/`，不得手改产物来通过验收。
-- 不覆盖其他任务或用户的工作区改动。新能力须有数值、拒绝码或产物文本的专项验收。
-- 除本文件和根 README 导航外，文档只放 `docs/`。
+READ THE FXXKING DOCS
