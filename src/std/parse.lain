@@ -156,12 +156,6 @@ func meta_host_meta_end() -> u64 {
   return result;
 }
 
-func ast_segment_of_source(src: u64) -> u64 {
-  let is_primary: bool = src == 0;
-  let result: u64 = if is_primary { 2 } else { src * 2 + 3 };
-  return result;
-}
-
 func sem_base_get(scratch: addr) -> u64 {
   let cell: addr = scratch + 1000;
   let result: u64 = std_types.meta_cell_get(cell);
@@ -209,61 +203,154 @@ func meta_sem_init() -> u32 {
   let entries_status: u32 = std_types.meta_cell_put(entries_cell, 48);
   let epoch_cell: addr = header + 40;
   let epoch_status: u32 = std_types.meta_cell_put(epoch_cell, 0);
+  let indexed: u32 = sem_index_clear(scratch);
   return 0;
 }
 
-func sem_find(scratch: addr, parent: u64, index: u64, env: u64, scope: u64, ctx: u64) -> u64 {
-  let base: u64 = sem_base_get(scratch);
-  let count: u64 = sem_count_get(scratch);
-  let result: u64 = loop scan(i: u64 = 0) {
-    if i < count {
-      let entry_offset: u64 = base + i * 72;
-      let entry: addr = scratch + entry_offset;
-      let parent_value: u64 = std_types.meta_cell_get(entry);
-      let parent_matches: bool = parent_value == parent;
-      if parent_matches == 0 { continue scan(i + 1); }
-      let index_cell: addr = entry + 8;
-      let index_value: u64 = std_types.meta_cell_get(index_cell);
-      let index_matches: bool = index_value == index;
-      if index_matches == 0 { continue scan(i + 1); }
-      let env_cell: addr = entry + 16;
-      let env_value: u64 = std_types.meta_cell_get(env_cell);
-      let env_matches: bool = env_value == env;
-      let scope_cell: addr = entry + 24;
-      let scope_value: u64 = std_types.meta_cell_get(scope_cell);
-      let scope_matches: bool = scope_value == scope;
-      let context_cell: addr = entry + 32;
-      let context_value: u64 = std_types.meta_cell_get(context_cell);
-      let context_matches: bool = context_value == ctx;
-      let scope_and_env: bool = env_matches and scope_matches;
-      let key_prefix_matches: bool = parent_matches and index_matches;
-      let key_matches_a: bool = key_prefix_matches and scope_and_env;
-      let key_matches: bool = key_matches_a and context_matches;
-      if key_matches { break scan(i); }
-      continue scan(i + 1);
-    }
-    break scan(0xFFFFFFFFFFFFFFFF);
+// 位置索引：旁表只增不移，所以按 (父组, 下标) 建桶链，next 链写在条目自己的
+// 第 8 格（+56，原本的 type 格从未被读写）。同一个 (父组, 下标) 可能对应多条条目
+// （env/scope/ctx 不同），它们按插入顺序挂在同一条链上，查的时候沿链比对全键。
+// 桶头表排在旁表之后，槽数由 meta_scope_setup 一次算定。
+func meta_sem_pow2(v: u64) -> u64 {
+  let result: u64 = loop grow(p: u64 = 1) {
+    let small: bool = p < v;
+    if small { continue grow(p * 2); }
+    break grow(p);
   };
   return result;
 }
 
-func sem_find_position(scratch: addr, parent: u64, index: u64) -> u64 {
+func sem_head_base_get(scratch: addr) -> u64 {
+  let cell: addr = scratch + 1112;
+  let result: u64 = std_types.meta_cell_get(cell);
+  return result;
+}
+
+func sem_slots_get(scratch: addr) -> u64 {
+  let cell: addr = scratch + 1120;
+  let result: u64 = std_types.meta_cell_get(cell);
+  return result;
+}
+
+func sem_bucket(parent: u64, index: u64, slots: u64) -> u64 {
+  let mixed: u64 = parent * 2654435761 + index * 40503;
+  let mask: u64 = slots - 1;
+  let result: u64 = mixed and mask;
+  return result;
+}
+
+// 桶头存「条目号 + 1」，0 表示空链。
+func sem_head_cell(scratch: addr, bucket: u64) -> addr {
+  let head_base: u64 = sem_head_base_get(scratch);
+  let result: addr = scratch + head_base + bucket * 8;
+  return result;
+}
+
+// 条目的 next 链接格：条目加 56。
+func sem_link_cell(scratch: addr, entry: u64) -> addr {
   let base: u64 = sem_base_get(scratch);
-  let count: u64 = sem_count_get(scratch);
-  let result: u64 = loop scan(i: u64 = 0) {
-    if i < count {
-      let entry_offset: u64 = base + i * 72;
-      let entry: addr = scratch + entry_offset;
-      let entry_parent: u64 = std_types.meta_cell_get(entry);
-      let index_cell: addr = entry + 8;
-      let entry_index: u64 = std_types.meta_cell_get(index_cell);
-      let same_parent: bool = entry_parent == parent;
-      let same_index: bool = entry_index == index;
-      let same_position: bool = same_parent and same_index;
-      if same_position { break scan(i); }
-      continue scan(i + 1);
+  let result: addr = scratch + base + entry * 72 + 56;
+  return result;
+}
+
+// 新条目挂到链尾，保持条目号递增：位置查询取链首，结果与线性扫一致。
+func sem_link(scratch: addr, parent: u64, index: u64, entry: u64) -> u32 {
+  let slots: u64 = sem_slots_get(scratch);
+  let bucket: u64 = sem_bucket(parent, index, slots);
+  let head: addr = sem_head_cell(scratch, bucket);
+  let first: u64 = std_types.meta_cell_get(head);
+  let link: addr = sem_link_cell(scratch, entry);
+  let empty: bool = first == 0;
+  if empty {
+    let link_status: u32 = std_types.meta_cell_put_raw(link, 0);
+    let head_status: u32 = std_types.meta_cell_put_raw(head, entry + 1);
+    return 0;
+  }
+  let tail: u64 = loop seek(node: u64 = first) {
+    let tail_index: u64 = node - 1;
+    let tail_cell: addr = sem_link_cell(scratch, tail_index);
+    let tail_next: u64 = std_types.meta_cell_get(tail_cell);
+    let at_tail: bool = tail_next == 0;
+    if at_tail { break seek(node); }
+    continue seek(tail_next);
+  };
+  let last_index: u64 = tail - 1;
+  let last_cell: addr = sem_link_cell(scratch, last_index);
+  let last_status: u32 = std_types.meta_cell_put_raw(last_cell, entry + 1);
+  let link_status: u32 = std_types.meta_cell_put_raw(link, 0);
+  return 0;
+}
+
+// 桶头表要清成空链；next 链接格在 sem_link 里逐条写，没挂上的条目不会被读到。
+func sem_index_clear(scratch: addr) -> u32 {
+  let slots: u64 = sem_slots_get(scratch);
+  let head_base: u64 = sem_head_base_get(scratch);
+  let cleared: u64 = loop clear(i: u64 = 0) {
+    let more: bool = i < slots;
+    if more {
+      let cell: addr = scratch + head_base + i * 8;
+      let status: u32 = std_types.meta_cell_put_raw(cell, 0);
+      continue clear(i + 1);
     }
-    break scan(0xFFFFFFFFFFFFFFFF);
+    break clear(slots);
+  };
+  return 0;
+}
+
+func sem_find(scratch: addr, parent: u64, index: u64, env: u64, scope: u64, ctx: u64) -> u64 {
+  let slots: u64 = sem_slots_get(scratch);
+  let bucket: u64 = sem_bucket(parent, index, slots);
+  let head: addr = sem_head_cell(scratch, bucket);
+  let first: u64 = std_types.meta_cell_get(head);
+  let base: u64 = sem_base_get(scratch);
+  let result: u64 = loop scan(node: u64 = first) {
+    let done: bool = node == 0;
+    if done { break scan(0xFFFFFFFFFFFFFFFF); }
+    let entry_index: u64 = node - 1;
+    let entry: addr = scratch + base + entry_index * 72;
+    let entry_parent: u64 = std_types.meta_cell_get(entry);
+    let entry_index_value: u64 = std_types.meta_cell_get(entry + 8);
+    let entry_env: u64 = std_types.meta_cell_get(entry + 16);
+    let entry_scope: u64 = std_types.meta_cell_get(entry + 24);
+    let entry_context: u64 = std_types.meta_cell_get(entry + 32);
+    let same_parent: bool = entry_parent == parent;
+    let same_index: bool = entry_index_value == index;
+    let same_env: bool = entry_env == env;
+    let same_scope: bool = entry_scope == scope;
+    let same_context: bool = entry_context == ctx;
+    let key_matches: bool = same_parent and same_index;
+    let key_matches_b: bool = key_matches and same_env;
+    let key_matches_c: bool = key_matches_b and same_scope;
+    let all_matches: bool = key_matches_c and same_context;
+    if all_matches { break scan(entry_index); }
+    let link: addr = sem_link_cell(scratch, entry_index);
+    let next_node: u64 = std_types.meta_cell_get(link);
+    continue scan(next_node);
+  };
+  return result;
+}
+
+// 位置 (父组, 下标) → 条目号。链首就是最早插入的那条，和原来的线性扫同解。
+func sem_find_position(scratch: addr, parent: u64, index: u64) -> u64 {
+  let slots: u64 = sem_slots_get(scratch);
+  let bucket: u64 = sem_bucket(parent, index, slots);
+  let head: addr = sem_head_cell(scratch, bucket);
+  let first: u64 = std_types.meta_cell_get(head);
+  let base: u64 = sem_base_get(scratch);
+  let result: u64 = loop scan(node: u64 = first) {
+    let done: bool = node == 0;
+    if done { break scan(0xFFFFFFFFFFFFFFFF); }
+    let entry_index: u64 = node - 1;
+    let entry: addr = scratch + base + entry_index * 72;
+    let entry_parent: u64 = std_types.meta_cell_get(entry);
+    let entry_index_value: u64 = std_types.meta_cell_get(entry + 8);
+    let same_parent: bool = entry_parent == parent;
+    let same_index: bool = entry_index_value == index;
+    let same_position: bool = same_parent and same_index;
+    if same_position { break scan(entry_index); }
+    let link: addr = sem_link_cell(scratch, entry_index);
+    let next_node: u64 = std_types.meta_cell_get(link);
+    continue scan(next_node);
   };
   return result;
 }
@@ -323,12 +410,12 @@ func meta_sem_put_full_key(parent: u64, index: u64, env: u64, scope: u64, ctx: u
     let binding_status: u32 = std_types.meta_cell_put(binding_cell, binding);
     let form_cell: addr = entry + 48;
     let form_status: u32 = std_types.meta_cell_put(form_cell, form);
-    let type_cell: addr = entry + 56;
-    let type_status: u32 = std_types.meta_cell_put(type_cell, 0);
+    // 第 8 格（+56）留给 next 链，由 sem_link 写。
     let expansion_cell: addr = entry + 64;
     let expansion_status: u32 = std_types.meta_cell_put(expansion_cell, expansion);
     let updated_count: u64 = count + 1;
     let count_status: u32 = sem_count_put(scratch, updated_count);
+    let linked: u32 = sem_link(scratch, parent, index, count);
     return 0;
   }
   let base_existing: u64 = sem_base_get(scratch);

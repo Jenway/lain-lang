@@ -314,7 +314,7 @@ LainMetaHost *lainmeta_host_new(void) {
  * 「慢」，是编译一份稍大的源码就报「装不下」——而那是宿主的资源配得不对，不是
  * 源码有问题，不该让用户看见。
  *
- * 所以按已登记源码的总字节数给：每字节 128 字节工作区（树 + 类型表 + 作用域表），
+ * 所以按已登记源码的总字节数给：每字节 160 字节工作区（树 + 类型表 + 作用域表 + 位置索引），
  * 再保底 64 KiB。**这只是资源配额，不是语言规则**——Meta 仍然自己算它要多少，
  * 装不下照样报 17，不会踩坏。 */
 static uint32_t decide_scratch_size(const LainMetaHost *host) {
@@ -323,7 +323,7 @@ static uint32_t decide_scratch_size(const LainMetaHost *host) {
   uint64_t size;
   for (i = 0; i < host->source_count; i++)
     total += host->sources[i].length;
-  size = 65536u + total * 128u;
+  size = 65536u + total * 160u;
   /* 段/根表占头部：每份源码两条段记录加一个 root 槽。 */
   size += LAIN_META_SCRATCH_HEADER +
           (uint64_t)host->source_count * 2u * LAIN_META_SEGMENT_ENTRY +

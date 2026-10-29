@@ -288,6 +288,14 @@ static int map_region(LainVmSpace *space, const void *base, uint64_t bytes,
   return 0;
 }
 
+/* 剖析：按子过程累计步数。采样点在每个切片的末尾，所以粒度由切片决定——
+ * --profile 会把切片压到 20000 步以内，越细越准，总步数越准地落在真正的地方。
+ * 只读采样，不改执行。 */
+static int g_profile = 0;
+static uint64_t *g_prof = NULL;
+static uint32_t g_prof_count = 0;
+static uint64_t g_prof_total = 0;
+
 int main(int argc, char **argv) {
   const char *root_dir = NULL;    /* 给了就由源文件路径算登记名 */
   const char *unit_path = NULL;   /* 无默认值：必须显式给 --unit 或 --units-dir */
@@ -350,6 +358,7 @@ int main(int argc, char **argv) {
     if (!strcmp(a, "--lower")) { TAKE(a); lower_index = strtoull(argv[i], NULL, 0); continue; }
     if (!strcmp(a, "--fuel")) { TAKE(a); fuel = strtoull(argv[i], NULL, 0); fuel_given = 1; continue; }
     if (!strcmp(a, "--slice")) { TAKE(a); slice_fuel = strtoull(argv[i], NULL, 0); continue; }
+    if (!strcmp(a, "--profile")) { g_profile = 1; continue; }
     if (!strcmp(a, "--stack")) { TAKE(a); stack_bytes = strtoull(argv[i], NULL, 0); continue; }
     if (!strcmp(a, "--quota")) { TAKE(a); quota_bytes = strtoull(argv[i], NULL, 0); continue; }
     if (!strcmp(a, "--caps")) { TAKE(a); caps_capacity = (uint32_t)strtoul(argv[i], NULL, 0); continue; }
@@ -658,10 +667,26 @@ int main(int argc, char **argv) {
   }
 
   /* 6. 推进到不 RUNNABLE 或燃料耗尽。 */
-  while (rounds * slice_fuel < fuel) {
+  while (fuel_used < fuel) {   /* 用真实消耗做条件：切片可能被剖析压小 */
     uint64_t this_slice = fuel - fuel_used;
     if (this_slice > slice_fuel) this_slice = slice_fuel;
-    slice = lainvm_engine_run(tcb, this_slice);
+    if (g_profile && this_slice > 20000) this_slice = 20000;
+    {
+      uint64_t before = g_profile ? lainvm_tcb_steps(tcb) : 0;
+      slice = lainvm_engine_run(tcb, this_slice);
+      if (g_profile) {
+        /* 归集实际迈出的步数，而不是请求的切片：切片可能提前停在 trap 上。 */
+        uint64_t delta = lainvm_tcb_steps(tcb) - before;
+        uint32_t region = lainvm_tcb_current_region(tcb);
+        uint32_t sub = lainvm_image_region_sub(image, region);
+        if (g_prof_count == 0) {
+          g_prof_count = lainvm_image_sub_count(image);
+          if (g_prof_count) g_prof = (uint64_t *)calloc(g_prof_count, sizeof(uint64_t));
+        }
+        if (sub < g_prof_count) g_prof[sub] += delta;
+        g_prof_total += delta;
+      }
+    }
     fuel_used += this_slice;
     rounds++;
     if (slice != LAINVM_SLICE_RUNNABLE) break;
@@ -669,6 +694,26 @@ int main(int argc, char **argv) {
   printf("run slice=%d rounds=%u steps=%llu host_status=%u\n", (int)slice,
          rounds, (unsigned long long)lainvm_tcb_steps(tcb),
          lainmeta_host_status(host));
+  if (g_profile) {
+    /* 恒等式：归集总量应当等于实际步数，不等说明有切片没被采到。 */
+    uint32_t shown = 0;
+    printf("profile total=%llu steps=%llu\n", (unsigned long long)g_prof_total,
+           (unsigned long long)lainvm_tcb_steps(tcb));
+    if (g_prof_total != lainvm_tcb_steps(tcb)) printf("profile WARNING 采样漏片\n");
+    while (shown < 12) {
+      uint32_t best = 0xFFFFFFFFu;
+      uint64_t best_n = 0;
+      uint32_t i;
+      for (i = 0; i < g_prof_count; i++)
+        if (g_prof[i] > best_n) { best_n = g_prof[i]; best = i; }
+      if (best == 0xFFFFFFFFu || best_n == 0) break;
+      printf("  %6.2f%% %12llu  %s\n",
+             100.0 * (double)best_n / (double)(g_prof_total ? g_prof_total : 1),
+             (unsigned long long)best_n, lainvm_image_sub_name(image, best));
+      g_prof[best] = 0;
+      shown++;
+    }
+  }
 
   {
     const LainVmTrap *trap = lainvm_tcb_trap(tcb);
