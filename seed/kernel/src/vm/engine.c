@@ -402,6 +402,21 @@ static LainVmSliceResult op_float_bin(LainVmTcb *tcb, const L1Inst *inst) {
   return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BAD_FLOAT_WIDTH, inst);
 }
 
+static LainVmSliceResult op_float_neg(LainVmTcb *tcb, const L1Inst *inst) {
+  uint32_t width = type_width(inst->ty);
+  uint64_t a = lainvm_operand_read(tcb, inst, 0).as.bits;
+
+  if (width == 32) {
+    lainvm_result_write(tcb, inst, 0, value_bits(f32_bits(-f32_of(a)), 32));
+    return LAINVM_SLICE_RUNNABLE;
+  }
+  if (width == 64) {
+    lainvm_result_write(tcb, inst, 0, value_bits(f64_bits(-f64_of(a)), 64));
+    return LAINVM_SLICE_RUNNABLE;
+  }
+  return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_BAD_FLOAT_WIDTH, inst);
+}
+
 static LainVmSliceResult op_float_cmp(LainVmTcb *tcb, const L1Inst *inst) {
   uint32_t width = type_width(inst->ty);
   double x = width == 32
@@ -489,10 +504,18 @@ static LainVmSliceResult op_lea(LainVmTcb *tcb, const L1Inst *inst) {
 
 
 
+/* 声明的对齐是地址本身的性质，和这段地址有没有映射无关，所以在权限检查之前判。 */
+static bool misaligned(const L1Inst *inst, uintptr_t addr) {
+  if (inst->align == 0) return false;
+  return (addr & (uintptr_t)(inst->align - 1)) != 0;
+}
+
 static LainVmSliceResult op_load(LainVmTcb *tcb, const L1Inst *inst) {
   uintptr_t addr = as_addr(lainvm_operand_read(tcb, inst, 0));
   uint64_t size = type_size(inst->ty);
   uint64_t raw = 0;
+  if (misaligned(inst, addr))
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_ALIGNMENT, inst);
   if (!lainvm_space_check(tcb->vspace, addr, size, LAINVM_MEM_READ))
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_LOAD_FAULT, inst);
   memcpy(&raw, (const void *)addr, (size_t)size);
@@ -508,10 +531,16 @@ static LainVmSliceResult op_store(LainVmTcb *tcb, const L1Inst *inst) {
   L1Value value = lainvm_operand_read(tcb, inst, 0);
   uintptr_t addr = as_addr(lainvm_operand_read(tcb, inst, 1));
   uint64_t size = type_size(inst->ty);
+  if (misaligned(inst, addr))
+    return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_ALIGNMENT, inst);
   uint64_t raw = value.kind == L1_VALUE_ADDR ? (uint64_t)(uintptr_t)value.as.addr
                                             : value.as.bits;
-  if (!lainvm_space_check(tcb->vspace, addr, size, LAINVM_MEM_WRITE))
+  if (!lainvm_space_check(tcb->vspace, addr, size, LAINVM_MEM_WRITE)) {
+    /* 能读不能写 = 只读段；连读都不行 = 落在窗口外。两种失败给不同的码。 */
+    if (lainvm_space_check(tcb->vspace, addr, size, LAINVM_MEM_READ))
+      return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_READ_ONLY, inst);
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_STORE_FAULT, inst);
+  }
   memcpy((void *)addr, &raw, (size_t)size);
   return LAINVM_SLICE_RUNNABLE;
 }
@@ -916,13 +945,96 @@ static LainVmSliceResult op_return(LainVmTcb *tcb, const L1Inst *inst) {
   return LAINVM_SLICE_RUNNABLE;
 }
 
+static LainVmSliceResult op_unreachable(LainVmTcb *tcb, const L1Inst *inst) {
+  return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_UNREACHABLE, inst);
+}
+
 static LainVmSliceResult op_unimplemented(LainVmTcb *tcb, const L1Inst *inst) {
   return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_UNIMPLEMENTED, inst);
+}
+
+/* --- 向量 ---------------------------------------------------------------- */
+
+/* 文档 A.3：操作数与结果都是 `#vec<N>`，类型实参是元素类型。所以元素宽度 M 记在
+ * inst->lane_bits，寄存器宽度 N 由操作数的 bit_width 给出，车道数 L = N / M。
+ * 这里只做整数车道的逐车道算术与按位运算；浮点车道和置换类算子还没有实现，
+ * 它们在 k_ops 里是空的，会落 UNKNOWN_INST，不会跳空指针。 */
+static uint64_t vec_lane_get(const uint64_t *words, uint32_t m, uint32_t lane) {
+  uint32_t per = 64u / m;
+  uint32_t shift = (lane % per) * m;
+  if (m == 64) return words[lane];
+  return (words[lane / per] >> shift) & ((1ull << m) - 1ull);
+}
+
+static void vec_lane_put(uint64_t *words, uint32_t m, uint32_t lane,
+                         uint64_t value) {
+  uint32_t per = 64u / m;
+  uint32_t shift;
+  uint64_t mask;
+  if (m == 64) {
+    words[lane] = value;
+    return;
+  }
+  shift = (lane % per) * m;
+  mask = ((1ull << m) - 1ull) << shift;
+  words[lane / per] = (words[lane / per] & ~mask) | ((value << shift) & mask);
+}
+
+static LainVmSliceResult op_vector(LainVmTcb *tcb, const L1Inst *inst) {
+  L1Value a = lainvm_operand_read(tcb, inst, 0);
+  L1Value b = lainvm_operand_read(tcb, inst, 1);
+  L1Value out;
+  uint64_t acc[8];
+  uint64_t mask;
+  uint32_t m = inst->lane_bits;
+  uint32_t lanes;
+  uint32_t i;
+
+  if (a.kind != L1_VALUE_VEC || b.kind != L1_VALUE_VEC) goto bad;
+  if (m != 8 && m != 16 && m != 32 && m != 64) goto bad;
+  if (a.bit_width != b.bit_width) goto bad;
+  if (a.bit_width % m != 0) goto bad;
+  lanes = a.bit_width / m;
+  if (lanes == 0 || lanes > 64) goto bad;
+  /* 浮点车道还没做：宁可明确报错，也不要拿整数语义算浮点。 */
+  if (inst->ty && inst->ty->kind == TY_FLOATS) goto bad;
+
+  memset(acc, 0, sizeof acc);
+  mask = m == 64 ? ~0ull : ((1ull << m) - 1ull);
+  for (i = 0; i < lanes; i++) {
+    uint64_t x = vec_lane_get(a.as.vec, m, i);
+    uint64_t y = vec_lane_get(b.as.vec, m, i);
+    uint64_t r;
+    switch (inst->kind) {
+    case INST_VADD: r = (x + y) & mask; break;
+    case INST_VSUB: r = (x - y) & mask; break;
+    case INST_VMUL: r = (x * y) & mask; break;
+    case INST_VAND: r = x & y; break;
+    case INST_VOR: r = x | y; break;
+    case INST_VXOR: r = x ^ y; break;
+    default: goto bad;
+    }
+    vec_lane_put(acc, m, i, r);
+  }
+  out.kind = L1_VALUE_VEC;
+  out.bit_width = a.bit_width;
+  memcpy(out.as.vec, acc, sizeof acc);
+  lainvm_result_write(tcb, inst, 0, out);
+  return LAINVM_SLICE_RUNNABLE;
+
+bad:
+  return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_BAD_VECTOR, inst);
 }
 
 /* --- 分派表 --------------------------------------------------------------- */
 
 static const LainVmOp k_ops[INST_COUNT] = {
+    [INST_VADD] = op_vector,
+    [INST_VSUB] = op_vector,
+    [INST_VMUL] = op_vector,
+    [INST_VAND] = op_vector,
+    [INST_VOR] = op_vector,
+    [INST_VXOR] = op_vector,
     [INST_ADD] = op_int_bin,
     [INST_SUB] = op_int_bin,
     [INST_MUL] = op_int_bin,
@@ -940,6 +1052,7 @@ static const LainVmOp k_ops[INST_COUNT] = {
     [INST_FSUB] = op_float_bin,
     [INST_FMUL] = op_float_bin,
     [INST_FDIV] = op_float_bin,
+    [INST_FNEG] = op_float_neg,
     [INST_EQ] = op_int_cmp,
     [INST_NE] = op_int_cmp,
     [INST_SLT] = op_int_cmp,
@@ -984,6 +1097,7 @@ static const LainVmOp k_ops[INST_COUNT] = {
     [INST_BREAK] = op_break,
     [INST_CONTINUE] = op_continue,
     [INST_RETURN] = op_return,
+    [INST_UNREACHABLE] = op_unreachable,
 };
 
 const LainVmOp *lainvm_op_table(void) { return k_ops; }
@@ -1013,6 +1127,7 @@ LainVmSliceResult lainvm_op_fadd(LainVmTcb *t, const L1Inst *i) { return op_floa
 LainVmSliceResult lainvm_op_fsub(LainVmTcb *t, const L1Inst *i) { return op_float_bin(t, i); }
 LainVmSliceResult lainvm_op_fmul(LainVmTcb *t, const L1Inst *i) { return op_float_bin(t, i); }
 LainVmSliceResult lainvm_op_fdiv(LainVmTcb *t, const L1Inst *i) { return op_float_bin(t, i); }
+LainVmSliceResult lainvm_op_fneg(LainVmTcb *t, const L1Inst *i) { return op_float_neg(t, i); }
 
 LainVmSliceResult lainvm_op_eq(LainVmTcb *t, const L1Inst *i) { return op_int_cmp(t, i); }
 LainVmSliceResult lainvm_op_ne(LainVmTcb *t, const L1Inst *i) { return op_int_cmp(t, i); }
@@ -1062,6 +1177,7 @@ LainVmSliceResult lainvm_op_yield(LainVmTcb *t, const L1Inst *i) { return op_yie
 LainVmSliceResult lainvm_op_break(LainVmTcb *t, const L1Inst *i) { return op_break(t, i); }
 LainVmSliceResult lainvm_op_continue(LainVmTcb *t, const L1Inst *i) { return op_continue(t, i); }
 LainVmSliceResult lainvm_op_return(LainVmTcb *t, const L1Inst *i) { return op_return(t, i); }
+LainVmSliceResult lainvm_op_unreachable(LainVmTcb *t, const L1Inst *i) { return op_unreachable(t, i); }
 
 #define LAINVM_OP_STUB(name)                                    \
   LainVmSliceResult lainvm_op_##name(LainVmTcb *tcb,            \
@@ -1095,6 +1211,11 @@ LAINVM_OP_STUB(rmw_xor)
 
 /* --- CU ------------------------------------------------------------------- */
 
+uint32_t lainvm_tcb_current_region(const LainVmTcb *tcb) {
+  if (!tcb || tcb->frame_count == 0) return 0xFFFFFFFFu;
+  return tcb->frames[tcb->frame_count - 1].region;
+}
+
 LainVmSliceResult lainvm_engine_step(LainVmTcb *tcb) {
   LainVmFrame *frame;
   const LainVmImageRegion *rec;
@@ -1119,8 +1240,13 @@ LainVmSliceResult lainvm_engine_step(LainVmTcb *tcb) {
   }
 
   inst = &rec->region->insts[frame->position];
+  /* 尚未实现的算子同样落到 UNKNOWN_INST：验证通过不等于引擎能执行，
+     缺实现必须是确定性的 Trap，不能是空指针跳转。 */
   if ((uint32_t)inst->kind >= (uint32_t)INST_COUNT)
     return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_UNKNOWN_INST, inst);
+  /* 有 kind 但没有实现，是占位不是坏码：1099 说的就是这件事。 */
+  if (!k_ops[inst->kind])
+    return trap_now(tcb, LAINVM_TRAP_STATE, LAINVM_TRAP_UNIMPLEMENTED, inst);
 
   saved_count = tcb->frame_count;
   saved_region = frame->region;

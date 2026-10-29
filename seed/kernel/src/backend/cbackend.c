@@ -383,6 +383,15 @@ static void emit_prologue(LainBackend *be) {
             "float l1_f32_of(l1v v) { float f; uint32_t u = (uint32_t)v; memcpy(&f, &u, 4); return f; }\n"
             "l1v l1_f32_bits(float f) { uint32_t u; memcpy(&u, &f, 4); return (l1v)u; }\n"
             "\n"
+            "/* #unreachable 的物化：这个位置不控制流到达，后端不给它留出口。 */\n"
+            "#if defined(__GNUC__) || defined(__clang__)\n"
+            "#define l1_unreachable() __builtin_unreachable()\n"
+            "#elif defined(_MSC_VER)\n"
+            "#define l1_unreachable() __assume(0)\n"
+            "#else\n"
+            "#define l1_unreachable() abort()\n"
+            "#endif\n"
+            "\n"
             "/* 间接调用：地址换回子过程。 */\n"
             "l1v l1_indirect(l1v target, const l1v *a, uint32_t n);\n"
             "\n");
@@ -601,6 +610,19 @@ static void emit_float_binary(LainBackend *be, const L1Region *region,
     fail(be, LAINBACKEND_ERR_FLOAT_FORMAT, "cbackend: unsupported float format");
 }
 
+static void emit_float_neg(LainBackend *be, const L1Region *region,
+                           const L1Inst *inst, uint32_t width,
+                           const char *dest) {
+  char a[192];
+  operand_masked(be, region, inst, 0, width, a, sizeof(a));
+  if (width == 32)
+    emitf(be, "%s = l1_f32_bits(-l1_f32_of(%s));\n", dest, a);
+  else if (width == 64)
+    emitf(be, "%s = l1_f64_bits(-l1_f64_of(%s));\n", dest, a);
+  else
+    fail(be, LAINBACKEND_ERR_FLOAT_FORMAT, "cbackend: unsupported float format");
+}
+
 static void emit_float_compare(LainBackend *be, const L1Region *region,
                                const L1Inst *inst, uint32_t width,
                                const char *dest) {
@@ -721,6 +743,13 @@ static void emit_inst(LainBackend *be, const L1Region *region, uint32_t position
 
   case INST_FADD: case INST_FSUB: case INST_FMUL: case INST_FDIV:
     emit_float_binary(be, region, inst, width, dest);
+    return;
+  case INST_FNEG:
+    emit_float_neg(be, region, inst, width, dest);
+    return;
+
+  case INST_UNREACHABLE:
+    emitf(be, "l1_unreachable();\n");
     return;
   case INST_FOEQ: case INST_FONE: case INST_FOLT: case INST_FOLE:
   case INST_FOGT: case INST_FOGE:

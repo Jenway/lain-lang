@@ -700,6 +700,20 @@ void lainvm_image_free(LainVmImage *image) {
   free(image);
 }
 
+uint32_t lainvm_image_region_sub(const LainVmImage *image, uint32_t region_id) {
+  if (!image || region_id >= image->region_count) return LAINVM_IMAGE_NO_INDEX;
+  return image->regions[region_id].sub_index;
+}
+
+uint32_t lainvm_image_sub_count(const LainVmImage *image) {
+  return image ? image->sub_count : 0;
+}
+
+const char *lainvm_image_sub_name(const LainVmImage *image, uint32_t sub_index) {
+  if (!image || sub_index >= image->sub_count) return "?";
+  return image->subs[sub_index].sub->name;
+}
+
 const LainVmImageRegion *lainvm_image_region(const LainVmImage *image,
                                              uint32_t region_id) {
   if (!image || region_id >= image->region_count) return NULL;

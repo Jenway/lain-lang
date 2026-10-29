@@ -77,8 +77,8 @@ typedef enum {
   INST_ADD, INST_SUB, INST_MUL, INST_SDIV, INST_UDIV, INST_SREM, INST_UREM,
   /* 位运算 */
   INST_AND, INST_OR, INST_XOR, INST_SHL, INST_LSHR, INST_ASHR,
-  /* 浮点算术 */
-  INST_FADD, INST_FSUB, INST_FMUL, INST_FDIV,
+  /* 浮点算术；#fneg 取一个操作数，其余是二元 */
+  INST_FADD, INST_FSUB, INST_FMUL, INST_FDIV, INST_FNEG,
   /* 整数比较；结果 #bits<1> */
   INST_EQ, INST_NE, INST_SLT, INST_SLE, INST_SGT, INST_SGE,
   INST_ULT, INST_ULE, INST_UGT, INST_UGE,
@@ -106,7 +106,7 @@ typedef enum {
   /* 结构：每条拥有自己的区域 */
   INST_IF, INST_LOOP, INST_SWITCH,
   /* 终结子 */
-  INST_YIELD, INST_BREAK, INST_CONTINUE, INST_RETURN,
+  INST_YIELD, INST_BREAK, INST_CONTINUE, INST_RETURN, INST_UNREACHABLE,
 
   /* 计数用；不是一条指令 */
   INST_COUNT,
@@ -178,8 +178,8 @@ typedef struct L1Inst {
   const L1Type *ty;
   bool has_ty;
 
-  /* 向量算子的车道宽度：`vadd.i32x4` 的 32。
-   * 车道数 = ty->width / lane_bits。0 表示不适用。 */
+  /* 向量算子的元素宽度 M（文档 A.3：`#vadd[#bits<M>]` 的 M）。
+   * ty 是元素类型；寄存器宽度 N 属于操作数，车道数 = N / M。0 表示不适用。 */
   uint32_t lane_bits;
 
   const L1Operand *operands;
@@ -189,6 +189,10 @@ typedef struct L1Inst {
   L1MemOrder order;
   bool is_volatile;
   bool is_tail;        /* #call[tail]：保证尾调用，复用当前栈帧 */
+
+  /* 值级对齐：`#load[T](%addr, align=N)` / `#store[T](%val, %addr, align=N)`
+   * 的 N。0 = 未声明，由目标平台按机器字长决定。必须是 2 的幂，验证器负责。 */
+  uint32_t align;
 
   /* 被调 / 被引用的符号：INST_CALL。值目标时 symbol 为空，
    * 函数指针是 operands[0]。 */

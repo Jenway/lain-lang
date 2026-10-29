@@ -63,6 +63,22 @@ static bool is_address_result(L1InstKind kind) {
   }
 }
 
+const L1Type *lainir_vec_type(LainIrTypes *types, uint32_t width) {
+  uint32_t i;
+  if (!types) return NULL;
+  if (width != 128 && width != 256 && width != 512) return NULL;
+  for (i = 0; i < 3; i++)
+    if (types->vec[i].width == width && types->vec[i].kind == TY_VEC)
+      return &types->vec[i];
+  for (i = 0; i < 3; i++)
+    if (types->vec[i].width == 0) {
+      types->vec[i].kind = TY_VEC;
+      types->vec[i].width = width;
+      return &types->vec[i];
+    }
+  return NULL;
+}
+
 const L1Type *lainir_inst_result_type(const LainIrTypes *types,
                                       const L1Inst *inst, uint32_t index) {
   if (!types || !inst || index >= inst->result_count) return NULL;

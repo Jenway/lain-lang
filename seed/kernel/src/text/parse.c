@@ -277,6 +277,11 @@ static bool parse_type(Parser *p, const L1Type **out) {
 
 /* --- 操作数 --------------------------------------------------------------- */
 
+/* 向量算子：core.h 里连续排的那一族，和验证器的 is_vector 是同一个区间。 */
+static bool is_vector_kind(L1InstKind kind) {
+  return kind >= INST_VADD && kind <= INST_VCMPGT;
+}
+
 static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
                                    bool require_result);
 
@@ -358,7 +363,7 @@ static bool parse_operand(Parser *p, L1Operand *out, InstList *into,
 /* 整数形式的操作数也要能当「地址宽度的量」用（scale / offset）。 */
 static bool parse_operand_list_into(Parser *p, InstList *into, L1Operand *out,
                                     uint32_t cap, uint32_t *count,
-                                    const L1Type *ty) {
+                                    const L1Type *ty, uint32_t *align_out) {
   uint32_t n = 0;
   if (!expect(p, '(', "to start the operand list")) return false;
   skip(p);
@@ -369,6 +374,31 @@ static bool parse_operand_list_into(Parser *p, InstList *into, L1Operand *out,
   for (;;) {
     if (n >= cap) return fail(p, LAINPARSE_ERR_OPERANDS, "too many operands");
     skip(p);
+    /* 值级对齐是具名实参 `align=N`：不占位置实参的槽，只挂在指令上。 */
+    if (align_out && at_word(p, "align")) {
+      uint64_t value = 0;
+      p->pos += 5;
+      p->column += 5;
+      skip(p);
+      if (!expect(p, '=', "after align")) return false;
+      skip(p);
+      if (cur(p) < '0' || cur(p) > '9')
+        return fail(p, LAINPARSE_ERR_SYNTAX, "align needs an integer");
+      while (cur(p) >= '0' && cur(p) <= '9') {
+        value = value * 10u + (uint64_t)(cur(p) - '0');
+        if (value > (1u << 31))
+          return fail(p, LAINPARSE_ERR_SYNTAX, "align is out of range");
+        advance(p);
+      }
+      if (value == 0 || (value & (value - 1u)) != 0)
+        return fail(p, LAINPARSE_ERR_SYNTAX, "align must be a power of two");
+      if (*align_out != 0)
+        return fail(p, LAINPARSE_ERR_SYNTAX, "align given twice");
+      *align_out = (uint32_t)value;
+      skip(p);
+      if (match(p, ',')) continue;
+      break;
+    }
     if (!parse_operand(p, &out[n], into, ty)) return false;
     n++;
     skip(p);
@@ -523,6 +553,7 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
   bool is_volatile = false;
   bool is_tail = false;
   const char *symbol = NULL;
+  uint32_t align = 0; /* 值级对齐：只有 #load / #store 接受 */
   L1Inst *inst;
 
   skip(p);
@@ -592,24 +623,26 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
       if (!expect(p, ']', "to end the type argument")) return false;
       skip(p);
     }
-    if (!parse_operand_list_into(p, into, ops, L1P_MAX_PARAMS, &count,
-                                 ty ? ty : NULL))
+    if (!parse_operand_list_into(
+            p, into, ops, L1P_MAX_PARAMS, &count, ty ? ty : NULL,
+            (kind == INST_LOAD || kind == INST_STORE) ? &align : NULL))
       return false;
   } else if (kind == INST_CALL) {
-    if (!parse_operand_list_into(p, into, ops, L1P_MAX_PARAMS, &count, NULL))
+    if (!parse_operand_list_into(p, into, ops, L1P_MAX_PARAMS, &count, NULL,
+                                 NULL))
       return false;
   }
 
   switch (kind) {
   case INST_STORE:
-    inst = (L1Inst *)lainir_inst_mem(p->builder, kind, NULL, ty, order,
-                                     is_volatile, ops, count);
+    inst = (L1Inst *)lainir_inst_mem_aligned(p->builder, kind, NULL, ty, order,
+                                            is_volatile, align, ops, count);
     break;
   case INST_LOAD:
   case INST_ALLOCA:
-    inst = (L1Inst *)lainir_inst_mem(p->builder, kind,
-                                     name_count ? names[0] : NULL, ty, order,
-                                     is_volatile, ops, count);
+    inst = (L1Inst *)lainir_inst_mem_aligned(
+        p->builder, kind, name_count ? names[0] : NULL, ty, order, is_volatile,
+        align, ops, count);
     break;
   case INST_CALL:
     inst = (L1Inst *)lainir_inst_call(p->builder,
@@ -622,6 +655,17 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
     break;
   }
   if (!inst) return fail(p, LAINPARSE_ERR_BUILD, "cannot build the instruction");
+  /* 向量算子只把元素宽度留在指令上；寄存器宽度 N 属于操作数，车道数 = N / M。 */
+  if (is_vector_kind(kind)) {
+    if (!ty || (ty->kind != TY_BITS && ty->kind != TY_FLOATS))
+      return fail(p, LAINPARSE_ERR_VECTOR_LANES,
+                  "a vector op needs an element type argument, e.g. [/#bits<32>]");
+    if (ty->width != 8 && ty->width != 16 && ty->width != 32 &&
+        ty->width != 64)
+      return fail(p, LAINPARSE_ERR_VECTOR_LANES,
+                  "the vector element width must be 8, 16, 32 or 64");
+    inst->lane_bits = ty->width;
+  }
   set_results(inst, names, name_count);
   if (is_volatile) inst->is_volatile = true;
   if (is_tail) inst->is_tail = true;
@@ -664,9 +708,10 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
   if (!lainir_opcode_kind(opname, n, &kind))
     return fail(p, LAINPARSE_ERR_BUILD, "unknown opcode `#%s`", opname);
 
-  /* 向量算子的车道后缀（vadd.i32x4）还没实现——引擎和后端也都没有。 */
+  /* 车道不写在后缀上：文档 A.3 的写法是 `#vadd[#bits<M>]`，元素类型走类型实参。 */
   if (cur(p) == '.')
-    return fail(p, LAINPARSE_ERR_VECTOR_LANES, "vector lane suffixes are not supported yet");
+    return fail(p, LAINPARSE_ERR_VECTOR_LANES,
+                "vector lane suffixes are not part of the syntax; give the element type in brackets");
 
   switch (kind) {
   case INST_IF: {
@@ -801,7 +846,8 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     if (!ident(p, label, sizeof(label))) return false;
     skip(p);
     if (cur(p) == '(') {
-      if (!parse_operand_list_into(p, into, ops, L1P_MAX_PARAMS, &count, NULL))
+      if (!parse_operand_list_into(p, into, ops, L1P_MAX_PARAMS, &count, NULL,
+                                   NULL))
         return false;
     }
     inst = (L1Inst *)lainir_inst_jump(p->builder, kind,
@@ -840,6 +886,17 @@ static bool parse_instruction_into(Parser *p, InstList *into, bool *terminated,
     p->inline_only = saved;
     inst = (L1Inst *)lainir_inst(p->builder, kind, NULL, NULL, ops, count);
     if (!inst) return fail(p, LAINPARSE_ERR_BUILD, "cannot build the terminator");
+    if (terminated) *terminated = true;
+    return list_push(p, into, inst);
+  }
+
+  case INST_UNREACHABLE: {
+    L1Inst *inst;
+    /* 没有操作数，也不产出值：`#unreachable` 就地结束这个位置。 */
+    if (name_count)
+      return fail(p, LAINPARSE_ERR_SYNTAX, "#unreachable produces no value");
+    inst = (L1Inst *)lainir_inst(p->builder, kind, NULL, NULL, NULL, 0);
+    if (!inst) return fail(p, LAINPARSE_ERR_BUILD, "cannot build #unreachable");
     if (terminated) *terminated = true;
     return list_push(p, into, inst);
   }

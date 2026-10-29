@@ -20,14 +20,20 @@ target_sources(lain_seed
     src/text/print.c
     src/ir/verify.c
     src/meta/ast_out.c
+    src/meta/expand.c
+    src/meta/expand_vm.c
     src/meta/host.c
     src/meta/tree.c
     src/vm/caps.c
+    src/vm/endpoint.c
     src/vm/engine.c
     src/vm/image.c
     src/vm/quota.c
     src/vm/space.c
     src/vm/tcb.c
+    src/vm/executor.c
+    src/vm/scheduler.c
+    src/vm/trap.c
   PUBLIC
     FILE_SET HEADERS
       BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include

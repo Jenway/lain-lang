@@ -353,3 +353,36 @@ uint32_t lain_ast_output_commit(LainAstOutput *o, uint64_t id, LainAstRef root) 
   o->depth = 0; publish(o);
   return 0;
 }
+
+/* --- 输出段回读 ----------------------------------------------------------- */
+
+/* 替换结果的节点与孩子列表都在可信副本里：驱动沿新子树继续展开时直接读这里，
+ * 「输出段」与「输入段」因此走两条明确不同的路（后者仍由宿主解析）。 */
+uint32_t lain_ast_output_node(const LainAstOutput *o, LainAstRef ref,
+                              LainAstNode *out) {
+  uint64_t off, index;
+  if (!o || !out) return LAIN_AST_ERR_PROTOCOL;
+  memset(out, 0, sizeof(*out));
+  if (lain_ast_segment(ref) != LAIN_AST_OUT) return LAIN_AST_ERR_SEGMENT;
+  off = lain_ast_offset(ref);
+  if (off < LAIN_AST_HEADER_SIZE ||
+      (off - LAIN_AST_HEADER_SIZE) % LAIN_AST_NODE_STRIDE != 0)
+    return LAIN_AST_ERR_SLOT;
+  index = (off - LAIN_AST_HEADER_SIZE) / LAIN_AST_NODE_STRIDE;
+  if (index >= o->header.node_count) return LAIN_AST_ERR_SLOT;
+  memcpy(out, o->trusted + off, sizeof(*out));
+  return 0;
+}
+uint32_t lain_ast_output_child(const LainAstOutput *o, LainAstRef parent,
+                               uint64_t index, LainAstRef *out) {
+  LainAstNode n;
+  uint32_t rc;
+  if (!out) return LAIN_AST_ERR_PROTOCOL;
+  *out = 0;
+  rc = lain_ast_output_node(o, parent, &n);
+  if (rc) return rc;
+  if (n.kind != LAIN_AST_GROUP) return LAIN_AST_ERR_SHAPE;
+  if (index >= n.child_count) return LAIN_AST_ERR_RANGE;
+  memcpy(out, o->trusted + n.children_offset + index * 8, 8);
+  return 0;
+}

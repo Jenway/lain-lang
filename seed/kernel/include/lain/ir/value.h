@@ -15,6 +15,7 @@ typedef enum {
   L1_VALUE_NONE = 0, /* 位置为空：不是一种类型，是没有值 */
   L1_VALUE_BITS = 1, /* 整数位串；bit_width 说明低多少位是真值 */
   L1_VALUE_ADDR = 2, /* 地址 */
+  L1_VALUE_VEC = 3,  /* 向量寄存器：bit_width 位，按 as.vec 低位起顺序存放 */
 } L1ValueKind;
 
 typedef struct {
@@ -23,6 +24,8 @@ typedef struct {
   union {
     uint64_t bits;
     void *addr;
+    /* VEC 用：bit_width 最多 512，所以 8 个 64 位字就够；高位未用部分为 0。 */
+    uint64_t vec[8];
   } as;
 } L1Value;
 

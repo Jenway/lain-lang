@@ -27,4 +27,11 @@ uint32_t lain_ast_output_group(LainAstOutput *, uint64_t, LainAstRef, uint64_t,
                               LainAstRef, uint64_t, LainAstRef *);
 uint32_t lain_ast_output_commit(LainAstOutput *, uint64_t, LainAstRef);
 uint32_t lain_ast_output_expansion(LainAstOutput *, LainAstRef, uint64_t *);
+/* 读回一个**输出段**节点（段号 3）与它的孩子。驱动沿替换结果继续展开时用这两个：
+ * 节点与孩子列表都在可信副本里，不必再经跨段解析。只接受段 3 的引用，
+ * 段号不符返回 LAIN_AST_ERR_SEGMENT，槽位非法返回 LAIN_AST_ERR_SLOT，
+ * 非组节点取孩子返回 LAIN_AST_ERR_SHAPE。 */
+uint32_t lain_ast_output_node(const LainAstOutput *, LainAstRef, LainAstNode *);
+uint32_t lain_ast_output_child(const LainAstOutput *, LainAstRef, uint64_t,
+                               LainAstRef *);
 #endif

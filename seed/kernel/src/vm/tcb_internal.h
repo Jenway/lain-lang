@@ -36,6 +36,9 @@ struct LainVmTcb {
   /* 状态机 */
   LainVmState state;
   uint32_t suspend_reason; /* BLOCKED 时有效 */
+  /* 是否已在就绪队列里。入队/出队各做一次原子交换，所以并发入队同一个激活
+   * 也只有一个能成功（调度器它自己不带锁）。 */
+  _Atomic bool queued;
 
   /* 引用：它跑在什么上。都是引用，不拥有。 */
   LainVmImage *image;  /* 装载后的映像：名字全换成槽、符号已解析、地址已烤进去 */
@@ -88,6 +91,7 @@ struct LainVmTcb {
 
   /* 阻塞 / 会合 */
   LainVmEndpoint *blocked_on; /* 非阻塞时为 NULL */
+  uint32_t endpoint_result;   /* 已结算的会合结果，取走即清零（见 vm/endpoint.c） */
   uint32_t pending_kind;
   uint64_t pending_value;
   bool has_pending;

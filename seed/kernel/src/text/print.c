@@ -136,8 +136,8 @@ static void print_result_prefix(Printer *p, const L1Inst *inst) {
 static void print_opcode(Printer *p, const L1Inst *inst) {
   const char *name = lainir_opcode_name(inst->kind);
   outf(p, "#%s", name ? name : "?");
-  if (inst->lane_bits) outf(p, ".i%ux%u", inst->lane_bits,
-                            inst->ty ? inst->ty->width / inst->lane_bits : 0u);
+  /* 车道信息不进助记符：文档 A.3 的写法是 `#vadd[#bits<32>]`，元素类型由
+   * 下面的类型实参给出，寄存器宽度属于操作数。 */
 }
 
 static void print_type_arg(Printer *p, const L1Inst *inst) {
@@ -170,6 +170,10 @@ static void print_operand_list(Printer *p, const L1Inst *inst,
                       ? inst->ty
                       : NULL);
   }
+  /* 值级对齐按文档写在实参里：`(%addr, align=N)`。 */
+  if (inst->align != 0) outf(p, "%salign=%u",
+                             inst->operand_count > first ? ", " : "",
+                             inst->align);
   out(p, ")");
 }
 
@@ -265,7 +269,8 @@ static void print_inst(Printer *p, const L1Region *region, const L1Inst *inst) {
     return;
 
   case INST_YIELD:
-  case INST_RETURN: {
+  case INST_RETURN:
+  case INST_UNREACHABLE: {
     uint32_t i;
     print_opcode(p, inst);
     /* 终止子的操作数不带括号：`#return %r`、`#yield %a, %b`。 */

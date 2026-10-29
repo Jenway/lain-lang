@@ -131,6 +131,14 @@ typedef LainVmSliceResult (*LainVmOp)(LainVmTcb *tcb, const L1Inst *inst);
 /* 分派表，按 L1InstKind 索引。测试可以直接取。 */
 const LainVmOp *lainvm_op_table(void);
 
+/* --- 诊断面 --------------------------------------------------------------
+ * 只读采样接口，给宿主做剖析：不影响执行、不改状态。
+ * 当前区域取最内层帧；区域属于哪个子过程、子过程叫什么，由映像回答。 */
+uint32_t lainvm_tcb_current_region(const LainVmTcb *tcb);
+uint32_t lainvm_image_region_sub(const LainVmImage *image, uint32_t region_id);
+uint32_t lainvm_image_sub_count(const LainVmImage *image);
+const char *lainvm_image_sub_name(const LainVmImage *image, uint32_t sub_index);
+
 /* 推进一步。 */
 LainVmSliceResult lainvm_engine_step(LainVmTcb *tcb);
 
@@ -173,6 +181,7 @@ LainVmSliceResult lainvm_op_fadd(LainVmTcb *tcb, const L1Inst *inst);
 LainVmSliceResult lainvm_op_fsub(LainVmTcb *tcb, const L1Inst *inst);
 LainVmSliceResult lainvm_op_fmul(LainVmTcb *tcb, const L1Inst *inst);
 LainVmSliceResult lainvm_op_fdiv(LainVmTcb *tcb, const L1Inst *inst);
+LainVmSliceResult lainvm_op_fneg(LainVmTcb *tcb, const L1Inst *inst);
 
 /* 整数比较；结果 #bits<1> */
 LainVmSliceResult lainvm_op_eq(LainVmTcb *tcb, const L1Inst *inst);
@@ -274,5 +283,6 @@ LainVmSliceResult lainvm_op_yield(LainVmTcb *tcb, const L1Inst *inst);
 LainVmSliceResult lainvm_op_break(LainVmTcb *tcb, const L1Inst *inst);
 LainVmSliceResult lainvm_op_continue(LainVmTcb *tcb, const L1Inst *inst);
 LainVmSliceResult lainvm_op_return(LainVmTcb *tcb, const L1Inst *inst);
+LainVmSliceResult lainvm_op_unreachable(LainVmTcb *tcb, const L1Inst *inst);
 
 #endif /* LAINVM_ENGINE_H */

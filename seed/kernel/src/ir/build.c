@@ -286,6 +286,19 @@ const L1Inst *lainir_inst_mem(L1Builder *builder, L1InstKind kind,
   return finish_inst(builder, inst, operands, operand_count);
 }
 
+const L1Inst *lainir_inst_mem_aligned(L1Builder *builder, L1InstKind kind,
+                                      const char *result, const L1Type *ty,
+                                      L1MemOrder order, bool is_volatile,
+                                      uint32_t align,
+                                      const L1Operand *operands,
+                                      uint32_t operand_count) {
+  L1Inst *inst = (L1Inst *)lainir_inst_mem(builder, kind, result, ty, order,
+                                           is_volatile, operands, operand_count);
+  if (!inst) return NULL;
+  inst->align = align;
+  return inst;
+}
+
 const L1Inst *lainir_inst_symbol(L1Builder *builder, L1InstKind kind,
                                  const char *result, const char *symbol) {
   L1Inst *inst = (L1Inst *)new_inst(builder, kind, result, result ? 1u : 0u);

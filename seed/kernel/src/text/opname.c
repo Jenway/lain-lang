@@ -28,6 +28,7 @@ static const OpEntry k_ops[] = {
     {"fsub", INST_FSUB},
     {"fmul", INST_FMUL},
     {"fdiv", INST_FDIV},
+    {"fneg", INST_FNEG},
     {"eq", INST_EQ},
     {"ne", INST_NE},
     {"slt", INST_SLT},
@@ -95,6 +96,7 @@ static const OpEntry k_ops[] = {
     {"break", INST_BREAK},
     {"continue", INST_CONTINUE},
     {"return", INST_RETURN},
+    {"unreachable", INST_UNREACHABLE},
 };
 
 #define OP_COUNT (sizeof(k_ops) / sizeof(k_ops[0]))

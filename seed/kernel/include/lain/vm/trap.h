@@ -40,6 +40,12 @@ enum {
   LAINVM_TRAP_INT_OVERFLOW = 1003,      /* 有符号最小值除以 -1 */
   LAINVM_TRAP_LOAD_FAULT = 1004,        /* 读取的地址不在有 READ 权限的窗口里 */
   LAINVM_TRAP_STORE_FAULT = 1005,       /* 写入的地址不在有 WRITE 权限的窗口里 */
+  LAINVM_TRAP_ALIGNMENT = 1045,          /* 访存地址未满足指令声明的 align=N */
+  /* 向量算子的车道配置不是合法的 (寄存器宽度, 元素宽度) 组合，或操作数不是 #vec。 */
+  LAINVM_TRAP_BAD_VECTOR = 1046,
+  /* 写入的区段映射着但没有 WRITE 权限（只读段）。与 STORE_FAULT 分开报：
+   * 前者是权限，后者是窗口，诊断要能分辨。 */
+  LAINVM_TRAP_READ_ONLY = 1047,
   LAINVM_TRAP_STACK_UNAVAILABLE = 1006, /* 没有栈租约，或租约不属于当前 VSpace */
   LAINVM_TRAP_STACK_EXHAUSTED = 1007,   /* 越过租约容量 */
   LAINVM_TRAP_ALLOCA_OVERFLOW = 1035,   /* 尺寸算术回绕 */
@@ -74,6 +80,7 @@ enum {
   LAINVM_TRAP_CONTINUE_OPERANDS = 1032,
   LAINVM_TRAP_RETURN_NO_SLOT = 1033,
   LAINVM_TRAP_UNKNOWN_INST = 1034,      /* kind >= INST_COUNT */
+  LAINVM_TRAP_UNREACHABLE = 1037,       /* 执行到 #unreachable */
   LAINVM_TRAP_PROC_NO_SUB = 1040,       /* #proc_addr 的子过程下标非法 */
   LAINVM_TRAP_PROC_NO_ADDR = 1041,
   LAINVM_TRAP_SWITCH_NO_CASES = 1042,   /* 有 case 但没有 case 表 */
@@ -96,5 +103,21 @@ enum {
 _Static_assert(LAINVM_TRAP_DIVIDE_BY_ZERO > LAINIR_CODES_TRAP_BASE &&
                    LAINVM_TRAP_CAP_NO_FN < LAINIR_CODES_TRAP_LIMIT,
                "trap codes must stay inside the trap segment");
+
+/* 文档 §4.1 的七个失败类别。状态码不动，这里只给对外分类视图。
+ * 由 lainvm_trap_class 从 LainVmTrap 推出，由 lainvm_trap_class_name 给文档里的名字。 */
+typedef enum {
+  LAINVM_TRAP_CLASS_NONE = 0,
+  LAINVM_TRAP_CLASS_MEMORY_OOB = 1,
+  LAINVM_TRAP_CLASS_ALIGNMENT = 2,
+  LAINVM_TRAP_CLASS_PERM_VIOLATION = 3,
+  LAINVM_TRAP_CLASS_ARITH_DOMAIN = 4,
+  LAINVM_TRAP_CLASS_CAP_DENIED = 5,
+  LAINVM_TRAP_CLASS_CAPACITY_EXCEEDED = 6,
+  LAINVM_TRAP_CLASS_UNREACHABLE = 7,
+} LainVmTrapClass;
+
+LainVmTrapClass lainvm_trap_class(const LainVmTrap *trap);
+const char *lainvm_trap_class_name(LainVmTrapClass cls);
 
 #endif /* LAINVM_TRAP_H */

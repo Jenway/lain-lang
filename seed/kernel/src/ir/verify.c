@@ -190,7 +190,7 @@ static bool is_int_compare(L1InstKind kind) {
 
 static bool is_float_arith(L1InstKind kind) {
   return kind == INST_FADD || kind == INST_FSUB || kind == INST_FMUL ||
-         kind == INST_FDIV;
+         kind == INST_FDIV || kind == INST_FNEG;
 }
 
 static bool is_float_compare(L1InstKind kind) {
@@ -226,7 +226,7 @@ static bool is_float_conv(L1InstKind kind) {
 static bool produces_value(L1InstKind kind) {
   switch (kind) {
   case INST_STORE: case INST_YIELD: case INST_BREAK: case INST_CONTINUE:
-  case INST_RETURN:
+  case INST_RETURN: case INST_UNREACHABLE:
     return false;
   default:
     return true;
@@ -262,6 +262,8 @@ static bool yields_values(Verifier *v, const L1Region *region, uint32_t want,
   if (last->kind == INST_RETURN || last->kind == INST_BREAK ||
       last->kind == INST_CONTINUE)
     return true;
+  /* #unreachable 让这条路走不到区域出口，交值的义务因此不落在它身上。 */
+  if (last->kind == INST_UNREACHABLE) return true;
   if (last->kind == INST_IF && last->else_body)
     return yields_values(v, last->body, want, NULL) &&
            yields_values(v, last->else_body, want, NULL);
@@ -285,6 +287,46 @@ static bool check_operands(Verifier *v, const L1Region *region,
                   "literal operand %u has no declared width (kind %d)", i,
                   (int)inst->kind);
     }
+  }
+  return true;
+}
+
+/* 向量算子（文档 A.3）：操作数与结果都是 `#vec<N>`，方括号里是元素类型。
+ * 所以这里不比"和类型实参等宽"，而是比：操作数都是向量、寄存器宽度一致、
+ * 能按元素宽度整切。寄存器宽度 N 只存在于操作数上，这是文档形式决定的。 */
+static bool check_vector_operands(Verifier *v, const Binding *names,
+                                  const L1Region *region, const L1Inst *inst,
+                                  const LoopScope *loops) {
+  uint32_t m = inst->lane_bits;
+  uint32_t width = 0;
+  uint32_t i;
+  if (m != 8 && m != 16 && m != 32 && m != 64)
+    return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                "the vector element width must be 8, 16, 32 or 64");
+  if (inst->ty && inst->ty->kind == TY_FLOATS && m != 32 && m != 64)
+    return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                "float vector elements are 32 or 64 bits wide");
+  for (i = 0; i < inst->operand_count; i++) {
+    const L1Type *ty = operand_ty(v, names, region, inst, i, loops);
+    uint32_t operand_width;
+    if (!ty) continue; /* 上面已经报过 */
+    if (ty->kind != TY_VEC)
+      return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                  "operand %u of a vector op must be #vec<N>", i);
+    operand_width = lainir_type_width(ty);
+    if (operand_width != 128 && operand_width != 256 && operand_width != 512)
+      return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                  "vector register width %u is not 128, 256 or 512",
+                  operand_width);
+    if (operand_width % m != 0)
+      return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                  "%u bits cannot be cut into %u-bit lanes", operand_width, m);
+    if (width == 0)
+      width = operand_width;
+    else if (width != operand_width)
+      return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                  "vector operands have different widths (%u and %u)", width,
+                  operand_width);
   }
   return true;
 }
@@ -368,6 +410,11 @@ static bool check_arity(Verifier *v, const L1Inst *inst) {
       return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
                   "#lea takes base, idx, scale, offset");
     return true;
+  case INST_FNEG:
+    if (inst->operand_count != 1)
+      return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                  "#fneg takes one operand");
+    return true;
   case INST_STORE:
     if (inst->operand_count != 2)
       return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
@@ -422,7 +469,7 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
   }
   if (is_vector(inst->kind)) {
     if (!check_type_arg(v, inst) || !check_result_count(v, inst, 1)) return false;
-    return check_operand_class(v, names, region, inst, loops, TY_VEC, true);
+    return check_vector_operands(v, names, region, inst, loops);
   }
   if (is_atomic(inst->kind)) {
     if (!check_type_arg(v, inst)) return false;
@@ -478,6 +525,13 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
   case INST_LOAD: {
     const L1Type *addr_ty;
     if (!check_type_arg(v, inst) || !check_result_count(v, inst, 1)) return false;
+    /* 值级对齐是声明的承诺，验证期就拒绝不可能成立的值。 */
+    if (inst->align != 0 && (inst->align & (inst->align - 1)) != 0)
+      return fail(v, L1V_BAD_MEMORY_WIDTH, inst->line, inst->column,
+                  "align must be a power of two");
+    if (inst->align > (1u << 31))
+      return fail(v, L1V_BAD_MEMORY_WIDTH, inst->line, inst->column,
+                  "align is out of range");
     if (!byte_addressable(inst->ty))
       return fail(v, L1V_BAD_MEMORY_WIDTH, inst->line, inst->column,
                   "#load width is not byte addressable");
@@ -491,6 +545,12 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
     const L1Type *addr_ty;
     const L1Type *value_ty;
     if (!check_type_arg(v, inst) || !check_result_count(v, inst, 0)) return false;
+    if (inst->align != 0 && (inst->align & (inst->align - 1)) != 0)
+      return fail(v, L1V_BAD_MEMORY_WIDTH, inst->line, inst->column,
+                  "align must be a power of two");
+    if (inst->align > (1u << 31))
+      return fail(v, L1V_BAD_MEMORY_WIDTH, inst->line, inst->column,
+                  "align is out of range");
     if (!byte_addressable(inst->ty))
       return fail(v, L1V_BAD_MEMORY_WIDTH, inst->line, inst->column,
                   "#store width is not byte addressable");
@@ -750,6 +810,13 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
     break;
   }
 
+  case INST_UNREACHABLE:
+    if (!check_result_count(v, inst, 0)) return false;
+    if (inst->operand_count != 0)
+      return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                  "#unreachable takes no operands");
+    break;
+
   default:
     /* 上面没覆盖到的、产出值的算子。 */
     if (produces_value(inst->kind) && !check_result_count(v, inst, 1))
@@ -762,6 +829,7 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
   case INST_BREAK:
   case INST_CONTINUE:
   case INST_RETURN:
+  case INST_UNREACHABLE:
     *terminated = true;
     break;
   default:
@@ -802,7 +870,14 @@ static bool verify_region(Verifier *v, const L1Region *region,
      * 但外层同名可以被内层遮蔽（所以只看本区域新加的那些）。 */
     for (k = 0; k < inst->result_count; k++) {
       const Binding *found = find_binding(v, names, inst->results[k]);
-      const L1Type *ty = lainir_inst_result_type(&v->types, inst, k);
+      /* 向量算子的结果类型由操作数的寄存器宽度决定，类型实参只是元素宽度。 */
+      const L1Type *ty;
+      if (is_vector(inst->kind)) {
+        const L1Type *op = operand_ty(v, names, region, inst, 0, loops);
+        ty = op ? lainir_vec_type(&v->types, lainir_type_width(op)) : NULL;
+      } else {
+        ty = lainir_inst_result_type(&v->types, inst, k);
+      }
       if (!ty)
         return fail(v, L1V_MISSING_TYPE, inst->line, inst->column,
                     "cannot determine the type of result `%s`",

@@ -1,7 +1,7 @@
 /* 语言无关的源码平铺 Arena（LAINAST v1 的第 1 段：AstIn）。
  *
  * reader 只做机制的事：词法约定（词、字符串、`::`/`->`/`..` 双字节标点）、注释与
- * 括号配对、源码位置、Arena 存储、结构验证。let / func / struct / my_if 的含义不在
+ * 括号配对、源码位置、Arena 存储、结构验证。let / func / struct / enum 的含义不在
  * 这里，全归 Meta。
  *
  * 布局与引用编码的唯一来源是 `lain/meta/ast_v1.h`。这里不给句柄、不给 C 指针：

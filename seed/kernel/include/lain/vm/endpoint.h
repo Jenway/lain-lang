@@ -1,6 +1,6 @@
 /* LAINVM 的端点：执行流之间的会合点（IPC rendezvous）。
  *
- * 端点对象本身还没实现，第一期只保留对象身份与结果码。契约如下：
+ * 契约如下：
  *   - 一次会合 = 发送方与接收方在同一个端点上相遇，各自得到一次
  *     LAINVM_ENDPOINT_SEND / LAINVM_ENDPOINT_RECEIVE；
  *   - 等待是 TCB 的状态：没有对手时阻塞，原因记 LAINVM_SUSPEND_ENDPOINT
@@ -12,7 +12,10 @@
 #ifndef LAINVM_ENDPOINT_H
 #define LAINVM_ENDPOINT_H
 
+#include <stdint.h>
+
 typedef struct LainVmTcb LainVmTcb;
+typedef struct LainVmScheduler LainVmScheduler;
 typedef struct LainVmEndpoint LainVmEndpoint;
 
 /* 会合结果 */
@@ -30,5 +33,13 @@ int lainvm_endpoint_send(LainVmEndpoint *endpoint, LainVmTcb *tcb);
 int lainvm_endpoint_receive(LainVmEndpoint *endpoint, LainVmTcb *tcb);
 int lainvm_endpoint_nb_send(LainVmEndpoint *endpoint, LainVmTcb *tcb);
 int lainvm_endpoint_nb_receive(LainVmEndpoint *endpoint, LainVmTcb *tcb);
+
+/* 会合结算时把挂起方交回调度器（文档 §3.1「同时将 TCB_A 标记为 READY」）。
+ * 不挂也能用：那样被唤醒的 TCB 只是变成 READY，由宿主自己再放回队列。 */
+void lainvm_endpoint_attach(LainVmEndpoint *endpoint, LainVmScheduler *sched);
+
+/* 诊断：完成的会合数、因为对手没到而被挂起的次数。 */
+uint32_t lainvm_endpoint_meetings(const LainVmEndpoint *endpoint);
+uint32_t lainvm_endpoint_parks(const LainVmEndpoint *endpoint);
 
 #endif /* LAINVM_ENDPOINT_H */

@@ -88,6 +88,15 @@ const L1Inst *lainir_inst_mem(L1Builder *builder, L1InstKind kind,
                               L1MemOrder order, bool is_volatile,
                               const L1Operand *operands, uint32_t operand_count);
 
+/* 同上，并声明值级对齐（`#load[T](%addr, align=N)`）。align 为 0 表示未声明。
+ * 构造期不替调用方兜底：2 的幂由验证器判。 */
+const L1Inst *lainir_inst_mem_aligned(L1Builder *builder, L1InstKind kind,
+                                      const char *result, const L1Type *ty,
+                                      L1MemOrder order, bool is_volatile,
+                                      uint32_t align,
+                                      const L1Operand *operands,
+                                      uint32_t operand_count);
+
 const L1Inst *lainir_inst_symbol(L1Builder *builder, L1InstKind kind,
                                  const char *result, const char *symbol);
 
