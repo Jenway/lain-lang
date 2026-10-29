@@ -8,7 +8,7 @@ project(lain-seed
 # seed 由两层组成，组织顺序固定：kernel 先编出 C 静态库 lain_seed，
 # lain0 再链接它构建 C++ 前端。两个 add_subdirectory 的顺序不许调换。
 #
-# 产物路径固定（docs/development.md、scripts/ 与回归脚本都按这个断言）：
+# 产物路径固定（README 的快速开始与 .github/workflows/lain-bootstrap.yml 都按这个断言）：
 #   build/lib/lain_seed.lib    kernel 的静态库
 #   build/lain-meta.exe        Meta 驱动
 #   build/lain0/lain0.exe      lain0 的 CLI
