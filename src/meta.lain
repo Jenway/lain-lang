@@ -957,6 +957,49 @@ func meta_emit_call_temp(base: addr, len: u64, kind: u64, width: u64, t_lo: u64,
   let w8: u32 = std_lainir.lainir_newline_write();
   let sc: addr = lain_meta_scratch_data();
   let s: u32 = std_types.meta_cell_put(sc + 168, tn);
+  // 调用的结果**自己带着类型**：从被调声明的签名里取返回类型名、换成类型 id 记下来。
+  // 操作数类型按窗口查不出来时（`f(c) == 2` 的左边就是）就靠这一条 —— 否则会退回
+  // 绑定的类型（常常是 bool，1 位）去量字面量，装不下就报 23。
+  let rrec: u32 = meta_record_ret_name(callee, callee_len, tn);
+  return 0;
+}
+
+// 把「返回类型名」那三格（源码下标 / 偏移 / 长度）换成类型 id，和临时量编号一起记在
+// 暂存区：+2248 = 类型 id、+2256 = 拥有它的临时量。
+func meta_store_ret(out: addr, tn: u64) -> u32 {
+  let sc: addr = lain_meta_scratch_data();
+  let rsrc: u64 = std_types.meta_cell_get(out);
+  let roff: u64 = std_types.meta_cell_get(out + 8);
+  let rlen: u64 = std_types.meta_cell_get(out + 16);
+  let rbase: addr = lain_meta_source_data(rsrc);
+  let rname: addr = rbase + roff;
+  let rtid: u64 = std_scalars.meta_type_id_of_name(rname, rlen);
+  let rput: u32 = std_types.meta_cell_put(sc + 2248, rtid);
+  let tput: u32 = std_types.meta_cell_put(sc + 2256, tn);
+  return 0;
+}
+
+// 按被调名字记下临时量 tn 的类型（同单元调用）。
+func meta_record_ret_name(name: addr, name_len: u64, tn: u64) -> u32 {
+  let sc: addr = lain_meta_scratch_data();
+  let out: addr = sc + 2224;
+  let rr: u32 = std_scope.meta_scope_func_ret(name, name_len, out);
+  let rok: bool = rr == 0;
+  if rok {
+    let s: u32 = meta_store_ret(out, tn);
+  }
+  return 0;
+}
+
+// 按作用域下标记下临时量 tn 的类型（跨模块成员调用手里只有下标）。
+func meta_record_ret_index(index: u64, tn: u64) -> u32 {
+  let sc: addr = lain_meta_scratch_data();
+  let out: addr = sc + 2224;
+  let rr: u32 = std_scope.meta_scope_func_ret_at(index, out);
+  let rok: bool = rr == 0;
+  if rok {
+    let s: u32 = meta_store_ret(out, tn);
+  }
   return 0;
 }
 
@@ -1598,7 +1641,12 @@ func meta_emit_expr_level(base: addr, len: u64, kind: u64, width: u64, t_lo: u64
         let ay14: u32 = std_lainir.lainir_close_paren_write();
         let ay15: u32 = std_lainir.lainir_newline_write();
         let abound: bool = a_named;
-        continue e(anx, 1, atn, 0, 0, abound);
+        // 转换出来的临时值**自己带着类型**：窗口一路带下去放目标类型名，后面查算子表、
+        // 量字面量宽度都要用它。绑定模式（值直接写进 %NAME）不走这条路 —— 那时窗口
+        // 只剩「源码里是哪段」，写类型名会让收尾把类型名当成值发出去。
+        let aw_lo: u64 = if a_named { 0 } else { rtn_at };
+        let aw_hi: u64 = if a_named { 0 } else { rtn_hi };
+        continue e(anx, 1, atn, aw_lo, aw_hi, abound);
       } else {
         // `as` 只做定宽整数之间的转换
         let fa3: u32 = lain_meta_fail(5);
@@ -1662,8 +1710,26 @@ func meta_emit_expr_level(base: addr, len: u64, kind: u64, width: u64, t_lo: u64
       1
     };
     let acc_skip: bool = acc_tmp and (acc_named == 0);
+    // 算出来的值也可能自己带着类型：调用结果的返回类型（`meta_emit_call_temp` 记下的
+    // 那一条）。只在记的就是当前这个临时量时才采信，陈旧的一条碰不到别的临时量。
+    let ovt: u64 = std_types.meta_cell_get(sc3 + 2248);
+    let ovn: u64 = std_types.meta_cell_get(sc3 + 2256);
+    let ov_named: bool = ovt != 0;
+    let ov_same: bool = ovn == acc;
+    let ov_hit: bool = ov_named and ov_same;
     let l_tlo: u64 = loop pick_ltlo(t: u64 = 0) {
-      if acc_skip { break pick_ltlo(0xFFFFFFFFFFFFFFFF); }
+      if acc_skip {
+        // 算出来的临时量一般不按窗口查类型（窗口里只是复合表达式的第一个操作数），
+        // 只有一种例外：`as T` 转换之后窗口里放的是**目标类型名**本身（见那条
+        // continue）。这时窗口就是这个操作数的类型 —— `(b as u32) == 59` 里那个
+        // 59 必须按 u32 量，否则会按绑定的类型（bool，1 位）量成「装不下」。
+        let tw: u64 = std_scalars.meta_type_resolve(base, len, alo, ahi);
+        let twmiss: bool = tw == 0;
+        if twmiss { break pick_ltlo(0xFFFFFFFFFFFFFFFF); }
+        let twsc: addr = lain_meta_scratch_data();
+        let twp: u32 = std_types.meta_cell_put(twsc + 0, ahi);
+        break pick_ltlo(alo);
+      }
       let ln: u64 = std_recognize.meta_node_at(base, alo);
       let lt: u64 = std_funcs.meta_word_type_name(base, len, ln);
       let lmiss0: bool = lt == 0xFFFFFFFFFFFFFFFF;
@@ -1714,17 +1780,27 @@ func meta_emit_expr_level(base: addr, len: u64, kind: u64, width: u64, t_lo: u64
     };
     // 指令那一格写的是**操作数**的宽度：`x < 2` 里两个操作数是 i32，所以发
     // `#slt[#bits<32>]`；结果天生 1 位，由验证器跟返回类型对。
-    let kind2: u64 = if any_hit {
-      let tid2: u64 = std_scalars.meta_type_resolve(base, len, tlo2, thi2);
-      let info2: u64 = std_registry.meta_tid_repr(tid2);
+    // 操作数的类型：调用结果记下来的类型 id 优先，其次按窗口查。
+    let sel_tid: u64 = loop pick_sel(t: u64 = 0) {
+      if ov_hit {
+        break pick_sel(ovt);
+      }
+      if any_hit {
+        let sq: u64 = std_scalars.meta_type_resolve(base, len, tlo2, thi2);
+        break pick_sel(sq);
+      }
+      break pick_sel(0);
+    };
+    let typed: bool = any_hit or ov_hit;
+    let kind2: u64 = if typed {
+      let info2: u64 = std_registry.meta_tid_repr(sel_tid);
       let kk: u64 = info2 and 255;
       kk
     } else {
       kind
     };
-    let width2: u64 = if any_hit {
-      let tid3: u64 = std_scalars.meta_type_resolve(base, len, tlo2, thi2);
-      let info3: u64 = std_registry.meta_tid_repr(tid3);
+    let width2: u64 = if typed {
+      let info3: u64 = std_registry.meta_tid_repr(sel_tid);
       let ww: u64 = (info3 >> 8) and 255;
       ww
     } else {
@@ -1749,11 +1825,15 @@ func meta_emit_expr_level(base: addr, len: u64, kind: u64, width: u64, t_lo: u64
     let sp_b: u8 = std_lex.bs_byte_at(base, bat, len);
     let is_plus: bool = (sp_b as u32) == 43;
     // **只认左边的地址**：`1 + p` 不算地址算术，`#lea` 的基址只能来自左操作数。
-    let a_tid: u64 = if l_hit {
-      let a_t2: u64 = std_scalars.meta_type_resolve(base, len, l_tlo3, l_thi3);
-      a_t2
-    } else {
-      0
+    let a_tid: u64 = loop pick_atid(t: u64 = 0) {
+      if ov_hit {
+        break pick_atid(ovt);
+      }
+      if l_hit {
+        let a_t2: u64 = std_scalars.meta_type_resolve(base, len, l_tlo3, l_thi3);
+        break pick_atid(a_t2);
+      }
+      break pick_atid(0);
     };
     let a_info: u64 = std_registry.meta_tid_repr(a_tid);
     let a_kind: u64 = a_info and 255;
@@ -1830,7 +1910,14 @@ func meta_emit_expr_level(base: addr, len: u64, kind: u64, width: u64, t_lo: u64
     // 现在才查物理算子。从这往后到这条指令发完，**不能再有任何递归调用** ——
     // 否则 `+24`/`+32` 里的名字会被换掉。
     let sym: addr = base + bat;
-    let ctx_phys: u64 = std_scalars.meta_op_resolve(base, len, tlo2, thi2, sym, bn);
+    let ctx_phys: u64 = loop pick_phys(t: u64 = 0) {
+      if ov_hit {
+        let oq: u64 = std_scalars.meta_op_resolve_tid(ovt, sym, bn);
+        break pick_phys(oq);
+      }
+      let cq: u64 = std_scalars.meta_op_resolve(base, len, tlo2, thi2, sym, bn);
+      break pick_phys(cq);
+    };
     let ctx_miss: bool = ctx_phys == 0xFFFFFFFFFFFFFFFF;
     let try_default: bool = both_lit and ctx_miss;
     let def_phys: u64 = if try_default {

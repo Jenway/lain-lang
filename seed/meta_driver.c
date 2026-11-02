@@ -274,6 +274,9 @@ static void usage(FILE *out) {
         out);
 }
 
+/* 调试输出开关：只有 -v/--verbose 才打区域映射、trace slot 与 trap 细分。 */
+static int g_verbose = 0;
+
 static int map_region(LainVmSpace *space, const void *base, uint64_t bytes,
                       uint64_t accessible, uint32_t rights, const char *what) {
   if (!base || !bytes) {
@@ -284,6 +287,11 @@ static int map_region(LainVmSpace *space, const void *base, uint64_t bytes,
           space, (uintptr_t)base, bytes, accessible, rights, 0))) {
     printf("map %s failed (%llu bytes)\n", what, (unsigned long long)bytes);
     return 1;
+  }
+  if (g_verbose) {
+    printf("map %s: base=0x%llx bytes=%llu accessible=%llu rights=%u\n", what,
+           (unsigned long long)(uintptr_t)base, (unsigned long long)bytes,
+           (unsigned long long)accessible, rights);
   }
   return 0;
 }
@@ -343,7 +351,7 @@ int main(int argc, char **argv) {
   for (i = 1; i < argc; i++) {
     const char *a = argv[i];
     if (!strcmp(a, "-q") || !strcmp(a, "--quiet")) { quiet = 1; continue; }
-    if (!strcmp(a, "-v") || !strcmp(a, "--verbose")) { verbose = 1; continue; }
+    if (!strcmp(a, "-v") || !strcmp(a, "--verbose")) { verbose = 1; g_verbose = 1; continue; }
     if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(stdout); return 0; }
 #define TAKE(name)                                                            \
     do {                                                                      \
@@ -538,7 +546,7 @@ int main(int argc, char **argv) {
       sources[s].path = path_block + path_used;
       path_used += (uint32_t)pl;
       memcpy(text_block + text_used, sources[s].text, tl - 1);
-      text_block[text_used + tl - 1] = '\\0';
+      text_block[text_used + tl - 1] = '\0';
       free(sources[s].text);
       sources[s].text = text_block + text_used;
       text_used += (uint32_t)tl;
@@ -715,12 +723,23 @@ int main(int argc, char **argv) {
     }
   }
 
+  if (g_verbose) {
+    for (uint32_t ts = 0; ts < LAINMETA_TRACE_SLOTS; ts++) {
+      uint64_t tv = lainmeta_host_trace_slot(host, ts);
+      if (tv) printf("trace slot=%u value=%llu\n", ts, (unsigned long long)tv);
+    }
+  }
   {
     const LainVmTrap *trap = lainvm_tcb_trap(tcb);
     if (trap && trap->active) {
       printf("trap kind=%d status=%d line=%u column=%u region=%u position=%u\n",
              (int)trap->kind, trap->status, trap->line, trap->column,
              trap->region, trap->position);
+      if (g_verbose) {
+        uint32_t tsub = lainvm_image_region_sub(image, trap->region);
+        const char *tname = lainvm_image_sub_name(image, tsub);
+        printf("trap sub=%u name=%s\n", tsub, tname ? tname : "?");
+      }
       rc = 1;
     } else {
       printf("trap none\n");

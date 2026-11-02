@@ -1632,6 +1632,32 @@ func meta_lower_loop_stmts(base: addr, len: u64,
     let more: bool = si < bcount;
     if more {
       let nm: u64 = std_parse.ast_child(parent, si);
+      // 语句 `return <值>;`：跟函数体那条路一样交给 `meta_lower_stmt` 发，
+      // 但它在循环区域里也是终止指令 —— 发完把「这一段已终止」两格置 1，
+      // 后面的语句、`if` 分支的 `#yield`、循环收尾的 `#continue` 都不再发
+      // （区域里终止指令必须是最后一条）。
+      let isret2: bool = std_parse.meta_node_is_word(nm, std_lex.meta_kw_return, 6);
+      if isret2 {
+        let rsi: u64 = meta_find_semi_index(base, parent, si);
+        let rnos: bool = rsi == 0xFFFFFFFFFFFFFFFF;
+        if rnos {
+          let fbr: u32 = lain_meta_fail(4);
+          break s(fbr);
+        }
+        let rsemi: u64 = std_parse.ast_child(parent, rsi);
+        let rt_lo: u64 = std_types.meta_cell_get(sc + 2536);
+        let rt_hi: u64 = std_types.meta_cell_get(sc + 2544);
+        let rvi: u64 = si + 1;
+        let rrst: u32 = meta_lower_stmt(base, len, parent, si, rvi, rsemi, 1,
+                                        0, 0, rt_lo, rt_hi);
+        let rrbad: bool = rrst != 0;
+        if rrbad {
+          break s(rrst);
+        }
+        let jz6: u32 = std_types.meta_cell_put(sc + 2392, 1);
+        let jz7: u32 = std_types.meta_cell_put(sc + 2464, 1);
+        break s(0);
+      }
       // 显式跳转：`break LABEL(值);` / `continue LABEL(实参…);`
       let isbrk2: bool = std_parse.meta_node_is_word(nm, std_lex.meta_kw_break, 5);
       let iscont2: bool = std_parse.meta_node_is_word(nm, std_lex.meta_kw_continue, 8);
@@ -1684,6 +1710,20 @@ func meta_lower_loop_stmts(base: addr, len: u64,
         let lt_lo: u64 = std_parse.meta_node_start(lty);
         let lt_hi: u64 = lt_lo + std_parse.meta_node_len(lty);
         let lreg: u32 = meta_local_type_put(ln_lo, ln_hi, lt_lo, lt_hi);
+        // `let NAME: T = loop …;`：值本身是循环，结果绑在这个名字上 —— 跟函数体
+        // 那条路一样，整条 `loop` 自己发 `#loop`，不走值的降级。
+        let lv: u64 = std_parse.ast_child(parent, si + 5);
+        let lvh: u64 = std_syntax.meta_syntax_lookup(lv, 1, 0, 2);
+        let lv_loop: bool = lvh == 13;
+        if lv_loop {
+          let llr: u32 = meta_lower_loop(base, len, parent, si + 5, ln_lo, ln_hi);
+          let llrbad: bool = llr != 0;
+          if llrbad {
+            break s(llr);
+          }
+          let jz5: u32 = std_types.meta_cell_put(sc + 2392, 0);
+          continue s(lsi + 1);
+        }
         let lvi: u64 = si + 5;
         let lst: u32 = meta_lower_stmt(base, len, parent, si, lvi, lvalsemi, 0,
                                        ln_lo, ln_hi, lt_lo, lt_hi);
@@ -2045,10 +2085,15 @@ func meta_lower_func_inner(base: addr, len: u64,
   // 每个函数体一张新的局部变量表：条目区从 bump 动态区要（表随绑定数增长），条数归零。
   // 表的寿命是这一次函数体 lowering —— 由 meta_lower_func 恢复外层那份。容量按函数体
   // 的孩子数给（一条语句最多产生一条绑定），够用；越界写会撞上别的临时块。
-  let pcount0: u64 = std_parse.ast_child_count(body);
+  // 条目来自函数体里所有 `let` —— 循环体和 `if` 分支里的也在同一个函数里，
+  // 按函数体语句数给容量会装不下（一个 `let x = loop …;` 的循环体可能二十条 let）。
+  // 容量 = 本文件里 `let` 的条数 + 余量：条目只由函数体（含循环体、`if` 分支）里的
+  // `let` 产生，一个函数的条目数一定不超过整个文件的 `let` 总数。容量写进 2144
+  // 供写入时查 —— 按源码字节数给会大到几 MB，把 bump 区顶爆（报 17）。
   let lmark: u64 = std_scope.meta_bump_mark();
-  let lbytes: u64 = pcount0 * 40;
-  let lbytes2: u64 = lbytes + 40;
+  let lcap: u64 = meta_let_cap(base, len);
+  let lentries: u64 = lcap + 8;
+  let lbytes2: u64 = lentries * 40;
   let loff: u64 = std_scope.meta_bump_alloc(lbytes2);
   let lbad: bool = loff == 0xFFFFFFFFFFFFFFFF;
   if lbad { return 17; }
@@ -2056,10 +2101,15 @@ func meta_lower_func_inner(base: addr, len: u64,
   // 跨调用层会被别的 bump 块叠在上面（读回一个已释放的地址 → 1004），偏移不会。
   let lz: u32 = std_types.meta_cell_put(scp + 2128, 0);
   let lb: u32 = std_types.meta_cell_put(scp + 2136, loff);
+  let lc: u32 = std_types.meta_cell_put(scp + 2144, lentries);
 
   let r_lo: u64 = std_parse.meta_node_start(ret_node);
   // 限定名（M.Point）跨多个 token：函数体的返回类型窗口也要扫到名字末尾
   let r_hi: u64 = std_lex.bs_skip_type_name(base, r_lo, len);
+  // 循环体里的 `return` 也在本函数里，用的是同一个返回类型窗口：
+  // 记到暂存区 2536 / 2544（函数不套函数，不需要恢复）。
+  let rt0: u32 = std_types.meta_cell_put(scp + 2536, r_lo);
+  let rt1: u32 = std_types.meta_cell_put(scp + 2544, r_hi);
   // 函数体里的字节串字面量先落成静态块：`data` 只能放顶层，一旦开过程就没法再插。
   let ps: u32 = meta_scan_entry(base, len, body);
   let psbad: bool = ps != 0;
@@ -3608,6 +3658,39 @@ func meta_loop_phi_types(b: addr, nparam: u64) -> u32 {
   return r;
 }
 
+// 一份源码里 `let` 关键字的条数：局部变量表的容量按它给 —— 条目只由函数体（含
+// 循环体、`if` 分支）里的 `let` 产生，一个函数的条目数一定不超过整个文件的 `let`
+// 总数。整个文件只扫一遍，结果按源码长度缓存在 2152/2160（键取 len+1，0 = 没算过）。
+func meta_let_cap(base: addr, len: u64) -> u64 {
+  let sc: addr = lain_meta_scratch_data();
+  let key: u64 = len + 1;
+  let cached: u64 = std_types.meta_cell_get(sc + 2152);
+  if cached == key {
+    let hit: u64 = std_types.meta_cell_get(sc + 2160);
+    return hit;
+  }
+  let n: u64 = loop cap(i: u64 = 0, acc: u64 = 0) {
+    let more: bool = i < len;
+    if more {
+      let here: bool = std_lex.bs_match_keyword(base, i, len, std_lex.meta_kw_let, 3);
+      let pi: u64 = if i == 0 { 0 } else { i - 1 };
+      let pb: u8 = std_lex.bs_byte_at(base, pi, len);
+      let prev_ok: bool = std_lex.bs_is_ident(pb) == 0;
+      let nb: u8 = std_lex.bs_byte_at(base, i + 3, len);
+      let next_ok: bool = std_lex.bs_is_ident(nb) == 0;
+      let ok: bool = here and prev_ok and next_ok;
+      let acc2: u64 = if ok { acc + 1 } else { acc };
+      continue cap(i + 1, acc2);
+    } else {
+      break cap(acc);
+    }
+  };
+  let p1: u32 = std_types.meta_cell_put(sc + 2152, key);
+  let p2: u32 = std_types.meta_cell_put(sc + 2160, n);
+  return n;
+}
+
+
 func meta_local_type_put(n_lo: u64, n_hi: u64, t_lo: u64, t_hi: u64) -> u32 {
   let sc: addr = lain_meta_scratch_data();
   let raw: u64 = std_types.meta_cell_get(sc + 2136);
@@ -3618,6 +3701,11 @@ func meta_local_type_put(n_lo: u64, n_hi: u64, t_lo: u64, t_hi: u64) -> u32 {
   let no_tbl: bool = raw == 0;
   if no_tbl { return 0; }
   let count: u64 = std_types.meta_cell_get(sc + 2128);
+  let cap: u64 = std_types.meta_cell_get(sc + 2144);
+  // 写满就报失效：容量是按函数体源码长度给的，正常写不满；真写满了往相邻 bump 块里
+  // 写会把别人的数据改成垃圾，故障点跑到几条语句之外，比这里报失效难查得多。
+  let full: bool = count >= cap;
+  if full { return 17; }
   let off: u64 = count * 40;
   let e: addr = base + off;
   let s0: u32 = std_types.meta_cell_put(e, n_lo);
