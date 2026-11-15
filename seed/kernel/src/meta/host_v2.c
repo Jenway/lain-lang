@@ -16,7 +16,7 @@
 #include "ast_out.h"
 #include "lain/ir/build.h"
 #include "lain/ir/verify.h"
-#include "lain/meta/ast_v1.h"
+#include "lain/meta/ast.h"
 #include "lain/meta/tree.h"
 #include "lain/text/print.h"
 
@@ -617,11 +617,11 @@ static uint32_t v2_source_import(void *ctx, const uint64_t *args, uint32_t argc,
   const unsigned char *bytes = NULL;
   uint32_t length = 0;
   char rel[V2_PATH_MAX];
-  char dir[V2_PATH_MAX];
   char joined[V2_PATH_MAX];
   char canonical[V2_PATH_MAX];
   char *text;
   uint32_t size = 0, index = 0, i;
+  *res = 0xFFFFFFFFu;
   if (argc != 2) return LAINMETA_V2_ERR_ARG;
   if ((uint32_t)args[0] >= h->source_count) return LAINMETA_V2_ERR_ARG;
   if (!v2_sym_view(h, (uint32_t)args[1], &bytes, &length))
@@ -629,15 +629,7 @@ static uint32_t v2_source_import(void *ctx, const uint64_t *args, uint32_t argc,
   if (length + 1 > sizeof(rel)) return LAINMETA_V2_ERR_ARG;
   memcpy(rel, bytes, length);
   rel[length] = 0;
-  if (h->sources[args[0]].path) {
-    v2_dirname(h->sources[args[0]].path, dir, sizeof(dir));
-  } else {
-    dir[0] = '.';
-    dir[1] = '/';
-    dir[2] = 0;
-  }
-  if (snprintf(joined, sizeof(joined), "%s%s", dir, rel) >=
-      (int)sizeof(joined))
+  if (snprintf(joined, sizeof(joined), "%s", rel) >= (int)sizeof(joined))
     return LAINMETA_V2_ERR_ARG;
   if (!v2_normalize(joined, canonical, sizeof(canonical)))
     return LAINMETA_V2_ERR_ARG;
@@ -684,6 +676,21 @@ static uint32_t v2_sym_find(void *ctx, const uint64_t *args, uint32_t argc,
   sym = lainmeta_sym_find(h->syms, (const void *)(uintptr_t)args[0],
                           (uint32_t)args[1]);
   *res = sym ? handle_sym(sym) : 0;
+  return 0;
+}
+
+/* 两个符号句柄的原文是否相同（AST 侧句柄按出现位置分配，只能按内容比）。 */
+static uint32_t v2_sym_same(void *ctx, const uint64_t *args, uint32_t argc,
+                            uint64_t *res) {
+  LainMetaHostV2 *h = (LainMetaHostV2 *)ctx;
+  const unsigned char *a = NULL;
+  const unsigned char *b = NULL;
+  uint32_t la = 0;
+  uint32_t lb = 0;
+  if (argc != 2) return LAINMETA_V2_ERR_ARG;
+  if (!v2_sym_view(h, (uint32_t)args[0], &a, &la)) return LAINMETA_V2_ERR_SYM;
+  if (!v2_sym_view(h, (uint32_t)args[1], &b, &lb)) return LAINMETA_V2_ERR_SYM;
+  *res = (la == lb && (la == 0 || memcmp(a, b, la) == 0)) ? 1u : 0u;
   return 0;
 }
 
@@ -1043,7 +1050,7 @@ static uint32_t v2_ir_data_add(void *ctx, const uint64_t *args, uint32_t argc,
   uint32_t size = (uint32_t)args[3];
   const L1Data *data;
   if (argc != 5) return LAINMETA_V2_ERR_ARG;
-  if (!m || m->proc.open) return LAINMETA_V2_ERR_STATE;
+  if (!m) return LAINMETA_V2_ERR_STATE;
   if (m->data_count == V2_DATA_MAX) return LAINMETA_V2_ERR_CAPACITY;
   if (size && (!h->space ||
                !lainvm_space_check(h->space, bytes, size, LAINVM_MEM_READ)))
@@ -1711,6 +1718,7 @@ static const V2Capability k_v2_capabilities[] = {
     {"lain2_source_import", v2_source_import},
     {"lain2_sym_intern", v2_sym_intern},
     {"lain2_sym_find", v2_sym_find},
+    {"lain2_sym_same", v2_sym_same},
     {"lain2_sym_addr", v2_sym_addr},
     {"lain2_sym_len", v2_sym_len},
     {"lain2_diag_emit", v2_diag_emit},

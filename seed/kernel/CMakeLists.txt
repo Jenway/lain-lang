@@ -19,7 +19,6 @@ target_sources(lain_seed
     src/text/print.c
     src/ir/verify.c
     src/meta/ast_out.c
-    src/meta/host.c
     src/meta/host_v2.c
     src/meta/sym.c
     src/meta/tree.c
@@ -41,8 +40,8 @@ target_sources(lain_seed
         include/lain/ir/infer.h
         include/lain/ir/value.h
         include/lain/ir/verify.h
-        include/lain/meta/ast_v1.h
-        include/lain/meta/host.h
+        include/lain/meta/ast.h
+        include/lain/meta/expand.h
         include/lain/meta/host_v2.h
         include/lain/meta/sym.h
         include/lain/meta/tree.h

@@ -9,9 +9,11 @@ project(lain-seed
 # lain0 再链接它构建 C++ 前端。两个 add_subdirectory 的顺序不许调换。
 #
 # 产物路径固定（README 的快速开始与 .github/workflows/lain-bootstrap.yml 都按这个断言）：
-#   build/lib/lain_seed.lib    kernel 的静态库
-#   build/lain-meta.exe        Meta 驱动
-#   build/lain0/lain0.exe      lain0 的 CLI
+#   build/lib/lain_seed.lib      kernel 的静态库
+#   build/lain-meta-v2.exe       Meta 驱动
+#   build/lainir-verify.exe      校验工具
+#   build/lainir-run.exe         执行工具
+#   build/lain0/lain0.exe        lain0 的 CLI
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
 option(LAIN_BUILD_DRIVER "Build the Meta driver tool" ON)
@@ -24,22 +26,7 @@ if(LAIN_BUILD_LAIN0)
 endif()
 
 if(LAIN_BUILD_DRIVER)
-  add_executable(lain_meta_driver meta_driver.c)
-  target_link_libraries(lain_meta_driver PRIVATE lain_seed)
-  target_compile_features(lain_meta_driver PRIVATE c_std_11)
-  set_target_properties(lain_meta_driver PROPERTIES
-    C_STANDARD_REQUIRED ON
-    C_EXTENSIONS OFF
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-    OUTPUT_NAME "lain-meta"
-  )
-  if(WIN32)
-    # 驱动用 fopen 一类 POSIX 名，MSVC 的 ucrt 只给弃用警告。
-    target_compile_definitions(lain_meta_driver PRIVATE _CRT_SECURE_NO_WARNINGS)
-  endif()
-
-  # v2 宿主：结构化句柄 + 一次符号驻留 + 沙箱 apply。与 v1 驱动并排存在，
-  # 两者共用 lain_seed，互不干扰。
+  # Meta 驱动：结构化句柄 + 一次符号驻留 + 沙箱 apply。
   add_executable(lain_meta_v2_driver meta_v2_driver.c)
   target_link_libraries(lain_meta_v2_driver PRIVATE lain_seed)
   target_compile_features(lain_meta_v2_driver PRIVATE c_std_11)

@@ -1,11 +1,11 @@
-# 从 IR 头文件生成 src_v2/ir_codes.lain。
+# 从 IR 头文件生成 src/ir_codes.lain。
 #
-# 用途：src_v2 里的编译器要发 #add/#load/#return 这些算子，枚举值必须和
+# 用途：src 里的编译器要发 #add/#load/#return 这些算子，枚举值必须和
 # seed/kernel/include/lain/ir/core.h 里的真值一致。手抄一份会在头文件增删
 # 算子之后静默错位，所以这里按出现顺序数逗号取值。
 #
 # 用法：
-#   python scripts/gen_v2_abi.py           写入 src_v2/ir_codes.lain
+#   python scripts/gen_v2_abi.py           写入 src/ir_codes.lain
 #   python scripts/gen_v2_abi.py --check   只校验，不同步就返回 1
 import os
 import re
@@ -14,7 +14,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CORE_H = os.path.join(ROOT, "seed", "kernel", "include", "lain", "ir", "core.h")
 VERIFY_H = os.path.join(ROOT, "seed", "kernel", "include", "lain", "ir", "verify.h")
-OUT = os.path.join(ROOT, "src_v2", "ir_codes.lain")
+OUT = os.path.join(ROOT, "src", "ir_codes.lain")
 
 COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
 
@@ -119,7 +119,7 @@ def main(argv):
         old = open(OUT, encoding="utf-8").read()
     if check_only:
         if old != text:
-            print("src_v2/ir_codes.lain 与头文件不同步，运行 python scripts/gen_v2_abi.py")
+            print("src/ir_codes.lain 与头文件不同步，运行 python scripts/gen_v2_abi.py")
             return 1
         print("ir_codes.lain 同步")
         return 0
@@ -129,7 +129,7 @@ def main(argv):
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
-    print("已写入 src_v2/ir_codes.lain")
+    print("已写入 src/ir_codes.lain")
     return 0
 
 

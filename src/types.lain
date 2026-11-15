@@ -4,23 +4,29 @@
 let codes = import("ir_codes");
 let s = import("sym");
 
-// --- 类型块：k @0，w @8，sg @16。k 用 L1TypeKind 编号，9 表示「上下文没有指定」。
+// --- 类型块：k @0，w @8，sg @16，sh @24。k 用 L1TypeKind 编号，9 表示「上下文没有指定」。
+// sh 是形状号：非 0 表示这个 addr 指向 struct/enum/数组/字符串，布局在 agg.lain。
 func ty_save(p: addr, k: u64, w: u64, sg: u64) -> u64 {
   store(p, k);
   store(p + 8, w);
   store(p + 16, sg);
+  store(p + 24, 0);
   return k;
 }
 
 func tk(p: addr) -> u64 { return load(p); }
 func tw(p: addr) -> u64 { return load(p + 8); }
 func tsg(p: addr) -> u64 { return load(p + 16); }
+func tsh(p: addr) -> u64 { return load(p + 24); }
+func ty_set_sh(p: addr, v: u64) -> u64 { store(p + 24, v); return v; }
 
 func ty_at(dst: addr, src: addr) -> u64 {
   let a: u64 = load(src);
   let b: u64 = load(src + 8);
   let c: u64 = load(src + 16);
-  return ty_save(dst, a, b, c);
+  let d: u64 = load(src + 24);
+  ty_save(dst, a, b, c);
+  return ty_set_sh(dst, d);
 }
 
 func ty_known(p: addr) -> u64 {
@@ -29,9 +35,18 @@ func ty_known(p: addr) -> u64 {
 }
 
 func ty_same(a: addr, b: addr) -> u64 {
-  if load(a) != load(b) { return 0; }
-  if load(a + 8) != load(b + 8) { return 0; }
-  if load(a + 16) != load(b + 16) { return 0; }
+  let a0: u64 = load(a);
+  let b0: u64 = load(b);
+  if a0 != b0 { return 0; }
+  let a1: u64 = load(a + 8);
+  let b1: u64 = load(b + 8);
+  if a1 != b1 { return 0; }
+  let a2: u64 = load(a + 16);
+  let b2: u64 = load(b + 16);
+  if a2 != b2 { return 0; }
+  let a3: u64 = load(a + 24);
+  let b3: u64 = load(b + 24);
+  if a3 != b3 { return 0; }
   return 1;
 }
 
@@ -51,6 +66,12 @@ func ty_bits(p: addr, w: u64, sg: u64) -> u64 {
 }
 
 func ty_addr(p: addr) -> u64 { return ty_save(p, codes.TY_ADDR(), 0, 0); }
+
+// 带形状的地址：聚合与数组值在 IR 里一律是 #addr。
+func ty_agg(p: addr, sh: u64) -> u64 {
+  ty_addr(p);
+  return ty_set_sh(p, sh);
+}
 func ty_bool(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 1, 0); }
 func ty_i32(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 32, 1); }
 func ty_u64(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 64, 0); }
@@ -120,7 +141,7 @@ func val_known(p: addr) -> u64 {
 }
 
 // --- 算子表 ------------------------------------------------------------
-// 优先级与 seed/lain0/src/Lexer.cpp:306 binaryPrecedence、src/std/lex.lain:280 一致。
+// 优先级与 seed/lain0/src/Lexer.cpp:306 binaryPrecedence 一致。
 func prec(h: u64) -> u64 {
   if h == s.k_or() { return 1; }
   if h == s.k_and() { return 2; }

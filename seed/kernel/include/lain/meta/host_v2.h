@@ -1,8 +1,7 @@
-/* Lain-Meta v2 宿主层：只给结构化原语，不给内存布局。
+/* Lain-Meta 宿主层：只给结构化原语，不给内存布局。
  *
- * 与 v1 的差别是 ABI 形状：v1 把 Arena、Erase 段、暂存区整片映射进 guest，
- * guest 按 56 字节镜像自己解节点；v2 只交出 u32 不透明句柄与一小组查询/构造
- * 原语，节点字段永远由宿主读，guest 拿到的是值。
+ * 宿主只交出 u32 不透明句柄与一小组查询/构造原语，节点字段永远由宿主读，
+ * guest 拿到的是值，不存在跨 C 与 Lain 的结构体镜像。
  *
  * 句柄编码（高 4 位类别，低 28 位编号）：
  *   1 = AstIn 节点  ((src_id << 20) | slot)     slot 即 Arena 里的节点下标
@@ -20,7 +19,7 @@
 #include <stdint.h>
 
 #include "lain/meta/apply.h"
-#include "lain/meta/host.h"
+#include "lain/meta/expand.h"
 #include "lain/meta/sym.h"
 #include "lain/vm/caps.h"
 #include "lain/vm/quota.h"

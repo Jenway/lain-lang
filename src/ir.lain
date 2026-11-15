@@ -9,7 +9,10 @@ extern lain2_ir_mod_new(name: u64) -> u64 = lain2_ir_mod_new;
 extern lain2_ir_proc_begin(mod: u64, name: u64) -> u64 = lain2_ir_proc_begin;
 extern lain2_ir_proc_param(mod: u64, name: u64, k: u64, w: u64) -> u64 = lain2_ir_proc_param;
 extern lain2_ir_proc_result(mod: u64, k: u64, w: u64) -> u64 = lain2_ir_proc_result;
+extern lain2_ir_proc_extern(mod: u64, name: u64, link: u64) -> u64 = lain2_ir_proc_extern;
 extern lain2_ir_proc_end(mod: u64) -> u64 = lain2_ir_proc_end;
+extern lain2_ir_data_add(mod: u64, name: u64, bytes: addr, size: u64, is_ro: u64) -> u64 = lain2_ir_data_add;
+extern lain2_ir_inst_symbol(mod: u64, kind: u64, res: u64, symbol: u64) -> u64 = lain2_ir_inst_symbol;
 extern lain2_ir_region_begin(mod: u64) -> u64 = lain2_ir_region_begin;
 extern lain2_ir_region_param(mod: u64, name: u64, k: u64, w: u64, ik: u64, ib: u64) -> u64 = lain2_ir_region_param;
 extern lain2_ir_region_result(mod: u64, k: u64, w: u64) -> u64 = lain2_ir_region_result;
@@ -97,8 +100,46 @@ func proc_result(s: addr, tp: addr) -> u64 {
   return lain2_ir_proc_result(st.st_mod(s), kcode(tp), ty.tw(tp));
 }
 
+func proc_extern(s: addr, name: u64, link: u64) -> u64 {
+  return lain2_ir_proc_extern(st.st_mod(s), name, link);
+}
+
+// 静态数据可以在任何时刻登记；is_writable 为假即落在只读段。
+func data_add(s: addr, name: u64, bytes: addr, size: u64, is_writable: u64) -> u64 {
+  return lain2_ir_data_add(st.st_mod(s), name, bytes, size, is_writable);
+}
+
+func emit_symbol(s: addr, kind: u64, res: u64, symbol: u64) -> u64 {
+  return lain2_ir_inst_symbol(st.st_mod(s), kind, res, symbol);
+}
+
 func proc_end(s: addr) -> u64 {
   return lain2_ir_proc_end(st.st_mod(s));
+}
+
+// 任意字节的符号（名字来自 guest 内存）。
+func sym_lit(p: addr, n: u64) -> u64 {
+  return lain2_sym_intern(p, n);
+}
+
+// 把一个值变成操作数：字面量走立即数，其余按名字引用。
+func op_val(s: addr, v: addr) -> u64 {
+  if ty.vlit(v) == 1 { return arg_int(s, ty.vbits(v)); }
+  return arg_ref(s, ty.vn(v));
+}
+
+// 类型块的临时载体：LEA 与字节读写都要一个 addr / bits 类型实参。
+// 每个都从 arena 现取 32 字节，随源结束一起作废。
+func taddr(s: addr) -> addr {
+  let t: addr = st.st_alloc(s, 32);
+  let rc: u64 = ty.ty_addr(t);
+  return t;
+}
+
+func tbits(s: addr, w: u64) -> addr {
+  let t: addr = st.st_alloc(s, 32);
+  let rc: u64 = ty.ty_bits(t, w, 0);
+  return t;
 }
 
 // --- 区域 ---------------------------------------------------------------
@@ -152,9 +193,19 @@ func emit_call(s: addr, res: u64, callee: u64, tail: u64) -> u64 {
   return lain2_ir_inst_call(st.st_mod(s), res, callee, tail);
 }
 
-// kind 只允许 LOAD / STORE / ALLOCA。order 固定 ORDER_RELAXED，对齐固定 8。
+// kind 只允许 LOAD / STORE / ALLOCA。order 固定 ORDER_RELAXED，对齐按参数。
 func emit_mem(s: addr, kind: u64, res: u64, tp: addr, align: u64) -> u64 {
   return lain2_ir_inst_mem(st.st_mod(s), kind, res, kcode(tp), ty.tw(tp), 0, 0, align);
+}
+
+// 指针算术一律走 #lea[#addr](base, idx, scale, offset)。
+func emit_lea(s: addr, res: u64, base: u64, idx: u64, scale: u64, off: u64) -> u64 {
+  let rc: u64 = args_reset(s);
+  let a: u64 = arg_ref(s, base);
+  let b: u64 = arg_int(s, idx);
+  let c: u64 = arg_int(s, scale);
+  let d: u64 = arg_int(s, off);
+  return emit(s, codes.INST_LEA(), res, taddr(s));
 }
 
 // --- 收尾 ---------------------------------------------------------------

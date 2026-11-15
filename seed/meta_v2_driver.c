@@ -16,7 +16,7 @@
  *   --slice <n>       单次推进步数上限（默认 1000000）
  *   --stack <n>       栈字节（默认 1 MiB）
  *   --quota <n>       配额字节（默认 16 MiB）
- *   --workspace <n>   工作区字节（默认 1 MiB）
+ *   --workspace <n>   工作区字节（默认 8 MiB）
  *   --caps <n>        能力表容量（默认 128）
  *   --depth <n>       最大调用深度（默认 32）
  *   --symbols <n>     符号容量（默认 8192）
@@ -136,7 +136,7 @@ int main(int argc, char **argv) {
   uint64_t fuel = 20000000, slice_fuel = 1000000;
   uint64_t stack_bytes = 1u << 20;
   uint64_t quota_bytes = 16u << 20;
-  uint64_t workspace_bytes = 1u << 20;
+  uint64_t workspace_bytes = 8u << 20;
   uint64_t caps_capacity = 128;
   uint64_t max_call_depth = 32;
   uint64_t symbol_capacity = 8192;

@@ -1,10 +1,10 @@
-/* 语言无关的源码平铺 Arena（LAINAST v1 的第 1 段：AstIn）。
+/* 语言无关的源码平铺 Arena（LAINAST 的第 1 段：AstIn）。
  *
  * reader 只做机制的事：词法约定（词、字符串、`::`/`->`/`..` 双字节标点）、注释与
  * 括号配对、源码位置、Arena 存储、结构验证。let / func / struct / enum 的含义不在
  * 这里，全归 Meta。
  *
- * 布局与引用编码的唯一来源是 `lain/meta/ast_v1.h`。这里不给句柄、不给 C 指针：
+ * 布局与引用编码的唯一来源是 `lain/meta/ast.h`。这里不给句柄、不给 C 指针：
  * 引用是「段号 + 段内偏移」的整数，节点在映射格式里。
  *
  * 手工测试与驱动都必须用 `lainmeta_tree_arena` 拿视图，禁止再抄一份布局。
@@ -15,7 +15,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "lain/meta/ast_v1.h"
+#include "lain/meta/ast.h"
 #include "lain/meta/sym.h"
 #include "lain/vm/quota.h"
 

@@ -1,4 +1,4 @@
-/* LAINAST v1：平铺 Arena 的共享布局、引用编码与固定拒码。
+/* LAINAST：平铺 Arena 的共享布局、引用编码与固定拒码。
  *
  * 这是唯一的布局来源：seed 的 reader（src/meta/tree.c）、宿主（src/meta/host.c）
  * 与验收程序都必须 include 它，禁止各自再写一份结构定义。
@@ -10,8 +10,8 @@
  *   3. 段身份在 AST 能力边界校验：任何跨段读取都要在所属段内先减后加地验证区间，
  *      再交给 VSpace 检查。引用只在所属编译任务存活期内有效，没有跨任务代际字段。
  */
-#ifndef LAINMETA_AST_V1_H
-#define LAINMETA_AST_V1_H
+#ifndef LAINMETA_AST_H
+#define LAINMETA_AST_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -26,7 +26,7 @@ typedef uint64_t LainAstRef;
 
 /* 默认主源码 Source=1、AstIn=2、任务 AstOut=3。源码编号与段号是不同概念：
  * 额外源码按注册顺序依次拿 Source/AstIn 对 4/5、6/7……，编号在任务存活期不回收。
- * 第一期没有 AstOut 消费者，编号 3 仍然保留，不挪作他用。 */
+ * 段号 3 归 AstOut，不挪作他用。 */
 enum {
   LAIN_AST_SOURCE = 1,
   LAIN_AST_IN = 2,
@@ -58,7 +58,7 @@ enum { LAIN_AST_TOKEN = 1, LAIN_AST_GROUP = 2 };
 typedef struct {
   uint8_t kind;     /* 1 = Token，2 = Group；其余值非法 */
   uint8_t delimiter;/* Group：0、(、[、{；Token 必须为 0 */
-  uint16_t flags;   /* v1 必须为 0 —— 不是保留位，是「不许有语义」 */
+  uint16_t flags;   /* 必须为 0 —— 不是保留位，是「不许有语义」 */
   uint32_t child_count;
   LainAstRef text;      /* 文本字节所在引用；空文本为 0 */
   uint64_t text_length; /* 不含 NUL */
@@ -105,7 +105,8 @@ _Static_assert(offsetof(LainAstArenaHeader, segment_id) == 8, "segment_id 偏移
 _Static_assert(offsetof(LainAstArenaHeader, flags) == 12, "flags 偏移");
 _Static_assert(offsetof(LainAstArenaHeader, capacity_bytes) == 16,
                "capacity_bytes 偏移");
-_Static_assert(offsetof(LainAstArenaHeader, used_bytes) == 24, "used_bytes 偏移");
+_Static_assert(offsetof(LainAstArenaHeader, used_bytes) == 24,
+               "used_bytes 偏移");
 _Static_assert(offsetof(LainAstArenaHeader, nodes_offset) == 32,
                "nodes_offset 偏移");
 _Static_assert(offsetof(LainAstArenaHeader, node_count) == 40, "node_count 偏移");
@@ -149,4 +150,4 @@ static inline uint64_t lain_ast_node_offset(const LainAstArenaHeader *header,
   return header->nodes_offset + index * (uint64_t)LAIN_AST_NODE_STRIDE;
 }
 
-#endif /* LAINMETA_AST_V1_H */
+#endif /* LAINMETA_AST_H */
