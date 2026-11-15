@@ -33,9 +33,10 @@
 typedef struct {
   bool is_literal;         /* 真：字面量，不进槽，值在 L1Inst.operands 里 */
   bool is_symbol;          /* 真：静态数据块的地址；值是符号装载后的地址 */
+  bool is_proc;            /* 真：子过程入口地址（写出来的 @name） */
   uint32_t frame_distance; /* 0 = 当前帧，1 = 外面一层 */
   uint32_t slot;           /* 相对该帧 slot_base 的下标；字面量时为 0 */
-  uint32_t symbol_index;   /* is_symbol 为真时的数据符号下标 */
+  uint32_t symbol_index;   /* is_symbol 为真时的数据符号下标；is_proc 为真时的子过程下标 */
 } LainVmOperandRef;
 
 typedef struct {
@@ -62,7 +63,7 @@ typedef struct {
   uint32_t case_base; /* 索引到 case_regions[] */
   uint32_t default_region;
   uint32_t symbol_index; /* data_addr 用的符号 */
-  uint32_t sub_index;    /* call 的目标子过程 */
+  uint32_t sub_index;    /* 直接 call 的目标子过程；值形式调用不设，目标来自操作数 */
 } LainVmImageInstMeta;
 
 typedef struct {

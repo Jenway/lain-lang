@@ -83,6 +83,25 @@ const L1Inst *lainir_inst_call_ex(L1Builder *builder, const char *result,
                                   const char *symbol, const L1Operand *operands,
                                   uint32_t operand_count, bool tail);
 
+/* 值目标调用（#call[(ParamTypes) -> RetType](%fn_ptr, ...)）：symbol 留空，
+ * operands[0] 是目标地址。期望签名必须显式给出——没有它，装载期无从判断
+ * 目标地址是不是一个过程，运行期也无从核对签名。 */
+const L1Inst *lainir_inst_call_indirect(L1Builder *builder, const char *result,
+                                        const L1Type *ret_ty,
+                                        const L1Type *const *params,
+                                        uint32_t param_count,
+                                        const L1Operand *operands,
+                                        uint32_t operand_count);
+
+/* 同上，并标记为保证尾调用（#call[tail]）。 */
+const L1Inst *lainir_inst_call_indirect_ex(L1Builder *builder,
+                                           const char *result,
+                                           const L1Type *ret_ty,
+                                           const L1Type *const *params,
+                                           uint32_t param_count,
+                                           const L1Operand *operands,
+                                           uint32_t operand_count, bool tail);
+
 const L1Inst *lainir_inst_mem(L1Builder *builder, L1InstKind kind,
                               const char *result, const L1Type *ty,
                               L1MemOrder order, bool is_volatile,

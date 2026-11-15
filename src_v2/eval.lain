@@ -1,0 +1,71 @@
+// eval.lain —— 顶层分派入口：按头部 SymId 把每条顶层声明分派给 decl 或 core，
+// 逐源降级成一个 LAINIR 模块。Wave 3B 的 struct/enum/import/extern 处理器就挂在
+// top_list 的分派链上（每个新关键字一个 if 分支 + 一个 decl 处理器）。
+let st = import("state");
+let ty = import("types");
+let env = import("env");
+let ir = import("ir");
+let s = import("sym");
+let ax = import("ast");
+let cx = import("ctx");
+let co = import("core");
+let dl = import("decl");
+
+// --- ast 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
+func is_semi(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); }
+func is_group(g: u64, i: u64) -> u64 { return ax.is_group(g, i); }
+func n_sym(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); }
+func n_count(g: u64) -> u64 { return ax.n_count(g); }
+func delim_of(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); }
+func dl_brace() -> u64 { return ax.dl_brace(); }
+func skip_semi(g: u64, j: u64) -> u64 { return ax.skip_semi(g, j); }
+// decl 层转发（顶层声明分派的目标）
+func compile_func(k: addr, g: u64, i: u64) -> u64 { return dl.compile_func(k, g, i); }
+func compile_top_let(k: addr, g: u64, i: u64) -> u64 { return dl.compile_top_let(k, g, i); }
+
+// 源文件两枚原语只有本单元用：一处在 lain_meta_v2_entry 的模块装配里，
+// 因此声明留在这里，不进公共层。
+extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
+extern lain2_source_name(src: u64) -> u64 = lain2_source_name;
+
+// --- 源文件 -----------------------------------------------------------
+func top_list(k: addr, g: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return i; }
+  if st.st_ok(k) != 0 { return i; }
+  if is_semi(g, i) == 1 { return top_list(k, g, i + 1, n); }
+  if is_group(g, i) == 1 { return top_list(k, g, i + 1, n); }
+  let sym: u64 = n_sym(g, i);
+  if sym == s.k_func() {
+    let j: u64 = compile_func(k, g, i);
+    return top_list(k, g, j, n);
+  }
+  if sym == s.k_let() {
+    let j: u64 = compile_top_let(k, g, i);
+    return top_list(k, g, j, n);
+  }
+  // @root 这类标注：跳过 @ 与名字。
+  if sym == s.p_at() { return top_list(k, g, i + 2, n); }
+  // 声明（struct / enum / extern / import）暂时整条跳过。
+  return skip_decl(k, g, i, n);
+}
+
+func skip_decl(k: addr, g: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return i; }
+  if is_semi(g, i) == 1 { return i + 1; }
+  if is_group(g, i) == 1 {
+    if delim_of(g, i) == dl_brace() { return skip_semi(g, i + 1); }
+    return skip_decl(k, g, i + 1, n);
+  }
+  return skip_decl(k, g, i + 1, n);
+}
+
+func compile_source(k: addr, src: u64) -> u64 {
+  let z: u64 = st.st_reset_arena(k);
+  st.st_set_src(k, src);
+  let root: u64 = lain2_source_root(src);
+  st.st_set_root(k, root);
+  env.env_release(k, 0);
+  ir.mod_new(k, lain2_source_name(src));
+  let j: u64 = top_list(k, root, 0, n_count(root));
+  return st.st_ok(k);
+}

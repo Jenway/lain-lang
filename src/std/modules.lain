@@ -577,13 +577,19 @@ func meta_emit_exported(mag: addr, mag_len: u64, b_base: addr, b_lo: u64, b_hi: 
   return 0;
 }
 
-// 发调用方：`#proc <bind>() -> <repr> { #return #call <mangle>__<member>() }`
-func meta_emit_ns_call(b_base: addr, b_lo: u64, b_hi: u64, kind: u64, width: u64, mag: addr, mag_len: u64, m_base: addr, m_lo: u64, m_hi: u64) -> u32 {
+// 发调用方：`#proc <本单元键>__<bind>() -> <repr> { #return #call <mangle>__<member>() }`
+// 调用方这条也是当前单元的顶层绑定，名字同样带前缀；成员名带**被导入模块**的键。
+func meta_emit_ns_call(caller: u64, b_base: addr, b_lo: u64, b_hi: u64, kind: u64, width: u64, mag: addr, mag_len: u64, m_base: addr, m_lo: u64, m_hi: u64) -> u32 {
   let buf: addr = std_lainir.lainir_text_buffer;
   let nbuf: addr = buf + 128;
   let bat: addr = b_base + b_lo;
   let bn: u64 = b_hi - b_lo;
-  let nlen: u64 = std_lainir.lainir_buf_bytes(nbuf, 0, bat, bn);
+  // 这条过程属于**调用方**单元：键要按调用方的源码索引算，不能用当前
+  // 正在按的那个模块（meta_scope_enter 已经把当前源码切成被导入模块）。
+  let ck: u64 = meta_module_key(caller, nbuf);
+  let dsep0: addr = std_emit.meta_dsep;
+  let n1: u64 = std_lainir.lainir_buf_bytes(nbuf, ck, dsep0, 2);
+  let nlen: u64 = std_lainir.lainir_buf_bytes(nbuf, n1, bat, bn);
   let h: u32 = std_lainir.lainir_proc_head_full(nbuf, nlen, nbuf, 0, kind, width);
   let o: u32 = std_lainir.lainir_open_body();
   let dsep: addr = std_emit.meta_dsep;
@@ -838,6 +844,8 @@ func meta_lower_ns_value(base: addr, len: u64, bind_lo: u64, bind_hi: u64, ns_lo
   let mag_len: u64 = meta_module_key(idx, buf);
 
   // 切到模块那一层；**扫一次就留着**（见 meta_scope_has_source 的注释）。
+  // 调用方索引必须在 enter 之前取：enter 之后 +104 指向被导入模块。
+  let caller: u64 = std_scope.meta_scope_current();
   let old_src: u64 = std_scope.meta_scope_enter(idx);
   let already: bool = std_scope.meta_scope_has_source(idx);
   let ready: u32 = loop pick_ready(t: u32 = 0) {
@@ -850,17 +858,25 @@ func meta_lower_ns_value(base: addr, len: u64, bind_lo: u64, bind_hi: u64, ns_lo
     let rest0: u32 = std_scope.meta_scope_set_current(old_src);
     return ready;
   }
-  // 成员名写在**调用方**的源码里，值在模块的源码里
+  // 成员名写在**调用方**的源码里，值在模块的源码里。成员那条过程由**模块自己
+  // 的单元**发出（见 meta_lower_import 的注释）；这里只确认它确实是一条值绑定。
   let m_name: addr = base + m_lo;
   let m_name_len: u64 = m_hi - m_lo;
-  let e1: u32 = meta_emit_module_binding(m_base, m_len, m_name, m_name_len, buf, mag_len);
-  // 调用方那条：`#proc <bind>() -> <repr> { #return #call <mangle>__<member>() }`
-  let e2: u32 = meta_emit_ns_call(base, bind_lo, bind_hi, kind, width, buf, mag_len, base, m_lo, m_hi);
-  let rest: u32 = std_scope.meta_scope_set_current(old_src);
-  let bad: bool = e1 != 0;
-  if bad {
-    return e1;
+  let mi: u64 = std_scope.meta_scope_find(m_name, m_name_len);
+  let gone: bool = mi == 0xFFFFFFFFFFFFFFFF;
+  if gone {
+    let f2: u32 = lain_meta_fail(13);
+    return 13;
   }
+  let mkind: u64 = std_scope.meta_scope_kind(mi);
+  let mval: bool = mkind == 3;
+  if mval == 0 {
+    let f3: u32 = lain_meta_fail(4);
+    return 4;
+  }
+  // 调用方那条：`#proc <本单元键>__<bind>() -> <repr> { #return #call <mangle>__<member>() }`
+  let e2: u32 = meta_emit_ns_call(caller, base, bind_lo, bind_hi, kind, width, buf, mag_len, base, m_lo, m_hi);
+  let rest: u32 = std_scope.meta_scope_set_current(old_src);
   return e2;
 }
 

@@ -1,0 +1,27 @@
+// entry.lain —— v2 编译器入口。宿主登记的每份源码编成一个 LAINIR 模块。
+let st = import("state");
+let ev = import("eval");
+let ir = import("ir");
+
+// 逐源编译：降级当前源，再自己校验并输出文本。
+func build(k: addr, i: u64, count: u64) -> u64 {
+  if i >= count { return st.st_ok(k); }
+  let e: u64 = ev.compile_source(k, i);
+  if e != 0 { st.st_fail(k, e); return e; }
+  let v: u64 = ir.verify(k);
+  if v != 0 { st.st_fail(k, v); return v; }
+  // emit_output 返回的是写出的字节数，不是错误码。
+  ir.emit_output(k);
+  return build(k, i + 1, count);
+}
+
+@root
+func lain_meta_v2_entry(count: u64) -> u64 {
+  let k: addr = st.st_new(65536);
+  let code: u64 = build(k, 0, count);
+  if code != 0 {
+    let msg: addr = "compile failed";
+    ir.diag(k, code, 1, msg, 14);
+  }
+  return st.st_ok(k);
+}

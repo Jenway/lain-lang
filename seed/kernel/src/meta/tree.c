@@ -27,6 +27,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "lain/meta/sym.h"
+
 /* 根的槽位恒为 0。 */
 #define LAIN_TREE_ROOT_SLOT 0u
 
@@ -40,6 +42,10 @@ struct LainMetaTree {
   uint16_t text_segment; /* 令牌文本所在的段（Source），与本 Arena 的段号不同 */
   LainAstRef root;
   LainVmQuota *quota;
+  /* 与节点下标平行的符号表：组恒为 0，词是驻留后的 SymId。只有经由
+   * lainmeta_tree_parse_symbols 解析的树才有这一份。 */
+  uint32_t *sym_ids;
+  uint64_t sym_charged;
 };
 
 /* 第一遍的产物。第二遍按同样顺序填，两遍的编号必须一样。 */
@@ -558,6 +564,60 @@ internal:
   return LAINMETA_TREE_ERR_INTERNAL;
 }
 
+/* 给已建好的 Arena 补一份平行符号表。每个词按它在源码里的字节区间驻留，
+ * 组一律为 0。驻留失败（符号表或字节池满）当作配额失败报出去。 */
+static bool intern_symbols(LainMetaTree *tree, LainMetaSymTab *syms,
+                           LainVmQuota *quota) {
+  LainAstArenaHeader header;
+  uint32_t *ids;
+  uint64_t charged;
+  uint64_t i;
+  if (!tree->arena || tree->arena_bytes < LAIN_AST_HEADER_SIZE) return false;
+  memcpy(&header, tree->arena, sizeof(header));
+  charged = header.node_count * 4u;
+  if (lainvm_quota_charge(quota, charged) != 0) return false;
+  ids = (uint32_t *)calloc((size_t)header.node_count, sizeof(uint32_t));
+  if (!ids) {
+    (void)lainvm_quota_release(quota, charged);
+    return false;
+  }
+  for (i = 0; i < header.node_count; i++) {
+    LainAstNode node;
+    uint64_t at = LAIN_AST_HEADER_SIZE + i * (uint64_t)LAIN_AST_NODE_STRIDE;
+    memcpy(&node, tree->arena + at, sizeof(node));
+    if (node.kind != LAIN_AST_TOKEN || node.text_length == 0) continue;
+    if (lain_ast_offset(node.text) + node.text_length > tree->source_length)
+      goto fail;
+    ids[i] = lainmeta_sym_intern(syms, tree->source + lain_ast_offset(node.text),
+                                 (uint32_t)node.text_length);
+    if (!ids[i]) goto fail;
+  }
+  tree->sym_ids = ids;
+  tree->sym_charged = charged;
+  return true;
+fail:
+  free(ids);
+  (void)lainvm_quota_release(quota, charged);
+  return false;
+}
+
+LainMetaTree *lainmeta_tree_parse_symbols(uint32_t source_index,
+                                          const char *text, uint32_t length,
+                                          LainMetaSymTab *syms,
+                                          uint32_t *error_offset,
+                                          LainVmQuota *quota,
+                                          LainMetaTreeStatus *status_out) {
+  LainMetaTree *tree = lainmeta_tree_parse_classified(
+      source_index, text, length, error_offset, quota, status_out);
+  if (!tree) return NULL;
+  if (!intern_symbols(tree, syms, quota)) {
+    lainmeta_tree_free(tree);
+    if (status_out) *status_out = LAINMETA_TREE_ERR_QUOTA;
+    return NULL;
+  }
+  return tree;
+}
+
 LainMetaTree *lainmeta_tree_parse_classified(uint32_t source_index,
                                              const char *text, uint32_t length,
                                              uint32_t *error_offset,
@@ -608,8 +668,35 @@ LainMetaTree *lainmeta_tree_parse(uint32_t source_index, const char *text,
 
 void lainmeta_tree_free(LainMetaTree *tree) {
   if (!tree) return;
+  if (tree->sym_ids) {
+    free(tree->sym_ids);
+    (void)lainvm_quota_release(tree->quota, tree->sym_charged);
+  }
   tree_release(tree->quota, tree->arena, tree->arena_bytes);
   free(tree);
+}
+
+bool lainmeta_tree_node(const LainMetaTree *tree, uint32_t slot,
+                        LainAstNode *out) {
+  LainAstArenaHeader header;
+  uint64_t at;
+  if (!tree || !out || !tree->arena) return false;
+  memcpy(&header, tree->arena, sizeof(header));
+  if (slot >= header.node_count) return false;
+  at = header.nodes_offset + (uint64_t)slot * LAIN_AST_NODE_STRIDE;
+  if (at + LAIN_AST_NODE_STRIDE > tree->arena_bytes) return false;
+  memcpy(out, tree->arena + at, sizeof(*out));
+  return true;
+}
+
+bool lainmeta_tree_symbols(const LainMetaTree *tree, const uint32_t **ids,
+                           uint32_t *count) {
+  LainAstArenaHeader header;
+  if (!tree || !ids || !count || !tree->sym_ids) return false;
+  memcpy(&header, tree->arena, sizeof(header));
+  *ids = tree->sym_ids;
+  *count = (uint32_t)header.node_count;
+  return true;
 }
 
 bool lainmeta_tree_set_segment(LainMetaTree *tree, uint16_t segment_id,
@@ -656,6 +743,12 @@ bool lainmeta_tree_set_segment(LainMetaTree *tree, uint16_t segment_id,
     }
   }
   return true;
+}
+
+const char *lainmeta_tree_text(const LainMetaTree *tree, uint32_t *length) {
+  if (!tree) return NULL;
+  if (length) *length = tree->source_length;
+  return tree->source;
 }
 
 bool lainmeta_tree_arena(const LainMetaTree *tree, LainAstArenaView *out) {

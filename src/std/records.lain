@@ -796,8 +796,17 @@ func meta_lower_field_get(base: addr, len: u64, v_lo: u64, v_hi: u64, src: addr,
   let buf: addr = std_lainir.lainir_text_buffer;
   let v_at: addr = base + v_lo;
   let v_n: u64 = v_hi - v_lo;
-  let pfx: u64 = std_lainir.lainir_buf_byte(buf, 32, 37);
-  let v_end: u64 = std_lainir.lainir_buf_bytes(buf, pfx, v_at, v_n);
+  // 值名先查局部值表：局部构造出来的聚合（`let p: Point = Point { … }`），名字
+  // 指向那条 `#alloca` 的临时量。不查就会回落到源码窗口渲染成 `%p` —— 那是
+  // 同名形参的寄存器，或者根本不存在（验证器报 2002）。
+  let slot: u64 = std_funcs.meta_local_value_name(base, v_lo, v_hi);
+  let bound: bool = slot != 0xFFFFFFFFFFFFFFFF;
+  let v_end: u64 = if bound {
+    std_lainir.lainir_buf_temp(buf, 32, slot)
+  } else {
+    let pfx: u64 = std_lainir.lainir_buf_byte(buf, 32, 37);
+    std_lainir.lainir_buf_bytes(buf, pfx, v_at, v_n)
+  };
   let v_len: u64 = v_end - 32;
   let v_txt: addr = buf + 32;
   let zbuf: addr = buf + 180;

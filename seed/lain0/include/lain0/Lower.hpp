@@ -118,6 +118,11 @@ public:
                        std::vector<const L1Inst *> &out, L1Operand &value);
   bool lowerAddressArithmetic(const ast::BinaryExpr *e, TypeId expectedTy,
                               std::vector<const L1Inst *> &out, L1Operand &value);
+  // 把已经降级好的值从 from 统一到 to：等宽补一条加零复制，变宽按 from 的
+  // 有符号性发 #sext / #zext，变窄发 #trunc，addr ↔ 整数发 #bitcast。
+  // 聚合（struct/enum）在 IR 里就是 #addr，from/to 一致时直接放过。
+  bool coerceValue(L1Operand &op, TypeId from, TypeId to,
+                   std::vector<const L1Inst *> &out);
 
 private:
   // 把一个模块的顶层声明降级进当前 builder（run 与 runModule 共用）。

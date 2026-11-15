@@ -90,6 +90,7 @@ static bool resolve_name(const Loader *L, uint32_t region_id, const char *name,
 /* --- 区域树 ---------------------------------------------------------------- */
 
 static uint32_t find_symbol(const LainVmImage *image, const char *symbol);
+static uint32_t find_sub(const LainVmImage *image, const char *name);
 
 /* 下面几个 push 的容量检查是**防御性的**：容量由 count_region() 预先数出来，
  * 超了说明计数器和装载器对不上——那是装载器的 bug，不是模块被拒。
@@ -160,6 +161,7 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
       uint32_t pushed = 0;
       ref.is_literal = init->kind != OPERAND_VALUE;
       ref.is_symbol = false;
+      ref.is_proc = false;
       ref.symbol_index = LAINVM_IMAGE_NO_INDEX;
       ref.frame_distance = 0;
       ref.slot = 0;
@@ -239,6 +241,7 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
           bool resolved;
           ref.is_literal = false;
           ref.is_symbol = false;
+          ref.is_proc = false;
           ref.symbol_index = LAINVM_IMAGE_NO_INDEX;
           ref.slot = 0;
           ref.frame_distance = 0;
@@ -252,6 +255,16 @@ static uint32_t add_region(Loader *L, const L1Region *region, uint32_t parent,
             if (sym != LAINVM_IMAGE_NO_INDEX) {
               ref.is_symbol = true;
               ref.symbol_index = sym;
+              resolved = true;
+            }
+          }
+          /* 写出来的 @name 也可能是子过程名：它就是过程入口地址。
+             值形式调用取目标走这条路。 */
+          if (!resolved && op->name) {
+            uint32_t sub = find_sub(L->image, op->name);
+            if (sub != LAINVM_IMAGE_NO_INDEX) {
+              ref.is_proc = true;
+              ref.symbol_index = sub;
               resolved = true;
             }
           }
@@ -406,7 +419,8 @@ static void resolve_symbols(LainVmImage *image) {
     for (pos = 0; pos < rec->inst_count; pos++) {
       const L1Inst *inst = &rec->region->insts[pos];
       LainVmImageInstMeta *meta = &image->insts[rec->meta_base + pos];
-      if (inst->kind == INST_CALL)
+      /* 值形式调用的目标来自操作数，装载时不查表。 */
+      if (inst->kind == INST_CALL && inst->symbol)
         meta->sub_index = find_sub(image, inst->symbol);
     }
   }
@@ -662,14 +676,16 @@ int lainvm_image_admit(const L1Module *module, LainVmSpace *space,
     uint32_t body = LAINVM_IMAGE_NO_REGION;
     uint32_t first = image->region_count;
     uint32_t r;
+    /* 先登记这条子过程：add_region 解析操作数时要用 find_sub 认过程名，
+       而 find_sub 看的是 subs[].sub。 */
+    image->subs[i].sub = sub;
+    image->sub_count = i + 1;
     if (!(sub->flags & SUBROUTINE_EXTERN) && sub->body)
       body = add_region(&loader, sub->body, LAINVM_IMAGE_NO_REGION, 1,
                         sub->params, sub->param_count);
     if (loader.failed) return admit_fail(&loader, image, out);
     for (r = first; r < image->region_count; r++) image->regions[r].sub_index = i;
-    image->subs[i].sub = sub;
     image->subs[i].body_region = body;
-    image->sub_count = i + 1;
   }
 
   resolve_symbols(image);

@@ -1,0 +1,130 @@
+// decl.lain —— 过程与顶层 let 的编译：签名解析、栈槽铺底、过程体交给 core。
+let st = import("state");
+let ty = import("types");
+let env = import("env");
+let ir = import("ir");
+let codes = import("ir_codes");
+let s = import("sym");
+let ax = import("ast");
+let cx = import("ctx");
+let co = import("core");
+
+// --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
+func new_ty(k: addr) -> addr { return ax.new_ty(k); }
+func new_val(k: addr) -> addr { return ax.new_val(k); }
+func box(k: addr) -> addr { return ax.box(k); }
+func box_get(p: addr) -> u64 { return ax.box_get(p); }
+func n_count(g: u64) -> u64 { return ax.n_count(g); }
+func n_sym(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); }
+func n_at(g: u64, i: u64) -> u64 { return ax.n_at(g, i); }
+func no_slot() -> u64 { return ax.no_slot(); }
+func skip_semi(g: u64, j: u64) -> u64 { return ax.skip_semi(g, j); }
+func e_type() -> u64 { return ax.e_type(); }
+func tnone(k: addr) -> addr { return cx.tnone(k); }
+func expect_sym(k: addr, g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); }
+func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 { return cx.parse_type(k, g, i, out); }
+func parse_params(k: addr, pg: u64, i: u64, idx: u64, tintbl: addr, symtbl: addr) -> u64 { return cx.parse_params(k, pg, i, idx, tintbl, symtbl); }
+func count_tree(h: u64, acc: u64) -> u64 { return cx.count_tree(h, acc); }
+func emit_slots(k: addr, j: u64, n: u64) -> u64 { return cx.emit_slots(k, j, n); }
+func slot_put(k: addr, j: u64, v: addr, tp: addr) -> u64 { return cx.slot_put(k, j, v, tp); }
+func slot_get(k: addr, j: u64, tp: addr, out: addr) -> u64 { return cx.slot_get(k, j, tp, out); }
+func push_val(k: addr, v: addr) -> u64 { return cx.push_val(k, v); }
+func block_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 { return co.block_mode(k, g, i, term, slot, tp); }
+func expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 { return co.expr(k, g, i, minp, want, out); }
+
+// --- 过程 ---------------------------------------------------------------
+func emit_ret_guard(k: addr, rt: addr, term: addr) -> u64 {
+  if box_get(term) == 1 { return 0; }
+  if ty.ty_known(rt) == 0 {
+    ir.args_reset(k);
+    return ir.emit_jump(k, codes.INST_RETURN(), 0);
+  }
+  ir.args_reset(k);
+  return ir.emit_jump(k, codes.INST_UNREACHABLE(), 0);
+}
+
+func compile_func(k: addr, g: u64, i: u64) -> u64 {
+  let n: u64 = n_count(g);
+  let name: u64 = n_sym(g, i + 1);
+  let pg: u64 = n_at(g, i + 2);
+  let paramp: addr = st.st_alloc(k, 384);
+  let syms: addr = st.st_alloc(k, 128);
+  let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
+  let rt: addr = new_ty(k);
+  ty.ty_none(rt);
+  let a0: u64 = i + 3;
+  let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
+  let bodyg: u64 = n_at(g, a);
+  st.st_set_retk(k, ty.tk(rt));
+  st.st_set_retw(k, ty.tw(rt));
+  st.st_set_retsg(k, ty.tsg(rt));
+  env.env_release(k, 0);
+  st.st_set_slotj(k, 0);
+  st.st_set_loopdepth(k, 0);
+  st.st_set_loopdepth(k, 0);
+  ir.proc_begin(k, name);
+  let pnames: addr = st.st_alloc(k, 128);
+  let dummy: u64 = loop w(idx: u64 = 0) while idx < np {
+    let vn: u64 = ir.fresh_t(k);
+    store(pnames + idx * 8, vn);
+    ir.proc_param(k, vn, paramp + idx * 24);
+    idx = idx + 1;
+  };
+  if ty.ty_known(rt) == 1 { ir.proc_result(k, rt); }
+  ir.region_begin(k);
+  let nslots: u64 = 16 + 32 + count_tree(bodyg, 0);
+  let sd: u64 = emit_slots(k, 0, nslots);
+  let bnd: u64 = loop w(idx: u64 = 0) while idx < np {
+    let sl: u64 = st.st_next_slot(k);
+    let vt: addr = new_ty(k);
+    ty.ty_at(vt, paramp + idx * 24);
+    let pn: u64 = load(pnames + idx * 8);
+    let ps: u64 = load(syms + idx * 8);
+    let pv: addr = new_val(k);
+    ty.val_ref(pv, pn, vt);
+    slot_put(k, sl, pv, vt);
+    env.env_push(k, ps, sl, vt);
+    idx = idx + 1;
+  };
+  let term: addr = box(k);
+  let after: u64 = block_mode(k, bodyg, 0, term, no_slot(), rt);
+  let guard: u64 = emit_ret_guard(k, rt, term);
+  ir.region_end(k);
+  ir.proc_end(k);
+  return a + 1;
+}
+
+func compile_top_let(k: addr, g: u64, i: u64) -> u64 {
+  let name: u64 = n_sym(g, i + 1);
+  let j0: u64 = i + 2;
+  let t: addr = tnone(k);
+  let j: u64 = if j0 < n_count(g) and n_sym(g, j0) == s.p_colon() { parse_type(k, g, j0 + 1, t) } else { j0 };
+  let e: u64 = expect_sym(k, g, j, s.p_eq());
+  st.st_set_slotj(k, 0);
+  st.st_set_loopdepth(k, 0);
+  env.env_release(k, 0);
+  st.st_set_retk(k, 9);
+  ir.proc_begin(k, name);
+  ir.region_begin(k);
+  let nslots: u64 = 16 + 32 + count_tree(g, 0);
+  let sd: u64 = emit_slots(k, 0, nslots);
+  let v: addr = new_val(k);
+  let nj: u64 = expr(k, g, e, 0, t, v);
+  if st.st_ok(k) != 0 { return nj; }
+  let vt: addr = new_ty(k);
+  if ty.ty_known(t) == 1 { ty.ty_at(vt, t); } else { ty.ty_at(vt, ty.vty(v)); }
+  if ty.ty_known(vt) == 0 { st.st_fail(k, e_type()); return nj; }
+  ir.proc_result(k, vt);
+  let sl: u64 = st.st_next_slot(k);
+  slot_put(k, sl, v, ty.vty(v));
+  env.env_push(k, name, sl, vt);
+  let lv: addr = new_val(k);
+  slot_get(k, sl, vt, lv);
+  ir.args_reset(k);
+  push_val(k, lv);
+  ir.emit_jump(k, codes.INST_RETURN(), 0);
+  ir.region_end(k);
+  ir.proc_end(k);
+  return skip_semi(g, nj);
+}
+

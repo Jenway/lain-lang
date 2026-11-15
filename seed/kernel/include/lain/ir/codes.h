@@ -5,16 +5,15 @@
  *   - 拒绝码：函数返回 L1Diagnostic，失败时把码写进 diag。
  * 号码只属于一个模块：新码落在自己的段里，退休的号码不复用。段内边界由各模块
  * 自己的头文件断言（见 lain/vm/trap.h、lain/vm/engine.h、lain/vm/tcb.h、
- * lain/text/parse.h、lain/backend/emit.h、lain/meta/apply.h）。
+ * lain/text/parse.h、lain/meta/apply.h）。
  *
  *   1xxx  Trap（vm/engine 发，vm/quota 借 1044）      lain/vm/trap.h
  *   2xxx  验证码（ir/verify）                        lain/ir/verify.h
  *   3xxx  文本解析拒绝码（text/parse）                lain/text/parse.h
  *   90xx  映像装载拒绝码（vm/image）                  lain/vm/engine.h
  *   91xx  TCB 拒绝码（vm/tcb）                       lain/vm/tcb.h
- *   92xx  后端拒绝码（backend/cbackend）             lain/backend/emit.h
  *   93xx  apply 拒绝码（meta/apply 与其宿主）         lain/meta/apply.h
- *   94xx  AstOut 与 Meta 库共享码                    lain/meta/ast_v1.h、bootstrap/std 下的 .lain
+ *   94xx  AstOut 与 Meta 库共享码                    lain/meta/ast_v1.h、src/std 下的 .lain
  *
  * 93xx 与 94xx 同时被 C 侧和 Meta 侧（bootstrap/std 的 .lain）读取，是跨语言契约：
  * 只能新增，不能改义，也不能挪号。
@@ -33,14 +32,10 @@ enum {
   LAINIR_CODES_IMAGE_LIMIT = 9099,
   LAINIR_CODES_TCB_BASE = 9100,
   LAINIR_CODES_TCB_LIMIT = 9199,
-  LAINIR_CODES_BACKEND_BASE = 9200,
-  LAINIR_CODES_BACKEND_LIMIT = 9299,
   LAINIR_CODES_APPLY_BASE = 9300,
   LAINIR_CODES_APPLY_LIMIT = 9399,
   LAINIR_CODES_META_BASE = 9400,
   LAINIR_CODES_META_LIMIT = 9499,
-  LAINIR_CODES_SCHED_BASE = 9500,
-  LAINIR_CODES_SCHED_LIMIT = 9599,
 };
 
 #endif /* LAINIR_CODES_H */

@@ -1,7 +1,7 @@
 /* AstOut 的可信存储实现接口，仅由宿主使用。 */
 #ifndef LAINMETA_AST_OUT_INTERNAL_H
 #define LAINMETA_AST_OUT_INTERNAL_H
-#include "lain/meta/expand.h"
+#include "lain/meta/host.h"
 #include "lain/vm/quota.h"
 #include <stdbool.h>
 typedef struct LainAstOutput LainAstOutput;
@@ -34,4 +34,7 @@ uint32_t lain_ast_output_expansion(LainAstOutput *, LainAstRef, uint64_t *);
 uint32_t lain_ast_output_node(const LainAstOutput *, LainAstRef, LainAstNode *);
 uint32_t lain_ast_output_child(const LainAstOutput *, LainAstRef, uint64_t,
                                LainAstRef *);
+/* 当前已发布的节点数（只读）。事务回滚后随之减少，宿主据此截断为节点下标
+ * 平行的索引。 */
+uint64_t lain_ast_output_node_count(const LainAstOutput *);
 #endif

@@ -254,6 +254,11 @@ public:
   // `<键>__<名字>` 之间，都不许重名。编译期发现，不留给运行的 start FAILED 9102。
   bool checkRootExports(DiagSink &diags) const;
 
+  // 宿主 extern 的返回类型，键是源码里的裸名（extern 的名字是平坦的，
+  // 不带模块前缀）。裸名调用出现在任何单元的正文里都要能查到；查不到返回
+  // kInvalidType（无返回标注或没有这个 extern）。
+  TypeId externReturn(std::string_view srcName) const;
+
   const ModuleUnit *root() const { return root_; }
   const ModuleUnit *find(const std::string &key) const;
   const std::deque<ModuleUnit> &units() const { return units_; }
@@ -272,12 +277,16 @@ private:
              DiagSink &diags) const;
   // 已加载的模块之后，把 import 依赖图按宽度优先补完。
   bool loadImports(SourceMgr &src, DiagSink &diags);
+  // 全部模块的宿主 extern 收进一张全局表（analyze 的 registerTopLevel 之后跑）。
+  void collectExterns(TypeStore &ts, DiagSink &diags);
 
   std::deque<ModuleUnit> units_{};
   std::unordered_map<std::string, size_t> index_{}; // 模块键 -> units_ 下标
   std::vector<std::string> manifestOrder_{};        // 清单给出的模块键顺序
   ModuleUnit *root_ = nullptr;
   std::string sourceRoot_{};
+  // 裸 extern 名 -> 返回类型。跨模块同名 extern 共享这一条结论。
+  std::unordered_map<std::string, TypeId> externReturns_{};
 };
 
 } // namespace ln

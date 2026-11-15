@@ -297,6 +297,17 @@ static bool parse_operand(Parser *p, L1Operand *out, InstList *into,
     out->name = lainir_builder_string(p->builder, name);
     return true;
   }
+  if (cur(p) == '@') {
+    /* 全局名字：静态数据块的地址，或子过程的入口（#proc_addr 的结果）。
+     * 和数据符号一样是模块级 #addr 绑定，装载期按名字解析。 */
+    char name[128];
+    advance(p);
+    if (!ident(p, name, sizeof(name))) return false;
+    out->kind = OPERAND_VALUE;
+    out->name = lainir_builder_string(p->builder, name);
+    out->is_global = true;
+    return true;
+  }
   if (cur(p) == '#') {
     /* 糖：把这条指令先放出去，操作数变成它的结果。 */
     uint32_t before;
@@ -544,6 +555,59 @@ static void set_results(const L1Inst *built, const char **names, uint32_t count)
   for (i = 0; i < inst->result_count; i++) inst->results[i] = names[i];
 }
 
+/* `->` 分隔返回类型。skip 过空白与注释后再看。 */
+static bool match_arrow(Parser *p) {
+  if (cur(p) != '-' || at(p, 1) != '>') return false;
+  p->pos += 2;
+  p->column += 2;
+  return true;
+}
+
+/* 值形式调用的签名：[(T1, T2) -> R]，返回类型可省（= 无返回值）。
+ * params 是调用方提供的数组，解析完由构造器拷进 arena。 */
+static bool parse_call_signature(Parser *p, const L1Type **params,
+                                 uint32_t *count_out, const L1Type **ret_out,
+                                 bool *has_sig) {
+  uint32_t count = 0;
+  const L1Type *ret = NULL;
+  *has_sig = true;
+  *count_out = 0;
+  *ret_out = NULL;
+  if (!expect(p, '(', "to start the call signature")) return false;
+  skip(p);
+  if (match(p, ')')) {
+    skip(p);
+    if (match_arrow(p)) {
+      skip(p);
+      if (!parse_type(p, &ret)) return false;
+    }
+    *ret_out = ret;
+    return true;
+  }
+  for (;;) {
+    const L1Type *ty = NULL;
+    if (count >= L1_MAX_OPERANDS)
+      return fail(p, LAINPARSE_ERR_SYNTAX, "too many call parameters");
+    if (!parse_type(p, &ty)) return false;
+    params[count++] = ty;
+    skip(p);
+    if (match(p, ',')) {
+      skip(p);
+      continue;
+    }
+    break;
+  }
+  if (!expect(p, ')', "to end the call parameters")) return false;
+  skip(p);
+  if (match_arrow(p)) {
+    skip(p);
+    if (!parse_type(p, &ret)) return false;
+  }
+  *count_out = count;
+  *ret_out = ret;
+  return true;
+}
+
 static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind,
                                       const char **names, uint32_t name_count) {
   L1Operand ops[L1P_MAX_PARAMS];
@@ -553,34 +617,48 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
   bool is_volatile = false;
   bool is_tail = false;
   const char *symbol = NULL;
+  const L1Type *call_params[L1_MAX_OPERANDS];
+  uint32_t call_param_count = 0;
+  const L1Type *call_ret = NULL;
+  bool call_has_sig = false;
   uint32_t align = 0; /* 值级对齐：只有 #load / #store 接受 */
   L1Inst *inst;
 
   skip(p);
   if (kind == INST_CALL) {
-    /* #call 的方括号里可能是 [tail]，也可能是值形式调用的签名 [(sig)]。 */
-    if (cur(p) == '[') {
-      p->pos++;
-      p->column++;
+    /* #call 的属性：先是可省的 [tail]，再是可省的值形式调用签名 [(sig)]。
+       两者各自一个方括号，顺序固定。 */
+    if (match(p, '[')) {
       skip(p);
       if (at_word(p, "tail")) {
         p->pos += 4;
         p->column += 4;
         is_tail = true;
         skip(p);
-      }
-      while (cur(p) && cur(p) != ']') {
-        p->pos++;
-        p->column++;
+      } else {
+        if (!parse_call_signature(p, call_params, &call_param_count,
+                                  &call_ret, &call_has_sig))
+          return false;
       }
       if (!expect(p, ']', "to end the call attribute")) return false;
       skip(p);
     }
-    char callee[128];
-    /* 注意：skip() 只吃空白/注释，不能用它来吃掉 '@' —— 必须用 advance()。 */
-    if (cur(p) == '@') advance(p);
-    if (!ident(p, callee, sizeof(callee))) return false;
-    symbol = lainir_builder_string(p->builder, callee);
+    if (match(p, '[')) {
+      skip(p);
+      if (!parse_call_signature(p, call_params, &call_param_count,
+                                &call_ret, &call_has_sig))
+        return false;
+      if (!expect(p, ']', "to end the call signature")) return false;
+      skip(p);
+    }
+    /* 符号调用才有被调名；值形式调用的目标是 operands[0]，名字从缺。 */
+    if (!call_has_sig) {
+      char callee[128];
+      /* 注意：skip() 只吃空白/注释，不能用它来吃掉 '@' —— 必须用 advance()。 */
+      if (cur(p) == '@') advance(p);
+      if (!ident(p, callee, sizeof(callee))) return false;
+      symbol = lainir_builder_string(p->builder, callee);
+    }
   }
 
   /* 其他算子：可选 [TYPE, attrs] 然后 (operands) */
@@ -645,9 +723,15 @@ static bool parse_operands_and_finish(Parser *p, InstList *into, L1InstKind kind
         align, ops, count);
     break;
   case INST_CALL:
-    inst = (L1Inst *)lainir_inst_call(p->builder,
-                                      name_count ? names[0] : NULL, symbol, ops,
-                                      count);
+    if (call_has_sig) {
+      inst = (L1Inst *)lainir_inst_call_indirect_ex(
+          p->builder, name_count ? names[0] : NULL, call_ret, call_params,
+          call_param_count, ops, count, is_tail);
+    } else {
+      inst = (L1Inst *)lainir_inst_call_ex(p->builder,
+                                           name_count ? names[0] : NULL, symbol,
+                                           ops, count, is_tail);
+    }
     break;
   default:
     inst = (L1Inst *)lainir_inst(p->builder, kind,

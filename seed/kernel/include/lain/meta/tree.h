@@ -16,6 +16,7 @@
 #include <stdint.h>
 
 #include "lain/meta/ast_v1.h"
+#include "lain/meta/sym.h"
 #include "lain/vm/quota.h"
 
 typedef struct LainMetaTree LainMetaTree;
@@ -60,13 +61,32 @@ LainMetaTree *lainmeta_tree_parse_classified(uint32_t source_index,
                                              uint32_t *error_offset,
                                              LainVmQuota *quota,
                                              LainMetaTreeStatus *status_out);
+/* 同上，并在解析成功后为每个词驻留一个 SymId，得到与节点下标平行的符号表。
+ * 驻留失败（符号表或字节池满）按配额失败报出，不返回半成品。 */
+LainMetaTree *lainmeta_tree_parse_symbols(uint32_t source_index,
+                                          const char *text, uint32_t length,
+                                          LainMetaSymTab *syms,
+                                          uint32_t *error_offset,
+                                          LainVmQuota *quota,
+                                          LainMetaTreeStatus *status_out);
 void lainmeta_tree_free(LainMetaTree *tree);
+
+/* 按槽位读一个节点。槽位越界或树为空返回 false。 */
+bool lainmeta_tree_node(const LainMetaTree *tree, uint32_t slot,
+                        LainAstNode *out);
+/* 平行符号表的只读视图：ids[i] 是槽位 i 的 SymId（组为 0），count 是节点总数。
+ * 未经 lainmeta_tree_parse_symbols 解析的树返回 false。 */
+bool lainmeta_tree_symbols(const LainMetaTree *tree, const uint32_t **ids,
+                           uint32_t *count);
 
 /* 已建好的平铺 Arena 视图：data/capacity/used 是真实分配，root 是源文件根引用
  *（delimiter=0 的组，覆盖全文）。驱动按 `[data, used)` 只读映射；映射不拥有存储、
  * 不重复扣账，映射期间禁止 free/realloc。
  * 失败返回 false（未建树或参数为空）。 */
 bool lainmeta_tree_arena(const LainMetaTree *tree, LainAstArenaView *out);
+/* 这份 Arena 绑定的源码文本（借用，不复制）。令牌与来源位置都是这段文本里的
+ * 偏移，宿主据此把字面量地址交给 guest。 */
+const char *lainmeta_tree_text(const LainMetaTree *tree, uint32_t *length);
 
 /* 登记这份 Arena 的绑定段号（驱动在映射前调用），并同时记下**文本所在段的段号**。
  *

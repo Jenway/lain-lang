@@ -121,6 +121,15 @@ static L1Value read_ref(const LainVmTcb *tcb, LainVmOperandRef ref,
                     width_mask(width);
     return value;
   }
+  if (ref.is_proc) {
+    /* 子过程的入口地址。与静态数据块同形：普通 #addr，不是另立的值种类。 */
+    uint32_t width = type_width(ty);
+    value.kind = L1_VALUE_BITS;
+    value.bit_width = width;
+    value.as.bits = (uint64_t)lainvm_image_sub_addr(tcb->image, ref.symbol_index) &
+                    width_mask(width);
+    return value;
+  }
   {
     const LainVmFrame *src =
         &tcb->frames[tcb->frame_count - 1 - ref.frame_distance];
@@ -550,7 +559,7 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
    * 元素占多少字节。这里直接读操作数里那个常量，**不走** `lainvm_operand_read`——
    * 那条路按指令的类型实参（也就是元素类型）宽度读字面量，会把
    * `#alloca[#bits<8>](256)` 的 256 截成 0（实测曾静默只分配 1 字节）。
-   * C 后端布局一直就是这么算的（`cbackend.c` 里 `#alloca` 的槽大小），两边现在一致。
+   * 槽大小就是元素宽度乘元素个数，与映像里给这块区域算出的尺寸一致。
    * 0 由验证器拒（码 **2024**）；引擎不再把 0 夹成 1 —— 那是静默错值的来源，
    * 而 `element × 0 == 0` 本身就是正确答案。 */
   uint64_t count = inst->operands[0].bits;
@@ -602,7 +611,8 @@ static LainVmSliceResult invoke_host(LainVmTcb *tcb, const L1Inst *inst,
                                      const L1Subroutine *sub,
                                      const L1Value *args, uint32_t arg_count,
                                      L1Value *result_out) {
-  uint64_t raw[LAINVM_MAX_OPERANDS];
+  /* 先清零：宿主回调只该读前 arg_count 项，清零让越界读也有确定值。 */
+  uint64_t raw[LAINVM_MAX_OPERANDS] = {0};
   uint64_t result = 0;
   uint32_t status;
   uint32_t i;
@@ -732,14 +742,47 @@ static LainVmSliceResult op_call(LainVmTcb *tcb, const L1Inst *inst) {
   const LainVmFrame *frame = ctop(tcb);
   LainVmImageInstMeta meta =
       lainvm_image_inst_meta(tcb->image, frame->region, frame->position);
+  /* 间接调用：操作数 0 是目标地址，其余是实参。
+   * 地址没有类型——能不能调用由它所在区段的 CALL 权限说话（相当于执行位）。
+   * 目标签名要与指令里写下的期望签名一致，否则拒绝；运行期不猜。 */
+  if (!inst->symbol) {
+    const L1Type addr_ty = {TY_ADDR, 64};
+    const LainVmImageSub *callee;
+    uintptr_t addr;
+    uint32_t sub_index;
+    uint32_t i;
+    if (!inst->operands || inst->operand_count == 0)
+      return trap_now(tcb, LAINVM_TRAP_EXECUTION,
+                      LAINVM_TRAP_INDIRECT_NO_TARGET, inst);
+    addr = as_addr(read_typed(tcb, inst, 0, &addr_ty));
+    if (!lainvm_space_check(tcb->vspace, addr, sizeof(LainVmCodeEntry),
+                            LAINVM_MEM_CALL))
+      return trap_now(tcb, LAINVM_TRAP_EXECUTION,
+                      LAINVM_TRAP_INDIRECT_NO_CALL, inst);
+    sub_index = lainvm_image_sub_at(tcb->image, addr);
+    if (sub_index == LAINVM_IMAGE_NO_INDEX)
+      return trap_now(tcb, LAINVM_TRAP_EXECUTION,
+                      LAINVM_TRAP_INDIRECT_NO_SUB, inst);
+    callee = &tcb->image->subs[sub_index];
+    if (!callee->sub || callee->sub->param_count != inst->call_param_count ||
+        inst->operand_count != inst->call_param_count + 1)
+      return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_CALL_ARITY,
+                      inst);
+    for (i = 0; i < inst->call_param_count; i++) {
+      const L1Type *got = callee->sub->params ? callee->sub->params[i].ty : NULL;
+      const L1Type *want = inst->call_params[i];
+      if (got && want &&
+          (got->kind != want->kind ||
+           (got->kind != TY_ADDR && got->width != want->width)))
+        return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_CALL_OPERANDS,
+                        inst);
+    }
+    return enter_sub(tcb, inst, sub_index, 1, inst->operand_count - 1,
+                     frame->position);
+  }
   return enter_sub(tcb, inst, meta.sub_index, 0, inst->operand_count,
                    frame->position);
 }
-
-/* 间接调用：操作数 0 是目标地址，其余是实参。
- * 地址没有类型——能不能调用由它所在区段的 CALL 权限说话（相当于执行位）。 */
-
-/* 取子过程的地址。和 #data_addr 同形，产出的是普通 #addr。 */
 
 static LainVmSliceResult op_if(LainVmTcb *tcb, const L1Inst *inst) {
   const LainVmFrame *frame = ctop(tcb);

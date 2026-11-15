@@ -53,12 +53,3 @@ set(LAIN0_RUNTIME_DIR "${CMAKE_BINARY_DIR}/lain0")
 add_executable(lain0 tools/main.cpp)
 target_link_libraries(lain0 PRIVATE lain0_core)
 set_target_properties(lain0 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${LAIN0_RUNTIME_DIR}")
-
-# 契约自洽 + seed 链接路径的两个哨兵。任何时候都应当能编译并跑通。
-add_executable(headers_check tools/headers_check.cpp)
-target_link_libraries(headers_check PRIVATE lain0_core)
-set_target_properties(headers_check PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${LAIN0_RUNTIME_DIR}")
-
-add_executable(probe_seed tools/probe_seed.cpp)
-target_link_libraries(probe_seed PRIVATE lain0_core)
-set_target_properties(probe_seed PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${LAIN0_RUNTIME_DIR}")

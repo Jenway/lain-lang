@@ -50,7 +50,7 @@ static void print_type(Printer *p, const L1Type *ty) {
 
 static void print_operand(Printer *p, const L1Operand *op, const L1Type *ty) {
   if (op->kind == OPERAND_VALUE) {
-    outf(p, "%%%s", op->name ? op->name : "?");
+    outf(p, op->is_global ? "@%s" : "%%%s", op->name ? op->name : "?");
     return;
   }
   if (op->kind == OPERAND_FLOAT) {
@@ -286,10 +286,26 @@ static void print_inst(Printer *p, const L1Region *region, const L1Inst *inst) {
     /* 算子名先打，否则类型实参会顶在指令位置：`[#bits<32>](40, 2)` 解析不了。
      * print.h 要求 `print(parse(text)) == text`，少了这一句定点就不成立。 */
     print_opcode(p, inst);
-    print_type_arg(p, inst);
+    /* 值形式调用的返回类型在签名里，不占类型实参的位置。 */
+    if (inst->kind != INST_CALL || inst->symbol) print_type_arg(p, inst);
     if (inst->kind == INST_CALL) {
+      uint32_t i;
       if (inst->is_tail) outf(p, "[tail]");
-      outf(p, " @%s", inst->symbol ? inst->symbol : "?");
+      if (inst->symbol) {
+        outf(p, " @%s", inst->symbol);
+      } else {
+        out(p, " [(");
+        for (i = 0; i < inst->call_param_count; i++) {
+          if (i) out(p, ", ");
+          print_type(p, inst->call_params[i]);
+        }
+        out(p, ")");
+        if (inst->has_ty && inst->ty) {
+          out(p, " -> ");
+          print_type(p, inst->ty);
+        }
+        out(p, "]");
+      }
       print_operand_list(p, inst, 0);
     } else {
       print_operand_list(p, inst, 0);

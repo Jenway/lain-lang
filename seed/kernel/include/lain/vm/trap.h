@@ -1,7 +1,7 @@
 /* LAINVM 的 Trap：执行失败的分类、状态码与位置。
  *
  * Trap 是拒绝执行的报出机制，不是函数返回值：引擎把它写进 LainVmTrap 后返回
- * LAINVM_SLICE_TRAPPED，由驱动或 fault_handler 处置。域外行为（除数为 0、
+ * LAINVM_SLICE_TRAPPED，由驱动处置。域外行为（除数为 0、
  * 移位量 >= 宽度、越权地址、预算耗尽、没验证过的模块）都在这里报出去，
  * 不是 UB，也不需要 IR 里有对应构造。
  *

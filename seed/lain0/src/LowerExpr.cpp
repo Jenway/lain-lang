@@ -156,8 +156,10 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
     std::vector<uint8_t> bytes(sl->rawText.begin(), sl->rawText.end());
     // 内联字符串字面量：在模块级发一个只读 data 块 + 取址过程，调用它拿 #addr。
     // （顶层 `let x = "..."` 走 lowerStaticLet 的同款机制；这里是表达式位置的内联形态。）
+    // 名字带模块键：--split 给每个模块新建 Lowerer，平坦名字会在合并时撞车。
+    // 名字带模块键：--split 给每个模块新建 Lowerer，平坦名字会在合并时撞车。
     const std::string storageName =
-        std::string("strlit_") + std::to_string(strlitCounter_++);
+        qualify(std::string("strlit_") + std::to_string(strlitCounter_++));
     const char *symbol = intern(storageName);
     const char *procName = intern(storageName);  // 取址过程名 = 存储名
     const L1Data *block = lainir_data(
@@ -187,11 +189,49 @@ bool Lowerer::lowerExpr(const ast::Expr *e, TypeId expectedTy,
   }
 }
 
+bool Lowerer::coerceValue(L1Operand &op, TypeId from, TypeId to,
+                           std::vector<const L1Inst *> &out) {
+  if (from == kInvalidType || to == kInvalidType || from == to) return true;
+  // 字面量的宽度由消费它的指令的类型实参给出，不需要复制。
+  if (op.kind != OPERAND_VALUE) return true;
+  const TypeId addrTy = types_->builtin("addr");
+  if (from == addrTy || to == addrTy) {
+    const char *res = nextTemp();
+    out.push_back(
+        lainir_inst(builder_, INST_BITCAST, res, types_->lain(to), &op, 1));
+    op = lainir_ref(res);
+    return true;
+  }
+  const uint32_t fromW = types_->width(from);
+  const uint32_t toW = types_->width(to);
+  // 聚合（struct/enum）在 IR 里表示成 #addr，宽度没有意义，放过。
+  if (fromW == 0 || toW == 0) return true;
+  const char *res = nextTemp();
+  if (fromW == toW) {
+    L1Operand ops[2] = {op, lainir_int(0)};
+    out.push_back(
+        lainir_inst(builder_, INST_ADD, res, types_->lain(to), ops, 2));
+  } else {
+    const bool widen = toW > fromW;
+    const bool sext = widen && types_->signedness(from);
+    out.push_back(lainir_inst(builder_,
+                              widen ? (sext ? INST_SEXT : INST_ZEXT) : INST_TRUNC,
+                              res, types_->lain(to), &op, 1));
+  }
+  op = lainir_ref(res);
+  return true;
+}
+
 bool Lowerer::lowerBinary(const ast::BinaryExpr *e, TypeId expectedTy,
                           std::vector<const L1Inst *> &out, L1Operand &value) {
-  TypeId lhsTy = typeOfExpr(*sema_, e->lhs, expectedTy);
-  TypeId rhsTy = typeOfExpr(*sema_, e->rhs, lhsTy);
+  // 比较的结果类型是 bool，它的期望类型不能喂给操作数：`load(p) == sym` 里
+  // load 的宽度只能来自期望类型，拿 bool 去问只会得到 1 位。
+  const bool cmp = isComparison(e->op);
+  const TypeId hint = cmp ? kInvalidType : expectedTy;
+  TypeId lhsTy = typeOfExpr(*sema_, e->lhs, hint);
+  TypeId rhsTy = typeOfExpr(*sema_, e->rhs, lhsTy != kInvalidType ? lhsTy : hint);
   TypeId operandTy = lhsTy != kInvalidType ? lhsTy : rhsTy;
+  if (operandTy == kInvalidType && cmp) operandTy = types_->builtin("i32");
   if (operandTy == kInvalidType) {
     fail(e->span, D::SemaWidthUnknown, "二元运算的操作数类型无法推导");
     return false;
@@ -208,6 +248,12 @@ bool Lowerer::lowerBinary(const ast::BinaryExpr *e, TypeId expectedTy,
   L1Operand rhs{};
   if (!lowerExpr(e->lhs, operandTy, out, lhs)) return false;
   if (!lowerExpr(e->rhs, operandTy, out, rhs)) return false;
+  // 两侧各自按 Sema 定的类型补齐到 operandTy：`x + b` 里 b 是 u8 时，直接进
+  // `#add<u64>` 会被验证器按 2005 拒掉。
+  if (!coerceValue(lhs, typeOfExpr(*sema_, e->lhs, operandTy), operandTy, out))
+    return false;
+  if (!coerceValue(rhs, typeOfExpr(*sema_, e->rhs, operandTy), operandTy, out))
+    return false;
 
   const char *res = nextTemp();
   L1Operand ops[2] = {lhs, rhs};
@@ -405,10 +451,12 @@ bool Lowerer::lowerConstructExpr(const ast::ConstructExpr *e, TypeId expectedTy,
     L1Operand val{};
     if (!lowerExpr(f.value, fieldTy, out, val)) return false;
     // #store takes value, destination —— 值在前、地址在后（顺序反了验证器报 2005）
+    // 字段本身是聚合时写的是它的地址：store 的物理类型是 #addr。
+    const L1Type *fieldLainTy = types_->lain(fieldTy);
     L1Operand storeOps[2] = {val, lainir_ref(fieldAddr)};
     out.push_back(lainir_inst_mem(builder_, INST_STORE, nullptr,
-                                  types_->lain(fieldTy), ORDER_RELAXED, false,
-                                  storeOps, 2));
+                                  fieldLainTy != nullptr ? fieldLainTy : addrTy,
+                                  ORDER_RELAXED, false, storeOps, 2));
   }
 
   value = lainir_ref(objName);
@@ -475,11 +523,17 @@ bool Lowerer::lowerDottedExpr(const ast::DottedExpr *e, TypeId expectedTy,
   const char *addrName = nextTemp();
   out.push_back(lainir_inst(builder_, INST_LEA, addrName, addrTy, leaOps, 4));
 
+  // 字段本身是聚合：它的值就是地址，不发 #load（聚合在 IR 里表示成 #addr）。
+  const L1Type *fieldLainTy = types_->lain(fieldTy);
+  if (fieldLainTy == nullptr) {
+    value = lainir_ref(addrName);
+    return true;
+  }
+
   L1Operand ptr = lainir_ref(addrName);
   const char *res = nextTemp();
-  out.push_back(lainir_inst_mem(builder_, INST_LOAD, res,
-                                types_->lain(fieldTy), ORDER_RELAXED, false,
-                                &ptr, 1));
+  out.push_back(lainir_inst_mem(builder_, INST_LOAD, res, fieldLainTy,
+                                ORDER_RELAXED, false, &ptr, 1));
   value = lainir_ref(res);
   return true;
 }
@@ -772,9 +826,14 @@ bool Lowerer::lowerCall(const ast::CallExpr *e, TypeId expectedTy,
   // 聚合（struct/enum）按地址返回：lain() 对它返回 nullptr，这里必须退回
   // #addr，否则 #call 就没有结果（验证器报 2020 defines 0 result(s)）。
   // 与 signatureTypeOf 同一条规则。
+  // 语句位置的调用（ExprStmt 降级时传 kInvalidType）拿不到期望类型，结果类型
+  // 改从 Sema 给这个 #call 表达式算出的结论取：不分配结果临时量的话，#call 会
+  // 以零结果发出，验证器报 2020。
+  TypeId resultTy = expectedTy;
+  if (resultTy == kInvalidType) resultTy = typeOfExpr(*sema_, e, kInvalidType);
   const L1Type *retTy = nullptr;
-  if (expectedTy != kInvalidType) {
-    retTy = types_->lain(expectedTy);
+  if (resultTy != kInvalidType) {
+    retTy = types_->lain(resultTy);
     if (retTy == nullptr) retTy = lainir_type(builder_, TY_ADDR, 0);
   }
   const char *res = retTy ? nextTemp() : nullptr;
@@ -910,6 +969,11 @@ bool Lowerer::lowerBuiltin(const ast::CallExpr *e, std::string_view name,
     L1Operand val{};
     if (!lowerExpr(e->args[0], kInvalidType, out, ptr)) return false;
     TypeId valTy = typeOfExpr(*sema_, e->args[1], kInvalidType);
+    // 裸整数字面量：store 的目标是 addr，没有元素类型可查，按机器字 64 位写。
+    // 按字面量的 i32 默认宽度写，会让随后 #load[#bits<64>] 读到未初始化的高一半。
+    if (e->args[1]->kind == ast::ExprKind::IntLit) {
+      valTy = types_->builtin("u64");
+    }
     if (!lowerExpr(e->args[1], valTy, out, val)) return false;
     L1Operand ops[2] = {val, ptr}; // store 的操作数顺序固定为「值, 地址」
     out.push_back(lainir_inst_mem(builder_, INST_STORE, nullptr,
@@ -1096,8 +1160,12 @@ bool Lowerer::lowerCast(const ast::CastExpr *e, std::vector<const L1Inst *> &out
     return true;
   }
   const char *res = nextTemp();
-  out.push_back(lainir_inst(builder_, toW > fromW ? INST_ZEXT : INST_TRUNC, res,
-                            types_->lain(target), &operand, 1));
+  // 有符号整数变宽发 #sext：零扩展会把 -2 变成 4294967294。
+  const bool widen = toW > fromW;
+  const bool sext = widen && types_->signedness(src);
+  out.push_back(lainir_inst(builder_,
+                            widen ? (sext ? INST_SEXT : INST_ZEXT) : INST_TRUNC,
+                            res, types_->lain(target), &operand, 1));
   value = lainir_ref(res);
   return true;
 }

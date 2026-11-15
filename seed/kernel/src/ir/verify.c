@@ -114,7 +114,9 @@ static const LoopScope *find_loop(const LoopScope *loops, const char *label) {
 static uint32_t literal_width(Verifier *v, const L1Region *region,
                               const L1Inst *inst, uint32_t index,
                               const LoopScope *loops) {
-  if (inst->has_ty && inst->ty) return lainir_type_width(inst->ty);
+  /* 值形式调用的类型实参是**返回类型**，不能拿来当实参宽度。 */
+  if (inst->kind != INST_CALL && inst->has_ty && inst->ty)
+    return lainir_type_width(inst->ty);
   switch (inst->kind) {
   case INST_YIELD:
     return index < region->result_count
@@ -127,8 +129,15 @@ static uint32_t literal_width(Verifier *v, const L1Region *region,
   case INST_LEA:
     return 64; /* scale / offset 是地址宽度的量 */
   case INST_CALL: {
-    const L1Subroutine *callee =
-        lainir_find_subroutine(v->module, inst->symbol);
+    const L1Subroutine *callee;
+    if (!inst->symbol) {
+      /* 值形式调用：operands[0] 是目标地址（#addr），其余是实参。 */
+      if (index == 0) return 64;
+      if (index - 1 < inst->call_param_count)
+        return lainir_type_width(inst->call_params[index - 1]);
+      return 0;
+    }
+    callee = lainir_find_subroutine(v->module, inst->symbol);
     if (callee && index < callee->param_count)
       return lainir_type_width(callee->params[index].ty);
     return 0;
@@ -393,8 +402,20 @@ static bool verify_region(Verifier *v, const L1Region *region,
 static bool check_arity(Verifier *v, const L1Inst *inst) {
   switch (inst->kind) {
   case INST_CALL: {
-    const L1Subroutine *callee =
-        lainir_find_subroutine(v->module, inst->symbol);
+    const L1Subroutine *callee;
+    if (!inst->symbol) {
+      /* 值形式调用：operands[0] 是目标地址，其余才是实参。 */
+      if (!inst->call_params && inst->call_param_count > 0)
+        return fail(v, L1V_BAD_CALL_ARITY, inst->line, inst->column,
+                    "#call through a value target has no signature");
+      if (inst->operand_count != inst->call_param_count + 1)
+        return fail(v, L1V_BAD_CALL_ARITY, inst->line, inst->column,
+                    "#call through a value target passes %u argument(s), expected %u",
+                    inst->operand_count ? inst->operand_count - 1 : 0,
+                    inst->call_param_count);
+      return true;
+    }
+    callee = lainir_find_subroutine(v->module, inst->symbol);
     if (!callee)
       return fail(v, L1V_UNKNOWN_CALLEE, inst->line, inst->column,
                   "#call: unknown callee `%s`",
@@ -580,24 +601,45 @@ static bool verify_inst(Verifier *v, const L1Region *region, uint32_t position,
   }
 
   case INST_CALL: {
-    const L1Subroutine *callee =
-        lainir_find_subroutine(v->module, inst->symbol);
-    if (!callee)
-      return fail(v, L1V_UNKNOWN_CALLEE, inst->line, inst->column,
-                  "#call: unknown callee `%s`",
-                  inst->symbol ? inst->symbol : "?");
-    if (inst->operand_count != callee->param_count)
-      return fail(v, L1V_BAD_CALL_ARITY, inst->line, inst->column,
-                  "#call to `%s` passes %u argument(s), expected %u",
-                  callee->name, inst->operand_count, callee->param_count);
-    if (!check_result_count(v, inst, callee->result_count)) return false;
-    for (i = 0; i < inst->operand_count; i++) {
-      const L1Type *ty = operand_ty(v, names, region, inst, i, loops);
-      const L1Type *want = callee->params[i].ty;
-      if (ty && want && !same_type(ty, want))
+    const L1Subroutine *callee = NULL;
+    if (!inst->symbol) {
+      /* 值形式调用。签名必须显式给出：没有它，运行期无从核对目标。 */
+      const L1Type *target_ty;
+      if (!inst->call_params && inst->call_param_count > 0)
+        return fail(v, L1V_BAD_CALL_ARITY, inst->line, inst->column,
+                    "#call through a value target has no signature");
+      target_ty = operand_ty(v, names, region, inst, 0, loops);
+      if (target_ty && target_ty->kind != TY_ADDR)
         return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
-                    "#call to `%s`: argument %u has the wrong type",
-                    callee->name, i);
+                    "#call through a value target: the target must be #addr");
+      if (!check_result_count(v, inst, inst->has_ty ? 1u : 0u)) return false;
+      for (i = 1; i < inst->operand_count; i++) {
+        const L1Type *ty = operand_ty(v, names, region, inst, i, loops);
+        const L1Type *want = inst->call_params[i - 1];
+        if (ty && want && !same_type(ty, want))
+          return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                      "#call through a value target: argument %u has the wrong type",
+                      i - 1);
+      }
+    } else {
+      callee = lainir_find_subroutine(v->module, inst->symbol);
+      if (!callee)
+        return fail(v, L1V_UNKNOWN_CALLEE, inst->line, inst->column,
+                    "#call: unknown callee `%s`",
+                    inst->symbol ? inst->symbol : "?");
+      if (inst->operand_count != callee->param_count)
+        return fail(v, L1V_BAD_CALL_ARITY, inst->line, inst->column,
+                    "#call to `%s` passes %u argument(s), expected %u",
+                    callee->name, inst->operand_count, callee->param_count);
+      if (!check_result_count(v, inst, callee->result_count)) return false;
+      for (i = 0; i < inst->operand_count; i++) {
+        const L1Type *ty = operand_ty(v, names, region, inst, i, loops);
+        const L1Type *want = callee->params[i].ty;
+        if (ty && want && !same_type(ty, want))
+          return fail(v, L1V_BAD_OPERAND_TYPE, inst->line, inst->column,
+                      "#call to `%s`: argument %u has the wrong type",
+                      callee->name, i);
+      }
     }
     if (inst->is_tail) {
       const L1Inst *next = (position + 1 < region->inst_count)
@@ -915,6 +957,13 @@ static bool verify_subroutine(Verifier *v, const L1Subroutine *sub) {
       const L1Data *d = &v->module->data[i];
       if (d->symbol)
         names = push_binding(v, names, d->symbol, &v->types.addr);
+    }
+    /* 子过程名同样是模块级的 #addr 值：它就是过程入口地址，
+       值形式调用取的就是它。extern 没有入口地址，不进表。 */
+    for (i = 0; i < v->module->subroutine_count; i++) {
+      const L1Subroutine *s = &v->module->subroutines[i];
+      if (s->name && !(s->flags & SUBROUTINE_EXTERN))
+        names = push_binding(v, names, s->name, &v->types.addr);
     }
   }
 

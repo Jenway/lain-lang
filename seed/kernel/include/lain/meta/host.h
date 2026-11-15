@@ -17,7 +17,6 @@
 #include <stdint.h>
 
 #include "lain/meta/ast_v1.h"
-#include "lain/meta/expand.h"
 #include "lain/vm/caps.h"
 #include "lain/vm/quota.h"
 #include "lain/vm/space.h"
@@ -25,6 +24,13 @@
 
 typedef struct LainMetaHost LainMetaHost;
 typedef struct LainMetaTree LainMetaTree;
+
+/* AstOut 与展开共用的一份预算：深度、访问次数、处理器调用、替换引用、
+ * 树容量与节点容量。驱动在 register 之前交给 lainmeta_host_enable_ast_out。 */
+typedef struct {
+  uint64_t max_depth, max_visits, max_handler_calls, max_replacement_refs;
+  uint64_t ast_out_capacity, ast_out_node_capacity;
+} LainExpandLimits;
 
 /* 结果码。Meta 侧的失败用 0 以外的值报回来。 */
 enum {

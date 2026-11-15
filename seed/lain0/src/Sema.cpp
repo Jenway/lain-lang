@@ -840,6 +840,10 @@ private:
         const auto *n = static_cast<const ast::NameExpr *>(c->callee);
         auto it = out_.functionReturns.find(ctx_.qualify(n->name));
         if (it != out_.functionReturns.end()) return it->second;
+        // 宿主 extern 是平坦名：本单元的 functionReturns 只记了本单元声明过
+        // 的那些，别的单元声明的 extern 要从全局表查。
+        const TypeId ext = prog_.externReturn(n->name);
+        if (ext != kInvalidType) return ext;
       }
       // M.f(x)：被调者是模块成员函数，返回类型就是成员表里那个函数的返回类型。
       if (c->callee && c->callee->kind == ast::ExprKind::Dotted) {
@@ -1244,6 +1248,12 @@ bool Program::analyze(TypeStore &ts, DiagSink &diags) {
   }
   if (diags.hasErrors()) return false;
 
+  // 宿主 extern 是平坦名，跨模块同名就是同一个符号：返回类型必须收在一张
+  // 全局表里。只收本单元的 functionReturns 会让裸名调用从别的单元指向的
+  // extern 拿不到结果类型（降级时就少发一个结果临时量，验证器报 2020）。
+  collectExterns(ts, diags);
+  if (diags.hasErrors()) return false;
+
   // §四 防撞：平坦导出名之间、平坦名与 `<键>__<名字>` 之间不许重名。
   // 放在 registerTopLevel 之后 —— 那一步才把每个模块发出的符号名登记齐
   // （含静态数据块的 `<名字>_storage`）。
@@ -1259,6 +1269,36 @@ bool Program::analyze(TypeStore &ts, DiagSink &diags) {
     w.walkBodies();
   }
   return !diags.hasErrors();
+}
+
+void Program::collectExterns(TypeStore &ts, DiagSink &diags) {
+  for (const ModuleUnit &u : units_) {
+    if (u.ast == nullptr) continue;
+    for (const ast::Decl *d : u.ast->decls) {
+      if (d->kind != ast::DeclKind::Extern) continue;
+      const auto *x = static_cast<const ast::ExternDecl *>(d);
+      const TypeId ret =
+          x->hasRet ? ts.resolve(x->ret, u.ctx, diags) : kInvalidType;
+      auto ins = externReturns_.emplace(std::string(x->name), ret);
+      if (ins.second) continue;
+      // 无返回标注的声明不给结论：另一个单元写了返回类型时以那条为准。
+      if (ret == kInvalidType) continue;
+      if (ins.first->second == kInvalidType) {
+        ins.first->second = ret;
+        continue;
+      }
+      if (ins.first->second != ret) {
+        diags.error(x->span, D::SemaDuplicateDeclaration,
+                    "同名宿主 extern '" + std::string(x->name) +
+                        "' 在各模块的返回类型不一致");
+      }
+    }
+  }
+}
+
+TypeId Program::externReturn(std::string_view srcName) const {
+  auto it = externReturns_.find(std::string(srcName));
+  return it == externReturns_.end() ? kInvalidType : it->second;
 }
 
 // §四 防撞。三条不许发生的事，全部在编译期报出来（今天的静默版要跑到

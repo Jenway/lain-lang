@@ -154,7 +154,10 @@ func meta_emit_symbol_binding(base: addr, len: u64, name_lo: u64, name_hi: u64, 
   let pbuf: addr = std_scope.meta_path_buf();
   let total: u64 = meta_symbol_storage_name(base, at, inner, pbuf);
   let h1: u32 = std_lainir.lainir_proc_word_write();
-  let h2: u32 = std_lainir.lainir_write(base + name_lo, name_hi - name_lo);
+  // 过程名带模块键前缀；pbuf 留给下面那条取址用的 `_storage` 符号名。
+  let nbuf: addr = pbuf + 256;
+  let nsym: u64 = std_scope.meta_unit_symbol(nbuf, base + name_lo, name_hi - name_lo);
+  let h2: u32 = std_lainir.lainir_write(nbuf, nsym);
   let h3: u32 = std_lainir.lainir_empty_params_write();
   let h4: u32 = std_lainir.lainir_repr(kind, width);
   let h5: u32 = std_lainir.lainir_open_body();
@@ -167,8 +170,10 @@ func meta_emit_symbol_binding(base: addr, len: u64, name_lo: u64, name_hi: u64, 
 
 // 顶层绑定引用同模块的另一条绑定：`#proc <名>() -> <repr> { %r<n> = #call <被调>() #return %r<n> }`。
 func meta_emit_ref_binding(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64, width: u64, ref_lo: u64, ref_hi: u64) -> u32 {
+  let nbuf: addr = std_scope.meta_path_buf();
+  let nsym: u64 = std_scope.meta_unit_symbol(nbuf, base + name_lo, name_hi - name_lo);
   let h1: u32 = std_lainir.lainir_proc_word_write();
-  let h2: u32 = std_lainir.lainir_write(base + name_lo, name_hi - name_lo);
+  let h2: u32 = std_lainir.lainir_write(nbuf, nsym);
   let h3: u32 = std_lainir.lainir_empty_params_write();
   let h4: u32 = std_lainir.lainir_repr(kind, width);
   let h5: u32 = std_lainir.lainir_open_body();
@@ -177,7 +182,10 @@ func meta_emit_ref_binding(base: addr, len: u64, name_lo: u64, name_hi: u64, kin
   let c2: u32 = std_lainir.lainir_temp_name_emit(tn);
   let c3: u32 = std_lainir.lainir_result_sep_write();
   let c4: u32 = std_lainir.lainir_call_word_write();
-  let c5: u32 = std_lainir.lainir_write(base + ref_lo, ref_hi - ref_lo);
+  // 被引的是本单元另一条顶层绑定，被调名同样染前缀（extern 保持平坦）。
+  let cbuf: addr = std_scope.meta_path_buf();
+  let clen: u64 = std_scope.meta_callee_symbol(cbuf, base + ref_lo, ref_hi - ref_lo);
+  let c5: u32 = std_lainir.lainir_write(cbuf, clen);
   let c6: u32 = std_lainir.lainir_open_paren_write();
   let c7: u32 = std_lainir.lainir_close_paren_write();
   let c8: u32 = std_lainir.lainir_newline_write();
@@ -1344,6 +1352,137 @@ func meta_param_scan(base: addr, len: u64, group: u64, index: u64, n_at: u64, n_
   return r;
 }
 
+// —— 三区签名 ——
+// 参数组 `(…)` 之后可以跟两个可选区，每区两格（`?` / `!` 一个词 + 一个花括号组）：
+//   `?{ T: Type, N: u64 }`  编译期参数：登记进该函数的作用域，不进运行时参数表；
+//   `!{ alloc, suspend }`   运行期效应列表：本轮只数条目，不解释、不检查。
+// 于是 `->`、返回类型、函数体都不再是固定下标 —— 按位置读它们的地方先过 `meta_skip_zones`。
+// 没有这两个区时 `meta_skip_zones(parent, index + 3)` 正好回参数组后面那一格，
+// 老形状的下标一个不变。
+func meta_skip_zones(parent: u64, from: u64) -> u64 {
+  let count: u64 = std_parse.ast_child_count(parent);
+  return loop sz(j: u64 = from) {
+    let more: bool = j < count;
+    if more == 0 { break sz(j); }
+    let t: u64 = std_parse.ast_child(parent, j);
+    let q: bool = std_parse.meta_node_is_word(t, std_lex.meta_lex_qmark, 1);
+    let b: bool = std_parse.meta_node_is_word(t, std_lex.meta_lex_bang, 1);
+    let zone: bool = q or b;
+    if zone { continue sz(j + 2); }
+    break sz(j);
+  };
+}
+
+// `?`（或 `!`）后面那个花括号组；这个区不在、或后面不是组（那是 `?NAME` 这类裸名字
+// 用法）都回 0 —— 区是可选的，认不出来就当没写。
+func meta_zone_group(parent: u64, from: u64, qmark: bool) -> u64 {
+  let count: u64 = std_parse.ast_child_count(parent);
+  let kw: addr = if qmark { std_lex.meta_lex_qmark } else { std_lex.meta_lex_bang };
+  let hit: u64 = loop zg(j: u64 = from) {
+    let more: bool = j < count;
+    if more == 0 { break zg(0); }
+    let t: u64 = std_parse.ast_child(parent, j);
+    let is_z: bool = std_parse.meta_node_is_word(t, kw, 1);
+    if is_z {
+      let nx: u64 = std_parse.meta_cursor_next(parent, j);
+      let k: u64 = std_parse.meta_node_kind(nx);
+      let grp: bool = k == 2;
+      if grp { break zg(nx); }
+      break zg(0);
+    }
+    continue zg(j + 1);
+  };
+  return hit;
+}
+
+// `!{ … }` 的条目数：顶层按逗号分隔，逗号本身不算一条。只计数，不解释标记。
+func meta_effect_count(group: u64) -> u64 {
+  let count: u64 = std_parse.ast_child_count(group);
+  return loop ec(i: u64 = 0, k: u64 = 0) {
+    let more: bool = i < count;
+    if more == 0 { break ec(k); }
+    let c: u64 = std_parse.ast_child(group, i);
+    let comma: bool = std_parse.meta_node_is_word(c, std_lainir.lainir_comma, 1);
+    let k2: u64 = if comma { k } else { k + 1 };
+    continue ec(i + 1, k2);
+  };
+}
+
+// 局部变量表追加一条：名字窗口 + 类型名窗口 + 值临时编号。表满回 17（与既有约定一致）。
+func meta_comptime_push(n_lo: u64, n_hi: u64, t_lo: u64, t_hi: u64, slot: u64) -> u32 {
+  let sc: addr = lain_meta_scratch_data();
+  let raw: u64 = std_types.meta_cell_get(sc + 2136);
+  let no_tbl: bool = raw == 0;
+  if no_tbl { return 0; }
+  let count: u64 = std_types.meta_cell_get(sc + 2128);
+  let cap: u64 = std_types.meta_cell_get(sc + 2144);
+  let next: u64 = count + 1;
+  let full: bool = next > cap;
+  if full { return 17; }
+  let rb: addr = std_regions.meta_region_scratch_base();
+  let e: addr = rb + raw + count * 40;
+  let s0: u32 = std_types.meta_cell_put(e, n_lo);
+  let s1: u32 = std_types.meta_cell_put(e + 8, n_hi);
+  let s2: u32 = std_types.meta_cell_put(e + 16, t_lo);
+  let s3: u32 = std_types.meta_cell_put(e + 24, t_hi);
+  let s4: u32 = std_types.meta_cell_put(e + 32, slot);
+  let s5: u32 = std_types.meta_cell_put(sc + 2128, next);
+  return 0;
+}
+
+// 编译期参数逐个登记：`名字: 类型` 进本函数的局部表（与形参同等可见，函数体里引用
+// 它不会报未定义），并给一条 0 占位值 —— 本轮不做单态化，编译期实参无处可代。
+// 声明的是 `Type` 这类没有运行时表示的编译期类型（类型表里查不到）时，占位值改用
+// 函数的返回类型。占位值要落在过程体里，所以调用点必须在 `lainir_open_body` 之后。
+func meta_comptime_bind(base: addr, len: u64, group: u64, r_lo: u64, r_hi: u64) -> u32 {
+  let r_tid: u64 = std_scalars.meta_type_resolve(base, len, r_lo, r_hi);
+  let r_info: u64 = std_registry.meta_tid_repr(r_tid);
+  let r_kind: u64 = r_info and 255;
+  let r_width: u64 = (r_info >> 8) and 255;
+  // 占位值的两段文本（`0` 与 `%r<n>`）走 bump 动态区：固定 scratch 偏移会和
+  // 类型注册表这类同样长在 scratch 上的状态撞车（撞了之后 `meta_tid_repr` 读回噪声）。
+  let mark: u64 = std_scope.meta_bump_mark();
+  let off: u64 = std_scope.meta_bump_alloc(64);
+  let no_buf: bool = off == 0xFFFFFFFFFFFFFFFF;
+  if no_buf { return 17; }
+  let rb: addr = std_regions.meta_region_scratch_base();
+  let zbuf: addr = rb + off;
+  let nbuf: addr = rb + off + 16;
+  let zlen: u64 = std_lainir.lainir_buf_uint(zbuf, 0, 0);
+  let count: u64 = std_parse.ast_child_count(group);
+  let st: u32 = loop bs(i: u64 = 0) {
+    let more: bool = i < count;
+    if more == 0 { break bs(0); }
+    let c: u64 = std_parse.ast_child(group, i);
+    let ni: u64 = i + 1;
+    let nx: u64 = std_parse.meta_cursor_next(group, i);
+    let is_colon: bool = std_parse.meta_node_is_word(nx, std_lex.meta_kw_colon, 1);
+    if is_colon == 0 { continue bs(ni); }
+    let n_lo: u64 = std_parse.meta_node_start(c);
+    let n_hi: u64 = n_lo + std_parse.meta_node_len(c);
+    let tn: u64 = std_parse.meta_cursor_next(group, ni);
+    let t_lo0: u64 = std_parse.meta_node_start(tn);
+    let t_hi0: u64 = std_lex.bs_skip_type_name(base, t_lo0, len);
+    let tid: u64 = std_scalars.meta_type_resolve(base, len, t_lo0, t_hi0);
+    let known: bool = tid != 0;
+    let t_lo: u64 = if known { t_lo0 } else { r_lo };
+    let t_hi: u64 = if known { t_hi0 } else { r_hi };
+    // 一次取够：`meta_tid_repr` 对复合类型会做登记，重复调用不是纯查询。
+    let info: u64 = if known { std_registry.meta_tid_repr(tid) } else { r_info };
+    let kind: u64 = info and 255;
+    let width: u64 = (info >> 8) and 255;
+    let slot: u64 = meta_next_temp();
+    let np: u64 = std_lainir.lainir_buf_temp(nbuf, 0, slot);
+    let addn: addr = std_emit.meta_sym_add;
+    // `%r<n> = #add[repr](0, 0)`：编译期参数的占位值。本轮不做特化，实参无处可代。
+    let w0: u32 = std_lainir.lainir_binary_op_named(nbuf, np, addn, 3, kind, width, zbuf, zlen, zbuf, zlen);
+    let put: u32 = meta_comptime_push(n_lo, n_hi, t_lo, t_hi, slot);
+    continue bs(ni + 1);
+  };
+  let rel: u32 = std_scope.meta_bump_release(mark);
+  return st;
+}
+
 func meta_decl_ret_window(name: addr, name_len: u64) -> u64 {
   let index: u64 = std_scope.meta_scope_find(name, name_len);
   let found: bool = index != 0xFFFFFFFFFFFFFFFF;
@@ -1359,8 +1498,10 @@ func meta_decl_ret_window(name: addr, name_len: u64) -> u64 {
   }
   let parent: u64 = std_scope.meta_scope_aux(index);
   let at: u64 = std_scope.meta_scope_emitted(index);
-  let ri: u64 = at + 3;
-  let ret_node: u64 = std_parse.meta_cursor_next(parent, ri);
+  // 三区签名：`?{…}` / `!{…}` 各占两格，返回类型不再是固定下标。
+  let ai: u64 = meta_skip_zones(parent, at + 3);
+  let ri: u64 = ai + 1;
+  let ret_node: u64 = std_parse.ast_child(parent, ri);
   let none: bool = ret_node == 0;
   if none {
     return 0xFFFFFFFFFFFFFFFF;
@@ -2060,10 +2201,11 @@ func meta_lower_func_inner(base: addr, len: u64,
   // op 表是空的 —— 拿绑定的类型去查表查不到 `<`。
   let scp: addr = lain_meta_scratch_data();
   let sp: u32 = std_types.meta_cell_put(scp + 504, params);
-  let ai: u64 = index + 3;
-  let arrow: u64 = std_parse.meta_cursor_next(parent, pi);
-  let ri: u64 = index + 4;
-  let ret_node: u64 = std_parse.meta_cursor_next(parent, ai);
+  // 三区签名：`?{…}` / `!{…}` 两个可选区在参数组之后、`->` 之前，各占两格。
+  // 先跳过它们再取 `->`、返回类型；体仍按「返回类型之后的第一个组」找。
+  let ai: u64 = meta_skip_zones(parent, index + 3);
+  let ri: u64 = ai + 1;
+  let ret_node: u64 = std_parse.ast_child(parent, ri);
   let ccnt: u64 = std_parse.ast_child_count(parent);
   let bnext: u64 = loop body_scan(j: u64 = ri) {
     let past_end: bool = j >= ccnt;
@@ -2119,6 +2261,25 @@ func meta_lower_func_inner(base: addr, len: u64,
   let hbad: bool = hdr != 0;
   if hbad { return hdr; }
   let w6: u32 = std_lainir.lainir_open_body();
+  // 三区签名：`?{ T: Type, … }` 的编译期参数在这里登记（占位值也要落在过程体里，
+  // 所以放在开体之后、语句序列之前）。`!{ … }` 的效应区只数条目，记到 +2560。
+  let cz: u64 = meta_zone_group(parent, index + 3, 1);
+  let cz_has: bool = cz != 0;
+  let cbind: u32 = if cz_has {
+    meta_comptime_bind(base, len, cz, r_lo, r_hi)
+  } else {
+    0
+  };
+  let czbad: bool = cbind != 0;
+  if czbad { return cbind; }
+  let ez: u64 = meta_zone_group(parent, index + 3, 0);
+  let ez_has: bool = ez != 0;
+  let efeff: u32 = if ez_has {
+    let en: u64 = meta_effect_count(ez);
+    std_types.meta_cell_put(scp + 2560, en)
+  } else {
+    std_types.meta_cell_put(scp + 2560, 0)
+  };
   // 语句序列
   let bst: u32 = meta_lower_body(base, len, body, r_lo, r_hi);
   // 局部变量表的条目区在 bump 动态区：函数体 lowering 结束就还回去。
@@ -2871,13 +3032,28 @@ func meta_lower_store(base: addr, len: u64, parent: u64, index: u64, r_t_lo: u64
   let vt_lo: u64 = meta_value_type_window(base, len, grp, start2, r_t_lo, r_t_hi);
   let vt_hi: u64 = std_types.meta_cell_get(sc + 0);
   let tid: u64 = std_scalars.meta_type_resolve(base, len, vt_lo, vt_hi);
-  let nokind: bool = tid == 0;
-  if nokind {
+  // 裸整数字面量：`store` 的目标是裸 `addr`，没有元素类型可查，按机器字 64 位写。
+  // 退回值窗口会拿到 `store` 所在函数的返回类型 —— 同一个 `store(q, 7)` 会因为外层
+  // 函数返回 i32 还是 u64 写出不同宽度。lain0 侧同一条规则。
+  let vn: u64 = std_parse.ast_child(grp, start2);
+  let vn_at: u64 = std_parse.meta_node_start(vn);
+  let vn_b: u8 = std_lex.bs_byte_at(base, vn_at, len);
+  let vn_w: u32 = vn_b as u32;
+  let v_digit: bool = vn_w >= 48 and vn_w <= 57;
+  let lit: bool = v_digit == 1;
+  let tid_miss: bool = tid == 0;
+  let unresolved: bool = tid_miss and (lit == 0);
+  if unresolved {
     return 5;
   }
-  let vkind: u64 = std_registry.meta_tid_repr_kind(tid);
-  let vwidth: u64 = std_registry.meta_tid_repr_width(tid);
-  let a2: u32 = meta.meta_emit_expr(base, len, vkind, vwidth, vt_lo, vt_hi, grp, start2, 0, 0, 0, 0);
+  let tkind: u64 = std_registry.meta_tid_repr_kind(tid);
+  let twidth: u64 = std_registry.meta_tid_repr_width(tid);
+  let vkind: u64 = if lit { 0 } else { tkind };
+  let vwidth: u64 = if lit { 64 } else { twidth };
+  // 字面量没有类型名可查：窗口留空。
+  let vt0: u64 = if lit { 0 } else { vt_lo };
+  let vt1: u64 = if lit { 0 } else { vt_hi };
+  let a2: u32 = meta.meta_emit_expr(base, len, vkind, vwidth, vt0, vt1, grp, start2, 0, 0, 0, 0);
   let b2: bool = a2 != 0;
   if b2 {
     return a2;

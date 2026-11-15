@@ -60,6 +60,10 @@ typedef struct {
   L1OperandKind kind;
   const char *name; /* OPERAND_VALUE */
   uint64_t bits;    /* 字面量 */
+  /* OPERAND_VALUE 且为真：模块级名字，书写成 `@name`。
+   * 数据块的符号与子过程名都是模块级 #addr 绑定，装载期按名字解析；
+   * 区域内绑定的值是 `%name`。 */
+  bool is_global;
 } L1Operand;
 
 /* ---------------------------------------------------------------------------
@@ -197,6 +201,12 @@ typedef struct L1Inst {
   /* 被调 / 被引用的符号：INST_CALL。值目标时 symbol 为空，
    * 函数指针是 operands[0]。 */
   const char *symbol;
+
+  /* 值目标调用的期望签名。symbol 为空时必填：call_params 指向参数类型
+   * 数组（长度 call_param_count），返回类型由 ty/has_ty 表示。
+   * 符号调用时两者都是空的——签名在被调过程的声明里。 */
+  const L1Type *const *call_params;
+  uint32_t call_param_count;
 
   /* 结构指令 */
   const char *label;        /* INST_LOOP / INST_BREAK / INST_CONTINUE 的目标名 */

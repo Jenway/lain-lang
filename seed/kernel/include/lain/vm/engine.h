@@ -8,9 +8,8 @@
  * 它不做的事：
  *   不分配    帧栈和值槽在 admit 时按 max_call_depth 分配好，
  *             这里没有分配，也就没有分配失败路径
- *   不调度    那是 scheduler 的
+ *   不调度    一次调用只推进一个 TCB，选中谁由调用者决定
  *   不给预算  燃料由调用者给
- *   不管阻塞  返回 BLOCKED，由 scheduler 处置
  *   不吞 trap  写进 TCB 后返回 TRAPPED
  *
  * 前置条件：TCB 处于 LAINVM_RUNNING。不满足时不动任何东西，

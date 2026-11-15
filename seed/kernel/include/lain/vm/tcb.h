@@ -7,7 +7,7 @@
  *     所以多个 TCB 能共享一个地址空间——那就是线程。
  *   - 上下文住在 TCB，不住在地址空间：区域栈和值槽是执行状态，
  *     程序既不能读也不能命名它们（值不占存储、不可寻址）。
- *   - 故障不致命：出错走 fault_handler 这条端点，把 trap 交出去；
+ *   - 故障不致命：出错时引擎把 trap 记进 TCB 并返回 TRAPPED；
  *     TCB 只记录，不自行终止。
  *
  * 命名：LAINIR 侧 L1*，LAINVM 侧 LainVm*。
@@ -22,7 +22,6 @@
 #include "lain/ir/core.h"
 #include "lain/ir/value.h"
 #include "lain/vm/caps.h"
-#include "lain/vm/endpoint.h"
 #include "lain/vm/quota.h"
 #include "lain/vm/space.h"
 #include "lain/vm/trap.h"
@@ -33,22 +32,14 @@ typedef struct LainVmImage LainVmImage;
 typedef enum {
   LAINVM_READY = 0,
   LAINVM_RUNNING = 1,
-  LAINVM_BLOCKED = 2,
-  LAINVM_DEAD = 3,
+  LAINVM_DEAD = 2,
 } LainVmState;
 
 typedef enum {
-  LAINVM_SLICE_RUNNABLE = 0, /* 还有事做：可再次选中 */
-  LAINVM_SLICE_BLOCKED = 1,  /* 阻塞在某个端点上 */
-  LAINVM_SLICE_DONE = 2,     /* 激活结束 */
-  LAINVM_SLICE_TRAPPED = 3,  /* 拒绝执行，trap 已记录 */
+  LAINVM_SLICE_RUNNABLE = 0, /* 燃料用完但还没结束：可再次推进 */
+  LAINVM_SLICE_DONE = 1,     /* 激活结束 */
+  LAINVM_SLICE_TRAPPED = 2,  /* 拒绝执行，trap 已记录 */
 } LainVmSliceResult;
-
-/* BLOCKED 时的原因 */
-enum {
-  LAINVM_SUSPEND_YIELD = 1,
-  LAINVM_SUSPEND_ENDPOINT = 2,
-};
 
 /* 租约校验的**接口层**状态（不是运行期 Trap，也不占用 engine 的 1xxx 号段）。
  * 供给方与驱动靠它分辨"为什么 TCB 不肯收这份租约"。 */

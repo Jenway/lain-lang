@@ -273,6 +273,37 @@ const L1Inst *lainir_inst_call_ex(L1Builder *builder, const char *result,
   return finish_inst(builder, inst, operands, operand_count);
 }
 
+/* 值目标调用：symbol 留空，函数指针是 operands[0]；期望签名必须显式给出。
+ * ret_ty 是返回类型（无返回值传 NULL），params 是参数类型数组（会拷进 arena）。 */
+const L1Inst *lainir_inst_call_indirect(L1Builder *builder, const char *result,
+                                        const L1Type *ret_ty,
+                                        const L1Type *const *params,
+                                        uint32_t param_count,
+                                        const L1Operand *operands,
+                                        uint32_t operand_count) {
+  return lainir_inst_call_indirect_ex(builder, result, ret_ty, params, param_count,
+                                      operands, operand_count, false);
+}
+
+const L1Inst *lainir_inst_call_indirect_ex(L1Builder *builder,
+                                           const char *result,
+                                           const L1Type *ret_ty,
+                                           const L1Type *const *params,
+                                           uint32_t param_count,
+                                           const L1Operand *operands,
+                                           uint32_t operand_count, bool tail) {
+  L1Inst *inst = (L1Inst *)new_inst(builder, INST_CALL, result,
+                                    result ? 1u : 0u);
+  if (!inst) return NULL;
+  inst->ty = ret_ty;
+  inst->has_ty = ret_ty != NULL;
+  inst->call_params = copy_types(builder, params, param_count);
+  inst->call_param_count = param_count;
+  if (params && param_count && !inst->call_params) return NULL;
+  inst->is_tail = tail;
+  return finish_inst(builder, inst, operands, operand_count);
+}
+
 const L1Inst *lainir_inst_mem(L1Builder *builder, L1InstKind kind,
                               const char *result, const L1Type *ty,
                               L1MemOrder order, bool is_volatile,

@@ -12,7 +12,6 @@ add_library(lain::seed ALIAS lain_seed)
 target_sources(lain_seed
   PRIVATE
     src/meta/apply.c
-    src/backend/cbackend.c
     src/ir/build.c
     src/ir/infer.c
     src/text/opname.c
@@ -20,27 +19,22 @@ target_sources(lain_seed
     src/text/print.c
     src/ir/verify.c
     src/meta/ast_out.c
-    src/meta/expand.c
-    src/meta/expand_vm.c
     src/meta/host.c
+    src/meta/host_v2.c
+    src/meta/sym.c
     src/meta/tree.c
     src/vm/caps.c
-    src/vm/endpoint.c
     src/vm/engine.c
     src/vm/image.c
     src/vm/quota.c
     src/vm/space.c
     src/vm/tcb.c
-    src/vm/executor.c
-    src/vm/scheduler.c
     src/vm/trap.c
   PUBLIC
     FILE_SET HEADERS
       BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include
       FILES
         include/lain/meta/apply.h
-        include/lain/backend/emit.h
-        include/lain/backend/target.h
         include/lain/ir/build.h
         include/lain/ir/core.h
         include/lain/ir/codes.h
@@ -48,15 +42,15 @@ target_sources(lain_seed
         include/lain/ir/value.h
         include/lain/ir/verify.h
         include/lain/meta/ast_v1.h
-        include/lain/meta/expand.h
         include/lain/meta/host.h
+        include/lain/meta/host_v2.h
+        include/lain/meta/sym.h
         include/lain/meta/tree.h
         include/lain/text/opname.h
         include/lain/text/parse.h
         include/lain/text/print.h
         include/lain/vm/caps.h
         include/lain/vm/engine.h
-        include/lain/vm/endpoint.h
         include/lain/vm/quota.h
         include/lain/vm/space.h
         include/lain/vm/tcb.h

@@ -1,0 +1,257 @@
+// ctx.lain —— 编译期公共层：类型与值的构造、栈槽读写、类型标注与签名解析、循环帧。
+let st = import("state");
+let ty = import("types");
+let env = import("env");
+let ir = import("ir");
+let codes = import("ir_codes");
+let s = import("sym");
+let ax = import("ast");
+
+// --- ast 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
+func new_ty(k: addr) -> addr { return ax.new_ty(k); }
+func new_val(k: addr) -> addr { return ax.new_val(k); }
+func n_count(g: u64) -> u64 { return ax.n_count(g); }
+func n_sym(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); }
+func n_at(g: u64, i: u64) -> u64 { return ax.n_at(g, i); }
+func node_count(h: u64) -> u64 { return ax.node_count(h); }
+func node_sym(h: u64) -> u64 { return ax.node_sym(h); }
+func dl_bracket() -> u64 { return ax.dl_bracket(); }
+func dl_paren() -> u64 { return ax.dl_paren(); }
+func e_ast() -> u64 { return ax.e_ast(); }
+func e_type() -> u64 { return ax.e_type(); }
+func is_comma(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); }
+func is_name(g: u64, i: u64) -> u64 { return ax.is_name(g, i); }
+func is_group(g: u64, i: u64) -> u64 { return ax.is_group(g, i); }
+func delim_of(g: u64, i: u64) -> u64 { return ax.delim_of(g, i); }
+func no_slot() -> u64 { return ax.no_slot(); }
+
+// --- 类型与值 -----------------------------------------------------------
+func t64(k: addr) -> addr {
+  let p: addr = new_ty(k);
+  ty.ty_u64(p);
+  return p;
+}
+func tbool(k: addr) -> addr {
+  let p: addr = new_ty(k);
+  ty.ty_bool(p);
+  return p;
+}
+func tnone(k: addr) -> addr {
+  let p: addr = new_ty(k);
+  ty.ty_none(p);
+  return p;
+}
+func ti32(k: addr) -> addr {
+  let p: addr = new_ty(k);
+  ty.ty_i32(p);
+  return p;
+}
+
+// 把一个值推到当前指令的实参邮箱。字面量走立即数，其余走名字引用。
+func push_val(k: addr, v: addr) -> u64 {
+  if ty.vlit(v) == 1 { return ir.arg_int(k, ty.vbits(v)); }
+  return ir.arg_ref(k, ty.vn(v));
+}
+
+// 字面量物化成一条指令的值名（#if 的条件这类位置必须是值名）。
+func val_force(k: addr, v: addr, tp: addr) -> u64 {
+  if ty.vlit(v) == 0 { return ty.vn(v); }
+  ir.args_reset(k);
+  ir.arg_int(k, ty.vbits(v));
+  ir.arg_int(k, 0);
+  let res: u64 = ir.fresh_t(k);
+  ir.emit(k, codes.INST_ADD(), res, tp);
+  return res;
+}
+
+// 把 v（类型 from）转成 to，结果写 out。
+func coerce(k: addr, v: addr, from: addr, to: addr, out: addr) -> u64 {
+  ty.val_at(out, v);
+  if ty.ty_known(from) == 0 { return 0; }
+  if ty.ty_known(to) == 0 { return 0; }
+  if ty.vlit(v) == 1 {
+    return ty.val_lit(out, ty.vbits(v), to);
+  }
+  if ty.ty_same(from, to) == 1 { return 0; }
+  let kind: u64 = ty.cast_inst(ty.tk(from), ty.tw(from), ty.tsg(from), ty.tk(to), ty.tw(to));
+  if kind == 0 { return 0; }
+  ir.args_reset(k);
+  ir.arg_ref(k, ty.vn(v));
+  let res: u64 = ir.fresh_t(k);
+  ir.emit(k, kind, res, to);
+  return ty.val_ref(out, res, to);
+}
+
+// --- 栈槽 ---------------------------------------------------------------
+func slot_put(k: addr, j: u64, v: addr, tp: addr) -> u64 {
+  let w: addr = t64(k);
+  let c: addr = new_val(k);
+  coerce(k, v, tp, w, c);
+  ir.args_reset(k);
+  push_val(k, c);
+  ir.arg_ref(k, ir.slot_name(k, j));
+  return ir.emit_mem(k, codes.INST_STORE(), 0, w, 0);
+}
+
+func slot_get(k: addr, j: u64, tp: addr, out: addr) -> u64 {
+  let w: addr = t64(k);
+  ir.args_reset(k);
+  ir.arg_ref(k, ir.slot_name(k, j));
+  let res: u64 = ir.fresh_t(k);
+  ir.emit_mem(k, codes.INST_LOAD(), res, w, 0);
+  let v: addr = new_val(k);
+  ty.val_ref(v, res, w);
+  return coerce(k, v, w, tp, out);
+}
+
+func slot_copy(k: addr, dst: u64, src: u64) -> u64 {
+  let w: addr = t64(k);
+  ir.args_reset(k);
+  ir.arg_ref(k, ir.slot_name(k, src));
+  let res: u64 = ir.fresh_t(k);
+  ir.emit_mem(k, codes.INST_LOAD(), res, w, 0);
+  ir.args_reset(k);
+  ir.arg_ref(k, res);
+  ir.arg_ref(k, ir.slot_name(k, dst));
+  return ir.emit_mem(k, codes.INST_STORE(), 0, w, 0);
+}
+
+func kw_weight(h: u64) -> u64 {
+  if node_count(h) != 0 { return 0; }
+  let sym: u64 = node_sym(h);
+  if sym == s.k_let() { return 1; }
+  if sym == s.k_if() { return 1; }
+  if sym == s.k_loop() { return 6; }
+  if sym == s.k_while() { return 2; }
+  if sym == s.k_for() { return 6; }
+  return 0;
+}
+
+func count_list(h: u64, i: u64, n: u64, acc: u64) -> u64 {
+  if i >= n { return acc; }
+  let j: u64 = i + 1;
+  let h2: u64 = n_at(h, i);
+  return count_list(h, j, n, count_tree(h2, acc));
+}
+
+func count_tree(h: u64, acc: u64) -> u64 {
+  return count_list(h, 0, node_count(h), acc + kw_weight(h));
+}
+
+func emit_slots(k: addr, j: u64, n: u64) -> u64 {
+  let t: addr = new_ty(k);
+  ty.ty_u8(t);
+  let done: u64 = loop w(idx: u64 = j) while idx < n {
+    ir.args_reset(k);
+    ir.arg_int(k, 8);
+    ir.emit_mem(k, codes.INST_ALLOCA(), ir.slot_name(k, idx), t, 0);
+    idx = idx + 1;
+  };
+  return done;
+}
+
+// 按子树的 let / if / loop / while / for 记数，给过程入口预留足够的槽。
+
+// --- 类型标注 -----------------------------------------------------------
+func expect_sym(k: addr, g: u64, i: u64, sym: u64) -> u64 {
+  if i < n_count(g) {
+    if n_sym(g, i) == sym { return i + 1; }
+  }
+  st.st_fail(k, e_ast());
+  return i + 1;
+}
+
+// 类型标注：名字（i32 / u64 / bool / addr / void）或 [T] 组（按 addr 传）。
+func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 {
+  if i >= n_count(g) { st.st_fail(k, e_ast()); return i; }
+  let h: u64 = n_at(g, i);
+  if node_count(h) != 0 {
+    if ax.delim(h) == dl_bracket() { ty.ty_addr(out); return i + 1; }
+    st.st_fail(k, e_type());
+    return i + 1;
+  }
+  let sym: u64 = node_sym(h);
+  if sym == s.k_ro() { return parse_type(k, g, i + 1, out); }
+  if ty.ty_of_sym(sym, out) == 1 { return i + 1; }
+  st.st_fail(k, e_type());
+  return i + 1;
+}
+
+// --- 函数签名 -----------------------------------------------------------
+// --- 函数签名 -----------------------------------------------------------
+// 形参组：名字、':'、类型，形参之间用逗号分隔。返回形参个数。
+func parse_params(k: addr, pg: u64, i: u64, idx: u64, tintbl: addr, symtbl: addr) -> u64 {
+  let n: u64 = n_count(pg);
+  if i >= n { return idx; }
+  let sym: u64 = n_sym(pg, i);
+  let a: u64 = expect_sym(k, pg, i + 1, s.p_colon());
+  let t: addr = tintbl + idx * 24;
+  let j: u64 = parse_type(k, pg, a, t);
+  store(symtbl + idx * 8, sym);
+  let nj: u64 = if is_comma(pg, j) == 1 { j + 1 } else { j };
+  return parse_params(k, pg, nj, idx + 1, tintbl, symtbl);
+}
+
+// 顶层扫一遍找 func <name>，只解析头部。返回 1 表示找到。
+func sig_scan(k: addr, g: u64, i: u64, n: u64, name: u64, retp: addr, paramp: addr, meta: addr) -> u64 {
+  if i >= n { return 0; }
+  if n_sym(g, i) == s.k_func() and i + 2 < n {
+    if n_sym(g, i + 1) == name {
+      let pg: u64 = n_at(g, i + 2);
+      let syms: addr = st.st_alloc(k, 128);
+      let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
+      store(meta, 1);
+      store(meta + 8, np);
+      ty.ty_none(retp);
+      let a: u64 = i + 3;
+      if a < n and n_sym(g, a) == s.p_arrow() { parse_type(k, g, a + 1, retp); }
+      return 1;
+    }
+  }
+  return sig_scan(k, g, i + 1, n, name, retp, paramp, meta);
+}
+
+func sig_lookup(k: addr, name: u64, retp: addr, paramp: addr, meta: addr) -> u64 {
+  let root: u64 = st.st_root(k);
+  return sig_scan(k, root, 0, n_count(root), name, retp, paramp, meta);
+}
+
+
+// --- 循环帧 ---------------------------------------------------------------
+func find_loop_at(k: addr, label: u64, d: u64) -> u64 {
+  if d == 0 { return no_slot(); }
+  let f: addr = st.st_lf(k, d - 1);
+  if st.st_lf_label(f) == label { return d - 1; }
+  return find_loop_at(k, label, d - 1);
+}
+
+func find_loop(k: addr, label: u64, has_label: u64) -> u64 {
+  let d: u64 = st.st_loopdepth(k);
+  if d == 0 { return no_slot(); }
+  if has_label == 0 { return d - 1; }
+  return find_loop_at(k, label, d);
+}
+
+// --- 结果槽（if/loop 共用） ---------------------------------------------
+func alloc_res_slot(k: addr) -> u64 {
+  let j: u64 = st.st_next_slot(k);
+  let w: addr = t64(k);
+  ir.args_reset(k);
+  ir.arg_int(k, 0);
+  ir.arg_ref(k, ir.slot_name(k, j));
+  ir.emit_mem(k, codes.INST_STORE(), 0, w, 0);
+  return j;
+}
+
+// --- 标签头 -------------------------------------------------------------
+// <名字> ( … )：名字后面紧跟小括号才算标签。
+func loop_head(k: addr, g: u64, j: u64, ob: addr) -> u64 {
+  let n: u64 = n_count(g);
+  store(ob, 0);
+  if j + 1 < n and is_name(g, j) == 1 and is_group(g, j + 1) == 1 and delim_of(g, j + 1) == dl_paren() {
+    store(ob, 1);
+    store(ob + 8, n_sym(g, j));
+    return j + 1;
+  }
+  return j;
+}

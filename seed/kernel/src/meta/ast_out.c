@@ -38,6 +38,9 @@ uint64_t lain_ast_output_handler_calls(const LainAstOutput *o) {
 uint64_t lain_ast_output_visits(const LainAstOutput *o) {
   return o ? o->visits : 0;
 }
+uint64_t lain_ast_output_node_count(const LainAstOutput *o) {
+  return o ? o->header.node_count : 0;
+}
 uint32_t lain_ast_output_charge(LainAstOutput *o, uint64_t kind, uint64_t n) {  uint64_t *used;
   uint64_t limit;
   if (!o || !n) return LAIN_AST_ERR_PROTOCOL;

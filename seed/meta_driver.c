@@ -28,7 +28,7 @@
  *   --slice <n>       每次 engine_run 的燃料片（默认 2000000）
  *   --stack <字节>    栈区大小（默认 4194304）
  *   --quota <字节>    宿主分配账户（默认 268435456；0 = 不限额）
- *   --caps <n>        能力表容量（默认 64，登记 45 项）
+ *   --caps <n>        能力表容量（默认 64，登记 33 项）
  *   --depth <n>       最大调用深度（默认 64）
  *   --expect-status <n>  要求 Meta 报回的状态码等于 n，否则退出码 1
  *   --max-output <n>  不写文件时最多打印多少字节产物（默认 4096）
@@ -56,7 +56,6 @@
 #include "lain/ir/value.h"
 #include "lain/ir/verify.h"
 #include "lain/meta/apply.h"
-#include "lain/meta/expand.h"
 #include "lain/meta/host.h"
 #include "lain/text/parse.h"
 #include "lain/vm/caps.h"
@@ -265,6 +264,180 @@ static char *relative_under(const char *root, const char *path) {
   return rel;
 }
 
+/* 调试输出开关：只有 -v/--verbose 才打区域映射、trace slot 与 trap 细分。 */
+static int g_verbose = 0;
+
+/* ---- 依赖预登记 ---------------------------------------------------------
+ * Meta 的 import 只在已登记源码里查表（src/std/modules.lain 的 meta_source_find）。
+ * 跨模块样例因此必须把被导入的文件也登记进来，否则 Meta 报 11。
+ *
+ * 路径规则与 seed/lain0/src/Sema.cpp 的 resolveModulePath 一致：说明符按
+ * `::` 拆成路径，在导入方目录下先试「整条说明符」，再试「最后一处 :: 的末段」。
+ * 文件缺 .lain 后缀时补上。登记名沿用 --root 的词法相对路径。
+ *
+ * 只在给了 --root 时做：不给时登记名由用户逐条给出，驱动不臆测别人的命名。
+ */
+
+static int is_ident_byte(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9') || c == '_';
+}
+
+static int has_lain_suffix(const char *s) {
+  size_t n = strlen(s);
+  return n > 5 && strcmp(s + n - 5, ".lain") == 0;
+}
+
+/* 说明符转相对路径：`::` 变 `/`，缺 `.lain` 补上。tail_only 为真时只取
+ * 最后一处 `::` 之后的段。 */
+static char *spec_to_rel(const char *spec, int tail_only) {
+  const char *begin = spec;
+  const char *p, *last = NULL;
+  char *out;
+  size_t n, o = 0;
+  if (tail_only) {
+    for (p = spec; (p = strstr(p, "::")) != NULL; p += 2) last = p;
+    if (last) begin = last + 2;
+  }
+  n = strlen(begin);
+  out = (char *)malloc(n + 6);
+  if (!out) return NULL;
+  for (p = begin; *p; p++) {
+    if (p[0] == ':' && p[1] == ':') { out[o++] = '/'; p++; }
+    else out[o++] = *p;
+  }
+  out[o] = 0;
+  if (!has_lain_suffix(out)) memcpy(out + o, ".lain", 6);
+  return out;
+}
+
+/* dir 与 rel 拼起来，文件可读就返回 malloc 的路径，否则 NULL。 */
+static char *existing_in(const char *dir, const char *rel) {
+  size_t need = strlen(dir) + strlen(rel) + 2;
+  char *full = (char *)malloc(need);
+  FILE *f;
+  if (!full) return NULL;
+  join_path(full, need, dir, rel);
+  f = fopen(full, "rb");
+  if (!f) { free(full); return NULL; }
+  fclose(f);
+  return full;
+}
+
+/* 文件所在目录；没有分隔符时给 "."，落在根上时给 "/"。 */
+static char *dir_of(const char *file) {
+  const char *slash = NULL, *p;
+  char *out;
+  size_t n;
+  for (p = file; *p; p++) if (*p == '/' || *p == '\\') slash = p;
+  if (!slash) return dup_cstr(".");
+  n = (size_t)(slash - file);
+  if (n == 0) n = 1;
+  out = (char *)malloc(n + 1);
+  if (!out) return NULL;
+  memcpy(out, file, n);
+  out[n] = 0;
+  return out;
+}
+
+/* 扫描一份源码里的 import("...")，把解析到的文件按登记名追加进 sources。
+ * 循环 import 由登记名去重挡住；解析不到的文件跳过，让 Meta 自己报错。 */
+static int preload_imports(SourceFile *sources, uint32_t *count, const char *root) {
+  uint32_t s;
+  for (s = 0; s < *count; s++) {   /* count 会增长：依赖的依赖也要扫 */
+    const char *text = sources[s].text;
+    uint32_t len = sources[s].length;
+    char *dir = dir_of(sources[s].file);
+    uint32_t i = 0;
+    if (!dir) return 1;
+    while (i < len) {
+      char c = text[i];
+      if (c == '/' && i + 1 < len && text[i + 1] == '/') {
+        while (i < len && text[i] != '\n') i++;
+        continue;
+      }
+      if (c == '"') {
+        i++;
+        while (i < len && text[i] != '"') {
+          if (text[i] == '\\') i++;
+          i++;
+        }
+        i++;
+        continue;
+      }
+      if (is_ident_byte(c)) {
+        uint32_t start = i, k;
+        char spec[512];
+        size_t sl = 0;
+        while (i < len && is_ident_byte(text[i])) i++;
+        if (i - start != 6 || memcmp(text + start, "import", 6) != 0) continue;
+        k = i;
+        while (k < len && (text[k] == ' ' || text[k] == '\t' ||
+                           text[k] == '\r' || text[k] == '\n')) k++;
+        if (k >= len || text[k] != '(') continue;
+        k++;
+        while (k < len && (text[k] == ' ' || text[k] == '\t' ||
+                           text[k] == '\r' || text[k] == '\n')) k++;
+        if (k >= len || text[k] != '"') continue;
+        k++;
+        while (k < len && text[k] != '"' && sl + 1 < sizeof(spec)) spec[sl++] = text[k++];
+        spec[sl] = 0;
+        if (k >= len || text[k] != '"' || sl == 0) continue;
+        {
+          char *rel = spec_to_rel(spec, 0);
+          char *file = rel ? existing_in(dir, rel) : NULL;
+          char *reg;
+          uint32_t t;
+          int dup = 0;
+          free(rel);
+          if (!file) {
+            rel = spec_to_rel(spec, 1);
+            file = rel ? existing_in(dir, rel) : NULL;
+            free(rel);
+          }
+          if (!file) continue;
+          reg = relative_under(root, file);
+          if (!reg) { free(file); continue; }
+          for (t = 0; t < *count; t++)
+            if (strcmp(sources[t].path, reg) == 0) { dup = 1; break; }
+          if (dup) {
+            free(reg);
+            free(file);
+            continue;
+          }
+          {
+            size_t n = 0;
+            char *src = read_file(file, &n);
+            if (!src) { free(reg); free(file); continue; }
+            if (*count >= DRIVER_MAX_SOURCES) {
+              printf("源码太多（含 import 依赖）\n");
+              free(reg); free(file); free(src); free(dir);
+              return 2;
+            }
+            if (n > 0xFFFFFFFFu) {
+              printf("源文件过大 %s\n", file);
+              free(reg); free(file); free(src); free(dir);
+              return 2;
+            }
+            sources[*count].path = reg;
+            sources[*count].file = file;
+            sources[*count].text = src;
+            sources[*count].length = (uint32_t)n;
+            if (g_verbose)
+              printf("source[%u] path=%s file=%s bytes=%u (import)\n", *count,
+                     reg, file, sources[*count].length);
+            (*count)++;
+          }
+        }
+        continue;
+      }
+      i++;
+    }
+    free(dir);
+  }
+  return 0;
+}
+
 static void usage(FILE *out) {
   fputs("用法: lain-meta [选项] <登记名> <源文件> [...]\n"
         "      lain-meta --root <目录> [选项] <源文件> [...]\n"
@@ -273,9 +446,6 @@ static void usage(FILE *out) {
         "      -q/--quiet -v/--verbose\n",
         out);
 }
-
-/* 调试输出开关：只有 -v/--verbose 才打区域映射、trace slot 与 trap 细分。 */
-static int g_verbose = 0;
 
 static int map_region(LainVmSpace *space, const void *base, uint64_t bytes,
                       uint64_t accessible, uint32_t rights, const char *what) {
@@ -415,6 +585,13 @@ int main(int argc, char **argv) {
     i++;
   }
   if (source_count == 0) { usage(stderr); return 2; }
+
+  /* 跨模块样例：把 import 依赖一并登记，登记名沿用 --root 的词法相对路径。
+     依赖追加在命令行给的源之后，所以 --lower 的下标仍然指向命令行里的顺序。 */
+  if (root_dir != NULL) {
+    int pre = preload_imports(sources, &source_count, root_dir);
+    if (pre) return pre;
+  }
   if (lower_index >= source_count) { printf("--lower 越界\n"); return 2; }
 
   /* 编译单元来源二选一，**必填**：旧默认值 `bootstrap/SOURCE_ORDER` 已随那份清单删除
@@ -806,6 +983,20 @@ int main(int argc, char **argv) {
     }
   }
 
+  /* 产物自检：跑到底却什么都没写出来，就是失败。产物本身是**一份单元**，
+     跨模块引用要等链接时才能解析，所以语法与符号校验交给 lainir-verify。 */
+  if (rc == 0 && slice != LAINVM_SLICE_RUNNABLE && expect_status < 0 &&
+      lainmeta_host_status(host) == 0 && lainmeta_host_output_length(host) == 0) {
+    printf("OUTPUT EMPTY 状态为 0 却没有产物\n");
+    rc = 1;
+  }
+
+  /* 没指定期望状态时，Meta 报回非 0 就是失败：驱动的退出码必须反映它。 */
+  if (expect_status < 0 && lainmeta_host_status(host) != 0) {
+    printf("META STATUS FAILED status=%u（未给 --expect-status）\n",
+           lainmeta_host_status(host));
+    rc = 1;
+  }
   if (expect_status >= 0 && (int)lainmeta_host_status(host) != expect_status) {
     printf("EXPECT-STATUS FAILED 期望 %d 实得 %u\n", expect_status,
            lainmeta_host_status(host));

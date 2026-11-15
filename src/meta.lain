@@ -582,7 +582,9 @@ func meta_emit_call(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64,
   let w1: u32 = std_lainir.lainir_proc_word_write();
   let name_at: addr = base + name_lo;
   let name_len: u64 = name_hi - name_lo;
-  let w2: u32 = std_lainir.lainir_write(name_at, name_len);
+  let nbuf: addr = std_scope.meta_path_buf();
+  let nsym: u64 = std_scope.meta_unit_symbol(nbuf, name_at, name_len);
+  let w2: u32 = std_lainir.lainir_write(nbuf, nsym);
   let w3: u32 = std_lainir.lainir_empty_params_write();
   let w4: u32 = std_lainir.lainir_repr(kind, width);
   let w5: u32 = std_lainir.lainir_open_body();
@@ -615,7 +617,10 @@ func meta_emit_let(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64, 
   let w1: u32 = std_lainir.lainir_proc_word_write();
   let name_at: addr = base + name_lo;
   let name_len: u64 = name_hi - name_lo;
-  let w2: u32 = std_lainir.lainir_write(name_at, name_len);
+  // 顶层绑定在定义它的单元里也带模块键前缀（与 lain0 一致）。
+  let nbuf: addr = std_scope.meta_path_buf();
+  let nsym: u64 = std_scope.meta_unit_symbol(nbuf, name_at, name_len);
+  let w2: u32 = std_lainir.lainir_write(nbuf, nsym);
   let w3: u32 = std_lainir.lainir_empty_params_write();
   let w4: u32 = std_lainir.lainir_repr(kind, width);
   let w5: u32 = std_lainir.lainir_body_return_write();
@@ -629,7 +634,9 @@ func meta_emit_chain(base: addr, len: u64, name_lo: u64, name_hi: u64, kind: u64
   let w1: u32 = std_lainir.lainir_proc_word_write();
   let name_at: addr = base + name_lo;
   let name_len: u64 = name_hi - name_lo;
-  let w2: u32 = std_lainir.lainir_write(name_at, name_len);
+  let nbuf: addr = std_scope.meta_path_buf();
+  let nsym: u64 = std_scope.meta_unit_symbol(nbuf, name_at, name_len);
+  let w2: u32 = std_lainir.lainir_write(nbuf, nsym);
   let w3: u32 = std_lainir.lainir_empty_params_write();
   let w4: u32 = std_lainir.lainir_repr(kind, width);
   let w5: u32 = std_lainir.lainir_open_body();
@@ -1578,8 +1585,10 @@ func meta_emit_expr_level(base: addr, len: u64, kind: u64, width: u64, t_lo: u64
         // 传进来的上下文宽度。
         // 操作数是**源码里的值**（`%acc` = 无）时它自己有名字，可以查类型；是临时值
         // 时没有类型来源，只能用上下文宽度。
+        // 源类型的宽度与符号性一起取：高 32 位是符号标记（1 = 有符号），低 32 位是宽度。
+        // 有符号变宽必须发 `#sext`：`#zext` 会把 -2 变成 4294967294。
         let acc_srcf: bool = acc == 0xFFFFFFFFFFFFFFFF;
-        let srcw: u64 = loop pick_srcw(t: u64 = 0) {
+        let src_pack: u64 = loop pick_srcw(t: u64 = 0) {
           if acc_srcf == 0 { break pick_srcw(width); }
           let alt_sc: addr = lain_meta_scratch_data();
           let aln: u64 = std_recognize.meta_node_at(base, alo);
@@ -1589,8 +1598,13 @@ func meta_emit_expr_level(base: addr, len: u64, kind: u64, width: u64, t_lo: u64
           let alt_hi: u64 = std_types.meta_cell_get(alt_sc + 0);
           let asid: u64 = std_scalars.meta_type_resolve(base, len, alt, alt_hi);
           let asw2: u64 = std_registry.meta_tid_repr_width(asid);
-          break pick_srcw(asw2);
+          let asign: u64 = std_scalars.meta_type_signed(asid);
+          let sshift: u64 = asign << 32;
+          let spack: u64 = sshift or asw2;
+          break pick_srcw(spack);
         };
+        let src_signed: bool = (src_pack >> 32) != 0;
+        let srcw: u64 = src_pack and 0xFFFFFFFF;
         let widen: bool = srcw < atw;
         let narrow: bool = srcw > atw;
         // 出参名前缀与通用算子那条路同一个判断：绑定模式的最后一条直接写 %NAME。
@@ -1619,7 +1633,7 @@ func meta_emit_expr_level(base: addr, len: u64, kind: u64, width: u64, t_lo: u64
         let ay5: u32 = std_lainir.lainir_result_sep_write();
         let ay6: u32 = loop pick_ay6(t: u64 = 0) {
           if widen {
-            let azn: addr = std_emit.meta_sym_zext;
+            let azn: addr = if src_signed { std_emit.meta_sym_sext } else { std_emit.meta_sym_zext };
             let az1: u32 = std_funcs.meta_emit_op_lit(azn, 4, atk, atw);
             let az2: u32 = meta_emit_ref2(base, len, acc, alo, ahi);
             break pick_ay6(az2);
@@ -1838,7 +1852,12 @@ func meta_emit_expr_level(base: addr, len: u64, kind: u64, width: u64, t_lo: u64
     let a_info: u64 = std_registry.meta_tid_repr(a_tid);
     let a_kind: u64 = a_info and 255;
     let a_is_addr: bool = a_kind == 3;
-    let is_lea: bool = is_plus and a_is_addr;
+    // 模块成员的声明在**别的源文件**里，操作数窗口查不到它的类型（`M.base + i`
+    // 就是这么漏的，发成 #add[#bits<64>] 被验证器按坏操作数类型拒掉）。绑定声明的
+    // 类型是 addr 时按地址算术发：结果只有 #lea 一种可能，发错验证器当场就拒。
+    let decl_addr: bool = kind == 3;
+    let addr_like: bool = a_is_addr or decl_addr;
+    let is_lea: bool = is_plus and addr_like;
     // `p + i * K`：地址算术把 scale 固定成 1，于是 `p + i * 4` 先算成 `(p + i) * 4`、
     // 在 addr 上报 6。这里就地看出来：右操作数后面紧跟 `* <裸字面量>`，且再往后不是算子。
     // 认出来就把那条乘法挪进 `#lea` 的 scale，游标跳过那两个节点。

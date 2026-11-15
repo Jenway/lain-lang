@@ -1,0 +1,160 @@
+// v2 宿主的冒烟用例：符号驻留、AST 句柄、结构化 IR、沙箱 apply。
+//
+// 它做四件事，任何一步失败都会让宿主能力返回非 0 状态，VM 立刻 Trap：
+//   1. 按 SymId 在 examples/arith.lain 的 RawAst 里认出 let total: i32 = 1 + 2;
+//   2. 建一个 #proc 把两个加数加起来，verify 之后把 .l1 文本吐到宿主输出；
+//   3. 用 ast_out 事务造一个「组里包一个 token」的新节点并提交；
+//   4. 把 (1) 读到的两个字面量交给 apply_module，在隔离空间里算出和。
+
+let K_ADD: u64 = 0;
+let K_RETURN: u64 = 84;
+let K_BITS: u64 = 1;  // 类型码 = L1TypeKind + 1（TY_BITS = 0）
+let AST_GROUP: u64 = 2;
+
+extern v2_source_count() -> u64 = lain2_source_count;
+extern v2_source_root(src: u64) -> u64 = lain2_source_root;
+extern v2_sym_intern(p: addr, n: u64) -> u64 = lain2_sym_intern;
+extern v2_ast_kind(id: u64) -> u64 = lain2_ast_kind;
+extern v2_ast_sym(id: u64) -> u64 = lain2_ast_sym;
+extern v2_ast_child_count(id: u64) -> u64 = lain2_ast_child_count;
+extern v2_ast_child(id: u64, i: u64) -> u64 = lain2_ast_child;
+extern v2_ast_literal_addr(id: u64) -> addr = lain2_ast_literal_addr;
+extern v2_ast_literal_len(id: u64) -> u64 = lain2_ast_literal_len;
+extern v2_ast_tx_begin() -> u64 = lain2_ast_tx_begin;
+extern v2_ast_tx_commit(root: u64) -> u64 = lain2_ast_tx_commit;
+extern v2_ast_mk_token(sym: u64, origin: u64, p: addr, n: u64) -> u64 = lain2_ast_mk_token;
+extern v2_ast_mk_group(delim: u64, n: u64, kids: addr) -> u64 = lain2_ast_mk_group;
+extern v2_diag_emit(span: u64, level: u64, p: addr, n: u64) -> u64 = lain2_diag_emit;
+extern v2_mem_alloc(n: u64, align: u64) -> addr = lain2_mem_alloc;
+extern v2_ir_mod_new(name: u64) -> u64 = lain2_ir_mod_new;
+extern v2_ir_proc_begin(mod: u64, name: u64) -> u64 = lain2_ir_proc_begin;
+extern v2_ir_proc_param(mod: u64, name: u64, kind: u64, width: u64) -> u64 = lain2_ir_proc_param;
+extern v2_ir_proc_result(mod: u64, kind: u64, width: u64) -> u64 = lain2_ir_proc_result;
+extern v2_ir_proc_end(mod: u64) -> u64 = lain2_ir_proc_end;
+extern v2_ir_region_begin(mod: u64) -> u64 = lain2_ir_region_begin;
+extern v2_ir_region_result(mod: u64, kind: u64, width: u64) -> u64 = lain2_ir_region_result;
+extern v2_ir_region_end(mod: u64) -> u64 = lain2_ir_region_end;
+extern v2_ir_args_reset(mod: u64) -> u64 = lain2_ir_args_reset;
+extern v2_ir_arg_ref(mod: u64, name: u64) -> u64 = lain2_ir_arg_ref;
+extern v2_ir_inst(mod: u64, kind: u64, result: u64, tk: u64, tw: u64) -> u64 = lain2_ir_inst;
+extern v2_ir_inst_jump(mod: u64, kind: u64, label: u64) -> u64 = lain2_ir_inst_jump;
+extern v2_ir_mod_verify(mod: u64) -> u64 = lain2_ir_mod_verify;
+extern v2_ir_mod_emit_output(mod: u64) -> u64 = lain2_ir_mod_emit_output;
+extern v2_apply_module(mod: u64, entry: u64, args_p: addr, n: u64, out_p: addr, cap: u64) -> u64 = lain2_apply_module;
+
+// 在组的直接孩子里找 want，返回 1 基下标；0 表示没有。
+func index_of(g: u64, want: u64) -> u64 {
+  let n: u64 = v2_ast_child_count(g);
+  let at: u64 = loop s(i: u64 = 0, hit: u64 = 0) while i < n and hit == 0 {
+    let kid: u64 = v2_ast_child(g, i);
+    let same: bool = v2_ast_sym(kid) == want;
+    hit = if same { i + 1 } else { 0 };
+    i = i + 1;
+  };
+  return at;
+}
+
+// 把组里前两个单字符十进制字面量打包：低位是第一个，高位是第二个。
+func two_digits(g: u64, empty: addr) -> u64 {
+  let n: u64 = v2_ast_child_count(g);
+  let packed: u64 = loop s(i: u64 = 0, lo: u64 = 0, hi: u64 = 0, seen: u64 = 0,
+                            out: u64 = 0)
+    while i < n and seen < 2 {
+      let tok: u64 = v2_ast_child(g, i);
+      let one: bool = v2_ast_literal_len(tok) == 1;
+      let p: addr = if one { v2_ast_literal_addr(tok) } else { empty };
+      let b: u8 = load(p);
+      let w: u64 = b as u64;
+      let digit: bool = one and w >= 48 and w <= 57;
+      let val: u64 = w - 48;
+      lo = if digit and seen == 0 { val } else { lo };
+      hi = if digit and seen == 1 { val } else { hi };
+      seen = if digit { seen + 1 } else { seen };
+      out = (hi << 32) or lo;
+      i = i + 1;
+    };
+  return packed;
+}
+
+// 造一个 %r = #add(%a, %b); #return %r 的模块，返回模块句柄。
+func build_adder(mod_name: u64, proc_name: u64, a: u64, b: u64, sum: u64) -> u64 {
+  let m: u64 = v2_ir_mod_new(mod_name);
+  v2_ir_proc_begin(m, proc_name);
+  v2_ir_proc_param(m, a, K_BITS, 64);
+  v2_ir_proc_param(m, b, K_BITS, 64);
+  v2_ir_proc_result(m, K_BITS, 64);
+  // 过程体的区域不声明结果：结果类型归 #proc 的声明（验证器 2021）。
+  v2_ir_region_begin(m);
+  v2_ir_args_reset(m);
+  v2_ir_arg_ref(m, a);
+  v2_ir_arg_ref(m, b);
+  v2_ir_inst(m, K_ADD, sum, K_BITS, 64);
+  v2_ir_args_reset(m);
+  v2_ir_arg_ref(m, sum);
+  v2_ir_inst_jump(m, K_RETURN, 0);
+  v2_ir_region_end(m);
+  v2_ir_proc_end(m);
+  return m;
+}
+
+// 在 AstOut 里造一个「组里包一个 total 词」的树并提交，返回 1 表示形状对。
+func ast_out_probe(tag: u64) -> u64 {
+  let text: addr = "total";
+  v2_ast_tx_begin();
+  let child: u64 = v2_ast_mk_token(tag, 0, text, 5);
+  let kids: addr = v2_mem_alloc(4, 4);
+  let narrow: u32 = child as u32;
+  store(kids, narrow);
+  let root: u64 = v2_ast_mk_group(0, 1, kids);
+  v2_ast_tx_commit(root);
+  let is_group: bool = v2_ast_kind(root) == AST_GROUP;
+  let no_sym: bool = v2_ast_sym(root) == 0;
+  let child_sym: bool = v2_ast_sym(child) == tag;
+  let ok: bool = is_group and no_sym and child_sym;
+  let v: u64 = if ok { 1 } else { 0 };
+  return v;
+}
+
+@root
+func lain_meta_v2_entry(bias: u64) -> u64 {
+  let root: u64 = v2_source_root(0);
+  let want: u64 = v2_sym_intern("total", 5);
+  let let_sym: u64 = v2_sym_intern("let", 3);
+  let at: u64 = index_of(root, want);
+  let prev: u64 = if at > 1 { at - 2 } else { 0 };
+  let ok_decl: bool = at != 0 and v2_ast_sym(v2_ast_child(root, prev)) == let_sym;
+
+  let empty: addr = v2_mem_alloc(1, 1);
+  let packed: u64 = two_digits(root, empty);
+  let lo: u64 = packed and 0xFFFFFFFF;
+  let hi: u64 = packed >> 32;
+  let sum: u64 = lo + hi;
+  let ok_digits: bool = hi != 0 and sum == 3;
+
+  let add: u64 = v2_sym_intern("add", 3);
+  let m: u64 = build_adder(v2_sym_intern("v2_smoke", 8), add,
+                           v2_sym_intern("a", 1), v2_sym_intern("b", 1),
+                           v2_sym_intern("sum", 3));
+  let verified: u64 = v2_ir_mod_verify(m);
+  let emitted: u64 = v2_ir_mod_emit_output(m);
+  let ok_ir: bool = verified == 0 and emitted != 0;
+
+  let abuf: addr = v2_mem_alloc(16, 8);
+  let obuf: addr = v2_mem_alloc(8, 8);
+  store(abuf, lo);
+  store(abuf + 8, hi);
+  let got: u64 = v2_apply_module(m, add, abuf, 2, obuf, 8);
+  let ok_apply: bool = got == sum;
+
+  let ok_ast: bool = ast_out_probe(want) == 1;
+
+  let ok: bool = ok_decl and ok_digits and ok_ir and ok_apply and ok_ast;
+  let okmsg: addr = "smoke ok";
+  let badmsg: addr = "smoke failed";
+  let msg: addr = if ok { okmsg } else { badmsg };
+  let level: u64 = if ok { 0 } else { 1 };
+  v2_diag_emit(0, level, msg, 8);
+
+  let out: u64 = if ok { sum } else { 0 };
+  return out;
+}

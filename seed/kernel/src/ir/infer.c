@@ -102,8 +102,12 @@ const L1Type *lainir_inst_result_type(const LainIrTypes *types,
     return NULL;
   }
   if (inst->kind == INST_CALL) {
-    const L1Subroutine *callee =
-        lainir_find_subroutine(types->module, inst->symbol);
+    const L1Subroutine *callee;
+    if (!inst->symbol) {
+      /* 值形式调用：返回类型写在签名里。 */
+      return inst->has_ty ? inst->ty : NULL;
+    }
+    callee = lainir_find_subroutine(types->module, inst->symbol);
     if (callee && index < callee->result_count) return callee->results[index];
     return NULL;
   }
