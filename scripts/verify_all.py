@@ -382,9 +382,97 @@ def check_ir_cases():
     return passed, len(IR_CASES), details
 
 
+# Meta 扩展测试：编译期求值（eval）必须把依赖折叠成常量，产物里不留求值入口。
+META_TESTS = os.path.join(ROOT, "tests", "meta")
+META_TEST_OUT = os.path.join(WORK, "meta_tests")
+META_CASES = [
+    {"file": "eval_comptime.lain", "entry": "s0__main", "value": 5112,
+     "folds": [("s0__folded", "55"), ("s0__folded_plus", "55")]},
+]
+
+
+def proc_block(text, name):
+    """取 “#proc <name>(” 到该过程收尾 “}” 之间的正文。"""
+    start = text.find("#proc %s(" % name)
+    if start < 0:
+        return None
+    end = text.find("\n}\n", start)
+    if end < 0:
+        return None
+    return text[start:end]
+
+
+def compile_meta_test(stem, units):
+    """编译 tests/meta/<stem>.lain。回 (产物路径, 驱动输出, 驱动退出码)。"""
+    out_path = os.path.join(META_TEST_OUT, stem + ".l1")
+    command = [LAIN_META] + units + [os.path.join("tests", "meta", stem + ".lain"),
+                                     "--out", out_path]
+    result = run(command)
+    return out_path, result.stdout + result.stderr, result.returncode
+
+
+def check_meta_cases(units):
+    """跑 Meta 扩展测试。回 (通过数, 总数, 明细列表)。"""
+    passed = 0
+    details = []
+    for case in META_CASES:
+        stem = case["file"][:-len(".lain")]
+        out_path, text, code = compile_meta_test(stem, units)
+        if code != 0 or "result=0" not in text:
+            body = text.strip().splitlines()
+            details.append("%s 编译: %s" % (case["file"], body[-1] if body else "失败"))
+            continue
+        keep = run([LAINIR_VERIFY, out_path])
+        if keep.returncode != 0:
+            body = (keep.stdout + keep.stderr).strip().splitlines()
+            details.append("%s 校验: %s" % (case["file"], body[0] if body else "失败"))
+            continue
+        with open(out_path, "r", encoding="utf-8") as handle:
+            ir_text = handle.read()
+        if "@__meta_eval" in ir_text:
+            details.append("%s 产物里残留求值入口 @__meta_eval" % case["file"])
+            continue
+        broken = False
+        for proc, literal in case["folds"]:
+            block = proc_block(ir_text, proc)
+            if block is None:
+                details.append("%s 缺少过程 %s" % (case["file"], proc))
+                broken = True
+                break
+            if "#call @" in block:
+                details.append("%s 的 %s 仍在调用子过程" % (case["file"], proc))
+                broken = True
+                break
+            if literal not in block:
+                details.append("%s 的 %s 没有折叠出常量 %s"
+                               % (case["file"], proc, literal))
+                broken = True
+                break
+        if broken:
+            continue
+        got, error, _ = execute([out_path], case["entry"], [])
+        if error or not got or measure(got, case["value"]) != case["value"]:
+            details.append("%s 执行 %s 应为 %d"
+                           % (case["file"], case["entry"], case["value"]))
+            continue
+        passed += 1
+    # 负测试：eval 内引用运行期形参必须编译失败。
+    out_path, text, code = compile_meta_test("eval_runtime_ref", units)
+    if "result=0" in text:
+        details.append("eval_runtime_ref.lain 编译期引用了运行期形参却编译成功")
+    elif "compile failed" not in text:
+        body = text.strip().splitlines()
+        details.append("eval_runtime_ref.lain 没有编译失败诊断: %s"
+                       % (body[-1] if body else "无输出"))
+    else:
+        passed += 1
+    return passed, len(META_CASES) + 1, details
+
+
 def main():
     started = time.time()
     os.makedirs(WORK, exist_ok=True)
+    os.makedirs(META_TEST_OUT, exist_ok=True)
     print("构建中 …")
     build()
 
@@ -463,6 +551,15 @@ def main():
     ir_passed, ir_total, ir_details = check_ir_cases()
     print("IR 用例 %d/%d" % (ir_passed, ir_total))
     problems += ir_details
+
+    print()
+    print("[Meta 扩展测试]  编译期求值 eval（常量折叠 / 隔离 VM 执行 / 运行期引用被拒）")
+    if units:
+        meta_passed, meta_total, meta_details = check_meta_cases(units)
+        print("Meta 用例 %d/%d" % (meta_passed, meta_total))
+        problems += meta_details
+    else:
+        print("Meta 用例 跳过（自举单元缺失）")
 
     if problems:
         print()

@@ -12,6 +12,7 @@ let cx = import("ctx");
 let agg = import("agg");
 let modules = import("modules");
 let bi = import("builtins");
+let comptime = import("comptime");
 
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
@@ -96,6 +97,7 @@ func expr_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64
   // 左操作数是地址时，右操作数的提示类型必须是整数（否则 a + 512 里的字面量会变成地址）。
   let hint: addr = if ty.tk(ty.vty(out)) == 3 { t64(k) } else { ty.vty(out) };
   let rj: u64 = expr(k, g, i + 1, p + 1, hint, rv);
+  if st.st_ok(k) != 0 { return rj; }
   let lt: addr = ty.vty(out);
   let rt: addr = ty.vty(rv);
   let opt: addr = new_ty(k);
@@ -300,6 +302,11 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
     ty.val_lit(out, b, t);
     return i + 1;
   }
+  if sym == s.k_eval() {
+    if i + 1 < n and is_group(g, i + 1) == 1 {
+      if delim_of(g, i + 1) == dl_paren() { return eval_call(k, g, i, want, out); }
+    }
+  }
   if sym == s.k_if() {
     let t: addr = box(k);
     return if_compile(k, g, i, want, out, t);
@@ -329,6 +336,63 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
     }
   }
   return var_ref(k, g, i, out);
+}
+
+// --- eval ---------------------------------------------------------------
+// eval(算得出来的东西)：把内层表达式编进独立的临时模块，交给 Lain VM 跑出标量，
+// 再当作字面量交回外层。运行期局部量在求值时不可见，引用它们会报未绑定。
+func eval_fail(k: addr, tmp: u64, saved_mod: u64, saved_sp: u64, code: u64, out: addr, back: u64) -> u64 {
+  comptime.release(tmp);
+  st.st_set_mod(k, saved_mod);
+  st.st_set_sp(k, saved_sp);
+  ty.val_none(out);
+  st.st_fail(k, code);
+  return back;
+}
+
+func eval_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  let pg: u64 = n_at(g, i + 1);
+  let saved_mod: u64 = st.st_mod(k);
+  let saved_sp: u64 = st.st_sp(k);
+  env.env_release(k, 0);
+  let tmp: u64 = comptime.clone(k);
+  st.st_set_mod(k, tmp);
+  let ename: u64 = comptime.entry_name();
+  ir.proc_begin(k, ename);
+  ir.region_begin(k);
+  let nslots: u64 = 16 + 32 + cx.count_tree(pg, 0);
+  emit_slots(k, 0, nslots);
+  let tv: addr = new_val(k);
+  expr(k, pg, 0, 0, tnone(k), tv);
+  if st.st_ok(k) != 0 {
+    return eval_fail(k, tmp, saved_mod, saved_sp, st.st_err(k), out, i + 2);
+  }
+  if ty.ty_known(tv) == 0 {
+    return eval_fail(k, tmp, saved_mod, saved_sp, e_type(), out, i + 2);
+  }
+  let vt: addr = new_ty(k);
+  ty.ty_at(vt, ty.vty(tv));
+  if ty.tk(vt) == 3 or ty.ty_byte_ok(vt) == 0 {
+    return eval_fail(k, tmp, saved_mod, saved_sp, e_type(), out, i + 2);
+  }
+  ir.proc_result(k, vt);
+  ir.args_reset(k);
+  push_val(k, tv);
+  ir.emit_jump(k, codes.INST_RETURN(), 0);
+  ir.region_end(k);
+  let vrc: u64 = comptime.verify(tmp);
+  if vrc != 0 {
+    return eval_fail(k, tmp, saved_mod, saved_sp, e_unsup(), out, i + 2);
+  }
+  let ob: addr = comptime.out_buf();
+  ir.args_reset(k);
+  let bits: u64 = comptime.apply_scalar(tmp, ename, ob);
+  comptime.release(tmp);
+  st.st_set_mod(k, saved_mod);
+  st.st_set_sp(k, saved_sp);
+  ty.val_lit(out, bits, vt);
+  coerce(k, out, vt, want, out);
+  return i + 2;
 }
 
 // --- if -----------------------------------------------------------------

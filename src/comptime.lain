@@ -1,0 +1,29 @@
+// comptime.lain —— 编译期求值的外壳：临时模块的克隆、入口收尾、隔离执行与释放。
+// 递归的表达式求值留在 core.lain：core 单向 import 本文件，这里不能反过来 import core。
+let st = import("state");
+
+extern lain2_sym_intern(p: addr, n: u64) -> u64 = lain2_sym_intern;
+extern lain2_ir_mod_verify(mod: u64) -> u64 = lain2_ir_mod_verify;
+extern lain2_ir_mod_clone_completed(mod: u64) -> u64 = lain2_ir_mod_clone_completed;
+extern lain2_ir_mod_free(mod: u64) -> u64 = lain2_ir_mod_free;
+extern lain2_apply_module(mod: u64, entry: u64, args: addr, arg_n: u64, out: addr, out_cap: u64) -> u64 = lain2_apply_module;
+extern lain2_mem_alloc(bytes: u64, align: u64) -> addr = lain2_mem_alloc;
+
+// 求值入口名：临时模块只装这一个过程，固定名字不会撞车。
+func entry_name() -> u64 { return lain2_sym_intern("__meta_eval", 11); }
+
+func clone(k: addr) -> u64 { return lain2_ir_mod_clone_completed(st.st_mod(k)); }
+
+func verify(m: u64) -> u64 { return lain2_ir_mod_verify(m); }
+
+func release(m: u64) -> u64 { return lain2_ir_mod_free(m); }
+
+// 结果缓冲区：apply 要 8 字节可写区，从工作区线性切一块。
+func out_buf() -> addr { return lain2_mem_alloc(8, 8); }
+
+// 零参调用。宿主把求值结果直接写进返回值，失败则以 Trap 中止整个编译。
+// 形参表为空时宿主不检查实参指针；结果区仍要 8 字节可写。
+func apply_scalar(m: u64, entry: u64, out: addr) -> u64 {
+  let none: addr = 0 as addr;
+  return lain2_apply_module(m, entry, none, 0, out, 8);
+}

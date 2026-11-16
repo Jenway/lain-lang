@@ -1623,6 +1623,55 @@ static uint32_t v2_ir_mod_emit_output(void *ctx, const uint64_t *args,
   return 0;
 }
 
+/* --- 原语：隔离求值的模块生命周期 ---------------------------------------- */
+
+/* 把一个正在编译的模块复制成独立临时模块：已登记的 data 与已闭合的过程按
+ * 指针搬运，源模块半成品过程（proc.open）不在其中；两边 builder 互不共享，
+ * 临时模块释放时不动源模块的 arena。 */
+static uint32_t v2_ir_mod_clone_completed(void *ctx, const uint64_t *args,
+                                          uint32_t argc, uint64_t *res) {
+  LainMetaHostV2 *h = (LainMetaHostV2 *)ctx;
+  V2Module *src = v2_module(h, (uint32_t)args[0]);
+  V2Module *m;
+  const char *name;
+  uint32_t i;
+  if (argc != 1) return LAINMETA_V2_ERR_ARG;
+  if (!src) return LAINMETA_V2_ERR_HANDLE;
+  for (i = 0; i < LAINMETA_V2_MAX_MODULES; i++) {
+    if (!h->mods[i].in_use) break;
+  }
+  if (i == LAINMETA_V2_MAX_MODULES) return LAINMETA_V2_ERR_CAPACITY;
+  m = &h->mods[i];
+  memset(m, 0, sizeof(*m));
+  m->builder = lainir_builder_new();
+  if (!m->builder) return LAINMETA_V2_ERR_IR;
+  name = lainir_builder_string(m->builder, src->name);
+  if (!name) {
+    lainir_builder_free(m->builder);
+    memset(m, 0, sizeof(*m));
+    return LAINMETA_V2_ERR_IR;
+  }
+  m->name = name;
+  for (i = 0; i < src->data_count; i++) m->data[m->data_count++] = src->data[i];
+  for (i = 0; i < src->sub_count; i++) m->subs[m->sub_count++] = src->subs[i];
+  m->in_use = true;
+  *res = handle_module((uint32_t)(m - h->mods));
+  return 0;
+}
+
+/* 释放临时模块。句柄随即失效；写过的状态整块清零，槽位可以再次分配。 */
+static uint32_t v2_ir_mod_free(void *ctx, const uint64_t *args, uint32_t argc,
+                               uint64_t *res) {
+  LainMetaHostV2 *h = (LainMetaHostV2 *)ctx;
+  V2Module *m = v2_module(h, (uint32_t)args[0]);
+  if (argc != 1) return LAINMETA_V2_ERR_ARG;
+  if (!m) return LAINMETA_V2_ERR_HANDLE;
+  lainir_builder_free(m->builder);
+  memset(m, 0, sizeof(*m));
+  *res = 0;
+  return 0;
+}
+
 /* --- 原语：内存与 apply -------------------------------------------------- */
 
 static uint32_t v2_mem_alloc(void *ctx, const uint64_t *args, uint32_t argc,
@@ -1762,6 +1811,8 @@ static const V2Capability k_v2_capabilities[] = {
     {"lain2_ir_inst_symbol", v2_ir_inst_symbol},
     {"lain2_ir_mod_verify", v2_ir_mod_verify},
     {"lain2_ir_mod_emit_output", v2_ir_mod_emit_output},
+    {"lain2_ir_mod_clone_completed", v2_ir_mod_clone_completed},
+    {"lain2_ir_mod_free", v2_ir_mod_free},
     {"lain2_mem_alloc", v2_mem_alloc},
     {"lain2_apply_module", v2_apply_module},
 };
