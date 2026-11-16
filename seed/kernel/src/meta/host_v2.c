@@ -1066,6 +1066,30 @@ static uint32_t v2_ir_data_add(void *ctx, const uint64_t *args, uint32_t argc,
   return 0;
 }
 
+/* 查静态数据是否已经登记过（1 起的序号，0 表示没有）。克隆出来的模块带着
+   主模块的数据段，反射表这类全局数据靠它判重。 */
+static uint32_t v2_ir_data_find(void *ctx, const uint64_t *args, uint32_t argc,
+                                uint64_t *res) {
+  LainMetaHostV2 *h = (LainMetaHostV2 *)ctx;
+  V2Module *m = v2_module(h, (uint32_t)args[0]);
+  char scratch[V2_NAME_MAX];
+  const char *symbol;
+  uint32_t i;
+  if (argc != 2) return LAINMETA_V2_ERR_ARG;
+  if (!m) return LAINMETA_V2_ERR_HANDLE;
+  symbol = v2_name(h, m->builder, (uint32_t)args[1], scratch, sizeof(scratch));
+  if (!symbol) return LAINMETA_V2_ERR_SYM;
+  *res = 0;
+  for (i = 0; i < m->data_count; i++) {
+    const char *name = m->data[i]->symbol;
+    if (name && strcmp(name, symbol) == 0) {
+      *res = (uint64_t)i + 1;
+      break;
+    }
+  }
+  return 0;
+}
+
 static uint32_t v2_ir_proc_begin(void *ctx, const uint64_t *args, uint32_t argc,
                                  uint64_t *res) {
   LainMetaHostV2 *h = (LainMetaHostV2 *)ctx;
@@ -1711,12 +1735,15 @@ static uint32_t v2_apply_module(void *ctx, const uint64_t *args, uint32_t argc,
   if (argc != 6) return LAINMETA_V2_ERR_ARG;
   if (!m) return LAINMETA_V2_ERR_HANDLE;
   if (arg_n > 8) return LAINMETA_V2_ERR_ARG;
-  if (out_cap < 8) return LAINMETA_V2_ERR_ARG;
+  /* out 是一条 16 字节记录：[状态 0, 结果 8]。求值失败属于用户代码的语义结果，
+     不能回错误码——宿主回调一旦回非 0，外层 VM 会直接以该码 Trap，
+     编译器自己就被打死了。只有参数或句柄用错才回错误码。 */
+  if (out_cap < 16) return LAINMETA_V2_ERR_ARG;
   if (!h->space) return LAINMETA_V2_ERR_STATE;
   if (arg_n && !lainvm_space_check(h->space, args_ptr, (uint64_t)arg_n * 8u,
                                    LAINVM_MEM_READ))
     return LAINMETA_V2_ERR_RANGE;
-  if (!lainvm_space_check(h->space, out_ptr, 8, LAINVM_MEM_WRITE))
+  if (!lainvm_space_check(h->space, out_ptr, 16, LAINVM_MEM_WRITE))
     return LAINMETA_V2_ERR_RANGE;
   rc = v2_verify_module(h, m);
   if (rc) return LAINMETA_V2_ERR_IR;
@@ -1741,15 +1768,120 @@ static uint32_t v2_apply_module(void *ctx, const uint64_t *args, uint32_t argc,
   memset(&diag, 0, sizeof(diag));
   if (!lainmeta_apply_proc(text, entry, values, arg_n, &h->apply_limits,
                            &result, &diag)) {
+    uint64_t fail[2];
+    free(text);
+    v2_diag(h, 1, 0, diag.message);
+    fail[0] = diag.code ? diag.code : LAINMETA_V2_ERR_APPLY;
+    fail[1] = 0;
+    memcpy((void *)out_ptr, fail, sizeof(fail));
+    *res = 0;
+    return 0;
+  }
+  free(text);
+  if (result.kind != LAINMETA_APPLY_RESULT_SCALAR) {
+    uint64_t fail[2];
+    fail[0] = LAINMETA_V2_ERR_APPLY;
+    fail[1] = 0;
+    memcpy((void *)out_ptr, fail, sizeof(fail));
+    *res = 0;
+    return 0;
+  }
+  {
+    uint64_t record[2];
+    record[0] = 0;
+    record[1] = result.scalar.bits;
+    memcpy((void *)out_ptr, record, sizeof(record));
+  }
+  *res = 0;
+  return 0;
+}
+
+/* 隔离执行一个返回 #addr 的零参入口，并把它指向的字节流整块抄进 guest 缓冲。
+   标量通道交付不了文本，编译期注入必须走这条。 */
+static uint32_t v2_apply_module_bytes(void *ctx, const uint64_t *args,
+                                     uint32_t argc, uint64_t *res) {
+  LainMetaHostV2 *h = (LainMetaHostV2 *)ctx;
+  V2Module *m = v2_module(h, (uint32_t)args[0]);
+  char entry[V2_NAME_MAX];
+  char *text;
+  LainMetaApplyResult result;
+  L1Diagnostic diag;
+  const L1Subroutine *sub;
+  uintptr_t out_ptr = (uintptr_t)args[2];
+  uint64_t cap = args[3];
+  size_t length;
+  uint32_t rc;
+  if (argc != 4) return LAINMETA_V2_ERR_ARG;
+  if (!m) return LAINMETA_V2_ERR_HANDLE;
+  if (!cap || cap > LAINMETA_APPLY_BYTES_MAX) return LAINMETA_V2_ERR_ARG;
+  if (!h->space) return LAINMETA_V2_ERR_STATE;
+  if (!lainvm_space_check(h->space, out_ptr, cap, LAINVM_MEM_WRITE))
+    return LAINMETA_V2_ERR_RANGE;
+  rc = v2_verify_module(h, m);
+  if (rc) return LAINMETA_V2_ERR_IR;
+  {
+    const char *name = v2_name(h, NULL, (uint32_t)args[1], entry,
+                               sizeof(entry));
+    if (!name) return LAINMETA_V2_ERR_SYM;
+    sub = v2_find_subroutine(m->module, name);
+    if (!sub) return LAINMETA_APPLY_ERR_NO_ENTRY;
+  }
+  if (sub->param_count) return LAINMETA_APPLY_ERR_ARG_COUNT;
+  text = lainir_print_to_string(m->module);
+  if (!text) return LAINMETA_V2_ERR_IR;
+  memset(&result, 0, sizeof(result));
+  memset(&diag, 0, sizeof(diag));
+  if (!lainmeta_apply_proc_bytes(text, entry, NULL, 0, cap, &h->apply_limits,
+                                 &result, &diag)) {
     free(text);
     v2_diag(h, 1, 0, diag.message);
     return diag.code ? (uint32_t)diag.code : LAINMETA_V2_ERR_APPLY;
   }
   free(text);
-  if (result.kind != LAINMETA_APPLY_RESULT_SCALAR)
+  if (result.kind != LAINMETA_APPLY_RESULT_BYTES) {
+    lainmeta_apply_bytes_free(&result.bytes);
     return LAINMETA_V2_ERR_APPLY;
-  memcpy((void *)out_ptr, &result.scalar.bits, 8);
-  *res = result.scalar.bits;
+  }
+  length = (size_t)result.bytes.length;
+  if (length > cap) length = (size_t)cap;
+  memcpy((void *)out_ptr, result.bytes.data, length);
+  lainmeta_apply_bytes_free(&result.bytes);
+  *res = (uint64_t)length;
+  return 0;
+}
+
+/* 把 guest 里一段文本登记成新的源码单元。词法错误不是宿主故障：
+   只写诊断并把 0 交回 guest，绝不能返回非 0（那会让整台虚拟机 Trap）。 */
+static uint32_t v2_ast_parse_snippet(void *ctx, const uint64_t *args,
+                                     uint32_t argc, uint64_t *res) {
+  LainMetaHostV2 *h = (LainMetaHostV2 *)ctx;
+  LainMetaV2Diag error;
+  char *copy;
+  uintptr_t ptr = (uintptr_t)args[0];
+  uint64_t length = args[1];
+  uint32_t index = 0;
+  if (argc != 2) return LAINMETA_V2_ERR_ARG;
+  *res = 0;
+  if (!length || length > 0xFFFFFFFFull) {
+    v2_diag(h, 1, 0, "snippet is empty");
+    return 0;
+  }
+  if (!h->space) return LAINMETA_V2_ERR_STATE;
+  if (!lainvm_space_check(h->space, ptr, length, LAINVM_MEM_READ))
+    return LAINMETA_V2_ERR_RANGE;
+  if (h->source_count == LAINMETA_V2_MAX_SOURCES) {
+    v2_diag(h, 1, 0, "too many sources");
+    return 0;
+  }
+  copy = (char *)malloc((size_t)length);
+  if (!copy) return LAINMETA_V2_ERR_MEM;
+  memcpy(copy, (const void *)ptr, (size_t)length);
+  memset(&error, 0, sizeof(error));
+  if (!v2_add_source(h, NULL, copy, copy, (uint32_t)length, &index, &error)) {
+    v2_diag(h, 1, 0, error.message[0] ? error.message : "snippet rejected");
+    return 0;
+  }
+  *res = index;
   return 0;
 }
 
@@ -1787,6 +1919,7 @@ static const V2Capability k_v2_capabilities[] = {
     {"lain2_ast_mk_group", v2_ast_mk_group},
     {"lain2_ir_mod_new", v2_ir_mod_new},
     {"lain2_ir_data_add", v2_ir_data_add},
+    {"lain2_ir_data_find", v2_ir_data_find},
     {"lain2_ir_proc_begin", v2_ir_proc_begin},
     {"lain2_ir_proc_extern", v2_ir_proc_extern},
     {"lain2_ir_proc_param", v2_ir_proc_param},
@@ -1815,6 +1948,8 @@ static const V2Capability k_v2_capabilities[] = {
     {"lain2_ir_mod_free", v2_ir_mod_free},
     {"lain2_mem_alloc", v2_mem_alloc},
     {"lain2_apply_module", v2_apply_module},
+    {"lain2_apply_module_bytes", v2_apply_module_bytes},
+    {"lain2_ast_parse_snippet", v2_ast_parse_snippet},
 };
 
 int lainv2_host_register(LainMetaHostV2 *host, LainVmCaps *caps) {

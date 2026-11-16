@@ -13,6 +13,7 @@ let agg = import("agg");
 let modules = import("modules");
 let bi = import("builtins");
 let comptime = import("comptime");
+let rf = import("reflect");
 
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
@@ -271,6 +272,31 @@ func call_args(k: addr, g: u64, i: u64, idx: u64, arity: u64, ab: addr, paramp: 
   return j;
 }
 
+// 反射分派：认 meta_* 查询与类型名。实参必须在这里用 expr 递归求值，
+// 所以钩子只能留在本文件；表结构与发射逻辑都在 reflect.lain。
+func reflect_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  if is_name(g, i) == 0 { return 0; }
+  let m: u64 = rf.mode_of(n_sym(g, i));
+  if m == 0 { return rf.type_value(k, g, i, out); }
+  if i + 1 >= n_count(g) { return 0; }
+  if is_group(g, i + 1) != 1 { return 0; }
+  let pr: u64 = rf.prepare(k);
+  if st.st_ok(k) != 0 { return i + 2; }
+  let pg: u64 = n_at(g, i + 1);
+  let v1: addr = new_val(k);
+  let v2: addr = new_val(k);
+  let pair: u64 = if m >= 6 and m <= 9 { 1 } else { 0 };
+  let j1: u64 = if m == 10 { 0 } else { expr(k, pg, 0, 0, t64(k), v1) };
+  if st.st_ok(k) != 0 { return i + 2; }
+  let bad: u64 = rf.bad_id(k, m, v1);
+  if bad == 1 { return i + 2; }
+  let j2: u64 = if pair == 1 { expr(k, pg, 2, 0, t64(k), v2) } else { 0 };
+  if st.st_ok(k) != 0 { return i + 2; }
+  let ok: u64 = rf.query(k, m, v1, v2, want, out);
+  if ok == 0 { st.st_fail(k, e_unsup()); }
+  return i + 2;
+}
+
 func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { st.st_fail(k, e_ast()); return i; }
@@ -329,6 +355,10 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
       return agg_construct(k, g, i, out);
     }
   }
+  // 编译期反射与类型句柄：类型名在表达式位置折成 TypeId 字面量，
+  // meta_* 查询就地展开成 #lea / #load。两者都不生成辅助过程。
+  let rq: u64 = reflect_prefix(k, g, i, want, out);
+  if rq != 0 { return rq; }
   if i + 1 < n and is_group(g, i + 1) == 1 {
     if delim_of(g, i + 1) == dl_paren() {
       if bi.is_builtin(sym) == 1 { return builtin_call(k, g, i, want, out); }
@@ -357,6 +387,12 @@ func eval_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   env.env_release(k, 0);
   let tmp: u64 = comptime.clone(k);
   st.st_set_mod(k, tmp);
+  // 临时模块拿到的是克隆那一刻的主模块，可能还没有反射表：先把表铺进去，
+  // 内层表达式里的 meta_* 查询才能落到真实数据段上。
+  let pr: u64 = rf.prepare(k);
+  if st.st_ok(k) != 0 {
+    return eval_fail(k, tmp, saved_mod, saved_sp, st.st_err(k), out, i + 2);
+  }
   let ename: u64 = comptime.entry_name();
   ir.proc_begin(k, ename);
   ir.region_begin(k);
@@ -382,11 +418,20 @@ func eval_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   ir.region_end(k);
   let vrc: u64 = comptime.verify(tmp);
   if vrc != 0 {
+    let vm: addr = "eval-verify";
+    let vd: u64 = ir.diag(k, vrc, 1, vm, 11);
     return eval_fail(k, tmp, saved_mod, saved_sp, e_unsup(), out, i + 2);
   }
   let ob: addr = comptime.out_buf();
   ir.args_reset(k);
-  let bits: u64 = comptime.apply_scalar(tmp, ename, ob);
+  let arc: u64 = comptime.apply_scalar(tmp, ename, ob);
+  let rc: u64 = if arc != 0 { arc } else { load(ob) };
+  if rc != 0 {
+    let am: addr = "eval-apply";
+    let ad: u64 = ir.diag(k, rc, 1, am, 10);
+    return eval_fail(k, tmp, saved_mod, saved_sp, e_unsup(), out, i + 2);
+  }
+  let bits: u64 = load(ob + 8);
   comptime.release(tmp);
   st.st_set_mod(k, saved_mod);
   st.st_set_sp(k, saved_sp);

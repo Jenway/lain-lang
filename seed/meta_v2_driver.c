@@ -138,7 +138,9 @@ int main(int argc, char **argv) {
   uint64_t quota_bytes = 16u << 20;
   uint64_t workspace_bytes = 8u << 20;
   uint64_t caps_capacity = 128;
-  uint64_t max_call_depth = 32;
+  /* 编译期的递归下降（表达式、注入生成器）都要落成普通的 #call 帧，
+     32 层连带的区域帧不够用；这一层上限只防失控递归。 */
+  uint64_t max_call_depth = 128;
   uint64_t symbol_capacity = 8192;
   uint64_t symbol_bytes = 512u << 10;
   LainExpandLimits expand_limits;
@@ -285,10 +287,12 @@ int main(int argc, char **argv) {
 
   memset(&apply_limits, 0, sizeof(apply_limits));
   apply_limits.caps = NULL;  /* apply 在隔离空间里跑，不给宿主能力 */
-  apply_limits.max_call_depth = 16;
-  apply_limits.stack_bytes = 256u << 10;
-  apply_limits.fuel = 2000000;
-  apply_limits.quota_bytes = 4u << 20;
+  /* 生成器常写成递归的字段遍历，沙箱里每一层普通调用与每一层分支区域都占一帧，
+     16 层连一个三字段 struct 的展开都不够。 */
+  apply_limits.max_call_depth = 128;
+  apply_limits.stack_bytes = 1u << 20;
+  apply_limits.fuel = 8000000;
+  apply_limits.quota_bytes = 8u << 20;
   lainv2_host_set_apply_limits(host, &apply_limits);
 
   /* 6. 装载映像、起 TCB。 */

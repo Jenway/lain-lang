@@ -382,12 +382,24 @@ def check_ir_cases():
     return passed, len(IR_CASES), details
 
 
-# Meta 扩展测试：编译期求值（eval）必须把依赖折叠成常量，产物里不留求值入口。
+# Meta 扩展测试：编译期求值（eval）与编译期代码注入（inject）都必须留下可执行产物，
+# 且产物里不留求值/注入入口；负测试必须给出编译错误而不是 VM 崩溃。
 META_TESTS = os.path.join(ROOT, "tests", "meta")
 META_TEST_OUT = os.path.join(WORK, "meta_tests")
 META_CASES = [
     {"file": "eval_comptime.lain", "entry": "s0__main", "value": 5112,
-     "folds": [("s0__folded", "55"), ("s0__folded_plus", "55")]},
+     "folds": [("s0__folded", "55"), ("s0__folded_plus", "55")], "procs": []},
+    # 静态反射现场生成 Vec3_SoA 与 soa_pack / soa_x / soa_y / soa_z：
+    # 61 = 10 + 20 + 30 + soa_pack 的 1 + 反射折叠偏差 0。
+    {"file": "soa_reflect.lain", "entry": "s0__main", "value": 61, "folds": [],
+     "procs": ["s0__soa_pack", "s0__soa_x", "s0__soa_y", "s0__soa_z"]},
+]
+META_NEGATIVE = [
+    {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
+    {"file": "inject_missing.lain", "why": "inject 指向不存在的生成器"},
+    {"file": "inject_bad_snippet.lain", "why": "注入片段无法解析"},
+    {"file": "reflect_bad_type.lain", "why": "反射查询用了越界的字面量 TypeId"},
+    {"file": "eval_trap.lain", "why": "被求值的表达式在隔离执行里触发陷阱"},
 ]
 
 
@@ -405,6 +417,8 @@ def proc_block(text, name):
 def compile_meta_test(stem, units):
     """编译 tests/meta/<stem>.lain。回 (产物路径, 驱动输出, 驱动退出码)。"""
     out_path = os.path.join(META_TEST_OUT, stem + ".l1")
+    if os.path.exists(out_path):
+        os.remove(out_path)
     command = [LAIN_META] + units + [os.path.join("tests", "meta", stem + ".lain"),
                                      "--out", out_path]
     result = run(command)
@@ -432,6 +446,10 @@ def check_meta_cases(units):
         if "@__meta_eval" in ir_text:
             details.append("%s 产物里残留求值入口 @__meta_eval" % case["file"])
             continue
+        missing = [p for p in case.get("procs", []) if ("#proc %s(" % p) not in ir_text]
+        if missing:
+            details.append("%s 缺少生成出来的过程 %s" % (case["file"], " ".join(missing)))
+            continue
         broken = False
         for proc, literal in case["folds"]:
             block = proc_block(ir_text, proc)
@@ -456,17 +474,24 @@ def check_meta_cases(units):
                            % (case["file"], case["entry"], case["value"]))
             continue
         passed += 1
-    # 负测试：eval 内引用运行期形参必须编译失败。
-    out_path, text, code = compile_meta_test("eval_runtime_ref", units)
-    if "result=0" in text:
-        details.append("eval_runtime_ref.lain 编译期引用了运行期形参却编译成功")
-    elif "compile failed" not in text:
-        body = text.strip().splitlines()
-        details.append("eval_runtime_ref.lain 没有编译失败诊断: %s"
-                       % (body[-1] if body else "无输出"))
-    else:
+    # 负测试：必须给出编译错误诊断，且不留下可执行产物。
+    for negative in META_NEGATIVE:
+        stem = negative["file"][:-len(".lain")]
+        out_path, text, code = compile_meta_test(stem, units)
+        if "result=0" in text:
+            details.append("%s 编译成功，但%s必须失败" % (negative["file"], negative["why"]))
+            continue
+        if "compile failed" not in text:
+            body = text.strip().splitlines()
+            details.append("%s 没有编译失败诊断: %s"
+                           % (negative["file"], body[-1] if body else "无输出"))
+            continue
+        written = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+        if written != 0:
+            details.append("%s 编译失败却写出了 %d 字节产物" % (negative["file"], written))
+            continue
         passed += 1
-    return passed, len(META_CASES) + 1, details
+    return passed, len(META_CASES) + len(META_NEGATIVE), details
 
 
 def main():
@@ -553,7 +578,7 @@ def main():
     problems += ir_details
 
     print()
-    print("[Meta 扩展测试]  编译期求值 eval（常量折叠 / 隔离 VM 执行 / 运行期引用被拒）")
+    print("[Meta 扩展测试]  编译期求值 eval（常量折叠 / 隔离执行）与代码注入 inject（静态反射 / SoA 原型）")
     if units:
         meta_passed, meta_total, meta_details = check_meta_cases(units)
         print("Meta 用例 %d/%d" % (meta_passed, meta_total))

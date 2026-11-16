@@ -13,6 +13,8 @@ let dl = import("decl");
 let agg = import("agg");
 let modules = import("modules");
 let bi = import("builtins");
+let rf = import("reflect");
+let ct = import("comptime");
 
 extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
 extern lain2_source_name(src: u64) -> u64 = lain2_source_name;
@@ -312,6 +314,7 @@ func phase1(k: addr, g: u64, i: u64, n: u64) -> u64 {
   if sym == s.k_extern() { let a: u64 = p1_extern(k, g, i); return phase1(k, g, a, n); }
   if sym == s.k_let() { let a: u64 = p1_let(k, g, i, n); return phase1(k, g, a, n); }
   if sym == s.k_func() { let a: u64 = p1_func(k, g, i); return phase1(k, g, a, n); }
+  if sym == s.k_inject() { let a: u64 = skip_semi(g, i + 2); return phase1(k, g, a, n); }
   return phase1(k, g, i + 1, n);
 }
 
@@ -356,20 +359,118 @@ func phase2(k: addr, g: u64, i: u64, n: u64) -> u64 {
     let a: u64 = skip_to_body(g, i + 1, n);
     return phase2(k, g, a, n);
   }
+  if sym == s.k_inject() { let a: u64 = inject_decl(k, g, i); return phase2(k, g, a, n); }
   return phase2(k, g, i + 1, n);
 }
 
 // --- 驱动 ---------------------------------------------------------------
-func compile_source(k: addr, src: u64) -> u64 {
-  if st.st_done(k, src) == 1 { return st.st_ok(k); }
-  let m: u64 = st.st_mark_done(k, src);
+// 把一棵已经在手里的树当成 src 这个源的代码来编译：注入的片段必须落在注入点上，
+// 否则它登记出来的 s<源号>__名字 会和当前源里的查找对不上。
+func compile_as(k: addr, src: u64, root: u64) -> u64 {
   st.st_set_src(k, src);
-  let root: u64 = lain2_source_root(src);
   st.st_set_root(k, root);
-  env.env_release(k, 0);
+  let mk: u64 = env.env_release(k, 0);
   let n: u64 = n_count(root);
   let a: u64 = phase1(k, root, 0, n);
   if st.st_ok(k) != 0 { return st.st_ok(k); }
   let b: u64 = phase2(k, root, 0, n);
   return st.st_ok(k);
+}
+
+func compile_source(k: addr, src: u64) -> u64 {
+  if st.st_done(k, src) == 1 { return st.st_ok(k); }
+  let m: u64 = st.st_mark_done(k, src);
+  let root: u64 = lain2_source_root(src);
+  return compile_as(k, src, root);
+}
+
+// --- 编译期注入 ---------------------------------------------------------
+// 实参只支持编译期字面量：生成器的形状参数是 TypeId 与整数。
+func collect_args(k: addr, g: u64, i: u64, idx: u64, ab: addr) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return idx; }
+  if is_comma(g, i) == 1 { return collect_args(k, g, i + 1, idx, ab); }
+  let v: addr = ax.new_val(k);
+  let j: u64 = co.expr(k, g, i, 0, cx.tnone(k), v);
+  if st.st_ok(k) != 0 { return j; }
+  let cp: u64 = ty.val_at(ab + idx * 56, v);
+  return collect_args(k, g, j, idx + 1, ab);
+}
+
+func fill_lits(k: addr, ab: addr, idx: u64, cnt: u64) -> u64 {
+  if idx >= cnt { return idx; }
+  let v: addr = ab + idx * 56;
+  if ty.vlit(v) != 1 {
+    st.st_fail(k, ax.e_unsup());
+    return idx;
+  }
+  let a: u64 = ir.arg_int(k, ty.vbits(v));
+  return fill_lits(k, ab, idx + 1, cnt);
+}
+
+func scan_len(p: addr, i: u64, cap: u64) -> u64 {
+  if i >= cap { return 0; }
+  let b: u8 = load(p + i);
+  if b == 0 { return i; }
+  return scan_len(p, i + 1, cap);
+}
+
+// inject(gen(TypeId, ...))：把生成器放进隔离沙箱跑一遍，取回它写出的源码文本，
+// 解析成新的源码单元，然后按注入点的源编号编译进去。
+func inject_decl(k: addr, g: u64, i: u64) -> u64 {
+  let pg: u64 = n_at(g, i + 1);
+  let fname: u64 = n_sym(pg, 0);
+  let fn: addr = modules.find_here(k, fname);
+  if fn as u64 == 0 { st.st_fail(k, ax.e_unbound()); return i + 2; }
+  if modules.sym_kind(fn) != modules.sym_kind_func() { st.st_fail(k, ax.e_type()); return i + 2; }
+  let argsg: u64 = n_at(pg, 1);
+  let span: u64 = 896;
+  let ab: addr = st.st_alloc(k, span);
+  let cnt: u64 = collect_args(k, argsg, 0, 0, ab);
+  if st.st_ok(k) != 0 { return i + 2; }
+  let saved_mod: u64 = st.st_mod(k);
+  let saved_sp: u64 = st.st_sp(k);
+  let saved_src: u64 = st.st_src(k);
+  let saved_root: u64 = st.st_root(k);
+  let tmp: u64 = ct.clone(k);
+  st.st_set_mod(k, tmp);
+  // 生成器里的 meta_* 查询要在临时模块里落到真实数据段上。
+  let pr: u64 = rf.prepare(k);
+  if st.st_ok(k) != 0 { return i + 2; }
+  let cap: u64 = rf.buffer_bytes();
+  let out: addr = ct.buf(cap);
+  let ename: u64 = ct.inject_name();
+  let b1: u64 = ir.proc_begin(k, ename);
+  let b0: u64 = ir.proc_result(k, ir.taddr(k));
+  let b2: u64 = ir.region_begin(k);
+  let b3: u64 = ir.args_reset(k);
+  let b4: u64 = fill_lits(k, ab, 0, cnt);
+  let cres: u64 = ir.fresh_t(k);
+  let b5: u64 = ir.emit_call(k, cres, modules.sym_qual(fn), 0);
+  // 返回缓冲的地址必须是一个 #addr 种类的值：#bitcast 由 bits 生出的是位值，
+  // 宿主拿不到可读区段。用 #lea 取符号地址，结果就是真正的 #addr。
+  let addr: u64 = ir.fresh_t(k);
+  let b6: u64 = ir.emit_lea(k, addr, rf.buffer_name(), 0, 1, 0);
+  let b7: u64 = ir.args_reset(k);
+  let b8: u64 = ir.arg_ref(k, addr);
+  let b9: u64 = ir.emit_jump(k, codes.INST_RETURN(), 0);
+  let b10: u64 = ir.region_end(k);
+  let vrc: u64 = ct.verify(tmp);
+  let arc: u64 = if vrc != 0 { vrc } else { ct.apply_bytes(tmp, ename, out, cap) };
+  let rl: u64 = ct.release(tmp);
+  st.st_set_mod(k, saved_mod);
+  st.st_set_sp(k, saved_sp);
+  if vrc != 0 { st.st_fail(k, ax.e_unsup()); return i + 2; }
+  // apply_bytes 的返回值是宿主抄回来的字节数；0 说明这一趟没拿到东西。
+  let len: u64 = scan_len(out, 0, arc);
+  if len == 0 { st.st_fail(k, ax.e_ast()); return i + 2; }
+  let src2: u64 = ct.snippet(out, len);
+  if src2 == 0 { st.st_fail(k, ax.e_ast()); return i + 2; }
+  if st.st_done(k, src2) == 1 { return skip_semi(g, i + 2); }
+  let dm: u64 = st.st_mark_done(k, src2);
+  let root2: u64 = lain2_source_root(src2);
+  let cc: u64 = compile_as(k, saved_src, root2);
+  st.st_set_src(k, saved_src);
+  st.st_set_root(k, saved_root);
+  return skip_semi(g, i + 2);
 }
