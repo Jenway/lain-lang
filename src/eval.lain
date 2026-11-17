@@ -186,6 +186,9 @@ func p1_func(k: addr, g: u64, i: u64) -> u64 {
   let sg: addr = cx.sig_new(k, rt, np, paramp);
   let q: u64 = modules.qual(k, st.st_src(k), name);
   let e: addr = modules.sym_add(k, modules.sym_kind_func(), st.st_src(k), name, q, sg, 0);
+  // 记下声明位置：inject 在 phase1 就地执行时要先把这个函数体补编出来。
+  let sd: u64 = modules.sym_set_decl(e, i);
+  let ss: u64 = modules.sym_set_src(e, st.st_src(k));
   return a;
 }
 
@@ -314,7 +317,8 @@ func phase1(k: addr, g: u64, i: u64, n: u64) -> u64 {
   if sym == s.k_extern() { let a: u64 = p1_extern(k, g, i); return phase1(k, g, a, n); }
   if sym == s.k_let() { let a: u64 = p1_let(k, g, i, n); return phase1(k, g, a, n); }
   if sym == s.k_func() { let a: u64 = p1_func(k, g, i); return phase1(k, g, a, n); }
-  if sym == s.k_inject() { let a: u64 = skip_semi(g, i + 2); return phase1(k, g, a, n); }
+  // 注入必须在这里执行：同源后面的声明可能就拿注入出来的类型做标注。
+  if sym == s.k_inject() { let a: u64 = inject_decl(k, g, i); return phase1(k, g, a, n); }
   return phase1(k, g, i + 1, n);
 }
 
@@ -326,10 +330,13 @@ func p2_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
   if n_sym(g, e) == s.k_import() { return skip_semi(g, e); }
   let se: addr = modules.find_here(k, name);
   if se as u64 == 0 { st.st_fail(k, e_ast()); return e; }
+  let after: u64 = if is_group(g, e) == 1 { skip_semi(g, e + 1) } else { skip_semi(g, e) };
+  // 已编过的声明（inject 为了沙箱 verify 会把注入点之前的值与过程先编出来）不再重复编。
+  if modules.sym_flag(se) == 1 { return after; }
+  let marked: u64 = modules.sym_set_flag(se, 1);
   if modules.sym_kind(se) == modules.sym_kind_value() {
     return compile_top_let(k, g, i);
   }
-  let after: u64 = if is_group(g, e) == 1 { skip_semi(g, e + 1) } else { skip_semi(g, e) };
   let tv: addr = modules.sym_sig(se);
   let dname: u64 = storage_name(k, name);
   // 聚合：字段要写进数据块
@@ -348,7 +355,14 @@ func phase2(k: addr, g: u64, i: u64, n: u64) -> u64 {
   if is_group(g, i) == 1 { return phase2(k, g, i + 1, n); }
   if is_semi(g, i) == 1 { return phase2(k, g, i + 1, n); }
   let sym: u64 = n_sym(g, i);
-  if sym == s.k_func() { let a: u64 = compile_func(k, g, i); return phase2(k, g, a, n); }
+  if sym == s.k_func() {
+    // 体已编过的过程（inject 为了沙箱 verify 会提前补编）不再重复编，否则重名。
+    let se: addr = modules.find_here(k, n_sym(g, i + 1));
+    let fl: u64 = if se as u64 == 0 { 0 } else { modules.sym_flag(se) };
+    if fl == 1 { let a0: u64 = skip_to_body(g, i + 2, n); return phase2(k, g, a0, n); }
+    let a: u64 = compile_func(k, g, i);
+    return phase2(k, g, a, n);
+  }
   if sym == s.k_let() { let a: u64 = p2_let(k, g, i, n); return phase2(k, g, a, n); }
   if sym == s.k_extern() {
     // extern 没有体，跳到分号即可；用找 '{' 的写法会吞掉后面一个函数。
@@ -359,7 +373,8 @@ func phase2(k: addr, g: u64, i: u64, n: u64) -> u64 {
     let a: u64 = skip_to_body(g, i + 1, n);
     return phase2(k, g, a, n);
   }
-  if sym == s.k_inject() { let a: u64 = inject_decl(k, g, i); return phase2(k, g, a, n); }
+  // 注入在 phase1 已执行过，这里只跳到分号。
+  if sym == s.k_inject() { let a: u64 = skip_semi(g, i + 2); return phase2(k, g, a, n); }
   return phase2(k, g, i + 1, n);
 }
 
@@ -432,7 +447,24 @@ func inject_decl(k: addr, g: u64, i: u64) -> u64 {
   let saved_sp: u64 = st.st_sp(k);
   let saved_src: u64 = st.st_src(k);
   let saved_root: u64 = st.st_root(k);
-  let tmp: u64 = ct.clone(k);
+  // 沙箱里的生成器会调用同一份源注入点之前声明的函数；临时模块只有调用指令、
+  // 没有被调过程的话，verify 会报 unknown callee。先把这些过程体编出来。
+  let pre: u64 = phase2(k, saved_root, 0, i);
+  if st.st_ok(k) != 0 { return i + 2; }
+  // 生成器声明可能在注入点之后（体还没编），凭声明下标与源号回到原位补编。
+  let fd: u64 = modules.sym_flag(fn);
+  if fd == 0 {
+    let dsrc: u64 = modules.sym_src(fn);
+    let dnode: u64 = modules.sym_decl(fn);
+    st.st_set_src(k, dsrc);
+    let droot: u64 = lain2_source_root(dsrc);
+    st.st_set_root(k, droot);
+    let cf: u64 = dl.compile_func(k, droot, dnode);
+    let fs: u64 = modules.sym_set_flag(fn, 1);
+    st.st_set_src(k, saved_src);
+    st.st_set_root(k, saved_root);
+    if st.st_ok(k) != 0 { return i + 2; }
+  }  let tmp: u64 = ct.clone(k);
   st.st_set_mod(k, tmp);
   // 生成器里的 meta_* 查询要在临时模块里落到真实数据段上。
   let pr: u64 = rf.prepare(k);
@@ -469,6 +501,7 @@ func inject_decl(k: addr, g: u64, i: u64) -> u64 {
   if st.st_done(k, src2) == 1 { return skip_semi(g, i + 2); }
   let dm: u64 = st.st_mark_done(k, src2);
   let root2: u64 = lain2_source_root(src2);
+  // 片段登记的名字要带注入点的源号，同源后续声明才找得到它们。
   let cc: u64 = compile_as(k, saved_src, root2);
   st.st_set_src(k, saved_src);
   st.st_set_root(k, saved_root);

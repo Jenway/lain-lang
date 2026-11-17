@@ -8,6 +8,7 @@ let s = import("sym");
 let ax = import("ast");
 let agg = import("agg");
 let modules = import("modules");
+let bi = import("builtins");
 
 // --- ast 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 func new_ty(k: addr) -> addr { return ax.new_ty(k); }
@@ -289,6 +290,31 @@ func sig_lookup(k: addr, name: u64, retp: addr, paramp: addr, meta: addr) -> u64
   store(meta + 8, np);
   store(meta + 16, modules.sym_qual(e));
   return 1;
+}
+
+// 间接调用签名 [...]：形参组、箭头、返回类型。返回一条签名记录，
+// 形参没有名字，类型表按 32 字节一条铺。
+func icall_sig(k: addr, sg: u64) -> addr {
+  let n: u64 = n_count(sg);
+  if n < 3 { st.st_fail(k, e_type()); return 0 as addr; }
+  let pg: u64 = n_at(sg, 0);
+  if is_group_node(pg) != 1 { st.st_fail(k, e_type()); return 0 as addr; }
+  if n_sym(sg, 1) != s.p_arrow() { st.st_fail(k, e_type()); return 0 as addr; }
+  let np: u64 = bi.arg_count(pg);
+  let tbl: addr = st.st_alloc(k, np * 32 + 32);
+  let got: u64 = sig_param_list(k, pg, 0, 0, tbl);
+  if got != np { st.st_fail(k, e_type()); return 0 as addr; }
+  let ret: addr = new_ty(k);
+  let j: u64 = parse_type(k, sg, 2, ret);
+  if j < n { st.st_fail(k, e_type()); return 0 as addr; }
+  return sig_new(k, ret, np, tbl);
+}
+
+func sig_param_list(k: addr, pg: u64, i: u64, idx: u64, tbl: addr) -> u64 {
+  if i >= n_count(pg) { return idx; }
+  let j: u64 = parse_type(k, pg, i, tbl + idx * 32);
+  let nj: u64 = if is_comma(pg, j) == 1 { j + 1 } else { j };
+  return sig_param_list(k, pg, nj, idx + 1, tbl);
 }
 
 // --- 循环帧 ---------------------------------------------------------------

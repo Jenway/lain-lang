@@ -81,6 +81,84 @@ func agg_data(s: addr, dname: u64, sh: u64) -> u64 {
   return ir.data_add(s, dname, buf, size, 1);
 }
 
+// --- 间接调用 -----------------------------------------------------------
+// 组里顶层逗号分隔的项数；空组算零项。
+func arg_count(g: u64) -> u64 {
+  let n: u64 = ax.n_count(g);
+  if n == 0 { return 0; }
+  return comma_n(g, 0, n, 0) + 1;
+}
+
+func comma_n(g: u64, i: u64, n: u64, acc: u64) -> u64 {
+  if i >= n { return acc; }
+  if ax.is_comma(g, i) == 1 { return comma_n(g, i + 1, n, acc + 1); }
+  return comma_n(g, i + 1, n, acc);
+}
+
+// 形参类型表压进两个 64 位字：每项 16 位，低 8 位类型码、高 8 位宽度。
+func pack_params(k: addr, ps: addr, i: u64, n: u64, pk: addr) -> u64 {
+  if i >= n { return i; }
+  let tp: addr = ps + i * 32;
+  let code: u64 = ir.kcode(tp);
+  if code == 0 { st.st_fail(k, ax.e_type()); return i; }
+  let w: u64 = ty.tw(tp);
+  if w > 255 { st.st_fail(k, ax.e_type()); return i; }
+  let item: u64 = code + w * 256;
+  let wo: u64 = (i / 4) * 8;
+  let sh: u64 = (i - i / 4 * 4) * 16;
+  let cur: u64 = load(pk + wo);
+  store(pk + wo, cur + (item << sh));
+  return pack_params(k, ps, i + 1, n, pk);
+}
+
+func push_vals(k: addr, ab: addr, i: u64, n: u64) -> u64 {
+  if i >= n { return i; }
+  let a: u64 = ir.op_val(k, ab + i * 56);
+  return push_vals(k, ab, i + 1, n);
+}
+
+// 间接调用：被调值必须是 addr，实参已在 ab 里按形参类型强制过。
+func icall_emit(k: addr, sk: addr, fv: addr, ab: addr, want: addr, out: addr) -> u64 {
+  let vt: addr = ty.vty(fv);
+  if ty.tk(vt) != 3 {
+    // 目标不是 addr：一次性调用错误，报明确消息再失败。
+    let m: addr = "icall-target";
+    let dg: u64 = ir.diag(k, 0, 1, m, 12);
+    st.st_fail(k, ax.e_type());
+    return 0;
+  }
+  let np: u64 = load(sk);
+  let ps: addr = load(sk + 16) as addr;
+  let pk: addr = st.st_alloc(k, 16);
+  store(pk, 0);
+  store(pk + 8, 0);
+  let filled: u64 = pack_params(k, ps, 0, np, pk);
+  if st.st_ok(k) != 0 { return 0; }
+  let ret: addr = st.st_alloc(k, 32);
+  let rt: u64 = ty.ty_at(ret, load(sk + 8) as addr);
+  let res: u64 = if ty.ty_known(ret) == 1 { ir.fresh_t(k) } else { 0 };
+  let ar: u64 = ir.args_reset(k);
+  let f: u64 = ir.op_val(k, fv);
+  let d: u64 = push_vals(k, ab, 0, np);
+  let plo: u64 = load(pk);
+  let phi: u64 = load(pk + 8);
+  let ins: u64 = ir.emit_call_indirect(k, res, ret, plo, phi);
+  if res == 0 {
+    ty.val_none(out);
+    return 0;
+  }
+  let rv: addr = st.st_alloc(k, 56);
+  ty.val_ref(rv, res, ret);
+  let ct: addr = st.st_alloc(k, 56);
+  if ty.ty_known(want) == 0 {
+    let cp: u64 = ty.val_at(ct, rv);
+  } else {
+    let cv: u64 = coerce_v(k, rv, want, ct);
+  }
+  ty.val_at(out, ct);
+  return 0;
+}
+
 // --- 内建分派 -----------------------------------------------------------
 func is_builtin(name: u64) -> u64 {
   if name == sym.b_load() { return 1; }

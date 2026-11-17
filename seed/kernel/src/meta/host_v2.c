@@ -32,11 +32,11 @@
 #define V2_MODULE 4u
 #define V2_REGION 5u
 
-#define V2_REGION_MAX 256u
+#define V2_REGION_MAX 1024u
 #define V2_INST_MAX 4096u
 #define V2_PROC_PARAM_MAX 16u
-#define V2_PROC_MAX 32u
-#define V2_DATA_MAX 32u
+#define V2_PROC_MAX 256u
+#define V2_DATA_MAX 256u
 #define V2_FRAME_MAX 16u
 #define V2_CASE_MAX 64u
 #define V2_NAME_MAX 512u
@@ -1544,6 +1544,50 @@ static uint32_t v2_ir_inst_call(void *ctx, const uint64_t *args, uint32_t argc,
   return 0;
 }
 
+// 间接调用：被调值作第 0 个操作数。参数类型每项压成 16 位，低 8 位是类型码
+// （0 表示列表结束），高 8 位是宽度；每字四项，八项占两个字。
+// 返回类型码为 0 表示没有返回值，此时结果名必须为空。
+static uint32_t v2_ir_inst_call_indirect(void *ctx, const uint64_t *args,
+                                         uint32_t argc, uint64_t *res) {
+  LainMetaHostV2 *h = (LainMetaHostV2 *)ctx;
+  V2Module *m = v2_module(h, (uint32_t)args[0]);
+  L1Operand operands[L1_MAX_OPERANDS];
+  const L1Type *params[L1_MAX_OPERANDS];
+  char scratch[V2_NAME_MAX];
+  const char *result_name = NULL;
+  const L1Type *ret_ty;
+  const L1Inst *inst;
+  uint32_t count = 0, np = 0, i, rc;
+  if (argc != 6) return LAINMETA_V2_ERR_ARG;
+  if (!m || !m->proc.open || !m->proc.depth) return LAINMETA_V2_ERR_STATE;
+  if (args[1]) {
+    result_name = v2_name(h, m->builder, (uint32_t)args[1], scratch,
+                          sizeof(scratch));
+    if (!result_name) return LAINMETA_V2_ERR_SYM;
+  }
+  for (i = 0; i < L1_MAX_OPERANDS; i++) {
+    uint64_t word = i < 4 ? args[4] : args[5];
+    uint64_t item = (word >> (16u * (i % 4u))) & 0xFFFFu;
+    uint32_t code = (uint32_t)(item & 0xFFu);
+    uint32_t width = (uint32_t)((item >> 8) & 0xFFu);
+    if (!code) break;
+    params[i] = v2_type(m->builder, code, width);
+    if (!params[i]) return LAINMETA_V2_ERR_ARG;
+    np++;
+  }
+  ret_ty = v2_type(m->builder, args[2], args[3]);
+  if (args[2] && !ret_ty) return LAINMETA_V2_ERR_ARG;
+  if (!args[2] && args[1]) return LAINMETA_V2_ERR_ARG;
+  v2_take_operands(m, operands, &count);
+  if (!count) return LAINMETA_V2_ERR_ARG;
+  inst = lainir_inst_call_indirect(m->builder, result_name, ret_ty, params, np,
+                                   operands, count);
+  rc = v2_append(h, m, inst);
+  if (rc) return rc;
+  *res = 1;
+  return 0;
+}
+
 static uint32_t v2_ir_inst_mem(void *ctx, const uint64_t *args, uint32_t argc,
                                uint64_t *res) {
   LainMetaHostV2 *h = (LainMetaHostV2 *)ctx;
@@ -1940,6 +1984,7 @@ static const V2Capability k_v2_capabilities[] = {
     {"lain2_ir_inst_switch", v2_ir_inst_switch},
     {"lain2_ir_inst_jump", v2_ir_inst_jump},
     {"lain2_ir_inst_call", v2_ir_inst_call},
+    {"lain2_ir_inst_call_indirect", v2_ir_inst_call_indirect},
     {"lain2_ir_inst_mem", v2_ir_inst_mem},
     {"lain2_ir_inst_symbol", v2_ir_inst_symbol},
     {"lain2_ir_mod_verify", v2_ir_mod_verify},

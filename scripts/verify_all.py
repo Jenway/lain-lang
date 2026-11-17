@@ -382,8 +382,8 @@ def check_ir_cases():
     return passed, len(IR_CASES), details
 
 
-# Meta 扩展测试：编译期求值（eval）与编译期代码注入（inject）都必须留下可执行产物，
-# 且产物里不留求值/注入入口；负测试必须给出编译错误而不是 VM 崩溃。
+# Meta 扩展测试：编译期求值（eval）、编译期代码注入（inject）与间接调用（icall）都必须
+# 留下可执行产物，且产物里不留求值/注入入口；负测试必须给出编译错误而不是 VM 崩溃。
 META_TESTS = os.path.join(ROOT, "tests", "meta")
 META_TEST_OUT = os.path.join(WORK, "meta_tests")
 META_CASES = [
@@ -393,6 +393,13 @@ META_CASES = [
     # 61 = 10 + 20 + 30 + soa_pack 的 1 + 反射折叠偏差 0。
     {"file": "soa_reflect.lain", "entry": "s0__main", "value": 61, "folds": [],
      "procs": ["s0__soa_pack", "s0__soa_x", "s0__soa_y", "s0__soa_z"]},
+    # 接口与 VTable：inject 生成两张表与两个多态过程，多态函数从 VTable 取出
+    # 函数地址后做间接调用。67 = Circle.area(7) + Rect.scale(3*4, 5)。
+    {"file": "interface_vtable.lain", "entry": "s0__main", "value": 67, "folds": [],
+     "procs": ["s0__shape_area", "s0__shape_scale", "s0__circle_vtable",
+               "s0__rect_vtable", "s0__as_shape_Circle", "s0__as_shape_Rect"],
+     "contains": ["#call [(#addr) -> #bits<64>](",
+                  "#call [(#addr, #bits<64>) -> #bits<64>]("]},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -400,6 +407,8 @@ META_NEGATIVE = [
     {"file": "inject_bad_snippet.lain", "why": "注入片段无法解析"},
     {"file": "reflect_bad_type.lain", "why": "反射查询用了越界的字面量 TypeId"},
     {"file": "eval_trap.lain", "why": "被求值的表达式在隔离执行里触发陷阱"},
+    {"file": "icall_bad_sig.lain", "why": "间接调用的目标不是 addr"},
+    {"file": "icall_bad_args.lain", "why": "间接调用的实参个数与签名不符"},
 ]
 
 
@@ -449,6 +458,10 @@ def check_meta_cases(units):
         missing = [p for p in case.get("procs", []) if ("#proc %s(" % p) not in ir_text]
         if missing:
             details.append("%s 缺少生成出来的过程 %s" % (case["file"], " ".join(missing)))
+            continue
+        lacking = [s for s in case.get("contains", []) if s not in ir_text]
+        if lacking:
+            details.append("%s 产物里缺少 %s" % (case["file"], " ".join(lacking)))
             continue
         broken = False
         for proc, literal in case["folds"]:
@@ -578,7 +591,7 @@ def main():
     problems += ir_details
 
     print()
-    print("[Meta 扩展测试]  编译期求值 eval（常量折叠 / 隔离执行）与代码注入 inject（静态反射 / SoA 原型）")
+    print("[Meta 扩展测试]  编译期求值 eval（常量折叠 / 隔离执行）、代码注入 inject（静态反射 / SoA 与 VTable）与间接调用 icall")
     if units:
         meta_passed, meta_total, meta_details = check_meta_cases(units)
         print("Meta 用例 %d/%d" % (meta_passed, meta_total))
