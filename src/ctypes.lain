@@ -1,0 +1,248 @@
+// ctypes.lain —— 复合类型工厂与转换判定：Ref / Mut / Slice / MutSlice / Array / Fn。
+// 一切编号与物理投影都在 tyreg，这里只负责造形状、查重、判可转换性与切片的
+// 16 字节头构造。不 import ctx / core，避免环。
+let st = import("state");
+let ty = import("types");
+let agg = import("agg");
+let ireg = import("tyreg");
+let ir = import("ir");
+
+func shapes_used(k: addr) -> u64 { return st.st_shpused(k) / 608; }
+
+func shape_at(k: addr, i: u64) -> u64 {
+  let p: addr = st.st_shpbase(k) + i * 608;
+  return p as u64;
+}
+
+func scan_kind_elem(k: addr, kind: u64, elem: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  let sh: u64 = shape_at(k, i);
+  let got: u64 = if agg.shp_kind(sh) == kind {
+    if agg.shp_elem(sh) == elem { agg.shp_tid(sh) } else { 0 }
+  } else {
+    0
+  };
+  if got != 0 { return got; }
+  return scan_kind_elem(k, kind, elem, i + 1, n);
+}
+
+func scan_array(k: addr, elem: u64, cnt: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  let sh: u64 = shape_at(k, i);
+  let got: u64 = if agg.shp_kind(sh) == agg.kind_array() {
+    if agg.shp_elem(sh) == elem {
+      if agg.shp_len(sh) == cnt { agg.shp_tid(sh) } else { 0 }
+    } else {
+      0
+    }
+  } else {
+    0
+  };
+  if got != 0 { return got; }
+  return scan_array(k, elem, cnt, i + 1, n);
+}
+
+func sig_same(p: u64, q: u64, np: u64, i: u64) -> u64 {
+  if i >= np { return 1; }
+  if load((p as addr) + i * 8) != load((q as addr) + i * 8) { return 0; }
+  return sig_same(p, q, np, i + 1);
+}
+
+func scan_fn(k: addr, ret: u64, np: u64, sig: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return 0; }
+  let sh: u64 = shape_at(k, i);
+  let got: u64 = if agg.shp_kind(sh) == agg.kind_fn() {
+    if agg.shp_ret(sh) == ret {
+      if agg.shp_len(sh) == np {
+        let p: u64 = agg.shp_sig(sh);
+        if sig_same(p, sig, np, 0) == 1 { agg.shp_tid(sh) } else { 0 }
+      } else {
+        0
+      }
+    } else {
+      0
+    }
+  } else {
+    0
+  };
+  if got != 0 { return got; }
+  return scan_fn(k, ret, np, sig, i + 1, n);
+}
+
+// --- 工厂 ---------------------------------------------------------------
+func ref_t(k: addr, elem: u64, mutv: u64) -> u64 {
+  let kind: u64 = if mutv == 1 { agg.kind_mut() } else { agg.kind_ref() };
+  let hit: u64 = scan_kind_elem(k, kind, elem, 0, shapes_used(k));
+  if hit != 0 { return hit; }
+  let sh: u64 = agg.shp_new(k, kind, 0, st.st_src(k));
+  let p: addr = sh as addr;
+  store(p + 24, 8);
+  store(p + 32, 8);
+  let e1: u64 = agg.shp_set_elem(sh, elem);
+  let id: u64 = ireg.ty_add(k, ireg.lk_of_shape(kind), 0, 0, sh);
+  let t1: u64 = agg.shp_set_tid(sh, id);
+  return id;
+}
+
+func slice_t(k: addr, elem: u64, mutv: u64) -> u64 {
+  let kind: u64 = if mutv == 1 { agg.kind_mutslice() } else { agg.kind_slice() };
+  let hit: u64 = scan_kind_elem(k, kind, elem, 0, shapes_used(k));
+  if hit != 0 { return hit; }
+  let sh: u64 = agg.shp_new(k, kind, 0, st.st_src(k));
+  let p: addr = sh as addr;
+  store(p + 24, 16);
+  store(p + 32, 8);
+  let e1: u64 = agg.shp_set_elem(sh, elem);
+  let t: addr = st.st_alloc(k, 32);
+  let r: u64 = ireg.project(k, elem, t);
+  let m: addr = agg.add_member(k, sh, 0, 0, 0, 1, ty.tk(t), ty.tw(t), ty.tsg(t), ty.tsh(t));
+  let id: u64 = ireg.ty_add(k, ireg.lk_of_shape(kind), 0, 0, sh);
+  let t1: u64 = agg.shp_set_tid(sh, id);
+  return id;
+}
+
+func array_t(k: addr, elem: u64, cnt: u64) -> u64 {
+  let hit: u64 = scan_array(k, elem, cnt, 0, shapes_used(k));
+  if hit != 0 { return hit; }
+  let t: addr = st.st_alloc(k, 32);
+  let r: u64 = ireg.project(k, elem, t);
+  let sh: u64 = agg.array_new(k, agg.kind_array(), cnt, ty.tk(t), ty.tw(t), ty.tsg(t),
+                              ty.tsh(t));
+  let e1: u64 = agg.shp_set_elem(sh, elem);
+  let id: u64 = ireg.ty_add(k, ireg.lk_array(), 0, 0, sh);
+  let t1: u64 = agg.shp_set_tid(sh, id);
+  return id;
+}
+
+// sig 是形参 TypeId 数组在持久池里的地址，np 项。
+func fn_t(k: addr, ret: u64, np: u64, sig: u64) -> u64 {
+  let hit: u64 = scan_fn(k, ret, np, sig, 0, shapes_used(k));
+  if hit != 0 { return hit; }
+  let sh: u64 = agg.shp_new(k, agg.kind_fn(), 0, st.st_src(k));
+  let p: addr = sh as addr;
+  store(p + 24, 8);
+  store(p + 32, 8);
+  store(p + 48, np);
+  let r1: u64 = agg.shp_set_ret(sh, ret);
+  let s1: u64 = agg.shp_set_sig(sh, sig);
+  let id: u64 = ireg.ty_add(k, ireg.lk_fn(), 0, 0, sh);
+  let t1: u64 = agg.shp_set_tid(sh, id);
+  return id;
+}
+
+// --- 查询 ---------------------------------------------------------------
+func kind_of(sh: u64) -> u64 { return agg.shp_kind(sh); }
+
+func elem_tid(k: addr, sh: u64) -> u64 {
+  let e: u64 = agg.shp_elem(sh);
+  if e != 0 { return e; }
+  let m: addr = agg.mem_index(sh, 0);
+  let t: addr = st.st_alloc(k, 32);
+  let r: u64 = agg.mem_ty(k, m, t);
+  return ireg.tid_of(k, t);
+}
+
+func elem_ty(k: addr, sh: u64, out: addr) -> u64 {
+  let id: u64 = elem_tid(k, sh);
+  return ireg.project(k, id, out);
+}
+
+func elem_size(k: addr, sh: u64) -> u64 {
+  return ireg.size_of(k, elem_tid(k, sh));
+}
+
+// Fn 形状 → 24 字节签名记录：[形参个数, 返回类型, 形参类型表]，与 ctx.sig_new 同构。
+func sig_of_fn(k: addr, sh: u64) -> addr {
+  let np: u64 = agg.shp_len(sh);
+  let ret: addr = st.st_alloc(k, 32);
+  let r1: u64 = ireg.project(k, agg.shp_ret(sh), ret);
+  let tab: addr = st.st_alloc(k, np * 32 + 8);
+  let sigp: u64 = agg.shp_sig(sh);
+  let i: u64 = loop c(i: u64 = 0) while i < np {
+    let tid: u64 = load((sigp as addr) + i * 8);
+    let e: u64 = ireg.project(k, tid, tab + i * 32);
+    i = i + 1;
+  };
+  let rec: addr = st.st_alloc(k, 24);
+  store(rec, np);
+  store(rec + 8, ret as u64);
+  store(rec + 16, tab as u64);
+  return rec;
+}
+
+// --- 转换判定 -----------------------------------------------------------
+// 0 同型、1 只改类型（Mut→Ref、MutSlice→Slice）、2 现造切片头、3 位模式直通、
+// 4 数值转换走 cast、9 不允许。
+func conv_kind(k: addr, from: addr, to: addr) -> u64 {
+  let fsh: u64 = ty.tsh(from);
+  let tsh: u64 = ty.tsh(to);
+  if tsh == 0 {
+    if fsh == 0 { return 4; }
+    // 带形状的值物理上就是 #addr：落到裸 addr 只改类型，落到字宽走 cast 的 BITCAST。
+    if ty.tk(to) == 3 { return 3; }
+    if ty.tk(to) == 0 and ty.tw(to) == 64 { return 4; }
+    return 9;
+  }
+  if fsh == 0 {
+    // 反向同理：字宽 → 带形状地址要真发 BITCAST，物理类型不能靠改标注糊过去。
+    if ty.tk(from) == 3 and ty.tk(to) == 3 { return 3; }
+    return 4;
+  }
+  if fsh == tsh { return 0; }
+  let fk: u64 = agg.shp_kind(fsh);
+  let tk: u64 = agg.shp_kind(tsh);
+  let fe: u64 = agg.shp_elem(fsh);
+  let te: u64 = agg.shp_elem(tsh);
+  // 引用之间的元素差异只影响解引用时怎么解释这 8 个字节，物理上都是 #addr：
+  // 允许改标注（Ref(T) 与 Ref(U) 之间、Ref 与 Mut 的只读方向），禁止 Ref→Mut。
+  if tk == agg.kind_mut() {
+    if fk == agg.kind_ref() { return 9; }
+    if fk != agg.kind_mut() { return 9; }
+    if fe == te { return 0; }
+    return 3;
+  }
+  if tk == agg.kind_ref() {
+    if fk != agg.kind_ref() and fk != agg.kind_mut() { return 9; }
+    if fe == te { return 1; }
+    return 3;
+  }
+  if tk == agg.kind_slice() or tk == agg.kind_mutslice() {
+    if fk == agg.kind_slice() or fk == agg.kind_mutslice() {
+      if fe != te { return 9; }
+      if fk == tk { return 0; }
+      if tk == agg.kind_slice() { return 1; }
+      return 9;
+    }
+    if fk == agg.kind_array() { return 2; }
+    if fk == agg.kind_string() {
+      if tk == agg.kind_mutslice() { return 9; }
+      return 2;
+    }
+    return 9;
+  }
+  // 两个 Fn 形状即使编号不同，也按签名内容判定是否同型（物理上都是 #addr）。
+  if tk == agg.kind_fn() {
+    if fk != agg.kind_fn() { return 9; }
+    if agg.shp_ret(fsh) != agg.shp_ret(tsh) { return 9; }
+    let np: u64 = agg.shp_len(fsh);
+    if np != agg.shp_len(tsh) { return 9; }
+    if sig_same(agg.shp_sig(fsh), agg.shp_sig(tsh), np, 0) == 1 { return 3; }
+    return 9;
+  }
+  // 聚合与数组的形状不同就是不同的类型：绝不按「种类相同」放行。
+  return 9;
+}
+
+// 聚合/数组/字符串的地址值 → 16 字节切片头 {ptr@0, len@8}。
+func slice_wrap(k: addr, v: addr, from_sh: u64, to: addr, out: addr) -> u64 {
+  let cnt: u64 = agg.shp_len(from_sh);
+  let obj: addr = st.st_alloc(k, 56);
+  let base: u64 = agg.new_bytes(k, 16, 8, obj);
+  let s1: u64 = agg.store_at(k, base, 0, v, ir.taddr(k));
+  let lv: addr = st.st_alloc(k, 56);
+  let ut: addr = st.st_alloc(k, 32);
+  let u: u64 = ty.ty_u64(ut);
+  let l0: u64 = ty.val_lit(lv, cnt, ut);
+  let s2: u64 = agg.store_at(k, base, 8, lv, ut);
+  return ty.val_ref(out, base, to);
+}

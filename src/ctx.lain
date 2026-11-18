@@ -9,6 +9,8 @@ let ax = import("ast");
 let agg = import("agg");
 let modules = import("modules");
 let bi = import("builtins");
+let ireg = import("tyreg");
+let ct = import("ctypes");
 
 // --- ast 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 func new_ty(k: addr) -> addr { return ax.new_ty(k); }
@@ -66,7 +68,14 @@ func val_force(k: addr, v: addr, tp: addr) -> u64 {
   return res;
 }
 
-// 把 v（类型 from）转成 to，结果写 out。
+func conv_fail(k: addr) -> u64 {
+  let m: addr = "type mismatch";
+  let d: u64 = ir.diag(k, 0, 1, m, 13);
+  return st.st_fail(k, e_type());
+}
+
+// 把 v（类型 from）转成 to，结果写 out。复合类型先走 ctypes 的转换判定：
+// 只改类型、现造切片头、或明确拒绝（Ref 不能升级成 Mut）。
 func coerce(k: addr, v: addr, from: addr, to: addr, out: addr) -> u64 {
   ty.val_at(out, v);
   if ty.ty_known(from) == 0 { return 0; }
@@ -75,6 +84,11 @@ func coerce(k: addr, v: addr, from: addr, to: addr, out: addr) -> u64 {
     return ty.val_lit(out, ty.vbits(v), to);
   }
   if ty.ty_same(from, to) == 1 { return 0; }
+  let ck: u64 = ct.conv_kind(k, from, to);
+  if ck == 1 { return ty.ty_at(ty.vty(out), to); }
+  if ck == 3 { return ty.ty_at(ty.vty(out), to); }
+  if ck == 2 { return ct.slice_wrap(k, v, ty.tsh(from), to, out); }
+  if ck == 9 { return conv_fail(k); }
   let kind: u64 = ty.cast_inst(ty.tk(from), ty.tw(from), ty.tsg(from), ty.tk(to), ty.tw(to));
   if kind == 0 { return 0; }
   ir.args_reset(k);
@@ -192,8 +206,88 @@ func qual_type(k: addr, g: u64, i: u64, out: addr) -> u64 {
   return i + 3;
 }
 
-// 类型标注：标量名、struct/enum 名、限定名 M.Name、ref T、mut ref T、slice T、[T]。
-// 聚合类型一律记成 addr + 形状号：聚合的运行时表示就是它的地址。
+// --- 复合类型工厂 -------------------------------------------------------
+// Ref(T) / Mut(T) / Slice(T) / MutSlice(T) / Array(T,N) / Fn((P,...)->R)。
+
+func factory_ref(k: addr, g: u64, i: u64, out: addr, mutv: u64) -> u64 {
+  let grp: u64 = n_at(g, i + 1);
+  if n_count(grp) == 0 { st.st_fail(k, e_type()); return i + 2; }
+  let e: addr = new_ty(k);
+  let j: u64 = parse_type(k, grp, 0, e);
+  let id: u64 = ct.ref_t(k, ireg.tid_of(k, e), mutv);
+  let a: u64 = ireg.project(k, id, out);
+  return i + 2;
+}
+
+func factory_slice(k: addr, g: u64, i: u64, out: addr, mutv: u64) -> u64 {
+  let grp: u64 = n_at(g, i + 1);
+  if n_count(grp) == 0 { st.st_fail(k, e_type()); return i + 2; }
+  let e: addr = new_ty(k);
+  let j: u64 = parse_type(k, grp, 0, e);
+  let id: u64 = ct.slice_t(k, ireg.tid_of(k, e), mutv);
+  let a: u64 = ireg.project(k, id, out);
+  return i + 2;
+}
+
+func count_at(k: addr, g: u64, i: u64) -> u64 {
+  if i >= n_count(g) { st.st_fail(k, e_type()); return 0; }
+  if ax.is_digit_token(g, i) == 0 { st.st_fail(k, e_type()); return 0; }
+  let h: u64 = n_at(g, i);
+  return ax.num_value(ax.lit_addr(h), ax.lit_len(h));
+}
+
+func factory_array(k: addr, g: u64, i: u64, out: addr) -> u64 {
+  let grp: u64 = n_at(g, i + 1);
+  if n_count(grp) == 0 { st.st_fail(k, e_type()); return i + 2; }
+  let e: addr = new_ty(k);
+  let j: u64 = parse_type(k, grp, 0, e);
+  if j >= n_count(grp) { st.st_fail(k, e_type()); return i + 2; }
+  if is_comma(grp, j) == 0 { st.st_fail(k, e_type()); return i + 2; }
+  let cnt: u64 = count_at(k, grp, j + 1);
+  let id: u64 = ct.array_t(k, ireg.tid_of(k, e), cnt);
+  let a: u64 = ireg.project(k, id, out);
+  return i + 2;
+}
+
+func fill_sig(k: addr, g: u64, i: u64, idx: u64, sig: addr) -> u64 {
+  if i >= n_count(g) { return idx; }
+  let t: addr = new_ty(k);
+  let j: u64 = parse_type(k, g, i, t);
+  store(sig + idx * 8, ireg.tid_of(k, t));
+  let nj: u64 = if is_comma(g, j) == 1 { j + 1 } else { j };
+  return fill_sig(k, g, nj, idx + 1, sig);
+}
+
+func factory_fn(k: addr, g: u64, i: u64, out: addr) -> u64 {
+  let grp: u64 = n_at(g, i + 1);
+  if n_count(grp) < 3 { st.st_fail(k, e_type()); return i + 2; }
+  let pg: u64 = n_at(grp, 0);
+  if is_group_node(pg) == 0 { st.st_fail(k, e_type()); return i + 2; }
+  let np: u64 = bi.arg_count(pg);
+  let sig: addr = st.st_ralloc(k, np * 8 + 8);
+  let got: u64 = fill_sig(k, pg, 0, 0, sig);
+  let ret: addr = new_ty(k);
+  let j: u64 = parse_type(k, grp, 2, ret);
+  let id: u64 = ct.fn_t(k, ireg.tid_of(k, ret), np, sig as u64);
+  let a: u64 = ireg.project(k, id, out);
+  return i + 2;
+}
+
+func factory_type(k: addr, g: u64, i: u64, out: addr) -> u64 {
+  let nm: u64 = n_sym(g, i);
+  if nm == s.t_mutslice() { return factory_slice(k, g, i, out, 1); }
+  if nm == s.t_mut() { return factory_ref(k, g, i, out, 1); }
+  if nm == s.t_ref() { return factory_ref(k, g, i, out, 0); }
+  if nm == s.t_slice() { return factory_slice(k, g, i, out, 0); }
+  if nm == s.t_array() { return factory_array(k, g, i, out); }
+  if nm == s.t_fn() { return factory_fn(k, g, i, out); }
+  return 0;
+}
+
+// 类型标注：标量名、struct/enum 名、限定名 M.Name、复合类型工厂、
+// 旧写法 ref T / mut ref T / slice T，以及表类型 [T]。
+// 复合类型一律压成物理表示：引用族与 Fn 是 addr，切片是 16 字节头，
+// 数组是原地块；逻辑身份都记在形状号里。
 func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 {
   if i >= n_count(g) { st.st_fail(k, e_ast()); return i + 1; }
   let h: u64 = n_at(g, i);
@@ -201,10 +295,8 @@ func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 {
     if ax.delim(h) == dl_bracket() {
       let elem: addr = new_ty(k);
       let j: u64 = parse_type(k, h, 0, elem);
-      let sh: u64 = agg.array_new(k, agg.kind_array(), 0, ty.tk(elem), ty.tw(elem),
-                                  ty.tsg(elem), ty.tsh(elem));
-      let a: u64 = ty.ty_addr(out);
-      let b: u64 = ty.ty_set_sh(out, sh);
+      let id: u64 = ct.array_t(k, ireg.tid_of(k, elem), 0);
+      let a: u64 = ireg.project(k, id, out);
       return i + 1;
     }
     st.st_fail(k, e_type());
@@ -212,23 +304,32 @@ func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 {
   }
   let sym: u64 = node_sym(h);
   if sym == s.k_ro() { return parse_type(k, g, i + 1, out); }
+  if is_name(g, i) == 1 and i + 1 < n_count(g) and is_group(g, i + 1) == 1 {
+    if delim_of(g, i + 1) == dl_paren() {
+      let f: u64 = factory_type(k, g, i, out);
+      if f != 0 { return f; }
+    }
+  }
   if sym == s.k_ref() {
-    let elem: addr = new_ty(k);
-    let j: u64 = parse_type(k, g, i + 1, elem);
-    let a: u64 = ty.ty_addr(out);
+    let e: addr = new_ty(k);
+    let j: u64 = parse_type(k, g, i + 1, e);
+    let id: u64 = ct.ref_t(k, ireg.tid_of(k, e), 0);
+    let a: u64 = ireg.project(k, id, out);
     return j;
   }
   if sym == s.k_slice() {
-    let elem: addr = new_ty(k);
-    let j: u64 = parse_type(k, g, i + 1, elem);
-    let a: u64 = ty.ty_addr(out);
+    let e: addr = new_ty(k);
+    let j: u64 = parse_type(k, g, i + 1, e);
+    let id: u64 = ct.slice_t(k, ireg.tid_of(k, e), 0);
+    let a: u64 = ireg.project(k, id, out);
     return j;
   }
   if sym == s.k_mut() {
     if i + 1 < n_count(g) and n_sym(g, i + 1) == s.k_ref() {
-      let elem: addr = new_ty(k);
-      let j: u64 = parse_type(k, g, i + 2, elem);
-      let a: u64 = ty.ty_addr(out);
+      let e: addr = new_ty(k);
+      let j: u64 = parse_type(k, g, i + 2, e);
+      let id: u64 = ct.ref_t(k, ireg.tid_of(k, e), 1);
+      let a: u64 = ireg.project(k, id, out);
       return j;
     }
     st.st_fail(k, e_type());

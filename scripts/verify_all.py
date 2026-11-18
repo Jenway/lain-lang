@@ -400,6 +400,31 @@ META_CASES = [
                "s0__rect_vtable", "s0__as_shape_Circle", "s0__as_shape_Rect"],
      "contains": ["#call [(#addr) -> #bits<64>](",
                   "#call [(#addr, #bits<64>) -> #bits<64>]("]},
+    # 复合类型基础设施：窄标量的 ref_of/mut_of/deref 按真实位宽读（u8），
+    # 聚合引用 deref 之后的字段与嵌套字段链都能定位。
+    # 925 = u8 的 200 + mut 的 3 + deref(rf).pos.x 的 7 + frame_score 的 704
+    # + Mut(i64) 隐式转 Ref(i64) 后解引用的 11。
+    {"file": "refs_deref.lain", "entry": "s0__main", "value": 925, "folds": [],
+     "procs": ["s0__frame_score"]},
+    # Fn 值走间接调用完成动态多态：s.vtable.scale(s.data, k) 按签名校验实参；
+    # Fn 还能做形参并在标注位置直接收过程名。
+    # 56 = area_of(Circle{r:7}) 的 7 + scaled(..., 5) 的 35 + f(1) 的 2 + twice 的 12。
+    {"file": "fn_vtable.lain", "entry": "s0__main", "value": 56, "folds": [],
+     "procs": ["s0__area_of", "s0__scaled", "s0__circle_area",
+               "s0__circle_scale", "s0__inc", "s0__twice"],
+     "contains": ["#call [(#addr) -> #bits<64>](",
+                  "#call [(#addr, #bits<64>) -> #bits<64>](",
+                  "#call [(#bits<64>) -> #bits<64>]("]},
+    # Array(u64, 4) 局部字面量与结构体字段、数组形参、Slice/MutSlice 视图：
+    # 4162 = 4000（len）+ 100（四元素求和）+ 50（形参数组的 s[0]+s[3]）
+    # + 10（字段数组的 s[1]+s[2] 加 tag=5）+ 2（slice_of(Ref,2) 的 len）。
+    {"file": "array_slice.lain", "entry": "s0__main", "value": 4162, "folds": [],
+     "procs": ["s0__sum_slice", "s0__head_tail", "s0__row_mid"]},
+    # 字符串反转义后作为 Slice(u8) 使用：a、换行、b、双引号、c、反斜杠共 6 字节，
+    # 和 430，6430 = 6*1000 + 430。
+    {"file": "str_escape.lain", "entry": "s0__main", "value": 6430, "folds": [],
+     "procs": ["s0__sum_bytes"],
+     "contains": ["data s0__strlit_0 ro"]},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -409,6 +434,13 @@ META_NEGATIVE = [
     {"file": "eval_trap.lain", "why": "被求值的表达式在隔离执行里触发陷阱"},
     {"file": "icall_bad_sig.lain", "why": "间接调用的目标不是 addr"},
     {"file": "icall_bad_args.lain", "why": "间接调用的实参个数与签名不符"},
+    {"file": "deref_nonref.lain", "why": "对非引用值做解引用"},
+    {"file": "deref_void.lain", "why": "对 Ref(void) 直接解引用"},
+    {"file": "fn_bad_args.lain", "why": "Fn 值的实参个数与签名不符"},
+    {"file": "ref_to_mut.lain", "why": "把 Ref(T) 当成 Mut(T) 传递"},
+    {"file": "slice_to_mutslice.lain", "why": "把 Slice(T) 当成 MutSlice(T) 传递"},
+    {"file": "fn_bad_type.lain", "why": "Fn 值的实参类型与签名不符"},
+    {"file": "array_bad_len.lain", "why": "数组字面量元素个数与 Array(T, N) 不符"},
 ]
 
 

@@ -24,17 +24,46 @@ func put_le(p: addr, v: u64, w: u64) -> u64 {
   return 0;
 }
 
-// 字符串字面量的字节落在暂存缓冲里，交给 data_add 变成 ro 静态数据。
+// 一个转义字符的实际字节（不认识的就照原样，反斜杠后接其它字符取其本身）。
+func esc_at(text: addr, i: u64, len: u64) -> u8 {
+  let b: u8 = load(text + i);
+  if b != 92 { return b; }
+  if i + 1 >= len { return b; }
+  let c: u8 = load(text + i + 1);
+  if c == 110 { return 10; }
+  if c == 114 { return 13; }
+  if c == 116 { return 9; }
+  if c == 48 { return 0; }
+  return c;
+}
+
+// 转义序列吃两个字节，普通字符吃一个。
+func esc_step(text: addr, i: u64, len: u64) -> u64 {
+  let b: u8 = load(text + i);
+  if b != 92 { return 1; }
+  if i + 1 >= len { return 1; }
+  return 2;
+}
+
+// 把源码里的字面量字节反转义后铺进 buf，回实际长度。
+func unescape_into(buf: addr, text: addr, len: u64) -> u64 {
+  let r: u64 = loop c(i: u64 = 0, o: u64 = 0) while i < len {
+    let v: u8 = esc_at(text, i, len);
+    let stp: u64 = esc_step(text, i, len);
+    store(buf + o, v);
+    i = i + stp;
+    o = o + 1;
+  };
+  return r;
+}
+
+// 字符串字面量的字节反转义后落在暂存缓冲里，交给 data_add 变成 ro 静态数据。
 func string_data(s: addr, dname: u64, text: addr, len: u64) -> u64 {
   let buf: addr = st.st_databuf(s) + st.st_dataused(s);
-  let i: u64 = loop c(i: u64 = 0) while i < len {
-    let b: u8 = load(text + i);
-    store(buf + i, b);
-    i = i + 1;
-  };
-  let add: u64 = st.st_set_dataused(s, st.st_dataused(s) + len);
-  let rc: u64 = ir.data_add(s, dname, buf, len, 0);
-  return agg.array_new(s, agg.kind_string(), len, 0, 8, 0, 0);
+  let outlen: u64 = unescape_into(buf, text, len);
+  let add: u64 = st.st_set_dataused(s, st.st_dataused(s) + outlen);
+  let rc: u64 = ir.data_add(s, dname, buf, outlen, 0);
+  return agg.array_new(s, agg.kind_string(), outlen, 0, 8, 0, 0);
 }
 
 // 定长表：[1, 2, 3] 这种字面量组按元素宽度铺进静态数据。逗号也占孩子位置，要跳过。
@@ -168,6 +197,9 @@ func is_builtin(name: u64) -> u64 {
   if name == sym.b_addr_of() { return 1; }
   if name == sym.b_len() { return 1; }
   if name == sym.b_ref_of() { return 1; }
+  if name == sym.b_mut_of() { return 1; }
+  if name == sym.b_deref() { return 1; }
+  if name == sym.b_fn_of() { return 1; }
   if name == sym.b_slice_of() { return 1; }
   if name == sym.b_symbol_addr() { return 1; }
   return 0;

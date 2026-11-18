@@ -2,7 +2,9 @@
 // 形状记录 96 字节头 + 8 条 64 字节成员记录：
 //   头  = [种类@0, 名字@8, 模块@16, 已用字节@24, 对齐@32, 成员数@40]
 //   成员 = [名字@0, 偏移@8, 标签号@16, 有载荷@24, k@32, w@40, sg@48, 形状@56]
-// 种类：1 struct、2 enum、3 数组、4 字符串。
+// 种类：1 struct、2 enum、3 数组、4 字符串、6 Ref、7 Mut、8 Slice、9 MutSlice、11 Fn。
+// 头里 64/72/80/88 处是逻辑类型信息：本形状的 TypeId、元素 TypeId、
+// Fn 的返回 TypeId、Fn 的形参 TypeId 表在持久池里的字节偏移。
 // 形状与成员都从持久分配器取：跨源（import）存活，且不随 arena 重置消失。
 let st = import("state");
 let ty = import("types");
@@ -13,6 +15,11 @@ func kind_struct() -> u64 { return 1; }
 func kind_enum() -> u64 { return 2; }
 func kind_array() -> u64 { return 3; }
 func kind_string() -> u64 { return 4; }
+func kind_ref() -> u64 { return 6; }
+func kind_mut() -> u64 { return 7; }
+func kind_slice() -> u64 { return 8; }
+func kind_mutslice() -> u64 { return 9; }
+func kind_fn() -> u64 { return 11; }
 
 func align_up(v: u64, a: u64) -> u64 {
   if a == 0 { return v; }
@@ -20,7 +27,7 @@ func align_up(v: u64, a: u64) -> u64 {
 }
 
 func shp_new(s: addr, kind: u64, name: u64, m: u64) -> u64 {
-  let p: addr = st.st_ralloc(s, 608);
+  let p: addr = st.st_shp_new(s, 608);
   store(p, kind);
   store(p + 8, name);
   store(p + 16, m);
@@ -29,6 +36,10 @@ func shp_new(s: addr, kind: u64, name: u64, m: u64) -> u64 {
   store(p + 40, 0);
   store(p + 48, 0);
   store(p + 56, 0);
+  store(p + 64, 0);
+  store(p + 72, 0);
+  store(p + 80, 0);
+  store(p + 88, 0);
   return p as u64;
 }
 
@@ -66,6 +77,50 @@ func shp_count(sh: u64) -> u64 {
 func shp_len(sh: u64) -> u64 {
   let p: addr = sh as addr;
   return load(p + 48);
+}
+
+func shp_tid(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 64);
+}
+
+func shp_set_tid(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 64, v);
+  return v;
+}
+
+func shp_elem(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 72);
+}
+
+func shp_set_elem(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 72, v);
+  return v;
+}
+
+func shp_ret(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 80);
+}
+
+func shp_set_ret(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 80, v);
+  return v;
+}
+
+func shp_sig(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 88);
+}
+
+func shp_set_sig(sh: u64, v: u64) -> u64 {
+  let p: addr = sh as addr;
+  store(p + 88, v);
+  return v;
 }
 
 func mem_at(sh: u64, i: u64) -> addr {

@@ -1,25 +1,55 @@
-// tyreg.lain —— 编译期类型注册表与只读反射表：TypeId 编号、表布局与打包。
+// tyreg.lain —— 逻辑类型注册表（TypeId）与只读反射表：编号、物理投影、表布局与打包。
 // 查询原语的 IR 内联发射在 reflect.lain，那边单向 import 本文件。
+// 逻辑种类：0 bits、1 floats、2 vec、3 addr、4 struct、5 enum、6 Ref、7 Mut、
+// 8 Slice、9 MutSlice、10 Array、11 Fn、12 void。物理投影里 Ref/Mut/Fn 与
+// 聚合都是 #addr，Slice/MutSlice/Array 是带形状的 #addr（Slice 指向 16 字节头）。
 let st = import("state");
+let ty = import("types");
 let agg = import("agg");
 let modules = import("modules");
 let ir = import("ir");
 let s = import("sym");
 
-// 注册表条目 40 字节：[种类 0, 位宽 8, 符号性 16, 形状 24]。
+func lk_bits() -> u64 { return 0; }
+func lk_floats() -> u64 { return 1; }
+func lk_vec() -> u64 { return 2; }
+func lk_addr() -> u64 { return 3; }
+func lk_struct() -> u64 { return 4; }
+func lk_enum() -> u64 { return 5; }
+func lk_ref() -> u64 { return 6; }
+func lk_mut() -> u64 { return 7; }
+func lk_slice() -> u64 { return 8; }
+func lk_mutslice() -> u64 { return 9; }
+func lk_array() -> u64 { return 10; }
+func lk_fn() -> u64 { return 11; }
+func lk_void() -> u64 { return 12; }
+
+func lk_of_shape(sk: u64) -> u64 {
+  if sk == agg.kind_struct() { return lk_struct(); }
+  if sk == agg.kind_enum() { return lk_enum(); }
+  if sk == agg.kind_array() { return lk_array(); }
+  if sk == agg.kind_string() { return lk_array(); }
+  if sk == agg.kind_ref() { return lk_ref(); }
+  if sk == agg.kind_mut() { return lk_mut(); }
+  if sk == agg.kind_slice() { return lk_slice(); }
+  if sk == agg.kind_mutslice() { return lk_mutslice(); }
+  if sk == agg.kind_fn() { return lk_fn(); }
+  return lk_void();
+}
+
+// 注册表条目 40 字节：[逻辑种类 0, 位宽 8, 符号性 16, 形状 24]。
 func reg_size() -> u64 { return 40; }
 // 反射表每类型 320 字节：64 字节头 + 8 条 32 字节字段记录。
 func stride() -> u64 { return 320; }
 func field_cap() -> u64 { return 8; }
-// 行数上限：0 号行是保留行，真实类型占 1..cnt。
-func reg_cap() -> u64 { return 32; }
+// 注册表初始行数；满了翻倍重分配。0 号行是保留行，真实类型占 1..cnt。
+func reg_init_cap() -> u64 { return 64; }
 
 func reflect_name() -> u64 { return s.intern("__meta_reflect", 14); }
 func buffer_name() -> u64 { return s.intern("__meta_buf", 10); }
 func buffer_bytes() -> u64 { return 8192; }
 
 // --- 类型注册表 -------------------------------------------------------------
-// TypeId 从 1 起（0 保留），条目下标从 0 起。reg_at 取下标，reg_slot 取编号。
 func reg_at(k: addr, i: u64) -> addr {
   let b: addr = st.st_tybase(k);
   return b + i * 40;
@@ -29,9 +59,33 @@ func reg_count(k: addr) -> u64 { return st.st_tyused(k) / reg_size(); }
 
 func reg_init(k: addr) -> u64 {
   if st.st_tybase(k) as u64 != 0 { return 1; }
-  let b: addr = st.st_ralloc(k, reg_size() * reg_cap());
-  let c: u64 = st.st_set_tycap(k, reg_cap());
+  let b: addr = st.st_ralloc(k, reg_size() * reg_init_cap());
+  let c: u64 = st.st_set_tycap(k, reg_init_cap());
   let d: u64 = st.st_set_tybase(k, b);
+  return 1;
+}
+
+// 翻倍：新块从持久池里取，旧块随编译结束一起作废。
+func reg_grow(k: addr) -> u64 {
+  let n: u64 = reg_count(k);
+  let ncap: u64 = st.st_tycap(k) * 2;
+  let nb: addr = st.st_ralloc(k, reg_size() * ncap);
+  if st.st_ok(k) != 0 { return 0; }
+  let i: u64 = loop c(i: u64 = 0) while i < n {
+    let src: addr = reg_at(k, i);
+    let dst: addr = nb + i * 40;
+    let v0: u64 = load(src);
+    let v1: u64 = load(src + 8);
+    let v2: u64 = load(src + 16);
+    let v3: u64 = load(src + 24);
+    store(dst, v0);
+    store(dst + 8, v1);
+    store(dst + 16, v2);
+    store(dst + 24, v3);
+    i = i + 1;
+  };
+  let a: u64 = st.st_set_tybase(k, nb);
+  let b: u64 = st.st_set_tycap(k, ncap);
   return 1;
 }
 
@@ -47,22 +101,21 @@ func reg_hit(k: addr, i: u64, kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
   return 0;
 }
 
-// 返回编号（下标 + 1）。
 func reg_scan(k: addr, kk: u64, w: u64, sg: u64, sh: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   if reg_hit(k, i, kk, w, sg, sh) == 1 { return i + 1; }
   return reg_scan(k, kk, w, sg, sh, i + 1, n);
 }
 
-// 登记一个类型并回它的 TypeId（1 起）；同形同宽同符号性同形状的类型共用编号。
+// 登记一个类型并回它的 TypeId（1 起）；同种类同宽同符号性同形状共用编号。
 func ty_add(k: addr, kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
   let e: u64 = reg_init(k);
   let n: u64 = reg_count(k);
   let hit: u64 = reg_scan(k, kk, w, sg, sh, 0, n);
   if hit != 0 { return hit; }
   if n >= st.st_tycap(k) {
-    let f: u64 = st.st_fail(k, 5);
-    return 0;
+    let g: u64 = reg_grow(k);
+    if st.st_ok(k) != 0 { return 0; }
   }
   let p: addr = reg_at(k, n);
   store(p, kk);
@@ -77,6 +130,50 @@ func ty_kind(k: addr, id: u64) -> u64 { return load(reg_slot(k, id)); }
 func ty_width(k: addr, id: u64) -> u64 { return load(reg_slot(k, id) + 8); }
 func ty_signed(k: addr, id: u64) -> u64 { return load(reg_slot(k, id) + 16); }
 func ty_shape(k: addr, id: u64) -> u64 { return load(reg_slot(k, id) + 24); }
+
+func void_tid(k: addr) -> u64 { return ty_add(k, lk_void(), 0, 0, 0); }
+
+// 把一个 Ty 归到一个 TypeId：带形状的按形状找，形状还没编号就现登记。
+func tid_of(k: addr, t: addr) -> u64 {
+  if ty.ty_known(t) == 0 { return void_tid(k); }
+  let sh: u64 = ty.tsh(t);
+  if sh != 0 {
+    let got: u64 = agg.shp_tid(sh);
+    if got != 0 { return got; }
+    let sk: u64 = agg.shp_kind(sh);
+    let id: u64 = ty_add(k, lk_of_shape(sk), 0, 0, sh);
+    let st1: u64 = agg.shp_set_tid(sh, id);
+    return id;
+  }
+  return ty_add(k, ty.tk(t), ty.tw(t), ty.tsg(t), 0);
+}
+
+// 物理投影：逻辑类型 → 代码发射用的 Ty。
+func project(k: addr, id: u64, out: addr) -> u64 {
+  let lk: u64 = ty_kind(k, id);
+  let w: u64 = ty_width(k, id);
+  let sg: u64 = ty_signed(k, id);
+  if lk <= 3 { return ty.ty_save(out, lk, w, sg); }
+  if lk == 12 { return ty.ty_none(out); }
+  let sh: u64 = ty_shape(k, id);
+  let a: u64 = ty.ty_addr(out);
+  if sh == 0 { return a; }
+  return ty.ty_set_sh(out, sh);
+}
+
+func size_of(k: addr, id: u64) -> u64 {
+  let sh: u64 = ty_shape(k, id);
+  if sh != 0 { return agg.shp_size(sh); }
+  if ty_kind(k, id) == lk_void() { return 0; }
+  return agg.type_size(ty_kind(k, id), ty_width(k, id), 0);
+}
+
+func align_of(k: addr, id: u64) -> u64 {
+  let sh: u64 = ty_shape(k, id);
+  if sh != 0 { return agg.shp_align(sh); }
+  if ty_kind(k, id) == lk_void() { return 1; }
+  return agg.type_align(ty_kind(k, id), ty_width(k, id), 0);
+}
 
 func scalar_name(kk: u64, w: u64, sg: u64) -> u64 {
   if kk == 3 { return s.t_addr(); }
@@ -97,6 +194,7 @@ func scalar_name(kk: u64, w: u64, sg: u64) -> u64 {
 func type_name(k: addr, i: u64) -> u64 {
   let sh: u64 = ty_shape(k, i);
   if sh != 0 { return agg.shp_name(sh); }
+  if ty_kind(k, i) == lk_void() { return s.t_void(); }
   return scalar_name(ty_kind(k, i), ty_width(k, i), ty_signed(k, i));
 }
 
@@ -104,13 +202,18 @@ func type_name(k: addr, i: u64) -> u64 {
 func seed_fields(k: addr, sh: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 1; }
   let m: addr = agg.mem_at(sh, i);
-  let e: u64 = ty_add(k, agg.mem_k(m), agg.mem_w(m), agg.mem_sg(m), agg.mem_sh(m));
+  let t: addr = st.st_alloc(k, 32);
+  let mt: u64 = agg.mem_ty(k, m, t);
+  let e: u64 = tid_of(k, t);
   return seed_fields(k, sh, i + 1, n);
 }
 
 func seed_shape(k: addr, sh: u64) -> u64 {
   if sh as u64 == 0 { return 1; }
-  let e: u64 = ty_add(k, 3, 0, 0, sh);
+  let t: addr = st.st_alloc(k, 32);
+  let a: u64 = ty.ty_addr(t);
+  let b: u64 = ty.ty_set_sh(t, sh);
+  let e: u64 = tid_of(k, t);
   return seed_fields(k, sh, 0, agg.shp_count(sh));
 }
 
@@ -138,17 +241,19 @@ func zero_bytes(p: addr, n: u64) -> u64 {
 func fill_fields(k: addr, base: addr, p: addr, sh: u64, j: u64, cnt: u64, pos: u64) -> u64 {
   if j >= cnt { return pos; }
   let m: addr = agg.mem_at(sh, j);
-  let q0: addr = p + 64;
-  let fr: addr = q0 + j * 32;
+  let fr: addr = p + 64 + j * 32;
   let fn: u64 = agg.mem_name(m);
-  let fl: u64 = modules.sym_len(fn);
+  let fl: u64 = if fn as u64 == 0 { 0 } else { modules.sym_len(fn) };
   store(fr, pos);
   store(fr + 8, fl);
   store(fr + 24, agg.mem_off(m));
-  let tid: u64 = ty_add(k, agg.mem_k(m), agg.mem_w(m), agg.mem_sg(m), agg.mem_sh(m));
+  let t: addr = st.st_alloc(k, 32);
+  let mt: u64 = agg.mem_ty(k, m, t);
+  let tid: u64 = tid_of(k, t);
   store(fr + 16, tid);
-  let cp: u64 = modules.copy_sym(base + pos, fn);
-  return fill_fields(k, base, p, sh, j + 1, cnt, pos + fl);
+  let pos2: u64 = if fn as u64 == 0 { pos } else { pos + fl };
+  let cp: u64 = if fn as u64 == 0 { 0 } else { modules.copy_sym(base + pos, fn) };
+  return fill_fields(k, base, p, sh, j + 1, cnt, pos2);
 }
 
 func fill_type(k: addr, base: addr, i: u64, n: u64, pos: u64) -> u64 {
@@ -161,19 +266,17 @@ func fill_type(k: addr, base: addr, i: u64, n: u64, pos: u64) -> u64 {
   store(p, kk);
   store(p + 8, w);
   store(p + 16, sg);
-  let size: u64 = if sh != 0 { agg.shp_size(sh) } else { agg.type_size(kk, w, 0) };
-  let al: u64 = if sh != 0 { agg.shp_align(sh) } else { agg.type_align(kk, w, 0) };
+  store(p + 24, size_of(k, i));
+  store(p + 32, align_of(k, i));
   let cnt: u64 = if sh != 0 { agg.shp_count(sh) } else { 0 };
-  store(p + 24, size);
-  store(p + 32, al);
   store(p + 40, cnt);
   let ns: u64 = type_name(k, i);
-  let nl: u64 = modules.sym_len(ns);
+  let nl: u64 = if ns as u64 == 0 { 0 } else { modules.sym_len(ns) };
   store(p + 48, pos);
   store(p + 56, nl);
-  let cp: u64 = modules.copy_sym(base + pos, ns);
-  let pos2: u64 = fill_fields(k, base, p, sh, 0, cnt, pos + nl);
-  return fill_type(k, base, i + 1, n, pos2);
+  let pos2: u64 = if ns as u64 == 0 { pos } else { pos + nl };
+  let cp: u64 = if ns as u64 == 0 { 0 } else { modules.copy_sym(base + pos, ns) };
+  return fill_type(k, base, i + 1, n, fill_fields(k, base, p, sh, 0, cnt, pos2));
 }
 
 // 把整张表铺进当前模块：只读表 + 一块可写的生成为输出缓冲。
