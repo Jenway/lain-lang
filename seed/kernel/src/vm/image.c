@@ -671,15 +671,17 @@ int lainvm_image_admit(const L1Module *module, LainVmSpace *space,
     }
   }
 
+  /* 先把全部子过程名登记完再装函数体：操作数里用过程名取入口地址
+     （#bitcast[#addr] 之类）不受声明顺序限制。 */
+  for (i = 0; i < module->subroutine_count; i++)
+    image->subs[i].sub = &module->subroutines[i];
+  image->sub_count = module->subroutine_count;
+
   for (i = 0; i < module->subroutine_count; i++) {
     const L1Subroutine *sub = &module->subroutines[i];
     uint32_t body = LAINVM_IMAGE_NO_REGION;
     uint32_t first = image->region_count;
     uint32_t r;
-    /* 先登记这条子过程：add_region 解析操作数时要用 find_sub 认过程名，
-       而 find_sub 看的是 subs[].sub。 */
-    image->subs[i].sub = sub;
-    image->sub_count = i + 1;
     if (!(sub->flags & SUBROUTINE_EXTERN) && sub->body)
       body = add_region(&loader, sub->body, LAINVM_IMAGE_NO_REGION, 1,
                         sub->params, sub->param_count);

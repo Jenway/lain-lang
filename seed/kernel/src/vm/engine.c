@@ -642,9 +642,8 @@ static LainVmSliceResult invoke_host(LainVmTcb *tcb, const L1Inst *inst,
                                            : args[i].as.bits;
 
   status = fn(context, raw, arg_count, result_out ? &result : NULL);
-  if (status != 0) {
+  if (status != 0)
     return trap_now(tcb, LAINVM_TRAP_CAPABILITY, (int32_t)status, inst);
-  }
 
   if (result_out) {
     memset(result_out, 0, sizeof(*result_out));

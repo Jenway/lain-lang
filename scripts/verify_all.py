@@ -425,6 +425,24 @@ META_CASES = [
     {"file": "str_escape.lain", "entry": "s0__main", "value": 6430, "folds": [],
      "procs": ["s0__sum_bytes"],
      "contains": ["data s0__strlit_0 ro"]},
+    # 通用左值 + sret 聚合返回 + let = func 与无捕获匿名函数：
+    # 167 = bump 105 + m.y 9 + bx.pos.x 7 + c 11 + 数组和 12 + apply 21
+    #       + is_odd 1 + is_even 1。
+    {"file": "lval_sret_func.lain", "entry": "s0__main", "value": 167, "folds": [],
+     "procs": ["s0__mk", "s0__bump", "s0__set_y", "s0__set_pos_x", "s0__set_slot",
+               "s0__fill", "s0__sum", "s0__is_odd", "s0__is_even", "s0__apply",
+               "s0__anon0"],
+     "contains": ["#call @s0__bump(%_t149, %_t148)"]},
+    # 干净版列式 SoA：注入的字段是真的 Array(i64, 4) 列，生成器用 Slice(u8)
+    # 与转义写入器拼源码。81 = 四组 (x+y+z) 的和 78 + soa_quote 的 3。
+    {"file": "soa_clean.lain", "entry": "s0__main", "value": 81, "folds": [],
+     "procs": ["s0__soa_set", "s0__soa_at", "s0__soa_quote"]},
+    # 干净版接口分发：Ref(T) 显式解引用、Ref(void) 承载数据、Fn 直接从成员调用。
+    # 49 = circle_area(3) 的 9 + rect_scale(4x5, 2) 的 40。
+    {"file": "interface_clean.lain", "entry": "s0__main", "value": 49, "folds": [],
+     "procs": ["s0__area_of", "s0__scale_of", "s0__circle_area", "s0__rect_scale"],
+     "contains": ["#call [(#addr) -> #bits<64>](",
+                  "#call [(#addr, #bits<64>) -> #bits<64>]("]},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -441,6 +459,10 @@ META_NEGATIVE = [
     {"file": "slice_to_mutslice.lain", "why": "把 Slice(T) 当成 MutSlice(T) 传递"},
     {"file": "fn_bad_type.lain", "why": "Fn 值的实参类型与签名不符"},
     {"file": "array_bad_len.lain", "why": "数组字面量元素个数与 Array(T, N) 不符"},
+    {"file": "lval_ref_ro.lain", "why": "通过只读 Ref 写字段必须失败"},
+    {"file": "lval_slice_ro.lain", "why": "通过只读 Slice 写元素必须失败"},
+    {"file": "anon_capture.lain", "why": "无名函数捕获外层局部量必须失败"},
+    {"file": "lval_bad.lain", "why": "非法左值必须报错"},
 ]
 
 

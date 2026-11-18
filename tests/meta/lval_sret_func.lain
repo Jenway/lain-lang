@@ -1,0 +1,90 @@
+// 通用左值、sret 聚合返回、let = func 与无捕获匿名函数。
+//
+// 覆盖四类写入目标：局部字段（含嵌套字段）、Mut(T) 解引用、MutSlice 下标、
+// 以及 Mut(i64) 解引用直接赋值；同时验证值聚合按 sret 安全返回。
+
+struct Vec2 { x: i64 y: i64 }
+struct Box2 { pos: Vec2 tag: i64 }
+
+// --- sret：值聚合安全返回 ------------------------------------------------
+func mk(n: i64) -> Vec2 {
+  let v: Vec2 = Vec2 { x: n y: n + 1 };
+  return v;
+}
+
+// 函数内的局部聚合在 if 分支里被改写，再整块返回。
+func bump(v: Vec2) -> Vec2 {
+  let p: Vec2 = Vec2 { x: v.x y: v.y };
+  if p.x > 0 { p.x = p.x + 100; } else { p.x = 0; }
+  return p;
+}
+
+// --- 左值：解引用与嵌套字段 ----------------------------------------------
+func set_y(r: Mut(Vec2), n: i64) -> u64 {
+  deref(r).y = n;
+  return 1;
+}
+
+func set_pos_x(r: Mut(Box2), n: i64) -> u64 {
+  deref(r).pos.x = n;
+  return 1;
+}
+
+func set_slot(c: Mut(i64), n: i64) -> u64 {
+  deref(c) = n;
+  return 1;
+}
+
+func fill(s: MutSlice(i64), n: u64) -> u64 {
+  let r: u64 = loop c(k: u64 = 0) while k < n {
+    s[k] = (k as i64) * 2;
+    k = k + 1;
+  };
+  return 1;
+}
+
+func sum(s: Slice(i64), n: u64) -> i64 {
+  let r: i64 = loop c(k: u64 = 0, acc: i64 = 0) while k < n {
+    acc = acc + s[k];
+    k = k + 1;
+  };
+  return r;
+}
+
+// --- let = func：顶层互相递归 --------------------------------------------
+let is_odd = func (n: i64) -> i64 {
+  if n == 0 { return 0; }
+  return is_even(n - 1);
+};
+
+let is_even = func (n: i64) -> i64 {
+  if n == 0 { return 1; }
+  return is_odd(n - 1);
+};
+
+// --- 高阶：接收 Fn 的函数与无捕获匿名实参 --------------------------------
+func apply(f: Fn((i64) -> i64), v: i64) -> i64 { return f(v); }
+
+func main() -> u64 {
+  let a: Vec2 = mk(5);
+  let b: Vec2 = bump(a);
+  let m: Vec2 = Vec2 { x: 0 y: 0 };
+  let r: Mut(Vec2) = mut_of(m);
+  let y_ok: u64 = set_y(r, 9);
+  let bx: Box2 = Box2 { pos: Vec2 { x: 0 y: 0 } tag: 3 };
+  let rb: Mut(Box2) = mut_of(bx);
+  let px_ok: u64 = set_pos_x(rb, 7);
+  let c: i64 = 0;
+  let rc: Mut(i64) = mut_of(c);
+  let c_ok: u64 = set_slot(rc, 11);
+  let arr: Array(i64, 4) = [1, 2, 3, 4];
+  let ms: MutSlice(i64) = slice_of(arr);
+  let f_ok: u64 = fill(ms, 4);
+  let ro: Slice(i64) = slice_of(arr);
+  let total: i64 = sum(ro, 4);
+  let triple: Fn((i64) -> i64) = func (x: i64) -> i64 { return x * 3; };
+  let t: i64 = apply(triple, 7);
+  let odd: i64 = is_odd(9);
+  let even: i64 = is_even(10);
+  return (b.x as u64) + (m.y as u64) + (bx.pos.x as u64) + (c as u64) + (total as u64) + (t as u64) + (odd as u64) + (even as u64);
+}

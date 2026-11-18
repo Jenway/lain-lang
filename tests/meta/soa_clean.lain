@@ -1,0 +1,133 @@
+// 静态反射 + 编译期注入：干净版真列式 SoA。
+//
+// 与 soa_reflect.lain 的区别：Vec3_SoA 的每个字段是真正的 Array(i64, 4) 列，
+// 生成器用 Slice(u8) 读字符串、用 MutSlice 风格的写入器逐个字节写出（转义交给
+// 写入器），源码片段里没有手数的字面量长度。
+struct Vec3 { x: i64 y: i64 z: i64 }
+
+// --- 写入器：字面量长度由 len 求得，字符串内容按需转义 --------------------
+func wb(b: addr, i: u64, c: u8) -> u64 {
+  store(b + i, c);
+  return i + 1;
+}
+
+func wesc(b: addr, i: u64, v: u64) -> u64 {
+  if v == 34 {
+    let j: u64 = wb(b, i, 92 as u8);
+    return wb(b, j, 34 as u8);
+  }
+  if v == 92 {
+    let j: u64 = wb(b, i, 92 as u8);
+    return wb(b, j, 92 as u8);
+  }
+  return wb(b, i, v as u8);
+}
+
+func wput(b: addr, i: u64, s: Slice(u8)) -> u64 {
+  let n: u64 = len(s);
+  let r: u64 = loop c(k: u64 = 0, j: u64 = i) while k < n {
+    let jj: u64 = wesc(b, j, s[k] as u64);
+    k = k + 1;
+    j = jj;
+  };
+  return r;
+}
+
+// 写一个带引号的字符串字面量：定界引号原样写出，内容按需转义。
+func wq(b: addr, i: u64, s: Slice(u8)) -> u64 {
+  let j0: u64 = wb(b, i, 34 as u8);
+  let j1: u64 = wput(b, j0, s);
+  return wb(b, j1, 34 as u8);
+}
+
+func wnum(b: addr, i: u64, v: u64) -> u64 {
+  if v >= 10 {
+    let j: u64 = wnum(b, i, v / 10);
+    return wb(b, j, (48 + (v - (v / 10) * 10)) as u8);
+  }
+  return wb(b, i, (48 + v) as u8);
+}
+
+// --- 生成器 ---------------------------------------------------------------
+func cols(b: addr, i: u64, tid: u64, k: u64, n: u64, cap: u64) -> u64 {
+  if k >= n { return i; }
+  let nm: addr = meta_field_name(tid, k);
+  let nl: u64 = meta_field_name_len(tid, k);
+  let ft: u64 = meta_field_type(tid, k);
+  let j0: u64 = wput(b, i, "  ");
+  let j1: u64 = wput(b, j0, slice_of(nm, nl));
+  let j2: u64 = wput(b, j1, ": Array(");
+  let j3: u64 = wput(b, j2, slice_of(meta_type_name(ft), meta_type_name_len(ft)));
+  let j4: u64 = wput(b, j3, ", ");
+  let j5: u64 = wnum(b, j4, cap);
+  let j6: u64 = wput(b, j5, ")\n");
+  return cols(b, j6, tid, k + 1, n, cap);
+}
+
+func setters(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
+  if k >= n { return i; }
+  let nm: addr = meta_field_name(tid, k);
+  let nl: u64 = meta_field_name_len(tid, k);
+  let j0: u64 = wput(b, i, "  deref(s).");
+  let j1: u64 = wput(b, j0, slice_of(nm, nl));
+  let j2: u64 = wput(b, j1, "[idx] = v.");
+  let j3: u64 = wput(b, j2, slice_of(nm, nl));
+  let j4: u64 = wput(b, j3, "\n");
+  return setters(b, j4, tid, k + 1, n);
+}
+
+func readers(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
+  if k >= n { return i; }
+  let j0: u64 = if k > 0 { wput(b, i, " + ") } else { i };
+  let nm: addr = meta_field_name(tid, k);
+  let nl: u64 = meta_field_name_len(tid, k);
+  let j1: u64 = wput(b, j0, "load(deref(s).");
+  let j2: u64 = wput(b, j1, slice_of(nm, nl));
+  let j3: u64 = wput(b, j2, "[idx])");
+  return readers(b, j3, tid, k + 1, n);
+}
+
+func gen(b: addr, i: u64, tid: u64, cap: u64) -> u64 {
+  let n: u64 = meta_field_count(tid);
+  let tn: addr = meta_type_name(tid);
+  let tl: u64 = meta_type_name_len(tid);
+  let j0: u64 = wput(b, i, "struct ");
+  let j1: u64 = wput(b, j0, slice_of(tn, tl));
+  let j2: u64 = wput(b, j1, "_SoA {\n");
+  let j3: u64 = cols(b, j2, tid, 0, n, cap);
+  let j4: u64 = wput(b, j3, "}\nfunc soa_set(s: Mut(");
+  let j5: u64 = wput(b, j4, slice_of(tn, tl));
+  let j6: u64 = wput(b, j5, "_SoA), idx: u64, v: ");
+  let j7: u64 = wput(b, j6, slice_of(tn, tl));
+  let j8: u64 = wput(b, j7, ") -> u64 {\n");
+  let j9: u64 = setters(b, j8, tid, 0, n);
+  let j10: u64 = wput(b, j9, "  return 1\n}\nfunc soa_at(s: Mut(");
+  let j11: u64 = wput(b, j10, slice_of(tn, tl));
+  let j12: u64 = wput(b, j11, "_SoA), idx: u64) -> i64 {\n  return ");
+  let j13: u64 = readers(b, j12, tid, 0, n);
+  let j14: u64 = wput(b, j13, "\n}\nfunc soa_quote() -> u64 { return len(");
+  let j15: u64 = wq(b, j14, "a\"b");
+  return wput(b, j15, ") }\n");
+}
+
+func soa_gen(tid: u64, cap: u64) -> addr {
+  let b: addr = meta_out();
+  let n: u64 = gen(b, 0, tid, cap);
+  return b;
+}
+
+inject(soa_gen(Vec3, 4));
+
+func main() -> u64 {
+  let s: Vec3_SoA = Vec3_SoA { x: [0, 0, 0, 0] y: [0, 0, 0, 0] z: [0, 0, 0, 0] };
+  let r: Mut(Vec3_SoA) = mut_of(s);
+  let f0: u64 = soa_set(r, 0, Vec3 { x: 1 y: 2 z: 3 });
+  let f1: u64 = soa_set(r, 1, Vec3 { x: 4 y: 5 z: 6 });
+  let f2: u64 = soa_set(r, 2, Vec3 { x: 7 y: 8 z: 9 });
+  let f3: u64 = soa_set(r, 3, Vec3 { x: 10 y: 11 z: 12 });
+  let t: i64 = loop c(k: u64 = 0, acc: i64 = 0) while k < 4 {
+    acc = acc + soa_at(r, k);
+    k = k + 1;
+  };
+  return (t as u64) + soa_quote();
+}

@@ -12,11 +12,11 @@
  *   --entry <名>      入口过程（默认 lain_meta_v2_entry）
  *   --source <路径>   追加一份源码（与位置参数等价）
  *   --out <路径>      把宿主输出写进文件（默认打到标准输出）
- *   --fuel <n>        总燃料（默认 20000000）
- *   --slice <n>       单次推进步数上限（默认 1000000）
- *   --stack <n>       栈字节（默认 1 MiB）
- *   --quota <n>       配额字节（默认 16 MiB）
- *   --workspace <n>   工作区字节（默认 8 MiB）
+ *   --fuel <n>        总燃料（默认 2000000000）
+ *   --slice <n>       单次推进步数上限（默认 50000000）
+ *   --stack <n>       栈字节（默认 4 MiB）
+ *   --quota <n>       配额字节（默认 512 MiB）
+ *   --workspace <n>   工作区字节（默认 256 MiB）
  *   --caps <n>        能力表容量（默认 128）
  *   --depth <n>       最大调用深度（默认 32）
  *   --symbols <n>     符号容量（默认 8192）
@@ -133,16 +133,18 @@ int main(int argc, char **argv) {
   const char *source_paths[DRIVER_MAX_SOURCES];
   char *source_text[DRIVER_MAX_SOURCES] = {0};
   uint32_t source_count = 0;
-  uint64_t fuel = 20000000, slice_fuel = 1000000;
-  uint64_t stack_bytes = 1u << 20;
-  uint64_t quota_bytes = 16u << 20;
-  uint64_t workspace_bytes = 8u << 20;
+  /* Meta 自己编译自身时固定预留 64 MiB 编译区 + 16 MiB 形状表 + 4 MiB 符号池，
+     默认值必须一次容纳整条自举链路，否则同一份驱动在样例与自举之间口径不一致。 */
+  uint64_t fuel = 2000000000ull, slice_fuel = 50000000ull;
+  uint64_t stack_bytes = 4ull << 20;
+  uint64_t quota_bytes = 512ull << 20;
+  uint64_t workspace_bytes = 256ull << 20;
   uint64_t caps_capacity = 128;
   /* 编译期的递归下降（表达式、注入生成器）都要落成普通的 #call 帧，
      32 层连带的区域帧不够用；这一层上限只防失控递归。 */
-  uint64_t max_call_depth = 128;
-  uint64_t symbol_capacity = 8192;
-  uint64_t symbol_bytes = 512u << 10;
+  uint64_t max_call_depth = 1024;
+  uint64_t symbol_capacity = 131072;
+  uint64_t symbol_bytes = 8ull << 20;
   LainExpandLimits expand_limits;
   LainMetaApplyLimits apply_limits;
   LainVmQuota quota;
@@ -202,8 +204,8 @@ int main(int argc, char **argv) {
     return 2;
   }
   if (!unit_count) { usage(); return 2; }
-  if (!slice_fuel) slice_fuel = 1000000;
-  if (!fuel) fuel = 20000000;
+  if (!slice_fuel) slice_fuel = 50000000ull;
+  if (!fuel) fuel = 2000000000ull;
 
   /* 1. 编译单元：.l1 文本必须过解析与验证。 */
   unit_text = join_units(unit_paths, unit_count, &unit_length);
@@ -346,9 +348,13 @@ int main(int argc, char **argv) {
     }
     if (slice == LAINVM_SLICE_TRAPPED) {
       const LainVmTrap *trap = lainvm_tcb_trap(tcb);
-      if (trap)
-        printf("TRAP kind=%d status=%d region=%u position=%u\n", (int)trap->kind,
-               (int)trap->status, trap->region, trap->position);
+      if (trap) {
+        uint32_t si = lainvm_image_region_sub(image, trap->region);
+        const char *nm = (si == 0xFFFFFFFFu) ? "?" : lainvm_image_sub_name(image, si);
+        printf("TRAP kind=%d status=%d region=%u position=%u sub=%s\n",
+               (int)trap->kind, (int)trap->status, trap->region, trap->position,
+               nm ? nm : "?");
+      }
       /* 走出异常路径时也要看得到 Meta 侧留下的诊断。 */
       print_diags(host);
       exit_code = 3;

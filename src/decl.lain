@@ -10,6 +10,7 @@ let cx = import("ctx");
 let co = import("core");
 let agg = import("agg");
 let modules = import("modules");
+let an = import("anon");
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 func new_ty(k: addr) -> addr { return ax.new_ty(k); }
@@ -58,24 +59,53 @@ func begin_proc(k: addr, q: u64, rt: addr) -> u64 {
   st.st_set_retk(k, ty.tk(rt));
   st.st_set_retw(k, ty.tw(rt));
   st.st_set_retsg(k, ty.tsg(rt));
+  st.st_set_retsh(k, ty.tsh(rt));
   return ir.proc_begin(k, q);
 }
 
-func compile_func(k: addr, g: u64, i: u64) -> u64 {
+// 值聚合返回的隐藏首参：%_ret: #addr。后面 return 的整块拷贝就写它。
+func sret_param(k: addr) -> u64 {
+  let vn: u64 = ir.fresh_t(k);
+  let ap: addr = ir.taddr(k);
+  ir.proc_param(k, vn, ap);
+  return st.st_set_retptr(k, vn);
+}
+
+// 匿名过程按队列逐个补齐：每个补编都会把体里新出现的匿名过程继续推进队列。
+func flush_queue(k: addr) -> u64 {
+  let e: addr = an.pending(k);
+  if e as u64 == 0 { return 0; }
+  let q: u64 = an.entry_name(e);
+  let src: u64 = an.entry_src(e);
+  let g: u64 = an.entry_group(e);
+  let node: u64 = an.entry_node(e);
+  let saved_src: u64 = st.st_src(k);
+  st.st_set_src(k, src);
+  let b: u64 = compile_body(k, g, node, q);
+  if st.st_ok(k) != 0 {
+    // 匿名过程在独立作用域里编译，外层局部量本来就看不到；给出可读的原因。
+    let m: addr = "anonymous func cannot capture";
+    let d: u64 = ir.diag(k, 0, 2, m, 29);
+  }
+  st.st_set_src(k, saved_src);
+  return flush_queue(k);
+}
+
+// 过程体：i 指向形参组，返回体之后的位置。
+func compile_body(k: addr, g: u64, i: u64, q: u64) -> u64 {
   let n: u64 = n_count(g);
-  let q: u64 = proc_name(k, g, i);
-  let se: addr = modules.find_here(k, n_sym(g, i + 1));
-  let flag: u64 = if se as u64 == 0 { 0 } else { modules.sym_set_flag(se, 1) };
-  let pg: u64 = n_at(g, i + 2);
+  let pg: u64 = n_at(g, i);
   let paramp: addr = st.st_alloc(k, 512);
   let syms: addr = st.st_alloc(k, 128);
   let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
   let rt: addr = new_ty(k);
   ty.ty_none(rt);
-  let a0: u64 = i + 3;
+  let a0: u64 = i + 1;
   let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
   let bodyg: u64 = n_at(g, a);
+  let sr: u64 = agg.sret_ty(rt);
   let bp: u64 = begin_proc(k, q, rt);
+  let rp: u64 = if sr == 1 { sret_param(k) } else { st.st_set_retptr(k, 0) };
   let pnames: addr = st.st_alloc(k, 128);
   let dummy: u64 = loop w(idx: u64 = 0) while idx < np {
     let vn: u64 = ir.fresh_t(k);
@@ -83,7 +113,9 @@ func compile_func(k: addr, g: u64, i: u64) -> u64 {
     ir.proc_param(k, vn, paramp + idx * 32);
     idx = idx + 1;
   };
-  if ty.ty_known(rt) == 1 { ir.proc_result(k, rt); }
+  if sr == 0 {
+    if ty.ty_known(rt) == 1 { ir.proc_result(k, rt); }
+  }
   ir.region_begin(k);
   let nslots: u64 = 16 + 32 + count_tree(bodyg, 0);
   let sd: u64 = emit_slots(k, 0, nslots);
@@ -104,7 +136,22 @@ func compile_func(k: addr, g: u64, i: u64) -> u64 {
   let guard: u64 = emit_ret_guard(k, rt, term);
   ir.region_end(k);
   ir.proc_end(k);
+  let fl: u64 = flush_queue(k);
   return a + 1;
+}
+
+func compile_func(k: addr, g: u64, i: u64) -> u64 {
+  let q: u64 = proc_name(k, g, i);
+  let se: addr = modules.find_here(k, n_sym(g, i + 1));
+  let flag: u64 = if se as u64 == 0 { 0 } else { modules.sym_set_flag(se, 1) };
+  return compile_body(k, g, i + 2, q);
+}
+
+// let 名 = func (形参) ... { 体 }：名字来自 let，func 词在 i。
+func compile_func_expr(k: addr, g: u64, i: u64, name: u64) -> u64 {
+  let q: u64 = modules.qual(k, st.st_src(k), name);
+  let b: u64 = compile_body(k, g, i + 1, q);
+  return skip_semi(g, b);
 }
 
 // 顶层的普通值：零参过程，把值算出来直接返回。
@@ -119,6 +166,7 @@ func compile_top_let(k: addr, g: u64, i: u64) -> u64 {
   st.st_set_loopdepth(k, 0);
   env.env_release(k, 0);
   st.st_set_retk(k, 9);
+  st.st_set_retsh(k, 0);
   ir.proc_begin(k, q);
   ir.region_begin(k);
   let nslots: u64 = 16 + 32 + count_tree(g, 0);
@@ -144,6 +192,7 @@ func compile_top_let(k: addr, g: u64, i: u64) -> u64 {
   ir.emit_jump(k, codes.INST_RETURN(), 0);
   ir.region_end(k);
   ir.proc_end(k);
+  let fl: u64 = flush_queue(k);
   return skip_semi(g, nj);
 }
 

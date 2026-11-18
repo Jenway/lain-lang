@@ -32,11 +32,11 @@
 #define V2_MODULE 4u
 #define V2_REGION 5u
 
-#define V2_REGION_MAX 1024u
+#define V2_REGION_MAX 65536u
 #define V2_INST_MAX 4096u
 #define V2_PROC_PARAM_MAX 16u
-#define V2_PROC_MAX 256u
-#define V2_DATA_MAX 256u
+#define V2_PROC_MAX 2048u
+#define V2_DATA_MAX 512u
 #define V2_FRAME_MAX 16u
 #define V2_CASE_MAX 64u
 #define V2_NAME_MAX 512u

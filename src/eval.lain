@@ -259,6 +259,8 @@ func p1_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
   if e >= n { st.st_fail(k, e_ast()); return e; }
   if n_sym(g, e) == s.k_import() { return p1_import(k, g, e, name); }
   let q: u64 = modules.qual(k, st.st_src(k), name);
+  // let 名 = func (形参) [-> 返回] { 体 }：签名先登记，体留给 phase2。
+  if n_sym(g, e) == s.k_func() { return p1_flet(k, g, e, name, q); }
   // 表：[...]
   if is_group(g, e) == 1 and delim_of(g, e) == dl_bracket() {
     let sh0: u64 = ty.tsh(t);
@@ -267,10 +269,11 @@ func p1_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
     let s1: u64 = agg.mem_ty(k, agg.mem_index(sh0, 0), et);
     let dname: u64 = storage_name(k, name);
     let sh: u64 = bi.table_data(k, dname, n_at(g, e), et, rdonly);
-    let tv: addr = new_ty(k);
+    let tv: addr = st.st_ralloc(k, 32);
     let a1: u64 = ty.ty_addr(tv);
     let a2: u64 = ty.ty_set_sh(tv, sh);
     let se: addr = modules.sym_add(k, modules.sym_kind_data(), st.st_src(k), name, q, tv, sh);
+    let rr: u64 = modules.sym_set_ro(se, rdonly);
     return skip_semi(g, e + 1);
   }
   // 字符串
@@ -278,10 +281,11 @@ func p1_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
     let h: u64 = n_at(g, e);
     let dname: u64 = storage_name(k, name);
     let sh: u64 = bi.string_data(k, dname, lit_addr(h) + 1, lit_len(h) - 2);
-    let tv: addr = new_ty(k);
+    let tv: addr = st.st_ralloc(k, 32);
     let a1: u64 = ty.ty_addr(tv);
     let a2: u64 = ty.ty_set_sh(tv, sh);
     let se: addr = modules.sym_add(k, modules.sym_kind_data(), st.st_src(k), name, q, tv, sh);
+    let rr: u64 = modules.sym_set_ro(se, 1);
     return skip_semi(g, e);
   }
   // 聚合构造：名字已在形状表里
@@ -292,18 +296,36 @@ func p1_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
       let sh: u64 = modules.sym_shape(te);
       let dname: u64 = storage_name(k, name);
       let r: u64 = bi.agg_data(k, dname, sh);
-      let tv: addr = new_ty(k);
+      let tv: addr = st.st_ralloc(k, 32);
       let a1: u64 = ty.ty_addr(tv);
       let a2: u64 = ty.ty_set_sh(tv, sh);
       let se: addr = modules.sym_add(k, modules.sym_kind_data(), st.st_src(k), name, q, tv, sh);
       return skip_semi(g, e + 1);
     }
   }
-  // 普通值
-  let vt: addr = new_ty(k);
-  ty.ty_at(vt, t);
+  // 普通值：类型块必须跨源存活，arena 每次编新源都会清空。
+  let vt: addr = st.st_ralloc(k, 32);
+  let cpv: u64 = ty.ty_at(vt, t);
   let se: addr = modules.sym_add(k, modules.sym_kind_value(), st.st_src(k), name, q, vt, 0);
   return skip_semi(g, e);
+}
+
+// let 名 = func ...：名字取 let 这边，签名来自 func 自己。
+func p1_flet(k: addr, g: u64, e: u64, name: u64, q: u64) -> u64 {
+  let n: u64 = n_count(g);
+  let pg: u64 = n_at(g, e + 1);
+  let paramp: addr = st.st_alloc(k, 512);
+  let syms: addr = st.st_alloc(k, 128);
+  let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
+  let rt: addr = new_ty(k);
+  ty.ty_none(rt);
+  let a0: u64 = e + 2;
+  let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
+  let sg: addr = cx.sig_new(k, rt, np, paramp);
+  let se: addr = modules.sym_add(k, modules.sym_kind_func(), st.st_src(k), name, q, sg, 0);
+  let sd: u64 = modules.sym_set_decl(se, e);
+  let ss: u64 = modules.sym_set_src(se, st.st_src(k));
+  return skip_semi(g, a + 1);
 }
 
 func phase1(k: addr, g: u64, i: u64, n: u64) -> u64 {
@@ -334,6 +356,9 @@ func p2_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
   // 已编过的声明（inject 为了沙箱 verify 会把注入点之前的值与过程先编出来）不再重复编。
   if modules.sym_flag(se) == 1 { return after; }
   let marked: u64 = modules.sym_set_flag(se, 1);
+  if modules.sym_kind(se) == modules.sym_kind_func() {
+    return dl.compile_func_expr(k, g, modules.sym_decl(se), name);
+  }
   if modules.sym_kind(se) == modules.sym_kind_value() {
     return compile_top_let(k, g, i);
   }
@@ -382,13 +407,24 @@ func phase2(k: addr, g: u64, i: u64, n: u64) -> u64 {
 // 把一棵已经在手里的树当成 src 这个源的代码来编译：注入的片段必须落在注入点上，
 // 否则它登记出来的 s<源号>__名字 会和当前源里的查找对不上。
 func compile_as(k: addr, src: u64, root: u64) -> u64 {
+  // 编译一份源会大量消耗 arena；但嵌套编译（inject 片段、import）时外层正在
+  // 编到一半的临时量也在同一块 arena 上，所以这里保存水位、编完再放回去。
+  let am: u64 = st.st_arenaused(k);
+  let sp: u64 = st.st_sp(k);
   st.st_set_src(k, src);
   st.st_set_root(k, root);
+  let rs: u64 = st.st_reset_arena(k);
   let mk: u64 = env.env_release(k, 0);
   let n: u64 = n_count(root);
   let a: u64 = phase1(k, root, 0, n);
-  if st.st_ok(k) != 0 { return st.st_ok(k); }
+  if st.st_ok(k) != 0 { return restore_arena(k, am, sp); }
   let b: u64 = phase2(k, root, 0, n);
+  return restore_arena(k, am, sp);
+}
+
+func restore_arena(k: addr, am: u64, sp: u64) -> u64 {
+  let ra: u64 = st.st_set_arenaused(k, am);
+  let rs: u64 = st.st_set_sp(k, sp);
   return st.st_ok(k);
 }
 

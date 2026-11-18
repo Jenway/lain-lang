@@ -8,6 +8,7 @@ extern lain2_sym_addr(h: u64) -> addr = lain2_sym_addr;
 extern lain2_sym_len(h: u64) -> u64 = lain2_sym_len;
 extern lain2_sym_find(p: addr, n: u64) -> u64 = lain2_sym_find;
 extern lain2_sym_same(a: u64, b: u64) -> u64 = lain2_sym_same;
+extern lain2_sym_intern(p: addr, n: u64) -> u64 = lain2_sym_intern;
 
 // --- 符号字节 -----------------------------------------------------------
 func sym_addr(h: u64) -> addr {
@@ -90,30 +91,33 @@ func cur(s: addr) -> u64 { return st.st_src(s); }
 func in_cur(s: addr, name: u64) -> u64 { return qual(s, cur(s), name); }
 
 // --- 模块表 -------------------------------------------------------------
-// 条目 24 字节：[别名符号, 源号, 种类]。
+// 条目 32 字节：[别名符号, 源号, 种类, 导入方源号]。
+// 别名是文件局部的：两份源各自 import 同一个别名指不同目标时不能互相串。
 func mod_add(s: addr, alias: u64, src: u64, kind: u64) -> u64 {
-  let p: addr = st.st_mod_new(s, 24);
+  let p: addr = st.st_mod_new(s, 32);
   store(p, alias);
   store(p + 8, src);
   store(p + 16, kind);
+  store(p + 24, st.st_src(s));
   return 1;
 }
 
-func mod_at(s: addr, i: u64) -> addr { return st.st_modbase(s) + i * 24; }
+func mod_at(s: addr, i: u64) -> addr { return st.st_modbase(s) + i * 32; }
 
-func mod_count(s: addr) -> u64 { return st.st_modused(s) / 24; }
+func mod_count(s: addr) -> u64 { return st.st_modused(s) / 32; }
 
-func mod_scan(s: addr, alias: u64, i: u64, n: u64) -> u64 {
+func mod_scan(s: addr, alias: u64, owner: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   let p: addr = mod_at(s, i);
   let got: u64 = load(p);
-  if got == alias { return load(p + 8) + 1; }
-  return mod_scan(s, alias, i + 1, n);
+  let own: u64 = load(p + 24);
+  if got == alias and own == owner { return load(p + 8) + 1; }
+  return mod_scan(s, alias, owner, i + 1, n);
 }
 
-// 别名 → 源号 + 1；未命中回 0。
+// (导入方, 别名) → 源号 + 1；未命中回 0。
 func mod_lookup(s: addr, alias: u64) -> u64 {
-  return mod_scan(s, alias, 0, mod_count(s));
+  return mod_scan(s, alias, st.st_src(s), 0, mod_count(s));
 }
 
 func mod_name_scan(s: addr, src: u64, i: u64, n: u64) -> u64 {
@@ -130,7 +134,7 @@ func mod_name_of(s: addr, src: u64) -> u64 {
 }
 
 // --- 模块符号表 ---------------------------------------------------------
-// 条目 72 字节：[种类, 裸名, 模块号, 限定名, 签名, 形状号, 标记, 声明下标, 源号]。
+// 条目 80 字节：[种类, 裸名, 模块号, 限定名, 签名, 形状号, 标记, 声明下标, 源号, 只读]。
 // 「声明下标 + 源号」留给延迟解析的签名：签名里的类型可能来自本文件后面的 inject，
 // 第一次解析它时那个类型还不存在。
 func sym_kind_struct() -> u64 { return 1; }
@@ -152,7 +156,7 @@ func name_key(s: addr, h: u64) -> u64 {
 }
 
 func sym_add(s: addr, kind: u64, mod: u64, name: u64, q: u64, sig: addr, sh: u64) -> addr {
-  let p: addr = st.st_sym_new(s, 72);
+  let p: addr = st.st_sym_new(s, 80);
   store(p, kind);
   store(p + 8, name);
   store(p + 16, mod);
@@ -160,12 +164,13 @@ func sym_add(s: addr, kind: u64, mod: u64, name: u64, q: u64, sig: addr, sh: u64
   store(p + 32, sig as u64);
   store(p + 40, sh);
   store(p + 48, 0);
+  store(p + 72, 0);
   return p;
 }
 
-func sym_count(s: addr) -> u64 { return st.st_symused(s) / 72; }
+func sym_count(s: addr) -> u64 { return st.st_symused(s) / 80; }
 
-func sym_at(s: addr, i: u64) -> addr { return st.st_symbase(s) + i * 72; }
+func sym_at(s: addr, i: u64) -> addr { return st.st_symbase(s) + i * 80; }
 
 func sym_kind(p: addr) -> u64 { return load(p); }
 func sym_name(p: addr) -> u64 { return load(p + 8); }
@@ -183,6 +188,10 @@ func sym_decl(p: addr) -> u64 { return load(p + 56); }
 func sym_set_decl(p: addr, v: u64) -> u64 { store(p + 56, v); return v; }
 func sym_src(p: addr) -> u64 { return load(p + 64); }
 func sym_set_src(p: addr, v: u64) -> u64 { store(p + 64, v); return v; }
+
+// 静态数据是否只读：ro 表与字符串不允许被赋值。
+func sym_ro(p: addr) -> u64 { return load(p + 72); }
+func sym_set_ro(p: addr, v: u64) -> u64 { store(p + 72, v); return v; }
 
 // AST 的符号句柄按出现位置分配，同名不同位置句柄不同，比名一律走这条。
 func sym_same(a: u64, b: u64) -> u64 { return lain2_sym_same(a, b); }

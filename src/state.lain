@@ -8,22 +8,22 @@ extern lain2_mem_alloc(bytes: u64, align: u64) -> addr = lain2_mem_alloc;
 // cap：绑定栈字节数。整块布局：状态 512 + 绑定栈 cap + 临时名缓冲 256 +
 // 循环帧 1024 + 类型/值 arena 4194304 + 声明表 8192 + 持久分配 1048576 +
 // 静态数据暂存 65536 + 已登记源标记 64 + 形状表 1048576 + 模块表 2048 +
-// 模块符号表 32768 + 待发数据表 2048。arena 与持久分配都跨源存活：一次编译
+// 模块符号表 32768 + 匿名过程队列 4096。arena 与持久分配都跨源存活：一次编译
 // 里所有源的形状、类型、符号必须同时有效。
 func st_new(cap: u64) -> addr {
   let p: addr = lain2_mem_alloc(512, 8);
   let b: addr = lain2_mem_alloc(cap, 8);
   let s: addr = lain2_mem_alloc(256, 8);
   let f: addr = lain2_mem_alloc(1024, 8);
-  let a: addr = lain2_mem_alloc(4194304, 8);
+  let a: addr = lain2_mem_alloc(67108864, 8);
   let r: addr = lain2_mem_alloc(8192, 8);
   let q: addr = lain2_mem_alloc(1048576, 8);
   let d: addr = lain2_mem_alloc(65536, 8);
   let g: addr = lain2_mem_alloc(64, 8);
-  let h: addr = lain2_mem_alloc(1048576, 8);
-  let m: addr = lain2_mem_alloc(2048, 8);
-  let t: addr = lain2_mem_alloc(32768, 8);
-  let u: addr = lain2_mem_alloc(2048, 8);
+  let h: addr = lain2_mem_alloc(16777216, 8);
+  let m: addr = lain2_mem_alloc(16384, 8);
+  let t: addr = lain2_mem_alloc(4194304, 8);
+  let u: addr = lain2_mem_alloc(4096, 8);
   let z: u64 = 0;
   let w: u64 = loop w(j: u64 = 0) while j < 512 {
     store(p + j, z);
@@ -34,7 +34,7 @@ func st_new(cap: u64) -> addr {
   store(p + 80, s as u64);
   store(p + 88, f as u64);
   store(p + 128, a as u64);
-  store(p + 136, 262144);
+  store(p + 136, 67108864);
   store(p + 192, r as u64);
   store(p + 200, 8192);
   store(p + 216, q as u64);
@@ -44,16 +44,16 @@ func st_new(cap: u64) -> addr {
   store(p + 264, g as u64);
   store(p + 272, h as u64);
   store(p + 280, 0);
-  store(p + 288, 1048576);
+  store(p + 288, 16777216);
   store(p + 296, m as u64);
   store(p + 304, 0);
-  store(p + 312, 2048);
+  store(p + 312, 16384);
   store(p + 320, t as u64);
   store(p + 328, 0);
-  store(p + 336, 32768);
+  store(p + 336, 4194304);
   store(p + 344, u as u64);
   store(p + 352, 0);
-  store(p + 360, 2048);
+  store(p + 360, 4096);
   return p;
 }
 
@@ -103,6 +103,7 @@ func st_arena(p: addr) -> addr { return load(p + 128) as addr; }
 func st_arenasz(p: addr) -> u64 { return load(p + 136); }
 
 func st_arenaused(p: addr) -> u64 { return load(p + 144); }
+func st_set_arenaused(p: addr, v: u64) -> u64 { store(p + 144, v); return v; }
 
 func st_slotj(p: addr) -> u64 { return load(p + 152); }
 func st_set_slotj(p: addr, v: u64) -> u64 { store(p + 152, v); return v; }
@@ -171,11 +172,30 @@ func st_symused(p: addr) -> u64 { return load(p + 328); }
 func st_set_symused(p: addr, v: u64) -> u64 { store(p + 328, v); return v; }
 func st_symcap(p: addr) -> u64 { return load(p + 336); }
 
-// 待发数据表：形状为 [符号, 数据缓冲偏移, 字节数, 是否只读] 的 32 字节条目。
+// 匿名过程队列：条目 40 字节 [限定名, 源号, 根节点, 形参组, 签名]。
 func st_pndbase(p: addr) -> addr { return load(p + 344) as addr; }
 func st_pndused(p: addr) -> u64 { return load(p + 352); }
 func st_set_pndused(p: addr, v: u64) -> u64 { store(p + 352, v); return v; }
 func st_pndcap(p: addr) -> u64 { return load(p + 360); }
+
+// 匿名过程队列的写入与读出。
+func st_q_add(p: addr) -> addr { return st_pnd_new(p, 40); }
+func st_q_count(p: addr) -> u64 { return st_pndused(p) / 40; }
+func st_q_at(p: addr, i: u64) -> addr { return st_pndbase(p) + i * 40; }
+func st_qhead(p: addr) -> u64 { return load(p + 424); }
+func st_set_qhead(p: addr, v: u64) -> u64 { store(p + 424, v); return v; }
+
+// 值聚合返回的隐藏出参：当前过程的 %_ret 名字（0 表示不走 sret）。
+func st_retptr(p: addr) -> u64 { return load(p + 408); }
+func st_set_retptr(p: addr, v: u64) -> u64 { store(p + 408, v); return v; }
+
+// 返回类型的形状号：sret 的整块拷贝按它算字节数。
+func st_retsh(p: addr) -> u64 { return load(p + 432); }
+func st_set_retsh(p: addr, v: u64) -> u64 { store(p + 432, v); return v; }
+
+// 匿名过程的合成序号。
+func st_anon(p: addr) -> u64 { return load(p + 416); }
+func st_set_anon(p: addr, v: u64) -> u64 { store(p + 416, v); return v; }
 
 // 字符串字面量序号。
 func st_strseq(p: addr) -> u64 { return load(p + 368); }

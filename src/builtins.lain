@@ -140,6 +140,23 @@ func pack_params(k: addr, ps: addr, i: u64, n: u64, pk: addr) -> u64 {
   return pack_params(k, ps, i + 1, n, pk);
 }
 
+// 从第 base 项开始打包形参类型（sret 要在前面空出隐藏出参那一项）。
+func pack_params_from(k: addr, ps: addr, i: u64, n: u64, pk: addr, base: u64) -> u64 {
+  if i >= n { return i; }
+  let tp: addr = ps + i * 32;
+  let code: u64 = ir.kcode(tp);
+  if code == 0 { st.st_fail(k, ax.e_type()); return i; }
+  let w: u64 = ty.tw(tp);
+  if w > 255 { st.st_fail(k, ax.e_type()); return i; }
+  let item: u64 = code + w * 256;
+  let idx: u64 = base + i;
+  let wo: u64 = (idx / 4) * 8;
+  let sh: u64 = (idx - idx / 4 * 4) * 16;
+  let cur: u64 = load(pk + wo);
+  store(pk + wo, cur + (item << sh));
+  return pack_params_from(k, ps, i + 1, n, pk, base);
+}
+
 func push_vals(k: addr, ab: addr, i: u64, n: u64) -> u64 {
   if i >= n { return i; }
   let a: u64 = ir.op_val(k, ab + i * 56);
@@ -158,13 +175,14 @@ func icall_emit(k: addr, sk: addr, fv: addr, ab: addr, want: addr, out: addr) ->
   }
   let np: u64 = load(sk);
   let ps: addr = load(sk + 16) as addr;
+  let ret: addr = st.st_alloc(k, 32);
+  let rt: u64 = ty.ty_at(ret, load(sk + 8) as addr);
   let pk: addr = st.st_alloc(k, 16);
   store(pk, 0);
   store(pk + 8, 0);
+  if agg.sret_ty(ret) == 1 { return icall_sret(k, fv, ab, np, ps, ret, want, out, pk); }
   let filled: u64 = pack_params(k, ps, 0, np, pk);
   if st.st_ok(k) != 0 { return 0; }
-  let ret: addr = st.st_alloc(k, 32);
-  let rt: u64 = ty.ty_at(ret, load(sk + 8) as addr);
   let res: u64 = if ty.ty_known(ret) == 1 { ir.fresh_t(k) } else { 0 };
   let ar: u64 = ir.args_reset(k);
   let f: u64 = ir.op_val(k, fv);
@@ -183,6 +201,35 @@ func icall_emit(k: addr, sk: addr, fv: addr, ab: addr, want: addr, out: addr) ->
     let cp: u64 = ty.val_at(ct, rv);
   } else {
     let cv: u64 = coerce_v(k, rv, want, ct);
+  }
+  ty.val_at(out, ct);
+  return 0;
+}
+
+// 值聚合返回走隐藏出参：先 #alloca 结果块，把它当第 0 个实参传进去，
+// 指令本身没有返回值，调用方拿到的就是那块地址。
+func icall_sret(k: addr, fv: addr, ab: addr, np: u64, ps: addr, ret: addr, want: addr,
+                out: addr, pk: addr) -> u64 {
+  if np + 1 > 8 { st.st_fail(k, ax.e_type()); return 0; }
+  let dv: addr = st.st_alloc(k, 56);
+  let ao: u64 = agg.new_obj(k, ty.tsh(ret), dv);
+  store(pk, 4);
+  let filled: u64 = pack_params_from(k, ps, 0, np, pk, 1);
+  if st.st_ok(k) != 0 { return 0; }
+  let nt: addr = st.st_alloc(k, 32);
+  let n0: u64 = ty.ty_none(nt);
+  let ar: u64 = ir.args_reset(k);
+  let f: u64 = ir.op_val(k, fv);
+  let p0: u64 = ir.op_val(k, dv);
+  let d: u64 = push_vals(k, ab, 0, np);
+  let plo: u64 = load(pk);
+  let phi: u64 = load(pk + 8);
+  let ins: u64 = ir.emit_call_indirect(k, 0, nt, plo, phi);
+  let ct: addr = st.st_alloc(k, 56);
+  if ty.ty_known(want) == 0 {
+    let cp: u64 = ty.val_at(ct, dv);
+  } else {
+    let cv: u64 = coerce_v(k, dv, want, ct);
   }
   ty.val_at(out, ct);
   return 0;

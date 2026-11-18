@@ -347,10 +347,23 @@ func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 {
 // --- 函数签名 -----------------------------------------------------------
 // 签名记录 24 字节：[形参个数, 返回类型, 形参类型表]。
 func sig_new(k: addr, ret: addr, np: u64, params: addr) -> addr {
-  let p: addr = st.st_alloc(k, 24);
+  // 签名挂在符号条目上，必须跨源存活：源之间会清空 arena。
+  // 返回类型块与形参类型表也一起搬进持久池，否则源一清就指向复用过的字节。
+  let p: addr = st.st_ralloc(k, 24);
   store(p, np);
-  store(p + 8, ret as u64);
-  store(p + 16, params as u64);
+  let r: addr = st.st_ralloc(k, 32);
+  let rc: u64 = ty.ty_at(r, ret);
+  store(p + 8, r as u64);
+  if np == 0 {
+    store(p + 16, 0);
+    return p;
+  }
+  let ps: addr = st.st_ralloc(k, np * 32);
+  store(p + 16, ps as u64);
+  let i: u64 = loop c(i: u64 = 0) while i < np {
+    let tc: u64 = ty.ty_at(ps + i * 32, params + i * 32);
+    i = i + 1;
+  };
   return p;
 }
 
