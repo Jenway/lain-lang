@@ -96,6 +96,8 @@ typedef struct {
   LainMetaApplyValue scalar; /* LAINMETA_APPLY_RESULT_SCALAR */
   LainMetaApplyBytes bytes;  /* LAINMETA_APPLY_RESULT_BYTES */
   uint64_t fuel_used;    /* 执行阶段已消耗的 VM 步数；失败结果也保留此计数 */
+  uint64_t quota_peak;   /* 执行阶段分配配额的峰值字节数；失败结果也保留 */
+  uint64_t stack_peak;   /* 执行阶段 #alloca 水位峰值；失败结果也保留 */
 } LainMetaApplyResult;
 
 /* 通用 apply：在独立 VSpace 里执行模块中名为 entry 的普通 `#proc`。

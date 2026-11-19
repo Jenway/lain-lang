@@ -12,6 +12,7 @@ let agg = import("agg");
 let modules = import("modules");
 let ct = import("ctypes");
 let ireg = import("tyreg");
+extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr;
 
 // 记录 128 字节：[存储名字@0, 类型@56, 只读标记@88]。
 // 名字是 IR 里的值名（局部槽、数据符号或 #lea 的结果），不是宿主地址。
@@ -142,4 +143,72 @@ func find_eq(g: u64, i: u64, n: u64) -> u64 {
     if ax.n_sym(g, i) == s.p_eq() { return i; }
   }
   return find_eq(g, i + 1, n);
+}
+
+func lval_bad(k: addr, m: addr, n: u64, back: u64) -> u64 {
+  let d: u64 = ir.diag(k, 0, 1, m, n);
+  st.st_fail(k, ax.e_op());
+  return back;
+}
+
+func parse_base(k: addr, g: u64, i: u64, r: addr) -> u64 {
+  let m: addr = "bad-lvalue";
+  if ax.is_name(g, i) == 0 { return lval_bad(k, m, 10, i + 1); }
+  let sym: u64 = ax.n_sym(g, i);
+  if sym == s.b_deref() {
+    if i + 1 >= ax.n_count(g) { return lval_bad(k, m, 10, i + 1); }
+    if ax.is_group(g, i + 1) == 0 { return lval_bad(k, m, 10, i + 1); }
+    if ax.delim_of(g, i + 1) != ax.dl_paren() { return lval_bad(k, m, 10, i + 1); }
+    let pv: addr = ax.new_val(k);
+    let aty: addr = ir.taddr(k);
+    let j: u64 = core_expr(k, ax.n_at(g, i + 1), 0, 0, aty, pv);
+    if st.st_ok(k) != 0 { return i + 2; }
+    let sh: u64 = ty.tsh(ty.vty(pv));
+    if sh == 0 { return lval_bad(k, m, 10, i + 2); }
+    let kd: u64 = agg.shp_kind(sh);
+    if kd != agg.kind_ref() and kd != agg.kind_mut() { return lval_bad(k, m, 10, i + 2); }
+    let f: u64 = from_deref(k, pv, r);
+    return i + 2;
+  }
+  let off: u64 = env.env_find(k, sym);
+  if off != 0 { let f: u64 = from_local(k, off, r); return i + 1; }
+  let e: addr = modules.find_here(k, sym);
+  if e as u64 != 0 {
+    if modules.sym_kind(e) == modules.sym_kind_data() { let f2: u64 = from_data(k, e, r); return i + 1; }
+  }
+  let p: addr = modules.sym_addr(sym);
+  let n: u64 = modules.sym_len(sym);
+  let d: u64 = ir.diag(k, ax.e_unbound(), 1, p, n);
+  st.st_fail(k, ax.e_unbound());
+  return i + 1;
+}
+
+func parse_walk(k: addr, g: u64, i: u64, eqj: u64, r: addr) -> u64 {
+  let m: addr = "bad-lvalue";
+  if i >= eqj { return i; }
+  if ax.is_group(g, i) == 1 {
+    if ax.delim_of(g, i) != ax.dl_bracket() { return lval_bad(k, m, 10, i); }
+    let sh: u64 = ty.tsh(rec_ty(r));
+    if sh == 0 { return lval_bad(k, m, 10, i); }
+    let kd: u64 = agg.shp_kind(sh);
+    if kd != agg.kind_array() and kd != agg.kind_slice() and kd != agg.kind_mutslice() { return lval_bad(k, m, 10, i); }
+    let nt: addr = ax.new_ty(k);
+    let u: u64 = ty.ty_u64(nt);
+    let iv: addr = ax.new_val(k);
+    let j: u64 = core_expr(k, ax.n_at(g, i), 0, 0, nt, iv);
+    if st.st_ok(k) != 0 { return i + 1; }
+    let f: u64 = index_step(k, r, iv);
+    return parse_walk(k, g, i + 1, eqj, r);
+  }
+  if ax.n_sym(g, i) == s.p_dot() {
+    if i + 1 < eqj and ax.is_name(g, i + 1) == 1 {
+      let sh2: u64 = ty.tsh(rec_ty(r));
+      if sh2 == 0 { return lval_bad(k, m, 10, i); }
+      let mem: addr = agg.mem_find(sh2, ax.n_sym(g, i + 1));
+      if mem as u64 == 0 { return lval_bad(k, m, 10, i); }
+      let f2: u64 = field_step(k, r, mem);
+      return parse_walk(k, g, i + 2, eqj, r);
+    }
+  }
+  return lval_bad(k, m, 10, i);
 }

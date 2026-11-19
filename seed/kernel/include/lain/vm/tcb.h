@@ -75,6 +75,9 @@ const LainVmTrap *lainvm_tcb_trap(const LainVmTcb *tcb);
 /* 这个 TCB 一共执行了多少步。 */
 uint64_t lainvm_tcb_steps(const LainVmTcb *tcb);
 
+/* 本次 activation 的 #alloca 水位峰值；换 activation 时归零。 */
+uint64_t lainvm_tcb_stack_peak(const LainVmTcb *tcb);
+
 /* admit、重绑与换空间的拒绝码（L1Diagnostic）。 */
 enum {
   LAINVM_TCB_ERR_NO_ENTRY = 9101,

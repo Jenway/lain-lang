@@ -59,6 +59,7 @@ struct LainVmTcb {
    * base / capacity / 权限一律从 VSpace 的记录读，不在 TCB 里留副本。 */
   LainVmStackLease stack_lease;
   uint64_t stack_used; /* alloca 水位（procedure activation 的生命周期，见下） */
+  uint64_t stack_peak; /* 本次 activation 见过的最高水位（诊断用） */
 
   /* 这次执行的分配账户。NULL = 不限额。
    * 账户跟着**执行**走，不跟着地址空间走：嵌套调用共享同一个账户，

@@ -122,6 +122,10 @@ struct LainMetaHostV2 {
   uintptr_t workspace;
   uint64_t workspace_bytes;
   uint64_t workspace_used;
+  uint64_t workspace_peak; /* 工作区切块的水位峰值（诊断用） */
+  uint64_t apply_fuel_peak;   /* 单次隔离执行的 VM 步数峰值 */
+  uint64_t apply_quota_peak;  /* 单次隔离执行的配额峰值字节数 */
+  uint64_t apply_stack_peak;  /* 单次隔离执行的栈水位峰值 */
 
   LainExpandLimits expand_limits;
   LainMetaApplyLimits apply_limits;
@@ -1757,8 +1761,20 @@ static uint32_t v2_mem_alloc(void *ctx, const uint64_t *args, uint32_t argc,
   if (at > h->workspace_bytes || bytes > h->workspace_bytes - at)
     return LAINMETA_V2_ERR_MEM;
   h->workspace_used = at + bytes;
+  if (h->workspace_used > h->workspace_peak) h->workspace_peak = h->workspace_used;
   *res = (uint64_t)(h->workspace + at);
   return 0;
+}
+
+/* 每次隔离执行的用量记账：只保留峰值，不累加。 */
+static void v2_note_apply_peaks(LainMetaHostV2 *h,
+                                const LainMetaApplyResult *result) {
+  if (result->fuel_used > h->apply_fuel_peak)
+    h->apply_fuel_peak = result->fuel_used;
+  if (result->quota_peak > h->apply_quota_peak)
+    h->apply_quota_peak = result->quota_peak;
+  if (result->stack_peak > h->apply_stack_peak)
+    h->apply_stack_peak = result->stack_peak;
 }
 
 static uint32_t v2_apply_module(void *ctx, const uint64_t *args, uint32_t argc,
@@ -1822,6 +1838,7 @@ static uint32_t v2_apply_module(void *ctx, const uint64_t *args, uint32_t argc,
     return 0;
   }
   free(text);
+  v2_note_apply_peaks(h, &result);
   if (result.kind != LAINMETA_APPLY_RESULT_SCALAR) {
     uint64_t fail[2];
     fail[0] = LAINMETA_V2_ERR_APPLY;
@@ -1882,6 +1899,7 @@ static uint32_t v2_apply_module_bytes(void *ctx, const uint64_t *args,
     return diag.code ? (uint32_t)diag.code : LAINMETA_V2_ERR_APPLY;
   }
   free(text);
+  v2_note_apply_peaks(h, &result);
   if (result.kind != LAINMETA_APPLY_RESULT_BYTES) {
     lainmeta_apply_bytes_free(&result.bytes);
     return LAINMETA_V2_ERR_APPLY;
@@ -2097,6 +2115,7 @@ bool lainv2_host_alloc_workspace(LainMetaHostV2 *host, uint64_t bytes,
   host->workspace = region->base;
   host->workspace_bytes = region->capacity;
   host->workspace_used = 0;
+  host->workspace_peak = 0;
   return true;
 }
 
@@ -2113,6 +2132,22 @@ const char *lainv2_host_output(const LainMetaHostV2 *host, uint32_t *length) {
   if (!host) return NULL;
   if (length) *length = (uint32_t)host->text_length;
   return host->text;
+}
+
+uint64_t lainv2_host_workspace_peak(const LainMetaHostV2 *host) {
+  return host ? host->workspace_peak : 0;
+}
+
+uint64_t lainv2_host_apply_fuel_peak(const LainMetaHostV2 *host) {
+  return host ? host->apply_fuel_peak : 0;
+}
+
+uint64_t lainv2_host_apply_quota_peak(const LainMetaHostV2 *host) {
+  return host ? host->apply_quota_peak : 0;
+}
+
+uint64_t lainv2_host_apply_stack_peak(const LainMetaHostV2 *host) {
+  return host ? host->apply_stack_peak : 0;
 }
 
 uint32_t lainv2_host_diag_count(const LainMetaHostV2 *host) {

@@ -43,6 +43,7 @@ static bool apply_run(const L1Module *module, const char *entry,
                       const L1Value *args, uint32_t arg_count,
                       const LainMetaApplyLimits *limits, L1Value *value_out,
                       LainVmQuota *quota_out, uint64_t *fuel_used_out,
+                      uint64_t *quota_peak_out, uint64_t *stack_peak_out,
                       LainMetaApplyBytes *bytes_out, uint64_t byte_length,
                       const LainMetaApplyBytes *byte_arg,
                       uint32_t byte_arg_index, L1Diagnostic *diag) {
@@ -212,6 +213,8 @@ static bool apply_run(const L1Module *module, const char *entry,
 cleanup:
   if (!ok && bytes_out) lainmeta_apply_bytes_free(bytes_out);
   if (fuel_used_out && tcb) *fuel_used_out = lainvm_tcb_steps(tcb);
+  if (quota_peak_out) *quota_peak_out = quota.peak;
+  if (stack_peak_out && tcb) *stack_peak_out = lainvm_tcb_stack_peak(tcb);
   if (tcb) lainvm_tcb_free(tcb);
   if (!lainvm_stack_lease_none(lease)) (void)lainvm_space_free(&space, lease.region);
   if (!lainvm_space_handle_none(byte_region))
@@ -366,7 +369,8 @@ static bool apply_proc_common(const char *module_text, const char *entry,
 
   memset(&value, 0, sizeof(value));
   ok = apply_run(module, entry, values, arg_count, limits, &value, NULL,
-                 &out->fuel_used, want_bytes ? &out->bytes : NULL,
+                 &out->fuel_used, &out->quota_peak, &out->stack_peak,
+                 want_bytes ? &out->bytes : NULL,
                  byte_length, byte_arg, byte_arg_index, diag);
   if (!ok) {
     lainir_builder_free(builder);

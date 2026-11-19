@@ -1,0 +1,344 @@
+// refval.lain —— 引用、切片与 Fn 值：形状判定、ref_of/mut_of、deref、slice_of、len、fn_of。
+// 这些处理器要递归求值实参，回跳经 core 的外部链接。
+let st = import("state");
+let ty = import("types");
+let env = import("env");
+let ir = import("ir");
+let s = import("sym");
+let ax = import("ast");
+let cx = import("ctx");
+let agg = import("agg");
+let modules = import("modules");
+let bi = import("builtins");
+let ireg = import("tyreg");
+let ct = import("ctypes");
+let cl = import("calls");
+
+extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr;
+extern core_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr_tail;
+
+// 槽与聚合成员一律存一个机器字：标量是值本身，引用族、Fn、切片头、聚合与
+// 数组是地址。所以定位成员只有一种读法——按成员类型的宽度把那个字 load 出来。
+// 只有「被指向的对象」是原地数据：deref 之后聚合与切片直接就是那块的视图，
+// 标量才需要按真实宽度读一次。
+func deref_loads(sh: u64) -> u64 {
+  if sh == 0 { return 1; }
+  let kd: u64 = agg.shp_kind(sh);
+  if kd == agg.kind_ref() or kd == agg.kind_mut() or kd == agg.kind_fn() { return 1; }
+  return 0;
+}
+
+func is_ref_shape(sh: u64) -> u64 {
+  if sh == 0 { return 0; }
+  let kd: u64 = agg.shp_kind(sh);
+  if kd == agg.kind_ref() or kd == agg.kind_mut() { return 1; }
+  return 0;
+}
+
+func fn_val_p(k: addr, out: addr) -> u64 {
+  let sh: u64 = ty.tsh(ty.vty(out));
+  if sh == 0 { return 0; }
+  if agg.shp_kind(sh) == agg.kind_fn() { return 1; }
+  return 0;
+}
+
+func ref_ty(k: addr, eid: u64, mutv: u64) -> addr {
+  let t: addr = ax.new_ty(k);
+  let id: u64 = ct.ref_t(k, eid, mutv);
+  let p: u64 = ireg.project(k, id, t);
+  return t;
+}
+
+// 把已经是地址的值 v 标成引用 rt，再强制到 want。
+func as_ref(k: addr, v: addr, rt: addr, want: addr, out: addr, back: u64) -> u64 {
+  if ty.tk(ty.vty(v)) != 3 {
+    let m: addr = "ref-nonaddr";
+    let d: u64 = ir.diag(k, 0, 1, m, 11);
+    st.st_fail(k, ax.e_type());
+    ty.val_none(out);
+    return back;
+  }
+  let rv: addr = ax.new_val(k);
+  let r0: u64 = ty.val_ref(rv, ty.vn(v), rt);
+  let c: addr = ax.new_val(k);
+  coerce(k, rv, rt, want, c);
+  ty.val_at(out, c);
+  return back;
+}
+
+func tnone(k: addr) -> addr { return cx.tnone(k); }
+func t64(k: addr) -> addr { return cx.t64(k); }
+func coerce(k: addr, v: addr, from: addr, to: addr, out: addr) -> u64 { return cx.coerce(k, v, from, to, out); }
+func slot_get(k: addr, j: u64, tp: addr, out: addr) -> u64 { return cx.slot_get(k, j, tp, out); }
+
+// ref_of(x) / mut_of(x)：标量取槽地址，聚合取槽里存的块地址。
+func ref_call(k: addr, g: u64, i: u64, want: addr, out: addr, mutv: u64) -> u64 {
+  let argsg: u64 = ax.n_at(g, i + 1);
+  if ax.n_count(argsg) == 0 { st.st_fail(k, ax.e_ast()); ty.val_none(out); return i + 2; }
+  if ax.is_group(argsg, 0) == 0 and ax.is_name(argsg, 0) == 1 {
+    let nm: u64 = ax.n_sym(argsg, 0);
+    let off: u64 = env.env_find(k, nm);
+    if off != 0 {
+      let vt: addr = ax.new_ty(k);
+      let g0: u64 = env.env_ty(k, off, vt);
+      let rt: addr = ref_ty(k, ireg.tid_of(k, vt), mutv);
+      if ty.tsh(vt) == 0 {
+        let res: u64 = ir.fresh_t(k);
+        let rc: u64 = ir.args_reset(k);
+        let lea: u64 = ir.emit_lea(k, res, ir.slot_name(k, env.env_slot(k, off)), 0, 1, 0);
+        let rv: addr = ax.new_val(k);
+        let r1: u64 = ty.val_ref(rv, res, rt);
+        let c: addr = ax.new_val(k);
+        coerce(k, rv, rt, want, c);
+        ty.val_at(out, c);
+        return i + 2;
+      }
+      let ov: addr = ax.new_val(k);
+      let got: u64 = slot_get(k, env.env_slot(k, off), vt, ov);
+      return as_ref(k, ov, rt, want, out, i + 2);
+    }
+  }
+  let v: addr = ax.new_val(k);
+  let j: u64 = core_expr(k, argsg, 0, 0, tnone(k), v);
+  let rt: addr = ref_ty(k, ireg.tid_of(k, ty.vty(v)), mutv);
+  return as_ref(k, v, rt, want, out, i + 2);
+}
+
+// deref(r)：标量按真实宽度 load，聚合/slice 直接还原成带形状的地址视图。
+func deref_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  let argsg: u64 = ax.n_at(g, i + 1);
+  if ax.n_count(argsg) == 0 { st.st_fail(k, ax.e_ast()); ty.val_none(out); return i + 2; }
+  let v: addr = ax.new_val(k);
+  let j: u64 = core_expr(k, argsg, 0, 0, tnone(k), v);
+  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
+  let sh: u64 = ty.tsh(ty.vty(v));
+  if is_ref_shape(sh) == 0 {
+    let m: addr = "deref-nonref";
+    let d: u64 = ir.diag(k, 0, 1, m, 12);
+    st.st_fail(k, ax.e_type());
+    ty.val_none(out);
+    return i + 2;
+  }
+  let eid: u64 = ct.elem_tid(k, sh);
+  if eid == ireg.void_tid(k) {
+    let m: addr = "deref-void";
+    let d: u64 = ir.diag(k, 0, 1, m, 10);
+    st.st_fail(k, ax.e_type());
+    ty.val_none(out);
+    return i + 2;
+  }
+  let et: addr = ax.new_ty(k);
+  let pr: u64 = ireg.project(k, eid, et);
+  let got: addr = ax.new_val(k);
+  if deref_loads(ty.tsh(et)) == 1 {
+    let l: u64 = agg.load_at(k, ty.vn(v), 0, et, got);
+  } else {
+    let r: u64 = ty.val_ref(got, ty.vn(v), et);
+  }
+  ty.val_at(out, got);
+  return i + 2;
+}
+
+func def_slice_ty(k: addr, mutv: u64) -> addr {
+  let e: addr = st.st_alloc(k, 32);
+  let u: u64 = ty.ty_u8(e);
+  let id: u64 = ireg.tid_of(k, e);
+  let sid: u64 = ct.slice_t(k, id, mutv);
+  let t: addr = ax.new_ty(k);
+  let p: u64 = ireg.project(k, sid, t);
+  return t;
+}
+
+func slice_target(k: addr, want: addr, mutv: u64) -> addr {
+  let wsh: u64 = ty.tsh(want);
+  if wsh != 0 {
+    let kd: u64 = agg.shp_kind(wsh);
+    if kd == agg.kind_slice() or kd == agg.kind_mutslice() { return want; }
+  }
+  return def_slice_ty(k, mutv);
+}
+
+// 16 字节切片头 {ptr@0, len@8}。
+func make_head(k: addr, pv: addr, lv: addr, tgt: addr, out: addr) -> u64 {
+  let obj: addr = st.st_alloc(k, 56);
+  let base: u64 = agg.new_bytes(k, 16, 8, obj);
+  let at: addr = ir.taddr(k);
+  let p2: addr = ax.new_val(k);
+  coerce(k, pv, ty.vty(pv), at, p2);
+  let s1: u64 = agg.store_at(k, base, 0, p2, at);
+  let ut: addr = st.st_alloc(k, 32);
+  let u: u64 = ty.ty_u64(ut);
+  let l2: addr = ax.new_val(k);
+  coerce(k, lv, ty.vty(lv), ut, l2);
+  let s2: u64 = agg.store_at(k, base, 8, l2, ut);
+  return ty.val_ref(out, base, tgt);
+}
+
+// slice_of(arr) / slice_of(ptr, len)。
+func slice_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  let argsg: u64 = ax.n_at(g, i + 1);
+  let na: u64 = bi.arg_count(argsg);
+  if na == 0 { return 0; }
+  let v1: addr = ax.new_val(k);
+  let j1: u64 = core_expr(k, argsg, 0, 0, tnone(k), v1);
+  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
+  if na == 1 {
+    let sh: u64 = ty.tsh(ty.vty(v1));
+    if sh == 0 { st.st_fail(k, ax.e_type()); ty.val_none(out); return i + 2; }
+    let kd: u64 = agg.shp_kind(sh);
+    if kd != agg.kind_array() and kd != agg.kind_string() {
+      st.st_fail(k, ax.e_type());
+      ty.val_none(out);
+      return i + 2;
+    }
+    let tgt: addr = slice_target(k, want, 0);
+    let c: addr = ax.new_val(k);
+    coerce(k, v1, ty.vty(v1), tgt, c);
+    ty.val_at(out, c);
+    return i + 2;
+  }
+  let bc: u64 = if ax.is_comma(argsg, j1) == 1 { j1 + 1 } else { j1 };
+  let v2: addr = ax.new_val(k);
+  let j2: u64 = core_expr(k, argsg, bc, 0, t64(k), v2);
+  let tgt: addr = slice_target(k, want, 0);
+  let c: addr = ax.new_val(k);
+  let h: u64 = make_head(k, v1, v2, tgt, c);
+  ty.val_at(out, c);
+  return i + 2;
+}
+
+// len(x)：切片读头里的长度，数组/字符串/表给编译期常量。
+func len_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  let argsg: u64 = ax.n_at(g, i + 1);
+  if ax.n_count(argsg) == 0 { st.st_fail(k, ax.e_ast()); ty.val_none(out); return i + 2; }
+  let v: addr = ax.new_val(k);
+  let j: u64 = core_expr(k, argsg, 0, 0, tnone(k), v);
+  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
+  let sh: u64 = ty.tsh(ty.vty(v));
+  if sh == 0 { st.st_fail(k, ax.e_type()); ty.val_none(out); return i + 2; }
+  let kd: u64 = agg.shp_kind(sh);
+  let ut: addr = t64(k);
+  let lv: addr = ax.new_val(k);
+  if kd == agg.kind_slice() or kd == agg.kind_mutslice() {
+    let l: u64 = agg.load_at(k, ty.vn(v), 8, ut, lv);
+  } else {
+    let l2: u64 = ty.val_lit(lv, agg.shp_len(sh), ut);
+  }
+  let c: addr = ax.new_val(k);
+  coerce(k, lv, ut, want, c);
+  ty.val_at(out, c);
+  return i + 2;
+}
+
+func synth_sig(k: addr, sg: addr, i: u64, np: u64, sig: addr) -> u64 {
+  if i >= np { return i; }
+  let ps: addr = load(sg + 16) as addr;
+  let t: addr = st.st_alloc(k, 32);
+  let c: u64 = ty.ty_at(t, ps + i * 32);
+  store(sig + i * 8, ireg.tid_of(k, t));
+  return synth_sig(k, sg, i + 1, np, sig);
+}
+
+// fn_of(过程名)：把过程符号地址包装成带完整签名的 Fn 值。
+func fn_of_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  let argsg: u64 = ax.n_at(g, i + 1);
+  if ax.n_count(argsg) == 0 { st.st_fail(k, ax.e_ast()); ty.val_none(out); return i + 2; }
+  if ax.is_group(argsg, 0) == 1 or ax.is_name(argsg, 0) == 0 {
+    st.st_fail(k, ax.e_type());
+    ty.val_none(out);
+    return i + 2;
+  }
+  let nm: u64 = ax.n_sym(argsg, 0);
+  let e: addr = modules.find_here(k, nm);
+  if e as u64 == 0 { ty.val_none(out); return i + 2; }
+  let kd: u64 = modules.sym_kind(e);
+  if kd != modules.sym_kind_func() and kd != modules.sym_kind_extern() {
+    st.st_fail(k, ax.e_type());
+    ty.val_none(out);
+    return i + 2;
+  }
+  let sg: addr = modules.sym_sig(e);
+  let np: u64 = load(sg);
+  let ret: addr = ax.new_ty(k);
+  let r1: u64 = ty.ty_at(ret, load(sg + 8) as addr);
+  let sig: addr = st.st_ralloc(k, np * 8 + 8);
+  let filled: u64 = synth_sig(k, sg, 0, np, sig);
+  let fid: u64 = ct.fn_t(k, ireg.tid_of(k, ret), np, sig as u64);
+  let ft: addr = ax.new_ty(k);
+  let pr: u64 = ireg.project(k, fid, ft);
+  let v: addr = ax.new_val(k);
+  let v1: u64 = ty.val_ref(v, modules.sym_qual(e), ft);
+  let c: addr = ax.new_val(k);
+  coerce(k, v, ft, want, c);
+  ty.val_at(out, c);
+  return i + 2;
+}
+
+func typed_builtin(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+  let name: u64 = ax.n_sym(g, i);
+  if name == s.b_ref_of() { return ref_call(k, g, i, want, out, 0); }
+  if name == s.b_mut_of() { return ref_call(k, g, i, want, out, 1); }
+  if name == s.b_deref() { return deref_call(k, g, i, want, out); }
+  if name == s.b_len() { return len_call(k, g, i, want, out); }
+  if name == s.b_slice_of() { return slice_call(k, g, i, want, out); }
+  if name == s.b_fn_of() { return fn_of_call(k, g, i, want, out); }
+  return 0;
+}
+
+
+// 值的成员：切片的 len / ptr，其余按形状查字段。引用族与 Fn 字段 load 出来。
+func member_on_val(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
+  let fname: u64 = ax.n_sym(g, i + 1);
+  let sh: u64 = ty.tsh(ty.vty(out));
+  if sh == 0 { st.st_fail(k, ax.e_type()); return i + 2; }
+  let kd: u64 = agg.shp_kind(sh);
+  if kd == agg.kind_slice() or kd == agg.kind_mutslice() {
+    let ut: addr = t64(k);
+    let lvv: addr = ax.new_val(k);
+    if fname == s.t_len() {
+      let l: u64 = agg.load_at(k, ty.vn(out), 8, ut, lvv);
+    } else {
+      if fname == s.t_ptr() {
+        let l2: u64 = agg.load_at(k, ty.vn(out), 0, ir.taddr(k), lvv);
+      } else {
+        st.st_fail(k, ax.e_unsup());
+        return i + 2;
+      }
+    }
+    ty.val_at(out, lvv);
+    return core_tail(k, g, i + 2, minp, want, out);
+  }
+  let m: addr = agg.mem_find(sh, fname);
+  if m as u64 == 0 { st.st_fail(k, ax.e_unsup()); return i + 2; }
+  let et: addr = ax.new_ty(k);
+  let e1: u64 = agg.mem_ty(k, m, et);
+  let got: addr = ax.new_val(k);
+  let l1: u64 = agg.load_at(k, ty.vn(out), agg.mem_off(m), et, got);
+  ty.val_at(out, got);
+  return core_tail(k, g, i + 2, minp, want, out);
+}
+
+// 值上直接调用：当前值是 Fn(...) 形状时按签名发间接 #call。
+func postfix_call(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
+  let argsg: u64 = ax.n_at(g, i);
+  let sh: u64 = ty.tsh(ty.vty(out));
+  let sk: addr = ct.sig_of_fn(k, sh);
+  let np: u64 = load(sk);
+  let ps: addr = load(sk + 16) as addr;
+  let na: u64 = bi.arg_count(argsg);
+  if na != np {
+    let m: addr = "fn-args";
+    let d: u64 = ir.diag(k, np, 1, m, 7);
+    st.st_fail(k, ax.e_type());
+    return i + 1;
+  }
+  let ab: addr = st.st_alloc(k, np * 56 + 8);
+  let j: u64 = if np == 0 { 0 } else { cl.call_args(k, argsg, 0, 0, np, ab, ps) };
+  if st.st_ok(k) != 0 { return i + 1; }
+  let fv: addr = ax.new_val(k);
+  ty.val_at(fv, out);
+  let rvv: addr = ax.new_val(k);
+  let rc: u64 = bi.icall_emit(k, sk, fv, ab, want, rvv);
+  ty.val_at(out, rvv);
+  return core_tail(k, g, i + 1, minp, want, out);
+}

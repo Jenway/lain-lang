@@ -8,9 +8,13 @@ let s = import("sym");
 let ax = import("ast");
 let cx = import("ctx");
 let co = import("core");
+let sm = import("stmt");
+let me = import("member");
 let agg = import("agg");
 let modules = import("modules");
 let an = import("anon");
+let ct = import("ctypes");
+let ireg = import("tyreg");
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 func new_ty(k: addr) -> addr { return ax.new_ty(k); }
@@ -33,7 +37,7 @@ func emit_slots(k: addr, j: u64, n: u64) -> u64 { return cx.emit_slots(k, j, n);
 func slot_put(k: addr, j: u64, v: addr, tp: addr) -> u64 { return cx.slot_put(k, j, v, tp); }
 func slot_get(k: addr, j: u64, tp: addr, out: addr) -> u64 { return cx.slot_get(k, j, tp, out); }
 func push_val(k: addr, v: addr) -> u64 { return cx.push_val(k, v); }
-func block_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 { return co.block_mode(k, g, i, term, slot, tp); }
+func block_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 { return sm.block_mode(k, g, i, term, slot, tp); }
 func expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 { return co.expr(k, g, i, minp, want, out); }
 
 // --- 过程 ---------------------------------------------------------------
@@ -175,7 +179,22 @@ func compile_top_let(k: addr, g: u64, i: u64) -> u64 {
   let nj: u64 = expr(k, g, e, 0, t, v);
   if st.st_ok(k) != 0 { return nj; }
   let vt: addr = new_ty(k);
-  if ty.ty_known(t) == 1 { ty.ty_at(vt, t); } else { ty.ty_at(vt, ty.vty(v)); }
+  if ty.ty_known(t) == 1 {
+    ty.ty_at(vt, t);
+  } else {
+    let vs: u64 = ty.tsh(ty.vty(v));
+    if vs != 0 {
+      if agg.shp_kind(vs) == agg.kind_string() {
+        let id: u64 = ireg.ty_add(k, ireg.lk_bits(), 8, 0, 0);
+        let sid: u64 = ct.slice_t(k, id, 0);
+        let projected: u64 = ireg.project(k, sid, vt);
+      } else {
+        ty.ty_at(vt, ty.vty(v));
+      }
+    } else {
+      ty.ty_at(vt, ty.vty(v));
+    }
+  }
   if ty.ty_known(vt) == 0 { st.st_fail(k, e_type()); return nj; }
   if ty.tk(vt) == 3 and ty.tsh(vt) == 0 and ty.tsh(ty.vty(v)) != 0 {
     let sh: u64 = ty.tsh(ty.vty(v));
@@ -221,7 +240,7 @@ func compile_data_agg(k: addr, g: u64, i: u64, nj: u64, dname: u64, sh: u64, fg:
   ir.region_begin(k);
   let nslots: u64 = 16 + 32 + count_tree(fg, 0);
   let sd: u64 = emit_slots(k, 0, nslots);
-  let wr: u64 = co.agg_fields(k, sh, fg, 0, dname);
+  let wr: u64 = me.agg_fields(k, sh, fg, 0, dname);
   ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, dname);
   let ins: u64 = ir.emit_jump(k, codes.INST_RETURN(), 0);

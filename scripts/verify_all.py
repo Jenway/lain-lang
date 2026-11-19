@@ -443,6 +443,9 @@ META_CASES = [
      "procs": ["s0__area_of", "s0__scale_of", "s0__circle_area", "s0__rect_scale"],
      "contains": ["#call [(#addr) -> #bits<64>](",
                   "#call [(#addr, #bits<64>) -> #bits<64>]("]},
+    {"file": "polish_syntax.lain", "entry": "s0__main", "value": 150, "folds": [],
+     "procs": ["s0__triple", "s0__inc", "s0__apply", "s0__set_y"],
+     "contains": ["data s0__strlit_0 ro", "#call [(#bits<64>) -> #bits<64>]("]},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -463,6 +466,9 @@ META_NEGATIVE = [
     {"file": "lval_slice_ro.lain", "why": "通过只读 Slice 写元素必须失败"},
     {"file": "anon_capture.lain", "why": "无名函数捕获外层局部量必须失败"},
     {"file": "lval_bad.lain", "why": "非法左值必须报错"},
+    {"file": "infer_missing.lain", "why": "let 右值未绑定，无法推导类型"},
+    {"file": "fn_value_bad_type.lain", "why": "过程值与目标 Fn 签名不符"},
+    {"file": "void_value.lain", "why": "void 调用没有可绑定的返回值"},
 ]
 
 

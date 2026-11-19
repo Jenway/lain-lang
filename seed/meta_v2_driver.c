@@ -12,15 +12,15 @@
  *   --entry <名>      入口过程（默认 lain_meta_v2_entry）
  *   --source <路径>   追加一份源码（与位置参数等价）
  *   --out <路径>      把宿主输出写进文件（默认打到标准输出）
- *   --fuel <n>        总燃料（默认 2000000000）
- *   --slice <n>       单次推进步数上限（默认 50000000）
+ *   --fuel <n>        总燃料（默认 8000000）
+ *   --slice <n>       单次推进步数上限（默认 4000000）
  *   --stack <n>       栈字节（默认 4 MiB）
- *   --quota <n>       配额字节（默认 512 MiB）
- *   --workspace <n>   工作区字节（默认 256 MiB）
+ *   --quota <n>       配额字节（默认 2 GiB）
+ *   --workspace <n>   工作区字节（默认 384 MiB）
  *   --caps <n>        能力表容量（默认 128）
- *   --depth <n>       最大调用深度（默认 32）
- *   --symbols <n>     符号容量（默认 8192）
- *   --symbol-bytes<n> 符号字节池（默认 512 KiB）
+ *   --depth <n>       最大调用深度（默认 1024）
+ *   --symbols <n>     符号容量（默认 131072）
+ *   --symbol-bytes<n> 符号字节池（默认 8 MiB）
  *   -q 安静；-v 打印装配细节
  *
  * 退出码：0 成功、1 装配失败、3 Trap、4 没有结果、5 燃料耗尽。
@@ -133,12 +133,13 @@ int main(int argc, char **argv) {
   const char *source_paths[DRIVER_MAX_SOURCES];
   char *source_text[DRIVER_MAX_SOURCES] = {0};
   uint32_t source_count = 0;
-  /* Meta 自己编译自身时固定预留 64 MiB 编译区 + 16 MiB 形状表 + 4 MiB 符号池，
-     默认值必须一次容纳整条自举链路，否则同一份驱动在样例与自举之间口径不一致。 */
-  uint64_t fuel = 2000000000ull, slice_fuel = 50000000ull;
+  /* 默认值按 scripts/verify_all.py 全量用例的实测峰值定在 4~8 倍：
+     步数峰值 1268250、工作区水位峰值 89298752、配额峰值（工作区整块入账后）
+     约 421700000。工作区是唯一预先切块的项，配额与步数只是上限，不预占内存。 */
+  uint64_t fuel = 8000000ull, slice_fuel = 4000000ull;
   uint64_t stack_bytes = 4ull << 20;
-  uint64_t quota_bytes = 512ull << 20;
-  uint64_t workspace_bytes = 256ull << 20;
+  uint64_t quota_bytes = 2147483648ull;
+  uint64_t workspace_bytes = 402653184ull;
   uint64_t caps_capacity = 128;
   /* 编译期的递归下降（表达式、注入生成器）都要落成普通的 #call 帧，
      32 层连带的区域帧不够用；这一层上限只防失控递归。 */
@@ -204,8 +205,8 @@ int main(int argc, char **argv) {
     return 2;
   }
   if (!unit_count) { usage(); return 2; }
-  if (!slice_fuel) slice_fuel = 50000000ull;
-  if (!fuel) fuel = 2000000000ull;
+  if (!slice_fuel) slice_fuel = 4000000ull;
+  if (!fuel) fuel = 8000000ull;
 
   /* 1. 编译单元：.l1 文本必须过解析与验证。 */
   unit_text = join_units(unit_paths, unit_count, &unit_length);
@@ -292,9 +293,11 @@ int main(int argc, char **argv) {
   /* 生成器常写成递归的字段遍历，沙箱里每一层普通调用与每一层分支区域都占一帧，
      16 层连一个三字段 struct 的展开都不够。 */
   apply_limits.max_call_depth = 128;
-  apply_limits.stack_bytes = 1u << 20;
-  apply_limits.fuel = 8000000;
-  apply_limits.quota_bytes = 8u << 20;
+  /* 隔离执行实测：步数峰值 67462、栈水位峰值 8760、配额峰值（栈整块入账后）
+     约 73728；同样取 4~8 倍。 */
+  apply_limits.stack_bytes = 65536;
+  apply_limits.fuel = 500000;
+  apply_limits.quota_bytes = 524288;
   lainv2_host_set_apply_limits(host, &apply_limits);
 
   /* 6. 装载映像、起 TCB。 */
@@ -376,6 +379,17 @@ int main(int argc, char **argv) {
     if (!g_quiet) {
       printf("steps=%llu\n", (unsigned long long)lainvm_tcb_steps(tcb));
       printf("output bytes=%u\n", length);
+      printf("stack peak=%llu\n",
+             (unsigned long long)lainvm_tcb_stack_peak(tcb));
+      printf("quota peak=%llu\n", (unsigned long long)quota.peak);
+      printf("workspace peak=%llu\n",
+             (unsigned long long)lainv2_host_workspace_peak(host));
+      printf("apply steps peak=%llu\n",
+             (unsigned long long)lainv2_host_apply_fuel_peak(host));
+      printf("apply quota peak=%llu\n",
+             (unsigned long long)lainv2_host_apply_quota_peak(host));
+      printf("apply stack peak=%llu\n",
+             (unsigned long long)lainv2_host_apply_stack_peak(host));
     }
     if (!out_path && length) {
       fwrite(output, 1, length, stdout);

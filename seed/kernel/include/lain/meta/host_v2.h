@@ -85,6 +85,12 @@ uint32_t lainv2_host_diag_count(const LainMetaHostV2 *host);
 bool lainv2_host_diag_at(const LainMetaHostV2 *host, uint32_t index,
                         LainMetaV2Diag *out);
 const L1Module *lainv2_host_module(const LainMetaHostV2 *host, uint32_t handle);
+
+/* 用量峰值（诊断用）：工作区切块水位、单次隔离执行的步数与配额。 */
+uint64_t lainv2_host_workspace_peak(const LainMetaHostV2 *host);
+uint64_t lainv2_host_apply_fuel_peak(const LainMetaHostV2 *host);
+uint64_t lainv2_host_apply_quota_peak(const LainMetaHostV2 *host);
+uint64_t lainv2_host_apply_stack_peak(const LainMetaHostV2 *host);
 /* 把全部原语登记成 LAINVM_CAP_FUNCTION。 */
 int lainv2_host_register(LainMetaHostV2 *host, LainVmCaps *caps);
 

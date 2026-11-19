@@ -591,6 +591,7 @@ static LainVmSliceResult op_alloca(LainVmTcb *tcb, const L1Inst *inst) {
   if (used + total > lease->capacity)
     return trap_now(tcb, LAINVM_TRAP_EXECUTION, LAINVM_TRAP_STACK_EXHAUSTED, inst);
   tcb->stack_used = used + total;
+  if (tcb->stack_used > tcb->stack_peak) tcb->stack_peak = tcb->stack_used;
   /* 授权跟着水位走：先把活窗口覆盖到新水位，再交地址。窗口同步不了就拒，
    * 并且把水位回退成失败前的样子（失败不改变状态）。 */
   if (stack_window_sync(tcb) != 0) {

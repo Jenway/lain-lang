@@ -73,6 +73,7 @@ LainVmTcb *lainvm_tcb_new(LainVmImage *image, LainVmSpace *space, uint64_t id,
   tcb->vspace = space;
   tcb->stack_lease = lease;
   tcb->stack_used = 0;
+  tcb->stack_peak = 0;
   tcb->quota = quota;
   tcb->slice_result = LAINVM_SLICE_RUNNABLE;
 
@@ -220,6 +221,7 @@ int lainvm_tcb_start(LainVmTcb *tcb, const char *entry, const L1Value *args,
   memset(tcb->frames, 0, sizeof(LainVmFrame) * tcb->frame_cap);
   memset(tcb->slots, 0, sizeof(L1Value) * tcb->slot_cap);
   tcb->stack_used = 0;
+  tcb->stack_peak = 0;
   /* 新 activation 从**空窗口**开始：上一次留下的授权要是跟着新激活一起活着，
    * 授权范围就比水位大，旧地址还能访问。 */
   if (!lainvm_stack_lease_none(tcb->stack_lease)) {
@@ -272,4 +274,8 @@ const LainVmTrap *lainvm_tcb_trap(const LainVmTcb *tcb) {
 
 uint64_t lainvm_tcb_steps(const LainVmTcb *tcb) {
   return tcb ? tcb->steps : 0;
+}
+
+uint64_t lainvm_tcb_stack_peak(const LainVmTcb *tcb) {
+  return tcb ? tcb->stack_peak : 0;
 }

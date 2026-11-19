@@ -18,6 +18,11 @@ let ireg = import("tyreg");
 let ct = import("ctypes");
 let lv = import("lval");
 let an = import("anon");
+let cl = import("calls");
+let flow = import("flow");
+let sm = import("stmt");
+let me = import("member");
+let rv = import("refval");
 
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
@@ -93,14 +98,14 @@ func expr_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64
   if is_group(g, i) == 1 {
     if delim_of(g, i) == dl_bracket() { return sub_expr(k, g, i, minp, want, out); }
     if delim_of(g, i) == dl_paren() {
-      if fn_val_p(k, out) == 1 { return postfix_call(k, g, i, minp, want, out); }
+      if rv.fn_val_p(k, out) == 1 { return rv.postfix_call(k, g, i, minp, want, out); }
     }
   }
   if is_group(g, i) == 0 {
     if n_sym(g, i) == s.p_dot() {
       if i + 1 < n {
         if is_name(g, i + 1) == 1 {
-          return member_on_val(k, g, i, minp, want, out);
+          return rv.member_on_val(k, g, i, minp, want, out);
         }
       }
     }
@@ -190,174 +195,6 @@ func prefix_neg(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   return j + 1;
 }
 
-// 名字/类型解析失败时把出问题的符号原文发进诊断，比光一个错误码有用。
-func fail_name(k: addr, sym: u64, code: u64) -> u64 {
-  let p: addr = modules.sym_addr(sym);
-  let n: u64 = modules.sym_len(sym);
-  let rc: u64 = ir.diag(k, code, 1, p, n);
-  return st.st_fail(k, code);
-}
-
-func var_ref(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
-  let sym: u64 = n_sym(g, i);
-  let off: u64 = env.env_find(k, sym);
-  if off != 0 {
-    let t: addr = new_ty(k);
-    env.env_ty(k, off, t);
-    slot_get(k, env.env_slot(k, off), t, out);
-    return i + 1;
-  }
-  // 过程名在期待 Fn(...) 的位置上就是一个带签名的过程地址值。
-  let se: addr = modules.find_here(k, sym);
-  if se as u64 != 0 {
-    let sk: u64 = modules.sym_kind(se);
-    if sk == modules.sym_kind_func() {
-      let wsh: u64 = ty.tsh(want);
-      if wsh != 0 {
-        if agg.shp_kind(wsh) == agg.kind_fn() {
-          let ft: addr = new_ty(k);
-          let cp: u64 = ty.ty_at(ft, want);
-          let v: addr = new_val(k);
-          let r: u64 = ty.val_ref(v, modules.sym_qual(se), ft);
-          ty.val_at(out, v);
-          return i + 1;
-        }
-      }
-    }
-  }
-  // 顶层 let：每个导出都降级成零参过程，取值就是调它。
-  let e: addr = modules.find_here(k, sym);
-  if e as u64 != 0 {
-    let kd: u64 = modules.sym_kind(e);
-    if kd == modules.sym_kind_data() or kd == modules.sym_kind_value() {
-      let vt: addr = modules.sym_sig(e);
-      let res: u64 = ir.fresh_t(k);
-      let rc: u64 = ir.args_reset(k);
-      let ins: u64 = ir.emit_call(k, res, modules.sym_qual(e), 0);
-      let t2: addr = new_ty(k);
-      if vt as u64 != 0 { let cp: u64 = ty.ty_at(t2, vt); } else { let nn: u64 = ty.ty_none(t2); }
-      ty.val_ref(out, res, t2);
-      return i + 1;
-    }
-  }
-  fail_name(k, sym, e_unbound());
-  return i + 1;
-}
-
-// NAME ( 实参...)：按签名逐个求值，再按邮箱顺序推入。
-func call_expr(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
-  let callee: u64 = n_sym(g, i);
-  let argsg: u64 = n_at(g, i + 1);
-  let e: addr = modules.find_here(k, callee);
-  if e as u64 == 0 { ty.val_none(out); fail_name(k, callee, e_unbound()); return i + 2; }
-  let kd: u64 = modules.sym_kind(e);
-  if kd != modules.sym_kind_func() and kd != modules.sym_kind_extern() {
-    ty.val_none(out);
-    st.st_fail(k, e_type());
-    return i + 2;
-  }
-  let j: u64 = call_sig(k, modules.sym_qual(e), modules.sym_sig(e), argsg, want, out);
-  // call_args 的返回值是实参组内部位置，外层要跳到组之后。
-  let ignored: u64 = j;
-  return i + 2;
-}
-
-// 签名记录：形参个数@0、返回类型@8、形参类型表@16（每项 32 字节）。
-func call_sig(k: addr, q: u64, sg: addr, argsg: u64, want: addr, out: addr) -> u64 {
-  let np: u64 = load(sg);
-  let ret: addr = load(sg + 8) as addr;
-  let ps: addr = load(sg + 16) as addr;
-  let ab: addr = st.st_alloc(k, np * 56 + 8);
-  // 先铺成空值：实参少于形参时剩下的槽必须能被确定地认出来。
-  let zw: u64 = zero_vals(k, ab, 0, np);
-  let j: u64 = call_args(k, argsg, 0, 0, np, ab, ps);
-  // 实参少于形参时 call_args 提前收手，ab 剩下的槽是空的；把这种情况报出来。
-  let hole: u64 = scan_holes(k, ab, 0, np);
-  if hole != np {
-    let p: addr = modules.sym_addr(q);
-    let n: u64 = modules.sym_len(q);
-    let d: u64 = ir.diag(k, hole, 1, p, n);
-    st.st_fail(k, e_type());
-    return j;
-  }
-  let rest: addr = new_ty(k);
-  ty.ty_at(rest, ret);
-  // 值聚合返回：先在本帧开结果块，把它当第 0 个实参传进去。
-  if agg.sret_ty(rest) == 1 {
-    let dv: addr = new_val(k);
-    let ao: u64 = agg.new_obj(k, ty.tsh(rest), dv);
-    ir.args_reset(k);
-    let p0: u64 = push_val(k, dv);
-    let f0: u64 = fill_args(k, ab, 0, np);
-    let e0: u64 = ir.emit_call(k, 0, q, 0);
-    let c0: addr = new_val(k);
-    let co: u64 = coerce(k, dv, rest, want, c0);
-    ty.val_at(out, c0);
-    return j;
-  }
-  ir.args_reset(k);
-  let dummy: u64 = fill_args(k, ab, 0, np);
-  let res: u64 = if ty.ty_known(rest) == 1 { ir.fresh_t(k) } else { 0 };
-  ir.emit_call(k, res, q, 0);
-  if res == 0 {
-    ty.val_none(out);
-  } else {
-    let rv: addr = new_val(k);
-    ty.val_ref(rv, res, rest);
-    let c: addr = new_val(k);
-    coerce(k, rv, rest, want, c);
-    ty.val_at(out, c);
-  }
-  return j;
-}
-
-func zero_vals(k: addr, ab: addr, idx: u64, arity: u64) -> u64 {
-  if idx >= arity { return idx; }
-  let v: addr = ab + idx * 56;
-  let nn: u64 = ty.val_none(v);
-  return zero_vals(k, ab, idx + 1, arity);
-}
-
-func scan_holes(k: addr, ab: addr, idx: u64, arity: u64) -> u64 {
-  if idx >= arity { return idx; }
-  let v: addr = ab + idx * 56;
-  if ty.vlit(v) == 0 {
-    if ty.vn(v) == 0 { return idx; }
-  }
-  return scan_holes(k, ab, idx + 1, arity);
-}
-
-func fill_args(k: addr, ab: addr, idx: u64, arity: u64) -> u64 {
-  if idx >= arity { return idx; }
-  let v: addr = ab + idx * 56;
-  // 空槽说明实参个数少于形参个数：报出缺的位置，不要把它当句柄发出去。
-  if ty.vlit(v) == 0 {
-    if ty.vn(v) == 0 {
-      let m: addr = "empty-arg";
-      let d: u64 = ir.diag(k, idx, 1, m, 9);
-      st.st_fail(k, e_type());
-      return idx;
-    }
-  }
-  push_val(k, v);
-  return fill_args(k, ab, idx + 1, arity);
-}
-
-// 实参组里用逗号分隔；逐个求值并按形参类型强制，结果写进 ab。
-func call_args(k: addr, g: u64, i: u64, idx: u64, arity: u64, ab: addr, paramp: addr) -> u64 {
-  let n: u64 = n_count(g);
-  if i >= n { return i; }
-  if idx >= arity { return i; }
-  let pt: addr = paramp + idx * 32;
-  let v: addr = new_val(k);
-  let j: u64 = expr(k, g, i, 0, pt, v);
-  let c: addr = new_val(k);
-  coerce(k, v, ty.vty(v), pt, c);
-  ty.val_at(ab + idx * 56, c);
-  if is_comma(g, j) == 1 { return call_args(k, g, j + 1, idx + 1, arity, ab, paramp); }
-  return j;
-}
-
 // 反射分派：认 meta_* 查询与类型名。实参必须在这里用 expr 递归求值，
 // 所以钩子只能留在本文件；表结构与发射逻辑都在 reflect.lain。
 func reflect_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
@@ -431,24 +268,24 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   }
   if sym == s.k_if() {
     let t: addr = box(k);
-    return if_compile(k, g, i, want, out, t);
+    return flow.if_compile(k, g, i, want, out, t);
   }
   if sym == s.k_loop() or sym == s.k_while() {
     let t: addr = box(k);
-    return loop_compile(k, g, i, want, out, t);
+    return flow.loop_compile(k, g, i, want, out, t);
   }
   if sym == s.o_minus() { return prefix_neg(k, g, i, want, out); }
   // 名字 . 名字：变体构造、变体投影、导入成员、变量字段
   if i + 2 < n and is_group(g, i + 1) == 0 and is_name(g, i) == 1 {
     if n_sym(g, i + 1) == s.p_dot() and is_name(g, i + 2) == 1 {
-      return dotted(k, g, i, want, out);
+      return me.dotted(k, g, i, want, out);
     }
   }
   // 名字 { 字段... }：聚合构造。只有结构名后跟花括号才算构造，
   // 否则 if 语句里的条件变量会被误当成构造名。
   if i + 1 < n and is_name(g, i) == 1 and is_group(g, i + 1) == 1 {
     if delim_of(g, i + 1) == dl_brace() and modules.is_struct_name(k, sym) == 1 {
-      return agg_construct(k, g, i, out);
+      return me.agg_construct(k, g, i, out);
     }
   }
   // 编译期反射与类型句柄：类型名在表达式位置折成 TypeId 字面量，
@@ -458,12 +295,12 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   // 间接调用：icall[(形参) -> 返回](目标, 实参...)。
   if sym == s.b_icall() and i + 2 < n {
     if is_group(g, i + 1) == 1 and is_group(g, i + 2) == 1 {
-      return icall_call(k, g, i, want, out);
+      return cl.icall_call(k, g, i, want, out);
     }
   }
   if i + 1 < n and is_group(g, i + 1) == 1 {
     if delim_of(g, i + 1) == dl_paren() {
-      if bi.is_builtin(sym) == 1 { return builtin_call(k, g, i, want, out); }
+      if bi.is_builtin(sym) == 1 { return me.builtin_call(k, g, i, want, out); }
       // 局部 Fn(...) 值：按签名发间接调用。
       let fo: u64 = env.env_find(k, sym);
       if fo != 0 {
@@ -473,50 +310,21 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
         if fsh != 0 {
           if agg.shp_kind(fsh) == agg.kind_fn() {
             let fv: addr = new_val(k);
-            let fj: u64 = var_ref(k, g, i, tnone(k), fv);
-            let pf: u64 = postfix_call(k, g, i + 1, 0, want, fv);
+            let fj: u64 = cl.var_ref(k, g, i, tnone(k), fv);
+            let pf: u64 = rv.postfix_call(k, g, i + 1, 0, want, fv);
             let ig: u64 = fj;
             ty.val_at(out, fv);
             return pf;
           }
         }
       }
-      return call_expr(k, g, i, want, out);
+      return cl.call_expr(k, g, i, want, out);
     }
     if delim_of(g, i + 1) == dl_bracket() and sym == s.b_icall() {
-      return icall_call(k, g, i, want, out);
+      return cl.icall_call(k, g, i, want, out);
     }
   }
-  return var_ref(k, g, i, want, out);
-}
-
-// --- 间接调用 -------------------------------------------------------------
-// 第一个实参是目标，其余按签名表逐个强制。数量不匹配或目标不是 addr 都报类型错。
-func icall_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
-  let sg: u64 = n_at(g, i + 1);
-  let argsg: u64 = n_at(g, i + 2);
-  let sk: addr = cx.icall_sig(k, sg);
-  if st.st_ok(k) != 0 { ty.val_none(out); return i + 3; }
-  let np: u64 = load(sk);
-  let ps: addr = load(sk + 16) as addr;
-  let need: u64 = if np == 0 { 1 } else { np + 1 };
-  let na: u64 = bi.arg_count(argsg);
-  if na != need {
-    let m: addr = "icall-args";
-    let dg: u64 = ir.diag(k, need, 1, m, 10);
-    ty.val_none(out);
-    st.st_fail(k, e_type());
-    return i + 3;
-  }
-  let fv: addr = new_val(k);
-  let j0: u64 = expr(k, argsg, 0, 0, tnone(k), fv);
-  if st.st_ok(k) != 0 { ty.val_none(out); return i + 3; }
-  let ab: addr = st.st_alloc(k, np * 56 + 8);
-  let st0: u64 = if is_comma(argsg, j0) == 1 { j0 + 1 } else { j0 };
-  let j1: u64 = if np == 0 { st0 } else { call_args(k, argsg, st0, 0, np, ab, ps) };
-  if st.st_ok(k) != 0 { ty.val_none(out); return i + 3; }
-  let rc: u64 = bi.icall_emit(k, sk, fv, ab, want, out);
-  return i + 3;
+  return cl.var_ref(k, g, i, want, out);
 }
 
 // --- eval ---------------------------------------------------------------
@@ -591,480 +399,6 @@ func eval_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   return i + 2;
 }
 
-// --- if -----------------------------------------------------------------
-func if_compile(k: addr, g: u64, i: u64, want: addr, out: addr, term: addr) -> u64 {
-  let ct: addr = tbool(k);
-  let cv: addr = new_val(k);
-  // 条件的期望类型不能往下漏：want 在 load/store 里是存取宽度，
-  // #bits<1> 漏进子表达式会发出 1 位宽的 #load。
-  let j: u64 = expr(k, g, i + 1, 0, tnone(k), cv);
-  if st.st_ok(k) != 0 { return j; }
-  let cb: addr = new_val(k);
-  let cj2: u64 = coerce(k, cv, ty.vty(cv), ct, cb);
-  let cn: u64 = val_force(k, cb, ct);
-  let has_res: u64 = ty.ty_known(want);
-  let resj: u64 = if has_res == 1 { alloc_res_slot(k) } else { no_slot() };
-  let ctp: addr = want;
-  let t1: addr = box(k);
-  ir.region_begin(k);
-  let j1: u64 = branch_block(k, g, j, ctp, resj, t1);
-  let r1: u64 = ir.region_end(k);
-  let t2: addr = box(k);
-  let ob: addr = box(k);
-  let j3: u64 = if_else_part(k, g, j1, want, ctp, resj, t2, ob);
-  let h2: u64 = box_get(ob);
-  ir.emit_if(k, 0, cn, r1, h2);
-  if st.st_ok(k) != 0 { return j3; }
-  if box_get(t1) == 1 and box_get(t2) == 1 { box_put(term, 1); }
-  if has_res == 1 {
-    slot_get(k, resj, want, out);
-  } else {
-    ty.val_none(out);
-  }
-  return j3;
-}
-
-// else 段：ob[0] 收 else 区域句柄（没有 else 就是 0），返回新下标。
-func if_else_part(k: addr, g: u64, j1: u64, want: addr, ctp: addr, resj: u64, t2: addr, ob: addr) -> u64 {
-  if j1 < n_count(g) and n_sym(g, j1) == s.k_else() {
-    ir.region_begin(k);
-    let jx: u64 = j1 + 1;
-    let j3: u64 = if jx < n_count(g) and n_sym(g, jx) == s.k_if() {
-      if_nested(k, g, jx, want, resj, t2)
-    } else {
-      branch_block(k, g, jx, ctp, resj, t2)
-    };
-    let r2: u64 = ir.region_end(k);
-    store(ob, r2);
-    return j3;
-  }
-  store(ob, 0);
-  return j1;
-}
-
-// else if：内层 if 自己发一条 #if，末值落回外层的结果槽。
-func if_nested(k: addr, g: u64, jx: u64, want: addr, resj: u64, t2: addr) -> u64 {
-  let inner: addr = new_val(k);
-  let j: u64 = if_compile(k, g, jx, want, inner, t2);
-  if resj != no_slot() and ty.val_known(inner) == 1 { slot_put(k, resj, inner, ty.vty(inner)); }
-  return j;
-}
-
-// 一个分支：期待 '{' 组；值模式下把末个表达式写进 slot。
-func branch_block(k: addr, g: u64, j: u64, tp: addr, slot: u64, term: addr) -> u64 {
-  if j >= n_count(g) { st.st_fail(k, e_ast()); box_put(term, 1); return j; }
-  let bg: u64 = n_at(g, j);
-  let mark: u64 = env.env_mark(k);
-  let jj: u64 = block_mode(k, bg, 0, term, slot, tp);
-  env.env_release(k, mark);
-  return j + 1;
-}
-
-// --- 循环 -------------------------------------------------------------
-func loop_params(k: addr, pg: u64, i: u64, f: addr, idx: u64, lt: addr) -> u64 {
-  let n: u64 = n_count(pg);
-  if i >= n { return i; }
-  if idx >= 4 { st.st_fail(k, e_frame()); return i; }
-  let name: u64 = n_sym(pg, i);
-  let a: u64 = expect_sym(k, pg, i + 1, s.p_colon());
-  let t: addr = new_ty(k);
-  let b: u64 = parse_type(k, pg, a, t);
-  ty.ty_at(lt, t);
-  let c: u64 = expect_sym(k, pg, b, s.p_eq());
-  let v: addr = new_val(k);
-  let d: u64 = expr(k, pg, c, 0, t, v);
-  let sl: u64 = st.st_next_slot(k);
-  slot_put(k, sl, v, t);
-  env.env_push(k, name, sl, t);
-  st.st_set_lf_slot(f, idx, sl);
-  st.st_set_lf_np(f, idx + 1);
-  if is_comma(pg, d) == 1 { return loop_params(k, pg, d + 1, f, idx + 1, lt); }
-  return d;
-}
-
-func loop_compile(k: addr, g: u64, i: u64, want: addr, out: addr, term: addr) -> u64 {
-  let n: u64 = n_count(g);
-  let ho: addr = st.st_alloc(k, 16);
-  let j0: u64 = loop_head(k, g, i + 1, ho);
-  let label: u64 = if box_get(ho) == 1 { box_get(ho + 8) } else { ir.fresh_l(k) };
-  let d: u64 = st.st_loopdepth(k);
-  if d >= 8 { st.st_fail(k, e_frame()); return j0; }
-  let f: addr = st.st_lf(k, d);
-  st.st_set_loopdepth(k, d + 1);
-  st.st_set_lf_label(f, label);
-  st.st_set_lf_res(f, no_slot());
-  st.st_set_lf_np(f, 0);
-  let mark: u64 = env.env_mark(k);
-  st.st_set_lf_mark(f, mark);
-  // loop_params 返回的是形参组内部的下一位置，外层要跳到组之后。
-  let lt: addr = new_ty(k);
-  let j: u64 = if j0 < n and is_group(g, j0) == 1 and delim_of(g, j0) == dl_paren() {
-    let ignored: u64 = loop_params(k, n_at(g, j0), 0, f, 0, lt);
-    j0 + 1
-  } else {
-    j0
-  };
-  let np: u64 = st.st_lf_np(f);
-  let wt: addr = new_ty(k);
-  if ty.ty_known(want) == 1 { ty.ty_at(wt, want); } else { if np > 0 { ty.ty_at(wt, lt); } }
-  let resj: u64 = if ty.ty_known(wt) == 1 { alloc_res_slot(k) } else { no_slot() };
-  st.st_set_lf_res(f, resj);
-  // while 可以省略：省略时循环体反复执行，只能靠 break 离开。
-  if j < n and n_sym(g, j) == s.k_while() {
-    return loop_while(k, g, j + 1, out, f, resj, np, wt, d, mark);
-  }
-  return loop_plain(k, g, j, out, f, resj, np, wt, d, mark);
-}
-
-func loop_while(k: addr, g: u64, wh: u64, out: addr, f: addr, resj: u64,
-                np: u64, wt: addr, d: u64, mark: u64) -> u64 {
-  let ct: addr = tbool(k);
-  let noty: addr = tnone(k);
-  let r0: u64 = ir.region_begin(k);
-  let cv: addr = new_val(k);
-  let cj: u64 = expr(k, g, wh, 0, tnone(k), cv);
-  let cb: addr = new_val(k);
-  let cbc: u64 = coerce(k, cv, ty.vty(cv), ct, cb);
-  let cn: u64 = val_force(k, cb, ct);
-  let bg: u64 = n_at(g, cj);
-  let bt: addr = box(k);
-  let h1: u64 = ir.region_begin(k);
-  let bj: u64 = block_mode(k, bg, 0, bt, no_slot(), noty);
-  if box_get(bt) == 0 {
-    ir.args_reset(k);
-    ir.emit_jump(k, codes.INST_CONTINUE(), st.st_lf_label(f));
-  }
-  let r1: u64 = ir.region_end(k);
-  ir.emit_if(k, 0, cn, r1, 0);
-  // 正常退出这一轮：把最后一个循环参数搬进结果槽（与 lain0 的隐式 #break 同义）。
-  if resj != no_slot() and np > 0 {
-    slot_copy(k, resj, st.st_lf_slot(f, np - 1));
-  }
-  ir.args_reset(k);
-  ir.emit_jump(k, codes.INST_BREAK(), st.st_lf_label(f));
-  let r2: u64 = ir.region_end(k);
-  ir.emit_loop(k, 0, st.st_lf_label(f), r2);
-  st.st_set_loopdepth(k, d);
-  env.env_release(k, mark);
-  if resj != no_slot() {
-    slot_get(k, resj, wt, out);
-  } else {
-    ty.val_none(out);
-  }
-  return cj + 1;
-}
-
-// 无 while 的 loop：体反复执行，未终结就继续。
-func loop_plain(k: addr, g: u64, j: u64, out: addr, f: addr, resj: u64,
-                np: u64, wt: addr, d: u64, mark: u64) -> u64 {
-  let noty: addr = tnone(k);
-  let r0: u64 = ir.region_begin(k);
-  let bg: u64 = n_at(g, j);
-  let bt: addr = box(k);
-  let bj: u64 = block_mode(k, bg, 0, bt, no_slot(), noty);
-  if box_get(bt) == 0 {
-    ir.args_reset(k);
-    ir.emit_jump(k, codes.INST_CONTINUE(), st.st_lf_label(f));
-  }
-  let r1: u64 = ir.region_end(k);
-  ir.emit_loop(k, 0, st.st_lf_label(f), r1);
-  st.st_set_loopdepth(k, d);
-  env.env_release(k, mark);
-  if resj != no_slot() {
-    slot_get(k, resj, wt, out);
-  } else {
-    ty.val_none(out);
-  }
-  return j + 1;
-}
-
-// --- 语句 ---------------------------------------------------------------
-func stmt_let(k: addr, g: u64, i: u64) -> u64 {
-  let name: u64 = n_sym(g, i + 1);
-  let j0: u64 = i + 2;
-  let t: addr = tnone(k);
-  let j: u64 = if j0 < n_count(g) and n_sym(g, j0) == s.p_colon() { parse_type(k, g, j0 + 1, t) } else { j0 };
-  let e: u64 = expect_sym(k, g, j, s.p_eq());
-  let v: addr = new_val(k);
-  let nj: u64 = expr(k, g, e, 0, t, v);
-  if st.st_ok(k) != 0 { return nj; }
-  let vt: addr = new_ty(k);
-  if ty.ty_known(t) == 1 {
-    ty.ty_at(vt, t);
-    // 标注是裸 addr 而右值带形状时保留形状，长度与字段信息都在形状里。
-    if ty.tk(t) == 3 and ty.tsh(t) == 0 and ty.tsh(ty.vty(v)) != 0 {
-      let sh: u64 = ty.tsh(ty.vty(v));
-      let sv: u64 = ty.ty_set_sh(vt, sh);
-    }
-  } else {
-    ty.ty_at(vt, ty.vty(v));
-  }
-  if ty.ty_known(vt) == 0 { st.st_fail(k, e_type()); return nj; }
-  // 标注类型与右值类型可能不同（字符串→切片要现造 16 字节头，Mut→Ref 只改标注）。
-  let cv: addr = new_val(k);
-  let c1: u64 = coerce(k, v, ty.vty(v), vt, cv);
-  if st.st_ok(k) != 0 { return nj; }
-  let sl: u64 = st.st_next_slot(k);
-  slot_put(k, sl, cv, ty.vty(cv));
-  env.env_push(k, name, sl, vt);
-  return skip_semi(g, nj);
-}
-
-// --- 左值 -----------------------------------------------------------------
-// 极薄的编排：起点与每一步都由 core 用 expr 求值，几何与写入在 lval.lain。
-func lval_bad(k: addr, m: addr, n: u64, back: u64) -> u64 {
-  let d: u64 = ir.diag(k, 0, 1, m, n);
-  st.st_fail(k, e_op());
-  return back;
-}
-
-func lval_base(k: addr, g: u64, i: u64, r: addr) -> u64 {
-  let m: addr = "bad-lvalue";
-  if is_name(g, i) == 0 { return lval_bad(k, m, 10, i + 1); }
-  let sym: u64 = n_sym(g, i);
-  if sym == s.b_deref() {
-    if i + 1 >= n_count(g) { return lval_bad(k, m, 10, i + 1); }
-    if is_group(g, i + 1) == 0 { return lval_bad(k, m, 10, i + 1); }
-    if delim_of(g, i + 1) != dl_paren() { return lval_bad(k, m, 10, i + 1); }
-    let pv: addr = new_val(k);
-    let aty: addr = ir.taddr(k);
-    let j: u64 = expr(k, n_at(g, i + 1), 0, 0, aty, pv);
-    if st.st_ok(k) != 0 { return i + 2; }
-    let sh: u64 = ty.tsh(ty.vty(pv));
-    if sh == 0 { return lval_bad(k, m, 10, i + 2); }
-    let kd: u64 = agg.shp_kind(sh);
-    if kd != agg.kind_ref() and kd != agg.kind_mut() { return lval_bad(k, m, 10, i + 2); }
-    let f: u64 = lv.from_deref(k, pv, r);
-    return i + 2;
-  }
-  let off: u64 = env.env_find(k, sym);
-  if off != 0 {
-    let f: u64 = lv.from_local(k, off, r);
-    return i + 1;
-  }
-  let e: addr = modules.find_here(k, sym);
-  if e as u64 != 0 {
-    if modules.sym_kind(e) == modules.sym_kind_data() {
-      let f2: u64 = lv.from_data(k, e, r);
-      return i + 1;
-    }
-  }
-  fail_name(k, sym, e_unbound());
-  return i + 1;
-}
-
-func lval_walk(k: addr, g: u64, i: u64, eqj: u64, r: addr) -> u64 {
-  let m: addr = "bad-lvalue";
-  if i >= eqj { return i; }
-  if is_group(g, i) == 1 {
-    if delim_of(g, i) != dl_bracket() { return lval_bad(k, m, 10, i); }
-    let sh: u64 = ty.tsh(lv.rec_ty(r));
-    if sh == 0 { return lval_bad(k, m, 10, i); }
-    let kd: u64 = agg.shp_kind(sh);
-    if kd != agg.kind_array() and kd != agg.kind_slice() and kd != agg.kind_mutslice() {
-      return lval_bad(k, m, 10, i);
-    }
-    let nt: addr = new_ty(k);
-    let u: u64 = ty.ty_u64(nt);
-    let iv: addr = new_val(k);
-    let j: u64 = expr(k, n_at(g, i), 0, 0, nt, iv);
-    if st.st_ok(k) != 0 { return i + 1; }
-    let f: u64 = lv.index_step(k, r, iv);
-    return lval_walk(k, g, i + 1, eqj, r);
-  }
-  if n_sym(g, i) == s.p_dot() {
-    if i + 1 < eqj and is_name(g, i + 1) == 1 {
-      let sh2: u64 = ty.tsh(lv.rec_ty(r));
-      if sh2 == 0 { return lval_bad(k, m, 10, i); }
-      let mem: addr = agg.mem_find(sh2, n_sym(g, i + 1));
-      if mem as u64 == 0 { return lval_bad(k, m, 10, i); }
-      let f2: u64 = lv.field_step(k, r, mem);
-      return lval_walk(k, g, i + 2, eqj, r);
-    }
-  }
-  return lval_bad(k, m, 10, i);
-}
-
-func stmt_assign(k: addr, g: u64, i: u64, eqj: u64) -> u64 {
-  let r: addr = lv.rec_new(k);
-  let a: u64 = lval_base(k, g, i, r);
-  if st.st_ok(k) != 0 { return eqj + 1; }
-  let b: u64 = lval_walk(k, g, a, eqj, r);
-  if st.st_ok(k) != 0 { return eqj + 1; }
-  let lock: u64 = lv.rec_lock(r);
-  let mr: addr = "read-only ref";
-  let ms: addr = "read-only slice";
-  let mt: addr = "read-only table";
-  if lock == 1 { return lval_bad(k, mr, 13, eqj + 1); }
-  if lock == 2 { return lval_bad(k, ms, 15, eqj + 1); }
-  if lock == 3 { return lval_bad(k, mt, 15, eqj + 1); }
-  let t: addr = lv.rec_ty(r);
-  let v: addr = new_val(k);
-  let j: u64 = expr(k, g, eqj + 1, 0, t, v);
-  if st.st_ok(k) != 0 { return j; }
-  let c: addr = new_val(k);
-  let c1: u64 = coerce(k, v, ty.vty(v), t, c);
-  if st.st_ok(k) != 0 { return j; }
-  let s0: u64 = lv.store_value(k, r, c);
-  return skip_semi(g, j);
-}
-
-// 有值 return：算表达式并把实参推好，返回新下标。
-func ret_value(k: addr, g: u64, j0: u64, rt: addr) -> u64 {
-  let v: addr = new_val(k);
-  let j: u64 = expr(k, g, j0, 0, rt, v);
-  if st.st_ok(k) != 0 { return j; }
-  if ty.ty_known(rt) == 0 { st.st_fail(k, e_type()); return j; }
-  let c: addr = new_val(k);
-  coerce(k, v, ty.vty(v), rt, c);
-  push_val(k, c);
-  return j;
-}
-
-func stmt_return(k: addr, g: u64, i: u64, term: addr) -> u64 {
-  box_put(term, 1);
-  let rt: addr = new_ty(k);
-  ty.ty_save(rt, st.st_retk(k), st.st_retw(k), st.st_retsg(k));
-  let sh: u64 = ty.ty_set_sh(rt, st.st_retsh(k));
-  let rp: u64 = st.st_retptr(k);
-  let j0: u64 = i + 1;
-  let has: u64 = if j0 < n_count(g) and is_semi(g, j0) == 0 { 1 } else { 0 };
-  // sret：把返回值整块拷进隐藏出参，过程本身没有返回值。
-  if rp != 0 and has == 1 {
-    let v: addr = new_val(k);
-    let j: u64 = expr(k, g, j0, 0, rt, v);
-    if st.st_ok(k) != 0 { return j; }
-    let c: addr = new_val(k);
-    let c1: u64 = coerce(k, v, ty.vty(v), rt, c);
-    if st.st_ok(k) != 0 { return j; }
-    let sz: u64 = agg.shp_size(ty.tsh(rt));
-    let cp: u64 = agg.copy_block(k, rp, ty.vn(c), sz);
-    ir.args_reset(k);
-    ir.emit_jump(k, codes.INST_RETURN(), 0);
-    return skip_semi(g, j);
-  }
-  ir.args_reset(k);
-  let j: u64 = if has == 1 { ret_value(k, g, j0, rt) } else { j0 };
-  ir.emit_jump(k, codes.INST_RETURN(), 0);
-  return skip_semi(g, j);
-}
-
-
-func break_value(k: addr, bg: u64, resj: u64) -> u64 {
-  let v: addr = new_val(k);
-  let noty: addr = tnone(k);
-  let j: u64 = expr(k, bg, 0, 0, noty, v);
-  if st.st_ok(k) != 0 { return j; }
-  if resj != no_slot() and ty.val_known(v) == 1 { slot_put(k, resj, v, ty.vty(v)); }
-  return j;
-}
-
-func stmt_break(k: addr, g: u64, i: u64, term: addr) -> u64 {
-  box_put(term, 1);
-  let ho: addr = st.st_alloc(k, 16);
-  let j: u64 = loop_head(k, g, i + 1, ho);
-  let fi: u64 = find_loop(k, box_get(ho + 8), box_get(ho));
-  if fi == no_slot() { st.st_fail(k, e_frame()); return j; }
-  let f: addr = st.st_lf(k, fi);
-  let resj: u64 = st.st_lf_res(f);
-  let j2: u64 = if j < n_count(g) and is_group(g, j) == 1 { break_value(k, n_at(g, j), resj) } else { j };
-  ir.args_reset(k);
-  ir.emit_jump(k, codes.INST_BREAK(), st.st_lf_label(f));
-  return skip_semi(g, j2);
-}
-
-func cont_args(k: addr, g: u64, i: u64, idx: u64, f: addr) -> u64 {
-  let n: u64 = n_count(g);
-  if i >= n { return i; }
-  let v: addr = new_val(k);
-  let noty: addr = tnone(k);
-  let j: u64 = expr(k, g, i, 0, noty, v);
-  if st.st_ok(k) != 0 { return j; }
-  if idx < st.st_lf_np(f) and ty.val_known(v) == 1 {
-    slot_put(k, st.st_lf_slot(f, idx), v, ty.vty(v));
-  }
-  if is_comma(g, j) == 1 { return cont_args(k, g, j + 1, idx + 1, f); }
-  return j;
-}
-
-func stmt_continue(k: addr, g: u64, i: u64, term: addr) -> u64 {
-  box_put(term, 1);
-  let ho: addr = st.st_alloc(k, 16);
-  let j: u64 = loop_head(k, g, i + 1, ho);
-  let fi: u64 = find_loop(k, box_get(ho + 8), box_get(ho));
-  if fi == no_slot() { st.st_fail(k, e_frame()); return j; }
-  let f: addr = st.st_lf(k, fi);
-  let j2: u64 = if j < n_count(g) and is_group(g, j) == 1 { cont_args(k, n_at(g, j), 0, 0, f) } else { j };
-  if st.st_ok(k) != 0 { return j2; }
-  ir.args_reset(k);
-  ir.emit_jump(k, codes.INST_CONTINUE(), st.st_lf_label(f));
-  return skip_semi(g, j2);
-}
-
-func stmt_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 {
-  let n: u64 = n_count(g);
-  if i >= n { return i; }
-  let h: u64 = n_at(g, i);
-  if is_group_node(h) == 1 {
-    if ax.delim(h) == dl_brace() {
-      let mark: u64 = env.env_mark(k);
-      let t: addr = box(k);
-      let j: u64 = block_mode(k, h, 0, t, slot, tp);
-      env.env_release(k, mark);
-      if box_get(t) == 1 { box_put(term, 1); }
-      return i + 1;
-    }
-    st.st_fail(k, e_ast());
-    box_put(term, 1);
-    return i + 1;
-  }
-  let sym: u64 = node_sym(h);
-  if sym == s.k_let() { return stmt_let(k, g, i); }
-  if sym == s.k_if() {
-    let dummy: addr = new_val(k);
-    let nt: addr = tnone(k);
-    let j: u64 = if_compile(k, g, i, nt, dummy, term);
-    return skip_semi(g, j);
-  }
-  if sym == s.k_loop() or sym == s.k_while() {
-    let dummy: addr = new_val(k);
-    let nt: addr = tnone(k);
-    let j: u64 = loop_compile(k, g, i, nt, dummy, term);
-    return skip_semi(g, j);
-  }
-  if sym == s.k_return() { return stmt_return(k, g, i, term); }
-  if sym == s.k_break() { return stmt_break(k, g, i, term); }
-  if sym == s.k_continue() { return stmt_continue(k, g, i, term); }
-  if sym == s.k_func() or sym == s.k_extern() or sym == s.k_struct() {
-    st.st_fail(k, e_unsup());
-    box_put(term, 1);
-    return i + 1;
-  }
-  if sym == s.k_enum() or sym == s.k_import() {
-    st.st_fail(k, e_unsup());
-    box_put(term, 1);
-    return i + 1;
-  }
-  let eqj: u64 = lv.find_eq(g, i, n);
-  if eqj != 0 { return stmt_assign(k, g, i, eqj); }
-  let v: addr = new_val(k);
-  let j: u64 = expr(k, g, i, 0, tp, v);
-  if st.st_ok(k) != 0 { return j; }
-  if slot != no_slot() and ty.val_known(v) == 1 {
-    slot_put(k, slot, v, ty.vty(v));
-  }
-  return skip_semi(g, j);
-}
-
-func block_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 {
-  let n: u64 = n_count(g);
-  if i >= n { return i; }
-  let t: addr = box(k);
-  let j: u64 = stmt_mode(k, g, i, t, slot, tp);
-  if st.st_ok(k) != 0 { return j; }
-  if box_get(t) == 1 { box_put(term, 1); return j; }
-  return block_mode(k, g, j, term, slot, tp);
-}
 
 // --- 表达式处理器的具体实现（挂在核心分派后面，避免膨胀上半部） --------------
 
@@ -1128,14 +462,25 @@ func sub_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 
   if sliced == 1 {
     // 切片的 s[i] 是元素值本身：标量按真实位宽读，聚合给那块视图。
     let ev: addr = new_val(k);
-    if deref_loads(ty.tsh(et)) == 1 {
+    if rv.deref_loads(ty.tsh(et)) == 1 {
       let el: u64 = agg.load_at(k, res, 0, et, ev);
     } else {
       let ev2: u64 = ty.val_ref(ev, res, et);
     }
     ty.val_at(out, ev);
   } else {
-    ty.val_ref(out, res, at);
+    let static_table: u64 = agg.shp_static(sh);
+    if static_table == 1 {
+      ty.val_ref(out, res, at);
+    } else {
+      let ev: addr = new_val(k);
+      if rv.deref_loads(ty.tsh(et)) == 1 {
+        let el: u64 = agg.load_at(k, res, 0, et, ev);
+      } else {
+        let ev2: u64 = ty.val_ref(ev, res, et);
+      }
+      ty.val_at(out, ev);
+    }
   }
   return expr_tail(k, g, i + 1, minp, want, out);
 }
@@ -1216,509 +561,6 @@ func strlit_prefix(k: addr) -> u64 {
   store(p + 5, c5);
   store(p + 6, c6);
   return ir.sym_lit(p, 7);
-}
-
-// 名字 . 名字：先认本源的枚举变体，再看导入模块成员，最后当变量字段。
-func dotted(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
-  let a: u64 = n_sym(g, i);
-  let b: u64 = n_sym(g, i + 2);
-  let e: addr = modules.find_here(k, a);
-  if e as u64 != 0 {
-    if modules.sym_kind(e) == modules.sym_kind_enum() {
-      let sh: u64 = modules.sym_shape(e);
-      if i + 3 < n_count(g) {
-        if is_group(g, i + 3) == 1 and delim_of(g, i + 3) == dl_brace() {
-          let made: u64 = variant_new(k, sh, b, n_at(g, i + 3), out);
-          let gone: u64 = made;
-          return i + 4;
-        }
-        if is_group(g, i + 3) == 1 and delim_of(g, i + 3) == dl_paren() {
-          let got: u64 = variant_proj_call(k, sh, b, n_at(g, i + 3), want, out);
-          let gone: u64 = got;
-          return i + 4;
-        }
-      }
-      st.st_fail(k, e_unsup());
-      return i + 3;
-    }
-  }
-  let m: u64 = modules.mod_lookup(k, a);
-  if m != 0 { return member_ref(k, g, i, m - 1, b, want, out); }
-  // 局部变量：先取值再按值定位成员，切片 len/ptr、聚合字段与链式后缀共用一条路。
-  if env.env_find(k, a) != 0 {
-    let bv: addr = new_val(k);
-    let bj: u64 = var_ref(k, g, i, tnone(k), bv);
-    if st.st_ok(k) != 0 { return i + 3; }
-    ty.val_at(out, bv);
-    return member_on_val(k, g, i + 1, 0, want, out);
-  }
-  return field_ref(k, g, i, a, b, out);
-}
-
-// Shape.Circle { 载荷 }
-func variant_new(k: addr, sh: u64, vname: u64, argp: u64, out: addr) -> u64 {
-  let m: addr = agg.mem_find(sh, vname);
-  if m as u64 == 0 { st.st_fail(k, e_unsup()); return 0; }
-  let objv: addr = new_val(k);
-  let obj: u64 = agg.new_obj(k, sh, objv);
-  let tg: u64 = agg.tag_write(k, obj, agg.mem_tag(m));
-  if agg.mem_has(m) == 1 {
-    let mt: addr = new_ty(k);
-    let s1: u64 = agg.mem_ty(k, m, mt);
-    let pv: addr = new_val(k);
-    let j: u64 = expr(k, argp, 0, 0, mt, pv);
-    let sv: u64 = agg.store_at(k, obj, agg.mem_off(m), pv, mt);
-  }
-  ty.val_at(out, objv);
-  return 0;
-}
-
-// Shape.Circle(s)：标签命中才读载荷，否则给 0。
-func variant_proj_call(k: addr, sh: u64, vname: u64, argp: u64, want: addr, out: addr) -> u64 {
-  let av: addr = new_val(k);
-  let at: addr = new_ty(k);
-  let a1: u64 = ty.ty_addr(at);
-  let a2: u64 = ty.ty_set_sh(at, sh);
-  let j: u64 = expr(k, argp, 0, 0, at, av);
-  let rt: addr = new_ty(k);
-  if ty.ty_known(want) == 1 { let cp: u64 = ty.ty_at(rt, want); } else { let i32v: u64 = ty.ty_i32(rt); }
-  let r: u64 = agg.variant_proj(k, sh, ty.vn(av), vname, rt, out);
-  let ignored: u64 = j;
-  return 0;
-}
-
-// Name { 字段: 表达式 ... }
-func agg_construct(k: addr, g: u64, i: u64, out: addr) -> u64 {
-  let nm: u64 = n_sym(g, i);
-  let e: addr = modules.find_here(k, nm);
-  if e as u64 == 0 { fail_name(k, nm, e_unbound()); return i + 2; }
-  let sh: u64 = modules.sym_shape(e);
-  if sh == 0 { st.st_fail(k, e_type()); return i + 2; }
-  let objv: addr = new_val(k);
-  let obj: u64 = agg.new_obj(k, sh, objv);
-  let j: u64 = agg_fields(k, sh, n_at(g, i + 1), 0, obj);
-  let ignored: u64 = j;
-  ty.val_at(out, objv);
-  return i + 2;
-}
-
-// 字段列表：名字 : 表达式，字段之间的逗号可有可无。
-func agg_fields(k: addr, sh: u64, fg: u64, i: u64, obj: u64) -> u64 {
-  let n: u64 = n_count(fg);
-  if i >= n { return i; }
-  if st.st_ok(k) != 0 { return i; }
-  if is_comma(fg, i) == 1 { return agg_fields(k, sh, fg, i + 1, obj); }
-  let fname: u64 = n_sym(fg, i);
-  let m: addr = agg.mem_find(sh, fname);
-  if m as u64 == 0 { st.st_fail(k, e_unsup()); return i + 1; }
-  let a: u64 = expect_sym(k, fg, i + 1, s.p_colon());
-  let mt: addr = new_ty(k);
-  let s1: u64 = agg.mem_ty(k, m, mt);
-  let pv: addr = new_val(k);
-  let j: u64 = expr(k, fg, a, 0, mt, pv);
-  let sv: u64 = agg.store_at(k, obj, agg.mem_off(m), pv, mt);
-  return agg_fields(k, sh, fg, j, obj);
-}
-
-// 变量字段：p.x，嵌套聚合给地址，标量给值。
-func field_ref(k: addr, g: u64, i: u64, var_sym: u64, fname: u64, out: addr) -> u64 {
-  let off: u64 = env.env_find(k, var_sym);
-  if off == 0 { fail_name(k, var_sym, e_unbound()); return i + 3; }
-  let vt: addr = new_ty(k);
-  env.env_ty(k, off, vt);
-  let sh: u64 = ty.tsh(vt);
-  if sh == 0 { st.st_fail(k, e_type()); return i + 3; }
-  let m: addr = agg.mem_find(sh, fname);
-  if m as u64 == 0 { st.st_fail(k, e_unsup()); return i + 3; }
-  let ov: addr = new_val(k);
-  slot_get(k, env.env_slot(k, off), vt, ov);
-  let obj: u64 = ty.vn(ov);
-  let et: addr = new_ty(k);
-  let e1: u64 = agg.mem_ty(k, m, et);
-  let lv: addr = new_val(k);
-  let l: u64 = agg.load_at(k, obj, agg.mem_off(m), et, lv);
-  ty.val_at(out, lv);
-  return i + 3;
-}
-
-// 导入模块成员：M.bump(...)、M.answer、M.table
-func member_ref(k: addr, g: u64, i: u64, m: u64, name: u64, want: addr, out: addr) -> u64 {
-  let e: addr = modules.sym_find(k, m, name);
-  if e as u64 == 0 { return fail_name(k, name, e_unbound()); }
-  let kd: u64 = modules.sym_kind(e);
-  let q: u64 = modules.sym_qual(e);
-  if kd == modules.sym_kind_func() {
-    if i + 3 < n_count(g) and is_group(g, i + 3) == 1 {
-      if delim_of(g, i + 3) == dl_paren() {
-        let j: u64 = call_sig(k, q, modules.sym_sig(e), n_at(g, i + 3), want, out);
-        return i + 4;
-      }
-    }
-    st.st_fail(k, e_ast());
-    return i + 3;
-  }
-  let vt: addr = modules.sym_sig(e);
-  let res: u64 = ir.fresh_t(k);
-  let rc: u64 = ir.args_reset(k);
-  let ins: u64 = ir.emit_call(k, res, q, 0);
-  let t2: addr = new_ty(k);
-  if vt as u64 != 0 { let cp: u64 = ty.ty_at(t2, vt); } else { let nn: u64 = ty.ty_none(t2); }
-  ty.val_ref(out, res, t2);
-  return i + 3;
-}
-
-// 内建调用：实参先各自求值，再由 builtins 按名字分派。
-func builtin_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
-  let name: u64 = n_sym(g, i);
-  let argsg: u64 = n_at(g, i + 1);
-  if name == s.b_symbol_addr() {
-    let made: u64 = bi.symbol_addr(k, argsg, out, st.st_src(k));
-    let gone: u64 = made;
-    return i + 2;
-  }
-  // 需要知道名字绑定（ref_of(slot) 取槽地址，而不是槽里的值）的内建先走这里。
-  let sp: u64 = typed_builtin(k, g, i, want, out);
-  if sp != 0 { return sp; }
-  let na: u64 = n_count(argsg);
-  let ab: addr = st.st_alloc(k, na * 56 + 8);
-  let j: u64 = bi_args(k, argsg, 0, 0, na, ab);
-  let r: u64 = bi.apply(k, name, ab, na, want, out);
-  let ignored: u64 = j;
-  return i + 2;
-}
-
-func bi_args(k: addr, g: u64, i: u64, idx: u64, na: u64, ab: addr) -> u64 {
-  let n: u64 = n_count(g);
-  if i >= n { return i; }
-  if idx >= na { return i; }
-  let nt: addr = tnone(k);
-  let v: addr = new_val(k);
-  let j: u64 = expr(k, g, i, 0, nt, v);
-  let cp: u64 = ty.val_at(ab + idx * 56, v);
-  if is_comma(g, j) == 1 { return bi_args(k, g, j + 1, idx + 1, na, ab); }
-  return j;
-}
-
-// --- 复合类型：引用、切片、Fn 值 ------------------------------------------
-
-// 槽与聚合成员一律存一个机器字：标量是值本身，引用族、Fn、切片头、聚合与
-// 数组是地址。所以定位成员只有一种读法——按成员类型的宽度把那个字 load 出来。
-// 只有「被指向的对象」是原地数据：deref 之后聚合与切片直接就是那块的视图，
-// 标量才需要按真实宽度读一次。
-func deref_loads(sh: u64) -> u64 {
-  if sh == 0 { return 1; }
-  let kd: u64 = agg.shp_kind(sh);
-  if kd == agg.kind_ref() or kd == agg.kind_mut() or kd == agg.kind_fn() { return 1; }
-  return 0;
-}
-
-func is_ref_shape(sh: u64) -> u64 {
-  if sh == 0 { return 0; }
-  let kd: u64 = agg.shp_kind(sh);
-  if kd == agg.kind_ref() or kd == agg.kind_mut() { return 1; }
-  return 0;
-}
-
-func fn_val_p(k: addr, out: addr) -> u64 {
-  let sh: u64 = ty.tsh(ty.vty(out));
-  if sh == 0 { return 0; }
-  if agg.shp_kind(sh) == agg.kind_fn() { return 1; }
-  return 0;
-}
-
-func ref_ty(k: addr, eid: u64, mutv: u64) -> addr {
-  let t: addr = new_ty(k);
-  let id: u64 = ct.ref_t(k, eid, mutv);
-  let p: u64 = ireg.project(k, id, t);
-  return t;
-}
-
-// 把已经是地址的值 v 标成引用 rt，再强制到 want。
-func as_ref(k: addr, v: addr, rt: addr, want: addr, out: addr, back: u64) -> u64 {
-  if ty.tk(ty.vty(v)) != 3 {
-    let m: addr = "ref-nonaddr";
-    let d: u64 = ir.diag(k, 0, 1, m, 11);
-    st.st_fail(k, e_type());
-    ty.val_none(out);
-    return back;
-  }
-  let rv: addr = new_val(k);
-  let r0: u64 = ty.val_ref(rv, ty.vn(v), rt);
-  let c: addr = new_val(k);
-  coerce(k, rv, rt, want, c);
-  ty.val_at(out, c);
-  return back;
-}
-
-// ref_of(x) / mut_of(x)：标量取槽地址，聚合取槽里存的块地址。
-func ref_call(k: addr, g: u64, i: u64, want: addr, out: addr, mutv: u64) -> u64 {
-  let argsg: u64 = n_at(g, i + 1);
-  if n_count(argsg) == 0 { st.st_fail(k, e_ast()); ty.val_none(out); return i + 2; }
-  if is_group(argsg, 0) == 0 and is_name(argsg, 0) == 1 {
-    let nm: u64 = n_sym(argsg, 0);
-    let off: u64 = env.env_find(k, nm);
-    if off != 0 {
-      let vt: addr = new_ty(k);
-      let g0: u64 = env.env_ty(k, off, vt);
-      let rt: addr = ref_ty(k, ireg.tid_of(k, vt), mutv);
-      if ty.tsh(vt) == 0 {
-        let res: u64 = ir.fresh_t(k);
-        let rc: u64 = ir.args_reset(k);
-        let lea: u64 = ir.emit_lea(k, res, ir.slot_name(k, env.env_slot(k, off)), 0, 1, 0);
-        let rv: addr = new_val(k);
-        let r1: u64 = ty.val_ref(rv, res, rt);
-        let c: addr = new_val(k);
-        coerce(k, rv, rt, want, c);
-        ty.val_at(out, c);
-        return i + 2;
-      }
-      let ov: addr = new_val(k);
-      let got: u64 = slot_get(k, env.env_slot(k, off), vt, ov);
-      return as_ref(k, ov, rt, want, out, i + 2);
-    }
-  }
-  let v: addr = new_val(k);
-  let j: u64 = expr(k, argsg, 0, 0, tnone(k), v);
-  let rt: addr = ref_ty(k, ireg.tid_of(k, ty.vty(v)), mutv);
-  return as_ref(k, v, rt, want, out, i + 2);
-}
-
-// deref(r)：标量按真实宽度 load，聚合/slice 直接还原成带形状的地址视图。
-func deref_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
-  let argsg: u64 = n_at(g, i + 1);
-  if n_count(argsg) == 0 { st.st_fail(k, e_ast()); ty.val_none(out); return i + 2; }
-  let v: addr = new_val(k);
-  let j: u64 = expr(k, argsg, 0, 0, tnone(k), v);
-  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
-  let sh: u64 = ty.tsh(ty.vty(v));
-  if is_ref_shape(sh) == 0 {
-    let m: addr = "deref-nonref";
-    let d: u64 = ir.diag(k, 0, 1, m, 12);
-    st.st_fail(k, e_type());
-    ty.val_none(out);
-    return i + 2;
-  }
-  let eid: u64 = ct.elem_tid(k, sh);
-  if eid == ireg.void_tid(k) {
-    let m: addr = "deref-void";
-    let d: u64 = ir.diag(k, 0, 1, m, 10);
-    st.st_fail(k, e_type());
-    ty.val_none(out);
-    return i + 2;
-  }
-  let et: addr = new_ty(k);
-  let pr: u64 = ireg.project(k, eid, et);
-  let got: addr = new_val(k);
-  if deref_loads(ty.tsh(et)) == 1 {
-    let l: u64 = agg.load_at(k, ty.vn(v), 0, et, got);
-  } else {
-    let r: u64 = ty.val_ref(got, ty.vn(v), et);
-  }
-  ty.val_at(out, got);
-  return i + 2;
-}
-
-func def_slice_ty(k: addr, mutv: u64) -> addr {
-  let e: addr = st.st_alloc(k, 32);
-  let u: u64 = ty.ty_u8(e);
-  let id: u64 = ireg.tid_of(k, e);
-  let sid: u64 = ct.slice_t(k, id, mutv);
-  let t: addr = new_ty(k);
-  let p: u64 = ireg.project(k, sid, t);
-  return t;
-}
-
-func slice_target(k: addr, want: addr, mutv: u64) -> addr {
-  let wsh: u64 = ty.tsh(want);
-  if wsh != 0 {
-    let kd: u64 = agg.shp_kind(wsh);
-    if kd == agg.kind_slice() or kd == agg.kind_mutslice() { return want; }
-  }
-  return def_slice_ty(k, mutv);
-}
-
-// 16 字节切片头 {ptr@0, len@8}。
-func make_head(k: addr, pv: addr, lv: addr, tgt: addr, out: addr) -> u64 {
-  let obj: addr = st.st_alloc(k, 56);
-  let base: u64 = agg.new_bytes(k, 16, 8, obj);
-  let at: addr = ir.taddr(k);
-  let p2: addr = new_val(k);
-  coerce(k, pv, ty.vty(pv), at, p2);
-  let s1: u64 = agg.store_at(k, base, 0, p2, at);
-  let ut: addr = st.st_alloc(k, 32);
-  let u: u64 = ty.ty_u64(ut);
-  let l2: addr = new_val(k);
-  coerce(k, lv, ty.vty(lv), ut, l2);
-  let s2: u64 = agg.store_at(k, base, 8, l2, ut);
-  return ty.val_ref(out, base, tgt);
-}
-
-// slice_of(arr) / slice_of(ptr, len)。
-func slice_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
-  let argsg: u64 = n_at(g, i + 1);
-  let na: u64 = bi.arg_count(argsg);
-  if na == 0 { return 0; }
-  let v1: addr = new_val(k);
-  let j1: u64 = expr(k, argsg, 0, 0, tnone(k), v1);
-  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
-  if na == 1 {
-    let sh: u64 = ty.tsh(ty.vty(v1));
-    if sh == 0 { st.st_fail(k, e_type()); ty.val_none(out); return i + 2; }
-    let kd: u64 = agg.shp_kind(sh);
-    if kd != agg.kind_array() and kd != agg.kind_string() {
-      st.st_fail(k, e_type());
-      ty.val_none(out);
-      return i + 2;
-    }
-    let tgt: addr = slice_target(k, want, 0);
-    let c: addr = new_val(k);
-    coerce(k, v1, ty.vty(v1), tgt, c);
-    ty.val_at(out, c);
-    return i + 2;
-  }
-  let bc: u64 = if is_comma(argsg, j1) == 1 { j1 + 1 } else { j1 };
-  let v2: addr = new_val(k);
-  let j2: u64 = expr(k, argsg, bc, 0, t64(k), v2);
-  let tgt: addr = slice_target(k, want, 0);
-  let c: addr = new_val(k);
-  let h: u64 = make_head(k, v1, v2, tgt, c);
-  ty.val_at(out, c);
-  return i + 2;
-}
-
-// len(x)：切片读头里的长度，数组/字符串/表给编译期常量。
-func len_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
-  let argsg: u64 = n_at(g, i + 1);
-  if n_count(argsg) == 0 { st.st_fail(k, e_ast()); ty.val_none(out); return i + 2; }
-  let v: addr = new_val(k);
-  let j: u64 = expr(k, argsg, 0, 0, tnone(k), v);
-  if st.st_ok(k) != 0 { ty.val_none(out); return i + 2; }
-  let sh: u64 = ty.tsh(ty.vty(v));
-  if sh == 0 { st.st_fail(k, e_type()); ty.val_none(out); return i + 2; }
-  let kd: u64 = agg.shp_kind(sh);
-  let ut: addr = t64(k);
-  let lv: addr = new_val(k);
-  if kd == agg.kind_slice() or kd == agg.kind_mutslice() {
-    let l: u64 = agg.load_at(k, ty.vn(v), 8, ut, lv);
-  } else {
-    let l2: u64 = ty.val_lit(lv, agg.shp_len(sh), ut);
-  }
-  let c: addr = new_val(k);
-  coerce(k, lv, ut, want, c);
-  ty.val_at(out, c);
-  return i + 2;
-}
-
-func synth_sig(k: addr, sg: addr, i: u64, np: u64, sig: addr) -> u64 {
-  if i >= np { return i; }
-  let ps: addr = load(sg + 16) as addr;
-  let t: addr = st.st_alloc(k, 32);
-  let c: u64 = ty.ty_at(t, ps + i * 32);
-  store(sig + i * 8, ireg.tid_of(k, t));
-  return synth_sig(k, sg, i + 1, np, sig);
-}
-
-// fn_of(过程名)：把过程符号地址包装成带完整签名的 Fn 值。
-func fn_of_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
-  let argsg: u64 = n_at(g, i + 1);
-  if n_count(argsg) == 0 { st.st_fail(k, e_ast()); ty.val_none(out); return i + 2; }
-  if is_group(argsg, 0) == 1 or is_name(argsg, 0) == 0 {
-    st.st_fail(k, e_type());
-    ty.val_none(out);
-    return i + 2;
-  }
-  let nm: u64 = n_sym(argsg, 0);
-  let e: addr = modules.find_here(k, nm);
-  if e as u64 == 0 { ty.val_none(out); fail_name(k, nm, e_unbound()); return i + 2; }
-  let kd: u64 = modules.sym_kind(e);
-  if kd != modules.sym_kind_func() and kd != modules.sym_kind_extern() {
-    st.st_fail(k, e_type());
-    ty.val_none(out);
-    return i + 2;
-  }
-  let sg: addr = modules.sym_sig(e);
-  let np: u64 = load(sg);
-  let ret: addr = new_ty(k);
-  let r1: u64 = ty.ty_at(ret, load(sg + 8) as addr);
-  let sig: addr = st.st_ralloc(k, np * 8 + 8);
-  let filled: u64 = synth_sig(k, sg, 0, np, sig);
-  let fid: u64 = ct.fn_t(k, ireg.tid_of(k, ret), np, sig as u64);
-  let ft: addr = new_ty(k);
-  let pr: u64 = ireg.project(k, fid, ft);
-  let v: addr = new_val(k);
-  let v1: u64 = ty.val_ref(v, modules.sym_qual(e), ft);
-  let c: addr = new_val(k);
-  coerce(k, v, ft, want, c);
-  ty.val_at(out, c);
-  return i + 2;
-}
-
-func typed_builtin(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
-  let name: u64 = n_sym(g, i);
-  if name == s.b_ref_of() { return ref_call(k, g, i, want, out, 0); }
-  if name == s.b_mut_of() { return ref_call(k, g, i, want, out, 1); }
-  if name == s.b_deref() { return deref_call(k, g, i, want, out); }
-  if name == s.b_len() { return len_call(k, g, i, want, out); }
-  if name == s.b_slice_of() { return slice_call(k, g, i, want, out); }
-  if name == s.b_fn_of() { return fn_of_call(k, g, i, want, out); }
-  return 0;
-}
-
-// 值的成员：切片的 len / ptr，其余按形状查字段。引用族与 Fn 字段 load 出来。
-func member_on_val(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
-  let fname: u64 = n_sym(g, i + 1);
-  let sh: u64 = ty.tsh(ty.vty(out));
-  if sh == 0 { st.st_fail(k, e_type()); return i + 2; }
-  let kd: u64 = agg.shp_kind(sh);
-  if kd == agg.kind_slice() or kd == agg.kind_mutslice() {
-    let ut: addr = t64(k);
-    let lv: addr = new_val(k);
-    if fname == s.t_len() {
-      let l: u64 = agg.load_at(k, ty.vn(out), 8, ut, lv);
-    } else {
-      if fname == s.t_ptr() {
-        let l2: u64 = agg.load_at(k, ty.vn(out), 0, ir.taddr(k), lv);
-      } else {
-        st.st_fail(k, e_unsup());
-        return i + 2;
-      }
-    }
-    ty.val_at(out, lv);
-    return expr_tail(k, g, i + 2, minp, want, out);
-  }
-  let m: addr = agg.mem_find(sh, fname);
-  if m as u64 == 0 { st.st_fail(k, e_unsup()); return i + 2; }
-  let et: addr = new_ty(k);
-  let e1: u64 = agg.mem_ty(k, m, et);
-  let got: addr = new_val(k);
-  let l1: u64 = agg.load_at(k, ty.vn(out), agg.mem_off(m), et, got);
-  ty.val_at(out, got);
-  return expr_tail(k, g, i + 2, minp, want, out);
-}
-
-// 值上直接调用：当前值是 Fn(...) 形状时按签名发间接 #call。
-func postfix_call(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
-  let argsg: u64 = n_at(g, i);
-  let sh: u64 = ty.tsh(ty.vty(out));
-  let sk: addr = ct.sig_of_fn(k, sh);
-  let np: u64 = load(sk);
-  let ps: addr = load(sk + 16) as addr;
-  let na: u64 = bi.arg_count(argsg);
-  if na != np {
-    let m: addr = "fn-args";
-    let d: u64 = ir.diag(k, np, 1, m, 7);
-    st.st_fail(k, e_type());
-    return i + 1;
-  }
-  let ab: addr = st.st_alloc(k, np * 56 + 8);
-  let j: u64 = if np == 0 { 0 } else { call_args(k, argsg, 0, 0, np, ab, ps) };
-  if st.st_ok(k) != 0 { return i + 1; }
-  let fv: addr = new_val(k);
-  ty.val_at(fv, out);
-  let rv: addr = new_val(k);
-  let rc: u64 = bi.icall_emit(k, sk, fv, ab, want, rv);
-  ty.val_at(out, rv);
-  return expr_tail(k, g, i + 1, minp, want, out);
 }
 
 

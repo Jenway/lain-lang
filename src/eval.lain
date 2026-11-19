@@ -15,6 +15,9 @@ let modules = import("modules");
 let bi = import("builtins");
 let rf = import("reflect");
 let ct = import("comptime");
+let cty = import("ctypes");
+let ireg = import("tyreg");
+let an = import("anon");
 
 extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
 extern lain2_source_name(src: u64) -> u64 = lain2_source_name;
@@ -121,6 +124,21 @@ func skip_to_body(g: u64, i: u64, n: u64) -> u64 {
   return skip_to_body(g, i + 1, n);
 }
 
+// 函数签名同步登记为一等 Fn 类型，令前向引用也能携带完整类型。
+func fn_type_id(k: addr, sg: addr) -> u64 {
+  let np: u64 = load(sg);
+  let rt: addr = load(sg + 8) as addr;
+  let ps: addr = load(sg + 16) as addr;
+  let tids: addr = st.st_ralloc(k, np * 8 + 8);
+  let i: u64 = loop c(i: u64 = 0) while i < np {
+    let pt: addr = st.st_alloc(k, 32);
+    let cp: u64 = ty.ty_at(pt, ps + i * 32);
+    store(tids + i * 8, ireg.tid_of(k, pt));
+    i = i + 1;
+  };
+  return cty.fn_t(k, ireg.tid_of(k, rt), np, tids as u64);
+}
+
 // --- phase1：声明 --------------------------------------------------------
 func p1_struct(k: addr, g: u64, i: u64) -> u64 {
   let name: u64 = n_sym(g, i + 1);
@@ -189,6 +207,8 @@ func p1_func(k: addr, g: u64, i: u64) -> u64 {
   // 记下声明位置：inject 在 phase1 就地执行时要先把这个函数体补编出来。
   let sd: u64 = modules.sym_set_decl(e, i);
   let ss: u64 = modules.sym_set_src(e, st.st_src(k));
+  let fid: u64 = fn_type_id(k, sg);
+  let sf: u64 = modules.sym_set_fnid(e, fid);
   return a;
 }
 
@@ -210,6 +230,8 @@ func p1_extern(k: addr, g: u64, i: u64) -> u64 {
   let j: u64 = if has_link == 1 { a + 2 } else { a };
   let sg: addr = cx.sig_new(k, rt, np, paramp);
   let e: addr = modules.sym_add(k, modules.sym_kind_extern(), st.st_src(k), name, name, sg, 0);
+  let fid: u64 = fn_type_id(k, sg);
+  let sf: u64 = modules.sym_set_fnid(e, fid);
   let b: u64 = ir.proc_extern(k, name, link);
   let pp: u64 = extern_params(k, syms, paramp, 0, np);
   let pr: u64 = if ty.ty_known(rt) == 1 { ir.proc_result(k, rt) } else { 0 };
@@ -325,6 +347,8 @@ func p1_flet(k: addr, g: u64, e: u64, name: u64, q: u64) -> u64 {
   let se: addr = modules.sym_add(k, modules.sym_kind_func(), st.st_src(k), name, q, sg, 0);
   let sd: u64 = modules.sym_set_decl(se, e);
   let ss: u64 = modules.sym_set_src(se, st.st_src(k));
+  let fid: u64 = fn_type_id(k, sg);
+  let sf: u64 = modules.sym_set_fnid(se, fid);
   return skip_semi(g, a + 1);
 }
 
