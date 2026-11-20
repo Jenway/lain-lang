@@ -24,6 +24,10 @@ let sm = import("stmt");
 let me = import("member");
 let rv = import("refval");
 let ctf = import("ctfor");
+let ctfn = import("ctfn");
+let gv = import("given");
+let gn = import("generics");
+let ireg = import("tyreg");
 
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
@@ -284,10 +288,22 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
     return flow.loop_compile(k, g, i, want, out, t);
   }
   if sym == s.o_minus() { return prefix_neg(k, g, i, want, out); }
-  // 名字 . 名字：变体构造、变体投影、导入成员、变量字段（局部运行期变量优先于编译期绑定）
+  // 名字 . 名字：编译期 Witness 成员/调用、FieldInfo 投影、变体/导入/变量字段
   if i + 2 < n and is_group(g, i + 1) == 0 and is_name(g, i) == 1 {
     if n_sym(g, i + 1) == s.p_dot() and is_name(g, i + 2) == 1 {
       if env.env_find(k, sym) == 0 {
+        let wf: addr = gv.witness_field_at(k, g, i);
+        if st.st_ok(k) != 0 { return i + 3; }
+        if wf as u64 != 0 {
+          let fk: u64 = load(wf + 8);
+          let fa: u64 = load(wf + 16);
+          if fk == 8 and i + 3 < n and is_group(g, i + 3) == 1 and delim_of(g, i + 3) == dl_paren() {
+            let se: addr = fa as addr;
+            cl.call_sig(k, modules.sym_qual(se), modules.sym_sig(se), n_at(g, i + 3), want, out);
+            return i + 4;
+          }
+          if fk == 0 { ty.val_lit(out, fa, t64(k)); return i + 3; }
+        }
         let pv: addr = ctf.proj_at(k, g, i);
         if (pv as u64) != 0 {
           if ctf.v_kind(pv) == 0 {
@@ -301,6 +317,20 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
         }
       }
       return me.dotted(k, g, i, want, out);
+    }
+  }
+  // Name(args...) { 字段... }：类型工厂构造结果直接初始化结构体。
+  if i + 2 < n and is_name(g, i) == 1 and is_group(g, i + 1) == 1 and is_group(g, i + 2) == 1 {
+    if delim_of(g, i + 1) == dl_paren() and delim_of(g, i + 2) == dl_brace() {
+      let tv: addr = st.st_alloc(k, 24);
+      let fj: u64 = ctfn.eval_factory_call(k, g, i, tv);
+      if fj != 0 {
+        if st.st_ok(k) != 0 { return i + 3; }
+        let sh: u64 = ireg.ty_shape(k, ctf.v_a(tv));
+        if sh == 0 { st.st_fail(k, e_type()); return i + 3; }
+        me.agg_construct_sh(k, sh, n_at(g, i + 2), out);
+        return i + 3;
+      }
     }
   }
   // 名字 { 字段... }：聚合构造。只有结构名后跟花括号才算构造，
@@ -346,6 +376,15 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
             ty.val_at(out, fv);
             return pf;
           }
+        }
+      }
+      // ?{} 泛型函数调用：单态化调度
+      let ge: addr = modules.find_here(k, sym);
+      if ge as u64 != 0 {
+        if modules.sym_kind(ge) == modules.sym_kind_generic() {
+          let nb: addr = box(k);
+          gn.call_generic(k, ge, g, i, want, out, nb);
+          return box_get(nb);
         }
       }
       return cl.call_expr(k, g, i, want, out);

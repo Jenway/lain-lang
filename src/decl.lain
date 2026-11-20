@@ -16,6 +16,10 @@ let an = import("anon");
 let ct = import("ctypes");
 let ireg = import("tyreg");
 let tb = import("tbuild");
+let ctf = import("ctfor");
+let gn = import("generics");
+
+extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 func new_ty(k: addr) -> addr { return ax.new_ty(k); }
@@ -76,10 +80,53 @@ func sret_param(k: addr) -> u64 {
   return st.st_set_retptr(k, vn);
 }
 
-// 匿名过程按队列逐个补齐：每个补编都会把体里新出现的匿名过程继续推进队列。
+func bind_gen_vals(k: addr, nms: addr, vals: addr, i: u64, n: u64) -> u64 {
+  if i >= n { return 1; }
+  let nm: u64 = load(nms + i * 8);
+  let v: addr = vals + i * 24;
+  let vk: u64 = load(v); let va: u64 = load(v + 8); let vb: u64 = load(v + 16);
+  ctf.bind(k, nm, vk, va, vb);
+  return bind_gen_vals(k, nms, vals, i + 1, n);
+}
+
+func flush_gen(k: addr) -> u64 {
+  let ge: addr = gn.genq_pending(k);
+  if ge as u64 == 0 { return 0; }
+  let q: u64 = load(ge);
+  let tpl_u: u64 = load(ge + 8);
+  let tpl_e: addr = tpl_u as addr;
+  let nct: u64 = load(ge + 16);
+  let nms_u: u64 = load(ge + 24);
+  let vals_u: u64 = load(ge + 32);
+  let dp: u64 = load(ge + 40);
+  let hdr: addr = modules.sym_sig(tpl_e);
+  let src: u64 = load(hdr + 8);
+  let root: u64 = lain2_source_root(src);
+  let pg_i: u64 = load(hdr + 16);
+  let pg: u64 = ax.n_at(root, pg_i);
+  let ret_i: u64 = load(hdr + 32);
+  let body_i: u64 = load(hdr + 40);
+  let bodyg: u64 = ax.n_at(root, body_i);
+  let saved_src: u64 = st.st_src(k);
+  let saved_dp: u64 = gn.gen_depth(k);
+  let cm: u64 = ctf.mark(k);
+  st.st_set_src(k, src);
+  gn.set_gen_depth(k, dp);
+  bind_gen_vals(k, nms_u as addr, vals_u as addr, 0, nct);
+  let rt: addr = new_ty(k);
+  ty.ty_none(rt);
+  if ret_i != 0 { parse_type(k, root, ret_i, rt); }
+  compile_body_with(k, pg, rt, bodyg, q);
+  ctf.release(k, cm);
+  gn.set_gen_depth(k, saved_dp);
+  st.st_set_src(k, saved_src);
+  return flush_gen(k);
+}
+
+// 匿名过程与泛型单态化队列按批排空。
 func flush_queue(k: addr) -> u64 {
   let e: addr = an.pending(k);
-  if e as u64 == 0 { return 0; }
+  if e as u64 == 0 { return flush_gen(k); }
   let q: u64 = an.entry_name(e);
   let src: u64 = an.entry_src(e);
   let g: u64 = an.entry_group(e);
@@ -96,18 +143,10 @@ func flush_queue(k: addr) -> u64 {
   return flush_queue(k);
 }
 
-// 过程体：i 指向形参组，返回体之后的位置。
-func compile_body(k: addr, g: u64, i: u64, q: u64) -> u64 {
-  let n: u64 = n_count(g);
-  let pg: u64 = n_at(g, i);
+func compile_body_with(k: addr, pg: u64, rt: addr, bodyg: u64, q: u64) -> u64 {
   let paramp: addr = st.st_alloc(k, 512);
   let syms: addr = st.st_alloc(k, 128);
   let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
-  let rt: addr = new_ty(k);
-  ty.ty_none(rt);
-  let a0: u64 = i + 1;
-  let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
-  let bodyg: u64 = n_at(g, a);
   let sr: u64 = agg.sret_ty(rt);
   let bp: u64 = begin_proc(k, q, rt);
   let rp: u64 = if sr == 1 { sret_param(k) } else { st.st_set_retptr(k, 0) };
@@ -141,7 +180,19 @@ func compile_body(k: addr, g: u64, i: u64, q: u64) -> u64 {
   let guard: u64 = emit_ret_guard(k, rt, term);
   ir.region_end(k);
   ir.proc_end(k);
-  let fl: u64 = flush_queue(k);
+  return flush_queue(k);
+}
+
+// 过程体：i 指向形参组，返回体之后的位置。
+func compile_body(k: addr, g: u64, i: u64, q: u64) -> u64 {
+  let n: u64 = n_count(g);
+  let pg: u64 = n_at(g, i);
+  let rt: addr = new_ty(k);
+  ty.ty_none(rt);
+  let a0: u64 = i + 1;
+  let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
+  let bodyg: u64 = n_at(g, a);
+  compile_body_with(k, pg, rt, bodyg, q);
   return a + 1;
 }
 

@@ -16,6 +16,7 @@ let ireg = import("tyreg");
 let ct = import("ctypes");
 let ctf = import("ctfor");
 let tb = import("tbuild");
+let gv = import("given");
 
 extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr;
 
@@ -60,6 +61,17 @@ func stmt_let(k: addr, g: u64, i: u64) -> u64 {
     return j;
   }
   let e: u64 = expect_sym(k, g, j, s.p_eq());
+  // 若局部 let 右值是编译期可求值的 Witness 构造（如 Ord(i64) { ... }），同时登记为显式可见（implicit=0）。
+  if e + 2 < n_count(g) and ax.is_name(g, e) == 1 and ax.is_group(g, e + 1) == 1 and ax.delim_of(g, e + 1) == ax.dl_paren() {
+    if ax.is_group(g, e + 2) == 1 and ax.delim_of(g, e + 2) == ax.dl_brace() {
+      let wv: addr = st.st_alloc(k, 24);
+      let wj: u64 = gv.eval_witness(k, g, e, wv);
+      if st.st_ok(k) == 0 and ctf.v_kind(wv) == 7 {
+        gv.push_given(k, name, ctf.v_a(wv), ctf.v_b(wv), 0);
+        return skip_semi(g, wj);
+      }
+    }
+  }
   let v: addr = new_val(k);
   let nj: u64 = core_expr(k, g, e, 0, t, v);
   if st.st_ok(k) != 0 { return nj; }
@@ -264,6 +276,7 @@ func stmt_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 
   }
   let sym: u64 = node_sym(h);
   if sym == s.k_let() { return stmt_let(k, g, i); }
+  if sym == s.k_given() { return gv.reg_given(k, g, i, 1); }
   if sym == s.k_if() {
     let dummy: addr = new_val(k);
     let nt: addr = tnone(k);
@@ -310,13 +323,20 @@ func stmt_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 
   return skip_semi(g, j);
 }
 
-func block_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 {
+func block_walk(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return i; }
   let t: addr = box(k);
   let j: u64 = stmt_mode(k, g, i, t, slot, tp);
   if st.st_ok(k) != 0 { return j; }
   if box_get(t) == 1 { box_put(term, 1); return j; }
-  return block_mode(k, g, j, term, slot, tp);
+  return block_walk(k, g, j, term, slot, tp);
+}
+
+func block_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 {
+  let gm: u64 = gv.mark(k);
+  let r: u64 = block_walk(k, g, i, term, slot, tp);
+  gv.release(k, gm);
+  return r;
 }
 

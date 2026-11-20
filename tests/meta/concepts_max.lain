@@ -1,0 +1,44 @@
+// Phase 2B 正例：Concept (Ord(T))、given 实例自动匹配、显式 ?{ ord: ... } 覆写、
+// 嵌套泛型调用与单态化缓存（同类型两次调用只生成一份 #proc，且产物零 icall 虚表）。
+func Ord(T: Type) -> Type {
+  let b = record_begin();
+  record_add(b, "less", Fn((T, T) -> bool));
+  return record_end(b);
+}
+
+func i64_less(a: i64, b: i64) -> bool { return a < b; }
+func i64_gt(a: i64, b: i64) -> bool { return a > b; }
+func u64_less(a: u64, b: u64) -> bool { return a < b; }
+
+given ord_i64: Ord(i64) = Ord(i64) { less: i64_less };
+given ord_u64: Ord(u64) = Ord(u64) { less: u64_less };
+
+func max(a: T, b: T) ?{ T: Type, ord: Ord(T) } -> T {
+  if ord.less(a, b) { return b; }
+  return a;
+}
+
+func clamp(x: T, lo: T, hi: T) ?{ T: Type, ord: Ord(T) } -> T {
+  let m: T = max(x, lo);
+  if ord.less(hi, m) { return hi; }
+  return m;
+}
+
+func local_min(a: i64, b: i64) -> i64 {
+  given rev: Ord(i64) = Ord(i64) { less: i64_gt };
+  return max(a, b);
+}
+
+func main() -> i64 {
+  let a: i64 = 10;
+  let b: i64 = 20;
+  let m1: i64 = max(a, b);
+  let m2: i64 = max(a + 5, b - 15);
+  let rev_ord = Ord(i64) { less: i64_gt };
+  let mn: i64 = max(a, b) ?{ ord: rev_ord };
+  let lm: i64 = local_min(33, 17);
+  let cl: i64 = clamp(100 as i64, 0, 50);
+  let mu: u64 = max(7 as u64, 12 as u64);
+  // 20 + 15 + 10 + 17 + 50 + 12 = 124
+  return m1 + m2 + mn + lm + cl + (mu as i64);
+}

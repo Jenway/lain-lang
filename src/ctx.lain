@@ -13,6 +13,7 @@ let ireg = import("tyreg");
 let ct = import("ctypes");
 let tb = import("tbuild");
 let ctfn = import("ctfn");
+let ctf = import("ctfor");
 
 // --- ast 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 func new_ty(k: addr) -> addr { return ax.new_ty(k); }
@@ -92,7 +93,7 @@ func coerce(k: addr, v: addr, from: addr, to: addr, out: addr) -> u64 {
   if ck == 2 { return ct.slice_wrap(k, v, ty.tsh(from), to, out); }
   if ck == 9 { return conv_fail(k); }
   let kind: u64 = ty.cast_inst(ty.tk(from), ty.tw(from), ty.tsg(from), ty.tk(to), ty.tw(to));
-  if kind == 0 { return 0; }
+  if kind == 0 { return ty.ty_at(ty.vty(out), to); }
   ir.args_reset(k);
   ir.arg_ref(k, ty.vn(v));
   let res: u64 = ir.fresh_t(k);
@@ -233,9 +234,18 @@ func factory_slice(k: addr, g: u64, i: u64, out: addr, mutv: u64) -> u64 {
 
 func count_at(k: addr, g: u64, i: u64) -> u64 {
   if i >= n_count(g) { st.st_fail(k, e_type()); return 0; }
-  if ax.is_digit_token(g, i) == 0 { st.st_fail(k, e_type()); return 0; }
-  let h: u64 = n_at(g, i);
-  return ax.num_value(ax.lit_addr(h), ax.lit_len(h));
+  if ax.is_digit_token(g, i) == 1 {
+    let h: u64 = n_at(g, i);
+    return ax.num_value(ax.lit_addr(h), ax.lit_len(h));
+  }
+  if is_name(g, i) == 1 {
+    let bv: addr = ctf.lookup(k, n_sym(g, i));
+    if bv as u64 != 0 {
+      if ctf.v_kind(bv) == 0 { return ctf.v_a(bv); }
+    }
+  }
+  st.st_fail(k, e_type());
+  return 0;
 }
 
 func factory_array(k: addr, g: u64, i: u64, out: addr) -> u64 {
@@ -349,6 +359,13 @@ func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 {
     return qual_type(k, g, i, out);
   }
   if ty.ty_of_sym(sym, out) == 1 { return i + 1; }
+  let bv: addr = ctf.lookup(k, sym);
+  if bv as u64 != 0 {
+    if ctf.v_kind(bv) == 1 {
+      let pr: u64 = ireg.project(k, ctf.v_a(bv), out);
+      return i + 1;
+    }
+  }
   if named_type(k, sym, out) != 0 { return i + 1; }
   st.st_fail(k, e_type());
   return i + 1;

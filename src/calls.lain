@@ -39,6 +39,38 @@ func fail_name(k: addr, sym: u64, code: u64) -> u64 {
   return st.st_fail(k, code);
 }
 
+func emit_prepared(k: addr, q: u64, ret: addr, np: u64, ab: addr, want: addr, out: addr) -> u64 {
+  let rest: addr = ax.new_ty(k);
+  ty.ty_at(rest, ret);
+  // 值聚合返回：先在本帧开结果块，把它当第 0 个实参传进去。
+  if agg.sret_ty(rest) == 1 {
+    let dv: addr = ax.new_val(k);
+    let ao: u64 = agg.new_obj(k, ty.tsh(rest), dv);
+    ir.args_reset(k);
+    let p0: u64 = cx.push_val(k, dv);
+    let f0: u64 = fill_args(k, ab, 0, np);
+    let e0: u64 = ir.emit_call(k, 0, q, 0);
+    let c0: addr = ax.new_val(k);
+    let co: u64 = cx.coerce(k, dv, rest, want, c0);
+    ty.val_at(out, c0);
+    return 1;
+  }
+  ir.args_reset(k);
+  let dummy: u64 = fill_args(k, ab, 0, np);
+  let res: u64 = if ty.ty_known(rest) == 1 { ir.fresh_t(k) } else { 0 };
+  ir.emit_call(k, res, q, 0);
+  if res == 0 {
+    ty.val_none(out);
+  } else {
+    let rv: addr = ax.new_val(k);
+    ty.val_ref(rv, res, rest);
+    let c: addr = ax.new_val(k);
+    cx.coerce(k, rv, rest, want, c);
+    ty.val_at(out, c);
+  }
+  return 1;
+}
+
 // 签名记录：形参个数@0、返回类型@8、形参类型表@16（每项 32 字节）。
 func call_sig(k: addr, q: u64, sg: addr, argsg: u64, want: addr, out: addr) -> u64 {
   // 签名里出现 Type 的过程只由编译期求值器解释，运行期调用必须明确报错。
@@ -64,34 +96,7 @@ func call_sig(k: addr, q: u64, sg: addr, argsg: u64, want: addr, out: addr) -> u
     st.st_fail(k, ax.e_type());
     return j;
   }
-  let rest: addr = ax.new_ty(k);
-  ty.ty_at(rest, ret);
-  // 值聚合返回：先在本帧开结果块，把它当第 0 个实参传进去。
-  if agg.sret_ty(rest) == 1 {
-    let dv: addr = ax.new_val(k);
-    let ao: u64 = agg.new_obj(k, ty.tsh(rest), dv);
-    ir.args_reset(k);
-    let p0: u64 = cx.push_val(k, dv);
-    let f0: u64 = fill_args(k, ab, 0, np);
-    let e0: u64 = ir.emit_call(k, 0, q, 0);
-    let c0: addr = ax.new_val(k);
-    let co: u64 = cx.coerce(k, dv, rest, want, c0);
-    ty.val_at(out, c0);
-    return j;
-  }
-  ir.args_reset(k);
-  let dummy: u64 = fill_args(k, ab, 0, np);
-  let res: u64 = if ty.ty_known(rest) == 1 { ir.fresh_t(k) } else { 0 };
-  ir.emit_call(k, res, q, 0);
-  if res == 0 {
-    ty.val_none(out);
-  } else {
-    let rv: addr = ax.new_val(k);
-    ty.val_ref(rv, res, rest);
-    let c: addr = ax.new_val(k);
-    cx.coerce(k, rv, rest, want, c);
-    ty.val_at(out, c);
-  }
+  let ep: u64 = emit_prepared(k, q, ret, np, ab, want, out);
   return j;
 }
 

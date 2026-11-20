@@ -461,6 +461,10 @@ META_CASES = [
     {"file": "soa_typebuilder.lain", "entry": "s0__main", "value": 1753,
      "folds": [], "procs": ["s0__soa_set", "s0__soa_get_sum", "s0__inline_soa_x"],
      "absent": ["#loop", "s0__make_soa"]},
+    # Phase 2B：Concept (Ord(T)) + given + ?{} 覆写 + 单态化缓存（零 icall 虚表）。
+    {"file": "concepts_max.lain", "entry": "s0__main", "value": 124,
+     "folds": [], "procs": ["s0__i64_less", "s0__i64_gt", "s0__u64_less"],
+     "absent": ["#call [("]},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -489,6 +493,10 @@ META_NEGATIVE = [
     {"file": "type_runtime_err.lain", "why": "Type 不能作为运行期变量类型"},
     {"file": "record_empty_err.lain", "why": "record_end 不能构造空结构体"},
     {"file": "record_dup_err.lain", "why": "record_add 不能添加重复字段名"},
+    {"file": "concept_conflict.lain", "why": "泛型实参类型推导冲突"},
+    {"file": "concept_missing_given.lain", "why": "缺少对应的 given 实例"},
+    {"file": "concept_ambig_given.lain", "why": "同层多个 given 实例歧义"},
+    {"file": "concept_rec_limit.lain", "why": "泛型递归实例化超过深度上限"},
 ]
 
 

@@ -21,6 +21,8 @@ let an = import("anon");
 let ctf = import("ctfor");
 let tb = import("tbuild");
 let ctfn = import("ctfn");
+let gv = import("given");
+let gn = import("generics");
 
 extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
 extern lain2_source_name(src: u64) -> u64 = lain2_source_name;
@@ -194,18 +196,37 @@ func p1_enum(k: addr, g: u64, i: u64) -> u64 {
 }
 
 // 函数签名：phase1 登记，phase2 才编译体（调用点要先看见签名）。
+func find_brace(g: u64, i: u64, n: u64) -> u64 {
+  if i >= n { return i; }
+  if is_group(g, i) == 1 and delim_of(g, i) == dl_brace() { return i; }
+  return find_brace(g, i + 1, n);
+}
+
+func p1_generic(k: addr, g: u64, decl_i: u64, pg_i: u64, qmark_i: u64, name: u64, q: u64) -> u64 {
+  let n: u64 = n_count(g);
+  let r0: u64 = qmark_i + 2;
+  let ret_i: u64 = if r0 < n and n_sym(g, r0) == s.p_arrow() { r0 + 1 } else { 0 };
+  let bi: u64 = find_brace(g, r0, n);
+  gn.reg_generic(k, name, q, decl_i, pg_i, qmark_i + 1, ret_i, bi);
+  return bi;
+}
+
 func p1_func(k: addr, g: u64, i: u64) -> u64 {
+  let n: u64 = n_count(g);
   let name: u64 = n_sym(g, i + 1);
+  let q: u64 = modules.qual(k, st.st_src(k), name);
+  let a0: u64 = i + 3;
+  if a0 + 1 < n and is_group(g, a0) == 0 and n_sym(g, a0) == s.p_qmark() and is_group(g, a0 + 1) == 1 {
+    if delim_of(g, a0 + 1) == dl_brace() { return p1_generic(k, g, i, i + 2, a0, name, q); }
+  }
   let pg: u64 = n_at(g, i + 2);
   let paramp: addr = st.st_alloc(k, 512);
   let syms: addr = st.st_alloc(k, 128);
   let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
   let rt: addr = new_ty(k);
   ty.ty_none(rt);
-  let a0: u64 = i + 3;
-  let a: u64 = if a0 < n_count(g) and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
+  let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
   let sg: addr = cx.sig_new(k, rt, np, paramp);
-  let q: u64 = modules.qual(k, st.st_src(k), name);
   let e: addr = modules.sym_add(k, modules.sym_kind_func(), st.st_src(k), name, q, sg, 0);
   // 记下声明位置：inject 在 phase1 就地执行时要先把这个函数体补编出来。
   let sd: u64 = modules.sym_set_decl(e, i);
@@ -351,6 +372,13 @@ func p1_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
 // let 名 = func ...：名字取 let 这边，签名来自 func 自己。
 func p1_flet(k: addr, g: u64, e: u64, name: u64, q: u64) -> u64 {
   let n: u64 = n_count(g);
+  let a0: u64 = e + 2;
+  if a0 + 1 < n and is_group(g, a0) == 0 and n_sym(g, a0) == s.p_qmark() and is_group(g, a0 + 1) == 1 {
+    if delim_of(g, a0 + 1) == dl_brace() {
+      let bi: u64 = p1_generic(k, g, e, e + 1, a0, name, q);
+      return skip_semi(g, bi + 1);
+    }
+  }
   let pg: u64 = n_at(g, e + 1);
   let paramp: addr = st.st_alloc(k, 512);
   let syms: addr = st.st_alloc(k, 128);
@@ -378,6 +406,7 @@ func phase1(k: addr, g: u64, i: u64, n: u64) -> u64 {
   if sym == s.k_enum() { let a: u64 = p1_enum(k, g, i); return phase1(k, g, a, n); }
   if sym == s.k_extern() { let a: u64 = p1_extern(k, g, i); return phase1(k, g, a, n); }
   if sym == s.k_let() { let a: u64 = p1_let(k, g, i, n); return phase1(k, g, a, n); }
+  if sym == s.k_given() { let a: u64 = gv.reg_given(k, g, i, 1); return phase1(k, g, a, n); }
   if sym == s.k_func() { let a: u64 = p1_func(k, g, i); return phase1(k, g, a, n); }
   // 注入必须在这里执行：同源后面的声明可能就拿注入出来的类型做标注。
   if sym == s.k_inject() { let a: u64 = inject_decl(k, g, i); return phase1(k, g, a, n); }
@@ -395,6 +424,11 @@ func p2_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
   let after: u64 = if is_group(g, e) == 1 { skip_semi(g, e + 1) } else { skip_semi(g, e) };
   // 已编过的声明（inject 为了沙箱 verify 会把注入点之前的值与过程先编出来）不再重复编。
   if modules.sym_flag(se) == 1 { return after; }
+  if modules.sym_kind(se) == modules.sym_kind_generic() {
+    let hdr: addr = modules.sym_sig(se);
+    let bi: u64 = load(hdr + 40);
+    return skip_semi(g, bi + 1);
+  }
   let marked: u64 = modules.sym_set_flag(se, 1);
   if modules.sym_kind(se) == modules.sym_kind_func() {
     return dl.compile_func_expr(k, g, modules.sym_decl(se), name);
@@ -421,13 +455,15 @@ func phase2(k: addr, g: u64, i: u64, n: u64) -> u64 {
   if is_semi(g, i) == 1 { return phase2(k, g, i + 1, n); }
   let sym: u64 = n_sym(g, i);
   if sym == s.k_func() {
-    // 体已编过的过程（inject 为了沙箱 verify 会提前补编）不再重复编，否则重名。
+    // 体已编过的过程（inject 为了沙箱 verify 会提前补编）或泛型模板跳过，否则重名。
     let se: addr = modules.find_here(k, n_sym(g, i + 1));
     let fl: u64 = if se as u64 == 0 { 0 } else { modules.sym_flag(se) };
-    if fl == 1 { let a0: u64 = skip_to_body(g, i + 2, n); return phase2(k, g, a0, n); }
+    let is_gen: u64 = if se as u64 == 0 { 0 } else { if modules.sym_kind(se) == modules.sym_kind_generic() { 1 } else { 0 } };
+    if fl == 1 or is_gen == 1 { let a0: u64 = skip_to_body(g, i + 2, n); return phase2(k, g, a0, n); }
     let a: u64 = compile_func(k, g, i);
     return phase2(k, g, a, n);
   }
+  if sym == s.k_given() { let a: u64 = skip_semi(g, i + 1); return phase2(k, g, a, n); }
   if sym == s.k_let() { let a: u64 = p2_let(k, g, i, n); return phase2(k, g, a, n); }
   if sym == s.k_extern() {
     // extern 没有体，跳到分号即可；用找 '{' 的写法会吞掉后面一个函数。
