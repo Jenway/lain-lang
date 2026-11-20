@@ -1,10 +1,11 @@
 // 聚合：struct / enum / 数组 / 字符串的形状描述、字段与变体布局、内存构造与读投影。
-// 形状记录 96 字节头 + 8 条 64 字节成员记录：
-//   头  = [种类@0, 名字@8, 模块@16, 已用字节@24, 对齐@32, 成员数@40]
+// 形状记录 112 字节头，成员记录在独立数组里（每项 64 字节）：
+//   头  = [种类@0, 名字@8, 模块@16, 已用字节@24, 对齐@32, 成员数@40, 静态@56,
+//          TypeId@64, 元素 TypeId@72, 返回 TypeId@80, 形参表@88,
+//          成员区指针@96, 成员区容量@104]
 //   成员 = [名字@0, 偏移@8, 标签号@16, 有载荷@24, k@32, w@40, sg@48, 形状@56]
 // 种类：1 struct、2 enum、3 数组、4 字符串、6 Ref、7 Mut、8 Slice、9 MutSlice、11 Fn。
-// 头里 64/72/80/88 处是逻辑类型信息：本形状的 TypeId、元素 TypeId、
-// Fn 的返回 TypeId、Fn 的形参 TypeId 表在持久池里的字节偏移。
+// 成员区初始 8 槽，满了翻倍重分配；头里的成员数只记已用条数。
 // 形状与成员都从持久分配器取：跨源（import）存活，且不随 arena 重置消失。
 let st = import("state");
 let ty = import("types");
@@ -21,13 +22,25 @@ func kind_slice() -> u64 { return 8; }
 func kind_mutslice() -> u64 { return 9; }
 func kind_fn() -> u64 { return 11; }
 
+// 一条形状记录的字节数（成员不内联，这 112 字节只是头部）。
+func shp_rec() -> u64 { return 112; }
+
+// 形状表下标换算：地址算术只接受字面量倍数，所以这里写死 112。
+func shape_at(k: addr, i: u64) -> u64 {
+  let b: addr = st.st_shpbase(k);
+  return (b + i * 112) as u64;
+}
+
+// 成员区初始槽数。
+func mem_init() -> u64 { return 8; }
+
 func align_up(v: u64, a: u64) -> u64 {
   if a == 0 { return v; }
   return (v + a - 1) / a * a;
 }
 
 func shp_new(s: addr, kind: u64, name: u64, m: u64) -> u64 {
-  let p: addr = st.st_shp_new(s, 608);
+  let p: addr = st.st_shp_new(s, shp_rec());
   store(p, kind);
   store(p + 8, name);
   store(p + 16, m);
@@ -40,7 +53,20 @@ func shp_new(s: addr, kind: u64, name: u64, m: u64) -> u64 {
   store(p + 72, 0);
   store(p + 80, 0);
   store(p + 88, 0);
+  let ms: addr = st.st_ralloc(s, mem_init() * 64);
+  store(p + 96, ms as u64);
+  store(p + 104, mem_init());
   return p as u64;
+}
+
+func shp_mem(sh: u64) -> addr {
+  let p: addr = sh as addr;
+  return load(p + 96) as addr;
+}
+
+func shp_memcap(sh: u64) -> u64 {
+  let p: addr = sh as addr;
+  return load(p + 104);
 }
 
 func shp_kind(sh: u64) -> u64 {
@@ -134,9 +160,49 @@ func shp_set_sig(sh: u64, v: u64) -> u64 {
   return v;
 }
 
+// 成员区在独立的持久块里，按需扩容。
 func mem_at(sh: u64, i: u64) -> addr {
+  let base: addr = shp_mem(sh);
+  return base + i * 64;
+}
+
+func mem_copy(dst: addr, src: addr, n: u64, i: u64) -> u64 {
+  if i >= n { return 1; }
+  let d: addr = dst + i * 64;
+  let p: addr = src + i * 64;
+  let v0: u64 = load(p);
+  let v1: u64 = load(p + 8);
+  let v2: u64 = load(p + 16);
+  let v3: u64 = load(p + 24);
+  let v4: u64 = load(p + 32);
+  let v5: u64 = load(p + 40);
+  let v6: u64 = load(p + 48);
+  let v7: u64 = load(p + 56);
+  store(d, v0);
+  store(d + 8, v1);
+  store(d + 16, v2);
+  store(d + 24, v3);
+  store(d + 32, v4);
+  store(d + 40, v5);
+  store(d + 48, v6);
+  store(d + 56, v7);
+  return mem_copy(dst, src, n, i + 1);
+}
+
+// 成员区满时翻倍：旧块随编译结束一起作废。
+func mem_reserve(s: addr, sh: u64, need: u64) -> u64 {
+  let cap: u64 = shp_memcap(sh);
+  if need <= cap { return 1; }
+  let ncap: u64 = cap * 2;
+  let nb: addr = st.st_ralloc(s, ncap * 64);
+  if st.st_ok(s) != 0 { return 0; }
+  let old: addr = shp_mem(sh);
+  let used: u64 = shp_count(sh);
+  let cp: u64 = mem_copy(nb, old, used, 0);
   let p: addr = sh as addr;
-  return p + 96 + i * 64;
+  store(p + 96, nb as u64);
+  store(p + 104, ncap);
+  return 1;
 }
 
 func mem_name(m: addr) -> u64 { return load(m); }
@@ -175,6 +241,8 @@ func add_member(s: addr, sh: u64, name: u64, off: u64, tag: u64, has: u64,
                 k: u64, w: u64, sg: u64, sub: u64) -> addr {
   let p: addr = sh as addr;
   let i: u64 = load(p + 40);
+  let rs: u64 = mem_reserve(s, sh, i + 1);
+  if st.st_ok(s) != 0 { return 0 as addr; }
   let m: addr = mem_at(sh, i);
   store(m, name);
   store(m + 8, off);

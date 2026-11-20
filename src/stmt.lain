@@ -14,6 +14,7 @@ let lv = import("lval");
 let flow = import("flow");
 let ireg = import("tyreg");
 let ct = import("ctypes");
+let ctf = import("ctfor");
 
 extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr;
 
@@ -216,6 +217,27 @@ func stmt_continue(k: addr, g: u64, i: u64, term: addr) -> u64 {
   return skip_semi(g, j2);
 }
 
+// comptime for 序列：按编译期序列逐次绑定循环变量，把体当普通语句编译，
+// 不发射任何运行期 #loop。每轮结束后释放运行期与编译期绑定栈，防止泄露到后续语句/函数。
+func stmt_ctfor(k: addr, g: u64, i: u64, term: addr) -> u64 {
+  let d: addr = ctf.for_open(k, g, i);
+  if st.st_ok(k) != 0 { return i + 1; }
+  let body: u64 = ctf.for_body(d);
+  let ctmark: u64 = ctf.mark(k);
+  let m0: u64 = ctf.for_step(k, d);
+  let m1: u64 = loop step(m: u64 = m0) while m == 1 {
+    let mark: u64 = env.env_mark(k);
+    let j: u64 = block_mode(k, n_at(g, body), 0, term, no_slot(), tnone(k));
+    env.env_release(k, mark);
+    ctf.release(k, ctmark);
+    let bad: u64 = if st.st_ok(k) != 0 { 1 } else { 0 };
+    let tbad: u64 = if box_get(term) == 1 { 1 } else { bad };
+    m = if tbad == 1 { 0 } else { ctf.for_step(k, d) };
+  };
+  ctf.release(k, ctmark);
+  return body + 1;
+}
+
 func stmt_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return i; }
@@ -256,6 +278,14 @@ func stmt_mode(k: addr, g: u64, i: u64, term: addr, slot: u64, tp: addr) -> u64 
     return i + 1;
   }
   if sym == s.k_enum() or sym == s.k_import() {
+    st.st_fail(k, e_unsup());
+    box_put(term, 1);
+    return i + 1;
+  }
+  if sym == s.k_comptime() {
+    if i + 1 < n {
+      if n_sym(g, i + 1) == s.k_for() { return stmt_ctfor(k, g, i, term); }
+    }
     st.st_fail(k, e_unsup());
     box_put(term, 1);
     return i + 1;

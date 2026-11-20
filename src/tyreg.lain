@@ -39,9 +39,9 @@ func lk_of_shape(sk: u64) -> u64 {
 
 // 注册表条目 40 字节：[逻辑种类 0, 位宽 8, 符号性 16, 形状 24]。
 func reg_size() -> u64 { return 40; }
-// 反射表每类型 320 字节：64 字节头 + 8 条 32 字节字段记录。
-func stride() -> u64 { return 320; }
-func field_cap() -> u64 { return 8; }
+// 反射表每类型 576 字节：64 字节头 + 16 条 32 字节字段记录。
+func stride() -> u64 { return 576; }
+func field_cap() -> u64 { return 16; }
 // 注册表初始行数；满了翻倍重分配。0 号行是保留行，真实类型占 1..cnt。
 func reg_init_cap() -> u64 { return 64; }
 
@@ -154,7 +154,7 @@ func project(k: addr, id: u64, out: addr) -> u64 {
   let w: u64 = ty_width(k, id);
   let sg: u64 = ty_signed(k, id);
   if lk <= 3 { return ty.ty_save(out, lk, w, sg); }
-  if lk == 12 { return ty.ty_none(out); }
+  if lk == lk_void() { return ty.ty_none(out); }
   let sh: u64 = ty_shape(k, id);
   let a: u64 = ty.ty_addr(out);
   if sh == 0 { return a; }
@@ -258,7 +258,8 @@ func fill_fields(k: addr, base: addr, p: addr, sh: u64, j: u64, cnt: u64, pos: u
 
 func fill_type(k: addr, base: addr, i: u64, n: u64, pos: u64) -> u64 {
   if i > n { return pos; }
-  let p: addr = base + i * 320;
+  let row_off: u64 = i * stride();
+  let p: addr = base + row_off;
   let kk: u64 = ty_kind(k, i);
   let w: u64 = ty_width(k, i);
   let sg: u64 = ty_signed(k, i);
@@ -269,14 +270,15 @@ func fill_type(k: addr, base: addr, i: u64, n: u64, pos: u64) -> u64 {
   store(p + 24, size_of(k, i));
   store(p + 32, align_of(k, i));
   let cnt: u64 = if sh != 0 { agg.shp_count(sh) } else { 0 };
-  store(p + 40, cnt);
+  let lim: u64 = if cnt > field_cap() { field_cap() } else { cnt };
+  store(p + 40, lim);
   let ns: u64 = type_name(k, i);
   let nl: u64 = if ns as u64 == 0 { 0 } else { modules.sym_len(ns) };
   store(p + 48, pos);
   store(p + 56, nl);
   let pos2: u64 = if ns as u64 == 0 { pos } else { pos + nl };
   let cp: u64 = if ns as u64 == 0 { 0 } else { modules.copy_sym(base + pos, ns) };
-  return fill_type(k, base, i + 1, n, fill_fields(k, base, p, sh, 0, cnt, pos2));
+  return fill_type(k, base, i + 1, n, fill_fields(k, base, p, sh, 0, lim, pos2));
 }
 
 // 把整张表铺进当前模块：只读表 + 一块可写的生成为输出缓冲。

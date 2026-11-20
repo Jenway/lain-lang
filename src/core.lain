@@ -23,6 +23,7 @@ let flow = import("flow");
 let sm = import("stmt");
 let me = import("member");
 let rv = import("refval");
+let ctf = import("ctfor");
 
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
@@ -104,7 +105,9 @@ func expr_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64
   if is_group(g, i) == 0 {
     if n_sym(g, i) == s.p_dot() {
       if i + 1 < n {
-        if is_name(g, i + 1) == 1 {
+        let plain: u64 = is_name(g, i + 1);
+        let interp: u64 = ctf.interp_at(g, i + 1);
+        if plain == 1 or interp == 1 {
           return rv.member_on_val(k, g, i, minp, want, out);
         }
       }
@@ -275,9 +278,22 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
     return flow.loop_compile(k, g, i, want, out, t);
   }
   if sym == s.o_minus() { return prefix_neg(k, g, i, want, out); }
-  // 名字 . 名字：变体构造、变体投影、导入成员、变量字段
+  // 名字 . 名字：变体构造、变体投影、导入成员、变量字段（局部运行期变量优先于编译期绑定）
   if i + 2 < n and is_group(g, i + 1) == 0 and is_name(g, i) == 1 {
     if n_sym(g, i + 1) == s.p_dot() and is_name(g, i + 2) == 1 {
+      if env.env_find(k, sym) == 0 {
+        let pv: addr = ctf.proj_at(k, g, i);
+        if (pv as u64) != 0 {
+          if ctf.v_kind(pv) == 0 {
+            ty.val_lit(out, ctf.v_a(pv), t64(k));
+            return i + 3;
+          }
+          let m: addr = "type is compile-time only";
+          let d: u64 = ir.diag(k, 0, 1, m, 25);
+          st.st_fail(k, e_unsup());
+          return i + 3;
+        }
+      }
       return me.dotted(k, g, i, want, out);
     }
   }
@@ -301,6 +317,14 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   if i + 1 < n and is_group(g, i + 1) == 1 {
     if delim_of(g, i + 1) == dl_paren() {
       if bi.is_builtin(sym) == 1 { return me.builtin_call(k, g, i, want, out); }
+      // size_of / align_of / field_count：编译期折成 u64 常量。
+      let qc: addr = st.st_alloc(k, 24);
+      let qh: u64 = ctf.query_fold(k, qc, g, i);
+      if st.st_ok(k) != 0 { return i + 2; }
+      if qh == 1 {
+        ty.val_lit(out, ctf.v_a(qc), t64(k));
+        return i + 2;
+      }
       // 局部 Fn(...) 值：按签名发间接调用。
       let fo: u64 = env.env_find(k, sym);
       if fo != 0 {
@@ -322,6 +346,20 @@ func expr_prefix(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
     }
     if delim_of(g, i + 1) == dl_bracket() and sym == s.b_icall() {
       return cl.icall_call(k, g, i, want, out);
+    }
+  }
+  // 编译期常量（comptime for 的循环变量）：折成字面量参与运行期表达式（局部运行期绑定优先）。
+  if env.env_find(k, sym) == 0 {
+    let cv: addr = ctf.lookup(k, sym);
+    if cv as u64 != 0 {
+      if ctf.v_kind(cv) == 0 {
+        ty.val_lit(out, ctf.v_a(cv), t64(k));
+        return i + 1;
+      }
+      let m: addr = "type is compile-time only";
+      let d: u64 = ir.diag(k, 0, 1, m, 25);
+      st.st_fail(k, e_unsup());
+      return i + 1;
     }
   }
   return cl.var_ref(k, g, i, want, out);

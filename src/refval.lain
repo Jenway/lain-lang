@@ -13,6 +13,7 @@ let bi = import("builtins");
 let ireg = import("tyreg");
 let ct = import("ctypes");
 let cl = import("calls");
+let ctf = import("ctfor");
 
 extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr;
 extern core_tail(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = core__expr_tail;
@@ -288,7 +289,12 @@ func typed_builtin(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
 
 // 值的成员：切片的 len / ptr，其余按形状查字段。引用族与 Fn 字段 load 出来。
 func member_on_val(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 {
-  let fname: u64 = ax.n_sym(g, i + 1);
+  // obj.[:expr]：成员名由编译期常量给出（SymId 或字节切片）。
+  let interp: u64 = ctf.interp_at(g, i + 1);
+  let fname: u64 = if interp == 1 { ctf.interp_name(k, ax.n_at(g, i + 1)) } else { ax.n_sym(g, i + 1) };
+  if interp == 1 {
+    if st.st_ok(k) != 0 { return i + 2; }
+  }
   let sh: u64 = ty.tsh(ty.vty(out));
   if sh == 0 { st.st_fail(k, ax.e_type()); return i + 2; }
   let kd: u64 = agg.shp_kind(sh);
@@ -309,7 +315,16 @@ func member_on_val(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) ->
     return core_tail(k, g, i + 2, minp, want, out);
   }
   let m: addr = agg.mem_find(sh, fname);
-  if m as u64 == 0 { st.st_fail(k, ax.e_unsup()); return i + 2; }
+  if m as u64 == 0 {
+    if interp == 1 {
+      let nf: addr = "no such field";
+      let d: u64 = ir.diag(k, 0, 1, nf, 13);
+      st.st_fail(k, ax.e_op());
+      return i + 2;
+    }
+    st.st_fail(k, ax.e_unsup());
+    return i + 2;
+  }
   let et: addr = ax.new_ty(k);
   let e1: u64 = agg.mem_ty(k, m, et);
   let got: addr = ax.new_val(k);

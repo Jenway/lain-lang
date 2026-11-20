@@ -446,6 +446,17 @@ META_CASES = [
     {"file": "polish_syntax.lain", "entry": "s0__main", "value": 150, "folds": [],
      "procs": ["s0__triple", "s0__inc", "s0__apply", "s0__set_y"],
      "contains": ["data s0__strlit_0 ro", "#call [(#bits<64>) -> #bits<64>]("]},
+    # 10 字段结构体（超出聚合旧的内联 8 槽）+ comptime for 展开 + [:expr] 插值：
+    # 106556 = 80919（size_of 80*1000 + align_of 8*100 + field_count 10*10 + m+q 19）
+    #          + 60（0..4 展开）+ 55（fields_of(Big10) 逐字段求和）
+    #          + 582（fields_of(Vec3) 通用拷贝后再读回）+ 100（tail2）
+    #          + 24000（Vec3 字段类型尺寸之和 24*1000）+ 24（字段偏移之和）
+    #          + 777（deref(d).[:f.name][0] 插值后再写下标）
+    #          + 5（src.[:"x"] 字符串字面量插值）+ 34（退栈后同名局部量 k/f 不受污染）。
+    # 产物里不能有运行期 #loop：循环已逐轮展开进过程体。
+    {"file": "comptime_for_splice.lain", "entry": "s0__main", "value": 106556,
+     "folds": [], "procs": ["s0__copy_vec3", "s0__set_first", "s0__tail2"],
+     "absent": ["#loop"]},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -469,6 +480,8 @@ META_NEGATIVE = [
     {"file": "infer_missing.lain", "why": "let 右值未绑定，无法推导类型"},
     {"file": "fn_value_bad_type.lain", "why": "过程值与目标 Fn 签名不符"},
     {"file": "void_value.lain", "why": "void 调用没有可绑定的返回值"},
+    {"file": "splice_runtime_name.lain", "why": "[:expr] 的成员名来自运行期形参"},
+    {"file": "splice_missing_field.lain", "why": "[:expr] 插值出结构体里不存在的字段"},
 ]
 
 
@@ -522,6 +535,10 @@ def check_meta_cases(units):
         lacking = [s for s in case.get("contains", []) if s not in ir_text]
         if lacking:
             details.append("%s 产物里缺少 %s" % (case["file"], " ".join(lacking)))
+            continue
+        present = [s for s in case.get("absent", []) if s in ir_text]
+        if present:
+            details.append("%s 产物里出现了 %s" % (case["file"], " ".join(present)))
             continue
         broken = False
         for proc, literal in case["folds"]:
