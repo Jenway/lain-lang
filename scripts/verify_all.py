@@ -457,6 +457,10 @@ META_CASES = [
     {"file": "comptime_for_splice.lain", "entry": "s0__main", "value": 106556,
      "folds": [], "procs": ["s0__copy_vec3", "s0__set_first", "s0__tail2"],
      "absent": ["#loop"]},
+    # Phase 2A-2：Type 一等值 + TypeBuilder + 类型工厂 make_soa（0 字符串拼接、0 inject）。
+    {"file": "soa_typebuilder.lain", "entry": "s0__main", "value": 1753,
+     "folds": [], "procs": ["s0__soa_set", "s0__soa_get_sum", "s0__inline_soa_x"],
+     "absent": ["#loop", "s0__make_soa"]},
 ]
 META_NEGATIVE = [
     {"file": "eval_runtime_ref.lain", "why": "eval 内引用了运行期形参"},
@@ -482,6 +486,9 @@ META_NEGATIVE = [
     {"file": "void_value.lain", "why": "void 调用没有可绑定的返回值"},
     {"file": "splice_runtime_name.lain", "why": "[:expr] 的成员名来自运行期形参"},
     {"file": "splice_missing_field.lain", "why": "[:expr] 插值出结构体里不存在的字段"},
+    {"file": "type_runtime_err.lain", "why": "Type 不能作为运行期变量类型"},
+    {"file": "record_empty_err.lain", "why": "record_end 不能构造空结构体"},
+    {"file": "record_dup_err.lain", "why": "record_add 不能添加重复字段名"},
 ]
 
 

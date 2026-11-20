@@ -15,6 +15,7 @@ let modules = import("modules");
 let an = import("anon");
 let ct = import("ctypes");
 let ireg = import("tyreg");
+let tb = import("tbuild");
 
 // --- ast / ctx 层转发（本文件正文的裸调用经这里转一手，避免逐处加前缀） ----------
 func new_ty(k: addr) -> addr { return ax.new_ty(k); }
@@ -144,16 +145,33 @@ func compile_body(k: addr, g: u64, i: u64, q: u64) -> u64 {
   return a + 1;
 }
 
+// 跳到过程的体之后（花括号组结束），用于只由编译期求值器解释的过程。
+func skip_body(g: u64, i: u64) -> u64 {
+  let n: u64 = n_count(g);
+  if i >= n { return i; }
+  if ax.is_group(g, i) == 1 {
+    if ax.delim_of(g, i) == ax.dl_brace() { return i + 1; }
+  }
+  return skip_body(g, i + 1);
+}
+
 func compile_func(k: addr, g: u64, i: u64) -> u64 {
   let q: u64 = proc_name(k, g, i);
   let se: addr = modules.find_here(k, n_sym(g, i + 1));
   let flag: u64 = if se as u64 == 0 { 0 } else { modules.sym_set_flag(se, 1) };
+  if se as u64 != 0 {
+    if tb.sig_types(modules.sym_sig(se)) == 1 { return skip_body(g, i + 2); }
+  }
   return compile_body(k, g, i + 2, q);
 }
 
 // let 名 = func (形参) ... { 体 }：名字来自 let，func 词在 i。
 func compile_func_expr(k: addr, g: u64, i: u64, name: u64) -> u64 {
   let q: u64 = modules.qual(k, st.st_src(k), name);
+  let se: addr = modules.find_here(k, name);
+  if se as u64 != 0 {
+    if tb.sig_types(modules.sym_sig(se)) == 1 { return skip_body(g, i + 1); }
+  }
   let b: u64 = compile_body(k, g, i + 1, q);
   return skip_semi(g, b);
 }
