@@ -24,11 +24,11 @@ Lain 写的 **Meta** 定义。Meta 本身也由 `lain0` 编译成 LAINIR，再�
 ```bash
 cmake -S seed -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
 cmake --build build
-for f in examples/*.lain; do ./build/lain0/lain0 --round-trip "$f"; done
+for f in seed/lain0/tests/*.lain; do ./build/lain0/lain0 --round-trip "$f"; done
 ./build/lain0/lain0 --entry src/entry.lain --split build/units
-./build/lain-meta-v2 build/units/*.l1 examples/arith.lain --out build/arith.l1
-./build/lainir-verify build/arith.l1
-./build/lainir-run --entry s0__total build/arith.l1
+./build/lain-meta-v2 build/units/*.l1 examples/concepts_monoid.lain --out build/concepts_monoid.l1
+./build/lainir-verify build/concepts_monoid.l1
+./build/lainir-run --entry s0__main build/concepts_monoid.l1
 ```
 
 2026 Jenway

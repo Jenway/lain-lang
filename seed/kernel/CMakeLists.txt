@@ -12,6 +12,7 @@ add_library(lain::seed ALIAS lain_seed)
 target_sources(lain_seed
   PRIVATE
     src/meta/apply.c
+    src/backend/c99.c
     src/ir/build.c
     src/ir/infer.c
     src/text/opname.c
@@ -34,6 +35,7 @@ target_sources(lain_seed
       BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include
       FILES
         include/lain/meta/apply.h
+        include/lain/backend/c99.h
         include/lain/ir/build.h
         include/lain/ir/core.h
         include/lain/ir/codes.h

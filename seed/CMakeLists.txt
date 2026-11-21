@@ -68,4 +68,18 @@ if(LAIN_BUILD_DRIVER)
   if(WIN32)
     target_compile_definitions(lainir_run PRIVATE _CRT_SECURE_NO_WARNINGS)
   endif()
+
+  # C99 后端：把已验证的 LAINIR 发射为标准 C99 源码。
+  add_executable(lainir_c lainir_c.c)
+  target_link_libraries(lainir_c PRIVATE lain_seed)
+  target_compile_features(lainir_c PRIVATE c_std_11)
+  set_target_properties(lainir_c PROPERTIES
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    OUTPUT_NAME "lainir-c"
+  )
+  if(WIN32)
+    target_compile_definitions(lainir_c PRIVATE _CRT_SECURE_NO_WARNINGS)
+  endif()
 endif()

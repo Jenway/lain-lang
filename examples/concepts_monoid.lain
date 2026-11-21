@@ -1,0 +1,73 @@
+// Concept-based polymorphism: Monoid(T) + generic array fold + witness override + generic SoA setter
+struct Vec2 { x: i64, y: i64 }
+struct Vec3 { x: i64, y: i64, z: i64 }
+
+// 1. Define Monoid(T) as a first-class Type factory (record of function pointers)
+func Monoid(T: Type) -> Type {
+  let b = record_begin();
+  record_add(b, "zero", Fn(() -> T));
+  record_add(b, "combine", Fn((T, T) -> T));
+  return record_end(b);
+}
+
+func i64_zero() -> i64 { return 0; }
+func i64_add(a: i64, b: i64) -> i64 { return a + b; }
+func i64_one() -> i64 { return 1; }
+func i64_mul(a: i64, b: i64) -> i64 { return a * b; }
+
+func vec2_zero() -> Vec2 { return Vec2 { x: 0, y: 0 }; }
+func vec2_add(a: Vec2, b: Vec2) -> Vec2 { return Vec2 { x: a.x + b.x, y: a.y + b.y }; }
+
+given sum_i64: Monoid(i64) = Monoid(i64) { zero: i64_zero, combine: i64_add };
+given sum_vec2: Monoid(Vec2) = Monoid(Vec2) { zero: vec2_zero, combine: vec2_add };
+
+// 2. Generic fixed-array fold: deduces T, N and resolves Monoid(T) witness automatically
+func fold_arr(arr: Ref(Array(T, N))) ?{ T: Type, N: u64, m: Monoid(T) } -> T {
+  let acc: T = m.zero();
+  comptime for i in 0..N {
+    acc = m.combine(acc, deref(arr)[i]);
+  }
+  return acc;
+}
+
+// Generic 3-way combine (also tests sret struct return through witness)
+func combine3(a: T, b: T, c: T) ?{ T: Type, m: Monoid(T) } -> T {
+  return m.combine(m.combine(a, b), c);
+}
+
+// 3. Generic SoA type constructor and generic field setter
+func make_soa(T: Type, N: u64) -> Type {
+  let b = record_begin();
+  comptime for f in fields_of(T) {
+    record_add(b, f.name, Array(f.type, N));
+  }
+  return record_end(b);
+}
+
+let Vec2SoA = make_soa(Vec2, 3);
+let Vec3SoA = make_soa(Vec3, 3);
+
+func soa_set(s: Mut(SoA), idx: u64, v: T) ?{ SoA: Type, T: Type } {
+  comptime for f in fields_of(T) {
+    deref(s).[:f.name][idx] = v.[:f.name];
+  }
+}
+
+func main() -> i64 {
+  let nums: Array(i64, 4) = [2, 3, 4, 5];
+  let sum_n: i64 = fold_arr(ref_of(nums)); // 2+3+4+5 = 14
+
+  // Override witness explicitly with multiplicative monoid
+  let prod_i64 = Monoid(i64) { zero: i64_one, combine: i64_mul };
+  let prod_n: i64 = fold_arr(ref_of(nums)) ?{ m: prod_i64 }; // 2*3*4*5 = 120
+
+  let vsum: Vec2 = combine3(Vec2 { x: 10, y: 1 }, Vec2 { x: 20, y: 2 }, Vec2 { x: 0, y: 0 }); // { 30, 3 }
+
+  let s2: Vec2SoA = Vec2SoA { x: [0, 0, 0], y: [0, 0, 0] };
+  let s3: Vec3SoA = Vec3SoA { x: [0, 0, 0], y: [0, 0, 0], z: [0, 0, 0] };
+  soa_set(mut_of(s2), 1, vsum);
+  soa_set(mut_of(s3), 2, Vec3 { x: 7, y: 8, z: 9 });
+
+  // 14 + 120 + (30 + 3) + (7 + 8 + 9) = 191
+  return sum_n + prod_n + s2.x[1] + s2.y[1] + s3.x[2] + s3.y[2] + s3.z[2];
+}

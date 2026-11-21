@@ -1,0 +1,59 @@
+// Zero-string-concatenation compile-time type factories & layout introspection
+struct Vec3 { x: i64, y: i64, z: i64 }
+
+// 1. Structure-of-Arrays factory: SoA(T, N)
+func make_soa(T: Type, N: u64) -> Type {
+  let b = record_begin();
+  comptime for f in fields_of(T) {
+    record_add(b, f.name, Array(f.type, N));
+  }
+  return record_end(b);
+}
+
+// 2. Compile-time struct extension: prepends `tag: u64` to any struct T
+func with_tag(T: Type) -> Type {
+  let b = record_begin();
+  record_add(b, "tag", u64);
+  comptime for f in fields_of(T) {
+    record_add(b, f.name, f.type);
+  }
+  return record_end(b);
+}
+
+// 3. Generic container layout: Option-like { present: u8, value: T }
+func make_opt(T: Type) -> Type {
+  let b = record_begin();
+  record_add(b, "present", u8);
+  record_add(b, "value", T);
+  return record_end(b);
+}
+
+let Vec3SoA = make_soa(Vec3, 4);
+let TaggedVec3 = with_tag(Vec3);
+let OptVec3 = make_opt(Vec3);
+
+func stamp_vec3(dst: Mut(TaggedVec3), tag: u64, src: Vec3) {
+  deref(dst).tag = tag;
+  comptime for f in fields_of(Vec3) {
+    deref(dst).[:f.name] = src.[:f.name];
+  }
+}
+
+func main() -> i64 {
+  let soa: Vec3SoA = Vec3SoA { x: [0, 0, 0, 0], y: [0, 0, 0, 0], z: [0, 0, 0, 0] };
+  let v: Vec3 = Vec3 { x: 3, y: 4, z: 5 };
+  comptime for f in fields_of(Vec3) {
+    soa.[:f.name][2] = v.[:f.name];
+  }
+  let dot: i64 = (soa.x[2] * soa.x[2]) + (soa.y[2] * soa.y[2]) + (soa.z[2] * soa.z[2]); // 50
+
+  let tv: TaggedVec3 = TaggedVec3 { tag: 0, x: 0, y: 0, z: 0 };
+  stamp_vec3(mut_of(tv), 99, v); // 99 + 3 + 4 + 5 = 111
+
+  // Memoized type identity: `make_opt(Vec3)` and `OptVec3` are the exact same Type
+  let opt: make_opt(Vec3) = OptVec3 { present: 1, value: v };
+  let opt_val: i64 = if opt.present == 1 { opt.value.x + opt.value.z } else { 0 }; // 8
+
+  // size_of(OptVec3) == 32 (1B present + 7B padding + 24B Vec3) -> total 201
+  return dot + (tv.tag as i64) + tv.x + tv.y + tv.z + opt_val + (size_of(OptVec3) as i64);
+}

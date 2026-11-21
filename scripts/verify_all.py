@@ -8,6 +8,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.join(ROOT, "build")
 WORK = os.path.join(BUILD, "verify_all")
+LAIN0_TESTS = os.path.join(ROOT, "seed", "lain0", "tests")
 EXAMPLES = os.path.join(ROOT, "examples")
 META_ENTRY = os.path.join(ROOT, "src", "entry.lain")
 META_UNITS = os.path.join(BUILD, "metaunits")
@@ -24,11 +25,12 @@ def exe(name):
 LAIN0 = os.path.join(BUILD, "lain0", "lain0.exe") if os.name == "nt" else os.path.join(BUILD, "lain0", "lain0")
 LAINIR_VERIFY = exe("lainir-verify")
 LAINIR_RUN = exe("lainir-run")
+LAINIR_C = exe("lainir-c")
 LAIN_META = exe("lain-meta-v2")
 
 
 # 真值用例：样例 -> [(函数名, 实参, 手算期望值)]。
-# 期望值来自对 examples/<样例>.lain 源码的人工核对，负数按有符号读数比较。
+# 期望值来自对 seed/lain0/tests/<样例>.lain 源码的人工核对，负数按有符号读数比较。
 RUN_CASES = {
     "arith": [("total", [], 3)],
     "bits": [
@@ -197,11 +199,11 @@ def split_meta():
             if n.endswith(".l1")]
 
 
-def compile_sample(stem, units):
+def compile_sample(stem, units, folder=LAIN0_TESTS):
     """用 Meta 编译一个样例。回 (输出文本, 失败文本或 None)。"""
     os.makedirs(META_OUT, exist_ok=True)
     out_path = os.path.join(META_OUT, stem + ".l1")
-    command = [LAIN_META] + units + [os.path.join("examples", stem + ".lain"),
+    command = [LAIN_META] + units + [os.path.join(folder, stem + ".lain"),
                                       "--out", out_path]
     result = run(command)
     text = result.stdout + result.stderr
@@ -213,12 +215,12 @@ def compile_sample(stem, units):
     return text, None
 
 
-def lain0_compile_sample(stem):
+def lain0_compile_sample(stem, folder=LAIN0_TESTS):
     """用 lain0 编译同一个样例，作为差分基准。回产物路径或 None。"""
     out_dir = os.path.join(WORK, stem)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "lain0.l1")
-    result = run([LAIN0, os.path.join("examples", stem + ".lain"),
+    result = run([LAIN0, os.path.join(folder, stem + ".lain"),
                   "-o", out_path, "--round-trip"])
     if result.returncode != 0 or not os.path.exists(out_path):
         return None
@@ -616,7 +618,7 @@ def main():
         if not units:
             problems.append("Meta 自举: lain0 --split src/entry.lain 失败")
 
-    names = sorted(n for n in os.listdir(EXAMPLES) if n.endswith(".lain"))
+    names = sorted(n for n in os.listdir(LAIN0_TESTS) if n.endswith(".lain"))
     rows = []
     total_pass = 0
     total_cases = 0
@@ -690,6 +692,76 @@ def main():
         problems += meta_details
     else:
         print("Meta 用例 跳过（自举单元缺失）")
+
+    print()
+    print("[现代样例]  examples/*.lain 编译、校验、VM 与 C99 原生差分")
+    clang_bin = shutil.which("clang")
+    if units and os.path.isdir(EXAMPLES):
+        ex_names = sorted(n for n in os.listdir(EXAMPLES) if n.endswith(".lain"))
+        ex_pass = 0
+        for ex_name in ex_names:
+            ex_stem = ex_name[:-len(".lain")]
+            _, ex_err = compile_sample(ex_stem, units, EXAMPLES)
+            if ex_err:
+                problems.append("examples/%s 编译: %s" % (ex_name, ex_err))
+                continue
+            ex_out = os.path.join(META_OUT, ex_stem + ".l1")
+            ex_ver = run([LAINIR_VERIFY, ex_out])
+            if ex_ver.returncode != 0:
+                problems.append("examples/%s 校验失败" % ex_name)
+                continue
+            procs = proc_names([ex_out])
+            entry = "s0__main" if "s0__main" in procs else ("main" if "main" in procs else None)
+            if entry:
+                got, run_err, _ = execute([ex_out], entry, [])
+                if run_err:
+                    problems.append("examples/%s VM 运行失败: %s" % (ex_name, run_err))
+                    continue
+                c_path = os.path.join(WORK, ex_stem + ".c")
+                c_res = run([LAINIR_C, "--entry", entry, "--print-result", "-o", c_path, ex_out])
+                if c_res.returncode != 0:
+                    problems.append("examples/%s C99 发射失败" % ex_name)
+                    continue
+                if clang_bin:
+                    exe_path = os.path.join(WORK, ex_stem + (".exe" if os.name == "nt" else ""))
+                    cc = run([clang_bin, "-std=c99", "-O2", c_path, "-o", exe_path])
+                    if cc.returncode != 0:
+                        problems.append("examples/%s C99 编译失败" % ex_name)
+                        continue
+                    nat = run([exe_path])
+                    if nat.returncode != 0:
+                        problems.append("examples/%s C99 运行失败" % ex_name)
+                        continue
+                    m = re.search(r"result=(-?\d+)", nat.stdout)
+                    if not m or int(m.group(1)) != got["signed"]:
+                        problems.append("examples/%s C99 与 VM 结果不一致: %s vs %s"
+                                        % (ex_name, nat.stdout.strip(), got["signed"]))
+                        continue
+            ex_pass += 1
+        print("现代样例 %d/%d" % (ex_pass, len(ex_names)))
+    else:
+        print("现代样例 跳过")
+
+    print()
+    print("[C99 自举验证]  src/ 全量 Meta 编译器发射为 C99")
+    if units:
+        self_c = os.path.join(WORK, "meta_self.c")
+        self_res = run([LAINIR_C, "-o", self_c] + units)
+        if self_res.returncode != 0:
+            problems.append("C99 自举: lainir-c 发射失败")
+            print("C99 自举 失败")
+        elif clang_bin:
+            cc_self = run([clang_bin, "-std=c99", "-fsyntax-only", self_c])
+            if cc_self.returncode != 0:
+                problems.append("C99 自举: clang -std=c99 语法/类型检查失败")
+                print("C99 自举 失败")
+            else:
+                print("C99 自举 通过（%d 单元 -> %d KB C99）"
+                      % (len(units), os.path.getsize(self_c) // 1024))
+        else:
+            print("C99 自举 发射通过（未找到 clang，跳过 C 编译检查）")
+    else:
+        print("C99 自举 跳过（自举单元缺失）")
 
     if problems:
         print()
