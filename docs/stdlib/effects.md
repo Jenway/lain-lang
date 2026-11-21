@@ -1,163 +1,175 @@
-# Effect
+# Effect（单次代数效应）
 
-TO BE DONE in the future
+Lain-Lang 提供受限的**单次代数效应（One-Shot Algebraic Effects）**机制，为标准库与用户代码提供类型可追踪、零异常展开表开销（无需 DWARF Unwinding）的非局部控制流原语。
 
-Lain-Lang 会在标准库里实现这一高级特性。
+> 说明：本规范采用统一 `let` 声明语法与现代零裸指针类型体系（`Ref(T)`、`Mut(T)`、`Slice(T)`、`i64`、`u64`、`bool`）。
 
-Koka 和 Ocaml5 向我们展示了强大的 Effect 机制。
+---
 
-Lain-Lang 提供受限的**单次代数效应（One-shot Algebraic Effects）**机制。该机制旨在提供受类型系统严格追踪的非局部控制流原语，其物理实现不依赖操作系统的栈展开表（如 DWARF unwinding）。
+## 1. 核心代数效应机制
 
-## 1. 核心代数效应机制 (Mechanism)
+### 1.1 效应声明与两类操作
 
-### 1.1 效应声明与操作分类
-效应是一组命名的操作（Operations）集合，定义计算过程中可能发起的控制转移：
+效应是一组命名的控制转移操作集合，用 `effect` 表达式绑定到标识符：
 
 ```ebnf
-EffectDecl    ::= 'effect' Ident ('(' TypeParamList? ')')? '{' OperationDecl* '}'
+EffectExpr    ::= 'effect' ('(' TypeParamList? ')')? '{' OperationDecl* '}'
 OperationDecl ::= 'op' Ident '(' ParamList? ')' '->' ReturnType ';'
 ```
 
-根据操作的返回值类型，操作在语义上严格划分为两类：
-1. **可恢复操作（Resumable Operation）**：返回具体的有效类型 `T`。处理器捕获该操作后，可通过 `resume` 将结果送回发生点并继续原执行流；
-2. **中止性操作（Abortive Operation）**：返回不可达类型 `Never`。该操作**不具备恢复能力**，一旦触发，执行流直接沿调用栈向外退出，处理器严禁亦无法调用 `resume`。
+```lain
+// 参数化与无参效应声明
+let Error = func(E: Type) -> Effect {
+  return effect { op raise(err: E) -> Never; };
+};
 
----
+let Cancel = effect {
+  op cancel() -> Never;
+};
 
-### 1.2 函数签名与效应集
-函数签名通过 `!{ ... }` 显式标注其可能向外泄漏的未捕获效应集合：
-
-```plain
-fn perform_task() -> ResultType !{ EffectA, EffectB }
+let Yield = func(T: Type) -> Effect {
+  return effect { op emit(val: T) -> bool; };
+};
 ```
 
-* **纯度规则**：缺省 `!{ ... }` 或显式声明为 `!{}` 的函数保证为纯控制流函数，内部严禁发起任何未捕获效应；
-* **传播操作符（`!`）**：调用可能发起效应的子函数时，必须使用后缀操作符 `!`。该操作符指示将子函数的效应集合并入当前函数的效应签名中，未捕获时自动向上传播。
+根据操作返回值的可返回性，操作严格分为两类：
+1. **可恢复操作（Resumable Operation）**：返回具体有效类型 `T`（如 `bool`、`u64`）。外层 `handle` 捕获该操作后，可通过 `resume(value)` 将结果送回发起点并继续原执行流；
+2. **中止性操作（Abortive Operation）**：返回不可达类型 `Never`。该操作**不具备恢复能力**，触发后控制流沿调用栈单向退出，处理器分支不得也不可能调用 `resume`。
 
 ---
 
-### 1.3 处理器与单次恢复契约 (`handle`)
-效应由动态包围在外层的 `handle` 表达式捕获并处理：
+### 1.2 函数签名中的效应集 (`!{ ... }`) 与传播 (`!`)
+
+三区函数签名的第三区 `!{ ... }` 显式声明过程允许向外逃逸的未捕获效应集：
+
+```lain
+let perform_task = func(id: u64) -> ResultVal
+  !{ Error(DbError), Cancel }
+{
+  ...
+};
+```
+
+* **纯度约束**：省略 `!{ ... }` 或显式写 `!{}` 表示控制流纯过程，内部严禁发起未在函数内部捕获的效应；
+* **显式传播操作符（`!`）**：调用带有效应的子函数时，须在调用处标出后缀操作符 `!`（如 `load_record(id)!`），表明将其未捕获效应并入当前函数的效应集或交由外层 `handle` 拦截。未标 `!` 也未被本地捕获时，编译期直接报错。
+
+---
+
+### 1.3 处理器与单次恢复契约 (`handle ... with`)
+
+效应由包围在外层的 `handle` 表达式动态捕获并处理：
 
 ```ebnf
 HandleExpr  ::= 'handle' Expr 'with' '{' HandlerArm* '}'
-HandlerArm  ::= 'return' '(' Ident ')' '=>' Block
-              | Ident '(' ParamList? ')' ('with' 'resume' '(' Ident ')')? '=>' Block
+HandlerArm  ::= 'return' '(' Ident ')' '=>' ExprOrBlock
+              | Ident '(' ParamList? ')' ('with' 'resume' '(' Ident ')')? '=>' ExprOrBlock
 ```
 
-* **返回值处理 (`return`)**：当被包围的计算正常终结时，控制流进入 `return` 分支交付最终结果；
-* **操作拦截**：匹配具体的操作发起点，接收传入参数；
+* **`return(val)` 分支**：被包围的计算正常完成时进入此分支；
+* **操作拦截分支**：按发起的效应操作匹配对应分支并绑定传入实参；
 * **单次恢复契约（One-Shot Invariant）**：
-  * 可恢复操作捕获的续体（Continuation）在物理上**仅允许被 `resume` 恰好一次**；
-  * 严禁将续体进行持久化保存、多次复制或回溯调用；
-  * 若处理器分支在未调用 `resume` 的情况下退出，被挂起的执行栈帧立即销毁，运行时逆序触发该作用域内注册的所有 `defer` 清理块。
+  * 可恢复操作捕获的续体（Continuation `resume`）在物理上**仅允许最多调用一次**；
+  * 严禁对续体进行复制、持久化保存跨过处理器作用域或多次回溯调用；
+  * 若处理器分支直接退出而未调用 `resume`，被挂起的栈帧按作用域规则销毁，并逆序执行沿途登记的 `defer` 清理块。
 
 ---
 
 ### 1.4 效应行多态 (Effect Row Polymorphism)
-效应签名支持泛型集合变量，用于在不感知具体效应类型的前提下透传环境效应：
 
-```plain
-// E 是效应行变量（Row Variable）
-fn transform(f: fn(A) -> B !{ E }) -> Result !{ E }
+高阶函数或泛型容器支持在 `?{ ... }` 与 `!{ ... }` 中通过行变量透传未知效应集：
+
+```lain
+// E 为效应行变量（编译期值）：sum/transform 对其内容保持透明
+let transform = func(x: A, f: Fn((A) -> B !{ E }))
+  ?{ A: Type, B: Type, E: EffectRow }
+  !{ E }
+  -> Result
+{
+  let b: B = f(x)!;
+  return wrap(b);
+};
 ```
 
-* **效应代数**：效应集合支持并集与消解操作。当高阶函数内部 `handle` 掉了集合中的某个具体效应时，该效应从外层签名中消除；未处理的效应继续透明透传。
+* **效应消除律**：若函数体内部用 `handle ... with` 完全拦截了某个效应（如拦截了 `Error(DbError)`），该效应自动从函数对外暴露的 `!{ ... }` 签名中消除，剩余未处理效应继续向上透传。
 
 ---
 
-### 1.5 物理降解契约 (Lowering)
-根据操作的控制流特征，Meta 将其确定性地降解为不同的底层机器代码：
+### 1.5 物理降解契约 (Lowering to LAINIR)
 
-1. **中止性操作（`Never`）的降解**：
-   * 因其绝不恢复，降解时不保留任何协程帧与状态机；
-   * Meta 将其直接编译为**多路离散状态码**（如 `#bits<8>` 寄存器值），调用点展开为单周期的 SSA 分支指令（`#switch`），零堆内存分配；
-2. **可恢复操作的降解**：
-   * 在编译期（Lain-VM）：降解为虚拟机 `TCB` 的让出与 `Endpoint` 同步会合；
-   * 在运行期（AOT）：根据目标平台配置，降解为无栈状态机（Stackless State Machine）或平台原生的汇编级纤程栈切换（Stack-switching Fiber）。
+Meta 依据操作是否可恢复，将其确定性地降解为两套零运行时意外开销的底层结构：
+
+1. **中止性操作（`-> Never`）的降解**：
+   * 因永不恢复，完全无需协程帧或堆分配状态机；
+   * 编译器将带有中止性效应的过程改写为返回 `(status_code: #bits<8>, payload)` 的普通值过程，在 `handle` 处展开为单条 **`#switch`** 分支指令。错误与取消路径的代价等价于手动返回 tagged struct。
+2. **可恢复操作（Resumable）的降解**：
+   * **Tail-Resumptive（尾恢复证据传递）**：若处理器分支直接返回给 `resume(...)`（如状态读取/日志采集），直接降级为编译期注入的普通回调参数调用，零栈切换成本；
+   * **一般单次续体**：在编译期（Lain-VM）映射为 `TCB` 让出与 `Endpoint` 同步会合；在运行期（AOT）依据平台策略降解为无栈状态机或平台纤程单次栈切换。
 
 ---
 
-## 2. 典型应用范例 (Application Patterns)
-
-以下范例展示如何利用上述核心机制解决具体的系统级工程问题。
+## 2. 典型应用范例
 
 ### 2.1 范例一：三通道完成模型 (Value-Error-Stopped)
 
-该模式展示如何利用**中止性效应**与普通返回值，构建零分配、无异常展开开销的“三出口”执行模型（对齐 C++ P2300 `std::execution`）。
+利用两个中止性效应与普通返回值，以零异常表与零堆分配构造结构化并发“值 / 错误 / 取消”三出口（语义对齐 C++ P2300 `std::execution`）：
 
-#### 效应声明
 ```lain
-// 声明两个中止性操作：错误与取消均不可恢复
-effect Error(E: Type) { op raise(err: E) -> Never; }
-effect Cancel         { op cancel() -> Never; }
-```
-
-#### 生产端：业务逻辑编写
-```lain
-fn fetch_record(id: #bits<64>) -> Record
-    !{ async, error(DbError), cancel }
+let fetch_record = func(id: u64) -> Record
+  !{ Error(DbError), Cancel }
 {
-    if is_timeout() {
-        perform cancel(); // 触发取消通道，沿调用栈退出
-    }
-    if is_corrupted() {
-        perform error(DbError.Corrupted); // 触发错误通道，沿调用栈退出
-    }
-    return load_record(id)!; // 成功通道
-}
-```
+  if is_timeout() {
+    perform Cancel.cancel();
+  }
+  if is_corrupted() {
+    perform Error(DbError).raise(DbError.Corrupted);
+  }
+  return load_record(id)!;
+};
 
-#### 消费端：三出口拦截
-```lain
-handle fetch_record(id) with {
-    return(record) => on_success(record), // 通道 1：值
-    error(err)     => on_failure(err),    // 通道 2：错误
-    cancel()       => on_stopped(),       // 通道 3：取消
-}
+let status: i64 = handle fetch_record(id) with {
+  return(rec) => on_success(rec),
+  raise(err)  => on_failure(err),
+  cancel()    => on_stopped(),
+};
 ```
-
-* **降解实况**：在编译产物中，该结构被降解为一个返回 `(status_code, payload)` 的普通过程，`handle` 处仅生成一条对 `status_code` 的 `#switch` 指令。取消与错误完全不产生异常对象与回溯开销。
+* **降解实况**：整个三通道控制流降解为对 `#bits<8>` 状态标签的一次 `#switch`，与手写错误码返回具有完全一致的机器指令密度，却具备完整的编译期穷尽跟踪保证。
 
 ---
 
 ### 2.2 范例二：消除函数染色的数据管道 (Colorless Pipeline)
 
-该模式展示如何利用**效应行多态**，仅编写一份算法代码即可同时驱动同步内存遍历与异步 I/O 流。
+利用效应行多态，同一份迭代器归约逻辑既能零开销跑在纯同步切片上，也能跑在异步流上：
 
-#### 协议与算子定义
 ```lain
-// 迭代器协议携带关联效应集
-let Iterator = std::concept(Self, Item) {
-    next(self: &mut Self) -> Option(Item) !{ Self.Effects };
+// Iterator Concept 允许实现模块自带关联效应集 `Effects`
+let Iterator = func(Self: Type, Item: Type) -> Type {
+  return struct {
+    Effects: EffectRow,
+    next: Fn((Mut(Self)) -> Opt(Item) !{ Effects }),
+  };
 };
 
-// 累加器利用行多态透传输入流的效应
-let sum = std::func(iter: Iter)
-    ?{
-        T: Addable,
-        Iter: Iterator(T),
-    }
-    !{ Iter.Effects } // 效应行多态：透传 Iter 自带的效应
-    -> T
+// sum 对输入流效应完全透明（无 sync/async 函数染色分裂）
+let sum = func(iter: Mut(Iter))
+  ?{
+    T: Type,
+    Iter: Type,
+    it: Iterator(Iter, T),
+    m: Monoid(T),
+  }
+  !{ it.Effects }
+  -> T
 {
-    let acc = T.zero();
-    loop {
-        let opt = iter.next()!; // 传播当前数据源的效应
-        match opt {
-            Some(x) => acc = acc + x,
-            None    => break acc,
-        }
+  let acc: T = m.zero();
+  loop {
+    let opt: Opt(T) = it.next(iter)!;
+    match opt {
+      Some(x) => { acc = m.combine(acc, x); },
+      None    => { break acc; },
     }
+  };
 };
 ```
 
-#### 场景实例化对比
-1. **纯内存切片数据源**：
-   * `SliceIter.Effects` 声明为 `!{}`；
-   * 调用 `sum(slice.iter())` 时，`Iter.Effects` 实例化为空集；
-   * Meta 在降解时抹去所有控制流开销，原地生成纯寄存器 `#loop` 汇编循环。
-2. **异步网络数据源**：
-   * `TcpStream.Effects` 声明为 `!{ async, error(IoError) }`；
-   * 调用 `sum(tcp_stream)` 时，`sum` 自动特化为携带异步挂起与错误的函数；
-   * 算法逻辑完全复用，标准库无需提供独立的 `async_sum`。
+* **纯内存切片实例化**：当 `SliceIterMod` 的 `Effects` 为 `!{}` 时，`it.Effects` 实例化为空集，`sum` 降解为纯寄存器 `#loop` 循环，零分支、零状态机；
+* **异步 / 带错流实例化**：当 `TcpStreamMod` 的 `Effects` 为 `!{ Async, Error(IoError) }` 时，同一个 `sum` 自动特化为可挂起与可传播错误的过程，标准库无需重复编写 `async_sum`。
