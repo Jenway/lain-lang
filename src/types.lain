@@ -1,84 +1,91 @@
-// 类型与值：全部是 caller 分配的 24 / 56 字节块，只有标量与 addr 参与签名。
-// 之所以不返回 struct：lain0 把聚合返回值降级成被调者栈帧里的 #alloca 地址，
-// 跨调用读字段会读到下一个调用的帧。
+// 类型与值：全部是 caller 分配的 32 / 56 字节块，只有标量与引用指针参与签名。
 let codes = import("ir_codes");
 let s = import("sym");
 
+struct Ty {
+  k: u64,
+  w: u64,
+  sg: u64,
+  sh: u64
+}
+
+struct Val {
+  n: u64,
+  lit: u64,
+  bits: u64,
+  tk: u64,
+  tw: u64,
+  tsg: u64,
+  tsh: u64
+}
+
 // --- 类型块：k @0，w @8，sg @16，sh @24。k 用 L1TypeKind 编号，9 表示「上下文没有指定」。
-// sh 是形状号：非 0 表示这个 addr 指向 struct/enum/数组/字符串，布局在 agg.lain。
-func ty_save(p: addr, k: u64, w: u64, sg: u64) -> u64 {
-  store(p, k);
-  store(p + 8, w);
-  store(p + 16, sg);
-  store(p + 24, 0);
+// sh 是形状号：非 0 表示指向 struct/enum/数组/字符串，布局在 agg.lain。
+func ty_save(p: Mut(Ty), k: u64, w: u64, sg: u64) -> u64 {
+  p.k = k;
+  p.w = w;
+  p.sg = sg;
+  p.sh = 0;
   return k;
 }
 
-func tk(p: addr) -> u64 { return load(p); }
-func tw(p: addr) -> u64 { return load(p + 8); }
-func tsg(p: addr) -> u64 { return load(p + 16); }
-func tsh(p: addr) -> u64 { return load(p + 24); }
-func ty_set_sh(p: addr, v: u64) -> u64 { store(p + 24, v); return v; }
+func tk(p: Mut(Ty)) -> u64 { return p.k; }
+func tw(p: Mut(Ty)) -> u64 { return p.w; }
+func tsg(p: Mut(Ty)) -> u64 { return p.sg; }
+func tsh(p: Mut(Ty)) -> u64 { return p.sh; }
+func ty_set_sh(p: Mut(Ty), v: u64) -> u64 { p.sh = v; return v; }
 
-func ty_at(dst: addr, src: addr) -> u64 {
-  let a: u64 = load(src);
-  let b: u64 = load(src + 8);
-  let c: u64 = load(src + 16);
-  let d: u64 = load(src + 24);
+func ty_at(dst: Mut(Ty), src: Mut(Ty)) -> u64 {
+  let a: u64 = src.k;
+  let b: u64 = src.w;
+  let c: u64 = src.sg;
+  let d: u64 = src.sh;
   ty_save(dst, a, b, c);
   return ty_set_sh(dst, d);
 }
 
-func ty_known(p: addr) -> u64 {
-  if load(p) == 9 { return 0; }
+func ty_known(p: Mut(Ty)) -> u64 {
+  if p.k == 9 { return 0; }
   return 1;
 }
 
-func ty_same(a: addr, b: addr) -> u64 {
-  let a0: u64 = load(a);
-  let b0: u64 = load(b);
-  if a0 != b0 { return 0; }
-  let a1: u64 = load(a + 8);
-  let b1: u64 = load(b + 8);
-  if a1 != b1 { return 0; }
-  let a2: u64 = load(a + 16);
-  let b2: u64 = load(b + 16);
-  if a2 != b2 { return 0; }
-  let a3: u64 = load(a + 24);
-  let b3: u64 = load(b + 24);
-  if a3 != b3 { return 0; }
+func ty_same(a: Mut(Ty), b: Mut(Ty)) -> u64 {
+  if a.k != b.k { return 0; }
+  if a.w != b.w { return 0; }
+  if a.sg != b.sg { return 0; }
+  if a.sh != b.sh { return 0; }
   return 1;
 }
 
 // bool 只有 1 位，不能进 #load/#store。
-func ty_byte_ok(p: addr) -> u64 {
-  let w: u64 = load(p + 8);
+func ty_byte_ok(p: Mut(Ty)) -> u64 {
+  let w: u64 = p.w;
   if w == 0 { return 0; }
   let r: u64 = w - w / 8 * 8;
   if r != 0 { return 0; }
   return 1;
 }
 
-func ty_none(p: addr) -> u64 { return ty_save(p, 9, 0, 0); }
+func ty_none(p: Mut(Ty)) -> u64 { return ty_save(p, 9, 0, 0); }
 
-func ty_bits(p: addr, w: u64, sg: u64) -> u64 {
+func ty_bits(p: Mut(Ty), w: u64, sg: u64) -> u64 {
   return ty_save(p, codes.TY_BITS(), w, sg);
 }
 
-func ty_addr(p: addr) -> u64 { return ty_save(p, codes.TY_ADDR(), 0, 0); }
+func ty_addr(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TY_ADDR(), 0, 0); }
 
-// 带形状的地址：聚合与数组值在 IR 里一律是 #addr。
-func ty_agg(p: addr, sh: u64) -> u64 {
+// 带形状的地址：聚合与数组值在 IR 里一律是指针类型。
+func ty_agg(p: Mut(Ty), sh: u64) -> u64 {
   ty_addr(p);
   return ty_set_sh(p, sh);
 }
-func ty_bool(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 1, 0); }
-func ty_i32(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 32, 1); }
-func ty_u64(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 64, 0); }
-func ty_u8(p: addr) -> u64 { return ty_save(p, codes.TY_BITS(), 8, 0); }
+func ty_bool(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TY_BITS(), 1, 0); }
+func ty_i32(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TY_BITS(), 32, 1); }
+func ty_u64(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TY_BITS(), 64, 0); }
+func ty_u8(p: Mut(Ty)) -> u64 { return ty_save(p, codes.TY_BITS(), 8, 0); }
 
 // 类型名 → 类型。认不出来返回 0，调用方负责报错。
-func ty_of_sym(h: u64, out: addr) -> u64 {
+func ty_of_sym(h: u64, out: Mut(Ty)) -> u64 {
   if h == s.t_i8() { ty_bits(out, 8, 1); return 1; }
   if h == s.t_i16() { ty_bits(out, 16, 1); return 1; }
   if h == s.t_i32() { ty_bits(out, 32, 1); return 1; }
@@ -95,48 +102,46 @@ func ty_of_sym(h: u64, out: addr) -> u64 {
 }
 
 // --- 值块：n @0，lit @8，bits @16，类型 @24。
-func val_save(p: addr, n: u64, lit: u64, bits: u64, t: addr) -> u64 {
-  store(p, n);
-  store(p + 8, lit);
-  store(p + 16, bits);
-  ty_at(p + 24, t);
+func val_save(p: Mut(Val), n: u64, lit: u64, bits: u64, t: Mut(Ty)) -> u64 {
+  p.n = n;
+  p.lit = lit;
+  p.bits = bits;
+  ty_at(vty(p), t);
   return n;
 }
 
-func val_at(dst: addr, src: addr) -> u64 {
-  let a: u64 = load(src);
-  let b: u64 = load(src + 8);
-  let c: u64 = load(src + 16);
-  store(dst, a);
-  store(dst + 8, b);
-  store(dst + 16, c);
-  return ty_at(dst + 24, src + 24);
+func val_at(dst: Mut(Val), src: Mut(Val)) -> u64 {
+  dst.n = src.n;
+  dst.lit = src.lit;
+  dst.bits = src.bits;
+  let srct: Mut(Ty) = ptr_cast(Mut(Ty), ptr_cast(Mut(u8), src) + 24);
+  return ty_at(vty(dst), srct);
 }
 
-func vn(p: addr) -> u64 { return load(p); }
-func vlit(p: addr) -> u64 { return load(p + 8); }
-func vbits(p: addr) -> u64 { return load(p + 16); }
-func vty(p: addr) -> addr { return p + 24; }
+func vn(p: Mut(Val)) -> u64 { return p.n; }
+func vlit(p: Mut(Val)) -> u64 { return p.lit; }
+func vbits(p: Mut(Val)) -> u64 { return p.bits; }
+func vty(p: Mut(Val)) -> Mut(Ty) { return ptr_cast(Mut(Ty), ptr_cast(Mut(u8), p) + 24); }
 
-func val_none(p: addr) -> u64 {
-  store(p, 0);
-  store(p + 8, 0);
-  store(p + 16, 0);
-  ty_none(p + 24);
+func val_none(p: Mut(Val)) -> u64 {
+  p.n = 0;
+  p.lit = 0;
+  p.bits = 0;
+  ty_none(vty(p));
   return 0;
 }
 
-func val_lit(p: addr, bits: u64, t: addr) -> u64 {
+func val_lit(p: Mut(Val), bits: u64, t: Mut(Ty)) -> u64 {
   return val_save(p, 0, 1, bits, t);
 }
 
-func val_ref(p: addr, n: u64, t: addr) -> u64 {
+func val_ref(p: Mut(Val), n: u64, t: Mut(Ty)) -> u64 {
   return val_save(p, n, 0, 0, t);
 }
 
-func val_known(p: addr) -> u64 {
-  if load(p + 8) == 1 { return 1; }
-  if load(p) != 0 { return 1; }
+func val_known(p: Mut(Val)) -> u64 {
+  if p.lit == 1 { return 1; }
+  if p.n != 0 { return 1; }
   return 0;
 }
 
@@ -233,7 +238,7 @@ func cast_inst(fk: u64, fw: u64, fsg: u64, tk: u64, tw: u64) -> u64 {
 }
 
 // 比较的结果是 bool，其它算子的结果是操作数类型。
-func result_ty(h: u64, t: addr, out: addr) -> u64 {
+func result_ty(h: u64, t: Mut(Ty), out: Mut(Ty)) -> u64 {
   if is_cmp(h) == 1 { return ty_bool(out); }
   return ty_at(out, t);
 }

@@ -11,79 +11,88 @@ let modules = import("modules");
 let ct = import("ctypes");
 let ireg = import("tyreg");
 
+struct AnonEntry {
+  name: u64,
+  src: u64,
+  grp: u64,
+  node: u64,
+  sg: Mut(u8)
+}
+
 func n_count(g: u64) -> u64 { return ax.n_count(g); }
 func n_at(g: u64, i: u64) -> u64 { return ax.n_at(g, i); }
 func n_sym(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); }
-func new_ty(k: addr) -> addr { return ax.new_ty(k); }
-func new_val(k: addr) -> addr { return ax.new_val(k); }
-func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 { return cx.parse_type(k, g, i, out); }
-func parse_params(k: addr, pg: u64, i: u64, idx: u64, tintbl: addr, symtbl: addr) -> u64 {
+func new_ty(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); }
+func new_val(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); }
+func parse_type(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 { return cx.parse_type(k, g, i, out); }
+func parse_params(k: Mut(st.State), pg: u64, i: u64, idx: u64, tintbl: Mut(ty.Ty), symtbl: Mut(u64)) -> u64 {
   return cx.parse_params(k, pg, i, idx, tintbl, symtbl);
 }
 
 // 形参类型表 → TypeId 表（Fn 签名用）。
-func sig_tids(k: addr, paramp: addr, i: u64, np: u64, sig: addr) -> u64 {
+func sig_tids(k: Mut(st.State), paramp: Mut(ty.Ty), i: u64, np: u64, sig: Mut(u64)) -> u64 {
   if i >= np { return i; }
-  let t: addr = st.st_alloc(k, 32);
-  let c: u64 = ty.ty_at(t, paramp + i * 32);
-  store(sig + i * 8, ireg.tid_of(k, t));
+  let t: Mut(ty.Ty) = new_ty(k);
+  let c: u64 = ty.ty_at(t, cx.ty_idx(paramp, i));
+  let wp: Mut(u64) = cx.word_idx(sig, i);
+  deref(wp) = ireg.tid_of(k, t);
   return sig_tids(k, paramp, i + 1, np, sig);
 }
 
 // 条目 40 字节：[限定名, 源号, 所在组, 形参组下标, 签名]。
 // 记的是出现位置所在的组与下标，不是文件根：匿名过程可以出现在函数体里。
-func enqueue(k: addr, nm: u64, g: u64, node: u64, sg: addr) -> u64 {
-  let e: addr = st.st_q_add(k);
-  store(e, nm);
-  store(e + 8, st.st_src(k));
-  store(e + 16, g);
-  store(e + 24, node);
-  store(e + 32, sg as u64);
+func enqueue(k: Mut(st.State), nm: u64, g: u64, node: u64, sg: Mut(u8)) -> u64 {
+  let e: Mut(AnonEntry) = ptr_cast(Mut(AnonEntry), st.st_q_add(k));
+  e.name = nm;
+  e.src = st.st_src(k);
+  e.grp = g;
+  e.node = node;
+  e.sg = sg;
   return 1;
 }
 
-// 取下一个待编条目；队列空回 0。
-func pending(k: addr) -> addr {
+// 取下一个待编条目；队列空回 null。
+func pending(k: Mut(st.State)) -> Mut(AnonEntry) {
   let n: u64 = st.st_q_count(k);
   let h: u64 = st.st_qhead(k);
-  if h >= n { return 0 as addr; }
+  if h >= n { return null_ref(Mut(AnonEntry)); }
   st.st_set_qhead(k, h + 1);
-  return st.st_q_at(k, h);
+  return ptr_cast(Mut(AnonEntry), st.st_q_at(k, h));
 }
 
-func entry_name(e: addr) -> u64 { return load(e); }
-func entry_src(e: addr) -> u64 { return load(e + 8); }
-func entry_group(e: addr) -> u64 { return load(e + 16); }
-func entry_node(e: addr) -> u64 { return load(e + 24); }
+func entry_name(e: Mut(AnonEntry)) -> u64 { return e.name; }
+func entry_src(e: Mut(AnonEntry)) -> u64 { return e.src; }
+func entry_group(e: Mut(AnonEntry)) -> u64 { return e.grp; }
+func entry_node(e: Mut(AnonEntry)) -> u64 { return e.node; }
 
 // func (形参) [-> 返回] { 体 } 作为一个 Fn(...) 值；返回体之后的位置。
-func func_expr(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+func func_expr(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let n: u64 = n_count(g);
   let pg: u64 = n_at(g, i + 1);
-  let paramp: addr = st.st_alloc(k, 512);
-  let syms: addr = st.st_alloc(k, 128);
+  let paramp: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 512));
+  let syms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
-  let rt: addr = new_ty(k);
+  let rt: Mut(ty.Ty) = new_ty(k);
   ty.ty_none(rt);
   let a0: u64 = i + 2;
   let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
   let seq: u64 = st.st_anon(k);
   let nx: u64 = st.st_set_anon(k, seq + 1);
   let nm: u64 = modules.qual_num(k, st.st_src(k), s.a_anon(), seq);
-  let sg: addr = cx.sig_new(k, rt, np, paramp);
-  let se: addr = modules.sym_add(k, modules.sym_kind_func(), st.st_src(k), nm, nm, sg, 0);
+  let sg: Mut(u8) = cx.sig_new(k, rt, np, paramp);
+  let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_func(), st.st_src(k), nm, nm, sg, 0);
   let sd: u64 = modules.sym_set_decl(se, i);
   let ss: u64 = modules.sym_set_src(se, st.st_src(k));
   let en: u64 = enqueue(k, nm, g, i + 1, sg);
-  let sig: addr = st.st_ralloc(k, np * 8 + 8);
+  let sig: Mut(u64) = ptr_cast(Mut(u64), st.st_ralloc(k, np * 8 + 8));
   let fl: u64 = sig_tids(k, paramp, 0, np, sig);
   let fid: u64 = ct.fn_t(k, ireg.tid_of(k, rt), np, sig as u64);
   let sf: u64 = modules.sym_set_fnid(se, fid);
-  let ft: addr = new_ty(k);
+  let ft: Mut(ty.Ty) = new_ty(k);
   let pr: u64 = ireg.project(k, fid, ft);
-  let v: addr = new_val(k);
+  let v: Mut(ty.Val) = new_val(k);
   let vr: u64 = ty.val_ref(v, nm, ft);
-  let c: addr = new_val(k);
+  let c: Mut(ty.Val) = new_val(k);
   let c3: u64 = cx.coerce(k, v, ft, want, c);
   ty.val_at(out, c);
   return a + 1;

@@ -1,14 +1,39 @@
 // tyreg.lain —— 逻辑类型注册表（TypeId）与只读反射表：编号、物理投影、表布局与打包。
 // 查询原语的 IR 内联发射在 reflect.lain，那边单向 import 本文件。
-// 逻辑种类：0 bits、1 floats、2 vec、3 addr、4 struct、5 enum、6 Ref、7 Mut、
-// 8 Slice、9 MutSlice、10 Array、11 Fn、12 void。物理投影里 Ref/Mut/Fn 与
-// 聚合都是 #addr，Slice/MutSlice/Array 是带形状的 #addr（Slice 指向 16 字节头）。
+// 逻辑种类：0 bits、1 floats、2 vec、3 ptr、4 struct、5 enum、6 Ref、7 Mut、
+// 8 Slice、9 MutSlice、10 Array、11 Fn、12 void、13 Type。
 let st = import("state");
 let ty = import("types");
 let agg = import("agg");
 let modules = import("modules");
 let ir = import("ir");
 let s = import("sym");
+
+struct TypeRegEntry {
+  kind: u64,
+  width: u64,
+  sg: u64,
+  sh: u64,
+  pad: u64
+}
+
+struct ReflHeader {
+  kind: u64,
+  width: u64,
+  sg: u64,
+  size: u64,
+  align: u64,
+  fcount: u64,
+  name_off: u64,
+  name_len: u64
+}
+
+struct ReflField {
+  name_off: u64,
+  name_len: u64,
+  tid: u64,
+  off: u64
+}
 
 func lk_bits() -> u64 { return 0; }
 func lk_floats() -> u64 { return 1; }
@@ -52,38 +77,34 @@ func buffer_name() -> u64 { return s.intern("__meta_buf", 10); }
 func buffer_bytes() -> u64 { return 8192; }
 
 // --- 类型注册表 -------------------------------------------------------------
-func reg_at(k: addr, i: u64) -> addr {
-  let b: addr = st.st_tybase(k);
-  return b + i * 40;
+func reg_at(k: Mut(st.State), i: u64) -> Mut(TypeRegEntry) {
+  let b: Mut(u8) = st.st_tybase(k);
+  return ptr_cast(Mut(TypeRegEntry), b + i * 40);
 }
-func reg_slot(k: addr, id: u64) -> addr { return reg_at(k, id - 1); }
-func reg_count(k: addr) -> u64 { return st.st_tyused(k) / reg_size(); }
+func reg_slot(k: Mut(st.State), id: u64) -> Mut(TypeRegEntry) { return reg_at(k, id - 1); }
+func reg_count(k: Mut(st.State)) -> u64 { return st.st_tyused(k) / reg_size(); }
 
-func reg_init(k: addr) -> u64 {
-  if st.st_tybase(k) as u64 != 0 { return 1; }
-  let b: addr = st.st_ralloc(k, reg_size() * reg_init_cap());
+func reg_init(k: Mut(st.State)) -> u64 {
+  if (st.st_tybase(k) as u64) != 0 { return 1; }
+  let b: Mut(u8) = st.st_ralloc(k, reg_size() * reg_init_cap());
   let c: u64 = st.st_set_tycap(k, reg_init_cap());
   let d: u64 = st.st_set_tybase(k, b);
   return 1;
 }
 
 // 翻倍：新块从持久池里取，旧块随编译结束一起作废。
-func reg_grow(k: addr) -> u64 {
+func reg_grow(k: Mut(st.State)) -> u64 {
   let n: u64 = reg_count(k);
   let ncap: u64 = st.st_tycap(k) * 2;
-  let nb: addr = st.st_ralloc(k, reg_size() * ncap);
+  let nb: Mut(u8) = st.st_ralloc(k, reg_size() * ncap);
   if st.st_ok(k) != 0 { return 0; }
   let i: u64 = loop c(i: u64 = 0) while i < n {
-    let src: addr = reg_at(k, i);
-    let dst: addr = nb + i * 40;
-    let v0: u64 = load(src);
-    let v1: u64 = load(src + 8);
-    let v2: u64 = load(src + 16);
-    let v3: u64 = load(src + 24);
-    store(dst, v0);
-    store(dst + 8, v1);
-    store(dst + 16, v2);
-    store(dst + 24, v3);
+    let src: Mut(TypeRegEntry) = reg_at(k, i);
+    let dst: Mut(TypeRegEntry) = ptr_cast(Mut(TypeRegEntry), nb + i * 40);
+    dst.kind = src.kind;
+    dst.width = src.width;
+    dst.sg = src.sg;
+    dst.sh = src.sh;
     i = i + 1;
   };
   let a: u64 = st.st_set_tybase(k, nb);
@@ -91,26 +112,26 @@ func reg_grow(k: addr) -> u64 {
   return 1;
 }
 
-func reg_hit(k: addr, i: u64, kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
-  let p: addr = reg_at(k, i);
-  if load(p) == kk {
-    if load(p + 8) == w {
-      if load(p + 16) == sg {
-        if load(p + 24) == sh { return 1; }
+func reg_hit(k: Mut(st.State), i: u64, kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
+  let p: Mut(TypeRegEntry) = reg_at(k, i);
+  if p.kind == kk {
+    if p.width == w {
+      if p.sg == sg {
+        if p.sh == sh { return 1; }
       }
     }
   }
   return 0;
 }
 
-func reg_scan(k: addr, kk: u64, w: u64, sg: u64, sh: u64, i: u64, n: u64) -> u64 {
+func reg_scan(k: Mut(st.State), kk: u64, w: u64, sg: u64, sh: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   if reg_hit(k, i, kk, w, sg, sh) == 1 { return i + 1; }
   return reg_scan(k, kk, w, sg, sh, i + 1, n);
 }
 
 // 登记一个类型并回它的 TypeId（1 起）；同种类同宽同符号性同形状共用编号。
-func ty_add(k: addr, kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
+func ty_add(k: Mut(st.State), kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
   let e: u64 = reg_init(k);
   let n: u64 = reg_count(k);
   let hit: u64 = reg_scan(k, kk, w, sg, sh, 0, n);
@@ -119,24 +140,24 @@ func ty_add(k: addr, kk: u64, w: u64, sg: u64, sh: u64) -> u64 {
     let g: u64 = reg_grow(k);
     if st.st_ok(k) != 0 { return 0; }
   }
-  let p: addr = reg_at(k, n);
-  store(p, kk);
-  store(p + 8, w);
-  store(p + 16, sg);
-  store(p + 24, sh);
+  let p: Mut(TypeRegEntry) = reg_at(k, n);
+  p.kind = kk;
+  p.width = w;
+  p.sg = sg;
+  p.sh = sh;
   let m: u64 = st.st_set_tyused(k, (n + 1) * reg_size());
   return n + 1;
 }
 
-func ty_kind(k: addr, id: u64) -> u64 { return load(reg_slot(k, id)); }
-func ty_width(k: addr, id: u64) -> u64 { return load(reg_slot(k, id) + 8); }
-func ty_signed(k: addr, id: u64) -> u64 { return load(reg_slot(k, id) + 16); }
-func ty_shape(k: addr, id: u64) -> u64 { return load(reg_slot(k, id) + 24); }
+func ty_kind(k: Mut(st.State), id: u64) -> u64 { let p: Mut(TypeRegEntry) = reg_slot(k, id); return p.kind; }
+func ty_width(k: Mut(st.State), id: u64) -> u64 { let p: Mut(TypeRegEntry) = reg_slot(k, id); return p.width; }
+func ty_signed(k: Mut(st.State), id: u64) -> u64 { let p: Mut(TypeRegEntry) = reg_slot(k, id); return p.sg; }
+func ty_shape(k: Mut(st.State), id: u64) -> u64 { let p: Mut(TypeRegEntry) = reg_slot(k, id); return p.sh; }
 
-func void_tid(k: addr) -> u64 { return ty_add(k, lk_void(), 0, 0, 0); }
+func void_tid(k: Mut(st.State)) -> u64 { return ty_add(k, lk_void(), 0, 0, 0); }
 
 // 把一个 Ty 归到一个 TypeId：带形状的按形状找，形状还没编号就现登记。
-func tid_of(k: addr, t: addr) -> u64 {
+func tid_of(k: Mut(st.State), t: Mut(ty.Ty)) -> u64 {
   if ty.ty_known(t) == 0 { return void_tid(k); }
   let sh: u64 = ty.tsh(t);
   if sh != 0 {
@@ -151,7 +172,7 @@ func tid_of(k: addr, t: addr) -> u64 {
 }
 
 // 物理投影：逻辑类型 → 代码发射用的 Ty。
-func project(k: addr, id: u64, out: addr) -> u64 {
+func project(k: Mut(st.State), id: u64, out: Mut(ty.Ty)) -> u64 {
   let lk: u64 = ty_kind(k, id);
   let w: u64 = ty_width(k, id);
   let sg: u64 = ty_signed(k, id);
@@ -164,14 +185,14 @@ func project(k: addr, id: u64, out: addr) -> u64 {
   return ty.ty_set_sh(out, sh);
 }
 
-func size_of(k: addr, id: u64) -> u64 {
+func size_of(k: Mut(st.State), id: u64) -> u64 {
   let sh: u64 = ty_shape(k, id);
   if sh != 0 { return agg.shp_size(sh); }
   if ty_kind(k, id) == lk_void() { return 0; }
   return agg.type_size(ty_kind(k, id), ty_width(k, id), 0);
 }
 
-func align_of(k: addr, id: u64) -> u64 {
+func align_of(k: Mut(st.State), id: u64) -> u64 {
   let sh: u64 = ty_shape(k, id);
   if sh != 0 { return agg.shp_align(sh); }
   if ty_kind(k, id) == lk_void() { return 1; }
@@ -194,7 +215,7 @@ func scalar_name(kk: u64, w: u64, sg: u64) -> u64 {
   return s.t_u64();
 }
 
-func type_name(k: addr, i: u64) -> u64 {
+func type_name(k: Mut(st.State), i: u64) -> u64 {
   let sh: u64 = ty_shape(k, i);
   if sh != 0 { return agg.shp_name(sh); }
   if ty_kind(k, i) == lk_void() { return s.t_void(); }
@@ -203,27 +224,27 @@ func type_name(k: addr, i: u64) -> u64 {
 }
 
 // --- 反射表 ----------------------------------------------------------------
-func seed_fields(k: addr, sh: u64, i: u64, n: u64) -> u64 {
+func seed_fields(k: Mut(st.State), sh: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 1; }
-  let m: addr = agg.mem_at(sh, i);
-  let t: addr = st.st_alloc(k, 32);
+  let m: Mut(agg.Member) = agg.mem_at(sh, i);
+  let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let mt: u64 = agg.mem_ty(k, m, t);
   let e: u64 = tid_of(k, t);
   return seed_fields(k, sh, i + 1, n);
 }
 
-func seed_shape(k: addr, sh: u64) -> u64 {
-  if sh as u64 == 0 { return 1; }
-  let t: addr = st.st_alloc(k, 32);
+func seed_shape(k: Mut(st.State), sh: u64) -> u64 {
+  if sh == 0 { return 1; }
+  let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let a: u64 = ty.ty_addr(t);
   let b: u64 = ty.ty_set_sh(t, sh);
   let e: u64 = tid_of(k, t);
   return seed_fields(k, sh, 0, agg.shp_count(sh));
 }
 
-func seed_syms(k: addr, i: u64, n: u64) -> u64 {
+func seed_syms(k: Mut(st.State), i: u64, n: u64) -> u64 {
   if i >= n { return 1; }
-  let e: addr = modules.sym_at(k, i);
+  let e: Mut(modules.SymEntry) = modules.sym_at(k, i);
   let kd: u64 = modules.sym_kind(e);
   let r: u64 = if kd == modules.sym_kind_struct() or kd == modules.sym_kind_enum() {
     seed_shape(k, modules.sym_shape(e))
@@ -233,64 +254,64 @@ func seed_syms(k: addr, i: u64, n: u64) -> u64 {
   return seed_syms(k, i + 1, n);
 }
 
-func zero_bytes(p: addr, n: u64) -> u64 {
+func zero_bytes(p: Mut(u8), n: u64) -> u64 {
+  let bs: MutSlice(u8) = make_slice(MutSlice(u8), p, n);
   let z: u8 = 0;
   let r: u64 = loop zb(i: u64 = 0) while i < n {
-    store(p + i, z);
+    bs[i] = z;
     i = i + 1;
   };
   return n;
 }
 
-func fill_fields(k: addr, base: addr, p: addr, sh: u64, j: u64, cnt: u64, pos: u64) -> u64 {
+func fill_fields(k: Mut(st.State), base: Mut(u8), p: Mut(u8), sh: u64, j: u64, cnt: u64, pos: u64) -> u64 {
   if j >= cnt { return pos; }
-  let m: addr = agg.mem_at(sh, j);
-  let fr: addr = p + 64 + j * 32;
+  let m: Mut(agg.Member) = agg.mem_at(sh, j);
+  let fr: Mut(ReflField) = ptr_cast(Mut(ReflField), p + 64 + j * 32);
   let fn: u64 = agg.mem_name(m);
-  let fl: u64 = if fn as u64 == 0 { 0 } else { modules.sym_len(fn) };
-  store(fr, pos);
-  store(fr + 8, fl);
-  store(fr + 24, agg.mem_off(m));
-  let t: addr = st.st_alloc(k, 32);
+  let fl: u64 = if fn == 0 { 0 } else { modules.sym_len(fn) };
+  fr.name_off = pos;
+  fr.name_len = fl;
+  fr.off = agg.mem_off(m);
+  let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let mt: u64 = agg.mem_ty(k, m, t);
   let tid: u64 = tid_of(k, t);
-  store(fr + 16, tid);
-  let pos2: u64 = if fn as u64 == 0 { pos } else { pos + fl };
-  let cp: u64 = if fn as u64 == 0 { 0 } else { modules.copy_sym(base + pos, fn) };
+  fr.tid = tid;
+  let pos2: u64 = if fn == 0 { pos } else { pos + fl };
+  let cp: u64 = if fn == 0 { 0 } else { modules.copy_sym(base + pos, fn) };
   return fill_fields(k, base, p, sh, j + 1, cnt, pos2);
 }
 
-func fill_type(k: addr, base: addr, i: u64, n: u64, pos: u64) -> u64 {
+func fill_type(k: Mut(st.State), base: Mut(u8), i: u64, n: u64, pos: u64) -> u64 {
   if i > n { return pos; }
   let row_off: u64 = i * stride();
-  let p: addr = base + row_off;
+  let p: Mut(u8) = base + row_off;
+  let hd: Mut(ReflHeader) = ptr_cast(Mut(ReflHeader), p);
   let kk: u64 = ty_kind(k, i);
   let w: u64 = ty_width(k, i);
   let sg: u64 = ty_signed(k, i);
   let sh: u64 = ty_shape(k, i);
-  store(p, kk);
-  store(p + 8, w);
-  store(p + 16, sg);
-  store(p + 24, size_of(k, i));
-  store(p + 32, align_of(k, i));
+  hd.kind = kk;
+  hd.width = w;
+  hd.sg = sg;
+  hd.size = size_of(k, i);
+  hd.align = align_of(k, i);
   let cnt: u64 = if sh != 0 { agg.shp_count(sh) } else { 0 };
   let lim: u64 = if cnt > field_cap() { field_cap() } else { cnt };
-  store(p + 40, lim);
+  hd.fcount = lim;
   let ns: u64 = type_name(k, i);
-  let nl: u64 = if ns as u64 == 0 { 0 } else { modules.sym_len(ns) };
-  store(p + 48, pos);
-  store(p + 56, nl);
-  let pos2: u64 = if ns as u64 == 0 { pos } else { pos + nl };
-  let cp: u64 = if ns as u64 == 0 { 0 } else { modules.copy_sym(base + pos, ns) };
+  let nl: u64 = if ns == 0 { 0 } else { modules.sym_len(ns) };
+  hd.name_off = pos;
+  hd.name_len = nl;
+  let pos2: u64 = if ns == 0 { pos } else { pos + nl };
+  let cp: u64 = if ns == 0 { 0 } else { modules.copy_sym(base + pos, ns) };
   return fill_type(k, base, i + 1, n, fill_fields(k, base, p, sh, 0, lim, pos2));
 }
 
-// 把整张表铺进当前模块：只读表 + 一块可写的生成为输出缓冲。
+// 把整张表铺进当前模块：只读表 + 一块可写的生成输出缓冲。
 // 判重看数据段本身：临时模块是从主模块克隆出来的，克隆那一刻已经铺好的表
 // 跟着一起过去了；而模块句柄会被回收复用，只看编号会漏铺。
-// 表里的类型行在铺下的那一刻定死：之后 inject 新登记的类型没有行，
-// 对它们的查询按越界算，签名解析只认形状号，不依赖这张表。
-func prepare(k: addr) -> u64 {
+func prepare(k: Mut(st.State)) -> u64 {
   let key: u64 = st.st_mod(k) + 1;
   let dn0: u64 = reflect_name();
   let present: u64 = ir.data_find(k, dn0);
@@ -302,9 +323,9 @@ func prepare(k: addr) -> u64 {
   if st.st_ok(k) != 0 { return 0; }
   let cnt: u64 = reg_count(k);
   let rows: u64 = cnt + 1;
-  let db: addr = st.st_databuf(k);
+  let db: Mut(u8) = st.st_databuf(k);
   let du: u64 = st.st_dataused(k);
-  let base: addr = db + du;
+  let base: Mut(u8) = db + du;
   let need: u64 = stride() * rows + buffer_bytes();
   if st.st_dataused(k) + need > st.st_datacap(k) {
     let f: u64 = st.st_fail(k, 5);
@@ -315,7 +336,7 @@ func prepare(k: addr) -> u64 {
   let dn: u64 = reflect_name();
   let idx: u64 = ir.data_add(k, dn, base, end, 0);
   let used: u64 = st.st_set_dataused(k, st.st_dataused(k) + end);
-  let buf: addr = st.st_alloc(k, buffer_bytes());
+  let buf: Mut(u8) = st.st_alloc(k, buffer_bytes());
   let z2: u64 = zero_bytes(buf, buffer_bytes());
   let bn: u64 = buffer_name();
   let bidx: u64 = ir.data_add(k, bn, buf, buffer_bytes(), 1);

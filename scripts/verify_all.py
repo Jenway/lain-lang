@@ -833,6 +833,10 @@ def main():
     if os.path.isdir(EXAMPLES):
         zero_addr_targets += [os.path.join(EXAMPLES, n)
                               for n in sorted(os.listdir(EXAMPLES)) if n.endswith(".lain")]
+    src_dir = os.path.join(ROOT, "src")
+    if os.path.isdir(src_dir):
+        zero_addr_targets += [os.path.join(src_dir, n)
+                              for n in sorted(os.listdir(src_dir)) if n.endswith(".lain")]
     for zpath in zero_addr_targets:
         with open(zpath, "r", encoding="utf-8") as zh:
             zsrc = re.sub(r"//.*", "", zh.read())

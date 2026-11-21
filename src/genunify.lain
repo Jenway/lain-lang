@@ -10,6 +10,50 @@ let ctf = import("ctfor");
 let ctp = import("ctprim");
 let ctfn = import("ctfn");
 
+struct CtParamRec {
+  name: u64,
+  ty_start: u64,
+  ty_end: u64
+}
+
+struct WFieldRec {
+  fname: u64,
+  fkind: u64,
+  fa: u64,
+  fb: u64
+}
+
+struct WitnessRec {
+  nf: u64
+}
+
+struct MonoCacheRec {
+  tpl_e: u64,
+  nct: u64,
+  mangled_q: u64,
+  concrete_sg: Mut(u8)
+}
+
+struct MonoBlk {
+  pad0: u64,
+  pad8: u64,
+  pad16: u64,
+  base: Mut(u8),
+  n: u64
+}
+
+func ctparam_at(tbl: Mut(CtParamRec), idx: u64) -> Mut(CtParamRec) {
+  return ptr_cast(Mut(CtParamRec), ptr_cast(Mut(u8), tbl) + idx * 24);
+}
+
+func val_at(vals: Mut(ctf.CtVal), idx: u64) -> Mut(ctf.CtVal) {
+  return ptr_cast(Mut(ctf.CtVal), ptr_cast(Mut(u8), vals) + idx * 24);
+}
+
+func word_at(arr: Mut(u64), idx: u64) -> Mut(u64) {
+  return ptr_cast(Mut(u64), ptr_cast(Mut(u8), arr) + idx * 8);
+}
+
 // 编译期形参项 24B：[name@0, ty_start@8, ty_end@16]；最多 8 项。
 func ct_skip_ty(qg: u64, i: u64) -> u64 {
   let n: u64 = ax.n_count(qg);
@@ -18,7 +62,7 @@ func ct_skip_ty(qg: u64, i: u64) -> u64 {
   return ct_skip_ty(qg, i + 1);
 }
 
-func parse_ctparams(k: addr, qg: u64, i: u64, out: addr, idx: u64) -> u64 {
+func parse_ctparams(k: Mut(st.State), qg: u64, i: u64, out: Mut(CtParamRec), idx: u64) -> u64 {
   let n: u64 = ax.n_count(qg);
   if i >= n { return idx; }
   if ax.is_comma(qg, i) == 1 { return parse_ctparams(k, qg, i + 1, out, idx); }
@@ -28,39 +72,39 @@ func parse_ctparams(k: addr, qg: u64, i: u64, out: addr, idx: u64) -> u64 {
     return idx;
   }
   let te: u64 = ct_skip_ty(qg, i + 2);
-  let p: addr = out + idx * 24;
-  store(p, ax.n_sym(qg, i));
-  store(p + 8, i + 2);
-  store(p + 16, te);
+  let p: Mut(CtParamRec) = ctparam_at(out, idx);
+  p.name = ax.n_sym(qg, i);
+  p.ty_start = i + 2;
+  p.ty_end = te;
   return parse_ctparams(k, qg, te, out, idx + 1);
 }
 
-func ct_find(ctp_tbl: addr, nct: u64, name: u64, i: u64) -> u64 {
+func ct_find(ctp_tbl: Mut(CtParamRec), nct: u64, name: u64, i: u64) -> u64 {
   if i >= nct { return 999; }
-  if load(ctp_tbl + i * 24) == name { return i; }
+  let p: Mut(CtParamRec) = ctparam_at(ctp_tbl, i);
+  if p.name == name { return i; }
   return ct_find(ctp_tbl, nct, name, i + 1);
 }
 
 // --- 类型模式合一 ---------------------------------------------------------
-func bind_or_check(k: addr, idx: u64, kind: u64, val: u64, vals: addr, bound: addr) -> u64 {
-  let b0: u64 = load(bound + idx * 8);
-  if b0 == 1 {
-    let slot: addr = vals + idx * 24;
-    let sk: u64 = load(slot);
-    let sv: u64 = load(slot + 8);
-    if sk != kind or sv != val {
+func bind_or_check(k: Mut(st.State), idx: u64, kind: u64, val: u64, vals: Mut(ctf.CtVal), bound: Mut(u64)) -> u64 {
+  let bp: Mut(u64) = word_at(bound, idx);
+  let slot: Mut(ctf.CtVal) = val_at(vals, idx);
+  if deref(bp) == 1 {
+    if slot.kind != kind or slot.a != val {
       ctf.fail_msg(k, "type inference conflict", 23, ax.e_type());
       return 0;
     }
     return 1;
   }
-  let slot: addr = vals + idx * 24;
-  store(slot, kind); store(slot + 8, val); store(slot + 16, 0);
-  store(bound + idx * 8, 1);
+  slot.kind = kind;
+  slot.a = val;
+  slot.b = 0;
+  deref(bp) = 1;
   return 1;
 }
 
-func ast_has_unbound(g: u64, i: u64, end: u64, ctp_tbl: addr, nct: u64, bound: addr) -> u64 {
+func ast_has_unbound(g: u64, i: u64, end: u64, ctp_tbl: Mut(CtParamRec), nct: u64, bound: Mut(u64)) -> u64 {
   if i >= end { return 0; }
   if ax.is_group(g, i) == 1 {
     let sub: u64 = ax.n_at(g, i);
@@ -69,15 +113,14 @@ func ast_has_unbound(g: u64, i: u64, end: u64, ctp_tbl: addr, nct: u64, bound: a
     if ax.is_name(g, i) == 1 {
       let idx: u64 = ct_find(ctp_tbl, nct, ax.n_sym(g, i), 0);
       if idx != 999 {
-        let bd: u64 = load(bound + idx * 8);
-        if bd == 0 { return 1; }
+        if deref(word_at(bound, idx)) == 0 { return 1; }
       }
     }
   }
   return ast_has_unbound(g, i + 1, end, ctp_tbl, nct, bound);
 }
 
-func unify_wrap(k: addr, pg: u64, i: u64, end: u64, want_sk: u64, arg_tid: u64, ctp_tbl: addr, nct: u64, vals: addr, bound: addr) -> u64 {
+func unify_wrap(k: Mut(st.State), pg: u64, i: u64, end: u64, want_sk: u64, arg_tid: u64, ctp_tbl: Mut(CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64)) -> u64 {
   let sh: u64 = ireg.ty_shape(k, arg_tid);
   if sh == 0 or agg.shp_kind(sh) != want_sk { return 0; }
   let elem: u64 = ct.elem_tid(k, sh);
@@ -85,7 +128,7 @@ func unify_wrap(k: addr, pg: u64, i: u64, end: u64, want_sk: u64, arg_tid: u64, 
   return unify_type(k, grp, 0, ax.n_count(grp), elem, ctp_tbl, nct, vals, bound);
 }
 
-func unify_type(k: addr, pg: u64, i: u64, end: u64, arg_tid: u64, ctp_tbl: addr, nct: u64, vals: addr, bound: addr) -> u64 {
+func unify_type(k: Mut(st.State), pg: u64, i: u64, end: u64, arg_tid: u64, ctp_tbl: Mut(CtParamRec), nct: u64, vals: Mut(ctf.CtVal), bound: Mut(u64)) -> u64 {
   if i >= end { return 1; }
   if ax.is_name(pg, i) == 1 and i + 1 == end {
     let nm: u64 = ax.n_sym(pg, i);
@@ -122,85 +165,85 @@ func unify_type(k: addr, pg: u64, i: u64, end: u64, arg_tid: u64, ctp_tbl: addr,
 
 // --- 单态化缓存（存在 st_genblk +24/+32，每条 288 字节） --------------------
 // [tpl_e@0, nct@8, mangled_q@16, concrete_sg@24, vals(8*24B)@32]
-func wrec_eq(w1: addr, w2: addr) -> u64 {
+func wrec_eq(w1: Mut(WitnessRec), w2: Mut(WitnessRec)) -> u64 {
   if w1 as u64 == w2 as u64 { return 1; }
-  let n1: u64 = load(w1); let n2: u64 = load(w2);
+  let n1: u64 = w1.nf;
+  let n2: u64 = w2.nf;
   if n1 != n2 { return 0; }
   let i: u64 = loop w(i: u64 = 0) while i < n1 {
-    let f1: addr = w1 + 8 + i * 32;
-    let f2: addr = w2 + 8 + i * 32;
-    let n1: u64 = load(f1); let n2: u64 = load(f2);
-    let k1: u64 = load(f1 + 8); let k2: u64 = load(f2 + 8);
-    let a1: u64 = load(f1 + 16); let a2: u64 = load(f2 + 16);
-    if n1 != n2 or k1 != k2 or a1 != a2 { return 0; }
-    if k1 == 7 {
-      let p1: u64 = load(f1 + 24); let p2: u64 = load(f2 + 24);
-      if wrec_eq(p1 as addr, p2 as addr) == 0 { return 0; }
+    let f1: Mut(WFieldRec) = ptr_cast(Mut(WFieldRec), ptr_cast(Mut(u8), w1) + 8 + i * 32);
+    let f2: Mut(WFieldRec) = ptr_cast(Mut(WFieldRec), ptr_cast(Mut(u8), w2) + 8 + i * 32);
+    if f1.fname != f2.fname { return 0; }
+    if f1.fkind != f2.fkind { return 0; }
+    if f1.fa != f2.fa { return 0; }
+    if f1.fkind == 7 {
+      if wrec_eq(ptr_cast(Mut(WitnessRec), f1.fb), ptr_cast(Mut(WitnessRec), f2.fb)) == 0 { return 0; }
     }
     i = i + 1;
   };
   return 1;
 }
 
-func val_eq(v1: addr, v2: addr) -> u64 {
-  let k1: u64 = load(v1); let k2: u64 = load(v2);
-  let a1: u64 = load(v1 + 8); let a2: u64 = load(v2 + 8);
-  if k1 != k2 or a1 != a2 { return 0; }
-  if k1 == 7 {
-    let p1: u64 = load(v1 + 16); let p2: u64 = load(v2 + 16);
-    return wrec_eq(p1 as addr, p2 as addr);
+func val_eq(v1: Mut(ctf.CtVal), v2: Mut(ctf.CtVal)) -> u64 {
+  if v1.kind != v2.kind { return 0; }
+  if v1.a != v2.a { return 0; }
+  if v1.kind == 7 {
+    return wrec_eq(ptr_cast(Mut(WitnessRec), v1.b), ptr_cast(Mut(WitnessRec), v2.b));
   }
   return 1;
 }
 
-func vals_eq(v1: addr, v2: addr, i: u64, n: u64) -> u64 {
+func vals_eq(v1: Mut(ctf.CtVal), v2: Mut(ctf.CtVal), i: u64, n: u64) -> u64 {
   if i >= n { return 1; }
-  if val_eq(v1 + i * 24, v2 + i * 24) == 0 { return 0; }
+  if val_eq(val_at(v1, i), val_at(v2, i)) == 0 { return 0; }
   return vals_eq(v1, v2, i + 1, n);
 }
 
-func cache_find(k: addr, tpl_e: u64, nct: u64, vals: addr) -> addr {
-  let gb: addr = st.st_genblk(k);
-  let bu: u64 = load(gb + 24);
-  if bu == 0 { return 0 as addr; }
-  let base: addr = bu as addr;
-  let n: u64 = load(gb + 32);
+func cache_find(k: Mut(st.State), tpl_e: u64, nct: u64, vals: Mut(ctf.CtVal)) -> Mut(MonoCacheRec) {
+  let gb: Mut(MonoBlk) = ptr_cast(Mut(MonoBlk), st.st_genblk(k));
+  let base: Mut(u8) = gb.base;
+  if is_null(base) { return null_ref(Mut(MonoCacheRec)); }
+  let n: u64 = gb.n;
   let i: u64 = loop sc(i: u64 = 0) while i < n {
-    let rec: addr = base + i * 288;
-    let rt: u64 = load(rec); let rn: u64 = load(rec + 8);
-    if rt == tpl_e and rn == nct {
-      if vals_eq(rec + 32, vals, 0, nct) == 1 { return rec; }
+    let raw: Mut(u8) = base + i * 288;
+    let rec: Mut(MonoCacheRec) = ptr_cast(Mut(MonoCacheRec), raw);
+    if rec.tpl_e == tpl_e and rec.nct == nct {
+      if vals_eq(ptr_cast(Mut(ctf.CtVal), raw + 32), vals, 0, nct) == 1 { return rec; }
     }
     i = i + 1;
   };
-  return 0 as addr;
+  return null_ref(Mut(MonoCacheRec));
 }
 
-func cache_base(k: addr) -> addr {
-  let gb: addr = st.st_genblk(k);
-  let b0u: u64 = load(gb + 24);
-  if b0u != 0 { return b0u as addr; }
+func cache_base(k: Mut(st.State)) -> Mut(u8) {
+  let gb: Mut(MonoBlk) = ptr_cast(Mut(MonoBlk), st.st_genblk(k));
+  if (gb.base as u64) != 0 { return gb.base; }
   let csz: u64 = 288 * 128;
-  let nb: addr = st.st_ralloc(k, csz);
-  store(gb + 24, nb as u64);
+  let nb: Mut(u8) = st.st_ralloc(k, csz);
+  gb.base = nb;
   return nb;
 }
 
-func cache_put(k: addr, tpl_e: u64, nct: u64, q: u64, sg: addr, vals: addr) -> u64 {
-  let gb: addr = st.st_genblk(k);
-  let base: addr = cache_base(k);
-  let n: u64 = load(gb + 32);
+func cache_put(k: Mut(st.State), tpl_e: u64, nct: u64, q: u64, sg: Mut(u8), vals: Mut(ctf.CtVal)) -> u64 {
+  let gb: Mut(MonoBlk) = ptr_cast(Mut(MonoBlk), st.st_genblk(k));
+  let base: Mut(u8) = cache_base(k);
+  let n: u64 = gb.n;
   if n >= 128 { ctf.fail_msg(k, "mono cache full", 15, ax.e_ast()); return 0; }
-  let rec: addr = base + n * 288;
-  store(rec, tpl_e); store(rec + 8, nct);
-  store(rec + 16, q); store(rec + 24, sg as u64);
+  let raw: Mut(u8) = base + n * 288;
+  let rec: Mut(MonoCacheRec) = ptr_cast(Mut(MonoCacheRec), raw);
+  rec.tpl_e = tpl_e;
+  rec.nct = nct;
+  rec.mangled_q = q;
+  rec.concrete_sg = sg;
+  let rvals: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), raw + 32);
   let i: u64 = loop cp(i: u64 = 0) while i < nct {
-    let dst: addr = rec + 32 + i * 24;
-    let src: addr = vals + i * 24;
-    let s0: u64 = load(src); let s1: u64 = load(src + 8); let s2: u64 = load(src + 16);
-    store(dst, s0); store(dst + 8, s1); store(dst + 16, s2);
+    let dst: Mut(ctf.CtVal) = val_at(rvals, i);
+    let src: Mut(ctf.CtVal) = val_at(vals, i);
+    dst.kind = src.kind;
+    dst.a = src.a;
+    dst.b = src.b;
     i = i + 1;
   };
-  store(gb + 32, n + 1);
+  gb.n = n + 1;
   return 1;
 }

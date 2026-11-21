@@ -5,10 +5,11 @@ extern lain2_ast_delim(h: u64) -> u64 = lain2_ast_delim;
 extern lain2_ast_sym(h: u64) -> u64 = lain2_ast_sym;
 extern lain2_ast_child_count(h: u64) -> u64 = lain2_ast_child_count;
 extern lain2_ast_child(h: u64, i: u64) -> u64 = lain2_ast_child;
-extern lain2_ast_literal_addr(h: u64) -> addr = lain2_ast_literal_addr;
+extern lain2_ast_literal_addr(h: u64) -> Ref(u8) = lain2_ast_literal_addr;
 extern lain2_ast_literal_len(h: u64) -> u64 = lain2_ast_literal_len;
 
 let st = import("state");
+let ty = import("types");
 
 // --- 常量 ---------------------------------------------------------------
 func dl_paren() -> u64 { return 40; }
@@ -24,7 +25,7 @@ func delim(h: u64) -> u64 {
   if h == 0 { return 0; }
   return lain2_ast_delim(h);
 }
-func lit_addr(h: u64) -> addr { return lain2_ast_literal_addr(h); }
+func lit_addr(h: u64) -> Ref(u8) { return lain2_ast_literal_addr(h); }
 func lit_len(h: u64) -> u64 { return lain2_ast_literal_len(h); }
 
 func e_ast() -> u64 { return 1; }
@@ -35,13 +36,17 @@ func e_unsup() -> u64 { return 5; }
 func e_frame() -> u64 { return 6; }
 
 // --- 小块内存 -----------------------------------------------------------
-func new_ty(k: addr) -> addr { return st.st_alloc(k, 32); }
-func new_val(k: addr) -> addr { return st.st_alloc(k, 56); }
+func new_ty(k: Mut(st.State)) -> Mut(ty.Ty) { return ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32)); }
+func new_val(k: Mut(st.State)) -> Mut(ty.Val) { return ptr_cast(Mut(ty.Val), st.st_alloc(k, 56)); }
 
 // 8 字节临时格：end / term 这类输出位置。
-func box(k: addr) -> addr { let p: addr = st.st_alloc(k, 8); store(p, 0); return p; }
-func box_put(p: addr, v: u64) -> u64 { store(p, v); return v; }
-func box_get(p: addr) -> u64 { return load(p); }
+func box(k: Mut(st.State)) -> Mut(u64) {
+  let p: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 8));
+  deref(p) = 0;
+  return p;
+}
+func box_put(p: Mut(u64), v: u64) -> u64 { deref(p) = v; return v; }
+func box_get(p: Mut(u64)) -> u64 { return deref(p); }
 
 // --- AST 访问（调用前必须自己保证下标没有越界） -------------------------
 func n_count(g: u64) -> u64 { return lain2_ast_child_count(g); }
@@ -80,8 +85,8 @@ func delim_of(g: u64, i: u64) -> u64 {
   if i >= n_count(g) { return 0; }
   return lain2_ast_delim(n_at(g, i));
 }
-func byte_at(p: addr, k: u64) -> u64 {
-  let b: u8 = load(p + k);
+func byte_at(p: Ref(u8), k: u64) -> u64 {
+  let b: u8 = deref(p + k);
   return b as u64;
 }
 func tok_first(g: u64, i: u64) -> u64 {
@@ -91,7 +96,7 @@ func tok_first(g: u64, i: u64) -> u64 {
   if is_group_node(h) == 1 { return 0; }
   let len: u64 = lain2_ast_literal_len(h);
   if len == 0 { return 0; }
-  let p: addr = lain2_ast_literal_addr(h);
+  let p: Ref(u8) = lain2_ast_literal_addr(h);
   return byte_at(p, 0);
 }
 func is_digit_token(g: u64, i: u64) -> u64 {
@@ -126,7 +131,7 @@ func skip_semi(g: u64, j: u64) -> u64 {
 }
 
 // 十进制 / 0x 十六进制字面量。
-func num_value(p: addr, n: u64) -> u64 {
+func num_value(p: Ref(u8), n: u64) -> u64 {
   let b0: u64 = byte_at(p, 0);
   if n > 2 and b0 == 48 {
     let b1: u64 = byte_at(p, 1);

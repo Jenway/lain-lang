@@ -27,7 +27,11 @@ let gn = import("generics");
 extern lain2_source_root(src: u64) -> u64 = lain2_source_root;
 extern lain2_source_name(src: u64) -> u64 = lain2_source_name;
 extern lain2_source_import(src: u64, path: u64) -> u64 = lain2_source_import;
-extern lain2_sym_intern(p: addr, n: u64) -> u64 = lain2_sym_intern;
+extern lain2_sym_intern(p: Ref(u8), n: u64) -> u64 = lain2_sym_intern;
+
+func val_idx(ab: Mut(ty.Val), idx: u64) -> Mut(ty.Val) {
+  return ptr_cast(Mut(ty.Val), ptr_cast(Mut(u8), ab) + idx * 56);
+}
 
 // --- ast / ctx / decl 层转发 --------------------------------------------------
 func n_count(g: u64) -> u64 { return ax.n_count(g); }
@@ -41,75 +45,66 @@ func is_semi(g: u64, i: u64) -> u64 { return ax.is_semi(g, i); }
 func is_comma(g: u64, i: u64) -> u64 { return ax.is_comma(g, i); }
 func is_name(g: u64, i: u64) -> u64 { return ax.is_name(g, i); }
 func skip_semi(g: u64, j: u64) -> u64 { return ax.skip_semi(g, j); }
-func lit_addr(h: u64) -> addr { return ax.lit_addr(h); }
+func lit_addr(h: u64) -> Ref(u8) { return ax.lit_addr(h); }
 func lit_len(h: u64) -> u64 { return ax.lit_len(h); }
 func tok_first(g: u64, i: u64) -> u64 { return ax.tok_first(g, i); }
-func new_ty(k: addr) -> addr { return ax.new_ty(k); }
+func new_ty(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); }
 func e_ast() -> u64 { return ax.e_ast(); }
 func e_type() -> u64 { return ax.e_type(); }
-func expect_sym(k: addr, g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); }
-func parse_type(k: addr, g: u64, i: u64, out: addr) -> u64 { return cx.parse_type(k, g, i, out); }
-func parse_params(k: addr, pg: u64, i: u64, idx: u64, tintbl: addr, symtbl: addr) -> u64 { return cx.parse_params(k, pg, i, idx, tintbl, symtbl); }
-func compile_func(k: addr, g: u64, i: u64) -> u64 { return dl.compile_func(k, g, i); }
-func compile_top_let(k: addr, g: u64, i: u64) -> u64 { return dl.compile_top_let(k, g, i); }
+func expect_sym(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); }
+func parse_type(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Ty)) -> u64 { return cx.parse_type(k, g, i, out); }
+func parse_params(k: Mut(st.State), pg: u64, i: u64, idx: u64, tintbl: Mut(ty.Ty), symtbl: Mut(u64)) -> u64 { return cx.parse_params(k, pg, i, idx, tintbl, symtbl); }
+func compile_func(k: Mut(st.State), g: u64, i: u64) -> u64 { return dl.compile_func(k, g, i); }
+func compile_top_let(k: Mut(st.State), g: u64, i: u64) -> u64 { return dl.compile_top_let(k, g, i); }
 
 // --- 名字工具 -----------------------------------------------------------
 // "_storage" 后缀符号：静态数据一律叫 <前缀><名字>_storage。
-func storage_suffix(k: addr) -> u64 {
-  let p: addr = st.st_scratch(k) + 128;
-  let c0: u8 = 95;
-  let c1: u8 = 115;
-  let c2: u8 = 116;
-  let c3: u8 = 111;
-  let c4: u8 = 114;
-  let c5: u8 = 97;
-  let c6: u8 = 103;
-  let c7: u8 = 101;
-  store(p, c0);
-  store(p + 1, c1);
-  store(p + 2, c2);
-  store(p + 3, c3);
-  store(p + 4, c4);
-  store(p + 5, c5);
-  store(p + 6, c6);
-  store(p + 7, c7);
+func storage_suffix(k: Mut(st.State)) -> u64 {
+  let p: Mut(u8) = st.st_scratch(k) + 128;
+  let ps: MutSlice(u8) = make_slice(MutSlice(u8), p, 8);
+  ps[0] = 95;
+  ps[1] = 115;
+  ps[2] = 116;
+  ps[3] = 111;
+  ps[4] = 114;
+  ps[5] = 97;
+  ps[6] = 103;
+  ps[7] = 101;
   return lain2_sym_intern(p, 8);
 }
 
-func storage_name(k: addr, name: u64) -> u64 {
+func storage_name(k: Mut(st.State), name: u64) -> u64 {
   return modules.qual_full(k, st.st_src(k), name, storage_suffix(k));
 }
 
 // "examples::modules_lib" → "examples/modules_lib.lain"
-func map_colons(p: addr, src: addr, i: u64, o: u64, n: u64) -> u64 {
+func map_colons(p: Mut(u8), src: Ref(u8), i: u64, o: u64, n: u64) -> u64 {
   if i >= n { return o; }
-  let b: u8 = load(src + i);
-  let nx: u8 = if i + 1 < n { load(src + i + 1) } else { 0 };
+  let b: u8 = deref(src + i);
+  let nx: u8 = if i + 1 < n { deref(src + i + 1) } else { 0 };
   if b == 58 and nx == 58 {
     let sl: u8 = 47;
-    store(p + o, sl);
+    let dp: Mut(u8) = p + o;
+    deref(dp) = sl;
     return map_colons(p, src, i + 2, o + 1, n);
   }
-  store(p + o, b);
+  let dp2: Mut(u8) = p + o;
+  deref(dp2) = b;
   return map_colons(p, src, i + 1, o + 1, n);
 }
 
-func import_path(k: addr, h: u64) -> u64 {
-  let p: addr = st.st_scratch(k) + 192;
+func import_path(k: Mut(st.State), h: u64) -> u64 {
+  let p: Mut(u8) = st.st_scratch(k) + 192;
   let n: u64 = lit_len(h) - 2;
-  let src: addr = lit_addr(h) + 1;
+  let src: Ref(u8) = lit_addr(h) + 1;
   let used: u64 = map_colons(p, src, 0, 0, n);
   // 末尾补 .lain（示例里的 import 一律省略扩展名）
-  let dot: u8 = 46;
-  let l: u8 = 108;
-  let a: u8 = 97;
-  let i2: u8 = 105;
-  let n2: u8 = 110;
-  store(p + used, dot);
-  store(p + used + 1, l);
-  store(p + used + 2, a);
-  store(p + used + 3, i2);
-  store(p + used + 4, n2);
+  let ext: MutSlice(u8) = make_slice(MutSlice(u8), p + used, 5);
+  ext[0] = 46;
+  ext[1] = 108;
+  ext[2] = 97;
+  ext[3] = 105;
+  ext[4] = 110;
   return lain2_sym_intern(p, used + 5);
 }
 
@@ -130,22 +125,23 @@ func skip_to_body(g: u64, i: u64, n: u64) -> u64 {
 }
 
 // 函数签名同步登记为一等 Fn 类型，令前向引用也能携带完整类型。
-func fn_type_id(k: addr, sg: addr) -> u64 {
-  let np: u64 = load(sg);
-  let rt: addr = load(sg + 8) as addr;
-  let ps: addr = load(sg + 16) as addr;
-  let tids: addr = st.st_ralloc(k, np * 8 + 8);
+func fn_type_id(k: Mut(st.State), sg: Mut(u8)) -> u64 {
+  let np: u64 = cx.sig_np(sg);
+  let rt: Mut(ty.Ty) = cx.sig_ret(sg);
+  let ps: Mut(ty.Ty) = cx.sig_params(sg);
+  let tids: Mut(u64) = ptr_cast(Mut(u64), st.st_ralloc(k, np * 8 + 8));
   let i: u64 = loop c(i: u64 = 0) while i < np {
-    let pt: addr = st.st_alloc(k, 32);
-    let cp: u64 = ty.ty_at(pt, ps + i * 32);
-    store(tids + i * 8, ireg.tid_of(k, pt));
+    let pt: Mut(ty.Ty) = new_ty(k);
+    let cp: u64 = ty.ty_at(pt, cx.ty_idx(ps, i));
+    let wp: Mut(u64) = cx.word_idx(tids, i);
+    deref(wp) = ireg.tid_of(k, pt);
     i = i + 1;
   };
   return cty.fn_t(k, ireg.tid_of(k, rt), np, tids as u64);
 }
 
 // --- phase1：声明 --------------------------------------------------------
-func p1_struct(k: addr, g: u64, i: u64) -> u64 {
+func p1_struct(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let name: u64 = n_sym(g, i + 1);
   let fg: u64 = n_at(g, i + 2);
   let sh: u64 = agg.shp_new(k, agg.kind_struct(), name, st.st_src(k));
@@ -156,19 +152,19 @@ func p1_struct(k: addr, g: u64, i: u64) -> u64 {
     } else {
       let fname: u64 = n_sym(fg, j);
       let a: u64 = expect_sym(k, fg, j + 1, s.p_colon());
-      let ft: addr = new_ty(k);
+      let ft: Mut(ty.Ty) = new_ty(k);
       let b: u64 = parse_type(k, fg, a, ft);
-      let m: addr = agg.field_add(k, sh, fname, ty.tk(ft), ty.tw(ft), ty.tsg(ft), ty.tsh(ft));
+      let m: Mut(agg.Member) = agg.field_add(k, sh, fname, ty.tk(ft), ty.tw(ft), ty.tsg(ft), ty.tsh(ft));
       j = b;
     }
   };
   let fin: u64 = agg.finish(k, sh);
   let q: u64 = modules.qual(k, st.st_src(k), name);
-  let e: addr = modules.sym_add(k, modules.sym_kind_struct(), st.st_src(k), name, q, 0, sh);
+  let e: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_struct(), st.st_src(k), name, q, null_ref(Mut(u8)), sh);
   return i + 3;
 }
 
-func p1_enum(k: addr, g: u64, i: u64) -> u64 {
+func p1_enum(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let name: u64 = n_sym(g, i + 1);
   let fg: u64 = n_at(g, i + 2);
   let sh: u64 = agg.shp_new(k, agg.kind_enum(), name, st.st_src(k));
@@ -179,19 +175,19 @@ func p1_enum(k: addr, g: u64, i: u64) -> u64 {
     } else {
       let vn: u64 = n_sym(fg, j);
       if j + 1 < n and is_group(fg, j + 1) == 1 {
-        let pt: addr = new_ty(k);
+        let pt: Mut(ty.Ty) = new_ty(k);
         let b: u64 = parse_type(k, n_at(fg, j + 1), 0, pt);
-        let m: addr = agg.variant_add(k, sh, vn, 1, ty.tk(pt), ty.tw(pt), ty.tsg(pt), ty.tsh(pt));
+        let m: Mut(agg.Member) = agg.variant_add(k, sh, vn, 1, ty.tk(pt), ty.tw(pt), ty.tsg(pt), ty.tsh(pt));
         j = j + 2;
       } else {
-        let m0: addr = agg.variant_add(k, sh, vn, 0, 0, 0, 0, 0);
+        let m0: Mut(agg.Member) = agg.variant_add(k, sh, vn, 0, 0, 0, 0, 0);
         j = j + 1;
       }
     }
   };
   let fin: u64 = agg.finish(k, sh);
   let q: u64 = modules.qual(k, st.st_src(k), name);
-  let e: addr = modules.sym_add(k, modules.sym_kind_enum(), st.st_src(k), name, q, 0, sh);
+  let e: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_enum(), st.st_src(k), name, q, null_ref(Mut(u8)), sh);
   return i + 3;
 }
 
@@ -202,16 +198,16 @@ func find_brace(g: u64, i: u64, n: u64) -> u64 {
   return find_brace(g, i + 1, n);
 }
 
-func p1_generic(k: addr, g: u64, decl_i: u64, pg_i: u64, qmark_i: u64, name: u64, q: u64) -> u64 {
+func p1_generic(k: Mut(st.State), g: u64, decl_i: u64, pg_i: u64, qmark_i: u64, name: u64, q: u64) -> u64 {
   let n: u64 = n_count(g);
   let r0: u64 = qmark_i + 2;
   let ret_i: u64 = if r0 < n and n_sym(g, r0) == s.p_arrow() { r0 + 1 } else { 0 };
-  let bi: u64 = find_brace(g, r0, n);
-  gn.reg_generic(k, name, q, decl_i, pg_i, qmark_i + 1, ret_i, bi);
-  return bi;
+  let bi_idx: u64 = find_brace(g, r0, n);
+  gn.reg_generic(k, name, q, decl_i, pg_i, qmark_i + 1, ret_i, bi_idx);
+  return bi_idx;
 }
 
-func p1_func(k: addr, g: u64, i: u64) -> u64 {
+func p1_func(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let n: u64 = n_count(g);
   let name: u64 = n_sym(g, i + 1);
   let is_root: u64 = if i >= 2 and is_group(g, i - 2) == 0 and n_sym(g, i - 2) == s.p_at() { 1 } else { 0 };
@@ -221,14 +217,14 @@ func p1_func(k: addr, g: u64, i: u64) -> u64 {
     if delim_of(g, a0 + 1) == dl_brace() { return p1_generic(k, g, i, i + 2, a0, name, q); }
   }
   let pg: u64 = n_at(g, i + 2);
-  let paramp: addr = st.st_alloc(k, 512);
-  let syms: addr = st.st_alloc(k, 128);
+  let paramp: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 512));
+  let syms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
-  let rt: addr = new_ty(k);
+  let rt: Mut(ty.Ty) = new_ty(k);
   ty.ty_none(rt);
   let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
-  let sg: addr = cx.sig_new(k, rt, np, paramp);
-  let e: addr = modules.sym_add(k, modules.sym_kind_func(), st.st_src(k), name, q, sg, 0);
+  let sg: Mut(u8) = cx.sig_new(k, rt, np, paramp);
+  let e: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_func(), st.st_src(k), name, q, sg, 0);
   // 记下声明位置：inject 在 phase1 就地执行时要先把这个函数体补编出来。
   let sd: u64 = modules.sym_set_decl(e, i);
   let ss: u64 = modules.sym_set_src(e, st.st_src(k));
@@ -238,14 +234,14 @@ func p1_func(k: addr, g: u64, i: u64) -> u64 {
 }
 
 // extern 名保持原样：宿主按它注册能力表里的符号。
-func p1_extern(k: addr, g: u64, i: u64) -> u64 {
+func p1_extern(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let n: u64 = n_count(g);
   let name: u64 = n_sym(g, i + 1);
   let pg: u64 = n_at(g, i + 2);
-  let paramp: addr = st.st_alloc(k, 512);
-  let syms: addr = st.st_alloc(k, 128);
+  let paramp: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 512));
+  let syms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
-  let rt: addr = new_ty(k);
+  let rt: Mut(ty.Ty) = new_ty(k);
   ty.ty_none(rt);
   let a0: u64 = i + 3;
   let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
@@ -253,8 +249,8 @@ func p1_extern(k: addr, g: u64, i: u64) -> u64 {
   let has_link: u64 = if has_eq == 1 and a + 1 < n { 1 } else { 0 };
   let link: u64 = if has_link == 1 { n_sym(g, a + 1) } else { name };
   let j: u64 = if has_link == 1 { a + 2 } else { a };
-  let sg: addr = cx.sig_new(k, rt, np, paramp);
-  let e: addr = modules.sym_add(k, modules.sym_kind_extern(), st.st_src(k), name, name, sg, 0);
+  let sg: Mut(u8) = cx.sig_new(k, rt, np, paramp);
+  let e: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_extern(), st.st_src(k), name, name, sg, 0);
   let fid: u64 = fn_type_id(k, sg);
   let sf: u64 = modules.sym_set_fnid(e, fid);
   let b: u64 = ir.proc_extern(k, name, link);
@@ -265,17 +261,17 @@ func p1_extern(k: addr, g: u64, i: u64) -> u64 {
 }
 
 // extern 声明的形参逐个登记：宿主按链接名查表，签名必须完整。
-func extern_params(k: addr, syms: addr, paramp: addr, idx: u64, np: u64) -> u64 {
+func extern_params(k: Mut(st.State), syms: Mut(u64), paramp: Mut(ty.Ty), idx: u64, np: u64) -> u64 {
   if idx >= np { return idx; }
-  let nm: u64 = load(syms + idx * 8);
-  let pt: addr = new_ty(k);
-  let cp: u64 = ty.ty_at(pt, paramp + idx * 32);
+  let nm: u64 = deref(cx.word_idx(syms, idx));
+  let pt: Mut(ty.Ty) = new_ty(k);
+  let cp: u64 = ty.ty_at(pt, cx.ty_idx(paramp, idx));
   let r: u64 = ir.proc_param(k, nm, pt);
   return extern_params(k, syms, paramp, idx + 1, np);
 }
 
 // let M = import("..."): 编译被导入源，再登记别名。
-func p1_import(k: addr, g: u64, i: u64, alias: u64) -> u64 {
+func p1_import(k: Mut(st.State), g: u64, i: u64, alias: u64) -> u64 {
   let cur: u64 = st.st_src(k);
   let h: u64 = if i + 1 < n_count(g) and is_group(g, i + 1) == 1 { n_at(g, i + 1) } else { 0 };
   if h == 0 { st.st_fail(k, e_ast()); return i + 1; }
@@ -295,15 +291,15 @@ func p1_import(k: addr, g: u64, i: u64, alias: u64) -> u64 {
 }
 
 // 顶层 let：按初值的形状分成「静态数据」与「普通值」两种。
-func p1_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
+func p1_let(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let name: u64 = n_sym(g, i + 1);
   let j0: u64 = i + 2;
   let rdonly: u64 = if j0 < n and n_sym(g, j0) == s.k_ro() { 1 } else { 0 };
-  let t: addr = new_ty(k);
+  let t: Mut(ty.Ty) = new_ty(k);
   ty.ty_none(t);
   let j: u64 = if j0 < n and n_sym(g, j0) == s.p_colon() { parse_type(k, g, j0 + 1, t) } else { j0 };
   if tb.ty_is_type(t) == 1 {
-    let m: addr = "type value at runtime";
+    let m: Ref(u8) = "type value at runtime";
     let d: u64 = ir.diag(k, 0, 1, m, 21);
     st.st_fail(k, ax.e_type());
     return j;
@@ -317,22 +313,22 @@ func p1_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
   // let 名 = 编译期类型工厂(...)：求值并登记为具名结构体，不生成运行期过程。
   let tbind: u64 = ctfn.type_binding(k, g, e, name, q);
   if tbind != 0 {
-    let se2: addr = modules.find_here(k, name);
-    if se2 as u64 != 0 { modules.sym_set_flag(se2, 1); }
+    let se2: Mut(modules.SymEntry) = modules.find_here(k, name);
+    if (se2 as u64) != 0 { modules.sym_set_flag(se2, 1); }
     return skip_semi(g, tbind);
   }
   // 表：[...]
   if is_group(g, e) == 1 and delim_of(g, e) == dl_bracket() {
     let sh0: u64 = ty.tsh(t);
     if sh0 == 0 { st.st_fail(k, e_type()); return e; }
-    let et: addr = new_ty(k);
+    let et: Mut(ty.Ty) = new_ty(k);
     let s1: u64 = agg.mem_ty(k, agg.mem_index(sh0, 0), et);
     let dname: u64 = storage_name(k, name);
     let sh: u64 = bi.table_data(k, dname, n_at(g, e), et, rdonly);
-    let tv: addr = st.st_ralloc(k, 32);
+    let tv: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_ralloc(k, 32));
     let a1: u64 = ty.ty_addr(tv);
     let a2: u64 = ty.ty_set_sh(tv, sh);
-    let se: addr = modules.sym_add(k, modules.sym_kind_data(), st.st_src(k), name, q, tv, sh);
+    let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_data(), st.st_src(k), name, q, ptr_cast(Mut(u8), tv), sh);
     let rr: u64 = modules.sym_set_ro(se, rdonly);
     return skip_semi(g, e + 1);
   }
@@ -341,55 +337,54 @@ func p1_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
     let h: u64 = n_at(g, e);
     let dname: u64 = storage_name(k, name);
     let sh: u64 = bi.string_data(k, dname, lit_addr(h) + 1, lit_len(h) - 2);
-    let tv: addr = st.st_ralloc(k, 32);
+    let tv: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_ralloc(k, 32));
     let a1: u64 = ty.ty_addr(tv);
     let a2: u64 = ty.ty_set_sh(tv, sh);
-    let se: addr = modules.sym_add(k, modules.sym_kind_data(), st.st_src(k), name, q, tv, sh);
+    let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_data(), st.st_src(k), name, q, ptr_cast(Mut(u8), tv), sh);
     let rr: u64 = modules.sym_set_ro(se, 1);
     return skip_semi(g, e);
   }
   // 聚合构造：名字已在形状表里
   if is_name(g, e) == 1 and e + 1 < n and is_group(g, e + 1) == 1 {
     if delim_of(g, e + 1) == dl_brace() {
-      let te: addr = modules.find_here(k, n_sym(g, e));
-      if te as u64 == 0 { st.st_fail(k, e_type()); return e; }
+      let te: Mut(modules.SymEntry) = modules.find_here(k, n_sym(g, e));
+      if is_null(te) { st.st_fail(k, e_type()); return e; }
       let sh: u64 = modules.sym_shape(te);
       let dname: u64 = storage_name(k, name);
       let r: u64 = bi.agg_data(k, dname, sh);
-      let tv: addr = st.st_ralloc(k, 32);
+      let tv: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_ralloc(k, 32));
       let a1: u64 = ty.ty_addr(tv);
       let a2: u64 = ty.ty_set_sh(tv, sh);
-      let se: addr = modules.sym_add(k, modules.sym_kind_data(), st.st_src(k), name, q, tv, sh);
+      let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_data(), st.st_src(k), name, q, ptr_cast(Mut(u8), tv), sh);
       return skip_semi(g, e + 1);
     }
   }
   // 普通值：类型块必须跨源存活，arena 每次编新源都会清空。
-  let vt: addr = st.st_ralloc(k, 32);
+  let vt: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_ralloc(k, 32));
   let cpv: u64 = ty.ty_at(vt, t);
-  let se: addr = modules.sym_add(k, modules.sym_kind_value(), st.st_src(k), name, q, vt, 0);
+  let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_value(), st.st_src(k), name, q, ptr_cast(Mut(u8), vt), 0);
   return skip_semi(g, e);
 }
 
 // let 名 = func ...：名字取 let 这边，签名来自 func 自己。
-func p1_flet(k: addr, g: u64, e: u64, name: u64, q: u64) -> u64 {
+func p1_flet(k: Mut(st.State), g: u64, e: u64, name: u64, q: u64) -> u64 {
   let n: u64 = n_count(g);
   let a0: u64 = e + 2;
   if a0 + 1 < n and is_group(g, a0) == 0 and n_sym(g, a0) == s.p_qmark() and is_group(g, a0 + 1) == 1 {
     if delim_of(g, a0 + 1) == dl_brace() {
-      let bi: u64 = p1_generic(k, g, e, e + 1, a0, name, q);
-      return skip_semi(g, bi + 1);
+      let body_idx: u64 = p1_generic(k, g, e, e + 1, a0, name, q);
+      return skip_semi(g, body_idx + 1);
     }
   }
   let pg: u64 = n_at(g, e + 1);
-  let paramp: addr = st.st_alloc(k, 512);
-  let syms: addr = st.st_alloc(k, 128);
+  let paramp: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 512));
+  let syms: Mut(u64) = ptr_cast(Mut(u64), st.st_alloc(k, 128));
   let np: u64 = parse_params(k, pg, 0, 0, paramp, syms);
-  let rt: addr = new_ty(k);
+  let rt: Mut(ty.Ty) = new_ty(k);
   ty.ty_none(rt);
-  let a0: u64 = e + 2;
   let a: u64 = if a0 < n and n_sym(g, a0) == s.p_arrow() { parse_type(k, g, a0 + 1, rt) } else { a0 };
-  let sg: addr = cx.sig_new(k, rt, np, paramp);
-  let se: addr = modules.sym_add(k, modules.sym_kind_func(), st.st_src(k), name, q, sg, 0);
+  let sg: Mut(u8) = cx.sig_new(k, rt, np, paramp);
+  let se: Mut(modules.SymEntry) = modules.sym_add(k, modules.sym_kind_func(), st.st_src(k), name, q, sg, 0);
   let sd: u64 = modules.sym_set_decl(se, e);
   let ss: u64 = modules.sym_set_src(se, st.st_src(k));
   let fid: u64 = fn_type_id(k, sg);
@@ -397,7 +392,7 @@ func p1_flet(k: addr, g: u64, e: u64, name: u64, q: u64) -> u64 {
   return skip_semi(g, a + 1);
 }
 
-func phase1(k: addr, g: u64, i: u64, n: u64) -> u64 {
+func phase1(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return i; }
   if st.st_ok(k) != 0 { return i; }
   if is_group(g, i) == 1 { return phase1(k, g, i + 1, n); }
@@ -415,20 +410,20 @@ func phase1(k: addr, g: u64, i: u64, n: u64) -> u64 {
 }
 
 // --- phase2：过程体 ------------------------------------------------------
-func p2_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
+func p2_let(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   let name: u64 = n_sym(g, i + 1);
   let e: u64 = find_eq(g, i + 2, n) + 1;
   if e >= n { st.st_fail(k, e_ast()); return e; }
   if n_sym(g, e) == s.k_import() { return skip_semi(g, e); }
-  let se: addr = modules.find_here(k, name);
-  if se as u64 == 0 { st.st_fail(k, e_ast()); return e; }
+  let se: Mut(modules.SymEntry) = modules.find_here(k, name);
+  if is_null(se) { st.st_fail(k, e_ast()); return e; }
   let after: u64 = if is_group(g, e) == 1 { skip_semi(g, e + 1) } else { skip_semi(g, e) };
   // 已编过的声明（inject 为了沙箱 verify 会把注入点之前的值与过程先编出来）不再重复编。
   if modules.sym_flag(se) == 1 { return after; }
   if modules.sym_kind(se) == modules.sym_kind_generic() {
-    let hdr: addr = modules.sym_sig(se);
-    let bi: u64 = load(hdr + 40);
-    return skip_semi(g, bi + 1);
+    let hdr: Mut(gn.GenHdr) = ptr_cast(Mut(gn.GenHdr), modules.sym_sig(se));
+    let body_idx: u64 = hdr.body_i;
+    return skip_semi(g, body_idx + 1);
   }
   let marked: u64 = modules.sym_set_flag(se, 1);
   if modules.sym_kind(se) == modules.sym_kind_func() {
@@ -437,7 +432,7 @@ func p2_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
   if modules.sym_kind(se) == modules.sym_kind_value() {
     return compile_top_let(k, g, i);
   }
-  let tv: addr = modules.sym_sig(se);
+  let tv: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), modules.sym_sig(se));
   let dname: u64 = storage_name(k, name);
   // 聚合：字段要写进数据块
   if is_name(g, e) == 1 and e + 1 < n and is_group(g, e + 1) == 1 {
@@ -449,7 +444,7 @@ func p2_let(k: addr, g: u64, i: u64, n: u64) -> u64 {
   return dl.compile_data_ref(k, g, i, after, dname, tv);
 }
 
-func phase2(k: addr, g: u64, i: u64, n: u64) -> u64 {
+func phase2(k: Mut(st.State), g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return i; }
   if st.st_ok(k) != 0 { return i; }
   if is_group(g, i) == 1 { return phase2(k, g, i + 1, n); }
@@ -457,9 +452,9 @@ func phase2(k: addr, g: u64, i: u64, n: u64) -> u64 {
   let sym: u64 = n_sym(g, i);
   if sym == s.k_func() {
     // 体已编过的过程（inject 为了沙箱 verify 会提前补编）或泛型模板跳过，否则重名。
-    let se: addr = modules.find_here(k, n_sym(g, i + 1));
-    let fl: u64 = if se as u64 == 0 { 0 } else { modules.sym_flag(se) };
-    let is_gen: u64 = if se as u64 == 0 { 0 } else { if modules.sym_kind(se) == modules.sym_kind_generic() { 1 } else { 0 } };
+    let se: Mut(modules.SymEntry) = modules.find_here(k, n_sym(g, i + 1));
+    let fl: u64 = if is_null(se) { 0 } else { modules.sym_flag(se) };
+    let is_gen: u64 = if is_null(se) { 0 } else { if modules.sym_kind(se) == modules.sym_kind_generic() { 1 } else { 0 } };
     if fl == 1 or is_gen == 1 { let a0: u64 = skip_to_body(g, i + 2, n); return phase2(k, g, a0, n); }
     let a: u64 = compile_func(k, g, i);
     return phase2(k, g, a, n);
@@ -483,7 +478,7 @@ func phase2(k: addr, g: u64, i: u64, n: u64) -> u64 {
 // --- 驱动 ---------------------------------------------------------------
 // 把一棵已经在手里的树当成 src 这个源的代码来编译：注入的片段必须落在注入点上，
 // 否则它登记出来的 s<源号>__名字 会和当前源里的查找对不上。
-func compile_as(k: addr, src: u64, root: u64) -> u64 {
+func compile_as(k: Mut(st.State), src: u64, root: u64) -> u64 {
   // 编译一份源会大量消耗 arena；但嵌套编译（inject 片段、import）时外层正在
   // 编到一半的临时量也在同一块 arena 上，所以这里保存水位、编完再放回去。
   let am: u64 = st.st_arenaused(k);
@@ -501,7 +496,7 @@ func compile_as(k: addr, src: u64, root: u64) -> u64 {
   return restore_arena(k, am, sp, saved_ct, saved_src, saved_root);
 }
 
-func restore_arena(k: addr, am: u64, sp: u64, saved_ct: u64, saved_src: u64, saved_root: u64) -> u64 {
+func restore_arena(k: Mut(st.State), am: u64, sp: u64, saved_ct: u64, saved_src: u64, saved_root: u64) -> u64 {
   let ra: u64 = st.st_set_arenaused(k, am);
   let rs: u64 = st.st_set_sp(k, sp);
   let rc: u64 = st.st_set_ctused(k, saved_ct);
@@ -510,7 +505,7 @@ func restore_arena(k: addr, am: u64, sp: u64, saved_ct: u64, saved_src: u64, sav
   return st.st_ok(k);
 }
 
-func compile_source(k: addr, src: u64) -> u64 {
+func compile_source(k: Mut(st.State), src: u64) -> u64 {
   if st.st_done(k, src) == 1 { return st.st_ok(k); }
   let m: u64 = st.st_mark_done(k, src);
   let root: u64 = lain2_source_root(src);
@@ -519,20 +514,20 @@ func compile_source(k: addr, src: u64) -> u64 {
 
 // --- 编译期注入 ---------------------------------------------------------
 // 实参只支持编译期字面量：生成器的形状参数是 TypeId 与整数。
-func collect_args(k: addr, g: u64, i: u64, idx: u64, ab: addr) -> u64 {
+func collect_args(k: Mut(st.State), g: u64, i: u64, idx: u64, ab: Mut(ty.Val)) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return idx; }
   if is_comma(g, i) == 1 { return collect_args(k, g, i + 1, idx, ab); }
-  let v: addr = ax.new_val(k);
+  let v: Mut(ty.Val) = ax.new_val(k);
   let j: u64 = co.expr(k, g, i, 0, cx.tnone(k), v);
   if st.st_ok(k) != 0 { return j; }
-  let cp: u64 = ty.val_at(ab + idx * 56, v);
+  let cp: u64 = ty.val_at(val_idx(ab, idx), v);
   return collect_args(k, g, j, idx + 1, ab);
 }
 
-func fill_lits(k: addr, ab: addr, idx: u64, cnt: u64) -> u64 {
+func fill_lits(k: Mut(st.State), ab: Mut(ty.Val), idx: u64, cnt: u64) -> u64 {
   if idx >= cnt { return idx; }
-  let v: addr = ab + idx * 56;
+  let v: Mut(ty.Val) = val_idx(ab, idx);
   if ty.vlit(v) != 1 {
     st.st_fail(k, ax.e_unsup());
     return idx;
@@ -541,24 +536,24 @@ func fill_lits(k: addr, ab: addr, idx: u64, cnt: u64) -> u64 {
   return fill_lits(k, ab, idx + 1, cnt);
 }
 
-func scan_len(p: addr, i: u64, cap: u64) -> u64 {
+func scan_len(p: Mut(u8), i: u64, cap: u64) -> u64 {
   if i >= cap { return 0; }
-  let b: u8 = load(p + i);
+  let b: u8 = deref(p + i);
   if b == 0 { return i; }
   return scan_len(p, i + 1, cap);
 }
 
 // inject(gen(TypeId, ...))：把生成器放进隔离沙箱跑一遍，取回它写出的源码文本，
 // 解析成新的源码单元，然后按注入点的源编号编译进去。
-func inject_decl(k: addr, g: u64, i: u64) -> u64 {
+func inject_decl(k: Mut(st.State), g: u64, i: u64) -> u64 {
   let pg: u64 = n_at(g, i + 1);
   let fname: u64 = n_sym(pg, 0);
-  let fn: addr = modules.find_here(k, fname);
-  if fn as u64 == 0 { st.st_fail(k, ax.e_unbound()); return i + 2; }
+  let fn: Mut(modules.SymEntry) = modules.find_here(k, fname);
+  if is_null(fn) { st.st_fail(k, ax.e_unbound()); return i + 2; }
   if modules.sym_kind(fn) != modules.sym_kind_func() { st.st_fail(k, ax.e_type()); return i + 2; }
   let argsg: u64 = n_at(pg, 1);
   let span: u64 = 896;
-  let ab: addr = st.st_alloc(k, span);
+  let ab: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, span));
   let cnt: u64 = collect_args(k, argsg, 0, 0, ab);
   if st.st_ok(k) != 0 { return i + 2; }
   let saved_mod: u64 = st.st_mod(k);
@@ -582,13 +577,14 @@ func inject_decl(k: addr, g: u64, i: u64) -> u64 {
     st.st_set_src(k, saved_src);
     st.st_set_root(k, saved_root);
     if st.st_ok(k) != 0 { return i + 2; }
-  }  let tmp: u64 = ct.clone(k);
+  }
+  let tmp: u64 = ct.clone(k);
   st.st_set_mod(k, tmp);
   // 生成器里的 meta_* 查询要在临时模块里落到真实数据段上。
   let pr: u64 = rf.prepare(k);
   if st.st_ok(k) != 0 { return i + 2; }
   let cap: u64 = rf.buffer_bytes();
-  let out: addr = ct.buf(cap);
+  let out: Mut(u8) = ct.buf(cap);
   let ename: u64 = ct.inject_name();
   let b1: u64 = ir.proc_begin(k, ename);
   let b0: u64 = ir.proc_result(k, ir.taddr(k));
@@ -597,12 +593,12 @@ func inject_decl(k: addr, g: u64, i: u64) -> u64 {
   let b4: u64 = fill_lits(k, ab, 0, cnt);
   let cres: u64 = ir.fresh_t(k);
   let b5: u64 = ir.emit_call(k, cres, modules.sym_qual(fn), 0);
-  // 返回缓冲的地址必须是一个 #addr 种类的值：#bitcast 由 bits 生出的是位值，
-  // 宿主拿不到可读区段。用 #lea 取符号地址，结果就是真正的 #addr。
-  let addr: u64 = ir.fresh_t(k);
-  let b6: u64 = ir.emit_lea(k, addr, rf.buffer_name(), 0, 1, 0);
+  // 返回缓冲的地址必须是一个指针种类的值：#bitcast 由 bits 生出的是位值，
+  // 宿主拿不到可读区段。用 #lea 取符号地址，结果就是真正的指针值。
+  let buf_ptr: u64 = ir.fresh_t(k);
+  let b6: u64 = ir.emit_lea(k, buf_ptr, rf.buffer_name(), 0, 1, 0);
   let b7: u64 = ir.args_reset(k);
-  let b8: u64 = ir.arg_ref(k, addr);
+  let b8: u64 = ir.arg_ref(k, buf_ptr);
   let b9: u64 = ir.emit_jump(k, codes.INST_RETURN(), 0);
   let b10: u64 = ir.region_end(k);
   let vrc: u64 = ct.verify(tmp);
@@ -614,7 +610,7 @@ func inject_decl(k: addr, g: u64, i: u64) -> u64 {
   // apply_bytes 的返回值是宿主抄回来的字节数；0 说明这一趟没拿到东西。
   let len: u64 = scan_len(out, 0, arc);
   if len == 0 { st.st_fail(k, ax.e_ast()); return i + 2; }
-  let src2: u64 = ct.snippet(out, len);
+  let src2: u64 = ct.snippet(ptr_cast(Ref(u8), out), len);
   if src2 == 0 { st.st_fail(k, ax.e_ast()); return i + 2; }
   if st.st_done(k, src2) == 1 { return skip_semi(g, i + 2); }
   let dm: u64 = st.st_mark_done(k, src2);

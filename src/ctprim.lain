@@ -9,21 +9,25 @@ let ct = import("ctypes");
 let tb = import("tbuild");
 let ctf = import("ctfor");
 
-func as_type(k: addr, v: addr) -> u64 {
+func arg_at(ab: Mut(ctf.CtVal), idx: u64) -> Mut(ctf.CtVal) {
+  return ptr_cast(Mut(ctf.CtVal), ptr_cast(Mut(u8), ab) + idx * 24);
+}
+
+func as_type(k: Mut(st.State), v: Mut(ctf.CtVal)) -> u64 {
   if ctf.v_kind(v) == 1 { return ctf.v_a(v); }
   ctf.fail_msg(k, "not a type", 10, ax.e_type());
   return 0;
 }
 
-func as_int(k: addr, v: addr) -> u64 {
+func as_int(k: Mut(st.State), v: Mut(ctf.CtVal)) -> u64 {
   if ctf.v_kind(v) == 0 { return ctf.v_a(v); }
   ctf.fail_msg(k, "not an int", 10, ax.e_type());
   return 0;
 }
 
-func as_name(k: addr, v: addr) -> u64 {
+func as_name(k: Mut(st.State), v: Mut(ctf.CtVal)) -> u64 {
   if ctf.v_kind(v) == 0 { return ctf.v_a(v); }
-  if ctf.v_kind(v) == 3 { return s.intern(ctf.v_a(v) as addr, ctf.v_b(v)); }
+  if ctf.v_kind(v) == 3 { return s.intern(ptr_cast(Ref(u8), ctf.v_a(v)), ctf.v_b(v)); }
   ctf.fail_msg(k, "bad field name", 14, ax.e_type());
   return 0;
 }
@@ -44,7 +48,7 @@ func ct_prio(g: u64, i: u64) -> u64 {
   return 0;
 }
 
-func ct_bin(k: addr, op: u64, a: u64, b: u64) -> u64 {
+func ct_bin(k: Mut(st.State), op: u64, a: u64, b: u64) -> u64 {
   if op == s.o_eq() { return if a == b { 1 } else { 0 }; }
   if op == s.o_ne() { return if a != b { 1 } else { 0 }; }
   if op == s.o_lt() { return if a < b { 1 } else { 0 }; }
@@ -55,11 +59,11 @@ func ct_bin(k: addr, op: u64, a: u64, b: u64) -> u64 {
 }
 
 // 简单类型原语（仅用 ctfor.eval_expr 求实参，或由 ctfn 传入已求值的参数数组）。
-func apply_prim(k: addr, name: u64, ag: u64, ab: addr, nargs: u64, out: addr) -> u64 {
+func apply_prim(k: Mut(st.State), name: u64, ag: u64, ab: Mut(ctf.CtVal), nargs: u64, out: Mut(ctf.CtVal)) -> u64 {
   if name == s.t_array() {
     if nargs != 2 { ctf.fail_msg(k, "bad Array args", 14, ax.e_ast()); return 2; }
     let e: u64 = as_type(k, ab);
-    let n: u64 = as_int(k, ab + 24);
+    let n: u64 = as_int(k, arg_at(ab, 1));
     if st.st_ok(k) != 0 { return 2; }
     ctf.v_set(out, 1, ct.array_t(k, e, n), 0);
     return 1;
@@ -82,7 +86,7 @@ func apply_prim(k: addr, name: u64, ag: u64, ab: addr, nargs: u64, out: addr) ->
   }
   if name == s.intern("record_begin", 12) {
     if nargs != 0 { ctf.fail_msg(k, "too many args", 13, ax.e_ast()); return 2; }
-    let b: addr = tb.record_begin(k);
+    let b: Mut(tb.TypeBuilder) = tb.record_begin(k);
     let ba: u64 = b as u64;
     ctf.v_set(out, 6, ba, 0);
     return 1;
@@ -90,10 +94,10 @@ func apply_prim(k: addr, name: u64, ag: u64, ab: addr, nargs: u64, out: addr) ->
   if name == s.intern("record_add", 10) {
     if nargs != 3 { ctf.fail_msg(k, "bad record_add", 14, ax.e_ast()); return 2; }
     if ctf.v_kind(ab) != 6 { ctf.fail_msg(k, "bad builder", 11, ax.e_type()); return 2; }
-    let nm: u64 = as_name(k, ab + 24);
-    let tt: u64 = as_type(k, ab + 48);
+    let nm: u64 = as_name(k, arg_at(ab, 1));
+    let tt: u64 = as_type(k, arg_at(ab, 2));
     if st.st_ok(k) != 0 { return 2; }
-    let r: u64 = tb.record_add(k, ctf.v_a(ab) as addr, nm, tt);
+    let r: u64 = tb.record_add(k, ptr_cast(Mut(tb.TypeBuilder), ctf.v_a(ab)), nm, tt);
     if st.st_ok(k) != 0 { return 2; }
     ctf.v_set(out, 0, r, 0);
     return 1;
@@ -101,7 +105,7 @@ func apply_prim(k: addr, name: u64, ag: u64, ab: addr, nargs: u64, out: addr) ->
   if name == s.intern("record_end", 10) {
     if nargs != 1 { ctf.fail_msg(k, "bad record_end", 14, ax.e_ast()); return 2; }
     if ctf.v_kind(ab) != 6 { ctf.fail_msg(k, "bad builder", 11, ax.e_type()); return 2; }
-    let id: u64 = tb.record_end(k, ctf.v_a(ab) as addr);
+    let id: u64 = tb.record_end(k, ptr_cast(Mut(tb.TypeBuilder), ctf.v_a(ab)));
     if st.st_ok(k) != 0 { return 2; }
     ctf.v_set(out, 1, id, 0);
     return 1;
@@ -111,7 +115,7 @@ func apply_prim(k: addr, name: u64, ag: u64, ab: addr, nargs: u64, out: addr) ->
     let t: u64 = ctf.as_tid(k, ab);
     if st.st_ok(k) != 0 { return 2; }
     let nm: u64 = ireg.type_name(k, t);
-    let sa: addr = modules.sym_addr(nm);
+    let sa: Ref(u8) = modules.sym_addr(nm);
     let sau: u64 = sa as u64;
     ctf.v_set(out, 3, sau, modules.sym_len(nm));
     return 1;

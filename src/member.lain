@@ -14,11 +14,15 @@ let cl = import("calls");
 let rf = import("refval");
 let gn = import("generics");
 
-extern core_expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 = lainc_core_expr;
+extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
+
+func val_idx(ab: Mut(ty.Val), idx: u64) -> Mut(ty.Val) {
+  return ptr_cast(Mut(ty.Val), ptr_cast(Mut(u8), ab) + idx * 56);
+}
 
 // --- ast / ctx 层转发（正文的裸调用经这里转一手） --------------------------
-func new_ty(k: addr) -> addr { return ax.new_ty(k); }
-func new_val(k: addr) -> addr { return ax.new_val(k); }
+func new_ty(k: Mut(st.State)) -> Mut(ty.Ty) { return ax.new_ty(k); }
+func new_val(k: Mut(st.State)) -> Mut(ty.Val) { return ax.new_val(k); }
 func n_count(g: u64) -> u64 { return ax.n_count(g); }
 func n_at(g: u64, i: u64) -> u64 { return ax.n_at(g, i); }
 func n_sym(g: u64, i: u64) -> u64 { return ax.n_sym(g, i); }
@@ -32,19 +36,19 @@ func e_ast() -> u64 { return ax.e_ast(); }
 func e_unbound() -> u64 { return ax.e_unbound(); }
 func e_type() -> u64 { return ax.e_type(); }
 func e_unsup() -> u64 { return ax.e_unsup(); }
-func tnone(k: addr) -> addr { return cx.tnone(k); }
-func expect_sym(k: addr, g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); }
-func slot_get(k: addr, j: u64, tp: addr, out: addr) -> u64 { return cx.slot_get(k, j, tp, out); }
-func expr(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 { return core_expr(k, g, i, minp, want, out); }
-func typed_builtin(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 { return rf.typed_builtin(k, g, i, want, out); }
-func member_on_val(k: addr, g: u64, i: u64, minp: u64, want: addr, out: addr) -> u64 { return rf.member_on_val(k, g, i, minp, want, out); }
+func tnone(k: Mut(st.State)) -> Mut(ty.Ty) { return cx.tnone(k); }
+func expect_sym(k: Mut(st.State), g: u64, i: u64, sym: u64) -> u64 { return cx.expect_sym(k, g, i, sym); }
+func slot_get(k: Mut(st.State), j: u64, tp: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return cx.slot_get(k, j, tp, out); }
+func expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return core_expr(k, g, i, minp, want, out); }
+func typed_builtin(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return rf.typed_builtin(k, g, i, want, out); }
+func member_on_val(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 { return rf.member_on_val(k, g, i, minp, want, out); }
 
 // 名字 . 名字：先认本源的枚举变体，再看导入模块成员，最后当变量字段。
-func dotted(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+func dotted(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let a: u64 = n_sym(g, i);
   let b: u64 = n_sym(g, i + 2);
-  let e: addr = modules.find_here(k, a);
-  if e as u64 != 0 {
+  let e: Mut(modules.SymEntry) = modules.find_here(k, a);
+  if (e as u64) != 0 {
     if modules.sym_kind(e) == modules.sym_kind_enum() {
       let sh: u64 = modules.sym_shape(e);
       if i + 3 < n_count(g) {
@@ -67,7 +71,7 @@ func dotted(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   if m != 0 { return member_ref(k, g, i, m - 1, b, want, out); }
   // 局部变量：先取值再按值定位成员，切片 len/ptr、聚合字段与链式后缀共用一条路。
   if env.env_find(k, a) != 0 {
-    let bv: addr = new_val(k);
+    let bv: Mut(ty.Val) = new_val(k);
     let bj: u64 = cl.var_ref(k, g, i, tnone(k), bv);
     if st.st_ok(k) != 0 { return i + 3; }
     ty.val_at(out, bv);
@@ -77,18 +81,18 @@ func dotted(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
 }
 
 // Shape.Circle { 载荷 }
-func variant_new(k: addr, sh: u64, vname: u64, argp: u64, out: addr) -> u64 {
-  let m: addr = agg.mem_find(sh, vname);
-  if m as u64 == 0 { st.st_fail(k, e_unsup()); return 0; }
-  let objv: addr = new_val(k);
+func variant_new(k: Mut(st.State), sh: u64, vname: u64, argp: u64, out: Mut(ty.Val)) -> u64 {
+  let m: Mut(agg.Member) = agg.mem_find(sh, vname);
+  if is_null(m) { st.st_fail(k, e_unsup()); return 0; }
+  let objv: Mut(ty.Val) = new_val(k);
   let obj: u64 = agg.new_obj(k, sh, objv);
   let tg: u64 = agg.tag_write(k, obj, agg.mem_tag(m));
   if agg.mem_has(m) == 1 {
-    let mt: addr = new_ty(k);
+    let mt: Mut(ty.Ty) = new_ty(k);
     let s1: u64 = agg.mem_ty(k, m, mt);
-    let pv: addr = new_val(k);
+    let pv: Mut(ty.Val) = new_val(k);
     let j: u64 = expr(k, argp, 0, 0, mt, pv);
-    let cv: addr = new_val(k);
+    let cv: Mut(ty.Val) = new_val(k);
     cx.coerce(k, pv, ty.vty(pv), mt, cv);
     let sv: u64 = agg.store_at(k, obj, agg.mem_off(m), cv, mt);
   }
@@ -97,13 +101,13 @@ func variant_new(k: addr, sh: u64, vname: u64, argp: u64, out: addr) -> u64 {
 }
 
 // Shape.Circle(s)：标签命中才读载荷，否则给 0。
-func variant_proj_call(k: addr, sh: u64, vname: u64, argp: u64, want: addr, out: addr) -> u64 {
-  let av: addr = new_val(k);
-  let at: addr = new_ty(k);
+func variant_proj_call(k: Mut(st.State), sh: u64, vname: u64, argp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let av: Mut(ty.Val) = new_val(k);
+  let at: Mut(ty.Ty) = new_ty(k);
   let a1: u64 = ty.ty_addr(at);
   let a2: u64 = ty.ty_set_sh(at, sh);
   let j: u64 = expr(k, argp, 0, 0, at, av);
-  let rt: addr = new_ty(k);
+  let rt: Mut(ty.Ty) = new_ty(k);
   if ty.ty_known(want) == 1 { let cp: u64 = ty.ty_at(rt, want); } else { let i32v: u64 = ty.ty_i32(rt); }
   let r: u64 = agg.variant_proj(k, sh, ty.vn(av), vname, rt, out);
   let ignored: u64 = j;
@@ -111,8 +115,8 @@ func variant_proj_call(k: addr, sh: u64, vname: u64, argp: u64, want: addr, out:
 }
 
 // 已知形状号的聚合构造（供 Name { ... } 与 Name(...) { ... } 共用）。
-func agg_construct_sh(k: addr, sh: u64, fg: u64, out: addr) -> u64 {
-  let objv: addr = new_val(k);
+func agg_construct_sh(k: Mut(st.State), sh: u64, fg: u64, out: Mut(ty.Val)) -> u64 {
+  let objv: Mut(ty.Val) = new_val(k);
   let obj: u64 = agg.new_obj(k, sh, objv);
   let j: u64 = agg_fields(k, sh, fg, 0, obj);
   let ignored: u64 = j;
@@ -121,10 +125,10 @@ func agg_construct_sh(k: addr, sh: u64, fg: u64, out: addr) -> u64 {
 }
 
 // Name { 字段: 表达式 ... }
-func agg_construct(k: addr, g: u64, i: u64, out: addr) -> u64 {
+func agg_construct(k: Mut(st.State), g: u64, i: u64, out: Mut(ty.Val)) -> u64 {
   let nm: u64 = n_sym(g, i);
-  let e: addr = modules.find_here(k, nm);
-  if e as u64 == 0 { cl.fail_name(k, nm, e_unbound()); return i + 2; }
+  let e: Mut(modules.SymEntry) = modules.find_here(k, nm);
+  if is_null(e) { cl.fail_name(k, nm, e_unbound()); return i + 2; }
   let sh: u64 = modules.sym_shape(e);
   if sh == 0 { st.st_fail(k, e_type()); return i + 2; }
   agg_construct_sh(k, sh, n_at(g, i + 1), out);
@@ -132,50 +136,50 @@ func agg_construct(k: addr, g: u64, i: u64, out: addr) -> u64 {
 }
 
 // 字段列表：名字 : 表达式，字段之间的逗号可有可无。
-func agg_fields(k: addr, sh: u64, fg: u64, i: u64, obj: u64) -> u64 {
+func agg_fields(k: Mut(st.State), sh: u64, fg: u64, i: u64, obj: u64) -> u64 {
   let n: u64 = n_count(fg);
   if i >= n { return i; }
   if st.st_ok(k) != 0 { return i; }
   if is_comma(fg, i) == 1 { return agg_fields(k, sh, fg, i + 1, obj); }
   let fname: u64 = n_sym(fg, i);
-  let m: addr = agg.mem_find(sh, fname);
-  if m as u64 == 0 { st.st_fail(k, e_unsup()); return i + 1; }
+  let m: Mut(agg.Member) = agg.mem_find(sh, fname);
+  if is_null(m) { st.st_fail(k, e_unsup()); return i + 1; }
   let a: u64 = expect_sym(k, fg, i + 1, s.p_colon());
-  let mt: addr = new_ty(k);
+  let mt: Mut(ty.Ty) = new_ty(k);
   let s1: u64 = agg.mem_ty(k, m, mt);
-  let pv: addr = new_val(k);
+  let pv: Mut(ty.Val) = new_val(k);
   let j: u64 = expr(k, fg, a, 0, mt, pv);
-  let cv: addr = new_val(k);
+  let cv: Mut(ty.Val) = new_val(k);
   cx.coerce(k, pv, ty.vty(pv), mt, cv);
   let sv: u64 = agg.store_at(k, obj, agg.mem_off(m), cv, mt);
   return agg_fields(k, sh, fg, j, obj);
 }
 
 // 变量字段：p.x，嵌套聚合给地址，标量给值。
-func field_ref(k: addr, g: u64, i: u64, var_sym: u64, fname: u64, out: addr) -> u64 {
+func field_ref(k: Mut(st.State), g: u64, i: u64, var_sym: u64, fname: u64, out: Mut(ty.Val)) -> u64 {
   let off: u64 = env.env_find(k, var_sym);
   if off == 0 { cl.fail_name(k, var_sym, e_unbound()); return i + 3; }
-  let vt: addr = new_ty(k);
+  let vt: Mut(ty.Ty) = new_ty(k);
   env.env_ty(k, off, vt);
   let sh: u64 = ty.tsh(vt);
   if sh == 0 { st.st_fail(k, e_type()); return i + 3; }
-  let m: addr = agg.mem_find(sh, fname);
-  if m as u64 == 0 { st.st_fail(k, e_unsup()); return i + 3; }
-  let ov: addr = new_val(k);
+  let m: Mut(agg.Member) = agg.mem_find(sh, fname);
+  if is_null(m) { st.st_fail(k, e_unsup()); return i + 3; }
+  let ov: Mut(ty.Val) = new_val(k);
   slot_get(k, env.env_slot(k, off), vt, ov);
   let obj: u64 = ty.vn(ov);
-  let et: addr = new_ty(k);
+  let et: Mut(ty.Ty) = new_ty(k);
   let e1: u64 = agg.mem_ty(k, m, et);
-  let lv: addr = new_val(k);
+  let lv: Mut(ty.Val) = new_val(k);
   let l: u64 = agg.load_at(k, obj, agg.mem_off(m), et, lv);
   ty.val_at(out, lv);
   return i + 3;
 }
 
 // 导入模块成员：M.bump(...)、M.answer、M.table
-func member_ref(k: addr, g: u64, i: u64, m: u64, name: u64, want: addr, out: addr) -> u64 {
-  let e: addr = modules.sym_find(k, m, name);
-  if e as u64 == 0 { return cl.fail_name(k, name, e_unbound()); }
+func member_ref(k: Mut(st.State), g: u64, i: u64, m: u64, name: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+  let e: Mut(modules.SymEntry) = modules.sym_find(k, m, name);
+  if is_null(e) { return cl.fail_name(k, name, e_unbound()); }
   let kd: u64 = modules.sym_kind(e);
   let q: u64 = modules.sym_qual(e);
   if kd == modules.sym_kind_func() {
@@ -202,7 +206,7 @@ func member_ref(k: addr, g: u64, i: u64, m: u64, name: u64, want: addr, out: add
   if kd == modules.sym_kind_generic() {
     if i + 3 < n_count(g) and is_group(g, i + 3) == 1 {
       if delim_of(g, i + 3) == dl_paren() {
-        let nb: addr = ax.box(k);
+        let nb: Mut(u64) = ax.box(k);
         gn.call_generic(k, e, g, i + 2, want, out, nb);
         return ax.box_get(nb);
       }
@@ -210,18 +214,18 @@ func member_ref(k: addr, g: u64, i: u64, m: u64, name: u64, want: addr, out: add
     st.st_fail(k, e_ast());
     return i + 3;
   }
-  let vt: addr = modules.sym_sig(e);
+  let vt: Mut(u8) = modules.sym_sig(e);
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let ins: u64 = ir.emit_call(k, res, q, 0);
-  let t2: addr = new_ty(k);
-  if vt as u64 != 0 { let cp: u64 = ty.ty_at(t2, vt); } else { let nn: u64 = ty.ty_none(t2); }
+  let t2: Mut(ty.Ty) = new_ty(k);
+  if (vt as u64) != 0 { let cp: u64 = ty.ty_at(t2, ptr_cast(Mut(ty.Ty), vt)); } else { let nn: u64 = ty.ty_none(t2); }
   ty.val_ref(out, res, t2);
   return i + 3;
 }
 
 // 内建调用：实参先各自求值，再由 builtins 按名字分派。
-func builtin_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
+func builtin_call(k: Mut(st.State), g: u64, i: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let name: u64 = n_sym(g, i);
   let argsg: u64 = n_at(g, i + 1);
   if name == s.b_symbol_addr() {
@@ -233,21 +237,21 @@ func builtin_call(k: addr, g: u64, i: u64, want: addr, out: addr) -> u64 {
   let sp: u64 = typed_builtin(k, g, i, want, out);
   if sp != 0 { return sp; }
   let na: u64 = n_count(argsg);
-  let ab: addr = st.st_alloc(k, na * 56 + 8);
+  let ab: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, na * 56 + 8));
   let j: u64 = bi_args(k, argsg, 0, 0, na, ab);
-  let r: u64 = bi.apply(k, name, ab, na, want, out);
+  let r: u64 = bi.apply(k, name, ptr_cast(Mut(u8), ab), na, want, out);
   let ignored: u64 = j;
   return i + 2;
 }
 
-func bi_args(k: addr, g: u64, i: u64, idx: u64, na: u64, ab: addr) -> u64 {
+func bi_args(k: Mut(st.State), g: u64, i: u64, idx: u64, na: u64, ab: Mut(ty.Val)) -> u64 {
   let n: u64 = n_count(g);
   if i >= n { return i; }
   if idx >= na { return i; }
-  let nt: addr = tnone(k);
-  let v: addr = new_val(k);
+  let nt: Mut(ty.Ty) = tnone(k);
+  let v: Mut(ty.Val) = new_val(k);
   let j: u64 = expr(k, g, i, 0, nt, v);
-  let cp: u64 = ty.val_at(ab + idx * 56, v);
+  let cp: u64 = ty.val_at(val_idx(ab, idx), v);
   if is_comma(g, j) == 1 { return bi_args(k, g, j + 1, idx + 1, na, ab); }
   return j;
 }

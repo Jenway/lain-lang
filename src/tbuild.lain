@@ -8,9 +8,41 @@ let ir = import("ir");
 let ireg = import("tyreg");
 let ax = import("ast");
 
+struct SigRec {
+  np: u64,
+  ret: Mut(ty.Ty),
+  params: Mut(ty.Ty)
+}
+
+struct TbField {
+  name: u64,
+  tid: u64
+}
+
+struct TypeBuilder {
+  base: Mut(TbField),
+  count: u64,
+  cap: u64
+}
+
+struct FactoryArg {
+  kind: u64,
+  a: u64,
+  b: u64
+}
+
+struct FactoryCacheEntry {
+  fn_u: u64,
+  nargs: u64,
+  rk: u64,
+  ra: u64,
+  rb: u64,
+  pad: u64
+}
+
 // --- Type 一等元类型与签名检测 --------------------------------------------
 // Type 的逻辑形状只编译期存在：投影一律 unknown，运行期不可物化。
-func type_shape(k: addr) -> u64 {
+func type_shape(k: Mut(st.State)) -> u64 {
   let got: u64 = st.st_typesh(k);
   if got != 0 { return got; }
   let sh: u64 = agg.shp_new(k, agg.kind_type(), s.t_type(), st.st_src(k));
@@ -18,7 +50,7 @@ func type_shape(k: addr) -> u64 {
   return sh;
 }
 
-func type_tid(k: addr) -> u64 {
+func type_tid(k: Mut(st.State)) -> u64 {
   let sh: u64 = type_shape(k);
   let got: u64 = agg.shp_tid(sh);
   if got != 0 { return got; }
@@ -27,97 +59,97 @@ func type_tid(k: addr) -> u64 {
   return id;
 }
 
-func ty_is_type(t: addr) -> u64 {
+func ty_is_type(t: Mut(ty.Ty)) -> u64 {
   let sh: u64 = ty.tsh(t);
   if sh == 0 { return 0; }
   return if agg.shp_kind(sh) == agg.kind_type() { 1 } else { 0 };
 }
 
-func scan_params(paramp: addr, i: u64, np: u64) -> u64 {
+func scan_params(paramp: Mut(ty.Ty), i: u64, np: u64) -> u64 {
   if i >= np { return 0; }
-  if ty_is_type(paramp + i * 32) == 1 { return 1; }
+  let pt: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), paramp) + i * 32);
+  if ty_is_type(pt) == 1 { return 1; }
   return scan_params(paramp, i + 1, np);
 }
 
-func sig_types(sg: addr) -> u64 {
-  let np: u64 = load(sg);
-  let ret: addr = load(sg + 8) as addr;
-  let ps: addr = load(sg + 16) as addr;
-  if ty_is_type(ret) == 1 { return 1; }
-  return scan_params(ps, 0, np);
+func sig_types(sg_raw: Mut(u8)) -> u64 {
+  let sg: Mut(SigRec) = ptr_cast(Mut(SigRec), sg_raw);
+  if ty_is_type(sg.ret) == 1 { return 1; }
+  return scan_params(sg.params, 0, sg.np);
 }
 
 // --- TypeBuilder -----------------------------------------------------------
 // 描述符 32 字节：[记录区@0, 已用条数@8, 容量@16]；每条记录 16 字节 [名字@0, TypeId@8]。
-func builder_new(k: addr) -> addr {
-  let d: addr = st.st_alloc(k, 32);
-  store(d, 0);
-  store(d + 8, 0);
-  store(d + 16, 0);
+func builder_new(k: Mut(st.State)) -> Mut(TypeBuilder) {
+  let d: Mut(TypeBuilder) = ptr_cast(Mut(TypeBuilder), st.st_alloc(k, 32));
+  d.base = null_ref(Mut(TbField));
+  d.count = 0;
+  d.cap = 0;
   return d;
 }
 
-func builder_base(d: addr) -> addr { return load(d) as addr; }
-func builder_count(d: addr) -> u64 { return load(d + 8); }
-func builder_cap(d: addr) -> u64 { return load(d + 16); }
+func builder_field_at(base: Mut(TbField), i: u64) -> Mut(TbField) {
+  return ptr_cast(Mut(TbField), ptr_cast(Mut(u8), base) + i * 16);
+}
 
-func builder_slot(k: addr, d: addr, need: u64) -> addr {
-  let cap: u64 = builder_cap(d);
-  if need <= cap { return builder_base(d); }
+func builder_slot(k: Mut(st.State), d: Mut(TypeBuilder), need: u64) -> Mut(TbField) {
+  let cap: u64 = d.cap;
+  if need <= cap { return d.base; }
   let ncap: u64 = if cap == 0 { 4 } else { cap * 2 };
-  let nb: addr = st.st_alloc(k, ncap * 16);
-  let old: addr = builder_base(d);
-  let cnt: u64 = builder_count(d);
+  let nb: Mut(TbField) = ptr_cast(Mut(TbField), st.st_alloc(k, ncap * 16));
+  let old: Mut(TbField) = d.base;
+  let cnt: u64 = d.count;
   let i: u64 = loop c(i: u64 = 0) while i < cnt {
-    let n0: u64 = load(old + i * 16);
-    let n1: u64 = load(old + i * 16 + 8);
-    store(nb + i * 16, n0);
-    store(nb + i * 16 + 8, n1);
+    let s0: Mut(TbField) = builder_field_at(old, i);
+    let d0: Mut(TbField) = builder_field_at(nb, i);
+    d0.name = s0.name;
+    d0.tid = s0.tid;
     i = i + 1;
   };
-  store(d, nb as u64);
-  store(d + 16, ncap);
+  d.base = nb;
+  d.cap = ncap;
   return nb;
 }
 
-func builder_find(d: addr, name: u64, i: u64) -> u64 {
-  if i >= builder_count(d) { return 0; }
-  if load(builder_base(d) + i * 16) == name { return i + 1; }
+func builder_find(d: Mut(TypeBuilder), name: u64, i: u64) -> u64 {
+  if i >= d.count { return 0; }
+  let bf: Mut(TbField) = builder_field_at(d.base, i);
+  if bf.name == name { return i + 1; }
   return builder_find(d, name, i + 1);
 }
 
-func fail_tb(k: addr, m: addr, n: u64, code: u64) -> u64 {
+func fail_tb(k: Mut(st.State), m: Ref(u8), n: u64, code: u64) -> u64 {
   let g: u64 = ir.diag(k, 0, 1, m, n);
   return st.st_fail(k, code);
 }
 
-func record_begin(k: addr) -> addr { return builder_new(k); }
+func record_begin(k: Mut(st.State)) -> Mut(TypeBuilder) { return builder_new(k); }
 
-func record_add(k: addr, d: addr, name: u64, tid: u64) -> u64 {
-  if d as u64 == 0 { fail_tb(k, "bad builder", 11, ax.e_type()); return 0; }
+func record_add(k: Mut(st.State), d: Mut(TypeBuilder), name: u64, tid: u64) -> u64 {
+  if is_null(d) { fail_tb(k, "bad builder", 11, ax.e_type()); return 0; }
   if name == 0 { fail_tb(k, "bad field name", 14, ax.e_type()); return 0; }
   if tid == type_tid(k) { fail_tb(k, "type is compile-time only", 25, ax.e_type()); return 0; }
   if builder_find(d, name, 0) != 0 { fail_tb(k, "duplicate field", 15, ax.e_type()); return 0; }
-  let c: u64 = builder_count(d);
-  let b: addr = builder_slot(k, d, c + 1);
-  store(b + c * 16, name);
-  store(b + c * 16 + 8, tid);
-  store(d + 8, c + 1);
+  let c: u64 = d.count;
+  let b: Mut(TbField) = builder_slot(k, d, c + 1);
+  let dst: Mut(TbField) = builder_field_at(b, c);
+  dst.name = name;
+  dst.tid = tid;
+  d.count = c + 1;
   return 1;
 }
 
-func record_end(k: addr, d: addr) -> u64 {
-  if d as u64 == 0 { fail_tb(k, "bad builder", 11, ax.e_type()); return 0; }
-  let c: u64 = builder_count(d);
+func record_end(k: Mut(st.State), d: Mut(TypeBuilder)) -> u64 {
+  if is_null(d) { fail_tb(k, "bad builder", 11, ax.e_type()); return 0; }
+  let c: u64 = d.count;
   if c == 0 { fail_tb(k, "empty record", 12, ax.e_type()); return 0; }
   let sh: u64 = agg.shp_new(k, agg.kind_struct(), 0, st.st_src(k));
-  let b: addr = builder_base(d);
+  let b: Mut(TbField) = d.base;
   let i: u64 = loop cc(i: u64 = 0) while i < c {
-    let name: u64 = load(b + i * 16);
-    let tid: u64 = load(b + i * 16 + 8);
-    let t: addr = st.st_alloc(k, 32);
-    ireg.project(k, tid, t);
-    agg.field_add(k, sh, name, ty.tk(t), ty.tw(t), ty.tsg(t), ty.tsh(t));
+    let fld: Mut(TbField) = builder_field_at(b, i);
+    let t: Mut(ty.Ty) = ax.new_ty(k);
+    ireg.project(k, fld.tid, t);
+    agg.field_add(k, sh, fld.name, ty.tk(t), ty.tw(t), ty.tsg(t), ty.tsh(t));
     i = i + 1;
   };
   agg.finish(k, sh);
@@ -128,54 +160,54 @@ func record_end(k: addr, d: addr) -> u64 {
 
 // --- 编译期类型工厂记忆化缓存 -------------------------------------------
 // 每条 144 字节：[fn@0, nargs@8, rk@16, ra@24, rb@32, 4 个实参单元(各24B)@48]。
-func cache_eq_args(rec: addr, ab: addr, i: u64, n: u64) -> u64 {
+func cache_eq_args(rec: Mut(u8), ab: Mut(u8), i: u64, n: u64) -> u64 {
   if i >= n { return 1; }
-  let r: addr = rec + 48 + i * 24;
-  let a: addr = ab + i * 24;
-  let r0: u64 = load(r); let a0: u64 = load(a);
-  if r0 != a0 { return 0; }
-  let r1: u64 = load(r + 8); let a1: u64 = load(a + 8);
-  if r1 != a1 { return 0; }
-  let r2: u64 = load(r + 16); let a2: u64 = load(a + 16);
-  if r2 != a2 { return 0; }
+  let r: Mut(FactoryArg) = ptr_cast(Mut(FactoryArg), rec + 48 + i * 24);
+  let a: Mut(FactoryArg) = ptr_cast(Mut(FactoryArg), ab + i * 24);
+  if r.kind != a.kind { return 0; }
+  if r.a != a.a { return 0; }
+  if r.b != a.b { return 0; }
   return cache_eq_args(rec, ab, i + 1, n);
 }
 
-func cache_scan(base: addr, e: u64, nargs: u64, ab: addr, i: u64, n: u64) -> addr {
-  if i >= n { return 0 as addr; }
-  let rec: addr = base + i * 144;
-  let re: u64 = load(rec);
-  let rn: u64 = load(rec + 8);
-  if re == e and rn == nargs {
-    if cache_eq_args(rec, ab, 0, nargs) == 1 { return rec; }
+func cache_scan(base: Mut(u8), e: u64, nargs: u64, ab: Mut(u8), i: u64, n: u64) -> Mut(FactoryCacheEntry) {
+  if i >= n { return null_ref(Mut(FactoryCacheEntry)); }
+  let rec_raw: Mut(u8) = base + i * 144;
+  let rec: Mut(FactoryCacheEntry) = ptr_cast(Mut(FactoryCacheEntry), rec_raw);
+  if rec.fn_u == e and rec.nargs == nargs {
+    if cache_eq_args(rec_raw, ab, 0, nargs) == 1 { return rec; }
   }
   return cache_scan(base, e, nargs, ab, i + 1, n);
 }
 
-func cache_find(k: addr, e: addr, nargs: u64, ab: addr) -> addr {
-  if nargs > 4 { return 0 as addr; }
-  let base: addr = st.st_ctcache(k);
-  if base as u64 == 0 { return 0 as addr; }
+func cache_find(k: Mut(st.State), e: Mut(u8), nargs: u64, ab: Mut(u8)) -> Mut(FactoryCacheEntry) {
+  if nargs > 4 { return null_ref(Mut(FactoryCacheEntry)); }
+  let base: Mut(u8) = st.st_ctcache(k);
+  if is_null(base) { return null_ref(Mut(FactoryCacheEntry)); }
   let eu: u64 = e as u64;
   return cache_scan(base, eu, nargs, ab, 0, st.st_ctcache_n(k));
 }
 
-func cache_put(k: addr, e: addr, nargs: u64, ab: addr, rk: u64, ra: u64, rb: u64) -> u64 {
+func cache_put(k: Mut(st.State), e: Mut(u8), nargs: u64, ab: Mut(u8), rk: u64, ra: u64, rb: u64) -> u64 {
   if nargs > 4 { return 0; }
-  let base0: addr = st.st_ctcache(k);
+  let base0: Mut(u8) = st.st_ctcache(k);
   let csz: u64 = 144 * 128;
-  let base: addr = if base0 as u64 == 0 { st.st_set_ctcache(k, st.st_ralloc(k, csz)) } else { base0 };
+  let base: Mut(u8) = if is_null(base0) { st.st_set_ctcache(k, st.st_ralloc(k, csz)) } else { base0 };
   let n: u64 = st.st_ctcache_n(k);
   if n >= 128 { return 0; }
-  let rec: addr = base + n * 144;
-  let eu: u64 = e as u64;
-  store(rec, eu); store(rec + 8, nargs);
-  store(rec + 16, rk); store(rec + 24, ra); store(rec + 32, rb);
+  let rec_raw: Mut(u8) = base + n * 144;
+  let rec: Mut(FactoryCacheEntry) = ptr_cast(Mut(FactoryCacheEntry), rec_raw);
+  rec.fn_u = e as u64;
+  rec.nargs = nargs;
+  rec.rk = rk;
+  rec.ra = ra;
+  rec.rb = rb;
   let i: u64 = loop cp(i: u64 = 0) while i < nargs {
-    let r: addr = rec + 48 + i * 24;
-    let a: addr = ab + i * 24;
-    let a0: u64 = load(a); let a1: u64 = load(a + 8); let a2: u64 = load(a + 16);
-    store(r, a0); store(r + 8, a1); store(r + 16, a2);
+    let r: Mut(FactoryArg) = ptr_cast(Mut(FactoryArg), rec_raw + 48 + i * 24);
+    let a: Mut(FactoryArg) = ptr_cast(Mut(FactoryArg), ab + i * 24);
+    r.kind = a.kind;
+    r.a = a.a;
+    r.b = a.b;
     i = i + 1;
   };
   return st.st_set_ctcache_n(k, n + 1);

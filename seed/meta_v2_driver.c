@@ -40,8 +40,8 @@
 #include "lain/vm/tcb.h"
 #include "lain/text/parse.h"
 
-#define DRIVER_MAX_SOURCES 32
-#define DRIVER_MAX_UNITS 64
+#define DRIVER_MAX_SOURCES 128
+#define DRIVER_MAX_UNITS 128
 
 static int g_verbose = 0;
 static int g_quiet = 0;

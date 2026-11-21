@@ -1,251 +1,328 @@
 // 状态：编译期的可变寄存器块，住在 guest 内存里。
-// 所有偏移只在本文件出现，别的模块只经访问器读写。
-// 这里不写任何标量顶层 let：lain0 把顶层标量 let 当成符号地址，参与运算会报
-// 「addr 上没有这个算子」。
+// 所有字段布局集中在本文件，别的模块只经访问器读写。
+// 不写标量顶层 let：顶层标量 let 在 IR 里是符号指针，不能直接当整数算。
 
-extern lain2_mem_alloc(bytes: u64, align: u64) -> addr = lain2_mem_alloc;
+extern lain2_mem_alloc(bytes: u64, align: u64) -> Mut(u8) = lain2_mem_alloc;
 
-// cap：绑定栈字节数。整块布局：状态 512 + 绑定栈 cap + 临时名缓冲 256 +
-// 循环帧 1024 + 类型/值 arena 4194304 + 声明表 8192 + 持久分配 1048576 +
-// 静态数据暂存 65536 + 已登记源标记 64 + 形状表 1048576 + 模块表 2048 +
-// 模块符号表 32768 + 匿名过程队列 4096。arena 与持久分配都跨源存活：一次编译
+struct LoopFrame {
+  label: u64,
+  res: u64,
+  mark: u64,
+  np: u64,
+  slot0: u64,
+  slot1: u64,
+  slot2: u64,
+  slot3: u64
+}
+
+struct State {
+  sp: u64,
+  tmp: u64,
+  label: u64,
+  modv: u64,
+  err: u64,
+  base: Mut(u8),
+  src: u64,
+  pad56: u64,
+  term: u64,
+  cap: u64,
+  scratch: Mut(u8),
+  frame: Mut(u8),
+  depth: u64,
+  retk: u64,
+  retw: u64,
+  looplbl: u64,
+  arena: Mut(u8),
+  arenasz: u64,
+  arenaused: u64,
+  slotj: u64,
+  loopdepth: u64,
+  retsg: u64,
+  root: u64,
+  prefix: u64,
+  regbase: Mut(u8),
+  regcap: u64,
+  regused: u64,
+  rallbase: Mut(u8),
+  rallcap: u64,
+  rallused: u64,
+  databuf: Mut(u8),
+  datacap: u64,
+  dataused: u64,
+  donebase: Mut(u8),
+  shpbase: Mut(u8),
+  shpused: u64,
+  shpcap: u64,
+  modbase: Mut(u8),
+  modused: u64,
+  modcap: u64,
+  symbase: Mut(u8),
+  symused: u64,
+  symcap: u64,
+  pndbase: Mut(u8),
+  pndused: u64,
+  pndcap: u64,
+  strseq: u64,
+  tybase: Mut(u8),
+  tycap: u64,
+  tyused: u64,
+  rftab: u64,
+  retptr: u64,
+  anon: u64,
+  qhead: u64,
+  retsh: u64,
+  ctbase: Mut(u8),
+  ctcap: u64,
+  ctused: u64,
+  ctret: Mut(u8),
+  ctdone: u64,
+  typesh: u64,
+  ctcache: Mut(u8),
+  ctcache_n: u64,
+  genblk: Mut(u8)
+}
+
+// cap：绑定栈字节数。arena 与持久分配都跨源存活：一次编译
 // 里所有源的形状、类型、符号必须同时有效。
-func st_new(cap: u64) -> addr {
-  let p: addr = lain2_mem_alloc(512, 8);
-  let b: addr = lain2_mem_alloc(cap, 8);
-  let s: addr = lain2_mem_alloc(256, 8);
-  let f: addr = lain2_mem_alloc(1024, 8);
-  let a: addr = lain2_mem_alloc(67108864, 8);
-  let r: addr = lain2_mem_alloc(8192, 8);
-  let q: addr = lain2_mem_alloc(1048576, 8);
-  let d: addr = lain2_mem_alloc(65536, 8);
-  let g: addr = lain2_mem_alloc(64, 8);
-  let h: addr = lain2_mem_alloc(16777216, 8);
-  let m: addr = lain2_mem_alloc(16384, 8);
-  let t: addr = lain2_mem_alloc(4194304, 8);
-  let u: addr = lain2_mem_alloc(4096, 8);
-  let v: addr = lain2_mem_alloc(65536, 8);
-  let x: addr = lain2_mem_alloc(32, 8);
-  let gb: addr = lain2_mem_alloc(128, 8);
-  let z: u64 = 0;
-  let w: u64 = loop w(j: u64 = 0) while j < 512 {
-    store(p + j, z);
-    j = j + 8;
+func st_new(cap: u64) -> Mut(State) {
+  let raw: Mut(u8) = lain2_mem_alloc(512, 8);
+  let b: Mut(u8) = lain2_mem_alloc(cap, 8);
+  let s: Mut(u8) = lain2_mem_alloc(256, 8);
+  let f: Mut(u8) = lain2_mem_alloc(1024, 8);
+  let a: Mut(u8) = lain2_mem_alloc(67108864, 8);
+  let r: Mut(u8) = lain2_mem_alloc(8192, 8);
+  let q: Mut(u8) = lain2_mem_alloc(1048576, 8);
+  let d: Mut(u8) = lain2_mem_alloc(65536, 8);
+  let g: Mut(u8) = lain2_mem_alloc(64, 8);
+  let h: Mut(u8) = lain2_mem_alloc(16777216, 8);
+  let m: Mut(u8) = lain2_mem_alloc(16384, 8);
+  let t: Mut(u8) = lain2_mem_alloc(4194304, 8);
+  let u: Mut(u8) = lain2_mem_alloc(4096, 8);
+  let v: Mut(u8) = lain2_mem_alloc(65536, 8);
+  let x: Mut(u8) = lain2_mem_alloc(32, 8);
+  let gb: Mut(u8) = lain2_mem_alloc(128, 8);
+  let words: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), raw), 64);
+  let w: u64 = loop w(j: u64 = 0) while j < 64 {
+    words[j] = 0;
+    j = j + 1;
   };
-  store(p + 40, b as u64);
-  store(p + 72, cap);
-  store(p + 80, s as u64);
-  store(p + 88, f as u64);
-  store(p + 128, a as u64);
-  store(p + 136, 67108864);
-  store(p + 192, r as u64);
-  store(p + 200, 8192);
-  store(p + 216, q as u64);
-  store(p + 224, 1048576);
-  store(p + 240, d as u64);
-  store(p + 248, 65536);
-  store(p + 264, g as u64);
-  store(p + 272, h as u64);
-  store(p + 280, 0);
-  store(p + 288, 16777216);
-  store(p + 296, m as u64);
-  store(p + 304, 0);
-  store(p + 312, 16384);
-  store(p + 320, t as u64);
-  store(p + 328, 0);
-  store(p + 336, 4194304);
-  store(p + 344, u as u64);
-  store(p + 352, 0);
-  store(p + 360, 4096);
-  store(p + 440, v as u64);
-  store(p + 448, 65536);
-  store(p + 464, x as u64);
-  let gz: u64 = loop gzw(j: u64 = 0) while j < 128 {
-    store(gb + j, z);
-    j = j + 8;
+  let gb_words: MutSlice(u64) = make_slice(MutSlice(u64), ptr_cast(Mut(u64), gb), 16);
+  let gz: u64 = loop gzw(j: u64 = 0) while j < 16 {
+    gb_words[j] = 0;
+    j = j + 1;
   };
-  store(p + 504, gb as u64);
+  let p: Mut(State) = ptr_cast(Mut(State), raw);
+  p.base = b;
+  p.cap = cap;
+  p.scratch = s;
+  p.frame = f;
+  p.arena = a;
+  p.arenasz = 67108864;
+  p.regbase = r;
+  p.regcap = 8192;
+  p.rallbase = q;
+  p.rallcap = 1048576;
+  p.databuf = d;
+  p.datacap = 65536;
+  p.donebase = g;
+  p.shpbase = h;
+  p.shpused = 0;
+  p.shpcap = 16777216;
+  p.modbase = m;
+  p.modused = 0;
+  p.modcap = 16384;
+  p.symbase = t;
+  p.symused = 0;
+  p.symcap = 4194304;
+  p.pndbase = u;
+  p.pndused = 0;
+  p.pndcap = 4096;
+  p.ctbase = v;
+  p.ctcap = 65536;
+  p.ctret = x;
+  p.genblk = gb;
   return p;
 }
 
-func st_sp(p: addr) -> u64 { return load(p + 0); }
-func st_set_sp(p: addr, v: u64) -> u64 { store(p + 0, v); return v; }
+func st_sp(p: Mut(State)) -> u64 { return p.sp; }
+func st_set_sp(p: Mut(State), v: u64) -> u64 { p.sp = v; return v; }
 
-func st_tmp(p: addr) -> u64 { return load(p + 8); }
-func st_set_tmp(p: addr, v: u64) -> u64 { store(p + 8, v); return v; }
+func st_tmp(p: Mut(State)) -> u64 { return p.tmp; }
+func st_set_tmp(p: Mut(State), v: u64) -> u64 { p.tmp = v; return v; }
 
-func st_label(p: addr) -> u64 { return load(p + 16); }
-func st_set_label(p: addr, v: u64) -> u64 { store(p + 16, v); return v; }
+func st_label(p: Mut(State)) -> u64 { return p.label; }
+func st_set_label(p: Mut(State), v: u64) -> u64 { p.label = v; return v; }
 
-func st_mod(p: addr) -> u64 { return load(p + 24); }
-func st_set_mod(p: addr, v: u64) -> u64 { store(p + 24, v); return v; }
+func st_mod(p: Mut(State)) -> u64 { return p.modv; }
+func st_set_mod(p: Mut(State), v: u64) -> u64 { p.modv = v; return v; }
 
-func st_err(p: addr) -> u64 { return load(p + 32); }
-func st_set_err(p: addr, v: u64) -> u64 { store(p + 32, v); return v; }
+func st_err(p: Mut(State)) -> u64 { return p.err; }
+func st_set_err(p: Mut(State), v: u64) -> u64 { p.err = v; return v; }
 
-func st_base(p: addr) -> addr { return load(p + 40) as addr; }
+func st_base(p: Mut(State)) -> Mut(u8) { return p.base; }
 
-func st_src(p: addr) -> u64 { return load(p + 48); }
-func st_set_src(p: addr, v: u64) -> u64 { store(p + 48, v); return v; }
+func st_src(p: Mut(State)) -> u64 { return p.src; }
+func st_set_src(p: Mut(State), v: u64) -> u64 { p.src = v; return v; }
 
-func st_term(p: addr) -> u64 { return load(p + 64); }
-func st_set_term(p: addr, v: u64) -> u64 { store(p + 64, v); return v; }
+func st_term(p: Mut(State)) -> u64 { return p.term; }
+func st_set_term(p: Mut(State), v: u64) -> u64 { p.term = v; return v; }
 
-func st_cap(p: addr) -> u64 { return load(p + 72); }
+func st_cap(p: Mut(State)) -> u64 { return p.cap; }
 
-func st_scratch(p: addr) -> addr { return load(p + 80) as addr; }
+func st_scratch(p: Mut(State)) -> Mut(u8) { return p.scratch; }
 
-func st_frame(p: addr) -> addr { return load(p + 88) as addr; }
+func st_frame(p: Mut(State)) -> Mut(u8) { return p.frame; }
 
-func st_depth(p: addr) -> u64 { return load(p + 96); }
-func st_set_depth(p: addr, v: u64) -> u64 { store(p + 96, v); return v; }
+func st_depth(p: Mut(State)) -> u64 { return p.depth; }
+func st_set_depth(p: Mut(State), v: u64) -> u64 { p.depth = v; return v; }
 
-func st_retk(p: addr) -> u64 { return load(p + 104); }
-func st_set_retk(p: addr, v: u64) -> u64 { store(p + 104, v); return v; }
+func st_retk(p: Mut(State)) -> u64 { return p.retk; }
+func st_set_retk(p: Mut(State), v: u64) -> u64 { p.retk = v; return v; }
 
-func st_retw(p: addr) -> u64 { return load(p + 112); }
-func st_set_retw(p: addr, v: u64) -> u64 { store(p + 112, v); return v; }
+func st_retw(p: Mut(State)) -> u64 { return p.retw; }
+func st_set_retw(p: Mut(State), v: u64) -> u64 { p.retw = v; return v; }
 
-func st_looplbl(p: addr) -> u64 { return load(p + 120); }
-func st_set_looplbl(p: addr, v: u64) -> u64 { store(p + 120, v); return v; }
+func st_looplbl(p: Mut(State)) -> u64 { return p.looplbl; }
+func st_set_looplbl(p: Mut(State), v: u64) -> u64 { p.looplbl = v; return v; }
 
-func st_arena(p: addr) -> addr { return load(p + 128) as addr; }
+func st_arena(p: Mut(State)) -> Mut(u8) { return p.arena; }
 
-func st_arenasz(p: addr) -> u64 { return load(p + 136); }
+func st_arenasz(p: Mut(State)) -> u64 { return p.arenasz; }
 
-func st_arenaused(p: addr) -> u64 { return load(p + 144); }
-func st_set_arenaused(p: addr, v: u64) -> u64 { store(p + 144, v); return v; }
+func st_arenaused(p: Mut(State)) -> u64 { return p.arenaused; }
+func st_set_arenaused(p: Mut(State), v: u64) -> u64 { p.arenaused = v; return v; }
 
-func st_slotj(p: addr) -> u64 { return load(p + 152); }
-func st_set_slotj(p: addr, v: u64) -> u64 { store(p + 152, v); return v; }
+func st_slotj(p: Mut(State)) -> u64 { return p.slotj; }
+func st_set_slotj(p: Mut(State), v: u64) -> u64 { p.slotj = v; return v; }
 
-func st_loopdepth(p: addr) -> u64 { return load(p + 160); }
-func st_set_loopdepth(p: addr, v: u64) -> u64 { store(p + 160, v); return v; }
+func st_loopdepth(p: Mut(State)) -> u64 { return p.loopdepth; }
+func st_set_loopdepth(p: Mut(State), v: u64) -> u64 { p.loopdepth = v; return v; }
 
-func st_retsg(p: addr) -> u64 { return load(p + 168); }
-func st_set_retsg(p: addr, v: u64) -> u64 { store(p + 168, v); return v; }
+func st_retsg(p: Mut(State)) -> u64 { return p.retsg; }
+func st_set_retsg(p: Mut(State), v: u64) -> u64 { p.retsg = v; return v; }
 
 // 当前源文件的根 AST 组句柄。
-func st_root(p: addr) -> u64 { return load(p + 176); }
-func st_set_root(p: addr, v: u64) -> u64 { store(p + 176, v); return v; }
+func st_root(p: Mut(State)) -> u64 { return p.root; }
+func st_set_root(p: Mut(State), v: u64) -> u64 { p.root = v; return v; }
 
 // 当前源文件的模块前缀（符号句柄，形如 s0__）。
-func st_prefix(p: addr) -> u64 { return load(p + 184); }
-func st_set_prefix(p: addr, v: u64) -> u64 { store(p + 184, v); return v; }
+func st_prefix(p: Mut(State)) -> u64 { return p.prefix; }
+func st_set_prefix(p: Mut(State), v: u64) -> u64 { p.prefix = v; return v; }
 
 // 本源里定义或导入的顶层名字（声明表）。
-func st_regbase(p: addr) -> addr { return load(p + 192) as addr; }
-func st_regcap(p: addr) -> u64 { return load(p + 200); }
-func st_regused(p: addr) -> u64 { return load(p + 208); }
-func st_set_regused(p: addr, v: u64) -> u64 { store(p + 208, v); return v; }
+func st_regbase(p: Mut(State)) -> Mut(u8) { return p.regbase; }
+func st_regcap(p: Mut(State)) -> u64 { return p.regcap; }
+func st_regused(p: Mut(State)) -> u64 { return p.regused; }
+func st_set_regused(p: Mut(State), v: u64) -> u64 { p.regused = v; return v; }
 
 // 持久分配：不随源重置，存放类型块与描述符。
-func st_rallbase(p: addr) -> addr { return load(p + 216) as addr; }
-func st_rallcap(p: addr) -> u64 { return load(p + 224); }
-func st_rallused(p: addr) -> u64 { return load(p + 232); }
-func st_set_rallused(p: addr, v: u64) -> u64 { store(p + 232, v); return v; }
+func st_rallbase(p: Mut(State)) -> Mut(u8) { return p.rallbase; }
+func st_rallcap(p: Mut(State)) -> u64 { return p.rallcap; }
+func st_rallused(p: Mut(State)) -> u64 { return p.rallused; }
+func st_set_rallused(p: Mut(State), v: u64) -> u64 { p.rallused = v; return v; }
 
 // 静态数据暂存：拼好字节再交给 lain2_ir_data_add。
-func st_databuf(p: addr) -> addr { return load(p + 240) as addr; }
-func st_datacap(p: addr) -> u64 { return load(p + 248); }
-func st_dataused(p: addr) -> u64 { return load(p + 256); }
-func st_set_dataused(p: addr, v: u64) -> u64 { store(p + 256, v); return v; }
+func st_databuf(p: Mut(State)) -> Mut(u8) { return p.databuf; }
+func st_datacap(p: Mut(State)) -> u64 { return p.datacap; }
+func st_dataused(p: Mut(State)) -> u64 { return p.dataused; }
+func st_set_dataused(p: Mut(State), v: u64) -> u64 { p.dataused = v; return v; }
 
 // 已登记源标记：每份源一字节。
-func st_donebase(p: addr) -> addr { return load(p + 264) as addr; }
+func st_donebase(p: Mut(State)) -> Mut(u8) { return p.donebase; }
 
-func st_done(p: addr, src: u64) -> u64 {
-  let f: u8 = load(st_donebase(p) + src);
-  return b2u(f);
+func st_done(p: Mut(State), src: u64) -> u64 {
+  let ds: Slice(u8) = make_slice(Slice(u8), p.donebase, 64);
+  return b2u(ds[src]);
 }
 
-func st_mark_done(p: addr, src: u64) -> u64 {
+func st_mark_done(p: Mut(State), src: u64) -> u64 {
+  let ds: MutSlice(u8) = make_slice(MutSlice(u8), p.donebase, 64);
   let one: u8 = 1;
-  store(st_donebase(p) + src, one);
+  ds[src] = one;
   return 1;
 }
 
-// 形状表：聚合、数组、字符串描述的连续数组，条目 96 字节。
-func st_shpbase(p: addr) -> addr { return load(p + 272) as addr; }
-func st_shpused(p: addr) -> u64 { return load(p + 280); }
-func st_set_shpused(p: addr, v: u64) -> u64 { store(p + 280, v); return v; }
-func st_shpcap(p: addr) -> u64 { return load(p + 288); }
+// 形状表：聚合、数组、字符串描述的连续数组，条目 112 字节。
+func st_shpbase(p: Mut(State)) -> Mut(u8) { return p.shpbase; }
+func st_shpused(p: Mut(State)) -> u64 { return p.shpused; }
+func st_set_shpused(p: Mut(State), v: u64) -> u64 { p.shpused = v; return v; }
+func st_shpcap(p: Mut(State)) -> u64 { return p.shpcap; }
 
-// 模块表：模块序号与别名。条目 24 字节。
-func st_modbase(p: addr) -> addr { return load(p + 296) as addr; }
-func st_modused(p: addr) -> u64 { return load(p + 304); }
-func st_set_modused(p: addr, v: u64) -> u64 { store(p + 304, v); return v; }
-func st_modcap(p: addr) -> u64 { return load(p + 312); }
+// 模块表：模块序号与别名。条目 32 字节。
+func st_modbase(p: Mut(State)) -> Mut(u8) { return p.modbase; }
+func st_modused(p: Mut(State)) -> u64 { return p.modused; }
+func st_set_modused(p: Mut(State), v: u64) -> u64 { p.modused = v; return v; }
+func st_modcap(p: Mut(State)) -> u64 { return p.modcap; }
 
-// 模块符号表：每个模块的顶层声明。条目 64 字节。
-func st_symbase(p: addr) -> addr { return load(p + 320) as addr; }
-func st_symused(p: addr) -> u64 { return load(p + 328); }
-func st_set_symused(p: addr, v: u64) -> u64 { store(p + 328, v); return v; }
-func st_symcap(p: addr) -> u64 { return load(p + 336); }
+// 模块符号表：每个模块的顶层声明。条目 88 字节。
+func st_symbase(p: Mut(State)) -> Mut(u8) { return p.symbase; }
+func st_symused(p: Mut(State)) -> u64 { return p.symused; }
+func st_set_symused(p: Mut(State), v: u64) -> u64 { p.symused = v; return v; }
+func st_symcap(p: Mut(State)) -> u64 { return p.symcap; }
 
 // 匿名过程队列：条目 40 字节 [限定名, 源号, 根节点, 形参组, 签名]。
-func st_pndbase(p: addr) -> addr { return load(p + 344) as addr; }
-func st_pndused(p: addr) -> u64 { return load(p + 352); }
-func st_set_pndused(p: addr, v: u64) -> u64 { store(p + 352, v); return v; }
-func st_pndcap(p: addr) -> u64 { return load(p + 360); }
+func st_pndbase(p: Mut(State)) -> Mut(u8) { return p.pndbase; }
+func st_pndused(p: Mut(State)) -> u64 { return p.pndused; }
+func st_set_pndused(p: Mut(State), v: u64) -> u64 { p.pndused = v; return v; }
+func st_pndcap(p: Mut(State)) -> u64 { return p.pndcap; }
 
 // 匿名过程队列的写入与读出。
-func st_q_add(p: addr) -> addr { return st_pnd_new(p, 40); }
-func st_q_count(p: addr) -> u64 { return st_pndused(p) / 40; }
-func st_q_at(p: addr, i: u64) -> addr { return st_pndbase(p) + i * 40; }
-func st_qhead(p: addr) -> u64 { return load(p + 424); }
-func st_set_qhead(p: addr, v: u64) -> u64 { store(p + 424, v); return v; }
+func st_q_add(p: Mut(State)) -> Mut(u8) { return st_pnd_new(p, 40); }
+func st_q_count(p: Mut(State)) -> u64 { return st_pndused(p) / 40; }
+func st_q_at(p: Mut(State), i: u64) -> Mut(u8) { return st_pndbase(p) + i * 40; }
+func st_qhead(p: Mut(State)) -> u64 { return p.qhead; }
+func st_set_qhead(p: Mut(State), v: u64) -> u64 { p.qhead = v; return v; }
 
 // 值聚合返回的隐藏出参：当前过程的 %_ret 名字（0 表示不走 sret）。
-func st_retptr(p: addr) -> u64 { return load(p + 408); }
-func st_set_retptr(p: addr, v: u64) -> u64 { store(p + 408, v); return v; }
+func st_retptr(p: Mut(State)) -> u64 { return p.retptr; }
+func st_set_retptr(p: Mut(State), v: u64) -> u64 { p.retptr = v; return v; }
 
 // 返回类型的形状号：sret 的整块拷贝按它算字节数。
-func st_retsh(p: addr) -> u64 { return load(p + 432); }
-func st_set_retsh(p: addr, v: u64) -> u64 { store(p + 432, v); return v; }
+func st_retsh(p: Mut(State)) -> u64 { return p.retsh; }
+func st_set_retsh(p: Mut(State), v: u64) -> u64 { p.retsh = v; return v; }
 
 // 匿名过程的合成序号。
-func st_anon(p: addr) -> u64 { return load(p + 416); }
-func st_set_anon(p: addr, v: u64) -> u64 { store(p + 416, v); return v; }
+func st_anon(p: Mut(State)) -> u64 { return p.anon; }
+func st_set_anon(p: Mut(State), v: u64) -> u64 { p.anon = v; return v; }
 
 // 字符串字面量序号。
-func st_strseq(p: addr) -> u64 { return load(p + 368); }
-func st_set_strseq(p: addr, v: u64) -> u64 { store(p + 368, v); return v; }
+func st_strseq(p: Mut(State)) -> u64 { return p.strseq; }
+func st_set_strseq(p: Mut(State), v: u64) -> u64 { p.strseq = v; return v; }
 
 // 类型注册表：编译期类型句柄（TypeId）的登记处。条目 40 字节。
-func st_tybase(p: addr) -> addr { return load(p + 376) as addr; }
-func st_set_tybase(p: addr, v: addr) -> u64 { store(p + 376, v); return 1; }
-func st_tycap(p: addr) -> u64 { return load(p + 384); }
-func st_set_tycap(p: addr, v: u64) -> u64 { store(p + 384, v); return v; }
-func st_tyused(p: addr) -> u64 { return load(p + 392); }
-func st_set_tyused(p: addr, v: u64) -> u64 { store(p + 392, v); return v; }
+func st_tybase(p: Mut(State)) -> Mut(u8) { return p.tybase; }
+func st_set_tybase(p: Mut(State), v: Mut(u8)) -> u64 { p.tybase = v; return 1; }
+func st_tycap(p: Mut(State)) -> u64 { return p.tycap; }
+func st_set_tycap(p: Mut(State), v: u64) -> u64 { p.tycap = v; return v; }
+func st_tyused(p: Mut(State)) -> u64 { return p.tyused; }
+func st_set_tyused(p: Mut(State), v: u64) -> u64 { p.tyused = v; return v; }
 
 // 反射表是否已经铺进当前模块。
-func st_rftab(p: addr) -> u64 { return load(p + 400); }
-func st_set_rftab(p: addr, v: u64) -> u64 { store(p + 400, v); return v; }
+func st_rftab(p: Mut(State)) -> u64 { return p.rftab; }
+func st_set_rftab(p: Mut(State), v: u64) -> u64 { p.rftab = v; return v; }
 
 // 取旧值并把格子加一。
-func st_next_tmp(p: addr) -> u64 {
-  let n: u64 = load(p + 8);
-  store(p + 8, n + 1);
+func st_next_tmp(p: Mut(State)) -> u64 {
+  let n: u64 = p.tmp;
+  p.tmp = n + 1;
   return n;
 }
 
-func st_next_label(p: addr) -> u64 {
-  let n: u64 = load(p + 16);
-  store(p + 16, n + 1);
+func st_next_label(p: Mut(State)) -> u64 {
+  let n: u64 = p.label;
+  p.label = n + 1;
   return n;
 }
 
-func st_next_slot(p: addr) -> u64 {
-  let n: u64 = load(p + 152);
-  store(p + 152, n + 1);
+func st_next_slot(p: Mut(State)) -> u64 {
+  let n: u64 = p.slotj;
+  p.slotj = n + 1;
   return n;
 }
 
-func st_next_str(p: addr) -> u64 {
-  let n: u64 = load(p + 368);
-  store(p + 368, n + 1);
+func st_next_str(p: Mut(State)) -> u64 {
+  let n: u64 = p.strseq;
+  p.strseq = n + 1;
   return n;
 }
 
@@ -254,144 +331,143 @@ func b2u(b: u8) -> u64 {
   return b as u64;
 }
 
-func mem_u8(p: addr) -> u8 {
-  let b: u8 = load(p);
-  return b;
+func mem_u8(p: Ref(u8)) -> u8 {
+  return deref(p);
 }
 
-func mem_put8(p: addr, v: u64) -> u64 {
-  let b: u8 = v as u8;
-  store(p, b);
+func mem_put8(p: Mut(u8), v: u64) -> u64 {
+  deref(p) = v as u8;
   return v;
 }
 
-func mem_copy(dst: addr, src: addr, n: u64) -> u64 {
+func mem_copy(dst: Mut(u8), src: Ref(u8), n: u64) -> u64 {
+  let ds: MutSlice(u8) = make_slice(MutSlice(u8), dst, n);
+  let ss: Slice(u8) = make_slice(Slice(u8), src, n);
   let i: u64 = loop c(i: u64 = 0) while i < n {
-    let b: u8 = load(src + i);
-    store(dst + i, b);
+    ds[i] = ss[i];
     i = i + 1;
   };
   return i;
 }
 
 // arena：编译器给自己用的顺序切分内存，回收发生在整个源文件编译结束时。
-func st_alloc(p: addr, n: u64) -> addr {
-  let used: u64 = load(p + 144);
-  let cap: u64 = load(p + 136);
-  if used + n > cap { return st_fail(p, 3) as addr; }
-  store(p + 144, used + n);
-  let base: addr = load(p + 128) as addr;
-  return base + used;
+func st_alloc(p: Mut(State), n: u64) -> Mut(u8) {
+  let used: u64 = p.arenaused;
+  let cap: u64 = p.arenasz;
+  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
+  p.arenaused = used + n;
+  return p.arena + used;
 }
 
 // 持久分配：跨源存活，装类型块与聚合描述符。
-func st_ralloc(p: addr, n: u64) -> addr {
-  let used: u64 = load(p + 232);
-  let cap: u64 = load(p + 224);
-  if used + n > cap { return st_fail(p, 3) as addr; }
-  store(p + 232, used + n);
-  let base: addr = load(p + 216) as addr;
-  return base + used;
+func st_ralloc(p: Mut(State), n: u64) -> Mut(u8) {
+  let used: u64 = p.rallused;
+  let cap: u64 = p.rallcap;
+  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
+  p.rallused = used + n;
+  return p.rallbase + used;
 }
 
-// 三个登记表的顺序追加，溢出都是同一种失败码。
-func st_shp_new(p: addr, n: u64) -> addr {
-  let used: u64 = load(p + 280);
-  let cap: u64 = load(p + 288);
-  if used + n > cap { return st_fail(p, 3) as addr; }
-  store(p + 280, used + n);
-  let base: addr = load(p + 272) as addr;
-  return base + used;
+// 登记表顺序追加，溢出返回空指针并置错误码。
+func st_shp_new(p: Mut(State), n: u64) -> Mut(u8) {
+  let used: u64 = p.shpused;
+  let cap: u64 = p.shpcap;
+  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
+  p.shpused = used + n;
+  return p.shpbase + used;
 }
 
-func st_mod_new(p: addr, n: u64) -> addr {
-  let used: u64 = load(p + 304);
-  let cap: u64 = load(p + 312);
-  if used + n > cap { return st_fail(p, 3) as addr; }
-  store(p + 304, used + n);
-  let base: addr = load(p + 296) as addr;
-  return base + used;
+func st_mod_new(p: Mut(State), n: u64) -> Mut(u8) {
+  let used: u64 = p.modused;
+  let cap: u64 = p.modcap;
+  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
+  p.modused = used + n;
+  return p.modbase + used;
 }
 
-func st_sym_new(p: addr, n: u64) -> addr {
-  let used: u64 = load(p + 328);
-  let cap: u64 = load(p + 336);
-  if used + n > cap { return st_fail(p, 3) as addr; }
-  store(p + 328, used + n);
-  let base: addr = load(p + 320) as addr;
-  return base + used;
+func st_sym_new(p: Mut(State), n: u64) -> Mut(u8) {
+  let used: u64 = p.symused;
+  let cap: u64 = p.symcap;
+  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
+  p.symused = used + n;
+  return p.symbase + used;
 }
 
-func st_pnd_new(p: addr, n: u64) -> addr {
-  let used: u64 = load(p + 352);
-  let cap: u64 = load(p + 360);
-  if used + n > cap { return st_fail(p, 3) as addr; }
-  store(p + 352, used + n);
-  let base: addr = load(p + 344) as addr;
-  return base + used;
+func st_pnd_new(p: Mut(State), n: u64) -> Mut(u8) {
+  let used: u64 = p.pndused;
+  let cap: u64 = p.pndcap;
+  if used + n > cap { st_fail(p, 3); return null_ref(Mut(u8)); }
+  p.pndused = used + n;
+  return p.pndbase + used;
 }
 
 // --- 编译期绑定栈与求值结果 ---------------------------------------------
 // 编译期绑定栈：每条 32 字节 [名字符号, 种类, 值一, 值二]。
-func st_ctbase(p: addr) -> addr { return load(p + 440) as addr; }
-func st_ctcap(p: addr) -> u64 { return load(p + 448); }
-func st_ctused(p: addr) -> u64 { return load(p + 456); }
-func st_set_ctused(p: addr, v: u64) -> u64 { store(p + 456, v); return v; }
+func st_ctbase(p: Mut(State)) -> Mut(u8) { return p.ctbase; }
+func st_ctcap(p: Mut(State)) -> u64 { return p.ctcap; }
+func st_ctused(p: Mut(State)) -> u64 { return p.ctused; }
+func st_set_ctused(p: Mut(State), v: u64) -> u64 { p.ctused = v; return v; }
 
 // 编译期函数 return 的结果单元（24 字节 [种类, 值一, 值二]）与返回标志。
-func st_ctret(p: addr) -> addr { return load(p + 464) as addr; }
-func st_ctdone(p: addr) -> u64 { return load(p + 472); }
-func st_set_ctdone(p: addr, v: u64) -> u64 { store(p + 472, v); return v; }
+func st_ctret(p: Mut(State)) -> Mut(u8) { return p.ctret; }
+func st_ctdone(p: Mut(State)) -> u64 { return p.ctdone; }
+func st_set_ctdone(p: Mut(State), v: u64) -> u64 { p.ctdone = v; return v; }
 
 // 内建 Type 类型的逻辑形状号，第一次用到时创建。
-func st_typesh(p: addr) -> u64 { return load(p + 480); }
-func st_set_typesh(p: addr, v: u64) -> u64 { store(p + 480, v); return v; }
+func st_typesh(p: Mut(State)) -> u64 { return p.typesh; }
+func st_set_typesh(p: Mut(State), v: u64) -> u64 { p.typesh = v; return v; }
 
 // 编译期类型工厂记忆化缓存区基址与已用条数。
-func st_ctcache(p: addr) -> addr { return load(p + 488) as addr; }
-func st_set_ctcache(p: addr, v: addr) -> addr { store(p + 488, v as u64); return v; }
-func st_ctcache_n(p: addr) -> u64 { return load(p + 496); }
-func st_set_ctcache_n(p: addr, v: u64) -> u64 { store(p + 496, v); return v; }
+func st_ctcache(p: Mut(State)) -> Mut(u8) { return p.ctcache; }
+func st_set_ctcache(p: Mut(State), v: Mut(u8)) -> Mut(u8) { p.ctcache = v; return v; }
+func st_ctcache_n(p: Mut(State)) -> u64 { return p.ctcache_n; }
+func st_set_ctcache_n(p: Mut(State), v: u64) -> u64 { p.ctcache_n = v; return v; }
 
 // Phase 2B 拓展块（128 字节）：given 栈 / 单态化缓存 / 泛型待编队列。
-func st_genblk(p: addr) -> addr { return load(p + 504) as addr; }
+func st_genblk(p: Mut(State)) -> Mut(u8) { return p.genblk; }
 
-func st_fail(p: addr, code: u64) -> u64 {
-  store(p + 32, code);
+func st_fail(p: Mut(State), code: u64) -> u64 {
+  p.err = code;
   return code;
 }
 
-func st_ok(p: addr) -> u64 { return load(p + 32); }
+func st_ok(p: Mut(State)) -> u64 { return p.err; }
 
 // Ty/Val 缓冲都是单文件内的临时量，编译新文件前清空，避免跨文件累计耗尽。
-func st_reset_arena(p: addr) -> u64 {
-  store(p + 144, 0);
+func st_reset_arena(p: Mut(State)) -> u64 {
+  p.arenaused = 0;
   return 0;
 }
 
 // --- 循环帧 -------------------------------------------------------------
-// 第 i 帧 64 字节：标签 0、结果槽 8、环境标记 16、参数个数 24、参数槽 32/40/48/56。
-func st_lf(p: addr, i: u64) -> addr {
-  return st_frame(p) + i * 64;
+// 第 i 帧 64 字节：标签、结果槽、环境标记、参数个数、4 个参数槽。
+func st_lf(p: Mut(State), i: u64) -> Mut(LoopFrame) {
+  return ptr_cast(Mut(LoopFrame), p.frame + i * 64);
 }
 
-func st_lf_label(f: addr) -> u64 { return load(f + 0); }
-func st_set_lf_label(f: addr, v: u64) -> u64 { store(f + 0, v); return v; }
+func st_lf_label(f: Mut(LoopFrame)) -> u64 { return f.label; }
+func st_set_lf_label(f: Mut(LoopFrame), v: u64) -> u64 { f.label = v; return v; }
 
-func st_lf_res(f: addr) -> u64 { return load(f + 8); }
-func st_set_lf_res(f: addr, v: u64) -> u64 { store(f + 8, v); return v; }
+func st_lf_res(f: Mut(LoopFrame)) -> u64 { return f.res; }
+func st_set_lf_res(f: Mut(LoopFrame), v: u64) -> u64 { f.res = v; return v; }
 
-func st_lf_mark(f: addr) -> u64 { return load(f + 16); }
-func st_set_lf_mark(f: addr, v: u64) -> u64 { store(f + 16, v); return v; }
+func st_lf_mark(f: Mut(LoopFrame)) -> u64 { return f.mark; }
+func st_set_lf_mark(f: Mut(LoopFrame), v: u64) -> u64 { f.mark = v; return v; }
 
-func st_lf_np(f: addr) -> u64 { return load(f + 24); }
-func st_set_lf_np(f: addr, v: u64) -> u64 { store(f + 24, v); return v; }
+func st_lf_np(f: Mut(LoopFrame)) -> u64 { return f.np; }
+func st_set_lf_np(f: Mut(LoopFrame), v: u64) -> u64 { f.np = v; return v; }
 
-func st_lf_slot(f: addr, i: u64) -> u64 {
-  return load(f + 32 + i * 8);
+func st_lf_slot(f: Mut(LoopFrame), i: u64) -> u64 {
+  if i == 0 { return f.slot0; }
+  if i == 1 { return f.slot1; }
+  if i == 2 { return f.slot2; }
+  return f.slot3;
 }
 
-func st_set_lf_slot(f: addr, i: u64, v: u64) -> u64 {
-  store(f + 32 + i * 8, v);
+func st_set_lf_slot(f: Mut(LoopFrame), i: u64, v: u64) -> u64 {
+  if i == 0 { f.slot0 = v; return v; }
+  if i == 1 { f.slot1 = v; return v; }
+  if i == 2 { f.slot2 = v; return v; }
+  f.slot3 = v;
   return v;
 }
