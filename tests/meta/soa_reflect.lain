@@ -6,13 +6,13 @@
 // 编译器再把这段文本当成新的源码单元编译进同一个模块。
 //
 // 生成出来的东西等价于：
-//   struct Vec3_SoA { x: i64 y: i64 z: i64 }
-//   func soa_pack(p: addr, a: Vec3) -> u64 { ... }
-//   func soa_x(p: addr) -> i64 { ... }
-struct Vec3 { x: i64 y: i64 z: i64 }
+//   let Vec3_SoA = struct { x: i64 y: i64 z: i64 };
+//   let soa_pack = func(p: addr, a: Vec3) -> u64 { ... };
+//   let soa_x = func(p: addr) -> i64 { ... };
+let Vec3 = struct { x: i64 y: i64 z: i64 };
 
 // --- 文本写入 -------------------------------------------------------------
-func puts(b: addr, i: u64, p: addr, n: u64) -> u64 {
+let puts = func(b: addr, i: u64, p: addr, n: u64) -> u64 {
   let r: u64 = loop cp(k: u64 = 0) while k < n {
     let j: u64 = i + k;
     let c: u8 = load(p + k);
@@ -20,10 +20,10 @@ func puts(b: addr, i: u64, p: addr, n: u64) -> u64 {
     k = k + 1;
   };
   return i + n;
-}
+};
 
 // 十进制写出：生成出来的代码里偏移必须是字面量。
-func putn(b: addr, i: u64, v: u64) -> u64 {
+let putn = func(b: addr, i: u64, v: u64) -> u64 {
   if v >= 10 {
     let j: u64 = putn(b, i, v / 10);
     let d: u64 = 48 + (v - (v / 10) * 10);
@@ -32,10 +32,10 @@ func putn(b: addr, i: u64, v: u64) -> u64 {
   }
   store(b + i, (48 + v) as u8);
   return i + 1;
-}
+};
 
 // --- 生成器 -------------------------------------------------------------
-func decl(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
+let decl = func(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
   if k >= n { return i; }
   let j0: u64 = if k == 0 { i } else { puts(b, i, " ", 1) };
   let nm: addr = meta_field_name(tid, k);
@@ -47,9 +47,9 @@ func decl(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
   let j2: u64 = puts(b, j1, ": ", 2);
   let j3: u64 = puts(b, j2, tn, tl);
   return decl(b, j3, tid, k + 1, n);
-}
+};
 
-func pack(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
+let pack = func(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
   if k >= n { return i; }
   let nm: addr = meta_field_name(tid, k);
   let nl: u64 = meta_field_name_len(tid, k);
@@ -59,44 +59,44 @@ func pack(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
   let j3: u64 = puts(b, j2, nm, nl);
   let j4: u64 = puts(b, j3, ")", 1);
   return pack(b, j4, tid, k + 1, n);
-}
+};
 
 // SoA 侧每个字段占满 8 字节槽位。
-func acc(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
+let acc = func(b: addr, i: u64, tid: u64, k: u64, n: u64) -> u64 {
   if k >= n { return i; }
   let nm: addr = meta_field_name(tid, k);
   let nl: u64 = meta_field_name_len(tid, k);
-  let j0: u64 = puts(b, i, "func soa_", 9);
+  let j0: u64 = puts(b, i, "let soa_", 8);
   let j1: u64 = puts(b, j0, nm, nl);
-  let j2: u64 = puts(b, j1, "(p: addr) -> i64 { return load(p + ", 35);
+  let j2: u64 = puts(b, j1, " = func(p: addr) -> i64 { return load(p + ", 42);
   let j3: u64 = putn(b, j2, k * 8);
-  let j4: u64 = puts(b, j3, ") }", 3);
+  let j4: u64 = puts(b, j3, ") };", 4);
   return acc(b, j4, tid, k + 1, n);
-}
+};
 
-func gen(b: addr, i: u64, tid: u64) -> u64 {
+let gen = func(b: addr, i: u64, tid: u64) -> u64 {
   let n: u64 = meta_field_count(tid);
   let tn: addr = meta_type_name(tid);
   let tl: u64 = meta_type_name_len(tid);
-  let j0: u64 = puts(b, i, "struct ", 7);
+  let j0: u64 = puts(b, i, "let ", 4);
   let j1: u64 = puts(b, j0, tn, tl);
-  let j2: u64 = puts(b, j1, "_SoA { ", 7);
+  let j2: u64 = puts(b, j1, "_SoA = struct { ", 16);
   let j3: u64 = decl(b, j2, tid, 0, n);
-  let j4: u64 = puts(b, j3, " }", 2);
-  let j5: u64 = puts(b, j4, "func soa_pack(p: addr, a: ", 26);
+  let j4: u64 = puts(b, j3, " };", 3);
+  let j5: u64 = puts(b, j4, "let soa_pack = func(p: addr, a: ", 32);
   let j6: u64 = puts(b, j5, tn, tl);
   let j7: u64 = puts(b, j6, ") -> u64 {", 10);
   let j8: u64 = pack(b, j7, tid, 0, n);
-  let j9: u64 = puts(b, j8, "  return 1}", 11);
+  let j9: u64 = puts(b, j8, "  return 1};", 12);
   return acc(b, j9, tid, 0, n);
-}
+};
 
 // inject 的生成器入口：返回缓冲起点，长度由编译器扫 0 字节得出。
-func soa_gen(tid: u64) -> addr {
+let soa_gen = func(tid: u64) -> addr {
   let b: addr = meta_out();
   let n: u64 = gen(b, 0, tid);
   return b;
-}
+};
 
 // --- 编译期折叠的反射查询 -------------------------------------------------
 let size_folded: u64 = meta_type_size(Vec3);
@@ -105,7 +105,7 @@ let off_folded: u64 = meta_field_offset(Vec3, 1);
 
 inject(soa_gen(Vec3));
 
-func main() -> u64 {
+let main = func() -> u64 {
   let v: Vec3 = Vec3 { x: 10 y: 20 z: 30 };
   let slot: Vec3_SoA = Vec3_SoA { x: 0 y: 0 z: 0 };
   let p: addr = ref_of(slot);
@@ -113,4 +113,4 @@ func main() -> u64 {
   let s: u64 = soa_x(p) + soa_y(p) + soa_z(p);
   let ok: u64 = (size_folded - 24) + (count_folded - 3) + (off_folded - 8);
   return s + n + ok;
-}
+};

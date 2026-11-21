@@ -96,16 +96,15 @@ def render(groups, checks):
         "// 不要手改：头文件里的枚举一改，就重跑脚本（verify_all.py 会校验是否同步）。",
         "",
     ]
-    # 一律发成零参过程：lain0 把顶层标量 let 当成符号地址，拿它参与运算会报
-    # 「addr 上没有这个算子」，所以常量必须以调用形式出现。
+    # 一律发成零参过程：常量以调用形式出现。
     for title, values in groups:
         lines.append("// " + title)
         for name, value in values:
-            lines.append("func %s() -> u64 { return %d; }" % (name, value))
+            lines.append("let %s = func() -> u64 { return %d; };" % (name, value))
         lines.append("")
     lines.append("// 验证器诊断码（verify.h）")
     for name, value in checks:
-        lines.append("func %s() -> u64 { return %d; }" % (name, value))
+        lines.append("let %s = func() -> u64 { return %d; };" % (name, value))
     lines.append("")
     return "\n".join(lines)
 

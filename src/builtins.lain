@@ -9,19 +9,19 @@ let sym = import("sym");
 let ax = import("ast");
 let modules = import("modules");
 
-struct SigRec {
+let SigRec = struct {
   np: u64,
   ret: Mut(ty.Ty),
   params: Mut(ty.Ty)
-}
+};
 
-func ty_at_idx(ps: Mut(ty.Ty), i: u64) -> Mut(ty.Ty) {
+let ty_at_idx = func(ps: Mut(ty.Ty), i: u64) -> Mut(ty.Ty) {
   return ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), ps) + i * 32);
-}
+};
 
 // --- 静态数据 -----------------------------------------------------------
 // 把值按 w 位、小端写进 p。
-func put_le(p: Mut(u8), v: u64, w: u64) -> u64 {
+let put_le = func(p: Mut(u8), v: u64, w: u64) -> u64 {
   let bytes: u64 = w / 8;
   let buf: MutSlice(u8) = make_slice(MutSlice(u8), p, bytes);
   let w2: u64 = loop c(i: u64 = 0, x: u64 = v) while i < bytes {
@@ -30,10 +30,10 @@ func put_le(p: Mut(u8), v: u64, w: u64) -> u64 {
     i = i + 1;
   };
   return 0;
-}
+};
 
 // 一个转义字符的实际字节（不认识的就照原样，反斜杠后接其它字符取其本身）。
-func esc_at(text: Ref(u8), i: u64, len: u64) -> u8 {
+let esc_at = func(text: Ref(u8), i: u64, len: u64) -> u8 {
   let b: u8 = deref(text + i);
   if b != 92 { return b; }
   if i + 1 >= len { return b; }
@@ -43,18 +43,18 @@ func esc_at(text: Ref(u8), i: u64, len: u64) -> u8 {
   if c == 116 { return 9; }
   if c == 48 { return 0; }
   return c;
-}
+};
 
 // 转义序列吃两个字节，普通字符吃一个。
-func esc_step(text: Ref(u8), i: u64, len: u64) -> u64 {
+let esc_step = func(text: Ref(u8), i: u64, len: u64) -> u64 {
   let b: u8 = deref(text + i);
   if b != 92 { return 1; }
   if i + 1 >= len { return 1; }
   return 2;
-}
+};
 
 // 把源码里的字面量字节反转义后铺进 buf，回实际长度。
-func unescape_into(buf: Mut(u8), text: Ref(u8), len: u64) -> u64 {
+let unescape_into = func(buf: Mut(u8), text: Ref(u8), len: u64) -> u64 {
   let dst: MutSlice(u8) = make_slice(MutSlice(u8), buf, len);
   let r: u64 = loop c(i: u64 = 0, o: u64 = 0) while i < len {
     let v: u8 = esc_at(text, i, len);
@@ -64,25 +64,25 @@ func unescape_into(buf: Mut(u8), text: Ref(u8), len: u64) -> u64 {
     o = o + 1;
   };
   return r;
-}
+};
 
 // 字符串字面量的字节反转义后落在暂存缓冲里，交给 data_add 变成 ro 静态数据。
-func string_data(s: Mut(st.State), dname: u64, text: Ref(u8), len: u64) -> u64 {
+let string_data = func(s: Mut(st.State), dname: u64, text: Ref(u8), len: u64) -> u64 {
   let buf: Mut(u8) = st.st_databuf(s) + st.st_dataused(s);
   let outlen: u64 = unescape_into(buf, text, len);
   let add: u64 = st.st_set_dataused(s, st.st_dataused(s) + outlen);
   let rc: u64 = ir.data_add(s, dname, buf, outlen, 0);
   return agg.array_new(s, agg.kind_string(), outlen, 0, 8, 0, 0);
-}
+};
 
 // 定长表：[1, 2, 3] 这种字面量组按元素宽度铺进静态数据。逗号也占孩子位置，要跳过。
-func table_cnt(g: u64, i: u64, n: u64, acc: u64) -> u64 {
+let table_cnt = func(g: u64, i: u64, n: u64, acc: u64) -> u64 {
   if i >= n { return acc; }
   if ax.is_comma(g, i) == 1 { return table_cnt(g, i + 1, n, acc); }
   return table_cnt(g, i + 1, n, acc + 1);
-}
+};
 
-func table_fill(s: Mut(st.State), buf: Mut(u8), g: u64, i: u64, n: u64, pos: u64, ew: u64) -> u64 {
+let table_fill = func(s: Mut(st.State), buf: Mut(u8), g: u64, i: u64, n: u64, pos: u64, ew: u64) -> u64 {
   if i >= n { return 0; }
   if ax.is_comma(g, i) == 1 { return table_fill(s, buf, g, i + 1, n, pos, ew); }
   let tok: u64 = ax.n_at(g, i);
@@ -90,9 +90,9 @@ func table_fill(s: Mut(st.State), buf: Mut(u8), g: u64, i: u64, n: u64, pos: u64
   let off: u64 = pos * ew;
   let put: u64 = put_le(buf + off, v, ew * 8);
   return table_fill(s, buf, g, i + 1, n, pos + 1, ew);
-}
+};
 
-func table_data(s: Mut(st.State), dname: u64, g: u64, elem: Mut(ty.Ty), rdonly: u64) -> u64 {
+let table_data = func(s: Mut(st.State), dname: u64, g: u64, elem: Mut(ty.Ty), rdonly: u64) -> u64 {
   let ew: u64 = agg.type_size(ty.tk(elem), ty.tw(elem), ty.tsh(elem));
   let n: u64 = ax.n_count(g);
   let cnt: u64 = table_cnt(g, 0, n, 0);
@@ -106,10 +106,10 @@ func table_data(s: Mut(st.State), dname: u64, g: u64, elem: Mut(ty.Ty), rdonly: 
                               ty.tsh(elem));
   let mark: u64 = agg.shp_set_static(sh, 1);
   return sh;
-}
+};
 
 // 聚合的静态占位：先给一块零字节数据，字段由随后的过程写进去。
-func agg_data(s: Mut(st.State), dname: u64, sh: u64) -> u64 {
+let agg_data = func(s: Mut(st.State), dname: u64, sh: u64) -> u64 {
   let size: u64 = agg.shp_size(sh);
   let buf: Mut(u8) = st.st_databuf(s) + st.st_dataused(s);
   let zs: MutSlice(u8) = make_slice(MutSlice(u8), buf, size);
@@ -120,24 +120,24 @@ func agg_data(s: Mut(st.State), dname: u64, sh: u64) -> u64 {
   };
   let add: u64 = st.st_set_dataused(s, st.st_dataused(s) + size);
   return ir.data_add(s, dname, buf, size, 1);
-}
+};
 
 // --- 间接调用 -----------------------------------------------------------
 // 组里顶层逗号分隔的项数；空组算零项。
-func arg_count(g: u64) -> u64 {
+let arg_count = func(g: u64) -> u64 {
   let n: u64 = ax.n_count(g);
   if n == 0 { return 0; }
   return comma_n(g, 0, n, 0) + 1;
-}
+};
 
-func comma_n(g: u64, i: u64, n: u64, acc: u64) -> u64 {
+let comma_n = func(g: u64, i: u64, n: u64, acc: u64) -> u64 {
   if i >= n { return acc; }
   if ax.is_comma(g, i) == 1 { return comma_n(g, i + 1, n, acc + 1); }
   return comma_n(g, i + 1, n, acc);
-}
+};
 
 // 形参类型表压进两个 64 位字：每项 16 位，低 8 位类型码、高 8 位宽度。
-func pack_params_from(k: Mut(st.State), ps: Mut(ty.Ty), i: u64, n: u64, pk: MutSlice(u64), base: u64) -> u64 {
+let pack_params_from = func(k: Mut(st.State), ps: Mut(ty.Ty), i: u64, n: u64, pk: MutSlice(u64), base: u64) -> u64 {
   if i >= n { return i; }
   let tp: Mut(ty.Ty) = ty_at_idx(ps, i);
   let code: u64 = ir.kcode(tp);
@@ -150,21 +150,21 @@ func pack_params_from(k: Mut(st.State), ps: Mut(ty.Ty), i: u64, n: u64, pk: MutS
   let sh: u64 = (idx - wi * 4) * 16;
   pk[wi] = pk[wi] + (item << sh);
   return pack_params_from(k, ps, i + 1, n, pk, base);
-}
+};
 
-func pack_params(k: Mut(st.State), ps: Mut(ty.Ty), i: u64, n: u64, pk: MutSlice(u64)) -> u64 {
+let pack_params = func(k: Mut(st.State), ps: Mut(ty.Ty), i: u64, n: u64, pk: MutSlice(u64)) -> u64 {
   return pack_params_from(k, ps, i, n, pk, 0);
-}
+};
 
-func push_vals(k: Mut(st.State), ab: Mut(ty.Val), i: u64, n: u64) -> u64 {
+let push_vals = func(k: Mut(st.State), ab: Mut(ty.Val), i: u64, n: u64) -> u64 {
   if i >= n { return i; }
   let v: Mut(ty.Val) = ptr_cast(Mut(ty.Val), ptr_cast(Mut(u8), ab) + i * 56);
   let a: u64 = ir.op_val(k, v);
   return push_vals(k, ab, i + 1, n);
-}
+};
 
 // 间接调用：被调值必须是指针类型，实参已在 ab 里按形参类型强制过。
-func icall_emit(k: Mut(st.State), sk_raw: Ref(u8), fv: Mut(ty.Val), ab: Mut(ty.Val), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+let icall_emit = func(k: Mut(st.State), sk_raw: Ref(u8), fv: Mut(ty.Val), ab: Mut(ty.Val), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let vt: Mut(ty.Ty) = ty.vty(fv);
   if ty.tk(vt) != 3 {
     // 目标不是指针：一次性调用错误，报明确消息再失败。
@@ -203,11 +203,11 @@ func icall_emit(k: Mut(st.State), sk_raw: Ref(u8), fv: Mut(ty.Val), ab: Mut(ty.V
   }
   ty.val_at(out, ct);
   return 0;
-}
+};
 
 // 值聚合返回走隐藏出参：先 #alloca 结果块，把它当第 0 个实参传进去，
 // 指令本身没有返回值，调用方拿到的就是那块地址。
-func icall_sret(k: Mut(st.State), fv: Mut(ty.Val), ab: Mut(ty.Val), np: u64, ps: Mut(ty.Ty), ret: Mut(ty.Ty), want: Mut(ty.Ty),
+let icall_sret = func(k: Mut(st.State), fv: Mut(ty.Val), ab: Mut(ty.Val), np: u64, ps: Mut(ty.Ty), ret: Mut(ty.Ty), want: Mut(ty.Ty),
                 out: Mut(ty.Val), pk: MutSlice(u64)) -> u64 {
   if np + 1 > 8 { st.st_fail(k, ax.e_type()); return 0; }
   let dv: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, 56));
@@ -230,10 +230,10 @@ func icall_sret(k: Mut(st.State), fv: Mut(ty.Val), ab: Mut(ty.Val), np: u64, ps:
   }
   ty.val_at(out, ct);
   return 0;
-}
+};
 
 // --- 内建分派 -----------------------------------------------------------
-func is_builtin(name: u64) -> u64 {
+let is_builtin = func(name: u64) -> u64 {
   if name == sym.b_load() { return 1; }
   if name == sym.b_store() { return 1; }
   if name == sym.b_lea() { return 1; }
@@ -251,42 +251,42 @@ func is_builtin(name: u64) -> u64 {
   if name == sym.b_null_ref() { return 1; }
   if name == sym.b_is_null() { return 1; }
   return 0;
-}
+};
 
 // 读的内存宽度由上下文期望类型决定，没有期望时按机器字。
-func load_ty(k: Mut(st.State), want: Mut(ty.Ty)) -> Mut(ty.Ty) {
+let load_ty = func(k: Mut(st.State), want: Mut(ty.Ty)) -> Mut(ty.Ty) {
   if ty.ty_known(want) == 1 and ty.tw(want) != 1 { return want; }
   return ir.tbits(k, 64);
-}
+};
 
-func do_load(k: Mut(st.State), v0: Mut(ty.Val), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+let do_load = func(k: Mut(st.State), v0: Mut(ty.Val), want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = load_ty(k, want);
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, v0);
   let ins: u64 = ir.emit_mem(k, codes.INST_LOAD(), res, t, 0);
   return ty.val_ref(out, res, t);
-}
+};
 
 // store 的宽度取右值的类型；右值是裸字面量时按 64 位。
-func store_ty(k: Mut(st.State), v: Mut(ty.Val)) -> Mut(ty.Ty) {
+let store_ty = func(k: Mut(st.State), v: Mut(ty.Val)) -> Mut(ty.Ty) {
   let t: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let vt: Mut(ty.Ty) = ty.vty(v);
   if ty.vlit(v) == 1 { let rc: u64 = ty.ty_bits(t, 64, 0); return t; }
   if ty.ty_known(vt) == 0 { let rc: u64 = ty.ty_bits(t, 64, 0); return t; }
   let cp: u64 = ty.ty_at(t, vt);
   return t;
-}
+};
 
-func do_store(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val)) -> u64 {
+let do_store = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = store_ty(k, v1);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, v1);
   let b: u64 = ir.op_val(k, v0);
   return ir.emit_mem(k, codes.INST_STORE(), 0, t, 0);
-}
+};
 
-func do_lea(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), out: Mut(ty.Val)) -> u64 {
+let do_lea = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), out: Mut(ty.Val)) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.op_val(k, v0);
@@ -295,9 +295,9 @@ func do_lea(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), out: Mut(ty.Val)
   let d: u64 = ir.arg_int(k, 0);
   let ins: u64 = ir.emit(k, codes.INST_LEA(), res, ir.taddr(k));
   return ty.val_ref(out, res, ir.taddr(k));
-}
+};
 
-func do_slice(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), out: Mut(ty.Val)) -> u64 {
+let do_slice = func(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), out: Mut(ty.Val)) -> u64 {
   let obj: Mut(ty.Val) = ptr_cast(Mut(ty.Val), st.st_alloc(k, 56));
   let base: u64 = agg.new_bytes(k, 16, 8, obj);
   let at: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
@@ -308,9 +308,9 @@ func do_slice(k: Mut(st.State), v0: Mut(ty.Val), v1: Mut(ty.Val), out: Mut(ty.Va
   let av: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), st.st_alloc(k, 32));
   let ta: u64 = ty.ty_addr(av);
   return ty.val_ref(out, base, av);
-}
+};
 
-func apply(k: Mut(st.State), name: u64, argv: Mut(u8), n: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+let apply = func(k: Mut(st.State), name: u64, argv: Mut(u8), n: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let v0: Mut(ty.Val) = ptr_cast(Mut(ty.Val), argv);
   let v1: Mut(ty.Val) = ptr_cast(Mut(ty.Val), argv + 56);
   if name == sym.b_load() { return do_load(k, v0, want, out); }
@@ -343,10 +343,10 @@ func apply(k: Mut(st.State), name: u64, argv: Mut(u8), n: u64, want: Mut(ty.Ty),
   if name == sym.b_slice_of() { return do_slice(k, v0, v1, out); }
   let rc: u64 = st.st_fail(k, 5);
   return 0;
-}
+};
 
 // coerce 的本地副本：builtins 在 ctx 之前，不能反向依赖。
-func coerce_v(k: Mut(st.State), v: Mut(ty.Val), to: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
+let coerce_v = func(k: Mut(st.State), v: Mut(ty.Val), to: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 {
   let from: Mut(ty.Ty) = ty.vty(v);
   let cp: u64 = ty.val_at(out, v);
   if ty.ty_known(from) == 0 { return 0; }
@@ -359,10 +359,10 @@ func coerce_v(k: Mut(st.State), v: Mut(ty.Val), to: Mut(ty.Ty), out: Mut(ty.Val)
   let a: u64 = ir.arg_ref(k, ty.vn(v));
   let ins: u64 = ir.emit(k, kind, res, to);
   return ty.val_ref(out, res, to);
-}
+};
 
 // symbol_addr("name")：把字面量文本当作数据符号名，拼上本模块前缀。
-func symbol_addr(k: Mut(st.State), g: u64, out: Mut(ty.Val), src: u64) -> u64 {
+let symbol_addr = func(k: Mut(st.State), g: u64, out: Mut(ty.Val), src: u64) -> u64 {
   let h: u64 = if ax.n_count(g) > 0 { ax.n_at(g, 0) } else { 0 };
   if h == 0 { return 0; }
   let off: Ref(u8) = ax.lit_addr(h) + 1;
@@ -380,4 +380,4 @@ func symbol_addr(k: Mut(st.State), g: u64, out: Mut(ty.Val), src: u64) -> u64 {
   let t: Mut(ty.Ty) = ax.new_ty(k);
   let a: u64 = ty.ty_addr(t);
   return ty.val_ref(out, q, t);
-}
+};

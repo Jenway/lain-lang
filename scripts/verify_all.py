@@ -386,6 +386,8 @@ META_NEGATIVE = [
     {"file": "concept_missing_given.lain", "why": "缺少对应的 given 实例"},
     {"file": "concept_ambig_given.lain", "why": "同层多个 given 实例歧义"},
     {"file": "concept_rec_limit.lain", "why": "泛型递归实例化超过深度上限"},
+    {"file": "legacy_top_func_err.lain", "why": "顶层 func 已移除，必须改用 let = func"},
+    {"file": "legacy_top_struct_err.lain", "why": "顶层 struct 已移除，必须改用 let = struct"},
 ]
 
 
@@ -684,8 +686,12 @@ def main():
     elif args.update_bootstrap:
         print("自举快照 未刷新（固定点未通过或检查被跳过）")
 
-    # 现代源码零 addr 审查
-    zero_addr_targets = [os.path.join(ROOT, "tests", "meta", "modern_no_addr.lain")]
+    # 现代源码零 addr 审查：tests/meta 里的现代样例与 legacy/std 负测试也必须零 addr。
+    meta_zero_names = ["modern_no_addr.lain", "legacy_top_func_err.lain",
+                       "legacy_top_struct_err.lain", "std_test_self.lain",
+                       "std_test_fail.lain", "std_bench_smoke.lain", "std_io_oob.lain"]
+    zero_addr_targets = [os.path.join(META_TESTS, n)
+                         for n in meta_zero_names]
     if os.path.isdir(EXAMPLES):
         zero_addr_targets += [os.path.join(EXAMPLES, n)
                               for n in sorted(os.listdir(EXAMPLES)) if n.endswith(".lain")]

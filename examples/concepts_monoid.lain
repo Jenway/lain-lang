@@ -1,61 +1,56 @@
 // Concept-based polymorphism: Monoid(T) + generic array fold + witness override + generic SoA setter
 let io = import("std::io");
 
-struct Vec2 { x: i64, y: i64 }
-struct Vec3 { x: i64, y: i64, z: i64 }
+let Vec2 = struct { x: i64, y: i64 };
+let Vec3 = struct { x: i64, y: i64, z: i64 };
 
-// 1. Define Monoid(T) as a first-class Type factory (record of function pointers)
-func Monoid(T: Type) -> Type {
-  let b = record_begin();
-  record_add(b, "zero", Fn(() -> T));
-  record_add(b, "combine", Fn((T, T) -> T));
-  return record_end(b);
-}
+// 1. Define Monoid(T) as a first-class Type factory (struct of function pointers)
+let Monoid = func(T: Type) -> Type { return struct { zero: Fn(() -> T), combine: Fn((T, T) -> T) }; };
 
-func i64_zero() -> i64 { return 0; }
-func i64_add(a: i64, b: i64) -> i64 { return a + b; }
-func i64_one() -> i64 { return 1; }
-func i64_mul(a: i64, b: i64) -> i64 { return a * b; }
+let i64_zero = func() -> i64 { return 0; };
+let i64_add = func(a: i64, b: i64) -> i64 { return a + b; };
+let i64_one = func() -> i64 { return 1; };
+let i64_mul = func(a: i64, b: i64) -> i64 { return a * b; };
 
-func vec2_zero() -> Vec2 { return Vec2 { x: 0, y: 0 }; }
-func vec2_add(a: Vec2, b: Vec2) -> Vec2 { return Vec2 { x: a.x + b.x, y: a.y + b.y }; }
+let vec2_zero = func() -> Vec2 { return Vec2 { x: 0, y: 0 }; };
+let vec2_add = func(a: Vec2, b: Vec2) -> Vec2 { return Vec2 { x: a.x + b.x, y: a.y + b.y }; };
 
-given sum_i64: Monoid(i64) = Monoid(i64) { zero: i64_zero, combine: i64_add };
-given sum_vec2: Monoid(Vec2) = Monoid(Vec2) { zero: vec2_zero, combine: vec2_add };
+given Monoid(i64) { zero: i64_zero, combine: i64_add };
+given Monoid(Vec2) { zero: vec2_zero, combine: vec2_add };
 
 // 2. Generic fixed-array fold: deduces T, N and resolves Monoid(T) witness automatically
-func fold_arr(arr: Ref(Array(T, N))) ?{ T: Type, N: u64, m: Monoid(T) } -> T {
+let fold_arr = func(arr: Ref(Array(T, N))) ?{ T: Type, N: u64, m: Monoid(T) } -> T {
   let acc: T = m.zero();
   comptime for i in 0..N {
     acc = m.combine(acc, deref(arr)[i]);
   }
   return acc;
-}
+};
 
 // Generic 3-way combine (also tests sret struct return through witness)
-func combine3(a: T, b: T, c: T) ?{ T: Type, m: Monoid(T) } -> T {
+let combine3 = func(a: T, b: T, c: T) ?{ T: Type, m: Monoid(T) } -> T {
   return m.combine(m.combine(a, b), c);
-}
+};
 
 // 3. Generic SoA type constructor and generic field setter
-func make_soa(T: Type, N: u64) -> Type {
+let make_soa = func(T: Type, N: u64) -> Type {
   let b = record_begin();
   comptime for f in fields_of(T) {
     record_add(b, f.name, Array(f.type, N));
   }
   return record_end(b);
-}
+};
 
 let Vec2SoA = make_soa(Vec2, 3);
 let Vec3SoA = make_soa(Vec3, 3);
 
-func soa_set(s: Mut(SoA), idx: u64, v: T) ?{ SoA: Type, T: Type } {
+let soa_set = func(s: Mut(SoA), idx: u64, v: T) ?{ SoA: Type, T: Type } {
   comptime for f in fields_of(T) {
     deref(s).[:f.name][idx] = v.[:f.name];
   }
-}
+};
 
-func main() -> i64 {
+let main = func() -> i64 {
   let nums: Array(i64, 4) = [2, 3, 4, 5];
   let sum_n: i64 = fold_arr(ref_of(nums)); // 2+3+4+5 = 14
 
@@ -83,4 +78,4 @@ func main() -> i64 {
   io.print("total=");
   io.println_i64(total);
   return total;
-}
+};

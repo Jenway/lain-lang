@@ -15,27 +15,27 @@ let ireg = import("tyreg");
 let ctf = import("ctfor");
 extern core_expr(k: Mut(st.State), g: u64, i: u64, minp: u64, want: Mut(ty.Ty), out: Mut(ty.Val)) -> u64 = lainc_core_expr;
 
-struct LvalRec {
+let LvalRec = struct {
   cell: u64,
   lock: u64
-}
+};
 
 // 记录 128 字节：[存储名字@0, 只读标记@8, ..., 类型@56]。
 // 名字是 IR 里的值名（局部槽、数据符号或 #lea 的结果），不是宿主地址。
 // 只读标记：0 可写，1 只读引用，2 只读切片，3 只读静态表。
-func rec_new(k: Mut(st.State)) -> Mut(LvalRec) {
+let rec_new = func(k: Mut(st.State)) -> Mut(LvalRec) {
   return ptr_cast(Mut(LvalRec), st.st_alloc(k, 128));
-}
-func rec_cell(r: Mut(LvalRec)) -> u64 { return r.cell; }
-func set_cell(r: Mut(LvalRec), v: u64) -> u64 { r.cell = v; return v; }
-func rec_ty(r: Mut(LvalRec)) -> Mut(ty.Ty) {
+};
+let rec_cell = func(r: Mut(LvalRec)) -> u64 { return r.cell; };
+let set_cell = func(r: Mut(LvalRec), v: u64) -> u64 { r.cell = v; return v; };
+let rec_ty = func(r: Mut(LvalRec)) -> Mut(ty.Ty) {
   return ptr_cast(Mut(ty.Ty), ptr_cast(Mut(u8), r) + 56);
-}
-func rec_lock(r: Mut(LvalRec)) -> u64 { return r.lock; }
-func rec_set_lock(r: Mut(LvalRec), v: u64) -> u64 { r.lock = v; return v; }
+};
+let rec_lock = func(r: Mut(LvalRec)) -> u64 { return r.lock; };
+let rec_set_lock = func(r: Mut(LvalRec), v: u64) -> u64 { r.lock = v; return v; };
 
 // base + idx * scale，idx 允许是寄存器里的值。
-func lea_idx(k: Mut(st.State), base: u64, iv: Mut(ty.Val), scale: u64) -> u64 {
+let lea_idx = func(k: Mut(st.State), base: u64, iv: Mut(ty.Val), scale: u64) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let rc: u64 = ir.args_reset(k);
   let a: u64 = ir.arg_ref(k, base);
@@ -44,13 +44,13 @@ func lea_idx(k: Mut(st.State), base: u64, iv: Mut(ty.Val), scale: u64) -> u64 {
   let d: u64 = ir.arg_int(k, 0);
   let ins: u64 = ir.emit(k, codes.INST_LEA(), res, ir.taddr(k));
   return res;
-}
+};
 
 // 槽里存的是块地址（值聚合）还是值本身：结构、枚举、数组、切片存地址。
-func slot_holds_ptr(t: Mut(ty.Ty)) -> u64 { return agg.sret_ty(t); }
+let slot_holds_ptr = func(t: Mut(ty.Ty)) -> u64 { return agg.sret_ty(t); };
 
 // 局部名字：槽地址本身就是左值；值聚合先读出槽里存的那块地址。
-func from_local(k: Mut(st.State), off: u64, r: Mut(LvalRec)) -> u64 {
+let from_local = func(k: Mut(st.State), off: u64, r: Mut(LvalRec)) -> u64 {
   let sn: u64 = ir.slot_name(k, env.env_slot(k, off));
   let t: Mut(ty.Ty) = rec_ty(r);
   let g0: u64 = env.env_ty(k, off, t);
@@ -64,10 +64,10 @@ func from_local(k: Mut(st.State), off: u64, r: Mut(LvalRec)) -> u64 {
   let res: u64 = ir.fresh_t(k);
   let le: u64 = ir.emit_lea(k, res, sn, 0, 1, 0);
   return set_cell(r, res);
-}
+};
 
 // deref(引用)：被指向的那块就是左值；只读引用打上标记 1。
-func from_deref(k: Mut(st.State), pv: Mut(ty.Val), r: Mut(LvalRec)) -> u64 {
+let from_deref = func(k: Mut(st.State), pv: Mut(ty.Val), r: Mut(LvalRec)) -> u64 {
   let sh: u64 = ty.tsh(ty.vty(pv));
   let eid: u64 = ct.elem_tid(k, sh);
   let t: Mut(ty.Ty) = rec_ty(r);
@@ -75,19 +75,19 @@ func from_deref(k: Mut(st.State), pv: Mut(ty.Val), r: Mut(LvalRec)) -> u64 {
   let kd: u64 = agg.shp_kind(sh);
   let lk: u64 = if kd == agg.kind_ref() { rec_set_lock(r, 1) } else { rec_set_lock(r, 0) };
   return set_cell(r, ty.vn(pv));
-}
+};
 
 // 静态数据：符号本身就是一个模块级的指针；只读表打上标记 3。
-func from_data(k: Mut(st.State), e: Mut(modules.SymEntry), r: Mut(LvalRec)) -> u64 {
+let from_data = func(k: Mut(st.State), e: Mut(modules.SymEntry), r: Mut(LvalRec)) -> u64 {
   let tv: Mut(ty.Ty) = ptr_cast(Mut(ty.Ty), modules.sym_sig(e));
   let t: Mut(ty.Ty) = rec_ty(r);
   let cp: u64 = ty.ty_at(t, tv);
   let lk: u64 = if modules.sym_ro(e) == 1 { rec_set_lock(r, 3) } else { rec_set_lock(r, 0) };
   return set_cell(r, modules.sym_qual(e));
-}
+};
 
 // 成员：偏移加上去；成员自己也是值聚合时，先读出它存的那块地址。
-func field_step(k: Mut(st.State), r: Mut(LvalRec), m: Mut(agg.Member)) -> u64 {
+let field_step = func(k: Mut(st.State), r: Mut(LvalRec), m: Mut(agg.Member)) -> u64 {
   let off: u64 = agg.mem_off(m);
   let t: Mut(ty.Ty) = rec_ty(r);
   let cur: u64 = rec_cell(r);
@@ -102,10 +102,10 @@ func field_step(k: Mut(st.State), r: Mut(LvalRec), m: Mut(agg.Member)) -> u64 {
     return set_cell(r, ty.vn(w));
   }
   return set_cell(r, cell);
-}
+};
 
 // 下标：数组直接落在块上；切片先从头里取列指针，只读切片打上标记 2。
-func index_step(k: Mut(st.State), r: Mut(LvalRec), iv: Mut(ty.Val)) -> u64 {
+let index_step = func(k: Mut(st.State), r: Mut(LvalRec), iv: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = rec_ty(r);
   let sh: u64 = ty.tsh(t);
   let kd: u64 = agg.shp_kind(sh);
@@ -131,10 +131,10 @@ func index_step(k: Mut(st.State), r: Mut(LvalRec), iv: Mut(ty.Val)) -> u64 {
   let np: u64 = lea_idx(k, base, iv, ew);
   let cp: u64 = ty.ty_at(t, et);
   return set_cell(r, np);
-}
+};
 
 // 写入：值聚合整块拷贝，其余按目标的真实物理类型 #store。
-func store_value(k: Mut(st.State), r: Mut(LvalRec), v: Mut(ty.Val)) -> u64 {
+let store_value = func(k: Mut(st.State), r: Mut(LvalRec), v: Mut(ty.Val)) -> u64 {
   let t: Mut(ty.Ty) = rec_ty(r);
   let cell: u64 = rec_cell(r);
   if slot_holds_ptr(t) == 1 {
@@ -142,26 +142,26 @@ func store_value(k: Mut(st.State), r: Mut(LvalRec), v: Mut(ty.Val)) -> u64 {
     return agg.copy_block(k, cell, ty.vn(v), sz);
   }
   return agg.store_at(k, cell, 0, v, t);
-}
+};
 
 // 语句里第一处 '=' 的位置（到分号为止，括号组整体跳过）；没有则回 0。
 // '==' 是另一个符号，不会误命中。
-func find_eq(g: u64, i: u64, n: u64) -> u64 {
+let find_eq = func(g: u64, i: u64, n: u64) -> u64 {
   if i >= n { return 0; }
   if ax.is_semi(g, i) == 1 { return 0; }
   if ax.is_group(g, i) == 0 {
     if ax.n_sym(g, i) == s.p_eq() { return i; }
   }
   return find_eq(g, i + 1, n);
-}
+};
 
-func lval_bad(k: Mut(st.State), m: Ref(u8), n: u64, back: u64) -> u64 {
+let lval_bad = func(k: Mut(st.State), m: Ref(u8), n: u64, back: u64) -> u64 {
   let d: u64 = ir.diag(k, 0, 1, m, n);
   st.st_fail(k, ax.e_op());
   return back;
-}
+};
 
-func parse_base(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> u64 {
+let parse_base = func(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> u64 {
   let m: Ref(u8) = "bad-lvalue";
   if ax.is_name(g, i) == 0 { return lval_bad(k, m, 10, i + 1); }
   let sym: u64 = ax.n_sym(g, i);
@@ -191,9 +191,9 @@ func parse_base(k: Mut(st.State), g: u64, i: u64, r: Mut(LvalRec)) -> u64 {
   let d: u64 = ir.diag(k, ax.e_unbound(), 1, p, n);
   st.st_fail(k, ax.e_unbound());
   return i + 1;
-}
+};
 
-func auto_deref(k: Mut(st.State), r: Mut(LvalRec)) -> u64 {
+let auto_deref = func(k: Mut(st.State), r: Mut(LvalRec)) -> u64 {
   let t: Mut(ty.Ty) = rec_ty(r);
   let sh: u64 = ty.tsh(t);
   if sh == 0 { return 0; }
@@ -209,9 +209,9 @@ func auto_deref(k: Mut(st.State), r: Mut(LvalRec)) -> u64 {
   let ig1: u64 = sc;
   let ig2: u64 = pr;
   return auto_deref(k, r) + 1;
-}
+};
 
-func parse_walk(k: Mut(st.State), g: u64, i: u64, eqj: u64, r: Mut(LvalRec)) -> u64 {
+let parse_walk = func(k: Mut(st.State), g: u64, i: u64, eqj: u64, r: Mut(LvalRec)) -> u64 {
   let m: Ref(u8) = "bad-lvalue";
   if i >= eqj { return i; }
   let ad: u64 = auto_deref(k, r);
@@ -256,4 +256,4 @@ func parse_walk(k: Mut(st.State), g: u64, i: u64, eqj: u64, r: Mut(LvalRec)) -> 
     }
   }
   return lval_bad(k, m, 10, i);
-}
+};

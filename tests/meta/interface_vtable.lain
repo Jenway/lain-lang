@@ -2,43 +2,43 @@
 // 多态函数只认 Shape 胖指针，经由 VTable 里的函数地址做间接调用。
 //
 // 生成出来的东西等价于：
-//   struct Shape_VTable { area: addr scale: addr }
-//   struct Shape { data: addr vtable: addr }
-//   func shape_area(s: Shape) -> i64 { ... icall[(addr) -> i64](f, d) }
-//   func shape_scale(s: Shape, k: i64) -> i64 { ... icall[(addr, i64) -> i64](f, d, k) }
+//   let Shape_VTable = struct { area: addr scale: addr };
+//   let Shape = struct { data: addr vtable: addr };
+//   let shape_area = func(s: Shape) -> i64 { ... icall[(addr) -> i64](f, d) };
+//   let shape_scale = func(s: Shape, k: i64) -> i64 { ... icall[(addr, i64) -> i64](f, d, k) };
 //   let circle_vtable: Shape_VTable = Shape_VTable { area: symbol_addr("circle_area") ... };
-//   func as_shape_Circle(dest: addr, d: addr) -> u64 { store(dest, d); store(dest + 8, circle_vtable); return 1; }
-struct Circle { r: i64 }
-struct Rect { w: i64 h: i64 }
+//   let as_shape_Circle = func(dest: addr, d: addr) -> u64 { store(dest, d); store(dest + 8, circle_vtable); return 1; };
+let Circle = struct { r: i64 };
+let Rect = struct { w: i64 h: i64 };
 
-func circle_area(self: addr) -> i64 { return load(self); }
-func circle_scale(self: addr, k: i64) -> i64 { let v: i64 = load(self); return v * k; }
-func rect_area(self: addr) -> i64 { let w: i64 = load(self); let h: i64 = load(self + 8); return w * h; }
-func rect_scale(self: addr, k: i64) -> i64 { let w: i64 = load(self); let h: i64 = load(self + 8); return w * h * k; }
+let circle_area = func(self: addr) -> i64 { return load(self); };
+let circle_scale = func(self: addr, k: i64) -> i64 { let v: i64 = load(self); return v * k; };
+let rect_area = func(self: addr) -> i64 { let w: i64 = load(self); let h: i64 = load(self + 8); return w * h; };
+let rect_scale = func(self: addr, k: i64) -> i64 { let w: i64 = load(self); let h: i64 = load(self + 8); return w * h * k; };
 
 // --- 文本写入 -------------------------------------------------------------
-func puts(b: addr, i: u64, p: addr, n: u64) -> u64 {
+let puts = func(b: addr, i: u64, p: addr, n: u64) -> u64 {
   let r: u64 = loop cp(k: u64 = 0) while k < n {
     let c: u8 = load(p + k);
     store(b + i + k, c);
     k = k + 1;
   };
   return i + n;
-}
+};
 
-func lit(b: addr, i: u64, p: addr, n: u64) -> u64 {
+let lit = func(b: addr, i: u64, p: addr, n: u64) -> u64 {
   return puts(b, i, p, n);
-}
+};
 
 // 每条声明之间要换行：顶层声明以行或分号分隔，拼在一起的文本解析不了。
-func nl(b: addr, i: u64) -> u64 {
+let nl = func(b: addr, i: u64) -> u64 {
   let c: u8 = 10;
   store(b + i, c);
   return i + 1;
-}
+};
 
 // 类型名转小写，用来拼方法名与静态数据名：Circle -> circle。
-func putlow(b: addr, i: u64, p: addr, n: u64) -> u64 {
+let putlow = func(b: addr, i: u64, p: addr, n: u64) -> u64 {
   let r: u64 = loop cp(k: u64 = 0) while k < n {
     let c8: u8 = load(p + k);
     let c: u64 = c8 as u64;
@@ -47,18 +47,18 @@ func putlow(b: addr, i: u64, p: addr, n: u64) -> u64 {
     k = k + 1;
   };
   return i + n;
-}
+};
 
 // 双引号单独写出：生成出来的文本里要包链接名。
-func putq(b: addr, i: u64) -> u64 {
+let putq = func(b: addr, i: u64) -> u64 {
   let q: u8 = 34;
   store(b + i, q);
   return i + 1;
-}
+};
 
 // --- 生成器 -------------------------------------------------------------
 // 每个具体类型一套：静态 VTable + 把数据指针与 VTable 绑进胖指针的构造器。
-func bind(b: addr, i: u64, tid: u64) -> u64 {
+let bind = func(b: addr, i: u64, tid: u64) -> u64 {
   let tn: addr = meta_type_name(tid);
   let tl: u64 = meta_type_name_len(tid);
   let j0: u64 = lit(b, i, "let ", len("let "));
@@ -74,34 +74,34 @@ func bind(b: addr, i: u64, tid: u64) -> u64 {
   let k0: u64 = lit(b, j9, "_scale", len("_scale"));
   let k1: u64 = putq(b, k0);
   let k2: u64 = nl(b, lit(b, k1, ") };", len(") };")));
-  let k3: u64 = lit(b, k2, "func as_shape_", len("func as_shape_"));
+  let k3: u64 = lit(b, k2, "let as_shape_", len("let as_shape_"));
   let k4: u64 = puts(b, k3, tn, tl);
-  let k5: u64 = lit(b, k4, "(dest: addr, d: addr) -> u64 { store(dest, d); store(dest + 8, ", len("(dest: addr, d: addr) -> u64 { store(dest, d); store(dest + 8, "));
+  let k5: u64 = lit(b, k4, " = func(dest: addr, d: addr) -> u64 { store(dest, d); store(dest + 8, ", len(" = func(dest: addr, d: addr) -> u64 { store(dest, d); store(dest + 8, "));
   let k6: u64 = putlow(b, k5, tn, tl);
-  let k7: u64 = lit(b, k6, "_vtable); return 1; }", len("_vtable); return 1; }"));
+  let k7: u64 = lit(b, k6, "_vtable); return 1; };", len("_vtable); return 1; };"));
   return nl(b, k7);
-}
+};
 
 // inject 的生成器入口：返回缓冲起点，长度由编译器扫 0 字节得出。
-func iface_gen(t1: u64, t2: u64) -> addr {
+let iface_gen = func(t1: u64, t2: u64) -> addr {
   let b: addr = meta_out();
-  let j0: u64 = nl(b, lit(b, 0, "struct Shape_VTable { area: addr scale: addr }", len("struct Shape_VTable { area: addr scale: addr }")));
-  let j1: u64 = nl(b, lit(b, j0, "struct Shape { data: addr vtable: addr }", len("struct Shape { data: addr vtable: addr }")));
-  let j2: u64 = nl(b, lit(b, j1, "func shape_area(s: Shape) -> i64 { let vt: Shape_VTable = s.vtable; let f: addr = vt.area; let d: addr = s.data; return icall[(addr) -> i64](f, d); }", len("func shape_area(s: Shape) -> i64 { let vt: Shape_VTable = s.vtable; let f: addr = vt.area; let d: addr = s.data; return icall[(addr) -> i64](f, d); }")));
-  let j3: u64 = nl(b, lit(b, j2, "func shape_scale(s: Shape, k: i64) -> i64 { let vt: Shape_VTable = s.vtable; let f: addr = vt.scale; let d: addr = s.data; return icall[(addr, i64) -> i64](f, d, k); }", len("func shape_scale(s: Shape, k: i64) -> i64 { let vt: Shape_VTable = s.vtable; let f: addr = vt.scale; let d: addr = s.data; return icall[(addr, i64) -> i64](f, d, k); }")));
+  let j0: u64 = nl(b, lit(b, 0, "let Shape_VTable = struct { area: addr scale: addr };", len("let Shape_VTable = struct { area: addr scale: addr };")));
+  let j1: u64 = nl(b, lit(b, j0, "let Shape = struct { data: addr vtable: addr };", len("let Shape = struct { data: addr vtable: addr };")));
+  let j2: u64 = nl(b, lit(b, j1, "let shape_area = func(s: Shape) -> i64 { let vt: Shape_VTable = s.vtable; let f: addr = vt.area; let d: addr = s.data; return icall[(addr) -> i64](f, d); };", len("let shape_area = func(s: Shape) -> i64 { let vt: Shape_VTable = s.vtable; let f: addr = vt.area; let d: addr = s.data; return icall[(addr) -> i64](f, d); };")));
+  let j3: u64 = nl(b, lit(b, j2, "let shape_scale = func(s: Shape, k: i64) -> i64 { let vt: Shape_VTable = s.vtable; let f: addr = vt.scale; let d: addr = s.data; return icall[(addr, i64) -> i64](f, d, k); };", len("let shape_scale = func(s: Shape, k: i64) -> i64 { let vt: Shape_VTable = s.vtable; let f: addr = vt.scale; let d: addr = s.data; return icall[(addr, i64) -> i64](f, d, k); };")));
   let j4: u64 = bind(b, j3, t1);
   return bind(b, j4, t2);
-}
+};
 
 inject(iface_gen(Circle, Rect));
 
 // --- 多态 ---------------------------------------------------------------
 // 这个函数完全不知道 a 与 b 背后是哪种具体类型。
-func eval_shapes(a: Shape, b: Shape, k: i64) -> i64 {
+let eval_shapes = func(a: Shape, b: Shape, k: i64) -> i64 {
   return shape_area(a) + shape_scale(b, k);
-}
+};
 
-func main() -> u64 {
+let main = func() -> u64 {
   let c: Circle = Circle { r: 7 };
   let r: Rect = Rect { w: 3 h: 4 };
   let a: Shape = Shape { data: 0 as addr vtable: 0 as addr };
@@ -110,4 +110,4 @@ func main() -> u64 {
   let z2: u64 = as_shape_Rect(ref_of(b), ref_of(r));
   let v: i64 = eval_shapes(a, b, 5);
   return v as u64;
-}
+};

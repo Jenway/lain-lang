@@ -11,70 +11,70 @@ let ctf = import("ctfor");
 let ctp = import("ctprim");
 let ctfn = import("ctfn");
 
-struct GivenEntry {
+let GivenEntry = struct {
   name: u64,
   tid: u64,
   wrec: u64,
   depth: u64,
   implicit: u64
-}
+};
 
-struct GivenBlk {
+let GivenBlk = struct {
   base: Mut(GivenEntry),
   used: u64,
   depth: u64
-}
+};
 
-struct WField {
+let WField = struct {
   fname: u64,
   fkind: u64,
   fa: u64,
   fb: u64
-}
+};
 
-func given_at(base: Mut(GivenEntry), off: u64) -> Mut(GivenEntry) {
+let given_at = func(base: Mut(GivenEntry), off: u64) -> Mut(GivenEntry) {
   return ptr_cast(Mut(GivenEntry), ptr_cast(Mut(u8), base) + off);
-}
+};
 
-func wfield_at(wrec: Mut(u8), i: u64) -> Mut(WField) {
+let wfield_at = func(wrec: Mut(u8), i: u64) -> Mut(WField) {
   return ptr_cast(Mut(WField), wrec + 8 + i * 32);
-}
+};
 
-func wrec_len(wrec: Mut(u8)) -> Mut(u64) {
+let wrec_len = func(wrec: Mut(u8)) -> Mut(u64) {
   return ptr_cast(Mut(u64), wrec);
-}
+};
 
 // --- given 栈（存在 st_genblk +0/+8/+16，每条 40 字节） --------------------
 // [name@0, tid@8, wrec@16, depth@24, implicit@32]
-func g_blk(k: Mut(st.State)) -> Mut(GivenBlk) {
+let g_blk = func(k: Mut(st.State)) -> Mut(GivenBlk) {
   return ptr_cast(Mut(GivenBlk), st.st_genblk(k));
-}
+};
 
-func g_base(k: Mut(st.State)) -> Mut(GivenEntry) {
+let g_base = func(k: Mut(st.State)) -> Mut(GivenEntry) {
   let gb: Mut(GivenBlk) = g_blk(k);
   if (gb.base as u64) != 0 { return gb.base; }
   let np: Mut(GivenEntry) = ptr_cast(Mut(GivenEntry), st.st_ralloc(k, 5120));
   gb.base = np;
   return np;
-}
-func g_used(k: Mut(st.State)) -> u64 { let gb: Mut(GivenBlk) = g_blk(k); return gb.used; }
-func g_set_used(k: Mut(st.State), v: u64) -> u64 { let gb: Mut(GivenBlk) = g_blk(k); gb.used = v; return v; }
-func g_depth(k: Mut(st.State)) -> u64 { let gb: Mut(GivenBlk) = g_blk(k); return gb.depth; }
-func g_set_depth(k: Mut(st.State), v: u64) -> u64 { let gb: Mut(GivenBlk) = g_blk(k); gb.depth = v; return v; }
+};
+let g_used = func(k: Mut(st.State)) -> u64 { let gb: Mut(GivenBlk) = g_blk(k); return gb.used; };
+let g_set_used = func(k: Mut(st.State), v: u64) -> u64 { let gb: Mut(GivenBlk) = g_blk(k); gb.used = v; return v; };
+let g_depth = func(k: Mut(st.State)) -> u64 { let gb: Mut(GivenBlk) = g_blk(k); return gb.depth; };
+let g_set_depth = func(k: Mut(st.State), v: u64) -> u64 { let gb: Mut(GivenBlk) = g_blk(k); gb.depth = v; return v; };
 
-func mark(k: Mut(st.State)) -> u64 {
+let mark = func(k: Mut(st.State)) -> u64 {
   let d: u64 = g_depth(k);
   g_set_depth(k, d + 1);
   return g_used(k);
-}
+};
 
-func release(k: Mut(st.State), m: u64) -> u64 {
+let release = func(k: Mut(st.State), m: u64) -> u64 {
   let d: u64 = g_depth(k);
   if d > 0 { g_set_depth(k, d - 1); }
   return g_set_used(k, m);
-}
+};
 
-func push_given(k: Mut(st.State), name: u64, tid: u64, wrec: u64, implicit: u64) -> u64 {
+let push_given = func(k: Mut(st.State), name: u64, tid: u64, wrec: u64, implicit: u64) -> u64 {
   let u: u64 = g_used(k);
   if u + 40 > 5120 { ctf.fail_msg(k, "given table full", 16, ax.e_ast()); return 0; }
   let p: Mut(GivenEntry) = given_at(g_base(k), u);
@@ -84,22 +84,22 @@ func push_given(k: Mut(st.State), name: u64, tid: u64, wrec: u64, implicit: u64)
   p.depth = g_depth(k);
   p.implicit = implicit;
   return g_set_used(k, u + 40);
-}
+};
 
-func find_name_scan(base: Mut(GivenEntry), name: u64, u: u64) -> Mut(GivenEntry) {
+let find_name_scan = func(base: Mut(GivenEntry), name: u64, u: u64) -> Mut(GivenEntry) {
   if u == 0 { return null_ref(Mut(GivenEntry)); }
   let back: u64 = u - 40;
   let p: Mut(GivenEntry) = given_at(base, back);
   if p.name == name { return p; }
   return find_name_scan(base, name, back);
-}
+};
 
-func find_by_name(k: Mut(st.State), name: u64) -> Mut(GivenEntry) {
+let find_by_name = func(k: Mut(st.State), name: u64) -> Mut(GivenEntry) {
   if name == 0 { return null_ref(Mut(GivenEntry)); }
   return find_name_scan(g_base(k), name, g_used(k));
-}
+};
 
-func find_imp_scan(k: Mut(st.State), base: Mut(GivenEntry), tid: u64, u: u64, hit_d: u64, hit_p: Mut(GivenEntry)) -> Mut(GivenEntry) {
+let find_imp_scan = func(k: Mut(st.State), base: Mut(GivenEntry), tid: u64, u: u64, hit_d: u64, hit_p: Mut(GivenEntry)) -> Mut(GivenEntry) {
   if u == 0 { return hit_p; }
   let back: u64 = u - 40;
   let p: Mut(GivenEntry) = given_at(base, back);
@@ -116,30 +116,30 @@ func find_imp_scan(k: Mut(st.State), base: Mut(GivenEntry), tid: u64, u: u64, hi
   }
   if imp == 1 and rt == tid { return find_imp_scan(k, base, tid, back, dp, p); }
   return find_imp_scan(k, base, tid, back, hit_d, hit_p);
-}
+};
 
-func find_implicit(k: Mut(st.State), tid: u64) -> Mut(GivenEntry) {
+let find_implicit = func(k: Mut(st.State), tid: u64) -> Mut(GivenEntry) {
   let hit: Mut(GivenEntry) = find_imp_scan(k, g_base(k), tid, g_used(k), 0, null_ref(Mut(GivenEntry)));
   if st.st_ok(k) != 0 { return null_ref(Mut(GivenEntry)); }
   if is_null(hit) { ctf.fail_msg(k, "missing given instance", 22, ax.e_type()); return null_ref(Mut(GivenEntry)); }
   return hit;
-}
+};
 
 // --- Witness 构造与求值 --------------------------------------------------
 // wrec：[nfields@0, field0..]，每字段 32B：[fname@0, fkind@8, fa@16, fb@24]
-func wrec_find(wrec: Mut(u8), fname: u64, i: u64, n: u64) -> Mut(WField) {
+let wrec_find = func(wrec: Mut(u8), fname: u64, i: u64, n: u64) -> Mut(WField) {
   if i >= n { return null_ref(Mut(WField)); }
   let f: Mut(WField) = wfield_at(wrec, i);
   if f.fname == fname { return f; }
   return wrec_find(wrec, fname, i + 1, n);
-}
+};
 
-func wrec_lookup(wrec: Mut(u8), fname: u64) -> Mut(WField) {
+let wrec_lookup = func(wrec: Mut(u8), fname: u64) -> Mut(WField) {
   let nf: u64 = deref(wrec_len(wrec));
   return wrec_find(wrec, fname, 0, nf);
-}
+};
 
-func parse_wfields(k: Mut(st.State), sh: u64, fg: u64, i: u64, wrec: Mut(u8), idx: u64) -> u64 {
+let parse_wfields = func(k: Mut(st.State), sh: u64, fg: u64, i: u64, wrec: Mut(u8), idx: u64) -> u64 {
   let n: u64 = ax.n_count(fg);
   if i >= n { deref(wrec_len(wrec)) = idx; return idx; }
   if ax.is_comma(fg, i) == 1 { return parse_wfields(k, sh, fg, i + 1, wrec, idx); }
@@ -156,9 +156,9 @@ func parse_wfields(k: Mut(st.State), sh: u64, fg: u64, i: u64, wrec: Mut(u8), id
   slot.fa = ctf.v_a(fv);
   slot.fb = ctf.v_b(fv);
   return parse_wfields(k, sh, fg, nj, wrec, idx + 1);
-}
+};
 
-func make_witness(k: Mut(st.State), tid: u64, fg: u64, out: Mut(ctf.CtVal)) -> u64 {
+let make_witness = func(k: Mut(st.State), tid: u64, fg: u64, out: Mut(ctf.CtVal)) -> u64 {
   let sh: u64 = ireg.ty_shape(k, tid);
   if sh == 0 or agg.shp_kind(sh) != agg.kind_struct() {
     ctf.fail_msg(k, "witness needs struct", 20, ax.e_type());
@@ -172,9 +172,9 @@ func make_witness(k: Mut(st.State), tid: u64, fg: u64, out: Mut(ctf.CtVal)) -> u
   let wu: u64 = wrec as u64;
   ctf.v_set(out, 7, tid, wu);
   return 1;
-}
+};
 
-func eval_witness(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
+let eval_witness = func(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 {
   let n: u64 = ax.n_count(g);
   if i >= n { ctf.fail_msg(k, "empty witness expr", 18, ax.e_ast()); return i; }
   // 1) Name(args...) { fields... }
@@ -230,11 +230,11 @@ func eval_witness(k: Mut(st.State), g: u64, i: u64, out: Mut(ctf.CtVal)) -> u64 
     }
   }
   return ctfn.ct_eval(k, g, i, 0, out);
-}
+};
 
 // --- 编译期/运行期查询 Witness 成员 --------------------------------------
 // 若 g[i] 是编译期 Witness 绑定且 g[i+1] == '.'，返回其字段记录地址，否则空引用。
-func witness_field_at(k: Mut(st.State), g: u64, i: u64) -> Mut(WField) {
+let witness_field_at = func(k: Mut(st.State), g: u64, i: u64) -> Mut(WField) {
   if ax.is_name(g, i) == 0 { return null_ref(Mut(WField)); }
   if ctf.has_tok(g, i + 1, s.p_dot()) == 0 { return null_ref(Mut(WField)); }
   if i + 2 >= ax.n_count(g) { return null_ref(Mut(WField)); }
@@ -246,18 +246,18 @@ func witness_field_at(k: Mut(st.State), g: u64, i: u64) -> Mut(WField) {
   let fld: Mut(WField) = wrec_lookup(wrec, ax.n_sym(g, i + 2));
   if is_null(fld) { ctf.fail_msg(k, "no such witness field", 21, ax.e_type()); return null_ref(Mut(WField)); }
   return fld;
-}
+};
 
-func parse_want_tid(k: Mut(st.State), g: u64, j0: u64) -> u64 {
+let parse_want_tid = func(k: Mut(st.State), g: u64, j0: u64) -> u64 {
   if ctf.has_tok(g, j0, s.p_colon()) == 0 { return 0; }
   let tv: Mut(ctf.CtVal) = ptr_cast(Mut(ctf.CtVal), st.st_alloc(k, 24));
   let tj: u64 = ctfn.ct_eval(k, g, j0 + 1, 0, tv);
   if st.st_ok(k) != 0 { return 0; }
   return ctp.as_type(k, tv);
-}
+};
 
 // 登记 given / 编译期 witness let 声明：decl_i 指向 given 或 let。
-func reg_given(k: Mut(st.State), g: u64, decl_i: u64, implicit: u64) -> u64 {
+let reg_given = func(k: Mut(st.State), g: u64, decl_i: u64, implicit: u64) -> u64 {
   let n: u64 = ax.n_count(g);
   if decl_i + 1 >= n {
     ctf.fail_msg(k, "expected given name", 19, ax.e_ast());
@@ -304,4 +304,4 @@ func reg_given(k: Mut(st.State), g: u64, decl_i: u64, implicit: u64) -> u64 {
   }
   ctf.fail_msg(k, "expected given name", 19, ax.e_ast());
   return decl_i + 1;
-}
+};
