@@ -1,3 +1,4 @@
+import argparse
 import os
 import re
 import shutil
@@ -22,6 +23,7 @@ STAGE2_C = os.path.join(BUILD, "stage2.c")
 STAGE2_EXE = os.path.join(BUILD, "lain-stage2.exe" if os.name == "nt" else "lain-stage2")
 STAGE3_L1 = os.path.join(BUILD, "stage3.l1")
 NATIVE_DRIVER = os.path.join(ROOT, "seed", "native_meta_driver.c")
+BOOT_C = os.path.join(ROOT, "seed", "bootstrap", "lainc_boot.c")
 KERNEL_INC = os.path.join(ROOT, "seed", "kernel", "include")
 SEED_LIB = os.path.join(BUILD, "lib", "lain_seed.lib" if os.name == "nt" else "liblain_seed.a")
 
@@ -198,11 +200,35 @@ def abi_check():
 
 
 def split_meta():
-    """从 seed/stage1 编译出原生 Stage-1 编译器，再用它把 src/ 编成 build/stage2.l1。"""
+    """构建原生 Stage-1 编译器，再用它把 src/ 编成 build/stage2.l1。
+
+    优先用 seed/bootstrap/lainc_boot.c（C99 自举快照）冷启动 Stage-1；
+    快照不存在时回退到 seed/stage1/ 的 lain0 --split 路径。
+    """
     clang_bin = shutil.which("clang")
     if not clang_bin:
         print("失败: 未找到 clang，无法构建 Stage-1")
         return None
+    if os.path.exists(BOOT_C):
+        res_cc = run([clang_bin, "-std=c99", "-O2", "-I", KERNEL_INC,
+                      NATIVE_DRIVER, BOOT_C, SEED_LIB, "-o", STAGE1_EXE])
+        if res_cc.returncode != 0:
+            print(res_cc.stdout)
+            print(res_cc.stderr)
+            return None
+        if os.path.exists(STAGE2_L1):
+            os.remove(STAGE2_L1)
+        res_s2 = run([STAGE1_EXE, META_ENTRY, "--out", STAGE2_L1])
+        if res_s2.returncode != 0 or not os.path.exists(STAGE2_L1):
+            print(res_s2.stdout)
+            print(res_s2.stderr)
+            return None
+        res_v2 = run([LAINIR_VERIFY, STAGE2_L1])
+        if res_v2.returncode != 0:
+            print(res_v2.stdout)
+            print(res_v2.stderr)
+            return None
+        return [STAGE2_L1]
     if os.path.isdir(STAGE1_UNITS):
         shutil.rmtree(STAGE1_UNITS)
     result = run([LAIN0, "--entry", STAGE1_ENTRY, "--split", STAGE1_UNITS])
@@ -648,6 +674,10 @@ def check_meta_cases(units):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Lain 全量验证脚本")
+    parser.add_argument("--update-bootstrap", action="store_true",
+                        help="全部检查与固定点通过后，把 build/stage2.c 刷新为 seed/bootstrap/lainc_boot.c")
+    args = parser.parse_args()
     started = time.time()
     os.makedirs(WORK, exist_ok=True)
     os.makedirs(META_TEST_OUT, exist_ok=True)
@@ -790,6 +820,7 @@ def main():
 
     print()
     print("[C99 自举验证]  Stage-1 -> Stage-2 -> Stage-3 固定点一致")
+    bootstrap_ok = False
     if units and clang_bin:
         self_res = run([LAINIR_C, "-o", STAGE2_C] + units)
         if self_res.returncode != 0:
@@ -820,13 +851,20 @@ def main():
                             problems.append("C99 自举: stage2.l1 与 stage3.l1 不一致")
                             print("C99 自举 失败（固定点不一致）")
                         else:
+                            bootstrap_ok = True
                             print("C99 自举 通过（Stage-1 -> Stage-2 -> Stage-3 固定点一致，%d KB IR / %d KB C99）"
                                   % (os.path.getsize(STAGE2_L1) // 1024,
                                      os.path.getsize(STAGE2_C) // 1024))
+                            if args.update_bootstrap:
+                                os.makedirs(os.path.dirname(BOOT_C), exist_ok=True)
+                                shutil.copyfile(STAGE2_C, BOOT_C)
+                                print("自举快照已刷新: %s" % os.path.relpath(BOOT_C, ROOT))
     elif units:
         print("C99 自举 跳过（未找到 clang）")
     else:
         print("C99 自举 跳过（自举单元缺失）")
+    if args.update_bootstrap and not bootstrap_ok:
+        print("自举快照 未刷新（固定点未通过或检查被跳过）")
 
     # 现代源码零 addr 审查 + 编译遥测
     zero_addr_targets = [os.path.join(ROOT, "tests", "meta", "modern_no_addr.lain")]
