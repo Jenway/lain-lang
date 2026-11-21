@@ -13,6 +13,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "ast_out.h"
 #include "lain/ir/build.h"
 #include "lain/ir/verify.h"
@@ -243,6 +249,73 @@ static void v2_dirname(const char *path, char *out, size_t cap) {
   if (n >= cap) n = cap - 1;
   memcpy(out, path, n);
   out[n] = 0;
+}
+
+static bool v2_file_exists(const char *path) {
+  FILE *file = fopen(path, "rb");
+  if (!file) return false;
+  fclose(file);
+  return true;
+}
+
+/* 仓库根：同时有 PLAN.md 与 std/io.lain 的目录。 */
+static bool v2_repo_root(const char *start, char *out, size_t cap) {
+  char dir[V2_PATH_MAX];
+  if (!start || !start[0]) return false;
+  if (snprintf(dir, sizeof(dir), "%s", start) >= (int)sizeof(dir)) return false;
+  for (;;) {
+    char probe[V2_PATH_MAX];
+    char *sep;
+    size_t n = strlen(dir);
+    while (n > 1 && (dir[n - 1] == '/' || dir[n - 1] == '\\')) dir[--n] = 0;
+    if (!dir[0]) return false;
+    if (snprintf(probe, sizeof(probe), "%s/std/io.lain", dir) <
+            (int)sizeof(probe) &&
+        v2_file_exists(probe)) {
+      char plan[V2_PATH_MAX];
+      if (snprintf(plan, sizeof(plan), "%s/PLAN.md", dir) <
+              (int)sizeof(plan) &&
+          v2_file_exists(plan)) {
+        if (strlen(dir) + 1 > cap) return false;
+        memcpy(out, dir, strlen(dir) + 1);
+        return true;
+      }
+    }
+    sep = strrchr(dir, '/');
+    {
+      char *bslash = strrchr(dir, '\\');
+      if (!sep || (bslash && bslash > sep)) sep = bslash;
+    }
+    if (!sep || sep == dir) return false;
+    *sep = 0;
+  }
+}
+
+/* 从源码所在目录与当前工作目录向上找仓库根，再把 std/... 解析成绝对路径。 */
+static bool v2_resolve_std(const char *source_path, const char *rel, char *out,
+                           size_t cap) {
+  char dir[V2_PATH_MAX];
+  char root[V2_PATH_MAX];
+  char cwd[V2_PATH_MAX];
+  if (strncmp(rel, "std/", 4) != 0) return false;
+  if (source_path && source_path[0]) {
+    v2_dirname(source_path, dir, sizeof(dir));
+    if (v2_repo_root(dir, root, sizeof(root)) &&
+        snprintf(out, cap, "%s/%s", root, rel) < (int)cap) {
+      return true;
+    }
+  }
+#if defined(_WIN32)
+  if (_getcwd(cwd, sizeof(cwd)) != NULL) {
+#else
+  if (getcwd(cwd, sizeof(cwd)) != NULL) {
+#endif
+    if (v2_repo_root(cwd, root, sizeof(root)) &&
+        snprintf(out, cap, "%s/%s", root, rel) < (int)cap) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static char *v2_read_file(const char *path, uint32_t *length) {
@@ -637,6 +710,14 @@ static uint32_t v2_source_import(void *ctx, const uint64_t *args, uint32_t argc,
     return LAINMETA_V2_ERR_ARG;
   if (!v2_normalize(joined, canonical, sizeof(canonical)))
     return LAINMETA_V2_ERR_ARG;
+  /* std:: 模块始终解析到仓库根下的 std/，与调用方文件所在目录无关。 */
+  if (strncmp(rel, "std/", 4) == 0) {
+    char std_path[V2_PATH_MAX];
+    if (v2_resolve_std(h->sources[(uint32_t)args[0]].path, rel, std_path,
+                       sizeof(std_path))) {
+      (void)v2_normalize(std_path, canonical, sizeof(canonical));
+    }
+  }
   for (i = 0; i < h->source_count; i++) {
     if (h->sources[i].path && strcmp(h->sources[i].path, canonical) == 0) {
       *res = i;

@@ -324,6 +324,38 @@ def execute(paths, name, args):
             "width": int(hit.group(3))}, None, text
 
 
+def program_stdout(text):
+    """保留程序自身的标准输出，去掉运行遥测与结果行。"""
+    lines = []
+    for line in text.replace("\r\n", "\n").split("\n"):
+        if line.startswith(("run slice=", "result value=", "result addr=", "result=", "trap ")):
+            break
+        lines.append(line)
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def run_native(stem, meta_path, entry):
+    """把一份 IR 发射成 C99、用 clang 编译并运行。回 (输出, 失败文本或 None)。"""
+    os.makedirs(WORK, exist_ok=True)
+    clang_bin = shutil.which("clang")
+    if not clang_bin:
+        return None, "未找到 clang"
+    c_path = os.path.join(WORK, stem + ".c")
+    res = run([LAINIR_C, "--entry", entry, "--print-result", "-o", c_path, meta_path])
+    if res.returncode != 0:
+        return None, "C99 发射失败"
+    exe_path = os.path.join(WORK, stem + (".exe" if os.name == "nt" else ""))
+    cc = run([clang_bin, "-std=c99", "-O2", c_path, "-o", exe_path])
+    if cc.returncode != 0:
+        return None, "C99 编译失败"
+    nat = run([exe_path])
+    if nat.returncode != 0:
+        return None, "C99 运行失败"
+    return nat.stdout + nat.stderr, None
+
+
 def measure(result, expected):
     """按期望值的符号选择读数：非负期望比无符号值，负期望比有符号值。"""
     return result["value"] if expected >= 0 else result["signed"]
@@ -789,34 +821,93 @@ def main():
             procs = proc_names([ex_out])
             entry = "s0__main" if "s0__main" in procs else ("main" if "main" in procs else None)
             if entry:
-                got, run_err, _ = execute([ex_out], entry, [])
+                got, run_err, vm_text = execute([ex_out], entry, [])
                 if run_err:
                     problems.append("examples/%s VM 运行失败: %s" % (ex_name, run_err))
                     continue
-                c_path = os.path.join(WORK, ex_stem + ".c")
-                c_res = run([LAINIR_C, "--entry", entry, "--print-result", "-o", c_path, ex_out])
-                if c_res.returncode != 0:
-                    problems.append("examples/%s C99 发射失败" % ex_name)
+                nat_text, nat_err = run_native(ex_stem, ex_out, entry)
+                if nat_err:
+                    problems.append("examples/%s %s" % (ex_name, nat_err))
                     continue
-                if clang_bin:
-                    exe_path = os.path.join(WORK, ex_stem + (".exe" if os.name == "nt" else ""))
-                    cc = run([clang_bin, "-std=c99", "-O2", c_path, "-o", exe_path])
-                    if cc.returncode != 0:
-                        problems.append("examples/%s C99 编译失败" % ex_name)
-                        continue
-                    nat = run([exe_path])
-                    if nat.returncode != 0:
-                        problems.append("examples/%s C99 运行失败" % ex_name)
-                        continue
-                    m = re.search(r"result=(-?\d+)", nat.stdout)
-                    if not m or int(m.group(1)) != got["signed"]:
-                        problems.append("examples/%s C99 与 VM 结果不一致: %s vs %s"
-                                        % (ex_name, nat.stdout.strip(), got["signed"]))
-                        continue
+                if program_stdout(vm_text) != program_stdout(nat_text):
+                    problems.append("examples/%s C99 与 VM 标准输出不一致" % ex_name)
+                    continue
+                m = re.search(r"result=(-?\d+)", nat_text)
+                if not m or int(m.group(1)) != got["signed"]:
+                    problems.append("examples/%s C99 与 VM 结果不一致: %s vs %s"
+                                    % (ex_name, nat_text.strip(), got["signed"]))
+                    continue
             ex_pass += 1
         print("现代样例 %d/%d" % (ex_pass, len(ex_names)))
     else:
         print("现代样例 跳过")
+
+    print()
+    print("[标准库]  std::test / std::bench 双后端；lain_io_write 越界访问必须触发 VM 陷阱")
+    std_passed = 0
+    std_cases = [
+        ("std_test_self", 0, ["[PASS] self (5/5)"]),
+        ("std_test_fail", 2, ["[FAIL] failing :: false-check",
+                              "[FAIL] failing :: wrong-i64: expected 2, got 1",
+                              "[FAIL] failing (2 failed)"]),
+        ("std_bench_smoke", 21, None),
+    ]
+    if units and clang_bin:
+        for std_stem, std_value, std_lines in std_cases:
+            _, std_err = compile_sample(std_stem, units, META_TESTS)
+            if std_err:
+                problems.append("tests/meta/%s.lain 编译: %s" % (std_stem, std_err))
+                continue
+            std_out = os.path.join(META_OUT, std_stem + ".l1")
+            if run([LAINIR_VERIFY, std_out]).returncode != 0:
+                problems.append("tests/meta/%s.lain 校验失败" % std_stem)
+                continue
+            got, run_err, vm_text = execute([std_out], "s0__main", [])
+            if run_err:
+                problems.append("tests/meta/%s.lain VM 运行失败: %s" % (std_stem, run_err))
+                continue
+            if got["signed"] != std_value:
+                problems.append("tests/meta/%s.lain VM 结果 %d，期望 %d"
+                                % (std_stem, got["signed"], std_value))
+                continue
+            vm_lines = program_stdout(vm_text)
+            if std_lines is not None and vm_lines != std_lines:
+                problems.append("tests/meta/%s.lain VM 标准输出不符: %s"
+                                % (std_stem, vm_lines))
+                continue
+            if std_lines is None and not any(
+                    line.startswith("[bench] work steps=") for line in vm_lines):
+                problems.append("tests/meta/%s.lain VM 没有输出 bench 遥测" % std_stem)
+                continue
+            nat_text, nat_err = run_native(std_stem, std_out, "s0__main")
+            if nat_err:
+                problems.append("tests/meta/%s.lain %s" % (std_stem, nat_err))
+                continue
+            if std_lines is not None and program_stdout(nat_text) != std_lines:
+                problems.append("tests/meta/%s.lain C99 标准输出不符" % std_stem)
+                continue
+            if std_lines is None and "[bench] work steps=" not in nat_text:
+                problems.append("tests/meta/%s.lain C99 没有输出 bench 遥测" % std_stem)
+                continue
+            nat_hit = re.search(r"result=(-?\d+)", nat_text)
+            if not nat_hit or int(nat_hit.group(1)) != std_value:
+                problems.append("tests/meta/%s.lain C99 结果不符: %s"
+                                % (std_stem, nat_text.strip()))
+                continue
+            std_passed += 1
+        _, oob_err = compile_sample("std_io_oob", units, META_TESTS)
+        if oob_err:
+            problems.append("tests/meta/std_io_oob.lain 编译: %s" % oob_err)
+        else:
+            oob_out = os.path.join(META_OUT, "std_io_oob.l1")
+            _, oob_run_err, oob_text = execute([oob_out], "s0__main", [])
+            if not oob_run_err or "trap kind=2 status=1004" not in oob_text:
+                problems.append("tests/meta/std_io_oob.lain 没有触发 lain_io_write 越界陷阱")
+            else:
+                std_passed += 1
+        print("标准库 %d/%d" % (std_passed, len(std_cases) + 1))
+    else:
+        print("标准库 跳过")
 
     print()
     print("[C99 自举验证]  Stage-1 -> Stage-2 -> Stage-3 固定点一致")
@@ -871,6 +962,10 @@ def main():
     if os.path.isdir(EXAMPLES):
         zero_addr_targets += [os.path.join(EXAMPLES, n)
                               for n in sorted(os.listdir(EXAMPLES)) if n.endswith(".lain")]
+    std_dir = os.path.join(ROOT, "std")
+    if os.path.isdir(std_dir):
+        zero_addr_targets += [os.path.join(std_dir, n)
+                              for n in sorted(os.listdir(std_dir)) if n.endswith(".lain")]
     src_dir = os.path.join(ROOT, "src")
     if os.path.isdir(src_dir):
         zero_addr_targets += [os.path.join(src_dir, n)

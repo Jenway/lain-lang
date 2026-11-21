@@ -14,6 +14,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
 #include "lain/ir/build.h"
 #include "lain/ir/core.h"
 #include "lain/ir/infer.h"
@@ -29,6 +35,135 @@
 #define RUN_STACK_BYTES (4u << 20)
 #define RUN_MAX_DEPTH 64
 #define RUN_SLICE_FUEL 2000000ull
+
+/* 宿主能力上下文：IO 写入要查地址空间，步数查询要读 TCB。 */
+typedef struct {
+  LainVmSpace *space;
+  LainVmTcb *tcb;
+} RunHostCtx;
+
+/* [addr, addr + len) 整段都在有 READ 权限的可访问窗口里才算可读。
+ * 按区段逐块推进，因此跨页、跨区段、相邻区段拼接的缓冲都能正确判定。 */
+static bool run_range_readable(const LainVmSpace *space, uintptr_t addr,
+                               uint64_t len) {
+  uintptr_t at = addr;
+  uint64_t left = len;
+  if (len == 0) return true;
+  if (len > (uint64_t)UINTPTR_MAX - (uint64_t)addr) return false;
+  while (left > 0) {
+    const LainVmRegion *region = lainvm_space_find(space, at);
+    uint64_t offset;
+    uint64_t step;
+    if (!region) return false;
+    if (!(region->rights & LAINVM_MEM_READ)) return false;
+    if (at < region->base) return false;
+    offset = (uint64_t)(at - region->base);
+    if (offset >= region->accessible) return false;
+    step = region->accessible - offset;
+    if (step > left) step = left;
+    at += (uintptr_t)step;
+    left -= step;
+  }
+  return true;
+}
+
+static uint64_t run_perf_nanos(void) {
+#if defined(_WIN32)
+  static LARGE_INTEGER freq;
+  static int ready = 0;
+  LARGE_INTEGER now;
+  uint64_t sec;
+  uint64_t rem;
+  if (!ready) {
+    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0)
+      return 0;
+    ready = 1;
+  }
+  if (!QueryPerformanceCounter(&now)) return 0;
+  sec = (uint64_t)(now.QuadPart / freq.QuadPart);
+  rem = (uint64_t)(now.QuadPart % freq.QuadPart);
+  return sec * UINT64_C(1000000000) +
+         (rem * UINT64_C(1000000000)) / (uint64_t)freq.QuadPart;
+#else
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+  return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+static uint32_t run_io_write(void *context, const uint64_t *args,
+                             uint32_t arg_count, uint64_t *result_out) {
+  RunHostCtx *host = (RunHostCtx *)context;
+  uintptr_t ptr;
+  uint64_t len;
+  size_t wrote;
+  if (arg_count != 2 || !result_out) return LAINVM_TRAP_CALL_ARITY;
+  ptr = (uintptr_t)args[0];
+  len = args[1];
+  if (len == 0) {
+    *result_out = 0;
+    return 0;
+  }
+  if (len > (uint64_t)(size_t)-1) return LAINVM_TRAP_LOAD_FAULT;
+  if (!run_range_readable(host->space, ptr, len))
+    return LAINVM_TRAP_LOAD_FAULT;
+  wrote = fwrite((const void *)ptr, 1, (size_t)len, stdout);
+  if (wrote != (size_t)len) return LAINVM_TRAP_LOAD_FAULT;
+  *result_out = len;
+  return 0;
+}
+
+static uint32_t run_io_print_i64(void *context, const uint64_t *args,
+                                 uint32_t arg_count, uint64_t *result_out) {
+  int n;
+  (void)context;
+  if (arg_count != 1 || !result_out) return LAINVM_TRAP_CALL_ARITY;
+  n = printf("%" PRId64, (int64_t)args[0]);
+  if (n < 0) return LAINVM_TRAP_LOAD_FAULT;
+  *result_out = (uint64_t)n;
+  return 0;
+}
+
+static uint32_t run_io_print_u64(void *context, const uint64_t *args,
+                                 uint32_t arg_count, uint64_t *result_out) {
+  int n;
+  (void)context;
+  if (arg_count != 1 || !result_out) return LAINVM_TRAP_CALL_ARITY;
+  n = printf("%" PRIu64, args[0]);
+  if (n < 0) return LAINVM_TRAP_LOAD_FAULT;
+  *result_out = (uint64_t)n;
+  return 0;
+}
+
+static uint32_t run_io_newline(void *context, const uint64_t *args,
+                               uint32_t arg_count, uint64_t *result_out) {
+  int c;
+  (void)context;
+  (void)args;
+  if (arg_count != 0 || !result_out) return LAINVM_TRAP_CALL_ARITY;
+  c = putchar('\n');
+  if (c == EOF) return LAINVM_TRAP_LOAD_FAULT;
+  *result_out = 1;
+  return 0;
+}
+
+static uint32_t run_perf_steps(void *context, const uint64_t *args,
+                               uint32_t arg_count, uint64_t *result_out) {
+  RunHostCtx *host = (RunHostCtx *)context;
+  (void)args;
+  if (arg_count != 0 || !result_out) return LAINVM_TRAP_CALL_ARITY;
+  *result_out = host->tcb ? lainvm_tcb_steps(host->tcb) : 0;
+  return 0;
+}
+
+static uint32_t run_perf_nanos_host(void *context, const uint64_t *args,
+                                    uint32_t arg_count, uint64_t *result_out) {
+  (void)context;
+  (void)args;
+  if (arg_count != 0 || !result_out) return LAINVM_TRAP_CALL_ARITY;
+  *result_out = run_perf_nanos();
+  return 0;
+}
 
 static char *read_file(const char *path, size_t *out_len) {
   FILE *f = fopen(path, "rb");
@@ -129,8 +264,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  /* 装载与执行。这里不注册任何能力：外部符号调不到就 Trap 1110，
-   * 那是纯计算样例应当暴露的事实，不该被宿主能力掩盖。 */
+  /* 装载与执行。只注册六个宿主原语；其余外部符号仍然调不到就 Trap 1110，
+   * 纯计算样例必须继续暴露这一点。 */
   LainVmSpace space;
   lainvm_space_init(&space);
   LainVmImage *image = lainvm_image_load(module, &space, &diag);
@@ -148,12 +283,51 @@ int main(int argc, char **argv) {
     lainir_builder_free(builder);
     return 1;
   }
+  LainVmCapEntry cap_entries[8];
+  RunHostCtx host_ctx;
+  LainVmCaps caps;
+  host_ctx.space = &space;
+  host_ctx.tcb = NULL;
+  lainvm_caps_init(&caps, cap_entries, 8);
+  if (lainvm_caps_add(&caps, "lain_io_write", LAINVM_CAP_FUNCTION,
+                      run_io_write, &host_ctx) != 0 ||
+      lainvm_caps_add(&caps, "lain_io_print_i64", LAINVM_CAP_FUNCTION,
+                      run_io_print_i64, &host_ctx) != 0 ||
+      lainvm_caps_add(&caps, "lain_io_print_u64", LAINVM_CAP_FUNCTION,
+                      run_io_print_u64, &host_ctx) != 0 ||
+      lainvm_caps_add(&caps, "lain_io_newline", LAINVM_CAP_FUNCTION,
+                      run_io_newline, &host_ctx) != 0 ||
+      lainvm_caps_add(&caps, "lain_perf_steps", LAINVM_CAP_FUNCTION,
+                      run_perf_steps, &host_ctx) != 0 ||
+      lainvm_caps_add(&caps, "lain_perf_nanos", LAINVM_CAP_FUNCTION,
+                      run_perf_nanos_host, &host_ctx) != 0) {
+    puts("能力登记失败");
+    lainvm_image_free(image);
+    lainir_builder_free(builder);
+    return 1;
+  }
+  if (lainvm_caps_freeze(&caps) != 0) {
+    puts("能力冻结失败");
+    lainvm_image_free(image);
+    lainir_builder_free(builder);
+    return 1;
+  }
+
   LainVmStackLease lease;
   lease.space = &space;
   lease.region = stack;
   LainVmTcb *tcb = lainvm_tcb_new(image, &space, 1, 1, RUN_MAX_DEPTH, lease, &quota);
   if (!tcb) {
     puts("tcb_new 失败");
+    lainvm_image_free(image);
+    lainir_builder_free(builder);
+    return 1;
+  }
+  host_ctx.tcb = tcb;
+  memset(&diag, 0, sizeof(diag));
+  if (lainvm_tcb_set_caps(tcb, &caps, &diag) != 0) {
+    printf("CAPS FAILED code=%d line=%u\n", diag.code, diag.line);
+    lainvm_tcb_free(tcb);
     lainvm_image_free(image);
     lainir_builder_free(builder);
     return 1;
